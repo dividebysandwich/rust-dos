@@ -6,7 +6,7 @@
 //! does when there is no such device.
 
 use super::builtin::{Def, register, rust, win32};
-use super::global::HeapItem;
+use super::global::{HeapItem, HeapPlace};
 use super::lz;
 use super::thunk;
 use super::user::{P_MISC, P_WORDS};
@@ -584,12 +584,12 @@ const GLOBAL_FREE: u32 = 2;
 const GLOBALENTRY_SIZE: u32 = 36;
 const GF_PDB_OWNER: u16 = 0x0100;
 
-/// Whether `item` is on the list GlobalFirst's `flags` walk.
-fn on_list(item: &HeapItem, flags: u32) -> bool {
+/// Whether `place` is on the list GlobalFirst's `flags` walk.
+fn on_list(place: &HeapPlace, flags: u32) -> bool {
     match flags {
         GLOBAL_ALL => true,
-        GLOBAL_LRU => item.lru,
-        GLOBAL_FREE => item.kind == super::global::GT_FREE,
+        GLOBAL_LRU => place.lru,
+        GLOBAL_FREE => place.is_free(),
         _ => false,
     }
 }
@@ -601,15 +601,19 @@ fn global_entry_at(cpu: &Cpu, at: u32) -> bool {
 }
 
 /// Fill the GLOBALENTRY at `at` with `item`. dwNext is the address of
-/// the item after it in the heap (`items`), and dwNextAlt that of the
-/// item after it on the LRU or free list it is on, 0 at a list's end;
-/// GlobalNext goes on from there.
-fn fill_global_entry(cpu: &mut Cpu, at: u32, items: &[HeapItem], item: &HeapItem) {
+/// the item after it in the heap (`places`), and dwNextAlt that of the
+/// item after it on the LRU or free list it is on, 0 at a list's end
+/// and for a discarded block, which isn't in the heap; GlobalNext goes
+/// on from there.
+fn fill_global_entry(cpu: &mut Cpu, at: u32, places: &[HeapPlace], item: &HeapItem) {
     let after = |list: Option<u32>| {
-        let found = items
+        if item.address == 0 {
+            return 0;
+        }
+        places
             .iter()
-            .find(|i| i.address > item.address && list.is_none_or(|f| on_list(i, f)));
-        found.filter(|_| item.address != 0).map_or(0, |i| i.address)
+            .find(|p| p.address > item.address && list.is_none_or(|f| on_list(p, f)))
+            .map_or(0, |p| p.address)
     };
     let alt = if item.lru {
         Some(GLOBAL_LRU)
@@ -646,11 +650,12 @@ fn global_first(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !global_entry_at(cpu, at) {
         return Some(0);
     }
-    let items = super::global::heap_items(cpu);
-    let Some(item) = items.iter().find(|i| on_list(i, flags)) else {
+    let places = super::global::heap_places(cpu);
+    let Some(place) = places.iter().find(|p| on_list(p, flags)) else {
         return Some(0);
     };
-    fill_global_entry(cpu, at, &items, item);
+    let item = super::global::place_item(cpu, place);
+    fill_global_entry(cpu, at, &places, &item);
     Some(1)
 }
 
@@ -666,14 +671,15 @@ fn global_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if cursor == 0 {
         return Some(0);
     }
-    let items = super::global::heap_items(cpu);
-    let found = items
+    let places = super::global::heap_places(cpu);
+    let found = places
         .iter()
-        .find(|i| i.address >= cursor && on_list(i, flags));
-    let Some(item) = found else {
+        .find(|p| p.address >= cursor && on_list(p, flags));
+    let Some(place) = found else {
         return Some(0);
     };
-    fill_global_entry(cpu, at, &items, item);
+    let item = super::global::place_item(cpu, place);
+    fill_global_entry(cpu, at, &places, &item);
     Some(1)
 }
 
@@ -684,8 +690,8 @@ fn global_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if at == 0 {
         return Some(0);
     }
-    let items = super::global::heap_items(cpu);
-    let count = |flags| items.iter().filter(|i| on_list(i, flags)).count() as u16;
+    let places = super::global::heap_places(cpu);
+    let count = |flags| places.iter().filter(|p| on_list(p, flags)).count() as u16;
     let counts = [count(GLOBAL_ALL), count(GLOBAL_FREE), count(GLOBAL_LRU)];
     for (i, v) in counts.into_iter().enumerate() {
         super::write_16(cpu, at + 4 + 2 * i as u32, v);
@@ -702,8 +708,12 @@ fn entry_of_block(cpu: &mut Cpu, at: u32, handle: u16) -> u32 {
     let Some(item) = super::global::heap_item(cpu, handle) else {
         return 0;
     };
-    let items = super::global::heap_items(cpu);
-    fill_global_entry(cpu, at, &items, &item);
+    let places = if item.address == 0 {
+        Vec::new()
+    } else {
+        super::global::heap_places(cpu)
+    };
+    fill_global_entry(cpu, at, &places, &item);
     1
 }
 

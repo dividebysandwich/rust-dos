@@ -452,37 +452,77 @@ pub struct HeapItem {
     pub lru: bool,
 }
 
+/// A block or a free piece in the walk of the heap: where it is and
+/// which of TOOLHELP's lists it is on, without the rest of what
+/// `HeapItem` tells, which takes longer to find out.
+#[derive(Clone, Copy, Debug)]
+pub struct HeapPlace {
+    pub address: u32,
+    pub size: u32,
+    /// The block's handle, 0 for a free piece.
+    pub handle: u16,
+    /// Whether it is on the LRU list: a present, discardable block.
+    pub lru: bool,
+}
+
+impl HeapPlace {
+    pub fn is_free(&self) -> bool {
+        self.handle == 0
+    }
+}
+
 /// What TOOLHELP tells of the block whose handle or selector is
 /// `handle`, or None when it isn't one.
 pub fn heap_item(cpu: &Cpu, handle: u16) -> Option<HeapItem> {
     arena(&cpu.bus.win32.win16, handle).map(|a| describe(cpu, a))
 }
 
+/// What TOOLHELP tells of `place`, a place of `heap_places`.
+pub fn place_item(cpu: &Cpu, place: &HeapPlace) -> HeapItem {
+    let block = (!place.is_free())
+        .then(|| arena(&cpu.bus.win32.win16, place.handle))
+        .flatten();
+    match block {
+        Some(a) => describe(cpu, a),
+        None => HeapItem {
+            address: place.address,
+            size: place.size,
+            kind: GT_FREE,
+            ..HeapItem::default()
+        },
+    }
+}
+
 /// The heap as GlobalFirst and GlobalNext walk it: its blocks and the
 /// free pieces between them, in address order. Discarded blocks have no
 /// memory, so they aren't in it.
-pub fn heap_items(cpu: &Cpu) -> Vec<HeapItem> {
+pub fn heap_places(cpu: &Cpu) -> Vec<HeapPlace> {
     let state = &cpu.bus.win32.win16;
-    let mut items: Vec<HeapItem> = state
+    let mut places: Vec<HeapPlace> = state
         .arena
         .values()
         .filter(|a| a.size != 0 && a.base != 0)
-        .map(|a| describe(cpu, a))
+        .map(|a| HeapPlace {
+            address: a.base,
+            size: a.size,
+            handle: a.handle,
+            lru: a.flags & GA_DISCARDABLE != 0,
+        })
         .collect();
     let mut after = None;
     while let Some((at, len, free)) = state.heap.piece_after(after) {
         after = Some(at);
         if free {
-            items.push(HeapItem {
+            places.push(HeapPlace {
                 address: at,
                 size: len,
-                kind: GT_FREE,
-                ..HeapItem::default()
+                handle: 0,
+                lru: false,
             });
         }
     }
-    items.sort_by_key(|i| i.address);
-    items
+    places.sort_by_key(|p| p.address);
+    places
 }
 
 fn describe(cpu: &Cpu, a: &Arena) -> HeapItem {
