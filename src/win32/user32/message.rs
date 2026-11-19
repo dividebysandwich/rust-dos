@@ -206,6 +206,11 @@ impl Msg {
 
     pub fn read(cpu: &mut Cpu, at: u32) -> Msg {
         let w = read_words(cpu, at, 7);
+        Msg::from_words(&w)
+    }
+
+    /// The message of a MSG's seven words, as `words` gives them.
+    pub fn from_words(w: &[u32]) -> Msg {
         Msg {
             hwnd: w[0],
             message: w[1],
@@ -1050,6 +1055,10 @@ const GET_CURSOR_LP: usize = 8;
 /// The window a click activates, while WM_MOUSEACTIVATE is asked; then
 /// whether the click is eaten.
 const GET_ACTIVATE: usize = 9;
+/// The devices' message the keyboard's or the mouse's hook is asked
+/// about, its seven words. It is kept here, not in the program's MSG,
+/// which a hook that peeks at the queue with the same MSG overwrites.
+const GET_HOOKED: usize = 10;
 const WAITS: u32 = 0x8000_0000;
 
 /// GetMessageA(msg, hwnd, min, max).
@@ -1310,12 +1319,14 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     if matches!(m.message, WM_TIMER | WM_SYSTIMER) && flags & PM_NOYIELD == 0 {
                         input_idle(cpu);
                     }
-                    write_words(cpu, t.var(GET_MSG), &m.words());
                     t.set(GET_REMOVE, remove as u32);
                     // The keyboard's and the mouse's hooks see what the
                     // devices did before the program does, and a hook
                     // that returns nonzero throws it away.
                     if input && let Some((kind, wp, lp)) = input_hook(cpu, t, &m) {
+                        for (k, w) in m.words().into_iter().enumerate() {
+                            t.set(GET_HOOKED + k, w);
+                        }
                         let code = if remove { HC_ACTION } else { HC_NOREMOVE };
                         return super::hook::call(kind, code, wp, lp, 7);
                     }
@@ -1391,7 +1402,8 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             7 => {
                 // What the keyboard's or the mouse's hook returned.
-                let m = Msg::read(cpu, t.var(GET_MSG));
+                let w: [u32; 7] = std::array::from_fn(|k| t.var(GET_HOOKED + k));
+                let m = Msg::from_words(&w);
                 if value != 0 {
                     // Thrown away, also by a peek that leaves messages
                     // in the queue: the thread looks for the next one.
@@ -1469,11 +1481,13 @@ fn drop_input(cpu: &mut Cpu, tid: u32, m: &Msg) {
     }
 }
 
-/// A message GetMessageA or PeekMessageA found and returns: the queue
-/// keeps its time and place, and a mouse message sets the cursor and may
-/// activate the window clicked. What comes next, if it calls into the
-/// program; otherwise the task goes on at the step this sets.
+/// A message GetMessageA or PeekMessageA found and returns: it goes to
+/// the program's MSG, the queue keeps its time and place, and a mouse
+/// message sets the cursor and may activate the window clicked. What
+/// comes next, if it calls into the program; otherwise the task goes on
+/// at the step this sets.
 fn found(cpu: &mut Cpu, t: &mut Task, tid: u32, m: &Msg) -> Option<Next> {
+    write_words(cpu, t.var(GET_MSG), &m.words());
     let flags = t.var(GET_FLAGS);
     let remove = t.var(GET_REMOVE) != 0;
     let state = user(cpu);
