@@ -2128,8 +2128,11 @@ impl Bus {
         let Some(level) = self.speaker_steady() else {
             return false;
         };
+        // The frame `speaker_until` falls in, or starts: rounded up, as
+        // after a skip it is a frame's start between two ticks, and
+        // rounding that down would give the frame before.
         let rate = crate::opl::RATE as u64;
-        let until = self.speaker_until.floor() as u64;
+        let until = self.speaker_until.ceil() as u64;
         let frame = crate::timer::mul_div(until, rate, crate::timer::PIT_HZ);
         let held = level as f64 * (self.speaker_until - frame_tick(frame));
         (self.speaker_high - held).abs() < 1e-6

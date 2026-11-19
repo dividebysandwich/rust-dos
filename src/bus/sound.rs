@@ -223,4 +223,25 @@ mod tests {
         let low = step.iter().min().unwrap();
         assert!(*low < -20000, "{}", low);
     }
+
+    /// The speaker held high, its level taken out by its filter, lets the
+    /// mixer rest also when the frame being made starts between two ticks,
+    /// as after a long pause skipped or a version 9 state loaded.
+    #[test]
+    fn a_speaker_held_high_rests_from_a_frame_start() {
+        use crate::bus::frame_tick;
+        let mut bus = Bus::new(std::path::PathBuf::from("."));
+        bus.set_cycles_per_ms(1000);
+        // The data bit with the gate low: channel 2's output is high.
+        bus.io_write(0x61, 0x02);
+        render(&mut bus, 2000);
+        assert!(bus.audio_quiet(), "the speaker rests at its level");
+        let frame = (1..100)
+            .map(|n| bus.audio_frames - n)
+            .find(|&f| frame_tick(f).fract() != 0.0);
+        bus.audio_frames = frame.unwrap();
+        bus.speaker_high = 0.0;
+        bus.speaker_until = frame_tick(bus.audio_frames);
+        assert!(bus.audio_quiet(), "and from the start of a frame");
+    }
 }
