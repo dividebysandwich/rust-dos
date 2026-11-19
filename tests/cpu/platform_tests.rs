@@ -71,6 +71,24 @@ fn memory_above_1mb_and_past_the_end_of_ram() {
 }
 
 #[test]
+fn vectors_past_the_bios_ones_start_null_as_on_an_at() {
+    // An AT BIOS sets up INT 00h-77h and leaves the rest zero. SBFMDRV
+    // installs on the first null vector from INT 80h up, and exits with
+    // "No interrupt vector available" when there is none.
+    let cpu = cpu();
+    let vector = |v: usize| cpu.bus.read_32(v * 4);
+    let free = (0x80..=0xFF).find(|&v| vector(v) == 0);
+    assert_eq!(free, Some(0x80), "INT 80h is free for SBFMDRV");
+    for v in 0x78..=0xFF {
+        let hle = rust_dos::bios::HLE_VECTORS.contains(&(v as u8));
+        assert_eq!(vector(v) == 0, !hle, "INT {v:02X}h");
+    }
+    for v in 0x70..=0x77 {
+        assert_ne!(vector(v), 0, "IRQ {} has a handler", v - 0x68);
+    }
+}
+
+#[test]
 fn pic_initialization_sets_the_vector_base() {
     let mut bus = Bus::new(PathBuf::from("."));
     // Remap the master to 20h, as some protected-mode programs do.
