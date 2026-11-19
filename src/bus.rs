@@ -2907,6 +2907,13 @@ impl Bus {
                 // CGA Mode Control / Color Select. Real VGA ignores writes
                 // here; VGA mode lives at 0x3D4/0x3D5 (handled by the VGA).
             }
+            // The CRTC of the display adapter the machine hasn't: the
+            // monochrome one at 3B4h beside a colour card, the colour one
+            // at 3D4h beside a monochrome card. Nothing answers there on a
+            // real machine either, and programs write to it to find out
+            // whether a second adapter is there (Shadow Knights does on an
+            // EGA).
+            0x3B4 | 0x3B5 | 0x3D4 | 0x3D5 if !self.vga.decodes(port) => {}
             // Game port write: the one-shots fire.
             0x0201 => {
                 let now_ns = self.clock.now_ns();

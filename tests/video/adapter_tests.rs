@@ -162,3 +162,50 @@ fn the_mouse_counts_8_a_character_in_text_on_every_adapter() {
     int10(&mut cpu, 0x1112, 0, 0, 0);
     assert_eq!(reset(&mut cpu), (639, 399));
 }
+
+#[test]
+fn the_crtc_of_the_absent_adapter_is_quietly_not_there() {
+    // A program looks for a second display adapter by writing to the
+    // CRTC it would have and reading it back: the monochrome one at 3B4h
+    // beside a colour card, the colour one at 3D4h beside a Hercules.
+    // Nothing answers there, and the log doesn't call it a missing
+    // device.
+    let cases = [
+        (Adapter::Svga, 0x3B4),
+        (Adapter::Vga, 0x3B4),
+        (Adapter::Ega, 0x3B4),
+        (Adapter::Cga, 0x3B4),
+        (Adapter::Hercules, 0x3D4),
+    ];
+    for (adapter, index_port) in cases {
+        let setup = VideoSetup {
+            adapter,
+            ..Default::default()
+        };
+        let mut cpu = Cpu::new(PathBuf::from("."));
+        bios::install(&mut cpu.bus, setup);
+        int10::set_mode(&mut cpu, setup.prompt_mode());
+        let crtc = cpu.bus.read_16(0x0463);
+        assert_ne!(crtc, index_port, "{:?}", adapter);
+        // The card's own cursor location, which the probe's register
+        // index (0Fh) would reach if the card answered.
+        cpu.bus.io_write(crtc, 0x0F);
+        let cursor = cpu.bus.io_read(crtc + 1);
+
+        cpu.bus.log_backlog = Some(Vec::new());
+        cpu.bus.io_write(index_port, 0x0F);
+        cpu.bus.io_write(index_port + 1, 0x66);
+        assert_eq!(cpu.bus.io_read(index_port + 1), 0xFF, "{:?}", adapter);
+        let unhandled: Vec<String> = cpu
+            .bus
+            .take_log_backlog()
+            .into_iter()
+            .map(|(_, line)| line)
+            .filter(|line| line.contains("Unhandled"))
+            .collect();
+        assert!(unhandled.is_empty(), "{:?}: {:?}", adapter, unhandled);
+
+        cpu.bus.io_write(crtc, 0x0F);
+        assert_eq!(cpu.bus.io_read(crtc + 1), cursor, "{:?}", adapter);
+    }
+}
