@@ -41,8 +41,8 @@ const CLSCTX_LOCAL_SERVER: u32 = 0x4;
 /// The methods of IUnknown and the others called here, by their places
 /// in the vtables.
 const QUERY_INTERFACE: u32 = 0;
-const ADD_REF: u32 = 1;
-const RELEASE: u32 = 2;
+pub(super) const ADD_REF: u32 = 1;
+pub(super) const RELEASE: u32 = 2;
 const CREATE_INSTANCE: u32 = 3;
 const STREAM_READ: u32 = 3;
 const STREAM_WRITE: u32 = 4;
@@ -124,6 +124,11 @@ pub fn initialized(cpu: &mut Cpu) -> bool {
     let apartments = &com_state(cpu).apartments;
     apartments.iter().any(|a| a.tid == tid)
         || apartments.iter().any(|a| a.pid == pid && a.multithreaded)
+}
+
+/// Whether the running thread called OleInitialize and hasn't undone it.
+pub fn ole_initialized(cpu: &mut Cpu) -> bool {
+    apartment(cpu).is_some_and(|a| a.ole > 0)
 }
 
 /// Whether the running thread is in its process's multithreaded
@@ -218,7 +223,7 @@ fn release_all(cpu: &mut Cpu, value: u32, objects: impl Iterator<Item = u32>) ->
     call_each(cpu, value, RELEASE, objects)
 }
 
-fn call_each(
+pub(super) fn call_each(
     cpu: &mut Cpu,
     value: u32,
     method: u32,

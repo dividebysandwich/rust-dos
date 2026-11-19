@@ -21,6 +21,7 @@ use crate::cpu::Cpu;
 
 mod calls;
 mod compobj;
+mod dragdrop;
 mod medium;
 mod propvariant;
 mod persist;
@@ -236,6 +237,8 @@ static APIS: &[Api] = &[
     stdcall("ReadClassStg", 222, 2, persist::read_class_stg),
     stdcall("OleSaveToStream", 209, 2, persist::ole_save_to_stream),
     stdcall("OleLoadFromStream", 197, 3, persist::ole_load_from_stream),
+    stdcall("RegisterDragDrop", 227, 2, dragdrop::register_drag_drop),
+    stdcall("RevokeDragDrop", 229, 1, dragdrop::revoke_drag_drop),
 ];
 
 /// The vtables, by their places in this list.
