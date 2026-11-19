@@ -60,9 +60,12 @@ fn speaker_settled(bus: &mut Bus) {
     peak(bus);
 }
 
-/// Whether two peaks are the same, but for the rounding of a sample.
+/// Whether two peaks are the same, but for the rounding of a sample and
+/// for where the speaker's band-limited edges fall among the frames: the
+/// overshoot of an edge peaks between frames, so the loudest sample of a
+/// window differs a little from one window to the next (up to 0.5%).
 fn near(a: u16, b: u16) -> bool {
-    a.abs_diff(b) <= 2
+    a.abs_diff(b) <= 2.max(b / 200)
 }
 
 /// The loudest sample rendered since the last call.
@@ -233,10 +236,10 @@ fn the_speaker_filter_softens_the_square_wave() {
     let mut bus = bus();
     speaker_settled(&mut bus);
     wait_ms(&mut bus, 20);
-    // The edges of a square wave, which take two frames where one falls
-    // inside a frame.
+    // The edges of a square wave, band-limited to the mix's rate: each
+    // rises over two or three frames.
     let square = steepest(&samples(&mut bus));
-    assert!(square > 5000, "the edges of a square wave: {square}");
+    assert!(square > 4000, "the edges of a square wave: {square}");
 
     bus.set_mixer(MixerSettings::default());
     wait_ms(&mut bus, 20);

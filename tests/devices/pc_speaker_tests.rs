@@ -1,8 +1,9 @@
 //! The PC speaker's level over time: PIT channel 2's output with port 61h
-//! bit 1, averaged over each frame of the mix. Programs play digitized
-//! sound through it by pulse-width modulation and by switching port 61h,
-//! and the mean keeps tones too fast for the mix from folding down into
-//! tones a real speaker doesn't make.
+//! bit 1, averaged over each eighth of a frame of the mix and band-limited
+//! to the mix's rate. Programs play digitized sound through it by
+//! pulse-width modulation and by switching port 61h, and the band limit
+//! keeps tones too fast for the mix from folding down into tones a real
+//! speaker doesn't make.
 
 use rust_dos::bus::Bus;
 use rust_dos::mixer::MixerSettings;
@@ -150,12 +151,13 @@ fn an_audible_tone_is_unchanged() {
         (fundamental / expected - 1.0).abs() < 0.02,
         "{fundamental} against {expected}"
     );
-    // Each frame is one of the two levels, or between them where an edge
-    // falls inside it.
+    // Each frame is one of the two levels, or between them near an edge,
+    // which the band limit spreads over about three frames: six frames of
+    // the period's 44 at most.
     let high = played.iter().filter(|&&s| s > 2900.0).count();
     let low = played.iter().filter(|&&s| s < -2900.0).count();
     assert!(
-        high + low > played.len() * 9 / 10,
+        high + low > played.len() * 4 / 5,
         "{high} high and {low} low of {}",
         played.len()
     );
@@ -180,5 +182,91 @@ fn a_tone_above_5_khz_folds_no_tone_down() {
     assert!(
         folded < fundamental / 100.0,
         "{folded} folded, the tone at {fundamental}"
+    );
+}
+
+#[test]
+fn a_pwm_carriers_harmonics_fold_no_tone_down() {
+    // RealSound's way, playing 1 kHz: a mode 0 count written at every
+    // sample, the samples 60 us apart (a 16.7 kHz carrier, about Mean
+    // Streets' 16.57 kHz) or 36 us (27.8 kHz). Each harmonic of the
+    // carrier above half the mix's rate that a frame's mean would fold
+    // into the audible range comes out under a three-hundredth of the
+    // tone: the 16.7 kHz carrier's second and third (10.8 and 5.9 kHz,
+    // Mean Streets' 11.0 and 5.6 kHz of issue 1454), the 27.8 kHz
+    // carrier's first and third (16.3 and 4.9 kHz). A carrier below half
+    // the mix's rate stays: it is a tone a speaker plays.
+    for period_us in [60u64, 36] {
+        let mut bus = bus(false);
+        bus.io_write(0x43, 0x90);
+        bus.io_write(0x61, 0x03);
+        let ticks = period_us as f64 * 1.193_182;
+        let play = |bus: &mut Bus, ms: u64| {
+            for n in 0..ms * 1000 / period_us {
+                let t = (n * period_us) as f64 / 1e6;
+                let level = 0.5 + 0.4 * (2.0 * PI * 1000.0 * t).sin();
+                let low = (1.0 - level) * ticks;
+                bus.io_write(0x42, low.round().max(1.0) as u8);
+                wait_us(bus, period_us);
+            }
+        };
+        play(&mut bus, 100);
+        samples(&mut bus);
+        play(&mut bus, 500);
+        let played = samples(&mut bus);
+        let carrier = 1e6 / period_us as f64;
+        let tone = amplitude(&played, 1000.0);
+        assert!(tone > 2000.0, "{period_us} us: the tone at {tone}");
+        for harmonic in 1..=5 {
+            let hz = harmonic as f64 * carrier;
+            let folded = (hz - (hz / RATE).round() * RATE).abs();
+            if hz < RATE / 2.0 || folded > 20_000.0 {
+                continue;
+            }
+            let level = amplitude(&played, folded);
+            assert!(
+                level < tone / 300.0,
+                "{period_us} us: harmonic {harmonic} at {folded} Hz at {level}, the tone at {tone}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_version_10_state_keeps_the_speakers_level() {
+    // Version 10 of the CORE section kept the time the speaker was high
+    // since the frame being made began; 11 keeps it since the eighth of
+    // the frame began. A speaker held high (the data bit with the gate
+    // low) for the whole frame loads high for the whole eighth.
+    use rust_dos::cpu::Cpu;
+    use rust_dos::savestate::machine;
+    let machine = || {
+        let mut cpu = Cpu::new(PathBuf::from("."));
+        cpu.bus.set_cycles_per_ms(1000);
+        cpu.load_shell();
+        cpu
+    };
+    let mut a = machine();
+    a.bus.io_write(0x61, 0x02);
+    wait_us(&mut a.bus, 10_013);
+    a.bus.audio_catch_up();
+    let until = a.bus.speaker_until;
+    let parts = RATE * 8.0 / 1_193_182.0;
+    let part = (until * parts).floor();
+    let part_start = part / parts;
+    let frame_start = (part / 8.0).floor() * 8.0 / parts;
+    assert!(until - frame_start > until - part_start + 1.0);
+    a.bus.speaker_high = until - frame_start;
+    let (mut bytes, labels) = machine::save_parts(&a);
+    let core = labels.iter().find(|(n, _)| n == "CORE").unwrap().1.start;
+    // The section's version follows its tag.
+    bytes[core + 4..core + 6].copy_from_slice(&10u16.to_le_bytes());
+    let mut b = machine();
+    machine::load(&mut b, &bytes).unwrap();
+    let high = b.bus.speaker_high;
+    assert!(
+        (high - (until - part_start)).abs() < 1e-6,
+        "{high} against {}",
+        until - part_start
     );
 }

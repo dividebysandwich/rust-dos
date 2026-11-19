@@ -4,7 +4,7 @@
 //! emulated cards' own levels, such as the Sound Blaster's mixer chip,
 //! which programs set and a new program resets.
 
-use crate::dsp::{Chorus, DcBlocker, OutputCoupling, Reverb, SpeakerFilter, StereoLowpass};
+use crate::dsp::{Chorus, DcBlocker, OutputCoupling, Reverb, SpeakerDecimator, SpeakerFilter, StereoLowpass};
 pub use crate::dsp::{ChorusPreset, ReverbPreset};
 
 /// A sound source the mixer has a volume for, or `Master` for the mix.
@@ -220,6 +220,8 @@ fn dry_wet(mix: u16) -> (f32, f32) {
 /// The filters' and effects' state.
 #[derive(Clone, Debug, Default)]
 struct Dsp {
+    /// The speaker's level, band-limited to the mix rate.
+    speaker_level: SpeakerDecimator,
     speaker: SpeakerFilter,
     /// The speaker's steady level taken out while its filter is off.
     speaker_dc: DcBlocker,
@@ -353,6 +355,7 @@ impl Mixer {
     /// Start the filters and effects from silence, dropping the sound that
     /// rang on in them, as after a save state was loaded.
     pub fn clear_tails(&mut self) {
+        self.dsp.speaker_level = SpeakerDecimator::default();
         self.dsp.speaker = SpeakerFilter::default();
         self.dsp.speaker_dc = DcBlocker::default();
         self.dsp.sb = StereoLowpass::default();
@@ -453,6 +456,26 @@ impl Mixer {
             frame.chorus.0 += l * send;
             frame.chorus.1 += r * send;
         }
+    }
+
+    /// Take in the PC speaker's mean level over the next eighth of a mix
+    /// frame (`SpeakerDecimator`).
+    #[inline]
+    pub(crate) fn speaker_part(&mut self, level: f32) {
+        self.dsp.speaker_level.push(level);
+    }
+
+    /// The PC speaker's level for the frame whose last eighth came in
+    /// last, band-limited.
+    #[inline]
+    pub(crate) fn speaker_level(&self) -> f32 {
+        self.dsp.speaker_level.output()
+    }
+
+    /// Whether the speaker's level held at `level` comes out as `level`
+    /// and leaves its band-limiting as it is.
+    pub(crate) fn speaker_level_rests_on(&self, level: f32) -> bool {
+        self.dsp.speaker_level.rests_on(level)
     }
 
     /// The PC speaker's sample through its filter, if it is on. Without
