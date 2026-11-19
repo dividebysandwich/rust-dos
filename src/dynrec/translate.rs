@@ -1718,8 +1718,15 @@ fn far_ret_pm(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
 /// ALU operations and the three-operand IMUL with an immediate (Riverworld
 /// pokes the factors of its transforms into those), and where the watched
 /// bytes take in more than the immediate. An MMX shift by a constant
-/// goes by the count it reads instead (`live_shift`).
+/// goes by the count it reads instead (`live_shift`), and an instruction
+/// whose watched bytes are all in its displacement by the displacement it
+/// reads (`live_displacement`).
 pub fn live_immediate(instr: &Instruction, phys: u32, watched: &[usize], u: &mut Vec<Uop>) -> bool {
+    if let Some((start, size)) = displacement(instr)
+        && watched.iter().all(|&w| (start..start + size).contains(&w))
+    {
+        return live_displacement(instr, phys, start, size, u);
+    }
     if u.iter().any(shift_imm) {
         return live_shift(instr, phys, watched, u);
     }
@@ -1808,6 +1815,134 @@ pub fn live_immediate(instr: &Instruction, phys: u32, watched: &[usize], u: &mut
         signed: false,
     });
     u.splice(at, [load].into_iter().chain(cut));
+    true
+}
+
+/// Where the displacement of `instr`'s memory operand is in its bytes: its
+/// offset and size. None for an instruction without one. The displacement
+/// comes after the ModRM and SIB bytes and before the immediates, which
+/// end the instruction.
+fn displacement(instr: &Instruction) -> Option<(usize, usize)> {
+    let size = instr.memory_displ_size() as usize;
+    if size == 0 || !(0..instr.op_count()).any(|k| instr.op_kind(k) == OpKind::Memory) {
+        return None;
+    }
+    let immediates: usize = (0..instr.op_count())
+        .map(|k| match instr.op_kind(k) {
+            OpKind::Immediate8
+            | OpKind::Immediate8_2nd
+            | OpKind::Immediate8to16
+            | OpKind::Immediate8to32
+            | OpKind::Immediate8to64 => 1,
+            OpKind::Immediate16 => 2,
+            OpKind::Immediate32 | OpKind::Immediate32to64 => 4,
+            OpKind::Immediate64 => 8,
+            _ => 0,
+        })
+        .sum();
+    let start = instr.len().checked_sub(immediates + size)?;
+    Some((start, size))
+}
+
+/// `live_immediate` for an instruction whose watched bytes, `size` of
+/// them from offset `start`, are its displacement: the Build engine
+/// (Witchaven) pokes the addresses of each column's palette and texture
+/// into the `MOV r8, [EAX+disp32]` of its drawing loops before running
+/// them, as Unreal's Fire.dll does into its loads.
+/// The effective address is computed without the displacement, and the
+/// displacement read from RAM is added to it, wrapped as the address is.
+/// The displacement goes through a temporary that is free from the
+/// address on: one the instruction's operations haven't used before it
+/// and next write rather than read (the ALU operations with a memory
+/// operand use all three, but load the register's only after the
+/// address). False, with nothing changed, where the operations use a
+/// form this doesn't follow, or no temporary is free, or the instruction
+/// runs on into the next page, whose physical address `phys` doesn't give.
+fn live_displacement(
+    instr: &Instruction,
+    phys: u32,
+    start: usize,
+    size: usize,
+    u: &mut Vec<Uop>,
+) -> bool {
+    if (phys & 0xFFF) as usize + instr.len() > 0x1000 {
+        return false;
+    }
+    // The temporaries each operation reads and writes, as masks.
+    let mut touched = Vec::with_capacity(u.len());
+    let mut site = None;
+    for (k, uop) in u.iter().enumerate() {
+        let bit = |t: &T| 1u8 << t.0;
+        let (reads, writes) = match uop {
+            Uop::Get { t, .. } | Uop::Const { t, .. } => (0, bit(t)),
+            Uop::Set { t, .. } => (bit(t), 0),
+            Uop::MemRef { t, .. }
+            | Uop::Extend { t, .. }
+            | Uop::AddConst { t, .. }
+            | Uop::Unary { t, .. }
+            | Uop::Shift { t, .. }
+            | Uop::Alu {
+                a: t,
+                b: Src::Imm(_),
+                ..
+            }
+            | Uop::Imul {
+                a: t,
+                b: Src::Imm(_),
+                ..
+            } => (bit(t), bit(t)),
+            Uop::Alu {
+                a, b: Src::T(b), ..
+            }
+            | Uop::Imul {
+                a, b: Src::T(b), ..
+            } => (bit(a) | bit(b), bit(a)),
+            Uop::Ea { t, .. } => {
+                if site.replace(k).is_some() {
+                    return false;
+                }
+                (0, bit(t))
+            }
+            Uop::Load { dst, m, .. } => (bit(m), bit(dst)),
+            Uop::Store { m, src, .. } => (bit(m) | bit(src), 0),
+            Uop::Copy { dst, src } => (bit(src), bit(dst)),
+            _ => return false,
+        };
+        touched.push((reads, writes));
+    }
+    let Some(site) = site else { return false };
+    let free = [T0, T1, T2].into_iter().find(|t| {
+        let bit = 1u8 << t.0;
+        let before = touched[..=site].iter().any(|&(r, w)| (r | w) & bit != 0);
+        let next = touched[site + 1..]
+            .iter()
+            .find(|&&(r, w)| (r | w) & bit != 0);
+        !before && next.is_none_or(|&(r, _)| r & bit == 0)
+    });
+    let Some(free) = free else { return false };
+    let Uop::Ea {
+        t,
+        a32,
+        ref mut disp,
+        ..
+    } = u[site]
+    else {
+        unreachable!()
+    };
+    *disp = 0;
+    let load = Uop::LoadCode {
+        t: free,
+        phys: phys + start as u32,
+        size: size as u8,
+        signed: size == 1,
+    };
+    let add = Uop::AddShifted {
+        t,
+        src: free,
+        shift: 0,
+        size: if a32 { 4 } else { 2 },
+    };
+    u.splice(site + 1..site + 1, [load, add]);
     true
 }
 

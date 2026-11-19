@@ -3418,6 +3418,100 @@ fn an_immediate_poked_before_each_loop_is_read_where_it_is() {
 }
 
 #[test]
+fn displacements_poked_before_each_loop_are_read_where_they_are() {
+    // The Build engine's columns (Witchaven): the address of each
+    // column's palette poked into the displacement of the loop's
+    // `MOV AL, [ESI+disp32]` before each run of it; and likewise a byte
+    // displacement, sign-extended, and a 16-bit address's, which wraps at
+    // 64 KB. Blocks translated once those bytes are watched read them, and
+    // run without leaving at them.
+    let fns = [CODE + 0x1000, CODE + 0x1100, CODE + 0x1200];
+    let top = CODE + 0x40;
+    let table = CODE + 0x3000;
+    let low = 0x9000u32;
+    let code = |at: u32, load: &dyn Fn(&mut CodeAssembler) -> Result<(), IcedError>| {
+        asm32(at, |a| {
+            a.xor(eax, eax)?;
+            load(a)?;
+            a.add(edi, eax)?;
+            a.ret()
+        })
+    };
+    let fn0 = code(fns[0], &|a| a.mov(al, byte_ptr(esi + 0x1234_5678))); // 8A 86 disp32
+    let fn1 = code(fns[1], &|a| a.mov(al, byte_ptr(edx + 0x55))); // 8A 42 disp8
+    let fn2 = code(fns[2], &|a| a.mov(al, byte_ptr(bx + 0x5A5A))); // 67 8A 87 disp16
+    let marker =
+        |bytes: &[u8], m: &[u8]| bytes.windows(m.len()).position(|w| w == m).unwrap() as u32;
+    let at0 = fns[0] + marker(&fn0, &0x1234_5678u32.to_le_bytes());
+    let at1 = fns[1] + marker(&fn1, &[0x55]);
+    let at2 = fns[2] + marker(&fn2, &0x5A5Au16.to_le_bytes());
+    let (mut a, mut b) = twins(|rig| {
+        for i in 0..0x400u32 {
+            rig.write32(table + 4 * i, i.wrapping_mul(0x0305_0709));
+        }
+        for i in 0..0x80u32 {
+            rig.write32(low + 4 * i, i.wrapping_mul(0x0B0D_1113));
+        }
+        rig.load(fns[0], &fn0);
+        rig.load(fns[1], &fn1);
+        rig.load(fns[2], &fn2);
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.xor(edi, edi)?;
+                a.mov(esi, 5u32)?;
+                a.mov(edx, table + 0x200)?;
+                // BX + disp16 = low + n, past 64 KB before the wrap.
+                a.mov(ebx, 0xF000u32)?;
+                a.mov(ecx, 200u32)?;
+                a.jmp(top as u64)
+            }),
+        );
+        rig.load(
+            top,
+            &asm32(top, |a| {
+                // EAX = table + 3 * n; the byte displacement -0x80 + n.
+                a.lea(eax, dword_ptr(ecx + ecx * 2 + table))?;
+                a.mov(dword_ptr(at0), eax)?;
+                a.lea(eax, dword_ptr(ecx - 0x80))?;
+                a.mov(byte_ptr(at1), al)?;
+                a.lea(eax, dword_ptr(ecx + (low + 0x1000) as i32))?;
+                a.mov(word_ptr(at2), ax)?;
+                for f in fns {
+                    a.call(f as u64)?;
+                }
+                a.dec(ecx)?;
+                a.jnz(top as u64)?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    let byte = |addr: u32| b.cpu.bus.read_8(addr as usize) as u32;
+    let sum = (1..=200u32)
+        .map(|n| {
+            let d8 = (n.wrapping_sub(0x80) as u8 as i8) as i32;
+            byte(table + 3 * n + 5)
+                + byte((table as i32 + 0x200 + d8) as u32)
+                + byte((0xF000 + low + 0x1000 + n) & 0xFFFF)
+        })
+        .sum::<u32>();
+    assert_eq!(b.cpu.edi(), sum);
+    if AVAILABLE {
+        assert!(
+            stats.watched < 20,
+            "left at the poked displacements: {:?}",
+            stats
+        );
+        assert!(
+            stats.blocks < 100,
+            "translated again and again: {:?}",
+            stats
+        );
+    }
+}
+
+#[test]
 fn immediates_poked_into_one_block_before_each_call_are_read_where_they_are() {
     // SkyNET's span setup: the steps poked into the immediates of three
     // ADDs of one block before each call of it, twelve bytes in three
@@ -3782,10 +3876,10 @@ fn mmx_shift_counts_poked_before_each_loop_are_read_where_they_are() {
 }
 
 #[test]
-fn a_displacement_a_block_pokes_just_ahead_of_itself_is_run_as_it_is_now() {
-    // The same with the address of an ADD's operand: the block leaves
-    // before the ADD where its watched bytes changed, and the interpreter
-    // runs it, rather than being translated again for each new address.
+fn a_displacement_a_block_pokes_just_ahead_of_itself_is_read_where_it_is() {
+    // The same with the address of an ADD's operand: once its bytes are
+    // watched, the block reads the address where it is, rather than
+    // being translated again for each new one or leaving before the ADD.
     let top = CODE + 0x40;
     let table = CODE + 0x3000;
     let (mut a, mut b) = twins(|rig| {
@@ -3808,8 +3902,140 @@ fn a_displacement_a_block_pokes_just_ahead_of_itself_is_run_as_it_is_now() {
     let stats = run_both(&mut a, &mut b);
     assert_eq!(b.cpu.edx(), (1..=200u32).map(|i| i * 3 + 1).sum::<u32>());
     if AVAILABLE {
+        assert!(stats.watched < 20, "left at the poked address: {:?}", stats);
+        assert!(stats.blocks < 60, "translated again and again: {:?}", stats);
+    }
+}
+
+#[test]
+fn an_opcode_poked_with_the_displacement_ahead_of_the_block_is_run_as_it_is_now() {
+    // As above, but the loop also turns the ADD into a SUB and back
+    // (03 15 and 2B 15 disp32) each time round. Once the opcode is
+    // watched too, the displacement isn't read where it is: the block
+    // leaves before the instruction where its watched bytes changed, and
+    // the interpreter runs whichever is there.
+    let top = CODE + 0x40;
+    let table = CODE + 0x3000;
+    let code = |op: u32, disp: u32| {
+        asm32(top, |a| {
+            a.lea(ecx, dword_ptr(ebx * 4 + table))?;
+            a.mov(dword_ptr(disp), ecx)?;
+            // AL = 2B (SUB) for an odd count, 03 (ADD) for an even one.
+            a.mov(eax, ebx)?;
+            a.and(eax, 1)?;
+            a.imul_3(eax, eax, 0x28)?;
+            a.add(eax, 3)?;
+            a.mov(byte_ptr(op), al)?;
+            a.add(edx, dword_ptr(0x1234_5678u64))?; // 03 15 disp32
+            a.dec(ebx)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        })
+    };
+    let first = code(top, top);
+    let at = top
+        + first
+            .windows(4)
+            .rposition(|w| w == 0x1234_5678u32.to_le_bytes())
+            .unwrap() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        for i in 0..=200u32 {
+            rig.write32(table + 4 * i, i * 3 + 1);
+        }
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.xor(edx, edx)?;
+                a.mov(ebx, 200u32)?;
+                a.jmp(top as u64)
+            }),
+        );
+        rig.load(top, &code(at - 2, at));
+    });
+    let stats = run_both(&mut a, &mut b);
+    let sum = (1..=200u32).fold(0u32, |sum, i| {
+        if i % 2 == 1 {
+            sum.wrapping_sub(i * 3 + 1)
+        } else {
+            sum.wrapping_add(i * 3 + 1)
+        }
+    });
+    assert_eq!(b.cpu.edx(), sum);
+    if AVAILABLE {
         assert!(stats.watched > 150, "{:?}", stats);
         assert!(stats.blocks < 60, "translated again and again: {:?}", stats);
+    }
+}
+
+#[test]
+fn a_modrm_changed_under_a_live_displacement_is_seen() {
+    // A loop pokes the displacement of a `MOV AL, [ESI+disp32]` before
+    // each call, as the Build engine does, and halfway through changes
+    // its ModRM once, to `MOV AL, [EDX+disp32]`. The blocks read the
+    // displacement where it is, but the ModRM isn't watched: the block
+    // check sees it change, and the block is translated again.
+    let f = CODE + 0x1000;
+    let top = CODE + 0x40;
+    let table = CODE + 0x3000;
+    let func = asm32(f, |a| {
+        a.xor(eax, eax)?;
+        a.mov(al, byte_ptr(esi + 0x1234_5678))?; // 8A 86 disp32
+        a.add(edi, eax)?;
+        a.ret()
+    });
+    let disp = f + func
+        .windows(4)
+        .position(|w| w == 0x1234_5678u32.to_le_bytes())
+        .unwrap() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        for i in 0..0x400u32 {
+            rig.write32(table + 4 * i, i.wrapping_mul(0x0305_0709));
+        }
+        rig.load(f, &func);
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.xor(edi, edi)?;
+                a.mov(esi, 5u32)?;
+                a.mov(edx, 0x100u32)?;
+                a.mov(ecx, 200u32)?;
+                a.jmp(top as u64)
+            }),
+        );
+        rig.load(
+            top,
+            &asm32(top, |a| {
+                let mut same = a.create_label();
+                a.lea(eax, dword_ptr(ecx + ecx * 2 + table))?;
+                a.mov(dword_ptr(disp), eax)?;
+                a.cmp(ecx, 100)?;
+                a.jne(same)?;
+                a.mov(byte_ptr(disp - 1), 0x82)?;
+                a.set_label(&mut same)?;
+                a.call(f as u64)?;
+                a.dec(ecx)?;
+                a.jnz(top as u64)?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    let byte = |addr: u32| b.cpu.bus.read_8(addr as usize) as u32;
+    let sum = (1..=200u32)
+        .map(|n| byte(table + 3 * n + if n > 100 { 5 } else { 0x100 }))
+        .sum::<u32>();
+    assert_eq!(b.cpu.edi(), sum);
+    if AVAILABLE {
+        assert!(
+            stats.watched < 20,
+            "left at the poked displacement: {:?}",
+            stats
+        );
+        assert!(
+            stats.blocks < 100,
+            "translated again and again: {:?}",
+            stats
+        );
     }
 }
 
