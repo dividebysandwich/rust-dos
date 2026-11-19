@@ -506,8 +506,7 @@ fn driver_extent((w, h): (usize, usize)) -> (i32, i32) {
 }
 
 /// Write the driver's INT 33h handler into DOS's data segment: the
-/// emulator's service trap and an IRET. Written with DOS's memory set up
-/// afresh, as the XMS driver's entry is (`xms::install_entry`).
+/// emulator's service trap and an IRET (`dos_data::write_driver_code`).
 pub fn install_entry(bus: &mut crate::bus::Bus) {
     let at = crate::dos_data::address(crate::dos_data::MOUSE_ENTRY);
     bus.load_bytes(at, &[0xFE, 0x38, 0x33, 0xCF]);

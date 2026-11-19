@@ -91,6 +91,8 @@ pub const XMS_ENTRY: u16 = EMM_IMPORT + 0x200;
 const END: u16 = XMS_ENTRY + 0x10;
 
 const _: () = assert!(DBCS_TABLE + DBCS_TABLE_SIZE <= MOUSE_ENTRY);
+// Neither half of the INT 33h vector may have a zero low byte (Wasteland).
+const _: () = assert!(SEGMENT & 0xFF != 0 && MOUSE_ENTRY & 0xFF != 0);
 
 const _: () = assert!(DEVICE_RETF < DOSMGR_PATCHES && DOSMGR_PATCHES + 0x0E <= DEVICE_HEADERS);
 const _: () = assert!(
@@ -196,6 +198,16 @@ pub const fn dpb(drive: u8) -> u16 {
 
 /// The NUL device's header, in the List of Lists.
 pub const NUL_DEVICE: u16 = SYSVARS + 0x22;
+
+/// Write the code the built-in drivers keep in DOS's data segment, as
+/// resident drivers keep theirs in low memory: the XMS driver's entry
+/// (`xms::install_entry`) and the mouse driver's INT 33h handler
+/// (`mouse::install_entry`). Called with DOS's memory set up afresh, not
+/// while a program runs, which may have hooked either.
+pub fn write_driver_code(bus: &mut Bus) {
+    crate::xms::install_entry(bus);
+    crate::mouse::install_entry(bus);
+}
 
 /// Write the DOS data segment afresh for the mounted drives: the List of
 /// Lists and its tables, the drive parameter blocks, the current directory
