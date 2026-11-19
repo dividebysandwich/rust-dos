@@ -486,8 +486,12 @@ pub(super) fn record(cpu: &mut Cpu) {
     let mut tables = entries(cpu, ip, instr.len() as u64);
     let trap = instr.is_invalid() && bytes[0] == 0xFE;
     // A service of the built-in Windows called from 32-bit code, which
-    // takes its arguments on the stack (`after_service`).
-    let service = trap && bytes[1] == crate::win32::TRAP && bitness == 32;
+    // takes its arguments on the stack (`after_service`), or the stub of
+    // a Win16 system module's function called from the program's 16-bit
+    // code, which takes them on the 16-bit stack (`idle::arguments16`).
+    let service16 =
+        trap && bytes[1] == crate::win32::TRAP && bitness == 16 && crate::win16::in_16bit_code(cpu);
+    let service = trap && bytes[1] == crate::win32::TRAP && bitness == 32 || service16;
     // The BIOS's and DOS's services read memory of their own (the BIOS
     // data area, DOS's data), which with paging on is where the page
     // tables put it, not where the window below looks.
@@ -673,8 +677,14 @@ pub(super) fn record(cpu: &mut Cpu) {
     if opaque {
         // A service keeps EBX, ESI, EDI and EBP, sets EAX to what it
         // returns, and reads no register but ESP (`after_service`); it may
-        // change ECX and EDX. Anything else may read any.
-        let open = if service {
+        // change ECX and EDX. A Win16 function keeps SI, DI and BP, and
+        // may leave anything in AX, BX, CX and DX: it returns DX:AX, and
+        // the thunk to a 32-bit function it may go through (`builtin::
+        // auto_thunk`) gives them back only where it returns. Anything
+        // else may read any.
+        let open = if service16 {
+            reg_cell(0)..reg_cell(4)
+        } else if service {
             reg_cell(1)..reg_cell(3)
         } else {
             reg_cell(0)..reg_cell(8)

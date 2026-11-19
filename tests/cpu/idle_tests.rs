@@ -896,6 +896,62 @@ fn an_mfc_idle_loop_of_window_queries_is_skipped() {
     assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
 }
 
+#[test]
+fn a_win16_loop_with_a_long_count_on_its_stack_is_skipped() {
+    // MFC's CWinThread::Run in a 16-bit program (Metal Marines) keeps its
+    // idle count, a LONG, in its frame on the 16-bit stack: every pass
+    // adds 1 to the low word and the carry to the high word (add/adc),
+    // and OnIdle compares the high word with 0. The stack's top is a few
+    // bytes below the count when the pass calls PeekMessage, whose stub
+    // reads only its arguments: the proof follows the count through the
+    // call, and the passes are skipped to the clock's next millisecond.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607).emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    code.push(0).push(0).emit(&[0x8B, 0xEC]); // the count at SS:BP; mov bp,sp
+    let top = code.here();
+    code.emit(&[0x83, 0x46, 0x00, 0x01]) // add word [bp],1
+        .emit(&[0x83, 0x56, 0x02, 0x00]) // adc word [bp+2],0
+        .emit(&[0x83, 0x7E, 0x02, 0x00]) // cmp word [bp+2],0
+        .emit(&[0x1E]) // push ds
+        .push(0x10) // the MSG at DS:10h
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0) // PM_NOREMOVE
+        .call("USER", 109) // PeekMessage
+        .call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_long_count";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}
+  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    // Each proof holds only to the clock's next millisecond, where the
+    // pass that recorded the count costs about as much as the passes it
+    // saves, so the head backs off: the proofs held is what is checked.
+    let counter = stats.failed_by.iter().find(|(w, _)| *w == "counter");
+    assert!(stats.proofs >= 10 && counter.is_none(), "{:?}", stats);
+}
+
 /// Reads of the built-in Windows's clock in a row arm their place, but not
 /// when so much runs between them that the head armed would give up.
 #[test]
