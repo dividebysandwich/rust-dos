@@ -863,3 +863,45 @@ fn fcb_file_functions_work_on_host_directories() {
     fcb_file_functions_on(&mut cpu, 0);
     assert!(!base.join("c/SAME.BAK").exists() && !base.join("c/SAVE.DAT").exists());
 }
+
+/// 1830: Railroads & Robber Barons looks for each of its save slots, and
+/// asks for FFFFh paragraphs to learn the largest free block, many times
+/// a second on its menus. Each kind of failure is logged the first few
+/// times, the last of them saying so; another file or size still gets
+/// its own lines, and the next program starts counting again.
+#[test]
+fn repeated_dos_failures_are_logged_a_few_times() {
+    let base = scratch("repeated_failures", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = lines.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        log.borrow_mut().push(line.to_string())
+    }));
+    set_dta(&mut cpu);
+    for _ in 0..100 {
+        set_dsdx_string(&mut cpu, "GAME0.SAV");
+        cpu.set_cx(0);
+        int21(&mut cpu, 0x4E);
+        assert!(cf(&cpu));
+        cpu.set_bx(0xFFFF);
+        int21(&mut cpu, 0x48);
+        assert!(cf(&cpu));
+    }
+    set_dsdx_string(&mut cpu, "GAME1.SAV");
+    int21(&mut cpu, 0x4E);
+    std::fs::write(base.join("c/NEXT.COM"), [0xC3]).unwrap();
+    assert!(cpu.load_executable("NEXT.COM", None));
+    set_dta(&mut cpu);
+    set_dsdx_string(&mut cpu, "GAME0.SAV");
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x4E);
+    cpu.bus.log_hook = None;
+    let lines = lines.take();
+    let of = |text: &str| lines.iter().filter(|l| l.contains(text)).count();
+    assert_eq!(of("Pattern='GAME0.SAV'"), 8 + 1, "{lines:?}");
+    assert_eq!(of("Alloc FFFF paras failed"), 8, "{lines:?}");
+    assert_eq!(of("(not logging more)"), 2, "{lines:?}");
+    assert_eq!(of("Pattern='GAME1.SAV'"), 1, "{lines:?}");
+}

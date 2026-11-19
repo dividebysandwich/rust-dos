@@ -1999,6 +1999,7 @@ impl Cpu {
             filename,
             bytes.len()
         ));
+        self.bus.reset_log_limits();
         // A program whose file a game fix patches as it loads
         // (`game_fixes`: Lands of Lore 2's launcher).
         let patched = self.patch_at_load(filename, bytes);
