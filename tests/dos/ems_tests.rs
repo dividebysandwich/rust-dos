@@ -546,3 +546,68 @@ fn windows_takes_the_page_frame_over_and_gives_it_back() {
     rust_dos::interrupts::int2f::handle(&mut cpu);
     assert_eq!(cpu.bus.read_8(FRAME), 0x11);
 }
+
+/// 1830: Railroads & Robber Barons maps four pages at a time with
+/// function 50h, the last two past the end of its handle, many times a
+/// frame, and ignores the 8Ah it gets. Each failing call is logged the
+/// first few times only, the last of them saying so, so a session's log
+/// isn't millions of the same line. Another call, handle or status
+/// still gets its own lines.
+#[test]
+fn a_failure_repeated_many_times_is_logged_a_few_times() {
+    let mut cpu = machine();
+    let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = lines.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        log.borrow_mut().push(line.to_string())
+    }));
+    let handle = allocate(&mut cpu, 2);
+    // Pages 0-3 into physical pages 0-3: the third entry fails.
+    let list: Vec<u8> = (0..4u16)
+        .flat_map(|i| [i.to_le_bytes(), i.to_le_bytes()].concat())
+        .collect();
+    cpu.bus.load_bytes(0x31000, &list);
+    for _ in 0..1000 {
+        cpu.set_ds(0x3100);
+        cpu.set_si(0);
+        cpu.set_cx(4);
+        cpu.set_dx(handle);
+        assert_eq!(ems(&mut cpu, 0x5000), 0x8A);
+    }
+    assert_eq!(map(&mut cpu, handle, 2, 0), 0x8A);
+    let other = allocate(&mut cpu, 2);
+    cpu.set_ds(0x3100);
+    cpu.set_si(0);
+    cpu.set_cx(4);
+    cpu.set_dx(other);
+    assert_eq!(ems(&mut cpu, 0x5000), 0x8A);
+    cpu.bus.log_hook = None;
+    let lines = lines.take();
+    let of = |prefix: &str, dx: u16| {
+        lines
+            .iter()
+            .filter(|l| l.starts_with(prefix) && l.contains(&format!("DX={dx:04X}: status 8A")))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let map_multiple = of("[EMS] AX=5000 ", handle);
+    assert_eq!(map_multiple.len(), 8, "{lines:?}");
+    let last = lines
+        .iter()
+        .filter(|l| l.starts_with("[EMS] AX=5000 "))
+        .nth(7);
+    assert!(
+        last.is_some_and(|l| l.ends_with("(not logging more)")),
+        "{lines:?}"
+    );
+    assert_eq!(
+        of("[EMS] AX=4400 ", handle).len(),
+        1,
+        "another call is logged"
+    );
+    assert_eq!(
+        of("[EMS] AX=5000 ", other).len(),
+        1,
+        "another handle is logged"
+    );
+}

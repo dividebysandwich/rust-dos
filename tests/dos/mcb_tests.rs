@@ -161,6 +161,43 @@ fn free_and_resize_without_arena_header() {
     assert_eq!(chain(&mut cpu), before);
 }
 
+/// MS-DOS's `$DEALLOC` checks only the arena signature, so freeing a
+/// block that is already free succeeds and leaves the chain as it was.
+/// A-10 Tank Killer's PS.EXE does it each time it starts.
+#[test]
+fn free_of_a_free_block_succeeds() {
+    use iced_x86::Register;
+    use rust_dos::cpu::{Cpu, CpuFlags};
+    use rust_dos::interrupts::int21;
+
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    let a = mcb::alloc(&mut cpu.bus, 0x1234, 0x100).unwrap();
+    let b = mcb::alloc(&mut cpu.bus, 0x1234, 0x100).unwrap();
+    mcb::free(&mut cpu.bus, a).unwrap();
+    let chain = |cpu: &mut Cpu| {
+        let chain = walk(&mut cpu.bus);
+        chain
+            .iter()
+            .map(|(s, m)| (*s, m.owner, m.size))
+            .collect::<Vec<_>>()
+    };
+    let before = chain(&mut cpu);
+
+    // A free block before an allocated one, twice, then the last block
+    // ('Z'), which is free.
+    let tail = b + 0x100 + 1;
+    assert!(mcb::read_mcb(&mut cpu.bus, tail - 1).is_free());
+    for seg in [a, a, tail] {
+        cpu.set_es(seg);
+        cpu.set_ax(0x4900);
+        cpu.set_cpu_flag(CpuFlags::CF, true);
+        int21::handle(&mut cpu);
+        assert!(!cpu.get_cpu_flag(CpuFlags::CF), "freeing free {seg:04X}");
+        assert_eq!(cpu.get_reg16(Register::AX), 0);
+        assert_eq!(chain(&mut cpu), before);
+    }
+}
+
 #[test]
 fn free_owned_by_releases_chain_blocks() {
     let mut bus = fresh_bus();

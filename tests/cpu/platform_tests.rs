@@ -222,6 +222,29 @@ fn keyboard_acknowledges_commands() {
 }
 
 #[test]
+fn the_keyboard_id_is_translated_while_the_controller_translates() {
+    let mut cpu = cpu();
+    let identify = |cpu: &mut Cpu| {
+        cpu.bus.io_write(0x60, 0xF2);
+        let mut bytes = Vec::new();
+        while cpu.bus.io_read(0x64) & 0x01 != 0 {
+            bytes.push(cpu.bus.io_read(0x60));
+            // The keyboard's next byte, without waiting for it.
+            cpu.bus.kbc.release();
+        }
+        cpu.set_ax(0x0A00);
+        rust_dos::interrupts::int16::handle(cpu);
+        (bytes, cpu.bx())
+    };
+    // An MF2 keyboard answers ABh 83h, and the 8042 turns the 83h into
+    // 41h while it translates, as it does by default.
+    assert_eq!(identify(&mut cpu), (vec![0xFA, 0xAB, 0x41], 0x41AB));
+    cpu.bus.io_write(0x64, 0x60);
+    cpu.bus.io_write(0x60, 0x01);
+    assert_eq!(identify(&mut cpu), (vec![0xFA, 0xAB, 0x83], 0x83AB));
+}
+
+#[test]
 fn cmos_reports_memory_and_keeps_the_shutdown_byte() {
     let mut bus = Bus::with_memory(PathBuf::from("."), 8);
     let read = |bus: &mut Bus, index: u8| {
@@ -440,6 +463,40 @@ fn f11_and_f12_send_their_make_codes_and_only_the_enhanced_reads_return_them() {
     rust_dos::interrupts::int16::handle(&mut cpu);
     assert_eq!(cpu.ax(), 0x1E61);
     assert!(cpu.bus.keyboard_buffer.is_empty());
+}
+
+#[test]
+fn the_bios_answers_the_keyboard_settings_functions_at_the_dos_prompt() {
+    let mut cpu = cpu();
+    let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = lines.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        log.borrow_mut().push(line.to_string())
+    }));
+
+    // AH=03h, AL=05h: set the typematic rate (BL) and delay (BH), as
+    // 1830's SOUND.EXE does on its way out. Nothing comes back.
+    cpu.set_ax(0x0305);
+    cpu.set_bx(0x0000);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!((cpu.ax(), cpu.bx()), (0x0305, 0x0000));
+    // AH=09h: the functions there are, which the configuration table's
+    // feature byte 2 (bit 6) says to ask for.
+    cpu.set_ax(0x0900);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!(cpu.get_al(), 0x30, "AH=0Ah and AH=10h-12h");
+    // AH=0Ah: the keyboard's ID, an MF2 keyboard behind the translating
+    // controller.
+    cpu.set_ax(0x0A00);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!(cpu.bx(), 0x41AB);
+
+    cpu.bus.log_hook = None;
+    let lines = lines.take();
+    assert!(
+        !lines.iter().any(|l| l.contains("Unhandled INT 16h")),
+        "{lines:?}"
+    );
 }
 
 #[test]
