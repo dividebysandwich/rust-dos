@@ -1,13 +1,12 @@
-//! The metrics of Windows 98 SE's TrueType faces, Arial, Times New Roman
-//! and Courier New, as its GDI measures them, without their outlines.
-//! `truetype.bin` (tools/gen_truetype_metrics.py) has, for each of the
+//! The metrics of the TrueType faces Arial, Times New Roman and Courier
+//! New, without their outlines. `truetype.bin` has, for each of the
 //! twelve fonts (each face regular, bold, italic and bold italic), the
-//! numbers of its TrueType file that the metrics come from, the ascent
-//! and descent in pixels at each pixel size (its VDMX table's), and the
-//! widths Windows 98's rasterizer gives the characters of code pages
-//! 1250 to 1254 and 1257 at the sizes up to 128 pixels where its hinting
-//! moves them off the scaled advance. GDI's text then takes as much room
-//! as on Windows 98, though `font` draws it with the ROM font's glyphs.
+//! font-wide numbers the metrics come from, the ascent and descent in
+//! pixels at each pixel size, and the hinted widths of the characters of
+//! code pages 1250 to 1254 and 1257 at the sizes up to 128 pixels where
+//! they move off the scaled advance. These roughly match the real fonts'
+//! dimensions, so GDI's text takes about as much room as on Windows,
+//! though `font` draws it with the ROM font's glyphs.
 
 use std::sync::OnceLock;
 
@@ -275,9 +274,8 @@ mod tests {
         widths(s, text).iter().sum()
     }
 
-    /// What Windows 98 SE's GetTextMetricsA gives Arial at the sizes
-    /// CyberStorm 2 asks for (lfHeight -13, -16 and -21) and at a
-    /// positive height.
+    /// Arial's metrics at the sizes CyberStorm 2 asks for (lfHeight -13,
+    /// -16 and -21) and at a positive height.
     #[test]
     fn arial_metrics_are_windows_98s() {
         let s = size(style(ARIAL, false, false), -13, 0);
