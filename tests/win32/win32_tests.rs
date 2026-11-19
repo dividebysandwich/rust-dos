@@ -12898,6 +12898,256 @@ fn a_window_that_doesnt_answer_doesnt_stop_the_session_from_ending() {
 }
 
 #[test]
+fn keyboard_and_mouse_hooks_see_input_before_the_program() {
+    // T.EXE hooks its thread's keyboard and mouse (WH_KEYBOARD,
+    // WH_MOUSE), then presses and lets go of A and clicks its window.
+    // As on Windows, each hook is called as the thread takes a message
+    // of its device: the keyboard's with HC_NOREMOVE for a peek that
+    // leaves the key in the queue and HC_ACTION for one that takes it,
+    // and a keyboard hook that returns nonzero throws the key away; the
+    // mouse's with the message and a MOUSEHOOKSTRUCT. (Stratosphere
+    // reads its keys and clicks in play this way.)
+    const WH_KEYBOARD: i32 = 2;
+    const WH_MOUSE: i32 = 7;
+    const HC_NOREMOVE: i32 = 3;
+    const VK_A: i32 = 0x41;
+    const KEYEVENTF_KEYUP: i32 = 2;
+    const WM_KEYDOWN: i32 = 0x0100;
+    const WM_KEYUP: i32 = 0x0101;
+    const WM_LBUTTONDOWN: i32 = 0x0201;
+    const MOUSEEVENTF_LEFTDOWN: i32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: i32 = 0x0004;
+    const HTCLIENT: i32 = 1;
+    const PM_NOREMOVE: i32 = 0;
+    let kernel32 = ["GetCurrentThreadId", "ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "SetFocus",
+        "SetWindowsHookExA",
+        "PeekMessageA",
+        "DispatchMessageA",
+        "SetCursorPos",
+        "keybd_event",
+        "mouse_event",
+    ];
+    // What the hooks and the program saw: the keyboard hook's HC_ACTION
+    // calls at 0xA0, the last key it got at 0xA4, its HC_NOREMOVE calls
+    // at 0xA8; the keys the program got at 0xAC; the MOUSEHOOKSTRUCT of
+    // WM_LBUTTONDOWN at 0xB0; the clicks the program got at 0x80. A MSG
+    // at 0xC0.
+    let data = child_data(&[(0x10, "Static")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        let mut keyboard = a.create_label();
+        let mut mouse = a.create_label();
+        a.jmp(start)?;
+
+        // The keyboard hook: it throws every key away that is taken.
+        a.set_label(&mut keyboard)?;
+        let mut action = a.create_label();
+        let mut out = a.create_label();
+        a.cmp(dword_ptr(esp + 4), HC_NOREMOVE)?;
+        a.jne(action)?;
+        a.inc(dword_ptr(l.at(0xA8)))?;
+        a.jmp(out)?;
+        a.set_label(&mut action)?;
+        a.cmp(dword_ptr(esp + 4), 0)?;
+        a.jne(out)?;
+        a.inc(dword_ptr(l.at(0xA0)))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(l.at(0xA4)), eax)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)?;
+        a.set_label(&mut out)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+
+        // The mouse hook: it keeps WM_LBUTTONDOWN's MOUSEHOOKSTRUCT.
+        a.set_label(&mut mouse)?;
+        let mut pass = a.create_label();
+        a.cmp(dword_ptr(esp + 4), 0)?;
+        a.jne(pass)?;
+        a.cmp(dword_ptr(esp + 8), WM_LBUTTONDOWN)?;
+        a.jne(pass)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        for k in 0..4i32 {
+            a.mov(ecx, dword_ptr(eax + 4 * k))?;
+            a.mov(dword_ptr(l.at((0xB0 + 4 * k) as u32)), ecx)?;
+        }
+        a.set_label(&mut pass)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+
+        a.set_label(&mut start)?;
+        a.xor(ebx, ebx)?;
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, class, style, 0, 0, 200, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.push(esi)?;
+        a.call(f("SetFocus"))?;
+        pump(a, l, f, 0xC0)?;
+        a.call(f("GetCurrentThreadId"))?;
+        a.mov(edi, eax)?;
+        for (kind, proc) in [(WH_KEYBOARD, keyboard), (WH_MOUSE, mouse)] {
+            a.push(edi)?;
+            a.push(0)?;
+            push_label(a, proc)?;
+            a.push(kind)?;
+            a.call(f("SetWindowsHookExA"))?;
+        }
+        for flags in [0, KEYEVENTF_KEYUP] {
+            push_args(a, &[VK_A, 0, flags, 0])?;
+            a.call(f("keybd_event"))?;
+        }
+        push_args(a, &[50, 25])?;
+        a.call(f("SetCursorPos"))?;
+        for flags in [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP] {
+            push_args(a, &[flags, 0, 0, 0, 0])?;
+            a.call(f("mouse_event"))?;
+        }
+        let msg = l.at(0xC0) as i32;
+        push_args(a, &[msg, 0, 0, 0, PM_NOREMOVE])?;
+        a.call(f("PeekMessageA"))?;
+        let mut next = a.create_label();
+        let mut key = a.create_label();
+        let mut done = a.create_label();
+        a.set_label(&mut next)?;
+        push_args(a, &[msg, 0, 0, 0, PM_REMOVE])?;
+        a.call(f("PeekMessageA"))?;
+        a.test(eax, eax)?;
+        a.je(done)?;
+        a.mov(eax, dword_ptr(l.at(0xC4)))?;
+        a.cmp(eax, WM_KEYDOWN)?;
+        a.je(key)?;
+        a.cmp(eax, WM_KEYUP)?;
+        a.je(key)?;
+        a.cmp(eax, WM_LBUTTONDOWN)?;
+        a.jne(next)?;
+        a.inc(dword_ptr(l.at(0x80)))?;
+        a.jmp(next)?;
+        a.set_label(&mut key)?;
+        a.inc(dword_ptr(l.at(0xAC)))?;
+        a.jmp(next)?;
+        a.set_label(&mut done)?;
+        // Both keys went to the hook and none to the program.
+        a.cmp(dword_ptr(l.at(0xA0)), 2)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(l.at(0xA4)), VK_A)?;
+        bit_if(a, eq, 1)?;
+        a.cmp(dword_ptr(l.at(0xA8)), 0)?;
+        bit_if(a, ne, 2)?;
+        a.cmp(dword_ptr(l.at(0xAC)), 0)?;
+        bit_if(a, eq, 3)?;
+        // The click: its point on the screen, its window and HTCLIENT,
+        // and the program got it.
+        a.mov(eax, dword_ptr(l.at(0xB4)))?;
+        a.shl(eax, 16)?;
+        a.or(eax, dword_ptr(l.at(0xB0)))?;
+        a.cmp(eax, 25 << 16 | 50)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xB8)), esi)?;
+        bit_if(a, eq, 5)?;
+        a.cmp(dword_ptr(l.at(0xBC)), HTCLIENT)?;
+        bit_if(a, eq, 6)?;
+        a.cmp(dword_ptr(l.at(0x80)), 1)?;
+        bit_if(a, eq, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("input_hooks", &[("T.EXE", parent)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn a_keyboard_hook_that_peeks_with_the_programs_msg_doesnt_change_its_key() {
+    // T.EXE's keyboard hook peeks at the queue with the MSG the program
+    // takes its messages with, as a hook that reads a global MSG may.
+    // The program still gets A going down first: Windows fills the MSG
+    // of GetMessageA or PeekMessageA once the hooks have let the message
+    // through.
+    const WH_KEYBOARD: i32 = 2;
+    const VK_A: i32 = 0x41;
+    const KEYEVENTF_KEYUP: i32 = 2;
+    const WM_KEYDOWN: i32 = 0x0100;
+    const WM_KEYUP: i32 = 0x0101;
+    const PM_NOREMOVE: i32 = 0;
+    let kernel32 = ["GetCurrentThreadId", "ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "SetFocus",
+        "SetWindowsHookExA",
+        "PeekMessageA",
+        "DispatchMessageA",
+        "keybd_event",
+    ];
+    // The first key message the program got at 0xA0, its wParam at
+    // 0xA4. A MSG at 0xC0.
+    let data = child_data(&[(0x10, "Static")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let msg = l.at(0xC0) as i32;
+        let mut start = a.create_label();
+        let mut keyboard = a.create_label();
+        a.jmp(start)?;
+
+        a.set_label(&mut keyboard)?;
+        push_args(a, &[msg, 0, 0, 0, PM_NOREMOVE])?;
+        a.call(f("PeekMessageA"))?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+
+        a.set_label(&mut start)?;
+        a.xor(ebx, ebx)?;
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, class, style, 0, 0, 200, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.push(eax)?;
+        a.call(f("SetFocus"))?;
+        pump(a, l, f, 0xC0)?;
+        a.call(f("GetCurrentThreadId"))?;
+        a.push(eax)?;
+        a.push(0)?;
+        push_label(a, keyboard)?;
+        a.push(WH_KEYBOARD)?;
+        a.call(f("SetWindowsHookExA"))?;
+        for flags in [0, KEYEVENTF_KEYUP] {
+            push_args(a, &[VK_A, 0, flags, 0])?;
+            a.call(f("keybd_event"))?;
+        }
+        let mut next = a.create_label();
+        let mut key = a.create_label();
+        let mut done = a.create_label();
+        a.set_label(&mut next)?;
+        push_args(a, &[msg, 0, 0, 0, PM_REMOVE])?;
+        a.call(f("PeekMessageA"))?;
+        a.test(eax, eax)?;
+        a.je(done)?;
+        a.mov(eax, dword_ptr(l.at(0xC4)))?;
+        a.cmp(eax, WM_KEYDOWN)?;
+        a.je(key)?;
+        a.cmp(eax, WM_KEYUP)?;
+        a.jne(next)?;
+        a.set_label(&mut key)?;
+        a.mov(dword_ptr(l.at(0xA0)), eax)?;
+        a.mov(eax, dword_ptr(l.at(0xC8)))?;
+        a.mov(dword_ptr(l.at(0xA4)), eax)?;
+        a.set_label(&mut done)?;
+        a.cmp(dword_ptr(l.at(0xA0)), WM_KEYDOWN)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(l.at(0xA4)), VK_A)?;
+        bit_if(a, eq, 1)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("input_hook_peeks", &[("T.EXE", parent)]);
+    assert_eq!(code, 0x03, "the checks that failed: {:02b}", !code & 3);
+}
+
+#[test]
 fn a_click_on_a_window_behind_activates_it_and_is_delivered() {
     // T.EXE's window, with a button, is behind C.EXE's, which it started.
     // A click on the button asks the window with WM_MOUSEACTIVATE, whose
