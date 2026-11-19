@@ -59,6 +59,7 @@ impl Bus {
         if let Some(awe) = &mut self.awe {
             awe.silence();
         }
+        self.reset_adlib_gold();
         self.sync_gus_irq();
         self.clock.schedule(self.next_event());
     }

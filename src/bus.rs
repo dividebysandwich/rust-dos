@@ -18,6 +18,7 @@ mod state;
 mod setup;
 mod drives;
 mod sound;
+mod adlib_gold;
 mod powervr;
 mod verite;
 mod mach64;
@@ -369,6 +370,10 @@ pub struct Bus {
     pub gus: Option<crate::gus::Gus>,
     /// The IRQ the Ultrasound's interrupt line holds up, if any.
     gus_line: Option<u8>,
+    /// The AdLib Gold, if one is installed (`adlibgold`).
+    pub adlib_gold: Option<Box<crate::adlibgold::AdlibGold>>,
+    /// The IRQ the AdLib Gold's interrupt line holds up, if any.
+    adlib_gold_line: Option<u8>,
     /// The AWE32's EMU8000, with a Sound Blaster AWE32.
     pub awe: Option<Box<crate::awe32::Emu8000>>,
     /// The ROM and RAM (KB) an AWE32 gets.
@@ -1736,6 +1741,7 @@ impl Bus {
             self.pit0.next_event(),
             sb,
             gus,
+            self.adlib_gold_next_event(),
             self.voodoo_next_event(),
             self.banshee_next_event(),
             self.powervr_next_event(),
@@ -1772,6 +1778,9 @@ impl Bus {
         }
         if self.gus_next_event().is_some_and(|t| t <= now) {
             self.gus_advance();
+        }
+        if self.adlib_gold_next_event().is_some_and(|t| t <= now) {
+            self.adlib_gold_advance();
         }
         if self.voodoo_next_event().is_some_and(|t| t <= now) {
             self.voodoo_service();
@@ -1922,6 +1931,7 @@ impl Bus {
         let _profile = crate::profile::zone(crate::profile::Zone::AudioSynth);
         self.sb_advance();
         self.gus_advance();
+        self.adlib_gold_advance();
         let rate = crate::opl::RATE as u64;
         let target = crate::timer::mul_div(self.clock.now_ticks(), rate, crate::timer::PIT_HZ);
         // After a long pause (a debugger stop, a slow host) start afresh
@@ -2015,7 +2025,16 @@ impl Bus {
                 self.mixer.add(&mut mix, &mut peaks, Channel::Speaker, (s, s));
             }
             let (ol, or) = self.opl.render();
-            self.mixer.add(&mut mix, &mut peaks, Channel::Fm, (ol as f32 * fl, or as f32 * fr));
+            let fm = (ol as f32 * fl, or as f32 * fr);
+            if let Some(gold) = &mut self.adlib_gold {
+                // The FM goes through the AdLib Gold's mixer and output
+                // stage, with its sampled sound.
+                let (fm, pcm) = gold.render(fm);
+                self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+                self.mixer.add(&mut mix, &mut peaks, Channel::AdlibGold, pcm);
+            } else {
+                self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+            }
             if let Some(sb) = &mut self.sb {
                 // The DAC's level at this frame's time, as the card worked
                 // it out from its own clock (`SoundBlaster::advance`).
@@ -2184,6 +2203,7 @@ impl Bus {
             && !crate::win32::audio_playing(&self.win32)
             && self.gus.as_ref().is_none_or(|g| g.is_idle())
             && self.awe.is_none()
+            && self.adlib_gold.as_ref().is_none_or(|g| g.pcm_quiet() && g.fm_chain_at_rest())
             && self.lpt_dac.is_none()
             && !self.tandy_sound_enabled()
     }
@@ -2767,6 +2787,10 @@ impl Bus {
                 self.speaker_on = gate && data;
             }
 
+            // The AdLib Gold, at 388h unless moved, ahead of the plain
+            // FM ports below.
+            p if self.adlib_gold_claims(p) => self.adlib_gold_write(p, value),
+
             // The FM chip: AdLib ports 388h/389h, and the OPL3's second
             // register bank at 38Ah/38Bh.
             0x388 => {
@@ -2809,8 +2833,11 @@ impl Bus {
             p if crate::dma::Dma::owns(p) => {
                 self.sb_advance();
                 self.gus_advance();
+                self.adlib_gold_advance();
                 self.dma.write(p, value);
                 self.sb_dma_write();
+                // An unmasked channel may fill the MMA's FIFOs at once.
+                self.adlib_gold_advance();
                 self.clock.schedule(self.next_event());
             }
 
@@ -3107,6 +3134,8 @@ impl Bus {
             0x71 => self.cmos.read_register(),
             0x92 => (self.a20() as u8) << 1,
 
+            p if self.adlib_gold_claims(p) => self.adlib_gold_read(p),
+
             // The FM chip's status register: timer flags, which programs
             // poll to detect an AdLib.
             0x388 | 0x38A => self.opl.read_status(self.clock.now_micros()),
@@ -3125,6 +3154,7 @@ impl Bus {
             p if crate::dma::Dma::owns(p) => {
                 self.sb_advance();
                 self.gus_advance();
+                self.adlib_gold_advance();
                 let value = self.dma.read(p);
                 self.clock.schedule(self.next_event());
                 value

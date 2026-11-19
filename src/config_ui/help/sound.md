@@ -45,6 +45,12 @@ The chip that plays the music of Sound Blaster and AdLib games.
 AdLib and first Sound Blasters, for the few games that sound wrong on an
 OPL3.
 
+**AdLib Gold** is AdLib's own card: an OPL3 with 12-bit digital sound
+and a surround module, which a few games offer (The Jungle Book, Dune).
+Its port shows with it, 388h unless the configuration file moves it
+(`adlibgoldbase`). Choose *AdLib Gold* in a game's setup only with it
+here; most of these games play as well on the Sound Blaster.
+
 # Gravis Ultrasound {#gus}
 
 A second sound card with wavetable music, which many demos and some games

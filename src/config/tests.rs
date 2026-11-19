@@ -732,7 +732,7 @@ fn mixer_settings() {
     assert!(config.warnings[1].starts_with("line 6: unknown setting 'bass'"), "{:?}", config.warnings);
     let mixer = Settings::from_config(&config).mixer;
     let levels = Channel::ALL.map(|channel| mixer.level(channel));
-    assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100, 100, 100, 100]);
+    assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100, 100, 100, 100, 100]);
     assert!(mixer.speaker_filter && mixer.sb_coupling);
     assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Auto, ReverbPreset::Off, ChorusPreset::Off));
 
@@ -860,6 +860,8 @@ fn changed_settings() -> Settings {
         sc55roms: Some(PathBuf::from("/home/u/sc55")),
         sc55model: "mk2".to_string(),
         midiport: "FLUID".to_string(),
+        adlibgold: crate::adlibgold::AdlibGoldConfig { base: 0x380, irq: 5, dma: 3, surround: false },
+        adlibgold_installed: true,
         lpt_dac: LptDacType::Disney,
         tandy: crate::sn76489::TandySound::On,
         pit2_gate_at_start: true,

@@ -357,6 +357,11 @@ pub struct SoundConfig {
     /// The host's MIDI port for `midisynth=host`: a part of its name or its
     /// number; empty for the first.
     pub midiport: String,
+    /// The AdLib Gold's resources (`adlibgoldbase`, `adlibgoldirq`,
+    /// `adlibgolddma`, `adlibgoldsurround`), and whether there is one
+    /// (`adlibgold`).
+    pub adlibgold: crate::adlibgold::AdlibGoldConfig,
+    pub adlibgold_installed: bool,
     /// The Covox or Disney Sound Source on LPT1 (`lpt_dac`).
     pub lpt_dac: LptDacType,
     /// The Tandy's and PCjr's sound chip (`tandy`).
@@ -397,6 +402,8 @@ impl Default for SoundConfig {
             sc55roms: None,
             sc55model: "auto".to_string(),
             midiport: String::new(),
+            adlibgold: crate::adlibgold::AdlibGoldConfig::default(),
+            adlibgold_installed: false,
             lpt_dac: LptDacType::None,
             tandy: crate::sn76489::TandySound::Auto,
             pit2_gate_at_start: false,
@@ -415,11 +422,22 @@ impl SoundConfig {
         self.gus.enabled.then(|| self.gus.clone())
     }
 
+    /// The AdLib Gold to install, if any.
+    pub fn adlib_gold(&self) -> Option<crate::adlibgold::AdlibGoldConfig> {
+        self.adlibgold_installed.then_some(self.adlibgold)
+    }
+
+    /// Whether the FM chip is an OPL3: as `opl` says, and always with an
+    /// AdLib Gold, whose chip it is.
+    pub fn fm_is_opl3(&self) -> bool {
+        self.opl3 || self.adlibgold_installed
+    }
+
     /// Problems between settings, once the section is read: an Ultrasound
     /// on the Sound Blaster's ports is left out; shared IRQs and DMA
     /// channels only work while programs use one card at a time.
     pub fn check(&mut self) -> Vec<String> {
-        let mut warnings = Vec::new();
+        let mut warnings = self.check_adlib_gold();
         let Some(sb) = self.card() else { return warnings };
         if !self.gus.enabled {
             return warnings;
@@ -437,6 +455,29 @@ impl SoundConfig {
         }
         if self.gus.dma == sb.dma8 || (sb.model.is_sb16() && self.gus.dma == sb.dma16) {
             warnings.push(format!("[sound]: the Ultrasound and the Sound Blaster share DMA {}", self.gus.dma));
+        }
+        warnings
+    }
+
+    /// An AdLib Gold on another card's ports is left out. Its IRQ and DMA
+    /// channel are those of the Sound Blaster unless moved, which works
+    /// while programs use one card at a time, as on a real PC.
+    fn check_adlib_gold(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let Some(gold) = self.adlib_gold() else { return warnings };
+        let ports = gold.base..gold.base + 8;
+        let mut taken = vec![("the MPU-401", 0x330..0x332)];
+        if let Some(sb) = self.card() {
+            taken.push(("the Sound Blaster", sb.base..sb.base + 0x10));
+        }
+        if self.gus.enabled {
+            taken.push(("the Ultrasound", self.gus.base + 0x100..self.gus.base + 0x108));
+            taken.push(("the Ultrasound", self.gus.base..self.gus.base + 0x10));
+        }
+        if let Some((name, _)) = taken.iter().find(|(_, r)| r.start < ports.end && ports.start < r.end) {
+            warnings.push(format!("[sound]: adlibgoldbase {:X} is on {}'s ports; there is no AdLib Gold", gold.base, name));
+            self.adlibgold_installed = false;
+            return warnings;
         }
         warnings
     }
@@ -572,6 +613,34 @@ impl SoundConfig {
             "tandy" => {
                 self.tandy = crate::sn76489::TandySound::parse(value)
                     .ok_or_else(|| format!("invalid tandy '{}' (auto, on or off)", value))?;
+            }
+            "adlibgold" => {
+                self.adlibgold_installed =
+                    parse_bool(value).ok_or_else(|| format!("invalid adlibgold '{}' (true or false)", value))?;
+            }
+            "adlibgoldbase" => {
+                self.adlibgold.base = u16::from_str_radix(value.trim_start_matches("0x"), 16)
+                    .ok()
+                    .filter(|&b| crate::adlibgold::AdlibGoldConfig::valid_base(b))
+                    .ok_or_else(|| format!("invalid adlibgoldbase '{}' (200 to 3F8 in steps of 8, hex)", value))?;
+            }
+            "adlibgoldirq" => {
+                self.adlibgold.irq = value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|&i| crate::adlibgold::AdlibGoldConfig::valid_irq(i))
+                    .ok_or_else(|| format!("invalid adlibgoldirq '{}' (3, 4, 5 or 7)", value))?;
+            }
+            "adlibgolddma" => {
+                self.adlibgold.dma = value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|&d| crate::adlibgold::AdlibGoldConfig::valid_dma(d))
+                    .ok_or_else(|| format!("invalid adlibgolddma '{}' (1 or 3)", value))?;
+            }
+            "adlibgoldsurround" => {
+                self.adlibgold.surround =
+                    parse_bool(value).ok_or_else(|| format!("invalid adlibgoldsurround '{}' (true or false)", value))?;
             }
             "lpt_dac" => {
                 self.lpt_dac = LptDacType::parse(value)

@@ -8,6 +8,7 @@
 #[path = "../common/cdimage/mod.rs"]
 mod cdimage;
 
+mod adlib_gold_tests;
 mod ata_tests;
 mod awe32_tests;
 mod bus_tests;

@@ -464,6 +464,32 @@ fn main_code(a: &mut CodeAssembler, audio_start: u32) -> Asm {
         opl(a, reg, value)?;
     }
 
+    // The AdLib Gold: its output stage in spatial stereo, and sampling
+    // channel 0 playing what the CPU puts in its FIFO, without the
+    // interrupt and the DMA, which are the Sound Blaster's IRQ 7 and DMA 1.
+    for (port, value) in [
+        (0x38A, 0xFF),
+        (0x38A, 0x13),
+        (0x38B, 0x00),
+        (0x38A, 0x14),
+        (0x38B, 0x00),
+        (0x38A, 0x08),
+        (0x38B, 0xDE),
+        (0x38A, 0xFE),
+        (0x38C, 0x09),
+        (0x38D, 0x80),
+        (0x38D, 0x00),
+        (0x38C, 0x0C),
+        (0x38D, 0x02),
+        (0x38C, 0x0A),
+        (0x38D, 0xFF),
+        (0x38C, 0x09),
+        (0x38D, 0x36),
+        (0x38D, 0x37),
+    ] {
+        outb(a, port, value)?;
+    }
+
     // The AWE32's sample counter.
     a.mov(dx, 0xE22u32)?;
     a.mov(ax, 0x3Bu32)?;
@@ -900,6 +926,11 @@ fn main_code(a: &mut CodeAssembler, audio_start: u32) -> Asm {
     store(a, 59, ax)?;
     inb(a, 0x388)?;
     store(a, 60, ax)?;
+    // Two samples into the AdLib Gold's FIFO, and its status.
+    outb(a, 0x38C, 0x0B)?;
+    outb(a, 0x38D, 0x40)?;
+    outb(a, 0x38D, 0xC0)?;
+    inb(a, 0x38C)?;
     a.mov(dx, 0xE22u32)?;
     a.mov(ax, 0x3Bu32)?;
     a.out(dx, ax)?;
@@ -1051,6 +1082,7 @@ fn settings(dir: &Path) -> rust_dos::config::Settings {
     s.sound.sb.model = rust_dos::sb::SbModel::Awe32;
     s.sound.midisynth = rust_dos::config::MidiSynth::None;
     s.sound.lpt_dac = rust_dos::lpt_dac::LptDacType::Disney;
+    s.sound.adlibgold_installed = true;
     s.network.ne2000 = true;
     s.network.ipx = rust_dos::net::IpxMode::On;
     s.voodoo.enabled = true;
@@ -1503,6 +1535,8 @@ const SECTION_FIELDS: &[(&str, &str)] = &[
     ("serial", "SER"),
     ("awe", "AWE"),
     ("isapnp", "PNP"),
+    ("adlib_gold", "AGLD"),
+    ("adlib_gold_line", "AGLD"),
     ("vfx1", "VFX1"),
     ("win32", "W32"),
     ("frame_cap", "PACE"),

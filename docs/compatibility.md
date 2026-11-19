@@ -90,6 +90,10 @@ that names the game, its settings and what happened.
 * **Doom and Heretic** over a LAN or a serial line:
   [playing over a LAN](../CONFIGURATION.md#playing-over-a-lan) and
   [serial and modem games](../CONFIGURATION.md#serial-and-modem-games).
+* **The Jungle Book** (Virgin, 1994) on the AdLib Gold
+  (`adlibgold=true`): its setup's port is the card's sample port, the
+  card's base + 4, so a card at 388h is `38C`. The 380 it offers is a
+  card at 37Ch.
 * **King's Quest, Ultima and other early CGA games**: their composite
   colours need `machine=cga`; `composite` and `composite_era` keep their
   defaults, `auto` and `old`

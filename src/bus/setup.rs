@@ -129,6 +129,8 @@ impl Bus {
             mpu: crate::mpu401::Mpu401::new(),
             gus: Some(crate::gus::Gus::new(crate::gus::GusConfig::default(), 0)),
             gus_line: None,
+            adlib_gold: None,
+            adlib_gold_line: None,
             awe: None,
             awe_rom: std::sync::Arc::from([]),
             awe_ram_kb: crate::awe32::DEFAULT_RAM_KB,

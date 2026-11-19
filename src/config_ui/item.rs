@@ -946,7 +946,10 @@ impl Item {
             },
             Awe32Download => String::new(),
             Awe32Ram => ram_size(s.sound.awe32ram),
-            Opl => if s.sound.opl3 { "OPL3" } else { "OPL2" }.to_string(),
+            Opl => match s.sound.adlib_gold() {
+                Some(gold) => format!("AdLib Gold {:X}h", gold.base),
+                None => if s.sound.opl3 { "OPL3" } else { "OPL2" }.to_string(),
+            },
             Gus => on_off(gus.enabled),
             GusBase => format!("{:X}h", gus.base),
             GusIrq => gus.irq.to_string(),
