@@ -599,14 +599,10 @@ pub fn change_display_settings(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(set_display_mode(cpu, Some(mode)))
 }
 
-/// GetProcessWindowStation: the one window station.
-pub fn get_process_window_station(_cpu: &mut Cpu, _args: &[u32]) -> Option<u32> {
-    Some(0x0030)
-}
-
-/// GetThreadDesktop(tid): the one desktop.
+/// GetThreadDesktop(tid): the handle Windows 98's USER32 gives for any
+/// thread, which no other function takes.
 pub fn get_thread_desktop(_cpu: &mut Cpu, _args: &[u32]) -> Option<u32> {
-    Some(0x0034)
+    Some(0x1234_5678)
 }
 
 #[cfg(test)]
