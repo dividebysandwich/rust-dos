@@ -5,6 +5,9 @@ const BDA_SHIFT_FLAGS: usize = 0x0417;
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
+    if keyboard_settings(cpu, ah) {
+        return;
+    }
     if crate::keyboard::bios_keystrokes(&cpu.bus) {
         return booted(cpu, ah);
     }
@@ -89,8 +92,6 @@ pub fn handle(cpu: &mut Cpu) {
             }
         }
 
-        0x03 | 0x09 | 0x0A => keyboard_settings(cpu, ah),
-
         _ => {
             cpu.bus
                 .log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}", ah));
@@ -99,18 +100,22 @@ pub fn handle(cpu: &mut Cpu) {
 }
 
 /// The functions about the keyboard itself, which an AT BIOS with an MF2
-/// keyboard has, booted or not.
-fn keyboard_settings(cpu: &mut Cpu, ah: u8) {
+/// keyboard has, booted or not, the same way. False for the others.
+fn keyboard_settings(cpu: &mut Cpu, ah: u8) -> bool {
     match ah {
-        // Set the typematic rate and delay: the host's keyboard repeats,
-        // so there is nothing to set and nothing to return.
+        // Set the typematic rate and delay. The keyboard controller
+        // takes the rate a program sends to the keyboard (F3h) and
+        // keeps nothing of it, and keys repeat as the host's do
+        // (#1486), so there is nothing to set and nothing to return.
         0x03 => {}
-        // The functions there are: AH=0Ah and 10h-12h.
+        // The functions there are: AH=0Ah and 10h-12h, and none of
+        // AH=03h's subfunctions, as Bochs' BIOS returns.
         0x09 => cpu.set_reg8(iced_x86::Register::AL, 0x30),
-        // The keyboard's ID: an MF2 keyboard, translated.
-        0x0A => cpu.set_bx(0x41AB),
-        _ => unreachable!("not a keyboard settings function: {ah:02X}"),
+        // The keyboard's ID, as the identify command returns it.
+        0x0A => cpu.set_bx(cpu.bus.kbc.keyboard_id()),
+        _ => return false,
     }
+    true
 }
 
 /// Whether only the enhanced keyboard's functions (AH=10h and 11h) return
@@ -180,7 +185,6 @@ fn booted(cpu: &mut Cpu, ah: u8) {
             let full = !BiosBuffer::push(&mut cpu.bus, key);
             cpu.set_reg8(iced_x86::Register::AL, full as u8);
         }
-        0x03 | 0x09 | 0x0A => keyboard_settings(cpu, ah),
         _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}", ah)),
     }
 }

@@ -222,6 +222,29 @@ fn keyboard_acknowledges_commands() {
 }
 
 #[test]
+fn the_keyboard_id_is_translated_while_the_controller_translates() {
+    let mut cpu = cpu();
+    let mut identify = |cpu: &mut Cpu| {
+        cpu.bus.io_write(0x60, 0xF2);
+        let mut bytes = Vec::new();
+        while cpu.bus.io_read(0x64) & 0x01 != 0 {
+            bytes.push(cpu.bus.io_read(0x60));
+            // The keyboard's next byte, without waiting for it.
+            cpu.bus.kbc.release();
+        }
+        cpu.set_ax(0x0A00);
+        rust_dos::interrupts::int16::handle(cpu);
+        (bytes, cpu.bx())
+    };
+    // An MF2 keyboard answers ABh 83h, and the 8042 turns the 83h into
+    // 41h while it translates, as it does by default.
+    assert_eq!(identify(&mut cpu), (vec![0xFA, 0xAB, 0x41], 0x41AB));
+    cpu.bus.io_write(0x64, 0x60);
+    cpu.bus.io_write(0x60, 0x01);
+    assert_eq!(identify(&mut cpu), (vec![0xFA, 0xAB, 0x83], 0x83AB));
+}
+
+#[test]
 fn cmos_reports_memory_and_keeps_the_shutdown_byte() {
     let mut bus = Bus::with_memory(PathBuf::from("."), 8);
     let read = |bus: &mut Bus, index: u8| {
