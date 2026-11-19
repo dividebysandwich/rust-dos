@@ -106,6 +106,10 @@ const ETO_OPAQUE: u32 = 2;
 const ETO_CLIPPED: u32 = 4;
 
 const RASTER_FONTTYPE: u32 = 1;
+const TRUETYPE_FONTTYPE: u32 = 4;
+/// TEXTMETRIC's tmPitchAndFamily bits of a TrueType font.
+const TMPF_VECTOR: u8 = 0x02;
+const TMPF_TRUETYPE: u8 = 0x04;
 
 /// The character sets a face has.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1107,6 +1111,9 @@ pub struct Realized {
     /// The glyphs are leaned right as they are drawn: an italic font made
     /// from an upright one.
     lean: bool,
+    /// Drawn from a TrueType file's outlines: TEXTMETRIC's
+    /// tmPitchAndFamily has TMPF_VECTOR and TMPF_TRUETYPE.
+    truetype: bool,
     pub underline: bool,
     pub strike: bool,
     pub charset: u8,
@@ -1246,6 +1253,7 @@ fn realize(log: &Log, sys: &System, device_height: i32, device_width: i32) -> Re
         weight,
         italic: log.italic,
         lean: log.italic,
+        truetype: false,
         underline: log.underline,
         strike: log.strike,
         charset,
@@ -1323,6 +1331,7 @@ fn realize_truetype(
         weight,
         italic: log.italic,
         lean: log.italic,
+        truetype: false,
         underline: log.underline,
         strike: log.strike,
         charset,
@@ -1420,6 +1429,7 @@ fn realize_file(
         weight: if made_bold { 700 } else { f.weight },
         italic: log.italic,
         lean: log.italic,
+        truetype: false,
         underline: log.underline || f.underline,
         strike: log.strike || f.strike,
         charset: f.charset,
@@ -1491,28 +1501,41 @@ fn added_truetype(files: &[AddedFile], log: &Log, sys: &System) -> Option<(Rc<Tt
         .filter(|t| t.face.eq_ignore_ascii_case(&log.face))
         .min_by_key(|t| ((t.weight - weight).abs(), t.italic != log.italic))?
         .clone();
+    let charset = truetype_charset(&t, log.charset, sys);
+    Some((t, charset))
+}
+
+/// The character sets of the TrueType font `t`: SYMBOL_CHARSET alone
+/// for a symbol font, else those its code page bits have, in the order
+/// of `nls::CHARSETS` (ANSI_CHARSET first), and ANSI_CHARSET for a font
+/// whose bits have none GDI knows.
+fn truetype_charsets(t: &Ttf) -> Vec<u8> {
     if t.symbol {
-        return Some((t, SYMBOL_CHARSET));
+        return vec![SYMBOL_CHARSET];
     }
-    let has = |c: u8| {
-        t.code_pages == 0 && c == ANSI_CHARSET
-            || nls::charset(c).is_some_and(|c| t.code_pages & c.csb != 0)
-    };
-    let want = if log.charset == DEFAULT_CHARSET {
+    let sets: Vec<u8> = nls::CHARSETS
+        .iter()
+        .filter(|c| t.code_pages & c.csb != 0)
+        .map(|c| c.charset)
+        .collect();
+    if sets.is_empty() {
+        vec![ANSI_CHARSET]
+    } else {
+        sets
+    }
+}
+
+/// The character set the TrueType font `t` is realized in for a logical
+/// font asking for `asked`: the one asked for (the system locale's for
+/// DEFAULT_CHARSET) where the font has it, else its first.
+fn truetype_charset(t: &Ttf, asked: u8, sys: &System) -> u8 {
+    let sets = truetype_charsets(t);
+    let want = if asked == DEFAULT_CHARSET {
         sys.charset
     } else {
-        log.charset
+        asked
     };
-    let charset = if has(want) {
-        want
-    } else {
-        [ANSI_CHARSET]
-            .into_iter()
-            .chain(nls::CHARSETS.iter().map(|c| c.charset))
-            .find(|&c| has(c))
-            .unwrap_or(ANSI_CHARSET)
-    };
-    Some((t, charset))
+    if sets.contains(&want) { want } else { sets[0] }
 }
 
 /// The TrueType fonts of the files added, those of a file added more
@@ -1555,6 +1578,7 @@ fn realize_added_truetype(
         weight: if made_bold { 700 } else { t.weight },
         italic: log.italic || t.italic,
         lean: log.italic && !t.italic,
+        truetype: true,
         underline: log.underline,
         strike: log.strike,
         charset,
@@ -1718,7 +1742,10 @@ fn text_metric(dc: &Dc, f: &Realized) -> Vec<u8> {
         b.extend_from_slice(&v.to_le_bytes());
     }
     // TMPF_FIXED_PITCH says the pitch is variable.
-    let pitch = (f.pitch_family & FF_FAMILY) | (f.pitch_family & 3 == VARIABLE_PITCH) as u8;
+    let mut pitch = (f.pitch_family & FF_FAMILY) | (f.pitch_family & 3 == VARIABLE_PITCH) as u8;
+    if f.truetype {
+        pitch |= TMPF_VECTOR | TMPF_TRUETYPE;
+    }
     let [first, last, default, break_char] = f.chars;
     b.extend_from_slice(&[
         first,
@@ -2270,7 +2297,7 @@ pub fn get_rasterizer_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// be read. The raster fonts of a .FON or .FNT file are drawn, listed
 /// with the system's faces and chosen by their face's name, and so are
 /// the TrueType fonts of a .TTF or .TTC file (`ttf`), by their family's
-/// name, though they aren't listed. A file of other fonts counts as one
+/// name. A file of other fonts counts as one
 /// font none of whose faces is drawn: a font that asks for its face
 /// gets one GDI has.
 pub fn add_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -2350,6 +2377,54 @@ fn added_items(cpu: &mut Cpu, family: Option<&str>, charset: u8) -> Vec<u32> {
     items
 }
 
+/// An enumeration's item for the TrueType font `i` of those files added
+/// (`added_fonts_truetype`) in a character set: ADDED_TRUETYPE | i << 8
+/// | charset.
+const ADDED_TRUETYPE: u32 = 1 << 24;
+
+/// The enumeration's items of the TrueType fonts files added, as Windows
+/// lists TrueType families: with no `family` each family once, with one
+/// each font (style) of that family. `each_set` lists each in every
+/// character set it has that `charset` lets through (DEFAULT_CHARSET
+/// any), as EnumFontFamiliesEx does; without it each is listed once, in
+/// the character set a logical font of DEFAULT_CHARSET gets, as
+/// EnumFontFamilies does.
+fn added_truetype_items(
+    files: &[AddedFile],
+    sys: &System,
+    family: Option<&str>,
+    charset: u8,
+    each_set: bool,
+) -> Vec<u32> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut items = Vec::new();
+    for (i, t) in added_fonts_truetype(files).enumerate().take(0xFFFF) {
+        let pick = match family {
+            Some(name) => t.face.eq_ignore_ascii_case(name),
+            None => !seen.iter().any(|s| s.eq_ignore_ascii_case(&t.face)),
+        };
+        if !pick {
+            continue;
+        }
+        let sets = if each_set {
+            truetype_charsets(t)
+                .into_iter()
+                .filter(|&c| charset == DEFAULT_CHARSET || c == charset)
+                .collect()
+        } else {
+            vec![truetype_charset(t, DEFAULT_CHARSET, sys)]
+        };
+        if !sets.is_empty() {
+            seen.push(&t.face);
+        }
+        items.extend(
+            sets.into_iter()
+                .map(|c| ADDED_TRUETYPE | (i as u32) << 8 | c as u32),
+        );
+    }
+    items
+}
+
 /// Scratch space a font enumeration's callback gets: ENUMLOGFONTEXA
 /// and NEWTEXTMETRICEXA.
 const ENUM_SCRATCH: u32 = 188 + 96;
@@ -2396,6 +2471,13 @@ pub fn enum_font_families(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .map(|i| enum_item(i, sys.sets(i)[0]))
         .collect();
     items.extend(added_items(cpu, family.as_deref(), DEFAULT_CHARSET));
+    items.extend(added_truetype_items(
+        &gdi(cpu).font_files,
+        &sys,
+        family.as_deref(),
+        DEFAULT_CHARSET,
+        false,
+    ));
     start_enum(cpu, items, args[2], args[3])
 }
 
@@ -2422,6 +2504,13 @@ pub fn enum_font_families_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .map(|(i, c)| enum_item(i, c))
         .collect();
     items.extend(added_items(cpu, family, log.charset));
+    items.extend(added_truetype_items(
+        &gdi(cpu).font_files,
+        &sys,
+        family,
+        log.charset,
+        true,
+    ));
     start_enum(cpu, items, args[2], args[3])
 }
 
@@ -2433,7 +2522,26 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
     };
     t.set(CB_AT, at as u32 + 1);
     let sys = System::of(cpu);
-    let (mut log_bytes, f) = if item & ADDED_ITEM != 0 {
+    let mut truetype = None;
+    let (mut log_bytes, f) = if item & ADDED_TRUETYPE != 0 {
+        let files = &gdi(cpu).font_files;
+        let Some(t) = added_fonts_truetype(files)
+            .nth((item >> 8 & 0xFFFF) as usize)
+            .cloned()
+        else {
+            return Next::Done(1);
+        };
+        // The font at its default size, as Windows lists a TrueType font;
+        // lfHeight is the cell's height there.
+        let mut b = logfont(0, 0, t.weight, item as u8, t.pitch_family, &t.face);
+        b[20] = t.italic as u8;
+        let Some(f) = realize_added_truetype(files, &Log::of(&b), &sys, 0, 0) else {
+            return Next::Done(1);
+        };
+        b[0..4].copy_from_slice(&f.height.to_le_bytes());
+        truetype = Some(t);
+        (b, f)
+    } else if item & ADDED_ITEM != 0 {
         let Some(font) = added_font(cpu, (item & 0xFFFF) as usize) else {
             return Next::Done(1);
         };
@@ -2462,20 +2570,32 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
         (b, f)
     };
     let charset = f.charset;
-    log_bytes[24] = 1; // OUT_STRING_PRECIS
-    log_bytes[25] = 2; // CLIP_STROKE_PRECIS
-    log_bytes[26] = 2; // PROOF_QUALITY
+    // OUT_STRING_PRECIS, CLIP_STROKE_PRECIS and PROOF_QUALITY for a
+    // raster font; OUT_STROKE_PRECIS, CLIP_STROKE_PRECIS and
+    // DRAFT_QUALITY for a TrueType one.
+    let precision = if truetype.is_some() {
+        [3, 2, 1]
+    } else {
+        [1, 2, 2]
+    };
+    log_bytes[24..27].copy_from_slice(&precision);
     log_bytes[4..8].copy_from_slice(&f.average_width().to_le_bytes());
     let mut elf = log_bytes;
-    let mut full = f.face.as_bytes().to_vec();
+    // A TrueType font's full name and style are its name table's.
+    let mut full = match &truetype {
+        Some(t) => t.full_name.as_bytes().to_vec(),
+        None => f.face.as_bytes().to_vec(),
+    };
     full.resize(64, 0);
+    full[63] = 0;
     elf.extend_from_slice(&full);
-    let mut style = if f.weight >= 600 {
-        b"Bold".to_vec()
-    } else {
-        b"Regular".to_vec()
+    let mut style = match &truetype {
+        Some(t) => t.style.as_bytes().to_vec(),
+        None if f.weight >= 600 => b"Bold".to_vec(),
+        None => b"Regular".to_vec(),
     };
     style.resize(32, 0);
+    style[31] = 0;
     elf.extend_from_slice(&style);
     let mut script = match nls::charset(charset) {
         _ if charset == OEM_CHARSET => b"OEM/DOS".to_vec(),
@@ -2489,29 +2609,37 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
     // NEWTEXTMETRICA starts with a TEXTMETRICA, padding included, so
     // ntmFlags is at 56.
     ntm.resize(TEXTMETRICA_SIZE, 0);
-    // ntmFlags (NTM_REGULAR or NTM_BOLD), ntmSizeEM, ntmCellHeight,
-    // ntmAvgWidth, then the FONTSIGNATURE.
-    let flags: u32 = if f.weight >= 600 { 0x20 } else { 0x40 };
-    for v in [
-        flags,
-        (f.height - f.internal_leading) as u32,
-        f.height as u32,
-        f.average_width() as u32,
-    ] {
+    // ntmFlags (NTM_ITALIC, NTM_BOLD, else NTM_REGULAR), ntmSizeEM,
+    // ntmCellHeight, ntmAvgWidth, then the FONTSIGNATURE. A TrueType
+    // font's sizes are in its design units.
+    let flags: u32 = match (f.italic, f.weight >= 600) {
+        (false, false) => 0x40,
+        (italic, bold) => italic as u32 | (bold as u32) << 5,
+    };
+    let (em, cell, average) = match &truetype {
+        Some(t) => t.design_sizes(),
+        None => (f.height - f.internal_leading, f.height, f.average_width()),
+    };
+    for v in [flags, em as u32, cell as u32, average as u32] {
         ntm.extend_from_slice(&v.to_le_bytes());
     }
     // The FONTSIGNATURE: no Unicode ranges, the face's code pages.
+    let csb = match &truetype {
+        Some(t) if t.code_pages != 0 => t.code_pages,
+        _ => f.csb,
+    };
     ntm.resize(72 + 16, 0);
-    ntm.extend_from_slice(&f.csb.to_le_bytes());
+    ntm.extend_from_slice(&csb.to_le_bytes());
     ntm.resize(96, 0);
+    let font_type = if truetype.is_some() {
+        TRUETYPE_FONTTYPE
+    } else {
+        RASTER_FONTTYPE
+    };
     let s = t.scratch;
     cpu.bus.guest_write_bytes(s, &elf);
     cpu.bus.guest_write_bytes(s + 188, &ntm);
-    Next::call(
-        t.var(CB_PROC),
-        &[s, s + 188, RASTER_FONTTYPE, t.var(CB_PARAM)],
-        1,
-    )
+    Next::call(t.var(CB_PROC), &[s, s + 188, font_type, t.var(CB_PARAM)], 1)
 }
 
 #[cfg(test)]
@@ -2933,6 +3061,53 @@ mod tests {
         let b = realize_added_truetype(&files, &bold, &System::WESTERN, -20, 0).unwrap();
         assert_eq!((b.weight, b.advance(b'A')), (700, 13));
         assert_eq!(b.glyph(b'A').rows[15], (1 << 11) - 1);
+    }
+
+    /// An added TrueType font says it is one in its metrics, and is
+    /// listed as Windows lists TrueType families: each family once
+    /// without a family's name, each of its fonts with one, in each of
+    /// its character sets for EnumFontFamiliesEx.
+    #[test]
+    fn an_added_truetype_font_is_listed_and_says_it_is_one() {
+        let ttf = super::super::ttf::tests::ttf;
+        let fonts = |family: &str, symbol: bool| -> Vec<Rc<Ttf>> {
+            Ttf::fonts_of_file(&ttf(family, symbol))
+                .into_iter()
+                .map(Rc::new)
+                .collect()
+        };
+        let file = |name: &str, truetype| AddedFile {
+            name: name.into(),
+            fonts: Vec::new(),
+            truetype,
+        };
+        let files = [
+            file("A.TTF", fonts("Listed", false)),
+            file("B.TTF", fonts("Listed", false)),
+            file("S.TTF", fonts("Marks", true)),
+        ];
+        let log = Log::of(&logfont(-20, 0, 0, 0, 0, "Listed"));
+        let f = realize_added_truetype(&files, &log, &System::WESTERN, -20, 0).unwrap();
+        let tm = text_metric(&Dc::new(dc::DISPLAY), &f);
+        assert_eq!(
+            tm[51] & (TMPF_VECTOR | TMPF_TRUETYPE),
+            TMPF_VECTOR | TMPF_TRUETYPE
+        );
+        let sys = &System::WESTERN;
+        let item = |i: u32, c: u8| ADDED_TRUETYPE | i << 8 | c as u32;
+        assert_eq!(
+            added_truetype_items(&files, sys, None, DEFAULT_CHARSET, false),
+            [item(0, ANSI_CHARSET), item(2, SYMBOL_CHARSET)]
+        );
+        assert_eq!(
+            added_truetype_items(&files, sys, Some("listed"), DEFAULT_CHARSET, false),
+            [item(0, ANSI_CHARSET), item(1, ANSI_CHARSET)]
+        );
+        assert_eq!(
+            added_truetype_items(&files, sys, None, SYMBOL_CHARSET, true),
+            [item(2, SYMBOL_CHARSET)]
+        );
+        assert!(added_truetype_items(&files, sys, Some("Arial"), DEFAULT_CHARSET, true).is_empty());
     }
 
     /// A symbol font's bytes are its characters F000h up, in

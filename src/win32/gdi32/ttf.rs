@@ -35,6 +35,10 @@ pub struct Ttf {
     pub index: u32,
     /// The family's name, which a logical font asks for.
     pub face: String,
+    /// The font's full name and its style's ("Bold Italic"), which an
+    /// enumeration's ENUMLOGFONT has.
+    pub full_name: String,
+    pub style: String,
     pub weight: i32,
     pub italic: bool,
     /// The font has a symbol cmap (3,0): its characters are bytes, in
@@ -127,6 +131,13 @@ impl Ttf {
         if face.is_empty() {
             return None;
         }
+        let name = |id: StringId| {
+            font.localized_strings(id)
+                .english_or_first()
+                .map(|s| s.to_string())
+        };
+        let full_name = name(StringId::FULL_NAME).unwrap_or_else(|| face.clone());
+        let style = name(StringId::SUBFAMILY_NAME).unwrap_or_else(|| "Regular".to_string());
         let symbol = font.cmap().ok()?.encoding_records().iter().any(|r| {
             r.platform_id() == skrifa::raw::tables::cmap::PlatformId::Windows
                 && r.encoding_id() == 0
@@ -154,6 +165,8 @@ impl Ttf {
         };
         Some(Ttf {
             face,
+            full_name,
+            style,
             index,
             weight: os2.as_ref().map_or(400, |o| o.us_weight_class() as i32),
             italic: os2
@@ -176,6 +189,17 @@ impl Ttf {
             drawn: RefCell::new(HashMap::new()),
             data,
         })
+    }
+
+    /// The em, the cell's height and the average width in the font's
+    /// design units, as NEWTEXTMETRIC's ntmSizeEM, ntmCellHeight and
+    /// ntmAvgWidth have them.
+    pub fn design_sizes(&self) -> (i32, i32, i32) {
+        (
+            self.units_per_em,
+            self.win_ascent + self.win_descent,
+            self.average,
+        )
     }
 
     /// The height in pixels of the font at `ppem` pixels to the em, and
