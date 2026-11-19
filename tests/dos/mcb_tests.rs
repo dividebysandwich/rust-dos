@@ -176,7 +176,10 @@ fn free_of_a_free_block_succeeds() {
     mcb::free(&mut cpu.bus, a).unwrap();
     let chain = |cpu: &mut Cpu| {
         let chain = walk(&mut cpu.bus);
-        chain.iter().map(|(s, m)| (*s, m.owner, m.size)).collect::<Vec<_>>()
+        chain
+            .iter()
+            .map(|(s, m)| (*s, m.owner, m.size))
+            .collect::<Vec<_>>()
     };
     let before = chain(&mut cpu);
 
