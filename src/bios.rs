@@ -575,14 +575,24 @@ pub fn windows_keyboard(bus: &mut Bus, on: bool) {
     write_rom(bus, trap, &code);
 }
 
-/// Put the default vectors back, except those pointing into `keep`
-/// (the memory of resident programs, whose hooks must survive).
+/// Put the default vectors back where they point into memory the shell
+/// takes back: conventional or upper memory outside `keep` (the memory of
+/// resident programs, whose hooks must survive). DOS itself never puts
+/// vectors back when a program ends, only INT 22h-24h from the PSP. The
+/// shell does for these because it clears the memory a program leaves,
+/// and a frontend can stop a program before it unhooks, so such a vector
+/// would call into zeroed or reused memory. A vector that points at the
+/// BIOS's or the video BIOS's ROM still leads to code and stays, as in
+/// DOS: Rob Northen's CDPATCH moves DOS's INT 21h entry (F000:1030) to
+/// INT 6Fh and chains to it from its own INT 21h hook.
 pub fn restore_ivt(bus: &mut Bus, keep: &[std::ops::Range<usize>]) {
+    let upper = crate::mcb::UMB_START as usize * 16..crate::mcb::UMB_END as usize * 16;
     for (vector, &entry) in default_ivt().iter().enumerate() {
         let offset = bus.read_16(vector * 4) as usize;
         let segment = bus.read_16(vector * 4 + 2) as usize;
         let at = (segment << 4) + offset;
-        if keep.iter().any(|range| range.contains(&at)) {
+        let taken_back = at < 0xA0000 || upper.contains(&at);
+        if !taken_back || keep.iter().any(|range| range.contains(&at)) {
             continue;
         }
         bus.write_16(vector * 4, entry as u16);

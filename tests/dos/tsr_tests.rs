@@ -183,6 +183,51 @@ fn tsr_started_from_shell_stays_resident() {
 }
 
 #[test]
+fn a_vector_a_tsr_points_at_a_service_entry_survives_the_shell() {
+    // Rob Northen's CDPATCH hooks INT 21h and moves DOS's entry to INT 6Fh
+    // to chain to it. That entry is in the BIOS ROM, outside the TSR, and
+    // must stay through the shell and the next program.
+    let base = scratch(
+        "chained",
+        &[("TSR.COM", &[0xEB, 0xFE]), ("APP.COM", &[0xEB, 0xFE])],
+    );
+    let mut cpu = Cpu::new(base);
+    cpu.load_shell();
+    let dos = ivt(&cpu, 0x21);
+    let iret = ivt(&cpu, 0x6F);
+    assert_ne!(dos, iret);
+
+    assert!(cpu.load_executable("TSR.COM", None));
+    let tsr = cpu.current_psp;
+    set_ivt(&mut cpu, 0x6F, dos.0, dos.1);
+    set_ivt(&mut cpu, 0x21, tsr, 0x0180);
+    cpu.set_dx(0x20);
+    cpu.set_reg8(Register::AL, 0);
+    int21(&mut cpu, 0x31);
+    cpu.load_shell();
+    assert_eq!(ivt(&cpu, 0x21), (tsr, 0x0180));
+    assert_eq!(ivt(&cpu, 0x6F), dos);
+
+    // A program that ends with a vector into its own memory has it put
+    // back, since the shell takes that memory back. One pointed at the
+    // BIOS's ROM stays as the program left it, as in DOS: here INT 05h
+    // pointed at the video BIOS's entry.
+    assert!(cpu.load_executable("APP.COM", None));
+    assert_eq!(ivt(&cpu, 0x6F), dos);
+    let app = cpu.current_psp;
+    let timer = ivt(&cpu, 0x1C);
+    let video = ivt(&cpu, 0x10);
+    assert_ne!(ivt(&cpu, 0x05), video);
+    set_ivt(&mut cpu, 0x05, video.0, video.1);
+    set_ivt(&mut cpu, 0x1C, app, 0x0100);
+    cpu.set_reg8(Register::AL, 0);
+    int21(&mut cpu, 0x4C);
+    cpu.load_shell();
+    assert_eq!((ivt(&cpu, 0x05), ivt(&cpu, 0x1C)), (video, timer));
+    assert_eq!(ivt(&cpu, 0x6F), dos);
+}
+
+#[test]
 fn tsr_started_from_shell_gives_up_its_ctrl_break_and_critical_error_handlers() {
     // DOS sets INT 22h, 23h and 24h from the PSP for a process that stays
     // resident too, so handlers it pointed into its own memory go: a TSR
