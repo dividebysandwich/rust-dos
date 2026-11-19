@@ -108,11 +108,10 @@ pub fn handle(cpu: &mut Cpu) {
 
             // Its length (8), the model as at F000:FFFE (FCh an AT, FFh a
             // Tandy 1000, FDh a PCjr), submodel 01h, BIOS revision 0, the
-            // features (60h: a real-time clock and a second 8259; 10h: the
-            // keyboard interrupt calls AH=4Fh, as a booted system's does).
+            // features (70h: a real-time clock, a second 8259, and a
+            // keyboard interrupt that calls AH=4Fh).
             let model = cpu.bus.read_8(0xFFFFE);
-            let features = if cpu.bus.boot.is_some() { 0x70 } else { 0x60 };
-            cpu.bus.write_rom(phys_addr, &[0x08, 0x00, model, 0x01, 0x00, features, 0x00, 0x00]);
+            cpu.bus.write_rom(phys_addr, &[0x08, 0x00, model, 0x01, 0x00, 0x70, 0x00, 0x00]);
 
             cpu.set_es(table_seg);
             cpu.set_bx(table_off);

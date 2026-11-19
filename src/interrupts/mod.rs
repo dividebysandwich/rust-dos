@@ -136,6 +136,7 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_MOUSE_CALLBACK_DONE => crate::mouse::clear_callback_busy(&mut cpu.bus),
         crate::bios::SERVICE_KBD_SCAN => crate::keyboard::bios_scan(cpu),
         crate::bios::SERVICE_KBD_PAUSED => crate::keyboard::bios_paused(cpu),
+        crate::bios::SERVICE_KBD_INTERCEPTED => crate::keyboard::bios_intercepted(cpu),
         crate::bios::SERVICE_IPX => crate::net::ipx::api(cpu),
         crate::bios::SERVICE_IPX_ESR => crate::net::ipx::esr(cpu),
         _ => cpu.bus.log_string(&format!(
