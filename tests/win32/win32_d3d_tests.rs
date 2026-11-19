@@ -34,7 +34,7 @@ impl Layout {
     }
 
     /// The import address table slot of the function `index`.
-    fn import(&self, index: usize) -> AsmMemoryOperand {
+    pub(super) fn import(&self, index: usize) -> AsmMemoryOperand {
         dword_ptr(self.iat[index] as u64)
     }
 }

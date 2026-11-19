@@ -326,8 +326,11 @@ const WINDOW_ACTIVATE: u32 = 0;
 const WINDOW_FULLSCREEN: u32 = 1;
 const WINDOW_NOTOPMOST: u32 = 2;
 const WINDOW_EXCLUSIVE: u32 = 3;
+const WINDOW_DEVICE: u32 = 4;
 /// The step of `WINDOW_EXCLUSIVE` after SetActiveWindow.
 const ACTIVATED: u16 = 20;
+/// The step of `WINDOW_DEVICE` after SetForegroundWindow.
+const FOCUSED: u16 = 21;
 
 /// DirectDraw's task on the window of exclusive mode, which returns
 /// DD_OK: SetCooperativeLevel makes it the active one
@@ -349,37 +352,49 @@ const ACTIVATED: u16 = 20;
 /// hidden, the window isn't under the cursor, so the mouse's clicks went
 /// to the desktop and the game's menus didn't answer them.
 ///
-/// Direct3D 8's task has the focus window in `FILTERED`: Direct3D's
-/// procedure is in front of the focus window's on Windows, and while the
-/// device changes its windows it hands the focus window's messages to
-/// DefWindowProc instead of the program's procedure. Wine's d3d8 tests
-/// (test_wndproc) find the program's procedure of the focus window gets
-/// none of them.
+/// Direct3D 8's CreateDevice of full screen first makes the focus window
+/// the foreground one (`WINDOW_DEVICE`, the device window, 0, 0, the
+/// focus window) with SetForegroundWindow. Wine's d3d8 tests
+/// (test_wndproc) find on Windows the focus window sent WM_SETFOCUS by
+/// CreateDevice when another window was the foreground one, and no
+/// message at all when it was already, which SetWindowPos wouldn't
+/// give: it sends WM_WINDOWPOSCHANGING whatever it changes. Then the task
+/// covers the screen with the device window as `WINDOW_FULLSCREEN` does,
+/// with the focus window in `FILTERED`, which Reset's task has from its
+/// start.
 pub fn activate_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
-    let filtered = t.var(FILTERED);
-    let default = user32::address_of("DefWindowProcA");
-    if t.step == 0
-        && filtered != 0
-        && let Some(w) = cpu.bus.win32.user.window_mut(filtered)
-    {
-        let original = std::mem::replace(&mut w.proc, default);
-        t.set(FILTERED + 1, original);
-    }
-    let next = window_step(cpu, t, value);
-    if matches!(next, Next::Done(_)) && filtered != 0 {
-        let original = t.var(FILTERED + 1);
-        match cpu.bus.win32.user.window_mut(filtered) {
-            Some(w) if original != 0 && w.proc == default => w.proc = original,
-            _ => {}
+    match (t.step, t.var(0)) {
+        (0, WINDOW_DEVICE) => {
+            let focus = [t.var(4)];
+            Next::call(user32::address_of("SetForegroundWindow"), &focus, FOCUSED)
         }
+        (FOCUSED, _) => match device_vars(cpu, t.var(1), t.var(4)) {
+            Some(vars) => {
+                t.vars = vars;
+                t.step = 0;
+                window_step(cpu, t, value)
+            }
+            None => Next::Done(DD_OK),
+        },
+        _ => window_step(cpu, t, value),
     }
-    next
 }
 
-/// The variable of `WINDOW_FULLSCREEN` with the window whose messages go
-/// to DefWindowProc while the task runs, 0 for none; the one after it
-/// keeps that window's procedure.
+/// The variable of `WINDOW_FULLSCREEN` with Direct3D 8's focus window,
+/// whose messages DirectDraw's procedure in front of it
+/// (`window_proc`) passes to DefWindowProc while the task runs; 0 for
+/// none.
 const FILTERED: usize = 5;
+
+/// Whether a task of Direct3D 8's device changes its windows with `hwnd`
+/// its focus window (`FILTERED`). The task counts while its call into
+/// the program hasn't returned: one its thread didn't come back from, as
+/// when a window procedure ended the thread, is over.
+fn filtering(cpu: &mut Cpu, hwnd: u32) -> bool {
+    task::any_running(cpu, task::DD_ACTIVATE, |vars| {
+        vars.get(FILTERED) == Some(&hwnd)
+    })
+}
 
 fn window_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
     use user32::window::{
@@ -489,8 +504,25 @@ fn window_proc_address() -> u32 {
 /// DirectDraw's window procedure (hwnd, message, wparam, lparam), in
 /// front of the procedure of the window of exclusive mode: it passes the
 /// messages on to the window's own.
+///
+/// A device of Direct3D 8's in full screen has its DirectDraw object's
+/// exclusive mode on the focus window, so this procedure is Direct3D's
+/// in front of the focus window's from CreateDevice until the device is
+/// released, as Wine's d3d8 tests (test_wndproc) find on Windows. While
+/// the device changes its windows (`activate_step`) it passes the focus
+/// window's messages to DefWindowProc instead, all but
+/// WM_DISPLAYCHANGE, as Wine's wined3d does (`device_process_message`):
+/// test_wndproc finds the program's procedure gets none of the others
+/// on Windows. DefWindowProcA is every window's: Windows 98's USER has
+/// no Unicode windows (RegisterClassW and CreateWindowExW fail there).
 pub fn window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    const WM_DISPLAYCHANGE: u32 = 0x7E;
     let hwnd = args[0];
+    if args[1] != WM_DISPLAYCHANGE && filtering(cpu, hwnd) {
+        let default = user32::address_of("DefWindowProcA");
+        let call = [default, hwnd, args[1], args[2], args[3]];
+        return user32::message::call_window_proc(cpu, &call);
+    }
     let original = state(cpu)
         .objects
         .iter()
@@ -612,22 +644,34 @@ fn window_vars(cpu: &mut Cpu, hwnd: u32, focus: u32, kind: u32) -> Option<Vec<u3
 /// device window `window` is made to cover the screen, and while the
 /// focus window `focus` is the foreground one shown, topmost and not
 /// maximized, as DirectDraw does with its window of exclusive mode
-/// (`activate_step`). Wine's d3d8 tests (test_window_style) find the
-/// device window's rectangle the screen's on Windows after CreateDevice,
-/// shown and topmost, and the focus window's style and rectangle as they
+/// (`activate_step`). CreateDevice (`activate`) first activates the
+/// focus window. Wine's d3d8 tests (test_window_style) find the device
+/// window's rectangle the screen's on Windows after CreateDevice, shown
+/// and topmost, and the focus window's style and rectangle as they
 /// were; test_wndproc has the device window sent WM_WINDOWPOSCHANGING,
 /// WM_MOVE and WM_SIZE. A game that made its window at another size
 /// before it took a larger mode has the mouse's messages of the whole
 /// screen only then. DD_OK.
-pub fn cover_screen_with(cpu: &mut Cpu, window: u32, focus: u32) -> Option<u32> {
-    match window_vars(cpu, window, focus, WINDOW_FULLSCREEN) {
-        Some(mut vars) => {
-            vars.resize(FILTERED, 0);
-            vars.push(cpu.bus.win32.user.top_level(focus));
-            task::start(cpu, task::DD_ACTIVATE, vars, 0)
-        }
+pub fn cover_screen_with(cpu: &mut Cpu, window: u32, focus: u32, activate: bool) -> Option<u32> {
+    let vars = if activate {
+        Some(vec![WINDOW_DEVICE, window, 0, 0, focus])
+    } else {
+        device_vars(cpu, window, focus)
+    };
+    match vars {
+        Some(vars) => task::start(cpu, task::DD_ACTIVATE, vars, 0),
         None => Some(DD_OK),
     }
+}
+
+/// The variables of the task that makes Direct3D 8's device window
+/// `window` cover the screen, the focus window `focus` in `FILTERED`, or
+/// None when it would change nothing.
+fn device_vars(cpu: &mut Cpu, window: u32, focus: u32) -> Option<Vec<u32>> {
+    let mut vars = window_vars(cpu, window, focus, WINDOW_FULLSCREEN)?;
+    vars.resize(FILTERED, 0);
+    vars.push(focus);
+    Some(vars)
 }
 
 /// RestoreDisplayMode(this).

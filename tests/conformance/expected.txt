@@ -83,7 +83,7 @@ comdlg32/filedlg: skipped filedlg.c:353 (x6)
 d3d8/buffer: buffer: 1 tests executed (0 marked as todo, 0 failures), 1 skipped.
 d3d8/buffer: skipped buffer.c:65
 d3d8/d3d8_main: d3d8_main: 18 tests executed (0 marked as todo, 0 failures), 0 skipped.
-d3d8/device: device: 313 tests executed (0 marked as todo, 1 failure), 7 skipped.
+d3d8/device: device: 313 tests executed (0 marked as todo, 0 failures), 7 skipped.
 d3d8/device: skipped device.c:1869
 d3d8/device: skipped device.c:532
 d3d8/device: skipped device.c:541
@@ -91,7 +91,6 @@ d3d8/device: skipped device.c:1136
 d3d8/device: skipped device.c:1271
 d3d8/device: skipped device.c:1359
 d3d8/device: skipped device.c:1418
-d3d8/device: failed device.c:1629
 d3d8/stateblock: stateblock: 8691 tests executed (0 marked as todo, 0 failures), 0 skipped.
 d3d8/surface: surface: 59 tests executed (0 marked as todo, 0 failures), 0 skipped.
 d3d8/texture: texture: 40 tests executed (0 marked as todo, 1 failure), 0 skipped.

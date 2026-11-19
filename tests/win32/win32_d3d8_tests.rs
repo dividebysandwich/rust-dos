@@ -1234,3 +1234,305 @@ fn a_full_screen_device_window_covers_the_screen_of_its_mode() {
         r[5]
     );
 }
+
+// The focus window's procedure.
+
+/// The focus window program's data: its windows, the window its
+/// procedure counts messages of, what the procedure saw, and the
+/// window class it registers.
+const FOCUS: u32 = 0x700;
+const DEVWIN: u32 = 0x704;
+const FILTER: u32 = 0x708;
+const FILTERED_COUNT: u32 = 0x70C;
+const SETFOCUS: u32 = 0x710;
+const SETFOCUS_AT_CREATE: u32 = 0x714;
+const PROC_DURING: u32 = 0x718;
+const USER_SEEN: u32 = 0x71C;
+const THREAD_WINDOW: u32 = 0x720;
+const THREAD_DONE: u32 = 0x724;
+const THREAD: u32 = 0x728;
+const PROC: u32 = 0x72C;
+const DEF_PROC: u32 = 0x730;
+const WNDCLASS: u32 = 0x740;
+const MSG: u32 = 0x780;
+const NAME: u32 = 0x7C0;
+const GWL_WNDPROC: i32 = -4;
+const WM_SIZE: u32 = 0x5;
+const WM_SETFOCUS: u32 = 0x7;
+const WM_DISPLAYCHANGE: u32 = 0x7E;
+const WM_IME_NOTIFY: u32 = 0x282;
+const WM_USER: u32 = 0x400;
+const IUNKNOWN_RELEASE: u32 = 2;
+
+/// The program of Wine's d3d8 test_wndproc: a focus window and a device
+/// window of a class whose procedure counts the messages of the window
+/// in FILTER (in FILTERED_COUNT, but WM_DISPLAYCHANGE and
+/// WM_IME_NOTIFY), and the focus window's WM_SETFOCUS and WM_USER, and
+/// keeps the focus window's GWL_WNDPROC when the device window gets
+/// WM_SIZE. Devices of full screen at 800x600: on the device window, on
+/// the focus window, and on the device window again with the program's
+/// SetWindowLongA of the focus window's procedure before Release. Then a
+/// second thread makes a device on a window of its own, whose procedure
+/// ends the thread at WM_SIZE, inside the device's change of its
+/// windows, and the program sends the focus window WM_USER.
+fn focus_window_program() -> (Vec<u8>, u32) {
+    const REGISTER_CLASS: usize = 1;
+    const GET_WINDOW_LONG: usize = 2;
+    const SET_WINDOW_LONG: usize = 3;
+    const DEF_WINDOW_PROC: usize = 4;
+    const PEEK_MESSAGE: usize = 5;
+    const SEND_MESSAGE: usize = 6;
+    const CREATE8: usize = 7;
+    const CREATE_THREAD: usize = 8;
+    const WAIT: usize = 9;
+    const EXIT_THREAD: usize = 10;
+    let mut d = vec![0u8; DATA_SIZE];
+    toadforce_present(&mut d);
+    put32(&mut d, PRESENT, 800);
+    put32(&mut d, PRESENT + 4, 600);
+    d[NAME as usize..NAME as usize + 6].copy_from_slice(b"Focus\0");
+    let user32: (&str, &[&str]) = (
+        "USER32.DLL",
+        &[
+            "CreateWindowExA",
+            "RegisterClassA",
+            "GetWindowLongA",
+            "SetWindowLongA",
+            "DefWindowProcA",
+            "PeekMessageA",
+            "SendMessageA",
+        ],
+    );
+    let kernel32: (&str, &[&str]) = (
+        "KERNEL32.DLL",
+        &["CreateThread", "WaitForSingleObject", "ExitThread"],
+    );
+    program(&[user32, D3D8, kernel32], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        // The window procedure, whose address the call pushes.
+        let mut start = a.create_label();
+        a.call(start)?;
+        let (mut counted, mut focus_done, mut def) =
+            (a.create_label(), a.create_label(), a.create_label());
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(esp + 8))?;
+        a.cmp(eax, dword_ptr(l.at(FILTER)))?;
+        a.jne(counted)?;
+        a.cmp(ecx, WM_DISPLAYCHANGE)?;
+        a.je(counted)?;
+        a.cmp(ecx, WM_IME_NOTIFY)?;
+        a.je(counted)?;
+        a.inc(dword_ptr(l.at(FILTERED_COUNT)))?;
+        a.set_label(&mut counted)?;
+        a.cmp(eax, dword_ptr(l.at(FOCUS)))?;
+        a.jne(focus_done)?;
+        let mut not_setfocus = a.create_label();
+        a.cmp(ecx, WM_SETFOCUS)?;
+        a.jne(not_setfocus)?;
+        a.inc(dword_ptr(l.at(SETFOCUS)))?;
+        a.set_label(&mut not_setfocus)?;
+        a.cmp(ecx, WM_USER)?;
+        a.jne(focus_done)?;
+        a.inc(dword_ptr(l.at(USER_SEEN)))?;
+        a.set_label(&mut focus_done)?;
+        a.cmp(ecx, WM_SIZE)?;
+        a.jne(def)?;
+        let mut not_device = a.create_label();
+        a.cmp(eax, dword_ptr(l.at(DEVWIN)))?;
+        a.jne(not_device)?;
+        a.push(GWL_WNDPROC)?;
+        a.push(dword_ptr(l.at(FOCUS)))?;
+        a.call(l.import(GET_WINDOW_LONG))?;
+        a.mov(dword_ptr(l.at(PROC_DURING)), eax)?;
+        a.jmp(def)?;
+        a.set_label(&mut not_device)?;
+        a.cmp(eax, dword_ptr(l.at(THREAD_WINDOW)))?;
+        a.jne(def)?;
+        a.mov(dword_ptr(l.at(THREAD_DONE)), 1)?;
+        a.push(0)?;
+        a.call(l.import(EXIT_THREAD))?;
+        a.set_label(&mut def)?;
+        a.jmp(l.import(DEF_WINDOW_PROC))?;
+
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(PROC)), eax)?;
+        a.mov(dword_ptr(l.at(WNDCLASS + 4)), eax)?;
+        a.mov(dword_ptr(l.at(WNDCLASS + 16)), 0x40_0000)?;
+        a.mov(dword_ptr(l.at(WNDCLASS + 36)), l.at(NAME) as u32)?;
+        a.mov(eax, l.import(DEF_WINDOW_PROC))?;
+        a.mov(dword_ptr(l.at(DEF_PROC)), eax)?;
+        c.api(a, l, REGISTER_CLASS, &[Arg::At(WNDCLASS)])?;
+        let window = [
+            Arg::I(0),
+            Arg::At(NAME),
+            Arg::At(NAME),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(640),
+            Arg::I(480),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(0x40_0000),
+            Arg::I(0),
+        ];
+        c.api(a, l, CREATE_WINDOW, &window)?;
+        a.mov(dword_ptr(l.at(FOCUS)), eax)?;
+        c.api(a, l, CREATE_WINDOW, &window)?;
+        a.mov(dword_ptr(l.at(DEVWIN)), eax)?;
+        let long = [Arg::Val(FOCUS), Arg::I(GWL_WNDPROC as u32)];
+        c.api(a, l, GET_WINDOW_LONG, &long)?;
+        c.api(a, l, CREATE8, &[Arg::I(D3D_SDK_VERSION)])?;
+        a.mov(dword_ptr(l.at(D3D)), eax)?;
+        let create = [
+            Arg::I(0),
+            Arg::I(D3DDEVTYPE_HAL),
+            Arg::Val(FOCUS),
+            Arg::I(D3DCREATE_HARDWARE_VERTEXPROCESSING),
+            Arg::At(PRESENT),
+            Arg::At(DEVICE),
+        ];
+        let device_window = |a: &mut CodeAssembler, window: u32| -> Result<(), IcedError> {
+            a.mov(eax, dword_ptr(l.at(window)))?;
+            a.mov(dword_ptr(l.at(PRESENT + 24)), eax)
+        };
+        // r[5]: on the device window.
+        device_window(a, DEVWIN)?;
+        c.com(a, l, D3D, D3D8_CREATE_DEVICE, &create)?;
+        a.mov(eax, dword_ptr(l.at(SETFOCUS)))?;
+        a.mov(dword_ptr(l.at(SETFOCUS_AT_CREATE)), eax)?;
+        c.api(a, l, GET_WINDOW_LONG, &long)?;
+        a.mov(eax, dword_ptr(l.at(FOCUS)))?;
+        a.mov(dword_ptr(l.at(FILTER)), eax)?;
+        c.com(a, l, DEVICE, IUNKNOWN_RELEASE, &[])?;
+        c.api(a, l, GET_WINDOW_LONG, &long)?;
+        // r[9]: on the focus window.
+        device_window(a, FOCUS)?;
+        c.com(a, l, D3D, D3D8_CREATE_DEVICE, &create)?;
+        c.com(a, l, DEVICE, IUNKNOWN_RELEASE, &[])?;
+        // r[11]: on the device window, the procedure changed.
+        device_window(a, DEVWIN)?;
+        c.com(a, l, D3D, D3D8_CREATE_DEVICE, &create)?;
+        let set = [
+            Arg::Val(FOCUS),
+            Arg::I(GWL_WNDPROC as u32),
+            Arg::Val(DEF_PROC),
+        ];
+        c.api(a, l, SET_WINDOW_LONG, &set)?;
+        c.com(a, l, DEVICE, IUNKNOWN_RELEASE, &[])?;
+        c.api(a, l, GET_WINDOW_LONG, &long)?;
+        let set = [Arg::Val(FOCUS), Arg::I(GWL_WNDPROC as u32), Arg::Val(PROC)];
+        c.api(a, l, SET_WINDOW_LONG, &set)?;
+        a.mov(dword_ptr(l.at(FILTER)), 0)?;
+        // r[16]: a new focus window, whose procedure no device put
+        // DirectDraw's in front of.
+        c.api(a, l, CREATE_WINDOW, &window)?;
+        a.mov(dword_ptr(l.at(FOCUS)), eax)?;
+        // r[17]: the second thread, which ends inside CreateDevice. The
+        // program handles the messages it sends the focus window until
+        // then. CreateThread's last three arguments, then its start
+        // address, which the call pushes: the code after it, the
+        // thread's.
+        let (mut thread, mut pump) = (a.create_label(), a.create_label());
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(thread)?;
+        let mut tc = Calls { next: 30 };
+        tc.api(a, l, CREATE_WINDOW, &window)?;
+        a.mov(dword_ptr(l.at(THREAD_WINDOW)), eax)?;
+        a.mov(dword_ptr(l.at(PRESENT + 24)), eax)?;
+        tc.com(a, l, D3D, D3D8_CREATE_DEVICE, &create)?;
+        a.push(0)?;
+        a.call(l.import(EXIT_THREAD))?;
+        a.set_label(&mut thread)?;
+        a.push(0)?;
+        a.push(0)?;
+        c.api(a, l, CREATE_THREAD, &[])?;
+        a.mov(dword_ptr(l.at(THREAD)), eax)?;
+        a.set_label(&mut pump)?;
+        let peek_args = [Arg::At(MSG), Arg::I(0), Arg::I(0), Arg::I(0), Arg::I(1)];
+        let mut pc = Calls { next: 40 };
+        pc.api(a, l, PEEK_MESSAGE, &peek_args)?;
+        a.cmp(dword_ptr(l.at(THREAD_DONE)), 0)?;
+        a.je(pump)?;
+        c.api(a, l, WAIT, &[Arg::Val(THREAD), Arg::I(u32::MAX)])?;
+        let send = [Arg::Val(FOCUS), Arg::I(WM_USER), Arg::I(0), Arg::I(0)];
+        c.api(a, l, SEND_MESSAGE, &send)?;
+        a.mov(dword_ptr(l.at(RESULTS + 4 * CALLS)), c.next as i32)?;
+        finish(a, l)
+    })
+}
+
+/// The focus window program run to its end: the machine, where its data
+/// is, and its calls' results.
+fn run_focus_window_program(test: &str) -> (Box<rust_dos::cpu::Cpu>, u32, Vec<u32>) {
+    let (exe, data) = focus_window_program();
+    let mut cpu = machine_toadforce(test, exe);
+    run_until_done(&mut cpu, data);
+    let calls = peek(&cpu, data + RESULTS + 4 * CALLS);
+    let r = results(&cpu, data, calls);
+    assert_ne!(r[0], 0, "RegisterClassA: {r:X?}");
+    assert_eq!(r[5], 0, "CreateDevice on the device window: {r:X?}");
+    (cpu, data, r)
+}
+
+/// CreateDevice of full screen makes the focus window the foreground
+/// one: it gets WM_SETFOCUS, as Wine's d3d8 test_wndproc finds on
+/// Windows.
+#[test]
+fn a_full_screen_device_activates_its_focus_window() {
+    let (cpu, data, _) = run_focus_window_program("d3d8_focus_activate");
+    assert_eq!(peek(&cpu, data + SETFOCUS_AT_CREATE), 1, "WM_SETFOCUS");
+}
+
+/// Direct3D 8's device of full screen puts its procedure in front of
+/// the focus window's from CreateDevice until Release, and while it
+/// changes its windows passes the focus window's messages to
+/// DefWindowProc, as Wine's d3d8 test_wndproc finds on Windows: the
+/// procedure GetWindowLongA gives is another than the program's after
+/// CreateDevice, also while the device window gets WM_SIZE, and the
+/// program's after Release, unless the program changed it in between.
+/// A device on the focus window sends its procedure no message.
+#[test]
+fn a_full_screen_device_hooks_its_focus_window_procedure() {
+    let (cpu, data, r) = run_focus_window_program("d3d8_focus_hook");
+    let proc = peek(&cpu, data + PROC);
+    let def_proc = peek(&cpu, data + DEF_PROC);
+    assert_eq!(r[3], proc, "the focus window's procedure before: {r:X?}");
+    assert_ne!(r[6], proc, "Direct3D's procedure after CreateDevice");
+    assert_eq!(
+        peek(&cpu, data + PROC_DURING),
+        r[6],
+        "GetWindowLongA while the device changes its windows"
+    );
+    assert_eq!(r[7], 0, "Release: {r:X?}");
+    assert_eq!(r[8], proc, "the program's procedure after Release");
+    assert_eq!(r[9], 0, "CreateDevice on the focus window: {r:X?}");
+    assert_eq!(r[10], 0, "Release: {r:X?}");
+    assert_eq!(r[11], 0, "CreateDevice: {r:X?}");
+    assert_ne!(r[12], proc, "SetWindowLongA's procedure before");
+    assert_eq!(r[13], 0, "Release: {r:X?}");
+    assert_eq!(r[14], def_proc, "the program's procedure stays");
+    assert_eq!(
+        peek(&cpu, data + FILTERED_COUNT),
+        0,
+        "messages to the focus window's procedure while filtered"
+    );
+}
+
+/// A thread that ends inside CreateDevice's change of the device's
+/// windows leaves no filter behind: the focus window's messages go to
+/// its procedure again.
+#[test]
+fn the_focus_window_filter_ends_with_its_thread() {
+    let (cpu, data, r) = run_focus_window_program("d3d8_focus_thread");
+    assert_eq!(peek(&cpu, data + THREAD_DONE), 1, "the thread's WM_SIZE");
+    assert_eq!(r[19], 0, "WaitForSingleObject: {r:X?}");
+    assert_eq!(
+        peek(&cpu, data + USER_SEEN),
+        1,
+        "WM_USER after the thread ended"
+    );
+}

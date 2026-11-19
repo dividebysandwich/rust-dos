@@ -459,6 +459,9 @@ fn build_into(cpu: &mut Cpu, id: u32, p: &[u32], chain: &mut Chain) -> Result<()
         // Windows, making and releasing a full-screen device sends the
         // focus window's procedure no message of DirectDraw's window
         // changes (Wine's d3d8 test_wndproc checks that none comes).
+        // Exclusive mode on the focus window puts DirectDraw's procedure
+        // in front of the focus window's until the device is released,
+        // as Direct3D's is on Windows (`directdraw::window_proc`).
         // CreateDevice and Reset make the device window cover the
         // screen once the buffers are made (`cover_screen`).
         let flags = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_NOWINDOWCHANGES;
@@ -582,9 +585,9 @@ pub fn set_targets(cpu: &mut Cpu, id: u32, target: u32, depth: u32) {
 }
 
 /// CreateDevice(this, adapter, type, focus, flags, params, out) of the
-/// IDirect3D8 `d3d`. A device of full screen ends with its device window
-/// made to cover the screen (`cover_screen`), which calls the program's
-/// window procedure.
+/// IDirect3D8 `d3d`. A device of full screen ends with its focus window
+/// activated and its device window made to cover the screen
+/// (`cover_screen`), which calls the program's window procedures.
 #[allow(clippy::too_many_arguments)]
 pub fn create(
     cpu: &mut Cpu,
@@ -703,7 +706,7 @@ pub fn create(
     write_params(cpu, params_at, &p);
     let iface = super::iface(cpu, id);
     com::write_out(cpu, out, iface);
-    cover_screen(cpu, id)
+    cover_screen(cpu, id, true)
 }
 
 // The methods.
@@ -950,17 +953,18 @@ pub fn reset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     use_chain(cpu, id, chain, p.clone());
     super::states::defaults(cpu, id);
     write_params(cpu, at, &p);
-    cover_screen(cpu, id)
+    cover_screen(cpu, id, false)
 }
 
 /// CreateDevice or Reset made the device `id`'s buffers: in full screen
-/// its device window covers the screen of the mode it took
+/// its device window covers the screen of the mode it took, after
+/// CreateDevice (`created`) activates the focus window
 /// (`directdraw::cover_screen_with`). D3D_OK.
-fn cover_screen(cpu: &mut Cpu, id: u32) -> Option<u32> {
+fn cover_screen(cpu: &mut Cpu, id: u32, created: bool) -> Option<u32> {
     match get(cpu, id) {
         Some(d) if d.params.get(PP_WINDOWED) == Some(&0) => {
             let (window, focus) = (d.window, d.focus);
-            directdraw::cover_screen_with(cpu, window, focus)
+            directdraw::cover_screen_with(cpu, window, focus, created)
         }
         _ => Some(D3D_OK),
     }
