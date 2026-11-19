@@ -30,12 +30,13 @@
 //! a squeezed ROM glyph to stay legible, has glyphs drawn for it in
 //! `sans8`.
 //!
-//! Arial, Times New Roman and Courier New, Windows 98's TrueType faces,
-//! take its metrics and widths the same way (`truetype`): the size a
-//! height gets, the TEXTMETRIC, and each character's hinted width at
-//! that size, in the regular, bold, italic or bold italic font the
-//! weight and slant pick. Programs that size their controls for the text
-//! in them, measured or not, then have it fit as on Windows 98.
+//! Arial, Times New Roman and Courier New, the TrueType faces, take
+//! metrics and widths that roughly match the real fonts' dimensions
+//! (`truetype`): the size a height gets, the TEXTMETRIC, and each
+//! character's hinted width at that size, in the regular, bold, italic or
+//! bold italic font the weight and slant pick. Programs that size their
+//! controls for the text in them, measured or not, then have it fit
+//! about as on Windows.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
