@@ -163,10 +163,13 @@ opcode, `win32_version=98se` when a message names the version, more
   setup](../CONFIGURATION.md#running-the-setup-on-first-start)).
 * **Iron Helix**: `win32_depth=8` (256 colours).
 * **Moto Racer**: `win32_depth=16`; it checks the desktop's depth before
-  it sets its own mode. *Play Link* races between instances in a [LAN
+  it sets its own mode. For its 3D races, `machine=svga_voodoo3`. Start
+  the GOG release's `game.EXE` without the `-FrameRateMax60` parameter
+  that GOG's `motoracer.ini` adds: the game stops at "Unknown parameter"
+  with it. *Play Link* races between instances in a [LAN
   room](../CONFIGURATION.md#directplay-games-on-the-built-in-windows)
   over the IPX connection, the only one the game takes; it lists the
-  TCP/IP one but ignores it, on Windows too (tested with the demo).
+  TCP/IP one but ignores it, on Windows too.
 * **Test Drive 4**: update it to version 1.2 with its patch,
   TD42UP.EXE, which runs on the built-in Windows. The game fix
   `td4-intro-camera` then keeps the race camera behind the car at any
@@ -314,6 +317,11 @@ needs.
   Voodoo3 with the 1.07.00 driver it needs DirectX 7
   ([3dfx Voodoo3 and
   Banshee](../CONFIGURATION.md#3dfx-voodoo3-and-banshee)).
+* **Moto Racer** (GOG release, `game.EXE`): play it on [the built-in
+  Windows](#windows-games-on-the-built-in-windows). On a Voodoo3 image,
+  install the driver from 3dfx's Voodoo3 driver CD 1.2 (`3dfx32v3.dll`
+  4.11.01.1151), copied over 1.07.00 as for Glover above: with 1.07.00
+  the bikes and riders draw as flat white shapes.
 * **Oni**: on a Voodoo3, take away a MiniGL `opengl32.dll` from its
   folder. On a Voodoo2, copy `3DFXVGL.DLL` into its folder as
   `OPENGL32.DLL` ([OpenGL games under
