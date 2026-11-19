@@ -282,7 +282,15 @@ fn generic_block_ioctl(cpu: &mut Cpu) {
                 _ => 0x05,                                                     // fixed disk
             };
             cpu.bus.guest_write_8(block + 0x01, device_type);
-            cpu.bus.guest_write_16(block + 0x02, if kind.is_removable() { 0 } else { 1 }); // 02: bit 0 = fixed
+            // 02: bit 0 = not removable, bit 1 = the drive has a change
+            // line, which MS-DOS sets for a diskette drive when INT 13h
+            // AH=15h says so, as the BIOS here does for every one.
+            let attributes = match kind {
+                DriveKind::Floppy => 0x0002,
+                _ if kind.is_removable() => 0x0000,
+                _ => 0x0001,
+            };
+            cpu.bus.guest_write_16(block + 0x02, attributes);
             cpu.bus.guest_write_16(block + 0x04, layout.cylinders());
             cpu.bus.guest_write_8(block + 0x06, 0); // 06: media type, the drive's own
             // 07: the BPB through its 32-bit sector count, 25 bytes, as

@@ -386,7 +386,8 @@ fn generic_ioctl_describes_floppies_and_hard_disks() {
     assert_eq!(ioctl(&mut cpu, 1, 0x0860), (false, 0));
     assert_eq!(cpu.bus.read_8(block), 0xAA); // special functions untouched
     assert_eq!(cpu.bus.read_8(block + 1), 0x07);
-    assert_eq!((cpu.bus.read_16(block + 2), cpu.bus.read_16(block + 4)), (0, 80));
+    // Removable, with a change line, as the BIOS's INT 13h AH=15h says
+    assert_eq!((cpu.bus.read_16(block + 2), cpu.bus.read_16(block + 4)), (2, 80));
     assert_eq!(cpu.bus.read_16(block + 7), 512);
     assert_eq!(cpu.bus.read_8(block + 9), 1); // sectors per cluster
     assert_eq!(cpu.bus.read_16(block + 0x0F), 2880); // total sectors
