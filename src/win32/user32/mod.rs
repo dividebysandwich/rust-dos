@@ -1251,6 +1251,12 @@ static APIS: &[Api] = &[
     stdcall("WinHelpA", 636, 4, winhelp::win_help),
     stdcall("GetSystemDefaultLangID", 652, 0, nothing),
     stdcall("EnumDisplayDevicesA", 192, 4, monitor::enum_display_devices),
+    stdcall(
+        "ChangeDisplaySettingsExA",
+        29,
+        5,
+        monitor::change_display_settings_ex,
+    ),
     // No monitor functions (430 to 433): they came with Windows 98, and
     // programs and Wine's tests look them up to tell Windows 95 apart.
     stdcall("SetWindowsHookW", 577, 2, not_implemented),
