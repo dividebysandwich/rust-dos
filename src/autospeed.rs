@@ -831,6 +831,21 @@ impl Mark {
     }
 }
 
+/// A measurement's first frame (`AutoSpeed::first_frame`).
+#[derive(Clone, Copy, Debug)]
+struct FirstFrame {
+    /// The emulated time of the measurement's mark, which says whose first
+    /// frame this is.
+    of: u64,
+    /// The counts at the frame.
+    at: Mark,
+    /// The frames the measurement had counted by then.
+    frames: u64,
+    /// The lag of the stalls the measurement had seen by then
+    /// (`Frames::late_lag_ns`), which an early end leaves out of its own.
+    stall_ns: u64,
+}
+
 /// The frame rate steps down keep `KEPT` of. It moves only by more than
 /// `KEPT`, so that measurements' noise doesn't walk it down, as the frame
 /// rate itself would. It goes up when the program draws more anywhere.
@@ -1193,10 +1208,9 @@ pub struct AutoSpeed {
     /// (`auto_fps`).
     target_fps: Option<u32>,
     mark: Option<Mark>,
-    /// The first frame of the measurement going on: the emulated time of
-    /// its mark, the counts at that frame, and the frames counted by then,
-    /// which an early end measures from (see `WINDOW_NS`).
-    first_frame: Option<(u64, Mark, u64)>,
+    /// The first frame of the measurement going on, which an early end
+    /// measures from (see `WINDOW_NS`).
+    first_frame: Option<FirstFrame>,
     /// No measurement starts before this emulated time.
     settle_until: u64,
     /// Since the last change of speed: the frame rates measured that
@@ -1562,8 +1576,13 @@ impl AutoSpeed {
             (0, presents, _) => presents,
             (flips, _, _) => flips,
         };
-        if frames > 0 && self.first_frame.is_none_or(|(at, ..)| at != mark.ns) {
-            self.first_frame = Some((mark.ns, now, frames));
+        if frames > 0 && self.first_frame.is_none_or(|first| first.of != mark.ns) {
+            self.first_frame = Some(FirstFrame {
+                of: mark.ns,
+                at: now,
+                frames,
+                stall_ns: self.frames.late_lag_ns,
+            });
         }
         // The window counts emulated time, which a host far behind runs at
         // a fraction of the wall clock's pace: at a tenth, a window of
@@ -1579,19 +1598,20 @@ impl AutoSpeed {
         // as lag while a game loads (#783), keeps the whole window.
         let dropped = now.lost_ns.saturating_sub(mark.lost_ns);
         let behind = dropped >= WINDOW_NS && (ns as f64) < (ns + dropped) as f64 * FAR_BEHIND;
-        let refresh = self.refresh(bus, now.ns);
         let waits = ns < WINDOW_NS || (frames > 0 && frames < ENOUGH_FRAMES && ns < LONG_WINDOW_NS);
-        let first = self
-            .first_frame
-            .filter(|&(at, ..)| at == mark.ns)
-            .map(|(_, first, count)| (first, frames.saturating_sub(count)));
+        let first = self.first_frame.filter(|first| first.of == mark.ns);
+        // Only the search's first measurement ends early, so the others
+        // don't weigh it at each frame.
+        let start = matches!(self.step, Step::Start);
         let early = match first {
-            Some((first, after)) if !behind && waits && ns >= WINDOW_NS => {
+            Some(first) if start && !behind && waits && ns >= WINDOW_NS => {
                 let most = self.lagged.map_or(host_max, |(most, _)| most.min(host_max));
                 let room = current < most.max(self.least(protected, host_max));
-                let (halted, io) = now.since(&first);
+                let (halted, io) = now.since(&first.at);
                 let busy = self.busy(protected, halted, io);
-                self.early_rate(now.ns, first.ns, after, refresh, room, busy)
+                let after = frames.saturating_sub(first.frames);
+                let refresh = self.refresh(bus, now.ns);
+                self.early_rate(now.ns, first.at.ns, after, refresh, room, busy)
             }
             _ => None,
         };
@@ -1604,10 +1624,13 @@ impl AutoSpeed {
         let window = self.frames;
         self.frames.start();
         // An early end measures from its first frame (see `WINDOW_NS`).
-        let (mark, ns) = match (early, first) {
-            (Some(_), Some((first, _))) => (first, now.ns.saturating_sub(first.ns)),
-            _ => (mark, ns),
+        let (mark, ns, stall_before) = match (early, first) {
+            (Some(_), Some(first)) => {
+                (first.at, now.ns.saturating_sub(first.at.ns), first.stall_ns)
+            }
+            _ => (mark, ns, 0),
         };
+        let refresh = self.refresh(bus, now.ns);
         let seconds = ns as f64 / 1e9;
         let (halted, io) = now.since(&mark);
         let polls = (now.polls - mark.polls) as f64 / seconds;
@@ -1643,8 +1666,11 @@ impl AutoSpeed {
         // at a speed the host keeps up with only just, has a frame of 80 ms
         // among frames on time in one measurement in eight, which is lag.
         let far_under = bus.clock.cycles_per_ms() as f64 * STALLED < host_max as f64;
+        // An early end's lag is that since its first frame, and so are the
+        // stalls it leaves out: a stall at the end of a load before that
+        // frame would otherwise hide the lag after it.
         let stall = if far_under {
-            window.stall_ns().min(lost)
+            window.stall_ns().saturating_sub(stall_before).min(lost)
         } else {
             0
         };
@@ -1738,13 +1764,13 @@ impl AutoSpeed {
         protected && self.idles && self.busy_os && !self.dpmi_client && halted < BUSY && io < LOADS
     }
 
-    /// The frame rate that ends the measurement early, if the `after`
-    /// frames that came after its first one, at `first_ns`, already decide
-    /// the search's first step (see `WINDOW_NS`): at the start, with `room`
-    /// above the speed, no reads on the drives for `WORK_DONE_NS` up to
-    /// `now_ns`, and `EARLY_FRAMES` of them. With a frame more, they are
-    /// short of `refresh` by `FIRST_STEP`, or of `AT_REFRESH` of it for a
-    /// `busy` program.
+    /// The frame rate that ends the search's first measurement early, if
+    /// the `after` frames that came after its first one, at `first_ns`,
+    /// already decide its step (see `WINDOW_NS`): with `room` above the
+    /// speed, no reads on the drives for `WORK_DONE_NS` up to `now_ns`, and
+    /// `EARLY_FRAMES` of them. With a frame more, they are short of
+    /// `refresh` by `FIRST_STEP`, or of `AT_REFRESH` of it for a `busy`
+    /// program.
     fn early_rate(
         &self,
         now_ns: u64,
@@ -1756,8 +1782,7 @@ impl AutoSpeed {
     ) -> Option<f64> {
         let seconds = now_ns.saturating_sub(first_ns) as f64 / 1e9;
         let most = (after + 1) as f64 / seconds;
-        let known = matches!(self.step, Step::Start)
-            && room
+        let known = room
             && after >= EARLY_FRAMES
             && now_ns.saturating_sub(self.io.1) >= WORK_DONE_NS
             && (most * FIRST_STEP <= refresh || (busy && most < refresh * AT_REFRESH));
@@ -2096,9 +2121,16 @@ impl AutoSpeed {
             }
             this.step = Step::Raised { from: current, fps, below };
             // A program that keeps an idling system from halting has no
-            // time to spare: its frames follow the speed, and it goes the
-            // whole way at once (`FIRST_STEP`).
-            let most = if busy { f64::INFINITY } else { most };
+            // time to spare: its frames follow the speed, and where a step
+            // could go `FIRST_STEP` it goes the whole way at once. A hold's
+            // try for more (`FINE_STEP`) stays a fine step: it climbs from
+            // the knee a step that gained nothing put it at, and the whole
+            // way from there would go back to that step.
+            let most = if busy && most >= FIRST_STEP {
+                f64::INFINITY
+            } else {
+                most
+            };
             // No further at once than a step under where the host fell
             // behind, and past it a step at a time.
             let most = match this.fell_at {
@@ -6230,5 +6262,39 @@ mod tests {
         assert_eq!(first(false, false, 0.0, 0.0, HOST), 134_800);
         assert_eq!(first(true, true, 0.0, 0.0, HOST), 134_800);
         assert_eq!(first(true, false, 0.0, LOADS, HOST), 134_800);
+    }
+
+    #[test]
+    fn a_busy_program_paced_by_the_clock_climbs_from_its_knee_a_fine_step_at_a_time() {
+        // Never halted under a system seen idling, it is busy, but it
+        // spins on the clock to 30 frames a second at any speed over
+        // 30,000. The first step goes the whole way, gains nothing, and
+        // the knee holds at 55,000. A hold's try for more is a fine step
+        // (`FINE_STEP`): the whole way to twice the speed, as from the
+        // start, would gain nothing again and come back, every 3.5 s.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(50_000);
+        let mut auto = AutoSpeed::new(3000, Some(60));
+        auto.set_idles(true);
+        auto.unsettled = Some((f64::NAN, 0));
+        let mut speeds = Vec::new();
+        while bus.clock.now_ns() < 30_000_000_000 {
+            let speed = bus.clock.cycles_per_ms() as u64;
+            bus.clock.icount += (speed * 1000 / 30).max(1_000_000);
+            bus.activity.swapped(1);
+            if let Some(next) = auto.update(bus, true, HOST, 0) {
+                speeds.push((bus.clock.now_ns(), next));
+                bus.set_cycles_per_ms(next);
+            }
+        }
+        assert_eq!(speeds[0].1, 100_000, "{speeds:?}");
+        assert!(
+            speeds
+                .iter()
+                .filter(|&&(at, _)| at > 9_000_000_000)
+                .all(|&(_, speed)| speed <= 63_250),
+            "{speeds:?}"
+        );
     }
 }
