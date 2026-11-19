@@ -118,24 +118,60 @@ fn ranges_and_sets_go_through_es_bx() {
     );
 }
 
-#[test]
-fn interrogating_finds_the_ril_on_an_ega_and_a_vga_only() {
-    let mut cpu = machine(0x12);
-    int10(&mut cpu, 0xFA00, 0, 0, 0);
-    assert_ne!(cpu.bx(), 0);
-    let version = (cpu.es() as usize) * 16 + cpu.bx() as usize;
-    assert_eq!(
-        [cpu.bus.read_8(version), cpu.bus.read_8(version + 1)],
-        [1, 0]
-    );
-
+/// A machine with `adapter`, in its text mode.
+fn machine_with(adapter: Adapter) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
-    let cga = VideoSetup {
-        adapter: Adapter::Cga,
+    let setup = VideoSetup {
+        adapter,
         ..Default::default()
     };
-    bios::install(&mut cpu.bus, cga);
-    int10::set_mode(&mut cpu, 0x03);
+    bios::install(&mut cpu.bus, setup);
+    int10::set_mode(&mut cpu, setup.prompt_mode());
+    cpu
+}
+
+#[test]
+fn interrogating_finds_the_ril_on_an_ega_and_a_vga_only() {
+    for adapter in [Adapter::Ega, Adapter::Vga, Adapter::Svga, Adapter::S3] {
+        let mut cpu = machine_with(adapter);
+        int10(&mut cpu, 0xFA00, 0, 0, 0);
+        assert_ne!(cpu.bx(), 0, "{adapter:?}");
+        let version = (cpu.es() as usize) * 16 + cpu.bx() as usize;
+        assert_eq!(
+            [cpu.bus.read_8(version), cpu.bus.read_8(version + 1)],
+            [1, 0],
+            "{adapter:?}"
+        );
+    }
+    let others = [
+        Adapter::Cga,
+        Adapter::Hercules,
+        Adapter::Tandy,
+        Adapter::Pcjr,
+    ];
+    for adapter in others {
+        let mut cpu = machine_with(adapter);
+        int10(&mut cpu, 0xFA00, 0, 0, 0);
+        assert_eq!(cpu.bx(), 0, "{adapter:?}");
+    }
+}
+
+#[test]
+fn a_booted_system_has_no_ril_of_the_bios() {
+    // Its mouse driver, if it loads one, brings the RIL; the BIOS leaves
+    // the functions alone.
+    let mut cpu = machine(0x12);
+    cpu.bus.boot = Some(Default::default());
     int10(&mut cpu, 0xFA00, 0, 0, 0);
     assert_eq!(cpu.bx(), 0);
+    let map_mask = cpu.bus.vga.sequencer_regs[2];
+    int10(&mut cpu, 0xF100, 0x0102, 0, 0x08);
+    assert_eq!(cpu.bus.vga.sequencer_regs[2], map_mask);
+}
+
+#[test]
+fn feature_control_reads_as_the_bios_left_it() {
+    let mut cpu = machine(0x12);
+    int10(&mut cpu, 0xF000, 0x00FF, 0, 0x28);
+    assert_eq!(cpu.get_reg8(Register::BL), 0);
 }

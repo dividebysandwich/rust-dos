@@ -4,9 +4,11 @@
 //! INT 10h with these functions, so that programs and the mouse driver can
 //! share the EGA's write-only registers: a program writes a register
 //! through the RIL, and the driver keeps a copy it can read back and
-//! restore. rust-dos's mouse driver is built in, so its INT 10h answers
-//! them. The emulated card keeps every register it was given, so a read
-//! comes from the card's own registers rather than from a copy.
+//! restore. rust-dos's mouse driver is built into its DOS, so INT 10h
+//! answers them there; on a booted system, which has its own mouse driver
+//! or none, the BIOS leaves them alone as a real one does. The emulated
+//! card keeps every register it was given, so a read comes from the
+//! card's own registers rather than from a copy.
 //!
 //! A register is named by its group, the port number in DX (or in a
 //! table): the CRT controller (00h, 25 registers), the sequencer (08h, 5),
@@ -84,9 +86,9 @@ fn read(cpu: &mut Cpu, group: Group, index: u8) -> Option<u8> {
         Group::Graphics => vga.graphics_regs[i],
         Group::Attribute => vga.attribute_regs[i],
         Group::Misc => vga.misc_output_reg,
-        // The card keeps no Feature Control bits; the VGA reads them back
-        // at 3CAh.
-        Group::Feature => cpu.bus.io_read(0x3CA),
+        // The card keeps no Feature Control bits, and the BIOS leaves them
+        // 0; the emulated card has no port 3CAh to read them back from.
+        Group::Feature => 0,
         // The EGA's positions, which IBM says to program to 0 and 1, are
         // write-only and do nothing on the emulated card.
         Group::Graphics1Position => 0,

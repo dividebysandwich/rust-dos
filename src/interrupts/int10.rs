@@ -733,9 +733,10 @@ pub fn handle(cpu: &mut Cpu) {
     {
         return;
     }
-    // The EGA Register Interface, which the mouse driver adds to the EGA's
-    // and VGA's BIOS.
-    if adapter.ega_bios() && ril::handle(cpu) {
+    // The EGA Register Interface, which the built-in mouse driver adds to
+    // the EGA's and VGA's BIOS. A booted system has no built-in driver
+    // (`bios::boot_ivt`), and its own mouse driver brings its own RIL.
+    if adapter.ega_bios() && cpu.bus.boot.is_none() && ril::handle(cpu) {
         return;
     }
 
