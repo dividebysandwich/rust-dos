@@ -52,9 +52,9 @@ const _: () = assert!(crate::config::MAX_MEMSIZE << 20 <= 0x8000_0000 && SLOW as
 const VIDEO: u32 = 0xA0000;
 const EXTENDED: u32 = 0x10_0000;
 /// The upper memory between the ROMs (`bus::UPPER_RAM`), RAM that the
-/// inline checks don't take: its first page and its number of pages. Its
-/// ends are on page boundaries, so an operand within one page is all in
-/// it or all out.
+/// inline checks don't take (`dev_read`, `dev_write`): its first page and
+/// its number of pages. Its ends are on page boundaries, so an operand
+/// within one page is all in it or all out.
 const UPPER_START: u32 = (UPPER_RAM.start >> 12) as u32;
 const UPPER_PAGES: u32 = ((UPPER_RAM.end - UPPER_RAM.start) >> 12) as u32;
 const _: () = assert!(UPPER_RAM.start & 0xFFF == 0 && UPPER_RAM.end & 0xFFF == 0);
@@ -108,6 +108,9 @@ pub struct Trampoline {
     pub exit: usize,
     /// `fpu_addsub`.
     pub addsub: usize,
+    /// `dev_read` and `dev_write`, for `JitCtx::dev`.
+    pub dev_read: usize,
+    pub dev_write: usize,
 }
 
 pub type Enter = unsafe extern "C" fn(*mut crate::cpu::Cpu, *mut JitCtx, *const u8) -> u64;
@@ -154,7 +157,75 @@ pub fn trampoline() -> Trampoline {
     );
     let addsub = ops.offset().0;
     fpu_addsub(&mut ops);
-    Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub }
+    let dev_read = ops.offset().0;
+    dev_read_routine(&mut ops);
+    let dev_write = ops.offset().0;
+    dev_write_routine(&mut ops);
+    Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub, dev_read, dev_write }
+}
+
+/// `jit_dev_read`'s way in (`JitCtx::dev`), with its arguments: an operand
+/// of W3 bytes at physical address W2, within one page, that the inline
+/// checks didn't take as plain RAM. The upper memory between the ROMs is
+/// RAM (`UPPER_PAGES`), read here into W0 without the call; the rest goes
+/// on to `jit_dev_read`. Keeping the check here rather than at each
+/// operand keeps the blocks' code as small as without it. X9 and X16 are
+/// changed.
+fn dev_read_routine(ops: &mut Asm) {
+    dynasm!(ops
+        ; .arch aarch64
+        ; sub w9, w2, UPPER_START, lsl 12
+        ; cmp w9, UPPER_PAGES, lsl 12
+        ; b.hs >helper
+        ; cmp w3, 2
+        ; b.lo >byte
+        ; b.eq >word
+        ; ldr w0, [x21, x2]
+        ; ret
+        ; byte:
+        ; ldrb w0, [x21, x2]
+        ; ret
+        ; word:
+        ; ldrh w0, [x21, x2]
+        ; ret
+        ; helper:
+    );
+    mov64(ops, 16, jit_dev_read as *const () as u64);
+    dynasm!(ops ; .arch aarch64 ; br x16);
+}
+
+/// `jit_dev_write`'s way in, as `dev_read_routine` is `jit_dev_read`'s:
+/// W3 written as W4 bytes at W2. Upper memory of a block without code is
+/// written here, as the inline stores write RAM (without bumping its
+/// generation, see `Bus::code_blocks`), and W0 = 0: it can't have hit
+/// the running block's bytes, which are code. The rest goes on to
+/// `jit_dev_write`. X9-X11 and X16 are changed.
+fn dev_write_routine(ops: &mut Asm) {
+    dynasm!(ops
+        ; .arch aarch64
+        ; sub w9, w2, UPPER_START, lsl 12
+        ; cmp w9, UPPER_PAGES, lsl 12
+        ; b.hs >helper
+        ; ldr x10, [x1, CTX_CODE_BLOCKS as u32]
+        ; lsr w11, w2, crate::bus::GEN_SHIFT as u32
+        ; ldrb w11, [x10, x11]
+        ; cbnz w11, >helper
+        ; mov w0, wzr
+        ; cmp w4, 2
+        ; b.lo >byte
+        ; b.eq >word
+        ; str w3, [x21, x2]
+        ; ret
+        ; byte:
+        ; strb w3, [x21, x2]
+        ; ret
+        ; word:
+        ; strh w3, [x21, x2]
+        ; ret
+        ; helper:
+    );
+    mov64(ops, 16, jit_dev_write as *const () as u64);
+    dynasm!(ops ; .arch aarch64 ; br x16);
 }
 
 /// ST(dst) = a + b, or a - b with W3 set, rounded to the control word's
@@ -541,10 +612,8 @@ enum Slow {
     /// block.
     Fetch { at: DynamicLabel, back: DynamicLabel, stub: DynamicLabel, slot: usize, g: u32 },
     /// A memory operand of `size` bytes at physical address `addr` (a
-    /// register) that the inline checks didn't take as plain RAM: within a
-    /// page, its handle is that address, with `DEV_BIT` unless it is in
-    /// the upper memory between the ROMs; else it goes on to `slow`, the
-    /// `MemRef`.
+    /// register) that isn't plain RAM: within a page, its handle is that
+    /// address with `DEV_BIT`; else it goes on to `slow`, the `MemRef`.
     Dev { at: DynamicLabel, back: DynamicLabel, slow: DynamicLabel, t: T, addr: u8, size: u8 },
 }
 
@@ -1701,23 +1770,13 @@ impl Gen<'_> {
                     );
                 }
                 Slow::Dev { at, back, slow, t, addr, size } => {
-                    // The upper memory between the ROMs is RAM
-                    // (`UPPER_PAGES`): its handle is the address, which the
-                    // inline checks only don't take because they stop at
-                    // A0000h.
                     dynasm!(self.ops
                         ; .arch aarch64
                         ; =>at
                         ; and w1, W(addr), 0xFFF
                         ; cmp w1, 0x1000 - size as u32
                         ; b.hi =>slow
-                        ; sub w1, WSP(addr), UPPER_START, lsl 12
-                        ; cmp w1, UPPER_PAGES, lsl 12
-                        ; b.lo >ram
                         ; orr XSP(r(t)), X(addr), 1u64 << DEV_BIT
-                        ; b =>back
-                        ; ram:
-                        ; mov W(r(t)), W(addr)
                         ; b =>back
                     );
                 }
