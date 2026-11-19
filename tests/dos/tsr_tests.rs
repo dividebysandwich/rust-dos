@@ -208,19 +208,22 @@ fn a_vector_a_tsr_points_at_a_service_entry_survives_the_shell() {
     assert_eq!(ivt(&cpu, 0x21), (tsr, 0x0180));
     assert_eq!(ivt(&cpu, 0x6F), dos);
 
-    // A program that ends with a vector pointed at the BIOS's plain IRET
-    // or into its own memory has it put back.
+    // A program that ends with a vector into its own memory has it put
+    // back, since the shell takes that memory back. One pointed at the
+    // BIOS's ROM stays as the program left it, as in DOS: here INT 05h
+    // pointed at the video BIOS's entry.
     assert!(cpu.load_executable("APP.COM", None));
     assert_eq!(ivt(&cpu, 0x6F), dos);
     let app = cpu.current_psp;
     let timer = ivt(&cpu, 0x1C);
-    let keyboard = ivt(&cpu, 0x09);
-    set_ivt(&mut cpu, 0x09, iret.0, iret.1);
+    let video = ivt(&cpu, 0x10);
+    assert_ne!(ivt(&cpu, 0x05), video);
+    set_ivt(&mut cpu, 0x05, video.0, video.1);
     set_ivt(&mut cpu, 0x1C, app, 0x0100);
     cpu.set_reg8(Register::AL, 0);
     int21(&mut cpu, 0x4C);
     cpu.load_shell();
-    assert_eq!((ivt(&cpu, 0x09), ivt(&cpu, 0x1C)), (keyboard, timer));
+    assert_eq!((ivt(&cpu, 0x05), ivt(&cpu, 0x1C)), (video, timer));
     assert_eq!(ivt(&cpu, 0x6F), dos);
 }
 
