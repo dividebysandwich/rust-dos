@@ -52,6 +52,10 @@ pub const SERVICE_KBD_PAUSED: u8 = 0x22;
 pub const SERVICE_IPX: u8 = 0x23;
 /// The IPX IRQ handler's next completed ECB (`net::ipx::esr`).
 pub const SERVICE_IPX_ESR: u8 = 0x24;
+/// The scan code the built-in DOS's keyboard interrupt read, after INT 15h
+/// AH=4Fh had it: CF set, its keystrokes go into the BIOS's buffer; clear,
+/// the hook took the key (`keyboard::bios_intercepted`).
+pub const SERVICE_KBD_INTERCEPTED: u8 = 0x25;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Far-call services (`FE 3A nn`, then RETF) at the ROM's entry points for
@@ -85,6 +89,10 @@ const PORT_ACCESSES_MORE: u16 = 0x1500;
 /// The keyboard interrupt (IRQ 1) of a booted system, which keeps the
 /// keystrokes in the BIOS data area as a PC's BIOS does.
 const KBD_HANDLER: u16 = 0x1230;
+/// The keyboard interrupt (IRQ 1) of the built-in DOS, which hands each
+/// scan code to INT 15h AH=4Fh as an AT's BIOS does, and moves the
+/// keystrokes the host typed into the BIOS's buffer.
+const DOS_KBD_HANDLER: u16 = 0x1320;
 /// The fixed disk parameter tables of the first two hard disks, which
 /// INT 41h and 46h point to.
 const FIXED_DISK_PARAMS: u16 = 0x12C0;
@@ -405,6 +413,8 @@ pub fn install(bus: &mut Bus) {
     write_rom(bus, PORT_ACCESSES, &port_access_loop());
     write_rom(bus, PORT_ACCESSES_MORE, &port_access_more());
     write_rom(bus, KBD_HANDLER, &keyboard_handler());
+    write_rom(bus, DOS_KBD_HANDLER, &dos_keyboard_handler());
+    write_rom(bus, hle_trap(0x09), &keyboard_trap(DOS_KBD_HANDLER));
     // The Plug and Play BIOS's and APM's entry points: the service, then a
     // far return (32-bit in APM's 32-bit code segment).
     write_rom(bus, crate::pnpbios::ENTRY, &[0xFE, 0x3A, FAR_PNP, 0xCB]);
@@ -556,6 +566,33 @@ fn keyboard_handler() -> Vec<u8> {
     a.finish()
 }
 
+/// The keyboard interrupt of the built-in DOS, as an AT's BIOS runs it:
+/// read the scan code, let INT 15h AH=4Fh take it or change it, keep the
+/// keystrokes of a key it didn't take (`keyboard::bios_intercepted`), and
+/// acknowledge the interrupt. Programs that read the keyboard through the
+/// intercept alone, leaving INT 09h to the BIOS, see every key this way
+/// (Sink or Swim's setup and game keep a table of held keys from it).
+fn dos_keyboard_handler() -> Vec<u8> {
+    let mut a = crate::asm16::Asm::new(DOS_KBD_HANDLER);
+    a.op(&[0x50]); // PUSH AX
+    a.op(&[0xE4, 0x60]); // IN AL, 60h
+    a.op(&[0xB4, 0x4F, 0xF9, 0xCD, 0x15]); // MOV AH, 4Fh; STC; INT 15h
+    a.op(&[0xFE, 0x39, SERVICE_KBD_INTERCEPTED]); // AL, CF: what the hook left
+    a.op(&[0xFA, 0xB0, 0x20, 0xE6, 0x20]); // CLI; MOV AL, 20h; OUT 20h, AL
+    a.op(&[0x58, 0xCF]); // POP AX; IRET
+    let code = a.finish();
+    assert!(DOS_KBD_HANDLER as usize + code.len() <= IPX_ENTRY as usize);
+    code
+}
+
+/// The keyboard interrupt's trap in the vector table's order of traps,
+/// where programs that kept its address still go: a jump to the keyboard
+/// interrupt `handler`.
+fn keyboard_trap(handler: u16) -> [u8; 4] {
+    let [lo, hi] = handler.wrapping_sub(hle_trap(0x09) + 3).to_le_bytes();
+    [0xE9, lo, hi, 0xCF] // JMP near handler
+}
+
 /// Windows' 386 enhanced mode starts (`on`) or ends: while it runs, its
 /// keyboard driver hands each virtual machine its keys through the
 /// keyboard controller, and the machine's BIOS makes the keystrokes from
@@ -569,14 +606,8 @@ pub fn windows_keyboard(bus: &mut Bus, on: bool) {
     }
     bus.kbd.windows = on;
     crate::keyboard::reset_keystrokes(bus);
-    let trap = hle_trap(0x09);
-    let code = if on {
-        let [lo, hi] = KBD_HANDLER.wrapping_sub(trap + 3).to_le_bytes();
-        [0xE9, lo, hi, 0xCF] // JMP near KBD_HANDLER
-    } else {
-        [0xFE, 0x38, 0x09, 0xCF]
-    };
-    write_rom(bus, trap, &code);
+    let handler = if on { KBD_HANDLER } else { DOS_KBD_HANDLER };
+    write_rom(bus, hle_trap(0x09), &keyboard_trap(handler));
 }
 
 /// Put the default vectors back where they point into memory the shell

@@ -10,10 +10,12 @@
 //! scan code at port 0x60 whenever a physical key event happens. So this
 //! default handler consumes the scan code by reading port 0x60 (which
 //! programs expect the ISR to do), moves a make code's keystrokes from the
-//! queue into the BDA buffer (`keyboard::bios_took_scan`) and sends EOI. It's
-//! invoked automatically by the emulator loop when the IRQ1 pending flag
-//! is set; games that install their own INT 09h ISR will get called
-//! instead because the IVT entry points to their handler, not ours.
+//! queue into the BDA buffer (`keyboard::bios_took_scan`) and sends EOI.
+//!
+//! The keyboard interrupt's trap now jumps to the ROM's handler
+//! (`bios::DOS_KBD_HANDLER`), which calls INT 15h AH=4Fh as an AT's BIOS
+//! does. This service is reached only from the trap a save state made
+//! before that keeps in its ROM.
 
 use crate::cpu::Cpu;
 
