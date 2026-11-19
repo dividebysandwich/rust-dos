@@ -1311,6 +1311,7 @@ impl Bus {
         }
         // The Tandy's and PCjr's window onto system memory.
         if let Some(ram) = self.vga.cpu_window(addr) {
+            let unchanged = self.ram[ram] == value;
             self.ram[ram] = value;
             let page = ram >> GEN_SHIFT;
             self.page_gen[page] = self.page_gen[page].wrapping_add(1);
@@ -1318,12 +1319,18 @@ impl Bus {
             if !(base..base + size).contains(&ram) {
                 return false;
             }
-            self.mark_text_dirty(ram - base, ram - base + 1);
+            // As in the text window below: the same byte again changes no
+            // pixel, and the retrace's comparison with the shadow
+            // (`compare_gate_array`) still sees what other writes changed.
+            if !unchanged {
+                self.mark_text_dirty(ram - base, ram - base + 1);
+            }
             return true;
         }
         let (text, size, wrap) = self.vga.text_window();
         if (text..text + size).contains(&addr) {
             let text_off = (addr - text) & wrap;
+            let unchanged = self.vga.vram_text[text_off] == value;
             self.vga.vram_text[text_off] = value;
             self.note_video_write(text_off, 1);
 
@@ -1331,8 +1338,13 @@ impl Bus {
             // we're in a text mode (see `text::geometry`). CGA graphics modes
             // (4/5/6) also live in this VRAM but their byte-to-scanline
             // mapping is interleaved, so we conservatively repaint everything
-            // for those.
-            self.mark_text_dirty(text_off, text_off + 1);
+            // for those. A byte written with the value it had changes no
+            // pixel: programs that redraw a whole menu every pass of their
+            // loop (Sink or Swim's setup) would otherwise have the rows
+            // painted again every frame.
+            if !unchanged {
+                self.mark_text_dirty(text_off, text_off + 1);
+            }
 
             // Check if current mode uses this memory
             return matches!(
