@@ -103,6 +103,18 @@ impl Kbc {
         })
     }
 
+    /// The two bytes an MF2 keyboard answers the identify command (F2h)
+    /// with, the first in the low byte: ABh 83h, which the controller
+    /// turns into ABh 41h while it translates scan codes. INT 16h AH=0Ah
+    /// returns the same word in BX.
+    pub fn keyboard_id(&self) -> u16 {
+        if self.command_byte & CMD_TRANSLATE != 0 {
+            0x41AB
+        } else {
+            0x83AB
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             queue: VecDeque::new(),
@@ -354,8 +366,9 @@ impl Kbc {
             0xEE => self.reply(0xEE), // echo
             0xF2 => {
                 // Identify: an MF2 keyboard.
-                self.queue.push_front(0x83);
-                self.queue.push_front(0xAB);
+                let [first, second] = self.keyboard_id().to_le_bytes();
+                self.queue.push_front(second);
+                self.queue.push_front(first);
                 self.reply(0xFA);
             }
             0xFF => {
