@@ -209,3 +209,16 @@ fn the_roms_ignore_writes() {
     cpu.bus.write_rom(0xF1030, &[0x90]);
     assert_eq!(cpu.bus.read_8(trap), 0x90);
 }
+
+#[test]
+fn upper_memory_ends_where_the_roms_begin() {
+    let mut bus = Bus::new(std::path::PathBuf::from("."));
+    let rom = (bus.read_8(0xC7FFF), bus.read_8(0xF0000));
+    // Words across each edge: the ROM's byte stays, the RAM's is written.
+    bus.write_16(0xC7FFF, 0x5A5A);
+    bus.write_16(0xEFFFF, 0xA5A5);
+    assert_eq!((bus.read_8(0xC7FFF), bus.read_8(0xF0000)), rom);
+    assert_eq!((bus.read_8(0xC8000), bus.read_8(0xEFFFF)), (0x5A, 0xA5));
+    bus.write_32(0xD0000, 0x1234_5678);
+    assert_eq!(bus.read_32(0xD0000), 0x1234_5678);
+}

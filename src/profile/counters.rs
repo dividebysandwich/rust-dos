@@ -10,9 +10,9 @@ use super::{ZONES, Zone, ZoneGuard};
 pub const MEM_KINDS: usize = 3;
 
 /// Memory that isn't plain RAM: the video memory windows at A0000h-BFFFFh,
-/// the upper memory area at C0000h-FFFFFh (the ROMs, the EMS page frame and
-/// upper memory blocks), and devices above RAM (linear frame buffers, the
-/// 3D cards, MMIO).
+/// the ROMs at C0000h-C7FFFh and F0000h-FFFFFh (the upper memory between
+/// them is RAM, `bus::UPPER_RAM`), and devices above RAM (linear frame
+/// buffers, the 3D cards, MMIO).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemKind {
     Video = 0,

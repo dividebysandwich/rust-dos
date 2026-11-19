@@ -537,6 +537,12 @@ mod engine {
             let returns = vec![Return::NONE; 1 << RETURN_BITS].into_boxed_slice();
             let mut ctx = Box::new(JitCtx::new(base + tramp.exit));
             ctx.fpu[4] = base + tramp.addsub;
+            // Upper memory read and written without the helpers' calls.
+            #[cfg(target_arch = "aarch64")]
+            {
+                ctx.dev[0] = base + tramp.dev_read;
+                ctx.dev[1] = base + tramp.dev_write;
+            }
             #[cfg(target_arch = "x86_64")]
             for (thunk, at) in ctx.thunks.iter_mut().zip(tramp.thunks) {
                 *thunk = base + at;

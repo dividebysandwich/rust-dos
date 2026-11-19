@@ -7957,3 +7957,46 @@ fn sse_stores_to_video_memory_and_code_pages_are_the_handlers() {
     assert_eq!(b.cpu.ebx(), 100);
     assert_eq!(b.read32(CODE + 0x20), 0x0101_0101u32.wrapping_mul(396));
 }
+
+#[test]
+fn upper_memory_between_the_roms_is_ram_to_translated_code() {
+    // A DOS extender's ring 0 stack and counters in an upper memory block
+    // at D0000h, as SMACKPLY's has them: translated code reads and writes
+    // them as RAM, without the device helpers, and a store into the BIOS
+    // ROM next to them is still dropped.
+    const UMB: u32 = 0xD0000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                let mut again = a.create_label();
+                a.mov(ecx, 1000u32)?;
+                a.mov(edx, esp)?;
+                a.mov(esp, UMB + 0x1000)?;
+                a.set_label(&mut again)?;
+                a.push(ecx)?;
+                a.add(dword_ptr(UMB), ecx)?;
+                a.pop(eax)?;
+                a.add(dword_ptr(UMB + 4), eax)?;
+                a.mov(dword_ptr(0xF0000u32), eax)?;
+                a.dec(ecx)?;
+                a.jnz(again)?;
+                a.mov(esp, edx)?;
+                a.hlt()
+            }),
+        );
+    });
+    let before = a.cpu.bus.read_32(0xF0000);
+    run_both(&mut a, &mut b);
+    let sum = (1..=1000u32).sum::<u32>();
+    for rig in [&a, &b] {
+        assert_eq!(rig.cpu.bus.read_32(UMB as usize), sum);
+        assert_eq!(rig.cpu.bus.read_32(UMB as usize + 4), sum);
+        assert_eq!(rig.cpu.bus.read_32(0xF0000), before, "the ROM as it was");
+    }
+    if AVAILABLE {
+        // The ROM's 1000 stores go to the helpers, the RAM's none.
+        let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev);
+        assert!(calls <= 1100, "{calls} calls");
+    }
+}

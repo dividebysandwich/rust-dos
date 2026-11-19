@@ -104,9 +104,10 @@ The JSON's sections:
 - `irqs`, `exceptions`: hardware interrupts delivered by IRQ line, and
   exceptions by vector.
 - `mapped_memory`: reads and writes of memory that isn't plain RAM:
-  `video` (A0000h-BFFFFh), `upper` (C0000h-FFFFFh: the ROMs, the EMS page
-  frame, upper memory blocks) and `device` (above RAM: linear frame
-  buffers, the 3D cards). A word access made of byte accesses counts once.
+  `video` (A0000h-BFFFFh), `upper` (the ROMs at C0000h-C7FFFh and
+  F0000h-FFFFFh; the upper memory blocks and the EMS page frame between
+  them are plain RAM) and `device` (above RAM: linear frame buffers, the
+  3D cards). A word access made of byte accesses counts once.
 - `dynrec`: the recompiler in the window: blocks translated, thrown away
   as stale or self-modified, flushes, block exits by reason, the
   instructions it handed to the interpreter (`calls.fallback_top`, by
