@@ -498,14 +498,25 @@ impl DiskController {
         Ok((time, date))
     }
 
-    /// INT 21h AX=5701h: set the time and date of an open file. Only
-    /// files on disk images keep them; host files keep their own.
+    /// INT 21h AX=5701h: set the time and date of an open file. A file
+    /// on a disk image keeps them in its directory entry, and a host file
+    /// opened for writing as its modification time, which installers set
+    /// to the date in their archives. A host file opened only for reading
+    /// keeps its own: the host doesn't let it be changed through it.
     pub fn set_file_time(&mut self, handle: u16, time: u16, date: u16) -> Result<(), u8> {
         // Emptying a disk-image file at its first use stamps it with the
         // current time, which would replace the one set here.
         self.settle(handle);
         match &self.open_files.get(&handle).ok_or(0x06u8)?.data {
             OpenData::Fat { volume, at, .. } => volume.set_time(*at, time, date),
+            OpenData::Host(f, Some(_)) => {
+                if let Some(t) = dos_to_system_time(time, date) {
+                    // A host that refuses keeps the file's own time, as
+                    // before.
+                    let _ = f.set_modified(t);
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -752,4 +763,18 @@ impl DiskController {
         let _ = self.seek_file(handle, was as i64, 0);
         result
     }
+}
+
+/// The local time a DOS time and date give, None for one that isn't a
+/// time (a month 0, a 30th of February).
+fn dos_to_system_time(time: u16, date: u16) -> Option<std::time::SystemTime> {
+    use chrono::TimeZone;
+    let year = 1980 + i32::from(date >> 9);
+    let (month, day) = (u32::from(date >> 5 & 15), u32::from(date & 31));
+    let (hour, minute) = (u32::from(time >> 11), u32::from(time >> 5 & 63));
+    let second = u32::from(time & 31) * 2;
+    let t = Local
+        .with_ymd_and_hms(year, month, day, hour, minute, second)
+        .earliest()?;
+    Some(t.into())
 }

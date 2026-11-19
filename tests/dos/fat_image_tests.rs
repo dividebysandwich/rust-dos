@@ -340,6 +340,34 @@ fn file_times_are_kept() {
     close(&mut cpu, handle);
 }
 
+#[test]
+fn host_file_times_are_kept() {
+    // Installers set each file they write to the date in their archive,
+    // and patches check it: Myth III's 1.0.2 patch looks at the game's
+    // file date. 2001-10-08 19:20:00.
+    let (time, date) = (0x9A80, 0x2B48);
+    let dir = fatimage::scratch("host_time");
+    let mut cpu = cpu(&dir);
+    let handle = create(&mut cpu, "C:\\GAME.EXE").unwrap();
+    cpu.set_bx(handle);
+    cpu.set_cx(time);
+    cpu.set_dx(date);
+    int21(&mut cpu, 0x5701);
+    assert!(!cf(&cpu));
+    close(&mut cpu, handle);
+    let handle = open(&mut cpu, "C:\\GAME.EXE", 0).unwrap();
+    cpu.set_bx(handle);
+    int21(&mut cpu, 0x5700);
+    assert_eq!((cpu.cx(), cpu.dx()), (time, date));
+    close(&mut cpu, handle);
+    let modified = fs::metadata(dir.join("c").join("GAME.EXE"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let age = std::time::SystemTime::now().duration_since(modified).unwrap();
+    assert!(age.as_secs() > 20 * 365 * 24 * 3600, "{:?}", modified);
+}
+
 /// Free clusters on `drive` (1-based, as AH=36h takes it).
 fn free_clusters(cpu: &mut Cpu, drive: u8) -> u16 {
     cpu.set_reg8(Register::DL, drive);
