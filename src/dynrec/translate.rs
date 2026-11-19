@@ -23,9 +23,9 @@ const DF: u32 = 0x0400;
 /// registers in protected mode too (in real mode it always has them).
 /// With `fpu`, FPU instructions are translated, for `fast_fpu`'s arithmetic
 /// (`Cpu::fpu_fast`) if set. `i486`: the CPU is a 486 or later, which
-/// has BSWAP (a 386 faults on it). `p6`: the CPU is a P6, which has
-/// CMOVcc. `simd`: MMX and SSE instructions the CPU has (`simd::MMX`,
-/// `simd::SSE`) are translated.
+/// has BSWAP and XADD (a 386 faults on them). `p6`: the CPU is a P6,
+/// which has CMOVcc. `simd`: MMX and SSE instructions the CPU has
+/// (`simd::MMX`, `simd::SSE`) are translated.
 #[allow(clippy::too_many_arguments)]
 pub fn translate(
     instr: &Instruction,
