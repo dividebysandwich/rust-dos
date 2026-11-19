@@ -1518,12 +1518,12 @@ fn comctl32_has_the_sheet_and_wizard_dialog_resources() {
     assert_ne!(r[0], 0, "COMCTL32 is loaded");
     let word = |lin: u32| peek(&cpu, lin) & 0xFFFF;
     // The sheet's buttons and tab control, and the wizard's buttons,
-    // lines and tab control.
-    for (i, controls) in [(1, 5), (4, 8)] {
+    // lines and tab control, with the styles of Windows 98 SE's.
+    for (i, style, controls) in [(1, 0x90C8_20C4, 5), (4, 0x90C8_00C4, 8)] {
         assert_ne!(r[i], 0, "FindResourceA finds dialog {i}");
         let (template, size) = (r[i + 1], r[i + 2]);
         assert_ne!(template, 0, "LoadResource gives its data");
-        assert_ne!(peek(&cpu, template) & 0x40, 0, "DS_SETFONT");
+        assert_eq!(peek(&cpu, template), style, "with DS_SETFONT");
         assert_eq!(word(template + 8), controls);
         // No menu or class, then the caption: the font after it.
         assert_eq!((word(template + 18), word(template + 20)), (0, 0));

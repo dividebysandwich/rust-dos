@@ -170,6 +170,7 @@ const VK_PRIOR: u32 = 0x21;
 const VK_NEXT: u32 = 0x22;
 const RT_DIALOG: u32 = 5;
 
+const DS_3DLOOK: u32 = 0x0004;
 const DS_SETFONT: u32 = 0x0040;
 const DS_MODALFRAME: u32 = 0x0080;
 const DS_CONTROL: u32 = 0x0400;
@@ -706,6 +707,13 @@ fn push32(b: &mut Vec<u8>, v: u32) {
 /// (AfxGetPropSheetFont), to lay its pages out in that font. Without
 /// them MFC takes a font size it never set, and the pages come out many
 /// times their size, with their controls out of sight.
+///
+/// They are the templates the sheets here are made from, so a program
+/// that reads one learns the dialog it gets. Windows 98 SE's have the
+/// same style, font (8-point MS Shell Dlg) and number of controls, which
+/// covers all MFC reads, but a layout of their own: at 20,20, with no
+/// caption, and the wizard 46 units high, which COMCTL32 grows to fit
+/// the pages.
 pub(super) fn resources() -> Vec<(u16, u16, u16, Vec<u8>)> {
     const IDD_PROPSHEET: u16 = 1006;
     const IDD_WIZARD: u16 = 1020;
@@ -727,6 +735,9 @@ fn sheet_template(flags: u32) -> Vec<u8> {
         (DS_CONTEXTHELP, (220, 140), caption, sheet_controls())
     };
     style |= DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE | DS_SETFONT;
+    // Windows 95 draws every dialog in 3D, but its COMCTL32's templates
+    // still have the bit.
+    style |= DS_3DLOOK;
     if flags & PSH_NOCONTEXTHELP != 0 {
         style &= !DS_CONTEXTHELP;
     }
