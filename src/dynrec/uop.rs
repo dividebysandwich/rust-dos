@@ -264,9 +264,15 @@ impl FTrigOp {
         matches!(self, FTrigOp::Tan | FTrigOp::SinCos)
     }
 
-    /// Its code for `helpers::jit_fpu_reg_op` (`desc >> 13`).
+    /// Its code for `helpers::jit_fpu_reg_op` (`desc >> 13`), which picks
+    /// the handler by these numbers.
     pub fn reg_op(self) -> u32 {
-        8 + self as u32
+        match self {
+            FTrigOp::Sin => 8,
+            FTrigOp::Cos => 9,
+            FTrigOp::Tan => 10,
+            FTrigOp::SinCos => 11,
+        }
     }
 }
 
