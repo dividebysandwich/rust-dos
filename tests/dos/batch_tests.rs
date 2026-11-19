@@ -5,6 +5,7 @@
 
 use rust_dos::cpu::Cpu;
 use rust_dos::exec::{self, NoHook, StopReason};
+use rust_dos::shell::{self, ShellWait};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -729,4 +730,112 @@ fn more_shows_a_screenful_at_a_time() {
     assert!(text.contains("line 24\nline 25") && text.ends_with("line 30\nC:\\>"), "{}", text);
     assert!(!text.contains("More"), "{}", text);
     assert!(pipe_files(&dir).is_empty());
+}
+
+/// What a CONFIG -SET waiting in the batch file asks the frontend for.
+fn requested(cpu: &Cpu) -> Vec<(&str, &str, &str)> {
+    match &cpu.shell_wait {
+        Some(ShellWait::Settings { requests, .. }) => {
+            requests.iter().map(|(s, k, v)| (s.as_str(), k.as_str(), v.as_str())).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn config_set_waits_for_the_frontend_to_take_its_settings() {
+    let bat = b"@echo off\r\nCONFIG -set \"composite=on\"\r\n\
+        config -set cpu cycles 9000\r\necho after\r\n";
+    let dir = scratch("config_set", &[("T.BAT", bat)]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_until(&mut cpu, 100, |_| false);
+    assert_eq!(requested(&cpu), [("emulator", "composite", "on")]);
+    assert!(!screen(&cpu).contains("after"), "{}", screen(&cpu));
+    // The frontend takes them, and the next line runs.
+    assert_eq!(shell::take_settings(&mut cpu).len(), 1);
+    run_until(&mut cpu, 200, |cpu| !requested(cpu).is_empty());
+    assert_eq!(requested(&cpu), [("emulator", "cycles", "9000")]);
+    assert!(!screen(&cpu).contains("after"), "{}", screen(&cpu));
+    shell::take_settings(&mut cpu);
+    run_batch_files(&mut cpu);
+    assert!(screen(&cpu).contains("after"), "{}", screen(&cpu));
+}
+
+/// A state saved while the batch file waits has the settings asked for,
+/// and the frontend of the machine it is loaded into takes them.
+#[test]
+fn config_set_waiting_is_saved_in_states() {
+    let bat = b"@echo off\r\nconfig -set composite=on\r\necho after\r\n";
+    let dir = scratch("config_set_state", &[("T.BAT", bat)]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_until(&mut cpu, 100, |cpu| !requested(cpu).is_empty());
+    let state = rust_dos::savestate::machine::save(&cpu);
+
+    let mut cpu = Cpu::new(dir.clone());
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert_eq!(requested(&cpu), [("emulator", "composite", "on")]);
+    run_until(&mut cpu, 100, |_| false);
+    assert!(!screen(&cpu).contains("after"), "{}", screen(&cpu));
+    shell::take_settings(&mut cpu);
+    run_batch_files(&mut cpu);
+    assert!(screen(&cpu).contains("after"), "{}", screen(&cpu));
+}
+
+#[test]
+fn config_set_goes_on_without_a_frontend_to_take_its_settings() {
+    let bat = b"@echo off\r\nconfig -set composite=on\r\necho after\r\n";
+    let dir = scratch("config_set_alone", &[("T.BAT", bat)]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_batch_files(&mut cpu);
+    assert!(screen(&cpu).contains("after"), "{}", screen(&cpu));
+    assert!(cpu.shell_wait.is_none(), "nothing takes them later");
+}
+
+#[test]
+fn config_says_what_it_can_t_set() {
+    let bat = b"@echo off\r\nconfig -set \"nosuch=1\"\r\nconfig -get cpu\r\n\
+        config -set dosbox memsize 32\r\necho after\r\n";
+    let dir = scratch("config_unknown", &[("T.BAT", bat)]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_batch_files(&mut cpu);
+    let text = screen(&cpu);
+    assert!(text.contains("CONFIG: rust-dos has no setting like nosuch=1"), "{}", text);
+    assert!(text.contains("CONFIG: only CONFIG -SET"), "{}", text);
+    // DOSBox can't change the memory at run time either.
+    assert!(text.contains("CONFIG: memsize can't be changed while the machine runs"), "{}", text);
+    assert!(text.contains("after"), "{}", text);
+}
+
+/// DOSBox's CONFIG is a program on Z:, which a game's own CONFIG (its
+/// setup) in the current directory comes before.
+#[test]
+fn a_program_called_config_runs_instead_of_the_command() {
+    let bat = b"@echo off\r\nconfig -set cycles=9000\r\n";
+    let files: &[(&str, &[u8])] = &[("CONFIG.COM", &exits_with(7)), ("T.BAT", bat)];
+    let dir = scratch("config_program", files);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 7);
+}
+
+/// Z: comes first on DOSBox's PATH, so its CONFIG runs before one in a
+/// directory of the PATH.
+#[test]
+fn config_comes_before_a_program_of_its_name_on_the_path() {
+    let bat = b"@echo off\r\nset PATH=C:\\BIN\r\nconfig -set cycles=9000\r\necho after\r\n";
+    let dir = scratch("config_on_path", &[("T.BAT", bat)]);
+    fs::create_dir_all(dir.join("BIN")).unwrap();
+    fs::write(dir.join("BIN").join("CONFIG.COM"), exits_with(7)).unwrap();
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    assert!(run_until(&mut cpu, 200, |cpu| !requested(cpu).is_empty()));
+    shell::take_settings(&mut cpu);
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 0);
+    assert!(screen(&cpu).contains("after"), "{}", screen(&cpu));
 }

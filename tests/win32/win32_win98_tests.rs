@@ -390,6 +390,100 @@ fn get_monitor_info_gives_the_screen() {
     assert_eq!(run(Win98Se, "info_size", monitor_info(12, 4)).0, 0x4C);
 }
 
+/// A program that lists the display adapter with EnumDisplayDevicesA,
+/// then device `number` on it by the adapter's name, and ends with the
+/// second call's result in bit 7 and the byte `byte` of what it wrote
+/// in the low bits.
+fn display_device_on_adapter(number: u32, byte: u32) -> Vec<u8> {
+    const SIZE: u32 = 424;
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", &["EnumDisplayDevicesA"])];
+    let mut data = vec![0u8; 2 * SIZE as usize];
+    data[..4].copy_from_slice(&SIZE.to_le_bytes());
+    data[SIZE as usize..SIZE as usize + 4].copy_from_slice(&SIZE.to_le_bytes());
+    program(imports, &data, |a, l| {
+        a.push(0)?;
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        // DeviceName is at 4.
+        a.push(0)?;
+        a.push(l.at(SIZE) as i32)?;
+        a.push(number as i32)?;
+        a.push(l.at(4) as i32)?;
+        a.call(l.import(0))?;
+        a.shl(eax, 7)?;
+        a.movzx(ecx, byte_ptr(l.at(SIZE + byte)))?;
+        a.and(ecx, 0x7F)?;
+        a.or(eax, ecx)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn enum_display_devices_finds_the_monitor_on_the_adapter() {
+    // The monitor is device 0 of the adapter, with the adapter's
+    // StateFlags (at 164) as on Windows 98 SE, 15h: bit 0 is
+    // DISPLAY_DEVICE_ACTIVE. It is named "\\.\Display1\Monitor1" (the
+    // 'M' at 17, the '1' at 24) and described as "Default Monitor" (the
+    // 'D' at 36).
+    assert_eq!(
+        run(Win98Se, "monitor_flags", display_device_on_adapter(0, 164)).0,
+        0x80 | 0x15
+    );
+    assert_eq!(
+        run(Win98Se, "monitor_name", display_device_on_adapter(0, 17)).0,
+        0x80 | b'M'
+    );
+    assert_eq!(
+        run(Win98Se, "monitor_number", display_device_on_adapter(0, 24)).0,
+        0x80 | b'1'
+    );
+    assert_eq!(
+        run(Win98Se, "monitor_string", display_device_on_adapter(0, 36)).0,
+        0x80 | b'D'
+    );
+    // There is one monitor: device 1 fails and leaves the structure.
+    assert_eq!(
+        run(Win98Se, "monitor_1", display_device_on_adapter(1, 4)).0,
+        0
+    );
+}
+
+/// A program that calls ChangeDisplaySettingsExA with no DEVMODE for the
+/// device named in its data, with `window` and `flags`, and ends with
+/// the result's low byte.
+fn change_display_settings_ex(device: &str, window: i32, flags: i32) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", &["ChangeDisplaySettingsExA"])];
+    let mut data = device.as_bytes().to_vec();
+    data.push(0);
+    program(imports, &data, |a, l| {
+        a.push(0)?;
+        a.push(flags)?;
+        a.push(window)?;
+        a.push(0)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.ret()
+    })
+}
+
+#[test]
+fn change_display_settings_ex_takes_the_adapters_name() {
+    // The desktop's mode again: DISP_CHANGE_SUCCESSFUL. Another device:
+    // DISP_CHANGE_BADPARAM, -5. Windows 98 SE gives -5 too for a window,
+    // which must be NULL, and for CDS_VIDEOPARAMETERS (20h).
+    let own = "\\\\.\\DISPLAY1";
+    let cdsex = |test, device, window, flags| {
+        let program = change_display_settings_ex(device, window, flags);
+        run(Win98Se, test, program).0
+    };
+    assert_eq!(cdsex("cdsex_own", own, 0, 0), 0);
+    assert_eq!(cdsex("cdsex_other", "\\\\.\\Display2", 0, 0), 0xFB);
+    assert_eq!(cdsex("cdsex_window", own, 1, 0), 0xFB);
+    assert_eq!(cdsex("cdsex_video", own, 0, 0x20), 0xFB);
+}
+
 #[test]
 fn enum_display_monitors_calls_back_for_the_screen() {
     let imports: &[(&str, &[&str])] = &[("USER32.DLL", &["EnumDisplayMonitors"])];
@@ -1703,4 +1797,95 @@ fn toolhelp32_walks_the_process_heaps_threads_and_modules() {
         let (code, text) = run(version, "toolhelp", toolhelp_walk());
         assert_eq!(code, 0, "check {} failed: {}", code, text);
     }
+}
+
+/// Windows 98 SE's USER32 has no desktops or window stations: OpenDesktopA
+/// and GetProcessWindowStation are its stubs that fail with
+/// ERROR_CALL_NOT_IMPLEMENTED, GetThreadDesktop gives 12345678h for any
+/// thread and SetThreadDesktop succeeds. QuickTime 5 calls OpenDesktopA
+/// when it starts. The program imports the family's other stubs too, so
+/// it loads only if USER32 has them all. It ends with the number of the
+/// first check that failed, or 0.
+#[test]
+fn desktops_are_windows_98s_stubs() {
+    let names: &[&str] = &[
+        "OpenDesktopA",
+        "GetProcessWindowStation",
+        "GetThreadDesktop",
+        "SetThreadDesktop",
+        "CloseDesktop",
+        "CloseWindowStation",
+        "CreateDesktopA",
+        "CreateDesktopW",
+        "CreateWindowStationA",
+        "CreateWindowStationW",
+        "EnumDesktopWindows",
+        "EnumDesktopsA",
+        "EnumDesktopsW",
+        "EnumWindowStationsA",
+        "EnumWindowStationsW",
+        "GetInputDesktop",
+        "GetUserObjectInformationA",
+        "GetUserObjectInformationW",
+        "GetUserObjectSecurity",
+        "LockWindowStation",
+        "OpenDesktopW",
+        "OpenInputDesktop",
+        "OpenWindowStationA",
+        "OpenWindowStationW",
+        "SetProcessWindowStation",
+        "SetUserObjectInformationA",
+        "SetUserObjectInformationW",
+        "SetUserObjectSecurity",
+        "SwitchDesktop",
+        "UnlockWindowStation",
+    ];
+    let (get_last_error, set_last_error) = (names.len(), names.len() + 1);
+    let imports: &[(&str, &[&str])] = &[
+        ("USER32.DLL", names),
+        ("KERNEL32.DLL", &["GetLastError", "SetLastError"]),
+    ];
+    let exe = program(imports, b"Default\0", |a, l| {
+        let mut fail = a.create_label();
+        let check_error = |a: &mut CodeAssembler, n: i32, fail| {
+            a.mov(ebx, n)?;
+            a.call(l.import(get_last_error))?;
+            a.cmp(eax, 120)?;
+            a.jne(fail)
+        };
+        a.push(0)?;
+        a.call(l.import(set_last_error))?;
+        a.push(0x40)?;
+        a.push(0)?;
+        a.push(1)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 1)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        check_error(a, 2, fail)?;
+        a.push(0)?;
+        a.call(l.import(set_last_error))?;
+        a.call(l.import(1))?;
+        a.mov(ebx, 3)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        check_error(a, 4, fail)?;
+        a.push(0)?;
+        a.call(l.import(2))?;
+        a.mov(ebx, 5)?;
+        a.cmp(eax, 0x1234_5678)?;
+        a.jne(fail)?;
+        a.push(eax)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 6)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run(Win98Se, "desktops", exe);
+    assert_eq!(code, 0, "check {} failed: {}", code, text);
 }

@@ -24,6 +24,7 @@ pub mod cmos;
 pub mod command;
 pub mod command_com;
 pub mod config;
+pub mod config_command;
 pub mod config_ui;
 pub mod cpu;
 pub mod d86f;

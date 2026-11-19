@@ -38,6 +38,7 @@ mod types;
 
 pub use edit::{
     DriveChange, Saving, autoexec_lines, complete_text, load_autoexec, save, save_autoexec, update_text, with_autoexec,
+    with_entries,
 };
 pub use parse::{MAX_MEMSIZE, MIN_MEMSIZE, parse, parse_memsize};
 pub use settings::{Memory, default_cpu, default_memsize};
