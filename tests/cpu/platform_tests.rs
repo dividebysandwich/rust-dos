@@ -224,7 +224,7 @@ fn keyboard_acknowledges_commands() {
 #[test]
 fn the_keyboard_id_is_translated_while_the_controller_translates() {
     let mut cpu = cpu();
-    let mut identify = |cpu: &mut Cpu| {
+    let identify = |cpu: &mut Cpu| {
         cpu.bus.io_write(0x60, 0xF2);
         let mut bytes = Vec::new();
         while cpu.bus.io_read(0x64) & 0x01 != 0 {
