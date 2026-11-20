@@ -515,13 +515,17 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
                 stretch_row(bytes, dst_row, from, columns_of(r));
                 continue;
             }
-            // A fill has no source, and no columns.
+            // For each pixel, the source's column: none for a fill.
             let columns: &[usize] = if from.is_some() { columns_of(r) } else { &[] };
-            for i in 0..r.width() as usize {
+            let columns = columns
+                .iter()
+                .map(|&c| Some(c))
+                .chain(std::iter::repeat(None));
+            for (i, column) in columns.take(r.width() as usize).enumerate() {
                 let at = i * bytes;
-                let value = match from {
-                    Some(from) => {
-                        let value = get(from, columns[i], bytes);
+                let value = match from.zip(column) {
+                    Some((from, column)) => {
+                        let value = get(from, column, bytes);
                         if src_key.is_some_and(|k| k.holds(value)) {
                             continue;
                         }
