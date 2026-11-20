@@ -832,10 +832,12 @@ fn t_handle_and_reserved(log: &str) -> (u16, u16) {
 #[test]
 fn two_linked_machines_give_a_program_different_selectors() {
     // Two machines on a null modem cable through a LAN room, one hosting
-    // it and one joining, run the same program: their selectors differ,
-    // as two real PCs' do, since Metal Marines tells its own message
-    // from the other side's by a far pointer in it (#661). A machine with
-    // no link lays them out as before, from the first entry.
+    // it and one joining, neither in the room yet, run the same program:
+    // each gives it its selectors from further on, by an amount of its
+    // own (`Net::link_end` and `ldt::reserved_for` test that the two
+    // ends' amounts differ), as two real PCs' differ, since Metal Marines
+    // tells its own message from the other side's by a far pointer in it
+    // (#661). A machine with no link lays them out as before.
     use rust_dos::serial::PortType;
     let code = {
         let mut code = Code::new();
@@ -857,8 +859,7 @@ fn two_linked_machines_give_a_program_different_selectors() {
     let join = run_linked("link_join", Some(|net| net.lan = Some("127.0.0.1:23661".into())));
     assert_eq!(alone.1, 0, "a machine with no link reserves none");
     for (linked, reserved) in [host, join] {
-        assert_ne!(reserved, 0);
+        assert!((256..320).contains(&reserved), "{reserved}");
         assert_eq!(linked, alone.0 + 8 * reserved, "{alone:?} {linked:X}");
     }
-    assert_ne!(host.0, join.0, "the two ends got the same selectors");
 }

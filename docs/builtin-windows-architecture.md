@@ -701,9 +701,10 @@ everything after comes that many entries later:
 - Linked but not in a room yet (a null modem cable or room in the
   settings, a modem that takes calls on `modemlisten`, a LAN command
   run before the room answered): 256 to 319 entries, from a hash of the
-  `[network]` and `modemlisten` settings, which the two ends usually set
-  differently (one hosts, the other joins; one takes calls, the other
-  dials).
+  `[network]` and `modemlisten` settings mixed with random bytes. Two
+  ends that share one configuration file then differ in 63 of 64 starts;
+  in a deterministic run the random bytes come from the start time, and
+  the settings keep two ends set differently apart.
 - No link: none, so single machines, save states, the determinism tests
   and the game suite's shots lay out as before.
 

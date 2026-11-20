@@ -31,13 +31,14 @@ pub const ACCESS_CODE: u8 = 0xFB;
 /// apart by them: Metal Marines takes the far pointer the other side
 /// sends that equals its own for its own message coming back (#661). A
 /// room member reserves its index (1 to 200); an instance not in a room
-/// 256 to 319 entries by its settings, which never equals a member's.
+/// 256 to 319 entries by its settings and random bytes, which never
+/// equals a member's.
 pub fn reserved_for(end: Option<crate::net::LinkEnd>) -> u16 {
     use crate::net::LinkEnd;
     match end {
         None => 0,
         Some(LinkEnd::Member(index)) => index as u16,
-        Some(LinkEnd::Settings(hash)) => 256 + (hash % 64) as u16,
+        Some(LinkEnd::NoRoom(hash)) => 256 + (hash % 64) as u16,
     }
 }
 
@@ -266,9 +267,9 @@ mod tests {
         // Room members: their indices, which the relay gives once each.
         assert_eq!(reserved_for(Some(LinkEnd::Member(1))), 1);
         assert_eq!(reserved_for(Some(LinkEnd::Member(200))), 200);
-        // Settings: past every member's, whatever the number.
+        // Outside a room: past every member's, whatever the number.
         for hash in [0, 63, 64, u32::MAX] {
-            assert!((256..320).contains(&reserved_for(Some(LinkEnd::Settings(hash)))));
+            assert!((256..320).contains(&reserved_for(Some(LinkEnd::NoRoom(hash)))));
         }
         let mut ldt = Ldt::default();
         ldt.reserve(3);
