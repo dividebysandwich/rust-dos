@@ -199,6 +199,30 @@ fn run_machine(
     memory_mb: Option<usize>,
     setup: impl FnOnce(&mut Cpu, &Path),
 ) -> (u8, String) {
+    run_prompts(test, program, command, args, memory_mb, 1, setup)
+}
+
+/// `run_with`, going on until the prompt has come back `prompts` times:
+/// for what the shell runs after the program, which then gives the exit
+/// code.
+pub fn run_with_prompts(
+    test: &str,
+    program: Vec<u8>,
+    prompts: usize,
+    setup: impl FnOnce(&mut Cpu, &Path),
+) -> (u8, String) {
+    run_prompts(test, program, "T.EXE", "", None, prompts, setup)
+}
+
+fn run_prompts(
+    test: &str,
+    program: Vec<u8>,
+    command: &str,
+    args: &str,
+    memory_mb: Option<usize>,
+    prompts: usize,
+    setup: impl FnOnce(&mut Cpu, &Path),
+) -> (u8, String) {
     let base = scratch(test, &[("T.EXE", program)]);
     let mut cpu = match memory_mb {
         Some(mb) => Cpu::with_memory(base.clone(), mb),
@@ -217,14 +241,17 @@ fn run_machine(
         rust_dos::exec::run_program(&mut cpu, command, args, false),
         "{command} didn't start"
     );
-    let mut ended = false;
-    for _ in 0..400 {
+    let mut ended = 0;
+    for _ in 0..400 * prompts {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
         if run_batch(&mut cpu, &mut NoHook, false) == StopReason::ShellReloaded {
-            ended = true;
-            break;
+            ended += 1;
+            if ended == prompts {
+                break;
+            }
         }
     }
+    let ended = ended == prompts;
     let log = lines.lock().unwrap().join("\n");
     assert!(ended, "the program didn't end:\n{log}");
     (cpu.errorlevel, log)

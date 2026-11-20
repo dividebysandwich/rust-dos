@@ -4,13 +4,14 @@
 
 use crate::win16;
 
-use win16::{CODE, Code, program, run};
+use win16::{CODE, Code, program, run, run_with_prompts};
 
 /// ExitWindows's code for restarting Windows.
 const EW_RESTARTWINDOWS: u16 = 0x42;
 
 /// USER's ordinals.
 const EXIT_WINDOWS: u16 = 7;
+const EXIT_WINDOWS_EXEC: u16 = 246;
 const WINDOW_FROM_POINT: u16 = 30;
 const CREATE_WINDOW: u16 = 41;
 const FIND_WINDOW: u16 = 50;
@@ -478,6 +479,39 @@ fn a_window_procedure_gets_the_stack_in_ds_and_its_instance_in_ax() {
     p.code.patch(name_at, name);
     let (exit, log) = run("wndproc_ds", p.build());
     assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn exit_windows_exec_runs_the_dos_program_after_windows() {
+    // ExitWindowsExec("C:\D.COM", "/X") ends Windows, and D.COM then
+    // runs at the prompt with "/X" as its command line: it ends with 5Ah
+    // when it got it, 5Bh when not. Should the call come back, T.EXE
+    // ends with 9.
+    let mut code = Code::new();
+    code.push_far(0);
+    let exe_at = code.here() - 2;
+    code.push_far(0);
+    let params_at = code.here() - 2;
+    code.call("USER", EXIT_WINDOWS_EXEC)
+        .emit(&[0xB0, 0x09]) // mov al,9
+        .exit_al();
+    let exe = code.here();
+    code.emit(b"C:\\D.COM\0");
+    code.patch(exe_at, exe);
+    let params = code.here();
+    code.emit(b"/X\0");
+    code.patch(params_at, params);
+    let dos = [
+        0x81, 0x3E, 0x82, 0x00, 0x2F, 0x58, // cmp word [82h],"/X"
+        0xB8, 0x5A, 0x4C, // mov ax,4C5Ah
+        0x74, 0x02, // je +2
+        0xB0, 0x5B, // mov al,5Bh
+        0xCD, 0x21, // int 21h
+    ];
+    let (exit, log) = run_with_prompts("exit_windows_exec", program(&code, CODE), 2, |_, dir| {
+        std::fs::write(dir.join("D.COM"), dos).unwrap();
+    });
+    assert_eq!(exit, 0x5A, "{log}");
 }
 
 #[test]
