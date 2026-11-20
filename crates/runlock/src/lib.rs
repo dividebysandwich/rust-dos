@@ -2,7 +2,8 @@
 //! once, and a measurement alone. This comment is the protocol's
 //! specification. Every program that takes the lock follows it, whatever
 //! it is written in, and a later change keeps it compatible with the
-//! programs that implement this version (`protocol` 1).
+//! programs that implement this version (`protocol` 2). Version 1 had
+//! no `door` and `queue`; "Older programs" says how the two mix.
 //!
 //! # Files
 //!
@@ -16,6 +17,9 @@
 //!   measurement exclusive.
 //! - `gate`, which puts measurements before the shared runs that ask
 //!   after them.
+//! - `queue`, which puts shared runs before the measurements that ask
+//!   after them.
+//! - `door`, through which every take joins the line.
 //! - `holders/`, one pair of files for each program that holds the lock
 //!   or waits for it.
 //!
@@ -30,11 +34,15 @@
 //! A program creates `DIR` and `DIR/holders` when they are missing,
 //! writes its holder files (below) with `state` `waiting`, and then:
 //!
-//! - Shared: it takes `gate` exclusive, takes `lock` shared, and lets
-//!   `gate` go. It holds `gate` only for that moment. If `lock` can't be
-//!   had (a measurement is letting go), it lets `gate` go and tries again.
-//! - Exclusive: it takes `gate` shared and keeps it, while it waits for
-//!   `lock` and while it runs; then it takes `lock` exclusive.
+//! - Shared: it takes `door` shared, takes `queue` shared and keeps it,
+//!   and lets `door` go. Then it takes `gate` exclusive, takes `lock`
+//!   shared, and lets `gate` go; it holds `gate` only for that moment. If
+//!   `lock` can't be had (a measurement is letting go), it lets `gate` go
+//!   and tries again. Once it holds `lock` it lets `queue` go.
+//! - Exclusive: it takes `door` exclusive, then `queue` exclusive, then
+//!   `gate` shared, and lets `queue` and then `door` go. It keeps `gate`
+//!   while it waits for `lock` and while it runs; then it takes `lock`
+//!   exclusive.
 //!
 //! While a measurement waits or runs it holds `gate` shared, so no new
 //! shared run can take it exclusive and get in, and the running ones
@@ -44,9 +52,33 @@
 //! run that asked after them. Among several waiting measurements there is
 //! no order.
 //!
-//! A shared take finds `gate` held for a moment by another shared take,
-//! too. It tells the two apart by the holders' records (an exclusive one
-//! is listed) and may try again sooner when none is.
+//! A shared run that waits holds `queue` shared, so a measurement that
+//! asks after it can't take `queue` exclusive, nor then `gate`, until
+//! that shared run is in. When the measurements that asked before the
+//! shared run let go, `gate` is free, and no later measurement can take
+//! it first. Shared runs thus come before every measurement that asked
+//! after them, however soon a measurement script asks again after
+//! letting go.
+//!
+//! `door` keeps that order while a measurement waits for `queue`. The
+//! measurement holds `door` exclusive meanwhile, so shared runs that ask
+//! after it can't join `queue` ahead of it, and it lets `door` go only
+//! once it has `gate`. A shared take holds `door` only while it joins
+//! `queue`. With `door` held shared no measurement holds `queue`, so
+//! that step doesn't wait.
+//!
+//! The line is kept in OS locks rather than in a ticket file because a
+//! counter in a file has to be read and written, which Windows refuses
+//! for a locked file, and because a process killed between taking a
+//! ticket and being served leaves a number every later program would
+//! have to recognise as dead. With locks, the line is whoever holds
+//! `queue` and `gate`, and a killed process leaves it when the OS lets
+//! its locks go.
+//!
+//! A take finds `door`, `queue` or `gate` held for a moment by another
+//! take passing through, too. It tells that apart from a wait by the
+//! holders' records (the holders it waits for are listed) and may try
+//! again sooner when none is.
 //!
 //! A program that waits with a limit polls the `try_` forms, since a
 //! blocked lock call can't be given up. One that waits without a limit
@@ -57,6 +89,18 @@
 //! Once it holds the lock, it rewrites its record with `state` `holding`.
 //! It lets go by removing its holder files (the JSON first), then `lock`,
 //! then `gate`.
+//!
+//! # Older programs
+//!
+//! A program of `protocol` 1 takes only `gate` and `lock`, in the steps
+//! above, and never `door` or `queue`. Mixed with programs of this
+//! version, measurements still run alone and no take waits for itself:
+//! the older program waits on nothing it didn't wait on before, and holds
+//! nothing the newer ones wait on in a new way. Only the order between
+//! them is lost. An older shared take can get in ahead of newer
+//! measurements that wait for `queue`, and an older measurement takes
+//! `gate` ahead of newer shared takes that waited longer, as in
+//! version 1.
 //!
 //! # Holders
 //!
@@ -118,11 +162,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub mod cli;
 
 /// The protocol's version, the records' `protocol`.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 /// The main lock's file.
 pub const LOCK_FILE: &str = "lock";
 /// The gate's file.
 pub const GATE_FILE: &str = "gate";
+/// The file waiting shared takes hold.
+pub const QUEUE_FILE: &str = "queue";
+/// The file every take passes to join the line.
+pub const DOOR_FILE: &str = "door";
 /// The directory of the holder files.
 pub const HOLDERS_DIR: &str = "holders";
 /// The default directory's name in the profile directory.
@@ -555,7 +603,31 @@ pub struct Hold {
     // Dropped in this order: the holder files, `lock`, `gate`.
     entry: Entry,
     lock: File,
+    /// A measurement's `gate`, held shared.
     gate: Option<File>,
+}
+
+/// The files a take uses while it waits, and how far it has got.
+struct Line {
+    door: File,
+    queue: File,
+    gate: File,
+    door_path: PathBuf,
+    queue_path: PathBuf,
+    gate_path: PathBuf,
+    lock_path: PathBuf,
+    step: Step,
+}
+
+/// How far a take has got in the line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// Outside: it holds nothing yet.
+    Outside,
+    /// A measurement holding `door`, waiting for `queue`.
+    AtDoor,
+    /// A shared take holding `queue`, or a measurement holding `gate`.
+    InLine,
 }
 
 impl Hold {
@@ -568,8 +640,19 @@ impl Hold {
         std::fs::create_dir_all(&holders).map_err(io_err(&holders))?;
         let lock_path = dir.join(LOCK_FILE);
         let gate_path = dir.join(GATE_FILE);
+        let queue_path = dir.join(QUEUE_FILE);
+        let door_path = dir.join(DOOR_FILE);
         let lock = open_lock_file(&lock_path).map_err(io_err(&lock_path))?;
-        let gate = open_lock_file(&gate_path).map_err(io_err(&gate_path))?;
+        let mut line = Line {
+            door: open_lock_file(&door_path).map_err(io_err(&door_path))?,
+            queue: open_lock_file(&queue_path).map_err(io_err(&queue_path))?,
+            gate: open_lock_file(&gate_path).map_err(io_err(&gate_path))?,
+            door_path,
+            queue_path,
+            gate_path,
+            lock_path,
+            step: Step::Outside,
+        };
         let entry = Entry::create(&holders)?;
         let record = Record {
             protocol: PROTOCOL,
@@ -589,20 +672,20 @@ impl Hold {
             record,
             entry,
             lock,
-            gate: Some(gate),
+            gate: None,
         };
 
         let start = Instant::now();
         let mut told: Option<Vec<String>> = None;
-        let mut gate_held = false;
         loop {
-            if hold.try_once(&mut gate_held, &gate_path, &lock_path)? {
+            if hold.try_once(&mut line)? {
                 break;
             }
-            let in_way = hold.in_the_way();
-            // Nobody listed in the way, early in the wait: another shared
-            // take has `gate` for a moment, or a holder's record isn't
-            // written yet. Not worth a line about waiting, and soon over.
+            let in_way = hold.in_the_way(line.step);
+            // Nobody listed in the way, early in the wait: another take
+            // has `door`, `queue` or `gate` for a moment, or a holder's
+            // record isn't written yet. Not worth a line about waiting,
+            // and soon over.
             let brief = in_way.is_empty() && told.is_none() && start.elapsed() < BRIEF;
             let files: Vec<String> = in_way.iter().map(|h| h.file.clone()).collect();
             if !brief && told.as_ref() != Some(&files) {
@@ -631,53 +714,85 @@ impl Hold {
                 request.poll
             });
         }
-        if hold.mode == Mode::Shared {
-            hold.gate = None;
+        // A measurement keeps `gate`; the other files' handles close,
+        // with no lock left on them.
+        if hold.mode == Mode::Exclusive {
+            hold.gate = Some(line.gate);
         }
         hold.record.state = State::Holding;
         hold.entry.write(&hold.record)?;
         Ok(hold)
     }
 
-    /// One try at the lock. `gate_held` is whether an exclusive take has
-    /// the gate already.
-    fn try_once(
-        &mut self,
-        gate_held: &mut bool,
-        gate_path: &Path,
-        lock_path: &Path,
-    ) -> Result<bool, Error> {
-        let gate = self.gate.as_ref().expect("the gate is open while taking");
+    /// One try at the lock, from where `line` has got to.
+    fn try_once(&self, line: &mut Line) -> Result<bool, Error> {
         match self.mode {
             Mode::Shared => {
-                if !got(gate.try_lock()).map_err(io_err(gate_path))? {
-                    return Ok(false);
-                }
-                let taken = got(self.lock.try_lock_shared()).map_err(io_err(lock_path));
-                gate.unlock().map_err(io_err(gate_path))?;
-                taken
-            }
-            Mode::Exclusive => {
-                if !*gate_held {
-                    *gate_held = got(gate.try_lock_shared()).map_err(io_err(gate_path))?;
-                    if !*gate_held {
+                if line.step == Step::Outside {
+                    if !got(line.door.try_lock_shared()).map_err(io_err(&line.door_path))? {
                         return Ok(false);
                     }
+                    let joined =
+                        got(line.queue.try_lock_shared()).map_err(io_err(&line.queue_path));
+                    line.door.unlock().map_err(io_err(&line.door_path))?;
+                    if !joined? {
+                        return Ok(false);
+                    }
+                    line.step = Step::InLine;
                 }
-                got(self.lock.try_lock()).map_err(io_err(lock_path))
+                if !got(line.gate.try_lock()).map_err(io_err(&line.gate_path))? {
+                    return Ok(false);
+                }
+                let taken = got(self.lock.try_lock_shared()).map_err(io_err(&line.lock_path));
+                line.gate.unlock().map_err(io_err(&line.gate_path))?;
+                if !taken? {
+                    return Ok(false);
+                }
+                line.queue.unlock().map_err(io_err(&line.queue_path))?;
+                Ok(true)
+            }
+            Mode::Exclusive => {
+                if line.step == Step::Outside {
+                    if !got(line.door.try_lock()).map_err(io_err(&line.door_path))? {
+                        return Ok(false);
+                    }
+                    line.step = Step::AtDoor;
+                }
+                if line.step == Step::AtDoor {
+                    // The shared takes waiting in `queue` asked first.
+                    if !got(line.queue.try_lock()).map_err(io_err(&line.queue_path))? {
+                        return Ok(false);
+                    }
+                    // Only a take of protocol 1 has `gate` exclusive now.
+                    let gated = got(line.gate.try_lock_shared()).map_err(io_err(&line.gate_path));
+                    line.queue.unlock().map_err(io_err(&line.queue_path))?;
+                    if !gated? {
+                        return Ok(false);
+                    }
+                    line.door.unlock().map_err(io_err(&line.door_path))?;
+                    line.step = Step::InLine;
+                }
+                got(self.lock.try_lock()).map_err(io_err(&line.lock_path))
             }
         }
     }
 
     /// The other holders this take waits for. A shared take waits for the
-    /// exclusive ones, which hold the gate while they wait and run. An
-    /// exclusive take waits for those that hold the lock, in either mode.
-    fn in_the_way(&self) -> Vec<Holder> {
+    /// exclusive ones, which hold `door` or `gate` while they wait and
+    /// run. An exclusive take waits for those that hold the lock, in
+    /// either mode, and until it has `gate`, for the shared takes that
+    /// asked before it and wait in `queue`.
+    fn in_the_way(&self, step: Step) -> Vec<Holder> {
         let mut found = holders(&self.dir).unwrap_or_default();
         found.retain(|h| h.file != self.entry.file);
         found.retain(|h| match self.mode {
             Mode::Shared => h.record.mode == Mode::Exclusive,
-            Mode::Exclusive => h.record.state == State::Holding,
+            Mode::Exclusive => {
+                h.record.state == State::Holding
+                    || (step != Step::InLine
+                        && h.record.mode == Mode::Shared
+                        && h.record.asked <= self.record.asked)
+            }
         });
         found
     }
@@ -968,6 +1083,96 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(10))
             .expect("the second measurement got the lock");
         second.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Waits until `dir` lists `n` holders in `state` with `mode`.
+    fn until_listed(dir: &Path, mode: Mode, state: State, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while holders(dir)
+            .unwrap()
+            .iter()
+            .filter(|h| h.record.mode == mode && h.record.state == state)
+            .count()
+            < n
+        {
+            assert!(
+                Instant::now() < deadline,
+                "{:?} {:?} not listed",
+                mode,
+                state
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A take on a thread of its own, which holds the lock for `hold_ms`.
+    /// `turns` gets `name` when it gets in.
+    fn take_on_thread(
+        dir: &Path,
+        mode: Mode,
+        name: &'static str,
+        poll_ms: u64,
+        hold_ms: u64,
+        turns: std::sync::mpsc::Sender<&'static str>,
+    ) -> std::thread::JoinHandle<()> {
+        let dir = dir.to_path_buf();
+        std::thread::spawn(move || {
+            let req = Request {
+                poll: Duration::from_millis(poll_ms),
+                wait: Some(Duration::from_secs(20)),
+                ..Request::new(mode, name)
+            };
+            let hold = held(take_with(&dir, &req, None, |_| {}));
+            turns.send(name).unwrap();
+            std::thread::sleep(Duration::from_millis(hold_ms));
+            drop(hold);
+        })
+    }
+
+    #[test]
+    fn a_waiting_shared_take_comes_before_a_later_measurement() {
+        let dir = scratch("fair");
+        let first = held(take_with(&dir, &request(Mode::Exclusive, 0), None, |_| {}));
+        let (tx, rx) = std::sync::mpsc::channel();
+        // The shared take tries again far less often than the second
+        // measurement, which in protocol 1 took `gate` at once and kept
+        // it, so that the shared take never found it free.
+        let shared = take_on_thread(&dir, Mode::Shared, "shared", 200, 300, tx.clone());
+        until_listed(&dir, Mode::Shared, State::Waiting, 1);
+        let second = take_on_thread(&dir, Mode::Exclusive, "second", 5, 0, tx);
+        until_listed(&dir, Mode::Exclusive, State::Waiting, 1);
+        std::thread::sleep(Duration::from_millis(100));
+        drop(first);
+        let order: Vec<&str> = rx.iter().take(2).collect();
+        assert_eq!(order, ["shared", "second"]);
+        shared.join().unwrap();
+        second.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_measurement_at_the_door_comes_before_later_shared_takes() {
+        let dir = scratch("door");
+        let first = held(take_with(&dir, &request(Mode::Exclusive, 0), None, |_| {}));
+        let (tx, rx) = std::sync::mpsc::channel();
+        // A shared take waits behind the first measurement, and a second
+        // measurement waits behind it, holding `door`.
+        let early = take_on_thread(&dir, Mode::Shared, "early", 10, 200, tx.clone());
+        until_listed(&dir, Mode::Shared, State::Waiting, 1);
+        let second = take_on_thread(&dir, Mode::Exclusive, "second", 10, 200, tx.clone());
+        until_listed(&dir, Mode::Exclusive, State::Waiting, 1);
+        std::thread::sleep(Duration::from_millis(100));
+        // This one asked after the second measurement, and tries again
+        // sooner than it.
+        let late = take_on_thread(&dir, Mode::Shared, "late", 2, 0, tx);
+        until_listed(&dir, Mode::Shared, State::Waiting, 2);
+        drop(first);
+        let order: Vec<&str> = rx.iter().take(3).collect();
+        assert_eq!(order, ["early", "second", "late"]);
+        for t in [early, second, late] {
+            t.join().unwrap();
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
