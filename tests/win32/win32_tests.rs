@@ -14168,6 +14168,141 @@ fn an_mdi_child_brought_to_the_top_in_a_hidden_frame_is_the_active_one() {
 }
 
 #[test]
+fn wm_mdiactivate_makes_the_child_the_active_one() {
+    // The MDI client answers WM_MDIACTIVATE with SetWindowPos(SWP_NOSIZE
+    // | SWP_NOMOVE) of the child, whose WM_CHILDACTIVATE makes
+    // DefMDIChildProc activate it (Wine's MDIClientWndProc; msg.c's
+    // WmSwitchChild, recorded on Windows, has the WM_CHILDACTIVATE).
+    const WS_CHILD: i32 = 0x4000_0000;
+    const WM_MDICREATE: i32 = 0x0220;
+    const WM_MDIACTIVATE: i32 = 0x0222;
+    const WM_MDIGETACTIVE: i32 = 0x0229;
+    const CW_USEDEFAULT: u32 = 0x8000_0000;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "SendMessageA",
+        "DefMDIChildProcA",
+    ];
+    // The frame, the client and the two children at 0, 4, 8 and 0x0C,
+    // the classes' names at 0x10, 0x20 and 0x88, a CLIENTCREATESTRUCT at
+    // 0x30, an MDICREATESTRUCTA at 0x38 (its class set by the code, no
+    // title, the instance, default places, WS_VISIBLE) and a WNDCLASSA
+    // at 0x60.
+    let mut data = vec![0; 0x90];
+    put(&mut data, 0x10, b"Static");
+    put(&mut data, 0x20, b"MDICLIENT");
+    put(&mut data, 0x88, b"Kid");
+    put(&mut data, 0x34, &1u32.to_le_bytes());
+    let mdi_create = [
+        0,
+        0,
+        BASE,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        WS_VISIBLE as u32,
+    ];
+    for (i, v) in mdi_create.iter().enumerate() {
+        put(&mut data, 0x38 + 4 * i, &v.to_le_bytes());
+    }
+    put(&mut data, 0x60 + 16, &BASE.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let at = |offset: u32| l.at(offset) as i32;
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The children's window procedure.
+        a.jmp(f("DefMDIChildProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0x60 + 4)), eax)?;
+        a.mov(dword_ptr(l.at(0x60 + 36)), at(0x88))?;
+        a.mov(dword_ptr(l.at(0x38)), at(0x88))?;
+        a.push(at(0x60))?;
+        a.call(f("RegisterClassA"))?;
+        a.xor(ebx, ebx)?;
+        let instance = BASE as i32;
+        // The frame, shown, and the client in it.
+        let frame = [
+            0,
+            at(0x10),
+            0,
+            WS_POPUP | WS_VISIBLE,
+            0,
+            0,
+            640,
+            480,
+            0,
+            0,
+            instance,
+            0,
+        ];
+        push_args(a, &frame)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(dword_ptr(l.at(0)), eax)?;
+        let client = WS_CHILD | WS_VISIBLE;
+        let client = [
+            0,
+            at(0x20),
+            0,
+            client,
+            0,
+            0,
+            640,
+            480,
+            0,
+            0,
+            instance,
+            at(0x30),
+        ];
+        push_args(a, &client)?;
+        a.mov(eax, dword_ptr(l.at(0)))?;
+        a.mov(dword_ptr(esp + 32), eax)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(dword_ptr(l.at(4)), eax)?;
+        // Two children, shown: the second is the active one.
+        for slot in [8, 0x0C] {
+            push_args(a, &[WM_MDICREATE, 0, at(0x38)])?;
+            a.push(dword_ptr(l.at(4)))?;
+            a.call(f("SendMessageA"))?;
+            a.mov(dword_ptr(l.at(slot)), eax)?;
+        }
+        let mut missing = a.create_label();
+        for slot in [0, 4, 8, 0x0C] {
+            a.cmp(dword_ptr(l.at(slot)), 0)?;
+            a.je(missing)?;
+        }
+        push_args(a, &[WM_MDIGETACTIVE, 0, 0])?;
+        a.push(dword_ptr(l.at(4)))?;
+        a.call(f("SendMessageA"))?;
+        // Bit 1: the second child was the active one.
+        a.cmp(eax, dword_ptr(l.at(0x0C)))?;
+        a.jne(missing)?;
+        a.or(ebx, 1)?;
+        a.push(0)?;
+        a.push(dword_ptr(l.at(8)))?;
+        a.push(WM_MDIACTIVATE)?;
+        a.push(dword_ptr(l.at(4)))?;
+        a.call(f("SendMessageA"))?;
+        push_args(a, &[WM_MDIGETACTIVE, 0, 0])?;
+        a.push(dword_ptr(l.at(4)))?;
+        a.call(f("SendMessageA"))?;
+        // Bit 2: WM_MDIACTIVATE made the first one the active one.
+        a.cmp(eax, dword_ptr(l.at(8)))?;
+        a.jne(missing)?;
+        a.or(ebx, 2)?;
+        a.set_label(&mut missing)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (code, _) = run("mdi_activate", program);
+    assert_eq!(code, 3, "the checks that failed: {:02b}", !code & 3);
+}
+
+#[test]
 fn a_state_saved_while_win_exec_waits_resumes_the_wait() {
     // C.EXE writes C0.DAT, works for 300 ms, writes C.DAT and only then
     // gets messages. The state is saved once C0.DAT is there, while the
