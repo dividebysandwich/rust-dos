@@ -99,6 +99,17 @@ fn make_process(cpu: &mut Cpu, environment: Vec<String>) -> Result<(), String> {
     let pid = created.process.1;
     cpu.bus.win32.win16.pid = pid;
     cpu.bus.win32.user.input.win16 = pid;
+    // A machine linked to another lays out its selectors differently from
+    // the other's, before anything takes one. A save state keeps the
+    // entries reserved, so a restored machine keeps its layout.
+    let reserved = ldt::reserved_for(cpu.bus.net.link_end());
+    cpu.bus.win32.win16.ldt.reserve(reserved);
+    if reserved != 0 {
+        cpu.bus.log_string(&format!(
+            "[W16] Linked to another machine: {} selectors reserved",
+            reserved
+        ));
+    }
     let made = super::with_win16(cpu, pid, |p, bus| {
         let mut memory = std::mem::take(&mut p.memory);
         let result = (|| {
