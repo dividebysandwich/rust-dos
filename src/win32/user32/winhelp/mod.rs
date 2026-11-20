@@ -110,9 +110,15 @@ const ID_EXIT: u32 = 1103;
 const ID_COPY: u32 = 1201;
 const ID_ANNOTATE: u32 = 1202;
 const ID_DEFINE: u32 = 1301;
-const ID_ON_TOP: u32 = 1401;
-const ID_HISTORY: u32 = 1402;
-const ID_SYSTEM_COLORS: u32 = 1403;
+/// Keep Help on Top's choices, in their order.
+const ID_ON_TOP_DEFAULT: u32 = 1401;
+const ID_ON_TOP: u32 = 1402;
+const ID_NOT_ON_TOP: u32 = 1403;
+const ID_HISTORY: u32 = 1404;
+const ID_FONT_SMALL: u32 = 1405;
+const ID_FONT_NORMAL: u32 = 1406;
+const ID_FONT_LARGE: u32 = 1407;
+const ID_SYSTEM_COLORS: u32 = 1408;
 const ID_VERSION: u32 = 1501;
 const BUTTON_WIDTH: i32 = 64;
 const BUTTON_HEIGHT: i32 = 22;
@@ -592,9 +598,16 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         },
         K_VERSION => match t.step {
             0 => {
+                // Windows 98 SE's Version Information box: its WinHelp's
+                // version and copyright, then the file's title.
                 let (text, caption) = (t.scratch + S_TEXT, t.scratch);
-                write_str(cpu, caption, "Windows Help", 32);
-                write_str(cpu, text, "Windows Help Version 4.00", 96);
+                write_str(cpu, caption, "Version Information", 32);
+                let about = format!(
+                    "Microsoft Windows Help\n4.10.1998\n\
+                     Copyright \u{A9} 1990-1995 Microsoft Corp.\n\n{}",
+                    title(cpu)
+                );
+                write_str(cpu, text, &about, (SCRATCH - S_TEXT) as usize);
                 let args = [t.var(1), text, caption, MB_OK | MB_ICONINFORMATION];
                 Next::call(address_of("MessageBoxA"), &args, 1)
             }
@@ -697,26 +710,43 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     }
 }
 
-/// The viewer's menu bar: Windows 98 WinHelp's for a Windows 3.1 file.
+/// The viewer's menu bar: Windows 98 SE WinHelp's (4.10.1998) for a
+/// Windows 3.1 file, as it shows METAL.HLP. Keep Help on Top starts at
+/// Default, which is the window's place the file asks for, and the
+/// viewer reads none: among the others, as Not On Top.
 fn menu_bar(cpu: &mut Cpu) -> u32 {
-    use crate::win32::user32::menu::{BarItem, MF_GRAYED, build_bar};
-    const FILE: [BarItem; 4] = [
-        (ID_OPEN, Some("&Open..."), MF_GRAYED),
-        (ID_PRINT, Some("&Print Topic..."), MF_GRAYED),
-        (0, None, 0),
-        (ID_EXIT, Some("E&xit"), 0),
+    use crate::win32::user32::menu::BarItem::{Command, Popup, Separator};
+    use crate::win32::user32::menu::{BarItem, MF_CHECKED, MF_GRAYED, build_bar};
+    const FILE: [BarItem; 5] = [
+        Command(ID_OPEN, "&Open...", MF_GRAYED),
+        Separator,
+        Command(ID_PRINT, "&Print Topic...", MF_GRAYED),
+        Separator,
+        Command(ID_EXIT, "E&xit", 0),
     ];
-    const EDIT: [BarItem; 2] = [
-        (ID_COPY, Some("&Copy"), MF_GRAYED),
-        (ID_ANNOTATE, Some("&Annotate..."), MF_GRAYED),
+    const EDIT: [BarItem; 3] = [
+        Command(ID_COPY, "&Copy\tCtrl+C", MF_GRAYED),
+        Separator,
+        Command(ID_ANNOTATE, "&Annotate...", MF_GRAYED),
     ];
-    const BOOKMARK: [BarItem; 1] = [(ID_DEFINE, Some("&Define..."), MF_GRAYED)];
-    const OPTIONS: [BarItem; 3] = [
-        (ID_ON_TOP, Some("&Keep Help on Top"), 0),
-        (ID_HISTORY, Some("Display &History Window"), MF_GRAYED),
-        (ID_SYSTEM_COLORS, Some("Use &System Colors"), MF_GRAYED),
+    const BOOKMARK: [BarItem; 1] = [Command(ID_DEFINE, "&Define...", MF_GRAYED)];
+    const ON_TOP: [BarItem; 3] = [
+        Command(ID_ON_TOP_DEFAULT, "&Default", MF_CHECKED),
+        Command(ID_ON_TOP, "&On Top", 0),
+        Command(ID_NOT_ON_TOP, "&Not On Top", 0),
     ];
-    const HELP: [BarItem; 1] = [(ID_VERSION, Some("&Version..."), 0)];
+    const FONT: [BarItem; 3] = [
+        Command(ID_FONT_SMALL, "&Small", MF_GRAYED),
+        Command(ID_FONT_NORMAL, "&Normal", MF_GRAYED | MF_CHECKED),
+        Command(ID_FONT_LARGE, "&Large", MF_GRAYED),
+    ];
+    const OPTIONS: [BarItem; 4] = [
+        Popup("&Keep Help on Top", &ON_TOP),
+        Command(ID_HISTORY, "Display &History Window...", MF_GRAYED),
+        Popup("&Font", &FONT),
+        Command(ID_SYSTEM_COLORS, "Use &System Colors", MF_GRAYED),
+    ];
+    const HELP: [BarItem; 1] = [Command(ID_VERSION, "&Version...", 0)];
     build_bar(
         cpu,
         &[
@@ -988,16 +1018,17 @@ pub fn frame_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         WM_COMMAND if ours => {
             match wp & 0xFFFF {
                 ID_EXIT => return task::start(cpu, task::WINHELP, vec![K_QUIT, hwnd], 0),
-                ID_ON_TOP => {
+                id @ ID_ON_TOP_DEFAULT..=ID_NOT_ON_TOP => {
                     use crate::win32::user32::menu::{MF_CHECKED, check_menu_item, get_menu};
-                    let on = user(cpu)
-                        .window(hwnd)
-                        .is_some_and(|w| w.ex_style & WS_EX_TOPMOST == 0);
+                    // The choice checked; Default is Not On Top, as the
+                    // menu bar says.
                     let bar = get_menu(cpu, &[hwnd]).unwrap_or(0);
-                    let check = if on { MF_CHECKED } else { 0 };
-                    check_menu_item(cpu, &[bar, ID_ON_TOP, check]);
-                    let vars = vec![K_ON_TOP, hwnd, on as u32];
-                    return task::start(cpu, task::WINHELP, vars, 0);
+                    for choice in ID_ON_TOP_DEFAULT..=ID_NOT_ON_TOP {
+                        let check = if choice == id { MF_CHECKED } else { 0 };
+                        check_menu_item(cpu, &[bar, choice, check]);
+                    }
+                    let on = u32::from(id == ID_ON_TOP);
+                    return task::start(cpu, task::WINHELP, vec![K_ON_TOP, hwnd, on], 0);
                 }
                 ID_VERSION => {
                     return task::start(cpu, task::WINHELP, vec![K_VERSION, hwnd], SCRATCH);
@@ -1159,11 +1190,12 @@ pub fn topic_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::win32::user32::menu::{self, MF_BYCOMMAND, MF_GRAYED};
+    use crate::win32::user32::menu::{self, MF_BYCOMMAND, MF_CHECKED, MF_GRAYED};
 
-    /// Windows 98's WinHelp shows File, Edit, Bookmark, Options and Help
-    /// over a Windows 3.1 help file's buttons. The commands the viewer
-    /// carries out are enabled, the others grayed.
+    /// Windows 98 SE's WinHelp shows File, Edit, Bookmark, Options and
+    /// Help over a Windows 3.1 help file's buttons, with these items,
+    /// Keep Help on Top and Font submenus of Options. The commands the
+    /// viewer carries out are enabled, the others grayed.
     #[test]
     fn the_viewer_has_windows_98s_menu_bar() {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
@@ -1171,17 +1203,23 @@ mod tests {
         let bar = menu_bar(&mut cpu);
         let count = |cpu: &mut Cpu, h| menu::get_menu_item_count(cpu, &[h]).unwrap();
         assert_eq!(count(&mut cpu, bar), 5);
-        let sizes: Vec<u32> = (0..5)
-            .map(|i| {
-                let sub = menu::get_sub_menu(&mut cpu, &[bar, i]).unwrap();
-                count(&mut cpu, sub)
-            })
+        let subs: Vec<u32> = (0..5)
+            .map(|i| menu::get_sub_menu(&mut cpu, &[bar, i]).unwrap())
             .collect();
-        assert_eq!(sizes, [4, 2, 1, 3, 1]);
+        let sizes: Vec<u32> = subs.iter().map(|&s| count(&mut cpu, s)).collect();
+        assert_eq!(sizes, [5, 3, 1, 4, 1]);
+        let on_top = menu::get_sub_menu(&mut cpu, &[subs[3], 0]).unwrap();
+        let font = menu::get_sub_menu(&mut cpu, &[subs[3], 2]).unwrap();
+        assert_eq!((count(&mut cpu, on_top), count(&mut cpu, font)), (3, 3));
         let state = |cpu: &mut Cpu, id| menu::get_menu_state(cpu, &[bar, id, MF_BYCOMMAND]);
-        for id in [ID_EXIT, ID_ON_TOP, ID_VERSION] {
+        for id in [ID_EXIT, ID_ON_TOP, ID_NOT_ON_TOP, ID_VERSION] {
             assert_eq!(state(&mut cpu, id), Some(0), "{id} is enabled");
         }
+        assert_eq!(state(&mut cpu, ID_ON_TOP_DEFAULT), Some(MF_CHECKED));
+        assert_eq!(
+            state(&mut cpu, ID_FONT_NORMAL),
+            Some(MF_GRAYED | MF_CHECKED)
+        );
         let grayed = [
             ID_OPEN,
             ID_PRINT,
@@ -1189,6 +1227,8 @@ mod tests {
             ID_ANNOTATE,
             ID_DEFINE,
             ID_HISTORY,
+            ID_FONT_SMALL,
+            ID_FONT_LARGE,
             ID_SYSTEM_COLORS,
         ];
         for id in grayed {
