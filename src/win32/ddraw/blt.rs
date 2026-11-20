@@ -506,7 +506,7 @@ fn ready(cpu: &mut Cpu, this: u32) -> Result<(u32, Surface), u32> {
     // What Direct3D drew in a 16-bit shadow of it, first.
     super::d3d::shadow::expose(cpu, id);
     let s = state(cpu).surface(id).cloned().ok_or(DDERR_INVALIDOBJECT)?;
-    if s.lost {
+    if s.lost.get() {
         return Err(DDERR_SURFACELOST);
     }
     if s.locked || s.dc != 0 {

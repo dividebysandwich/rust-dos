@@ -57,7 +57,7 @@ fn shadows(cpu: &mut Cpu) -> &mut Vec<Shadow> {
 /// or depth buffer of more than 16 bits in video memory, on a Banshee
 /// or Voodoo3.
 fn shadowed(cpu: &mut Cpu, s: &Surface) -> bool {
-    hw::banshee(cpu) && s.memory == MEM_VIDEO && !s.lost && matches!(s.format.bits, 24 | 32)
+    hw::banshee(cpu) && s.memory == MEM_VIDEO && !s.lost.get() && matches!(s.format.bits, 24 | 32)
 }
 
 /// Where the card draws the surface `id`: its block of the card's

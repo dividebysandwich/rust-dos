@@ -14,7 +14,7 @@
 //! INT 21h AH=4Ch, so the shell or the program that started it goes on.
 
 mod advapi32;
-mod boot;
+pub(crate) mod boot;
 pub(crate) mod call;
 mod com;
 mod comctl32;
@@ -23,6 +23,7 @@ mod convert;
 mod d3d8;
 mod dciman32;
 mod ddraw;
+pub use ddraw::is_lost_cache;
 mod dinput;
 pub mod dll_files;
 mod forwarders;

@@ -40,6 +40,30 @@ pub enum Conv {
     /// still has that stub. A function that has been code since it was
     /// added has no such state, and its handler is `never_a_trap`.
     Code(&'static [u8]),
+    /// `Code` that reads or writes the DLL's variables at the addresses
+    /// its `Fixup`s say.
+    CodeVars(&'static [u8], &'static [Fixup]),
+}
+
+/// A place in the bytes of a function given as code (`Conv::CodeVars`)
+/// that holds the address of one of its DLL's variables: the 4 bytes at
+/// `at` hold an offset from the start of the variable `var` (its place in
+/// `Dll::vars`), and the image has the variable's address added to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fixup {
+    pub at: usize,
+    pub var: usize,
+}
+
+impl Conv {
+    /// The code of a function given as code, and its fixups.
+    fn code(self) -> Option<(&'static [u8], &'static [Fixup])> {
+        match self {
+            Conv::Code(code) => Some((code, &[])),
+            Conv::CodeVars(code, fixups) => Some((code, fixups)),
+            _ => None,
+        }
+    }
 }
 
 /// The handler of a function that has been x86 code (`Conv::Code`) since
@@ -283,17 +307,12 @@ fn stubs_size(dll: &Dll) -> u32 {
 /// place in `apis`, its offset in the code section, and the code.
 fn functions_as_code(dll: &Dll) -> impl Iterator<Item = (usize, u32, &'static [u8])> + '_ {
     let mut at = stubs_size(dll);
-    dll.apis
-        .iter()
-        .enumerate()
-        .filter_map(move |(i, api)| match api.conv {
-            Conv::Code(code) => {
-                let offset = at;
-                at += code.len() as u32;
-                Some((i, offset, code))
-            }
-            _ => None,
-        })
+    dll.apis.iter().enumerate().filter_map(move |(i, api)| {
+        let (code, _) = api.conv.code()?;
+        let offset = at;
+        at += code.len() as u32;
+        Some((i, offset, code))
+    })
 }
 
 /// Bytes the code section of the DLL `dll` takes: the stubs, the vtables
@@ -430,16 +449,23 @@ fn builder(index: usize, version: super::version::WindowsVersion) -> pe::Builder
         .iter()
         .enumerate()
         .flat_map(|(i, api)| match api.conv {
-            Conv::Code(_) => jump(CODE_RVA + i as u32 * STUB, entries[i]),
+            Conv::Code(_) | Conv::CodeVars(..) => jump(CODE_RVA + i as u32 * STUB, entries[i]),
             conv => stub(id(index, i), api.args, conv),
         })
         .collect();
     for method in vtable_methods(dll) {
         code.extend_from_slice(&stub_address(index, method).to_le_bytes());
     }
-    for (_, offset, function) in functions_as_code(dll) {
+    for (i, offset, function) in functions_as_code(dll) {
         debug_assert_eq!(code.len() as u32, offset);
         code.extend_from_slice(function);
+        let fixups = dll.apis[i].conv.code().map_or(&[][..], |(_, f)| f);
+        for fixup in fixups {
+            let at = (offset as usize + fixup.at)..(offset as usize + fixup.at + 4);
+            let plus = u32::from_le_bytes(code[at.clone()].try_into().unwrap());
+            let address = var_address(index, fixup.var).wrapping_add(plus);
+            code[at].copy_from_slice(&address.to_le_bytes());
+        }
     }
     let rva = b.section(
         ".text",

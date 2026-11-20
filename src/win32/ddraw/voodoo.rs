@@ -292,13 +292,17 @@ pub fn close(cpu: &mut Cpu) {
 
 /// The surfaces in the card's buffers lose them.
 fn lost(cpu: &mut Cpu) {
+    let mut changed = false;
     for id in state(cpu).ids(|o| o.surface.as_ref().is_some_and(|s| s.memory == MEM_CARD)) {
         if let Some(s) = state(cpu).surface_mut(id) {
             s.memory = surface::MEM_NONE;
             s.bits = 0;
-            s.lost = true;
             s.locked = false;
         }
+        changed |= surface::mark_lost(cpu, id, true);
+    }
+    if changed {
+        surface::forget_is_lost(cpu);
     }
 }
 
@@ -350,7 +354,7 @@ pub fn is_card_object(cpu: &mut Cpu, id: u32) -> bool {
 #[allow(dead_code)] // For Direct3D's HAL.
 pub fn card_buffer(cpu: &mut Cpu, id: u32) -> Option<u32> {
     let s = state(cpu).surface(id)?;
-    (s.memory == MEM_CARD && !s.lost).then_some(s.bits)
+    (s.memory == MEM_CARD && !s.lost.get()).then_some(s.bits)
 }
 
 /// The buffer a surface of the device's is to have, by its first caps:

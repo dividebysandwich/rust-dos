@@ -87,21 +87,58 @@ pub fn blt(
             None => &memory[from..from + row_len],
         });
         let out = &mut memory[at..at + dst_rect.width as usize * bytes];
-        for (x, pixel) in out.chunks_exact_mut(bytes).enumerate() {
-            let sx = if same_size {
-                x
-            } else {
-                centre(x as u32, dst_rect.width, src_rect.width) as usize
-            };
-            let source = &row[sx * bytes..(sx + 1) * bytes];
-            if let Some((key, bits)) = key {
-                let mut value = [0u8; 4];
-                value[..bytes].copy_from_slice(source);
-                if u32::from_le_bytes(value) & bits == key {
-                    continue;
+        let stretch = (!same_size).then_some((dst_rect.width, src_rect.width));
+        match bytes {
+            1 => line::<1>(out, &row, key, stretch),
+            2 => line::<2>(out, &row, key, stretch),
+            4 => line::<4>(out, &row, key, stretch),
+            _ => unreachable!("a BLT of pixels of {bytes} bytes"),
+        }
+    }
+}
+
+/// One line of a `BLT` that goes pixel by pixel, with pixels of `B`
+/// bytes: `out` from `row`, the source's line, each pixel from the one
+/// under its centre where `stretch` has the destination's and the
+/// source's widths, and with `key` (the key and the bits compared) only
+/// those that don't match it.
+///
+/// A keyed copy of the same size writes every pixel of `out`, those the
+/// key leaves alone with what they held: the compiler then compares and
+/// selects many pixels at once (a colour-keyed sprite or tile, the most
+/// common `BLT` of 2D games).
+#[inline(always)]
+fn line<const B: usize>(
+    out: &mut [u8],
+    row: &[u8],
+    key: Option<(u32, u32)>,
+    stretch: Option<(u32, u32)>,
+) {
+    let value = |p: &[u8; B]| {
+        let mut value = [0u8; 4];
+        value[..B].copy_from_slice(p);
+        u32::from_le_bytes(value)
+    };
+    let out = out.as_chunks_mut::<B>().0;
+    let row = row.as_chunks::<B>().0;
+    match (key, stretch) {
+        (Some((key, bits)), None) => {
+            for (pixel, source) in out.iter_mut().zip(row) {
+                *pixel = if value(source) & bits == key {
+                    *pixel
+                } else {
+                    *source
+                };
+            }
+        }
+        (None, None) => out.copy_from_slice(&row[..out.len()]),
+        (key, Some((dst_width, src_width))) => {
+            for (x, pixel) in out.iter_mut().enumerate() {
+                let source = &row[centre(x as u32, dst_width, src_width) as usize];
+                if key.is_none_or(|(key, bits)| value(source) & bits != key) {
+                    *pixel = *source;
                 }
             }
-            pixel.copy_from_slice(source);
         }
     }
 }
@@ -368,5 +405,42 @@ mod tests {
                 0x5555, 0x5555, 0xF81E, 0xF81E, 0x781F, 0x781F, 0x5555, 0x5555
             ]
         );
+    }
+
+    #[test]
+    fn a_keyed_copy_of_many_rows_skips_the_key_in_each() {
+        // A sprite of 13 by 3 with its key in a pattern, over a
+        // background in each format, rows and pitches that don't line
+        // up with any vector width.
+        for format in [Format::P8, Format::R5G6B5, Format::A8R8G8B8] {
+            let src = surface(0, 13, 3, format);
+            let dst = surface(256, 20, 5, format);
+            let mut memory = vec![0u8; 1024];
+            let value = |x: u32, y: u32| if (x + y) % 3 == 0 { 0 } else { 1 + x + 16 * y };
+            for y in 0..3 {
+                for x in 0..13 {
+                    set(&mut memory, &src, x, y, value(x, y));
+                }
+            }
+            fill(&mut memory, &dst, &rect(0, 0, 20, 5), 0x99);
+            blt(
+                &mut memory,
+                &dst,
+                &rect(4, 1, 13, 3),
+                &src,
+                &rect(0, 0, 13, 3),
+                Some(0),
+            );
+            for y in 0..5 {
+                for x in 0..20 {
+                    let inside = (4..17).contains(&x) && (1..4).contains(&y);
+                    let want = match inside {
+                        true if value(x - 4, y - 1) != 0 => value(x - 4, y - 1),
+                        _ => 0x99,
+                    };
+                    assert_eq!(pixel(&memory, &dst, x, y), want, "{format:?} ({x}, {y})");
+                }
+            }
+        }
     }
 }
