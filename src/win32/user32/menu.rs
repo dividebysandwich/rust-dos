@@ -555,6 +555,35 @@ pub fn create_popup_menu(cpu: &mut Cpu, _args: &[u32]) -> Option<u32> {
     Some(new_menu(user(cpu), MF_POPUP, pid))
 }
 
+/// A menu item of `build_bar`: its command, its text (none for a
+/// separator) and its flags, such as MF_GRAYED or MF_CHECKED.
+pub type BarItem = (u32, Option<&'static str>, u32);
+
+/// A menu bar for a window the system makes itself: each popup a title
+/// and its items. The menu belongs to the current process, as
+/// CreateMenu's would.
+pub(crate) fn build_bar(cpu: &mut Cpu, popups: &[(&str, &[BarItem])]) -> u32 {
+    let pid = current_pid(cpu);
+    let bar = new_menu(user(cpu), 0, pid);
+    for &(title, items) in popups {
+        let sub = new_menu(user(cpu), MF_POPUP, pid);
+        for &(id, text, flags) in items {
+            let flags = if text.is_none() {
+                flags | MF_SEPARATOR
+            } else {
+                flags
+            };
+            let text = text.map(crate::dosstr::to_bytes);
+            let info = info_of(flags, id, 1, text);
+            insert_item(cpu, sub, NONE, MF_BYPOSITION, &info);
+        }
+        let text = Some(crate::dosstr::to_bytes(title));
+        let info = info_of(MF_POPUP, sub, 1, text);
+        insert_item(cpu, bar, NONE, MF_BYPOSITION, &info);
+    }
+    bar
+}
+
 /// DestroyMenu(hmenu): with its submenus.
 pub fn destroy_menu(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let state = user(cpu);

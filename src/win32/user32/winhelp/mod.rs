@@ -2,11 +2,13 @@
 //!
 //! Windows runs WINHELP.EXE for it; here the viewer is built in, after
 //! Wine's winhlp32 (LGPL-2.1+), whose file reading `hlpfile` ports. Its
-//! window (class MS_WINHELP) has a row of buttons, Contents, Back and
-//! the browse buttons << and >>, over the topic (MS_WINTOPIC), which
-//! scrolls. A click on a jump goes to its topic; a click on a popup link
-//! shows its topic in a window of its own (MS_WINPOPUP) until the next
-//! click or key.
+//! window (class MS_WINHELP) has Windows 98's menu bar for a Windows
+//! 3.1 help file (File, Edit, Bookmark, Options, Help) and a row of
+//! buttons, Contents, Back and the browse buttons << and >>, over the
+//! topic (MS_WINTOPIC), which scrolls. Of the menus' commands, Exit,
+//! Keep Help on Top and Version work; the others are grayed. A click on
+//! a jump goes to its topic; a click on a popup link shows its topic in
+//! a window of its own (MS_WINPOPUP) until the next click or key.
 //!
 //! What the viewer keeps is in `Help`, out of save states: a viewer
 //! open when a state is saved is an empty window after it is loaded.
@@ -43,6 +45,13 @@ const SIF_PAGE: u32 = 0x02;
 const SIF_POS: u32 = 0x04;
 const SIF_DISABLENOSCROLL: u32 = 0x08;
 const COLOR_WINDOW: u32 = 5;
+const HWND_TOPMOST: u32 = 0xFFFF_FFFF;
+const HWND_NOTOPMOST: u32 = 0xFFFF_FFFE;
+const SWP_NOSIZE: u32 = 0x0001;
+const SWP_NOMOVE: u32 = 0x0002;
+const SWP_NOACTIVATE: u32 = 0x0010;
+const MB_OK: u32 = 0x0000;
+const MB_ICONINFORMATION: u32 = 0x0040;
 
 const WM_CREATE: u32 = 0x0001;
 const WM_DESTROY: u32 = 0x0002;
@@ -94,6 +103,17 @@ const ID_BACK: u32 = 2;
 const ID_PREVIOUS: u32 = 3;
 const ID_NEXT: u32 = 4;
 const ID_TOPIC: u32 = 100;
+/// The menu bar's commands.
+const ID_OPEN: u32 = 1101;
+const ID_PRINT: u32 = 1102;
+const ID_EXIT: u32 = 1103;
+const ID_COPY: u32 = 1201;
+const ID_ANNOTATE: u32 = 1202;
+const ID_DEFINE: u32 = 1301;
+const ID_ON_TOP: u32 = 1401;
+const ID_HISTORY: u32 = 1402;
+const ID_SYSTEM_COLORS: u32 = 1403;
+const ID_VERSION: u32 = 1501;
 const BUTTON_WIDTH: i32 = 64;
 const BUTTON_HEIGHT: i32 = 22;
 /// The height of the row of buttons.
@@ -117,6 +137,8 @@ const K_POPUP: u32 = 5;
 const K_CLOSE_POPUP: u32 = 6;
 const K_QUIT: u32 = 7;
 const K_FOCUS: u32 = 8;
+const K_ON_TOP: u32 = 9;
+const K_VERSION: u32 = 10;
 
 /// The scratch space of the task: strings, a PAINTSTRUCT, a SCROLLINFO.
 const SCRATCH: u32 = 256;
@@ -553,6 +575,31 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             0 => Next::call(address_of("SetFocus"), &[t.var(1)], 1),
             _ => Next::Done(0),
         },
+        // Keep Help on Top: the window above the others, or back among
+        // them, as `t.var(2)` says.
+        K_ON_TOP => match t.step {
+            0 => {
+                let after = if t.var(2) != 0 {
+                    HWND_TOPMOST
+                } else {
+                    HWND_NOTOPMOST
+                };
+                let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+                let args = [t.var(1), after, 0, 0, 0, 0, flags];
+                Next::call(address_of("SetWindowPos"), &args, 1)
+            }
+            _ => Next::Done(0),
+        },
+        K_VERSION => match t.step {
+            0 => {
+                let (text, caption) = (t.scratch + S_TEXT, t.scratch);
+                write_str(cpu, caption, "Windows Help", 32);
+                write_str(cpu, text, "Windows Help Version 4.00", 96);
+                let args = [t.var(1), text, caption, MB_OK | MB_ICONINFORMATION];
+                Next::call(address_of("MessageBoxA"), &args, 1)
+            }
+            _ => Next::Done(0),
+        },
         _ => Next::Done(0),
     }
 }
@@ -587,7 +634,8 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             write_str(cpu, text, &title, 128);
             let style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
             let d = CW_USEDEFAULT;
-            let args = [0, class, text, style, d, d, d, d, 0, 0, instance, 0];
+            let bar = menu_bar(cpu);
+            let args = [0, class, text, style, d, d, d, d, 0, bar, instance, 0];
             Next::call(create, &args, 1)
         }
         1 => {
@@ -647,6 +695,38 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         }
         _ => Next::Done(1),
     }
+}
+
+/// The viewer's menu bar: Windows 98 WinHelp's for a Windows 3.1 file.
+fn menu_bar(cpu: &mut Cpu) -> u32 {
+    use crate::win32::user32::menu::{BarItem, MF_GRAYED, build_bar};
+    const FILE: [BarItem; 4] = [
+        (ID_OPEN, Some("&Open..."), MF_GRAYED),
+        (ID_PRINT, Some("&Print Topic..."), MF_GRAYED),
+        (0, None, 0),
+        (ID_EXIT, Some("E&xit"), 0),
+    ];
+    const EDIT: [BarItem; 2] = [
+        (ID_COPY, Some("&Copy"), MF_GRAYED),
+        (ID_ANNOTATE, Some("&Annotate..."), MF_GRAYED),
+    ];
+    const BOOKMARK: [BarItem; 1] = [(ID_DEFINE, Some("&Define..."), MF_GRAYED)];
+    const OPTIONS: [BarItem; 3] = [
+        (ID_ON_TOP, Some("&Keep Help on Top"), 0),
+        (ID_HISTORY, Some("Display &History Window"), MF_GRAYED),
+        (ID_SYSTEM_COLORS, Some("Use &System Colors"), MF_GRAYED),
+    ];
+    const HELP: [BarItem; 1] = [(ID_VERSION, Some("&Version..."), 0)];
+    build_bar(
+        cpu,
+        &[
+            ("&File", &FILE),
+            ("&Edit", &EDIT),
+            ("Book&mark", &BOOKMARK),
+            ("&Options", &OPTIONS),
+            ("&Help", &HELP),
+        ],
+    )
 }
 
 /// Show the topic chosen in the open viewer; `t.var(1)` is set when the
@@ -906,6 +986,24 @@ pub fn frame_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             task::start(cpu, task::WINHELP, vec![K_FOCUS, topic], 0)
         }
         WM_COMMAND if ours => {
+            match wp & 0xFFFF {
+                ID_EXIT => return task::start(cpu, task::WINHELP, vec![K_QUIT, hwnd], 0),
+                ID_ON_TOP => {
+                    use crate::win32::user32::menu::{MF_CHECKED, check_menu_item, get_menu};
+                    let on = user(cpu)
+                        .window(hwnd)
+                        .is_some_and(|w| w.ex_style & WS_EX_TOPMOST == 0);
+                    let bar = get_menu(cpu, &[hwnd]).unwrap_or(0);
+                    let check = if on { MF_CHECKED } else { 0 };
+                    check_menu_item(cpu, &[bar, ID_ON_TOP, check]);
+                    let vars = vec![K_ON_TOP, hwnd, on as u32];
+                    return task::start(cpu, task::WINHELP, vars, 0);
+                }
+                ID_VERSION => {
+                    return task::start(cpu, task::WINHELP, vec![K_VERSION, hwnd], SCRATCH);
+                }
+                _ => {}
+            }
             let v = viewer(cpu)?;
             let page = match wp & 0xFFFF {
                 ID_CONTENTS => Some(v.contents.unwrap_or_else(|| v.file.contents())),
@@ -1055,5 +1153,46 @@ pub fn topic_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             }
         }
         _ => defwnd::def_window_proc(cpu, args),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::win32::user32::menu::{self, MF_BYCOMMAND, MF_GRAYED};
+
+    /// Windows 98's WinHelp shows File, Edit, Bookmark, Options and Help
+    /// over a Windows 3.1 help file's buttons. The commands the viewer
+    /// carries out are enabled, the others grayed.
+    #[test]
+    fn the_viewer_has_windows_98s_menu_bar() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        crate::win32::user32::init(&mut cpu);
+        let bar = menu_bar(&mut cpu);
+        let count = |cpu: &mut Cpu, h| menu::get_menu_item_count(cpu, &[h]).unwrap();
+        assert_eq!(count(&mut cpu, bar), 5);
+        let sizes: Vec<u32> = (0..5)
+            .map(|i| {
+                let sub = menu::get_sub_menu(&mut cpu, &[bar, i]).unwrap();
+                count(&mut cpu, sub)
+            })
+            .collect();
+        assert_eq!(sizes, [4, 2, 1, 3, 1]);
+        let state = |cpu: &mut Cpu, id| menu::get_menu_state(cpu, &[bar, id, MF_BYCOMMAND]);
+        for id in [ID_EXIT, ID_ON_TOP, ID_VERSION] {
+            assert_eq!(state(&mut cpu, id), Some(0), "{id} is enabled");
+        }
+        let grayed = [
+            ID_OPEN,
+            ID_PRINT,
+            ID_COPY,
+            ID_ANNOTATE,
+            ID_DEFINE,
+            ID_HISTORY,
+            ID_SYSTEM_COLORS,
+        ];
+        for id in grayed {
+            assert_eq!(state(&mut cpu, id), Some(MF_GRAYED), "{id} is grayed");
+        }
     }
 }
