@@ -126,6 +126,7 @@
 //!    | `mode` | `shared` or `exclusive` |
 //!    | `state` | `waiting`, then `holding` |
 //!    | `asked` | when it asked, in seconds since 1970 (UTC) |
+//!    | `held` | when it got the lock, the same way; null while it waits (from protocol 2) |
 //!    | `instance` | the debug server's instance (`/api/version`), or null |
 //!    | `debug_server` | the debug server's address, or null |
 //!
@@ -234,6 +235,10 @@ pub struct Record {
     pub mode: Mode,
     pub state: State,
     pub asked: u64,
+    /// When it got the lock; None while it waits, and in protocol 1's
+    /// records.
+    #[serde(default)]
+    pub held: Option<u64>,
     #[serde(default)]
     pub instance: Option<String>,
     #[serde(default)]
@@ -257,6 +262,9 @@ impl Holder {
             s += &format!(" ({})", name);
         }
         s += &format!(", {} {}", r.mode.as_str(), state_word(r.state));
+        if let Some(held) = r.held {
+            s += &format!(" for {}", age(held));
+        }
         if let Some(addr) = &r.debug_server {
             s += &format!(", debug server {}", addr);
         }
@@ -662,6 +670,7 @@ impl Hold {
             mode: request.mode,
             state: State::Waiting,
             asked: unix_now(),
+            held: None,
             instance: None,
             debug_server: None,
         };
@@ -720,6 +729,7 @@ impl Hold {
             hold.gate = Some(line.gate);
         }
         hold.record.state = State::Holding;
+        hold.record.held = Some(unix_now());
         hold.entry.write(&hold.record)?;
         Ok(hold)
     }
@@ -1239,6 +1249,7 @@ mod tests {
             mode: Mode::Exclusive,
             state: State::Holding,
             asked: 1,
+            held: Some(2),
             instance: None,
             debug_server: None,
         };
