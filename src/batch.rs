@@ -164,6 +164,12 @@ impl Batch {
         self.push(Frame::new(FrameKind::File, file_lines(bytes), params(name, args)));
     }
 
+    /// Run these lines next, before the rest of what is queued.
+    pub fn push_lines(&mut self, lines: &[String]) {
+        let lines = lines.iter().map(|l| dosstr::to_bytes(l)).collect();
+        self.push(Frame::new(FrameKind::Lines, lines, vec![String::new()]));
+    }
+
     /// Run these commands, a FOR line's, next.
     pub fn push_for(&mut self, lines: Vec<String>) {
         let lines = lines.iter().map(|l| dosstr::to_bytes(l)).collect();

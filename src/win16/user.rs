@@ -471,6 +471,7 @@ static APIS: &[Api16] = &[
     rust("BuildCommDCB", 213, "pp", comm::build_comm_dcb),
     rust("EscapeCommFunction", 214, "ww", comm::escape_comm_function),
     rust("FlushComm", 215, "ww", comm::flush_comm),
+    rust("ExitWindowsExec", 246, "pp", exit_windows_exec),
 ];
 
 fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -1101,6 +1102,30 @@ fn set_class_word(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         _ => (value, Vec::new()),
     };
     go_post(cpu, "SetClassLongA", &[hwnd, index, value], data)
+}
+
+/// ExitWindowsEx's flag for a shutdown, whose WM_QUERYENDSESSION and
+/// WM_ENDSESSION have lParam 0, as Windows 3.1's have.
+const EWX_SHUTDOWN: u32 = 1;
+
+/// ExitWindowsExec(exe, params): Windows ends, as ExitWindows ends it,
+/// and then the DOS program `exe` runs with the command line `params`
+/// (boot.rs says where and when). FALSE when a window refused to end,
+/// which is the only time the call comes back.
+fn exit_windows_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let text = |cpu: &Cpu, at: u32| {
+        if at == 0 {
+            String::new()
+        } else {
+            super::string(cpu, at).trim().to_string()
+        }
+    };
+    let (exe, params) = (text(cpu, args[0]), text(cpu, args[1]));
+    if !exe.is_empty() {
+        let line = format!("{} {}", exe, params);
+        crate::win32::boot::exec_after(cpu, line.trim_end().to_string());
+    }
+    go(cpu, "ExitWindowsEx", &[EWX_SHUTDOWN, 0])
 }
 
 fn window_from_point(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
