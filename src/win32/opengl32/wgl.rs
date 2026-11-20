@@ -543,7 +543,7 @@ pub fn fit_buffers(cpu: &mut Cpu, index: usize) -> bool {
     let lost = |cpu: &mut Cpu, id: u32| {
         ddraw::state(cpu)
             .surface(id)
-            .is_none_or(|s| s.lost || s.memory == dd_surface::MEM_NONE)
+            .is_none_or(|s| s.lost.get() || s.memory == dd_surface::MEM_NONE)
     };
     if c.target != 0 && c.size == size && !lost(cpu, c.target) && !lost(cpu, c.depth) {
         return true;
