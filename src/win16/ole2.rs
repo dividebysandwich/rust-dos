@@ -49,10 +49,11 @@ const MEMCTX_TASK: u32 = 1;
 const MEMCTX_SHARED: u32 = 2;
 
 /// OLE 2's build version, which CoBuildVersion and OleBuildVersion
-/// return: the major version 23 (rmm) that programs compare with theirs,
-/// and the minor one (rup), as Wine has them.
+/// return: 23.700, as Windows 98 SE's COMPOBJ.DLL has it. Programs
+/// compare it with the oldest they take: Visual Basic 4's runtime wants
+/// 23.700 or later.
 const RMM: u32 = 23;
-const RUP: u32 = 639;
+const RUP: u32 = 700;
 
 /// The GUIDs of OLE's own interfaces, {xxxxxxxx-0000-0000-C000-
 /// 000000000046}, by their first part.
@@ -73,6 +74,9 @@ pub const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> [u8; 16] {
 
 pub const IID_IUNKNOWN: [u8; 16] = ole_guid(0);
 pub const IID_IMALLOC: [u8; 16] = ole_guid(2);
+
+/// The W32 state version that first saves `Ole16`.
+pub const OLE16: u16 = 84;
 
 /// What the OLE modules keep of the Win16 process.
 #[derive(Clone, Debug, Default)]

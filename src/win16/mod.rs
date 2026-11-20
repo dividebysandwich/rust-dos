@@ -131,7 +131,7 @@ pub struct State {
     /// The serial ports open (comm.rs).
     pub comm: Vec<comm::Port>,
     /// What the 16-bit OLE modules keep (ole2.rs).
-    pub ole: ole2::Ole16,
+    pub ole: crate::savestate::Since<{ ole2::OLE16 }, ole2::Ole16>,
     /// The exit code of the last task that ended other than a client's,
     /// which the Win16 process ends with when a client outlived it.
     pub exit_code: u16,
