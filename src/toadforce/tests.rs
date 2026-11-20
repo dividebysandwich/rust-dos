@@ -608,3 +608,30 @@ fn reset_starts_frame_again() {
     assert_eq!(rig.read(regs::FRAME), 10);
     assert_eq!(rig.read(regs::IRQ_STATUS), regs::IRQ_VBLANK);
 }
+
+#[test]
+fn memory_given_back_while_commands_wait_stays_theirs_until_they_run() {
+    let mut rig = Rig::new();
+    // Nothing queued: what is given back is free at once.
+    rig.card.retire((0x1000, 0x2000));
+    assert!(!rig.card.queue_may_touch((0, MEMORY)));
+    let mut words = Vec::new();
+    encode::nop(&mut words, 1);
+    let live = rig.live();
+    rig.card.queue(&words, live);
+    rig.card.retire((0x1000, 0x2000));
+    // An empty range is no range.
+    rig.card.retire((0x3000, 0x3000));
+    assert_eq!(rig.card.retired(), [(0x1000, 0x2000)]);
+    assert!(rig.card.queue_may_touch((0x1FFC, 0x2004)));
+    assert!(!rig.card.queue_may_touch((0x2000, 0x3000)));
+    assert!(!rig.card.queue_may_touch((0x0800, 0x1000)));
+    // A state loaded with commands queued: what they use isn't known.
+    rig.card.forget();
+    assert!(rig.card.queue_may_touch((MEMORY - 4, MEMORY)));
+    let live = rig.live();
+    rig.card.run_queue(&mut rig.memory, live);
+    assert!(rig.card.retired().is_empty());
+    assert!(!rig.card.queue_may_touch((0, MEMORY)));
+    assert_eq!(rig.card.queue_runs(), 1);
+}

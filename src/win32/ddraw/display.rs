@@ -296,22 +296,35 @@ fn restore_screen(cpu: &mut Cpu) {
 /// Take a block of `len` bytes of video memory: its offset, or the
 /// error.
 pub fn alloc(cpu: &mut Cpu, len: u32) -> Result<u32, u32> {
+    alloc_avoiding(cpu, len, &[])
+}
+
+/// `alloc`, with the ranges `avoid` (start and end) kept out of the
+/// block as well as the blocks taken.
+fn alloc_avoiding(cpu: &mut Cpu, len: u32, avoid: &[(u32, u32)]) -> Result<u32, u32> {
     let floor = screen_len(cpu).next_multiple_of(ALIGN);
     let len = len.max(1).next_multiple_of(ALIGN);
-    let size = screen::memory_size(cpu);
+    let size = screen::memory_size(cpu) as u64;
     let display = &mut state(cpu).display;
+    let taken = if avoid.is_empty() {
+        std::borrow::Cow::Borrowed(&display.blocks[..])
+    } else {
+        let mut taken = display.blocks.clone();
+        taken.extend(avoid.iter().map(|&(start, end)| (start, end - start)));
+        taken.sort_unstable();
+        std::borrow::Cow::Owned(taken)
+    };
     let mut at = floor;
-    let mut index = 0;
-    for (i, &(start, size)) in display.blocks.iter().enumerate() {
+    for &(start, len_taken) in taken.iter() {
         if start >= at && start - at >= len {
             break;
         }
-        at = at.max((start + size).next_multiple_of(ALIGN));
-        index = i + 1;
+        at = at.max((start + len_taken).next_multiple_of(ALIGN));
     }
-    if at as u64 + len as u64 > size as u64 {
+    if at as u64 + len as u64 > size {
         return Err(DDERR_OUTOFVIDEOMEMORY);
     }
+    let index = display.blocks.partition_point(|&(start, _)| start < at);
     display.blocks.insert(index, (at, len));
     Ok(at)
 }
@@ -329,31 +342,11 @@ pub fn alloc_rest(cpu: &mut Cpu) -> Result<u32, u32> {
 /// were queued stays out of it. Its offset, or the error.
 pub fn alloc_past_queue(cpu: &mut Cpu, len: u32) -> Result<u32, u32> {
     let retired = cpu.bus.toadforce_retired().to_vec();
-    if retired.is_empty() {
-        return alloc(cpu, len);
-    }
-    let floor = screen_len(cpu).next_multiple_of(ALIGN);
-    let len = len.max(1).next_multiple_of(ALIGN);
-    let size = screen::memory_size(cpu);
-    let display = &mut state(cpu).display;
-    let mut taken = display.blocks.clone();
-    taken.extend(retired.iter().map(|&(start, end)| (start, end - start)));
-    taken.sort_unstable();
-    let mut at = floor;
-    for &(start, size) in &taken {
-        if start >= at && start - at >= len {
-            break;
-        }
-        at = at.max((start + size).next_multiple_of(ALIGN));
-    }
-    if at as u64 + len as u64 > size as u64 {
+    alloc_avoiding(cpu, len, &retired).or_else(|_| {
         // The retired blocks are free again once the queue has run.
         cpu.bus.toadforce_flush();
-        return alloc(cpu, len);
-    }
-    let index = display.blocks.partition_point(|&(start, _)| start < at);
-    display.blocks.insert(index, (at, len));
-    Ok(at)
+        alloc(cpu, len)
+    })
 }
 
 /// Give back the block at `offset`. A ToadForce's queued commands may
