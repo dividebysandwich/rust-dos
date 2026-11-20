@@ -992,6 +992,20 @@ impl SoundBlaster {
             // Raise the 8-bit (F2h) or 16-bit (F3h) interrupt.
             0xF2 => self.irq8 = true,
             0xF3 if sb16 => self.irq16 = true,
+            // The DSPs before the SB16 (2.xx, 3.xx) decode group F by bits
+            // of the command: bit 3 runs the internal RAM test, which
+            // answers the address that failed, 00h when none did; bit 2
+            // the ROM checksum; bit 1 the 8-bit interrupt; bit 0 the
+            // auxiliary status; none the sine wave. F8h-FFh are all the
+            // RAM test and take no parameters (the 2.02 and 3.02
+            // firmware, schlae/sb-firmware and SaxxonPike/sb-dsp-firmware).
+            // DMX (Doom, Heretic) sends FAh to a DSP 3.xx to find Media
+            // Vision's Jazz16, which answers with an ID, and takes the
+            // card for one only when exactly one byte other than 0 comes
+            // back. The test also overwrites the 8051's RAM, which this
+            // DSP doesn't model; DMX resets the DSP after the probe.
+            0xF3 => self.irq8 = true,
+            0xF8..=0xFF if !sb16 => self.read_buf.push_back(0),
             0xF8 => self.read_buf.push_back(0),
             // The SB16's ASP socket, empty, as Windows' driver probes it:
             // the mode (04h), a codec parameter (05h), the chip's version
@@ -1079,6 +1093,36 @@ mod tests {
             sb.write(0x4, reg, &mut Vec::new());
             sb.write(0x5, 0x18, &mut Vec::new());
             assert_eq!(sb.read(0x5) == 0x18, kept, "mixer register {:02X}h", reg);
+        }
+    }
+
+    #[test]
+    fn creative_dsps_before_the_sb16_give_dmxs_jazz16_probe_no_id() {
+        for model in [SbModel::Sb2, SbModel::SbPro2] {
+            let config = SbConfig {
+                model,
+                ..SbConfig::default()
+            };
+            let mut sb = SoundBlaster::new(config, 0);
+            let mut log = Vec::new();
+            // F8h-FFh run the RAM test: one byte, 00h, which DMX doesn't
+            // take for a Jazz16's ID.
+            for cmd in 0xF8..=0xFF {
+                sb.write(0xC, cmd, &mut log);
+                assert_eq!(sb.read(0xE) & 0x80, 0x80, "{:?} {:02X}h", model, cmd);
+                assert_eq!(sb.read(0xA), 0, "{:?} {:02X}h", model, cmd);
+                assert_eq!(sb.read(0xE) & 0x80, 0, "{:?} {:02X}h", model, cmd);
+            }
+            // They take no parameters: the next byte is a command.
+            sb.write(0xC, 0xE1, &mut log);
+            assert_eq!(
+                [sb.read(0xA), sb.read(0xA)],
+                <[u8; 2]>::from(model.dsp_version())
+            );
+            // F3h raises the 8-bit interrupt, as F2h does.
+            sb.write(0xC, 0xF3, &mut log);
+            assert!(sb.irq8, "{:?}", model);
+            assert!(log.is_empty(), "{:?}: {:?}", model, log);
         }
     }
 
