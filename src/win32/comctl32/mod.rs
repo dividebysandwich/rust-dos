@@ -50,6 +50,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: Some(propsheet::resources),
 };
 
 const fn stdcall(

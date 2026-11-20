@@ -86,6 +86,9 @@ pub struct Dll {
     /// The tables of methods of its COM interfaces (com.rs), after the
     /// stubs in its code section.
     pub vtables: &'static [Vtable],
+    /// Its resources, which programs find with FindResourceA on its
+    /// handle.
+    pub resources: Option<Resources>,
 }
 
 /// A COM interface's table of methods, which the DLL's objects of it
@@ -110,6 +113,9 @@ pub type Init = fn(&mut crate::bus::Bus, &mut super::Process) -> Option<()>;
 
 /// A DLL's `term`: the process it is going from.
 pub type Term = fn(&mut crate::bus::Bus, &mut super::Process);
+
+/// A DLL's `resources`: each one's type, name, language and data.
+pub type Resources = fn() -> Vec<(u16, u16, u16, Vec<u8>)>;
 
 /// The built-in DLLs. Append only (see the module's notes).
 pub static DLLS: &[&Dll] = &[
@@ -460,6 +466,9 @@ fn builder(index: usize, version: super::version::WindowsVersion) -> pe::Builder
                 b.export(Some(var.name), var.ordinal, data + offset);
             }
         }
+    }
+    for (kind, name, language, data) in dll.resources.map(|r| r()).unwrap_or_default() {
+        b.resource(kind, name, language, &data);
     }
     b
 }
