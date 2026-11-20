@@ -24,9 +24,13 @@ pub struct Opl {
     timer_start: [Option<u64>; 2],
     timer_mask: [bool; 2],
     timer_expired: [bool; 2],
-    /// Whether any key has been played since the last reset, so a silent
-    /// chip can skip synthesis.
+    /// Whether a key may be sounding: set by the writes that key notes on
+    /// or off, and cleared once every operator has been released to
+    /// silence, so a silent chip skips synthesis.
     active: bool,
+    /// Frames rendered since `render` last checked whether the chip has
+    /// gone quiet.
+    unchecked_frames: u32,
     /// The chip's registers as written, for a save state: the chip can't
     /// be saved, so a loaded state writes them to a new one (`after_load`).
     regs: [[u8; 256]; 2],
@@ -36,8 +40,9 @@ pub struct Opl {
 }
 
 impl Opl {
-    /// Whether the chip has made no sound since it was reset (`render`
-    /// then gives silence without running it).
+    /// Whether the chip is silent: no key written since it was reset, or
+    /// every operator released to silence since (`render` then gives
+    /// silence without running it).
     #[inline]
     pub fn is_idle(&self) -> bool {
         !self.active
@@ -53,6 +58,7 @@ impl Opl {
             timer_mask: [false; 2],
             timer_expired: [false; 2],
             active: false,
+            unchecked_frames: 0,
             regs: [[0; 256]; 2],
             mute: 0,
         }
@@ -284,13 +290,32 @@ impl Opl {
         }
         let mut frame = [0i16; 2];
         let _ = self.chip.generate_resampled(&mut frame);
+        // Now and then, check whether every operator is keyed off and
+        // released to full attenuation. Such a chip stays silent until a
+        // key is written (which sets `active` again), whatever else
+        // changes: a level or a rate applies to the next note. Its
+        // operators' output is then only their sine's sign bit, a pattern
+        // of 0 and -1 a few steps high at most, which `render` turns into
+        // 0. The chip's clock stops meanwhile, so the vibrato and tremolo
+        // go on from where they were rather than where a running chip's
+        // would be, which no program can read and nobody hears.
+        self.unchecked_frames += 1;
+        if self.unchecked_frames == IDLE_CHECK_FRAMES {
+            self.unchecked_frames = 0;
+            if self.chip.active_voice_count() == 0 {
+                self.active = false;
+            }
+        }
         (frame[0], frame[1])
     }
 }
 
+/// How often, in frames, `render` checks whether the chip has gone quiet.
+const IDLE_CHECK_FRAMES: u32 = 64;
+
 // Whether it is an OPL3 comes with the Sound Blaster's model; the chip is
 // written anew from `regs` after a load.
-rust_dos_savestate::state_fields!(Opl { address, timer_value, timer_start, timer_mask, timer_expired, active, regs } skip { chip, opl3, mute });
+rust_dos_savestate::state_fields!(Opl { address, timer_value, timer_start, timer_mask, timer_expired, active, regs } skip { chip, opl3, mute, unchecked_frames });
 
 #[cfg(test)]
 mod mute_tests {
@@ -319,6 +344,71 @@ mod mute_tests {
         assert_eq!(loudest(&mut opl, 2000), 0);
         assert!(opl.channels()[0].key_on, "it goes on playing");
         opl.set_mute(0);
+        assert!(loudest(&mut opl, 2000) > 1000);
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    fn write(opl: &mut Opl, reg: u8, value: u8) {
+        opl.write_address(0, reg);
+        opl.write_data(0, value, 0);
+    }
+
+    fn loudest(opl: &mut Opl, frames: usize) -> i32 {
+        (0..frames)
+            .map(|_| opl.render())
+            .map(|(l, r)| (l as i32).abs().max((r as i32).abs()))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Channel 0 playing A4: a sine on both operators at full volume,
+    /// fast attack, held while the key is on, and a release of a few
+    /// hundred milliseconds.
+    fn key_a4(opl: &mut Opl) {
+        for (reg, value) in [
+            (0x20, 0x21),
+            (0x23, 0x21),
+            (0x40, 0x10),
+            (0x43, 0x00),
+            (0x60, 0xF0),
+            (0x63, 0xF0),
+            (0x80, 0x08),
+            (0x83, 0x08),
+            (0xC0, 0x01),
+            (0xA0, 0x44),
+            (0xB0, 0x32),
+        ] {
+            write(opl, reg, value);
+        }
+    }
+
+    /// A note keyed off and released to silence leaves the chip idle, so
+    /// it stops synthesizing until the next key; the next note plays as
+    /// the first did.
+    #[test]
+    fn the_chip_goes_idle_once_its_notes_are_released() {
+        let mut opl = Opl::new(false);
+        assert!(opl.is_idle());
+        key_a4(&mut opl);
+        assert!(loudest(&mut opl, 2000) > 1000);
+        assert!(!opl.is_idle());
+        write(&mut opl, 0xB0, 0x12);
+        assert!(!opl.is_idle(), "a key write keeps it running");
+        assert!(loudest(&mut opl, 441) > 1000, "the release starts loud");
+        assert!(!opl.is_idle());
+        loudest(&mut opl, 2 * RATE as usize);
+        assert!(opl.is_idle(), "released to silence");
+        assert_eq!(loudest(&mut opl, 2000), 0);
+
+        // A level written meanwhile applies to the next note only.
+        write(&mut opl, 0x43, 0x01);
+        assert!(opl.is_idle());
+        write(&mut opl, 0xB0, 0x32);
+        assert!(!opl.is_idle());
         assert!(loudest(&mut opl, 2000) > 1000);
     }
 }
