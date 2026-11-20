@@ -154,6 +154,13 @@ pub struct CpuKey {
     pub system: [crate::cpu::SegCache; 2],
     pub fpu: crate::cpu::FpuKey,
     pub shadow: bool,
+    /// The running Win16 task's switches between 16-bit and 32-bit code
+    /// (`win16::frames_of_running`). A 16-bit call of a 32-bit function
+    /// keeps the caller's registers there, and the thunk starts the
+    /// 32-bit code with registers that are the same whoever called it:
+    /// two calls of GetTickCount from two places of a loop come to it with
+    /// the same registers, and differ only in where they go back to.
+    pub win16: Vec<crate::win16::Frame>,
     /// AL holds a value read from a port, and isn't compared (see
     /// `Observe::tainted`).
     pub tainted: bool,
