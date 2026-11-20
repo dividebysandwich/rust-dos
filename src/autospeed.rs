@@ -291,6 +291,9 @@ const MOST_BACKOFFS: u32 = 2;
 /// low, and a floor there would pin a run that noise sent up (one at 700,000
 /// in a program that holds at 85,000). A heavier scene clears that speed, so
 /// a run it sends up can still form a floor there, for as long as it lasts.
+/// A speed under the floor, where a cut for the host falling behind (see
+/// `KEPT_UP`) put it, loses the frames the floor stands for: the hold
+/// there ends back up at the floor, as far as the limits let it.
 const FLOOR_WINDOWS: u32 = 4 * HOLD_WINDOWS;
 const SEEN_TWICE: u32 = 2;
 const LASTS: u32 = JUDGED - 1;
@@ -2197,6 +2200,15 @@ impl AutoSpeed {
             // A step that would pass the floor stops at it. At the floor,
             // trying more instead, the only way left to go, would climb.
             let to = match this.floor {
+                // Under the floor, where a cut for lag put it, the speed
+                // loses frames: back up to the floor, as far as the limits
+                // let it. Held there instead, Myth III's battle sat at
+                // 419,864 for minutes at 26 frames a second, a floor of
+                // 488,802 over it and the host keeping up with 560,000:
+                // each hold ended in another (#1493).
+                Some((floor, _)) if c * 1.01 < floor as f64 => {
+                    return hold(this, floor as f64, HOLD_WINDOWS, false);
+                }
                 Some((floor, _)) if c / FINE_STEP < floor as f64 => {
                     if floor as f64 * 1.01 >= c {
                         return hold_drawing(this, fps, clamp(c), HOLD_WINDOWS, false);
@@ -6392,5 +6404,45 @@ mod tests {
                 .all(|&(_, speed)| speed <= 63_250),
             "{speeds:?}"
         );
+    }
+
+    /// Myth III's battle on a Pentium II (#1493): no halting, and a frame
+    /// rate that follows the speed, 30 frames a second at 488,802.
+    fn myth3_battle(speed: u32) -> Measurement {
+        Measurement {
+            fps: Some(speed as f64 / 16_300.0),
+            refresh: 60.0,
+            ..STILL
+        }
+    }
+
+    #[test]
+    fn a_hold_under_the_floor_goes_back_up_to_it() {
+        // A step down from 488,802 lost frames and set a floor there; a
+        // measurement behind then cut the speed to 419,864. With the limits
+        // gone, the hold there ends at the floor, where the frames are,
+        // rather than in another hold under it.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(crate::cpu::CpuModel::PentiumII.auto_least());
+        auto.set_idles(true);
+        let fps = myth3_battle(419_864).fps.unwrap();
+        let ending = Step::Hold {
+            fps,
+            left: 1,
+            more: false,
+            recent: fps,
+            seen: HOLD_WINDOWS - 1,
+            dipped: 0,
+        };
+        auto.floor = Some((488_802, 40));
+        auto.step = ending;
+        let speed = auto.decide(419_864, &myth3_battle(419_864), true, 560_000);
+        assert_eq!(speed, 488_802);
+        // A limit from the host falling behind still holds it under.
+        auto.floor = Some((488_802, 40));
+        auto.step = ending;
+        auto.lagged = Some((419_864, 10));
+        let speed = auto.decide(419_864, &myth3_battle(419_864), true, 560_000);
+        assert_eq!(speed, 419_864);
     }
 }
