@@ -1913,6 +1913,59 @@ pub fn set_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     task::start(cpu, TASK_SET_POS, vars, P_SCRATCH)
 }
 
+/// Whether SetWindowPos's `after` leaves `hwnd` where it already is
+/// among its siblings, so the call adds SWP_NOZORDER: HWND_TOP for the
+/// first sibling, HWND_BOTTOM for the last one that isn't topmost,
+/// HWND_TOPMOST for a topmost first sibling, or the sibling that already
+/// comes before it (for a top-level window, when both are topmost or
+/// neither is). Windows decides this after WM_WINDOWPOSCHANGING, which
+/// still gets the caller's flags, so a call that changes nothing ends
+/// without WM_WINDOWPOSCHANGED (msg.c's WmSwitchNotMaximizedChild and
+/// WmCreateMDIchildVisibleSeq, recorded on Windows; Wine's
+/// fixup_swp_flags).
+///
+/// Wine also adds it for HWND_NOTOPMOST on a window that isn't topmost,
+/// and for the sibling before a top-level window whatever their topmost
+/// flags. Windows 98 SE doesn't (win32_zorder_tests.rs, recorded there):
+/// HWND_NOTOPMOST on such a window still takes the flag from the windows
+/// it owns and puts them below the topmost ones, and a top-level window
+/// placed after the topmost window just above it becomes topmost.
+fn zorder_unchanged(state: &State, hwnd: u32, after: u32, flags: u32) -> bool {
+    if flags & SWP_NOZORDER != 0 {
+        return false;
+    }
+    let Some(w) = state.window(hwnd) else {
+        return false;
+    };
+    let topmost = w.ex_style & WS_EX_TOPMOST != 0;
+    let siblings: &[u32] = state
+        .window(w.parent)
+        .map(|p| p.children.as_slice())
+        .unwrap_or_default();
+    let first = siblings.first() == Some(&hwnd);
+    match after {
+        HWND_TOP => first,
+        HWND_BOTTOM => !topmost && siblings.last() == Some(&hwnd),
+        HWND_TOPMOST => topmost && first,
+        HWND_NOTOPMOST => false,
+        h => {
+            // Only top-level windows have a topmost band: a child placed
+            // after a sibling keeps its WS_EX_TOPMOST (`set_topmost`).
+            let same_band = w.parent != DESKTOP
+                || state
+                    .window(h)
+                    .is_some_and(|a| (a.ex_style & WS_EX_TOPMOST != 0) == topmost);
+            h == hwnd
+                || (same_band
+                    && siblings
+                        .iter()
+                        .position(|&s| s == h)
+                        .and_then(|i| siblings.get(i + 1))
+                        == Some(&hwnd))
+        }
+    }
+}
+
 /// SetWindowPos's steps.
 pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     let hwnd = t.var(P_HWND);
@@ -1934,7 +1987,11 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if !user(cpu).is_window(hwnd) {
                     return Next::Done(FALSE);
                 }
-                let p = read_words(cpu, winpos, 7);
+                let mut p = read_words(cpu, winpos, 7);
+                if zorder_unchanged(user(cpu), hwnd, p[1], p[6]) {
+                    p[6] |= SWP_NOZORDER;
+                    cpu.bus.guest_write_32(winpos + 24, p[6]);
+                }
                 let flags = p[6];
                 let old = rect_var(t, P_OLD);
                 let (x, y, cx, cy) = (p[2] as i32, p[3] as i32, p[4] as i32, p[5] as i32);
