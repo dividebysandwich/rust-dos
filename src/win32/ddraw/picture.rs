@@ -151,7 +151,7 @@ pub fn put_picture(
 ) -> Result<(), u32> {
     let (_, id) = surface::surface_of(cpu, this)?;
     let s = state(cpu).surface(id).cloned().ok_or(DDERR_INVALIDPARAMS)?;
-    if s.lost {
+    if s.lost.get() {
         return Err(DDERR_SURFACELOST);
     }
     if s.locked {

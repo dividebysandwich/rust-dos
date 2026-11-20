@@ -73,7 +73,14 @@ pub struct Boot {
     directories: Option<Directories>,
     /// Whether the program that is to start is one of the commands'.
     command: bool,
+    /// The DOS command line ExitWindowsExec runs once the session has
+    /// ended, while the session's end is being asked for. A state saved
+    /// by an older rust-dos has none.
+    exec: crate::savestate::Since<EXIT_EXEC, Option<String>>,
 }
+
+/// The W32 section's version that added ExitWindowsExec's command line.
+pub const EXIT_EXEC: u16 = 83;
 
 /// DOS's current drive and each drive's current directory, and the long
 /// names SetCurrentDirectoryA was given for them (`Win32::long_dirs`).
@@ -127,6 +134,30 @@ pub fn session_starts(cpu: &mut Cpu) {
 /// ExitWindowsEx ends the session with a restart.
 pub fn restart(cpu: &mut Cpu) {
     cpu.bus.win32.boot.restart = true;
+}
+
+/// ExitWindowsExec asks for the session to end and the command line
+/// `line` to run at the DOS prompt after it.
+pub fn exec_after(cpu: &mut Cpu, line: String) {
+    *cpu.bus.win32.boot.exec = Some(line);
+}
+
+/// The session ends (`ending`) or goes on, as its windows answered:
+/// ExitWindowsExec's command line, if one was asked for, runs at the DOS
+/// prompt next, before the rest of a batch file that started the program
+/// DOS ran. Windows 3.1's WIN.COM runs it once Windows has ended, then
+/// starts Windows again. The built-in Windows has no shell to come back
+/// to, so the prompt comes back after the program, and the boot's work
+/// runs when the next session starts, as after a restart.
+pub fn session_decided(cpu: &mut Cpu, ending: bool) {
+    let Some(line) = cpu.bus.win32.boot.exec.take() else {
+        return;
+    };
+    if ending {
+        let text = format!("[W32] ExitWindowsExec: DOS runs {line}");
+        cpu.bus.log_string(&text);
+        cpu.batch.push_lines(&[format!("@{line}")]);
+    }
 }
 
 /// The session's last process ended, or the program that was to start
@@ -349,7 +380,8 @@ crate::state_fields!(Boot {
     commands,
     program,
     directories,
-    command
+    command,
+    exec
 });
 
 #[cfg(test)]
