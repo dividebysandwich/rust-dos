@@ -1335,8 +1335,9 @@ pub fn destroy(cpu: &mut Cpu, id: u32) {
     for iface in &object.ifaces {
         com::free_interface(cpu, iface.address);
     }
-    if !object.ifaces.is_empty() {
-        // IsLost's caches may hold them.
+    if object.surface.is_some() && !object.ifaces.is_empty() {
+        // IsLost's caches may hold them: it caches only a surface's
+        // interfaces.
         surface::forget_is_lost(cpu);
     }
     if let Some(slot) = state(cpu).objects.get_mut(id as usize - 1) {

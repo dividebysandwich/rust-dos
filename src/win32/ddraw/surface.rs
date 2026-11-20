@@ -722,12 +722,16 @@ pub fn video_memory_to_change(cpu: &mut Cpu) {
 /// surfaces that had pixels there are lost, as are the blocks Direct3D's
 /// HAL took for its copies of textures.
 pub fn video_memory_lost(cpu: &mut Cpu) {
+    let mut changed = false;
     for id in state(cpu).ids(|o| o.surface.as_ref().is_some_and(|s| s.memory == MEM_VIDEO)) {
         if let Some(s) = surface(cpu, id) {
             s.memory = MEM_NONE;
             s.bits = 0;
         }
-        set_lost(cpu, id, true);
+        changed |= mark_lost(cpu, id, true);
+    }
+    if changed {
+        forget_is_lost(cpu);
     }
     super::d3d::hal::video_memory_lost(cpu);
 }
@@ -1530,13 +1534,22 @@ impl crate::savestate::State for Lost {
 /// The surface `id` is lost, or has its pixels again. Every process's
 /// cache of IsLost's answers is emptied when that changes.
 pub(super) fn set_lost(cpu: &mut Cpu, id: u32, lost: bool) {
-    let Some(s) = surface(cpu, id) else {
-        return;
-    };
-    if s.lost.0 != lost {
-        s.lost = Lost(lost);
+    if mark_lost(cpu, id, lost) {
         forget_is_lost(cpu);
     }
+}
+
+/// `set_lost` for one of many surfaces that change together, as when a
+/// mode switch loses all of video memory: whether the surface's state
+/// changed, so the caller empties the caches (`forget_is_lost`) once
+/// after the last of them.
+pub(super) fn mark_lost(cpu: &mut Cpu, id: u32, lost: bool) -> bool {
+    let Some(s) = surface(cpu, id) else {
+        return false;
+    };
+    let changed = s.lost.0 != lost;
+    s.lost = Lost(lost);
+    changed
 }
 
 /// Slots of IsLost's cache, the DDRAW variable `IsLostCache`: a power

@@ -3632,12 +3632,67 @@ fn is_lost_answers_from_its_cache_and_sees_a_surface_lost() {
         results(&mut cpu, data, 10)[3..],
         [0, 0, 0, INVALID_OBJECT, 0, SURFACE_LOST, SURFACE_LOST]
     );
-    // The surface's slot holds its interface and the last answer.
     let front = peek(&cpu, data + FRONT);
     let cache = rust_dos::win32::is_lost_cache();
+    // The surface's slot holds its interface and the last answer.
     let slot = cache + (front >> 3 & 255) * 8;
     assert_eq!(
         (peek(&cpu, slot), peek(&cpu, slot + 4)),
         (front, SURFACE_LOST)
+    );
+}
+
+/// Where `is_lost_after_release_program` keeps IsLost's address.
+const IS_LOST_AT: u32 = SOURCE;
+
+/// A surface lost and asked about, so that the cache holds its
+/// DDERR_SURFACELOST, then released, and its interface pointer asked
+/// about again through IsLost's address taken before.
+fn is_lost_after_release_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (100, 50, 200, 100))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_NORMAL)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        a.mov(eax, dword_ptr(l.at(FRONT)))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.mov(eax, dword_ptr(eax + 4 * S_IS_LOST))?;
+        a.mov(dword_ptr(l.at(IS_LOST_AT)), eax)?;
+        c.com(a, l, DD, DD_RELEASE, &[])?;
+        c.com(a, l, FRONT, S_IS_LOST, &[])?;
+        c.com(a, l, FRONT, DD_RELEASE, &[])?;
+        // The interface is gone: the trap would say so.
+        a.push(dword_ptr(l.at(FRONT)))?;
+        a.call(dword_ptr(l.at(IS_LOST_AT)))?;
+        c.keep(a, l)?;
+        finish(a, l)
+    })
+}
+
+/// Releasing a surface empties IsLost's cache, so its freed interface
+/// gets the answer the trap gives, not the one cached while it was a
+/// surface (#1517).
+#[test]
+fn is_lost_forgets_a_released_surface() {
+    let (program, data) = is_lost_after_release_program();
+    let mut cpu = machine("is_lost_after_release", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(
+        results(&mut cpu, data, 8)[3..],
+        [0, 0, SURFACE_LOST, 0, INVALID_OBJECT]
     );
 }

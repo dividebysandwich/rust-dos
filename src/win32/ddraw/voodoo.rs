@@ -292,13 +292,17 @@ pub fn close(cpu: &mut Cpu) {
 
 /// The surfaces in the card's buffers lose them.
 fn lost(cpu: &mut Cpu) {
+    let mut changed = false;
     for id in state(cpu).ids(|o| o.surface.as_ref().is_some_and(|s| s.memory == MEM_CARD)) {
         if let Some(s) = state(cpu).surface_mut(id) {
             s.memory = surface::MEM_NONE;
             s.bits = 0;
             s.locked = false;
         }
-        surface::set_lost(cpu, id, true);
+        changed |= surface::mark_lost(cpu, id, true);
+    }
+    if changed {
+        surface::forget_is_lost(cpu);
     }
 }
 
