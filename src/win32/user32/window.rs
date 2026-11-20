@@ -1917,18 +1917,19 @@ pub fn set_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// among its siblings, so the call adds SWP_NOZORDER: HWND_TOP for the
 /// first sibling, HWND_BOTTOM for the last one that isn't topmost,
 /// HWND_TOPMOST for a topmost first sibling, or the sibling that already
-/// comes before it when both are topmost or neither is. Windows decides
-/// this after WM_WINDOWPOSCHANGING, which still gets the caller's flags,
-/// so a call that changes nothing ends without WM_WINDOWPOSCHANGED
-/// (msg.c's WmSwitchNotMaximizedChild and WmCreateMDIchildVisibleSeq,
-/// recorded on Windows; Wine's fixup_swp_flags).
+/// comes before it (for a top-level window, when both are topmost or
+/// neither is). Windows decides this after WM_WINDOWPOSCHANGING, which
+/// still gets the caller's flags, so a call that changes nothing ends
+/// without WM_WINDOWPOSCHANGED (msg.c's WmSwitchNotMaximizedChild and
+/// WmCreateMDIchildVisibleSeq, recorded on Windows; Wine's
+/// fixup_swp_flags).
 ///
 /// Wine also adds it for HWND_NOTOPMOST on a window that isn't topmost,
-/// and for the sibling before it whatever their topmost flags. Windows
-/// 98 SE doesn't (win32_zorder_tests.rs, recorded there): HWND_NOTOPMOST
-/// on such a window still takes the flag from the windows it owns and
-/// puts them below the topmost ones, and a window placed after the
-/// topmost window just above it becomes topmost.
+/// and for the sibling before a top-level window whatever their topmost
+/// flags. Windows 98 SE doesn't (win32_zorder_tests.rs, recorded there):
+/// HWND_NOTOPMOST on such a window still takes the flag from the windows
+/// it owns and puts them below the topmost ones, and a top-level window
+/// placed after the topmost window just above it becomes topmost.
 fn zorder_unchanged(state: &State, hwnd: u32, after: u32, flags: u32) -> bool {
     if flags & SWP_NOZORDER != 0 {
         return false;
@@ -1948,9 +1949,12 @@ fn zorder_unchanged(state: &State, hwnd: u32, after: u32, flags: u32) -> bool {
         HWND_TOPMOST => topmost && first,
         HWND_NOTOPMOST => false,
         h => {
-            let same_band = state
-                .window(h)
-                .is_some_and(|a| (a.ex_style & WS_EX_TOPMOST != 0) == topmost);
+            // Only top-level windows have a topmost band: a child placed
+            // after a sibling keeps its WS_EX_TOPMOST (`set_topmost`).
+            let same_band = w.parent != DESKTOP
+                || state
+                    .window(h)
+                    .is_some_and(|a| (a.ex_style & WS_EX_TOPMOST != 0) == topmost);
             h == hwnd
                 || (same_band
                     && siblings

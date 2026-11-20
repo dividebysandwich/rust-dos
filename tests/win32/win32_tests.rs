@@ -13790,14 +13790,15 @@ fn set_window_pos_to_where_a_window_already_is_sends_no_changed() {
             all_equal(a, l, &[(0xA0, bit + 1), (0xA4, 2)], bit as u32)?;
         }
         // A after B, which it already comes after: B is topmost and A
-        // isn't, so the call is a change (Windows 98 SE makes a top-level
-        // window placed so topmost, win32_zorder_tests.rs).
+        // isn't, but children have no topmost band, so nothing changes.
+        // (A top-level window placed so becomes topmost on Windows 98
+        // SE, a change: win32_zorder_tests.rs.)
         a.push(flags)?;
         push_args(a, &[0, 0, 0, 0])?;
         a.push(edi)?;
         a.push(esi)?;
         a.call(f("SetWindowPos"))?;
-        all_equal(a, l, &[(0xA0, 7), (0xA4, 3)], 6)?;
+        all_equal(a, l, &[(0xA0, 7), (0xA4, 2)], 6)?;
         a.push(ebx)?;
         a.call(f("ExitProcess"))?;
         a.int3()
