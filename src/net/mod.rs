@@ -403,6 +403,18 @@ impl LanStatus {
     }
 }
 
+/// Which end of a link to another machine an instance is (`Net::link_end`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkEnd {
+    /// Its member index in the LAN room it is in, which the relay gives
+    /// no two members at once.
+    Member(u8),
+    /// Not in a room (yet): a number made from the link's settings, which
+    /// the two ends of a link usually set differently (one hosts the room
+    /// or takes the modem's calls, the other joins or dials).
+    Settings(u32),
+}
+
 /// The network as the emulator keeps it on its bus.
 pub struct Net {
     pub settings: NetSettings,
@@ -665,6 +677,39 @@ impl Net {
         #[cfg(target_arch = "wasm32")]
         let serial = None;
         LanView { state: status.describe(), joined: status.joined(), index, roster, listing: self.listing(), serial }
+    }
+
+    /// Which end of a link to another machine this instance is, or None
+    /// when it has no link: no LAN room, no null modem cable, no modem
+    /// that takes calls. Two machines at the two ends of a link get
+    /// different ones, so what each lays out differently from the other
+    /// (the built-in Windows' selectors, `win16::task`) can come from it,
+    /// and a given setup gets the same one each run.
+    pub fn link_end(&self) -> Option<LinkEnd> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(status) = self.status().hub
+            && let hub::LanState::Joined { index, .. } = status.lan
+        {
+            return Some(LinkEnd::Member(index));
+        }
+        let (net, serial) = (&self.settings, &self.serial.settings);
+        let linked = self.active()
+            || net.lan.is_some()
+            || net.lan_host.is_some()
+            || serial.modem_listen.is_some()
+            || serial.ports.contains(&crate::serial::PortType::NullModem);
+        if !linked {
+            return None;
+        }
+        // FNV-1a, which gives the same number on every host and build.
+        let text = format!(
+            "{:?}|{:?}|{:?}|{:?}|{}|{}",
+            net.lan, net.lan_host, net.mac, serial.modem_listen, net.room, net.player
+        );
+        let hash = text
+            .bytes()
+            .fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+        Some(LinkEnd::Settings(hash))
     }
 
     /// What happened on the LAN since the last call, for the screen.

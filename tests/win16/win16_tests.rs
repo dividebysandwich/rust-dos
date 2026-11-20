@@ -811,3 +811,54 @@ fn load_library_gives_the_data_segment_a_self_loading_dlls_loader_made() {
         "{log}"
     );
 }
+
+/// The handle of module T the loader logged, and how many selectors the
+/// Win16 process reserved for a link to another machine (0 for none).
+fn t_handle_and_reserved(log: &str) -> (u16, u16) {
+    let handle = log
+        .lines()
+        .find_map(|l| l.split("[W16] Loaded T (").nth(1))
+        .and_then(|rest| rest.rsplit("module ").next())
+        .and_then(|h| u16::from_str_radix(h.trim(), 16).ok())
+        .unwrap_or_else(|| panic!("T's load isn't logged:\n{log}"));
+    let reserved = log
+        .lines()
+        .find_map(|l| l.split("[W16] Linked to another machine: ").nth(1))
+        .and_then(|rest| rest.split(' ').next())
+        .map_or(0, |n| n.parse().unwrap());
+    (handle, reserved)
+}
+
+#[test]
+fn two_linked_machines_give_a_program_different_selectors() {
+    // Two machines on a null modem cable through a LAN room, one hosting
+    // it and one joining, run the same program: their selectors differ,
+    // as two real PCs' do, since Metal Marines tells its own message
+    // from the other side's by a far pointer in it (#661). A machine with
+    // no link lays them out as before, from the first entry.
+    use rust_dos::serial::PortType;
+    let code = {
+        let mut code = Code::new();
+        code.emit(&[0xB0, 0x00]).exit_al(); // mov al,0
+        code
+    };
+    let run_linked = |test: &str, link: Option<fn(&mut rust_dos::net::NetSettings)>| {
+        let (exit, log) = win16::run_with(test, program(&code, CODE), |cpu, _| {
+            if let Some(link) = link {
+                cpu.bus.net.serial.settings.ports[0] = PortType::NullModem;
+                link(&mut cpu.bus.net.settings);
+            }
+        });
+        assert_eq!(exit, 0, "{log}");
+        t_handle_and_reserved(&log)
+    };
+    let alone = run_linked("link_none", None);
+    let host = run_linked("link_host", Some(|net| net.lan_host = Some(23661)));
+    let join = run_linked("link_join", Some(|net| net.lan = Some("127.0.0.1:23661".into())));
+    assert_eq!(alone.1, 0, "a machine with no link reserves none");
+    for (linked, reserved) in [host, join] {
+        assert_ne!(reserved, 0);
+        assert_eq!(linked, alone.0 + 8 * reserved, "{alone:?} {linked:X}");
+    }
+    assert_ne!(host.0, join.0, "the two ends got the same selectors");
+}
