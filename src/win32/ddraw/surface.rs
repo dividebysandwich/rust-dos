@@ -1634,10 +1634,11 @@ pub(super) const IS_LOST_FIXUPS: &[Fixup] = &[Fixup { at: 0x1F, var: 0 }];
 /// The offset in the cache of the slot of the interface `this`:
 /// `((this >> 3) ^ (this >> 13)) & 1023`, 4 bytes each. Interfaces are
 /// blocks of the process's heap at multiples of 8 bytes, so the low bits
-/// tell apart those within 8 KB of each other, and the higher ones folded in keep blocks
-/// 8 KB apart from sharing a slot: with the low bits alone, Beasts and
-/// Bumpkins' sprites' interfaces, 4 KB apart, took turns in slots and
-/// missed 360 times a second.
+/// give each interface in an aligned 8 KB block a slot of its own, and
+/// the higher bits folded in keep interfaces at the same place in
+/// neighbouring blocks apart. With `(this >> 3) & 255` alone, Beasts
+/// and Bumpkins' sprites' interfaces, 4 KB and 10 KB apart, took turns
+/// in their slots and missed 360 times a second.
 pub(super) fn is_lost_slot(this: u32) -> u32 {
     (((this ^ (this >> 10)) >> 3) & (IS_LOST_SLOTS - 1)) * 4
 }
