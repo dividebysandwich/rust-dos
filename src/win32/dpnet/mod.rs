@@ -10,10 +10,10 @@
 //! provider of DirectPlay 8 can start: EnumServiceProviders lists the
 //! four DirectX 8.1 registers (TCP/IP, IPX, modem, serial) only when the
 //! program asks for every registered one, and a peer, a client or a
-//! server can't host, join or look for a session. What needs a session fails as DirectPlay 8 does
-//! with none, so a game that offers network play next to playing alone
-//! falls back to playing alone. DPLAYX's sessions over the LAN room
-//! (dplayx/) don't reach DirectPlay 8 yet.
+//! server can't host, join or look for a session. What needs a session
+//! fails as DirectPlay 8 does with none, so a game that offers network
+//! play next to playing alone falls back to playing alone. DPLAYX's
+//! sessions over the LAN room (dplayx/) don't reach DirectPlay 8 yet.
 //!
 //! The lobbied application registers a program for lobbies under
 //! HKLM\Software\Microsoft\DirectPlay8\Applications, as DirectPlay 8
