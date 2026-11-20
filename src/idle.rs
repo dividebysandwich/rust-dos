@@ -154,6 +154,13 @@ pub struct CpuKey {
     pub system: [crate::cpu::SegCache; 2],
     pub fpu: crate::cpu::FpuKey,
     pub shadow: bool,
+    /// The running Win16 task's switches between 16-bit and 32-bit code
+    /// (`win16::frames_of_running`). A 16-bit call of a 32-bit function
+    /// keeps the caller's registers there, and the thunk starts the
+    /// 32-bit code with registers that are the same whoever called it:
+    /// two calls of GetTickCount from two places of a loop come to it with
+    /// the same registers, and differ only in where they go back to.
+    pub win16: Vec<crate::win16::Frame>,
     /// AL holds a value read from a port, and isn't compared (see
     /// `Observe::tainted`).
     pub tainted: bool,
@@ -600,6 +607,13 @@ impl Observe {
             && !pass.wrote(start, end, exact)
         {
             self.opaque_because("pass");
+        }
+        // A failed proof ends at the next visit and looks at no blocks.
+        // Writes until then can be many (the built-in Windows loading an
+        // image of megabytes in one service call), and collecting them
+        // would sort ever more blocks at every write.
+        if self.failed.get().is_some() {
+            return;
         }
         for chunk in start >> GEN_SHIFT..=(end - 1) >> GEN_SHIFT {
             self.chunks.push(chunk as u32);
@@ -2056,5 +2070,22 @@ mod tests {
         assert!(!cpu.bus.observe.watching());
         assert!(cpu.bus.observe.enabled);
         assert_eq!(cpu.bus.observe.stats.arms, 7);
+    }
+
+    #[test]
+    fn a_proof_that_failed_on_its_blocks_collects_no_more() {
+        let mut o = Observe {
+            on: true,
+            ..Observe::default()
+        };
+        // A service writes 4 MB a dword at a time, as the built-in
+        // Windows maps a large image and writes its page table entries.
+        for addr in (0..4 << 20).step_by(4 << GEN_SHIFT) {
+            o.wrote(addr, addr + 4);
+        }
+        assert_eq!(o.failed.get(), Some("blocks"));
+        // The blocks it had when it failed, not one for every write since:
+        // each write would sort them all again.
+        assert!(o.chunks.len() <= 4 * CHUNKS + 1, "{} blocks", o.chunks.len());
     }
 }
