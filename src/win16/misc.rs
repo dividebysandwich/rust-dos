@@ -523,6 +523,15 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
             if value == 0 {
                 mci_returned(cpu, d(1), d(2), d(3));
             }
+            // A status's answer, copied to the program's block, and the
+            // error code in DX:AX as it is: WINMM's function already
+            // said whether an idle proof goes through the command.
+            if d(3) == wmci::MCI_STATUS {
+                crate::idle::pure_call(cpu, None);
+                crate::idle::reads_arguments(cpu);
+                crate::idle::reads_also(cpu, d(1) + 4, 4);
+                crate::idle::resumed16(cpu, true);
+            }
             Some(value)
         }
         P_SEGPTR => {
@@ -1586,6 +1595,16 @@ fn mci_send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         mci_block32(cpu, segptr, at16, block, msg, flags);
         block
     };
+    // A status's block is copied as it is, into the 32-bit stack's
+    // scratch space: WINMM's function says for itself whether an idle
+    // proof goes through the command (`mci::send_command`), and `post`
+    // whether it goes through what comes back.
+    if msg == wmci::MCI_STATUS && at16 != 0 {
+        let room = super::segment_room(cpu, segptr).min(MCI_BLOCK);
+        crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
+        crate::idle::reads_also(cpu, at16, room);
+    }
     // The program's block goes to `post` as its 16:16 pointer: the
     // command can call into USER32, whose messages run the program's
     // window procedures, and a segment they grow can move.
