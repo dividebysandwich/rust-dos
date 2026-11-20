@@ -94,8 +94,12 @@ enum Tok {
 const FLOAT_GAP: i32 = 4;
 
 /// A picture at a margin: the side, the room it takes from the lines
-/// beside it, and where it ends. It keeps that room into the paragraphs
-/// after its own until its bottom, as WinHelp's `{bml}` and `{bmr}` do.
+/// beside it, and where it ends. WinHelp wraps the text of the picture's
+/// own paragraph around it, and the paragraph ends below the picture, so
+/// the paragraphs after it start under it. A paragraph that holds only
+/// the picture is its height, with no text beside it ("Microsoft Windows
+/// Programming Tools", Windows 3.1 SDK, 3.3.2 "Wrapping Text Around a
+/// Bitmap").
 #[derive(Clone, Copy)]
 struct Float {
     place: Place,
@@ -203,19 +207,20 @@ pub fn layout(
     let mut out = Layout::default();
     let mut font = 0u16;
     let mut y = margin;
-    let mut floats: Vec<Float> = Vec::new();
     for par in pars {
+        let mut floats: Vec<Float> = Vec::new();
         let left = margin + pixels(par.left);
         let right = (width - margin - pixels(par.right)).max(left + 1);
         let first = (left + pixels(par.first)).max(margin);
         y += pixels(par.space_before);
         let toks = tokens(par, &mut font, &mut out.links);
-        // A paragraph of pictures at the margins alone takes no line:
-        // the text after it goes beside them.
+        // A paragraph of pictures at the margins alone takes no line of
+        // text, only the pictures' height.
         let only_floats = !toks.is_empty() && toks.iter().all(|t| matches!(t, Tok::Float(..)));
+        let par_right = right;
         let mut line = Line {
             pieces: Vec::new(),
-            x: first + taken(&floats, y).0,
+            x: first,
         };
         // Where the paragraph's first line goes.
         let top = y;
@@ -261,10 +266,17 @@ pub fn layout(
                     line.x += w;
                 }
                 Tok::Float(n, link, side) => {
+                    // After text of its paragraph, the picture goes under
+                    // that text: WinHelp wraps around a picture at the
+                    // start of a paragraph, and puts one at its end under
+                    // it.
+                    if !line.pieces.is_empty() {
+                        flush!();
+                    }
                     let (w, h) = picture(n).unwrap_or((0, 0));
                     let (l, r) = taken(&floats, y);
                     let x = match side {
-                        Place::Right => right - w,
+                        Place::Right => (par_right - r - w).max(left),
                         _ => left + l,
                     };
                     out.pictures.push(Placed {
@@ -282,9 +294,9 @@ pub fn layout(
                         room,
                         bottom: y + h,
                     });
-                    // A line with nothing on it yet starts after the
-                    // picture; one that has text keeps it where it is.
-                    if side != Place::Right && line.pieces.is_empty() {
+                    // The line, which has nothing on it yet, starts
+                    // beside the picture.
+                    if side != Place::Right {
                         line.x = line.x.max(left + room);
                     }
                 }
@@ -293,10 +305,11 @@ pub fn layout(
         if !line.pieces.is_empty() || (y == top && !only_floats) {
             flush!();
         }
+        // The paragraph ends below its pictures.
+        y = floats.iter().map(|f| f.bottom).fold(y, i32::max);
         y += pixels(par.space_after);
     }
-    let bottom = floats.iter().map(|f| f.bottom).max().unwrap_or(0);
-    out.height = y.max(bottom) + margin;
+    out.height = y + margin;
     out
 }
 
@@ -491,11 +504,11 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_at_the_left_margin_has_the_next_paragraphs_beside_it() {
+    fn a_paragraph_of_a_picture_at_the_margin_has_no_text_beside_it() {
         // Metal Marines' help: "Clicking the", then a paragraph of a
         // {bml} button picture 20 by 25, then the rest of the sentence.
-        // The rest goes beside the picture, from its top, and the lines
-        // below the picture's bottom go back to the margin.
+        // As in Windows 98's WinHelp, the rest starts under the picture,
+        // at the margin.
         let pars = [
             par(vec![text("Clicking the")]),
             par(vec![Item::Picture(7, Place::Left)]),
@@ -504,25 +517,74 @@ mod tests {
         let l = layout(&pars, 100, 0, &mut Fixed, &mut |_| Some((20, 25)));
         assert_eq!((l.pictures[0].x, l.pictures[0].y), (0, 10));
         let lines: Vec<(i32, i32)> = l.runs.iter().map(|r| (r.x, r.y)).collect();
-        // The lines at 10, 20 and 30 start beside the picture, which ends
-        // at 35; the one at 40 starts at the margin.
-        let b = 20 + FLOAT_GAP;
         assert_eq!(
             lines,
             [
                 (0, 0),
                 (54, 0),
-                (b, 10),
-                (b + 18, 10),
-                (b + 42, 10),
-                (b, 20),
-                (b + 36, 20),
-                (b, 30),
-                (0, 40),
-                (48, 40),
+                (0, 35),
+                (18, 35),
+                (42, 35),
+                (66, 35),
+                (0, 45),
+                (24, 45),
+                (0, 55),
+                (48, 55),
             ]
         );
-        assert_eq!(l.height, 50);
+        assert_eq!(l.height, 65);
+    }
+
+    #[test]
+    fn a_picture_at_the_start_of_a_paragraph_has_its_text_beside_it() {
+        // A {bml} picture 20 by 25 that starts its paragraph: the lines
+        // that start above its bottom go beside it, the next at the
+        // margin, and the next paragraph after the picture's bottom when
+        // the text ends first.
+        let pars = [
+            par(vec![
+                Item::Picture(7, Place::Left),
+                text("aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk"),
+            ]),
+            par(vec![Item::Picture(7, Place::Left), text("aaa")]),
+            par(vec![text("z")]),
+        ];
+        let l = layout(&pars, 100, 0, &mut Fixed, &mut |_| Some((20, 25)));
+        let at: Vec<(i32, i32)> = l.pictures.iter().map(|p| (p.x, p.y)).collect();
+        assert_eq!(at, [(0, 0), (0, 40)]);
+        let lines: Vec<(i32, i32)> = l.runs.iter().map(|r| (r.x, r.y)).collect();
+        let b = 20 + FLOAT_GAP;
+        assert_eq!(
+            lines,
+            [
+                (b, 0),
+                (b + 24, 0),
+                (b + 48, 0),
+                (b, 10),
+                (b + 24, 10),
+                (b + 48, 10),
+                (b, 20),
+                (b + 24, 20),
+                (b + 48, 20),
+                (0, 30),
+                (24, 30),
+                (b, 40),
+                (0, 65),
+            ]
+        );
+        assert_eq!(l.height, 75);
+    }
+
+    #[test]
+    fn a_picture_at_the_end_of_a_paragraph_goes_under_its_text() {
+        // {bmr} after the text: the picture under it, at the right margin.
+        let pars = [
+            par(vec![text("ab"), Item::Picture(7, Place::Right)]),
+            par(vec![text("z")]),
+        ];
+        let l = layout(&pars, 100, 0, &mut Fixed, &mut |_| Some((20, 25)));
+        assert_eq!((l.pictures[0].x, l.pictures[0].y), (80, 10));
+        assert_eq!((l.runs[1].x, l.runs[1].y), (0, 35));
     }
 
     #[test]
