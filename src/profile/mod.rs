@@ -215,12 +215,15 @@ zones! {
     // The built-in OpenGL: its functions (`call`), of which glVertex
     // (`vertex`) and glEnd's vertices (`end`) have their own, and a
     // draw's work before Direct3D gets it: the context's state put
-    // on the device (`apply`) and the primitives (the plain name).
+    // on the device (`apply`) and the primitives (the plain name). A
+    // texture image's texels read from the program, converted and
+    // written into the texture's surface have `texels`.
     OpenGl = "hle.opengl",
     OpenGlCall = "hle.opengl.call",
     OpenGlVertex = "hle.opengl.vertex",
     OpenGlEnd = "hle.opengl.end",
     OpenGlApply = "hle.opengl.apply",
+    OpenGlTexels = "hle.opengl.texels",
     // Port accesses, by the device that has the port.
     IoVga = "io.vga",
     IoPic = "io.pic",
