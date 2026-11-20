@@ -377,11 +377,11 @@ user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/msg: msg: 11696 tests executed (0 marked as todo, 525 failures), 6 skipped.
+user32/msg: msg: 11769 tests executed (0 marked as todo, 509 failures), 6 skipped.
 user32/msg: skipped msg.c:12537
 user32/msg: failed msg.c:8462
 user32/msg: skipped msg.c:12177
-user32/msg: failed msg.c:10734 (x57)
+user32/msg: failed msg.c:10734 (x55)
 user32/msg: failed msg.c:10731 (x3)
 user32/msg: failed msg.c:10729 (x2)
 user32/msg: failed msg.c:9529
@@ -408,7 +408,7 @@ user32/msg: failed msg.c:4578 (x4)
 user32/msg: failed msg.c:4588
 user32/msg: failed msg.c:3971 (x4)
 user32/msg: failed msg.c:4013 (x4)
-user32/msg: failed msg.c:4603 (x2)
+user32/msg: failed msg.c:4603
 user32/msg: failed msg.c:4674
 user32/msg: failed msg.c:4690
 user32/msg: failed msg.c:4693 (x7)
@@ -457,10 +457,10 @@ user32/msg: failed msg.c:5081
 user32/msg: failed msg.c:5086
 user32/msg: failed msg.c:5093 (x3)
 user32/msg: failed msg.c:3378
-user32/msg: failed msg.c:3452 (x14)
+user32/msg: failed msg.c:3452 (x15)
 user32/msg: failed msg.c:3466
 user32/msg: failed msg.c:3488
-user32/msg: failed msg.c:3507 (x8)
+user32/msg: failed msg.c:3507 (x4)
 user32/msg: failed msg.c:3529 (x5)
 user32/msg: failed msg.c:3553 (x4)
 user32/msg: failed msg.c:3559 (x5)
@@ -479,7 +479,6 @@ user32/msg: failed msg.c:3732 (x6)
 user32/msg: failed msg.c:3754
 user32/msg: failed msg.c:3773
 user32/msg: failed msg.c:3788
-user32/msg: failed msg.c:3801 (x10)
 user32/msg: failed msg.c:3826
 user32/msg: failed msg.c:3828
 user32/msg: failed msg.c:3843
@@ -580,7 +579,7 @@ user32/text: text: 197 tests executed (0 marked as todo, 0 failures), 2 skipped.
 user32/text: skipped text.c:119
 user32/text: skipped text.c:554
 user32/uitools: uitools: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/win: win: 10460 tests executed (0 marked as todo, 45 failures), 8 skipped.
+user32/win: win: 10436 tests executed (0 marked as todo, 45 failures), 8 skipped.
 user32/win: skipped win.c:5400
 user32/win: skipped win.c:2891
 user32/win: failed win.c:4616
