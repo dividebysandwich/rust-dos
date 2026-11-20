@@ -397,6 +397,8 @@ fn a_program_started_from_the_shell_frees_its_environment() {
     cpu.set_reg16(Register::ES, environment);
     int21(&mut cpu, 0x49);
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    // Its MCB is free, as DOS leaves a freed block.
+    assert!(mcb::read_mcb(&mut cpu.bus, environment - 1).is_free());
 
     // A segment that is no block of its fails as before.
     cpu.set_reg16(Register::ES, environment + 1);
@@ -445,4 +447,42 @@ fn a_program_started_from_the_shell_owns_its_environment_block() {
             cpu.load_shell();
         }
     }
+}
+
+#[test]
+fn resizing_the_shell_environment_keeps_the_chain() {
+    // Loaded high, the program's environment MCB is followed by the free
+    // first block of conventional memory. The environment area is not in
+    // the chain, so AH=4Ah on it must neither take that block (growing)
+    // nor merge a freed tail into it (shrinking).
+    let base = scratch("resize_environment", &[("ONE.COM", &[0xEB, 0xFE])]);
+    let mut cpu = Cpu::new(base);
+    cpu.set_upper_memory(false, true).unwrap();
+    cpu.load_shell();
+    assert!(cpu.load_executable_high("ONE.COM"));
+    let psp = cpu.current_psp;
+    assert!(psp >= mcb::UMB_START);
+    let environment = cpu.bus.read_16(cpu.get_physical_addr(psp, 0x2C));
+    let before = walk(&mut cpu.bus);
+    assert!(before[0].1.is_free());
+    let size = mcb::read_mcb(&mut cpu.bus, environment - 1).size;
+
+    cpu.set_reg16(Register::ES, environment);
+    cpu.set_bx(size + 0x100);
+    int21(&mut cpu, 0x4A);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!((cpu.ax(), cpu.bx()), (8, size));
+    assert_eq!(walk(&mut cpu.bus), before);
+
+    cpu.set_reg16(Register::ES, environment);
+    cpu.set_bx(0x10);
+    int21(&mut cpu, 0x4A);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(walk(&mut cpu.bus), before);
+    let header = mcb::read_mcb(&mut cpu.bus, environment - 1);
+    assert_eq!((header.owner, header.size), (psp, 0x10));
+    // The freed tail still ends at the first MCB.
+    let tail = mcb::read_mcb(&mut cpu.bus, environment + 0x10);
+    assert!(tail.is_free() && !tail.is_last());
+    assert_eq!(environment + 0x10 + 1 + tail.size, FIRST_MCB_SEG);
 }

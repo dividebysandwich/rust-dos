@@ -104,7 +104,7 @@ const _: () = assert!(VSHARE_FLAG < CRIT_PATCHES);
 /// What DOS keeps after its data segment, below the first MCB: the file
 /// table with the system JFT after it, and the environment of programs
 /// started from the shell, up to the first MCB. The paragraph before the
-/// environment is its MCB (`Cpu::load_executable` writes it), as the
+/// environment is its MCB (`Cpu::load_program_bytes` writes it), as the
 /// environment DOS gives a program is a block of the program's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
