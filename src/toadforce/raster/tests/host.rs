@@ -1734,6 +1734,104 @@ fn surfaces_over_the_same_bytes_take_each_others_pixels() {
     assert_eq!(rig.px(45, 10), 0x00_00FF);
 }
 
+/// A 16x16 surface at `offset`, as a texture's image or as the copy
+/// it is filled from.
+fn tile(offset: u32) -> Surface {
+    Surface {
+        offset,
+        pitch: 16 * 4,
+        width: 16,
+        height: 16,
+        format: FORMAT,
+    }
+}
+
+/// The colour of the texels the tile at `STAGED + n * TILE` holds.
+fn staged(n: u32) -> u32 {
+    0xFF00_0000 | 0x11_2233 * (n + 1)
+}
+
+const STAGED: u32 = BUFFER;
+const TILE: u32 = 0x1000;
+/// A surface no draw uses, which a `FILL` and a `BLT` write.
+const ASIDE: u32 = TEXTURE + 0x8000;
+
+/// Textures streamed as Nocturne streams them, in one run of
+/// commands: a `BLT` copies a texture's texels in from a tile of
+/// their own before the draws that sample it. Texture 1 is filled
+/// before the first draw, texture 2 while that draw waits, and
+/// texture 1 again while a draw that samples it waits. A `FILL` of a
+/// surface no draw uses comes in between, and a `BLT` out of the
+/// target while a draw into it waits.
+fn streamed_textures(rig: &mut Rig) {
+    for n in 0..3 {
+        let texels = staged(n).to_le_bytes().repeat(16 * 16);
+        poke(rig, (STAGED + n * TILE) as usize, &texels);
+    }
+    let texture = |n: u32| Texture {
+        format: FORMAT,
+        width: 16,
+        height: 16,
+        levels: 1,
+        images: vec![(TEXTURE + n * TILE, 16 * 4)],
+        ..Texture::default()
+    };
+    rig.stage(
+        0,
+        &[(TSS_COLOROP, OP_SELECT_ARG1), (TSS_COLORARG1, ARG_TEXTURE)],
+    );
+    let whole = rect(0, 0, 16, 16);
+    let copy = |w: &mut Vec<u32>, into: u32, from: u32| {
+        let (dst, src) = (tile(TEXTURE + into * TILE), tile(STAGED + from * TILE));
+        command::encode::blt(w, &dst, &whole, &src, &whole, None);
+    };
+    let colour = rig.colour();
+    let error = rig.run(|w| {
+        encode::define_texture(w, 1, &texture(0));
+        encode::define_texture(w, 2, &texture(1));
+        copy(w, 0, 0);
+        encode::set_texture(w, 0, 1);
+        encode::draw(w, 5, TL, 4, &quad(0.0, 0.0, 16.0));
+        copy(w, 1, 1);
+        command::encode::fill(w, &tile(ASIDE), &whole, 0x00AB_CDEF);
+        encode::set_texture(w, 0, 2);
+        encode::draw(w, 5, TL, 4, &quad(16.0, 0.0, 16.0));
+        copy(w, 0, 2);
+        encode::set_texture(w, 0, 1);
+        encode::draw(w, 5, TL, 4, &quad(32.0, 0.0, 16.0));
+        // Out of the target, into the half of the tile aside the
+        // `FILL` left alone.
+        let half = rect(0, 8, 16, 8);
+        let drawn = rect(32, 8, 16, 8);
+        command::encode::blt(w, &tile(ASIDE), &half, &colour, &drawn, None);
+        encode::set_texture(w, 0, 2);
+        encode::draw(w, 5, TL, 4, &quad(48.0, 0.0, 16.0));
+    });
+    assert_eq!(error, 0);
+}
+
+#[test]
+fn a_blt_of_surfaces_no_waiting_draw_uses_leaves_the_hosts_batch_growing() {
+    let (rig, log) = same(takes_all, streamed_textures);
+    // Each draw sampled the texels copied in before it, and the
+    // second copy into texture 1 waited for the draw before it.
+    let rgb = |n| staged(n) & 0xFF_FFFF;
+    assert_eq!(rig.px(8, 8), rgb(0));
+    assert_eq!(rig.px(24, 8), rgb(1));
+    assert_eq!(rig.px(40, 8), rgb(2));
+    assert_eq!(rig.px(56, 8), rgb(1));
+    // The `BLT` out of the target waited for the draw into it, and
+    // the `FILL` is there.
+    let aside = tile(ASIDE);
+    assert_eq!(rig.word(aside.at(4, 12), 4) & 0xFF_FFFF, rgb(2));
+    assert_eq!(rig.word(aside.at(4, 4), 4), 0x00AB_CDEF);
+    // The first two draws are one batch: the copy into texture 2 and
+    // the `FILL` don't touch what the first draw uses. The copy into
+    // texture 1 ends it, as the first draw samples texture 1, and the
+    // `BLT` out of the target ends the next.
+    assert_eq!(log.borrow().batches, 3);
+}
+
 /// The first half of a scene, and the half after a state was saved.
 fn before_the_save(rig: &mut Rig) {
     triangles(rig);
