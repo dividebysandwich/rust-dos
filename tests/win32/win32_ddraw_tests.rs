@@ -3578,3 +3578,66 @@ fn flips_without_the_retrace_come_at_60_under_auto() {
     assert!((rate - 60.0).abs() < 1.5, "{} flips a second under auto", rate);
     assert!(worker > 100_000, "the other thread ran {} passes", worker);
 }
+
+const S_IS_LOST: u32 = 24;
+const DD_RELEASE: u32 = 2;
+/// DDERR_INVALIDOBJECT and DDERR_SURFACELOST.
+const INVALID_OBJECT: u32 = 0x8876_0082;
+const SURFACE_LOST: u32 = 0x8876_01C2;
+
+/// IsLost is x86 code that answers from a cache of the interfaces it was
+/// asked about (#1517): a surface asked about twice, NULL, and the
+/// surface again after its DirectDraw object went, which loses it.
+fn is_lost_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (100, 50, 200, 100))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_NORMAL)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(a, l, FRONT, S_IS_LOST, &[])?;
+        c.com(a, l, FRONT, S_IS_LOST, &[])?;
+        // IsLost(NULL), through the surface's vtable.
+        a.mov(eax, dword_ptr(l.at(FRONT)))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.push(0)?;
+        a.call(dword_ptr(eax + 4 * S_IS_LOST))?;
+        c.keep(a, l)?;
+        c.com(a, l, DD, DD_RELEASE, &[])?;
+        c.com(a, l, FRONT, S_IS_LOST, &[])?;
+        c.com(a, l, FRONT, S_IS_LOST, &[])?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn is_lost_answers_from_its_cache_and_sees_a_surface_lost() {
+    let (program, data) = is_lost_program();
+    let mut cpu = machine("is_lost", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(
+        results(&mut cpu, data, 10)[3..],
+        [0, 0, 0, INVALID_OBJECT, 0, SURFACE_LOST, SURFACE_LOST]
+    );
+    // The surface's slot holds its interface and the last answer.
+    let front = peek(&cpu, data + FRONT);
+    let cache = rust_dos::win32::is_lost_cache();
+    let slot = cache + (front >> 3 & 255) * 8;
+    assert_eq!(
+        (peek(&cpu, slot), peek(&cpu, slot + 4)),
+        (front, SURFACE_LOST)
+    );
+}

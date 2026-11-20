@@ -34,8 +34,11 @@ use super::{
 };
 use crate::cpu::Cpu;
 use crate::video::dxt;
+use crate::win32::TRAP;
 use crate::win32::gdi32;
+use crate::win32::memory::Memory;
 use crate::win32::screen;
+use crate::win32::stubs::{self, Fixup};
 
 // DDSURFACEDESC's flags.
 pub const DDSD_CAPS: u32 = 0x1;
@@ -271,7 +274,7 @@ pub struct Surface {
     /// Whether its pixels are DirectDraw's to free: not SetSurfaceDesc's,
     /// or a mipmap level's in its top level's block.
     pub owns_bits: bool,
-    pub lost: bool,
+    pub lost: Lost,
     pub locked: bool,
     /// GetDC's DC, its bitmap, and the bitmap it had before.
     pub dc: u32,
@@ -386,7 +389,7 @@ fn surface(cpu: &mut Cpu, id: u32) -> Option<&mut Surface> {
 /// The surface `this` is, with an error if it is lost.
 fn usable(cpu: &mut Cpu, this: u32) -> Result<(usize, u32), u32> {
     let (vtable, id) = surface_of(cpu, this)?;
-    if state(cpu).surface(id).is_some_and(|s| s.lost) {
+    if state(cpu).surface(id).is_some_and(|s| s.lost.get()) {
         return Err(DDERR_SURFACELOST);
     }
     Ok((vtable, id))
@@ -459,7 +462,7 @@ pub fn card_memory(cpu: &mut Cpu, id: u32) -> Option<(u32, u32)> {
         return None;
     }
     let s = state(cpu).surface(id)?;
-    (s.memory == MEM_VIDEO && !s.lost).then_some((s.bits, s.pitch))
+    (s.memory == MEM_VIDEO && !s.lost.get()).then_some((s.bits, s.pitch))
 }
 
 /// Read `len` bytes of a surface's pixels from byte `offset`.
@@ -612,8 +615,8 @@ fn allocate(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
         s.memory = memory;
         s.bits = bits;
         s.owns_bits = level.is_none();
-        s.lost = false;
     }
+    set_lost(cpu, id, false);
     Ok(())
 }
 
@@ -723,8 +726,8 @@ pub fn video_memory_lost(cpu: &mut Cpu) {
         if let Some(s) = surface(cpu, id) {
             s.memory = MEM_NONE;
             s.bits = 0;
-            s.lost = true;
         }
+        set_lost(cpu, id, true);
     }
     super::d3d::hal::video_memory_lost(cpu);
 }
@@ -772,9 +775,9 @@ pub fn orphan(cpu: &mut Cpu, id: u32) {
     end_lock(cpu, id);
     free_memory(cpu, id);
     if let Some(s) = surface(cpu, id) {
-        s.lost = true;
         s.locked = false;
     }
+    set_lost(cpu, id, true);
 }
 
 /// A card surface that goes while locked lets go of Glide's lock on
@@ -1494,11 +1497,148 @@ pub fn get_pixel_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// restores a surface, so an idle proof goes through it (#1306), lost or
 /// not: Biosys asks it in every pass of the loop it waits in. It reads
 /// no RAM but its argument and the interface block (`com::interface_of`).
+///
+/// IsLost is x86 code (`IS_LOST`), and this runs as itself only in a
+/// state saved when it was a trap; the code traps to `is_lost_miss`.
 pub fn is_lost(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     crate::idle::pure_call(cpu, None);
     crate::idle::reads_arguments(cpu);
     hr!(usable(cpu, args[0]));
     Some(DD_OK)
+}
+
+/// Whether a surface is lost. It changes through `set_lost` alone, which
+/// keeps IsLost's caches (`IS_LOST`) right.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lost(bool);
+
+impl Lost {
+    pub fn get(self) -> bool {
+        self.0
+    }
+}
+
+impl crate::savestate::State for Lost {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        crate::savestate::State::save(&self.0, w);
+    }
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        crate::savestate::State::load(&mut self.0, r)
+    }
+}
+
+/// The surface `id` is lost, or has its pixels again. Every process's
+/// cache of IsLost's answers is emptied when that changes.
+pub(super) fn set_lost(cpu: &mut Cpu, id: u32, lost: bool) {
+    let Some(s) = surface(cpu, id) else {
+        return;
+    };
+    if s.lost.0 != lost {
+        s.lost = Lost(lost);
+        forget_is_lost(cpu);
+    }
+}
+
+/// Slots of IsLost's cache, the DDRAW variable `IsLostCache`: a power
+/// of two.
+pub(super) const IS_LOST_SLOTS: u32 = 256;
+
+/// The id of `Surface_IsLostMiss`: DDRAW's place in `stubs::DLLS` and
+/// the function's in its table. A test checks it.
+pub(super) const IS_LOST_MISS_ID: u16 = 6 << 10 | 254;
+
+const fn lo(id: u16) -> u8 {
+    id as u8
+}
+
+const fn hi(id: u16) -> u8 {
+    (id >> 8) as u8
+}
+
+/// IsLost(this) as x86 code. Some games call it for every sprite they
+/// draw (Beasts and Bumpkins 140,000 times a second, #1517), and a trap
+/// leaves translated code at each call. The code answers from a cache in
+/// DDRAW's variables of the interfaces it was asked about: slot
+/// `(this >> 3) & 255` holds `this` and the answer, 8 bytes. NULL and an
+/// interface the slot doesn't hold go to `is_lost_miss`, which answers
+/// and fills the slot. The code never reads through `this`, so a pointer
+/// that isn't an interface gets the answer the trap gives it.
+#[rustfmt::skip]
+pub(super) const IS_LOST: &[u8] = &[
+    0x8B, 0x44, 0x24, 0x04, //       00: mov eax, [esp+4]
+    0x85, 0xC0, //                   04: test eax, eax
+    0x74, 0x1B, //                   06: je 23h (miss)
+    0x89, 0xC1, //                   08: mov ecx, eax
+    0xC1, 0xE9, 0x03, //             0A: shr ecx, 3
+    0x0F, 0xB6, 0xC9, //             0D: movzx ecx, cl
+    0x3B, 0x04, 0xCD, 0x00, 0x00, 0x00, 0x00, // 10: cmp eax, [ecx*8+cache]
+    0x75, 0x0A, //                   17: jne 23h (miss)
+    0x8B, 0x04, 0xCD, 0x04, 0x00, 0x00, 0x00, // 19: mov eax, [ecx*8+cache+4]
+    0xC2, 0x04, 0x00, //             20: ret 4
+    0xFE, TRAP, lo(IS_LOST_MISS_ID), hi(IS_LOST_MISS_ID), // 23: trap IsLostMiss
+    0xC2, 0x04, 0x00, //             27: ret 4
+];
+
+/// The places in `IS_LOST` that hold the cache's address.
+pub(super) const IS_LOST_FIXUPS: &[Fixup] =
+    &[Fixup { at: 0x13, var: 0 }, Fixup { at: 0x1C, var: 0 }];
+
+/// The offset in the cache of the slot of the interface `this`.
+fn is_lost_slot(this: u32) -> u32 {
+    (this >> 3 & (IS_LOST_SLOTS - 1)) * 8
+}
+
+/// IsLost(this) that `IS_LOST` didn't find in its cache: the answer,
+/// which goes in the cache when `this` is a surface's interface.
+pub fn is_lost_miss(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let result = is_lost(cpu, args)?;
+    if result == DD_OK || result == DDERR_SURFACELOST {
+        let at = stubs::var_address(super::dll_index(), 0) + is_lost_slot(args[0]);
+        let mut slot = [0u8; 8];
+        slot[..4].copy_from_slice(&args[0].to_le_bytes());
+        slot[4..].copy_from_slice(&result.to_le_bytes());
+        if let Some(cr3) = crate::win32::running(cpu).map(|p| p.memory.cr3) {
+            Memory::tables(cr3).write(&mut cpu.bus, at, &slot);
+            // The next pass reads what this one wrote.
+            crate::idle::not_pure(cpu);
+        }
+    }
+    Some(result)
+}
+
+/// Empty the cache of IsLost's answers of every process that has one: a
+/// surface was lost or got its pixels back, or an object went with its
+/// interfaces. A process whose DDRAW is from a state saved before IsLost
+/// was code has no cache, and its IsLost is the trap.
+pub(super) fn forget_is_lost(cpu: &mut Cpu) {
+    let dll = super::dll_index();
+    let Some(index) = stubs::DLLS[dll]
+        .apis
+        .iter()
+        .position(|a| a.name == "Surface_IsLost")
+    else {
+        return;
+    };
+    let stub = stubs::stub_address(dll, index);
+    let cache = stubs::var_address(dll, 0);
+    let base = stubs::DLLS[dll].base;
+    let tables: Vec<u32> = cpu
+        .bus
+        .win32
+        .processes
+        .iter()
+        .filter(|p| p.modules.iter().any(|m| m.base == base))
+        .map(|p| p.memory.cr3)
+        .collect();
+    let zeros = [0u8; (IS_LOST_SLOTS * 8) as usize];
+    for cr3 in tables {
+        let memory = Memory::tables(cr3);
+        // The stub of a function given as code is a JMP to it.
+        let mut first = [0u8; 1];
+        if memory.read(&cpu.bus, stub, &mut first).is_some() && first[0] == 0xE9 {
+            memory.write(&mut cpu.bus, cache, &zeros);
+        }
+    }
 }
 
 /// Restore(this): pixels again for a lost surface, the rest of its
@@ -1535,7 +1675,7 @@ fn restore_surface(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
     let mut list = vec![id];
     list.extend(&s.children);
     for id in list {
-        if state(cpu).surface(id).is_some_and(|s| s.lost) {
+        if state(cpu).surface(id).is_some_and(|s| s.lost.get()) {
             allocate(cpu, id)?;
             changed(cpu, id);
         }
@@ -1569,7 +1709,7 @@ pub fn lock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(s) = state(cpu).surface(id).cloned() else {
         return Some(DDERR_INVALIDOBJECT);
     };
-    if s.lost {
+    if s.lost.get() {
         return Some(DDERR_SURFACELOST);
     }
     let rect = if rect_at != 0 {
@@ -2851,3 +2991,50 @@ crate::state_fields!(Surface {
     lod,
     gamma
 });
+
+#[cfg(test)]
+mod is_lost_tests {
+    use super::*;
+    use iced_x86::code_asm::*;
+
+    /// The id IsLost's code traps to is IsLostMiss's.
+    #[test]
+    fn is_lost_traps_to_is_lost_miss() {
+        let dll = super::super::dll_index();
+        let index = stubs::DLLS[dll]
+            .apis
+            .iter()
+            .position(|a| a.name == "Surface_IsLostMiss")
+            .unwrap();
+        assert_eq!(IS_LOST_MISS_ID, stubs::id(dll, index));
+    }
+
+    /// The bytes of IsLost are the instructions their comments list,
+    /// assembled, and the fixups are where the cache's address goes.
+    #[test]
+    fn is_lost_is_its_listing() {
+        let mut a = CodeAssembler::new(32).unwrap();
+        let mut miss = a.create_label();
+        a.mov(eax, dword_ptr(esp + 4)).unwrap();
+        a.test(eax, eax).unwrap();
+        a.je(miss).unwrap();
+        a.mov(ecx, eax).unwrap();
+        a.shr(ecx, 3).unwrap();
+        a.movzx(ecx, cl).unwrap();
+        a.cmp(eax, dword_ptr(ecx * 8 + 0x1234_5678)).unwrap();
+        a.jne(miss).unwrap();
+        a.mov(eax, dword_ptr(ecx * 8 + 0x1234_567C)).unwrap();
+        a.ret_1(4).unwrap();
+        a.set_label(&mut miss).unwrap();
+        let [lo, hi] = IS_LOST_MISS_ID.to_le_bytes();
+        a.db(&[0xFE, TRAP, lo, hi]).unwrap();
+        a.ret_1(4).unwrap();
+        let mut listed = IS_LOST.to_vec();
+        for (fixup, plus) in IS_LOST_FIXUPS.iter().zip([0u32, 4]) {
+            let at = fixup.at..fixup.at + 4;
+            assert_eq!(listed[at.clone()], plus.to_le_bytes());
+            listed[at].copy_from_slice(&(0x1234_5678 + plus).to_le_bytes());
+        }
+        assert_eq!(a.assemble(0).unwrap(), listed);
+    }
+}

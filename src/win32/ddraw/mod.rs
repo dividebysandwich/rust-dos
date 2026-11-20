@@ -56,7 +56,7 @@ pub(super) mod surface;
 pub mod voodoo;
 
 use super::com::{self, E_INVALIDARG, E_NOINTERFACE, Guid, IID_IUNKNOWN, S_OK};
-use super::stubs::{Api, Conv, Dll, Vtable};
+use super::stubs::{Api, Conv, Dll, Var, Vtable};
 use stamp::Stamped;
 use crate::cpu::Cpu;
 
@@ -67,7 +67,11 @@ pub static DLL: Dll = Dll {
     name: "DDRAW.DLL",
     base: 0xBFA0_0000,
     apis: APIS,
-    vars: &[],
+    vars: &[Var {
+        name: "IsLostCache",
+        ordinal: 0,
+        size: surface::IS_LOST_SLOTS * 8,
+    }],
     init: None,
     term: None,
     vtables: VTABLES,
@@ -269,7 +273,15 @@ static APIS: &[Api] = &[
     method("Surface_GetPixelFormat", 2, surface::get_pixel_format),
     method("Surface_GetSurfaceDesc", 2, surface::get_surface_desc),
     method("Surface_Initialize", 3, surface::initialize),
-    method("Surface_IsLost", 1, surface::is_lost),
+    // x86 code that answers from a cache (`surface::IS_LOST`); the
+    // handler is for states saved when it was a trap.
+    Api {
+        name: "Surface_IsLost",
+        ordinal: 0,
+        args: 1,
+        conv: Conv::CodeVars(surface::IS_LOST, surface::IS_LOST_FIXUPS),
+        handler: surface::is_lost,
+    },
     method("Surface_Lock", 5, surface::lock),
     method("Surface_ReleaseDC", 2, surface::release_dc),
     method("Surface_Restore", 1, surface::restore),
@@ -498,6 +510,8 @@ static APIS: &[Api] = &[
         gamma::set_gamma_ramp,
     ),
     method("DDrawWndProc", 4, directdraw::window_proc),
+    // What IsLost's code traps to for an interface its cache hasn't.
+    method("Surface_IsLostMiss", 1, surface::is_lost_miss),
 ];
 
 const IUNKNOWN: [&str; 3] = ["DD_QueryInterface", "DD_AddRef", "DD_Release"];
@@ -1104,6 +1118,12 @@ pub fn state(cpu: &mut Cpu) -> &mut State {
     &mut cpu.bus.win32.ddraw
 }
 
+/// Where IsLost's cache of answers is in a process's DDRAW
+/// (`surface::IS_LOST`): 256 slots of an interface and its answer.
+pub fn is_lost_cache() -> u32 {
+    super::stubs::var_address(dll_index(), 0)
+}
+
 fn dll_index() -> usize {
     super::stubs::DLLS
         .iter()
@@ -1314,6 +1334,10 @@ pub fn destroy(cpu: &mut Cpu, id: u32) {
     }
     for iface in &object.ifaces {
         com::free_interface(cpu, iface.address);
+    }
+    if !object.ifaces.is_empty() {
+        // IsLost's caches may hold them.
+        surface::forget_is_lost(cpu);
     }
     if let Some(slot) = state(cpu).objects.get_mut(id as usize - 1) {
         *slot = None;

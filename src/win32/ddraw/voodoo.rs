@@ -296,9 +296,9 @@ fn lost(cpu: &mut Cpu) {
         if let Some(s) = state(cpu).surface_mut(id) {
             s.memory = surface::MEM_NONE;
             s.bits = 0;
-            s.lost = true;
             s.locked = false;
         }
+        surface::set_lost(cpu, id, true);
     }
 }
 
@@ -350,7 +350,7 @@ pub fn is_card_object(cpu: &mut Cpu, id: u32) -> bool {
 #[allow(dead_code)] // For Direct3D's HAL.
 pub fn card_buffer(cpu: &mut Cpu, id: u32) -> Option<u32> {
     let s = state(cpu).surface(id)?;
-    (s.memory == MEM_CARD && !s.lost).then_some(s.bits)
+    (s.memory == MEM_CARD && !s.lost.get()).then_some(s.bits)
 }
 
 /// The buffer a surface of the device's is to have, by its first caps:

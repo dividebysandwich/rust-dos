@@ -23,6 +23,7 @@ mod convert;
 mod d3d8;
 mod dciman32;
 mod ddraw;
+pub use ddraw::is_lost_cache;
 mod dinput;
 pub mod dll_files;
 mod forwarders;

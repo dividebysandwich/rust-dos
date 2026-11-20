@@ -161,6 +161,16 @@ had it, so no state holds a trap for it, and its Rust function is
 `stubs::never_a_trap`, which ends the program as a call of an unknown
 function does.
 
+Code that needs the DLL's variables is `Conv::CodeVars`: its `Fixup`s
+name the places in the code that hold a variable's address, which the
+image builder writes there. DDRAW's `IDirectDrawSurface::IsLost`, which
+Beasts and Bumpkins calls 150,000 times a second, answers from a cache
+in DDRAW's variables, 256 slots of an interface and its answer, and
+traps to `Surface_IsLostMiss` only for an interface its slot doesn't
+hold. A surface lost or restored, and an object going with its
+interfaces, empty the cache of every process (`forget_is_lost`), so a
+cached answer is always the one the trap would give.
+
 Because the DLLs are real images, `LoadLibrary`, `GetProcAddress`,
 `GetModuleHandle`, programs that walk export tables, data exports and
 the debugger all work on them like on any DLL. retrowin32, which solves
