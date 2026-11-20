@@ -3,6 +3,6 @@ apogee b21399d36a67c24240cbd337
 apogee-sound ad987dc5c5c6afb9ba47bfce
 cygnus 054d35e9fff76a3559b6e3dd
 intro 46b82de11487dec3c9ad3c2e
-intro-sound fde430e154f54864f2e06894
+intro-sound a58404435ee44740d8b1c44e
 menu 46b82de11487dec3c9ad3c2e
 new-mission c374e71dfe7e8472f8ce9867
