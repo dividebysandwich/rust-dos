@@ -1,9 +1,10 @@
 //! The built-in Windows' DirectPlay 8 (DPNET.DLL): Win32 programs made
-//! here with rust-dos-pe's builder make its peer, lobbied application
-//! and address, as DirectX 8 on Windows 98 SE has them, on a machine
-//! whose network protocols can't open a connection. They start the way
-//! Magic & Mayhem: The Art of Magic does, register a program for
-//! lobbies, fail to host, and build addresses and their URLs.
+//! here with rust-dos-pe's builder make its peer, client, server,
+//! lobbied application and address, as DirectX 8 on Windows 98 SE has
+//! them, on a machine whose network protocols can't open a connection.
+//! They start the way Magic & Mayhem: The Art of Magic and Zax: The
+//! Alien Hunter do, register a program for lobbies, fail to host or
+//! connect, and build addresses and their URLs.
 //!
 //! Each program checks the results itself and ends with exit code 0, or
 //! with the number of the step that failed.
@@ -262,6 +263,30 @@ const IID_ADDRESS: [u8; 16] = guid(
     0x4C8A,
     [0x9D, 0xB3, 0x82, 0x83, 0x0A, 0x7F, 0xEB, 0x31],
 );
+const CLSID_CLIENT: [u8; 16] = guid(
+    0x743F_1DC6,
+    0x5ABA,
+    0x429F,
+    [0x8B, 0xDF, 0xC5, 0x4D, 0x03, 0x25, 0x3D, 0xC2],
+);
+const IID_CLIENT: [u8; 16] = guid(
+    0x5102_DACD,
+    0x241B,
+    0x11D3,
+    [0xAE, 0xA7, 0x00, 0x60, 0x97, 0xB0, 0x14, 0x11],
+);
+const CLSID_SERVER: [u8; 16] = guid(
+    0xDA82_5E1B,
+    0x6830,
+    0x43D7,
+    [0x83, 0x5D, 0x0B, 0x5A, 0xD8, 0x29, 0x56, 0xA2],
+);
+const IID_SERVER: [u8; 16] = guid(
+    0x5102_DACE,
+    0x241B,
+    0x11D3,
+    [0xAE, 0xA7, 0x00, 0x60, 0x97, 0xB0, 0x14, 0x11],
+);
 const CLSID_DP8SP_TCPIP: [u8; 16] = guid(
     0xEBFE_7BA0,
     0x628D,
@@ -290,6 +315,24 @@ const ADDRESS_GET_URL_A: i32 = 10;
 const ADDRESS_GET_SP: i32 = 11;
 const ADDRESS_SET_SP: i32 = 13;
 const ADDRESS_ADD_COMPONENT: i32 = 18;
+const CLIENT_INITIALIZE: i32 = 3;
+const CLIENT_ENUM_HOSTS: i32 = 5;
+const CLIENT_CONNECT: i32 = 7;
+const CLIENT_SEND: i32 = 8;
+const CLIENT_SET_CLIENT_INFO: i32 = 11;
+const CLIENT_GET_SERVER_INFO: i32 = 12;
+const CLIENT_CLOSE: i32 = 14;
+const CLIENT_GET_CAPS: i32 = 16;
+const CLIENT_GET_CONNECTION_INFO: i32 = 20;
+const SERVER_INITIALIZE: i32 = 3;
+const SERVER_GET_SEND_QUEUE_INFO: i32 = 6;
+const SERVER_SET_SERVER_INFO: i32 = 8;
+const SERVER_HOST: i32 = 13;
+const SERVER_SEND_TO: i32 = 14;
+const SERVER_CLOSE: i32 = 23;
+const SERVER_DESTROY_CLIENT: i32 = 24;
+const SERVER_GET_CONNECTION_INFO: i32 = 32;
+const SERVER_REGISTER_LOBBY: i32 = 33;
 
 const DPNA_DATATYPE_STRING: u32 = 1;
 const DPNA_DATATYPE_DWORD: u32 = 2;
@@ -304,6 +347,10 @@ const G_CLSID_ADDRESS: u32 = 0x40;
 const G_IID_ADDRESS: u32 = 0x50;
 const G_TCPIP: u32 = 0x60;
 const G_APPLICATION: u32 = 0x70;
+const G_CLSID_CLIENT: u32 = 0x80;
+const G_IID_CLIENT: u32 = 0x90;
+const G_CLSID_SERVER: u32 = 0xA0;
+const G_IID_SERVER: u32 = 0xB0;
 const PEER: u32 = 0x100;
 const LOBBIED: u32 = 0x104;
 const ADDRESS: u32 = 0x108;
@@ -315,6 +362,9 @@ const VALUE: u32 = 0x11C;
 const CAPS: u32 = 0x120;
 const HANDLER: u32 = 0x13C;
 const SP_GUID: u32 = 0x140;
+const CLIENT: u32 = 0x150;
+const SERVER: u32 = 0x154;
+const STACK: u32 = 0x158;
 const PROGRAM_DESC: u32 = 0x180;
 const APP_DESC: u32 = 0x200;
 const DEVICES: u32 = 0x260;
@@ -366,6 +416,10 @@ fn data() -> Strings {
     put(G_IID_ADDRESS, &IID_ADDRESS);
     put(G_TCPIP, &CLSID_DP8SP_TCPIP);
     put(G_APPLICATION, &APPLICATION);
+    put(G_CLSID_CLIENT, &CLSID_CLIENT);
+    put(G_IID_CLIENT, &IID_CLIENT);
+    put(G_CLSID_SERVER, &CLSID_SERVER);
+    put(G_IID_SERVER, &IID_SERVER);
     Strings {
         data: d,
         next: STRINGS,
@@ -595,6 +649,125 @@ fn a_peer_cant_host_without_a_network() {
         exit(a, l, &mut fail)
     });
     let mut cpu = machine("host", exe);
+    assert_eq!(run(&mut cpu), 0);
+}
+
+/// The client and the server of a client/server session, which Zax:
+/// The Alien Hunter makes for its multi-player menu: CoCreateInstance
+/// makes them, they initialize, and they can't connect or host on
+/// TCP/IP, whose provider can't start. Each method takes the arguments
+/// its interface declares: the stack is where it was after all of them.
+#[test]
+fn a_client_and_a_server_cant_start_a_session_without_a_network() {
+    const DPNERR_NOTREGISTERED: u32 = dpnerr(0x550);
+    const DPNLOBBY_UNREGISTER: u32 = 2;
+    let exe = program(&data().data, |a, l| {
+        let mut fail = a.create_label();
+        handler(a, l)?;
+        create(a, l, fail, 1, (G_CLSID_CLIENT, G_IID_CLIENT), CLIENT)?;
+        let args = [
+            Ptr(G_CLSID_SERVER),
+            Imm(0),
+            Imm(CLSCTX_INPROC_SERVER),
+            Ptr(G_IID_SERVER),
+            Ptr(SERVER),
+        ];
+        call(a, l, fail, 3, CO_CREATE, &args, S_OK)?;
+        let args = [
+            Ptr(G_CLSID_ADDRESS),
+            Imm(0),
+            Imm(CLSCTX_INPROC_SERVER),
+            Ptr(G_IID_ADDRESS),
+            Ptr(ADDRESS),
+        ];
+        call(a, l, fail, 4, CO_CREATE, &args, S_OK)?;
+        let args = [Ptr(G_TCPIP)];
+        method(a, l, fail, 5, (ADDRESS, ADDRESS_SET_SP), &args, S_OK)?;
+        a.mov(dword_ptr(l.at(STACK)), esp)?;
+        // The client.
+        let get_info = [Ptr(BUFFER), Ptr(SIZE), Imm(0)];
+        let client_info = (CLIENT, CLIENT_GET_SERVER_INFO);
+        method(a, l, fail, 6, client_info, &get_info, DPNERR_UNINITIALIZED)?;
+        a.mov(eax, dword_ptr(l.at(HANDLER)))?;
+        a.mov(dword_ptr(l.at(VALUE)), eax)?;
+        let init = [Imm(0), Val(VALUE), Imm(0)];
+        method(a, l, fail, 7, (CLIENT, CLIENT_INITIALIZE), &init, S_OK)?;
+        a.mov(dword_ptr(l.at(CAPS)), 20)?;
+        let args = [Ptr(CAPS), Imm(0)];
+        method(a, l, fail, 8, (CLIENT, CLIENT_GET_CAPS), &args, S_OK)?;
+        expect_at(a, l, fail, 9, CAPS + 8, 200)?;
+        // DPN_APPLICATION_DESC, 72 bytes.
+        a.mov(dword_ptr(l.at(APP_DESC)), 72)?;
+        let mut args = vec![Ptr(APP_DESC), Val(ADDRESS), Imm(0)];
+        args.extend([Imm(0); 7]);
+        let connect = (CLIENT, CLIENT_CONNECT);
+        method(a, l, fail, 10, connect, &args, DPNERR_INVALIDDEVICEADDRESS)?;
+        let mut args = vec![Ptr(APP_DESC), Val(ADDRESS), Imm(0)];
+        args.extend([Imm(0); 8]);
+        let enum_hosts = (CLIENT, CLIENT_ENUM_HOSTS);
+        method(
+            a,
+            l,
+            fail,
+            11,
+            enum_hosts,
+            &args,
+            DPNERR_INVALIDDEVICEADDRESS,
+        )?;
+        let args = [Ptr(BUFFER), Imm(1), Imm(0), Imm(0), Imm(0), Imm(0)];
+        let send = (CLIENT, CLIENT_SEND);
+        method(a, l, fail, 12, send, &args, DPNERR_NOCONNECTION)?;
+        let args = [Ptr(BUFFER), Imm(0), Imm(0), Imm(0)];
+        let set_info = (CLIENT, CLIENT_SET_CLIENT_INFO);
+        method(a, l, fail, 13, set_info, &args, S_OK)?;
+        method(a, l, fail, 14, client_info, &get_info, DPNERR_NOCONNECTION)?;
+        let args = [Ptr(BUFFER), Imm(0)];
+        let connection = (CLIENT, CLIENT_GET_CONNECTION_INFO);
+        method(a, l, fail, 15, connection, &args, DPNERR_NOCONNECTION)?;
+        method(a, l, fail, 16, (CLIENT, CLIENT_CLOSE), &[Imm(0)], S_OK)?;
+        // The server.
+        method(a, l, fail, 17, (SERVER, SERVER_INITIALIZE), &init, S_OK)?;
+        a.mov(eax, dword_ptr(l.at(ADDRESS)))?;
+        a.mov(dword_ptr(l.at(DEVICES)), eax)?;
+        let args = [
+            Ptr(APP_DESC),
+            Ptr(DEVICES),
+            Imm(1),
+            Imm(0),
+            Imm(0),
+            Imm(0),
+            Imm(0),
+        ];
+        let host = (SERVER, SERVER_HOST);
+        method(a, l, fail, 18, host, &args, DPNERR_INVALIDDEVICEADDRESS)?;
+        let args = [Imm(1), Ptr(SIZE), Ptr(COUNT), Imm(0)];
+        let queue = (SERVER, SERVER_GET_SEND_QUEUE_INFO);
+        method(a, l, fail, 19, queue, &args, DPNERR_NOCONNECTION)?;
+        let args = [Ptr(BUFFER), Imm(0), Imm(0), Imm(0)];
+        let set_info = (SERVER, SERVER_SET_SERVER_INFO);
+        method(a, l, fail, 20, set_info, &args, S_OK)?;
+        let args = [Imm(1), Ptr(BUFFER), Imm(1), Imm(0), Imm(0), Imm(0), Imm(0)];
+        let send_to = (SERVER, SERVER_SEND_TO);
+        method(a, l, fail, 21, send_to, &args, DPNERR_NOCONNECTION)?;
+        let args = [Imm(1), Imm(0), Imm(0), Imm(0)];
+        let destroy = (SERVER, SERVER_DESTROY_CLIENT);
+        method(a, l, fail, 22, destroy, &args, DPNERR_NOCONNECTION)?;
+        let args = [Imm(1), Ptr(BUFFER), Imm(0)];
+        let connection = (SERVER, SERVER_GET_CONNECTION_INFO);
+        method(a, l, fail, 23, connection, &args, DPNERR_NOCONNECTION)?;
+        let args = [Imm(1), Imm(0), Imm(DPNLOBBY_UNREGISTER)];
+        let lobby = (SERVER, SERVER_REGISTER_LOBBY);
+        method(a, l, fail, 24, lobby, &args, DPNERR_NOTREGISTERED)?;
+        method(a, l, fail, 25, (SERVER, SERVER_CLOSE), &[Imm(0)], S_OK)?;
+        a.mov(eax, esp)?;
+        a.sub(eax, dword_ptr(l.at(STACK)))?;
+        expect(a, fail, 26, 0)?;
+        method(a, l, fail, 27, (ADDRESS, RELEASE), &[], 0)?;
+        method(a, l, fail, 28, (SERVER, RELEASE), &[], 0)?;
+        method(a, l, fail, 29, (CLIENT, RELEASE), &[], 0)?;
+        exit(a, l, &mut fail)
+    });
+    let mut cpu = machine("client_server", exe);
     assert_eq!(run(&mut cpu), 0);
 }
 
