@@ -74,9 +74,13 @@ pub struct Boot {
     /// Whether the program that is to start is one of the commands'.
     command: bool,
     /// The DOS command line ExitWindowsExec runs once the session has
-    /// ended, while the session's end is being asked for.
-    exec: Option<String>,
+    /// ended, while the session's end is being asked for. A state saved
+    /// by an older rust-dos has none.
+    exec: crate::savestate::Since<EXIT_EXEC, Option<String>>,
 }
+
+/// The W32 section's version that added ExitWindowsExec's command line.
+pub const EXIT_EXEC: u16 = 83;
 
 /// DOS's current drive and each drive's current directory, and the long
 /// names SetCurrentDirectoryA was given for them (`Win32::long_dirs`).
@@ -135,7 +139,7 @@ pub fn restart(cpu: &mut Cpu) {
 /// ExitWindowsExec asks for the session to end and the command line
 /// `line` to run at the DOS prompt after it.
 pub fn exec_after(cpu: &mut Cpu, line: String) {
-    cpu.bus.win32.boot.exec = Some(line);
+    *cpu.bus.win32.boot.exec = Some(line);
 }
 
 /// The session ends (`ending`) or goes on, as its windows answered:
