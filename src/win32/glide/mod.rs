@@ -50,6 +50,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: None,
 };
 
 /// GLIDE3X.DLL, beside GLIDE2X.DLL in the space the latter leaves.
@@ -61,6 +62,7 @@ pub static DLL3: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: None,
 };
 
 /// Whether `name` is one of Glide's DLLs, which are there with a 3dfx

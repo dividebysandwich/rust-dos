@@ -62,6 +62,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: VTABLES,
+    resources: None,
 };
 
 /// DPLAY.DLL, DirectX 3's DirectPlay, which programs of its time import
@@ -79,6 +80,7 @@ pub static DPLAY: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: None,
 };
 
 /// DPLAY.DLL's functions, by its ordinals. Append only (see `stubs`).

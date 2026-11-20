@@ -63,6 +63,7 @@ pub static DMUSIC: Dll = Dll {
     init: None,
     term: None,
     vtables: DMUSIC_VTABLES,
+    resources: None,
 };
 
 pub static DMIME: Dll = Dll {
@@ -73,6 +74,7 @@ pub static DMIME: Dll = Dll {
     init: None,
     term: None,
     vtables: DMIME_VTABLES,
+    resources: None,
 };
 
 pub static DMLOADER: Dll = Dll {
@@ -83,6 +85,7 @@ pub static DMLOADER: Dll = Dll {
     init: None,
     term: None,
     vtables: DMLOADER_VTABLES,
+    resources: None,
 };
 
 pub static DMSTYLE: Dll = Dll {
@@ -93,6 +96,7 @@ pub static DMSTYLE: Dll = Dll {
     init: None,
     term: None,
     vtables: DMSTYLE_VTABLES,
+    resources: None,
 };
 
 pub static DMBAND: Dll = Dll {
@@ -103,6 +107,7 @@ pub static DMBAND: Dll = Dll {
     init: None,
     term: None,
     vtables: DMBAND_VTABLES,
+    resources: None,
 };
 
 pub static DMCOMPOS: Dll = Dll {
@@ -113,6 +118,7 @@ pub static DMCOMPOS: Dll = Dll {
     init: None,
     term: None,
     vtables: DMCOMPOS_VTABLES,
+    resources: None,
 };
 
 /// The DLLs, by their places in `Iface::dll`.

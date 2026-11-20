@@ -49,6 +49,7 @@ pub static DLL: Dll = Dll {
     init: Some(init),
     term: Some(term),
     vtables: &[],
+    resources: None,
 };
 
 /// Streams in `_iob`, and streams there can be at all (`_NSTREAM_`).
