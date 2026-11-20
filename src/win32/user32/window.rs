@@ -1864,15 +1864,16 @@ pub fn set_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if rect.left == x as i32 && rect.top == y as i32 {
         flags |= SWP_NOMOVE;
     }
-    // A child keeps the flags as given: Windows passes them to
-    // WM_WINDOWPOSCHANGING without SWP_NOACTIVATE and sends the child
-    // WM_CHILDACTIVATE (msg.c's WmShowChildSeq_2 and WmReparentButtonSeq).
-    // A window already active in the foreground isn't activated again.
-    // The active window of a queue in the background is: the activation
-    // brings it to the foreground if SetForegroundWindow may, as when a
-    // program's message box made active behind the foreground (its
-    // SetFocus came first) is then shown. Hiding it adds nothing: Windows
-    // passes the flags as they were (WM_WINDOWPOSCHANGING of Wine's
+    // Windows adds no SWP_NOACTIVATE for a child: WM_WINDOWPOSCHANGING
+    // gets the caller's flags, and the child gets WM_CHILDACTIVATE unless
+    // they hold SWP_NOACTIVATE or SWP_HIDEWINDOW (msg.c's
+    // WmShowChildSeq_2 and WmReparentButtonSeq). A top-level window
+    // already active in the foreground isn't activated again. The active
+    // window of a queue in the background is: the activation brings it
+    // to the foreground if SetForegroundWindow may, as when a program's
+    // message box made active behind the foreground (its SetFocus came
+    // first) is then shown. Hiding it adds nothing: Windows passes the
+    // flags as they were (WM_WINDOWPOSCHANGING of Wine's
     // WmHideOverlappedSeq and WmSWP_HideOverlappedSeq).
     if style & WS_CHILD == 0 && state.foreground_window() == hwnd && flags & SWP_HIDEWINDOW == 0 {
         flags |= SWP_NOACTIVATE;
