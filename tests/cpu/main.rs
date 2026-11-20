@@ -6,6 +6,8 @@
 //! groups): each file is a module, and the helpers they share are
 //! declared here, once.
 
+#[path = "../common/cdimage/mod.rs"]
+mod cdimage;
 #[path = "../common/dyndiff/mod.rs"]
 mod dyndiff;
 #[path = "../common/pmrig/mod.rs"]

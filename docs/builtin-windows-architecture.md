@@ -696,6 +696,35 @@ to the 32-bit function that does the work (`thunk.rs`). Tasks take turns
 as Windows 3.1's do, while the Win32 processes' threads go on around
 them.
 
+Selectors come from the LDT from entry 80h on (`ldt.rs`); the entries
+below it are the flat selectors and the threads' TIB selectors. The
+emulator's Windows boots the same way every time, so two instances give
+a program the same selectors, which two real PCs almost never do: their
+drivers and the programs run before differ. A program can tell the two
+ends of a link apart by them. Metal Marines answers the other side's
+CONNECT with a far pointer of its own and takes an answer whose pointer
+equals its own for its own message coming back, so two instances never
+connected (#661). A machine linked to another therefore keeps some
+entries from 80h on out of use when its Win16 process is made, and
+everything after comes that many entries later:
+
+- In a LAN room (a null modem cable or a modem to the other player, IPX
+  or a network card through the room), its member index, 1 to 200,
+  which the relay gives no two members at once.
+- Linked but not in a room yet (a null modem cable or room in the
+  settings, a modem that takes calls on `modemlisten`, a LAN command
+  run before the room answered): 256 to 319 entries, from a hash of the
+  `[network]` and `modemlisten` settings mixed with random bytes. Two
+  ends that share one configuration file then differ in 63 of 64 starts;
+  in a deterministic run the random bytes come from the start time, and
+  the settings keep two ends set differently apart.
+- No link: none, so single machines, save states, the determinism tests
+  and the game suite's shots lay out as before.
+
+The reserved entries stay empty descriptors that no fixed selector
+uses. They are in the LDT's map of entries given out, which a save
+state keeps, so a restored machine has the layout it was saved with.
+
 ## Timing
 
 `GetTickCount`, `timeGetTime`, `QueryPerformanceCounter` (at the PIT's
