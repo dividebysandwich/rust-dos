@@ -12,6 +12,7 @@ use win16::{CODE, Code, program, run};
 
 /// The ordinals the program imports.
 const OLE_INITIALIZE: u16 = 2; // OLE2
+const OLE_UNINITIALIZE: u16 = 3;
 const CO_GET_MALLOC: u16 = 4; // COMPOBJ
 const STRING_FROM_CLSID: u16 = 19; // COMPOBJ
 const IID_IUNKNOWN: u16 = 38; // COMPOBJ's variable _IID_IUnknown
@@ -265,5 +266,71 @@ fn a_vb4_programs_ole_calls_work() {
 
     code.emit(&[0xB0, 0x00]).exit_al();
     let (exit, log) = run("ole2_vb4_calls", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}
+
+/// Where the allocator test keeps its object: a vtable pointer and a
+/// reference count, and the vtable (QueryInterface, AddRef, Release).
+const OBJECT: u16 = 0x60;
+const REFS: u16 = OBJECT + 4;
+const VTABLE: u16 = 0x70;
+
+/// A program that gives OleInitialize its own allocator keeps it alive
+/// through COMPOBJ's reference: OleInitialize adds one, CoGetMalloc
+/// another for its caller, and OleUninitialize lets COMPOBJ's go.
+/// Visual Basic 4 releases its own reference right after OleInitialize,
+/// so without COMPOBJ's its allocator frees itself.
+#[test]
+fn ole_initialize_holds_the_programs_allocator() {
+    let mut code = Code::new();
+
+    // AddRef and Release of the object, as C calls them: the count is
+    // at this+4, and the new one comes back in DX:AX.
+    let jump = code.here() + 1;
+    code.emit(&[0xE9, 0, 0]);
+    let method = |code: &mut Code, op: u8| {
+        let at = code.here();
+        code.emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+            .emit(&[0xC4, 0x5E, 0x06]) // les bx,[bp+6]
+            .emit(&[0x26, 0xFF, op, 0x04]) // inc/dec word es:[bx+4]
+            .emit(&[0x26, 0x8B, 0x47, 0x04]) // mov ax,es:[bx+4]
+            .emit(&[0x33, 0xD2, 0x5D, 0xCB]); // xor dx,dx; pop bp; retf
+        at
+    };
+    let add_ref = method(&mut code, 0x47);
+    let release = method(&mut code, 0x4F);
+    let start = code.here();
+    code.patch(jump, start - (jump + 2));
+
+    // The object, with one reference, its vtable in the data segment.
+    set(&mut code, OBJECT, VTABLE);
+    code.emit(&[0x8C, 0x1E, lo(OBJECT + 2), hi(OBJECT + 2)]); // mov [..],ds
+    set(&mut code, REFS, 1);
+    for (i, at) in [(1u16, add_ref), (2, release)] {
+        set(&mut code, VTABLE + 4 * i, at);
+        let seg = VTABLE + 4 * i + 2;
+        code.emit(&[0x8C, 0x0E, lo(seg), hi(seg)]); // mov [..],cs
+    }
+
+    // OleInitialize(&object): S_OK, and a reference more.
+    push_ds(&mut code, OBJECT);
+    code.call("OLE2", OLE_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 1);
+    expect(&mut code, REFS, 2, 2);
+
+    // CoGetMalloc(MEMCTX_TASK, &malloc): the object, a reference more.
+    code.push(0).push(1);
+    push_ds(&mut code, MALLOC);
+    code.call("COMPOBJ", CO_GET_MALLOC);
+    expect_dx_ax(&mut code, 0, 3);
+    expect(&mut code, MALLOC, OBJECT, 4);
+    expect(&mut code, REFS, 3, 5);
+
+    // OleUninitialize: COMPOBJ's reference goes.
+    code.call("OLE2", OLE_UNINITIALIZE);
+    expect(&mut code, REFS, 2, 6);
+
+    code.emit(&[0xB0, 0x00]).exit_al();
+    let (exit, log) = run("ole2_app_malloc", program(&code, CODE));
     assert_eq!(exit, 0, "check {exit} failed\n{log}");
 }

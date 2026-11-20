@@ -503,33 +503,48 @@ fn build_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 /// CoInitialize(lpMalloc): S_OK the first time, S_FALSE after. A
 /// program's own allocator, if it gives one, is the task allocator from
-/// then on.
+/// then on, and COMPOBJ holds a reference to it until the last
+/// CoUninitialize: Visual Basic 4 releases its own reference right after
+/// OleInitialize, and its allocator frees itself if nothing else holds
+/// one.
 fn co_initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    initialize(cpu, args[0], false)
+}
+
+/// CoInitialize, and for OleInitialize OLE's own initialization too,
+/// which has nothing to set up here.
+fn initialize(cpu: &mut Cpu, malloc: u32, ole_too: bool) -> Option<u32> {
     let o = ole(cpu);
     o.co_inits += 1;
-    if o.co_inits > 1 {
-        return Some(S_FALSE);
+    let first = o.co_inits == 1;
+    let mut result = if first { S_OK } else { S_FALSE };
+    if ole_too {
+        o.ole_inits += 1;
+        if o.ole_inits > 1 {
+            result = S_FALSE;
+        }
     }
-    o.app_malloc = args[0];
-    Some(S_OK)
+    if first && malloc != 0 {
+        o.app_malloc = malloc;
+        return call_method(cpu, malloc, 1, &[], "", Some(result));
+    }
+    Some(result)
 }
 
 fn co_uninitialize(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let o = ole(cpu);
     o.co_inits = o.co_inits.saturating_sub(1);
-    if o.co_inits == 0 {
-        o.app_malloc = 0;
+    if o.co_inits == 0 && o.app_malloc != 0 {
+        // The reference CoInitialize took.
+        let malloc = std::mem::take(&mut o.app_malloc);
+        return call_method(cpu, malloc, 2, &[], "", Some(0));
     }
     Some(0)
 }
 
-/// OleInitialize(lpMalloc): CoInitialize, and OLE's own initialization,
-/// which has nothing to set up here.
+/// OleInitialize(lpMalloc): CoInitialize, and OLE's own initialization.
 fn ole_initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let co = co_initialize(cpu, args)?;
-    let o = ole(cpu);
-    o.ole_inits += 1;
-    Some(if o.ole_inits > 1 { S_FALSE } else { co })
+    initialize(cpu, args[0], true)
 }
 
 fn ole_uninitialize(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
