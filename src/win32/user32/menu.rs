@@ -555,6 +555,50 @@ pub fn create_popup_menu(cpu: &mut Cpu, _args: &[u32]) -> Option<u32> {
     Some(new_menu(user(cpu), MF_POPUP, pid))
 }
 
+/// An item of a menu `build_bar` makes.
+pub enum BarItem {
+    /// A command: its id, its text and its flags, such as MF_GRAYED or
+    /// MF_CHECKED.
+    Command(u32, &'static str, u32),
+    Separator,
+    /// A submenu: its text and its items.
+    Popup(&'static str, &'static [BarItem]),
+}
+
+/// A menu bar for a window the system makes itself: each popup a title
+/// and its items. The menus belong to the current process, as
+/// CreateMenu's would.
+pub(crate) fn build_bar(cpu: &mut Cpu, popups: &[(&str, &[BarItem])]) -> u32 {
+    let pid = current_pid(cpu);
+    let bar = new_menu(user(cpu), 0, pid);
+    for &(title, items) in popups {
+        let sub = build_popup(cpu, items, pid);
+        let text = Some(crate::dosstr::to_bytes(title));
+        let info = info_of(MF_POPUP, sub, 1, text);
+        insert_item(cpu, bar, NONE, MF_BYPOSITION, &info);
+    }
+    bar
+}
+
+/// The popup menu of `items` for `build_bar`.
+fn build_popup(cpu: &mut Cpu, items: &[BarItem], pid: u32) -> u32 {
+    let menu = new_menu(user(cpu), MF_POPUP, pid);
+    for item in items {
+        let info = match *item {
+            BarItem::Command(id, text, flags) => {
+                info_of(flags, id, 1, Some(crate::dosstr::to_bytes(text)))
+            }
+            BarItem::Separator => info_of(MF_SEPARATOR, 0, 1, None),
+            BarItem::Popup(text, items) => {
+                let sub = build_popup(cpu, items, pid);
+                info_of(MF_POPUP, sub, 1, Some(crate::dosstr::to_bytes(text)))
+            }
+        };
+        insert_item(cpu, menu, NONE, MF_BYPOSITION, &info);
+    }
+    menu
+}
+
 /// DestroyMenu(hmenu): with its submenus.
 pub fn destroy_menu(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let state = user(cpu);
