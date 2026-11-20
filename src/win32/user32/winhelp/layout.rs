@@ -2,7 +2,7 @@
 //! words wrapped into lines, each piece of text placed with its font,
 //! and the places of the links, which the viewer draws and hit-tests.
 
-use super::hlpfile::{Align, Item, Link, Paragraph};
+use super::hlpfile::{Align, Item, Link, Paragraph, Place};
 use crate::win32::gdi32::Rect;
 
 /// What laying text out needs to know of the fonts: the width of text in
@@ -86,6 +86,33 @@ enum Tok {
     Tab,
     Break,
     Picture(u16, Option<usize>),
+    /// A picture at the left or right margin, which the text goes beside.
+    Float(u16, Option<usize>, Place),
+}
+
+/// The space between a picture at a margin and the text beside it.
+const FLOAT_GAP: i32 = 4;
+
+/// A picture at a margin: the side, the room it takes from the lines
+/// beside it, and where it ends. It keeps that room into the paragraphs
+/// after its own until its bottom, as WinHelp's `{bml}` and `{bmr}` do.
+#[derive(Clone, Copy)]
+struct Float {
+    place: Place,
+    room: i32,
+    bottom: i32,
+}
+
+/// The room the floats take from the left and the right of a line at `y`.
+fn taken(floats: &[Float], y: i32) -> (i32, i32) {
+    let mut out = (0, 0);
+    for f in floats.iter().filter(|f| y < f.bottom) {
+        match f.place {
+            Place::Right => out.1 = out.1.max(f.room),
+            _ => out.0 = out.0.max(f.room),
+        }
+    }
+    out
 }
 
 /// A thing on the line being filled.
@@ -149,9 +176,13 @@ fn tokens(par: &Paragraph, font: &mut u16, links: &mut Vec<Link>) -> Vec<Tok> {
                 link = Some(links.len() - 1);
             }
             Item::LinkEnd => link = None,
-            Item::Picture(n) => {
+            Item::Picture(n, Place::Character) => {
                 close(&mut word, &mut out);
                 out.push(Tok::Picture(*n, link));
+            }
+            Item::Picture(n, place) => {
+                close(&mut word, &mut out);
+                out.push(Tok::Float(*n, link, *place));
             }
         }
     }
@@ -172,26 +203,32 @@ pub fn layout(
     let mut out = Layout::default();
     let mut font = 0u16;
     let mut y = margin;
+    let mut floats: Vec<Float> = Vec::new();
     for par in pars {
         let left = margin + pixels(par.left);
         let right = (width - margin - pixels(par.right)).max(left + 1);
         let first = (left + pixels(par.first)).max(margin);
         y += pixels(par.space_before);
         let toks = tokens(par, &mut font, &mut out.links);
+        // A paragraph of pictures at the margins alone takes no line:
+        // the text after it goes beside them.
+        let only_floats = !toks.is_empty() && toks.iter().all(|t| matches!(t, Tok::Float(..)));
         let mut line = Line {
             pieces: Vec::new(),
-            x: first,
+            x: first + taken(&floats, y).0,
         };
         // Where the paragraph's first line goes.
         let top = y;
         macro_rules! flush {
             () => {{
+                let right = right - taken(&floats, y).1;
                 place(&line, &mut y, &mut out, m, par, left, right, font);
                 line.pieces.clear();
-                line.x = left;
+                line.x = left + taken(&floats, y).0;
             }};
         }
         for tok in toks {
+            let right = (right - taken(&floats, y).1).max(left + 1);
             match tok {
                 Tok::Word(segs) => {
                     let widths: Vec<i32> = segs.iter().map(|s| m.width(s.font, &s.text)).collect();
@@ -223,14 +260,43 @@ pub fn layout(
                     line.pieces.push((x, Piece::Picture(n, link, w, h)));
                     line.x += w;
                 }
+                Tok::Float(n, link, side) => {
+                    let (w, h) = picture(n).unwrap_or((0, 0));
+                    let (l, r) = taken(&floats, y);
+                    let x = match side {
+                        Place::Right => right - w,
+                        _ => left + l,
+                    };
+                    out.pictures.push(Placed {
+                        x,
+                        y,
+                        width: w,
+                        height: h,
+                        number: n,
+                        link,
+                    });
+                    out.width = out.width.max(x + w);
+                    let room = w + FLOAT_GAP + if side == Place::Right { r } else { l };
+                    floats.push(Float {
+                        place: side,
+                        room,
+                        bottom: y + h,
+                    });
+                    // A line with nothing on it yet starts after the
+                    // picture; one that has text keeps it where it is.
+                    if side != Place::Right && line.pieces.is_empty() {
+                        line.x = line.x.max(left + room);
+                    }
+                }
             }
         }
-        if !line.pieces.is_empty() || y == top {
+        if !line.pieces.is_empty() || (y == top && !only_floats) {
             flush!();
         }
         y += pixels(par.space_after);
     }
-    out.height = y + margin;
+    let bottom = floats.iter().map(|f| f.bottom).max().unwrap_or(0);
+    out.height = y.max(bottom) + margin;
     out
 }
 
@@ -422,6 +488,53 @@ mod tests {
         let pars = [par(vec![text("a")]), par(vec![]), par(vec![text("b")])];
         let l = layout(&pars, 400, 0, &mut Fixed, &mut |_| None);
         assert_eq!(l.runs[1].y, 20);
+    }
+
+    #[test]
+    fn a_picture_at_the_left_margin_has_the_next_paragraphs_beside_it() {
+        // Metal Marines' help: "Clicking the", then a paragraph of a
+        // {bml} button picture 20 by 25, then the rest of the sentence.
+        // The rest goes beside the picture, from its top, and the lines
+        // below the picture's bottom go back to the margin.
+        let pars = [
+            par(vec![text("Clicking the")]),
+            par(vec![Item::Picture(7, Place::Left)]),
+            par(vec![text("in the bar opens the sound options box")]),
+        ];
+        let l = layout(&pars, 100, 0, &mut Fixed, &mut |_| Some((20, 25)));
+        assert_eq!((l.pictures[0].x, l.pictures[0].y), (0, 10));
+        let lines: Vec<(i32, i32)> = l.runs.iter().map(|r| (r.x, r.y)).collect();
+        // The lines at 10, 20 and 30 start beside the picture, which ends
+        // at 35; the one at 40 starts at the margin.
+        let b = 20 + FLOAT_GAP;
+        assert_eq!(
+            lines,
+            [
+                (0, 0),
+                (54, 0),
+                (b, 10),
+                (b + 18, 10),
+                (b + 42, 10),
+                (b, 20),
+                (b + 36, 20),
+                (b, 30),
+                (0, 40),
+                (48, 40),
+            ]
+        );
+        assert_eq!(l.height, 50);
+    }
+
+    #[test]
+    fn a_picture_in_the_line_stays_in_it() {
+        let pars = [par(vec![
+            text("Click "),
+            Item::Picture(7, Place::Character),
+            text(" here"),
+        ])];
+        let l = layout(&pars, 400, 0, &mut Fixed, &mut |_| Some((20, 8)));
+        assert_eq!(l.pictures[0].x, 36);
+        assert_eq!((l.runs[1].x, l.runs[1].y), (56, 0));
     }
 
     #[test]

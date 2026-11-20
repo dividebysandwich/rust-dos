@@ -431,7 +431,7 @@ fn lay_out(cpu: &mut Cpu, hwnd: u32, page: usize, width: i32) -> Layout {
     let mut known: HashMap<u16, Option<(i32, i32)>> = HashMap::new();
     for par in &pars {
         for item in &par.items {
-            if let hlpfile::Item::Picture(n) = item {
+            if let hlpfile::Item::Picture(n, _) = item {
                 known.entry(*n).or_insert_with(|| sizes(cpu, *n));
             }
         }

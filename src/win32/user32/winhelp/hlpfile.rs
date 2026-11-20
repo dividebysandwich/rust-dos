@@ -319,8 +319,19 @@ pub enum Item {
     /// A link starts: the text up to `LinkEnd` is it.
     Link(Link),
     LinkEnd,
-    /// A picture: the number of its |bm file.
-    Picture(u16),
+    /// A picture: the number of its |bm file, and where it goes.
+    Picture(u16, Place),
+}
+
+/// Where a picture goes: in the line of text, as a character (`{bmc}`),
+/// or at the left or right margin with the text beside it (`{bml}`,
+/// `{bmr}`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Place {
+    #[default]
+    Character,
+    Left,
+    Right,
 }
 
 /// A paragraph: its format and its pieces. Distances are in half
@@ -1090,6 +1101,11 @@ impl HelpFile {
                     }
                     0x83 => par.items.push(Item::Tab),
                     0x86..=0x88 => {
+                        let place = match code {
+                            0x86 => Place::Character,
+                            0x87 => Place::Left,
+                            _ => Place::Right,
+                        };
                         let kind = f.byte();
                         let size = f.long();
                         if kind == 0x22 {
@@ -1098,7 +1114,7 @@ impl HelpFile {
                         }
                         let start = f.at;
                         if (kind == 0x03 || kind == 0x22) && i16_at(rec, f.at) == 0 {
-                            par.items.push(Item::Picture(u16_at(rec, f.at + 2)));
+                            par.items.push(Item::Picture(u16_at(rec, f.at + 2), place));
                         }
                         f.at = start + size.max(0) as usize;
                     }
