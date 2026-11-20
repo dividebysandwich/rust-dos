@@ -227,8 +227,11 @@ fn older_cards_take_sb16_only_commands_without_parameters() {
         for cmd in [0x41, 0x42, 0x05, 0x08, 0x0E, 0x0F, 0xF9, 0xFA, 0xB6, 0xC6, 0xE7] {
             dsp_write(&mut bus, cmd);
         }
-        // None waited for parameters: E1h answers straight away.
+        // None waited for parameters: E1h answers straight away, after the
+        // 00h that F9h and FAh, the RAM test on these DSPs, each answer.
         dsp_write(&mut bus, 0xE1);
+        assert_eq!(dsp_read(&mut bus), 0x00, "{:?} F9h", model);
+        assert_eq!(dsp_read(&mut bus), 0x00, "{:?} FAh", model);
         assert_eq!(dsp_read(&mut bus), major, "{:?}", model);
     }
 }
