@@ -423,6 +423,16 @@ fn status(cpu: &mut Cpu, i: usize, flags: u32, p: &mut Parms) -> u32 {
     };
     p.ret = ret;
     p.ret_kind = kind;
+    // Every answer but the position the device plays at and its track
+    // comes from the disc's table of contents and the device's state,
+    // which only a command or the end of a play changes, and the end
+    // comes in the mixer, at an event. The position moves on with time,
+    // and reading it renders the sound up to now first.
+    p.steady = match p.item {
+        MCI_STATUS_POSITION => flags & (MCI_TRACK | MCI_STATUS_START) != 0,
+        MCI_STATUS_CURRENT_TRACK => false,
+        _ => true,
+    };
     0
 }
 

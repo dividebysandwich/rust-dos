@@ -3,6 +3,7 @@
 //! them all, and must come out the same after every batch. Loops that
 //! change something every pass must not be skipped.
 
+use crate::cdimage;
 use crate::dyndiff;
 use crate::win16;
 
@@ -1004,6 +1005,81 @@ fn an_mfc_idle_loop_of_window_queries_is_skipped() {
     let stats = b.bus.observe.stats;
     println!("{}: {:?}", test, stats);
     assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+#[test]
+fn a_win16_loop_that_polls_the_cd_audio_mode_is_skipped_until_the_play_ends() {
+    // This Means War!'s menu: the CD plays its music, and in every pass
+    // the game asks the cdaudio device its mode with
+    // mciSendCommand(MCI_STATUS), then PeekMessage and GetTickCount. The
+    // mode stays MCI_MODE_PLAY until the mixer comes to the play's end,
+    // which it does between the batches here, as the front end renders
+    // the sound at its ticks. The skipping machine has to see the mode
+    // change in the same pass as the one that runs every pass, and leave
+    // the loop with the same mode: MCI_MODE_STOP (525, 20Dh).
+    use win16::{CODE, Code, program};
+    // MCI_OPEN_PARMS at DS:60h, MCI_SET_PARMS at DS:80h, MCI_PLAY_PARMS
+    // at DS:A0h and MCI_STATUS_PARMS at DS:40h; the device's id comes
+    // back at DS:64h.
+    let send = |code: &mut Code, msg: u16, flags: u16, parms: u16| {
+        code.emit(&[0xFF, 0x36, 0x64, 0x00]) // push word [64h]
+            .push(msg)
+            .push(0)
+            .push(flags)
+            .emit(&[0x1E]) // push ds
+            .push(parms)
+            .call("MMSYSTEM", 701); // mciSendCommand
+    };
+    let mut code = Code::new();
+    // The device type by its number, MCI_DEVTYPE_CD_AUDIO.
+    code.emit(&[0xC7, 0x06, 0x68, 0x00, 0x04, 0x02]); // mov word [68h],204h
+    send(&mut code, 0x803, 0x3000, 0x60); // MCI_OPEN, _TYPE | _TYPE_ID
+    code.emit(&[0xC7, 0x06, 0x84, 0x00, 0x0A, 0x00]); // mov word [84h],10
+    send(&mut code, 0x80D, 0x400, 0x80); // MCI_SET_TIME_FORMAT, TMSF
+    code.emit(&[0xC7, 0x06, 0xA4, 0x00, 0x02, 0x00]); // mov word [A4h],2
+    send(&mut code, 0x806, 0x4, 0xA0); // MCI_PLAY from track 2
+    code.emit(&[0xC7, 0x06, 0x48, 0x00, 0x04, 0x00]); // mov word [48h],4
+    let top = code.here();
+    send(&mut code, 0x814, 0x100, 0x40); // MCI_STATUS_ITEM, MCI_STATUS_MODE
+    code.emit(&[0x1E]) // push ds
+        .push(0x10) // the MSG at DS:10h
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(1) // PM_REMOVE
+        .call("USER", 109) // PeekMessage
+        .call("USER", 13) // GetTickCount
+        .emit(&[0x81, 0x3E, 0x44, 0x00, 0x0E, 0x02]); // cmp word [44h],20Eh
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x74, back as i8 as u8]) // je top
+        .emit(&[0xA0, 0x44, 0x00]) // mov al,[44h]
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_cd_mode";
+    let dir = cdimage::scratch(test);
+    let iso = cdimage::iso("TESTDISC", &[cdimage::file("A.TXT", b"a")]);
+    // 200 ms of audio in track 2.
+    let cue = cdimage::mixed_disc(&dir, &iso, 15);
+    let with_cd = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine_with(test, name, ("T.EXE", program.as_slice()), core, skip);
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.mount_drive(3, &cue, options, false).unwrap();
+        cpu.bus.win32.enabled = true;
+        cpu.host_console = Some(rust_dos::cpu::HostConsole::default());
+        cpu.load_shell();
+        assert!(cpu.load_executable("T.EXE", None));
+        cpu
+    };
+    let mut a = with_cd("a", CoreMode::Normal, false);
+    let mut b = with_cd("b", CoreMode::Dynamic, true);
+    let each = |_: usize, cpu: &mut Cpu| cpu.bus.audio_catch_up();
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (0x0D, 0x0D), "the play ended");
     assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
 }
 

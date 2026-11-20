@@ -106,6 +106,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     if t.var(RESTART) != 0 {
                         crate::win32::boot::restart(cpu);
                     }
+                    crate::win32::boot::session_decided(cpu, true);
                     t.set(NEXT, 0);
                     t.step = NOTIFY;
                     continue;
@@ -123,6 +124,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     && user(cpu).is_window(hwnd);
                 t.step = QUERY;
                 if refused {
+                    crate::win32::boot::session_decided(cpu, false);
                     // The windows asked before it learn that the session
                     // goes on.
                     t.set(ENDING, 0);

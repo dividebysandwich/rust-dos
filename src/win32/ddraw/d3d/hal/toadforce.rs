@@ -810,7 +810,7 @@ fn sent(cpu: &mut Cpu) -> Sent {
 /// The surface `id` in card memory: where it is and its pitch.
 fn in_card(cpu: &mut Cpu, id: u32) -> Option<(u32, u32)> {
     let s = state(cpu).surface(id)?;
-    (s.memory == MEM_VIDEO && !s.lost).then_some((s.bits, s.pitch))
+    (s.memory == MEM_VIDEO && !s.lost.get()).then_some((s.bits, s.pitch))
 }
 
 /// The device's render target as the card takes it, with the depth

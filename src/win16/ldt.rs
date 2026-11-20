@@ -24,6 +24,24 @@ pub const AHSHIFT: u16 = 3;
 pub const ACCESS_DATA: u8 = 0xF3;
 pub const ACCESS_CODE: u8 = 0xFB;
 
+/// How many LDT entries the Win16 process of a machine at `end` of a
+/// link keeps out of use (`Ldt::reserve`): none without a link. Two
+/// machines with the same built-in Windows would otherwise give a program
+/// the same selectors, and a program can tell the two ends of a link
+/// apart by them: Metal Marines takes the far pointer the other side
+/// sends that equals its own for its own message coming back (#661). A
+/// room member reserves its index (1 to 200); an instance not in a room
+/// 256 to 319 entries by its settings and random bytes, which never
+/// equals a member's.
+pub fn reserved_for(end: Option<crate::net::LinkEnd>) -> u16 {
+    use crate::net::LinkEnd;
+    match end {
+        None => 0,
+        Some(LinkEnd::Member(index)) => index as u16,
+        Some(LinkEnd::NoRoom(hash)) => 256 + (hash % 64) as u16,
+    }
+}
+
 /// The selector of LDT entry `index`, at level 3.
 pub fn selector(index: u16) -> u16 {
     index << 3 | 7
@@ -56,6 +74,17 @@ impl Ldt {
             self.used[word] |= 1 << (i % 64);
         } else {
             self.used[word] &= !(1 << (i % 64));
+        }
+    }
+
+    /// Keep the `count` entries from `FIRST` out of use, so that every
+    /// selector given out after comes `count` entries later. Their
+    /// descriptors stay empty. A machine linked to another reserves some
+    /// (`reserved_for`), as a real PC's drivers and the programs that ran
+    /// before take selectors another PC's don't.
+    pub fn reserve(&mut self, count: u16) {
+        for i in FIRST..FIRST + count {
+            self.set(i, true);
         }
     }
 
@@ -226,3 +255,25 @@ pub fn limit_of(desc: u64) -> u32 {
 }
 
 crate::state_fields!(Ldt { used });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::LinkEnd;
+
+    #[test]
+    fn linked_machines_reserve_entries_no_other_end_does() {
+        assert_eq!(reserved_for(None), 0);
+        // Room members: their indices, which the relay gives once each.
+        assert_eq!(reserved_for(Some(LinkEnd::Member(1))), 1);
+        assert_eq!(reserved_for(Some(LinkEnd::Member(200))), 200);
+        // Outside a room: past every member's, whatever the number.
+        for hash in [0, 63, 64, u32::MAX] {
+            assert!((256..320).contains(&reserved_for(Some(LinkEnd::NoRoom(hash)))));
+        }
+        let mut ldt = Ldt::default();
+        ldt.reserve(3);
+        assert_eq!(ldt.alloc(1), Some(selector(FIRST + 3)));
+        assert!(!ldt.is_allocated(selector(FIRST + 4)));
+    }
+}
