@@ -491,8 +491,11 @@ pub fn triangle_rows(st: &RasterState, verts: &[(f32, f32); 3]) -> Option<(i32, 
 /// triangles at the bottom edge of the screen reach past the origin by
 /// the pixel `triangle_rows` spares, and were taken to draw anywhere,
 /// which read the OpenGL renderer's rows back for each (#1522).
+/// `buffer_rows` sends only a Voodoo Graphics's or Voodoo2's rows here,
+/// whose `ymask` is 0x3FF: a Banshee's rows don't wrap.
 fn wrapped_rows(st: &RasterState, y0: i32, y1: i32, (low, high): (i32, i32)) -> (i32, i32) {
-    let size = st.ymask + 1;
+    debug_assert_eq!(st.ymask, 0x3FF);
+    let size = 0x400;
     let (r0, r1) = (st.yorigin as i32 - (y1 - 1), st.yorigin as i32 - y0 + 1);
     if r1 - r0 >= size {
         return (low.max(0), high.min(size));
@@ -2086,5 +2089,37 @@ mod tests {
         assert_eq!(wrapped_rows(&st, 481, 490, (0, 480)), (0, 0));
         // Rows that go round the whole buffer.
         assert_eq!(wrapped_rows(&st, -600, 600, (8, 400)), (8, 400));
+    }
+
+    #[test]
+    fn wrapped_rows_cover_the_rows_screen_y_gives() {
+        // Against the rasterizer's own row mapping, for Y origins other
+        // than Glide's (a picture's height less one) and clip rectangles
+        // both inside and across the wrap.
+        let mut st = flipped_state();
+        for yorigin in [0, 1, 479, 599, 767, 1023] {
+            st.yorigin = yorigin;
+            for (low, high) in [(0, 480), (0, 1024), (100, 200), (1000, 1024), (0, 1)] {
+                for y0 in (-40..1100).step_by(37) {
+                    for len in [1, 2, 5, 30, 600, 1100] {
+                        let y1 = y0 + len;
+                        let drawn: Vec<i32> = (y0..y1)
+                            .map(|y| screen_y(&st, y, true))
+                            .filter(|r| (low..high).contains(r))
+                            .collect();
+                        let (r0, r1) = wrapped_rows(&st, y0, y1, (low, high));
+                        let case = (yorigin, low, high, y0, y1, r0, r1);
+                        assert!(drawn.iter().all(|r| (r0..r1).contains(r)), "{case:?}");
+                        if drawn.is_empty() {
+                            assert!(r0 >= r1, "{case:?}");
+                        } else {
+                            let lo = *drawn.iter().min().unwrap();
+                            let hi = *drawn.iter().max().unwrap() + 1;
+                            assert_eq!((r0, r1), (lo, hi), "{case:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }
