@@ -515,6 +515,79 @@ fn exit_windows_exec_runs_the_dos_program_after_windows() {
 }
 
 #[test]
+fn exit_windows_exec_runs_nothing_when_a_window_refuses() {
+    // The program's window refuses WM_QUERYENDSESSION, so
+    // ExitWindowsExec("C:\D.COM", "") returns FALSE: exit code 7. 9 is a
+    // call that returned TRUE, 2 and 3 calls that failed before. The
+    // command line must not be left to run at the prompt.
+    const WM_QUERYENDSESSION: u8 = 0x11;
+    const WC: u8 = 0x20;
+    let mut p = Program::default();
+    p.code.emit(&[0x89, 0x3E, WC + 10, 0x00]); // mov [WC+10],di: the instance
+    let proc_at = p.code.here() + 4;
+    p.code
+        .emit(&[0xC7, 0x06, WC + 2, 0x00, 0x00, 0x00]) // its procedure
+        .emit(&[0x8C, 0x0E, WC + 4, 0x00]); // mov [WC+4],cs
+    let name_at = p.code.here() + 4;
+    p.code
+        .emit(&[0xC7, 0x06, WC + 22, 0x00, 0x00, 0x00]) // its name
+        .emit(&[0x8C, 0x0E, WC + 24, 0x00])
+        .emit(&[0x1E])
+        .push(WC as u16)
+        .call("USER", REGISTER_CLASS)
+        .emit(&[0x0B, 0xC0, 0x75, 0x06])
+        .emit(&[0xB0, 2, 0xB4, 0x4C, 0xCD, 0x21]);
+    p.push_string(b"NOEND\0");
+    p.push_string(b"\0");
+    p.code.push((POPUP >> 16) as u16).push(POPUP as u16);
+    for v in [0, 0, 100, 60] {
+        p.code.push(v);
+    }
+    p.code
+        .push(0)
+        .push(0)
+        .emit(&[0x57]) // push di: the instance
+        .push(0)
+        .push(0)
+        .call("USER", CREATE_WINDOW)
+        .emit(&[0x0B, 0xC0, 0x75, 0x06])
+        .emit(&[0xB0, 3, 0xB4, 0x4C, 0xCD, 0x21]);
+    p.push_string(b"C:\\D.COM\0");
+    p.push_string(b"\0");
+    p.code
+        .call("USER", EXIT_WINDOWS_EXEC)
+        .emit(&[0x0B, 0xC0, 0x74, 0x04]) // or ax,ax; jz refused
+        .emit(&[0xB0, 0x09, 0xEB, 0x02]) // mov al,9; jmp done
+        .emit(&[0xB0, 0x07]) // refused: mov al,7
+        .exit_al();
+    // The window procedure: 0 for WM_QUERYENDSESSION, DefWindowProc's
+    // answer for the rest.
+    let proc = p.code.here();
+    p.code
+        .emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+        .emit(&[0x83, 0x7E, 0x0C, WM_QUERYENDSESSION]) // cmp word [bp+0Ch],11h
+        .emit(&[0x75, 0x08]) // jne default
+        .emit(&[0x31, 0xC0, 0x31, 0xD2]) // xor ax,ax; xor dx,dx
+        .emit(&[0x5D, 0xCA, 0x0A, 0x00]) // pop bp; retf 0Ah
+        .emit(&[
+            0xFF, 0x76, 0x0E, // default: push [bp+0Eh] (hwnd)
+            0xFF, 0x76, 0x0C, // push [bp+0Ch] (msg)
+            0xFF, 0x76, 0x0A, // push [bp+0Ah] (wParam)
+            0xFF, 0x76, 0x08, // push [bp+8] (lParam)
+            0xFF, 0x76, 0x06, // push [bp+6]
+        ])
+        .call("USER", DEF_WINDOW_PROC)
+        .emit(&[0x5D, 0xCA, 0x0A, 0x00]); // pop bp; retf 0Ah
+    p.code.patch(proc_at, proc);
+    let name = p.code.here();
+    p.code.emit(b"NOEND\0");
+    p.code.patch(name_at, name);
+    let (exit, log) = run("exit_windows_exec_refused", p.build());
+    assert_eq!(exit, 7, "{log}");
+    assert!(!log.contains("ExitWindowsExec: DOS runs"), "{log}");
+}
+
+#[test]
 fn exit_windows_ends_the_program() {
     // ExitWindows(EW_RESTARTWINDOWS, 0) comes back only when a window
     // refuses, and then the exit code is 9.
