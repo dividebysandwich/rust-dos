@@ -2205,9 +2205,14 @@ impl AutoSpeed {
                 // let it. Held there instead, Myth III's battle sat at
                 // 419,864 for minutes at 26 frames a second, a floor of
                 // 488,802 over it and the host keeping up with 560,000:
-                // each hold ended in another (#1493).
+                // each hold ended in another (#1493). As a step up, no
+                // further at once than a step under where the host fell
+                // behind, and past it a step at a time (`fell_at`).
                 Some((floor, _)) if c * 1.01 < floor as f64 => {
-                    return hold(this, floor as f64, HOLD_WINDOWS, false);
+                    let most = this.fell_at.map_or(f64::INFINITY, |at| {
+                        (at as f64 / FINE_STEP).max(c * FINE_STEP)
+                    });
+                    return hold(this, (floor as f64).min(most), HOLD_WINDOWS, false);
                 }
                 Some((floor, _)) if c / FINE_STEP < floor as f64 => {
                     if floor as f64 * 1.01 >= c {
@@ -6444,5 +6449,65 @@ mod tests {
         auto.lagged = Some((419_864, 10));
         let speed = auto.decide(419_864, &myth3_battle(419_864), true, 560_000);
         assert_eq!(speed, 419_864);
+        // And where the host fell behind at the floor itself, the way back
+        // goes a step at a time past a step under it, as a step up does.
+        auto.floor = Some((488_802, 40));
+        auto.step = ending;
+        auto.lagged = None;
+        auto.fell_at = Some(488_802);
+        let speed = auto.decide(419_864, &myth3_battle(419_864), true, 560_000);
+        assert_eq!(speed, (419_864.0 * FINE_STEP).round() as u32);
+    }
+
+    #[test]
+    fn hitches_hold_the_speed_under_the_floor_only_while_the_limits_do() {
+        // Myth III's battle on a host that keeps real time up to 560,000
+        // and hitches in one measurement in 40 on average: that one runs
+        // at 0.9 of what it would, with the estimate down to 350,000. Each
+        // hitch cuts the speed, often under a floor. Counted over 20 runs
+        // of 1000 measurements: those more than 1% under a floor while
+        // the limits (`lagged`, `fell_at`, the estimate) left room up to
+        // it. Before #1493's fix, where a hold under the floor ended in
+        // another, there were 587 of them, and the speed averaged 485,600;
+        // with it, 97 and 509,600.
+        let (mut stuck, mut sum, mut n) = (0, 0.0, 0);
+        for run in 1..21u32 {
+            let mut auto = AutoSpeed::new(3000, None);
+            auto.set_protected_least(crate::cpu::CpuModel::PentiumII.auto_least());
+            auto.set_idles(true);
+            let (mut speed, mut seed) = (3000, run.wrapping_mul(0x9E37_79B9) | 1);
+            for i in 0..1200 {
+                let m = myth3_battle(speed);
+                let hitch = noise(&mut seed, 1.0) < 2.0 / 40.0;
+                let mut pace = (560_000.0 / speed as f64).min(1.0);
+                let mut host = 560_000;
+                if hitch {
+                    pace *= 0.9;
+                    host = 350_000;
+                }
+                let fps = m.fps.map(|fps| fps * noise(&mut seed, 0.04));
+                if i >= 200 {
+                    let room = |floor: u32| {
+                        auto.lagged
+                            .is_none_or(|(most, _)| most as f64 >= floor as f64 * 0.99)
+                            && host >= floor
+                            && auto
+                                .fell_at
+                                .is_none_or(|at| at as f64 * FINE_STEP >= floor as f64)
+                    };
+                    let under = auto
+                        .floor
+                        .filter(|&(floor, _)| speed as f64 * 1.01 < floor as f64);
+                    if under.is_some_and(|(floor, _)| room(floor)) {
+                        stuck += 1;
+                    }
+                    sum += speed as f64;
+                    n += 1;
+                }
+                speed = auto.decide(speed, &Measurement { fps, pace, ..m }, true, host);
+            }
+        }
+        assert!(stuck <= 200, "{stuck}");
+        assert!(sum / n as f64 >= 500_000.0, "{}", sum / n as f64);
     }
 }
