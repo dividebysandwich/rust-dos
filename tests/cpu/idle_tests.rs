@@ -915,6 +915,42 @@ fn a_win16_loop_that_reads_the_time_in_two_places_is_skipped() {
 }
 
 #[test]
+fn a_win16_loop_that_counts_its_clock_reads_keeps_the_count() {
+    // A calibration loop: it counts in SI how many times it reads
+    // GetTickCount before 300 ms have gone by. The proof's head is in
+    // KERNEL32's GetTickCount, where the thunk starts the 32-bit code
+    // with the same registers in every pass, and SI waits in the 16-bit
+    // context the thunk keeps. A skip that compared the registers only
+    // took the passes for the same and lost the count; with the task's
+    // frames in the key the passes differ, and the loop runs as it is.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.emit(&[0x31, 0xF6]) // xor si,si
+        .call("USER", 13)
+        .emit(&[0x8B, 0xF8]); // mov di,ax
+    let top = code.here();
+    code.emit(&[0x46]) // inc si
+        .call("USER", 13)
+        .emit(&[0x2B, 0xC7]) // sub ax,di
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0x8B, 0xC6]) // mov ax,si
+        .emit(&[0x8A, 0xC4]) // mov al,ah
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_counted_clock_reads";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, |_, _| {}) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!(a.errorlevel, b.errorlevel, "the count");
+}
+
+#[test]
 fn an_mfc_idle_loop_of_window_queries_is_skipped() {
     // Metal Marines' MFC message loop, which waits for 300 ms here: in
     // every pass Catch, PeekMessage finding nothing, GetActiveWindow,
