@@ -32,6 +32,8 @@ mod lz;
 mod message;
 mod misc;
 mod module;
+mod ole2;
+mod ole2disp;
 pub(crate) mod resource;
 pub mod task;
 pub(crate) mod thunk;
@@ -128,6 +130,8 @@ pub struct State {
     pub links: Vec<flat::Link>,
     /// The serial ports open (comm.rs).
     pub comm: Vec<comm::Port>,
+    /// What the 16-bit OLE modules keep (ole2.rs).
+    pub ole: ole2::Ole16,
     /// The exit code of the last task that ended other than a client's,
     /// which the Win16 process ends with when a client outlived it.
     pub exit_code: u16,
@@ -634,7 +638,8 @@ crate::state_fields!(State {
     aliases,
     links,
     exit_code,
-    comm
+    comm,
+    ole
 });
 crate::state_fields!(Module16 {
     name,

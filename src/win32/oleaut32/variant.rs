@@ -41,7 +41,7 @@ const VARIANT_TRUE: u64 = 0xFFFF;
 
 /// A VARIANT's value, read from the program's.
 #[derive(Clone, Debug, PartialEq)]
-enum Val {
+pub(crate) enum Val {
     Empty,
     Null,
     Int(i64),
@@ -225,7 +225,7 @@ fn real(n: Num) -> f64 {
 }
 
 /// C's "%.<precision>G" of `f`.
-fn format_g(f: f64, precision: usize) -> String {
+pub(crate) fn format_g(f: f64, precision: usize) -> String {
     if f == 0.0 {
         return "0".into();
     }
@@ -276,14 +276,14 @@ fn currency_text(c: i64) -> String {
 }
 
 /// What the destination gets.
-pub(super) enum Out {
+pub(crate) enum Out {
     Bits(u16, u64),
     Str(Vec<u16>),
     Iface(u16, u32),
 }
 
 /// The value `v` changed to the type `vt`.
-fn change(v: &Val, vt: u16, flags: u32) -> Result<Out, u32> {
+pub(crate) fn change(v: &Val, vt: u16, flags: u32) -> Result<Out, u32> {
     if matches!(v, Val::Null) && vt != VT_NULL && vt != VT_EMPTY {
         return Err(DISP_E_TYPEMISMATCH);
     }
