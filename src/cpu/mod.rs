@@ -2054,6 +2054,19 @@ impl Cpu {
             self.bus.guest_write_bytes(env_phys, &block);
             let psp_phys = self.get_physical_addr(self.current_psp, 0) as u32;
             self.bus.guest_write_16(psp_phys + 0x2C, layout.environment);
+            // Its MCB names the program as the owner and reaches up to the
+            // first MCB, as the block DOS gives the program would. Runtimes
+            // check the owner before they read a variable (the BASIC of
+            // Z's installer finds none otherwise), and programs read the
+            // size to know how far the environment may grow.
+            let mcb = crate::mcb::Mcb {
+                signature: crate::mcb::MCB_M,
+                owner: self.current_psp,
+                size: layout.first_mcb - layout.environment,
+            };
+            crate::mcb::write_mcb(&mut self.bus, layout.environment - 1, &mcb);
+            let name_phys = self.get_physical_addr(layout.environment - 1, 8) as u32;
+            self.bus.guest_write_bytes(name_phys, &[0; 8]);
         }
         if loaded && placement == Placement::Shell {
             crate::mcb::name_program(&mut self.bus, self.current_psp, filename);

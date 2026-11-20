@@ -103,7 +103,9 @@ const _: () = assert!(VSHARE_FLAG < CRIT_PATCHES);
 
 /// What DOS keeps after its data segment, below the first MCB: the file
 /// table with the system JFT after it, and the environment of programs
-/// started from the shell, up to the first MCB.
+/// started from the shell, up to the first MCB. The paragraph before the
+/// environment is its MCB (`Cpu::load_executable` writes it), as the
+/// environment DOS gives a program is a block of the program's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
     pub sft: u16,
@@ -122,12 +124,13 @@ impl Layout {
 pub const LOW: Layout = Layout { sft: 0x0A20, environment: 0x0C00, first_mcb: 0x0FFF };
 
 /// Packed (`dos_high`), as DOS=HIGH leaves conventional memory: the file
-/// table right after the data segment and 2 KB of environment after it.
-/// The HMA stays free for programs: DOS has no code there to move.
+/// table right after the data segment and 2 KB of environment after it,
+/// its MCB included. The HMA stays free for programs: DOS has no code
+/// there to move.
 pub const HIGH: Layout = {
     let sft = (address(END) as u16).div_ceil(16);
-    let environment = sft + (crate::dos_files::TABLE_BYTES as u16).div_ceil(16);
-    Layout { sft, environment, first_mcb: environment + HIGH_ENVIRONMENT_PARAS }
+    let table_end = sft + (crate::dos_files::TABLE_BYTES as u16).div_ceil(16);
+    Layout { sft, environment: table_end + 1, first_mcb: table_end + HIGH_ENVIRONMENT_PARAS }
 };
 const HIGH_ENVIRONMENT_PARAS: u16 = 0x80;
 
@@ -137,7 +140,13 @@ pub fn layout(bus: &Bus) -> Layout {
 }
 
 const _: () = assert!(address(END) <= LOW.sft as usize * 16);
-const _: () = assert!(LOW.sft as usize * 16 + crate::dos_files::TABLE_BYTES <= LOW.environment as usize * 16);
+// The environment's MCB comes after the file table.
+const _: () = assert!(
+    LOW.sft as usize * 16 + crate::dos_files::TABLE_BYTES <= (LOW.environment - 1) as usize * 16
+);
+const _: () = assert!(
+    HIGH.sft as usize * 16 + crate::dos_files::TABLE_BYTES <= (HIGH.environment - 1) as usize * 16
+);
 
 /// A device DOS has built in: its name and attributes.
 struct Device {

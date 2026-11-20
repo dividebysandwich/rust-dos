@@ -1869,10 +1869,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x49 => {
             let segment_to_free = cpu.es();
             // A program started from the shell has its environment in
-            // DOS's environment area, which has no MCB. On DOS it is a
-            // block of the program's, which it may free, as a TSR does
-            // before it stays resident: the free succeeds, and the area
-            // stays for the next program.
+            // DOS's environment area, whose MCB names the program but is
+            // not in the chain. On DOS it is a block of the program's,
+            // which it may free, as a TSR does before it stays resident:
+            // the free succeeds, and the area stays for the next program.
             let psp = cpu.get_physical_addr(cpu.current_psp, 0x2C);
             let shell_environment = segment_to_free
                 == crate::dos_data::layout(&cpu.bus).environment

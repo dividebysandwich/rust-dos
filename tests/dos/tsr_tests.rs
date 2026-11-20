@@ -418,3 +418,31 @@ fn a_program_started_from_the_shell_frees_its_environment() {
     );
     assert_eq!(block(&mut cpu)[..8], before[..8]);
 }
+
+#[test]
+fn a_program_started_from_the_shell_owns_its_environment_block() {
+    // The paragraph before PSP:[2Ch] is the environment's MCB, owned by
+    // the program, and the chain goes on from it to the program's own
+    // block. The BASIC runtime of Z's installer checks the owner before
+    // it reads COMSPEC, and finds no variable without it.
+    let base = scratch(
+        "environment_mcb",
+        &[("ONE.COM", &[0xEB, 0xFE]), ("TWO.COM", &[0xEB, 0xFE])],
+    );
+    for high in [true, false] {
+        let mut cpu = Cpu::new(base.clone());
+        cpu.load_shell();
+        cpu.set_dos_high(high).unwrap();
+        for program in ["ONE.COM", "TWO.COM"] {
+            assert!(cpu.load_executable(program, None));
+            let psp = cpu.current_psp;
+            let environment = cpu.bus.read_16(cpu.get_physical_addr(psp, 0x2C));
+            let header = mcb::read_mcb(&mut cpu.bus, environment - 1);
+            assert_eq!(header.signature, MCB_M, "{program}, dos_high={high}");
+            assert_eq!(header.owner, psp, "{program}, dos_high={high}");
+            assert_eq!(environment + header.size, psp - 1, "{program}, dos_high={high}");
+            assert!(mcb::read_name(&mut cpu.bus, environment - 1).is_empty());
+            cpu.load_shell();
+        }
+    }
+}
