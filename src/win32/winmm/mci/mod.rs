@@ -250,6 +250,11 @@ pub struct Parms {
     pub ret: u32,
     pub ret_kind: Ret,
     pub text: String,
+    /// An MCI_STATUS answer the device read without changing anything,
+    /// which stays the same until an event outside the program's code
+    /// changes the device (`send_command` lets an idle proof go through
+    /// it).
+    pub steady: bool,
 }
 
 /// A driver of a kind of device: its commands on the open device `i`.
@@ -938,6 +943,17 @@ fn send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     if wait_for_play(cpu, id, msg, flags) {
         return None;
+    }
+    // A status the device read without changing anything, and with no
+    // notification posted: what it wrote is the answer, in RAM, and the
+    // passes of a loop that polls it see the same answer until an event
+    // changes the device, which ends a skip anyway. This Means War!'s
+    // menu asks the CD audio device's mode in every pass of its
+    // PeekMessage loop. The call reads its parameters too.
+    if msg == MCI_STATUS && p.steady && flags & MCI_NOTIFY == 0 {
+        crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
+        crate::idle::reads_also(cpu, at, size);
     }
     Some(0)
 }
