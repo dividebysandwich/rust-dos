@@ -118,7 +118,7 @@ const GLU32: &[&str] = &[
 ];
 const KERNEL32: &[&str] = &["CreateThread"];
 /// USER32's imports after the others', so that the places above stay.
-const USER32_MORE: &[&str] = &["ChangeDisplaySettingsA"];
+const USER32_MORE: &[&str] = &["ChangeDisplaySettingsA", "SendMessageA"];
 const DDRAW: &[&str] = &["DirectDrawCreate"];
 const CREATE_WINDOW: usize = 0;
 const GET_DC: usize = 1;
@@ -202,6 +202,7 @@ const ERROR_STRING: usize = GLU + 2;
 const GLU_GET_STRING: usize = GLU + 3;
 const CREATE_THREAD: usize = GLU + GLU32.len();
 const CHANGE_DISPLAY_SETTINGS: usize = CREATE_THREAD + KERNEL32.len();
+const SEND_MESSAGE: usize = CHANGE_DISPLAY_SETTINGS + 1;
 const DIRECT_DRAW_CREATE: usize = CHANGE_DISPLAY_SETTINGS + USER32_MORE.len();
 
 /// A program importing the functions above, with `data` and the code
@@ -210,22 +211,34 @@ fn program(
     data: &[u8],
     f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
 ) -> (Vec<u8>, u32) {
+    program_importing(data, true, f)
+}
+
+/// `program`, importing DirectDraw's function only with `ddraw`: a
+/// program without it doesn't load DDRAW.DLL, as GLQuake doesn't.
+fn program_importing(
+    data: &[u8],
+    ddraw: bool,
+    f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+) -> (Vec<u8>, u32) {
     let mut b = Builder::exe(BASE);
     let list =
         |names: &[&'static str]| -> Vec<Imp> { names.iter().map(|n| Imp::Name(n)).collect() };
     let (user, gdi, gl, glu) = (list(USER32), list(GDI32), list(OPENGL32), list(GLU32));
-    let (kernel, user_more, ddraw) = (list(KERNEL32), list(USER32_MORE), list(DDRAW));
-    let iat = b
-        .imports(&[
-            ("USER32.DLL", &user),
-            ("GDI32.DLL", &gdi),
-            ("OPENGL32.DLL", &gl),
-            ("GLU32.DLL", &glu),
-            ("KERNEL32.DLL", &kernel),
-            ("USER32.DLL", &user_more),
-            ("DDRAW.DLL", &ddraw),
-        ])
-        .concat();
+    let (kernel, user_more) = (list(KERNEL32), list(USER32_MORE));
+    let ddraw_imports = list(DDRAW);
+    let mut dlls: Vec<(&str, &[Imp])> = vec![
+        ("USER32.DLL", &user),
+        ("GDI32.DLL", &gdi),
+        ("OPENGL32.DLL", &gl),
+        ("GLU32.DLL", &glu),
+        ("KERNEL32.DLL", &kernel),
+        ("USER32.DLL", &user_more),
+    ];
+    if ddraw {
+        dlls.push(("DDRAW.DLL", &ddraw_imports));
+    }
+    let iat = b.imports(&dlls).concat();
     let data_rva = b.section(
         ".data",
         data,
@@ -1319,6 +1332,34 @@ fn on_a_voodoo2_a_context_draws_full_screen_on_the_card() {
     assert_eq!((v.fbi.width, v.fbi.height), (512, 384));
     assert_eq!(pixel(&cpu, data, 4, 4), [255, 0, 0]);
     assert_eq!(pixel(&cpu, data, 60, 60), [0, 0, 255]);
+}
+
+/// On a Voodoo2 a full-screen context puts DirectDraw's window procedure
+/// in front of the window's. A program that imports OpenGL alone, as
+/// GLQuake does, gets its messages through it all the same: DDRAW.DLL,
+/// where the procedure is, is loaded with the context.
+#[test]
+fn on_a_voodoo2_a_program_without_directdraw_gets_its_window_messages() {
+    let (exe, data) = program_importing(&data(), false, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        // WM_NULL, through the window's procedure.
+        c.api(
+            a,
+            l,
+            SEND_MESSAGE,
+            &[Arg::Val(HWND), Arg::I(0), Arg::I(0), Arg::I(0)],
+        )?;
+        c.api(a, l, SWAP_BUFFERS, &[Arg::Val(HDC)])?;
+        finish(a, l)
+    });
+    let mut cpu = machine_with("voodoo2_no_ddraw", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    let r: Vec<u32> = (0..8).map(|i| peek(&cpu, data + RESULTS + 4 * i)).collect();
+    assert_ne!(r[4], 0, "wglCreateContext");
+    assert_eq!(r[5], 1, "wglMakeCurrent");
+    assert_eq!(r[7], 1, "SwapBuffers");
+    assert!(cpu.bus.voodoo.as_ref().unwrap().output(), "the card shows");
 }
 
 /// Upload a 2x2 texture of the RGBA texel `texel` as texture `name` (a

@@ -725,7 +725,15 @@ pub fn create_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
 
     // The DirectDraw object: in a window, or the Voodoo2's, which takes
-    // the card full screen when the context is first made current.
+    // the card full screen when the context is first made current. Its
+    // exclusive mode puts DirectDraw's window procedure in front of the
+    // window's, and that procedure is in DDRAW.DLL's image, which a
+    // program that imports only OPENGL32.DLL (GLQuake) hasn't loaded.
+    if crate::win32::loader::map_builtin_named(cpu, "DDRAW.DLL").is_none() {
+        super::super::kernel32::free_pages(cpu, strings);
+        super::super::gdi32::set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
+        return Some(0);
+    }
     let card = icd == Icd::FullScreen;
     let dd = directdraw::new_ddraw(cpu, true, card);
     let dd_iface = ddraw::iface(cpu, dd, V_DD7);
