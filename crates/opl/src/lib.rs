@@ -411,6 +411,60 @@ mod idle_tests {
         assert!(!opl.is_idle());
         assert!(loudest(&mut opl, 2000) > 1000);
     }
+
+    /// In rhythm mode the drums are keyed by register BDh: a drum
+    /// released to silence leaves the chip idle, and the next drum key
+    /// wakes it.
+    #[test]
+    fn a_rhythm_key_wakes_the_idle_chip() {
+        let mut opl = Opl::new(false);
+        // The bass drum: channel 6, operators 12 and 15.
+        for (reg, value) in [
+            (0x30, 0x01),
+            (0x33, 0x01),
+            (0x50, 0x10),
+            (0x53, 0x00),
+            (0x70, 0xF0),
+            (0x73, 0xF0),
+            (0x90, 0x08),
+            (0x93, 0x08),
+            (0xC6, 0x00),
+            (0xA6, 0x44),
+            (0xB6, 0x12),
+        ] {
+            write(&mut opl, reg, value);
+        }
+        write(&mut opl, 0xBD, 0x30);
+        assert!(loudest(&mut opl, 2000) > 1000);
+        write(&mut opl, 0xBD, 0x20);
+        loudest(&mut opl, 2 * RATE as usize);
+        assert!(opl.is_idle(), "the drum released to silence");
+        write(&mut opl, 0xBD, 0x30);
+        assert!(!opl.is_idle());
+        assert!(loudest(&mut opl, 2000) > 1000);
+    }
+
+    /// A state saved while the chip is idle loads idle, without notes
+    /// starting again, and the next key plays.
+    #[test]
+    fn an_idle_chip_loads_idle() {
+        let mut opl = Opl::new(false);
+        key_a4(&mut opl);
+        loudest(&mut opl, 2000);
+        write(&mut opl, 0xB0, 0x12);
+        loudest(&mut opl, 2 * RATE as usize);
+        assert!(opl.is_idle());
+        let mut w = rust_dos_savestate::Writer::new();
+        rust_dos_savestate::State::save(&opl, &mut w);
+        let mut loaded = Opl::new(false);
+        let mut r = rust_dos_savestate::Reader::new(&w.buf);
+        rust_dos_savestate::State::load(&mut loaded, &mut r).unwrap();
+        loaded.after_load();
+        assert!(loaded.is_idle());
+        assert_eq!(loudest(&mut loaded, 2000), 0);
+        write(&mut loaded, 0xB0, 0x32);
+        assert!(loudest(&mut loaded, 2000) > 1000);
+    }
 }
 
 #[cfg(test)]
