@@ -2008,9 +2008,20 @@ impl AutoSpeed {
         // holds from the first measurement behind, before the smoothed pace
         // says it lagged: a step up from 20,000 that the host runs at 0.88
         // of real time would go back to the estimate, half of that.
+        //
+        // A load's frames are slow in the host's time too (files read
+        // cold, data unpacked), and the estimate takes about a second of
+        // frames after it to rise again. In the measurement right after a
+        // load, a speed the host kept up with stays within what it has:
+        // GLQuake's timedemo kept real time at 161,000 with 59 frames a
+        // second just after its level loaded, the estimate read 45,000,
+        // and the speed went there, where the demo drew 36 to 48 frames a
+        // second until a heavier scene sent it up (#1530).
         let ran = (c * m.pace * KEPT_UP).round() as u32;
         let have = if m.pace < KEPT_UP {
             host_max.max(ran)
+        } else if was_loaded || m.io >= LOADS {
+            host_max.max(current)
         } else {
             host_max
         };
@@ -6392,5 +6403,47 @@ mod tests {
                 .all(|&(_, speed)| speed <= 63_250),
             "{speeds:?}"
         );
+    }
+
+    /// GLQuake's timedemo as it loads its level (`LOADS`), at 0.9 of real
+    /// time, on a Pentium II (#1530).
+    fn quake_level_load() -> Measurement {
+        Measurement {
+            fps: Some(13.7),
+            io: 4_960_000.0,
+            output: 4_960_000.0,
+            refresh: 59.93,
+            pace: 0.88,
+            ..STILL
+        }
+    }
+
+    fn quake_demo(fps: f64) -> Measurement {
+        Measurement {
+            fps: Some(fps),
+            io: 8_000.0,
+            output: 8_000.0,
+            refresh: 59.93,
+            ..STILL
+        }
+    }
+
+    fn pentium_ii() -> AutoSpeed {
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(crate::cpu::CpuModel::PentiumII.auto_least());
+        auto.set_idles(true);
+        auto
+    }
+
+    #[test]
+    fn a_speed_kept_up_with_after_a_load_is_not_cut_to_the_host_estimate() {
+        // The estimate reads low for a second after the load: its frames
+        // took long in the host's time too.
+        let mut auto = pentium_ii();
+        auto.decide(3000, &STILL, true, 1200);
+        auto.decide(20_000, &STILL, true, 658_000);
+        auto.decide(140_000, &quake_level_load(), true, 279_000);
+        let speed = auto.decide(161_000, &quake_demo(59.4), true, 45_000);
+        assert_eq!(speed, 161_000);
     }
 }
