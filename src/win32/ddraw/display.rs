@@ -323,12 +323,48 @@ pub fn alloc_rest(cpu: &mut Cpu) -> Result<u32, u32> {
     alloc(cpu, screen::memory_size(cpu) - floor)
 }
 
-/// Give back the block at `offset`.
+/// Take a block of `len` bytes of video memory that no command a
+/// ToadForce has queued reads or draws, for a driver to write past the
+/// queue (`screen::write_taken`): a block given back while the commands
+/// were queued stays out of it. Its offset, or the error.
+pub fn alloc_past_queue(cpu: &mut Cpu, len: u32) -> Result<u32, u32> {
+    let retired = cpu.bus.toadforce_retired().to_vec();
+    if retired.is_empty() {
+        return alloc(cpu, len);
+    }
+    let floor = screen_len(cpu).next_multiple_of(ALIGN);
+    let len = len.max(1).next_multiple_of(ALIGN);
+    let size = screen::memory_size(cpu);
+    let display = &mut state(cpu).display;
+    let mut taken = display.blocks.clone();
+    taken.extend(retired.iter().map(|&(start, end)| (start, end - start)));
+    taken.sort_unstable();
+    let mut at = floor;
+    for &(start, size) in &taken {
+        if start >= at && start - at >= len {
+            break;
+        }
+        at = at.max((start + size).next_multiple_of(ALIGN));
+    }
+    if at as u64 + len as u64 > size as u64 {
+        // The retired blocks are free again once the queue has run.
+        cpu.bus.toadforce_flush();
+        return alloc(cpu, len);
+    }
+    let index = display.blocks.partition_point(|&(start, _)| start < at);
+    display.blocks.insert(index, (at, len));
+    Ok(at)
+}
+
+/// Give back the block at `offset`. A ToadForce's queued commands may
+/// still read or draw there, so it stays out of `alloc_past_queue`
+/// until they have run.
 pub fn free(cpu: &mut Cpu, offset: u32) {
-    state(cpu)
-        .display
-        .blocks
-        .retain(|&(start, _)| start != offset);
+    let blocks = &mut state(cpu).display.blocks;
+    if let Some(i) = blocks.iter().position(|&(start, _)| start == offset) {
+        let (start, len) = blocks.remove(i);
+        cpu.bus.toadforce_retire(start, len);
+    }
 }
 
 /// Video memory for surfaces, and how much of it is free.

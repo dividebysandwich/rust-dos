@@ -1562,7 +1562,8 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool) -> Option<Texture> {
     forget(cpu, |c| c.surface == id);
     let image = image(cpu, id, key[0] != 0)?;
     let start = room(cpu, image.data.len() as u32)?;
-    screen::write(cpu, start, &image.data);
+    // The block is one no queued draw samples, so they stay queued.
+    screen::write_taken(cpu, start, &image.data);
     let mut texture = image.texture;
     for (offset, _) in &mut texture.images {
         *offset += start;
@@ -1612,7 +1613,7 @@ fn forget(cpu: &mut Cpu, gone: impl Fn(&Cached) -> bool) {
 fn room(cpu: &mut Cpu, len: u32) -> Option<u32> {
     let clock = hal(cpu).clock;
     loop {
-        if let Ok(at) = display::alloc(cpu, len.max(4)) {
+        if let Ok(at) = display::alloc_past_queue(cpu, len.max(4)) {
             return Some(at);
         }
         let textures = &hal(cpu).textures;
