@@ -3634,12 +3634,10 @@ fn is_lost_answers_from_its_cache_and_sees_a_surface_lost() {
     );
     let front = peek(&cpu, data + FRONT);
     let cache = rust_dos::win32::is_lost_cache();
-    // The surface's slot holds its interface and the last answer.
-    let slot = cache + (front >> 3 & 255) * 8;
-    assert_eq!(
-        (peek(&cpu, slot), peek(&cpu, slot + 4)),
-        (front, SURFACE_LOST)
-    );
+    // The surface's slot holds its interface, with bit 0 for its last
+    // answer, DDERR_SURFACELOST.
+    let slot = cache + ((front ^ (front >> 10)) >> 3 & 1023) * 4;
+    assert_eq!(peek(&cpu, slot), front | 1);
 }
 
 /// Where `is_lost_after_release_program` keeps IsLost's address.

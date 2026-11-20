@@ -70,7 +70,7 @@ pub static DLL: Dll = Dll {
     vars: &[Var {
         name: "IsLostCache",
         ordinal: 0,
-        size: surface::IS_LOST_SLOTS * 8,
+        size: surface::IS_LOST_SLOTS * 4,
     }],
     init: None,
     term: None,
@@ -273,8 +273,9 @@ static APIS: &[Api] = &[
     method("Surface_GetPixelFormat", 2, surface::get_pixel_format),
     method("Surface_GetSurfaceDesc", 2, surface::get_surface_desc),
     method("Surface_Initialize", 3, surface::initialize),
-    // x86 code that answers from a cache (`surface::IS_LOST`); the
-    // handler is for states saved when it was a trap.
+    // x86 code that answers from a cache (`surface::IS_LOST`) and traps
+    // to the handler for an interface the cache hasn't; in a state saved
+    // when it was a trap, the stub still traps on every call.
     Api {
         name: "Surface_IsLost",
         ordinal: 0,
@@ -510,8 +511,6 @@ static APIS: &[Api] = &[
         gamma::set_gamma_ramp,
     ),
     method("DDrawWndProc", 4, directdraw::window_proc),
-    // What IsLost's code traps to for an interface its cache hasn't.
-    method("Surface_IsLostMiss", 1, surface::is_lost_miss),
 ];
 
 const IUNKNOWN: [&str; 3] = ["DD_QueryInterface", "DD_AddRef", "DD_Release"];
@@ -1119,7 +1118,7 @@ pub fn state(cpu: &mut Cpu) -> &mut State {
 }
 
 /// Where IsLost's cache of answers is in a process's DDRAW
-/// (`surface::IS_LOST`): 256 slots of an interface and its answer.
+/// (`surface::IS_LOST`): 1024 slots of an interface and its answer.
 pub fn is_lost_cache() -> u32 {
     super::stubs::var_address(dll_index(), 0)
 }
