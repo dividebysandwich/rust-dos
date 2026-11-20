@@ -711,9 +711,9 @@ impl Net {
             "{:?}|{:?}|{:?}|{:?}|{}|{}",
             net.lan, net.lan_host, net.mac, serial.modem_listen, net.room, net.player
         );
-        let hash = text
-            .bytes()
-            .fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+        let hash = text.bytes().fold(0x811C_9DC5u32, |h, b| {
+            (h ^ b as u32).wrapping_mul(0x0100_0193)
+        });
         let mut random = [0; 4];
         fill_machine_random(&mut random);
         Some(LinkEnd::NoRoom(hash ^ u32::from_le_bytes(random)))

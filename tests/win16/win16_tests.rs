@@ -856,7 +856,10 @@ fn two_linked_machines_give_a_program_different_selectors() {
     };
     let alone = run_linked("link_none", None);
     let host = run_linked("link_host", Some(|net| net.lan_host = Some(23661)));
-    let join = run_linked("link_join", Some(|net| net.lan = Some("127.0.0.1:23661".into())));
+    let join = run_linked(
+        "link_join",
+        Some(|net| net.lan = Some("127.0.0.1:23661".into())),
+    );
     assert_eq!(alone.1, 0, "a machine with no link reserves none");
     for (linked, reserved) in [host, join] {
         assert!((256..320).contains(&reserved), "{reserved}");
