@@ -1,24 +1,26 @@
 //! DPNET.DLL: DirectPlay 8, which DirectX 8 brought, on a machine whose
 //! network protocols can't open a connection. Its classes are the peer
-//! (IDirectPlay8Peer), the lobbied application
-//! (IDirectPlay8LobbiedApplication) and the address
+//! (IDirectPlay8Peer), the client (IDirectPlay8Client) and the server
+//! (IDirectPlay8Server) of a client/server session, the lobbied
+//! application (IDirectPlay8LobbiedApplication) and the address
 //! (IDirectPlay8Address), which CoCreateInstance, DllGetClassObject and
 //! DirectPlay8Create make.
 //!
 //! The built-in WinSock opens no sockets (wsock32.rs), so no service
 //! provider of DirectPlay 8 can start: EnumServiceProviders lists the
 //! four DirectX 8.1 registers (TCP/IP, IPX, modem, serial) only when the
-//! program asks for every registered one, and a peer can't host, join or
-//! look for a session. What needs a session fails as DirectPlay 8 does
-//! with none, so a game that offers network play next to playing alone
-//! falls back to playing alone. DPLAYX's sessions over the LAN room
-//! (dplayx/) don't reach DirectPlay 8 yet.
+//! program asks for every registered one, and a peer, a client or a
+//! server can't host, join or look for a session. What needs a session
+//! fails as DirectPlay 8 does with none, so a game that offers network
+//! play next to playing alone falls back to playing alone. DPLAYX's
+//! sessions over the LAN room (dplayx/) don't reach DirectPlay 8 yet.
 //!
 //! The lobbied application registers a program for lobbies under
 //! HKLM\Software\Microsoft\DirectPlay8\Applications, as DirectPlay 8
 //! does. No lobby launched the program, so it has no lobby connection.
 //!
-//! peer.rs has the peer's methods, lobbied.rs the lobbied application's
+//! peer.rs has the methods of the peer, which the client and the server
+//! share where theirs do the same, lobbied.rs the lobbied application's
 //! and address.rs the address's. Each object has one interface: IUnknown
 //! is that interface, and its block (com.rs) holds the object's id.
 
@@ -152,6 +154,76 @@ static APIS: &[Api] = &[
         3,
         address::build_from_dpaddress,
     ),
+    // IDirectPlay8Client: the peer's methods, with the server as the
+    // session's other side.
+    method("Client_Initialize", 4, peer::initialize),
+    method(
+        "Client_EnumServiceProviders",
+        7,
+        peer::enum_service_providers,
+    ),
+    method("Client_EnumHosts", 12, peer::enum_hosts),
+    method(
+        "Client_CancelAsyncOperation",
+        3,
+        peer::cancel_async_operation,
+    ),
+    method("Client_Connect", 11, peer::connect),
+    method("Client_Send", 7, peer::no_connection),
+    method("Client_GetSendQueueInfo", 4, peer::no_connection),
+    method("Client_GetApplicationDesc", 4, peer::no_connection),
+    method("Client_SetClientInfo", 5, peer::set_peer_info),
+    method("Client_GetServerInfo", 4, peer::no_connection),
+    method("Client_GetServerAddress", 3, peer::no_connection),
+    method("Client_Close", 2, peer::close),
+    method("Client_ReturnBuffer", 3, peer::return_buffer),
+    method("Client_GetCaps", 3, peer::get_caps),
+    method("Client_SetCaps", 3, peer::set_caps),
+    method("Client_SetSPCaps", 4, peer::sp_caps),
+    method("Client_GetSPCaps", 4, peer::sp_caps),
+    method("Client_GetConnectionInfo", 3, peer::no_connection),
+    method("Client_RegisterLobby", 4, peer::register_lobby),
+    // IDirectPlay8Server: the peer's methods, with the clients as the
+    // session's other players.
+    method("Server_Initialize", 4, peer::initialize),
+    method(
+        "Server_EnumServiceProviders",
+        7,
+        peer::enum_service_providers,
+    ),
+    method(
+        "Server_CancelAsyncOperation",
+        3,
+        peer::cancel_async_operation,
+    ),
+    method("Server_GetSendQueueInfo", 5, peer::no_connection),
+    method("Server_GetApplicationDesc", 4, peer::no_connection),
+    method("Server_SetServerInfo", 5, peer::set_peer_info),
+    method("Server_GetClientInfo", 5, peer::no_connection),
+    method("Server_GetClientAddress", 4, peer::no_connection),
+    method("Server_GetLocalHostAddresses", 4, peer::no_connection),
+    method("Server_SetApplicationDesc", 3, peer::no_connection),
+    method("Server_Host", 8, peer::host),
+    method("Server_SendTo", 8, peer::no_connection),
+    method("Server_CreateGroup", 6, peer::no_connection),
+    method("Server_DestroyGroup", 5, peer::no_connection),
+    method("Server_AddPlayerToGroup", 6, peer::no_connection),
+    method("Server_RemovePlayerFromGroup", 6, peer::no_connection),
+    method("Server_SetGroupInfo", 6, peer::no_connection),
+    method("Server_GetGroupInfo", 5, peer::no_connection),
+    method("Server_EnumPlayersAndGroups", 4, peer::no_connection),
+    method("Server_EnumGroupMembers", 5, peer::no_connection),
+    method("Server_Close", 2, peer::close),
+    method("Server_DestroyClient", 5, peer::no_connection),
+    method("Server_ReturnBuffer", 3, peer::return_buffer),
+    method("Server_GetPlayerContext", 4, peer::no_connection),
+    method("Server_GetGroupContext", 4, peer::no_connection),
+    method("Server_GetCaps", 3, peer::get_caps),
+    method("Server_SetCaps", 3, peer::set_caps),
+    method("Server_SetSPCaps", 4, peer::sp_caps),
+    method("Server_GetSPCaps", 4, peer::sp_caps),
+    method("Server_GetConnectionInfo", 4, peer::no_connection),
+    method("Server_RegisterLobby", 4, peer::register_lobby),
 ];
 
 /// IDirectPlay8Peer's methods in their order.
@@ -237,6 +309,70 @@ const ADDRESS_METHODS: &[&str] = &[
     "Address_BuildFromDPADDRESS",
 ];
 
+/// IDirectPlay8Client's methods in their order.
+const CLIENT_METHODS: &[&str] = &[
+    "IUnknown_QueryInterface",
+    "IUnknown_AddRef",
+    "IUnknown_Release",
+    "Client_Initialize",
+    "Client_EnumServiceProviders",
+    "Client_EnumHosts",
+    "Client_CancelAsyncOperation",
+    "Client_Connect",
+    "Client_Send",
+    "Client_GetSendQueueInfo",
+    "Client_GetApplicationDesc",
+    "Client_SetClientInfo",
+    "Client_GetServerInfo",
+    "Client_GetServerAddress",
+    "Client_Close",
+    "Client_ReturnBuffer",
+    "Client_GetCaps",
+    "Client_SetCaps",
+    "Client_SetSPCaps",
+    "Client_GetSPCaps",
+    "Client_GetConnectionInfo",
+    "Client_RegisterLobby",
+];
+
+/// IDirectPlay8Server's methods in their order.
+const SERVER_METHODS: &[&str] = &[
+    "IUnknown_QueryInterface",
+    "IUnknown_AddRef",
+    "IUnknown_Release",
+    "Server_Initialize",
+    "Server_EnumServiceProviders",
+    "Server_CancelAsyncOperation",
+    "Server_GetSendQueueInfo",
+    "Server_GetApplicationDesc",
+    "Server_SetServerInfo",
+    "Server_GetClientInfo",
+    "Server_GetClientAddress",
+    "Server_GetLocalHostAddresses",
+    "Server_SetApplicationDesc",
+    "Server_Host",
+    "Server_SendTo",
+    "Server_CreateGroup",
+    "Server_DestroyGroup",
+    "Server_AddPlayerToGroup",
+    "Server_RemovePlayerFromGroup",
+    "Server_SetGroupInfo",
+    "Server_GetGroupInfo",
+    "Server_EnumPlayersAndGroups",
+    "Server_EnumGroupMembers",
+    "Server_Close",
+    "Server_DestroyClient",
+    "Server_ReturnBuffer",
+    "Server_GetPlayerContext",
+    "Server_GetGroupContext",
+    "Server_GetCaps",
+    "Server_SetCaps",
+    "Server_SetSPCaps",
+    "Server_GetSPCaps",
+    "Server_GetConnectionInfo",
+    "Server_RegisterLobby",
+];
+
 /// The vtables, by their places in this list, which `Class` numbers.
 static VTABLES: &[Vtable] = &[
     Vtable {
@@ -251,6 +387,14 @@ static VTABLES: &[Vtable] = &[
         name: "IDirectPlay8Address",
         methods: ADDRESS_METHODS,
     },
+    Vtable {
+        name: "IDirectPlay8Client",
+        methods: CLIENT_METHODS,
+    },
+    Vtable {
+        name: "IDirectPlay8Server",
+        methods: SERVER_METHODS,
+    },
 ];
 
 /// The kinds of object, by their vtables' places in VTABLES.
@@ -260,16 +404,26 @@ pub enum Class {
     Peer = 0,
     Lobbied = 1,
     Address = 2,
+    Client = 3,
+    Server = 4,
 }
 
 impl Class {
-    const ALL: [Class; 3] = [Class::Peer, Class::Lobbied, Class::Address];
+    const ALL: [Class; 5] = [
+        Class::Peer,
+        Class::Lobbied,
+        Class::Address,
+        Class::Client,
+        Class::Server,
+    ];
 
     fn iid(self) -> Guid {
         match self {
             Class::Peer => IID_PEER,
             Class::Lobbied => IID_LOBBIED,
             Class::Address => IID_ADDRESS,
+            Class::Client => IID_CLIENT,
+            Class::Server => IID_SERVER,
         }
     }
 
@@ -314,6 +468,30 @@ const IID_ADDRESS: Guid = Guid::new(
     0x4C8A,
     [0x9D, 0xB3, 0x82, 0x83, 0x0A, 0x7F, 0xEB, 0x31],
 );
+const CLSID_CLIENT: Guid = Guid::new(
+    0x743F_1DC6,
+    0x5ABA,
+    0x429F,
+    [0x8B, 0xDF, 0xC5, 0x4D, 0x03, 0x25, 0x3D, 0xC2],
+);
+const IID_CLIENT: Guid = Guid::new(
+    0x5102_DACD,
+    0x241B,
+    0x11D3,
+    [0xAE, 0xA7, 0x00, 0x60, 0x97, 0xB0, 0x14, 0x11],
+);
+const CLSID_SERVER: Guid = Guid::new(
+    0xDA82_5E1B,
+    0x6830,
+    0x43D7,
+    [0x83, 0x5D, 0x0B, 0x5A, 0xD8, 0x29, 0x56, 0xA2],
+);
+const IID_SERVER: Guid = Guid::new(
+    0x5102_DACE,
+    0x241B,
+    0x11D3,
+    [0xAE, 0xA7, 0x00, 0x60, 0x97, 0xB0, 0x14, 0x11],
+);
 
 /// The classes CoCreateInstance makes of DPNET's (com.rs).
 pub static CLASSES: &[com::Class] = &[
@@ -334,6 +512,18 @@ pub static CLASSES: &[com::Class] = &[
         dll: "DPNET.DLL",
         name: "DirectPlay8Address",
         create: create_address,
+    },
+    com::Class {
+        clsid: CLSID_CLIENT,
+        dll: "DPNET.DLL",
+        name: "DirectPlay8Client",
+        create: create_client,
+    },
+    com::Class {
+        clsid: CLSID_SERVER,
+        dll: "DPNET.DLL",
+        name: "DirectPlay8Server",
+        create: create_server,
     },
 ];
 
@@ -371,11 +561,11 @@ pub struct Object {
     pub refs: u32,
     /// Its `Class`.
     pub class: u8,
-    /// Whether a peer's or a lobbied application's Initialize ran, and
-    /// no Close since.
+    /// Whether the Initialize of a peer, a client, a server or a lobbied
+    /// application ran, and no Close since.
     pub initialized: bool,
-    /// A peer's DPN_CAPS after its size: flags, connect timeout, connect
-    /// retries, time until keep-alive.
+    /// The DPN_CAPS of a peer, a client or a server after its size:
+    /// flags, connect timeout, connect retries, time until keep-alive.
     pub caps: [u32; 4],
     /// An address's components, in the order they were added, and its
     /// user data.
@@ -563,6 +753,14 @@ fn create_address(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
     create(cpu, Class::Address, iid, out)
 }
 
+fn create_client(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
+    create(cpu, Class::Client, iid, out)
+}
+
+fn create_server(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
+    create(cpu, Class::Server, iid, out)
+}
+
 /// DirectPlay8Create(iid, out, outer): an object of the class whose
 /// interface `iid` is, as DirectX 8.1's DPNET.DLL exports it besides
 /// its classes. An IID of no class of DPNET's fails with
@@ -694,8 +892,8 @@ mod tests {
             }
         }
         let lengths: Vec<usize> = VTABLES.iter().map(|v| v.methods.len()).collect();
-        // IUnknown's 3, then the interfaces' own 34, 9 and 19.
-        assert_eq!(lengths, [37, 12, 22]);
+        // IUnknown's 3, then the interfaces' own 34, 9, 19, 19 and 31.
+        assert_eq!(lengths, [37, 12, 22, 22, 34]);
     }
 
     #[test]

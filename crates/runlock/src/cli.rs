@@ -261,30 +261,42 @@ fn status(opts: Options) -> i32 {
         println!("  free: no holders, nobody waiting");
     }
     for h in &holders {
-        let r = &h.record;
-        let mut line = format!(
-            "  pid {:<7} {:<9} {:<7} {:>6}  {}",
-            r.pid,
-            r.mode.as_str(),
-            match r.state {
-                crate::State::Waiting => "waiting",
-                crate::State::Holding => "holding",
-            },
-            crate::age(r.asked),
-            r.program
-        );
-        if let Some(name) = &r.name {
-            line += &format!(" ({})", name);
-        }
-        if let Some(addr) = &r.debug_server {
-            line += &format!("  debug server {}", addr);
-        }
-        if let Some(instance) = &r.instance {
-            line += &format!("  instance {}", instance);
-        }
-        println!("{}", line);
+        println!("{}", status_line(&h.record));
     }
     0
+}
+
+/// One holder's line in `status`. The time after the state is how long
+/// it has been in that state: a holder's since it got the lock, so that
+/// a hold isn't read as having lasted through the wait before it. A
+/// holder also shows when it asked; a record of protocol 1 has no time
+/// it got the lock, and shows `?`.
+fn status_line(r: &crate::Record) -> String {
+    let (state, since) = match r.state {
+        crate::State::Waiting => ("waiting", crate::age(r.asked)),
+        crate::State::Holding => ("holding", r.held.map_or("?".into(), crate::age)),
+    };
+    let mut line = format!(
+        "  pid {:<7} {:<9} {:<7} {:>6}  {}",
+        r.pid,
+        r.mode.as_str(),
+        state,
+        since,
+        r.program
+    );
+    if let Some(name) = &r.name {
+        line += &format!(" ({})", name);
+    }
+    if r.state == crate::State::Holding {
+        line += &format!("  asked {} ago", crate::age(r.asked));
+    }
+    if let Some(addr) = &r.debug_server {
+        line += &format!("  debug server {}", addr);
+    }
+    if let Some(instance) = &r.instance {
+        line += &format!("  instance {}", instance);
+    }
+    line
 }
 
 #[cfg(windows)]
@@ -457,6 +469,45 @@ mod tests {
 
     fn os(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn status_shows_how_long_a_holder_has_held() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut r = crate::Record {
+            protocol: crate::PROTOCOL,
+            pid: 7,
+            program: "rust-dos-lock".into(),
+            name: Some("build".into()),
+            mode: Mode::Shared,
+            state: crate::State::Holding,
+            asked: now - 1200,
+            held: Some(now - 5),
+            instance: None,
+            debug_server: None,
+        };
+        // It waited 20 minutes and has held for 5 seconds: the time after
+        // "holding" is the hold's.
+        let line = status_line(&r);
+        assert!(
+            line.contains("holding     5s  rust-dos-lock (build)"),
+            "{}",
+            line
+        );
+        assert!(line.contains("asked 20m00s ago"), "{}", line);
+        r.held = None;
+        assert!(
+            status_line(&r).contains("holding      ?"),
+            "{}",
+            status_line(&r)
+        );
+        r.state = crate::State::Waiting;
+        let line = status_line(&r);
+        assert!(line.contains("waiting 20m00s  rust-dos-lock"), "{}", line);
+        assert!(!line.contains("asked"), "{}", line);
     }
 
     #[test]
