@@ -55,6 +55,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: VTABLES,
+    resources: None,
 };
 
 const fn stdcall(
@@ -138,6 +139,7 @@ pub static DLL8: Dll = Dll {
     init: None,
     term: None,
     vtables: VTABLES8,
+    resources: None,
 };
 
 /// DINPUT8's functions. Append only (see `stubs`).

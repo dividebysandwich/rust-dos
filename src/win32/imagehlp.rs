@@ -19,6 +19,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: None,
 };
 
 const fn stdcall(

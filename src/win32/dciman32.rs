@@ -26,6 +26,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: None,
 };
 
 /// DCI's results (dciddi.h).
