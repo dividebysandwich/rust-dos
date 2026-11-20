@@ -3681,7 +3681,12 @@ fn set_cursor(cpu: &mut Cpu, hwnd: u32, wp: u32, lp: u32) -> Option<u32> {
 
 /// WM_KEYDOWN's work, after TVN_KEYDOWN (TREEVIEW_KeyDown).
 fn key_down(cpu: &mut Cpu, t: &mut Tree, key: u32, out: &mut Out) {
-    let ctrl = user32::input::get_async_key_state(cpu, &[VK_CONTROL]).unwrap_or(0) & 0x8000 != 0;
+    // A call from Rust: what it says of idle proofs holds for this
+    // message only as far as the message's own work does.
+    let state = crate::idle::nested(cpu, |cpu| {
+        user32::input::get_async_key_state(cpu, &[VK_CONTROL])
+    });
+    let ctrl = state.unwrap_or(0) & 0x8000 != 0;
     if ctrl {
         let (bar, code) = match key {
             VK_PRIOR => (SB_VERT, SB_PAGEUP),
