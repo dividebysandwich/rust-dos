@@ -871,6 +871,50 @@ fn a_windows_3_1_timegettime_loop_is_skipped() {
 }
 
 #[test]
+fn a_win16_loop_that_reads_the_time_in_two_places_is_skipped() {
+    // This Means War!'s briefing waits in a PeekMessage(PM_REMOVE) loop
+    // that calls GetTickCount from two places in every pass. The thunk
+    // starts KERNEL32's GetTickCount with the same 32-bit registers from
+    // both, which differ only in the 16-bit context the thunk keeps and
+    // in the return address on the 16-bit stack. The proof has to tell
+    // the two calls apart, or it takes the return address for a count
+    // and fails at the RETF that reads it.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("USER", 13).emit(&[0x8B, 0xF0]); // GetTickCount; mov si,ax
+    let top = code.here();
+    code.emit(&[0x1E]) // push ds
+        .push(0x10) // the MSG at DS:10h
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(1) // PM_REMOVE
+        .call("USER", 109) // PeekMessage
+        .emit(&[0xBB, 0x05, 0x00]) // mov bx,5
+        .call("USER", 13)
+        .emit(&[0x8B, 0xF8]) // mov di,ax
+        .emit(&[0xBB, 0x9A, 0xB1]) // mov bx,0B19Ah
+        .call("USER", 13)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_two_clock_reads";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, |_, _| {}) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+#[test]
 fn an_mfc_idle_loop_of_window_queries_is_skipped() {
     // Metal Marines' MFC message loop, which waits for 300 ms here: in
     // every pass Catch, PeekMessage finding nothing, GetActiveWindow,

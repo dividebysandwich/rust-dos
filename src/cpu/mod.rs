@@ -1028,6 +1028,7 @@ impl Cpu {
                 tags: self.fpu_tags,
             },
             shadow: self.irq_shadow,
+            win16: crate::win16::frames_of_running(self),
             tainted: false,
         }
     }
