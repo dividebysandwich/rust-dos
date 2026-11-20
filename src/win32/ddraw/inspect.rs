@@ -61,7 +61,7 @@ fn surface_info(
         },
         address: sf.bits,
         locked: sf.locked,
-        lost: sf.lost,
+        lost: sf.lost.get(),
         keys: (0..4)
             .filter(|&k| sf.key_set & 1 << k != 0)
             .map(|k| (KEY_NAMES[k], sf.keys[k].0, sf.keys[k].1))

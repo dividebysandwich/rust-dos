@@ -33,7 +33,7 @@ use crate::win32::screen;
 /// The surface `s` as the card's commands name it, its pixels in
 /// `format`: None if the card takes no such surface.
 fn card_surface(cpu: &Cpu, s: &Surface, format: Format) -> Option<format::Surface> {
-    if s.memory != surface::MEM_VIDEO || s.lost || s.compressed() {
+    if s.memory != surface::MEM_VIDEO || s.lost.get() || s.compressed() {
         return None;
     }
     let words = [s.bits, s.pitch, s.width, s.height, format.code()];
@@ -140,7 +140,7 @@ pub(super) fn copy(
         && from.right as i64 <= src.width as i64
         && from.bottom as i64 <= src.height as i64;
     let (source, origin) = if staged {
-        if !inside || src.lost || src.compressed() {
+        if !inside || src.lost.get() || src.compressed() {
             return false;
         }
         let Some(source) = stage(cpu, src, from, format) else {

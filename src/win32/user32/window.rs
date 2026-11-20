@@ -1864,15 +1864,18 @@ pub fn set_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if rect.left == x as i32 && rect.top == y as i32 {
         flags |= SWP_NOMOVE;
     }
-    let child = style & WS_CHILD != 0;
-    // A window already active in the foreground isn't activated again.
-    // The active window of a queue in the background is: the activation
-    // brings it to the foreground if SetForegroundWindow may, as when a
-    // program's message box made active behind the foreground (its
-    // SetFocus came first) is then shown. Hiding it adds nothing: Windows
-    // passes the flags as they were (WM_WINDOWPOSCHANGING of Wine's
+    // Windows adds no SWP_NOACTIVATE for a child: WM_WINDOWPOSCHANGING
+    // gets the caller's flags, and the child gets WM_CHILDACTIVATE unless
+    // they hold SWP_NOACTIVATE or SWP_HIDEWINDOW (msg.c's
+    // WmShowChildSeq_2 and WmReparentButtonSeq). A top-level window
+    // already active in the foreground isn't activated again. The active
+    // window of a queue in the background is: the activation brings it
+    // to the foreground if SetForegroundWindow may, as when a program's
+    // message box made active behind the foreground (its SetFocus came
+    // first) is then shown. Hiding it adds nothing: Windows passes the
+    // flags as they were (WM_WINDOWPOSCHANGING of Wine's
     // WmHideOverlappedSeq and WmSWP_HideOverlappedSeq).
-    if child || (state.foreground_window() == hwnd && flags & SWP_HIDEWINDOW == 0) {
+    if style & WS_CHILD == 0 && state.foreground_window() == hwnd && flags & SWP_HIDEWINDOW == 0 {
         flags |= SWP_NOACTIVATE;
     }
     let mut after = after;
@@ -2101,7 +2104,16 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW) == 0 && !child {
                     return Next::call(address_of("SetForegroundWindow"), &[hwnd], 4);
                 }
-                if child && flags & SWP_NOACTIVATE == 0 && flags & SWP_SHOWWINDOW != 0 {
+                // A child gets WM_CHILDACTIVATE instead, whether this
+                // shows it or only moves it or brings it to the top, as
+                // BringWindowToTop does (msg.c's WmReparentButtonSeq,
+                // recorded on Windows, has it for a SWP_NOSIZE move). An
+                // MDI child activates itself there (DefMDIChildProc):
+                // MFC's CMDIChildWnd shows a new child while its frame is
+                // still hidden, which ShowWindow leaves at WS_VISIBLE, and
+                // then brings it to the top, which makes it the active
+                // one that WM_MDIGETACTIVE returns.
+                if child && flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW) == 0 {
                     return send(hwnd, WM_CHILDACTIVATE, 0, 0, 4);
                 }
                 t.step = 4;

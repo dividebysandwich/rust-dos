@@ -227,7 +227,7 @@ pub struct Task16 {
 }
 
 /// A switch between a task's 16-bit and 32-bit code (thunk.rs).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Frame {
     /// 16-bit code called 32-bit code: its context, which goes on when
     /// that returns, and what is done with what it returns (`post`, a
@@ -342,6 +342,13 @@ pub fn current_task(cpu: &Cpu) -> Option<usize> {
     }
     let tid = current_tid(cpu)?;
     cpu.bus.win32.win16.tasks.iter().position(|t| t.tid == tid)
+}
+
+/// The running task's switches between 16-bit and 32-bit code: the
+/// contexts that go on when the code called returns, which the registers
+/// don't show (`Cpu::idle_key`). Empty outside a Win16 task.
+pub fn frames_of_running(cpu: &Cpu) -> Vec<Frame> {
+    current_task(cpu).map_or_else(Vec::new, |i| cpu.bus.win32.win16.tasks[i].frames.clone())
 }
 
 /// The running task: there is one.
