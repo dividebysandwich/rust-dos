@@ -1913,6 +1913,45 @@ pub fn set_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     task::start(cpu, TASK_SET_POS, vars, P_SCRATCH)
 }
 
+/// Whether SetWindowPos's `after` leaves `hwnd` where it already is
+/// among its siblings, so the call adds SWP_NOZORDER: HWND_TOP for the
+/// first sibling, HWND_BOTTOM for the last one that isn't topmost,
+/// HWND_TOPMOST for a topmost first sibling, HWND_NOTOPMOST for a window
+/// that isn't topmost, or the sibling that already comes before it.
+/// Windows decides this after WM_WINDOWPOSCHANGING, which still gets
+/// the caller's flags, so a call that changes nothing ends without
+/// WM_WINDOWPOSCHANGED (msg.c's WmSwitchNotMaximizedChild and
+/// WmCreateMDIchildVisibleSeq, recorded on Windows; Wine's
+/// fixup_swp_flags).
+fn zorder_unchanged(state: &State, hwnd: u32, after: u32, flags: u32) -> bool {
+    if flags & SWP_NOZORDER != 0 {
+        return false;
+    }
+    let Some(w) = state.window(hwnd) else {
+        return false;
+    };
+    let topmost = w.ex_style & WS_EX_TOPMOST != 0;
+    let siblings: &[u32] = state
+        .window(w.parent)
+        .map(|p| p.children.as_slice())
+        .unwrap_or_default();
+    let first = siblings.first() == Some(&hwnd);
+    match after {
+        HWND_TOP => first,
+        HWND_BOTTOM => !topmost && siblings.last() == Some(&hwnd),
+        HWND_TOPMOST => topmost && first,
+        HWND_NOTOPMOST => !topmost,
+        h => {
+            h == hwnd
+                || siblings
+                    .iter()
+                    .position(|&s| s == h)
+                    .and_then(|i| siblings.get(i + 1))
+                    == Some(&hwnd)
+        }
+    }
+}
+
 /// SetWindowPos's steps.
 pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     let hwnd = t.var(P_HWND);
@@ -1934,7 +1973,11 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if !user(cpu).is_window(hwnd) {
                     return Next::Done(FALSE);
                 }
-                let p = read_words(cpu, winpos, 7);
+                let mut p = read_words(cpu, winpos, 7);
+                if zorder_unchanged(user(cpu), hwnd, p[1], p[6]) {
+                    p[6] |= SWP_NOZORDER;
+                    cpu.bus.guest_write_32(winpos + 24, p[6]);
+                }
                 let flags = p[6];
                 let old = rect_var(t, P_OLD);
                 let (x, y, cx, cy) = (p[2] as i32, p[3] as i32, p[4] as i32, p[5] as i32);

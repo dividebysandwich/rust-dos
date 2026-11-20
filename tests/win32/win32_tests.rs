@@ -13682,6 +13682,123 @@ fn set_window_pos_without_changing_still_sends_changed_with_the_new_place() {
     assert_eq!(code, 0x7F, "the checks that failed: {:07b}", !code & 0x7F);
 }
 
+#[test]
+fn set_window_pos_to_where_a_window_already_is_sends_no_changed() {
+    // SetWindowPos that puts a window where it already is among its
+    // siblings adds SWP_NOZORDER after WM_WINDOWPOSCHANGING, so with
+    // SWP_NOSIZE | SWP_NOMOVE nothing changes and no
+    // WM_WINDOWPOSCHANGED comes: HWND_TOP for the first sibling,
+    // HWND_BOTTOM for the last, the sibling it already comes after,
+    // HWND_NOTOPMOST for a window that isn't topmost and HWND_TOPMOST for
+    // a topmost first one (msg.c's WmSwitchNotMaximizedChild, recorded on
+    // Windows; Wine's fixup_swp_flags). A real move still sends it.
+    const WM_WINDOWPOSCHANGING: i32 = 0x0046;
+    const WM_WINDOWPOSCHANGED: i32 = 0x0047;
+    const WS_CHILD: i32 = 0x4000_0000;
+    const SWP_NOSIZE: i32 = 0x0001;
+    const SWP_NOMOVE: i32 = 0x0002;
+    const SWP_NOACTIVATE: i32 = 0x0010;
+    const HWND_TOP: i32 = 0;
+    const HWND_BOTTOM: i32 = 1;
+    const HWND_TOPMOST: i32 = -1;
+    const HWND_NOTOPMOST: i32 = -2;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "SetWindowPos",
+    ];
+    // What the window procedure saw: WM_WINDOWPOSCHANGING's count at
+    // 0xA0 and WM_WINDOWPOSCHANGED's at 0xA4; the frame at 0xB8. A
+    // WNDCLASSA at 0xE0, its procedure put in by the code.
+    let mut data = child_data(&[(0x10, "Frame")]);
+    data.resize(0x110, 0);
+    data[0xF0..0xF4].copy_from_slice(&BASE.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        for (message, at) in [(WM_WINDOWPOSCHANGING, 0xA0), (WM_WINDOWPOSCHANGED, 0xA4)] {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), message)?;
+            a.jne(other)?;
+            a.inc(dword_ptr(l.at(at)))?;
+            a.set_label(&mut other)?;
+        }
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0xE4)), eax)?;
+        a.mov(dword_ptr(l.at(0xE0 + 36)), l.at(0x10) as i32)?;
+        a.push(l.at(0xE0) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        let class = l.at(0x10) as i32;
+        let instance = BASE as i32;
+        // The frame, then its children A (in ESI) and B (in EDI).
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(
+            a,
+            &[0, class, class, style, 0, 0, 200, 200, 0, 0, instance, 0],
+        )?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(dword_ptr(l.at(0xB8)), eax)?;
+        let style = WS_CHILD | WS_VISIBLE;
+        for (id, reg) in [(1, esi), (2, edi)] {
+            push_args(
+                a,
+                &[0, class, class, style, 0, 0, 50, 50, 0, id, instance, 0],
+            )?;
+            a.mov(eax, dword_ptr(l.at(0xB8)))?;
+            a.mov(dword_ptr(esp + 32), eax)?;
+            a.call(f("CreateWindowExA"))?;
+            a.mov(reg, eax)?;
+        }
+        let flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE;
+        // Calls of SetWindowPos(hwnd, after, 0, 0, 0, 0, flags).
+        let swp = |a: &mut CodeAssembler, hwnd: AsmRegister32, after: Option<i32>| {
+            push_args(a, &[0, 0, 0, 0, flags])?;
+            match after {
+                Some(after) => a.push(after)?,
+                None => a.push(esi)?,
+            }
+            a.push(hwnd)?;
+            a.call(f("SetWindowPos"))
+        };
+        // A first, B after it.
+        swp(a, esi, Some(HWND_TOP))?;
+        swp(a, edi, None)?;
+        a.xor(ebx, ebx)?;
+        a.mov(dword_ptr(l.at(0xA0)), 0)?;
+        a.mov(dword_ptr(l.at(0xA4)), 0)?;
+        // Each call where the window already is (None: after A):
+        // WM_WINDOWPOSCHANGING only.
+        let calls = [
+            (esi, Some(HWND_TOP)),
+            (edi, Some(HWND_BOTTOM)),
+            (edi, None),
+            (edi, Some(HWND_NOTOPMOST)),
+        ];
+        for (bit, (hwnd, after)) in calls.into_iter().enumerate() {
+            swp(a, hwnd, after)?;
+            all_equal(a, l, &[(0xA0, bit as i32 + 1), (0xA4, 0)], bit as u32)?;
+        }
+        // B to the top moves it: both messages.
+        swp(a, edi, Some(HWND_TOP))?;
+        all_equal(a, l, &[(0xA0, 5), (0xA4, 1)], 4)?;
+        // HWND_TOPMOST makes it topmost, a change; once more is none.
+        for bit in [5, 6] {
+            swp(a, edi, Some(HWND_TOPMOST))?;
+            all_equal(a, l, &[(0xA0, bit + 1), (0xA4, 2)], bit as u32)?;
+        }
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (code, _) = run("swp_already_there", program);
+    assert_eq!(code, 0x7F, "the checks that failed: {:07b}", !code & 0x7F);
+}
+
 /// Set bit `bit` of EBX if every dword at the data offsets in `checks`
 /// holds its value.
 fn all_equal(
