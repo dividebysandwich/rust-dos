@@ -1009,6 +1009,51 @@ fn an_mfc_idle_loop_of_window_queries_is_skipped() {
 }
 
 #[test]
+fn a_loop_that_polls_a_key_and_the_cursor_is_skipped() {
+    // The War of the Worlds' film player waits for each frame's time in
+    // a loop of timeGetTime and GetAsyncKeyState(VK_ESCAPE), and Shadow
+    // of the Horned Rat's screens call GetCursorPos in theirs (#1284):
+    // here all three, for 300 ms. With no key pressed and the mouse
+    // still, the two reads of the devices change nothing but the POINT
+    // written, so the passes are skipped as a PeekMessage loop's are.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607).emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    let top = code.here();
+    code.push(0x1B) // VK_ESCAPE
+        .call("USER", 249) // GetAsyncKeyState
+        .emit(&[0x1E]) // push ds
+        .push(0x10) // the POINT at DS:10h
+        .call("USER", 17) // GetCursorPos
+        .call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_async_key";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}
+  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+#[test]
 fn a_win16_loop_that_polls_the_cd_audio_mode_is_skipped_until_the_play_ends() {
     // This Means War!'s menu: the CD plays its music, and in every pass
     // the game asks the cdaudio device its mode with
