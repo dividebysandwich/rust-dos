@@ -109,6 +109,8 @@ const OPENGL32: &[&str] = &[
     "glTexCoord2f",
     "glIsTexture",
     "glDeleteTextures",
+    "glTexSubImage2D",
+    "glCopyTexSubImage2D",
 ];
 const GLU32: &[&str] = &[
     "gluBuild2DMipmaps",
@@ -195,6 +197,8 @@ const PIXEL_STOREI: usize = GL + 65;
 const TEX_COORD2F: usize = GL + 66;
 const IS_TEXTURE: usize = GL + 67;
 const DELETE_TEXTURES: usize = GL + 68;
+const TEX_SUB_IMAGE_2D: usize = GL + 69;
+const COPY_TEX_SUB_IMAGE_2D: usize = GL + 70;
 const GLU: usize = GL + OPENGL32.len();
 const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
@@ -3023,6 +3027,118 @@ fn a_display_list_keeps_texels_as_they_were_unpacked() {
     assert_eq!(pixel(&cpu, data, 48, 16), [0, 255, 0]);
     assert_eq!(pixel(&cpu, data, 16, 48), [0, 0, 255]);
     assert_eq!(pixel(&cpu, data, 48, 48), [255, 255, 255]);
+}
+
+#[test]
+fn sub_images_land_at_their_offsets() {
+    sub_images(Draws::Voodoo3);
+}
+
+#[test]
+fn sub_images_on_a_toadforce_land_at_their_offsets() {
+    sub_images(Draws::ToadForce);
+}
+
+/// glTexSubImage2D and glCopyTexSubImage2D write their texels into
+/// part of a level, row by row at the level's pitch, and leave the
+/// texels around them as they were: a black 4x4 texture gets a 2x2
+/// image at (1, 2) and a column of two texels copied from the blue
+/// color buffer at (3, 0). The quad drawn with it shows each texel 16
+/// pixels square.
+fn sub_images(card: Draws) {
+    const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
+    const SUB: u32 = TEXELS + 0x40;
+    let mut d = lists_data();
+    put(&mut d, TEXELS, [[0, 0, 0, 255u8]; 16].as_flattened());
+    let sub = [
+        [255, 0, 0, 255u8],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 255, 255],
+    ];
+    put(&mut d, SUB, sub.as_flattened());
+    let mut error_at = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(TEXTURE)])?;
+        let image = [
+            Arg::I(GL_TEXTURE_2D),
+            Arg::I(0),
+            Arg::I(GL_RGB),
+            Arg::I(4),
+            Arg::I(4),
+            Arg::I(0),
+            Arg::I(GL_RGBA),
+            Arg::I(GL_UNSIGNED_BYTE),
+            Arg::At(TEXELS),
+        ];
+        gl(a, l, TEX_IMAGE_2D, &image)?;
+        let part = [
+            Arg::I(GL_TEXTURE_2D),
+            Arg::I(0),
+            Arg::I(1),
+            Arg::I(2),
+            Arg::I(2),
+            Arg::I(2),
+            Arg::I(GL_RGBA),
+            Arg::I(GL_UNSIGNED_BYTE),
+            Arg::At(SUB),
+        ];
+        gl(a, l, TEX_SUB_IMAGE_2D, &part)?;
+        clear_blue(a, l)?;
+        let copy = [
+            Arg::I(GL_TEXTURE_2D),
+            Arg::I(0),
+            Arg::I(3),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(1),
+            Arg::I(2),
+        ];
+        gl(a, l, COPY_TEX_SUB_IMAGE_2D, &copy)?;
+        for filter in [GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER] {
+            let nearest = [Arg::I(GL_TEXTURE_2D), Arg::I(filter), Arg::I(GL_NEAREST)];
+            gl(a, l, TEX_PARAMETERI, &nearest)?;
+        }
+        gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_2D)])?;
+        let replace = [
+            Arg::I(GL_TEXTURE_ENV),
+            Arg::I(GL_TEXTURE_ENV_MODE),
+            Arg::I(GL_REPLACE),
+        ];
+        gl(a, l, TEX_ENVI, &replace)?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        for [x, y] in corners(WHOLE) {
+            let st = [x, y].map(|v| Arg::F((v + 1.0) / 2.0));
+            gl(a, l, TEX_COORD2F, &st)?;
+            gl(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        gl(a, l, END, &[])?;
+        read_into(a, l, PIXELS)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine_on("sub_images", card, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    card_drew(&cpu, card);
+    // Texel (x, y), the first row given the bottom one.
+    let texel = |x: u32, y: u32| pixel(&cpu, data, x * 16 + 8, y * 16 + 8);
+    let rows = [
+        [[0; 3], [0; 3], [0; 3], [0, 0, 255]],
+        [[0; 3], [0; 3], [0; 3], [0, 0, 255]],
+        [[0; 3], [255, 0, 0], [0, 255, 0], [0; 3]],
+        [[0; 3], [0, 0, 255], [255, 255, 255], [0; 3]],
+    ];
+    for (y, row) in rows.iter().enumerate() {
+        for (x, &rgb) in row.iter().enumerate() {
+            assert_eq!(texel(x as u32, y as u32), rgb, "texel ({x}, {y})");
+        }
+    }
 }
 
 /// Lists call lists 64 deep (GL_MAX_LIST_NESTING), and a call past
