@@ -1011,6 +1011,12 @@ impl SoundBlaster {
             // The 8051's memory.
             0xF9 if sb16 => self.read_buf.push_back(self.mem8051[self.params[0] as usize]),
             0xFA if sb16 => self.mem8051[self.params[0] as usize] = self.params[1],
+            // Media Vision's Jazz16 reports a DSP 3.xx and answers FAh with
+            // its ID. DMX (Doom, Heretic) sends FAh to a DSP 3.xx to find
+            // one and takes the card for a Jazz16 only when exactly one
+            // byte other than 0 comes back. Creative's DSP gives it no ID,
+            // and DMX resets the DSP and goes on as with any SB Pro.
+            0xFA => {}
             _ => log.push(format!("[SB] Unhandled DSP command {:02X}h", cmd)),
         }
     }
@@ -1079,6 +1085,28 @@ mod tests {
             sb.write(0x4, reg, &mut Vec::new());
             sb.write(0x5, 0x18, &mut Vec::new());
             assert_eq!(sb.read(0x5) == 0x18, kept, "mixer register {:02X}h", reg);
+        }
+    }
+
+    #[test]
+    fn creative_dsps_before_the_sb16_give_dmxs_jazz16_probe_no_id() {
+        for model in [SbModel::Sb2, SbModel::SbPro2] {
+            let config = SbConfig {
+                model,
+                ..SbConfig::default()
+            };
+            let mut sb = SoundBlaster::new(config, 0);
+            let mut log = Vec::new();
+            sb.write(0xC, 0xFA, &mut log);
+            assert!(log.is_empty(), "{:?}: {:?}", model, log);
+            assert_eq!(sb.read(0xE) & 0x80, 0, "{:?}: no byte to read", model);
+            // FAh takes no parameters: the next byte is a command.
+            sb.write(0xC, 0xE1, &mut log);
+            assert_eq!(
+                [sb.read(0xA), sb.read(0xA)],
+                <[u8; 2]>::from(model.dsp_version())
+            );
+            assert!(log.is_empty(), "{:?}: {:?}", model, log);
         }
     }
 
