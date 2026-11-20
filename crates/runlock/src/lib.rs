@@ -119,7 +119,7 @@
 //!
 //!    | Field | Value |
 //!    |---|---|
-//!    | `protocol` | 1 |
+//!    | `protocol` | the version the program implements: 2, or 1 for an older one |
 //!    | `pid` | the process ID |
 //!    | `program` | the program's name, as `rust-dos` or `rust-dos-lock` |
 //!    | `name` | a label (the wrapped command), or null |
@@ -1183,6 +1183,46 @@ mod tests {
         for t in [early, second, late] {
             t.join().unwrap();
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn takes_of_protocol_1_still_exclude_and_let_in() {
+        let dir = scratch("v1");
+        let take = |mode, wait_ms| take_with(&dir, &request(mode, wait_ms), None, |_| {});
+        // Creates the directory and the files.
+        drop(held(take(Mode::Shared, 0)));
+        let open = |name: &str| open_lock_file(&dir.join(name)).unwrap();
+        // A measurement of protocol 1: `gate` shared, then `lock`
+        // exclusive. Takes of this version wait for it, and leave nothing
+        // held when they give up.
+        let (gate, lock) = (open(GATE_FILE), open(LOCK_FILE));
+        gate.lock_shared().unwrap();
+        lock.lock().unwrap();
+        for mode in [Mode::Shared, Mode::Exclusive] {
+            match take(mode, 50) {
+                Err(Error::TimedOut { .. }) => {}
+                other => panic!("{:?} got past a measurement: {:?}", mode, other),
+            }
+        }
+        drop((lock, gate));
+        let measurement = held(take(Mode::Exclusive, 0));
+        // A shared take of protocol 1 finds `gate` held by a measurement
+        // of this version and stays out.
+        let gate = open(GATE_FILE);
+        assert!(!got(gate.try_lock()).unwrap());
+        drop(measurement);
+        // A shared run of protocol 1 holding `lock` keeps a measurement
+        // of this version out, and lets a shared take in.
+        let lock = open(LOCK_FILE);
+        lock.lock_shared().unwrap();
+        assert!(matches!(
+            take(Mode::Exclusive, 50),
+            Err(Error::TimedOut { .. })
+        ));
+        drop(held(take(Mode::Shared, 0)));
+        drop(lock);
+        drop(held(take(Mode::Exclusive, 0)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
