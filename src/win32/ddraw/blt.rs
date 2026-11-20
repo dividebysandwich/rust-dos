@@ -180,6 +180,25 @@ fn merge(bytes: usize, dst: &mut [u8], src: &[u8], src_key: Option<Key>, dst_key
     }
 }
 
+/// The pixels of `N` bytes of the row `src` that start at `columns`, one
+/// for each pixel of `dst`, copied there in turn.
+fn stretch_row_of<const N: usize>(dst: &mut [u8], src: &[u8], columns: &[usize]) {
+    let dst = dst.as_chunks_mut::<N>().0;
+    for (d, &at) in dst.iter_mut().zip(columns) {
+        *d = src[at..at + N].try_into().unwrap();
+    }
+}
+
+/// `stretch_row_of` for pixels of `bytes` bytes.
+fn stretch_row(bytes: usize, dst: &mut [u8], src: &[u8], columns: &[usize]) {
+    match bytes {
+        1 => stretch_row_of::<1>(dst, src, columns),
+        2 => stretch_row_of::<2>(dst, src, columns),
+        3 => stretch_row_of::<3>(dst, src, columns),
+        _ => stretch_row_of::<4>(dst, src, columns),
+    }
+}
+
 /// The runs of the pixels of `N` bytes of the row `row` that aren't in
 /// the key, each given to `run` as the byte it starts at and the byte
 /// after its end.
@@ -396,20 +415,34 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     let keyless = dst_key.is_none() && src_key.is_none();
     let overwrite = keyless && (source.is_none() || unscaled);
     let unscaled_source = source.as_ref().filter(|_| unscaled).map(|(data, ..)| data);
-    // The source's pixel under the destination's (`x`, `y`), of a copy
+    // Of a copy that isn't unscaled, the byte in a row of the source
+    // where the pixel under each column of `area` starts, worked out once
+    // a blit rather than for each pixel.
+    let columns: Vec<usize> = match &source {
+        Some((_, _, sr)) if !unscaled => {
+            let sw = sr.width() as i64;
+            (area.left..area.right)
+                .map(|x| {
+                    let u = (x - op.dst.left) as i64;
+                    let u = if op.mirror_x { dw - 1 - u } else { u };
+                    (u * sw / dw) as usize * bytes
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    // The columns of the rectangle `r`.
+    let columns_of =
+        |r: &Rect| &columns[(r.left - area.left) as usize..(r.right - area.left) as usize];
+    // The row of the source under the destination's row `y`, of a copy
     // that isn't unscaled.
-    let sample = |data: &[u8], sr: &Rect, x: i32, y: i32| {
+    let source_span = |data: &[u8], sr: &Rect, y: i32| -> std::ops::Range<usize> {
         let (sw, sh) = (sr.width() as i64, sr.height() as i64);
-        let mut u = (x - op.dst.left) as i64;
-        let mut v = (y - op.dst.top) as i64;
-        if op.mirror_x {
-            u = dw - 1 - u;
-        }
-        if op.mirror_y {
-            v = dh - 1 - v;
-        }
-        let (sx, sy) = (u * sw / dw, v * sh / dh);
-        get(data, (sy * sw + sx) as usize * bytes, bytes)
+        let v = (y - op.dst.top) as i64;
+        let v = if op.mirror_y { dh - 1 - v } else { v };
+        let start = (v * sh / dh * sw) as usize * bytes;
+        debug_assert!(start + sw as usize * bytes <= data.len());
+        start..start + sw as usize * bytes
     };
     // A copy through a source key alone puts the source's pixels outside
     // the key over those of the destination, which it doesn't read: the
@@ -431,9 +464,8 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
                     let from = src_at(r.left, y);
                     &data[from..from + len]
                 } else {
-                    for (i, x) in (r.left..r.right).enumerate() {
-                        put(&mut row, i * bytes, bytes, sample(data, sr, x, y));
-                    }
+                    let from = &data[source_span(data, sr, y)];
+                    stretch_row(bytes, &mut row, from, columns_of(r));
                     &row
                 };
                 let at = offset(&d, r.left, y);
@@ -476,11 +508,20 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
                 merge(bytes, dst_row, &data[from..from + len], src_key, dst_key);
                 continue;
             }
-            for (i, x) in (r.left..r.right).enumerate() {
+            let from = source
+                .as_ref()
+                .map(|(data, _, sr)| &data[source_span(data, sr, y)]);
+            if let (Some(from), true) = (from, keyless) {
+                stretch_row(bytes, dst_row, from, columns_of(r));
+                continue;
+            }
+            // A fill has no source, and no columns.
+            let columns: &[usize] = if from.is_some() { columns_of(r) } else { &[] };
+            for i in 0..r.width() as usize {
                 let at = i * bytes;
-                let value = match &source {
-                    Some((data, _, sr)) => {
-                        let value = sample(data, sr, x, y);
+                let value = match from {
+                    Some(from) => {
+                        let value = get(from, columns[i], bytes);
                         if src_key.is_some_and(|k| k.holds(value)) {
                             continue;
                         }
@@ -844,6 +885,110 @@ mod tests {
                     _ => 0x1111,
                 };
                 assert_eq!(at(x, y), want, "pixel ({x}, {y})");
+            }
+        }
+    }
+
+    /// Stretched and mirrored copies between surfaces in system memory,
+    /// through no key, a source key and a destination key, and cut by a
+    /// clipper, take for each destination pixel the source pixel under
+    /// its top left corner: column `u * sw / dw` and row `v * sh / dh`
+    /// of the source's rectangle, `u` and `v` counted from the far side
+    /// when mirrored.
+    #[test]
+    fn stretched_copies_take_the_source_pixel_under_each_corner() {
+        const SRC: u32 = 0x1_0000;
+        const DST: u32 = 0x2_0000;
+        let (sw, sh) = (5u32, 3u32);
+        let (width, height) = (13u32, 7u32);
+        // Each source pixel different, one of them the key.
+        let source = |x: u32, y: u32| {
+            if (x, y) == (2, 1) {
+                KEY
+            } else {
+                0x100 + y * 16 + x
+            }
+        };
+        let fresh = |cpu: &mut Cpu| {
+            for y in 0..height {
+                for x in 0..width {
+                    let old = if (x + y) % 3 == 0 {
+                        KEY
+                    } else {
+                        0x7000 + y * 16 + x
+                    };
+                    cpu.bus
+                        .guest_write_16(DST + 2 * (y * width + x), old as u16);
+                }
+            }
+        };
+        let read = |cpu: &mut Cpu| -> Vec<u32> {
+            (0..width * height)
+                .map(|i| cpu.bus.guest_read_16(DST + 2 * i) as u32)
+                .collect()
+        };
+        let cases = [
+            // Destination, mirrored, source key, destination key, clip.
+            (Rect::new(1, 0, 12, 7), [false, false], false, false, None),
+            (Rect::new(0, 1, 13, 6), [true, true], false, false, None),
+            (Rect::new(2, 2, 5, 4), [false, false], true, false, None),
+            (Rect::new(0, 0, 8, 7), [true, false], true, false, None),
+            (Rect::new(1, 0, 12, 7), [false, true], false, true, None),
+            (
+                Rect::new(-3, 1, 9, 6),
+                [true, false],
+                false,
+                false,
+                Some(Rect::new(0, 2, 7, 6)),
+            ),
+        ];
+        for (n, (dst_rect, mirror, src_key, dst_key, clip)) in cases.into_iter().enumerate() {
+            let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+            for y in 0..sh {
+                for x in 0..sw {
+                    cpu.bus
+                        .guest_write_16(SRC + 2 * (y * sw + x), source(x, y) as u16);
+                }
+            }
+            let src = add(&mut cpu, surface(surface::MEM_SYSTEM, SRC, sw, sh));
+            let dst = add(&mut cpu, surface(surface::MEM_SYSTEM, DST, width, height));
+            fresh(&mut cpu);
+            let before = read(&mut cpu);
+            let op = Op {
+                dst: dst_rect,
+                src: Some((src, Rect::new(0, 0, sw as i32, sh as i32))),
+                src_key: src_key.then_some((KEY, KEY)),
+                dst_key: dst_key.then_some((KEY, KEY)),
+                mirror_x: mirror[0],
+                mirror_y: mirror[1],
+                clip: clip.map(Region::from_rect),
+                ..Default::default()
+            };
+            assert_eq!(run(&mut cpu, dst, &op), Ok(()), "case {n}");
+            let after = read(&mut cpu);
+            let (dw, dh) = (dst_rect.width() as i64, dst_rect.height() as i64);
+            let drawn = clip.unwrap_or(dst_rect);
+            for y in 0..height as i32 {
+                for x in 0..width as i32 {
+                    let i = (y as u32 * width + x as u32) as usize;
+                    let mut want = before[i];
+                    if dst_rect.contains(x, y) && drawn.contains(x, y) {
+                        let mut u = (x - dst_rect.left) as i64;
+                        let mut v = (y - dst_rect.top) as i64;
+                        if mirror[0] {
+                            u = dw - 1 - u;
+                        }
+                        if mirror[1] {
+                            v = dh - 1 - v;
+                        }
+                        let p = source((u * sw as i64 / dw) as u32, (v * sh as i64 / dh) as u32);
+                        let keyed = src_key && p == KEY || dst_key && before[i] != KEY;
+                        if !keyed {
+                            want = p;
+                        }
+                    }
+                    assert_eq!(after[i], want, "case {n}, pixel ({x}, {y})");
+                }
             }
         }
     }
