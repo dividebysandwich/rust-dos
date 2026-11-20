@@ -321,6 +321,8 @@ ole32/compobj: skipped compobj.c:1073
 ole32/compobj: skipped compobj.c:1117
 ole32/compobj: skipped compobj.c:1270
 ole32/compobj: skipped compobj.c:1328
+ole32/dragdrop: dragdrop: 16 tests executed (0 marked as todo, 0 failures), 0 skipped.
+ole32/dropreg: dropreg: 60 tests executed (0 marked as todo, 0 failures), 0 skipped.
 ole32/hglobalstream: hglobalstream: 93 tests executed (0 marked as todo, 0 failures), 0 skipped.
 ole32/propvariant: propvariant: 245 tests executed (0 marked as todo, 0 failures), 53 skipped.
 ole32/propvariant: skipped propvariant.c:167 (x52)

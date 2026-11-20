@@ -26,7 +26,7 @@ use crate::win32::task::{Next, Task};
 use crate::win32::user32::{current_pid, current_tid};
 
 const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
-const RPC_E_WRONG_THREAD: u32 = 0x8001_010E;
+pub(super) const RPC_E_WRONG_THREAD: u32 = 0x8001_010E;
 const CO_E_NOT_SUPPORTED: u32 = 0x8000_4021;
 const CO_E_CLASSSTRING: u32 = 0x8004_01F3;
 const CO_E_DLLNOTFOUND: u32 = 0x8004_01F8;
@@ -41,8 +41,8 @@ const CLSCTX_LOCAL_SERVER: u32 = 0x4;
 /// The methods of IUnknown and the others called here, by their places
 /// in the vtables.
 const QUERY_INTERFACE: u32 = 0;
-const ADD_REF: u32 = 1;
-const RELEASE: u32 = 2;
+pub(super) const ADD_REF: u32 = 1;
+pub(super) const RELEASE: u32 = 2;
 const CREATE_INSTANCE: u32 = 3;
 const STREAM_READ: u32 = 3;
 const STREAM_WRITE: u32 = 4;
@@ -181,7 +181,9 @@ pub fn ole_initialize(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         return Some(result);
     };
     a.ole += 1;
-    Some(if a.ole == 1 { S_OK } else { S_FALSE })
+    let first = a.ole == 1;
+    super::dragdrop::ole_initialized(cpu);
+    Some(if first { S_OK } else { S_FALSE })
 }
 
 /// CoUninitialize: the last one ends the thread's apartment, revoking
@@ -218,7 +220,7 @@ fn release_all(cpu: &mut Cpu, value: u32, objects: impl Iterator<Item = u32>) ->
     call_each(cpu, value, RELEASE, objects)
 }
 
-fn call_each(
+pub(super) fn call_each(
     cpu: &mut Cpu,
     value: u32,
     method: u32,
