@@ -601,6 +601,13 @@ impl Observe {
         {
             self.opaque_because("pass");
         }
+        // A failed proof ends at the next visit and looks at no blocks.
+        // Writes until then can be many (the built-in Windows loading an
+        // image of megabytes in one service call), and collecting them
+        // would sort ever more blocks at every write.
+        if self.failed.get().is_some() {
+            return;
+        }
         for chunk in start >> GEN_SHIFT..=(end - 1) >> GEN_SHIFT {
             self.chunks.push(chunk as u32);
         }
@@ -2056,5 +2063,22 @@ mod tests {
         assert!(!cpu.bus.observe.watching());
         assert!(cpu.bus.observe.enabled);
         assert_eq!(cpu.bus.observe.stats.arms, 7);
+    }
+
+    #[test]
+    fn a_proof_that_failed_on_its_blocks_collects_no_more() {
+        let mut o = Observe {
+            on: true,
+            ..Observe::default()
+        };
+        // A service writes 4 MB a dword at a time, as the built-in
+        // Windows maps a large image and writes its page table entries.
+        for addr in (0..4 << 20).step_by(4 << GEN_SHIFT) {
+            o.wrote(addr, addr + 4);
+        }
+        assert_eq!(o.failed.get(), Some("blocks"));
+        // The blocks it had when it failed, not one for every write since:
+        // each write would sort them all again.
+        assert!(o.chunks.len() <= 4 * CHUNKS + 1, "{} blocks", o.chunks.len());
     }
 }
