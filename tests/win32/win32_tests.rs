@@ -13688,10 +13688,10 @@ fn set_window_pos_to_where_a_window_already_is_sends_no_changed() {
     // siblings adds SWP_NOZORDER after WM_WINDOWPOSCHANGING, so with
     // SWP_NOSIZE | SWP_NOMOVE nothing changes and no
     // WM_WINDOWPOSCHANGED comes: HWND_TOP for the first sibling,
-    // HWND_BOTTOM for the last, the sibling it already comes after,
-    // HWND_NOTOPMOST for a window that isn't topmost and HWND_TOPMOST for
-    // a topmost first one (msg.c's WmSwitchNotMaximizedChild, recorded on
-    // Windows; Wine's fixup_swp_flags). A real move still sends it.
+    // HWND_BOTTOM for the last, the sibling it already comes after and
+    // HWND_TOPMOST for a topmost first one (msg.c's
+    // WmSwitchNotMaximizedChild, recorded on Windows; Wine's
+    // fixup_swp_flags). A real move still sends it.
     const WM_WINDOWPOSCHANGING: i32 = 0x0046;
     const WM_WINDOWPOSCHANGED: i32 = 0x0047;
     const WS_CHILD: i32 = 0x4000_0000;
@@ -13701,7 +13701,6 @@ fn set_window_pos_to_where_a_window_already_is_sends_no_changed() {
     const HWND_TOP: i32 = 0;
     const HWND_BOTTOM: i32 = 1;
     const HWND_TOPMOST: i32 = -1;
-    const HWND_NOTOPMOST: i32 = -2;
     let kernel32 = ["ExitProcess"];
     let user32 = [
         "RegisterClassA",
@@ -13777,7 +13776,6 @@ fn set_window_pos_to_where_a_window_already_is_sends_no_changed() {
             (esi, Some(HWND_TOP)),
             (edi, Some(HWND_BOTTOM)),
             (edi, None),
-            (edi, Some(HWND_NOTOPMOST)),
         ];
         for (bit, (hwnd, after)) in calls.into_iter().enumerate() {
             swp(a, hwnd, after)?;
@@ -13785,12 +13783,21 @@ fn set_window_pos_to_where_a_window_already_is_sends_no_changed() {
         }
         // B to the top moves it: both messages.
         swp(a, edi, Some(HWND_TOP))?;
-        all_equal(a, l, &[(0xA0, 5), (0xA4, 1)], 4)?;
+        all_equal(a, l, &[(0xA0, 4), (0xA4, 1)], 3)?;
         // HWND_TOPMOST makes it topmost, a change; once more is none.
-        for bit in [5, 6] {
+        for bit in [4, 5] {
             swp(a, edi, Some(HWND_TOPMOST))?;
             all_equal(a, l, &[(0xA0, bit + 1), (0xA4, 2)], bit as u32)?;
         }
+        // A after B, which it already comes after: B is topmost and A
+        // isn't, so the call is a change (Windows 98 SE makes a top-level
+        // window placed so topmost, win32_zorder_tests.rs).
+        a.push(flags)?;
+        push_args(a, &[0, 0, 0, 0])?;
+        a.push(edi)?;
+        a.push(esi)?;
+        a.call(f("SetWindowPos"))?;
+        all_equal(a, l, &[(0xA0, 7), (0xA4, 3)], 6)?;
         a.push(ebx)?;
         a.call(f("ExitProcess"))?;
         a.int3()
