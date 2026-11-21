@@ -730,8 +730,8 @@ state keeps, so a restored machine has the layout it was saved with.
 
 A Windows program can start a DOS program: WinExec, LoadModule,
 CreateProcessA, ShellExecute and the C runtime's spawn functions of an
-MZ file that is neither a PE file nor a Windows 3.1 program, a COM file
-or a batch file (`src/win32/dosvm.rs`). Setups do it to run a DOS
+MZ file that is neither a PE file nor a Windows 3.1 program, a COM file,
+a batch file or a PIF (`src/win32/dosvm.rs`). Setups do it to run a DOS
 installer or a sound setup program. Windows 98 runs the program in a
 virtual DOS machine of its own: the VMM gives it a copy of the first
 megabyte as DOS was when Windows started, with its own vector table,
@@ -765,6 +765,20 @@ path and the environment of the caller go in a block of their own. A
 batch file runs in `COMMAND.COM /C`. INT 2Fh AX=1600h and 160Ah answer
 from the program as in a DOS box: Windows 4.x in enhanced mode, 4.0 for
 Windows 95 and 4.10 for 98.
+
+The program starts in a folder the session keeps: CreateProcessA's
+lpCurrentDirectory, or the caller's current folder when it was started.
+ShellExecute changes to a shell link's working folder around its
+CreateProcessA and back before the service returns, so the folder has
+to be taken then. When the program ends, DOS's current drive and
+folders are put back. A PIF (`src/win32/pif.rs`) starts the program it
+names: its basic section gives the program (at 24h), the working
+folder (65h) and the parameters (A5h), and the "WINDOWS 386 3.0"
+record's parameters (at 28h in its data) take the place of the basic
+ones, as Wine's winevdm reads them. Arguments on the command line take
+the place of the PIF's parameters, and its working folder that of the
+caller's. The program is looked for in the working folder, the PIF's
+folder, and then where SearchPathA looks.
 
 This is what a full-screen DOS box does on Windows 98, but for the
 Windows programs, which run on there behind it. Running them side by

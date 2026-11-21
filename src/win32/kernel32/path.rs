@@ -43,7 +43,7 @@ const MAX_PATH: usize = 260;
 
 /// A Win32 path as DOS takes it: '/' as '\', and the dots and spaces that
 /// end a name gone, as Windows drops them ("Remove Me." is "Remove Me").
-pub(super) fn dos_path(path: &str) -> String {
+pub(crate) fn dos_path(path: &str) -> String {
     path.replace('/', "\\")
         .split('\\')
         .map(|part| match part.trim_end_matches(['.', ' ']) {

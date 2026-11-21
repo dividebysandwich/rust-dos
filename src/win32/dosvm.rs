@@ -1,7 +1,8 @@
 //! DOS programs a Windows program starts: WinExec, LoadModule,
 //! CreateProcessA, ShellExecute and the C runtime's spawn functions of
 //! a DOS program (an MZ file that is neither a PE file nor a Windows 3.1
-//! program, a COM file, or a batch file, which COMMAND.COM /C runs).
+//! program, a COM file, or a batch file, which COMMAND.COM /C runs), or
+//! of a PIF, which names the DOS program it starts (pif.rs).
 //!
 //! Windows 98 runs such a program in a virtual DOS machine of its own:
 //! its VMM gives the machine a copy of the first megabyte as DOS was
@@ -74,6 +75,8 @@ const VECTORS: usize = 0x400;
 /// The W32 section's version that added the DOS program a Windows
 /// program started.
 pub const DOSVM_SAVED: u16 = 85;
+/// The W32 section's version that added the folder it starts in.
+pub const DOSVM_DIRECTORY: u16 = 86;
 
 /// A DOS program a Windows program started.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -94,6 +97,11 @@ pub struct Session {
     psp: u16,
     /// DOS's current drive and directories before it started.
     directories: Directories,
+    /// The folder it starts in, a full path: its PIF's working folder,
+    /// CreateProcessA's lpCurrentDirectory, or the current folder of
+    /// its caller. ShellExecute has put back its own by the time the
+    /// program starts (`start_pending`).
+    directory: crate::savestate::Since<DOSVM_DIRECTORY, String>,
 }
 
 /// The DOS program waiting for the service that started it to return,
@@ -120,9 +128,10 @@ pub fn windows_version(cpu: &Cpu) -> (u8, u8) {
 /// Whether the file `file` at `path` is a DOS program, which a Windows
 /// program starts in a DOS machine: an MZ file that is neither a PE file
 /// nor a Windows 3.1 program (an NE file for OS/2, as Borland's DPMI16
-/// programs are, is one), a COM file, or a batch file.
+/// programs are, is one), a COM file, a batch file, or a PIF, which
+/// names the DOS program it starts.
 pub fn is_program(path: &str, file: &[u8]) -> bool {
-    if is_batch(path) {
+    if is_batch(path) || is_pif(path) {
         return true;
     }
     if rust_dos_pe::is_pe(file) || super::launcher::is_win16(file) {
@@ -134,6 +143,106 @@ pub fn is_program(path: &str, file: &[u8]) -> bool {
 /// Whether `path` names a batch file.
 fn is_batch(path: &str) -> bool {
     has_extension(path, "BAT")
+}
+
+/// Whether `path` names a PIF.
+fn is_pif(path: &str) -> bool {
+    has_extension(path, "PIF")
+}
+
+/// What a start of a DOS program runs: the program, the arguments that
+/// follow its name (from the blank before them) and the folder it starts
+/// in.
+struct Start {
+    program: String,
+    arguments: String,
+    directory: String,
+}
+
+/// The program the PIF at `path` starts (pif.rs), as Windows 98 starts
+/// it: the program the PIF names, looked for in the folder it starts
+/// in, the PIF's folder and then where SearchPathA looks, with
+/// `arguments` if there are any, else the PIF's parameters, in the
+/// PIF's working folder, else in `directory`. The error, as
+/// CreateProcessA gives it, when the PIF can't be read or the program
+/// isn't a DOS program that is there.
+fn open_pif(cpu: &mut Cpu, path: &str, arguments: &str, directory: String) -> Result<Start, u32> {
+    use super::kernel32::{files, path as paths};
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
+    const ERROR_BAD_EXE_FORMAT: u32 = 193;
+    let data = files::read_whole(cpu, path)?;
+    let Some(pif) = super::pif::parse(&data) else {
+        cpu.bus
+            .log_string(&format!("[W32] {} can't start: it isn't a PIF", path));
+        return Err(ERROR_BAD_EXE_FORMAT);
+    };
+    let mut directory = directory;
+    if !pif.directory.is_empty() {
+        let full = paths::full_path(cpu, &pif.directory);
+        if super::kernel32::is_directory(cpu, &full) {
+            directory = full;
+        } else {
+            cpu.bus.log_string(&format!(
+                "[W32] {}'s working folder {} isn't there: the program starts in {}",
+                path, pif.directory, directory
+            ));
+        }
+    }
+    let folder = path.rsplit_once('\\').map_or("", |(folder, _)| folder);
+    let dirs = format!("{};{}", directory, folder);
+    // A name without an extension is a program DOS finds as COMMAND.COM
+    // does: a COM file, an EXE file or a batch file.
+    let file = pif.program.rsplit(['\\', '/']).next().unwrap_or(&pif.program);
+    let names: Vec<String> = if file.contains('.') {
+        vec![pif.program.clone()]
+    } else {
+        ["COM", "EXE", "BAT"]
+            .iter()
+            .map(|e| format!("{}.{}", pif.program, e))
+            .collect()
+    };
+    let found = names.iter().find_map(|name| {
+        files::search(cpu, Some(&dirs), name).or_else(|| files::search(cpu, None, name))
+    });
+    let Some(found) = found else {
+        cpu.bus.log_string(&format!(
+            "[W32] {} can't start: its program {} isn't there",
+            path, pif.program
+        ));
+        return Err(ERROR_FILE_NOT_FOUND);
+    };
+    let program = cpu.program_path(&paths::dos_path(&found));
+    let file = cpu.read_program_file(&program).ok_or(ERROR_FILE_NOT_FOUND)?;
+    if is_pif(&program) || !is_program(&program, &file) {
+        cpu.bus.log_string(&format!(
+            "[W32] {} can't start: its program {} isn't a DOS program",
+            path, program
+        ));
+        return Err(ERROR_BAD_EXE_FORMAT);
+    }
+    let arguments = if !arguments.trim().is_empty() {
+        arguments.to_string()
+    } else if pif.parameters == "?" {
+        // Windows asks for the parameters in a dialog box.
+        cpu.bus.log_string(&format!(
+            "[W32] {} asks for parameters: the program starts without any",
+            path
+        ));
+        String::new()
+    } else if pif.parameters.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", pif.parameters)
+    };
+    cpu.bus.log_string(&format!(
+        "[W32] {} starts {}{} in {}",
+        path, program, arguments, directory
+    ));
+    Ok(Start {
+        program,
+        arguments,
+        directory,
+    })
 }
 
 fn has_extension(path: &str, extension: &str) -> bool {
@@ -150,21 +259,41 @@ pub struct Spawned {
 
 /// Start the DOS program at `path` with the command line's `arguments`
 /// (what follows the program's name, from the blank before them) and
-/// `environment`: it runs when the service that started it returns
-/// (`start_pending`). Its process's and thread's objects, which the
-/// session holds; or the error: ERROR_NOT_ENOUGH_MEMORY when there is
-/// no conventional memory for what EXEC is given.
+/// `environment`, in the folder `directory` or else the current one: it
+/// runs when the service that started it returns (`start_pending`). A
+/// PIF starts the program it names, with its settings (`open_pif`). Its
+/// process's and thread's objects, which the session holds; or the
+/// error: ERROR_NOT_ENOUGH_MEMORY when there is no conventional memory
+/// for what EXEC is given.
 pub fn spawn(
     cpu: &mut Cpu,
     path: &str,
     arguments: &str,
     environment: &[String],
+    directory: Option<&str>,
 ) -> Result<Spawned, u32> {
     const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
     const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
     if cpu.bus.win32.dosvm.pending.is_some() {
         return Err(ERROR_NOT_ENOUGH_MEMORY);
     }
+    // The folder is taken now: ShellExecute changes to a link's working
+    // folder around its CreateProcessA and back before the program
+    // starts.
+    let directory = match directory {
+        Some(directory) => super::kernel32::path::full_path(cpu, directory),
+        None => super::kernel32::files::current_directory(cpu),
+    };
+    let start = if is_pif(path) {
+        open_pif(cpu, path, arguments, directory)?
+    } else {
+        Start {
+            program: path.to_string(),
+            arguments: arguments.to_string(),
+            directory,
+        }
+    };
+    let (path, arguments) = (start.program.as_str(), start.arguments.as_str());
     // A batch file runs in COMMAND.COM, as Windows 98 runs one.
     let (program, tail) = if is_batch(path) {
         (
@@ -262,6 +391,7 @@ pub fn spawn(
         process,
         thread,
         block,
+        directory: crate::savestate::Since(start.directory.clone()),
         ..Session::default()
     });
     cpu.bus.log_string(&format!(
@@ -312,6 +442,17 @@ pub fn start_pending(cpu: &mut Cpu) {
     }
     session.psp = cpu.current_psp;
     session.directories = Directories::now(cpu);
+    // The program starts in its folder, and the one before is put back
+    // when it ends (`ended`), as on Windows 98 the DOS machine has
+    // current folders of its own.
+    if !session.directory.is_empty()
+        && super::kernel32::files::change_directory(cpu, &session.directory).is_err()
+    {
+        cpu.bus.log_string(&format!(
+            "[W32] {} can't start in {}: it isn't there",
+            session.path, *session.directory
+        ));
+    }
     cpu.current_psp = cpu.bus.win32.psp;
     let (ss, sp) = realmode::host_stack(cpu);
     let block = session.block;
@@ -405,5 +546,6 @@ crate::state_fields!(Session {
     desktop,
     psp,
     directories,
+    directory,
 });
 crate::state_fields!(State { pending, running });

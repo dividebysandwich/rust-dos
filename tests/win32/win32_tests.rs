@@ -2434,6 +2434,19 @@ fn start_programs(
     files: Vec<(&str, Vec<u8>)>,
     dirs: &[&str],
 ) -> u8 {
+    start_programs_in(test, parent_at, line, None, files, dirs)
+}
+
+/// `start_programs`, with `directory` as CreateProcessA's
+/// lpCurrentDirectory.
+fn start_programs_in(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    directory: Option<&str>,
+    files: Vec<(&str, Vec<u8>)>,
+    dirs: &[&str],
+) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",
@@ -2443,16 +2456,21 @@ fn start_programs(
     ];
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
     // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
-    // the exit code at 0xA0.
+    // the exit code at 0xA0, the directory at 0xB0.
     let mut data = line.as_bytes().to_vec();
     assert!(data.len() < 0x40);
-    data.resize(0xB0, 0);
+    data.resize(0xF0, 0);
     data[0x40] = 68;
+    if let Some(directory) = directory {
+        assert!(directory.len() < 0x40);
+        data[0xB0..0xB0 + directory.len()].copy_from_slice(directory.as_bytes());
+    }
     let parent = program(BASE, false, imports, &data, |a, l| {
         let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
         a.push(l.at(0x90) as i32)?;
         a.push(l.at(0x40) as i32)?;
-        for _ in 0..6 {
+        a.push(directory.map_or(0, |_| l.at(0xB0) as i32))?;
+        for _ in 0..5 {
             a.push(0)?;
         }
         a.push(l.at(0) as i32)?;
@@ -2559,6 +2577,46 @@ fn a_program_starts_a_batch_file() {
     assert_eq!(code & 0x0F, 0x01);
     let written = fs::read(base.join("MARK.TXT")).unwrap();
     assert_eq!(&written[2..], b" ARG");
+}
+
+/// CreateProcessA of a PIF: Windows 98 runs the program the PIF names,
+/// in the PIF's working folder, with the parameters of its 386 enhanced
+/// record in place of those of its basic section (as Wine's winevdm
+/// reads them). The program, a batch file named without a folder, is
+/// found in the PIF's folder, and the DOS program it starts writes
+/// MARK.TXT in its current folder with its command tail.
+#[test]
+fn a_program_starts_a_pif() {
+    let files = vec![
+        ("GAME\\Z.PIF", win16::pif("Z.BAT", "C:\\GAME\\RUN", "/B", "/E")),
+        ("GAME\\Z.BAT", b"@C:\\GAME\\MARK.COM %1\r\n".to_vec()),
+        ("GAME\\MARK.COM", win16::dos_folder_marker()),
+    ];
+    let line = "C:\\GAME\\Z.PIF";
+    let code = start_programs("child_pif", "T.EXE", line, files, &["GAME/RUN"]);
+    // CreateProcessA's TRUE and the wait's WAIT_OBJECT_0.
+    assert_eq!(code & 0x0F, 0x01);
+    let base = PathBuf::from("target/test_win32/child_pif");
+    let written = fs::read(base.join("GAME/RUN/MARK.TXT")).unwrap();
+    assert_eq!(written, b" /E");
+}
+
+/// CreateProcessA with lpCurrentDirectory starts a DOS program in that
+/// folder, and fails with ERROR_DIRECTORY for a folder that isn't
+/// there.
+#[test]
+fn a_dos_program_starts_in_the_current_directory_it_is_given() {
+    let files = vec![("MARK.COM", win16::dos_folder_marker())];
+    let line = "C:\\MARK.COM X";
+    let code = start_programs_in("child_dos_dir", "T.EXE", line, Some("C:\\SUB"), files, &["SUB"]);
+    // 5 from the program, WAIT_OBJECT_0 and TRUE.
+    assert_eq!(code, 0x51);
+    let base = PathBuf::from("target/test_win32/child_dos_dir");
+    assert_eq!(fs::read(base.join("SUB/MARK.TXT")).unwrap(), b" X");
+    assert!(!base.join("MARK.TXT").exists());
+    let files = vec![("MARK.COM", win16::dos_folder_marker())];
+    let code = start_programs_in("child_dos_no_dir", "T.EXE", line, Some("C:\\NONE"), files, &[]);
+    assert_eq!(code & 1, 0, "CreateProcessA succeeded");
 }
 
 #[test]

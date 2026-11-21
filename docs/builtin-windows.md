@@ -132,6 +132,11 @@ or in a window, while the Windows programs go on. Here it runs full
 screen, on the same drives, and the Windows programs wait until it
 ends; then the desktop comes back.
 
+Starting a PIF, as a Start menu icon of a DOS game does, runs the
+program the PIF names, in its working folder (or the icon's) and with
+its parameters. Its other settings (memory, window, close on exit)
+aren't used yet.
+
 ### Notepad
 
 `C:\WINDOWS\NOTEPAD.EXE` is there, read-only, as on Windows 98, and the
