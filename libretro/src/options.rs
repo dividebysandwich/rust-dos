@@ -276,6 +276,7 @@ fn definitions() -> Vec<Definition> {
                 ("sb16", "Sound Blaster 16"),
                 ("awe32", "Sound Blaster AWE32"),
                 ("sbpro2", "Sound Blaster Pro 2"),
+                ("sbpro1", "Sound Blaster Pro"),
                 ("sb2", "Sound Blaster 2.0"),
                 ("none", "None"),
             ]),

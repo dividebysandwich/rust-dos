@@ -923,6 +923,7 @@ impl Item {
             SbType => match sb.model {
                 SbModel::Sb16 => "SB16",
                 SbModel::Awe32 => "SB AWE32",
+                SbModel::SbPro1 => "SB Pro",
                 SbModel::SbPro2 => "SB Pro 2",
                 SbModel::Sb2 => "SB 2.0",
                 SbModel::Sb16Vibra => "SB16 ViBRA PnP",
