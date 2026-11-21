@@ -829,13 +829,13 @@ limit, so without a connection it goes on as it would with one:
   `dualopl2`. `auto` is two OPL2s with `sbtype=sbpro1` and an OPL3 with
   every other card. `dualopl2` is the first SB Pro's pair of OPL2s:
   base+0/1 writes the left chip, base+2/3 the right one, and base+8/9 and
-  388h to 38Bh both. The status at base+0, base+8 and 388h is the left
-  chip's, at base+2 and 38Ah the right chip's, as in DOSBox. It reads as
-  an OPL2's, so a program's OPL3 check fails as on the real card. The
-  left chip plays on the left output only and the right chip on the
-  right only, and the Sound Blaster mixer's FM volume sets each side. A
-  DOSBox configuration's `oplmode=dualopl2` imports as `dualopl2`, and
-  its `auto` as `auto`.
+  388h/389h both; 38Ah and 38Bh aren't there, as on that card. The status
+  at base+0, base+8 and 388h is the left chip's, at base+2 the right
+  chip's. It reads as an OPL2's, so a program's OPL3 check fails as on the
+  real card. The left chip plays on the left output only and the right
+  chip on the right only, and the Sound Blaster mixer's FM volume sets
+  each side. A DOSBox configuration's `oplmode=dualopl2` imports as
+  `dualopl2`, and its `auto` as `auto`.
 * `adlibgold` installs the AdLib Gold 1000: `true` or `false` (the
   default). It is an OPL3 with a control chip (mixer, EEPROM), a stereo
   processor (TDA8425), the optional surround module (YM7128B) and two

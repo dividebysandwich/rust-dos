@@ -344,8 +344,8 @@ impl Opl {
     }
 
     /// The status register read at the address port of `bank`: on a dual
-    /// OPL2 the right chip's for bank 1 (a Sound Blaster's base+2, and
-    /// 38Ah as DOSBox has it), else the one status (`read_status`).
+    /// OPL2 the right chip's for bank 1 (a Sound Blaster's base+2), else
+    /// the one status (`read_status`).
     pub fn read_status_of(&mut self, bank: usize, now_us: u64) -> u8 {
         match &mut self.right {
             Some(right) if bank == 1 => right.read_status(now_us),
@@ -356,7 +356,8 @@ impl Opl {
     /// The status register: IRQ (bit 7) and the timer flags (6, 5) that
     /// aren't masked. An OPL2 also reads 06h in the low bits, which is
     /// how programs tell the two apart. On a dual OPL2 this is the left
-    /// chip's, which the AdLib ports (388h, base+8) read, as in DOSBox.
+    /// chip's, which the AdLib ports (388h, base+8) read, as in DOSBox and
+    /// 86Box.
     pub fn read_status(&mut self, now_us: u64) -> u8 {
         self.update_flags(now_us);
         let mut status = 0;
@@ -461,14 +462,29 @@ impl Opl {
     }
 
     /// For a state saved before dual OPL2s were emulated, when the one chip
-    /// (an SB Pro 1's OPL3) took the right OPL2's writes in its second
-    /// bank: the right chip gets that bank's registers, and the left keeps
-    /// the first bank's. Nothing changes without a right chip.
+    /// (an SB Pro 1's OPL3) took the right OPL2's writes (base+2/3) in its
+    /// second bank, and the writes to both chips (base+8/9, 388h/389h) in
+    /// its first. With nothing in the second bank, the program wrote both
+    /// chips alike, so the right chip becomes a copy of the left, timers
+    /// and all; else the right chip gets that bank's registers, and the
+    /// left keeps the first bank's. Nothing changes without a right chip.
     pub fn right_from_bank_1(&mut self) {
-        if let Some(right) = &mut self.right {
-            right.regs[0] = std::mem::replace(&mut self.regs[1], [0; 256]);
-            right.active = self.active;
+        let Some(right) = &mut self.right else {
+            return;
+        };
+        let bank_1 = std::mem::replace(&mut self.regs[1], [0; 256]);
+        if bank_1.iter().all(|&reg| reg == 0) {
+            right.regs[0] = self.regs[0];
+            right.address[0] = self.address[0];
+            right.timer_value = self.timer_value;
+            right.timer_start = self.timer_start;
+            right.timer_mask = self.timer_mask;
+            right.timer_expired = self.timer_expired;
+        } else {
+            right.regs[0] = bank_1;
+            right.address[0] = self.address[1];
         }
+        right.active = self.active;
     }
 
     /// Load what `save_right` saved. A state of a machine with a dual
@@ -740,5 +756,73 @@ mod timer_tests {
         assert_eq!(opl.read_status(100), 0x06);
         assert_eq!(opl.read_status(159), 0x06);
         assert_eq!(opl.read_status(160), 0xC6);
+    }
+}
+
+#[cfg(test)]
+mod old_state_tests {
+    use super::*;
+
+    /// The loudest sample of the left and the right output.
+    fn loudest(opl: &mut Opl, frames: usize) -> (i32, i32) {
+        (0..frames)
+            .map(|_| opl.render())
+            .fold((0, 0), |(l, r), (fl, fr)| {
+                (l.max((fl as i32).abs()), r.max((fr as i32).abs()))
+            })
+    }
+
+    /// Channel 0 keyed on with a plain sine, as `regs` of a bank hold it.
+    fn note() -> [u8; 256] {
+        let mut regs = [0; 256];
+        for (reg, value) in [
+            (0x20, 0x21),
+            (0x23, 0x21),
+            (0x40, 0x10),
+            (0x60, 0xF0),
+            (0x63, 0xF0),
+            (0xC0, 0x31),
+            (0xA0, 0x44),
+            (0xB0, 0x32),
+        ] {
+            regs[reg] = value;
+        }
+        regs
+    }
+
+    /// A state of the old SB Pro 1, whose OPL3 took 388h's writes in its
+    /// first bank and base+2/3's in its second: what `load` leaves in a
+    /// dual OPL2's left chip.
+    fn loaded(bank_0: [u8; 256], bank_1: [u8; 256]) -> Opl {
+        let mut opl = Opl::with_chip(Chip::DualOpl2);
+        opl.regs = [bank_0, bank_1];
+        opl.active = true;
+        opl
+    }
+
+    /// An AdLib program's notes, which went through 388h to the first
+    /// bank only, play on both sides once the state loads.
+    #[test]
+    fn notes_written_to_both_chips_play_on_both_sides() {
+        let mut opl = loaded(note(), [0; 256]);
+        opl.timer_value[0] = 0xFF;
+        opl.timer_start[0] = Some(0);
+        opl.right_from_bank_1();
+        opl.after_load();
+        let (l, r) = loudest(&mut opl, 2000);
+        assert!(l > 1000 && r > 1000, "left {} right {}", l, r);
+        assert_eq!(opl.read_status_of(1, 100), 0xC6, "the right chip's timer");
+    }
+
+    /// Notes written to the right chip alone, which went to the second
+    /// bank, play on the right only.
+    #[test]
+    fn notes_written_to_the_right_chip_play_on_the_right() {
+        let mut opl = loaded([0; 256], note());
+        opl.right_from_bank_1();
+        opl.after_load();
+        let (l, r) = loudest(&mut opl, 2000);
+        assert!(l == 0 && r > 1000, "left {} right {}", l, r);
+        assert_eq!(opl.regs[1], [0; 256]);
     }
 }

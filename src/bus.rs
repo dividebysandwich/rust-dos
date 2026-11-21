@@ -2877,13 +2877,13 @@ impl Bus {
             p if self.adlib_gold_claims(p) => self.adlib_gold_write(p, value),
 
             // The FM chip: AdLib ports 388h/389h, and the OPL3's second
-            // register bank at 38Ah/38Bh. A dual OPL2 takes all four on
-            // both chips, as DOSBox has it.
+            // register bank at 38Ah/38Bh. The first SB Pro (CT1330), whose
+            // dual OPL2 this is, decodes only 388h/389h, and writes both
+            // chips there.
             0x388 => self.opl_address(0x388, value),
             0x389 => self.opl_data(None, value),
-            0x38A if self.opl.chip() == Chip::DualOpl2 => self.opl.write_address_all(value),
+            0x38A | 0x38B if self.opl.chip() == Chip::DualOpl2 => {}
             0x38A => self.opl.write_address(1, value),
-            0x38B if self.opl.chip() == Chip::DualOpl2 => self.opl_data(None, value),
             0x38B => self.opl_data(Some(1), value),
 
             // The Sound Blaster, 16 ports from its base.
@@ -3276,7 +3276,8 @@ impl Bus {
             // The FM chip's status register: timer flags, which programs
             // poll to detect an AdLib.
             0x388 => self.opl.read_status(self.clock.now_micros()),
-            0x38A => self.opl.read_status_of(1, self.clock.now_micros()),
+            0x38A if self.opl.chip() == Chip::DualOpl2 => 0xFF,
+            0x38A => self.opl.read_status(self.clock.now_micros()),
             0x389 | 0x38B => 0xFF,
 
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_read(p & 0xF),

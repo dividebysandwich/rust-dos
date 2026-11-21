@@ -93,6 +93,14 @@ fn each_chip_has_its_ports_and_its_status() {
         assert_eq!(bus.io_read(0x222) & 0xE0, 0xC0);
     }
 
+    // The CT1330 decodes 388h/389h only, as 86Box's SB Pro 1 has it:
+    // 38Ah/38Bh reach neither chip, and 38Ah reads nothing.
+    let mut bus = bus_with(Chip::DualOpl2);
+    run_timer_1(&mut bus, 0x38A);
+    assert_eq!(statuses(&mut bus), [0x06, 0x06, 0x06, 0x06]);
+    run_timer_1(&mut bus, 0x220);
+    assert_eq!(bus.io_read(0x38A), 0xFF);
+
     // An OPL3 keeps one status at every port.
     let mut bus = bus_with(Chip::Opl3);
     run_timer_1(&mut bus, 0x220);
