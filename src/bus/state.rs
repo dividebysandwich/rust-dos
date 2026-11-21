@@ -1058,6 +1058,7 @@ mod tests {
         (82, 0x7F8F_BB1B_6F82_7B99), // OLE32's drop targets and OleInitialize's processes
         (83, 0xE951_CEB4_D9AD_4CAC), // ExitWindowsExec's command line
         (84, 0x3A9C_D1FD_6601_1D0E), // the 16-bit OLE modules' state
+        (85, 0xD065_06B4_D1EE_C645), // the DOS program a Windows program started
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
