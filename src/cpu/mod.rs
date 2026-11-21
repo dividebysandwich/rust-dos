@@ -1687,6 +1687,14 @@ impl Cpu {
         // termination restored this to the shell's PSP; frontends that
         // explicitly close a running process have no parent context to do so.
         self.current_psp = 0;
+        // DOS keeps the verify flag as the last program set it (AH=2Eh),
+        // unless a system booted from a disk had the memory.
+        let verify_flag = crate::dos_data::address(crate::dos_data::VERIFY_FLAG);
+        let verify = if self.bus.boot.is_some() {
+            0
+        } else {
+            self.bus.read_8(verify_flag) & 1
+        };
         // Windows' keyboard ends with it.
         crate::bios::windows_keyboard(&mut self.bus, false);
         // A system booted from a disk turned the machine off: DOS starts
@@ -1868,6 +1876,7 @@ impl Cpu {
         crate::dos_files::write_table(&mut self.bus);
         crate::dos_data::write(&mut self.bus);
         crate::dos_data::write_driver_code(&mut self.bus);
+        self.bus.write_8(verify_flag, verify);
 
         self.bus.log_string("[SYSTEM] Shell Loaded. Ready.");
     }

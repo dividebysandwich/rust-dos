@@ -471,4 +471,11 @@ fn the_verify_flag_is_kept_between_set_and_get() {
         rust_dos::interrupts::int21::handle(&mut cpu);
         assert_eq!(get(&mut cpu), flag, "after AL={al:02X}");
     }
+
+    // It stays for the programs after the one that set it, as VERIFY ON
+    // in AUTOEXEC.BAT does on DOS.
+    cpu.set_reg16(Register::AX, 0x2E01);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    cpu.load_shell();
+    assert_eq!(get(&mut cpu), 1, "after the shell is loaded again");
 }
