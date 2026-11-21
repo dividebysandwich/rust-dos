@@ -22,11 +22,13 @@
 //! 95. This module is that system copy, and module.rs finds a built-in
 //! module before any file of the name.
 //!
+//! ITypeInfo's Invoke is in typelib_invoke.rs.
+//!
 //! What isn't here: CreateTypeLib and the ICreateTypeLib and
-//! ICreateTypeInfo interfaces, ITypeComp, ITypeInfo's Invoke,
-//! AddressOfMember and CreateInstance (E_NOTIMPL), and a dual
-//! interface's dispinterface side, which the 32-bit ITypeInfo makes:
-//! a 16-bit type's functions are those the library has for it.
+//! ICreateTypeInfo interfaces, ITypeComp, ITypeInfo's AddressOfMember
+//! and CreateInstance (E_NOTIMPL), and a dual interface's dispinterface
+//! side, which the 32-bit ITypeInfo makes: a 16-bit type's functions are
+//! those the library has for it.
 
 use super::builtin::{Def, cdecl, missing, rust, variable};
 use super::ole2::{self, ole_guid};
@@ -123,7 +125,12 @@ pub static TYPELIB: Def = Def {
         ),
         cdecl("ITypeInfo_GetImplTypeFlags", 0, "lwp", get_impl_type_flags),
         cdecl("ITypeInfo_GetIDsOfNames", 0, "lpwp", get_ids_of_names),
-        cdecl("ITypeInfo_Invoke", 0, "lllwllll", invoke),
+        cdecl(
+            "ITypeInfo_Invoke",
+            0,
+            "lllwllll",
+            super::typelib_invoke::invoke,
+        ),
         cdecl(
             "ITypeInfo_GetDocumentation",
             0,
@@ -207,17 +214,17 @@ const INFO_FIELDS: u32 = 12;
 
 /// Where a library comes from: the built-in STDOLE of a version, or the
 /// bytes of a file or of a module's TYPELIB resource.
-enum Source {
+pub(super) enum Source {
     Builtin(u16),
     Bytes(Vec<u8>),
 }
 
-fn page(cpu: &Cpu) -> CodePage {
+pub(super) fn page(cpu: &Cpu) -> CodePage {
     crate::win32::nls::ansi(cpu)
 }
 
 /// `s` in the ANSI code page.
-fn ansi(page: CodePage, s: &str) -> Vec<u8> {
+pub(super) fn ansi(page: CodePage, s: &str) -> Vec<u8> {
     let units: Vec<u16> = s.encode_utf16().collect();
     page.encode(&units)
 }
@@ -362,7 +369,7 @@ fn new_info(cpu: &mut Cpu, lib: u32, index: usize) -> u32 {
 
 /// The library object, the place and the library of the type object
 /// `info`.
-fn info_parts(cpu: &Cpu, info: u32) -> Option<(u32, usize, TypeLib)> {
+pub(super) fn info_parts(cpu: &Cpu, info: u32) -> Option<(u32, usize, TypeLib)> {
     let at = super::linear(cpu, info);
     if at == 0 {
         return None;
@@ -454,7 +461,7 @@ fn import_source(cpu: &mut Cpu, import: &ImportLib) -> Result<Source, u32> {
 
 /// The type the HREFTYPE `href` of the type at `index` of `m` refers to:
 /// its library, None for `m` itself, and its place.
-fn find_ref(
+pub(super) fn find_ref(
     cpu: &mut Cpu,
     m: &TypeLib,
     index: usize,
@@ -480,17 +487,18 @@ fn find_ref(
 }
 
 /// Look `find` up in the type at `index` of `m`, and if it isn't there in
-/// the first interface it implements or inherits from, and so on.
-fn search<T>(
+/// the first interface it implements or inherits from, and so on. `find`
+/// is given the library, the type's place in it and the type.
+pub(super) fn search<T>(
     cpu: &mut Cpu,
     m: TypeLib,
     index: usize,
-    find: impl Fn(&TypeLib, &TypeInfo) -> Option<T>,
+    find: impl Fn(&TypeLib, usize, &TypeInfo) -> Option<T>,
 ) -> Option<T> {
     let (mut m, mut index) = (m, index);
     for _ in 0..MAX_BASES {
         let t = m.infos.get(index)?;
-        if let Some(found) = find(&m, t) {
+        if let Some(found) = find(&m, index, t) {
             return Some(found);
         }
         let href = t.impls.first()?.href;
@@ -1163,7 +1171,7 @@ fn get_names(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_INVALIDARG);
     }
     let memid = memid as i32;
-    let found = search(cpu, m, index, |_, t| {
+    let found = search(cpu, m, index, |_, _, t| {
         if let Some(f) = t.funcs.iter().find(|f| f.memid == memid) {
             return Some(func_names(f));
         }
@@ -1254,7 +1262,7 @@ fn get_ids_of_names(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(first) = strings.first().cloned() else {
         return Some(S_OK);
     };
-    let member = search(cpu, m, index, |_, t| {
+    let member = search(cpu, m, index, |_, _, t| {
         if let Some(f) = t
             .funcs
             .iter()
@@ -1291,13 +1299,7 @@ fn get_ids_of_names(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(hr)
 }
 
-/// Invoke: calling a member through the type isn't done.
-fn invoke(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    log_not_implemented(cpu, "ITypeInfo::Invoke");
-    Some(E_NOTIMPL)
-}
-
-fn log_not_implemented(cpu: &mut Cpu, name: &str) {
+pub(super) fn log_not_implemented(cpu: &mut Cpu, name: &str) {
     cpu.bus.log_string(&format!(
         "[W16] TYPELIB: {name} isn't implemented: E_NOTIMPL"
     ));
@@ -1314,7 +1316,7 @@ fn info_get_documentation(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let memid = memid as i32;
     type Doc = (Option<String>, Option<String>, u32, Option<String>);
-    let found: Option<Doc> = search(cpu, m, index, |lib, t| {
+    let found: Option<Doc> = search(cpu, m, index, |lib, _, t| {
         let file = lib.help_file.clone();
         if memid == MEMBERID_NIL {
             return Some((t.name.clone(), t.doc.clone(), t.help_context, file));

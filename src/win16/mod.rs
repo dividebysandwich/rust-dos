@@ -38,6 +38,7 @@ pub(crate) mod resource;
 pub mod task;
 pub(crate) mod thunk;
 mod typelib;
+mod typelib_invoke;
 mod user;
 
 pub use builtin::{function_name, trap_name};

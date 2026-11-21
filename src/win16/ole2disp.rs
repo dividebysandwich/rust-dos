@@ -13,11 +13,25 @@
 //! (win32/oleaut32/variant.rs), the 16-bit values read into its and its
 //! results written back.
 //!
-//! BSTRs and safe arrays take their blocks from the built-in task
-//! allocator (ole2.rs). The real OLE2DISP takes them from the one
-//! CoGetMalloc gives, the program's own when it gave CoInitialize one;
-//! a program sees the difference only when it frees one of them with
-//! IMalloc::Free rather than with OLE2DISP's functions (#1586).
+//! BSTRs and safe arrays take their blocks from the task allocator, the
+//! one CoGetMalloc(MEMCTX_TASK) gives, as the OLE 2 Programmer's
+//! Reference has them: a program may free a BSTR or an array's data with
+//! IMalloc::Free, and ask its allocator's GetSize or DidAlloc about one.
+//! That is the program's own allocator when it gave CoInitialize or
+//! OleInitialize one, as Visual Basic 4's runtime does, and the built-in
+//! one of ole2.rs otherwise (before CoInitialize too, where the real
+//! OLE2DISP has no allocator).
+//!
+//! The program's allocator is 16-bit code, and no Rust frame lives
+//! across a call of 16-bit code (thunk.rs). A function that makes blocks
+//! (`Op`) runs again from its start each time the program's Alloc or
+//! Realloc returned, with the blocks those calls gave so far (`Heap`),
+//! until it needs no more; the frees and the interfaces' AddRef and
+//! Release calls it asked for are made after it ends, in order. So a
+//! function writes nothing the program can see before its last Alloc,
+//! except into the blocks it made, and reads nothing a free changes. A
+//! block goes to the allocator CoGetMalloc gives when it is freed, as
+//! the real OLE2DISP's do, whichever made it.
 //!
 //! Copyright 1998 Jean-Claude Cote
 //! Copyright 2003 Jon Griffiths
@@ -25,7 +39,9 @@
 
 use super::builtin::{Def, cdecl, missing, rust, variable};
 use super::ole2::{self, call_all, call_method, guid};
+use super::thunk;
 use crate::cpu::Cpu;
+use crate::dpmi::Context;
 use crate::win32::com::{E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, S_FALSE, S_OK};
 use crate::win32::oleaut32::variant::{Out, Val, change, format_g};
 
@@ -80,21 +96,21 @@ pub static OLE2DISP: Def = Def {
     file: "OLE2DISP.DLL",
     apis: &[
         missing("DllGetClassObject", 1),
-        rust("SysAllocString", 2, "p", sys_alloc_string),
-        rust("SysReAllocString", 3, "pp", sys_realloc_string),
-        rust("SysAllocStringLen", 4, "pw", sys_alloc_string_len),
-        rust("SysReAllocStringLen", 5, "ppw", sys_realloc_string_len),
-        rust("SysFreeString", 6, "l", sys_free_string),
+        rust("SysAllocString", 2, "p", with_heap),
+        rust("SysReAllocString", 3, "pp", with_heap),
+        rust("SysAllocStringLen", 4, "pw", with_heap),
+        rust("SysReAllocStringLen", 5, "ppw", with_heap),
+        rust("SysFreeString", 6, "l", with_heap),
         rust("SysStringLen", 7, "l", sys_string_len),
         rust("VariantInit", 8, "p", variant_init),
-        rust("VariantClear", 9, "p", variant_clear),
-        rust("VariantCopy", 10, "pp", variant_copy),
-        rust("VariantCopyInd", 11, "pp", variant_copy_ind),
-        rust("VariantChangeType", 12, "ppww", variant_change_type),
+        rust("VariantClear", 9, "p", with_heap),
+        rust("VariantCopy", 10, "pp", with_heap),
+        rust("VariantCopyInd", 11, "pp", with_heap),
+        rust("VariantChangeType", 12, "ppww", with_heap),
         missing("VariantTimeToDosDateTime", 13),
         missing("DosDateTimeToVariantTime", 14),
-        rust("SafeArrayCreate", 15, "wwp", safe_array_create),
-        rust("SafeArrayDestroy", 16, "l", safe_array_destroy),
+        rust("SafeArrayCreate", 15, "wwp", with_heap),
+        rust("SafeArrayDestroy", 16, "l", with_heap),
         rust("SafeArrayGetDim", 17, "l", safe_array_get_dim),
         rust("SafeArrayGetElemsize", 18, "l", safe_array_get_elemsize),
         rust("SafeArrayGetUBound", 19, "lwp", safe_array_get_ubound),
@@ -103,9 +119,9 @@ pub static OLE2DISP: Def = Def {
         rust("SafeArrayUnlock", 22, "l", safe_array_unlock),
         rust("SafeArrayAccessData", 23, "lp", safe_array_access_data),
         rust("SafeArrayUnaccessData", 24, "l", safe_array_unlock),
-        rust("SafeArrayGetElement", 25, "lpl", safe_array_get_element),
-        rust("SafeArrayPutElement", 26, "lpl", safe_array_put_element),
-        rust("SafeArrayCopy", 27, "lp", safe_array_copy),
+        rust("SafeArrayGetElement", 25, "lpl", with_heap),
+        rust("SafeArrayPutElement", 26, "lpl", with_heap),
+        rust("SafeArrayCopy", 27, "lp", with_heap),
         missing("DispGetParam", 28),
         rust("DispGetIDsOfNames", 29, "llwl", disp_get_ids_of_names),
         rust("DispInvoke", 30, "lllwllll", disp_invoke),
@@ -116,87 +132,77 @@ pub static OLE2DISP: Def = Def {
         missing("RegisterActiveObject", 35),
         missing("RevokeActiveObject", 36),
         missing("GetActiveObject", 37),
-        rust(
-            "SafeArrayAllocDescriptor",
-            38,
-            "wp",
-            safe_array_alloc_descriptor,
-        ),
-        rust("SafeArrayAllocData", 39, "l", safe_array_alloc_data),
-        rust(
-            "SafeArrayDestroyDescriptor",
-            40,
-            "l",
-            safe_array_destroy_descriptor,
-        ),
-        rust("SafeArrayDestroyData", 41, "l", safe_array_destroy_data),
-        rust("SafeArrayRedim", 42, "lp", safe_array_redim),
-        rust("VarI2FromI4", 43, "lp", var_from),
-        rust("VarI2FromR4", 44, "lp", var_from),
-        rust("VarI2FromR8", 45, "llp", var_from),
-        rust("VarI2FromCy", 46, "llp", var_from),
-        rust("VarI2FromDate", 47, "llp", var_from),
-        rust("VarI2FromStr", 48, "pllp", var_from),
+        rust("SafeArrayAllocDescriptor", 38, "wp", with_heap),
+        rust("SafeArrayAllocData", 39, "l", with_heap),
+        rust("SafeArrayDestroyDescriptor", 40, "l", with_heap),
+        rust("SafeArrayDestroyData", 41, "l", with_heap),
+        rust("SafeArrayRedim", 42, "lp", with_heap),
+        rust("VarI2FromI4", 43, "lp", with_heap),
+        rust("VarI2FromR4", 44, "lp", with_heap),
+        rust("VarI2FromR8", 45, "llp", with_heap),
+        rust("VarI2FromCy", 46, "llp", with_heap),
+        rust("VarI2FromDate", 47, "llp", with_heap),
+        rust("VarI2FromStr", 48, "pllp", with_heap),
         missing("VarI2FromDisp", 49),
-        rust("VarI2FromBool", 50, "wp", var_from),
-        rust("VarI4FromI2", 51, "wp", var_from),
-        rust("VarI4FromR4", 52, "lp", var_from),
-        rust("VarI4FromR8", 53, "llp", var_from),
-        rust("VarI4FromCy", 54, "llp", var_from),
-        rust("VarI4FromDate", 55, "llp", var_from),
-        rust("VarI4FromStr", 56, "pllp", var_from),
+        rust("VarI2FromBool", 50, "wp", with_heap),
+        rust("VarI4FromI2", 51, "wp", with_heap),
+        rust("VarI4FromR4", 52, "lp", with_heap),
+        rust("VarI4FromR8", 53, "llp", with_heap),
+        rust("VarI4FromCy", 54, "llp", with_heap),
+        rust("VarI4FromDate", 55, "llp", with_heap),
+        rust("VarI4FromStr", 56, "pllp", with_heap),
         missing("VarI4FromDisp", 57),
-        rust("VarI4FromBool", 58, "wp", var_from),
-        rust("VarR4FromI2", 59, "wp", var_from),
-        rust("VarR4FromI4", 60, "lp", var_from),
-        rust("VarR4FromR8", 61, "llp", var_from),
-        rust("VarR4FromCy", 62, "llp", var_from),
-        rust("VarR4FromDate", 63, "llp", var_from),
-        rust("VarR4FromStr", 64, "pllp", var_from),
+        rust("VarI4FromBool", 58, "wp", with_heap),
+        rust("VarR4FromI2", 59, "wp", with_heap),
+        rust("VarR4FromI4", 60, "lp", with_heap),
+        rust("VarR4FromR8", 61, "llp", with_heap),
+        rust("VarR4FromCy", 62, "llp", with_heap),
+        rust("VarR4FromDate", 63, "llp", with_heap),
+        rust("VarR4FromStr", 64, "pllp", with_heap),
         missing("VarR4FromDisp", 65),
-        rust("VarR4FromBool", 66, "wp", var_from),
-        rust("VarR8FromI2", 67, "wp", var_from),
-        rust("VarR8FromI4", 68, "lp", var_from),
-        rust("VarR8FromR4", 69, "lp", var_from),
-        rust("VarR8FromCy", 70, "llp", var_from),
-        rust("VarR8FromDate", 71, "llp", var_from),
-        rust("VarR8FromStr", 72, "pllp", var_from),
+        rust("VarR4FromBool", 66, "wp", with_heap),
+        rust("VarR8FromI2", 67, "wp", with_heap),
+        rust("VarR8FromI4", 68, "lp", with_heap),
+        rust("VarR8FromR4", 69, "lp", with_heap),
+        rust("VarR8FromCy", 70, "llp", with_heap),
+        rust("VarR8FromDate", 71, "llp", with_heap),
+        rust("VarR8FromStr", 72, "pllp", with_heap),
         missing("VarR8FromDisp", 73),
-        rust("VarR8FromBool", 74, "wp", var_from),
-        rust("VarDateFromI2", 75, "wp", var_from),
-        rust("VarDateFromI4", 76, "lp", var_from),
-        rust("VarDateFromR4", 77, "lp", var_from),
-        rust("VarDateFromR8", 78, "llp", var_from),
-        rust("VarDateFromCy", 79, "llp", var_from),
-        rust("VarDateFromStr", 80, "pllp", var_from),
+        rust("VarR8FromBool", 74, "wp", with_heap),
+        rust("VarDateFromI2", 75, "wp", with_heap),
+        rust("VarDateFromI4", 76, "lp", with_heap),
+        rust("VarDateFromR4", 77, "lp", with_heap),
+        rust("VarDateFromR8", 78, "llp", with_heap),
+        rust("VarDateFromCy", 79, "llp", with_heap),
+        rust("VarDateFromStr", 80, "pllp", with_heap),
         missing("VarDateFromDisp", 81),
-        rust("VarDateFromBool", 82, "wp", var_from),
-        rust("VarCyFromI2", 83, "wp", var_from),
-        rust("VarCyFromI4", 84, "lp", var_from),
-        rust("VarCyFromR4", 85, "lp", var_from),
-        rust("VarCyFromR8", 86, "llp", var_from),
-        rust("VarCyFromDate", 87, "llp", var_from),
-        rust("VarCyFromStr", 88, "pllp", var_from),
+        rust("VarDateFromBool", 82, "wp", with_heap),
+        rust("VarCyFromI2", 83, "wp", with_heap),
+        rust("VarCyFromI4", 84, "lp", with_heap),
+        rust("VarCyFromR4", 85, "lp", with_heap),
+        rust("VarCyFromR8", 86, "llp", with_heap),
+        rust("VarCyFromDate", 87, "llp", with_heap),
+        rust("VarCyFromStr", 88, "pllp", with_heap),
         missing("VarCyFromDisp", 89),
-        rust("VarCyFromBool", 90, "wp", var_from),
-        rust("VarBstrFromI2", 91, "wllp", var_from),
-        rust("VarBstrFromI4", 92, "lllp", var_from),
-        rust("VarBstrFromR4", 93, "lllp", var_from),
-        rust("VarBstrFromR8", 94, "llllp", var_from),
-        rust("VarBstrFromCy", 95, "llllp", var_from),
-        rust("VarBstrFromDate", 96, "llllp", var_from),
+        rust("VarCyFromBool", 90, "wp", with_heap),
+        rust("VarBstrFromI2", 91, "wllp", with_heap),
+        rust("VarBstrFromI4", 92, "lllp", with_heap),
+        rust("VarBstrFromR4", 93, "lllp", with_heap),
+        rust("VarBstrFromR8", 94, "llllp", with_heap),
+        rust("VarBstrFromCy", 95, "llllp", with_heap),
+        rust("VarBstrFromDate", 96, "llllp", with_heap),
         missing("VarBstrFromDisp", 97),
-        rust("VarBstrFromBool", 98, "wllp", var_from),
-        rust("VarBoolFromI2", 99, "wp", var_from),
-        rust("VarBoolFromI4", 100, "lp", var_from),
-        rust("VarBoolFromR4", 101, "lp", var_from),
-        rust("VarBoolFromR8", 102, "llp", var_from),
-        rust("VarBoolFromDate", 103, "llp", var_from),
-        rust("VarBoolFromCy", 104, "llp", var_from),
-        rust("VarBoolFromStr", 105, "pllp", var_from),
+        rust("VarBstrFromBool", 98, "wllp", with_heap),
+        rust("VarBoolFromI2", 99, "wp", with_heap),
+        rust("VarBoolFromI4", 100, "lp", with_heap),
+        rust("VarBoolFromR4", 101, "lp", with_heap),
+        rust("VarBoolFromR8", 102, "llp", with_heap),
+        rust("VarBoolFromDate", 103, "llp", with_heap),
+        rust("VarBoolFromCy", 104, "llp", with_heap),
+        rust("VarBoolFromStr", 105, "pllp", with_heap),
         missing("VarBoolFromDisp", 106),
         missing("DoInvokeMethod", 107),
-        rust("VariantChangeTypeEx", 108, "pplww", variant_change_type_ex),
+        rust("VariantChangeTypeEx", 108, "pplww", with_heap),
         rust("SafeArrayPtrOfIndex", 109, "lpp", safe_array_ptr_of_index),
         rust("SetErrorInfo", 110, "ll", set_error_info),
         rust("GetErrorInfo", 111, "lp", get_error_info),
@@ -213,23 +219,23 @@ pub static OLE2DISP: Def = Def {
                 [0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1, 0x19],
             ),
         ),
-        rust("VarUI1FromI2", 116, "wp", var_from),
-        rust("VarUI1FromI4", 117, "lp", var_from),
-        rust("VarUI1FromR4", 118, "lp", var_from),
-        rust("VarUI1FromR8", 119, "llp", var_from),
-        rust("VarUI1FromCy", 120, "llp", var_from),
-        rust("VarUI1FromDate", 121, "llp", var_from),
-        rust("VarUI1FromStr", 122, "pllp", var_from),
+        rust("VarUI1FromI2", 116, "wp", with_heap),
+        rust("VarUI1FromI4", 117, "lp", with_heap),
+        rust("VarUI1FromR4", 118, "lp", with_heap),
+        rust("VarUI1FromR8", 119, "llp", with_heap),
+        rust("VarUI1FromCy", 120, "llp", with_heap),
+        rust("VarUI1FromDate", 121, "llp", with_heap),
+        rust("VarUI1FromStr", 122, "pllp", with_heap),
         missing("VarUI1FromDisp", 123),
-        rust("VarUI1FromBool", 124, "wp", var_from),
-        rust("VarI2FromUI1", 125, "wp", var_from),
-        rust("VarI4FromUI1", 126, "wp", var_from),
-        rust("VarR4FromUI1", 127, "wp", var_from),
-        rust("VarR8FromUI1", 128, "wp", var_from),
-        rust("VarDateFromUI1", 129, "wp", var_from),
-        rust("VarCyFromUI1", 130, "wp", var_from),
-        rust("VarBstrFromUI1", 131, "wllp", var_from),
-        rust("VarBoolFromUI1", 132, "wp", var_from),
+        rust("VarUI1FromBool", 124, "wp", with_heap),
+        rust("VarI2FromUI1", 125, "wp", with_heap),
+        rust("VarI4FromUI1", 126, "wp", with_heap),
+        rust("VarR4FromUI1", 127, "wp", with_heap),
+        rust("VarR8FromUI1", 128, "wp", with_heap),
+        rust("VarDateFromUI1", 129, "wp", with_heap),
+        rust("VarCyFromUI1", 130, "wp", with_heap),
+        rust("VarBstrFromUI1", 131, "wllp", with_heap),
+        rust("VarBoolFromUI1", 132, "wp", with_heap),
         // No object of the program's can be unloaded while it runs.
         rust("DllCanUnloadNow", 133, "", s_false),
         // The error object's methods, which aren't exported.
@@ -272,21 +278,311 @@ fn s_false(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(S_FALSE)
 }
 
+// The task allocator.
+
+/// IMalloc's methods, by their place in the vtable.
+const IMALLOC_ALLOC: u32 = 3;
+const IMALLOC_REALLOC: u32 = 4;
+const IMALLOC_FREE: u32 = 5;
+/// IUnknown's.
+const ADD_REF: u32 = 1;
+const RELEASE: u32 = 2;
+
+/// Why a function's run stopped before its end.
+enum Stop {
+    /// To call the program's Alloc or Realloc: it runs again when that
+    /// returns (`Heap`).
+    Pending,
+    /// It failed with this HRESULT: the blocks it asked to free are
+    /// freed, but the AddRefs and Releases it asked for aren't made.
+    Fail(u32),
+}
+
+/// What a function that makes or frees blocks does: its value, or why
+/// it stopped.
+type Op = fn(&mut Cpu, &[u32], &mut Heap) -> Result<u32, Stop>;
+
+/// A call to make after a function ends: `method` of `object`, with the
+/// block `arg` for IMalloc::Free.
+#[derive(Clone, Copy)]
+struct Call {
+    object: u32,
+    method: u32,
+    arg: u32,
+}
+
+/// The task allocator, as one run of a function sees it.
+struct Heap {
+    /// The name of the function that runs.
+    name: &'static str,
+    /// The program's own allocator, or 0 for the built-in one.
+    app: u32,
+    /// What the program's Alloc and Realloc returned to the runs before,
+    /// in order, and how many of them this run took.
+    got: Vec<u32>,
+    taken: usize,
+    /// The method and arguments of the call this run stopped for.
+    ask: (u32, Vec<u32>),
+    /// The frees, AddRefs and Releases to make when it ends.
+    calls: Vec<Call>,
+}
+
+impl Heap {
+    /// The built-in allocator's, for `alloc_bstr` and `free_bstr`.
+    fn builtin() -> Heap {
+        Heap {
+            name: "",
+            app: 0,
+            got: Vec::new(),
+            taken: 0,
+            ask: (0, Vec::new()),
+            calls: Vec::new(),
+        }
+    }
+
+    /// What the program's `method` with `args` returned, or `Pending`
+    /// for the run to stop and call it.
+    fn answer(&mut self, method: u32, args: Vec<u32>) -> Result<u32, Stop> {
+        if let Some(&value) = self.got.get(self.taken) {
+            self.taken += 1;
+            return Ok(value);
+        }
+        self.ask = (method, args);
+        Err(Stop::Pending)
+    }
+
+    /// Whether the program's allocator has answered the next Alloc or
+    /// Realloc in a run before: this run then goes past it.
+    fn answered(&self) -> bool {
+        self.app != 0 && self.taken < self.got.len()
+    }
+
+    /// A block of `size` bytes: its 16:16 address, or 0.
+    fn alloc(&mut self, cpu: &mut Cpu, size: u32) -> Result<u32, Stop> {
+        if self.app == 0 {
+            return Ok(ole2::alloc(cpu, size));
+        }
+        self.answer(IMALLOC_ALLOC, vec![size])
+    }
+
+    /// Free the block at `p`: now with the built-in allocator, when the
+    /// function ends with the program's.
+    fn free(&mut self, cpu: &mut Cpu, p: u32) {
+        if p == 0 {
+            return;
+        }
+        if self.app == 0 {
+            ole2::free(cpu, p);
+            return;
+        }
+        self.calls.push(Call {
+            object: self.app,
+            method: IMALLOC_FREE,
+            arg: p,
+        });
+    }
+
+    /// The block at `p` with `size` bytes, its contents kept: where it
+    /// is now, or 0 (and the block as it was).
+    fn realloc(&mut self, cpu: &mut Cpu, p: u32, size: u32) -> Result<u32, Stop> {
+        if self.app == 0 {
+            return Ok(ole2::realloc(cpu, p, size));
+        }
+        self.answer(IMALLOC_REALLOC, vec![p, size])
+    }
+
+    /// Call AddRef or Release of the interface `object` when the function
+    /// ends.
+    fn method(&mut self, object: u32, method: u32) {
+        self.calls.push(Call {
+            object,
+            method,
+            arg: 0,
+        });
+    }
+}
+
+/// The function of OLE2DISP's called `name`, of those that make or free
+/// blocks.
+fn op_named(name: &str) -> Option<Op> {
+    Some(match name {
+        "SysAllocString" => sys_alloc_string,
+        "SysReAllocString" => sys_realloc_string,
+        "SysAllocStringLen" => sys_alloc_string_len,
+        "SysReAllocStringLen" => sys_realloc_string_len,
+        "SysFreeString" => sys_free_string,
+        "VariantClear" => variant_clear,
+        "VariantCopy" => variant_copy,
+        "VariantCopyInd" => variant_copy_ind,
+        "VariantChangeType" => variant_change_type,
+        "VariantChangeTypeEx" => variant_change_type_ex,
+        "SafeArrayCreate" => safe_array_create,
+        "SafeArrayDestroy" => safe_array_destroy,
+        "SafeArrayAllocDescriptor" => safe_array_alloc_descriptor,
+        "SafeArrayAllocData" => safe_array_alloc_data,
+        "SafeArrayDestroyDescriptor" => safe_array_destroy_descriptor,
+        "SafeArrayDestroyData" => safe_array_destroy_data,
+        "SafeArrayRedim" => safe_array_redim,
+        "SafeArrayGetElement" => safe_array_get_element,
+        "SafeArrayPutElement" => safe_array_put_element,
+        "SafeArrayCopy" => safe_array_copy,
+        n if n.starts_with("Var") && n.contains("From") => var_from,
+        _ => return None,
+    })
+}
+
+/// What `data` of a THEN_OLE2DISP frame starts with: a run stopped for
+/// the program's Alloc or Realloc, or the calls after a function ended.
+const THEN_RUN: u32 = 0;
+const THEN_CALLS: u32 = 1;
+
+/// The stub of a function that makes or frees blocks: run it with the
+/// task allocator.
+fn with_heap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let name = current_function(cpu);
+    let ordinal = OLE2DISP.apis.iter().find(|a| a.name == name)?.ordinal;
+    let mut ctx = Context::of(cpu);
+    run(cpu, ordinal, args, Vec::new(), &mut ctx, true)
+}
+
+/// Run the function with the ordinal `ordinal` and the arguments `args`,
+/// `got` what the program's allocator returned to its runs before, for
+/// the caller that goes on as `ctx`. `first` when it is the stub's run,
+/// whose value the stub returns; else it goes to `ctx`'s DX:AX.
+fn run(
+    cpu: &mut Cpu,
+    ordinal: u16,
+    args: &[u32],
+    got: Vec<u32>,
+    ctx: &mut Context,
+    first: bool,
+) -> Option<u32> {
+    let name = OLE2DISP.apis.iter().find(|a| a.ordinal == ordinal)?.name;
+    let op = op_named(name)?;
+    let app = ole2::this_task_or_new(cpu).app_malloc;
+    let mut heap = Heap {
+        name,
+        app,
+        got,
+        ..Heap::builtin()
+    };
+    match op(cpu, args, &mut heap) {
+        Ok(value) => finish(cpu, value, &heap.calls, ctx, first),
+        Err(Stop::Fail(e)) => {
+            heap.calls.retain(|c| c.method == IMALLOC_FREE);
+            finish(cpu, e, &heap.calls, ctx, first)
+        }
+        Err(Stop::Pending) => {
+            let mut data = vec![THEN_RUN, ordinal as u32, args.len() as u32];
+            data.extend_from_slice(args);
+            data.extend_from_slice(&heap.got);
+            let (method, margs) = std::mem::take(&mut heap.ask);
+            call_program(cpu, *ctx, app, method, &margs, data);
+            None
+        }
+    }
+}
+
+/// The function ended with `value`: make `calls` in turn, then return
+/// `value`.
+fn finish(
+    cpu: &mut Cpu,
+    value: u32,
+    calls: &[Call],
+    ctx: &mut Context,
+    first: bool,
+) -> Option<u32> {
+    for (i, c) in calls.iter().enumerate() {
+        if ole2::method_address(cpu, c.object, c.method) == 0 {
+            continue;
+        }
+        let mut data = vec![THEN_CALLS, value];
+        for rest in &calls[i + 1..] {
+            data.extend([rest.object, rest.method, rest.arg]);
+        }
+        let args: &[u32] = if c.method == IMALLOC_FREE {
+            &[c.arg]
+        } else {
+            &[]
+        };
+        call_program(cpu, *ctx, c.object, c.method, args, data);
+        return None;
+    }
+    if first {
+        Some(value)
+    } else {
+        ole2::dx_ax(ctx, value)
+    }
+}
+
+/// Call the method `method` of the program's 16-bit interface `object`
+/// with the dwords `args`, as C calls it; `then` gets what it returned,
+/// and `data`, and the caller goes on as `resume`.
+fn call_program(
+    cpu: &mut Cpu,
+    resume: Context,
+    object: u32,
+    method: u32,
+    args: &[u32],
+    data: Vec<u32>,
+) {
+    let target = ole2::method_address(cpu, object, method);
+    // C's order: the last argument pushed first, a dword's high word
+    // before its low one.
+    let mut words = Vec::new();
+    for &a in args.iter().rev() {
+        words.push((a >> 16) as u16);
+        words.push(a as u16);
+    }
+    words.push((object >> 16) as u16);
+    words.push(object as u16);
+    thunk::call16(cpu, target, &words, 0, resume, thunk::THEN_OLE2DISP, data);
+}
+
+/// A method of the program's that `run` or `finish` called returned
+/// `value`: the function's next run, or the next of its calls.
+pub(super) fn then(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
+    if data[0] == THEN_CALLS {
+        let (chunks, _) = data[2..].as_chunks::<3>();
+        let calls: Vec<Call> = chunks
+            .iter()
+            .map(|&[object, method, arg]| Call {
+                object,
+                method,
+                arg,
+            })
+            .collect();
+        return finish(cpu, data[1], &calls, ctx, false);
+    }
+    let count = data[2] as usize;
+    let args = &data[3..3 + count];
+    let mut got = data[3 + count..].to_vec();
+    got.push(value);
+    run(cpu, data[1] as u16, args, got, ctx, false)
+}
+
 // BSTRs.
 
 /// A BSTR of the bytes `text`: its 16:16 address, or 0.
-pub fn alloc_bstr(cpu: &mut Cpu, text: &[u8]) -> u32 {
+fn new_bstr(cpu: &mut Cpu, heap: &mut Heap, text: &[u8]) -> Result<u32, Stop> {
     let len = text.len() as u32;
-    let block = ole2::alloc(cpu, len + 5);
+    let block = heap.alloc(cpu, len + 5)?;
     if block == 0 {
-        return 0;
+        return Ok(0);
     }
     let at = super::linear(cpu, block);
     let mut bytes = len.to_le_bytes().to_vec();
     bytes.extend_from_slice(text);
     bytes.push(0);
     super::poke(cpu, at, &bytes);
-    block + 4
+    Ok(block + 4)
+}
+
+/// A BSTR of the bytes `text` from the built-in allocator: its 16:16
+/// address, or 0. For TYPELIB (#1598) and the error object (#1601),
+/// whose functions don't run with a `Heap` yet (#1625).
+pub fn alloc_bstr(cpu: &mut Cpu, text: &[u8]) -> u32 {
+    new_bstr(cpu, &mut Heap::builtin(), text).unwrap_or(0)
 }
 
 /// The bytes of the BSTR `bstr` (16:16), its length as the dword before
@@ -300,24 +596,31 @@ pub fn bstr_bytes(cpu: &Cpu, bstr: u32) -> Vec<u8> {
     super::peek_upto(cpu, at, len as usize)
 }
 
-fn free_bstr(cpu: &mut Cpu, bstr: u32) {
+/// Free the BSTR `bstr` of the built-in allocator's. For the error
+/// object (#1601) and TYPELIB, as `alloc_bstr`.
+pub(super) fn free_bstr(cpu: &mut Cpu, bstr: u32) {
+    drop_bstr(cpu, &mut Heap::builtin(), bstr);
+}
+
+/// Free the BSTR `bstr` when the function ends.
+fn drop_bstr(cpu: &mut Cpu, heap: &mut Heap, bstr: u32) {
     if bstr != 0 && bstr as u16 >= 4 {
-        ole2::free(cpu, bstr - 4);
+        heap.free(cpu, bstr - 4);
     }
 }
 
 /// SysAllocString(sz): a BSTR of the string, NULL for none.
-fn sys_alloc_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn sys_alloc_string(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     if args[0] == 0 {
-        return Some(0);
+        return Ok(0);
     }
     let text = super::string_bytes(cpu, args[0], 0xFFF0);
-    Some(alloc_bstr(cpu, &text))
+    new_bstr(cpu, heap, &text)
 }
 
 /// SysAllocStringLen(pch, cch): a BSTR of `cch` bytes from `pch`, of
 /// zeros when it is NULL.
-fn sys_alloc_string_len(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn sys_alloc_string_len(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     let len = args[1] as u16 as usize;
     let mut text = if args[0] == 0 {
         Vec::new()
@@ -325,31 +628,31 @@ fn sys_alloc_string_len(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         super::peek_upto(cpu, args[0], len)
     };
     text.resize(len, 0);
-    Some(alloc_bstr(cpu, &text))
+    new_bstr(cpu, heap, &text)
 }
 
 /// Put a new BSTR of `text` at `pbstr`, freeing the one there: TRUE, or
 /// FALSE (and the old one kept) when there is no memory.
-fn replace_bstr(cpu: &mut Cpu, pbstr: u32, text: &[u8]) -> u32 {
+fn replace_bstr(cpu: &mut Cpu, heap: &mut Heap, pbstr: u32, text: &[u8]) -> Result<u32, Stop> {
     if pbstr == 0 {
-        return 0;
+        return Ok(0);
     }
-    let new = alloc_bstr(cpu, text);
+    let new = new_bstr(cpu, heap, text)?;
     if new == 0 {
-        return 0;
+        return Ok(0);
     }
     let old = super::read_32(cpu, pbstr);
-    free_bstr(cpu, old);
+    drop_bstr(cpu, heap, old);
     super::write_32(cpu, pbstr, new);
-    1
+    Ok(1)
 }
 
-fn sys_realloc_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn sys_realloc_string(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     let text = super::string_bytes(cpu, args[1], 0xFFF0);
-    Some(replace_bstr(cpu, args[0], &text))
+    replace_bstr(cpu, heap, args[0], &text)
 }
 
-fn sys_realloc_string_len(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn sys_realloc_string_len(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     let len = args[2] as u16 as usize;
     let mut text = if args[1] == 0 {
         Vec::new()
@@ -357,12 +660,12 @@ fn sys_realloc_string_len(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         super::peek_upto(cpu, args[1], len)
     };
     text.resize(len, 0);
-    Some(replace_bstr(cpu, args[0], &text))
+    replace_bstr(cpu, heap, args[0], &text)
 }
 
-fn sys_free_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    free_bstr(cpu, args[0]);
-    Some(0)
+fn sys_free_string(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
+    drop_bstr(cpu, heap, args[0]);
+    Ok(0)
 }
 
 fn sys_string_len(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -379,7 +682,7 @@ fn units(bytes: &[u8]) -> Vec<u16> {
 }
 
 /// OLEAUT32's characters as ANSI text: "?" for one that isn't a byte.
-fn ansi(units: &[u16]) -> Vec<u8> {
+pub(super) fn ansi(units: &[u16]) -> Vec<u8> {
     units
         .iter()
         .map(|&u| u8::try_from(u).unwrap_or(b'?'))
@@ -427,27 +730,27 @@ fn read_variant(cpu: &Cpu, at: u32, depth: u32) -> Result<Val, u32> {
 }
 
 /// What a VARIANT of the type `vt` holding `value` needs released when
-/// it is cleared: its BSTR freed here, its interface's Release returned
-/// to be called, its array destroyed.
-fn clear_value(cpu: &mut Cpu, vt: u16, value: u32, calls: &mut Vec<(u32, u32)>) {
+/// it is cleared: its BSTR freed, its interface released, its array
+/// destroyed, when the function ends.
+fn clear_value(cpu: &mut Cpu, heap: &mut Heap, vt: u16, value: u32) {
     if vt & VT_BYREF != 0 {
         return;
     }
     if vt & VT_ARRAY != 0 {
-        destroy_array(cpu, value, calls);
+        destroy_array(cpu, heap, value);
         return;
     }
     match vt {
-        VT_BSTR => free_bstr(cpu, value),
-        VT_DISPATCH | VT_UNKNOWN if value != 0 => calls.push((value, 2)),
+        VT_BSTR => drop_bstr(cpu, heap, value),
+        VT_DISPATCH | VT_UNKNOWN if value != 0 => heap.method(value, RELEASE),
         _ => {}
     }
 }
 
-fn clear(cpu: &mut Cpu, at: u32, calls: &mut Vec<(u32, u32)>) {
+fn clear(cpu: &mut Cpu, heap: &mut Heap, at: u32) {
     let vt = super::read_16(cpu, at);
     let value = super::read_32(cpu, at + 8);
-    clear_value(cpu, vt, value, calls);
+    clear_value(cpu, heap, vt, value);
     super::poke(cpu, at, &[0; 16]);
 }
 
@@ -465,36 +768,35 @@ fn variant_init(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// VariantClear(pvarg): its BSTR freed, its interface released, its
 /// array destroyed, and the VARIANT VT_EMPTY.
-fn variant_clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn variant_clear(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     if args[0] == 0 {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     }
     let vt = super::read_16(cpu, args[0]);
     if !valid_vt(vt) {
-        return Some(DISP_E_BADVARTYPE);
+        return Ok(DISP_E_BADVARTYPE);
     }
-    let mut calls = Vec::new();
-    clear(cpu, args[0], &mut calls);
-    call_all(cpu, S_OK, &calls)
+    clear(cpu, heap, args[0]);
+    Ok(S_OK)
 }
 
 /// Put the value `out` in the VARIANT at `dest` (flat), after clearing
-/// it: the calls to make.
-fn store(cpu: &mut Cpu, dest: u32, out: Out, calls: &mut Vec<(u32, u32)>) -> Result<(), u32> {
+/// it.
+fn store(cpu: &mut Cpu, heap: &mut Heap, dest: u32, out: Out) -> Result<(), Stop> {
     let (vt, value) = match out {
         Out::Bits(vt, b) => (vt, b),
-        Out::Str(u) => match alloc_bstr(cpu, &ansi(&u)) {
-            0 => return Err(E_OUTOFMEMORY),
+        Out::Str(u) => match new_bstr(cpu, heap, &ansi(&u))? {
+            0 => return Err(Stop::Fail(E_OUTOFMEMORY)),
             s => (VT_BSTR, s as u64),
         },
         Out::Iface(vt, p) => {
             if p != 0 {
-                calls.push((p, 1));
+                heap.method(p, ADD_REF);
             }
             (vt, p as u64)
         }
     };
-    clear(cpu, dest, calls);
+    clear(cpu, heap, dest);
     super::write_16(cpu, dest, vt);
     super::poke(cpu, dest + 8, &value.to_le_bytes());
     Ok(())
@@ -502,23 +804,23 @@ fn store(cpu: &mut Cpu, dest: u32, out: Out, calls: &mut Vec<(u32, u32)>) -> Res
 
 /// VariantCopy(dest, src): a BSTR copied, an interface with a reference
 /// added, an array copied, a VT_BYREF pointer as it is.
-fn variant_copy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    copy(cpu, args[0], args[1], false)
+fn variant_copy(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
+    copy(cpu, heap, args[0], args[1], false)
 }
 
 /// VariantCopyInd(dest, src): a copy of what a VT_BYREF VARIANT points
 /// at, or VariantCopy.
-fn variant_copy_ind(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    copy(cpu, args[0], args[1], true)
+fn variant_copy_ind(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
+    copy(cpu, heap, args[0], args[1], true)
 }
 
-fn copy(cpu: &mut Cpu, dest: u32, src: u32, indirect: bool) -> Option<u32> {
+fn copy(cpu: &mut Cpu, heap: &mut Heap, dest: u32, src: u32, indirect: bool) -> Result<u32, Stop> {
     if dest == 0 || src == 0 {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     }
     let vt = super::read_16(cpu, src);
     if !valid_vt(vt) {
-        return Some(DISP_E_BADVARTYPE);
+        return Ok(DISP_E_BADVARTYPE);
     }
     let mut value = super::read_32(cpu, src + 8);
     let mut bits = super::peek(cpu, src + 8, 8).unwrap_or_else(|| vec![0; 8]);
@@ -527,61 +829,73 @@ fn copy(cpu: &mut Cpu, dest: u32, src: u32, indirect: bool) -> Option<u32> {
         base = vt & !VT_BYREF;
         let at = super::linear(cpu, value);
         if base == VT_VARIANT {
-            return copy(cpu, dest, at, false);
+            return copy(cpu, heap, dest, at, false);
         }
         bits = super::peek(cpu, at, 8).unwrap_or_else(|| vec![0; 8]);
         value = u32::from_le_bytes([bits[0], bits[1], bits[2], bits[3]]);
     } else if dest == src {
-        return Some(S_OK);
+        return Ok(S_OK);
     }
-    let mut calls = Vec::new();
     let new = if base & VT_BYREF != 0 {
         value
     } else if base & VT_ARRAY != 0 {
-        match copy_array(cpu, value, &mut calls) {
-            Ok(a) => a,
-            Err(e) => return Some(e),
-        }
+        copy_array(cpu, heap, value)?
     } else {
         match base {
-            VT_BSTR if value != 0 => match alloc_bstr(cpu, &bstr_bytes(cpu, value)) {
-                0 => return Some(E_OUTOFMEMORY),
+            VT_BSTR if value != 0 => match new_bstr(cpu, heap, &bstr_bytes(cpu, value))? {
+                0 => return Ok(E_OUTOFMEMORY),
                 s => s,
             },
             VT_DISPATCH | VT_UNKNOWN => {
                 if value != 0 {
-                    calls.push((value, 1));
+                    heap.method(value, ADD_REF);
                 }
                 value
             }
             _ => value,
         }
     };
-    clear(cpu, dest, &mut calls);
+    clear(cpu, heap, dest);
     super::write_16(cpu, dest, base);
     super::poke(cpu, dest + 8, &bits);
     super::write_32(cpu, dest + 8, new);
-    call_all(cpu, S_OK, &calls)
+    Ok(S_OK)
 }
 
-fn variant_change_type(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    change_type(cpu, args[0], args[1], args[2], args[3] as u16)
+fn variant_change_type(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
+    change_type(cpu, heap, args[0], args[1], args[2], args[3] as u16)
 }
 
 /// VariantChangeTypeEx(dest, src, lcid, flags, vt): the locale's own
 /// formats aren't taken; those of English (United States) are, as the
 /// built-in OLEAUT32's.
-fn variant_change_type_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    change_type(cpu, args[0], args[1], args[3], args[4] as u16)
+fn variant_change_type_ex(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
+    change_type(cpu, heap, args[0], args[1], args[3], args[4] as u16)
 }
 
 /// VariantChangeType(dest, src, flags, vt).
-fn change_type(cpu: &mut Cpu, dest: u32, src: u32, flags: u32, vt: u16) -> Option<u32> {
+fn change_type(
+    cpu: &mut Cpu,
+    heap: &mut Heap,
+    dest: u32,
+    src: u32,
+    flags: u32,
+    vt: u16,
+) -> Result<u32, Stop> {
     if dest == 0 || src == 0 {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     }
+    match changed(cpu, src, vt, flags) {
+        Ok(out) => store(cpu, heap, dest, out).map(|()| S_OK),
+        Err(e) => Ok(e),
+    }
+}
+
+/// The value of the VARIANT at `src` (flat) changed to the type `vt`,
+/// as VariantChangeType changes it.
+pub(super) fn changed(cpu: &Cpu, src: u32, vt: u16, flags: u32) -> Result<Out, u32> {
     let from = super::read_16(cpu, src);
-    let result = read_variant(cpu, src, 0).and_then(|v| {
+    read_variant(cpu, src, 0).and_then(|v| {
         // A VT_R4's text is "%.7G" of the single value.
         if vt == VT_BSTR
             && from & !VT_BYREF == VT_R4
@@ -590,12 +904,7 @@ fn change_type(cpu: &mut Cpu, dest: u32, src: u32, flags: u32, vt: u16) -> Optio
             return Ok(Out::Str(units(format_g(f, 7).as_bytes())));
         }
         change(&v, vt, flags & 0xFFFF)
-    });
-    let mut calls = Vec::new();
-    match result.and_then(|out| store(cpu, dest, out, &mut calls)) {
-        Ok(()) => call_all(cpu, S_OK, &calls),
-        Err(e) => Some(e),
-    }
+    })
 }
 
 // VarXxxFromYyy.
@@ -628,16 +937,18 @@ fn current_function(cpu: &mut Cpu) -> &'static str {
 /// function it is comes from its name; its arguments are as its
 /// signature reads them, a double or currency value as two dwords (the
 /// high one first).
-fn var_from(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let name = current_function(cpu);
-    let (to, from) = name
+fn var_from(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
+    let (to, from) = heap
+        .name
         .strip_prefix("Var")
         .and_then(|n| n.split_once("From"))
         .expect("a VarXxxFromYyy");
-    let (to, from) = (vt_named(to)?, vt_named(from)?);
+    let (Some(to), Some(from)) = (vt_named(to), vt_named(from)) else {
+        return Ok(E_INVALIDARG);
+    };
     let out = *args.last().expect("an out pointer");
     if out == 0 {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     }
     let qword = || (args[0] as u64) << 32 | args[1] as u64;
     let v = match from {
@@ -651,7 +962,7 @@ fn var_from(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         VT_BOOL => Val::Bool(args[0] as u16 != 0),
         _ => {
             if args[0] == 0 {
-                return Some(E_INVALIDARG);
+                return Ok(E_INVALIDARG);
             }
             Val::Str(units(&super::string_bytes(cpu, args[0], 0xFFF0)))
         }
@@ -678,17 +989,17 @@ fn var_from(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 _ => 8,
             };
             super::poke(cpu, out, &b.to_le_bytes()[..size]);
-            Some(S_OK)
+            Ok(S_OK)
         }
-        Ok(Out::Str(u)) => match alloc_bstr(cpu, &ansi(&u)) {
-            0 => Some(E_OUTOFMEMORY),
+        Ok(Out::Str(u)) => match new_bstr(cpu, heap, &ansi(&u))? {
+            0 => Ok(E_OUTOFMEMORY),
             s => {
                 super::write_32(cpu, out, s);
-                Some(S_OK)
+                Ok(S_OK)
             }
         },
-        Ok(Out::Iface(..)) => Some(DISP_E_TYPEMISMATCH),
-        Err(e) => Some(e),
+        Ok(Out::Iface(..)) => Ok(DISP_E_TYPEMISMATCH),
+        Err(e) => Ok(e),
     }
 }
 
@@ -786,52 +1097,77 @@ fn element(vt: u16) -> Option<(u16, u16)> {
 }
 
 /// A descriptor of `dims` dimensions: its 16:16 address, or 0.
-fn alloc_descriptor(cpu: &mut Cpu, dims: u16) -> u32 {
+fn alloc_descriptor(cpu: &mut Cpu, heap: &mut Heap, dims: u16) -> Result<u32, Stop> {
     let size = SA_HEADER + SA_BOUND * dims as u32;
-    let p = ole2::alloc(cpu, size);
+    let p = heap.alloc(cpu, size)?;
     if p != 0 {
         let at = super::linear(cpu, p);
         super::poke(cpu, at, &vec![0; size as usize]);
         super::write_16(cpu, at, dims);
     }
-    p
+    Ok(p)
 }
 
-/// The data of the array described at `a`, zeroed: false when there is
-/// no memory.
-fn alloc_data(cpu: &mut Cpu, a: &Array) -> bool {
-    let size = a.bytes();
-    let p = ole2::alloc(cpu, size.max(1));
-    if p == 0 {
-        return false;
-    }
-    let mut done = 0;
+/// Zero `size` bytes of the huge block at `p` from its byte `from`.
+fn zero(cpu: &mut Cpu, p: u32, from: u32, size: u32) {
+    let mut done = from;
     while done < size {
         let n = (size - done).min(0x1000);
         let at = huge(cpu, p, done);
         super::poke(cpu, at, &vec![0; n as usize]);
         done += n;
     }
+}
+
+/// Copy `size` bytes from the byte `from` of the huge block at `src` to
+/// the start of the huge block at `dest`.
+fn copy_huge(cpu: &mut Cpu, src: u32, from: u32, dest: u32, size: u32) {
+    let mut done = 0;
+    while done < size {
+        // No piece crosses either block's 64 KB boundaries.
+        let s = (src & 0xFFFF) + from + done;
+        let d = (dest & 0xFFFF) + done;
+        let n = (size - done)
+            .min(0x1000)
+            .min(0x1_0000 - (s & 0xFFFF))
+            .min(0x1_0000 - (d & 0xFFFF));
+        let at = huge(cpu, src, from + done);
+        let bytes = super::peek(cpu, at, n as usize).unwrap_or_else(|| vec![0; n as usize]);
+        let to = huge(cpu, dest, done);
+        super::poke(cpu, to, &bytes);
+        done += n;
+    }
+}
+
+/// The data of the array described at `a`, zeroed: false when there is
+/// no memory.
+fn alloc_data(cpu: &mut Cpu, heap: &mut Heap, a: &Array) -> Result<bool, Stop> {
+    let size = a.bytes();
+    let p = heap.alloc(cpu, size.max(1))?;
+    if p == 0 {
+        return Ok(false);
+    }
+    zero(cpu, p, 0, size);
     super::write_32(cpu, a.at + 12, p);
-    true
+    Ok(true)
 }
 
 /// SafeArrayCreate(vt, cDims, rgsabound): a descriptor and its data,
 /// zeroed.
-fn safe_array_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn safe_array_create(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     let [vt, dims, bounds] = args[..] else {
         unreachable!()
     };
     let (vt, dims) = (vt as u16, dims as u16);
     let Some((size, features)) = element(vt) else {
-        return Some(0);
+        return Ok(0);
     };
     if dims == 0 || bounds == 0 {
-        return Some(0);
+        return Ok(0);
     }
-    let psa = alloc_descriptor(cpu, dims);
+    let psa = alloc_descriptor(cpu, heap, dims)?;
     if psa == 0 {
-        return Some(0);
+        return Ok(0);
     }
     let at = super::linear(cpu, psa);
     super::write_16(cpu, at + 2, features);
@@ -844,111 +1180,123 @@ fn safe_array_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let b = super::peek(cpu, from, 8).unwrap_or_else(|| vec![0; 8]);
         super::poke(cpu, to, &b);
     }
-    let a = Array::read(cpu, psa)?;
-    if !alloc_data(cpu, &a) {
-        ole2::free(cpu, psa);
-        return Some(0);
+    let Some(a) = Array::read(cpu, psa) else {
+        return Ok(0);
+    };
+    if !alloc_data(cpu, heap, &a)? {
+        heap.free(cpu, psa);
+        return Ok(0);
     }
-    Some(psa)
+    Ok(psa)
 }
 
-fn safe_array_alloc_descriptor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn safe_array_alloc_descriptor(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     let [dims, out] = args[..] else {
         unreachable!()
     };
     if dims as u16 == 0 || out == 0 {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     }
-    match alloc_descriptor(cpu, dims as u16) {
-        0 => Some(E_OUTOFMEMORY),
+    match alloc_descriptor(cpu, heap, dims as u16)? {
+        0 => Ok(E_OUTOFMEMORY),
         psa => {
             super::write_32(cpu, out, psa);
-            Some(S_OK)
+            Ok(S_OK)
         }
     }
 }
 
-fn safe_array_alloc_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn safe_array_alloc_data(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     let Some(a) = Array::read(cpu, args[0]) else {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     };
-    Some(if alloc_data(cpu, &a) {
+    Ok(if alloc_data(cpu, heap, &a)? {
         S_OK
     } else {
         E_OUTOFMEMORY
     })
 }
 
-/// The elements' BSTRs freed, interfaces' releases added to `calls`,
-/// VARIANTs cleared.
-fn clear_elements(cpu: &mut Cpu, a: &Array, calls: &mut Vec<(u32, u32)>) {
-    if a.data == 0 || a.features & (FADF_BSTR | FADF_UNKNOWN | FADF_DISPATCH | FADF_VARIANT) == 0 {
+/// The element at `at` of an array with the features `features`
+/// emptied: its BSTR freed, its interface released, its VARIANT cleared.
+fn clear_element(cpu: &mut Cpu, heap: &mut Heap, features: u16, at: u32) {
+    if features & FADF_VARIANT != 0 {
+        clear(cpu, heap, at);
+        return;
+    }
+    let p = super::read_32(cpu, at);
+    if features & FADF_BSTR != 0 {
+        drop_bstr(cpu, heap, p);
+    } else if p != 0 {
+        heap.method(p, RELEASE);
+    }
+    super::write_32(cpu, at, 0);
+}
+
+/// Whether an array's elements hold what must be freed or released.
+fn owns(features: u16) -> bool {
+    features & (FADF_BSTR | FADF_UNKNOWN | FADF_DISPATCH | FADF_VARIANT) != 0
+}
+
+/// The elements' BSTRs freed, interfaces released, VARIANTs cleared.
+fn clear_elements(cpu: &mut Cpu, heap: &mut Heap, a: &Array) {
+    if a.data == 0 || !owns(a.features) {
         return;
     }
     for cell in 0..a.cells() {
         let at = a.data_at(cpu, cell * a.elem as u32);
-        if a.features & FADF_VARIANT != 0 {
-            clear(cpu, at, calls);
-            continue;
-        }
-        let p = super::read_32(cpu, at);
-        if a.features & FADF_BSTR != 0 {
-            free_bstr(cpu, p);
-        } else if p != 0 {
-            calls.push((p, 2));
-        }
-        super::write_32(cpu, at, 0);
+        clear_element(cpu, heap, a.features, at);
     }
 }
 
 /// Destroy the array at `psa` and its data, as SafeArrayDestroy does.
-fn destroy_array(cpu: &mut Cpu, psa: u32, calls: &mut Vec<(u32, u32)>) {
+fn destroy_array(cpu: &mut Cpu, heap: &mut Heap, psa: u32) {
     if let Some(a) = Array::read(cpu, psa) {
-        clear_elements(cpu, &a, calls);
-        if a.data != 0 {
-            ole2::free(cpu, a.data);
-        }
-        ole2::free(cpu, psa);
+        clear_elements(cpu, heap, &a);
+        heap.free(cpu, a.data);
+        heap.free(cpu, psa);
     }
 }
 
-fn safe_array_destroy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn safe_array_destroy(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     let Some(a) = Array::read(cpu, args[0]) else {
-        return Some(if args[0] == 0 { S_OK } else { E_INVALIDARG });
+        return Ok(if args[0] == 0 { S_OK } else { E_INVALIDARG });
     };
     if a.locks > 0 {
-        return Some(DISP_E_ARRAYISLOCKED);
+        return Ok(DISP_E_ARRAYISLOCKED);
     }
-    let mut calls = Vec::new();
-    destroy_array(cpu, args[0], &mut calls);
-    call_all(cpu, S_OK, &calls)
+    destroy_array(cpu, heap, args[0]);
+    Ok(S_OK)
 }
 
-fn safe_array_destroy_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn safe_array_destroy_data(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     let Some(a) = Array::read(cpu, args[0]) else {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     };
     if a.locks > 0 {
-        return Some(DISP_E_ARRAYISLOCKED);
+        return Ok(DISP_E_ARRAYISLOCKED);
     }
-    let mut calls = Vec::new();
-    clear_elements(cpu, &a, &mut calls);
+    clear_elements(cpu, heap, &a);
     if a.data != 0 {
-        ole2::free(cpu, a.data);
+        heap.free(cpu, a.data);
         super::write_32(cpu, a.at + 12, 0);
     }
-    call_all(cpu, S_OK, &calls)
+    Ok(S_OK)
 }
 
-fn safe_array_destroy_descriptor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn safe_array_destroy_descriptor(
+    cpu: &mut Cpu,
+    args: &[u32],
+    heap: &mut Heap,
+) -> Result<u32, Stop> {
     let Some(a) = Array::read(cpu, args[0]) else {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     };
     if a.locks > 0 {
-        return Some(DISP_E_ARRAYISLOCKED);
+        return Ok(DISP_E_ARRAYISLOCKED);
     }
-    ole2::free(cpu, args[0]);
-    Some(S_OK)
+    heap.free(cpu, args[0]);
+    Ok(S_OK)
 }
 
 fn safe_array_get_dim(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1054,108 +1402,106 @@ fn safe_array_ptr_of_index(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// SafeArrayGetElement(psa, rgIndices, pv): a copy of the element at
 /// `pv` (16:16): a BSTR copied, an interface with a reference added, a
 /// VARIANT as VariantCopy copies it.
-fn safe_array_get_element(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn safe_array_get_element(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     let Some(a) = Array::read(cpu, args[0]) else {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     };
     let out = super::linear(cpu, args[2]);
     if out == 0 {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     }
     let Some((_, at)) = element_ptr(cpu, &a, args[1]) else {
-        return Some(DISP_E_BADINDEX);
+        return Ok(DISP_E_BADINDEX);
     };
     if a.features & FADF_VARIANT != 0 {
         super::poke(cpu, out, &[0; 16]);
-        return copy(cpu, out, at, false);
+        return copy(cpu, heap, out, at, false);
     }
     let bytes = super::peek(cpu, at, a.elem as usize).unwrap_or_default();
-    let mut calls = Vec::new();
     if a.features & FADF_BSTR != 0 {
         let s = super::read_32(cpu, at);
         let new = if s == 0 {
             0
         } else {
-            match alloc_bstr(cpu, &bstr_bytes(cpu, s)) {
-                0 => return Some(E_OUTOFMEMORY),
+            match new_bstr(cpu, heap, &bstr_bytes(cpu, s))? {
+                0 => return Ok(E_OUTOFMEMORY),
                 n => n,
             }
         };
         super::write_32(cpu, out, new);
-        return Some(S_OK);
+        return Ok(S_OK);
     }
     if a.features & (FADF_UNKNOWN | FADF_DISPATCH) != 0 {
         let p = super::read_32(cpu, at);
         if p != 0 {
-            calls.push((p, 1));
+            heap.method(p, ADD_REF);
         }
     }
     super::poke(cpu, out, &bytes);
-    call_all(cpu, S_OK, &calls)
+    Ok(S_OK)
 }
 
 /// SafeArrayPutElement(psa, rgIndices, pv): the value at `pv` (16:16)
 /// put in the element, whose old value is freed. For an array of BSTRs
 /// or interfaces, `pv` is the BSTR or interface itself.
-fn safe_array_put_element(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn safe_array_put_element(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     let Some(a) = Array::read(cpu, args[0]) else {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     };
     let Some((_, at)) = element_ptr(cpu, &a, args[1]) else {
-        return Some(DISP_E_BADINDEX);
+        return Ok(DISP_E_BADINDEX);
     };
     let pv = args[2];
-    let mut calls = Vec::new();
     if a.features & FADF_VARIANT != 0 {
         let src = super::linear(cpu, pv);
-        return copy(cpu, at, src, false);
+        return copy(cpu, heap, at, src, false);
     }
     if a.features & FADF_BSTR != 0 {
         let new = if pv == 0 {
             0
         } else {
-            match alloc_bstr(cpu, &bstr_bytes(cpu, pv)) {
-                0 => return Some(E_OUTOFMEMORY),
+            match new_bstr(cpu, heap, &bstr_bytes(cpu, pv))? {
+                0 => return Ok(E_OUTOFMEMORY),
                 n => n,
             }
         };
         let old = super::read_32(cpu, at);
-        free_bstr(cpu, old);
+        drop_bstr(cpu, heap, old);
         super::write_32(cpu, at, new);
-        return Some(S_OK);
+        return Ok(S_OK);
     }
     if a.features & (FADF_UNKNOWN | FADF_DISPATCH) != 0 {
         let old = super::read_32(cpu, at);
         if pv != 0 {
-            calls.push((pv, 1));
+            heap.method(pv, ADD_REF);
         }
         if old != 0 {
-            calls.push((old, 2));
+            heap.method(old, RELEASE);
         }
         super::write_32(cpu, at, pv);
-        return call_all(cpu, S_OK, &calls);
+        return Ok(S_OK);
     }
     let from = super::linear(cpu, pv);
     if from == 0 {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     }
     let bytes = super::peek(cpu, from, a.elem as usize).unwrap_or_default();
     super::poke(cpu, at, &bytes);
-    Some(S_OK)
+    Ok(S_OK)
 }
 
 /// A copy of the array at `psa` (16:16) and its elements: the copy's
-/// 16:16 address, the AddRefs to make added to `calls`.
-fn copy_array(cpu: &mut Cpu, psa: u32, calls: &mut Vec<(u32, u32)>) -> Result<u32, u32> {
+/// 16:16 address, the AddRefs to make asked of `heap`.
+fn copy_array(cpu: &mut Cpu, heap: &mut Heap, psa: u32) -> Result<u32, Stop> {
     if psa == 0 {
         return Ok(0);
     }
-    let a = Array::read(cpu, psa).ok_or(E_INVALIDARG)?;
-    let size = SA_HEADER + SA_BOUND * a.dims as u32;
-    let new = ole2::alloc(cpu, size);
+    let a = Array::read(cpu, psa).ok_or(Stop::Fail(E_INVALIDARG))?;
+    let new = alloc_descriptor(cpu, heap, a.dims)?;
     if new == 0 {
-        return Err(E_OUTOFMEMORY);
+        return Err(Stop::Fail(E_OUTOFMEMORY));
     }
+    let size = SA_HEADER + SA_BOUND * a.dims as u32;
     let to = super::linear(cpu, new);
     let head = super::peek(cpu, a.at, size as usize).unwrap_or_default();
     super::poke(cpu, to, &head);
@@ -1164,12 +1510,12 @@ fn copy_array(cpu: &mut Cpu, psa: u32, calls: &mut Vec<(u32, u32)>) -> Result<u3
     if a.data == 0 {
         return Ok(new);
     }
-    let b = Array::read(cpu, new).ok_or(E_INVALIDARG)?;
-    if !alloc_data(cpu, &b) {
-        ole2::free(cpu, new);
-        return Err(E_OUTOFMEMORY);
+    let b = Array::read(cpu, new).ok_or(Stop::Fail(E_INVALIDARG))?;
+    if !alloc_data(cpu, heap, &b)? {
+        heap.free(cpu, new);
+        return Err(Stop::Fail(E_OUTOFMEMORY));
     }
-    let b = Array::read(cpu, new).ok_or(E_INVALIDARG)?;
+    let b = Array::read(cpu, new).ok_or(Stop::Fail(E_INVALIDARG))?;
     for cell in 0..a.cells() {
         let offset = cell * a.elem as u32;
         let from = a.data_at(cpu, offset);
@@ -1179,12 +1525,12 @@ fn copy_array(cpu: &mut Cpu, psa: u32, calls: &mut Vec<(u32, u32)>) -> Result<u3
             let value = super::read_32(cpu, from + 8);
             let mut bytes = super::peek(cpu, from, 16).unwrap_or_else(|| vec![0; 16]);
             let new_value = match vt {
-                VT_BSTR if value != 0 => alloc_bstr(cpu, &bstr_bytes(cpu, value)),
+                VT_BSTR if value != 0 => new_bstr(cpu, heap, &bstr_bytes(cpu, value))?,
                 VT_DISPATCH | VT_UNKNOWN if value != 0 => {
-                    calls.push((value, 1));
+                    heap.method(value, ADD_REF);
                     value
                 }
-                _ if vt & VT_ARRAY != 0 && vt & VT_BYREF == 0 => copy_array(cpu, value, calls)?,
+                _ if vt & VT_ARRAY != 0 && vt & VT_BYREF == 0 => copy_array(cpu, heap, value)?,
                 _ => value,
             };
             bytes[8..12].copy_from_slice(&new_value.to_le_bytes());
@@ -1195,43 +1541,46 @@ fn copy_array(cpu: &mut Cpu, psa: u32, calls: &mut Vec<(u32, u32)>) -> Result<u3
         let bytes = super::peek(cpu, from, a.elem as usize).unwrap_or_default();
         super::poke(cpu, to, &bytes);
         if a.features & FADF_BSTR != 0 && p != 0 {
-            let s = alloc_bstr(cpu, &bstr_bytes(cpu, p));
+            let s = new_bstr(cpu, heap, &bstr_bytes(cpu, p))?;
             super::write_32(cpu, to, s);
         } else if a.features & (FADF_UNKNOWN | FADF_DISPATCH) != 0 && p != 0 {
-            calls.push((p, 1));
+            heap.method(p, ADD_REF);
         }
     }
     Ok(new)
 }
 
-fn safe_array_copy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+fn safe_array_copy(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     if args[1] == 0 {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     }
-    let mut calls = Vec::new();
-    match copy_array(cpu, args[0], &mut calls) {
+    match copy_array(cpu, heap, args[0]) {
         Ok(p) => {
             super::write_32(cpu, args[1], p);
-            call_all(cpu, S_OK, &calls)
+            Ok(S_OK)
         }
-        Err(e) => {
+        Err(Stop::Fail(e)) => {
             super::write_32(cpu, args[1], 0);
-            Some(e)
+            Err(Stop::Fail(e))
         }
+        Err(Stop::Pending) => Err(Stop::Pending),
     }
 }
 
 /// SafeArrayRedim(psa, psaboundNew): the last dimension's bound changed,
-/// the data grown (zeroed) or cut (the elements cut freed).
-fn safe_array_redim(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+/// the data reallocated, grown (zeroed) or cut (the elements cut freed).
+/// As Windows' OLE2DISP does, the elements cut are copied to a block of
+/// their own before the data's Realloc, which may move or free them, and
+/// freed from there after it.
+fn safe_array_redim(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     let Some(a) = Array::read(cpu, args[0]) else {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     };
     if args[1] == 0 || a.dims == 0 {
-        return Some(E_INVALIDARG);
+        return Ok(E_INVALIDARG);
     }
     if a.locks > 0 {
-        return Some(DISP_E_ARRAYISLOCKED);
+        return Ok(DISP_E_ARRAYISLOCKED);
     }
     let count = super::read_32(cpu, args[1]);
     let lower = super::read_32(cpu, args[1] + 4);
@@ -1239,40 +1588,39 @@ fn safe_array_redim(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let last = a.bounds[a.dims as usize - 1].0;
     let per = old_bytes.checked_div(last).unwrap_or(0);
     let new_bytes = per.saturating_mul(count);
-    let mut calls = Vec::new();
-    let owned = FADF_BSTR | FADF_UNKNOWN | FADF_DISPATCH | FADF_VARIANT;
-    if new_bytes < old_bytes && a.features & owned != 0 {
-        // The elements cut go.
-        let elem = a.elem.max(1) as u32;
-        for cell in 0..(old_bytes - new_bytes) / elem {
-            let at = a.data_at(cpu, new_bytes + cell * elem);
-            if a.features & FADF_VARIANT != 0 {
-                clear(cpu, at, &mut calls);
-                continue;
-            }
-            let p = super::read_32(cpu, at);
-            if a.features & FADF_BSTR != 0 {
-                free_bstr(cpu, p);
-            } else if p != 0 {
-                calls.push((p, 2));
-            }
+    let mut data = a.data;
+    if new_bytes != old_bytes || data == 0 {
+        let cut = if new_bytes < old_bytes && data != 0 && owns(a.features) {
+            old_bytes - new_bytes
+        } else {
+            0
+        };
+        let kept = if cut > 0 { heap.alloc(cpu, cut)? } else { 0 };
+        if cut > 0 && kept == 0 {
+            return Ok(E_OUTOFMEMORY);
         }
-    }
-    let data = ole2::realloc(cpu, a.data, new_bytes.max(1));
-    if data == 0 {
-        return Some(E_OUTOFMEMORY);
-    }
-    let mut done = old_bytes;
-    while done < new_bytes {
-        let n = (new_bytes - done).min(0x1000);
-        let at = huge(cpu, data, done);
-        super::poke(cpu, at, &vec![0; n as usize]);
-        done += n;
+        // A run after the program's Realloc returned finds the elements
+        // in their block already, and the data may be gone.
+        if kept != 0 && !heap.answered() {
+            copy_huge(cpu, a.data, new_bytes, kept, cut);
+        }
+        data = heap.realloc(cpu, a.data, new_bytes.max(1))?;
+        if data == 0 {
+            heap.free(cpu, kept);
+            return Ok(E_OUTOFMEMORY);
+        }
+        zero(cpu, data, old_bytes, new_bytes);
+        let elem = a.elem.max(1) as u32;
+        for cell in 0..cut / elem {
+            let at = huge(cpu, kept, cell * elem);
+            clear_element(cpu, heap, a.features, at);
+        }
+        heap.free(cpu, kept);
     }
     super::write_32(cpu, a.at + 12, data);
     super::write_32(cpu, a.at + SA_HEADER, count);
     super::write_32(cpu, a.at + SA_HEADER + 4, lower);
-    call_all(cpu, S_OK, &calls)
+    Ok(S_OK)
 }
 
 // Dispatch.

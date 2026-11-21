@@ -973,7 +973,7 @@ fn call_at(
 }
 
 /// Return `result` to the function's caller in DX:AX from a `then`.
-fn dx_ax(ctx: &mut Context, result: u32) -> Option<u32> {
+pub(super) fn dx_ax(ctx: &mut Context, result: u32) -> Option<u32> {
     ctx.gpr[thunk::EDX] = ctx.gpr[thunk::EDX] & 0xFFFF_0000 | result >> 16;
     Some(ctx.gpr[thunk::EAX] & 0xFFFF_0000 | result & 0xFFFF)
 }
