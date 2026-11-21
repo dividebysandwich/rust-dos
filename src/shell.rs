@@ -258,12 +258,13 @@ pub fn prompt(cpu: &mut Cpu) {
     // The batch files have run: ECHO is as it was before them.
     cpu.batch.settle();
     cpu.shell_prompt_at = None;
-    // RC left to run a command line, which has run: RC comes back.
-    if cpu.shell_wait.is_none()
-        && cpu.pending_command.is_none()
-        && !cpu.batch.is_active()
-        && crate::rc_command::resume(cpu, None)
-    {
+    let reads_line = cpu.shell_wait.is_none() && cpu.pending_command.is_none() && !cpu.batch.is_active();
+    if reads_line {
+        prompt_break(cpu);
+    }
+    // RC left to run a command line, which has run: RC comes back, its
+    // command line where the prompt would be.
+    if reads_line && crate::rc_command::resume(cpu, None) {
         return;
     }
     if cpu.batch.echo && cpu.shell_wait.is_none() {
@@ -271,6 +272,36 @@ pub fn prompt(cpu: &mut Cpu) {
         show_prompt(cpu);
     }
     crate::cmdline::start(cpu);
+}
+
+/// What COMMAND.COM prints before it reads a command line at its prompt:
+/// CR LF when a command line has run since the last one and ECHO is on
+/// (the CRLF2 at COMMAND in MS-DOS 4.0's TCODE.ASM). So the output of
+/// the command keeps its last line, whether it ended with CR LF (which
+/// leaves an empty line before the prompt), with a CR alone or with
+/// nothing. An empty line, a CLS, a batch file and a FOR whose last line
+/// is empty print none. The batch files have ended (`Batch::settle`).
+pub fn prompt_break(cpu: &mut Cpu) {
+    let ran = std::mem::take(&mut cpu.batch.crlf.command_ran);
+    // The shell reads a line: the empty batch line before doesn't count
+    // for the echo of the next.
+    cpu.batch.crlf.null_line = false;
+    if ran && cpu.batch.echo && !cpu.batch.is_active() {
+        teletype(cpu, b"\r\n");
+    }
+}
+
+/// Show a batch line as COMMAND.COM does before it runs it: the CR LFs
+/// before it (`BatchLine::breaks`), and with ECHO on the prompt and the
+/// line, and CR LF.
+pub fn echo_batch_line(cpu: &mut Cpu, line: &crate::batch::BatchLine) {
+    for _ in 0..line.breaks {
+        video::print_string(cpu, "\r\n");
+    }
+    if line.echo {
+        show_prompt(cpu);
+        video::print_string(cpu, &format!("{}\r\n", line.text));
+    }
 }
 
 /// What the shell waits for, outside of a typed line.
@@ -613,6 +644,9 @@ pub fn abandon_input(cpu: &mut Cpu) -> bool {
     }
     crate::cmdline::finish(cpu);
     erase_prompt(cpu);
+    // The first line echoed takes the prompt's place, without the CR LF
+    // that would leave its row empty.
+    cpu.batch.crlf.null_line = true;
     cpu.set_sp(cpu.sp().wrapping_add(6));
     cpu.set_cs(SHELL_SEGMENT);
     cpu.set_ip(labels().after_trap);
