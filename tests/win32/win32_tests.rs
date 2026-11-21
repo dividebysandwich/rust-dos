@@ -2561,6 +2561,174 @@ fn a_program_starts_a_batch_file() {
     assert_eq!(&written[2..], b" ARG");
 }
 
+/// A DOS program (a COM file) that changes what Windows 98 keeps apart
+/// for each DOS machine and leaves it so: the FPU's control word, the
+/// mouse driver's event handler, the master PIC's mask (IRQ 6 masked),
+/// the timer's rate (1000 Hz) and DOS's memory strategy. It counts down
+/// for a while, then ends with 7.
+fn dos_machine_changer() -> Vec<u8> {
+    let mut code = vec![
+        0xDB, 0xE3, // fninit
+        0xD9, 0x2E, 0x00, 0x00, // fldcw [cw]
+        0xB8, 0x0C, 0x00, // mov ax,000Ch
+        0xB9, 0x7F, 0x00, // mov cx,007Fh
+        0x0E, 0x07, // push cs; pop es
+        0xBA, 0x00, 0x00, // mov dx,handler
+        0xCD, 0x33, // int 33h
+        0xE4, 0x21, // in al,21h
+        0x0C, 0x40, // or al,40h
+        0xE6, 0x21, // out 21h,al
+        0xB0, 0x36, // mov al,36h
+        0xE6, 0x43, // out 43h,al
+        0xB8, 0xA9, 0x04, // mov ax,1193
+        0xE6, 0x40, // out 40h,al
+        0x88, 0xE0, // mov al,ah
+        0xE6, 0x40, // out 40h,al
+        0xB8, 0x01, 0x58, // mov ax,5801h
+        0xBB, 0x02, 0x00, // mov bx,0002h: last fit
+        0xCD, 0x21, // int 21h
+        0xBB, 0x04, 0x00, // mov bx,4
+        0xB9, 0xFF, 0xFF, // outer: mov cx,0FFFFh
+        0xE2, 0xFE, // inner: loop inner
+        0x4B, // dec bx
+        0x75, 0xF8, // jnz outer
+        0xB8, 0x07, 0x4C, // mov ax,4C07h
+        0xCD, 0x21, // int 21h
+    ];
+    let handler = 0x100 + code.len() as u16;
+    code.push(0xCB); // retf
+    let cw = 0x100 + code.len() as u16;
+    code.extend_from_slice(&0x0F7Fu16.to_le_bytes());
+    code[4..6].copy_from_slice(&cw.to_le_bytes());
+    code[15..17].copy_from_slice(&handler.to_le_bytes());
+    code
+}
+
+/// T.EXE sets the FPU's control word to 027Fh, starts C.COM
+/// (`dos_machine_changer`) with CreateProcessA, waits for it and ends
+/// with 1 for CreateProcessA's TRUE, the wait's result shifted left by
+/// one, 8 if its control word changed, and the child's exit code
+/// shifted left by four: 71h. With `reload`, a state saved while C.COM
+/// runs is loaded once the run has ended, and runs to the end again.
+/// Each run checks what C.COM changed when it has ended.
+fn run_dos_machine_changer(test: &str, reload: bool) {
+    const CW: u16 = 0x027F;
+    let names: &[&str] = &[
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
+    // the exit code at 0xA0, the control words at 0xA4 and 0xA6.
+    let mut data = b"C.COM".to_vec();
+    data.resize(0xB0, 0);
+    data[0x40] = 68;
+    data[0xA4..0xA6].copy_from_slice(&CW.to_le_bytes());
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.fldcw(word_ptr(l.at(0xA4)))?;
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        a.mov(ebx, eax)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.shl(eax, 1)?;
+        a.or(ebx, eax)?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("GetExitCodeProcess"))?;
+        a.fnstcw(word_ptr(l.at(0xA6)))?;
+        a.cmp(word_ptr(l.at(0xA6)), CW as i32)?;
+        a.setne(al)?;
+        a.movzx(eax, al)?;
+        a.shl(eax, 3)?;
+        a.or(ebx, eax)?;
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        a.shl(eax, 4)?;
+        a.or(eax, ebx)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let files = [("T.EXE", parent), ("C.COM", dos_machine_changer())];
+    let mut cpu = machine_with(test, &files);
+    let seen = std::rc::Rc::new(std::cell::Cell::new((false, false)));
+    let hook = seen.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        let (started, ended) = hook.get();
+        hook.set((
+            started || line.contains("C.COM starts"),
+            ended || line.contains("C.COM ended with exit code 7"),
+        ));
+    }));
+    let before = (
+        cpu.bus.pic.master.imr,
+        cpu.bus.pit0.reload(),
+        cpu.bus.mouse.callback_cs,
+        cpu.alloc_strategy,
+    );
+    // Runs until C.COM has ended, then checks what it changed is back,
+    // then runs to the end: T.EXE's exit code.
+    let finish = |cpu: &mut Cpu| {
+        let mut batches = 0;
+        while !seen.get().1 {
+            batches += 1;
+            assert!(batches < 2_000_000, "C.COM didn't end: {}", printed(cpu));
+            cpu.bus.start_batch(cpu.bus.clock.icount + 1);
+            run_batch(cpu, &mut NoHook, false);
+        }
+        let after = (
+            cpu.bus.pic.master.imr,
+            cpu.bus.pit0.reload(),
+            cpu.bus.mouse.callback_cs,
+            cpu.alloc_strategy,
+        );
+        assert_eq!(after, before, "the machine as C.COM left it");
+        assert!(run_to_exit(cpu, 200), "{}", printed(cpu));
+        cpu.errorlevel
+    };
+    // Up to C.COM's count.
+    while !seen.get().0 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 1_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+    }
+    cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+    run_batch(&mut cpu, &mut NoHook, false);
+    assert!(!seen.get().1, "C.COM ended before the state");
+    let state = reload.then(|| rust_dos::savestate::machine::save(&cpu));
+    assert_eq!(finish(&mut cpu), 0x71);
+    if let Some(state) = state {
+        rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+        seen.set((true, false));
+        assert_eq!(finish(&mut cpu), 0x71, "after the load");
+    }
+}
+
+/// What a DOS program changes of the machine that Windows 98 keeps for
+/// its DOS machine alone is as it was for the program that started it
+/// when it ends: the thread's FPU, the PIC's masks, the timer's rate,
+/// the mouse driver's event handler and DOS's memory strategy.
+#[test]
+fn a_dos_program_leaves_the_machine_as_it_found_it() {
+    run_dos_machine_changer("dos_machine", false);
+}
+
+/// A state saved while a DOS program a Windows program started runs
+/// loads with it running, and it ends as it would have.
+#[test]
+fn a_state_saved_while_a_dos_program_runs_goes_on_with_it() {
+    run_dos_machine_changer("dos_machine_state", true);
+}
+
 #[test]
 fn win_exec_starts_a_program_or_says_why_not() {
     let child = {

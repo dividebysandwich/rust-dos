@@ -752,17 +752,22 @@ The program runs full screen, and the Windows programs wait: their
 threads don't switch while the system waits for real-mode code. When
 the program ends, DOS goes back after the INT 21h, the trap returns to
 the system, and the process and thread objects get its exit code and
-are signaled. The vector table is put back as it was, the desktop is
-painted again, and the caller goes on. A program that waits for the one
-it started (WaitForSingleObject, GetExitCodeProcess, GetModuleUsage of
-WinExec's 33, a loop looking for a file the program writes) finds it
+are signaled. What Windows 98 keeps apart for each DOS machine is put
+back as it was before the program started: the vector table, DOS's
+current drive and directories, its memory strategy and upper memory
+link, the PICs' masks, the timer's rate, the mouse driver's event
+handler, and the calling thread's FPU and SSE registers. The desktop
+is painted again, and the caller goes on. A program that waits for the
+one it started (WaitForSingleObject, GetExitCodeProcess, GetModuleUsage
+of WinExec's 33, a loop looking for a file the program writes) finds it
 ended, and the files it wrote are on the same drives.
 
 Before EXEC, the DOS process's memory block is cut down to what it uses
 (its PSP, its DOS stub and its stack), so the program gets the rest of
 conventional memory, and EXEC's parameter block, the command tail, the
-path and the environment of the caller go in a block of their own. A
-batch file runs in `COMMAND.COM /C`. INT 2Fh AX=1600h and 160Ah answer
+path and the environment of the caller go in a block of their own.
+The program gets its 8.3 path, as on Windows 98. A batch file runs in
+`COMMAND.COM /C`. INT 2Fh AX=1600h and 160Ah answer
 from the program as in a DOS box: Windows 4.x in enhanced mode, 4.0 for
 Windows 95 and 4.10 for 98.
 
