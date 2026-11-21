@@ -23,6 +23,7 @@ fn audio_json(cpu: &Cpu) -> Value {
         "queue_growth_frames": cpu.bus.audio_feed.extra_frames(),
         "sound_blaster": cpu.bus.sb_blaster(),
         "opl3": cpu.bus.opl.is_opl3(),
+        "fm_chip": cpu.bus.opl.chip().name(),
         "ultrasound": cpu.bus.gus.as_ref().map(|gus| gus.config.ultrasnd()),
         "midi_synth": cpu.bus.mpu.synth_name(),
         "midi_voices": cpu.bus.mpu.gus_synth().map(|s| s.active_voices()),
@@ -760,7 +761,13 @@ pub(super) fn sound_json(cpu: &Cpu) -> Value {
         .collect();
     let silenced: Vec<&str> =
         rust_dos::mixer::Channel::ALL.iter().filter(|c| bus.mixer.silenced >> c.index() & 1 != 0).map(|c| c.key()).collect();
-    json!({ "fm": { "opl3": bus.opl.is_opl3(), "idle": bus.opl.is_idle(), "channels": fm }, "gus": gus, "midi": midi, "silenced": silenced })
+    let fm = json!({
+        "opl3": bus.opl.is_opl3(),
+        "chip": bus.opl.chip().name(),
+        "idle": bus.opl.is_idle(),
+        "channels": fm,
+    });
+    json!({ "fm": fm, "gus": gus, "midi": midi, "silenced": silenced })
 }
 
 pub(super) fn ivt_json(cpu: &Cpu) -> Value {

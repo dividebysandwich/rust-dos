@@ -12,15 +12,19 @@ impl Bus {
     }
 
     /// Replace the sound hardware: the Sound Blaster (None removes it) and
-    /// whether the FM chip is an OPL3.
-    pub fn configure_sound(&mut self, sb: Option<crate::sb::SbConfig>, opl3: bool) {
+    /// the FM chip (`true` is an OPL3, `false` an OPL2).
+    pub fn configure_sound(
+        &mut self,
+        sb: Option<crate::sb::SbConfig>,
+        chip: impl Into<crate::opl::Chip>,
+    ) {
         // The sound up to now is the old card's: mix it before the card
         // goes, so the new one's frames start where the mixer is.
         self.audio_catch_up();
         let now = self.clock.now_ticks();
         self.sb = sb.map(|config| crate::sb::SoundBlaster::new(config, now));
         self.isapnp = sb.filter(|sb| sb.model == crate::sb::SbModel::Sb16Vibra).map(|sb| crate::isapnp::IsaPnp::vibra16c(&sb));
-        self.opl = crate::opl::Opl::new(opl3);
+        self.opl = crate::opl::Opl::with_chip(chip.into());
         self.configure_awe();
         self.sync_sb_irq();
         self.clock.schedule(self.next_event());
@@ -34,9 +38,9 @@ impl Bus {
     /// resources outlast it: a reboot (`power_on_sound`) gives the BIOS's.
     pub fn reset_sound(&mut self) {
         let config = self.sb.as_ref().map(|sb| sb.config);
-        let opl3 = self.opl.is_opl3();
+        let chip = self.opl.chip();
         let pnp = self.isapnp.take();
-        self.configure_sound(config, opl3);
+        self.configure_sound(config, chip);
         if self.isapnp.is_some() && pnp.is_some() {
             self.isapnp = pnp;
             self.route_isapnp_audio();

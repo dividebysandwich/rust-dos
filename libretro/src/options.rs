@@ -287,7 +287,12 @@ fn definitions() -> Vec<Definition> {
             info: "The OPL chip of the AdLib and the Sound Blasters.",
             category: "audio",
             target: config("sound", "opl"),
-            values: configured(&[("opl3", "OPL3"), ("opl2", "OPL2 (AdLib)")]),
+            values: configured(&[
+                ("auto", "Auto (two OPL2s on an SB Pro, else OPL3)"),
+                ("opl3", "OPL3"),
+                ("opl2", "OPL2 (AdLib)"),
+                ("dualopl2", "Two OPL2s (SB Pro 1)"),
+            ]),
         },
         Definition {
             key: "gus",

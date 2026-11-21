@@ -374,10 +374,18 @@ impl Item {
             SbHdma => each(s, [5, 6, 7], |s, dma| s.sound.sb.dma16 = dma),
             Awe32Ram => each(s, crate::awe32::RAM_SIZES, |s, kb| s.sound.awe32ram = kb),
             // The AdLib Gold is an OPL3 with more around it.
-            Opl => each(s, [(false, false), (true, false), (true, true)], |s, (opl3, gold)| {
-                s.sound.opl3 = opl3;
-                s.sound.adlibgold_installed = gold;
-            }),
+            Opl => {
+                use crate::opl::Chip;
+                let chips = [None, Some(Chip::Opl3), Some(Chip::Opl2), Some(Chip::DualOpl2)];
+                let choices = chips
+                    .into_iter()
+                    .map(|chip| (chip, false))
+                    .chain([(Some(Chip::Opl3), true)]);
+                each(s, choices, |s, (chip, gold)| {
+                    s.sound.opl = chip;
+                    s.sound.adlibgold_installed = gold;
+                })
+            }
             Gus => on_off(|s, on| s.sound.gus.enabled = on),
             GusBase => each(s, [0x210, 0x220, 0x240, 0x250, 0x260], |s, base| s.sound.gus.base = base),
             GusIrq => each(s, [2, 3, 5, 7, 11, 12, 15], |s, irq| s.sound.gus.irq = irq),
