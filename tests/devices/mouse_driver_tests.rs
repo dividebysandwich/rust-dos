@@ -395,6 +395,31 @@ fn without_the_dpmi_host_protected_mode_gets_the_handler_from_irq_12() {
     assert_eq!((cpu.cs(), cpu.sp()), (0x3000, 0xFF00), "back in the loop");
 }
 
+/// With EMS, DOS runs in virtual-8086 mode under the built-in monitor,
+/// as under EMM386. A DOS program there gets its event handler called as
+/// in real mode, between two of its instructions with interrupts on.
+#[test]
+fn under_the_v86_monitor_a_dos_program_gets_its_handler_called() {
+    let mut cpu = polling_cpu();
+    cpu.bus.mouse.callback_mask = 0x0002;
+    cpu.bus.load_bytes(0x30000, &[0xFB, 0xEB, 0xFE]); // STI; JMP $
+    cpu.set_cs(0x3000);
+    cpu.set_ip(0);
+    rust_dos::v86mon::install_rom(&mut cpu.bus);
+    rust_dos::v86mon::enter(&mut cpu);
+    assert!(cpu.v86() && cpu.dos_mode());
+    cpu.bus.mouse.button_down(0);
+    for _ in 0..20 {
+        let end = cpu.bus.clock.icount + 10_000;
+        cpu.bus.start_batch(end);
+        rust_dos::exec::run_batch(&mut cpu, &mut rust_dos::exec::NoHook, false);
+    }
+    assert_eq!(cpu.bus.read_16(CALLBACK_COUNT), 1);
+    assert_eq!(cpu.bus.read_16(CALLBACK_ARGS), 2, "left press");
+    assert!(cpu.v86(), "still under the monitor");
+    assert_eq!((cpu.cs(), cpu.sp()), (0x3000, 0xFF00), "back in the loop");
+}
+
 /// INT 10h with AX and BX, as a program sets a video mode.
 fn int10(cpu: &mut Cpu, function: u16, mode: u16) {
     cpu.set_ax(function);
