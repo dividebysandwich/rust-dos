@@ -2422,6 +2422,18 @@ fn start_program_from(
     program_bytes: Vec<u8>,
     dirs: &[&str],
 ) -> u8 {
+    start_programs(test, parent_at, line, vec![(child, program_bytes)], dirs)
+}
+
+/// `start_program_from`, with the files `files` (each a path and its
+/// bytes) in place of C.EXE.
+fn start_programs(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    files: Vec<(&str, Vec<u8>)>,
+    dirs: &[&str],
+) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",
@@ -2472,7 +2484,7 @@ fn start_program_from(
     for dir in dirs {
         fs::create_dir_all(base.join(dir)).unwrap();
     }
-    for (at, bytes) in [(parent_at, parent), (child, program_bytes)] {
+    for (at, bytes) in [(parent_at, parent)].into_iter().chain(files) {
         let file = base.join(at.replace('\\', "/"));
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(file, bytes).unwrap();
@@ -2512,6 +2524,209 @@ fn a_program_starts_a_windows_3_1_program_and_waits_for_it() {
     let child = win16::program(&code, win16::CODE);
     let code = start_program("child_win16", "C.EXE an argument", "C.EXE", child, &[]);
     assert_eq!(code, 0x71);
+}
+
+/// CreateProcessA of a DOS program, which Windows 98 runs in a DOS box:
+/// it succeeds, the process handle is signaled when the program ends,
+/// and GetExitCodeProcess gives its exit code. The child (a COM file)
+/// ends with 7 when its command tail is the line's arguments, " an
+/// argument", else 9; so 71h.
+#[test]
+fn a_program_starts_a_dos_program_and_waits_for_it() {
+    let child = vec![
+        0xA0, 0x80, 0x00, // mov al,[80h]: the tail's length
+        0x3C, 0x0C, // cmp al,12
+        0xB0, 0x07, // mov al,7
+        0x74, 0x02, // je end
+        0xB0, 0x09, // mov al,9
+        0xB4, 0x4C, 0xCD, 0x21, // end: mov ah,4Ch; int 21h
+    ];
+    let code = start_program("child_dos", "C.COM an argument", "C.COM", child, &[]);
+    assert_eq!(code, 0x71);
+}
+
+/// CreateProcessA of a batch file: Windows 98 runs it with COMMAND.COM
+/// /C in a DOS box, and the programs it starts see its arguments. The
+/// batch file starts the DOS program D.COM with its first argument,
+/// which writes C:\MARK.TXT (`win16::dos_marker`).
+#[test]
+fn a_program_starts_a_batch_file() {
+    let batch = b"@D.COM %1\r\n".to_vec();
+    let files = vec![("C.BAT", batch), ("D.COM", win16::dos_marker())];
+    let code = start_programs("child_batch", "T.EXE", "C.BAT ARG", files, &[]);
+    let base = PathBuf::from("target/test_win32/child_batch");
+    // CreateProcessA's TRUE and the wait's WAIT_OBJECT_0.
+    assert_eq!(code & 0x0F, 0x01);
+    let written = fs::read(base.join("MARK.TXT")).unwrap();
+    assert_eq!(&written[2..], b" ARG");
+}
+
+/// A DOS program (a COM file) that changes what Windows 98 keeps apart
+/// for each DOS machine and leaves it so: the FPU's control word, the
+/// mouse driver's event handler, the master PIC's mask (IRQ 6 masked),
+/// the timer's rate (1000 Hz) and DOS's memory strategy. It counts down
+/// for a while, then ends with 7.
+fn dos_machine_changer() -> Vec<u8> {
+    let mut code = vec![
+        0xDB, 0xE3, // fninit
+        0xD9, 0x2E, 0x00, 0x00, // fldcw [cw]
+        0xB8, 0x0C, 0x00, // mov ax,000Ch
+        0xB9, 0x7F, 0x00, // mov cx,007Fh
+        0x0E, 0x07, // push cs; pop es
+        0xBA, 0x00, 0x00, // mov dx,handler
+        0xCD, 0x33, // int 33h
+        0xE4, 0x21, // in al,21h
+        0x0C, 0x40, // or al,40h
+        0xE6, 0x21, // out 21h,al
+        0xB0, 0x36, // mov al,36h
+        0xE6, 0x43, // out 43h,al
+        0xB8, 0xA9, 0x04, // mov ax,1193
+        0xE6, 0x40, // out 40h,al
+        0x88, 0xE0, // mov al,ah
+        0xE6, 0x40, // out 40h,al
+        0xB8, 0x01, 0x58, // mov ax,5801h
+        0xBB, 0x02, 0x00, // mov bx,0002h: last fit
+        0xCD, 0x21, // int 21h
+        0xBB, 0x04, 0x00, // mov bx,4
+        0xB9, 0xFF, 0xFF, // outer: mov cx,0FFFFh
+        0xE2, 0xFE, // inner: loop inner
+        0x4B, // dec bx
+        0x75, 0xF8, // jnz outer
+        0xB8, 0x07, 0x4C, // mov ax,4C07h
+        0xCD, 0x21, // int 21h
+    ];
+    let handler = 0x100 + code.len() as u16;
+    code.push(0xCB); // retf
+    let cw = 0x100 + code.len() as u16;
+    code.extend_from_slice(&0x0F7Fu16.to_le_bytes());
+    code[4..6].copy_from_slice(&cw.to_le_bytes());
+    code[15..17].copy_from_slice(&handler.to_le_bytes());
+    code
+}
+
+/// T.EXE sets the FPU's control word to 027Fh, starts C.COM
+/// (`dos_machine_changer`) with CreateProcessA, waits for it and ends
+/// with 1 for CreateProcessA's TRUE, the wait's result shifted left by
+/// one, 8 if its control word changed, and the child's exit code
+/// shifted left by four: 71h. With `reload`, a state saved while C.COM
+/// runs is loaded once the run has ended, and runs to the end again.
+/// Each run checks what C.COM changed when it has ended.
+fn run_dos_machine_changer(test: &str, reload: bool) {
+    const CW: u16 = 0x027F;
+    let names: &[&str] = &[
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
+    // the exit code at 0xA0, the control words at 0xA4 and 0xA6.
+    let mut data = b"C.COM".to_vec();
+    data.resize(0xB0, 0);
+    data[0x40] = 68;
+    data[0xA4..0xA6].copy_from_slice(&CW.to_le_bytes());
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.fldcw(word_ptr(l.at(0xA4)))?;
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        a.mov(ebx, eax)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.shl(eax, 1)?;
+        a.or(ebx, eax)?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("GetExitCodeProcess"))?;
+        a.fnstcw(word_ptr(l.at(0xA6)))?;
+        a.cmp(word_ptr(l.at(0xA6)), CW as i32)?;
+        a.setne(al)?;
+        a.movzx(eax, al)?;
+        a.shl(eax, 3)?;
+        a.or(ebx, eax)?;
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        a.shl(eax, 4)?;
+        a.or(eax, ebx)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let files = [("T.EXE", parent), ("C.COM", dos_machine_changer())];
+    let mut cpu = machine_with(test, &files);
+    let seen = std::rc::Rc::new(std::cell::Cell::new((false, false)));
+    let hook = seen.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        let (started, ended) = hook.get();
+        hook.set((
+            started || line.contains("C.COM starts"),
+            ended || line.contains("C.COM ended with exit code 7"),
+        ));
+    }));
+    let before = (
+        cpu.bus.pic.master.imr,
+        cpu.bus.pit0.reload(),
+        cpu.bus.mouse.callback_cs,
+        cpu.alloc_strategy,
+    );
+    // Runs until C.COM has ended, then checks what it changed is back,
+    // then runs to the end: T.EXE's exit code.
+    let finish = |cpu: &mut Cpu| {
+        let mut batches = 0;
+        while !seen.get().1 {
+            batches += 1;
+            assert!(batches < 2_000_000, "C.COM didn't end: {}", printed(cpu));
+            cpu.bus.start_batch(cpu.bus.clock.icount + 1);
+            run_batch(cpu, &mut NoHook, false);
+        }
+        let after = (
+            cpu.bus.pic.master.imr,
+            cpu.bus.pit0.reload(),
+            cpu.bus.mouse.callback_cs,
+            cpu.alloc_strategy,
+        );
+        assert_eq!(after, before, "the machine as C.COM left it");
+        assert!(run_to_exit(cpu, 200), "{}", printed(cpu));
+        cpu.errorlevel
+    };
+    // Up to C.COM's count.
+    while !seen.get().0 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 1_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+    }
+    cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+    run_batch(&mut cpu, &mut NoHook, false);
+    assert!(!seen.get().1, "C.COM ended before the state");
+    let state = reload.then(|| rust_dos::savestate::machine::save(&cpu));
+    assert_eq!(finish(&mut cpu), 0x71);
+    if let Some(state) = state {
+        rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+        seen.set((true, false));
+        assert_eq!(finish(&mut cpu), 0x71, "after the load");
+    }
+}
+
+/// What a DOS program changes of the machine that Windows 98 keeps for
+/// its DOS machine alone is as it was for the program that started it
+/// when it ends: the thread's FPU, the PIC's masks, the timer's rate,
+/// the mouse driver's event handler and DOS's memory strategy.
+#[test]
+fn a_dos_program_leaves_the_machine_as_it_found_it() {
+    run_dos_machine_changer("dos_machine", false);
+}
+
+/// A state saved while a DOS program a Windows program started runs
+/// loads with it running, and it ends as it would have.
+#[test]
+fn a_state_saved_while_a_dos_program_runs_goes_on_with_it() {
+    run_dos_machine_changer("dos_machine_state", true);
 }
 
 #[test]
@@ -17843,4 +18058,283 @@ fn wing32_makes_dib_bitmaps_and_blits_between_them() {
     });
     let (code, out) = run("wing32", exe);
     assert_eq!(code, 0, "check {code} went wrong {out}");
+}
+
+/// Where GDI32's image is, and where its stubs start in it.
+const GDI32_BASE: u32 = 0xBFF3_0000;
+const STUBS_RVA: u32 = 0x1000;
+
+/// The running process's memory at `lin`, through its page tables.
+fn peek(cpu: &mut Cpu, lin: u32, data: &mut [u8]) {
+    for (i, byte) in data.iter_mut().enumerate() {
+        let phys = cpu.lin_to_phys(lin + i as u32, false, false).unwrap();
+        *byte = cpu.bus.read_8(phys as usize);
+    }
+}
+
+fn peek_32(cpu: &mut Cpu, lin: u32) -> u32 {
+    let mut bytes = [0; 4];
+    peek(cpu, lin, &mut bytes);
+    u32::from_le_bytes(bytes)
+}
+
+fn poke(cpu: &mut Cpu, lin: u32, data: &[u8]) {
+    for (i, &byte) in data.iter().enumerate() {
+        let phys = cpu.lin_to_phys(lin + i as u32, false, false).unwrap();
+        cpu.bus.write_8(phys as usize, byte);
+    }
+}
+
+/// GDI32's export directory in the running process: its function count,
+/// and where its function, name and name ordinal tables are.
+fn gdi32_exports(cpu: &mut Cpu) -> (u32, u32, u32, u32, u32) {
+    let pe = GDI32_BASE + peek_32(cpu, GDI32_BASE + 0x3C);
+    let dir = GDI32_BASE + peek_32(cpu, pe + 0x78);
+    let functions = peek_32(cpu, dir + 20);
+    let names = peek_32(cpu, dir + 24);
+    let tables = [28, 32, 36].map(|at| GDI32_BASE + peek_32(cpu, dir + at));
+    (functions, names, tables[0], tables[1], tables[2])
+}
+
+/// Where GDI32's export directory has the address of its export `name`.
+fn gdi32_export(cpu: &mut Cpu, name: &str) -> u32 {
+    let (_, names, function_table, name_table, ordinal_table) = gdi32_exports(cpu);
+    let wanted = [name.as_bytes(), &[0]].concat();
+    let index = (0..names)
+        .find(|&i| {
+            let at = GDI32_BASE + peek_32(cpu, name_table + 4 * i);
+            let mut text = vec![0u8; wanted.len()];
+            peek(cpu, at, &mut text);
+            text == wanted
+        })
+        .map(|i| {
+            let mut ordinal = [0u8; 2];
+            peek(cpu, ordinal_table + 2 * i, &mut ordinal);
+            u16::from_le_bytes(ordinal) as u32
+        })
+        .unwrap_or_else(|| panic!("GDI32 exports {name}"));
+    function_table + 4 * index
+}
+
+/// Turn the running process's GDI32 image into what a build from before
+/// CreateScalableFontResourceA went into the middle of GDI32's table
+/// (#1583) made, and its imports into what that build bound: the stubs
+/// after the entry's place one place earlier, each trapping with its
+/// place, the slot after them empty, and the exports and the import
+/// table slots `iat` that point at them 8 bytes earlier.
+fn without_create_scalable_font_resource(cpu: &mut Cpu, iat: &[u32]) {
+    let (functions, _, function_table, _, _) = gdi32_exports(cpu);
+    let entry = gdi32_export(cpu, "CreateScalableFontResourceA");
+    let inserted = peek_32(cpu, entry);
+    let k = (inserted - STUBS_RVA) / 8;
+    let mut stubs = Vec::new();
+    loop {
+        let mut stub = [0u8; 8];
+        peek(cpu, GDI32_BASE + STUBS_RVA + 8 * stubs.len() as u32, &mut stub);
+        if stub[..2] != [0xFE, 0x3E] {
+            break;
+        }
+        stubs.push(stub);
+    }
+    let n = stubs.len() as u32;
+    let end = STUBS_RVA + 8 * n;
+    let dll = u16::from_le_bytes([stubs[0][2], stubs[0][3]]) >> 10;
+    for slot in 0..n {
+        let mut stub = [0u8; 8];
+        if slot + 1 < n {
+            stub = stubs[(if slot < k { slot } else { slot + 1 }) as usize];
+            stub[2..4].copy_from_slice(&(dll << 10 | slot as u16).to_le_bytes());
+        }
+        poke(cpu, GDI32_BASE + STUBS_RVA + 8 * slot, &stub);
+    }
+    for i in 0..functions {
+        let rva = peek_32(cpu, function_table + 4 * i);
+        if rva == inserted {
+            poke(cpu, function_table + 4 * i, &0u32.to_le_bytes());
+        } else if rva > inserted && rva < end {
+            poke(cpu, function_table + 4 * i, &(rva - 8).to_le_bytes());
+        }
+    }
+    for &slot in iat {
+        let address = peek_32(cpu, slot);
+        if address > GDI32_BASE + inserted && address < GDI32_BASE + end {
+            poke(cpu, slot, &(address - 8).to_le_bytes());
+        }
+    }
+}
+
+/// Run until the program runs on in its wait, past its start.
+fn run_into_the_wait(cpu: &mut Cpu) {
+    while !cpu.bus.win32.active() {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 10_000);
+        run_batch(cpu, &mut NoHook, false);
+    }
+    for _ in 0..20 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 10_000);
+        run_batch(cpu, &mut NoHook, false);
+    }
+    assert!(cpu.bus.win32.active() && cpu.pe());
+}
+
+/// A state saved by a build from before CreateScalableFontResourceA went
+/// into the middle of GDI32's table (#1583) calls the GDI32 functions its
+/// program was bound to after a load. GetRasterizerCaps is after the
+/// insertion: without the mending its old stub calls EnumFontFamiliesExW,
+/// the function before it in the table now.
+#[test]
+fn a_state_from_before_a_gdi32_insertion_calls_what_it_was_bound_to() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("GDI32.DLL", &["GetRasterizerCaps"]),
+    ];
+    let mut iat = Vec::new();
+    let image = program(BASE, false, imports, &[0xEE; 8], |a, l| {
+        iat = l.iat.clone();
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 300))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.push(6)?;
+        a.push(l.data as i32)?;
+        a.call(l.import(1))?;
+        // The size it wrote, and TRUE in the high nibble: 16h.
+        a.shl(eax, 4)?;
+        a.movzx(ecx, byte_ptr(l.at(0)))?;
+        a.add(eax, ecx)?;
+        a.ret()
+    });
+    let mut cpu = machine("stub_tables_gdi32", image);
+    run_into_the_wait(&mut cpu);
+    without_create_scalable_font_resource(&mut cpu, &iat);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    // A state the mended machine saves loads again as it was: the stubs
+    // already trap with their ids of now, and the load works out the
+    // image's order again.
+    let mut stubs = vec![0u8; 0x1000];
+    peek(&mut cpu, GDI32_BASE + STUBS_RVA, &mut stubs);
+    let mended = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &mended).unwrap();
+    let mut again = vec![0u8; 0x1000];
+    peek(&mut cpu, GDI32_BASE + STUBS_RVA, &mut again);
+    assert!(stubs == again, "a second load changed GDI32's stubs");
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x16, "{}", printed(&cpu));
+}
+
+/// A program that hooked a GDI32 function by rewriting its export, so
+/// that the export points into the program, has its state load as it
+/// is: the export says nothing of the order of GDI32's stubs.
+#[test]
+fn a_state_with_a_hooked_gdi32_export_loads() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("GDI32.DLL", &["GetRasterizerCaps"]),
+    ];
+    let mut iat = Vec::new();
+    let image = program(BASE, false, imports, &[0xEE; 8], |a, l| {
+        iat = l.iat.clone();
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 300))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.push(6)?;
+        a.push(l.data as i32)?;
+        a.call(l.import(1))?;
+        a.shl(eax, 4)?;
+        a.movzx(ecx, byte_ptr(l.at(0)))?;
+        a.add(eax, ecx)?;
+        a.ret()
+    });
+    let mut cpu = machine("stub_tables_hooked", image);
+    run_into_the_wait(&mut cpu);
+    // RemoveFontResourceA, the first export after the inserted entry,
+    // which `mend` looks at, points into the program.
+    let entry = gdi32_export(&mut cpu, "RemoveFontResourceA");
+    poke(&mut cpu, entry, &BASE.wrapping_sub(GDI32_BASE).to_le_bytes());
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x16, "{}", printed(&cpu));
+}
+
+/// The 16-bit GDI's GetRasterizerCaps goes on to GDI32's at the address
+/// Rust works out: in a state from before the insertion, that is where
+/// the older image has it.
+#[test]
+fn a_win16_call_into_an_older_gdi32_image_reaches_its_function() {
+    let mut code = win16::Code::new();
+    code.call("USER", 13); // GetTickCount
+    code.emit(&[0x89, 0xC6]); // mov si, ax
+    let wait = code.here();
+    code.call("USER", 13);
+    code.emit(&[0x29, 0xF0]); // sub ax, si
+    code.emit(&[0x3D, 0x2C, 0x01]); // cmp ax, 300
+    let back = wait.wrapping_sub(code.here() + 2) as u8;
+    code.emit(&[0x72, back]); // jb wait
+    code.emit(&[0x83, 0xEC, 0x06]); // sub sp, 6
+    code.emit(&[0x89, 0xE5]); // mov bp, sp
+    code.emit(&[0xC6, 0x46, 0x00, 0xEE]); // mov byte [bp], 0EEh
+    code.emit(&[0x16, 0x55]); // push ss, push bp
+    code.push(6);
+    code.call("GDI", 313); // GetRasterizerCaps
+    code.emit(&[0xC0, 0xE0, 0x04]); // shl al, 4
+    code.emit(&[0x02, 0x46, 0x00]); // add al, [bp]
+    code.exit_al();
+    let mut cpu = machine(
+        "stub_tables_win16",
+        win16::program(&code, win16::CODE),
+    );
+    run_into_the_wait(&mut cpu);
+    without_create_scalable_font_resource(&mut cpu, &[]);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x16, "{}", printed(&cpu));
+}
+
+/// A state whose GDI32 stubs are where no table put them doesn't load:
+/// its stubs would call other functions than the program's.
+#[test]
+fn a_state_with_gdi32_stubs_no_table_had_is_refused() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("GDI32.DLL", &["GetRasterizerCaps"]),
+    ];
+    let image = program(BASE, false, imports, &[0], |a, l| {
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 300))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.xor(eax, eax)?;
+        a.ret()
+    });
+    let mut cpu = machine("stub_tables_refused", image);
+    run_into_the_wait(&mut cpu);
+    let good = rust_dos::savestate::machine::save(&cpu);
+    // Every export of a GDI32 stub 16 bytes on: two places later, which
+    // no table had.
+    let (functions, _, function_table, _, _) = gdi32_exports(&mut cpu);
+    for i in 0..functions {
+        let rva = peek_32(&mut cpu, function_table + 4 * i);
+        if (STUBS_RVA..0x2000).contains(&rva) {
+            poke(&mut cpu, function_table + 4 * i, &(rva + 16).to_le_bytes());
+        }
+    }
+    let bad = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &good).unwrap();
+    let refused = rust_dos::savestate::machine::load(&mut cpu, &bad).unwrap_err();
+    assert!(refused.to_string().contains("GDI32.DLL"), "{refused}");
+    // The machine is as it was, and goes on.
+    assert!(run_to_exit(&mut cpu, 2000));
+    assert_eq!(cpu.errorlevel, 0);
 }

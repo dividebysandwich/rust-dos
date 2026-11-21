@@ -256,3 +256,50 @@ fn run_prompts(
     assert!(ended, "the program didn't end:\n{log}");
     (cpu.errorlevel, log)
 }
+
+/// A DOS program (a COM file) that changes to C:\SUB (if it is there),
+/// writes C:\MARK.TXT and ends with 5: the file holds what INT 2Fh
+/// AX=1600h gave it (Windows' version, as a DOS box on Windows has it),
+/// then its command tail.
+pub fn dos_marker() -> Vec<u8> {
+    const NAME: u16 = 0x0140;
+    const RESULT: u16 = 0x0150;
+    const SUB: u16 = 0x0160;
+    let [name_lo, name_hi] = NAME.to_le_bytes();
+    let [result_lo, result_hi] = RESULT.to_le_bytes();
+    let [sub_lo, sub_hi] = SUB.to_le_bytes();
+    let mut code = vec![
+        0xB4, 0x3B, // mov ah,3Bh
+        0xBA, sub_lo, sub_hi, // mov dx,sub
+        0xCD, 0x21, // int 21h
+        0xB8, 0x00, 0x16, // mov ax,1600h
+        0xCD, 0x2F, // int 2Fh
+        0xA3, result_lo, result_hi, // mov [result],ax
+        0xB4, 0x3C, // mov ah,3Ch
+        0x31, 0xC9, // xor cx,cx
+        0xBA, name_lo, name_hi, // mov dx,name
+        0xCD, 0x21, // int 21h
+        0x72, 0x22, // jc fail
+        0x89, 0xC3, // mov bx,ax
+        0xB4, 0x40, // mov ah,40h
+        0xB9, 0x02, 0x00, // mov cx,2
+        0xBA, result_lo, result_hi, // mov dx,result
+        0xCD, 0x21, // int 21h
+        0xB4, 0x40, // mov ah,40h
+        0x8A, 0x0E, 0x80, 0x00, // mov cl,[80h]
+        0x30, 0xED, // xor ch,ch
+        0xBA, 0x81, 0x00, // mov dx,81h
+        0xCD, 0x21, // int 21h
+        0xB4, 0x3E, // mov ah,3Eh
+        0xCD, 0x21, // int 21h
+        0xB8, 0x05, 0x4C, // mov ax,4C05h
+        0xCD, 0x21, // int 21h
+        0xB8, 0x06, 0x4C, // fail: mov ax,4C06h
+        0xCD, 0x21, // int 21h
+    ];
+    code.resize((NAME - 0x100) as usize, 0x90);
+    code.extend_from_slice(b"C:\\MARK.TXT\0");
+    code.resize((SUB - 0x100) as usize, 0);
+    code.extend_from_slice(b"C:\\SUB\0");
+    code
+}

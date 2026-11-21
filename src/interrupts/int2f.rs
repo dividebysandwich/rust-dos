@@ -5,8 +5,9 @@
 //! through the network redirector's, AX=1100h, see `mscdex.rs`), the DOS
 //! internal calls that find DOS's data segment and file tables (AX=1203h,
 //! 1216h, 1220h), DOS's interface for Windows' DOSMGR (AX=1607h BX=0015h)
-//! and the expanded memory manager's part of Windows' exit (AX=1606h) are
-//! there.
+//! the expanded memory manager's part of Windows' exit (AX=1606h), and
+//! Windows' installation and version checks (AX=1600h, 160Ah) from a DOS
+//! program the built-in Windows started are there.
 //! Every other function leaves the registers untouched, which callers read
 //! as "not installed" (AL stays 00h for the usual install checks, AX stays
 //! 1687h for the DPMI check with the host off, ...).
@@ -74,6 +75,20 @@ pub fn handle(cpu: &mut Cpu) {
             let (psp, handle) = (cpu.current_psp, cpu.bx());
             let at = dos_files::slot_address(&mut cpu.bus, psp, handle);
             point_es_di(cpu, at);
+        }
+        // Windows' installation check, from a DOS program a Windows
+        // program started (win32/dosvm.rs): Windows 4.x in enhanced mode,
+        // its version in AL and AH (4.0 for Windows 95, 4.10 for 98).
+        0x1600 if crate::win32::dosvm::running(&cpu.bus.win32) => {
+            let (major, minor) = crate::win32::dosvm::windows_version(cpu);
+            cpu.set_ax((minor as u16) << 8 | major as u16);
+        }
+        // Its version in BX and its mode in CX (3, enhanced).
+        0x160A if crate::win32::dosvm::running(&cpu.bus.win32) => {
+            let (major, minor) = crate::win32::dosvm::windows_version(cpu);
+            cpu.set_ax(0x0000);
+            cpu.set_bx((major as u16) << 8 | minor as u16);
+            cpu.set_cx(0x0003);
         }
         // The DPMI host (dpmi.rs): its entry point.
         0x1687 => {

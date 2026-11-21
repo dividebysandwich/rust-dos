@@ -6,40 +6,53 @@ use crate::cpu::{Cpu, FpuFlags, CpuFlags, FPU_TAG_EMPTY};
 use crate::f80::F80;
 use crate::instructions::utils::calculate_addr;
 
-// Performs the FPU comparison and sets Status Word flags
-// Used by FCOM, FCOMP, FCOMPP
-fn fpu_compare_values(cpu: &mut Cpu, lhs: f64, rhs: f64) {
-    // Clear C0, C2, C3
-    cpu.set_fpu_flag(FpuFlags::C0 | FpuFlags::C2 | FpuFlags::C3, false);
+// The compares report what the x87 does with the invalid exception
+// masked, whatever the control word says, as every x87 instruction here
+// does: with it unmasked, the FPU would leave the condition codes and the
+// stack as they were and raise the error at the next waiting instruction
+// (#914).
 
-    if lhs.is_nan() || rhs.is_nan() {
-        // Unordered: C3=1, C2=1, C0=1
-        cpu.set_fpu_flag(FpuFlags::C0 | FpuFlags::C2 | FpuFlags::C3, true);
-    } else if lhs == rhs {
-        // Equal: C3=1
-        cpu.set_fpu_flag(FpuFlags::C3, true);
-    } else if lhs < rhs {
-        // Less Than: C0=1
-        cpu.set_fpu_flag(FpuFlags::C0, true);
-    }
-    // Greater Than: All flags 0
+/// Whether a register's value makes a compare invalid (IE): a format the
+/// FPU doesn't take (`F80::is_unsupported`), or a NaN, of either kind for
+/// FCOM, FICOM, FTST and FCOMI, a signalling one for FUCOM and FUCOMI
+/// (`unordered`).
+fn invalid_operand(x: F80, unordered: bool) -> bool {
+    x.is_unsupported() || if unordered { x.is_signalling() } else { x.is_nan() }
 }
 
-/// Compare two values by their 80 bits (`F80::compare`), given where
-/// either holds more than its double (`precise`): the doubles are rounded
-/// to nearest, so a value just below a double could compare equal to it.
-/// False where the doubles' comparison stands.
-fn fpu_compare_precise(cpu: &mut Cpu, precise: Option<(F80, F80)>) -> bool {
-    let Some(order) = precise.and_then(|(lhs, rhs)| lhs.compare(&rhs)) else {
-        return false;
+/// How `lhs` and `rhs` order, None where either is a NaN. Where either
+/// register holds more than its double, `precise` has their 80 bits,
+/// which order them (`F80::compare`) where both are normal numbers or
+/// zeros: the doubles are rounded to nearest, so a value just below a
+/// double could compare equal to it.
+fn order(lhs: f64, rhs: f64, precise: Option<(F80, F80)>) -> Option<Ordering> {
+    precise.and_then(|(lhs, rhs)| lhs.compare(&rhs)).or_else(|| lhs.partial_cmp(&rhs))
+}
+
+/// Leave the status word as FCOM, FUCOM, FICOM and FTST do: C3, C2 and C0
+/// as `order` says (all three set for unordered, None), and C1 clear. An
+/// empty register (`underflow`, a stack fault) sets SF and IE, and an
+/// invalid operand (`invalid_operand`) IE; either makes it unordered.
+fn set_condition_codes(cpu: &mut Cpu, order: Option<Ordering>, underflow: bool, invalid: bool) {
+    cpu.set_fpu_flag(FpuFlags::C0 | FpuFlags::C1 | FpuFlags::C2 | FpuFlags::C3, false);
+    set_invalid(cpu, underflow, invalid);
+    let order = if underflow || invalid { None } else { order };
+    let codes = match order {
+        None => FpuFlags::C0 | FpuFlags::C2 | FpuFlags::C3,
+        Some(Ordering::Equal) => FpuFlags::C3,
+        Some(Ordering::Less) => FpuFlags::C0,
+        Some(Ordering::Greater) => FpuFlags::empty(),
     };
-    cpu.set_fpu_flag(FpuFlags::C0 | FpuFlags::C2 | FpuFlags::C3, false);
-    match order {
-        Ordering::Equal => cpu.set_fpu_flag(FpuFlags::C3, true),
-        Ordering::Less => cpu.set_fpu_flag(FpuFlags::C0, true),
-        Ordering::Greater => {}
+    cpu.set_fpu_flag(codes, true);
+}
+
+/// SF and IE for a stack underflow, IE alone for an invalid operand.
+fn set_invalid(cpu: &mut Cpu, underflow: bool, invalid: bool) {
+    if underflow {
+        cpu.set_fpu_flag(FpuFlags::SF | FpuFlags::IE, true);
+    } else if invalid {
+        cpu.set_fpu_flag(FpuFlags::IE, true);
     }
-    true
 }
 
 /// A double from memory as 80 bits, where a register holds it as it is (0
@@ -86,30 +99,39 @@ pub fn fcom_registers(instr: &Instruction) -> Option<(usize, usize, u8)> {
 }
 
 pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
+    let unordered =
+        matches!(instr.mnemonic(), Mnemonic::Fucom | Mnemonic::Fucomp | Mnemonic::Fucompp);
     // The doubles, and the 80 bits where either register holds more.
-    let (lhs, rhs, precise) = match fcom_registers(instr) {
+    let (order, underflow, invalid) = match fcom_registers(instr) {
         Some((lhs, rhs, _)) => {
-            let precise = (cpu.fpu_beyond_double(lhs) || cpu.fpu_beyond_double(rhs))
-                .then(|| (cpu.fpu_get(lhs), cpu.fpu_get(rhs)));
-            (cpu.fpu_get_f64(lhs), cpu.fpu_get_f64(rhs), precise)
+            let (a, b) = (cpu.fpu_get(lhs), cpu.fpu_get(rhs));
+            let beyond = cpu.fpu_beyond_double(lhs) || cpu.fpu_beyond_double(rhs);
+            let precise = beyond.then_some((a, b));
+            (
+                order(cpu.fpu_get_f64(lhs), cpu.fpu_get_f64(rhs), precise),
+                cpu.fpu_is_empty(lhs) || cpu.fpu_is_empty(rhs),
+                invalid_operand(a, unordered) || invalid_operand(b, unordered),
+            )
         }
         None => {
             // Memory Comparison is ALWAYS ST(0) vs Memory
-            let val_0 = cpu.fpu_get_f64(0);
+            let st0 = cpu.fpu_get(0);
             let addr = calculate_addr(cpu, instr);
             let val_op = match instr.memory_size() {
                 MemorySize::Float32 => f32::from_bits(cpu.lin_read_32(addr)) as f64,
                 MemorySize::Float64 => f64::from_bits(cpu.lin_read_64(addr)),
                 _ => f64::NAN,
             };
-            let precise = cpu.fpu_beyond_double(0).then(|| f80_of(val_op).map(|op| (cpu.fpu_get(0), op))).flatten();
-            (val_0, val_op, precise)
+            let precise =
+                cpu.fpu_beyond_double(0).then(|| f80_of(val_op).map(|op| (st0, op))).flatten();
+            (
+                order(cpu.fpu_get_f64(0), val_op, precise),
+                cpu.fpu_is_empty(0),
+                invalid_operand(st0, false) || val_op.is_nan(),
+            )
         }
     };
-
-    if !fpu_compare_precise(cpu, precise) {
-        fpu_compare_values(cpu, lhs, rhs);
-    }
+    set_condition_codes(cpu, order, underflow, invalid);
 
     match instr.mnemonic() {
         Mnemonic::Fcomp | Mnemonic::Fucomp => cpu.fpu_drop(),
@@ -122,17 +144,16 @@ pub fn fcom_variants(cpu: &mut Cpu, instr: &Instruction) {
 }
 
 pub fn ficom_variants(cpu: &mut Cpu, instr: &Instruction) {
-    let st0 = cpu.fpu_get(0).get_f64();
+    let st0 = cpu.fpu_get(0);
     let addr = calculate_addr(cpu, instr);
     let val = match instr.memory_size() {
         MemorySize::Int16 => (cpu.lin_read_16(addr) as i16) as f64,
         MemorySize::Int32 => (cpu.lin_read_32(addr) as i32) as f64,
         _ => 0.0,
     };
-    let precise = cpu.fpu_beyond_double(0).then(|| f80_of(val).map(|op| (cpu.fpu_get(0), op))).flatten();
-    if !fpu_compare_precise(cpu, precise) {
-        fpu_compare_values(cpu, st0, val);
-    }
+    let precise = cpu.fpu_beyond_double(0).then(|| f80_of(val).map(|op| (st0, op))).flatten();
+    let order = order(st0.get_f64(), val, precise);
+    set_condition_codes(cpu, order, cpu.fpu_is_empty(0), invalid_operand(st0, false));
     if instr.mnemonic() == Mnemonic::Ficomp {
         cpu.fpu_pop();
     }
@@ -176,21 +197,29 @@ pub fn fxam(cpu: &mut Cpu) {
 
 // FTST: Test ST(0) against 0.0
 pub fn ftst(cpu: &mut Cpu) {
-    let st0 = cpu.fpu_get(0).get_f64();
-    // Compare ST(0) vs 0.0
-    fpu_compare_values(cpu, st0, 0.0);
+    let st0 = cpu.fpu_get(0);
+    let order = order(st0.get_f64(), 0.0, None);
+    set_condition_codes(cpu, order, cpu.fpu_is_empty(0), invalid_operand(st0, false));
 }
 
-// FCOMI/FUCOMI... (Pentium Pro+)
-// These set CPU EFLAGS (ZF, PF, CF) directly, not the FPU status word condition codes.
+/// FCOMI, FCOMIP, FUCOMI and FUCOMIP (Pentium Pro and later): the result
+/// goes to EFLAGS' ZF, PF and CF rather than to the condition codes. In
+/// the status word they clear C1 and set IE and SF as FCOM and FUCOM do.
 pub fn fcomi_variants(cpu: &mut Cpu, instr: &Instruction) {
     let idx = instr.op1_register().number() - iced_x86::Register::ST0.number();
     let st0 = cpu.fpu_get(0);
     let sti = cpu.fpu_get(idx);
-    
-    // ZF=1 if equal, CF=1 if less, all three if unordered (a NaN). The
-    // comparison is of all 80 bits, and +0 equals -0.
-    let (zf, pf, cf) = if st0.is_nan() || sti.is_nan() {
+    let m = instr.mnemonic();
+    let unordered = matches!(m, Mnemonic::Fucomi | Mnemonic::Fucomip);
+    let underflow = cpu.fpu_is_empty(0) || cpu.fpu_is_empty(idx);
+    let invalid = invalid_operand(st0, unordered) || invalid_operand(sti, unordered);
+    cpu.set_fpu_flag(FpuFlags::C1, false);
+    set_invalid(cpu, underflow, invalid);
+
+    // ZF=1 if equal, CF=1 if less, all three if unordered (a NaN, an
+    // empty register or an invalid operand). The comparison is of all 80
+    // bits, and +0 equals -0.
+    let (zf, pf, cf) = if underflow || invalid || st0.is_nan() || sti.is_nan() {
         (true, true, true)
     } else if st0.get() == sti.get() || (st0.is_zero() && sti.is_zero()) {
         (true, false, false)
@@ -212,8 +241,7 @@ pub fn fcomi_variants(cpu: &mut Cpu, instr: &Instruction) {
     cpu.set_cpu_flag(CpuFlags::OF | CpuFlags::SF | CpuFlags::AF, false);
 
     // Pop if P-variant (FCOMIP / FUCOMIP)
-    let m = instr.mnemonic();
-    if m == iced_x86::Mnemonic::Fcomip || m == iced_x86::Mnemonic::Fucomip {
+    if m == Mnemonic::Fcomip || m == Mnemonic::Fucomip {
         cpu.fpu_pop();
     }
 }

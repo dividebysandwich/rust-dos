@@ -923,6 +923,7 @@ impl Item {
             SbType => match sb.model {
                 SbModel::Sb16 => "SB16",
                 SbModel::Awe32 => "SB AWE32",
+                SbModel::SbPro1 => "SB Pro",
                 SbModel::SbPro2 => "SB Pro 2",
                 SbModel::Sb2 => "SB 2.0",
                 SbModel::Sb16Vibra => "SB16 ViBRA PnP",
@@ -948,7 +949,17 @@ impl Item {
             Awe32Ram => ram_size(s.sound.awe32ram),
             Opl => match s.sound.adlib_gold() {
                 Some(gold) => format!("AdLib Gold {:X}h", gold.base),
-                None => if s.sound.opl3 { "OPL3" } else { "OPL2" }.to_string(),
+                None => {
+                    let name = |chip| match chip {
+                        crate::opl::Chip::Opl3 => "OPL3",
+                        crate::opl::Chip::Opl2 => "OPL2",
+                        crate::opl::Chip::DualOpl2 => "2 x OPL2",
+                    };
+                    match s.sound.opl {
+                        Some(chip) => name(chip).to_string(),
+                        None => format!("auto ({})", name(s.sound.fm_chip())),
+                    }
+                }
             },
             Gus => on_off(gus.enabled),
             GusBase => format!("{:X}h", gus.base),

@@ -279,7 +279,7 @@ impl F80 {
         if !a_nan && !b_nan {
             return None;
         }
-        let signalling = |x: &F80| x.is_nan() && x.st & QUIET == 0;
+        let signalling = |x: &F80| x.is_signalling();
         let invalid = signalling(self) || signalling(&b);
         let mut nan = *self;
         if a_nan && b_nan {
@@ -341,6 +341,11 @@ impl F80 {
     pub fn is_nan(&self) -> bool {
         let exponent = (self.st >> 64) & 0x7FFF;
         exponent == 0x7FFF && self.st & MANTISSA_MASK_NOINT != 0
+    }
+
+    /// A NaN with the quiet bit (bit 62 of the significand) clear.
+    pub fn is_signalling(&self) -> bool {
+        self.is_nan() && self.st & 1 << 62 == 0
     }
 
     /// The value as FBSTP stores it, rounded as `rc` (the control word's RC

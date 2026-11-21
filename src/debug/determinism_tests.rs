@@ -1516,6 +1516,7 @@ const STILL: &[(&str, &str)] = &[
     ("VIDE.gate_array_shadow_at", "the PCjr's and Tandy's gate array"),
     ("SOUN.tandy_sound", "the PCjr's and Tandy's sound chip"),
     ("SOUN.gus_line", "the Ultrasound's interrupt line, up only until the handler reads the card"),
+    ("SOUN.opl_right", "the SB Pro 1's right OPL2: the machine's AWE32 has one OPL3"),
     ("DOS.dos_high", "the settings' DOS=HIGH"),
     ("DOS.disk_io", "the disk's speed settings, and the time charged until the next instruction takes it"),
     ("CDHD", "MSCDEX's heads: the run's CD drive is a folder, which has no sectors to seek"),
