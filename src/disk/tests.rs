@@ -1521,12 +1521,12 @@ fn find_next_sees_the_guest_s_changes_mid_search() {
     }
     age(&root);
     let mut disk = DiskController::new(root.clone());
-    // A program deleting what it finds, as before: the listing after
-    // the delete is the folder as it is then.
+    // A program deleting what it finds gets the next file, as DOS gives
+    // it: the deleted file's slot stays where it was on a disk.
     assert_eq!(disk.find_directory_entry(r"C:\*.DAT", 0, 0).unwrap().filename, "A.DAT");
     disk.delete_file(r"C:\A.DAT").unwrap();
     age(&root);
-    assert_eq!(disk.find_directory_entry(r"C:\*.DAT", 1, 0).unwrap().filename, "C.DAT");
+    assert_eq!(disk.find_directory_entry(r"C:\*.DAT", 1, 0).unwrap().filename, "B.DAT");
 
     // A write changes the size a search reports.
     let handle = disk.open_file(r"C:\C.DAT", 2, PSP).unwrap();
@@ -1548,6 +1548,52 @@ fn find_next_sees_the_guest_s_changes_mid_search() {
     let source = disk.resolve_path(r"C:\").unwrap();
     assert!(disk.host_dirs.searches.borrow().iter().any(|s| s.key.dir == source), "kept");
     assert_eq!(disk.find_directory_entry(r"C:\*.DAT", 1, 0).unwrap().filename, "C.DAT");
+}
+
+/// Ultima VII's U7.EXE empties GAMEDAT for a new game with FindFirst and
+/// FindNext, deleting each file it finds, and then removes the folder.
+/// On a disk every file is found, as deleting one leaves its slot where
+/// it was; in a host folder, changed within `RECENT` all the while, the
+/// search goes on after the last entry found that is still there.
+#[test]
+fn a_program_deleting_each_file_it_finds_finds_them_all() {
+    let root = scratch("find_next_delete_all");
+    fs::create_dir(root.join("GAMEDAT")).unwrap();
+    let names: Vec<String> = (0..20).map(|i| format!("U7IREG{i:02X}")).collect();
+    for name in &names {
+        fs::write(root.join("GAMEDAT").join(name), b"x").unwrap();
+    }
+    let mut disk = DiskController::new(root.clone());
+    let spec = r"C:\GAMEDAT\*.*";
+    let mut found = Vec::new();
+    let mut next = 0;
+    while let Ok((entry, after)) = disk.find_entry_from(spec, next, 0) {
+        disk.delete_file(&format!(r"C:\GAMEDAT\{}", entry.filename))
+            .unwrap();
+        found.push(entry.filename);
+        next = after;
+    }
+    assert_eq!(found, names);
+    disk.remove_directory(r"C:\GAMEDAT").unwrap();
+
+    // Files another program adds after the last one found are found too,
+    // and those the guest deletes before the search reaches them aren't.
+    fs::create_dir(root.join("D")).unwrap();
+    for name in ["A", "B", "C", "D"] {
+        fs::write(root.join("D").join(name), b"x").unwrap();
+    }
+    let spec = r"C:\D\*.*";
+    let (a, next) = disk.find_entry_from(spec, 0, 0).unwrap();
+    assert_eq!(a.filename, "A");
+    disk.delete_file(r"C:\D\B").unwrap();
+    fs::write(root.join("D").join("E"), b"x").unwrap();
+    let rest: Vec<String> =
+        std::iter::successors(disk.find_entry_from(spec, next, 0).ok(), |(_, next)| {
+            disk.find_entry_from(spec, *next, 0).ok()
+        })
+        .map(|(entry, _)| entry.filename)
+        .collect();
+    assert_eq!(rest, ["C", "D", "E"]);
 }
 
 #[test]

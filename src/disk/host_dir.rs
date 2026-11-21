@@ -48,7 +48,10 @@ use web_time::Instant;
 /// FindNext (`DiskController::find_directory_entry`), whatever their size:
 /// a listing stats each entry. FindFirst always lists afresh, so where a
 /// folder's time doesn't move, a file another program adds mid-search
-/// shows on the next FindFirst.
+/// shows on the next FindFirst. A search whose folder changed lists it
+/// again and goes on after the last entry it found that is still there
+/// (`resume_at`), so that a program deleting each file it finds gets the
+/// next one, as DOS gives it on a disk.
 #[derive(Default)]
 pub(super) struct HostDirCache {
     /// Counts the guest's changes to the names in host folders.
@@ -159,10 +162,14 @@ impl Settled {
     }
 }
 
-/// A search of a host folder, as FindFirst listed it.
+/// A search of a host folder, as last listed.
 pub(super) struct HostSearch {
     pub(super) key: SearchKey,
-    modified: std::time::SystemTime,
+    /// The folder's time when listed; None for a `RECENT` folder, or one
+    /// `std::fs` doesn't reach, which is listed again for each FindNext.
+    modified: Option<std::time::SystemTime>,
+    /// The guest changed something in the folder since (`touched`).
+    stale: bool,
     entries: Rc<[DosDirEntry]>,
 }
 
@@ -269,7 +276,11 @@ impl HostDirCache {
                 _ => false,
             }
         });
-        self.searches.borrow_mut().retain(|s| Some(s.key.dir.as_path()) != parent && !s.key.dir.starts_with(path));
+        for search in self.searches.borrow_mut().iter_mut() {
+            if Some(search.key.dir.as_path()) == parent || search.key.dir.starts_with(path) {
+                search.stale = true;
+            }
+        }
     }
 
     /// What the files in the host folder `dir` take with clusters of
@@ -482,28 +493,63 @@ impl HostDirCache {
         self.clock.set(Some(self.now() + Self::TRUST));
     }
 
-    /// The listing of the search `key`: the one kept, unless `first` (a
-    /// new search lists the folder as it is now), or from `list`.
+    /// The listing of the search `key` and where in it entry `index` of
+    /// the search is: the listing kept, unless `index` is 0 (a new search
+    /// lists the folder as it is now) or the folder changed since, or one
+    /// from `list`. In a new listing of a search that goes on, the index
+    /// is moved to go on after the last entry found that is still there.
     pub(super) fn search(
         &self,
         key: SearchKey,
-        first: bool,
+        index: usize,
         list: impl FnOnce() -> Result<Vec<DosDirEntry>, u8>,
-    ) -> Result<Rc<[DosDirEntry]>, u8> {
+    ) -> Result<(Rc<[DosDirEntry]>, usize), u8> {
         let mut searches = self.searches.borrow_mut();
         let at = searches.iter().position(|s| s.key == key);
         let kept = at.map(|i| searches.remove(i));
-        let Settled::At(modified) = Self::settled(&key.dir) else {
-            return list().map(Into::into);
-        };
-        let entries = match kept {
-            Some(kept) if !first && kept.modified == modified => kept.entries,
-            _ => list()?.into(),
+        let modified = Self::settled(&key.dir).time();
+        let (entries, index) = match kept {
+            Some(kept)
+                if index > 0 && !kept.stale && modified.is_some() && kept.modified == modified =>
+            {
+                (kept.entries, index)
+            }
+            Some(kept) if index > 0 => {
+                let entries: Rc<[DosDirEntry]> = list()?.into();
+                let index = Self::resume_at(&kept.entries, index, &entries);
+                (entries, index)
+            }
+            _ => (list()?.into(), index),
         };
         if searches.len() >= Self::MAX_SEARCHES {
             searches.remove(0);
         }
-        searches.push(HostSearch { key, modified, entries: entries.clone() });
-        Ok(entries)
+        let stale = false;
+        searches.push(HostSearch {
+            key,
+            modified,
+            stale,
+            entries: entries.clone(),
+        });
+        Ok((entries, index))
+    }
+
+    /// Where a search that had found the entries of `old` up to `index`
+    /// goes on in `new`, a listing of its folder made since: after the
+    /// last of them still in `new`, or from the start where none is. DOS
+    /// goes on from a slot of the directory, which deleting a file found
+    /// doesn't move: a program that deletes each file it finds (Ultima
+    /// VII's U7.EXE emptying GAMEDAT for a new game) gets every one.
+    fn resume_at(old: &[DosDirEntry], index: usize, new: &[DosDirEntry]) -> usize {
+        let at: HashMap<&str, usize> = new
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.filename.as_str(), i))
+            .collect();
+        old[..index.min(old.len())]
+            .iter()
+            .rev()
+            .find_map(|e| at.get(e.filename.as_str()))
+            .map_or(0, |i| i + 1)
     }
 }
