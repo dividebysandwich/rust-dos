@@ -2422,6 +2422,18 @@ fn start_program_from(
     program_bytes: Vec<u8>,
     dirs: &[&str],
 ) -> u8 {
+    start_programs(test, parent_at, line, vec![(child, program_bytes)], dirs)
+}
+
+/// `start_program_from`, with the files `files` (each a path and its
+/// bytes) in place of C.EXE.
+fn start_programs(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    files: Vec<(&str, Vec<u8>)>,
+    dirs: &[&str],
+) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",
@@ -2472,7 +2484,7 @@ fn start_program_from(
     for dir in dirs {
         fs::create_dir_all(base.join(dir)).unwrap();
     }
-    for (at, bytes) in [(parent_at, parent), (child, program_bytes)] {
+    for (at, bytes) in [(parent_at, parent)].into_iter().chain(files) {
         let file = base.join(at.replace('\\', "/"));
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(file, bytes).unwrap();
@@ -2512,6 +2524,41 @@ fn a_program_starts_a_windows_3_1_program_and_waits_for_it() {
     let child = win16::program(&code, win16::CODE);
     let code = start_program("child_win16", "C.EXE an argument", "C.EXE", child, &[]);
     assert_eq!(code, 0x71);
+}
+
+/// CreateProcessA of a DOS program, which Windows 98 runs in a DOS box:
+/// it succeeds, the process handle is signaled when the program ends,
+/// and GetExitCodeProcess gives its exit code. The child (a COM file)
+/// ends with 7 when its command tail is the line's arguments, " an
+/// argument", else 9; so 71h.
+#[test]
+fn a_program_starts_a_dos_program_and_waits_for_it() {
+    let child = vec![
+        0xA0, 0x80, 0x00, // mov al,[80h]: the tail's length
+        0x3C, 0x0C, // cmp al,12
+        0xB0, 0x07, // mov al,7
+        0x74, 0x02, // je end
+        0xB0, 0x09, // mov al,9
+        0xB4, 0x4C, 0xCD, 0x21, // end: mov ah,4Ch; int 21h
+    ];
+    let code = start_program("child_dos", "C.COM an argument", "C.COM", child, &[]);
+    assert_eq!(code, 0x71);
+}
+
+/// CreateProcessA of a batch file: Windows 98 runs it with COMMAND.COM
+/// /C in a DOS box, and the programs it starts see its arguments. The
+/// batch file starts the DOS program D.COM with its first argument,
+/// which writes C:\MARK.TXT (`win16::dos_marker`).
+#[test]
+fn a_program_starts_a_batch_file() {
+    let batch = b"@D.COM %1\r\n".to_vec();
+    let files = vec![("C.BAT", batch), ("D.COM", win16::dos_marker())];
+    let code = start_programs("child_batch", "T.EXE", "C.BAT ARG", files, &[]);
+    let base = PathBuf::from("target/test_win32/child_batch");
+    // CreateProcessA's TRUE and the wait's WAIT_OBJECT_0.
+    assert_eq!(code & 0x0F, 0x01);
+    let written = fs::read(base.join("MARK.TXT")).unwrap();
+    assert_eq!(&written[2..], b" ARG");
 }
 
 #[test]

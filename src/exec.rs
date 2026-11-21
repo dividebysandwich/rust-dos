@@ -1580,9 +1580,14 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     if let Some(before) = &before
         && guest_page_fault(cpu, before)
     {
+        // The service runs again, and starts its DOS program then.
+        crate::win32::dosvm::discard_pending(cpu);
         return true;
     }
     cpu.bus.guest_paging = None;
+    // A DOS program the service started runs now, and the caller goes on
+    // after it once it ends (win32/dosvm.rs).
+    crate::win32::dosvm::start_pending(cpu);
     if reads_clock {
         crate::idle::clock_read(cpu, trap.0, trap.1);
     }
