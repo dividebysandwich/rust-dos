@@ -2451,6 +2451,20 @@ fn start_programs_in(
     files: Vec<(&str, Vec<u8>)>,
     dirs: &[&str],
 ) -> u8 {
+    start_programs_using(test, parent_at, line, directory, 0, files, dirs)
+}
+
+/// `start_programs_in`, with a parent that first commits `used` bytes
+/// (VirtualAlloc), writes to each of their pages and releases them.
+fn start_programs_using(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    directory: Option<&str>,
+    used: u32,
+    files: Vec<(&str, Vec<u8>)>,
+    dirs: &[&str],
+) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",
@@ -2458,6 +2472,8 @@ fn start_programs_in(
         "CloseHandle",
         "ExitProcess",
         "GetLastError",
+        "VirtualAlloc",
+        "VirtualFree",
     ];
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
     // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
@@ -2472,6 +2488,27 @@ fn start_programs_in(
     }
     let parent = program(BASE, false, imports, &data, |a, l| {
         let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        if used > 0 {
+            // MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE.
+            a.push(4)?;
+            a.push(0x3000)?;
+            a.push(used as i32)?;
+            a.push(0)?;
+            a.call(f("VirtualAlloc"))?;
+            a.mov(edi, eax)?;
+            a.mov(ecx, used / 0x1000)?;
+            let mut touch = a.create_label();
+            a.set_label(&mut touch)?;
+            a.mov(byte_ptr(eax), 1)?;
+            a.add(eax, 0x1000)?;
+            a.dec(ecx)?;
+            a.jnz(touch)?;
+            // MEM_RELEASE.
+            a.push(0x8000)?;
+            a.push(0)?;
+            a.push(edi)?;
+            a.call(f("VirtualFree"))?;
+        }
         a.push(l.at(0x90) as i32)?;
         a.push(l.at(0x40) as i32)?;
         a.push(directory.map_or(0, |_| l.at(0xB0) as i32))?;
@@ -2825,6 +2862,259 @@ fn a_dos_program_leaves_the_machine_as_it_found_it() {
 #[test]
 fn a_state_saved_while_a_dos_program_runs_goes_on_with_it() {
     run_dos_machine_changer("dos_machine_state", true);
+}
+
+/// A DOS program that asks the XMS driver for its free memory (function
+/// 88h, as MEM /C does) and writes the largest free block and the total
+/// free, in KB, to XMS.BIN: exit code 5, or 6 if there is no XMS driver
+/// or the file can't be made.
+fn xms_reporter() -> Vec<u8> {
+    const NAME: u16 = 0x0180;
+    const FREE: u16 = 0x0190;
+    const ENTRY: u16 = 0x01A0;
+    let assemble = || -> Result<Vec<u8>, IcedError> {
+        let mut a = CodeAssembler::new(16)?;
+        let mut fail = a.create_label();
+        a.mov(ax, 0x4300)?;
+        a.int(0x2F)?;
+        a.cmp(al, 0x80)?;
+        a.jne(fail)?;
+        a.mov(ax, 0x4310)?;
+        a.int(0x2F)?;
+        a.mov(word_ptr(ENTRY), bx)?;
+        a.mov(word_ptr(ENTRY + 2), es)?;
+        a.mov(ah, 0x88)?;
+        // call far [ENTRY]
+        let [lo, hi] = ENTRY.to_le_bytes();
+        a.db(&[0xFF, 0x1E, lo, hi])?;
+        a.mov(dword_ptr(FREE), eax)?;
+        a.mov(dword_ptr(FREE + 4), edx)?;
+        a.mov(ah, 0x3C)?;
+        a.xor(cx, cx)?;
+        a.mov(dx, NAME as u32)?;
+        a.int(0x21)?;
+        a.jc(fail)?;
+        a.mov(bx, ax)?;
+        a.mov(ah, 0x40)?;
+        a.mov(cx, 8)?;
+        a.mov(dx, FREE as u32)?;
+        a.int(0x21)?;
+        a.mov(ah, 0x3E)?;
+        a.int(0x21)?;
+        a.mov(ax, 0x4C05)?;
+        a.int(0x21)?;
+        a.set_label(&mut fail)?;
+        a.mov(ax, 0x4C06)?;
+        a.int(0x21)?;
+        a.assemble(0x100)
+    };
+    let mut code = assemble().unwrap();
+    assert!(code.len() <= (NAME - 0x100) as usize);
+    code.resize((NAME - 0x100) as usize, 0x90);
+    code.extend_from_slice(b"XMS.BIN\0");
+    code
+}
+
+/// The largest free block of XMS and the XMS free, in KB, that a DOS
+/// program a Windows program starts finds, after the Windows program
+/// used and released `used` bytes of memory.
+fn xms_free_after(test: &str, used: u32) -> (u32, u32) {
+    let files = vec![("XMS.COM", xms_reporter())];
+    let code = start_programs_using(test, "T.EXE", "C:\\XMS.COM", None, used, files, &[]);
+    // 5 from the program, WAIT_OBJECT_0 and TRUE.
+    assert_eq!(code, 0x51);
+    let base = PathBuf::from("target/test_win32").join(test);
+    let report = fs::read(base.join("XMS.BIN")).unwrap();
+    let word = |at: usize| u32::from_le_bytes(report[at..at + 4].try_into().unwrap());
+    (word(0), word(4))
+}
+
+/// A DOS program a Windows program starts gets the memory the Windows
+/// programs have free as XMS, as in a DOS box of Windows 98, where the
+/// VMM gives it from the memory the system has: memory a Windows program
+/// used and gave back counts as well as memory never used. 4 MB used and
+/// released before CreateProcessA leaves the XMS the DOS program finds
+/// as it was without them (a page table or two of the system's may
+/// stay).
+#[test]
+fn a_dos_program_gets_the_memory_windows_programs_gave_back_as_xms() {
+    let (largest, total) = xms_free_after("dos_xms_unused", 0);
+    assert!(largest >= 8 * 1024, "only {largest} KB of XMS");
+    let (largest_after, total_after) = xms_free_after("dos_xms_given_back", 0x40_0000);
+    assert!(
+        largest_after + 64 >= largest,
+        "{largest_after} KB, {largest} KB before"
+    );
+    assert!(
+        total_after + 64 >= total,
+        "{total_after} KB, {total} KB before"
+    );
+}
+
+/// The pages a Windows program keeps while a DOS program it starts runs
+/// stay its own, with their bytes, wherever the system put them to lend
+/// the memory under them (`memory::compact`): T.EXE fills a view of a
+/// mapping of the swap file and, above 2 MB it touches and releases, a
+/// block it may run code in, each page with its address, and calls a
+/// function in that block. It then starts XMS.COM (`xms_reporter`),
+/// waits for it, and ends with 1 for CreateProcessA's TRUE, 2 if the
+/// block's pages read back right, 4 if the view's do, 8 if the function
+/// returns what it did, and the child's exit code shifted left by four:
+/// 5Fh. The XMS the child finds is what it finds when no memory was used
+/// and released, less what T.EXE still holds: the block moved down into
+/// the pages released, which the DOS program got.
+#[test]
+fn a_programs_pages_read_back_after_a_dos_program_got_the_memory_under_them() {
+    const RELEASED: i32 = 0x20_0000;
+    const KEPT: i32 = 0x1_0000;
+    const RESULT: i32 = 0x1234_5678;
+    let names: &[&str] = &[
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "VirtualAlloc",
+        "VirtualFree",
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
+    // the exit code at 0xA0, the view's address at 0xB0 and the block's
+    // at 0xB4.
+    let mut data = b"C:\\XMS.COM".to_vec();
+    data.resize(0xC0, 0);
+    data[0x40] = 68;
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        // Each of the `KEPT / 4096` pages from eax on gets its address.
+        let fill = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.mov(ecx, KEPT as u32 / 0x1000)?;
+            let mut page = a.create_label();
+            a.set_label(&mut page)?;
+            a.mov(dword_ptr(eax), eax)?;
+            a.add(eax, 0x1000)?;
+            a.dec(ecx)?;
+            a.jnz(page)
+        };
+        // `bit` in ebx if each of those pages from eax on still has it.
+        let check = |a: &mut CodeAssembler, bit: u32| -> Result<(), IcedError> {
+            a.mov(edx, bit)?;
+            a.mov(ecx, KEPT as u32 / 0x1000)?;
+            let mut page = a.create_label();
+            let mut same = a.create_label();
+            a.set_label(&mut page)?;
+            a.cmp(dword_ptr(eax), eax)?;
+            a.je(same)?;
+            a.xor(edx, edx)?;
+            a.set_label(&mut same)?;
+            a.add(eax, 0x1000)?;
+            a.dec(ecx)?;
+            a.jnz(page)?;
+            a.or(ebx, edx)
+        };
+        // A mapping of the swap file (PAGE_READWRITE), its view
+        // (FILE_MAP_WRITE), filled.
+        a.push(0)?;
+        a.push(KEPT)?;
+        a.push(0)?;
+        a.push(4)?;
+        a.push(0)?;
+        a.push(-1)?;
+        a.call(f("CreateFileMappingA"))?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(2)?;
+        a.push(eax)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(dword_ptr(l.at(0xB0)), eax)?;
+        fill(a)?;
+        // The memory released later: MEM_COMMIT | MEM_RESERVE,
+        // PAGE_READWRITE, each page touched.
+        a.push(4)?;
+        a.push(0x3000)?;
+        a.push(RELEASED)?;
+        a.push(0)?;
+        a.call(f("VirtualAlloc"))?;
+        a.mov(edi, eax)?;
+        a.mov(ecx, RELEASED as u32 / 0x1000)?;
+        let mut touch = a.create_label();
+        a.set_label(&mut touch)?;
+        a.mov(byte_ptr(eax), 1)?;
+        a.add(eax, 0x1000)?;
+        a.dec(ecx)?;
+        a.jnz(touch)?;
+        // The block kept, PAGE_EXECUTE_READWRITE, filled, with
+        // `mov eax,RESULT; ret` in its last page, which runs once.
+        a.push(0x40)?;
+        a.push(0x3000)?;
+        a.push(KEPT)?;
+        a.push(0)?;
+        a.call(f("VirtualAlloc"))?;
+        a.mov(dword_ptr(l.at(0xB4)), eax)?;
+        fill(a)?;
+        a.mov(esi, dword_ptr(l.at(0xB4)))?;
+        a.add(esi, KEPT - 0x1000 + 0x100)?;
+        let [r0, r1, r2, r3] = RESULT.to_le_bytes();
+        a.mov(dword_ptr(esi), u32::from_le_bytes([0xB8, r0, r1, r2]))?;
+        a.mov(dword_ptr(esi + 4), u32::from_le_bytes([r3, 0xC3, 0, 0]))?;
+        a.call(esi)?;
+        // MEM_RELEASE.
+        a.push(0x8000)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("VirtualFree"))?;
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        a.mov(ebx, eax)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("GetExitCodeProcess"))?;
+        a.mov(eax, dword_ptr(l.at(0xB4)))?;
+        check(a, 2)?;
+        a.mov(eax, dword_ptr(l.at(0xB0)))?;
+        check(a, 4)?;
+        a.mov(esi, dword_ptr(l.at(0xB4)))?;
+        a.add(esi, KEPT - 0x1000 + 0x100)?;
+        a.call(esi)?;
+        a.cmp(eax, RESULT)?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        a.shl(eax, 3)?;
+        a.or(ebx, eax)?;
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        a.shl(eax, 4)?;
+        a.or(eax, ebx)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let test = "dos_xms_pages_kept";
+    let base = scratch(test, &[]);
+    fs::write(base.join("T.EXE"), parent).unwrap();
+    fs::write(base.join("XMS.COM"), xms_reporter()).unwrap();
+    let mut cpu = Cpu::new(base.clone());
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x5F);
+    let report = fs::read(base.join("XMS.BIN")).unwrap();
+    let total = u32::from_le_bytes(report[4..8].try_into().unwrap());
+    let (_, before) = xms_free_after("dos_xms_pages_kept_unused", 0);
+    // The view, the block and a page table or two.
+    assert!(total + 256 >= before, "{total} KB, {before} KB without");
 }
 
 #[test]
