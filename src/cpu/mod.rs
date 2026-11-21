@@ -1279,7 +1279,21 @@ impl Cpu {
         // `cycles=auto` to the real-mode speed.
         self.pm_latched = false;
         self.os_idles = false;
+        let caches = self.seg;
         self.restore(&context.regs);
+        // DOS goes back to the parent with real-mode loads of its data
+        // segment registers (MOV SS, POP DS and POP ES), which change only
+        // the selector and the base. The limits stay as the child left
+        // them: a child that set 4 GB limits ("unreal mode") leaves them to
+        // the programs after it, as Ultima VII's MAINMENU.EXE does for
+        // U7.EXE, which then runs with them without setting them itself.
+        if !self.pe() {
+            for seg in [Seg::ES, Seg::SS, Seg::DS, Seg::FS, Seg::GS] {
+                let selector = self.seg[seg as usize].selector;
+                self.seg[seg as usize] = caches[seg as usize];
+                self.load_seg_real(seg, selector);
+            }
+        }
         self.current_psp = context.psp;
         self.heap_pointer = context.heap_pointer; // Restore heap specifically for that process? Maybe not... but safer.
         (self.bus.dta_segment, self.bus.dta_offset) = context.dta;

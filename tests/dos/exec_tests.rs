@@ -1,4 +1,4 @@
-use rust_dos::cpu::{Cpu, CpuFlags, CpuState};
+use rust_dos::cpu::{Cpu, CpuFlags, CpuState, Seg};
 use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
@@ -299,6 +299,76 @@ fn exec_leaves_a_com_program_the_whole_block_it_allocated() {
     assert_eq!((block.owner, block.size), (child, end - child));
     assert!(block.is_last());
     assert_eq!(cpu.bus.read_16(child as usize * 16 + 2), end, "the PSP's top of memory");
+}
+
+#[test]
+fn the_parent_keeps_the_4_gb_limits_its_child_left_in_real_mode() {
+    // Ultima VII's MAINMENU.EXE sets 4 GB limits and ends, and U7.EXE,
+    // which ULTIMA7.COM starts next, addresses memory above 1 MB with them.
+    // DOS goes back to the parent with real-mode segment loads, which
+    // leave the limits as they are.
+    #[rustfmt::skip]
+    let parent = [
+        0xB4, 0x4A,             // MOV AH,4Ah: shrink to 1000h paragraphs
+        0xBB, 0x00, 0x10,       // MOV BX,1000h
+        0xCD, 0x21,             // INT 21h
+        0xB8, 0x00, 0x4B,       // MOV AX,4B00h
+        0xBB, 0x00, 0x02,       // MOV BX,0200h
+        0xBA, 0x00, 0x03,       // MOV DX,0300h
+        0xCD, 0x21,             // INT 21h
+        0xF4,                   // HLT
+    ];
+    #[rustfmt::skip]
+    let child = [
+        0xFA,                               // 0100: CLI
+        0x8C, 0xC8,                         // MOV AX,CS
+        0x66, 0x0F, 0xB7, 0xC0,             // MOVZX EAX,AX
+        0x66, 0xC1, 0xE0, 0x04,             // SHL EAX,4
+        0x66, 0x05, 0x48, 0x01, 0x00, 0x00, // ADD EAX,148h: the GDT
+        0x66, 0xA3, 0x42, 0x01,             // MOV [0142h],EAX: its base
+        0x0F, 0x01, 0x16, 0x40, 0x01,       // LGDT [0140h]
+        0x0F, 0x20, 0xC0,                   // MOV EAX,CR0
+        0x0C, 0x01,                         // OR AL,1
+        0x0F, 0x22, 0xC0,                   // MOV CR0,EAX
+        0xBB, 0x08, 0x00,                   // MOV BX,8: flat, 4 GB
+        0x8E, 0xC3,                         // MOV ES,BX
+        0x8E, 0xDB,                         // MOV DS,BX
+        0x8E, 0xE3,                         // MOV FS,BX
+        0x8E, 0xEB,                         // MOV GS,BX
+        0x24, 0xFE,                         // AND AL,0FEh
+        0x0F, 0x22, 0xC0,                   // MOV CR0,EAX: real mode
+        0x8C, 0xC8,                         // MOV AX,CS
+        0x8E, 0xD8,                         // MOV DS,AX
+        0x8E, 0xC0,                         // MOV ES,AX
+        0xFB,                               // STI
+        0xB8, 0x00, 0x4C,                   // MOV AX,4C00h
+        0xCD, 0x21,                         // INT 21h
+        0x90, 0x90,                         // 013E
+        0x0F, 0x00, 0, 0, 0, 0, 0, 0,       // 0140: GDTR, limit 0Fh
+        0, 0, 0, 0, 0, 0, 0, 0,             // 0148: null descriptor
+        0xFF, 0xFF, 0, 0, 0, 0x92, 0xCF, 0, // 0150: data, base 0, 4 GB
+    ];
+    let dir = scratch(
+        "exec_unreal",
+        &[("PARENT.COM", &parent), ("CHILD.COM", &child)],
+    );
+    let mut cpu = Cpu::new(dir);
+    assert!(cpu.load_executable("PARENT.COM", None));
+    let psp = cpu.current_psp;
+    exec_child_com(&mut cpu, psp);
+    let segs = [Seg::DS, Seg::ES, Seg::FS, Seg::GS];
+    let parents = segs.map(|seg| cpu.seg_cache(seg).selector);
+
+    run_to_hlt_where(&mut cpu, |cpu| cpu.current_psp == psp);
+    assert!(!cpu.pe());
+    for (seg, parent) in segs.into_iter().zip(parents) {
+        let cache = cpu.seg_cache(seg);
+        assert_eq!(cache.selector, parent, "{seg:?}: the parent's segment");
+        assert_eq!(cache.base, parent as u32 * 16, "{seg:?}");
+        assert_eq!(cache.limit, 0xFFFF_FFFF, "{seg:?}: the child's limit");
+    }
+    // SS, which the child left alone, is as it was.
+    assert_eq!(cpu.seg_cache(Seg::SS).limit, 0xFFFF);
 }
 
 #[test]
