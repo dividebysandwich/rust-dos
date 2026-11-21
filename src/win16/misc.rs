@@ -107,16 +107,16 @@ pub static TOOLHELP: Def = Def {
         rust("GlobalInfo", 53, "p", global_info),
         rust("GlobalEntryHandle", 54, "pw", global_entry_handle),
         rust("GlobalEntryModule", 55, "pww", global_entry_module),
-        rust("LocalInfo", 56, "pw", zero),
-        rust("LocalFirst", 57, "pw", zero),
-        rust("LocalNext", 58, "p", zero),
-        rust("ModuleFirst", 59, "p", zero),
-        rust("ModuleNext", 60, "p", zero),
-        rust("ModuleFindName", 61, "pp", zero),
-        rust("ModuleFindHandle", 62, "pw", zero),
-        rust("TaskFirst", 63, "p", zero),
-        rust("TaskNext", 64, "p", zero),
-        rust("TaskFindHandle", 65, "pw", zero),
+        rust("LocalInfo", 56, "pw", local_info),
+        rust("LocalFirst", 57, "pw", local_first),
+        rust("LocalNext", 58, "p", local_next),
+        rust("ModuleFirst", 59, "p", module_first),
+        rust("ModuleNext", 60, "p", module_next),
+        rust("ModuleFindName", 61, "pp", module_find_name),
+        rust("ModuleFindHandle", 62, "pw", module_find_handle),
+        rust("TaskFirst", 63, "p", task_first),
+        rust("TaskNext", 64, "p", task_next),
+        rust("TaskFindHandle", 65, "pw", task_find_handle),
         rust("StackTraceFirst", 66, "pw", zero),
         rust("StackTraceCSIPFirst", 67, "pwwww", zero),
         rust("StackTraceNext", 68, "p", zero),
@@ -766,6 +766,292 @@ fn mem_man_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     super::write_16(cpu, at + 40, 4096);
     Some(1)
+}
+
+/// Whether the structure at `at` has `size` in its dwSize, as TOOLHELP
+/// checks before it fills one.
+fn sized(cpu: &Cpu, at: u32, size: u32) -> bool {
+    at != 0 && super::read_32(cpu, at) == size
+}
+
+/// Write `name` into the `len` bytes at `at`, cut short and ended with
+/// a NUL, the rest zeroed.
+fn put_name(cpu: &mut Cpu, at: u32, len: usize, name: &[u8]) {
+    let mut bytes = name[..name.len().min(len - 1)].to_vec();
+    bytes.resize(len, 0);
+    super::poke(cpu, at, &bytes);
+}
+
+/// TASKENTRY's size: dwSize, hTask, hTaskParent, hInst, hModule, wSS,
+/// wSP, wStackTop, wStackMinimum, wStackBottom, wcEvents, hQueue,
+/// szModule[10], wPSPOffset, hNext.
+const TASKENTRY_SIZE: u32 = 0x28;
+
+/// The tasks TaskFirst and TaskNext walk: those that haven't ended, in
+/// the order they started, the first the one GetCurrentTask gives in DX.
+fn live_tasks(cpu: &Cpu) -> Vec<usize> {
+    let tasks = &cpu.bus.win32.win16.tasks;
+    (0..tasks.len())
+        .filter(|&t| tasks[t].exit_code.is_none())
+        .collect()
+}
+
+/// Fill the TASKENTRY at `at` with the task whose handle is `handle`:
+/// whether there is one. hNext is the next task's handle, 0 after the
+/// last.
+fn fill_task_entry(cpu: &mut Cpu, at: u32, handle: u16) -> u32 {
+    if handle == 0 || !sized(cpu, at, TASKENTRY_SIZE) {
+        return 0;
+    }
+    let live = live_tasks(cpu);
+    let Some(place) = live
+        .iter()
+        .position(|&t| cpu.bus.win32.win16.tasks[t].handle == handle)
+    else {
+        return 0;
+    };
+    let t = live[place];
+    let task = cpu.bus.win32.win16.tasks[t].clone();
+    let next = live
+        .get(place + 1)
+        .map_or(0, |&n| cpu.bus.win32.win16.tasks[n].handle);
+    let (ss, sp) = thunk::task_stack16(cpu, t);
+    // INSTANCEDATA at the start of the automatic data segment: the
+    // stack's top, its lowest SP so far and its bottom, as InitTask set
+    // them.
+    let data = super::lin(cpu, super::global::handle_to_sel(task.instance), 0);
+    let (top, min, bottom) = if task.instance == 0 {
+        (0, 0, 0)
+    } else {
+        (
+            super::read_16(cpu, data + 0x0A),
+            super::read_16(cpu, data + 0x0C),
+            super::read_16(cpu, data + 0x0E),
+        )
+    };
+    let name = super::module_index(cpu, task.module)
+        .map(|i| cpu.bus.win32.win16.modules[i].name.clone())
+        .unwrap_or_default();
+    // hQueue and wcEvents: the message queue is USER32's thread queue,
+    // which has no 16-bit handle, so both are 0.
+    let words = [
+        task.handle,
+        task.parent,
+        task.instance,
+        task.module,
+        ss,
+        sp,
+        top,
+        min,
+        bottom,
+        0,
+        0,
+    ];
+    for (i, w) in words.into_iter().enumerate() {
+        super::write_16(cpu, at + 4 + 2 * i as u32, w);
+    }
+    put_name(cpu, at + 0x1A, 10, name.as_bytes());
+    // The PDB is at 100h in the task database.
+    super::write_16(cpu, at + 0x24, 0x100);
+    super::write_16(cpu, at + 0x26, next);
+    1
+}
+
+/// TaskFirst(lpte): the first task.
+fn task_first(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let first = live_tasks(cpu)
+        .first()
+        .map_or(0, |&t| cpu.bus.win32.win16.tasks[t].handle);
+    Some(fill_task_entry(cpu, args[0], first))
+}
+
+/// TaskNext(lpte): the task the entry's hNext names.
+fn task_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = args[0];
+    if !sized(cpu, at, TASKENTRY_SIZE) {
+        return Some(0);
+    }
+    let next = super::read_16(cpu, at + 0x26);
+    Some(fill_task_entry(cpu, at, next))
+}
+
+/// TaskFindHandle(lpte, hTask): the task `hTask`.
+fn task_find_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(fill_task_entry(cpu, args[0], args[1] as u16))
+}
+
+/// MODULEENTRY's size: dwSize, szModule[10], hModule, wcUsage,
+/// szExePath[256], wNext.
+const MODULEENTRY_SIZE: u32 = 0x114;
+
+/// Fill the MODULEENTRY at `at` with the module `modules[index]`. wNext
+/// is the next module's handle, 0 after the last; the system's modules
+/// come first, KERNEL the first of them, as in Windows' module list.
+fn fill_module_entry(cpu: &mut Cpu, at: u32, index: usize) -> u32 {
+    let modules = &cpu.bus.win32.win16.modules;
+    let m = &modules[index];
+    let (name, handle, refs) = (m.name.clone(), m.handle, m.refs);
+    let path = crate::dosstr::to_bytes(&m.path);
+    let next = modules.get(index + 1).map_or(0, |n| n.handle);
+    put_name(cpu, at + 4, 10, name.as_bytes());
+    super::write_16(cpu, at + 0x0E, handle);
+    super::write_16(cpu, at + 0x10, refs);
+    put_name(cpu, at + 0x12, 256, &path);
+    super::write_16(cpu, at + 0x112, next);
+    1
+}
+
+/// Fill the MODULEENTRY at `at` with the module whose handle is exactly
+/// `handle`, after checking dwSize.
+fn module_entry_of(cpu: &mut Cpu, at: u32, handle: u16) -> u32 {
+    if handle == 0 || !sized(cpu, at, MODULEENTRY_SIZE) {
+        return 0;
+    }
+    let modules = &cpu.bus.win32.win16.modules;
+    match modules.iter().position(|m| m.handle == handle) {
+        Some(i) => fill_module_entry(cpu, at, i),
+        None => 0,
+    }
+}
+
+/// ModuleFirst(lpme): the first module, KERNEL.
+fn module_first(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let first = cpu.bus.win32.win16.modules.first().map_or(0, |m| m.handle);
+    Some(module_entry_of(cpu, args[0], first))
+}
+
+/// ModuleNext(lpme): the module the entry's wNext names.
+fn module_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = args[0];
+    if !sized(cpu, at, MODULEENTRY_SIZE) {
+        return Some(0);
+    }
+    let next = super::read_16(cpu, at + 0x112);
+    Some(module_entry_of(cpu, at, next))
+}
+
+/// ModuleFindName(lpme, lpszName): the module named `lpszName`, in any
+/// case.
+fn module_find_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[1] == 0 {
+        return Some(0);
+    }
+    let name = super::string(cpu, args[1]).to_ascii_uppercase();
+    let handle = cpu
+        .bus
+        .win32
+        .win16
+        .modules
+        .iter()
+        .find(|m| m.name == name)
+        .map_or(0, |m| m.handle);
+    Some(module_entry_of(cpu, args[0], handle))
+}
+
+/// ModuleFindHandle(lpme, hModule): the module `hModule`, or the one
+/// whose instance or segment it is, as GetExePtr takes them.
+fn module_find_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let handle = super::module_index(cpu, args[1] as u16)
+        .map_or(0, |i| cpu.bus.win32.win16.modules[i].handle);
+    Some(module_entry_of(cpu, args[0], handle))
+}
+
+/// LOCALINFO's and LOCALENTRY's sizes. LOCALENTRY: dwSize, hHandle,
+/// wAddress, wSize, wFlags, wcLock, wType, hHeap, wHeapType, wNext.
+const LOCALINFO_SIZE: u32 = 6;
+const LOCALENTRY_SIZE: u32 = 0x16;
+/// LOCALENTRY's wFlags: a fixed, free or moveable block. wType is
+/// LT_NORMAL for a block and LT_FREE for a free piece, and wHeapType
+/// NORMAL_HEAP: USER's and GDI's heaps are USER32's and GDI32's.
+const LF_FIXED: u16 = 1;
+const LF_FREE: u16 = 2;
+const LF_MOVEABLE: u16 = 4;
+const LT_NORMAL: u16 = 0;
+const LT_FREE: u16 = 0xFF;
+
+/// The items of the local heap in the segment whose handle or selector
+/// is `heap`.
+fn local_items(cpu: &Cpu, heap: u16) -> Option<Vec<super::local::WalkItem>> {
+    super::local::walk(cpu, super::global::handle_to_sel(heap))
+}
+
+/// LocalInfo(lpli, hHeap): the number of items in the heap.
+fn local_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = args[0];
+    if !sized(cpu, at, LOCALINFO_SIZE) {
+        return Some(0);
+    }
+    let Some(items) = local_items(cpu, args[1] as u16) else {
+        return Some(0);
+    };
+    super::write_16(cpu, at + 4, items.len() as u16);
+    Some(1)
+}
+
+/// Fill the LOCALENTRY at `at` with the item of the heap `heap` whose
+/// arena starts at `arena`, or the first one for None. wNext is where
+/// the next item's arena starts, 0 after the last.
+fn fill_local_entry(cpu: &mut Cpu, at: u32, heap: u16, arena: Option<u16>) -> u32 {
+    let Some(items) = local_items(cpu, heap) else {
+        return 0;
+    };
+    let place = match arena {
+        None => 0,
+        Some(a) => match items.iter().position(|i| i.arena == a) {
+            Some(p) => p,
+            None => return 0,
+        },
+    };
+    let Some(item) = items.get(place) else {
+        return 0;
+    };
+    let next = items.get(place + 1).map_or(0, |n| n.arena);
+    let (flags, kind) = if item.free {
+        (LF_FREE, LT_FREE)
+    } else if item.moveable {
+        (LF_MOVEABLE, LT_NORMAL)
+    } else {
+        (LF_FIXED, LT_NORMAL)
+    };
+    let words = [
+        item.handle,
+        item.address,
+        item.size,
+        flags,
+        item.lock as u16,
+        kind,
+        heap,
+        0,
+        next,
+    ];
+    for (i, w) in words.into_iter().enumerate() {
+        super::write_16(cpu, at + 4 + 2 * i as u32, w);
+    }
+    1
+}
+
+/// LocalFirst(lple, hHeap): the heap's first item.
+fn local_first(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = args[0];
+    if !sized(cpu, at, LOCALENTRY_SIZE) {
+        return Some(0);
+    }
+    Some(fill_local_entry(cpu, at, args[1] as u16, None))
+}
+
+/// LocalNext(lple): the item the entry's wNext names, in the heap its
+/// hHeap names.
+fn local_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = args[0];
+    if !sized(cpu, at, LOCALENTRY_SIZE) {
+        return Some(0);
+    }
+    let heap = super::read_16(cpu, at + 0x10);
+    let next = super::read_16(cpu, at + 0x14);
+    if next == 0 {
+        return Some(0);
+    }
+    Some(fill_local_entry(cpu, at, heap, Some(next)))
 }
 
 fn memory_read(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
