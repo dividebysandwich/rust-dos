@@ -87,15 +87,14 @@ that names the game, its settings and what happened.
   [the VFX1 headset](../CONFIGURATION.md#the-vfx1-headset) has each
   one's start command and settings, and [docs/vfx1.md](vfx1.md) their
   resolutions.
-* **Dune II** (Westwood, 1992): `memsize=48` or less for its `SETUP`,
-  such as the `memsize=32` of the eXoDOS package. Asked to use extended
-  memory, `SETUP` takes the largest free XMS block and tests its last
-  bytes. Its pointers into XMS carry a slot of its own table from bit 24
-  up, and the table has three slots, so with more than 48 MB of XMS free
-  the test reads a slot past the table, fails, and `SETUP` says
-  "extended memory is not available". HIMEM.SYS and DOSBox report the
-  same free memory, and `SETUP` fails the same way there. The game
-  itself takes a 4 MB block of XMS and runs with 63 MB as well.
+* **Dune II** (Westwood, 1992): with more than 48 MB of XMS free
+  (`memsize` above 48), its `SETUP` says "extended memory is not
+  available" after the extended memory question. `SETUP`'s own test of
+  the end of the XMS block goes wrong there, and HIMEM.SYS reports the
+  same free memory, so a real machine shows it too. It changes nothing:
+  `SETUP` still saves "Use Extended Memory: Yes", and the game uses XMS
+  at any `memsize`. To run `SETUP` without the message, use `memsize=48`
+  or less, such as the eXoDOS package's 32.
 * **Doom and Heretic** over a LAN or a serial line:
   [playing over a LAN](../CONFIGURATION.md#playing-over-a-lan) and
   [serial and modem games](../CONFIGURATION.md#serial-and-modem-games).
