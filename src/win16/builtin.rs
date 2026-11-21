@@ -520,7 +520,8 @@ pub(crate) fn mend(bus: &mut crate::bus::Bus) -> crate::savestate::Result<()> {
         }
         if mended > 0 {
             bus.log_string(&format!(
-                "[W16] KERNEL's image has {first} functions and the missing-import                  stubs after them: {mended} of them trap with their ids of now"
+                "[W16] KERNEL's image has {first} functions and the missing-import \
+                 stubs after them: {mended} of them trap with their ids of now"
             ));
         }
     }
