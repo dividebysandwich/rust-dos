@@ -36,8 +36,8 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
         };
         cpu.bus.set_awe_setup(rom, sound.awe32ram);
     }
-    if changed(&|s| format!("{:?} {}", s.card(), s.fm_is_opl3())) {
-        cpu.bus.configure_sound(sound.card(), sound.fm_is_opl3());
+    if changed(&|s| format!("{:?} {:?}", s.card(), s.fm_chip())) {
+        cpu.bus.configure_sound(sound.card(), sound.fm_chip());
         let blaster = sound.card().map(|sb| sb.blaster()).unwrap_or_default();
         cpu.set_env("BLASTER", &blaster);
     }

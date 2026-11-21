@@ -1,6 +1,7 @@
 //! The FM synthesizer: a Yamaha YMF262 (OPL3), as on the SB Pro 2 and SB16,
-//! or its OPL2 subset, as on an AdLib or SB 2.0. Synthesis is Nuked-OPL3
-//! (the `nuked-opl3` crate); this module adds the two timers and the status
+//! its OPL2 subset, as on an AdLib or SB 2.0, or two OPL2s, left and
+//! right, as on the first SB Pro (CT1330). Synthesis is Nuked-OPL3 (the
+//! `nuked-opl3` crate); this module adds the two timers and the status
 //! register that programs use to detect the chip, which Nuked-OPL3 leaves
 //! out.
 //!
@@ -12,6 +13,37 @@ pub use nuked_opl3::ChannelView;
 
 /// Output sample rate of the mixer, which the chip renders at.
 pub use rust_dos_audio_core::RATE;
+
+/// The FM chips a card has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chip {
+    /// One OPL2 (YM3812): an AdLib, a Sound Blaster 1.x or 2.0.
+    Opl2,
+    /// One OPL3 (YMF262): an SB Pro 2, an SB16.
+    Opl3,
+    /// Two OPL2s, the left one at register bank 0 and the right one at
+    /// bank 1: the first Sound Blaster Pro (CT1330), DOSBox's
+    /// `oplmode=dualopl2`.
+    DualOpl2,
+}
+
+impl Chip {
+    /// The name the `opl` setting gives it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Chip::Opl2 => "opl2",
+            Chip::Opl3 => "opl3",
+            Chip::DualOpl2 => "dualopl2",
+        }
+    }
+}
+
+/// An OPL3 for `true`, an OPL2 for `false`.
+impl From<bool> for Chip {
+    fn from(opl3: bool) -> Self {
+        if opl3 { Chip::Opl3 } else { Chip::Opl2 }
+    }
+}
 
 pub struct Opl {
     chip: Opl3Chip,
@@ -37,6 +69,9 @@ pub struct Opl {
     /// The channels left out of the mix (the sound visualizer's), a bit
     /// each.
     mute: u32,
+    /// The right OPL2 of a dual OPL2, which takes what is written to
+    /// bank 1. This one is then the left OPL2.
+    right: Option<Box<Opl>>,
 }
 
 impl Opl {
@@ -45,7 +80,27 @@ impl Opl {
     /// silence without running it).
     #[inline]
     pub fn is_idle(&self) -> bool {
-        !self.active
+        !self.active && self.right.as_ref().is_none_or(|r| r.is_idle())
+    }
+
+    /// The chips `chip` names.
+    pub fn with_chip(chip: Chip) -> Self {
+        match chip {
+            Chip::Opl2 => Self::new(false),
+            Chip::Opl3 => Self::new(true),
+            Chip::DualOpl2 => Self {
+                right: Some(Box::new(Self::new(false))),
+                ..Self::new(false)
+            },
+        }
+    }
+
+    pub fn chip(&self) -> Chip {
+        match (self.opl3, self.right.is_some()) {
+            (true, _) => Chip::Opl3,
+            (false, false) => Chip::Opl2,
+            (false, true) => Chip::DualOpl2,
+        }
     }
 
     pub fn new(opl3: bool) -> Self {
@@ -61,6 +116,7 @@ impl Opl {
             unchecked_frames: 0,
             regs: [[0; 256]; 2],
             mute: 0,
+            right: None,
         }
     }
 
@@ -69,16 +125,48 @@ impl Opl {
         self.opl3
     }
 
-    /// Latch a register address in `bank` (1 is the OPL3's second bank).
+    /// Latch a register address in `bank` (1 is the OPL3's second bank,
+    /// or the right OPL2 of a dual OPL2).
     #[inline]
     pub fn write_address(&mut self, bank: usize, value: u8) {
-        if bank == 0 || self.opl3 {
+        if bank == 1
+            && let Some(right) = &mut self.right
+        {
+            right.write_address(0, value);
+        } else if bank == 0 || self.opl3 {
             self.address[bank] = value;
+        }
+    }
+
+    /// Latch a register address through an AdLib port (388h, or a Sound
+    /// Blaster's base+8): the first bank's, and on a dual OPL2 each
+    /// chip's, as the card writes both there.
+    #[inline]
+    pub fn write_address_all(&mut self, value: u8) {
+        self.write_address(0, value);
+        if let Some(right) = &mut self.right {
+            right.write_address(0, value);
+        }
+    }
+
+    /// Write the latched register through an AdLib port (389h, or a
+    /// Sound Blaster's base+9): the first bank's, and on a dual OPL2 each
+    /// chip's.
+    pub fn write_data_all(&mut self, value: u8, now_us: u64) {
+        self.write_data(0, value, now_us);
+        if let Some(right) = &mut self.right {
+            right.write_data(0, value, now_us);
         }
     }
 
     /// Write the latched register of `bank`. `now_us` is emulated time.
     pub fn write_data(&mut self, bank: usize, value: u8, now_us: u64) {
+        if bank == 1
+            && let Some(right) = &mut self.right
+        {
+            right.write_data(0, value, now_us);
+            return;
+        }
         if bank == 1 && !self.opl3 {
             return;
         }
@@ -109,6 +197,9 @@ impl Opl {
     /// and the rhythm register last, so the notes playing start again
     /// with their instruments.
     pub fn after_load(&mut self) {
+        if let Some(right) = &mut self.right {
+            right.after_load();
+        }
         self.chip = Opl3Chip::new(RATE);
         self.chip.set_mute(self.mute);
         let key_part = |reg: usize| (0xA0..=0xB8).contains(&reg) || reg == 0xBD;
@@ -230,28 +321,43 @@ impl Opl {
     /// status's bit 7 shows the same; the AdLib Gold puts it on its
     /// interrupt line.
     pub fn irq_at(&self, now_us: u64) -> bool {
-        (0..2).any(|i| {
+        let own = (0..2).any(|i| {
             !self.timer_mask[i]
                 && (self.timer_expired[i]
                     || self.timer_start[i]
                         .is_some_and(|start| now_us.saturating_sub(start) >= self.timer_period(i)))
-        })
+        });
+        own || self.right.as_ref().is_some_and(|r| r.irq_at(now_us))
     }
 
     /// When after `now_us` an unmasked running timer raises its flag, in
     /// emulated microseconds, if one will. A flag already up stays up
     /// until register 04h resets it, which reschedules.
     pub fn next_irq_us(&self, now_us: u64) -> Option<u64> {
+        let right = self.right.as_ref().and_then(|r| r.next_irq_us(now_us));
         (0..2)
             .filter(|&i| !self.timer_mask[i] && !self.timer_expired[i])
             .filter_map(|i| self.timer_start[i].map(|start| start + self.timer_period(i)))
             .filter(|&at| at > now_us)
+            .chain(right)
             .min()
+    }
+
+    /// The status register read at the address port of `bank`: on a dual
+    /// OPL2 the right chip's for bank 1 (a Sound Blaster's base+2), else
+    /// the one status (`read_status`).
+    pub fn read_status_of(&mut self, bank: usize, now_us: u64) -> u8 {
+        match &mut self.right {
+            Some(right) if bank == 1 => right.read_status(now_us),
+            _ => self.read_status(now_us),
+        }
     }
 
     /// The status register: IRQ (bit 7) and the timer flags (6, 5) that
     /// aren't masked. An OPL2 also reads 06h in the low bits, which is
-    /// how programs tell the two apart.
+    /// how programs tell the two apart. On a dual OPL2 this is the left
+    /// chip's, which the AdLib ports (388h, base+8) read, as in DOSBox and
+    /// 86Box.
     pub fn read_status(&mut self, now_us: u64) -> u8 {
         self.update_flags(now_us);
         let mut status = 0;
@@ -267,24 +373,50 @@ impl Opl {
         if self.opl3 { status } else { status | 0x06 }
     }
 
-    /// Leave the channels whose bits are set (0 to 17) out of the mix.
+    /// Leave the channels whose bits are set (0 to 17) out of the mix. On
+    /// a dual OPL2, 0 to 8 are the left chip's and 9 to 17 the right's.
     pub fn set_mute(&mut self, mask: u32) {
-        self.mute = mask;
-        self.chip.set_mute(mask);
+        let own = if self.right.is_some() {
+            mask & 0x1FF
+        } else {
+            mask
+        };
+        self.mute = own;
+        self.chip.set_mute(own);
+        if let Some(right) = &mut self.right {
+            right.set_mute(mask >> 9 & 0x1FF);
+        }
     }
 
     pub fn mute(&self) -> u32 {
-        self.mute
+        self.mute | self.right.as_ref().map_or(0, |r| r.mute() << 9)
     }
 
-    /// What the 18 channels play (the first 9 on an OPL2).
+    /// What the 18 channels play: the first 9 on an OPL2, and on a dual
+    /// OPL2 the left chip's 9 and then the right chip's.
     pub fn channels(&self) -> [ChannelView; 18] {
-        self.chip.channel_views()
+        let mut views = self.chip.channel_views();
+        if let Some(right) = &self.right {
+            views[9..].copy_from_slice(&right.chip.channel_views()[..9]);
+        }
+        views
     }
 
-    /// Render one stereo frame at `RATE`.
+    /// Render one stereo frame at `RATE`. A dual OPL2's left chip plays
+    /// on the left output only and its right chip on the right only, as
+    /// the CT1330 wires them.
     #[inline]
     pub fn render(&mut self) -> (i16, i16) {
+        let own = self.render_chip();
+        match &mut self.right {
+            None => own,
+            Some(right) => (own.0, right.render_chip().1),
+        }
+    }
+
+    /// One frame of this chip alone.
+    #[inline]
+    fn render_chip(&mut self) -> (i16, i16) {
         if !self.active {
             return (0, 0);
         }
@@ -315,7 +447,67 @@ const IDLE_CHECK_FRAMES: u32 = 64;
 
 // Whether it is an OPL3 comes with the Sound Blaster's model; the chip is
 // written anew from `regs` after a load.
-rust_dos_savestate::state_fields!(Opl { address, timer_value, timer_start, timer_mask, timer_expired, active, regs } skip { chip, opl3, mute, unchecked_frames });
+// A dual OPL2's right chip is saved apart (`save_right`), so that the
+// layout of the one chip stays as it was.
+rust_dos_savestate::state_fields!(Opl { address, timer_value, timer_start, timer_mask, timer_expired, active, regs } skip { chip, opl3, mute, unchecked_frames, right });
+
+impl Opl {
+    /// Save the right chip of a dual OPL2, if there is one.
+    pub fn save_right(&self, w: &mut rust_dos_savestate::Writer) {
+        use rust_dos_savestate::State;
+        self.right.is_some().save(w);
+        if let Some(right) = &self.right {
+            right.save(w);
+        }
+    }
+
+    /// For a state saved before dual OPL2s were emulated, when the one chip
+    /// (an SB Pro 1's OPL3) took the right OPL2's writes (base+2/3) in its
+    /// second bank, and the writes to both chips (base+8/9, 388h/389h) in
+    /// its first. With nothing in the second bank, the program wrote both
+    /// chips alike, so the right chip becomes a copy of the left, timers
+    /// and all; else the right chip gets that bank's registers, and the
+    /// left keeps the first bank's. Nothing changes without a right chip.
+    pub fn right_from_bank_1(&mut self) {
+        let Some(right) = &mut self.right else {
+            return;
+        };
+        let bank_1 = std::mem::replace(&mut self.regs[1], [0; 256]);
+        if bank_1.iter().all(|&reg| reg == 0) {
+            right.regs[0] = self.regs[0];
+            right.address[0] = self.address[0];
+            right.timer_value = self.timer_value;
+            right.timer_start = self.timer_start;
+            right.timer_mask = self.timer_mask;
+            right.timer_expired = self.timer_expired;
+        } else {
+            right.regs[0] = bank_1;
+            right.address[0] = self.address[1];
+        }
+        right.active = self.active;
+    }
+
+    /// Load what `save_right` saved. A state of a machine with a dual
+    /// OPL2 doesn't load on one without, nor the other way round.
+    pub fn load_right(
+        &mut self,
+        r: &mut rust_dos_savestate::Reader,
+    ) -> rust_dos_savestate::Result<()> {
+        use rust_dos_savestate::{State, StateError};
+        let mut some = false;
+        some.load(r)?;
+        match (some, &mut self.right) {
+            (true, Some(right)) => right.load(r),
+            (false, None) => Ok(()),
+            (true, None) => Err(StateError::Mismatch(
+                "it has two OPL2s and this machine hasn't".into(),
+            )),
+            (false, Some(_)) => Err(StateError::Mismatch(
+                "this machine has two OPL2s and it hasn't".into(),
+            )),
+        }
+    }
+}
 
 #[cfg(test)]
 mod mute_tests {
@@ -564,5 +756,73 @@ mod timer_tests {
         assert_eq!(opl.read_status(100), 0x06);
         assert_eq!(opl.read_status(159), 0x06);
         assert_eq!(opl.read_status(160), 0xC6);
+    }
+}
+
+#[cfg(test)]
+mod old_state_tests {
+    use super::*;
+
+    /// The loudest sample of the left and the right output.
+    fn loudest(opl: &mut Opl, frames: usize) -> (i32, i32) {
+        (0..frames)
+            .map(|_| opl.render())
+            .fold((0, 0), |(l, r), (fl, fr)| {
+                (l.max((fl as i32).abs()), r.max((fr as i32).abs()))
+            })
+    }
+
+    /// Channel 0 keyed on with a plain sine, as `regs` of a bank hold it.
+    fn note() -> [u8; 256] {
+        let mut regs = [0; 256];
+        for (reg, value) in [
+            (0x20, 0x21),
+            (0x23, 0x21),
+            (0x40, 0x10),
+            (0x60, 0xF0),
+            (0x63, 0xF0),
+            (0xC0, 0x31),
+            (0xA0, 0x44),
+            (0xB0, 0x32),
+        ] {
+            regs[reg] = value;
+        }
+        regs
+    }
+
+    /// A state of the old SB Pro 1, whose OPL3 took 388h's writes in its
+    /// first bank and base+2/3's in its second: what `load` leaves in a
+    /// dual OPL2's left chip.
+    fn loaded(bank_0: [u8; 256], bank_1: [u8; 256]) -> Opl {
+        let mut opl = Opl::with_chip(Chip::DualOpl2);
+        opl.regs = [bank_0, bank_1];
+        opl.active = true;
+        opl
+    }
+
+    /// An AdLib program's notes, which went through 388h to the first
+    /// bank only, play on both sides once the state loads.
+    #[test]
+    fn notes_written_to_both_chips_play_on_both_sides() {
+        let mut opl = loaded(note(), [0; 256]);
+        opl.timer_value[0] = 0xFF;
+        opl.timer_start[0] = Some(0);
+        opl.right_from_bank_1();
+        opl.after_load();
+        let (l, r) = loudest(&mut opl, 2000);
+        assert!(l > 1000 && r > 1000, "left {} right {}", l, r);
+        assert_eq!(opl.read_status_of(1, 100), 0xC6, "the right chip's timer");
+    }
+
+    /// Notes written to the right chip alone, which went to the second
+    /// bank, play on the right only.
+    #[test]
+    fn notes_written_to_the_right_chip_play_on_the_right() {
+        let mut opl = loaded([0; 256], note());
+        opl.right_from_bank_1();
+        opl.after_load();
+        let (l, r) = loudest(&mut opl, 2000);
+        assert!(l == 0 && r > 1000, "left {} right {}", l, r);
+        assert_eq!(opl.regs[1], [0; 256]);
     }
 }
