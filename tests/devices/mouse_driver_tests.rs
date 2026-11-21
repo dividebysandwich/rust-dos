@@ -375,7 +375,10 @@ fn without_the_dpmi_host_protected_mode_gets_the_handler_from_irq_12() {
     cpu.cr0 &= !1;
 
     cpu.set_cpu_flag(CpuFlags::IF, true);
-    assert!(!rust_dos::mouse::deliver_callback(&mut cpu), "no call between two instructions");
+    assert!(
+        !rust_dos::mouse::deliver_callback(&mut cpu),
+        "no call between two instructions"
+    );
     assert_eq!(cpu.bus.read_16(CALLBACK_COUNT), 0);
 
     cpu.bus.load_bytes(0x30000, &[0xFB, 0xEB, 0xFE]); // STI; JMP $
