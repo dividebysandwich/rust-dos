@@ -980,6 +980,35 @@ fn its_swaps_are_the_frames_drawn_while_it_shows() {
 }
 
 #[test]
+fn swaps_late_for_their_retrace_count_for_cycles_auto() {
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    // A program that waits for its swap to happen, works `ms` on the next
+    // frame and swaps again, `n` times.
+    let frames = |bus: &mut Bus, n: usize, ms: f64| {
+        let start = bus.activity.late_swaps;
+        for _ in 0..n {
+            while r(bus, STATUS) >> 28 & 7 != 0 {
+                wait_ms(bus, 0.1);
+            }
+            wait_ms(bus, ms);
+            w(bus, SWAPBUFFER_CMD, 1 << 1 | 1);
+            bus.sync_display();
+        }
+        bus.activity.late_swaps - start
+    };
+    // The first swap after a long wait is no frame.
+    assert_eq!(frames(&mut bus, 1, 10.0), 0);
+    // Frames shorter than the refresh period at 60 Hz: each swap is in
+    // time for the retrace after the one before.
+    assert_eq!(frames(&mut bus, 10, 10.0), 0);
+    // Frames of 20 ms: each misses that one, and shows at the next.
+    assert_eq!(frames(&mut bus, 10, 20.0), 10);
+    // A pause of a fifth of a second is no frame either.
+    assert_eq!(frames(&mut bus, 1, 200.0), 0);
+}
+
+#[test]
 fn the_frame_rate_cap_holds_swaps_a_frame_time_apart() {
     let mut bus = bus(Board::Standard);
     init(&mut bus);

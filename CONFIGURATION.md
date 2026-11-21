@@ -193,7 +193,7 @@ limit, so without a connection it goes on as it would with one:
   and some games, such as Descent, play badly at such rates), and goes
   down while the program waits for a key or calls DOS's idle interrupt. It
   then tries lower speeds, down to where they cost more than 3% of the
-  frame rate, or make a program that polls for the vertical retrace
+  frame rate, or make a program that waits for the vertical retrace
   miss one. A speed the host falls behind at is left for a lower one,
   and the limit that sets rises again while the host keeps up. A real-mode
   program with no frames to go by (most games of the 1980s, which update the

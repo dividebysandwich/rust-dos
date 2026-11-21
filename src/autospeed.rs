@@ -510,6 +510,9 @@ pub struct Activity {
     /// Vertical retraces that a program polling the status register let
     /// pass unseen (`status_read`).
     pub missed_retraces: u64,
+    /// Retraces that the 3dfx card's swaps waiting for one came too late
+    /// for (`Voodoo::late_for`).
+    pub late_swaps: u64,
     /// Bytes written to video memory, and moved on drives.
     pub video_bytes: u64,
     pub io_bytes: u64,
@@ -830,6 +833,7 @@ struct Mark {
     polls: u64,
     status_reads: u64,
     missed: u64,
+    late: u64,
     output: u64,
     io: u64,
     /// The emulated time dropped behind the wall clock, and the emulated
@@ -857,6 +861,7 @@ impl Mark {
             polls: a.polls,
             status_reads: a.status_reads,
             missed: a.missed_retraces,
+            late: a.late_swaps,
             output: a.video_bytes + a.io_bytes,
             io: a.io_bytes,
         }
@@ -934,8 +939,10 @@ pub struct Measurement {
     /// Emulated seconds a second of the host's time: 1 kept real time,
     /// less fell behind (and dropped what it didn't catch up on).
     pub pace: f64,
-    /// Vertical retraces the program let pass unseen while it polled for
-    /// them (`Activity::status_read`).
+    /// Vertical retraces the program let pass while it waited for them:
+    /// unseen while it polled the status register for them
+    /// (`Activity::status_read`), or too late for the 3dfx card's swaps
+    /// (`Voodoo::late_for`).
     pub missed: u64,
 }
 
@@ -1765,6 +1772,11 @@ impl AutoSpeed {
                 window.count
             );
         }
+        // Swaps late for their retrace, of a program with no time to
+        // spare: one that sits halted (`SPARE`) paces its frames itself,
+        // as a game held to 30 frames a second by its timer does, and its
+        // swaps come late for every other retrace at any speed.
+        let late = if halted < SPARE { now.late - mark.late } else { 0 };
         let measured = Measurement {
             fps,
             polling: if polls > POLLS_PER_SECOND { status.max(0.5) } else { status },
@@ -1773,7 +1785,7 @@ impl AutoSpeed {
             io,
             refresh,
             pace: paced as f64 / (paced + lost - stall) as f64,
-            missed: now.missed - mark.missed,
+            missed: now.missed - mark.missed + late,
         };
         // The step up's first measurement is in: the frames kept up with it.
         self.trying = None;
@@ -2375,7 +2387,7 @@ impl AutoSpeed {
                 // retrace, which fall to a fraction of the refresh rate
                 // (60 to 30), and `from` gets them back.
                 let heavier = fps < before * (c / from as f64) * DROPPED;
-                // A retrace the program let pass while it polled for it
+                // A retrace the program missed while it waited for it
                 // (`missed`) lost a frame to the step, whatever the frame
                 // rate reads: back to `from`, as for a step that lost
                 // frames, and steps down stop a step above this one.
@@ -2473,9 +2485,14 @@ impl AutoSpeed {
                         least = self.lost_frames(speed, TWO_STEPS, top);
                     }
                 }
-                // A retrace missed while polling for it (`missed`): the
-                // speed loses frames too few for the frame rate to show, up
-                // a step, and steps down stop there.
+                // A retrace missed while waiting for it (`missed`): the
+                // speed loses frames, too few for the frame rate to show
+                // where it polls for the retrace, and too many where its
+                // frames take two periods now and then and the frame rate
+                // swings under the refresh rate with the scenes (GLQuake's
+                // timedemo held at 143,000 at 46 to 60 frames a second,
+                // where it draws 60 at 168,000). Up a step, and steps down
+                // stop there.
                 if m.missed > 0 && !lagged {
                     least = least.max(self.lost_frames(current, FINE_STEP, top));
                 }
@@ -6607,5 +6624,37 @@ mod tests {
         let mean = sum / n as u64;
         assert!(missed <= 40, "{missed} missed, mean speed {mean}");
         assert!((8500..=13_000).contains(&mean), "{mean}");
+    }
+
+    #[test]
+    fn a_hold_whose_swaps_miss_the_retrace_goes_up() {
+        // GLQuake's timedemo on a Voodoo2 at 60 Hz (#1553): at 143,000 its
+        // frames take one refresh period or two with the scenes, 46 to 60
+        // a second, with swaps late for their retrace; at 160,000 and up
+        // they take one.
+        const READS: [f64; 8] = [59.9, 56.1, 47.5, 59.9, 53.1, 59.9, 46.0, 58.8];
+        let glquake = |speed: u32, i: usize| {
+            let slow = speed < 160_000;
+            Measurement {
+                fps: Some(if slow { READS[i % READS.len()] } else { 59.9 }),
+                polling: 0.0,
+                halted: 0.0,
+                output: 0.0,
+                io: 0.0,
+                refresh: 59.94,
+                pace: 1.0,
+                missed: if slow && READS[i % READS.len()] < 59.0 { 6 } else { 0 },
+            }
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(112_500);
+        let mut speed = 143_234;
+        let speeds: Vec<u32> = (0..40)
+            .map(|i| {
+                speed = auto.decide(speed, &glquake(speed, i), true, 300_000);
+                speed
+            })
+            .collect();
+        assert!(speeds[10..].iter().all(|&s| s >= 160_000), "{speeds:?}");
     }
 }

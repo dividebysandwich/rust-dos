@@ -627,6 +627,9 @@ pub struct Voodoo {
     showing: bool,
     /// Buffer swaps since the bus last counted them as frames drawn.
     pub swapped: u64,
+    /// Retraces that swaps waiting for one came too late for, since the
+    /// bus last counted them (`late_for`).
+    pub late: u64,
     /// fastfillCMDs that filled something, from the card's creation.
     /// Nothing in the emulator reads them; tests tell from them whether
     /// a fill was the card's (`blt::depth_fill`).
@@ -750,6 +753,10 @@ const WORDS_A_JOB: usize = 4096;
 /// batch of all of them would save the job's growth, but costs a copy of
 /// 640 KB a frame instead, and measured no faster.
 const WORDS_HELD: usize = 1 << 16;
+/// The most retraces a swap counts as late for (`Voodoo::late_for`):
+/// a frame of four refresh periods is 15 frames a second at 60 Hz.
+/// Chosen; a longer gap is the program doing something else.
+const LATE_MOST: u64 = 3;
 
 /// One-time log messages.
 const LOG_BYTE: u32 = 1;
@@ -791,6 +798,7 @@ impl Voodoo {
             display_dirty: true,
             showing: false,
             swapped: 0,
+            late: 0,
             fastfills: 0,
             timing: CrtTiming::VESA_480,
             timing_clocked: false,
@@ -2074,6 +2082,25 @@ impl Voodoo {
         }
     }
 
+    /// The retraces a swap with the swapbufferCMD `data` made now came too
+    /// late for: it waits for the one `bits 8:1` after the last swap's,
+    /// and that began before the swap was made. A frame that took a
+    /// little more than a refresh period shows a period late, and a
+    /// program that swaps on the retrace draws at half the refresh rate
+    /// while its frames take that long (GLQuake on a Voodoo2, #1553). The
+    /// card draws at once in emulated time, so it is the program's own
+    /// work that was late. More than `LATE_MOST` is a pause (a load, a
+    /// menu), not a frame, and counts nothing.
+    pub fn late_for(&self, data: u32, now: Now) -> u64 {
+        let Some(k) = self.swap_retrace(data, now) else {
+            return 0;
+        };
+        let interval = ((data >> 1) & 0xFF).max(1) as u64;
+        let after = self.swaps.back().map_or(self.last_swap, |s| s.retrace);
+        let late = k.saturating_sub(after + interval);
+        if late <= LATE_MOST { late } else { 0 }
+    }
+
     /// The display's frame time for a swap with the swapbufferCMD `data`
     /// if it waits for a retrace, as the frame rate cap takes it
     /// (`FrameCap::wait`).
@@ -2106,6 +2133,7 @@ impl Voodoo {
     /// the frame rate cap having come at `turn` ns (0 for none): a Voodoo
     /// Graphics' or Voodoo2's, or a Banshee's (`banshee_swap`).
     fn swap_now(&mut self, data: u32, now: Now, turn: u64, effect: &mut Effect) {
+        self.late += self.late_for(data, now);
         // Within the PIT tick of its turn, a swap counts from its turn.
         let at = self.swap_shows_at(data, now).max(turn);
         self.frame_cap.shown_later(at, self.swap_refresh_ns(data));

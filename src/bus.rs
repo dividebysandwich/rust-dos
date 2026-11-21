@@ -3501,6 +3501,7 @@ impl Bus {
         // on a Banshee or Voodoo3, what DirectDraw shows in its memory.
         if let Some(v) = &mut self.voodoo {
             let swapped = std::mem::take(&mut v.swapped);
+            let late = std::mem::take(&mut v.late);
             if v.output() {
                 if presented || swapped > 0 {
                     self.last_present = Some(self.retraces);
@@ -3511,6 +3512,7 @@ impl Bus {
                 let shown = presented || (gdi && !presenting);
                 self.frames_drawn += swapped.max(u64::from(shown));
                 self.activity.swapped(swapped);
+                self.activity.late_swaps += late;
                 return;
             }
         }
