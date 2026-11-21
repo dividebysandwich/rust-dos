@@ -1494,6 +1494,33 @@ mod tests {
         &cpu.bus.win32.pool.as_ref().expect("a pool").page_file
     }
 
+    /// The pool lends the pages it never used to the XMS pool for a DOS
+    /// program the system runs, and takes them back once all of them are
+    /// free again; while the program keeps one, the pool stays smaller.
+    #[test]
+    fn lends_its_unused_pages_and_takes_them_back() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.win32.pool = Pool::take(&mut cpu.bus, 0x40_0000);
+        let _memory = Memory::new(&mut cpu.bus).expect("a page directory");
+        let end = cpu.bus.ram().len() as u32;
+        let pool = cpu.bus.win32.pool.as_ref().expect("a pool");
+        let (base, len, next) = (pool.base, pool.len, pool.next);
+        assert!(next > 0, "the page directory came from the pool");
+        let (_, free) = cpu.bus.xms.dpmi_free(end);
+        let lent = Pool::lend(&mut cpu.bus);
+        assert_eq!(lent, len - next);
+        assert_eq!(cpu.bus.xms.dpmi_free(end).1, free + lent);
+        assert_eq!(cpu.bus.win32.pool.as_ref().unwrap().len, next);
+        // A program keeps a page of it.
+        assert!(cpu.bus.xms.take_dpmi_at(base + next, PAGE, end));
+        assert!(!Pool::take_back(&mut cpu.bus, lent));
+        assert_eq!(cpu.bus.win32.pool.as_ref().unwrap().len, next);
+        cpu.bus.xms.release_dpmi(base + next);
+        assert!(Pool::take_back(&mut cpu.bus, lent));
+        assert_eq!(cpu.bus.win32.pool.as_ref().unwrap().len, len);
+        assert_eq!(cpu.bus.xms.dpmi_free(end).1, free);
+    }
+
     /// The `n`th page of the program's memory.
     fn page(n: u32) -> u32 {
         PRIVATE + n * PAGE

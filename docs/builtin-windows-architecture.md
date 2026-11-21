@@ -761,8 +761,13 @@ ended, and the files it wrote are on the same drives.
 Before EXEC, the DOS process's memory block is cut down to what it uses
 (its PSP, its DOS stub and its stack), so the program gets the rest of
 conventional memory, and EXEC's parameter block, the command tail, the
-path and the environment of the caller go in a block of their own. A
-batch file runs in `COMMAND.COM /C`. INT 2Fh AX=1600h and 160Ah answer
+path and the environment of the caller go in a block of their own. The
+pages of the Windows programs' memory pool that no program has used yet
+go back to the XMS pool while the program runs, for its DPMI host and
+XMS memory (a DOS extender such as DOS/4GW needs some), as Windows 98's
+VMM gives a DOS machine memory from what the system has free; the pool
+takes them back when the program ends. A batch file runs in
+`COMMAND.COM /C`. INT 2Fh AX=1600h and 160Ah answer
 from the program as in a DOS box: Windows 4.x in enhanced mode, 4.0 for
 Windows 95 and 4.10 for 98.
 
