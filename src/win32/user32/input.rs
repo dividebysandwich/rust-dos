@@ -2054,21 +2054,61 @@ pub fn get_key_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// GetAsyncKeyState(vk): 8000h down, 1 pressed since the last call; the
-/// devices as they are now.
+/// devices as they are now. A call that found the key not pressed since
+/// the last one, with nothing new from the devices, changed nothing, and
+/// an idle proof goes through it (`read_quiet`): The War of the Worlds
+/// plays its films in a loop of timeGetTime and
+/// GetAsyncKeyState(VK_ESCAPE) (#1284).
 pub fn get_async_key_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    poll(cpu);
     let vk = args[0] as usize & 0xFF;
-    let input = &mut user(cpu).input;
-    if input.async_keys.len() < 256 {
-        input.async_keys.resize(256, 0);
-    }
-    let k = input.async_keys[vk];
-    input.async_keys[vk] &= !1;
+    let mut k = 0;
+    read_quiet(cpu, |cpu| {
+        let input = &mut user(cpu).input;
+        if input.async_keys.len() < 256 {
+            input.async_keys.resize(256, 0);
+        }
+        k = input.async_keys[vk];
+        input.async_keys[vk] &= !1;
+        k & 1 == 0
+    });
     let mut v = (k & 1) as u32;
     if k & 0x80 != 0 {
         v |= 0xFFFF_8000;
     }
     Some(v)
+}
+
+/// Read the devices (`poll`), then run `read`, which looks at what they
+/// have and says whether it left the system as it was. During an idle
+/// proof a call whose read of the devices changed nothing either is
+/// followed by the proof: no key went down, the mouse stayed, and no
+/// message came of the read in any thread's queue (`settled`). The
+/// thread may have no queue: The War of the Worlds polls in a thread of
+/// its film player. The passes after it read the same until an input
+/// comes, which comes with an interrupt or between the host's frames,
+/// either of which ends the passes skipped. It reads no RAM but its
+/// arguments, and what it writes is noted as it writes it.
+fn read_quiet(cpu: &mut Cpu, read: impl FnOnce(&mut Cpu) -> bool) {
+    let before = cpu.bus.observe.on.then(|| settled(cpu)).flatten();
+    poll(cpu);
+    let kept = read(cpu);
+    if let Some(before) = before
+        && kept
+        && settled(cpu).is_some_and(|after| after == before)
+    {
+        crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
+    }
+}
+
+/// What a read of the devices may change (`seen`), and the messages in
+/// every queue it may post input to. None when a key went down.
+fn settled(cpu: &mut Cpu) -> Option<(Seen, usize, u32)> {
+    let seen = seen(cpu)?;
+    let queues = &user(cpu).queues;
+    let messages = queues.iter().map(|q| q.posted.len() + q.input.len()).sum();
+    let changed = queues.iter().fold(0, |all, q| all | q.changed);
+    Some((seen, messages, changed))
 }
 
 /// GetKeyboardState(buffer): the 256 keys' states.
@@ -2438,12 +2478,17 @@ pub fn mouse_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // The cursor.
 
-/// GetCursorPos(point): where the mouse is now.
+/// GetCursorPos(point): where the mouse is now. A read that found the
+/// mouse where it was changed nothing but the point, and an idle proof
+/// goes through it (`read_quiet`): Shadow of the Horned Rat calls it in
+/// every pass of the loop its screens wait in (#1284).
 pub fn get_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     super::init(cpu);
-    poll(cpu);
-    let (x, y) = user(cpu).input.cursor;
-    write_words(cpu, args[0], &[x as u32, y as u32]);
+    read_quiet(cpu, |cpu| {
+        let (x, y) = user(cpu).input.cursor;
+        write_words(cpu, args[0], &[x as u32, y as u32]);
+        !cpu.bus.guest_faulted()
+    });
     if cpu.bus.guest_faulted() {
         return None;
     }
