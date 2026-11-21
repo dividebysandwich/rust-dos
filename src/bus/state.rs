@@ -85,6 +85,7 @@ const PIT2_VERSION: u16 = 1;
 const PIT_8254_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
 const KEY_QUEUE_VERSION: u16 = 1;
+const TYPEMATIC_VERSION: u16 = 1;
 const FRAME_CAP_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
@@ -307,6 +308,10 @@ impl Bus {
         // Which queued keystrokes the BIOS never saw, in a section of its
         // own so states saved before it load.
         w.section(b"KEYQ", KEY_QUEUE_VERSION, |w| kbd.save_queue(w));
+        // The keyboard's typematic rate and the key it repeats, likewise.
+        w.section(b"TYPM", TYPEMATIC_VERSION, |w| {
+            kbd.save_typematic(kbc.typematic, w)
+        });
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga);
             // A ToadForce's memory is saved with what its host renderer
@@ -714,6 +719,11 @@ impl Bus {
         } else {
             kbd.forget_queue();
         }
+        kbc.typematic = if r.next_is(b"TYPM") {
+            kbd.load_typematic(&mut r.section(b"TYPM", TYPEMATIC_VERSION)?)?
+        } else {
+            kbd.forget_typematic()
+        };
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         *last_present = None;
