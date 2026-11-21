@@ -884,6 +884,9 @@ impl Bus {
         // The processes' stubs from older tables call what their programs
         // were bound to.
         crate::win32::stub_tables::mend(self)?;
+        // The Win16 KERNEL's stubs for imports nothing has keep their ids
+        // when KERNEL's table grows.
+        crate::win16::builtin::mend(self)?;
         Ok(lost)
     }
 

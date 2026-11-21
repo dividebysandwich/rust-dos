@@ -177,7 +177,7 @@ pub struct Module16 {
     /// loader made.
     pub unbooted: bool,
     /// For a system module whose code segment is from an older table, of
-    /// a state that was loaded (`builtin::mend`): the offset of each
+    /// a state that was loaded (`builtin::mend_order`): the offset of each
     /// function's stub in it, by the function's place in the table now,
     /// None for one it lacks. A load works it out again.
     pub older: Option<Vec<Option<u16>>>,

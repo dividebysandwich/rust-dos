@@ -35,7 +35,7 @@
 //! system's window classes, which all processes share, hold its
 //! addresses, as Windows 9x has one image of its system DLLs for all
 //! processes. The 16-bit system modules are mended the same way through
-//! their entry tables (`win16::builtin::mend`).
+//! their entry tables (`win16::builtin::mend_order`).
 
 use super::{Process, TRAP, loader, stubs};
 use crate::bus::Bus;
@@ -363,7 +363,7 @@ pub(crate) fn mend(bus: &mut Bus) -> Result<()> {
         bus.win32.processes[i] = process;
         mended?;
     }
-    crate::win16::builtin::mend(bus)
+    crate::win16::builtin::mend_order(bus)
 }
 
 fn mend_process(bus: &mut Bus, process: &mut Process) -> Result<()> {

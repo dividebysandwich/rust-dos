@@ -18636,3 +18636,171 @@ fn a_win16_state_from_before_a_user_insertion_calls_what_it_was_bound_to() {
     assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
     assert_eq!(cpu.errorlevel, 7, "{}", printed(&cpu));
 }
+
+/// KERNEL's stubs for imports nothing has: the first one's id and its
+/// place in KERNEL's code segment (`win16::builtin::FIRST_MISSING`), and
+/// how many there are.
+const FIRST_MISSING16: u32 = 0x3C0;
+const MISSING16: u32 = 64;
+
+/// How many functions the 16-bit KERNEL's table has.
+fn kernel16_functions() -> u32 {
+    (0..0x400)
+        .take_while(|&i| rust_dos::win16::function_name(i).is_some())
+        .count() as u32
+}
+
+/// The Win16 KERNEL's place in the module list, and where its code
+/// segment is: its selector and linear address.
+fn kernel16(cpu: &Cpu) -> (usize, u16, u32) {
+    let modules = &cpu.bus.win32.win16.modules;
+    let i = modules.iter().position(|m| m.builtin == Some(0)).unwrap();
+    let sel = modules[i].segments[0].selector;
+    (i, sel, rust_dos::win16::linear(cpu, (sel as u32) << 16))
+}
+
+/// A stub for an import nothing has, with the trap id `id`.
+fn missing_stub16(id: u32) -> [u8; 8] {
+    let [lo, hi] = (id as u16).to_le_bytes();
+    [0xFE, 0x3E, lo, hi, 0xCB, 0x90, 0x90, 0x90]
+}
+
+/// Turn the running Win16 process's KERNEL into what a build from before
+/// #1599 made with a KERNEL table of `functions` entries, and the
+/// program's calls of missing stubs into what that build bound: the
+/// missing stubs right after KERNEL's own, each trapping with its place,
+/// and the code segment ending after them.
+fn kernel16_from_before_1599(cpu: &mut Cpu, functions: u32) {
+    let (i, sel, base) = kernel16(cpu);
+    for k in 0..MISSING16 {
+        let at = base + 8 * (functions + k);
+        poke(cpu, at, &missing_stub16(functions + k));
+    }
+    let end = 8 * (functions + MISSING16);
+    poke(cpu, base + end, &vec![0; (0x2000 - end) as usize]);
+    cpu.bus.win32.win16.modules[i].segments[0].size = end;
+    // The program's far calls of missing stubs.
+    let program = &cpu.bus.win32.win16.modules;
+    let t = program.iter().find(|m| m.name == "T").unwrap();
+    let (code_sel, size) = (t.segments[0].selector, t.segments[0].size);
+    let code = rust_dos::win16::linear(cpu, (code_sel as u32) << 16);
+    let mut bytes = vec![0u8; size as usize];
+    peek(cpu, code, &mut bytes);
+    for at in 0..bytes.len().saturating_sub(3) {
+        let offset = u16::from_le_bytes([bytes[at], bytes[at + 1]]) as u32;
+        let selector = u16::from_le_bytes([bytes[at + 2], bytes[at + 3]]);
+        let missing = 8 * FIRST_MISSING16..8 * (FIRST_MISSING16 + MISSING16);
+        if selector == sel && missing.contains(&offset) {
+            let then = (offset - 8 * FIRST_MISSING16 + 8 * functions) as u16;
+            poke(cpu, code + at as u32, &then.to_le_bytes());
+        }
+    }
+}
+
+/// A Win16 program that waits 300 ms, then calls USER's #9999, which
+/// USER doesn't have.
+fn calls_a_missing_import16() -> Vec<u8> {
+    let mut code = win16::Code::new();
+    code.call("USER", 13); // GetTickCount
+    code.emit(&[0x89, 0xC6]); // mov si, ax
+    let wait = code.here();
+    code.call("USER", 13);
+    code.emit(&[0x29, 0xF0]); // sub ax, si
+    code.emit(&[0x3D, 0x2C, 0x01]); // cmp ax, 300
+    let back = wait.wrapping_sub(code.here() + 2) as u8;
+    code.emit(&[0x72, back]); // jb wait
+    code.call("USER", 9999);
+    code.emit(&[0xB0, 0x00]); // mov al, 0
+    code.exit_al();
+    win16::program(&code, win16::CODE)
+}
+
+const MISSING_CALL16: &str = "a call of USER.#9999, which the built-in Windows doesn't have yet";
+
+/// A state saved by a build from before #1599, whose KERNEL table then
+/// grew by an append: its call of a missing import still reaches the
+/// missing-import stub, named. Without the mending, the stub traps with
+/// the id KERNEL's last function, the one appended since, has now.
+#[test]
+fn a_win16_state_from_before_a_kernel_append_still_calls_its_missing_import() {
+    let mut cpu = machine("missing16_older", calls_a_missing_import16());
+    run_into_the_wait(&mut cpu);
+    kernel16_from_before_1599(&mut cpu, kernel16_functions() - 1);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    // A state the mended machine saves loads again as it was.
+    let (_, _, base) = kernel16(&cpu);
+    let mut stubs = vec![0u8; 0x2000];
+    peek(&mut cpu, base, &mut stubs);
+    let mended = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &mended).unwrap();
+    let mut again = vec![0u8; 0x2000];
+    peek(&mut cpu, base, &mut again);
+    assert!(stubs == again, "a second load changed KERNEL's stubs");
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert!(printed(&cpu).contains(MISSING_CALL16), "{}", printed(&cpu));
+}
+
+/// In a state from before #1599 whose KERNEL table grew since, the
+/// function appended has no stub in the state's KERNEL: GetProcAddress
+/// finds none, where it would give the first missing stub's address.
+#[test]
+fn a_win16_state_from_before_a_kernel_append_has_no_address_for_it() {
+    let mut code = win16::Code::new();
+    code.call("USER", 13); // GetTickCount
+    code.emit(&[0x89, 0xC6]); // mov si, ax
+    let wait = code.here();
+    code.call("USER", 13);
+    code.emit(&[0x29, 0xF0]); // sub ax, si
+    code.emit(&[0x3D, 0x2C, 0x01]); // cmp ax, 300
+    let back = wait.wrapping_sub(code.here() + 2) as u8;
+    code.emit(&[0x72, back]); // jb wait
+    let name = code.here() + 1;
+    code.push_far(0); // "KERNEL"
+    code.call("KERNEL", 47); // GetModuleHandle
+    code.emit(&[0x50]); // push ax
+    code.push(0);
+    code.push(110); // PatchCodeHandle, KERNEL's last function
+    code.call("KERNEL", 50); // GetProcAddress
+    code.emit(&[0x09, 0xD0]); // or ax, dx
+    code.emit(&[0x74, 0x02]); // jz +2
+    code.emit(&[0xB0, 0x01]); // mov al, 1
+    code.exit_al();
+    let text = code.here();
+    code.emit(b"KERNEL\0");
+    code.patch(name + 1, text);
+    let mut cpu = machine("missing16_address", win16::program(&code, win16::CODE));
+    run_into_the_wait(&mut cpu);
+    kernel16_from_before_1599(&mut cpu, kernel16_functions() - 1);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+/// A state of now calls its missing import after a load. Its KERNEL has
+/// the missing stubs at their fixed place, and a function appended to
+/// KERNEL's table after the state was saved gets its stub in the zeros
+/// before them.
+#[test]
+fn a_win16_state_of_now_calls_its_missing_import() {
+    let mut cpu = machine("missing16_now", calls_a_missing_import16());
+    run_into_the_wait(&mut cpu);
+    let (i, _, base) = kernel16(&cpu);
+    assert_eq!(cpu.bus.win32.win16.modules[i].segments[0].size, 0x2000);
+    let mut first = [0u8; 8];
+    peek(&mut cpu, base + 8 * FIRST_MISSING16, &mut first);
+    assert_eq!(first, missing_stub16(FIRST_MISSING16));
+    // KERNEL's last function, as if appended after the state was saved.
+    let last = base + 8 * (kernel16_functions() - 1);
+    let mut stub = [0u8; 8];
+    peek(&mut cpu, last, &mut stub);
+    poke(&mut cpu, last, &[0; 8]);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    let mut mended = [0u8; 8];
+    peek(&mut cpu, last, &mut mended);
+    assert_eq!(mended, stub);
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert!(printed(&cpu).contains(MISSING_CALL16), "{}", printed(&cpu));
+}
