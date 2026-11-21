@@ -18183,9 +18183,10 @@ const USER32_INSERTED: [&[&str]; 4] = [
 /// into the one a build whose table lacked `lacking` and ended after
 /// `len` entries made, and the import table slots `iat` into what that
 /// build bound. Each function's stub goes to its place in that table: a
-/// trap with the place's id, or a jump to the function's code. The places
-/// after them are empty. The exports and slots that point at stubs move
-/// with them, and the exports of the functions it lacks become 0.
+/// trap with the place's id, or a jump to the function's code, which
+/// follows the stubs, as the image builder lays it out. The rest of the
+/// section is empty. The exports and slots that point at stubs or code
+/// move with them, and the exports of the functions it lacks become 0.
 fn make_older(cpu: &mut Cpu, dll: &str, base: u32, lacking: &[&str], len: usize, iat: &[u32]) {
     let names = rust_dos::win32::builtin_functions(dll).unwrap();
     let n = names.len();
@@ -18195,9 +18196,17 @@ fn make_older(cpu: &mut Cpu, dll: &str, base: u32, lacking: &[&str], len: usize,
         .collect();
     assert_eq!(order.len(), len, "{dll} has fewer entries");
     let mut place = vec![None; n];
-    let mut now = vec![0u8; 8 * n];
+    // The first section, with the stubs and then the code of the
+    // functions given as code: it moves up by `shift`.
+    let pe = base + peek_32(cpu, base + 0x3C);
+    let section = pe + 24 + (peek_32(cpu, pe + 20) & 0xFFFF);
+    let end = base + peek_32(cpu, section + 12) + peek_32(cpu, section + 8);
+    let code = base + STUBS_RVA + 8 * n as u32;
+    let shift = 8 * (n - len) as u32;
+    let mut now = vec![0u8; (end - base - STUBS_RVA) as usize];
     peek(cpu, base + STUBS_RVA, &mut now);
-    let mut older = vec![0u8; 8 * n];
+    let mut older = vec![0u8; now.len()];
+    older[8 * len..now.len() - shift as usize].copy_from_slice(&now[8 * n..]);
     for (q, &api) in order.iter().enumerate() {
         place[api] = Some(q as u32);
         let stub = &mut older[8 * q..8 * q + 8];
@@ -18209,7 +18218,7 @@ fn make_older(cpu: &mut Cpu, dll: &str, base: u32, lacking: &[&str], len: usize,
             }
             0xE9 => {
                 let rel = i32::from_le_bytes(stub[1..5].try_into().unwrap());
-                let rel = rel + 8 * (api as i32 - q as i32);
+                let rel = rel + 8 * (api as i32 - q as i32) - shift as i32;
                 stub[1..5].copy_from_slice(&rel.to_le_bytes());
             }
             other => panic!("{dll}'s stub {api} starts with {other:02X}"),
@@ -18219,6 +18228,9 @@ fn make_older(cpu: &mut Cpu, dll: &str, base: u32, lacking: &[&str], len: usize,
     // Where an address of a stub went: None for one that isn't a stub's.
     let stubs = base + STUBS_RVA..base + STUBS_RVA + 8 * n as u32;
     let moved = |address: u32| {
+        if (code..end).contains(&address) {
+            return Some(address - shift);
+        }
         let api = (address.wrapping_sub(base + STUBS_RVA) / 8) as usize;
         (stubs.contains(&address) && address.is_multiple_of(8))
             .then(|| place[api].map_or(0, |q| base + STUBS_RVA + 8 * q))

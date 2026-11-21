@@ -190,7 +190,7 @@ pub(crate) fn image_order(image: &Image) -> Option<Vec<usize>> {
     // the image was made, and those not exported, aren't in it.
     let exported = |(p, &api): (usize, &usize)| {
         let name = image.names[api].as_bytes();
-        (image.exported.get(name) == Some(&p)).then_some(p + 1)
+        (!(image.code)(api) && image.exported.get(name) == Some(&p)).then_some(p + 1)
     };
     let mut len = order
         .iter()
@@ -206,17 +206,21 @@ pub(crate) fn image_order(image: &Image) -> Option<Vec<usize>> {
 }
 
 /// Whether the image's exports are where `order` has their functions, and
-/// it exports none `order` lacks.
+/// it exports none `order` lacks. The export of a function given as code
+/// points at its code, which follows the image's stubs: in an image with
+/// fewer stubs than the table has now, that is where a later stub would
+/// be now, so it says nothing of the order.
 fn fits(image: &Image, order: &[usize]) -> bool {
     let mut place = vec![None; image.names.len()];
     for (p, &api) in order.iter().enumerate() {
         place[api] = Some(p);
     }
     image.names.iter().enumerate().all(|(api, name)| {
-        image
-            .exported
-            .get(name.as_bytes())
-            .is_none_or(|&at| place[api] == Some(at))
+        (image.code)(api)
+            || image
+                .exported
+                .get(name.as_bytes())
+                .is_none_or(|&at| place[api] == Some(at))
     })
 }
 
