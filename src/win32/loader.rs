@@ -992,7 +992,12 @@ fn bind_imports(
                 pe::Import::Name { name, .. } => Wanted::Name(name.clone()),
                 pe::Import::Ordinal(ordinal) => Wanted::Ordinal(*ordinal),
             };
-            let found = resolve_export(l, dep, &wanted, importer, &mut deps, 0)?;
+            let found = match resolve_export(l, dep, &wanted, importer, &mut deps, 0)? {
+                Some(address) => Some(address),
+                // A function an older image of a built-in DLL lacks, which
+                // the load that mended it gave a stub (stub_tables.rs).
+                None => super::stub_tables::lacking_export(l.bus, l.process, dep, &wanted),
+            };
             // A function the built-in DLL has only under Windows 98 is
             // missing under 95 as on Windows 95, and the program doesn't
             // load.
@@ -1182,7 +1187,10 @@ pub(super) fn find_export(
 ) -> Option<u32> {
     let (mut base, mut wanted) = (base, wanted.clone());
     for _ in 0..8 {
-        match export_target(bus, &process.memory, base, &wanted)? {
+        let Some(target) = export_target(bus, &process.memory, base, &wanted) else {
+            return super::stub_tables::lacking_export(bus, process, base, &wanted);
+        };
+        match target {
             Target::Address(address) => return Some(address),
             Target::Forward(forward) => {
                 let (dll, function) = forward.rsplit_once('.')?;

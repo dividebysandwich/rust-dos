@@ -18387,6 +18387,129 @@ fn a_state_from_before_the_user32_and_kernel32_insertions_calls_what_it_was_boun
     }
 }
 
+/// A program started after the load of a state from before the USER32
+/// insertions gets the state's older image of USER32 (#1613): the
+/// system's windows hold addresses in it. GetProcAddress gives
+/// GetKBCodePage's stub at its older place. SetThreadDesktop, which the
+/// older image lacks and doesn't export, is bound and found at the stub
+/// the load gave it, and runs. The parent hooked
+/// GetKBCodePage by writing over its stub before the save, and the child
+/// calls the stub as the image builder made it, as a process on main
+/// gets an image of its own. A bit each in the child's exit code.
+#[test]
+fn a_program_started_after_an_older_user32_state_loads_gets_its_image() {
+    let names = rust_dos::win32::builtin_functions("USER32.DLL").unwrap();
+    let lacking: Vec<&str> = USER32_INSERTED.concat();
+    let older: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|n| !lacking.contains(n))
+        .take(524)
+        .collect();
+    let place = older.iter().position(|&n| n == "GetKBCodePage").unwrap();
+    let kb_code_page = USER32_BASE + STUBS_RVA + 8 * place as u32;
+    let child = {
+        let imports: &[(&str, &[&str])] = &[
+            ("KERNEL32.DLL", &["GetModuleHandleA", "GetProcAddress"]),
+            ("USER32.DLL", &["GetKBCodePage", "SetThreadDesktop"]),
+        ];
+        // GetKBCodePage's older address at 0, the names from 0x10.
+        let mut data = vec![0u8; 0x60];
+        data[..4].copy_from_slice(&kb_code_page.to_le_bytes());
+        data[0x10..0x1B].copy_from_slice(b"USER32.DLL\0");
+        data[0x20..0x2E].copy_from_slice(b"GetKBCodePage\0");
+        data[0x30..0x41].copy_from_slice(b"SetThreadDesktop\0");
+        program(BASE, false, imports, &data, |a, l| {
+            a.xor(ebx, ebx)?;
+            a.call(l.import(2))?;
+            a.cmp(eax, 437)?;
+            bit_if(a, eq, 0)?;
+            a.push(l.at(0x10) as i32)?;
+            a.call(l.import(0))?;
+            a.mov(esi, eax)?;
+            a.push(l.at(0x20) as i32)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+            a.cmp(eax, dword_ptr(l.at(0)))?;
+            bit_if(a, eq, 1)?;
+            a.push(l.at(0x30) as i32)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+            a.mov(edi, eax)?;
+            a.test(edi, edi)?;
+            bit_if(a, ne, 2)?;
+            a.cmp(edi, dword_ptr(l.iat[3] as u64))?;
+            bit_if(a, eq, 3)?;
+            a.push(0)?;
+            a.call(l.import(3))?;
+            a.test(eax, eax)?;
+            bit_if(a, ne, 4)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        })
+    };
+    let names_p: &[&str] = &[
+        "GetTickCount",
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", names_p),
+        ("USER32.DLL", &["GetKBCodePage"]),
+    ];
+    // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
+    // the exit code at 0xA0.
+    let mut data = b"C.EXE".to_vec();
+    data.resize(0xB0, 0);
+    data[0x40] = 68;
+    let mut iat = Vec::new();
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        iat = l.iat.clone();
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 300))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(l.import(1))?;
+        // 0EEh when CreateProcessA fails.
+        let mut started = a.create_label();
+        a.test(eax, eax)?;
+        a.jnz(started)?;
+        a.mov(eax, 0xEE)?;
+        a.ret()?;
+        a.set_label(&mut started)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(l.import(2))?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(l.import(3))?;
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        a.ret()
+    });
+    let mut cpu = machine_with(
+        "stub_tables_user32_new_process",
+        &[("T.EXE", parent), ("C.EXE", child)],
+    );
+    run_into_the_wait(&mut cpu);
+    make_older(&mut cpu, "USER32.DLL", USER32_BASE, &lacking, 524, &iat);
+    // mov eax, 1234; ret: a hook the parent wrote over the stub.
+    poke(&mut cpu, kb_code_page, &[0xB8, 0xD2, 0x04, 0, 0, 0xC3, 0x90, 0x90]);
+    load_twice(&mut cpu, &[USER32_BASE]);
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x1F, "{}", printed(&cpu));
+}
+
 /// An exception raised in a handler, in a state from before LoadModule
 /// went into the middle of KERNEL32's table (#1173): the system's frame
 /// around the handler has the address Rust works out for KERNEL32's

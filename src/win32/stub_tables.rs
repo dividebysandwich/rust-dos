@@ -284,6 +284,35 @@ fn stub_in<'a>(
     }
 }
 
+/// The stub of the function `wanted` of the built-in DLL at `base` in the
+/// process's older image of it, which lacks the function and so doesn't
+/// export it: `mend` gave it a stub after the image's code, and a program
+/// bound or a GetProcAddress made after the load gets that, as it would
+/// get the function of the image of the table now. None when the process
+/// has no older image of that DLL or no stub for the function in it, and
+/// for a function the running version of Windows doesn't export.
+pub(crate) fn lacking_export(
+    bus: &Bus,
+    process: &Process,
+    base: u32,
+    wanted: &loader::Wanted,
+) -> Option<u32> {
+    let d = stubs::DLLS.iter().position(|dll| dll.base == base)?;
+    let older = process.older_images.iter().find(|o| o.dll == d)?;
+    let dll = stubs::DLLS[d];
+    let api = dll.apis.iter().position(|a| {
+        a.ordinal != 0
+            && match wanted {
+                loader::Wanted::Name(name) => a.name == name,
+                loader::Wanted::Ordinal(ordinal) => a.ordinal == *ordinal,
+            }
+    })?;
+    if !super::version::exports(bus.win32.os, dll.name, dll.apis[api].name) {
+        return None;
+    }
+    older.stubs.get(api).copied().flatten()
+}
+
 /// The address of the stub of function `api` of the built-in DLL `dll`,
 /// for Rust to call or to give the program: in the running process's
 /// image, or, with no process running, in the image a process gets (both
@@ -408,8 +437,9 @@ fn mend_process(bus: &mut Bus, process: &mut Process) -> Result<()> {
             stubs: mend_image(bus, process, d, &order),
         };
         if !bus.win32.older_images.iter().any(|s| s.older.dll == d)
-            && let Some(bytes) = loader::peek(bus, &process.memory, dll.base, size as usize)
+            && let Some(mut bytes) = loader::peek(bus, &process.memory, dll.base, size as usize)
         {
+            unpatched(&mut bytes, d, &older);
             bus.win32.older_images.push(SharedImage {
                 older: older.clone(),
                 bytes,
@@ -418,6 +448,28 @@ fn mend_process(bus: &mut Bus, process: &mut Process) -> Result<()> {
         process.older_images.push(older);
     }
     Ok(())
+}
+
+/// Give each function of the copy `bytes` of an older image of the
+/// built-in DLL `d` that traps the stub the image builder writes for it,
+/// with its id now. The copy is of a process's image, whose program may
+/// have hooked functions by writing jumps over their stubs: a process
+/// started later would jump into memory it doesn't have, where on main it
+/// gets an image of its own, as the builder made it.
+fn unpatched(bytes: &mut [u8], d: usize, older: &OlderImage) {
+    let dll = stubs::DLLS[d];
+    for (api, function) in dll.apis.iter().enumerate() {
+        let Some(at) = older.stubs.get(api).copied().flatten() else {
+            continue;
+        };
+        let at = (at - dll.base) as usize;
+        if function.conv.is_trap()
+            && let Some(stub) = bytes.get_mut(at..at + stubs::STUB as usize)
+        {
+            let id = stubs::id(d, api);
+            stub.copy_from_slice(&stubs::stub(id, function.args, function.conv));
+        }
+    }
 }
 
 /// The place of the stub each export of the image of the built-in DLL `d`
