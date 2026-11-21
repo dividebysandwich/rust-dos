@@ -648,7 +648,7 @@ fn selector_access_rights(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// Whether `len` bytes at the 16:16 pointer `ptr` aren't all there.
-fn bad_range(cpu: &Cpu, ptr: u32, len: u32) -> bool {
+pub(super) fn bad_range(cpu: &Cpu, ptr: u32, len: u32) -> bool {
     let Some((_, limit, _)) = super::selector_base(cpu, (ptr >> 16) as u16) else {
         return true;
     };

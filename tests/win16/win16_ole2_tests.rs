@@ -15,6 +15,8 @@ const OLE_INITIALIZE: u16 = 2; // OLE2
 const OLE_UNINITIALIZE: u16 = 3;
 const CO_GET_MALLOC: u16 = 4; // COMPOBJ
 const STRING_FROM_CLSID: u16 = 19; // COMPOBJ
+const GET_SCODE: u16 = 26;
+const CO_REGISTER_MESSAGE_FILTER: u16 = 27;
 const IID_IUNKNOWN: u16 = 38; // COMPOBJ's variable _IID_IUnknown
 const SYS_ALLOC_STRING_LEN: u16 = 4; // OLE2DISP
 const SYS_STRING_LEN: u16 = 7;
@@ -269,23 +271,21 @@ fn a_vb4_programs_ole_calls_work() {
     assert_eq!(exit, 0, "check {exit} failed\n{log}");
 }
 
-/// Where the allocator test keeps its object: a vtable pointer and a
-/// reference count, and the vtable (QueryInterface, AddRef, Release).
+/// Where the tests of the program's objects keep their object: a vtable
+/// pointer, a reference count and the size its IMalloc::Alloc was last
+/// asked for; the vtable (QueryInterface, AddRef, Release, Alloc); and
+/// the block its Alloc gives.
 const OBJECT: u16 = 0x60;
 const REFS: u16 = OBJECT + 4;
+const ASKED: u16 = OBJECT + 6;
 const VTABLE: u16 = 0x70;
+const OWN_BLOCK: u16 = 0xA0;
 
-/// A program that gives OleInitialize its own allocator keeps it alive
-/// through COMPOBJ's reference: OleInitialize adds one, CoGetMalloc
-/// another for its caller, and OleUninitialize lets COMPOBJ's go.
-/// Visual Basic 4 releases its own reference right after OleInitialize,
-/// so without COMPOBJ's its allocator frees itself.
-#[test]
-fn ole_initialize_holds_the_programs_allocator() {
-    let mut code = Code::new();
-
-    // AddRef and Release of the object, as C calls them: the count is
-    // at this+4, and the new one comes back in DX:AX.
+/// Make the program's object at OBJECT, with one reference: AddRef and
+/// Release count at this+4 and return the new count in DX:AX, as C
+/// calls them; Alloc keeps the size it is asked for at this+6 and gives
+/// the data segment's OWN_BLOCK.
+fn program_object(code: &mut Code) {
     let jump = code.here() + 1;
     code.emit(&[0xE9, 0, 0]);
     let method = |code: &mut Code, op: u8| {
@@ -297,20 +297,38 @@ fn ole_initialize_holds_the_programs_allocator() {
             .emit(&[0x33, 0xD2, 0x5D, 0xCB]); // xor dx,dx; pop bp; retf
         at
     };
-    let add_ref = method(&mut code, 0x47);
-    let release = method(&mut code, 0x4F);
+    let add_ref = method(code, 0x47);
+    let release = method(code, 0x4F);
+    let alloc = code.here();
+    code.emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+        .emit(&[0xC4, 0x5E, 0x06]) // les bx,[bp+6]
+        .emit(&[0x8B, 0x46, 0x0A]) // mov ax,[bp+10]
+        .emit(&[0x26, 0x89, 0x47, 0x06]) // mov es:[bx+6],ax
+        .emit(&[0xB8, lo(OWN_BLOCK), hi(OWN_BLOCK)]) // mov ax,OWN_BLOCK
+        .emit(&[0x8C, 0xC2, 0x5D, 0xCB]); // mov dx,es; pop bp; retf
     let start = code.here();
     code.patch(jump, start - (jump + 2));
 
-    // The object, with one reference, its vtable in the data segment.
-    set(&mut code, OBJECT, VTABLE);
+    set(code, OBJECT, VTABLE);
     code.emit(&[0x8C, 0x1E, lo(OBJECT + 2), hi(OBJECT + 2)]); // mov [..],ds
-    set(&mut code, REFS, 1);
-    for (i, at) in [(1u16, add_ref), (2, release)] {
-        set(&mut code, VTABLE + 4 * i, at);
+    set(code, REFS, 1);
+    set(code, ASKED, 0);
+    for (i, at) in [(1u16, add_ref), (2, release), (3, alloc)] {
+        set(code, VTABLE + 4 * i, at);
         let seg = VTABLE + 4 * i + 2;
         code.emit(&[0x8C, 0x0E, lo(seg), hi(seg)]); // mov [..],cs
     }
+}
+
+/// A program that gives OleInitialize its own allocator keeps it alive
+/// through COMPOBJ's reference: OleInitialize adds one, CoGetMalloc
+/// another for its caller, and OleUninitialize lets COMPOBJ's go.
+/// Visual Basic 4 releases its own reference right after OleInitialize,
+/// so without COMPOBJ's its allocator frees itself.
+#[test]
+fn ole_initialize_holds_the_programs_allocator() {
+    let mut code = Code::new();
+    program_object(&mut code);
 
     // OleInitialize(&object): S_OK, and a reference more.
     push_ds(&mut code, OBJECT);
@@ -332,5 +350,78 @@ fn ole_initialize_holds_the_programs_allocator() {
 
     code.emit(&[0xB0, 0x00]).exit_al();
     let (exit, log) = run("ole2_app_malloc", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}
+
+/// StringFromCLSID's text is the caller's to free with the allocator
+/// CoGetMalloc gives it, so it comes from the program's own allocator
+/// when OleInitialize was given one: its Alloc is asked for the text's
+/// 39 bytes, and the text is in the block it gave.
+#[test]
+fn string_from_clsid_takes_the_programs_allocator() {
+    let mut code = Code::new();
+    program_object(&mut code);
+    push_ds(&mut code, OBJECT);
+    code.call("OLE2", OLE_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 1);
+
+    // StringFromCLSID(&GUID_NULL in the data segment, &text).
+    for i in 0..8 {
+        set(&mut code, SOURCE + 2 * i, 0);
+    }
+    push_ds(&mut code, SOURCE);
+    push_ds(&mut code, OUT);
+    code.call("COMPOBJ", STRING_FROM_CLSID);
+    expect_dx_ax(&mut code, 0, 2);
+    expect(&mut code, ASKED, 39, 3);
+    expect(&mut code, OUT, OWN_BLOCK, 4);
+    les_bx(&mut code, OUT);
+    expect_es_bx(&mut code, 0, b'{', 5);
+    expect_es_bx(&mut code, 1, b'0', 6);
+    expect_es_bx(&mut code, 37, b'}', 7);
+    expect_es_bx(&mut code, 38, 0, 8);
+
+    code.emit(&[0xB0, 0x00]).exit_al();
+    let (exit, log) = run("ole2_string_app_malloc", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}
+
+/// CoRegisterMessageFilter with no place for the filter before it
+/// releases that one, and GetScode keeps a result's severity, facility
+/// and code.
+#[test]
+fn a_replaced_message_filter_is_released() {
+    let mut code = Code::new();
+    program_object(&mut code);
+    push_ds(&mut code, OBJECT);
+    code.call("OLE2", OLE_INITIALIZE);
+
+    // CoRegisterMessageFilter(&object, NULL): a reference more.
+    push_ds(&mut code, OBJECT);
+    code.push(0)
+        .push(0)
+        .call("COMPOBJ", CO_REGISTER_MESSAGE_FILTER);
+    expect_dx_ax(&mut code, 0, 1);
+    expect(&mut code, REFS, 3, 2);
+
+    // Again: the new one's reference added, the old one's released.
+    push_ds(&mut code, OBJECT);
+    code.push(0)
+        .push(0)
+        .call("COMPOBJ", CO_REGISTER_MESSAGE_FILTER);
+    expect_dx_ax(&mut code, 0, 3);
+    expect(&mut code, REFS, 3, 4);
+
+    // CoRegisterMessageFilter(NULL, NULL): the filter's released.
+    code.push(0).push(0).push(0).push(0);
+    code.call("COMPOBJ", CO_REGISTER_MESSAGE_FILTER);
+    expect(&mut code, REFS, 2, 5);
+
+    // GetScode(8FFF0005h): 800F0005h.
+    code.push(0x8FFF).push(0x0005).call("COMPOBJ", GET_SCODE);
+    expect_dx_ax(&mut code, 0x800F_0005, 6);
+
+    code.emit(&[0xB0, 0x00]).exit_al();
+    let (exit, log) = run("ole2_message_filter", program(&code, CODE));
     assert_eq!(exit, 0, "check {exit} failed\n{log}");
 }

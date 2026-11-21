@@ -18,11 +18,15 @@
 //!
 //! Interfaces: a 16-bit interface's methods are far cdecl functions, the
 //! object's 16:16 pointer first, as OLE 2's STDMETHODCALLTYPE has them
-//! in Win16. The task allocator (IMalloc) is the built-in one's: its
-//! methods are stubs of COMPOBJ that aren't exported, and its blocks
-//! come from local heaps in global blocks of COMPOBJ's (`alloc`).
-//! The methods of an interface of the program's are called through its
-//! vtable (`call_method`).
+//! in Win16. The built-in task allocator (IMalloc) has methods that are
+//! stubs of COMPOBJ that aren't exported, and its blocks come from local
+//! heaps in global blocks of COMPOBJ's (`alloc`). A program that gives
+//! CoInitialize an allocator of its own has that one as its task
+//! allocator instead: CoGetMalloc gives it, and the strings COMPOBJ
+//! makes for the program come from it (`task_block`). The methods of an
+//! interface of the program's are called through its vtable
+//! (`call_method`). What a task initialized, registered or was given is
+//! its own (`OleTask`), and goes when it ends.
 //!
 //! Copyright 1995 Martin von Loewis
 //! Copyright 1998 Justin Bradford
@@ -81,51 +85,126 @@ pub const OLE16: u16 = 84;
 /// What the OLE modules keep of the Win16 process.
 #[derive(Clone, Debug, Default)]
 pub struct Ole16 {
-    /// How many times CoInitialize and OleInitialize have been called
-    /// without their uninitialize.
-    pub co_inits: u32,
-    pub ole_inits: u32,
-    /// The task allocator's object (16:16), 0 before it is made, and the
-    /// program's own allocator that CoInitialize was given, if any.
+    /// The tasks that called the modules, each with what is its own.
+    pub tasks: Vec<OleTask>,
+    /// The built-in task allocator's object (16:16), 0 before it is
+    /// made.
     pub malloc: u32,
-    pub app_malloc: u32,
     /// The selectors of the global blocks the allocator's local heaps
     /// are in, and of the blocks too big for one, each a block of its
     /// own.
     pub heaps: Vec<u16>,
     pub large: Vec<u16>,
-    /// The class objects registered (CoRegisterClassObject): the class's
-    /// GUID as four dwords, the object, and the registration's number.
-    pub classes: Vec<([u32; 4], u32, u32)>,
+    /// The class objects registered (CoRegisterClassObject).
+    pub classes: Vec<Class>,
     pub next_cookie: u32,
-    /// The message filter CoRegisterMessageFilter registered.
-    pub message_filter: u32,
-    /// The windows drag and drop targets were registered for, and the
-    /// targets.
-    pub drop_targets: Vec<(u16, u32)>,
-    /// The error object of the last SetErrorInfo (OLE2DISP).
-    pub error_info: u32,
+    /// The windows drag and drop targets were registered for, the
+    /// targets, and the tasks that registered them.
+    pub drop_targets: Vec<(u16, u32, u16)>,
     /// CoCreateGuid's generator.
     pub guid_seed: u64,
 }
 
 crate::state_fields!(Ole16 {
-    co_inits,
-    ole_inits,
+    tasks,
     malloc,
-    app_malloc,
     heaps,
     large,
     classes,
     next_cookie,
-    message_filter,
     drop_targets,
-    error_info,
     guid_seed
+});
+
+/// What COMPOBJ, OLE2 and OLE2DISP keep for one task, as the real ones
+/// keep it in each task's own data: a task's initialization, allocator
+/// and error object are its own, and go when it ends (`task_ended`).
+#[derive(Clone, Debug, Default)]
+pub struct OleTask {
+    /// The task's handle.
+    pub task: u16,
+    /// How many times CoInitialize and OleInitialize have been called
+    /// without their uninitialize.
+    pub co_inits: u32,
+    pub ole_inits: u32,
+    /// The program's own allocator that CoInitialize was given, if any:
+    /// the task allocator from then on.
+    pub app_malloc: u32,
+    /// The message filter CoRegisterMessageFilter registered.
+    pub message_filter: u32,
+    /// The error object of the last SetErrorInfo (OLE2DISP).
+    pub error_info: u32,
+}
+
+crate::state_fields!(OleTask {
+    task,
+    co_inits,
+    ole_inits,
+    app_malloc,
+    message_filter,
+    error_info
+});
+
+/// A class object CoRegisterClassObject registered.
+#[derive(Clone, Debug, Default)]
+pub struct Class {
+    /// The class's GUID as four dwords.
+    pub clsid: [u32; 4],
+    /// The object (16:16), the registration's number, and the task that
+    /// registered it.
+    pub object: u32,
+    pub cookie: u32,
+    pub task: u16,
+}
+
+crate::state_fields!(Class {
+    clsid,
+    object,
+    cookie,
+    task
 });
 
 fn ole(cpu: &mut Cpu) -> &mut Ole16 {
     &mut cpu.bus.win32.win16.ole
+}
+
+/// The handle of the task running, 0 outside one.
+fn current(cpu: &Cpu) -> u16 {
+    super::current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].handle)
+}
+
+/// What the modules keep for the task running, if it has called them.
+fn this_task(cpu: &mut Cpu) -> Option<&mut OleTask> {
+    let task = current(cpu);
+    ole(cpu).tasks.iter_mut().find(|t| t.task == task)
+}
+
+/// What the modules keep for the task running, made the first time.
+pub fn this_task_or_new(cpu: &mut Cpu) -> &mut OleTask {
+    let task = current(cpu);
+    let tasks = &mut ole(cpu).tasks;
+    let i = match tasks.iter().position(|t| t.task == task) {
+        Some(i) => i,
+        None => {
+            tasks.push(OleTask {
+                task,
+                ..OleTask::default()
+            });
+            tasks.len() - 1
+        }
+    };
+    &mut tasks[i]
+}
+
+/// The task `task` ended: what the modules kept for it goes, with the
+/// class objects and drop targets it registered, so that no other task
+/// reaches them. Their code and data went with the task, so none of
+/// their methods is called.
+pub fn task_ended(cpu: &mut Cpu, task: u16) {
+    let o = ole(cpu);
+    o.tasks.retain(|t| t.task != task);
+    o.classes.retain(|c| c.task != task);
+    o.drop_targets.retain(|d| d.2 != task);
 }
 
 pub static COMPOBJ: Def = Def {
@@ -150,19 +229,19 @@ pub static COMPOBJ: Def = Def {
         missing("CoFreeLibrary", 11),
         missing("CoFreeAllLibraries", 12),
         rust("CoCreateInstance", 13, "pllll", co_create_instance),
-        rust("StringFromIID", 14, "pp", string_from_clsid),
+        rust("StringFromIID", 14, "pl", string_from_clsid),
         rust("CoDisconnectObject", 15, "ll", s_ok),
         missing("CoReleaseMarshalData", 16),
         rust("CoFreeUnusedLibraries", 17, "", s_ok),
         rust("IsEqualGUID", 18, "pp", is_equal_guid),
-        rust("StringFromCLSID", 19, "pp", string_from_clsid),
+        rust("StringFromCLSID", 19, "pl", string_from_clsid),
         rust("CLSIDFromString", 20, "pp", clsid_from_string),
-        missing("IsValidPtrIn", 21),
-        missing("IsValidPtrOut", 22),
+        rust("IsValidPtrIn", 21, "Sw", is_valid_ptr),
+        rust("IsValidPtrOut", 22, "Sw", is_valid_ptr),
         rust("IsValidInterface", 23, "l", is_valid_interface),
         missing("IsValidIid", 24),
-        missing("ResultFromScode", 25),
-        missing("GetScode", 26),
+        rust("ResultFromScode", 25, "l", scode),
+        rust("GetScode", 26, "l", scode),
         rust(
             "CoRegisterMessageFilter",
             27,
@@ -215,7 +294,7 @@ pub static COMPOBJ: Def = Def {
         variable("_IID_IDfReserved3", 59, &ole_guid(0x15)),
         variable("_IID_IMessageFilter", 60, &ole_guid(0x16)),
         rust("CLSIDFromProgID", 61, "pp", clsid_from_prog_id),
-        rust("ProgIDFromCLSID", 62, "pp", prog_id_from_clsid),
+        rust("ProgIDFromCLSID", 62, "pl", prog_id_from_clsid),
         rust("CoLockObjectExternal", 63, "lww", s_ok),
         variable("_CLSID_StdMarshal", 64, &ole_guid(0x17)),
         missing("CoGetTreatAsClass", 65),
@@ -499,6 +578,19 @@ fn build_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(RMM << 16 | RUP)
 }
 
+/// GetScode(hr) and ResultFromScode(sc): the value with the bits
+/// between the severity and the facility cleared, as OLE 2.02's do it.
+fn scode(_: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(args[0] & 0x800F_FFFF)
+}
+
+/// IsValidPtrIn(pv, cb) and IsValidPtrOut: TRUE when the `cb` bytes at
+/// `pv` are all there, as KERNEL's IsBadReadPtr and IsBadWritePtr tell
+/// it.
+fn is_valid_ptr(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(!super::kernel::bad_range(cpu, args[0], args[1]) as u32)
+}
+
 // Initialization.
 
 /// CoInitialize(lpMalloc): S_OK the first time, S_FALSE after. A
@@ -514,29 +606,31 @@ fn co_initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// CoInitialize, and for OleInitialize OLE's own initialization too,
 /// which has nothing to set up here.
 fn initialize(cpu: &mut Cpu, malloc: u32, ole_too: bool) -> Option<u32> {
-    let o = ole(cpu);
-    o.co_inits += 1;
-    let first = o.co_inits == 1;
+    let t = this_task_or_new(cpu);
+    t.co_inits += 1;
+    let first = t.co_inits == 1;
     let mut result = if first { S_OK } else { S_FALSE };
     if ole_too {
-        o.ole_inits += 1;
-        if o.ole_inits > 1 {
+        t.ole_inits += 1;
+        if t.ole_inits > 1 {
             result = S_FALSE;
         }
     }
     if first && malloc != 0 {
-        o.app_malloc = malloc;
+        t.app_malloc = malloc;
         return call_method(cpu, malloc, 1, &[], "", Some(result));
     }
     Some(result)
 }
 
 fn co_uninitialize(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let o = ole(cpu);
-    o.co_inits = o.co_inits.saturating_sub(1);
-    if o.co_inits == 0 && o.app_malloc != 0 {
+    let Some(t) = this_task(cpu) else {
+        return Some(0);
+    };
+    t.co_inits = t.co_inits.saturating_sub(1);
+    if t.co_inits == 0 && t.app_malloc != 0 {
         // The reference CoInitialize took.
-        let malloc = std::mem::take(&mut o.app_malloc);
+        let malloc = std::mem::take(&mut t.app_malloc);
         return call_method(cpu, malloc, 2, &[], "", Some(0));
     }
     Some(0)
@@ -548,8 +642,9 @@ fn ole_initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn ole_uninitialize(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let o = ole(cpu);
-    o.ole_inits = o.ole_inits.saturating_sub(1);
+    if let Some(t) = this_task(cpu) {
+        t.ole_inits = t.ole_inits.saturating_sub(1);
+    }
     co_uninitialize(cpu, &[])
 }
 
@@ -735,10 +830,10 @@ fn co_get_malloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if context != MEMCTX_TASK && context != MEMCTX_SHARED {
         return Some(E_INVALIDARG);
     }
-    if context == MEMCTX_TASK && ole(cpu).co_inits == 0 {
+    let (inits, app) = this_task(cpu).map_or((0, 0), |t| (t.co_inits, t.app_malloc));
+    if context == MEMCTX_TASK && inits == 0 {
         return Some(CO_E_NOTINITIALIZED);
     }
-    let app = ole(cpu).app_malloc;
     if context == MEMCTX_TASK && app != 0 {
         // The program's allocator, with a reference added.
         super::write_32(cpu, out, app);
@@ -834,6 +929,34 @@ pub fn call_method(
     if target == 0 {
         return Some(value.unwrap_or(E_INVALIDARG));
     }
+    let data = match value {
+        Some(v) => vec![1, v],
+        None => vec![0, 0],
+    };
+    call_at(
+        cpu,
+        target,
+        object,
+        args,
+        sizes,
+        thunk::THEN_OLE_METHOD,
+        data,
+    );
+    None
+}
+
+/// Call the method at `target` of the 16-bit interface `object` with
+/// the arguments `args` (`sizes` as `call_method` has them); `then`
+/// gets what it returned, and `data`.
+fn call_at(
+    cpu: &mut Cpu,
+    target: u32,
+    object: u32,
+    args: &[u32],
+    sizes: &str,
+    then: u16,
+    data: Vec<u32>,
+) {
     // C's order: the last argument pushed first, a dword's high word
     // before its low one.
     let mut words = Vec::new();
@@ -846,12 +969,73 @@ pub fn call_method(
     words.push((object >> 16) as u16);
     words.push(object as u16);
     let resume = Context::of(cpu);
-    let data = match value {
-        Some(v) => vec![1, v],
-        None => vec![0, 0],
+    thunk::call16(cpu, target, &words, 0, resume, then, data);
+}
+
+/// Return `result` to the function's caller in DX:AX from a `then`.
+fn dx_ax(ctx: &mut Context, result: u32) -> Option<u32> {
+    ctx.gpr[thunk::EDX] = ctx.gpr[thunk::EDX] & 0xFFFF_0000 | result >> 16;
+    Some(ctx.gpr[thunk::EAX] & 0xFFFF_0000 | result & 0xFFFF)
+}
+
+/// Give the program `bytes` in a block of its task allocator, the
+/// block's 16:16 address at the 16:16 `out`, and return S_OK, or
+/// E_OUTOFMEMORY (and NULL at `out`) when there is no block. The program
+/// frees the block with the allocator CoGetMalloc gives it, so when
+/// CoInitialize was given the program's own allocator, its Alloc makes
+/// the block (`then_block` fills it); otherwise the built-in one does.
+fn task_block(cpu: &mut Cpu, out: u32, bytes: &[u8]) -> Option<u32> {
+    let app = this_task(cpu).map_or(0, |t| t.app_malloc);
+    let target = if app == 0 {
+        0
+    } else {
+        method_address(cpu, app, 3)
     };
-    thunk::call16(cpu, target, &words, 0, resume, thunk::THEN_OLE_METHOD, data);
+    if target == 0 {
+        let p = alloc(cpu, bytes.len() as u32);
+        return Some(fill_block(cpu, out, p, bytes));
+    }
+    let mut data = vec![out, bytes.len() as u32];
+    for chunk in bytes.chunks(4) {
+        let mut word = [0; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        data.push(u32::from_le_bytes(word));
+    }
+    let size = bytes.len() as u32;
+    call_at(cpu, target, app, &[size], "l", thunk::THEN_OLE_BLOCK, data);
     None
+}
+
+/// Put `bytes` in the block at `p` (16:16) and `p` at `out`: S_OK, or
+/// E_OUTOFMEMORY for no block.
+fn fill_block(cpu: &mut Cpu, out: u32, p: u32, bytes: &[u8]) -> u32 {
+    let at = super::linear(cpu, out);
+    if at != 0 {
+        super::write_32(cpu, at, p);
+    }
+    let block = super::linear(cpu, p);
+    if block == 0 {
+        if at != 0 {
+            super::write_32(cpu, at, 0);
+        }
+        return E_OUTOFMEMORY;
+    }
+    super::poke(cpu, block, bytes);
+    S_OK
+}
+
+/// The program's IMalloc::Alloc that `task_block` called returned the
+/// block `value`: `data` is `out`, the bytes' count, and the bytes, four
+/// in each dword.
+pub(super) fn then_block(
+    cpu: &mut Cpu,
+    value: u32,
+    data: &[u32],
+    ctx: &mut Context,
+) -> Option<u32> {
+    let bytes: Vec<u8> = data[2..].iter().flat_map(|w| w.to_le_bytes()).collect();
+    let result = fill_block(cpu, data[0], value, &bytes[..data[1] as usize]);
+    dx_ax(ctx, result)
 }
 
 /// Call IUnknown's AddRef (method 1) or Release (2) of each of `calls`
@@ -910,8 +1094,7 @@ pub(super) fn then_method(
         thunk::call16(cpu, target, &words, 0, *ctx, thunk::THEN_OLE_METHOD, more);
         return None;
     }
-    ctx.gpr[thunk::EDX] = ctx.gpr[thunk::EDX] & 0xFFFF_0000 | result >> 16;
-    Some(ctx.gpr[thunk::EAX] & 0xFFFF_0000 | result & 0xFFFF)
+    dx_ax(ctx, result)
 }
 
 // Class objects.
@@ -931,11 +1114,17 @@ fn co_register_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if clsid == 0 || unk == 0 || out == 0 {
         return Some(E_INVALIDARG);
     }
-    let class = guid_dwords(read_guid(cpu, clsid));
+    let clsid = guid_dwords(read_guid(cpu, clsid));
+    let task = current(cpu);
     let o = ole(cpu);
     o.next_cookie += 1;
     let cookie = o.next_cookie;
-    o.classes.push((class, unk, cookie));
+    o.classes.push(Class {
+        clsid,
+        object: unk,
+        cookie,
+        task,
+    });
     super::write_32(cpu, out, cookie);
     call_method(cpu, unk, 1, &[], "", Some(S_OK))
 }
@@ -944,17 +1133,21 @@ fn co_register_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// object's reference released.
 fn co_revoke_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let classes = &mut ole(cpu).classes;
-    let Some(i) = classes.iter().position(|c| c.2 == args[0]) else {
+    let Some(i) = classes.iter().position(|c| c.cookie == args[0]) else {
         return Some(CO_E_OBJNOTREG);
     };
-    let (_, unk, _) = classes.remove(i);
+    let unk = classes.remove(i).object;
     call_method(cpu, unk, 2, &[], "", Some(S_OK))
 }
 
 /// The object registered for the class whose GUID is at `clsid`.
 fn registered(cpu: &mut Cpu, clsid: u32) -> Option<u32> {
-    let class = guid_dwords(read_guid(cpu, clsid));
-    ole(cpu).classes.iter().find(|c| c.0 == class).map(|c| c.1)
+    let clsid = guid_dwords(read_guid(cpu, clsid));
+    ole(cpu)
+        .classes
+        .iter()
+        .find(|c| c.clsid == clsid)
+        .map(|c| c.object)
 }
 
 /// CoGetClassObject(rclsid, dwClsContext, pvReserved, riid, ppv): the
@@ -997,28 +1190,29 @@ fn co_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// CoRegisterMessageFilter(lpMessageFilter, lplpMessageFilter): the
-/// filter kept with a reference, the one before given back. No call
+/// task's filter kept with a reference, the one before given back with
+/// its reference, or released when `lplpMessageFilter` is NULL. No call
 /// between processes is made, so it is never called.
 fn co_register_message_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [filter, out] = args[..] else {
         unreachable!()
     };
-    let old = std::mem::replace(&mut ole(cpu).message_filter, filter);
+    let old = std::mem::replace(&mut this_task_or_new(cpu).message_filter, filter);
+    let mut calls = Vec::new();
+    if filter != 0 {
+        calls.push((filter, 1));
+    }
     if out != 0 {
         super::write_32(cpu, out, old);
-    } else if old != 0 && filter == 0 {
-        // Nobody takes the old one's reference.
-        return call_method(cpu, old, 2, &[], "", Some(S_OK));
+    } else if old != 0 {
+        calls.push((old, 2));
     }
-    if filter != 0 {
-        return call_method(cpu, filter, 1, &[], "", Some(S_OK));
-    }
-    Some(S_OK)
+    call_all(cpu, S_OK, &calls)
 }
 
 /// CoGetCurrentProcess: a number for the task, unique while it runs.
 fn co_get_current_process(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(super::current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].handle as u32))
+    Some(current(cpu) as u32)
 }
 
 // GUIDs.
@@ -1070,7 +1264,7 @@ pub fn parse_guid(text: &str) -> Option<[u8; 16]> {
 }
 
 /// StringFromCLSID(rclsid, lplpsz), StringFromIID: the GUID's text in a
-/// block of the task allocator's.
+/// block of the task allocator's (`task_block`).
 fn string_from_clsid(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [clsid, out] = args[..] else {
         unreachable!()
@@ -1080,14 +1274,7 @@ fn string_from_clsid(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let mut text = guid_text(&read_guid(cpu, clsid)).into_bytes();
     text.push(0);
-    let p = alloc(cpu, text.len() as u32);
-    super::write_32(cpu, out, p);
-    if p == 0 {
-        return Some(E_OUTOFMEMORY);
-    }
-    let at = super::linear(cpu, p);
-    super::poke(cpu, at, &text);
-    Some(S_OK)
+    task_block(cpu, out, &text)
 }
 
 /// StringFromGUID2(rguid, lpsz, cbMax): the text in the program's
@@ -1171,29 +1358,23 @@ fn clsid_from_prog_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// ProgIDFromCLSID(clsid, lplpszProgID): the name at
 /// HKEY_CLASSES_ROOT\CLSID\{...}\ProgID, in a block of the task
-/// allocator's.
+/// allocator's (`task_block`).
 fn prog_id_from_clsid(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [clsid, out] = args[..] else {
         unreachable!()
     };
-    if out == 0 {
+    let at = super::linear(cpu, out);
+    if at == 0 {
         return Some(E_INVALIDARG);
     }
-    super::write_32(cpu, out, 0);
+    super::write_32(cpu, at, 0);
     let path = format!("CLSID\\{}\\ProgID", guid_text(&read_guid(cpu, clsid)));
     let Some(name) = crate::win32::registry::string_value(cpu, HKEY_CLASSES_ROOT, &path, "") else {
         return Some(REGDB_E_CLASSNOTREG);
     };
     let mut text = crate::dosstr::to_bytes(&name);
     text.push(0);
-    let p = alloc(cpu, text.len() as u32);
-    if p == 0 {
-        return Some(E_OUTOFMEMORY);
-    }
-    super::write_32(cpu, out, p);
-    let at = super::linear(cpu, p);
-    super::poke(cpu, at, &text);
-    Some(S_OK)
+    task_block(cpu, out, &text)
 }
 
 /// CoCreateGuid(pguid): a version 4 (random) GUID, from a generator
@@ -1250,7 +1431,8 @@ fn register_drag_drop(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if ole(cpu).drop_targets.iter().any(|t| t.0 == hwnd) {
         return Some(DRAGDROP_E_ALREADYREGISTERED);
     }
-    ole(cpu).drop_targets.push((hwnd, target));
+    let task = current(cpu);
+    ole(cpu).drop_targets.push((hwnd, target, task));
     call_method(cpu, target, 1, &[], "", Some(S_OK))
 }
 
@@ -1260,7 +1442,7 @@ fn revoke_drag_drop(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(i) = targets.iter().position(|t| t.0 == hwnd) else {
         return Some(DRAGDROP_E_NOTREGISTERED);
     };
-    let (_, target) = targets.remove(i);
+    let (_, target, _) = targets.remove(i);
     call_method(cpu, target, 2, &[], "", Some(S_OK))
 }
 

@@ -5,14 +5,19 @@
 //!
 //! The 16-bit structures differ from the 32-bit ones. A BSTR is a far
 //! pointer to ANSI characters, the dword before them their length in
-//! bytes, a NUL after them; its block is the task allocator's (ole2.rs),
-//! as OLE2DISP takes its blocks from CoGetMalloc's. A VARIANT is 16
-//! bytes, its VARTYPE at 0 and its value at 8, with 16:16 pointers. A
-//! SAFEARRAY is cDims, fFeatures, cbElements and cLocks (words), a dword
-//! handle, the 16:16 pointer to the data, and the bounds, the last
-//! dimension's first. The changes between types are those of the
-//! built-in OLEAUT32 (win32/oleaut32/variant.rs), the 16-bit values read
-//! into its and its results written back.
+//! bytes, a NUL after them. A VARIANT is 16 bytes, its VARTYPE at 0 and
+//! its value at 8, with 16:16 pointers. A SAFEARRAY is cDims, fFeatures,
+//! cbElements and cLocks (words), a dword handle, the 16:16 pointer to
+//! the data, and the bounds, the last dimension's first. The changes
+//! between types are those of the built-in OLEAUT32
+//! (win32/oleaut32/variant.rs), the 16-bit values read into its and its
+//! results written back.
+//!
+//! BSTRs and safe arrays take their blocks from the built-in task
+//! allocator (ole2.rs). The real OLE2DISP takes them from the one
+//! CoGetMalloc gives, the program's own when it gave CoInitialize one;
+//! a program sees the difference only when it frees one of them with
+//! IMalloc::Free rather than with OLE2DISP's functions (#1586).
 //!
 //! Copyright 1998 Jean-Claude Cote
 //! Copyright 2003 Jon Griffiths
@@ -1205,7 +1210,7 @@ fn safe_array_redim(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let lower = super::read_32(cpu, args[1] + 4);
     let old_bytes = a.bytes();
     let last = a.bounds[a.dims as usize - 1].0;
-    let per = if last == 0 { 0 } else { old_bytes / last };
+    let per = old_bytes.checked_div(last).unwrap_or(0);
     let new_bytes = per.saturating_mul(count);
     let mut calls = Vec::new();
     let owned = FADF_BSTR | FADF_UNKNOWN | FADF_DISPATCH | FADF_VARIANT;
@@ -1277,7 +1282,7 @@ fn disp_invoke(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// reference, the one before released.
 fn set_error_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let new = args[1];
-    let old = std::mem::replace(&mut cpu.bus.win32.win16.ole.error_info, new);
+    let old = std::mem::replace(&mut ole2::this_task_or_new(cpu).error_info, new);
     let mut calls = Vec::new();
     if new != 0 {
         calls.push((new, 1));
@@ -1294,7 +1299,7 @@ fn get_error_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[1] == 0 {
         return Some(E_INVALIDARG);
     }
-    let info = std::mem::take(&mut cpu.bus.win32.win16.ole.error_info);
+    let info = std::mem::take(&mut ole2::this_task_or_new(cpu).error_info);
     super::write_32(cpu, args[1], info);
     Some(if info == 0 { S_FALSE } else { S_OK })
 }
