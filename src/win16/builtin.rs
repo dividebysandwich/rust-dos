@@ -12,10 +12,12 @@
 //! ```
 //!
 //! A function's id is its module's place in `MODULES` and its own in the
-//! module's table. Its arguments, read from the 16-bit stack as its
-//! signature says (`Api16::args`), go to Rust (`Run::Rust`), or go on to
-//! the function of a built-in DLL that does what it does (`Run::Win32`),
-//! translated: 16:16 pointers become flat ones, handles USER32's.
+//! module's table; saved states keep the stubs, so the tables only grow
+//! at their ends (`win32::stub_tables`). A function's arguments, read
+//! from the 16-bit stack as its signature says (`Api16::args`), go to
+//! Rust (`Run::Rust`), or go on to the function of a built-in DLL that
+//! does what it does (`Run::Win32`), translated: 16:16 pointers become
+//! flat ones, handles USER32's.
 
 use super::thunk;
 use crate::cpu::{Cpu, Seg};
@@ -409,14 +411,18 @@ pub fn thunk16_id() -> u16 {
 }
 
 /// The address of the stub of the 32-bit function `function` of the
-/// built-in DLL `dll`.
-pub fn win32_address(dll: &str, function: &str) -> Option<u32> {
+/// built-in DLL `dll` in the running process, whose image of the DLL may
+/// be from an older table (`stub_tables::stub_address_in`).
+pub fn win32_address(cpu: &Cpu, dll: &str, function: &str) -> Option<u32> {
     let index = crate::win32::stubs::find_dll(dll)?;
     let api = crate::win32::stubs::DLLS[index]
         .apis
         .iter()
         .position(|a| a.name == function)?;
-    Some(crate::win32::stubs::stub_address(index, api))
+    match crate::win32::running(cpu) {
+        Some(process) => crate::win32::stub_tables::stub_address_in(process, index, api),
+        None => Some(crate::win32::stubs::stub_address(index, api)),
+    }
 }
 
 /// Read the arguments of a function with the signature `args` from the
@@ -522,7 +528,7 @@ pub fn call(cpu: &mut Cpu, id: u16) {
             handler(cpu, &args)
         }
         Run::Win32(dll, function, ret) => {
-            match win32_address(dll, function) {
+            match win32_address(cpu, dll, function) {
                 Some(target) => {
                     auto_thunk(cpu, target, api.args, &raw, ret);
                     // Converting no handle, the stub changes nothing but

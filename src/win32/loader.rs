@@ -1291,6 +1291,15 @@ fn export_target(bus: &Bus, memory: &Memory, base: u32, wanted: &Wanted) -> Opti
     Some(Target::Address(base.wrapping_add(rva)))
 }
 
+/// The address the module at `base` exports `name` at, when that is in
+/// the module and not forwarded.
+pub(super) fn export_address(bus: &Bus, memory: &Memory, base: u32, name: &str) -> Option<u32> {
+    match export_target(bus, memory, base, &Wanted::Name(name.to_string()))? {
+        Target::Address(address) => Some(address),
+        Target::Forward(_) => None,
+    }
+}
+
 /// Take a reference on the module at `base` away (FreeLibrary): the
 /// modules whose last reference went, it first and then those it imported
 /// from, are added to `freed`. The modules that stay while the program

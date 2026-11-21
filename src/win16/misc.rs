@@ -401,8 +401,8 @@ fn w32(cpu: &mut Cpu, at: u32, value: u32) {
 }
 
 /// The address of the built-in DLL `dll`'s function `name`.
-fn api(dll: &str, name: &str) -> u32 {
-    super::builtin::win32_address(dll, name).unwrap_or_else(|| panic!("{} has no {}", dll, name))
+fn api(cpu: &Cpu, dll: &str, name: &str) -> u32 {
+    super::builtin::win32_address(cpu, dll, name).unwrap_or_else(|| panic!("{} has no {}", dll, name))
 }
 
 /// Go on to `dll`'s `name` with `args`, the 32-bit stack below `top`,
@@ -421,7 +421,8 @@ fn go_at(
     } else {
         thunk::POST_USER
     };
-    thunk::enter32_at(cpu, ctx, top, api(dll, name), args, post, data);
+    let target = api(cpu, dll, name);
+    thunk::enter32_at(cpu, ctx, top, target, args, post, data);
     None
 }
 

@@ -198,11 +198,20 @@ of Windows': an import of it by ordinal binds to the missing-function
 stub below, as an import by name does.
 
 A function's id, which its stub's trap carries, is its DLL's place in
-`DLLS` and its own in the DLL's table, apart from its ordinal; saved
-states keep the stubs in memory, so tables are only added to at their
-ends. A missing function is bound to a stub that logs `dll!name` with
-its arguments and ends the program with a message saying which function
-it needed, so the log of a game that fails says what to write next. The
+`DLLS` and its own in the DLL's table, apart from its ordinal, and its
+stub is at that place in the image. Saved states keep the stubs in
+memory and programs keep their addresses, so tables are only added to
+at their ends: `src/win32/stub_tables.txt` holds the order every
+built-in DLL's and 16-bit system module's table has had, and a test
+fails on an entry inserted, moved or taken out (`stub_tables.rs`). The
+one entry inserted before that test, GDI32's
+CreateScalableFontResourceA, is mended in states saved before it: their
+GDI32 image keeps its order, its stubs trap with the ids their functions
+have now, and the addresses Rust works out for its functions follow it.
+
+A missing function is bound to a stub that logs `dll!name` with its
+arguments and ends the program with a message saying which function it
+needed, so the log of a game that fails says what to write next. The
 trace of every call (`trace.rs`, like Wine's `+relay`) goes to the log
 and to the debug server.
 
