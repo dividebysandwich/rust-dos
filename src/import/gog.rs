@@ -405,7 +405,12 @@ mod tests {
         assert_eq!(imported.drives[0].path, game);
         assert_eq!(imported.drives[1].path, game.join("game.ins"));
         assert_eq!(imported.autoexec, ["@echo off", "c:", "war2.bat"]);
-        assert!(imported.settings.iter().any(|(_, k, v)| *k == "cycles" && v == "30000"));
+        assert!(
+            imported
+                .settings
+                .iter()
+                .any(|(_, k, v)| *k == "cycles" && v == "30000")
+        );
 
         // A file in the install itself, as GOG Galaxy copies it there,
         // goes before the support data's.
@@ -415,7 +420,12 @@ mod tests {
         )
         .unwrap();
         let imported = import(&game, None).unwrap();
-        assert!(imported.settings.iter().any(|(_, k, v)| *k == "cycles" && v == "20000"));
+        assert!(
+            imported
+                .settings
+                .iter()
+                .any(|(_, k, v)| *k == "cycles" && v == "20000")
+        );
     }
 
     #[test]
