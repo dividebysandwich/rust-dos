@@ -520,6 +520,15 @@ pub fn expose(cpu: &mut Cpu) {
 /// its draws. A device's call that reads video memory itself reads it
 /// through `read`, which settles.
 ///
+/// A Lock, an Unlock and a blit settle themselves, where they need to:
+/// a Lock or Unlock of a surface in video memory, and a blit that reads
+/// or writes video memory with the processor (through `read` and
+/// `write`). A ToadForce's commands read and draw card memory only, so
+/// the queue has nothing to do with a surface in system memory: a
+/// program that locks a texture there to write it and blits it to one
+/// in video memory between its draws (Nocturne, 25 times a frame) has
+/// the copy queued behind the draws (`ddraw::toadforce::copy`).
+///
 /// A scene's end doesn't settle. On a real card EndScene hands the
 /// driver's buffer to the card and returns without waiting for it, and
 /// the program sees what was drawn only through a call above, which
@@ -544,7 +553,14 @@ pub fn api_settles(dll: &str, name: &str) -> bool {
                 "IDirect3DLight",
                 "IDirect3DExecuteBuffer",
             ];
-            !DRAWING.iter().any(|prefix| name.starts_with(prefix)) || frame_end
+            const SETTLE_THEMSELVES: [&str; 4] = [
+                "Surface_Lock",
+                "Surface_Unlock",
+                "Surface_Blt",
+                "Surface_BltFast",
+            ];
+            let drawing = DRAWING.iter().any(|prefix| name.starts_with(prefix));
+            !(drawing || SETTLE_THEMSELVES.contains(&name)) || frame_end
         }
         "D3D8.DLL" => {
             // The device, and the vertex and index buffers, whose memory
@@ -593,6 +609,18 @@ const RECTANGLE_ARITHMETIC: [&str; 11] = [
 /// Write `data` into video memory at byte `offset`: what is past its end
 /// goes nowhere. The picture shows it.
 pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
+    write_at(cpu, offset, data, false);
+}
+
+/// `write` into a block a driver took for itself with
+/// `ddraw::display::alloc_past_queue`, which no command a ToadForce has
+/// queued reads or draws: the queue goes on growing, and the commands
+/// the driver queues next can read the block.
+pub fn write_taken(cpu: &mut Cpu, offset: u32, data: &[u8]) {
+    write_at(cpu, offset, data, true);
+}
+
+fn write_at(cpu: &mut Cpu, offset: u32, data: &[u8], taken: bool) {
     let size = memory_size(cpu) as usize;
     let start = (offset as usize).min(size);
     let end = (start + data.len()).min(size);
@@ -602,7 +630,11 @@ pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
     let data = &data[..end - start];
     // Every byte of the range is written, so a ToadForce reads nothing
     // back for it.
-    cpu.bus.toadforce_writing(start, end - start);
+    if taken {
+        cpu.bus.toadforce_writing_taken(start, end - start);
+    } else {
+        cpu.bus.toadforce_writing(start, end - start);
+    }
     cpu.bus.toadforce_wrote(start, end - start);
     drew(cpu, start as u32, end as u32, data.len() as u64);
     if let Some(v) = &mut cpu.bus.voodoo
@@ -1301,9 +1333,13 @@ mod tests {
             ("DDRAW.DLL", "IDirect3DDevice7_EndScene", false),
             ("DDRAW.DLL", "IDirect3DDevice_EndScene", false),
             ("DDRAW.DLL", "Surface_Flip", true),
-            ("DDRAW.DLL", "Surface_Blt", true),
             ("DDRAW.DLL", "Surface_GetDC", true),
-            ("DDRAW.DLL", "Surface_Lock", true),
+            ("DDRAW.DLL", "Surface_GetSurfaceDesc", true),
+            // These settle themselves where they need to.
+            ("DDRAW.DLL", "Surface_Blt", false),
+            ("DDRAW.DLL", "Surface_BltFast", false),
+            ("DDRAW.DLL", "Surface_Lock", false),
+            ("DDRAW.DLL", "Surface_Unlock", false),
             ("D3D8.DLL", "Device8_DrawPrimitive", false),
             ("D3D8.DLL", "Device8_SetRenderState", false),
             ("D3D8.DLL", "Buffer8_Lock", false),
