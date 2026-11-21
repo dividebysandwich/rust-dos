@@ -440,9 +440,13 @@ pub fn start_pending(cpu: &mut Cpu) {
     let mut vectors = vec![0u8; VECTORS];
     super::dos(cpu, |cpu| cpu.bus.guest_read_bytes(0, &mut vectors));
     session.vectors = vectors;
-    // The memory the Windows programs haven't used goes to the DOS
-    // program's DPMI and XMS memory while it runs.
+    // The memory the Windows programs can do without goes to the DOS
+    // program's DPMI and XMS memory while it runs. Pages of theirs moved
+    // for it, so the translations the TLB has of them are stale.
     *session.lent = super::memory::Pool::lend(&mut cpu.bus);
+    if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
+        cpu.tlb.flush();
+    }
     session.desktop = super::user32::user(cpu).desktop;
     if session.desktop {
         super::user32::paint::leave_desktop(cpu);
@@ -473,8 +477,14 @@ pub fn start_pending(cpu: &mut Cpu) {
     rm.gpr[EBX] = PARAMS as u32;
     rm.gpr[EDX] = PATH as u32;
     rm.gpr[ESP] = sp as u32;
-    cpu.bus
-        .log_string(&format!("[W32] {} starts", session.path));
+    let end = cpu.bus.ram().len() as u32;
+    let (_, free) = cpu.bus.xms.free_kb(end);
+    cpu.bus.log_string(&format!(
+        "[W32] {} starts, with {free} KB of extended memory free ({} KB lent by the \
+         Windows programs)",
+        session.path,
+        *session.lent / 1024
+    ));
     cpu.bus.win32.dosvm.running = Some(session);
     realmode::call(cpu, Frame::new(Kind::Exec, ctx), &rm, &[]);
 }
