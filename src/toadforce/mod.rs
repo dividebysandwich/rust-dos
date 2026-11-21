@@ -842,12 +842,22 @@ impl ToadForce {
         fx: &mut Effects,
     ) -> Result<(), Error> {
         // What the queued draws were to draw is there before anything
-        // else reads or writes the memory.
-        if !matches!(
-            command,
-            Command::Nop | Command::Level1(level1::Command::Draw(_))
-        ) && !matches!(command, Command::Level1(c) if c.sets_state())
-        {
+        // else reads or writes the memory they use. A `FILL` or a
+        // `BLT` of other surfaces runs while they wait, as the card
+        // would run it after them: no byte either touches is the
+        // other's (`Renderer::waits`). Nocturne copies a texture in
+        // between draws some 25 times a frame, and the host renderer
+        // draws them all in one batch.
+        let waits = match &command {
+            Command::Nop | Command::Level1(level1::Command::Draw(_)) => false,
+            Command::Level1(c) if c.sets_state() => false,
+            Command::Fill { dst, .. } => self.raster.waits(gpu::range(dst), None),
+            Command::Blt { dst, src, .. } => {
+                self.raster.waits(gpu::range(dst), Some(gpu::range(src)))
+            }
+            _ => true,
+        };
+        if waits {
             self.raster.flush(memory, &mut self.gpu);
         }
         // The commands below that run on the processor read back what
