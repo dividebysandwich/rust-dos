@@ -298,3 +298,165 @@ fn a_file_with_a_loaded_file_name_is_that_module() {
     });
     assert_eq!(exit, 1, "{log}");
 }
+
+/// KERNEL's FreeLibrary and GetModuleHandle.
+const FREE_LIBRARY: u16 = 96;
+const GET_MODULE_HANDLE: u16 = 47;
+
+/// The places a test puts copies of a DLL in, by the length of the path
+/// GetModuleFileName gives for each: the current directory (C:\, where
+/// the shell starts the program), the Windows directory, the system
+/// directory, and C:\APP, where the program is.
+const IN_CURRENT: u8 = 11; // C:\PICK.DLL
+const IN_WINDOWS: u8 = 19; // C:\WINDOWS\PICK.DLL
+const IN_SYSTEM: u8 = 26; // C:\WINDOWS\SYSTEM\PICK.DLL
+const IN_APP: u8 = 15; // C:\APP\PICK.DLL
+
+/// Code that ends the program with the length of the path of the module
+/// whose handle or instance is in AX, or with 1 if AX is below 32.
+fn exit_with_path_length(code: &mut Code) {
+    code.emit(&[
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0x73, 0x06, // jae over the exit
+        0xB0, 0x01, 0xB4, 0x4C, 0xCD, 0x21, // mov al,1; exit
+        0x50, // push ax
+        0x1E, // push ds
+        0x68, 0x20, 0x00, // push 20h: the buffer
+        0x68, 0x80, 0x00, // push 80h: its size
+    ]);
+    code.call("KERNEL", GET_MODULE_FILE_NAME).exit_al();
+}
+
+/// A program, started as C:\APP\T.EXE with C:\ the current directory,
+/// that first loads and frees each of `first` (paths), then loads `name`
+/// and ends with the length of its path. `places` are the directories
+/// (under C:\) that get a copy of `name`'s DLL.
+fn search(test: &str, first: &[&str], name: &str, places: &[&str]) -> (u8, String) {
+    let mut code = Code::new();
+    let mut strings = Vec::new();
+    for path in first {
+        let at = code.here() + 2;
+        code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+        code.emit(&[0x50]).call("KERNEL", FREE_LIBRARY); // push ax
+        strings.push((at, *path));
+    }
+    let at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+    strings.push((at, name));
+    exit_with_path_length(&mut code);
+    for (at, text) in strings {
+        let here = code.here();
+        code.patch(at, here);
+        code.emit(text.as_bytes()).emit(&[0]);
+    }
+    let exe = program(&code, CODE);
+    let copy = exe.clone();
+    let file = name.rsplit('\\').next().unwrap().to_string();
+    run_command(test, exe, "APP\\T.EXE", "", move |_, base| {
+        fs::create_dir_all(base.join("APP")).unwrap();
+        fs::write(base.join("APP").join("T.EXE"), copy).unwrap();
+        for place in places {
+            let dir = base.join(place);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(&file), library("PICK")).unwrap();
+        }
+    })
+}
+
+#[test]
+fn the_current_directory_comes_before_the_windows_directory() {
+    let places = ["", "WINDOWS", "WINDOWS/SYSTEM", "APP"];
+    let (exit, log) = search("search_current", &[], "PICK.DLL", &places);
+    assert_eq!(exit, IN_CURRENT, "{log}");
+}
+
+#[test]
+fn the_windows_directory_comes_before_the_system_directory() {
+    let places = ["WINDOWS", "WINDOWS/SYSTEM", "APP"];
+    let (exit, log) = search("search_windows", &[], "PICK.DLL", &places);
+    assert_eq!(exit, IN_WINDOWS, "{log}");
+}
+
+/// Windows 3.1 looks in the directory of the current task's executable
+/// only after the system directory, so a program's older copy of a
+/// system DLL beside it isn't the one loaded.
+#[test]
+fn the_system_directory_comes_before_the_programs_directory() {
+    let places = ["WINDOWS/SYSTEM", "APP"];
+    let (exit, log) = search("search_system", &[], "PICK.DLL", &places);
+    assert_eq!(exit, IN_SYSTEM, "{log}");
+}
+
+#[test]
+fn the_programs_directory_is_searched() {
+    let (exit, log) = search("search_app", &[], "PICK.DLL", &["APP"]);
+    assert_eq!(exit, IN_APP, "{log}");
+}
+
+/// Windows 95 makes a DLL loaded from the system directory one of
+/// Known16DLLs, and looks for those there first, before the current
+/// directory: once C:\WINDOWS\SYSTEM\PICK.DLL was loaded, C:\PICK.DLL
+/// isn't the one LoadLibrary("PICK.DLL") loads.
+#[test]
+fn a_known_dll_is_looked_for_in_the_system_directory_first() {
+    let places = ["", "WINDOWS/SYSTEM"];
+    let first = ["C:\\WINDOWS\\SYSTEM\\PICK.DLL"];
+    let (exit, log) = search("search_known", &first, "PICK.DLL", &places);
+    assert_eq!(exit, IN_SYSTEM, "{log}");
+    // Without it, the current directory's comes first.
+    let (exit, log) = search("search_unknown", &[], "PICK.DLL", &places);
+    assert_eq!(exit, IN_CURRENT, "{log}");
+}
+
+/// A DLL that imports another is in C:\LIBS, with a copy of the other
+/// beside it and one in C:\APP, the program's directory. Windows looks
+/// for the import in the current task's directory, not in that of the
+/// DLL that imports it, so C:\APP\INNER.DLL is loaded (16 characters,
+/// where C:\LIBS\INNER.DLL has 17).
+#[test]
+fn a_dlls_import_is_looked_for_in_the_tasks_directory() {
+    let mut code = Code::new();
+    let outer_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+    code.emit(&[
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0x73, 0x06, // jae over the exit
+        0xB0, 0x02, 0xB4, 0x4C, 0xCD, 0x21, // mov al,2; exit
+    ]);
+    let inner_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", GET_MODULE_HANDLE);
+    exit_with_path_length(&mut code);
+    let here = code.here();
+    code.patch(outer_at, here);
+    code.emit(b"C:\\LIBS\\OUTER.DLL\0");
+    let here = code.here();
+    code.patch(inner_at, here);
+    code.emit(b"INNER\0");
+    let exe = program(&code, CODE);
+    let copy = exe.clone();
+    let (exit, log) = run_command("search_import", exe, "APP\\T.EXE", "", move |_, base| {
+        let (app, libs) = (base.join("APP"), base.join("LIBS"));
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&libs).unwrap();
+        fs::write(app.join("T.EXE"), copy).unwrap();
+        fs::write(libs.join("OUTER.DLL"), library_importing("OUTER", "INNER")).unwrap();
+        fs::write(libs.join("INNER.DLL"), library("INNER")).unwrap();
+        fs::write(app.join("INNER.DLL"), library("INNER")).unwrap();
+    });
+    assert_eq!(exit, 16, "{log}");
+}
+
+/// A DLL named `name` that imports the DLL `dll`, whose LibMain returns
+/// 1.
+fn library_importing(name: &str, dll: &str) -> Vec<u8> {
+    let mut b = ne::Builder::new(name, ne::LIBMODULE);
+    b.import_module(dll);
+    let text = b.segment(ne::SegmentSpec {
+        data: vec![0xB8, 0x01, 0x00, 0xCB], // mov ax,1; retf
+        flags: CODE,
+        alloc: 0,
+        relocations: Vec::new(),
+    });
+    b.entry_point(text, 0);
+    b.build()
+}

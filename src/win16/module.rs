@@ -28,6 +28,7 @@ use super::{Module16, Segment16, builtin, global, ldt};
 use crate::cpu::Cpu;
 use crate::dpmi::Context;
 use crate::win32::memory::{PAGE, SHARED, SYSTEM, USER};
+use crate::win32::registry::{self, Open};
 use rust_dos_ne as ne;
 
 /// A module's segment's selector, and the entry points' addresses: a
@@ -60,8 +61,9 @@ impl From<LoadError> for String {
 }
 
 /// Load the module `name` (a module name, or a file's name or path) for
-/// the module in the directory `dir`: one loaded already, its count
-/// raised, a system module, or the file found where Windows 3.1 looks.
+/// a task whose executable is in the directory `dir` (`find_file`): one
+/// loaded already, its count raised, a system module, or the file found
+/// where Windows looks.
 /// Its place in `State::modules`, and the libraries loaded with it whose
 /// entry points are yet to run, in the order they are to run in.
 pub fn load(
@@ -117,7 +119,7 @@ pub fn load(
             crate::win32::loader::SYSTEM_DIR,
             builtin::MODULES[index].file
         );
-        return load_file(cpu, image, &path, Some(index as u16), inits);
+        return load_file(cpu, image, &path, Some(index as u16), dir, inits);
     }
     let Some((path, file)) = find_file(cpu, name, dir) else {
         return Err(LoadError::new(
@@ -125,12 +127,64 @@ pub fn load(
             format!("{} can't be found.", file_name),
         ));
     };
-    load_file(cpu, file, &path, None, inits)
+    let loaded = load_file(cpu, file, &path, None, dir, inits)?;
+    remember_known(cpu, loaded);
+    Ok(loaded)
 }
 
-/// The file `name` and its path: as it is if it has a directory, else in
-/// the current directory, `dir`, Windows' directories and the PATH, with
-/// ".DLL" added to a name without an extension.
+/// Where Windows 95 and 98 keep the 16-bit DLLs they look for in the
+/// system directory first: one value for each, named after its module,
+/// its file's name the data.
+const KNOWN16DLLS: &str = "System\\CurrentControlSet\\Control\\SessionManager\\Known16DLLs";
+
+/// Whether the file `name` is one of Known16DLLs.
+fn is_known(cpu: &mut Cpu, name: &str) -> bool {
+    let values = registry::string_values(cpu, &[(registry::HKEY_LOCAL_MACHINE, KNOWN16DLLS)]);
+    values
+        .into_iter()
+        .flatten()
+        .any(|(_, file)| file.eq_ignore_ascii_case(name))
+}
+
+/// A DLL that was loaded from the system directory becomes one of
+/// Known16DLLs, as Windows 95 makes it (Microsoft's article Q149430):
+/// from then on it is looked for there first, whatever directory a
+/// program has a copy of it in.
+fn remember_known(cpu: &mut Cpu, index: usize) {
+    let m = &cpu.bus.win32.win16.modules[index];
+    if m.flags & ne::LIBMODULE == 0 {
+        return;
+    }
+    let dir = crate::win32::loader::directory_of(&m.path);
+    if !dir.eq_ignore_ascii_case(crate::win32::loader::SYSTEM_DIR) {
+        return;
+    }
+    let file = file_name_of(&m.path).to_ascii_uppercase();
+    let name = m.name.clone();
+    if is_known(cpu, &file) {
+        return;
+    }
+    let reg = registry::get(cpu);
+    let Open::Key(root) = reg.open(registry::HKEY_LOCAL_MACHINE, 0) else {
+        return;
+    };
+    let (key, _) = reg.create(root, KNOWN16DLLS);
+    let mut data = file.into_bytes();
+    data.push(0);
+    reg.set_value(key, &name, registry::REG_SZ, data);
+}
+
+fn file_name_of(path: &str) -> &str {
+    path.rsplit(['\\', '/', ':']).next().unwrap_or(path)
+}
+
+/// The file `name` and its path: as it is if it has a directory, else
+/// where Windows 3.1's LoadLibrary and LoadModule look for it, with
+/// ".DLL" added to a name without an extension. Windows 3.1's order is:
+/// the current directory, the Windows directory, the system directory,
+/// the directory of the current task's executable (`dir`), then the
+/// directories of PATH. Windows 95 and 98 look in the system directory
+/// before all of them for a file of Known16DLLs.
 fn find_file(cpu: &mut Cpu, name: &str, dir: &str) -> Option<(String, Vec<u8>)> {
     let name = if name.contains('.') {
         name.to_string()
@@ -141,13 +195,12 @@ fn find_file(cpu: &mut Cpu, name: &str, dir: &str) -> Option<(String, Vec<u8>)> 
     if name.contains(['\\', '/', ':']) {
         candidates.push(name.clone());
     } else {
+        let system = crate::win32::loader::SYSTEM_DIR;
+        if is_known(cpu, &name) {
+            candidates.push(join(system, &name));
+        }
         let cwd = crate::win32::kernel32::current_directory(cpu, cpu.bus.disk.get_current_drive());
-        for d in [
-            cwd.as_str(),
-            dir,
-            crate::win32::loader::WINDOWS_DIR,
-            crate::win32::loader::SYSTEM_DIR,
-        ] {
+        for d in [cwd.as_str(), crate::win32::loader::WINDOWS_DIR, system, dir] {
             if !d.is_empty() {
                 candidates.push(join(d, &name));
             }
@@ -181,12 +234,16 @@ fn join(dir: &str, file: &str) -> String {
 }
 
 /// Load the NE file `file` from `path` (a system module's image, for
-/// `builtin`).
+/// `builtin`), for a task whose executable is in the directory `dir`.
+/// The modules it imports from are looked for as `find_file` does, with
+/// `dir` as the task's directory; a program's own imports with its own
+/// directory, as it is the task they are loaded for.
 pub fn load_file(
     cpu: &mut Cpu,
     file: Vec<u8>,
     path: &str,
     builtin: Option<u16>,
+    dir: &str,
     inits: &mut Vec<usize>,
 ) -> Result<usize, LoadError> {
     let file_name = path
@@ -308,7 +365,11 @@ pub fn load_file(
     });
 
     // The modules it imports from.
-    let dir = crate::win32::loader::directory_of(path);
+    let dir = if parsed.is_dll() {
+        dir.to_string()
+    } else {
+        crate::win32::loader::directory_of(path)
+    };
     let mut deps = Vec::new();
     for dep in &parsed.module_refs {
         match load(cpu, dep, &dir, inits) {
