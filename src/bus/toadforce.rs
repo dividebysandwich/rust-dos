@@ -409,6 +409,44 @@ impl Bus {
         }
     }
 
+    /// `toadforce_writing` for bytes of a block a driver took for
+    /// itself just now: the queued commands run only if they may read or
+    /// draw there (`ToadForce::queue_may_touch`), so a copy staged in
+    /// card memory or a texture put there between two draws doesn't cut
+    /// the batch the queue makes of the draws.
+    #[inline]
+    pub fn toadforce_writing_taken(&mut self, offset: usize, len: usize) {
+        let end = (offset + len).min(u32::MAX as usize) as u32;
+        let range = (offset as u32, end);
+        if self
+            .toadforce
+            .as_deref()
+            .is_some_and(|c| c.queue_may_touch(range))
+        {
+            self.toadforce_flush();
+        }
+        if self.toadforce_ahead()
+            && let Some(card) = &mut self.toadforce
+        {
+            card.writing(offset as u32, len as u32);
+        }
+    }
+
+    /// A driver gave back the `len` bytes of card memory at `offset`,
+    /// which commands still queued may read or draw
+    /// (`ToadForce::retire`).
+    pub fn toadforce_retire(&mut self, offset: u32, len: u32) {
+        if let Some(card) = &mut self.toadforce {
+            card.retire((offset, offset.saturating_add(len)));
+        }
+    }
+
+    /// The ranges of card memory given back while the queued commands
+    /// were queued, start and end: empty without a card.
+    pub fn toadforce_retired(&self) -> &[(u32, u32)] {
+        self.toadforce.as_deref().map_or(&[], |c| c.retired())
+    }
+
     /// The program reads `len` bytes of card memory at `offset` through
     /// the bus, up to 4: their value where the host renderer has newer
     /// pixels than card memory, and None where card memory has them. A

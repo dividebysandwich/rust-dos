@@ -1767,6 +1767,9 @@ pub fn lock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if s.locked || s.dc != 0 {
         return Some(DDERR_SURFACEBUSY);
     }
+    // A surface in video memory is settled by `address`. One in system
+    // memory isn't: a ToadForce's queued commands read and draw card
+    // memory only, so the program can write it while they wait.
     let found = if s.memory == MEM_CARD {
         Some(hr!(voodoo::lock(cpu, id, s.bits)))
     } else {
@@ -1802,6 +1805,12 @@ pub fn unlock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (memory, role) = (s.memory, s.bits);
     if memory == MEM_CARD {
         voodoo::unlock(cpu, role);
+    }
+    // Unlock isn't one of the calls `stubs::call` settles before
+    // (`screen::api_settles`): a ToadForce's queue reads and draws card
+    // memory only, and has nothing to do with a surface in system memory.
+    if memory == MEM_VIDEO {
+        screen::settle(cpu);
     }
     shown(cpu, id);
     changed(cpu, id);
