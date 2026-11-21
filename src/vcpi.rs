@@ -217,7 +217,9 @@ pub fn program_ended(bus: &mut Bus) {
 /// its GDTR's and IDTR's values, its LDTR and TR, and CS:EIP. Interrupts
 /// stay off; SS:ESP is a stack of the monitor's, the caller's own stack
 /// below its top (16 bytes are all the client may use), and DS, ES, FS
-/// and GS are null.
+/// and GS are null. ESP's upper half is zero, as with EMM386, whose
+/// level-0 stack is a small one: CWSDPMI loads only SP, into a 32-bit
+/// stack segment, and takes the upper half as it finds it.
 fn switch_to_pm(cpu: &mut Cpu) {
     let at = cpu.esi();
     let read32 = |cpu: &mut Cpu, a: u32| cpu.bus.guest_read_32(a);
@@ -234,7 +236,7 @@ fn switch_to_pm(cpu: &mut Cpu) {
         base: read32(&mut *cpu, idt_at + 2),
         limit: read16(&mut *cpu, idt_at),
     };
-    let stack = cpu.real_linear(cpu.ss(), cpu.sp());
+    let (stack_base, stack) = ((cpu.ss() as u32) << 4, cpu.sp() as u32);
 
     let a20 = cpu.bus.a20();
     cpu.bus.vcpi.v86_a20 = Some(a20);
@@ -262,7 +264,7 @@ fn switch_to_pm(cpu: &mut Cpu) {
     }
     cpu.set_seg_cache(
         Seg::SS,
-        SegCache::from_descriptor(crate::v86mon::DATA0, 0, 0xFFFF_FFFF, 0xC093),
+        SegCache::from_descriptor(crate::v86mon::DATA0, stack_base, 0xFFFF, 0x4093),
     );
     cpu.set_esp(stack);
     for seg in [Seg::DS, Seg::ES, Seg::FS, Seg::GS] {

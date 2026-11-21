@@ -219,12 +219,14 @@ fn a_vcpi_client_switches_to_protected_mode_and_back() {
     cpu.bus
         .load_bytes(((CODE_SEG as usize) << 4) + 0x100, &back);
     let pm = asm32(PM_CODE, |a| {
+        a.mov(ebx, esp)?;
         a.mov(ax, FLAT_DATA as u32)?;
         a.mov(ds, ax)?;
         a.mov(es, ax)?;
         a.mov(ss, ax)?;
         a.mov(esp, 0x9000)?;
         a.mov(dword_ptr(DATA + 0x40), 0x1234_5678)?;
+        a.mov(dword_ptr(DATA + 0x44), ebx)?;
         // The frame for the switch back: GS, FS, DS, ES, SS, ESP, EFLAGS,
         // CS, EIP, under the far call's return address.
         for seg in [DATA_SEG, DATA_SEG, DATA_SEG, DATA_SEG, STACK_SEG] {
@@ -279,6 +281,8 @@ fn a_vcpi_client_switches_to_protected_mode_and_back() {
         0x1234_5678,
         "the protected-mode part ran"
     );
+    // CWSDPMI loads only SP into a 32-bit stack segment after the switch.
+    assert_eq!(read32(&cpu, 0x44) >> 16, 0, "ESP's upper half is zero");
     assert_eq!(cpu.bus.read_8(0x20031), 0);
     assert_eq!(cpu.bus.read_8(0x20030), 1, "back in virtual-8086 mode");
     assert!(cpu.v86());
