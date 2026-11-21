@@ -2294,6 +2294,7 @@ mod tests {
             io: 14_800_000.0,
             refresh: 60.0,
             pace: 1.0,
+            missed: 0,
         };
         let host_max = pacer.host.max.unwrap() as u32;
         let boost = pacer.auto.decide(433_332, &loading, true, host_max);

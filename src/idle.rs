@@ -1657,7 +1657,7 @@ fn finish(
     let mut limit = cpu.bus.clock.deadline;
     let ports = std::mem::take(&mut cpu.bus.observe.ports);
     let from = cpu.bus.observe.first_read.unwrap_or(visit.icount);
-    for (port, mask) in ports {
+    for &(port, mask) in &ports {
         match cpu.bus.idle_port(port, mask, from) {
             Some(until) => limit = limit.min(until),
             None => return cpu.bus.observe.fail("port"),
@@ -1769,6 +1769,11 @@ fn finish(
             if let (Some(_), Some(head)) = (by_service, head) {
                 let now = cpu.bus.clock.icount;
                 cpu.bus.observe.arm(head, now);
+            }
+            // The last pass skipped read the ports as they are now: a loop
+            // that polls for the retrace was polling up to here.
+            for &(port, _) in &ports {
+                cpu.bus.idle_port_skipped(port);
             }
         }
         if let Some((port, read)) = held

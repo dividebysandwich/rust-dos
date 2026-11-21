@@ -1428,10 +1428,12 @@ half the screen, frames copied as what changed; counted as frames for
 protected-mode programs only), `flips` (display start changes), `presents`
 (what the built-in Windows drew on the screen for the program, its blits to
 the primary surface and GDI's drawing, in bursts that are a frame or a copy
-by the same rules), `polls` (key checks that found nothing, idle calls) and
-`status_reads` (port 3DAh), with `emulated_ns` to make rates of them. Sample
-it twice and divide: a game's frame rate at a few fixed speeds shows where
-it stops growing. `presents` count only what lands in the picture shown, not
+by the same rules), `polls` (key checks that found nothing, idle calls),
+`status_reads` (port 3DAh) and `missed_retraces` (vertical retraces that
+began and ended between two reads of 3DAh less than a quarter of a frame
+apart: the program polled for one and an interrupt covered it), with
+`emulated_ns` to make rates of them. Sample it twice and divide: a game's
+frame rate at a few fixed speeds shows where it stops growing. `presents` count only what lands in the picture shown, not
 the copies to surfaces out of sight, and where there are any, they are the
 frames instead of the program's own bursts and copies, which may be the same
 frames drawn in video memory before they were shown. Start the emulator with

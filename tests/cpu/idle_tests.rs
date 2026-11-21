@@ -446,6 +446,40 @@ fn a_wait_for_the_display_after_the_retrace_is_skipped() {
 }
 
 #[test]
+fn a_skipped_wait_across_the_retrace_misses_no_retrace() {
+    // Raster code syncing to each line: wait for the display, then for the
+    // blanking. In the vertical blanking the wait for the display runs
+    // over the whole retrace pulse, reading the register all through it.
+    // Its mask leaves bit 3 out, but a skip still stops where the retrace
+    // begins (`CrtTiming::next_status_change`), so the passes after it
+    // read it as the interpreter's do, and no retrace counts as missed.
+    let code = assemble(|a| {
+        let mut shown = a.create_label();
+        let mut blank = a.create_label();
+        a.mov(dx, 0x3DA)?;
+        a.set_label(&mut shown)?;
+        a.in_(al, dx)?;
+        a.test(al, 1)?;
+        a.jnz(shown)?;
+        a.set_label(&mut blank)?;
+        a.in_(al, dx)?;
+        a.test(al, 1)?;
+        a.jz(blank)?;
+        a.jmp(shown)
+    });
+    let test = "line_waits";
+    let mut a = machine(test, "a", &code, CoreMode::Normal, false);
+    let mut b = machine(test, "b", &code, CoreMode::Dynamic, true);
+    if let Err(e) = lockstep(&mut a, &mut b, BATCHES, 100_000, |_, _| {}) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    let stats = b.bus.observe.stats;
+    assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+    assert_eq!(a.bus.activity.missed_retraces, 0);
+    assert_eq!(b.bus.activity.missed_retraces, 0, "{:?}", stats);
+}
+
+#[test]
 fn an_interrupt_in_a_retrace_wait_sees_the_status_it_would_have() {
     // A timer handler keeps the AL of the code it interrupted, the status
     // the wait read last, in a ring of bytes, and goes on to the BIOS's.

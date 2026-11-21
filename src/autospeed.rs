@@ -477,6 +477,13 @@ pub(crate) const BURST_GAP: u64 = 5000;
 /// Changes of the display start this close together are one flip (the
 /// program writes the start address a byte at a time).
 const FLIP_GAP_INSTRUCTIONS: u64 = 1000;
+/// The longest break, as a share of a frame, between two reads of the
+/// status register that a retrace passing in it counts as missed
+/// (`Activity::status_read`). Chosen: an interrupt handler that runs over
+/// the pulse takes a millisecond or less, and a program that reads the
+/// register after its work and waits for its timer reads it a frame or
+/// more later.
+const MISS_GAP: f64 = 0.25;
 
 /// What the running program does that tells the speed it needs, counted
 /// as it runs.
@@ -500,6 +507,9 @@ pub struct Activity {
     pub polls: u64,
     /// Reads of the input status register (3DAh, 3BAh).
     pub status_reads: u64,
+    /// Vertical retraces that a program polling the status register let
+    /// pass unseen (`status_read`).
+    pub missed_retraces: u64,
     /// Bytes written to video memory, and moved on drives.
     pub video_bytes: u64,
     pub io_bytes: u64,
@@ -534,6 +544,9 @@ pub struct Activity {
     /// The display start, and the instruction it last changed at.
     start: u32,
     last_flip: u64,
+    /// The last read of the status register outside the vertical retrace:
+    /// its emulated time, and the retraces begun by then.
+    outside_retrace: Option<(u64, u64)>,
     /// The burst of the built-in Windows' writes going on.
     shown: Burst,
 }
@@ -671,6 +684,34 @@ impl Activity {
         self.polls += 1;
     }
 
+    /// The program read the status register at emulated time `ns`, after
+    /// `retraces` vertical retraces began, in one or not, with frames of
+    /// `frame_ns`.
+    ///
+    /// A retrace that began and ended between two reads outside it less
+    /// than `MISS_GAP` of a frame apart went by while the program polled
+    /// for it: an interrupt handler ran over the whole pulse, and the
+    /// program waits a frame more for the next. Prehistorik 2 polls for a
+    /// pulse of two scanlines (64 us), and its timer handler of about 2000
+    /// instructions takes 0.4 ms at 5000: it misses one frame in 70 there,
+    /// one in 450 at 7000, and none at 10,000. A program that reads the
+    /// register once after its work and then waits for something else (a
+    /// timer tick, its next frame's drawing) reads a frame or more apart
+    /// and misses nothing it waits for.
+    pub fn status_read(&mut self, ns: u64, retraces: u64, in_retrace: bool, frame_ns: u64) {
+        if in_retrace {
+            self.outside_retrace = None;
+            return;
+        }
+        if let Some((at, before)) = self.outside_retrace
+            && retraces == before + 1
+            && (ns.saturating_sub(at) as f64) < frame_ns as f64 * MISS_GAP
+        {
+            self.missed_retraces += 1;
+        }
+        self.outside_retrace = Some((ns, retraces));
+    }
+
     /// The bytes a burst needs to count as a frame: a quarter of what the
     /// program writes for a screen (`screen_bytes`). A smaller burst counts
     /// as a copy when it reaches across half of that and writes at least a
@@ -788,6 +829,7 @@ struct Mark {
     presents: u64,
     polls: u64,
     status_reads: u64,
+    missed: u64,
     output: u64,
     io: u64,
     /// The emulated time dropped behind the wall clock, and the emulated
@@ -814,6 +856,7 @@ impl Mark {
             presents: a.presents,
             polls: a.polls,
             status_reads: a.status_reads,
+            missed: a.missed_retraces,
             output: a.video_bytes + a.io_bytes,
             io: a.io_bytes,
         }
@@ -891,6 +934,9 @@ pub struct Measurement {
     /// Emulated seconds a second of the host's time: 1 kept real time,
     /// less fell behind (and dropped what it didn't catch up on).
     pub pace: f64,
+    /// Vertical retraces the program let pass unseen while it polled for
+    /// them (`Activity::status_read`).
+    pub missed: u64,
 }
 
 /// Where the search for the speed is.
@@ -1727,6 +1773,7 @@ impl AutoSpeed {
             io,
             refresh,
             pace: paced as f64 / (paced + lost - stall) as f64,
+            missed: now.missed - mark.missed,
         };
         // The step up's first measurement is in: the frames kept up with it.
         self.trying = None;
@@ -2328,6 +2375,17 @@ impl AutoSpeed {
                 // retrace, which fall to a fraction of the refresh rate
                 // (60 to 30), and `from` gets them back.
                 let heavier = fps < before * (c / from as f64) * DROPPED;
+                // A retrace the program let pass while it polled for it
+                // (`missed`) lost a frame to the step, whatever the frame
+                // rate reads: back to `from`, as for a step that lost
+                // frames, and steps down stop a step above this one.
+                if m.missed > 0 && !lagged {
+                    let left = HOLD_WINDOWS << self.backoffs;
+                    self.backoffs = (self.backoffs + 1).min(MOST_BACKOFFS);
+                    let least = self.lost_frames(current, FINE_STEP, top);
+                    let back = clamp((from as f64).max(least));
+                    return hold_drawing(self, before, back, left, true);
+                }
                 if seen < JUDGED && !dropped {
                     self.step = Step::Lowered {
                         from,
@@ -2414,6 +2472,12 @@ impl AutoSpeed {
                     } else {
                         least = self.lost_frames(speed, TWO_STEPS, top);
                     }
+                }
+                // A retrace missed while polling for it (`missed`): the
+                // speed loses frames too few for the frame rate to show, up
+                // a step, and steps down stop there.
+                if m.missed > 0 && !lagged {
+                    least = least.max(self.lost_frames(current, FINE_STEP, top));
                 }
                 let recent = if before.is_nan() {
                     fps
@@ -2629,6 +2693,7 @@ mod tests {
         io: 0.0,
         refresh: 70.0,
         pace: 1.0,
+        missed: 0,
     };
 
     /// A game that draws `per_cycle` frames a second for each instruction
@@ -2642,6 +2707,7 @@ mod tests {
             io: 0.0,
             refresh: 70.0,
             pace: 1.0,
+            missed: 0,
         }
     }
 
@@ -2698,6 +2764,7 @@ mod tests {
             io: 0.0,
             refresh: 70.0,
             pace: 1.0,
+            missed: 0,
         };
         let speeds = run(f117, false, 60);
         assert!((20_000..=30_000).contains(&speeds[59]), "{:?}", speeds);
@@ -6476,5 +6543,69 @@ mod tests {
             speed = auto.decide(speed, &behind, true, 45_000);
         }
         assert!(speed < kept, "{speed}");
+    }
+
+    /// Prehistorik 2's difficulty screen at `speed`, measurement `i`: it
+    /// waits for each retrace (70 Hz), halted most of the time, and the
+    /// flips it is counted by read 58 to 72 a measurement, as its scroll
+    /// stops for a frame now and then. Under 10,000 its timer handler
+    /// runs over the retrace pulse now and then, and it misses one: once
+    /// in 450 frames at 7000, once in 70 at 5000 (one a measurement).
+    fn prehistorik2(speed: u32, i: usize, missed: &mut f64) -> Measurement {
+        const READS: [f64; 10] = [69.7, 69.7, 60.0, 69.7, 70.0, 71.9, 58.1, 69.7, 69.7, 64.0];
+        let rate = (10_000.0 - speed as f64).max(0.0) / 5000.0;
+        *missed += 0.5 * rate.powi(3);
+        let miss = missed.floor();
+        *missed -= miss;
+        Measurement {
+            fps: Some(READS[i % READS.len()]),
+            polling: 0.006,
+            halted: 0.94,
+            output: 105_000.0,
+            io: 0.0,
+            refresh: 70.09,
+            pace: 1.0,
+            missed: miss as u64,
+        }
+    }
+
+    #[test]
+    fn a_retrace_missed_while_polling_for_it_counts() {
+        let frame = 14_268_000;
+        let pulse = |n: u64| n * frame + 13_000_000;
+        let mut a = Activity::new();
+        // Polling up to the pulse, an interrupt over all of it, polling
+        // again after: one missed.
+        a.status_read(pulse(0) - 5000, 0, false, frame);
+        a.status_read(pulse(0) + 400_000, 1, false, frame);
+        assert_eq!(a.missed_retraces, 1);
+        // Seen the next time: nothing more.
+        a.status_read(pulse(1) + 10, 2, true, frame);
+        a.status_read(pulse(1) + 70_000, 2, false, frame);
+        assert_eq!(a.missed_retraces, 1);
+        // Read once after the work, then not until a frame later: a
+        // program that waits for its timer, not for the retrace.
+        a.status_read(pulse(2) + 100_000, 3, false, frame);
+        assert_eq!(a.missed_retraces, 1);
+    }
+
+    #[test]
+    fn a_game_that_polls_for_the_retrace_keeps_a_speed_that_misses_none() {
+        // From the speed of a save state, as #1590's runs started.
+        let mut auto = AutoSpeed::new(3000, None);
+        let mut speed = 10_000;
+        let (mut acc, mut missed, mut sum) = (0.0, 0, 0u64);
+        let n = 2000;
+        for i in 0..n {
+            let m = prehistorik2(speed, i, &mut acc);
+            missed += m.missed;
+            speed = auto.decide(speed, &m, false, 2_000_000);
+            sum += speed as u64;
+        }
+        // Main went down to 5000 to 8000 and missed one a few seconds,
+        // over 500 here.
+        let mean = sum / n as u64;
+        assert!(missed <= 40, "{missed} missed, mean speed {mean}");
+        assert!((8500..=13_000).contains(&mean), "{mean}");
     }
 }
