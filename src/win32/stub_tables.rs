@@ -12,15 +12,26 @@
 //! calls the function in front of the one it was bound to. The tables
 //! therefore only grow at their ends: `stub_tables.txt` holds the order
 //! each table has had, and `tables_only_grow_at_their_ends` fails on an
-//! entry inserted, moved or taken out.
+//! entry inserted, moved or taken out. It holds the DLLs' variables the
+//! same way, with their sizes: programs keep their addresses too, and a
+//! variable put before others or grown moves every later one.
 //!
-//! One entry went into the middle of a table before that test was there:
-//! GDI32's CreateScalableFontResourceA, after AddFontResourceA (#1583).
-//! A process whose GDI32 image was made without it is mended when its
-//! state loads (`mend`): its image keeps its order, each stub then traps
-//! with the id its function has now, CreateScalableFontResourceA gets a
-//! stub after the last one, and the addresses Rust works out for the
-//! process's GDI32 functions follow the image (`stub_address_in`).
+//! Entries went into the middle of tables before that test was there.
+//! Those merged before the W32 section's version 71 (2026-11-15) can't
+//! reach a state this rust-dos loads, since it refuses older versions.
+//! Since then, KERNEL32's LoadModule, 34 USER32 functions in four
+//! places, GDI32's CreateScalableFontResourceA and the 16-bit USER's
+//! DlgDirSelectComboBox went in. GDI32's is mended (#1583): a process
+//! whose GDI32 image was made without it keeps that image's order when
+//! its state loads (`mend`), each stub then traps with the id its
+//! function has now, CreateScalableFontResourceA gets a stub after the
+//! last one, and the addresses Rust works out for the process's GDI32
+//! functions follow the image (`stub_address_in`). Rust works those out
+//! only for the 16-bit GDI's calls into GDI32. It works out the
+//! addresses of KERNEL32's and USER32's functions in hundreds of places,
+//! many with no process at hand, so their insertions aren't mended yet
+//! (#1613): mending their stubs alone would make Rust's calls land on
+//! other functions.
 
 use super::{Process, TRAP, loader, stubs};
 use crate::bus::Bus;
@@ -34,8 +45,8 @@ struct Inserted {
     name: &'static str,
 }
 
-/// Every such entry. Nothing is added here: `stub_tables.txt` stops a
-/// new one.
+/// The entries `mend` mends. `stub_tables.txt` stops new insertions; the
+/// older ones of KERNEL32, USER32 and the 16-bit USER wait for #1613.
 const INSERTED: &[Inserted] = &[Inserted {
     dll: "GDI32.DLL",
     name: "CreateScalableFontResourceA",
@@ -65,6 +76,14 @@ pub(crate) fn stub_address_in(process: &Process, dll: usize, api: usize) -> Opti
             .map(|slot| stubs::stub_address(dll, slot)),
         None => Some(stubs::stub_address(dll, api)),
     }
+}
+
+/// The process's image of the built-in DLL `dll` was written again from
+/// the table as it is now (`loader::attach_builtin`, when a program loads
+/// a DLL it had freed): its stubs are where `stubs::stub_address` puts
+/// them.
+pub(crate) fn forget(process: &mut Process, dll: usize) {
+    process.older_images.retain(|o| o.dll != dll);
 }
 
 /// Mend the images of the built-in DLLs that the processes of a state just
@@ -141,7 +160,10 @@ fn lacking(bus: &Bus, process: &Process, d: usize, inserted: &[usize]) -> Option
         .find(|without| {
             // After each inserted entry, the first function the image
             // exports that is a stub: where the image has it tells
-            // whether the entry was there.
+            // whether the entry was there. An export outside the stubs is
+            // one the program hooked by rewriting the export table, which
+            // tells nothing.
+            let stubs = stubs::stub_address(d, 0)..stubs::stub_address(d, dll.apis.len());
             inserted.iter().all(|&entry| {
                 let anchor = (entry + 1..dll.apis.len())
                     .filter(|i| !without.contains(i))
@@ -153,7 +175,7 @@ fn lacking(bus: &Bus, process: &Process, d: usize, inserted: &[usize]) -> Option
                             dll.base,
                             dll.apis[i].name,
                         )?;
-                        Some((i, at))
+                        stubs.contains(&at).then_some((i, at))
                     });
                 anchor.is_none_or(|(i, at)| {
                     let slot = i - without.iter().filter(|&&w| w < i).count();
@@ -242,7 +264,14 @@ mod tests {
             let names = m.apis.iter().map(|a| a.name.to_string()).collect();
             (format!("MODULE {}", m.name), names)
         });
-        dlls.chain(modules).collect()
+        let vars = stubs::DLLS
+            .iter()
+            .filter(|dll| !dll.vars.is_empty())
+            .map(|dll| {
+                let vars = dll.vars.iter().map(|v| format!("{} {}", v.name, v.size));
+                (format!("VARS {}", dll.name), vars.collect())
+            });
+        dlls.chain(modules).chain(vars).collect()
     }
 
     fn file() -> PathBuf {
@@ -256,7 +285,7 @@ mod tests {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            if line.starts_with("DLL ") || line.starts_with("MODULE ") {
+            if KINDS.iter().any(|kind| line.starts_with(kind)) {
                 tables.push((line.to_string(), Vec::new()));
             } else {
                 let table = tables.last_mut().expect("a name before its table's line");
@@ -270,8 +299,9 @@ mod tests {
         let mut text = String::from(
             "# The order of the built-in DLLs' function tables (src/win32/stubs.rs)\n\
              # and the 16-bit system modules' (src/win16/builtin.rs), which saved\n\
-             # states keep the stubs of: src/win32/stub_tables.rs. A new function\n\
-             # or table goes at the end of its list, never in the middle.\n",
+             # states keep the stubs of, and of the DLLs' variables with their\n\
+             # sizes: src/win32/stub_tables.rs. A new function, variable or table\n\
+             # goes at the end of its list, never in the middle.\n",
         );
         for (table, names) in tables {
             text.push('\n');
@@ -285,37 +315,85 @@ mod tests {
         text
     }
 
+    /// The kinds of tables: the DLLs' functions in `DLLS` order, the
+    /// modules' in `MODULES` order, and the variables of the DLLs that
+    /// have them, by their DLL's name.
+    const KINDS: [&str; 3] = ["DLL ", "MODULE ", "VARS "];
+
     /// Why the tables `now` aren't `recorded` with entries added at the
-    /// ends of tables and new tables at the end: the first entry or
-    /// table that moved. None when they are.
+    /// ends of tables and new tables at the ends of their lists: the
+    /// first entry or table that moved. None when they are.
     fn moved(recorded: &[Table], now: &[Table]) -> Option<String> {
-        for (i, (table, names)) in recorded.iter().enumerate() {
-            let Some((table_now, names_now)) = now.get(i) else {
-                return Some(format!("{table} is gone, and the tables after it moved"));
-            };
-            if table_now != table {
-                return Some(format!(
-                    "{table_now} is where {table} was: a table goes at the end of the list, \
-                     and every table after one put in moves to another index"
-                ));
+        fn of(kind: &str, tables: &[Table]) -> Vec<Table> {
+            tables
+                .iter()
+                .filter(|t| t.0.starts_with(kind))
+                .cloned()
+                .collect()
+        }
+        // A DLL's or module's place in its list is the high bits of its
+        // functions' ids.
+        for kind in &KINDS[..2] {
+            let (recorded, now) = (of(kind, recorded), of(kind, now));
+            for (i, table) in recorded.iter().enumerate() {
+                let Some(table_now) = now.get(i) else {
+                    return Some(format!(
+                        "{} is gone, and the tables after it moved",
+                        table.0
+                    ));
+                };
+                if table_now.0 != table.0 {
+                    return Some(format!(
+                        "{} is where {} was: a DLL or module goes at the end of its list, \
+                         and every one after one put in moves to another index",
+                        table_now.0, table.0
+                    ));
+                }
+                if let Some(why) = entry_moved(table, table_now) {
+                    return Some(why);
+                }
             }
-            for (j, name) in names.iter().enumerate() {
-                match names_now.get(j) {
-                    Some(n) if n == name => {}
-                    Some(n) => {
-                        return Some(format!(
-                            "{table}'s entry {j} was {name} and is now {n}: a function put \
-                             before others gives each of them the next id and stub, and a \
-                             saved state's stubs then call the function before the one the \
-                             program was bound to. Add functions at the end of the table"
-                        ));
-                    }
-                    None => {
-                        return Some(format!(
-                            "{table}'s entry {j}, {name}, is gone: a saved state's stub of it \
-                             would call nothing. Keep the entry"
-                        ));
-                    }
+        }
+        // A DLL's variables follow its functions: their tables have no
+        // place of their own.
+        for table in of("VARS ", recorded) {
+            let Some(table_now) = now.iter().find(|t| t.0 == table.0) else {
+                return Some(format!("{} is gone", table.0));
+            };
+            if let Some(why) = entry_moved(&table, table_now) {
+                return Some(why);
+            }
+        }
+        None
+    }
+
+    /// Why the entries of `now` aren't those of `recorded` with others
+    /// after them: the first one that moved.
+    fn entry_moved((table, names): &Table, (_, names_now): &Table) -> Option<String> {
+        let variables = table.starts_with("VARS ");
+        for (j, name) in names.iter().enumerate() {
+            match names_now.get(j) {
+                Some(n) if n == name => {}
+                Some(n) if variables => {
+                    return Some(format!(
+                        "{table}'s entry {j} was {name} and is now {n}: a variable put before \
+                         others, or one grown, moves every one after it, and a saved state's \
+                         program keeps their old addresses. Add variables at the end"
+                    ));
+                }
+                Some(n) => {
+                    return Some(format!(
+                        "{table}'s entry {j} was {name} and is now {n}: a function put \
+                         before others gives each of them the next id and stub, and a \
+                         saved state's stubs then call the function before the one the \
+                         program was bound to. Add functions at the end of the table"
+                    ));
+                }
+                None => {
+                    return Some(format!(
+                        "{table}'s entry {j}, {name}, is gone: a saved state's program may \
+                         still use it. Keep the entry"
+                    ));
                 }
             }
         }
@@ -355,16 +433,40 @@ mod tests {
         let why = moved(&before, &now).expect("the insertion is found");
         assert!(why.contains("GDI32.DLL's entry"), "{why}");
         assert!(why.contains("is now CreateScalableFontResourceA"), "{why}");
-        // An entry added at the end of a table, and a table at the end of
-        // the list, aren't moves.
+        // An entry added at the end of a table, a DLL at the end of
+        // `DLLS` (before the modules in the file), a module at the end of
+        // `MODULES`, and the variables of a DLL that had none aren't moves.
         let mut grown = now.clone();
         grown[4].1.push("Later".into());
-        grown.push(("DLL LATER.DLL".into(), vec!["First".into()]));
+        let modules = grown
+            .iter()
+            .position(|t| t.0.starts_with("MODULE "))
+            .unwrap();
+        grown.insert(modules, ("DLL LATER.DLL".into(), vec!["First".into()]));
+        let vars = grown.iter().position(|t| t.0.starts_with("VARS ")).unwrap();
+        grown.insert(vars, ("MODULE LATER".into(), vec!["First".into()]));
+        grown.insert(vars + 1, ("VARS GDI32.DLL".into(), vec!["first 4".into()]));
         assert_eq!(moved(&now, &grown), None);
         // One taken out is.
         let mut shrunk = now.clone();
         shrunk[4].1.pop();
         assert!(moved(&now, &shrunk).unwrap().contains("is gone"));
+        // So is a variable put in before others, or grown.
+        let msvcrt = now.iter().position(|t| t.0 == "VARS MSVCRT.DLL").unwrap();
+        let mut put_in = now.clone();
+        put_in[msvcrt].1.insert(1, "early 4".into());
+        assert!(
+            moved(&now, &put_in)
+                .unwrap()
+                .contains("a variable put before")
+        );
+        let mut resized = now.clone();
+        resized[msvcrt].1[0].push('0');
+        assert!(
+            moved(&now, &resized)
+                .unwrap()
+                .contains("a variable put before")
+        );
     }
 
     #[test]

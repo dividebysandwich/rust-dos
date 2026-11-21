@@ -17881,6 +17881,26 @@ fn gdi32_exports(cpu: &mut Cpu) -> (u32, u32, u32, u32, u32) {
     (functions, names, tables[0], tables[1], tables[2])
 }
 
+/// Where GDI32's export directory has the address of its export `name`.
+fn gdi32_export(cpu: &mut Cpu, name: &str) -> u32 {
+    let (_, names, function_table, name_table, ordinal_table) = gdi32_exports(cpu);
+    let wanted = [name.as_bytes(), &[0]].concat();
+    let index = (0..names)
+        .find(|&i| {
+            let at = GDI32_BASE + peek_32(cpu, name_table + 4 * i);
+            let mut text = vec![0u8; wanted.len()];
+            peek(cpu, at, &mut text);
+            text == wanted
+        })
+        .map(|i| {
+            let mut ordinal = [0u8; 2];
+            peek(cpu, ordinal_table + 2 * i, &mut ordinal);
+            u16::from_le_bytes(ordinal) as u32
+        })
+        .unwrap_or_else(|| panic!("GDI32 exports {name}"));
+    function_table + 4 * index
+}
+
 /// Turn the running process's GDI32 image into what a build from before
 /// CreateScalableFontResourceA went into the middle of GDI32's table
 /// (#1583) made, and its imports into what that build bound: the stubs
@@ -17888,21 +17908,9 @@ fn gdi32_exports(cpu: &mut Cpu) -> (u32, u32, u32, u32, u32) {
 /// place, the slot after them empty, and the exports and the import
 /// table slots `iat` that point at them 8 bytes earlier.
 fn without_create_scalable_font_resource(cpu: &mut Cpu, iat: &[u32]) {
-    let (functions, names, function_table, name_table, ordinal_table) = gdi32_exports(cpu);
-    let index = (0..names)
-        .find(|&i| {
-            let name = GDI32_BASE + peek_32(cpu, name_table + 4 * i);
-            let mut text = [0u8; 28];
-            peek(cpu, name, &mut text);
-            &text == b"CreateScalableFontResourceA "
-        })
-        .map(|i| {
-            let mut ordinal = [0u8; 2];
-            peek(cpu, ordinal_table + 2 * i, &mut ordinal);
-            u16::from_le_bytes(ordinal) as u32
-        })
-        .expect("GDI32 exports CreateScalableFontResourceA");
-    let inserted = peek_32(cpu, function_table + 4 * index);
+    let (functions, _, function_table, _, _) = gdi32_exports(cpu);
+    let entry = gdi32_export(cpu, "CreateScalableFontResourceA");
+    let inserted = peek_32(cpu, entry);
     let k = (inserted - STUBS_RVA) / 8;
     let mut stubs = Vec::new();
     loop {
@@ -17986,6 +17994,55 @@ fn a_state_from_before_a_gdi32_insertion_calls_what_it_was_bound_to() {
     let mut cpu = machine("stub_tables_gdi32", image);
     run_into_the_wait(&mut cpu);
     without_create_scalable_font_resource(&mut cpu, &iat);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    // A state the mended machine saves loads again as it was: the stubs
+    // already trap with their ids of now, and the load works out the
+    // image's order again.
+    let mut stubs = vec![0u8; 0x1000];
+    peek(&mut cpu, GDI32_BASE + STUBS_RVA, &mut stubs);
+    let mended = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &mended).unwrap();
+    let mut again = vec![0u8; 0x1000];
+    peek(&mut cpu, GDI32_BASE + STUBS_RVA, &mut again);
+    assert!(stubs == again, "a second load changed GDI32's stubs");
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x16, "{}", printed(&cpu));
+}
+
+/// A program that hooked a GDI32 function by rewriting its export, so
+/// that the export points into the program, has its state load as it
+/// is: the export says nothing of the order of GDI32's stubs.
+#[test]
+fn a_state_with_a_hooked_gdi32_export_loads() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("GDI32.DLL", &["GetRasterizerCaps"]),
+    ];
+    let mut iat = Vec::new();
+    let image = program(BASE, false, imports, &[0xEE; 8], |a, l| {
+        iat = l.iat.clone();
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 300))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.push(6)?;
+        a.push(l.data as i32)?;
+        a.call(l.import(1))?;
+        a.shl(eax, 4)?;
+        a.movzx(ecx, byte_ptr(l.at(0)))?;
+        a.add(eax, ecx)?;
+        a.ret()
+    });
+    let mut cpu = machine("stub_tables_hooked", image);
+    run_into_the_wait(&mut cpu);
+    // RemoveFontResourceA, the first export after the inserted entry,
+    // which `mend` looks at, points into the program.
+    let entry = gdi32_export(&mut cpu, "RemoveFontResourceA");
+    poke(&mut cpu, entry, &BASE.wrapping_sub(GDI32_BASE).to_le_bytes());
     let state = rust_dos::savestate::machine::save(&cpu);
     rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
     assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));

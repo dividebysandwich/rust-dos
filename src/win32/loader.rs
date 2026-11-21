@@ -610,6 +610,8 @@ fn attach_builtin(
         }
     }
     memory.write(bus, dll.base, &built.data)?;
+    // An older image of it that a load mended is gone.
+    super::stub_tables::forget(process, index);
     process.modules.push(Module {
         name: dll.name.to_string(),
         path: join(SYSTEM_DIR, dll.name),

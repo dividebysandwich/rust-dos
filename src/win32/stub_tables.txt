@@ -1,7 +1,8 @@
 # The order of the built-in DLLs' function tables (src/win32/stubs.rs)
 # and the 16-bit system modules' (src/win16/builtin.rs), which saved
-# states keep the stubs of: src/win32/stub_tables.rs. A new function
-# or table goes at the end of its list, never in the middle.
+# states keep the stubs of, and of the DLLs' variables with their
+# sizes: src/win32/stub_tables.rs. A new function, variable or table
+# goes at the end of its list, never in the middle.
 
 DLL KERNEL32.DLL
 ProcessReturn
@@ -6473,3 +6474,73 @@ VarCyFromUI1
 VarBstrFromUI1
 VarBoolFromUI1
 DllCanUnloadNow
+
+VARS MSVCRT.DLL
+_iob 640
+_environ 4
+__initenv 4
+__argc 4
+__argv 4
+_acmdln 4
+_pgmptr 4
+_fmode 4
+_commode 4
+_adjust_fdiv 4
+_osver 4
+_winver 4
+_winmajor 4
+_winminor 4
+_ctype 514
+_pctype 4
+_pwctype 4
+__mb_cur_max 4
+_mbctype 257
+_sys_nerr 4
+_sys_errlist 172
+_timezone 4
+_daylight 4
+_dstbias 4
+_tzname 8
+_HUGE 8
+_wenviron 4
+__winitenv 4
+__wargv 4
+_wcmdln 4
+_wpgmptr 4
+__lc_codepage 4
+__lc_collate_cp 4
+__lc_handle 24
+_mbcasemap 256
+wctype 512
+errtext 2048
+tztext 64
+__pioinfo 256
+streams 2048
+threads 512
+state 512
+__setlc_active 4
+__unguarded_readlc_active 4
+rtti 768
+type_info locator 8
+type_info vtable 4
+exception locator 8
+??_7exception@@6B@ 8
+bad_cast locator 8
+??_7bad_cast@@6B@ 8
+bad_typeid locator 8
+??_7bad_typeid@@6B@ 8
+__non_rtti_object locator 8
+??_7__non_rtti_object@@6B@ 8
+__badioinfo 36
+lc_time_c 512
+
+VARS DDRAW.DLL
+IsLostCache 4096
+
+VARS GLIDE3X.DLL
+context 64
+strings 320
+
+VARS GLU32.DLL
+texts 3584
+wide 7168

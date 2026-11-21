@@ -202,12 +202,15 @@ A function's id, which its stub's trap carries, is its DLL's place in
 stub is at that place in the image. Saved states keep the stubs in
 memory and programs keep their addresses, so tables are only added to
 at their ends: `src/win32/stub_tables.txt` holds the order every
-built-in DLL's and 16-bit system module's table has had, and a test
-fails on an entry inserted, moved or taken out (`stub_tables.rs`). The
-one entry inserted before that test, GDI32's
-CreateScalableFontResourceA, is mended in states saved before it: their
-GDI32 image keeps its order, its stubs trap with the ids their functions
-have now, and the addresses Rust works out for its functions follow it.
+built-in DLL's and 16-bit system module's table has had, and the DLLs'
+variables with their sizes, and a test fails on an entry inserted,
+moved or taken out (`stub_tables.rs`). GDI32's
+CreateScalableFontResourceA, inserted before that test, is mended in
+states saved before it: their GDI32 image keeps its order, its stubs
+trap with the ids their functions have now, and the addresses Rust
+works out for its functions follow it. The entries KERNEL32, USER32 and
+the 16-bit USER had inserted in the same days aren't mended yet
+(#1613).
 
 A missing function is bound to a stub that logs `dll!name` with its
 arguments and ends the program with a message saying which function it
