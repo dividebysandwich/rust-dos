@@ -100,7 +100,9 @@ pub struct Renderer {
     /// The target of what is queued.
     target: Option<Target>,
     /// The bytes of card memory the queued draws read besides their
-    /// target: their textures (`pipeline::reads`), once each.
+    /// target: their textures (`pipeline::reads`), as ranges in order
+    /// of their offsets, merged where they overlap or touch
+    /// (`note_reads`).
     reads: Vec<(u32, u32)>,
     /// Kept from draw to draw for their room.
     vertices: Vec<ScreenVertex>,
@@ -389,17 +391,42 @@ fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
 }
 
 /// Add the bytes a draw with `state` reads besides its target to
-/// `reads`, those that aren't there yet.
+/// `reads` (`Renderer::reads`). A batch of many draws keeps one range
+/// for the textures they share, and one for a texture's levels laid
+/// out one after the other, so adding to it and asking it
+/// (`overlaps_any`) take a binary search however long the batch is.
 fn note_reads(reads: &mut Vec<(u32, u32)>, state: &DrawState) {
-    let mut at = reads.len();
-    pipeline::reads(state, reads);
-    while at < reads.len() {
-        if reads[..at].contains(&reads[at]) {
-            reads.swap_remove(at);
-        } else {
-            at += 1;
-        }
+    let clamp = |at: u64| at.min(u32::MAX as u64) as u32;
+    for t in state.tex.iter().flatten() {
+        pipeline::texture_reads(&t.texture, |(first, end)| {
+            add_range(reads, (clamp(first), clamp(end)));
+        });
     }
+}
+
+/// Add `(first, end)` to `ranges`, which are in order of their
+/// offsets and neither overlap nor touch, keeping them so.
+fn add_range(ranges: &mut Vec<(u32, u32)>, (first, end): (u32, u32)) {
+    if first >= end {
+        return;
+    }
+    // The ranges it overlaps or touches: from the first that ends at
+    // or after its start to the last that starts at or before its end.
+    let from = ranges.partition_point(|r| r.1 < first);
+    let to = ranges.partition_point(|r| r.0 <= end);
+    if from == to {
+        ranges.insert(from, (first, end));
+    } else {
+        let merged = (ranges[from].0.min(first), ranges[to - 1].1.max(end));
+        ranges.splice(from..to, [merged]);
+    }
+}
+
+/// Whether one of `ranges`, kept by `add_range`, shares a byte with
+/// `(first, end)`.
+fn overlaps_any(ranges: &[(u32, u32)], (first, end): (u32, u32)) -> bool {
+    let at = ranges.partition_point(|r| r.1 <= first);
+    ranges.get(at).is_some_and(|r| r.0 < end && first < end)
 }
 
 // A copy of a card draws as the card does, and has nothing queued.
@@ -949,7 +976,7 @@ impl Renderer {
         let wide = |r: (u32, u32)| (r.0 as u64, r.1 as u64);
         pipeline::writes(target, wide(writes))
             || reads.is_some_and(|r| pipeline::writes(target, wide(r)))
-            || self.reads.iter().any(|&r| gpu::overlap(r, writes))
+            || overlaps_any(&self.reads, writes)
     }
 
     /// Draw what is queued, or have the host of `gpu` draw it.

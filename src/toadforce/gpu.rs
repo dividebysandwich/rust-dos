@@ -590,8 +590,7 @@ pub fn range(surface: &Surface) -> (u32, u32) {
     (surface.offset, surface.end().min(u32::MAX as u64) as u32)
 }
 
-/// Whether the byte ranges `a` and `b` share a byte.
-pub fn overlap(a: (u32, u32), b: (u32, u32)) -> bool {
+fn overlap(a: (u32, u32), b: (u32, u32)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 

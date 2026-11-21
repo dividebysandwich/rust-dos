@@ -818,3 +818,27 @@ fn a_loaded_card_draws_as_the_saved_one() {
     assert!(rig.px(2, 2) != 0xFF40_4040);
     assert!(loaded.memory == rig.memory);
 }
+
+#[test]
+fn the_ranges_a_batch_reads_stay_in_order_and_merge_where_they_meet() {
+    use super::{add_range, overlaps_any};
+    let mut ranges = Vec::new();
+    for range in [(100, 200), (300, 400), (100, 200), (0, 10), (50, 50)] {
+        add_range(&mut ranges, range);
+    }
+    assert_eq!(ranges, [(0, 10), (100, 200), (300, 400)]);
+    // One that touches a range joins it, and one over several joins
+    // them all.
+    add_range(&mut ranges, (200, 250));
+    assert_eq!(ranges, [(0, 10), (100, 250), (300, 400)]);
+    add_range(&mut ranges, (5, 310));
+    assert_eq!(ranges, [(0, 400)]);
+    let ranges = [(0, 10), (100, 250), (300, 400)];
+    assert!(overlaps_any(&ranges, (9, 11)));
+    assert!(overlaps_any(&ranges, (120, 130)));
+    assert!(overlaps_any(&ranges, (10, 301)));
+    assert!(!overlaps_any(&ranges, (10, 100)));
+    assert!(!overlaps_any(&ranges, (250, 300)));
+    assert!(!overlaps_any(&ranges, (400, 500)));
+    assert!(!overlaps_any(&ranges, (120, 120)));
+}

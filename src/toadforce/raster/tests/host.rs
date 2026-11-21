@@ -1832,6 +1832,167 @@ fn a_blt_of_surfaces_no_waiting_draw_uses_leaves_the_hosts_batch_growing() {
     assert_eq!(log.borrow().batches, 3);
 }
 
+/// Where `queued_reads` keeps a palette and the one it copies over it.
+const PALETTE: u32 = BUFFER + 0x1_0000;
+const NEW_PALETTE: u32 = BUFFER + 0x1_1000;
+/// Its texture's two levels, and the texels copied into the second.
+const LEVELS: u32 = BUFFER + 0x2_0000;
+const NEW_LEVEL: u32 = BUFFER + 0x2_1000;
+/// A surface no draw uses.
+const UNUSED: u32 = BUFFER + 0x3_0000;
+
+/// A colour of the palette at `PALETTE`, and of the one copied over it.
+const OLD_COLOUR: u32 = 0xFF11_2233;
+const NEW_COLOUR: u32 = 0xFF44_5566;
+
+/// A surface of `width` by `height` pixels of `format` at `offset`,
+/// its rows one after the other.
+fn packed_at(offset: u32, width: u32, height: u32, format: Format) -> Surface {
+    Surface {
+        offset,
+        pitch: width * format.bytes(),
+        width,
+        height,
+        format,
+    }
+}
+
+/// Draws that wait in one run of commands while a `FILL` or a `BLT`
+/// touches, by turns, each kind of memory they use besides the
+/// target's colour: their texture's palette, a level of the texture
+/// they don't sample, the depth buffer written, the depth buffer read,
+/// and last memory none of them uses.
+fn queued_reads(rig: &mut Rig) {
+    let palette = |colour: u32| {
+        let mut words = [0u32; 256];
+        words[1] = colour;
+        words.map(u32::to_le_bytes).concat()
+    };
+    poke(rig, PALETTE as usize, &palette(OLD_COLOUR));
+    poke(rig, NEW_PALETTE as usize, &palette(NEW_COLOUR));
+    // Index 1 everywhere, in a 4x4 level and a 2x2 one.
+    poke(rig, LEVELS as usize, &[1; 16 + 4]);
+    poke(rig, NEW_LEVEL as usize, &[2; 4]);
+    let texture = Texture {
+        format: Format::P8,
+        width: 4,
+        height: 4,
+        levels: 2,
+        palette: Some(PALETTE),
+        images: vec![(LEVELS, 4), (LEVELS + 16, 2)],
+        ..Texture::default()
+    };
+    let error = rig.run(|w| {
+        encode::define_texture(w, 1, &texture);
+        encode::set_texture(w, 0, 1);
+    });
+    assert_eq!(error, 0);
+    rig.stage(
+        0,
+        &[(TSS_COLOROP, OP_SELECT_ARG1), (TSS_COLORARG1, ARG_TEXTURE)],
+    );
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF00_0000, 1.0, 0);
+    rig.states(&[(RS_ZENABLE, 1)]);
+
+    let depth = target(rig).depth_surface().expect("a depth buffer");
+    // The depth buffer under the name of a colour format of its size,
+    // as a `FILL` or a `BLT` takes it.
+    let depth = Surface {
+        format: Format::R5G6B5,
+        ..depth
+    };
+    let bottom = rect(0, 32, 64, 32);
+    let unused = packed_at(UNUSED, 64, 32, Format::R5G6B5);
+    let all = rect(0, 0, 64, 32);
+    let new_palette = packed_at(NEW_PALETTE, 256, 1, FORMAT);
+    let old_palette = packed_at(PALETTE, 256, 1, FORMAT);
+    let level = |offset| packed_at(offset, 2, 2, Format::P8);
+    let error = rig.run(|w| {
+        encode::draw(w, 5, TL, 4, &quad(0.0, 0.0, 16.0));
+        let whole = rect(0, 0, 256, 1);
+        command::encode::blt(w, &old_palette, &whole, &new_palette, &whole, None);
+        encode::draw(w, 5, TL, 4, &quad(16.0, 0.0, 16.0));
+        let texels = rect(0, 0, 2, 2);
+        let (into, from) = (level(LEVELS + 16), level(NEW_LEVEL));
+        command::encode::blt(w, &into, &texels, &from, &texels, None);
+        encode::draw(w, 5, TL, 4, &quad(32.0, 0.0, 16.0));
+        command::encode::fill(w, &depth, &bottom, 0);
+        encode::draw(w, 5, TL, 4, &quad(48.0, 0.0, 16.0));
+        command::encode::blt(w, &unused, &all, &depth, &bottom, None);
+        encode::draw(w, 5, TL, 4, &quad(0.0, 16.0, 16.0));
+        command::encode::fill(w, &unused, &all, 0x1234);
+        encode::draw(w, 5, TL, 4, &quad(16.0, 16.0, 16.0));
+    });
+    assert_eq!(error, 0);
+}
+
+#[test]
+fn a_fill_or_blt_of_any_memory_a_waiting_draw_uses_ends_the_batch() {
+    let (rig, log) = same(takes_all, queued_reads);
+    // The draw before the copy of the palette has the old colour, the
+    // one after it the new.
+    assert_eq!(rig.px(8, 8), OLD_COLOUR & 0xFF_FFFF);
+    assert_eq!(rig.px(24, 8), NEW_COLOUR & 0xFF_FFFF);
+    // The palette, the level, the depth written and the depth read
+    // each end a batch, and the `FILL` of the unused surface doesn't:
+    // the last two draws are one batch.
+    assert_eq!(log.borrow().batches, 5);
+}
+
+/// Draws into the top half of a surface wait while a `BLT` and a
+/// `FILL` write its bottom half: the halves are views of one surface,
+/// which the host keeps as one copy and has ahead. (The left and right
+/// halves would share bytes between their rows, so a `BLT` into one
+/// would wait for draws into the other.)
+fn beside_the_target(rig: &mut Rig) {
+    let whole = texture_surface();
+    let half = |y: u32| Surface {
+        offset: whole.at(0, y) as u32,
+        height: 32,
+        ..whole
+    };
+    let (top, bottom) = (half(0), half(32));
+    let texels = staged(0).to_le_bytes().repeat(16 * 16);
+    poke(rig, STAGED as usize, &texels);
+    let on = |colour: Surface| Target {
+        colour,
+        depth: None,
+    };
+    rig.stage(
+        0,
+        &[(TSS_COLOROP, OP_SELECT_ARG1), (TSS_COLORARG1, ARG_DIFFUSE)],
+    );
+    aim(rig, &on(whole));
+    rig.clear(CLEAR_COLOUR, 0xFF10_1010, 0.0, 0);
+    assert_eq!(rig.draw(4, &corner(0.0, 0.0, 64.0, 0.0, 0xFFFF_0000)), 0);
+    aim(rig, &on(top));
+    let whole_tile = rect(0, 0, 16, 16);
+    let error = rig.run(|w| {
+        encode::draw(w, 4, TL, 3, &corner(0.0, 0.0, 16.0, 0.0, 0xFF00_FF00));
+        let into = rect(0, 0, 16, 16);
+        command::encode::blt(w, &bottom, &into, &tile(STAGED), &whole_tile, None);
+        encode::draw(w, 4, TL, 3, &corner(32.0, 0.0, 16.0, 0.0, 0xFF00_00FF));
+        command::encode::fill(w, &bottom, &rect(48, 16, 16, 16), 0x00AB_CDEF);
+        encode::draw(w, 4, TL, 3, &corner(48.0, 0.0, 16.0, 0.0, 0xFFFF_FF00));
+    });
+    assert_eq!(error, 0);
+}
+
+#[test]
+fn a_blt_into_a_view_below_the_target_leaves_the_batch_growing() {
+    let (rig, log) = same(takes_all, beside_the_target);
+    let whole = texture_surface();
+    let px = |x, y| rig.word(whole.at(x, y), 4) & 0xFF_FFFF;
+    assert_eq!(px(2, 2), 0x00_FF00);
+    assert_eq!(px(34, 2), 0x00_00FF);
+    assert_eq!(px(50, 2), 0xFF_FF00);
+    assert_eq!(px(4, 36), staged(0) & 0xFF_FFFF);
+    assert_eq!(px(60, 60), 0xAB_CDEF);
+    // The red triangle's batch, and one for the three draws into the
+    // top half.
+    assert_eq!(log.borrow().batches, 2);
+}
+
 /// The first half of a scene, and the half after a state was saved.
 fn before_the_save(rig: &mut Rig) {
     triangles(rig);
