@@ -581,7 +581,6 @@ fn new_bstr(cpu: &mut Cpu, heap: &mut Heap, text: &[u8]) -> Result<u32, Stop> {
 /// A BSTR of the bytes `text` from the built-in allocator: its 16:16
 /// address, or 0. For TYPELIB (#1598) and the error object (#1601),
 /// whose functions don't run with a `Heap` yet (#1625).
-#[allow(dead_code)]
 pub fn alloc_bstr(cpu: &mut Cpu, text: &[u8]) -> u32 {
     new_bstr(cpu, &mut Heap::builtin(), text).unwrap_or(0)
 }
@@ -599,7 +598,6 @@ pub fn bstr_bytes(cpu: &Cpu, bstr: u32) -> Vec<u8> {
 
 /// Free the BSTR `bstr` of the built-in allocator's. For the error
 /// object (#1601) and TYPELIB, as `alloc_bstr`.
-#[allow(dead_code)]
 pub(super) fn free_bstr(cpu: &mut Cpu, bstr: u32) {
     drop_bstr(cpu, &mut Heap::builtin(), bstr);
 }
