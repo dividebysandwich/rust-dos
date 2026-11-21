@@ -182,12 +182,35 @@ fn stack16(cpu: &mut Cpu, from: &Context) -> (u16, u16) {
     if !is_flat(from) {
         return (from.seg[Seg::SS as usize], from.gpr[ESP] as u16);
     }
-    let task = super::task(cpu);
+    stack16_of(super::task(cpu), from)
+}
+
+/// `stack16` for the task `task`, whose context is `from`.
+fn stack16_of(task: &super::Task16, from: &Context) -> (u16, u16) {
+    if !is_flat(from) {
+        return (from.seg[Seg::SS as usize], from.gpr[ESP] as u16);
+    }
     let waiting = task.frames.iter().rev().find_map(|f| match f {
         Frame::To32 { ctx, .. } => Some((ctx.seg[Seg::SS as usize], ctx.gpr[ESP] as u16)),
         _ => None,
     });
     waiting.unwrap_or(task.stack16)
+}
+
+/// The 16-bit stack (SS, SP) of the task `t` as its 16-bit code left
+/// it: the processor's for the running task, else its thread's saved
+/// context's, or that of the 16-bit code waiting for the 32-bit code it
+/// called.
+pub fn task_stack16(cpu: &Cpu, t: usize) -> (u16, u16) {
+    let task = &cpu.bus.win32.win16.tasks[t];
+    let ctx = if super::current_task(cpu) == Some(t) {
+        Some(Context::of(cpu))
+    } else {
+        super::win16_ref(cpu)
+            .and_then(|p| p.threads.iter().find(|th| th.id == task.tid))
+            .map(|th| th.ctx)
+    };
+    ctx.map_or(task.stack16, |ctx| stack16_of(task, &ctx))
 }
 
 /// From 16-bit code, as a function of a system module: call the 32-bit

@@ -76,14 +76,14 @@ aspect=4:3
 #floppy_disk_speed=maximum
 
 [sound]
-# The Sound Blaster: sb16, sbpro2, sb2 or none.
+# The Sound Blaster: sb16, sbpro2, sbpro1, sb2 or none.
 #sbtype=sb16
 #sbbase=220
 #irq=7
 #dma=1
 #hdma=5
-# FM synthesizer: opl3 or opl2.
-#opl=opl3
+# FM synthesizer: auto, opl3, opl2 or dualopl2.
+#opl=auto
 # The Gravis Ultrasound, with its MIDI patches on drive X:.
 #gus=true
 # A DAC on the parallel port: none, disney (the Disney Sound Source) or

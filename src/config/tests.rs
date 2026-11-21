@@ -355,7 +355,7 @@ fn sound_section() {
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     let sb = config.sound.card().unwrap();
     assert_eq!((sb.model, sb.base, sb.irq, sb.dma8), (crate::sb::SbModel::SbPro2, 0x240, 5, 3));
-    assert!(!config.sound.opl3);
+    assert_eq!(config.sound.opl, Some(crate::opl::Chip::Opl2));
     assert_eq!(config.sound.soundfont.as_deref(), Some(Path::new("/cfg/gm.sf2")));
     assert_eq!(sb.blaster(), "A240 I5 D3 T4");
 
@@ -841,7 +841,7 @@ fn changed_settings() -> Settings {
     let sound = SoundConfig {
         sb: crate::sb::SbConfig { model: crate::sb::SbModel::SbPro2, base: 0x240, irq: 5, dma8: 3, dma16: 6 },
         sb_installed: true,
-        opl3: false,
+        opl: Some(crate::opl::Chip::DualOpl2),
         awe32rom: Some(PathBuf::from("/home/u/roms/awe32.raw")),
         awe32ram: 2048,
         soundfont: Some(PathBuf::from("/home/u/sf/General User.sf2")),

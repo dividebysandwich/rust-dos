@@ -418,8 +418,8 @@ fn minus_one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// The address of GDI32's function `name`.
-fn api(name: &str) -> u32 {
-    super::builtin::win32_address(G, name).unwrap_or_else(|| panic!("GDI32 has no {}", name))
+fn api(cpu: &Cpu, name: &str) -> u32 {
+    super::builtin::win32_address(cpu, G, name).unwrap_or_else(|| panic!("GDI32 has no {}", name))
 }
 
 /// Go on to GDI32's `name` with `args`, the 32-bit stack below `top`
@@ -432,7 +432,8 @@ fn go_at(cpu: &mut Cpu, top: u32, name: &str, args: &[u32], data: Vec<u32>) -> O
     } else {
         thunk::POST_USER
     };
-    thunk::enter32_at(cpu, ctx, top, api(name), args, post, data);
+    let target = api(cpu, name);
+    thunk::enter32_at(cpu, ctx, top, target, args, post, data);
     None
 }
 

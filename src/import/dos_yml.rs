@@ -134,7 +134,8 @@ fn apply(imported: &mut Imported, key: &str, value: &str, package: &Path) {
         "sound_card" => match lower.as_str() {
             "sb16" => imported.set("sound", "sbtype", "sb16"),
             "sb1" | "sb2" => imported.set("sound", "sbtype", "sb2"),
-            "sbpro1" | "sbpro2" => imported.set("sound", "sbtype", "sbpro2"),
+            "sbpro1" => imported.set("sound", "sbtype", "sbpro1"),
+            "sbpro2" => imported.set("sound", "sbtype", "sbpro2"),
             "none" => imported.set("sound", "sbtype", "none"),
             _ => skipped(imported),
         },

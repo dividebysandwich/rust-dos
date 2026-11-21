@@ -15,7 +15,7 @@
 //! message or yields (the Win16 lock, `State::lock`), while the Win32
 //! processes' threads go on around them.
 
-mod builtin;
+pub(crate) mod builtin;
 mod ddeml;
 pub(crate) mod comm;
 pub mod dos;
@@ -37,6 +37,7 @@ mod ole2disp;
 pub(crate) mod resource;
 pub mod task;
 pub(crate) mod thunk;
+mod typelib;
 mod user;
 
 pub use builtin::{function_name, trap_name};

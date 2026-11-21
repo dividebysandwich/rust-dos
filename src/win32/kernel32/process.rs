@@ -7,7 +7,7 @@ use crate::cpu::Cpu;
 use crate::win32::memory::{Memory, PAGE, PRIVATE, SYSTEM};
 use crate::win32::object;
 use crate::win32::task::{self, Next, Task};
-use crate::win32::{create_process_from, launcher, process};
+use crate::win32::{create_process_from, dosvm, launcher, process};
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
@@ -196,7 +196,9 @@ pub(super) fn create_process_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// process's, all its handles if `inherit`, and `startup`: a STARTUPINFOA
 /// and after it the C runtime's block that lpReserved2 points to, if
 /// there is one. The handles of the process and its main thread, and
-/// their ids; or the error.
+/// their ids; or the error. A DOS program starts once the service that
+/// called this has returned, and the caller goes on when it has ended
+/// (dosvm.rs).
 pub(crate) fn spawn(
     cpu: &mut Cpu,
     app: Option<&str>,
@@ -224,6 +226,13 @@ pub(crate) fn spawn(
     };
     let environment = environment.unwrap_or_else(|| process(cpu).environment.clone());
     let file = cpu.read_program_file(&path).ok_or(ERROR_FILE_NOT_FOUND)?;
+    if dosvm::is_program(&path, &file) {
+        // A DOS program runs in a DOS machine (dosvm.rs), once the
+        // caller's call has returned.
+        let spawned = dosvm::spawn(cpu, &path, arguments, &environment)?;
+        cpu.almanac.last_program = Some(path);
+        return Ok(handles(cpu, spawned.process, spawned.thread));
+    }
     if launcher::is_ne(&file) {
         // InstallShield's setup launcher starts its 32-bit engine in its
         // place, as from the DOS prompt (`launcher`). Windows 98's waits

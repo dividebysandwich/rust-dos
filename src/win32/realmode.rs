@@ -3,8 +3,10 @@
 //! code for its protected-mode programs: the handler of a hardware
 //! interrupt that came while a program ran (system.rs), the handler a
 //! program put in the real-mode vector table for a Win16 task's INT n
-//! (win16/dos.rs), and the code a Win16 task calls with DPMI's INT 31h
-//! AX=0300h, 0301h and 0302h (win16/dpmi.rs).
+//! (win16/dos.rs), the code a Win16 task calls with DPMI's INT 31h
+//! AX=0300h, 0301h and 0302h (win16/dpmi.rs), and DOS's EXEC of a DOS
+//! program a Windows program started, which runs until the program ends
+//! (dosvm.rs).
 //!
 //! Each goes the same way. `call` keeps what the system goes on with
 //! afterwards in a `Frame`, switches the processor to real mode with the
@@ -50,6 +52,9 @@ pub enum Kind {
     /// real-mode callback, which goes on when that returns. `ctx` is the
     /// real-mode code's.
     Callback,
+    /// DOS's EXEC of a DOS program a Windows program started: the
+    /// program that started it goes on when it ends (dosvm.rs).
+    Exec,
 }
 
 /// What the system goes on with when the code it called returns.
@@ -211,6 +216,7 @@ pub fn returned(cpu: &mut Cpu) {
             enter_user(cpu, &ctx);
         }
         Kind::Call => crate::win16::dpmi::call_returned(cpu, frame, &rm),
+        Kind::Exec => super::dosvm::ended(cpu, frame, &rm),
         Kind::Callback => unreachable!("a callback's code returned to the system"),
     }
 }
@@ -257,6 +263,7 @@ crate::state_enum!(Kind {
     Kind::Irq,
     Kind::Int,
     Kind::Call,
-    Kind::Callback
+    Kind::Callback,
+    Kind::Exec
 });
 crate::state_fields!(Frame { kind, ctx, at });
