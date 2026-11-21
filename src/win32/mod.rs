@@ -501,7 +501,7 @@ pub struct Win32 {
     /// DPNET's DirectPlay 8 objects.
     dpnet: dpnet::State,
     /// The DOS program a Windows program started (dosvm.rs).
-    pub(crate) dosvm: dosvm::State,
+    pub(crate) dosvm: crate::savestate::Since<{ dosvm::DOSVM_SAVED }, dosvm::State>,
 }
 
 impl Win32 {

@@ -257,15 +257,21 @@ fn run_prompts(
     (cpu.errorlevel, log)
 }
 
-/// A DOS program (a COM file) that writes C:\MARK.TXT and ends with 5:
-/// the file holds what INT 2Fh AX=1600h gave it (Windows' version, as a
-/// DOS box on Windows has it), then its command tail.
+/// A DOS program (a COM file) that changes to C:\SUB (if it is there),
+/// writes C:\MARK.TXT and ends with 5: the file holds what INT 2Fh
+/// AX=1600h gave it (Windows' version, as a DOS box on Windows has it),
+/// then its command tail.
 pub fn dos_marker() -> Vec<u8> {
     const NAME: u16 = 0x0140;
     const RESULT: u16 = 0x0150;
+    const SUB: u16 = 0x0160;
     let [name_lo, name_hi] = NAME.to_le_bytes();
     let [result_lo, result_hi] = RESULT.to_le_bytes();
+    let [sub_lo, sub_hi] = SUB.to_le_bytes();
     let mut code = vec![
+        0xB4, 0x3B, // mov ah,3Bh
+        0xBA, sub_lo, sub_hi, // mov dx,sub
+        0xCD, 0x21, // int 21h
         0xB8, 0x00, 0x16, // mov ax,1600h
         0xCD, 0x2F, // int 2Fh
         0xA3, result_lo, result_hi, // mov [result],ax
@@ -293,6 +299,7 @@ pub fn dos_marker() -> Vec<u8> {
     ];
     code.resize((NAME - 0x100) as usize, 0x90);
     code.extend_from_slice(b"C:\\MARK.TXT\0");
-    code.resize((RESULT - 0x100) as usize + 2, 0);
+    code.resize((SUB - 0x100) as usize, 0);
+    code.extend_from_slice(b"C:\\SUB\0");
     code
 }

@@ -304,9 +304,11 @@ fn a_program_starts_a_dos_program_and_sees_what_it_wrote() {
     // WinExec("C:\DOSPROG.COM /X"): Windows 98 runs a DOS program in a
     // DOS box, on the same drives, and WinExec gives 33 or more. The
     // built-in Windows runs it full screen while the Windows programs
-    // wait, so when WinExec returns, the file it writes is there. The
-    // program ends with 1 when it can open that file, 2 when it can't,
-    // and 10h when WinExec didn't give 33.
+    // wait, so when WinExec returns, the file it writes is there. The DOS
+    // program changes to C:\SUB, which on Windows is its DOS machine's
+    // own current directory: the program opens MARK.TXT in its own, C:\.
+    // It ends with 1 when it can open that file, 2 when it can't, and 10h
+    // when WinExec didn't give 33.
     let mut code = Code::new();
     let path_at = code.here() + 2;
     code.push_far(0).push(1).call("KERNEL", WIN_EXEC);
@@ -328,11 +330,12 @@ fn a_program_starts_a_dos_program_and_sees_what_it_wrote() {
     code.emit(b"C:\\DOSPROG.COM /X\0");
     code.patch(path_at, path);
     let mark = code.here();
-    code.emit(b"C:\\MARK.TXT\0");
+    code.emit(b"MARK.TXT\0");
     code.patch(mark_at, mark);
     let mut folder = None;
     let (exit, log) = run_with("dos_child", program(&code, CODE), |_, base| {
         fs::write(base.join("DOSPROG.COM"), dos_marker()).unwrap();
+        fs::create_dir_all(base.join("SUB")).unwrap();
         folder = Some(base.to_path_buf());
     });
     assert_eq!(exit, 1, "{log}");

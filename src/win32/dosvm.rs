@@ -39,9 +39,12 @@
 //! of its own. They need a second copy of the first megabyte and of
 //! DOS's state, switched with the processor's context, as the VMM does.
 //! The parts the DOS program can leave behind are put back here: the
-//! vector table is as it was before it started, its memory and files
-//! are freed by DOS when it ends, and the screen is the desktop again.
+//! vector table and DOS's current drive and directories are as they were
+//! before it started (on Windows 98 the DOS machine has its own), its
+//! memory and files are freed by DOS when it ends, and the screen is the
+//! desktop again.
 
+use super::boot::Directories;
 use super::realmode::{self, Frame, Kind};
 use super::{Context, EAX, EBX, EDX, ESP, ROM_SEG, object};
 use crate::cpu::{Cpu, CpuFlags};
@@ -68,6 +71,10 @@ const COMMAND_COM: &str = "Z:\\COMMAND.COM";
 /// was.
 const VECTORS: usize = 0x400;
 
+/// The W32 section's version that added the DOS program a Windows
+/// program started.
+pub const DOSVM_SAVED: u16 = 85;
+
 /// A DOS program a Windows program started.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Session {
@@ -85,6 +92,8 @@ pub struct Session {
     desktop: bool,
     /// DOS's current PSP before it started.
     psp: u16,
+    /// DOS's current drive and directories before it started.
+    directories: Directories,
 }
 
 /// The DOS program waiting for the service that started it to return,
@@ -158,7 +167,10 @@ pub fn spawn(
     }
     // A batch file runs in COMMAND.COM, as Windows 98 runs one.
     let (program, tail) = if is_batch(path) {
-        (COMMAND_COM.to_string(), format!(" /C {}{}", path, arguments))
+        (
+            COMMAND_COM.to_string(),
+            format!(" /C {}{}", path, arguments),
+        )
     } else {
         (path.to_string(), arguments.to_string())
     };
@@ -299,6 +311,7 @@ pub fn start_pending(cpu: &mut Cpu) {
         super::user32::paint::leave_desktop(cpu);
     }
     session.psp = cpu.current_psp;
+    session.directories = Directories::now(cpu);
     cpu.current_psp = cpu.bus.win32.psp;
     let (ss, sp) = realmode::host_stack(cpu);
     let block = session.block;
@@ -361,6 +374,7 @@ pub fn ended(cpu: &mut Cpu, frame: Frame, rm: &Context) {
         let _ = crate::mcb::free(&mut cpu.bus, session.block);
     });
     cpu.current_psp = session.psp;
+    super::boot::put_back(cpu, session.directories);
     cpu.bus.set_a20(true);
     let objects = &mut cpu.bus.win32.objects;
     for id in [session.process, session.thread] {
@@ -390,5 +404,6 @@ crate::state_fields!(Session {
     vectors,
     desktop,
     psp,
+    directories,
 });
 crate::state_fields!(State { pending, running });
