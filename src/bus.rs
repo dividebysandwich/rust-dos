@@ -162,6 +162,8 @@ pub struct Bus {
     pub xms: crate::xms::Xms,
     /// The expanded memory manager (INT 67h), if EMS is on.
     pub ems: Option<crate::ems::Ems>,
+    /// VCPI's pages and the PIC mapping its client set (vcpi.rs).
+    pub vcpi: crate::vcpi::Vcpi,
     /// The DPMI host (INT 2Fh AX=1687h, INT 31h) and its clients.
     pub dpmi: crate::dpmi::Dpmi,
     /// The built-in Windows (`win32`) and its running Win32 program.
