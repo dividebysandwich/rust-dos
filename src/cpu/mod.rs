@@ -1287,11 +1287,16 @@ impl Cpu {
         // them: a child that set 4 GB limits ("unreal mode") leaves them to
         // the programs after it, as Ultima VII's MAINMENU.EXE does for
         // U7.EXE, which then runs with them without setting them itself.
+        // DOS is 16-bit code and never loads FS or GS, so they stay as the
+        // child left them, selector and base included.
         if !self.pe() {
-            for seg in [Seg::ES, Seg::SS, Seg::DS, Seg::FS, Seg::GS] {
+            for seg in [Seg::ES, Seg::SS, Seg::DS] {
                 let selector = self.seg[seg as usize].selector;
                 self.seg[seg as usize] = caches[seg as usize];
                 self.load_seg_real(seg, selector);
+            }
+            for seg in [Seg::FS, Seg::GS] {
+                self.seg[seg as usize] = caches[seg as usize];
             }
         }
         self.current_psp = context.psp;
@@ -1705,7 +1710,8 @@ impl Cpu {
         crate::bios::windows_keyboard(&mut self.bus, false);
         // A system booted from a disk turned the machine off: DOS starts
         // over on it.
-        if self.bus.boot.take().is_some() {
+        let booted = self.bus.boot.take().is_some();
+        if booted {
             // What it changed on the host folders it had as disks goes
             // into them.
             for line in self.bus.disk.finish_shared_disks(true) {
@@ -1831,8 +1837,19 @@ impl Cpu {
         // Copy bytes
         self.bus.load_bytes(start_addr, &shell_code);
 
+        // A program that ended in real mode leaves the limits of its data
+        // segment registers to the shell and the programs it starts next,
+        // as on DOS, where COMMAND.COM gets control back with real-mode
+        // segment loads (see `restore_context`). A machine that was off or
+        // a program that ended in protected mode gets them reset.
+        let kept = (!booted && !self.pe()).then_some(self.seg);
         // Reset CPU State to "Boot" values
         self.reset_to_real_mode();
+        if let Some(kept) = kept {
+            for seg in [Seg::ES, Seg::SS, Seg::DS, Seg::FS, Seg::GS] {
+                self.seg[seg as usize] = kept[seg as usize];
+            }
+        }
         self.set_cs(SHELL_SEGMENT);
         self.set_ds(SHELL_SEGMENT);
         self.set_es(SHELL_SEGMENT);
