@@ -1466,10 +1466,15 @@ fn find_next_goes_on_from_the_listing_find_first_made() {
     assert_eq!(disk.host_dirs.searches.borrow().len(), 2, "one search per pattern");
 
     // Another program adds a file mid-search: the folder's time moves,
-    // and the next FindNext lists it again.
+    // and the next FindNext lists it again. The new file takes a slot
+    // after the last, as on a FAT disk, so the search finds it last.
     assert_eq!(disk.find_directory_entry(r"C:\*.*", 0, 0x16).unwrap().filename, "A.DAT");
     fs::write(root.join("AA.DAT"), b"x").unwrap();
-    assert_eq!(disk.find_directory_entry(r"C:\*.*", 1, 0x16).unwrap().filename, "AA.DAT");
+    let rest: Vec<String> = (1..)
+        .map_while(|i| disk.find_directory_entry(r"C:\*.*", i, 0x16).ok())
+        .map(|e| e.filename)
+        .collect();
+    assert_eq!(rest, ["B.DAT", "C.DAT", "LONGNA~1.TXT", "SUB", "AA.DAT"]);
 }
 
 /// A search whose attributes take the label besides other entries finds
@@ -1534,7 +1539,8 @@ fn find_next_sees_the_guest_s_changes_mid_search() {
     disk.write_file(handle, b"longer").unwrap();
     disk.close_file(handle);
     age(&root);
-    let found = disk.find_directory_entry(r"C:\*.DAT", 1, 0).unwrap();
+    // B.DAT was in slot 1, so FindNext goes on from slot 2.
+    let found = disk.find_directory_entry(r"C:\*.DAT", 2, 0).unwrap();
     assert_eq!((found.filename.as_str(), found.size), ("C.DAT", 6));
 
     // Copying what it finds into another folder, as an installer does,
@@ -1576,8 +1582,9 @@ fn a_program_deleting_each_file_it_finds_finds_them_all() {
     assert_eq!(found, names);
     disk.remove_directory(r"C:\GAMEDAT").unwrap();
 
-    // Files another program adds after the last one found are found too,
-    // and those the guest deletes before the search reaches them aren't.
+    // A file the guest deletes before the search reaches it isn't found,
+    // and a file added takes the first slot a deleted file left, as on a
+    // FAT disk, or one after the last.
     fs::create_dir(root.join("D")).unwrap();
     for name in ["A", "B", "C", "D"] {
         fs::write(root.join("D").join(name), b"x").unwrap();
@@ -1587,13 +1594,42 @@ fn a_program_deleting_each_file_it_finds_finds_them_all() {
     assert_eq!(a.filename, "A");
     disk.delete_file(r"C:\D\B").unwrap();
     fs::write(root.join("D").join("E"), b"x").unwrap();
+    fs::write(root.join("D").join("F"), b"x").unwrap();
     let rest: Vec<String> =
         std::iter::successors(disk.find_entry_from(spec, next, 0).ok(), |(_, next)| {
             disk.find_entry_from(spec, *next, 0).ok()
         })
         .map(|(entry, _)| entry.filename)
         .collect();
-    assert_eq!(rest, ["C", "D", "E"]);
+    assert_eq!(rest, ["E", "C", "D", "F"]);
+}
+
+/// DOS renames a file in its directory slot, so a search that found it
+/// doesn't find it again under its new name, and one that hasn't reached
+/// it yet finds it there.
+#[test]
+fn a_program_renaming_each_file_it_finds_finds_each_once() {
+    let root = scratch("find_next_rename");
+    for name in ["A", "B", "C", "D"] {
+        fs::write(root.join(name), b"x").unwrap();
+    }
+    let mut disk = DiskController::new(root.clone());
+    let spec = r"C:\*.*";
+    let mut found = Vec::new();
+    let mut next = 0;
+    while let Ok((entry, after)) = disk.find_entry_from(spec, next, 0) {
+        if entry.filename == "A" {
+            // Not reached yet: found under its new name.
+            disk.rename_file(r"C:\D", r"C:\0D").unwrap();
+        }
+        let to = format!(r"C:\Z{}", entry.filename);
+        disk.rename_file(&format!(r"C:\{}", entry.filename), &to)
+            .unwrap();
+        found.push(entry.filename);
+        next = after;
+        assert!(found.len() < 10, "found again: {found:?}");
+    }
+    assert_eq!(found, ["A", "B", "C", "0D"]);
 }
 
 #[test]

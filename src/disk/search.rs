@@ -517,12 +517,12 @@ impl DiskController {
 
     // INT 21h, AH=4E/4F: Find First / Find Next
     // search_spec contains the path AND the pattern e.g. "C:\GAMES\*.EXE" or "*.EXE"
-    /// Entry `search_index` of the listing of `search_spec`. Off a FAT
-    /// disk FindNext passes the same spec with the next index each call
-    /// (`find_entry_from`); on a host drive the listing FindFirst (index
-    /// 0) made is kept for it, as long as the folder doesn't change
-    /// (`HostDirCache`), rather than listing the folder again for each
-    /// entry.
+    /// The entry at or after `search_index` of the listing of
+    /// `search_spec`. Off a FAT disk FindNext passes the same spec with
+    /// the next index each call (`find_entry_from`); on a host drive the
+    /// listing FindFirst (index 0) made is kept for it, as long as the
+    /// folder doesn't change (`HostDirCache`), rather than listing the
+    /// folder again for each entry.
     pub fn find_directory_entry(
         &self,
         search_spec: &str,
@@ -534,8 +534,9 @@ impl DiskController {
     }
 
     /// `find_directory_entry`, with where the search goes on from: past
-    /// the entry, which in a host folder the guest changed mid-search
-    /// may be at another index than `search_index` (`HostDirCache::search`).
+    /// the entry, which in a host folder the guest deleted or renamed
+    /// files in mid-search may be past an empty slot
+    /// (`HostDirCache::relist`).
     fn find_listed_entry(
         &self,
         search_spec: &str,
@@ -547,11 +548,15 @@ impl DiskController {
             let entry = listed.into_iter().nth(search_index).ok_or(0x12)?;
             return Ok((entry, search_index + 1));
         };
-        let (entries, at) = self.host_dirs.search(key, search_index, || {
+        let slots = self.host_dirs.search(key, search_index, || {
             self.list_directory(search_spec, search_attr)
         })?;
-        let entry = entries.get(at).cloned().ok_or(0x12)?;
-        Ok((entry, at + 1))
+        slots
+            .iter()
+            .enumerate()
+            .skip(search_index)
+            .find_map(|(at, slot)| Some((slot.clone()?, at + 1)))
+            .ok_or(0x12)
     }
 
     /// The entry FindFirst or FindNext finds for `search_spec` at or after
@@ -559,9 +564,9 @@ impl DiskController {
     /// a slot of the directory, as in DOS: a program that deletes each
     /// file it finds (Windows 98 Setup's DELTEMP emptying its folder)
     /// doesn't make the next file move up to a slot the search has
-    /// passed. Elsewhere it counts the entries found, and a search of a
-    /// host folder the guest changed goes on after the last entry found
-    /// that is still there.
+    /// passed. A search of a host folder keeps its entries in slots the
+    /// same way (`HostDirCache::relist`). Elsewhere it counts the entries
+    /// found.
     pub fn find_entry_from(
         &self,
         search_spec: &str,
