@@ -195,6 +195,7 @@ pub static MODULES: &[&Def] = &[
     &super::ole2::OLE2,
     &super::ole2::OLE2NLS,
     &super::ole2disp::OLE2DISP,
+    &super::typelib::TYPELIB,
 ];
 
 /// The place in `MODULES` of the module named `name` ("USER",

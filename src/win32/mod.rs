@@ -13,7 +13,7 @@
 //! ExitProcess goes back to real mode and ends the DOS process with
 //! INT 21h AH=4Ch, so the shell or the program that started it goes on.
 
-mod advapi32;
+pub(crate) mod advapi32;
 pub(crate) mod boot;
 pub(crate) mod call;
 pub(crate) mod com;
