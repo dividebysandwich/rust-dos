@@ -167,13 +167,17 @@ pub(super) fn copy(
         .map(|(d, s)| (d, card_rect(&s)))
         .filter(|(_, s)| source.holds(s))
         .collect();
-    // The block goes back whatever comes of the blit. The card runs
-    // the commands queued below before anything else writes its
-    // memory (`Bus::toadforce_submit`), the next blit's block too.
-    if staged {
-        display::free(cpu, source.offset);
-    }
+    // The block goes back whatever comes of the blit: at once if the
+    // card doesn't copy, and after the commands are queued if it does,
+    // so that it stays retired until they have run (`display::free`)
+    // and the next blit's block is another.
+    let give_back = |cpu: &mut Cpu| {
+        if staged {
+            display::free(cpu, source.offset);
+        }
+    };
     if pairs.len() != blit.rects.len() {
+        give_back(cpu);
         return false;
     }
     // DirectDraw reads the whole source before it writes. The card does
@@ -187,6 +191,7 @@ pub(super) fn copy(
                 .any(|(_, s)| overlaps(dst.span(d), source.span(s)))
         });
     if unsafe_order {
+        give_back(cpu);
         return false;
     }
     let mut words = Vec::new();
@@ -194,6 +199,7 @@ pub(super) fn copy(
         encode::blt(&mut words, &dst, d, &source, s, key);
     }
     submit(cpu, blit, &words);
+    give_back(cpu);
     true
 }
 
@@ -264,7 +270,7 @@ fn stage(cpu: &mut Cpu, src: &Surface, from: &Rect, format: Format) -> Option<fo
         return None;
     }
     let pitch = width * bytes;
-    let start = display::alloc(cpu, pitch * height).ok()?;
+    let start = display::alloc_past_queue(cpu, pitch * height).ok()?;
     let words = [start, pitch, width, height, format.code()];
     let Ok(staged) = format::Surface::parse(&words, caps::BLIT_FORMATS, screen::memory_size(cpu))
     else {
@@ -274,7 +280,9 @@ fn stage(cpu: &mut Cpu, src: &Surface, from: &Rect, format: Format) -> Option<fo
     let mut data = vec![0u8; (pitch * height) as usize];
     let at = from.top as u32 * src.pitch + from.left as u32 * bytes;
     surface::read_rows(cpu, src, at, pitch as usize, &mut data);
-    screen::write(cpu, start, &data);
+    // The commands queued before don't read the block, so they can stay
+    // queued, and so can the draws around the copy.
+    screen::write_taken(cpu, start, &data);
     Some(staged)
 }
 

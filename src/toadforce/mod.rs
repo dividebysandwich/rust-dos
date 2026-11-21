@@ -141,6 +141,14 @@ pub struct ToadForce {
     /// When the oldest of them was queued, in nanoseconds of the
     /// emulated clock.
     queue_since: u64,
+    /// The ranges of card memory, start and end, that the drivers gave
+    /// back while commands were queued (`retire`): queued commands may
+    /// still read or draw there. Emptied when the queue runs. No part
+    /// of the card's state.
+    retired: Vec<(u32, u32)>,
+    /// How many times the queue ran, for a look at how the drivers'
+    /// commands are batched. No part of the card's state.
+    queue_runs: u64,
     /// The commands since the card was made, for a look at what drives
     /// it. No part of the card's state.
     counts: Counts,
@@ -212,7 +220,7 @@ crate::state_fields!(ToadForce {
     level1,
     queue,
     queue_since,
-} skip { counts, raster, gpu, capture, decoded, screen_gamma });
+} skip { counts, raster, gpu, capture, decoded, screen_gamma, retired, queue_runs });
 
 impl ToadForce {
     /// A card with `memory` bytes of card memory (one of
@@ -241,6 +249,8 @@ impl ToadForce {
             irq_up: None,
             queue: Vec::new(),
             queue_since: 0,
+            retired: Vec::new(),
+            queue_runs: 0,
             counts: Counts::default(),
             capture: capture::Slot::default(),
             decoded: [None; 2],
@@ -390,6 +400,12 @@ impl ToadForce {
     pub fn forget(&mut self) {
         self.gpu.forget();
         self.record_end();
+        // What the drivers gave back while the state's queue was filled
+        // isn't known: all of card memory may be in use by it.
+        self.retired.clear();
+        if self.queued() {
+            self.retired.push((0, self.memory));
+        }
     }
 
     /// The processor is about to write `len` bytes of `memory`, card
@@ -452,6 +468,7 @@ impl ToadForce {
             "error": self.error,
             "error_at": format!("{:X}", self.error_at),
             "bars": bars,
+            "queue_runs": self.queue_runs,
             "commands": {
                 "nop": counts.nop,
                 "fill": counts.fill,
@@ -568,7 +585,37 @@ impl ToadForce {
         // The buffer is kept for the next batch.
         words.clear();
         self.queue = words;
+        self.retired.clear();
+        self.queue_runs += 1;
         fx
+    }
+
+    /// A driver gave back the bytes `range` of card memory, start and
+    /// end. While commands are queued, they may still read or draw
+    /// there, so the range stays retired until they have run.
+    pub fn retire(&mut self, range: (u32, u32)) {
+        if self.queued() && range.0 < range.1 {
+            self.retired.push(range);
+        }
+    }
+
+    /// Whether a queued command may read or draw any of the bytes
+    /// `range` of card memory, a range a driver took after the
+    /// commands queued before it took theirs: only one that overlaps
+    /// what was given back while they were queued (`retire`) may.
+    pub fn queue_may_touch(&self, range: (u32, u32)) -> bool {
+        self.queued() && self.retired.iter().any(|r| r.0 < range.1 && range.0 < r.1)
+    }
+
+    /// How many times the queue ran (`run_queue`).
+    pub fn queue_runs(&self) -> u64 {
+        self.queue_runs
+    }
+
+    /// The ranges `retire` holds, which a driver doesn't take for a
+    /// block it writes past the queue.
+    pub fn retired(&self) -> &[(u32, u32)] {
+        &self.retired
     }
 
     /// Bring the card up to `live`: the vertical blanks that began, and
