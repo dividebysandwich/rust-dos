@@ -3707,7 +3707,30 @@ impl Bus {
         let timing = self.vga.timing();
         match self.vga.adapter {
             video::adapter::Adapter::Hercules => video::hercules::status(&timing, now),
-            _ => timing.status(now),
+            _ => {
+                let status = timing.status(now);
+                self.note_status(&timing, now, status);
+                status
+            }
+        }
+    }
+
+    /// The program read Input Status 1 as `status` at `now`, or the last
+    /// pass of a loop the idle skip skipped read it then: for the retraces
+    /// it let pass unseen (`Activity::status_read`).
+    fn note_status(&mut self, timing: &video::crt::CrtTiming, now: u64, status: u8) {
+        let retraces = timing.retraces(now);
+        let frame = timing.frame_ns();
+        self.activity.status_read(now, retraces, status & 0x08 != 0, frame);
+    }
+
+    /// For `idle`: the passes of a loop that reads port `port` (one
+    /// `idle_port` knows) were skipped up to now.
+    pub fn idle_port_skipped(&mut self, port: u16) {
+        if matches!(port, 0x3DA | 0x3BA) && self.vga.adapter != video::adapter::Adapter::Hercules {
+            let now = self.clock.now_ns();
+            let timing = self.vga.timing();
+            self.note_status(&timing, now, timing.status(now));
         }
     }
 
