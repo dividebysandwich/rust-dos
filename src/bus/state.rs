@@ -1075,6 +1075,7 @@ mod tests {
         (83, 0xE951_CEB4_D9AD_4CAC), // ExitWindowsExec's command line
         (84, 0x3A9C_D1FD_6601_1D0E), // the 16-bit OLE modules' state
         (85, 0xD065_06B4_D1EE_C645), // the DOS program a Windows program started
+        (86, 0x64E2_699F_8225_8EB3), // the DOS program's folder and lent memory
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
