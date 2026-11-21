@@ -12,7 +12,7 @@
 //!
 //! A function's id is its DLL's place in `DLLS` and its own in the DLL's
 //! table (`id`). Saved states keep the stubs in memory, so tables are only
-//! added to at their ends.
+//! added to at their ends, which `stub_tables.rs` holds them to.
 //!
 //! A few functions are x86 code instead (`Conv::Code`), as Windows has
 //! them: the code goes after the stubs and vtables, the export points at
@@ -63,6 +63,11 @@ impl Conv {
             Conv::CodeVars(code, fixups) => Some((code, fixups)),
             _ => None,
         }
+    }
+
+    /// Whether the function's stub is a trap, not a jump to its code.
+    pub fn is_trap(self) -> bool {
+        self.code().is_none()
     }
 }
 

@@ -275,7 +275,7 @@ fn short_name(cpu: &Cpu, dir: &str, name: &str) -> String {
 
 /// The path `path` with each name its 8.3 one, as GetShortPathNameA makes
 /// it: a relative path stays relative.
-fn short_path(cpu: &Cpu, path: &str) -> String {
+pub(crate) fn short_path(cpu: &Cpu, path: &str) -> String {
     let path = dos_path(path);
     let bytes = path.as_bytes();
     let prefix_len = match bytes {

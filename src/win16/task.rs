@@ -985,7 +985,9 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
     // gave: full, with backslashes (D:/METAL.EXE is D:\METAL.EXE), which
     // GetModuleFileName gives and the module's DLLs are looked for by.
     let path = cpu.bus.disk.qualify_path(&path).unwrap_or(path);
-    if pe::is_pe(&file) {
+    // A DOS program starts in a DOS machine, as CreateProcessA starts
+    // one (win32/dosvm.rs).
+    if pe::is_pe(&file) || crate::win32::dosvm::is_program(&path, &file) {
         return exec_win32(cpu, &path, arguments, show, environment);
     }
     match spawn(cpu, &path, arguments, show, parent, environment) {
@@ -1005,10 +1007,11 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
     }
 }
 
-/// `exec` of the Win32 program at `path`: as on Windows 98, a process of
-/// its own, which runs beside the Win16 tasks, as the Win32 WinExec
-/// starts it. 33 once it started, as Wine's WinExec16 gives for one, or
-/// the error.
+/// `exec` of the Win32 or DOS program at `path`: as on Windows 98, a
+/// process of its own, which runs beside the Win16 tasks, as the Win32
+/// WinExec starts it. 33 once it started, as Wine's WinExec16 gives for
+/// one, or the error. 33 is no module's handle, so GetModuleUsage of it
+/// gives 0.
 fn exec_win32(
     cpu: &mut Cpu,
     path: &str,

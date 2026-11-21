@@ -23,10 +23,10 @@
 //! Copyright 2003 Jon Griffiths
 //! Copyright 2005 Daniel Remenak
 
-use super::builtin::{Def, missing, rust, variable};
+use super::builtin::{Def, cdecl, missing, rust, variable};
 use super::ole2::{self, call_all, call_method, guid};
 use crate::cpu::Cpu;
-use crate::win32::com::{E_INVALIDARG, E_OUTOFMEMORY, S_FALSE, S_OK};
+use crate::win32::com::{E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, S_FALSE, S_OK};
 use crate::win32::oleaut32::variant::{Out, Val, change, format_g};
 
 const VT_EMPTY: u16 = 0;
@@ -61,6 +61,19 @@ const FADF_VARIANT: u16 = 0x0800;
 /// A SAFEARRAY's bytes before its bounds, and each bound's.
 const SA_HEADER: u32 = 16;
 const SA_BOUND: u32 = 8;
+
+const IID_IERRORINFO: [u8; 16] = guid(
+    0x1CF2_B120,
+    0x547D,
+    0x101B,
+    [0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1, 0x19],
+);
+const IID_ICREATEERRORINFO: [u8; 16] = guid(
+    0x22F0_3340,
+    0x547D,
+    0x101B,
+    [0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1, 0x19],
+);
 
 pub static OLE2DISP: Def = Def {
     name: "OLE2DISP",
@@ -187,27 +200,9 @@ pub static OLE2DISP: Def = Def {
         rust("SafeArrayPtrOfIndex", 109, "lpp", safe_array_ptr_of_index),
         rust("SetErrorInfo", 110, "ll", set_error_info),
         rust("GetErrorInfo", 111, "lp", get_error_info),
-        missing("CreateErrorInfo", 112),
-        variable(
-            "_IID_IErrorInfo",
-            113,
-            &guid(
-                0x1CF2_B120,
-                0x547D,
-                0x101B,
-                [0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1, 0x19],
-            ),
-        ),
-        variable(
-            "_IID_ICreateErrorInfo",
-            114,
-            &guid(
-                0x22F0_3340,
-                0x547D,
-                0x101B,
-                [0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1, 0x19],
-            ),
-        ),
+        rust("CreateErrorInfo", 112, "p", create_error_info),
+        variable("_IID_IErrorInfo", 113, &IID_IERRORINFO),
+        variable("_IID_ICreateErrorInfo", 114, &IID_ICREATEERRORINFO),
         variable(
             "_IID_ISupportErrorInfo",
             115,
@@ -237,6 +232,38 @@ pub static OLE2DISP: Def = Def {
         rust("VarBoolFromUI1", 132, "wp", var_from),
         // No object of the program's can be unloaded while it runs.
         rust("DllCanUnloadNow", 133, "", s_false),
+        // The error object's methods, which aren't exported.
+        cdecl(
+            "ICreateErrorInfo_QueryInterface",
+            0,
+            "lpp",
+            cei_query_interface,
+        ),
+        cdecl("ICreateErrorInfo_AddRef", 0, "l", cei_add_ref),
+        cdecl("ICreateErrorInfo_Release", 0, "l", cei_release),
+        cdecl("ICreateErrorInfo_SetGUID", 0, "lp", cei_set_guid),
+        cdecl("ICreateErrorInfo_SetSource", 0, "lp", cei_set_source),
+        cdecl(
+            "ICreateErrorInfo_SetDescription",
+            0,
+            "lp",
+            cei_set_description,
+        ),
+        cdecl("ICreateErrorInfo_SetHelpFile", 0, "lp", cei_set_help_file),
+        cdecl(
+            "ICreateErrorInfo_SetHelpContext",
+            0,
+            "ll",
+            cei_set_help_context,
+        ),
+        cdecl("IErrorInfo_QueryInterface", 0, "lpp", ei_query_interface),
+        cdecl("IErrorInfo_AddRef", 0, "l", ei_add_ref),
+        cdecl("IErrorInfo_Release", 0, "l", ei_release),
+        cdecl("IErrorInfo_GetGUID", 0, "lp", ei_get_guid),
+        cdecl("IErrorInfo_GetSource", 0, "lp", ei_get_source),
+        cdecl("IErrorInfo_GetDescription", 0, "lp", ei_get_description),
+        cdecl("IErrorInfo_GetHelpFile", 0, "lp", ei_get_help_file),
+        cdecl("IErrorInfo_GetHelpContext", 0, "lp", ei_get_help_context),
     ],
     library: true,
 };
@@ -1308,6 +1335,262 @@ fn get_error_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let info = std::mem::take(&mut ole2::this_task_or_new(cpu).error_info);
     super::write_32(cpu, args[1], info);
     Some(if info == 0 { S_FALSE } else { S_OK })
+}
+
+// The error object CreateErrorInfo makes. One block holds both its
+// interfaces' vtable pointers, ICreateErrorInfo's first and IErrorInfo's
+// after it, its count of references, the GUID, the source, description
+// and help file as BSTRs, the help context, then the two vtables.
+
+const EI_ERROR_INFO: u32 = 4;
+const EI_REFS: u32 = 8;
+const EI_GUID: u32 = 10;
+const EI_SOURCE: u32 = 26;
+const EI_DESCRIPTION: u32 = 30;
+const EI_HELP_FILE: u32 = 34;
+const EI_HELP_CONTEXT: u32 = 38;
+const EI_FIELDS: u32 = 42;
+
+const CREATE_ERROR_INFO_METHODS: [&str; 8] = [
+    "ICreateErrorInfo_QueryInterface",
+    "ICreateErrorInfo_AddRef",
+    "ICreateErrorInfo_Release",
+    "ICreateErrorInfo_SetGUID",
+    "ICreateErrorInfo_SetSource",
+    "ICreateErrorInfo_SetDescription",
+    "ICreateErrorInfo_SetHelpFile",
+    "ICreateErrorInfo_SetHelpContext",
+];
+
+const ERROR_INFO_METHODS: [&str; 8] = [
+    "IErrorInfo_QueryInterface",
+    "IErrorInfo_AddRef",
+    "IErrorInfo_Release",
+    "IErrorInfo_GetGUID",
+    "IErrorInfo_GetSource",
+    "IErrorInfo_GetDescription",
+    "IErrorInfo_GetHelpFile",
+    "IErrorInfo_GetHelpContext",
+];
+
+/// CreateErrorInfo(ppcerrinfo): a new error object, by its
+/// ICreateErrorInfo, with one reference.
+fn create_error_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let out = args[0];
+    if out == 0 {
+        return Some(E_INVALIDARG);
+    }
+    super::write_32(cpu, out, 0);
+    let Some(module) = super::builtin::find("OLE2DISP") else {
+        return Some(E_OUTOFMEMORY);
+    };
+    let methods = CREATE_ERROR_INFO_METHODS.len() as u32;
+    let size = EI_FIELDS + 8 * methods;
+    let p = ole2::alloc(cpu, size);
+    let at = super::linear(cpu, p);
+    if at == 0 {
+        return Some(E_OUTOFMEMORY);
+    }
+    super::poke(cpu, at, &vec![0; size as usize]);
+    let vtables = [
+        (0, EI_FIELDS, &CREATE_ERROR_INFO_METHODS),
+        (EI_ERROR_INFO, EI_FIELDS + 4 * methods, &ERROR_INFO_METHODS),
+    ];
+    for (place, vtable, names) in vtables {
+        super::write_32(cpu, at + place, p + vtable);
+        for (i, name) in names.iter().enumerate() {
+            let stub = super::builtin::stub_address(cpu, module, name).unwrap_or(0);
+            super::write_32(cpu, at + vtable + 4 * i as u32, stub);
+        }
+    }
+    super::write_16(cpu, at + EI_REFS, 1);
+    super::write_32(cpu, out, p);
+    Some(S_OK)
+}
+
+/// The error object's block, its 16:16 address and its linear one, from
+/// the interface pointer `this`: ICreateErrorInfo's if `error_info` is
+/// false, else IErrorInfo's.
+fn error_object(cpu: &Cpu, this: u32, error_info: bool) -> (u32, u32) {
+    let p = if error_info {
+        this.wrapping_sub(EI_ERROR_INFO)
+    } else {
+        this
+    };
+    (p, super::linear(cpu, p))
+}
+
+fn error_query_interface(cpu: &mut Cpu, args: &[u32], error_info: bool) -> Option<u32> {
+    let [this, iid, out] = args[..] else {
+        unreachable!()
+    };
+    if out == 0 {
+        return Some(E_INVALIDARG);
+    }
+    let (p, at) = error_object(cpu, this, error_info);
+    let iid = ole2::read_guid(cpu, iid);
+    let found = if iid == ole2::ole_guid(0) || iid == IID_ICREATEERRORINFO {
+        Some(p)
+    } else if iid == IID_IERRORINFO {
+        Some(p + EI_ERROR_INFO)
+    } else {
+        None
+    };
+    let Some(found) = found else {
+        super::write_32(cpu, out, 0);
+        return Some(E_NOINTERFACE);
+    };
+    let refs = super::read_16(cpu, at + EI_REFS).saturating_add(1);
+    super::write_16(cpu, at + EI_REFS, refs);
+    super::write_32(cpu, out, found);
+    Some(S_OK)
+}
+
+fn error_add_ref(cpu: &mut Cpu, this: u32, error_info: bool) -> Option<u32> {
+    let (_, at) = error_object(cpu, this, error_info);
+    let refs = super::read_16(cpu, at + EI_REFS).saturating_add(1);
+    super::write_16(cpu, at + EI_REFS, refs);
+    Some(refs as u32)
+}
+
+/// Release: the last reference frees the strings and the object.
+fn error_release(cpu: &mut Cpu, this: u32, error_info: bool) -> Option<u32> {
+    let (p, at) = error_object(cpu, this, error_info);
+    let refs = super::read_16(cpu, at + EI_REFS).saturating_sub(1);
+    super::write_16(cpu, at + EI_REFS, refs);
+    if refs == 0 {
+        for field in [EI_SOURCE, EI_DESCRIPTION, EI_HELP_FILE] {
+            free_bstr(cpu, super::read_32(cpu, at + field));
+        }
+        ole2::free(cpu, p);
+    }
+    Some(refs as u32)
+}
+
+fn cei_query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    error_query_interface(cpu, args, false)
+}
+
+fn cei_add_ref(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    error_add_ref(cpu, args[0], false)
+}
+
+fn cei_release(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    error_release(cpu, args[0], false)
+}
+
+fn ei_query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    error_query_interface(cpu, args, true)
+}
+
+fn ei_add_ref(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    error_add_ref(cpu, args[0], true)
+}
+
+fn ei_release(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    error_release(cpu, args[0], true)
+}
+
+/// SetGUID(rguid).
+fn cei_set_guid(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (_, at) = error_object(cpu, args[0], false);
+    let guid = ole2::read_guid(cpu, args[1]);
+    super::poke(cpu, at + EI_GUID, &guid);
+    Some(S_OK)
+}
+
+/// SetSource, SetDescription and SetHelpFile(sz): a copy of the string
+/// in place of the one before, NULL for none.
+fn cei_set_string(cpu: &mut Cpu, args: &[u32], field: u32) -> Option<u32> {
+    let (_, at) = error_object(cpu, args[0], false);
+    let new = if args[1] == 0 {
+        0
+    } else {
+        let text = super::string_bytes(cpu, args[1], 0xFFF0);
+        match alloc_bstr(cpu, &text) {
+            0 => return Some(E_OUTOFMEMORY),
+            s => s,
+        }
+    };
+    free_bstr(cpu, super::read_32(cpu, at + field));
+    super::write_32(cpu, at + field, new);
+    Some(S_OK)
+}
+
+fn cei_set_source(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    cei_set_string(cpu, args, EI_SOURCE)
+}
+
+fn cei_set_description(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    cei_set_string(cpu, args, EI_DESCRIPTION)
+}
+
+fn cei_set_help_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    cei_set_string(cpu, args, EI_HELP_FILE)
+}
+
+/// SetHelpContext(dwHelpContext).
+fn cei_set_help_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (_, at) = error_object(cpu, args[0], false);
+    super::write_32(cpu, at + EI_HELP_CONTEXT, args[1]);
+    Some(S_OK)
+}
+
+/// GetGUID(pguid).
+fn ei_get_guid(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[1] == 0 {
+        return Some(E_INVALIDARG);
+    }
+    let (_, at) = error_object(cpu, args[0], true);
+    let guid = ole2::read_guid(cpu, at + EI_GUID);
+    super::poke(cpu, args[1], &guid);
+    Some(S_OK)
+}
+
+/// GetSource, GetDescription and GetHelpFile(pbstr): a copy of the
+/// string, which the caller frees, NULL for none.
+fn ei_get_string(cpu: &mut Cpu, args: &[u32], field: u32) -> Option<u32> {
+    if args[1] == 0 {
+        return Some(E_INVALIDARG);
+    }
+    let (_, at) = error_object(cpu, args[0], true);
+    let s = super::read_32(cpu, at + field);
+    let copy = if s == 0 {
+        0
+    } else {
+        match alloc_bstr(cpu, &bstr_bytes(cpu, s)) {
+            0 => {
+                super::write_32(cpu, args[1], 0);
+                return Some(E_OUTOFMEMORY);
+            }
+            copy => copy,
+        }
+    };
+    super::write_32(cpu, args[1], copy);
+    Some(S_OK)
+}
+
+fn ei_get_source(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    ei_get_string(cpu, args, EI_SOURCE)
+}
+
+fn ei_get_description(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    ei_get_string(cpu, args, EI_DESCRIPTION)
+}
+
+fn ei_get_help_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    ei_get_string(cpu, args, EI_HELP_FILE)
+}
+
+/// GetHelpContext(pdwHelpContext).
+fn ei_get_help_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[1] == 0 {
+        return Some(E_INVALIDARG);
+    }
+    let (_, at) = error_object(cpu, args[0], true);
+    let context = super::read_32(cpu, at + EI_HELP_CONTEXT);
+    super::write_32(cpu, args[1], context);
+    Some(S_OK)
 }
 
 #[cfg(test)]
