@@ -500,7 +500,7 @@ pub fn ft_prolog(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         return None;
     }
     let next = crate::win32::seh::handlers(cpu);
-    let handler = crate::win32::kernel32::address_of("FlatThunkHandler");
+    let handler = crate::win32::kernel32::address_of(cpu, "FlatThunkHandler");
     for (at, value) in [
         (0, cpu.ebp()),
         (FT_EBX, cpu.ebx()),
@@ -662,7 +662,7 @@ pub fn ft_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if flags & 6 != 0 {
         return Some(1);
     }
-    let unwind = crate::win32::kernel32::address_of("RtlUnwind");
+    let unwind = crate::win32::kernel32::address_of(cpu, "RtlUnwind");
     let resume = crate::win32::call::here(cpu);
     let then = crate::win32::call::FT_UNWOUND;
     if !crate::win32::call::call(cpu, unwind, &[frame, 0, 0, 0], then, resume, vec![frame]) {
@@ -958,7 +958,7 @@ fn ensure_client(cpu: &mut Cpu, pid: u32) -> Option<usize> {
             m.name.split('.').next().unwrap_or("WIN32").to_string()
         });
     let ctx = Context {
-        eip: crate::win32::kernel32::address_of("Win16Serve"),
+        eip: crate::win32::kernel32::address_of(cpu, "Win16Serve"),
         eflags: 0x0202,
         seg: [
             crate::win32::system::DATA3,
@@ -1323,8 +1323,8 @@ fn connect(cpu: &mut Cpu, c: usize) -> bool {
         let qt = request.data32.wrapping_add(word(&data32, 0x1C));
         let ft = request.data32.wrapping_add(word(&data32, 0x20));
         let ok = write(cpu, pid, request.data32 + 8, &table.to_le_bytes())
-            && write(cpu, pid, qt, &qt_code(table))
-            && write(cpu, pid, ft, &ft_code(table));
+            && write(cpu, pid, qt, &qt_code(cpu, table))
+            && write(cpu, pid, ft, &ft_code(cpu, table));
         if !ok {
             return fail(cpu, "its thunk data can't be written");
         }
@@ -1353,22 +1353,22 @@ fn connect(cpu: &mut Cpu, c: usize) -> bool {
 /// as Windows 95 writes it: the target's 16:16 address from the 16-bit
 /// table at `table`, by the number the thunk keeps at EBP - 4, into EDX,
 /// then on to QT_Thunk.
-fn qt_code(table: u32) -> Vec<u8> {
+fn qt_code(cpu: &Cpu, table: u32) -> Vec<u8> {
     let mut code = vec![0x33, 0xC9, 0x8A, 0x4D, 0xFC, 0x8B, 0x14, 0x8D];
     code.extend_from_slice(&table.to_le_bytes());
     code.push(0xB8);
-    code.extend_from_slice(&crate::win32::kernel32::address_of("QT_Thunk").to_le_bytes());
+    code.extend_from_slice(&crate::win32::kernel32::address_of(cpu, "QT_Thunk").to_le_bytes());
     code.extend_from_slice(&[0xFF, 0xE0]);
     code
 }
 
 /// The code ThunkConnect32 writes for the FT_Prolog thunks: the target,
 /// by the number in CL, into EDX, then on to FT_Prolog.
-fn ft_code(table: u32) -> Vec<u8> {
+fn ft_code(cpu: &Cpu, table: u32) -> Vec<u8> {
     let mut code = vec![0x0F, 0xB6, 0xD1, 0x8B, 0x14, 0x95];
     code.extend_from_slice(&table.to_le_bytes());
     code.push(0x68);
-    code.extend_from_slice(&crate::win32::kernel32::address_of("FT_Prolog").to_le_bytes());
+    code.extend_from_slice(&crate::win32::kernel32::address_of(cpu, "FT_Prolog").to_le_bytes());
     code.push(0xC3);
     code
 }

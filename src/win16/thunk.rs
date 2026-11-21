@@ -236,7 +236,7 @@ pub fn enter32_at(
     data: Vec<u32>,
 ) {
     let esp = top - 4 * (args.len() as u32 + 1);
-    let mut words = vec![crate::win32::kernel32::win16_return_address()];
+    let mut words = vec![crate::win32::kernel32::win16_return_address(cpu)];
     words.extend_from_slice(args);
     for (i, &word) in words.iter().enumerate() {
         cpu.bus.guest_write_32(esp + 4 * i as u32, word);

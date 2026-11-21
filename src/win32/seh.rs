@@ -647,7 +647,7 @@ fn push_guard(cpu: &mut Cpu, handler: &str, frame: u32) -> bool {
         return false;
     }
     let next = handlers(cpu);
-    let handler = super::kernel32::address_of(handler);
+    let handler = super::kernel32::address_of(cpu, handler);
     cpu.bus.guest_write_32(at, next);
     cpu.bus.guest_write_32(at + 4, handler);
     cpu.bus.guest_write_32(at + GUARD_ESTABLISHER, frame);

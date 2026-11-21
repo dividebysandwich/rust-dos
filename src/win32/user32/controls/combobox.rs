@@ -314,9 +314,9 @@ impl Ctx {
         run(cpu, COMBOBOX, out, result as u32)
     }
 
-    fn notify(&mut self, code: u32) {
+    fn notify(&mut self, cpu: &Cpu, code: u32) {
         let wp = self.id | code << 16;
-        self.out.send(self.c.owner, WM_COMMAND, wp, self.hwnd);
+        self.out.send(cpu, self.c.owner, WM_COMMAND, wp, self.hwnd);
     }
 
     fn enabled(&self, cpu: &mut Cpu) -> bool {
@@ -326,28 +326,28 @@ impl Ctx {
     }
 
     /// Clear the state's bits `bits` after the calls before.
-    fn clear_after(&mut self, bits: u32) {
+    fn clear_after(&mut self, cpu: &Cpu, bits: u32) {
         if bits != 0 {
-            self.out.send(self.hwnd, CBM_CLEAR, bits, 0);
+            self.out.send(cpu, self.hwnd, CBM_CLEAR, bits, 0);
         }
     }
 
     /// Invalidate `r` of the combo box, or all of it.
-    fn invalidate(&mut self, r: Option<Rect>) {
+    fn invalidate(&mut self, cpu: &Cpu, r: Option<Rect>) {
         match r {
             Some(r) => {
                 self.out.write(SCRATCH_DATA, &rect_words(r));
                 let args = [self.hwnd, SCRATCH_DATA, 1];
-                self.out.call_with("InvalidateRect", &args, 2, false);
+                self.out.call_with(cpu, "InvalidateRect", &args, 2, false);
             }
-            None => self.out.call("InvalidateRect", &[self.hwnd, 0, 1]),
+            None => self.out.call(cpu, "InvalidateRect", &[self.hwnd, 0, 1]),
         }
     }
 
-    fn repaint_button(&mut self) {
+    fn repaint_button(&mut self, cpu: &Cpu) {
         let r = self.c.button_rect;
-        self.invalidate(Some(r));
-        self.out.call("UpdateWindow", &[self.hwnd]);
+        self.invalidate(cpu, Some(r));
+        self.out.call(cpu, "UpdateWindow", &[self.hwnd]);
     }
 
     // The layout.
@@ -399,36 +399,38 @@ impl Ctx {
         let w = user(cpu).window(self.hwnd).map_or(0, |w| w.rect.width());
         let flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE;
         self.out.call(
+            cpu,
             "SetWindowPos",
             &[self.hwnd, 0, 0, 0, w as u32, h as u32, flags],
         );
     }
 
     /// CBResetPos: the edit and the list where the placement says.
-    fn reset_pos(&mut self, redraw: bool) {
+    fn reset_pos(&mut self, cpu: &Cpu, redraw: bool) {
         let drop = self.c.kind() != CBS_SIMPLE;
         let flags = SWP_NOZORDER | SWP_NOACTIVATE | if drop { SWP_NOREDRAW } else { 0 };
         if self.c.state & CBF_EDIT != 0 {
             let args = rect_pos(self.c.edit, self.c.text_rect, flags);
-            self.out.call("SetWindowPos", &args);
+            self.out.call(cpu, "SetWindowPos", &args);
         }
         let args = rect_pos(self.c.list, self.c.dropped_rect, flags);
-        self.out.call("SetWindowPos", &args);
+        self.out.call(cpu, "SetWindowPos", &args);
         if drop {
             if self.c.state & CBF_DROPPED != 0 {
                 self.c.state &= !CBF_DROPPED;
-                self.out.call("ShowWindow", &[self.c.list, SW_HIDE]);
+                self.out.call(cpu, "ShowWindow", &[self.c.list, SW_HIDE]);
             }
             if redraw && self.c.state & CBF_NOREDRAW == 0 {
                 let flags = RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW;
-                self.out.call("RedrawWindow", &[self.hwnd, 0, 0, flags]);
+                self.out
+                    .call(cpu, "RedrawWindow", &[self.hwnd, 0, 0, flags]);
             }
         }
     }
 
     fn size(&mut self, cpu: &mut Cpu, redraw: bool) {
         self.calc_placement(cpu);
-        self.reset_pos(redraw);
+        self.reset_pos(cpu, redraw);
     }
 
     /// Lay out again after the text area's height changed.
@@ -464,13 +466,14 @@ impl Ctx {
         };
         let at = index.max(0) as u32;
         self.out.send(
+            cpu,
             list,
             LB_SETCURSEL,
             if select { index as u32 } else { u32::MAX },
             0,
         );
-        self.out.send(list, LB_SETCARETINDEX, at, 0);
-        self.out.send(list, LB_SETTOPINDEX, at, 0);
+        self.out.send(cpu, list, LB_SETCARETINDEX, at, 0);
+        self.out.send(cpu, list, LB_SETTOPINDEX, at, 0);
         index
     }
 
@@ -484,7 +487,7 @@ impl Ctx {
         let calls = edit::set_window_text(cpu, self.c.edit, text);
         self.out.append(calls);
         // What was set before stays set.
-        self.clear_after(bits & !had);
+        self.clear_after(cpu, bits & !had);
     }
 
     /// CBUpdateEdit: the list's item `index` into the edit.
@@ -498,7 +501,7 @@ impl Ctx {
             self.set_edit_text(cpu, &text);
         }
         if self.c.state & CBF_FOCUSED != 0 {
-            self.out.send(self.c.edit, EM_SETSEL, 0, u32::MAX);
+            self.out.send(cpu, self.c.edit, EM_SETSEL, 0, u32::MAX);
         }
     }
 
@@ -507,7 +510,7 @@ impl Ctx {
     /// CBDropDown: show the list below (or above) the combo box. With
     /// `self_capture`, the combo box has just asked for the capture.
     fn drop_down(&mut self, cpu: &mut Cpu, self_capture: bool) {
-        self.notify(CBN_DROPDOWN);
+        self.notify(cpu, CBN_DROPDOWN);
         self.c.state |= CBF_DROPPED;
         let list = self.c.list;
         if self.c.kind() == CBS_DROPDOWN {
@@ -518,9 +521,14 @@ impl Ctx {
             }
         } else {
             self.c.dropped_index = listbox::cur_sel(cpu, list);
-            self.out
-                .send(list, LB_SETTOPINDEX, self.c.dropped_index.max(0) as u32, 0);
-            self.out.send(list, LB_CARETON, 0, 0);
+            self.out.send(
+                cpu,
+                list,
+                LB_SETTOPINDEX,
+                self.c.dropped_index.max(0) as u32,
+                0,
+            );
+            self.out.send(cpu, list, LB_CARETON, 0, 0);
         }
         let state = user(cpu);
         let mut rect = state.screen_rect(self.hwnd);
@@ -555,28 +563,29 @@ impl Ctx {
             height as u32,
             SWP_NOACTIVATE | SWP_SHOWWINDOW,
         ];
-        self.out.call("SetWindowPos", &args);
+        self.out.call(cpu, "SetWindowPos", &args);
         if self.c.state & CBF_NOREDRAW == 0 {
             let flags = RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_NOCHILDREN;
-            self.out.call("RedrawWindow", &[self.hwnd, 0, 0, flags]);
+            self.out
+                .call(cpu, "RedrawWindow", &[self.hwnd, 0, 0, flags]);
         }
-        self.out.call("EnableWindow", &[list, 1]);
+        self.out.call(cpu, "EnableWindow", &[list, 1]);
         if !self_capture && capture != self.hwnd {
-            self.out.call("SetCapture", &[list]);
+            self.out.call(cpu, "SetCapture", &[list]);
         }
     }
 
     /// CBRollUp: hide the list, the selection `ok` or not.
     fn roll_up(&mut self, cpu: &mut Cpu, ok: bool, button: bool) {
-        self.notify(if ok { CBN_SELENDOK } else { CBN_SELENDCANCEL });
+        self.notify(cpu, if ok { CBN_SELENDOK } else { CBN_SELENDCANCEL });
         if self.c.kind() == CBS_SIMPLE || self.c.state & CBF_DROPPED == 0 {
             return;
         }
         self.c.state &= !CBF_DROPPED;
         let list = self.c.list;
-        self.out.call("ShowWindow", &[list, SW_HIDE]);
+        self.out.call(cpu, "ShowWindow", &[list, SW_HIDE]);
         if user(cpu).input.capture == list {
-            self.out.call("ReleaseCapture", &[]);
+            self.out.call(cpu, "ReleaseCapture", &[]);
         }
         let mut button = button;
         let rect = if self.c.kind() == CBS_DROPDOWN {
@@ -594,9 +603,9 @@ impl Ctx {
             self.out.write(SCRATCH_DATA, &rect_words(rect));
             let flags = RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_NOCHILDREN;
             let args = [self.hwnd, SCRATCH_DATA, 0, flags];
-            self.out.call_with("RedrawWindow", &args, 2, false);
+            self.out.call_with(cpu, "RedrawWindow", &args, 2, false);
         }
-        self.notify(CBN_CLOSEUP);
+        self.notify(cpu, CBN_CLOSEUP);
     }
 
     fn flip(&mut self, cpu: &mut Cpu, ok: bool, button: bool) {
@@ -609,18 +618,18 @@ impl Ctx {
 
     // The focus.
 
-    fn set_focus(&mut self) {
+    fn set_focus(&mut self, cpu: &Cpu) {
         if self.c.state & CBF_FOCUSED != 0 {
             return;
         }
         if self.c.kind() == CBS_DROPDOWNLIST {
-            self.out.send(self.c.list, LB_CARETON, 0, 0);
+            self.out.send(cpu, self.c.list, LB_CARETON, 0, 0);
         }
         if self.c.state & CBF_EDIT == 0 {
             let r = self.c.text_rect;
-            self.invalidate(Some(r));
+            self.invalidate(cpu, Some(r));
         }
-        self.notify(CBN_SETFOCUS);
+        self.notify(cpu, CBN_SETFOCUS);
         self.c.state |= CBF_FOCUSED;
     }
 
@@ -630,14 +639,14 @@ impl Ctx {
         }
         self.roll_up(cpu, false, true);
         if self.c.kind() == CBS_DROPDOWNLIST {
-            self.out.send(self.c.list, LB_CARETOFF, 0, 0);
+            self.out.send(cpu, self.c.list, LB_CARETOFF, 0, 0);
         }
         self.c.state &= !CBF_FOCUSED;
         if self.c.state & CBF_EDIT == 0 {
             let r = self.c.text_rect;
-            self.invalidate(Some(r));
+            self.invalidate(cpu, Some(r));
         }
-        self.notify(CBN_KILLFOCUS);
+        self.notify(cpu, CBN_KILLFOCUS);
     }
 
     // Notifications from the edit and the list.
@@ -646,7 +655,7 @@ impl Ctx {
         let code = wp >> 16;
         if self.c.state & CBF_EDIT != 0 && from == self.c.edit {
             match code {
-                EN_SETFOCUS => self.set_focus(),
+                EN_SETFOCUS => self.set_focus(cpu),
                 EN_KILLFOCUS => self.kill_focus(cpu),
                 EN_CHANGE => {
                     if self.c.state & CBF_NOLBSELECT != 0 {
@@ -656,39 +665,39 @@ impl Ctx {
                         self.update_lbox(cpu, dropped);
                     }
                     if self.c.state & CBF_NOEDITNOTIFY == 0 {
-                        self.notify(CBN_EDITCHANGE);
+                        self.notify(cpu, CBN_EDITCHANGE);
                     }
                 }
                 EN_UPDATE => {
                     if self.c.state & CBF_NOEDITNOTIFY == 0 {
-                        self.notify(CBN_EDITUPDATE);
+                        self.notify(cpu, CBN_EDITUPDATE);
                     }
                 }
                 // EN_ERRSPACE.
-                0x0500 => self.notify(CBN_ERRSPACE),
+                0x0500 => self.notify(cpu, CBN_ERRSPACE),
                 _ => {}
             }
         } else if from == self.c.list {
             match code {
-                LBN_ERRSPACE => self.notify(CBN_ERRSPACE),
-                LBN_DBLCLK => self.notify(CBN_DBLCLK),
+                LBN_ERRSPACE => self.notify(cpu, CBN_ERRSPACE),
+                LBN_DBLCLK => self.notify(cpu, CBN_DBLCLK),
                 LBN_SELCHANGE | LBN_SELCANCEL => {
                     if self.c.state & CBF_NOROLLUP == 0 {
                         self.roll_up(cpu, code == LBN_SELCHANGE, true);
                     } else {
                         self.c.state &= !CBF_NOROLLUP;
                     }
-                    self.notify(CBN_SELCHANGE);
+                    self.notify(cpu, CBN_SELCHANGE);
                     if code == LBN_SELCHANGE {
                         if self.c.state & CBF_EDIT != 0 {
                             let index = listbox::cur_sel(cpu, self.c.list);
                             self.c.state |= CBF_NOLBSELECT;
                             self.update_edit(cpu, index);
-                            self.out.send(self.c.edit, EM_SETSEL, 0, u32::MAX);
+                            self.out.send(cpu, self.c.edit, EM_SETSEL, 0, u32::MAX);
                         } else {
                             let r = self.c.text_rect;
-                            self.invalidate(Some(r));
-                            self.out.call("UpdateWindow", &[self.hwnd]);
+                            self.invalidate(cpu, Some(r));
+                            self.out.call(cpu, "UpdateWindow", &[self.hwnd]);
                         }
                     }
                 }
@@ -713,15 +722,15 @@ impl Ctx {
             self.roll_up(cpu, true, false);
             if self.c.state & CBF_CAPTURE != 0 {
                 self.c.state &= !CBF_CAPTURE;
-                self.out.call("ReleaseCapture", &[]);
+                self.out.call(cpu, "ReleaseCapture", &[]);
             }
         } else {
             self.c.state |= CBF_CAPTURE;
-            self.out.call("SetCapture", &[self.hwnd]);
+            self.out.call(cpu, "SetCapture", &[self.hwnd]);
             self.drop_down(cpu, true);
         }
         if button {
-            self.repaint_button();
+            self.repaint_button(cpu);
         }
     }
 
@@ -734,15 +743,15 @@ impl Ctx {
                     let had = self.c.state & CBF_NOLBSELECT;
                     self.c.state |= CBF_NOLBSELECT;
                     self.update_edit(cpu, index);
-                    self.clear_after(CBF_NOLBSELECT & !had);
+                    self.clear_after(cpu, CBF_NOLBSELECT & !had);
                 }
             }
-            self.out.call("ReleaseCapture", &[]);
-            self.out.call("SetCapture", &[self.c.list]);
+            self.out.call(cpu, "ReleaseCapture", &[]);
+            self.out.call(cpu, "SetCapture", &[self.c.list]);
         }
         if self.c.state & CBF_BUTTONDOWN != 0 {
             self.c.state &= !CBF_BUTTONDOWN;
-            self.repaint_button();
+            self.repaint_button(cpu);
         }
     }
 
@@ -752,7 +761,7 @@ impl Ctx {
         let (x, y) = (lp as i16 as i32, (lp >> 16) as i16 as i32);
         if self.c.state & CBF_BUTTONDOWN != 0 && !self.c.button_rect.contains(x, y) {
             self.c.state &= !CBF_BUTTONDOWN;
-            self.repaint_button();
+            self.repaint_button(cpu);
         }
         let state = user(cpu);
         let list = self.c.list;
@@ -761,11 +770,12 @@ impl Ctx {
         let (px, py) = (x + cx - lx, y + cy - ly);
         if client_of(state, list).contains(px, py) {
             self.c.state &= !CBF_CAPTURE;
-            self.out.call("ReleaseCapture", &[]);
+            self.out.call(cpu, "ReleaseCapture", &[]);
             if self.c.kind() == CBS_DROPDOWN {
                 self.update_lbox(cpu, true);
             }
-            self.out.send(list, WM_LBUTTONDOWN, wp, make_long(px, py));
+            self.out
+                .send(cpu, list, WM_LBUTTONDOWN, wp, make_long(px, py));
         }
     }
 }
@@ -782,8 +792,8 @@ fn rect_pos(hwnd: u32, r: Rect, flags: u32) -> [u32; 7] {
 }
 
 /// Send the list `msg`, and answer what it does.
-fn forward(c: &mut Ctx, msg: u32, wp: u32, lp: u32) -> i32 {
-    c.out.send_keep(c.c.list, msg, wp, lp);
+fn forward(cpu: &Cpu, c: &mut Ctx, msg: u32, wp: u32, lp: u32) -> i32 {
+    c.out.send_keep(cpu, c.c.list, msg, wp, lp);
     0
 }
 
@@ -803,10 +813,10 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let result: i32 = match msg {
         WM_NCDESTROY => {
             if c.c.kind() != CBS_SIMPLE && list != 0 {
-                c.out.call("DestroyWindow", &[list]);
+                c.out.call(cpu, "DestroyWindow", &[list]);
             }
             c.c.state &= !CBF_CREATED;
-            c.out.call_with("DefWindowProcA", args, 0, true);
+            c.out.call_with(cpu, "DefWindowProcA", args, 0, true);
             0
         }
         WM_CREATE => {
@@ -860,23 +870,23 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         WM_SETFONT => {
             c.c.font = wp;
             if has_edit {
-                c.out.send(edit_wnd, WM_SETFONT, wp, lp);
+                c.out.send(cpu, edit_wnd, WM_SETFONT, wp, lp);
             }
-            c.out.send(list, WM_SETFONT, wp, lp);
+            c.out.send(cpu, list, WM_SETFONT, wp, lp);
             c.relayout(cpu);
             1
         }
         WM_GETFONT => c.c.font as i32,
         WM_SETFOCUS => {
             if has_edit {
-                c.out.call("SetFocus", &[edit_wnd]);
+                c.out.call(cpu, "SetFocus", &[edit_wnd]);
                 // The first time, all the text is selected.
                 if c.c.state & CBF_BEENFOCUSED == 0 {
-                    c.out.send(edit_wnd, EM_SETSEL, 0, u32::MAX);
+                    c.out.send(cpu, edit_wnd, EM_SETSEL, 0, u32::MAX);
                     c.c.state |= CBF_BEENFOCUSED;
                 }
             } else {
-                c.set_focus();
+                c.set_focus(cpu);
             }
             1
         }
@@ -892,7 +902,7 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         WM_GETTEXT => {
             if has_edit {
-                forward_to(&mut c, edit_wnd, msg, wp, lp)
+                forward_to(cpu, &mut c, edit_wnd, msg, wp, lp)
             } else if wp == 0 || lp == 0 {
                 0
             } else {
@@ -924,8 +934,8 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             } else if has_edit {
                 let had = c.c.state & CBF_NOEDITNOTIFY;
                 c.c.state |= CBF_NOEDITNOTIFY;
-                forward_to(&mut c, edit_wnd, msg, wp, lp);
-                c.clear_after(CBF_NOEDITNOTIFY & !had);
+                forward_to(cpu, &mut c, edit_wnd, msg, wp, lp);
+                c.clear_after(cpu, CBF_NOEDITNOTIFY & !had);
                 0
             } else {
                 CB_ERR
@@ -933,7 +943,7 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         WM_CUT | WM_PASTE | WM_COPY => {
             if has_edit {
-                forward_to(&mut c, edit_wnd, msg, wp, lp)
+                forward_to(cpu, &mut c, edit_wnd, msg, wp, lp)
             } else {
                 CB_ERR
             }
@@ -951,14 +961,14 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 write_words(cpu, lp + at, &[hwnd]);
             }
             let (owner, id) = (c.c.owner, c.id);
-            forward_to(&mut c, owner, msg, id, lp)
+            forward_to(cpu, &mut c, owner, msg, id, lp)
         }
         WM_ENABLE => {
             if has_edit {
-                c.out.call("EnableWindow", &[edit_wnd, wp]);
+                c.out.call(cpu, "EnableWindow", &[edit_wnd, wp]);
             }
-            c.out.call("EnableWindow", &[list, wp]);
-            c.invalidate(None);
+            c.out.call(cpu, "EnableWindow", &[list, wp]);
+            c.invalidate(cpu, None);
             1
         }
         WM_SETREDRAW => {
@@ -968,9 +978,9 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 c.c.state |= CBF_NOREDRAW;
             }
             if has_edit {
-                c.out.send(edit_wnd, msg, wp, lp);
+                c.out.send(cpu, edit_wnd, msg, wp, lp);
             }
-            c.out.send(list, msg, wp, lp);
+            c.out.send(cpu, list, msg, wp, lp);
             0
         }
         WM_SYSKEYDOWN => {
@@ -989,14 +999,14 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 1
             } else {
                 let to = if has_edit { edit_wnd } else { list };
-                forward_to(&mut c, to, msg, wp, lp)
+                forward_to(cpu, &mut c, to, msg, wp, lp)
             }
         }
         WM_LBUTTONDOWN => {
             if c.c.state & CBF_FOCUSED == 0 {
                 // The rest once the focus is here.
-                c.out.call("SetFocus", &[hwnd]);
-                c.out.send(hwnd, CBM_CLICK, wp, lp);
+                c.out.call(cpu, "SetFocus", &[hwnd]);
+                c.out.send(cpu, hwnd, CBM_CLICK, wp, lp);
             } else {
                 c.lbutton_down(cpu, lp);
             }
@@ -1032,25 +1042,25 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if case != 0 && lp != 0 && c.c.style & CBS_HASSTRINGS != 0 {
                 add_in_case(cpu, &mut c, lb, wp, lp, case)
             } else {
-                forward(&mut c, lb, wp, lp)
+                forward(cpu, &mut c, lb, wp, lp)
             }
         }
-        CB_DELETESTRING => forward(&mut c, LB_DELETESTRING, wp, 0),
+        CB_DELETESTRING => forward(cpu, &mut c, LB_DELETESTRING, wp, 0),
         CB_SELECTSTRING => {
             let index = listbox::select_string_result(cpu, list, wp as i32, lp);
-            c.out.send(list, LB_SELECTSTRING, wp, lp);
+            c.out.send(cpu, list, LB_SELECTSTRING, wp, lp);
             if index >= 0 {
                 if has_edit {
                     c.update_edit(cpu, index);
                 } else {
                     let r = c.c.text_rect;
-                    c.invalidate(Some(r));
+                    c.invalidate(cpu, Some(r));
                 }
             }
             index
         }
-        CB_FINDSTRING => forward(&mut c, LB_FINDSTRING, wp, lp),
-        CB_FINDSTRINGEXACT => forward(&mut c, LB_FINDSTRINGEXACT, wp, lp),
+        CB_FINDSTRING => forward(cpu, &mut c, LB_FINDSTRING, wp, lp),
+        CB_FINDSTRINGEXACT => forward(cpu, &mut c, LB_FINDSTRINGEXACT, wp, lp),
         CB_SETITEMHEIGHT => {
             if wp as i32 == -1 {
                 if (lp as i32) < 32768 {
@@ -1061,33 +1071,33 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                     CB_ERR
                 }
             } else if c.c.owner_drawn() {
-                forward(&mut c, LB_SETITEMHEIGHT, wp, lp)
+                forward(cpu, &mut c, LB_SETITEMHEIGHT, wp, lp)
             } else {
                 CB_ERR
             }
         }
         CB_GETITEMHEIGHT => {
             if wp as i32 >= 0 {
-                forward(&mut c, LB_GETITEMHEIGHT, wp, 0)
+                forward(cpu, &mut c, LB_GETITEMHEIGHT, wp, 0)
             } else {
                 c.text_area_height(cpu)
             }
         }
         CB_RESETCONTENT => {
-            c.out.send(list, LB_RESETCONTENT, 0, 0);
+            c.out.send(cpu, list, LB_RESETCONTENT, 0, 0);
             if has_edit && c.c.style & CBS_HASSTRINGS != 0 {
                 c.set_edit_text(cpu, &[]);
             } else {
-                c.invalidate(None);
+                c.invalidate(cpu, None);
             }
             1
         }
-        CB_INITSTORAGE => forward(&mut c, LB_INITSTORAGE, wp, lp),
-        CB_GETHORIZONTALEXTENT => forward(&mut c, LB_GETHORIZONTALEXTENT, 0, 0),
-        CB_SETHORIZONTALEXTENT => forward(&mut c, LB_SETHORIZONTALEXTENT, wp, 0),
-        CB_GETTOPINDEX => forward(&mut c, LB_GETTOPINDEX, 0, 0),
-        CB_GETLOCALE => forward(&mut c, LB_GETLOCALE, 0, 0),
-        CB_SETLOCALE => forward(&mut c, LB_SETLOCALE, wp, 0),
+        CB_INITSTORAGE => forward(cpu, &mut c, LB_INITSTORAGE, wp, lp),
+        CB_GETHORIZONTALEXTENT => forward(cpu, &mut c, LB_GETHORIZONTALEXTENT, 0, 0),
+        CB_SETHORIZONTALEXTENT => forward(cpu, &mut c, LB_SETHORIZONTALEXTENT, wp, 0),
+        CB_GETTOPINDEX => forward(cpu, &mut c, LB_GETTOPINDEX, 0, 0),
+        CB_GETLOCALE => forward(cpu, &mut c, LB_GETLOCALE, 0, 0),
+        CB_SETLOCALE => forward(cpu, &mut c, LB_SETLOCALE, wp, 0),
         CB_GETDROPPEDWIDTH => {
             if c.c.dropped_width != 0 {
                 c.c.dropped_width
@@ -1111,7 +1121,7 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             CB_OKAY
         }
         CB_GETDROPPEDSTATE => (c.c.state & CBF_DROPPED != 0) as i32,
-        CB_DIR => forward(&mut c, LB_DIR, wp, lp),
+        CB_DIR => forward(cpu, &mut c, LB_DIR, wp, lp),
         CB_SHOWDROPDOWN => {
             if c.c.kind() != CBS_SIMPLE {
                 let dropped = c.c.state & CBF_DROPPED != 0;
@@ -1123,31 +1133,31 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             }
             1
         }
-        CB_GETCOUNT => forward(&mut c, LB_GETCOUNT, 0, 0),
-        CB_GETCURSEL => forward(&mut c, LB_GETCURSEL, 0, 0),
+        CB_GETCOUNT => forward(cpu, &mut c, LB_GETCOUNT, 0, 0),
+        CB_GETCURSEL => forward(cpu, &mut c, LB_GETCURSEL, 0, 0),
         CB_SETCURSEL => {
             let r = listbox::set_cur_sel_result(cpu, list, wp as i32);
-            c.out.send(list, LB_SETCURSEL, wp, 0);
+            c.out.send(cpu, list, LB_SETCURSEL, wp, 0);
             if r >= 0 {
-                c.out.send(list, LB_SETTOPINDEX, wp, 0);
+                c.out.send(cpu, list, LB_SETTOPINDEX, wp, 0);
             }
             // The list sends no LBN_SELCHANGE for it.
             if has_edit {
                 c.update_edit(cpu, wp as i32);
             } else {
                 let r = c.c.text_rect;
-                c.invalidate(Some(r));
+                c.invalidate(cpu, Some(r));
             }
             c.c.state &= !CBF_SELCHANGE;
             r
         }
-        CB_GETLBTEXT => forward(&mut c, LB_GETTEXT, wp, lp),
-        CB_GETLBTEXTLEN => forward(&mut c, LB_GETTEXTLEN, wp, 0),
-        CB_GETITEMDATA => forward(&mut c, LB_GETITEMDATA, wp, 0),
-        CB_SETITEMDATA => forward(&mut c, LB_SETITEMDATA, wp, lp),
+        CB_GETLBTEXT => forward(cpu, &mut c, LB_GETTEXT, wp, lp),
+        CB_GETLBTEXTLEN => forward(cpu, &mut c, LB_GETTEXTLEN, wp, 0),
+        CB_GETITEMDATA => forward(cpu, &mut c, LB_GETITEMDATA, wp, 0),
+        CB_SETITEMDATA => forward(cpu, &mut c, LB_SETITEMDATA, wp, lp),
         CB_GETEDITSEL => {
             if has_edit {
-                forward_to(&mut c, edit_wnd, EM_GETSEL, wp, lp)
+                forward_to(cpu, &mut c, edit_wnd, EM_GETSEL, wp, lp)
             } else {
                 CB_ERR
             }
@@ -1155,7 +1165,7 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         CB_SETEDITSEL => {
             if has_edit {
                 let (s, e) = (lp as i16 as i32 as u32, (lp >> 16) as i16 as i32 as u32);
-                forward_to(&mut c, edit_wnd, EM_SETSEL, s, e)
+                forward_to(cpu, &mut c, edit_wnd, EM_SETSEL, s, e)
             } else {
                 CB_ERR
             }
@@ -1192,7 +1202,7 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 1
             }
         }
-        CB_LIMITTEXT if has_edit => forward_to(&mut c, edit_wnd, EM_LIMITTEXT, wp, lp),
+        CB_LIMITTEXT if has_edit => forward_to(cpu, &mut c, edit_wnd, EM_LIMITTEXT, wp, lp),
         _ => {
             c.finish(cpu);
             return def_window_proc(cpu, args);
@@ -1202,8 +1212,8 @@ pub fn combobox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// Send `to` the message, and answer what it does.
-fn forward_to(c: &mut Ctx, to: u32, msg: u32, wp: u32, lp: u32) -> i32 {
-    c.out.send_keep(to, msg, wp, lp);
+fn forward_to(cpu: &Cpu, c: &mut Ctx, to: u32, msg: u32, wp: u32, lp: u32) -> i32 {
+    c.out.send_keep(cpu, to, msg, wp, lp);
     0
 }
 
@@ -1220,7 +1230,7 @@ fn add_in_case(cpu: &mut Cpu, c: &mut Ctx, lb: u32, wp: u32, lp: u32, case: u32)
     text.push(0);
     if text.len() > (SCRATCH - SCRATCH_DATA) as usize {
         cpu.bus.guest_write_bytes(lp, &text);
-        return forward(c, lb, wp, lp);
+        return forward(cpu, c, lb, wp, lp);
     }
     text.resize(text.len().next_multiple_of(4), 0);
     let words: Vec<u32> = text
@@ -1228,7 +1238,7 @@ fn add_in_case(cpu: &mut Cpu, c: &mut Ctx, lb: u32, wp: u32, lp: u32, case: u32)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect();
     c.out.write(SCRATCH_DATA, &words);
-    c.out.send_struct(c.c.list, lb, wp, SCRATCH_DATA, true);
+    c.out.send_struct(cpu, c.c.list, lb, wp, SCRATCH_DATA, true);
     0
 }
 
@@ -1289,7 +1299,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         return Next::Done(u32::MAX);
     };
     let mis = t.scratch + SCRATCH_DATA;
-    let send = address_of("SendMessageA");
+    let send = address_of(cpu, "SendMessageA");
     let width = client_of(user(cpu), hwnd).right;
     match t.step {
         0 => {
@@ -1355,7 +1365,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             // The list goes on the desktop, and the combo box gets the
             // height of its text area.
-            Next::call(address_of("SetParent"), &[list, 0], 5)
+            Next::call(address_of(cpu, "SetParent"), &[list, 0], 5)
         }
         5 => {
             c.dummy_resize(cpu);
@@ -1426,7 +1436,7 @@ fn create_list(cpu: &mut Cpu, t: &mut Task, mut c: Ctx) -> Next {
         hwnd,
     ];
     c.finish(cpu);
-    Next::call(address_of("CreateWindowExA"), &args, 3)
+    Next::call(address_of(cpu, "CreateWindowExA"), &args, 3)
 }
 
 /// COMBO_Create's edit, in the text area.
@@ -1467,7 +1477,7 @@ fn create_edit(cpu: &mut Cpu, t: &mut Task, c: Ctx) -> Next {
         0,
     ];
     c.finish(cpu);
-    Next::call(address_of("CreateWindowExA"), &args, 4)
+    Next::call(address_of(cpu, "CreateWindowExA"), &args, 4)
 }
 
 // Painting.
@@ -1475,7 +1485,7 @@ fn create_edit(cpu: &mut Cpu, t: &mut Task, c: Ctx) -> Next {
 /// The WM_PAINT task: the border, the button and the text area, then the
 /// owner's item in calls whose list its own variable gives.
 fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
-    if let Some(next) = paint_head(t, value) {
+    if let Some(next) = paint_head(cpu, t, value) {
         return next;
     }
     match t.step {
@@ -1491,7 +1501,7 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             if let Some(next) = ops_step(cpu, t, base, value) {
                 return next;
             }
-            paint_end(t, 5)
+            paint_end(cpu, t, 5)
         }
         _ => Next::Done(0),
     }
@@ -1593,7 +1603,7 @@ fn draw_text(
         dis.extend(rect_words(r));
         dis.push(data);
         out.write(SCRATCH_DATA, &dis);
-        out.send_struct(c.owner, WM_DRAWITEM, id, SCRATCH_DATA, false);
+        out.send_struct(cpu, c.owner, WM_DRAWITEM, id, SCRATCH_DATA, false);
         return;
     }
     if focused {

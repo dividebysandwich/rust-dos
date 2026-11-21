@@ -370,8 +370,132 @@ pub fn trap_name(id: u16) -> String {
 /// module `module`, once that is loaded.
 pub fn stub_address(cpu: &Cpu, module: usize, name: &str) -> Option<u32> {
     let i = MODULES[module].apis.iter().position(|a| a.name == name)?;
-    let sel = super::module::builtin_selector(cpu, module)?;
-    Some(((sel as u32) << 16) | (i as u32 * STUB))
+    let m = cpu
+        .bus
+        .win32
+        .win16
+        .modules
+        .iter()
+        .find(|m| m.builtin == Some(module as u16))?;
+    let sel = m.segments.first()?.selector;
+    Some(((sel as u32) << 16) | stub_offset(m, i)? as u32)
+}
+
+/// The offset of the stub of the function `i` of the system module `m`
+/// in its code segment: its place in the table, or in the order of an
+/// older table that a loaded state's segment has (`mend`). None when that
+/// segment has no stub for it.
+pub fn stub_offset(m: &super::Module16, i: usize) -> Option<u16> {
+    match &m.older {
+        Some(older) => older.get(i).copied().flatten(),
+        None => Some((i as u32 * STUB) as u16),
+    }
+}
+
+/// Mend the system modules of a state just loaded whose code segments are
+/// from an older table, of before an entry went into its middle or
+/// functions were appended (`win32::stub_tables`): each stub traps with
+/// the id its function has now, and `stub_offset` follows the segment's
+/// order. Its entry table, which programs' imports were bound from, has
+/// that order already. The segment ends with its stubs, so a function it
+/// lacks has none, and the module doesn't export it, as the build that
+/// made it didn't. A segment whose stubs are where no table had them
+/// fails the load.
+pub(crate) fn mend(bus: &mut crate::bus::Bus) -> crate::savestate::Result<()> {
+    use crate::win32::stub_tables::{self as tables, Image, Of};
+    for m in &mut bus.win32.win16.modules {
+        m.older = None;
+    }
+    let pid = bus.win32.win16.pid;
+    let Some(p) = bus.win32.processes.iter().position(|p| p.id == pid) else {
+        return Ok(());
+    };
+    let process = std::mem::take(&mut bus.win32.processes[p]);
+    let mut result = Ok(());
+    for m in 0..bus.win32.win16.modules.len() {
+        let module = &bus.win32.win16.modules[m];
+        let Some(b) = module.builtin.map(usize::from) else {
+            continue;
+        };
+        let def = MODULES[b];
+        let arena = &bus.win32.win16.arena;
+        let base = |sel: u16| arena.get(&super::ldt::index(sel)).map(|a| a.base);
+        let code = module.segments.first().map(|s| (base(s.selector), s.size));
+        let (true, Some(db), Some((Some(code), size))) = (
+            tables::mended(Of::Module(def.name)),
+            base(module.handle),
+            code,
+        ) else {
+            continue;
+        };
+        let order = {
+            let (bus, memory) = (&*bus, &process.memory);
+            let read = |at: u32, len: usize| crate::win32::loader::peek(bus, memory, at, len);
+            let word = |at: u32| read(at, 2).map(|w| u16::from_le_bytes([w[0], w[1]]));
+            // The entry table of the module's database, which is a copy of
+            // its header and tables.
+            let entries = word(db + 4)
+                .zip(word(db + 6))
+                .and_then(|(at, len)| read(db + at as u32, len as usize))
+                .and_then(|table| ne::entries(&table).ok())
+                .unwrap_or_default();
+            let exported = def
+                .apis
+                .iter()
+                .filter(|api| api.ordinal != 0)
+                .filter_map(|api| match entries.get(api.ordinal as usize - 1)? {
+                    ne::Entry::Code {
+                        segment: 1, offset, ..
+                    } if (*offset as u32).is_multiple_of(STUB) => {
+                        let place = (*offset as u32 / STUB) as usize;
+                        Some((api.name.as_bytes().to_vec(), place))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let stub = |p: usize| {
+                let at = p as u32 * STUB;
+                if at + STUB > size {
+                    return None;
+                }
+                read(code + at, STUB as usize)?.try_into().ok()
+            };
+            let names: Vec<&'static str> = def.apis.iter().map(|a| a.name).collect();
+            tables::image_order(&Image {
+                of: Of::Module(def.name),
+                names: &names,
+                exported,
+                stub: &stub,
+                id: &|api| id(b, api),
+                code: &|_| false,
+            })
+        };
+        let Some(order) = order else {
+            result = Err(crate::savestate::StateError::Invalid(format!(
+                "the 16-bit {}'s stubs are in an order this rust-dos doesn't know, and \
+                 would call other functions than the programs'",
+                def.name
+            )));
+            break;
+        };
+        if order.len() == def.apis.len() {
+            continue;
+        }
+        let mut offsets = vec![None; def.apis.len()];
+        for (slot, &api) in order.iter().enumerate() {
+            let at = code + slot as u32 * STUB;
+            let (then, now) = (id(b, slot), id(b, api));
+            if let Some(bytes) = crate::win32::loader::peek(bus, &process.memory, at, 4)
+                && tables::rewrites(&bytes, then, now)
+            {
+                process.memory.write(bus, at + 2, &now.to_le_bytes());
+            }
+            offsets[api] = Some((slot as u32 * STUB) as u16);
+        }
+        bus.win32.win16.modules[m].older = Some(offsets);
+    }
+    bus.win32.processes[p] = process;
+    result
 }
 
 /// The 16:16 address of the stub that stands for the import `name`
@@ -419,10 +543,7 @@ pub fn win32_address(cpu: &Cpu, dll: &str, function: &str) -> Option<u32> {
         .apis
         .iter()
         .position(|a| a.name == function)?;
-    match crate::win32::running(cpu) {
-        Some(process) => crate::win32::stub_tables::stub_address_in(process, index, api),
-        None => Some(crate::win32::stubs::stub_address(index, api)),
-    }
+    Some(crate::win32::stub_tables::address(cpu, index, api)).filter(|&a| a != 0)
 }
 
 /// Read the arguments of a function with the signature `args` from the

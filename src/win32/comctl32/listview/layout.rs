@@ -534,6 +534,7 @@ pub(super) fn get_item_position_msg(
     if lv.view == LV_VIEW_DETAILS && !lv.columns.is_empty() && lv.header != 0 {
         let ops = vec![
             send_op(
+                cpu,
                 lv.header,
                 header::HDM_GETITEMRECT,
                 Arg::V(0),
@@ -1384,7 +1385,7 @@ fn place_header(cpu: &mut Cpu, hdr: u32, want: Rect, flags: u32) -> Vec<Op> {
         Arg::V(want.height() as u32),
         Arg::V(flags),
     ];
-    vec![user_op("SetWindowPos", &args)]
+    vec![user_op(cpu, "SetWindowPos", &args)]
 }
 
 /// The steps of LISTVIEW_UpdateScroll.
@@ -1404,8 +1405,9 @@ fn write_scroll_info(cpu: &mut Cpu, scratch: u32, mask: u32, max: i32, page: i32
     );
 }
 
-fn set_scroll_op(hwnd: u32, bar: u32) -> Op {
+fn set_scroll_op(cpu: &Cpu, hwnd: u32, bar: u32) -> Op {
     user_op(
+        cpu,
         "SetScrollInfo",
         &[Arg::V(hwnd), Arg::V(bar), Arg::S(S_SCROLL), Arg::V(1)],
     )
@@ -1617,7 +1619,7 @@ fn scroll(cpu: &mut Cpu, c: &mut Ctx, bar: u32) -> Vec<Op> {
     let mut ops = Vec::new();
     if lv.edit != 0 {
         let msg = user32::message::WM_KILLFOCUS;
-        ops.push(send_op(lv.edit, msg, Arg::V(0), Arg::V(0)));
+        ops.push(send_op(cpu, lv.edit, msg, Arg::V(0), Arg::V(0)));
     }
     let at = c.scratch + S_SCROLL;
     write_words(cpu, at, &[28, SIF_ALL | SIF_TRACKPOS]);
@@ -1668,7 +1670,7 @@ fn scroll(cpu: &mut Cpu, c: &mut Ctx, bar: u32) -> Vec<Op> {
         new = min;
     }
     write_scroll_info(cpu, c.scratch, SIF_POS, 0, 0, new);
-    ops.push(set_scroll_op(c.hwnd, bar));
+    ops.push(set_scroll_op(cpu, c.hwnd, bar));
     ops.push(step(T_SCROLLED, &[bar, pos as u32]));
     ops
 }
@@ -1702,7 +1704,7 @@ fn scrolled(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     invalidate_rect(cpu, c.hwnd, &lv, list);
     lv.rc_focus = lv.rc_focus.offset(dx, dy);
     put(cpu, c.hwnd, lv);
-    ops.push(user_op("UpdateWindow", &[Arg::V(c.hwnd)]));
+    ops.push(user_op(cpu, "UpdateWindow", &[Arg::V(c.hwnd)]));
     ops
 }
 
@@ -1797,7 +1799,13 @@ pub(super) fn style_changed(
     lv.style = new;
     lv.map_view();
     let mut ops = Vec::new();
-    let show_bar = |bar: u32| user_op("ShowScrollBar", &[Arg::V(hwnd), Arg::V(bar), Arg::V(0)]);
+    let show_bar = |bar: u32| {
+        user_op(
+            cpu,
+            "ShowScrollBar",
+            &[Arg::V(hwnd), Arg::V(bar), Arg::V(0)],
+        )
+    };
     if old & WS_HSCROLL != 0 && new & WS_HSCROLL == 0 {
         ops.push(show_bar(SB_HORZ));
     }
@@ -1807,10 +1815,10 @@ pub(super) fn style_changed(
     if new_view != old_view {
         if lv.edit != 0 {
             let msg = user32::message::WM_KILLFOCUS;
-            ops.push(send_op(lv.edit, msg, Arg::V(0), Arg::V(0)));
+            ops.push(send_op(cpu, lv.edit, msg, Arg::V(0), Arg::V(0)));
         }
         if lv.header != 0 {
-            ops.push(user_op("ShowWindow", &[Arg::V(lv.header), Arg::V(0)]));
+            ops.push(user_op(cpu, "ShowWindow", &[Arg::V(lv.header), Arg::V(0)]));
         }
         ops.push(show_bar(3));
         lv.rc_focus = Rect::default();
@@ -1870,7 +1878,7 @@ pub(super) fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             write_scroll_info(cpu, c.scratch, SIF_RANGE | SIF_PAGE, max, page, 0);
             let old = scroll_pos(cpu, c.hwnd, SB_HORZ);
             vec![
-                set_scroll_op(c.hwnd, SB_HORZ),
+                set_scroll_op(cpu, c.hwnd, SB_HORZ),
                 step(T_SCROLL_V, &[old as u32]),
             ]
         }
@@ -1883,7 +1891,7 @@ pub(super) fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             write_scroll_info(cpu, c.scratch, SIF_RANGE | SIF_PAGE, max, page, 0);
             let old = scroll_pos(cpu, c.hwnd, SB_VERT);
             vec![
-                set_scroll_op(c.hwnd, SB_VERT),
+                set_scroll_op(cpu, c.hwnd, SB_VERT),
                 step(T_SCROLL_DONE, &[dx as u32, old as u32]),
             ]
         }

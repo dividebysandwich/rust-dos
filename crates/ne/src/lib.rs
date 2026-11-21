@@ -567,8 +567,9 @@ fn names(file: &[u8], mut at: usize, what: &'static str) -> Result<Vec<(String, 
     }
 }
 
-/// The entry table's bundles, as a list of entry points by ordinal.
-fn entries(table: &[u8]) -> Result<Vec<Entry>> {
+/// The entry table's bundles, as a list of entry points by ordinal (the
+/// first is ordinal 1): of a file, or of a module's copy in memory.
+pub fn entries(table: &[u8]) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     let mut at = 0;
     while at < table.len() {

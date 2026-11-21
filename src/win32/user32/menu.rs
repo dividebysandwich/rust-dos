@@ -2683,7 +2683,7 @@ fn key(cpu: &mut Cpu, tr: &mut Track, vk: u32, scratch: u32) -> Option<Next> {
         }
         _ => {
             return Some(Next::call(
-                address_of("TranslateMessage"),
+                address_of(cpu, "TranslateMessage"),
                 &[scratch],
                 S_RUN,
             ));
@@ -2792,7 +2792,7 @@ fn got(cpu: &mut Cpu, tr: &mut Track, value: u32, scratch: u32) -> Next {
         }
         WM_CHAR | WM_SYSCHAR => character(cpu, tr, msg.wparam),
         WM_KEYDOWN..=WM_SYSDEADCHAR => {}
-        _ => return Next::call(address_of("DispatchMessageA"), &[scratch], S_RUN),
+        _ => return Next::call(address_of(cpu, "DispatchMessageA"), &[scratch], S_RUN),
     }
     reconcile(cpu, tr, scratch)
 }
@@ -2863,19 +2863,19 @@ fn reconcile(cpu: &mut Cpu, tr: &mut Track, scratch: u32) -> Next {
         if !tr.destroy.is_empty() {
             let hwnd = tr.destroy.remove(0);
             if user(cpu).is_window(hwnd) {
-                return Next::call(address_of("DestroyWindow"), &[hwnd], S_RUN);
+                return Next::call(address_of(cpu, "DestroyWindow"), &[hwnd], S_RUN);
             }
             continue;
         }
         if !tr.sends.is_empty() {
             let [hwnd, msg, wp, lp] = tr.sends.remove(0);
-            return super::window::send(hwnd, msg, wp, lp, S_RUN);
+            return super::window::send(cpu, hwnd, msg, wp, lp, S_RUN);
         }
         if tr.key != 0 && tr.mode & M_END == 0 {
             let h = tr.levels[tr.current()].menu;
             let flags = get(user(cpu), h).map_or(0, |m| m.flags);
             let wp = make_wp(tr.key, flags);
-            return super::window::send(tr.owner, WM_MENUCHAR, wp, h, S_MENUCHAR);
+            return super::window::send(cpu, tr.owner, WM_MENUCHAR, wp, h, S_MENUCHAR);
         }
         if let Some(lv) = tr.levels.iter().position(|l| l.state != L_SHOWN) {
             let l = tr.levels[lv];
@@ -2887,7 +2887,14 @@ fn reconcile(cpu: &mut Cpu, tr: &mut Track, scratch: u32) -> Next {
                         let (pos, sys) = get(user(cpu), parent)
                             .map_or((0, 0), |m| (m.focus, (m.flags & MF_SYSMENU != 0) as u32));
                         let lp = make_wp(pos, sys);
-                        return super::window::send(tr.owner, WM_INITMENUPOPUP, l.menu, lp, S_RUN);
+                        return super::window::send(
+                            cpu,
+                            tr.owner,
+                            WM_INITMENUPOPUP,
+                            l.menu,
+                            lp,
+                            S_RUN,
+                        );
                     }
                 }
                 L_WINDOW => {
@@ -2922,13 +2929,13 @@ fn reconcile(cpu: &mut Cpu, tr: &mut Track, scratch: u32) -> Next {
                         instance,
                         l.menu,
                     ];
-                    return Next::call(address_of("CreateWindowExA"), &args, S_CREATED);
+                    return Next::call(address_of(cpu, "CreateWindowExA"), &args, S_CREATED);
                 }
                 _ => {
                     tr.levels[lv].state = L_SHOWN;
                     let flags = SWP_SHOWWINDOW | SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE;
                     let args = [l.hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags];
-                    return Next::call(address_of("SetWindowPos"), &args, S_SHOWN);
+                    return Next::call(address_of(cpu, "SetWindowPos"), &args, S_SHOWN);
                 }
             }
             continue;
@@ -2950,7 +2957,7 @@ fn reconcile(cpu: &mut Cpu, tr: &mut Track, scratch: u32) -> Next {
             };
             return Next::Done(result);
         }
-        return Next::call(address_of("GetMessageA"), &[scratch, 0, 0, 0], S_GOT);
+        return Next::call(address_of(cpu, "GetMessageA"), &[scratch, 0, 0, 0], S_GOT);
     }
 }
 
@@ -2985,6 +2992,7 @@ fn measure_next(cpu: &mut Cpu, tr: &mut Track, lv: usize, scratch: u32) -> Optio
     }
     tr.levels[lv].state = L_MEASURE + i + 1;
     Some(super::window::send(
+        cpu,
         tr.owner,
         WM_MEASUREITEM,
         0,
@@ -3093,7 +3101,14 @@ fn next_owner_draw(cpu: &mut Cpu, tr: &mut Track, scratch: u32) -> Option<Next> 
             cpu.bus.guest_write_32(at + 4 * k as u32, v);
         }
         tr.drawing = [l.menu, i, hdc, font];
-        return Some(super::window::send(tr.owner, WM_DRAWITEM, 0, at, S_DRAWN));
+        return Some(super::window::send(
+            cpu,
+            tr.owner,
+            WM_DRAWITEM,
+            0,
+            at,
+            S_DRAWN,
+        ));
     }
     None
 }
@@ -3139,7 +3154,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let flags =
                     SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED;
                 Next::call(
-                    address_of("SetWindowPos"),
+                    address_of(cpu, "SetWindowPos"),
                     &[t.var(1), 0, 0, 0, 0, 0, flags],
                     1,
                 )

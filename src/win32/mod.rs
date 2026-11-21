@@ -305,7 +305,8 @@ pub struct Process {
     /// once a critical section needs it.
     system_heap: heap::SystemHeap,
     /// Its images of built-in DLLs made from an older table, which keep
-    /// its order. A load works them out again (`stub_tables::mend`).
+    /// its order, and which the addresses Rust works out for it follow. A
+    /// load works them out again (`stub_tables::mend`).
     pub(crate) older_images: Vec<stub_tables::OlderImage>,
 }
 
@@ -402,6 +403,10 @@ pub struct Win32 {
     /// What the page file did since the emulator started, for the
     /// debugger's status.
     pub(crate) paging: memory::PagingCounts,
+    /// The older images of built-in DLLs the state that was loaded had,
+    /// which a process started since gets too. A load works them out again
+    /// (`stub_tables::mend`).
+    pub(crate) older_images: Vec<stub_tables::SharedImage>,
     /// The kernel objects, which the processes' handles are of.
     pub(crate) objects: object::Objects,
     /// The DOS process the programs run in, and the stack its DOS stub
@@ -658,6 +663,31 @@ pub(crate) fn process(cpu: &mut Cpu) -> &mut Process {
         .processes
         .get_mut(win32.running)
         .expect("a Win32 process")
+}
+
+/// The functions of the built-in DLL `name` in its table's order, which
+/// the places of their stubs follow; None for a DLL that isn't built in.
+/// The tests make images of older tables with it.
+#[doc(hidden)]
+pub fn builtin_functions(name: &str) -> Option<Vec<&'static str>> {
+    let dll = stubs::DLLS[stubs::find_dll(name)?];
+    Some(dll.apis.iter().map(|a| a.name).collect())
+}
+
+/// `len` bytes of the running process's memory at `lin`, whether its
+/// pages are in memory or in the page file; None where it has none. For
+/// the tests, which change what an older build would have left there.
+#[doc(hidden)]
+pub fn process_bytes(cpu: &Cpu, lin: u32, len: usize) -> Option<Vec<u8>> {
+    loader::peek(&cpu.bus, &running(cpu)?.memory, lin, len)
+}
+
+/// Write `data` to the running process's memory at `lin`, as
+/// `process_bytes` reads it.
+#[doc(hidden)]
+pub fn write_process_bytes(cpu: &mut Cpu, lin: u32, data: &[u8]) -> Option<()> {
+    let memory = running(cpu)?.memory.clone();
+    memory.write(&mut cpu.bus, lin, data)
 }
 
 /// The running process, if there is one, for what only reads it.
@@ -960,7 +990,7 @@ pub(crate) fn create_process_from(
     let mut process = loaded.process;
     process.priority_class = 0x20;
     process.startup = startup;
-    let return_address = stubs::stub_address(0, kernel32::PROCESS_RETURN);
+    let return_address = stub_tables::fixed_address(0, kernel32::PROCESS_RETURN);
     let esp = loaded.stack_top - 4;
     process.memory.write_32(&mut cpu.bus, esp, return_address);
     cpu.bus.log_string(&format!(
@@ -1717,4 +1747,5 @@ crate::state_fields!(Win32 {
     system_clock,
     tlb_stale,
     paging,
+    older_images,
 });

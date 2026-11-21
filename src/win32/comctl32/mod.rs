@@ -513,7 +513,7 @@ pub fn register_classes(cpu: &mut Cpu) {
         );
     }
     for &(name, background) in PLACEHOLDERS {
-        let proc = user32::address_of("DefWindowProcA");
+        let proc = user32::address_of(cpu, "DefWindowProcA");
         add(cpu, name, 0, proc, 4, 32512, background);
     }
 }
@@ -553,11 +553,11 @@ pub fn invalidate(cpu: &mut Cpu, hwnd: u32, erase: bool) {
 
 /// A script that paints the control as WM_PAINT does without a DC:
 /// BeginPaint, the module's `draw` with its DC, EndPaint; it returns 0.
-pub fn paint_script(hwnd: u32) -> Script {
+pub fn paint_script(cpu: &Cpu, hwnd: u32) -> Script {
     let mut s = Script::new(hwnd);
     let ps = s.alloc(64);
-    let begin = user32::address_of("BeginPaint");
-    let end = user32::address_of("EndPaint");
+    let begin = user32::address_of(cpu, "BeginPaint");
+    let end = user32::address_of(cpu, "EndPaint");
     s.call(begin, &[Arg::V(hwnd), Arg::S(ps)])
         .then(DRAW, &[ps])
         .call(end, &[Arg::V(hwnd), Arg::S(ps)])
@@ -574,6 +574,6 @@ pub fn notify(cpu: &mut Cpu, s: &mut Script, hwnd: u32, to: u32, code: u32, more
     words.extend_from_slice(more);
     let at = s.data(&words);
     let msg = user32::message::WM_NOTIFY;
-    s.send(to, msg, Arg::V(id), Arg::S(at));
+    s.send(cpu, to, msg, Arg::V(id), Arg::S(at));
     at
 }

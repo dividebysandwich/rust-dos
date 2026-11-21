@@ -423,7 +423,7 @@ pub fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32) -> Vec<Op> {
                     words: dis,
                 });
                 ops.push(Op::Call {
-                    target: user32::address_of("SendMessageA"),
+                    target: user32::address_of(cpu, "SendMessageA"),
                     args: vec![
                         Arg::V(s.notify),
                         Arg::V(WM_DRAWITEM),
@@ -454,11 +454,11 @@ pub fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32) -> Vec<Op> {
 }
 
 /// A script that paints the bar through BeginPaint and EndPaint.
-fn paint_script(hwnd: u32) -> Script {
+fn paint_script(cpu: &Cpu, hwnd: u32) -> Script {
     let mut s = Script::new(hwnd);
     s.alloc(S_PAINT);
-    let begin = user32::address_of("BeginPaint");
-    let end = user32::address_of("EndPaint");
+    let begin = user32::address_of(cpu, "BeginPaint");
+    let end = user32::address_of(cpu, "EndPaint");
     s.call(begin, &[Arg::V(hwnd), Arg::S(S_PS)])
         .then(DRAW, &[])
         .call(end, &[Arg::V(hwnd), Arg::S(S_PS)])
@@ -483,7 +483,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             let args = [c.hwnd, c.word(0), c.word(1), c.word(2)];
             vec![
                 Op::Call {
-                    target: user32::address_of("DefWindowProcA"),
+                    target: user32::address_of(cpu, "DefWindowProcA"),
                     args: args.iter().map(|&a| Arg::V(a)).collect(),
                 },
                 Op::Return(Arg::Last),
@@ -679,7 +679,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if is_window(cpu, notify) {
                 let id = super::id_of(cpu, hwnd);
                 let at = sc.data(&[hwnd, id, SBN_SIMPLEMODECHANGE]);
-                sc.send(notify, WM_NOTIFY, Arg::V(0), Arg::S(at));
+                sc.send(cpu, notify, WM_NOTIFY, Arg::V(0), Arg::S(at));
             }
             sc.ret(1);
             return script::run(cpu, STATUS, sc);
@@ -754,7 +754,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         WM_NOTIFYFORMAT => {
             if lp == NF_REQUERY && is_window(cpu, wp) {
                 let mut sc = Script::new(hwnd);
-                sc.send(wp, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY))
+                sc.send(cpu, wp, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY))
                     .then(T_FORMAT, &[]);
                 return script::run(cpu, STATUS, sc);
             }
@@ -769,7 +769,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 sc.ret(0);
                 return script::run(cpu, STATUS, sc);
             }
-            return script::run(cpu, STATUS, paint_script(hwnd));
+            return script::run(cpu, STATUS, paint_script(cpu, hwnd));
         }
         WM_SETFONT => {
             s.font = wp;
@@ -779,7 +779,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 invalidate(cpu, hwnd, false);
             }
             let mut sc = Script::new(hwnd);
-            sc.send(hwnd, WM_SIZE, Arg::V(0), Arg::V(0)).ret(0);
+            sc.send(cpu, hwnd, WM_SIZE, Arg::V(0), Arg::V(0)).ret(0);
             return script::run(cpu, STATUS, sc);
         }
         WM_SIZE => {
@@ -794,6 +794,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let y = parent.bottom - s.height;
             let mut sc = Script::new(hwnd);
             sc.user(
+                cpu,
                 "MoveWindow",
                 &[
                     hwnd,
@@ -858,7 +859,7 @@ fn set_text(cpu: &mut Cpu, hwnd: u32, mut s: Status, wp: u32, lp: u32) -> Option
     put(cpu, hwnd, s);
     invalidate(cpu, hwnd, false);
     let mut sc = Script::new(hwnd);
-    sc.user("UpdateWindow", &[hwnd]).ret(1);
+    sc.user(cpu, "UpdateWindow", &[hwnd]).ret(1);
     script::run(cpu, STATUS, sc)
 }
 
@@ -923,7 +924,7 @@ fn create(cpu: &mut Cpu, hwnd: u32, cs: u32) -> Option<u32> {
     put(cpu, hwnd, s);
     let mut sc = Script::new(hwnd);
     if is_window(cpu, parent) {
-        sc.send(parent, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY))
+        sc.send(cpu, parent, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY))
             .then(T_FORMAT, &[]);
     }
     sc.ret(0);
@@ -943,7 +944,7 @@ pub fn menu_help(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let mut s = Script::new(0);
     if wp >> 16 == 0xFFFF && lp == 0 {
-        s.send(status, SB_SIMPLE, Arg::V(0), Arg::V(0));
+        s.send(cpu, status, SB_SIMPLE, Arg::V(0), Arg::V(0));
     } else {
         let id = if (wp >> 16) & MF_POPUP != 0 {
             let id = cpu.bus.guest_read_32(ids.wrapping_add(4));
@@ -956,14 +957,14 @@ pub fn menu_help(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         };
         if id != 0 {
             let buf = s.data(&[0; 64]);
-            let load = user32::address_of("LoadStringA");
+            let load = user32::address_of(cpu, "LoadStringA");
             s.call(
                 load,
                 &[Arg::V(instance), Arg::V(id), Arg::S(buf), Arg::V(256)],
             );
             let wp = Arg::V(SB_SIMPLEID | SBT_NOBORDERS);
-            s.send(status, SB_SETTEXTA, wp, Arg::S(buf));
-            s.send(status, SB_SIMPLE, Arg::V(1), Arg::V(0));
+            s.send(cpu, status, SB_SETTEXTA, wp, Arg::S(buf));
+            s.send(cpu, status, SB_SIMPLE, Arg::V(1), Arg::V(0));
         }
     }
     s.ret(0);
@@ -1015,7 +1016,8 @@ pub fn show_hide_menu_ctl(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     user32::menu::check_menu_item(cpu, &[head[0], item, MF_BYCOMMAND | check]);
     let ctl = user32::dialog::get_dlg_item(cpu, &[hwnd, control]).unwrap_or(0);
     let mut s = Script::new(0);
-    s.user("SetWindowPos", &[ctl, 0, 0, 0, 0, 0, show]).ret(1);
+    s.user(cpu, "SetWindowPos", &[ctl, 0, 0, 0, 0, 0, show])
+        .ret(1);
     script::run(cpu, STATUS, s)
 }
 
@@ -1115,7 +1117,7 @@ pub fn create_status_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let mut s = Script::new(0);
     let class = s.string(b"msctls_statusbar32");
-    let f = user32::address_of("CreateWindowExA");
+    let f = user32::address_of(cpu, "CreateWindowExA");
     let d = Arg::V(CW_USEDEFAULT);
     s.call(
         f,

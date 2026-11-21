@@ -175,6 +175,11 @@ pub struct Module16 {
     /// (module.rs): its database's segment table has the segments the
     /// loader made.
     pub unbooted: bool,
+    /// For a system module whose code segment is from an older table, of
+    /// a state that was loaded (`builtin::mend`): the offset of each
+    /// function's stub in it, by the function's place in the table now,
+    /// None for one it lacks. A load works it out again.
+    pub older: Option<Vec<Option<u16>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -657,7 +662,8 @@ crate::state_fields!(Module16 {
     loaded,
     unbooted
 } skip {
-    image32
+    image32,
+    older
 });
 crate::state_fields!(Segment16 {
     handle,

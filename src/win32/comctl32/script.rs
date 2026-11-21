@@ -114,14 +114,14 @@ impl Script {
     }
 
     /// Call USER32's function `name` with plain values.
-    pub fn user(&mut self, name: &str, args: &[u32]) -> &mut Self {
+    pub fn user(&mut self, cpu: &Cpu, name: &str, args: &[u32]) -> &mut Self {
         let args: Vec<Arg> = args.iter().map(|&a| Arg::V(a)).collect();
-        self.call(crate::win32::user32::address_of(name), &args)
+        self.call(crate::win32::user32::address_of(cpu, name), &args)
     }
 
     /// SendMessageA(hwnd, msg, wp, lp).
-    pub fn send(&mut self, hwnd: u32, msg: u32, wp: Arg, lp: Arg) -> &mut Self {
-        let target = crate::win32::user32::address_of("SendMessageA");
+    pub fn send(&mut self, cpu: &Cpu, hwnd: u32, msg: u32, wp: Arg, lp: Arg) -> &mut Self {
+        let target = crate::win32::user32::address_of(cpu, "SendMessageA");
         self.call(target, &[Arg::V(hwnd), Arg::V(msg), wp, lp])
     }
 

@@ -1019,7 +1019,7 @@ fn get_item(
     write_words(cpu, scratch + S_NM, &words);
     let msg = user32::message::WM_NOTIFY;
     Err(vec![
-        send_op(lv.notify, msg, Arg::V(id), Arg::S(S_NM)),
+        send_op(cpu, lv.notify, msg, Arg::V(id), Arg::S(S_NM)),
         step(
             T_GET_DONE,
             &[
@@ -1887,7 +1887,7 @@ pub(super) fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             ];
             write_words(cpu, c.scratch + S_NM, &words);
             let msg = user32::message::WM_NOTIFY;
-            vec![send_op(lv.notify, msg, Arg::V(id), Arg::S(S_NM))]
+            vec![send_op(cpu, lv.notify, msg, Arg::V(id), Arg::S(S_NM))]
         }
         T_DELETE => {
             let i = c.word(0) as i32;

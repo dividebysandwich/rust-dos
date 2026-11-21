@@ -155,7 +155,7 @@ fn mul_div(a: i32, b: i32, c: i32) -> i32 {
 /// Whether `hwnd` is a scroll bar control, whose state is its first
 /// `scroll`.
 fn is_control(cpu: &mut Cpu, hwnd: u32) -> bool {
-    let proc = address_of("ScrollBarWndProc");
+    let proc = address_of(cpu, "ScrollBarWndProc");
     class::of(user(cpu), hwnd).is_some_and(|c| c.proc == proc)
 }
 
@@ -890,7 +890,7 @@ const STEP_PAINT: u16 = 40;
 pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let k = kind(t);
     if k == K_NOTIFY {
-        return button::notify_step(t);
+        return button::notify_step(cpu, t);
     }
     match k {
         K_PAINT => paint_step(cpu, t, value),
@@ -899,16 +899,16 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let flags =
                     SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED;
                 let args = [t.var(1), 0, 0, 0, 0, 0, flags];
-                Next::call(address_of("SetWindowPos"), &args, 1)
+                Next::call(address_of(cpu, "SetWindowPos"), &args, 1)
             }
             _ => Next::Done(t.var(2)),
         },
         K_SHOW => match t.step {
-            0 => Next::call(address_of("ShowWindow"), &[t.var(1), t.var(2)], 1),
+            0 => Next::call(address_of(cpu, "ShowWindow"), &[t.var(1), t.var(2)], 1),
             _ => Next::Done(1),
         },
         K_SEND => match t.step {
-            0 => window::send(t.var(1), t.var(2), t.var(3), t.var(4), 1),
+            0 => window::send(cpu, t.var(1), t.var(2), t.var(3), t.var(4), 1),
             _ => Next::Done(if t.var(5) == u32::MAX {
                 value
             } else {
@@ -922,7 +922,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             match t.step {
                 0 if t.var(P_OWN) < 2 => {
                     let args = [t.var(P_HWND), t.var(P_OWN)];
-                    Next::call(address_of("EnableWindow"), &args, 1)
+                    Next::call(address_of(cpu, "EnableWindow"), &args, 1)
                 }
                 _ => {
                     if !user(cpu).is_visible(t.var(P_HWND)) {
@@ -938,7 +938,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         K_CREATE => match t.step {
             0 => {
                 let args = [t.var(1), t.var(2), t.var(3), t.var(4), t.var(5), 0];
-                Next::call(address_of("MoveWindow"), &args, 1)
+                Next::call(address_of(cpu, "MoveWindow"), &args, 1)
             }
             _ => Next::Done(0),
         },
@@ -973,7 +973,7 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return button::close(cpu, t, STEP_PAINT + 3);
             }
             let parent = button::parent_of(cpu, hwnd);
-            window::send(parent, WM_CTLCOLORSCROLLBAR, hdc, hwnd, STEP_PAINT + 2)
+            window::send(cpu, parent, WM_CTLCOLORSCROLLBAR, hdc, hwnd, STEP_PAINT + 2)
         }
         2 => {
             let hdc = t.var(P_HDC);
@@ -1279,7 +1279,7 @@ fn track_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 if hdc != 0 {
                     t.set(T_HDC, hdc);
                     let parent = button::parent_of(cpu, hwnd);
-                    return window::send(parent, WM_CTLCOLORSCROLLBAR, hdc, hwnd, S_DRAW);
+                    return window::send(cpu, parent, WM_CTLCOLORSCROLLBAR, hdc, hwnd, S_DRAW);
                 }
             }
             Next::call(0, &[], S_DRAW)
@@ -1296,9 +1296,9 @@ fn track_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             t.set(T_NEXT, at as u32 + 1);
             let (op, arg) = (t.var(T_OP0 + 2 * at), t.var(T_OP0 + 2 * at + 1));
             match op {
-                OP_SETFOCUS => Next::call(address_of("SetFocus"), &[hwnd], S_OPS),
-                OP_SETCAPTURE => Next::call(address_of("SetCapture"), &[hwnd], S_OPS),
-                OP_RELEASE => Next::call(address_of("ReleaseCapture"), &[], S_OPS),
+                OP_SETFOCUS => Next::call(address_of(cpu, "SetFocus"), &[hwnd], S_OPS),
+                OP_SETCAPTURE => Next::call(address_of(cpu, "SetCapture"), &[hwnd], S_OPS),
+                OP_RELEASE => Next::call(address_of(cpu, "ReleaseCapture"), &[], S_OPS),
                 _ => {
                     let (owner, ctl) = if bar == SB_CTL {
                         (button::parent_of(cpu, hwnd), hwnd)
@@ -1310,26 +1310,26 @@ fn track_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     } else {
                         WM_HSCROLL
                     };
-                    window::send(owner, msg, arg, ctl, S_OPS)
+                    window::send(cpu, owner, msg, arg, ctl, S_OPS)
                 }
             }
         }
         S_GET => {
             let state = user(cpu);
             if !state.is_window(hwnd) {
-                return Next::call(address_of("ReleaseCapture"), &[], 99);
+                return Next::call(address_of(cpu, "ReleaseCapture"), &[], 99);
             }
             if t.var(T_MSG) == WM_LBUTTONUP || state.input.capture != hwnd {
                 return Next::Done(0);
             }
-            Next::call(address_of("GetMessageA"), &[t.scratch, 0, 0, 0], S_GOT)
+            Next::call(address_of(cpu, "GetMessageA"), &[t.scratch, 0, 0, 0], S_GOT)
         }
         S_GOT => {
             if value == 0 {
                 return Next::Done(0);
             }
             Next::call(
-                address_of("CallMsgFilterA"),
+                address_of(cpu, "CallMsgFilterA"),
                 &[t.scratch, MSGF_SCROLLBAR],
                 S_FILTERED,
             )
@@ -1351,9 +1351,17 @@ fn track_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.set(T_MSG, msg);
                 return Next::call(0, &[], S_EVENT);
             }
-            Next::call(address_of("TranslateMessage"), &[t.scratch], S_TRANSLATED)
+            Next::call(
+                address_of(cpu, "TranslateMessage"),
+                &[t.scratch],
+                S_TRANSLATED,
+            )
         }
-        S_TRANSLATED => Next::call(address_of("DispatchMessageA"), &[t.scratch], S_DISPATCHED),
+        S_TRANSLATED => Next::call(
+            address_of(cpu, "DispatchMessageA"),
+            &[t.scratch],
+            S_DISPATCHED,
+        ),
         S_DISPATCHED => Next::call(0, &[], S_GET),
         _ => Next::Done(0),
     }

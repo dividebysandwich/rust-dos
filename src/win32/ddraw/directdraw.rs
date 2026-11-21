@@ -366,7 +366,11 @@ pub fn activate_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     match (t.step, t.var(0)) {
         (0, WINDOW_DEVICE) => {
             let focus = [t.var(4)];
-            Next::call(user32::address_of("SetForegroundWindow"), &focus, FOCUSED)
+            Next::call(
+                user32::address_of(cpu, "SetForegroundWindow"),
+                &focus,
+                FOCUSED,
+            )
         }
         (FOCUSED, _) => match device_vars(cpu, t.var(1), t.var(4)) {
             Some(vars) => {
@@ -406,34 +410,40 @@ fn window_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
     let z_order = |after: u32, next: u16| {
         let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
         let args = [hwnd, after, 0, 0, 0, 0, flags];
-        Next::call(user32::address_of("SetWindowPos"), &args, next)
+        Next::call(user32::address_of(cpu, "SetWindowPos"), &args, next)
     };
     // The window placed: SetCooperativeLevel's task goes on to activate
     // it.
     let placed = |cpu: &Cpu| {
         if t.var(0) == WINDOW_EXCLUSIVE && !cpu.bus.win32.user.is_active(hwnd) {
-            Next::call(user32::address_of("SetActiveWindow"), &[hwnd], ACTIVATED)
+            Next::call(
+                user32::address_of(cpu, "SetActiveWindow"),
+                &[hwnd],
+                ACTIVATED,
+            )
         } else {
             Next::Done(DD_OK)
         }
     };
     match (t.step, t.var(0)) {
-        (0, WINDOW_ACTIVATE) => Next::call(user32::address_of("SetActiveWindow"), &[hwnd], 1),
+        (0, WINDOW_ACTIVATE) => Next::call(user32::address_of(cpu, "SetActiveWindow"), &[hwnd], 1),
         (0, WINDOW_NOTOPMOST) => z_order(HWND_NOTOPMOST, 1),
         (_, WINDOW_ACTIVATE | WINDOW_NOTOPMOST) | (ACTIVATED, _) => Next::Done(DD_OK),
         (0, _) => {
             let flags = SWP_NOZORDER | SWP_NOACTIVATE;
             let args = [hwnd, 0, 0, 0, t.var(2), t.var(3), flags];
-            Next::call(user32::address_of("SetWindowPos"), &args, 1)
+            Next::call(user32::address_of(cpu, "SetWindowPos"), &args, 1)
         }
         (1, _) if cpu.bus.win32.user.foreground_window() != t.var(4) => placed(cpu),
         (1, _) if style & WS_VISIBLE == 0 => {
-            Next::call(user32::address_of("ShowWindow"), &[hwnd, SW_SHOW], 2)
+            Next::call(user32::address_of(cpu, "ShowWindow"), &[hwnd, SW_SHOW], 2)
         }
         (1 | 2, _) => z_order(HWND_TOPMOST, 3),
-        (3, _) if style & WS_MAXIMIZE != 0 => {
-            Next::call(user32::address_of("ShowWindow"), &[hwnd, SW_RESTORE], 9)
-        }
+        (3, _) if style & WS_MAXIMIZE != 0 => Next::call(
+            user32::address_of(cpu, "ShowWindow"),
+            &[hwnd, SW_RESTORE],
+            9,
+        ),
         _ => placed(cpu),
     }
 }
@@ -519,7 +529,7 @@ pub fn window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     const WM_DISPLAYCHANGE: u32 = 0x7E;
     let hwnd = args[0];
     if args[1] != WM_DISPLAYCHANGE && filtering(cpu, hwnd) {
-        let default = user32::address_of("DefWindowProcA");
+        let default = user32::address_of(cpu, "DefWindowProcA");
         let call = [default, hwnd, args[1], args[2], args[3]];
         return user32::message::call_window_proc(cpu, &call);
     }
@@ -534,7 +544,7 @@ pub fn window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let chained = &state(cpu).chained;
             chained.iter().find(|c| c.1 == hwnd).map(|c| c.2)
         });
-    let target = original.unwrap_or_else(|| user32::address_of("DefWindowProcA"));
+    let target = original.unwrap_or_else(|| user32::address_of(cpu, "DefWindowProcA"));
     let call = [target, hwnd, args[1], args[2], args[3]];
     user32::message::call_window_proc(cpu, &call)
 }

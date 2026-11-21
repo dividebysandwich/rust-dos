@@ -393,7 +393,7 @@ fn nc_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let k = kind(t);
     if k == K_NOTIFY {
-        return button::notify_step(t);
+        return button::notify_step(cpu, t);
     }
     if t.step >= STEP_PAINT {
         return paint_step(cpu, t, value);
@@ -405,7 +405,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         K_SETTEXT => match t.step {
             0 => {
                 let args = [hwnd, WM_SETTEXT, t.var(V_A), t.var(V_B)];
-                Next::call(address_of("DefWindowProcA"), &args, 1)
+                Next::call(address_of(cpu, "DefWindowProcA"), &args, 1)
             }
             _ => try_paint_then(cpu, t, value, 0),
         },
@@ -414,7 +414,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let (cx, cy) = (t.var(V_B), t.var(V_B + 1));
                 let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER;
                 let args = [hwnd, 0, 0, 0, cx, cy, flags];
-                Next::call(address_of("SetWindowPos"), &args, 1)
+                Next::call(address_of(cpu, "SetWindowPos"), &args, 1)
             }
             _ => try_paint_then(cpu, t, t.var(V_A), 0),
         },
@@ -433,7 +433,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let parent = button::parent_of(cpu, hwnd);
                 let id = user(cpu).window(hwnd).map_or(0, |w| w.id);
                 let msg = crate::win32::user32::message::WM_COMMAND;
-                window::send(parent, msg, id & 0xFFFF | code << 16, hwnd, 2)
+                window::send(cpu, parent, msg, id & 0xFFFF | code << 16, hwnd, 2)
             }
             _ => Next::Done(0),
         },
@@ -453,7 +453,7 @@ fn erase_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return button::close(cpu, t, 3);
             }
             let parent = button::parent_of(cpu, hwnd);
-            window::send(parent, WM_CTLCOLORSTATIC, hdc, hwnd, 2)
+            window::send(cpu, parent, WM_CTLCOLORSTATIC, hdc, hwnd, 2)
         }
         2 => {
             let hdc = t.var(P_HDC);
@@ -503,7 +503,7 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return button::close(cpu, t, STEP_PAINT + 4);
             }
             let parent = button::parent_of(cpu, hwnd);
-            window::send(parent, WM_CTLCOLORSTATIC, hdc, hwnd, STEP_PAINT + 2)
+            window::send(cpu, parent, WM_CTLCOLORSTATIC, hdc, hwnd, STEP_PAINT + 2)
         }
         2 => {
             let hdc = t.var(P_HDC);
@@ -539,7 +539,7 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     ];
                     crate::win32::user32::write_words(cpu, dis, &words);
                     let parent = button::parent_of(cpu, hwnd);
-                    return window::send(parent, WM_DRAWITEM, id, dis, STEP_PAINT + 3);
+                    return window::send(cpu, parent, WM_DRAWITEM, id, dis, STEP_PAINT + 3);
                 }
                 SS_ICON => paint_icon(cpu, hdc, r, brush, style, s.image),
                 SS_BITMAP => paint_bitmap(cpu, hdc, r, brush, style, s.image),
