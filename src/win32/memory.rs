@@ -1063,18 +1063,37 @@ pub struct PagedRange {
 /// pages the pool got back, their entries following them. The cut is
 /// the lowest it can be: above every page that has to stay where it is
 /// (the system's own, such as page tables, a page of a view of a file,
-/// one pinned or held for an instruction), with as many free pages under
-/// it as there are pages to move from above it. The free pages above
-/// the cut leave the free list, and the block's used part (`next`) ends
-/// there. No page goes to the page file: the DOS program gets the
-/// memory the Windows programs aren't using.
+/// one the system pinned), with as many free pages under it as there
+/// are pages to move from above it. The free pages above the cut leave
+/// the free list, and the block's used part (`next`) ends there. No
+/// page goes to the page file: the DOS program gets the memory the
+/// Windows programs aren't using.
 fn compact(bus: &mut Bus) {
-    let Some(pool) = bus.win32.pool.as_ref() else {
+    let Some(pool) = bus.win32.pool.as_mut() else {
         return;
     };
+    // The pages held for the last instruction that faulted (`hold`) are
+    // let go: it has run, since the service that starts the DOS program
+    // came after it. Held, the last page a program touched would stay
+    // pinned, and keep everything under it from being lent.
+    let file = &mut pool.page_file;
+    for (phys, at) in std::mem::take(&mut file.held) {
+        file.let_go(phys, at);
+    }
+    let pool = bus.win32.pool.as_ref().expect("checked");
     let base = pool.base;
     let mut free: std::collections::BTreeSet<u32> = pool.free.iter().copied().collect();
     let mut free_under = free.len();
+    // The pages of file mappings, looked up for every page that would
+    // move: gathered once, as the mappings may hold many.
+    let shared: std::collections::BTreeSet<u32> = bus
+        .win32
+        .sections
+        .iter()
+        .flatten()
+        .flat_map(|s| s.pages.iter().copied())
+        .filter(|&page| page != 0)
+        .collect();
     // The pages to move, from the top down, with their entries'
     // addresses and the entries.
     let mut moving = Vec::new();
@@ -1097,7 +1116,7 @@ fn compact(bus: &mut Bus) {
             if entry == 0
                 || is_paged(entry)
                 || entry & !0xFFF != page
-                || bus.win32.shared(page)
+                || shared.contains(&page)
                 || moving.len() >= free_under
             {
                 break;
