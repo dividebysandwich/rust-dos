@@ -1503,13 +1503,14 @@ A game set up for DOSBox becomes a profile with its **Import** row, or
 `--import PATH` at startup (which also launches it): a GOG install's folder
 (its `goggame-*.info` says how GOG runs DOSBox), a folder with DOSBox
 configuration files (GOG's older `dosboxGame.conf` and
-`dosboxGame_single.conf`), or one such file. A GOG install made by gogdl
-(Heroic's downloader) keeps the DOSBox configuration files in
-`gog-support\<product id>\app`, where GOG Galaxy's install script would
-have copied them from: they are read from there. The profile gets the CPU,
-memory, video, sound, joystick and keyboard settings the configuration has,
-the drives its `[autoexec]` mounts (CD images included), and its commands
-but EXIT; what doesn't come across goes to the log. DOSBox Staging's
+`dosboxGame_single.conf`), or one such file. GOG Galaxy's install script
+copies the DOSBox configuration files from `gog-support\<product id>\app`
+into the install's folder; an install downloaded with gogdl (the
+downloader Heroic uses) leaves them there, and a file the install's
+folder lacks is read from there. The profile gets the CPU, memory, video,
+sound, joystick and keyboard settings the configuration has, the drives
+its `[autoexec]` mounts (CD images included), and its commands but EXIT;
+what doesn't come across goes to the log. DOSBox Staging's
 `cpu_cycles` and `cpu_cycles_protected` become `cycles` (a real-mode speed
 with a faster protected mode is `auto` with that speed), `CONFIG -SET`
 lines become the profile's settings, and `LOADFIX` runs the program it

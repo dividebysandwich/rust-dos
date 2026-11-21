@@ -130,47 +130,65 @@ fn import_info(info: &Path, home: Option<&Path>) -> Result<Imported, String> {
 }
 
 /// The folders GOG Galaxy copies into an install after it downloads one:
-/// the `supportData` actions of the install's `goggame-*.script`, each a
-/// folder of the support data (`gog-support\<product id>`, such as its
-/// `app` folder with the DOSBox configuration files) and the folder of
-/// the install it goes to (`{app}`, the install itself). gogdl, the
-/// downloader Heroic uses, runs no script and leaves the files in
-/// `gog-support`. Empty without a script.
+/// the `supportData` actions of the install's `goggame-*.script` files
+/// (the game's and those of its DLC), each a folder of the product's
+/// support data (`gog-support\<product id>`, such as its `app` folder
+/// with the DOSBox configuration files) and the folder of the install it
+/// goes to (`{app}`, the install itself). gogdl, the downloader Heroic
+/// uses, runs no script and leaves the files in `gog-support`. Empty
+/// without a script.
 fn support_copies(install: &Path) -> Vec<(PathBuf, PathBuf)> {
-    let Some(script) = fs::read_dir(install).ok().and_then(|entries| {
-        entries.into_iter().map(|e| e.path).find(|p| {
+    let mut scripts: Vec<PathBuf> = fs::read_dir(install)
+        .into_iter()
+        .flatten()
+        .map(|e| e.path)
+        .filter(|p| {
             let name = p
                 .file_name()
                 .map(|n| n.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
             name.starts_with("goggame-") && name.ends_with(".script") && fs::is_file(p)
         })
-    }) else {
-        return Vec::new();
-    };
-    let Some(json) = fs::read_to_string(&script)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-    else {
-        return Vec::new();
-    };
-    let Some(product) = json["productId"].as_str() else {
-        return Vec::new();
-    };
-    let support = host_path(install, &format!("gog-support/{product}"));
-    let actions = json["actions"].as_array().cloned().unwrap_or_default();
-    actions
-        .iter()
-        .map(|action| &action["install"])
-        .filter(|install| install["action"].as_str() == Some("supportData"))
-        .map(|install| &install["arguments"])
-        .filter(|args| args["type"].as_str() == Some("folder"))
-        .filter_map(|args| {
-            let source = args["source"].as_str()?.strip_prefix("{supportDir}")?;
-            let target = args["target"].as_str()?.strip_prefix("{app}")?;
-            Some((host_path(&support, source), host_path(install, target)))
-        })
-        .collect()
+        .collect();
+    scripts.sort();
+    let mut copies = Vec::new();
+    for script in scripts {
+        let Some(json) = fs::read_to_string(&script)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        else {
+            continue;
+        };
+        let Some(product) = json["productId"].as_str() else {
+            continue;
+        };
+        let support = host_path(install, &format!("gog-support/{product}"));
+        let actions = json["actions"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        copies.extend(
+            actions
+                .iter()
+                .map(|action| &action["install"])
+                .filter(|install| install["action"].as_str() == Some("supportData"))
+                .map(|install| &install["arguments"])
+                .filter(|args| args["type"].as_str() == Some("folder"))
+                .filter_map(|args| {
+                    let source = args["source"].as_str()?.strip_prefix("{supportDir}")?;
+                    let target = args["target"].as_str()?.strip_prefix("{app}")?;
+                    // What follows the placeholder starts with a slash,
+                    // which `host_path` would take for the root on Linux
+                    // and macOS.
+                    let relative = |p: &str| p.trim_start_matches(['/', '\\']).to_string();
+                    Some((
+                        host_path(&support, &relative(source)),
+                        host_path(install, &relative(target)),
+                    ))
+                }),
+        );
+    }
+    copies
 }
 
 /// The file at `path`, or, while it isn't there, its copy in the support
