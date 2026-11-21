@@ -7,7 +7,7 @@ use crate::win16;
 use rust_dos_ne as ne;
 use rust_dos_pe as pe;
 use std::fs;
-use win16::{CODE, Code, program, run_command, run_with};
+use win16::{CODE, Code, dos_marker, program, run_command, run_with};
 
 /// KERNEL's ordinals.
 const GET_MODULE_FILE_NAME: u16 = 49;
@@ -297,6 +297,53 @@ fn a_file_with_a_loaded_file_name_is_that_module() {
         fs::write(sub.join("RES.DLL"), library("Q")).unwrap();
     });
     assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn a_program_starts_a_dos_program_and_sees_what_it_wrote() {
+    // WinExec("C:\DOSPROG.COM /X"): Windows 98 runs a DOS program in a
+    // DOS box, on the same drives, and WinExec gives 33 or more. The
+    // built-in Windows runs it full screen while the Windows programs
+    // wait, so when WinExec returns, the file it writes is there. The DOS
+    // program changes to C:\SUB, which on Windows is its DOS machine's
+    // own current directory: the program opens MARK.TXT in its own, C:\.
+    // It ends with 1 when it can open that file, 2 when it can't, and 10h
+    // when WinExec didn't give 33.
+    let mut code = Code::new();
+    let path_at = code.here() + 2;
+    code.push_far(0).push(1).call("KERNEL", WIN_EXEC);
+    let mark_at = code.here() + 10;
+    code.emit(&[
+        0x3D, 0x21, 0x00, // cmp ax,33
+        0xB0, 0x10, // mov al,10h
+        0x75, 0x10, // jne end
+        0x0E, 0x1F, // push cs; pop ds
+        0xBA, 0xFF, 0xFF, // mov dx,mark
+        0xB8, 0x00, 0x3D, // mov ax,3D00h
+        0xCD, 0x21, // int 21h
+        0xB0, 0x01, // mov al,1
+        0x73, 0x02, // jnc end
+        0xB0, 0x02, // mov al,2
+    ])
+    .exit_al();
+    let path = code.here();
+    code.emit(b"C:\\DOSPROG.COM /X\0");
+    code.patch(path_at, path);
+    let mark = code.here();
+    code.emit(b"MARK.TXT\0");
+    code.patch(mark_at, mark);
+    let mut folder = None;
+    let (exit, log) = run_with("dos_child", program(&code, CODE), |_, base| {
+        fs::write(base.join("DOSPROG.COM"), dos_marker()).unwrap();
+        fs::create_dir_all(base.join("SUB")).unwrap();
+        folder = Some(base.to_path_buf());
+    });
+    assert_eq!(exit, 1, "{log}");
+    assert!(log.contains("DOSPROG.COM ended with exit code 5"), "{log}");
+    let written = fs::read(folder.unwrap().join("MARK.TXT")).unwrap();
+    // Windows 4.x, and the command tail with its blank.
+    assert_eq!(written[0], 4, "{written:?}");
+    assert_eq!(&written[2..], b" /X");
 }
 
 /// KERNEL's FreeLibrary and GetModuleHandle.

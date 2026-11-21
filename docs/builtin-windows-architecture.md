@@ -738,6 +738,60 @@ The reserved entries stay empty descriptors that no fixed selector
 uses. They are in the LDT's map of entries given out, which a save
 state keeps, so a restored machine has the layout it was saved with.
 
+## DOS programs
+
+A Windows program can start a DOS program: WinExec, LoadModule,
+CreateProcessA, ShellExecute and the C runtime's spawn functions of an
+MZ file that is neither a PE file nor a Windows 3.1 program, a COM file
+or a batch file (`src/win32/dosvm.rs`). Setups do it to run a DOS
+installer or a sound setup program. Windows 98 runs the program in a
+virtual DOS machine of its own: the VMM gives it a copy of the first
+megabyte as DOS was when Windows started, with its own vector table,
+DOS data and conventional memory, and switches the processor between it
+and the system's machine, so the Windows programs go on running. The
+program runs full screen or in a window, as its PIF says.
+
+The built-in Windows runs in one DOS process of the built-in DOS, whose
+real mode it keeps for the real-mode code it calls (`realmode.rs`). A
+DOS program starts there as that process's child. Its start is queued
+by the function that starts it, which returns to its caller as on
+Windows (33 from WinExec, handles of a process and a thread from
+CreateProcessA). When the service trap that called the function is
+done, the system calls DOS's EXEC in real mode from a few bytes in the
+ROM (`INT 21h`, then the trap of the return to the system), keeping the
+caller's context in a real-mode frame of its own kind (`Kind::Exec`).
+The program runs full screen, and the Windows programs wait: their
+threads don't switch while the system waits for real-mode code. When
+the program ends, DOS goes back after the INT 21h, the trap returns to
+the system, and the process and thread objects get its exit code and
+are signaled. What Windows 98 keeps apart for each DOS machine is put
+back as it was before the program started: the vector table, DOS's
+current drive and directories, its memory strategy and upper memory
+link, the PICs' masks, the timer's rate, the mouse driver's event
+handler, and the calling thread's FPU and SSE registers. The desktop
+is painted again, and the caller goes on. A program that waits for the
+one it started (WaitForSingleObject, GetExitCodeProcess, GetModuleUsage
+of WinExec's 33, a loop looking for a file the program writes) finds it
+ended, and the files it wrote are on the same drives.
+
+Before EXEC, the DOS process's memory block is cut down to what it uses
+(its PSP, its DOS stub and its stack), so the program gets the rest of
+conventional memory, and EXEC's parameter block, the command tail, the
+path and the environment of the caller go in a block of their own.
+The program gets its 8.3 path, as on Windows 98. A batch file runs in
+`COMMAND.COM /C`. INT 2Fh AX=1600h and 160Ah answer
+from the program as in a DOS box: Windows 4.x in enhanced mode, 4.0 for
+Windows 95 and 4.10 for 98.
+
+This is what a full-screen DOS box does on Windows 98, but for the
+Windows programs, which run on there behind it. Running them side by
+side, a window for the DOS program, and a first megabyte of its own for
+it need what the VMM keeps for each machine: a second copy of the first
+megabyte and of DOS's state, switched with the processor's context. The
+real-mode frame and the session's state are the place for that: a
+scheduler that switches between the frame's DOS program and the Windows
+threads, and a session that holds the machine's own memory.
+
 ## Timing
 
 `GetTickCount`, `timeGetTime`, `QueryPerformanceCounter` (at the PIT's

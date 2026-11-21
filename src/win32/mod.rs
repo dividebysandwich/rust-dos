@@ -28,6 +28,7 @@ mod dinput;
 pub mod dll_files;
 mod forwarders;
 mod dmusic;
+pub(crate) mod dosvm;
 mod dplayx;
 mod dpnet;
 mod dshow;
@@ -162,7 +163,8 @@ pub const TRAP: u8 = 0x3E;
 /// The ROM's part (offsets in segment F000): the start of a process, the
 /// return of real-mode code the system called (realmode.rs), the end of
 /// a process (INT 21h AH=4Ch), the Win16 tasks' real-mode callbacks
-/// (win16/dpmi.rs) and the IDT's 256 traps.
+/// (win16/dpmi.rs), DOS's EXEC of a DOS program a Windows program
+/// started (dosvm.rs) and the IDT's 256 traps.
 pub(crate) const ROM_SEG: u16 = 0xF000;
 const ROM_BASE: usize = 0xF0000;
 const START: u16 = 0x3800;
@@ -170,6 +172,7 @@ const REAL_RETURN: u16 = 0x3804;
 const EXIT: u16 = 0x3808;
 pub(crate) const CALLBACKS: u16 = 0x380C;
 pub(crate) const CALLBACK_SLOTS: usize = 32;
+const DOS_EXEC: u16 = 0x3890;
 const IDT_TRAPS: u16 = 0x3C00;
 
 /// The traps' ids: the built-in DLLs' functions below `FIRST_MISSING`
@@ -501,6 +504,8 @@ pub struct Win32 {
     msacm32: msacm32::State,
     /// DPNET's DirectPlay 8 objects.
     dpnet: dpnet::State,
+    /// The DOS program a Windows program started (dosvm.rs).
+    pub(crate) dosvm: crate::savestate::Since<{ dosvm::DOSVM_SAVED }, dosvm::State>,
 }
 
 impl Win32 {
@@ -688,6 +693,10 @@ pub fn install_rom(bus: &mut crate::bus::Bus) {
         .flat_map(|slot| trap(ID_CALLBACK | slot))
         .collect();
     bus.write_rom(at(CALLBACKS), &callbacks);
+    // INT 21h, then the return to the system.
+    let mut exec = vec![0xCD, 0x21];
+    exec.extend(trap(ID_REAL_RETURN));
+    bus.write_rom(at(DOS_EXEC), &exec);
     // INT 21h; and should DOS come back, again.
     bus.write_rom(at(EXIT), &[0xCD, 0x21, 0xEB, 0xFC]);
     let idt: Vec<u8> = (0..=255).flat_map(|v| trap(system::idt_id(v))).collect();
@@ -728,6 +737,15 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
     } else {
         return false;
     };
+    // A DOS program the built-in Windows started can't start a Windows
+    // program yet: its stub runs.
+    if dosvm::running(&cpu.bus.win32) {
+        cpu.bus.log_string(&format!(
+            "[W32] {} is a Windows program, started by a DOS program the built-in Windows runs: its DOS stub runs",
+            filename
+        ));
+        return false;
+    }
     // Under a virtual-8086 monitor (EMM386, Windows' 386 enhanced mode)
     // the process can't take the processor (`accepts`): the stub runs.
     if cpu.pe() {
@@ -1702,6 +1720,7 @@ crate::state_fields!(Win32 {
     msacm32,
     comm,
     dpnet,
+    dosvm,
 } skip {
     enabled,
     guest_dlls,

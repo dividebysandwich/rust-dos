@@ -23,7 +23,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 84;
+const WIN32_VERSION: u16 = 85;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -39,9 +39,10 @@ const WIN32_VERSION: u16 = 84;
 /// to 80's not the TrueType fonts of the files a program added
 /// (`gdi32::fnt::TRUETYPE_SAVED`), 71's to 81's no drop targets
 /// (`ole32::DROP_TARGETS`), 71's to 82's no ExitWindowsExec command
-/// line (`boot::EXIT_EXEC`), and 71's to 83's not the 16-bit OLE
-/// modules' state (`win16::ole2::OLE16`).
-const WIN32_LOADS: [u16; 14] = [
+/// line (`boot::EXIT_EXEC`), 71's to 83's not the 16-bit OLE modules'
+/// state (`win16::ole2::OLE16`), and 71's to 84's no DOS program a
+/// Windows program started (`dosvm::DOSVM_SAVED`).
+const WIN32_LOADS: [u16; 15] = [
     71,
     72,
     73,
@@ -55,6 +56,7 @@ const WIN32_LOADS: [u16; 14] = [
     81,
     82,
     83,
+    84,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1059,6 +1061,7 @@ mod tests {
         (82, 0x7F8F_BB1B_6F82_7B99), // OLE32's drop targets and OleInitialize's processes
         (83, 0xE951_CEB4_D9AD_4CAC), // ExitWindowsExec's command line
         (84, 0x3A9C_D1FD_6601_1D0E), // the 16-bit OLE modules' state
+        (85, 0xD065_06B4_D1EE_C645), // the DOS program a Windows program started
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
