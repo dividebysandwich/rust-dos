@@ -19,4 +19,5 @@ mod win16_ole2_tests;
 mod win16_resource_tests;
 mod win16_tests;
 mod win16_toolhelp_tests;
+mod win16_typelib_tests;
 mod win16_user_tests;
