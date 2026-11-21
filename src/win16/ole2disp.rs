@@ -351,6 +351,12 @@ impl Heap {
         Err(Stop::Pending)
     }
 
+    /// Whether the program's allocator has answered the next Alloc or
+    /// Realloc in a run before: this run then goes past it.
+    fn answered(&self) -> bool {
+        self.app != 0 && self.taken < self.got.len()
+    }
+
     /// A block of `size` bytes: its 16:16 address, or 0.
     fn alloc(&mut self, cpu: &mut Cpu, size: u32) -> Result<u32, Stop> {
         if self.app == 0 {
@@ -1110,6 +1116,26 @@ fn zero(cpu: &mut Cpu, p: u32, from: u32, size: u32) {
     }
 }
 
+/// Copy `size` bytes from the byte `from` of the huge block at `src` to
+/// the start of the huge block at `dest`.
+fn copy_huge(cpu: &mut Cpu, src: u32, from: u32, dest: u32, size: u32) {
+    let mut done = 0;
+    while done < size {
+        // No piece crosses either block's 64 KB boundaries.
+        let s = (src & 0xFFFF) + from + done;
+        let d = (dest & 0xFFFF) + done;
+        let n = (size - done)
+            .min(0x1000)
+            .min(0x1_0000 - (s & 0xFFFF))
+            .min(0x1_0000 - (d & 0xFFFF));
+        let at = huge(cpu, src, from + done);
+        let bytes = super::peek(cpu, at, n as usize).unwrap_or_else(|| vec![0; n as usize]);
+        let to = huge(cpu, dest, done);
+        super::poke(cpu, to, &bytes);
+        done += n;
+    }
+}
+
 /// The data of the array described at `a`, zeroed: false when there is
 /// no memory.
 fn alloc_data(cpu: &mut Cpu, heap: &mut Heap, a: &Array) -> Result<bool, Stop> {
@@ -1539,9 +1565,10 @@ fn safe_array_copy(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, 
 }
 
 /// SafeArrayRedim(psa, psaboundNew): the last dimension's bound changed,
-/// the data grown (zeroed) or cut (the elements cut freed). Data that is
-/// cut keeps its block, as big as it was: the elements cut are read
-/// before the program's Realloc would move them.
+/// the data reallocated, grown (zeroed) or cut (the elements cut freed).
+/// As Windows' OLE2DISP does, the elements cut are copied to a block of
+/// their own before the data's Realloc, which may move or free them, and
+/// freed from there after it.
 fn safe_array_redim(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32, Stop> {
     let Some(a) = Array::read(cpu, args[0]) else {
         return Ok(E_INVALIDARG);
@@ -1559,21 +1586,33 @@ fn safe_array_redim(cpu: &mut Cpu, args: &[u32], heap: &mut Heap) -> Result<u32,
     let per = old_bytes.checked_div(last).unwrap_or(0);
     let new_bytes = per.saturating_mul(count);
     let mut data = a.data;
-    if new_bytes < old_bytes {
-        if owns(a.features) {
-            // The elements cut go.
-            let elem = a.elem.max(1) as u32;
-            for cell in 0..(old_bytes - new_bytes) / elem {
-                let at = a.data_at(cpu, new_bytes + cell * elem);
-                clear_element(cpu, heap, a.features, at);
-            }
+    if new_bytes != old_bytes || data == 0 {
+        let cut = if new_bytes < old_bytes && data != 0 && owns(a.features) {
+            old_bytes - new_bytes
+        } else {
+            0
+        };
+        let kept = if cut > 0 { heap.alloc(cpu, cut)? } else { 0 };
+        if cut > 0 && kept == 0 {
+            return Ok(E_OUTOFMEMORY);
         }
-    } else if new_bytes > old_bytes || data == 0 {
+        // A run after the program's Realloc returned finds the elements
+        // in their block already, and the data may be gone.
+        if kept != 0 && !heap.answered() {
+            copy_huge(cpu, a.data, new_bytes, kept, cut);
+        }
         data = heap.realloc(cpu, a.data, new_bytes.max(1))?;
         if data == 0 {
+            heap.free(cpu, kept);
             return Ok(E_OUTOFMEMORY);
         }
         zero(cpu, data, old_bytes, new_bytes);
+        let elem = a.elem.max(1) as u32;
+        for cell in 0..cut / elem {
+            let at = huge(cpu, kept, cell * elem);
+            clear_element(cpu, heap, a.features, at);
+        }
+        heap.free(cpu, kept);
     }
     super::write_32(cpu, a.at + 12, data);
     super::write_32(cpu, a.at + SA_HEADER, count);

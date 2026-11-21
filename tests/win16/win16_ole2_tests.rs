@@ -433,9 +433,12 @@ const SYS_FREE_STRING: u16 = 6;
 const VARIANT_CLEAR: u16 = 9;
 const SAFE_ARRAY_CREATE: u16 = 15;
 const SAFE_ARRAY_DESTROY: u16 = 16;
+const SAFE_ARRAY_GET_UBOUND: u16 = 19;
 const SAFE_ARRAY_PUT_ELEMENT: u16 = 26;
+const SAFE_ARRAY_REDIM: u16 = 42;
 
 /// IMalloc's methods, by their place in the vtable.
+const REALLOC: u8 = 4;
 const FREE: u8 = 5;
 const DID_ALLOC: u8 = 7;
 
@@ -456,12 +459,14 @@ const COUNTER_VTABLE: u16 = 0xC4;
 const BOUND: u16 = 0xE8;
 const INDEX: u16 = 0xF0;
 const ARRAY: u16 = 0xF4;
+/// How many times the counting allocator's Realloc was called.
+const REALLOCS: u16 = 0xF8;
 
 /// Make the counting allocator at COUNTER, with one reference: its
-/// Alloc and Free count, keep what they were given, and hand on to the
-/// standard allocator, which CoCreateStandardMalloc puts at STANDARD.
-/// A debugging allocator a program wraps around the standard one does
-/// the same.
+/// Alloc and Free count and keep what they were given, its Realloc
+/// counts, and all three hand on to the standard allocator, which
+/// CoCreateStandardMalloc puts at STANDARD. A debugging allocator a
+/// program wraps around the standard one does the same.
 fn counting_allocator(code: &mut Code) {
     let jump = code.here() + 1;
     code.emit(&[0xE9, 0, 0]);
@@ -502,16 +507,35 @@ fn counting_allocator(code: &mut Code) {
         .emit(&[0x8B, 0x46, 0x0C]) // mov ax,[bp+12]
         .emit(&[0x26, 0x89, 0x47, 0x12]); // mov es:[bx+12h],ax
     hand_on(code, FREE);
+    // Realloc counts at REALLOCS and hands its two dwords on.
+    let realloc = code.here();
+    let count = (REALLOCS - COUNTER) as u8;
+    code.emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+        .emit(&[0xC4, 0x5E, 0x06]) // les bx,[bp+6]
+        .emit(&[0x26, 0xFF, 0x47, count]) // inc word es:[bx+count]
+        .emit(&[0xFF, 0x76, 0x10, 0xFF, 0x76, 0x0E]) // push the size
+        .emit(&[0xFF, 0x76, 0x0C, 0xFF, 0x76, 0x0A]) // push the block
+        .emit(&[0x26, 0xFF, 0x77, 0x0E, 0x26, 0xFF, 0x77, 0x0C]) // push standard
+        .emit(&[0x26, 0xC4, 0x5F, 0x0C]) // les bx,es:[bx+0Ch]
+        .emit(&[0x26, 0xC4, 0x1F]) // les bx,es:[bx]
+        .emit(&[0x26, 0xFF, 0x5F, 4 * REALLOC]) // call far es:[bx+4*REALLOC]
+        .emit(&[0x83, 0xC4, 0x0C, 0x5D, 0xCB]); // add sp,12; pop bp; retf
     let start = code.here();
     code.patch(jump, start - (jump + 2));
 
     set(code, COUNTER, COUNTER_VTABLE);
     code.emit(&[0x8C, 0x1E, lo(COUNTER + 2), hi(COUNTER + 2)]); // mov [..],ds
-    for at in [ALLOCS, FREES, FREED, FREED_SEL, COUNTER_ASKED] {
+    for at in [ALLOCS, FREES, FREED, FREED_SEL, COUNTER_ASKED, REALLOCS] {
         set(code, at, 0);
     }
     set(code, COUNTER_REFS, 1);
-    for (i, at) in [(1u16, add_ref), (2, release), (3, alloc), (5, free)] {
+    for (i, at) in [
+        (1u16, add_ref),
+        (2, release),
+        (3, alloc),
+        (4, realloc),
+        (5, free),
+    ] {
         set(code, COUNTER_VTABLE + 4 * i, at);
         let seg = COUNTER_VTABLE + 4 * i + 2;
         code.emit(&[0x8C, 0x0E, lo(seg), hi(seg)]); // mov [..],cs
@@ -628,6 +652,86 @@ fn ole2disp_takes_blocks_from_the_programs_allocator() {
     code.call("OLE2", OLE_UNINITIALIZE);
     code.emit(&[0xB0, 0x00]).exit_al();
     let (exit, log) = run("ole2disp_app_malloc", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}
+
+/// SafeArrayRedim cutting an array of BSTRs, with the program's
+/// allocator, as Windows' OLE2DISP does it: the elements cut are copied
+/// to a block of their own (an Alloc), the data is made smaller (a
+/// Realloc), and then the BSTRs cut and that block go to the program's
+/// Free, the block last.
+#[test]
+fn safe_array_redim_cuts_through_the_programs_allocator() {
+    let mut code = Code::new();
+    counting_allocator(&mut code);
+    push_ds(&mut code, COUNTER);
+    code.call("OLE2", OLE_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 1);
+
+    // SafeArrayCreate(VT_BSTR, 1, {3, 0}): its descriptor and its data.
+    set(&mut code, BOUND, 3);
+    for at in [BOUND + 2, BOUND + 4, BOUND + 6, INDEX + 2] {
+        set(&mut code, at, 0);
+    }
+    code.push(8).push(1);
+    push_ds(&mut code, BOUND);
+    code.call("OLE2DISP", SAFE_ARRAY_CREATE);
+    store_dx_ax(&mut code, ARRAY);
+    expect(&mut code, ALLOCS, 2, 2);
+
+    // Element 2 a copy of SysAllocString("abc"), which is then freed.
+    put_text(&mut code, TEXT, b"abc");
+    push_ds(&mut code, TEXT);
+    code.call("OLE2DISP", SYS_ALLOC_STRING);
+    store_dx_ax(&mut code, BSTR);
+    set(&mut code, INDEX, 2);
+    push_word(&mut code, ARRAY + 2);
+    push_word(&mut code, ARRAY);
+    push_ds(&mut code, INDEX);
+    push_word(&mut code, BSTR + 2);
+    push_word(&mut code, BSTR);
+    code.call("OLE2DISP", SAFE_ARRAY_PUT_ELEMENT);
+    expect_dx_ax(&mut code, 0, 3);
+    push_word(&mut code, BSTR + 2);
+    push_word(&mut code, BSTR);
+    code.call("OLE2DISP", SYS_FREE_STRING);
+    expect(&mut code, ALLOCS, 4, 4);
+    expect(&mut code, FREES, 1, 5);
+
+    // SafeArrayRedim(psa, {1, 0}): the two elements cut (8 bytes) go to
+    // a block of their own, the data is reallocated, and element 2's
+    // BSTR and that block are freed.
+    set(&mut code, BOUND, 1);
+    push_word(&mut code, ARRAY + 2);
+    push_word(&mut code, ARRAY);
+    push_ds(&mut code, BOUND);
+    code.call("OLE2DISP", SAFE_ARRAY_REDIM);
+    expect_dx_ax(&mut code, 0, 6);
+    expect(&mut code, ALLOCS, 5, 7);
+    expect(&mut code, COUNTER_ASKED, 8, 8);
+    expect(&mut code, REALLOCS, 1, 9);
+    expect(&mut code, FREES, 3, 10);
+
+    // SafeArrayGetUBound(psa, 1, &bound): 0.
+    set(&mut code, OUT, 0xFFFF);
+    push_word(&mut code, ARRAY + 2);
+    push_word(&mut code, ARRAY);
+    code.push(1);
+    push_ds(&mut code, OUT);
+    code.call("OLE2DISP", SAFE_ARRAY_GET_UBOUND);
+    expect_dx_ax(&mut code, 0, 11);
+    expect(&mut code, OUT, 0, 12);
+
+    // SafeArrayDestroy: the data and the descriptor.
+    push_word(&mut code, ARRAY + 2);
+    push_word(&mut code, ARRAY);
+    code.call("OLE2DISP", SAFE_ARRAY_DESTROY);
+    expect_dx_ax(&mut code, 0, 13);
+    expect(&mut code, FREES, 5, 14);
+
+    code.call("OLE2", OLE_UNINITIALIZE);
+    code.emit(&[0xB0, 0x00]).exit_al();
+    let (exit, log) = run("ole2disp_redim_app_malloc", program(&code, CODE));
     assert_eq!(exit, 0, "check {exit} failed\n{log}");
 }
 
