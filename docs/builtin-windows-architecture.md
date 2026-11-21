@@ -204,13 +204,18 @@ memory and programs keep their addresses, so tables are only added to
 at their ends: `src/win32/stub_tables.txt` holds the order every
 built-in DLL's and 16-bit system module's table has had, and the DLLs'
 variables with their sizes, and a test fails on an entry inserted,
-moved or taken out (`stub_tables.rs`). GDI32's
-CreateScalableFontResourceA, inserted before that test, is mended in
-states saved before it: their GDI32 image keeps its order, its stubs
-trap with the ids their functions have now, and the addresses Rust
-works out for its functions follow it. The entries KERNEL32, USER32 and
-the 16-bit USER had inserted in the same days aren't mended yet
-(#1613).
+moved or taken out (`stub_tables.rs`). The entries inserted before
+that test went in since the W32 section's version 71 (KERNEL32's,
+USER32's, GDI32's and the 16-bit USER's, listed in `INSERTED`) are
+mended in states saved before them. Such a state's image keeps its
+order, its stubs trap with the ids their functions have now, and the
+functions it lacks get stubs after its code. Every address Rust works
+out for a function of a mended DLL follows the running process's image
+(`stub_tables::address`), and a process started after the load maps the
+same image, since the system's window classes and Program Manager's
+window hold its addresses for every process. The few KERNEL32 stubs the
+system uses before a process runs are before the first insertion
+(`fixed_address`).
 
 A missing function is bound to a stub that logs `dll!name` with its
 arguments and ends the program with a message saying which function it

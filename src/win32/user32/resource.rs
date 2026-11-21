@@ -1395,9 +1395,9 @@ pub fn translate_accelerator(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// TranslateAcceleratorA's step: the message, then TRUE.
-pub fn step(_cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
+pub fn step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     match t.step {
-        0 => super::window::send(t.var(0), t.var(1), t.var(2), 0, 1),
+        0 => super::window::send(cpu, t.var(0), t.var(1), t.var(2), 0, 1),
         _ => Next::Done(TRUE),
     }
 }

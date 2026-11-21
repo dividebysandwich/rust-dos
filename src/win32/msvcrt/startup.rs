@@ -797,13 +797,8 @@ pub fn filter_returned(cpu: &mut Cpu, value: u32, call: Call) {
 }
 
 /// The address of KERNEL32's RtlUnwind.
-fn rtl_unwind_address() -> u32 {
-    let index = super::super::kernel32::DLL
-        .apis
-        .iter()
-        .position(|api| api.name == "RtlUnwind")
-        .expect("KERNEL32 has RtlUnwind");
-    super::super::stubs::stub_address(0, index)
+fn rtl_unwind_address(cpu: &Cpu) -> u32 {
+    super::super::kernel32::address_of(cpu, "RtlUnwind")
 }
 
 /// RtlUnwind(frame) called, the frames above `frame` unwound; then
@@ -811,7 +806,7 @@ fn rtl_unwind_address() -> u32 {
 fn global_unwind(cpu: &mut Cpu, frame: u32, resume: (u32, u32), d: &[u32]) -> bool {
     call_program(
         cpu,
-        rtl_unwind_address(),
+        rtl_unwind_address(cpu),
         &[frame, 0, 0, 0],
         C_UNWOUND,
         resume,
@@ -1413,7 +1408,7 @@ fn end_search(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
     if d[D_CATCH_GUARD] != 0 && rethrow(cpu, d[D_RAW]) == Some(true) {
         d[0] = X_RETHROWN;
         let args = [d[D_CATCH_GUARD], 0, 0, 0];
-        if !call_program(cpu, rtl_unwind_address(), &args, C_CXX, resume, &d) {
+        if !call_program(cpu, rtl_unwind_address(cpu), &args, C_CXX, resume, &d) {
             super::super::fatal(cpu, "a C++ exception, and its stack is gone", None);
         }
         return;
@@ -1504,7 +1499,7 @@ fn unwind_translator(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
     }
     d[0] = X_LEFT_TRANSLATOR;
     let args = [guard, 0, 0, 0];
-    if !call_program(cpu, rtl_unwind_address(), &args, C_CXX, resume, &d) {
+    if !call_program(cpu, rtl_unwind_address(cpu), &args, C_CXX, resume, &d) {
         super::super::fatal(cpu, "a C++ exception, and its stack is gone", None);
     }
 }
@@ -1874,7 +1869,7 @@ fn unwind_above(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
     };
     if !call_program(
         cpu,
-        rtl_unwind_address(),
+        rtl_unwind_address(cpu),
         &[target, 0, 0, 0],
         C_CXX,
         resume,
@@ -2271,7 +2266,7 @@ fn spawn(cpu: &mut Cpu, mode: u32, path: u32, argv: u32, envp: u32) -> Option<u3
         P_WAIT => {
             // KERNEL32's wait, as the program would call it, which lets
             // the child run; `spawned` goes on when it is done.
-            let wait = kernel32_stub("WaitForSingleObject")?;
+            let wait = kernel32_stub(cpu, "WaitForSingleObject")?;
             let resume = call::here(cpu);
             if call_program(
                 cpu,

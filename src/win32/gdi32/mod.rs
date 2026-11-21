@@ -1138,7 +1138,7 @@ pub fn callback_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             t.set(CB_AT, 1);
             t.step = 2;
-            let send = super::user32::address_of("SendMessageA");
+            let send = super::user32::address_of(cpu, "SendMessageA");
             let msg = super::user32::message::WM_PALETTECHANGED;
             let to = super::user32::message::HWND_BROADCAST;
             Next::call(send, &[to, msg, t.var(CB_PARAM), 0], 2)

@@ -460,13 +460,25 @@ fn dll_index() -> usize {
 }
 
 /// The address of USER32's function `name`, for tasks that call it as
-/// the program would and for window procedures of the system's classes.
-pub fn address_of(name: &str) -> u32 {
+/// the program would and for window procedures of the system's classes:
+/// in the running process's image of USER32, which a state from an older
+/// table has in that table's order (stub_tables.rs).
+pub fn address_of(cpu: &Cpu, name: &str) -> u32 {
     let index = APIS
         .iter()
         .position(|a| a.name == name)
         .unwrap_or_else(|| panic!("USER32 has no {}", name));
-    super::stubs::stub_address(dll_index(), index)
+    super::stub_tables::address(cpu, dll_index(), index)
+}
+
+/// The address of USER32's function `name` in the image a process
+/// started now gets, for a program file the system makes (NOTEPAD.EXE).
+pub fn address_for_new(bus: &crate::bus::Bus, name: &str) -> u32 {
+    let index = APIS
+        .iter()
+        .position(|a| a.name == name)
+        .unwrap_or_else(|| panic!("USER32 has no {}", name));
+    super::stub_tables::address_for_new(bus, dll_index(), index)
 }
 
 /// The system starts: the desktop window, the system's classes, the

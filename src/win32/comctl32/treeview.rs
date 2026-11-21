@@ -1011,19 +1011,27 @@ fn font_like(cpu: &mut Cpu, font: u32, bold: bool) -> u32 {
 
 // What the program is called for, made into ops.
 
-fn call(name: &str, args: &[Arg]) -> Op {
+fn call(cpu: &Cpu, name: &str, args: &[Arg]) -> Op {
     Op::Call {
-        target: user32::address_of(name),
+        target: user32::address_of(cpu, name),
         args: args.to_vec(),
     }
 }
 
-fn user(name: &str, args: &[u32]) -> Op {
-    call(name, &args.iter().map(|&a| Arg::V(a)).collect::<Vec<_>>())
+fn user(cpu: &Cpu, name: &str, args: &[u32]) -> Op {
+    call(
+        cpu,
+        name,
+        &args.iter().map(|&a| Arg::V(a)).collect::<Vec<_>>(),
+    )
 }
 
-fn send(hwnd: u32, msg: u32, wp: u32, lp: Arg) -> Op {
-    call("SendMessageA", &[Arg::V(hwnd), Arg::V(msg), Arg::V(wp), lp])
+fn send(cpu: &Cpu, hwnd: u32, msg: u32, wp: u32, lp: Arg) -> Op {
+    call(
+        cpu,
+        "SendMessageA",
+        &[Arg::V(hwnd), Arg::V(msg), Arg::V(wp), lp],
+    )
 }
 
 fn write(at: u32, words: Vec<u32>) -> Op {
@@ -1053,7 +1061,7 @@ fn notify(cpu: &mut Cpu, t: &Tree, code: u32, body: &[u32]) -> Vec<Op> {
     words.extend_from_slice(body);
     vec![
         write(S_NM, words),
-        send(t.notify, WM_NOTIFY, id, Arg::S(S_NM)),
+        send(cpu, t.notify, WM_NOTIFY, id, Arg::S(S_NM)),
     ]
 }
 
@@ -1172,6 +1180,7 @@ fn update_scroll_bars(cpu: &mut Cpu, t: &mut Tree, ops: &mut Vec<Op>) {
                 vec![28, mask, 0, max as u32, page as u32, pos as u32, 0],
             ),
             call(
+                cpu,
                 "SetScrollInfo",
                 &[Arg::V(hwnd), Arg::V(bar), Arg::S(S_SI), Arg::V(1)],
             ),
@@ -1186,12 +1195,12 @@ fn update_scroll_bars(cpu: &mut Cpu, t: &mut Tree, ops: &mut Vec<Op>) {
             t.max_visible_order - 1,
         ));
         if t.status & TV_VSCROLL == 0 {
-            ops.push(user("ShowScrollBar", &[hwnd, SB_VERT, 1]));
+            ops.push(user(cpu, "ShowScrollBar", &[hwnd, SB_VERT, 1]));
         }
         t.status |= TV_VSCROLL;
     } else {
         if t.status & TV_VSCROLL != 0 {
-            ops.push(user("ShowScrollBar", &[hwnd, SB_VERT, 0]));
+            ops.push(user(cpu, "ShowScrollBar", &[hwnd, SB_VERT, 0]));
         }
         t.status &= !TV_VSCROLL;
     }
@@ -1200,14 +1209,14 @@ fn update_scroll_bars(cpu: &mut Cpu, t: &mut Tree, ops: &mut Vec<Op>) {
         let max = t.tree_width - 1;
         let pos = t.scroll_x.min(max - (page - 1).max(0)).max(0);
         if t.status & TV_HSCROLL == 0 {
-            ops.push(user("ShowScrollBar", &[hwnd, SB_HORZ, 1]));
+            ops.push(user(cpu, "ShowScrollBar", &[hwnd, SB_HORZ, 1]));
         }
         t.status |= TV_HSCROLL;
         ops.extend(set_info(SB_HORZ, page, pos, max));
         hscroll(cpu, t, SB_THUMBPOSITION, pos, ops);
     } else {
         if t.status & TV_HSCROLL != 0 {
-            ops.push(user("ShowScrollBar", &[hwnd, SB_HORZ, 0]));
+            ops.push(user(cpu, "ShowScrollBar", &[hwnd, SB_HORZ, 0]));
         }
         t.status &= !TV_HSCROLL;
     }
@@ -1249,7 +1258,7 @@ fn hscroll(cpu: &mut Cpu, t: &mut Tree, code: u32, pos: i32, ops: &mut Vec<Op>) 
         invalidate(cpu, t.hwnd, true);
     }
     if code != SB_THUMBTRACK {
-        ops.push(user("SetScrollPos", &[t.hwnd, SB_HORZ, x as u32, 1]));
+        ops.push(user(cpu, "SetScrollPos", &[t.hwnd, SB_HORZ, x as u32, 1]));
     }
 }
 
@@ -1283,7 +1292,7 @@ fn set_first_visible(cpu: &mut Cpu, t: &mut Tree, new: u32, update_pos: bool, op
     }
     if update_pos {
         let pos = t.order(new) as u32;
-        ops.push(user("SetScrollPos", &[t.hwnd, SB_VERT, pos, 1]));
+        ops.push(user(cpu, "SetScrollPos", &[t.hwnd, SB_VERT, pos, 1]));
     }
     invalidate(cpu, t.hwnd, true);
 }
@@ -1312,7 +1321,7 @@ fn vscroll(cpu: &mut Cpu, t: &mut Tree, code: u32, pos: i32, ops: &mut Vec<Op>) 
         set_first_visible(cpu, t, new, code != SB_THUMBTRACK, ops);
     } else if code == SB_THUMBPOSITION {
         let pos = t.order(new) as u32;
-        ops.push(user("SetScrollPos", &[t.hwnd, SB_VERT, pos, 1]));
+        ops.push(user(cpu, "SetScrollPos", &[t.hwnd, SB_VERT, pos, 1]));
     }
 }
 
@@ -1523,7 +1532,7 @@ fn step(cpu: &mut Cpu, hwnd: u32, w: Step, r: &mut Run, out: &mut Out) {
         // end their painting.
         if w[0] == W_END_PAINT {
             out.ops
-                .push(call("EndPaint", &[Arg::V(hwnd), Arg::S(S_PS)]));
+                .push(call(cpu, "EndPaint", &[Arg::V(hwnd), Arg::S(S_PS)]));
         }
         return;
     };
@@ -1648,7 +1657,7 @@ fn step_on(cpu: &mut Cpu, t: &mut Tree, w: Step, r: &mut Run, out: &mut Out) {
             let mask = TVIF_TEXT | TVIF_HANDLE | TVIF_STATE | TVIF_PARAM;
             out.ops = tv_notify(cpu, t, TVN_SELCHANGEDA, c, mask, b, a, scratch);
             // Windows paints the new selection before it returns.
-            out.ops.push(user("UpdateWindow", &[t.hwnd]));
+            out.ops.push(user(cpu, "UpdateWindow", &[t.hwnd]));
         }
         W_ENSURE => {
             if !t.user_item(a) {
@@ -1757,13 +1766,14 @@ fn step_on(cpu: &mut Cpu, t: &mut Tree, w: Step, r: &mut Run, out: &mut Out) {
                 }
                 t.edit = 0;
                 t.edit_item = 0;
-                out.ops.push(user("DestroyWindow", &[edit]));
+                out.ops.push(user(cpu, "DestroyWindow", &[edit]));
                 r.result = 0;
                 return;
             }
-            out.ops.push(user("SetFocus", &[edit]));
-            out.ops.push(send(edit, EM_SETSEL, 0, Arg::V(u32::MAX)));
-            out.ops.push(user("ShowWindow", &[edit, SW_SHOW]));
+            out.ops.push(user(cpu, "SetFocus", &[edit]));
+            out.ops
+                .push(send(cpu, edit, EM_SETSEL, 0, Arg::V(u32::MAX)));
+            out.ops.push(user(cpu, "ShowWindow", &[edit, SW_SHOW]));
             r.result = edit;
         }
         W_END_EDIT => {
@@ -1780,6 +1790,7 @@ fn step_on(cpu: &mut Cpu, t: &mut Tree, w: Step, r: &mut Run, out: &mut Out) {
                 let size = Arg::V(EDIT_BUF - 1);
                 out.ops.push(write(S_EDIT, vec![0]));
                 out.ops.push(call(
+                    cpu,
                     "GetWindowTextA",
                     &[Arg::V(edit), Arg::S(S_EDIT), size],
                 ));
@@ -1823,8 +1834,8 @@ fn step_on(cpu: &mut Cpu, t: &mut Tree, w: Step, r: &mut Run, out: &mut Out) {
             // tree, whose edit control it isn't by then.
             t.edit = 0;
             t.edit_item = 0;
-            out.ops.push(user("ShowWindow", &[edit, SW_HIDE]));
-            out.ops.push(user("DestroyWindow", &[edit]));
+            out.ops.push(user(cpu, "ShowWindow", &[edit, SW_HIDE]));
+            out.ops.push(user(cpu, "DestroyWindow", &[edit]));
             invalidate(cpu, t.hwnd, true);
             if b != 0 {
                 r.result = 1;
@@ -1848,6 +1859,7 @@ fn step_on(cpu: &mut Cpu, t: &mut Tree, w: Step, r: &mut Run, out: &mut Out) {
             let cy = i.rect.bottom - i.rect.top + 3;
             let flags = SWP_NOMOVE | SWP_DRAWFRAME;
             out.ops.push(user(
+                cpu,
                 "SetWindowPos",
                 &[t.edit, 0, 0, 0, cx as u32, cy as u32, flags],
             ));
@@ -1949,7 +1961,7 @@ fn step_on(cpu: &mut Cpu, t: &mut Tree, w: Step, r: &mut Run, out: &mut Out) {
         }
         W_END_PAINT => {
             out.ops
-                .push(call("EndPaint", &[Arg::V(t.hwnd), Arg::S(S_PS)]));
+                .push(call(cpu, "EndPaint", &[Arg::V(t.hwnd), Arg::S(S_PS)]));
         }
         W_CLICK => {
             out.ops = notify(cpu, t, NM_CLICK, &[]);
@@ -1975,7 +1987,7 @@ fn step_on(cpu: &mut Cpu, t: &mut Tree, w: Step, r: &mut Run, out: &mut Out) {
             }
             clicked(cpu, t, a, b, c != 0, out);
         }
-        W_SET_FOCUS => out.ops.push(user("SetFocus", &[t.hwnd])),
+        W_SET_FOCUS => out.ops.push(user(cpu, "SetFocus", &[t.hwnd])),
         W_DBLCLK_ASKED => {
             if r.last != 0 || !t.valid(a) {
                 return;
@@ -2069,11 +2081,11 @@ fn step_on(cpu: &mut Cpu, t: &mut Tree, w: Step, r: &mut Run, out: &mut Out) {
             }
             if a != 0 && t.style & TVS_TRACKSELECT != 0 {
                 let hand = user32::resource::system_cursor(cpu, IDC_HAND);
-                out.ops.push(user("SetCursor", &[hand]));
+                out.ops.push(user(cpu, "SetCursor", &[hand]));
                 r.result = 0;
             } else {
                 out.ops
-                    .push(user("DefWindowProcA", &[t.hwnd, WM_SETCURSOR, b, c]));
+                    .push(user(cpu, "DefWindowProcA", &[t.hwnd, WM_SETCURSOR, b, c]));
                 out.push.push(st(W_RESULT, &[]));
             }
         }
@@ -2848,6 +2860,7 @@ fn edit_create(cpu: &mut Cpu, t: &mut Tree, h: u32, r: &mut Run, out: &mut Out) 
     // the tree EN_UPDATE and EN_CHANGE before WM_PARENTNOTIFY.
     out.ops.push(write(S_EDIT, text_words(&text, EDIT_BUF)));
     out.ops.push(call(
+        cpu,
         "CreateWindowExA",
         &[
             Arg::V(0),
@@ -2882,15 +2895,17 @@ fn edit_created(cpu: &mut Cpu, t: &mut Tree, h: u32, r: &mut Run, out: &mut Out)
         .window(edit)
         .map_or((0, 0), |w| (w.style, w.ex_style));
     out.ops.push(user(
+        cpu,
         "SetWindowLongA",
         &[edit, GWL_EXSTYLE, ex & !WS_EX_CLIENTEDGE],
     ));
     out.ops.push(user(
+        cpu,
         "SetWindowLongA",
         &[edit, GWL_STYLE, style | WS_BORDER],
     ));
     let font = t.font_for(h);
-    out.ops.push(send(edit, WM_SETFONT, font, Arg::V(0)));
+    out.ops.push(send(cpu, edit, WM_SETFONT, font, Arg::V(0)));
     // The edit control's own procedure goes on behind the tree's, which
     // ends the editing on Enter and Esc.
     let ours = super::address_of("TreeViewEditProc");
@@ -2930,7 +2945,7 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             Arg::V(wp),
             Arg::V(lp),
         ];
-        s.call(user32::address_of("CallWindowProcA"), &args)
+        s.call(user32::address_of(cpu, "CallWindowProcA"), &args)
             .ret_last();
         script::run(cpu, TREEVIEW, s)
     };
@@ -2978,7 +2993,7 @@ fn command(cpu: &mut Cpu, hwnd: u32, wp: u32, lp: u32) -> Option<u32> {
             let mut s = new_script(hwnd);
             s.ops.push(write(S_EDIT, vec![0]));
             s.call(
-                user32::address_of("GetWindowTextA"),
+                user32::address_of(cpu, "GetWindowTextA"),
                 &[Arg::V(edit), Arg::S(S_EDIT), Arg::V(EDIT_BUF - 1)],
             );
             s.ops.push(then_steps(&[st(W_EDIT_RESIZE, &[])]));
@@ -2993,7 +3008,7 @@ fn command(cpu: &mut Cpu, hwnd: u32, wp: u32, lp: u32) -> Option<u32> {
         }
         _ => {
             let mut s = Script::new(hwnd);
-            s.ops.push(send(notify_to, WM_COMMAND, wp, Arg::V(lp)));
+            s.ops.push(send(cpu, notify_to, WM_COMMAND, wp, Arg::V(lp)));
             s.ret_last();
             script::run(cpu, TREEVIEW, s)
         }
@@ -3283,7 +3298,7 @@ fn paint(cpu: &mut Cpu, hwnd: u32, hdc: u32) -> Option<u32> {
     }
     let mut s = new_script(hwnd);
     s.call(
-        user32::address_of("BeginPaint"),
+        user32::address_of(cpu, "BeginPaint"),
         &[Arg::V(hwnd), Arg::S(S_PS)],
     );
     s.ops
@@ -3478,7 +3493,7 @@ fn press(cpu: &mut Cpu, t: &mut Tree, h: u32, flags: u32, packed: u32, out: &mut
         t.press_item = h;
         t.press_flags = flags;
         t.press_edit = edit;
-        out.ops.push(user("SetCapture", &[t.hwnd]));
+        out.ops.push(user(cpu, "SetCapture", &[t.hwnd]));
         return;
     }
     clicked(cpu, t, h, flags, edit, out);
@@ -3560,7 +3575,7 @@ fn pressed_mouse(cpu: &mut Cpu, hwnd: u32, msg: u32, lp: u32) -> Option<Option<u
         }
         let ops = with(cpu, hwnd, |cpu, t| {
             t.press = 0;
-            let mut ops = vec![user("ReleaseCapture", &[])];
+            let mut ops = vec![user(cpu, "ReleaseCapture", &[])];
             if !t.valid(h) {
                 return ops;
             }
@@ -3591,17 +3606,17 @@ fn pressed_mouse(cpu: &mut Cpu, hwnd: u32, msg: u32, lp: u32) -> Option<Option<u
     let mut ops = if msg == WM_CAPTURECHANGED {
         Vec::new()
     } else {
-        vec![user("ReleaseCapture", &[])]
+        vec![user(cpu, "ReleaseCapture", &[])]
     };
     if button == 2 {
         if msg == WM_RBUTTONUP {
-            ops.push(user("SetFocus", &[hwnd]));
+            ops.push(user(cpu, "SetFocus", &[hwnd]));
             ops.push(then_steps(&[st(W_RCLICK, &[])]));
             // WM_CONTEXTMENU follows when the parent leaves NM_RCLICK
             // to the tree; the point is on the screen.
             let screen = user32::user(cpu).screen_client(hwnd);
             let pt = user32::make_long(x + screen.left, y + screen.top);
-            ops.push(send(hwnd, WM_CONTEXTMENU, hwnd, Arg::V(pt)));
+            ops.push(send(cpu, hwnd, WM_CONTEXTMENU, hwnd, Arg::V(pt)));
         }
         return Some(finish(cpu, hwnd, ops, 0));
     }
@@ -3615,7 +3630,7 @@ fn rbutton_down(cpu: &mut Cpu, hwnd: u32, lp: u32) -> Option<u32> {
     let (x, y) = user32::point_of(lp);
     let ops = with(cpu, hwnd, |cpu, t| {
         if t.edit != 0 {
-            return vec![user("SetFocus", &[t.hwnd])];
+            return vec![user(cpu, "SetFocus", &[t.hwnd])];
         }
         let (h, _) = hit_test(cpu, t, x, y);
         t.press = 2;
@@ -3624,7 +3639,7 @@ fn rbutton_down(cpu: &mut Cpu, hwnd: u32, lp: u32) -> Option<u32> {
         t.press_edit = false;
         t.press_x = x;
         t.press_y = y;
-        vec![user("SetCapture", &[t.hwnd])]
+        vec![user(cpu, "SetCapture", &[t.hwnd])]
     })
     .unwrap_or_default();
     finish(cpu, hwnd, ops, 0)
@@ -3632,7 +3647,7 @@ fn rbutton_down(cpu: &mut Cpu, hwnd: u32, lp: u32) -> Option<u32> {
 
 fn lbutton_dblclk(cpu: &mut Cpu, hwnd: u32, lp: u32) -> Option<u32> {
     let (x, y) = user32::point_of(lp);
-    let mut ops = vec![user("SetFocus", &[hwnd])];
+    let mut ops = vec![user(cpu, "SetFocus", &[hwnd])];
     with(cpu, hwnd, |cpu, t| {
         if t.edit_timer {
             user32::message::kill_timer(cpu, &[t.hwnd, TV_EDIT_TIMER]);
@@ -3934,14 +3949,14 @@ fn create(cpu: &mut Cpu, hwnd: u32, cs: u32) -> Option<u32> {
     }
     put(cpu, t);
     let mut s = new_script(hwnd);
-    s.send(parent, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY));
+    s.send(cpu, parent, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY));
     s.ops.push(then_steps(&[st(W_NOTIFY_FORMAT, &[])]));
     if style & TVS_NOTOOLTIPS == 0 {
         s.ops
             .push(write(S_CLASS, script::words_of(b"tooltips_class32\0")));
         let d = CW_USEDEFAULT;
         s.call(
-            user32::address_of("CreateWindowExA"),
+            user32::address_of(cpu, "CreateWindowExA"),
             &[
                 Arg::V(0),
                 Arg::S(S_CLASS),
@@ -3959,8 +3974,8 @@ fn create(cpu: &mut Cpu, hwnd: u32, cs: u32) -> Option<u32> {
         );
         s.ops.push(then_steps(&[st(W_TOOLTIP, &[])]));
     }
-    s.user("ShowScrollBar", &[hwnd, SB_VERT, 0]);
-    s.user("ShowScrollBar", &[hwnd, SB_HORZ, 0]);
+    s.user(cpu, "ShowScrollBar", &[hwnd, SB_VERT, 0]);
+    s.user(cpu, "ShowScrollBar", &[hwnd, SB_HORZ, 0]);
     s.ret(0);
     script::run(cpu, TREEVIEW, s)
 }
@@ -4422,7 +4437,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let mut s = new_script(hwnd);
             if selected != 0 {
                 invalidate(cpu, hwnd, true);
-                s.user("UpdateWindow", &[hwnd]);
+                s.user(cpu, "UpdateWindow", &[hwnd]);
             }
             s.ops.push(then_steps(&[st(W_FOCUS_TELL, &[NM_KILLFOCUS])]));
             s.ret(0);
@@ -4448,7 +4463,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 return Some(0);
             }
             let mut s = new_script(hwnd);
-            s.send(wp, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY));
+            s.send(cpu, wp, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY));
             s.ops.push(then_steps(&[st(W_NOTIFY_FORMAT, &[])]));
             return script::run(cpu, TREEVIEW, s);
         }
@@ -4511,7 +4526,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                         && new & TVS_NOTOOLTIPS != 0
                         && t.tooltip != 0
                     {
-                        ops.push(user("DestroyWindow", &[t.tooltip]));
+                        ops.push(user(cpu, "DestroyWindow", &[t.tooltip]));
                         t.tooltip = 0;
                     }
                     t.style = new;

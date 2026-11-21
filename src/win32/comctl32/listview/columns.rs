@@ -117,7 +117,10 @@ fn create_header(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
         Arg::V(instance),
         Arg::V(0),
     ];
-    vec![user_op("CreateWindowExA", &args), step(T_HEADER_MADE, &[])]
+    vec![
+        user_op(cpu, "CreateWindowExA", &args),
+        step(T_HEADER_MADE, &[]),
+    ]
 }
 
 fn header_made(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
@@ -132,8 +135,14 @@ fn header_made(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     let font = lv.hfont(cpu);
     put(cpu, c.hwnd, lv);
     vec![
-        send_op(hdr, header::HDM_SETUNICODEFORMAT, Arg::V(1), Arg::V(0)),
-        send_op(hdr, user32::message::WM_SETFONT, Arg::V(font), Arg::V(1)),
+        send_op(cpu, hdr, header::HDM_SETUNICODEFORMAT, Arg::V(1), Arg::V(0)),
+        send_op(
+            cpu,
+            hdr,
+            user32::message::WM_SETFONT,
+            Arg::V(font),
+            Arg::V(1),
+        ),
         step(layout::T_UPDATE_SIZE, &[]),
     ]
 }
@@ -267,6 +276,7 @@ fn insert(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     write_hditem(cpu, c.scratch, hd, &text, has_text);
     vec![
         send_op(
+            cpu,
             lv.header,
             header::HDM_INSERTITEMA,
             Arg::V(col as u32),
@@ -373,6 +383,7 @@ fn set(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     write_hditem(cpu, c.scratch, hd, &text, has_text);
     vec![
         send_op(
+            cpu,
             lv.header,
             header::HDM_SETITEMA,
             Arg::V(col as u32),
@@ -482,6 +493,7 @@ pub(super) fn delete_column(cpu: &mut Cpu, hwnd: u32, lv: ListView, col: i32) ->
     }
     let ops = vec![
         send_op(
+            cpu,
             lv.header,
             header::HDM_DELETEITEM,
             Arg::V(col as u32),
@@ -611,6 +623,7 @@ fn width_ops(
     Ok(vec![
         Op::Write { at: S_AUX, words },
         send_op(
+            cpu,
             lv.header,
             header::HDM_SETITEMA,
             Arg::V(col as u32),
@@ -715,7 +728,7 @@ fn forward(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     }
     write_words(cpu, c.scratch + S_NM, &w);
     let msg = user32::message::WM_NOTIFY;
-    vec![send_op(lv.notify, msg, Arg::V(w[1]), Arg::S(S_NM))]
+    vec![send_op(cpu, lv.notify, msg, Arg::V(w[1]), Arg::S(S_NM))]
 }
 
 /// The continuations.
@@ -730,7 +743,7 @@ pub(super) fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             if lv.header == 0 || lv.style & LVS_NOCOLUMNHEADER != 0 {
                 return Vec::new();
             }
-            vec![user_op("ShowWindow", &[Arg::V(lv.header), Arg::V(1)])]
+            vec![user_op(cpu, "ShowWindow", &[Arg::V(lv.header), Arg::V(1)])]
         }
         T_REPORT_HEADER => vec![step(layout::T_UPDATE_SIZE, &[])],
         T_INSERT => insert(cpu, c),

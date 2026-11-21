@@ -204,7 +204,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
             write_words(cpu, t.scratch, &rect);
             Next::call(t.var(1), &[MONITOR, t.var(3), t.scratch, t.var(2)], 1)
         }
-        _ => Next::call(address_of("ShowWindow"), &[t.var(1), t.var(2)], 1),
+        _ => Next::call(address_of(cpu, "ShowWindow"), &[t.var(1), t.var(2)], 1),
     }
 }
 

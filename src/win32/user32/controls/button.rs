@@ -261,7 +261,7 @@ pub fn paint_vars(hwnd: u32, hdc: u32, begin: bool, action: u32) -> Vec<u32> {
 pub fn open(cpu: &mut Cpu, t: &mut Task, next: u16) -> Next {
     let hwnd = t.var(P_HWND);
     match t.var(P_HOW) {
-        HOW_PAINT => Next::call(address_of("BeginPaint"), &[hwnd, t.scratch], next),
+        HOW_PAINT => Next::call(address_of(cpu, "BeginPaint"), &[hwnd, t.scratch], next),
         HOW_DC => {
             let hdc = paint::get_dc(cpu, &[hwnd]).unwrap_or(0);
             t.set(P_HDC, hdc);
@@ -306,7 +306,7 @@ pub fn close(cpu: &mut Cpu, t: &mut Task, done: u16) -> Next {
         unclip(cpu, hdc, t.var(P_CLIP));
     }
     match t.var(P_HOW) {
-        HOW_PAINT => Next::call(address_of("EndPaint"), &[hwnd, t.scratch], done),
+        HOW_PAINT => Next::call(address_of(cpu, "EndPaint"), &[hwnd, t.scratch], done),
         HOW_DC => {
             if hdc != 0 {
                 paint::release_dc(cpu, &[hwnd, hdc]);
@@ -336,9 +336,9 @@ pub fn notify(cpu: &mut Cpu, module: u32, hwnd: u32, code: u32, result: u32) -> 
 }
 
 /// The steps of `notify`.
-pub fn notify_step(t: &mut Task) -> Next {
+pub fn notify_step(cpu: &Cpu, t: &mut Task) -> Next {
     match t.step {
-        0 => window::send(t.var(1), WM_COMMAND, t.var(2), t.var(3), 1),
+        0 => window::send(cpu, t.var(1), WM_COMMAND, t.var(2), t.var(3), 1),
         _ => Next::Done(t.var(4)),
     }
 }
@@ -581,7 +581,7 @@ pub fn button_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let k = kind(t);
     if k == K_NOTIFY {
-        return notify_step(t);
+        return notify_step(cpu, t);
     }
     if t.step >= STEP_PAINT {
         return paint_step(cpu, t, value);
@@ -591,27 +591,27 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         K_ERASE => erase_step(cpu, t, value),
         K_PAINT => Next::call(0, &[], STEP_PAINT),
         K_DOWN => match t.step {
-            0 => Next::call(address_of("SetCapture"), &[hwnd], 1),
-            1 => Next::call(address_of("SetFocus"), &[hwnd], 2),
+            0 => Next::call(address_of(cpu, "SetCapture"), &[hwnd], 1),
+            1 => Next::call(address_of(cpu, "SetFocus"), &[hwnd], 2),
             2 => {
                 let state = button(cpu, hwnd).state;
                 set_state(cpu, hwnd, state | PRESSED);
-                window::send(hwnd, BM_SETSTATE, 1, 0, 3)
+                window::send(cpu, hwnd, BM_SETSTATE, 1, 0, 3)
             }
             _ => Next::Done(0),
         },
         K_SPACE => match t.step {
-            0 => window::send(hwnd, BM_SETSTATE, 1, 0, 1),
+            0 => window::send(cpu, hwnd, BM_SETSTATE, 1, 0, 1),
             1 => {
                 let state = button(cpu, hwnd).state;
                 set_state(cpu, hwnd, state | PRESSED);
-                Next::call(address_of("SetCapture"), &[hwnd], 2)
+                Next::call(address_of(cpu, "SetCapture"), &[hwnd], 2)
             }
             _ => Next::Done(0),
         },
         K_UP => up_step(cpu, t),
         K_CAPTURE => match t.step {
-            0 => window::send(hwnd, BM_SETSTATE, 0, 0, 1),
+            0 => window::send(cpu, hwnd, BM_SETSTATE, 0, 0, 1),
             _ => Next::Done(0),
         },
         K_SETTEXT => settext_step(cpu, t, value),
@@ -624,7 +624,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             0 => repaint_then(cpu, t, ODA_FOCUS, 0, 1),
             1 => {
                 if t.var(V_A) & PRESSED != 0 && user(cpu).input.capture == hwnd {
-                    return Next::call(address_of("ReleaseCapture"), &[], 2);
+                    return Next::call(address_of(cpu, "ReleaseCapture"), &[], 2);
                 }
                 Next::call(0, &[], 2)
             }
@@ -635,8 +635,8 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
         },
         K_CLICK => match t.step {
-            0 => window::send(hwnd, WM_LBUTTONDOWN, 0, 0, 1),
-            1 => window::send(hwnd, WM_LBUTTONUP, 0, 0, 2),
+            0 => window::send(cpu, hwnd, WM_LBUTTONDOWN, 0, 0, 1),
+            1 => window::send(cpu, hwnd, WM_LBUTTONUP, 0, 0, 2),
             _ => Next::Done(0),
         },
         K_SETCHECK => setcheck_step(cpu, t),
@@ -650,7 +650,14 @@ fn notify_from(cpu: &mut Cpu, t: &Task, code: u32, next: u16) -> Next {
     let hwnd = t.var(P_HWND);
     let parent = parent_of(cpu, hwnd);
     let id = user(cpu).window(hwnd).map_or(0, |w| w.id);
-    window::send(parent, WM_COMMAND, id & 0xFFFF | code << 16, hwnd, next)
+    window::send(
+        cpu,
+        parent,
+        WM_COMMAND,
+        id & 0xFFFF | code << 16,
+        hwnd,
+        next,
+    )
 }
 
 /// WM_LBUTTONUP, or WM_KEYUP of the space bar: the click.
@@ -665,11 +672,11 @@ fn up_step(cpu: &mut Cpu, t: &mut Task) -> Next {
             let state = state & NSTATES;
             set_state(cpu, hwnd, state);
             if state & HIGHLIGHTED == 0 {
-                return Next::call(address_of("ReleaseCapture"), &[], 9);
+                return Next::call(address_of(cpu, "ReleaseCapture"), &[], 9);
             }
-            window::send(hwnd, BM_SETSTATE, 0, 0, 1)
+            window::send(cpu, hwnd, BM_SETSTATE, 0, 0, 1)
         }
-        1 => Next::call(address_of("ReleaseCapture"), &[], 2),
+        1 => Next::call(address_of(cpu, "ReleaseCapture"), &[], 2),
         2 => {
             if t.var(V_B) == 0 && !in_client(cpu, hwnd, t.var(V_A)) {
                 return Next::Done(0);
@@ -678,16 +685,16 @@ fn up_step(cpu: &mut Cpu, t: &mut Task) -> Next {
             match style_of(cpu, hwnd) & 0x0F {
                 BS_AUTOCHECKBOX => {
                     let check = (state & CHECKED == 0) as u32;
-                    window::send(hwnd, BM_SETCHECK, check, 0, 3)
+                    window::send(cpu, hwnd, BM_SETCHECK, check, 0, 3)
                 }
-                BS_AUTORADIOBUTTON => window::send(hwnd, BM_SETCHECK, 1, 0, 3),
+                BS_AUTORADIOBUTTON => window::send(cpu, hwnd, BM_SETCHECK, 1, 0, 3),
                 BS_AUTO3STATE => {
                     let check = if state & THREE_STATE != 0 {
                         0
                     } else {
                         (state & 3) + 1
                     };
-                    window::send(hwnd, BM_SETCHECK, check, 0, 3)
+                    window::send(cpu, hwnd, BM_SETCHECK, check, 0, 3)
                 }
                 _ => Next::call(0, &[], 3),
             }
@@ -710,7 +717,7 @@ fn settext_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return Next::call(0, &[], 2);
             }
             let parent = parent_of(cpu, hwnd);
-            window::send(parent, WM_CTLCOLORSTATIC, hdc, hwnd, 1)
+            window::send(cpu, parent, WM_CTLCOLORSTATIC, hdc, hwnd, 1)
         }
         1 => {
             let hdc = t.var(P_HDC);
@@ -736,7 +743,7 @@ fn settext_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         }
         2 => {
             let args = [hwnd, WM_SETTEXT, t.var(V_A), t.var(V_B)];
-            Next::call(address_of("DefWindowProcA"), &args, 3)
+            Next::call(address_of(cpu, "DefWindowProcA"), &args, 3)
         }
         _ => {
             if style_of(cpu, hwnd) & 0x0F == BS_GROUPBOX {
@@ -797,7 +804,7 @@ fn setcheck_step(cpu: &mut Cpu, t: &mut Task) -> Next {
                 return Next::Done(0);
             }
             t.set(V_B, i as u32 + 1);
-            window::send(t.var(V_LIST + i), BM_SETCHECK, 0, 0, 2)
+            window::send(cpu, t.var(V_LIST + i), BM_SETCHECK, 0, 0, 2)
         }
     }
 }
@@ -844,7 +851,7 @@ fn erase_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     match t.step {
         0 => {
             let parent = parent_of(cpu, hwnd);
-            window::send(parent, WM_CTLCOLORBTN, hdc, hwnd, 1)
+            window::send(cpu, parent, WM_CTLCOLORBTN, hdc, hwnd, 1)
         }
         _ => {
             let brush = if value != 0 {
@@ -887,7 +894,7 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 _ => WM_CTLCOLORSTATIC,
             };
             let parent = parent_of(cpu, hwnd);
-            window::send(parent, msg, hdc, hwnd, STEP_PAINT + 2)
+            window::send(cpu, parent, msg, hdc, hwnd, STEP_PAINT + 2)
         }
         2 => {
             let hdc = t.var(P_HDC);
@@ -909,7 +916,7 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     write_draw_item(cpu, hwnd, hdc, dis, action, b.state, style);
                     let parent = parent_of(cpu, hwnd);
                     let id = user(cpu).window(hwnd).map_or(0, |w| w.id);
-                    return window::send(parent, WM_DRAWITEM, id, dis, STEP_PAINT + 3);
+                    return window::send(cpu, parent, WM_DRAWITEM, id, dis, STEP_PAINT + 3);
                 }
                 BS_USERBUTTON => {
                     let rc = client_rect(cpu, hwnd);

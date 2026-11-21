@@ -80,7 +80,7 @@ pub fn exit_windows_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The call that sends `msg` to `hwnd`, going on at `step`. Its value is 0
 /// when no answer came.
-fn send(t: &Task, hwnd: u32, msg: u32, wparam: u32, step: u16) -> Next {
+fn send(cpu: &Cpu, t: &Task, hwnd: u32, msg: u32, wparam: u32, step: u16) -> Next {
     let args = [
         hwnd,
         msg,
@@ -90,7 +90,7 @@ fn send(t: &Task, hwnd: u32, msg: u32, wparam: u32, step: u16) -> Next {
         ANSWER_MS,
         t.scratch,
     ];
-    Next::call(address_of("SendMessageTimeoutA"), &args, step)
+    Next::call(address_of(cpu, "SendMessageTimeoutA"), &args, step)
 }
 
 /// The steps of ExitWindowsEx's task.
@@ -113,7 +113,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 };
                 t.set(NEXT, at as u32 + 1);
                 if user(cpu).is_window(hwnd) {
-                    return send(t, hwnd, WM_QUERYENDSESSION, 0, ANSWER);
+                    return send(cpu, t, hwnd, WM_QUERYENDSESSION, 0, ANSWER);
                 }
             }
             ANSWER => {
@@ -152,7 +152,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 };
                 t.set(NEXT, at as u32 + 1);
                 if user(cpu).is_window(hwnd) {
-                    return send(t, hwnd, WM_ENDSESSION, t.var(ENDING), NOTIFY);
+                    return send(cpu, t, hwnd, WM_ENDSESSION, t.var(ENDING), NOTIFY);
                 }
             }
         }

@@ -828,7 +828,7 @@ const THREAD_RETURN: usize = 46;
 
 /// Where calls into the program return to (call.rs).
 pub fn call_return_address() -> u32 {
-    super::stubs::stub_address(0, CALL_RETURN)
+    super::stub_tables::fixed_address(0, CALL_RETURN)
 }
 
 /// Whether the running process's environment has the variable `name`.
@@ -978,22 +978,20 @@ pub fn program_path(cpu: &mut Cpu) -> Option<String> {
         .map(|m| m.path.clone())
 }
 
-/// The address of KERNEL32's function `name`, for a task to call.
-pub fn address_of(name: &str) -> u32 {
+/// The address of KERNEL32's function `name`, for a task to call: in the
+/// running process's image of KERNEL32, which a state from an older table
+/// has in that table's order (stub_tables.rs).
+pub fn address_of(cpu: &Cpu, name: &str) -> u32 {
     let index = APIS
         .iter()
         .position(|a| a.name == name)
         .unwrap_or_else(|| panic!("KERNEL32 has no {}", name));
-    let dll = super::stubs::DLLS
-        .iter()
-        .position(|d| d.name == DLL.name)
-        .expect("KERNEL32 is a built-in DLL");
-    super::stubs::stub_address(dll, index)
+    super::stub_tables::address(cpu, 0, index)
 }
 
 /// Where 32-bit code that 16-bit code called returns to (Win16Return).
-pub fn win16_return_address() -> u32 {
-    address_of("Win16Return")
+pub fn win16_return_address(cpu: &Cpu) -> u32 {
+    address_of(cpu, "Win16Return")
 }
 
 /// The trap id of the 32-bit slots that call 16-bit procedures
@@ -1270,21 +1268,21 @@ pub fn read_whole_file(cpu: &mut Cpu, name: u32) -> Option<Option<(u32, u32)>> {
 /// Where the main thread starts when DLLs' entry points run first.
 pub fn process_start_address() -> u32 {
     let index = APIS.iter().position(|a| a.name == "ProcessStart");
-    super::stubs::stub_address(0, index.expect("ProcessStart"))
+    super::stub_tables::fixed_address(0, index.expect("ProcessStart"))
 }
 
 /// The idle loop's stub (thread.rs).
 pub fn idle_address() -> u32 {
-    super::stubs::stub_address(0, IDLE)
+    super::stub_tables::fixed_address(0, IDLE)
 }
 
 /// Where a new thread starts, and where its function returns to.
 pub fn thread_start_address() -> u32 {
-    super::stubs::stub_address(0, THREAD_START)
+    super::stub_tables::fixed_address(0, THREAD_START)
 }
 
 pub fn thread_return_address() -> u32 {
-    super::stubs::stub_address(0, THREAD_RETURN)
+    super::stub_tables::fixed_address(0, THREAD_RETURN)
 }
 
 fn call_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {

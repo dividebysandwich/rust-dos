@@ -558,7 +558,7 @@ pub(super) fn load_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub(crate) fn win_exec_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
     let (process, thread) = (t.var(0), t.var(1));
     if t.step == 0 {
-        let wait = crate::win32::user32::address_of("WaitForInputIdle");
+        let wait = crate::win32::user32::address_of(cpu, "WaitForInputIdle");
         return Next::call(wait, &[process, WIN_EXEC_IDLE_MS], 1);
     }
     object::close(cpu, process);

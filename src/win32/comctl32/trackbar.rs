@@ -423,7 +423,7 @@ fn page_direction(l: &Layout, t: &Trackbar, x: i32, y: i32) -> i32 {
 }
 
 /// Add telling the parent of a move, with WM_HSCROLL or WM_VSCROLL.
-fn notify_scroll(hwnd: u32, t: &Trackbar, s: &mut Script, code: u32) {
+fn notify_scroll(cpu: &Cpu, hwnd: u32, t: &Trackbar, s: &mut Script, code: u32) {
     if t.notify == 0 {
         return;
     }
@@ -432,39 +432,39 @@ fn notify_scroll(hwnd: u32, t: &Trackbar, s: &mut Script, code: u32) {
     } else {
         WM_HSCROLL
     };
-    s.send(t.notify, msg, Arg::V(code), Arg::V(hwnd));
+    s.send(cpu, t.notify, msg, Arg::V(code), Arg::V(hwnd));
 }
 
-fn page_down(hwnd: u32, t: &mut Trackbar, s: &mut Script) {
+fn page_down(cpu: &Cpu, hwnd: u32, t: &mut Trackbar, s: &mut Script) {
     if t.pos == t.max {
         return;
     }
     t.pos = t.pos.saturating_add(t.page).min(t.max);
-    notify_scroll(hwnd, t, s, TB_PAGEDOWN);
+    notify_scroll(cpu, hwnd, t, s, TB_PAGEDOWN);
 }
 
-fn page_up(hwnd: u32, t: &mut Trackbar, s: &mut Script) {
+fn page_up(cpu: &Cpu, hwnd: u32, t: &mut Trackbar, s: &mut Script) {
     if t.pos == t.min {
         return;
     }
     t.pos = t.pos.saturating_sub(t.page).max(t.min);
-    notify_scroll(hwnd, t, s, TB_PAGEUP);
+    notify_scroll(cpu, hwnd, t, s, TB_PAGEUP);
 }
 
-fn line_up(hwnd: u32, t: &mut Trackbar, s: &mut Script) {
+fn line_up(cpu: &Cpu, hwnd: u32, t: &mut Trackbar, s: &mut Script) {
     if t.pos == t.min {
         return;
     }
     t.pos = t.pos.saturating_sub(t.line).max(t.min);
-    notify_scroll(hwnd, t, s, TB_LINEUP);
+    notify_scroll(cpu, hwnd, t, s, TB_LINEUP);
 }
 
-fn line_down(hwnd: u32, t: &mut Trackbar, s: &mut Script) {
+fn line_down(cpu: &Cpu, hwnd: u32, t: &mut Trackbar, s: &mut Script) {
     if t.pos == t.max {
         return;
     }
     t.pos = t.pos.saturating_add(t.line).min(t.max);
-    notify_scroll(hwnd, t, s, TB_LINEDOWN);
+    notify_scroll(cpu, hwnd, t, s, TB_LINEDOWN);
 }
 
 /// Page towards the mouse at (`x`, `y`) while the button is held
@@ -473,9 +473,9 @@ fn auto_page(cpu: &mut Cpu, hwnd: u32, t: &mut Trackbar, x: i32, y: i32, s: &mut
     let l = layout(cpu, hwnd, t);
     let dir = page_direction(&l, t, x, y);
     if dir > 0 && t.flags & FLAG_PAGE_RIGHT != 0 {
-        page_down(hwnd, t, s);
+        page_down(cpu, hwnd, t, s);
     } else if dir < 0 && t.flags & FLAG_PAGE_LEFT != 0 {
-        page_up(hwnd, t, s);
+        page_up(cpu, hwnd, t, s);
     } else {
         return false;
     }
@@ -734,9 +734,9 @@ fn custom_draw(cpu: &mut Cpu, hwnd: u32, hdc: u32, stage: u32) -> Vec<u32> {
 }
 
 /// The steps that send the parent `msg` with `wp` and `lp`.
-fn send_op(to: u32, msg: u32, wp: Arg, lp: Arg) -> Op {
+fn send_op(cpu: &Cpu, to: u32, msg: u32, wp: Arg, lp: Arg) -> Op {
     Op::Call {
-        target: user32::address_of("SendMessageA"),
+        target: user32::address_of(cpu, "SendMessageA"),
         args: vec![Arg::V(to), Arg::V(msg), wp, lp],
     }
 }
@@ -757,7 +757,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                 return Vec::new();
             }
             vec![
-                send_op(notify, WM_CTLCOLORSTATIC, Arg::V(hdc), Arg::V(hwnd)),
+                send_op(cpu, notify, WM_CTLCOLORSTATIC, Arg::V(hdc), Arg::V(hwnd)),
                 Op::Then {
                     id: T_BRUSH,
                     data: vec![hdc],
@@ -772,7 +772,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                     at: S_NM,
                     words: custom_draw(cpu, hwnd, hdc, CDDS_PREPAINT),
                 },
-                send_op(notify, WM_NOTIFY, Arg::V(ctl), Arg::S(S_NM)),
+                send_op(cpu, notify, WM_NOTIFY, Arg::V(ctl), Arg::S(S_NM)),
                 Op::Then {
                     id: T_PREPAINT,
                     data: vec![hdc, brush],
@@ -794,7 +794,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                     at: S_NM,
                     words: custom_draw(cpu, hwnd, hdc, CDDS_POSTPAINT),
                 },
-                send_op(notify, WM_NOTIFY, Arg::V(ctl), Arg::S(S_NM)),
+                send_op(cpu, notify, WM_NOTIFY, Arg::V(ctl), Arg::S(S_NM)),
             ]
         }
         T_TOOLTIP => {
@@ -813,7 +813,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                     at: S_TOOL,
                     words: vec![44, flags, hwnd, hwnd, 0, 0, 0, 0, 0, 0, 0],
                 },
-                send_op(tip, TTM_ADDTOOLA, Arg::V(0), Arg::S(S_TOOL)),
+                send_op(cpu, tip, TTM_ADDTOOLA, Arg::V(0), Arg::S(S_TOOL)),
             ]
         }
         _ => Vec::new(),
@@ -822,15 +822,15 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
 
 /// A script that paints the control: through BeginPaint and EndPaint,
 /// or on `hdc`.
-fn paint_script(hwnd: u32, hdc: u32) -> Script {
+fn paint_script(cpu: &Cpu, hwnd: u32, hdc: u32) -> Script {
     let mut s = Script::new(hwnd);
     s.alloc(S_PAINT);
     if hdc != 0 {
         s.then(T_BEGIN, &[hdc]).ret(0);
         return s;
     }
-    let begin = user32::address_of("BeginPaint");
-    let end = user32::address_of("EndPaint");
+    let begin = user32::address_of(cpu, "BeginPaint");
+    let end = user32::address_of(cpu, "EndPaint");
     s.call(begin, &[Arg::V(hwnd), Arg::S(S_PS)])
         .then(T_BEGIN, &[0])
         .call(end, &[Arg::V(hwnd), Arg::S(S_PS)])
@@ -842,7 +842,7 @@ fn paint_script(hwnd: u32, hdc: u32) -> Script {
 fn redraw(cpu: &mut Cpu, hwnd: u32, result: u32) -> Option<u32> {
     invalidate(cpu, hwnd, false);
     let mut s = Script::new(hwnd);
-    s.user("UpdateWindow", &[hwnd]).ret(result);
+    s.user(cpu, "UpdateWindow", &[hwnd]).ret(result);
     script::run(cpu, TRACKBAR, s)
 }
 
@@ -875,6 +875,7 @@ fn align_buddies(cpu: &mut Cpu, hwnd: u32, t: &Trackbar, s: &mut Script) {
             )
         };
         s.user(
+            cpu,
             "SetWindowPos",
             &[t.buddy_la, 0, x as u32, y as u32, 0, 0, flags],
         );
@@ -892,6 +893,7 @@ fn align_buddies(cpu: &mut Cpu, hwnd: u32, t: &Trackbar, s: &mut Script) {
             )
         };
         s.user(
+            cpu,
             "SetWindowPos",
             &[t.buddy_rb, 0, x as u32, y as u32, 0, 0, flags],
         );
@@ -1010,7 +1012,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let mut s = Script::new(hwnd);
             align_buddies(cpu, hwnd, &t, &mut s);
             invalidate(cpu, hwnd, false);
-            s.user("UpdateWindow", &[hwnd]).ret(old);
+            s.user(cpu, "UpdateWindow", &[hwnd]).ret(old);
             return script::run(cpu, TRACKBAR, s);
         }
         TBM_SETLINESIZE => {
@@ -1131,7 +1133,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         WM_CAPTURECHANGED => {
             let mut s = Script::new(hwnd);
-            notify_scroll(hwnd, &t, &mut s, TB_ENDTRACK);
+            notify_scroll(cpu, hwnd, &t, &mut s, TB_ENDTRACK);
             s.ret(0);
             return script::run(cpu, TRACKBAR, s);
         }
@@ -1143,7 +1145,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             }
             if is_window(cpu, t.tooltip) {
                 let mut s = Script::new(hwnd);
-                s.user("DestroyWindow", &[t.tooltip]).ret(0);
+                s.user(cpu, "DestroyWindow", &[t.tooltip]).ret(0);
                 return script::run(cpu, TRACKBAR, s);
             }
             0
@@ -1157,7 +1159,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 wp,
                 VK_LEFT | VK_UP | VK_RIGHT | VK_DOWN | VK_NEXT | VK_PRIOR | VK_HOME | VK_END
             ) {
-                notify_scroll(hwnd, &t, &mut s, TB_ENDTRACK);
+                notify_scroll(cpu, hwnd, &t, &mut s, TB_ENDTRACK);
             }
             s.ret(1);
             return script::run(cpu, TRACKBAR, s);
@@ -1177,7 +1179,9 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let (x, y) = user32::point_of(lp);
             return mouse_move(cpu, hwnd, t, x, y);
         }
-        WM_PAINT | WM_PRINTCLIENT => return script::run(cpu, TRACKBAR, paint_script(hwnd, wp)),
+        WM_PAINT | WM_PRINTCLIENT => {
+            return script::run(cpu, TRACKBAR, paint_script(cpu, hwnd, wp));
+        }
         WM_SIZE => {
             initialize_thumb(cpu, hwnd, &mut t);
             put(cpu, hwnd, t.clone());
@@ -1251,23 +1255,23 @@ fn key_down(cpu: &mut Cpu, hwnd: u32, mut t: Trackbar, key: u32) -> Option<u32> 
     match key {
         VK_UP | VK_DOWN => {
             if (key == VK_UP) == (!vert && down_is_left) {
-                line_down(hwnd, &mut t, &mut s);
+                line_down(cpu, hwnd, &mut t, &mut s);
             } else {
-                line_up(hwnd, &mut t, &mut s);
+                line_up(cpu, hwnd, &mut t, &mut s);
             }
         }
         VK_LEFT | VK_RIGHT => {
             if (key == VK_LEFT) == (vert && down_is_left) {
-                line_down(hwnd, &mut t, &mut s);
+                line_down(cpu, hwnd, &mut t, &mut s);
             } else {
-                line_up(hwnd, &mut t, &mut s);
+                line_up(cpu, hwnd, &mut t, &mut s);
             }
         }
         VK_NEXT | VK_PRIOR => {
             if (key == VK_NEXT) == (!vert && down_is_left) {
-                page_up(hwnd, &mut t, &mut s);
+                page_up(cpu, hwnd, &mut t, &mut s);
             } else {
-                page_down(hwnd, &mut t, &mut s);
+                page_down(cpu, hwnd, &mut t, &mut s);
             }
         }
         VK_HOME => {
@@ -1275,14 +1279,14 @@ fn key_down(cpu: &mut Cpu, hwnd: u32, mut t: Trackbar, key: u32) -> Option<u32> 
                 return Some(0);
             }
             t.pos = t.min;
-            notify_scroll(hwnd, &t, &mut s, TB_TOP);
+            notify_scroll(cpu, hwnd, &t, &mut s, TB_TOP);
         }
         VK_END => {
             if t.pos == t.max {
                 return Some(0);
             }
             t.pos = t.max;
-            notify_scroll(hwnd, &t, &mut s, TB_BOTTOM);
+            notify_scroll(cpu, hwnd, &t, &mut s, TB_BOTTOM);
         }
         _ => {}
     }
@@ -1299,12 +1303,12 @@ fn key_down(cpu: &mut Cpu, hwnd: u32, mut t: Trackbar, key: u32) -> Option<u32> 
 /// towards the click and on while the button is held.
 fn button_down(cpu: &mut Cpu, hwnd: u32, mut t: Trackbar, x: i32, y: i32) -> Option<u32> {
     let mut s = Script::new(hwnd);
-    s.user("SetFocus", &[hwnd]);
+    s.user(cpu, "SetFocus", &[hwnd]);
     t.mouse = (x, y);
     let l = layout(cpu, hwnd, &t);
     if l.thumb.contains(x, y) {
         t.flags |= FLAG_DRAG;
-        s.user("SetCapture", &[hwnd]);
+        s.user(cpu, "SetCapture", &[hwnd]);
         invalidate(cpu, hwnd, false);
     } else {
         let dir = page_direction(&l, &t, x, y);
@@ -1315,7 +1319,7 @@ fn button_down(cpu: &mut Cpu, hwnd: u32, mut t: Trackbar, x: i32, y: i32) -> Opt
                 FLAG_PAGE_RIGHT
             };
             auto_page(cpu, hwnd, &mut t, x, y, &mut s);
-            s.user("SetCapture", &[hwnd]);
+            s.user(cpu, "SetCapture", &[hwnd]);
             user32::message::set_timer(cpu, &[hwnd, TB_REFRESH_TIMER, TB_REFRESH_DELAY, 0]);
         }
     }
@@ -1328,15 +1332,15 @@ fn button_down(cpu: &mut Cpu, hwnd: u32, mut t: Trackbar, x: i32, y: i32) -> Opt
 fn button_up(cpu: &mut Cpu, hwnd: u32, mut t: Trackbar) -> Option<u32> {
     let mut s = Script::new(hwnd);
     let release = |cpu: &mut Cpu, t: &Trackbar, s: &mut Script| {
-        s.user("ReleaseCapture", &[]);
+        s.user(cpu, "ReleaseCapture", &[]);
         if is_window(cpu, t.notify) {
             super::notify(cpu, s, hwnd, t.notify, NM_RELEASEDCAPTURE, &[]);
         }
     };
     if t.flags & FLAG_DRAG != 0 {
         let pos = (t.pos as u32) << 16;
-        notify_scroll(hwnd, &t, &mut s, TB_THUMBPOSITION | pos);
-        notify_scroll(hwnd, &t, &mut s, TB_ENDTRACK);
+        notify_scroll(cpu, hwnd, &t, &mut s, TB_THUMBPOSITION | pos);
+        notify_scroll(cpu, hwnd, &t, &mut s, TB_ENDTRACK);
         t.flags &= !FLAG_DRAG;
         release(cpu, &t, &mut s);
         invalidate(cpu, hwnd, false);
@@ -1344,7 +1348,7 @@ fn button_up(cpu: &mut Cpu, hwnd: u32, mut t: Trackbar) -> Option<u32> {
     if t.flags & FLAG_PAGE != 0 {
         user32::message::kill_timer(cpu, &[hwnd, TB_REFRESH_TIMER]);
         t.flags &= !FLAG_PAGE;
-        notify_scroll(hwnd, &t, &mut s, TB_ENDTRACK);
+        notify_scroll(cpu, hwnd, &t, &mut s, TB_ENDTRACK);
         release(cpu, &t, &mut s);
     }
     put(cpu, hwnd, t);
@@ -1365,9 +1369,9 @@ fn mouse_move(cpu: &mut Cpu, hwnd: u32, mut t: Trackbar, x: i32, y: i32) -> Opti
         if pos != t.pos {
             t.pos = pos;
             let code = TB_THUMBTRACK | (pos as u32) << 16;
-            notify_scroll(hwnd, &t, &mut s, code);
+            notify_scroll(cpu, hwnd, &t, &mut s, code);
             invalidate(cpu, hwnd, false);
-            s.user("UpdateWindow", &[hwnd]);
+            s.user(cpu, "UpdateWindow", &[hwnd]);
         }
     }
     put(cpu, hwnd, t);
@@ -1399,13 +1403,13 @@ fn create(cpu: &mut Cpu, hwnd: u32, cs: u32) -> Option<u32> {
     let mut s = Script::new(hwnd);
     s.alloc(S_CREATE);
     if is_window(cpu, parent) {
-        s.send(parent, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY));
+        s.send(cpu, parent, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY));
     }
     if style & TBS_TOOLTIPS != 0 {
         let class = s.string(b"tooltips_class32");
         let d = Arg::V(CW_USEDEFAULT);
         s.call(
-            user32::address_of("CreateWindowExA"),
+            user32::address_of(cpu, "CreateWindowExA"),
             &[
                 Arg::V(0),
                 Arg::S(class),

@@ -365,6 +365,7 @@ pub fn load_file(
         expected_version: parsed.expected_version,
         loaded: Vec::new(),
         unbooted: self_loading,
+        older: None,
     });
 
     // The modules it imports from.
@@ -505,13 +506,16 @@ pub fn entry_point(cpu: &Cpu, module: u16, ordinal: u16) -> u32 {
                 let offset = builtin::data_offset(builtin::MODULES[b as usize], i);
                 ((sel as u32) << 16) | offset as u32
             }
-            // An image from an older table has no stub for a function
-            // appended since: its program finds the function missing.
-            _ if i >= builtin::stubs_in(m) => 0,
-            _ => {
-                let sel = m.segments.first().map_or(0, |s| s.selector);
-                ((sel as u32) << 16) | (i as u32 * builtin::STUB)
-            }
+            _ => match builtin::stub_offset(m, i) {
+                Some(offset) => {
+                    let sel = m.segments.first().map_or(0, |s| s.selector);
+                    ((sel as u32) << 16) | offset as u32
+                }
+                // A function the module's code segment, from an older
+                // table, lacks: the module didn't export it, and its
+                // program finds the function missing.
+                None => 0,
+            },
         };
     }
     let parsed = match parsed_of(cpu, m) {

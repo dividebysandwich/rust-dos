@@ -255,15 +255,15 @@ pub(super) struct Calls {
 impl Calls {
     /// Call USER32's `name` with `args`; with `mask`, the arguments whose
     /// bits are set are places in the scratch space instead.
-    pub fn call_with(&mut self, name: &str, args: &[u32], mask: u32, keep: bool) {
-        self.op(name, args, mask, 0, keep);
+    pub fn call_with(&mut self, cpu: &Cpu, name: &str, args: &[u32], mask: u32, keep: bool) {
+        self.op(cpu, name, args, mask, 0, keep);
     }
 
     /// `call_with`, and the arguments whose bits are set in `read` are
     /// the words at those places of the scratch space when it is made.
-    fn op(&mut self, name: &str, args: &[u32], mask: u32, read: u32, keep: bool) {
+    fn op(&mut self, cpu: &Cpu, name: &str, args: &[u32], mask: u32, read: u32, keep: bool) {
         self.ops.push(OP_CALL);
-        self.ops.push(address_of(name));
+        self.ops.push(address_of(cpu, name));
         let head = args.len() as u32 | (keep as u32) << 8 | read << 9 | mask << 16;
         self.ops.push(head);
         self.ops.extend_from_slice(args);
@@ -272,28 +272,28 @@ impl Calls {
         }
     }
 
-    pub fn call(&mut self, name: &str, args: &[u32]) {
-        self.call_with(name, args, 0, false);
+    pub fn call(&mut self, cpu: &Cpu, name: &str, args: &[u32]) {
+        self.call_with(cpu, name, args, 0, false);
     }
 
-    pub fn send(&mut self, hwnd: u32, msg: u32, wp: u32, lp: u32) {
-        self.call("SendMessageA", &[hwnd, msg, wp, lp]);
+    pub fn send(&mut self, cpu: &Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32) {
+        self.call(cpu, "SendMessageA", &[hwnd, msg, wp, lp]);
     }
 
     /// Send a message whose answer the handler returns.
-    pub fn send_keep(&mut self, hwnd: u32, msg: u32, wp: u32, lp: u32) {
-        self.call_with("SendMessageA", &[hwnd, msg, wp, lp], 0, true);
+    pub fn send_keep(&mut self, cpu: &Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32) {
+        self.call_with(cpu, "SendMessageA", &[hwnd, msg, wp, lp], 0, true);
     }
 
     /// Send a message with a structure at `lp` of the scratch space.
-    pub fn send_struct(&mut self, hwnd: u32, msg: u32, wp: u32, lp: u32, keep: bool) {
-        self.call_with("SendMessageA", &[hwnd, msg, wp, lp], 8, keep);
+    pub fn send_struct(&mut self, cpu: &Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32, keep: bool) {
+        self.call_with(cpu, "SendMessageA", &[hwnd, msg, wp, lp], 8, keep);
     }
 
     /// Send a message whose lParam is the word at `at` of the scratch
     /// space when it is sent: what an earlier call left there.
-    pub fn send_read(&mut self, hwnd: u32, msg: u32, wp: u32, at: u32) {
-        self.op("SendMessageA", &[hwnd, msg, wp, at], 0, 8, false);
+    pub fn send_read(&mut self, cpu: &Cpu, hwnd: u32, msg: u32, wp: u32, at: u32) {
+        self.op(cpu, "SendMessageA", &[hwnd, msg, wp, at], 0, 8, false);
     }
 
     /// Write `words` at `offset` of the scratch space.
@@ -420,7 +420,7 @@ pub(super) fn paint_start(
 /// The steps of a WM_PAINT task before the module draws: None at step 3
 /// and after, when `P_HDC` and `P_BRUSH` are set. The brush is 0 when
 /// neither the window nor DefWindowProcA gave one.
-pub(super) fn paint_head(t: &mut Task, value: u32) -> Option<Next> {
+pub(super) fn paint_head(cpu: &Cpu, t: &mut Task, value: u32) -> Option<Next> {
     let (hwnd, msg, to) = (t.var(P_HWND), t.var(5), t.var(7));
     match t.step {
         0 => {
@@ -429,7 +429,11 @@ pub(super) fn paint_head(t: &mut Task, value: u32) -> Option<Next> {
                 return Some(Next::call(0, &[], 1));
             }
             t.set(4, 1);
-            Some(Next::call(address_of("BeginPaint"), &[hwnd, t.scratch], 1))
+            Some(Next::call(
+                address_of(cpu, "BeginPaint"),
+                &[hwnd, t.scratch],
+                1,
+            ))
         }
         1 => {
             if t.var(4) != 0 {
@@ -440,7 +444,7 @@ pub(super) fn paint_head(t: &mut Task, value: u32) -> Option<Next> {
             }
             let args = [to, msg, t.var(P_HDC), hwnd];
             let target = if to != 0 {
-                address_of("SendMessageA")
+                address_of(cpu, "SendMessageA")
             } else {
                 0
             };
@@ -452,7 +456,7 @@ pub(super) fn paint_head(t: &mut Task, value: u32) -> Option<Next> {
                 return Some(Next::call(0, &[], 3));
             }
             let args = [to, msg, t.var(P_HDC), hwnd];
-            Some(Next::call(address_of("DefWindowProcA"), &args, 3))
+            Some(Next::call(address_of(cpu, "DefWindowProcA"), &args, 3))
         }
         3 => {
             if t.var(P_BRUSH) == 0 {
@@ -466,9 +470,13 @@ pub(super) fn paint_head(t: &mut Task, value: u32) -> Option<Next> {
 
 /// The end of a WM_PAINT task: EndPaint if BeginPaint gave the DC, going
 /// on at `step`, which is done.
-pub(super) fn paint_end(t: &Task, step: u16) -> Next {
+pub(super) fn paint_end(cpu: &Cpu, t: &Task, step: u16) -> Next {
     if t.var(4) != 0 {
-        return Next::call(address_of("EndPaint"), &[t.var(P_HWND), t.scratch], step);
+        return Next::call(
+            address_of(cpu, "EndPaint"),
+            &[t.var(P_HWND), t.scratch],
+            step,
+        );
     }
     Next::Done(0)
 }
@@ -1085,7 +1093,7 @@ impl Ctx {
     /// the caret: the calls to make.
     fn finish(mut self, cpu: &mut Cpu) -> Calls {
         let lines = self.e.lines();
-        self.scroll_info(&lines);
+        self.scroll_info(cpu, &lines);
         let hwnd = self.hwnd;
         let caret = (self.e.flags & EF_FOCUSED != 0).then(|| {
             let after = self.e.flags & EF_AFTER_WRAP != 0;
@@ -1107,14 +1115,14 @@ impl Ctx {
         self.out
     }
 
-    fn notify(&mut self, code: u32) {
+    fn notify(&mut self, cpu: &Cpu, code: u32) {
         let lp = self.hwnd;
         let wp = self.id | code << 16;
-        self.out.send(self.e.parent, WM_COMMAND, wp, lp);
+        self.out.send(cpu, self.e.parent, WM_COMMAND, wp, lp);
     }
 
     /// SetScrollInfo for the scroll bars whose values changed.
-    fn scroll_info(&mut self, lines: &[Line]) {
+    fn scroll_info(&mut self, cpu: &Cpu, lines: &[Line]) {
         let e = &self.e;
         let mut bars = e.bars.clone();
         bars.resize(6, -1);
@@ -1130,7 +1138,7 @@ impl Ctx {
                 let si = [28, mask, 0, v[0] as u32, v[1] as u32, v[2] as u32, 0];
                 self.out.write(SCRATCH_DATA, &si);
                 let args = [self.hwnd, SB_VERT, SCRATCH_DATA, 1];
-                self.out.call_with("SetScrollInfo", &args, 4, false);
+                self.out.call_with(cpu, "SetScrollInfo", &args, 4, false);
             }
         }
         if e.style & WS_HSCROLL != 0 {
@@ -1140,7 +1148,7 @@ impl Ctx {
                 let si = [28, mask, 0, v[0] as u32, v[1] as u32, v[2] as u32, 0];
                 self.out.write(SCRATCH_DATA + 32, &si);
                 let args = [self.hwnd, SB_HORZ, SCRATCH_DATA + 32, 1];
-                self.out.call_with("SetScrollInfo", &args, 4, false);
+                self.out.call_with(cpu, "SetScrollInfo", &args, 4, false);
             }
         }
         self.e.bars = bars;
@@ -1266,7 +1274,7 @@ impl Ctx {
         }
     }
 
-    fn line_scroll_internal(&mut self, mut dx: i32, dy: i32) -> bool {
+    fn line_scroll_internal(&mut self, cpu: &Cpu, mut dx: i32, dy: i32) -> bool {
         let lines = self.e.lines();
         let e = &mut self.e;
         let lh = e.line_height();
@@ -1299,15 +1307,15 @@ impl Ctx {
             self.redraw = true;
         }
         if dx != 0 {
-            self.notify(EN_HSCROLL);
+            self.notify(cpu, EN_HSCROLL);
         }
         if dy != 0 {
-            self.notify(EN_VSCROLL);
+            self.notify(cpu, EN_VSCROLL);
         }
         true
     }
 
-    fn scroll_caret(&mut self) {
+    fn scroll_caret(&mut self, cpu: &Cpu) {
         let lines = self.e.lines();
         let e = &self.e;
         if e.ml() {
@@ -1340,7 +1348,7 @@ impl Ctx {
                     dx = tw - ww - e.x_offset;
                 }
                 if dx != 0 || dy != 0 || short {
-                    self.line_scroll_internal(dx, dy);
+                    self.line_scroll_internal(cpu, dx, dy);
                 }
             }
         } else {
@@ -1377,7 +1385,14 @@ impl Ctx {
 
     // Changing the text.
 
-    fn replace_sel(&mut self, can_undo: bool, replace: &[u8], send_update: bool, honor: bool) {
+    fn replace_sel(
+        &mut self,
+        cpu: &Cpu,
+        can_undo: bool,
+        replace: &[u8],
+        send_update: bool,
+        honor: bool,
+    ) {
         let e = &mut self.e;
         let (mut s, mut e_) = (e.sel_start as usize, e.sel_end as usize);
         let mut insert = replace.to_vec();
@@ -1390,7 +1405,7 @@ impl Ctx {
         let tl = e.len();
         let size = tl - (e_ - s) + insert.len();
         if honor && size as u64 > e.limit as u64 {
-            self.notify(EN_MAXTEXT);
+            self.notify(cpu, EN_MAXTEXT);
             let e = &mut self.e;
             let keep = (e.limit as usize).saturating_sub(tl - (e_ - s));
             insert.truncate(keep);
@@ -1423,7 +1438,7 @@ impl Ctx {
             }
         }
         if maxed {
-            self.notify(EN_MAXTEXT);
+            self.notify(cpu, EN_MAXTEXT);
         }
         let e = &mut self.e;
         if e_ != s {
@@ -1475,29 +1490,29 @@ impl Ctx {
         self.e.flags |= EF_MODIFIED;
         self.redraw = true;
         if send_update {
-            self.notify(EN_UPDATE);
+            self.notify(cpu, EN_UPDATE);
         }
-        self.scroll_caret();
+        self.scroll_caret(cpu);
         if send_update {
             self.e.flags &= !EF_UPDATE;
-            self.notify(EN_CHANGE);
+            self.notify(cpu, EN_CHANGE);
         }
     }
 
     fn set_text(&mut self, cpu: &mut Cpu, text: &[u8]) {
         self.set_sel(0, u32::MAX, false);
-        self.replace_sel(false, text, false, false);
+        self.replace_sel(cpu, false, text, false, false);
         self.e.x_offset = 0;
         self.e.flags &= !EF_MODIFIED;
         self.set_sel(0, 0, false);
         if !(self.e.ml() || self.in_combo(cpu)) {
-            self.notify(EN_UPDATE);
-            self.notify(EN_CHANGE);
+            self.notify(cpu, EN_UPDATE);
+            self.notify(cpu, EN_CHANGE);
         }
-        self.scroll_caret();
+        self.scroll_caret(cpu);
     }
 
-    fn undo(&mut self) -> u32 {
+    fn undo(&mut self, cpu: &Cpu) -> u32 {
         let e = &self.e;
         if e.style & ES_READONLY != 0 {
             return !e.ml() as u32;
@@ -1506,11 +1521,11 @@ impl Ctx {
         let (pos, count) = (e.undo_pos, e.undo_count);
         self.set_sel(pos, pos + count, false);
         self.e.empty_undo();
-        self.replace_sel(true, &text, true, true);
+        self.replace_sel(cpu, true, &text, true, true);
         let (pos, count) = (self.e.undo_pos, self.e.undo_count);
         self.set_sel(pos, pos + count, false);
-        self.notify(EN_CHANGE);
-        self.scroll_caret();
+        self.notify(cpu, EN_CHANGE);
+        self.scroll_caret(cpu);
         1
     }
 
@@ -1531,11 +1546,11 @@ impl Ctx {
         input::close_clipboard(cpu, &[]);
     }
 
-    fn clear(&mut self) {
+    fn clear(&mut self, cpu: &Cpu) {
         if self.e.style & ES_READONLY != 0 {
             return;
         }
-        self.replace_sel(true, &[], true, true);
+        self.replace_sel(cpu, true, &[], true, true);
     }
 
     fn paste(&mut self, cpu: &mut Cpu) {
@@ -1547,22 +1562,22 @@ impl Ctx {
         let at = crate::win32::kernel32::global_address(cpu, handle);
         if handle != 0 && at != 0 {
             let text = bytes_at(cpu, at).unwrap_or_default();
-            self.replace_sel(true, &text, true, true);
+            self.replace_sel(cpu, true, &text, true, true);
         } else if self.e.style & ES_PASSWORD != 0 {
-            self.replace_sel(true, &[], true, true);
+            self.replace_sel(cpu, true, &[], true, true);
         }
         input::close_clipboard(cpu, &[]);
     }
 
     // Moving the caret.
 
-    fn sel_to(&mut self, extend: bool, e: i32, after_wrap: bool) {
+    fn sel_to(&mut self, cpu: &Cpu, extend: bool, e: i32, after_wrap: bool) {
         let s = if extend { self.e.sel_start } else { e as u32 };
         self.set_sel(s, e as u32, after_wrap);
-        self.scroll_caret();
+        self.scroll_caret(cpu);
     }
 
-    fn move_backward(&mut self, extend: bool) {
+    fn move_backward(&mut self, cpu: &Cpu, extend: bool) {
         let t = &self.e.text;
         let mut e = self.e.sel_end as usize;
         if e > 0 {
@@ -1574,10 +1589,10 @@ impl Ctx {
                 }
             }
         }
-        self.sel_to(extend, e as i32, false);
+        self.sel_to(cpu, extend, e as i32, false);
     }
 
-    fn move_forward(&mut self, extend: bool) {
+    fn move_forward(&mut self, cpu: &Cpu, extend: bool) {
         let t = &self.e.text;
         let mut e = self.e.sel_end as usize;
         if e < t.len() {
@@ -1590,19 +1605,19 @@ impl Ctx {
                 }
             }
         }
-        self.sel_to(extend, e as i32, false);
+        self.sel_to(cpu, extend, e as i32, false);
     }
 
     /// Move to the place `dy` pixels below the caret.
-    fn move_vertically(&mut self, extend: bool, dy: i32) {
+    fn move_vertically(&mut self, cpu: &Cpu, extend: bool, dy: i32) {
         let lines = self.e.lines();
         let after = self.e.flags & EF_AFTER_WRAP != 0;
         let (x, y) = self.e.pos_from_char(&lines, self.e.sel_end as i32, after);
         let (e, after) = self.e.char_from_pos(&lines, x, y + dy);
-        self.sel_to(extend, e, after);
+        self.sel_to(cpu, extend, e, after);
     }
 
-    fn move_home(&mut self, extend: bool, ctrl: bool) {
+    fn move_home(&mut self, cpu: &Cpu, extend: bool, ctrl: bool) {
         let e = if !ctrl && self.e.ml() {
             let lines = self.e.lines();
             let after = self.e.flags & EF_AFTER_WRAP != 0;
@@ -1611,10 +1626,10 @@ impl Ctx {
         } else {
             0
         };
-        self.sel_to(extend, e, false);
+        self.sel_to(cpu, extend, e, false);
     }
 
-    fn move_end(&mut self, extend: bool, ctrl: bool) {
+    fn move_end(&mut self, cpu: &Cpu, extend: bool, ctrl: bool) {
         let (e, after) = if !ctrl && self.e.ml() {
             let lines = self.e.lines();
             let after = self.e.flags & EF_AFTER_WRAP != 0;
@@ -1623,10 +1638,10 @@ impl Ctx {
         } else {
             (self.e.len() as i32, false)
         };
-        self.sel_to(extend, e, after);
+        self.sel_to(cpu, extend, e, after);
     }
 
-    fn move_word(&mut self, extend: bool, right: bool) {
+    fn move_word(&mut self, cpu: &Cpu, extend: bool, right: bool) {
         let lines = self.e.lines();
         let e = &self.e;
         let mut end = e.sel_end as i32;
@@ -1650,10 +1665,10 @@ impl Ctx {
         } else {
             end = li + word_break(text, (end - li + 1) as usize, ll as usize, true) as i32;
         }
-        self.sel_to(extend, end, false);
+        self.sel_to(cpu, extend, end, false);
     }
 
-    fn select_word(&mut self) {
+    fn select_word(&mut self, cpu: &Cpu) {
         let lines = self.e.lines();
         let e = &self.e;
         let end = e.sel_end as i32;
@@ -1664,7 +1679,7 @@ impl Ctx {
         let s = li + word_break(text, (end - li) as usize, ll, false) as i32;
         let en = li + word_break(text, (end - li) as usize, ll, true) as i32;
         self.set_sel(s as u32, en as u32, false);
-        self.scroll_caret();
+        self.scroll_caret(cpu);
     }
 
     /// The point moved into the format rectangle.
@@ -1702,22 +1717,22 @@ impl Ctx {
                     key = VK_F4;
                     eui = 2;
                 }
-                self.out.send(list, WM_KEYDOWN, key, 0);
+                self.out.send(cpu, list, WM_KEYDOWN, key, 0);
             }
             _ => {
                 if eui != 0 {
                     let show = !is_dropped as u32;
                     self.out
-                        .send(combo, super::combobox::CB_SHOWDROPDOWN, show, 0);
+                        .send(cpu, combo, super::combobox::CB_SHOWDROPDOWN, show, 0);
                 } else {
-                    self.out.send(list, WM_KEYDOWN, VK_F4, 0);
+                    self.out.send(cpu, list, WM_KEYDOWN, VK_F4, 0);
                 }
             }
         }
         if eui == 2 {
             // The extended UI comes back after the key.
             self.out
-                .send(combo, super::combobox::CB_SETEXTENDEDUI, 1, 0);
+                .send(cpu, combo, super::combobox::CB_SETEXTENDEDUI, 1, 0);
         }
         true
     }
@@ -1755,7 +1770,7 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         EM_SETSEL => {
             c.set_sel(wp, lp, false);
-            c.scroll_caret();
+            c.scroll_caret(cpu);
             1
         }
         EM_GETRECT => {
@@ -1774,17 +1789,17 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             }
             0
         }
-        EM_SCROLL => scroll(&mut c, wp),
+        EM_SCROLL => scroll(cpu, &mut c, wp),
         EM_LINESCROLL => {
             if !c.e.ml() {
                 0
             } else {
                 let dx = wp as i32 * c.e.char_width;
-                c.line_scroll_internal(dx, lp as i32) as u32
+                c.line_scroll_internal(cpu, dx, lp as i32) as u32
             }
         }
         EM_SCROLLCARET => {
-            c.scroll_caret();
+            c.scroll_caret(cpu);
             1
         }
         EM_GETMODIFY => return Some((c.e.flags & EF_MODIFIED != 0) as u32),
@@ -1823,7 +1838,7 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 c.e.empty_undo();
                 c.e.flags &= !(EF_MODIFIED | EF_UPDATE);
                 c.redraw = true;
-                c.scroll_caret();
+                c.scroll_caret(cpu);
             }
             0
         }
@@ -1857,7 +1872,7 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             } else {
                 vec![]
             };
-            c.replace_sel(wp != 0, &text, true, true);
+            c.replace_sel(cpu, wp != 0, &text, true, true);
             1
         }
         EM_GETLINE => return Some(get_line(cpu, &c, wp as i32, lp)),
@@ -1870,7 +1885,7 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             0
         }
         EM_CANUNDO => return Some(c.e.can_undo() as u32),
-        EM_UNDO | WM_UNDO => c.undo(),
+        EM_UNDO | WM_UNDO => c.undo(cpu),
         EM_FMTLINES => {
             c.e.flags &= !EF_SOFT_BREAKS;
             if wp != 0 {
@@ -1993,7 +2008,7 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let ch = wp & 0xFF;
             if c.in_combo(cpu) && (ch == VK_RETURN || ch == VK_ESCAPE) {
                 if super::combobox::state_of(cpu, c.e.parent).2 {
-                    c.out.send(c.e.parent, WM_KEYDOWN, ch, 0);
+                    c.out.send(cpu, c.e.parent, WM_KEYDOWN, ch, 0);
                 }
                 0
             } else {
@@ -2002,17 +2017,19 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             }
         }
         WM_CLEAR => {
-            c.clear();
+            c.clear(cpu);
             0
         }
         WM_COMMAND => {
             if wp >> 16 == 0 && lp == 0 {
                 match wp & 0xFFFF {
-                    EM_UNDO => c.out.send(hwnd, WM_UNDO, 0, 0),
-                    WM_CUT | WM_COPY | WM_PASTE | WM_CLEAR => c.out.send(hwnd, wp & 0xFFFF, 0, 0),
+                    EM_UNDO => c.out.send(cpu, hwnd, WM_UNDO, 0, 0),
+                    WM_CUT | WM_COPY | WM_PASTE | WM_CLEAR => {
+                        c.out.send(cpu, hwnd, wp & 0xFFFF, 0, 0)
+                    }
                     EM_SETSEL => {
                         c.set_sel(0, u32::MAX, false);
-                        c.scroll_caret();
+                        c.scroll_caret(cpu);
                     }
                     _ => {}
                 }
@@ -2025,7 +2042,7 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         WM_CUT => {
             c.copy(cpu);
-            c.clear();
+            c.clear(cpu);
             0
         }
         WM_PASTE => {
@@ -2052,8 +2069,8 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(copy_out(cpu, lp, wp, &text));
         }
         WM_GETTEXTLENGTH => return Some(c.e.text_with_breaks().len() as u32),
-        WM_HSCROLL => h_scroll(&mut c, wp & 0xFFFF, (wp >> 16) as i16 as i32),
-        WM_VSCROLL => v_scroll(&mut c, wp & 0xFFFF, (wp >> 16) as i16 as i32),
+        WM_HSCROLL => h_scroll(cpu, &mut c, wp & 0xFFFF, (wp >> 16) as i16 as i32),
+        WM_VSCROLL => v_scroll(cpu, &mut c, wp & 0xFFFF, (wp >> 16) as i16 as i32),
         WM_KEYDOWN => {
             if key_down(cpu, VK_MENU) {
                 return Some(0);
@@ -2073,18 +2090,18 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if c.e.style & ES_NOHIDESEL == 0 {
                 c.redraw = true;
             }
-            c.notify(EN_KILLFOCUS);
+            c.notify(cpu, EN_KILLFOCUS);
             0
         }
         WM_LBUTTONDBLCLK => {
             c.e.flags |= EF_CAPTURE;
-            c.out.call("SetCapture", &[hwnd]);
-            c.select_word();
+            c.out.call(cpu, "SetCapture", &[hwnd]);
+            c.select_word(cpu);
             0
         }
         WM_LBUTTONDOWN => {
             c.e.flags |= EF_CAPTURE;
-            c.out.call("SetCapture", &[hwnd]);
+            c.out.call(cpu, "SetCapture", &[hwnd]);
             let (x, y) = point_of(lp);
             let (x, y) = c.confine(x, y);
             let lines = c.e.lines();
@@ -2095,21 +2112,21 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 e as u32
             };
             c.set_sel(s, e as u32, after);
-            c.scroll_caret();
+            c.scroll_caret(cpu);
             if c.e.flags & EF_FOCUSED == 0 {
-                c.out.call("SetFocus", &[hwnd]);
+                c.out.call(cpu, "SetFocus", &[hwnd]);
             }
             0
         }
         WM_LBUTTONUP => {
             if c.e.flags & EF_CAPTURE != 0 && user(cpu).input.capture == hwnd {
-                c.out.call("ReleaseCapture", &[]);
+                c.out.call(cpu, "ReleaseCapture", &[]);
             }
             c.e.flags &= !EF_CAPTURE;
             0
         }
         WM_MBUTTONDOWN => {
-            c.out.send(hwnd, WM_PASTE, 0, 0);
+            c.out.send(cpu, hwnd, WM_PASTE, 0, 0);
             0
         }
         WM_MOUSEMOVE => {
@@ -2149,7 +2166,7 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let (x, y) = c.e.pos_from_char(&lines, c.e.sel_end as i32, after);
             input::set_caret_pos(cpu, &[x as u32, y as u32]);
             input::show_caret(cpu, &[hwnd]);
-            c.notify(EN_SETFOCUS);
+            c.notify(cpu, EN_SETFOCUS);
             0
         }
         WM_SETFONT => {
@@ -2194,7 +2211,7 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         WM_SYSKEYDOWN => {
             if wp == VK_BACK && lp & 0x2000_0000 != 0 {
                 if c.e.can_undo() {
-                    c.undo();
+                    c.undo(cpu);
                 }
                 0
             } else if (wp == VK_UP || wp == VK_DOWN) && c.check_combo(cpu, WM_SYSKEYDOWN, wp) {
@@ -2299,10 +2316,10 @@ fn create(cpu: &mut Cpu, c: &mut Ctx, cs: u32) -> u32 {
     if name >= 0x1_0000 {
         let text = bytes_at(cpu, name).unwrap_or_default();
         if !text.is_empty() {
-            c.replace_sel(false, &text, false, false);
+            c.replace_sel(cpu, false, &text, false, false);
             c.e.sel_start = 0;
             c.e.sel_end = 0;
-            c.scroll_caret();
+            c.scroll_caret(cpu);
         }
     }
     1
@@ -2347,7 +2364,7 @@ fn get_line(cpu: &mut Cpu, c: &Ctx, line: i32, dst: u32) -> u32 {
 }
 
 /// EM_SCROLL(action).
-fn scroll(c: &mut Ctx, action: u32) -> u32 {
+fn scroll(cpu: &Cpu, c: &mut Ctx, action: u32) -> u32 {
     if !c.e.ml() {
         return 0;
     }
@@ -2369,7 +2386,7 @@ fn scroll(c: &mut Ctx, action: u32) -> u32 {
             dy = (count - vlc).max(0) - y;
         }
         if dy != 0 {
-            c.line_scroll_internal(0, dy);
+            c.line_scroll_internal(cpu, 0, dy);
             return make_long(dy, 1);
         }
     }
@@ -2377,7 +2394,7 @@ fn scroll(c: &mut Ctx, action: u32) -> u32 {
 }
 
 /// WM_HSCROLL(action, position).
-fn h_scroll(c: &mut Ctx, action: u32, pos: i32) -> u32 {
+fn h_scroll(cpu: &Cpu, c: &mut Ctx, action: u32, pos: i32) -> u32 {
     let lines = c.e.lines();
     let fw = c.e.format_width();
     let tw = c.e.text_width(&lines);
@@ -2397,32 +2414,32 @@ fn h_scroll(c: &mut Ctx, action: u32, pos: i32) -> u32 {
         _ => 0,
     };
     if dx != 0 {
-        c.line_scroll_internal(dx, 0);
+        c.line_scroll_internal(cpu, dx, 0);
     }
     0
 }
 
 /// WM_VSCROLL(action, position).
-fn v_scroll(c: &mut Ctx, action: u32, pos: i32) -> u32 {
+fn v_scroll(cpu: &Cpu, c: &mut Ctx, action: u32, pos: i32) -> u32 {
     if !c.e.ml() {
         return 0;
     }
     match action {
         SB_LINEUP | SB_LINEDOWN | SB_PAGEUP | SB_PAGEDOWN => {
-            scroll(c, action);
+            scroll(cpu, c, action);
         }
         SB_TOP => {
             let dy = -c.e.y_offset;
-            c.line_scroll_internal(0, dy);
+            c.line_scroll_internal(cpu, 0, dy);
         }
         SB_BOTTOM => {
             let count = c.e.lines().len() as i32;
             let dy = count - 1 - c.e.y_offset;
-            c.line_scroll_internal(0, dy);
+            c.line_scroll_internal(cpu, 0, dy);
         }
         SB_THUMBTRACK | SB_THUMBPOSITION => {
             let dy = pos - c.e.y_offset;
-            c.line_scroll_internal(0, dy);
+            c.line_scroll_internal(cpu, 0, dy);
         }
         _ => {}
     }
@@ -2443,48 +2460,48 @@ fn char_(cpu: &mut Cpu, c: &mut Ctx, ch: u8) {
             }
             if ml {
                 if readonly {
-                    c.move_home(false, false);
+                    c.move_home(cpu, false, false);
                     let lh = c.e.line_height();
-                    c.move_vertically(false, lh);
+                    c.move_vertically(cpu, false, lh);
                 } else {
-                    c.replace_sel(true, b"\r\n", true, true);
+                    c.replace_sel(cpu, true, b"\r\n", true, true);
                 }
             }
         }
         b'\t' => {
             if ml && !readonly && !dialog {
-                c.replace_sel(true, b"\t", true, true);
+                c.replace_sel(cpu, true, b"\t", true, true);
             }
         }
         0x08 => {
             if !readonly && !control {
                 if c.e.sel_start != c.e.sel_end {
-                    c.clear();
+                    c.clear(cpu);
                 } else {
                     c.set_sel(u32::MAX, 0, false);
-                    c.move_backward(true);
-                    c.clear();
+                    c.move_backward(cpu, true);
+                    c.clear(cpu);
                 }
             }
         }
         0x03 => {
             if style & ES_PASSWORD == 0 {
-                c.out.send(c.hwnd, WM_COPY, 0, 0);
+                c.out.send(cpu, c.hwnd, WM_COPY, 0, 0);
             }
         }
         0x16 => {
             if !readonly {
-                c.out.send(c.hwnd, WM_PASTE, 0, 0);
+                c.out.send(cpu, c.hwnd, WM_PASTE, 0, 0);
             }
         }
         0x18 => {
             if !readonly && style & ES_PASSWORD == 0 {
-                c.out.send(c.hwnd, WM_CUT, 0, 0);
+                c.out.send(cpu, c.hwnd, WM_CUT, 0, 0);
             }
         }
         0x1A => {
             if !readonly {
-                c.out.send(c.hwnd, WM_UNDO, 0, 0);
+                c.out.send(cpu, c.hwnd, WM_UNDO, 0, 0);
             }
         }
         _ => {
@@ -2492,7 +2509,7 @@ fn char_(cpu: &mut Cpu, c: &mut Ctx, ch: u8) {
                 return;
             }
             if !readonly && ch >= b' ' && ch != 127 {
-                c.replace_sel(true, &[ch], true, true);
+                c.replace_sel(cpu, true, &[ch], true, true);
             }
         }
     }
@@ -2513,11 +2530,11 @@ fn keydown(cpu: &mut Cpu, c: &mut Ctx, key: u32) {
                 return;
             }
             if ml && key == VK_UP {
-                c.move_vertically(shift, -lh);
+                c.move_vertically(cpu, shift, -lh);
             } else if control {
-                c.move_word(shift, false);
+                c.move_word(cpu, shift, false);
             } else {
-                c.move_backward(shift);
+                c.move_backward(cpu, shift);
             }
         }
         VK_DOWN | VK_RIGHT => {
@@ -2525,18 +2542,18 @@ fn keydown(cpu: &mut Cpu, c: &mut Ctx, key: u32) {
                 return;
             }
             if ml && key == VK_DOWN {
-                c.move_vertically(shift, lh);
+                c.move_vertically(cpu, shift, lh);
             } else if control {
-                c.move_word(shift, true);
+                c.move_word(cpu, shift, true);
             } else {
-                c.move_forward(shift);
+                c.move_forward(cpu, shift);
             }
         }
-        VK_HOME => c.move_home(shift, control),
-        VK_END => c.move_end(shift, control),
+        VK_HOME => c.move_home(cpu, shift, control),
+        VK_END => c.move_end(cpu, shift, control),
         VK_PRIOR | VK_NEXT => {
             if ml {
-                c.move_vertically(shift, if key == VK_PRIOR { -page } else { page });
+                c.move_vertically(cpu, shift, if key == VK_PRIOR { -page } else { page });
             } else {
                 c.check_combo(cpu, WM_KEYDOWN, key);
             }
@@ -2547,17 +2564,17 @@ fn keydown(cpu: &mut Cpu, c: &mut Ctx, key: u32) {
                     if shift {
                         c.copy(cpu);
                     }
-                    c.clear();
+                    c.clear(cpu);
                 } else {
                     c.set_sel(u32::MAX, 0, false);
                     if shift {
-                        c.move_backward(true);
+                        c.move_backward(cpu, true);
                     } else if control {
-                        c.move_end(true, false);
+                        c.move_end(cpu, true, false);
                     } else {
-                        c.move_forward(true);
+                        c.move_forward(cpu, true);
                     }
-                    c.clear();
+                    c.clear(cpu);
                 }
             }
         }
@@ -2575,7 +2592,7 @@ fn keydown(cpu: &mut Cpu, c: &mut Ctx, key: u32) {
                 super::super::message::post_message(cpu, &[c.e.parent, WM_CLOSE, 0, 0]);
             }
         }
-        VK_TAB if ml && dialog => c.out.send(c.e.parent, WM_NEXTDLGCTL, shift as u32, 0),
+        VK_TAB if ml && dialog => c.out.send(cpu, c.e.parent, WM_NEXTDLGCTL, shift as u32, 0),
         _ => {}
     }
 }
@@ -2595,7 +2612,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 fn return_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let parent = t.var(2);
     match t.step {
-        0 => super::super::window::send(parent, DM_GETDEFID, 0, 0, 1),
+        0 => super::super::window::send(cpu, parent, DM_GETDEFID, 0, 0, 1),
         1 => {
             if value >> 16 != DC_HASDEFID {
                 return Next::Done(1);
@@ -2605,7 +2622,7 @@ fn return_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return Next::Done(1);
             }
             t.set(3, child);
-            super::super::window::send(parent, WM_NEXTDLGCTL, child, 1, 2)
+            super::super::window::send(cpu, parent, WM_NEXTDLGCTL, child, 1, 2)
         }
         _ => {
             let child = t.var(3);
@@ -2616,12 +2633,12 @@ fn return_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 }
 
 fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
-    if let Some(next) = paint_head(t, value) {
+    if let Some(next) = paint_head(cpu, t, value) {
         return next;
     }
     if t.step == 3 {
         draw(cpu, t.var(P_HWND), t.var(P_HDC), t.var(P_BRUSH));
-        return paint_end(t, 4);
+        return paint_end(cpu, t, 4);
     }
     Next::Done(0)
 }

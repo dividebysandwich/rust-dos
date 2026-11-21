@@ -189,7 +189,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
 fn moved(cpu: &mut Cpu, hwnd: u32, old: i32, new: i32, result: u32) -> Option<u32> {
     invalidate(cpu, hwnd, old > new);
     let mut s = Script::new(hwnd);
-    s.user("UpdateWindow", &[hwnd]).ret(result);
+    s.user(cpu, "UpdateWindow", &[hwnd]).ret(result);
     super::script::run(cpu, PROGRESS, s)
 }
 
@@ -233,7 +233,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 draw(cpu, hwnd, wp);
                 return Some(0);
             }
-            super::script::run(cpu, PROGRESS, paint_script(hwnd))
+            super::script::run(cpu, PROGRESS, paint_script(cpu, hwnd))
         }
         WM_TIMER => {
             if wp != ID_MARQUEE_TIMER {
@@ -254,7 +254,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             put(cpu, p);
             invalidate(cpu, hwnd, false);
             let mut s = Script::new(hwnd);
-            s.user("UpdateWindow", &[hwnd]).ret(0);
+            s.user(cpu, "UpdateWindow", &[hwnd]).ret(0);
             super::script::run(cpu, PROGRESS, s)
         }
         PBM_DELTAPOS => {
@@ -373,6 +373,7 @@ fn create(cpu: &mut Cpu, hwnd: u32) -> Option<u32> {
     );
     let flags = SWP_FRAMECHANGED | SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE;
     let mut s = Script::new(hwnd);
-    s.user("SetWindowPos", &[hwnd, 0, 0, 0, 0, 0, flags]).ret(0);
+    s.user(cpu, "SetWindowPos", &[hwnd, 0, 0, 0, 0, 0, flags])
+        .ret(0);
     super::script::run(cpu, PROGRESS, s)
 }
