@@ -948,7 +948,7 @@ pub fn call_method(
 /// Call the method at `target` of the 16-bit interface `object` with
 /// the arguments `args` (`sizes` as `call_method` has them); `then`
 /// gets what it returned, and `data`.
-pub(super) fn call_at(
+fn call_at(
     cpu: &mut Cpu,
     target: u32,
     object: u32,

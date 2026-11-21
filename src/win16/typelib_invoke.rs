@@ -96,15 +96,16 @@ const STEP_DISPATCH: u32 = 2;
 
 /// The data of STEP_METHOD: the result's VARIANT, the EXCEPINFO (16:16),
 /// the block of the call's values, the [retval] parameter's VARTYPE and
-/// its place in the block (16:16, 0 for none), what the method returns;
-/// then the BSTRs made for the call.
+/// its place in the block (16:16, 0 for none), what the method returns,
+/// the number of parameters; then the BSTRs made for the call's values.
 const D_RESULT: usize = 1;
 const D_EXCEPINFO: usize = 2;
 const D_BLOCK: usize = 3;
 const D_RETVAL_VT: usize = 4;
 const D_RETVAL: usize = 5;
 const D_RET: usize = 6;
-const D_BSTRS: usize = 7;
+const D_PARAMS: usize = 7;
+const D_BSTRS: usize = 8;
 
 /// The 16:16 address `n` bytes after `p`, in its segment.
 fn add16(p: u32, n: u32) -> u32 {
@@ -182,30 +183,45 @@ fn size(vt: u16) -> usize {
     }
 }
 
+/// The value of an `Out` of the type `vt`, as `size(vt)` bytes, and the
+/// BSTR made for it (0 for none).
+fn out_bytes(cpu: &mut Cpu, out: Out, vt: u16) -> Result<(Vec<u8>, u32), u32> {
+    let (bits, bstr) = match out {
+        Out::Bits(_, bits) => (bits, 0),
+        Out::Str(units) => match alloc_bstr(cpu, &ansi(&units)) {
+            0 => return Err(E_OUTOFMEMORY),
+            s => (s as u64, s),
+        },
+        Out::Iface(_, p) => (p as u64, 0),
+    };
+    Ok((bits.to_le_bytes()[..size(vt).min(8)].to_vec(), bstr))
+}
+
+/// Free the BSTRs the parameters' slots in the call's block at `block`
+/// hold, but the [retval] parameter's at `retval`. A slot holds a
+/// VARIANT: a missing argument's default, or an argument changed to the
+/// type of a parameter passed by reference, whose method may have
+/// replaced the BSTR it was given.
+fn free_slots(cpu: &mut Cpu, block: u32, params: u32, retval: u32) {
+    for i in 0..params {
+        let slot = add16(block, 16 * i);
+        let at = linear(cpu, slot);
+        if slot != retval && at != 0 && super::read_16(cpu, at) == VT_BSTR {
+            free_bstr(cpu, super::read_32(cpu, at + 8));
+        }
+    }
+}
+
 /// A call while it is put together: each argument's bytes as they lie
-/// in memory, and the BSTRs made for it, freed after it.
+/// in memory, and the BSTRs made for the values passed, freed after it.
+/// The BSTRs the slots of the call's block hold are freed with them
+/// (`free_slots`).
 struct Call {
     args: Vec<Vec<u8>>,
     bstrs: Vec<u32>,
 }
 
 impl Call {
-    /// The value of an `Out` of the type `vt`, as `size(vt)` bytes.
-    fn out_bytes(&mut self, cpu: &mut Cpu, out: Out, vt: u16) -> Result<Vec<u8>, u32> {
-        let bits = match out {
-            Out::Bits(_, bits) => bits,
-            Out::Str(units) => match alloc_bstr(cpu, &ansi(&units)) {
-                0 => return Err(E_OUTOFMEMORY),
-                s => {
-                    self.bstrs.push(s);
-                    s as u64
-                }
-            },
-            Out::Iface(_, p) => p as u64,
-        };
-        Ok(bits.to_le_bytes()[..size(vt).min(8)].to_vec())
-    }
-
     /// The argument for a parameter of the type `vt` (not VT_BYREF) from
     /// the VARIANT at `src` (flat).
     fn value(&mut self, cpu: &mut Cpu, src: u32, vt: u16) -> Result<Vec<u8>, u32> {
@@ -221,13 +237,18 @@ impl Call {
             return super::peek(cpu, src + 8, size(vt)).ok_or(E_INVALIDARG);
         }
         let out = changed(cpu, src, vt, 0)?;
-        self.out_bytes(cpu, out, vt)
+        let (bytes, bstr) = out_bytes(cpu, out, vt)?;
+        if bstr != 0 {
+            self.bstrs.push(bstr);
+        }
+        Ok(bytes)
     }
 
     /// The pointer a parameter of the type `vt` (VT_BYREF with the type)
-    /// takes, for the VARIANT at `src16` (16:16): `slot` (16:16) is 16
-    /// bytes to change a value of another type into.
-    fn reference(&mut self, cpu: &mut Cpu, src16: u32, vt: u16, slot: u32) -> Result<u32, u32> {
+    /// takes, for the VARIANT at `src16` (16:16): `slot` (16:16) is a
+    /// VARIANT to change a value of another type into, whose value the
+    /// pointer then points to.
+    fn reference(&self, cpu: &mut Cpu, src16: u32, vt: u16, slot: u32) -> Result<u32, u32> {
         let src = linear(cpu, src16);
         let src_vt = super::read_16(cpu, src);
         if src_vt == vt {
@@ -250,9 +271,11 @@ impl Call {
             return Err(DISP_E_TYPEMISMATCH);
         }
         let out = changed(cpu, src, base, 0)?;
-        let bytes = self.out_bytes(cpu, out, base)?;
-        super::poke(cpu, linear(cpu, slot), &bytes);
-        Ok(slot)
+        let (bytes, _) = out_bytes(cpu, out, base)?;
+        let at = linear(cpu, slot);
+        super::write_16(cpu, at, base);
+        super::poke(cpu, at + 8, &bytes);
+        Ok(add16(slot, 8))
     }
 
     fn free(&self, cpu: &mut Cpu) {
@@ -475,7 +498,6 @@ impl Invocation {
                                     break;
                                 }
                                 b => {
-                                    call.bstrs.push(b);
                                     super::write_16(cpu, slot_at, VT_BSTR);
                                     super::write_32(cpu, slot_at + 8, b);
                                 }
@@ -516,6 +538,7 @@ impl Invocation {
         }
         if let Err((e, arg)) = built {
             call.free(cpu);
+            free_slots(cpu, block, f.params.len() as u32, retval.1);
             ole2::free(cpu, block);
             return self.fail(cpu, e, arg);
         }
@@ -542,6 +565,7 @@ impl Invocation {
             retval.0 as u32,
             retval.1,
             ret,
+            f.params.len() as u32,
         ];
         data.extend(&call.bstrs);
         let resume = Context::of(cpu);
@@ -708,6 +732,7 @@ fn then_method(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Op
     let block = data[D_BLOCK];
     let (retval_vt, retval) = (data[D_RETVAL_VT] as u16, data[D_RETVAL]);
     let ret = data[D_RET];
+    free_slots(cpu, block, data[D_PARAMS], retval);
     if ret == RET_HRESULT && value & 0x8000_0000 != 0 {
         let excepinfo = linear(cpu, data[D_EXCEPINFO]);
         if excepinfo != 0 {
