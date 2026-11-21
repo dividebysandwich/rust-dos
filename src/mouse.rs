@@ -575,15 +575,114 @@ pub fn clear_callback_busy(bus: &mut crate::bus::Bus) {
 /// it runs the real-mode handler of a hardware interrupt, such as the IRQ
 /// a mouse driver's handler runs from, and the client goes on afterwards
 /// as it was. ShadowCaster's DOS/4GW code stays in protected mode and
-/// reads the mouse only through the handler it installs. Other
-/// protected-mode systems get no call.
+/// reads the mouse only through the handler it installs. Under any other
+/// protected-mode system (a DOS extender that switches the processor
+/// itself, such as Phar Lap's 286|DOS-Extender without a DPMI host) the
+/// driver raises its IRQ instead, as a PS/2 mouse would, and the handler
+/// is called from the driver's IRQ handler (`irq_service`) when the
+/// system passes the interrupt down to real mode. From then on the driver
+/// calls the handler only from its IRQ, in real mode too, as a real
+/// driver does: the system's real-mode code that runs with interrupts on,
+/// such as Phar Lap's thunk that passes an interrupt down, can't be
+/// entered again in the middle of it, which a call between any two of its
+/// instructions would do.
 pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
-    if cpu.pe() && !crate::dpmi::can_reflect_interrupt(cpu) {
+    if driver_vector_ours(&cpu.bus) || (cpu.pe() && !crate::dpmi::can_reflect_interrupt(cpu)) {
+        raise_driver_irq(&mut cpu.bus);
         return false;
     }
-    let mouse = &cpu.bus.mouse;
+    if !take_event(cpu) {
+        return false;
+    }
+    if cpu.pe() {
+        let stub = (CALLBACK_STUB - 0xF0000) as u16;
+        crate::dpmi::call_device_code(cpu, 0xF000, stub);
+        return true;
+    }
+    enter_stub(cpu);
+    true
+}
+
+/// The events of the program's mask that wait for its handler, if it has
+/// one and it isn't running.
+fn handler_due(bus: &crate::bus::Bus) -> u16 {
+    let mouse = &bus.mouse;
     let fire = mouse.pending_callback_events & mouse.callback_mask;
-    if fire == 0 || (mouse.callback_cs == 0 && mouse.callback_ip == 0) || callback_busy(&cpu.bus) {
+    if (mouse.callback_cs == 0 && mouse.callback_ip == 0) || callback_busy(bus) {
+        return 0;
+    }
+    fire
+}
+
+/// The IRQ of the driver's handler calls in protected mode: the PS/2
+/// mouse's, whose vector (INT 74h) the driver takes over from the BIOS.
+const DRIVER_IRQ: u8 = 12;
+const DRIVER_VECTOR: usize = 0x74;
+
+/// Whether INT 74h leads to the driver's IRQ handler. Where it has the
+/// BIOS's handler, the driver takes it over and lets IRQ 12 through the
+/// PICs, as a PS/2 mouse driver does when it loads; it does so the first
+/// time it needs the IRQ, so programs that never do keep the BIOS's
+/// vector and masks. A program that hooked the vector in real mode, and
+/// doesn't pass the interrupt on, gets no request from the driver.
+fn take_driver_vector(bus: &mut crate::bus::Bus) -> bool {
+    // A state saved by an older build brings its ROM, without the handler.
+    let handler = 0xF0000 + crate::bios::MOUSE_IRQ as usize;
+    if bus.read_8(handler + 2) != crate::bios::SERVICE_MOUSE_IRQ || bus.read_8(handler) != 0xFE {
+        return false;
+    }
+    if driver_vector_ours(bus) {
+        return true;
+    }
+    let at = DRIVER_VECTOR * 4;
+    if driver_vector(bus) != 0xF000_0000 | crate::bios::PS2_HANDLER as u32 {
+        return false;
+    }
+    bus.write_16(at, crate::bios::MOUSE_IRQ);
+    bus.write_16(at + 2, 0xF000);
+    bus.pic.slave.imr &= !(1 << (DRIVER_IRQ - 8));
+    bus.pic.master.imr &= !0x04;
+    true
+}
+
+/// INT 74h's vector, segment in the high word.
+fn driver_vector(bus: &crate::bus::Bus) -> u32 {
+    let at = DRIVER_VECTOR * 4;
+    (bus.read_16(at + 2) as u32) << 16 | bus.read_16(at) as u32
+}
+
+/// Whether the driver has INT 74h, so calls the handler from its IRQ.
+fn driver_vector_ours(bus: &crate::bus::Bus) -> bool {
+    driver_vector(bus) == 0xF000_0000 | crate::bios::MOUSE_IRQ as u32
+}
+
+/// Request the driver's IRQ for an event the handler waits for.
+fn raise_driver_irq(bus: &mut crate::bus::Bus) {
+    if handler_due(bus) == 0 || bus.pic.busy(DRIVER_IRQ) || !take_driver_vector(bus) {
+        return;
+    }
+    bus.pic.raise(DRIVER_IRQ);
+    bus.refresh_irq();
+}
+
+/// The driver's IRQ handler (`bios::MOUSE_IRQ`), in real mode: CF set
+/// when the IRQ is the PS/2 mouse's, with a byte for the BIOS's handler
+/// to read. Otherwise the event handler is entered through the stub, if
+/// an event waits for it, and the stub returns to the IRQ handler, which
+/// acknowledges the interrupt.
+pub fn irq_service(cpu: &mut crate::cpu::Cpu) {
+    let ps2 = !cpu.bus.kbc.aux_idle();
+    cpu.set_cpu_flag(crate::cpu::CpuFlags::CF, ps2);
+    if !ps2 && !cpu.pe() && take_event(cpu) {
+        enter_stub(cpu);
+    }
+}
+
+/// Take the events the handler is due to be called for, and give the stub
+/// its registers and address. False if there is no call to make.
+fn take_event(cpu: &mut crate::cpu::Cpu) -> bool {
+    let fire = handler_due(&cpu.bus);
+    if fire == 0 {
         return false;
     }
     // The motion after this call counts for the picture shown now, which
@@ -610,12 +709,12 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     let mut data: Vec<u8> = regs.into_iter().chain([handler_ip, handler_cs]).flat_map(u16::to_le_bytes).collect();
     data.push(1); // busy
     cpu.bus.write_rom(CALLBACK_DATA, &data);
+    true
+}
 
-    if cpu.pe() {
-        let stub = (CALLBACK_STUB - 0xF0000) as u16;
-        crate::dpmi::call_device_code(cpu, 0xF000, stub);
-        return true;
-    }
+/// Enter the stub in real mode as an interrupt would, on the stack that
+/// runs, to come back to CS:IP.
+fn enter_stub(cpu: &mut crate::cpu::Cpu) {
     cpu.push(cpu.flags16());
     cpu.push(cpu.cs());
     cpu.push(cpu.ip());
@@ -623,7 +722,6 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     cpu.set_ip((CALLBACK_STUB - 0xF0000) as u16);
     cpu.set_cpu_flag(crate::cpu::CpuFlags::IF, false);
     cpu.set_cpu_flag(crate::cpu::CpuFlags::TF, false);
-    true
 }
 
 impl MouseState {

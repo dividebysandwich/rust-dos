@@ -134,6 +134,7 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_PS2_REPORT => crate::mouse::ps2_report(cpu),
         crate::bios::SERVICE_PORT_ACCESS => crate::bios::next_port_access(cpu),
         crate::bios::SERVICE_MOUSE_CALLBACK_DONE => crate::mouse::clear_callback_busy(&mut cpu.bus),
+        crate::bios::SERVICE_MOUSE_IRQ => crate::mouse::irq_service(cpu),
         crate::bios::SERVICE_KBD_SCAN => crate::keyboard::bios_scan(cpu),
         crate::bios::SERVICE_KBD_PAUSED => crate::keyboard::bios_paused(cpu),
         crate::bios::SERVICE_KBD_INTERCEPTED => crate::keyboard::bios_intercepted(cpu),

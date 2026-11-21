@@ -56,6 +56,9 @@ pub const SERVICE_IPX_ESR: u8 = 0x24;
 /// AH=4Fh had it: CF set, its keystrokes go into the BIOS's buffer; clear,
 /// the hook took the key (`keyboard::bios_intercepted`).
 pub const SERVICE_KBD_INTERCEPTED: u8 = 0x25;
+/// The INT 33h driver's IRQ handler: call the program's event handler, or
+/// pass the IRQ on to the BIOS's PS/2 handler (`mouse::irq_service`).
+pub const SERVICE_MOUSE_IRQ: u8 = 0x26;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Far-call services (`FE 3A nn`, then RETF) at the ROM's entry points for
@@ -77,7 +80,7 @@ pub const DISKETTE_PARAMS: u16 = 0x1150;
 pub const IO_WAIT: u16 = 0x1190;
 /// The PS/2 mouse's IRQ 12 handler (INT 74h), and where it finds the far
 /// address of the program's handler (INT 15h AX=C207h).
-const PS2_HANDLER: u16 = 0x11A0;
+pub const PS2_HANDLER: u16 = 0x11A0;
 pub const PS2_HANDLER_ADDRESS: u16 = 0x11E0;
 /// Where services in virtual-8086 mode return through when they changed
 /// hardware a V86 monitor follows through the ports it traps: it makes the
@@ -86,6 +89,10 @@ pub const PORT_ACCESSES: u16 = 0x11F0;
 /// The rest of the port accesses' kinds (`port_access_more`), which don't
 /// fit the loop.
 const PORT_ACCESSES_MORE: u16 = 0x1500;
+/// The INT 33h driver's IRQ 12 handler, through which a protected-mode
+/// system that passes the IRQ down to real mode gets the program's event
+/// handler called (`mouse::irq_service`).
+pub const MOUSE_IRQ: u16 = 0x1600;
 /// The keyboard interrupt (IRQ 1) of a booted system, which keeps the
 /// keystrokes in the BIOS data area as a PC's BIOS does.
 const KBD_HANDLER: u16 = 0x1230;
@@ -408,6 +415,7 @@ pub fn install(bus: &mut Bus) {
     // completed ECB with an event service routine to it.
     write_rom(bus, IPX_ENTRY, &[0xFE, 0x39, SERVICE_IPX, 0xCB]);
     write_rom(bus, IPX_IRQ, &ipx_irq_handler());
+    write_rom(bus, MOUSE_IRQ, &mouse_irq_handler());
     // Services in V86 mode: make each port access the service left, then
     // return.
     write_rom(bus, PORT_ACCESSES, &port_access_loop());
@@ -517,6 +525,24 @@ fn ipx_irq_handler() -> Vec<u8> {
     a.op(&[0xCF]); // IRET
     let code = a.finish();
     assert!(IPX_IRQ as usize + code.len() <= 0x1500);
+    code
+}
+
+/// The INT 33h driver's IRQ 12 handler: the service calls the program's
+/// event handler through the mouse's stub, which returns here, and the
+/// PICs are acknowledged; a PS/2 byte goes to the BIOS's handler instead.
+fn mouse_irq_handler() -> Vec<u8> {
+    let mut a = crate::asm16::Asm::new(MOUSE_IRQ);
+    a.op(&[0xFE, 0x39, SERVICE_MOUSE_IRQ]); // CF: the BIOS's PS/2 byte
+    a.jump(0x72, "ps2");
+    a.op(&[0x50, 0xB0, 0x20]); // PUSH AX; MOV AL, 20h
+    a.op(&[0xE6, 0xA0, 0xE6, 0x20, 0x58]); // OUT A0h, AL; OUT 20h, AL; POP AX
+    a.op(&[0xCF]); // IRET
+    a.label("ps2");
+    let [lo, hi] = PS2_HANDLER.to_le_bytes();
+    a.op(&[0xEA, lo, hi, 0x00, 0xF0]); // JMP FAR F000:PS2_HANDLER
+    let code = a.finish();
+    assert!(MOUSE_IRQ as usize + code.len() <= 0x1640);
     code
 }
 
