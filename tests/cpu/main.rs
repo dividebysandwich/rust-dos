@@ -31,6 +31,7 @@ mod dynrec_lfb_tests;
 mod dynrec_tests;
 mod f80_tests;
 mod fpu_arithmetic_tests;
+mod fpu_compare_status_tests;
 mod fpu_comparison_tests;
 mod fpu_control_tests;
 mod fpu_data_tests;
