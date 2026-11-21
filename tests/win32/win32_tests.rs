@@ -2587,8 +2587,9 @@ fn a_program_starts_a_batch_file() {
 /// MARK.TXT in its current folder with its command tail.
 #[test]
 fn a_program_starts_a_pif() {
+    let pif = win16::pif("Z.BAT", "C:\\GAME\\RUN", "/B", "/E");
     let files = vec![
-        ("GAME\\Z.PIF", win16::pif("Z.BAT", "C:\\GAME\\RUN", "/B", "/E")),
+        ("GAME\\Z.PIF", pif),
         ("GAME\\Z.BAT", b"@C:\\GAME\\MARK.COM %1\r\n".to_vec()),
         ("GAME\\MARK.COM", win16::dos_folder_marker()),
     ];
@@ -2608,14 +2609,16 @@ fn a_program_starts_a_pif() {
 fn a_dos_program_starts_in_the_current_directory_it_is_given() {
     let files = vec![("MARK.COM", win16::dos_folder_marker())];
     let line = "C:\\MARK.COM X";
-    let code = start_programs_in("child_dos_dir", "T.EXE", line, Some("C:\\SUB"), files, &["SUB"]);
+    let sub = Some("C:\\SUB");
+    let code = start_programs_in("child_dos_dir", "T.EXE", line, sub, files, &["SUB"]);
     // 5 from the program, WAIT_OBJECT_0 and TRUE.
     assert_eq!(code, 0x51);
     let base = PathBuf::from("target/test_win32/child_dos_dir");
     assert_eq!(fs::read(base.join("SUB/MARK.TXT")).unwrap(), b" X");
     assert!(!base.join("MARK.TXT").exists());
     let files = vec![("MARK.COM", win16::dos_folder_marker())];
-    let code = start_programs_in("child_dos_no_dir", "T.EXE", line, Some("C:\\NONE"), files, &[]);
+    let none = Some("C:\\NONE");
+    let code = start_programs_in("child_dos_no_dir", "T.EXE", line, none, files, &[]);
     assert_eq!(code & 1, 0, "CreateProcessA succeeded");
 }
 

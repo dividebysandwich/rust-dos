@@ -195,8 +195,8 @@ fn open_pif(cpu: &mut Cpu, path: &str, arguments: &str, directory: String) -> Re
     let dirs = format!("{};{}", directory, folder);
     // A name without an extension is a program DOS finds as COMMAND.COM
     // does: a COM file, an EXE file or a batch file.
-    let file = pif.program.rsplit(['\\', '/']).next().unwrap_or(&pif.program);
-    let names: Vec<String> = if file.contains('.') {
+    let name = pif.program.rsplit(['\\', '/']).next().unwrap_or("");
+    let names: Vec<String> = if name.contains('.') {
         vec![pif.program.clone()]
     } else {
         ["COM", "EXE", "BAT"]
@@ -215,7 +215,8 @@ fn open_pif(cpu: &mut Cpu, path: &str, arguments: &str, directory: String) -> Re
         return Err(ERROR_FILE_NOT_FOUND);
     };
     let program = cpu.program_path(&paths::dos_path(&found));
-    let file = cpu.read_program_file(&program).ok_or(ERROR_FILE_NOT_FOUND)?;
+    let file = cpu.read_program_file(&program);
+    let file = file.ok_or(ERROR_FILE_NOT_FOUND)?;
     if is_pif(&program) || !is_program(&program, &file) {
         cpu.bus.log_string(&format!(
             "[W32] {} can't start: its program {} isn't a DOS program",

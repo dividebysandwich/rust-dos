@@ -868,7 +868,8 @@ fn shellexecute_starts_a_dos_program_in_its_working_folder() {
         let code = program(imports, &data, |a, l| {
             a.xor(ebx, ebx)?;
             let parameters_at = if parameters.is_empty() { 0 } else { l.at(0x40) };
-            call(a, l.import(1), &[0, 0, l.at(0), parameters_at, l.at(0x80), 1])?;
+            let args = [0, 0, l.at(0), parameters_at, l.at(0x80), 1];
+            call(a, l.import(1), &args)?;
             let mut skip = a.create_label();
             a.cmp(eax, 32)?;
             a.jbe(skip)?;
@@ -879,10 +880,10 @@ fn shellexecute_starts_a_dos_program_in_its_working_folder() {
         let folder = &directory[3..];
         for core in CORES {
             let base = scratch(test, &[("T.EXE", code.clone())]);
-            fs::create_dir_all(base.join(folder)).unwrap();
-            fs::write(base.join(folder).join("MARK.COM"), win16::dos_folder_marker()).unwrap();
-            let pif = win16::pif("MARK", "", "", "/E");
-            fs::write(base.join(folder).join("Z.PIF"), pif).unwrap();
+            let dir = base.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("MARK.COM"), win16::dos_folder_marker()).unwrap();
+            fs::write(dir.join("Z.PIF"), win16::pif("MARK", "", "", "/E")).unwrap();
             let mut cpu = Cpu::new(base.clone());
             cpu.core = core;
             cpu.bus.win32.enabled = true;
@@ -891,8 +892,9 @@ fn shellexecute_starts_a_dos_program_in_its_working_folder() {
             assert!(cpu.load_executable("T.EXE", None));
             run_to_exit(&mut cpu);
             assert_eq!(cpu.errorlevel, 1, "{test} {core:?}: {}", printed(&cpu));
-            let written = fs::read(base.join(folder).join("MARK.TXT"));
-            assert_eq!(written.ok().as_deref(), Some(tail.as_bytes()), "{test} {core:?}");
+            let written = fs::read(dir.join("MARK.TXT")).ok();
+            let tail = Some(tail.as_bytes());
+            assert_eq!(written.as_deref(), tail, "{test} {core:?}");
             assert!(!base.join("MARK.TXT").exists(), "{test} {core:?}");
         }
     }

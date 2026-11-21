@@ -141,7 +141,13 @@ mod tests {
         let enhanced_at = (BASIC + HEADER_LEN) as u16;
         let vmm_at = enhanced_at + HEADER_LEN as u16 + 0x68;
         header(&mut data, FIRST_RECORD, enhanced_at, 0, BASIC as u16);
-        header(&mut data, b"WINDOWS 386 3.0", vmm_at, enhanced_at + 22, 0x68);
+        header(
+            &mut data,
+            b"WINDOWS 386 3.0",
+            vmm_at,
+            enhanced_at + 22,
+            0x68,
+        );
         let mut record = [0u8; 0x68];
         if let Some(p) = enhanced {
             record[ENHANCED_PARAMETERS..ENHANCED_PARAMETERS + p.len()]
@@ -181,7 +187,12 @@ mod tests {
     /// the PIFs Z (1996)'s setup writes: "z.bat", then "EST\ZED.EXE".
     #[test]
     fn strings_end_at_their_nul() {
-        let data = pif("z.bat\0EST\\ZED.EXE", "\0:\\Z_TEST", "\0cd:d", Some("\0cd:d"));
+        let data = pif(
+            "z.bat\0EST\\ZED.EXE",
+            "\0:\\Z_TEST",
+            "\0cd:d",
+            Some("\0cd:d"),
+        );
         let pif = parse(&data).unwrap();
         assert_eq!(pif.program, "z.bat");
         assert_eq!(pif.directory, "");
