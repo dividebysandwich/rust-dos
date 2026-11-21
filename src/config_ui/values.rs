@@ -351,7 +351,15 @@ impl Item {
             AutoBusyOs => on_off(|s, on| s.auto_busy_os = on),
             RewindMemory => each(s, REWIND_MEMORY, |s, mb| s.rewind_memory = mb),
             SbType => {
-                let models = [Some(SbModel::Sb16), Some(SbModel::Awe32), Some(SbModel::SbPro2), Some(SbModel::Sb2), Some(SbModel::SbPro1), Some(SbModel::Sb16Vibra), None];
+                let models = [
+                    Some(SbModel::Sb16),
+                    Some(SbModel::Awe32),
+                    Some(SbModel::SbPro2),
+                    Some(SbModel::SbPro1),
+                    Some(SbModel::Sb2),
+                    Some(SbModel::Sb16Vibra),
+                    None,
+                ];
                 each(s, models, |s, model| match model {
                     Some(model) => {
                         s.sound.sb.model = model;

@@ -30,7 +30,9 @@ pub enum SbModel {
     Sb2,
     /// The first Sound Blaster Pro (CT1330), DSP 3.00. Creative's drivers
     /// for it, such as the CT-VOICE.DRV of 1989-1990, take only DSP 3.00
-    /// and 3.01 and give up on an SB Pro 2's 3.02.
+    /// and 3.01 and give up on an SB Pro 2's 3.02. Its DSP and mixer are
+    /// the SB Pro 2's. The card's two OPL2s are one chip here, the OPL
+    /// crate's, as the configuration's `opl` sets it.
     SbPro1,
     SbPro2,
     Sb16,
