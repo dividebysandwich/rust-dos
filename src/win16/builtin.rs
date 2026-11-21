@@ -50,6 +50,13 @@ pub enum Run {
     Win32(&'static str, &'static str, u8),
     /// A constant: its value (as __AHINCR is).
     Value(fn(&Cpu) -> u16),
+    /// A variable in the module's data segment, its second: its bytes
+    /// (as COMPOBJ's _IID_IUnknown, a GUID, is).
+    Data(&'static [u8]),
+    /// A function the module exports that the built-in Windows doesn't
+    /// have yet: a call of it ends the program saying so, as a call of an
+    /// import no module has does (`missing_address`).
+    Missing,
 }
 
 /// A function of a system module.
@@ -131,6 +138,26 @@ pub const fn value(name: &'static str, ordinal: u16, f: fn(&Cpu) -> u16) -> Api1
     }
 }
 
+pub const fn variable(name: &'static str, ordinal: u16, data: &'static [u8]) -> Api16 {
+    Api16 {
+        name,
+        ordinal,
+        args: "",
+        conv: Conv16::Pascal,
+        run: Run::Data(data),
+    }
+}
+
+pub const fn missing(name: &'static str, ordinal: u16) -> Api16 {
+    Api16 {
+        name,
+        ordinal,
+        args: "",
+        conv: Conv16::Pascal,
+        run: Run::Missing,
+    }
+}
+
 /// A system module.
 pub struct Def {
     /// Its module name, and its file's name.
@@ -161,6 +188,11 @@ pub static MODULES: &[&Def] = &[
     &super::ddeml::MODULE,
     &super::misc::DISPLAY,
     &super::misc::SETUPX,
+    &super::ole2::COMPOBJ,
+    &super::ole2::STORAGE,
+    &super::ole2::OLE2,
+    &super::ole2::OLE2NLS,
+    &super::ole2disp::OLE2DISP,
 ];
 
 /// The place in `MODULES` of the module named `name` ("USER",
@@ -246,6 +278,23 @@ pub fn image(cpu: &Cpu, index: usize) -> Vec<u8> {
         alloc: 0,
         relocations: Vec::new(),
     });
+    let data: Vec<u8> = def
+        .apis
+        .iter()
+        .flat_map(|api| match api.run {
+            Run::Data(bytes) => bytes,
+            _ => &[],
+        })
+        .copied()
+        .collect();
+    if !data.is_empty() {
+        b.segment(ne::SegmentSpec {
+            data,
+            flags: ne::SEG_DATA,
+            alloc: 0,
+            relocations: Vec::new(),
+        });
+    }
     b.description(&format!("{} (built-in)", def.file));
     b.expected_version(0x030A);
     for (i, api) in def.apis.iter().enumerate() {
@@ -256,6 +305,12 @@ pub fn image(cpu: &Cpu, index: usize) -> Vec<u8> {
             Run::Value(f) => ne::Entry::Constant {
                 value: f(cpu),
                 flags: ne::ENTRY_EXPORTED,
+            },
+            Run::Data(_) => ne::Entry::Code {
+                segment: 2,
+                offset: data_offset(def, i),
+                flags: ne::ENTRY_EXPORTED,
+                moveable: false,
             },
             _ => ne::Entry::Code {
                 segment: 1,
@@ -268,6 +323,18 @@ pub fn image(cpu: &Cpu, index: usize) -> Vec<u8> {
         b.export(api.name, api.ordinal, true);
     }
     b.build()
+}
+
+/// Where the variable `apis[i]` of the module `def` is in its data
+/// segment: after the variables before it.
+pub fn data_offset(def: &Def, i: usize) -> u16 {
+    def.apis[..i]
+        .iter()
+        .map(|api| match api.run {
+            Run::Data(bytes) => bytes.len() as u16,
+            _ => 0,
+        })
+        .sum()
 }
 
 /// The module and function of the id `id`.
@@ -441,6 +508,14 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     } else {
         0
     };
+    if matches!(api.run, Run::Missing | Run::Data(_)) {
+        let what = format!(
+            "a call of {}.{}, which the built-in Windows doesn't have yet",
+            def.name, api.name
+        );
+        crate::win32::fatal(cpu, &what, None);
+        return;
+    }
     let result = match api.run {
         Run::Rust(handler) => {
             let args = convert_plain(cpu, api.args, &raw);
@@ -477,6 +552,7 @@ pub fn call(cpu: &mut Cpu, id: u16) {
             None
         }
         Run::Value(f) => Some(f(cpu) as u32),
+        Run::Data(_) | Run::Missing => unreachable!(),
     };
     if !cpu.bus.win32.win16.comm.is_empty() {
         super::comm::service(cpu);
