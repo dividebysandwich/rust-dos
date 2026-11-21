@@ -60,6 +60,7 @@ mod oledlg;
 mod olepro32;
 mod opengl32;
 mod pace;
+mod pif;
 mod advpack;
 pub(crate) mod realmode;
 pub(crate) mod registry;

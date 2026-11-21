@@ -2389,20 +2389,23 @@ fn a_program_uses_the_heap_tls_environment_and_exports() {
 /// 7, or 8 when its command line starts with a quote, so 71h is the
 /// program started, waited for and its exit code read.
 fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
-    let child_program = {
-        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetCommandLineA", "ExitProcess"])];
-        program(BASE, false, imports, &[0; 4], |a, l| {
-            a.call(l.import(0))?;
-            a.cmp(byte_ptr(eax), b'"' as i32)?;
-            a.sete(al)?;
-            a.movzx(eax, al)?;
-            a.add(eax, 7)?;
-            a.push(eax)?;
-            a.call(l.import(1))?;
-            a.int3()
-        })
-    };
-    start_program(test, line, child, child_program, dirs)
+    start_program(test, line, child, child_program(), dirs)
+}
+
+/// `start_child`'s C.EXE: it ends with 7, or 8 when its command line
+/// starts with a quote.
+fn child_program() -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetCommandLineA", "ExitProcess"])];
+    program(BASE, false, imports, &[0; 4], |a, l| {
+        a.call(l.import(0))?;
+        a.cmp(byte_ptr(eax), b'"' as i32)?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        a.add(eax, 7)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.int3()
+    })
 }
 
 /// `start_child`, with `program_bytes` for C.EXE: T.EXE's exit code is 1
@@ -2434,31 +2437,58 @@ fn start_programs(
     files: Vec<(&str, Vec<u8>)>,
     dirs: &[&str],
 ) -> u8 {
+    start_programs_in(test, parent_at, line, None, files, dirs)
+}
+
+/// `start_programs`, with `directory` as CreateProcessA's
+/// lpCurrentDirectory. When CreateProcessA fails, T.EXE ends with the
+/// low byte of GetLastError's code instead.
+fn start_programs_in(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    directory: Option<&str>,
+    files: Vec<(&str, Vec<u8>)>,
+    dirs: &[&str],
+) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",
         "GetExitCodeProcess",
         "CloseHandle",
         "ExitProcess",
+        "GetLastError",
     ];
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
     // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
-    // the exit code at 0xA0.
+    // the exit code at 0xA0, the directory at 0xB0.
     let mut data = line.as_bytes().to_vec();
     assert!(data.len() < 0x40);
-    data.resize(0xB0, 0);
+    data.resize(0xF0, 0);
     data[0x40] = 68;
+    if let Some(directory) = directory {
+        assert!(directory.len() < 0x40);
+        data[0xB0..0xB0 + directory.len()].copy_from_slice(directory.as_bytes());
+    }
     let parent = program(BASE, false, imports, &data, |a, l| {
         let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
         a.push(l.at(0x90) as i32)?;
         a.push(l.at(0x40) as i32)?;
-        for _ in 0..6 {
+        a.push(directory.map_or(0, |_| l.at(0xB0) as i32))?;
+        for _ in 0..5 {
             a.push(0)?;
         }
         a.push(l.at(0) as i32)?;
         a.push(0)?;
         a.call(f("CreateProcessA"))?;
         a.mov(ebx, eax)?;
+        let mut started = a.create_label();
+        a.test(eax, eax)?;
+        a.jnz(started)?;
+        a.call(f("GetLastError"))?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.set_label(&mut started)?;
         a.push(-1)?;
         a.push(dword_ptr(l.at(0x90)))?;
         a.call(f("WaitForSingleObject"))?;
@@ -2559,6 +2589,74 @@ fn a_program_starts_a_batch_file() {
     assert_eq!(code & 0x0F, 0x01);
     let written = fs::read(base.join("MARK.TXT")).unwrap();
     assert_eq!(&written[2..], b" ARG");
+}
+
+/// CreateProcessA of a PIF: Windows 98 runs the program the PIF names,
+/// in the PIF's working folder, with the parameters of its 386 enhanced
+/// record in place of those of its basic section (as Wine's winevdm
+/// reads them). The program, a batch file named without a folder, is
+/// found in the PIF's folder, and the DOS program it starts writes
+/// MARK.TXT in its current folder with its command tail.
+#[test]
+fn a_program_starts_a_pif() {
+    let pif = win16::pif("Z.BAT", "C:\\GAME\\RUN", "/B", "/E");
+    let files = vec![
+        ("GAME\\Z.PIF", pif),
+        ("GAME\\Z.BAT", b"@C:\\GAME\\MARK.COM %1\r\n".to_vec()),
+        ("GAME\\MARK.COM", win16::dos_folder_marker()),
+    ];
+    let line = "C:\\GAME\\Z.PIF";
+    let code = start_programs("child_pif", "T.EXE", line, files, &["GAME/RUN"]);
+    // CreateProcessA's TRUE and the wait's WAIT_OBJECT_0.
+    assert_eq!(code & 0x0F, 0x01);
+    let base = PathBuf::from("target/test_win32/child_pif");
+    let written = fs::read(base.join("GAME/RUN/MARK.TXT")).unwrap();
+    assert_eq!(written, b" /E");
+}
+
+/// CreateProcessA with lpCurrentDirectory starts a DOS program in that
+/// folder, and fails with ERROR_DIRECTORY for a folder that isn't
+/// there.
+#[test]
+fn a_dos_program_starts_in_the_current_directory_it_is_given() {
+    let files = vec![("MARK.COM", win16::dos_folder_marker())];
+    let line = "C:\\MARK.COM X";
+    let sub = Some("C:\\SUB");
+    let code = start_programs_in("child_dos_dir", "T.EXE", line, sub, files, &["SUB"]);
+    // 5 from the program, WAIT_OBJECT_0 and TRUE.
+    assert_eq!(code, 0x51);
+    let base = PathBuf::from("target/test_win32/child_dos_dir");
+    assert_eq!(fs::read(base.join("SUB/MARK.TXT")).unwrap(), b" X");
+    assert!(!base.join("MARK.TXT").exists());
+    let files = vec![("MARK.COM", win16::dos_folder_marker())];
+    let none = Some("C:\\NONE");
+    let code = start_programs_in("child_dos_no_dir", "T.EXE", line, none, files, &[]);
+    // ERROR_DIRECTORY's low byte (267, 10Bh).
+    assert_eq!(code, 0x0B);
+}
+
+/// CreateProcessA of a Windows program with lpCurrentDirectory: a folder
+/// that is there lets it start as without one (#1611: it starts in its
+/// parent's folder for now), and one that isn't fails with
+/// ERROR_DIRECTORY before the program is looked at, for a Win32 and a
+/// Windows 3.1 child alike, as Windows 98's CreateProcessA does.
+#[test]
+fn a_windows_program_given_a_missing_current_directory_does_not_start() {
+    let line = "C.EXE an argument";
+    let sub = Some("C:\\SUB");
+    let files = vec![("C.EXE", child_program())];
+    let code = start_programs_in("child_win32_dir", "T.EXE", line, sub, files, &["SUB"]);
+    assert_eq!(code, 0x71);
+    let none = Some("C:\\NONE");
+    let files = vec![("C.EXE", child_program())];
+    let code = start_programs_in("child_win32_no_dir", "T.EXE", line, none, files, &[]);
+    // ERROR_DIRECTORY's low byte (267, 10Bh).
+    assert_eq!(code, 0x0B);
+    let mut code = win16::Code::new();
+    code.emit(&[0xB0, 0x07]).exit_al(); // mov al,7
+    let files = vec![("C.EXE", win16::program(&code, win16::CODE))];
+    let code = start_programs_in("child_win16_no_dir", "T.EXE", line, none, files, &[]);
+    assert_eq!(code, 0x0B);
 }
 
 /// A DOS program (a COM file) that changes what Windows 98 keeps apart
