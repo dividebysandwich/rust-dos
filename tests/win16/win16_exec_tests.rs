@@ -332,12 +332,32 @@ fn exit_with_path_length(code: &mut Code) {
 /// and ends with the length of its path. `places` are the directories
 /// (under C:\) that get a copy of `name`'s DLL.
 fn search(test: &str, first: &[&str], name: &str, places: &[&str]) -> (u8, String) {
+    search_after(test, first, &[], name, places)
+}
+
+/// `search`, with the files `gone` (paths) deleted after the loads of
+/// `first`.
+fn search_after(
+    test: &str,
+    first: &[&str],
+    gone: &[&str],
+    name: &str,
+    places: &[&str],
+) -> (u8, String) {
     let mut code = Code::new();
     let mut strings = Vec::new();
     for path in first {
         let at = code.here() + 2;
         code.push_far(0).call("KERNEL", LOAD_LIBRARY);
         code.emit(&[0x50]).call("KERNEL", FREE_LIBRARY); // push ax
+        strings.push((at, *path));
+    }
+    for path in gone {
+        // push ds; push cs; pop ds; mov dx,path; mov ah,41h; int 21h;
+        // pop ds.
+        code.emit(&[0x1E, 0x0E, 0x1F, 0xBA]);
+        let at = code.here();
+        code.emit(&[0, 0, 0xB4, 0x41, 0xCD, 0x21, 0x1F]);
         strings.push((at, *path));
     }
     let at = code.here() + 2;
@@ -406,6 +426,19 @@ fn a_known_dll_is_looked_for_in_the_system_directory_first() {
     // Without it, the current directory's comes first.
     let (exit, log) = search("search_unknown", &[], "PICK.DLL", &places);
     assert_eq!(exit, IN_CURRENT, "{log}");
+}
+
+/// A value of Known16DLLs stays when its file leaves the system
+/// directory, and Windows 95 then looks in the Windows directory before
+/// the current one (Microsoft's articles Q141969 and Q149430): the
+/// system directory, the Windows directory, the current directory, the
+/// task's directory, PATH.
+#[test]
+fn a_known_dll_moved_away_is_looked_for_in_the_windows_directory_next() {
+    let places = ["", "WINDOWS", "WINDOWS/SYSTEM"];
+    let system = "C:\\WINDOWS\\SYSTEM\\PICK.DLL";
+    let (exit, log) = search_after("search_moved", &[system], &[system], "PICK.DLL", &places);
+    assert_eq!(exit, IN_WINDOWS, "{log}");
 }
 
 /// A DLL that imports another is in C:\LIBS, with a copy of the other

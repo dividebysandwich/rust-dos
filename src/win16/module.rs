@@ -133,23 +133,21 @@ pub fn load(
 }
 
 /// Where Windows 95 and 98 keep the 16-bit DLLs they look for in the
-/// system directory first: one value for each, named after its module,
-/// its file's name the data.
+/// system directory first: one value for each, named after its file
+/// ("COMMCTRL.DLL"). The data can be anything; Windows writes the file's
+/// name (Microsoft's articles Q141969 and Q149430).
 const KNOWN16DLLS: &str = "System\\CurrentControlSet\\Control\\SessionManager\\Known16DLLs";
 
-/// Whether the file `name` is one of Known16DLLs.
+/// Whether the file `name` is one of Known16DLLs: whether the key has a
+/// value of that name, whatever its type and data.
 fn is_known(cpu: &mut Cpu, name: &str) -> bool {
-    let values = registry::string_values(cpu, &[(registry::HKEY_LOCAL_MACHINE, KNOWN16DLLS)]);
-    values
-        .into_iter()
-        .flatten()
-        .any(|(_, file)| file.eq_ignore_ascii_case(name))
+    registry::has_value(cpu, registry::HKEY_LOCAL_MACHINE, KNOWN16DLLS, name)
 }
 
 /// A DLL that was loaded from the system directory becomes one of
-/// Known16DLLs, as Windows 95 makes it (Microsoft's article Q149430):
-/// from then on it is looked for there first, whatever directory a
-/// program has a copy of it in.
+/// Known16DLLs, as Windows 95 makes it (Q141969, Q149430): from then on
+/// it is looked for there first, whatever directory a program has a
+/// copy of it in, and the value stays when the file is moved away.
 fn remember_known(cpu: &mut Cpu, index: usize) {
     let m = &cpu.bus.win32.win16.modules[index];
     if m.flags & ne::LIBMODULE == 0 {
@@ -160,7 +158,6 @@ fn remember_known(cpu: &mut Cpu, index: usize) {
         return;
     }
     let file = file_name_of(&m.path).to_ascii_uppercase();
-    let name = m.name.clone();
     if is_known(cpu, &file) {
         return;
     }
@@ -169,9 +166,9 @@ fn remember_known(cpu: &mut Cpu, index: usize) {
         return;
     };
     let (key, _) = reg.create(root, KNOWN16DLLS);
-    let mut data = file.into_bytes();
+    let mut data = file.clone().into_bytes();
     data.push(0);
-    reg.set_value(key, &name, registry::REG_SZ, data);
+    reg.set_value(key, &file, registry::REG_SZ, data);
 }
 
 fn file_name_of(path: &str) -> &str {
@@ -183,8 +180,9 @@ fn file_name_of(path: &str) -> &str {
 /// ".DLL" added to a name without an extension. Windows 3.1's order is:
 /// the current directory, the Windows directory, the system directory,
 /// the directory of the current task's executable (`dir`), then the
-/// directories of PATH. Windows 95 and 98 look in the system directory
-/// before all of them for a file of Known16DLLs.
+/// directories of PATH. For a file of Known16DLLs, Windows 95 and 98
+/// look in the system directory, the Windows directory, the current
+/// directory, the task's directory and PATH (Q141969).
 fn find_file(cpu: &mut Cpu, name: &str, dir: &str) -> Option<(String, Vec<u8>)> {
     let name = if name.contains('.') {
         name.to_string()
@@ -195,12 +193,17 @@ fn find_file(cpu: &mut Cpu, name: &str, dir: &str) -> Option<(String, Vec<u8>)> 
     if name.contains(['\\', '/', ':']) {
         candidates.push(name.clone());
     } else {
-        let system = crate::win32::loader::SYSTEM_DIR;
-        if is_known(cpu, &name) {
-            candidates.push(join(system, &name));
-        }
+        let (windows, system) = (
+            crate::win32::loader::WINDOWS_DIR,
+            crate::win32::loader::SYSTEM_DIR,
+        );
         let cwd = crate::win32::kernel32::current_directory(cpu, cpu.bus.disk.get_current_drive());
-        for d in [cwd.as_str(), crate::win32::loader::WINDOWS_DIR, system, dir] {
+        let order = if is_known(cpu, &name) {
+            [system, windows, cwd.as_str(), dir]
+        } else {
+            [cwd.as_str(), windows, system, dir]
+        };
+        for d in order {
             if !d.is_empty() {
                 candidates.push(join(d, &name));
             }
