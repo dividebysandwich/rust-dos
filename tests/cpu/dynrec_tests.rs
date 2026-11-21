@@ -6653,6 +6653,10 @@ fn fpu_instructions_on_empty_registers_run_as_their_handlers() {
         a.fcompp()?;
         a.fnstsw(ax)?;
         a.add(ebx, eax)?;
+        a.ficom(dword_ptr(esi + 8))?;
+        a.ficomp(word_ptr(esi + 8))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
         for _ in 0..5 {
             a.fld(dword_ptr(esi))?;
             a.fld(st0)?;
