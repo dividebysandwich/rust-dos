@@ -228,6 +228,18 @@ pub const STUB: u32 = 8;
 /// has go to: one for each such import, calls of which end the program.
 pub const MISSING: usize = 64;
 
+/// The id, in KERNEL's, and the place in KERNEL's code segment of the
+/// first stub for an import nothing has: the last `MISSING` of KERNEL's
+/// 400h ids. The stubs of KERNEL's functions take the places before it,
+/// the rest of them zeros until KERNEL's table grows into them, so a
+/// function appended to the table takes a place and an id no missing
+/// stub has, and a saved state's missing stubs keep theirs.
+///
+/// States saved before #1599 have the missing stubs right after
+/// KERNEL's stubs, with the ids of those places: their KERNEL code
+/// segment is that many stubs long (`mend`).
+pub const FIRST_MISSING: usize = 0x400 - MISSING;
+
 /// The stub of `api`, whose id is `id`.
 fn stub(id: u16, api: &Api16) -> [u8; STUB as usize] {
     let [lo, hi] = id.to_le_bytes();
@@ -241,6 +253,13 @@ fn stub(id: u16, api: &Api16) -> [u8; STUB as usize] {
         code[4] = 0xCB;
     }
     code
+}
+
+/// The stub with the trap id `id` (in KERNEL's) for an import nothing
+/// has.
+fn missing_stub(id: usize) -> [u8; STUB as usize] {
+    let [lo, hi] = (id as u16).to_le_bytes();
+    [0xFE, crate::win32::TRAP, lo, hi, 0xCB, 0x90, 0x90, 0x90]
 }
 
 /// The bytes of arguments the signature `args` says.
@@ -270,9 +289,9 @@ pub fn image(cpu: &Cpu, index: usize) -> Vec<u8> {
         .flat_map(|(i, api)| stub(id(index, i), api))
         .collect();
     if index == 0 {
+        code.resize(FIRST_MISSING * STUB as usize, 0);
         for k in 0..MISSING {
-            let [lo, hi] = id(0, def.apis.len() + k).to_le_bytes();
-            code.extend_from_slice(&[0xFE, crate::win32::TRAP, lo, hi, 0xCB, 0x90, 0x90, 0x90]);
+            code.extend_from_slice(&missing_stub(FIRST_MISSING + k));
         }
     }
     b.segment(ne::SegmentSpec {
@@ -354,29 +373,66 @@ pub fn function_name(id: u16) -> Option<String> {
 
 /// What the stub with the trap id `id` in a system module's code runs,
 /// for the disassembler and the profiler: "Win16 USER.IsWindow". KERNEL's
-/// ids past its table are the stubs of functions the built-in Windows
-/// doesn't have (`missing_address`), which `call` numbers from 0.
+/// ids from `FIRST_MISSING` on are the stubs of functions the built-in
+/// Windows doesn't have (`missing_address`), which `call` numbers from 0.
 pub fn trap_name(id: u16) -> String {
     if let Some(name) = function_name(id) {
         return format!("Win16 {name}");
     }
-    let kernel = MODULES[0].apis.len();
-    if id >> 10 == 0 && (id & 0x3FF) as usize >= kernel {
-        return format!("Win16 missing function {}", (id & 0x3FF) as usize - kernel);
+    if let Some(k) = missing_index(id) {
+        return format!("Win16 missing function {k}");
     }
     format!("Win16 {id:04X}h")
+}
+
+/// Which stub for an import nothing has the trap id `id` is, if it is
+/// one.
+fn missing_index(id: u16) -> Option<usize> {
+    (id as usize)
+        .checked_sub(FIRST_MISSING)
+        .filter(|&k| k < MISSING)
+}
+
+/// How many stubs of its functions the loaded image of a system module
+/// has room for at the start of its code segment. An image from an
+/// older table lacks the stubs of the functions appended since: where
+/// they would be, it has KERNEL's missing stubs (in a state from before
+/// #1599) or nothing.
+pub fn stubs_in(m: &super::Module16) -> usize {
+    let size = (m.segments.first().map_or(0, |s| s.size) / STUB) as usize;
+    match m.builtin {
+        Some(0) => size.saturating_sub(MISSING),
+        _ => size,
+    }
 }
 
 /// The 16:16 address of the stub of the function `name` of the system
 /// module `module`, once that is loaded.
 pub fn stub_address(cpu: &Cpu, module: usize, name: &str) -> Option<u32> {
     let i = MODULES[module].apis.iter().position(|a| a.name == name)?;
-    let sel = super::module::builtin_selector(cpu, module)?;
+    let m = loaded(cpu, module)?;
+    if i >= stubs_in(m) {
+        return None;
+    }
+    let sel = m.segments.first()?.selector;
     Some(((sel as u32) << 16) | (i as u32 * STUB))
 }
 
+/// The system module `module` (its place in `MODULES`), once it is
+/// loaded.
+fn loaded(cpu: &Cpu, module: usize) -> Option<&super::Module16> {
+    cpu.bus
+        .win32
+        .win16
+        .modules
+        .iter()
+        .find(|m| m.builtin == Some(module as u16))
+}
+
 /// The 16:16 address of the stub that stands for the import `name`
-/// nothing has: 0 when there are no more of them.
+/// nothing has: 0 when there are no more of them. The missing stubs are
+/// the last `MISSING` of KERNEL's code segment: at `FIRST_MISSING`, or
+/// right after KERNEL's own stubs in a state from before #1599.
 pub fn missing_address(cpu: &mut Cpu, name: String) -> u32 {
     let missing = &mut cpu.bus.win32.win16.missing;
     let k = match missing.iter().position(|m| *m == name) {
@@ -389,10 +445,87 @@ pub fn missing_address(cpu: &mut Cpu, name: String) -> u32 {
     if k >= MISSING {
         return 0;
     }
-    let Some(sel) = super::module::builtin_selector(cpu, 0) else {
+    let Some(kernel) = loaded(cpu, 0) else {
         return 0;
     };
-    ((sel as u32) << 16) | ((MODULES[0].apis.len() + k) as u32 * STUB)
+    let Some(code) = kernel.segments.first() else {
+        return 0;
+    };
+    ((code.selector as u32) << 16) | ((stubs_in(kernel) + k) as u32 * STUB)
+}
+
+/// Mend the Win16 KERNEL of a state just loaded.
+///
+/// In a state from before #1599, the stubs for imports nothing has
+/// follow KERNEL's own and trap with the ids of their places, which a
+/// function appended to KERNEL's table since then has. Each one traps
+/// with its id of now instead, from `FIRST_MISSING` on, and stays where
+/// it is, since the program's imports point at it. The KERNEL code
+/// segment's size, which the state keeps, tells where they start.
+///
+/// In a state of now, the functions appended to KERNEL's table since it
+/// was saved get their stubs in the zeros before `FIRST_MISSING`.
+///
+/// A stub is rewritten only while it has its older id, and a place
+/// filled only while it is zeros, so a state the mended machine saves
+/// loads again as it was.
+pub(crate) fn mend(bus: &mut crate::bus::Bus) -> crate::savestate::Result<()> {
+    let win16 = &bus.win32.win16;
+    let Some(kernel) = win16.modules.iter().find(|m| m.builtin == Some(0)) else {
+        return Ok(());
+    };
+    let Some(code) = kernel.segments.first() else {
+        return Ok(());
+    };
+    let first = stubs_in(kernel);
+    if code.size % STUB != 0 || first > FIRST_MISSING {
+        return Err(crate::savestate::StateError::Invalid(format!(
+            "the Win16 KERNEL's code segment is {} bytes long, which no build of \
+             KERNEL made",
+            code.size
+        )));
+    }
+    let Some(base) = win16
+        .arena
+        .get(&super::ldt::index(code.selector))
+        .map(|a| a.base)
+        .filter(|&b| b != 0)
+    else {
+        return Ok(());
+    };
+    let pid = win16.pid;
+    let Some(index) = bus.win32.processes.iter().position(|p| p.id == pid) else {
+        return Ok(());
+    };
+    let process = std::mem::take(&mut bus.win32.processes[index]);
+    let at = |slot: usize| base + slot as u32 * STUB;
+    let has = |bus: &crate::bus::Bus, slot: usize, bytes: &[u8]| {
+        crate::win32::loader::peek(bus, &process.memory, at(slot), STUB as usize)
+            .is_some_and(|b| b == bytes)
+    };
+    if first == FIRST_MISSING {
+        for (i, api) in MODULES[0].apis.iter().enumerate() {
+            if has(bus, i, &[0; STUB as usize]) {
+                process.memory.write(bus, at(i), &stub(id(0, i), api));
+            }
+        }
+    } else {
+        let mut mended = 0;
+        for k in 0..MISSING {
+            if has(bus, first + k, &missing_stub(first + k)) {
+                let now = missing_stub(FIRST_MISSING + k);
+                process.memory.write(bus, at(first + k), &now);
+                mended += 1;
+            }
+        }
+        if mended > 0 {
+            bus.log_string(&format!(
+                "[W16] KERNEL's image has {first} functions and the missing-import                  stubs after them: {mended} of them trap with their ids of now"
+            ));
+        }
+    }
+    bus.win32.processes[index] = process;
+    Ok(())
 }
 
 /// Where 16-bit code 32-bit code called returns to: KERNEL's
@@ -474,9 +607,7 @@ pub fn returns_as_is(c: u8) -> bool {
 /// Run the function the trap with id `id` is the stub of, called by 16-bit
 /// code: its far return address on the stack, its arguments above.
 pub fn call(cpu: &mut Cpu, id: u16) {
-    let kernel = MODULES[0].apis.len();
-    if id >> 10 == 0 && (id & 0x3FF) as usize >= kernel {
-        let k = (id & 0x3FF) as usize - kernel;
+    if let Some(k) = missing_index(id) {
         let name = cpu
             .bus
             .win32
@@ -731,5 +862,16 @@ mod tests {
         assert_eq!(ordinal("WIN87EM", "__WIN87EMINFO"), Some(3));
         assert_eq!(ordinal("WIN87EM", "__WIN87EMRESTORE"), Some(4));
         assert_eq!(ordinal("WIN87EM", "__WIN87EMSAVE"), Some(5));
+    }
+
+    /// KERNEL's functions take the ids and places before its missing
+    /// stubs, and every module's fit in a module's 400h ids.
+    #[test]
+    fn kernel_leaves_the_missing_stubs_their_ids() {
+        assert!(MODULES[0].apis.len() <= FIRST_MISSING);
+        assert!(MODULES.iter().all(|m| m.apis.len() <= 0x400));
+        let image = ne::Module::parse(&image(&Cpu::new(".".into()), 0)).unwrap();
+        let code = &image.segments[0];
+        assert_eq!(code.size() as usize, 0x400 * STUB as usize);
     }
 }
