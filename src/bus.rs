@@ -2018,7 +2018,7 @@ impl Bus {
         let sb_filter = match &self.sb {
             Some(sb) if self.mixer.settings().sb_filter == crate::mixer::SbFilter::Auto => match sb.config.model {
                 crate::sb::SbModel::Sb2 => Some((4800.0, 2)),
-                crate::sb::SbModel::SbPro2 => Some((3200.0, 2)),
+                crate::sb::SbModel::SbPro1 | crate::sb::SbModel::SbPro2 => Some((3200.0, 2)),
                 // The SB16 filters at half its sample rate.
                 m if m.is_sb16() && sb.out_rate >= 4000 => Some((sb.out_rate as f32 / 2.0, 4)),
                 _ => None,

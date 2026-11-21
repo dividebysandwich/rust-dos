@@ -790,10 +790,19 @@ limit, so without a connection it goes on as it would with one:
 ### `[sound]`
 
 * `sbtype` is the Sound Blaster: `sb16` (the default), `sb16vibra`,
-  `awe32`, `sbpro2`, `sb2` or `none`. `sbbase` (hex), `irq`, `dma` and
-  `hdma` (the SB16's and AWE32's 16-bit channel) set its resources; the
-  defaults are 220, 7, 1 and 5. The `BLASTER` environment variable follows
-  them.
+  `awe32`, `sbpro2`, `sbpro1`, `sb2` or `none`. `sbbase` (hex), `irq`,
+  `dma` and `hdma` (the SB16's and AWE32's 16-bit channel) set its
+  resources; the defaults are 220, 7, 1 and 5. The `BLASTER` environment
+  variable follows them.
+* `sbpro1` is the first Sound Blaster Pro (CT1330, DSP 3.00), which
+  DOSBox's `sbtype=sbpro1` imports as. Creative's early drivers for it,
+  such as Mega lo Mania's, take only DSP 3.00 and 3.01 and don't find an
+  `sbpro2`, whose DSP is 3.02. The real card has two OPL2 chips, the left
+  one at base+0 and the right one at base+2; here its FM synthesizer is
+  the one `opl` picks. With `opl3`, the default, a program that checks for
+  an OPL3 finds one and can use it, and notes written to the two chips
+  play through the OPL3's two register banks, in the middle. With `opl2`
+  the check finds an OPL2, but what goes to base+2 is lost.
 * `sb16vibra` is an SB16 as Creative's ViBRA16C (CTL0070, DSP 4.13), an
   ISA Plug and Play card, as DOSBox-X's `sbtype=sb16vibra` is. The BIOS
   leaves it configured at the resources above, so DOS programs find it as

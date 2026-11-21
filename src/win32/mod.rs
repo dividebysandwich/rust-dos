@@ -13,7 +13,7 @@
 //! ExitProcess goes back to real mode and ends the DOS process with
 //! INT 21h AH=4Ch, so the shell or the program that started it goes on.
 
-mod advapi32;
+pub(crate) mod advapi32;
 pub(crate) mod boot;
 pub(crate) mod call;
 pub(crate) mod com;
@@ -67,6 +67,7 @@ mod screen;
 pub(crate) mod seh;
 mod shell32;
 pub mod snapshot;
+pub(crate) mod stub_tables;
 pub(crate) mod stubs;
 pub(crate) mod system;
 mod tapi32;
@@ -303,6 +304,9 @@ pub struct Process {
     /// The system's heap in the shared arena (`Heap::create_shared`),
     /// once a critical section needs it.
     system_heap: heap::SystemHeap,
+    /// Its images of built-in DLLs made from an older table, which keep
+    /// its order. A load works them out again (`stub_tables::mend`).
+    pub(crate) older_images: Vec<stub_tables::OlderImage>,
 }
 
 impl Process {
@@ -1641,6 +1645,7 @@ crate::state_fields!(Process {
     system_heap,
 } skip {
     file_apis_oem,
+    older_images,
 });
 crate::state_fields!(Win32 {
     pending,
