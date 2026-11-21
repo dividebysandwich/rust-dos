@@ -356,7 +356,8 @@
 [sound]
 # The Sound Blaster: sb16 (the default), sb16vibra (an SB16 as the ViBRA16C,
 # an ISA Plug and Play card whose resources Windows 95 sets), awe32 (an
-# SB16 with the EMU8000 wavetable synthesizer), sbpro2, sb2, or none.
+# SB16 with the EMU8000 wavetable synthesizer), sbpro2, sbpro1 (the first
+# SB Pro, DSP 3.00, for drivers that take no later one), sb2, or none.
 # Programs learn its settings from the BLASTER environment variable, which
 # follows these.
 #sbtype=sb16

@@ -1420,7 +1420,7 @@ mod tests {
         let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
         assert!(prepared.warnings.is_empty(), "{:?}\n{}", prepared.warnings, text);
         assert_eq!(prepared.settings.cycles, crate::timer::CpuSpeed::Fixed(8000));
-        assert_eq!(prepared.settings.sound.sb.model, crate::sb::SbModel::SbPro2);
+        assert_eq!(prepared.settings.sound.sb.model, crate::sb::SbModel::SbPro1);
         let archive = crate::hostfs::canonicalize_plain(dir.join("Game.zip")).unwrap();
         assert_eq!(prepared.drives.len(), 1);
         assert_eq!(prepared.drives[0].path, archive.join("game"));
