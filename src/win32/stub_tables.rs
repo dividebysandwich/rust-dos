@@ -291,7 +291,7 @@ fn stub_in<'a>(
 /// get the function of the image of the table now. None when the process
 /// has no older image of that DLL or no stub for the function in it, and
 /// for a function the running version of Windows doesn't export.
-pub(crate) fn lacking_export(
+pub(super) fn lacking_export(
     bus: &Bus,
     process: &Process,
     base: u32,
