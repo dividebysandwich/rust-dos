@@ -19,7 +19,7 @@ pub struct SoundView {
     /// The sources heard lately, with their last frames, oldest first.
     scopes: Vec<(Channel, Vec<f32>)>,
     silenced: u16,
-    opl: Option<([ChannelView; 18], bool, u32)>,
+    opl: Option<([ChannelView; 18], crate::opl::Chip, u32)>,
     gus: Option<(Vec<VoiceView>, u32)>,
     midi: Option<(Box<[[u8; 128]; 16]>, u16)>,
 }
@@ -45,7 +45,8 @@ impl SoundView {
                     .collect()
             })
             .unwrap_or_default();
-        let opl = (!bus.opl.is_idle()).then(|| (bus.opl.channels(), bus.opl.is_opl3(), bus.opl.mute()));
+        let opl = (!bus.opl.is_idle())
+            .then(|| (bus.opl.channels(), bus.opl.chip(), bus.opl.mute()));
         let gus = bus
             .gus
             .as_ref()
@@ -267,9 +268,16 @@ impl ConfigUi {
         for from in (0..view.scopes.len()).step_by(per_row) {
             parts.push(Part::Scopes(from, (from + per_row).min(view.scopes.len())));
         }
-        if let Some((channels, opl3, _)) = &view.opl {
-            parts.push(Part::Heading(if *opl3 { "FM synthesizer (OPL3)" } else { "FM synthesizer (OPL2)" }));
-            let used = if *opl3 && channels[9..].iter().any(|c| c.key_on || c.level > 0) { 18 } else { 9 };
+        if let Some((channels, chip, _)) = &view.opl {
+            use crate::opl::Chip;
+            parts.push(Part::Heading(match chip {
+                Chip::Opl3 => "FM synthesizer (OPL3)",
+                Chip::Opl2 => "FM synthesizer (OPL2)",
+                Chip::DualOpl2 => "FM synthesizer (left and right OPL2)",
+            }));
+            // A dual OPL2's channels 9 to 17 are its right chip's.
+            let more = *chip != Chip::Opl2 && channels[9..].iter().any(|c| c.key_on || c.level > 0);
+            let used = if more { 18 } else { 9 };
             for from in (0..used).step_by(9) {
                 parts.push(Part::Opl(from, from + 9));
             }

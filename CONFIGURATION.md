@@ -797,12 +797,11 @@ limit, so without a connection it goes on as it would with one:
 * `sbpro1` is the first Sound Blaster Pro (CT1330, DSP 3.00), which
   DOSBox's `sbtype=sbpro1` imports as. Creative's early drivers for it,
   such as Mega lo Mania's, take only DSP 3.00 and 3.01 and don't find an
-  `sbpro2`, whose DSP is 3.02. The real card has two OPL2 chips, the left
-  one at base+0 and the right one at base+2; here its FM synthesizer is
-  the one `opl` picks. With `opl3`, the default, a program that checks for
-  an OPL3 finds one and can use it, and notes written to the two chips
-  play through the OPL3's two register banks, in the middle. With `opl2`
-  the check finds an OPL2, but what goes to base+2 is lost.
+  `sbpro2`, whose DSP is 3.02. Its FM synthesizer is two OPL2 chips, as
+  on the real card (`opl=dualopl2`, which `opl=auto` gives it): the left
+  one at base+0/1 plays on the left only, the right one at base+2/3 on
+  the right only, and base+8/9 and 388h/389h write both. A program that
+  checks for an OPL3 finds none.
 * `sb16vibra` is an SB16 as Creative's ViBRA16C (CTL0070, DSP 4.13), an
   ISA Plug and Play card, as DOSBox-X's `sbtype=sb16vibra` is. The BIOS
   leaves it configured at the resources above, so DOS programs find it as
@@ -826,7 +825,17 @@ limit, so without a connection it goes on as it would with one:
   the instruments programs load into its RAM; the ROM's are silent.
   `awe32ram` is the RAM in KB: `512` (the default, as the AWE32 came),
   `0`, `1024`, `2048`, `4096`, `8192`, `12288`, `16384` or `28672`.
-* `opl` is the FM synthesizer: `opl3` (the default) or `opl2`.
+* `opl` is the FM synthesizer: `auto` (the default), `opl3`, `opl2` or
+  `dualopl2`. `auto` is two OPL2s with `sbtype=sbpro1` and an OPL3 with
+  every other card. `dualopl2` is the first SB Pro's pair of OPL2s:
+  base+0/1 writes the left chip, base+2/3 the right one, and base+8/9 and
+  388h to 38Bh both. The status at base+0, base+8 and 388h is the left
+  chip's, at base+2 and 38Ah the right chip's, as in DOSBox. It reads as
+  an OPL2's, so a program's OPL3 check fails as on the real card. The
+  left chip plays on the left output only and the right chip on the
+  right only, and the Sound Blaster mixer's FM volume sets each side. A
+  DOSBox configuration's `oplmode=dualopl2` imports as `dualopl2`, and
+  its `auto` as `auto`.
 * `adlibgold` installs the AdLib Gold 1000: `true` or `false` (the
   default). It is an OPL3 with a control chip (mixer, EEPROM), a stereo
   processor (TDA8425), the optional surround module (YM7128B) and two

@@ -331,8 +331,9 @@ pub struct SoundConfig {
     /// The Sound Blaster's resources, and whether there is one.
     pub sb: crate::sb::SbConfig,
     pub sb_installed: bool,
-    /// OPL3 (as on an SB Pro 2 or SB16) rather than OPL2.
-    pub opl3: bool,
+    /// The FM chip (`opl`), or None for the Sound Blaster's own: two
+    /// OPL2s on an SB Pro 1, else an OPL3.
+    pub opl: Option<crate::opl::Chip>,
     /// The AWE32's sample ROM, a file or a directory with `awe32.raw`
     /// (`awe32rom`); without it, the usual places (`awe32::rom::find`).
     pub awe32rom: Option<PathBuf>,
@@ -390,7 +391,7 @@ impl Default for SoundConfig {
         Self {
             sb: crate::sb::SbConfig::default(),
             sb_installed: true,
-            opl3: true,
+            opl: None,
             awe32rom: None,
             awe32ram: crate::awe32::DEFAULT_RAM_KB,
             soundfont: None,
@@ -427,10 +428,18 @@ impl SoundConfig {
         self.adlibgold_installed.then_some(self.adlibgold)
     }
 
-    /// Whether the FM chip is an OPL3: as `opl` says, and always with an
-    /// AdLib Gold, whose chip it is.
-    pub fn fm_is_opl3(&self) -> bool {
-        self.opl3 || self.adlibgold_installed
+    /// The FM chip: as `opl` says, and always an OPL3 with an AdLib
+    /// Gold, whose chip it is. `opl=auto` gives the two OPL2s of the
+    /// first SB Pro (CT1330) with `sbtype=sbpro1`, and an OPL3 otherwise.
+    pub fn fm_chip(&self) -> crate::opl::Chip {
+        use crate::opl::Chip;
+        if self.adlibgold_installed {
+            return Chip::Opl3;
+        }
+        self.opl.unwrap_or(match self.card() {
+            Some(sb) if sb.model == crate::sb::SbModel::SbPro1 => Chip::DualOpl2,
+            _ => Chip::Opl3,
+        })
     }
 
     /// Problems between settings, once the section is read: an Ultrasound
@@ -515,10 +524,18 @@ impl SoundConfig {
             "dma" => sb.dma8 = number(0, 3).and_then(|d| if d == 2 { Err("dma 2 belongs to the floppy".to_string()) } else { Ok(d) })? as u8,
             "hdma" => sb.dma16 = number(5, 7)? as u8,
             "opl" => {
-                self.opl3 = match value.to_ascii_lowercase().as_str() {
-                    "opl3" => true,
-                    "opl2" => false,
-                    _ => return Err(format!("invalid opl '{}' (opl3 or opl2)", value)),
+                use crate::opl::Chip;
+                self.opl = match value.to_ascii_lowercase().as_str() {
+                    "auto" => None,
+                    "opl3" => Some(Chip::Opl3),
+                    "opl2" => Some(Chip::Opl2),
+                    "dualopl2" => Some(Chip::DualOpl2),
+                    _ => {
+                        return Err(format!(
+                            "invalid opl '{}' (auto, opl3, opl2 or dualopl2)",
+                            value
+                        ));
+                    }
                 }
             }
             "awe32rom" => self.awe32rom = Some(expand_host_path(value, base_dir, home)),

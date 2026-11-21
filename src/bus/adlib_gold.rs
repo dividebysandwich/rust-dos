@@ -85,7 +85,7 @@ impl Bus {
         };
         match port.wrapping_sub(gold.base()) {
             0 => self.opl_address(port, value),
-            1 => self.opl_data(0, value),
+            1 => self.opl_data(Some(0), value),
             2 => {
                 if !gold.write_control_address(value) {
                     self.opl.write_address(1, value);
@@ -93,7 +93,7 @@ impl Bus {
             }
             3 => {
                 if !gold.control_selected() {
-                    self.opl_data(1, value);
+                    self.opl_data(Some(1), value);
                     return;
                 }
                 // The mixer and output stage change from now on.

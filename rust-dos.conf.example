@@ -375,8 +375,10 @@
 # The AWE32's sample RAM in KB: 512 (the default), 0, 1024, 2048, 4096,
 # 8192, 12288, 16384 or 28672.
 #awe32ram=512
-# FM synthesizer: opl3 (as on an SB Pro 2 or SB16) or opl2 (AdLib, SB 2.0).
-#opl=opl3
+# FM synthesizer: auto (two OPL2s with sbtype=sbpro1, else an OPL3), opl3
+# (as on an SB Pro 2 or SB16), opl2 (AdLib, SB 2.0) or dualopl2 (the first
+# SB Pro's two OPL2s, left and right).
+#opl=auto
 # A General MIDI SoundFont (.sf2) for music sent to the MPU-401 at 330h.
 #soundfont=~/soundfonts/GeneralUser.sf2
 # The Gravis Ultrasound: true (the default) or false. Programs learn its
