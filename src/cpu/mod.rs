@@ -2054,6 +2054,31 @@ impl Cpu {
             self.bus.guest_write_bytes(env_phys, &block);
             let psp_phys = self.get_physical_addr(self.current_psp, 0) as u32;
             self.bus.guest_write_16(psp_phys + 0x2C, layout.environment);
+            // Its MCB names the program as the owner, with the size of the
+            // block, as MS-DOS's EXEC allocates it: the variables, the
+            // count and the path, in paragraphs. Runtimes check the owner
+            // before they read a variable (the BASIC of Z's installer
+            // finds none otherwise). The rest of the area up to the first
+            // MCB is a free block, so the chain read from it reaches the
+            // first MCB.
+            let area = layout.first_mcb - layout.environment;
+            let size = (block.len().div_ceil(16) as u16).min(area);
+            let mcb = crate::mcb::Mcb {
+                signature: crate::mcb::MCB_M,
+                owner: self.current_psp,
+                size,
+            };
+            crate::mcb::write_mcb(&mut self.bus, layout.environment - 1, &mcb);
+            let name_phys = self.get_physical_addr(layout.environment - 1, 8) as u32;
+            self.bus.guest_write_bytes(name_phys, &[0; 8]);
+            if size < area {
+                let rest = crate::mcb::Mcb {
+                    signature: crate::mcb::MCB_M,
+                    owner: crate::mcb::FREE_OWNER,
+                    size: area - size - 1,
+                };
+                crate::mcb::write_mcb(&mut self.bus, layout.environment + size, &rest);
+            }
         }
         if loaded && placement == Placement::Shell {
             crate::mcb::name_program(&mut self.bus, self.current_psp, filename);

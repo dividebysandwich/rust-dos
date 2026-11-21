@@ -509,7 +509,8 @@ limit, so without a connection it goes on as it would with one:
   conventional memory, as `DOS=HIGH` leaves it: `true` (the default) or
   `false`. The first memory block is then at 05A9h, about 617 KB of
   conventional memory are free, and programs load below 64 KB, with a
-  2 KB environment (`SET` says *Out of environment space* past it).
+  2 KB environment, its MCB included (`SET` says *Out of environment
+  space* past it).
   `false` spreads them up to 0FFFh, where programs start at segment 1000h
   with 576 KB free, for an old program that fails below 64 KB ("Packed
   file is corrupt"). DOS keeps no code in the HMA, which stays free for

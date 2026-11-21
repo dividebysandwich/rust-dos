@@ -16,7 +16,7 @@
 mod advapi32;
 pub(crate) mod boot;
 pub(crate) mod call;
-mod com;
+pub(crate) mod com;
 mod comctl32;
 mod comdlg32;
 mod convert;
@@ -54,14 +54,14 @@ pub(crate) mod object;
 #[cfg(test)]
 mod ordinals;
 mod ole32;
-mod oleaut32;
+pub(crate) mod oleaut32;
 mod oledlg;
 mod olepro32;
 mod opengl32;
 mod pace;
 mod advpack;
 pub(crate) mod realmode;
-mod registry;
+pub(crate) mod registry;
 mod rpcrt4;
 mod screen;
 pub(crate) mod seh;

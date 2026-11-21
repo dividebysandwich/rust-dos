@@ -19,7 +19,7 @@ mod stdole;
 #[cfg(test)]
 mod tests;
 mod typelib;
-mod variant;
+pub(crate) mod variant;
 
 use super::stubs::{Api, Conv, Dll, Vtable};
 use crate::cpu::Cpu;

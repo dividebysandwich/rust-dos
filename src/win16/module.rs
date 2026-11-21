@@ -436,6 +436,11 @@ pub fn entry_point(cpu: &Cpu, module: u16, ordinal: u16) -> u32 {
         };
         return match apis[i].run {
             builtin::Run::Value(f) => (CONSTANT_SEL as u32) << 16 | f(cpu) as u32,
+            builtin::Run::Data(_) => {
+                let sel = m.segments.get(1).map_or(0, |s| s.selector);
+                let offset = builtin::data_offset(builtin::MODULES[b as usize], i);
+                ((sel as u32) << 16) | offset as u32
+            }
             _ => {
                 let sel = m.segments.first().map_or(0, |s| s.selector);
                 ((sel as u32) << 16) | (i as u32 * builtin::STUB)
@@ -756,6 +761,9 @@ fn unload(cpu: &mut Cpu, index: usize) {
     }
     global::free_owned(cpu, m.handle);
     global::free(cpu, m.handle);
+    if m.builtin.is_some() && m.name == "COMPOBJ" {
+        super::ole2::unloaded(cpu);
+    }
     if m.resources32 != 0 {
         let pid = cpu.bus.win32.win16.pid;
         super::with_win16(cpu, pid, |p, bus| {

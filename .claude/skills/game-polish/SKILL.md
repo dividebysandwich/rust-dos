@@ -341,6 +341,17 @@ Fix the issues in rank order. For each one:
    request, if there is one, and the worktree for whoever goes on with
    it, and say where they are in the report.
 
+A finding that isn't fixed in this session is follow-up work, not a
+finding to leave behind: a missing DLL or API, a missing device, a
+performance cost, a gap the game only touches in its setup. Don't ask
+the user whether to take it on. List it in the report's follow-ups
+(Phase 4) with what the fix needs, so that it is queued as a fix task
+of its own: by you, if you go on working, or by whoever runs the
+session. Only two kinds stay out of the follow-ups, each with its reason
+in the report: the game's own behaviour, which the real PC shows too,
+and a fix that needs a decision with no clearly better option, which
+the report puts to the user.
+
 Remove each worktree (`git worktree remove`) once its pull request is
 ready for review and nothing in it is still needed.
 
@@ -352,6 +363,9 @@ Finish with a short report to the user:
 - what you covered, and what you didn't reach;
 - a table: finding, kind, issue, pull request (draft or ready),
   validated (yes, no, or how), and what is left;
+- the follow-ups: each finding not fixed, with its issue, what the fix
+  needs and the save states for it, to be queued as fix tasks without
+  asking; and the findings left out of them, with the reason;
 - the speed figures from `stats.jsonl`: the slowest scenes and their
   `emulated_speed`, `fps` and `cpu_use`;
 - where `$W` is, with the save states and screenshots, since they aren't
