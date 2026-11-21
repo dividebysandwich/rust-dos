@@ -10,15 +10,15 @@
 mod desc;
 mod errorinfo;
 mod invoke;
-mod model;
+pub(crate) mod model;
 mod msft;
 pub(crate) mod safearray;
 pub(crate) mod signature;
 mod sltg;
-mod stdole;
+pub(crate) mod stdole;
 #[cfg(test)]
 mod tests;
-mod typelib;
+pub(crate) mod typelib;
 pub(crate) mod variant;
 
 use super::stubs::{Api, Conv, Dll, Vtable};

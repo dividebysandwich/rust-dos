@@ -370,3 +370,311 @@ fn global_first_and_next_walk_the_heap() {
     let (status, log) = run("toolhelp_walk", program(&code, CODE));
     assert_eq!(status, 0, "check {status} failed:\n{log}");
 }
+
+/// TOOLHELP's task, module and local heap functions.
+const LOCAL_INFO: u16 = 56;
+const LOCAL_FIRST: u16 = 57;
+const LOCAL_NEXT: u16 = 58;
+const MODULE_FIRST: u16 = 59;
+const MODULE_NEXT: u16 = 60;
+const MODULE_FIND_NAME: u16 = 61;
+const MODULE_FIND_HANDLE: u16 = 62;
+const TASK_FIRST: u16 = 63;
+const TASK_NEXT: u16 = 64;
+const TASK_FIND_HANDLE: u16 = 65;
+/// KERNEL's LocalAlloc and GetModuleHandle.
+const LOCAL_ALLOC: u16 = 5;
+const GET_MODULE_HANDLE: u16 = 47;
+
+/// TASKENTRY, MODULEENTRY, LOCALINFO and LOCALENTRY sizes.
+const TASKENTRY: u16 = 0x28;
+const MODULEENTRY: u16 = 0x114;
+const LOCALINFO: u16 = 6;
+const LOCALENTRY: u16 = 0x16;
+
+/// More places in the data segment: the instance DI had at the start,
+/// SS, a module name, what a walk copies from the entry it looks for,
+/// the value it looks for, and a second handle.
+const INST: u16 = 0x28;
+const SS: u16 = 0x2A;
+const NAME: u16 = 0x2C;
+const GOT_FLAGS: u16 = 0x36;
+const GOT_SIZE: u16 = 0x38;
+const WANT: u16 = 0x3A;
+const HANDLE2: u16 = 0x3C;
+
+/// TASKENTRY's fields at ENTRY.
+const TE_TASK: u16 = ENTRY + 4;
+const TE_INST: u16 = ENTRY + 8;
+const TE_MODULE: u16 = ENTRY + 10;
+const TE_SS: u16 = ENTRY + 12;
+const TE_MODULE_NAME: u16 = ENTRY + 0x1A;
+const TE_PSP_OFFSET: u16 = ENTRY + 0x24;
+
+/// MODULEENTRY's fields at ENTRY.
+const ME_NAME: u16 = ENTRY + 4;
+const ME_MODULE: u16 = ENTRY + 0x0E;
+const ME_USAGE: u16 = ENTRY + 0x10;
+const ME_PATH: u16 = ENTRY + 0x12;
+
+/// LOCALENTRY's fields at ENTRY, and its wFlags and wType values.
+const LE_HANDLE: u16 = ENTRY + 4;
+const LE_SIZE: u16 = ENTRY + 8;
+const LE_FLAGS: u16 = ENTRY + 10;
+const LE_TYPE: u16 = ENTRY + 14;
+const LE_HEAP: u16 = ENTRY + 16;
+const LF_FIXED: u16 = 1;
+const LF_FREE: u16 = 2;
+const LF_MOVEABLE: u16 = 4;
+const LT_FREE: u16 = 0xFF;
+
+/// End with `fail` if the word at `at` is 0.
+fn expect_nonzero(code: &mut Code, at: u16, fail: u8) {
+    code.emit(&[0x83, 0x3E, lo(at), hi(at), 0])
+        .emit(&[0x75, 0x06]) // jne over the exit
+        .emit(&[0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21]);
+}
+
+/// Walk a list: `first` calls the function that gives its first item,
+/// then `next` (TOOLHELP's, given ds:ENTRY) the rest, to the first
+/// FALSE. COUNT counts the items; FOUND is 1 once one whose word `key`
+/// equals the word at WANT comes, and GOT_FLAGS and GOT_SIZE then have
+/// its words `flags` and `size`.
+fn walk_list(
+    code: &mut Code,
+    first: impl Fn(&mut Code),
+    next: u16,
+    key: u16,
+    flags: u16,
+    size: u16,
+) {
+    set(code, COUNT, 0);
+    set(code, FOUND, 0);
+    first(code);
+    let top = code.here();
+    // test ax,ax; jz near (the end, patched below).
+    code.emit(&[0x85, 0xC0, 0x0F, 0x84, 0, 0]);
+    let end_at = code.here() - 2;
+    code.emit(&[0xFF, 0x06, lo(COUNT), hi(COUNT)]); // inc word [COUNT]
+    code.emit(&[0xA1, lo(key), hi(key)]) // mov ax,[key]
+        .emit(&[0x3B, 0x06, lo(WANT), hi(WANT)]) // cmp ax,[WANT]
+        .emit(&[0x75, 0x12]); // jne over the next 18 bytes
+    set(code, FOUND, 1);
+    code.emit(&[0xA1, lo(flags), hi(flags)]);
+    store_ax(code, GOT_FLAGS);
+    code.emit(&[0xA1, lo(size), hi(size)]);
+    store_ax(code, GOT_SIZE);
+    code.emit(&[0x1E]).push(ENTRY).call("TOOLHELP", next);
+    // jmp near top.
+    let back = top.wrapping_sub(code.here() + 3);
+    code.emit(&[0xE9, lo(back), hi(back)]);
+    let end = code.here();
+    code.patch(end_at, end - (end_at + 2));
+}
+
+/// TaskFindHandle fills TASKENTRY for the running task: its handle (what
+/// GetCurrentTask gives), its instance (what DI had at the start), its
+/// module, its stack's selector, its module's name and the PDB's offset
+/// 100h. Visual Basic 4's runtime reads the instance from it at start
+/// and quits when the call fails. TaskFirst and TaskNext walk the tasks
+/// to this one; an entry whose dwSize isn't 28h, and a handle that is no
+/// task, get FALSE.
+#[test]
+fn task_find_handle_describes_the_running_task() {
+    let mut code = Code::new();
+    code.emit(&[0x89, 0x3E, lo(INST), hi(INST)]); // mov [INST],di
+    code.emit(&[0x8C, 0x16, lo(SS), hi(SS)]); // mov [SS],ss
+    code.call("KERNEL", GET_CURRENT_TASK);
+    store_ax(&mut code, TASK);
+    code.emit(&[0x1E]).call("KERNEL", GET_EXE_PTR); // push ds
+    store_ax(&mut code, MODULE);
+
+    entry_size(&mut code, TASKENTRY);
+    code.emit(&[0x1E]).push(ENTRY);
+    push_word(&mut code, TASK);
+    code.call("TOOLHELP", TASK_FIND_HANDLE);
+    expect_ax(&mut code, 1, 1);
+    expect_same(&mut code, TE_TASK, TASK, 2);
+    expect_same(&mut code, TE_INST, INST, 3);
+    expect_same(&mut code, TE_MODULE, MODULE, 4);
+    expect_same(&mut code, TE_SS, SS, 5);
+    expect_byte(&mut code, TE_MODULE_NAME, b'T', 6);
+    expect_byte(&mut code, TE_MODULE_NAME + 1, 0, 7);
+    expect(&mut code, TE_PSP_OFFSET, 0x100, 8);
+
+    // TaskFirst and TaskNext come to this task.
+    code.emit(&[0xA1, lo(TASK), hi(TASK)]); // mov ax,[TASK]
+    store_ax(&mut code, WANT);
+    walk_list(
+        &mut code,
+        |c| {
+            c.emit(&[0x1E]).push(ENTRY).call("TOOLHELP", TASK_FIRST);
+        },
+        TASK_NEXT,
+        TE_TASK,
+        TE_INST,
+        TE_MODULE,
+    );
+    expect(&mut code, FOUND, 1, 9);
+    expect_same(&mut code, GOT_FLAGS, INST, 10);
+    expect_same(&mut code, GOT_SIZE, MODULE, 11);
+
+    // A handle that is no task.
+    code.emit(&[0x1E]).push(ENTRY).push(0x0FF6);
+    code.call("TOOLHELP", TASK_FIND_HANDLE);
+    expect_ax(&mut code, 0, 12);
+
+    // A dwSize TOOLHELP doesn't know.
+    entry_size(&mut code, TASKENTRY - 1);
+    code.emit(&[0x1E]).push(ENTRY);
+    push_word(&mut code, TASK);
+    code.call("TOOLHELP", TASK_FIND_HANDLE);
+    expect_ax(&mut code, 0, 13);
+    exit_ok(&mut code);
+
+    let (status, log) = run("toolhelp_tasks", program(&code, CODE));
+    assert_eq!(status, 0, "check {status} failed:\n{log}");
+}
+
+/// ModuleFindHandle fills MODULEENTRY for the program's module, given
+/// its data segment as GetExePtr takes it: the module's handle, its
+/// name, its use count and its file's path. ModuleFindName finds KERNEL
+/// by its name in any case, the handle GetModuleHandle gives, and
+/// ModuleFirst and ModuleNext walk the modules from KERNEL to the
+/// program's. A dwSize that isn't 114h gets FALSE.
+#[test]
+fn module_walk_finds_the_programs_module() {
+    let mut code = Code::new();
+    code.emit(&[0x1E]).call("KERNEL", GET_EXE_PTR); // push ds
+    store_ax(&mut code, MODULE);
+    entry_size(&mut code, MODULEENTRY);
+
+    code.emit(&[0x1E]).push(ENTRY).emit(&[0x1E]); // push ds (the module)
+    code.call("TOOLHELP", MODULE_FIND_HANDLE);
+    expect_ax(&mut code, 1, 1);
+    expect_same(&mut code, ME_MODULE, MODULE, 2);
+    expect_byte(&mut code, ME_NAME, b'T', 3);
+    expect_byte(&mut code, ME_NAME + 1, 0, 4);
+    expect_nonzero(&mut code, ME_USAGE, 5);
+    expect_byte(&mut code, ME_PATH + 1, b':', 6);
+
+    // "kernel", in lower case.
+    set(&mut code, NAME, u16::from_le_bytes(*b"ke"));
+    set(&mut code, NAME + 2, u16::from_le_bytes(*b"rn"));
+    set(&mut code, NAME + 4, u16::from_le_bytes(*b"el"));
+    set(&mut code, NAME + 6, 0);
+    code.emit(&[0x1E]).push(ENTRY).emit(&[0x1E]).push(NAME);
+    code.call("TOOLHELP", MODULE_FIND_NAME);
+    expect_ax(&mut code, 1, 7);
+    expect_byte(&mut code, ME_NAME, b'K', 8);
+    code.emit(&[0x1E])
+        .push(NAME)
+        .call("KERNEL", GET_MODULE_HANDLE);
+    code.emit(&[0x3B, 0x06, lo(ME_MODULE), hi(ME_MODULE)]); // cmp ax,[ME_MODULE]
+    or_fail(&mut code, 9);
+
+    // ModuleFirst gives KERNEL, and the walk comes to the program.
+    code.emit(&[0x1E])
+        .push(ENTRY)
+        .call("TOOLHELP", MODULE_FIRST);
+    expect_ax(&mut code, 1, 10);
+    expect_byte(&mut code, ME_NAME, b'K', 11);
+    code.emit(&[0xA1, lo(MODULE), hi(MODULE)]); // mov ax,[MODULE]
+    store_ax(&mut code, WANT);
+    walk_list(
+        &mut code,
+        |c| {
+            c.emit(&[0x1E]).push(ENTRY).call("TOOLHELP", MODULE_FIRST);
+        },
+        MODULE_NEXT,
+        ME_MODULE,
+        ME_NAME,
+        ME_USAGE,
+    );
+    expect(&mut code, FOUND, 1, 12);
+    expect(&mut code, GOT_FLAGS, u16::from(b'T'), 13);
+
+    // A dwSize TOOLHELP doesn't know.
+    entry_size(&mut code, MODULEENTRY + 1);
+    code.emit(&[0x1E])
+        .push(ENTRY)
+        .call("TOOLHELP", MODULE_FIRST);
+    expect_ax(&mut code, 0, 14);
+    exit_ok(&mut code);
+
+    let (status, log) = run("toolhelp_modules", program(&code, CODE));
+    assert_eq!(status, 0, "check {status} failed:\n{log}");
+}
+
+/// LocalInfo counts the items of a local heap, and LocalFirst and
+/// LocalNext walk as many: a fixed block as LF_FIXED and a moveable one
+/// as LF_MOVEABLE, each by its handle and with its size, and the free
+/// rest of the heap as LF_FREE of type LT_FREE, every entry naming the
+/// heap. Wrong dwSizes get FALSE.
+#[test]
+fn local_walk_lists_the_heaps_blocks() {
+    let mut code = Code::new();
+    // LocalInit(DS, 200h, 600h).
+    code.push(0)
+        .push(0x200)
+        .push(0x600)
+        .call("KERNEL", LOCAL_INIT);
+    code.emit(&[0x8C, 0x1E, lo(DS), hi(DS)]); // mov [DS],ds
+    code.push(0).push(0x20).call("KERNEL", LOCAL_ALLOC);
+    store_ax(&mut code, HANDLE);
+    code.push(0x0002).push(0x30).call("KERNEL", LOCAL_ALLOC);
+    store_ax(&mut code, HANDLE2);
+    expect_nonzero(&mut code, HANDLE, 1);
+    expect_nonzero(&mut code, HANDLE2, 2);
+
+    set(&mut code, INFO, LOCALINFO);
+    set(&mut code, INFO + 2, 0);
+    code.emit(&[0x1E]).push(INFO);
+    push_word(&mut code, DS);
+    code.call("TOOLHELP", LOCAL_INFO);
+    expect_ax(&mut code, 1, 3);
+
+    let first = |c: &mut Code| {
+        set(c, ENTRY, LOCALENTRY);
+        set(c, ENTRY + 2, 0);
+        c.emit(&[0x1E]).push(ENTRY);
+        push_word(c, DS);
+        c.call("TOOLHELP", LOCAL_FIRST);
+    };
+    code.emit(&[0xA1, lo(HANDLE), hi(HANDLE)]); // mov ax,[HANDLE]
+    store_ax(&mut code, WANT);
+    walk_list(&mut code, first, LOCAL_NEXT, LE_HANDLE, LE_FLAGS, LE_SIZE);
+    expect_same(&mut code, COUNT, WC_ITEMS, 4);
+    expect(&mut code, FOUND, 1, 5);
+    expect(&mut code, GOT_FLAGS, LF_FIXED, 6);
+    expect(&mut code, GOT_SIZE, 0x20, 7);
+    expect_same(&mut code, LE_HEAP, DS, 8);
+
+    code.emit(&[0xA1, lo(HANDLE2), hi(HANDLE2)]); // mov ax,[HANDLE2]
+    store_ax(&mut code, WANT);
+    walk_list(&mut code, first, LOCAL_NEXT, LE_HANDLE, LE_FLAGS, LE_SIZE);
+    expect(&mut code, FOUND, 1, 9);
+    expect(&mut code, GOT_FLAGS, LF_MOVEABLE, 10);
+    expect(&mut code, GOT_SIZE, 0x30, 11);
+
+    set(&mut code, WANT, LT_FREE);
+    walk_list(&mut code, first, LOCAL_NEXT, LE_TYPE, LE_FLAGS, LE_SIZE);
+    expect(&mut code, FOUND, 1, 12);
+    expect(&mut code, GOT_FLAGS, LF_FREE, 13);
+
+    // Sizes TOOLHELP doesn't know.
+    set(&mut code, INFO, LOCALINFO + 1);
+    code.emit(&[0x1E]).push(INFO);
+    push_word(&mut code, DS);
+    code.call("TOOLHELP", LOCAL_INFO);
+    expect_ax(&mut code, 0, 14);
+    set(&mut code, ENTRY, LOCALENTRY + 1);
+    code.emit(&[0x1E]).push(ENTRY);
+    push_word(&mut code, DS);
+    code.call("TOOLHELP", LOCAL_FIRST);
+    expect_ax(&mut code, 0, 15);
+    exit_ok(&mut code);
+
+    let (status, log) = run("toolhelp_local_walk", program(&code, CODE));
+    assert_eq!(status, 0, "check {status} failed:\n{log}");
+}
