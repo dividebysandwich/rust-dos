@@ -357,11 +357,8 @@ mod tests {
         };
         assert_eq!(pm32.disasm().1, rust_dos::win32::trap_name(0x0466, false));
         assert!(pm32.disasm().1.starts_with("Win32 "));
-        // KERNEL's ids past its table are functions it doesn't have.
-        let kernel = (0..0x400)
-            .take_while(|&i| rust_dos::win16::function_name(i).is_some())
-            .count();
-        let [lo, hi] = id(0, kernel as u16 + 2);
+        // KERNEL's last 64 ids, 3C0h on, are functions it doesn't have.
+        let [lo, hi] = id(0, 0x3C0 + 2);
         let missing = TraceEntry {
             pm: true,
             ..code(&[0xFE, 0x3E, lo, hi])

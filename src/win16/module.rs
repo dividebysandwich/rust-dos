@@ -505,6 +505,9 @@ pub fn entry_point(cpu: &Cpu, module: u16, ordinal: u16) -> u32 {
                 let offset = builtin::data_offset(builtin::MODULES[b as usize], i);
                 ((sel as u32) << 16) | offset as u32
             }
+            // An image from an older table has no stub for a function
+            // appended since: its program finds the function missing.
+            _ if i >= builtin::stubs_in(m) => 0,
             _ => {
                 let sel = m.segments.first().map_or(0, |s| s.selector);
                 ((sel as u32) << 16) | (i as u32 * builtin::STUB)
@@ -890,19 +893,6 @@ pub fn new_instance(cpu: &mut Cpu, index: usize) -> u16 {
         super::poke(cpu, a.base, &bytes);
     }
     handle
-}
-
-/// The selector of the code segment of the loaded system module
-/// `builtin`.
-pub fn builtin_selector(cpu: &Cpu, builtin: usize) -> Option<u16> {
-    cpu.bus
-        .win32
-        .win16
-        .modules
-        .iter()
-        .find(|m| m.builtin == Some(builtin as u16))
-        .and_then(|m| m.segments.first())
-        .map(|s| s.selector)
 }
 
 // The module database.
