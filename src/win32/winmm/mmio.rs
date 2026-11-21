@@ -1332,7 +1332,7 @@ pub fn mmio_rename(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if !cpu.bus.guest_probe(info, INFO_SIZE as usize, false) {
             return None;
         }
-        let fcc = cpu.bus.guest_read_32(info + I_FCC);
+        let mut fcc = cpu.bus.guest_read_32(info + I_FCC);
         let proc = cpu.bus.guest_read_32(info + I_PROC);
         let pid = crate::win32::user32::current_pid(cpu);
         let proc = if proc != 0 {
@@ -1341,7 +1341,19 @@ pub fn mmio_rename(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             // An installed DOS procedure too, as in mmioOpenA.
             installed(cpu, pid, fcc)
         } else {
-            None
+            // The extension before the '+' of a compound name picks an
+            // installed procedure as in mmioOpenA, which gets
+            // MMIOM_RENAME; a name with no procedure for its extension
+            // goes to the built-in DOS procedure.
+            match parse_extension(&from)
+                .and_then(|ext| installed(cpu, pid, ext).map(|p| (ext, p)))
+            {
+                Some((ext, p)) => {
+                    fcc = ext;
+                    Some(p)
+                }
+                None => None,
+            }
         };
         if let Some(proc) = proc {
             // A file of its own for the call, which goes after it.
