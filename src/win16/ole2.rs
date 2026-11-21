@@ -948,7 +948,7 @@ pub fn call_method(
 /// Call the method at `target` of the 16-bit interface `object` with
 /// the arguments `args` (`sizes` as `call_method` has them); `then`
 /// gets what it returned, and `data`.
-fn call_at(
+pub(super) fn call_at(
     cpu: &mut Cpu,
     target: u32,
     object: u32,
@@ -973,7 +973,7 @@ fn call_at(
 }
 
 /// Return `result` to the function's caller in DX:AX from a `then`.
-fn dx_ax(ctx: &mut Context, result: u32) -> Option<u32> {
+pub(super) fn dx_ax(ctx: &mut Context, result: u32) -> Option<u32> {
     ctx.gpr[thunk::EDX] = ctx.gpr[thunk::EDX] & 0xFFFF_0000 | result >> 16;
     Some(ctx.gpr[thunk::EAX] & 0xFFFF_0000 | result & 0xFFFF)
 }

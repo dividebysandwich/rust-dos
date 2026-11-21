@@ -273,7 +273,7 @@ pub fn bstr_bytes(cpu: &Cpu, bstr: u32) -> Vec<u8> {
     super::peek_upto(cpu, at, len as usize)
 }
 
-fn free_bstr(cpu: &mut Cpu, bstr: u32) {
+pub(super) fn free_bstr(cpu: &mut Cpu, bstr: u32) {
     if bstr != 0 && bstr as u16 >= 4 {
         ole2::free(cpu, bstr - 4);
     }
@@ -352,7 +352,7 @@ fn units(bytes: &[u8]) -> Vec<u16> {
 }
 
 /// OLEAUT32's characters as ANSI text: "?" for one that isn't a byte.
-fn ansi(units: &[u16]) -> Vec<u8> {
+pub(super) fn ansi(units: &[u16]) -> Vec<u8> {
     units
         .iter()
         .map(|&u| u8::try_from(u).unwrap_or(b'?'))
@@ -553,8 +553,19 @@ fn change_type(cpu: &mut Cpu, dest: u32, src: u32, flags: u32, vt: u16) -> Optio
     if dest == 0 || src == 0 {
         return Some(E_INVALIDARG);
     }
+    let result = changed(cpu, src, vt, flags);
+    let mut calls = Vec::new();
+    match result.and_then(|out| store(cpu, dest, out, &mut calls)) {
+        Ok(()) => call_all(cpu, S_OK, &calls),
+        Err(e) => Some(e),
+    }
+}
+
+/// The value of the VARIANT at `src` (flat) changed to the type `vt`,
+/// as VariantChangeType changes it.
+pub(super) fn changed(cpu: &Cpu, src: u32, vt: u16, flags: u32) -> Result<Out, u32> {
     let from = super::read_16(cpu, src);
-    let result = read_variant(cpu, src, 0).and_then(|v| {
+    read_variant(cpu, src, 0).and_then(|v| {
         // A VT_R4's text is "%.7G" of the single value.
         if vt == VT_BSTR
             && from & !VT_BYREF == VT_R4
@@ -563,12 +574,7 @@ fn change_type(cpu: &mut Cpu, dest: u32, src: u32, flags: u32, vt: u16) -> Optio
             return Ok(Out::Str(units(format_g(f, 7).as_bytes())));
         }
         change(&v, vt, flags & 0xFFFF)
-    });
-    let mut calls = Vec::new();
-    match result.and_then(|out| store(cpu, dest, out, &mut calls)) {
-        Ok(()) => call_all(cpu, S_OK, &calls),
-        Err(e) => Some(e),
-    }
+    })
 }
 
 // VarXxxFromYyy.

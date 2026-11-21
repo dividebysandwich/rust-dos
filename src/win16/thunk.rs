@@ -102,6 +102,7 @@ pub static THENS: &[Then] = &[
     super::misc::then_calls16,
     super::ole2::then_method,
     super::ole2::then_block,
+    super::typelib_invoke::then,
 ];
 
 // Place 0 is then_keep, which no call names now.
@@ -118,6 +119,7 @@ pub const THEN_BOOT: u16 = 10;
 pub const THEN_CALLS16: u16 = 11;
 pub const THEN_OLE_METHOD: u16 = 12;
 pub const THEN_OLE_BLOCK: u16 = 13;
+pub const THEN_TYPELIB_INVOKE: u16 = 14;
 
 fn post_plain(_: &mut Cpu, value: u32, _: &[u32], _: &mut Context) -> Option<u32> {
     Some(value)
