@@ -1,6 +1,7 @@
 //! Sound Blaster digital audio: the DSP and the mixer of the SB 2.0 (DSP
-//! 2.01), SB Pro 2 (DSP 3.02, stereo, CT1345 mixer) and SB16 (DSP 4.05,
-//! 16-bit transfers, CT1745 mixer). The FM chip is the `rust-dos-opl` crate's.
+//! 2.01), SB Pro (DSP 3.00) and SB Pro 2 (DSP 3.02), both stereo with the
+//! CT1345 mixer, and SB16 (DSP 4.05, 16-bit transfers, CT1745 mixer). The
+//! FM chip is the `rust-dos-opl` crate's.
 //!
 //! The DSP runs on emulated time: while a DMA transfer is active it pulls
 //! samples from the DMA controller at its sample rate, and raises its IRQ
@@ -27,6 +28,10 @@ use rust_dos_audio_core::{PIT_HZ, RATE, mul_div, mul_div_ceil};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SbModel {
     Sb2,
+    /// The first Sound Blaster Pro (CT1330), DSP 3.00. Creative's drivers
+    /// for it, such as the CT-VOICE.DRV of 1989-1990, take only DSP 3.00
+    /// and 3.01 and give up on an SB Pro 2's 3.02.
+    SbPro1,
     SbPro2,
     Sb16,
     /// Creative's ViBRA16C (CTL0070), an SB16 on one chip that is an ISA
@@ -42,6 +47,7 @@ impl SbModel {
     fn dsp_version(self) -> (u8, u8) {
         match self {
             SbModel::Sb2 => (2, 1),
+            SbModel::SbPro1 => (3, 0),
             SbModel::SbPro2 => (3, 2),
             SbModel::Sb16 => (4, 5),
             // The ViBRA16C's, as DOSBox-X gives it.
@@ -61,6 +67,7 @@ impl SbModel {
     pub fn blaster_type(self) -> u8 {
         match self {
             SbModel::Sb2 => 3,
+            SbModel::SbPro1 => 2,
             SbModel::SbPro2 => 4,
             SbModel::Sb16 | SbModel::Sb16Vibra | SbModel::Awe32 => 6,
         }
@@ -70,6 +77,7 @@ impl SbModel {
     pub fn name(self) -> &'static str {
         match self {
             SbModel::Sb2 => "sb2",
+            SbModel::SbPro1 => "sbpro1",
             SbModel::SbPro2 => "sbpro2",
             SbModel::Sb16 => "sb16",
             SbModel::Sb16Vibra => "sb16vibra",
@@ -80,6 +88,7 @@ impl SbModel {
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "sb2" | "sb20" => Some(SbModel::Sb2),
+            "sbpro1" => Some(SbModel::SbPro1),
             "sbpro2" | "sbpro" => Some(SbModel::SbPro2),
             "sb16" => Some(SbModel::Sb16),
             "sb16vibra" | "vibra" => Some(SbModel::Sb16Vibra),
