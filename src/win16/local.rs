@@ -422,6 +422,59 @@ pub fn count_free(cpu: &Cpu, sel: u16) -> u16 {
     })
 }
 
+/// An item of a heap as TOOLHELP's LocalFirst and LocalNext walk it: a
+/// block (a handle table's too) or a free piece between blocks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WalkItem {
+    /// Where its arena starts: the block's header, or the free piece.
+    pub arena: u16,
+    /// Its handle (a fixed block's is its offset) and its data's offset.
+    pub handle: u16,
+    pub address: u16,
+    pub size: u16,
+    pub free: bool,
+    pub moveable: bool,
+    pub lock: u8,
+}
+
+/// The items of the heap of the segment `sel`, in address order, or
+/// None if it has no heap.
+pub fn walk(cpu: &Cpu, sel: u16) -> Option<Vec<WalkItem>> {
+    let h = &cpu.bus.win32.win16.local_heaps[heap_index(cpu, sel)?];
+    let mut items = Vec::new();
+    let mut at = h.start as u32;
+    let free = |items: &mut Vec<WalkItem>, from: u32, to: u32| {
+        if to > from {
+            items.push(WalkItem {
+                arena: from as u16,
+                handle: from as u16,
+                address: from as u16,
+                size: (to - from) as u16,
+                free: true,
+                moveable: false,
+                lock: 0,
+            });
+        }
+    };
+    for b in &h.blocks {
+        let arena = (b.offset - HEADER) as u32;
+        free(&mut items, at, arena);
+        let handle = if b.handle == 0 { b.offset } else { b.handle };
+        items.push(WalkItem {
+            arena: arena as u16,
+            handle,
+            address: b.offset,
+            size: b.size,
+            free: false,
+            moveable: handle != b.offset,
+            lock: b.lock,
+        });
+        at = b.offset as u32 + (b.size.max(1) as u32).next_multiple_of(ALIGN as u32);
+    }
+    free(&mut items, at, h.end as u32);
+    Some(items)
+}
+
 /// The heaps of the segment `sel` go, as its block is freed.
 pub fn forget(cpu: &mut Cpu, sel: u16) {
     cpu.bus

@@ -583,8 +583,9 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         },
         ("sblaster", "sbtype") => match first {
             "sb1" | "sb2" => imported.set("sound", "sbtype", "sb2"),
+            "sbpro1" => imported.set("sound", "sbtype", "sbpro1"),
             // DOSBox Staging's ESS AudioDrive, a Sound Blaster Pro to games.
-            "sbpro1" | "sbpro2" | "ess" => imported.set("sound", "sbtype", "sbpro2"),
+            "sbpro2" | "ess" => imported.set("sound", "sbtype", "sbpro2"),
             "sb16" => imported.set("sound", "sbtype", "sb16"),
             "sb16vibra" => imported.set("sound", "sbtype", "sb16vibra"),
             "none" => imported.set("sound", "sbtype", "none"),
@@ -1289,6 +1290,15 @@ oplmode=opl3gold
 "], &[PathBuf::from("/")], "x", None);
         assert_eq!(get(&imported, "adlibgold").as_deref(), Some("true"));
         assert_eq!(get(&imported, "opl").as_deref(), Some("opl3"));
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+    }
+
+    /// DOSBox's `sbpro1` answers DSP 3.00, which drivers for the first
+    /// SB Pro check for, so it stays an SB Pro and not an SB Pro 2.
+    #[test]
+    fn sbpro1_imports_as_the_first_sb_pro() {
+        let imported = import(&["[sblaster]\nsbtype=sbpro1\n"], &[PathBuf::from("/")], "x", None);
+        assert_eq!(get(&imported, "sbtype").as_deref(), Some("sbpro1"));
         assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
     }
 

@@ -883,6 +883,9 @@ impl Bus {
             None if high_speed => return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a Sound Blaster".into())),
             None => {}
         }
+        // The processes' stubs from older tables call what their programs
+        // were bound to.
+        crate::win32::stub_tables::mend(self)?;
         Ok(lost)
     }
 
