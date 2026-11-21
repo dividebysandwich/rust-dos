@@ -1,7 +1,7 @@
 //! OLE2DISP, 16-bit OLE automation: BSTRs, VARIANTs and their changes
 //! between types, safe arrays, and the dispatch helpers. The ordinals
 //! and names are Windows 98 SE's, as Wine's ole2disp.dll16 spec file has
-//! them; the type libraries are TYPELIB.DLL's, which programs bring.
+//! them; the type libraries are TYPELIB's (typelib.rs).
 //!
 //! The 16-bit structures differ from the 32-bit ones. A BSTR is a far
 //! pointer to ANSI characters, the dword before them their length in

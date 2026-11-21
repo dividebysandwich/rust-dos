@@ -157,7 +157,7 @@ fn pid(cpu: &Cpu) -> u32 {
 
 /// The library read from `data`, its strings in the code page `page`, or
 /// the built-in STDOLE `builtin`.
-fn parse(builtin: u16, data: &[u8], page: CodePage) -> Option<TypeLib> {
+pub(crate) fn parse(builtin: u16, data: &[u8], page: CodePage) -> Option<TypeLib> {
     if builtin != 0 {
         return Some(stdole::library(builtin));
     }
@@ -813,6 +813,19 @@ pub(super) fn query_path(
     minor: u16,
     lcid: u32,
 ) -> Result<String, u32> {
+    query_path_on(cpu, guid, major, minor, lcid, "win32")
+}
+
+/// `query_path` for the platform `platform` ("win16", "win32"): the
+/// key under the language that has the file of the library made for it.
+pub(crate) fn query_path_on(
+    cpu: &mut Cpu,
+    guid: &Guid,
+    major: u16,
+    minor: u16,
+    lcid: u32,
+    platform: &str,
+) -> Result<String, u32> {
     let page = crate::win32::nls::ansi(cpu);
     let reg = registry::get(cpu);
     let Open::Key(root) = reg.open(HKEY_CLASSES_ROOT, 0) else {
@@ -839,7 +852,7 @@ pub(super) fn query_path(
         .min_by_key(|&(later, min, _)| (later, std::cmp::Reverse(min)))
         .ok_or(TYPE_E_LIBNOTREGISTERED)?;
     for l in [lcid, lcid & 0x3FF, 0] {
-        if let Some(key) = reg.find(version, &format!("{l:x}\\win32"))
+        if let Some(key) = reg.find(version, &format!("{l:x}\\{platform}"))
             && let Some(v) = reg.value(key, "")
         {
             let end = v.data.iter().position(|&b| b == 0).unwrap_or(v.data.len());
@@ -921,6 +934,12 @@ fn set_string(reg: &mut registry::Registry, page: CodePage, key: u32, name: &str
 /// marshals: its dispinterfaces, duals and [oleautomation] interfaces.
 fn register_lib(cpu: &mut Cpu, lib: u32, path: &str, help: Option<&str>) -> u32 {
     let m = model(cpu, lib);
+    register_model(cpu, &m, path, help)
+}
+
+/// Write the keys of the library `m`, whose file is `path`, as
+/// RegisterTypeLib does (`register_lib`).
+pub(crate) fn register_model(cpu: &mut Cpu, m: &TypeLib, path: &str, help: Option<&str>) -> u32 {
     let Some(platform) = platform(m.syskind) else {
         return E_FAIL;
     };
