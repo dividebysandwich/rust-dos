@@ -102,6 +102,9 @@ pub struct Session {
     /// its caller. ShellExecute has put back its own by the time the
     /// program starts (`start_pending`).
     directory: crate::savestate::Since<DOSVM_DIRECTORY, String>,
+    /// The bytes of the Windows programs' memory pool lent to the XMS
+    /// pool while it runs (`memory::Pool::lend`).
+    lent: crate::savestate::Since<DOSVM_DIRECTORY, u32>,
 }
 
 /// The DOS program waiting for the service that started it to return,
@@ -436,6 +439,9 @@ pub fn start_pending(cpu: &mut Cpu) {
     let mut vectors = vec![0u8; VECTORS];
     super::dos(cpu, |cpu| cpu.bus.guest_read_bytes(0, &mut vectors));
     session.vectors = vectors;
+    // The memory the Windows programs haven't used goes to the DOS
+    // program's DPMI and XMS memory while it runs.
+    *session.lent = super::memory::Pool::lend(&mut cpu.bus);
     session.desktop = super::user32::user(cpu).desktop;
     if session.desktop {
         super::user32::paint::leave_desktop(cpu);
@@ -516,6 +522,13 @@ pub fn ended(cpu: &mut Cpu, frame: Frame, rm: &Context) {
     });
     cpu.current_psp = session.psp;
     super::boot::put_back(cpu, session.directories);
+    if !super::memory::Pool::take_back(&mut cpu.bus, *session.lent) {
+        cpu.bus.log_string(&format!(
+            "[W32] {} left extended memory taken: the Windows programs have {} KB less",
+            session.path,
+            *session.lent / 1024
+        ));
+    }
     cpu.bus.set_a20(true);
     let objects = &mut cpu.bus.win32.objects;
     for id in [session.process, session.thread] {
@@ -547,5 +560,6 @@ crate::state_fields!(Session {
     psp,
     directories,
     directory,
+    lent,
 });
 crate::state_fields!(State { pending, running });
