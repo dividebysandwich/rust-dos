@@ -11,8 +11,8 @@
 //! header of 22 bytes: a name of 16 bytes ("MICROSOFT PIFEX" first),
 //! the offset of the next header (FFFFh for none), the offset of its
 //! data and the data's size. The "WINDOWS 386 3.0" record's data has
-//! ten words of memory and priority settings and flags, nine of the hot
-//! key, and then parameters (64 bytes at 28h), which Windows in 386
+//! eleven words of memory and priority settings and flags, nine of the
+//! hot key, and then parameters (64 bytes at 28h), which Windows in 386
 //! enhanced mode uses in place of the basic section's. The "WINDOWS VMM
 //! 4.0" record Windows 95 added holds the icon, the fonts, the
 //! keyboard, mouse and other settings of the Properties sheet, and no
