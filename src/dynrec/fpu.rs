@@ -9,9 +9,11 @@
 //! whose 80 bits hold more than its double to the handler
 //! (`FBailPrecise`); a single store rounds those 80 bits through the
 //! handlers' code and goes on (`Uop::FToSingle`), as games that round
-//! down store singles all the time. FILD of a qword pushes its exact 80
-//! bits and FISTP of a qword converts them (`Uop::FToInt64`), so the
-//! 8-byte copies MSVC makes with the pair stay in translated code.
+//! down store singles all the time. Compares leave a NaN and a format the
+//! FPU doesn't take to the handler too, which sets IE for them. FILD of a
+//! qword pushes its exact 80 bits and FISTP of a qword converts them
+//! (`Uop::FToInt64`), so the 8-byte copies MSVC makes with the pair stay
+//! in translated code.
 
 use iced_x86::{Code, Instruction, OpKind, Register};
 
@@ -197,7 +199,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
                 return false;
             }
             u.push(Uop::FGet { x: X1, i: 0 });
-            precise(u, 1, Precise::Equal(X1, X0));
+            precise(u, 1, Precise::Compare(X1, X0));
             u.push(Uop::FCom { a: X1, b: X0 });
             if instr.code() == Fcomp_m64fp {
                 u.push(Uop::FPop { n: 1 });
@@ -474,7 +476,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
                 return false;
             }
             u.push(Uop::FGet { x: X1, i: 0 });
-            precise(u, 1, Precise::Equal(X1, X0));
+            precise(u, 1, Precise::Compare(X1, X0));
             u.push(Uop::FCom { a: X1, b: X0 });
             if instr.code() == Fcomp_m32fp {
                 u.push(Uop::FPop { n: 1 });
@@ -486,7 +488,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             guard(u, 1 << lhs | 1 << rhs);
             u.push(Uop::FGet { x: X0, i: lhs as u8 });
             u.push(Uop::FGet { x: X1, i: rhs as u8 });
-            precise(u, 1 << lhs | 1 << rhs, Precise::Equal(X0, X1));
+            precise(u, 1 << lhs | 1 << rhs, Precise::Compare(X0, X1));
             u.push(Uop::FCom { a: X0, b: X1 });
             if pops > 0 {
                 u.push(Uop::FPop { n: pops });
