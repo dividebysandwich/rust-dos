@@ -39,16 +39,20 @@
 //! running beside the DOS program, a window for it, and a first megabyte
 //! of its own. They need a second copy of the first megabyte and of
 //! DOS's state, switched with the processor's context, as the VMM does.
-//! The parts the DOS program can leave behind are put back here: the
-//! vector table and DOS's current drive and directories are as they were
-//! before it started (on Windows 98 the DOS machine has its own), its
-//! memory and files are freed by DOS when it ends, and the screen is the
-//! desktop again.
+//! The parts the DOS program can leave behind are put back here, as
+//! they were before it started (on Windows 98 the DOS machine has its
+//! own): the vector table, DOS's current drive and directories, its
+//! memory strategy and upper memory link, the PICs' masks, the timer's
+//! rate, the mouse driver's event handler, and the FPU and SSE
+//! registers of the thread that started it (`Machine`). Its memory and
+//! files are freed by DOS when it ends, and the screen is the desktop
+//! again, in its mode, with the mouse's range over it.
 
 use super::boot::Directories;
 use super::realmode::{self, Frame, Kind};
 use super::{Context, EAX, EBX, EDX, ESP, ROM_SEG, object};
 use crate::cpu::{Cpu, CpuFlags};
+use crate::instructions::fpu::control;
 
 /// The block of conventional memory the start needs, in the DOS
 /// process's memory: EXEC's parameter block, its two FCBs, the command
@@ -97,6 +101,8 @@ pub struct Session {
     psp: u16,
     /// DOS's current drive and directories before it started.
     directories: Directories,
+    /// The rest of the machine before it started.
+    machine: Machine,
     /// The folder it starts in, a full path: its PIF's working folder,
     /// CreateProcessA's lpCurrentDirectory, or the current folder of
     /// its caller. ShellExecute has put back its own by the time the
@@ -105,6 +111,75 @@ pub struct Session {
     /// The bytes of the Windows programs' memory pool lent to the XMS
     /// pool while it runs (`memory::Pool::lend`).
     lent: crate::savestate::Since<DOSVM_DIRECTORY, u32>,
+}
+
+/// What of the machine a DOS program can change that Windows 98 keeps
+/// apart for each virtual machine, which its VMM and virtual devices
+/// switch with it: the Windows programs find it as it was when the
+/// program ends.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Machine {
+    /// The FPU's registers (FSAVE's image), and the XMM registers and
+    /// MXCSR on a processor with SSE: the calling thread's, which the
+    /// DOS program shares the processor with.
+    fpu: Vec<u8>,
+    sse: Option<([u128; 8], u32)>,
+    /// The masks of the master and the slave PIC.
+    pic: (u8, u8),
+    /// The timer's channel 0: its mode and count, IRQ 0's rate.
+    pit: (u8, u32),
+    /// The mouse driver's event handler (INT 33h AX=000Ch): its mask,
+    /// segment and offset. One the program leaves points into memory
+    /// that is freed when it ends.
+    mouse: (u16, u16, u16),
+    /// DOS's memory strategy (INT 21h AX=5801h) and whether upper memory
+    /// is linked (AX=5803h).
+    memory: (u16, bool),
+}
+
+impl Machine {
+    fn now(cpu: &Cpu) -> Machine {
+        let bus = &cpu.bus;
+        let mouse = &bus.mouse;
+        Machine {
+            fpu: control::save_image(cpu).to_vec(),
+            sse: cpu.model.has_sse().then_some((cpu.sse.xmm, cpu.sse.mxcsr)),
+            pic: (bus.pic.master.imr, bus.pic.slave.imr),
+            pit: (bus.pit0.mode(), bus.pit0.reload()),
+            mouse: (mouse.callback_mask, mouse.callback_cs, mouse.callback_ip),
+            memory: (cpu.alloc_strategy, bus.umb.is_some_and(|u| u.linked)),
+        }
+    }
+
+    /// Put the machine back as it was.
+    fn put_back(self, cpu: &mut Cpu) {
+        if let Ok(image) = <[u8; 108]>::try_from(self.fpu.as_slice()) {
+            control::load_image(cpu, &image);
+        }
+        if let Some((xmm, mxcsr)) = self.sse {
+            cpu.sse.xmm = xmm;
+            cpu.sse.mxcsr = mxcsr;
+        }
+        let bus = &mut cpu.bus;
+        (bus.pic.master.imr, bus.pic.slave.imr) = self.pic;
+        bus.refresh_irq();
+        // A new rate, set as the BIOS sets one: the control word, then
+        // the count's low and high byte (0 for 65536).
+        let (mode, count) = self.pit;
+        if (bus.pit0.mode(), bus.pit0.reload()) != self.pit {
+            let [low, high] = (count as u16).to_le_bytes();
+            bus.io_write(0x43, 0x30 | mode << 1);
+            bus.io_write(0x40, low);
+            bus.io_write(0x40, high);
+        }
+        let mouse = &mut bus.mouse;
+        (mouse.callback_mask, mouse.callback_cs, mouse.callback_ip) = self.mouse;
+        mouse.pending_callback_events = 0;
+        crate::mouse::clear_callback_busy(bus);
+        let (strategy, linked) = self.memory;
+        cpu.alloc_strategy = strategy;
+        super::dos(cpu, |cpu| crate::mcb::link_upper(&mut cpu.bus, linked));
+    }
 }
 
 /// The DOS program waiting for the service that started it to return,
@@ -298,14 +373,17 @@ pub fn spawn(
         }
     };
     let (path, arguments) = (start.program.as_str(), start.arguments.as_str());
+    // The DOS machine gets the program's 8.3 path, as on Windows 98, so
+    // that a folder with blanks in its long name splits no command line.
+    let short = super::kernel32::path::short_path(cpu, path);
     // A batch file runs in COMMAND.COM, as Windows 98 runs one.
     let (program, tail) = if is_batch(path) {
         (
             COMMAND_COM.to_string(),
-            format!(" /C {}{}", path, arguments),
+            format!(" /C {}{}", short, arguments),
         )
     } else {
-        (path.to_string(), arguments.to_string())
+        (short, arguments.to_string())
     };
     let mut name = crate::dosstr::to_bytes(&program);
     name.push(0);
@@ -460,6 +538,7 @@ pub fn start_pending(cpu: &mut Cpu) {
             session.path, *session.directory
         ));
     }
+    session.machine = Machine::now(cpu);
     cpu.current_psp = cpu.bus.win32.psp;
     let (ss, sp) = realmode::host_stack(cpu);
     let block = session.block;
@@ -523,6 +602,7 @@ pub fn ended(cpu: &mut Cpu, frame: Frame, rm: &Context) {
     });
     cpu.current_psp = session.psp;
     super::boot::put_back(cpu, session.directories);
+    session.machine.put_back(cpu);
     if !super::memory::Pool::take_back(&mut cpu.bus, *session.lent) {
         cpu.bus.log_string(&format!(
             "[W32] {} left extended memory taken: the Windows programs have {} KB less",
@@ -560,7 +640,16 @@ crate::state_fields!(Session {
     desktop,
     psp,
     directories,
+    machine,
     directory,
     lent,
+});
+crate::state_fields!(Machine {
+    fpu,
+    sse,
+    pic,
+    pit,
+    mouse,
+    memory,
 });
 crate::state_fields!(State { pending, running });

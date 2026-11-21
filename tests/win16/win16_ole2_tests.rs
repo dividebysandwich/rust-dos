@@ -425,3 +425,157 @@ fn a_replaced_message_filter_is_released() {
     let (exit, log) = run("ole2_message_filter", program(&code, CODE));
     assert_eq!(exit, 0, "check {exit} failed\n{log}");
 }
+
+/// OLE2DISP's ordinals of the error object's functions.
+const SET_ERROR_INFO: u16 = 110;
+const GET_ERROR_INFO: u16 = 111;
+const CREATE_ERROR_INFO: u16 = 112;
+const IID_IERRORINFO: u16 = 113; // OLE2DISP's variable _IID_IErrorInfo
+
+/// The error object's methods: ICreateErrorInfo's and IErrorInfo's.
+const QUERY_INTERFACE: u8 = 0;
+const RELEASE: u8 = 2;
+const SET_DESCRIPTION: u8 = 5;
+const SET_HELP_CONTEXT: u8 = 7;
+const GET_DESCRIPTION: u8 = 5;
+const GET_HELP_CONTEXT: u8 = 7;
+
+/// Where the program keeps the two interfaces of the error object.
+const CREATE_INFO: u16 = 0x80;
+const ERROR_INFO: u16 = 0x84;
+const GOT: u16 = 0x88;
+
+/// Call the method `method` of the object whose far pointer is at
+/// `object`, with `push_args` pushing its arguments (`words` of them)
+/// before the object's pointer, as C calls it, and take them off again.
+fn call_object(code: &mut Code, object: u16, method: u8, push_args: impl Fn(&mut Code), words: u8) {
+    push_args(code);
+    les_bx(code, object);
+    code.emit(&[0x06, 0x53]) // push es; push bx
+        .emit(&[0x26, 0xC4, 0x1F]) // les bx,es:[bx]
+        .emit(&[0x26, 0xFF, 0x5F, 4 * method]) // call far es:[bx+4*method]
+        .emit(&[0x83, 0xC4, 2 * (words + 2)]); // add sp,...
+}
+
+/// Visual Basic 4's runtime raises a Basic error as Windows' OLE does:
+/// CreateErrorInfo, the description and help context set through
+/// ICreateErrorInfo, its IErrorInfo from QueryInterface given to
+/// SetErrorInfo, and GetErrorInfo gives the same object back, whose
+/// GetDescription is a copy of the text and GetHelpContext the number.
+#[test]
+fn a_program_raises_an_error_object() {
+    let mut code = Code::new();
+    code.push(0).push(0).call("OLE2", OLE_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 1);
+
+    // CreateErrorInfo(&create_info): S_OK.
+    push_ds(&mut code, CREATE_INFO);
+    code.call("OLE2DISP", CREATE_ERROR_INFO);
+    expect_dx_ax(&mut code, 0, 2);
+
+    // SetDescription("Path not found"), SetHelpContext(76).
+    put_text(&mut code, TEXT, b"Path not found");
+    call_object(
+        &mut code,
+        CREATE_INFO,
+        SET_DESCRIPTION,
+        |c| push_ds(c, TEXT),
+        2,
+    );
+    expect_dx_ax(&mut code, 0, 3);
+    call_object(
+        &mut code,
+        CREATE_INFO,
+        SET_HELP_CONTEXT,
+        |c| {
+            c.push(0).push(76);
+        },
+        2,
+    );
+    expect_dx_ax(&mut code, 0, 4);
+
+    // QueryInterface(IID_IErrorInfo, &error_info): S_OK.
+    call_object(
+        &mut code,
+        CREATE_INFO,
+        QUERY_INTERFACE,
+        |c| {
+            push_ds(c, ERROR_INFO);
+            // push seg _IID_IErrorInfo; push offset _IID_IErrorInfo
+            let module = c.module("OLE2DISP");
+            let at = c.here() + 1;
+            c.emit(&[0x68, 0xFF, 0xFF]);
+            c.fixup(
+                at,
+                ne::ADDR_SELECTOR,
+                ne::Target::Ordinal {
+                    module,
+                    ordinal: IID_IERRORINFO,
+                },
+            );
+            let at = c.here() + 1;
+            c.emit(&[0x68, 0xFF, 0xFF]);
+            c.fixup(
+                at,
+                ne::ADDR_OFFSET,
+                ne::Target::Ordinal {
+                    module,
+                    ordinal: IID_IERRORINFO,
+                },
+            );
+        },
+        4,
+    );
+    expect_dx_ax(&mut code, 0, 5);
+    call_object(&mut code, CREATE_INFO, RELEASE, |_| {}, 0);
+    expect_dx_ax(&mut code, 1, 6);
+
+    // SetErrorInfo(0, error_info), then GetErrorInfo(0, &got): the same
+    // object.
+    code.push(0).push(0);
+    code.emit(&[0xFF, 0x36, lo(ERROR_INFO + 2), hi(ERROR_INFO + 2)])
+        .emit(&[0xFF, 0x36, lo(ERROR_INFO), hi(ERROR_INFO)]);
+    code.call("OLE2DISP", SET_ERROR_INFO);
+    expect_dx_ax(&mut code, 0, 7);
+    code.push(0).push(0);
+    push_ds(&mut code, GOT);
+    code.call("OLE2DISP", GET_ERROR_INFO);
+    expect_dx_ax(&mut code, 0, 8);
+    code.emit(&[0xA1, lo(GOT), hi(GOT)]) // mov ax,[got]
+        .emit(&[0x3B, 0x06, lo(ERROR_INFO), hi(ERROR_INFO)]); // cmp ax,[error_info]
+    or_fail(&mut code, 9);
+
+    // GetDescription(&bstr): "Path not found"; GetHelpContext: 76.
+    call_object(
+        &mut code,
+        ERROR_INFO,
+        GET_DESCRIPTION,
+        |c| push_ds(c, BSTR),
+        2,
+    );
+    expect_dx_ax(&mut code, 0, 10);
+    les_bx(&mut code, BSTR);
+    expect_es_bx(&mut code, -4, 14, 11);
+    expect_es_bx(&mut code, 0, b'P', 12);
+    expect_es_bx(&mut code, 13, b'd', 13);
+    call_object(
+        &mut code,
+        ERROR_INFO,
+        GET_HELP_CONTEXT,
+        |c| push_ds(c, OUT),
+        2,
+    );
+    expect_dx_ax(&mut code, 0, 14);
+    expect(&mut code, OUT, 76, 15);
+
+    // The references SetErrorInfo and GetErrorInfo handed over, then
+    // QueryInterface's: the last one frees the object.
+    call_object(&mut code, ERROR_INFO, RELEASE, |_| {}, 0);
+    expect_dx_ax(&mut code, 1, 16);
+    call_object(&mut code, ERROR_INFO, RELEASE, |_| {}, 0);
+    expect_dx_ax(&mut code, 0, 17);
+    code.emit(&[0xB0, 0x00]).exit_al();
+
+    let (exit, log) = run("ole2_error_info", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}

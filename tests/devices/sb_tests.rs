@@ -221,7 +221,7 @@ fn sb16_driver_selects_its_resources_in_the_mixer() {
 
 #[test]
 fn older_cards_take_sb16_only_commands_without_parameters() {
-    for (model, major) in [(SbModel::Sb2, 2), (SbModel::SbPro2, 3)] {
+    for (model, major) in [(SbModel::Sb2, 2), (SbModel::SbPro1, 3), (SbModel::SbPro2, 3)] {
         let mut bus = bus_with(SbConfig { model, ..SbConfig::default() });
         reset_dsp(&mut bus);
         for cmd in [0x41, 0x42, 0x05, 0x08, 0x0E, 0x0F, 0xF9, 0xFA, 0xB6, 0xC6, 0xE7] {
@@ -248,6 +248,21 @@ fn sb_pro_mixer_lacks_the_sb16_registers() {
     bus.io_write(0x224, 0x22);
     bus.io_write(0x225, 0x99);
     assert_eq!(bus.io_read(0x225), 0x99);
+}
+
+#[test]
+fn sb_pro_1_answers_dsp_3_00_as_its_drivers_check() {
+    // Creative's CT-VOICE.DRV for the first SB Pro (in Mega lo Mania)
+    // takes the card only for DSP 3.00 or 3.01.
+    let config = SbConfig { model: SbModel::SbPro1, irq: 5, ..SbConfig::default() };
+    let mut bus = bus_with(config);
+    reset_dsp(&mut bus);
+    dsp_write(&mut bus, 0xE1);
+    assert_eq!((dsp_read(&mut bus), dsp_read(&mut bus)), (3, 0));
+    // BLASTER's T2 is the SB Pro, T4 the SB Pro 2.
+    assert_eq!(config.blaster(), "A220 I5 D1 T2");
+    assert_eq!(SbModel::parse("sbpro1"), Some(SbModel::SbPro1));
+    assert_eq!(SbModel::SbPro1.name(), "sbpro1");
 }
 
 #[test]

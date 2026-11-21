@@ -15,7 +15,11 @@ const CORE_VERSION: u16 = 11;
 /// it in the eighth of the frame being made (`Bus::speaker_high`).
 const CORE_LOADS: [u16; 3] = [9, 10, CORE_VERSION];
 const VIDEO_VERSION: u16 = 2;
-const SOUND_VERSION: u16 = 4;
+const SOUND_VERSION: u16 = 5;
+/// The SOUN versions this rust-dos loads: its own, and 4, which has no
+/// right OPL2 of a dual OPL2 (`Opl::save_right`): on a machine with one,
+/// it gets what the one chip's second bank held (`Opl::right_from_bank_1`).
+const SOUND_LOADS: [u16; 2] = [4, SOUND_VERSION];
 const DOS_VERSION: u16 = 6;
 const CD_HEAD_VERSION: u16 = 1;
 const VOODOO_VERSION: u16 = 1;
@@ -370,6 +374,8 @@ impl Bus {
             w.label("gus");
             save_device(gus, w);
             save_all!(w; opl, mpu, gus_line, tandy_sound);
+            w.label("opl_right");
+            opl.save_right(w);
             w.label("sb");
             save_device(sb, w);
             w.label("lpt_dac");
@@ -772,9 +778,14 @@ impl Bus {
         } else {
             mscdex.load_heads(None)?;
         }
-        let mut section = r.section(b"SOUN", SOUND_VERSION)?;
+        let mut section = r.section_of(b"SOUN", &SOUND_LOADS)?;
         load_device(gus, "Gravis Ultrasound", &mut section)?;
         load_all!(&mut section; opl, mpu, gus_line, tandy_sound);
+        if section.version() >= Some(5) {
+            opl.load_right(&mut section)?;
+        } else {
+            opl.right_from_bank_1();
+        }
         load_device(sb, "Sound Blaster", &mut section)?;
         load_device(lpt_dac, "DAC on LPT1", &mut section)?;
         cdaudio.load_state(&mut section, |drive| disk.cd_image(drive))?;
@@ -885,6 +896,9 @@ impl Bus {
             None if high_speed => return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a Sound Blaster".into())),
             None => {}
         }
+        // The processes' stubs from older tables call what their programs
+        // were bound to.
+        crate::win32::stub_tables::mend(self)?;
         Ok(lost)
     }
 
@@ -1060,6 +1074,7 @@ mod tests {
         (82, 0x7F8F_BB1B_6F82_7B99), // OLE32's drop targets and OleInitialize's processes
         (83, 0xE951_CEB4_D9AD_4CAC), // ExitWindowsExec's command line
         (84, 0x3A9C_D1FD_6601_1D0E), // the 16-bit OLE modules' state
+        (85, 0xD065_06B4_D1EE_C645), // the DOS program a Windows program started
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

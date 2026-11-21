@@ -276,6 +276,7 @@ fn definitions() -> Vec<Definition> {
                 ("sb16", "Sound Blaster 16"),
                 ("awe32", "Sound Blaster AWE32"),
                 ("sbpro2", "Sound Blaster Pro 2"),
+                ("sbpro1", "Sound Blaster Pro"),
                 ("sb2", "Sound Blaster 2.0"),
                 ("none", "None"),
             ]),
@@ -286,7 +287,12 @@ fn definitions() -> Vec<Definition> {
             info: "The OPL chip of the AdLib and the Sound Blasters.",
             category: "audio",
             target: config("sound", "opl"),
-            values: configured(&[("opl3", "OPL3"), ("opl2", "OPL2 (AdLib)")]),
+            values: configured(&[
+                ("auto", "Auto (two OPL2s on an SB Pro, else OPL3)"),
+                ("opl3", "OPL3"),
+                ("opl2", "OPL2 (AdLib)"),
+                ("dualopl2", "Two OPL2s (SB Pro 1)"),
+            ]),
         },
         Definition {
             key: "gus",

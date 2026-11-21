@@ -198,11 +198,23 @@ of Windows': an import of it by ordinal binds to the missing-function
 stub below, as an import by name does.
 
 A function's id, which its stub's trap carries, is its DLL's place in
-`DLLS` and its own in the DLL's table, apart from its ordinal; saved
-states keep the stubs in memory, so tables are only added to at their
-ends. A missing function is bound to a stub that logs `dll!name` with
-its arguments and ends the program with a message saying which function
-it needed, so the log of a game that fails says what to write next. The
+`DLLS` and its own in the DLL's table, apart from its ordinal, and its
+stub is at that place in the image. Saved states keep the stubs in
+memory and programs keep their addresses, so tables are only added to
+at their ends: `src/win32/stub_tables.txt` holds the order every
+built-in DLL's and 16-bit system module's table has had, and the DLLs'
+variables with their sizes, and a test fails on an entry inserted,
+moved or taken out (`stub_tables.rs`). GDI32's
+CreateScalableFontResourceA, inserted before that test, is mended in
+states saved before it: their GDI32 image keeps its order, its stubs
+trap with the ids their functions have now, and the addresses Rust
+works out for its functions follow it. The entries KERNEL32, USER32 and
+the 16-bit USER had inserted in the same days aren't mended yet
+(#1613).
+
+A missing function is bound to a stub that logs `dll!name` with its
+arguments and ends the program with a message saying which function it
+needed, so the log of a game that fails says what to write next. The
 trace of every call (`trace.rs`, like Wine's `+relay`) goes to the log
 and to the debug server.
 
@@ -752,10 +764,14 @@ The program runs full screen, and the Windows programs wait: their
 threads don't switch while the system waits for real-mode code. When
 the program ends, DOS goes back after the INT 21h, the trap returns to
 the system, and the process and thread objects get its exit code and
-are signaled. The vector table is put back as it was, the desktop is
-painted again, and the caller goes on. A program that waits for the one
-it started (WaitForSingleObject, GetExitCodeProcess, GetModuleUsage of
-WinExec's 33, a loop looking for a file the program writes) finds it
+are signaled. What Windows 98 keeps apart for each DOS machine is put
+back as it was before the program started: the vector table, DOS's
+current drive and directories, its memory strategy and upper memory
+link, the PICs' masks, the timer's rate, the mouse driver's event
+handler, and the calling thread's FPU and SSE registers. The desktop
+is painted again, and the caller goes on. A program that waits for the
+one it started (WaitForSingleObject, GetExitCodeProcess, GetModuleUsage
+of WinExec's 33, a loop looking for a file the program writes) finds it
 ended, and the files it wrote are on the same drives.
 
 Before EXEC, the DOS process's memory block is cut down to what it uses
@@ -766,10 +782,10 @@ pages of the Windows programs' memory pool that no program has used yet
 go back to the XMS pool while the program runs, for its DPMI host and
 XMS memory (a DOS extender such as DOS/4GW needs some), as Windows 98's
 VMM gives a DOS machine memory from what the system has free; the pool
-takes them back when the program ends. A batch file runs in
-`COMMAND.COM /C`. INT 2Fh AX=1600h and 160Ah answer
-from the program as in a DOS box: Windows 4.x in enhanced mode, 4.0 for
-Windows 95 and 4.10 for 98.
+takes them back when the program ends. The program gets its 8.3 path,
+as on Windows 98. A batch file runs in `COMMAND.COM /C`. INT 2Fh
+AX=1600h and 160Ah answer from the program as in a DOS box: Windows 4.x
+in enhanced mode, 4.0 for Windows 95 and 4.10 for 98.
 
 The program starts in a folder the session keeps: CreateProcessA's
 lpCurrentDirectory, or the caller's current folder when it was started.
