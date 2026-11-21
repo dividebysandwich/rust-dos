@@ -5046,6 +5046,37 @@ fn fpu_integer_operands_run_as_their_handlers() {
 }
 
 #[test]
+fn fpu_integer_comparisons_run_as_their_handlers() {
+    // FICOM and FICOMP of words and dwords against every kind of single
+    // (NaNs, infinities, a denormal), equal ones too: 0, 32767, -2^31,
+    // and 32768 against the dword but not the word 8000h. The status
+    // words, C0, C2 and C3 and the stack's top, summed in EBX.
+    let (_, b, stats) = fpu_loop(|a| {
+        a.fld(dword_ptr(esi))?;
+        a.ficom(dword_ptr(esi + 8))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.ficom(word_ptr(esi + 8))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.ficomp(dword_ptr(esi + 8))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.ficomp(word_ptr(esi + 8))?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fstp(dword_ptr(edi))?;
+        a.mov(dword_ptr(edi + 4), ebx)
+    });
+    assert_ne!(b.cpu.ebx(), 0);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
 fn fpu_square_roots_run_as_their_handlers() {
     let (_, b, stats) = fpu_loop(|a| {
         // Of every kind of single and its negation, and of the integers:
@@ -5718,9 +5749,9 @@ fn fpu_sums_of_80_bit_values_round_to_doubles_as_the_handlers_do() {
 
 #[test]
 fn fpu_stores_and_compares_of_80_bit_values_round_once_on_both_cores() {
-    // FIST, FST, FRNDINT and FCOM of 80 bits a double hasn't, under each
-    // rounding: from the 80 bits, not from their double (rounded to
-    // nearest), on both cores.
+    // FIST, FST, FRNDINT, FCOM and FICOM of 80 bits a double hasn't,
+    // under each rounding: from the 80 bits, not from their double
+    // (rounded to nearest), on both cores.
     let mut values = EXTENDED.to_vec();
     values.extend([
         (0x4000, 0xBFFF_FFFF_FFFF_FFF0), // just under 3
@@ -5743,6 +5774,9 @@ fn fpu_stores_and_compares_of_80_bit_values_round_once_on_both_cores() {
         }
         rig.write32(three, 0);
         rig.write32(three + 4, (3f64.to_bits() >> 32) as u32);
+        // The dword 3 and the word -3.
+        rig.write32(three + 8, 3);
+        rig.write32(three + 12, 0xFFFD);
         rig.load(CODE, &asm32(CODE, |a| {
             let mut again = a.create_label();
             a.fninit()?;
@@ -5763,6 +5797,12 @@ fn fpu_stores_and_compares_of_80_bit_values_round_once_on_both_cores() {
             a.fcom_2(st0, st1)?;
             a.fnstsw(ax)?;
             a.mov(word_ptr(edi + 24), ax)?;
+            a.ficom(dword_ptr(three + 8))?;
+            a.fnstsw(ax)?;
+            a.mov(word_ptr(edi + 40), ax)?;
+            a.ficom(word_ptr(three + 12))?;
+            a.fnstsw(ax)?;
+            a.mov(word_ptr(edi + 44), ax)?;
             a.fld(st0)?;
             a.frndint()?;
             a.fstp(qword_ptr(edi + 28))?;
@@ -5787,6 +5827,10 @@ fn fpu_stores_and_compares_of_80_bit_values_round_once_on_both_cores() {
     // Below 3 by the 80 bits, though its double is 3: C0 set, C3 clear.
     assert_eq!(b.read32(at(under_3, 0) + 20) & 0x4500, 0x0100);
     assert_eq!(b.read32(at(under_3, 0) + 24) & 0x4500, 0x0100);
+    assert_eq!(b.read32(at(under_3, 0) + 40) & 0x4500, 0x0100);
+    // Above -3 by the 80 bits, though its double is -3: all three clear.
+    let over_minus_3 = k((0xC000, 0xBFFF_FFFF_FFFF_FFF0));
+    assert_eq!(b.read32(at(over_minus_3, 0) + 44) & 0x4500, 0);
     // To nearest, the double 3.0 itself.
     assert_eq!(read64(&b, at(under_3, 0) + 12), 3f64.to_bits());
     // A single rounded once: 3F800001h (the double would tie and go even).

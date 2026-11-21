@@ -480,6 +480,21 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
                 u.push(Uop::FPop { n: 1 });
             }
         }
+        // A word or dword is a double, as a single is: where ST(0) holds
+        // more than its double, the doubles compare as the handler's 80
+        // bits do unless they are equal.
+        Ficom_m16int | Ficom_m32int | Ficomp_m16int | Ficomp_m32int => {
+            guard(u, 1);
+            if !int(u) {
+                return false;
+            }
+            u.push(Uop::FGet { x: X1, i: 0 });
+            precise(u, 1, Precise::Equal(X1, X0));
+            u.push(Uop::FCom { a: X1, b: X0 });
+            if matches!(instr.code(), Ficomp_m16int | Ficomp_m32int) {
+                u.push(Uop::FPop { n: 1 });
+            }
+        }
         Fcom_st0_sti | Fcom_st0_sti_DCD0 | Fcomp_st0_sti | Fcomp_st0_sti_DCD8 | Fcomp_st0_sti_DED0 | Fcompp
         | Fucom_st0_sti | Fucomp_st0_sti | Fucompp => {
             let Some((lhs, rhs, pops)) = comparison::fcom_registers(instr) else { return false };
