@@ -2447,12 +2447,28 @@ fn start_programs_in(
     files: Vec<(&str, Vec<u8>)>,
     dirs: &[&str],
 ) -> u8 {
+    start_programs_using(test, parent_at, line, directory, 0, files, dirs)
+}
+
+/// `start_programs_in`, with a parent that first commits `used` bytes
+/// (VirtualAlloc), writes to each of their pages and releases them.
+fn start_programs_using(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    directory: Option<&str>,
+    used: u32,
+    files: Vec<(&str, Vec<u8>)>,
+    dirs: &[&str],
+) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",
         "GetExitCodeProcess",
         "CloseHandle",
         "ExitProcess",
+        "VirtualAlloc",
+        "VirtualFree",
     ];
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
     // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
@@ -2467,6 +2483,27 @@ fn start_programs_in(
     }
     let parent = program(BASE, false, imports, &data, |a, l| {
         let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        if used > 0 {
+            // MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE.
+            a.push(4)?;
+            a.push(0x3000)?;
+            a.push(used as i32)?;
+            a.push(0)?;
+            a.call(f("VirtualAlloc"))?;
+            a.mov(edi, eax)?;
+            a.mov(ecx, used / 0x1000)?;
+            let mut touch = a.create_label();
+            a.set_label(&mut touch)?;
+            a.mov(byte_ptr(eax), 1)?;
+            a.add(eax, 0x1000)?;
+            a.dec(ecx)?;
+            a.jnz(touch)?;
+            // MEM_RELEASE.
+            a.push(0x8000)?;
+            a.push(0)?;
+            a.push(edi)?;
+            a.call(f("VirtualFree"))?;
+        }
         a.push(l.at(0x90) as i32)?;
         a.push(l.at(0x40) as i32)?;
         a.push(directory.map_or(0, |_| l.at(0xB0) as i32))?;
@@ -2620,6 +2657,93 @@ fn a_dos_program_starts_in_the_current_directory_it_is_given() {
     let none = Some("C:\\NONE");
     let code = start_programs_in("child_dos_no_dir", "T.EXE", line, none, files, &[]);
     assert_eq!(code & 1, 0, "CreateProcessA succeeded");
+}
+
+/// A DOS program that asks the XMS driver for its free memory (function
+/// 88h, as MEM /C does) and writes the largest free block and the total
+/// free, in KB, to XMS.BIN: exit code 5, or 6 if there is no XMS driver
+/// or the file can't be made.
+fn xms_reporter() -> Vec<u8> {
+    const NAME: u16 = 0x0180;
+    const FREE: u16 = 0x0190;
+    const ENTRY: u16 = 0x01A0;
+    let assemble = || -> Result<Vec<u8>, IcedError> {
+        let mut a = CodeAssembler::new(16)?;
+        let mut fail = a.create_label();
+        a.mov(ax, 0x4300)?;
+        a.int(0x2F)?;
+        a.cmp(al, 0x80)?;
+        a.jne(fail)?;
+        a.mov(ax, 0x4310)?;
+        a.int(0x2F)?;
+        a.mov(word_ptr(ENTRY), bx)?;
+        a.mov(word_ptr(ENTRY + 2), es)?;
+        a.mov(ah, 0x88)?;
+        // call far [ENTRY]
+        let [lo, hi] = ENTRY.to_le_bytes();
+        a.db(&[0xFF, 0x1E, lo, hi])?;
+        a.mov(dword_ptr(FREE), eax)?;
+        a.mov(dword_ptr(FREE + 4), edx)?;
+        a.mov(ah, 0x3C)?;
+        a.xor(cx, cx)?;
+        a.mov(dx, NAME as u32)?;
+        a.int(0x21)?;
+        a.jc(fail)?;
+        a.mov(bx, ax)?;
+        a.mov(ah, 0x40)?;
+        a.mov(cx, 8)?;
+        a.mov(dx, FREE as u32)?;
+        a.int(0x21)?;
+        a.mov(ah, 0x3E)?;
+        a.int(0x21)?;
+        a.mov(ax, 0x4C05)?;
+        a.int(0x21)?;
+        a.set_label(&mut fail)?;
+        a.mov(ax, 0x4C06)?;
+        a.int(0x21)?;
+        a.assemble(0x100)
+    };
+    let mut code = assemble().unwrap();
+    assert!(code.len() <= (NAME - 0x100) as usize);
+    code.resize((NAME - 0x100) as usize, 0x90);
+    code.extend_from_slice(b"XMS.BIN\0");
+    code
+}
+
+/// The largest free block of XMS and the XMS free, in KB, that a DOS
+/// program a Windows program starts finds, after the Windows program
+/// used and released `used` bytes of memory.
+fn xms_free_after(test: &str, used: u32) -> (u32, u32) {
+    let files = vec![("XMS.COM", xms_reporter())];
+    let code = start_programs_using(test, "T.EXE", "C:\\XMS.COM", None, used, files, &[]);
+    // 5 from the program, WAIT_OBJECT_0 and TRUE.
+    assert_eq!(code, 0x51);
+    let base = PathBuf::from("target/test_win32").join(test);
+    let report = fs::read(base.join("XMS.BIN")).unwrap();
+    let word = |at: usize| u32::from_le_bytes(report[at..at + 4].try_into().unwrap());
+    (word(0), word(4))
+}
+
+/// A DOS program a Windows program starts gets the memory the Windows
+/// programs have free as XMS, as in a DOS box of Windows 98, where the
+/// VMM gives it from the memory the system has: memory a Windows program
+/// used and gave back counts as well as memory never used. 4 MB used and
+/// released before CreateProcessA leaves the XMS the DOS program finds
+/// as it was without them (a page table or two of the system's may
+/// stay).
+#[test]
+fn a_dos_program_gets_the_memory_windows_programs_gave_back_as_xms() {
+    let (largest, total) = xms_free_after("dos_xms_unused", 0);
+    assert!(largest >= 8 * 1024, "only {largest} KB of XMS");
+    let (largest_after, total_after) = xms_free_after("dos_xms_given_back", 0x40_0000);
+    assert!(
+        largest_after + 64 >= largest,
+        "{largest_after} KB, {largest} KB before"
+    );
+    assert!(
+        total_after + 64 >= total,
+        "{total_after} KB, {total} KB before"
+    );
 }
 
 #[test]
