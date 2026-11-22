@@ -560,7 +560,7 @@ impl SoundConfig {
             "sbbase" => {
                 let base = u16::from_str_radix(value.trim_start_matches("0x"), 16)
                     .ok()
-                    .filter(|b| (0x210..=0x280).contains(b) && b & 0xF == 0)
+                    .filter(|b| crate::sb::SbConfig::BASES.contains(b))
                     .ok_or_else(|| format!("invalid sbbase '{}' (210 to 280, hex)", value))?;
                 sb.base = base;
             }

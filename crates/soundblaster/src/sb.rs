@@ -122,6 +122,10 @@ impl Default for SbConfig {
 }
 
 impl SbConfig {
+    /// The bases a card's jumpers offer, 210h to 280h. Sound drivers look
+    /// for the card at each of them in turn.
+    pub const BASES: [u16; 8] = [0x210, 0x220, 0x230, 0x240, 0x250, 0x260, 0x270, 0x280];
+
     /// The BLASTER environment variable describing the card.
     pub fn blaster(&self) -> String {
         let mut s = format!("A{:X} I{} D{}", self.base, self.irq, self.dma8);
