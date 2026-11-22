@@ -1425,6 +1425,99 @@ fn a_client_allocates_linear_memory_at_an_address() {
     assert_eq!(dword(R + 16), 0x40_0000);
 }
 
+/// Copy the LDT's descriptor from the GDT, through the selector at
+/// `R + 8`, to `at` (DS = the data).
+fn copy_ldt_descriptor(a: &mut CodeAssembler, at: u16) -> Result<(), IcedError> {
+    a.push(es)?;
+    a.mov(es, word_ptr(R + 8))?;
+    a.mov(bx, word_ptr(R + 6))?;
+    a.and(bx, 0xFFF8)?;
+    a.mov(eax, dword_ptr(bx).es())?;
+    a.mov(dword_ptr(at), eax)?;
+    a.mov(eax, dword_ptr(bx + 4).es())?;
+    a.mov(dword_ptr(at + 4), eax)?;
+    a.pop(es)
+}
+
+#[test]
+fn the_ldt_descriptor_covers_the_pages_in_use() {
+    // The LDT's descriptor in the GDT, read through a selector over the
+    // GDT (SGDT, SLDT), as Ultima VIII's DOSFIX32 reads it: at the start,
+    // with 1000 more selectors and after they are freed. Windows 98's DOS
+    // box gives limits FFFh, 1FFFh and 1FFFh: its LDT grows a 4 KB page at
+    // a time and doesn't shrink.
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        let mut free = a.create_label();
+        enter(a, false, fail)?;
+        step(a, 4)?;
+        a.sgdt(ptr(R))?;
+        a.sldt(word_ptr(R + 6))?;
+        a.xor(ax, ax)?;
+        a.mov(cx, 1)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(R + 8), ax)?;
+        a.mov(bx, ax)?;
+        a.mov(ax, 0x0007)?;
+        a.mov(cx, word_ptr(R + 4))?;
+        a.mov(dx, word_ptr(R + 2))?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(ax, 0x0008)?;
+        a.xor(cx, cx)?;
+        a.mov(dx, 0xFFFF)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        step(a, 5)?;
+        copy_ldt_descriptor(a, R + 0x10)?;
+        a.xor(ax, ax)?;
+        a.mov(cx, 1000)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(R + 10), ax)?;
+        step(a, 6)?;
+        copy_ldt_descriptor(a, R + 0x18)?;
+        a.mov(bx, word_ptr(R + 10))?;
+        a.mov(cx, 1000)?;
+        a.set_label(&mut free)?;
+        a.push(cx)?;
+        a.push(bx)?;
+        a.mov(ax, 0x0001)?;
+        a.int(0x31)?;
+        a.pop(bx)?;
+        a.pop(cx)?;
+        a.add(bx, 8)?;
+        a.loop_(free)?;
+        step(a, 7)?;
+        copy_ldt_descriptor(a, R + 0x20)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    let (mut cpu, psp) = machine("ldtlimit", &[("T.COM", com(&[(0x100, main)]))], "T.COM");
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end (step {})",
+        word(&cpu, psp, STEP)
+    );
+    assert_eq!(
+        cpu.errorlevel,
+        0x2A,
+        "failed at step {}",
+        word(&cpu, psp, STEP)
+    );
+    let limit = |at: u16| {
+        let low = word(&cpu, psp, at) as u32;
+        let high = cpu.bus.read_8(psp as usize * 16 + at as usize + 6) as u32;
+        assert_eq!(high & 0x80, 0, "byte-granular");
+        (high & 0x0F) << 16 | low
+    };
+    assert_eq!(limit(R + 0x10), 0x0FFF, "at the start");
+    assert_eq!(limit(R + 0x18), 0x1FFF, "with 1000 more selectors");
+    assert_eq!(limit(R + 0x20), 0x1FFF, "after they are freed");
+}
+
 /// Set DAC colours 40h and 41h from a buffer the client addresses by
 /// selector (INT 10h AX=1012h, as Jazz Jackrabbit's RTM does), read them
 /// back into another (1017h), and get the 8x16 font's address (1130h),
