@@ -1,10 +1,12 @@
 //! ANSI.SYS's escape sequences in DOS's console output, as DOSBox's CON
-//! device has them: the colours of the text (`ESC[...m`), moving the
-//! cursor (`ESC[r;cH`, `ESC[nA` to `ESC[nD`, `ESC[s` and `ESC[u`), and
-//! erasing the screen (`ESC[2J`) and the rest of a line (`ESC[K`).
-//! Set mode (`ESC[=nh`, `ESC[=nl`), key reassignment (`ESC[...p`) and the
-//! cursor position report (`ESC[6n`) are taken off the output and do
-//! nothing, as in DOSBox. `console_write` in video/mod.rs carries them out.
+//! device has them: the colours of the text (`ESC[...m`, with MS-DOS
+//! ANSI.SYS's attributes), moving the cursor (`ESC[r;cH`, `ESC[nA` to
+//! `ESC[nD`, `ESC[s` and `ESC[u`), and erasing the screen (`ESC[2J`) and
+//! the rest of a line (`ESC[K`). Set mode (`ESC[=nh`, `ESC[=nl`), key
+//! reassignment (`ESC[...p`) and the cursor position report (`ESC[6n`)
+//! are taken off the output and do nothing, as in DOSBox (#1706).
+//! `console_write` in video/mod.rs carries them out, while the `ansi_sys`
+//! setting is on.
 
 /// What a byte of console output asks for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -155,8 +157,10 @@ impl Ansi {
     }
 }
 
-/// `attr` after the Select Graphic Rendition parameter `n`, as DOSBox's
-/// ANSI emulation sets it.
+/// `attr` after the Select Graphic Rendition parameter `n`, as MS-DOS's
+/// ANSI.SYS sets it (its table GRMODE: a mask, then bits to set). Blink
+/// and intensity stay through reverse (7) and concealed (8), and
+/// underline (4) is blue text, the colour adapter's form of it.
 fn sgr(attr: u8, n: u16) -> u8 {
     // ANSI's colour order (black, red, green, yellow, blue, magenta, cyan,
     // white) in the PC's (blue in bit 0, green in 1, red in 2).
@@ -164,11 +168,10 @@ fn sgr(attr: u8, n: u16) -> u8 {
     match n {
         0 => 0x07,
         1 => attr | 0x08,
+        4 => (attr & 0xF8) | 0x01,
         5 => attr | 0x80,
-        // Black on light grey, as ANSI.SYS and DOSBox have it.
-        7 => 0x70,
-        // Concealed: the text in the colour of its background.
-        8 => (attr & 0xF0) | ((attr >> 4) & 0x07),
+        7 => (attr & 0xF8) | 0x70,
+        8 => attr & 0x88,
         30..=37 => (attr & 0xF8) | PC[(n - 30) as usize],
         40..=47 => (attr & 0x8F) | (PC[(n - 40) as usize] << 4),
         _ => attr,
@@ -197,6 +200,14 @@ mod tests {
         assert_eq!(ansi.attr, 0x07);
         run(&mut ansi, b"\x1B[7m");
         assert_eq!(ansi.attr, 0x70);
+        // ANSI.SYS keeps blink and intensity through reverse and
+        // concealed, and underlines in blue.
+        run(&mut ansi, b"\x1B[0;1;5;31;44m\x1B[7m");
+        assert_eq!(ansi.attr, 0xF8);
+        run(&mut ansi, b"\x1B[0;1;5;31;44m\x1B[8m");
+        assert_eq!(ansi.attr, 0x88);
+        run(&mut ansi, b"\x1B[0;4m");
+        assert_eq!(ansi.attr, 0x01);
     }
 
     #[test]
