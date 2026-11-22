@@ -410,6 +410,7 @@ impl Item {
             LptDac => "lpt-dac",
             TandySound => "tandy-sound",
             Pit2GateAtStart => "pit2-gate-at-start",
+            Cms => "cms",
             Autoexec => "autoexec",
             Ipx => "ipx",
             IpxIrq => "ipx-irq",

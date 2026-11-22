@@ -274,6 +274,8 @@ pub(super) enum Item {
     TandySound,
     /// PIT channel 2's gate at startup (`pit2_gate_at_start`).
     Pit2GateAtStart,
+    /// The CMS chips in the SB 2.0's sockets (`cms`).
+    Cms,
     /// The configuration file's `[autoexec]` commands (autoexec.rs).
     Autoexec,
     /// The IPX driver, its IRQ and its frame type.
@@ -466,6 +468,7 @@ impl Item {
             LptDac => "Parallel port DAC",
             TandySound => "Tandy/PCjr sound",
             Pit2GateAtStart => "Timer 2 gate at startup",
+            Cms => "CMS chips on the SB 2.0",
             Autoexec => "Edit the [autoexec] commands...",
             Ipx => "IPX driver",
             IpxIrq => "  IRQ",
@@ -635,6 +638,7 @@ impl Item {
                 s.machine.is_verite() && s.verite.risc == crate::verite::Risc::Lle
             }
             Item::Awe32Rom | Item::Awe32Ram => awe32(s),
+            Item::Cms => s.sound.sb_installed && s.sound.sb.model == crate::sb::SbModel::Sb2,
             // Until there is a ROM.
             Item::Awe32Download => awe32(s) && crate::awe32::rom::find(s.sound.awe32rom.as_deref()).is_none(),
             Item::Sc55Roms | Item::Sc55Model => s.sound.midisynth == MidiSynth::Sc55,
@@ -919,6 +923,7 @@ impl Item {
             AlmanacFetch | AlmanacReport => String::new(),
             Rewind => on_off(s.rewind),
             RewindMemory => format!("{} MB", s.rewind_memory),
+            SbType if s.sound.game_blaster => "Game Blaster".to_string(),
             SbType if !s.sound.sb_installed => "none".to_string(),
             SbType => match sb.model {
                 SbModel::Sb16 => "SB16",
@@ -1027,6 +1032,7 @@ impl Item {
             LptDac => s.sound.lpt_dac.describe().to_string(),
             TandySound => s.sound.tandy.describe().to_string(),
             Pit2GateAtStart => on_off(s.sound.pit2_gate_at_start),
+            Cms => on_off(s.sound.cms),
             Autoexec | Rooms | Phonebook => String::new(),
             Ipx => match s.network.ipx {
                 crate::net::IpxMode::Auto => "auto (with LAN HOST or JOIN)",

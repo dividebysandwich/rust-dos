@@ -12,6 +12,12 @@ ROM for its instruments.
 In a game's setup program, choose *Sound Blaster* (or *Sound Blaster 16*)
 for both sound effects and music, and keep the settings it detects.
 
+**Game Blaster** is Creative's card before the Sound Blaster, the
+Creative Music System: two Philips SAA1099 chips with twelve square-wave
+voices, at the port set below. Pick it for games that offer *CMS* or
+*Game Blaster* music, such as Elvira, Silpheed and the Sierra games of
+1988-1990. It has no digitized sound and no FM chip of its own.
+
 # Sound Blaster port, IRQ and DMA {#sb-ports}
 
 Where the Sound Blaster sits in the PC. A game's setup asks for these:
@@ -20,6 +26,14 @@ give it the same values as here, **220**, IRQ **7**, DMA **1** and HDMA
 
 Leave them as they are unless a game only works with other values.
 Left and Right pick a field, Enter lists its values.
+
+# CMS chips on the SB 2.0 {#cms}
+
+The SB 2.0 has sockets for the Game Blaster's two SAA1099 chips, which
+Creative sold as an upgrade (the first Sound Blaster had them fitted).
+**on** fits them, at the Sound Blaster's first four ports, for games
+that play *CMS* music on a Sound Blaster. Real cards came without them,
+so it starts **off**.
 
 # AWE32 ROM {#awe32-rom}
 

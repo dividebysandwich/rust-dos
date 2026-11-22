@@ -331,6 +331,11 @@ pub struct SoundConfig {
     /// The Sound Blaster's resources, and whether there is one.
     pub sb: crate::sb::SbConfig,
     pub sb_installed: bool,
+    /// A Game Blaster (`sbtype=gb`) at the Sound Blaster's base, in place
+    /// of the Sound Blaster.
+    pub game_blaster: bool,
+    /// The two CMS chips in the SB 2.0's sockets (`cms`).
+    pub cms: bool,
     /// The FM chip (`opl`), or None for the Sound Blaster's own: two
     /// OPL2s on an SB Pro 1, else an OPL3.
     pub opl: Option<crate::opl::Chip>,
@@ -391,6 +396,8 @@ impl Default for SoundConfig {
         Self {
             sb: crate::sb::SbConfig::default(),
             sb_installed: true,
+            game_blaster: false,
+            cms: false,
             opl: None,
             awe32rom: None,
             awe32ram: crate::awe32::DEFAULT_RAM_KB,
@@ -416,6 +423,28 @@ impl SoundConfig {
     /// The Sound Blaster to install, if any.
     pub fn card(&self) -> Option<crate::sb::SbConfig> {
         self.sb_installed.then_some(self.sb)
+    }
+
+    /// The Creative Music System's chips, if any: the Game Blaster's,
+    /// with its detection chip, or those in an SB 2.0's sockets (`cms`).
+    pub fn cms_chips(&self) -> Option<crate::gameblaster::CmsConfig> {
+        let base = self.sb.base;
+        if self.game_blaster {
+            Some(crate::gameblaster::CmsConfig { base, detection: true })
+        } else if self.cms && self.card().is_some_and(|sb| sb.model == crate::sb::SbModel::Sb2) {
+            Some(crate::gameblaster::CmsConfig { base, detection: false })
+        } else {
+            None
+        }
+    }
+
+    /// The `sbtype` value.
+    pub fn sb_type_name(&self) -> &'static str {
+        match (self.game_blaster, self.sb_installed) {
+            (true, _) => "gb",
+            (false, true) => self.sb.model.name(),
+            (false, false) => "none",
+        }
     }
 
     /// The Gravis Ultrasound to install, if any.
@@ -447,6 +476,13 @@ impl SoundConfig {
     /// channels only work while programs use one card at a time.
     pub fn check(&mut self) -> Vec<String> {
         let mut warnings = self.check_adlib_gold();
+        if self.game_blaster && self.gus.enabled && self.gus.base == self.sb.base {
+            warnings.push(format!(
+                "[sound]: gusbase {:X} is the Game Blaster's base port; there is no Ultrasound",
+                self.gus.base
+            ));
+            self.gus.enabled = false;
+        }
         let Some(sb) = self.card() else { return warnings };
         if !self.gus.enabled {
             return warnings;
@@ -479,6 +515,9 @@ impl SoundConfig {
         if let Some(sb) = self.card() {
             taken.push(("the Sound Blaster", sb.base..sb.base + 0x10));
         }
+        if self.game_blaster {
+            taken.push(("the Game Blaster", self.sb.base..self.sb.base + 0x10));
+        }
         if self.gus.enabled {
             taken.push(("the Ultrasound", self.gus.base + 0x100..self.gus.base + 0x108));
             taken.push(("the Ultrasound", self.gus.base..self.gus.base + 0x10));
@@ -501,11 +540,22 @@ impl SoundConfig {
             "sbtype" => {
                 if value.eq_ignore_ascii_case("none") {
                     self.sb_installed = false;
+                    self.game_blaster = false;
+                } else if value.eq_ignore_ascii_case("gb") {
+                    self.sb_installed = false;
+                    self.game_blaster = true;
                 } else {
-                    sb.model = crate::sb::SbModel::parse(value)
-                        .ok_or_else(|| format!("invalid sbtype '{}' (sb16, sb16vibra, awe32, sbpro2, sbpro1, sb2 or none)", value))?;
+                    sb.model = crate::sb::SbModel::parse(value).ok_or_else(|| {
+                        let types = "sb16, sb16vibra, awe32, sbpro2, sbpro1, sb2, gb or none";
+                        format!("invalid sbtype '{}' ({})", value, types)
+                    })?;
                     self.sb_installed = true;
+                    self.game_blaster = false;
                 }
+            }
+            "cms" => {
+                self.cms = parse_bool(value)
+                    .ok_or_else(|| format!("invalid cms '{}' (true or false)", value))?;
             }
             "sbbase" => {
                 let base = u16::from_str_radix(value.trim_start_matches("0x"), 16)
