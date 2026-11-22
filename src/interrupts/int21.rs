@@ -538,8 +538,11 @@ pub fn handle(cpu: &mut Cpu) {
     if writes_console(cpu, ah) && !crate::video::console_ready(cpu) {
         return;
     }
-    // Ctrl+C typed: the program's Ctrl+C handler before the call.
-    if checks_break(cpu, ah) && take_break(cpu) {
+    // Ctrl+C typed: the program's Ctrl+C handler before the call. The
+    // keyboard comes first, two reads of the BIOS data in the usual case
+    // of no key, as the function's test may look up a handle's file.
+    if break_waits(cpu) && checks_break(cpu, ah) {
+        crate::keyboard::take_keystroke(&mut cpu.bus);
         dos_data::leave_dos(cpu);
         call_break_handler(cpu);
         return;
@@ -563,44 +566,40 @@ pub fn handle(cpu: &mut Cpu) {
 /// in the character I/O functions (01h to 0Ch but the direct console
 /// I/O, 06h and 07h, which 0Ch can run too) and the reads and writes of
 /// the console in cooked mode always, and in the others while BREAK is on
-/// (AX=3301h), but for those DOS answers on the caller's stack. A program
-/// running in real or virtual-8086 mode only: Windows' virtual machines
-/// have their own, and the shell takes its Ctrl+C itself.
+/// (AX=3301h), but for those DOS answers on the caller's stack.
 fn checks_break(cpu: &mut Cpu, ah: u8) -> bool {
-    if cpu.current_psp == 0 || cpu.pm() || cpu.bus.guest_paging.is_some() {
-        return false;
-    }
     let flag = dos_data::address(dos_data::BREAK_FLAG) as u32;
-    let break_on = cpu.bus.guest_read_8(flag) & 1 != 0;
+    let break_on = |cpu: &mut Cpu| cpu.bus.guest_read_8(flag) & 1 != 0;
     match ah {
         0x01..=0x05 | 0x08..=0x0B => true,
         0x0C => !matches!(cpu.get_al(), 0x06 | 0x07),
         0x00 | 0x06 | 0x07 | 0x33 | 0x50 | 0x51 | 0x62 | 0x64 => false,
         0x3F | 0x40 => {
-            let handle = cpu.bx();
-            let cooked_con = file_of(cpu, handle).is_some_and(|sft| {
-                cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con) && !cpu.bus.disk.device_raw(sft)
-            });
-            cooked_con || break_on
+            break_on(cpu)
+                || file_of(cpu, cpu.bx()).is_some_and(|sft| {
+                    cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con)
+                        && !cpu.bus.disk.device_raw(sft)
+                })
         }
-        _ => break_on,
+        _ => break_on(cpu),
     }
 }
 
-/// Take a Ctrl+C (03h) or Ctrl+Break (0000h) that is the next key the
+/// Whether a Ctrl+C (03h) or Ctrl+Break (0000h) is the next key the
 /// console reads, as DOS's check reads the console's next character and
-/// leaves any other.
-fn take_break(cpu: &mut Cpu) -> bool {
-    if cpu.con_pending_scan.is_some() {
+/// leaves any other, for a program running in real or virtual-8086 mode:
+/// Windows' virtual machines have their own check, and the shell takes
+/// its Ctrl+C itself.
+fn break_waits(cpu: &mut Cpu) -> bool {
+    if cpu.current_psp == 0
+        || cpu.pm()
+        || cpu.bus.guest_paging.is_some()
+        || cpu.con_pending_scan.is_some()
+    {
         return false;
     }
-    match crate::keyboard::peek_keystroke(&mut cpu.bus) {
-        Some(key) if key & 0xFF == 0x03 || key == 0x0000 => {
-            crate::keyboard::take_keystroke(&mut cpu.bus);
-            true
-        }
-        _ => false,
-    }
+    crate::keyboard::peek_keystroke(&mut cpu.bus)
+        .is_some_and(|key| key & 0xFF == 0x03 || key == 0x0000)
 }
 
 /// Run the program's Ctrl+C handler (INT 23h) as MS-DOS does when it finds
@@ -614,7 +613,9 @@ fn call_break_handler(cpu: &mut Cpu) {
     let sp = cpu.sp();
     let at = dos_data::address(dos_data::SDA_BREAK_SP) as u32;
     cpu.bus.guest_write_16(at, sp);
-    let flags = cpu.read_u16(crate::cpu::Seg::SS, sp.wrapping_add(4) as u32).unwrap_or(0x0202);
+    let flags = cpu
+        .read_u16(crate::cpu::Seg::SS, sp.wrapping_add(4) as u32)
+        .unwrap_or(0x0202);
     cpu.push(flags);
     cpu.push(0xF000);
     cpu.push(crate::bios::BREAK_RETURN);
