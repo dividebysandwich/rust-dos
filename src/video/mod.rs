@@ -1543,6 +1543,10 @@ pub fn console_write(cpu: &mut Cpu, text: &[u8]) {
     if !bios && let Some(console) = cpu.host_console.as_mut() {
         console.write(text);
     }
+    if !cpu.bus.ansi_sys {
+        // No ANSI.SYS (`ansi_sys`): ESC is a character like the others.
+        return console_text(cpu, bios, text, 0x07);
+    }
     let mut ansi = std::mem::take(&mut cpu.ansi);
     let mut run = Vec::new();
     let mut run_attr = ansi.attr;

@@ -271,7 +271,8 @@ and `SORT` read a pipe, `<file` or the file they are given; `PAUSE`,
 default), and ANSI colors after `$E` (`$E[1;33m`). DOS's output, `ECHO`'s
 and programs', takes ANSI.SYS's escape sequences as DOSBox's does:
 colors (`ESC[1;33m`), moving the cursor (`ESC[r;cH`, `ESC[nA` to
-`ESC[nD`, `ESC[s`, `ESC[u`) and clearing (`ESC[2J`, `ESC[K`).
+`ESC[nD`, `ESC[s`, `ESC[u`) and clearing (`ESC[2J`, `ESC[K`). The
+`ansi_sys` setting turns them off.
 
 ### The prompt
 

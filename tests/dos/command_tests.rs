@@ -548,6 +548,16 @@ fn console_output_takes_ansi_sys_sequences() {
     cpu.set_ax(0x1A00);
     rust_dos::interrupts::int2f::handle(&mut cpu);
     assert_eq!(cpu.ax(), 0x1AFF);
+    // With `ansi_sys` off, as on a DOS without ANSI.SYS: the sequence is
+    // text, and the installation check says it isn't there.
+    cpu.bus.ansi_sys = false;
+    run(&mut cpu, "CLS");
+    run(&mut cpu, "ECHO \u{1B}[1mA");
+    let start = [0x1B, 0x07, b'[', 0x07, b'1', 0x07, b'm', 0x07, b'A', 0x07];
+    assert_eq!(&cpu.bus.vga.vram_text[..10], &start);
+    cpu.set_ax(0x1A00);
+    rust_dos::interrupts::int2f::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 0x1A00);
 }
 
 #[test]

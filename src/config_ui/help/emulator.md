@@ -365,6 +365,13 @@ program that complains about the DOS version may want **6.22**. Disk
 tools for Windows 95's disks want its DOS: **7.00** as in the first
 Windows 95, **7.10** as in the later ones with FAT32.
 
+# ANSI.SYS {#ansi-sys}
+
+Whether DOS's screen output understands ANSI.SYS's escape codes, the
+colours and cursor moves of menus written for DOSBox. Leave it **on**;
+turn it off only for a program that misbehaves when it finds ANSI.SYS
+installed, as on a DOS without it in CONFIG.SYS.
+
 # IDE hard disks {#ide-hard-disks}
 
 Only matters for a system booted from a disk image with `BOOT`, such as

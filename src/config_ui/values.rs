@@ -323,6 +323,7 @@ impl Item {
             IdeHardDisks => on_off(|s, on| s.ide_hard_disks = on),
             BootCdrom => on_off(|s, on| s.boot_cdrom = on),
             FloppyController => on_off(|s, on| s.floppy_controller = on),
+            AnsiSys => on_off(|s, on| s.ansi_sys = on),
             DosVersion => {
                 let mut versions = crate::config::DosVersion::PRESETS.to_vec();
                 if !versions.contains(&s.dos_version) {
