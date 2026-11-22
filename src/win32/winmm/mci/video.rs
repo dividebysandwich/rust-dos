@@ -1133,20 +1133,7 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
     video(cpu, i).drawn = Some(n);
     let mut surface = Surface::memory(w, h, 24, Vec::new(), default_masks(24));
     surface.data = rows;
-    // MCIAVI draws through DrawDib, which on a display of 256 colours
-    // dithers a movie of more than 8 bits to the halftone palette that
-    // `select_movie_palette` selects. A movie with colours of its own is
-    // drawn in them.
-    let deep = matches!(&m.video, MediaKind::Avi(v) if v.colors().is_empty());
-    if deep && palette::palette_device(cpu) {
-        surface = crate::win32::gdi32::dither::to_halftone(&surface);
-    }
     let [sx, sy, sw, sh] = video(cpu, i).source;
-    let source = Source {
-        surface,
-        bk_color: 0xFF_FFFF,
-        origin: (0, 0),
-    };
     let (hdc, dest) = match to {
         Some((hdc, rect)) => (hdc, rect.or(video(cpu, i).dest).unwrap_or([0, 0, w, h])),
         None => {
@@ -1166,7 +1153,22 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
     let [dx, dy, dw, dh] = dest;
     let (x0, y0) = dc.to_device(dx, dy);
     let (x1, y1) = dc.to_device(dx + dw, dy + dh);
-    let src = (sx, sy, sx + sw, sy + sh);
+    let mut src = (sx, sy, sx + sw, sy + sh);
+    // MCIAVI draws through DrawDib, which on a display of 256 colours
+    // stretches a movie of more than 8 bits to the destination and
+    // dithers that to the halftone palette `select_movie_palette`
+    // selects. A movie with colours of its own is drawn in them.
+    let deep = matches!(&m.video, MediaKind::Avi(v) if v.colors().is_empty());
+    let (pw, ph) = (x1 - x0, y1 - y0);
+    if deep && palette::palette_device(cpu) && pw > 0 && ph > 0 && sw > 0 && sh > 0 {
+        surface = crate::win32::gdi32::dither::to_halftone(&surface, src, pw, ph);
+        src = (0, 0, pw, ph);
+    }
+    let source = Source {
+        surface,
+        bk_color: 0xFF_FFFF,
+        origin: (0, 0),
+    };
     if blacken && to.is_none() {
         let (cw, ch) = user32::user(cpu)
             .window(hwnd)

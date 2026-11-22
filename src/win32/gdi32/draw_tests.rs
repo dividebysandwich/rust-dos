@@ -701,3 +701,51 @@ fn drawdib_dithers_true_colour_to_the_halftone_cube() {
         "{dithered} colours dithered, {nearest} nearest"
     );
 }
+
+/// A 24-bit DIB of grey 128, `sw` by `sh`, drawn as DrawDib draws it to
+/// `dw` by `dh` at (0, 0) of the screen with the halftone palette
+/// realized; the rows drawn, '#' for the cube's grey 153 and '.' for 102.
+fn draw_grey(sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<String> {
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &palette::halftone_colors());
+    let mut header = [40, sw, sh].map(u32::to_le_bytes).concat();
+    header.extend_from_slice(&[1, 0, 24, 0]);
+    header.resize(40, 0);
+    cpu.bus.guest_write_bytes(SCRATCH, &header);
+    let stride = (sw * 3).div_ceil(4) * 4;
+    cpu.bus.guest_write_bytes(BITS, &vec![128; (stride * sh) as usize]);
+    let args = [screen, 0, 0, dw, dh, 0, 0, sw, sh, BITS, SCRATCH, 0, SRCCOPY];
+    assert_eq!(bitmap::stretch_dib(&mut cpu, &args, true), Some(sh));
+    let pixels = screen_pixels(&mut cpu);
+    let system = palette::system_colors(&mut cpu);
+    (0..dh as usize)
+        .map(|y| {
+            (0..dw as usize)
+                .map(|x| match system[pixels[y * 640 + x] as usize] {
+                    0x99_9999 => '#',
+                    0x66_6666 => '.',
+                    c => panic!("({x}, {y}) is {c:06x}"),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Grey 128 as Windows 98 SE's DrawDib draws it on an 8-bit desktop,
+/// read back from the screen: the 4x4 matrix starts at the destination's
+/// bottom row, and a stretched picture is dithered at the destination's
+/// size.
+#[test]
+fn drawdib_dithers_as_windows_98_does() {
+    // Rows from the top of a destination whose height is a multiple of
+    // 4; one row less starts a row further down the matrix.
+    let rows = [".#.#.#.#", "#.#.#.#.", "##.###.#", "#.#.#.#."];
+    let expected = |dh: usize| -> Vec<String> {
+        (0..dh)
+            .map(|y| rows[(y + 8 - dh % 4) % 4].to_string())
+            .collect()
+    };
+    assert_eq!(draw_grey(8, 8, 8, 8), expected(8));
+    assert_eq!(draw_grey(8, 7, 8, 7), expected(7));
+    assert_eq!(draw_grey(4, 4, 8, 8), expected(8));
+    assert_eq!(draw_grey(8, 8, 8, 6), expected(6));
+}

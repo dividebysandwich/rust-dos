@@ -1082,9 +1082,9 @@ pub fn stretch_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     stretch_dib(cpu, args, false)
 }
 
-/// StretchDIBits, with a DIB of more than 8 bits a pixel first dithered
-/// to the halftone palette when `halftone` is set, as DrawDib draws one
-/// on a display of 256 colours (`dither`).
+/// StretchDIBits, with a DIB of more than 8 bits a pixel stretched and
+/// dithered to the halftone palette when `halftone` is set, as DrawDib
+/// draws one on a display of 256 colours (`dither`).
 pub fn stretch_dib(cpu: &mut Cpu, args: &[u32], halftone: bool) -> Option<u32> {
     let [hdc, xd, yd, wd, hd, xs, ys, ws, hs, bits, at, usage, rop] = args.try_into().unwrap();
     let Some(dc) = gdi(cpu).dc(hdc).cloned() else {
@@ -1096,30 +1096,41 @@ pub fn stretch_dib(cpu: &mut Cpu, args: &[u32], halftone: bool) -> Option<u32> {
         return Some(0);
     };
     let height = info.abs_height();
+    let (x0, y0) = dc.to_device(xd as i32, yd as i32);
+    let (x1, y1) = dc.to_device(xd as i32 + wd as i32, yd as i32 + hd as i32);
     let source = if draw::uses_source((rop >> 16) as u8) {
         let Some(mut src) = read_dib(cpu, &info, bits, 0, height as u32) else {
             return Some(0);
         };
-        if halftone && src.bpp > 8 {
-            src = super::dither::to_halftone(&src);
-        }
         let (xs, ys, ws, hs) = (xs as i32, ys as i32, ws as i32, hs as i32);
         // The source's coordinates start at the DIB's bottom, even for a
         // DIB whose rows run top down.
         let top = height - ys - hs;
+        let mut rect = (xs, top, xs + ws, top + hs);
+        // DrawDib stretches the picture to the destination and dithers
+        // that, which is then drawn 1:1. A mirrored one (which DrawDib's
+        // callers don't ask for) is dithered at its own size.
+        if halftone && src.bpp > 8 {
+            let (w, h) = (x1 - x0, y1 - y0);
+            if w > 0 && h > 0 && ws > 0 && hs > 0 {
+                src = super::dither::to_halftone(&src, rect, w, h);
+                rect = (0, 0, w, h);
+            } else {
+                let whole = (0, 0, src.width, src.height);
+                src = super::dither::to_halftone(&src, whole, src.width, src.height);
+            }
+        }
         Some((
             Source {
                 surface: src,
                 bk_color: 0xFFFFFF,
                 origin: (0, 0),
             },
-            (xs, top, xs + ws, top + hs),
+            rect,
         ))
     } else {
         None
     };
-    let (x0, y0) = dc.to_device(xd as i32, yd as i32);
-    let (x1, y1) = dc.to_device(xd as i32 + wd as i32, yd as i32 + hd as i32);
     draw::blit_from(cpu, hdc, (x0, y0, x1, y1), source, rop);
     Some(height as u32)
 }

@@ -12,10 +12,11 @@
 //! DDF_UPDATE draws it again and DDF_DONTDRAW decompresses without
 //! drawing. DrawDibBegin fails for a DIB no codec of codec.rs takes. An
 //! uncompressed DIB goes to StretchDIBits as it is. On a display of 256
-//! colours a picture of more than 8 bits a pixel is dithered to the
-//! halftone palette first (`gdi32::dither`). A save state keeps the
-//! DIB but not the decoder: after a restore the decoder refuses the
-//! frames up to the next key frame, and the picture stays until then.
+//! colours a picture of more than 8 bits a pixel is stretched to the
+//! destination and dithered to the halftone palette (`gdi32::dither`).
+//! A save state keeps the DIB but not the decoder: after a restore the
+//! decoder refuses the frames up to the next key frame, and the picture
+//! stays until then.
 
 use super::codec::{self, Codec};
 use super::msvideo1;
