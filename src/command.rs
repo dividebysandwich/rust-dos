@@ -1,7 +1,8 @@
 use crate::cpu::Cpu;
 use crate::disk::{DRIVE_C, DriveKind, drive_letter, drive_name, parse_drive_prefix};
 use crate::mount::{
-    MOUNT_USAGE, MountCmd, MountSpec, PathContext, display_host_path, parse_mount_command,
+    MOUNT_USAGE, MountCmd, MountSpec, PathContext, display_host_path, parse_dos_mount_tokens,
+    tokenize,
 };
 use crate::video::{print_cp437, print_string};
 use std::fmt::Write;
@@ -31,6 +32,8 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("IF", &IfCommand),
     ("FOR", &ForCommand),
     ("PAUSE", &PauseCommand),
+    ("VERIFY", &VerifyCommand),
+    ("BREAK", &BreakCommand),
     ("CHOICE", &ChoiceCommand),
     ("PROMPT", &PromptCommand),
     ("COPY", &crate::file_commands::CopyCommand),
@@ -562,7 +565,7 @@ impl ShellCommand for TypeCommand {
         match cpu.bus.disk.file_data(target) {
             Some(file) => match file.read() {
                 Ok(bytes) => {
-                    print_cp437(cpu, &type_text(&bytes), 0x07);
+                    crate::video::print_console(cpu, &type_text(&bytes));
                     if cpu.bus.console_cursor().0 != 0 {
                         print_string(cpu, "\r\n");
                     }
@@ -589,11 +592,19 @@ fn type_text(bytes: &[u8]) -> Vec<u8> {
 }
 
 struct ClsCommand;
+/// MS-DOS 6.22's COMMAND.COM prints no CR LF after CLS: the prompt, or
+/// the next line a batch file echoes, comes on the top line.
+fn after_cls(cpu: &mut Cpu) {
+    cpu.batch.crlf.command_ran = false;
+    cpu.batch.crlf.null_line = true;
+}
+
 impl ShellCommand for ClsCommand {
     fn execute(&self, cpu: &mut Cpu, _args: &str) {
         // In a Windows virtual machine, the machine's own screen.
         if cpu.v86() && cpu.bus.guest_paging.is_some() {
             crate::interrupts::clear_screen(cpu);
+            after_cls(cpu);
             return;
         }
         // Direct VRAM clear to avoid circular dependency on int10.rs:
@@ -606,6 +617,7 @@ impl ShellCommand for ClsCommand {
         }
         // The cursor to the top left, where the next output goes on.
         cpu.bus.set_console_cursor(0, 0);
+        after_cls(cpu);
     }
 }
 
@@ -875,6 +887,75 @@ fn file_exists(cpu: &Cpu, name: &str) -> bool {
     }
 }
 
+/// What VERIFY and BREAK do with their argument, as MS-DOS 6.22's
+/// COMMAND.COM does: none shows the flag (`NAME is on`), ON or OFF (any
+/// case, after spaces or an =) sets it, anything else is refused, and /?
+/// shows the usage.
+fn on_off_command(
+    cpu: &mut Cpu,
+    args: &str,
+    name: &str,
+    help: &str,
+    get: fn(&mut Cpu) -> bool,
+    set: fn(&mut Cpu, bool),
+) {
+    let arg = args
+        .trim_start_matches([' ', '\t', '='])
+        .trim_end_matches([' ', '\t']);
+    match arg.to_ascii_uppercase().as_str() {
+        "" => {
+            let state = if get(cpu) { "on" } else { "off" };
+            print_string(cpu, &format!("{} is {}\r\n", name, state));
+        }
+        "ON" => set(cpu, true),
+        "OFF" => set(cpu, false),
+        "/?" => print_string(cpu, help),
+        _ => print_string(cpu, "Must specify ON or OFF\r\n"),
+    }
+}
+
+/// Whether the DOS flag byte at `offset` of DOS's data segment is on.
+fn dos_flag(cpu: &mut Cpu, offset: u16) -> bool {
+    cpu.bus
+        .guest_read_8(crate::dos_data::address(offset) as u32)
+        & 1
+        != 0
+}
+
+/// Set the DOS flag byte at `offset` of DOS's data segment, as INT 21h's
+/// functions that set it do.
+fn set_dos_flag(cpu: &mut Cpu, offset: u16, on: bool) {
+    cpu.bus
+        .guest_write_8(crate::dos_data::address(offset) as u32, on as u8);
+}
+
+/// VERIFY [ON|OFF]: DOS's verify flag, which INT 21h AH=2Eh and 54h set
+/// and get.
+struct VerifyCommand;
+impl ShellCommand for VerifyCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        const HELP: &str = "Tells MS-DOS whether to verify that your files are written correctly to a\r\n\
+            disk.\r\n\r\nVERIFY [ON | OFF]\r\n\r\n\
+            Type VERIFY without a parameter to display the current VERIFY setting.\r\n";
+        let get = |cpu: &mut Cpu| dos_flag(cpu, crate::dos_data::VERIFY_FLAG);
+        let set = |cpu: &mut Cpu, on| set_dos_flag(cpu, crate::dos_data::VERIFY_FLAG, on);
+        on_off_command(cpu, args, "VERIFY", HELP, get, set);
+    }
+}
+
+/// BREAK [ON|OFF]: DOS's Ctrl+Break check flag, which INT 21h AX=3300h
+/// to 3302h get and set.
+struct BreakCommand;
+impl ShellCommand for BreakCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        const HELP: &str = "Sets or clears extended CTRL+C checking.\r\n\r\nBREAK [ON | OFF]\r\n\r\n\
+            Type BREAK without a parameter to display the current BREAK setting.\r\n";
+        let get = |cpu: &mut Cpu| dos_flag(cpu, crate::dos_data::BREAK_FLAG);
+        let set = |cpu: &mut Cpu, on| set_dos_flag(cpu, crate::dos_data::BREAK_FLAG, on);
+        on_off_command(cpu, args, "BREAK", HELP, get, set);
+    }
+}
+
 /// PAUSE: wait for a key. Ctrl+C ends the batch files.
 struct PauseCommand;
 impl ShellCommand for PauseCommand {
@@ -903,54 +984,110 @@ impl ShellCommand for ChoiceCommand {
                 crate::shell::enter_wait(cpu, crate::shell::ShellWait::Choice(choice));
             }
             Err(e) => {
-                print_string(cpu, &format!("{}\r\n", e));
+                print_string(cpu, &e);
                 cpu.errorlevel = 255;
             }
         }
     }
 }
 
+/// The form CHOICE's messages about its switches end with.
+const CHOICE_FORM: &str = "    CHOICE [/C[:]choices] [/N] [/S] [/T[:]c,nn] [text]\r\n";
+
 /// CHOICE's switches: the keys to wait for, its text, and whether to show
-/// the keys.
+/// the keys. As MS-DOS's CHOICE.COM reads them: switches before and after
+/// the text, a `/` in the text starting one unless the text is in quotes,
+/// and the text as typed up to the next switch, its spaces too. Errors
+/// are CHOICE.COM's messages, line ends included.
 fn parse_choice<'a>(cpu: &Cpu, args: &'a str) -> Result<(crate::shell::Choice, &'a str, bool), String> {
     let mut keys = b"YN".to_vec();
     let (mut case_sensitive, mut show_keys, mut timeout) = (false, true, None);
-    let mut rest = args.trim_start();
-    while let Some(switch) = rest.strip_prefix('/') {
-        let (word, after) = first_word(switch);
-        rest = after.trim_start();
-        let (letter, value) = word.split_at(word.chars().next().map_or(0, char::len_utf8));
-        let value = value.strip_prefix(':').unwrap_or(value);
-        match letter.to_ascii_uppercase().as_str() {
-            "C" => keys = crate::dosstr::to_bytes(value),
-            "N" => show_keys = false,
-            "S" => case_sensitive = true,
-            "T" => {
-                let (key, seconds) = value.split_once(',').ok_or("Invalid switch - /T")?;
-                let (key, seconds) = (key.bytes().next(), seconds.trim().parse::<u64>().ok());
-                let (Some(key), Some(seconds)) = (key, seconds.filter(|&s| s <= 99)) else {
-                    return Err("Invalid switch - /T".into());
-                };
-                timeout = Some((key, seconds));
+    let mut text = None;
+    let mut rest = args;
+    loop {
+        rest = rest.trim_start_matches(WHITESPACE);
+        let Some(switch) = rest.strip_prefix('/') else {
+            if rest.is_empty() {
+                break;
             }
-            _ => return Err(format!("Invalid switch - /{}", word)),
+            if text.is_some() {
+                return Err(format!(
+                    "CHOICE: only one prompt string allowed. Expected Form:\r\n{CHOICE_FORM}\r\n"
+                ));
+            }
+            // Quotes keep a `/` in the text and are taken off it.
+            let (found, after) = match rest.strip_prefix('"') {
+                Some(quoted) => quoted.split_once('"').unwrap_or((quoted, "")),
+                None => rest.split_at(rest.find('/').unwrap_or(rest.len())),
+            };
+            text = Some(found);
+            rest = after;
+            continue;
+        };
+        let mut chars = switch.chars();
+        let letter = chars.next().map(|c| c.to_ascii_uppercase());
+        let value = chars.as_str();
+        rest = value;
+        match letter {
+            Some('N') => show_keys = false,
+            Some('S') => case_sensitive = true,
+            Some('C') => {
+                let value = value.strip_prefix(':').unwrap_or(value);
+                let end = value.find([' ', '\t', '/']).unwrap_or(value.len());
+                if end == 0 {
+                    return Err(
+                        "CHOICE: invalid choice switch syntax. Expected form: /C[:]choices\r\n"
+                            .into(),
+                    );
+                }
+                keys = crate::dosstr::to_bytes(&value[..end]);
+                rest = &value[end..];
+            }
+            Some('T') => {
+                // A key, a comma and one or two digits; a third digit
+                // starts the text.
+                let value = value.strip_prefix(':').unwrap_or(value);
+                let mut chars = value.chars();
+                let (key, comma) = (chars.next(), chars.next());
+                let after = chars.as_str();
+                let digits = after.bytes().take(2).take_while(u8::is_ascii_digit).count();
+                let (Some(key), Some(','), 1..) = (key, comma, digits) else {
+                    return Err(
+                        "CHOICE: Incorrect timeout syntax.  Expected form Tc,nn or T:c,nn\r\n"
+                            .into(),
+                    );
+                };
+                let seconds = after[..digits].parse::<u64>().unwrap_or(0);
+                timeout = Some((crate::dosstr::to_bytes(&key.to_string())[0], seconds));
+                rest = &after[digits..];
+            }
+            _ => {
+                return Err(format!(
+                    "Invalid switch on command line. Expected form:\r\n{CHOICE_FORM}\r\n"
+                ));
+            }
         }
     }
     if !case_sensitive {
         keys.make_ascii_uppercase();
     }
-    if keys.is_empty() {
-        return Err("Invalid switch - /C".into());
-    }
     let mut choice = crate::shell::Choice { keys, case_sensitive, timeout: None };
     if let Some((key, seconds)) = timeout {
-        let Some(i) = choice.keys.iter().position(|&k| if case_sensitive { k == key } else { k.eq_ignore_ascii_case(&key) }) else {
-            return Err("Timeout default not in specified (or default) choices.".into());
+        let Some(i) = choice.keys.iter().position(|&k| {
+            if case_sensitive {
+                k == key
+            } else {
+                k.eq_ignore_ascii_case(&key)
+            }
+        }) else {
+            return Err(
+                "CHOICE: Timeout default not in specified (or default) choices.\r\n".into(),
+            );
         };
         let at = cpu.bus.clock.now_ticks() + seconds * crate::timer::PIT_HZ;
         choice.timeout = Some((choice.keys[i], at));
     }
-    Ok((choice, rest, show_keys))
+    Ok((choice, text.unwrap_or(""), show_keys))
 }
 
 /// KEYB [code[,codepage]]: type in another keyboard layout (keylayout.rs),
@@ -1071,7 +1208,8 @@ impl ShellCommand for MountCommand {
             home: home.as_deref(),
             locate: &locate,
         };
-        match parse_mount_command(args, &paths) {
+        // Host paths among the words as the host spells them.
+        match tokenize(args).and_then(|tokens| parse_dos_mount_tokens(&tokens, &paths)) {
             Ok(MountCmd::List) => {
                 print_string(cpu, "Drive Type    Label       Host path\r\n");
                 let disk = &cpu.bus.disk;

@@ -27,7 +27,7 @@ const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
-const DPMI_VERSION: u16 = 2;
+const DPMI_VERSION: u16 = 3;
 const WIN32_VERSION: u16 = 86;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
@@ -71,6 +71,7 @@ const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
 const AWE_VERSION: u16 = 1;
 const ADLIB_GOLD_VERSION: u16 = 1;
+const CMS_VERSION: u16 = 1;
 const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 3;
 const ET4000_VERSION: u16 = 1;
@@ -86,6 +87,7 @@ const PIT2_VERSION: u16 = 1;
 const PIT_8254_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
 const KEY_QUEUE_VERSION: u16 = 1;
+const RTC_ALARM_VERSION: u16 = 1;
 const TYPEMATIC_VERSION: u16 = 1;
 const FRAME_CAP_VERSION: u16 = 1;
 
@@ -125,6 +127,7 @@ impl Bus {
             kbc,
             kbc_release_at: _,
             rtc_next: _,
+            rtc_alarm_next: _,
             a20_mask,
             cmos,
             pit_divisor,
@@ -191,6 +194,7 @@ impl Bus {
             awe_rom: _,
             awe_ram_kb: _,
             tandy_sound,
+            cms,
             lpt_dac,
             cdaudio,
             xms,
@@ -211,6 +215,7 @@ impl Bus {
             dos_version: _,
             ide_hard_disks: _,
             floppy_controller: _,
+            ansi_sys: _,
             boot_cdrom: _,
             idle_hint: _,
             disk_notices: _,
@@ -315,6 +320,11 @@ impl Bus {
         w.section(b"TYPM", TYPEMATIC_VERSION, |w| {
             kbd.save_typematic(kbc.typematic, w)
         });
+        // Where the look for the clock's alarm got to, while the alarm is
+        // enabled: only then, so other states load as they did.
+        if let Some(at) = cmos.alarm_look() {
+            w.section(b"RTCA", RTC_ALARM_VERSION, |w| at.save(w));
+        }
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga);
             // A ToadForce's memory is saved with what its host renderer
@@ -410,6 +420,10 @@ impl Bus {
                 adlib_gold_line.save(w);
             });
         }
+        // The CMS chips, likewise.
+        if let Some(cms) = cms {
+            w.section(b"CMS ", CMS_VERSION, |w| cms.save(w));
+        }
         // A 3dfx card, whose memory comes first, and only on a machine
         // with one, so states of machines without load as they did.
         if let Some(voodoo) = voodoo {
@@ -437,7 +451,10 @@ impl Bus {
         }
         // The DPMI host, while it has clients.
         if dpmi.active() {
-            w.section(b"DPMI", DPMI_VERSION, |w| dpmi.save(w));
+            w.section(b"DPMI", DPMI_VERSION, |w| {
+                dpmi.save(w);
+                dpmi.save_ldt_limits(w);
+            });
         }
         // The built-in Windows, while it runs a program or is about to.
         if win32.active() || win32.pending() {
@@ -497,6 +514,7 @@ impl Bus {
             kbc,
             kbc_release_at: _,
             rtc_next: _,
+            rtc_alarm_next: _,
             a20_mask,
             cmos,
             pit_divisor,
@@ -563,6 +581,7 @@ impl Bus {
             awe_rom: _,
             awe_ram_kb: _,
             tandy_sound,
+            cms,
             lpt_dac,
             cdaudio,
             xms,
@@ -581,6 +600,7 @@ impl Bus {
             dos_version: _,
             ide_hard_disks: _,
             floppy_controller: _,
+            ansi_sys: _,
             boot_cdrom: _,
             idle_hint: _,
             disk_notices: _,
@@ -732,6 +752,11 @@ impl Bus {
         } else {
             kbd.forget_typematic()
         };
+        if r.next_is(b"RTCA") {
+            let mut at = 0i64;
+            at.load(&mut r.section(b"RTCA", RTC_ALARM_VERSION)?)?;
+            cmos.set_alarm_look(at);
+        }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         *last_present = None;
@@ -834,6 +859,16 @@ impl Bus {
             (true, None) => return Err(StateError::Mismatch("it has an AdLib Gold and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has an AdLib Gold and it hasn't".into())),
         }
+        match (r.next_is(b"CMS "), cms) {
+            (true, Some(cms)) => cms.load(&mut r.section(b"CMS ", CMS_VERSION)?)?,
+            (false, None) => {}
+            (true, None) => {
+                return Err(StateError::Mismatch("it has CMS chips and this machine hasn't".into()));
+            }
+            (false, Some(_)) => {
+                return Err(StateError::Mismatch("this machine has CMS chips and it hasn't".into()));
+            }
+        }
         // A state saved before the cap had its section has the 3dfx
         // card's last capped frame, which the card's load puts in.
         frame_cap.forget();
@@ -871,7 +906,11 @@ impl Bus {
         }
         dpmi.reset();
         if r.next_is(b"DPMI") {
-            dpmi.load(&mut r.section(b"DPMI", DPMI_VERSION)?)?;
+            // Version 2 has no LDT limits (`Dpmi::load_ldt_limits`).
+            let mut section = r.section_of(b"DPMI", &[2, DPMI_VERSION])?;
+            dpmi.load(&mut section)?;
+            let version = section.version();
+            dpmi.load_ldt_limits(&mut section, version)?;
         }
         win32.reset();
         if r.next_is(b"W32 ") {
@@ -950,9 +989,10 @@ impl Bus {
         // and the IPX driver's node is the state's.
         self.net.ipx_queue.clear();
         self.net.ipx_installed();
-        // The clock's periodic interrupt as the state's registers have it,
-        // and the keyboard's next byte at once.
+        // The clock's periodic interrupt and the look for its alarm as the
+        // state's registers have them, and the keyboard's next byte at once.
         self.rtc_next = None;
+        self.rtc_alarm_next = None;
         self.schedule_rtc();
         self.kbc_release_at = None;
         self.kbc.after_load();

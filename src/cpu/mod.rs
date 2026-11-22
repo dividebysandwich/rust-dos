@@ -571,6 +571,9 @@ pub struct Cpu {
     pub con_line: Option<crate::interrupts::int21::ConLine>,
     /// What is left of the last line read from CON, for the next reads.
     pub con_pending: VecDeque<u8>,
+    /// ANSI.SYS's state in the console output: the colours of the text,
+    /// and a sequence part written.
+    pub ansi: crate::video::ansi::Ansi,
     /// Memory allocation strategy (INT 21h AH=58h).
     pub alloc_strategy: u16,
     /// End of an INT 15h AH=86h wait in progress, in PIT ticks.
@@ -835,6 +838,7 @@ impl Cpu {
             con_pending_scan: None,
             con_line: None,
             con_pending: VecDeque::new(),
+            ansi: Default::default(),
             alloc_strategy: 0,
             bios_wait_until: None,
             process_stack: Vec::new(),
@@ -1719,13 +1723,18 @@ impl Cpu {
         // termination restored this to the shell's PSP; frontends that
         // explicitly close a running process have no parent context to do so.
         self.current_psp = 0;
-        // DOS keeps the verify flag as the last program set it (AH=2Eh),
-        // unless a system booted from a disk had the memory.
+        // DOS keeps the verify and Ctrl+Break flags as the last program or
+        // command set them (AH=2Eh, AX=3301h), unless a system booted from
+        // a disk had the memory.
         let verify_flag = crate::dos_data::address(crate::dos_data::VERIFY_FLAG);
-        let verify = if self.bus.boot.is_some() {
-            0
+        let break_flag = crate::dos_data::address(crate::dos_data::BREAK_FLAG);
+        let (verify, ctrl_break) = if self.bus.boot.is_some() {
+            (0, 0)
         } else {
-            self.bus.read_8(verify_flag) & 1
+            (
+                self.bus.read_8(verify_flag) & 1,
+                self.bus.read_8(break_flag) & 1,
+            )
         };
         // Windows' keyboard ends with it.
         crate::bios::windows_keyboard(&mut self.bus, false);
@@ -1924,6 +1933,7 @@ impl Cpu {
         crate::dos_data::write(&mut self.bus);
         crate::dos_data::write_driver_code(&mut self.bus);
         self.bus.write_8(verify_flag, verify);
+        self.bus.write_8(break_flag, ctrl_break);
 
         // With expanded memory, DOS runs in virtual-8086 mode under the
         // built-in monitor, as under EMM386.

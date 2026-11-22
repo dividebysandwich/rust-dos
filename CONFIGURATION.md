@@ -697,6 +697,15 @@ limit, so without a connection it goes on as it would with one:
   way. Below 7.10, INT 25h and 26h still read and write FAT32 drives, unlike
   MS-DOS 7.1, so DOS 5 programs that know only them keep reaching the
   volume. A change takes effect at once.
+* `ansi_sys` is whether DOS's console takes ANSI.SYS's escape sequences:
+  `true` (the default), as DOSBox's CON has them, or `false`, as a DOS
+  without `DEVICE=ANSI.SYS`. With it on, the output of `ECHO`, of `TYPE`
+  and of programs through DOS (INT 21h, INT 29h) takes colours
+  (`ESC[...m`), cursor moves (`ESC[r;cH`, `ESC[nA` to `ESC[nD`, `ESC[s`,
+  `ESC[u`) and clearing (`ESC[2J`, `ESC[K`), and INT 2Fh AX=1A00h reports
+  ANSI.SYS installed. Turn it off for a program that misbehaves when it
+  finds ANSI.SYS. A DOSBox-X configuration's `ansi.sys` in `[dos]`
+  imports as it. A change takes effect at once.
 * `keyboard_layout` is the layout the keyboard types in, as DOS's KEYB
   has them: `auto` (the default) takes the host keyboard's, or one of
   `us`, `uk`, `gr` (German, also `de`), `sg` and `sf` (Swiss German and
@@ -801,10 +810,30 @@ limit, so without a connection it goes on as it would with one:
 ### `[sound]`
 
 * `sbtype` is the Sound Blaster: `sb16` (the default), `sb16vibra`,
-  `awe32`, `sbpro2`, `sbpro1`, `sb2` or `none`. `sbbase` (hex), `irq`,
-  `dma` and `hdma` (the SB16's and AWE32's 16-bit channel) set its
+  `awe32`, `sbpro2`, `sbpro1`, `sb2`, `gb` or `none`. `sbbase` (hex),
+  `irq`, `dma` and `hdma` (the SB16's and AWE32's 16-bit channel) set its
   resources; the defaults are 220, 7, 1 and 5. The `BLASTER` environment
   variable follows them.
+* `gb` is Creative's Game Blaster (the Creative Music System, C/MS) in
+  place of a Sound Blaster: two Philips SAA1099 chips on a 7.16 MHz
+  clock, twelve square-wave voices with noise and envelopes, at `sbbase`
+  (220h unless set). The first chip is at base+0 (data) and base+1
+  (address), the second at base+2 and base+3. The card's detection chip
+  is at base+4 to base+0Fh: base+4 reads 7Fh, and a byte written to
+  base+6 or base+7 reads back from base+0Ah and base+0Bh, which
+  Creative's drivers and the games that look for the card check. The
+  card has no IRQ, DMA or digitized sound, and no `BLASTER` variable. It
+  plays on the mixer's `cms` channel. DOSBox's `sbtype=gb` imports as
+  this.
+* `cms=true` fits the two SAA1099s to the SB 2.0 (`sbtype=sb2`), at its
+  base+0 to base+3, where its DSP has no ports. The first Sound Blaster
+  (1.0) had the chips fitted for C/MS games, and the SB 1.5 and 2.0 had
+  empty sockets for them, sold as an upgrade, so the default is `false`.
+  The SB 2.0 with them has no detection chip, as on the real cards. The
+  SB Pro and SB16 have no sockets, and `cms` does nothing on them. From a
+  DOSBox configuration, `sbtype=sb1` (with DOSBox Staging's `cms=auto`,
+  its default) imports as `sbtype=sb2` with `cms=true`, `cms=on` or
+  `off` as itself, and DOSBox 0.74's `oplmode=cms` as `cms=true`.
 * `sbpro1` is the first Sound Blaster Pro (CT1330, DSP 3.00), which
   DOSBox's `sbtype=sbpro1` imports as. Creative's early drivers for it,
   such as Mega lo Mania's, take only DSP 3.00 and 3.01 and don't find an
@@ -954,8 +983,9 @@ The volume of each sound source in percent, from 0 to 200: `speaker` (the
 PC speaker and the prompt's beeps), `sb` (the Sound Blaster's digital
 audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
 `lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
-PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer),
-`monitor` (the [monitor's effects](#emulator)), `modem` (the [modem's
+PCjr's sound chip), `cms` (the Game Blaster's SAA1099s), `awe32` (the
+AWE32's wavetable synthesizer), `monitor` (the [monitor's
+effects](#emulator)), `modem` (the [modem's
 speaker](#serial-and-modem-games)), `windows` (the built-in Windows's
 sound: DirectSound and WinMM's wave audio), and `master` for all of them
 together. At 100, the default, a source plays as loud as its card makes
@@ -969,12 +999,15 @@ programs set.
   filters as the model in `sbtype` does, at 4.8 kHz on an SB 2.0, 3.2 kHz
   on an SB Pro and half the sample rate on an SB16; `off` leaves the
   sound as the card makes it.
-* `sb_coupling` is the capacitor on the Sound Blaster's output, a
-  high-pass at 3 Hz: `on` (the default) or `off`. A card's DAC holds its
-  last sample until the next, and with the capacitor that level fades
+* `sb_coupling` is the capacitor on the outputs of the Sound Blaster, the
+  AdLib and the AdLib Gold, a high-pass at 3 Hz: `on` (the default) or
+  `off`. A card's DAC (the Sound Blaster's, or the AdLib Gold's for its
+  sampled sound) holds its last sample until the next, and the FM
+  synthesizer holds a level when a program stops a note by setting its
+  frequency to 0 without a release. With the capacitor that level fades
   out of the mix within a fraction of a second, as on the real card;
-  `off` mixes the DAC's level as it is, so a level a program leaves the
-  card at stays in the mix as a constant offset.
+  `off` mixes it as it is, so a level a program leaves the card at stays
+  in the mix as a constant offset.
 * `reverb` adds a room to the music of the FM synthesizer, the Gravis
   Ultrasound and MIDI: `off` (the default), `tiny`, `small`, `medium`,
   `large` or `huge`. `chorus` thickens them: `off` (the default),

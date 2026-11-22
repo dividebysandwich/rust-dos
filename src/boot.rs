@@ -207,6 +207,7 @@ pub fn power_on(cpu: &mut Cpu, unit: u8) {
 /// leaves it, and the devices come up again.
 fn reset_machine(cpu: &mut Cpu) {
     cpu.batch.clear();
+    cpu.batch.crlf = Default::default();
     cpu.pending_command = None;
     cpu.shell_wait = None;
     cpu.rc_resume = None;
@@ -223,6 +224,7 @@ fn reset_machine(cpu: &mut Cpu) {
     cpu.con_pending_scan = None;
     cpu.con_line = None;
     cpu.con_pending.clear();
+    cpu.ansi = Default::default();
     cpu.hle_retry = false;
     cpu.idle = false;
     cpu.pm_latched = false;

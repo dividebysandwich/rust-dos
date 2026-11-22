@@ -135,6 +135,8 @@ pub struct Bus {
     pub kbc_release_at: Option<u64>,
     /// When the clock's next periodic interrupt comes, in PIT ticks.
     pub rtc_next: Option<u64>,
+    /// When to look for the clock's alarm next, while it is enabled.
+    pub rtc_alarm_next: Option<u64>,
     /// The A20 gate as a mask for physical addresses: with the gate
     /// closed, address line 20 is forced to 0 and addresses wrap at 1 MB
     /// as on an 8086. See `a20()` and `set_a20()`.
@@ -175,6 +177,9 @@ pub struct Bus {
     pub ide_hard_disks: bool,
     /// A booted system has a floppy disk controller (`floppy_controller`).
     pub floppy_controller: bool,
+    /// DOS's console takes ANSI.SYS's escape sequences (`ansi_sys`,
+    /// video/ansi.rs).
+    pub ansi_sys: bool,
     /// A booted system has a CD-ROM drive even with no CD mounted, for one
     /// to go in later (`boot_cdrom`).
     pub boot_cdrom: bool,
@@ -201,6 +206,9 @@ pub struct Bus {
     /// `tandy_sound_enabled`.
     pub tandy_sound: crate::sn76489::Sn76489,
     pub tandy_mode: crate::sn76489::TandySound,
+    /// The Creative Music System's two SAA1099s: a Game Blaster, or the
+    /// chips in an SB 2.0's sockets (`sbtype=gb`, `cms`).
+    pub cms: Option<Box<crate::gameblaster::GameBlaster>>,
     /// Values the settings window's Cheats page froze, put back before
     /// every frame while the program runs (`apply_freezes`).
     pub freezes: Vec<crate::cheats::Freeze>,
@@ -1014,6 +1022,7 @@ impl Bus {
     fn plain_vga_run(&self, dst: usize, len: usize) -> bool {
         (ADDR_VGA_GRAPHICS..=ADDR_VGA_GRAPHICS + SIZE_GRAPHICS - len).contains(&dst)
             && !self.vbe_window()
+            && self.vga.maps_graphics_window()
             && self.s3_mmio(dst).is_none()
             && self.mach64_mmio(dst).is_none()
             && self.vga.plain_writes()
@@ -1178,6 +1187,11 @@ impl Bus {
                 }
                 return self.vbe.vram[offset];
             }
+            // Nothing there while GR06 maps the memory at B0000h or
+            // B8000h alone (the text modes).
+            if !self.vga.maps_graphics_window() {
+                return 0xFF;
+            }
             // Route through VGA so chain-4, odd/even, and Read Map Select
             // work correctly. read_graphics also latches planes, needed
             // for planar read-modify-write sequences.
@@ -1233,6 +1247,9 @@ impl Bus {
             return self.mapped_8(addr);
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && !self.vbe_window() {
+            if !self.vga.maps_graphics_window() {
+                return 0xFF;
+            }
             let saved = self.vga.latches.get();
             let v = self.vga.read_graphics(self.vga_window(addr, false));
             self.vga.latches.set(saved);
@@ -1253,7 +1270,11 @@ impl Bus {
     /// the VGA's planes as `write_planes_plainly` has them.
     #[cfg_attr(not(dynrec), allow(dead_code))]
     pub(crate) fn plain_planes(&mut self) -> Option<(u8, *mut u8, usize)> {
-        if self.vbe_window() || self.et4000() || (self.s3() && self.vga.s3.mmio()) {
+        if self.vbe_window()
+            || self.et4000()
+            || (self.s3() && self.vga.s3.mmio())
+            || !self.vga.maps_graphics_window()
+        {
             return None;
         }
         self.vga.plain_planes()
@@ -1264,6 +1285,7 @@ impl Bus {
             || self.vbe_window()
             || self.et4000()
             || (self.s3() && self.vga.s3.mmio())
+            || !self.vga.maps_graphics_window()
             || !self.vga.write_planes_plainly(addr - ADDR_VGA_GRAPHICS, value, size)
         {
             return false;
@@ -1308,6 +1330,10 @@ impl Bus {
                 let offset = self.vesa_window(addr - ADDR_VGA_GRAPHICS, true);
                 self.write_vram(offset, &[value]);
                 return true;
+            }
+            // Lost while GR06 maps the memory elsewhere (see `mapped_8`).
+            if !self.vga.maps_graphics_window() {
+                return false;
             }
             self.note_video_write(addr - ADDR_VGA_GRAPHICS, 1);
             // write_graphics already sets vga.dirty unconditionally. The
@@ -1790,6 +1816,7 @@ impl Bus {
             self.kbc_release_at,
             crate::keyboard::typematic_at(self),
             self.rtc_next,
+            self.rtc_alarm_next,
             self.win32.next_event(),
             crate::win32::audio_next_event(&self.win32, self.clock.now_ticks()),
         ]
@@ -1855,6 +1882,16 @@ impl Bus {
         {
             self.rtc_next = self.cmos.periodic_ticks().map(|period| if at + period > now { at + period } else { now + period });
             if self.rtc_next.is_some() && self.cmos.periodic_fired() {
+                self.pic.raise(8);
+            }
+        }
+        // The clock's alarm.
+        if let Some(at) = self.rtc_alarm_next
+            && at <= now
+        {
+            let enabled = self.cmos.alarm_enabled();
+            self.rtc_alarm_next = enabled.then(|| next_alarm_look(now));
+            if self.cmos.alarm_due() {
                 self.pic.raise(8);
             }
         }
@@ -2070,14 +2107,25 @@ impl Bus {
             }
             let (ol, or) = self.opl.render();
             let fm = (ol as f32 * fl, or as f32 * fr);
-            if let Some(gold) = &mut self.adlib_gold {
-                // The FM goes through the AdLib Gold's mixer and output
-                // stage, with its sampled sound.
-                let (fm, pcm) = gold.render(fm);
-                self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+            // On an AdLib Gold the FM goes through the card's mixer and
+            // output stage, with its sampled sound. Either way it reaches
+            // the line out through the capacitor on the card's output.
+            // The Gold has one capacitor for each output, after the
+            // TDA8425, which gets the FM and the sampled sound mixed. It
+            // is linear, so one for each source sums to the same and keeps
+            // the two apart for the host's mixer, as the card's chain does.
+            let (fm, gold_pcm) = match &mut self.adlib_gold {
+                Some(gold) => {
+                    let (fm, pcm) = gold.render(fm);
+                    (fm, Some(pcm))
+                }
+                None => (fm, None),
+            };
+            let fm = self.mixer.fm_coupling(fm);
+            self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+            if let Some(pcm) = gold_pcm {
+                let pcm = self.mixer.adlib_gold_coupling(pcm);
                 self.mixer.add(&mut mix, &mut peaks, Channel::AdlibGold, pcm);
-            } else {
-                self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
             }
             if let Some(sb) = &mut self.sb {
                 // The DAC's level at this frame's time, as the card worked
@@ -2128,6 +2176,10 @@ impl Bus {
             if tandy_on {
                 let s = self.tandy_sound.render();
                 self.mixer.add(&mut mix, &mut peaks, Channel::Tandy, (s, s));
+            }
+            if let Some(cms) = &mut self.cms {
+                let frame = cms.render();
+                self.mixer.add(&mut mix, &mut peaks, Channel::Cms, frame);
             }
             if let Some(frames) = &windows {
                 self.mixer.add(&mut mix, &mut peaks, Channel::Windows, frames[n]);
@@ -2249,6 +2301,7 @@ impl Bus {
         self.speaker_rests()
             && self.beep_frames == 0
             && self.opl.is_idle()
+            && self.mixer.fm_coupling_rests()
             && self.sb_quiet()
             && self.mpu.is_idle()
             && self.cdaudio.is_idle()
@@ -2258,9 +2311,14 @@ impl Bus {
             && !crate::win32::audio_playing(&self.win32)
             && self.gus.as_ref().is_none_or(|g| g.is_idle())
             && self.awe.is_none()
-            && self.adlib_gold.as_ref().is_none_or(|g| g.pcm_quiet() && g.fm_chain_at_rest())
+            // Without a Gold its capacitor never gets a frame, and one that
+            // got none doesn't rest (`OutputCoupling::rests_on`).
+            && self.adlib_gold.as_ref().is_none_or(|g| {
+                g.pcm_quiet() && g.fm_chain_at_rest() && self.mixer.adlib_gold_coupling_rests()
+            })
             && self.lpt_dac.is_none()
             && !self.tandy_sound_enabled()
+            && self.cms.as_ref().is_none_or(|cms| cms.is_quiet())
     }
 
     /// Keep the queues of output in bounds.
@@ -2571,8 +2629,8 @@ impl Bus {
         self.clock.stall_to(until);
     }
 
-    /// Start or stop the clock's periodic interrupt as its status
-    /// registers have it.
+    /// Start or stop the clock's periodic interrupt and the look for its
+    /// alarm as its status registers have them.
     pub fn schedule_rtc(&mut self) {
         match self.cmos.periodic_ticks() {
             Some(period) if self.rtc_next.is_none() => {
@@ -2581,6 +2639,15 @@ impl Bus {
             }
             Some(_) => {}
             None => self.rtc_next = None,
+        }
+        // From the current second as the alarm interrupt is enabled, or
+        // where a loaded state's look was.
+        self.cmos.start_alarm_look();
+        if !self.cmos.alarm_enabled() {
+            self.rtc_alarm_next = None;
+        } else if self.rtc_alarm_next.is_none() {
+            self.rtc_alarm_next = Some(next_alarm_look(self.clock.now_ticks()));
+            self.clock.schedule(self.next_event());
         }
     }
 
@@ -2906,6 +2973,16 @@ impl Bus {
             0x38A | 0x38B if self.opl.chip() == Chip::DualOpl2 => {}
             0x38A => self.opl.write_address(1, value),
             0x38B => self.opl_data(Some(1), value),
+
+            // The CMS chips, at the first four ports of the Game Blaster
+            // or of an SB 2.0 with them (whose DSP has none there), and
+            // the Game Blaster's detection chip after them.
+            p if self.cms.as_ref().is_some_and(|cms| cms.claims(p)) => {
+                self.audio_catch_up();
+                if let Some(cms) = &mut self.cms {
+                    cms.write(p, value);
+                }
+            }
 
             // The Sound Blaster, 16 ports from its base.
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_write(p & 0xF, value),
@@ -3301,6 +3378,9 @@ impl Bus {
             0x38A => self.opl.read_status(self.clock.now_micros()),
             0x389 | 0x38B => 0xFF,
 
+            p if self.cms.as_ref().is_some_and(|cms| cms.claims(p)) => {
+                self.cms.as_ref().map_or(0xFF, |cms| cms.read(p))
+            }
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_read(p & 0xF),
 
             p if self.gus_claims(p) => self.gus_read(p),
@@ -3855,6 +3935,13 @@ pub struct Scanout {
     pub device: &'static str,
     pub name: String,
     pub bpp: Option<u32>,
+}
+
+/// The tick of the look for the clock's alarm after tick `now`: the next
+/// multiple of `cmos::ALARM_POLL_TICKS`, the same however long the alarm
+/// has been enabled or since a state was loaded.
+fn next_alarm_look(now: u64) -> u64 {
+    (now / crate::cmos::ALARM_POLL_TICKS + 1) * crate::cmos::ALARM_POLL_TICKS
 }
 
 /// How far apart the PC speaker's two levels are in the mix: its cone

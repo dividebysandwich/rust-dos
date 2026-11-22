@@ -435,6 +435,70 @@ fn a_loaded_machine_sounds_the_same() {
     assert!(loudest > 1000, "there is something to hear: {}", loudest);
 }
 
+/// A machine at the prompt with a Game Blaster in place of the Sound
+/// Blaster, or with none.
+fn game_blaster_machine(with: bool) -> Box<Cpu> {
+    let mut cpu = Cpu::new(Path::new(".").to_path_buf());
+    cpu.bus.set_cycles_per_ms(1000);
+    cpu.bus.configure_sound(None, true);
+    let config = rust_dos::gameblaster::CmsConfig { base: 0x220, detection: true };
+    cpu.bus.configure_cms(with.then_some(config));
+    cpu.load_shell();
+    cpu
+}
+
+/// The Game Blaster's chips and detection latch come back from a state,
+/// and play on as they did; a machine without the card refuses the state.
+#[test]
+fn a_loaded_game_blaster_sounds_the_same() {
+    fix_time();
+    let mut a = game_blaster_machine(true);
+    let bus = &mut a.bus;
+    let mut set = |chip: u16, reg: u8, value: u8| {
+        bus.io_write(0x221 + 2 * chip, reg);
+        bus.io_write(0x220 + 2 * chip, value);
+    };
+    // A tone with noise on the first chip, an enveloped tone on the
+    // second.
+    let first = [(0x00, 0x9F), (0x08, 40), (0x10, 0x03), (0x14, 0x01), (0x15, 0x01), (0x16, 0x02)];
+    for (reg, value) in first.into_iter().chain([(0x1C, 0x01)]) {
+        set(0, reg, value);
+    }
+    let second = [(0x02, 0xFF), (0x0A, 200), (0x11, 0x04), (0x09, 100), (0x10, 0x20), (0x14, 0x04)];
+    for (reg, value) in second.into_iter().chain([(0x18, 0x8A), (0x1C, 0x01)]) {
+        set(1, reg, value);
+    }
+    bus.io_write(0x226, 0x5C);
+    for _ in 0..300 {
+        run_ms(&mut a);
+    }
+
+    let state = machine::save(&a);
+    let mut b = game_blaster_machine(true);
+    machine::load(&mut b, &state).unwrap();
+    machine::load(&mut a, &state).unwrap();
+    assert!(machine::save(&b) == state, "a loaded state saves as the same bytes");
+    assert_eq!(b.bus.io_read(0x22A), 0x5C);
+    // The machines run the same instructions, but a batch can end an
+    // instruction apart between them, so the sound is compared as one
+    // stream rather than a millisecond at a time.
+    let (mut sa, mut sb) = (Vec::new(), Vec::new());
+    for _ in 0..300 {
+        run_ms(&mut a);
+        run_ms(&mut b);
+        sa.extend(sound(&mut a));
+        sb.extend(sound(&mut b));
+    }
+    let common = sa.len().min(sb.len());
+    assert!(sa.len().abs_diff(sb.len()) <= 4, "{} and {} samples", sa.len(), sb.len());
+    assert!(sa[..common] == sb[..common], "the sound differs");
+    let loudest = sa.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+    assert!(loudest > 1000, "there is something to hear: {}", loudest);
+
+    let mut without = game_blaster_machine(false);
+    assert!(matches!(machine::load(&mut without, &state), Err(StateError::Mismatch(_))));
+}
+
 /// INT 21h with AX, BX, CX and DS:DX at 2000:0000, with `text` there as
 /// an ASCIIZ string. Returns AX, or the error with CF set.
 fn dos(cpu: &mut Cpu, function: u16, bx_value: u16, cx_value: u16, text: &str) -> Result<u16, u16> {

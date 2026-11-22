@@ -1363,6 +1363,16 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.set_reg8(Register::CL, switches & 0x0F);
                     cpu.set_reg8(Register::CH, switches >> 4);
                 }
+                0x20 => {
+                    // Alternate Print Screen: the EGA's and VGA's BIOS
+                    // point INT 05h at a print screen routine of their own,
+                    // which prints the rows the screen has (43, 50) rather
+                    // than 25, and return nothing. Rust-DOS's print screen
+                    // is the BIOS's IRET, which prints nothing whatever the
+                    // rows: INT 05h goes back to it, as a program that
+                    // hooked it before loses its hook on a real card.
+                    set_vector(cpu, 0x05, 0xF000_0000 | crate::bios::IRET_HANDLER as u32);
+                }
                 0x30 => {
                     // Select Scan Lines (AL = 0, 1, 2)
                     // We just acknowledge it

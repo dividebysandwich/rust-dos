@@ -730,7 +730,8 @@ pub(super) fn screen_text(cpu: &Cpu) -> Reply {
 }
 
 /// What the sound visualizer shows: the FM channels, the Ultrasound's
-/// voices, the MIDI notes held, and what is muted.
+/// voices, the MIDI notes held, and what is muted; and the CMS chips'
+/// channels, with the tone each plays.
 pub(super) fn sound_json(cpu: &Cpu) -> Value {
     let bus = &cpu.bus;
     let fm: Vec<Value> = bus
@@ -771,7 +772,34 @@ pub(super) fn sound_json(cpu: &Cpu) -> Value {
         "held": bus.opl.is_held(),
         "channels": fm,
     });
-    json!({ "fm": fm, "gus": gus, "midi": midi, "silenced": silenced })
+    let cms = bus.cms.as_ref().map(|cms| {
+        let config = cms.config();
+        let chips: Vec<Value> = cms
+            .chips()
+            .iter()
+            .map(|chip| {
+                let channels: Vec<Value> = chip
+                    .channels()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let (left, right) = c.amplitudes();
+                        let hz = c.hz(rust_dos::gameblaster::CLOCK as f64);
+                        json!({ "channel": i, "tone": c.freq_enable, "noise": c.noise_enable,
+                                "octave": c.octave, "frequency": c.frequency,
+                                "hz": (hz * 10.0).round() / 10.0,
+                                "amplitude": [left, right] })
+                    })
+                    .collect();
+                json!({ "enabled": chip.enabled(), "noise": chip.noise_params(),
+                        "envelope": chip.envelope_registers().map(|r| format!("{:02X}", r)),
+                        "channels": channels })
+            })
+            .collect();
+        json!({ "base": format!("{:X}", config.base), "game_blaster": config.detection,
+                "chips": chips })
+    });
+    json!({ "fm": fm, "gus": gus, "midi": midi, "cms": cms, "silenced": silenced })
 }
 
 pub(super) fn ivt_json(cpu: &Cpu) -> Value {

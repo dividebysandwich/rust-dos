@@ -320,17 +320,14 @@ fn the_sysenter_msrs_go_into_a_save_state() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.model = CpuModel::PentiumII;
     cpu.sysenter = [0x08, 0x7000, 0x1234];
-    let state = rust_dos::savestate::machine::save(&cpu);
+    let (state, parts) = rust_dos::savestate::machine::save_parts(&cpu);
     cpu.sysenter = [0; 3];
     rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
     assert_eq!(cpu.sysenter, [0x08, 0x7000, 0x1234]);
-    // A state from before them (without their section and the SSE, K6,
-    // IDLE and RC ones after it, the last) loads, with them 0.
-    let older = &state[..state.len()
-        - (4 + 2 + 4 + 12)
-        - (4 + 2 + 4 + 8 * 16 + 4 + 1)
-        - (4 + 2 + 4 + 6 * 8)
-        - 2 * (4 + 2 + 4 + 1)];
+    // A state from before them (cut where their section starts, without
+    // the ones after it) loads, with them 0.
+    let section = parts.iter().find(|(part, _)| part == "SEP").unwrap();
+    let older = &state[..section.1.start];
     rust_dos::savestate::machine::load(&mut cpu, older).unwrap();
     assert_eq!(cpu.sysenter, [0; 3]);
 }

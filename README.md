@@ -248,6 +248,7 @@ programs, the prompt has these commands:
 | `KEYB [code]` | type in another [keyboard layout](CONFIGURATION.md#emulator), or show which |
 | `DATE [mm-dd-yy]`, `TIME [hh:mm[:ss]]` | set the machine's date or time, or show it |
 | `CLS`, `VER`, `ECHO`, `SET`, `PATH`, `PROMPT` | as in DOS |
+| `VERIFY [ON\|OFF]`, `BREAK [ON\|OFF]` | set DOS's verify and Ctrl+Break check flags, or show them; programs can read them, and they change nothing else |
 | `MOUNT`, `IMGMOUNT` | see [Mounting drives](CONFIGURATION.md#mounting-drives) |
 | `REMOUNT from to` | move a mounted drive to another letter |
 | `SUBST drive: path` | make a folder a drive of its own (`/D` removes it) |
@@ -268,7 +269,11 @@ or the current drive's root, deleted once the line has run. `MORE`, `FIND`
 and `SORT` read a pipe, `<file` or the file they are given; `PAUSE`,
 `CHOICE`, `DATE` and `TIME` take their keys or lines from a pipe too
 (`ECHO Y | CHOICE`). `PROMPT` takes DOS's `$` codes (`$P$G` is the
-default), and ANSI colors after `$E` (`$E[1;33m`).
+default), and ANSI colors after `$E` (`$E[1;33m`). DOS's output, `ECHO`'s
+and programs', takes ANSI.SYS's escape sequences as DOSBox's does:
+colors (`ESC[1;33m`), moving the cursor (`ESC[r;cH`, `ESC[nA` to
+`ESC[nD`, `ESC[s`, `ESC[u`) and clearing (`ESC[2J`, `ESC[K`). The
+`ansi_sys` setting turns them off.
 
 ### The prompt
 

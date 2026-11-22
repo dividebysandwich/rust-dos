@@ -97,6 +97,33 @@ fn drives_keep_their_mount_options() {
 }
 
 #[test]
+fn mount_takes_a_host_folder_named_in_code_page_437() {
+    // `MOUNT E ...\Über` typed at the prompt, or queued from a
+    // configuration's [autoexec]: the Ü is 9Ah on the DOS side.
+    let base = scratch("mount_cp437", &["c", "\u{DC}ber"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    let host = format!("MOUNT E \"{}\"", base.join("\u{DC}ber").display());
+    let line = rust_dos::dosstr::from_bytes(&rust_dos::dosstr::encode_cp437(&host));
+    let (command, args) = split_command(&line);
+    assert!(CommandDispatcher::new().dispatch(&mut cpu, command, args));
+    assert_eq!(cpu.bus.disk.drive_kind(4), Some(DriveKind::HardDisk));
+}
+
+#[test]
+fn mount_takes_a_host_folder_with_a_letter_code_page_437_lacks() {
+    // `MOUNT E ...\Bjørn` from a configuration's [autoexec]: code page 437
+    // has no ø, so the line carries its Latin-1 byte F8h, which MOUNT
+    // reads back as ø when ° (F8h in code page 437) names nothing.
+    let base = scratch("mount_latin1", &["c", "Bj\u{F8}rn"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    let host = format!("MOUNT E \"{}\"", base.join("Bj\u{F8}rn").display());
+    let line = rust_dos::dosstr::from_bytes(&rust_dos::dosstr::encode_cp437(&host));
+    let (command, args) = split_command(&line);
+    assert!(CommandDispatcher::new().dispatch(&mut cpu, command, args));
+    assert_eq!(cpu.bus.disk.drive_kind(4), Some(DriveKind::HardDisk));
+}
+
+#[test]
 fn mount_lists_mounts_and_unmounts() {
     let base = scratch("mount", &["c", "floppy", "cd"]);
     let mut cpu = Cpu::new(base.join("c"));
@@ -513,6 +540,86 @@ fn echo_prints_its_text_as_it_is() {
     run(&mut cpu, "ECHO \u{C9}\u{84}");
     assert_eq!(&cpu.bus.vga.vram_text[..4], &[0xC9, 0x07, 0x84, 0x07]);
     assert_eq!(run(&mut cpu, "REM nothing"), "");
+}
+
+#[test]
+fn console_output_takes_ansi_sys_sequences() {
+    let base = scratch("ansi", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    // GOG's launcher menus: colours, then back to light grey.
+    assert_eq!(
+        run(&mut cpu, "ECHO \u{1B}[1;33m\u{1B}[42mA\u{1B}[0mB"),
+        "AB"
+    );
+    assert_eq!(&cpu.bus.vga.vram_text[..4], &[b'A', 0x2E, b'B', 0x07]);
+    // The cursor moved, and the rest of a line erased in the colour set.
+    run(
+        &mut cpu,
+        "ECHO xyz\u{1B}[3;5Hp\u{1B}[s\u{1B}[A\u{1B}[2Dq\u{1B}[u\u{1B}[44m\u{1B}[K\u{1B}[0m",
+    );
+    let cell = |cpu: &Cpu, row: usize, col: usize| {
+        let at = (row * 80 + col) * 2;
+        (cpu.bus.vga.vram_text[at], cpu.bus.vga.vram_text[at + 1])
+    };
+    assert_eq!(cell(&cpu, 0, 0), (b'x', 0x07));
+    assert_eq!(cell(&cpu, 2, 4), (b'p', 0x07));
+    assert_eq!(cell(&cpu, 1, 3), (b'q', 0x07));
+    assert_eq!(cell(&cpu, 2, 5), (b' ', 0x17));
+    assert_eq!(cell(&cpu, 2, 79), (b' ', 0x17));
+    // The screen cleared in the colour set, the cursor home.
+    run(&mut cpu, "ECHO \u{1B}[37;41m\u{1B}[2J\u{1B}[0m");
+    assert_eq!(cell(&cpu, 24, 79), (b' ', 0x47));
+    assert_eq!(cpu.bus.console_cursor(), (0, 1));
+    // As ANSI.SYS is there, INT 2Fh AX=1A00h says so.
+    cpu.set_ax(0x1A00);
+    rust_dos::interrupts::int2f::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 0x1AFF);
+    // With `ansi_sys` off, as on a DOS without ANSI.SYS: the sequence is
+    // text, and the installation check says it isn't there.
+    cpu.bus.ansi_sys = false;
+    run(&mut cpu, "CLS");
+    run(&mut cpu, "ECHO \u{1B}[1mA");
+    let start = [0x1B, 0x07, b'[', 0x07, b'1', 0x07, b'm', 0x07, b'A', 0x07];
+    assert_eq!(&cpu.bus.vga.vram_text[..10], &start);
+    cpu.set_ax(0x1A00);
+    rust_dos::interrupts::int2f::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 0x1A00);
+}
+
+#[test]
+fn verify_and_break_set_and_show_dos_s_flags() {
+    // As MS-DOS 6.22's COMMAND.COM answers.
+    let base = scratch("verify_break", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    rust_dos::dos_data::write(&mut cpu.bus);
+    for name in ["VERIFY", "BREAK"] {
+        assert_eq!(run(&mut cpu, name), format!("{} is off", name));
+        assert_eq!(run(&mut cpu, &format!("{} on", name.to_lowercase())), "");
+        assert_eq!(run(&mut cpu, name), format!("{} is on", name));
+        assert_eq!(run(&mut cpu, &format!("{}=OFF  ", name)), "");
+        assert_eq!(run(&mut cpu, name), format!("{} is off", name));
+        for bad in ["x", "on;", "on off", "o"] {
+            assert_eq!(
+                run(&mut cpu, &format!("{} {}", name, bad)),
+                "Must specify ON or OFF"
+            );
+        }
+    }
+    // The flags are DOS's, as INT 21h AH=54h and AX=3300h tell them.
+    run(&mut cpu, "VERIFY ON");
+    run(&mut cpu, "BREAK ON");
+    cpu.set_ax(0x5400);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.get_al(), 1);
+    cpu.set_ax(0x3300);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.dx() & 0xFF, 1);
+    // AX=3302h sets the flag from DL and gives the old one back.
+    cpu.set_ax(0x3302);
+    cpu.set_dx(0);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.dx() & 0xFF, 1);
+    assert_eq!(run(&mut cpu, "BREAK"), "BREAK is off");
 }
 
 #[test]
