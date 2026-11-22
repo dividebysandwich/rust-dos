@@ -19,16 +19,20 @@ pub fn to_bytes(s: &str) -> Vec<u8> {
 
 /// Text from the host, a configuration's `[autoexec]` say, as the code
 /// page 437 bytes that show it: ASCII as itself, control characters
-/// included, and every other character as the byte of its glyph ('?'
-/// where code page 437 has none). The ECHO of a box drawn with `╔═╗`
-/// prints the bytes C9h CDh BBh.
+/// included, and every other character as the byte of its glyph. The
+/// ECHO of a box drawn with `╔═╗` prints the bytes C9h CDh BBh. A Latin-1
+/// letter code page 437 lacks (ø, Â) becomes its Latin-1 byte, which a
+/// host path given to MOUNT or BOOT is read back from
+/// (`mount::parse_dos_mount_tokens`); any other character becomes '?'.
 pub fn encode_cp437(s: &str) -> Vec<u8> {
     s.chars()
         .map(|c| {
             if c.is_ascii() {
                 c as u8
             } else {
-                crate::keylayout::cp437(c).unwrap_or(b'?')
+                crate::keylayout::cp437(c)
+                    .or_else(|| u8::try_from(c as u32).ok())
+                    .unwrap_or(b'?')
             }
         })
         .collect()
@@ -91,6 +95,8 @@ mod tests {
         // A file in UTF-8 is read as UTF-8.
         assert_eq!(decode_cp437("ECHO ╔═╗ ä".as_bytes()), "ECHO ╔═╗ ä");
         assert_eq!(encode_cp437("é€"), b"\x82?");
+        // ø has no glyph in code page 437: its Latin-1 byte.
+        assert_eq!(encode_cp437("Bjørn"), b"Bj\xF8rn");
         // A host path among DOS text, and back.
         let dos = from_bytes(b"D:\\\x9Aber");
         assert_eq!(host_text(&dos), "D:\\Über");
