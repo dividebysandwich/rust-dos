@@ -188,18 +188,21 @@ limit, so without a connection it goes on as it would with one:
   default, finds the speed the running program needs from the frames it
   draws (its page flips, or the bursts of writes that copy a finished
   picture to video memory): it goes up while the frame rate follows it,
-  stops where the frame rate stops following (a game that caps its own
-  frame rate) or reaches the display's refresh rate (frames nobody sees,
-  and some games, such as Descent, play badly at such rates), and goes
-  down while the program waits for a key or calls DOS's idle interrupt. It
-  then tries lower speeds, down to where they cost more than 3% of the
-  frame rate, or make a program that waits for the vertical retrace
-  miss one. A speed the host falls behind at is left for a lower one,
-  and the limit that sets rises again while the host keeps up. A real-mode
-  program with no frames to go by (most games of the 1980s, which update the
-  screen piecemeal) runs at 3000, about a 286, as in DOSBox's `cycles=auto`,
-  and at max while it reads or writes its drives (loading), unless it would
-  sit halted for 30% of the time or more at the real-mode speed, as a game
+  stops where the frame rate stops following (a game that caps its own frame
+  rate) or reaches the display's refresh rate (frames nobody sees, and some
+  games, such as Descent, play badly at such rates), and goes down while the
+  program waits for a key or calls DOS's idle interrupt. It doesn't go up
+  for a program that sits halted for half the time or more, and longer than
+  waiting for a retrace or two a frame takes: it waits for something else,
+  as a Windows game that draws only when something changes does. It then
+  tries lower speeds, down to where they cost more than 3% of the frame
+  rate, or make a program that waits for the vertical retrace miss one. A
+  speed the host falls behind at is left for a lower one, and the limit that
+  sets rises again while the host keeps up. A real-mode program with no
+  frames to go by (most games of the 1980s, which update the screen
+  piecemeal) runs at 3000, about a 286, as in DOSBox's `cycles=auto`, and at
+  max while it reads or writes its drives (loading), unless it would sit
+  halted for 30% of the time or more at the real-mode speed, as a game
   playing speech from its CD does. A protected-mode one runs at max while it
   reads and writes (loading, computing), and otherwise goes down to 20000, a
   486's speed, or a quarter of a faster `cpu` model's clock (50000 on a
@@ -495,9 +498,15 @@ limit, so without a connection it goes on as it would with one:
 * `ems` gives programs expanded memory (LIM EMS 4.0, INT 67h), which
   many games of the early 1990s want: `true` (the default) or `false`.
   As with EMM386, 16 KB pages of extended memory show through a page
-  frame at E000h, and EMS and XMS share the same memory. There is no
-  VCPI: DOS extenders use the DPMI host (`dpmi`), or run as they do
-  without EMM386. A change takes effect at the DOS prompt.
+  frame at E000h, and EMS and XMS share the same memory. With EMS, DOS
+  runs in virtual-8086 mode under a built-in monitor, as under EMM386:
+  installers that look for a memory manager by reading CR0 find one, and
+  DOS extenders that find no DPMI host switch to protected mode through
+  VCPI (INT 67h AX=DE00h-DE0Ch). Programs that switch the processor
+  themselves (to "unreal" mode, or with a DOS extender that only knows
+  plain DOS) stop with a message, as they do under EMM386, and need
+  `ems=false`, which runs DOS in real mode. A change takes effect at the
+  DOS prompt.
 * `umb` gives DOS upper memory blocks between 640 KB and 1 MB, from
   D000h to EFFFh (to DFFFh with EMS), as DOS 5 with EMM386 has them:
   `true` (the default) or `false`. `LOADHIGH` (or `LH`) at the prompt
@@ -526,8 +535,9 @@ limit, so without a connection it goes on as it would with one:
   from it as they need it, so a DOS/4GW program can start another DOS
   extender's (demos such as Scoop's Luminous do). As under Windows, its
   clients can call DOS with INT 21h in protected mode, with selectors
-  for their buffers. Off, they run as they do on plain DOS with HIMEM. A
-  change takes effect for the programs started after it.
+  for their buffers. Off, they use VCPI with EMS on, as under EMM386, and
+  run as they do on plain DOS with HIMEM with EMS off. A change takes
+  effect for the programs started after it.
 * `win32` turns on the built-in Windows: `true` or `false` (the default). A
   Win32 program, a Windows 95 .EXE, then runs from the DOS prompt in
   protected mode with paging, as Windows 95 runs it, and ends back at the
@@ -791,10 +801,18 @@ limit, so without a connection it goes on as it would with one:
 ### `[sound]`
 
 * `sbtype` is the Sound Blaster: `sb16` (the default), `sb16vibra`,
-  `awe32`, `sbpro2`, `sb2` or `none`. `sbbase` (hex), `irq`, `dma` and
-  `hdma` (the SB16's and AWE32's 16-bit channel) set its resources; the
-  defaults are 220, 7, 1 and 5. The `BLASTER` environment variable follows
-  them.
+  `awe32`, `sbpro2`, `sbpro1`, `sb2` or `none`. `sbbase` (hex), `irq`,
+  `dma` and `hdma` (the SB16's and AWE32's 16-bit channel) set its
+  resources; the defaults are 220, 7, 1 and 5. The `BLASTER` environment
+  variable follows them.
+* `sbpro1` is the first Sound Blaster Pro (CT1330, DSP 3.00), which
+  DOSBox's `sbtype=sbpro1` imports as. Creative's early drivers for it,
+  such as Mega lo Mania's, take only DSP 3.00 and 3.01 and don't find an
+  `sbpro2`, whose DSP is 3.02. Its FM synthesizer is two OPL2 chips, as
+  on the real card (`opl=dualopl2`, which `opl=auto` gives it): the left
+  one at base+0/1 plays on the left only, the right one at base+2/3 on
+  the right only, and base+8/9 and 388h/389h write both. A program that
+  checks for an OPL3 finds none.
 * `sb16vibra` is an SB16 as Creative's ViBRA16C (CTL0070, DSP 4.13), an
   ISA Plug and Play card, as DOSBox-X's `sbtype=sb16vibra` is. The BIOS
   leaves it configured at the resources above, so DOS programs find it as
@@ -818,7 +836,17 @@ limit, so without a connection it goes on as it would with one:
   the instruments programs load into its RAM; the ROM's are silent.
   `awe32ram` is the RAM in KB: `512` (the default, as the AWE32 came),
   `0`, `1024`, `2048`, `4096`, `8192`, `12288`, `16384` or `28672`.
-* `opl` is the FM synthesizer: `opl3` (the default) or `opl2`.
+* `opl` is the FM synthesizer: `auto` (the default), `opl3`, `opl2` or
+  `dualopl2`. `auto` is two OPL2s with `sbtype=sbpro1` and an OPL3 with
+  every other card. `dualopl2` is the first SB Pro's pair of OPL2s:
+  base+0/1 writes the left chip, base+2/3 the right one, and base+8/9 and
+  388h/389h both; 38Ah and 38Bh aren't there, as on that card. The status
+  at base+0, base+8 and 388h is the left chip's, at base+2 the right
+  chip's. It reads as an OPL2's, so a program's OPL3 check fails as on the
+  real card. The left chip plays on the left output only and the right
+  chip on the right only, and the Sound Blaster mixer's FM volume sets
+  each side. A DOSBox configuration's `oplmode=dualopl2` imports as
+  `dualopl2`, and its `auto` as `auto`.
 * `adlibgold` installs the AdLib Gold 1000: `true` or `false` (the
   default). It is an OPL3 with a control chip (mixer, EEPROM), a stereo
   processor (TDA8425), the optional surround module (YM7128B) and two
@@ -1485,10 +1513,14 @@ A game set up for DOSBox becomes a profile with its **Import** row, or
 `--import PATH` at startup (which also launches it): a GOG install's folder
 (its `goggame-*.info` says how GOG runs DOSBox), a folder with DOSBox
 configuration files (GOG's older `dosboxGame.conf` and
-`dosboxGame_single.conf`), or one such file. The profile gets the CPU,
-memory, video, sound, joystick and keyboard settings the configuration has,
-the drives its `[autoexec]` mounts (CD images included), and its commands
-but EXIT; what doesn't come across goes to the log. DOSBox Staging's
+`dosboxGame_single.conf`), or one such file. GOG Galaxy's install script
+copies the DOSBox configuration files from `gog-support\<product id>\app`
+into the install's folder; an install downloaded with gogdl (the
+downloader Heroic uses) leaves them there, and a file the install's
+folder lacks is read from there. The profile gets the CPU, memory, video,
+sound, joystick and keyboard settings the configuration has, the drives
+its `[autoexec]` mounts (CD images included), and its commands but EXIT;
+what doesn't come across goes to the log. DOSBox Staging's
 `cpu_cycles` and `cpu_cycles_protected` become `cycles` (a real-mode speed
 with a faster protected mode is `auto` with that speed), `CONFIG -SET`
 lines become the profile's settings, and `LOADFIX` runs the program it

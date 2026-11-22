@@ -432,8 +432,16 @@ fn run_to_exit(cpu: &mut Cpu, batches: usize) -> bool {
 
 /// A machine with the program `name` in `files` loaded from the shell.
 fn machine(test: &str, files: &[(&str, Vec<u8>)], name: &str) -> (Box<Cpu>, u16) {
+    machine_with(test, files, name, false)
+}
+
+/// `machine`, with expanded memory on (`ems`): DOS then runs in
+/// virtual-8086 mode under the built-in monitor.
+fn machine_with(test: &str, files: &[(&str, Vec<u8>)], name: &str, ems: bool) -> (Box<Cpu>, u16) {
     let mut cpu = Cpu::new(scratch(test, files));
+    rust_dos::ems::set_enabled(&mut cpu.bus, ems);
     cpu.load_shell();
+    assert_eq!(cpu.v86(), ems);
     assert!(cpu.load_executable(name, None));
     let psp = cpu.current_psp;
     (cpu, psp)
@@ -444,11 +452,17 @@ fn word(cpu: &Cpu, psp: u16, offset: u16) -> u16 {
 }
 
 fn check_services(bits32: bool) {
-    let (mut cpu, psp) = machine(
-        if bits32 { "services32" } else { "services16" },
-        &[("T.COM", services_program(bits32))],
-        "T.COM",
-    );
+    check_services_with(bits32, false);
+}
+
+fn check_services_with(bits32: bool, ems: bool) {
+    let test = match (bits32, ems) {
+        (false, false) => "services16",
+        (true, false) => "services32",
+        (false, true) => "services16_v86",
+        (true, true) => "services32_v86",
+    };
+    let (mut cpu, psp) = machine_with(test, &[("T.COM", services_program(bits32))], "T.COM", ems);
     let a20 = cpu.bus.a20();
     let timer = cpu.bus.read_32(8 * 4);
     assert!(run_to_exit(&mut cpu, 2000), "the program didn't end (step {})", word(&cpu, psp, STEP));
@@ -485,6 +499,8 @@ fn check_services(bits32: bool) {
     assert_eq!(cpu.bus.read_32(8 * 4), timer);
     assert_eq!(cpu.bus.a20(), a20);
     assert_eq!(cpu.state, CpuState::Running);
+    // Back at the prompt in the mode DOS runs in.
+    assert_eq!(cpu.v86(), ems);
 }
 
 #[test]
@@ -495,6 +511,15 @@ fn a_16_bit_client_uses_the_services() {
 #[test]
 fn a_32_bit_client_uses_the_services() {
     check_services(true);
+}
+
+/// With expanded memory DOS runs in virtual-8086 mode under the built-in
+/// monitor, and the host is there as with a memory manager that has one:
+/// it switches from there to protected mode and back to it for DOS.
+#[test]
+fn a_client_uses_the_services_under_the_v86_monitor() {
+    check_services_with(false, true);
+    check_services_with(true, true);
 }
 
 #[test]

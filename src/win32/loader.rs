@@ -585,7 +585,13 @@ fn attach_builtin(
         return Some(m.base);
     }
     let built = stubs::image(index, bus.win32.os);
-    let size = built.headers.size_of_image;
+    // The older image of it that a loaded state had, which every process
+    // gets since (stub_tables.rs), or the one built from its table.
+    let data = match super::stub_tables::shared(bus, index) {
+        Some(bytes) => bytes.to_vec(),
+        None => built.data.clone(),
+    };
+    let size = built.headers.size_of_image.max(data.len() as u32);
     // Its own region, of an earlier load, starts at its base and has stub
     // pages. Anything else of the process's at this address keeps it, and
     // the load fails.
@@ -609,7 +615,8 @@ fn attach_builtin(
             process.stub_pages.push(memory.translate(bus, page)? >> 12);
         }
     }
-    memory.write(bus, dll.base, &built.data)?;
+    memory.write(bus, dll.base, &data)?;
+    super::stub_tables::attached(bus, process, index);
     process.modules.push(Module {
         name: dll.name.to_string(),
         path: join(SYSTEM_DIR, dll.name),
@@ -985,7 +992,12 @@ fn bind_imports(
                 pe::Import::Name { name, .. } => Wanted::Name(name.clone()),
                 pe::Import::Ordinal(ordinal) => Wanted::Ordinal(*ordinal),
             };
-            let found = resolve_export(l, dep, &wanted, importer, &mut deps, 0)?;
+            let found = match resolve_export(l, dep, &wanted, importer, &mut deps, 0)? {
+                Some(address) => Some(address),
+                // A function an older image of a built-in DLL lacks, which
+                // the load that mended it gave a stub (stub_tables.rs).
+                None => super::stub_tables::lacking_export(l.bus, l.process, dep, &wanted),
+            };
             // A function the built-in DLL has only under Windows 98 is
             // missing under 95 as on Windows 95, and the program doesn't
             // load.
@@ -1175,7 +1187,10 @@ pub(super) fn find_export(
 ) -> Option<u32> {
     let (mut base, mut wanted) = (base, wanted.clone());
     for _ in 0..8 {
-        match export_target(bus, &process.memory, base, &wanted)? {
+        let Some(target) = export_target(bus, &process.memory, base, &wanted) else {
+            return super::stub_tables::lacking_export(bus, process, base, &wanted);
+        };
+        match target {
             Target::Address(address) => return Some(address),
             Target::Forward(forward) => {
                 let (dll, function) = forward.rsplit_once('.')?;
@@ -1289,6 +1304,44 @@ fn export_target(bus: &Bus, memory: &Memory, base: u32, wanted: &Wanted) -> Opti
         return Some(Target::Forward(crate::dosstr::from_bytes(&text)));
     }
     Some(Target::Address(base.wrapping_add(rva)))
+}
+
+/// The names the module at `base` exports and the addresses they point
+/// at, forwarded ones left out.
+pub(super) fn exports(bus: &Bus, memory: &Memory, base: u32) -> Vec<(Vec<u8>, u32)> {
+    let Some((dir, dir_size)) = directory(bus, memory, base, 0).filter(|d| d.0 != 0) else {
+        return Vec::new();
+    };
+    let field = |offset: u32| peek_32(bus, memory, base.wrapping_add(dir).wrapping_add(offset));
+    let (Some(functions), Some(names), Some(function_table), Some(name_table), Some(ordinals)) =
+        (field(20), field(24), field(28), field(32), field(36))
+    else {
+        return Vec::new();
+    };
+    let (function_table, name_table, ordinals) = (
+        base.wrapping_add(function_table),
+        base.wrapping_add(name_table),
+        base.wrapping_add(ordinals),
+    );
+    (0..names)
+        .filter_map(|i| {
+            let name = peek_string(
+                bus,
+                memory,
+                base.wrapping_add(peek_32(bus, memory, name_table + 4 * i)?),
+                256,
+            )?;
+            let index = peek(bus, memory, ordinals + 2 * i, 2)?;
+            let index = u16::from_le_bytes([index[0], index[1]]) as u32;
+            if index >= functions {
+                return None;
+            }
+            let rva = peek_32(bus, memory, function_table + 4 * index)?;
+            // An address in the export directory is a forwarder's name.
+            let forwarded = (dir..dir.wrapping_add(dir_size)).contains(&rva);
+            (rva != 0 && !forwarded).then(|| (name, base.wrapping_add(rva)))
+        })
+        .collect()
 }
 
 /// Take a reference on the module at `base` away (FreeLibrary): the

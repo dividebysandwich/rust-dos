@@ -425,3 +425,508 @@ fn a_replaced_message_filter_is_released() {
     let (exit, log) = run("ole2_message_filter", program(&code, CODE));
     assert_eq!(exit, 0, "check {exit} failed\n{log}");
 }
+
+/// The ordinals the tests of OLE2DISP's blocks import.
+const CO_CREATE_STANDARD_MALLOC: u16 = 71; // COMPOBJ
+const SYS_ALLOC_STRING: u16 = 2; // OLE2DISP
+const SYS_FREE_STRING: u16 = 6;
+const VARIANT_CLEAR: u16 = 9;
+const SAFE_ARRAY_CREATE: u16 = 15;
+const SAFE_ARRAY_DESTROY: u16 = 16;
+const SAFE_ARRAY_GET_UBOUND: u16 = 19;
+const SAFE_ARRAY_PUT_ELEMENT: u16 = 26;
+const SAFE_ARRAY_REDIM: u16 = 42;
+
+/// IMalloc's methods, by their place in the vtable.
+const REALLOC: u8 = 4;
+const FREE: u8 = 5;
+const DID_ALLOC: u8 = 7;
+
+/// The program's counting allocator: a vtable pointer, a reference
+/// count, how many blocks its Alloc made and its Free freed, the block
+/// last freed (offset, then selector at FREED_SEL), the standard
+/// allocator it hands the blocks on to, and the size last asked for.
+const COUNTER: u16 = 0xB0;
+const COUNTER_REFS: u16 = COUNTER + 4;
+const ALLOCS: u16 = COUNTER + 6;
+const FREES: u16 = COUNTER + 8;
+const FREED: u16 = COUNTER + 0xA;
+const STANDARD: u16 = COUNTER + 0xC;
+const COUNTER_ASKED: u16 = COUNTER + 0x10;
+const FREED_SEL: u16 = COUNTER + 0x12;
+const COUNTER_VTABLE: u16 = 0xC4;
+/// A SAFEARRAYBOUND, an index and a safe array's pointer.
+const BOUND: u16 = 0xE8;
+const INDEX: u16 = 0xF0;
+const ARRAY: u16 = 0xF4;
+/// How many times the counting allocator's Realloc was called.
+const REALLOCS: u16 = 0xF8;
+
+/// Make the counting allocator at COUNTER, with one reference: its
+/// Alloc and Free count and keep what they were given, its Realloc
+/// counts, and all three hand on to the standard allocator, which
+/// CoCreateStandardMalloc puts at STANDARD. A debugging allocator a
+/// program wraps around the standard one does the same.
+fn counting_allocator(code: &mut Code) {
+    let jump = code.here() + 1;
+    code.emit(&[0xE9, 0, 0]);
+    let method = |code: &mut Code, op: u8| {
+        let at = code.here();
+        code.emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+            .emit(&[0xC4, 0x5E, 0x06]) // les bx,[bp+6]
+            .emit(&[0x26, 0xFF, op, 0x04]) // inc/dec word es:[bx+4]
+            .emit(&[0x26, 0x8B, 0x47, 0x04]) // mov ax,es:[bx+4]
+            .emit(&[0x33, 0xD2, 0x5D, 0xCB]); // xor dx,dx; pop bp; retf
+        at
+    };
+    let add_ref = method(code, 0x47);
+    let release = method(code, 0x4F);
+    // Call the standard allocator's `method` with the dword argument at
+    // [bp+10], and return what it returned.
+    let hand_on = |code: &mut Code, method: u8| {
+        code.emit(&[0xFF, 0x76, 0x0C, 0xFF, 0x76, 0x0A]) // push the dword
+            .emit(&[0x26, 0xFF, 0x77, 0x0E, 0x26, 0xFF, 0x77, 0x0C]) // push standard
+            .emit(&[0x26, 0xC4, 0x5F, 0x0C]) // les bx,es:[bx+0Ch]
+            .emit(&[0x26, 0xC4, 0x1F]) // les bx,es:[bx]
+            .emit(&[0x26, 0xFF, 0x5F, 4 * method]) // call far es:[bx+4*method]
+            .emit(&[0x83, 0xC4, 0x08, 0x5D, 0xCB]); // add sp,8; pop bp; retf
+    };
+    let alloc = code.here();
+    code.emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+        .emit(&[0xC4, 0x5E, 0x06]) // les bx,[bp+6]
+        .emit(&[0x26, 0xFF, 0x47, 0x06]) // inc word es:[bx+6]
+        .emit(&[0x8B, 0x46, 0x0A]) // mov ax,[bp+10]
+        .emit(&[0x26, 0x89, 0x47, 0x10]); // mov es:[bx+10h],ax
+    hand_on(code, ALLOC);
+    let free = code.here();
+    code.emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+        .emit(&[0xC4, 0x5E, 0x06]) // les bx,[bp+6]
+        .emit(&[0x26, 0xFF, 0x47, 0x08]) // inc word es:[bx+8]
+        .emit(&[0x8B, 0x46, 0x0A]) // mov ax,[bp+10]
+        .emit(&[0x26, 0x89, 0x47, 0x0A]) // mov es:[bx+0Ah],ax
+        .emit(&[0x8B, 0x46, 0x0C]) // mov ax,[bp+12]
+        .emit(&[0x26, 0x89, 0x47, 0x12]); // mov es:[bx+12h],ax
+    hand_on(code, FREE);
+    // Realloc counts at REALLOCS and hands its two dwords on.
+    let realloc = code.here();
+    let count = (REALLOCS - COUNTER) as u8;
+    code.emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+        .emit(&[0xC4, 0x5E, 0x06]) // les bx,[bp+6]
+        .emit(&[0x26, 0xFF, 0x47, count]) // inc word es:[bx+count]
+        .emit(&[0xFF, 0x76, 0x10, 0xFF, 0x76, 0x0E]) // push the size
+        .emit(&[0xFF, 0x76, 0x0C, 0xFF, 0x76, 0x0A]) // push the block
+        .emit(&[0x26, 0xFF, 0x77, 0x0E, 0x26, 0xFF, 0x77, 0x0C]) // push standard
+        .emit(&[0x26, 0xC4, 0x5F, 0x0C]) // les bx,es:[bx+0Ch]
+        .emit(&[0x26, 0xC4, 0x1F]) // les bx,es:[bx]
+        .emit(&[0x26, 0xFF, 0x5F, 4 * REALLOC]) // call far es:[bx+4*REALLOC]
+        .emit(&[0x83, 0xC4, 0x0C, 0x5D, 0xCB]); // add sp,12; pop bp; retf
+    let start = code.here();
+    code.patch(jump, start - (jump + 2));
+
+    set(code, COUNTER, COUNTER_VTABLE);
+    code.emit(&[0x8C, 0x1E, lo(COUNTER + 2), hi(COUNTER + 2)]); // mov [..],ds
+    for at in [ALLOCS, FREES, FREED, FREED_SEL, COUNTER_ASKED, REALLOCS] {
+        set(code, at, 0);
+    }
+    set(code, COUNTER_REFS, 1);
+    for (i, at) in [
+        (1u16, add_ref),
+        (2, release),
+        (3, alloc),
+        (4, realloc),
+        (5, free),
+    ] {
+        set(code, COUNTER_VTABLE + 4 * i, at);
+        let seg = COUNTER_VTABLE + 4 * i + 2;
+        code.emit(&[0x8C, 0x0E, lo(seg), hi(seg)]); // mov [..],cs
+    }
+    // CoCreateStandardMalloc(MEMCTX_TASK, &standard).
+    code.push(0).push(1);
+    push_ds(code, STANDARD);
+    code.call("COMPOBJ", CO_CREATE_STANDARD_MALLOC);
+}
+
+/// End with `fail` unless the word at `a` is the word at `b`.
+fn expect_same(code: &mut Code, a: u16, b: u16, fail: u8) {
+    code.emit(&[0xA1, lo(a), hi(a)]) // mov ax,[a]
+        .emit(&[0x3B, 0x06, lo(b), hi(b)]); // cmp ax,[b]
+    or_fail(code, fail);
+}
+
+/// OLE2DISP takes its blocks from the task allocator, the program's own
+/// when OleInitialize was given one, and gives them back to it: a BSTR,
+/// a safe array of BSTRs (its descriptor, its data, its element's copy)
+/// and a VARIANT's text are made by the program's Alloc and freed by its
+/// Free, when SysFreeString, SafeArrayDestroy and VariantClear free
+/// them.
+#[test]
+fn ole2disp_takes_blocks_from_the_programs_allocator() {
+    let mut code = Code::new();
+    counting_allocator(&mut code);
+    push_ds(&mut code, COUNTER);
+    code.call("OLE2", OLE_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 1);
+
+    // SysAllocString("abc"): a block of 3 + 5 bytes from the program's
+    // Alloc, its text 4 bytes in.
+    put_text(&mut code, TEXT, b"abc");
+    push_ds(&mut code, TEXT);
+    code.call("OLE2DISP", SYS_ALLOC_STRING);
+    store_dx_ax(&mut code, BSTR);
+    expect(&mut code, ALLOCS, 1, 2);
+    expect(&mut code, COUNTER_ASKED, 8, 3);
+    les_bx(&mut code, BSTR);
+    expect_es_bx(&mut code, -4, 3, 4);
+    expect_es_bx(&mut code, 0, b'a', 5);
+
+    // SysFreeString: the program's Free gets the block.
+    push_word(&mut code, BSTR + 2);
+    push_word(&mut code, BSTR);
+    code.call("OLE2DISP", SYS_FREE_STRING);
+    expect(&mut code, FREES, 1, 6);
+    code.emit(&[0x83, 0x2E, lo(BSTR), hi(BSTR), 4]); // sub word [BSTR],4
+    expect_same(&mut code, FREED, BSTR, 7);
+    expect_same(&mut code, FREED_SEL, BSTR + 2, 8);
+
+    // SafeArrayCreate(VT_BSTR, 1, {2, 0}): its descriptor and its data.
+    set(&mut code, BOUND, 2);
+    for at in [BOUND + 2, BOUND + 4, BOUND + 6, INDEX, INDEX + 2] {
+        set(&mut code, at, 0);
+    }
+    code.push(8).push(1);
+    push_ds(&mut code, BOUND);
+    code.call("OLE2DISP", SAFE_ARRAY_CREATE);
+    store_dx_ax(&mut code, ARRAY);
+    code.emit(&[0x85, 0xD2]); // test dx,dx
+    code.emit(&[0x75, 0x06])
+        .emit(&[0xB0, 9, 0xB4, 0x4C, 0xCD, 0x21]);
+    expect(&mut code, ALLOCS, 3, 10);
+    expect(&mut code, COUNTER_ASKED, 8, 11);
+
+    // SafeArrayPutElement(psa, {0}, SysAllocString("abc")): a copy.
+    push_ds(&mut code, TEXT);
+    code.call("OLE2DISP", SYS_ALLOC_STRING);
+    store_dx_ax(&mut code, BSTR);
+    push_word(&mut code, ARRAY + 2);
+    push_word(&mut code, ARRAY);
+    push_ds(&mut code, INDEX);
+    push_word(&mut code, BSTR + 2);
+    push_word(&mut code, BSTR);
+    code.call("OLE2DISP", SAFE_ARRAY_PUT_ELEMENT);
+    expect_dx_ax(&mut code, 0, 12);
+    expect(&mut code, ALLOCS, 5, 13);
+
+    // SafeArrayDestroy: the element's copy, the data and the descriptor
+    // go to the program's Free, the descriptor last.
+    push_word(&mut code, ARRAY + 2);
+    push_word(&mut code, ARRAY);
+    code.call("OLE2DISP", SAFE_ARRAY_DESTROY);
+    expect_dx_ax(&mut code, 0, 14);
+    expect(&mut code, FREES, 4, 15);
+    expect_same(&mut code, FREED, ARRAY, 16);
+    expect_same(&mut code, FREED_SEL, ARRAY + 2, 17);
+
+    // VariantChangeType(&dest, &source, 0, VT_BSTR) of the VT_I2 -5, then
+    // VariantClear(&dest): the text's block made and freed.
+    set(&mut code, SOURCE, 2);
+    set(&mut code, SOURCE + 8, (-5i16) as u16);
+    set(&mut code, DEST, 0);
+    push_ds(&mut code, DEST);
+    push_ds(&mut code, SOURCE);
+    code.push(0).push(8).call("OLE2DISP", VARIANT_CHANGE_TYPE);
+    expect_dx_ax(&mut code, 0, 18);
+    expect(&mut code, ALLOCS, 6, 19);
+    expect(&mut code, COUNTER_ASKED, 7, 20);
+    push_ds(&mut code, DEST);
+    code.call("OLE2DISP", VARIANT_CLEAR);
+    expect_dx_ax(&mut code, 0, 21);
+    expect(&mut code, FREES, 5, 22);
+    expect(&mut code, DEST, 0, 23);
+
+    // The BSTR the program made is still its own to free.
+    push_word(&mut code, BSTR + 2);
+    push_word(&mut code, BSTR);
+    code.call("OLE2DISP", SYS_FREE_STRING);
+    expect(&mut code, FREES, 6, 24);
+
+    code.call("OLE2", OLE_UNINITIALIZE);
+    code.emit(&[0xB0, 0x00]).exit_al();
+    let (exit, log) = run("ole2disp_app_malloc", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}
+
+/// SafeArrayRedim cutting an array of BSTRs, with the program's
+/// allocator, as Windows' OLE2DISP does it: the elements cut are copied
+/// to a block of their own (an Alloc), the data is made smaller (a
+/// Realloc), and then the BSTRs cut and that block go to the program's
+/// Free, the block last.
+#[test]
+fn safe_array_redim_cuts_through_the_programs_allocator() {
+    let mut code = Code::new();
+    counting_allocator(&mut code);
+    push_ds(&mut code, COUNTER);
+    code.call("OLE2", OLE_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 1);
+
+    // SafeArrayCreate(VT_BSTR, 1, {3, 0}): its descriptor and its data.
+    set(&mut code, BOUND, 3);
+    for at in [BOUND + 2, BOUND + 4, BOUND + 6, INDEX + 2] {
+        set(&mut code, at, 0);
+    }
+    code.push(8).push(1);
+    push_ds(&mut code, BOUND);
+    code.call("OLE2DISP", SAFE_ARRAY_CREATE);
+    store_dx_ax(&mut code, ARRAY);
+    expect(&mut code, ALLOCS, 2, 2);
+
+    // Element 2 a copy of SysAllocString("abc"), which is then freed.
+    put_text(&mut code, TEXT, b"abc");
+    push_ds(&mut code, TEXT);
+    code.call("OLE2DISP", SYS_ALLOC_STRING);
+    store_dx_ax(&mut code, BSTR);
+    set(&mut code, INDEX, 2);
+    push_word(&mut code, ARRAY + 2);
+    push_word(&mut code, ARRAY);
+    push_ds(&mut code, INDEX);
+    push_word(&mut code, BSTR + 2);
+    push_word(&mut code, BSTR);
+    code.call("OLE2DISP", SAFE_ARRAY_PUT_ELEMENT);
+    expect_dx_ax(&mut code, 0, 3);
+    push_word(&mut code, BSTR + 2);
+    push_word(&mut code, BSTR);
+    code.call("OLE2DISP", SYS_FREE_STRING);
+    expect(&mut code, ALLOCS, 4, 4);
+    expect(&mut code, FREES, 1, 5);
+
+    // SafeArrayRedim(psa, {1, 0}): the two elements cut (8 bytes) go to
+    // a block of their own, the data is reallocated, and element 2's
+    // BSTR and that block are freed.
+    set(&mut code, BOUND, 1);
+    push_word(&mut code, ARRAY + 2);
+    push_word(&mut code, ARRAY);
+    push_ds(&mut code, BOUND);
+    code.call("OLE2DISP", SAFE_ARRAY_REDIM);
+    expect_dx_ax(&mut code, 0, 6);
+    expect(&mut code, ALLOCS, 5, 7);
+    expect(&mut code, COUNTER_ASKED, 8, 8);
+    expect(&mut code, REALLOCS, 1, 9);
+    expect(&mut code, FREES, 3, 10);
+
+    // SafeArrayGetUBound(psa, 1, &bound): 0.
+    set(&mut code, OUT, 0xFFFF);
+    push_word(&mut code, ARRAY + 2);
+    push_word(&mut code, ARRAY);
+    code.push(1);
+    push_ds(&mut code, OUT);
+    code.call("OLE2DISP", SAFE_ARRAY_GET_UBOUND);
+    expect_dx_ax(&mut code, 0, 11);
+    expect(&mut code, OUT, 0, 12);
+
+    // SafeArrayDestroy: the data and the descriptor.
+    push_word(&mut code, ARRAY + 2);
+    push_word(&mut code, ARRAY);
+    code.call("OLE2DISP", SAFE_ARRAY_DESTROY);
+    expect_dx_ax(&mut code, 0, 13);
+    expect(&mut code, FREES, 5, 14);
+
+    code.call("OLE2", OLE_UNINITIALIZE);
+    code.emit(&[0xB0, 0x00]).exit_al();
+    let (exit, log) = run("ole2disp_redim_app_malloc", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}
+
+/// A BSTR is a block of the task allocator's, 4 bytes before the text:
+/// IMalloc::GetSize gives its size, DidAlloc owns it, and IMalloc::Free
+/// frees it, as a program may instead of calling SysFreeString.
+#[test]
+fn a_bstr_is_freed_with_imalloc_free() {
+    let mut code = Code::new();
+    code.push(0).push(0).call("OLE2", OLE_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 1);
+    code.push(0).push(1);
+    push_ds(&mut code, MALLOC);
+    code.call("COMPOBJ", CO_GET_MALLOC);
+    expect_dx_ax(&mut code, 0, 2);
+
+    // SysAllocString("hello"), and BLOCK its block.
+    put_text(&mut code, TEXT, b"hello");
+    push_ds(&mut code, TEXT);
+    code.call("OLE2DISP", SYS_ALLOC_STRING);
+    code.emit(&[0x2D, 4, 0]); // sub ax,4
+    store_dx_ax(&mut code, BLOCK);
+    let block = |c: &mut Code| {
+        push_word(c, BLOCK + 2);
+        push_word(c, BLOCK);
+    };
+    call_malloc(&mut code, GET_SIZE, block, 2);
+    expect_dx_ax(&mut code, 10, 3);
+    call_malloc(&mut code, DID_ALLOC, block, 2);
+    expect_dx_ax(&mut code, 1, 4);
+    call_malloc(&mut code, FREE, block, 2);
+
+    // The block is free: the next BSTR of its size takes its place.
+    push_ds(&mut code, TEXT);
+    code.call("OLE2DISP", SYS_ALLOC_STRING);
+    code.emit(&[0x2D, 4, 0]); // sub ax,4
+    store_dx_ax(&mut code, OUT);
+    expect_same(&mut code, OUT, BLOCK, 5);
+    expect_same(&mut code, OUT + 2, BLOCK + 2, 6);
+
+    code.emit(&[0xB0, 0x00]).exit_al();
+    let (exit, log) = run("ole2disp_bstr_imalloc_free", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}
+
+/// OLE2DISP's ordinals of the error object's functions.
+const SET_ERROR_INFO: u16 = 110;
+const GET_ERROR_INFO: u16 = 111;
+const CREATE_ERROR_INFO: u16 = 112;
+const IID_IERRORINFO: u16 = 113; // OLE2DISP's variable _IID_IErrorInfo
+
+/// The error object's methods: ICreateErrorInfo's and IErrorInfo's.
+const QUERY_INTERFACE: u8 = 0;
+const RELEASE: u8 = 2;
+const SET_DESCRIPTION: u8 = 5;
+const SET_HELP_CONTEXT: u8 = 7;
+const GET_DESCRIPTION: u8 = 5;
+const GET_HELP_CONTEXT: u8 = 7;
+
+/// Where the program keeps the two interfaces of the error object.
+const CREATE_INFO: u16 = 0x80;
+const ERROR_INFO: u16 = 0x84;
+const GOT: u16 = 0x88;
+
+/// Call the method `method` of the object whose far pointer is at
+/// `object`, with `push_args` pushing its arguments (`words` of them)
+/// before the object's pointer, as C calls it, and take them off again.
+fn call_object(code: &mut Code, object: u16, method: u8, push_args: impl Fn(&mut Code), words: u8) {
+    push_args(code);
+    les_bx(code, object);
+    code.emit(&[0x06, 0x53]) // push es; push bx
+        .emit(&[0x26, 0xC4, 0x1F]) // les bx,es:[bx]
+        .emit(&[0x26, 0xFF, 0x5F, 4 * method]) // call far es:[bx+4*method]
+        .emit(&[0x83, 0xC4, 2 * (words + 2)]); // add sp,...
+}
+
+/// Visual Basic 4's runtime raises a Basic error as Windows' OLE does:
+/// CreateErrorInfo, the description and help context set through
+/// ICreateErrorInfo, its IErrorInfo from QueryInterface given to
+/// SetErrorInfo, and GetErrorInfo gives the same object back, whose
+/// GetDescription is a copy of the text and GetHelpContext the number.
+#[test]
+fn a_program_raises_an_error_object() {
+    let mut code = Code::new();
+    code.push(0).push(0).call("OLE2", OLE_INITIALIZE);
+    expect_dx_ax(&mut code, 0, 1);
+
+    // CreateErrorInfo(&create_info): S_OK.
+    push_ds(&mut code, CREATE_INFO);
+    code.call("OLE2DISP", CREATE_ERROR_INFO);
+    expect_dx_ax(&mut code, 0, 2);
+
+    // SetDescription("Path not found"), SetHelpContext(76).
+    put_text(&mut code, TEXT, b"Path not found");
+    call_object(
+        &mut code,
+        CREATE_INFO,
+        SET_DESCRIPTION,
+        |c| push_ds(c, TEXT),
+        2,
+    );
+    expect_dx_ax(&mut code, 0, 3);
+    call_object(
+        &mut code,
+        CREATE_INFO,
+        SET_HELP_CONTEXT,
+        |c| {
+            c.push(0).push(76);
+        },
+        2,
+    );
+    expect_dx_ax(&mut code, 0, 4);
+
+    // QueryInterface(IID_IErrorInfo, &error_info): S_OK.
+    call_object(
+        &mut code,
+        CREATE_INFO,
+        QUERY_INTERFACE,
+        |c| {
+            push_ds(c, ERROR_INFO);
+            // push seg _IID_IErrorInfo; push offset _IID_IErrorInfo
+            let module = c.module("OLE2DISP");
+            let at = c.here() + 1;
+            c.emit(&[0x68, 0xFF, 0xFF]);
+            c.fixup(
+                at,
+                ne::ADDR_SELECTOR,
+                ne::Target::Ordinal {
+                    module,
+                    ordinal: IID_IERRORINFO,
+                },
+            );
+            let at = c.here() + 1;
+            c.emit(&[0x68, 0xFF, 0xFF]);
+            c.fixup(
+                at,
+                ne::ADDR_OFFSET,
+                ne::Target::Ordinal {
+                    module,
+                    ordinal: IID_IERRORINFO,
+                },
+            );
+        },
+        4,
+    );
+    expect_dx_ax(&mut code, 0, 5);
+    call_object(&mut code, CREATE_INFO, RELEASE, |_| {}, 0);
+    expect_dx_ax(&mut code, 1, 6);
+
+    // SetErrorInfo(0, error_info), then GetErrorInfo(0, &got): the same
+    // object.
+    code.push(0).push(0);
+    code.emit(&[0xFF, 0x36, lo(ERROR_INFO + 2), hi(ERROR_INFO + 2)])
+        .emit(&[0xFF, 0x36, lo(ERROR_INFO), hi(ERROR_INFO)]);
+    code.call("OLE2DISP", SET_ERROR_INFO);
+    expect_dx_ax(&mut code, 0, 7);
+    code.push(0).push(0);
+    push_ds(&mut code, GOT);
+    code.call("OLE2DISP", GET_ERROR_INFO);
+    expect_dx_ax(&mut code, 0, 8);
+    code.emit(&[0xA1, lo(GOT), hi(GOT)]) // mov ax,[got]
+        .emit(&[0x3B, 0x06, lo(ERROR_INFO), hi(ERROR_INFO)]); // cmp ax,[error_info]
+    or_fail(&mut code, 9);
+
+    // GetDescription(&bstr): "Path not found"; GetHelpContext: 76.
+    call_object(
+        &mut code,
+        ERROR_INFO,
+        GET_DESCRIPTION,
+        |c| push_ds(c, BSTR),
+        2,
+    );
+    expect_dx_ax(&mut code, 0, 10);
+    les_bx(&mut code, BSTR);
+    expect_es_bx(&mut code, -4, 14, 11);
+    expect_es_bx(&mut code, 0, b'P', 12);
+    expect_es_bx(&mut code, 13, b'd', 13);
+    call_object(
+        &mut code,
+        ERROR_INFO,
+        GET_HELP_CONTEXT,
+        |c| push_ds(c, OUT),
+        2,
+    );
+    expect_dx_ax(&mut code, 0, 14);
+    expect(&mut code, OUT, 76, 15);
+
+    // The references SetErrorInfo and GetErrorInfo handed over, then
+    // QueryInterface's: the last one frees the object.
+    call_object(&mut code, ERROR_INFO, RELEASE, |_| {}, 0);
+    expect_dx_ax(&mut code, 1, 16);
+    call_object(&mut code, ERROR_INFO, RELEASE, |_| {}, 0);
+    expect_dx_ax(&mut code, 0, 17);
+    code.emit(&[0xB0, 0x00]).exit_al();
+
+    let (exit, log) = run("ole2_error_info", program(&code, CODE));
+    assert_eq!(exit, 0, "check {exit} failed\n{log}");
+}

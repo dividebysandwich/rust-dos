@@ -1284,15 +1284,17 @@ impl Gen<'_> {
                     ; b.ne >precise_done
                 );
             }
-            Precise::Equal(a, b) => {
-                // Not equal where unordered either.
+            Precise::Compare(a, b) => {
+                // Unordered (V set): the handler. W4 = 1 where equal.
                 dynasm!(self.ops
                     ; .arch aarch64
                     ; fcmp D(d(a)), D(d(b))
-                    ; b.ne >precise_done
+                    ; b.vs =>at
+                    ; cset w4, eq
                 );
             }
         }
+        let compare = matches!(when, Precise::Compare(..));
         dynasm!(self.ops ; .arch aarch64 ; precise_regs:);
         self.field(Access::Ldr64, 1, layout::fpu::TOP);
         for i in (0..8).filter(|i| regs >> i & 1 != 0) {
@@ -1309,6 +1311,21 @@ impl Gen<'_> {
                 ; .arch aarch64
                 ; add x2, x2, x3, lsl 4
                 ; ldr x0, [x2]
+            );
+            if compare {
+                // As x86-64's.
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; tbnz x0, 63, >precise_int
+                    ; ldrh w5, [x2, 8]
+                    ; tst w5, 0x7FFF
+                    ; b.ne =>at
+                    ; precise_int:
+                    ; cbz w4, >precise_next
+                );
+            }
+            dynasm!(self.ops
+                ; .arch aarch64
                 ; tst x0, 0x7FF
                 ; b.ne =>at
                 ; precise_next:
@@ -2820,8 +2837,9 @@ impl Gen<'_> {
             }
             Uop::FCom { a, b } => {
                 // C0 where less or unordered, C2 where unordered, C3 where
-                // equal or unordered (an unordered FCMP sets C and V).
-                const C0_C2_C3: u32 = 0x4500;
+                // equal or unordered (an unordered FCMP sets C and V). C1
+                // is cleared.
+                const C0_TO_C3: u32 = 0x4700;
                 dynasm!(self.ops
                     ; .arch aarch64
                     ; fcmp D(d(a)), D(d(b))
@@ -2837,7 +2855,7 @@ impl Gen<'_> {
                 dynasm!(self.ops
                     ; .arch aarch64
                     ; ldrh w4, [x2]
-                    ; movz w5, C0_C2_C3
+                    ; movz w5, C0_TO_C3
                     ; bic w4, w4, w5
                     ; orr w4, w4, w1
                     ; strh w4, [x2]

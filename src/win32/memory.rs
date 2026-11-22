@@ -335,6 +335,56 @@ impl Pool {
         })
     }
 
+    /// Lend the top of the block back to the XMS pool, for a DOS program
+    /// the system runs while the Windows programs wait (dosvm.rs): on
+    /// Windows 98 the VMM gives a DOS machine its DPMI and XMS memory
+    /// from the memory the system has free. The pages the pool got back
+    /// are part of it: the programs' pages above them move down into
+    /// them first (`compact`). The bytes lent, which `take_back` takes
+    /// back. The TLB is stale after it when a page moved
+    /// (`Win32::tlb_stale`).
+    pub fn lend(bus: &mut Bus) -> u32 {
+        compact(bus);
+        let end = bus.ram().len() as u32;
+        let Bus { win32, xms, .. } = bus;
+        let Some(pool) = win32.pool.as_mut() else {
+            return 0;
+        };
+        // The block keeps a page, so that it stays one.
+        let keep = pool.next.max(PAGE);
+        if pool.len <= keep {
+            return 0;
+        }
+        xms.release_dpmi(pool.base);
+        let kept = xms.take_dpmi_at(pool.base, keep, end);
+        debug_assert!(kept, "the pool's own memory was free");
+        let lent = pool.len - keep;
+        pool.len = keep;
+        lent
+    }
+
+    /// Take back the `bytes` that `lend` lent, if all of it is free
+    /// again: false if a program kept some of it, and the block stays as
+    /// it is.
+    pub fn take_back(bus: &mut Bus, bytes: u32) -> bool {
+        let end = bus.ram().len() as u32;
+        let Bus { win32, xms, .. } = bus;
+        let Some(pool) = win32.pool.as_mut() else {
+            return bytes == 0;
+        };
+        if bytes == 0 {
+            return true;
+        }
+        xms.release_dpmi(pool.base);
+        if xms.take_dpmi_at(pool.base, pool.len + bytes, end) {
+            pool.len += bytes;
+            return true;
+        }
+        let kept = xms.take_dpmi_at(pool.base, pool.len, end);
+        debug_assert!(kept, "the pool's own memory was free");
+        false
+    }
+
     /// Give the physical page `phys` back.
     fn give(&mut self, phys: u32) {
         self.page_file.pageable.remove(&phys);
@@ -1008,6 +1058,88 @@ pub struct PagedRange {
     pub zeros: bool,
 }
 
+/// Make the top of the pool's block free, for `Pool::lend`, by moving
+/// pages of programs' own memory and of modules' images down into the
+/// pages the pool got back, their entries following them. The cut is
+/// the lowest it can be: above every page that has to stay where it is
+/// (the system's own, such as page tables, a page of a view of a file,
+/// one the system pinned), with as many free pages under it as there
+/// are pages to move from above it. The free pages above the cut leave
+/// the free list, and the block's used part (`next`) ends there. No
+/// page goes to the page file: the DOS program gets the memory the
+/// Windows programs aren't using.
+fn compact(bus: &mut Bus) {
+    let Some(pool) = bus.win32.pool.as_mut() else {
+        return;
+    };
+    // The pages held for the last instruction that faulted (`hold`) are
+    // let go: it has run, since the service that starts the DOS program
+    // came after it. Held, the last page a program touched would stay
+    // pinned, and keep everything under it from being lent.
+    let file = &mut pool.page_file;
+    for (phys, at) in std::mem::take(&mut file.held) {
+        file.let_go(phys, at);
+    }
+    let pool = bus.win32.pool.as_ref().expect("checked");
+    let base = pool.base;
+    let mut free: std::collections::BTreeSet<u32> = pool.free.iter().copied().collect();
+    let mut free_under = free.len();
+    // The pages of file mappings, looked up for every page that would
+    // move: gathered once, as the mappings may hold many.
+    let shared: std::collections::BTreeSet<u32> = bus
+        .win32
+        .sections
+        .iter()
+        .flatten()
+        .flat_map(|s| s.pages.iter().copied())
+        .filter(|&page| page != 0)
+        .collect();
+    // The pages to move, from the top down, with their entries'
+    // addresses and the entries.
+    let mut moving = Vec::new();
+    let mut cut = pool.next;
+    while cut > PAGE {
+        let page = base + cut - PAGE;
+        if free.contains(&page) {
+            if moving.len() >= free_under {
+                break;
+            }
+            free_under -= 1;
+        } else {
+            let pool = bus.win32.pool.as_ref().expect("checked");
+            let Some(&at) = pool.page_file.pageable.get(&page) else {
+                break;
+            };
+            let entry = bus.read_32(at as usize);
+            // A page whose entry has changed (see `page_out`) or a page of
+            // a file mapping, which has an entry in each view of it.
+            if entry == 0
+                || is_paged(entry)
+                || entry & !0xFFF != page
+                || shared.contains(&page)
+                || moving.len() >= free_under
+            {
+                break;
+            }
+            moving.push((page, at, entry));
+        }
+        cut -= PAGE;
+    }
+    free.retain(|&page| page < base + cut);
+    for (page, at, entry) in moving {
+        let low = free.pop_first().expect("a free page under the cut");
+        bus.copy_ram(page as usize, low as usize, PAGE as usize);
+        bus.write_32(at as usize, low | entry & 0xFFF);
+        let file = &mut bus.win32.pool.as_mut().expect("checked").page_file;
+        file.pageable.remove(&page);
+        file.pageable.insert(low, at);
+        bus.win32.tlb_stale = true;
+    }
+    let pool = bus.win32.pool.as_mut().expect("checked");
+    pool.free = free.into_iter().collect();
+    pool.next = cut;
+}
+
 /// A zeroed physical page from the pool. When it has none left, a page
 /// of programs' own memory or modules' images goes out to the page file
 /// to make one.
@@ -1448,9 +1580,101 @@ mod tests {
         &cpu.bus.win32.pool.as_ref().expect("a pool").page_file
     }
 
+    /// The pool lends the pages it never used to the XMS pool for a DOS
+    /// program the system runs, and takes them back once all of them are
+    /// free again; while the program keeps one, the pool stays smaller.
+    #[test]
+    fn lends_its_unused_pages_and_takes_them_back() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.win32.pool = Pool::take(&mut cpu.bus, 0x40_0000);
+        let _memory = Memory::new(&mut cpu.bus).expect("a page directory");
+        let end = cpu.bus.ram().len() as u32;
+        let pool = cpu.bus.win32.pool.as_ref().expect("a pool");
+        let (base, len, next) = (pool.base, pool.len, pool.next);
+        assert!(next > 0, "the page directory came from the pool");
+        let (_, free) = cpu.bus.xms.dpmi_free(end);
+        let lent = Pool::lend(&mut cpu.bus);
+        assert_eq!(lent, len - next);
+        assert_eq!(cpu.bus.xms.dpmi_free(end).1, free + lent);
+        assert_eq!(cpu.bus.win32.pool.as_ref().unwrap().len, next);
+        // A program keeps a page of it.
+        assert!(cpu.bus.xms.take_dpmi_at(base + next, PAGE, end));
+        assert!(!Pool::take_back(&mut cpu.bus, lent));
+        assert_eq!(cpu.bus.win32.pool.as_ref().unwrap().len, next);
+        cpu.bus.xms.release_dpmi(base + next);
+        assert!(Pool::take_back(&mut cpu.bus, lent));
+        assert_eq!(cpu.bus.win32.pool.as_ref().unwrap().len, len);
+        assert_eq!(cpu.bus.xms.dpmi_free(end).1, free);
+    }
+
     /// The `n`th page of the program's memory.
     fn page(n: u32) -> u32 {
         PRIVATE + n * PAGE
+    }
+
+    /// Before it lends its memory to a DOS program, the pool moves the
+    /// programs' pages at its top down into the pages it got back, and
+    /// lends from as low as that lets it. The pages keep their bytes, and
+    /// those that moved can go to the page file from where they are now.
+    #[test]
+    fn lends_the_pages_given_back_and_moves_programs_pages_into_them() {
+        let (mut cpu, mut memory) = machine(16, 32);
+        memory
+            .commit_paged(&mut cpu.bus, page(0), 8 * PAGE, PAGE_READWRITE)
+            .expect("room in the page file");
+        let pool = cpu.bus.win32.pool.as_ref().expect("a pool");
+        let (base, len, next) = (pool.base, pool.len, pool.next);
+        for n in 0..8 {
+            touch(&mut cpu, &memory, page(n), n as u8 + 1);
+        }
+        let at = |n: u32| base + next + n * PAGE;
+        assert_eq!(memory.translate(&cpu.bus, page(7)), Some(at(7)));
+        // The program gives two pages in the middle back.
+        for n in [1, 3] {
+            memory.unmap(&mut cpu.bus, page(n));
+        }
+        cpu.bus.win32.tlb_stale = false;
+        let lent = Pool::lend(&mut cpu.bus);
+        assert_eq!(lent, len - (next + 6 * PAGE));
+        assert!(cpu.bus.win32.tlb_stale, "pages moved");
+        let pool = cpu.bus.win32.pool.as_ref().expect("a pool");
+        assert_eq!(pool.len, next + 6 * PAGE);
+        assert!(pool.free.is_empty());
+        assert_eq!(memory.translate(&cpu.bus, page(7)), Some(at(1)));
+        assert_eq!(memory.translate(&cpu.bus, page(6)), Some(at(3)));
+        for n in [0, 2, 4, 5] {
+            assert_eq!(memory.translate(&cpu.bus, page(n)), Some(at(n)));
+        }
+        for n in [0, 2, 4, 5, 6, 7] {
+            let all = bytes(&cpu, &memory, page(n), PAGE as usize);
+            assert!(all.iter().all(|&b| b == n as u8 + 1), "page {n}");
+        }
+        let entry = memory.entry_at(&cpu.bus, page(7)).expect("an entry") as u32;
+        assert_eq!(file(&cpu).pageable.get(&at(1)), Some(&entry));
+        assert!(!file(&cpu).pageable.contains_key(&at(7)));
+        assert!(Pool::take_back(&mut cpu.bus, lent));
+        assert_eq!(cpu.bus.win32.pool.as_ref().unwrap().len, len);
+    }
+
+    /// A page of the system's own memory at the top of what the pool
+    /// used stays where it is, and the pool lends only what is above it.
+    #[test]
+    fn lends_nothing_from_under_a_page_of_the_systems_own() {
+        let (mut cpu, mut memory) = machine(16, 32);
+        memory
+            .commit_paged(&mut cpu.bus, page(0), 2 * PAGE, PAGE_READWRITE)
+            .expect("room in the page file");
+        touch(&mut cpu, &memory, page(0), 1);
+        touch(&mut cpu, &memory, page(1), 2);
+        let own = memory.page(&mut cpu.bus).expect("a page");
+        memory.unmap(&mut cpu.bus, page(1));
+        let pool = cpu.bus.win32.pool.as_ref().expect("a pool");
+        let (base, len, next) = (pool.base, pool.len, pool.next);
+        assert_eq!(own, base + next - PAGE);
+        assert_eq!(Pool::lend(&mut cpu.bus), len - next);
+        let pool = cpu.bus.win32.pool.as_ref().expect("a pool");
+        assert_eq!(pool.free.len(), 1);
+        assert_eq!(bytes(&cpu, &memory, page(0), 4), [1; 4]);
     }
 
     /// Touch the page at `lin` as the program does: bring it in, as the

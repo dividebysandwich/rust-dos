@@ -915,7 +915,7 @@ fn begin_async(
 /// it isn't there yet: its handle, or 0 when there is no room for it.
 fn event_window(cpu: &mut Cpu, pid: u32, tid: u32) -> u32 {
     super::init(cpu);
-    let proc = super::address_of("DdemlWndProc");
+    let proc = super::address_of(cpu, "DdemlWndProc");
     let state = super::user(cpu);
     let found = state.top_levels().into_iter().find(|&h| {
         state
@@ -1230,7 +1230,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
     const WS_VISIBLE: u32 = 0x1000_0000;
     const CW_USEDEFAULT: u32 = 0x8000_0000;
-    let create = super::address_of("CreateWindowExA");
+    let create = super::address_of(cpu, "CreateWindowExA");
     let args = [
         0,
         class,

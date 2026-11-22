@@ -72,8 +72,8 @@ pub fn has(cpu: &Cpu, kind: u32) -> bool {
 
 /// Call the hooks of `kind` with `code`, `wp` and `lp`, going on at
 /// `step` with what the first returns.
-pub fn call(kind: u32, code: u32, wp: u32, lp: u32, step: u16) -> Next {
-    Next::call(address_of("CallHooks"), &[kind, code, wp, lp], step)
+pub fn call(cpu: &Cpu, kind: u32, code: u32, wp: u32, lp: u32, step: u16) -> Next {
+    Next::call(address_of(cpu, "CallHooks"), &[kind, code, wp, lp], step)
 }
 
 const TASK_HOOK: u16 = 8;

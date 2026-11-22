@@ -82,7 +82,7 @@ const S_EDIT_CLASS: u32 = 64;
 /// The file of NOTEPAD.EXE: a program for the GUI subsystem whose code
 /// is NotepadMain and then the message loop, which ends the process
 /// with the exit code of WM_QUIT.
-pub fn file() -> Vec<u8> {
+pub fn file(bus: &crate::bus::Bus) -> Vec<u8> {
     let mut b = Builder::exe(BASE);
     b.subsystem(pe::SUBSYSTEM_GUI);
     let kernel32 = [Imp::Name("ExitProcess")];
@@ -96,7 +96,8 @@ pub fn file() -> Vec<u8> {
     // The MSG the loop reads into.
     let data = pe::SCN_INITIALIZED_DATA | pe::SCN_READ | pe::SCN_WRITE;
     let msg = BASE + b.section_sized(".data", &[], 28, data);
-    let main = address_of("NotepadMain");
+    // Where NotepadMain is in the USER32 image the process will have.
+    let main = super::address_for_new(bus, "NotepadMain");
     let mut code = Vec::new();
     let mut op = |bytes: &[u8], value: Option<u32>| {
         code.extend_from_slice(bytes);
@@ -246,12 +247,12 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         K_SIZE => match t.step {
             0 => {
                 let args = [t.var(1), 0, 0, t.var(2), t.var(3), 1];
-                Next::call(address_of("MoveWindow"), &args, 1)
+                Next::call(address_of(cpu, "MoveWindow"), &args, 1)
             }
             _ => Next::Done(0),
         },
         K_FOCUS => match t.step {
-            0 => Next::call(address_of("SetFocus"), &[t.var(1)], 1),
+            0 => Next::call(address_of(cpu, "SetFocus"), &[t.var(1)], 1),
             _ => Next::Done(0),
         },
         _ => Next::Done(0),
@@ -262,7 +263,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 /// edit control, give it the text and the font, show the window.
 fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let instance = BASE;
-    let create = address_of("CreateWindowExA");
+    let create = address_of(cpu, "CreateWindowExA");
     let s = t.scratch;
     match t.step {
         0 => {
@@ -270,7 +271,7 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             write_str(cpu, s + S_EDIT_CLASS, "Edit", 16);
             let class = [
                 CS_HREDRAW | CS_VREDRAW,
-                address_of("NotepadWndProc"),
+                address_of(cpu, "NotepadWndProc"),
                 0,
                 4,
                 instance,
@@ -283,7 +284,7 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             for (i, w) in class.iter().enumerate() {
                 cpu.bus.guest_write_32(s + 4 * i as u32, *w);
             }
-            Next::call(address_of("RegisterClassA"), &[s], 1)
+            Next::call(address_of(cpu, "RegisterClassA"), &[s], 1)
         }
         1 => {
             let d = CW_USEDEFAULT;
@@ -347,17 +348,17 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             let font = gdi32::get_stock_object(cpu, &[gdi32::SYSTEM_FIXED_FONT]).unwrap_or(0);
             let args = [value, WM_SETFONT, font, 0];
-            Next::call(address_of("SendMessageA"), &args, 4)
+            Next::call(address_of(cpu, "SendMessageA"), &args, 4)
         }
         4 => {
             let args = [t.var(V_EDIT), t.var(V_TEXT)];
-            Next::call(address_of("SetWindowTextA"), &args, 5)
+            Next::call(address_of(cpu, "SetWindowTextA"), &args, 5)
         }
         5 => {
             let args = [t.var(V_FRAME), t.var(V_SHOW)];
-            Next::call(address_of("ShowWindow"), &args, 6)
+            Next::call(address_of(cpu, "ShowWindow"), &args, 6)
         }
-        6 => Next::call(address_of("SetFocus"), &[t.var(V_EDIT)], 7),
+        6 => Next::call(address_of(cpu, "SetFocus"), &[t.var(V_EDIT)], 7),
         _ => done(cpu, t, 1),
     }
 }

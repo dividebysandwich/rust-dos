@@ -65,7 +65,7 @@ pub fn sync(bus: &mut Bus) {
     let programs = if bus.win32.enabled {
         vec![(
             "NOTEPAD.EXE".to_string(),
-            super::user32::notepad::file().into(),
+            super::user32::notepad::file(bus).into(),
         )]
     } else {
         Vec::new()

@@ -553,7 +553,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 let (w, h) = (t.var(1), t.var(2) as i32);
                 let args = [topic, 0, BAR as u32, w, (h - BAR).max(0) as u32, 1];
-                Next::call(address_of("MoveWindow"), &args, 1)
+                Next::call(address_of(cpu, "MoveWindow"), &args, 1)
             }
             _ => Next::Done(0),
         },
@@ -562,23 +562,29 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let at = t.scratch + S_INFO;
                 scroll_info(cpu, at);
                 let topic = t.var(1);
-                Next::call(address_of("SetScrollInfo"), &[topic, SB_VERT, at, 1], 1)
+                Next::call(
+                    address_of(cpu, "SetScrollInfo"),
+                    &[topic, SB_VERT, at, 1],
+                    1,
+                )
             }
-            1 if t.var(2) != 0 => Next::call(address_of("InvalidateRect"), &[t.var(1), 0, 1], 2),
+            1 if t.var(2) != 0 => {
+                Next::call(address_of(cpu, "InvalidateRect"), &[t.var(1), 0, 1], 2)
+            }
             _ => Next::Done(0),
         },
         K_POPUP => popup_step(cpu, t, value),
         K_CLOSE_POPUP => match t.step {
-            0 if t.var(2) != 0 => Next::call(address_of("ReleaseCapture"), &[], 1),
-            0 | 1 => Next::call(address_of("DestroyWindow"), &[t.var(1)], 2),
+            0 if t.var(2) != 0 => Next::call(address_of(cpu, "ReleaseCapture"), &[], 1),
+            0 | 1 => Next::call(address_of(cpu, "DestroyWindow"), &[t.var(1)], 2),
             _ => Next::Done(0),
         },
         K_QUIT => match t.step {
-            0 => Next::call(address_of("DestroyWindow"), &[t.var(1)], 1),
+            0 => Next::call(address_of(cpu, "DestroyWindow"), &[t.var(1)], 1),
             _ => Next::Done(1),
         },
         K_FOCUS => match t.step {
-            0 => Next::call(address_of("SetFocus"), &[t.var(1)], 1),
+            0 => Next::call(address_of(cpu, "SetFocus"), &[t.var(1)], 1),
             _ => Next::Done(0),
         },
         // Keep Help on Top: the window above the others, or back among
@@ -592,7 +598,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 };
                 let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
                 let args = [t.var(1), after, 0, 0, 0, 0, flags];
-                Next::call(address_of("SetWindowPos"), &args, 1)
+                Next::call(address_of(cpu, "SetWindowPos"), &args, 1)
             }
             _ => Next::Done(0),
         },
@@ -609,7 +615,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 );
                 write_str(cpu, text, &about, (SCRATCH - S_TEXT) as usize);
                 let args = [t.var(1), text, caption, MB_OK | MB_ICONINFORMATION];
-                Next::call(address_of("MessageBoxA"), &args, 1)
+                Next::call(address_of(cpu, "MessageBoxA"), &args, 1)
             }
             _ => Next::Done(0),
         },
@@ -639,7 +645,7 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let instance = DLL.base;
     let class = t.scratch;
     let text = t.scratch + S_TEXT;
-    let create = address_of("CreateWindowExA");
+    let create = address_of(cpu, "CreateWindowExA");
     match t.step {
         0 => {
             let title = title(cpu);
@@ -693,18 +699,22 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let (frame, topic) = (v.frame, v.topic);
             let (w, h) = client(cpu, frame);
             let args = [topic, 0, BAR as u32, w as u32, (h - BAR).max(0) as u32, 0];
-            Next::call(address_of("MoveWindow"), &args, 7)
+            Next::call(address_of(cpu, "MoveWindow"), &args, 7)
         }
         7 => {
             refresh(cpu);
             let at = t.scratch + S_INFO;
             scroll_info(cpu, at);
             let topic = viewer(cpu).map_or(0, |v| v.topic);
-            Next::call(address_of("SetScrollInfo"), &[topic, SB_VERT, at, 1], 8)
+            Next::call(
+                address_of(cpu, "SetScrollInfo"),
+                &[topic, SB_VERT, at, 1],
+                8,
+            )
         }
         8 => {
             let frame = viewer(cpu).map_or(0, |v| v.frame);
-            Next::call(address_of("ShowWindow"), &[frame, SW_SHOWNORMAL], 9)
+            Next::call(address_of(cpu, "ShowWindow"), &[frame, SW_SHOWNORMAL], 9)
         }
         _ => Next::Done(1),
     }
@@ -773,23 +783,27 @@ fn show_step(cpu: &mut Cpu, t: &mut Task) -> Next {
             refresh(cpu);
             let at = t.scratch + S_INFO;
             scroll_info(cpu, at);
-            Next::call(address_of("SetScrollInfo"), &[topic, SB_VERT, at, 1], 1)
+            Next::call(
+                address_of(cpu, "SetScrollInfo"),
+                &[topic, SB_VERT, at, 1],
+                1,
+            )
         }
-        1 => Next::call(address_of("InvalidateRect"), &[topic, 0, 1], 2),
+        1 => Next::call(address_of(cpu, "InvalidateRect"), &[topic, 0, 1], 2),
         2 if t.var(1) == 0 => {
             let iconic = user(cpu)
                 .window(frame)
                 .is_some_and(|w| w.style & 0x2000_0000 != 0);
             let show = if iconic { SW_RESTORE } else { SW_SHOWNORMAL };
-            Next::call(address_of("ShowWindow"), &[frame, show], 3)
+            Next::call(address_of(cpu, "ShowWindow"), &[frame, show], 3)
         }
-        2 => Next::call(address_of("SetFocus"), &[topic], 5),
-        3 => Next::call(address_of("SetForegroundWindow"), &[frame], 4),
+        2 => Next::call(address_of(cpu, "SetFocus"), &[topic], 5),
+        3 => Next::call(address_of(cpu, "SetForegroundWindow"), &[frame], 4),
         4 if t.var(2) != 0 => {
             let text = t.scratch + S_TEXT;
             let title = title(cpu);
             write_str(cpu, text, &title, 128);
-            Next::call(address_of("SetWindowTextA"), &[frame, text], 5)
+            Next::call(address_of(cpu, "SetWindowTextA"), &[frame, text], 5)
         }
         _ => Next::Done(1),
     }
@@ -800,12 +814,12 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let hwnd = t.var(1);
     let ps = t.scratch + S_INFO;
     match t.step {
-        0 => Next::call(address_of("BeginPaint"), &[hwnd, ps], 1),
+        0 => Next::call(address_of(cpu, "BeginPaint"), &[hwnd, ps], 1),
         1 => {
             if value != 0 {
                 draw(cpu, hwnd, value);
             }
-            Next::call(address_of("EndPaint"), &[hwnd, ps], 2)
+            Next::call(address_of(cpu, "EndPaint"), &[hwnd, ps], 2)
         }
         _ => Next::Done(0),
     }
@@ -917,7 +931,7 @@ fn popup_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     match t.step {
         // A popup already open goes first.
         0 => match viewer(cpu).map(|v| std::mem::take(&mut v.popup)) {
-            Some(old) if old != 0 => Next::call(address_of("DestroyWindow"), &[old], 1),
+            Some(old) if old != 0 => Next::call(address_of(cpu, "DestroyWindow"), &[old], 1),
             _ => {
                 t.step = 1;
                 popup_step(cpu, t, 0)
@@ -957,7 +971,7 @@ fn popup_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 DLL.base,
                 0,
             ];
-            Next::call(address_of("CreateWindowExA"), &args, 2)
+            Next::call(address_of(cpu, "CreateWindowExA"), &args, 2)
         }
         2 => {
             if value == 0 {
@@ -967,9 +981,9 @@ fn popup_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 v.popup = value;
             }
             t.set(4, value);
-            Next::call(address_of("ShowWindow"), &[value, SW_SHOWNA], 3)
+            Next::call(address_of(cpu, "ShowWindow"), &[value, SW_SHOWNA], 3)
         }
-        3 => Next::call(address_of("SetCapture"), &[t.var(4)], 4),
+        3 => Next::call(address_of(cpu, "SetCapture"), &[t.var(4)], 4),
         _ => Next::Done(1),
     }
 }

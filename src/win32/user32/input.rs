@@ -1296,11 +1296,13 @@ pub fn take_activation(cpu: &mut Cpu, step: u16) -> Option<Next> {
         EV_ACTIVATE | EV_SELECT if foreground && state.is_window(hwnd) => {
             let flags = if kind == EV_ACTIVATE { F_SWITCHED } else { 0 };
             let args = [hwnd, flags, other];
-            Some(Next::call(address_of("ActivateInQueue"), &args, step))
+            Some(Next::call(address_of(cpu, "ActivateInQueue"), &args, step))
         }
-        EV_DEACTIVATE if !foreground => {
-            Some(Next::call(address_of("DeactivateQueue"), &[other], step))
-        }
+        EV_DEACTIVATE if !foreground => Some(Next::call(
+            address_of(cpu, "DeactivateQueue"),
+            &[other],
+            step,
+        )),
         _ => None,
     }
 }
@@ -1393,7 +1395,7 @@ fn focus_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 if super::hook::has(cpu, super::window::WH_CBT) {
                     let previous = t.var(2);
                     let (cbt, code) = (super::window::WH_CBT, super::window::HCBT_SETFOCUS);
-                    return super::hook::call(cbt, code, hwnd, previous, 9);
+                    return super::hook::call(cpu, cbt, code, hwnd, previous, 9);
                 }
                 t.step = 10;
             }
@@ -1417,7 +1419,7 @@ fn focus_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 });
                 if hwnd != 0 && top != active(cpu) && activatable {
                     let args = [top, F_NOFOCUS, 0];
-                    return Next::call(address_of("ActivateInQueue"), &args, 1);
+                    return Next::call(address_of(cpu, "ActivateInQueue"), &args, 1);
                 }
                 t.step = 1;
             }
@@ -1533,9 +1535,9 @@ fn activate_send(cpu: &mut Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32, step: u16
         && !crate::win16::flat::is_client(win32, tid);
     if tid != me && !waits {
         let args = [hwnd, msg, wp, lp];
-        return Next::call(address_of("SendNotifyMessageA"), &args, step);
+        return Next::call(address_of(cpu, "SendNotifyMessageA"), &args, step);
     }
-    window::send(hwnd, msg, wp, lp, step)
+    window::send(cpu, hwnd, msg, wp, lp, step)
 }
 
 /// The top-level windows of the thread `tid`, each with WM_ACTIVATEAPP's
@@ -1616,7 +1618,7 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                         0,
                         SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
                     ];
-                    return Next::call(address_of("SetWindowPos"), &args, 3);
+                    return Next::call(address_of(cpu, "SetWindowPos"), &args, 3);
                 }
                 t.step = 3;
             }
@@ -1700,7 +1702,7 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     && (focus == 0 || hwnd == 0 || state.top_level(focus) != hwnd)
                     && (hwnd != 0 || focus != 0)
                 {
-                    return Next::call(address_of("SetFocus"), &[hwnd], 8);
+                    return Next::call(address_of(cpu, "SetFocus"), &[hwnd], 8);
                 }
                 return Next::Done(previous);
             }
@@ -1815,20 +1817,20 @@ fn start_switch(
     task::start(cpu, TASK_INPUT, vars, 0)
 }
 
-fn switch_step(t: &mut Task) -> Next {
+fn switch_step(cpu: &Cpu, t: &mut Task) -> Next {
     loop {
         match t.step {
             0 => {
                 t.step = 1;
                 if t.var(2) != 0 {
-                    return Next::call(address_of("DeactivateQueue"), &[t.var(3)], 1);
+                    return Next::call(address_of(cpu, "DeactivateQueue"), &[t.var(3)], 1);
                 }
             }
             1 => {
                 t.step = 2;
                 if t.var(4) != 0 {
                     let args = [t.var(5), t.var(6), t.var(7)];
-                    return Next::call(address_of("ActivateInQueue"), &args, 2);
+                    return Next::call(address_of(cpu, "ActivateInQueue"), &args, 2);
                 }
             }
             _ => return Next::Done(t.var(1)),
@@ -2023,9 +2025,9 @@ pub fn release_capture(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-fn capture_step(_cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
+fn capture_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     match t.step {
-        0 => window::send(t.var(1), WM_CAPTURECHANGED, 0, t.var(2), 1),
+        0 => window::send(cpu, t.var(1), WM_CAPTURECHANGED, 0, t.var(2), 1),
         _ => Next::Done(t.var(3)),
     }
 }
@@ -2037,7 +2039,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         K_ACTIVATE => activate_step(cpu, t, value),
         K_CAPTURE => capture_step(cpu, t, value),
         K_DEACTIVATE => deactivate_step(cpu, t, value),
-        _ => switch_step(t),
+        _ => switch_step(cpu, t),
     }
 }
 
@@ -2951,9 +2953,9 @@ mod tests {
         let task = user(&mut cpu).new_window(window(2)).expect("a window");
         let other = user(&mut cpu).new_window(window(3)).expect("a window");
         let client = user(&mut cpu).new_window(window(4)).expect("a window");
-        let send = address_of("SendMessageA");
+        let send = address_of(&cpu, "SendMessageA");
         assert_eq!(activation_call(&mut cpu, task), send);
-        let notify = address_of("SendNotifyMessageA");
+        let notify = address_of(&cpu, "SendNotifyMessageA");
         assert_eq!(activation_call(&mut cpu, other), notify);
         assert_eq!(activation_call(&mut cpu, client), notify);
     }

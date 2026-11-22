@@ -88,10 +88,7 @@ pub fn init(cpu: &mut Cpu) -> Result<(), String> {
     let seg = crate::win32::dos(cpu, |cpu| {
         let psp = cpu.bus.win32.psp;
         crate::mcb::alloc(&mut cpu.bus, psp, TB_PARAS).or_else(|_| {
-            let (ss, sp) = cpu.bus.win32.rm_stack;
-            let keep = (ss as u32 + (sp as u32 >> 4) + 1).saturating_sub(psp as u32) + 0x10;
-            let keep = keep.max(0x20) as u16;
-            let _ = crate::mcb::resize(&mut cpu.bus, psp, keep);
+            crate::win32::dosvm::shrink_dos_process(cpu);
             crate::mcb::alloc(&mut cpu.bus, psp, TB_PARAS)
         })
     })

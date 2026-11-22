@@ -198,11 +198,28 @@ of Windows': an import of it by ordinal binds to the missing-function
 stub below, as an import by name does.
 
 A function's id, which its stub's trap carries, is its DLL's place in
-`DLLS` and its own in the DLL's table, apart from its ordinal; saved
-states keep the stubs in memory, so tables are only added to at their
-ends. A missing function is bound to a stub that logs `dll!name` with
-its arguments and ends the program with a message saying which function
-it needed, so the log of a game that fails says what to write next. The
+`DLLS` and its own in the DLL's table, apart from its ordinal, and its
+stub is at that place in the image. Saved states keep the stubs in
+memory and programs keep their addresses, so tables are only added to
+at their ends: `src/win32/stub_tables.txt` holds the order every
+built-in DLL's and 16-bit system module's table has had, and the DLLs'
+variables with their sizes, and a test fails on an entry inserted,
+moved or taken out (`stub_tables.rs`). The entries inserted before
+that test went in since the W32 section's version 71 (KERNEL32's,
+USER32's, GDI32's and the 16-bit USER's, listed in `INSERTED`) are
+mended in states saved before them. Such a state's image keeps its
+order, its stubs trap with the ids their functions have now, and the
+functions it lacks get stubs after its code. Every address Rust works
+out for a function of a mended DLL follows the running process's image
+(`stub_tables::address`), and a process started after the load maps the
+same image, since the system's window classes and Program Manager's
+window hold its addresses for every process. The few KERNEL32 stubs the
+system uses before a process runs are before the first insertion
+(`fixed_address`).
+
+A missing function is bound to a stub that logs `dll!name` with its
+arguments and ends the program with a message saying which function it
+needed, so the log of a game that fails says what to write next. The
 trace of every call (`trace.rs`, like Wine's `+relay`) goes to the log
 and to the debug server.
 
@@ -725,6 +742,78 @@ everything after comes that many entries later:
 The reserved entries stay empty descriptors that no fixed selector
 uses. They are in the LDT's map of entries given out, which a save
 state keeps, so a restored machine has the layout it was saved with.
+
+## DOS programs
+
+A Windows program can start a DOS program: WinExec, LoadModule,
+CreateProcessA, ShellExecute and the C runtime's spawn functions of an
+MZ file that is neither a PE file nor a Windows 3.1 program, a COM file,
+a batch file or a PIF (`src/win32/dosvm.rs`). Setups do it to run a DOS
+installer or a sound setup program. Windows 98 runs the program in a
+virtual DOS machine of its own: the VMM gives it a copy of the first
+megabyte as DOS was when Windows started, with its own vector table,
+DOS data and conventional memory, and switches the processor between it
+and the system's machine, so the Windows programs go on running. The
+program runs full screen or in a window, as its PIF says.
+
+The built-in Windows runs in one DOS process of the built-in DOS, whose
+real mode it keeps for the real-mode code it calls (`realmode.rs`). A
+DOS program starts there as that process's child. Its start is queued
+by the function that starts it, which returns to its caller as on
+Windows (33 from WinExec, handles of a process and a thread from
+CreateProcessA). When the service trap that called the function is
+done, the system calls DOS's EXEC in real mode from a few bytes in the
+ROM (`INT 21h`, then the trap of the return to the system), keeping the
+caller's context in a real-mode frame of its own kind (`Kind::Exec`).
+The program runs full screen, and the Windows programs wait: their
+threads don't switch while the system waits for real-mode code. When
+the program ends, DOS goes back after the INT 21h, the trap returns to
+the system, and the process and thread objects get its exit code and
+are signaled. What Windows 98 keeps apart for each DOS machine is put
+back as it was before the program started: the vector table, DOS's
+current drive and directories, its memory strategy and upper memory
+link, the PICs' masks, the timer's rate, the mouse driver's event
+handler, and the calling thread's FPU and SSE registers. The desktop
+is painted again, and the caller goes on. A program that waits for the
+one it started (WaitForSingleObject, GetExitCodeProcess, GetModuleUsage
+of WinExec's 33, a loop looking for a file the program writes) finds it
+ended, and the files it wrote are on the same drives.
+
+Before EXEC, the DOS process's memory block is cut down to what it uses
+(its PSP, its DOS stub and its stack), so the program gets the rest of
+conventional memory, and EXEC's parameter block, the command tail, the
+path and the environment of the caller go in a block of their own. The
+pages of the Windows programs' memory pool that no program has used yet
+go back to the XMS pool while the program runs, for its DPMI host and
+XMS memory (a DOS extender such as DOS/4GW needs some), as Windows 98's
+VMM gives a DOS machine memory from what the system has free; the pool
+takes them back when the program ends. The program gets its 8.3 path,
+as on Windows 98. A batch file runs in `COMMAND.COM /C`. INT 2Fh
+AX=1600h and 160Ah answer from the program as in a DOS box: Windows 4.x
+in enhanced mode, 4.0 for Windows 95 and 4.10 for 98.
+
+The program starts in a folder the session keeps: CreateProcessA's
+lpCurrentDirectory, or the caller's current folder when it was started.
+ShellExecute changes to a shell link's working folder around its
+CreateProcessA and back before the service returns, so the folder has
+to be taken then. When the program ends, DOS's current drive and
+folders are put back. A PIF (`src/win32/pif.rs`) starts the program it
+names: its basic section gives the program (at 24h), the working
+folder (65h) and the parameters (A5h), and the "WINDOWS 386 3.0"
+record's parameters (at 28h in its data) take the place of the basic
+ones, as Wine's winevdm reads them. Arguments on the command line take
+the place of the PIF's parameters, and its working folder that of the
+caller's. The program is looked for in the working folder, the PIF's
+folder, and then where SearchPathA looks.
+
+This is what a full-screen DOS box does on Windows 98, but for the
+Windows programs, which run on there behind it. Running them side by
+side, a window for the DOS program, and a first megabyte of its own for
+it need what the VMM keeps for each machine: a second copy of the first
+megabyte and of DOS's state, switched with the processor's context. The
+real-mode frame and the session's state are the place for that: a
+scheduler that switches between the frame's DOS program and the Windows
+threads, and a session that holds the machine's own memory.
 
 ## Timing
 

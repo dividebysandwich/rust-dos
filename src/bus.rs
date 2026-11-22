@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use web_time::Instant;
 
 use crate::disk::{DRIVE_SLOTS, DiskController, DriveKind, MountOptions};
+use crate::opl::Chip;
 use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 
 mod guest;
@@ -161,6 +162,8 @@ pub struct Bus {
     pub xms: crate::xms::Xms,
     /// The expanded memory manager (INT 67h), if EMS is on.
     pub ems: Option<crate::ems::Ems>,
+    /// VCPI's pages and the PIC mapping its client set (vcpi.rs).
+    pub vcpi: crate::vcpi::Vcpi,
     /// The DPMI host (INT 2Fh AX=1687h, INT 31h) and its clients.
     pub dpmi: crate::dpmi::Dpmi,
     /// The built-in Windows (`win32`) and its running Win32 program.
@@ -1771,6 +1774,7 @@ impl Bus {
             self.net_next_event(),
             self.serial_next_event(),
             self.kbc_release_at,
+            crate::keyboard::typematic_at(self),
             self.rtc_next,
             self.win32.next_event(),
             crate::win32::audio_next_event(&self.win32, self.clock.now_ticks()),
@@ -1847,6 +1851,10 @@ impl Bus {
             self.kbc_release_at = None;
             self.kbc.release();
             self.sync_keyboard_irq();
+        }
+        // The keyboard repeats a held key.
+        if crate::keyboard::typematic_at(self).is_some_and(|t| t <= now) {
+            crate::keyboard::typematic(self);
         }
         self.clock.schedule(self.next_event());
         self.refresh_irq();
@@ -2018,7 +2026,7 @@ impl Bus {
         let sb_filter = match &self.sb {
             Some(sb) if self.mixer.settings().sb_filter == crate::mixer::SbFilter::Auto => match sb.config.model {
                 crate::sb::SbModel::Sb2 => Some((4800.0, 2)),
-                crate::sb::SbModel::SbPro2 => Some((3200.0, 2)),
+                crate::sb::SbModel::SbPro1 | crate::sb::SbModel::SbPro2 => Some((3200.0, 2)),
                 // The SB16 filters at half its sample rate.
                 m if m.is_sb16() && sb.out_rate >= 4000 => Some((sb.out_rate as f32 / 2.0, 4)),
                 _ => None,
@@ -2312,10 +2320,12 @@ impl Bus {
         let model = self.sb.as_ref().map(|sb| sb.config.model);
         let fm_ports = model != Some(crate::sb::SbModel::Sb2);
         match offset {
-            0x0 | 0x8 => self.opl.write_address(0, value),
+            0x0 => self.opl.write_address(0, value),
+            0x8 => self.opl.write_address_all(value),
             0x2 if fm_ports => self.opl.write_address(1, value),
-            0x1 | 0x9 => self.opl_data(0, value),
-            0x3 if fm_ports => self.opl_data(1, value),
+            0x1 => self.opl_data(Some(0), value),
+            0x9 => self.opl_data(None, value),
+            0x3 if fm_ports => self.opl_data(Some(1), value),
             _ => {
                 // Once, as the reset starts (bit 0 set), not again as it
                 // ends.
@@ -2345,7 +2355,9 @@ impl Bus {
 
     fn sb_read(&mut self, offset: u16) -> u8 {
         match offset {
-            0x0 | 0x2 | 0x8 => self.opl.read_status(self.clock.now_micros()),
+            // On an SB Pro 1's dual OPL2, base+2 reads the right chip.
+            0x0 | 0x8 => self.opl.read_status(self.clock.now_micros()),
+            0x2 => self.opl.read_status_of(1, self.clock.now_micros()),
             _ => {
                 self.sb_advance();
                 let value = self.sb.as_mut().map_or(0xFF, |sb| sb.read(offset));
@@ -2356,9 +2368,10 @@ impl Bus {
         }
     }
 
-    /// Pick a register of the FM chip's first bank through `port`.
+    /// Pick a register of the FM chip's first bank through `port` (both
+    /// chips' on a dual OPL2).
     fn opl_address(&mut self, port: u16, value: u8) {
-        self.opl.write_address(0, value);
+        self.opl.write_address_all(value);
         // The Ultrasound latches the AdLib register numbers written to
         // 388h too, whichever card's FM chip answers there (an AdLib
         // Gold's at its default base); its detection reads them back at
@@ -2370,11 +2383,15 @@ impl Bus {
         }
     }
 
-    /// Write an FM register at its emulated time.
-    fn opl_data(&mut self, bank: usize, value: u8) {
+    /// Write an FM register at its emulated time: of `bank`, or with None
+    /// through an AdLib port, which a dual OPL2 takes on both chips.
+    fn opl_data(&mut self, bank: Option<usize>, value: u8) {
         self.audio_catch_up();
         let now = self.clock.now_micros();
-        self.opl.write_data(bank, value, now);
+        match bank {
+            Some(bank) => self.opl.write_data(bank, value, now),
+            None => self.opl.write_data_all(value, now),
+        }
         if self.adlib_gold.is_some() {
             // The timers' interrupt goes out on the AdLib Gold's line.
             self.sync_adlib_gold_irq();
@@ -2867,11 +2884,14 @@ impl Bus {
             p if self.adlib_gold_claims(p) => self.adlib_gold_write(p, value),
 
             // The FM chip: AdLib ports 388h/389h, and the OPL3's second
-            // register bank at 38Ah/38Bh.
+            // register bank at 38Ah/38Bh. The first SB Pro (CT1330), whose
+            // dual OPL2 this is, decodes only 388h/389h, and writes both
+            // chips there.
             0x388 => self.opl_address(0x388, value),
-            0x389 => self.opl_data(0, value),
+            0x389 => self.opl_data(None, value),
+            0x38A | 0x38B if self.opl.chip() == Chip::DualOpl2 => {}
             0x38A => self.opl.write_address(1, value),
-            0x38B => self.opl_data(1, value),
+            0x38B => self.opl_data(Some(1), value),
 
             // The Sound Blaster, 16 ports from its base.
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_write(p & 0xF, value),
@@ -3262,7 +3282,9 @@ impl Bus {
 
             // The FM chip's status register: timer flags, which programs
             // poll to detect an AdLib.
-            0x388 | 0x38A => self.opl.read_status(self.clock.now_micros()),
+            0x388 => self.opl.read_status(self.clock.now_micros()),
+            0x38A if self.opl.chip() == Chip::DualOpl2 => 0xFF,
+            0x38A => self.opl.read_status(self.clock.now_micros()),
             0x389 | 0x38B => 0xFF,
 
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_read(p & 0xF),

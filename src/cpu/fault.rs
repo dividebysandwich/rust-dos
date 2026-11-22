@@ -221,6 +221,11 @@ impl Cpu {
     /// exceptions push in protected mode.
     pub fn deliver_interrupt(&mut self, vector: u8, source: IntSource, error: Option<u32>) -> CpuResult {
         if self.pe() {
+            // From virtual-8086 mode to the built-in monitor, whose level
+            // 0 is Rust code (`v86mon`).
+            if self.v86() && crate::v86mon::owns(self) {
+                return crate::v86mon::event(self, vector, source, error);
+            }
             self.deliver_pm(vector, source, error)
         } else {
             self.deliver_real(vector)

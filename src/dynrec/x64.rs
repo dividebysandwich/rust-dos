@@ -3110,10 +3110,11 @@ impl Gen<'_> {
             }
             Uop::FCom { a, b } => {
                 // C0, C2 and C3 are where CF, PF and ZF are in AH's flags.
-                const C0_C2_C3: i16 = 0x4500;
+                // C1 is cleared.
+                const C0_TO_C3: i16 = 0x4700;
                 dynasm!(self.ops
                     ; .arch x64
-                    ; and WORD [rbx + FPU_FLAGS], !C0_C2_C3
+                    ; and WORD [rbx + FPU_FLAGS], !C0_TO_C3
                     ; ucomisd Rx(a.0), Rx(b.0)
                     ; mov eax, 0
                     ; mov ecx, 0
@@ -3753,15 +3754,18 @@ impl Gen<'_> {
                     ; jnz >precise_done
                 );
             }
-            Precise::Equal(a, b) => {
+            Precise::Compare(a, b) => {
+                // Unordered: the handler. EDX = 1 where equal.
                 dynasm!(self.ops
                     ; .arch x64
                     ; ucomisd Rx(a.0), Rx(b.0)
-                    ; jne >precise_done
-                    ; jp >precise_done
+                    ; jp =>at
+                    ; mov edx, 0
+                    ; sete dl
                 );
             }
         }
+        let compare = matches!(when, Precise::Compare(..));
         dynasm!(self.ops ; .arch x64 ; precise_regs:);
         dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + FPU_TOP]);
         for i in (0..8).filter(|i| regs >> i & 1 != 0) {
@@ -3772,6 +3776,24 @@ impl Gen<'_> {
                 ; cmp BYTE [rbx + rcx + FPU_STALE], 0
                 ; jne >precise_next
                 ; shl ecx, 4
+            );
+            if compare {
+                // A nonzero exponent with the integer bit clear: a format
+                // the FPU doesn't take. The bits below a double's only
+                // where the doubles are equal.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; test BYTE [rbx + rcx + FPU_X80 + 7], 0x80u8 as i8
+                    ; jnz >precise_int
+                    ; test WORD [rbx + rcx + FPU_X80 + 8], 0x7FFF
+                    ; jnz =>at
+                    ; precise_int:
+                    ; test edx, edx
+                    ; jz >precise_next
+                );
+            }
+            dynasm!(self.ops
+                ; .arch x64
                 ; test WORD [rbx + rcx + FPU_X80], 0x7FF
                 ; jnz =>at
                 ; precise_next:

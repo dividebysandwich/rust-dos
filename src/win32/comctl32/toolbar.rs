@@ -1103,7 +1103,7 @@ fn auto_size(cpu: &mut Cpu, hwnd: u32, t: &mut Toolbar, s: &mut Script, if_chang
         }
     }
     let args = [hwnd, 0, x as u32, y as u32, cx as u32, cy as u32, flags];
-    s.user("SetWindowPos", &args);
+    s.user(cpu, "SetWindowPos", &args);
 }
 
 /// The TBBUTTONs at `at`, or None if the memory faulted.
@@ -1746,7 +1746,7 @@ fn set_rows(cpu: &mut Cpu, hwnd: u32, t: &mut Toolbar, s: &mut Script, wp: u32, 
         if t.style & CCS_NORESIZE != 0 {
             let (w, h) = (t.bound.width() as u32, t.bound.height() as u32);
             let flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE;
-            s.user("SetWindowPos", &[hwnd, 0, 0, 0, w, h, flags]);
+            s.user(cpu, "SetWindowPos", &[hwnd, 0, 0, 0, w, h, flags]);
         }
         super::invalidate(cpu, hwnd, true);
     }
@@ -1913,10 +1913,10 @@ fn get_string(cpu: &mut Cpu, t: &Toolbar, wp: u32, lp: u32, wide: bool) -> u32 {
 /// The steps that make the tooltip control
 /// (TOOLBAR_TooltipCreateControl); with `answer`, the script returns
 /// its handle.
-fn create_tooltip(t: &mut Toolbar, hwnd: u32, s: &mut Script, answer: bool) {
+fn create_tooltip(cpu: &Cpu, t: &mut Toolbar, hwnd: u32, s: &mut Script, answer: bool) {
     t.tip_creating = true;
     let class = s.string(b"tooltips_class32");
-    let f = user32::address_of("CreateWindowExA");
+    let f = user32::address_of(cpu, "CreateWindowExA");
     let v = Arg::V;
     let args = [
         v(0),
@@ -1988,8 +1988,8 @@ fn press(cpu: &mut Cpu, hwnd: u32, t: &mut Toolbar, s: &mut Script, hit: i32) {
     if enabled {
         invalidate_rect(cpu, hwnd, r, true);
     }
-    s.user("UpdateWindow", &[hwnd]);
-    s.user("SetCapture", &[hwnd]);
+    s.user(cpu, "UpdateWindow", &[hwnd]);
+    s.user(cpu, "SetCapture", &[hwnd]);
 }
 
 /// The end of TOOLBAR_LButtonDown: TBN_BEGINDRAG, NM_LDOWN.
@@ -2025,7 +2025,7 @@ fn l_button_down(cpu: &mut Cpu, hwnd: u32, t: &mut Toolbar, s: &mut Script, wp: 
     let hit = hit_test(t, x, y);
     if hit >= 0 && drag_key && t.style & CCS_ADJUSTABLE != 0 {
         t.button_drag = hit;
-        s.user("SetCapture", &[hwnd]);
+        s.user(cpu, "SetCapture", &[hwnd]);
     } else if hit >= 0 {
         t.old_hit = hit;
         let b = t.buttons[hit as usize].clone();
@@ -2042,7 +2042,7 @@ fn l_button_down(cpu: &mut Cpu, hwnd: u32, t: &mut Toolbar, s: &mut Script, wp: 
                 bb.dropdown_pressed = true;
             }
             invalidate_rect(cpu, hwnd, b.rect, true);
-            s.user("UpdateWindow", &[hwnd]);
+            s.user(cpu, "UpdateWindow", &[hwnd]);
             let more = nmtoolbar(b.command, None, b.rect);
             notify(cpu, s, hwnd, t, TBN_DROPDOWN, &more);
             s.then(T_DROPDOWN, &[hit as u32, wp, lp]);
@@ -2102,7 +2102,7 @@ fn l_button_up(cpu: &mut Cpu, hwnd: u32, t: &mut Toolbar, s: &mut Script, lp: u3
     if t.button_drag >= 0 && t.button_drag < n {
         let drag = t.button_drag;
         let br = t.buttons[drag as usize].rect;
-        s.user("ReleaseCapture", &[]);
+        s.user(cpu, "ReleaseCapture", &[]);
         let client = super::client(cpu, hwnd);
         if client.contains(x, y) {
             let target = if hit >= 0 {
@@ -2170,7 +2170,7 @@ fn l_button_up(cpu: &mut Cpu, hwnd: u32, t: &mut Toolbar, s: &mut Script, lp: u3
         let r = t.buttons[down as usize].rect;
         invalidate_rect(cpu, hwnd, r, true);
         if t.captured {
-            s.user("ReleaseCapture", &[]);
+            s.user(cpu, "ReleaseCapture", &[]);
         }
         t.captured = false;
         t.old_hit = -1;
@@ -2181,7 +2181,7 @@ fn l_button_up(cpu: &mut Cpu, hwnd: u32, t: &mut Toolbar, s: &mut Script, lp: u3
         notify(cpu, s, hwnd, t, TBN_ENDDRAG, &more);
         if clicked && b.state & TBSTATE_ENABLED != 0 {
             let wp = (b.command as u32 & 0xFFFF) | (BN_CLICKED << 16);
-            s.send(t.notify, WM_COMMAND, Arg::V(wp), Arg::V(hwnd));
+            s.send(cpu, t.notify, WM_COMMAND, Arg::V(wp), Arg::V(hwnd));
             // The program may have destroyed the toolbar.
             s.then(T_CLICKED, &[hit as u32, x as u32, y as u32, lp]);
             return;
@@ -2310,7 +2310,7 @@ fn key_down(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
             if hot >= 0 && hot < n && t.buttons[hot as usize].state & TBSTATE_ENABLED != 0 {
                 let id = t.buttons[hot as usize].command as u32 & 0xFFFF;
                 let wp = id | (BN_CLICKED << 16);
-                s.send(t.notify, WM_COMMAND, Arg::V(wp), Arg::V(hwnd));
+                s.send(cpu, t.notify, WM_COMMAND, Arg::V(wp), Arg::V(hwnd));
             }
         }
         _ => {}
@@ -2373,7 +2373,7 @@ fn tip_ask(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
         at: O_TIP_NM,
         words,
     });
-    s.send(t.notify, WM_NOTIFY, Arg::V(id), Arg::S(O_TIP_NM));
+    s.send(cpu, t.notify, WM_NOTIFY, Arg::V(id), Arg::S(O_TIP_NM));
     s.then(T_TIP_GOT, &c.data);
     s.ops
 }
@@ -2433,7 +2433,7 @@ fn tip_got(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     // Windows sends it.
     let mut s = cont_script(hwnd);
     if !wide_disp || t.unicode {
-        s.send(t.notify, WM_NOTIFY, Arg::V(id_from), Arg::V(lp));
+        s.send(cpu, t.notify, WM_NOTIFY, Arg::V(id_from), Arg::V(lp));
         s.ret_last();
         return s.ops;
     }
@@ -2450,7 +2450,7 @@ fn tip_got(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
         at: O_DISP_A,
         words,
     });
-    s.send(t.notify, WM_NOTIFY, Arg::V(id_from), Arg::S(O_DISP_A));
+    s.send(cpu, t.notify, WM_NOTIFY, Arg::V(id_from), Arg::S(O_DISP_A));
     s.then(T_DISP_BACK, &[lp]);
     s.ops
 }
@@ -2511,7 +2511,7 @@ fn erase_background(
         } else {
             (0, 0)
         };
-        s.send(parent, WM_ERASEBKGND, Arg::V(wp), Arg::V(lp));
+        s.send(cpu, parent, WM_ERASEBKGND, Arg::V(wp), Arg::V(lp));
         s.then(T_ERASED, &[wp, x, y, lp]);
         return 0;
     }
@@ -2998,8 +2998,8 @@ fn paint(cpu: &mut Cpu, hwnd: u32, t: &Toolbar, s: &mut Script, hdc: u32) {
         return;
     }
     let ps = s.alloc(64);
-    let begin = user32::address_of("BeginPaint");
-    let end = user32::address_of("EndPaint");
+    let begin = user32::address_of(cpu, "BeginPaint");
+    let end = user32::address_of(cpu, "EndPaint");
     s.call(begin, &[Arg::V(hwnd), Arg::S(ps)])
         .then(DRAW, &[ps])
         .call(end, &[Arg::V(hwnd), Arg::S(ps)]);
@@ -3077,7 +3077,13 @@ fn create(cpu: &mut Cpu, hwnd: u32, t: &mut Toolbar, s: &mut Script) -> u32 {
     t.default_font = gfx::default_font(cpu);
     t.font = t.default_font;
     if t.notify != 0 {
-        s.send(t.notify, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY));
+        s.send(
+            cpu,
+            t.notify,
+            WM_NOTIFYFORMAT,
+            Arg::V(hwnd),
+            Arg::V(NF_QUERY),
+        );
         s.then(T_FORMAT, &[0]);
     }
     0
@@ -3297,7 +3303,7 @@ fn message(
         TB_GETTEXTROWS => t.max_text_rows as u32,
         TB_GETTOOLTIPS => {
             if t.style & TBSTYLE_TOOLTIPS != 0 && t.tooltip == 0 && !t.tip_creating {
-                create_tooltip(t, hwnd, s, true);
+                create_tooltip(cpu, t, hwnd, s, true);
                 return Some(0);
             }
             t.tooltip
@@ -3521,7 +3527,7 @@ fn message(
             1
         }
         TB_SETSTYLE => {
-            s.user("SetWindowLongA", &[hwnd, GWL_STYLE, lp]);
+            s.user(cpu, "SetWindowLongA", &[hwnd, GWL_STYLE, lp]);
             1
         }
         TB_SETTOOLTIPS => {
@@ -3578,7 +3584,7 @@ fn message(
         WM_CREATE => create(cpu, hwnd, t, s),
         WM_DESTROY => {
             if t.tooltip != 0 {
-                s.user("DestroyWindow", &[t.tooltip]);
+                s.user(cpu, "DestroyWindow", &[t.tooltip]);
             }
             if t.tip_text != 0 {
                 let heap = process_heap(cpu);
@@ -3630,7 +3636,7 @@ fn message(
         }
         WM_MOUSEMOVE => {
             if t.style & TBSTYLE_TOOLTIPS != 0 && t.tooltip == 0 && !t.tip_creating {
-                create_tooltip(t, hwnd, s, false);
+                create_tooltip(cpu, t, hwnd, s, false);
                 s.then(T_MOVE, &[wp, lp]);
                 return Some(0);
             }
@@ -3681,7 +3687,13 @@ fn message(
         WM_NOTIFYFORMAT => match lp {
             NF_QUERY => NFR_UNICODE,
             NF_REQUERY => {
-                s.send(t.notify, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY));
+                s.send(
+                    cpu,
+                    t.notify,
+                    WM_NOTIFYFORMAT,
+                    Arg::V(hwnd),
+                    Arg::V(NF_QUERY),
+                );
                 s.then(T_FORMAT, &[1]);
                 0
             }
@@ -3754,7 +3766,7 @@ fn message(
             0
         }
         WM_CHARTOITEM | WM_COMMAND | WM_DRAWITEM | WM_MEASUREITEM | WM_VKEYTOITEM => {
-            s.send(t.notify, msg, Arg::V(wp), Arg::V(lp));
+            s.send(cpu, t.notify, msg, Arg::V(wp), Arg::V(lp));
             s.ret_last();
             0
         }
@@ -3910,14 +3922,14 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
         T_DISP_IMAGE => image_got(cpu, c),
         T_ERASED => erased(cpu, c),
         T_KEY => key_down(cpu, c),
-        T_EX_MADE => toolbar_ex_made(c),
+        T_EX_MADE => toolbar_ex_made(cpu, c),
         _ => Vec::new(),
     }
 }
 
 /// The toolbar CreateToolbarEx made is there (T_EX_MADE): its sizes,
 /// bitmap and buttons.
-fn toolbar_ex_made(c: &mut Ctx) -> Vec<Op> {
+fn toolbar_ex_made(cpu: &Cpu, c: &mut Ctx) -> Vec<Op> {
     let tb = c.last;
     c.result = tb;
     if tb == 0 {
@@ -3937,7 +3949,7 @@ fn toolbar_ex_made(c: &mut Ctx) -> Vec<Op> {
     ] = std::array::from_fn(|i| c.word(i));
     let mut s = cont_script(0);
     let v = Arg::V;
-    s.send(tb, TB_BUTTONSTRUCTSIZE, v(size), v(0));
+    s.send(cpu, tb, TB_BUTTONSTRUCTSIZE, v(size), v(0));
     let (mut bw, mut bh) = (dx_bitmap as i32, dy_bitmap as i32);
     if bw < 0 {
         bw = 16;
@@ -3950,7 +3962,7 @@ fn toolbar_ex_made(c: &mut Ctx) -> Vec<Op> {
         bh = 16;
     }
     let pack = |w: i32, h: i32| (w as u32 & 0xFFFF) | ((h as u32 & 0xFFFF) << 16);
-    s.send(tb, TB_SETBITMAPSIZE, v(0), v(pack(bw, bh)));
+    s.send(cpu, tb, TB_SETBITMAPSIZE, v(0), v(pack(bw, bh)));
     let (mut dx, mut dy) = (dx_button as i32, dy_button as i32);
     if dx < 0 {
         dx = bw;
@@ -3960,7 +3972,7 @@ fn toolbar_ex_made(c: &mut Ctx) -> Vec<Op> {
     }
     // As Windows does, the button size goes to TB_SETBITMAPSIZE.
     if dx != 0 && dy != 0 {
-        s.send(tb, TB_SETBITMAPSIZE, v(0), v(pack(dx, dy)));
+        s.send(cpu, tb, TB_SETBITMAPSIZE, v(0), v(pack(dx, dy)));
     }
     if (bitmaps as i32) > 0 || inst == HINST_COMMCTRL {
         // The continuations' scratch space: no TBADDBITMAP was there.
@@ -3968,10 +3980,10 @@ fn toolbar_ex_made(c: &mut Ctx) -> Vec<Op> {
             at: O_DISP_A,
             words: vec![inst, bmid],
         });
-        s.send(tb, TB_ADDBITMAP, v(bitmaps), Arg::S(O_DISP_A));
+        s.send(cpu, tb, TB_ADDBITMAP, v(bitmaps), Arg::S(O_DISP_A));
     }
     if (n as i32) > 0 {
-        s.send(tb, TB_ADDBUTTONSA, v(n), v(buttons));
+        s.send(cpu, tb, TB_ADDBUTTONSA, v(n), v(buttons));
     }
     s.ops
 }
@@ -3981,7 +3993,7 @@ fn toolbar_ex_made(c: &mut Ctx) -> Vec<Op> {
 pub fn create_toolbar_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut s = new_script(0);
     let class = s.string(b"ToolbarWindow32");
-    let f = user32::address_of("CreateWindowExA");
+    let f = user32::address_of(cpu, "CreateWindowExA");
     let v = Arg::V;
     let call = [
         v(0),

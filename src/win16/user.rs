@@ -546,20 +546,20 @@ fn check_mark_dimensions(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// The address of USER32's function `name`.
-fn api(name: &str) -> u32 {
-    crate::win32::user32::address_of(name)
+fn api(cpu: &Cpu, name: &str) -> u32 {
+    crate::win32::user32::address_of(cpu, name)
 }
 
 /// Go on to USER32's `name` with `args`; DX:AX what it returns.
 fn go(cpu: &mut Cpu, name: &str, args: &[u32]) -> Option<u32> {
-    thunk::call32(cpu, api(name), args, thunk::POST_PLAIN, Vec::new());
+    thunk::call32(cpu, api(cpu, name), args, thunk::POST_PLAIN, Vec::new());
     None
 }
 
 /// Go on to USER32's `name` with `args`, `post` (this module's `post`)
 /// seeing to what it returns with `data`.
 fn go_post(cpu: &mut Cpu, name: &str, args: &[u32], data: Vec<u32>) -> Option<u32> {
-    thunk::call32(cpu, api(name), args, thunk::POST_USER, data);
+    thunk::call32(cpu, api(cpu, name), args, thunk::POST_USER, data);
     None
 }
 
@@ -572,7 +572,7 @@ fn go_at(cpu: &mut Cpu, top: u32, name: &str, args: &[u32], data: Vec<u32>) -> O
     } else {
         thunk::POST_USER
     };
-    thunk::enter32_at(cpu, ctx, top, api(name), args, post, data);
+    thunk::enter32_at(cpu, ctx, top, api(cpu, name), args, post, data);
     None
 }
 
@@ -1164,7 +1164,13 @@ fn create_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     args32[0] = instance32(cpu, args[0] as u16);
     args32[3] &= 0xFF;
     args32[4] &= 0xFF;
-    thunk::call32(cpu, api("CreateIcon"), &args32, thunk::POST_AUTO, vec![b'i' as u32]);
+    thunk::call32(
+        cpu,
+        api(cpu, "CreateIcon"),
+        &args32,
+        thunk::POST_AUTO,
+        vec![b'i' as u32],
+    );
     None
 }
 
@@ -1173,7 +1179,13 @@ fn create_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn create_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut args32 = args.to_vec();
     args32[0] = instance32(cpu, args[0] as u16);
-    thunk::call32(cpu, api("CreateCursor"), &args32, thunk::POST_AUTO, vec![b'i' as u32]);
+    thunk::call32(
+        cpu,
+        api(cpu, "CreateCursor"),
+        &args32,
+        thunk::POST_AUTO,
+        vec![b'i' as u32],
+    );
     None
 }
 
@@ -1533,7 +1545,14 @@ fn send_dlg_item_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if hwnd == 0 {
         return Some(0);
     }
-    message::send32(cpu, api("SendMessageA"), hwnd, args[2], args[3], args[4]);
+    message::send32(
+        cpu,
+        api(cpu, "SendMessageA"),
+        hwnd,
+        args[2],
+        args[3],
+        args[4],
+    );
     None
 }
 
@@ -1555,7 +1574,7 @@ fn def_mdi_child_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn def_frame_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     message::send32_with(
         cpu,
-        api("DefFrameProcA"),
+        api(cpu, "DefFrameProcA"),
         args[0],
         &[args[1]],
         args[2],

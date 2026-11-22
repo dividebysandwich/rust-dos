@@ -1103,16 +1103,18 @@ impl Cpu {
     /// shell is loaded again without them having exited: a divide
     /// overflow, the tripwire, a DPMI client that can't go on, the
     /// debugger's or a frontend's close, a reboot. One exit is recorded,
-    /// for the program that ran last, with no exit code.
-    fn note_abort(&mut self) {
+    /// for the program that ran last, with no exit code. Returns whether
+    /// one was running.
+    fn note_abort(&mut self) -> bool {
         let name = self.program.clone();
         let events = &mut self.programs;
         if events.running == 0 {
-            return;
+            return false;
         }
         events.running = 0;
         events.ended += 1;
         events.last_exit = Some(ProgramExit { name, code: None, resident: false });
+        true
     }
 
     /// Stop the running program for the shell to be loaded again, with
@@ -1279,7 +1281,26 @@ impl Cpu {
         // `cycles=auto` to the real-mode speed.
         self.pm_latched = false;
         self.os_idles = false;
+        let caches = self.seg;
         self.restore(&context.regs);
+        // DOS goes back to the parent with real-mode loads of its data
+        // segment registers (MOV SS, POP DS and POP ES), which change only
+        // the selector and the base. The limits stay as the child left
+        // them: a child that set 4 GB limits ("unreal mode") leaves them to
+        // the programs after it, as Ultima VII's MAINMENU.EXE does for
+        // U7.EXE, which then runs with them without setting them itself.
+        // DOS is 16-bit code and never loads FS or GS, so they stay as the
+        // child left them, selector and base included.
+        if !self.pe() {
+            for seg in [Seg::ES, Seg::SS, Seg::DS] {
+                let selector = self.seg[seg as usize].selector;
+                self.seg[seg as usize] = caches[seg as usize];
+                self.load_seg_real(seg, selector);
+            }
+            for seg in [Seg::FS, Seg::GS] {
+                self.seg[seg as usize] = caches[seg as usize];
+            }
+        }
         self.current_psp = context.psp;
         self.heap_pointer = context.heap_pointer; // Restore heap specifically for that process? Maybe not... but safer.
         (self.bus.dta_segment, self.bus.dta_offset) = context.dta;
@@ -1311,18 +1332,26 @@ impl Cpu {
         self.load_flags16(new_flags.bits() as u16);
     }
 
-    /// See `set_cpu_flags`.
+    /// See `set_cpu_flags`. In virtual-8086 mode IOPL stays as it is, as
+    /// POPF and IRET leave it there: a BIOS service under the built-in
+    /// monitor that hands back the flags its caller pushed keeps IOPL 3.
     pub fn load_flags16(&mut self, value: u16) {
         let upper = self.flags.bits() & 0xFFFF_0000;
-        self.flags = CpuFlags::from_bits_retain(upper | (value as u32 & FLAGS16_WRITABLE) | 0x0002);
+        let writable = if self.v86() { FLAGS16_WRITABLE & !CpuFlags::IOPL.bits() } else { FLAGS16_WRITABLE };
+        let kept = self.flags.bits() & FLAGS16_WRITABLE & !writable;
+        self.flags = CpuFlags::from_bits_retain(upper | kept | (value as u32 & writable) | 0x0002);
     }
 
     /// Load EFLAGS, as POPFD and IRETD do in real mode (IRETD loads RF
     /// too). VM and RF can't be set this way; AC only exists from the 486
-    /// on, ID on a Pentium.
+    /// on, ID on a Pentium. In virtual-8086 mode IOPL stays as it is.
     pub fn load_eflags(&mut self, value: u32) {
-        let writable = FLAGS16_WRITABLE | self.model.eflags_extra();
-        let keep = self.flags.bits() & CpuFlags::VM.bits();
+        let mut writable = FLAGS16_WRITABLE | self.model.eflags_extra();
+        let mut keep = self.flags.bits() & CpuFlags::VM.bits();
+        if keep != 0 {
+            writable &= !CpuFlags::IOPL.bits();
+            keep |= self.flags.bits() & CpuFlags::IOPL.bits();
+        }
         self.flags = CpuFlags::from_bits_retain(keep | (value & writable) | 0x0002);
     }
 
@@ -1628,6 +1657,9 @@ impl Cpu {
     /// is until rust-dos starts again.
     pub fn set_upper_memory(&mut self, ems: bool, umb: bool) -> Result<(), String> {
         crate::ems::set_enabled(&mut self.bus, ems);
+        // At the prompt, DOS goes on under the virtual-8086 monitor with
+        // EMS, in real mode without.
+        crate::v86mon::sync(self);
         // With EMS, its page frame takes the upper half of upper memory.
         let size = if ems { 0x1000 } else { 0x2000 };
         let wanted = umb.then_some(size);
@@ -1682,16 +1714,25 @@ impl Cpu {
     }
 
     pub fn load_shell(&mut self) {
-        self.note_abort();
+        let aborted = self.note_abort();
         // A shell reload always starts outside any DOS process. Normally
         // termination restored this to the shell's PSP; frontends that
         // explicitly close a running process have no parent context to do so.
         self.current_psp = 0;
+        // DOS keeps the verify flag as the last program set it (AH=2Eh),
+        // unless a system booted from a disk had the memory.
+        let verify_flag = crate::dos_data::address(crate::dos_data::VERIFY_FLAG);
+        let verify = if self.bus.boot.is_some() {
+            0
+        } else {
+            self.bus.read_8(verify_flag) & 1
+        };
         // Windows' keyboard ends with it.
         crate::bios::windows_keyboard(&mut self.bus, false);
         // A system booted from a disk turned the machine off: DOS starts
         // over on it.
-        if self.bus.boot.take().is_some() {
+        let booted = self.bus.boot.take().is_some();
+        if booted {
             // What it changed on the host folders it had as disks goes
             // into them.
             for line in self.bus.disk.finish_shared_disks(true) {
@@ -1817,8 +1858,19 @@ impl Cpu {
         // Copy bytes
         self.bus.load_bytes(start_addr, &shell_code);
 
+        // A program that ended in real mode leaves the limits of its data
+        // segment registers to the shell and the programs it starts next,
+        // as on DOS, where COMMAND.COM gets control back with real-mode
+        // segment loads (see `restore_context`). A machine that was off or
+        // a program that ended in protected mode gets them reset.
+        let kept = (!booted && !self.pe()).then_some(self.seg);
         // Reset CPU State to "Boot" values
         self.reset_to_real_mode();
+        if let Some(kept) = kept {
+            for seg in [Seg::ES, Seg::SS, Seg::DS, Seg::FS, Seg::GS] {
+                self.seg[seg as usize] = kept[seg as usize];
+            }
+        }
         self.set_cs(SHELL_SEGMENT);
         self.set_ds(SHELL_SEGMENT);
         self.set_es(SHELL_SEGMENT);
@@ -1842,11 +1894,17 @@ impl Cpu {
         self.bus.reset_serial_irqs();
         self.keep_resident_irqs(slave_imr);
         self.bus.reset_sound();
+        // A note the ended program was playing on the speaker would sound
+        // on at the prompt, with nothing left to switch it off.
+        if aborted {
+            self.bus.silence_speaker();
+        }
         self.bus.reset_network();
         // No program runs any more: its extended memory and A20 go too,
         // but for what resident programs hold, and a reset from now on is
         // a cold boot.
         let a20 = self.bus.xms.program_ended();
+        crate::vcpi::program_ended(&mut self.bus);
         self.bus.dpmi.reset();
         // The loops of a program that ends here get their summaries.
         crate::win32::trace::flush(self);
@@ -1868,6 +1926,14 @@ impl Cpu {
         crate::dos_files::write_table(&mut self.bus);
         crate::dos_data::write(&mut self.bus);
         crate::dos_data::write_driver_code(&mut self.bus);
+        self.bus.write_8(verify_flag, verify);
+
+        // With expanded memory, DOS runs in virtual-8086 mode under the
+        // built-in monitor, as under EMM386.
+        if crate::v86mon::installed(&self.bus) {
+            crate::v86mon::install_rom(&mut self.bus);
+            crate::v86mon::enter(self);
+        }
 
         self.bus.log_string("[SYSTEM] Shell Loaded. Ready.");
     }

@@ -52,8 +52,13 @@ pub enum Precise {
     /// To an integer, where the double in x is one or halfway between two
     /// (or is 2^52 or more, or not finite).
     Int(X),
-    /// Compared, where the doubles in the two are equal.
-    Equal(X, X),
+    /// Compared, where the doubles in the two are equal. A compare also
+    /// leaves to its handler doubles that are unordered (a NaN, which sets
+    /// IE or not as its kind and the instruction say) and, whatever the
+    /// doubles, a register in `regs` that holds a format the FPU doesn't
+    /// take (`F80::is_unsupported`), whose double is a number: both are
+    /// invalid operands, IE.
+    Compare(X, X),
 }
 
 pub const X0: X = X(0);
@@ -548,7 +553,8 @@ pub enum Uop {
     /// this one where one of the registers ST(i) with bit i set in `regs`
     /// holds more than its double (`FpuRegs::beyond_double`), which the
     /// handler then rounds from the 80 bits, and `when` says that rounding
-    /// the double instead could come out different. Nothing before it may
+    /// the double instead could come out different (`Precise::Compare`
+    /// says what else a compare leaves to it). Nothing before it may
     /// change anything. The block stops after it, as after an `FpuGuard`'s.
     FBailPrecise { regs: u8, when: Precise },
     /// x = ST(i).
@@ -632,7 +638,8 @@ pub enum Uop {
     /// Push the 80 bits at handle m, which is RAM's (`BailUnlessRam`), as
     /// FLD's handler does.
     FLoad80 { m: T },
-    /// Compare a with b into C0, C2 and C3.
+    /// Compare a with b into C0, C2 and C3, and clear C1. (A NaN went to
+    /// the handler before it, `Precise::Compare`.)
     FCom { a: X, b: X },
     /// t = the status word.
     FStatus { t: T },

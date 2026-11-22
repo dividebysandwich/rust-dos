@@ -429,14 +429,14 @@ impl Ops {
     }
 
     /// USER32's function `name` with plain values.
-    pub fn user(&mut self, name: &str, args: &[u32]) -> &mut Self {
+    pub fn user(&mut self, cpu: &Cpu, name: &str, args: &[u32]) -> &mut Self {
         let args: Vec<Arg> = args.iter().map(|&a| Arg::V(a)).collect();
-        self.call(user32::address_of(name), &args)
+        self.call(user32::address_of(cpu, name), &args)
     }
 
     /// SendMessageA with plain values.
-    pub fn send(&mut self, hwnd: u32, msg: u32, wp: u32, lp: u32) -> &mut Self {
-        self.user("SendMessageA", &[hwnd, msg, wp, lp])
+    pub fn send(&mut self, cpu: &Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32) -> &mut Self {
+        self.user(cpu, "SendMessageA", &[hwnd, msg, wp, lp])
     }
 
     /// Write `bytes` and a 0 at the offset `at` of the scratch space, in
@@ -457,9 +457,9 @@ impl Ops {
     }
 
     /// SendMessageA(hwnd, msg, wp, the string `text`).
-    pub fn send_text(&mut self, hwnd: u32, msg: u32, wp: u32, text: &str) -> &mut Self {
+    pub fn send_text(&mut self, cpu: &Cpu, hwnd: u32, msg: u32, wp: u32, text: &str) -> &mut Self {
         self.put(B_TEXT, &crate::dosstr::to_bytes(text), TEXT_SIZE);
-        let target = user32::address_of("SendMessageA");
+        let target = user32::address_of(cpu, "SendMessageA");
         self.call(
             target,
             &[Arg::V(hwnd), Arg::V(msg), Arg::V(wp), Arg::S(B_TEXT)],
@@ -467,22 +467,22 @@ impl Ops {
     }
 
     /// SetWindowTextA(hwnd, text).
-    pub fn set_text(&mut self, hwnd: u32, text: &str) -> &mut Self {
+    pub fn set_text(&mut self, cpu: &Cpu, hwnd: u32, text: &str) -> &mut Self {
         self.put(B_TEXT, &crate::dosstr::to_bytes(text), TEXT_SIZE);
-        let target = user32::address_of("SetWindowTextA");
+        let target = user32::address_of(cpu, "SetWindowTextA");
         self.call(target, &[Arg::V(hwnd), Arg::S(B_TEXT)])
     }
 
     /// SetDlgItemTextA(dlg, id, text).
-    pub fn set_item_text(&mut self, dlg: u32, id: u32, text: &str) -> &mut Self {
+    pub fn set_item_text(&mut self, cpu: &Cpu, dlg: u32, id: u32, text: &str) -> &mut Self {
         self.put(B_TEXT, &crate::dosstr::to_bytes(text), TEXT_SIZE);
-        let target = user32::address_of("SetDlgItemTextA");
+        let target = user32::address_of(cpu, "SetDlgItemTextA");
         self.call(target, &[Arg::V(dlg), Arg::V(id), Arg::S(B_TEXT)])
     }
 
     /// GetDlgItemTextA(dlg, id) into the text buffer.
-    pub fn get_item_text(&mut self, dlg: u32, id: u32) -> &mut Self {
-        let target = user32::address_of("GetDlgItemTextA");
+    pub fn get_item_text(&mut self, cpu: &Cpu, dlg: u32, id: u32) -> &mut Self {
+        let target = user32::address_of(cpu, "GetDlgItemTextA");
         self.call(
             target,
             &[Arg::V(dlg), Arg::V(id), Arg::S(B_TEXT), Arg::V(TEXT_SIZE)],
@@ -490,10 +490,17 @@ impl Ops {
     }
 
     /// MessageBoxA(owner, text, caption, style).
-    pub fn message_box(&mut self, owner: u32, text: &str, caption: &str, style: u32) -> &mut Self {
+    pub fn message_box(
+        &mut self,
+        cpu: &Cpu,
+        owner: u32,
+        text: &str,
+        caption: &str,
+        style: u32,
+    ) -> &mut Self {
         self.put(B_TEXT, &crate::dosstr::to_bytes(text), TEXT_SIZE);
         self.put(B_TEXT2, &crate::dosstr::to_bytes(caption), TEXT2_SIZE);
-        let target = user32::address_of("MessageBoxA");
+        let target = user32::address_of(cpu, "MessageBoxA");
         self.call(
             target,
             &[
@@ -733,11 +740,11 @@ fn get_file_name_as(cpu: &mut Cpu, ofn: u32, save: bool, win16: bool) -> Option<
     if old && flags & OFN_ENABLETEMPLATEHANDLE != 0 {
         let proc_ = super::address_of("FileOpenDlgProc31");
         let args = [DLL.base, template, owner, proc_, id];
-        o.user("DialogBoxIndirectParamA", &args);
+        o.user(cpu, "DialogBoxIndirectParamA", &args);
     } else if old && flags & OFN_ENABLETEMPLATE != 0 {
         let proc_ = super::address_of("FileOpenDlgProc31");
         let args = [w[O_INSTANCE], w[O_TEMPLATE], owner, proc_, id];
-        o.user("DialogBoxParamA", &args);
+        o.user(cpu, "DialogBoxParamA", &args);
     } else {
         let (words, proc_) = if old {
             (super::old::template(save), "FileOpenDlgProc31")
@@ -745,7 +752,7 @@ fn get_file_name_as(cpu: &mut Cpu, ofn: u32, save: bool, win16: bool) -> Option<
             (super::explorer::template(save), "FileOpenDlgProc")
         };
         o.write(B_TEMPLATE, &words);
-        let target = user32::address_of("DialogBoxIndirectParamA");
+        let target = user32::address_of(cpu, "DialogBoxIndirectParamA");
         let proc_ = super::address_of(proc_);
         o.call(
             target,

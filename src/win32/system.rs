@@ -694,9 +694,11 @@ pub fn enter_user(cpu: &mut Cpu, ctx: &Context) {
         .map(|t| (t.selector, t.tib))
         .collect();
     let system = process.system;
-    if !cpu.pe() {
+    if !cpu.pm() {
         cpu.note_mode_switch(true);
     }
+    // From virtual-8086 mode under the built-in monitor too.
+    cpu.set_cpu_flag(CpuFlags::VM, false);
     cpu.cr3 = cr3;
     cpu.cr0 |= CR0_PE | CR0_PG;
     if cpu.model.has_sse() {
@@ -821,7 +823,8 @@ fn load_registers(cpu: &mut Cpu, ctx: &Context) {
 }
 
 /// Put the processor in real mode at `cs:ip`, on the stack `ss:sp`, with
-/// DS and ES the process's PSP and the flags `flags`.
+/// DS and ES the process's PSP and the flags `flags`: in virtual-8086 mode
+/// under the built-in monitor, where DOS runs there.
 pub fn enter_real(cpu: &mut Cpu, (cs, ip): (u16, u16), (ss, sp): (u16, u16), flags: u32) {
     let psp = dos_psp(cpu);
     let cr4 = if cpu.bus.win32.psp != 0 {
@@ -851,7 +854,12 @@ pub fn enter_real(cpu: &mut Cpu, (cs, ip): (u16, u16), (ss, sp): (u16, u16), fla
     }
     cpu.set_esp(sp as u32);
     cpu.set_eip(ip as u32);
+    cpu.set_cpu_flag(CpuFlags::VM, false);
     cpu.load_eflags(flags & !(CpuFlags::VM | CpuFlags::NT | CpuFlags::IOPL).bits());
+    // Where DOS runs under the built-in monitor, there.
+    if crate::v86mon::installed(&cpu.bus) {
+        crate::v86mon::enter(cpu);
+    }
 }
 
 /// The DOS process the programs run in: its PSP.

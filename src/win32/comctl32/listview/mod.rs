@@ -633,14 +633,14 @@ pub(super) fn run_ops(cpu: &mut Cpu, hwnd: u32, ops: Vec<Op>, result: u32) -> Op
 }
 
 /// SendMessageA(to, msg, wp, lp) as a step.
-pub(super) fn send_op(to: u32, msg: u32, wp: Arg, lp: Arg) -> Op {
-    header::send_op(to, msg, wp, lp)
+pub(super) fn send_op(cpu: &Cpu, to: u32, msg: u32, wp: Arg, lp: Arg) -> Op {
+    header::send_op(cpu, to, msg, wp, lp)
 }
 
 /// USER32's function `name` as a step.
-pub(super) fn user_op(name: &str, args: &[Arg]) -> Op {
+pub(super) fn user_op(cpu: &Cpu, name: &str, args: &[Arg]) -> Op {
     Op::Call {
-        target: user32::address_of(name),
+        target: user32::address_of(cpu, name),
         args: args.to_vec(),
     }
 }
@@ -676,7 +676,7 @@ pub(super) fn notify_ops(
     words.extend_from_slice(more);
     vec![
         Op::Write { at: S_NM, words },
-        send_op(lv.notify, WM_NOTIFY, Arg::V(id), Arg::S(S_NM)),
+        send_op(cpu, lv.notify, WM_NOTIFY, Arg::V(id), Arg::S(S_NM)),
     ]
 }
 
@@ -753,7 +753,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             }
             let msg = header::HDM_GETORDERARRAY;
             let ops = vec![
-                send_op(lv.header, msg, Arg::V(wp), Arg::V(lp)),
+                send_op(cpu, lv.header, msg, Arg::V(wp), Arg::V(lp)),
                 Op::Return(Arg::Last),
             ];
             return run_ops(cpu, hwnd, ops, 0);
@@ -862,7 +862,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             }
             let msg = header::HDM_SETORDERARRAY;
             let ops = vec![
-                send_op(lv.header, msg, Arg::V(wp), Arg::V(lp)),
+                send_op(cpu, lv.header, msg, Arg::V(wp), Arg::V(lp)),
                 step(T_RESULT_LAST, &[]),
                 step(columns::T_ORDER_CHANGED, &[]),
             ];
@@ -1022,6 +1022,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if lp == header::NF_REQUERY {
                 let ops = vec![
                     send_op(
+                        cpu,
                         lv.notify,
                         WM_NOTIFYFORMAT,
                         Arg::V(hwnd),
@@ -1061,6 +1062,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 ops.push(step(columns::T_SHOW_HEADER, &[]));
             }
             ops.push(user_op(
+                cpu,
                 "DefWindowProcA",
                 &[Arg::V(hwnd), Arg::V(msg), Arg::V(wp), Arg::V(lp)],
             ));
@@ -1079,6 +1081,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 ops.extend(layout::update_scroll_ops(&lv));
             }
             ops.push(user_op(
+                cpu,
                 "DefWindowProcA",
                 &[Arg::V(hwnd), Arg::V(msg), Arg::V(wp), Arg::V(lp)],
             ));
@@ -1155,6 +1158,7 @@ fn create(cpu: &mut Cpu, hwnd: u32, mut lv: ListView, lp: u32) -> Option<u32> {
     put(cpu, hwnd, lv.clone());
     let ops = vec![
         send_op(
+            cpu,
             lv.notify,
             WM_NOTIFYFORMAT,
             Arg::V(hwnd),
@@ -1204,7 +1208,7 @@ fn measure_item_ops(cpu: &mut Cpu, hwnd: u32, lv: &ListView, scratch: u32) -> Ve
     let words = [102, id, 0, 0, lv.text_height as u32, 0];
     write_words(cpu, scratch + S_AUX, &words);
     vec![
-        send_op(lv.notify, WM_MEASUREITEM, Arg::V(id), Arg::S(S_AUX)),
+        send_op(cpu, lv.notify, WM_MEASUREITEM, Arg::V(id), Arg::S(S_AUX)),
         step(T_MEASURE, &[]),
     ]
 }
@@ -1238,7 +1242,13 @@ fn set_font(cpu: &mut Cpu, hwnd: u32, mut lv: ListView, font: u32, redraw: u32) 
     let mut ops = Vec::new();
     if lv.view == LV_VIEW_DETAILS && lv.header != 0 {
         let lp = redraw & 0xFFFF;
-        ops.push(send_op(lv.header, WM_SETFONT, Arg::V(lv.font), Arg::V(lp)));
+        ops.push(send_op(
+            cpu,
+            lv.header,
+            WM_SETFONT,
+            Arg::V(lv.font),
+            Arg::V(lp),
+        ));
         ops.push(step(layout::T_UPDATE_SIZE, &[]));
         ops.extend(layout::update_scroll_ops(&lv));
     }

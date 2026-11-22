@@ -831,7 +831,8 @@ impl Machine {
             }
             return true;
         }
-        // Held keys repeat, as keyboards do.
+        // The browser's repeats of a held key change nothing: the
+        // machine's keyboard repeats it itself (`keyboard::key_event`).
         let flags = bus.read_8(0x0417);
         let ascii = typed_char(pc, code, key, flags);
         if alt_graph && ascii != 0 {
@@ -1932,11 +1933,11 @@ mod tests {
         // The settings window saves as `save_settings` does, after a change
         // to something else.
         let mut changed = m.settings.clone();
-        changed.sound.opl3 = !changed.sound.opl3;
+        changed.sound.opl = Some(rust_dos::opl::Chip::Opl2);
         let text = config::complete_text(&m.saved.text, Path::new("/"), &m.saved.settings, &changed, &[], None);
         let saved = Settings::from_config(&config::parse(&text, Path::new("/"), None));
         assert_eq!(saved.memsize, Some(8));
-        assert_eq!(saved.sound.opl3, changed.sound.opl3);
+        assert_eq!(saved.sound.opl, changed.sound.opl);
     }
 
     #[test]

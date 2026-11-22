@@ -7,7 +7,7 @@ use crate::cpu::Cpu;
 use crate::win32::memory::{Memory, PAGE, PRIVATE, SYSTEM};
 use crate::win32::object;
 use crate::win32::task::{self, Next, Task};
-use crate::win32::{create_process_from, launcher, process};
+use crate::win32::{create_process_from, dosvm, launcher, process};
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
@@ -138,7 +138,7 @@ pub(super) fn create_process_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         inherit,
         flags,
         env_at,
-        _,
+        directory_at,
         startup_at,
         info_at,
     ] = args
@@ -172,11 +172,26 @@ pub(super) fn create_process_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         0 => None,
         at => Some(environment_at(cpu, at)?),
     };
+    let directory = match directory_at {
+        0 => None,
+        at => Some(string_at(cpu, at)?),
+    };
     if !cpu.bus.guest_probe(info_at, 16, true) {
         return None;
     }
     let (app, line) = (app.as_deref(), line.as_deref());
-    match spawn(cpu, app, line, environment, inherit != 0, flags, startup) {
+    let inherit = inherit != 0;
+    let spawned = spawn_in(
+        cpu,
+        app,
+        line,
+        environment,
+        inherit,
+        flags,
+        startup,
+        directory.as_deref(),
+    );
+    match spawned {
         Ok(info) => {
             for (i, value) in info.into_iter().enumerate() {
                 cpu.bus.guest_write_32(info_at + 4 * i as u32, value);
@@ -196,7 +211,9 @@ pub(super) fn create_process_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// process's, all its handles if `inherit`, and `startup`: a STARTUPINFOA
 /// and after it the C runtime's block that lpReserved2 points to, if
 /// there is one. The handles of the process and its main thread, and
-/// their ids; or the error.
+/// their ids; or the error. A DOS program starts once the service that
+/// called this has returned, and the caller goes on when it has ended
+/// (dosvm.rs).
 pub(crate) fn spawn(
     cpu: &mut Cpu,
     app: Option<&str>,
@@ -204,8 +221,32 @@ pub(crate) fn spawn(
     environment: Option<Vec<String>>,
     inherit: bool,
     flags: u32,
-    mut startup: Vec<u8>,
+    startup: Vec<u8>,
 ) -> Result<[u32; 4], u32> {
+    spawn_in(cpu, app, line, environment, inherit, flags, startup, None)
+}
+
+/// `spawn` with CreateProcessA's lpCurrentDirectory, `directory`: the
+/// folder the program starts in, or ERROR_DIRECTORY when it isn't one.
+/// A DOS program starts there. A Windows program starts in its parent's
+/// current folder, which the processes share here (#1611).
+#[allow(clippy::too_many_arguments)]
+fn spawn_in(
+    cpu: &mut Cpu,
+    app: Option<&str>,
+    line: Option<&str>,
+    environment: Option<Vec<String>>,
+    inherit: bool,
+    flags: u32,
+    mut startup: Vec<u8>,
+    directory: Option<&str>,
+) -> Result<[u32; 4], u32> {
+    const ERROR_DIRECTORY: u32 = 267;
+    if let Some(directory) = directory
+        && !crate::win32::kernel32::is_directory(cpu, directory)
+    {
+        return Err(ERROR_DIRECTORY);
+    }
     // The program, its command line and the arguments in that.
     let (path, line, arguments) = match (app, line) {
         // Given the program, Windows passes the line on as it is.
@@ -224,6 +265,13 @@ pub(crate) fn spawn(
     };
     let environment = environment.unwrap_or_else(|| process(cpu).environment.clone());
     let file = cpu.read_program_file(&path).ok_or(ERROR_FILE_NOT_FOUND)?;
+    if dosvm::is_program(&path, &file) {
+        // A DOS program runs in a DOS machine (dosvm.rs), once the
+        // caller's call has returned.
+        let spawned = dosvm::spawn(cpu, &path, arguments, &environment, directory)?;
+        cpu.almanac.last_program = Some(path);
+        return Ok(handles(cpu, spawned.process, spawned.thread));
+    }
     if launcher::is_ne(&file) {
         // InstallShield's setup launcher starts its 32-bit engine in its
         // place, as from the DOS prompt (`launcher`). Windows 98's waits
@@ -510,7 +558,7 @@ pub(super) fn load_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub(crate) fn win_exec_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
     let (process, thread) = (t.var(0), t.var(1));
     if t.step == 0 {
-        let wait = crate::win32::user32::address_of("WaitForInputIdle");
+        let wait = crate::win32::user32::address_of(cpu, "WaitForInputIdle");
         return Next::call(wait, &[process, WIN_EXEC_IDLE_MS], 1);
     }
     object::close(cpu, process);

@@ -15,15 +15,20 @@ const CORE_VERSION: u16 = 11;
 /// it in the eighth of the frame being made (`Bus::speaker_high`).
 const CORE_LOADS: [u16; 3] = [9, 10, CORE_VERSION];
 const VIDEO_VERSION: u16 = 2;
-const SOUND_VERSION: u16 = 4;
+const SOUND_VERSION: u16 = 5;
+/// The SOUN versions this rust-dos loads: its own, and 4, which has no
+/// right OPL2 of a dual OPL2 (`Opl::save_right`): on a machine with one,
+/// it gets what the one chip's second bank held (`Opl::right_from_bank_1`).
+const SOUND_LOADS: [u16; 2] = [4, SOUND_VERSION];
 const DOS_VERSION: u16 = 6;
 const CD_HEAD_VERSION: u16 = 1;
+const VCPI_VERSION: u16 = 1;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 84;
+const WIN32_VERSION: u16 = 86;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -39,9 +44,11 @@ const WIN32_VERSION: u16 = 84;
 /// to 80's not the TrueType fonts of the files a program added
 /// (`gdi32::fnt::TRUETYPE_SAVED`), 71's to 81's no drop targets
 /// (`ole32::DROP_TARGETS`), 71's to 82's no ExitWindowsExec command
-/// line (`boot::EXIT_EXEC`), and 71's to 83's not the 16-bit OLE
-/// modules' state (`win16::ole2::OLE16`).
-const WIN32_LOADS: [u16; 14] = [
+/// line (`boot::EXIT_EXEC`), 71's to 83's not the 16-bit OLE modules'
+/// state (`win16::ole2::OLE16`), 71's to 84's no DOS program a
+/// Windows program started (`dosvm::DOSVM_SAVED`), and 85's not the
+/// folder it starts in (`dosvm::DOSVM_DIRECTORY`).
+const WIN32_LOADS: [u16; 16] = [
     71,
     72,
     73,
@@ -55,6 +62,8 @@ const WIN32_LOADS: [u16; 14] = [
     81,
     82,
     83,
+    84,
+    85,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -77,6 +86,7 @@ const PIT2_VERSION: u16 = 1;
 const PIT_8254_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
 const KEY_QUEUE_VERSION: u16 = 1;
+const TYPEMATIC_VERSION: u16 = 1;
 const FRAME_CAP_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
@@ -184,6 +194,7 @@ impl Bus {
             cdaudio,
             xms,
             ems,
+            vcpi,
             dpmi,
             win32,
             umb,
@@ -299,6 +310,10 @@ impl Bus {
         // Which queued keystrokes the BIOS never saw, in a section of its
         // own so states saved before it load.
         w.section(b"KEYQ", KEY_QUEUE_VERSION, |w| kbd.save_queue(w));
+        // The keyboard's typematic rate and the key it repeats, likewise.
+        w.section(b"TYPM", TYPEMATIC_VERSION, |w| {
+            kbd.save_typematic(kbc.typematic, w)
+        });
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga);
             // A ToadForce's memory is saved with what its host renderer
@@ -360,12 +375,17 @@ impl Bus {
         // Where MSCDEX's drives' heads are, in a section of their own so
         // states saved before it load (with every head at sector 0).
         w.section(b"CDHD", CD_HEAD_VERSION, |w| mscdex.save_heads(w));
+        // VCPI's, in a section of its own so states saved before it load
+        // (with none of its pages handed out).
+        w.section(b"VCPI", VCPI_VERSION, |w| vcpi.save(w));
         // The Ultrasound's memory first, where it stays in place for
         // rewind's deltas (rewind.rs) whatever the queues after it hold.
         w.section(b"SOUN", SOUND_VERSION, |w| {
             w.label("gus");
             save_device(gus, w);
             save_all!(w; opl, mpu, gus_line, tandy_sound);
+            w.label("opl_right");
+            opl.save_right(w);
             w.label("sb");
             save_device(sb, w);
             w.label("lpt_dac");
@@ -548,6 +568,7 @@ impl Bus {
             cdaudio,
             xms,
             ems,
+            vcpi,
             dpmi,
             win32,
             umb,
@@ -704,6 +725,11 @@ impl Bus {
         } else {
             kbd.forget_queue();
         }
+        kbc.typematic = if r.next_is(b"TYPM") {
+            kbd.load_typematic(&mut r.section(b"TYPM", TYPEMATIC_VERSION)?)?
+        } else {
+            kbd.forget_typematic()
+        };
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         *last_present = None;
@@ -768,9 +794,19 @@ impl Bus {
         } else {
             mscdex.load_heads(None)?;
         }
-        let mut section = r.section(b"SOUN", SOUND_VERSION)?;
+        if r.next_is(b"VCPI") {
+            vcpi.load(&mut r.section(b"VCPI", VCPI_VERSION)?)?;
+        } else {
+            *vcpi = crate::vcpi::Vcpi::default();
+        }
+        let mut section = r.section_of(b"SOUN", &SOUND_LOADS)?;
         load_device(gus, "Gravis Ultrasound", &mut section)?;
         load_all!(&mut section; opl, mpu, gus_line, tandy_sound);
+        if section.version() >= Some(5) {
+            opl.load_right(&mut section)?;
+        } else {
+            opl.right_from_bank_1();
+        }
         load_device(sb, "Sound Blaster", &mut section)?;
         load_device(lpt_dac, "DAC on LPT1", &mut section)?;
         cdaudio.load_state(&mut section, |drive| disk.cd_image(drive))?;
@@ -881,6 +917,12 @@ impl Bus {
             None if high_speed => return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a Sound Blaster".into())),
             None => {}
         }
+        // The processes' stubs from older tables call what their programs
+        // were bound to.
+        crate::win32::stub_tables::mend(self)?;
+        // The Win16 KERNEL's stubs for imports nothing has keep their ids
+        // when KERNEL's table grows.
+        crate::win16::builtin::mend(self)?;
         Ok(lost)
     }
 
@@ -1056,6 +1098,8 @@ mod tests {
         (82, 0x7F8F_BB1B_6F82_7B99), // OLE32's drop targets and OleInitialize's processes
         (83, 0xE951_CEB4_D9AD_4CAC), // ExitWindowsExec's command line
         (84, 0x3A9C_D1FD_6601_1D0E), // the 16-bit OLE modules' state
+        (85, 0xD065_06B4_D1EE_C645), // the DOS program a Windows program started
+        (86, 0x64E2_699F_8225_8EB3), // the DOS program's folder and lent memory
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

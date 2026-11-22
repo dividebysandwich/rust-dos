@@ -1122,8 +1122,8 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Option<
 }
 
 /// The address of USER32's function `name`.
-fn user32(name: &str) -> u32 {
-    crate::win32::user32::address_of(name)
+fn user32(cpu: &Cpu, name: &str) -> u32 {
+    crate::win32::user32::address_of(cpu, name)
 }
 
 /// SendMessage(hwnd, msg, wParam, lParam) of 16-bit code: USER32's
@@ -1135,7 +1135,7 @@ pub fn send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// DefWindowProc, DefDlgProc and the others that take a message.
 pub fn send32_fn(cpu: &mut Cpu, name: &str, args: &[u32]) {
-    let target = user32(name);
+    let target = user32(cpu, name);
     send32(cpu, target, args[0], args[1], args[2], args[3]);
 }
 
@@ -1149,7 +1149,7 @@ pub fn post_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (msg, wp, lp) = to32(
         cpu, args[0], args[1], args[2], args[3], 0, &mut stack, &mut data,
     );
-    let target = user32("PostMessageA");
+    let target = user32(cpu, "PostMessageA");
     let ctx = Context::of(cpu);
     thunk::enter32_at(
         cpu,
