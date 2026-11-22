@@ -1330,18 +1330,26 @@ impl Cpu {
         self.load_flags16(new_flags.bits() as u16);
     }
 
-    /// See `set_cpu_flags`.
+    /// See `set_cpu_flags`. In virtual-8086 mode IOPL stays as it is, as
+    /// POPF and IRET leave it there: a BIOS service under the built-in
+    /// monitor that hands back the flags its caller pushed keeps IOPL 3.
     pub fn load_flags16(&mut self, value: u16) {
         let upper = self.flags.bits() & 0xFFFF_0000;
-        self.flags = CpuFlags::from_bits_retain(upper | (value as u32 & FLAGS16_WRITABLE) | 0x0002);
+        let writable = if self.v86() { FLAGS16_WRITABLE & !CpuFlags::IOPL.bits() } else { FLAGS16_WRITABLE };
+        let kept = self.flags.bits() & FLAGS16_WRITABLE & !writable;
+        self.flags = CpuFlags::from_bits_retain(upper | kept | (value as u32 & writable) | 0x0002);
     }
 
     /// Load EFLAGS, as POPFD and IRETD do in real mode (IRETD loads RF
     /// too). VM and RF can't be set this way; AC only exists from the 486
-    /// on, ID on a Pentium.
+    /// on, ID on a Pentium. In virtual-8086 mode IOPL stays as it is.
     pub fn load_eflags(&mut self, value: u32) {
-        let writable = FLAGS16_WRITABLE | self.model.eflags_extra();
-        let keep = self.flags.bits() & CpuFlags::VM.bits();
+        let mut writable = FLAGS16_WRITABLE | self.model.eflags_extra();
+        let mut keep = self.flags.bits() & CpuFlags::VM.bits();
+        if keep != 0 {
+            writable &= !CpuFlags::IOPL.bits();
+            keep |= self.flags.bits() & CpuFlags::IOPL.bits();
+        }
         self.flags = CpuFlags::from_bits_retain(keep | (value & writable) | 0x0002);
     }
 
@@ -1647,6 +1655,9 @@ impl Cpu {
     /// is until rust-dos starts again.
     pub fn set_upper_memory(&mut self, ems: bool, umb: bool) -> Result<(), String> {
         crate::ems::set_enabled(&mut self.bus, ems);
+        // At the prompt, DOS goes on under the virtual-8086 monitor with
+        // EMS, in real mode without.
+        crate::v86mon::sync(self);
         // With EMS, its page frame takes the upper half of upper memory.
         let size = if ems { 0x1000 } else { 0x2000 };
         let wanted = umb.then_some(size);
@@ -1886,6 +1897,7 @@ impl Cpu {
         // but for what resident programs hold, and a reset from now on is
         // a cold boot.
         let a20 = self.bus.xms.program_ended();
+        crate::vcpi::program_ended(&mut self.bus);
         self.bus.dpmi.reset();
         // The loops of a program that ends here get their summaries.
         crate::win32::trace::flush(self);
@@ -1908,6 +1920,13 @@ impl Cpu {
         crate::dos_data::write(&mut self.bus);
         crate::dos_data::write_driver_code(&mut self.bus);
         self.bus.write_8(verify_flag, verify);
+
+        // With expanded memory, DOS runs in virtual-8086 mode under the
+        // built-in monitor, as under EMM386.
+        if crate::v86mon::installed(&self.bus) {
+            crate::v86mon::install_rom(&mut self.bus);
+            crate::v86mon::enter(self);
+        }
 
         self.bus.log_string("[SYSTEM] Shell Loaded. Ready.");
     }

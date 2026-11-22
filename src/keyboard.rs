@@ -248,7 +248,7 @@ pub fn bios_took_scan(bus: &mut Bus, scan: u8) {
 /// the keystrokes stay queued for INT 16h, which reads them from there.
 pub fn bios_intercepted(cpu: &mut Cpu) {
     bios_saw_keys(&mut cpu.bus);
-    if cpu.v86() {
+    if cpu.guest_v86() {
         return;
     }
     let scan = cpu.get_al();
