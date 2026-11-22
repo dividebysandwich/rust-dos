@@ -13,7 +13,10 @@
 //! drawing. DrawDibBegin fails for a DIB no codec of codec.rs takes. An
 //! uncompressed DIB goes to StretchDIBits as it is. On a display of 256
 //! colours a picture of more than 8 bits a pixel is stretched to the
-//! destination and dithered to the halftone palette (`gdi32::dither`).
+//! destination and dithered to the halftone palette (`gdi32::dither`),
+//! but for a Cinepak one: iccvid.dll decodes that to 8 bits itself, in
+//! a palette of its own (`cinepak::palette_8`), at the size of the
+//! picture or twice it, and DrawDib stretches that.
 //! A save state keeps the DIB but not the decoder: after a restore the
 //! decoder refuses the frames up to the next key frame, and the picture
 //! stays until then.
@@ -505,6 +508,9 @@ pub struct DrawDib {
     /// its picture is dithered on a display of 256 colours. Set again
     /// from the format when the decoder is (after a restore).
     deep: bool,
+    /// The palette of a Cinepak picture's 8-bit colours, made when it is
+    /// first drawn on a display of 256 colours (`draw_cinepak_8`).
+    palette: u32,
 }
 
 crate::state_fields!(DrawDib {
@@ -517,7 +523,8 @@ crate::state_fields!(DrawDib {
     last
 } skip {
     codec,
-    deep
+    deep,
+    palette
 });
 
 /// A BITMAPINFOHEADER's fields this needs.
@@ -768,6 +775,11 @@ fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if flags & DDF_DONTDRAW != 0 || src_bits == 0 {
         return Some(1);
     }
+    let src_rect = (xs as i32, ys as i32, dxs as i32, dys as i32);
+    let dst_rect = (xd as i32, yd as i32, dxd as i32, dyd as i32);
+    if draw_cinepak_8(cpu, slot, hdc, dst_rect, src_rect) {
+        return Some(1);
+    }
     // On a display of 256 colours, a picture of more bits is dithered to
     // the halftone palette. DrawDib asks the display, as GetDeviceCaps
     // tells every DC the display's depth.
@@ -792,6 +804,79 @@ fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         halftone,
     )?;
     Some((drawn != 0) as u32)
+}
+
+/// On a display of 256 colours, draws the picture of a Cinepak source as
+/// Windows 98's DrawDib does: decoded by the codec to 8 bits in its
+/// palette, at twice the size when the whole picture is drawn at twice
+/// its size, and stretched to the destination `dst` (x, y, width,
+/// height) from the source rectangle `src` (x and y from the picture's
+/// bottom left). The codec's palette is selected into the DC and
+/// realized for the drawing, so the pixels keep their indexes, which on
+/// Windows land on the same entries of the system palette. False when
+/// the picture isn't drawn so.
+fn draw_cinepak_8(
+    cpu: &mut Cpu,
+    slot: usize,
+    hdc: u32,
+    (xd, yd, dxd, dyd): (i32, i32, i32, i32),
+    (xs, ys, dxs, dys): (i32, i32, i32, i32),
+) -> bool {
+    use crate::win32::gdi32::{self, dither, draw, palette};
+    let d = dd(cpu, slot);
+    let cinepak = codec::upper(d.compression) == codec::upper(u32::from_le_bytes(*b"cvid"));
+    if d.buffer == 0 || !cinepak || !palette::palette_device(cpu) {
+        return false;
+    }
+    let Some(dc) = gdi32::gdi(cpu).dc(hdc).cloned() else {
+        return false;
+    };
+    let d = dd(cpu, slot);
+    let (w, h) = (d.width as i32, d.height as i32);
+    let (x0, y0) = dc.to_device(xd, yd);
+    let (x1, y1) = dc.to_device(xd + dxd, yd + dyd);
+    let (pw, ph) = (x1 - x0, y1 - y0);
+    if pw <= 0 || ph <= 0 || dxs <= 0 || dys <= 0 {
+        return false;
+    }
+    let top = h - ys - dys;
+    let from = (xs, top, xs + dxs, top + dys);
+    let zoom = if from == (0, 0, w, h) && (pw, ph) == (2 * w, 2 * h) {
+        2
+    } else {
+        1
+    };
+    let Some(indexes) = d.codec.indexes_8(d.width, d.height, zoom as u32) else {
+        return false;
+    };
+    let grey = !d.deep;
+    let mut hpal = d.palette;
+    if gdi32::gdi(cpu).palette(hpal).is_none() {
+        let colors = super::cinepak::palette_8(gdi32::static_colors(), grey);
+        hpal = palette::system_palette_of(cpu, &colors);
+        dd(cpu, slot).palette = hpal;
+    }
+    let colors = super::cinepak::palette_8(gdi32::static_colors(), grey);
+    let from = if zoom == 2 { (0, 0, pw, ph) } else { from };
+    let surface = dither::stretch_8(&indexes, w * zoom, colors, from, pw, ph);
+    let source = draw::Source {
+        surface,
+        bk_color: 0xFF_FFFF,
+        origin: (0, 0),
+    };
+    let old = palette::select_palette(cpu, &[hdc, hpal, 0]).filter(|&o| o != 0);
+    palette::realize_posted(cpu, hdc);
+    draw::blit_from(
+        cpu,
+        hdc,
+        (x0, y0, x1, y1),
+        Some((source, (0, 0, pw, ph))),
+        SRCCOPY,
+    );
+    if let Some(old) = old {
+        palette::select_palette(cpu, &[hdc, old, 1]);
+    }
+    true
 }
 
 /// How many of the `len` bytes at `at` the program can read, up to the
