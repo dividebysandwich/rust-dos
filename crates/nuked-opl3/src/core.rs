@@ -509,6 +509,71 @@ impl Chip {
         }
     }
 
+    /// rust-dos: whether the chip's output can't change until a register
+    /// is written. Every slot that sounds (all but those keyed off and
+    /// released to full attenuation) and every slot that modulates one
+    /// holds still: no phase increment, vibrato included, no tremolo, an
+    /// envelope whose rate in its state is 0 with no change of state due,
+    /// and its feedback at a fixed point (the output it gave last is the
+    /// one before, and the feedback the next sample works out is the one
+    /// this sample had). Feedback that goes round a cycle of outputs
+    /// instead never holds, nor does rhythm mode, whose noise moves. A
+    /// released slot that only adds its sine's sign bit to the mix may
+    /// still move, as when the chip goes idle (`Opl::render_chip`).
+    pub(crate) fn is_frozen(&self) -> bool {
+        if self.rhy & 0x20 != 0 || self.writebuf.iter().any(|w| w.reg & 0x200 != 0) {
+            return false;
+        }
+        let sounds = |s: &Slot| !(s.key == 0 && s.eg_rout == 0x1ff);
+        let mut relevant = [false; 36];
+        for (i, s) in self.slots.iter().enumerate() {
+            relevant[i] = sounds(s);
+        }
+        // The slots that modulate a relevant one, down a four-operator
+        // chain.
+        for _ in 0..4 {
+            for i in 0..36 {
+                let m = self.slots[i].mod_idx;
+                if relevant[i] && m < 72 {
+                    relevant[m / 2] = true;
+                }
+            }
+        }
+        (0..36)
+            .filter(|&i| relevant[i])
+            .all(|i| self.slot_frozen(i, sounds(&self.slots[i])))
+    }
+
+    /// rust-dos: whether slot `i` gives the same output at every sample
+    /// from now on, if what modulates it does (`is_frozen`). A slot that
+    /// is `sounding` needs its envelope to hold too.
+    fn slot_frozen(&self, i: usize, sounding: bool) -> bool {
+        let s = &self.slots[i];
+        if s.pg_inc != 0 || s.reg_vib != 0 && s.pg_inc_vib.iter().any(|&inc| inc != 0) {
+            return false;
+        }
+        if sounding {
+            let state = s.eg_gen;
+            let rate_zero = s.eg_rate_nonzero_mask >> (state & 0x03) & 1 == 0;
+            let changes = s.key != 0 && state == ENV_RELEASE
+                || s.key == 0 && state != ENV_RELEASE
+                || state == ENV_ATTACK && s.eg_rout == 0
+                || state == ENV_DECAY && s.eg_rout >> 4 == s.reg_sl as u16
+                || state != ENV_ATTACK && s.eg_rout & 0x1f8 == 0x1f8 && s.eg_rout != 0x1ff;
+            if s.trem_enabled || !rate_zero || changes {
+                return false;
+            }
+        }
+        let out = self.outputs[i * 2];
+        let fb = self.channels[s.channel].fb;
+        let next_fb = if fb != 0 {
+            s.prout.wrapping_add(out) >> (0x09 - fb)
+        } else {
+            0
+        };
+        s.prout == out && next_fb == self.outputs[i * 2 + 1]
+    }
+
     pub(crate) fn active_voice_count(&self) -> usize {
         self.slots[..36]
             .iter()
