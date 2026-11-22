@@ -31,6 +31,8 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("IF", &IfCommand),
     ("FOR", &ForCommand),
     ("PAUSE", &PauseCommand),
+    ("VERIFY", &VerifyCommand),
+    ("BREAK", &BreakCommand),
     ("CHOICE", &ChoiceCommand),
     ("PROMPT", &PromptCommand),
     ("COPY", &crate::file_commands::CopyCommand),
@@ -881,6 +883,75 @@ fn file_exists(cpu: &Cpu, name: &str) -> bool {
         cpu.bus.disk.matching_files(name).is_ok_and(|files| !files.is_empty())
     } else {
         cpu.bus.disk.is_file(name)
+    }
+}
+
+/// What VERIFY and BREAK do with their argument, as MS-DOS 6.22's
+/// COMMAND.COM does: none shows the flag (`NAME is on`), ON or OFF (any
+/// case, after spaces or an =) sets it, anything else is refused, and /?
+/// shows the usage.
+fn on_off_command(
+    cpu: &mut Cpu,
+    args: &str,
+    name: &str,
+    help: &str,
+    get: fn(&mut Cpu) -> bool,
+    set: fn(&mut Cpu, bool),
+) {
+    let arg = args
+        .trim_start_matches([' ', '\t', '='])
+        .trim_end_matches([' ', '\t']);
+    match arg.to_ascii_uppercase().as_str() {
+        "" => {
+            let state = if get(cpu) { "on" } else { "off" };
+            print_string(cpu, &format!("{} is {}\r\n", name, state));
+        }
+        "ON" => set(cpu, true),
+        "OFF" => set(cpu, false),
+        "/?" => print_string(cpu, help),
+        _ => print_string(cpu, "Must specify ON or OFF\r\n"),
+    }
+}
+
+/// Whether the DOS flag byte at `offset` of DOS's data segment is on.
+fn dos_flag(cpu: &mut Cpu, offset: u16) -> bool {
+    cpu.bus
+        .guest_read_8(crate::dos_data::address(offset) as u32)
+        & 1
+        != 0
+}
+
+/// Set the DOS flag byte at `offset` of DOS's data segment, as INT 21h's
+/// functions that set it do.
+fn set_dos_flag(cpu: &mut Cpu, offset: u16, on: bool) {
+    cpu.bus
+        .guest_write_8(crate::dos_data::address(offset) as u32, on as u8);
+}
+
+/// VERIFY [ON|OFF]: DOS's verify flag, which INT 21h AH=2Eh and 54h set
+/// and get.
+struct VerifyCommand;
+impl ShellCommand for VerifyCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        const HELP: &str = "Tells MS-DOS whether to verify that your files are written correctly to a\r\n\
+            disk.\r\n\r\nVERIFY [ON | OFF]\r\n\r\n\
+            Type VERIFY without a parameter to display the current VERIFY setting.\r\n";
+        let get = |cpu: &mut Cpu| dos_flag(cpu, crate::dos_data::VERIFY_FLAG);
+        let set = |cpu: &mut Cpu, on| set_dos_flag(cpu, crate::dos_data::VERIFY_FLAG, on);
+        on_off_command(cpu, args, "VERIFY", HELP, get, set);
+    }
+}
+
+/// BREAK [ON|OFF]: DOS's Ctrl+Break check flag, which INT 21h AX=3300h
+/// to 3302h get and set.
+struct BreakCommand;
+impl ShellCommand for BreakCommand {
+    fn execute(&self, cpu: &mut Cpu, args: &str) {
+        const HELP: &str = "Sets or clears extended CTRL+C checking.\r\n\r\nBREAK [ON | OFF]\r\n\r\n\
+            Type BREAK without a parameter to display the current BREAK setting.\r\n";
+        let get = |cpu: &mut Cpu| dos_flag(cpu, crate::dos_data::BREAK_FLAG);
+        let set = |cpu: &mut Cpu, on| set_dos_flag(cpu, crate::dos_data::BREAK_FLAG, on);
+        on_off_command(cpu, args, "BREAK", HELP, get, set);
     }
 }
 
