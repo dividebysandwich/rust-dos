@@ -120,7 +120,10 @@ fn a_driver_probing_the_bases_without_a_card_finds_nothing_quietly() {
         assert_eq!(found, base == 0x220, "{base:03X}");
     }
     let lines = bus.take_log_backlog();
-    assert!(lines.iter().all(|(_, l)| !l.contains("Unhandled")), "{lines:?}");
+    assert!(
+        lines.iter().all(|(_, l)| !l.contains("Unhandled")),
+        "{lines:?}"
+    );
 }
 
 #[test]
