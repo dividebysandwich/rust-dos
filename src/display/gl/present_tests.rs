@@ -688,10 +688,13 @@ fn xbrz_near_colour_edges_use_exact_colour_inequality() {
 fn xbrz_two_colour_pictures_filter_the_same_with_colours_swapped() {
     use crate::video::mono::Monochrome;
     // With a symmetric distance, swapping the two colours of a picture
-    // swaps them in every blend: each output pixel of the swapped picture
-    // is the sum of the two colours minus the original's, give or take
-    // the rounding of the blend. The texels near the edge also see the
-    // transparent black outside the frame, so only the interior counts.
+    // swaps them in every blend, so a pixel of the output and the same
+    // pixel of the swapped picture's output add up to the sum of the two
+    // colours. Each blend rounds down in both outputs, which can take a
+    // level off that sum, and up to three rotations blend into one output
+    // pixel, so the sum may fall short by 3 but never exceeds it. The
+    // texels near the edge also see the transparent black outside the
+    // frame, so only the interior counts.
     let (low, high) = (100u8, 134u8);
     let (width, height) = (24usize, 24usize);
     let mut state = 0x2545_f491u32;
@@ -727,8 +730,9 @@ fn xbrz_two_colour_pictures_filter_the_same_with_colours_swapped() {
             if a != low as i32 && a != high as i32 {
                 blended += 1;
             }
+            let short = low as i32 + high as i32 - a - b;
             assert!(
-                (a + b - low as i32 - high as i32).abs() <= 1,
+                (0..=3).contains(&short),
                 "({x}, {y}): {a} and {b} with the colours swapped"
             );
         }
