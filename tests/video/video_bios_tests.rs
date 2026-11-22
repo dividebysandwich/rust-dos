@@ -396,3 +396,20 @@ fn graphics_pixels_xor_and_scroll() {
     int10(&mut cpu, 0x0D00, 0, 100, 100);
     assert_eq!(cpu.get_al(), 2);
 }
+
+#[test]
+fn alternate_print_screen_points_int_05h_at_the_bios_s_routine() {
+    // Ultima VIII's INSTALL selects it at startup: INT 10h AH=12h BL=20h
+    // points INT 05h at the video BIOS's print screen, over a hook a
+    // program left there, and returns nothing.
+    let mut cpu = machine(0x03);
+    let routine = (0xF000, rust_dos::bios::IRET_HANDLER);
+    cpu.bus.write_16(0x14, 0x5678);
+    cpu.bus.write_16(0x16, 0x1234);
+    int10(&mut cpu, 0x1200, 0x0020, 0x1111, 0x2222);
+    assert_eq!((cpu.bus.read_16(0x16), cpu.bus.read_16(0x14)), routine);
+    assert_eq!(
+        (cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()),
+        (0x1200, 0x0020, 0x1111, 0x2222)
+    );
+}
