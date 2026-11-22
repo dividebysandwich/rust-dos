@@ -336,3 +336,19 @@ fn a_program_that_exits_keeps_its_tone() {
         "the tone stopped"
     );
 }
+
+#[test]
+fn closing_a_program_leaves_the_gate_as_the_startup_setting_has_it() {
+    // With `pit2_gate_at_start` (a game's profile), the BIOS leaves
+    // channel 2's gate up: the close puts port 61h back that way, the
+    // speaker data bit clear so nothing sounds.
+    let (mut cpu, hz) = program_playing_a_tone("gate");
+    cpu.bus.pit2_gate_at_start = true;
+    cpu.close_program();
+    cpu.load_shell();
+    assert_eq!(cpu.bus.io_read(0x61) & 0x03, 0x01);
+    samples(&mut cpu.bus);
+    wait_us(&mut cpu.bus, 200_000);
+    let level = amplitude(&samples(&mut cpu.bus), hz);
+    assert!(level < 10.0, "the tone goes on at {level}");
+}
