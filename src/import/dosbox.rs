@@ -618,7 +618,9 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         },
         ("sblaster", "oplmode") => match first {
             "opl2" => imported.set("sound", "opl", "opl2"),
-            // DOSBox 0.74's CMS chips on its SB 1.x or 2.0.
+            // DOSBox 0.74's CMS chips without an OPL, which DOSBox Staging
+            // reads as `cms=on`. rust-dos always has its FM chip at 388h,
+            // so the SB 2.0 keeps its OPL2 and has the chips beside it.
             "cms" => {
                 imported.set("sound", "opl", "opl2");
                 imported.set("sound", "cms", "true");
