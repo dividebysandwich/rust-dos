@@ -1376,11 +1376,19 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 33h: Get/Set Ctrl-Break Check
         0x33 => {
             let al = cpu.get_al();
-            if al == 0x00 {
-                // Get
-                cpu.set_reg8(Register::DL, 0); // 0 = Off
-            } else if al == 0x01 { // Set
-                // Ignore setting, just return
+            let flag = dos_data::address(dos_data::BREAK_FLAG) as u32;
+            if al <= 0x02 {
+                // The Ctrl+Break check flag: get it in DL (AL=00h), set it
+                // from DL (01h), or both, the old one in DL (02h). It is
+                // kept for BREAK and the programs that read it; nothing
+                // else here looks at it.
+                let old = cpu.bus.guest_read_8(flag) & 1;
+                if al != 0x00 {
+                    cpu.bus.guest_write_8(flag, cpu.get_reg8(Register::DL) & 1);
+                }
+                if al != 0x01 {
+                    cpu.set_reg8(Register::DL, old);
+                }
             } else if al == 0x06 {
                 // Get MS-DOS Version (True version)
                 let version = cpu.bus.dos_version;
@@ -2157,6 +2165,21 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 0Dh: Disk reset (flush buffers). Nothing is buffered.
         0x0D => {}
+
+        // AH = 2Eh: Set the verify flag from bit 0 of AL (00h off, 01h on),
+        // as DOS does. It is kept for AH=54h; the drives here write
+        // without reading back either way.
+        0x2E => {
+            let flag = dos_data::address(dos_data::VERIFY_FLAG) as u32;
+            cpu.bus.guest_write_8(flag, cpu.get_al() & 1);
+        }
+
+        // AH = 54h: Get the verify flag in AL.
+        0x54 => {
+            let flag = dos_data::address(dos_data::VERIFY_FLAG) as u32;
+            let on = cpu.bus.guest_read_8(flag);
+            cpu.set_reg8(Register::AL, on);
+        }
 
         // AH = 2Ah: Get date. CX=year, DH=month, DL=day, AL=day of week.
         0x2A => {

@@ -325,6 +325,17 @@ fn set_param(cpu: &mut Cpu, action: u32, value: u32) {
     }
 }
 
+/// Program the keyboard's typematic rate and delay with Windows' keyboard
+/// speed (0-31: 2 to 30 a second, rate 1Fh to 00h) and delay (0-3: 250
+/// ms to 1 s), as Windows' keyboard driver does when it starts and when
+/// SPI_SETKEYBOARDSPEED or SPI_SETKEYBOARDDELAY changes them. Windows'
+/// defaults, 31 and 1, repeat a held key 30 times a second after 500 ms.
+pub fn program_keyboard(cpu: &mut Cpu) {
+    let speed = param(cpu, 11, 31).min(31) as u8;
+    let delay = param(cpu, 23, 1).min(3) as u8;
+    cpu.bus.kbc.typematic = delay << 5 | (31 - speed);
+}
+
 /// SystemParametersInfoA(action, ui, pv, flags).
 pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (action, ui, pv) = (args[0], args[1], args[2]);
@@ -382,8 +393,15 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let v = param(cpu, 107, 400);
             put(cpu, pv, v)
         }
-        2 | 11 | 23 | 37 | 57 | 107 => {
+        2 | 37 | 57 | 107 => {
             set_param(cpu, action, ui);
+            TRUE
+        }
+        // SPI_SETKEYBOARDSPEED and SPI_SETKEYBOARDDELAY: the keyboard
+        // repeats at the new rate.
+        11 | 23 => {
+            set_param(cpu, action, ui);
+            program_keyboard(cpu);
             TRUE
         }
         // SPI_GETMOUSEHOVERWIDTH, SPI_GETMOUSEHOVERHEIGHT and

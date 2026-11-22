@@ -1495,6 +1495,7 @@ const ABSENT_SECTIONS: &[(&str, &str)] = &[
     ("PNP", "the ISA Plug and Play card is a ViBRA16C: the machine's card is an AWE32"),
     ("VFX1", "the VFX1 headset is a VR headset's: its tracking is the host's, as the VR pads are"),
     ("W32", "the built-in Windows runs Win32 programs, which the run doesn't start"),
+    ("RTCA", "the clock's alarm, which the run's program never enables"),
 ];
 
 /// Parts of the save state that the run doesn't change, and why.
@@ -1520,6 +1521,7 @@ const STILL: &[(&str, &str)] = &[
     ("DOS.dos_high", "the settings' DOS=HIGH"),
     ("DOS.disk_io", "the disk's speed settings, and the time charged until the next instruction takes it"),
     ("CDHD", "MSCDEX's heads: the run's CD drive is a folder, which has no sectors to seek"),
+    ("VCPI", "VCPI's pages and PIC vectors: the run's program uses no DOS extender"),
     ("ENV", "the settings' environment variables"),
     ("SEP", "the SYSENTER MSRs, which only a Pentium II's WRMSR sets"),
     ("SSE", "the SSE registers and MXCSR, which only a Pentium III's instructions set"),
@@ -1545,6 +1547,7 @@ const SECTION_FIELDS: &[(&str, &str)] = &[
     ("ide", "IDE"),
     ("fdc", "FDC"),
     ("dpmi", "DPMI"),
+    ("vcpi", "VCPI"),
     ("net", "NET"),
     ("serial", "SER"),
     ("awe", "AWE"),

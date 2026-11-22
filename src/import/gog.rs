@@ -110,11 +110,15 @@ fn import_info(info: &Path, home: Option<&Path>) -> Result<Imported, String> {
     };
     let working_dir = host_path(install, task["workingDir"].as_str().unwrap_or(""));
     let args = crate::mount::tokenize(task["arguments"].as_str().unwrap_or(""))?;
+    let copies = support_copies(install);
     let (mut confs, mut commands) = (Vec::new(), Vec::new());
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.to_ascii_lowercase().as_str() {
-            "-conf" => confs.extend(args.next().map(|p| host_path(&working_dir, p))),
+            "-conf" => confs.extend(
+                args.next()
+                    .map(|p| or_support_copy(host_path(&working_dir, p), &copies)),
+            ),
             "-c" => commands.extend(args.next().filter(|c| !c.eq_ignore_ascii_case("exit")).cloned()),
             _ => {}
         }
@@ -123,6 +127,84 @@ fn import_info(info: &Path, home: Option<&Path>) -> Result<Imported, String> {
         confs = conf_files(install);
     }
     import_confs(&confs, &[working_dir, install.to_path_buf()], &name, &commands, home, install)
+}
+
+/// The folders GOG Galaxy copies into an install after it downloads one:
+/// the `supportData` actions of the install's `goggame-*.script` files
+/// (the game's and those of its DLC), each a folder of the product's
+/// support data (`gog-support\<product id>`, such as its `app` folder
+/// with the DOSBox configuration files) and the folder of the install it
+/// goes to (`{app}`, the install itself). gogdl, the downloader Heroic
+/// uses, runs no script and leaves the files in `gog-support`. Empty
+/// without a script.
+fn support_copies(install: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let mut scripts: Vec<PathBuf> = fs::read_dir(install)
+        .into_iter()
+        .flatten()
+        .map(|e| e.path)
+        .filter(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            name.starts_with("goggame-") && name.ends_with(".script") && fs::is_file(p)
+        })
+        .collect();
+    scripts.sort();
+    let mut copies = Vec::new();
+    for script in scripts {
+        let Some(json) = fs::read_to_string(&script)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        else {
+            continue;
+        };
+        let Some(product) = json["productId"].as_str() else {
+            continue;
+        };
+        let support = host_path(install, &format!("gog-support/{product}"));
+        let actions = json["actions"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        copies.extend(
+            actions
+                .iter()
+                .map(|action| &action["install"])
+                .filter(|install| install["action"].as_str() == Some("supportData"))
+                .map(|install| &install["arguments"])
+                .filter(|args| args["type"].as_str() == Some("folder"))
+                .filter_map(|args| {
+                    let source = args["source"].as_str()?.strip_prefix("{supportDir}")?;
+                    let target = args["target"].as_str()?.strip_prefix("{app}")?;
+                    // What follows the placeholder starts with a slash,
+                    // which `host_path` would take for the root on Linux
+                    // and macOS.
+                    let relative = |p: &str| p.trim_start_matches(['/', '\\']).to_string();
+                    Some((
+                        host_path(&support, &relative(source)),
+                        host_path(install, &relative(target)),
+                    ))
+                }),
+        );
+    }
+    copies
+}
+
+/// The file at `path`, or, while it isn't there, its copy in the support
+/// data that GOG Galaxy would have put there (`support_copies`).
+fn or_support_copy(path: PathBuf, copies: &[(PathBuf, PathBuf)]) -> PathBuf {
+    if fs::is_file(&path) {
+        return path;
+    }
+    copies
+        .iter()
+        .find_map(|(source, target)| {
+            let rel = path.strip_prefix(target).ok()?;
+            let copy = host_path(source, &rel.to_string_lossy());
+            fs::is_file(&copy).then_some(copy)
+        })
+        .unwrap_or(path)
 }
 
 /// A game GOG starts without DOSBox: the Windows program of its primary
@@ -294,6 +376,74 @@ mod tests {
         assert_eq!(imported.drives[1].path, game.join("cloud_saves/game.ins"));
         assert_eq!(imported.autoexec, ["@echo off", "c:", "game"]);
         assert!(imported.settings.iter().any(|(_, k, v)| *k == "cycles" && v == "20000"));
+    }
+
+    #[test]
+    fn a_gogdl_install_reads_the_configuration_from_its_support_data() {
+        // As gogdl installs Warlords II Deluxe: the files the script's
+        // supportData action would copy to the install stay in
+        // gog-support.
+        let game = scratch("gogdl");
+        let app = game.join("gog-support/1421600680/app");
+        fs::create_dir_all(game.join("DOSBOX")).unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            game.join("goggame-1421600680.info"),
+            r#"{"gameId":"1421600680","name":"Warlords II Deluxe","playTasks":[
+            {"arguments":"-conf \"..\\dosbox_warlords2.conf\" -conf \"..\\dosbox_warlords2_single.conf\" -noconsole -c \"exit\"",
+             "isPrimary":true,"path":"DOSBOX\\dosbox.exe","type":"FileTask","workingDir":"DOSBOX"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            game.join("goggame-1421600680.script"),
+            r#"{"actions":[
+            {"install":{"action":"supportData","arguments":{"overwrite":true,
+             "source":"{supportDir}/app","target":"{app}","type":"folder"}},
+             "languages":["*"],"name":"DOSBoxConfig"},
+            {"install":{"action":"setRegistry","arguments":{"root":"HKEY_LOCAL_MACHINE",
+             "subkey":"Software\\GOG.com\\Games\\1421600680","valueData":"dosbox_warlords2",
+             "valueName":"DOSBOXCONF","valueType":"String"}},"name":"DOSBoxConfigLegacy2"}],
+            "productId":"1421600680"}"#,
+        )
+        .unwrap();
+        fs::write(
+            app.join("dosbox_warlords2.conf"),
+            "[cpu]\ncycles=fixed 30000\n",
+        )
+        .unwrap();
+        fs::write(
+            app.join("dosbox_warlords2_single.conf"),
+            "[autoexec]\n@echo off\nmount c \"..\"\nimgmount d \"..\\game.ins\" -t iso\nc:\nwar2.bat\nexit\n",
+        )
+        .unwrap();
+        fs::write(game.join("game.ins"), "").unwrap();
+
+        let imported = import(&game, None).unwrap();
+        assert_eq!(imported.name, "Warlords II Deluxe");
+        assert_eq!(imported.drives[0].path, game);
+        assert_eq!(imported.drives[1].path, game.join("game.ins"));
+        assert_eq!(imported.autoexec, ["@echo off", "c:", "war2.bat"]);
+        assert!(
+            imported
+                .settings
+                .iter()
+                .any(|(_, k, v)| *k == "cycles" && v == "30000")
+        );
+
+        // A file in the install itself, as GOG Galaxy copies it there,
+        // goes before the support data's.
+        fs::write(
+            game.join("dosbox_warlords2.conf"),
+            "[cpu]\ncycles=fixed 20000\n",
+        )
+        .unwrap();
+        let imported = import(&game, None).unwrap();
+        assert!(
+            imported
+                .settings
+                .iter()
+                .any(|(_, k, v)| *k == "cycles" && v == "20000")
+        );
     }
 
     #[test]

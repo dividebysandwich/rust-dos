@@ -137,7 +137,7 @@ fn show_floppy_transfer(cpu: &mut Cpu, dl: u8, ah: u8) {
     if cpu.bus.boot.is_none()
         || cpu.bus.fdc.is_none()
         || dl >= crate::boot::FLOPPY_UNITS
-        || !cpu.v86()
+        || !cpu.guest_v86()
         || cpu.check_io(crate::fdc::DATA, 1).is_ok()
     {
         return;

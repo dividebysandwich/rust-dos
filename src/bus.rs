@@ -135,6 +135,8 @@ pub struct Bus {
     pub kbc_release_at: Option<u64>,
     /// When the clock's next periodic interrupt comes, in PIT ticks.
     pub rtc_next: Option<u64>,
+    /// When to look for the clock's alarm next, while it is enabled.
+    pub rtc_alarm_next: Option<u64>,
     /// The A20 gate as a mask for physical addresses: with the gate
     /// closed, address line 20 is forced to 0 and addresses wrap at 1 MB
     /// as on an 8086. See `a20()` and `set_a20()`.
@@ -162,6 +164,8 @@ pub struct Bus {
     pub xms: crate::xms::Xms,
     /// The expanded memory manager (INT 67h), if EMS is on.
     pub ems: Option<crate::ems::Ems>,
+    /// VCPI's pages and the PIC mapping its client set (vcpi.rs).
+    pub vcpi: crate::vcpi::Vcpi,
     /// The DPMI host (INT 2Fh AX=1687h, INT 31h) and its clients.
     pub dpmi: crate::dpmi::Dpmi,
     /// The built-in Windows (`win32`) and its running Win32 program.
@@ -998,6 +1002,7 @@ impl Bus {
     fn plain_vga_run(&self, dst: usize, len: usize) -> bool {
         (ADDR_VGA_GRAPHICS..=ADDR_VGA_GRAPHICS + SIZE_GRAPHICS - len).contains(&dst)
             && !self.vbe_window()
+            && self.vga.maps_graphics_window()
             && self.s3_mmio(dst).is_none()
             && self.mach64_mmio(dst).is_none()
             && self.vga.plain_writes()
@@ -1162,6 +1167,11 @@ impl Bus {
                 }
                 return self.vbe.vram[offset];
             }
+            // Nothing there while GR06 maps the memory at B0000h or
+            // B8000h alone (the text modes).
+            if !self.vga.maps_graphics_window() {
+                return 0xFF;
+            }
             // Route through VGA so chain-4, odd/even, and Read Map Select
             // work correctly. read_graphics also latches planes, needed
             // for planar read-modify-write sequences.
@@ -1217,6 +1227,9 @@ impl Bus {
             return self.mapped_8(addr);
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && !self.vbe_window() {
+            if !self.vga.maps_graphics_window() {
+                return 0xFF;
+            }
             let saved = self.vga.latches.get();
             let v = self.vga.read_graphics(self.vga_window(addr, false));
             self.vga.latches.set(saved);
@@ -1237,7 +1250,11 @@ impl Bus {
     /// the VGA's planes as `write_planes_plainly` has them.
     #[cfg_attr(not(dynrec), allow(dead_code))]
     pub(crate) fn plain_planes(&mut self) -> Option<(u8, *mut u8, usize)> {
-        if self.vbe_window() || self.et4000() || (self.s3() && self.vga.s3.mmio()) {
+        if self.vbe_window()
+            || self.et4000()
+            || (self.s3() && self.vga.s3.mmio())
+            || !self.vga.maps_graphics_window()
+        {
             return None;
         }
         self.vga.plain_planes()
@@ -1248,6 +1265,7 @@ impl Bus {
             || self.vbe_window()
             || self.et4000()
             || (self.s3() && self.vga.s3.mmio())
+            || !self.vga.maps_graphics_window()
             || !self.vga.write_planes_plainly(addr - ADDR_VGA_GRAPHICS, value, size)
         {
             return false;
@@ -1292,6 +1310,10 @@ impl Bus {
                 let offset = self.vesa_window(addr - ADDR_VGA_GRAPHICS, true);
                 self.write_vram(offset, &[value]);
                 return true;
+            }
+            // Lost while GR06 maps the memory elsewhere (see `mapped_8`).
+            if !self.vga.maps_graphics_window() {
+                return false;
             }
             self.note_video_write(addr - ADDR_VGA_GRAPHICS, 1);
             // write_graphics already sets vga.dirty unconditionally. The
@@ -1772,7 +1794,9 @@ impl Bus {
             self.net_next_event(),
             self.serial_next_event(),
             self.kbc_release_at,
+            crate::keyboard::typematic_at(self),
             self.rtc_next,
+            self.rtc_alarm_next,
             self.win32.next_event(),
             crate::win32::audio_next_event(&self.win32, self.clock.now_ticks()),
         ]
@@ -1841,6 +1865,16 @@ impl Bus {
                 self.pic.raise(8);
             }
         }
+        // The clock's alarm.
+        if let Some(at) = self.rtc_alarm_next
+            && at <= now
+        {
+            let enabled = self.cmos.alarm_enabled();
+            self.rtc_alarm_next = enabled.then(|| next_alarm_look(now));
+            if self.cmos.alarm_due() {
+                self.pic.raise(8);
+            }
+        }
         // The keyboard's next byte, once it had time to send it.
         if let Some(at) = self.kbc_release_at
             && at <= now
@@ -1848,6 +1882,10 @@ impl Bus {
             self.kbc_release_at = None;
             self.kbc.release();
             self.sync_keyboard_irq();
+        }
+        // The keyboard repeats a held key.
+        if crate::keyboard::typematic_at(self).is_some_and(|t| t <= now) {
+            crate::keyboard::typematic(self);
         }
         self.clock.schedule(self.next_event());
         self.refresh_irq();
@@ -2049,14 +2087,20 @@ impl Bus {
             }
             let (ol, or) = self.opl.render();
             let fm = (ol as f32 * fl, or as f32 * fr);
-            if let Some(gold) = &mut self.adlib_gold {
-                // The FM goes through the AdLib Gold's mixer and output
-                // stage, with its sampled sound.
-                let (fm, pcm) = gold.render(fm);
-                self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+            // On an AdLib Gold the FM goes through the card's mixer and
+            // output stage, with its sampled sound. Either way it reaches
+            // the line out through the capacitor on the card's output.
+            let (fm, gold_pcm) = match &mut self.adlib_gold {
+                Some(gold) => {
+                    let (fm, pcm) = gold.render(fm);
+                    (fm, Some(pcm))
+                }
+                None => (fm, None),
+            };
+            let fm = self.mixer.fm_coupling(fm);
+            self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+            if let Some(pcm) = gold_pcm {
                 self.mixer.add(&mut mix, &mut peaks, Channel::AdlibGold, pcm);
-            } else {
-                self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
             }
             if let Some(sb) = &mut self.sb {
                 // The DAC's level at this frame's time, as the card worked
@@ -2228,6 +2272,7 @@ impl Bus {
         self.speaker_rests()
             && self.beep_frames == 0
             && self.opl.is_idle()
+            && self.mixer.fm_coupling_rests()
             && self.sb_quiet()
             && self.mpu.is_idle()
             && self.cdaudio.is_idle()
@@ -2550,8 +2595,8 @@ impl Bus {
         self.clock.stall_to(until);
     }
 
-    /// Start or stop the clock's periodic interrupt as its status
-    /// registers have it.
+    /// Start or stop the clock's periodic interrupt and the look for its
+    /// alarm as its status registers have them.
     pub fn schedule_rtc(&mut self) {
         match self.cmos.periodic_ticks() {
             Some(period) if self.rtc_next.is_none() => {
@@ -2560,6 +2605,15 @@ impl Bus {
             }
             Some(_) => {}
             None => self.rtc_next = None,
+        }
+        // From the current second as the alarm interrupt is enabled, or
+        // where a loaded state's look was.
+        self.cmos.start_alarm_look();
+        if !self.cmos.alarm_enabled() {
+            self.rtc_alarm_next = None;
+        } else if self.rtc_alarm_next.is_none() {
+            self.rtc_alarm_next = Some(next_alarm_look(self.clock.now_ticks()));
+            self.clock.schedule(self.next_event());
         }
     }
 
@@ -3834,6 +3888,13 @@ pub struct Scanout {
     pub device: &'static str,
     pub name: String,
     pub bpp: Option<u32>,
+}
+
+/// The tick of the look for the clock's alarm after tick `now`: the next
+/// multiple of `cmos::ALARM_POLL_TICKS`, the same however long the alarm
+/// has been enabled or since a state was loaded.
+fn next_alarm_look(now: u64) -> u64 {
+    (now / crate::cmos::ALARM_POLL_TICKS + 1) * crate::cmos::ALARM_POLL_TICKS
 }
 
 /// How far apart the PC speaker's two levels are in the mix: its cone

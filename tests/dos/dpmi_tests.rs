@@ -432,8 +432,16 @@ fn run_to_exit(cpu: &mut Cpu, batches: usize) -> bool {
 
 /// A machine with the program `name` in `files` loaded from the shell.
 fn machine(test: &str, files: &[(&str, Vec<u8>)], name: &str) -> (Box<Cpu>, u16) {
+    machine_with(test, files, name, false)
+}
+
+/// `machine`, with expanded memory on (`ems`): DOS then runs in
+/// virtual-8086 mode under the built-in monitor.
+fn machine_with(test: &str, files: &[(&str, Vec<u8>)], name: &str, ems: bool) -> (Box<Cpu>, u16) {
     let mut cpu = Cpu::new(scratch(test, files));
+    rust_dos::ems::set_enabled(&mut cpu.bus, ems);
     cpu.load_shell();
+    assert_eq!(cpu.v86(), ems);
     assert!(cpu.load_executable(name, None));
     let psp = cpu.current_psp;
     (cpu, psp)
@@ -444,11 +452,17 @@ fn word(cpu: &Cpu, psp: u16, offset: u16) -> u16 {
 }
 
 fn check_services(bits32: bool) {
-    let (mut cpu, psp) = machine(
-        if bits32 { "services32" } else { "services16" },
-        &[("T.COM", services_program(bits32))],
-        "T.COM",
-    );
+    check_services_with(bits32, false);
+}
+
+fn check_services_with(bits32: bool, ems: bool) {
+    let test = match (bits32, ems) {
+        (false, false) => "services16",
+        (true, false) => "services32",
+        (false, true) => "services16_v86",
+        (true, true) => "services32_v86",
+    };
+    let (mut cpu, psp) = machine_with(test, &[("T.COM", services_program(bits32))], "T.COM", ems);
     let a20 = cpu.bus.a20();
     let timer = cpu.bus.read_32(8 * 4);
     assert!(run_to_exit(&mut cpu, 2000), "the program didn't end (step {})", word(&cpu, psp, STEP));
@@ -485,6 +499,8 @@ fn check_services(bits32: bool) {
     assert_eq!(cpu.bus.read_32(8 * 4), timer);
     assert_eq!(cpu.bus.a20(), a20);
     assert_eq!(cpu.state, CpuState::Running);
+    // Back at the prompt in the mode DOS runs in.
+    assert_eq!(cpu.v86(), ems);
 }
 
 #[test]
@@ -495,6 +511,15 @@ fn a_16_bit_client_uses_the_services() {
 #[test]
 fn a_32_bit_client_uses_the_services() {
     check_services(true);
+}
+
+/// With expanded memory DOS runs in virtual-8086 mode under the built-in
+/// monitor, and the host is there as with a memory manager that has one:
+/// it switches from there to protected mode and back to it for DOS.
+#[test]
+fn a_client_uses_the_services_under_the_v86_monitor() {
+    check_services_with(false, true);
+    check_services_with(true, true);
 }
 
 #[test]
@@ -1398,6 +1423,99 @@ fn a_client_allocates_linear_memory_at_an_address() {
     assert_eq!(word(&cpu, psp, R + 10), 0x8025, "not page-aligned");
     assert_eq!(dword(R + 12), 0x40_0000, "grown where it is");
     assert_eq!(dword(R + 16), 0x40_0000);
+}
+
+/// Copy the LDT's descriptor from the GDT, through the selector at
+/// `R + 8`, to `at` (DS = the data).
+fn copy_ldt_descriptor(a: &mut CodeAssembler, at: u16) -> Result<(), IcedError> {
+    a.push(es)?;
+    a.mov(es, word_ptr(R + 8))?;
+    a.mov(bx, word_ptr(R + 6))?;
+    a.and(bx, 0xFFF8)?;
+    a.mov(eax, dword_ptr(bx).es())?;
+    a.mov(dword_ptr(at), eax)?;
+    a.mov(eax, dword_ptr(bx + 4).es())?;
+    a.mov(dword_ptr(at + 4), eax)?;
+    a.pop(es)
+}
+
+#[test]
+fn the_ldt_descriptor_covers_the_pages_in_use() {
+    // The LDT's descriptor in the GDT, read through a selector over the
+    // GDT (SGDT, SLDT), as Ultima VIII's DOSFIX32 reads it: at the start,
+    // with 1000 more selectors and after they are freed. Windows 98's DOS
+    // box gives limits FFFh, 1FFFh and 1FFFh: its LDT grows a 4 KB page at
+    // a time and doesn't shrink.
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        let mut free = a.create_label();
+        enter(a, false, fail)?;
+        step(a, 4)?;
+        a.sgdt(ptr(R))?;
+        a.sldt(word_ptr(R + 6))?;
+        a.xor(ax, ax)?;
+        a.mov(cx, 1)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(R + 8), ax)?;
+        a.mov(bx, ax)?;
+        a.mov(ax, 0x0007)?;
+        a.mov(cx, word_ptr(R + 4))?;
+        a.mov(dx, word_ptr(R + 2))?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(ax, 0x0008)?;
+        a.xor(cx, cx)?;
+        a.mov(dx, 0xFFFF)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        step(a, 5)?;
+        copy_ldt_descriptor(a, R + 0x10)?;
+        a.xor(ax, ax)?;
+        a.mov(cx, 1000)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(R + 10), ax)?;
+        step(a, 6)?;
+        copy_ldt_descriptor(a, R + 0x18)?;
+        a.mov(bx, word_ptr(R + 10))?;
+        a.mov(cx, 1000)?;
+        a.set_label(&mut free)?;
+        a.push(cx)?;
+        a.push(bx)?;
+        a.mov(ax, 0x0001)?;
+        a.int(0x31)?;
+        a.pop(bx)?;
+        a.pop(cx)?;
+        a.add(bx, 8)?;
+        a.loop_(free)?;
+        step(a, 7)?;
+        copy_ldt_descriptor(a, R + 0x20)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    let (mut cpu, psp) = machine("ldtlimit", &[("T.COM", com(&[(0x100, main)]))], "T.COM");
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end (step {})",
+        word(&cpu, psp, STEP)
+    );
+    assert_eq!(
+        cpu.errorlevel,
+        0x2A,
+        "failed at step {}",
+        word(&cpu, psp, STEP)
+    );
+    let limit = |at: u16| {
+        let low = word(&cpu, psp, at) as u32;
+        let high = cpu.bus.read_8(psp as usize * 16 + at as usize + 6) as u32;
+        assert_eq!(high & 0x80, 0, "byte-granular");
+        (high & 0x0F) << 16 | low
+    };
+    assert_eq!(limit(R + 0x10), 0x0FFF, "at the start");
+    assert_eq!(limit(R + 0x18), 0x1FFF, "with 1000 more selectors");
+    assert_eq!(limit(R + 0x20), 0x1FFF, "after they are freed");
 }
 
 /// Set DAC colours 40h and 41h from a buffer the client addresses by
