@@ -82,19 +82,55 @@ pub struct Tlb {
     /// Whether an entry has come from a 4 MB page since the last flush.
     /// The entries are of 4 KB pieces of it.
     large: bool,
+    /// The slots filled since the last flush, the first `filled` of them,
+    /// so that a flush empties those rather than all 64 KB of entries.
+    /// More than `FILLED_KEPT` means the list ran out, and the flush
+    /// empties them all. A DOS extender that switches to real mode for a
+    /// real-mode service loads CR0 and CR3 on the way there and back, and
+    /// so flushes four times a round trip, which can come tens of
+    /// thousands of times a second (X32 in Pirates! Gold), each after a
+    /// few slots were filled.
+    filled_slots: [u16; FILLED_KEPT],
+    filled: usize,
 }
+
+/// The slots a flush empties one by one; with more filled, it empties all.
+const FILLED_KEPT: usize = 256;
 
 impl Default for Tlb {
     fn default() -> Self {
-        Self { _align: [0; 32], entries: [EMPTY; 2 * TLB_ENTRIES], epoch: 0, large: false }
+        Self {
+            _align: [0; 32],
+            entries: [EMPTY; 2 * TLB_ENTRIES],
+            epoch: 0,
+            large: false,
+            filled_slots: [0; FILLED_KEPT],
+            filled: 0,
+        }
     }
 }
 
 impl Tlb {
     pub fn flush(&mut self) {
-        self.entries.fill(EMPTY);
+        if self.filled <= FILLED_KEPT {
+            for &slot in &self.filled_slots[..self.filled] {
+                self.entries[slot as usize] = EMPTY;
+            }
+        } else {
+            self.entries.fill(EMPTY);
+        }
+        self.filled = 0;
         self.epoch = self.epoch.wrapping_add(1);
         self.large = false;
+    }
+
+    /// Put a translation in its slot, and note the slot for `flush`.
+    fn fill(&mut self, slot: usize, entry: TlbEntry) {
+        if self.filled < FILLED_KEPT {
+            self.filled_slots[self.filled] = slot as u16;
+        }
+        self.filled = (self.filled + 1).min(FILLED_KEPT + 1);
+        self.entries[slot] = entry;
     }
 
     /// Drop the translations of the page holding `lin` (INVLPG). Where 4 MB
@@ -302,14 +338,17 @@ impl Cpu {
         let writable = walked.dirty && allows(walked.user_ok, walked.write_ok, true, paging);
         let plain = self.bus.is_plain_ram(walked.page as usize, 0x1000);
         let at = lin & !0xFFF;
-        self.tlb.entries[Tlb::slot(page, user)] = TlbEntry {
-            read_tag: page + 1,
-            write_tag: if writable { page + 1 } else { 0 },
-            phys: walked.page,
-            jit_read: if plain { at } else { 1 },
-            jit_write: if plain && writable { at } else { 1 },
-            jit_delta: walked.page.wrapping_sub(at),
-        };
+        self.tlb.fill(
+            Tlb::slot(page, user),
+            TlbEntry {
+                read_tag: page + 1,
+                write_tag: if writable { page + 1 } else { 0 },
+                phys: walked.page,
+                jit_read: if plain { at } else { 1 },
+                jit_write: if plain && writable { at } else { 1 },
+                jit_delta: walked.page.wrapping_sub(at),
+            },
+        );
         Ok(self.translate(walked.page | (lin & 0xFFF)))
     }
 
