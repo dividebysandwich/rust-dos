@@ -2,6 +2,7 @@
 //! mix, the mute, which silences the output device but not the samples
 //! handed on for recordings, and the filters and effects.
 
+use rust_dos::adlibgold::AdlibGoldConfig;
 use rust_dos::audio::{AudioOutput, pump_audio};
 use rust_dos::bus::Bus;
 use rust_dos::mixer::{Channel, ChorusPreset, MixerSettings, ReverbPreset, SbFilter};
@@ -328,10 +329,11 @@ fn the_dac_level_held_fades_out_of_the_mix() {
 /// frequency set to 0 and the key released, with a release rate of 0.
 /// The phase stops and the envelope stays, so the chip holds its output at
 /// a level. With the capacitor on the card's output (`sb_coupling`) or
-/// without.
-fn fm_hold(coupling: bool) -> Vec<i16> {
+/// without, on an AdLib or an AdLib Gold.
+fn fm_hold(coupling: bool, gold: bool) -> Vec<i16> {
     let mut bus = bus();
     bus.set_mixer(unfiltered_with(|m| m.sb_coupling = coupling));
+    bus.configure_adlib_gold(gold.then(AdlibGoldConfig::default));
     let write = |bus: &mut Bus, reg: u8, value: u8| {
         bus.io_write(0x388, reg);
         bus.io_write(0x389, value);
@@ -367,17 +369,20 @@ fn fm_hold(coupling: bool) -> Vec<i16> {
 /// The level the FM chip holds after such a note fades out of the mix
 /// through the capacitor on the card's output, as on a real AdLib or
 /// Sound Blaster: a second later the output is back at silence. Without
-/// the capacitor it stays as a constant offset.
+/// the capacitor it stays as a constant offset. An AdLib Gold's output
+/// stage passes the level on to the same capacitor.
 #[test]
 fn the_fm_level_held_fades_out_of_the_mix() {
-    let raw = fm_hold(false);
-    let held = *raw.last().unwrap();
-    assert!(held.unsigned_abs() > 1000, "{held}");
-    let tail = &raw[raw.len() - 4410..];
-    assert!(tail.iter().all(|&s| s == held), "the chip holds its level");
-    let coupled = fm_hold(true);
-    let tail = &coupled[coupled.len() - 4410..];
-    assert!(tail.iter().all(|s| s.abs() <= 1), "{tail:?}");
+    for gold in [false, true] {
+        let raw = fm_hold(false, gold);
+        let held = *raw.last().unwrap();
+        assert!(held.unsigned_abs() > 1000, "{held}, gold {gold}");
+        let tail = &raw[raw.len() - 4410..];
+        assert!(tail.iter().all(|&s| s == held), "the chip holds its level, gold {gold}");
+        let coupled = fm_hold(true, gold);
+        let tail = &coupled[coupled.len() - 4410..];
+        assert!(tail.iter().all(|s| s.abs() <= 1), "gold {gold}: {tail:?}");
+    }
 }
 
 /// An FM note that plays for 50 ms, then the loudness of the 250 ms after

@@ -236,8 +236,9 @@ struct Dsp {
     speaker_dc: DcBlocker,
     sb: StereoLowpass,
     sb_coupling: OutputCoupling,
-    /// The capacitor on the FM synthesizer's output (the AdLib's, or the
-    /// Sound Blaster's that its FM chip shares with the DAC).
+    /// The capacitor on the FM synthesizer's output: the AdLib's, the
+    /// AdLib Gold's, or the Sound Blaster's that its FM chip shares with
+    /// the DAC.
     fm_coupling: OutputCoupling,
     reverb: Option<Reverb>,
     chorus: Option<Chorus>,

@@ -2049,15 +2049,20 @@ impl Bus {
             }
             let (ol, or) = self.opl.render();
             let fm = (ol as f32 * fl, or as f32 * fr);
-            if let Some(gold) = &mut self.adlib_gold {
-                // The FM goes through the AdLib Gold's mixer and output
-                // stage, with its sampled sound.
-                let (fm, pcm) = gold.render(fm);
-                self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+            // On an AdLib Gold the FM goes through the card's mixer and
+            // output stage, with its sampled sound. Either way it reaches
+            // the line out through the capacitor on the card's output.
+            let (fm, gold_pcm) = match &mut self.adlib_gold {
+                Some(gold) => {
+                    let (fm, pcm) = gold.render(fm);
+                    (fm, Some(pcm))
+                }
+                None => (fm, None),
+            };
+            let fm = self.mixer.fm_coupling(fm);
+            self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+            if let Some(pcm) = gold_pcm {
                 self.mixer.add(&mut mix, &mut peaks, Channel::AdlibGold, pcm);
-            } else {
-                let fm = self.mixer.fm_coupling(fm);
-                self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
             }
             if let Some(sb) = &mut self.sb {
                 // The DAC's level at this frame's time, as the card worked
@@ -2229,7 +2234,7 @@ impl Bus {
         self.speaker_rests()
             && self.beep_frames == 0
             && self.opl.is_idle()
-            && (self.adlib_gold.is_some() || self.mixer.fm_coupling_rests())
+            && self.mixer.fm_coupling_rests()
             && self.sb_quiet()
             && self.mpu.is_idle()
             && self.cdaudio.is_idle()
