@@ -1694,13 +1694,12 @@ fn finish(
     {
         let room = limit.min(cpu.bus.clock.deadline) - visit.icount;
         let most = (room / period).min(COUNTED_PASSES);
-        let (same, values, flags, modelled) =
-            count::counted_passes(cpu, pass, most, visit.icount, period);
-        cpu.bus.observe.stats.modelled += modelled;
-        if most > 0 && same == 0 {
+        let counted = count::counted_passes(cpu, pass, most, visit.icount, period);
+        cpu.bus.observe.stats.modelled += counted.modelled;
+        if most > 0 && counted.passes == 0 {
             return cpu.bus.observe.fail("count passes");
         }
-        counted_run = Some((same, values, flags));
+        counted_run = Some((counted.passes, counted.values, counted.flags));
     }
     let o = &mut cpu.bus.observe;
     let head = o.head();
