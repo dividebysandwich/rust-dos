@@ -37,8 +37,8 @@ pub(crate) mod realcall;
 mod video;
 
 use crate::bus::Bus;
-use crate::savestate::{Reader, State, StateError, Writer};
 use crate::cpu::{CR0_PE, CR4_OSFXSR, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Seg, SegCache};
+use crate::savestate::{Reader, State, StateError, Writer};
 
 /// The host's code in the BIOS ROM: segment F000, which its protected-mode
 /// code segments have as their base too.
@@ -449,8 +449,10 @@ impl Dpmi {
         limits.save(w);
     }
 
-    /// The limits `save_ldt_limits` saved. A state of version 2, which
-    /// has none, gets those that cover the entries in use.
+    /// The limits `save_ldt_limits` saved. A state of version 2 has none:
+    /// the rust-dos that saved it gave every LDT descriptor all 8192
+    /// entries, which the GDT and LDTR in the state still have, so its
+    /// clients keep that limit.
     pub fn load_ldt_limits(
         &mut self,
         r: &mut Reader,
@@ -467,7 +469,7 @@ impl Dpmi {
             }
         } else {
             for client in &mut self.clients {
-                client.ldt_limit = client.ldt_limit_in_use();
+                client.ldt_limit = LDT_SIZE - 1;
             }
         }
         Ok(())
