@@ -545,6 +545,9 @@ fn early() -> Vec<Scenario> {
         Hold("comma", 400),
         Wait(1500),
         Shot("flying"),
+        // Sopwith starts with its sound off; S turns it on.
+        Type("s"),
+        Wait(500),
         Record("engine", 1000),
         Check(Cond::Running),
     ];
