@@ -3032,6 +3032,15 @@ impl Bus {
             p if self.s3() && s3::is_engine_port(p) => self.engine_write(p, value as u32, 1),
             0xCFC..=0xCFF if self.pci_present() => self.pci_write(port, value),
 
+            // The DSP reset port of a Sound Blaster at a base where the
+            // machine has none (every base a card's jumpers offer, 210h to
+            // 280h). Sound drivers look for the card by writing 1 and 0
+            // there at each base in turn and reading 2xEh for the DSP's
+            // AAh, as Prehistorik 2's does from 210h on. Nothing decodes
+            // the port on a real machine, so the writes go nowhere
+            // without a log line.
+            0x216 | 0x226 | 0x236 | 0x246 | 0x256 | 0x266 | 0x276 | 0x286 => {}
+
             _ => {
                 if self.vga.ports().contains(&port) {
                     // A retrace nobody watched may have passed since the

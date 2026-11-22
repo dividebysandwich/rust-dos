@@ -106,6 +106,24 @@ fn dsp_reset_version_and_identification() {
 }
 
 #[test]
+fn a_driver_probing_the_bases_without_a_card_finds_nothing_quietly() {
+    // A driver looks for the card at each base from 210h to 280h: it
+    // resets the DSP there and waits for AAh. With the card at 220h, the
+    // other bases don't answer, and the log doesn't call their reset
+    // port a missing device, since nothing decodes it on a real machine.
+    let mut bus = sb16();
+    bus.log_backlog = Some(Vec::new());
+    for base in (0x210u16..=0x280).step_by(0x10) {
+        bus.io_write(base + 6, 1);
+        bus.io_write(base + 6, 0);
+        let found = bus.io_read(base + 0xE) & 0x80 != 0 && bus.io_read(base + 0xA) == 0xAA;
+        assert_eq!(found, base == 0x220, "{base:03X}");
+    }
+    let lines = bus.take_log_backlog();
+    assert!(lines.iter().all(|(_, l)| !l.contains("Unhandled")), "{lines:?}");
+}
+
+#[test]
 fn single_cycle_transfer_plays_in_emulated_time_and_interrupts() {
     let mut bus = sb16();
     reset_dsp(&mut bus);
