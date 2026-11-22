@@ -1019,6 +1019,23 @@ mod tests {
     }
 
     #[test]
+    fn only_memory_fixes_have_data() {
+        // `Kind::AtLoad` and `Kind::Win32` patch files and images, which
+        // never apply `CodePatch::data`: data listed there would do
+        // nothing.
+        for fix in FIXES {
+            let files: Vec<&CodePatch> = match fix.kind {
+                Kind::AtLoad { programs, .. } => programs.iter().map(|&(_, c)| c).collect(),
+                Kind::Win32 { code, .. } => vec![code],
+                Kind::Code(_) | Kind::SkipAtExec { .. } => vec![],
+            };
+            for code in files {
+                assert!(code.data.is_empty(), "{} has data it never writes", fix.name);
+            }
+        }
+    }
+
+    #[test]
     fn data_is_rewritten_only_where_it_is_as_listed() {
         let base = 0x3_0000;
         for (fix, code) in codes().filter(|(_, code)| !code.data.is_empty()) {
