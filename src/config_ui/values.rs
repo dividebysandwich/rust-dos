@@ -368,7 +368,9 @@ impl Item {
                     None => s.sound.sb_installed = false,
                 })
             }
-            SbBase => each(s, [0x210, 0x220, 0x230, 0x240, 0x250, 0x260, 0x270, 0x280], |s, base| s.sound.sb.base = base),
+            SbBase => each(s, crate::sb::SbConfig::BASES, |s, base| {
+                s.sound.sb.base = base
+            }),
             SbIrq => each(s, [2, 3, 5, 7, 9, 10, 11, 12, 15], |s, irq| s.sound.sb.irq = irq),
             SbDma => each(s, [0, 1, 3], |s, dma| s.sound.sb.dma8 = dma),
             SbHdma => each(s, [5, 6, 7], |s, dma| s.sound.sb.dma16 = dma),

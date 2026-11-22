@@ -111,6 +111,7 @@ fn a_driver_probing_the_bases_without_a_card_finds_nothing_quietly() {
     // resets the DSP there and waits for AAh. With the card at 220h, the
     // other bases don't answer, and the log doesn't call their reset
     // port a missing device, since nothing decodes it on a real machine.
+    // The bus's Ultrasound at 240h takes the writes to 246h itself.
     let mut bus = sb16();
     bus.log_backlog = Some(Vec::new());
     for base in (0x210u16..=0x280).step_by(0x10) {
