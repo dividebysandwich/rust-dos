@@ -29,6 +29,7 @@ Everything in THIRD-PARTY-NOTICES after the MARKER line is replaced;
 the part above it is kept as written.
 """
 
+import difflib
 import json
 import os
 import re
@@ -317,7 +318,12 @@ def crates_part():
         "Each entry names the crates and the licence rust-dos uses them\n"
         "under (where a crate offers a choice, the one picked), then the\n"
         "licence text with its copyright notice. This part is written by\n"
-        "tools/third_party_notices.py.\n")
+        "tools/third_party_notices.py.\n"
+        "\n"
+        "The source code of each crate, as the programs are built from it,\n"
+        "is at https://crates.io/crates/<name>/<version>, with the name and\n"
+        "version its entry gives. That is where the Source Code Form of the\n"
+        "crates under the Mozilla Public License 2.0 is available.\n")
     for key, entry in sorted(entries.items(),
                              key=lambda e: e[1]["crates"][0].lower()):
         out.append(RULE)
@@ -331,7 +337,9 @@ def crates_part():
 
 def main():
     check = "--check" in sys.argv[1:]
-    with open(NOTICES, encoding="utf-8", newline="") as f:
+    # Universal newlines: a checkout with CRLF line ends compares the same
+    # as one with LF, and the file is written back with LF.
+    with open(NOTICES, encoding="utf-8") as f:
         current = f.read()
     at = current.find(MARKER)
     if at < 0:
@@ -339,8 +347,14 @@ def main():
     wanted = current[:at] + crates_part()
     if check:
         if wanted != current:
+            diff = list(difflib.unified_diff(
+                current.splitlines(), wanted.splitlines(),
+                "THIRD-PARTY-NOTICES", "expected", lineterm="", n=1))
+            print("\n".join(diff[:60]))
+            if len(diff) > 60:
+                print(f"... {len(diff) - 60} more lines of difference")
             sys.exit("THIRD-PARTY-NOTICES is out of date: run "
-                     "python tools/third_party_notices.py")
+                     "python tools/third_party_notices.py and commit it")
         return
     with open(NOTICES, "w", encoding="utf-8", newline="\n") as f:
         f.write(wanted)

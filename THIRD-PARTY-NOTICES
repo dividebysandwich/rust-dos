@@ -252,6 +252,37 @@ IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
 DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
 ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+------------------------------------------------------------------------
+mwemu
+------------------------------------------------------------------------
+
+The x87's 80-bit floating point numbers (src/f80.rs) started as a copy
+of libmwemu's src/fpu/f80.rs by sha0coder
+(https://github.com/sha0coder/mwemu), as libmwemu 0.23 had it, which
+crates.io publishes under the MIT licence (mwemu is under the Apache
+License 2.0 since 2026):
+
+Copyright (c) sha0coder
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 
 ========================================================================
 2. CODE UNDER THE GNU LESSER GENERAL PUBLIC LICENSE 2.1 OR LATER
@@ -270,8 +301,9 @@ message.c, ole2 and ole2disp. In src/win32: comctl32, comdlg32, ddraw's
 Direct3D, d3d8, gdi32's fonts, kernel32's lzexpand, msvcrt, ole32,
 oleaut32, olepro32, opengl32, shell32, user32's dialogs, list boxes,
 combo boxes, scroll bars and winhlp32, version, avifil32, msvfw32,
-quartz and winmm's mmio. Copyright the Wine project authors, listed in
-Wine's AUTHORS file.
+quartz and winmm's mmio. comctl32's standard toolbar bitmaps
+(src/win32/comctl32/res) are Wine's. Copyright the Wine project
+authors, listed in Wine's AUTHORS file.
 
 FFmpeg (https://ffmpeg.org/): the Indeo Video 4 decoder
 (src/win32/vfw/indeo4) follows libavcodec's indeo4.c, ivi.c, ivi_dsp.c
@@ -295,9 +327,10 @@ LICENSE.
 
 DOSBox (https://www.dosbox.com/), copyright The DOSBox Team, and DOSBox
 Staging (https://www.dosbox-staging.org/), copyright The DOSBox Staging
-Team: devices that follow their code, the 8x14 ROM font and its
-alternate glyphs (src/video/assets), and the disk drive noises
-(assets/disknoise).
+Team: devices that follow their code, the ROM fonts of
+src/video/assets (the 8x14 font and the alternate glyphs come from
+DOSBox Staging's int10_memory.cpp, whose 8x8 and 8x16 tables are the
+same as rust-dos's), and the disk drive noises (assets/disknoise).
 
 DOSBox-X (https://dosbox-x.com/), copyright The DOSBox Team and the
 DOSBox-X contributors: the IDE controller (src/ide), the S3 Trio and
@@ -306,8 +339,10 @@ ViRGE engines (src/video/s3), and the frame of the Voodoo emulation
 
 86Box (https://86box.net/), with code of PCem by Sarah Walker, copyright
 Sarah Walker and the 86Box contributors: the Voodoo Banshee and Voodoo3
-(src/voodoo/banshee) and the AWE32's EMU8000
-(crates/soundblaster/src/awe32).
+(src/voodoo/banshee), the AWE32's EMU8000
+(crates/soundblaster/src/awe32), and parts that follow 86Box's code:
+86F floppy images (src/d86f.rs), the ET4000 (src/video/et4000.rs) and
+the ViRGE's 3D engine (src/video/s3/s3d.rs).
 
 Nuked-SC55 (https://github.com/jcmoyer/Nuked-SC55), copyright (C) 2021,
 2024 nukeykt, modified by J.C. Moyer: crates/sc55 is a Rust port of it.
@@ -872,6 +907,11 @@ Each entry names the crates and the licence rust-dos uses them
 under (where a crate offers a choice, the one picked), then the
 licence text with its copyright notice. This part is written by
 tools/third_party_notices.py.
+
+The source code of each crate, as the programs are built from it,
+is at https://crates.io/crates/<name>/<version>, with the name and
+version its entry gives. That is where the Source Code Form of the
+crates under the Mozilla Public License 2.0 is available.
 
 ------------------------------------------------------------------------
 Crates: ab_glyph_rasterizer 0.1.10, sync_wrapper 1.0.2
