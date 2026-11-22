@@ -37,6 +37,7 @@ pub(crate) mod realcall;
 mod video;
 
 use crate::bus::Bus;
+use crate::savestate::{Reader, State, StateError, Writer};
 use crate::cpu::{CR0_PE, CR4_OSFXSR, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Seg, SegCache};
 
 /// The host's code in the BIOS ROM: segment F000, which its protected-mode
@@ -128,6 +129,9 @@ const HOST_BLOCK: u32 = 0x2000;
 /// callbacks and its exception handlers.
 pub const LDT_ENTRIES: usize = 8192;
 const LDT_SIZE: u32 = LDT_ENTRIES as u32 * 8;
+/// The LDT's descriptor in the GDT covers the LDT in steps of this many
+/// bytes (`Client::ldt_limit`).
+const LDT_PAGE: u32 = 0x1000;
 const LPMS_SIZE: u32 = 0x4000;
 const CLIENT_BLOCK: u32 = LDT_SIZE + LPMS_SIZE;
 /// LDT entries INT 31h AX=000Dh hands out by number; AX=0000h allocates
@@ -251,6 +255,8 @@ pub struct Client {
     dta: Option<(u16, u32)>,
     /// The selector of its LDT the "MS-DOS" extensions gave it, or 0.
     ldt_alias: u16,
+    /// The limit of its LDT's descriptor in the GDT (`grow_ldt`).
+    ldt_limit: u32,
     /// Memory blocks of INT 21h AH=48h: the first of their selectors, how
     /// many, and their handle in `memory`.
     blocks: Vec<(u16, u16, u32)>,
@@ -294,6 +300,19 @@ impl Client {
     fn handler(&self, vector: u8) -> Option<(u16, u32)> {
         let handler = self.vectors[vector as usize];
         (handler != Self::default_vector(vector)).then_some(handler)
+    }
+
+    /// The limit that covers the LDT's entries in use, in whole 4 KB
+    /// pages, as Windows 98 grows a DOS box's LDT: its descriptor in the
+    /// GDT has limit FFFh while the entries in use fit in one page, and
+    /// a page more each time they reach past it.
+    fn ldt_limit_in_use(&self) -> u32 {
+        let used = self
+            .ldt
+            .iter()
+            .rposition(|&use_| use_ != LDT_FREE)
+            .map_or(1, |i| i + 1);
+        (used as u32 * 8).next_multiple_of(LDT_PAGE) - 1
     }
 
     fn lpms_base(&self) -> u32 {
@@ -421,6 +440,37 @@ impl Dpmi {
     /// The clients, as (PSP, 32-bit), the running one last, for debuggers.
     pub fn clients(&self) -> Vec<(u16, bool)> {
         self.clients.iter().map(|c| (c.psp, c.bits32)).collect()
+    }
+
+    /// The limits of the clients' LDT descriptors, for a save state: after
+    /// the rest of the host's (`State`), in version 3 of its section.
+    pub fn save_ldt_limits(&self, w: &mut Writer) {
+        let limits: Vec<u32> = self.clients.iter().map(|c| c.ldt_limit).collect();
+        limits.save(w);
+    }
+
+    /// The limits `save_ldt_limits` saved. A state of version 2, which
+    /// has none, gets those that cover the entries in use.
+    pub fn load_ldt_limits(
+        &mut self,
+        r: &mut Reader,
+        version: Option<u16>,
+    ) -> crate::savestate::Result<()> {
+        if version >= Some(3) {
+            let mut limits: Vec<u32> = Vec::new();
+            limits.load(r)?;
+            if limits.len() != self.clients.len() {
+                return Err(StateError::Invalid("LDT limits for other clients".into()));
+            }
+            for (client, limit) in self.clients.iter_mut().zip(limits) {
+                client.ldt_limit = limit;
+            }
+        } else {
+            for client in &mut self.clients {
+                client.ldt_limit = client.ldt_limit_in_use();
+            }
+        }
+        Ok(())
     }
 
     /// The extended memory the host holds, as (address, bytes): for the
@@ -641,7 +691,42 @@ fn allocate(cpu: &mut Cpu, count: usize, desc: u64, use_: u8) -> Option<usize> {
     for i in first..first + count {
         write_desc(&mut cpu.bus, ldt, i, desc);
     }
+    grow_ldt(cpu);
     Some(first)
+}
+
+/// Make the running client's LDT descriptor in the GDT, and LDTR when it
+/// holds it, cover the entries in use (`Client::ldt_limit_in_use`). The
+/// limit only grows while the client runs, as under Windows 98, where
+/// freeing selectors leaves it as it was. A limit of FFFFh for all 8192
+/// entries breaks programs that map the LDT with a 16-bit size of the
+/// limit plus 1: Ultima VIII's DOSFIX32 asks Phar Lap's 286|DOS-Extender
+/// for a segment of size 0 and halts.
+pub(super) fn grow_ldt(cpu: &mut Cpu) {
+    let Some(host) = cpu.bus.dpmi.host else {
+        return;
+    };
+    let Some(client) = cpu.bus.dpmi.clients.last_mut() else {
+        return;
+    };
+    let limit = client.ldt_limit_in_use();
+    if limit <= client.ldt_limit {
+        return;
+    }
+    client.ldt_limit = limit;
+    let ldt = client.block;
+    write_gdt_ldt(cpu, host, ldt, limit);
+    if cpu.ldtr.selector == HOST_LDT && cpu.ldtr.base == ldt {
+        cpu.ldtr = SegCache::from_descriptor(HOST_LDT, ldt, limit, 0x82);
+    }
+}
+
+/// The GDT's descriptor of the LDT at `ldt`, `limit` its limit.
+fn write_gdt_ldt(cpu: &mut Cpu, host: u32, ldt: u32, limit: u32) {
+    let desc = descriptor(ldt, limit, 0x82, 0);
+    let at = (host + HOST_GDT) as usize + (HOST_LDT >> 3) as usize * 8;
+    cpu.bus.write_32(at, desc as u32);
+    cpu.bus.write_32(at + 4, (desc >> 32) as u32);
 }
 
 fn free_entry(cpu: &mut Cpu, index: usize) {
@@ -737,7 +822,7 @@ fn start_host(cpu: &mut Cpu) -> Option<u32> {
         (HOST_CODE0, descriptor(ROM_BASE, 0xFFFF, 0x9B, BIG)),
         (HOST_DATA0, descriptor(0, 0xFFFF_FFFF, 0x93, BIG)),
         (HOST_TSS, descriptor(host + TSS_OFFSET, 0x67, 0x8B, 0)),
-        (HOST_LDT, descriptor(0, LDT_SIZE - 1, 0x82, 0)),
+        (HOST_LDT, descriptor(0, LDT_PAGE - 1, 0x82, 0)),
         (HOST_CODE3, descriptor(ROM_BASE, 0xFFFF, 0xFB, 0)),
         (BIOS_DATA, descriptor(0x400, 0xFFFF, 0xF3, 0)),
     ];
@@ -823,6 +908,7 @@ fn enter(cpu: &mut Cpu) {
         env: 0,
         dta: None,
         ldt_alias: 0,
+        ldt_limit: LDT_PAGE - 1,
         blocks: Vec::new(),
     });
     let real = |segment: u16, access: u8, limit: u32| descriptor((segment as u32) << 4, limit, access, 0);
@@ -877,19 +963,21 @@ fn host_ring0(cpu: &mut Cpu) {
         cpu.cr4 |= CR4_OSFXSR;
     }
     let host = cpu.bus.dpmi.host.expect("the DPMI host");
-    let ldt = cpu.bus.dpmi.clients.last().map_or(0, |c| c.block);
+    let (ldt, limit) = cpu
+        .bus
+        .dpmi
+        .clients
+        .last()
+        .map_or((0, LDT_PAGE - 1), |c| (c.block, c.ldt_limit));
     // The GDT's LDT descriptor is the running client's.
-    let desc = descriptor(ldt, LDT_SIZE - 1, 0x82, 0);
-    let at = (host + HOST_GDT) as usize + (HOST_LDT >> 3) as usize * 8;
-    cpu.bus.write_32(at, desc as u32);
-    cpu.bus.write_32(at + 4, (desc >> 32) as u32);
+    write_gdt_ldt(cpu, host, ldt, limit);
     if !cpu.pe() {
         cpu.cr0 |= CR0_PE;
         cpu.note_mode_switch(true);
     }
     cpu.gdtr = DescTable { base: host + HOST_GDT, limit: (GDT_ENTRIES * 8 - 1) as u16 };
     cpu.idtr = DescTable { base: host + HOST_IDT, limit: 0x7FF };
-    cpu.ldtr = SegCache::from_descriptor(HOST_LDT, ldt, LDT_SIZE - 1, 0x82);
+    cpu.ldtr = SegCache::from_descriptor(HOST_LDT, ldt, limit, 0x82);
     cpu.tr = SegCache::from_descriptor(HOST_TSS, host + TSS_OFFSET, 0x67, 0x8B);
     cpu.set_seg_cache(Seg::CS, SegCache::from_descriptor(HOST_CODE0, ROM_BASE, 0xFFFF, 0x409B));
     cpu.set_seg_cache(Seg::SS, SegCache::from_descriptor(HOST_DATA0, 0, 0xFFFF_FFFF, 0xC093));
@@ -1726,7 +1814,7 @@ crate::state_fields!(Context { gpr, eip, eflags, seg });
 crate::state_fields!(Client {
     id, psp, bits32, block, ldt, segments, vectors, exceptions, memory, dos_blocks,
     rm_stack, rm_sp, lpms_sel, lpms_esp, cb_sel, segs, env, dta, ldt_alias, blocks,
-});
+} skip { ldt_limit });
 crate::state_fields!(Callback { client, proc_sel, proc_off, struct_sel, struct_off });
 crate::state_fields!(Frame { kind, client, ctx, vector, sel, off, rm_sp, lpms, base });
 crate::state_fields!(Dpmi { host, clients, frames, callbacks, hooks, a20, next_id, next_handle } skip { enabled, passed_over });
