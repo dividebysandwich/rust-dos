@@ -43,6 +43,10 @@ const FCBS: u16 = 4;
 /// The verify flag (INT 21h AH=2Eh and 54h): 01h when DOS is to read
 /// back what it writes to disk, 00h (as at boot) when not.
 pub const VERIFY_FLAG: u16 = 0x0300;
+/// The Ctrl+Break check flag (INT 21h AX=3300h to 3302h): 01h when DOS
+/// checks for Ctrl+C in every call, 00h (as at boot) when only in the
+/// console's.
+pub const BREAK_FLAG: u16 = 0x0301;
 /// A byte VSHARE.386 sets while Windows runs, at its MS-DOS 5 offset.
 const VSHARE_FLAG: u16 = 0x0303;
 /// The zero-terminated list of the places to patch for critical sections
@@ -102,7 +106,7 @@ const _: () = assert!(
     DEVICE_HEADERS + DEVICES.len() as u16 * DEVICE_HEADER_SIZE <= FCB_TABLE
 );
 const _: () = assert!(FCB_TABLE + 6 + FCBS * crate::dos_files::ENTRY_SIZE as u16 <= VERIFY_FLAG);
-const _: () = assert!(VERIFY_FLAG < VSHARE_FLAG);
+const _: () = assert!(VERIFY_FLAG < BREAK_FLAG && BREAK_FLAG < VSHARE_FLAG);
 const _: () = assert!(VSHARE_FLAG < CRIT_PATCHES);
 
 /// What DOS keeps after its data segment, below the first MCB: the file

@@ -138,6 +138,8 @@ pub struct Bus {
     pub kbc_release_at: Option<u64>,
     /// When the clock's next periodic interrupt comes, in PIT ticks.
     pub rtc_next: Option<u64>,
+    /// When to look for the clock's alarm next, while it is enabled.
+    pub rtc_alarm_next: Option<u64>,
     /// The A20 gate as a mask for physical addresses: with the gate
     /// closed, address line 20 is forced to 0 and addresses wrap at 1 MB
     /// as on an 8086. See `a20()` and `set_a20()`.
@@ -1825,6 +1827,7 @@ impl Bus {
             self.kbc_release_at,
             crate::keyboard::typematic_at(self),
             self.rtc_next,
+            self.rtc_alarm_next,
             self.win32.next_event(),
             crate::win32::audio_next_event(&self.win32, self.clock.now_ticks()),
         ]
@@ -1890,6 +1893,16 @@ impl Bus {
         {
             self.rtc_next = self.cmos.periodic_ticks().map(|period| if at + period > now { at + period } else { now + period });
             if self.rtc_next.is_some() && self.cmos.periodic_fired() {
+                self.pic.raise(8);
+            }
+        }
+        // The clock's alarm.
+        if let Some(at) = self.rtc_alarm_next
+            && at <= now
+        {
+            let enabled = self.cmos.alarm_enabled();
+            self.rtc_alarm_next = enabled.then(|| next_alarm_look(now));
+            if self.cmos.alarm_due() {
                 self.pic.raise(8);
             }
         }
@@ -2105,14 +2118,20 @@ impl Bus {
             }
             let (ol, or) = self.opl.render();
             let fm = (ol as f32 * fl, or as f32 * fr);
-            if let Some(gold) = &mut self.adlib_gold {
-                // The FM goes through the AdLib Gold's mixer and output
-                // stage, with its sampled sound.
-                let (fm, pcm) = gold.render(fm);
-                self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+            // On an AdLib Gold the FM goes through the card's mixer and
+            // output stage, with its sampled sound. Either way it reaches
+            // the line out through the capacitor on the card's output.
+            let (fm, gold_pcm) = match &mut self.adlib_gold {
+                Some(gold) => {
+                    let (fm, pcm) = gold.render(fm);
+                    (fm, Some(pcm))
+                }
+                None => (fm, None),
+            };
+            let fm = self.mixer.fm_coupling(fm);
+            self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+            if let Some(pcm) = gold_pcm {
                 self.mixer.add(&mut mix, &mut peaks, Channel::AdlibGold, pcm);
-            } else {
-                self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
             }
             if let Some(sb) = &mut self.sb {
                 // The DAC's level at this frame's time, as the card worked
@@ -2284,6 +2303,7 @@ impl Bus {
         self.speaker_rests()
             && self.beep_frames == 0
             && self.opl.is_idle()
+            && self.mixer.fm_coupling_rests()
             && self.sb_quiet()
             && self.mpu.is_idle()
             && self.cdaudio.is_idle()
@@ -2606,8 +2626,8 @@ impl Bus {
         self.clock.stall_to(until);
     }
 
-    /// Start or stop the clock's periodic interrupt as its status
-    /// registers have it.
+    /// Start or stop the clock's periodic interrupt and the look for its
+    /// alarm as its status registers have them.
     pub fn schedule_rtc(&mut self) {
         match self.cmos.periodic_ticks() {
             Some(period) if self.rtc_next.is_none() => {
@@ -2616,6 +2636,15 @@ impl Bus {
             }
             Some(_) => {}
             None => self.rtc_next = None,
+        }
+        // From the current second as the alarm interrupt is enabled, or
+        // where a loaded state's look was.
+        self.cmos.start_alarm_look();
+        if !self.cmos.alarm_enabled() {
+            self.rtc_alarm_next = None;
+        } else if self.rtc_alarm_next.is_none() {
+            self.rtc_alarm_next = Some(next_alarm_look(self.clock.now_ticks()));
+            self.clock.schedule(self.next_event());
         }
     }
 
@@ -3890,6 +3919,13 @@ pub struct Scanout {
     pub device: &'static str,
     pub name: String,
     pub bpp: Option<u32>,
+}
+
+/// The tick of the look for the clock's alarm after tick `now`: the next
+/// multiple of `cmos::ALARM_POLL_TICKS`, the same however long the alarm
+/// has been enabled or since a state was loaded.
+fn next_alarm_look(now: u64) -> u64 {
+    (now / crate::cmos::ALARM_POLL_TICKS + 1) * crate::cmos::ALARM_POLL_TICKS
 }
 
 /// How far apart the PC speaker's two levels are in the mix: its cone
