@@ -80,6 +80,12 @@ pub struct CodePatch {
     /// What to change: the bytes there now, and what replaces them (of
     /// the same length). The first is what the search looks for.
     pub patches: &'static [(Bytes, &'static [u8])],
+    /// Data the driver works on, as `patches` has its code: rewritten
+    /// where it holds the bytes listed and left alone where it doesn't.
+    /// It doesn't decide whether the code is the fix's: a copy of the
+    /// driver with its data elsewhere is patched all the same. Only fixes
+    /// found in memory (`Kind::Code`) rewrite it.
+    pub data: &'static [(Bytes, &'static [u8])],
 }
 
 /// How a fix recognises its game, and what it does.
@@ -224,6 +230,18 @@ const PREHISTORIK_2_SB_MIX: CodePatch = CodePatch {
             &[0xEB, 0x0D, 0x90, 0x90, 0x90, 0x90, 0x90],
         ),
     ],
+    // The two DMA buffers the music plays from, which sit at 0FB9:10C9h
+    // when the code is at 05DA:0000h. The driver plays both once before
+    // it has mixed anything into them: 40 ms of the zeros they hold
+    // until then, which the patched mix's centre line of 80h makes the
+    // lowest level the card has, a thump as the music starts.
+    data: &[(
+        Bytes {
+            at: 0xAEB9,
+            bytes: &[0; 2 * 0xA8],
+        },
+        &[0x80; 2 * 0xA8],
+    )],
 };
 
 /// Blues Brothers: Jukebox Adventure's driver (BLUES.EXE as PKLITE
@@ -302,6 +320,7 @@ const JUKEBOX_SB_MIX: CodePatch = CodePatch {
             &[0x32, 0xC0, 0x90, 0x90, 0x90, 0x90],
         ),
     ],
+    data: &[],
 };
 
 /// Jukebox Adventure's MOD player, in the same code segment: before its
@@ -345,6 +364,7 @@ const JUKEBOX_MOD_HANG: CodePatch = CodePatch {
         },
         &[0x83, 0xFB, 0x0B, 0x90, 0x90],
     )],
+    data: &[],
 };
 
 /// The DOS/4GW settings that Lands of Lore 2's launchers add to the
@@ -398,6 +418,7 @@ const LOL2_LAUNCHER: CodePatch = CodePatch {
         },
         b"32",
     )],
+    data: &[],
 };
 
 /// SETUPG.EXE's copy of the settings `LOL2_LAUNCHER` patches.
@@ -425,6 +446,7 @@ const LOL2_SETUP_LAUNCHER: CodePatch = CodePatch {
         },
         b"32",
     )],
+    data: &[],
 };
 
 /// Test Drive 4's race camera, in the game's Win32 program (3.EXE, which
@@ -523,6 +545,7 @@ const TD4_INTRO_CAMERA: CodePatch = CodePatch {
             ],
         ),
     ],
+    data: &[],
 };
 
 /// The fixes rust-dos knows.
@@ -688,6 +711,23 @@ pub fn writes(code: &CodePatch, base: usize) -> impl Iterator<Item = (usize, u8)
             .enumerate()
             .map(move |(i, &byte)| (base + old.at + i, byte))
     })
+}
+
+/// The bytes to write for the data of `code` at `base` that `ram` holds as
+/// listed (see `CodePatch::data`): (linear address, byte).
+pub fn data_writes<'a>(
+    ram: &'a [u8],
+    code: &'a CodePatch,
+    base: usize,
+) -> impl Iterator<Item = (usize, u8)> + 'a {
+    code.data
+        .iter()
+        .filter(move |(old, _)| has(ram, base, old))
+        .flat_map(move |(old, new)| {
+            new.iter()
+                .enumerate()
+                .map(move |(i, &byte)| (base + old.at + i, byte))
+        })
 }
 
 /// The fix, and the exit code it gives, for an EXEC (AL=00h) of `path`:
@@ -963,9 +1003,35 @@ mod tests {
                     pair[1].at
                 );
             }
-            for (old, new) in code.patches {
+            for (old, new) in code.patches.iter().chain(code.data) {
                 assert_eq!(old.bytes.len(), new.len(), "{} at {:04X}", fix.name, old.at);
             }
+            for (old, _) in code.data {
+                assert!(
+                    all.iter().all(|b| b.at + b.bytes.len() <= old.at
+                        || old.at + old.bytes.len() <= b.at),
+                    "{}'s data at {:04X} overlaps its code",
+                    fix.name,
+                    old.at
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn data_is_rewritten_only_where_it_is_as_listed() {
+        let base = 0x3_0000;
+        for (fix, code) in codes().filter(|(_, code)| !code.data.is_empty()) {
+            let mut ram = memory(code, base);
+            let all: Vec<_> = data_writes(&ram, code, base).collect();
+            let want: usize = code.data.iter().map(|(_, new)| new.len()).sum();
+            assert_eq!(all.len(), want, "{}", fix.name);
+            for (old, _) in code.data {
+                ram[base + old.at] ^= 1;
+            }
+            assert_eq!(data_writes(&ram, code, base).count(), 0, "{}", fix.name);
+            // The code is still the fix's.
+            assert_eq!(names(&find_code(&ram, |_| true)), [(fix.name, base)]);
         }
     }
 

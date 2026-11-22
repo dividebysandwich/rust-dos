@@ -144,7 +144,9 @@ impl Bus {
         let found =
             crate::game_fixes::find_code(&self.ram[..end], |fix| self.game_fix_enabled(fix));
         for (fix, code, base) in found {
-            for (addr, byte) in crate::game_fixes::writes(code, base) {
+            let data: Vec<_> =
+                crate::game_fixes::data_writes(&self.ram[..end], code, base).collect();
+            for (addr, byte) in crate::game_fixes::writes(code, base).chain(data) {
                 self.write_8(addr, byte);
             }
             self.log_string(&format!(
