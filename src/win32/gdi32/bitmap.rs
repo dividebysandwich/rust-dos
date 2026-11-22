@@ -1079,6 +1079,13 @@ pub fn set_di_bits_to_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// StretchDIBits(hdc, xdst, ydst, wdst, hdst, xsrc, ysrc, wsrc, hsrc,
 /// bits, info, usage, rop): the scan lines of the DIB.
 pub fn stretch_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    stretch_dib(cpu, args, false)
+}
+
+/// StretchDIBits, with a DIB of more than 8 bits a pixel first dithered
+/// to the halftone palette when `halftone` is set, as DrawDib draws one
+/// on a display of 256 colours (`dither`).
+pub fn stretch_dib(cpu: &mut Cpu, args: &[u32], halftone: bool) -> Option<u32> {
     let [hdc, xd, yd, wd, hd, xs, ys, ws, hs, bits, at, usage, rop] = args.try_into().unwrap();
     let Some(dc) = gdi(cpu).dc(hdc).cloned() else {
         set_error(cpu, ERROR_INVALID_HANDLE);
@@ -1090,9 +1097,12 @@ pub fn stretch_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let height = info.abs_height();
     let source = if draw::uses_source((rop >> 16) as u8) {
-        let Some(src) = read_dib(cpu, &info, bits, 0, height as u32) else {
+        let Some(mut src) = read_dib(cpu, &info, bits, 0, height as u32) else {
             return Some(0);
         };
+        if halftone && src.bpp > 8 {
+            src = super::dither::to_halftone(&src);
+        }
         let (xs, ys, ws, hs) = (xs as i32, ys as i32, ws as i32, hs as i32);
         // The source's coordinates start at the DIB's bottom, even for a
         // DIB whose rows run top down.

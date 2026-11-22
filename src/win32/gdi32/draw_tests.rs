@@ -611,3 +611,84 @@ fn a_copy_onto_the_card_through_a_dc_takes_its_turn_behind_the_3d_drawing() {
         }
     }
 }
+
+/// A 24-bit DIB of 256 by 4, top down, its header at SCRATCH and its
+/// bits at BITS: in each row, red rising from 0 to 255 across, green half
+/// of it and blue falling. Drawn on the screen at (0, 0) with the
+/// halftone palette realized, through StretchDIBits or, with `halftone`,
+/// as DrawDib draws it; the indices of the 256 by 4 pixels drawn.
+fn draw_gradient(halftone: bool) -> (Vec<u8>, Vec<u32>) {
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &palette::halftone_colors());
+    let (w, h) = (256u32, 4u32);
+    let mut header = [40, w, (-(h as i32)) as u32].map(u32::to_le_bytes).concat();
+    header.extend_from_slice(&[1, 0, 24, 0]);
+    header.resize(40, 0);
+    cpu.bus.guest_write_bytes(SCRATCH, &header);
+    let row: Vec<u8> = (0..w).flat_map(|x| [255 - x as u8, (x / 2) as u8, x as u8]).collect();
+    for y in 0..h {
+        cpu.bus.guest_write_bytes(BITS + y * w * 3, &row);
+    }
+    let args = [screen, 0, 0, w, h, 0, 0, w, h, BITS, SCRATCH, 0, SRCCOPY];
+    assert_eq!(bitmap::stretch_dib(&mut cpu, &args, halftone), Some(h));
+    let pixels = screen_pixels(&mut cpu);
+    let drawn = (0..h as usize)
+        .flat_map(|y| pixels[y * 640..y * 640 + w as usize].to_vec())
+        .collect();
+    (drawn, palette::system_colors(&mut cpu))
+}
+
+/// StretchDIBits maps each pixel of a 24-bit DIB to the nearest colour of
+/// the DC's palette, as Windows 98's GDI does whatever the stretch mode:
+/// no dither, so the four rows of the gradient are the same.
+#[test]
+fn stretch_di_bits_maps_true_colour_to_the_nearest_colour() {
+    let (drawn, system) = draw_gradient(false);
+    let (top, rest) = drawn.split_at(256);
+    for row in rest.chunks(256) {
+        assert_eq!(row, top);
+    }
+    let halftone = palette::halftone_colors();
+    for (x, &i) in top.iter().enumerate() {
+        let x = x as u32;
+        let want = x | (x / 2) << 8 | (255 - x) << 16;
+        let distance = |c: u32| {
+            (0..3)
+                .map(|s| ((c >> (8 * s)) & 0xFF).abs_diff((want >> (8 * s)) & 0xFF).pow(2))
+                .sum::<u32>()
+        };
+        let best = halftone.iter().map(|&c| distance(c)).min().unwrap();
+        assert_eq!(distance(system[i as usize]), best, "x {x}");
+    }
+}
+
+/// DrawDib dithers the same gradient to the halftone palette's cube:
+/// every pixel is a colour of the cube whose channels are the levels on
+/// either side of the source's, the rows differ from each other in a
+/// pattern, and the picture has more distinct colours than the nearest
+/// colour mapping gives.
+#[test]
+fn drawdib_dithers_true_colour_to_the_halftone_cube() {
+    let (drawn, system) = draw_gradient(true);
+    for (at, &i) in drawn.iter().enumerate() {
+        let x = (at % 256) as u32;
+        let source = [x, x / 2, 255 - x];
+        let color = system[i as usize];
+        for (s, v) in source.into_iter().enumerate() {
+            let c = (color >> (8 * s)) & 0xFF;
+            assert_eq!(c % 51, 0, "pixel {at}: {color:06x} isn't the cube's");
+            assert!(c / 51 == v / 51 || c / 51 == v.div_ceil(51), "pixel {at}");
+        }
+    }
+    let differing = (0..256)
+        .filter(|&x| (1..4).any(|y| drawn[y * 256 + x] != drawn[x]))
+        .count();
+    assert!(differing > 200, "{differing} columns differ between rows");
+    let count = |pixels: &[u8]| {
+        let mut seen = [false; 256];
+        pixels.iter().for_each(|&i| seen[i as usize] = true);
+        seen.iter().filter(|&&s| s).count()
+    };
+    let nearest = count(&draw_gradient(false).0);
+    let dithered = count(&drawn);
+    assert!(dithered > nearest + 10, "{dithered} colours dithered, {nearest} nearest");
+}

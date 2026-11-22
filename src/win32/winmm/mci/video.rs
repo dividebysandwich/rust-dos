@@ -1133,6 +1133,14 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
     video(cpu, i).drawn = Some(n);
     let mut surface = Surface::memory(w, h, 24, Vec::new(), default_masks(24));
     surface.data = rows;
+    // MCIAVI draws through DrawDib, which on a display of 256 colours
+    // dithers a movie of more than 8 bits to the halftone palette that
+    // `select_movie_palette` selects. A movie with colours of its own is
+    // drawn in them.
+    let deep = matches!(&m.video, MediaKind::Avi(v) if v.colors().is_empty());
+    if deep && palette::palette_device(cpu) {
+        surface = crate::win32::gdi32::dither::to_halftone(&surface);
+    }
     let [sx, sy, sw, sh] = video(cpu, i).source;
     let source = Source {
         surface,

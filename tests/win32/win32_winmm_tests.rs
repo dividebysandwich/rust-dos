@@ -1767,6 +1767,103 @@ fn avivideo_realizes_the_movies_palette_on_a_256_colour_desktop() {
     }
 }
 
+/// On a desktop of 256 colours, AVIVideo draws a movie of more than 8
+/// bits as MCIAVI's DrawDib does: dithered to the halftone palette. A
+/// grey of 128, between the halftone cube's greys of 102 and 153, comes
+/// out as a pattern of both in the four pixels from (16, 16). Mapped to
+/// the nearest colour, as StretchDIBits would, every pixel would be the
+/// static grey of 128. The program exits with bit 0 set for a pixel of
+/// 102, bit 1 for one of 153 and bit 2 for one of another colour.
+#[test]
+fn avivideo_dithers_a_true_colour_movie_on_a_256_colour_desktop() {
+    const WS_POPUP_VISIBLE: i32 = 0x9000_0000_u32 as i32;
+    const WS_CHILD_VISIBLE: i32 = 0x5000_0000;
+    const MCI_OPEN: i32 = 0x803;
+    const MCI_PLAY: i32 = 0x806;
+    const MCI_STATUS: i32 = 0x814;
+    const MCI_STATUS_ITEM: i32 = 0x100;
+    const OPEN_FLAGS: i32 = 0x0200 | 0x1_0000 | 0x2_0000;
+    let mut data = vec![0u8; 0xE0];
+    put(&mut data, CLIP_NAME as usize, b"C:\\CLIP.AVI\0");
+    put(&mut data, STATIC as usize, b"Static\0");
+    let open = OPEN_PARMS as usize;
+    put(&mut data, open + 20, &(WS_CHILD_VISIBLE as u32).to_le_bytes());
+    put(&mut data, STATUS_PARMS as usize + 8, &0x4001u32.to_le_bytes());
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["Sleep", "ExitProcess"]),
+        ("WINMM.dll", &["mciSendCommandA"]),
+        ("USER32.dll", &["CreateWindowExA", "GetDC"]),
+        ("GDI32.dll", &["GetPixel"]),
+    ];
+    let exe = program(imports, &data, |a, l| {
+        let send = |a: &mut CodeAssembler, msg: i32, flags: i32, parms: u32| {
+            a.push(l.at(parms) as i32)?;
+            a.push(flags)?;
+            a.push(msg)?;
+            a.push(edi)?;
+            a.call(l.import(2))
+        };
+        a.xor(ebx, ebx)?;
+        a.xor(edi, edi)?;
+        a.mov(dword_ptr(l.at(OPEN_PARMS + 12)), l.at(CLIP_NAME) as i32)?;
+        let args = [
+            0,
+            l.at(STATIC) as i32,
+            0,
+            WS_POPUP_VISIBLE,
+            0,
+            0,
+            64,
+            64,
+            0,
+            0,
+            0,
+            0,
+        ];
+        call(a, l.import(3), &args)?;
+        a.mov(dword_ptr(l.at(OPEN_PARMS + 24)), eax)?;
+        send(a, MCI_OPEN, OPEN_FLAGS, OPEN_PARMS)?;
+        a.mov(edi, dword_ptr(l.at(OPEN_PARMS + 4)))?;
+        send(a, MCI_PLAY, 0, PLAY_PARMS)?;
+        call(a, l.import(0), &[100])?;
+        send(a, MCI_STATUS, MCI_STATUS_ITEM, STATUS_PARMS)?;
+        a.push(dword_ptr(l.at(STATUS_PARMS + 4)))?;
+        a.call(l.import(4))?;
+        a.mov(ebp, eax)?;
+        for (x, y) in [(16, 16), (17, 16), (16, 17), (17, 17)] {
+            a.push(y)?;
+            a.push(x)?;
+            a.push(ebp)?;
+            a.call(l.import(5))?;
+            let mut other = a.create_label();
+            let mut high = a.create_label();
+            let mut next = a.create_label();
+            a.cmp(eax, 0x66_6666)?;
+            a.jne(high)?;
+            a.or(ebx, 1)?;
+            a.jmp(next)?;
+            a.set_label(&mut high)?;
+            a.cmp(eax, 0x99_9999)?;
+            a.jne(other)?;
+            a.or(ebx, 2)?;
+            a.jmp(next)?;
+            a.set_label(&mut other)?;
+            a.or(ebx, 4)?;
+            a.set_label(&mut next)?;
+            a.nop()?;
+        }
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.int3()
+    });
+    let files = [("T.EXE", exe), ("CLIP.AVI", avi_clip_of(&[[128; 3]; 2], &[]))];
+    let mut cpu = machine("dither", CoreMode::Normal, &files, |cpu| {
+        cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    });
+    run_to_exit(&mut cpu, 20_000, |_| {});
+    assert_eq!(cpu.errorlevel, 0b011, "{:?}", printed(&cpu));
+}
+
 /// On a desktop of 256 colours, MCI_REALIZE realizes the movie's palette
 /// in its window at once, before a frame is drawn. The program realizes
 /// a palette of its own first, which takes every free entry of the
