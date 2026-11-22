@@ -1000,6 +1000,7 @@ impl Bus {
     fn plain_vga_run(&self, dst: usize, len: usize) -> bool {
         (ADDR_VGA_GRAPHICS..=ADDR_VGA_GRAPHICS + SIZE_GRAPHICS - len).contains(&dst)
             && !self.vbe_window()
+            && self.vga.maps_graphics_window()
             && self.s3_mmio(dst).is_none()
             && self.mach64_mmio(dst).is_none()
             && self.vga.plain_writes()
@@ -1164,6 +1165,11 @@ impl Bus {
                 }
                 return self.vbe.vram[offset];
             }
+            // Nothing there while GR06 maps the memory at B0000h or
+            // B8000h alone (the text modes).
+            if !self.vga.maps_graphics_window() {
+                return 0xFF;
+            }
             // Route through VGA so chain-4, odd/even, and Read Map Select
             // work correctly. read_graphics also latches planes, needed
             // for planar read-modify-write sequences.
@@ -1219,6 +1225,9 @@ impl Bus {
             return self.mapped_8(addr);
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && !self.vbe_window() {
+            if !self.vga.maps_graphics_window() {
+                return 0xFF;
+            }
             let saved = self.vga.latches.get();
             let v = self.vga.read_graphics(self.vga_window(addr, false));
             self.vga.latches.set(saved);
@@ -1239,7 +1248,11 @@ impl Bus {
     /// the VGA's planes as `write_planes_plainly` has them.
     #[cfg_attr(not(dynrec), allow(dead_code))]
     pub(crate) fn plain_planes(&mut self) -> Option<(u8, *mut u8, usize)> {
-        if self.vbe_window() || self.et4000() || (self.s3() && self.vga.s3.mmio()) {
+        if self.vbe_window()
+            || self.et4000()
+            || (self.s3() && self.vga.s3.mmio())
+            || !self.vga.maps_graphics_window()
+        {
             return None;
         }
         self.vga.plain_planes()
@@ -1250,6 +1263,7 @@ impl Bus {
             || self.vbe_window()
             || self.et4000()
             || (self.s3() && self.vga.s3.mmio())
+            || !self.vga.maps_graphics_window()
             || !self.vga.write_planes_plainly(addr - ADDR_VGA_GRAPHICS, value, size)
         {
             return false;
@@ -1294,6 +1308,10 @@ impl Bus {
                 let offset = self.vesa_window(addr - ADDR_VGA_GRAPHICS, true);
                 self.write_vram(offset, &[value]);
                 return true;
+            }
+            // Lost while GR06 maps the memory elsewhere (see `mapped_8`).
+            if !self.vga.maps_graphics_window() {
+                return false;
             }
             self.note_video_write(addr - ADDR_VGA_GRAPHICS, 1);
             // write_graphics already sets vga.dirty unconditionally. The
