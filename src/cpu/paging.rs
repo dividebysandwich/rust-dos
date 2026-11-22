@@ -390,3 +390,58 @@ impl Cpu {
         (pde_addr, pde, Some((pte_addr, self.bus.read_32(pte_addr as usize))))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(page: u32) -> TlbEntry {
+        TlbEntry {
+            read_tag: page + 1,
+            write_tag: page + 1,
+            phys: page << 12,
+            ..EMPTY
+        }
+    }
+
+    /// A TLB with `fills` translations put in through `fill`, and one
+    /// more written past it into slot 2047, which only a flush of the
+    /// whole table empties.
+    fn tlb_with(fills: u32) -> Box<Tlb> {
+        let mut tlb = Box::<Tlb>::default();
+        for page in 0..fills {
+            tlb.fill(Tlb::slot(page, false), entry(page));
+        }
+        tlb.entries[2 * TLB_ENTRIES - 1] = entry(0x3FF);
+        tlb
+    }
+
+    #[test]
+    fn a_flush_empties_only_the_slots_filled_while_they_fit_the_list() {
+        for fills in [0, 3, FILLED_KEPT as u32] {
+            let mut tlb = tlb_with(fills);
+            tlb.flush();
+            assert!(
+                (0..fills).all(|page| tlb.lookup(page, false).is_none()),
+                "{fills} fills"
+            );
+            assert_eq!(tlb.lookup(0x3FF, true), Some(0x3FF << 12), "{fills} fills");
+            // The list starts again: the next flush is as short.
+            tlb.fill(Tlb::slot(5, false), entry(5));
+            tlb.flush();
+            assert_eq!(tlb.lookup(5, false), None);
+            assert_eq!(tlb.lookup(0x3FF, true), Some(0x3FF << 12), "{fills} fills");
+        }
+    }
+
+    #[test]
+    fn a_flush_after_more_fills_than_the_list_holds_empties_the_table() {
+        let mut tlb = tlb_with(FILLED_KEPT as u32 + 1);
+        tlb.flush();
+        assert!(
+            tlb.entries
+                .iter()
+                .all(|e| e.read_tag == 0 && e.jit_read == 1)
+        );
+    }
+}
