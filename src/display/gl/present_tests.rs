@@ -685,6 +685,59 @@ fn xbrz_near_colour_edges_use_exact_colour_inequality() {
 
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
+fn xbrz_two_colour_pictures_filter_the_same_with_colours_swapped() {
+    use crate::video::mono::Monochrome;
+    // With a symmetric distance, swapping the two colours of a picture
+    // swaps them in every blend: each output pixel of the swapped picture
+    // is the sum of the two colours minus the original's, give or take
+    // the rounding of the blend. The texels near the edge also see the
+    // transparent black outside the frame, so only the interior counts.
+    let (low, high) = (100u8, 134u8);
+    let (width, height) = (24usize, 24usize);
+    let mut state = 0x2545_f491u32;
+    let picture: Vec<bool> = (0..width * height)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state >> 31 == 1
+        })
+        .collect();
+    let sdl = sdl3::init().unwrap();
+    let video = sdl.video().unwrap();
+    let display = (width as u32 * 2, height as u32 * 2);
+    let mut screen = GlScreen::open(&video, "xBRZ swapped colours", display, true)
+        .unwrap_or_else(|e| panic!("{}", e.reason));
+    screen.select(Shader::Xbrz, Filter::Sharp).unwrap();
+    let mut draw = |swapped: bool| {
+        let pixels = picture
+            .iter()
+            .flat_map(|&bit| [if bit != swapped { high } else { low }; 3])
+            .collect();
+        let native = Frame::from_rgb(width as u32, height as u32, pixels);
+        let base = double(&native);
+        screen
+            .capture(&base, &base, Monochrome::Off, display, false)
+            .unwrap()
+    };
+    let (plain, swapped) = (draw(false), draw(true));
+    let mut blended = 0;
+    for y in 8..height * 2 - 8 {
+        for x in 8..width * 2 - 8 {
+            let at = (y * width * 2 + x) * 4;
+            let (a, b) = (plain.rgba[at] as i32, swapped.rgba[at] as i32);
+            if a != low as i32 && a != high as i32 {
+                blended += 1;
+            }
+            assert!(
+                (a + b - low as i32 - high as i32).abs() <= 1,
+                "({x}, {y}): {a} and {b} with the colours swapped"
+            );
+        }
+    }
+    assert!(blended > 0, "the picture must have blended edges");
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
 fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
     use crate::display::{Display, Output};
     let sdl = sdl3::init().unwrap();
