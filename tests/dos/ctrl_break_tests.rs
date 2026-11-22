@@ -45,11 +45,18 @@ fn program(own_handler: bool, break_on: bool, ah: u8) -> Vec<u8> {
 /// Run `program` until it has called its function a few times, type
 /// Ctrl+C, and run on.
 fn run(name: &str, code: &[u8]) -> Box<Cpu> {
+    run_with(name, code, false)
+}
+
+/// `run`, with expanded memory if `ems`: DOS then runs in virtual-8086
+/// mode under the built-in monitor, as it does by default.
+fn run_with(name: &str, code: &[u8], ems: bool) -> Box<Cpu> {
     let base = PathBuf::from("target/test_ctrl_break").join(name);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("BRK.COM"), code).unwrap();
     let mut cpu = Cpu::new(base);
+    rust_dos::ems::set_enabled(&mut cpu.bus, ems);
     cpu.load_shell();
     assert!(cpu.load_executable("BRK.COM", None));
     let psp = cpu.current_psp;
@@ -92,6 +99,22 @@ fn break_on_runs_the_handler_in_a_file_call_and_the_call_again() {
     // and the loop goes on.
     assert!(count(&cpu, CALLS) > 10);
     assert_eq!(cpu.state, CpuState::Running);
+}
+
+#[test]
+fn break_on_runs_the_handler_under_the_v86_monitor() {
+    let mut cpu = run_with("on_v86", &program(true, true, 0x19), true);
+    assert!(cpu.v86());
+    assert_eq!(count(&cpu, BREAKS), 1);
+    assert!(!ctrl_c_waits(&mut cpu));
+    assert!(count(&cpu, CALLS) > 10);
+}
+
+#[test]
+fn the_default_handler_ends_the_program_under_the_v86_monitor() {
+    let cpu = run_with("default_v86", &program(false, true, 0x19), true);
+    assert_eq!(cpu.state, CpuState::RebootShell);
+    assert_eq!(cpu.last_child_exit, 0x0100);
 }
 
 #[test]
