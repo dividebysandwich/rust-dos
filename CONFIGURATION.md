@@ -188,18 +188,21 @@ limit, so without a connection it goes on as it would with one:
   default, finds the speed the running program needs from the frames it
   draws (its page flips, or the bursts of writes that copy a finished
   picture to video memory): it goes up while the frame rate follows it,
-  stops where the frame rate stops following (a game that caps its own
-  frame rate) or reaches the display's refresh rate (frames nobody sees,
-  and some games, such as Descent, play badly at such rates), and goes
-  down while the program waits for a key or calls DOS's idle interrupt. It
-  then tries lower speeds, down to where they cost more than 3% of the
-  frame rate, or make a program that polls for the vertical retrace
-  miss one. A speed the host falls behind at is left for a lower one,
-  and the limit that sets rises again while the host keeps up. A real-mode
-  program with no frames to go by (most games of the 1980s, which update the
-  screen piecemeal) runs at 3000, about a 286, as in DOSBox's `cycles=auto`,
-  and at max while it reads or writes its drives (loading), unless it would
-  sit halted for 30% of the time or more at the real-mode speed, as a game
+  stops where the frame rate stops following (a game that caps its own frame
+  rate) or reaches the display's refresh rate (frames nobody sees, and some
+  games, such as Descent, play badly at such rates), and goes down while the
+  program waits for a key or calls DOS's idle interrupt. It doesn't go up
+  for a program that sits halted for half the time or more, and longer than
+  waiting for a retrace or two a frame takes: it waits for something else,
+  as a Windows game that draws only when something changes does. It then
+  tries lower speeds, down to where they cost more than 3% of the frame
+  rate, or make a program that polls for the vertical retrace miss one. A
+  speed the host falls behind at is left for a lower one, and the limit that
+  sets rises again while the host keeps up. A real-mode program with no
+  frames to go by (most games of the 1980s, which update the screen
+  piecemeal) runs at 3000, about a 286, as in DOSBox's `cycles=auto`, and at
+  max while it reads or writes its drives (loading), unless it would sit
+  halted for 30% of the time or more at the real-mode speed, as a game
   playing speech from its CD does. A protected-mode one runs at max while it
   reads and writes (loading, computing), and otherwise goes down to 20000, a
   486's speed, or a quarter of a faster `cpu` model's clock (50000 on a
@@ -495,9 +498,15 @@ limit, so without a connection it goes on as it would with one:
 * `ems` gives programs expanded memory (LIM EMS 4.0, INT 67h), which
   many games of the early 1990s want: `true` (the default) or `false`.
   As with EMM386, 16 KB pages of extended memory show through a page
-  frame at E000h, and EMS and XMS share the same memory. There is no
-  VCPI: DOS extenders use the DPMI host (`dpmi`), or run as they do
-  without EMM386. A change takes effect at the DOS prompt.
+  frame at E000h, and EMS and XMS share the same memory. With EMS, DOS
+  runs in virtual-8086 mode under a built-in monitor, as under EMM386:
+  installers that look for a memory manager by reading CR0 find one, and
+  DOS extenders that find no DPMI host switch to protected mode through
+  VCPI (INT 67h AX=DE00h-DE0Ch). Programs that switch the processor
+  themselves (to "unreal" mode, or with a DOS extender that only knows
+  plain DOS) stop with a message, as they do under EMM386, and need
+  `ems=false`, which runs DOS in real mode. A change takes effect at the
+  DOS prompt.
 * `umb` gives DOS upper memory blocks between 640 KB and 1 MB, from
   D000h to EFFFh (to DFFFh with EMS), as DOS 5 with EMM386 has them:
   `true` (the default) or `false`. `LOADHIGH` (or `LH`) at the prompt
@@ -526,8 +535,9 @@ limit, so without a connection it goes on as it would with one:
   from it as they need it, so a DOS/4GW program can start another DOS
   extender's (demos such as Scoop's Luminous do). As under Windows, its
   clients can call DOS with INT 21h in protected mode, with selectors
-  for their buffers. Off, they run as they do on plain DOS with HIMEM. A
-  change takes effect for the programs started after it.
+  for their buffers. Off, they use VCPI with EMS on, as under EMM386, and
+  run as they do on plain DOS with HIMEM with EMS off. A change takes
+  effect for the programs started after it.
 * `win32` turns on the built-in Windows: `true` or `false` (the default). A
   Win32 program, a Windows 95 .EXE, then runs from the DOS prompt in
   protected mode with paging, as Windows 95 runs it, and ends back at the

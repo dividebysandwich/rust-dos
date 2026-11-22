@@ -1029,10 +1029,11 @@ fn main() -> Result<ExitCode, String> {
                     if paused {
                         continue;
                     }
-                    // A key still held from the settings window repeats
-                    // for nobody.
+                    // The host's key repeat is for nobody: the machine's
+                    // keyboard repeats a held key itself, at its own
+                    // typematic rate.
                     let Some(scancode) = scancode else { continue };
-                    if repeat && !held.contains_key(&scancode) {
+                    if repeat {
                         continue;
                     }
                     // A key pressed stops a paste.

@@ -587,14 +587,14 @@ pub fn clear_callback_busy(bus: &mut crate::bus::Bus) {
 /// entered again in the middle of it, which a call between any two of its
 /// instructions would do.
 pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
-    if driver_vector_ours(&cpu.bus) || (cpu.pe() && !crate::dpmi::can_reflect_interrupt(cpu)) {
+    if driver_vector_ours(&cpu.bus) || (!cpu.dos_mode() && !crate::dpmi::can_reflect_interrupt(cpu)) {
         raise_driver_irq(&mut cpu.bus);
         return false;
     }
     if !take_event(cpu) {
         return false;
     }
-    if cpu.pe() {
+    if !cpu.dos_mode() {
         let stub = (CALLBACK_STUB - 0xF0000) as u16;
         crate::dpmi::call_device_code(cpu, 0xF000, stub);
         return true;
@@ -665,7 +665,8 @@ fn raise_driver_irq(bus: &mut crate::bus::Bus) {
     bus.refresh_irq();
 }
 
-/// The driver's IRQ handler (`bios::MOUSE_IRQ`), in real mode: CF set
+/// The driver's IRQ handler (`bios::MOUSE_IRQ`), in real or virtual-8086
+/// mode (under the built-in monitor, or a VCPI client's own): CF set
 /// when the IRQ is the PS/2 mouse's, with a byte for the BIOS's handler
 /// to read. Otherwise the event handler is entered through the stub, if
 /// an event waits for it, and the stub returns to the IRQ handler, which
@@ -673,7 +674,7 @@ fn raise_driver_irq(bus: &mut crate::bus::Bus) {
 pub fn irq_service(cpu: &mut crate::cpu::Cpu) {
     let ps2 = !cpu.bus.kbc.aux_idle();
     cpu.set_cpu_flag(crate::cpu::CpuFlags::CF, ps2);
-    if !ps2 && !cpu.pe() && take_event(cpu) {
+    if !ps2 && !cpu.pm() && take_event(cpu) {
         enter_stub(cpu);
     }
 }
@@ -824,7 +825,7 @@ pub fn ps2_bios(cpu: &mut crate::cpu::Cpu) {
             1 if cpu.bus.mouse.ps2.handler == (0, 0) => Err(0x05),
             1 => {
                 cpu.bus.mouse.ps2.enabled = true;
-                if cpu.v86() {
+                if cpu.guest_v86() {
                     // Through the ports, for a V86 monitor that keeps
                     // the machine's masks, as Windows' VPICD does.
                     use crate::bios::PortAccess::Update;
