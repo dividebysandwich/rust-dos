@@ -1584,7 +1584,11 @@ fn segment_loads_in_big_real_mode_keep_the_limits_and_flatness() {
     // Back in real mode from protected mode, the data segments keep their
     // 4 GB limit ("big real mode", as HIMEM leaves them). A loop loads DS
     // with selectors 0 to 3000h in turn, making it flat (base 0) and not,
-    // and reads and writes through it above 1 MB.
+    // and reads and writes through it above 1 MB; then pops 0 into ES and
+    // DS's selector after it, as Ultima VII's memory manager loads and
+    // restores its segments around each copy. The loads run in
+    // translated code, which goes on after them, not through their
+    // handlers.
     const PM16: u32 = 0x8000;
     const REAL: u32 = 0x9000;
     let (mut a, mut b) = twins(|rig| {
@@ -1614,12 +1618,27 @@ fn segment_loads_in_big_real_mode_keep_the_limits_and_flatness() {
             a.mov(dx, ds)?;
             a.add(si, dx)?;
             a.add(si, word_ptr(ebx))?;
+            a.push(ds)?;
+            a.xor(dx, dx)?;
+            a.push(dx)?;
+            a.pop(es)?;
+            a.add(di, word_ptr(ebx).es())?;
+            a.pop(es)?;
+            a.add(di, word_ptr(ebx).es())?;
             a.loop_(top)?;
             a.hlt()
         }));
     });
     run_both(&mut a, &mut b);
     assert_ne!(b.cpu.esi() & 0xFFFF, 0);
+    if AVAILABLE {
+        let calls = b.cpu.dynrec.calls().unwrap();
+        use iced_x86::Mnemonic::*;
+        for m in [Mov, Pop] {
+            let n = calls.fallback[m as usize];
+            assert!(n < 100, "{n} {m:?} through their handlers");
+        }
+    }
 }
 
 #[test]
