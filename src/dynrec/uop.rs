@@ -465,15 +465,16 @@ pub enum Uop {
     GetFlags { t: T, size: u8 },
     /// t = the segment register's selector.
     GetSeg { t: T, seg: Seg },
-    /// In real mode, before a far transfer: the instruction's handler runs
-    /// it instead unless loading CS changes only its selector and base, as
-    /// `Cpu::load_seg_real` does once CS is a plain data-like segment
-    /// (that isn't flat, which a load could make it, changing the block's
-    /// environment).
+    /// In real or virtual-8086 mode, before a far transfer: the
+    /// instruction's handler runs it instead unless loading CS changes only
+    /// its selector and base, as `Cpu::load_seg_real` does once CS is a
+    /// plain data-like segment (that isn't flat, which a load could make
+    /// it, changing the block's environment), and `Cpu::load_seg_v86` once
+    /// it is a 64 KB level-3 one.
     CsReal,
-    /// Load CS with the selector in t as `Cpu::load_seg_real` does, after
-    /// `CsReal`, noting the block and the CS base it ran under for the
-    /// engine (`JitCtx::far_block`).
+    /// Load CS with the selector in t as `Cpu::load_seg_real` or
+    /// `load_seg_v86` does, after `CsReal`, noting the block and the CS
+    /// base it ran under for the engine (`JitCtx::far_block`).
     LoadCsReal { t: T },
     /// RETF in protected mode to CS:EIP `sel:off`, read from the stack
     /// (their accesses checked), through `helpers::jit_far_ret`, which
@@ -497,8 +498,11 @@ pub enum Uop {
     Unspill { t: T, slot: u8 },
     /// Leave the block with EIP = the value.
     Exit { eip: Src },
-    /// Load segment register `seg` (not CS or SS) with the selector in t,
-    /// as `Cpu::load_segment` does (it may fault).
+    /// Load segment register `seg` (not CS) with the selector in t, as
+    /// `Cpu::load_segment` does (it may fault). In real and virtual-8086
+    /// mode the code changes the selector and base itself where the
+    /// register holds the segment such a load keeps (see `CsReal`), and
+    /// sets the interrupt shadow a load of SS leaves.
     LoadSeg { seg: Seg, t: T },
     /// The end of a MOV or POP into SS (whose `LoadSeg` left the interrupt
     /// shadow): the block stops after the instruction where the stack's
