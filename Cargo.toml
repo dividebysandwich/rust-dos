@@ -50,6 +50,7 @@ assets = [
     ["packaging/linux/rust-dos.desktop", "usr/share/applications/", "644"],
     ["packaging/linux/rust-dos.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
     ["assets/rust-dos.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+    ["THIRD-PARTY-NOTICES", "usr/share/doc/rust-dos/", "644"],
 ]
 
 # The macOS app (cargo-bundle, in the release workflow): its icon, which
