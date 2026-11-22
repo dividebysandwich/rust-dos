@@ -1346,12 +1346,13 @@ fn sti_at_the_end_of_a_full_block_holds_interrupts_for_one_instruction() {
     assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
 }
 
-/// A DOS program (`T.COM`, in real mode) on the interpreter and on the
-/// recompiler, from directories of their own, run in lockstep to its end.
-/// Returns the recompiler's counts. The machines are boxed: a debug build
-/// on Windows makes copies of a `Cpu` on the stack, and two of them by
-/// value overflow a test thread's 2 MB.
-fn com_in_lockstep(test: &str, code: &[u8]) -> (Box<Cpu>, Box<Cpu>) {
+/// A DOS program (`T.COM`) on the interpreter and on the recompiler, from
+/// directories of their own, run in lockstep to its end: in real mode, or
+/// with `ems` in virtual-8086 mode under the built-in monitor. Returns the
+/// two machines. They are boxed: a debug build on Windows makes copies of
+/// a `Cpu` on the stack, and two of them by value overflow a test thread's
+/// 2 MB.
+fn com_in_lockstep(test: &str, code: &[u8], ems: bool) -> (Box<Cpu>, Box<Cpu>) {
     rust_dos::hosttime::fix(NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56));
     let machine = |name: &str, core: CoreMode| {
         let dir = std::path::Path::new("target/dynrec_tests").join(test).join(name);
@@ -1360,6 +1361,7 @@ fn com_in_lockstep(test: &str, code: &[u8]) -> (Box<Cpu>, Box<Cpu>) {
         std::fs::write(dir.join("T.COM"), code).unwrap();
         let mut cpu = Cpu::new(dir);
         cpu.core = core;
+        rust_dos::ems::set_enabled(&mut cpu.bus, ems);
         cpu.load_shell();
         cpu.pending_command = Some("T".to_string());
         cpu
@@ -1441,11 +1443,139 @@ fn far_calls_returns_and_interrupts_in_real_mode_go_on_in_translated_code() {
     code.extend(&handler);
     code.resize(FAR_AT, 0x90);
     code.extend(&far);
-    let (_, b) = com_in_lockstep("far", &code);
+    let (_, b) = com_in_lockstep("far", &code, false);
     let stats = b.dynrec.stats();
     if AVAILABLE {
         // Far transfers went on through the links, not the execution loop.
         assert!(stats.runs < 20000, "{:?}", stats);
+    }
+}
+
+/// A COM program whose loop loads segment registers every way a real-mode
+/// program does (MOV, POP, LES and LDS, MOV and POP SS) and makes far
+/// calls, jumps and returns, with INT 60h and the timer interrupting it.
+fn segment_loop_program() -> Vec<u8> {
+    const FAR_AT: usize = 0xF00;
+    const HANDLER: u32 = 0x0C00;
+    const PTR: u64 = 0x0E00;
+    const DPTR: u64 = 0x0E04;
+    const JPTR: u64 = 0x0E08;
+    let main = {
+        let mut a = CodeAssembler::new(16).unwrap();
+        let mut top = a.create_label();
+        a.mov(ax, cs).unwrap();
+        a.add(ax, 0x100).unwrap();
+        a.mov(word_ptr(PTR), 0).unwrap();
+        a.mov(word_ptr(PTR + 2), ax).unwrap();
+        a.mov(word_ptr(JPTR), 0x80).unwrap();
+        a.mov(word_ptr(JPTR + 2), ax).unwrap();
+        a.add(ax, 0x100).unwrap();
+        a.mov(word_ptr(DPTR), 0).unwrap();
+        a.mov(word_ptr(DPTR + 2), ax).unwrap();
+        a.xor(ax, ax).unwrap();
+        a.mov(es, ax).unwrap();
+        a.mov(word_ptr(0x180).es(), HANDLER).unwrap();
+        a.mov(word_ptr(0x182).es(), cs).unwrap();
+        // The timer at about 8 kHz.
+        a.mov(al, 0x36).unwrap();
+        a.out(0x43, al).unwrap();
+        a.mov(al, 150).unwrap();
+        a.out(0x40, al).unwrap();
+        a.xor(al, al).unwrap();
+        a.out(0x40, al).unwrap();
+        a.xor(si, si).unwrap();
+        a.xor(di, di).unwrap();
+        a.mov(cx, 20000).unwrap();
+        a.set_label(&mut top).unwrap();
+        a.mov(bx, cx).unwrap();
+        // ES and then DS on the data segment, and back.
+        a.les(ax, dword_ptr(DPTR)).unwrap();
+        a.add(word_ptr(0).es(), bx).unwrap();
+        a.push(ds).unwrap();
+        a.push(es).unwrap();
+        a.pop(ds).unwrap();
+        a.add(si, word_ptr(0)).unwrap();
+        a.pop(ds).unwrap();
+        a.lds(dx, dword_ptr(DPTR)).unwrap();
+        a.mov(ax, cs).unwrap();
+        a.mov(ds, ax).unwrap();
+        // The same stack again, by MOV and POP.
+        a.mov(ax, ss).unwrap();
+        a.mov(ss, ax).unwrap();
+        a.push(ss).unwrap();
+        a.pop(ss).unwrap();
+        a.call(dword_ptr(PTR)).unwrap();
+        a.add(si, ax).unwrap();
+        a.loop_(top).unwrap();
+        a.mov(al, 0x36).unwrap();
+        a.out(0x43, al).unwrap();
+        a.xor(al, al).unwrap();
+        a.out(0x40, al).unwrap();
+        a.out(0x40, al).unwrap();
+        a.mov(word_ptr(0x80), si).unwrap();
+        a.mov(word_ptr(0x82), di).unwrap();
+        a.mov(ax, 0x4C00).unwrap();
+        a.int(0x21).unwrap();
+        a.assemble(0x100).unwrap()
+    };
+    // The far function: INT 60h, then a far jump through a pointer to its
+    // RETF.
+    let far = {
+        let mut a = CodeAssembler::new(16).unwrap();
+        a.mov(ax, bx).unwrap();
+        a.imul_3(ax, ax, 7).unwrap();
+        a.int(0x60).unwrap();
+        a.xor(ax, di).unwrap();
+        a.jmp(dword_ptr(JPTR)).unwrap();
+        let mut code = a.assemble(0).unwrap();
+        code.resize(0x80, 0x90);
+        let mut b = CodeAssembler::new(16).unwrap();
+        b.inc(ax).unwrap();
+        b.retf().unwrap();
+        code.extend(b.assemble(0x80).unwrap());
+        code
+    };
+    let handler = {
+        let mut a = CodeAssembler::new(16).unwrap();
+        a.add(di, bx).unwrap();
+        a.rol(di, 3).unwrap();
+        a.iret().unwrap();
+        a.assemble(HANDLER as u64).unwrap()
+    };
+    assert!(main.len() < HANDLER as usize - 0x100);
+    let mut code = main;
+    code.resize(HANDLER as usize - 0x100, 0x90);
+    code.extend(&handler);
+    code.resize(FAR_AT, 0x90);
+    code.extend(&far);
+    // The data segment, 2 KB on.
+    code.resize(0x2000 - 0x100 + 2, 0);
+    code
+}
+
+#[test]
+fn segment_loads_and_far_transfers_under_the_v86_monitor_run_in_translated_code() {
+    // With EMS the program runs in virtual-8086 mode under the built-in
+    // monitor, as under EMM386, and without in real mode. Its segment
+    // loads and far transfers run in translated code in both, as the
+    // interpreter runs them, without a call into Rust for each load.
+    let code = segment_loop_program();
+    for ems in [true, false] {
+        let (_, b) = com_in_lockstep(if ems { "segs_v86" } else { "segs_real" }, &code, ems);
+        assert_eq!(b.v86(), ems, "EMS {ems}");
+        if !AVAILABLE {
+            continue;
+        }
+        let stats = b.dynrec.stats();
+        let calls = b.dynrec.calls().unwrap();
+        assert_eq!(calls.load_seg, 0, "segment loads through jit_load_seg, EMS {ems}");
+        use iced_x86::Mnemonic::*;
+        for m in [Mov, Pop, Les, Lds, Call, Jmp, Retf] {
+            let n = calls.fallback[m as usize];
+            assert!(n < 100, "{n} {m:?} through their handlers, EMS {ems}");
+        }
+        // Far transfers went on through the links, not the execution loop.
+        assert!(stats.runs < 20000, "EMS {ems}: {stats:?}");
     }
 }
 
@@ -2110,7 +2240,8 @@ fn popf_in_virtual_8086_mode_at_iopl_3_runs_in_translated_code() {
 #[test]
 fn stack_switches_in_virtual_8086_mode_run_in_translated_code() {
     // MOV SS and POP SS in virtual-8086 code, which loads SS as real mode
-    // does, through `jit_load_seg`, 200 times, then INT 40h into ring 0.
+    // does, in the translated code itself, 200 times, then INT 40h into
+    // ring 0.
     let (mut a, mut b) = twins(|rig| {
         rig.handler(0x40, 3, |a| record_code(a, 0x40));
         rig.load(0x30000, &asm16(0x30000, |a| {
@@ -2143,6 +2274,10 @@ fn stack_switches_in_virtual_8086_mode_run_in_translated_code() {
     assert_eq!(b.cpu.ebp() & 0xFFFF, (1..=200u32).sum::<u32>() & 0xFFFF);
     if AVAILABLE {
         assert_eq!(handled(&b, iced_x86::Mnemonic::Pop), 0);
+        // The loop's 800 loads of SS; the rig's protected-mode code loads
+        // a few segments through `jit_load_seg`.
+        let calls = b.cpu.dynrec.calls().unwrap().load_seg;
+        assert!(calls < 50, "{calls} through jit_load_seg");
     }
 }
 
