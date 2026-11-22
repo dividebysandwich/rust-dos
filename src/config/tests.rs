@@ -1607,3 +1607,20 @@ fn saving_keeps_an_unset_memsize_unset() {
     assert!(saved.contains("\nmemsize=64\n"), "{}", saved);
     assert_eq!(Settings::from_config(&parse(&saved, Path::new("/cfg"), None)).memory_mb(), 64);
 }
+
+#[test]
+fn a_code_page_437_file_loads_and_keeps_its_encoding() {
+    // A DOSBox configuration in code page 437, a menu of box characters
+    // in its [autoexec]: it loads, and the editors write it back in code
+    // page 437, so DOSBox still shows the boxes.
+    let dir = scratch("cp437");
+    let path = dir.join("dosbox.conf");
+    fs::write(&path, b"[cpu]\ncycles=max\n[autoexec]\nECHO \xC9\xCD\xBB\n").unwrap();
+    let config = load(Some(&path), &dir, None, None, None).unwrap();
+    assert_eq!(config.autoexec, ["ECHO ╔═╗"]);
+    assert_eq!(load_autoexec(&path).unwrap(), ["ECHO ╔═╗"]);
+    save_autoexec(&path, &["ECHO ╔═╗".to_string(), "DIR".to_string()]).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    assert!(std::str::from_utf8(&bytes).is_err());
+    assert!(bytes.windows(9).any(|w| w == b"ECHO \xC9\xCD\xBB\n"));
+}

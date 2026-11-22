@@ -1,7 +1,8 @@
 use crate::cpu::Cpu;
 use crate::disk::{DRIVE_C, DriveKind, drive_letter, drive_name, parse_drive_prefix};
 use crate::mount::{
-    MOUNT_USAGE, MountCmd, MountSpec, PathContext, display_host_path, parse_mount_command,
+    MOUNT_USAGE, MountCmd, MountSpec, PathContext, display_host_path, parse_dos_mount_tokens,
+    tokenize,
 };
 use crate::video::{print_cp437, print_string};
 use std::fmt::Write;
@@ -1151,7 +1152,8 @@ impl ShellCommand for MountCommand {
             home: home.as_deref(),
             locate: &locate,
         };
-        match parse_mount_command(args, &paths) {
+        // Host paths among the words as the host spells them.
+        match tokenize(args).and_then(|tokens| parse_dos_mount_tokens(&tokens, &paths)) {
             Ok(MountCmd::List) => {
                 print_string(cpu, "Drive Type    Label       Host path\r\n");
                 let disk = &cpu.bus.disk;
