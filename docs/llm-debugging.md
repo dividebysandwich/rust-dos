@@ -312,6 +312,12 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   follow motion, so steer their pointer with these.
   `/api/status` → `mouse` shows the driver's position and whether it is
   installed.
+- **A held key repeats** as a PC keyboard's does, in emulated time: its
+  make code (and keystroke) comes again 500 ms after it went down, then
+  10.9 times a second, or at the rate a program set (command F3h, INT 16h
+  AX=0305h), until it comes up or another key goes down. A game that
+  moves one step for each make code it reads (Starflight) walks for as
+  long as `hold_ms` holds the key.
 - **Keys arrive at most one scan code per frame** (about 16 ms). A long
   `type` string takes roughly 2 frames per character, or 4 for shifted
   characters.
