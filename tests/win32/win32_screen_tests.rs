@@ -3496,7 +3496,9 @@ const SRCCOPY: u32 = 0x00CC_0020;
 /// own palette; then for each of the 32768 cells (red, green and blue
 /// `n >> 10`, `n >> 5 & 31` and `n & 31`) the colour drawn, as an index:
 /// into the halftone palette with it selected, into `VGA` with the
-/// default palette, and into the probe's palette with that.
+/// default palette, and into the probe's palette with that. These are
+/// the probe's pictures 1, 0 and 2 in its `C:\DD2.BIN` (StretchDIBits
+/// of the colours 8 c), each pixel written as its colour's index.
 struct Win98DibColors {
     halftone: Vec<[u8; 3]>,
     custom: Vec<[u8; 3]>,

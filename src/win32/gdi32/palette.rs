@@ -273,7 +273,12 @@ impl DeviceMap {
     /// default palette, with StretchDIBits, SetDIBitsToDevice and BitBlt
     /// from a DIB section alike. The 250 is fitted: 249 and 250 give
     /// every cell, 248 and 251 to 255 miss 99 to 456 of them, all near
-    /// silver. A DIB of 8 bits or fewer goes by `blit_color` instead.
+    /// silver. No rule without a fitted number gives the table: other
+    /// metrics (L1, L-infinity, cubes, weighted squares), other points
+    /// of the cell (8 c + 1 to 7, 8 c + c / 4), the colors cut to 5 or 6
+    /// bits, and other values of grey and silver all miss cells. Adding
+    /// 834 to 881 to silver's distance fits as well as the 250 does.
+    /// A DIB of 8 bits or fewer goes by `blit_color` instead.
     pub fn deep_color(&self, color: u32) -> u32 {
         let cell = |s: u32| (color >> s) & 0xF8;
         if self.default && self.logical.len() == VGA_OF_DEFAULT.len() + 4 {
