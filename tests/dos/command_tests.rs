@@ -98,6 +98,19 @@ fn drives_keep_their_mount_options() {
 }
 
 #[test]
+fn mount_takes_a_host_folder_named_in_code_page_437() {
+    // `MOUNT E ...\Über` typed at the prompt, or queued from a
+    // configuration's [autoexec]: the Ü is 9Ah on the DOS side.
+    let base = scratch("mount_cp437", &["c", "\u{DC}ber"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    let host = format!("MOUNT E \"{}\"", base.join("\u{DC}ber").display());
+    let line = rust_dos::dosstr::from_bytes(&rust_dos::dosstr::encode_cp437(&host));
+    let (command, args) = split_command(&line);
+    assert!(CommandDispatcher::new().dispatch(&mut cpu, command, args));
+    assert_eq!(cpu.bus.disk.drive_kind(4), Some(DriveKind::HardDisk));
+}
+
+#[test]
 fn mount_lists_mounts_and_unmounts() {
     let base = scratch("mount", &["c", "floppy", "cd"]);
     let mut cpu = Cpu::new(base.join("c"));

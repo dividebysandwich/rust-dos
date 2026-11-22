@@ -1064,14 +1064,16 @@ impl ShellCommand for MountCommand {
         let cwd = std::env::current_dir().unwrap_or_default();
         let home = crate::hostdirs::home_dir();
         let disk = &cpu.bus.disk;
-        let locate = |path: &str| disk.resolve_path(path);
+        // The words are host paths as the host spells them, and DOS paths
+        // again for the mounted drives.
+        let locate = |path: &str| disk.resolve_path(&crate::dosstr::from_host_text(path));
         let paths = PathContext {
             base: &cwd,
             config_dir: cpu.bus.config_dir.as_deref(),
             home: home.as_deref(),
             locate: &locate,
         };
-        match parse_mount_command(args, &paths) {
+        match parse_mount_command(&crate::dosstr::host_text(args), &paths) {
             Ok(MountCmd::List) => {
                 print_string(cpu, "Drive Type    Label       Host path\r\n");
                 let disk = &cpu.bus.disk;

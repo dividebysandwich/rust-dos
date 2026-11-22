@@ -17,9 +17,85 @@ pub fn to_bytes(s: &str) -> Vec<u8> {
     s.chars().map(|c| u8::try_from(c as u32).unwrap_or(b'?')).collect()
 }
 
+/// Text from the host, a configuration's `[autoexec]` say, as the code
+/// page 437 bytes that show it: ASCII as itself, control characters
+/// included, and every other character as the byte of its glyph ('?'
+/// where code page 437 has none). The ECHO of a box drawn with `╔═╗`
+/// prints the bytes C9h CDh BBh.
+pub fn encode_cp437(s: &str) -> Vec<u8> {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii() {
+                c as u8
+            } else {
+                crate::keylayout::cp437(c).unwrap_or(b'?')
+            }
+        })
+        .collect()
+}
+
+/// The text of a host file that DOS programs read as code page 437 bytes,
+/// such as a DOSBox configuration, which DOSBox runs the `[autoexec]` of
+/// byte for byte: the file as UTF-8 where it is valid UTF-8, else each
+/// byte as the character code page 437 shows (ASCII as itself, control
+/// characters included). `encode_cp437` gives the bytes back.
+pub fn decode_cp437(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => bytes
+            .iter()
+            .map(|&b| {
+                if b.is_ascii() {
+                    b as char
+                } else {
+                    crate::video::CP437[b as usize]
+                }
+            })
+            .collect(),
+    }
+}
+
+/// A DOS string as host text, for the host paths given to MOUNT and BOOT:
+/// each byte above 7Fh as the character code page 437 shows for it, so
+/// `D:\Über` typed at the prompt (9Ah for the Ü) or queued from a
+/// configuration (`encode_cp437`) names the folder `Über`.
+pub fn host_text(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if (0x80..=0xFF).contains(&(c as u32)) {
+                crate::video::CP437[c as usize]
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// `host_text` undone: host text as the DOS string of its code page 437
+/// bytes, for a DOS path among the words of `host_text`.
+pub fn from_host_text(s: &str) -> String {
+    from_bytes(&encode_cp437(s))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_page_437_files_come_back_as_their_bytes() {
+        // GOG's launcher menus: a double-line box, and ANSI colours.
+        let bytes = b"ECHO \x1B[1;33m\xC9\xCD\xBB \x84\x1B[0m\r\n";
+        let text = decode_cp437(bytes);
+        assert_eq!(text, "ECHO \u{1B}[1;33m╔═╗ ä\u{1B}[0m\r\n");
+        assert_eq!(encode_cp437(&text), bytes);
+        // A file in UTF-8 is read as UTF-8.
+        assert_eq!(decode_cp437("ECHO ╔═╗ ä".as_bytes()), "ECHO ╔═╗ ä");
+        assert_eq!(encode_cp437("é€"), b"\x82?");
+        // A host path among DOS text, and back.
+        let dos = from_bytes(b"D:\\\x9Aber");
+        assert_eq!(host_text(&dos), "D:\\Über");
+        assert_eq!(from_host_text(&host_text(&dos)), dos);
+    }
 
     #[test]
     fn bytes_survive_the_round_trip() {

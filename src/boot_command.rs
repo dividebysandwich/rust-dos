@@ -71,7 +71,8 @@ pub struct BootCommand;
 
 impl ShellCommand for BootCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
-        let request = tokenize(args).and_then(|tokens| parse(&tokens));
+        // Host paths as the host spells them (see MOUNT).
+        let request = tokenize(&crate::dosstr::host_text(args)).and_then(|tokens| parse(&tokens));
         let (drive, images) = match request {
             Ok(Request::Help) => {
                 print_string(cpu, BOOT_USAGE);
@@ -122,7 +123,7 @@ fn mount_as(cpu: &mut Cpu, drive: u8, images: &[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let home = crate::hostdirs::home_dir();
     let disk = &cpu.bus.disk;
-    let locate = |path: &str| disk.resolve_path(path);
+    let locate = |path: &str| disk.resolve_path(&crate::dosstr::from_host_text(path));
     let paths =
         PathContext { base: &cwd, config_dir: cpu.bus.config_dir.as_deref(), home: home.as_deref(), locate: &locate };
     let spec = match parse_mount_tokens(&tokens, &paths)? {

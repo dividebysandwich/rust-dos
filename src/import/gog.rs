@@ -250,7 +250,11 @@ fn import_confs(
 ) -> Result<Imported, String> {
     let texts = confs
         .iter()
-        .map(|p| fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).map_err(|e| format!("{}: {}", p.display(), e)))
+        .map(|p| {
+            fs::read(p)
+                .map(|b| crate::dosstr::decode_cp437(&b))
+                .map_err(|e| format!("{}: {}", p.display(), e))
+        })
         .collect::<Result<Vec<String>, String>>()?;
     let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
     let mut imported = dosbox::import_in(&texts, bases, name, home, Some(c_root));
@@ -313,6 +317,23 @@ mod tests {
         let setup = import_conf(&dir.join("dosboxDescent_settings.conf"), None).unwrap();
         assert_eq!(setup.autoexec, ["c:", "setup.exe"]);
         assert!(import(&scratch("empty"), None).is_err());
+    }
+
+    #[test]
+    fn a_launcher_menu_keeps_its_code_page_437_characters() {
+        // GOG's Warlords II Deluxe draws its menu with ECHO, in box
+        // characters of code page 437, which DOSBox prints byte for byte.
+        let dir = scratch("menu");
+        let single = b"[autoexec]\r\nmount C \"..\\menu\"\r\nc:\r\nECHO \x1B[1;33m\xC9\xCD\xBB\x1B[0m\r\nwar2\r\nexit\r\n";
+        fs::write(dir.join("dosboxMenu_single.conf"), single).unwrap();
+        fs::write(dir.join("dosboxMenu.conf"), "[cpu]\ncycles=20000\n").unwrap();
+        let imported = import(&dir, None).unwrap();
+        assert_eq!(
+            imported.autoexec,
+            ["c:", "ECHO \u{1B}[1;33m╔═╗\u{1B}[0m", "war2"]
+        );
+        let bytes = crate::dosstr::encode_cp437(&imported.autoexec[1]);
+        assert_eq!(bytes, b"ECHO \x1B[1;33m\xC9\xCD\xBB\x1B[0m");
     }
 
     #[test]
