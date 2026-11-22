@@ -870,6 +870,8 @@ fn start(cpu: &mut Cpu) {
     nls::start(win32);
     dll_files::sync(&mut cpu.bus);
     boot::session_starts(cpu);
+    // Windows sets the keyboard's typematic rate from its own settings.
+    user32::sysparams::program_keyboard(cpu);
     loop {
         let Some(program) = cpu.bus.win32.pending.take() else {
             return;

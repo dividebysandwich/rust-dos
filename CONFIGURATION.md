@@ -188,18 +188,21 @@ limit, so without a connection it goes on as it would with one:
   default, finds the speed the running program needs from the frames it
   draws (its page flips, or the bursts of writes that copy a finished
   picture to video memory): it goes up while the frame rate follows it,
-  stops where the frame rate stops following (a game that caps its own
-  frame rate) or reaches the display's refresh rate (frames nobody sees,
-  and some games, such as Descent, play badly at such rates), and goes
-  down while the program waits for a key or calls DOS's idle interrupt. It
-  then tries lower speeds, down to where they cost more than 3% of the
-  frame rate, or make a program that polls for the vertical retrace
-  miss one. A speed the host falls behind at is left for a lower one,
-  and the limit that sets rises again while the host keeps up. A real-mode
-  program with no frames to go by (most games of the 1980s, which update the
-  screen piecemeal) runs at 3000, about a 286, as in DOSBox's `cycles=auto`,
-  and at max while it reads or writes its drives (loading), unless it would
-  sit halted for 30% of the time or more at the real-mode speed, as a game
+  stops where the frame rate stops following (a game that caps its own frame
+  rate) or reaches the display's refresh rate (frames nobody sees, and some
+  games, such as Descent, play badly at such rates), and goes down while the
+  program waits for a key or calls DOS's idle interrupt. It doesn't go up
+  for a program that sits halted for half the time or more, and longer than
+  waiting for a retrace or two a frame takes: it waits for something else,
+  as a Windows game that draws only when something changes does. It then
+  tries lower speeds, down to where they cost more than 3% of the frame
+  rate, or make a program that polls for the vertical retrace miss one. A
+  speed the host falls behind at is left for a lower one, and the limit that
+  sets rises again while the host keeps up. A real-mode program with no
+  frames to go by (most games of the 1980s, which update the screen
+  piecemeal) runs at 3000, about a 286, as in DOSBox's `cycles=auto`, and at
+  max while it reads or writes its drives (loading), unless it would sit
+  halted for 30% of the time or more at the real-mode speed, as a game
   playing speech from its CD does. A protected-mode one runs at max while it
   reads and writes (loading, computing), and otherwise goes down to 20000, a
   486's speed, or a quarter of a faster `cpu` model's clock (50000 on a
