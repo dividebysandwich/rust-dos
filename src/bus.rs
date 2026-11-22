@@ -1776,6 +1776,7 @@ impl Bus {
             self.net_next_event(),
             self.serial_next_event(),
             self.kbc_release_at,
+            crate::keyboard::typematic_at(self),
             self.rtc_next,
             self.rtc_alarm_next,
             self.win32.next_event(),
@@ -1863,6 +1864,10 @@ impl Bus {
             self.kbc_release_at = None;
             self.kbc.release();
             self.sync_keyboard_irq();
+        }
+        // The keyboard repeats a held key.
+        if crate::keyboard::typematic_at(self).is_some_and(|t| t <= now) {
+            crate::keyboard::typematic(self);
         }
         self.clock.schedule(self.next_event());
         self.refresh_irq();

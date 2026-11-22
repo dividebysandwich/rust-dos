@@ -37,4 +37,5 @@ mod sb_tests;
 mod sc55_tests;
 mod tandy_sound_tests;
 mod timer_tests;
+mod typematic_tests;
 mod uart_tests;

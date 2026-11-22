@@ -1103,16 +1103,18 @@ impl Cpu {
     /// shell is loaded again without them having exited: a divide
     /// overflow, the tripwire, a DPMI client that can't go on, the
     /// debugger's or a frontend's close, a reboot. One exit is recorded,
-    /// for the program that ran last, with no exit code.
-    fn note_abort(&mut self) {
+    /// for the program that ran last, with no exit code. Returns whether
+    /// one was running.
+    fn note_abort(&mut self) -> bool {
         let name = self.program.clone();
         let events = &mut self.programs;
         if events.running == 0 {
-            return;
+            return false;
         }
         events.running = 0;
         events.ended += 1;
         events.last_exit = Some(ProgramExit { name, code: None, resident: false });
+        true
     }
 
     /// Stop the running program for the shell to be loaded again, with
@@ -1712,7 +1714,7 @@ impl Cpu {
     }
 
     pub fn load_shell(&mut self) {
-        self.note_abort();
+        let aborted = self.note_abort();
         // A shell reload always starts outside any DOS process. Normally
         // termination restored this to the shell's PSP; frontends that
         // explicitly close a running process have no parent context to do so.
@@ -1892,6 +1894,11 @@ impl Cpu {
         self.bus.reset_serial_irqs();
         self.keep_resident_irqs(slave_imr);
         self.bus.reset_sound();
+        // A note the ended program was playing on the speaker would sound
+        // on at the prompt, with nothing left to switch it off.
+        if aborted {
+            self.bus.silence_speaker();
+        }
         self.bus.reset_network();
         // No program runs any more: its extended memory and A20 go too,
         // but for what resident programs hold, and a reset from now on is
