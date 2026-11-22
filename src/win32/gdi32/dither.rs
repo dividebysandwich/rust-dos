@@ -71,7 +71,7 @@ const fn cube() -> [u8; 216] {
             while s < 3 {
                 let v = (c >> (8 * s)) & 0xFF;
                 let w = want[s] as u32;
-                let e = if v > w { v - w } else { w - v };
+                let e = v.abs_diff(w);
                 d += e * e;
                 s += 1;
             }
