@@ -1770,10 +1770,10 @@ fn avivideo_realizes_the_movies_palette_on_a_256_colour_desktop() {
 /// On a desktop of 256 colours, AVIVideo draws a movie of more than 8
 /// bits as MCIAVI's DrawDib does: dithered to the halftone palette. A
 /// grey of 128, between the halftone cube's greys of 102 and 153, comes
-/// out as a pattern of both in the four pixels from (16, 16). Mapped to
-/// the nearest colour, as StretchDIBits would, every pixel would be the
-/// static grey of 128. The program exits with bit 0 set for a pixel of
-/// 102, bit 1 for one of 153 and bit 2 for one of another colour.
+/// out as a pattern of both in the four pixels from (16, 16). Drawn by
+/// StretchDIBits, which doesn't dither, every pixel would be one grey
+/// of the palette. The program exits with bit 0 set for a pixel of 102,
+/// bit 1 for one of 153 and bit 2 for one of another colour.
 #[test]
 fn avivideo_dithers_a_true_colour_movie_on_a_256_colour_desktop() {
     const WS_POPUP_VISIBLE: i32 = 0x9000_0000_u32 as i32;

@@ -3459,6 +3459,265 @@ fn a_256_colour_desktop_dithers_solid_brushes() {
     }
 }
 
+const GDI32_DIB: (&str, &[&str]) = (
+    "GDI32.DLL",
+    &[
+        "CreateHalftonePalette",
+        "GetPaletteEntries",
+        "CreatePalette",
+        "SelectPalette",
+        "RealizePalette",
+        "StretchDIBits",
+        "SetDIBitsToDevice",
+    ],
+);
+const D_CREATE_HALFTONE_PALETTE: usize = 2;
+const D_GET_PALETTE_ENTRIES: usize = 3;
+const D_CREATE_PALETTE: usize = 4;
+const D_SELECT_PALETTE: usize = 5;
+const D_REALIZE_PALETTE: usize = 6;
+const D_STRETCH_DI_BITS: usize = 7;
+const D_SET_DI_BITS_TO_DEVICE: usize = 8;
+
+// The DIB colour program's data.
+const D_LOGPALETTE: u32 = 0x400;
+const D_ENTRIES: u32 = 0x600;
+const D_BMI: u32 = 0xA00;
+const D_BITS: u32 = 0x1000;
+const D_SIZE: usize = 0x1000 + 256 * 128 * 3;
+const SRCCOPY: u32 = 0x00CC_0020;
+
+/// What Windows 98 SE drew on a desktop of 256 colours (640x480 on a
+/// Voodoo 3 in 86Box) from 24-bit DIBs holding every cell of 5 bits a
+/// channel of the RGB cube, read back with BitBlt into a 24-bit DIB
+/// section; the probe is `data/win98-dib-colors.c`. The file is gzipped
+/// and holds the 256 colours of CreateHalftonePalette's palette
+/// (GetPaletteEntries), 3 bytes each, and the 64 colours of the probe's
+/// own palette; then for each of the 32768 cells (red, green and blue
+/// `n >> 10`, `n >> 5 & 31` and `n & 31`) the colour drawn, as an index:
+/// into the halftone palette with it selected, into `VGA` with the
+/// default palette, and into the probe's palette with that.
+struct Win98DibColors {
+    halftone: Vec<[u8; 3]>,
+    custom: Vec<[u8; 3]>,
+    with_halftone: Vec<u8>,
+    with_default: Vec<u8>,
+    with_custom: Vec<u8>,
+}
+
+/// The 16 VGA colours, in the order of `Win98DibColors::with_default`.
+const VGA: [[u8; 3]; 16] = [
+    [0, 0, 0],
+    [128, 0, 0],
+    [0, 128, 0],
+    [128, 128, 0],
+    [0, 0, 128],
+    [128, 0, 128],
+    [0, 128, 128],
+    [192, 192, 192],
+    [128, 128, 128],
+    [255, 0, 0],
+    [0, 255, 0],
+    [255, 255, 0],
+    [0, 0, 255],
+    [255, 0, 255],
+    [0, 255, 255],
+    [255, 255, 255],
+];
+
+fn win98_dib_colors() -> Win98DibColors {
+    use std::io::Read;
+    let gz: &[u8] = include_bytes!("data/win98-dib-colors.bin.gz");
+    let mut raw = Vec::new();
+    flate2::read::GzDecoder::new(gz)
+        .read_to_end(&mut raw)
+        .unwrap();
+    let rgb = |b: &[u8]| b.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
+    let (halftone, rest) = raw.split_at(256 * 3);
+    let (custom, rest) = rest.split_at(64 * 3);
+    let (with_halftone, rest) = rest.split_at(32768);
+    let (with_default, with_custom) = rest.split_at(32768);
+    Win98DibColors {
+        halftone: rgb(halftone),
+        custom: rgb(custom),
+        with_halftone: with_halftone.to_vec(),
+        with_default: with_default.to_vec(),
+        with_custom: with_custom.to_vec(),
+    }
+}
+
+/// On a desktop of 256 colours, a window of 256x128 at (0, 0) and a
+/// 24-bit DIB of that size whose pixel `n` (from the top left) is the
+/// colour 8 c + 5 of each channel c of the cell `n` of 5 bits a channel,
+/// drawn with StretchDIBits with the default palette (step 1), with
+/// SetDIBitsToDevice with the halftone palette, whose entries are read
+/// back (step 2), and with StretchDIBits with a palette of `custom`
+/// (step 3).
+fn dib_colors_program(custom: &[[u8; 3]]) -> (Vec<u8>, u32) {
+    let mut d = data();
+    d.resize(D_SIZE, 0);
+    put32(&mut d, D_LOGPALETTE, 0x300 | (custom.len() as u32) << 16);
+    for (i, c) in custom.iter().enumerate() {
+        put(
+            &mut d,
+            D_LOGPALETTE + 4 + 4 * i as u32,
+            &[c[0], c[1], c[2], 0],
+        );
+    }
+    // A bottom-up BITMAPINFOHEADER of 256x128 at 24 bits.
+    put32(&mut d, D_BMI, 40);
+    put32(&mut d, D_BMI + 4, 256);
+    put32(&mut d, D_BMI + 8, 128);
+    put32(&mut d, D_BMI + 12, 1 | 24 << 16);
+    for n in 0..32768u32 {
+        let (x, y) = (n % 256, n / 256);
+        let v = |c: u32| (8 * c + 5) as u8;
+        let at = D_BITS + ((127 - y) * 256 + x) * 3;
+        put(&mut d, at, &[v(n & 31), v(n >> 5 & 31), v(n >> 10)]);
+    }
+    program(&[USER32, GDI32_DIB], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(256),
+                Arg::I(128),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        c.api(a, l, GET_DC, &[Arg::Val(HWND)])?;
+        a.mov(dword_ptr(l.at(HDC)), eax)?;
+        let stretch = [
+            Arg::Val(HDC),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(256),
+            Arg::I(128),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(256),
+            Arg::I(128),
+            Arg::At(D_BITS),
+            Arg::At(D_BMI),
+            Arg::I(0),
+            Arg::I(SRCCOPY),
+        ];
+        c.api(a, l, D_STRETCH_DI_BITS, &stretch)?;
+        wait(a, l, 1)?;
+        c.api(a, l, D_CREATE_HALFTONE_PALETTE, &[Arg::Val(HDC)])?;
+        a.mov(dword_ptr(l.at(PALETTE)), eax)?;
+        c.api(
+            a,
+            l,
+            D_GET_PALETTE_ENTRIES,
+            &[
+                Arg::Val(PALETTE),
+                Arg::I(0),
+                Arg::I(256),
+                Arg::At(D_ENTRIES),
+            ],
+        )?;
+        let select = [Arg::Val(HDC), Arg::Val(PALETTE), Arg::I(0)];
+        c.api(a, l, D_SELECT_PALETTE, &select)?;
+        c.api(a, l, D_REALIZE_PALETTE, &[Arg::Val(HDC)])?;
+        c.api(
+            a,
+            l,
+            D_SET_DI_BITS_TO_DEVICE,
+            &[
+                Arg::Val(HDC),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(256),
+                Arg::I(128),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(128),
+                Arg::At(D_BITS),
+                Arg::At(D_BMI),
+                Arg::I(0),
+            ],
+        )?;
+        wait(a, l, 2)?;
+        c.api(a, l, D_CREATE_PALETTE, &[Arg::At(D_LOGPALETTE)])?;
+        a.mov(dword_ptr(l.at(PALETTE)), eax)?;
+        c.api(a, l, D_SELECT_PALETTE, &select)?;
+        c.api(a, l, D_REALIZE_PALETTE, &[Arg::Val(HDC)])?;
+        c.api(a, l, D_STRETCH_DI_BITS, &stretch)?;
+        finish(a, l, 3)
+    })
+}
+
+/// How many of the 256x128 pixels at the screen's top left, as the DAC
+/// shows them, differ from Windows 98's colours `want`, and the first
+/// few of them.
+fn differing_cells(cpu: &Cpu, want: impl Iterator<Item = [u8; 3]>) -> (usize, String) {
+    let shift = if cpu.bus.vga.dac_8bit { 0 } else { 2 };
+    let dac = &cpu.bus.vga.palette;
+    let mut first = String::new();
+    let mut count = 0;
+    for (n, want) in want.enumerate() {
+        let i = cpu.bus.vbe.vram[(n / 256) * 640 + n % 256] as usize;
+        let got = [dac[3 * i], dac[3 * i + 1], dac[3 * i + 2]];
+        if got != want.map(|v| v >> shift) {
+            if count < 5 {
+                let cell = (n >> 10, n >> 5 & 31, n & 31);
+                first += &format!(" cell {cell:?}: {got:?} for {want:?};");
+            }
+            count += 1;
+        }
+    }
+    (count, first)
+}
+
+/// On a desktop of 256 colours CreateHalftonePalette gives Windows 98's
+/// palette, and a 24-bit DIB's pixels take the colours Windows 98 SE
+/// draws through its inverse colour table, in every one of the 32768
+/// cells of 5 bits a channel: with the default palette only the 16 VGA
+/// colours, with the halftone palette and a palette of 64 colours only
+/// their own.
+#[test]
+fn a_256_colour_desktop_maps_deep_dibs_as_windows_98() {
+    let want = win98_dib_colors();
+    let (program, data) = dib_colors_program(&want.custom);
+    let mut cpu = card_machine("dib_colors", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let default = want.with_default.iter().map(|&i| VGA[i as usize]);
+    assert_eq!(differing_cells(&cpu, default), (0, String::new()));
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    let entries: Vec<[u8; 3]> = (0..256)
+        .map(|i| {
+            let [r, g, b, _] = peek(&cpu, data + D_ENTRIES + 4 * i).to_le_bytes();
+            [r, g, b]
+        })
+        .collect();
+    assert_eq!(entries, want.halftone, "CreateHalftonePalette's entries");
+    let halftone = want
+        .with_halftone
+        .iter()
+        .map(|&i| want.halftone[i as usize]);
+    assert_eq!(differing_cells(&cpu, halftone), (0, String::new()));
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 3);
+    let custom = want.with_custom.iter().map(|&i| want.custom[i as usize]);
+    assert_eq!(differing_cells(&cpu, custom), (0, String::new()));
+}
+
 const USER32_CURSOR: (&str, &[&str]) = (
     "USER32.DLL",
     &["CreateWindowExA", "LoadCursorA", "SetCursor", "SetCursorPos", "ShowCursor"],

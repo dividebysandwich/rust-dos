@@ -144,6 +144,8 @@ pub struct DeviceMap {
     pub logical: Vec<u32>,
     /// The static colors, and their indices.
     pub statics: Vec<(u32, u8)>,
+    /// Whether the logical palette is the stock DEFAULT_PALETTE.
+    pub default: bool,
 }
 
 impl DeviceMap {
@@ -158,6 +160,7 @@ impl DeviceMap {
             .filter(|&i| uses.get(i) == Some(&USE_STATIC))
             .map(|i| (rgb(system[i]), i as u8))
             .collect();
+        let default = hpal == state.stock(DEFAULT_PALETTE);
         let (logical, mut map) = match state.palette(hpal) {
             Some(p) => (
                 p.entries.iter().map(|&e| rgb(e)).collect::<Vec<u32>>(),
@@ -176,6 +179,7 @@ impl DeviceMap {
             map,
             logical,
             statics,
+            default,
         }
     }
 
@@ -245,7 +249,70 @@ impl DeviceMap {
         }
         best.1
     }
+
+    /// A pixel of a DIB or bitmap of more than 8 bits a pixel, of the
+    /// color `color`, in a blit, StretchDIBits or SetDIBitsToDevice.
+    ///
+    /// Windows 98 maps these through an inverse color table of 5 bits a
+    /// channel: the pixel's color counts as the cell of the 32x32x32
+    /// cube its top 5 bits of red, green and blue name, so every color
+    /// of a cell draws the same. Each cell takes:
+    ///
+    /// - with a logical palette selected, the entry nearest (sum of the
+    ///   squared differences) to the cell's middle, 8 c + 4 for each
+    ///   5-bit channel c; the first entry of those equally near. Only the
+    ///   logical palette's entries count, not the static colors.
+    /// - with the default palette, one of the 16 VGA colors: the nearest
+    ///   to the cell's corner, 8 c, the later of those equally near (in
+    ///   the order black, the 6 dark colors, silver, grey, the 6 bright
+    ///   ones, white), with 255 in a color's channel counting as 250.
+    ///   The four other static colors aren't drawn.
+    ///
+    /// Read back pixel by pixel on Windows 98 SE, every one of the 32768
+    /// cells through the halftone palette, a palette of 64 colors and the
+    /// default palette, with StretchDIBits, SetDIBitsToDevice and BitBlt
+    /// from a DIB section alike. The 250 is fitted: 249 and 250 give
+    /// every cell, 248 and 251 to 255 miss 99 to 456 of them, all near
+    /// silver. A DIB of 8 bits or fewer goes by `blit_color` instead.
+    pub fn deep_color(&self, color: u32) -> u32 {
+        let cell = |s: u32| (color >> s) & 0xF8;
+        if self.default && self.logical.len() == VGA_OF_DEFAULT.len() + 4 {
+            let corner = cell(0) | cell(8) << 8 | cell(16) << 16;
+            let full = |c: u32| {
+                let ch = |s: u32| match (c >> s) & 0xFF {
+                    0xFF => 250,
+                    v => v,
+                };
+                ch(0) | ch(8) << 8 | ch(16) << 16
+            };
+            let mut best = (u32::MAX, 0);
+            for &i in &VGA_OF_DEFAULT {
+                let d = distance(full(self.logical[i]), corner);
+                if d <= best.0 {
+                    best = (d, i);
+                }
+            }
+            return self.map[best.1] as u32;
+        }
+        if self.logical.is_empty() {
+            return self.solid(color);
+        }
+        let middle = (cell(0) + 4) | (cell(8) + 4) << 8 | (cell(16) + 4) << 16;
+        let mut best = (u32::MAX, 0);
+        for (i, &c) in self.logical.iter().enumerate() {
+            let d = distance(c, middle);
+            if d < best.0 {
+                best = (d, i);
+            }
+        }
+        self.map[best.1] as u32
+    }
 }
+
+/// The default palette's entries of the 16 VGA colors, in their VGA
+/// order: all but its entries 8, 9, 10 and 11 (the four colors of the
+/// 20 static ones that aren't VGA colors).
+const VGA_OF_DEFAULT: [usize; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 17, 18, 19];
 
 /// The ordered dither's thresholds, 0 to 63, rows from the top.
 const BAYER: [[u8; 8]; 8] = [
@@ -312,26 +379,51 @@ fn nearest_of(table: &[(u32, u8)], color: u32) -> u8 {
     best.1
 }
 
-/// The halftone palette's colors: the static colors at its ends, a
-/// 6x6x6 color cube and grays between.
+/// The halftone palette's colors: what Windows 98 SE's
+/// CreateHalftonePalette gives on a desktop of 256 colours, read back
+/// with GetPaletteEntries. The 20 static colors are at its ends, greys
+/// and a few other colors at 10 to 28 and 233 to 245, and between them
+/// the 6x6x6 cube of the levels 0, 51, ... 255 in Windows' own order,
+/// less the four of one channel 0, one 51 and one 255.
+#[rustfmt::skip]
+pub const HALFTONE: [u32; 256] = [
+    0x000000, 0x000080, 0x008000, 0x008080, 0x800000, 0x800080, 0x808000, 0xC0C0C0,
+    0xC0DCC0, 0xF0CAA6, 0x040404, 0x080808, 0x0C0C0C, 0x111111, 0x161616, 0x1C1C1C,
+    0x222222, 0x292929, 0x555555, 0x4D4D4D, 0x424242, 0x393939, 0x807CFF, 0x5050FF,
+    0x9300D6, 0xFFECCC, 0xC6D6EF, 0xD6E7E7, 0x90A9AD, 0x000033, 0x000066, 0x000099,
+    0x0000CC, 0x003300, 0x003333, 0x003366, 0x003399, 0x0033CC, 0x0033FF, 0x006600,
+    0x006633, 0x006666, 0x006699, 0x0066CC, 0x0066FF, 0x009900, 0x009933, 0x009966,
+    0x009999, 0x0099CC, 0x0099FF, 0x00CC00, 0x00CC33, 0x00CC66, 0x00CC99, 0x00CCCC,
+    0x00CCFF, 0x00FF66, 0x00FF99, 0x00FFCC, 0x330000, 0x330033, 0x330066, 0x330099,
+    0x3300CC, 0x3300FF, 0x333300, 0x333333, 0x333366, 0x333399, 0x3333CC, 0x3333FF,
+    0x336600, 0x336633, 0x336666, 0x336699, 0x3366CC, 0x3366FF, 0x339900, 0x339933,
+    0x339966, 0x339999, 0x3399CC, 0x3399FF, 0x33CC00, 0x33CC33, 0x33CC66, 0x33CC99,
+    0x33CCCC, 0x33CCFF, 0x33FF33, 0x33FF66, 0x33FF99, 0x33FFCC, 0x33FFFF, 0x660000,
+    0x660033, 0x660066, 0x660099, 0x6600CC, 0x6600FF, 0x663300, 0x663333, 0x663366,
+    0x663399, 0x6633CC, 0x6633FF, 0x666600, 0x666633, 0x666666, 0x666699, 0x6666CC,
+    0x669900, 0x669933, 0x669966, 0x669999, 0x6699CC, 0x6699FF, 0x66CC00, 0x66CC33,
+    0x66CC99, 0x66CCCC, 0x66CCFF, 0x66FF00, 0x66FF33, 0x66FF99, 0x66FFCC, 0xCC00FF,
+    0xFF00CC, 0x999900, 0x993399, 0x990099, 0x9900CC, 0x990000, 0x993333, 0x990066,
+    0x9933CC, 0x9900FF, 0x996600, 0x996633, 0x993366, 0x996699, 0x9966CC, 0x9933FF,
+    0x999933, 0x999966, 0x999999, 0x9999CC, 0x9999FF, 0x99CC00, 0x99CC33, 0x66CC66,
+    0x99CC99, 0x99CCCC, 0x99CCFF, 0x99FF00, 0x99FF33, 0x99CC66, 0x99FF99, 0x99FFCC,
+    0x99FFFF, 0xCC0000, 0x990033, 0xCC0066, 0xCC0099, 0xCC00CC, 0x993300, 0xCC3333,
+    0xCC3366, 0xCC3399, 0xCC33CC, 0xCC33FF, 0xCC6600, 0xCC6633, 0x996666, 0xCC6699,
+    0xCC66CC, 0x9966FF, 0xCC9900, 0xCC9933, 0xCC9966, 0xCC9999, 0xCC99CC, 0xCC99FF,
+    0xCCCC00, 0xCCCC33, 0xCCCC66, 0xCCCC99, 0xCCCCCC, 0xCCCCFF, 0xCCFF00, 0xCCFF33,
+    0x99FF66, 0xCCFF99, 0xCCFFCC, 0xCCFFFF, 0xCC0033, 0xFF0066, 0xFF0099, 0xCC3300,
+    0xFF3333, 0xFF3366, 0xFF3399, 0xFF33CC, 0xFF33FF, 0xFF6600, 0xFF6633, 0xCC6666,
+    0xFF6699, 0xFF66CC, 0xCC66FF, 0xFF9900, 0xFF9933, 0xFF9966, 0xFF9999, 0xFF99CC,
+    0xFF99FF, 0xFFCC00, 0xFFCC33, 0xFFCC66, 0xFFCC99, 0xFFCCCC, 0xFFCCFF, 0xFFFF33,
+    0xCCFF66, 0xFFFF99, 0xFFFFCC, 0x6666FF, 0x66FF66, 0x66FFFF, 0xFF6666, 0xFF66FF,
+    0xFFFF66, 0x2100A5, 0x5F5F5F, 0x777777, 0x868686, 0x969696, 0xCBCBCB, 0xB2B2B2,
+    0xD7D7D7, 0xDDDDDD, 0xE3E3E3, 0xEAEAEA, 0xF1F1F1, 0xF8F8F8, 0xF0FBFF, 0xA4A0A0,
+    0x808080, 0x0000FF, 0x00FF00, 0x00FFFF, 0xFF0000, 0xFF00FF, 0xFFFF00, 0xFFFFFF,
+];
+
+/// The halftone palette's colors (`HALFTONE`).
 pub fn halftone_colors() -> Vec<u32> {
-    let statics = static_colors();
-    let mut colors = vec![0u32; 256];
-    colors[..10].copy_from_slice(&statics[..10]);
-    colors[246..].copy_from_slice(&statics[10..]);
-    for r in 0..6u32 {
-        for g in 0..6u32 {
-            for b in 0..6u32 {
-                let i = (r + g * 6 + b * 36 + 10) as usize;
-                colors[i] = (r * 51) | ((g * 51) << 8) | ((b * 51) << 16);
-            }
-        }
-    }
-    for i in 226..246u32 {
-        let v = ((i - 226) * 255 / 19) & 0xFF;
-        colors[i as usize] = v | v << 8 | v << 16;
-    }
-    colors
+    HALFTONE.to_vec()
 }
 
 /// CreatePalette(logpalette).
@@ -806,11 +898,70 @@ mod tests {
     #[test]
     fn halftone_palette_has_the_static_colors_and_the_cube() {
         let c = halftone_colors();
-        assert_eq!(c.len(), 256);
-        assert_eq!(c[0], 0);
-        assert_eq!(c[255], 0xFFFFFF);
-        // Red 5, green 0, blue 0.
-        assert_eq!(c[15], 0x0000FF);
+        let statics = static_colors();
+        assert_eq!(c[..10], statics[..10]);
+        assert_eq!(c[246..], statics[10..]);
+        let cube = (0..216u32)
+            .map(|i| (i % 6 * 51) | (i / 6 % 6 * 51) << 8 | (i / 36 * 51) << 16)
+            .filter(|color| c.contains(color))
+            .count();
+        assert_eq!(cube, 212);
+        // Windows 98's own order: greys, then other colours, then the
+        // cube from (51, 0, 0).
+        assert_eq!(c[10..14], [0x040404, 0x080808, 0x0C0C0C, 0x111111]);
+        assert_eq!(c[22], 0x807CFF);
+        assert_eq!(c[29], 0x000033);
+    }
+
+    /// The map of the palette `colors`, realized on a
+    /// desktop of 256 colours, or of the default palette with none.
+    fn map_of(colors: Option<&[u32]>) -> DeviceMap {
+        let (mut cpu, hdc) = palette_machine();
+        init(&mut cpu);
+        let hpal = match colors {
+            Some(colors) => add(&mut cpu, palette_of(colors)),
+            None => gdi(&mut cpu).stock(DEFAULT_PALETTE),
+        };
+        select(&mut cpu, hdc, hpal);
+        realize(&mut cpu, hdc);
+        DeviceMap::new(&mut cpu, hpal)
+    }
+
+    /// A 24-bit pixel's colour, through `map`, as a colour.
+    fn deep(map: &DeviceMap, colors: &[u32], color: u32) -> u32 {
+        let i = map.deep_color(color) as usize;
+        colors[map.map.iter().position(|&m| m as usize == i).unwrap()]
+    }
+
+    /// Windows 98 draws grey 127 of a 24-bit DIB as the halftone
+    /// palette's grey 128 and grey 128 as 134, the entries nearest to
+    /// their cells' middles (124 and 132).
+    #[test]
+    fn a_deep_pixel_takes_the_entry_nearest_its_cells_middle() {
+        let colors = halftone_colors();
+        let map = map_of(Some(&colors));
+        let grey = |v: u32| v | v << 8 | v << 16;
+        assert_eq!(deep(&map, &colors, grey(127)), grey(128));
+        assert_eq!(deep(&map, &colors, grey(128)), grey(134));
+        assert_eq!(deep(&map, &colors, grey(0)), grey(4));
+        assert_eq!(deep(&map, &colors, 0x40FF40), 0x33FF33);
+    }
+
+    /// With the default palette Windows 98 draws a 24-bit DIB in the 16
+    /// VGA colours: grey 64 to 167 as grey 128 (64 and 160 are as near
+    /// black and silver), (168, 248, 248) as white though silver is
+    /// nearer, and never the four other static colours.
+    #[test]
+    fn a_deep_pixel_takes_a_vga_colour_with_the_default_palette() {
+        let colors = static_colors().to_vec();
+        let map = map_of(None);
+        let grey = |v: u32| v | v << 8 | v << 16;
+        for (v, want) in [(63, 0), (64, 128), (167, 128), (168, 192), (224, 255)] {
+            assert_eq!(deep(&map, &colors, grey(v)), grey(want), "grey {v}");
+        }
+        assert_eq!(deep(&map, &colors, 0xF8F8A8), 0xFFFFFF);
+        assert_eq!(deep(&map, &colors, 0xF0FBFF), 0xFFFFFF);
+        assert_eq!(deep(&map, &colors, 0xA4A0A0), 0x808080);
     }
 
     /// A machine with a desktop of 256 colours and a memory DC, which
