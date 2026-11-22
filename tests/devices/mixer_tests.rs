@@ -323,6 +323,63 @@ fn the_dac_level_held_fades_out_of_the_mix() {
     }
 }
 
+/// The left samples of the second after an FM note is stopped the way
+/// Covert Action's AdLib driver stops its sounds (issue 1689): the
+/// frequency set to 0 and the key released, with a release rate of 0.
+/// The phase stops and the envelope stays, so the chip holds its output at
+/// a level. With the capacitor on the card's output (`sb_coupling`) or
+/// without.
+fn fm_hold(coupling: bool) -> Vec<i16> {
+    let mut bus = bus();
+    bus.set_mixer(unfiltered_with(|m| m.sb_coupling = coupling));
+    let write = |bus: &mut Bus, reg: u8, value: u8| {
+        bus.io_write(0x388, reg);
+        bus.io_write(0x389, value);
+    };
+    // A plain sine at full level, attack at once, no decay or release.
+    for (reg, value) in [
+        (0x20, 0x01),
+        (0x40, 0x3F),
+        (0x60, 0xF0),
+        (0x80, 0x00),
+        (0x23, 0x01),
+        (0x43, 0x00),
+        (0x63, 0xF0),
+        (0x83, 0x00),
+        (0xC0, 0x30),
+        (0xA0, 0x98),
+        (0xB0, 0x31),
+    ] {
+        write(&mut bus, reg, value);
+    }
+    wait_ms(&mut bus, 7);
+    samples(&mut bus);
+    write(&mut bus, 0xA0, 0x00);
+    write(&mut bus, 0xB0, 0x00);
+    let mut left = Vec::new();
+    for _ in 0..100 {
+        wait_ms(&mut bus, 10);
+        left.extend(samples(&mut bus).chunks(2).map(|frame| frame[0]));
+    }
+    left
+}
+
+/// The level the FM chip holds after such a note fades out of the mix
+/// through the capacitor on the card's output, as on a real AdLib or
+/// Sound Blaster: a second later the output is back at silence. Without
+/// the capacitor it stays as a constant offset.
+#[test]
+fn the_fm_level_held_fades_out_of_the_mix() {
+    let raw = fm_hold(false);
+    let held = *raw.last().unwrap();
+    assert!(held.unsigned_abs() > 1000, "{held}");
+    let tail = &raw[raw.len() - 4410..];
+    assert!(tail.iter().all(|&s| s == held), "the chip holds its level");
+    let coupled = fm_hold(true);
+    let tail = &coupled[coupled.len() - 4410..];
+    assert!(tail.iter().all(|s| s.abs() <= 1), "{tail:?}");
+}
+
 /// An FM note that plays for 50 ms, then the loudness of the 250 ms after
 /// it ends, with `settings`.
 fn fm_tail(settings: MixerSettings) -> (Vec<i16>, u64) {

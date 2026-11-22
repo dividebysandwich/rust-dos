@@ -2056,6 +2056,7 @@ impl Bus {
                 self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
                 self.mixer.add(&mut mix, &mut peaks, Channel::AdlibGold, pcm);
             } else {
+                let fm = self.mixer.fm_coupling(fm);
                 self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
             }
             if let Some(sb) = &mut self.sb {
@@ -2228,6 +2229,7 @@ impl Bus {
         self.speaker_rests()
             && self.beep_frames == 0
             && self.opl.is_idle()
+            && (self.adlib_gold.is_some() || self.mixer.fm_coupling_rests())
             && self.sb_quiet()
             && self.mpu.is_idle()
             && self.cdaudio.is_idle()
