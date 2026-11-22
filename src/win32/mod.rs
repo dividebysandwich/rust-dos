@@ -753,7 +753,7 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
     // Other Windows 3.1 programs start as Win16 tasks.
     let (path, line, win16) = if rust_dos_pe::is_pe(bytes) {
         (cpu.program_path(filename), None, false)
-    } else if launcher::is_ne(bytes) && !cpu.pe() {
+    } else if launcher::is_ne(bytes) && cpu.dos_mode() {
         let launcher = cpu.program_path(filename);
         match launcher::engine(cpu, &launcher, bytes) {
             Some((engine, arguments)) => {
@@ -777,9 +777,11 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
         ));
         return false;
     }
-    // Under a virtual-8086 monitor (EMM386, Windows' 386 enhanced mode)
-    // the process can't take the processor (`accepts`): the stub runs.
-    if cpu.pe() {
+    // Under a virtual-8086 monitor of the guest's (EMM386, Windows' 386
+    // enhanced mode) the process can't take the processor (`accepts`):
+    // the stub runs. The built-in monitor gives it up as for the DPMI
+    // host.
+    if !cpu.dos_mode() {
         cpu.bus.log_string(&format!(
             "[W32] {} is a Win32 program, but DOS runs in virtual-8086 mode: its DOS stub runs",
             filename
@@ -808,10 +810,10 @@ pub fn accepts(cpu: &Cpu, phys_ip: usize, id: u16) -> bool {
             return false;
         }
         return match id {
-            ID_START => !cpu.pe() && win32.pending.is_some() && !win32.active(),
-            ID_REAL_RETURN => !cpu.pe() && realmode::in_call(cpu),
+            ID_START => cpu.dos_mode() && win32.pending.is_some() && !win32.active(),
+            ID_REAL_RETURN => cpu.dos_mode() && realmode::in_call(cpu),
             _ if id & 0xFF00 == ID_CALLBACK => {
-                !cpu.pe() && crate::win16::dpmi::has_callback(cpu, id as u8 as usize)
+                cpu.dos_mode() && crate::win16::dpmi::has_callback(cpu, id as u8 as usize)
             }
             _ => id & 0xFF00 == ID_IDT && cpu.pm() && cpu.cpl == 0 && win32.active(),
         };
@@ -868,6 +870,8 @@ fn start(cpu: &mut Cpu) {
     nls::start(win32);
     dll_files::sync(&mut cpu.bus);
     boot::session_starts(cpu);
+    // Windows sets the keyboard's typematic rate from its own settings.
+    user32::sysparams::program_keyboard(cpu);
     loop {
         let Some(program) = cpu.bus.win32.pending.take() else {
             return;

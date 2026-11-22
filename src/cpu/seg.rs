@@ -194,6 +194,32 @@ impl Cpu {
         self.flags.contains(CpuFlags::VM)
     }
 
+    /// Where the built-in DOS and BIOS run as they do in real mode: real
+    /// mode, or virtual-8086 mode under the built-in monitor
+    /// (`v86mon::owns`), which reflects interrupts to the real-mode
+    /// vector table and leaves every port open, as EMM386 runs DOS.
+    #[inline(always)]
+    pub fn dos_mode(&self) -> bool {
+        !self.pe() || (self.v86() && crate::v86mon::owns(self))
+    }
+
+    /// Where an interrupt finds its handler in `dos_mode`: the vector
+    /// table at IDTR's base in real mode, and at 0 under the monitor,
+    /// which reflects interrupts there.
+    #[inline(always)]
+    pub fn ivt_base(&self) -> u32 {
+        if self.pe() { 0 } else { self.idtr.base }
+    }
+
+    /// Virtual-8086 mode under a monitor of the guest's own: a booted
+    /// system's EMM386 or Windows, or a VCPI client's own V86 task. The
+    /// BIOS services then go through the ports and IRETs such a monitor
+    /// traps.
+    #[inline(always)]
+    pub fn guest_v86(&self) -> bool {
+        self.v86() && !crate::v86mon::owns(self)
+    }
+
     /// Protected mode, not virtual-8086 mode: where segment registers hold
     /// selectors.
     #[inline(always)]

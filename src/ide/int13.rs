@@ -78,7 +78,7 @@ fn after_bios(cpu: &mut Cpu, unit: u8, read: Option<(u64, bool)>) {
     };
     let base = id.base();
     // Ports a V86 monitor traps: the accesses for it to see.
-    if cpu.v86() && cpu.check_io(base + 7, 1).is_err() {
+    if cpu.guest_v86() && cpu.check_io(base + 7, 1).is_err() {
         let devices: Vec<bool> = cpu.bus.ide[id.index()].as_ref().map_or(vec![], |c| c.devices.iter().map(Option::is_some).collect());
         let mut queue = vec![PortAccess::Faked(true)];
         for (s, present) in devices.into_iter().enumerate().take(slot + 1) {

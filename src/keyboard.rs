@@ -149,6 +149,20 @@ pub struct KeyboardState {
     /// keyboard controller, and the machine's BIOS makes its keystrokes
     /// from the scan codes in its own buffer, as a booted system's does.
     pub windows: bool,
+    /// The key the keyboard repeats while it is held, and when (`typematic`).
+    repeat: Option<Repeat>,
+}
+
+/// The key a keyboard repeats: the one that went down last, while it is
+/// held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Repeat {
+    scan: u8,
+    extended: bool,
+    /// What the host said it typed, which each repeat types again.
+    host_char: Option<u8>,
+    /// When the next make code goes out, in PIT ticks.
+    at: u64,
 }
 
 impl Default for KeyboardState {
@@ -161,6 +175,7 @@ impl Default for KeyboardState {
             unseen: 0,
             made: Default::default(),
             windows: false,
+            repeat: None,
         }
     }
 }
@@ -248,7 +263,7 @@ pub fn bios_took_scan(bus: &mut Bus, scan: u8) {
 /// the keystrokes stay queued for INT 16h, which reads them from there.
 pub fn bios_intercepted(cpu: &mut Cpu) {
     bios_saw_keys(&mut cpu.bus);
-    if cpu.v86() {
+    if cpu.guest_v86() {
         return;
     }
     let scan = cpu.get_al();
@@ -412,7 +427,75 @@ fn set_bit(byte: &mut u8, bit: u8, on: bool) {
 /// plain character; with nothing there it is Alt. Every key sends its make
 /// or break code to the keyboard controller, for programs that read the
 /// keyboard themselves.
+///
+/// The keyboard repeats a held key by itself, as a PC's does: the last
+/// key to go down sends its make code again after the typematic delay and
+/// then at the typematic rate (`typematic`), until it comes up or another
+/// key goes down. A key going down again while it is held, as the host's
+/// own key repeat sends it, changes nothing.
 pub fn key_event(bus: &mut Bus, scan: u8, extended: bool, down: bool, host_char: Option<u8>) {
+    let id = key_id(scan, extended);
+    if down {
+        if bus.kbd.is_held(id) {
+            return;
+        }
+        let at = bus.clock.now_ticks() + typematic_delay_ticks(bus.kbc.typematic);
+        bus.kbd.repeat = Some(Repeat {
+            scan,
+            extended,
+            host_char,
+            at,
+        });
+        bus.reschedule_timers();
+    } else if bus
+        .kbd
+        .repeat
+        .is_some_and(|r| key_id(r.scan, r.extended) == id)
+    {
+        bus.kbd.repeat = None;
+    }
+    key_change(bus, scan, extended, down, host_char);
+}
+
+/// How long a key is held before the keyboard repeats it, in PIT ticks:
+/// 250 ms times one more than bits 5-6 of the typematic byte.
+pub fn typematic_delay_ticks(typematic: u8) -> u64 {
+    let quarters = 1 + (typematic >> 5 & 3) as u64;
+    crate::timer::mul_div(quarters, crate::timer::PIT_HZ, 4)
+}
+
+/// The time between two repeats, in PIT ticks: (8 + A) * 2^B * 4.17 ms,
+/// with A bits 0-2 and B bits 3-4 of the typematic byte, from 33.3 ms
+/// (30 a second) to 500 ms (2 a second).
+pub fn typematic_period_ticks(typematic: u8) -> u64 {
+    let units = (8 + (typematic & 7) as u64) << (typematic >> 3 & 3);
+    crate::timer::mul_div(units * 417, crate::timer::PIT_HZ, 100_000)
+}
+
+/// When the keyboard sends its next repeat, in PIT ticks.
+pub fn typematic_at(bus: &Bus) -> Option<u64> {
+    bus.kbd.repeat.map(|r| r.at)
+}
+
+/// The keyboard's repeat came due: the held key's make code (and its
+/// keystroke) again, and the next one a period later.
+pub fn typematic(bus: &mut Bus) {
+    let now = bus.clock.now_ticks();
+    let Some(repeat) = bus.kbd.repeat.filter(|r| r.at <= now) else {
+        return;
+    };
+    let period = typematic_period_ticks(bus.kbc.typematic);
+    // A machine that ran far behind (a state loaded, a long stall) sends
+    // one repeat for the time it lost, as a keyboard waiting on a busy
+    // controller does.
+    let next = (repeat.at + period).max(now + 1);
+    bus.kbd.repeat = Some(Repeat { at: next, ..repeat });
+    key_change(bus, repeat.scan, repeat.extended, true, repeat.host_char);
+}
+
+/// A key went down (again, when the keyboard repeats it) or up, as
+/// `key_event` has it.
+fn key_change(bus: &mut Bus, scan: u8, extended: bool, down: bool, host_char: Option<u8>) {
     let id = key_id(scan, extended);
     // A booted system's BIOS makes the keystrokes of the scan codes
     // itself, in its keyboard interrupt (`bios_scan`), as the BIOS of a
@@ -855,6 +938,43 @@ impl KeyboardState {
         use crate::savestate::State;
         self.unseen.load(r)?;
         self.made.load(r)
+    }
+
+    /// The key repeating and the typematic byte, which a state saves in a
+    /// section of their own, TYPM, so states saved before it load.
+    pub fn save_typematic(&self, typematic: u8, w: &mut crate::savestate::Writer) {
+        use crate::savestate::State;
+        typematic.save(w);
+        let repeat = self
+            .repeat
+            .map(|r| ((r.scan, r.extended), r.host_char, r.at));
+        repeat.save(w);
+    }
+
+    /// Load what `save_typematic` saved; the typematic byte it returns.
+    pub fn load_typematic(
+        &mut self,
+        r: &mut crate::savestate::Reader,
+    ) -> crate::savestate::Result<u8> {
+        use crate::savestate::State;
+        let mut typematic = 0u8;
+        typematic.load(r)?;
+        let mut repeat: Option<((u8, bool), Option<u8>, u64)> = None;
+        repeat.load(r)?;
+        self.repeat = repeat.map(|((scan, extended), host_char, at)| Repeat {
+            scan,
+            extended,
+            host_char,
+            at,
+        });
+        Ok(typematic)
+    }
+
+    /// For a state from before `save_typematic`: no key repeats, and the
+    /// keyboard has its default rate (returned).
+    pub fn forget_typematic(&mut self) -> u8 {
+        self.repeat = None;
+        crate::kbc::TYPEMATIC_DEFAULT
     }
 
     /// For a state from before `save_queue`: its queued keystrokes count

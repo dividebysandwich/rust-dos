@@ -22,6 +22,7 @@ const SOUND_VERSION: u16 = 5;
 const SOUND_LOADS: [u16; 2] = [4, SOUND_VERSION];
 const DOS_VERSION: u16 = 6;
 const CD_HEAD_VERSION: u16 = 1;
+const VCPI_VERSION: u16 = 1;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
@@ -85,6 +86,7 @@ const PIT2_VERSION: u16 = 1;
 const PIT_8254_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
 const KEY_QUEUE_VERSION: u16 = 1;
+const TYPEMATIC_VERSION: u16 = 1;
 const FRAME_CAP_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
@@ -192,6 +194,7 @@ impl Bus {
             cdaudio,
             xms,
             ems,
+            vcpi,
             dpmi,
             win32,
             umb,
@@ -307,6 +310,10 @@ impl Bus {
         // Which queued keystrokes the BIOS never saw, in a section of its
         // own so states saved before it load.
         w.section(b"KEYQ", KEY_QUEUE_VERSION, |w| kbd.save_queue(w));
+        // The keyboard's typematic rate and the key it repeats, likewise.
+        w.section(b"TYPM", TYPEMATIC_VERSION, |w| {
+            kbd.save_typematic(kbc.typematic, w)
+        });
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga);
             // A ToadForce's memory is saved with what its host renderer
@@ -368,6 +375,9 @@ impl Bus {
         // Where MSCDEX's drives' heads are, in a section of their own so
         // states saved before it load (with every head at sector 0).
         w.section(b"CDHD", CD_HEAD_VERSION, |w| mscdex.save_heads(w));
+        // VCPI's, in a section of its own so states saved before it load
+        // (with none of its pages handed out).
+        w.section(b"VCPI", VCPI_VERSION, |w| vcpi.save(w));
         // The Ultrasound's memory first, where it stays in place for
         // rewind's deltas (rewind.rs) whatever the queues after it hold.
         w.section(b"SOUN", SOUND_VERSION, |w| {
@@ -558,6 +568,7 @@ impl Bus {
             cdaudio,
             xms,
             ems,
+            vcpi,
             dpmi,
             win32,
             umb,
@@ -714,6 +725,11 @@ impl Bus {
         } else {
             kbd.forget_queue();
         }
+        kbc.typematic = if r.next_is(b"TYPM") {
+            kbd.load_typematic(&mut r.section(b"TYPM", TYPEMATIC_VERSION)?)?
+        } else {
+            kbd.forget_typematic()
+        };
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         *last_present = None;
@@ -777,6 +793,11 @@ impl Bus {
             mscdex.load_heads(Some(&mut r.section(b"CDHD", CD_HEAD_VERSION)?))?;
         } else {
             mscdex.load_heads(None)?;
+        }
+        if r.next_is(b"VCPI") {
+            vcpi.load(&mut r.section(b"VCPI", VCPI_VERSION)?)?;
+        } else {
+            *vcpi = crate::vcpi::Vcpi::default();
         }
         let mut section = r.section_of(b"SOUN", &SOUND_LOADS)?;
         load_device(gus, "Gravis Ultrasound", &mut section)?;

@@ -3,5 +3,5 @@ intro-sound dc1c55ba2da3bd60ae6ee57c
 menu 883997a3befcd080ce4eac9e
 briefing fb67a8c88f052c3de4947811
 cockpit 511db2a774847843cfde1bfc
-flown ca4e4448453c399dfe286486
-laser cebd411bb94ee57fd5b39d0a
+flown 6e57e7c00e1f58267f1be115
+laser ad831439e1daa145df6a7193
