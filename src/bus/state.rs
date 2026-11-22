@@ -121,6 +121,7 @@ impl Bus {
             kbc,
             kbc_release_at: _,
             rtc_next: _,
+            rtc_alarm_next: _,
             a20_mask,
             cmos,
             pit_divisor,
@@ -491,6 +492,7 @@ impl Bus {
             kbc,
             kbc_release_at: _,
             rtc_next: _,
+            rtc_alarm_next: _,
             a20_mask,
             cmos,
             pit_divisor,
@@ -941,6 +943,7 @@ impl Bus {
         // The clock's periodic interrupt as the state's registers have it,
         // and the keyboard's next byte at once.
         self.rtc_next = None;
+        self.rtc_alarm_next = None;
         self.schedule_rtc();
         self.kbc_release_at = None;
         self.kbc.after_load();

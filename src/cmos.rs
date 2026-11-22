@@ -13,16 +13,30 @@
 //! status A (1024 Hz as the BIOS sets it), which HX's Win32 emulation
 //! times its Sleep and timers with: the bus fires it (`periodic_fired`) as
 //! its `periodic_ticks` come due, and reading status C acknowledges it.
+//!
+//! The alarm interrupt (status B bit 5) raises IRQ 8 in the second the
+//! clock reaches the time in the alarm registers (01h seconds, 03h minutes,
+//! 05h hours; a value from C0h on matches any). The bus looks for it every
+//! `ALARM_POLL_TICKS` while status B enables it (`alarm_due`).
 
 use chrono::{Datelike, NaiveDateTime, TimeDelta, Timelike};
 
 pub const SHUTDOWN_STATUS: u8 = 0x0F;
 
-/// Status B: the periodic interrupt enabled.
+/// Status B: the periodic interrupt enabled (PIE), and the alarm
+/// interrupt (AIE).
 const PIE: u8 = 0x40;
-/// Status C: an interrupt is asserted (IRQF), and a periodic one came (PF).
+pub const AIE: u8 = 0x20;
+/// Status C: an interrupt is asserted (IRQF), a periodic one came (PF),
+/// and the alarm time came (AF).
 const IRQF: u8 = 0x80;
 const PF: u8 = 0x40;
+const AF: u8 = 0x20;
+
+/// How often the bus looks for the alarm while it is enabled: twice a
+/// second, in PIT ticks. `alarm_due` checks each second since the last
+/// look, so a late look still finds the alarm.
+pub const ALARM_POLL_TICKS: u64 = crate::timer::PIT_HZ / 2;
 
 pub struct Cmos {
     index: u8,
@@ -30,6 +44,9 @@ pub struct Cmos {
     /// How far the machine's clock is from the host's, which DATE, TIME and
     /// the services that set the clock move it.
     offset: TimeDelta,
+    /// The last second the alarm was looked for in, while the alarm
+    /// interrupt is enabled.
+    alarm_checked: Option<NaiveDateTime>,
 }
 
 fn bcd(value: u32) -> u8 {
@@ -51,7 +68,7 @@ impl Cmos {
         ram[0x18] = (ext >> 8) as u8;
         ram[0x30] = ext as u8;
         ram[0x31] = (ext >> 8) as u8;
-        let mut cmos = Self { index: 0, ram, offset: TimeDelta::zero() };
+        let mut cmos = Self { index: 0, ram, offset: TimeDelta::zero(), alarm_checked: None };
         cmos.update_checksum();
         cmos
     }
@@ -144,6 +161,37 @@ impl Cmos {
         !asserted
     }
 
+    /// Whether status B enables the alarm interrupt.
+    pub fn alarm_enabled(&self) -> bool {
+        self.ram[0x0B] & AIE != 0
+    }
+
+    /// Look for the alarm time in the seconds since the last look: true
+    /// when it came and asserts IRQ 8. The first look after the alarm
+    /// interrupt is enabled starts from the current second.
+    pub fn alarm_due(&mut self) -> bool {
+        if !self.alarm_enabled() {
+            self.alarm_checked = None;
+            return false;
+        }
+        let now = self.now().with_nanosecond(0).unwrap_or_else(|| self.now());
+        let from = self.alarm_checked.replace(now).unwrap_or(now);
+        let alarm = [self.ram[0x05], self.ram[0x03], self.ram[0x01]];
+        let matches = |at: NaiveDateTime| {
+            let clock = [bcd(at.hour()), bcd(at.minute()), bcd(at.second())];
+            alarm.iter().zip(clock).all(|(&alarm, clock)| alarm >= 0xC0 || alarm == clock)
+        };
+        // A day covers every time the alarm can match, after a pause or a
+        // clock set forward.
+        let seconds = (now - from).num_seconds().clamp(0, 86_400);
+        if !(1..=seconds).any(|s| matches(from + TimeDelta::seconds(s))) {
+            return false;
+        }
+        let asserted = self.ram[0x0C] & IRQF != 0;
+        self.ram[0x0C] |= IRQF | AF;
+        !asserted
+    }
+
     /// Port 71h read. Status C reads clear it, acknowledging the interrupt.
     pub fn read_register(&mut self) -> u8 {
         let value = self.read_data();
@@ -172,8 +220,10 @@ impl Cmos {
 
     pub fn write_data(&mut self, value: u8) {
         match self.index {
-            // The clock can't be set, and status C/D are read-only.
-            0x00..=0x09 | 0x0C | 0x0D | 0x32 => {}
+            // The clock can't be set, and status C/D are read-only. The
+            // alarm registers (01h, 03h, 05h) between the clock's keep
+            // what is written.
+            0x00 | 0x02 | 0x04 | 0x06..=0x09 | 0x0C | 0x0D | 0x32 => {}
             i => self.ram[i as usize] = value,
         }
     }
@@ -200,6 +250,7 @@ impl crate::savestate::State for Cmos {
         let mut ms = 0i64;
         ms.load(r)?;
         self.offset = TimeDelta::milliseconds(ms);
+        self.alarm_checked = None;
         Ok(())
     }
 }

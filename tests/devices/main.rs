@@ -19,6 +19,7 @@ mod fdc_tests;
 mod gus_patch_tests;
 mod gus_tests;
 mod ide_tests;
+mod int1a_tests;
 mod ipx_tests;
 mod joystick_tests;
 mod lpt_dac_tests;

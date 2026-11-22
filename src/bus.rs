@@ -135,6 +135,8 @@ pub struct Bus {
     pub kbc_release_at: Option<u64>,
     /// When the clock's next periodic interrupt comes, in PIT ticks.
     pub rtc_next: Option<u64>,
+    /// When to look for the clock's alarm next, while it is enabled.
+    pub rtc_alarm_next: Option<u64>,
     /// The A20 gate as a mask for physical addresses: with the gate
     /// closed, address line 20 is forced to 0 and addresses wrap at 1 MB
     /// as on an 8086. See `a20()` and `set_a20()`.
@@ -1775,6 +1777,7 @@ impl Bus {
             self.serial_next_event(),
             self.kbc_release_at,
             self.rtc_next,
+            self.rtc_alarm_next,
             self.win32.next_event(),
             crate::win32::audio_next_event(&self.win32, self.clock.now_ticks()),
         ]
@@ -1840,6 +1843,17 @@ impl Bus {
         {
             self.rtc_next = self.cmos.periodic_ticks().map(|period| if at + period > now { at + period } else { now + period });
             if self.rtc_next.is_some() && self.cmos.periodic_fired() {
+                self.pic.raise(8);
+            }
+        }
+        // The clock's alarm.
+        if let Some(at) = self.rtc_alarm_next
+            && at <= now
+        {
+            let poll = crate::cmos::ALARM_POLL_TICKS;
+            let enabled = self.cmos.alarm_enabled();
+            self.rtc_alarm_next = enabled.then(|| if at + poll > now { at + poll } else { now + poll });
+            if self.cmos.alarm_due() {
                 self.pic.raise(8);
             }
         }
@@ -2552,8 +2566,8 @@ impl Bus {
         self.clock.stall_to(until);
     }
 
-    /// Start or stop the clock's periodic interrupt as its status
-    /// registers have it.
+    /// Start or stop the clock's periodic interrupt and the look for its
+    /// alarm as its status registers have them.
     pub fn schedule_rtc(&mut self) {
         match self.cmos.periodic_ticks() {
             Some(period) if self.rtc_next.is_none() => {
@@ -2562,6 +2576,19 @@ impl Bus {
             }
             Some(_) => {}
             None => self.rtc_next = None,
+        }
+        match self.cmos.alarm_enabled() {
+            true if self.rtc_alarm_next.is_none() => {
+                // Start the look from the current second.
+                self.cmos.alarm_due();
+                self.rtc_alarm_next = Some(self.clock.now_ticks() + crate::cmos::ALARM_POLL_TICKS);
+                self.clock.schedule(self.next_event());
+            }
+            true => {}
+            false => {
+                self.rtc_alarm_next = None;
+                self.cmos.alarm_due();
+            }
         }
     }
 

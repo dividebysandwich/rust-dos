@@ -95,6 +95,8 @@ const PORT_ACCESSES_MORE: u16 = 0x1500;
 /// system that passes the IRQ down to real mode gets the program's event
 /// handler called (`mouse::irq_service`).
 pub const MOUSE_IRQ: u16 = 0x1600;
+/// The real-time clock's interrupt (IRQ 8, INT 70h).
+const RTC_HANDLER: u16 = 0x1640;
 /// The keyboard interrupt (IRQ 1) of a booted system, which keeps the
 /// keystrokes in the BIOS data area as a PC's BIOS does.
 const KBD_HANDLER: u16 = 0x1230;
@@ -184,6 +186,7 @@ pub fn default_ivt() -> [u32; 256] {
     ivt[0x78..].fill(0);
     ivt[0x0A..=0x0F].fill(far(MASTER_EOI_HANDLER));
     ivt[0x70..=0x77].fill(far(SLAVE_EOI_HANDLER));
+    ivt[0x70] = far(RTC_HANDLER);
     ivt[0x71] = far(IRQ9_HANDLER);
     ivt[0x74] = far(PS2_HANDLER);
     for (i, &vector) in HLE_VECTORS.iter().enumerate() {
@@ -356,6 +359,27 @@ pub fn install(bus: &mut Bus) {
         bus,
         SLAVE_EOI_HANDLER,
         &[0x50, 0xB0, 0x20, 0xE6, 0xA0, 0xE6, 0x20, 0x58, 0xCF],
+    );
+    // The real-time clock's interrupt, as an AT's BIOS has it: read
+    // status C, which acknowledges the clock, call the alarm's INT 4Ah if
+    // the alarm came, and acknowledge both PICs.
+    write_rom(
+        bus,
+        RTC_HANDLER,
+        &[
+            0x50, // PUSH AX
+            0xB0, 0x0C, // MOV AL, 0Ch
+            0xE6, 0x70, // OUT 70h, AL
+            0xE4, 0x71, // IN AL, 71h
+            0xA8, 0x20, // TEST AL, 20h
+            0x74, 0x02, // JZ eoi
+            0xCD, 0x4A, // INT 4Ah
+            0xB0, 0x20, // eoi: MOV AL, 20h
+            0xE6, 0xA0, // OUT A0h, AL
+            0xE6, 0x20, // OUT 20h, AL
+            0x58, // POP AX
+            0xCF, // IRET
+        ],
     );
     // IRQ 9 is the AT's rerouted IRQ 2: acknowledge the slave and run the
     // IRQ 2 handler (INT 0Ah), which acknowledges the master.
@@ -552,7 +576,7 @@ fn mouse_irq_handler() -> Vec<u8> {
 /// BIOS's own IRQ handlers that only acknowledge the interrupt, or the
 /// IPX driver's, which a device may take the IRQ over from.
 pub fn is_default_irq_handler(entry: u32) -> bool {
-    [MASTER_EOI_HANDLER, SLAVE_EOI_HANDLER, IRQ9_HANDLER, IRET_HANDLER, IPX_IRQ].into_iter().any(|h| far(h) == entry)
+    [MASTER_EOI_HANDLER, SLAVE_EOI_HANDLER, IRQ9_HANDLER, RTC_HANDLER, IRET_HANDLER, IPX_IRQ].into_iter().any(|h| far(h) == entry)
 }
 
 /// The keyboard interrupt of a booted system, as a PC's BIOS runs it:
