@@ -413,3 +413,36 @@ fn alternate_print_screen_points_int_05h_at_the_bios_s_routine() {
         (0x1200, 0x0020, 0x1111, 0x2222)
     );
 }
+
+#[test]
+fn the_text_modes_map_the_memory_at_b8000h_alone() {
+    // Mode 3 maps the VGA's memory at B8000h (GR06's Memory Map Select
+    // 11b): A0000h reaches none of it. Ultima VIII's INSTALL keeps a
+    // block of its own at A000:0000 there, which must not show.
+    let mut cpu = machine(0x03);
+    int10(&mut cpu, 0x0941, 0x0007, 1, 0);
+    let screen: Vec<u8> = (0..16).map(|i| cpu.bus.read_8(0xB8000 + i)).collect();
+    cpu.bus.write_32(0xA0000, 0x89AB_CDEF);
+    for (i, &b) in b"C:\\0".iter().enumerate() {
+        cpu.bus.write_8(0xA0004 + i, b);
+    }
+    cpu.bus.write_16(0xA0008, 0x1234);
+    let after: Vec<u8> = (0..16).map(|i| cpu.bus.read_8(0xB8000 + i)).collect();
+    assert_eq!(after, screen, "the text screen is as the BIOS left it");
+    assert_eq!(cpu.bus.read_32(0xA0000), 0xFFFF_FFFF, "the open bus");
+    assert_eq!(
+        cell_colors(&picture(&mut cpu), 1, 0),
+        [(0, 0, 0)],
+        "the second cell stays blank"
+    );
+
+    // Mapped at A0000h (64 KB, as Windows' VDD maps it to read a text
+    // screen through the planes), the planes are there in odd/even mode:
+    // the character in plane 0, its attribute in plane 1.
+    cpu.bus.io_write(0x3CE, 0x06);
+    cpu.bus.io_write(0x3CF, 0x06);
+    assert_eq!(cpu.bus.read_8(0xA0000), b'A');
+    assert_eq!(cpu.bus.read_8(0xA0001), 0x07);
+    cpu.bus.write_8(0xA0002, b'B');
+    assert_eq!(cpu.bus.vga.vram_text[2], b'B');
+}

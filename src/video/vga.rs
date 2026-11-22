@@ -352,6 +352,17 @@ impl VgaCard {
         self.get_rgb(self.dac_index(value))
     }
 
+    /// Whether the card answers at A0000h-AFFFFh, its graphics window. An
+    /// EGA or VGA decodes the addresses the Graphics Controller's
+    /// Miscellaneous register (GR06) maps its memory at: A0000h for 128 KB
+    /// or 64 KB (Memory Map Select 00b and 01b), B0000h or B8000h for 32 KB
+    /// (10b and 11b, the text modes'). Outside them the processor reaches
+    /// no memory of the card: reads find the open bus, and writes go
+    /// nowhere. The other adapters keep the window as they had it.
+    pub fn maps_graphics_window(&self) -> bool {
+        !self.adapter.ega_bios() || self.graphics_regs[0x06] & 0x08 == 0
+    }
+
     /// Where the text and CGA modes' memory is, how big the window onto it
     /// is, and where the memory wraps (a mask): 32 KB at B8000h, or at
     /// B0000h when the Graphics Miscellaneous register maps memory there

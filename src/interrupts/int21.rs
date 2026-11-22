@@ -1376,11 +1376,19 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 33h: Get/Set Ctrl-Break Check
         0x33 => {
             let al = cpu.get_al();
-            if al == 0x00 {
-                // Get
-                cpu.set_reg8(Register::DL, 0); // 0 = Off
-            } else if al == 0x01 { // Set
-                // Ignore setting, just return
+            let flag = dos_data::address(dos_data::BREAK_FLAG) as u32;
+            if al <= 0x02 {
+                // The Ctrl+Break check flag: get it in DL (AL=00h), set it
+                // from DL (01h), or both, the old one in DL (02h). It is
+                // kept for BREAK and the programs that read it; nothing
+                // else here looks at it.
+                let old = cpu.bus.guest_read_8(flag) & 1;
+                if al != 0x00 {
+                    cpu.bus.guest_write_8(flag, cpu.get_reg8(Register::DL) & 1);
+                }
+                if al != 0x01 {
+                    cpu.set_reg8(Register::DL, old);
+                }
             } else if al == 0x06 {
                 // Get MS-DOS Version (True version)
                 let version = cpu.bus.dos_version;
