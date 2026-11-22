@@ -2256,8 +2256,11 @@ impl Bus {
             && !crate::win32::audio_playing(&self.win32)
             && self.gus.as_ref().is_none_or(|g| g.is_idle())
             && self.awe.is_none()
-            && self.adlib_gold.as_ref().is_none_or(|g| g.pcm_quiet() && g.fm_chain_at_rest())
-            && self.mixer.adlib_gold_coupling_rests()
+            // Without a Gold its capacitor never gets a frame, and one that
+            // got none doesn't rest (`OutputCoupling::rests_on`).
+            && self.adlib_gold.as_ref().is_none_or(|g| {
+                g.pcm_quiet() && g.fm_chain_at_rest() && self.mixer.adlib_gold_coupling_rests()
+            })
             && self.lpt_dac.is_none()
             && !self.tandy_sound_enabled()
     }
