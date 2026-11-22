@@ -333,8 +333,8 @@ jobs:
           du -sh target target/debug/deps || true
 
   # The release builds and packages, the ones `scope` picks: every target
-  # on pushes, tags and manual runs, and on pull requests that change the
-  # manifests, the build or the packaging; none on other pull requests.
+  # on pushes, tags and manual runs and on the pull requests `scope` lists,
+  # none on other pull requests and on drafts.
   build:
     name: ${{ matrix.label }}
     needs: [test, scope]
@@ -753,16 +753,17 @@ jobs:
   #   no `hostmidi`), so code that needs those breaks it.
   # - `builds`: the release builds `build` makes, as its matrix. All of
   #   them on pushes, tags and manual runs, and on pull requests that change
-  #   the manifests, build.rs, the packaging or the workflows, or that have
-  #   the `full-build` label (read when the job runs, so after adding it,
-  #   re-run the workflow). Other pull requests get none: the test jobs
-  #   have compiled and linked the program on every system already. The
-  #   one thing they don't find is code that needs a newer glibc than
-  #   Ubuntu 22.04's 2.35, which the linux-x86_64-compat build would; that
-  #   comes from the manifests or the build far more often than from the
-  #   code (no pull request's compat build failed in the 200 runs before
-  #   this change), so main's push run, which builds every target, finds
-  #   it instead. Drafts get none either.
+  #   the manifests, build.rs, the packaging or anything in `.github`, or
+  #   that have the `full-build` label (read when the job runs, so after
+  #   adding it, re-run the workflow). Other pull requests get none: the
+  #   test jobs have compiled and linked the program on Linux, macOS and
+  #   Windows already. What they don't find is code that needs a newer
+  #   glibc than Ubuntu 22.04's 2.35, which the linux-x86_64-compat build
+  #   would. That comes from the manifests or the build far more often than
+  #   from the code: in the 1000 runs from 14 to 22 November 2026, the one
+  #   pull request whose compat build failed lost its network connection.
+  #   Main's push run, which builds every target, finds it instead. Drafts
+  #   get none, and a `ready_for_review` run makes those they would get.
   scope:
     name: scope
     runs-on: ubuntu-latest
