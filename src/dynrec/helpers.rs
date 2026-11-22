@@ -964,8 +964,8 @@ jit_fn! {
 /// neither TF nor IF with an interrupt waiting (INT clears both), and the
 /// mode is as the blocks were translated for. In real and virtual-8086
 /// mode only CS changed: its environment bits and the code size; not into
-/// an emulator service trap in real mode (an INT of the BIOS's or DOS's),
-/// where no block starts. In protected mode everything a gate or another
+/// an emulator service trap (an INT of the BIOS's or DOS's), where no
+/// block starts. In protected mode everything a gate or another
 /// task could change: no task switch, and CPL and all segments' bits. (The
 /// CS base and EIP are the links' guards.) 0 where it goes on through the
 /// links, else EXIT_AFTER (`cpl`: the privilege level before). Where in
@@ -995,7 +995,7 @@ fn far_goes_on(cpu: &Cpu, ctx: &mut JitCtx, pm: bool, tr: u16, cpl: u8) -> u32 {
     }
     let phys = (cs.base.wrapping_add(cpu.eip()) & cpu.bus.a20_mask()) as usize;
     let cs_bits = super::seg_env_mask(Seg::CS) | 1;
-    let goes_on = (cpu.pe() || !crate::exec::is_service_trap(cpu.bus.ram(), phys))
+    let goes_on = (cpu.pm() || !crate::exec::is_service_trap(cpu.bus.ram(), phys))
         && code32 | super::flat_bit(cpu, Seg::CS) == ctx.mode & cs_bits;
     if goes_on { 0 } else { EXIT_AFTER }
 }
