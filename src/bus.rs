@@ -1477,7 +1477,9 @@ impl Bus {
         } else {
             (self.vga.crtc_regs[0x0C] as u32) << 8 | self.vga.crtc_regs[0x0D] as u32
         };
-        self.activity.display_start(self.clock.icount, start);
+        let frame = self.vga.peek_timing().frame_ns();
+        let (at, ns) = (self.clock.icount, self.clock.now_ns());
+        self.activity.display_start(at, start, ns, frame);
     }
 
     /// The CPU wrote `bytes` bytes to video memory at `offset` (in the

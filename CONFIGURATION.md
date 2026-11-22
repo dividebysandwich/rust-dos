@@ -196,9 +196,12 @@ limit, so without a connection it goes on as it would with one:
   waiting for a retrace or two a frame takes: it waits for something else,
   as a Windows game that draws only when something changes does. It then
   tries lower speeds, down to where they cost more than 3% of the frame
-  rate, or make a program that polls for the vertical retrace miss one. A
-  speed the host falls behind at is left for a lower one, and the limit that
-  sets rises again while the host keeps up. A real-mode program with no
+  rate, make a program that polls for the vertical retrace miss one, or
+  show more than one frame in 300 a retrace late (a frame flipped after
+  the retrace it was due at, as a game's drawing runs long). A speed whose
+  frames are that late goes up, unless they stay as late at more speed. A
+  speed the host falls behind at is left for a lower one, and the limit
+  that sets rises again while the host keeps up. A real-mode program with no
   frames to go by (most games of the 1980s, which update the screen
   piecemeal) runs at 3000, about a 286, as in DOSBox's `cycles=auto`, and at
   max while it reads or writes its drives (loading), unless it would sit
