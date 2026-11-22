@@ -930,7 +930,9 @@ fn parse_choice<'a>(cpu: &Cpu, args: &'a str) -> Result<(crate::shell::Choice, &
                 break;
             }
             if text.is_some() {
-                return Err(format!("CHOICE: only one prompt string allowed. Expected Form:\r\n{CHOICE_FORM}\r\n"));
+                return Err(format!(
+                    "CHOICE: only one prompt string allowed. Expected Form:\r\n{CHOICE_FORM}\r\n"
+                ));
             }
             // Quotes keep a `/` in the text and are taken off it.
             let (found, after) = match rest.strip_prefix('"') {
@@ -952,7 +954,10 @@ fn parse_choice<'a>(cpu: &Cpu, args: &'a str) -> Result<(crate::shell::Choice, &
                 let value = value.strip_prefix(':').unwrap_or(value);
                 let end = value.find([' ', '\t', '/']).unwrap_or(value.len());
                 if end == 0 {
-                    return Err("CHOICE: invalid choice switch syntax. Expected form: /C[:]choices\r\n".into());
+                    return Err(
+                        "CHOICE: invalid choice switch syntax. Expected form: /C[:]choices\r\n"
+                            .into(),
+                    );
                 }
                 keys = crate::dosstr::to_bytes(&value[..end]);
                 rest = &value[end..];
@@ -966,13 +971,20 @@ fn parse_choice<'a>(cpu: &Cpu, args: &'a str) -> Result<(crate::shell::Choice, &
                 let after = chars.as_str();
                 let digits = after.bytes().take(2).take_while(u8::is_ascii_digit).count();
                 let (Some(key), Some(','), 1..) = (key, comma, digits) else {
-                    return Err("CHOICE: Incorrect timeout syntax.  Expected form Tc,nn or T:c,nn\r\n".into());
+                    return Err(
+                        "CHOICE: Incorrect timeout syntax.  Expected form Tc,nn or T:c,nn\r\n"
+                            .into(),
+                    );
                 };
                 let seconds = after[..digits].parse::<u64>().unwrap_or(0);
                 timeout = Some((crate::dosstr::to_bytes(&key.to_string())[0], seconds));
                 rest = &after[digits..];
             }
-            _ => return Err(format!("Invalid switch on command line. Expected form:\r\n{CHOICE_FORM}\r\n")),
+            _ => {
+                return Err(format!(
+                    "Invalid switch on command line. Expected form:\r\n{CHOICE_FORM}\r\n"
+                ));
+            }
         }
     }
     if !case_sensitive {
@@ -980,8 +992,16 @@ fn parse_choice<'a>(cpu: &Cpu, args: &'a str) -> Result<(crate::shell::Choice, &
     }
     let mut choice = crate::shell::Choice { keys, case_sensitive, timeout: None };
     if let Some((key, seconds)) = timeout {
-        let Some(i) = choice.keys.iter().position(|&k| if case_sensitive { k == key } else { k.eq_ignore_ascii_case(&key) }) else {
-            return Err("CHOICE: Timeout default not in specified (or default) choices.\r\n".into());
+        let Some(i) = choice.keys.iter().position(|&k| {
+            if case_sensitive {
+                k == key
+            } else {
+                k.eq_ignore_ascii_case(&key)
+            }
+        }) else {
+            return Err(
+                "CHOICE: Timeout default not in specified (or default) choices.\r\n".into(),
+            );
         };
         let at = cpu.bus.clock.now_ticks() + seconds * crate::timer::PIT_HZ;
         choice.timeout = Some((choice.keys[i], at));
