@@ -591,11 +591,19 @@ fn type_text(bytes: &[u8]) -> Vec<u8> {
 }
 
 struct ClsCommand;
+/// MS-DOS 6.22's COMMAND.COM prints no CR LF after CLS: the prompt, or
+/// the next line a batch file echoes, comes on the top line.
+fn after_cls(cpu: &mut Cpu) {
+    cpu.batch.crlf.command_ran = false;
+    cpu.batch.crlf.null_line = true;
+}
+
 impl ShellCommand for ClsCommand {
     fn execute(&self, cpu: &mut Cpu, _args: &str) {
         // In a Windows virtual machine, the machine's own screen.
         if cpu.v86() && cpu.bus.guest_paging.is_some() {
             crate::interrupts::clear_screen(cpu);
+            after_cls(cpu);
             return;
         }
         // Direct VRAM clear to avoid circular dependency on int10.rs:
@@ -608,6 +616,7 @@ impl ShellCommand for ClsCommand {
         }
         // Reset Cursor (BDA 0x0450)
         cpu.bus.write_16(0x0450, 0x0000);
+        after_cls(cpu);
     }
 }
 

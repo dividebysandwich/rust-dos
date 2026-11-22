@@ -92,7 +92,14 @@ fn lines_are_echoed_at_the_prompt_unless_echo_is_off() {
     cpu.pending_command = Some("X".into());
     run_batch_files(&mut cpu);
     let screen = screen(&cpu);
-    assert!(screen.contains("C:\\>echo one\none\ntwo\nC:\\>echo off\nthree"), "{}", screen);
+    // COMMAND.COM prints CR LF before each line it echoes, and none
+    // before the prompt when the file's last line, the empty one after its
+    // CR LF, is unechoed.
+    assert!(
+        screen.contains("C:\\>echo one\none\ntwo\n\nC:\\>echo off\nthree\nC:\\>"),
+        "{}",
+        screen
+    );
 }
 
 #[test]
@@ -117,7 +124,8 @@ fn autoexec_bat_runs_after_autoexec_lines_that_chain_to_a_batch_file() {
     assert!(cpu.queue_batch_file("C:\\AUTOEXEC.BAT"));
     run_batch_files(&mut cpu);
     let screen = screen(&cpu);
-    assert!(screen.contains("in x\nin autoexec"), "{}", screen);
+    // X.BAT's last line is the empty one after its CR LF, echoed.
+    assert!(screen.contains("in x\n\nC:\\>\nin autoexec"), "{}", screen);
     assert!(!screen.contains("never"), "chaining never comes back: {}", screen);
 }
 
@@ -400,7 +408,7 @@ fn prompt_codes_make_the_prompt() {
     cpu.queue_batch_lines(["@prompt $n$g", "@echo x", "@prompt [$p]$_$$"]);
     run_batch_files(&mut cpu);
     let text = screen(&cpu);
-    assert!(text.ends_with("x\n[C:\\]\n$"), "{}", text);
+    assert!(text.ends_with("x\n\n[C:\\]\n$"), "{}", text);
 }
 
 #[test]
@@ -428,7 +436,8 @@ fn batch_lines_run_while_the_prompt_waits_for_a_key() {
     assert_eq!(screen(&cpu), "C:\\>ab");
     cpu.queue_batch_lines(["echo one"]);
     run_batch_files(&mut cpu);
-    assert_eq!(screen(&cpu), "C:\\>echo one\none\nC:\\>");
+    // The line echoed in the prompt's place, and the prompt after a CR LF.
+    assert_eq!(screen(&cpu), "C:\\>echo one\none\n\nC:\\>");
 }
 
 fn type_line(cpu: &mut Cpu, line: &[u8]) {
@@ -501,7 +510,11 @@ fn programs_are_found_in_the_current_directory_then_on_the_path() {
     cpu.queue_batch_lines(["@TOOL.EXE.TXT"]);
     run_batch_files(&mut cpu);
     let screen = screen(&cpu);
-    assert!(screen.contains("went there\nBad command or file name."), "{}", screen);
+    assert!(
+        screen.contains("went there\n\nC:\\>\nBad command or file name."),
+        "{}",
+        screen
+    );
 }
 
 #[test]
@@ -643,6 +656,128 @@ fn what_a_program_printed_stays_on_the_screen_after_it() {
     type_line(&mut cpu, b"hello\r");
     run_until(&mut cpu, 200, |cpu| cpu.shell_idle());
     assert_eq!(screen(&cpu), "C:\\>hello\nhi\nC:\\>");
+}
+
+/// A .COM program that prints `text`, which ends in `$`, and exits.
+fn prints(text: &[u8]) -> Vec<u8> {
+    #[rustfmt::skip]
+    let mut program = vec![
+        0xB4, 0x09, 0xBA, 0x0C, 0x01,   // MOV AH, 09h; MOV DX, 010Ch
+        0xCD, 0x21,                     // INT 21h
+        0xB8, 0x00, 0x4C, 0xCD, 0x21,   // MOV AX, 4C00h; INT 21h
+    ];
+    program.extend_from_slice(text);
+    program
+}
+
+/// The screen after typing `lines` at the prompt of a new machine whose C:
+/// holds the batch files T1.BAT to T9.BAT and the programs HICR.COM (which
+/// prints "hi" and CR) and HICRLF.COM ("hi", CR and LF).
+fn screen_after(name: &str, lines: &[&str]) -> String {
+    let hicr = prints(b"hi\r$");
+    let hicrlf = prints(b"hi\r\n$");
+    let dir = scratch(
+        name,
+        &[
+            ("HICR.COM", &hicr),
+            ("HICRLF.COM", &hicrlf),
+            (
+                "T1.BAT",
+                b"echo a\r\necho hi\r\n\r\nrem x\r\n@echo y\r\nhicr\r\n",
+            ),
+            ("T2.BAT", b"echo a\r\n:lbl\r\necho b"),
+            ("T3.BAT", b"@echo off\r\necho a\r\n"),
+            ("T4.BAT", b"@echo off\r\necho a"),
+            ("T5.BAT", b"@echo off\r\nhicrlf\r\n"),
+            (
+                "T6.BAT",
+                b"echo a\r\nfor %%a in (1 2) do echo %%a\r\necho b",
+            ),
+            ("T7.BAT", b"echo a\r\n\r\n\r\necho b\r\n"),
+            ("T8.BAT", b"cls\r\necho a\r\n"),
+            ("T9.BAT", b"@echo off\r\ncls\r\necho on\r\necho a\r\n"),
+        ],
+    );
+    let mut cpu = machine(&dir);
+    for line in lines {
+        type_line(&mut cpu, format!("{}\r", line).as_bytes());
+        let idle = run_until(&mut cpu, 2000, |cpu| {
+            !cpu.batch.is_active() && cpu.shell_idle()
+        });
+        assert!(idle, "{}", line);
+    }
+    screen(&cpu)
+}
+
+// The screens below are MS-DOS 6.22's COMMAND.COM's, booted from its
+// floppy, with the same programs and batch files.
+
+#[test]
+fn the_prompt_comes_after_a_cr_lf_once_a_command_has_run() {
+    // A program whose output ends with a CR alone keeps its last line
+    // (Ultima VII's goodbye); one that ends with CR LF gets an empty line
+    // before the prompt, as a built-in command does. An empty line gets
+    // none, and neither does CLS.
+    assert_eq!(
+        screen_after("crlf_program", &["hicr", "hicrlf", "", "echo hi"]),
+        "C:\\>hicr\nhi\nC:\\>hicrlf\nhi\n\nC:\\>\nC:\\>echo hi\nhi\n\nC:\\>"
+    );
+    assert_eq!(screen_after("crlf_cls", &["echo hi", "cls"]), "C:\\>");
+    assert_eq!(
+        screen_after("crlf_missing", &["nothere"]),
+        "C:\\>nothere\nBad command or file name.\n\nC:\\>"
+    );
+    // With ECHO off there is no prompt, and no CR LF before it.
+    assert_eq!(
+        screen_after("crlf_echo_off", &["echo off", "echo x", "echo on"]),
+        "C:\\>echo off\necho x\nx\necho on\n\nC:\\>"
+    );
+    // A FOR at the prompt shows each command it runs.
+    assert_eq!(
+        screen_after("crlf_for", &["for %a in (1 2) do echo %a"]),
+        "C:\\>for %a in (1 2) do echo %a\n\nC:\\>echo 1\n1\n\nC:\\>echo 2\n2\n\nC:\\>"
+    );
+}
+
+#[test]
+fn batch_lines_are_echoed_between_cr_lfs_as_command_com_does() {
+    // An empty line is echoed as a prompt alone, and the line after it
+    // comes without the CR LF before it. The end of a file whose last
+    // line ends with CR LF is one more empty line.
+    assert_eq!(
+        screen_after("crlf_t1", &["t1"]),
+        "C:\\>t1\n\nC:\\>echo a\na\n\nC:\\>echo hi\nhi\n\nC:\\>\nC:\\>rem x\ny\n\nC:\\>hicr\nhi\nC:\\>\nC:\\>"
+    );
+    // A label is never echoed; a file without CR LF after its last line
+    // ends with it, and the prompt comes after a CR LF.
+    assert_eq!(
+        screen_after("crlf_t2", &["t2"]),
+        "C:\\>t2\n\nC:\\>echo a\na\n\nC:\\>echo b\nb\n\nC:\\>"
+    );
+    assert_eq!(
+        screen_after("crlf_t3", &["t3", "t4", "t5"]),
+        "C:\\>t3\na\nC:\\>t4\na\n\nC:\\>t5\nhi\nC:\\>"
+    );
+    // A FOR that ends in a batch file prints CR LF.
+    assert_eq!(
+        screen_after("crlf_t6", &["t6"]),
+        "C:\\>t6\n\nC:\\>echo a\na\n\nC:\\>for %a in (1 2) do echo %a\n\nC:\\>echo 1\n1\n\n\
+         C:\\>echo 2\n2\n\n\nC:\\>echo b\nb\n\nC:\\>"
+    );
+    assert_eq!(
+        screen_after("crlf_t7", &["t7"]),
+        "C:\\>t7\n\nC:\\>echo a\na\n\nC:\\>\nC:\\>\nC:\\>echo b\nb\n\nC:\\>\nC:\\>"
+    );
+    // After CLS the next line echoed comes on the top line, even with
+    // lines run unechoed between.
+    assert_eq!(
+        screen_after("crlf_t8", &["t8"]),
+        "C:\\>echo a\na\n\nC:\\>\nC:\\>"
+    );
+    assert_eq!(
+        screen_after("crlf_t9", &["t9"]),
+        "C:\\>echo a\na\n\nC:\\>\nC:\\>"
+    );
 }
 
 #[test]
@@ -814,7 +949,11 @@ fn more_shows_a_screenful_at_a_time() {
     cpu.bus.keyboard_buffer.push_back(0x3920);
     run_batch_files(&mut cpu);
     let text = screen(&cpu);
-    assert!(text.contains("line 24\nline 25") && text.ends_with("line 30\nC:\\>"), "{}", text);
+    assert!(
+        text.contains("line 24\nline 25") && text.ends_with("line 30\n\nC:\\>"),
+        "{}",
+        text
+    );
     assert!(!text.contains("More"), "{}", text);
     assert!(pipe_files(&dir).is_empty());
 }
