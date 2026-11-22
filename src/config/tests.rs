@@ -961,6 +961,7 @@ fn changed_settings() -> Settings {
         win32_trace: Win32Trace::Off,
         dos_high: false,
         dos_version: DosVersion::new(7, 10),
+        ansi_sys: false,
         ide_hard_disks: false,
         boot_cdrom: false,
         floppy_controller: false,

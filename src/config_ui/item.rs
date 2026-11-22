@@ -175,6 +175,7 @@ pub(super) enum Item {
     Dpmi,
     /// The DOS version programs are told.
     DosVersion,
+    AnsiSys,
     /// A booted system's hard disks on the IDE channels.
     IdeHardDisks,
     /// A booted system's CD-ROM drive, with or without a CD.
@@ -405,6 +406,7 @@ impl Item {
             DosHigh => "DOS high",
             Dpmi => "DPMI host",
             DosVersion => "Reported DOS version",
+            AnsiSys => "ANSI.SYS",
             IdeHardDisks => "IDE hard disks (BOOT)",
             BootCdrom => "CD-ROM drive (BOOT)",
             FloppyController => "Floppy controller (BOOT)",
@@ -674,7 +676,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Vrr | FpsCap | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
+            Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | AnsiSys | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | ToadForceRenderer
             | ToadForceGamma
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooOverlay | PowerVrFilter => Applies::Now,
@@ -905,6 +907,7 @@ impl Item {
             DosHigh => on_off(s.dos_high),
             Dpmi => on_off(s.dpmi),
             DosVersion => s.dos_version.name(),
+            AnsiSys => on_off(s.ansi_sys),
             IdeHardDisks => on_off(s.ide_hard_disks),
             BootCdrom => if s.boot_cdrom { "always" } else { "with a CD" }.to_string(),
             FloppyController => on_off(s.floppy_controller),

@@ -1529,6 +1529,7 @@ const STILL: &[(&str, &str)] = &[
     ("K6", "the K6-2's MSRs, which only its WRMSR sets"),
     ("IDLE", "whether cycles=auto saw an idle loop: deterministic runs have a fixed speed"),
     ("RC", "RC waiting to come back after a command line it ran, which the run doesn't start"),
+    ("ANSI", "the console's ANSI.SYS state: the run's program writes no escape sequences"),
     ("KEYQ", "queued keys INT 09h hasn't taken yet, none left at the stops"),
 ];
 

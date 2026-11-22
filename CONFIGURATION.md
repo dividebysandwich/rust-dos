@@ -697,6 +697,15 @@ limit, so without a connection it goes on as it would with one:
   way. Below 7.10, INT 25h and 26h still read and write FAT32 drives, unlike
   MS-DOS 7.1, so DOS 5 programs that know only them keep reaching the
   volume. A change takes effect at once.
+* `ansi_sys` is whether DOS's console takes ANSI.SYS's escape sequences:
+  `true` (the default), as DOSBox's CON has them, or `false`, as a DOS
+  without `DEVICE=ANSI.SYS`. With it on, the output of `ECHO`, of `TYPE`
+  and of programs through DOS (INT 21h, INT 29h) takes colours
+  (`ESC[...m`), cursor moves (`ESC[r;cH`, `ESC[nA` to `ESC[nD`, `ESC[s`,
+  `ESC[u`) and clearing (`ESC[2J`, `ESC[K`), and INT 2Fh AX=1A00h reports
+  ANSI.SYS installed. Turn it off for a program that misbehaves when it
+  finds ANSI.SYS. A DOSBox-X configuration's `ansi.sys` in `[dos]`
+  imports as it. A change takes effect at once.
 * `keyboard_layout` is the layout the keyboard types in, as DOS's KEYB
   has them: `auto` (the default) takes the host keyboard's, or one of
   `us`, `uk`, `gr` (German, also `de`), `sg` and `sf` (Swiss German and

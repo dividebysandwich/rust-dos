@@ -225,6 +225,20 @@ pub fn teletype(cpu: &mut Cpu, text: &[u8]) {
     cpu.restore(&saved);
 }
 
+/// Call the video BIOS's function AX with BX, CX and DX (INT 10h), keeping
+/// the caller's registers.
+pub fn video_service(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
+    let saved = cpu.snapshot();
+    video_bios(cpu, (ax >> 8) as u8, ax as u8, |cpu| {
+        cpu.set_ax(ax);
+        cpu.set_bx(bx);
+        cpu.set_cx(cx);
+        cpu.set_dx(dx);
+        int10::handle(cpu);
+    });
+    cpu.restore(&saved);
+}
+
 /// Clear the screen as CLS does, through the video BIOS (INT 10h AH=06h
 /// over all of it, and the cursor home), keeping the caller's registers:
 /// for a Windows virtual machine, whose screen is its own.

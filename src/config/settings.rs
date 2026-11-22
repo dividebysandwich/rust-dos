@@ -110,6 +110,8 @@ pub struct Settings {
     pub dos_high: bool,
     /// The DOS version programs are told.
     pub dos_version: DosVersion,
+    /// DOS's console takes ANSI.SYS's escape sequences.
+    pub ansi_sys: bool,
     /// A booted system's hard disks are ATA disks on the IDE channels too.
     pub ide_hard_disks: bool,
     /// A booted system has a CD-ROM drive even with no CD mounted.
@@ -219,6 +221,7 @@ impl Default for Settings {
             win32_trace: Win32Trace::Collapsed,
             dos_high: true,
             dos_version: DosVersion::default(),
+            ansi_sys: true,
             ide_hard_disks: true,
             boot_cdrom: true,
             floppy_controller: true,
@@ -378,6 +381,7 @@ impl Settings {
             win32_trace: config.win32_trace.unwrap_or(default.win32_trace),
             dos_high: config.dos_high.unwrap_or(default.dos_high),
             dos_version: config.dos_version.unwrap_or(default.dos_version),
+            ansi_sys: config.ansi_sys.unwrap_or(default.ansi_sys),
             ide_hard_disks: config.ide_hard_disks.unwrap_or(default.ide_hard_disks),
             boot_cdrom: config.boot_cdrom.unwrap_or(default.boot_cdrom),
             floppy_controller: config.floppy_controller.unwrap_or(default.floppy_controller),
@@ -639,6 +643,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "win32_trace", Some(settings.win32_trace.name().to_string())),
         (Emulator, "dos_high", yes_no(settings.dos_high)),
         (Emulator, "dos_version", Some(settings.dos_version.name())),
+        (Emulator, "ansi_sys", yes_no(settings.ansi_sys)),
         (Emulator, "ide_hard_disks", yes_no(settings.ide_hard_disks)),
         (Emulator, "boot_cdrom", yes_no(settings.boot_cdrom)),
         (Emulator, "floppy_controller", yes_no(settings.floppy_controller)),

@@ -13,6 +13,7 @@ const K6_VERSION: u16 = 1;
 const IDLE_VERSION: u16 = 1;
 const RC_VERSION: u16 = 1;
 const CRLF_VERSION: u16 = 1;
+const ANSI_VERSION: u16 = 1;
 
 /// The machine's state, between batches.
 pub fn save(cpu: &Cpu) -> Vec<u8> {
@@ -42,6 +43,7 @@ fn write(cpu: &Cpu, w: &mut Writer) {
     w.section(b"IDLE", IDLE_VERSION, |w| cpu.os_idles.save(w));
     w.section(b"RC  ", RC_VERSION, |w| cpu.rc_resume.save(w));
     w.section(b"CRLF", CRLF_VERSION, |w| cpu.batch.crlf.save(w));
+    w.section(b"ANSI", ANSI_VERSION, |w| cpu.ansi.save(w));
 }
 
 /// Load a state `save` wrote into the machine, between batches. A state
@@ -140,6 +142,13 @@ fn load_sections(cpu: &mut Cpu, data: &[u8]) -> Result<Vec<String>> {
             .load(&mut r.section(b"CRLF", CRLF_VERSION)?)?;
     } else {
         cpu.batch.crlf = Default::default();
+    }
+    // A state from before the console took ANSI.SYS's sequences writes in
+    // light grey.
+    if r.next_is(b"ANSI") {
+        cpu.ansi.load(&mut r.section(b"ANSI", ANSI_VERSION)?)?;
+    } else {
+        cpu.ansi = Default::default();
     }
     // Less than a section's header left: a state cut short.
     if !r.is_empty() && r.take(10).is_err() {
@@ -274,15 +283,34 @@ mod tests {
         cpu.batch.crlf.command_ran = false;
         load(&mut cpu, &state).unwrap();
         assert!(cpu.batch.crlf.command_ran);
+        // A state from before the section (the last then) has none.
+        let section = |name: &str| {
+            let found = parts.iter().find(|(n, _)| n == name);
+            found.expect("the section").1.clone()
+        };
+        let crlf = section("CRLF");
+        assert_eq!(crlf.end, section("ANSI").start);
+        load(&mut cpu, &state[..crlf.start]).unwrap();
+        assert!(!cpu.batch.crlf.command_ran);
+    }
+
+    #[test]
+    fn a_state_keeps_the_console_s_colours() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.ansi.attr = 0x1E;
+        let (state, parts) = save_parts(&cpu);
+        cpu.ansi = Default::default();
+        load(&mut cpu, &state).unwrap();
+        assert_eq!(cpu.ansi.attr, 0x1E);
         // The last section; a state from before it has none.
-        let crlf = parts
+        let ansi = parts
             .iter()
-            .find(|(name, _)| name == "CRLF")
+            .find(|(name, _)| name == "ANSI")
             .expect("the section")
             .1
             .clone();
-        assert_eq!(crlf.end, state.len());
-        load(&mut cpu, &state[..crlf.start]).unwrap();
-        assert!(!cpu.batch.crlf.command_ran);
+        assert_eq!(ansi.end, state.len());
+        load(&mut cpu, &state[..ansi.start]).unwrap();
+        assert_eq!(cpu.ansi.attr, 0x07);
     }
 }

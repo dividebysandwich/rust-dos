@@ -565,7 +565,7 @@ impl ShellCommand for TypeCommand {
         match cpu.bus.disk.file_data(target) {
             Some(file) => match file.read() {
                 Ok(bytes) => {
-                    print_cp437(cpu, &type_text(&bytes), 0x07);
+                    crate::video::print_console(cpu, &type_text(&bytes));
                     if cpu.bus.cursor_x != 0 {
                         print_string(cpu, "\r\n");
                     }

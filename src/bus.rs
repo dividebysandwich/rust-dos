@@ -177,6 +177,9 @@ pub struct Bus {
     pub ide_hard_disks: bool,
     /// A booted system has a floppy disk controller (`floppy_controller`).
     pub floppy_controller: bool,
+    /// DOS's console takes ANSI.SYS's escape sequences (`ansi_sys`,
+    /// video/ansi.rs).
+    pub ansi_sys: bool,
     /// A booted system has a CD-ROM drive even with no CD mounted, for one
     /// to go in later (`boot_cdrom`).
     pub boot_cdrom: bool,

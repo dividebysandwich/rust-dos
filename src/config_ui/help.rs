@@ -355,6 +355,7 @@ impl Item {
             DosHigh => "dos-high",
             Dpmi => "dpmi",
             DosVersion => "dos-version",
+            AnsiSys => "ansi-sys",
             IdeHardDisks => "ide-hard-disks",
             BootCdrom => "boot-cdrom",
             FloppyController => "floppy-controller",

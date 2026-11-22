@@ -544,6 +544,50 @@ fn echo_prints_its_text_as_it_is() {
 }
 
 #[test]
+fn console_output_takes_ansi_sys_sequences() {
+    let base = scratch("ansi", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    // GOG's launcher menus: colours, then back to light grey.
+    assert_eq!(
+        run(&mut cpu, "ECHO \u{1B}[1;33m\u{1B}[42mA\u{1B}[0mB"),
+        "AB"
+    );
+    assert_eq!(&cpu.bus.vga.vram_text[..4], &[b'A', 0x2E, b'B', 0x07]);
+    // The cursor moved, and the rest of a line erased in the colour set.
+    run(
+        &mut cpu,
+        "ECHO xyz\u{1B}[3;5Hp\u{1B}[s\u{1B}[A\u{1B}[2Dq\u{1B}[u\u{1B}[44m\u{1B}[K\u{1B}[0m",
+    );
+    let cell = |cpu: &Cpu, row: usize, col: usize| {
+        let at = (row * 80 + col) * 2;
+        (cpu.bus.vga.vram_text[at], cpu.bus.vga.vram_text[at + 1])
+    };
+    assert_eq!(cell(&cpu, 0, 0), (b'x', 0x07));
+    assert_eq!(cell(&cpu, 2, 4), (b'p', 0x07));
+    assert_eq!(cell(&cpu, 1, 3), (b'q', 0x07));
+    assert_eq!(cell(&cpu, 2, 5), (b' ', 0x17));
+    assert_eq!(cell(&cpu, 2, 79), (b' ', 0x17));
+    // The screen cleared in the colour set, the cursor home.
+    run(&mut cpu, "ECHO \u{1B}[37;41m\u{1B}[2J\u{1B}[0m");
+    assert_eq!(cell(&cpu, 24, 79), (b' ', 0x47));
+    assert_eq!((cpu.bus.cursor_x, cpu.bus.cursor_y), (0, 1));
+    // As ANSI.SYS is there, INT 2Fh AX=1A00h says so.
+    cpu.set_ax(0x1A00);
+    rust_dos::interrupts::int2f::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 0x1AFF);
+    // With `ansi_sys` off, as on a DOS without ANSI.SYS: the sequence is
+    // text, and the installation check says it isn't there.
+    cpu.bus.ansi_sys = false;
+    run(&mut cpu, "CLS");
+    run(&mut cpu, "ECHO \u{1B}[1mA");
+    let start = [0x1B, 0x07, b'[', 0x07, b'1', 0x07, b'm', 0x07, b'A', 0x07];
+    assert_eq!(&cpu.bus.vga.vram_text[..10], &start);
+    cpu.set_ax(0x1A00);
+    rust_dos::interrupts::int2f::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 0x1A00);
+}
+
+#[test]
 fn verify_and_break_set_and_show_dos_s_flags() {
     // As MS-DOS 6.22's COMMAND.COM answers.
     let base = scratch("verify_break", &["c"]);

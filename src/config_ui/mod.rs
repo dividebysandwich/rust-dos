@@ -194,7 +194,7 @@ impl Page {
                 VeriteRisc, VeriteMhz, VeriteRom, VeriteIrq, ToadForceMemory, ToadForceRenderer,
                 ToadForceGamma,
                 Memsize, Ems, Umb, DosHigh, Dpmi,
-                DosVersion, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
+                DosVersion, AnsiSys, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, PauseInSettings, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory, GameFixes,
                 VersionCheck, AlmanacAuto,

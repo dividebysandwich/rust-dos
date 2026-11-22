@@ -47,6 +47,7 @@ impl Bus {
             dos_version: crate::config::DosVersion::default(),
             ide_hard_disks: true,
             floppy_controller: true,
+            ansi_sys: true,
             boot_cdrom: true,
             idle_hint: false,
             disk_notices: Vec::new(),
