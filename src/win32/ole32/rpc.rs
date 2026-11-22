@@ -1465,7 +1465,7 @@ pub fn proxy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 if let Some(next) = guest_call(cpu, id, 0) {
                     return next;
                 }
-                let send = user32::address_of("SendMessageA");
+                let send = user32::address_of(cpu, "SendMessageA");
                 return Next::call(send, &[t.var(P_HWND), WM_OLE_CALL, id, 0], 1);
             }
             1 => {
@@ -1922,7 +1922,7 @@ pub fn activate_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 cpu.bus.guest_write_bytes(s + S_LINE, &bytes);
                 cpu.bus
                     .guest_write_32(s + S_STARTUP, crate::win32::kernel32::STARTUPINFO_SIZE);
-                let create = crate::win32::kernel32::address_of("CreateProcessA");
+                let create = crate::win32::kernel32::address_of(cpu, "CreateProcessA");
                 let args = [
                     0,
                     s + S_LINE,
@@ -1945,11 +1945,11 @@ pub fn activate_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let deadline = cpu.bus.clock.now_micros() + SERVER_WAIT;
                 t.set(A_DEADLINE_LO, deadline as u32);
                 t.set(A_DEADLINE_HI, (deadline >> 32) as u32);
-                let close = crate::win32::kernel32::address_of("CloseHandle");
+                let close = crate::win32::kernel32::address_of(cpu, "CloseHandle");
                 return Next::call(close, &[read32(cpu, s + S_PROCESS)], 2);
             }
             2 => {
-                let close = crate::win32::kernel32::address_of("CloseHandle");
+                let close = crate::win32::kernel32::address_of(cpu, "CloseHandle");
                 return Next::call(close, &[read32(cpu, s + S_PROCESS + 4)], 3);
             }
             // Wait for the server's class object.
@@ -1973,7 +1973,7 @@ pub fn activate_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     ));
                     return Next::Done(CO_E_SERVER_EXEC_FAILURE);
                 }
-                let sleep = crate::win32::kernel32::address_of("Sleep");
+                let sleep = crate::win32::kernel32::address_of(cpu, "Sleep");
                 return Next::call(sleep, &[10], 3);
             }
             10 => {

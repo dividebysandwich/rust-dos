@@ -301,16 +301,16 @@ fn read_bytes(cpu: &mut Cpu, at: u32, n: usize) -> Vec<u8> {
     b
 }
 
-fn send_op(hwnd: u32, msg: u32, wp: u32, lp: Arg) -> Op {
+fn send_op(cpu: &Cpu, hwnd: u32, msg: u32, wp: u32, lp: Arg) -> Op {
     Op::Call {
-        target: user32::address_of("SendMessageA"),
+        target: user32::address_of(cpu, "SendMessageA"),
         args: vec![Arg::V(hwnd), Arg::V(msg), Arg::V(wp), lp],
     }
 }
 
-fn call_op(name: &str, args: &[u32]) -> Op {
+fn call_op(cpu: &Cpu, name: &str, args: &[u32]) -> Op {
     Op::Call {
-        target: user32::address_of(name),
+        target: user32::address_of(cpu, name),
         args: args.iter().map(|&a| Arg::V(a)).collect(),
     }
 }
@@ -323,7 +323,7 @@ fn notify_ops(cpu: &mut Cpu, hwnd: u32, to: u32, code: u32, more: &[u32]) -> Vec
     words.extend_from_slice(more);
     vec![
         Op::Write { at: S_NM, words },
-        send_op(to, WM_NOTIFY, id, Arg::S(S_NM)),
+        send_op(cpu, to, WM_NOTIFY, id, Arg::S(S_NM)),
     ]
 }
 
@@ -496,7 +496,7 @@ fn max_range(t: &Tab, client: Rect) -> i32 {
 
 /// TAB_SetupScrolling: show, place or hide the up-down control. One
 /// that doesn't exist yet is made, and T_UPDOWN finishes the work.
-fn setup_scrolling(t: &Tab, hwnd: u32, client: Rect) -> Vec<Op> {
+fn setup_scrolling(cpu: &Cpu, t: &Tab, hwnd: u32, client: Rect) -> Vec<Op> {
     let mut ops = Vec::new();
     if t.scrolling {
         let r = updown_rect(t, client);
@@ -506,7 +506,7 @@ fn setup_scrolling(t: &Tab, hwnd: u32, client: Rect) -> Vec<Op> {
                 words: script::words_of(b"msctls_updown32\0"),
             });
             ops.push(Op::Call {
-                target: user32::address_of("CreateWindowExA"),
+                target: user32::address_of(cpu, "CreateWindowExA"),
                 args: [
                     0,
                     0,
@@ -533,6 +533,7 @@ fn setup_scrolling(t: &Tab, hwnd: u32, client: Rect) -> Vec<Op> {
             return ops;
         }
         ops.push(call_op(
+            cpu,
             "SetWindowPos",
             &[
                 t.updown,
@@ -545,11 +546,17 @@ fn setup_scrolling(t: &Tab, hwnd: u32, client: Rect) -> Vec<Op> {
             ],
         ));
     } else if t.updown != 0 {
-        ops.push(call_op("ShowWindow", &[t.updown, SW_HIDE]));
+        ops.push(call_op(cpu, "ShowWindow", &[t.updown, SW_HIDE]));
     }
     if t.updown != 0 {
         let range = max_range(t, client);
-        ops.push(send_op(t.updown, UDM_SETRANGE32, 0, Arg::V(range as u32)));
+        ops.push(send_op(
+            cpu,
+            t.updown,
+            UDM_SETRANGE32,
+            0,
+            Arg::V(range as u32),
+        ));
     }
     ops
 }
@@ -606,6 +613,7 @@ fn ensure_selection_visible(cpu: &mut Cpu, hwnd: u32, t: &mut Tab) -> Vec<Op> {
         recalc_hot_track(cpu, hwnd, t, None);
     }
     vec![send_op(
+        cpu,
         t.updown,
         UDM_SETPOS,
         0,
@@ -724,7 +732,7 @@ fn place_items(cpu: &mut Cpu, hwnd: u32, t: &mut Tab) -> Vec<Op> {
         t.scrolling = false;
         t.leftmost = 0;
     }
-    let mut ops = setup_scrolling(t, hwnd, client);
+    let mut ops = setup_scrolling(cpu, t, hwnd, client);
     t.rows = rows;
     if t.style & TCS_RAGGEDRIGHT == 0 && wraps && !t.items.is_empty() && t.rows > 1 {
         arrange_rows(t, client);
@@ -1066,7 +1074,7 @@ fn draw_item_interior(cpu: &mut Cpu, hwnd: u32, t: &Tab, hdc: u32, i: i32, ops: 
                 u32::from_le_bytes(data),
             ],
         });
-        ops.push(send_op(t.notify, WM_DRAWITEM, id, Arg::S(S_DIS)));
+        ops.push(send_op(cpu, t.notify, WM_DRAWITEM, id, Arg::S(S_DIS)));
     } else {
         let mut text_r = Rect::default();
         if let Some(text) = &item.text {
@@ -1533,7 +1541,13 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             if t.updown != 0 {
                 let client = super::client(cpu, c.hwnd);
                 let range = max_range(&t, client);
-                ops.push(send_op(t.updown, UDM_SETRANGE32, 0, Arg::V(range as u32)));
+                ops.push(send_op(
+                    cpu,
+                    t.updown,
+                    UDM_SETRANGE32,
+                    0,
+                    Arg::V(range as u32),
+                ));
                 ops.extend(ensure_selection_visible(cpu, c.hwnd, &mut t));
             }
             put(cpu, c.hwnd, t);
@@ -1563,7 +1577,7 @@ fn relay_ops(cpu: &mut Cpu, hwnd: u32, tip: u32, msg: u32, wp: u32, lp: u32) -> 
             at: S_MSG,
             words: vec![hwnd, msg, wp, lp, 0, x as u32, y as u32],
         },
-        send_op(tip, TTM_RELAYEVENT, 0, Arg::S(S_MSG)),
+        send_op(cpu, tip, TTM_RELAYEVENT, 0, Arg::S(S_MSG)),
     ]
 }
 
@@ -1837,7 +1851,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 let ops = set_item_bounds(cpu, hwnd, &mut t);
                 s.ops.extend(ops);
                 let flags = RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW;
-                s.user("RedrawWindow", &[hwnd, 0, 0, flags]);
+                s.user(cpu, "RedrawWindow", &[hwnd, 0, 0, flags]);
             }
             put(cpu, hwnd, t);
             old
@@ -1948,7 +1962,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 user32::message::kill_timer(cpu, &[hwnd, HOTTRACK_TIMER]);
             }
             if t.tooltip != 0 && user32::user(cpu).is_window(t.tooltip) {
-                s.user("DestroyWindow", &[t.tooltip]);
+                s.user(cpu, "DestroyWindow", &[t.tooltip]);
             }
             0
         }
@@ -1958,7 +1972,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 s.ops.extend(relay_ops(cpu, hwnd, t.tooltip, msg, wp, lp));
             }
             if t.style & TCS_FOCUSNEVER == 0 {
-                s.user("SetFocus", &[hwnd]);
+                s.user(cpu, "SetFocus", &[hwnd]);
             }
             let (x, y) = user32::point_of(lp);
             let client = super::client(cpu, hwnd);
@@ -1994,7 +2008,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             0
         }
         WM_NOTIFY => {
-            s.send(t.notify, WM_NOTIFY, Arg::V(wp), Arg::V(lp))
+            s.send(cpu, t.notify, WM_NOTIFY, Arg::V(wp), Arg::V(lp))
                 .ret_last();
             return script::run(cpu, TAB, s);
         }
@@ -2032,8 +2046,8 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 s.ret(0);
                 return script::run(cpu, TAB, s);
             }
-            let begin = user32::address_of("BeginPaint");
-            let end = user32::address_of("EndPaint");
+            let begin = user32::address_of(cpu, "BeginPaint");
+            let end = user32::address_of(cpu, "EndPaint");
             s.call(begin, &[Arg::V(hwnd), Arg::S(S_PS)])
                 .then(DRAW, &[])
                 .call(end, &[Arg::V(hwnd), Arg::S(S_PS)])
@@ -2063,7 +2077,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 recalc_hot_track(cpu, hwnd, &mut t, None);
                 invalidate_tabs(cpu, hwnd, &t);
                 let pos = Arg::V(t.leftmost as u16 as u32);
-                s.send(t.updown, UDM_SETPOS, Arg::V(0), pos);
+                s.send(cpu, t.updown, UDM_SETPOS, Arg::V(0), pos);
                 put(cpu, hwnd, t);
             }
             0
@@ -2201,10 +2215,10 @@ fn create(cpu: &mut Cpu, hwnd: u32, cs: u32) -> Option<u32> {
             .enumerate()
             .map(|(k, &v)| if k == 1 { Arg::S(S_CLASS) } else { Arg::V(v) })
             .collect();
-        s.call(user32::address_of("CreateWindowExA"), &args)
+        s.call(user32::address_of(cpu, "CreateWindowExA"), &args)
             .then(T_TOOLTIP, &[]);
     }
-    s.send(parent, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY));
+    s.send(cpu, parent, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY));
     s.ret(0);
     script::run(cpu, TAB, s)
 }

@@ -103,7 +103,7 @@ pub const ERR_INVALID_BLOCK: u8 = 0x09;
 /// DOS error code: insufficient memory.
 pub const ERR_INSUFFICIENT: u8 = 0x08;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mcb {
     pub signature: u8,
     pub owner: u16,
@@ -686,6 +686,58 @@ pub fn set_block(
     let mcb_seg = block_seg.wrapping_sub(1);
     let m = read_mcb(bus, mcb_seg);
     write_mcb(bus, mcb_seg, &Mcb { owner, ..m });
+    Ok(())
+}
+
+/// AH=49h on a block outside the chain DOS walks, the environment of a
+/// program started from the shell (`dos_data::Layout`): its MCB is left
+/// free, and it is not merged with the block after it, which is in the
+/// chain.
+pub fn free_detached(bus: &mut Bus, block_seg: u16) -> Result<(), u8> {
+    let mcb_seg = block_seg.wrapping_sub(1);
+    let m = read_mcb(bus, mcb_seg);
+    if !m.is_valid() {
+        return Err(ERR_INVALID_BLOCK);
+    }
+    write_mcb(bus, mcb_seg, &Mcb { owner: FREE_OWNER, ..m });
+    Ok(())
+}
+
+/// AH=4Ah from the process `owner` on a block outside the chain, as
+/// `free_detached` has it. The block after it is in the chain, so the
+/// block can't grow into it, and a tail it gives back stays a free block
+/// of its own up to it.
+pub fn set_detached_block(
+    bus: &mut Bus,
+    owner: u16,
+    block_seg: u16,
+    new_paras: u16,
+) -> Result<(), ResizeError> {
+    let mcb_seg = block_seg.wrapping_sub(1);
+    let m = read_mcb(bus, mcb_seg);
+    if !m.is_valid() {
+        return Err(ResizeError::McbDestroyed);
+    }
+    if new_paras > m.size {
+        return Err(ResizeError::Insufficient(m.size));
+    }
+    if new_paras < m.size {
+        let tail = Mcb {
+            signature: MCB_M,
+            owner: FREE_OWNER,
+            size: m.size - new_paras - 1,
+        };
+        write_mcb(bus, mcb_seg + 1 + new_paras, &tail);
+    }
+    write_mcb(
+        bus,
+        mcb_seg,
+        &Mcb {
+            owner,
+            size: new_paras,
+            ..m
+        },
+    );
     Ok(())
 }
 

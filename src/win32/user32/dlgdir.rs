@@ -159,7 +159,7 @@ fn list(cpu: &mut Cpu, args: &[u32], combo: bool) -> Option<u32> {
         } else {
             (MASK_AT, ANY_AT, 1)
         };
-        let target = address_of(if post { "PostMessageA" } else { "SendMessageA" });
+        let target = address_of(cpu, if post { "PostMessageA" } else { "SendMessageA" });
         calls.push([target, list, reset, 0, 0, 0]);
         if attrib & DDL_DIRECTORY != 0 {
             if attrib & DDL_EXCLUSIVE == 0 {
@@ -176,7 +176,7 @@ fn list(cpu: &mut Cpu, args: &[u32], combo: bool) -> Option<u32> {
     let path = item(cpu, dlg, id_static);
     let mut folder = Vec::new();
     if path != 0 {
-        let at = address_of("SendMessageA");
+        let at = address_of(cpu, "SendMessageA");
         calls.push([at, path, WM_SETTEXT, 0, PATH_AT, 1]);
         folder = crate::dosstr::to_bytes(&files::current_directory(cpu))
             .iter()
@@ -288,7 +288,7 @@ fn select_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let combo = t.var(S_COMBO) != 0;
     let list = t.var(S_LIST);
     let send = |msg: u32, wp: u32, lp: u32, step: u16| {
-        Next::call(address_of("SendMessageA"), &[list, msg, wp, lp], step)
+        Next::call(address_of(cpu, "SendMessageA"), &[list, msg, wp, lp], step)
     };
     match t.step {
         0 => send(if combo { CB_GETCURSEL } else { LB_GETCURSEL }, 0, 0, 1),

@@ -446,6 +446,40 @@ fn a_wait_for_the_display_after_the_retrace_is_skipped() {
 }
 
 #[test]
+fn a_skipped_wait_across_the_retrace_misses_no_retrace() {
+    // Raster code syncing to each line: wait for the display, then for the
+    // blanking. In the vertical blanking the wait for the display runs
+    // over the whole retrace pulse, reading the register all through it.
+    // Its mask leaves bit 3 out, but a skip still stops where the retrace
+    // begins (`CrtTiming::next_status_change`), so the passes after it
+    // read it as the interpreter's do, and no retrace counts as missed.
+    let code = assemble(|a| {
+        let mut shown = a.create_label();
+        let mut blank = a.create_label();
+        a.mov(dx, 0x3DA)?;
+        a.set_label(&mut shown)?;
+        a.in_(al, dx)?;
+        a.test(al, 1)?;
+        a.jnz(shown)?;
+        a.set_label(&mut blank)?;
+        a.in_(al, dx)?;
+        a.test(al, 1)?;
+        a.jz(blank)?;
+        a.jmp(shown)
+    });
+    let test = "line_waits";
+    let mut a = machine(test, "a", &code, CoreMode::Normal, false);
+    let mut b = machine(test, "b", &code, CoreMode::Dynamic, true);
+    if let Err(e) = lockstep(&mut a, &mut b, BATCHES, 100_000, |_, _| {}) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    let stats = b.bus.observe.stats;
+    assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+    assert_eq!(a.bus.activity.missed_retraces, 0);
+    assert_eq!(b.bus.activity.missed_retraces, 0, "{:?}", stats);
+}
+
+#[test]
 fn an_interrupt_in_a_retrace_wait_sees_the_status_it_would_have() {
     // A timer handler keeps the AL of the code it interrupted, the status
     // the wait read last, in a ring of bytes, and goes on to the BIOS's.
@@ -1006,6 +1040,133 @@ fn an_mfc_idle_loop_of_window_queries_is_skipped() {
     println!("{}: {:?}", test, stats);
     assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
     assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+#[test]
+fn a_loop_that_polls_a_key_and_the_cursor_is_skipped() {
+    // The War of the Worlds' film player waits for each frame's time in
+    // a loop of timeGetTime and GetAsyncKeyState(VK_ESCAPE), and Shadow
+    // of the Horned Rat's screens call GetCursorPos in theirs (#1284):
+    // here all three, for 300 ms. With no key pressed and the mouse
+    // still, the two reads of the devices change nothing but the POINT
+    // written, so the passes are skipped as a PeekMessage loop's are.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607).emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    let top = code.here();
+    code.push(0x1B) // VK_ESCAPE
+        .call("USER", 249) // GetAsyncKeyState
+        .emit(&[0x1E]) // push ds
+        .push(0x10) // the POINT at DS:10h
+        .call("USER", 17) // GetCursorPos
+        .call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_async_key";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+/// A loop of GetAsyncKeyState(VK_ESCAPE) and GetCursorPos that ends
+/// when the key is down or was pressed (exit code 1), when the cursor
+/// left where it was at the start (2), or after 3 s (3). `input` acts on
+/// the machine before batch 100, on both the skipping machine and the
+/// one that runs every pass. Returns the exit code and the instructions
+/// skipped before the input.
+fn polled_input_ends_the_loop(test: &str, input: fn(&mut Cpu)) -> (u8, u64) {
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607)
+        .emit(&[0x8B, 0xF0]) // timeGetTime; mov si,ax
+        .emit(&[0x1E]) // push ds
+        .push(0x10) // the POINT at DS:10h
+        .call("USER", 17) // GetCursorPos
+        .emit(&[0x8B, 0x3E, 0x10, 0x00]); // mov di,[10h]
+    let top = code.here();
+    code.push(0x1B) // VK_ESCAPE
+        .call("USER", 249) // GetAsyncKeyState
+        .emit(&[0xA9, 0x01, 0x80]) // test ax,8001h
+        .emit(&[0x75, 0]); // jnz key
+    let to_key = code.here() - 1;
+    code.emit(&[0x1E]) // push ds
+        .push(0x10)
+        .call("USER", 17) // GetCursorPos
+        .emit(&[0x39, 0x3E, 0x10, 0x00]) // cmp [10h],di
+        .emit(&[0x75, 0]); // jne moved
+    let to_moved = code.here() - 1;
+    code.call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0xB8, 0x0B]); // cmp ax,3000
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x03])
+        .exit_al();
+    for (at, exit) in [(to_key, 1), (to_moved, 2)] {
+        code.bytes[at as usize] = (code.here() - at - 1) as u8;
+        code.emit(&[0xB0, exit]).exit_al();
+    }
+    let program = program(&code, CODE);
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    // USER takes the keyboard's and the mouse's input only with the
+    // desktop on the screen.
+    for cpu in [&mut a, &mut b] {
+        rust_dos::win32::user32::paint::ensure_desktop(cpu);
+    }
+    let mut before = 0;
+    let each = |n: usize, cpu: &mut Cpu| {
+        if n == 100 {
+            // `b` comes second: what it skipped so far.
+            before = cpu.bus.observe.stats.skipped;
+            input(cpu);
+        }
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    println!("{}: {:?}", test, b.bus.observe.stats);
+    assert_eq!(a.errorlevel, b.errorlevel, "{test}: the same end");
+    (b.errorlevel, before)
+}
+
+#[test]
+fn a_key_pressed_during_a_skipped_key_poll_is_seen_in_the_same_pass() {
+    // The passes before the key are skipped; the key ends the loop at
+    // the same instruction on both machines (`lockstep`).
+    let (code, skipped) = polled_input_ends_the_loop("win16_async_key_press", |cpu| {
+        rust_dos::keyboard::key_event(&mut cpu.bus, 0x01, false, true, None)
+    });
+    assert_eq!(code, 1, "the key ended the loop");
+    assert!(skipped > 100_000, "skipped before the key: {}", skipped);
+}
+
+#[test]
+fn a_mouse_moved_during_a_skipped_cursor_poll_is_seen_in_the_same_pass() {
+    let (code, skipped) = polled_input_ends_the_loop("win16_cursor_move", |cpu| {
+        let (x, y) = (cpu.bus.mouse.x, cpu.bus.mouse.y);
+        cpu.bus.mouse.set_position(x + 7, y + 5);
+    });
+    assert_eq!(code, 2, "the move ended the loop");
+    assert!(skipped > 100_000, "skipped before the move: {}", skipped);
 }
 
 #[test]

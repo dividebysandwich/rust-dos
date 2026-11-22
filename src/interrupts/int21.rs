@@ -52,6 +52,16 @@ fn block_owner(cpu: &Cpu) -> u16 {
     if cpu.current_psp != 0 { cpu.current_psp } else { crate::mcb::DOS_OWNER }
 }
 
+/// Whether `segment` is the environment of the running program in DOS's
+/// environment area, where a program started from the shell has it
+/// (`dos_data::Layout`). Its MCB names the program but is not in the
+/// chain, and the block after it is the first MCB.
+fn is_shell_environment(cpu: &mut Cpu, segment: u16) -> bool {
+    let environment = cpu.get_physical_addr(cpu.current_psp, 0x2C);
+    segment == crate::dos_data::layout(&cpu.bus).environment
+        && cpu.bus.read_16(environment) == segment
+}
+
 /// The open file (its System File Table entry) handle `handle` of the
 /// running process refers to.
 fn file_of(cpu: &mut Cpu, handle: u16) -> Option<u16> {
@@ -1868,17 +1878,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         //   ES = segment returned by AH=48h
         0x49 => {
             let segment_to_free = cpu.es();
-            // A program started from the shell has its environment in
-            // DOS's environment area, which has no MCB. On DOS it is a
-            // block of the program's, which it may free, as a TSR does
-            // before it stays resident: the free succeeds, and the area
-            // stays for the next program.
-            let psp = cpu.get_physical_addr(cpu.current_psp, 0x2C);
-            let shell_environment = segment_to_free
-                == crate::dos_data::layout(&cpu.bus).environment
-                && cpu.bus.read_16(psp) == segment_to_free;
-            let freed = if shell_environment {
-                Ok(())
+            // On DOS the environment is a block of the program's, which it
+            // may free, as a TSR does before it stays resident: the free
+            // succeeds, its MCB is left free, and the area stays for the
+            // next program.
+            let freed = if is_shell_environment(cpu, segment_to_free) {
+                crate::mcb::free_detached(&mut cpu.bus, segment_to_free)
             } else {
                 crate::mcb::free(&mut cpu.bus, segment_to_free)
             };
@@ -1906,7 +1911,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let segment = cpu.es();
             let requested_size = cpu.get_reg16(Register::BX);
             let owner = block_owner(cpu);
-            match crate::mcb::set_block(&mut cpu.bus, owner, segment, requested_size) {
+            let resized = if is_shell_environment(cpu, segment) {
+                crate::mcb::set_detached_block(&mut cpu.bus, owner, segment, requested_size)
+            } else {
+                crate::mcb::set_block(&mut cpu.bus, owner, segment, requested_size)
+            };
+            match resized {
                 Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
                 Err(err) => {
                     if let crate::mcb::ResizeError::Insufficient(max) = err {
@@ -2147,6 +2157,21 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 0Dh: Disk reset (flush buffers). Nothing is buffered.
         0x0D => {}
+
+        // AH = 2Eh: Set the verify flag from bit 0 of AL (00h off, 01h on),
+        // as DOS does. It is kept for AH=54h; the drives here write
+        // without reading back either way.
+        0x2E => {
+            let flag = dos_data::address(dos_data::VERIFY_FLAG) as u32;
+            cpu.bus.guest_write_8(flag, cpu.get_al() & 1);
+        }
+
+        // AH = 54h: Get the verify flag in AL.
+        0x54 => {
+            let flag = dos_data::address(dos_data::VERIFY_FLAG) as u32;
+            let on = cpu.bus.guest_read_8(flag);
+            cpu.set_reg8(Register::AL, on);
+        }
 
         // AH = 2Ah: Get date. CX=year, DH=month, DL=day, AL=day of week.
         0x2A => {

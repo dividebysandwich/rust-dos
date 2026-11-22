@@ -294,7 +294,7 @@ pub fn register_system(cpu: &mut Cpu) {
             atom,
             name: name.to_string(),
             style: style | CS_GLOBALCLASS,
-            proc: address_of(proc),
+            proc: address_of(cpu, proc),
             wnd_extra: extra,
             instance: super::DLL.base,
             cursor: super::resource::system_cursor(cpu, cursor),

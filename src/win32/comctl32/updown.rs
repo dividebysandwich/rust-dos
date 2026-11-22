@@ -386,10 +386,10 @@ fn get_buddy_int(cpu: &mut Cpu, s: &mut Script, hwnd: u32, u: &mut UpDown) {
         return;
     }
     if u.buddy_type == BUDDY_LISTBOX {
-        s.send(u.buddy, LB_GETCARETINDEX, Arg::V(0), Arg::V(0))
+        s.send(cpu, u.buddy, LB_GETCARETINDEX, Arg::V(0), Arg::V(0))
             .then(T_GOT_INDEX, &[hwnd]);
     } else {
-        let f = user32::address_of("GetWindowTextA");
+        let f = user32::address_of(cpu, "GetWindowTextA");
         s.call(f, &[Arg::V(u.buddy), Arg::S(S_TEXT), Arg::V(TEXT_MAX)])
             .then(T_GOT_TEXT, &[hwnd]);
     }
@@ -403,7 +403,7 @@ fn set_buddy_int_ops(cpu: &mut Cpu, u: &UpDown) -> Vec<Op> {
     }
     if u.buddy_type == BUDDY_LISTBOX {
         return vec![Op::Call {
-            target: user32::address_of("SendMessageA"),
+            target: user32::address_of(cpu, "SendMessageA"),
             args: vec![
                 Arg::V(u.buddy),
                 Arg::V(LB_SETCURSEL),
@@ -415,7 +415,7 @@ fn set_buddy_int_ops(cpu: &mut Cpu, u: &UpDown) -> Vec<Op> {
     let text = format(u);
     let mut bytes = text.clone();
     bytes.push(0);
-    let f = user32::address_of("GetWindowTextA");
+    let f = user32::address_of(cpu, "GetWindowTextA");
     vec![
         Op::Write {
             at: S_TEXT,
@@ -451,7 +451,7 @@ fn action_ops(cpu: &mut Cpu, hwnd: u32, u: &UpDown, delta: i32, action: u32) -> 
         delta = 0;
     }
     let id = super::id_of(cpu, hwnd);
-    let send = user32::address_of("SendMessageA");
+    let send = user32::address_of(cpu, "SendMessageA");
     vec![
         Op::Write {
             at: S_NM,
@@ -493,7 +493,7 @@ fn after_delta(cpu: &mut Cpu, hwnd: u32, c: &Ctx) -> Vec<Op> {
     };
     let wp = SB_THUMBPOSITION | (u.cur as u32) << 16;
     ops.push(Op::Call {
-        target: user32::address_of("SendMessageA"),
+        target: user32::address_of(cpu, "SendMessageA"),
         args: vec![Arg::V(u.notify), Arg::V(msg), Arg::V(wp), Arg::V(hwnd)],
     });
     ops
@@ -557,7 +557,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                 return Vec::new();
             }
             vec![Op::Call {
-                target: user32::address_of("SetWindowTextA"),
+                target: user32::address_of(cpu, "SetWindowTextA"),
                 args: vec![Arg::V(c.word(0)), Arg::S(S_NEW)],
             }]
         }
@@ -575,7 +575,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             if hwnd == 0 {
                 return vec![Op::Return(Arg::V(0))];
             }
-            let send = user32::address_of("SendMessageA");
+            let send = user32::address_of(cpu, "SendMessageA");
             let msg = |m: u32, wp: u32, lp: u32| Op::Call {
                 target: send,
                 args: vec![Arg::V(hwnd), Arg::V(m), Arg::V(wp), Arg::V(lp)],
@@ -642,7 +642,7 @@ fn cancel_mode(cpu: &mut Cpu, hwnd: u32, s: &mut Script) -> bool {
     }
     if user32::input::get_capture(cpu, &[]) == Some(hwnd) {
         super::notify(cpu, s, hwnd, u.notify, NM_RELEASEDCAPTURE, &[]);
-        s.user("ReleaseCapture", &[]);
+        s.user(cpu, "ReleaseCapture", &[]);
     }
     u.flags &= !FLAG_PRESSED;
     put(cpu, hwnd, u);
@@ -665,6 +665,7 @@ fn set_buddy(cpu: &mut Cpu, hwnd: u32, u: &mut UpDown, bud: u32, s: &mut Script)
             return old;
         };
         s.user(
+            cpu,
             "SetWindowPos",
             &[
                 hwnd,
@@ -704,6 +705,7 @@ fn set_buddy(cpu: &mut Cpu, hwnd: u32, u: &mut UpDown, bud: u32, s: &mut Script)
         return old;
     }
     s.user(
+        cpu,
         "SetWindowPos",
         &[
             bud,
@@ -724,6 +726,7 @@ fn set_buddy(cpu: &mut Cpu, hwnd: u32, u: &mut UpDown, bud: u32, s: &mut Script)
         }
     }
     s.user(
+        cpu,
         "SetWindowPos",
         &[
             hwnd,
@@ -792,7 +795,7 @@ pub fn buddy_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if swallow {
         s.ret(0);
     } else {
-        let f = user32::address_of("CallWindowProcA");
+        let f = user32::address_of(cpu, "CallWindowProcA");
         s.call(
             f,
             &[
@@ -867,9 +870,9 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                         WM_VSCROLL
                     };
                     let wp = SB_ENDSCROLL | (u.cur as u32) << 16;
-                    s.send(u.notify, m, Arg::V(wp), Arg::V(hwnd));
+                    s.send(cpu, u.notify, m, Arg::V(wp), Arg::V(hwnd));
                     if u.buddy_type == BUDDY_EDIT {
-                        s.send(u.buddy, EM_SETSEL, Arg::V(0), Arg::V(0xFFFF_0000));
+                        s.send(cpu, u.buddy, EM_SETSEL, Arg::V(0), Arg::V(0xFFFF_0000));
                     }
                 }
                 cancel_mode(cpu, hwnd, &mut s);
@@ -908,7 +911,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 draw(cpu, hwnd, wp);
                 return Some(0);
             }
-            return script::run(cpu, UPDOWN, paint_script(hwnd));
+            return script::run(cpu, UPDOWN, paint_script(cpu, hwnd));
         }
         UDM_GETACCEL => {
             if wp == 0 && lp == 0 {
@@ -958,8 +961,8 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             // Windows sets the style again on the way, telling the
             // window twice.
             let style = super::style(cpu, hwnd);
-            s.user("SetWindowLongA", &[hwnd, GWL_STYLE, style]);
-            s.user("SetWindowLongA", &[hwnd, GWL_STYLE, style]);
+            s.user(cpu, "SetWindowLongA", &[hwnd, GWL_STYLE, style]);
+            s.user(cpu, "SetWindowLongA", &[hwnd, GWL_STYLE, style]);
             let old = set_buddy(cpu, hwnd, &mut u, wp, &mut s);
             put(cpu, hwnd, u);
             old
@@ -1080,7 +1083,7 @@ fn mouse(cpu: &mut Cpu, hwnd: u32, mut u: UpDown, msg: u32, x: i32, y: i32, s: &
     let arrow = arrow_at(cpu, hwnd, &u, x, y);
     if msg == WM_LBUTTONDOWN {
         if u.buddy_type == BUDDY_EDIT {
-            s.user("SetFocus", &[u.buddy]);
+            s.user(cpu, "SetFocus", &[u.buddy]);
         }
         u.flags &= !(FLAG_MOUSEIN | FLAG_ARROW);
         if arrow != 0 {
@@ -1094,7 +1097,7 @@ fn mouse(cpu: &mut Cpu, hwnd: u32, mut u: UpDown, msg: u32, x: i32, y: i32, s: &
             invalidate(cpu, hwnd, false);
             let inc = first_inc(&u);
             s.then(T_ACTION, &[hwnd, inc as u32, u.flags & FLAG_ARROW]);
-            s.user("SetCapture", &[hwnd]);
+            s.user(cpu, "SetCapture", &[hwnd]);
             user32::message::set_timer(cpu, &[hwnd, TIMER_AUTOREPEAT, INITIAL_DELAY, 0]);
         }
     } else {
@@ -1139,10 +1142,11 @@ fn create(cpu: &mut Cpu, hwnd: u32, cs: u32) -> Option<u32> {
     }
     let mut s = Script::new(hwnd);
     s.alloc(S_SIZE);
-    s.send(parent, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY));
+    s.send(cpu, parent, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY));
     if style & UDS_HORZ == 0 {
         let flags = SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOMOVE;
         s.user(
+            cpu,
             "SetWindowPos",
             &[hwnd, 0, 0, 0, DEFAULT_WIDTH as u32, cy, flags],
         );
@@ -1161,7 +1165,7 @@ fn create(cpu: &mut Cpu, hwnd: u32, cs: u32) -> Option<u32> {
 pub fn create_up_down_control(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut s = Script::new(0);
     let name = s.string(b"msctls_updown32");
-    let f = user32::address_of("CreateWindowExA");
+    let f = user32::address_of(cpu, "CreateWindowExA");
     let v = |i: usize| Arg::V(args[i]);
     s.call(
         f,

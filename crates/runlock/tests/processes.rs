@@ -224,6 +224,26 @@ fn exclusive_waits_and_keeps_later_shared_out() {
 }
 
 #[test]
+fn a_waiting_shared_run_gets_in_between_two_measurements() {
+    let s = Scratch::new("between");
+    let mut m1 = spawn_take(&s, "exclusive", "m1");
+    eventually("m1 holds", || held(&s, "m1"));
+    let mut a = spawn_take(&s, "shared", "a");
+    eventually("a waits", || waits(&s, "a"));
+    // A second measurement asks after the shared run, as a timing script
+    // does that asks again as soon as its last session ends.
+    let mut m2 = spawn_take(&s, "exclusive", "m2");
+    eventually("m2 waits", || waits(&s, "m2"));
+    stays_out(&s, "m2");
+    release(&s, "m1", &mut m1);
+    eventually("a holds", || held(&s, "a"));
+    stays_out(&s, "m2");
+    release(&s, "a", &mut a);
+    eventually("m2 holds", || held(&s, "m2"));
+    release(&s, "m2", &mut m2);
+}
+
+#[test]
 fn a_killed_holder_lets_go() {
     let s = Scratch::new("killed");
     let mut a = spawn_take(&s, "exclusive", "a");

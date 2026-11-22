@@ -730,7 +730,7 @@ pub fn class_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return Next::Done(REGDB_E_CLASSNOTREG);
             };
             put_text(cpu, s + S_TEXT, &dll);
-            let load = crate::win32::kernel32::address_of("LoadLibraryA");
+            let load = crate::win32::kernel32::address_of(cpu, "LoadLibraryA");
             Next::call(load, &[s + S_TEXT], 1)
         }
         1 => {
@@ -738,7 +738,7 @@ pub fn class_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return Next::Done(CO_E_DLLNOTFOUND);
             }
             put_text(cpu, s + S_TEXT, "DllGetClassObject");
-            let find = crate::win32::kernel32::address_of("GetProcAddress");
+            let find = crate::win32::kernel32::address_of(cpu, "GetProcAddress");
             Next::call(find, &[value, s + S_TEXT], 2)
         }
         2 => {

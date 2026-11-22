@@ -225,7 +225,7 @@ fn calls(cpu: &mut Cpu) -> &mut Calls {
 /// the strings the call passes, each with the place of its argument.
 pub fn made(cpu: &mut Cpu, api: &str, args: &[u32], strings: &[(u32, &str)]) -> Option<u32> {
     let call = Call {
-        target: user32::address_of(api),
+        target: user32::address_of(cpu, api),
         args: args.to_vec(),
         strings: strings.iter().map(|&(k, s)| (k, s.to_string())).collect(),
     };

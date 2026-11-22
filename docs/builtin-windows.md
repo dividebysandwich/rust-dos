@@ -124,6 +124,19 @@ programs and DLLs built with those compilers. Their functions are
 `MSVCRT.DLL`'s, so the three share one heap and one set of open files,
 where Windows' own keep one each.
 
+### DOS programs started from Windows
+
+A Windows program can start a DOS program, as setups do to run a DOS
+installer. On Windows 98 the DOS program runs in a DOS box, full screen
+or in a window, while the Windows programs go on. Here it runs full
+screen, on the same drives, and the Windows programs wait until it
+ends; then the desktop comes back.
+
+Starting a PIF, as a Start menu icon of a DOS game does, runs the
+program the PIF names, in its working folder (or the icon's) and with
+its parameters. Its other settings (memory, window, close on exit)
+aren't used yet.
+
 ### Notepad
 
 `C:\WINDOWS\NOTEPAD.EXE` is there, read-only, as on Windows 98, and the

@@ -227,7 +227,7 @@ fn browse_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let owner = cpu.bus.guest_read_32(info);
             let proc = super::address_of("BrowseDialogProc");
             let args = [0, block + B_TEMPLATE, owner, proc, block];
-            Next::call(user32("DialogBoxIndirectParamA"), &args, 1)
+            Next::call(user32(cpu, "DialogBoxIndirectParamA"), &args, 1)
         }
         1 => {
             if value != 1 {
@@ -318,9 +318,9 @@ fn entries(cpu: &mut Cpu, path: &str, root: &str) -> Vec<String> {
     list
 }
 
-fn send_list(t: &Task, msg: u32, wp: u32, lp: u32, step: u16) -> Next {
+fn send_list(cpu: &Cpu, t: &Task, msg: u32, wp: u32, lp: u32, step: u16) -> Next {
     let args = [t.var(V_HWND), ID_LIST, msg, wp, lp];
-    Next::call(user32("SendDlgItemMessageA"), &args, step)
+    Next::call(user32(cpu, "SendDlgItemMessageA"), &args, step)
 }
 
 fn go(step: u16) -> Next {
@@ -341,9 +341,9 @@ fn proc_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             if msg == WM_INITDIALOG {
                 t.set(V_BLOCK, lp);
                 let args = [hwnd, DWL_USER, lp];
-                return Next::call(user32("SetWindowLongA"), &args, 10);
+                return Next::call(user32(cpu, "SetWindowLongA"), &args, 10);
             }
-            Next::call(user32("GetWindowLongA"), &[hwnd, DWL_USER], 1)
+            Next::call(user32(cpu, "GetWindowLongA"), &[hwnd, DWL_USER], 1)
         }
         1 => {
             t.set(V_BLOCK, value);
@@ -352,9 +352,9 @@ fn proc_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             match msg {
                 WM_COMMAND => match (wp & 0xFFFF, wp >> 16) {
-                    (IDOK, _) => send_list(t, LB_GETCURSEL, 0, 0, 30),
-                    (IDCANCEL, _) => Next::call(user32("EndDialog"), &[hwnd, 0], 99),
-                    (ID_LIST, LBN_DBLCLK) => send_list(t, LB_GETCURSEL, 0, 0, 40),
+                    (IDOK, _) => send_list(cpu, t, LB_GETCURSEL, 0, 0, 30),
+                    (IDCANCEL, _) => Next::call(user32(cpu, "EndDialog"), &[hwnd, 0], 99),
+                    (ID_LIST, LBN_DBLCLK) => send_list(cpu, t, LB_GETCURSEL, 0, 0, 40),
                     _ => Next::Done(0),
                 },
                 BFFM_SETSELECTIONA => {
@@ -378,9 +378,9 @@ fn proc_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     put_string(cpu, value + B_CURRENT, &full);
                     fill(t, 98)
                 }
-                BFFM_ENABLEOK => Next::call(user32("GetDlgItem"), &[hwnd, IDOK], 60),
+                BFFM_ENABLEOK => Next::call(user32(cpu, "GetDlgItem"), &[hwnd, IDOK], 60),
                 BFFM_SETSTATUSTEXTA => {
-                    Next::call(user32("SetDlgItemTextA"), &[hwnd, ID_PATH, lp], 98)
+                    Next::call(user32(cpu, "SetDlgItemTextA"), &[hwnd, ID_PATH, lp], 98)
                 }
                 _ => Next::Done(0),
             }
@@ -392,7 +392,7 @@ fn proc_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             if title == 0 {
                 return go(11);
             }
-            Next::call(user32("SetDlgItemTextA"), &[hwnd, ID_TITLE, title], 11)
+            Next::call(user32(cpu, "SetDlgItemTextA"), &[hwnd, ID_TITLE, title], 11)
         }
         11 => fill(t, 12),
         12 => {
@@ -412,7 +412,7 @@ fn proc_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 put_string(cpu, block + B_TEXT, "");
                 return go(next);
             }
-            send_list(t, LB_GETTEXT, value, block + B_TEXT, next)
+            send_list(cpu, t, LB_GETTEXT, value, block + B_TEXT, next)
         }
         31 => {
             let entry = get_string(cpu, block + B_TEXT);
@@ -429,7 +429,7 @@ fn proc_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return Next::Done(1);
             }
             put_string(cpu, block + B_RESULT, &picked);
-            Next::call(user32("EndDialog"), &[hwnd, 1], 99)
+            Next::call(user32(cpu, "EndDialog"), &[hwnd, 1], 99)
         }
         // A double click: into the folder.
         41 => {
@@ -443,7 +443,7 @@ fn proc_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             put_string(cpu, block + B_CURRENT, &next);
             fill(t, 99)
         }
-        60 => Next::call(user32("EnableWindow"), &[value, (lp != 0) as u32], 98),
+        60 => Next::call(user32(cpu, "EnableWindow"), &[value, (lp != 0) as u32], 98),
         98 => Next::Done(0),
         99 => Next::Done(1),
         // The list: the current folder's line, then its entries.
@@ -456,11 +456,11 @@ fn proc_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             };
             put_string(cpu, block + B_TEXT, &shown);
             let args = [hwnd, ID_PATH, block + B_TEXT];
-            Next::call(user32("SetDlgItemTextA"), &args, 101)
+            Next::call(user32(cpu, "SetDlgItemTextA"), &args, 101)
         }
         101 => {
             t.set(V_INDEX, 0);
-            send_list(t, LB_RESETCONTENT, 0, 0, 102)
+            send_list(cpu, t, LB_RESETCONTENT, 0, 0, 102)
         }
         102 => {
             let current = get_string(cpu, block + B_CURRENT);
@@ -472,7 +472,7 @@ fn proc_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             };
             put_string(cpu, block + B_TEXT, entry);
             t.set(V_INDEX, i as u32 + 1);
-            send_list(t, LB_ADDSTRING, 0, block + B_TEXT, 102)
+            send_list(cpu, t, LB_ADDSTRING, 0, block + B_TEXT, 102)
         }
         _ => Next::Done(0),
     }

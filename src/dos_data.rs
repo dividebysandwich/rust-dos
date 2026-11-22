@@ -40,6 +40,9 @@ const DEVICE_HEADER_SIZE: u16 = 0x12;
 /// The FCB table (FCBS=4), an SFT block of its own.
 const FCB_TABLE: u16 = 0x0160;
 const FCBS: u16 = 4;
+/// The verify flag (INT 21h AH=2Eh and 54h): 01h when DOS is to read
+/// back what it writes to disk, 00h (as at boot) when not.
+pub const VERIFY_FLAG: u16 = 0x0300;
 /// A byte VSHARE.386 sets while Windows runs, at its MS-DOS 5 offset.
 const VSHARE_FLAG: u16 = 0x0303;
 /// The zero-terminated list of the places to patch for critical sections
@@ -98,12 +101,15 @@ const _: () = assert!(DEVICE_RETF < DOSMGR_PATCHES && DOSMGR_PATCHES + 0x0E <= D
 const _: () = assert!(
     DEVICE_HEADERS + DEVICES.len() as u16 * DEVICE_HEADER_SIZE <= FCB_TABLE
 );
-const _: () = assert!(FCB_TABLE + 6 + FCBS * crate::dos_files::ENTRY_SIZE as u16 <= VSHARE_FLAG);
+const _: () = assert!(FCB_TABLE + 6 + FCBS * crate::dos_files::ENTRY_SIZE as u16 <= VERIFY_FLAG);
+const _: () = assert!(VERIFY_FLAG < VSHARE_FLAG);
 const _: () = assert!(VSHARE_FLAG < CRIT_PATCHES);
 
 /// What DOS keeps after its data segment, below the first MCB: the file
 /// table with the system JFT after it, and the environment of programs
-/// started from the shell, up to the first MCB.
+/// started from the shell, up to the first MCB. The paragraph before the
+/// environment is its MCB (`Cpu::load_program_bytes` writes it), as the
+/// environment DOS gives a program is a block of the program's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
     pub sft: u16,
@@ -122,12 +128,13 @@ impl Layout {
 pub const LOW: Layout = Layout { sft: 0x0A20, environment: 0x0C00, first_mcb: 0x0FFF };
 
 /// Packed (`dos_high`), as DOS=HIGH leaves conventional memory: the file
-/// table right after the data segment and 2 KB of environment after it.
-/// The HMA stays free for programs: DOS has no code there to move.
+/// table right after the data segment and 2 KB of environment after it,
+/// its MCB included. The HMA stays free for programs: DOS has no code
+/// there to move.
 pub const HIGH: Layout = {
     let sft = (address(END) as u16).div_ceil(16);
-    let environment = sft + (crate::dos_files::TABLE_BYTES as u16).div_ceil(16);
-    Layout { sft, environment, first_mcb: environment + HIGH_ENVIRONMENT_PARAS }
+    let table_end = sft + (crate::dos_files::TABLE_BYTES as u16).div_ceil(16);
+    Layout { sft, environment: table_end + 1, first_mcb: table_end + HIGH_ENVIRONMENT_PARAS }
 };
 const HIGH_ENVIRONMENT_PARAS: u16 = 0x80;
 
@@ -137,7 +144,13 @@ pub fn layout(bus: &Bus) -> Layout {
 }
 
 const _: () = assert!(address(END) <= LOW.sft as usize * 16);
-const _: () = assert!(LOW.sft as usize * 16 + crate::dos_files::TABLE_BYTES <= LOW.environment as usize * 16);
+// The environment's MCB comes after the file table.
+const _: () = assert!(
+    LOW.sft as usize * 16 + crate::dos_files::TABLE_BYTES <= (LOW.environment - 1) as usize * 16
+);
+const _: () = assert!(
+    HIGH.sft as usize * 16 + crate::dos_files::TABLE_BYTES <= (HIGH.environment - 1) as usize * 16
+);
 
 /// A device DOS has built in: its name and attributes.
 struct Device {

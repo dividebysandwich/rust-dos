@@ -102,7 +102,7 @@ pub fn set_windows_hook_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
     };
     let proc = proc32(cpu, args[1], kind, instance);
-    let hook = crate::win32::user32::address_of("SetWindowsHookExA");
+    let hook = crate::win32::user32::address_of(cpu, "SetWindowsHookExA");
     let args = [kind as u32, proc, instance as u32, tid];
     thunk::call32(cpu, hook, &args, thunk::POST_PLAIN, Vec::new());
     None
@@ -116,7 +116,7 @@ pub fn set_windows_hook(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let proc = proc32(cpu, args[1], kind, 0);
-    let hook = crate::win32::user32::address_of("SetWindowsHookA");
+    let hook = crate::win32::user32::address_of(cpu, "SetWindowsHookA");
     thunk::call32(cpu, hook, &[kind as u32, proc], thunk::POST_PLAIN, Vec::new());
     None
 }
@@ -156,7 +156,7 @@ pub fn def_hook_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// 32-bit structure, with what the hook changed, and what the next one
 /// changes is copied back.
 fn call_next(cpu: &mut Cpu, hook: u32, code: u32, wp: u32, lp: u32) -> Option<u32> {
-    let next = crate::win32::user32::address_of("CallNextHookEx");
+    let next = crate::win32::user32::address_of(cpu, "CallNextHookEx");
     let Some(call) = call_of(cpu, lp) else {
         thunk::call32(cpu, next, &[hook, code, wp, lp], thunk::POST_PLAIN, Vec::new());
         return None;
@@ -176,7 +176,7 @@ fn call_next(cpu: &mut Cpu, hook: u32, code: u32, wp: u32, lp: u32) -> Option<u3
 pub fn call_msg_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let m = thunk::scratch32(cpu, 28);
     let top = message::msg32(cpu, args[0], m);
-    let filter = crate::win32::user32::address_of("CallMsgFilterA");
+    let filter = crate::win32::user32::address_of(cpu, "CallMsgFilterA");
     let ctx = Context::of(cpu);
     let mut data = vec![args[0], m];
     data.extend((0..7).map(|i| read_32(cpu, m + 4 * i)));

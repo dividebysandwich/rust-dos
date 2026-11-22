@@ -1096,8 +1096,8 @@ fn vars_with_list(mut vars: Vec<u32>, list: &[u32]) -> Vec<u32> {
     vars
 }
 
-fn call_api(name: &str, args: &[u32], step: u16) -> Next {
-    Next::call(address_of(name), args, step)
+fn call_api(cpu: &Cpu, name: &str, args: &[u32], step: u16) -> Next {
+    Next::call(address_of(cpu, name), args, step)
 }
 
 /// The dialog task's steps.
@@ -1186,7 +1186,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.set(C_I, t.var(C_I) + 1);
             }
             match list_at(t, t.var(C_I)) {
-                Some(h) => call_api("EnableWindow", &[h, FALSE], 81),
+                Some(h) => call_api(cpu, "EnableWindow", &[h, FALSE], 81),
                 None => goto(90),
             }
         }
@@ -1203,7 +1203,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     put(cpu, t.scratch + CLASS_AT, CLASS_SIZE, &text)
                 }
             };
-            call_api("LoadMenuA", &[t.var(C_INST), name], 91)
+            call_api(cpu, "LoadMenuA", &[t.var(C_INST), name], 91)
         }
         // The font, the units, where the dialog goes; a modal dialog
         // disables its owner.
@@ -1308,7 +1308,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 if root != 0 && style_of_root_enabled(state, root) {
                     t.set(C_FLAGS, DF_OWNERENABLED as u32);
-                    return call_api("EnableWindow", &[root, FALSE], 92);
+                    return call_api(cpu, "EnableWindow", &[root, FALSE], 92);
                 }
             }
             goto(92)
@@ -1346,7 +1346,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.var(C_INST),
                 0,
             ];
-            call_api("CreateWindowExA", &args, 93)
+            call_api(cpu, "CreateWindowExA", &args, 93)
         }
         93 => {
             let hwnd = value;
@@ -1356,7 +1356,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 return match t.var(C_MENU) {
                     0 => goto(94),
-                    menu => call_api("DestroyMenu", &[menu], 94),
+                    menu => call_api(cpu, "DestroyMenu", &[menu], 94),
                 };
             }
             t.set(V_HWND, hwnd);
@@ -1388,14 +1388,14 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             t.set(C_ITEM, 0);
             t.set(C_PTR, h.map_or(0, |h| h.items));
             if proc != 0 && font != 0 {
-                return send(hwnd, WM_SETFONT, font, 0, 100);
+                return send(cpu, hwnd, WM_SETFONT, font, 0, 100);
             }
             goto(100)
         }
         // It wasn't made: the owner is enabled again.
         94 => {
             if t.var(C_FLAGS) & DF_OWNERENABLED as u32 != 0 {
-                return call_api("EnableWindow", &[t.var(C_ROOT), TRUE], 95);
+                return call_api(cpu, "EnableWindow", &[t.var(C_ROOT), TRUE], 95);
             }
             goto(95)
         }
@@ -1435,7 +1435,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.var(C_INST),
                 it.data,
             ];
-            call_api("CreateWindowExA", &args, 101)
+            call_api(cpu, "CreateWindowExA", &args, 101)
         }
         101 => {
             let ctrl = value;
@@ -1455,10 +1455,10 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             t.set(C_CTRL, ctrl);
             match t.var(C_FONT) {
                 0 => goto(102),
-                font => send(ctrl, WM_SETFONT, font, 0, 102),
+                font => send(cpu, ctrl, WM_SETFONT, font, 0, 102),
             }
         }
-        102 => send(t.var(C_CTRL), WM_GETDLGCODE, 0, 0, 103),
+        102 => send(cpu, t.var(C_CTRL), WM_GETDLGCODE, 0, 0, 103),
         103 => {
             if value & DLGC_DEFPUSHBUTTON == 0 {
                 return goto(100);
@@ -1470,7 +1470,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let id = ctrl_id(state, ctrl);
             update_info(state, hwnd, |i| i.result = id);
             if old != 0 {
-                return send(old, BM_SETSTYLE, BS_PUSHBUTTON, FALSE, 100);
+                return send(cpu, old, BM_SETSTYLE, BS_PUSHBUTTON, FALSE, 100);
             }
             goto(100)
         }
@@ -1479,7 +1479,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let icon = t.var(C_ICON);
             let item = dlg_item(user(cpu), t.var(V_HWND), MSGBOX_IDICON);
             if msgbox && icon != 0 && item != 0 {
-                return send(item, STM_SETICON, icon, 0, 111);
+                return send(cpu, item, STM_SETICON, icon, 0, 111);
             }
             goto(111)
         }
@@ -1490,7 +1490,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return goto(114);
             }
             let focus = next_tab(user(cpu), hwnd, 0, false);
-            send(hwnd, WM_INITDIALOG, focus, t.var(C_PARAM), 112)
+            send(cpu, hwnd, WM_INITDIALOG, focus, t.var(C_PARAM), 112)
         }
         112 => {
             let hwnd = t.var(V_HWND);
@@ -1500,7 +1500,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 // The default button has the focus.
                 let def = dlg_item(state, hwnd, t.var(C_MB_DEF));
                 if t.var(C_MB_DEF) != 0 && def != 0 {
-                    return call_api("SetFocus", &[def], 114);
+                    return call_api(cpu, "SetFocus", &[def], 114);
                 }
                 return goto(114);
             }
@@ -1524,7 +1524,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let hwnd = t.var(V_HWND);
             let shown = style(user(cpu), hwnd) & WS_VISIBLE != 0;
             if t.var(C_STYLE) & WS_VISIBLE != 0 && user(cpu).is_window(hwnd) && !shown {
-                return call_api("ShowWindow", &[hwnd, SW_SHOWNORMAL], 115);
+                return call_api(cpu, "ShowWindow", &[hwnd, SW_SHOWNORMAL], 115);
             }
             goto(115)
         }
@@ -1537,14 +1537,14 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         // A control wasn't made: the dialog goes.
         120 => {
             if modal && t.var(C_FLAGS) & DF_OWNERENABLED as u32 != 0 {
-                return call_api("EnableWindow", &[t.var(C_ROOT), TRUE], 121);
+                return call_api(cpu, "EnableWindow", &[t.var(C_ROOT), TRUE], 121);
             }
             goto(121)
         }
         121 => {
             let hwnd = t.var(V_HWND);
             if user(cpu).is_window(hwnd) {
-                return call_api("DestroyWindow", &[hwnd], 122);
+                return call_api(cpu, "DestroyWindow", &[hwnd], 122);
             }
             goto(122)
         }
@@ -1573,7 +1573,7 @@ fn modal_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             goto(201)
         }
-        201 => call_api("PeekMessageA", &[msg, 0, 0, 0, PM_REMOVE], 202),
+        201 => call_api(cpu, "PeekMessageA", &[msg, 0, 0, 0, PM_REMOVE], 202),
         202 => {
             if value != 0 {
                 return goto(206);
@@ -1581,18 +1581,18 @@ fn modal_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             // The dialog shows the first time the queue is empty.
             if t.var(C_FIRST) != 0 {
                 t.set(C_FIRST, 0);
-                return call_api("ShowWindow", &[hwnd, SW_SHOWNORMAL], 203);
+                return call_api(cpu, "ShowWindow", &[hwnd, SW_SHOWNORMAL], 203);
             }
             goto(203)
         }
         203 => {
             let root = t.var(C_ROOT);
             if style(user(cpu), hwnd) & DS_NOIDLEMSG == 0 && root != 0 {
-                return send(root, WM_ENTERIDLE, MSGF_DIALOGBOX, hwnd, 204);
+                return send(cpu, root, WM_ENTERIDLE, MSGF_DIALOGBOX, hwnd, 204);
             }
             goto(204)
         }
-        204 => call_api("GetMessageA", &[msg, 0, 0, 0], 205),
+        204 => call_api(cpu, "GetMessageA", &[msg, 0, 0, 0], 205),
         205 => {
             if value == 0 {
                 return goto(220);
@@ -1605,7 +1605,9 @@ fn modal_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return finish(t, 0);
             }
             match info(state, hwnd) {
-                Some(i) if i.flags & DF_END == 0 => call_api("IsDialogMessageA", &[hwnd, msg], 207),
+                Some(i) if i.flags & DF_END == 0 => {
+                    call_api(cpu, "IsDialogMessageA", &[hwnd, msg], 207)
+                }
                 _ => goto(209),
             }
         }
@@ -1613,9 +1615,9 @@ fn modal_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             if value != 0 {
                 return goto(209);
             }
-            call_api("TranslateMessage", &[msg], 208)
+            call_api(cpu, "TranslateMessage", &[msg], 208)
         }
-        208 => call_api("DispatchMessageA", &[msg], 209),
+        208 => call_api(cpu, "DispatchMessageA", &[msg], 209),
         209 => {
             let message = cpu.bus.guest_read_32(msg + 4);
             let state = user(cpu);
@@ -1626,7 +1628,7 @@ fn modal_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             if t.var(C_FIRST) != 0 && message == WM_TIMER && state.is_window(hwnd) {
                 t.set(C_FIRST, 0);
-                return call_api("ShowWindow", &[hwnd, SW_SHOWNORMAL], 201);
+                return call_api(cpu, "ShowWindow", &[hwnd, SW_SHOWNORMAL], 201);
             }
             goto(201)
         }
@@ -1638,7 +1640,7 @@ fn modal_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             // left by WM_QUIT, disabled (Wine's test_dialog_parent).
             goto(221)
         }
-        221 => call_api("DestroyWindow", &[hwnd], 222),
+        221 => call_api(cpu, "DestroyWindow", &[hwnd], 222),
         222 => finish(t, t.var(C_RESULT)),
         // The end: what a task-modal message box disabled is enabled.
         250 | 251 => {
@@ -1648,7 +1650,7 @@ fn modal_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             if t.var(C_MODE) & M_TASKMODAL != 0
                 && let Some(h) = list_at(t, t.var(C_I))
             {
-                return call_api("EnableWindow", &[h, TRUE], 251);
+                return call_api(cpu, "EnableWindow", &[h, TRUE], 251);
             }
             if t.var(C_PAGES) != 0 {
                 kernel32::free_pages(cpu, t.var(C_PAGES));
@@ -1720,9 +1722,9 @@ fn message_box_end(state: &State, hwnd: u32, mb_style: u32, wp: u32) -> Option<u
     }
 }
 
-fn def_window(t: &Task, step: u16) -> Next {
+fn def_window(cpu: &Cpu, t: &Task, step: u16) -> Next {
     let args = [t.var(V_HWND), t.var(D_MSG), t.var(D_WP), t.var(D_LP)];
-    call_api("DefWindowProcA", &args, step)
+    call_api(cpu, "DefWindowProcA", &args, step)
 }
 
 fn def_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
@@ -1740,7 +1742,7 @@ fn def_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 && msg == WM_COMMAND
                 && let Some(code) = message_box_end(state, hwnd, i.mb_style as u32, wp)
             {
-                return call_api("EndDialog", &[hwnd, code], 302);
+                return call_api(cpu, "EndDialog", &[hwnd, code], 302);
             }
             goto(301)
         }
@@ -1753,7 +1755,7 @@ fn def_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             let i = info(state, hwnd).unwrap_or_default();
             match msg {
-                WM_ERASEBKGND => send(hwnd, WM_CTLCOLORDLG, wp, hwnd, 310),
+                WM_ERASEBKGND => send(cpu, hwnd, WM_CTLCOLORDLG, wp, hwnd, 310),
                 WM_NCDESTROY => {
                     if i.font != 0 {
                         gdi32::delete_object(cpu, &[i.font]);
@@ -1762,13 +1764,13 @@ fn def_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     if info(state, hwnd).is_some() {
                         set_info(state, hwnd, &Info::default());
                     }
-                    def_window(t, 399)
+                    def_window(cpu, t, 399)
                 }
                 WM_SHOWWINDOW => {
                     if wp == 0 {
                         save_focus(state, hwnd);
                     }
-                    def_window(t, 399)
+                    def_window(cpu, t, 399)
                 }
                 WM_ACTIVATE => {
                     if wp != 0 {
@@ -1816,9 +1818,9 @@ fn def_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     let focus = state.focus_of(hwnd);
                     if focus != 0 {
                         t.set(D_TMP, focus);
-                        return send(focus, CB_SHOWDROPDOWN, FALSE, 0, 341);
+                        return send(cpu, focus, CB_SHOWDROPDOWN, FALSE, 0, 341);
                     }
-                    def_window(t, 399)
+                    def_window(cpu, t, 399)
                 }
                 WM_GETFONT => Next::Done(i.font),
                 WM_CLOSE => {
@@ -1827,7 +1829,7 @@ fn def_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     Next::Done(0)
                 }
                 WM_INITDIALOG | WM_VKEYTOITEM | WM_COMPAREITEM | WM_CHARTOITEM => goto(398),
-                _ => def_window(t, 399),
+                _ => def_window(cpu, t, 399),
             }
         }
         // WM_ERASEBKGND: the dialog's brush, or DefWindowProcA's.
@@ -1836,7 +1838,12 @@ fn def_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.set(D_TMP, value);
                 return goto(312);
             }
-            call_api("DefWindowProcA", &[hwnd, WM_CTLCOLORDLG, wp, hwnd], 311)
+            call_api(
+                cpu,
+                "DefWindowProcA",
+                &[hwnd, WM_CTLCOLORDLG, wp, hwnd],
+                311,
+            )
         }
         311 => {
             t.set(D_TMP, value);
@@ -1861,12 +1868,12 @@ fn def_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             if value == 0 {
                 let parent = parent_of(user(cpu), t.var(D_TMP));
                 if parent != 0 {
-                    return send(parent, CB_SHOWDROPDOWN, FALSE, 0, 342);
+                    return send(cpu, parent, CB_SHOWDROPDOWN, FALSE, 0, 342);
                 }
             }
             goto(342)
         }
-        342 => def_window(t, 399),
+        342 => def_window(cpu, t, 399),
         395 => {
             let found = t.var(S_FOUND);
             if found != 0 {
@@ -1895,14 +1902,14 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         // DEFDLG_SetFocus(S_CTRL): an edit control's text is selected.
         // Windows 98 sends EM_SETSEL(0, -2), which a subclassed control
         // sees.
-        600 => send(t.var(S_CTRL), WM_GETDLGCODE, 0, 0, 601),
+        600 => send(cpu, t.var(S_CTRL), WM_GETDLGCODE, 0, 0, 601),
         601 => {
             if value & DLGC_HASSETSEL != 0 {
-                return send(t.var(S_CTRL), EM_SETSEL, 0, -2i32 as u32, 602);
+                return send(cpu, t.var(S_CTRL), EM_SETSEL, 0, -2i32 as u32, 602);
             }
             goto(602)
         }
-        602 => call_api("SetFocus", &[t.var(S_CTRL)], 603),
+        602 => call_api(cpu, "SetFocus", &[t.var(S_CTRL)], 603),
         603 => ret(t),
         // DEFDLG_RestoreFocus: the saved control, or the first with
         // WS_TABSTOP, through DEFDLG_SetFocus. For WM_ACTIVATE
@@ -1926,7 +1933,7 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let saved = state.is_window(focus) && focus != hwnd;
             if t.var(S_ACTIVATE) != 0 {
                 if saved {
-                    return call_api("SetFocus", &[focus], 611);
+                    return call_api(cpu, "SetFocus", &[focus], 611);
                 }
                 return ret(t);
             }
@@ -1950,7 +1957,7 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             goto(621)
         }
         621 => match list_at(t, t.var(S_I)) {
-            Some(c) => send(c, WM_GETDLGCODE, 0, 0, 622),
+            Some(c) => send(cpu, c, WM_GETDLGCODE, 0, 0, 622),
             None => {
                 t.set(S_FOUND, 0);
                 ret(t)
@@ -1972,7 +1979,7 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             t.set(S_CODE, 0);
             match t.var(S_NEW) {
                 0 => goto(633),
-                new => send(new, WM_GETDLGCODE, 0, 0, 631),
+                new => send(cpu, new, WM_GETDLGCODE, 0, 0, 631),
             }
         }
         631 => {
@@ -1985,7 +1992,7 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             t.set(S_NEW, old);
             t.set(S_CODE, 0);
             if old != 0 {
-                return send(old, WM_GETDLGCODE, 0, 0, 632);
+                return send(cpu, old, WM_GETDLGCODE, 0, 0, 632);
             }
             goto(633)
         }
@@ -1996,7 +2003,7 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         // Make sure the old default is a default push button.
         633 => match t.var(S_OLD) {
             0 => goto(635),
-            old => send(old, WM_GETDLGCODE, 0, 0, 634),
+            old => send(cpu, old, WM_GETDLGCODE, 0, 0, 634),
         },
         634 => {
             if value & DLGC_DEFPUSHBUTTON != 0 {
@@ -2012,14 +2019,14 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         636 => {
             let (old, new) = (t.var(S_OLD), t.var(S_NEW));
             if old != 0 && old != new {
-                return send(old, BM_SETSTYLE, BS_PUSHBUTTON, TRUE, 638);
+                return send(cpu, old, BM_SETSTYLE, BS_PUSHBUTTON, TRUE, 638);
             }
             goto(638)
         }
         638 => {
             let new = t.var(S_NEW);
             if new != 0 && t.var(S_CODE) & DLGC_UNDEFPUSHBUTTON != 0 {
-                return send(new, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE, 639);
+                return send(cpu, new, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE, 639);
             }
             goto(639)
         }
@@ -2036,7 +2043,7 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             t.set(S_CODE, 0);
             match new {
                 0 => goto(633),
-                new => send(new, WM_GETDLGCODE, 0, 0, 641),
+                new => send(cpu, new, WM_GETDLGCODE, 0, 0, 641),
             }
         }
         641 => {
@@ -2064,7 +2071,7 @@ fn end_step(cpu: &mut Cpu, t: &mut Task) -> Next {
         400 => {
             let owner = t.var(3);
             if owner != 0 && owner != DESKTOP && user(cpu).is_window(owner) {
-                return call_api("EnableWindow", &[owner, TRUE], 401);
+                return call_api(cpu, "EnableWindow", &[owner, TRUE], 401);
             }
             goto(401)
         }
@@ -2072,17 +2079,17 @@ fn end_step(cpu: &mut Cpu, t: &mut Task) -> Next {
         401 => {
             let state = user(cpu);
             if state.is_descendant(hwnd, state.focus_of(hwnd)) {
-                return call_api("SetFocus", &[hwnd], 402);
+                return call_api(cpu, "SetFocus", &[hwnd], 402);
             }
             goto(402)
         }
         402 => {
             let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW;
-            call_api("SetWindowPos", &[hwnd, 0, 0, 0, 0, 0, flags], 403)
+            call_api(cpu, "SetWindowPos", &[hwnd, 0, 0, 0, 0, 0, flags], 403)
         }
         403 => {
             if user(cpu).is_active(hwnd) {
-                return call_api("ActivateOtherWindow", &[hwnd], 404);
+                return call_api(cpu, "ActivateOtherWindow", &[hwnd], 404);
             }
             goto(404)
         }
@@ -2100,7 +2107,7 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let dlg = t.var(V_HWND);
     let (at, mhwnd, wp) = (t.var(I_MSGPTR), t.var(I_MHWND), t.var(I_WP));
     match t.step {
-        500 => call_api("CallMsgFilterA", &[at, MSGF_DIALOGBOX], 501),
+        500 => call_api(cpu, "CallMsgFilterA", &[at, MSGF_DIALOGBOX], 501),
         501 => {
             if value != 0 {
                 return Next::Done(TRUE);
@@ -2112,8 +2119,8 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let dlg = message_destination(state, dlg);
             t.set(V_HWND, dlg);
             match t.var(I_MSG) {
-                WM_KEYDOWN => send(mhwnd, WM_GETDLGCODE, wp, at, 510),
-                WM_CHAR => send(mhwnd, WM_GETDLGCODE, wp, at, 530),
+                WM_KEYDOWN => send(cpu, mhwnd, WM_GETDLGCODE, wp, at, 510),
+                WM_CHAR => send(cpu, mhwnd, WM_GETDLGCODE, wp, at, 530),
                 WM_SYSCHAR => goto(540),
                 _ => goto(590),
             }
@@ -2132,7 +2139,7 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     let shift = super::input::get_key_state(cpu, &[VK_SHIFT]).unwrap_or(0) & 0x8000;
                     let state = user(cpu);
                     if info(state, dlg).is_some() {
-                        return send(dlg, WM_NEXTDLGCTL, shift, 0, 599);
+                        return send(cpu, dlg, WM_NEXTDLGCTL, shift, 0, 599);
                     }
                     // Not a dialog: the focus moves here.
                     let focus = state.focus_of(dlg);
@@ -2142,7 +2149,7 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                         return Next::Done(FALSE);
                     }
                     t.set(I_NEXT, next);
-                    send(next, WM_GETDLGCODE, wp, at, 512)
+                    send(cpu, next, WM_GETDLGCODE, wp, at, 512)
                 }
                 VK_RIGHT | VK_DOWN | VK_LEFT | VK_UP => {
                     if code & DLGC_WANTARROWS != 0 {
@@ -2151,15 +2158,15 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     let prev = wp == VK_LEFT || wp == VK_UP;
                     let state = user(cpu);
                     let next = next_group_item(state, dlg, state.focus_of(dlg), prev);
-                    send(dlg, WM_NEXTDLGCTL, next, 1, 599)
+                    send(cpu, dlg, WM_NEXTDLGCTL, next, 1, 599)
                 }
                 VK_CANCEL | VK_ESCAPE => {
                     let cancel = dlg_item(user(cpu), dlg, IDCANCEL);
-                    send(dlg, WM_COMMAND, IDCANCEL, cancel, 599)
+                    send(cpu, dlg, WM_COMMAND, IDCANCEL, cancel, 599)
                 }
                 VK_EXECUTE | VK_RETURN => {
                     if user(cpu).focus_of(mhwnd) == mhwnd {
-                        return send(mhwnd, WM_GETDLGCODE, 0, 0, 525);
+                        return send(cpu, mhwnd, WM_GETDLGCODE, 0, 0, 525);
                     }
                     goto(526)
                 }
@@ -2170,13 +2177,13 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         // focus moves, the default button follows.
         512 => {
             if value & DLGC_HASSETSEL != 0 {
-                return send(t.var(I_NEXT), WM_GETTEXTLENGTH, 0, 0, 513);
+                return send(cpu, t.var(I_NEXT), WM_GETTEXTLENGTH, 0, 0, 513);
             }
             goto(514)
         }
-        513 => send(t.var(I_NEXT), EM_SETSEL, 0, value, 514),
-        514 => call_api("SetFocus", &[t.var(I_NEXT)], 515),
-        515 => send(t.var(I_NEXT), WM_GETDLGCODE, 0, 0, 516),
+        513 => send(cpu, t.var(I_NEXT), EM_SETSEL, 0, value, 514),
+        514 => call_api(cpu, "SetFocus", &[t.var(I_NEXT)], 515),
+        515 => send(cpu, t.var(I_NEXT), WM_GETDLGCODE, 0, 0, 516),
         // DIALOG_FixChildrenOnChangeFocus: no control is the default
         // push button.
         516 => {
@@ -2188,24 +2195,24 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             goto(517)
         }
         517 => match list_at(t, t.var(I_I)) {
-            Some(c) => send(c, WM_GETDLGCODE, 0, 0, 518),
+            Some(c) => send(cpu, c, WM_GETDLGCODE, 0, 0, 518),
             None => goto(519),
         },
         518 => {
             let c = t.var(LIST + t.var(I_I) as usize);
             t.set(I_I, t.var(I_I) + 1);
             if value & DLGC_DEFPUSHBUTTON != 0 {
-                return send(c, BM_SETSTYLE, BS_PUSHBUTTON, TRUE, 517);
+                return send(cpu, c, BM_SETSTYLE, BS_PUSHBUTTON, TRUE, 517);
             }
             goto(517)
         }
         519 => {
             let code = t.var(I_CODE);
             if code & DLGC_DEFPUSHBUTTON != 0 {
-                return send(dlg, DM_GETDEFID, 0, 0, 520);
+                return send(cpu, dlg, DM_GETDEFID, 0, 0, 520);
             }
             if code & DLGC_BUTTON != 0 && code & DLGC_UNDEFPUSHBUTTON != 0 {
-                return send(t.var(I_NEXT), BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE, 599);
+                return send(cpu, t.var(I_NEXT), BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE, 599);
             }
             Next::Done(TRUE)
         }
@@ -2214,14 +2221,14 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let def = dlg_item(user(cpu), dlg, value & 0xFFFF);
                 if def != 0 {
                     t.set(I_NEXT, def);
-                    return send(def, WM_GETDLGCODE, 0, 0, 521);
+                    return send(cpu, def, WM_GETDLGCODE, 0, 0, 521);
                 }
             }
             Next::Done(TRUE)
         }
         521 => {
             if value & DLGC_BUTTON != 0 && value & DLGC_UNDEFPUSHBUTTON != 0 {
-                return send(t.var(I_NEXT), BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE, 599);
+                return send(cpu, t.var(I_NEXT), BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE, 599);
             }
             Next::Done(TRUE)
         }
@@ -2230,11 +2237,11 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         525 => {
             if value & DLGC_DEFPUSHBUTTON != 0 {
                 let id = ctrl_id(user(cpu), mhwnd) & 0xFFFF;
-                return send(dlg, WM_COMMAND, id, mhwnd, 599);
+                return send(cpu, dlg, WM_COMMAND, id, mhwnd, 599);
             }
             goto(526)
         }
-        526 => send(dlg, DM_GETDEFID, 0, 0, 527),
+        526 => send(cpu, dlg, DM_GETDEFID, 0, 0, 527),
         527 => {
             let state = user(cpu);
             if value >> 16 == DC_HASDEFID {
@@ -2246,12 +2253,12 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     id == IDOK
                 };
                 if enabled {
-                    return send(dlg, WM_COMMAND, id, def, 599);
+                    return send(cpu, dlg, WM_COMMAND, id, def, 599);
                 }
                 return Next::Done(TRUE);
             }
             let ok = dlg_item(state, dlg, IDOK);
-            send(dlg, WM_COMMAND, IDOK, ok, 599)
+            send(cpu, dlg, WM_COMMAND, IDOK, ok, 599)
         }
         // WM_CHAR.
         530 => {
@@ -2272,7 +2279,7 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             goto(541)
         }
         541 => match list_at(t, t.var(I_I)) {
-            Some(c) => send(c, WM_GETDLGCODE, 0, 0, 542),
+            Some(c) => send(cpu, c, WM_GETDLGCODE, 0, 0, 542),
             None => goto(590),
         },
         542 => {
@@ -2288,13 +2295,13 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             if value & DLGC_STATIC != 0 || s & 0x0F == BS_GROUPBOX {
                 // The focus goes to the control, then on to the next.
-                return send(dlg, WM_NEXTDLGCTL, c, 1, 543);
+                return send(cpu, dlg, WM_NEXTDLGCTL, c, 1, 543);
             }
-            send(c, BM_CLICK, 0, 0, 599)
+            send(cpu, c, BM_CLICK, 0, 0, 599)
         }
-        543 => send(dlg, WM_NEXTDLGCTL, 0, 0, 599),
-        590 => call_api("TranslateMessage", &[at], 591),
-        591 => call_api("DispatchMessageA", &[at], 599),
+        543 => send(cpu, dlg, WM_NEXTDLGCTL, 0, 0, 599),
+        590 => call_api(cpu, "TranslateMessage", &[at], 591),
+        591 => call_api(cpu, "DispatchMessageA", &[at], 599),
         _ => Next::Done(TRUE),
     }
 }
@@ -2312,10 +2319,10 @@ fn item_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 number.to_string()
             };
             let at = put(cpu, t.scratch, 32, text.as_bytes());
-            send(item, WM_SETTEXT, 0, at, 701)
+            send(cpu, item, WM_SETTEXT, 0, at, 701)
         }
         // GetDlgItemInt.
-        710 => send(t.var(1), WM_GETTEXT, 30, t.scratch, 711),
+        710 => send(cpu, t.var(1), WM_GETTEXT, 30, t.scratch, 711),
         711 => {
             if value == 0 {
                 return Next::Done(0);
@@ -2330,7 +2337,7 @@ fn item_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             Next::Done(n)
         }
         // A message, then a value of the function's own.
-        720 => send(t.var(1), t.var(2), t.var(3), t.var(4), 721),
+        720 => send(cpu, t.var(1), t.var(2), t.var(3), t.var(4), 721),
         721 => Next::Done(t.var(5)),
         // CheckRadioButton.
         730 | 731 => {
@@ -2341,7 +2348,7 @@ fn item_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return Next::Done(TRUE);
             };
             let check = (ctrl_id(user(cpu), c) == t.var(2)) as u32;
-            send(c, BM_SETCHECK, check, 0, 731)
+            send(cpu, c, BM_SETCHECK, check, 0, 731)
         }
         _ => Next::Done(value),
     }

@@ -344,13 +344,13 @@ fn call(target: u32, args: &[u32]) -> Op {
     }
 }
 
-fn user(name: &str, args: &[u32]) -> Op {
-    call(user32::address_of(name), args)
+fn user(cpu: &Cpu, name: &str, args: &[u32]) -> Op {
+    call(user32::address_of(cpu, name), args)
 }
 
-fn send(hwnd: u32, msg: u32, wp: u32, lp: Arg) -> Op {
+fn send(cpu: &Cpu, hwnd: u32, msg: u32, wp: u32, lp: Arg) -> Op {
     Op::Call {
-        target: user32::address_of("SendMessageA"),
+        target: user32::address_of(cpu, "SendMessageA"),
         args: vec![Arg::V(hwnd), Arg::V(msg), Arg::V(wp), lp],
     }
 }
@@ -363,13 +363,13 @@ fn then_op(id: u16, data: &[u32]) -> Op {
 }
 
 /// A PSHNOTIFY with `code` and `lparam` from the sheet to `page`.
-fn psn(sheet: u32, page: u32, code: u32, lparam: u32) -> Vec<Op> {
+fn psn(cpu: &Cpu, sheet: u32, page: u32, code: u32, lparam: u32) -> Vec<Op> {
     vec![
         Op::Write {
             at: P_PSN,
             words: vec![sheet, 0, code, lparam],
         },
-        send(page, WM_NOTIFY, 0, Arg::S(P_PSN)),
+        send(cpu, page, WM_NOTIFY, 0, Arg::S(P_PSN)),
     ]
 }
 
@@ -384,11 +384,11 @@ fn write_text(text: &[u8]) -> Op {
 }
 
 /// SetWindowTextA(hwnd, text).
-fn set_text(hwnd: u32, text: &[u8]) -> Vec<Op> {
+fn set_text(cpu: &Cpu, hwnd: u32, text: &[u8]) -> Vec<Op> {
     vec![
         write_text(text),
         Op::Call {
-            target: user32::address_of("SetWindowTextA"),
+            target: user32::address_of(cpu, "SetWindowTextA"),
             args: vec![Arg::V(hwnd), Arg::S(P_TEXT)],
         },
     ]
@@ -984,10 +984,10 @@ pub fn property_sheet(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             .push(call(sheet_callback, &[0, PSCB_PRECREATE, template]));
     }
     if !modeless && parent != 0 {
-        s.ops.push(user("EnableWindow", &[parent, 0]));
+        s.ops.push(user(cpu, "EnableWindow", &[parent, 0]));
     }
     let proc = super::address_of("PropSheetDlgProc");
-    let create = user32::address_of("CreateDialogIndirectParamA");
+    let create = user32::address_of(cpu, "CreateDialogIndirectParamA");
     s.ops
         .push(call(create, &[instance, template, parent, proc, id]));
     s.ops.push(then_op(T_CREATED, &[id]));
@@ -1023,7 +1023,7 @@ fn created(cpu: &mut Cpu, c: &mut Ctx, id: u32) -> Vec<Op> {
         c.result = u32::MAX;
         state(cpu).propsheet.sheets.remove(&id);
         if sheet.parent != 0 {
-            return vec![user("EnableWindow", &[sheet.parent, 1])];
+            return vec![user(cpu, "EnableWindow", &[sheet.parent, 1])];
         }
         return Vec::new();
     }
@@ -1039,10 +1039,10 @@ fn end_loop(cpu: &mut Cpu, c: &mut Ctx, id: u32, result: u32) -> Vec<Op> {
     };
     let mut ops = Vec::new();
     if !sheet.destroyed && user32::user(cpu).is_window(sheet.hwnd) {
-        ops.push(user("DestroyWindow", &[sheet.hwnd]));
+        ops.push(user(cpu, "DestroyWindow", &[sheet.hwnd]));
     }
     if sheet.parent != 0 {
-        ops.push(user("EnableWindow", &[sheet.parent, 1]));
+        ops.push(user(cpu, "EnableWindow", &[sheet.parent, 1]));
     }
     ops.push(then_op(T_DONE, &[id]));
     ops
@@ -1058,7 +1058,7 @@ fn run_loop(cpu: &mut Cpu, c: &mut Ctx, id: u32) -> Vec<Op> {
     }
     vec![
         Op::Call {
-            target: user32::address_of("GetMessageA"),
+            target: user32::address_of(cpu, "GetMessageA"),
             args: vec![Arg::S(P_MSG), Arg::V(0), Arg::V(0), Arg::V(0)],
         },
         then_op(T_GOT, &[id]),
@@ -1079,7 +1079,7 @@ fn got_message(cpu: &mut Cpu, c: &mut Ctx, id: u32) -> Vec<Op> {
             let hwnd = get(cpu, id).map_or(0, |s| s.hwnd);
             vec![
                 Op::Call {
-                    target: user32::address_of("IsDialogMessageA"),
+                    target: user32::address_of(cpu, "IsDialogMessageA"),
                     args: vec![Arg::V(hwnd), Arg::S(P_MSG)],
                 },
                 then_op(T_DISPATCHED, &[id]),
@@ -1088,12 +1088,12 @@ fn got_message(cpu: &mut Cpu, c: &mut Ctx, id: u32) -> Vec<Op> {
     }
 }
 
-fn dispatched(c: &Ctx, id: u32) -> Vec<Op> {
+fn dispatched(cpu: &Cpu, c: &Ctx, id: u32) -> Vec<Op> {
     let mut ops = Vec::new();
     if c.last == 0 {
         for name in ["TranslateMessage", "DispatchMessageA"] {
             ops.push(Op::Call {
-                target: user32::address_of(name),
+                target: user32::address_of(cpu, name),
                 args: vec![Arg::S(P_MSG)],
             });
         }
@@ -1134,11 +1134,12 @@ fn page_hwnd(sheet: &Sheet, i: i32) -> u32 {
 /// PSN_KILLACTIVE to the active page, then the continuation `id` with
 /// `data` and a word saying whether the page was asked: `refused` then
 /// tells whether it kept the sheet on it (PROPSHEET_CanSetCurSel).
-fn kill_active(sheet: &Sheet, id: u16, data: &[u32]) -> Vec<Op> {
+fn kill_active(cpu: &Cpu, sheet: &Sheet, id: u16, data: &[u32]) -> Vec<Op> {
     let mut data = data.to_vec();
     let mut ops = Vec::new();
     if sheet.active >= 0 {
         ops = psn(
+            cpu,
             sheet.hwnd,
             page_hwnd(sheet, sheet.active),
             PSN_KILLACTIVE,
@@ -1160,7 +1161,7 @@ fn refused(c: &Ctx, i: usize) -> bool {
 
 /// PROPSHEET_SetTitle: the sheet's caption, "Properties for" it with
 /// PSH_PROPTITLE.
-fn title_ops(hwnd: u32, style: u32, text: &[u8]) -> Vec<Op> {
+fn title_ops(cpu: &Cpu, hwnd: u32, style: u32, text: &[u8]) -> Vec<Op> {
     let mut caption = text.to_vec();
     if style & PSH_PROPTITLE != 0 {
         let at = PROPERTIES_FOR
@@ -1171,7 +1172,7 @@ fn title_ops(hwnd: u32, style: u32, text: &[u8]) -> Vec<Op> {
         caption.extend_from_slice(text);
         caption.extend_from_slice(&PROPERTIES_FOR[at + 2..]);
     }
-    set_text(hwnd, &caption)
+    set_text(cpu, hwnd, &caption)
 }
 
 /// PROPSHEET_SetCurSel(index, skipdir, hpage).
@@ -1201,6 +1202,7 @@ fn sc_begin(cpu: &mut Cpu, id: u32, c: &Ctx) -> Vec<Op> {
     let mut ops = Vec::new();
     if sheet.active != -1 {
         ops.push(user(
+            cpu,
             "ShowWindow",
             &[page_hwnd(&sheet, sheet.active), SW_HIDE],
         ));
@@ -1217,7 +1219,7 @@ fn sc_step(cpu: &mut Cpu, sheet: &Sheet, id: u32, index: i32, skipdir: i32, n: u
     let mut ops = Vec::new();
     let tab = item(cpu, sheet.hwnd, IDC_TABCONTROL);
     if tab != 0 {
-        ops.push(send(tab, TCM_SETCURSEL, index as u32, Arg::V(0)));
+        ops.push(send(cpu, tab, TCM_SETCURSEL, index as u32, Arg::V(0)));
     }
     if page_hwnd(sheet, index) == 0 {
         ops.extend(create_page(cpu, sheet, id, index));
@@ -1257,6 +1259,7 @@ fn sc_place(cpu: &mut Cpu, id: u32, c: &Ctx) -> Vec<Op> {
     let page = page_hwnd(&sheet, index);
     let r = page_rect(cpu, &sheet);
     let mut ops = vec![user(
+        cpu,
         "SetWindowPos",
         &[
             page,
@@ -1268,7 +1271,7 @@ fn sc_place(cpu: &mut Cpu, id: u32, c: &Ctx) -> Vec<Op> {
             0,
         ],
     )];
-    ops.extend(psn(sheet.hwnd, page, PSN_SETACTIVE, 0));
+    ops.extend(psn(cpu, sheet.hwnd, page, PSN_SETACTIVE, 0));
     ops.push(then_op(T_SC_RESULT, &c.data));
     ops
 }
@@ -1307,7 +1310,7 @@ fn sc_result(cpu: &mut Cpu, id: u32, c: &Ctx) -> Vec<Op> {
     let mut ops = show_page(id, index);
     let help = item(cpu, sheet.hwnd, IDHELP);
     let has_help = sheet.pages.get(index as usize).is_some_and(|p| p.has_help);
-    ops.push(user("EnableWindow", &[help, has_help as u32]));
+    ops.push(user(cpu, "EnableWindow", &[help, has_help as u32]));
     ops
 }
 
@@ -1335,21 +1338,22 @@ fn show(cpu: &mut Cpu, id: u32, c: &Ctx) -> Vec<Op> {
     let mut ops = Vec::new();
     if wizard(&sheet) {
         let text = sheet.pages[index as usize].text.clone();
-        ops.extend(title_ops(sheet.hwnd, sheet.flags, &text));
+        ops.extend(title_ops(cpu, sheet.hwnd, sheet.flags, &text));
         let control = dialog::get_next_dlg_tab_item(cpu, &[page, 0, 0]).unwrap_or(0);
         if control != 0 {
-            ops.push(user("SetFocus", &[control]));
+            ops.push(user(cpu, "SetFocus", &[control]));
         }
     }
     if sheet.active != -1 {
         ops.push(user(
+            cpu,
             "ShowWindow",
             &[page_hwnd(&sheet, sheet.active), SW_HIDE],
         ));
     }
-    ops.push(user("ShowWindow", &[page, SW_SHOW]));
+    ops.push(user(cpu, "ShowWindow", &[page, SW_SHOW]));
     let tab = item(cpu, sheet.hwnd, IDC_TABCONTROL);
-    ops.push(send(tab, TCM_SETCURSEL, index as u32, Arg::V(0)));
+    ops.push(send(cpu, tab, TCM_SETCURSEL, index as u32, Arg::V(0)));
     sheet.active = index;
     sheet.active_valid = true;
     put(cpu, id, sheet);
@@ -1395,7 +1399,7 @@ fn create_page(cpu: &mut Cpu, sheet: &Sheet, id: u32, index: i32) -> Vec<Op> {
     if w[1] & PSP_USECALLBACK != 0 && w[8] != 0 {
         ops.push(call(w[8], &[0, PSPCB_CREATE, hpage]));
     }
-    let create = user32::address_of("CreateDialogIndirectParamA");
+    let create = user32::address_of(cpu, "CreateDialogIndirectParamA");
     ops.push(call(create, &[w[2], copy, sheet.hwnd, w[6], hpage]));
     ops.push(then_op(T_PAGE_CREATED, &[id, hpage, copy]));
     ops
@@ -1419,9 +1423,9 @@ fn wiz_buttons(cpu: &mut Cpu, sheet: &Sheet, flags: u32) -> Vec<Op> {
     let next = item(cpu, hwnd, IDC_NEXT_BUTTON);
     let finish = item(cpu, hwnd, IDC_FINISH_BUTTON);
     let mut ops = vec![
-        user("EnableWindow", &[back, 0]),
-        user("EnableWindow", &[next, 0]),
-        user("EnableWindow", &[finish, 0]),
+        user(cpu, "EnableWindow", &[back, 0]),
+        user(cpu, "EnableWindow", &[next, 0]),
+        user(cpu, "EnableWindow", &[finish, 0]),
     ];
     let disabled_finish = flags & PSWIZB_DISABLEDFINISH != 0;
     let def = if (flags & PSWIZB_FINISH != 0 || sheet.has_finish) && !disabled_finish {
@@ -1433,32 +1437,33 @@ fn wiz_buttons(cpu: &mut Cpu, sheet: &Sheet, flags: u32) -> Vec<Op> {
     } else {
         IDCANCEL
     };
-    ops.push(send(hwnd, DM_SETDEFID, def, Arg::V(0)));
+    ops.push(send(cpu, hwnd, DM_SETDEFID, def, Arg::V(0)));
     if flags & PSWIZB_BACK != 0 {
-        ops.push(user("EnableWindow", &[back, 1]));
+        ops.push(user(cpu, "EnableWindow", &[back, 1]));
     }
     if flags & PSWIZB_NEXT != 0 {
-        ops.push(user("EnableWindow", &[next, 1]));
+        ops.push(user(cpu, "EnableWindow", &[next, 1]));
     }
     if !sheet.has_finish {
         if flags & (PSWIZB_FINISH | PSWIZB_DISABLEDFINISH) != 0 {
-            ops.push(user("ShowWindow", &[next, SW_HIDE]));
-            ops.push(user("ShowWindow", &[finish, SW_SHOW]));
+            ops.push(user(cpu, "ShowWindow", &[next, SW_HIDE]));
+            ops.push(user(cpu, "ShowWindow", &[finish, SW_SHOW]));
             if !disabled_finish {
-                ops.push(user("EnableWindow", &[finish, 1]));
+                ops.push(user(cpu, "EnableWindow", &[finish, 1]));
             }
         } else {
-            ops.push(user("ShowWindow", &[finish, SW_HIDE]));
-            ops.push(user("ShowWindow", &[next, SW_SHOW]));
+            ops.push(user(cpu, "ShowWindow", &[finish, SW_HIDE]));
+            ops.push(user(cpu, "ShowWindow", &[next, SW_SHOW]));
         }
     } else if !disabled_finish {
-        ops.push(user("EnableWindow", &[finish, 1]));
+        ops.push(user(cpu, "EnableWindow", &[finish, 1]));
     }
     ops
 }
 
-fn move_to(hwnd: u32, x: i32, y: i32) -> Op {
+fn move_to(cpu: &Cpu, hwnd: u32, x: i32, y: i32) -> Op {
     user(
+        cpu,
         "SetWindowPos",
         &[
             hwnd,
@@ -1472,8 +1477,9 @@ fn move_to(hwnd: u32, x: i32, y: i32) -> Op {
     )
 }
 
-fn resize(hwnd: u32, cx: i32, cy: i32) -> Op {
+fn resize(cpu: &Cpu, hwnd: u32, cx: i32, cy: i32) -> Op {
     user(
+        cpu,
         "SetWindowPos",
         &[
             hwnd,
@@ -1515,32 +1521,33 @@ fn adjust_sheet(cpu: &mut Cpu, sheet: &mut Sheet) -> Vec<Op> {
     }
     let rc = tab::adjust(cpu, tab, true, rc);
     let (tw, th) = (rc.width(), rc.height());
-    let mut ops = vec![resize(tab, tw, th)];
+    let mut ops = vec![resize(cpu, tab, tw, th)];
     // The sheet's client area, then its window.
     let cl = Rect::new(0, 0, tw + 2 * px, th + bh + 3 * py);
     let (fx, fy) = frame_size(cpu, hwnd);
-    ops.push(resize(hwnd, cl.right + fx, cl.bottom + fy));
+    ops.push(resize(cpu, hwnd, cl.right + fx, cl.bottom + fy));
     // The buttons.
     let n = 2 + sheet.has_apply as i32 + sheet.has_help as i32;
     let y = cl.bottom - (py + bh);
     let mut x = cl.right - (px + bw) * n;
-    ops.push(move_to(ok, x, y));
-    ops.push(send(hwnd, DM_SETDEFID, IDOK, Arg::V(0)));
+    ops.push(move_to(cpu, ok, x, y));
+    ops.push(send(cpu, hwnd, DM_SETDEFID, IDOK, Arg::V(0)));
     x += px + bw;
-    ops.push(move_to(item(cpu, hwnd, IDCANCEL), x, y));
+    let cancel = item(cpu, hwnd, IDCANCEL);
+    ops.push(move_to(cpu, cancel, x, y));
     let apply = item(cpu, hwnd, IDC_APPLY_BUTTON);
     if sheet.has_apply {
         x += px + bw;
     } else {
-        ops.push(user("ShowWindow", &[apply, SW_HIDE]));
+        ops.push(user(cpu, "ShowWindow", &[apply, SW_HIDE]));
     }
-    ops.push(move_to(apply, x, y));
-    ops.push(user("EnableWindow", &[apply, 0]));
+    ops.push(move_to(cpu, apply, x, y));
+    ops.push(user(cpu, "EnableWindow", &[apply, 0]));
     let help = item(cpu, hwnd, IDHELP);
     x += px + bw;
-    ops.push(move_to(help, x, y));
+    ops.push(move_to(cpu, help, x, y));
     if !sheet.has_help {
-        ops.push(user("ShowWindow", &[help, SW_HIDE]));
+        ops.push(user(cpu, "ShowWindow", &[help, SW_HIDE]));
     }
     ops
 }
@@ -1555,7 +1562,7 @@ fn adjust_wizard(cpu: &mut Cpu, sheet: &Sheet) -> Vec<Op> {
     let (_, client_h) = client_size(cpu, hwnd);
     rc.bottom += client_h - line_rect.top - 1;
     let (fx, fy) = frame_size(cpu, hwnd);
-    let mut ops = vec![resize(hwnd, rc.width() + fx, rc.height() + fy)];
+    let mut ops = vec![resize(cpu, hwnd, rc.width() + fx, rc.height() + fy)];
     let cl = Rect::new(0, 0, rc.width(), rc.height());
     // PROPSHEET_GetPaddingInfoWizard: from the line to the buttons.
     let measure = if sheet.has_help {
@@ -1572,29 +1579,32 @@ fn adjust_wizard(cpu: &mut Cpu, sheet: &Sheet) -> Vec<Op> {
     let (_, line_h) = client_size(cpu, line);
     let y = cl.bottom - (py + bh);
     let mut x = cl.right - (px + bw) * (n - 1) - bw;
-    ops.push(move_to(item(cpu, hwnd, IDC_BACK_BUTTON), x, y));
+    let back = item(cpu, hwnd, IDC_BACK_BUTTON);
+    ops.push(move_to(cpu, back, x, y));
     x += bw;
-    ops.push(move_to(item(cpu, hwnd, IDC_NEXT_BUTTON), x, y));
+    let next = item(cpu, hwnd, IDC_NEXT_BUTTON);
+    ops.push(move_to(cpu, next, x, y));
     let finish = item(cpu, hwnd, IDC_FINISH_BUTTON);
     if sheet.has_finish {
         x += px + bw;
     }
-    ops.push(move_to(finish, x, y));
+    ops.push(move_to(cpu, finish, x, y));
     if !sheet.has_finish {
-        ops.push(user("ShowWindow", &[finish, SW_HIDE]));
+        ops.push(user(cpu, "ShowWindow", &[finish, SW_HIDE]));
     }
     x += px + bw;
-    ops.push(move_to(cancel, x, y));
+    ops.push(move_to(cpu, cancel, x, y));
     let help = item(cpu, hwnd, IDHELP);
     if sheet.has_help {
         x += px + bw;
-        ops.push(move_to(help, x, y));
+        ops.push(move_to(cpu, help, x, y));
     } else {
-        ops.push(user("ShowWindow", &[help, SW_HIDE]));
+        ops.push(user(cpu, "ShowWindow", &[help, SW_HIDE]));
     }
     let y = cl.bottom - (py * 2 + bh + line_h);
     let width = cl.right - px * 2;
     ops.push(user(
+        cpu,
         "SetWindowPos",
         &[
             line,
@@ -1606,8 +1616,8 @@ fn adjust_wizard(cpu: &mut Cpu, sheet: &Sheet) -> Vec<Op> {
             SWP_NOZORDER | SWP_NOACTIVATE,
         ],
     ));
-    ops.push(resize(header, cl.right, 2));
-    ops.push(user("ShowWindow", &[header, SW_HIDE]));
+    ops.push(resize(cpu, header, cl.right, 2));
+    ops.push(user(cpu, "ShowWindow", &[header, SW_HIDE]));
     ops
 }
 
@@ -1625,7 +1635,7 @@ fn init(cpu: &mut Cpu, hwnd: u32, id: u32) -> Option<u32> {
     if wizard(&sheet) {
         s.ops = wiz_buttons(cpu, &sheet, PSWIZB_BACK | PSWIZB_NEXT);
         let next = item(cpu, hwnd, IDC_NEXT_BUTTON);
-        s.ops.push(user("SetFocus", &[next]));
+        s.ops.push(user(cpu, "SetFocus", &[next]));
     }
     s.ops.push(then_op(T_INIT_TABS, &[id]));
     s.ops.push(then_op(T_INIT_LAYOUT, &[id]));
@@ -1643,21 +1653,21 @@ fn init_tabs(cpu: &mut Cpu, id: u32, c: &Ctx) -> Vec<Op> {
     let tab = item(cpu, sheet.hwnd, IDC_TABCONTROL);
     let mut ops = Vec::new();
     for (i, p) in sheet.pages.iter().enumerate() {
-        ops.extend(insert_tab(c, tab, i as u32, &p.text));
+        ops.extend(insert_tab(cpu, c, tab, i as u32, &p.text));
     }
     ops
 }
 
 /// TCM_INSERTITEMA of a tab with `text`, from a continuation, which
 /// knows where the scratch space is.
-fn insert_tab(c: &Ctx, tab: u32, at: u32, text: &[u8]) -> Vec<Op> {
+fn insert_tab(cpu: &Cpu, c: &Ctx, tab: u32, at: u32, text: &[u8]) -> Vec<Op> {
     vec![
         write_text(text),
         Op::Write {
             at: P_ITEM,
             words: vec![TCIF_TEXT, 0, 0, c.scratch + P_TEXT, MAX_TEXT as u32, 0, 0],
         },
-        send(tab, TCM_INSERTITEMA, at, Arg::S(P_ITEM)),
+        send(cpu, tab, TCM_INSERTITEMA, at, Arg::S(P_ITEM)),
     ]
 }
 
@@ -1669,7 +1679,7 @@ fn init_layout(cpu: &mut Cpu, id: u32) -> Vec<Op> {
     let mut ops = Vec::new();
     if wizard(&sheet) {
         let tab = item(cpu, hwnd, IDC_TABCONTROL);
-        ops.push(user("ShowWindow", &[tab, SW_HIDE]));
+        ops.push(user(cpu, "ShowWindow", &[tab, SW_HIDE]));
         ops.extend(adjust_wizard(cpu, &sheet));
     } else {
         ops.extend(adjust_sheet(cpu, &mut sheet));
@@ -1682,7 +1692,7 @@ fn init_layout(cpu: &mut Cpu, id: u32) -> Vec<Op> {
         None => None,
     };
     if let Some(text) = caption {
-        ops.extend(title_ops(hwnd, sheet.flags, &text));
+        ops.extend(title_ops(cpu, hwnd, sheet.flags, &text));
     }
     if sheet.callback != 0 {
         ops.push(call(sheet.callback, &[hwnd, PSCB_INITIALIZED, 0]));
@@ -1701,7 +1711,13 @@ fn init_end(cpu: &mut Cpu, id: u32) -> Vec<Op> {
         return Vec::new();
     };
     let tab = item(cpu, sheet.hwnd, IDC_TABCONTROL);
-    let mut ops = vec![send(tab, TCM_SETCURSEL, sheet.active as u32, Arg::V(0))];
+    let mut ops = vec![send(
+        cpu,
+        tab,
+        TCM_SETCURSEL,
+        sheet.active as u32,
+        Arg::V(0),
+    )];
     ops.extend(unchanged(cpu, id, 0));
     ops
 }
@@ -1717,7 +1733,7 @@ fn changed(cpu: &mut Cpu, id: u32, page: u32) -> Vec<Op> {
     let mut ops = Vec::new();
     if sheet.has_apply {
         let apply = item(cpu, sheet.hwnd, IDC_APPLY_BUTTON);
-        ops.push(user("EnableWindow", &[apply, 1]));
+        ops.push(user(cpu, "EnableWindow", &[apply, 1]));
     }
     put(cpu, id, sheet);
     ops
@@ -1735,7 +1751,7 @@ fn unchanged(cpu: &mut Cpu, id: u32, page: u32) -> Vec<Op> {
     let mut ops = Vec::new();
     if !sheet.pages.iter().any(|p| p.dirty) {
         let apply = item(cpu, sheet.hwnd, IDC_APPLY_BUTTON);
-        ops.push(user("EnableWindow", &[apply, 0]));
+        ops.push(user(cpu, "EnableWindow", &[apply, 0]));
     }
     put(cpu, id, sheet);
     ops
@@ -1754,7 +1770,7 @@ fn wiz_step(cpu: &mut Cpu, id: u32, back: bool) -> Vec<Op> {
         return Vec::new();
     }
     let code = if back { PSN_WIZBACK } else { PSN_WIZNEXT };
-    let mut ops = psn(sheet.hwnd, page_hwnd(&sheet, sheet.active), code, 0);
+    let mut ops = psn(cpu, sheet.hwnd, page_hwnd(&sheet, sheet.active), code, 0);
     ops.push(then_op(if back { T_BACK_R } else { T_NEXT_R }, &[id]));
     ops
 }
@@ -1773,7 +1789,7 @@ fn wiz_step_result(cpu: &mut Cpu, id: u32, c: &Ctx, back: bool) -> Vec<Op> {
         return Vec::new();
     }
     let next = if back { T_BACK_K } else { T_NEXT_K };
-    kill_active(&sheet, next, &[id, index as u32])
+    kill_active(cpu, &sheet, next, &[id, index as u32])
 }
 
 fn wiz_step_go(cpu: &mut Cpu, id: u32, c: &Ctx, back: bool) -> Vec<Op> {
@@ -1790,8 +1806,8 @@ fn wiz_step_go(cpu: &mut Cpu, id: u32, c: &Ctx, back: bool) -> Vec<Op> {
     };
     let control = item(cpu, sheet.hwnd, button);
     let mut ops = vec![
-        user("SetFocus", &[control]),
-        send(sheet.hwnd, DM_SETDEFID, button, Arg::V(0)),
+        user(cpu, "SetFocus", &[control]),
+        send(cpu, sheet.hwnd, DM_SETDEFID, button, Arg::V(0)),
     ];
     let skipdir = if back { -1 } else { 1 };
     ops.extend(set_cur_sel(id, c.word(1) as i32, skipdir, 0));
@@ -1807,7 +1823,7 @@ fn finish(cpu: &mut Cpu, id: u32) -> Vec<Op> {
         return Vec::new();
     }
     let page = page_hwnd(&sheet, sheet.active);
-    let mut ops = psn(sheet.hwnd, page, PSN_WIZFINISH, 0);
+    let mut ops = psn(cpu, sheet.hwnd, page, PSN_WIZFINISH, 0);
     ops.push(then_op(T_FINISH_R, &[id]));
     ops
 }
@@ -1850,7 +1866,7 @@ fn apply_begin(cpu: &mut Cpu, id: u32, c: &Ctx) -> Vec<Op> {
         return vec![then_op(T_APPLY_TAIL, &[id, c.word(2), 0])];
     }
     let page = page_hwnd(&sheet, sheet.active);
-    let mut ops = psn(sheet.hwnd, page, PSN_KILLACTIVE, 0);
+    let mut ops = psn(cpu, sheet.hwnd, page, PSN_KILLACTIVE, 0);
     ops.push(then_op(T_APPLY_K, &c.data));
     ops
 }
@@ -1869,13 +1885,13 @@ fn apply_from(cpu: &mut Cpu, id: u32, from: usize, lparam: u32, tail: u32) -> Ve
             sheet.active_valid = false;
         } else if sheet.active >= 0 {
             let page = page_hwnd(&sheet, sheet.active);
-            ops.extend(psn(sheet.hwnd, page, PSN_SETACTIVE, 0));
+            ops.extend(psn(cpu, sheet.hwnd, page, PSN_SETACTIVE, 0));
         }
         put(cpu, id, sheet);
         ops.push(then_op(T_APPLY_TAIL, &[id, tail, 1]));
         return ops;
     };
-    let mut ops = psn(sheet.hwnd, sheet.pages[i].hwnd, PSN_APPLY, lparam);
+    let mut ops = psn(cpu, sheet.hwnd, sheet.pages[i].hwnd, PSN_APPLY, lparam);
     ops.push(then_op(T_APPLY_I, &[id, i as u32, lparam, tail]));
     ops
 }
@@ -1909,7 +1925,7 @@ fn apply_tail(cpu: &mut Cpu, id: u32, c: &Ctx) -> Vec<Op> {
         }
         IDC_APPLY_BUTTON if ok => {
             let apply = item(cpu, sheet.hwnd, IDC_APPLY_BUTTON);
-            return vec![user("EnableWindow", &[apply, 0])];
+            return vec![user(cpu, "EnableWindow", &[apply, 0])];
         }
         _ => {}
     }
@@ -1926,7 +1942,7 @@ fn cancel(cpu: &mut Cpu, id: u32, lparam: u32) -> Vec<Op> {
         return Vec::new();
     }
     let page = page_hwnd(&sheet, sheet.active);
-    let mut ops = psn(sheet.hwnd, page, PSN_QUERYCANCEL, 0);
+    let mut ops = psn(cpu, sheet.hwnd, page, PSN_QUERYCANCEL, 0);
     ops.push(then_op(T_CANCEL_Q, &[id, lparam]));
     ops
 }
@@ -1940,7 +1956,7 @@ fn cancel_result(cpu: &mut Cpu, id: u32, c: &Ctx) -> Vec<Op> {
     }
     let mut ops = Vec::new();
     for p in sheet.pages.iter().filter(|p| p.hwnd != 0) {
-        ops.extend(psn(sheet.hwnd, p.hwnd, PSN_RESET, c.word(1)));
+        ops.extend(psn(cpu, sheet.hwnd, p.hwnd, PSN_RESET, c.word(1)));
     }
     close(&mut sheet);
     put(cpu, id, sheet);
@@ -1955,7 +1971,13 @@ fn help(cpu: &mut Cpu, id: u32) -> Vec<Op> {
     if sheet.active < 0 {
         return Vec::new();
     }
-    psn(sheet.hwnd, page_hwnd(&sheet, sheet.active), PSN_HELP, 0)
+    psn(
+        cpu,
+        sheet.hwnd,
+        page_hwnd(&sheet, sheet.active),
+        PSN_HELP,
+        0,
+    )
 }
 
 /// PROPSHEET_DoCommand: what a button does, or None for another
@@ -1989,11 +2011,11 @@ fn remove(cpu: &mut Cpu, id: u32, c: &Ctx) -> Vec<Op> {
     let page = sheet.pages.remove(index);
     let mut ops = Vec::new();
     if page.hwnd != 0 {
-        ops.push(user("DestroyWindow", &[page.hwnd]));
+        ops.push(user(cpu, "DestroyWindow", &[page.hwnd]));
     }
     ops.extend(destroy_page(cpu, page.hpage));
     let tab = item(cpu, sheet.hwnd, IDC_TABCONTROL);
-    ops.push(send(tab, TCM_DELETEITEM, index as u32, Arg::V(0)));
+    ops.push(send(cpu, tab, TCM_DELETEITEM, index as u32, Arg::V(0)));
     put(cpu, id, sheet);
     ops
 }
@@ -2071,7 +2093,7 @@ fn clean_up(cpu: &mut Cpu, hwnd: u32, id: u32) -> Vec<Op> {
     let mut ops = Vec::new();
     for p in std::mem::take(&mut sheet.pages) {
         if p.hwnd != 0 {
-            ops.push(user("DestroyWindow", &[p.hwnd]));
+            ops.push(user(cpu, "DestroyWindow", &[p.hwnd]));
         }
         ops.extend(destroy_page(cpu, p.hpage));
     }
@@ -2091,7 +2113,7 @@ pub fn then(cpu: &mut Cpu, t: u16, c: &mut Ctx) -> Vec<Op> {
         T_CREATED => created(cpu, c, id),
         T_LOOP => run_loop(cpu, c, id),
         T_GOT => got_message(cpu, c, id),
-        T_DISPATCHED => dispatched(c, id),
+        T_DISPATCHED => dispatched(cpu, c, id),
         T_DONE => {
             state(cpu).propsheet.sheets.remove(&id);
             Vec::new()
@@ -2171,7 +2193,7 @@ pub fn then(cpu: &mut Cpu, t: u16, c: &mut Ctx) -> Vec<Op> {
                 return Vec::new();
             };
             vec![
-                send(sheet.pages[k].hwnd, PSM_QUERYSIBLINGS, wp, Arg::V(lp)),
+                send(cpu, sheet.pages[k].hwnd, PSM_QUERYSIBLINGS, wp, Arg::V(lp)),
                 then_op(T_QUERY, &[id, k as u32 + 1, wp, lp]),
             ]
         }
@@ -2186,7 +2208,7 @@ pub fn then(cpu: &mut Cpu, t: u16, c: &mut Ctx) -> Vec<Op> {
                 .map(|p| p.text.clone())
                 .unwrap_or_default();
             let tab = item(cpu, sheet.hwnd, IDC_TABCONTROL);
-            insert_tab(c, tab, index + 1, &text)
+            insert_tab(cpu, c, tab, index + 1, &text)
         }
         T_REMOVE => remove(cpu, id, c),
         T_ISDLG => {
@@ -2205,10 +2227,10 @@ pub fn then(cpu: &mut Cpu, t: u16, c: &mut Ctx) -> Vec<Op> {
                 }
             };
             if delta == 0 {
-                return is_dialog_message(sheet.hwnd, id, msg);
+                return is_dialog_message(cpu, sheet.hwnd, id, msg);
             }
             set_result(cpu, c.hwnd, 1);
-            kill_active(&sheet, T_ISDLG_K, &[id, delta as u32])
+            kill_active(cpu, &sheet, T_ISDLG_K, &[id, delta as u32])
         }
         T_ISDLG_K => {
             let Some(sheet) = get(cpu, id) else {
@@ -2234,9 +2256,9 @@ pub fn then(cpu: &mut Cpu, t: u16, c: &mut Ctx) -> Vec<Op> {
     }
 }
 
-fn is_dialog_message(hwnd: u32, id: u32, msg: u32) -> Vec<Op> {
+fn is_dialog_message(cpu: &Cpu, hwnd: u32, id: u32, msg: u32) -> Vec<Op> {
     vec![
-        user("IsDialogMessageA", &[hwnd, msg]),
+        user(cpu, "IsDialogMessageA", &[hwnd, msg]),
         then_op(T_RESULT_LAST, &[id]),
     ]
 }
@@ -2270,7 +2292,7 @@ pub fn dlg_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             None => {
                 if sheet.active_valid && sheet.active != -1 {
                     let page = page_hwnd(&sheet, sheet.active);
-                    s.ops.push(send(page, WM_COMMAND, wp, Arg::V(lp)));
+                    s.ops.push(send(cpu, page, WM_COMMAND, wp, Arg::V(lp)));
                 }
             }
         },
@@ -2285,7 +2307,7 @@ pub fn dlg_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 let index = tab::cur_sel(cpu, from);
                 s.ops = set_cur_sel(id, index, 1, 0);
             } else if code == TCN_SELCHANGING {
-                s.ops = kill_active(&sheet, T_SELCHANGING, &[id]);
+                s.ops = kill_active(cpu, &sheet, T_SELCHANGING, &[id]);
                 s.result = 1;
             }
         }
@@ -2303,12 +2325,12 @@ pub fn dlg_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let tab = item(cpu, hwnd, IDC_TABCONTROL);
             set_result(cpu, hwnd, tab);
         }
-        PSM_SETCURSEL => s.ops = kill_active(&sheet, T_PSM_SETCUR, &[id, wp, lp]),
+        PSM_SETCURSEL => s.ops = kill_active(cpu, &sheet, T_PSM_SETCUR, &[id, wp, lp]),
         PSM_CANCELTOCLOSE => {
             let cancel = item(cpu, hwnd, IDCANCEL);
             let ok = item(cpu, hwnd, IDOK);
-            s.ops.push(user("EnableWindow", &[cancel, 0]));
-            s.ops.extend(set_text(ok, b"Close"));
+            s.ops.push(user(cpu, "EnableWindow", &[cancel, 0]));
+            s.ops.extend(set_text(cpu, ok, b"Close"));
             s.result = 0;
         }
         PSM_RESTARTWINDOWS | PSM_REBOOTSYSTEM => {
@@ -2331,7 +2353,7 @@ pub fn dlg_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 load_string(cpu, sheet.instance, lp)
             };
             if let Some(text) = text {
-                s.ops = title_ops(hwnd, wp, &text);
+                s.ops = title_ops(cpu, hwnd, wp, &text);
             }
         }
         PSM_APPLY => s.ops = apply(id, 0, 0),
@@ -2353,11 +2375,11 @@ pub fn dlg_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                     let shift = user32::input::get_key_state(cpu, &[VK_SHIFT]).unwrap_or(0);
                     let shift = (shift & 0x8000 != 0) as u32;
                     s.ops = vec![
-                        send(target, WM_GETDLGCODE, 0, Arg::V(lp)),
+                        send(cpu, target, WM_GETDLGCODE, 0, Arg::V(lp)),
                         then_op(T_ISDLG, &[id, lp, key, shift]),
                     ];
                 } else {
-                    s.ops = is_dialog_message(hwnd, id, lp);
+                    s.ops = is_dialog_message(cpu, hwnd, id, lp);
                 }
             }
         }
@@ -2380,23 +2402,23 @@ pub fn dlg_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 return None;
             }
             let finish = item(cpu, hwnd, IDC_FINISH_BUTTON);
-            s.ops = set_text(finish, &text.unwrap_or_default());
-            s.ops.push(user("ShowWindow", &[finish, SW_SHOW]));
-            s.ops.push(user("EnableWindow", &[finish, 1]));
+            s.ops = set_text(cpu, finish, &text.unwrap_or_default());
+            s.ops.push(user(cpu, "ShowWindow", &[finish, SW_SHOW]));
+            s.ops.push(user(cpu, "EnableWindow", &[finish, 1]));
             s.ops
-                .push(send(hwnd, DM_SETDEFID, IDC_FINISH_BUTTON, Arg::V(0)));
+                .push(send(cpu, hwnd, DM_SETDEFID, IDC_FINISH_BUTTON, Arg::V(0)));
             let back = item(cpu, hwnd, IDC_BACK_BUTTON);
-            s.ops.push(user("ShowWindow", &[back, SW_HIDE]));
+            s.ops.push(user(cpu, "ShowWindow", &[back, SW_HIDE]));
             if !sheet.has_finish {
                 let next = item(cpu, hwnd, IDC_NEXT_BUTTON);
-                s.ops.push(user("ShowWindow", &[next, SW_HIDE]));
+                s.ops.push(user(cpu, "ShowWindow", &[next, SW_HIDE]));
             }
         }
         PSM_SETWIZBUTTONS => s.ops = wiz_buttons(cpu, &sheet, lp),
         PSM_SETCURSELID => {
             let index = find_by_res_id(cpu, &sheet, lp);
             if (index as usize) < sheet.pages.len() {
-                s.ops = kill_active(&sheet, T_SETCURSELID, &[id, index as u32]);
+                s.ops = kill_active(cpu, &sheet, T_SETCURSELID, &[id, index as u32]);
             }
         }
         // The messages from here on are Internet Explorer 4's (COMCTL32

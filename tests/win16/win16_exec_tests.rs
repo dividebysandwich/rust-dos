@@ -7,7 +7,7 @@ use crate::win16;
 use rust_dos_ne as ne;
 use rust_dos_pe as pe;
 use std::fs;
-use win16::{CODE, Code, program, run_command, run_with};
+use win16::{CODE, Code, dos_marker, program, run_command, run_with};
 
 /// KERNEL's ordinals.
 const GET_MODULE_FILE_NAME: u16 = 49;
@@ -297,4 +297,246 @@ fn a_file_with_a_loaded_file_name_is_that_module() {
         fs::write(sub.join("RES.DLL"), library("Q")).unwrap();
     });
     assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn a_program_starts_a_dos_program_and_sees_what_it_wrote() {
+    // WinExec("C:\DOSPROG.COM /X"): Windows 98 runs a DOS program in a
+    // DOS box, on the same drives, and WinExec gives 33 or more. The
+    // built-in Windows runs it full screen while the Windows programs
+    // wait, so when WinExec returns, the file it writes is there. The DOS
+    // program changes to C:\SUB, which on Windows is its DOS machine's
+    // own current directory: the program opens MARK.TXT in its own, C:\.
+    // It ends with 1 when it can open that file, 2 when it can't, and 10h
+    // when WinExec didn't give 33.
+    let mut code = Code::new();
+    let path_at = code.here() + 2;
+    code.push_far(0).push(1).call("KERNEL", WIN_EXEC);
+    let mark_at = code.here() + 10;
+    code.emit(&[
+        0x3D, 0x21, 0x00, // cmp ax,33
+        0xB0, 0x10, // mov al,10h
+        0x75, 0x10, // jne end
+        0x0E, 0x1F, // push cs; pop ds
+        0xBA, 0xFF, 0xFF, // mov dx,mark
+        0xB8, 0x00, 0x3D, // mov ax,3D00h
+        0xCD, 0x21, // int 21h
+        0xB0, 0x01, // mov al,1
+        0x73, 0x02, // jnc end
+        0xB0, 0x02, // mov al,2
+    ])
+    .exit_al();
+    let path = code.here();
+    code.emit(b"C:\\DOSPROG.COM /X\0");
+    code.patch(path_at, path);
+    let mark = code.here();
+    code.emit(b"MARK.TXT\0");
+    code.patch(mark_at, mark);
+    let mut folder = None;
+    let (exit, log) = run_with("dos_child", program(&code, CODE), |_, base| {
+        fs::write(base.join("DOSPROG.COM"), dos_marker()).unwrap();
+        fs::create_dir_all(base.join("SUB")).unwrap();
+        folder = Some(base.to_path_buf());
+    });
+    assert_eq!(exit, 1, "{log}");
+    assert!(log.contains("DOSPROG.COM ended with exit code 5"), "{log}");
+    let written = fs::read(folder.unwrap().join("MARK.TXT")).unwrap();
+    // Windows 4.x, and the command tail with its blank.
+    assert_eq!(written[0], 4, "{written:?}");
+    assert_eq!(&written[2..], b" /X");
+}
+
+/// KERNEL's FreeLibrary and GetModuleHandle.
+const FREE_LIBRARY: u16 = 96;
+const GET_MODULE_HANDLE: u16 = 47;
+
+/// The places a test puts copies of a DLL in, by the length of the path
+/// GetModuleFileName gives for each: the current directory (C:\, where
+/// the shell starts the program), the Windows directory, the system
+/// directory, and C:\APP, where the program is.
+const IN_CURRENT: u8 = 11; // C:\PICK.DLL
+const IN_WINDOWS: u8 = 19; // C:\WINDOWS\PICK.DLL
+const IN_SYSTEM: u8 = 26; // C:\WINDOWS\SYSTEM\PICK.DLL
+const IN_APP: u8 = 15; // C:\APP\PICK.DLL
+
+/// Code that ends the program with the length of the path of the module
+/// whose handle or instance is in AX, or with 1 if AX is below 32.
+fn exit_with_path_length(code: &mut Code) {
+    code.emit(&[
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0x73, 0x06, // jae over the exit
+        0xB0, 0x01, 0xB4, 0x4C, 0xCD, 0x21, // mov al,1; exit
+        0x50, // push ax
+        0x1E, // push ds
+        0x68, 0x20, 0x00, // push 20h: the buffer
+        0x68, 0x80, 0x00, // push 80h: its size
+    ]);
+    code.call("KERNEL", GET_MODULE_FILE_NAME).exit_al();
+}
+
+/// A program, started as C:\APP\T.EXE with C:\ the current directory,
+/// that first loads and frees each of `first` (paths), then loads `name`
+/// and ends with the length of its path. `places` are the directories
+/// (under C:\) that get a copy of `name`'s DLL.
+fn search(test: &str, first: &[&str], name: &str, places: &[&str]) -> (u8, String) {
+    search_after(test, first, &[], name, places)
+}
+
+/// `search`, with the files `gone` (paths) deleted after the loads of
+/// `first`.
+fn search_after(
+    test: &str,
+    first: &[&str],
+    gone: &[&str],
+    name: &str,
+    places: &[&str],
+) -> (u8, String) {
+    let mut code = Code::new();
+    let mut strings = Vec::new();
+    for path in first {
+        let at = code.here() + 2;
+        code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+        code.emit(&[0x50]).call("KERNEL", FREE_LIBRARY); // push ax
+        strings.push((at, *path));
+    }
+    for path in gone {
+        // push ds; push cs; pop ds; mov dx,path; mov ah,41h; int 21h;
+        // pop ds.
+        code.emit(&[0x1E, 0x0E, 0x1F, 0xBA]);
+        let at = code.here();
+        code.emit(&[0, 0, 0xB4, 0x41, 0xCD, 0x21, 0x1F]);
+        strings.push((at, *path));
+    }
+    let at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+    strings.push((at, name));
+    exit_with_path_length(&mut code);
+    for (at, text) in strings {
+        let here = code.here();
+        code.patch(at, here);
+        code.emit(text.as_bytes()).emit(&[0]);
+    }
+    let exe = program(&code, CODE);
+    let copy = exe.clone();
+    let file = name.rsplit('\\').next().unwrap().to_string();
+    run_command(test, exe, "APP\\T.EXE", "", move |_, base| {
+        fs::create_dir_all(base.join("APP")).unwrap();
+        fs::write(base.join("APP").join("T.EXE"), copy).unwrap();
+        for place in places {
+            let dir = base.join(place);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(&file), library("PICK")).unwrap();
+        }
+    })
+}
+
+#[test]
+fn the_current_directory_comes_before_the_windows_directory() {
+    let places = ["", "WINDOWS", "WINDOWS/SYSTEM", "APP"];
+    let (exit, log) = search("search_current", &[], "PICK.DLL", &places);
+    assert_eq!(exit, IN_CURRENT, "{log}");
+}
+
+#[test]
+fn the_windows_directory_comes_before_the_system_directory() {
+    let places = ["WINDOWS", "WINDOWS/SYSTEM", "APP"];
+    let (exit, log) = search("search_windows", &[], "PICK.DLL", &places);
+    assert_eq!(exit, IN_WINDOWS, "{log}");
+}
+
+/// Windows 3.1 looks in the directory of the current task's executable
+/// only after the system directory, so a program's older copy of a
+/// system DLL beside it isn't the one loaded.
+#[test]
+fn the_system_directory_comes_before_the_programs_directory() {
+    let places = ["WINDOWS/SYSTEM", "APP"];
+    let (exit, log) = search("search_system", &[], "PICK.DLL", &places);
+    assert_eq!(exit, IN_SYSTEM, "{log}");
+}
+
+#[test]
+fn the_programs_directory_is_searched() {
+    let (exit, log) = search("search_app", &[], "PICK.DLL", &["APP"]);
+    assert_eq!(exit, IN_APP, "{log}");
+}
+
+/// Windows 95 makes a DLL loaded from the system directory one of
+/// Known16DLLs, and looks for those there first, before the current
+/// directory: once C:\WINDOWS\SYSTEM\PICK.DLL was loaded, C:\PICK.DLL
+/// isn't the one LoadLibrary("PICK.DLL") loads.
+#[test]
+fn a_known_dll_is_looked_for_in_the_system_directory_first() {
+    let places = ["", "WINDOWS/SYSTEM"];
+    let first = ["C:\\WINDOWS\\SYSTEM\\PICK.DLL"];
+    let (exit, log) = search("search_known", &first, "PICK.DLL", &places);
+    assert_eq!(exit, IN_SYSTEM, "{log}");
+    // Without it, the current directory's comes first.
+    let (exit, log) = search("search_unknown", &[], "PICK.DLL", &places);
+    assert_eq!(exit, IN_CURRENT, "{log}");
+}
+
+/// A value of Known16DLLs stays when its file leaves the system
+/// directory, and Windows 95 then looks in the Windows directory before
+/// the current one (Microsoft's articles Q141969 and Q149430): the
+/// system directory, the Windows directory, the current directory, the
+/// task's directory, PATH.
+#[test]
+fn a_known_dll_moved_away_is_looked_for_in_the_windows_directory_next() {
+    let places = ["", "WINDOWS", "WINDOWS/SYSTEM"];
+    let system = "C:\\WINDOWS\\SYSTEM\\PICK.DLL";
+    let (exit, log) = search_after("search_moved", &[system], &[system], "PICK.DLL", &places);
+    assert_eq!(exit, IN_WINDOWS, "{log}");
+}
+
+/// A DLL that imports another is in C:\LIBS, with a copy of the other
+/// beside it and one in C:\APP, the program's directory. Windows looks
+/// for the import in the current task's directory, not in that of the
+/// DLL that imports it, so C:\APP\INNER.DLL is loaded (16 characters,
+/// where C:\LIBS\INNER.DLL has 17).
+#[test]
+fn a_dlls_import_is_looked_for_in_the_tasks_directory() {
+    let mut code = Code::new();
+    let outer_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+    code.emit(&[
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0x73, 0x06, // jae over the exit
+        0xB0, 0x02, 0xB4, 0x4C, 0xCD, 0x21, // mov al,2; exit
+    ]);
+    let inner_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", GET_MODULE_HANDLE);
+    exit_with_path_length(&mut code);
+    let here = code.here();
+    code.patch(outer_at, here);
+    code.emit(b"C:\\LIBS\\OUTER.DLL\0");
+    let here = code.here();
+    code.patch(inner_at, here);
+    code.emit(b"INNER\0");
+    let exe = program(&code, CODE);
+    let copy = exe.clone();
+    let (exit, log) = run_command("search_import", exe, "APP\\T.EXE", "", move |_, base| {
+        let (app, libs) = (base.join("APP"), base.join("LIBS"));
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&libs).unwrap();
+        fs::write(app.join("T.EXE"), copy).unwrap();
+        fs::write(libs.join("OUTER.DLL"), library_importing("OUTER", "INNER")).unwrap();
+        fs::write(libs.join("INNER.DLL"), library("INNER")).unwrap();
+        fs::write(app.join("INNER.DLL"), library("INNER")).unwrap();
+    });
+    assert_eq!(exit, 16, "{log}");
+}
+
+/// A DLL named `name` that imports the DLL `dll`, whose LibMain returns
+/// 1.
+fn library_importing(name: &str, dll: &str) -> Vec<u8> {
+    let mut b = ne::Builder::new(name, ne::LIBMODULE);
+    b.import_module(dll);
+    let text = b.segment(ne::SegmentSpec {
+        data: vec![0xB8, 0x01, 0x00, 0xCB], // mov ax,1; retf
+        flags: CODE,
+        alloc: 0,
+        relocations: Vec::new(),
+    });
+    b.entry_point(text, 0);
+    b.build()
 }

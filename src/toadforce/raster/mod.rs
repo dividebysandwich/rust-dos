@@ -28,9 +28,11 @@
 //! primitives in the order they came and draws the rows it owns (row
 //! `r` belongs to share `r % n`), so a pixel sees the primitives in the
 //! card's order and the picture is the same for any number of threads.
-//! The card empties the queue before any other command touches the
-//! memory and at the end of the run, so nothing is queued when the
-//! guest runs, a state is saved, or the screen is shown.
+//! The card empties the queue before another command touches memory
+//! the queued draws read or draw into (`Renderer::waits`), before a
+//! command other than a `FILL` or a `BLT` touches any, and at the end
+//! of the run, so nothing is queued when the guest runs, a state is
+//! saved, or the screen is shown.
 //!
 //! With a host renderer attached (`super::gpu`), the primitives of a
 //! state the host takes are queued for it as the screen vertices of
@@ -97,6 +99,11 @@ pub struct Renderer {
     prims: Vec<Prim>,
     /// The target of what is queued.
     target: Option<Target>,
+    /// The bytes of card memory the queued draws read besides their
+    /// target: their textures (`pipeline::reads`), as ranges in order
+    /// of their offsets, merged where they overlap or touch
+    /// (`note_reads`).
+    reads: Vec<(u32, u32)>,
     /// Kept from draw to draw for their room.
     vertices: Vec<ScreenVertex>,
     lit: Vec<geometry::Vertex>,
@@ -383,6 +390,45 @@ fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
     }
 }
 
+/// Add the bytes a draw with `state` reads besides its target to
+/// `reads` (`Renderer::reads`). A batch of many draws keeps one range
+/// for the textures they share, and one for a texture's levels laid
+/// out one after the other, so adding to it and asking it
+/// (`overlaps_any`) take a binary search however long the batch is.
+fn note_reads(reads: &mut Vec<(u32, u32)>, state: &DrawState) {
+    let clamp = |at: u64| at.min(u32::MAX as u64) as u32;
+    for t in state.tex.iter().flatten() {
+        pipeline::texture_reads(&t.texture, |(first, end)| {
+            add_range(reads, (clamp(first), clamp(end)));
+        });
+    }
+}
+
+/// Add `(first, end)` to `ranges`, which are in order of their
+/// offsets and neither overlap nor touch, keeping them so.
+fn add_range(ranges: &mut Vec<(u32, u32)>, (first, end): (u32, u32)) {
+    if first >= end {
+        return;
+    }
+    // The ranges it overlaps or touches: from the first that ends at
+    // or after its start to the last that starts at or before its end.
+    let from = ranges.partition_point(|r| r.1 < first);
+    let to = ranges.partition_point(|r| r.0 <= end);
+    if from == to {
+        ranges.insert(from, (first, end));
+    } else {
+        let merged = (ranges[from].0.min(first), ranges[to - 1].1.max(end));
+        ranges.splice(from..to, [merged]);
+    }
+}
+
+/// Whether one of `ranges`, kept by `add_range`, shares a byte with
+/// `(first, end)`.
+fn overlaps_any(ranges: &[(u32, u32)], (first, end): (u32, u32)) -> bool {
+    let at = ranges.partition_point(|r| r.1 <= first);
+    ranges.get(at).is_some_and(|r| r.0 < end && first < end)
+}
+
 // A copy of a card draws as the card does, and has nothing queued.
 impl Clone for Renderer {
     fn clone(&self) -> Self {
@@ -631,7 +677,10 @@ impl Renderer {
                 {
                     last.vertices.end = run.vertices.end;
                 }
-                _ => self.host_runs.push(run),
+                _ => {
+                    note_reads(&mut self.reads, &run.state);
+                    self.host_runs.push(run);
+                }
             }
             return Ok(Some(Drawn {
                 primitives,
@@ -643,6 +692,7 @@ impl Renderer {
             return Ok(None);
         }
         let serial = state.serial;
+        note_reads(&mut self.reads, &state);
         self.runs.push(Run {
             state,
             prims: first..self.prims.len(),
@@ -722,6 +772,7 @@ impl Renderer {
                 (start - geometry.words.start) / words
             }
             _ => {
+                note_reads(&mut self.reads, &state);
                 self.host_runs.push(gpu::Run {
                     state,
                     vertices: 0..0,
@@ -907,16 +958,30 @@ impl Renderer {
         });
     }
 
+    /// Whether a command that writes the bytes `writes` of card memory
+    /// and reads the bytes `reads` has to wait for the queue to be
+    /// drawn: it writes bytes a queued draw reads (a texture or its
+    /// palette) or draws into (the target or its depth buffer), or
+    /// reads bytes a queued draw draws into. A command that touches
+    /// none of them may run before the queue is drawn: each byte
+    /// either touches then sees the card's order, and the queue goes
+    /// on growing. The host makes its copies of the textures from card
+    /// memory when the queue is drawn, after such a command, which
+    /// therefore may write a texture that only draws queued after it
+    /// sample.
+    pub fn waits(&self, writes: (u32, u32), reads: Option<(u32, u32)>) -> bool {
+        let Some(target) = &self.target else {
+            return false;
+        };
+        let wide = |r: (u32, u32)| (r.0 as u64, r.1 as u64);
+        pipeline::writes(target, wide(writes))
+            || reads.is_some_and(|r| pipeline::writes(target, wide(r)))
+            || overlaps_any(&self.reads, writes)
+    }
+
     /// Draw what is queued, or have the host of `gpu` draw it.
     pub fn flush(&mut self, memory: &mut [u8], gpu: &mut Gpu) {
         if !self.host_runs.is_empty() {
-            // The textures the host is about to copy from card memory.
-            let mut reads = Vec::new();
-            if gpu.ahead() {
-                for run in &self.host_runs {
-                    pipeline::reads(&run.state, &mut reads);
-                }
-            }
             let batch = gpu::Batch {
                 target: self.target.expect("what is queued has a target"),
                 runs: &self.host_runs,
@@ -924,7 +989,10 @@ impl Renderer {
                 words: &self.host_words,
                 indices: &self.host_indices,
             };
-            gpu.draw(&batch, &reads, memory);
+            // `reads` are the textures the host is about to copy from
+            // card memory.
+            gpu.draw(&batch, &self.reads, memory);
+            self.reads.clear();
             self.host_runs.clear();
             self.host_vertices.clear();
             self.host_words.clear();
@@ -934,6 +1002,7 @@ impl Renderer {
         }
         if self.runs.is_empty() {
             self.target = None;
+            self.reads.clear();
             return;
         }
         let (runs, prims) = (&self.runs, &self.prims);
@@ -965,6 +1034,7 @@ impl Renderer {
         }
         self.runs.clear();
         self.prims.clear();
+        self.reads.clear();
         // The host's copies of what was drawn into are stale.
         if let Some(target) = self.target.take() {
             let (first, end) = gpu::range(&target.colour);

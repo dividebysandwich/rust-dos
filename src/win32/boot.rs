@@ -86,8 +86,9 @@ pub const EXIT_EXEC: u16 = 83;
 /// names SetCurrentDirectoryA was given for them (`Win32::long_dirs`).
 /// The program DOS started gets them back after the commands, which run
 /// in the same DOS process: on Windows a command changes Explorer's
-/// directory for no other program.
-#[derive(Clone, Debug, Default)]
+/// directory for no other program. A DOS program a Windows program
+/// started gives them back too (dosvm.rs).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Directories {
     current: (u8, Vec<(u8, String)>),
     long: Vec<(String, String)>,
@@ -124,11 +125,18 @@ pub fn session_starts(cpu: &mut Cpu) {
         return;
     }
     cpu.bus.win32.boot.program = cpu.bus.win32.pending.take();
-    cpu.bus.win32.boot.directories = Some(Directories {
-        current: cpu.bus.disk.current_directories(),
-        long: cpu.bus.win32.long_dirs.clone(),
-    });
+    cpu.bus.win32.boot.directories = Some(Directories::now(cpu));
     next(cpu);
+}
+
+impl Directories {
+    /// DOS's current drive and directories as they are now.
+    pub fn now(cpu: &Cpu) -> Directories {
+        Directories {
+            current: cpu.bus.disk.current_directories(),
+            long: cpu.bus.win32.long_dirs.clone(),
+        }
+    }
 }
 
 /// ExitWindowsEx ends the session with a restart.
@@ -209,7 +217,7 @@ pub fn next(cpu: &mut Cpu) -> bool {
 }
 
 /// Make `directories` DOS's current ones again, in its tables too.
-fn put_back(cpu: &mut Cpu, directories: Directories) {
+pub fn put_back(cpu: &mut Cpu, directories: Directories) {
     cpu.bus.disk.set_current_directories(&directories.current);
     cpu.bus.win32.long_dirs = directories.long;
     super::dos(cpu, |cpu| {

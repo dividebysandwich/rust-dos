@@ -677,7 +677,7 @@ pub fn send_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             0 => {
                 if t.scratch != 0 && super::hook::has(cpu, WH_CALLWNDPROC) {
                     write_words(cpu, t.scratch, &[args[3], args[2], args[1], args[0]]);
-                    return super::hook::call(WH_CALLWNDPROC, 0, 1, t.scratch, 1);
+                    return super::hook::call(cpu, WH_CALLWNDPROC, 0, 1, t.scratch, 1);
                 }
                 t.step = 1;
             }
@@ -695,7 +695,7 @@ pub fn send_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.set(SEND_RESULT, value);
                 if t.scratch != 0 && super::hook::has(cpu, WH_CALLWNDPROCRET) {
                     write_words(cpu, t.scratch, &[value, args[3], args[2], args[1], args[0]]);
-                    return super::hook::call(WH_CALLWNDPROCRET, 0, 1, t.scratch, 3);
+                    return super::hook::call(cpu, WH_CALLWNDPROCRET, 0, 1, t.scratch, 3);
                 }
                 return Next::Done(send_result(cpu, t, value));
             }
@@ -782,6 +782,7 @@ fn reply_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 /// none.
 fn handle_sent(cpu: &mut Cpu, step: u16) -> Option<Next> {
     let me = current_tid(cpu);
+    let send = address_of(cpu, "SendMessageA");
     let state = user(cpu);
     let q = state.queue_mut(me);
     let (call, args) = if let Some(cb) = q.callbacks.pop_front() {
@@ -791,7 +792,7 @@ fn handle_sent(cpu: &mut Cpu, step: u16) -> Option<Next> {
         let sent = q.sent.pop_front()?;
         let args = [sent.hwnd, sent.message, sent.wparam, sent.lparam];
         q.in_send.push(Some(sent));
-        (address_of("SendMessageA"), args)
+        (send, args)
     };
     q.waiting.push((0, 0));
     // With none left to handle, QS_SENDMESSAGE no longer counts as new.
@@ -971,12 +972,13 @@ pub fn post_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         post(cpu, tid, m);
         return Some(TRUE);
     }
+    let progman = super::progman::proc_address(cpu);
     if hwnd == HWND_BROADCAST || hwnd == 0xFFFF_FFFF {
         for h in user(cpu).top_levels() {
             // Program Manager's window has no thread whose queue is read.
             let Some(tid) = user(cpu)
                 .window(h)
-                .filter(|w| !super::progman::is_server(w))
+                .filter(|w| !super::progman::is_server(w, progman))
                 .map(|w| w.tid)
             else {
                 continue;
@@ -998,7 +1000,7 @@ pub fn post_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     // Program Manager's window, of no thread, handles what is posted to
     // it now.
-    if super::progman::is_server(w) {
+    if super::progman::is_server(w, progman) {
         return super::progman::posted(cpu, hwnd, msg, wp, lp);
     }
     let tid = w.tid;
@@ -1328,7 +1330,7 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                             t.set(GET_HOOKED + k, w);
                         }
                         let code = if remove { HC_ACTION } else { HC_NOREMOVE };
-                        return super::hook::call(kind, code, wp, lp, 7);
+                        return super::hook::call(cpu, kind, code, wp, lp, 7);
                     }
                     if let Some(next) = found(cpu, t, tid, &m) {
                         return next;
@@ -1377,7 +1379,7 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.step = 6;
                 let activates = matches!(value, 0 | MA_ACTIVATE | MA_ACTIVATEANDEAT);
                 if activates && user(cpu).is_window(top) {
-                    return Next::call(address_of("ActivateByClick"), &[top], 6);
+                    return Next::call(address_of(cpu, "ActivateByClick"), &[top], 6);
                 }
             }
             6 => {
@@ -1391,12 +1393,12 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     t.set(GET_CURSOR_HWND, 0);
                     if user(cpu).is_window(hwnd) {
                         let lp = t.var(GET_CURSOR_LP);
-                        return super::window::send(hwnd, WM_SETCURSOR, hwnd, lp, 3);
+                        return super::window::send(cpu, hwnd, WM_SETCURSOR, hwnd, lp, 3);
                     }
                 }
                 if super::hook::has(cpu, WH_GETMESSAGE) {
                     let remove = t.var(GET_REMOVE);
-                    return super::hook::call(WH_GETMESSAGE, 0, remove, t.var(GET_MSG), 2);
+                    return super::hook::call(cpu, WH_GETMESSAGE, 0, remove, t.var(GET_MSG), 2);
                 }
                 return Next::Done(t.var(GET_RESULT));
             }
@@ -1511,7 +1513,14 @@ fn found(cpu: &mut Cpu, t: &mut Task, tid: u32, m: &Msg) -> Option<Next> {
     // delivered.
     if remove && let Some((top, lp)) = super::input::click_activates(cpu, m) {
         t.set(GET_ACTIVATE, top);
-        return Some(super::window::send(m.hwnd, WM_MOUSEACTIVATE, top, lp, 5));
+        return Some(super::window::send(
+            cpu,
+            m.hwnd,
+            WM_MOUSEACTIVATE,
+            top,
+            lp,
+            5,
+        ));
     }
     t.step = 3;
     None
@@ -1586,7 +1595,7 @@ pub fn dispatch_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     if t.var(DISPATCH_KIND) == DISPATCH_CALLBACK_NOW {
         let [hwnd, msg, wp, lp, callback, data] = [1, 2, 3, 4, 5, 6].map(|i| t.var(i));
         return match t.step {
-            0 => Next::call(address_of("SendMessageA"), &[hwnd, msg, wp, lp], 1),
+            0 => Next::call(address_of(cpu, "SendMessageA"), &[hwnd, msg, wp, lp], 1),
             1 if callable(callback) => Next::call(callback, &[hwnd, msg, data, value], 2),
             _ => Next::Done(TRUE),
         };
@@ -1621,7 +1630,7 @@ pub fn broadcast_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
         t.set(4, at as u32 + 1);
         if user(cpu).is_window(hwnd) {
             let args = [hwnd, t.var(0), t.var(1), t.var(2)];
-            return Next::call(address_of("SendMessageA"), &args, 1);
+            return Next::call(address_of(cpu, "SendMessageA"), &args, 1);
         }
     }
 }
@@ -1875,7 +1884,7 @@ pub fn idle_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 write_words(cpu, t.scratch, &[t.var(IDLE_PROCESS), t.var(IDLE_EVENT)]);
                 let args = [2, t.scratch, FALSE, left, QS_SENDMESSAGE];
-                return Next::call(address_of("MsgWaitForMultipleObjects"), &args, 1);
+                return Next::call(address_of(cpu, "MsgWaitForMultipleObjects"), &args, 1);
             }
             1 => match value {
                 2 => {

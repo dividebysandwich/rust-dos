@@ -757,7 +757,7 @@ pub fn proxy_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
     let id = t.var(X_ID);
     match t.step {
         0 => {
-            let send = user32::address_of("SendMessageA");
+            let send = user32::address_of(cpu, "SendMessageA");
             Next::call(send, &[t.var(X_HWND), WM_OLE_CALL, id, 0], 1)
         }
         1 => {

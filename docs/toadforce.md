@@ -1066,6 +1066,17 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   why the host takes points and lines as triangles the card builds. The
   queue holds draws of one renderer at a time, and a draw of the other
   empties it first, which keeps the card's order on a target.
+- **Where a batch ends.** The queue goes to the host at the end of a
+  run of commands, before a draw of the other renderer or into another
+  target, and before a command that touches memory the queued draws
+  use. A `FILL` or a `BLT` that writes none of their textures, their
+  target or its depth buffer, and reads neither of those two, runs
+  while they wait, and the batch goes on growing
+  (`Renderer::waits`). The host copies a texture from card memory when
+  the batch is drawn, after such a copy, so a draw queued after a
+  `BLT` into its texture samples what the `BLT` wrote. Nocturne copies
+  some 25 textures a frame into card memory between its draws, and
+  they stay in one batch.
 - **Who has the newer pixels.** A surface the host drew into is ahead
   on the host, and card memory is stale there. Before the emulator's
   own code reads that memory on the processor the card reads the

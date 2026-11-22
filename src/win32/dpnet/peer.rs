@@ -3,6 +3,12 @@
 //! DirectX 8.1 registers; hosting, joining and looking for a session
 //! fail on the device's service provider, and what needs a session
 //! fails with DPNERR_NOCONNECTION.
+//!
+//! IDirectPlay8Client and IDirectPlay8Server use these methods where
+//! theirs take the same arguments first (mod.rs's APIS): the client's
+//! Connect and EnumHosts, the server's Host, and SetClientInfo and
+//! SetServerInfo as SetPeerInfo. The handlers read only the arguments
+//! the three interfaces share.
 
 use super::address::{self, DPNA_DATATYPE_GUID};
 use super::{

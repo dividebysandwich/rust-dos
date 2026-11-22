@@ -377,9 +377,9 @@ pub fn font_height_of(cpu: &mut Cpu, font: u32) -> i32 {
 }
 
 /// SendMessageA(to, msg, wp, lp) as a step.
-pub fn send_op(to: u32, msg: u32, wp: Arg, lp: Arg) -> Op {
+pub fn send_op(cpu: &Cpu, to: u32, msg: u32, wp: Arg, lp: Arg) -> Op {
     Op::Call {
-        target: user32::address_of("SendMessageA"),
+        target: user32::address_of(cpu, "SendMessageA"),
         args: vec![Arg::V(to), Arg::V(msg), wp, lp],
     }
 }
@@ -784,7 +784,7 @@ fn header_notify_ops(
         scratch + S_NM,
         &[hwnd, id, code_for(h, code), item as u32, 0, pitem],
     );
-    vec![send_op(h.notify, WM_NOTIFY, Arg::V(id), Arg::S(S_NM))]
+    vec![send_op(cpu, h.notify, WM_NOTIFY, Arg::V(id), Arg::S(S_NM))]
 }
 
 /// An HDITEM of the item's fields with one of them changed
@@ -1042,7 +1042,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             NF_QUERY => h.format,
             NF_REQUERY => {
                 let mut s = new_script(hwnd);
-                s.send(wp, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY))
+                s.send(cpu, wp, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY))
                     .then(T_FORMAT, &[]);
                 return script::run(cpu, HEADER, s);
             }
@@ -1058,8 +1058,8 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if wp != 0 {
                 s.then(T_PAINT, &[wp]);
             } else {
-                let begin = user32::address_of("BeginPaint");
-                let end = user32::address_of("EndPaint");
+                let begin = user32::address_of(cpu, "BeginPaint");
+                let end = user32::address_of(cpu, "EndPaint");
                 s.call(begin, &[Arg::V(hwnd), Arg::S(S_PS)])
                     .then(T_PAINT, &[0])
                     .call(end, &[Arg::V(hwnd), Arg::S(S_PS)]);
@@ -1074,7 +1074,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             simple_notify(cpu, &mut s, hwnd, &h, NM_RCLICK);
             s.then(T_RETURN_LAST, &[]);
             let at = user32::make_long(x + ox, y + oy);
-            s.send(hwnd, WM_CONTEXTMENU, Arg::V(hwnd), Arg::V(at));
+            s.send(cpu, hwnd, WM_CONTEXTMENU, Arg::V(hwnd), Arg::V(at));
             return script::run(cpu, HEADER, s);
         }
         WM_SETFONT => {
@@ -1272,7 +1272,7 @@ fn disp_info_ops(cpu: &mut Cpu, scratch: u32, hwnd: u32, h: &Header, i: i32, mas
         scratch + S_NM,
         &[hwnd, id, code, i as u32, mask, text, max, 0, lparam],
     );
-    vec![send_op(h.notify, WM_NOTIFY, Arg::V(id), Arg::S(S_NM))]
+    vec![send_op(cpu, h.notify, WM_NOTIFY, Arg::V(id), Arg::S(S_NM))]
 }
 
 /// After HDN_GETDISPINFO: the text and image the parent gave, kept for
@@ -1415,7 +1415,7 @@ fn create(cpu: &mut Cpu, hwnd: u32, cs: u32) -> Option<u32> {
     };
     put(cpu, hwnd, h);
     let mut s = new_script(hwnd);
-    s.send(parent, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY))
+    s.send(cpu, parent, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY))
         .then(T_FORMAT, &[])
         .ret(0);
     script::run(cpu, HEADER, s)
@@ -1456,7 +1456,7 @@ fn button_down(cpu: &mut Cpu, hwnd: u32, lp: u32) -> Option<u32> {
     let (flags, item) = h.hit_test(client, x, y);
     let mut s = new_script(hwnd);
     if h.style & HDS_BUTTONS != 0 && flags == HHT_ONHEADER {
-        s.user("SetCapture", &[hwnd]);
+        s.user(cpu, "SetCapture", &[hwnd]);
         h.captured = true;
         h.pressed = true;
         h.dragging = false;
@@ -1522,7 +1522,7 @@ fn button_up(cpu: &mut Cpu, hwnd: u32, lp: u32) -> Option<u32> {
     }
     if h.captured {
         h.captured = false;
-        s.user("ReleaseCapture", &[]);
+        s.user(cpu, "ReleaseCapture", &[]);
         simple_notify(cpu, &mut s, hwnd, &h, NM_RELEASEDCAPTURE);
     }
     put(cpu, hwnd, h);
@@ -1754,7 +1754,7 @@ fn custom_draw_ops(
             lparam,
         ],
     );
-    vec![send_op(h.notify, WM_NOTIFY, Arg::V(id), Arg::S(S_NM))]
+    vec![send_op(cpu, h.notify, WM_NOTIFY, Arg::V(id), Arg::S(S_NM))]
 }
 
 /// Paint the items from the place `from` on (HEADER_Refresh's loop),
@@ -1848,7 +1848,7 @@ fn paint_item_body(
         );
         gfx::set_bk_mode(cpu, hdc, TRANSPARENT);
         return Some(vec![
-            send_op(h.notify, WM_DRAWITEM, Arg::V(id), Arg::S(S_NM)),
+            send_op(cpu, h.notify, WM_DRAWITEM, Arg::V(id), Arg::S(S_NM)),
             next,
         ]);
     }
@@ -1960,7 +1960,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             let code = code_for(&h, HDN_ITEMCHANGEDW);
             write_words(cpu, c.scratch + S_NM, &[hwnd, id, code]);
             vec![
-                send_op(h.notify, WM_NOTIFY, Arg::V(id), Arg::S(S_NM)),
+                send_op(cpu, h.notify, WM_NOTIFY, Arg::V(id), Arg::S(S_NM)),
                 Op::Return(Arg::V(1)),
             ]
         }
@@ -2116,7 +2116,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             }
             put(cpu, hwnd, h);
             vec![Op::Call {
-                target: user32::address_of("SetCapture"),
+                target: user32::address_of(cpu, "SetCapture"),
                 args: vec![Arg::V(hwnd)],
             }]
         }
@@ -2138,7 +2138,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             let mut ops = Vec::new();
             if !at_end {
                 ops.push(Op::Call {
-                    target: user32::address_of("UpdateWindow"),
+                    target: user32::address_of(cpu, "UpdateWindow"),
                     args: vec![Arg::V(hwnd)],
                 });
             }

@@ -569,6 +569,7 @@ pub(super) fn end_client_task(cpu: &mut Cpu, tid: u32) {
     crate::win32::user32::destroy_thread_windows(cpu, tid);
     crate::win32::user32::ddeml::thread_ended(cpu, tid);
     super::comm::task_ended(cpu, task.handle);
+    super::ole2::task_ended(cpu, task.handle);
     super::misc::task_ended(cpu, task.tid);
     global::free_owned(cpu, task.handle);
     cpu.bus.win32.win16.ldt.free(task.psp, 1);
@@ -984,7 +985,9 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
     // gave: full, with backslashes (D:/METAL.EXE is D:\METAL.EXE), which
     // GetModuleFileName gives and the module's DLLs are looked for by.
     let path = cpu.bus.disk.qualify_path(&path).unwrap_or(path);
-    if pe::is_pe(&file) {
+    // A DOS program starts in a DOS machine, as CreateProcessA starts
+    // one (win32/dosvm.rs).
+    if pe::is_pe(&file) || crate::win32::dosvm::is_program(&path, &file) {
         return exec_win32(cpu, &path, arguments, show, environment);
     }
     match spawn(cpu, &path, arguments, show, parent, environment) {
@@ -1004,10 +1007,11 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
     }
 }
 
-/// `exec` of the Win32 program at `path`: as on Windows 98, a process of
-/// its own, which runs beside the Win16 tasks, as the Win32 WinExec
-/// starts it. 33 once it started, as Wine's WinExec16 gives for one, or
-/// the error.
+/// `exec` of the Win32 or DOS program at `path`: as on Windows 98, a
+/// process of its own, which runs beside the Win16 tasks, as the Win32
+/// WinExec starts it. 33 once it started, as Wine's WinExec16 gives for
+/// one, or the error. 33 is no module's handle, so GetModuleUsage of it
+/// gives 0.
 fn exec_win32(
     cpu: &mut Cpu,
     path: &str,
@@ -1079,6 +1083,7 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     // The serial ports it left open close, the last task's too, so that
     // their lines drop.
     super::comm::task_ended(cpu, task.handle);
+    super::ole2::task_ended(cpu, task.handle);
     super::misc::task_ended(cpu, task.tid);
     // The process object its starters wait on.
     let objects = &mut cpu.bus.win32.objects;

@@ -1130,7 +1130,7 @@ fn every_page_draws_and_clicks() {
     let step = ui.hits.iter().find(|h| matches!(h.target, Target::Step(0, 1))).unwrap();
     let (x, y) = at(step.col, step.row);
     ui.click(x, y, &mut host);
-    assert_eq!(ui.settings.sound.sb.model, SbModel::Sb2);
+    assert_eq!(ui.settings.sound.sb.model, SbModel::SbPro1);
 
     // And the ► of the Mixer page's first slider.
     ui.show_page(Page::Mixer);

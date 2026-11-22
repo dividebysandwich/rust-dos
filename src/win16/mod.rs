@@ -15,7 +15,7 @@
 //! message or yields (the Win16 lock, `State::lock`), while the Win32
 //! processes' threads go on around them.
 
-mod builtin;
+pub(crate) mod builtin;
 mod ddeml;
 pub(crate) mod comm;
 pub mod dos;
@@ -32,9 +32,13 @@ mod lz;
 mod message;
 mod misc;
 mod module;
+mod ole2;
+mod ole2disp;
 pub(crate) mod resource;
 pub mod task;
 pub(crate) mod thunk;
+mod typelib;
+mod typelib_invoke;
 mod user;
 
 pub use builtin::{function_name, trap_name};
@@ -128,6 +132,8 @@ pub struct State {
     pub links: Vec<flat::Link>,
     /// The serial ports open (comm.rs).
     pub comm: Vec<comm::Port>,
+    /// What the 16-bit OLE modules keep (ole2.rs).
+    pub ole: crate::savestate::Since<{ ole2::OLE16 }, ole2::Ole16>,
     /// The exit code of the last task that ended other than a client's,
     /// which the Win16 process ends with when a client outlived it.
     pub exit_code: u16,
@@ -171,6 +177,11 @@ pub struct Module16 {
     /// (module.rs): its database's segment table has the segments the
     /// loader made.
     pub unbooted: bool,
+    /// For a system module whose code segment is from an older table, of
+    /// a state that was loaded (`builtin::mend_order`): the offset of each
+    /// function's stub in it, by the function's place in the table now,
+    /// None for one it lacks. A load works it out again.
+    pub older: Option<Vec<Option<u16>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -634,7 +645,8 @@ crate::state_fields!(State {
     aliases,
     links,
     exit_code,
-    comm
+    comm,
+    ole
 });
 crate::state_fields!(Module16 {
     name,
@@ -652,7 +664,8 @@ crate::state_fields!(Module16 {
     loaded,
     unbooted
 } skip {
-    image32
+    image32,
+    older
 });
 crate::state_fields!(Segment16 {
     handle,

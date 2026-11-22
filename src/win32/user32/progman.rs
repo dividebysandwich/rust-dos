@@ -50,22 +50,25 @@ pub const TITLE: &[u8] = b"Program Manager";
 /// The application and topic it answers to.
 const NAME: &str = "PROGMAN";
 
-fn proc_address() -> u32 {
-    address_of("ProgmanWndProc")
+/// Program Manager's window procedure, in the running process's USER32.
+pub fn proc_address(cpu: &Cpu) -> u32 {
+    address_of(cpu, "ProgmanWndProc")
 }
 
-/// Whether `w` is Program Manager's window.
-pub fn is_server(w: &Window) -> bool {
-    w.pid == 0 && w.proc == proc_address()
+/// Whether `w` is Program Manager's window, whose procedure is `proc`
+/// (`proc_address`).
+pub fn is_server(w: &Window, proc: u32) -> bool {
+    w.pid == 0 && w.proc == proc
 }
 
 /// The server's window if `server` made it already.
 pub fn existing_server(cpu: &mut Cpu) -> Option<u32> {
+    let proc = proc_address(cpu);
     let state = user(cpu);
     state
         .top_levels()
         .into_iter()
-        .find(|&h| state.window(h).is_some_and(is_server))
+        .find(|&h| state.window(h).is_some_and(|w| is_server(w, proc)))
 }
 
 /// Program Manager's window, made if it isn't there yet: its handle, or
@@ -75,12 +78,13 @@ pub fn server(cpu: &mut Cpu) -> u32 {
     if let Some(hwnd) = existing_server(cpu) {
         return hwnd;
     }
+    let proc = proc_address(cpu);
     let state = user(cpu);
     let window = Window {
         text: TITLE.to_vec(),
         ..Window::default()
     };
-    window::new_hidden(state, CLASS, proc_address(), window)
+    window::new_hidden(state, CLASS, proc, window)
 }
 
 /// ProgmanWndProc(hwnd, message, wParam, lParam): the window's
@@ -145,10 +149,10 @@ fn initiate(cpu: &mut Cpu, hwnd: u32, client: u32, lp: u32) -> Option<u32> {
 
 /// The task that sends a message: variables 0 to 3 its window, message,
 /// wParam and lParam.
-pub fn step(_: &mut Cpu, t: &mut Task, _value: u32) -> Next {
+pub fn step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     if t.step == 0 {
         let args = [t.var(0), t.var(1), t.var(2), t.var(3)];
-        return Next::call(address_of("SendMessageA"), &args, 1);
+        return Next::call(address_of(cpu, "SendMessageA"), &args, 1);
     }
     Next::Done(0)
 }

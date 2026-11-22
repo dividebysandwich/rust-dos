@@ -23,7 +23,7 @@ use crate::cpu::Cpu;
 pub fn handle(cpu: &mut Cpu) {
     crate::keyboard::bios_saw_keys(&mut cpu.bus);
     crate::bios::dos_keyboard(&mut cpu.bus);
-    if cpu.v86() {
+    if cpu.guest_v86() {
         // Under a V86 monitor the processor reads the scan code and
         // acknowledges the interrupt on the way out (`return_from_hle`):
         // Windows' keyboard driver hands the machine its keys through the

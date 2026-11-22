@@ -1054,7 +1054,7 @@ fn erase_step(cpu: &mut Cpu, t: &mut Task, value: u32, keep: bool) -> Option<Nex
                     // WM_PAINT for the frame.
                     w.paint &= !PAINT_FRAME;
                     w.update = w.update.and_rect(&client);
-                    return Some(send(hwnd, WM_NCPAINT, 1, 0, STEP_ERASE_BKGND));
+                    return Some(send(cpu, hwnd, WM_NCPAINT, 1, 0, STEP_ERASE_BKGND));
                 }
                 t.step = STEP_ERASE_BKGND;
             }
@@ -1086,7 +1086,7 @@ fn erase_step(cpu: &mut Cpu, t: &mut Task, value: u32, keep: bool) -> Option<Nex
                 };
                 if erase && !vis.is_empty() {
                     t.step = STEP_ERASED;
-                    return Some(send(hwnd, WM_ERASEBKGND, hdc, 0, STEP_ERASED));
+                    return Some(send(cpu, hwnd, WM_ERASEBKGND, hdc, 0, STEP_ERASED));
                 }
                 // Nothing to erase on: done, as if the window had.
                 t.step = STEP_ERASED;
@@ -1515,7 +1515,7 @@ fn redraw_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             t.set(V_AT, at as u32 + 1);
             if needs {
                 t.step = 1;
-                return send(hwnd, WM_PAINT, 0, 0, 1);
+                return send(cpu, hwnd, WM_PAINT, 0, 0, 1);
             }
             continue;
         }
@@ -1541,7 +1541,7 @@ pub fn pending_erase(cpu: &mut Cpu, hwnd: u32, step: u16) -> Option<Next> {
     }
     let flags = RDW_NOINTERNALPAINT | RDW_ERASENOW | RDW_NOCHILDREN;
     Some(Next::call(
-        address_of("RedrawWindow"),
+        address_of(cpu, "RedrawWindow"),
         &[hwnd, 0, 0, flags],
         step,
     ))
@@ -1720,7 +1720,7 @@ fn scroll(cpu: &mut Cpu, args: &[u32], boolean: bool) -> Option<u32> {
     task::start(cpu, TASK_PAINT, vars, 0)
 }
 
-fn scroll_step(_cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
+fn scroll_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     let at = t.var(V_AT) as usize;
     if let Some(m) = t
         .vars
@@ -1730,14 +1730,18 @@ fn scroll_step(_cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
         t.set(V_AT, at as u32 + 1);
         let flags = SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE;
         return Next::call(
-            address_of("SetWindowPos"),
+            address_of(cpu, "SetWindowPos"),
             &[m[0], 0, m[1], m[2], 0, 0, flags],
             1,
         );
     }
     if t.var(V_FLAGS) & SW_ERASE != 0 && t.step != 2 {
         let rdw = RDW_ERASENOW | RDW_ALLCHILDREN;
-        return Next::call(address_of("RedrawWindow"), &[t.var(V_HWND), 0, 0, rdw], 2);
+        return Next::call(
+            address_of(cpu, "RedrawWindow"),
+            &[t.var(V_HWND), 0, 0, rdw],
+            2,
+        );
     }
     Next::Done(t.var(V_RESULT))
 }
