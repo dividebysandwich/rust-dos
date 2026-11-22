@@ -971,7 +971,8 @@ jit_fn! {
 /// links, else EXIT_AFTER (`cpl`: the privilege level before). Where in
 /// protected mode only the code size, the stack width and the segments'
 /// bits changed, the context takes the mode the blocks after it must be
-/// in, which the return links check (`Guard::mode`).
+/// in, which the return links check (`Guard::mode`); in real mode it takes
+/// the data segments' bits, which a load before it in the block changes.
 fn far_goes_on(cpu: &Cpu, ctx: &mut JitCtx, pm: bool, tr: u16, cpl: u8) -> u32 {
     use crate::cpu::CpuFlags;
     if cpu.get_cpu_flag(CpuFlags::TF) || (cpu.bus.irq_ready && cpu.get_cpu_flag(CpuFlags::IF)) || cpu.pm() != pm {
@@ -1002,7 +1003,15 @@ fn far_goes_on(cpu: &Cpu, ctx: &mut JitCtx, pm: bool, tr: u16, cpl: u8) -> u32 {
     let cs_bits = super::seg_env_mask(Seg::CS) | 1;
     let goes_on = !crate::exec::is_service_trap(cpu.bus.ram(), phys as usize)
         && code32 | super::flat_bit(cpu, Seg::CS) == ctx.mode & cs_bits;
-    if goes_on { 0 } else { EXIT_AFTER }
+    if !goes_on {
+        return EXIT_AFTER;
+    }
+    // A load in the block before it may have made a big data segment flat
+    // or not (`Gen::note_big_load`): the blocks after it are those for the
+    // segments as they are now, which the return links check.
+    ctx.mode = ctx.mode & !super::ENV_FLAT_ALL | super::flat_bits(cpu);
+    ctx.flat = ctx.mode & super::ENV_FLAT_ALL;
+    0
 }
 
 jit_fn! {
