@@ -305,10 +305,19 @@ impl Cpu {
     }
 
     /// Load a segment register in virtual-8086 mode: a 64 KB writable data
-    /// segment at `value << 4` with privilege level 3.
+    /// segment at `value << 4` with privilege level 3. A register that has
+    /// such a segment already keeps its checks, which come from the limit
+    /// and the access rights alone (`SegCache::update_checks`), as
+    /// `load_seg_real` keeps them: DOS runs in this mode with EMS on.
+    #[inline(always)]
     pub fn load_seg_v86(&mut self, seg: Seg, value: u16) {
-        self.seg[seg as usize] =
-            SegCache::from_descriptor(value, (value as u32) << 4, 0xFFFF, AR_DATA_RW_V86);
+        let cache = &mut self.seg[seg as usize];
+        if cache.attr == AR_DATA_RW_V86 && cache.limit == 0xFFFF {
+            cache.selector = value;
+            cache.base = (value as u32) << 4;
+        } else {
+            *cache = SegCache::from_descriptor(value, (value as u32) << 4, 0xFFFF, AR_DATA_RW_V86);
+        }
     }
 
     /// Replace a segment register and its descriptor cache.

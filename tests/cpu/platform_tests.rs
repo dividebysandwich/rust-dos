@@ -480,11 +480,16 @@ fn the_bios_answers_the_keyboard_settings_functions_at_the_dos_prompt() {
     cpu.set_bx(0x0000);
     rust_dos::interrupts::int16::handle(&mut cpu);
     assert_eq!((cpu.ax(), cpu.bx()), (0x0305, 0x0000));
+    assert_eq!(cpu.bus.kbc.typematic, 0x00, "250 ms, 30 a second");
     // AH=09h: the functions there are, which the configuration table's
     // feature byte 2 (bit 6) says to ask for.
     cpu.set_ax(0x0900);
     rust_dos::interrupts::int16::handle(&mut cpu);
-    assert_eq!(cpu.get_al(), 0x30, "AH=0Ah and AH=10h-12h");
+    assert_eq!(
+        cpu.get_al(),
+        0x3D,
+        "AH=0Ah, AH=10h-12h and AX=0300h, 0305h and 0306h"
+    );
     // AH=0Ah: the keyboard's ID, an MF2 keyboard behind the translating
     // controller.
     cpu.set_ax(0x0A00);

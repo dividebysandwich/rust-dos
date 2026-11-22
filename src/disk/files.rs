@@ -473,8 +473,14 @@ impl DiskController {
         let target = parent.join(super::new_entry_name(leaf));
         let renamed = hostfs::rename(&source, &target);
         self.host_dirs.changed();
-        self.host_dirs.touched(&source);
-        self.host_dirs.touched(&target);
+        if renamed.is_ok() {
+            let from_leaf = from.rsplit(['\\', '/', ':']).next().unwrap_or(from);
+            let from_leaf = Self::dos_component(from_leaf);
+            self.host_dirs.renamed(&source, &target, from_leaf, leaf);
+        } else {
+            self.host_dirs.touched(&source);
+            self.host_dirs.touched(&target);
+        }
         renamed.map_err(|_| 0x05)
     }
 

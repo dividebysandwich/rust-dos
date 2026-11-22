@@ -281,3 +281,74 @@ fn a_version_10_state_keeps_the_speakers_level() {
         until - part_start
     );
 }
+
+/// A machine that has started T.COM (an endless loop, which never runs
+/// here) and plays a 1 kHz tone on the speaker for it, as a program's
+/// music would when it is ended. Returns the machine and the tone.
+fn program_playing_a_tone(test: &str) -> (Box<rust_dos::cpu::Cpu>, f64) {
+    let dir = std::env::temp_dir().join(format!("rust_dos_speaker_{test}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("T.COM"), [0xEB, 0xFE]).unwrap();
+    let mut cpu = rust_dos::cpu::Cpu::new(dir);
+    cpu.bus.set_cycles_per_ms(1000);
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.COM", None));
+    tone(&mut cpu.bus, 0x04A9);
+    wait_us(&mut cpu.bus, 100_000);
+    let hz = 1_193_182.0 / 0x04A9 as f64;
+    assert!(amplitude(&samples(&mut cpu.bus), hz) > 1000.0, "no tone");
+    (cpu, hz)
+}
+
+#[test]
+fn closing_a_program_silences_its_tone() {
+    // The settings window's close or the debug server's reboot_shell ends
+    // the program without it switching the speaker off: the shell turns
+    // it off, as the BIOS's POST does, or the note sounds on at the
+    // prompt with nothing left to stop it.
+    let (mut cpu, hz) = program_playing_a_tone("closed");
+    cpu.close_program();
+    cpu.load_shell();
+    assert_eq!(
+        cpu.bus.io_read(0x61) & 0x03,
+        0,
+        "the gate or the data bit is on"
+    );
+    samples(&mut cpu.bus);
+    wait_us(&mut cpu.bus, 200_000);
+    let level = amplitude(&samples(&mut cpu.bus), hz);
+    assert!(level < 10.0, "the tone goes on at {level}");
+}
+
+#[test]
+fn a_program_that_exits_keeps_its_tone() {
+    // A program that ends through DOS with the speaker on leaves it on,
+    // as on a real PC, where the tone goes on until a program stops it.
+    let (mut cpu, hz) = program_playing_a_tone("exited");
+    cpu.terminate(0);
+    cpu.load_shell();
+    assert_eq!(cpu.bus.io_read(0x61) & 0x03, 0x03);
+    samples(&mut cpu.bus);
+    wait_us(&mut cpu.bus, 200_000);
+    assert!(
+        amplitude(&samples(&mut cpu.bus), hz) > 1000.0,
+        "the tone stopped"
+    );
+}
+
+#[test]
+fn closing_a_program_leaves_the_gate_as_the_startup_setting_has_it() {
+    // With `pit2_gate_at_start` (a game's profile), the BIOS leaves
+    // channel 2's gate up: the close puts port 61h back that way, the
+    // speaker data bit clear so nothing sounds.
+    let (mut cpu, hz) = program_playing_a_tone("gate");
+    cpu.bus.pit2_gate_at_start = true;
+    cpu.close_program();
+    cpu.load_shell();
+    assert_eq!(cpu.bus.io_read(0x61) & 0x03, 0x01);
+    samples(&mut cpu.bus);
+    wait_us(&mut cpu.bus, 200_000);
+    let level = amplitude(&samples(&mut cpu.bus), hz);
+    assert!(level < 10.0, "the tone goes on at {level}");
+}
