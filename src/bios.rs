@@ -59,6 +59,9 @@ pub const SERVICE_KBD_INTERCEPTED: u8 = 0x25;
 /// The INT 33h driver's IRQ handler: call the program's event handler, or
 /// pass the IRQ on to the BIOS's PS/2 handler (`mouse::irq_service`).
 pub const SERVICE_MOUSE_IRQ: u8 = 0x26;
+/// DOS back from the Ctrl+C handler (INT 23h) it called
+/// (`int21::break_return`).
+pub const SERVICE_BREAK_RETURN: u8 = 0x27;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Far-call services (`FE 3A nn`, then RETF) at the ROM's entry points for
@@ -80,6 +83,11 @@ pub const DISKETTE_PARAMS: u16 = 0x1150;
 /// Where disk services wait for slow disk access to end, after the CD-ROM
 /// driver's entries.
 pub const IO_WAIT: u16 = 0x1190;
+/// The Ctrl+C handler (INT 23h) COMMAND.COM leaves the programs it runs:
+/// STC and RETF, which tells DOS to end the program.
+const BREAK_HANDLER: u16 = 0x1194;
+/// Where DOS's INT 23h call returns to (`int21::break_return`).
+pub const BREAK_RETURN: u16 = 0x1198;
 /// The PS/2 mouse's IRQ 12 handler (INT 74h), and where it finds the far
 /// address of the program's handler (INT 15h AX=C207h).
 pub const PS2_HANDLER: u16 = 0x11A0;
@@ -195,6 +203,7 @@ pub fn default_ivt() -> [u32; 256] {
     // programs that kept its address.
     ivt[0x33] = crate::mouse::vector();
     ivt[0x1E] = far(DISKETTE_PARAMS);
+    ivt[0x23] = far(BREAK_HANDLER);
     // The video BIOS's fonts: the second half of the 8x8 font for the CGA
     // graphics modes, and the graphics font of the mode it starts in.
     use crate::video::bios::{FONT_8X8, FONT_8X8_HIGH, rom_pointer};
@@ -209,7 +218,7 @@ pub fn default_ivt() -> [u32; 256] {
 /// in the BIOS data area, and the fixed disk parameter tables.
 pub fn boot_ivt() -> [u32; 256] {
     let mut ivt = default_ivt();
-    for vector in [0x00, 0x20, 0x21, 0x25, 0x26, 0x27, 0x29, 0x2F, 0x33, 0x67, 0x7A] {
+    for vector in [0x00, 0x20, 0x21, 0x23, 0x25, 0x26, 0x27, 0x29, 0x2F, 0x33, 0x67, 0x7A] {
         ivt[vector] = far(IRET_HANDLER);
     }
     ivt[0x09] = far(KBD_HANDLER);
@@ -325,9 +334,17 @@ pub fn ticks_since_midnight(at: chrono::NaiveDateTime) -> u32 {
 }
 
 /// The offset in F000 of the trap of the HLE vector `vector`.
-fn hle_trap(vector: u8) -> u16 {
+pub fn hle_trap(vector: u8) -> u16 {
     let i = HLE_VECTORS.iter().position(|&v| v == vector).expect("an HLE vector");
     TRAP_BASE + 4 * i as u16
+}
+
+/// Write DOS's Ctrl+C code in the ROM: COMMAND.COM's INT 23h handler
+/// and where DOS's INT 23h call returns to. Also after a save state of an
+/// older build is loaded, whose ROM lacks them.
+pub fn write_break_code(bus: &mut Bus) {
+    write_rom(bus, BREAK_HANDLER, &[0xF9, 0xCB]);
+    write_rom(bus, BREAK_RETURN, &[0xFE, 0x39, SERVICE_BREAK_RETURN]);
 }
 
 /// Write the ROM code and data, and the default vector table.
@@ -374,6 +391,7 @@ pub fn install(bus: &mut Bus) {
     );
     // Disk services wait here for slow disk access (`diskio::wait`).
     write_rom(bus, IO_WAIT, &[0xFE, 0x39, SERVICE_IO_WAIT]);
+    write_break_code(bus);
     let [trap_lo, trap_hi] = hle_trap(0x21).to_le_bytes();
     write_rom(
         bus,

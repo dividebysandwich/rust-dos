@@ -140,6 +140,7 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_KBD_INTERCEPTED => crate::keyboard::bios_intercepted(cpu),
         crate::bios::SERVICE_IPX => crate::net::ipx::api(cpu),
         crate::bios::SERVICE_IPX_ESR => crate::net::ipx::esr(cpu),
+        crate::bios::SERVICE_BREAK_RETURN => int21::break_return(cpu),
         _ => cpu.bus.log_string(&format!(
             "[CPU] Unknown inline emulator service {:02X}",
             service
