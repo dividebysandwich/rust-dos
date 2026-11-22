@@ -517,6 +517,42 @@ fn echo_prints_its_text_as_it_is() {
 }
 
 #[test]
+fn verify_and_break_set_and_show_dos_s_flags() {
+    // As MS-DOS 6.22's COMMAND.COM answers.
+    let base = scratch("verify_break", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    rust_dos::dos_data::write(&mut cpu.bus);
+    for name in ["VERIFY", "BREAK"] {
+        assert_eq!(run(&mut cpu, name), format!("{} is off", name));
+        assert_eq!(run(&mut cpu, &format!("{} on", name.to_lowercase())), "");
+        assert_eq!(run(&mut cpu, name), format!("{} is on", name));
+        assert_eq!(run(&mut cpu, &format!("{}=OFF  ", name)), "");
+        assert_eq!(run(&mut cpu, name), format!("{} is off", name));
+        for bad in ["x", "on;", "on off", "o"] {
+            assert_eq!(
+                run(&mut cpu, &format!("{} {}", name, bad)),
+                "Must specify ON or OFF"
+            );
+        }
+    }
+    // The flags are DOS's, as INT 21h AH=54h and AX=3300h tell them.
+    run(&mut cpu, "VERIFY ON");
+    run(&mut cpu, "BREAK ON");
+    cpu.set_ax(0x5400);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.get_al(), 1);
+    cpu.set_ax(0x3300);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.dx() & 0xFF, 1);
+    // AX=3302h sets the flag from DL and gives the old one back.
+    cpu.set_ax(0x3302);
+    cpu.set_dx(0);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.dx() & 0xFF, 1);
+    assert_eq!(run(&mut cpu, "BREAK"), "BREAK is off");
+}
+
+#[test]
 fn cd_dot_dot_and_type_stop_at_the_end_of_file_mark() {
     let base = scratch("cddotdot", &["c/sub"]);
     fs::write(base.join("c/sub/a.txt"), b"one\ntwo\x1Ajunk").unwrap();
