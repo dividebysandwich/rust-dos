@@ -1504,6 +1504,13 @@ pub fn print_cp437(cpu: &mut Cpu, text: &[u8], attr: u8) {
     print_cells(cpu, text.iter().copied(), attr);
 }
 
+/// Print text of the host, such as a host path, as the code page 437
+/// glyphs that show it (`dosstr::encode_cp437`): `D:\Über` with the
+/// Ü as 9Ah, and '?' for a character code page 437 lacks.
+pub fn print_host_text(cpu: &mut Cpu, text: &str) {
+    print_cp437(cpu, &crate::dosstr::encode_cp437(text), 0x07);
+}
+
 /// Whether console output goes through the video BIOS: in a virtual
 /// machine of Windows' 386 enhanced mode (a service in virtual-8086 mode
 /// with paging on), whose screen is the machine's own, which the monitor

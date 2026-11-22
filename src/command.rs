@@ -3,7 +3,7 @@ use crate::disk::{DRIVE_C, DriveKind, drive_letter, drive_name, parse_drive_pref
 use crate::mount::{
     MOUNT_USAGE, MountCmd, MountSpec, PathContext, display_host_path, parse_mount_command,
 };
-use crate::video::{print_cp437, print_string};
+use crate::video::{print_cp437, print_host_text, print_string};
 use std::fmt::Write;
 
 pub trait ShellCommand {
@@ -1090,15 +1090,14 @@ impl ShellCommand for MountCommand {
                         String::new()
                     };
                     let line = format!(
-                        "{:<6}{:<7} {:<11} {}{}{}\r\n",
+                        "{:<6}{:<7} {:<11} ",
                         info.name(),
                         info.kind.name(),
-                        info.label,
-                        host,
-                        disk_number(info.image_index, info.images.len()),
-                        access
+                        info.label
                     );
                     print_string(cpu, &line);
+                    let images = disk_number(info.image_index, info.images.len());
+                    print_host_text(cpu, &format!("{}{}{}\r\n", host, images, access));
                 }
             }
             Ok(MountCmd::Help) => print_string(cpu, MOUNT_USAGE),
@@ -1106,7 +1105,7 @@ impl ShellCommand for MountCommand {
             Ok(MountCmd::Unmount(drive)) => unmount(cpu, drive),
             Ok(MountCmd::Overlay(drive, dir)) => overlay(cpu, drive, dir),
             Err(e) => {
-                print_string(cpu, &format!("{}\r\n", e));
+                print_host_text(cpu, &format!("{}\r\n", e));
                 print_string(cpu, MOUNT_USAGE);
             }
         }
@@ -1152,11 +1151,16 @@ impl ShellCommand for RemountCommand {
             return;
         };
         match cpu.bus.remount_drive(from, to) {
-            Ok(path) => print_string(
+            Ok(path) => print_host_text(
                 cpu,
-                &format!("Drive {} is now {}, from {}\r\n", drive_name(from), drive_name(to), display_host_path(&path)),
+                &format!(
+                    "Drive {} is now {}, from {}\r\n",
+                    drive_name(from),
+                    drive_name(to),
+                    display_host_path(&path)
+                ),
             ),
-            Err(e) => print_string(cpu, &format!("{}\r\n", e)),
+            Err(e) => print_host_text(cpu, &format!("{}\r\n", e)),
         }
     }
 }
@@ -1221,14 +1225,15 @@ fn print_os_images(cpu: &mut Cpu) {
     if images.is_empty() {
         print_string(cpu, "\r\nNo OS images are in:\r\n");
         for dir in crate::os_images::dirs() {
-            print_string(cpu, &format!("  {}\r\n", display_host_path(&dir)));
+            print_host_text(cpu, &format!("  {}\r\n", display_host_path(&dir)));
         }
         return;
     }
     print_string(cpu, "\r\nOS images:\r\n");
     for (name, path) in images {
         let files = if crate::os_images::holds_files(&path) { " (files, for C:)" } else { "" };
-        print_string(cpu, &format!("  {:<12} {}{}\r\n", name.to_ascii_uppercase(), display_host_path(&path), files));
+        let path = display_host_path(&path);
+        print_host_text(cpu, &format!("  {:<12} {}{}\r\n", name.to_ascii_uppercase(), path, files));
     }
 }
 
@@ -1253,9 +1258,9 @@ fn mount(cpu: &mut Cpu, spec: MountSpec) {
                 display_host_path(&path),
                 disk_number(0, count)
             );
-            print_string(cpu, &msg);
+            print_host_text(cpu, &msg);
         }
-        Err(e) => print_string(cpu, &format!("{}\r\n", e)),
+        Err(e) => print_host_text(cpu, &format!("{}\r\n", e)),
     }
 }
 
@@ -1268,8 +1273,11 @@ fn overlay(cpu: &mut Cpu, drive: u8, dir: std::path::PathBuf) {
     };
     spec.opts.overlay = Some(dir.clone());
     match cpu.bus.mount_drive(drive, &spec.path, spec.opts, true) {
-        Ok(_) => print_string(cpu, &format!("Drive {}'s changes go to {}\r\n", drive_name(drive), display_host_path(&dir))),
-        Err(e) => print_string(cpu, &format!("{}\r\n", e)),
+        Ok(_) => {
+            let dir = display_host_path(&dir);
+            print_host_text(cpu, &format!("Drive {}'s changes go to {}\r\n", drive_name(drive), dir))
+        }
+        Err(e) => print_host_text(cpu, &format!("{}\r\n", e)),
     }
 }
 
