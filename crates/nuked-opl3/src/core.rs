@@ -393,17 +393,7 @@ impl Chip {
         buf4[1] = clip_sample(self.mixbuff[1]);
         buf4[3] = clip_sample(self.mixbuff[3]);
 
-        {
-            let s = self.noise;
-            let f0_8 = (s ^ (s >> 14)) & 0x1ff;
-            let f9_17 = ((s >> 9) ^ f0_8) & 0x1ff;
-            let f18_22 = ((s >> 18) ^ f9_17) & 0x1f;
-            let f23_31 = f0_8 ^ ((f9_17 >> 5) | (f18_22 << 4));
-            let f32_35 = (f9_17 ^ f23_31) & 0x0f;
-            self.noise_hh = ((s >> 13) & 1) as u8;
-            self.noise_sd = ((s >> 16) & 1) as u8;
-            self.noise = ((f9_17 >> 4) & 0x1f) | (f18_22 << 5) | (f23_31 << 10) | (f32_35 << 19);
-        }
+        self.step_noise();
 
         if CHANNEL_SAMPLE_DELAY {
             for slot in 0..15 {
@@ -451,6 +441,36 @@ impl Chip {
 
         self.update_timers_and_lfo();
         self.drain_writebuf();
+    }
+
+    fn step_noise(&mut self) {
+        let s = self.noise;
+        let f0_8 = (s ^ (s >> 14)) & 0x1ff;
+        let f9_17 = ((s >> 9) ^ f0_8) & 0x1ff;
+        let f18_22 = ((s >> 18) ^ f9_17) & 0x1f;
+        let f23_31 = f0_8 ^ ((f9_17 >> 5) | (f18_22 << 4));
+        let f32_35 = (f9_17 ^ f23_31) & 0x0f;
+        self.noise_hh = ((s >> 13) & 1) as u8;
+        self.noise_sd = ((s >> 16) & 1) as u8;
+        self.noise = ((f9_17 >> 4) & 0x1f) | (f18_22 << 5) | (f23_31 << 10) | (f32_35 << 19);
+    }
+
+    /// rust-dos: the resampled frame of a chip `is_frozen` finds frozen,
+    /// whose slots and mix give the samples they gave before, without
+    /// working them out: the clocks they don't use (the noise, the
+    /// tremolo and vibrato, the envelope generator's timer, the resampler)
+    /// go on as `generate_4ch_resampled` moves them, so that the chip goes
+    /// on from a write as one that ran all along. The frame is the last
+    /// one, once the samples interpolated are the same.
+    pub(crate) fn advance_frozen(&mut self) {
+        while self.samplecnt >= self.rateratio {
+            self.oldsamples = self.samples;
+            self.step_noise();
+            self.update_timers_and_lfo();
+            self.drain_writebuf();
+            self.samplecnt -= self.rateratio;
+        }
+        self.samplecnt += 1 << RSM_FRAC;
     }
 
     pub(crate) fn generate_4ch_resampled(&mut self, buf4: &mut [i16]) {
@@ -507,6 +527,71 @@ impl Chip {
             drum: channel.chtype == CH_DRUM,
             heard: channel.mix_mask != 0,
         }
+    }
+
+    /// rust-dos: whether the chip's output can't change until a register
+    /// is written. Every slot that sounds (all but those keyed off and
+    /// released to full attenuation) and every slot that modulates one
+    /// holds still: no phase increment, vibrato included, no tremolo, an
+    /// envelope whose rate in its state is 0 with no change of state due,
+    /// and its feedback at a fixed point (the output it gave last is the
+    /// one before, and the feedback the next sample works out is the one
+    /// this sample had). Feedback that goes round a cycle of outputs
+    /// instead never holds, nor does rhythm mode, whose noise moves. A
+    /// released slot that only adds its sine's sign bit to the mix may
+    /// still move, as when the chip goes idle (`Opl::render_chip`).
+    pub(crate) fn is_frozen(&self) -> bool {
+        if self.rhy & 0x20 != 0 || self.writebuf.iter().any(|w| w.reg & 0x200 != 0) {
+            return false;
+        }
+        let sounds = |s: &Slot| !(s.key == 0 && s.eg_rout == 0x1ff);
+        let mut relevant = [false; 36];
+        for (i, s) in self.slots.iter().enumerate() {
+            relevant[i] = sounds(s);
+        }
+        // The slots that modulate a relevant one, down a four-operator
+        // chain.
+        for _ in 0..4 {
+            for i in 0..36 {
+                let m = self.slots[i].mod_idx;
+                if relevant[i] && m < 72 {
+                    relevant[m / 2] = true;
+                }
+            }
+        }
+        (0..36)
+            .filter(|&i| relevant[i])
+            .all(|i| self.slot_frozen(i, sounds(&self.slots[i])))
+    }
+
+    /// rust-dos: whether slot `i` gives the same output at every sample
+    /// from now on, if what modulates it does (`is_frozen`). A slot that
+    /// is `sounding` needs its envelope to hold too.
+    fn slot_frozen(&self, i: usize, sounding: bool) -> bool {
+        let s = &self.slots[i];
+        if s.pg_inc != 0 || s.reg_vib != 0 && s.pg_inc_vib.iter().any(|&inc| inc != 0) {
+            return false;
+        }
+        if sounding {
+            let state = s.eg_gen;
+            let rate_zero = s.eg_rate_nonzero_mask >> (state & 0x03) & 1 == 0;
+            let changes = s.key != 0 && state == ENV_RELEASE
+                || s.key == 0 && state != ENV_RELEASE
+                || state == ENV_ATTACK && s.eg_rout == 0
+                || state == ENV_DECAY && s.eg_rout >> 4 == s.reg_sl as u16
+                || state != ENV_ATTACK && s.eg_rout & 0x1f8 == 0x1f8 && s.eg_rout != 0x1ff;
+            if s.trem_enabled || !rate_zero || changes {
+                return false;
+            }
+        }
+        let out = self.outputs[i * 2];
+        let fb = self.channels[s.channel].fb;
+        let next_fb = if fb != 0 {
+            s.prout.wrapping_add(out) >> (0x09 - fb)
+        } else {
+            0
+        };
+        s.prout == out && next_fb == self.outputs[i * 2 + 1]
     }
 
     pub(crate) fn active_voice_count(&self) -> usize {

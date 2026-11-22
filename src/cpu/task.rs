@@ -306,10 +306,12 @@ impl Cpu {
 
     /// May the program use `size` bytes of ports from `port`? In protected
     /// mode with CPL > IOPL, and always in virtual-8086 mode, only if the
-    /// I/O permission bitmap in the (32-bit) TSS clears their bits.
+    /// I/O permission bitmap in the (32-bit) TSS clears their bits. The
+    /// built-in monitor's bitmap, in the ROM, clears every port
+    /// (`v86mon::install_rom`), so its lookups are skipped.
     #[inline(always)]
     pub fn check_io(&mut self, port: u16, size: u8) -> CpuResult {
-        if !self.pe() || (!self.v86() && self.cpl <= self.iopl()) {
+        if !self.pe() || (!self.v86() && self.cpl <= self.iopl()) || crate::v86mon::owns(self) {
             return Ok(());
         }
         self.check_io_bitmap(port, size)

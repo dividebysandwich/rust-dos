@@ -521,7 +521,7 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         } else {
             cpu.bus.fill_ram(base..base + size, 0);
         }
-    } else if !keep && cpu.v86() {
+    } else if !keep && cpu.guest_v86() {
         // Under a V86 monitor the BIOS clears the memory the machine has
         // where it maps it, on its way out (Windows gives a DOS box in a
         // window a copy of it, and maps it in a page at a time).
