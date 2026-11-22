@@ -397,14 +397,26 @@ fn freed_vcpi_pages_go_back_to_the_pool() {
         a.mov(ah, 0x42)?;
         a.int(0x67)?;
         a.mov(word_ptr(2), bx)?;
-        a.mov(si, 0x10)?;
+        // Free them last first: after four, the second 16 KB page is
+        // back and the first still holds one page in use.
+        a.mov(si, 0x20)?;
         a.mov(cx, 5)?;
         let mut free = a.create_label();
         a.set_label(&mut free)?;
         a.mov(edx, dword_ptr(si))?;
         a.mov(ax, 0xDE05)?;
         a.int(0x67)?;
-        a.add(si, 4)?;
+        a.sub(si, 4)?;
+        a.cmp(cx, 2)?;
+        let mut on = a.create_label();
+        a.jne(on)?;
+        a.mov(ah, 0x42)?;
+        a.int(0x67)?;
+        a.mov(word_ptr(6), bx)?;
+        a.mov(ax, 0xDE03)?;
+        a.int(0x67)?;
+        a.mov(dword_ptr(12), edx)?;
+        a.set_label(&mut on)?;
         a.loop_(free)?;
         a.mov(ah, 0x42)?;
         a.int(0x67)?;
@@ -416,6 +428,12 @@ fn freed_vcpi_pages_go_back_to_the_pool() {
     });
     let (before, taken, freed) = (read16(&cpu, 0), read16(&cpu, 2), read16(&cpu, 4));
     assert_eq!(taken, before - 2);
+    assert_eq!(read16(&cpu, 6), before - 1, "one 16 KB page still in use");
+    assert_eq!(
+        read32(&cpu, 12),
+        (before as u32 - 1) * 4 + 3,
+        "DE03h counts the pool and the three spare pages of the one in use"
+    );
     assert_eq!(freed, before, "the 16 KB pages are back in the pool");
     assert_eq!(read32(&cpu, 8), before as u32 * 4, "and DE03h counts them once");
 }
