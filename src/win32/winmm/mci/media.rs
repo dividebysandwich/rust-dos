@@ -203,6 +203,22 @@ mod tests {
 }
 
 impl Pictures {
+    /// The frame `n` of a Cinepak movie as iccvid.dll decodes it to 8
+    /// bits, at `zoom` times the size: rows of indexes of the codec's
+    /// palette from the top. None for another movie.
+    pub fn cinepak_8(&mut self, media: &Media, n: u32, zoom: u32) -> Option<Vec<u8>> {
+        let Kind::Avi(v) = &media.video else {
+            return None;
+        };
+        if !matches!(self, Pictures::Avi(_)) {
+            *self = Pictures::Avi(avi::Pictures::default());
+        }
+        let Pictures::Avi(p) = self else {
+            return None;
+        };
+        p.cinepak_8(v, (media.width, media.height), n, zoom)
+    }
+
     /// The frame `n` of `media` as rows of 24-bit pixels from the top,
     /// `stride` bytes each, in a DIB's order: blue, green, red.
     pub fn rows(&mut self, media: &Media, n: u32, stride: usize) -> Option<Vec<u8>> {

@@ -3,6 +3,13 @@
 use super::*;
 
 impl Bus {
+    /// Install (or with None remove) the CMS chips: a Game Blaster, or
+    /// those in an SB 2.0's sockets.
+    pub fn configure_cms(&mut self, config: Option<crate::gameblaster::CmsConfig>) {
+        self.audio_catch_up();
+        self.cms = config.map(|c| Box::new(crate::gameblaster::GameBlaster::new(c)));
+    }
+
     /// Install (or with None remove) the Gravis Ultrasound.
     pub fn configure_gus(&mut self, config: Option<crate::gus::GusConfig>) {
         let now = self.clock.now_ticks();
@@ -48,6 +55,8 @@ impl Bus {
         self.dma = crate::dma::Dma::new();
         self.mpu.reset();
         self.tandy_sound = crate::sn76489::Sn76489::new(self.tandy_sound.variant());
+        let cms = self.cms.as_ref().map(|cms| cms.config());
+        self.configure_cms(cms);
         self.cdaudio.reset();
         self.sb_frame = (0, 0);
         let hooked = self.gus.as_ref().and_then(|gus| gus.irq()).is_some_and(|irq| {
@@ -135,12 +144,21 @@ impl Bus {
         let found =
             crate::game_fixes::find_code(&self.ram[..end], |fix| self.game_fix_enabled(fix));
         for (fix, code, base) in found {
-            for (addr, byte) in crate::game_fixes::writes(code, base) {
+            let data: Vec<_> =
+                crate::game_fixes::data_writes(&self.ram[..end], code, base).collect();
+            // Data that no longer holds what the fix lists is left alone;
+            // the log says so, since the fix then does less.
+            let data_note = match (code.data.is_empty(), data.is_empty()) {
+                (true, _) => "",
+                (false, false) => ", data rewritten",
+                (false, true) => ", data left (not as listed)",
+            };
+            for (addr, byte) in crate::game_fixes::writes(code, base).chain(data) {
                 self.write_8(addr, byte);
             }
             self.log_string(&format!(
-                "[game fix] {}: {} ({}): code at {:05X} patched",
-                fix.name, fix.game, fix.reason, base
+                "[game fix] {}: {} ({}): code at {:05X} patched{}",
+                fix.name, fix.game, fix.reason, base, data_note
             ));
         }
     }

@@ -33,8 +33,7 @@ fn clear_screen(cpu: &mut Cpu) {
     for b in cpu.bus.vga.vram_text.iter_mut() {
         *b = 0;
     }
-    cpu.bus.cursor_x = 0;
-    cpu.bus.cursor_y = 0;
+    cpu.bus.set_console_cursor(0, 0);
 }
 
 /// The text on the screen, as `run` returns it.
@@ -95,6 +94,57 @@ fn drives_keep_their_mount_options() {
     assert_eq!((info.label.as_str(), mount.path, mount.opts), ("DISK 1", base.join("floppy"), opts));
     assert_eq!(cpu.bus.disk.drive_info(2).unwrap().mount.unwrap().opts, MountOptions::default());
     assert!(cpu.bus.disk.drive_info(25).unwrap().mount.is_none());
+}
+
+#[test]
+fn mount_takes_a_host_folder_named_in_code_page_437() {
+    // `MOUNT E ...\Über` typed at the prompt, or queued from a
+    // configuration's [autoexec]: the Ü is 9Ah on the DOS side.
+    let base = scratch("mount_cp437", &["c", "\u{DC}ber"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    let host = format!("MOUNT E \"{}\"", base.join("\u{DC}ber").display());
+    let line = rust_dos::dosstr::from_bytes(&rust_dos::dosstr::encode_cp437(&host));
+    let (command, args) = split_command(&line);
+    assert!(CommandDispatcher::new().dispatch(&mut cpu, command, args));
+    assert_eq!(cpu.bus.disk.drive_kind(4), Some(DriveKind::HardDisk));
+}
+
+#[test]
+fn mount_takes_a_host_folder_with_a_letter_code_page_437_lacks() {
+    // `MOUNT E ...\Bjørn` from a configuration's [autoexec]: code page 437
+    // has no ø, so the line carries its Latin-1 byte F8h, which MOUNT
+    // reads back as ø when ° (F8h in code page 437) names nothing.
+    let base = scratch("mount_latin1", &["c", "Bj\u{F8}rn"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    let host = format!("MOUNT E \"{}\"", base.join("Bj\u{F8}rn").display());
+    let line = rust_dos::dosstr::from_bytes(&rust_dos::dosstr::encode_cp437(&host));
+    let (command, args) = split_command(&line);
+    assert!(CommandDispatcher::new().dispatch(&mut cpu, command, args));
+    assert_eq!(cpu.bus.disk.drive_kind(4), Some(DriveKind::HardDisk));
+}
+
+#[test]
+fn mount_shows_host_paths_in_code_page_437() {
+    // The Ü of a host folder `Über` shows as code page 437's Ü (9Ah) in
+    // MOUNT's messages and its list, and a character code page 437 lacks
+    // as '?': the Latin-1 ø too, not as the glyph of its byte (°).
+    let folders = ["c", "\u{DC}ber", "Euro \u{20AC}", "Bj\u{F8}rn"];
+    let base = scratch("mount_cp437_shown", &folders);
+    let mut cpu = Cpu::new(base.join("c"));
+    let host = format!("MOUNT E \"{}\"", base.join("\u{DC}ber").display());
+    let line = rust_dos::dosstr::from_bytes(&rust_dos::dosstr::encode_cp437(&host));
+    let shown = run(&mut cpu, &line).replace('\n', "");
+    // The host's separator: '\' on Windows, '/' elsewhere.
+    let sep = std::path::MAIN_SEPARATOR;
+    assert!(shown.ends_with(&format!("{sep}\u{9A}ber")), "{:?}", shown);
+    let euro = base.join("Euro \u{20AC}");
+    cpu.bus.mount_drive(5, &euro, MountOptions::default(), false).unwrap();
+    let bjorn = base.join("Bj\u{F8}rn");
+    cpu.bus.mount_drive(6, &bjorn, MountOptions::default(), false).unwrap();
+    let listing = run(&mut cpu, "MOUNT").replace('\n', "");
+    assert!(listing.contains(&format!("{sep}\u{9A}ber")), "{:?}", listing);
+    assert!(listing.contains(&format!("{sep}Euro ?")), "{:?}", listing);
+    assert!(listing.contains(&format!("{sep}Bj?rn")), "{:?}", listing);
 }
 
 #[test]
@@ -517,6 +567,50 @@ fn echo_prints_its_text_as_it_is() {
 }
 
 #[test]
+fn console_output_takes_ansi_sys_sequences() {
+    let base = scratch("ansi", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    // GOG's launcher menus: colours, then back to light grey.
+    assert_eq!(
+        run(&mut cpu, "ECHO \u{1B}[1;33m\u{1B}[42mA\u{1B}[0mB"),
+        "AB"
+    );
+    assert_eq!(&cpu.bus.vga.vram_text[..4], &[b'A', 0x2E, b'B', 0x07]);
+    // The cursor moved, and the rest of a line erased in the colour set.
+    run(
+        &mut cpu,
+        "ECHO xyz\u{1B}[3;5Hp\u{1B}[s\u{1B}[A\u{1B}[2Dq\u{1B}[u\u{1B}[44m\u{1B}[K\u{1B}[0m",
+    );
+    let cell = |cpu: &Cpu, row: usize, col: usize| {
+        let at = (row * 80 + col) * 2;
+        (cpu.bus.vga.vram_text[at], cpu.bus.vga.vram_text[at + 1])
+    };
+    assert_eq!(cell(&cpu, 0, 0), (b'x', 0x07));
+    assert_eq!(cell(&cpu, 2, 4), (b'p', 0x07));
+    assert_eq!(cell(&cpu, 1, 3), (b'q', 0x07));
+    assert_eq!(cell(&cpu, 2, 5), (b' ', 0x17));
+    assert_eq!(cell(&cpu, 2, 79), (b' ', 0x17));
+    // The screen cleared in the colour set, the cursor home.
+    run(&mut cpu, "ECHO \u{1B}[37;41m\u{1B}[2J\u{1B}[0m");
+    assert_eq!(cell(&cpu, 24, 79), (b' ', 0x47));
+    assert_eq!(cpu.bus.console_cursor(), (0, 1));
+    // As ANSI.SYS is there, INT 2Fh AX=1A00h says so.
+    cpu.set_ax(0x1A00);
+    rust_dos::interrupts::int2f::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 0x1AFF);
+    // With `ansi_sys` off, as on a DOS without ANSI.SYS: the sequence is
+    // text, and the installation check says it isn't there.
+    cpu.bus.ansi_sys = false;
+    run(&mut cpu, "CLS");
+    run(&mut cpu, "ECHO \u{1B}[1mA");
+    let start = [0x1B, 0x07, b'[', 0x07, b'1', 0x07, b'm', 0x07, b'A', 0x07];
+    assert_eq!(&cpu.bus.vga.vram_text[..10], &start);
+    cpu.set_ax(0x1A00);
+    rust_dos::interrupts::int2f::handle(&mut cpu);
+    assert_eq!(cpu.ax(), 0x1A00);
+}
+
+#[test]
 fn verify_and_break_set_and_show_dos_s_flags() {
     // As MS-DOS 6.22's COMMAND.COM answers.
     let base = scratch("verify_break", &["c"]);
@@ -669,4 +763,36 @@ fn cd_md_and_rd_take_quoted_paths() {
     assert_eq!(run(&mut cpu, r#"RD "C:\New Folder""#), "");
     assert!(!base.join("c/NEW FOLDER").exists());
     assert_eq!(run(&mut cpu, r#"MD """#), "Required parameter missing");
+}
+
+/// CLS puts the cursor at the top left, and what is printed next starts
+/// there, as MS-DOS's COMMAND.COM has it in a batch file: GOG's launchers
+/// clear the screen in `[autoexec]` and then draw their menus.
+#[test]
+fn output_after_cls_starts_on_the_top_row() {
+    let base = scratch("cls_cursor", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    clear_screen(&mut cpu);
+    rust_dos::video::print_string(&mut cpu, "one\r\ntwo\r\nthree\r\n");
+    let (command, args) = split_command("CLS");
+    assert!(CommandDispatcher::new().dispatch(&mut cpu, command, args));
+    rust_dos::video::print_string(&mut cpu, "first\r\nsecond");
+    let text = screen(&cpu);
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    assert_eq!(lines, ["first", "second"]);
+    assert_eq!(cpu.bus.console_cursor(), (6, 1));
+}
+
+/// DOS's output goes on at the BIOS's cursor, wherever a program put it:
+/// through INT 10h or by writing the BIOS data (BDA 0450h) itself.
+#[test]
+fn output_goes_on_at_the_cursor_a_program_set() {
+    let base = scratch("bios_cursor", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    clear_screen(&mut cpu);
+    rust_dos::video::print_string(&mut cpu, "a");
+    cpu.bus.write_8(0x0450, 10);
+    cpu.bus.write_8(0x0451, 2);
+    rust_dos::video::print_string(&mut cpu, "b");
+    assert_eq!(screen(&cpu), "a\n\n          b");
 }

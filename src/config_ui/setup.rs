@@ -44,7 +44,17 @@ const CATEGORIES: [Category; 4] = [
     Category {
         title: "BIOS FEATURES SETUP",
         about: "The processor, its speed, and how the machine starts",
-        items: &[Item::Cpu, Item::Cycles, Item::Core, Item::Fpu, Item::Dpmi, Item::DosVersion, Item::Post, Item::KeyboardLayout],
+        items: &[
+            Item::Cpu,
+            Item::Cycles,
+            Item::Core,
+            Item::Fpu,
+            Item::Dpmi,
+            Item::DosVersion,
+            Item::AnsiSys,
+            Item::Post,
+            Item::KeyboardLayout,
+        ],
     },
     Category {
         title: "INTEGRATED PERIPHERALS",

@@ -571,6 +571,9 @@ pub struct Cpu {
     pub con_line: Option<crate::interrupts::int21::ConLine>,
     /// What is left of the last line read from CON, for the next reads.
     pub con_pending: VecDeque<u8>,
+    /// ANSI.SYS's state in the console output: the colours of the text,
+    /// and a sequence part written.
+    pub ansi: crate::video::ansi::Ansi,
     /// Memory allocation strategy (INT 21h AH=58h).
     pub alloc_strategy: u16,
     /// End of an INT 15h AH=86h wait in progress, in PIT ticks.
@@ -835,6 +838,7 @@ impl Cpu {
             con_pending_scan: None,
             con_line: None,
             con_pending: VecDeque::new(),
+            ansi: Default::default(),
             alloc_strategy: 0,
             bios_wait_until: None,
             process_stack: Vec::new(),
@@ -867,16 +871,34 @@ impl Cpu {
 
     /// Whether the dynamic recompiler runs the instructions now: always
     /// with `core=dynamic`, and with `core=auto` once the running program
-    /// has switched to protected mode. Never on a host it has no code
-    /// generator for.
+    /// has switched to protected mode or while the CPU is in big real mode
+    /// (`big_real`). Never on a host it has no code generator for.
     #[inline(always)]
     pub fn dynamic_active(&self) -> bool {
         crate::dynrec::AVAILABLE
             && match self.core {
                 CoreMode::Dynamic => true,
-                CoreMode::Auto => self.pm_latched,
+                CoreMode::Auto => self.pm_latched || self.big_real(),
                 CoreMode::Normal => false,
             }
+    }
+
+    /// Real mode with a data segment whose limit is above 64 KB ("big
+    /// real mode"). Only code that switched to protected mode sets such a
+    /// limit, and a load in real mode keeps it, so the program running now
+    /// may not have switched itself: Ultima VII's U7.EXE runs in the 4 GB
+    /// limits MAINMENU.EXE set before it ended, as on a real machine. Such
+    /// a program was written for a 386, as a protected-mode one was, and
+    /// `core=auto` runs it on the recompiler too. The limits stay until
+    /// something switches to protected mode again and sets others, so the
+    /// programs after it do as well, as they all do after the first
+    /// switch under DOSBox's `core=auto`.
+    #[inline(always)]
+    pub fn big_real(&self) -> bool {
+        !self.pe()
+            && [Seg::ES, Seg::DS, Seg::FS, Seg::GS]
+                .iter()
+                .any(|&s| self.seg[s as usize].limit > 0xFFFF)
     }
 
     /// Switch the FPU between exact and fast arithmetic (`fpu_fast`). The
@@ -1846,10 +1868,7 @@ impl Cpu {
         crate::keyboard::drop_unseen_keys(&mut self.bus);
         match kept_cursor {
             Some((col, row)) => {
-                self.bus.write_8(0x0450, col);
-                self.bus.write_8(0x0451, row);
-                self.bus.cursor_x = col as usize;
-                self.bus.cursor_y = row as usize;
+                self.bus.set_console_cursor(col as usize, row as usize);
             }
             None => {
                 // Clear text VRAM so we don't show leftover text from the

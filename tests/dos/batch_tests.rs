@@ -314,6 +314,93 @@ fn choice_takes_its_default_when_the_time_is_up() {
     assert_eq!(cpu.errorlevel, 2);
 }
 
+/// What CHOICE prints for `line`, answered with `key` if it waits, and the
+/// ERRORLEVEL it leaves.
+fn choice_screen(name: &str, line: &str, key: Option<u16>) -> (String, u8) {
+    let dir = scratch(name, &[]);
+    let mut cpu = machine(&dir);
+    cpu.queue_batch_lines([line]);
+    run_until(&mut cpu, 100, |_| false);
+    if let Some(key) = key {
+        assert!(cpu.shell_wait.is_some(), "{}: {}", line, screen(&cpu));
+        cpu.bus.keyboard_buffer.push_back(key);
+    }
+    run_until(&mut cpu, 100, |cpu| cpu.shell_wait.is_none());
+    let text = screen(&cpu);
+    let shown = text
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("C:\\>"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (shown, cpu.errorlevel)
+}
+
+#[test]
+fn choice_reads_switches_after_the_text_as_choice_com_does() {
+    // What Windows 98's CHOICE.COM printed for these lines, ERRORLEVEL
+    // too. GOG's Warlords II launcher ends its text with /N.
+    let line = "@choice /c123 /s Which program do you want to run? [1-3]: /n";
+    assert_eq!(
+        choice_screen("choice_n", line, Some(0x0332)),
+        ("Which program do you want to run? [1-3]: 2".into(), 2)
+    );
+    // The text runs to the next switch, its spaces too.
+    assert_eq!(
+        choice_screen("choice_spaces", "@choice Two   spaces /c:ab", Some(0x1E61)),
+        ("Two   spaces [A,B]?A".into(), 1)
+    );
+    assert_eq!(
+        choice_screen("choice_end", "@choice /c:ab Hello", Some(0x3062)),
+        ("Hello[A,B]?B".into(), 2)
+    );
+    // A / in the text starts a switch, unless the text is in quotes.
+    assert_eq!(
+        choice_screen("choice_slash", "@choice Hi/n", Some(0x316E)),
+        ("HiN".into(), 2)
+    );
+    assert_eq!(
+        choice_screen("choice_quoted", "@choice \"Quoted /n\" /c:ab", Some(0x1E61)),
+        ("Quoted /n[A,B]?A".into(), 1)
+    );
+    assert_eq!(
+        choice_screen("choice_joined", "@choice /nHi /c:ab", Some(0x1E61)),
+        ("Hi A".into(), 1)
+    );
+    assert_eq!(
+        choice_screen("choice_abut", "@choice /c:ab/n Hi", Some(0x1E61)),
+        ("HiA".into(), 1)
+    );
+    let form = "    CHOICE [/C[:]choices] [/N] [/S] [/T[:]c,nn] [text]";
+    let one = format!(
+        "CHOICE: only one prompt string allowed. Expected Form:\n{}",
+        form
+    );
+    assert_eq!(
+        choice_screen("choice_two", "@choice Hello /n world /c:ab", None),
+        (one.clone(), 255)
+    );
+    // /T's seconds are one or two digits; a third is text.
+    assert_eq!(
+        choice_screen("choice_100", "@choice Hi /t:y,100", None),
+        (one, 255)
+    );
+    let invalid = format!("Invalid switch on command line. Expected form:\n{}", form);
+    assert_eq!(
+        choice_screen("choice_x", "@choice Pick a/b /c:ab", None),
+        (invalid, 255)
+    );
+    let timeout = "CHOICE: Incorrect timeout syntax.  Expected form Tc,nn or T:c,nn";
+    assert_eq!(
+        choice_screen("choice_t", "@choice Hi /t:y", None),
+        (timeout.into(), 255)
+    );
+    let keys = "CHOICE: invalid choice switch syntax. Expected form: /C[:]choices";
+    assert_eq!(
+        choice_screen("choice_c", "@choice Hi /c:", None),
+        (keys.into(), 255)
+    );
+}
+
 #[test]
 fn prompt_codes_make_the_prompt() {
     let dir = scratch("prompt", &[]);

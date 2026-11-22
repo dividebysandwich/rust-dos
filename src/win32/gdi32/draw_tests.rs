@@ -611,3 +611,144 @@ fn a_copy_onto_the_card_through_a_dc_takes_its_turn_behind_the_3d_drawing() {
         }
     }
 }
+
+/// A 24-bit DIB of 256 by 4, top down, its header at SCRATCH and its
+/// bits at BITS: in each row, red rising from 0 to 255 across, green half
+/// of it and blue falling. Drawn on the screen at (0, 0) with the
+/// halftone palette realized, through StretchDIBits or, with `halftone`,
+/// as DrawDib draws it; the indices of the 256 by 4 pixels drawn.
+fn draw_gradient(halftone: bool) -> (Vec<u8>, Vec<u32>) {
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &palette::halftone_colors());
+    let (w, h) = (256u32, 4u32);
+    let mut header = [40, w, (-(h as i32)) as u32].map(u32::to_le_bytes).concat();
+    header.extend_from_slice(&[1, 0, 24, 0]);
+    header.resize(40, 0);
+    cpu.bus.guest_write_bytes(SCRATCH, &header);
+    let row: Vec<u8> = (0..w)
+        .flat_map(|x| [255 - x as u8, (x / 2) as u8, x as u8])
+        .collect();
+    for y in 0..h {
+        cpu.bus.guest_write_bytes(BITS + y * w * 3, &row);
+    }
+    let args = [screen, 0, 0, w, h, 0, 0, w, h, BITS, SCRATCH, 0, SRCCOPY];
+    assert_eq!(bitmap::stretch_dib(&mut cpu, &args, halftone), Some(h));
+    let pixels = screen_pixels(&mut cpu);
+    let drawn = (0..h as usize)
+        .flat_map(|y| pixels[y * 640..y * 640 + w as usize].to_vec())
+        .collect();
+    (drawn, palette::system_colors(&mut cpu))
+}
+
+/// StretchDIBits maps each pixel of a 24-bit DIB through Windows 98's
+/// inverse colour table, whatever the stretch mode: no dither, so the
+/// four rows of the gradient are the same, and each pixel takes the
+/// palette's colour nearest to the middle of its cell of 5 bits a
+/// channel (`DeviceMap::deep_color`).
+#[test]
+fn stretch_di_bits_maps_true_colour_through_the_cells() {
+    let (drawn, system) = draw_gradient(false);
+    let (top, rest) = drawn.split_at(256);
+    for row in rest.chunks(256) {
+        assert_eq!(row, top);
+    }
+    let halftone = palette::halftone_colors();
+    for (x, &i) in top.iter().enumerate() {
+        let x = x as u32;
+        let want = x | (x / 2) << 8 | (255 - x) << 16;
+        let middle = (want & 0xF8_F8F8) + 0x04_0404;
+        let distance = |c: u32| {
+            (0..3)
+                .map(|s| {
+                    ((c >> (8 * s)) & 0xFF)
+                        .abs_diff((middle >> (8 * s)) & 0xFF)
+                        .pow(2)
+                })
+                .sum::<u32>()
+        };
+        let best = halftone.iter().map(|&c| distance(c)).min().unwrap();
+        assert_eq!(distance(system[i as usize]), best, "x {x}");
+    }
+}
+
+/// DrawDib dithers the same gradient to the halftone palette's cube:
+/// every pixel is a colour of the cube whose channels are the levels on
+/// either side of the source's, the rows differ from each other in a
+/// pattern, and the picture has more distinct colours than the nearest
+/// colour mapping gives.
+#[test]
+fn drawdib_dithers_true_colour_to_the_halftone_cube() {
+    let (drawn, system) = draw_gradient(true);
+    for (at, &i) in drawn.iter().enumerate() {
+        let x = (at % 256) as u32;
+        let source = [x, x / 2, 255 - x];
+        let color = system[i as usize];
+        for (s, v) in source.into_iter().enumerate() {
+            let c = (color >> (8 * s)) & 0xFF;
+            assert_eq!(c % 51, 0, "pixel {at}: {color:06x} isn't the cube's");
+            assert!(c / 51 == v / 51 || c / 51 == v.div_ceil(51), "pixel {at}");
+        }
+    }
+    let differing = (0..256)
+        .filter(|&x| (1..4).any(|y| drawn[y * 256 + x] != drawn[x]))
+        .count();
+    assert!(differing > 200, "{differing} columns differ between rows");
+    let count = |pixels: &[u8]| {
+        let mut seen = [false; 256];
+        pixels.iter().for_each(|&i| seen[i as usize] = true);
+        seen.iter().filter(|&&s| s).count()
+    };
+    let nearest = count(&draw_gradient(false).0);
+    let dithered = count(&drawn);
+    assert!(
+        dithered > nearest + 10,
+        "{dithered} colours dithered, {nearest} nearest"
+    );
+}
+
+/// A 24-bit DIB of grey 128, `sw` by `sh`, drawn as DrawDib draws it to
+/// `dw` by `dh` at (0, 0) of the screen with the halftone palette
+/// realized; the rows drawn, '#' for the cube's grey 153 and '.' for 102.
+fn draw_grey(sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<String> {
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &palette::halftone_colors());
+    let mut header = [40, sw, sh].map(u32::to_le_bytes).concat();
+    header.extend_from_slice(&[1, 0, 24, 0]);
+    header.resize(40, 0);
+    cpu.bus.guest_write_bytes(SCRATCH, &header);
+    let stride = (sw * 3).div_ceil(4) * 4;
+    cpu.bus.guest_write_bytes(BITS, &vec![128; (stride * sh) as usize]);
+    let args = [screen, 0, 0, dw, dh, 0, 0, sw, sh, BITS, SCRATCH, 0, SRCCOPY];
+    assert_eq!(bitmap::stretch_dib(&mut cpu, &args, true), Some(sh));
+    let pixels = screen_pixels(&mut cpu);
+    let system = palette::system_colors(&mut cpu);
+    (0..dh as usize)
+        .map(|y| {
+            (0..dw as usize)
+                .map(|x| match system[pixels[y * 640 + x] as usize] {
+                    0x99_9999 => '#',
+                    0x66_6666 => '.',
+                    c => panic!("({x}, {y}) is {c:06x}"),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Grey 128 as Windows 98 SE's DrawDib draws it on an 8-bit desktop,
+/// read back from the screen: the 4x4 matrix starts at the destination's
+/// bottom row, and a stretched picture is dithered at the destination's
+/// size.
+#[test]
+fn drawdib_dithers_as_windows_98_does() {
+    // Rows from the top of a destination whose height is a multiple of
+    // 4; one row less starts a row further down the matrix.
+    let rows = [".#.#.#.#", "#.#.#.#.", "##.###.#", "#.#.#.#."];
+    let expected = |dh: usize| -> Vec<String> {
+        (0..dh)
+            .map(|y| rows[(y + 8 - dh % 4) % 4].to_string())
+            .collect()
+    };
+    assert_eq!(draw_grey(8, 8, 8, 8), expected(8));
+    assert_eq!(draw_grey(8, 7, 8, 7), expected(7));
+    assert_eq!(draw_grey(4, 4, 8, 8), expected(8));
+    assert_eq!(draw_grey(8, 8, 8, 6), expected(6));
+}

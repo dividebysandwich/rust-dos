@@ -59,6 +59,9 @@ pub const GEN_SHIFT: usize = 6;
 /// pages mapped there). DOS extenders keep their ring 0 stacks and task
 /// state segments in it, which every switch to ring 0 touches.
 pub const UPPER_RAM: std::ops::Range<usize> = 0xC8000..0xF0000;
+/// B0000h-BFFFFh, where the text modes' memory is: an EGA or VGA answers
+/// in the part GR06 maps (`VgaCard::decoded_text_window`).
+const TEXT_SEGMENTS: std::ops::Range<usize> = 0xB0000..0xC0000;
 
 /// `Bus::code_blocks`' marks: a block with code, and every block while
 /// the writes are watched.
@@ -177,6 +180,9 @@ pub struct Bus {
     pub ide_hard_disks: bool,
     /// A booted system has a floppy disk controller (`floppy_controller`).
     pub floppy_controller: bool,
+    /// DOS's console takes ANSI.SYS's escape sequences (`ansi_sys`,
+    /// video/ansi.rs).
+    pub ansi_sys: bool,
     /// A booted system has a CD-ROM drive even with no CD mounted, for one
     /// to go in later (`boot_cdrom`).
     pub boot_cdrom: bool,
@@ -203,6 +209,9 @@ pub struct Bus {
     /// `tandy_sound_enabled`.
     pub tandy_sound: crate::sn76489::Sn76489,
     pub tandy_mode: crate::sn76489::TandySound,
+    /// The Creative Music System's two SAA1099s: a Game Blaster, or the
+    /// chips in an SB 2.0's sockets (`sbtype=gb`, `cms`).
+    pub cms: Option<Box<crate::gameblaster::GameBlaster>>,
     /// Values the settings window's Cheats page froze, put back before
     /// every frame while the program runs (`apply_freezes`).
     pub freezes: Vec<crate::cheats::Freeze>,
@@ -235,8 +244,6 @@ pub struct Bus {
     /// Port 61h bit 4, the DRAM refresh request, toggles on every read;
     /// delay loops count the toggles.
     refresh_toggle: bool,
-    pub cursor_x: usize,
-    pub cursor_y: usize,
     pub start_time: Instant, // System timer
     /// The game port at 201h and the joysticks on it (see joystick.rs).
     pub joystick: crate::joystick::GamePort,
@@ -542,6 +549,22 @@ impl Bus {
             0 => 25,
             rows => rows as usize + 1,
         }
+    }
+
+    /// Where DOS's console output goes on: the BIOS's cursor of page 0
+    /// (BDA 0450h), which CLS, INT 10h and programs that write the BIOS
+    /// data move as well, kept inside the 80 columns and the rows of the
+    /// text screen.
+    pub fn console_cursor(&self) -> (usize, usize) {
+        let col = (self.read_8(0x0450) as usize).min(79);
+        let row = (self.read_8(0x0451) as usize).min(self.text_rows() - 1);
+        (col, row)
+    }
+
+    /// Put the cursor `console_cursor` reads at `col`, `row`.
+    pub fn set_console_cursor(&mut self, col: usize, row: usize) {
+        self.write_8(0x0450, col as u8);
+        self.write_8(0x0451, row as u8);
     }
 
     /// The characters in a row of an 80-column text mode: 80, or what an
@@ -1180,9 +1203,18 @@ impl Bus {
         if let Some(ram) = self.vga.cpu_window(addr) {
             return self.ram[ram];
         }
-        let (text, size, wrap) = self.vga.text_window();
-        if (text..text + size).contains(&addr) {
+        if let Some((text, size, wrap)) = self.vga.decoded_text_window()
+            && (text..text + size).contains(&addr)
+        {
             return self.vga.vram_text[(addr - text) & wrap];
+        }
+        if TEXT_SEGMENTS.contains(&addr) && self.vga.adapter.ega_bios() {
+            // What GR06 doesn't map there: the planes go on from A0000h in
+            // its 128 KB window, and otherwise nothing answers.
+            if self.vga.maps_128k() && !self.vbe_window() {
+                return self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS);
+            }
+            return 0xFF;
         }
         if addr < self.ram.len() {
             return self.ram[addr];
@@ -1232,6 +1264,13 @@ impl Bus {
             }
             let saved = self.vga.latches.get();
             let v = self.vga.read_graphics(self.vga_window(addr, false));
+            self.vga.latches.set(saved);
+            return v;
+        }
+        // The planes past 64 KB of GR06's 128 KB window, latches kept too.
+        if TEXT_SEGMENTS.contains(&addr) && self.vga.maps_128k() && !self.vbe_window() {
+            let saved = self.vga.latches.get();
+            let v = self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS);
             self.vga.latches.set(saved);
             return v;
         }
@@ -1350,8 +1389,9 @@ impl Bus {
             }
             return true;
         }
-        let (text, size, wrap) = self.vga.text_window();
-        if (text..text + size).contains(&addr) {
+        if let Some((text, size, wrap)) = self.vga.decoded_text_window()
+            && (text..text + size).contains(&addr)
+        {
             let text_off = (addr - text) & wrap;
             let unchanged = self.vga.vram_text[text_off] == value;
             self.vga.vram_text[text_off] = value;
@@ -1382,6 +1422,17 @@ impl Bus {
                     | VideoMode::Cga320x200Color
                     | VideoMode::Cga640x200
             );
+        }
+        if TEXT_SEGMENTS.contains(&addr) && self.vga.adapter.ega_bios() {
+            // As in `mapped_8`: the planes in GR06's 128 KB window, else
+            // lost.
+            if !self.vga.maps_128k() || self.vbe_window() {
+                return false;
+            }
+            let offset = addr - ADDR_VGA_GRAPHICS;
+            self.note_video_write(offset, 1);
+            self.vga.write_graphics(offset, value);
+            return true;
         }
 
         // The ROMs ignore writes; the upper memory between them is RAM.
@@ -2090,6 +2141,10 @@ impl Bus {
             // On an AdLib Gold the FM goes through the card's mixer and
             // output stage, with its sampled sound. Either way it reaches
             // the line out through the capacitor on the card's output.
+            // The Gold has one capacitor for each output, after the
+            // TDA8425, which gets the FM and the sampled sound mixed. It
+            // is linear, so one for each source sums to the same and keeps
+            // the two apart for the host's mixer, as the card's chain does.
             let (fm, gold_pcm) = match &mut self.adlib_gold {
                 Some(gold) => {
                     let (fm, pcm) = gold.render(fm);
@@ -2100,6 +2155,7 @@ impl Bus {
             let fm = self.mixer.fm_coupling(fm);
             self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
             if let Some(pcm) = gold_pcm {
+                let pcm = self.mixer.adlib_gold_coupling(pcm);
                 self.mixer.add(&mut mix, &mut peaks, Channel::AdlibGold, pcm);
             }
             if let Some(sb) = &mut self.sb {
@@ -2151,6 +2207,10 @@ impl Bus {
             if tandy_on {
                 let s = self.tandy_sound.render();
                 self.mixer.add(&mut mix, &mut peaks, Channel::Tandy, (s, s));
+            }
+            if let Some(cms) = &mut self.cms {
+                let frame = cms.render();
+                self.mixer.add(&mut mix, &mut peaks, Channel::Cms, frame);
             }
             if let Some(frames) = &windows {
                 self.mixer.add(&mut mix, &mut peaks, Channel::Windows, frames[n]);
@@ -2282,9 +2342,14 @@ impl Bus {
             && !crate::win32::audio_playing(&self.win32)
             && self.gus.as_ref().is_none_or(|g| g.is_idle())
             && self.awe.is_none()
-            && self.adlib_gold.as_ref().is_none_or(|g| g.pcm_quiet() && g.fm_chain_at_rest())
+            // Without a Gold its capacitor never gets a frame, and one that
+            // got none doesn't rest (`OutputCoupling::rests_on`).
+            && self.adlib_gold.as_ref().is_none_or(|g| {
+                g.pcm_quiet() && g.fm_chain_at_rest() && self.mixer.adlib_gold_coupling_rests()
+            })
             && self.lpt_dac.is_none()
             && !self.tandy_sound_enabled()
+            && self.cms.as_ref().is_none_or(|cms| cms.is_quiet())
     }
 
     /// Keep the queues of output in bounds.
@@ -2940,6 +3005,16 @@ impl Bus {
             0x38A => self.opl.write_address(1, value),
             0x38B => self.opl_data(Some(1), value),
 
+            // The CMS chips, at the first four ports of the Game Blaster
+            // or of an SB 2.0 with them (whose DSP has none there), and
+            // the Game Blaster's detection chip after them.
+            p if self.cms.as_ref().is_some_and(|cms| cms.claims(p)) => {
+                self.audio_catch_up();
+                if let Some(cms) = &mut self.cms {
+                    cms.write(p, value);
+                }
+            }
+
             // The Sound Blaster, 16 ports from its base.
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_write(p & 0xF, value),
 
@@ -3031,6 +3106,15 @@ impl Bus {
             }
             p if self.s3() && s3::is_engine_port(p) => self.engine_write(p, value as u32, 1),
             0xCFC..=0xCFF if self.pci_present() => self.pci_write(port, value),
+
+            // The DSP reset port of a Sound Blaster at a base where the
+            // machine has none (any of `SbConfig::BASES`), after the arms
+            // of every device that may sit there. Sound drivers look for
+            // the card by writing 1 and 0 there at each base in turn and
+            // reading 2xEh for the DSP's AAh, as Prehistorik 2's does from
+            // 210h on. Nothing decodes the port on a real machine, so the
+            // writes go nowhere without a log line.
+            p if p & 0xF == 6 && crate::sb::SbConfig::BASES.contains(&(p & !0xF)) => {}
 
             _ => {
                 if self.vga.ports().contains(&port) {
@@ -3334,6 +3418,9 @@ impl Bus {
             0x38A => self.opl.read_status(self.clock.now_micros()),
             0x389 | 0x38B => 0xFF,
 
+            p if self.cms.as_ref().is_some_and(|cms| cms.claims(p)) => {
+                self.cms.as_ref().map_or(0xFF, |cms| cms.read(p))
+            }
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_read(p & 0xF),
 
             p if self.gus_claims(p) => self.gus_read(p),

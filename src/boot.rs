@@ -224,6 +224,7 @@ fn reset_machine(cpu: &mut Cpu) {
     cpu.con_pending_scan = None;
     cpu.con_line = None;
     cpu.con_pending.clear();
+    cpu.ansi = Default::default();
     cpu.hle_retry = false;
     cpu.idle = false;
     cpu.pm_latched = false;

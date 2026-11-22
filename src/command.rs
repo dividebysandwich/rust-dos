@@ -1,9 +1,10 @@
 use crate::cpu::Cpu;
 use crate::disk::{DRIVE_C, DriveKind, drive_letter, drive_name, parse_drive_prefix};
 use crate::mount::{
-    MOUNT_USAGE, MountCmd, MountSpec, PathContext, display_host_path, parse_mount_command,
+    MOUNT_USAGE, MountCmd, MountSpec, PathContext, display_host_path, parse_dos_mount_tokens,
+    tokenize,
 };
-use crate::video::{print_cp437, print_string};
+use crate::video::{print_cp437, print_host_text, print_string};
 use std::fmt::Write;
 
 pub trait ShellCommand {
@@ -564,8 +565,8 @@ impl ShellCommand for TypeCommand {
         match cpu.bus.disk.file_data(target) {
             Some(file) => match file.read() {
                 Ok(bytes) => {
-                    print_cp437(cpu, &type_text(&bytes), 0x07);
-                    if cpu.bus.cursor_x != 0 {
+                    crate::video::print_console(cpu, &type_text(&bytes));
+                    if cpu.bus.console_cursor().0 != 0 {
                         print_string(cpu, "\r\n");
                     }
                 }
@@ -614,8 +615,8 @@ impl ShellCommand for ClsCommand {
             cpu.bus.write_8(base + i, 0x20);
             cpu.bus.write_8(base + i + 1, 0x07);
         }
-        // Reset Cursor (BDA 0x0450)
-        cpu.bus.write_16(0x0450, 0x0000);
+        // The cursor to the top left, where the next output goes on.
+        cpu.bus.set_console_cursor(0, 0);
         after_cls(cpu);
     }
 }
@@ -983,54 +984,110 @@ impl ShellCommand for ChoiceCommand {
                 crate::shell::enter_wait(cpu, crate::shell::ShellWait::Choice(choice));
             }
             Err(e) => {
-                print_string(cpu, &format!("{}\r\n", e));
+                print_string(cpu, &e);
                 cpu.errorlevel = 255;
             }
         }
     }
 }
 
+/// The form CHOICE's messages about its switches end with.
+const CHOICE_FORM: &str = "    CHOICE [/C[:]choices] [/N] [/S] [/T[:]c,nn] [text]\r\n";
+
 /// CHOICE's switches: the keys to wait for, its text, and whether to show
-/// the keys.
+/// the keys. As MS-DOS's CHOICE.COM reads them: switches before and after
+/// the text, a `/` in the text starting one unless the text is in quotes,
+/// and the text as typed up to the next switch, its spaces too. Errors
+/// are CHOICE.COM's messages, line ends included.
 fn parse_choice<'a>(cpu: &Cpu, args: &'a str) -> Result<(crate::shell::Choice, &'a str, bool), String> {
     let mut keys = b"YN".to_vec();
     let (mut case_sensitive, mut show_keys, mut timeout) = (false, true, None);
-    let mut rest = args.trim_start();
-    while let Some(switch) = rest.strip_prefix('/') {
-        let (word, after) = first_word(switch);
-        rest = after.trim_start();
-        let (letter, value) = word.split_at(word.chars().next().map_or(0, char::len_utf8));
-        let value = value.strip_prefix(':').unwrap_or(value);
-        match letter.to_ascii_uppercase().as_str() {
-            "C" => keys = crate::dosstr::to_bytes(value),
-            "N" => show_keys = false,
-            "S" => case_sensitive = true,
-            "T" => {
-                let (key, seconds) = value.split_once(',').ok_or("Invalid switch - /T")?;
-                let (key, seconds) = (key.bytes().next(), seconds.trim().parse::<u64>().ok());
-                let (Some(key), Some(seconds)) = (key, seconds.filter(|&s| s <= 99)) else {
-                    return Err("Invalid switch - /T".into());
-                };
-                timeout = Some((key, seconds));
+    let mut text = None;
+    let mut rest = args;
+    loop {
+        rest = rest.trim_start_matches(WHITESPACE);
+        let Some(switch) = rest.strip_prefix('/') else {
+            if rest.is_empty() {
+                break;
             }
-            _ => return Err(format!("Invalid switch - /{}", word)),
+            if text.is_some() {
+                return Err(format!(
+                    "CHOICE: only one prompt string allowed. Expected Form:\r\n{CHOICE_FORM}\r\n"
+                ));
+            }
+            // Quotes keep a `/` in the text and are taken off it.
+            let (found, after) = match rest.strip_prefix('"') {
+                Some(quoted) => quoted.split_once('"').unwrap_or((quoted, "")),
+                None => rest.split_at(rest.find('/').unwrap_or(rest.len())),
+            };
+            text = Some(found);
+            rest = after;
+            continue;
+        };
+        let mut chars = switch.chars();
+        let letter = chars.next().map(|c| c.to_ascii_uppercase());
+        let value = chars.as_str();
+        rest = value;
+        match letter {
+            Some('N') => show_keys = false,
+            Some('S') => case_sensitive = true,
+            Some('C') => {
+                let value = value.strip_prefix(':').unwrap_or(value);
+                let end = value.find([' ', '\t', '/']).unwrap_or(value.len());
+                if end == 0 {
+                    return Err(
+                        "CHOICE: invalid choice switch syntax. Expected form: /C[:]choices\r\n"
+                            .into(),
+                    );
+                }
+                keys = crate::dosstr::to_bytes(&value[..end]);
+                rest = &value[end..];
+            }
+            Some('T') => {
+                // A key, a comma and one or two digits; a third digit
+                // starts the text.
+                let value = value.strip_prefix(':').unwrap_or(value);
+                let mut chars = value.chars();
+                let (key, comma) = (chars.next(), chars.next());
+                let after = chars.as_str();
+                let digits = after.bytes().take(2).take_while(u8::is_ascii_digit).count();
+                let (Some(key), Some(','), 1..) = (key, comma, digits) else {
+                    return Err(
+                        "CHOICE: Incorrect timeout syntax.  Expected form Tc,nn or T:c,nn\r\n"
+                            .into(),
+                    );
+                };
+                let seconds = after[..digits].parse::<u64>().unwrap_or(0);
+                timeout = Some((crate::dosstr::to_bytes(&key.to_string())[0], seconds));
+                rest = &after[digits..];
+            }
+            _ => {
+                return Err(format!(
+                    "Invalid switch on command line. Expected form:\r\n{CHOICE_FORM}\r\n"
+                ));
+            }
         }
     }
     if !case_sensitive {
         keys.make_ascii_uppercase();
     }
-    if keys.is_empty() {
-        return Err("Invalid switch - /C".into());
-    }
     let mut choice = crate::shell::Choice { keys, case_sensitive, timeout: None };
     if let Some((key, seconds)) = timeout {
-        let Some(i) = choice.keys.iter().position(|&k| if case_sensitive { k == key } else { k.eq_ignore_ascii_case(&key) }) else {
-            return Err("Timeout default not in specified (or default) choices.".into());
+        let Some(i) = choice.keys.iter().position(|&k| {
+            if case_sensitive {
+                k == key
+            } else {
+                k.eq_ignore_ascii_case(&key)
+            }
+        }) else {
+            return Err(
+                "CHOICE: Timeout default not in specified (or default) choices.\r\n".into(),
+            );
         };
         let at = cpu.bus.clock.now_ticks() + seconds * crate::timer::PIT_HZ;
         choice.timeout = Some((choice.keys[i], at));
     }
-    Ok((choice, rest, show_keys))
+    Ok((choice, text.unwrap_or(""), show_keys))
 }
 
 /// KEYB [code[,codepage]]: type in another keyboard layout (keylayout.rs),
@@ -1151,7 +1208,8 @@ impl ShellCommand for MountCommand {
             home: home.as_deref(),
             locate: &locate,
         };
-        match parse_mount_command(args, &paths) {
+        // Host paths among the words as the host spells them.
+        match tokenize(args).and_then(|tokens| parse_dos_mount_tokens(&tokens, &paths)) {
             Ok(MountCmd::List) => {
                 print_string(cpu, "Drive Type    Label       Host path\r\n");
                 let disk = &cpu.bus.disk;
@@ -1168,15 +1226,14 @@ impl ShellCommand for MountCommand {
                         String::new()
                     };
                     let line = format!(
-                        "{:<6}{:<7} {:<11} {}{}{}\r\n",
+                        "{:<6}{:<7} {:<11} ",
                         info.name(),
                         info.kind.name(),
-                        info.label,
-                        host,
-                        disk_number(info.image_index, info.images.len()),
-                        access
+                        info.label
                     );
                     print_string(cpu, &line);
+                    let images = disk_number(info.image_index, info.images.len());
+                    print_host_text(cpu, &format!("{}{}{}\r\n", host, images, access));
                 }
             }
             Ok(MountCmd::Help) => print_string(cpu, MOUNT_USAGE),
@@ -1184,7 +1241,7 @@ impl ShellCommand for MountCommand {
             Ok(MountCmd::Unmount(drive)) => unmount(cpu, drive),
             Ok(MountCmd::Overlay(drive, dir)) => overlay(cpu, drive, dir),
             Err(e) => {
-                print_string(cpu, &format!("{}\r\n", e));
+                print_host_text(cpu, &format!("{}\r\n", e));
                 print_string(cpu, MOUNT_USAGE);
             }
         }
@@ -1230,11 +1287,16 @@ impl ShellCommand for RemountCommand {
             return;
         };
         match cpu.bus.remount_drive(from, to) {
-            Ok(path) => print_string(
+            Ok(path) => print_host_text(
                 cpu,
-                &format!("Drive {} is now {}, from {}\r\n", drive_name(from), drive_name(to), display_host_path(&path)),
+                &format!(
+                    "Drive {} is now {}, from {}\r\n",
+                    drive_name(from),
+                    drive_name(to),
+                    display_host_path(&path)
+                ),
             ),
-            Err(e) => print_string(cpu, &format!("{}\r\n", e)),
+            Err(e) => print_host_text(cpu, &format!("{}\r\n", e)),
         }
     }
 }
@@ -1299,14 +1361,15 @@ fn print_os_images(cpu: &mut Cpu) {
     if images.is_empty() {
         print_string(cpu, "\r\nNo OS images are in:\r\n");
         for dir in crate::os_images::dirs() {
-            print_string(cpu, &format!("  {}\r\n", display_host_path(&dir)));
+            print_host_text(cpu, &format!("  {}\r\n", display_host_path(&dir)));
         }
         return;
     }
     print_string(cpu, "\r\nOS images:\r\n");
     for (name, path) in images {
         let files = if crate::os_images::holds_files(&path) { " (files, for C:)" } else { "" };
-        print_string(cpu, &format!("  {:<12} {}{}\r\n", name.to_ascii_uppercase(), display_host_path(&path), files));
+        let path = display_host_path(&path);
+        print_host_text(cpu, &format!("  {:<12} {}{}\r\n", name.to_ascii_uppercase(), path, files));
     }
 }
 
@@ -1331,9 +1394,9 @@ fn mount(cpu: &mut Cpu, spec: MountSpec) {
                 display_host_path(&path),
                 disk_number(0, count)
             );
-            print_string(cpu, &msg);
+            print_host_text(cpu, &msg);
         }
-        Err(e) => print_string(cpu, &format!("{}\r\n", e)),
+        Err(e) => print_host_text(cpu, &format!("{}\r\n", e)),
     }
 }
 
@@ -1346,8 +1409,11 @@ fn overlay(cpu: &mut Cpu, drive: u8, dir: std::path::PathBuf) {
     };
     spec.opts.overlay = Some(dir.clone());
     match cpu.bus.mount_drive(drive, &spec.path, spec.opts, true) {
-        Ok(_) => print_string(cpu, &format!("Drive {}'s changes go to {}\r\n", drive_name(drive), display_host_path(&dir))),
-        Err(e) => print_string(cpu, &format!("{}\r\n", e)),
+        Ok(_) => {
+            let dir = display_host_path(&dir);
+            print_host_text(cpu, &format!("Drive {}'s changes go to {}\r\n", drive_name(drive), dir))
+        }
+        Err(e) => print_host_text(cpu, &format!("{}\r\n", e)),
     }
 }
 

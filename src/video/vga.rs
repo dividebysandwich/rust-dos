@@ -379,6 +379,28 @@ impl VgaCard {
         (base, 0x8000, 0x7FFF)
     }
 
+    /// `text_window` while the card answers there: always on the CGA,
+    /// Tandy, PCjr and Hercules, and on an EGA or VGA only while GR06's
+    /// Memory Map Select maps the memory at B0000h (10b) or B8000h (11b).
+    #[inline]
+    pub fn decoded_text_window(&self) -> Option<(usize, usize, usize)> {
+        if !self.adapter.ega_bios() {
+            return Some(self.text_window());
+        }
+        match self.graphics_regs[0x06] & 0x0C {
+            0x08 => Some((0xB0000, 0x8000, 0x7FFF)),
+            0x0C => Some((0xB8000, 0x8000, 0x7FFF)),
+            _ => None,
+        }
+    }
+
+    /// Whether GR06 maps an EGA's or VGA's memory at A0000h-BFFFFh, 128 KB
+    /// (Memory Map Select 00b): B0000h-BFFFFh reach the planes from offset
+    /// 10000h on, as the window from A0000h goes on.
+    pub fn maps_128k(&self) -> bool {
+        self.adapter.ega_bios() && self.graphics_regs[0x06] & 0x0C == 0
+    }
+
     /// Whether attribute bit 7 makes characters blink rather than select
     /// the bright background colours (Attribute Mode Control bit 3, in a
     /// text mode; the CGA's Mode Control bit 5).

@@ -6,7 +6,7 @@
 use crate::command::ShellCommand;
 use crate::cpu::Cpu;
 use crate::disk::{DriveKind, FLOPPY_DRIVES, drive_key, drive_number, numbered_drive};
-use crate::mount::{MountCmd, PathContext, parse_drive_name, parse_mount_tokens, tokenize};
+use crate::mount::{MountCmd, PathContext, parse_dos_mount_tokens, parse_drive_name, tokenize};
 use crate::video::print_string;
 
 pub const BOOT_USAGE: &str = concat!(
@@ -125,7 +125,8 @@ fn mount_as(cpu: &mut Cpu, drive: u8, images: &[String]) -> Result<(), String> {
     let locate = |path: &str| disk.resolve_path(path);
     let paths =
         PathContext { base: &cwd, config_dir: cpu.bus.config_dir.as_deref(), home: home.as_deref(), locate: &locate };
-    let spec = match parse_mount_tokens(&tokens, &paths)? {
+    // Host paths as the host spells them (see MOUNT).
+    let spec = match parse_dos_mount_tokens(&tokens, &paths)? {
         MountCmd::Mount(spec) => spec,
         _ => return Err("BOOT needs disk images".to_string()),
     };
