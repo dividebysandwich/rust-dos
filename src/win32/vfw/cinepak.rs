@@ -328,12 +328,15 @@ fn codebook(book: &mut [Entry; 256], id: u8, data: &[u8]) {
 // those entries are lattice colours: `grey_8`. A movie of 8 bits gets
 // that palette of 236 greys.
 //
-// The codec does this with tables of 256 entries for each sample, which
-// give the four phases' levels together, and works each codebook entry
-// out for the phases of the pixels it covers when the codebook is read.
-// These are those tables, read from its code, and its palette, which
-// ICM_DECOMPRESS_GET_PALETTE gives and MCIAVI realizes. They match
-// pixel for pixel what Windows 98 SE draws (`tests`).
+// The codec does this with a table of 256 entries for each sample,
+// which gives the four phases' levels together, and works each codebook
+// entry out for the phases of the pixels it covers when the codebook is
+// read. `Y_STEPS`, `U_STEPS` and `V_STEPS` are the samples at which the
+// levels of those tables go up. `LATTICE` and `LATTICE_COLORS` are the
+// codec's map of levels to entries and its palette, which
+// ICM_DECOMPRESS_GET_PALETTE gives and MCIAVI realizes. All were read
+// from iccvid.dll, and they match pixel for pixel what Windows 98 SE
+// draws (`tests`).
 
 /// The dither phase of the pixel `x` from the left and `y` from the top
 /// is `PHASE[y % 4][x % 4]`.

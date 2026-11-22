@@ -1171,19 +1171,24 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
     };
     let (pw, ph) = (x1 - x0, y1 - y0);
     let shown = pw > 0 && ph > 0 && sw > 0 && sh > 0 && palette::palette_device(cpu);
-    if let Some(colors) = cinepak.filter(|_| shown) {
-        let zoom = if src == (0, 0, w, h) && (pw, ph) == (2 * w, 2 * h) {
-            2
-        } else {
-            1
-        };
-        let indexes = video(cpu, i).pictures.cinepak_8(&m, n, zoom as u32);
-        if let Some(indexes) = indexes {
-            let from = if zoom == 2 { (0, 0, pw, ph) } else { src };
-            surface =
-                crate::win32::gdi32::dither::stretch_8(&indexes, w * zoom, colors, from, pw, ph);
-            src = (0, 0, pw, ph);
-        }
+    let zoom = if src == (0, 0, w, h) && (pw, ph) == (2 * w, 2 * h) {
+        2
+    } else {
+        1
+    };
+    // A Cinepak picture the codec can't give in 8 bits (its frames are
+    // of another size than the movie's) is dithered as other movies are.
+    let cinepak = match cinepak {
+        Some(colors) if shown => video(cpu, i)
+            .pictures
+            .cinepak_8(&m, n, zoom as u32)
+            .map(|indexes| (indexes, colors)),
+        _ => None,
+    };
+    if let Some((indexes, colors)) = cinepak {
+        let from = if zoom == 2 { (0, 0, pw, ph) } else { src };
+        surface = crate::win32::gdi32::dither::stretch_8(&indexes, w * zoom, colors, from, pw, ph);
+        src = (0, 0, pw, ph);
     } else if deep && shown {
         surface = crate::win32::gdi32::dither::to_halftone(&surface, src, pw, ph);
         src = (0, 0, pw, ph);

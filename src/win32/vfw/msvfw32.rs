@@ -473,6 +473,7 @@ const DDF_UPDATE: u32 = 0x0002;
 const DDF_SAME_HDC: u32 = 0x0004;
 const DDF_SAME_DRAW: u32 = 0x0008;
 const DDF_DONTDRAW: u32 = 0x0010;
+const DDF_BACKGROUNDPAL: u32 = 0x0200;
 
 const BI_RGB: u32 = 0;
 
@@ -623,6 +624,7 @@ fn draw_dib_end(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn end(cpu: &mut Cpu, slot: usize) {
+    drop_palette(cpu, slot);
     let d = dd(cpu, slot);
     let buffer = std::mem::take(&mut d.buffer);
     *d = DrawDib::default();
@@ -659,7 +661,13 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, at: u32) -> bool {
         {
             let d = dd(cpu, slot);
             d.codec.follow(&format);
-            d.deep = format.bits > 8;
+            let deep = format.bits > 8;
+            if d.deep != deep {
+                // A Cinepak stream of the other kind (grey or colour)
+                // takes the other palette.
+                d.deep = deep;
+                drop_palette(cpu, slot);
+            }
         }
         return true;
     }
@@ -777,7 +785,8 @@ fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let src_rect = (xs as i32, ys as i32, dxs as i32, dys as i32);
     let dst_rect = (xd as i32, yd as i32, dxd as i32, dyd as i32);
-    if draw_cinepak_8(cpu, slot, hdc, dst_rect, src_rect) {
+    let background = flags & DDF_BACKGROUNDPAL != 0;
+    if draw_cinepak_8(cpu, slot, hdc, dst_rect, src_rect, background) {
         return Some(1);
     }
     // On a display of 256 colours, a picture of more bits is dithered to
@@ -813,14 +822,17 @@ fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// height) from the source rectangle `src` (x and y from the picture's
 /// bottom left). The codec's palette is selected into the DC and
 /// realized for the drawing, so the pixels keep their indexes, which on
-/// Windows land on the same entries of the system palette. False when
-/// the picture isn't drawn so.
+/// Windows land on the same entries of the system palette. It is
+/// realized as a foreground palette unless `background`
+/// (DDF_BACKGROUNDPAL), as Wine's DrawDibDraw selects it. False when the
+/// picture isn't drawn so.
 fn draw_cinepak_8(
     cpu: &mut Cpu,
     slot: usize,
     hdc: u32,
     (xd, yd, dxd, dyd): (i32, i32, i32, i32),
     (xs, ys, dxs, dys): (i32, i32, i32, i32),
+    background: bool,
 ) -> bool {
     use crate::win32::gdi32::{self, dither, draw, palette};
     let d = dd(cpu, slot);
@@ -851,12 +863,11 @@ fn draw_cinepak_8(
     };
     let grey = !d.deep;
     let mut hpal = d.palette;
+    let colors = super::cinepak::palette_8(gdi32::static_colors(), grey);
     if gdi32::gdi(cpu).palette(hpal).is_none() {
-        let colors = super::cinepak::palette_8(gdi32::static_colors(), grey);
         hpal = palette::system_palette_of(cpu, &colors);
         dd(cpu, slot).palette = hpal;
     }
-    let colors = super::cinepak::palette_8(gdi32::static_colors(), grey);
     let from = if zoom == 2 { (0, 0, pw, ph) } else { from };
     let surface = dither::stretch_8(&indexes, w * zoom, colors, from, pw, ph);
     let source = draw::Source {
@@ -864,7 +875,7 @@ fn draw_cinepak_8(
         bk_color: 0xFF_FFFF,
         origin: (0, 0),
     };
-    let old = palette::select_palette(cpu, &[hdc, hpal, 0]).filter(|&o| o != 0);
+    let old = palette::select_palette(cpu, &[hdc, hpal, background as u32]).filter(|&o| o != 0);
     palette::realize_posted(cpu, hdc);
     draw::blit_from(
         cpu,
@@ -877,6 +888,16 @@ fn draw_cinepak_8(
         palette::select_palette(cpu, &[hdc, old, 1]);
     }
     true
+}
+
+/// Deletes the palette of a DrawDib's Cinepak pictures (`draw_cinepak_8`),
+/// which no process owns, when the DrawDib ends or its stream changes
+/// kind.
+fn drop_palette(cpu: &mut Cpu, slot: usize) {
+    let hpal = std::mem::take(&mut dd(cpu, slot).palette);
+    if crate::win32::gdi32::gdi(cpu).palette(hpal).is_some() {
+        crate::win32::gdi32::delete_object(cpu, &[hpal]);
+    }
 }
 
 /// How many of the `len` bytes at `at` the program can read, up to the

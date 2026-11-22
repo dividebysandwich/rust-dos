@@ -213,7 +213,10 @@ pub fn stretch_8(
 /// bottom. When either shrinks, the column takes `(x * sw + c) / dw` and
 /// the row from the top `(y * sh + c) / dh`, `c` being `sw - dw / 2`
 /// for a narrower picture, else `(sw - 1) / 2`, and `sh - (dh + 1) / 2`
-/// for a lower one, else `(sh + 1) / 2`.
+/// for a lower one, else `(sh + 1) / 2`. Every measured size that
+/// shrinks was stretched from 256 by 64, so how `c` follows the source's
+/// size is the simplest rule that fits; other sources may differ
+/// (#1730).
 fn stretch_map((sw, sh): (i32, i32), (dw, dh): (i32, i32)) -> (Vec<i32>, Vec<i32>) {
     let (sw64, sh64, dw64, dh64) = (sw as i64, sh as i64, dw as i64, dh as i64);
     if dw >= sw && dh >= sh {
