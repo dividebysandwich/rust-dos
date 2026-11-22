@@ -393,17 +393,7 @@ impl Chip {
         buf4[1] = clip_sample(self.mixbuff[1]);
         buf4[3] = clip_sample(self.mixbuff[3]);
 
-        {
-            let s = self.noise;
-            let f0_8 = (s ^ (s >> 14)) & 0x1ff;
-            let f9_17 = ((s >> 9) ^ f0_8) & 0x1ff;
-            let f18_22 = ((s >> 18) ^ f9_17) & 0x1f;
-            let f23_31 = f0_8 ^ ((f9_17 >> 5) | (f18_22 << 4));
-            let f32_35 = (f9_17 ^ f23_31) & 0x0f;
-            self.noise_hh = ((s >> 13) & 1) as u8;
-            self.noise_sd = ((s >> 16) & 1) as u8;
-            self.noise = ((f9_17 >> 4) & 0x1f) | (f18_22 << 5) | (f23_31 << 10) | (f32_35 << 19);
-        }
+        self.step_noise();
 
         if CHANNEL_SAMPLE_DELAY {
             for slot in 0..15 {
@@ -451,6 +441,36 @@ impl Chip {
 
         self.update_timers_and_lfo();
         self.drain_writebuf();
+    }
+
+    fn step_noise(&mut self) {
+        let s = self.noise;
+        let f0_8 = (s ^ (s >> 14)) & 0x1ff;
+        let f9_17 = ((s >> 9) ^ f0_8) & 0x1ff;
+        let f18_22 = ((s >> 18) ^ f9_17) & 0x1f;
+        let f23_31 = f0_8 ^ ((f9_17 >> 5) | (f18_22 << 4));
+        let f32_35 = (f9_17 ^ f23_31) & 0x0f;
+        self.noise_hh = ((s >> 13) & 1) as u8;
+        self.noise_sd = ((s >> 16) & 1) as u8;
+        self.noise = ((f9_17 >> 4) & 0x1f) | (f18_22 << 5) | (f23_31 << 10) | (f32_35 << 19);
+    }
+
+    /// rust-dos: the resampled frame of a chip `is_frozen` finds frozen,
+    /// whose slots and mix give the samples they gave before, without
+    /// working them out: the clocks they don't use (the noise, the
+    /// tremolo and vibrato, the envelope generator's timer, the resampler)
+    /// go on as `generate_4ch_resampled` moves them, so that the chip goes
+    /// on from a write as one that ran all along. The frame is the last
+    /// one, once the samples interpolated are the same.
+    pub(crate) fn advance_frozen(&mut self) {
+        while self.samplecnt >= self.rateratio {
+            self.oldsamples = self.samples;
+            self.step_noise();
+            self.update_timers_and_lfo();
+            self.drain_writebuf();
+            self.samplecnt -= self.rateratio;
+        }
+        self.samplecnt += 1 << RSM_FRAC;
     }
 
     pub(crate) fn generate_4ch_resampled(&mut self, buf4: &mut [i16]) {

@@ -675,6 +675,13 @@ impl Opl3Chip {
         self.chip.is_frozen()
     }
 
+    /// rust-dos: the next resampled frame of a chip `is_frozen` found
+    /// frozen, which is the last one, without working out its slots: only
+    /// its clocks move, as `generate_resampled` would move them.
+    pub fn advance_frozen(&mut self) {
+        self.chip.advance_frozen();
+    }
+
     /// rust-dos: leave the channels whose bits are set (bit 0 channel 0,
     /// up to bit 17) out of the mix; the chip goes on as before.
     pub fn set_mute(&mut self, mask: u32) {

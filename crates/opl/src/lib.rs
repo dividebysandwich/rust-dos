@@ -448,6 +448,7 @@ impl Opl {
             return (0, 0);
         }
         if let Some(frame) = self.held {
+            self.chip.advance_frozen();
             return frame;
         }
         let mut frame = [0i16; 2];
@@ -469,7 +470,9 @@ impl Opl {
         // find it so, that frame is held without running it. The second
         // check lets the frames the chip works out a sample or two late
         // catch up. A released slot's sign bit, which may still move, is
-        // left out as above; the chip's clock stops as above.
+        // left out as above. The chip's clocks go on meanwhile
+        // (`advance_frozen`), unlike an idle chip's, so that from a write
+        // on it gives the frames of a chip that ran all along.
         self.unchecked_frames += 1;
         if self.unchecked_frames == IDLE_CHECK_FRAMES {
             self.unchecked_frames = 0;
@@ -803,6 +806,50 @@ mod frozen_tests {
             assert!(!opl.is_held(), "am {am} rr {rr} fb {fb}");
             assert_eq!(ours, reference, "am {am} rr {rr} fb {fb}");
         }
+    }
+
+    /// The clocks of a held chip go on: a note with tremolo and vibrato
+    /// keyed on channel 1 by the write that wakes it gives the frames of
+    /// the chip that ran all along.
+    #[test]
+    fn a_held_chip_goes_on_as_one_that_ran() {
+        const NEXT: [(u16, u8); 10] = [
+            (0x21, 0xC1),
+            (0x24, 0xC1),
+            (0x41, 0x10),
+            (0x44, 0x00),
+            (0x61, 0xF4),
+            (0x64, 0xF4),
+            (0x81, 0x35),
+            (0x84, 0x35),
+            (0xA1, 0x98),
+            (0xB1, 0x31),
+        ];
+        let mut opl = Opl::new(false);
+        let mut chip = Opl3Chip::new(RATE);
+        let mut ours = Vec::new();
+        let mut reference = Vec::new();
+        let both_write = |opl: &mut Opl, chip: &mut Opl3Chip, writes: &[(u16, u8)]| {
+            write(opl, writes);
+            for &(reg, value) in writes {
+                chip.write_register(reg, value);
+            }
+        };
+        both_write(&mut opl, &mut chip, &instrument(false, 0x00, 0));
+        for n in 0..8000 {
+            if n == 300 {
+                both_write(&mut opl, &mut chip, &STOP);
+            }
+            if n == 3000 {
+                assert!(opl.is_held());
+                both_write(&mut opl, &mut chip, &NEXT);
+            }
+            ours.push(opl.render());
+            let mut frame = [0i16; 2];
+            let _ = chip.generate_resampled(&mut frame);
+            reference.push((frame[0], frame[1]));
+        }
+        assert_eq!(ours, reference);
     }
 }
 
