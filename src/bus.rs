@@ -2059,6 +2059,10 @@ impl Bus {
             // On an AdLib Gold the FM goes through the card's mixer and
             // output stage, with its sampled sound. Either way it reaches
             // the line out through the capacitor on the card's output.
+            // The Gold has one capacitor for each output, after the
+            // TDA8425, which gets the FM and the sampled sound mixed. It
+            // is linear, so one for each source sums to the same and keeps
+            // the two apart for the host's mixer, as the card's chain does.
             let (fm, gold_pcm) = match &mut self.adlib_gold {
                 Some(gold) => {
                     let (fm, pcm) = gold.render(fm);
@@ -2069,6 +2073,7 @@ impl Bus {
             let fm = self.mixer.fm_coupling(fm);
             self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
             if let Some(pcm) = gold_pcm {
+                let pcm = self.mixer.adlib_gold_coupling(pcm);
                 self.mixer.add(&mut mix, &mut peaks, Channel::AdlibGold, pcm);
             }
             if let Some(sb) = &mut self.sb {
@@ -2252,6 +2257,7 @@ impl Bus {
             && self.gus.as_ref().is_none_or(|g| g.is_idle())
             && self.awe.is_none()
             && self.adlib_gold.as_ref().is_none_or(|g| g.pcm_quiet() && g.fm_chain_at_rest())
+            && self.mixer.adlib_gold_coupling_rests()
             && self.lpt_dac.is_none()
             && !self.tandy_sound_enabled()
     }

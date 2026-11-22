@@ -969,14 +969,15 @@ programs set.
   filters as the model in `sbtype` does, at 4.8 kHz on an SB 2.0, 3.2 kHz
   on an SB Pro and half the sample rate on an SB16; `off` leaves the
   sound as the card makes it.
-* `sb_coupling` is the capacitor on the outputs of the Sound Blaster and
-  the AdLib, a high-pass at 3 Hz: `on` (the default) or `off`. A card's
-  DAC holds its last sample until the next, and the FM synthesizer holds
-  a level when a program stops a note by setting its frequency to 0
-  without a release. With the capacitor that level fades out of the mix
-  within a fraction of a second, as on the real card; `off` mixes it as
-  it is, so a level a program leaves the card at stays in the mix as a
-  constant offset.
+* `sb_coupling` is the capacitor on the outputs of the Sound Blaster, the
+  AdLib and the AdLib Gold, a high-pass at 3 Hz: `on` (the default) or
+  `off`. A card's DAC (the Sound Blaster's, or the AdLib Gold's for its
+  sampled sound) holds its last sample until the next, and the FM
+  synthesizer holds a level when a program stops a note by setting its
+  frequency to 0 without a release. With the capacitor that level fades
+  out of the mix within a fraction of a second, as on the real card;
+  `off` mixes it as it is, so a level a program leaves the card at stays
+  in the mix as a constant offset.
 * `reverb` adds a room to the music of the FM synthesizer, the Gravis
   Ultrasound and MIDI: `off` (the default), `tiny`, `small`, `medium`,
   `large` or `huge`. `chorus` thickens them: `off` (the default),

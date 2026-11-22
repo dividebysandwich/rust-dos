@@ -159,8 +159,8 @@ pub struct MixerSettings {
     pub speaker_filter: bool,
     pub sb_filter: SbFilter,
     /// The capacitor on the sound card's output, which keeps a level the
-    /// Sound Blaster's DAC or the FM synthesizer holds between sounds out
-    /// of the mix (`sb_coupling`).
+    /// DAC of the Sound Blaster or the AdLib Gold, or the FM synthesizer,
+    /// holds between sounds out of the mix (`sb_coupling`).
     pub sb_coupling: bool,
     /// The reverb and chorus the FM synthesizer, the Gravis Ultrasound and
     /// MIDI are sent to.
@@ -240,6 +240,8 @@ struct Dsp {
     /// AdLib Gold's, or the Sound Blaster's that its FM chip shares with
     /// the DAC.
     fm_coupling: OutputCoupling,
+    /// The capacitor on the AdLib Gold's output, for its sampled sound.
+    adlib_gold_coupling: OutputCoupling,
     reverb: Option<Reverb>,
     chorus: Option<Chorus>,
 }
@@ -362,6 +364,7 @@ impl Mixer {
         if settings.sb_coupling != old.sb_coupling {
             self.dsp.sb_coupling = OutputCoupling::default();
             self.dsp.fm_coupling = OutputCoupling::default();
+            self.dsp.adlib_gold_coupling = OutputCoupling::default();
         }
         self.mix();
     }
@@ -375,6 +378,7 @@ impl Mixer {
         self.dsp.sb = StereoLowpass::default();
         self.dsp.sb_coupling = OutputCoupling::default();
         self.dsp.fm_coupling = OutputCoupling::default();
+        self.dsp.adlib_gold_coupling = OutputCoupling::default();
         self.dsp.reverb = (self.settings.reverb != ReverbPreset::Off).then(|| Reverb::new(self.settings.reverb));
         self.dsp.chorus = (self.settings.chorus != ChorusPreset::Off).then(Chorus::new);
     }
@@ -563,6 +567,26 @@ impl Mixer {
     /// through of the chip's last level has faded out.
     pub(crate) fn fm_coupling_rests(&self) -> bool {
         !self.settings.sb_coupling || self.dsp.fm_coupling.rests_on((0.0, 0.0))
+    }
+
+    /// The AdLib Gold's sampled sound through the capacitor on the card's
+    /// output (`OutputCoupling`), if `sb_coupling` is on. The MMA's DAC
+    /// holds the last sample a program played; the capacitor takes that
+    /// level out of the sound.
+    #[inline]
+    pub(crate) fn adlib_gold_coupling(&mut self, frame: (f32, f32)) -> (f32, f32) {
+        if self.settings.sb_coupling {
+            self.dsp.adlib_gold_coupling.process(frame)
+        } else {
+            frame
+        }
+    }
+
+    /// Whether silence from the AdLib Gold's sampled sound gives silence
+    /// through `adlib_gold_coupling` and changes nothing in it: what the
+    /// capacitor let through of the DAC's last level has faded out.
+    pub(crate) fn adlib_gold_coupling_rests(&self) -> bool {
+        !self.settings.sb_coupling || self.dsp.adlib_gold_coupling.rests_on((0.0, 0.0))
     }
 
     /// The mix of a frame: the sources with the reverb and chorus of what
