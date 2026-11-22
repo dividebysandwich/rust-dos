@@ -163,20 +163,29 @@ impl Batch {
         }
     }
 
-    /// Run these lines once everything queued before them has run.
+    /// Run these lines once everything queued before them has run. They
+    /// are the host's text (a configuration's `[autoexec]`), which runs
+    /// as the code page 437 bytes that show it (`dosstr::encode_cp437`).
     pub fn append_lines<I, S>(&mut self, lines: I)
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let lines = lines.into_iter().map(|l| dosstr::to_bytes(l.as_ref())).collect();
+        let lines = lines
+            .into_iter()
+            .map(|l| dosstr::encode_cp437(l.as_ref()))
+            .collect();
         self.insert_bottom(Frame::new(FrameKind::Lines, lines, vec![String::new()]));
     }
 
     /// Run the command line `line` once everything queued before it has
     /// run, and set `reached` to `mark` when it is handed out.
     pub fn append_marked(&mut self, line: &str, mark: u64) {
-        let mut frame = Frame::new(FrameKind::Lines, vec![dosstr::to_bytes(line)], vec![String::new()]);
+        let mut frame = Frame::new(
+            FrameKind::Lines,
+            vec![dosstr::encode_cp437(line)],
+            vec![String::new()],
+        );
         frame.mark = Some(mark);
         self.insert_bottom(frame);
     }
@@ -702,7 +711,18 @@ PROBE.COM
     fn code_page_437_bytes_come_through() {
         let mut batch = Batch::default();
         batch.append_file("X", b"echo \xC9\xCD\xBB %1\r\n", "\u{84}");
-        assert_eq!(dosstr::to_bytes(&batch.next_line(&[]).unwrap().text), b"echo \xC9\xCD\xBB \x84");
+        assert_eq!(
+            dosstr::to_bytes(&batch.next_line(&[]).unwrap().text),
+            b"echo \xC9\xCD\xBB \x84"
+        );
+        // Lines from the host's text, as a configuration's [autoexec] has
+        // them, run as the bytes that show them.
+        let mut batch = Batch::default();
+        batch.append_lines(["echo ╔═╗ ä"]);
+        assert_eq!(
+            dosstr::to_bytes(&batch.next_line(&[]).unwrap().text),
+            b"echo \xC9\xCD\xBB \x84"
+        );
     }
 
     #[test]

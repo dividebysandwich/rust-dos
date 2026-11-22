@@ -564,6 +564,11 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             None if first.is_empty() => {}
             None => unknown(imported),
         },
+        // DOSBox-X's switch for its ANSI.SYS emulation.
+        ("dos", "ansi.sys") => match bool_value() {
+            Some(b) => imported.set("emulator", "ansi_sys", b),
+            None => unknown(imported),
+        },
         ("dos", "umb") => match bool_value() {
             Some(b) => imported.set("emulator", "umb", b),
             None => unknown(imported),
@@ -582,7 +587,18 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             _ => unknown(imported),
         },
         ("sblaster", "sbtype") => match first {
-            "sb1" | "sb2" => imported.set("sound", "sbtype", "sb2"),
+            // The SB 1.0 has the CMS chips fitted, which DOSBox Staging's
+            // `cms=auto` gives it; rust-dos's SB 2.0 has them with `cms`,
+            // unless the file turned them off.
+            "sb1" => {
+                imported.set("sound", "sbtype", "sb2");
+                if !imported.settings.iter().any(|(s, k, _)| s == "sound" && k == "cms") {
+                    imported.set("sound", "cms", "true");
+                }
+            }
+            "sb2" => imported.set("sound", "sbtype", "sb2"),
+            // The Game Blaster (Creative Music System).
+            "gb" => imported.set("sound", "sbtype", "gb"),
             "sbpro1" => imported.set("sound", "sbtype", "sbpro1"),
             // DOSBox Staging's ESS AudioDrive, a Sound Blaster Pro to games.
             "sbpro2" | "ess" => imported.set("sound", "sbtype", "sbpro2"),
@@ -598,8 +614,22 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         // with an hdma below 4, isn't; the card's own channel serves.
         ("sblaster", "hdma") if first.parse::<u8>().is_ok_and(|d| d < 4) => {}
         ("sblaster", "hdma") => imported.set("sound", "hdma", first),
+        // The CMS chips on an SB 1.x or 2.0 (DOSBox Staging's and
+        // DOSBox-X's `cms`; `auto` follows the card, as `sbtype` has it).
+        ("sblaster", "cms") => match (bool_value(), first) {
+            (Some(b), _) => imported.set("sound", "cms", b),
+            (None, "auto") => {}
+            _ => unknown(imported),
+        },
         ("sblaster", "oplmode") => match first {
-            "opl2" | "cms" => imported.set("sound", "opl", "opl2"),
+            "opl2" => imported.set("sound", "opl", "opl2"),
+            // DOSBox 0.74's CMS chips without an OPL, which DOSBox Staging
+            // reads as `cms=on`. rust-dos always has its FM chip at 388h,
+            // so the SB 2.0 keeps its OPL2 and has the chips beside it.
+            "cms" => {
+                imported.set("sound", "opl", "opl2");
+                imported.set("sound", "cms", "true");
+            }
             "dualopl2" => imported.set("sound", "opl", "dualopl2"),
             "opl3" | "esfm" => imported.set("sound", "opl", "opl3"),
             // DOSBox's AdLib Gold: its OPL3 and control chip at 388h.
@@ -1098,7 +1128,7 @@ mod tests {
 
     #[test]
     fn settings_map_onto_rust_dos_s() {
-        let conf = "[cpu]\ncycles=max 80%\ncputype=386_prefetch\ncore=simple\n[dos]\nkeyboardlayout=de\numb=false\nver=7.1\n[gus]\ngus=true\ngusbase=240\n[joystick]\njoysticktype=fcs\n[speaker]\ndisney=true\npcspeaker clock gate enable at startup = true\n[sblaster]\nsbtype=gb\n";
+        let conf = "[cpu]\ncycles=max 80%\ncputype=386_prefetch\ncore=simple\n[dos]\nkeyboardlayout=de\numb=false\nansi.sys=false\nver=7.1\n[gus]\ngus=true\ngusbase=240\n[joystick]\njoysticktype=fcs\n[speaker]\ndisney=true\npcspeaker clock gate enable at startup = true\n[sblaster]\nsbtype=gb\n";
         let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
         let get = |key: &str| imported.settings.iter().find(|(_, k, _)| *k == key).map(|(_, _, v)| v.as_str());
         assert_eq!(get("cycles"), Some("max"));
@@ -1123,13 +1153,33 @@ mod tests {
         }
         assert_eq!(get("keyboard_layout"), Some("gr"));
         assert_eq!(get("umb"), Some("false"));
+        assert_eq!(get("ansi_sys"), Some("false"));
         assert_eq!(get("dos_version"), Some("7.10"));
         assert_eq!(get("gus"), Some("true"));
         assert_eq!(get("joysticktype"), Some("4axis"));
         assert_eq!(get("lpt_dac"), Some("disney"));
         assert_eq!(get("pit2_gate_at_start"), Some("true"));
-        assert_eq!(get("sbtype"), None);
-        assert!(imported.warnings[0].contains("sbtype=gb"), "{:?}", imported.warnings);
+        assert_eq!(get("sbtype"), Some("gb"));
+        assert!(!imported.warnings.iter().any(|w| w.contains("sbtype")), "{:?}", imported.warnings);
+    }
+
+    /// The CMS chips: the Game Blaster, an SB 1.0's (fitted unless `cms`
+    /// says otherwise), and those `cms` or DOSBox 0.74's `oplmode=cms` fit
+    /// to an SB 2.0.
+    #[test]
+    fn cms_chips() {
+        let sound = |conf: &str| {
+            let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
+            (get(&imported, "sbtype"), get(&imported, "cms"))
+        };
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(sound("[sblaster]\nsbtype=gb\n"), (some("gb"), None));
+        assert_eq!(sound("[sblaster]\nsbtype=sb1\n"), (some("sb2"), some("true")));
+        assert_eq!(sound("[sblaster]\nsbtype=sb1\ncms=off\n"), (some("sb2"), some("false")));
+        assert_eq!(sound("[sblaster]\ncms=false\nsbtype=sb1\n"), (some("sb2"), some("false")));
+        assert_eq!(sound("[sblaster]\nsbtype=sb2\ncms=auto\n"), (some("sb2"), None));
+        assert_eq!(sound("[sblaster]\nsbtype=sb2\ncms=on\n"), (some("sb2"), some("true")));
+        assert_eq!(sound("[sblaster]\nsbtype=sb2\noplmode=cms\n"), (some("sb2"), some("true")));
     }
 
     #[test]

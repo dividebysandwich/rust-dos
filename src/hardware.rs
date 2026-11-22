@@ -84,6 +84,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     crate::win32::trace::set_level(cpu, settings.win32_trace);
     crate::win32::dll_files::sync(&mut cpu.bus);
     crate::dos_data::set_version(&mut cpu.bus, settings.dos_version);
+    cpu.bus.ansi_sys = settings.ansi_sys;
     cpu.bus.ide_hard_disks = settings.ide_hard_disks;
     cpu.bus.boot_cdrom = settings.boot_cdrom;
     cpu.bus.floppy_controller = settings.floppy_controller;

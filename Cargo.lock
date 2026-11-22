@@ -2261,6 +2261,7 @@ dependencies = [
  "rust-dos-adlibgold",
  "rust-dos-audio-core",
  "rust-dos-dma",
+ "rust-dos-gameblaster",
  "rust-dos-gus",
  "rust-dos-hostdirs",
  "rust-dos-installshield",
@@ -2313,6 +2314,14 @@ dependencies = [
 name = "rust-dos-dma"
 version = "1.9.2"
 dependencies = [
+ "rust-dos-savestate",
+]
+
+[[package]]
+name = "rust-dos-gameblaster"
+version = "1.9.2"
+dependencies = [
+ "rust-dos-audio-core",
  "rust-dos-savestate",
 ]
 

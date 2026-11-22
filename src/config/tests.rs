@@ -364,6 +364,38 @@ fn sound_section() {
     assert!(config.warnings[0].contains("invalid irq '4'"));
 }
 
+/// `sbtype=gb` is a Game Blaster at `sbbase`, with its detection chip
+/// and no Sound Blaster; `cms` fits the chips to an SB 2.0 only.
+#[test]
+fn game_blaster_and_cms_chips() {
+    use crate::gameblaster::CmsConfig;
+    let config = parse("[sound]\nsbtype=gb\nsbbase=230\n", Path::new("/cfg"), None);
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    assert_eq!(config.sound.card(), None);
+    assert_eq!(config.sound.cms_chips(), Some(CmsConfig { base: 0x230, detection: true }));
+    assert_eq!(config.sound.sb_type_name(), "gb");
+    // The Ultrasound can't share its ports.
+    let text = "[sound]\nsbtype=gb\nsbbase=240\ngus=true\ngusbase=240\n";
+    let config = parse(text, Path::new("/cfg"), None);
+    assert!(config.warnings[0].contains("Game Blaster"), "{:?}", config.warnings);
+    assert!(config.sound.ultrasound().is_none());
+
+    let config = parse("[sound]\nsbtype=sb2\ncms=true\n", Path::new("/cfg"), None);
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    assert!(config.sound.card().is_some());
+    assert_eq!(config.sound.cms_chips(), Some(CmsConfig { base: 0x220, detection: false }));
+
+    let config = parse("[sound]\nsbtype=sb2\n", Path::new("/cfg"), None);
+    assert_eq!(config.sound.cms_chips(), None);
+    // The SB16 has no sockets for them.
+    let config = parse("[sound]\nsbtype=sb16\ncms=true\n", Path::new("/cfg"), None);
+    assert_eq!(config.sound.cms_chips(), None);
+    // A later sbtype replaces the Game Blaster.
+    let config = parse("[sound]\nsbtype=gb\nsbtype=sbpro2\n", Path::new("/cfg"), None);
+    assert_eq!(config.sound.cms_chips(), None);
+    assert!(config.sound.card().is_some());
+}
+
 #[test]
 fn channel_2_can_start_with_its_gate_high() {
     assert!(!parse("[sound]
@@ -732,7 +764,7 @@ fn mixer_settings() {
     assert!(config.warnings[1].starts_with("line 6: unknown setting 'bass'"), "{:?}", config.warnings);
     let mixer = Settings::from_config(&config).mixer;
     let levels = Channel::ALL.map(|channel| mixer.level(channel));
-    assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100, 100, 100, 100, 100]);
+    assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100, 100, 100, 100, 100, 100]);
     assert!(mixer.speaker_filter && mixer.sb_coupling);
     assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Auto, ReverbPreset::Off, ChorusPreset::Off));
 
@@ -841,6 +873,8 @@ fn changed_settings() -> Settings {
     let sound = SoundConfig {
         sb: crate::sb::SbConfig { model: crate::sb::SbModel::SbPro2, base: 0x240, irq: 5, dma8: 3, dma16: 6 },
         sb_installed: true,
+        game_blaster: false,
+        cms: true,
         opl: Some(crate::opl::Chip::DualOpl2),
         awe32rom: Some(PathBuf::from("/home/u/roms/awe32.raw")),
         awe32ram: 2048,
@@ -927,6 +961,7 @@ fn changed_settings() -> Settings {
         win32_trace: Win32Trace::Off,
         dos_high: false,
         dos_version: DosVersion::new(7, 10),
+        ansi_sys: false,
         ide_hard_disks: false,
         boot_cdrom: false,
         floppy_controller: false,
@@ -1572,4 +1607,21 @@ fn saving_keeps_an_unset_memsize_unset() {
     let saved = complete_text(own, Path::new("/cfg"), &file, &changed, &[], None);
     assert!(saved.contains("\nmemsize=64\n"), "{}", saved);
     assert_eq!(Settings::from_config(&parse(&saved, Path::new("/cfg"), None)).memory_mb(), 64);
+}
+
+#[test]
+fn a_code_page_437_file_loads_and_keeps_its_encoding() {
+    // A DOSBox configuration in code page 437, a menu of box characters
+    // in its [autoexec]: it loads, and the editors write it back in code
+    // page 437, so DOSBox still shows the boxes.
+    let dir = scratch("cp437");
+    let path = dir.join("dosbox.conf");
+    fs::write(&path, b"[cpu]\ncycles=max\n[autoexec]\nECHO \xC9\xCD\xBB\n").unwrap();
+    let config = load(Some(&path), &dir, None, None, None).unwrap();
+    assert_eq!(config.autoexec, ["ECHO ╔═╗"]);
+    assert_eq!(load_autoexec(&path).unwrap(), ["ECHO ╔═╗"]);
+    save_autoexec(&path, &["ECHO ╔═╗".to_string(), "DIR".to_string()]).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    assert!(std::str::from_utf8(&bytes).is_err());
+    assert!(bytes.windows(9).any(|w| w == b"ECHO \xC9\xCD\xBB\n"));
 }

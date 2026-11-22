@@ -2,6 +2,7 @@ use crate::bus::Bus;
 use crate::cpu::Cpu;
 
 pub mod adapter;
+pub mod ansi;
 pub mod bios;
 pub mod cga;
 pub mod composite;
@@ -1494,8 +1495,23 @@ pub fn print_banner(cpu: &mut Cpu, notes: &[(String, String)], update: Option<&s
     print_string(cpu, "\r\n");
 }
 
+/// Print the shell's output, `s` a code page 437 string as `dosstr` has
+/// them, as `print_console` does.
 pub fn print_string(cpu: &mut Cpu, s: &str) {
-    print_cells(cpu, s.chars().map(|c| c as u8), 0x07);
+    let text: Vec<u8> = s.chars().map(|c| c as u8).collect();
+    print_console(cpu, &text);
+}
+
+/// Print code page 437 text as COMMAND.COM and programs write it to
+/// standard output: through DOS's console, which takes ANSI.SYS's
+/// sequences (`console_write`), or into the file a built-in command's
+/// output is redirected to.
+pub fn print_console(cpu: &mut Cpu, text: &[u8]) {
+    if let Some(captured) = cpu.stdout_capture.as_mut() {
+        captured.extend_from_slice(text);
+        return;
+    }
+    console_write(cpu, text);
 }
 
 /// Print code page 437 characters in the colors of `attr`, as
@@ -1518,19 +1534,149 @@ pub fn console_ready(cpu: &mut Cpu) -> bool {
     !through_video_bios(cpu) || crate::interrupts::int10::output_ready(cpu)
 }
 
-/// Write DOS's console output, as `print_char` does, or through the video
-/// BIOS in a Windows virtual machine.
+/// Write DOS's console output at the cursor, or through the video BIOS
+/// in a Windows virtual machine. The console takes ANSI.SYS's escape
+/// sequences, as DOSBox's does (`ansi`): the text in the colours they set
+/// and the cursor where they put it.
 pub fn console_write(cpu: &mut Cpu, text: &[u8]) {
-    if through_video_bios(cpu) {
-        crate::interrupts::teletype(cpu, text);
-    } else {
-        if let Some(console) = cpu.host_console.as_mut() {
-            console.write(text);
-        }
-        for &b in text {
-            print_char(&mut cpu.bus, b);
+    let bios = through_video_bios(cpu);
+    if !bios && let Some(console) = cpu.host_console.as_mut() {
+        console.write(text);
+    }
+    if !cpu.bus.ansi_sys {
+        // No ANSI.SYS (`ansi_sys`): ESC is a character like the others.
+        return console_text(cpu, bios, text, 0x07);
+    }
+    let mut ansi = std::mem::take(&mut cpu.ansi);
+    let mut run = Vec::new();
+    let mut run_attr = ansi.attr;
+    for &b in text {
+        match ansi.feed(b) {
+            ansi::Feed::Text(c) => {
+                if run_attr != ansi.attr {
+                    console_text(cpu, bios, &std::mem::take(&mut run), run_attr);
+                    run_attr = ansi.attr;
+                }
+                run.push(c);
+            }
+            ansi::Feed::Held => {}
+            ansi::Feed::Command(command) => {
+                console_text(cpu, bios, &std::mem::take(&mut run), run_attr);
+                run_attr = ansi.attr;
+                console_command(cpu, bios, &mut ansi, command);
+            }
         }
     }
+    console_text(cpu, bios, &run, run_attr);
+    cpu.ansi = ansi;
+}
+
+/// Console output's characters in `attr`, as `console_write` writes them.
+fn console_text(cpu: &mut Cpu, bios: bool, text: &[u8], attr: u8) {
+    if text.is_empty() {
+        return;
+    }
+    if !bios {
+        draw_cells(cpu, text.iter().copied(), attr);
+    } else if attr == 0x07 {
+        // The BIOS's teletype keeps the attribute the cell has.
+        crate::interrupts::teletype(cpu, text);
+    } else {
+        // Each character with its attribute first (AH=09h), as ANSI.SYS
+        // writes it, then on with the teletype.
+        for &c in text {
+            if !matches!(c, b'\r' | b'\n' | 0x07 | 0x08) {
+                let page = cpu.bus.guest_read_8(0x0462) as u16;
+                crate::interrupts::video_service(
+                    cpu,
+                    0x0900 | c as u16,
+                    page << 8 | attr as u16,
+                    1,
+                    0,
+                );
+            }
+            crate::interrupts::teletype(cpu, &[c]);
+        }
+    }
+}
+
+/// Carry out an ANSI.SYS sequence that moves the cursor or erases, on the
+/// screen console output goes to.
+fn console_command(cpu: &mut Cpu, bios: bool, ansi: &mut ansi::Ansi, command: ansi::Command) {
+    use ansi::Command::*;
+    let page = cpu.bus.guest_read_8(0x0462);
+    let (col, row, cols, rows) = if bios {
+        let at = cpu.bus.guest_read_16(0x0450 + 2 * page as u32);
+        let cols = cpu.bus.guest_read_16(0x044A).max(1);
+        let rows = cpu.bus.guest_read_8(0x0484).max(24) as u16 + 1;
+        (at & 0xFF, at >> 8, cols, rows)
+    } else {
+        (
+            cpu.bus.cursor_x as u16,
+            cpu.bus.cursor_y as u16,
+            80,
+            cpu.bus.text_rows() as u16,
+        )
+    };
+    let to = match command {
+        Position(r, c) => Some((r.min(rows) - 1, c.min(cols) - 1)),
+        Up(n) => Some((row.saturating_sub(n), col)),
+        Down(n) => Some(((row + n).min(rows - 1), col)),
+        Forward(n) => Some((row, (col + n).min(cols - 1))),
+        Back(n) => Some((row, col.saturating_sub(n))),
+        Save => {
+            ansi.saved = (row as u8, col as u8);
+            None
+        }
+        Restore => Some((ansi.saved.0 as u16, ansi.saved.1 as u16)),
+        EraseScreen => {
+            if bios {
+                let bh = (ansi.attr as u16) << 8;
+                crate::interrupts::video_service(cpu, 0x0600, bh, 0, (rows - 1) << 8 | (cols - 1));
+            } else {
+                fill_cells(cpu, 0, rows as usize * 80, ansi.attr);
+            }
+            Some((0, 0))
+        }
+        EraseLine => {
+            if bios {
+                let count = cols - col;
+                crate::interrupts::video_service(
+                    cpu,
+                    0x0920,
+                    (page as u16) << 8 | ansi.attr as u16,
+                    count,
+                    0,
+                );
+            } else {
+                let at = row as usize * 80 + col as usize;
+                fill_cells(cpu, at, 80 - col as usize, ansi.attr);
+            }
+            None
+        }
+    };
+    if let Some((row, col)) = to {
+        if bios {
+            crate::interrupts::video_service(cpu, 0x0200, (page as u16) << 8, 0, row << 8 | col);
+        } else {
+            cpu.bus.cursor_x = col as usize;
+            cpu.bus.cursor_y = row as usize;
+            cpu.bus.write_8(0x0450, col as u8);
+            cpu.bus.write_8(0x0451, row as u8);
+        }
+    }
+}
+
+/// `count` cells of the text screen from cell `at` blanked in `attr`, as
+/// `draw_cells` writes them.
+fn fill_cells(cpu: &mut Cpu, at: usize, count: usize, attr: u8) {
+    let text = cpu.bus.text_mem_mut();
+    let end = ((at + count) * 2).min(text.len());
+    let start = (at * 2).min(end);
+    for (i, byte) in text[start..end].iter_mut().enumerate() {
+        *byte = if i % 2 == 0 { 0x20 } else { attr };
+    }
+    cpu.bus.mark_text_dirty(start, end);
 }
 
 /// The column console output goes on at and the width of a line, as
@@ -1562,7 +1708,12 @@ fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
     if let Some(console) = cpu.host_console.as_mut() {
         console.write(&text);
     }
-    let text = text.into_iter();
+    draw_cells(cpu, text.into_iter(), attr);
+}
+
+/// Write `text` in `attr` at `print_char`'s cursor, which it moves on,
+/// scrolling the screen at its end.
+fn draw_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
     let mut col = cpu.bus.cursor_x;
     let mut row = cpu.bus.cursor_y;
     let max_cols = 80;
