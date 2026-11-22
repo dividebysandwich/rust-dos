@@ -698,11 +698,17 @@ in real mode leaves it, loading it changes only its selector and base
 (`Uop::CsReal`, `LoadCsReal`; elsewhere the handler runs the instruction),
 and the block leaves for the target through the links a return takes.
 Loads of DS, ES, FS and GS in real mode (MOV, POP, LES, LDS, LFS, LGS)
-are translated the same way on both hosts, segments with a 4 GB limit
-("big real mode", as HIMEM leaves them) included but where the load
-would make the segment flat or not (base 0), and a load that would change
+are translated the same way on both hosts, and a load that would change
 more than the selector and base runs through its handler and stops the
-block after it.
+block after it. A segment with a 4 GB limit ("big real mode", as HIMEM
+leaves them) becomes flat when it is loaded with 0 and stops being flat
+when it is loaded with anything else, as Ultima VII's memory manager
+does around each copy to and from extended memory: where the block's
+environment has the segment big (`Gen::big_load`), the code notes in
+`JitCtx::flat` whether it is flat after the load, as `jit_load_seg`
+does, and the block goes on, checking the segment's accesses as a
+segment's that isn't flat and taking its links only where the segments
+are flat as they were (`check_flat`).
 INT and IRET, and far transfers in virtual-8086 and protected mode, run
 through their handlers and end their block, but where that leaves
 translated code nothing to check (`helpers::far_goes_on`: still in the
