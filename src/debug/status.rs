@@ -768,6 +768,8 @@ pub(super) fn sound_json(cpu: &Cpu) -> Value {
         "opl3": bus.opl.is_opl3(),
         "chip": bus.opl.chip().name(),
         "idle": bus.opl.is_idle(),
+        // Frozen: it gives the frame it holds without running.
+        "held": bus.opl.is_held(),
         "channels": fm,
     });
     let cms = bus.cms.as_ref().map(|cms| {
