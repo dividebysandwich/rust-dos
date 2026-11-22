@@ -221,6 +221,7 @@ impl Page {
                 Volume(Channel::Modem),
                 Volume(Channel::Windows),
                 Volume(Channel::AdlibGold),
+                Volume(Channel::Cms),
                 SpeakerFilter,
                 SbFilter,
                 SbCoupling,

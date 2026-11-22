@@ -40,9 +40,11 @@ pub enum Channel {
     /// The AdLib Gold's sampled sound (its MMA), through the card's mixer
     /// and output stage. Its FM goes on `Fm`.
     AdlibGold,
+    /// The Creative Music System's SAA1099s (a Game Blaster).
+    Cms,
 }
 
-pub const CHANNELS: usize = 15;
+pub const CHANNELS: usize = 16;
 
 /// The loudest volume, in percent.
 pub const MAX_LEVEL: u16 = 200;
@@ -69,6 +71,7 @@ impl Channel {
         Channel::Modem,
         Channel::Windows,
         Channel::AdlibGold,
+        Channel::Cms,
     ];
 
     /// Its key in `[mixer]`.
@@ -89,6 +92,7 @@ impl Channel {
             Channel::Modem => "modem",
             Channel::Windows => "windows",
             Channel::AdlibGold => "adlibgold",
+            Channel::Cms => "cms",
         }
     }
 
@@ -114,6 +118,7 @@ impl Channel {
             Channel::Modem => "Modem",
             Channel::Windows => "Windows sound",
             Channel::AdlibGold => "AdLib Gold digital",
+            Channel::Cms => "Game Blaster (CMS)",
         }
     }
 

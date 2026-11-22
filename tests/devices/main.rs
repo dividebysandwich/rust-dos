@@ -14,6 +14,7 @@ mod awe32_tests;
 mod bus_tests;
 mod cd_audio_tests;
 mod cdrom_tests;
+mod cms_tests;
 mod dual_opl2_tests;
 mod fdc_tests;
 mod gus_patch_tests;

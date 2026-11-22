@@ -57,6 +57,7 @@ impl Bus {
             printer_settings: crate::printer::PrinterSettings { output: crate::printer::PrinterOutput::None, ..Default::default() },
             tandy_sound: crate::sn76489::Sn76489::new(crate::sn76489::Variant::Ncr8496),
             tandy_mode: crate::sn76489::TandySound::Auto,
+            cms: None,
             freezes: Vec::new(),
             mixer_changed: false,
             frames_drawn: 0,

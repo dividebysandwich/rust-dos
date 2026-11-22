@@ -201,6 +201,9 @@ pub struct Bus {
     /// `tandy_sound_enabled`.
     pub tandy_sound: crate::sn76489::Sn76489,
     pub tandy_mode: crate::sn76489::TandySound,
+    /// The Creative Music System's two SAA1099s: a Game Blaster, or the
+    /// chips in an SB 2.0's sockets (`sbtype=gb`, `cms`).
+    pub cms: Option<Box<crate::gameblaster::GameBlaster>>,
     /// Values the settings window's Cheats page froze, put back before
     /// every frame while the program runs (`apply_freezes`).
     pub freezes: Vec<crate::cheats::Freeze>,
@@ -2115,6 +2118,10 @@ impl Bus {
                 let s = self.tandy_sound.render();
                 self.mixer.add(&mut mix, &mut peaks, Channel::Tandy, (s, s));
             }
+            if let Some(cms) = &mut self.cms {
+                let frame = cms.render();
+                self.mixer.add(&mut mix, &mut peaks, Channel::Cms, frame);
+            }
             if let Some(frames) = &windows {
                 self.mixer.add(&mut mix, &mut peaks, Channel::Windows, frames[n]);
             }
@@ -2247,6 +2254,7 @@ impl Bus {
             && self.adlib_gold.as_ref().is_none_or(|g| g.pcm_quiet() && g.fm_chain_at_rest())
             && self.lpt_dac.is_none()
             && !self.tandy_sound_enabled()
+            && self.cms.as_ref().is_none_or(|cms| cms.is_quiet())
     }
 
     /// Keep the queues of output in bounds.
@@ -2893,6 +2901,16 @@ impl Bus {
             0x38A => self.opl.write_address(1, value),
             0x38B => self.opl_data(Some(1), value),
 
+            // The CMS chips, at the first four ports of the Game Blaster
+            // or of an SB 2.0 with them (whose DSP has none there), and
+            // the Game Blaster's detection chip after them.
+            p if self.cms.as_ref().is_some_and(|cms| cms.claims(p)) => {
+                self.audio_catch_up();
+                if let Some(cms) = &mut self.cms {
+                    cms.write(p, value);
+                }
+            }
+
             // The Sound Blaster, 16 ports from its base.
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_write(p & 0xF, value),
 
@@ -3287,6 +3305,9 @@ impl Bus {
             0x38A => self.opl.read_status(self.clock.now_micros()),
             0x389 | 0x38B => 0xFF,
 
+            p if self.cms.as_ref().is_some_and(|cms| cms.claims(p)) => {
+                self.cms.as_ref().map_or(0xFF, |cms| cms.read(p))
+            }
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_read(p & 0xF),
 
             p if self.gus_claims(p) => self.gus_read(p),
