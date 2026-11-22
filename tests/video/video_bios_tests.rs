@@ -429,3 +429,42 @@ fn the_text_modes_map_the_memory_at_b8000h_alone() {
     cpu.bus.write_8(0xA0002, b'B');
     assert_eq!(cpu.bus.vga.vram_text[2], b'B');
 }
+
+#[test]
+fn b0000h_and_b8000h_answer_only_where_gr06_maps_the_memory() {
+    // Mode 13h maps 64 KB at A0000h (Memory Map Select 01b): B0000h and
+    // B8000h reach nothing of the VGA. Writes go nowhere, reads find the
+    // open bus.
+    let mut cpu = machine(0x13);
+    let text = cpu.bus.vga.vram_text.clone();
+    cpu.bus.write_8(0xB8000, b'A');
+    cpu.bus.write_16(0xB8010, 0x1234);
+    cpu.bus.write_32(0xB0000, 0x89AB_CDEF);
+    assert!(cpu.bus.vga.vram_text == text, "the text memory is as it was");
+    assert_eq!(cpu.bus.read_8(0xB8000), 0xFF);
+    assert_eq!(cpu.bus.read_16(0xB8010), 0xFFFF);
+    assert_eq!(cpu.bus.read_32(0xB0000), 0xFFFF_FFFF);
+
+    // Mode 3 (11b): the 32 KB at B8000h, and nothing at B0000h.
+    let mut cpu = machine(0x03);
+    cpu.bus.write_8(0xB8000, b'A');
+    assert_eq!(cpu.bus.read_8(0xB8000), b'A');
+    cpu.bus.write_8(0xB0000, 0x55);
+    assert_eq!(cpu.bus.read_8(0xB0000), 0xFF);
+
+    // The monochrome window (10b): B0000h, and nothing at B8000h.
+    cpu.bus.io_write(0x3CE, 0x06);
+    cpu.bus.io_write(0x3CF, 0x0A);
+    cpu.bus.write_8(0xB0002, b'B');
+    assert_eq!(cpu.bus.vga.vram_text[2], b'B');
+    assert_eq!(cpu.bus.read_8(0xB0000), b'A');
+    assert_eq!(cpu.bus.read_8(0xB8000), 0xFF);
+
+    // 128 KB from A0000h (00b): B0000h-BFFFFh go on into the planes, the
+    // offsets past 64 KB of the window.
+    let mut cpu = machine(0x12);
+    cpu.bus.io_write(0x3CE, 0x06);
+    cpu.bus.io_write(0x3CF, 0x01);
+    cpu.bus.write_8(0xB8005, 0x5A);
+    assert_eq!(cpu.bus.read_8(0xB8005), 0x5A);
+}
