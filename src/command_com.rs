@@ -268,10 +268,7 @@ fn step(cpu: &mut Cpu, shell: &mut SecondaryShell) -> Result<u8, u8> {
     }
     if cpu.batch.is_active() {
         if let Some(line) = cpu.batch.next_line(&cpu.environment) {
-            if line.echo {
-                crate::shell::show_prompt(cpu);
-                print_string(cpu, &format!("{}\r\n", line.text));
-            }
+            crate::shell::echo_batch_line(cpu, &line);
             cpu.bus.clock.stall(crate::exec::BATCH_LINE_NS);
             run(cpu, shell, &line.text, true);
         }
@@ -281,6 +278,7 @@ fn step(cpu: &mut Cpu, shell: &mut SecondaryShell) -> Result<u8, u8> {
     if shell.once {
         return Err(cpu.errorlevel);
     }
+    crate::shell::prompt_break(cpu);
     // RC left this shell to run a command line, which has run.
     if crate::rc_command::resume(cpu, Some(shell.psp))
         && let Some(wait) = &cpu.shell_wait
