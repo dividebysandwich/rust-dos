@@ -19,7 +19,7 @@ settings window's Emulator page) picks what runs the instructions:
 
 | `core` | Runs |
 |---|---|
-| `auto` (default) | The interpreter, and the recompiler for a program from its first switch to protected mode (CR0.PE 0 to 1) until it ends, as DOSBox's `core=auto` does. The latch is `Cpu::dyn_latched`: `note_mode_switch` sets it, `restore_process_context` and `load_shell` clear it. |
+| `auto` (default) | The interpreter, and the recompiler for a program from its first switch to protected mode (CR0.PE 0 to 1) until it ends, as DOSBox's `core=auto` does. The latch is `Cpu::pm_latched`: `note_mode_switch` sets it, `restore_process_context` and `load_shell` clear it. The recompiler also runs while the CPU is in real mode with a data segment limit above 64 KB (`Cpu::big_real`, "big real mode"): a program that switched to protected mode set it, and the program running may be a later one, as Ultima VII's U7.EXE runs in the limits MAINMENU.EXE left. |
 | `dynamic` | The recompiler throughout. |
 | `normal` | The interpreter. |
 

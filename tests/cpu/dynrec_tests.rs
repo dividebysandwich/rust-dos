@@ -2391,6 +2391,56 @@ fn auto_uses_the_recompiler_from_protected_mode_until_the_program_ends() {
 }
 
 #[test]
+fn auto_uses_the_recompiler_in_big_real_mode_a_program_before_set_up() {
+    // A program switches to protected mode, where the rig loads the data
+    // segments with 4 GB limits, switches back to real mode, which keeps
+    // them ("big real mode"), and ends. The next program runs in real
+    // mode with those limits without switching itself, as Ultima VII's
+    // U7.EXE does after MAINMENU.EXE, and reads and writes above 1 MB
+    // through DS = 0: it runs on the recompiler too.
+    const PM16: u32 = 0x8000;
+    const REAL: u32 = 0x9000;
+    let mut rig = Rig::new();
+    rig.cpu.core = CoreMode::Auto;
+    rig.load(CODE, &asm32(CODE, |a| {
+        a.db(&[0xEA])?;
+        a.dd(&[PM16])?;
+        a.dw(&[CODE16])
+    }));
+    rig.load(PM16, &asm16(PM16, |a| {
+        a.mov(eax, cr0)?;
+        a.and(eax, 0xFFFF_FFFEu32 as i32)?;
+        a.mov(cr0, eax)?;
+        a.db(&[0xEA])?;
+        a.dw(&[0, (REAL >> 4) as u16])
+    }));
+    rig.load(REAL, &asm16(0, |a| a.hlt()));
+    rig.enter_pm();
+    rig.run_batched_to_halt();
+    assert!(!rig.cpu.pe(), "back in real mode");
+    // The program ends (`Cpu::restore_context`), and the limits stay.
+    rig.cpu.pm_latched = false;
+    assert_eq!(rig.cpu.dynamic_active(), AVAILABLE, "big real mode runs on the recompiler");
+    rig.load(REAL + 0x100, &asm16(0x100, |a| {
+        let mut top = a.create_label();
+        a.xor(ax, ax)?;
+        a.mov(ds, ax)?;
+        a.mov(ebx, 0x20_0000u32)?;
+        a.mov(cx, 1000)?;
+        a.set_label(&mut top)?;
+        a.add(word_ptr(ebx), cx)?;
+        a.loop_(top)?;
+        a.hlt()
+    }));
+    rig.cpu.set_ip(0x100);
+    rig.run_batched_to_halt();
+    assert_eq!(rig.cpu.bus.read_16(0x20_0000), (500_500 % 65_536) as u16);
+    if AVAILABLE {
+        assert!(rig.cpu.dynrec.stats().runs > 0, "{:?}", rig.cpu.dynrec.stats());
+    }
+}
+
+#[test]
 fn changing_a_linked_block_unlinks_it() {
     // Two passes of a loop whose blocks link to each other; between them
     // the code rewrites the ADD's immediate in the block the jump leads
