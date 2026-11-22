@@ -11,9 +11,12 @@
 //! the process heap, which DrawDibDraw then draws with StretchDIBits;
 //! DDF_UPDATE draws it again and DDF_DONTDRAW decompresses without
 //! drawing. DrawDibBegin fails for a DIB no codec of codec.rs takes. An
-//! uncompressed DIB goes to StretchDIBits as it is. A save state keeps the
-//! DIB but not the decoder: after a restore the decoder refuses the
-//! frames up to the next key frame, and the picture stays until then.
+//! uncompressed DIB goes to StretchDIBits as it is. On a display of 256
+//! colours a picture of more than 8 bits a pixel is stretched to the
+//! destination and dithered to the halftone palette (`gdi32::dither`).
+//! A save state keeps the DIB but not the decoder: after a restore the
+//! decoder refuses the frames up to the next key frame, and the picture
+//! stays until then.
 
 use super::codec::{self, Codec};
 use super::msvideo1;
@@ -498,6 +501,10 @@ pub struct DrawDib {
     /// DDF_UPDATE of an uncompressed DIB draws again.
     last: (u32, u32),
     codec: Codec,
+    /// Whether the compressed source has more than 8 bits a pixel, so
+    /// its picture is dithered on a display of 256 colours. Set again
+    /// from the format when the decoder is (after a restore).
+    deep: bool,
 }
 
 crate::state_fields!(DrawDib {
@@ -509,7 +516,8 @@ crate::state_fields!(DrawDib {
     dirty,
     last
 } skip {
-    codec
+    codec,
+    deep
 });
 
 /// A BITMAPINFOHEADER's fields this needs.
@@ -642,7 +650,9 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, at: u32) -> bool {
         if d.buffer != 0
             && let Some(format) = read_format(cpu, at)
         {
-            dd(cpu, slot).codec.follow(&format);
+            let d = dd(cpu, slot);
+            d.codec.follow(&format);
+            d.deep = format.bits > 8;
         }
         return true;
     }
@@ -688,6 +698,7 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, at: u32) -> bool {
     let d = dd(cpu, slot);
     d.buffer = buffer;
     d.codec = Codec::new(&format);
+    d.deep = format.bits > 8;
     true
 }
 
@@ -736,7 +747,7 @@ fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         (dxd, dyd)
     };
-    let (src_info, src_bits) = if d.buffer != 0 {
+    let (src_info, src_bits, deep) = if d.buffer != 0 {
         if flags & DDF_UPDATE == 0 && bits != 0 {
             decode(cpu, slot, info, bits);
         }
@@ -744,18 +755,24 @@ fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if d.dirty && flags & DDF_DONTDRAW == 0 {
             write_picture(cpu, slot);
         }
-        let buffer = dd(cpu, slot).buffer;
-        (buffer, buffer + HEADER)
+        let d = dd(cpu, slot);
+        (d.buffer, d.buffer + HEADER, d.deep)
     } else {
         if flags & DDF_UPDATE == 0 {
             d.last = (info, bits);
         }
-        d.last
+        let (at, bits) = d.last;
+        let deep = read_info(cpu, at).is_some_and(|i| i.bit_count > 8);
+        (at, bits, deep)
     };
     if flags & DDF_DONTDRAW != 0 || src_bits == 0 {
         return Some(1);
     }
-    let drawn = bitmap::stretch_di_bits(
+    // On a display of 256 colours, a picture of more bits is dithered to
+    // the halftone palette. DrawDib asks the display, as GetDeviceCaps
+    // tells every DC the display's depth.
+    let halftone = deep && crate::win32::gdi32::palette::palette_device(cpu);
+    let drawn = bitmap::stretch_dib(
         cpu,
         &[
             hdc,
@@ -772,6 +789,7 @@ fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             DIB_RGB_COLORS,
             SRCCOPY,
         ],
+        halftone,
     )?;
     Some((drawn != 0) as u32)
 }
@@ -815,7 +833,9 @@ fn decode(cpu: &mut Cpu, slot: usize, at: u32, bits: u32) {
     // A copy's (after a restore) starts again.
     if dd(cpu, slot).codec.is_empty() {
         let format = read_format(cpu, at).unwrap_or_default();
-        dd(cpu, slot).codec = Codec::new(&format);
+        let d = dd(cpu, slot);
+        d.codec = Codec::new(&format);
+        d.deep = format.bits > 8;
     }
     let d = dd(cpu, slot);
     if frame.is_empty() {

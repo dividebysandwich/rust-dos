@@ -12,6 +12,7 @@
 
 pub mod bitmap;
 pub mod dc;
+pub mod dither;
 pub mod draw;
 #[cfg(test)]
 mod draw_tests;
