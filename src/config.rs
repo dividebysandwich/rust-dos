@@ -521,8 +521,9 @@ pub fn load(
         }
     };
 
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
+    // A DOSBox configuration is often in code page 437 (`decode_cp437`).
+    let text = match fs::read(&path) {
+        Ok(bytes) => crate::dosstr::decode_cp437(&bytes),
         Err(e) => {
             let msg = format!("cannot read {}: {}", path.display(), e);
             if source == ConfigSource::CommandLine {
