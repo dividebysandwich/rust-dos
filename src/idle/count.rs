@@ -1308,24 +1308,26 @@ fn clock_at(cpu: &Cpu, icount: u64) -> u32 {
 /// How many of the next passes, up to `most`, run as the recorded one:
 /// those whose operations set the flags read after them as it did, the
 /// first starting at instruction count `from` and each `period` after the
-/// one before. Also the cells holding counts after them, and the flags
-/// the last leaves the head where they come from a count: a mask and
-/// their values.
+/// one before. Also the cells holding counts after them, the flags the
+/// last leaves the head where they come from a count (a mask and their
+/// values), and how many passes the model ran to find that.
 pub(super) fn counted_passes(
     cpu: &Cpu,
     model: &Model,
     most: u64,
     from: u64,
     period: u64,
-) -> (u64, Vec<(Cell, u8)>, (u32, u32)) {
+) -> (u64, Vec<(Cell, u8)>, (u32, u32), u64) {
     let mut state = model.seeded(|c| value_now(cpu, c));
     let mut done = state.clone();
     let mut passes = 0;
     let mut head_flags = (0, 0);
+    let mut modelled = 0;
     while passes < most {
         let start = from + passes * period;
         let clock = |offset: u64| clock_at(cpu, start + offset);
         let mut left = head_flags;
+        modelled += 1;
         let same = model.run(&mut state, clock, |i, _, flags| {
             let (live, seen, out) = model.checks[i];
             left = (left.0 | out, left.1 & !out | flags & out);
@@ -1343,7 +1345,7 @@ pub(super) fn counted_passes(
         .zip(&model.cells)
         .filter_map(|(v, &c)| v.map(|v| (c, v)))
         .collect();
-    (passes, values, head_flags)
+    (passes, values, head_flags, modelled)
 }
 
 /// The service running read the general registers (`reads_registers`):

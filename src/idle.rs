@@ -298,6 +298,10 @@ pub struct IdleStats {
     /// Of the proofs that skipped, those that started from what the last
     /// proof at their head found (`Shape`).
     pub shaped: u64,
+    /// The passes the model of a proof over counts ran to find how many
+    /// of the passes after the one recorded run the same
+    /// (`count::counted_passes`).
+    pub modelled: u64,
     /// The failures by why, in the order the reasons first came up (an
     /// empty one is a free slot).
     pub failed_by: [(&'static str, u64); 16],
@@ -1690,7 +1694,9 @@ fn finish(
     {
         let room = limit.min(cpu.bus.clock.deadline) - visit.icount;
         let most = (room / period).min(COUNTED_PASSES);
-        let (same, values, flags) = count::counted_passes(cpu, pass, most, visit.icount, period);
+        let (same, values, flags, modelled) =
+            count::counted_passes(cpu, pass, most, visit.icount, period);
+        cpu.bus.observe.stats.modelled += modelled;
         if most > 0 && same == 0 {
             return cpu.bus.observe.fail("count passes");
         }
