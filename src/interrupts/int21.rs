@@ -2158,6 +2158,21 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 0Dh: Disk reset (flush buffers). Nothing is buffered.
         0x0D => {}
 
+        // AH = 2Eh: Set the verify flag from bit 0 of AL (00h off, 01h on),
+        // as DOS does. It is kept for AH=54h; the drives here write
+        // without reading back either way.
+        0x2E => {
+            let flag = dos_data::address(dos_data::VERIFY_FLAG) as u32;
+            cpu.bus.guest_write_8(flag, cpu.get_al() & 1);
+        }
+
+        // AH = 54h: Get the verify flag in AL.
+        0x54 => {
+            let flag = dos_data::address(dos_data::VERIFY_FLAG) as u32;
+            let on = cpu.bus.guest_read_8(flag);
+            cpu.set_reg8(Register::AL, on);
+        }
+
         // AH = 2Ah: Get date. CX=year, DH=month, DL=day, AL=day of week.
         0x2A => {
             let now = cpu.bus.cmos.now();

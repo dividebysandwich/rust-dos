@@ -50,3 +50,4 @@ mod sse_tests;
 mod sst386;
 mod string_bulk_tests;
 mod test386;
+mod v86_monitor_tests;

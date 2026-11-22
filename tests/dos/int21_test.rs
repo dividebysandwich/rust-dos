@@ -449,3 +449,33 @@ fn ioctl_subfunctions_past_11h_are_invalid() {
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(cpu.get_reg16(Register::DX), 0x80D3);
 }
+
+/// DOS keeps the verify flag AH=2Eh sets (bit 0 of AL) and returns it
+/// with AH=54h. It is off at boot. Ultima VII's U7.EXE sets it off.
+#[test]
+fn the_verify_flag_is_kept_between_set_and_get() {
+    let root_path = PathBuf::from("target/test_int21_verify_flag");
+    let _ = fs::remove_dir_all(&root_path);
+    fs::create_dir_all(&root_path).unwrap();
+    let mut cpu = Cpu::new(root_path);
+    cpu.load_shell();
+
+    let get = |cpu: &mut Cpu| {
+        cpu.set_reg16(Register::AX, 0x54FF);
+        rust_dos::interrupts::int21::handle(cpu);
+        cpu.get_reg16(Register::AX) & 0xFF
+    };
+    assert_eq!(get(&mut cpu), 0, "off at boot");
+    for (al, flag) in [(0x01, 1), (0x00, 0), (0x03, 1), (0x02, 0)] {
+        cpu.set_reg16(Register::AX, 0x2E00 | al);
+        rust_dos::interrupts::int21::handle(&mut cpu);
+        assert_eq!(get(&mut cpu), flag, "after AL={al:02X}");
+    }
+
+    // It stays for the programs after the one that set it, as VERIFY ON
+    // in AUTOEXEC.BAT does on DOS.
+    cpu.set_reg16(Register::AX, 0x2E01);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    cpu.load_shell();
+    assert_eq!(get(&mut cpu), 1, "after the shell is loaded again");
+}

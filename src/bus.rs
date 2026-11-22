@@ -162,6 +162,8 @@ pub struct Bus {
     pub xms: crate::xms::Xms,
     /// The expanded memory manager (INT 67h), if EMS is on.
     pub ems: Option<crate::ems::Ems>,
+    /// VCPI's pages and the PIC mapping its client set (vcpi.rs).
+    pub vcpi: crate::vcpi::Vcpi,
     /// The DPMI host (INT 2Fh AX=1687h, INT 31h) and its clients.
     pub dpmi: crate::dpmi::Dpmi,
     /// The built-in Windows (`win32`) and its running Win32 program.
@@ -1772,6 +1774,7 @@ impl Bus {
             self.net_next_event(),
             self.serial_next_event(),
             self.kbc_release_at,
+            crate::keyboard::typematic_at(self),
             self.rtc_next,
             self.win32.next_event(),
             crate::win32::audio_next_event(&self.win32, self.clock.now_ticks()),
@@ -1848,6 +1851,10 @@ impl Bus {
             self.kbc_release_at = None;
             self.kbc.release();
             self.sync_keyboard_irq();
+        }
+        // The keyboard repeats a held key.
+        if crate::keyboard::typematic_at(self).is_some_and(|t| t <= now) {
+            crate::keyboard::typematic(self);
         }
         self.clock.schedule(self.next_event());
         self.refresh_irq();
@@ -2049,14 +2056,20 @@ impl Bus {
             }
             let (ol, or) = self.opl.render();
             let fm = (ol as f32 * fl, or as f32 * fr);
-            if let Some(gold) = &mut self.adlib_gold {
-                // The FM goes through the AdLib Gold's mixer and output
-                // stage, with its sampled sound.
-                let (fm, pcm) = gold.render(fm);
-                self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+            // On an AdLib Gold the FM goes through the card's mixer and
+            // output stage, with its sampled sound. Either way it reaches
+            // the line out through the capacitor on the card's output.
+            let (fm, gold_pcm) = match &mut self.adlib_gold {
+                Some(gold) => {
+                    let (fm, pcm) = gold.render(fm);
+                    (fm, Some(pcm))
+                }
+                None => (fm, None),
+            };
+            let fm = self.mixer.fm_coupling(fm);
+            self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+            if let Some(pcm) = gold_pcm {
                 self.mixer.add(&mut mix, &mut peaks, Channel::AdlibGold, pcm);
-            } else {
-                self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
             }
             if let Some(sb) = &mut self.sb {
                 // The DAC's level at this frame's time, as the card worked
@@ -2228,6 +2241,7 @@ impl Bus {
         self.speaker_rests()
             && self.beep_frames == 0
             && self.opl.is_idle()
+            && self.mixer.fm_coupling_rests()
             && self.sb_quiet()
             && self.mpu.is_idle()
             && self.cdaudio.is_idle()

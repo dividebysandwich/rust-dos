@@ -604,7 +604,7 @@ pub fn tick(cpu: &mut Cpu) {
 /// if its caller isn't the shell at its prompt.
 pub fn abandon_input(cpu: &mut Cpu) -> bool {
     use crate::cpu::SHELL_SEGMENT;
-    if cpu.pe() || !cpu.batch.is_active() || cpu.shell_wait.is_some() || !cpu.process_stack.is_empty() {
+    if !cpu.dos_mode() || !cpu.batch.is_active() || cpu.shell_wait.is_some() || !cpu.process_stack.is_empty() {
         return false;
     }
     let frame = cpu.get_physical_addr(cpu.ss(), cpu.sp());

@@ -60,7 +60,7 @@ pub fn return_from_hle(cpu: &mut Cpu, vector: u8) {
     let hle_cf = cpu.get_cpu_flag(CpuFlags::CF);
     let hle_zf = cpu.get_cpu_flag(CpuFlags::ZF);
 
-    if cpu.v86() {
+    if cpu.guest_v86() {
         if matches!(vector, 0x25 | 0x26) {
             let ip = cpu.pop();
             cpu.set_ip(ip);
@@ -154,6 +154,7 @@ pub fn handle_far_service(cpu: &mut Cpu, service: u8) {
         crate::bios::FAR_PNP => crate::pnpbios::entry(cpu),
         crate::bios::FAR_APM => crate::apm::pm_entry(cpu),
         crate::bios::FAR_ATI => crate::mach64::bios::rom_entry(cpu),
+        crate::bios::FAR_VCPI => crate::vcpi::pm_entry(cpu),
         _ => cpu.bus.log_string(&format!("[CPU] Unknown far emulator service {:02X}", service)),
     }
 }
@@ -163,7 +164,7 @@ pub fn handle_far_service(cpu: &mut Cpu, service: u8) {
 /// register changes through the ports again on the way out
 /// (`return_from_hle`).
 fn video_bios(cpu: &mut Cpu, ah: u8, al: u8, service: impl FnOnce(&mut Cpu)) {
-    let echo = cpu.v86() && cpu.bus.vga.adapter.ega_bios();
+    let echo = cpu.guest_v86() && cpu.bus.vga.adapter.ega_bios();
     if echo {
         // The service works in the mode the registers describe, which
         // Windows' VDD may have just set restoring the machine's display,

@@ -40,6 +40,9 @@ const DEVICE_HEADER_SIZE: u16 = 0x12;
 /// The FCB table (FCBS=4), an SFT block of its own.
 const FCB_TABLE: u16 = 0x0160;
 const FCBS: u16 = 4;
+/// The verify flag (INT 21h AH=2Eh and 54h): 01h when DOS is to read
+/// back what it writes to disk, 00h (as at boot) when not.
+pub const VERIFY_FLAG: u16 = 0x0300;
 /// A byte VSHARE.386 sets while Windows runs, at its MS-DOS 5 offset.
 const VSHARE_FLAG: u16 = 0x0303;
 /// The zero-terminated list of the places to patch for critical sections
@@ -98,7 +101,8 @@ const _: () = assert!(DEVICE_RETF < DOSMGR_PATCHES && DOSMGR_PATCHES + 0x0E <= D
 const _: () = assert!(
     DEVICE_HEADERS + DEVICES.len() as u16 * DEVICE_HEADER_SIZE <= FCB_TABLE
 );
-const _: () = assert!(FCB_TABLE + 6 + FCBS * crate::dos_files::ENTRY_SIZE as u16 <= VSHARE_FLAG);
+const _: () = assert!(FCB_TABLE + 6 + FCBS * crate::dos_files::ENTRY_SIZE as u16 <= VERIFY_FLAG);
+const _: () = assert!(VERIFY_FLAG < VSHARE_FLAG);
 const _: () = assert!(VSHARE_FLAG < CRIT_PATCHES);
 
 /// What DOS keeps after its data segment, below the first MCB: the file

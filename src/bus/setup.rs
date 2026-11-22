@@ -40,6 +40,7 @@ impl Bus {
             debug_console: Vec::new(),
             xms: crate::xms::Xms::new(),
             ems: None,
+            vcpi: crate::vcpi::Vcpi::default(),
             dpmi: crate::dpmi::Dpmi::default(),
             win32: crate::win32::Win32::default(),
             dos_version: crate::config::DosVersion::default(),
