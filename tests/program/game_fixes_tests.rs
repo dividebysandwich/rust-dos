@@ -205,6 +205,32 @@ fn prehistorik_2_fills_the_rest_of_an_effects_block_with_128() {
     assert_eq!(block[0x80], 0);
 }
 
+/// Where Prehistorik 2's two music buffers are, by offset from its code
+/// segment, and their length.
+const PREHISTORIK_2_BUFFERS: (usize, usize) = (0xAEB9, 2 * 0xA8);
+
+#[test]
+fn prehistorik_2s_music_buffers_start_at_the_centre() {
+    let (at, len) = PREHISTORIK_2_BUFFERS;
+    let mut cpu = machine(&LAYOUTS[0]);
+    // The driver plays both buffers before it mixes into them, with the
+    // zeros they hold until then.
+    assert!(read(&mut cpu, BASE + at, len).iter().all(|&b| b == 0));
+    reset_dsp(&mut cpu);
+    let buffers = read(&mut cpu, BASE + at, len + 1);
+    assert!(buffers[..len].iter().all(|&b| b == 0x80));
+    assert_eq!(buffers[len], 0);
+
+    // Buffers that hold something else stay as they are, and the code is
+    // patched all the same.
+    let mut cpu = machine(&LAYOUTS[0]);
+    cpu.bus.write_8(BASE + at + 5, 0x7F);
+    let before = read(&mut cpu, BASE + at, len);
+    reset_dsp(&mut cpu);
+    assert_eq!(read(&mut cpu, BASE + at, len), before);
+    assert_eq!(cpu.bus.read_8(BASE + 0x222A), 0xEB);
+}
+
 #[test]
 fn nothing_changes_with_the_fix_off() {
     for layout in &LAYOUTS {

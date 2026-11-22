@@ -144,12 +144,21 @@ impl Bus {
         let found =
             crate::game_fixes::find_code(&self.ram[..end], |fix| self.game_fix_enabled(fix));
         for (fix, code, base) in found {
-            for (addr, byte) in crate::game_fixes::writes(code, base) {
+            let data: Vec<_> =
+                crate::game_fixes::data_writes(&self.ram[..end], code, base).collect();
+            // Data that no longer holds what the fix lists is left alone;
+            // the log says so, since the fix then does less.
+            let data_note = match (code.data.is_empty(), data.is_empty()) {
+                (true, _) => "",
+                (false, false) => ", data rewritten",
+                (false, true) => ", data left (not as listed)",
+            };
+            for (addr, byte) in crate::game_fixes::writes(code, base).chain(data) {
                 self.write_8(addr, byte);
             }
             self.log_string(&format!(
-                "[game fix] {}: {} ({}): code at {:05X} patched",
-                fix.name, fix.game, fix.reason, base
+                "[game fix] {}: {} ({}): code at {:05X} patched{}",
+                fix.name, fix.game, fix.reason, base, data_note
             ));
         }
     }
