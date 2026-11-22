@@ -70,8 +70,6 @@ impl Bus {
             gate_array_shadow: Vec::new(),
             gate_array_shadow_at: usize::MAX,
             refresh_toggle: false,
-            cursor_x: 0,
-            cursor_y: 0,
             start_time: Instant::now(),
             joystick: crate::joystick::GamePort::default(),
             vfx1: None,

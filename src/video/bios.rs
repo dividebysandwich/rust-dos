@@ -58,10 +58,7 @@ pub fn switch(cpu: &mut crate::cpu::Cpu, setup: VideoSetup) {
         cpu.bus.vga.mark_dirty_full();
     }
     let row = row.min(cpu.bus.text_rows() as u8 - 1);
-    cpu.bus.write_8(0x0450, col);
-    cpu.bus.write_8(0x0451, row);
-    cpu.bus.cursor_x = col as usize;
-    cpu.bus.cursor_y = row as usize;
+    cpu.bus.set_console_cursor(col as usize, row as usize);
 }
 
 /// The text cursor's scanlines for a text mode with `height` scanlines to
