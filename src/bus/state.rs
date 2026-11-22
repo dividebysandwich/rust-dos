@@ -86,6 +86,7 @@ const PIT2_VERSION: u16 = 1;
 const PIT_8254_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
 const KEY_QUEUE_VERSION: u16 = 1;
+const RTC_ALARM_VERSION: u16 = 1;
 const FRAME_CAP_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
@@ -310,6 +311,11 @@ impl Bus {
         // Which queued keystrokes the BIOS never saw, in a section of its
         // own so states saved before it load.
         w.section(b"KEYQ", KEY_QUEUE_VERSION, |w| kbd.save_queue(w));
+        // Where the look for the clock's alarm got to, while the alarm is
+        // enabled: only then, so other states load as they did.
+        if let Some(at) = cmos.alarm_look() {
+            w.section(b"RTCA", RTC_ALARM_VERSION, |w| at.save(w));
+        }
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga);
             // A ToadForce's memory is saved with what its host renderer
@@ -722,6 +728,11 @@ impl Bus {
         } else {
             kbd.forget_queue();
         }
+        if r.next_is(b"RTCA") {
+            let mut at = 0i64;
+            at.load(&mut r.section(b"RTCA", RTC_ALARM_VERSION)?)?;
+            cmos.set_alarm_look(at);
+        }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         *last_present = None;
@@ -940,8 +951,8 @@ impl Bus {
         // and the IPX driver's node is the state's.
         self.net.ipx_queue.clear();
         self.net.ipx_installed();
-        // The clock's periodic interrupt as the state's registers have it,
-        // and the keyboard's next byte at once.
+        // The clock's periodic interrupt and the look for its alarm as the
+        // state's registers have them, and the keyboard's next byte at once.
         self.rtc_next = None;
         self.rtc_alarm_next = None;
         self.schedule_rtc();

@@ -34,8 +34,10 @@ const PF: u8 = 0x40;
 const AF: u8 = 0x20;
 
 /// How often the bus looks for the alarm while it is enabled: twice a
-/// second, in PIT ticks. `alarm_due` checks each second since the last
-/// look, so a late look still finds the alarm.
+/// second, in PIT ticks, at the multiples of this count of the machine's
+/// tick count (which a save state keeps, so a loaded state looks when the
+/// machine it was saved from would have). `alarm_due` checks each second
+/// since the last look, so a late look still finds the alarm.
 pub const ALARM_POLL_TICKS: u64 = crate::timer::PIT_HZ / 2;
 
 pub struct Cmos {
@@ -166,6 +168,34 @@ impl Cmos {
         self.ram[0x0B] & AIE != 0
     }
 
+    /// The current second of the machine's clock.
+    fn this_second(&self) -> NaiveDateTime {
+        let now = self.now();
+        now.with_nanosecond(0).unwrap_or(now)
+    }
+
+    /// Start looking for the alarm from the current second, as the alarm
+    /// interrupt is enabled, or stop when it is disabled. A look that runs
+    /// goes on from the second it got to.
+    pub fn start_alarm_look(&mut self) {
+        if !self.alarm_enabled() {
+            self.alarm_checked = None;
+        } else if self.alarm_checked.is_none() {
+            self.alarm_checked = Some(self.this_second());
+        }
+    }
+
+    /// The last second the alarm was looked for in, for a save state: as
+    /// seconds since 1970 on the machine's local clock.
+    pub fn alarm_look(&self) -> Option<i64> {
+        self.alarm_checked.map(|at| at.and_utc().timestamp())
+    }
+
+    /// Go on looking for the alarm after the second `alarm_look` gave.
+    pub fn set_alarm_look(&mut self, at: i64) {
+        self.alarm_checked = chrono::DateTime::from_timestamp(at, 0).map(|at| at.naive_utc());
+    }
+
     /// Look for the alarm time in the seconds since the last look: true
     /// when it came and asserts IRQ 8. The first look after the alarm
     /// interrupt is enabled starts from the current second.
@@ -174,7 +204,7 @@ impl Cmos {
             self.alarm_checked = None;
             return false;
         }
-        let now = self.now().with_nanosecond(0).unwrap_or_else(|| self.now());
+        let now = self.this_second();
         let from = self.alarm_checked.replace(now).unwrap_or(now);
         let alarm = [self.ram[0x05], self.ram[0x03], self.ram[0x01]];
         let matches = |at: NaiveDateTime| {

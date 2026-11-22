@@ -1850,10 +1850,8 @@ impl Bus {
         if let Some(at) = self.rtc_alarm_next
             && at <= now
         {
-            let poll = crate::cmos::ALARM_POLL_TICKS;
             let enabled = self.cmos.alarm_enabled();
-            let next = if at + poll > now { at + poll } else { now + poll };
-            self.rtc_alarm_next = enabled.then_some(next);
+            self.rtc_alarm_next = enabled.then(|| next_alarm_look(now));
             if self.cmos.alarm_due() {
                 self.pic.raise(8);
             }
@@ -2578,18 +2576,14 @@ impl Bus {
             Some(_) => {}
             None => self.rtc_next = None,
         }
-        match self.cmos.alarm_enabled() {
-            true if self.rtc_alarm_next.is_none() => {
-                // Start the look from the current second.
-                self.cmos.alarm_due();
-                self.rtc_alarm_next = Some(self.clock.now_ticks() + crate::cmos::ALARM_POLL_TICKS);
-                self.clock.schedule(self.next_event());
-            }
-            true => {}
-            false => {
-                self.rtc_alarm_next = None;
-                self.cmos.alarm_due();
-            }
+        // From the current second as the alarm interrupt is enabled, or
+        // where a loaded state's look was.
+        self.cmos.start_alarm_look();
+        if !self.cmos.alarm_enabled() {
+            self.rtc_alarm_next = None;
+        } else if self.rtc_alarm_next.is_none() {
+            self.rtc_alarm_next = Some(next_alarm_look(self.clock.now_ticks()));
+            self.clock.schedule(self.next_event());
         }
     }
 
@@ -3864,6 +3858,13 @@ pub struct Scanout {
     pub device: &'static str,
     pub name: String,
     pub bpp: Option<u32>,
+}
+
+/// The tick of the look for the clock's alarm after tick `now`: the next
+/// multiple of `cmos::ALARM_POLL_TICKS`, the same however long the alarm
+/// has been enabled or since a state was loaded.
+fn next_alarm_look(now: u64) -> u64 {
+    (now / crate::cmos::ALARM_POLL_TICKS + 1) * crate::cmos::ALARM_POLL_TICKS
 }
 
 /// How far apart the PC speaker's two levels are in the mix: its cone

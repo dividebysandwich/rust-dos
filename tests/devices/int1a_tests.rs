@@ -207,3 +207,25 @@ fn the_bios_clock_interrupt_calls_int_4ah_for_the_alarm() {
     assert_eq!(cmos(&mut cpu, 0x0C), 0, "status C read by the handler");
     rust_dos::hosttime::fix(None);
 }
+
+#[test]
+fn a_loaded_state_looks_for_the_alarm_where_the_saved_machine_would() {
+    // The alarm at 12:00:03. The last look before the save was in
+    // 12:00:01, and the save comes in 12:00:03, before the next look:
+    // loaded, that look still finds the alarm, at the same tick.
+    rust_dos::hosttime::fix(Some(noon(0)));
+    let mut cpu = machine(Adapter::Svga);
+    cpu.set_cx(0x1200);
+    cpu.set_dx(0x0300);
+    call(&mut cpu, 0x0600, true);
+    rust_dos::hosttime::fix(Some(noon(1)));
+    assert!(!run_a_second(&mut cpu), "12:00:01");
+    rust_dos::hosttime::fix(Some(noon(3)));
+    let next = cpu.bus.rtc_alarm_next;
+    let state = rust_dos::savestate::machine::save(&cpu);
+    let mut loaded = machine(Adapter::Svga);
+    rust_dos::savestate::machine::load(&mut loaded, &state).unwrap();
+    assert_eq!(loaded.bus.rtc_alarm_next, next, "the look's tick");
+    assert!(run_a_second(&mut loaded), "12:00:03 after the load");
+    rust_dos::hosttime::fix(None);
+}
