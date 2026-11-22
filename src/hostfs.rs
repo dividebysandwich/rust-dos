@@ -53,6 +53,12 @@ pub struct DirEntry {
     /// Whether it is a folder; a link to one isn't (`metadata` follows
     /// links).
     pub is_dir: bool,
+    /// Its size, where it is a file (not a link) and the listing gave the
+    /// size without another call: on Windows, which lists names with
+    /// their sizes. None elsewhere, where `metadata` tells it. NTFS may
+    /// leave out what a handle still open wrote, so for a file open for
+    /// writing `metadata` is the one to ask.
+    pub len: Option<u64>,
 }
 
 impl DirEntry {
@@ -416,13 +422,31 @@ pub fn read_dir(path: impl AsRef<Path>) -> io::Result<Vec<DirEntry>> {
             .read_dir(path)?
             .into_iter()
             .filter(|(name, _)| name != "." && name != "..")
-            .map(|(name, is_dir)| DirEntry { path: path.join(&name), name, is_dir })
+            .map(|(name, is_dir)| DirEntry {
+                path: path.join(&name),
+                name,
+                is_dir,
+                len: None,
+            })
             .collect()),
         None => Ok(fs::read_dir(path)?
             .filter_map(Result::ok)
             .map(|e| {
-                let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
-                DirEntry { name: e.file_name(), path: e.path(), is_dir }
+                let kind = e.file_type().ok();
+                let is_dir = kind.is_some_and(|t| t.is_dir());
+                // Windows' listing has each file's size: the entry's
+                // metadata costs no call there, and a stat elsewhere.
+                let len = if cfg!(windows) && kind.is_some_and(|t| t.is_file()) {
+                    e.metadata().ok().map(|m| m.len())
+                } else {
+                    None
+                };
+                DirEntry {
+                    name: e.file_name(),
+                    path: e.path(),
+                    is_dir,
+                    len,
+                }
             })
             .collect()),
     }

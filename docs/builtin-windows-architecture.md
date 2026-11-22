@@ -161,6 +161,19 @@ had it, so no state holds a trap for it, and its Rust function is
 `stubs::never_a_trap`, which ends the program as a call of an unknown
 function does.
 
+Code that needs the DLL's variables is `Conv::CodeVars`: its `Fixup`s
+name the places in the code that hold a variable's address, which the
+image builder writes there. DDRAW's `IDirectDrawSurface::IsLost`, which
+Beasts and Bumpkins calls 150,000 times a second, answers from a cache
+in DDRAW's variables, 1024 slots of one dword each: the interface, with
+bit 0 set when the answer was `DDERR_SURFACELOST`, so that one read
+gives both and no other thread can come between them. It traps to its
+Rust function only for an interface its slot doesn't hold, which fills
+the slot; states saved when IsLost was a trap keep their trap stub and
+have no cache. A surface lost, restored or released empties the cache of
+every process (`forget_is_lost`), so a cached answer is always the one
+the trap would give.
+
 Because the DLLs are real images, `LoadLibrary`, `GetProcAddress`,
 `GetModuleHandle`, programs that walk export tables, data exports and
 the debugger all work on them like on any DLL. retrowin32, which solves
@@ -185,11 +198,28 @@ of Windows': an import of it by ordinal binds to the missing-function
 stub below, as an import by name does.
 
 A function's id, which its stub's trap carries, is its DLL's place in
-`DLLS` and its own in the DLL's table, apart from its ordinal; saved
-states keep the stubs in memory, so tables are only added to at their
-ends. A missing function is bound to a stub that logs `dll!name` with
-its arguments and ends the program with a message saying which function
-it needed, so the log of a game that fails says what to write next. The
+`DLLS` and its own in the DLL's table, apart from its ordinal, and its
+stub is at that place in the image. Saved states keep the stubs in
+memory and programs keep their addresses, so tables are only added to
+at their ends: `src/win32/stub_tables.txt` holds the order every
+built-in DLL's and 16-bit system module's table has had, and the DLLs'
+variables with their sizes, and a test fails on an entry inserted,
+moved or taken out (`stub_tables.rs`). The entries inserted before
+that test went in since the W32 section's version 71 (KERNEL32's,
+USER32's, GDI32's and the 16-bit USER's, listed in `INSERTED`) are
+mended in states saved before them. Such a state's image keeps its
+order, its stubs trap with the ids their functions have now, and the
+functions it lacks get stubs after its code. Every address Rust works
+out for a function of a mended DLL follows the running process's image
+(`stub_tables::address`), and a process started after the load maps the
+same image, since the system's window classes and Program Manager's
+window hold its addresses for every process. The few KERNEL32 stubs the
+system uses before a process runs are before the first insertion
+(`fixed_address`).
+
+A missing function is bound to a stub that logs `dll!name` with its
+arguments and ends the program with a message saying which function it
+needed, so the log of a game that fails says what to write next. The
 trace of every call (`trace.rs`, like Wine's `+relay`) goes to the log
 and to the debug server.
 
@@ -333,7 +363,11 @@ against that DLL's results in `undname_vc6.txt`).
   the loader's rules: `GLIDE2X.DLL` and `GLIDE3X.DLL` with a 3dfx card
   alone (`voodoo=true`, or a Banshee or Voodoo3 as the display adapter),
   `MSIMG32.DLL` from Windows 98 on, and a DLL that `win32_dlls_replace`
-  replaces with one of the folder's not at all.
+  replaces with one of the folder's not at all. `MSVCRT20.DLL` and
+  `MSVCRT40.DLL` are files of another kind (`forwarders.rs`): no stubs,
+  only an export directory whose every entry forwards to `MSVCRT.DLL`'s
+  function of the same name. The loader loads them as DLL files and
+  follows the forwarders, so they are modules of their own names.
 
   The files are read-only: they open for reading alone, show as
   read-only (FILE_ATTRIBUTE_READONLY and ARCHIVE), and opening one for
@@ -386,25 +420,33 @@ against that DLL's results in `undname_vc6.txt`).
 
 All output goes through the emulated video hardware (`screen.rs`):
 
-- **GDI and windows**: one desktop in a mode of the display adapter:
-  640x480 at 32 bits a pixel on a VESA card, and at 16 on a Banshee or
-  Voodoo3, which use the card's own modes, set through its registers as
-  3dfx's driver set them. Windows are drawn into it. The fonts are
-  raster fonts drawn from the VGA's ROM glyphs, scaled, with the dialog
-  faces' character widths taken from Windows 98's own raster fonts
-  (`gdi32/font.rs`). The characters code page 437 lacks (Central
-  European, Cyrillic, Greek, Turkish and Baltic letters) are drawn from
-  FreeDOS's CPIDOS fonts in the same three sizes, which
-  `tools/gen_cpi_glyphs.py` extracts into
-  `video/assets/CPIDOS_glyphs.bin`. A font's bytes are those of its
-  character set's code page; the raster faces have the system locale's
-  character set, Arial, Times New Roman and Courier New the six of
-  WGL4, and the font mapper weighs the character set over the face as
-  Windows does. With `win32_depth=8` the desktop has 8 bits a
-  pixel, and GDI keeps a system palette in the DAC as Windows does on a
-  256-colour display: palettes realized in the foreground or the
-  background, `PC_RESERVED` entries for `AnimatePalette`,
-  `SetSystemPaletteUse`, and `WM_PALETTECHANGED` and
+- **GDI and windows**: one desktop in a mode of the display adapter: 640x480
+  at 32 bits a pixel on a VESA card, and at 16 on a Banshee or Voodoo3,
+  which use the card's own modes, set through its registers as 3dfx's driver
+  set them. Windows are drawn into it. The fonts are raster fonts drawn from
+  the VGA's ROM glyphs, scaled, with the dialog faces' character widths
+  taken from Windows 98's own raster fonts (`gdi32/font.rs`). MS Sans
+  Serif's 8-point size, the font of menus, dialogs and buttons, is too
+  narrow for a squeezed ROM glyph to stay legible, and has glyphs drawn for
+  it with one-pixel strokes (`gdi32/sans8.rs`): the printable ASCII
+  characters, code page 1252's other letters and its Spanish and French
+  punctuation, the Central European and Baltic letters with a stroke, and
+  the Latin letters with accents built from them. A letter that code page
+  1252 lacks is as wide as its glyph there. The characters code page 437
+  lacks (Central European, Cyrillic, Greek, Turkish and Baltic letters) are
+  drawn from FreeDOS's CPIDOS fonts in the same three sizes, which
+  `tools/gen_cpi_glyphs.py` extracts into `video/assets/CPIDOS_glyphs.bin`.
+  A font's bytes are those of its character set's code page; the raster
+  faces have the system locale's character set, Arial, Times New Roman and
+  Courier New the six of WGL4, and the font mapper weighs the character set
+  over the face as Windows does. `AddFontResourceA` reads the FNT resources
+  of a program's .FON file, or a bare .FNT (`gdi32/fnt.rs`): their faces are
+  listed with the built-in ones, a font that names one is drawn with its
+  glyphs at the nearest size, and a save state keeps their bytes. With
+  `win32_depth=8` the desktop has 8 bits a pixel, and GDI keeps a system
+  palette in the DAC as Windows does on a 256-colour display: palettes
+  realized in the foreground or the background, `PC_RESERVED` entries for
+  `AnimatePalette`, `SetSystemPaletteUse`, and `WM_PALETTECHANGED` and
   `WM_QUERYNEWPALETTE` for the windows (`gdi32/palette.rs`).
 - **DirectDraw** (`ddraw/`) in exclusive full-screen mode sets the mode
   the game asks for. Surfaces in video memory are in the card's memory,
@@ -550,6 +592,19 @@ DPLAY.DLL, DirectX 3's, which some games import by ordinal, makes and
 lists DPLAYX's objects and providers, as Wine's does. WS2_32 and WSOCK32
 have no network yet.
 
+DirectPlay 8 (`dpnet/`, DPNET.DLL) has the peer, the client, the server,
+the lobbied application and the address of DirectX 8, on a machine whose
+service providers can't start, as WinSock opens no sockets (#1248): the
+four providers DirectX 8.1 registers are listed only when a program asks
+for every registered one, and hosting, joining and looking for a session
+fail on the device address. The client and the server share the peer's
+methods where theirs do the same. The lobbied application registers
+programs under `HKLM\Software\Microsoft\DirectPlay8\Applications`. It
+has no sessions over the LAN room yet. DirectX 8.x keeps the address in
+DPNADDR.DLL and the lobby classes in DPNLOBBY.DLL; the built-in Windows
+has them all in DPNET.DLL, as DirectX 9 does, and has no lobby client
+or IDirectPlay8AddressIP yet (#1251).
+
 ## Setup programs
 
 A game on CD is installed in one of three ways, which the player page
@@ -658,6 +713,107 @@ builds, each export a stub that traps into Rust, and most of them go on
 to the 32-bit function that does the work (`thunk.rs`). Tasks take turns
 as Windows 3.1's do, while the Win32 processes' threads go on around
 them.
+
+Selectors come from the LDT from entry 80h on (`ldt.rs`); the entries
+below it are the flat selectors and the threads' TIB selectors. The
+emulator's Windows boots the same way every time, so two instances give
+a program the same selectors, which two real PCs almost never do: their
+drivers and the programs run before differ. A program can tell the two
+ends of a link apart by them. Metal Marines answers the other side's
+CONNECT with a far pointer of its own and takes an answer whose pointer
+equals its own for its own message coming back, so two instances never
+connected (#661). A machine linked to another therefore keeps some
+entries from 80h on out of use when its Win16 process is made, and
+everything after comes that many entries later:
+
+- In a LAN room (a null modem cable or a modem to the other player, IPX
+  or a network card through the room), its member index, 1 to 200,
+  which the relay gives no two members at once.
+- Linked but not in a room yet (a null modem cable or room in the
+  settings, a modem that takes calls on `modemlisten`, a LAN command
+  run before the room answered): 256 to 319 entries, from a hash of the
+  `[network]` and `modemlisten` settings mixed with random bytes. Two
+  ends that share one configuration file then differ in 63 of 64 starts;
+  in a deterministic run the random bytes come from the start time, and
+  the settings keep two ends set differently apart.
+- No link: none, so single machines, save states, the determinism tests
+  and the game suite's shots lay out as before.
+
+The reserved entries stay empty descriptors that no fixed selector
+uses. They are in the LDT's map of entries given out, which a save
+state keeps, so a restored machine has the layout it was saved with.
+
+## DOS programs
+
+A Windows program can start a DOS program: WinExec, LoadModule,
+CreateProcessA, ShellExecute and the C runtime's spawn functions of an
+MZ file that is neither a PE file nor a Windows 3.1 program, a COM file,
+a batch file or a PIF (`src/win32/dosvm.rs`). Setups do it to run a DOS
+installer or a sound setup program. Windows 98 runs the program in a
+virtual DOS machine of its own: the VMM gives it a copy of the first
+megabyte as DOS was when Windows started, with its own vector table,
+DOS data and conventional memory, and switches the processor between it
+and the system's machine, so the Windows programs go on running. The
+program runs full screen or in a window, as its PIF says.
+
+The built-in Windows runs in one DOS process of the built-in DOS, whose
+real mode it keeps for the real-mode code it calls (`realmode.rs`). A
+DOS program starts there as that process's child. Its start is queued
+by the function that starts it, which returns to its caller as on
+Windows (33 from WinExec, handles of a process and a thread from
+CreateProcessA). When the service trap that called the function is
+done, the system calls DOS's EXEC in real mode from a few bytes in the
+ROM (`INT 21h`, then the trap of the return to the system), keeping the
+caller's context in a real-mode frame of its own kind (`Kind::Exec`).
+The program runs full screen, and the Windows programs wait: their
+threads don't switch while the system waits for real-mode code. When
+the program ends, DOS goes back after the INT 21h, the trap returns to
+the system, and the process and thread objects get its exit code and
+are signaled. What Windows 98 keeps apart for each DOS machine is put
+back as it was before the program started: the vector table, DOS's
+current drive and directories, its memory strategy and upper memory
+link, the PICs' masks, the timer's rate, the mouse driver's event
+handler, and the calling thread's FPU and SSE registers. The desktop
+is painted again, and the caller goes on. A program that waits for the
+one it started (WaitForSingleObject, GetExitCodeProcess, GetModuleUsage
+of WinExec's 33, a loop looking for a file the program writes) finds it
+ended, and the files it wrote are on the same drives.
+
+Before EXEC, the DOS process's memory block is cut down to what it uses
+(its PSP, its DOS stub and its stack), so the program gets the rest of
+conventional memory, and EXEC's parameter block, the command tail, the
+path and the environment of the caller go in a block of their own. The
+pages of the Windows programs' memory pool that no program has used yet
+go back to the XMS pool while the program runs, for its DPMI host and
+XMS memory (a DOS extender such as DOS/4GW needs some), as Windows 98's
+VMM gives a DOS machine memory from what the system has free; the pool
+takes them back when the program ends. The program gets its 8.3 path,
+as on Windows 98. A batch file runs in `COMMAND.COM /C`. INT 2Fh
+AX=1600h and 160Ah answer from the program as in a DOS box: Windows 4.x
+in enhanced mode, 4.0 for Windows 95 and 4.10 for 98.
+
+The program starts in a folder the session keeps: CreateProcessA's
+lpCurrentDirectory, or the caller's current folder when it was started.
+ShellExecute changes to a shell link's working folder around its
+CreateProcessA and back before the service returns, so the folder has
+to be taken then. When the program ends, DOS's current drive and
+folders are put back. A PIF (`src/win32/pif.rs`) starts the program it
+names: its basic section gives the program (at 24h), the working
+folder (65h) and the parameters (A5h), and the "WINDOWS 386 3.0"
+record's parameters (at 28h in its data) take the place of the basic
+ones, as Wine's winevdm reads them. Arguments on the command line take
+the place of the PIF's parameters, and its working folder that of the
+caller's. The program is looked for in the working folder, the PIF's
+folder, and then where SearchPathA looks.
+
+This is what a full-screen DOS box does on Windows 98, but for the
+Windows programs, which run on there behind it. Running them side by
+side, a window for the DOS program, and a first megabyte of its own for
+it need what the VMM keeps for each machine: a second copy of the first
+megabyte and of DOS's state, switched with the processor's context. The
+real-mode frame and the session's state are the place for that: a
+scheduler that switches between the frame's DOS program and the Windows
+threads, and a session that holds the machine's own memory.
 
 ## Timing
 

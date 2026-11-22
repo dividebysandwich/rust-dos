@@ -300,6 +300,7 @@ static APIS: &[Api16] = &[
         "DlgDirListComboBoxA",
         b'w',
     ),
+    rust("DlgDirSelectComboBox", 194, "wpw", dlg_dir_select_combo_box),
     rust("TabbedTextOut", 196, "wsspssps", tabbed_text_out),
     rust("GetTabbedTextExtent", 197, "wpwwp", get_tabbed_text_extent),
     rust("OpenComm", 200, "pww", comm::open_comm),
@@ -470,6 +471,7 @@ static APIS: &[Api16] = &[
     rust("BuildCommDCB", 213, "pp", comm::build_comm_dcb),
     rust("EscapeCommFunction", 214, "ww", comm::escape_comm_function),
     rust("FlushComm", 215, "ww", comm::flush_comm),
+    rust("ExitWindowsExec", 246, "pp", exit_windows_exec),
 ];
 
 fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -489,10 +491,19 @@ fn one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// it makes its first window). On Windows 98 the setup started from the
 /// Run dialog gets Explorer's window.
 fn get_active_window(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    match crate::win32::user32::input::active(cpu) {
-        0 => Some(crate::win32::user32::progman::server(cpu)),
+    use crate::win32::user32::progman;
+    let active = match crate::win32::user32::input::active(cpu) {
+        0 => progman::existing_server(cpu),
         active => Some(active),
-    }
+    };
+    let Some(active) = active else {
+        return Some(progman::server(cpu));
+    };
+    // Only a read, which an idle proof goes through: Metal Marines asks
+    // it in every pass of its PeekMessage loop.
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
+    Some(active)
 }
 
 /// GetTimerResolution: 1000, as Wine says.
@@ -535,20 +546,20 @@ fn check_mark_dimensions(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// The address of USER32's function `name`.
-fn api(name: &str) -> u32 {
-    crate::win32::user32::address_of(name)
+fn api(cpu: &Cpu, name: &str) -> u32 {
+    crate::win32::user32::address_of(cpu, name)
 }
 
 /// Go on to USER32's `name` with `args`; DX:AX what it returns.
 fn go(cpu: &mut Cpu, name: &str, args: &[u32]) -> Option<u32> {
-    thunk::call32(cpu, api(name), args, thunk::POST_PLAIN, Vec::new());
+    thunk::call32(cpu, api(cpu, name), args, thunk::POST_PLAIN, Vec::new());
     None
 }
 
 /// Go on to USER32's `name` with `args`, `post` (this module's `post`)
 /// seeing to what it returns with `data`.
 fn go_post(cpu: &mut Cpu, name: &str, args: &[u32], data: Vec<u32>) -> Option<u32> {
-    thunk::call32(cpu, api(name), args, thunk::POST_USER, data);
+    thunk::call32(cpu, api(cpu, name), args, thunk::POST_USER, data);
     None
 }
 
@@ -561,7 +572,7 @@ fn go_at(cpu: &mut Cpu, top: u32, name: &str, args: &[u32], data: Vec<u32>) -> O
     } else {
         thunk::POST_USER
     };
-    thunk::enter32_at(cpu, ctx, top, api(name), args, post, data);
+    thunk::enter32_at(cpu, ctx, top, api(cpu, name), args, post, data);
     None
 }
 
@@ -606,7 +617,7 @@ const PM_NOYIELD: u32 = 0x0002;
 pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     let d = |i: usize| data.get(i).copied().unwrap_or(0);
     if d(0) >= P_MISC {
-        return super::misc::post(cpu, value, data);
+        return super::misc::post(cpu, value, data, ctx);
     }
     if d(0) >= P_GDI {
         return super::gdi::post(cpu, value, data);
@@ -629,6 +640,7 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
                 // turn started over: an idle proof follows that.
                 if running.is_some() && running_thread(cpu) == running {
                     crate::idle::pure_call(cpu, None);
+                    crate::idle::reads_arguments(cpu);
                     crate::idle::turn_started(cpu);
                 }
                 return None;
@@ -637,6 +649,7 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
                 // message found was converted, and the 32-bit function
                 // that found it already ended the proof.)
                 crate::idle::pure_call(cpu, None);
+                crate::idle::reads_arguments(cpu);
             }
         }
         P_PAINT => {
@@ -704,7 +717,12 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
             let kind = d(1) as u8;
             return Some(proc16_of(cpu, value, kind));
         }
-        P_INSTANCE => return Some(instance16(cpu, value) as u32),
+        P_INSTANCE => {
+            // A look-up of the module whose image of resources it is.
+            crate::idle::pure_call(cpu, None);
+            crate::idle::reads_arguments(cpu);
+            return Some(instance16(cpu, value) as u32);
+        }
         P_ICON => return Some(icon16(value) as u32),
         P_WORDS => {
             // 32-bit integers at d(1) as 16-bit ones at d(2), d(3) of them.
@@ -1010,6 +1028,11 @@ fn window_instance(cpu: &Cpu, hwnd: u32) -> u16 {
 }
 
 fn get_window_word(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // It goes on to a USER32 function that says for itself whether an
+    // idle proof goes through it; here only the 32-bit stack and the
+    // frame `post` takes off again change.
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     let (hwnd, index) = (args[0], args[1]);
     match index {
         GWL_HINSTANCE => go_post(cpu, "GetWindowLongA", &[hwnd, index], vec![P_INSTANCE]),
@@ -1081,6 +1104,30 @@ fn set_class_word(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     go_post(cpu, "SetClassLongA", &[hwnd, index, value], data)
 }
 
+/// ExitWindowsEx's flag for a shutdown, whose WM_QUERYENDSESSION and
+/// WM_ENDSESSION have lParam 0, as Windows 3.1's have.
+const EWX_SHUTDOWN: u32 = 1;
+
+/// ExitWindowsExec(exe, params): Windows ends, as ExitWindows ends it,
+/// and then the DOS program `exe` runs with the command line `params`
+/// (boot.rs says where and when). FALSE when a window refused to end,
+/// which is the only time the call comes back.
+fn exit_windows_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let text = |cpu: &Cpu, at: u32| {
+        if at == 0 {
+            String::new()
+        } else {
+            super::string(cpu, at).trim().to_string()
+        }
+    };
+    let (exe, params) = (text(cpu, args[0]), text(cpu, args[1]));
+    if !exe.is_empty() {
+        let line = format!("{} {}", exe, params);
+        crate::win32::boot::exec_after(cpu, line.trim_end().to_string());
+    }
+    go(cpu, "ExitWindowsEx", &[EWX_SHUTDOWN, 0])
+}
+
 fn window_from_point(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     go(cpu, "WindowFromPoint", &[sx(args[0]), sx(args[0] >> 16)])
 }
@@ -1117,7 +1164,13 @@ fn create_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     args32[0] = instance32(cpu, args[0] as u16);
     args32[3] &= 0xFF;
     args32[4] &= 0xFF;
-    thunk::call32(cpu, api("CreateIcon"), &args32, thunk::POST_AUTO, vec![b'i' as u32]);
+    thunk::call32(
+        cpu,
+        api(cpu, "CreateIcon"),
+        &args32,
+        thunk::POST_AUTO,
+        vec![b'i' as u32],
+    );
     None
 }
 
@@ -1126,7 +1179,13 @@ fn create_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn create_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut args32 = args.to_vec();
     args32[0] = instance32(cpu, args[0] as u16);
-    thunk::call32(cpu, api("CreateCursor"), &args32, thunk::POST_AUTO, vec![b'i' as u32]);
+    thunk::call32(
+        cpu,
+        api(cpu, "CreateCursor"),
+        &args32,
+        thunk::POST_AUTO,
+        vec![b'i' as u32],
+    );
     None
 }
 
@@ -1458,6 +1517,14 @@ fn dlg_dir_select(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     go(cpu, "DlgDirSelectExA", &[args[0], args[1], 128, args[2]])
 }
 
+fn dlg_dir_select_combo_box(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    go(
+        cpu,
+        "DlgDirSelectComboBoxExA",
+        &[args[0], args[1], 128, args[2]],
+    )
+}
+
 /// The child of `dialog` whose id is `id`.
 fn dlg_item(cpu: &Cpu, dialog: u32, id: u32) -> u32 {
     let user = &cpu.bus.win32.user;
@@ -1478,7 +1545,14 @@ fn send_dlg_item_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if hwnd == 0 {
         return Some(0);
     }
-    message::send32(cpu, api("SendMessageA"), hwnd, args[2], args[3], args[4]);
+    message::send32(
+        cpu,
+        api(cpu, "SendMessageA"),
+        hwnd,
+        args[2],
+        args[3],
+        args[4],
+    );
     None
 }
 
@@ -1500,7 +1574,7 @@ fn def_mdi_child_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn def_frame_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     message::send32_with(
         cpu,
-        api("DefFrameProcA"),
+        api(cpu, "DefFrameProcA"),
         args[0],
         &[args[1]],
         args[2],
@@ -1556,6 +1630,9 @@ fn post_app_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 // The message loop: MSG16s.
 
 fn get_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if super::call_queued16(cpu) {
+        return None;
+    }
     let m = thunk::scratch32(cpu, 28);
     go_at(
         cpu,
@@ -1567,6 +1644,9 @@ fn get_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if super::call_queued16(cpu) {
+        return None;
+    }
     let m = thunk::scratch32(cpu, 28);
     go_at(
         cpu,
@@ -1578,6 +1658,7 @@ fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // Only the 32-bit stack and the frame `post` takes off again changed:
     // an idle proof follows PeekMessageA from here (`idle::pure_call`).
     crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     None
 }
 

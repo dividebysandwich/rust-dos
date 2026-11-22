@@ -4,7 +4,9 @@
 //! emulated cards' own levels, such as the Sound Blaster's mixer chip,
 //! which programs set and a new program resets.
 
-use crate::dsp::{Chorus, OutputCoupling, Reverb, SpeakerFilter, StereoLowpass};
+use crate::dsp::{
+    Chorus, DcBlocker, OutputCoupling, Reverb, SpeakerDecimator, SpeakerFilter, StereoLowpass,
+};
 pub use crate::dsp::{ChorusPreset, ReverbPreset};
 
 /// A sound source the mixer has a volume for, or `Master` for the mix.
@@ -35,9 +37,12 @@ pub enum Channel {
     /// The built-in Windows's sound device: DirectSound and WinMM's wave
     /// audio.
     Windows,
+    /// The AdLib Gold's sampled sound (its MMA), through the card's mixer
+    /// and output stage. Its FM goes on `Fm`.
+    AdlibGold,
 }
 
-pub const CHANNELS: usize = 14;
+pub const CHANNELS: usize = 15;
 
 /// The loudest volume, in percent.
 pub const MAX_LEVEL: u16 = 200;
@@ -63,6 +68,7 @@ impl Channel {
         Channel::Monitor,
         Channel::Modem,
         Channel::Windows,
+        Channel::AdlibGold,
     ];
 
     /// Its key in `[mixer]`.
@@ -82,6 +88,7 @@ impl Channel {
             Channel::Monitor => "monitor",
             Channel::Modem => "modem",
             Channel::Windows => "windows",
+            Channel::AdlibGold => "adlibgold",
         }
     }
 
@@ -106,6 +113,7 @@ impl Channel {
             Channel::Monitor => "Monitor",
             Channel::Modem => "Modem",
             Channel::Windows => "Windows sound",
+            Channel::AdlibGold => "AdLib Gold digital",
         }
     }
 
@@ -150,8 +158,9 @@ pub struct MixerSettings {
     /// speaker of a PC (`speaker_filter`).
     pub speaker_filter: bool,
     pub sb_filter: SbFilter,
-    /// The capacitor on the Sound Blaster's output, which keeps the level
-    /// its DAC holds between sounds out of the mix (`sb_coupling`).
+    /// The capacitor on the sound card's output, which keeps a level the
+    /// Sound Blaster's DAC or the FM synthesizer holds between sounds out
+    /// of the mix (`sb_coupling`).
     pub sb_coupling: bool,
     /// The reverb and chorus the FM synthesizer, the Gravis Ultrasound and
     /// MIDI are sent to.
@@ -220,9 +229,17 @@ fn dry_wet(mix: u16) -> (f32, f32) {
 /// The filters' and effects' state.
 #[derive(Clone, Debug, Default)]
 struct Dsp {
+    /// The speaker's level, band-limited to the mix rate.
+    speaker_level: SpeakerDecimator,
     speaker: SpeakerFilter,
+    /// The speaker's steady level taken out while its filter is off.
+    speaker_dc: DcBlocker,
     sb: StereoLowpass,
     sb_coupling: OutputCoupling,
+    /// The capacitor on the FM synthesizer's output: the AdLib's, the
+    /// AdLib Gold's, or the Sound Blaster's that its FM chip shares with
+    /// the DAC.
+    fm_coupling: OutputCoupling,
     reverb: Option<Reverb>,
     chorus: Option<Chorus>,
 }
@@ -337,12 +354,14 @@ impl Mixer {
         }
         if settings.speaker_filter != old.speaker_filter {
             self.dsp.speaker = SpeakerFilter::default();
+            self.dsp.speaker_dc = DcBlocker::default();
         }
         if settings.sb_filter != old.sb_filter {
             self.dsp.sb = StereoLowpass::default();
         }
         if settings.sb_coupling != old.sb_coupling {
             self.dsp.sb_coupling = OutputCoupling::default();
+            self.dsp.fm_coupling = OutputCoupling::default();
         }
         self.mix();
     }
@@ -350,9 +369,12 @@ impl Mixer {
     /// Start the filters and effects from silence, dropping the sound that
     /// rang on in them, as after a save state was loaded.
     pub fn clear_tails(&mut self) {
+        self.dsp.speaker_level = SpeakerDecimator::default();
         self.dsp.speaker = SpeakerFilter::default();
+        self.dsp.speaker_dc = DcBlocker::default();
         self.dsp.sb = StereoLowpass::default();
         self.dsp.sb_coupling = OutputCoupling::default();
+        self.dsp.fm_coupling = OutputCoupling::default();
         self.dsp.reverb = (self.settings.reverb != ReverbPreset::Off).then(|| Reverb::new(self.settings.reverb));
         self.dsp.chorus = (self.settings.chorus != ChorusPreset::Off).then(Chorus::new);
     }
@@ -451,10 +473,46 @@ impl Mixer {
         }
     }
 
-    /// The PC speaker's sample through its filter, if it is on.
+    /// Take in the PC speaker's mean level over the next eighth of a mix
+    /// frame (`SpeakerDecimator`).
+    #[inline]
+    pub(crate) fn speaker_part(&mut self, level: f32) {
+        self.dsp.speaker_level.push(level);
+    }
+
+    /// The PC speaker's level for the frame whose last eighth came in
+    /// last, band-limited.
+    #[inline]
+    pub(crate) fn speaker_level(&self) -> f32 {
+        self.dsp.speaker_level.output()
+    }
+
+    /// Whether the speaker's level held at `level` comes out as `level`
+    /// and leaves its band-limiting as it is.
+    pub(crate) fn speaker_level_rests_on(&self, level: f32) -> bool {
+        self.dsp.speaker_level.rests_on(level)
+    }
+
+    /// The PC speaker's sample through its filter, if it is on. Without
+    /// it, the level the speaker rests at is taken out still, so a speaker
+    /// left high adds nothing to the mix.
     #[inline]
     pub(crate) fn speaker_filter(&mut self, sample: f32) -> f32 {
-        if self.settings.speaker_filter { self.dsp.speaker.process(sample) } else { sample }
+        if self.settings.speaker_filter {
+            self.dsp.speaker.process(sample)
+        } else {
+            self.dsp.speaker_dc.process(sample)
+        }
+    }
+
+    /// Whether a speaker sample of `sample` would give exactly 0 and leave
+    /// the speaker's filter as it is (see `speaker_filter`).
+    pub(crate) fn speaker_rests_on(&self, sample: f32) -> bool {
+        if self.settings.speaker_filter {
+            self.dsp.speaker.rests_on(sample)
+        } else {
+            self.dsp.speaker_dc.rests_on(sample)
+        }
     }
 
     /// The Sound Blaster's frame through its low-pass at `cutoff` Hz, of
@@ -485,6 +543,26 @@ impl Mixer {
         } else {
             frame == (0.0, 0.0)
         }
+    }
+
+    /// The FM synthesizer's frame through the capacitor on the card's
+    /// output (`OutputCoupling`), if `sb_coupling` is on. A note left
+    /// keyed off with no release, at a frequency of 0, holds the chip's
+    /// output at a level; the capacitor takes it out of the sound.
+    #[inline]
+    pub(crate) fn fm_coupling(&mut self, frame: (f32, f32)) -> (f32, f32) {
+        if self.settings.sb_coupling {
+            self.dsp.fm_coupling.process(frame)
+        } else {
+            frame
+        }
+    }
+
+    /// Whether silence from the FM synthesizer gives silence through
+    /// `fm_coupling` and changes nothing in it: what the capacitor let
+    /// through of the chip's last level has faded out.
+    pub(crate) fn fm_coupling_rests(&self) -> bool {
+        !self.settings.sb_coupling || self.dsp.fm_coupling.rests_on((0.0, 0.0))
     }
 
     /// The mix of a frame: the sources with the reverb and chorus of what

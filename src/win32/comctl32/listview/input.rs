@@ -147,10 +147,10 @@ pub(super) fn command(cpu: &mut Cpu, hwnd: u32, lv: &ListView, wp: u32, lp: u32)
     }
     match wp >> 16 {
         EN_UPDATE => Some(0),
-        EN_KILLFOCUS => run_ops(cpu, hwnd, cancel_edit_ops(lv), 0),
+        EN_KILLFOCUS => run_ops(cpu, hwnd, cancel_edit_ops(cpu, lv), 0),
         _ => {
             let ops = vec![
-                send_op(lv.notify, WM_COMMAND, Arg::V(wp), Arg::V(lp)),
+                send_op(cpu, lv.notify, WM_COMMAND, Arg::V(wp), Arg::V(lp)),
                 Op::Return(Arg::Last),
             ];
             run_ops(cpu, hwnd, ops, 0)
@@ -159,13 +159,13 @@ pub(super) fn command(cpu: &mut Cpu, hwnd: u32, lv: &ListView, wp: u32, lp: u32)
 }
 
 /// LISTVIEW_CancelEditLabel: the edit ends, keeping its text.
-fn cancel_edit_ops(lv: &ListView) -> Vec<Op> {
+fn cancel_edit_ops(cpu: &Cpu, lv: &ListView) -> Vec<Op> {
     if lv.edit == 0 {
         return Vec::new();
     }
     vec![
         step(T_END, &[1, lv.edit]),
-        send_op(lv.edit, WM_CLOSE, Arg::V(0), Arg::V(0)),
+        send_op(cpu, lv.edit, WM_CLOSE, Arg::V(0), Arg::V(0)),
     ]
 }
 
@@ -280,7 +280,7 @@ fn key_selection(cpu: &mut Cpu, hwnd: u32, lv: &ListView, i: i32, space: bool) -
         }
         ops.extend(layout::ensure_visible_ops(i, false));
     }
-    ops.push(user_op("UpdateWindow", &[Arg::V(hwnd)]));
+    ops.push(user_op(cpu, "UpdateWindow", &[Arg::V(hwnd)]));
     ops
 }
 
@@ -314,7 +314,7 @@ fn group_selection_ops(lv: &ListView, i: i32) -> Vec<Op> {
 /// WM_MOUSEHOVER (LISTVIEW_MouseHover): COMCTL32 4.7x asks the parent
 /// for WM_GETDLGCODE first.
 pub(super) fn mouse_hover(cpu: &mut Cpu, hwnd: u32, lv: &ListView, lp: u32) -> Option<u32> {
-    let mut ops = vec![send_op(lv.notify, WM_GETDLGCODE, Arg::V(0), Arg::V(0))];
+    let mut ops = vec![send_op(cpu, lv.notify, WM_GETDLGCODE, Arg::V(0), Arg::V(0))];
     ops.extend(notify_ops(cpu, hwnd, lv, NM_HOVER, &[]));
     ops.push(step(T_HOVERED, &[lp]));
     run_ops(cpu, hwnd, ops, 0)
@@ -337,7 +337,7 @@ fn hovered(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     if hit.item >= 0 && hit.item < lv.count() {
         ops.extend(items::set_selection_ops(&lv, hit.item));
     }
-    ops.push(user_op("SetFocus", &[Arg::V(c.hwnd)]));
+    ops.push(user_op(cpu, "SetFocus", &[Arg::V(c.hwnd)]));
     ops
 }
 
@@ -438,12 +438,12 @@ fn lbutton_down_step(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     } else {
         lv.lbutton_item = -1;
         if !lv.focus {
-            ops.push(user_op("SetFocus", &[Arg::V(c.hwnd)]));
+            ops.push(user_op(cpu, "SetFocus", &[Arg::V(c.hwnd)]));
         }
         if keys & (MK_CONTROL | MK_SHIFT) == 0 {
             ops.extend(items::deselect_all_ops(&lv, -1));
         }
-        ops.push(user_op("ReleaseCapture", &[]));
+        ops.push(user_op(cpu, "ReleaseCapture", &[]));
     }
     put(cpu, c.hwnd, lv);
     ops
@@ -473,7 +473,7 @@ fn lbutton_up_step(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     }
     lv.lbutton_item = -1;
     if !lv.focus {
-        ops.push(user_op("SetFocus", &[Arg::V(c.hwnd)]));
+        ops.push(user_op(cpu, "SetFocus", &[Arg::V(c.hwnd)]));
     }
     put(cpu, c.hwnd, lv);
     ops
@@ -517,7 +517,7 @@ pub(super) fn rbutton_down(
     let (x, y) = point(lp);
     let mut ops = notify_ops(cpu, hwnd, &lv, NM_RELEASEDCAPTURE, &[]);
     if !lv.focus {
-        ops.push(user_op("SetFocus", &[Arg::V(hwnd)]));
+        ops.push(user_op(cpu, "SetFocus", &[Arg::V(hwnd)]));
     }
     let hit = layout::hit_test(cpu, hwnd, &lv, x, y, false, true);
     let i = hit.item;
@@ -550,7 +550,7 @@ fn context(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     let (x, y) = point(c.word(0));
     write_words(cpu, c.scratch + S_AUX, &[x as u32, y as u32]);
     vec![
-        user_op("ClientToScreen", &[Arg::V(c.hwnd), Arg::S(S_AUX)]),
+        user_op(cpu, "ClientToScreen", &[Arg::V(c.hwnd), Arg::S(S_AUX)]),
         step(T_CONTEXT_MENU, &[]),
     ]
 }
@@ -558,7 +558,13 @@ fn context(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
 fn context_menu(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     let p = read_words(cpu, c.scratch + S_AUX, 2);
     let lp = (p[0] & 0xFFFF) | ((p[1] & 0xFFFF) << 16);
-    vec![send_op(c.hwnd, WM_CONTEXTMENU, Arg::V(c.hwnd), Arg::V(lp))]
+    vec![send_op(
+        cpu,
+        c.hwnd,
+        WM_CONTEXTMENU,
+        Arg::V(c.hwnd),
+        Arg::V(lp),
+    )]
 }
 
 /// LVM_EDITLABEL (LISTVIEW_EditLabelT): the edit control, or 0.
@@ -569,7 +575,7 @@ pub(super) fn edit_label(cpu: &mut Cpu, hwnd: u32, lv: &ListView, i: i32) -> Opt
     let mut ops = Vec::new();
     if lv.edit != 0 {
         // The edit loses the focus, which ends it.
-        ops.push(user_op("SetFocus", &[Arg::V(hwnd)]));
+        ops.push(user_op(cpu, "SetFocus", &[Arg::V(hwnd)]));
         ops.push(step(T_FORGET_EDIT, &[]));
     }
     ops.push(step(T_EDIT_BEGIN, &[i as u32]));
@@ -667,7 +673,10 @@ fn edit_create(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
         r.right as u32,
         r.bottom as u32,
     ];
-    vec![user_op("CreateWindowExA", &args), step(T_EDIT_MADE, &data)]
+    vec![
+        user_op(cpu, "CreateWindowExA", &args),
+        step(T_EDIT_MADE, &data),
+    ]
 }
 
 fn edit_made(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
@@ -686,7 +695,7 @@ fn edit_made(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     lv.edit = edit;
     put(cpu, c.hwnd, lv.clone());
     let font = lv.hfont(cpu);
-    let mut ops = vec![send_op(edit, WM_SETFONT, Arg::V(font), Arg::V(0))];
+    let mut ops = vec![send_op(cpu, edit, WM_SETFONT, Arg::V(font), Arg::V(0))];
     let mask = LVIF_PARAM | LVIF_STATE | LVIF_TEXT;
     let item = [
         mask,
@@ -715,7 +724,7 @@ fn edit_begun(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     if c.last != 0 {
         lv.edit = 0;
         put(cpu, c.hwnd, lv);
-        return vec![send_op(edit, WM_CLOSE, Arg::V(0), Arg::V(0))];
+        return vec![send_op(cpu, edit, WM_CLOSE, Arg::V(0), Arg::V(0))];
     }
     let r = Rect::new(
         c.word(3) as i32,
@@ -734,10 +743,10 @@ fn edit_begun(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
         Arg::V(0),
     ];
     vec![
-        user_op("MoveWindow", &args),
-        user_op("ShowWindow", &[Arg::V(edit), Arg::V(1)]),
-        user_op("SetFocus", &[Arg::V(edit)]),
-        send_op(edit, EM_SETSEL, Arg::V(0), Arg::V(0xFFFF_FFFF)),
+        user_op(cpu, "MoveWindow", &args),
+        user_op(cpu, "ShowWindow", &[Arg::V(edit), Arg::V(1)]),
+        user_op(cpu, "SetFocus", &[Arg::V(edit)]),
+        send_op(cpu, edit, EM_SETSEL, Arg::V(0), Arg::V(0xFFFF_FFFF)),
         Op::Return(Arg::V(edit)),
     ]
 }
@@ -749,7 +758,10 @@ fn end(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     put_text2(cpu, c.scratch, b"");
     if save != 0 {
         let args = [Arg::V(edit), Arg::S(S_TEXT2), Arg::V(TEXT_MAX)];
-        vec![user_op("GetWindowTextA", &args), step(T_END_TEXT, &[1])]
+        vec![
+            user_op(cpu, "GetWindowTextA", &args),
+            step(T_END_TEXT, &[1]),
+        ]
     } else {
         vec![step(T_END_TEXT, &[0])]
     }
@@ -803,7 +815,7 @@ fn end_got(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     let mut ops = notify_ops(cpu, c.hwnd, &lv, LVN_ENDLABELEDITW, &words);
     ops.push(step(T_END_DONE, &[item as u32, has as u32, same as u32]));
     // COMCTL32 4.7x paints the label before the edit control goes.
-    ops.push(user_op("UpdateWindow", &[Arg::V(c.hwnd)]));
+    ops.push(user_op(cpu, "UpdateWindow", &[Arg::V(c.hwnd)]));
     ops
 }
 
@@ -844,9 +856,10 @@ pub(super) fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if old == 0 {
         return defwnd::def_window_proc(cpu, args);
     }
-    let call_old = |old: u32| {
+    let call_old = |cpu: &Cpu, old: u32| {
         vec![
             user_op(
+                cpu,
                 "CallWindowProcA",
                 &[
                     Arg::V(old),
@@ -867,18 +880,22 @@ pub(super) fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             }
             lv.edit_proc = 0;
             put(cpu, lvh, lv);
-            run_ops(cpu, lvh, call_old(old), 0)
+            let ops = call_old(cpu, old);
+            run_ops(cpu, lvh, ops, 0)
         }
         WM_KEYDOWN if wp == VK_ESCAPE || wp == VK_RETURN => {
             let mut ops = Vec::new();
             if lv.edit != 0 {
                 ops.push(step(T_END, &[(wp == VK_RETURN) as u32, edit]));
             }
-            ops.push(send_op(edit, WM_CLOSE, Arg::V(0), Arg::V(0)));
+            ops.push(send_op(cpu, edit, WM_CLOSE, Arg::V(0), Arg::V(0)));
             ops.push(Op::Return(Arg::V(0)));
             run_ops(cpu, lvh, ops, 0)
         }
-        _ => run_ops(cpu, lvh, call_old(old), 0),
+        _ => {
+            let ops = call_old(cpu, old);
+            run_ops(cpu, lvh, ops, 0)
+        }
     }
 }
 

@@ -10,9 +10,9 @@ use super::{ZONES, Zone, ZoneGuard};
 pub const MEM_KINDS: usize = 3;
 
 /// Memory that isn't plain RAM: the video memory windows at A0000h-BFFFFh,
-/// the upper memory area at C0000h-FFFFFh (the ROMs, the EMS page frame and
-/// upper memory blocks), and devices above RAM (linear frame buffers, the
-/// 3D cards, MMIO).
+/// the ROMs at C0000h-C7FFFh and F0000h-FFFFFh (the upper memory between
+/// them is RAM, `bus::UPPER_RAM`), and devices above RAM (linear frame
+/// buffers, the 3D cards, MMIO).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemKind {
     Video = 0,
@@ -93,6 +93,9 @@ pub struct Counters {
     pub services: [[u64; 256]; SERVICE_KINDS],
     /// Calls of the built-in Windows's functions and traps, by id.
     pub win32: Box<[u64]>,
+    /// Calls of the Win16 system modules' functions from 16-bit code, by
+    /// id: their ids number them apart from the built-in DLLs'.
+    pub win16: Box<[u64]>,
     /// Hardware interrupts delivered, by IRQ line.
     pub irqs: [u64; 16],
     /// Exceptions the CPU raised, by vector.
@@ -116,6 +119,7 @@ impl Counters {
             hle: vec![0; 0x10000].into_boxed_slice(),
             services: [[0; 256]; SERVICE_KINDS],
             win32: vec![0; 0x10000].into_boxed_slice(),
+            win16: vec![0; 0x10000].into_boxed_slice(),
             irqs: [0; 16],
             exceptions: [0; 32],
             mem_reads: Default::default(),
@@ -171,6 +175,16 @@ impl Counters {
         let count = if write { &self.mem_writes[kind as usize] } else { &self.mem_reads[kind as usize] };
         count.set(count.get() + accesses);
         super::zone(kind.zone())
+    }
+
+    /// Reads and writes of a device's memory above RAM that translated
+    /// code made by itself (`dynrec`'s `card_state`), which `mem` didn't
+    /// see: counted as it counts them, in no zone of their own.
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    pub fn mem_direct(&self, reads: u64, writes: u64) {
+        let kind = MemKind::Device as usize;
+        self.mem_reads[kind].set(self.mem_reads[kind].get() + reads);
+        self.mem_writes[kind].set(self.mem_writes[kind].get() + writes);
     }
 
     /// The page of physical address `phys`, if RAM has it.

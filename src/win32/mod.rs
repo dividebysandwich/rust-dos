@@ -13,20 +13,24 @@
 //! ExitProcess goes back to real mode and ends the DOS process with
 //! INT 21h AH=4Ch, so the shell or the program that started it goes on.
 
-mod advapi32;
-mod boot;
+pub(crate) mod advapi32;
+pub(crate) mod boot;
 pub(crate) mod call;
-mod com;
+pub(crate) mod com;
 mod comctl32;
 mod comdlg32;
 mod convert;
 mod d3d8;
 mod dciman32;
 mod ddraw;
+pub use ddraw::is_lost_cache;
 mod dinput;
 pub mod dll_files;
+mod forwarders;
 mod dmusic;
+pub(crate) mod dosvm;
 mod dplayx;
+mod dpnet;
 mod dshow;
 mod dsound;
 pub mod gdi32;
@@ -51,18 +55,21 @@ pub(crate) mod object;
 #[cfg(test)]
 mod ordinals;
 mod ole32;
-mod oleaut32;
+pub(crate) mod oleaut32;
 mod oledlg;
 mod olepro32;
 mod opengl32;
 mod pace;
+mod pif;
 mod advpack;
 pub(crate) mod realmode;
-mod registry;
+pub(crate) mod registry;
+mod rpcrt4;
 mod screen;
 pub(crate) mod seh;
 mod shell32;
 pub mod snapshot;
+pub(crate) mod stub_tables;
 pub(crate) mod stubs;
 pub(crate) mod system;
 mod tapi32;
@@ -75,6 +82,7 @@ pub mod version;
 mod verdll;
 mod vmm;
 mod vfw;
+mod wing32;
 pub(crate) mod winmm;
 mod winspool;
 mod wnaspi32;
@@ -82,7 +90,9 @@ mod wow32;
 mod ws2_32;
 mod wsock32;
 
-pub use memory::{Kept, PageFileStatus, PagedRange, PagingCounts, page_file_status};
+pub use memory::{
+    Kept, PageFileStatus, PagedRange, PagingCounts, page_file_status, paging_counts,
+};
 pub use snapshot::snapshot;
 pub use stubs::function_name;
 
@@ -154,7 +164,8 @@ pub const TRAP: u8 = 0x3E;
 /// The ROM's part (offsets in segment F000): the start of a process, the
 /// return of real-mode code the system called (realmode.rs), the end of
 /// a process (INT 21h AH=4Ch), the Win16 tasks' real-mode callbacks
-/// (win16/dpmi.rs) and the IDT's 256 traps.
+/// (win16/dpmi.rs), DOS's EXEC of a DOS program a Windows program
+/// started (dosvm.rs) and the IDT's 256 traps.
 pub(crate) const ROM_SEG: u16 = 0xF000;
 const ROM_BASE: usize = 0xF0000;
 const START: u16 = 0x3800;
@@ -162,6 +173,7 @@ const REAL_RETURN: u16 = 0x3804;
 const EXIT: u16 = 0x3808;
 pub(crate) const CALLBACKS: u16 = 0x380C;
 pub(crate) const CALLBACK_SLOTS: usize = 32;
+const DOS_EXEC: u16 = 0x3890;
 const IDT_TRAPS: u16 = 0x3C00;
 
 /// The traps' ids: the built-in DLLs' functions below `FIRST_MISSING`
@@ -293,6 +305,13 @@ pub struct Process {
     /// The process that started it with CreateProcessA or WinExec, or 0
     /// for the one DOS started.
     pub(crate) parent: u32,
+    /// The system's heap in the shared arena (`Heap::create_shared`),
+    /// once a critical section needs it.
+    system_heap: heap::SystemHeap,
+    /// Its images of built-in DLLs made from an older table, which keep
+    /// its order, and which the addresses Rust works out for it follow. A
+    /// load works them out again (`stub_tables::mend`).
+    pub(crate) older_images: Vec<stub_tables::OlderImage>,
 }
 
 impl Process {
@@ -348,6 +367,11 @@ pub struct Win32 {
     /// of them started.
     pub depth: crate::config::DesktopDepth,
     desktop_depth: crate::config::DesktopDepth,
+    /// The desktop's own size (the `win32_desktop` setting), and the
+    /// size the running processes have, the setting's when the first of
+    /// them started.
+    pub desktop: crate::config::DesktopSize,
+    own_size: version::OwnSize,
     /// The system locale (the `win32_locale` setting), and the locale
     /// the running processes see, the setting's when the first of them
     /// started (nls.rs).
@@ -383,6 +407,10 @@ pub struct Win32 {
     /// What the page file did since the emulator started, for the
     /// debugger's status.
     pub(crate) paging: memory::PagingCounts,
+    /// The older images of built-in DLLs the state that was loaded had,
+    /// which a process started since gets too. A load works them out again
+    /// (`stub_tables::mend`).
+    pub(crate) older_images: Vec<stub_tables::SharedImage>,
     /// The kernel objects, which the processes' handles are of.
     pub(crate) objects: object::Objects,
     /// The DOS process the programs run in, and the stack its DOS stub
@@ -443,6 +471,8 @@ pub struct Win32 {
     /// The Win16 tasks' state (src/win16), whose process is one of
     /// `processes`.
     pub win16: crate::win16::State,
+    /// The serial ports Win32 programs have open (kernel32/comm.rs).
+    pub comm: Vec<kernel32::comm::Port>,
 
     /// COM's and the DirectX and multimedia DLLs' state, the system's,
     /// and how many GUIDs CoCreateGuid made.
@@ -478,6 +508,10 @@ pub struct Win32 {
     oleaut32: oleaut32::State,
     /// MSACM32's streams.
     msacm32: msacm32::State,
+    /// DPNET's DirectPlay 8 objects.
+    dpnet: dpnet::State,
+    /// The DOS program a Windows program started (dosvm.rs).
+    pub(crate) dosvm: crate::savestate::Since<{ dosvm::DOSVM_SAVED }, dosvm::State>,
 }
 
 impl Win32 {
@@ -489,6 +523,7 @@ impl Win32 {
             guest_replace: std::mem::take(&mut self.guest_replace),
             version: self.version,
             depth: self.depth,
+            desktop: self.desktop,
             locale: self.locale,
             dll_files: self.dll_files.take(),
             trace: trace::Trace::new(self.trace.level()),
@@ -636,6 +671,31 @@ pub(crate) fn process(cpu: &mut Cpu) -> &mut Process {
         .expect("a Win32 process")
 }
 
+/// The functions of the built-in DLL `name` in its table's order, which
+/// the places of their stubs follow; None for a DLL that isn't built in.
+/// The tests make images of older tables with it.
+#[doc(hidden)]
+pub fn builtin_functions(name: &str) -> Option<Vec<&'static str>> {
+    let dll = stubs::DLLS[stubs::find_dll(name)?];
+    Some(dll.apis.iter().map(|a| a.name).collect())
+}
+
+/// `len` bytes of the running process's memory at `lin`, whether its
+/// pages are in memory or in the page file; None where it has none. For
+/// the tests, which change what an older build would have left there.
+#[doc(hidden)]
+pub fn process_bytes(cpu: &Cpu, lin: u32, len: usize) -> Option<Vec<u8>> {
+    loader::peek(&cpu.bus, &running(cpu)?.memory, lin, len)
+}
+
+/// Write `data` to the running process's memory at `lin`, as
+/// `process_bytes` reads it.
+#[doc(hidden)]
+pub fn write_process_bytes(cpu: &mut Cpu, lin: u32, data: &[u8]) -> Option<()> {
+    let memory = running(cpu)?.memory.clone();
+    memory.write(&mut cpu.bus, lin, data)
+}
+
 /// The running process, if there is one, for what only reads it.
 pub(crate) fn running(cpu: &Cpu) -> Option<&Process> {
     cpu.bus.win32.processes.get(cpu.bus.win32.running)
@@ -664,6 +724,10 @@ pub fn install_rom(bus: &mut crate::bus::Bus) {
         .flat_map(|slot| trap(ID_CALLBACK | slot))
         .collect();
     bus.write_rom(at(CALLBACKS), &callbacks);
+    // INT 21h, then the return to the system.
+    let mut exec = vec![0xCD, 0x21];
+    exec.extend(trap(ID_REAL_RETURN));
+    bus.write_rom(at(DOS_EXEC), &exec);
     // INT 21h; and should DOS come back, again.
     bus.write_rom(at(EXIT), &[0xCD, 0x21, 0xEB, 0xFC]);
     let idt: Vec<u8> = (0..=255).flat_map(|v| trap(system::idt_id(v))).collect();
@@ -689,7 +753,7 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
     // Other Windows 3.1 programs start as Win16 tasks.
     let (path, line, win16) = if rust_dos_pe::is_pe(bytes) {
         (cpu.program_path(filename), None, false)
-    } else if launcher::is_ne(bytes) && !cpu.pe() {
+    } else if launcher::is_ne(bytes) && cpu.dos_mode() {
         let launcher = cpu.program_path(filename);
         match launcher::engine(cpu, &launcher, bytes) {
             Some((engine, arguments)) => {
@@ -704,9 +768,20 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
     } else {
         return false;
     };
-    // Under a virtual-8086 monitor (EMM386, Windows' 386 enhanced mode)
-    // the process can't take the processor (`accepts`): the stub runs.
-    if cpu.pe() {
+    // A DOS program the built-in Windows started can't start a Windows
+    // program yet: its stub runs.
+    if dosvm::running(&cpu.bus.win32) {
+        cpu.bus.log_string(&format!(
+            "[W32] {} is a Windows program, started by a DOS program the built-in Windows runs: its DOS stub runs",
+            filename
+        ));
+        return false;
+    }
+    // Under a virtual-8086 monitor of the guest's (EMM386, Windows' 386
+    // enhanced mode) the process can't take the processor (`accepts`):
+    // the stub runs. The built-in monitor gives it up as for the DPMI
+    // host.
+    if !cpu.dos_mode() {
         cpu.bus.log_string(&format!(
             "[W32] {} is a Win32 program, but DOS runs in virtual-8086 mode: its DOS stub runs",
             filename
@@ -735,10 +810,10 @@ pub fn accepts(cpu: &Cpu, phys_ip: usize, id: u16) -> bool {
             return false;
         }
         return match id {
-            ID_START => !cpu.pe() && win32.pending.is_some() && !win32.active(),
-            ID_REAL_RETURN => !cpu.pe() && realmode::in_call(cpu),
+            ID_START => cpu.dos_mode() && win32.pending.is_some() && !win32.active(),
+            ID_REAL_RETURN => cpu.dos_mode() && realmode::in_call(cpu),
             _ if id & 0xFF00 == ID_CALLBACK => {
-                !cpu.pe() && crate::win16::dpmi::has_callback(cpu, id as u8 as usize)
+                cpu.dos_mode() && crate::win16::dpmi::has_callback(cpu, id as u8 as usize)
             }
             _ => id & 0xFF00 == ID_IDT && cpu.pm() && cpu.cpl == 0 && win32.active(),
         };
@@ -795,6 +870,8 @@ fn start(cpu: &mut Cpu) {
     nls::start(win32);
     dll_files::sync(&mut cpu.bus);
     boot::session_starts(cpu);
+    // Windows sets the keyboard's typematic rate from its own settings.
+    user32::sysparams::program_keyboard(cpu);
     loop {
         let Some(program) = cpu.bus.win32.pending.take() else {
             return;
@@ -936,7 +1013,7 @@ pub(crate) fn create_process_from(
     let mut process = loaded.process;
     process.priority_class = 0x20;
     process.startup = startup;
-    let return_address = stubs::stub_address(0, kernel32::PROCESS_RETURN);
+    let return_address = stub_tables::fixed_address(0, kernel32::PROCESS_RETURN);
     let esp = loaded.stack_top - 4;
     process.memory.write_32(&mut cpu.bus, esp, return_address);
     cpu.bus.log_string(&format!(
@@ -1254,6 +1331,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     dshow::process_ended(cpu, process.id);
     shell32::process_ended(cpu, process.id);
     dplayx::process_ended(cpu, process.id);
+    dpnet::process_ended(cpu, process.id);
     user32::ddeml::process_ended(cpu, process.id);
     if process.id == cpu.bus.win32.win16.pid {
         crate::win16::dos::release(cpu);
@@ -1479,7 +1557,7 @@ pub fn audio_playing(win32: &Win32) -> bool {
 /// The sound device's samples for the host's frames `first` to `first +
 /// frames`, if it plays (dsound/device.rs).
 pub fn audio_render(
-    bus: &crate::bus::Bus,
+    bus: &mut crate::bus::Bus,
     first: u64,
     frames: usize,
 ) -> Option<Vec<(f32, f32)>> {
@@ -1513,6 +1591,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         // otherwise go on finding, before the objects their players'
         // events are go.
         dplayx::session_ended(cpu);
+        dpnet::session_ended(cpu);
         if let Some(pool) = cpu.bus.win32.pool.take() {
             pool.release(&mut cpu.bus);
         }
@@ -1547,9 +1626,13 @@ pub fn import_registry(cpu: &mut Cpu, text: &str) -> Result<(), String> {
     registry::import_file(cpu, text)
 }
 
-/// What the trap with id `id` runs, for the disassembler.
-pub fn trap_name(id: u16) -> String {
+/// What the trap with id `id` runs, for the disassembler and the
+/// profiler. `code16` says the trap is in 16-bit protected-mode code,
+/// where the stubs of the Win16 system modules are: their ids number
+/// the 16-bit functions apart from the built-in DLLs' (`service`).
+pub fn trap_name(id: u16, code16: bool) -> String {
     match id {
+        _ if code16 && id < FIRST_MISSING => crate::win16::trap_name(id),
         ID_START => "Win32 start".to_string(),
         ID_REAL_RETURN => "Win32 real-mode return".to_string(),
         _ if id & 0xFF00 == ID_CALLBACK => format!("Win16 real-mode callback {}", id as u8),
@@ -1612,8 +1695,10 @@ crate::state_fields!(Process {
     imagehlp,
     parent,
     vfw,
+    system_heap,
 } skip {
     file_apis_oem,
+    older_images,
 });
 crate::state_fields!(Win32 {
     pending,
@@ -1661,18 +1746,23 @@ crate::state_fields!(Win32 {
     boot,
     win16,
     desktop_depth,
+    own_size,
     os_locale,
     atoms,
     desktop_size,
     wnaspi32,
     oleaut32,
     msacm32,
+    comm,
+    dpnet,
+    dosvm,
 } skip {
     enabled,
     guest_dlls,
     guest_replace,
     version,
     depth,
+    desktop,
     locale,
     dll_files,
     trace,
@@ -1681,4 +1771,5 @@ crate::state_fields!(Win32 {
     system_clock,
     tlb_stale,
     paging,
+    older_images,
 });

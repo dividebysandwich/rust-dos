@@ -170,6 +170,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfb"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fef29b910ef2b9dbecc60168d1568d643c633b0518af970c17e83bd5f6e2c94f"
+dependencies = [
+ "fnv",
+ "uuid",
+ "web-time",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -954,11 +965,12 @@ dependencies = [
 
 [[package]]
 name = "rust-dos"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "ab_glyph_rasterizer",
  "base64",
  "bitflags 2.13.2",
+ "cfb",
  "chd",
  "chrono",
  "clap",
@@ -980,6 +992,7 @@ dependencies = [
  "oxideav-mp2",
  "oxideav-mpeg12video",
  "png",
+ "rust-dos-adlibgold",
  "rust-dos-audio-core",
  "rust-dos-dma",
  "rust-dos-gus",
@@ -1004,27 +1017,37 @@ dependencies = [
  "skrifa",
  "smoltcp",
  "tokio",
+ "uuid",
  "web-time",
  "windows-sys",
 ]
 
 [[package]]
+name = "rust-dos-adlibgold"
+version = "1.9.2"
+dependencies = [
+ "rust-dos-audio-core",
+ "rust-dos-dma",
+ "rust-dos-savestate",
+]
+
+[[package]]
 name = "rust-dos-audio-core"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-dma"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-gus"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -1035,14 +1058,14 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-hostdirs"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "rust-dos-installshield"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "flate2",
  "md-5",
@@ -1050,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-lpt-dac"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -1058,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mpu401"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-gus",
@@ -1069,7 +1092,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mt32"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "libloading",
  "rust-dos-hostdirs",
@@ -1077,11 +1100,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-ne"
-version = "1.9.0"
+version = "1.9.2"
 
 [[package]]
 name = "rust-dos-opl"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "nuked-opl3",
  "rust-dos-audio-core",
@@ -1090,11 +1113,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-pe"
-version = "1.9.0"
+version = "1.9.2"
 
 [[package]]
 name = "rust-dos-rc"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "rust-dos-savestate",
  "rust-dos-zip",
@@ -1102,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-runlock"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "libc",
  "rust-dos-hostdirs",
@@ -1113,11 +1136,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-savestate"
-version = "1.9.0"
+version = "1.9.2"
 
 [[package]]
 name = "rust-dos-sc55"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "dirs",
  "rust-dos-hostdirs",
@@ -1127,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-soundblaster"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -1140,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-tandy"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -1148,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-web"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "console_error_panic_hook",
  "rust-dos",
@@ -1159,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-zip"
-version = "1.9.0"
+version = "1.9.2"
 dependencies = [
  "flate2",
  "zip",
@@ -1449,6 +1472,16 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "uuid"
+version = "1.29.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c14b15dffa2f4bd712103e857140aa04a4f2ff6e955c77d7eb8e53ee02a3b64"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "vswhom"

@@ -221,6 +221,39 @@ fn edit_text(
     out
 }
 
+/// `settings` with `entries` (section, key, value) of a configuration file
+/// set over them, as a file with these lines after its own would have
+/// them: a game's CONFIG -SET. Relative paths are from `base_dir`. The
+/// warnings say what of the entries wasn't taken.
+pub fn with_entries(
+    settings: &Settings,
+    entries: &[(String, String, String)],
+    base_dir: &Path,
+    home: Option<&Path>,
+) -> (Settings, Vec<String>) {
+    let base = update_text("", &Settings::default(), settings, &[], home);
+    let own: String = entries
+        .iter()
+        .map(|(section, key, value)| format!("[{}]\n{}={}\n", section, key, value))
+        .collect();
+    let config = parse(&format!("{}\n{}", base, own), base_dir, home);
+    // What the entries brought: the settings' own were taken before. The
+    // line numbers are of no file.
+    let before = parse(&base, base_dir, home).warnings;
+    let warnings = config
+        .warnings
+        .iter()
+        .filter(|w| !before.contains(w))
+        .map(|w| {
+            w.split_once(": ")
+                .filter(|(at, _)| at.starts_with("line "))
+                .map_or(w.as_str(), |(_, rest)| rest)
+        })
+        .map(str::to_string)
+        .collect();
+    (Settings::from_config(&config), warnings)
+}
+
 /// `original` with what changed from `baseline` to `settings`, and the
 /// drive changes, written into it. Everything else in the file (comments,
 /// blank lines, `[autoexec]`, the settings that didn't change) stays as it

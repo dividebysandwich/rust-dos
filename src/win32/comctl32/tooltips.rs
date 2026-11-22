@@ -267,16 +267,16 @@ fn new_script(hwnd: u32) -> Script {
     s
 }
 
-fn send_op(to: u32, msg: u32, wp: Arg, lp: Arg) -> Op {
+fn send_op(cpu: &Cpu, to: u32, msg: u32, wp: Arg, lp: Arg) -> Op {
     Op::Call {
-        target: user32::address_of("SendMessageA"),
+        target: user32::address_of(cpu, "SendMessageA"),
         args: vec![Arg::V(to), Arg::V(msg), wp, lp],
     }
 }
 
-fn user_op(name: &str, args: &[u32]) -> Op {
+fn user_op(cpu: &Cpu, name: &str, args: &[u32]) -> Op {
     Op::Call {
-        target: user32::address_of(name),
+        target: user32::address_of(cpu, name),
         args: args.iter().map(|&a| Arg::V(a)).collect(),
     }
 }
@@ -452,13 +452,13 @@ fn tip_size(cpu: &mut Cpu, hwnd: u32, t: &Tooltip) -> (i32, i32) {
 
 /// The steps that tell the tool's window `code` (TTN_SHOW, TTN_POP),
 /// with an NMHDR at the offset `at`.
-fn tool_notify(hwnd: u32, tool: &Tool, code: u32, at: u32) -> Vec<Op> {
+fn tool_notify(cpu: &Cpu, hwnd: u32, tool: &Tool, code: u32, at: u32) -> Vec<Op> {
     vec![
         Op::Write {
             at,
             words: vec![hwnd, tool.id, code],
         },
-        send_op(tool.hwnd, WM_NOTIFY, Arg::V(tool.id), Arg::S(at)),
+        send_op(cpu, tool.hwnd, WM_NOTIFY, Arg::V(tool.id), Arg::S(at)),
     ]
 }
 
@@ -476,9 +476,9 @@ fn hide_ops(cpu: &mut Cpu, hwnd: u32, at: u32) -> Vec<Op> {
     user32::message::kill_timer(cpu, &[hwnd, ID_TIMERPOP]);
     t.current = -1;
     put(cpu, hwnd, t);
-    let mut ops = tool_notify(hwnd, &tool, TTN_POP, at);
+    let mut ops = tool_notify(cpu, hwnd, &tool, TTN_POP, at);
     let flags = SWP_NOZORDER | SWP_HIDEWINDOW | SWP_NOACTIVATE;
-    ops.push(user_op("SetWindowPos", &[hwnd, 0, 0, 0, 0, 0, flags]));
+    ops.push(user_op(cpu, "SetWindowPos", &[hwnd, 0, 0, 0, 0, 0, flags]));
     ops
 }
 
@@ -493,9 +493,9 @@ fn track_hide_ops(cpu: &mut Cpu, hwnd: u32) -> Vec<Op> {
     let Some(tool) = t.tools.get(t.track as usize).cloned() else {
         return Vec::new();
     };
-    let mut ops = tool_notify(hwnd, &tool, TTN_POP, S_HDR);
+    let mut ops = tool_notify(cpu, hwnd, &tool, TTN_POP, S_HDR);
     let flags = SWP_NOZORDER | SWP_HIDEWINDOW | SWP_NOACTIVATE;
-    ops.push(user_op("SetWindowPos", &[hwnd, 0, 0, 0, 0, 0, flags]));
+    ops.push(user_op(cpu, "SetWindowPos", &[hwnd, 0, 0, 0, 0, 0, flags]));
     ops
 }
 
@@ -539,7 +539,7 @@ fn show_fetched(cpu: &mut Cpu, hwnd: u32, n: i32, track: bool) -> Vec<Op> {
         t.current = n;
     }
     put(cpu, hwnd, t.clone());
-    let mut ops = tool_notify(hwnd, &tool, TTN_SHOW, S_HDR);
+    let mut ops = tool_notify(cpu, hwnd, &tool, TTN_SHOW, S_HDR);
     let (cx, cy) = tip_size(cpu, hwnd, &t);
     let mut r = Rect::default();
     if track {
@@ -590,6 +590,7 @@ fn show_fetched(cpu: &mut Cpu, hwnd: u32, n: i32, track: bool) -> Vec<Op> {
     }
     let flags = SWP_SHOWWINDOW | SWP_NOACTIVATE;
     ops.push(user_op(
+        cpu,
         "SetWindowPos",
         &[
             hwnd,
@@ -708,10 +709,10 @@ fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32, flags: u32) {
 
 /// WM_PAINT: BeginPaint, NM_CUSTOMDRAW's prepaint to the parent, the
 /// drawing, the postpaint if the parent asks for it, EndPaint.
-fn paint(hwnd: u32) -> Script {
+fn paint(cpu: &Cpu, hwnd: u32) -> Script {
     let mut s = new_script(hwnd);
-    let begin = user32::address_of("BeginPaint");
-    let end = user32::address_of("EndPaint");
+    let begin = user32::address_of(cpu, "BeginPaint");
+    let end = user32::address_of(cpu, "EndPaint");
     s.call(begin, &[Arg::V(hwnd), Arg::S(S_PS)])
         .then(T_PAINT, &[])
         .call(end, &[Arg::V(hwnd), Arg::S(S_PS)])
@@ -785,7 +786,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             words[26] = tool.lparam;
             vec![
                 Op::Write { at: S_DISP, words },
-                send_op(tool.hwnd, WM_NOTIFY, Arg::V(tool.id), Arg::S(S_DISP)),
+                send_op(cpu, tool.hwnd, WM_NOTIFY, Arg::V(tool.id), Arg::S(S_DISP)),
                 Op::Then {
                     id: T_DISP_GOT,
                     data: c.data.clone(),
@@ -809,7 +810,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                 user32::message::set_timer(cpu, &[hwnd, ID_TIMERPOP, t.autopop as u32, 0]);
                 user32::message::set_timer(cpu, &[hwnd, ID_TIMERLEAVE, t.reshow as u32, 0]);
             }
-            vec![user_op("UpdateWindow", &[hwnd])]
+            vec![user_op(cpu, "UpdateWindow", &[hwnd])]
         }
         T_COPY_TEXT => {
             // TTM_GETTEXTA: the text into the program's buffer.
@@ -851,7 +852,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             let parent = super::parent(cpu, hwnd);
             vec![
                 Op::Write { at: S_CD, words },
-                send_op(parent, WM_NOTIFY, Arg::V(id), Arg::S(S_CD)),
+                send_op(cpu, parent, WM_NOTIFY, Arg::V(id), Arg::S(S_CD)),
                 Op::Then {
                     id: T_PAINT_DRAW,
                     data: vec![hdc, parent, id],
@@ -868,7 +869,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                         at: S_CD + 12,
                         words: vec![CDDS_POSTPAINT],
                     },
-                    send_op(parent, WM_NOTIFY, Arg::V(id), Arg::S(S_CD)),
+                    send_op(cpu, parent, WM_NOTIFY, Arg::V(id), Arg::S(S_CD)),
                 ];
             }
             Vec::new()
@@ -929,7 +930,7 @@ fn add_tool_msg(cpu: &mut Cpu, hwnd: u32, mut t: Tooltip, ti: u32, wide: bool) -
         return Some(1);
     }
     let mut s = new_script(hwnd);
-    s.send(to, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY))
+    s.send(cpu, to, WM_NOTIFYFORMAT, Arg::V(hwnd), Arg::V(NF_QUERY))
         .then(T_FORMAT, &[hwnd, n])
         .ret(1);
     script::run(cpu, TOOLTIPS, s)
@@ -989,7 +990,7 @@ pub fn subclass_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             w.proc = sc.proc;
         }
     }
-    let f = user32::address_of("CallWindowProcA");
+    let f = user32::address_of(cpu, "CallWindowProcA");
     let args = [sc.proc, hwnd, msg, wp, lp].map(Arg::V);
     s.call(f, &args).ret_last();
     script::run(cpu, TOOLTIPS, s)
@@ -1053,7 +1054,8 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         put(cpu, hwnd, t);
         let flags = SWP_NOZORDER | SWP_HIDEWINDOW | SWP_NOACTIVATE;
         let mut s = new_script(hwnd);
-        s.user("SetWindowPos", &[hwnd, 0, 0, 0, 0, 0, flags]).ret(0);
+        s.user(cpu, "SetWindowPos", &[hwnd, 0, 0, 0, 0, 0, flags])
+            .ret(0);
         return script::run(cpu, TOOLTIPS, s);
     }
     let Some(mut t) = get(cpu, hwnd) else {
@@ -1369,7 +1371,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         TTM_UPDATE => {
             if t.current != -1 {
-                s.user("UpdateWindow", &[hwnd]);
+                s.user(cpu, "UpdateWindow", &[hwnd]);
             }
             0
         }
@@ -1423,7 +1425,7 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 draw(cpu, hwnd, wp, flags);
                 return Some(0);
             }
-            return script::run(cpu, TOOLTIPS, paint(hwnd));
+            return script::run(cpu, TOOLTIPS, paint(cpu, hwnd));
         }
         WM_SETFONT => {
             t.font = if wp != 0 { wp } else { gfx::default_font(cpu) };

@@ -56,7 +56,7 @@ pub(super) mod surface;
 pub mod voodoo;
 
 use super::com::{self, E_INVALIDARG, E_NOINTERFACE, Guid, IID_IUNKNOWN, S_OK};
-use super::stubs::{Api, Conv, Dll, Vtable};
+use super::stubs::{Api, Conv, Dll, Var, Vtable};
 use stamp::Stamped;
 use crate::cpu::Cpu;
 
@@ -67,10 +67,15 @@ pub static DLL: Dll = Dll {
     name: "DDRAW.DLL",
     base: 0xBFA0_0000,
     apis: APIS,
-    vars: &[],
+    vars: &[Var {
+        name: "IsLostCache",
+        ordinal: 0,
+        size: surface::IS_LOST_SLOTS * 4,
+    }],
     init: None,
     term: None,
     vtables: VTABLES,
+    resources: None,
 };
 
 const fn stdcall(
@@ -268,7 +273,16 @@ static APIS: &[Api] = &[
     method("Surface_GetPixelFormat", 2, surface::get_pixel_format),
     method("Surface_GetSurfaceDesc", 2, surface::get_surface_desc),
     method("Surface_Initialize", 3, surface::initialize),
-    method("Surface_IsLost", 1, surface::is_lost),
+    // x86 code that answers from a cache (`surface::IS_LOST`) and traps
+    // to the handler for an interface the cache hasn't; in a state saved
+    // when it was a trap, the stub still traps on every call.
+    Api {
+        name: "Surface_IsLost",
+        ordinal: 0,
+        args: 1,
+        conv: Conv::CodeVars(surface::IS_LOST, surface::IS_LOST_FIXUPS),
+        handler: surface::is_lost,
+    },
     method("Surface_Lock", 5, surface::lock),
     method("Surface_ReleaseDC", 2, surface::release_dc),
     method("Surface_Restore", 1, surface::restore),
@@ -1094,10 +1108,19 @@ pub struct State {
     /// before the object that put DirectDraw's there went: (process,
     /// window, the procedure DirectDraw's passes the messages on to).
     pub chained: Vec<(u32, u32, u32)>,
+    /// The reasons texture Load left a level as it was that are logged
+    /// so far, one bit each (`d3d::texture::Unloaded`).
+    pub load_logged: u32,
 }
 
 pub fn state(cpu: &mut Cpu) -> &mut State {
     &mut cpu.bus.win32.ddraw
+}
+
+/// Where IsLost's cache of answers is in a process's DDRAW
+/// (`surface::IS_LOST`): 1024 slots of an interface and its answer.
+pub fn is_lost_cache() -> u32 {
+    super::stubs::var_address(dll_index(), 0)
 }
 
 fn dll_index() -> usize {
@@ -1311,6 +1334,11 @@ pub fn destroy(cpu: &mut Cpu, id: u32) {
     for iface in &object.ifaces {
         com::free_interface(cpu, iface.address);
     }
+    if object.surface.is_some() && !object.ifaces.is_empty() {
+        // IsLost's caches may hold them: it caches only a surface's
+        // interfaces.
+        surface::forget_is_lost(cpu);
+    }
     if let Some(slot) = state(cpu).objects.get_mut(id as usize - 1) {
         *slot = None;
     }
@@ -1464,4 +1492,4 @@ crate::state_fields!(State {
     hal,
     hal_toadforce,
     chained
-} skip { hal_software });
+} skip { hal_software, load_logged });

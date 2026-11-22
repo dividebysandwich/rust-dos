@@ -23,9 +23,9 @@ const DF: u32 = 0x0400;
 /// registers in protected mode too (in real mode it always has them).
 /// With `fpu`, FPU instructions are translated, for `fast_fpu`'s arithmetic
 /// (`Cpu::fpu_fast`) if set. `i486`: the CPU is a 486 or later, which
-/// has BSWAP (a 386 faults on it). `p6`: the CPU is a P6, which has
-/// CMOVcc. `simd`: MMX and SSE instructions the CPU has (`simd::MMX`,
-/// `simd::SSE`) are translated.
+/// has BSWAP and XADD (a 386 faults on them). `p6`: the CPU is a P6,
+/// which has CMOVcc. `simd`: MMX and SSE instructions the CPU has
+/// (`simd::MMX`, `simd::SSE`) are translated.
 #[allow(clippy::too_many_arguments)]
 pub fn translate(
     instr: &Instruction,
@@ -82,6 +82,8 @@ pub fn translate(
         Movzx => movx(instr, false, &mut u),
         Movsx => movx(instr, true, &mut u),
         Xchg => xchg(instr, &mut u),
+        Xadd if i486 => xadd(instr, &mut u),
+        Xlatb => xlat(instr, &mut u),
         Bswap if i486 => bswap(instr, &mut u),
         Cbw => extend_acc(1, false, &mut u),
         Cwde => extend_acc(2, false, &mut u),
@@ -121,13 +123,15 @@ pub fn translate(
         Push => push(instr, stack32, &mut u),
         Pop => pop(instr, stack32, &mut u),
         Pusha | Pushad => pusha(instr, stack32, &mut u),
-        Popa | Popad => popa(instr, stack32, &mut u),
+        Popa | Popad => popa(instr, stack32, i486, &mut u),
         Pushf | Pushfd => pushf(instr, stack32, &mut u),
         Popf | Popfd if system && !real => popf(instr, stack32, &mut u),
         Bt => bit_op(instr, BitKind::Test, &mut u),
         Bts => bit_op(instr, BitKind::Set, &mut u),
         Btr => bit_op(instr, BitKind::Reset, &mut u),
         Btc => bit_op(instr, BitKind::Complement, &mut u),
+        Bsf => bit_scan(instr, true, &mut u),
+        Bsr => bit_scan(instr, false, &mut u),
         Jmp if instr.is_jmp_far() || instr.is_jmp_far_indirect() => real && far_jump(instr, next, stack32, false, &mut u),
         Call if (instr.is_call_far() || instr.is_call_far_indirect()) && real => far_jump(instr, next, stack32, true, &mut u),
         Call if instr.is_call_far() || instr.is_call_far_indirect() => system && far_call_pm(instr, next, stack32, &mut u),
@@ -408,6 +412,29 @@ fn movx(instr: &Instruction, signed: bool, u: &mut Vec<Uop>) -> bool {
     true
 }
 
+/// XLAT: AL = the byte at seg:(E)BX + AL. iced gives the operand as a
+/// memory reference with base (E)BX and index AL, which `Uop::Ea` adds
+/// zero-extended, and wraps to 16 bits with a 16-bit address size.
+fn xlat(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    if mem(instr, T1, 1, false, u).is_none() {
+        return false;
+    }
+    u.push(Uop::Load {
+        dst: T0,
+        m: T1,
+        size: 1,
+    });
+    u.push(Uop::Set {
+        r: Gpr {
+            index: 0,
+            high: false,
+            size: 1,
+        },
+        t: T0,
+    });
+    true
+}
+
 /// BSWAP of a dword register (the 16-bit form, which a 486 clears, runs
 /// through `transfer::bswap`).
 fn bswap(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
@@ -447,6 +474,58 @@ fn xchg(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     u.push(Uop::Get { t: T1, r: b });
     u.push(Uop::Set { r: a, t: T1 });
     u.push(Uop::Set { r: b, t: T0 });
+    true
+}
+
+/// XADD of a register or memory and a register, as `transfer::xadd`: the
+/// destination checked for writing and read, the register given the
+/// destination's value, then the sum, with ADD's flags, written to the
+/// destination. (With one register for both, the sum is what stays.) A
+/// LOCK prefix changes nothing on one processor.
+fn xadd(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let Some(src) = gpr(instr.op1_register()) else {
+        return false;
+    };
+    let size = src.size;
+    // The destination's value into T0; a register destination, or None
+    // for memory at T2.
+    let dst = match instr.op0_kind() {
+        OpKind::Register => {
+            let Some(dst) = gpr(instr.op0_register()).filter(|r| r.size == size) else {
+                return false;
+            };
+            u.push(Uop::Get { t: T0, r: dst });
+            Some(dst)
+        }
+        OpKind::Memory => {
+            if mem(instr, T2, size, true, u).is_none() {
+                return false;
+            }
+            u.push(Uop::Load {
+                dst: T0,
+                m: T2,
+                size,
+            });
+            None
+        }
+        _ => return false,
+    };
+    u.push(Uop::Get { t: T1, r: src });
+    u.push(Uop::Set { r: src, t: T0 });
+    u.push(Uop::Alu {
+        op: AluOp::Add,
+        size,
+        a: T0,
+        b: Src::T(T1),
+    });
+    u.push(match dst {
+        Some(r) => Uop::Set { r, t: T0 },
+        None => Uop::Store {
+            m: T2,
+            src: T0,
+            size,
+        },
+    });
     true
 }
 
@@ -916,10 +995,12 @@ fn pusha(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
 /// POPA and POPAD, as `transfer::popa`: the registers loaded one by one
 /// from EDI's slot up, skipping the stack pointer's (which is still read),
 /// then the stack pointer moved. POPAD on a 16-bit stack loads the upper
-/// half of ESP on a 386 only: its handler runs it.
-fn popa(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+/// half of ESP on a 386 only: its handler runs it there. On a 486 and
+/// later it moves SP alone, as here (DOS/4GW's 16-bit code that calls
+/// real mode runs one for each call).
+fn popa(instr: &Instruction, stack32: bool, i486: bool, u: &mut Vec<Uop>) -> bool {
     let size = if instr.code() == Code::Popad { 4 } else { 2 };
-    if size == 4 && !stack32 {
+    if size == 4 && !stack32 && !i486 {
         return false;
     }
     let sp = sp(stack32);
@@ -991,8 +1072,8 @@ fn near_rm(instr: &Instruction, size: u8, u: &mut Vec<Uop>) -> bool {
     true
 }
 
-/// LODS without REP, going up (DF clear): the element into AL, AX or EAX,
-/// then SI or ESI moved past it.
+/// LODS without REP: the element into AL, AX or EAX, then SI or ESI moved
+/// past it, up or down as DF says.
 fn lods(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     let size = match instr.code() {
         Code::Lodsb_AL_m8 => 1,
@@ -1005,13 +1086,16 @@ fn lods(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     }
     let a32 = (0..instr.op_count()).any(|i| instr.op_kind(i) == OpKind::MemorySegESI);
     let (si, width) = if a32 { (Gpr::dword(6), 4) } else { (Gpr::word(6), 2) };
-    u.push(Uop::Forward);
     u.push(Uop::Get { t: T2, r: si });
     u.push(Uop::MemRef { t: T2, seg: mem_seg(instr), size, write: false, slot: 0 });
     u.push(Uop::Load { dst: T0, m: T2, size });
     u.push(Uop::Set { r: Gpr { index: 0, high: false, size }, t: T0 });
     u.push(Uop::Get { t: T2, r: si });
-    u.push(Uop::AddConst { t: T2, v: size as u32, size: width });
+    u.push(Uop::AddDir {
+        t: T2,
+        step: size,
+        size: width,
+    });
     u.push(Uop::Set { r: si, t: T2 });
     true
 }
@@ -1085,9 +1169,11 @@ fn leave(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
 /// `instructions::string`).
 const REP_INLINE: u32 = crate::instructions::string::REP_ONE_INSTRUCTION;
 
-/// MOVS or STOS, with or without REP, going up (DF clear), an iteration as
-/// the handler does it: the source's and destination's checks, the
-/// element moved, then the indexes and the count.
+/// MOVS or STOS, with or without REP, an iteration as the handler does it:
+/// the source's and destination's checks, the element moved, then the
+/// indexes, up or down as DF says, and the count. A fault in the checks
+/// leaves the registers as they were before the iteration, where the
+/// handler goes on when the instruction runs again.
 fn string(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     let (size, stos) = match instr.code() {
         Code::Movsb_m8_m8 => (1, false),
@@ -1105,8 +1191,6 @@ fn string(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     let rep = instr.has_rep_prefix() || instr.has_repne_prefix();
     if rep {
         u.push(Uop::RepStart { t: T0, count: reg(ECX), max: REP_INLINE });
-    } else {
-        u.push(Uop::Forward);
     }
     u.push(Uop::Get { t: T1, r: reg(EDI) });
     if stos {
@@ -1121,7 +1205,11 @@ fn string(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     u.push(Uop::Store { m: T1, src: T0, size });
     let step = |i: u8, u: &mut Vec<Uop>| {
         u.push(Uop::Get { t: T2, r: reg(i) });
-        u.push(Uop::AddConst { t: T2, v: size as u32, size: width });
+        u.push(Uop::AddDir {
+            t: T2,
+            step: size,
+            size: width,
+        });
         u.push(Uop::Set { r: reg(i), t: T2 });
     };
     if !stos {
@@ -1315,9 +1403,9 @@ fn pushf(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     true
 }
 
-/// POPF or POPFD in protected mode, as `transfer::popf` at CPL 0 (the
-/// handler's elsewhere, see `Uop::LoadFlags`): the value off the stack
-/// (its access checked), the flags, then the stack pointer.
+/// POPF or POPFD in protected or virtual-8086 mode, as `transfer::popf`
+/// (see `Uop::LoadFlags`): the value off the stack (its access checked),
+/// the flags, then the stack pointer.
 fn popf(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     let size = match instr.stack_pointer_increment() {
         2 => 2,
@@ -1332,18 +1420,18 @@ fn popf(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     true
 }
 
-/// BT, BTS, BTR or BTC of a register, or of memory with an immediate bit
-/// offset, as `logic::bit_test`: the offset first, then the operand's
-/// access checked (for writing but for BT), read, and written back. (With
-/// a register offset, a memory operand is found from the offset too: its
-/// handler runs it.)
+/// BT, BTS, BTR or BTC of a register or of memory, as `logic::bit_test`:
+/// the offset first, then the operand's access checked (for writing but
+/// for BT), read, and written back. With a register offset, the memory
+/// operand is the word or dword the offset picks, which the access check
+/// is for, so a fault reports that address.
 fn bit_op(instr: &Instruction, op: BitKind, u: &mut Vec<Uop>) -> bool {
     let size = match instr.op0_kind() {
         OpKind::Register => match gpr(instr.op0_register()) {
             Some(r) if r.size > 1 => r.size,
             _ => return false,
         },
-        OpKind::Memory if instr.op1_kind() == OpKind::Immediate8 => instr.memory_size().size() as u8,
+        OpKind::Memory => instr.memory_size().size() as u8,
         _ => return false,
     };
     if size != 2 && size != 4 {
@@ -1366,7 +1454,41 @@ fn bit_op(instr: &Instruction, op: BitKind, u: &mut Vec<Uop>) -> bool {
             u.push(Uop::Set { r, t: T0 });
         }
     } else {
-        if mem(instr, T2, size, op != BitKind::Test, u).is_none() {
+        let write = op != BitKind::Test;
+        if let Src::T(b) = bit {
+            // A register's offset is signed, and picks the word or dword
+            // it is in, before or after the operand's (`logic::bit_test`).
+            let Some(seg) = ea(instr, T2, u) else {
+                return false;
+            };
+            u.push(Uop::Copy { dst: T0, src: b });
+            if size == 2 {
+                u.push(Uop::Extend {
+                    t: T0,
+                    from: 2,
+                    signed: true,
+                });
+            }
+            let shift = size.trailing_zeros() as u8;
+            u.push(Uop::SarConst {
+                t: T0,
+                count: shift + 3,
+            });
+            let width = addr_size(instr);
+            u.push(Uop::AddShifted {
+                t: T2,
+                src: T0,
+                shift,
+                size: width,
+            });
+            u.push(Uop::MemRef {
+                t: T2,
+                seg,
+                size,
+                write,
+                slot: 0,
+            });
+        } else if mem(instr, T2, size, write, u).is_none() {
             return false;
         }
         u.push(Uop::Load { dst: T0, m: T2, size });
@@ -1375,6 +1497,41 @@ fn bit_op(instr: &Instruction, op: BitKind, u: &mut Vec<Uop>) -> bool {
             u.push(Uop::Store { m: T2, src: T0, size });
         }
     }
+    true
+}
+
+/// BSF (`forward`) or BSR of a register or memory into a register, as
+/// `logic::bit_scan`.
+fn bit_scan(instr: &Instruction, forward: bool, u: &mut Vec<Uop>) -> bool {
+    let Some(dst) = gpr(instr.op0_register()).filter(|r| r.size > 1) else {
+        return false;
+    };
+    match instr.op1_kind() {
+        OpKind::Register => {
+            let Some(src) = gpr(instr.op1_register()).filter(|r| r.size == dst.size) else {
+                return false;
+            };
+            u.push(Uop::Get { t: T1, r: src });
+        }
+        OpKind::Memory => {
+            if mem(instr, T2, dst.size, false, u).is_none() {
+                return false;
+            }
+            u.push(Uop::Load {
+                dst: T1,
+                m: T2,
+                size: dst.size,
+            });
+        }
+        _ => return false,
+    }
+    u.push(Uop::Get { t: T0, r: dst });
+    u.push(Uop::BitScan {
+        forward,
+        dst: T0,
+        src: T1,
+    });
+    u.push(Uop::Set { r: dst, t: T0 });
     true
 }
 
@@ -1561,8 +1718,15 @@ fn far_ret_pm(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
 /// ALU operations and the three-operand IMUL with an immediate (Riverworld
 /// pokes the factors of its transforms into those), and where the watched
 /// bytes take in more than the immediate. An MMX shift by a constant
-/// goes by the count it reads instead (`live_shift`).
+/// goes by the count it reads instead (`live_shift`), and an instruction
+/// whose watched bytes are all in its displacement by the displacement it
+/// reads (`live_displacement`).
 pub fn live_immediate(instr: &Instruction, phys: u32, watched: &[usize], u: &mut Vec<Uop>) -> bool {
+    if let Some((start, size)) = displacement(instr)
+        && watched.iter().all(|&w| (start..start + size).contains(&w))
+    {
+        return live_displacement(instr, phys, start, size, u);
+    }
     if u.iter().any(shift_imm) {
         return live_shift(instr, phys, watched, u);
     }
@@ -1651,6 +1815,134 @@ pub fn live_immediate(instr: &Instruction, phys: u32, watched: &[usize], u: &mut
         signed: false,
     });
     u.splice(at, [load].into_iter().chain(cut));
+    true
+}
+
+/// Where the displacement of `instr`'s memory operand is in its bytes: its
+/// offset and size. None for an instruction without one. The displacement
+/// comes after the ModRM and SIB bytes and before the immediates, which
+/// end the instruction.
+fn displacement(instr: &Instruction) -> Option<(usize, usize)> {
+    let size = instr.memory_displ_size() as usize;
+    if size == 0 || !(0..instr.op_count()).any(|k| instr.op_kind(k) == OpKind::Memory) {
+        return None;
+    }
+    let immediates: usize = (0..instr.op_count())
+        .map(|k| match instr.op_kind(k) {
+            OpKind::Immediate8
+            | OpKind::Immediate8_2nd
+            | OpKind::Immediate8to16
+            | OpKind::Immediate8to32
+            | OpKind::Immediate8to64 => 1,
+            OpKind::Immediate16 => 2,
+            OpKind::Immediate32 | OpKind::Immediate32to64 => 4,
+            OpKind::Immediate64 => 8,
+            _ => 0,
+        })
+        .sum();
+    let start = instr.len().checked_sub(immediates + size)?;
+    Some((start, size))
+}
+
+/// `live_immediate` for an instruction whose watched bytes, `size` of
+/// them from offset `start`, are its displacement: the Build engine
+/// (Witchaven) pokes the addresses of each column's palette and texture
+/// into the `MOV r8, [EAX+disp32]` of its drawing loops before running
+/// them, as Unreal's Fire.dll does into its loads.
+/// The effective address is computed without the displacement, and the
+/// displacement read from RAM is added to it, wrapped as the address is.
+/// The displacement goes through a temporary that is free from the
+/// address on: one the instruction's operations haven't used before it
+/// and next write rather than read (the ALU operations with a memory
+/// operand use all three, but load the register's only after the
+/// address). False, with nothing changed, where the operations use a
+/// form this doesn't follow, or no temporary is free, or the instruction
+/// runs on into the next page, whose physical address `phys` doesn't give.
+fn live_displacement(
+    instr: &Instruction,
+    phys: u32,
+    start: usize,
+    size: usize,
+    u: &mut Vec<Uop>,
+) -> bool {
+    if (phys & 0xFFF) as usize + instr.len() > 0x1000 {
+        return false;
+    }
+    // The temporaries each operation reads and writes, as masks.
+    let mut touched = Vec::with_capacity(u.len());
+    let mut site = None;
+    for (k, uop) in u.iter().enumerate() {
+        let bit = |t: &T| 1u8 << t.0;
+        let (reads, writes) = match uop {
+            Uop::Get { t, .. } | Uop::Const { t, .. } => (0, bit(t)),
+            Uop::Set { t, .. } => (bit(t), 0),
+            Uop::MemRef { t, .. }
+            | Uop::Extend { t, .. }
+            | Uop::AddConst { t, .. }
+            | Uop::Unary { t, .. }
+            | Uop::Shift { t, .. }
+            | Uop::Alu {
+                a: t,
+                b: Src::Imm(_),
+                ..
+            }
+            | Uop::Imul {
+                a: t,
+                b: Src::Imm(_),
+                ..
+            } => (bit(t), bit(t)),
+            Uop::Alu {
+                a, b: Src::T(b), ..
+            }
+            | Uop::Imul {
+                a, b: Src::T(b), ..
+            } => (bit(a) | bit(b), bit(a)),
+            Uop::Ea { t, .. } => {
+                if site.replace(k).is_some() {
+                    return false;
+                }
+                (0, bit(t))
+            }
+            Uop::Load { dst, m, .. } => (bit(m), bit(dst)),
+            Uop::Store { m, src, .. } => (bit(m) | bit(src), 0),
+            Uop::Copy { dst, src } => (bit(src), bit(dst)),
+            _ => return false,
+        };
+        touched.push((reads, writes));
+    }
+    let Some(site) = site else { return false };
+    let free = [T0, T1, T2].into_iter().find(|t| {
+        let bit = 1u8 << t.0;
+        let before = touched[..=site].iter().any(|&(r, w)| (r | w) & bit != 0);
+        let next = touched[site + 1..]
+            .iter()
+            .find(|&&(r, w)| (r | w) & bit != 0);
+        !before && next.is_none_or(|&(r, _)| r & bit == 0)
+    });
+    let Some(free) = free else { return false };
+    let Uop::Ea {
+        t,
+        a32,
+        ref mut disp,
+        ..
+    } = u[site]
+    else {
+        unreachable!()
+    };
+    *disp = 0;
+    let load = Uop::LoadCode {
+        t: free,
+        phys: phys + start as u32,
+        size: size as u8,
+        signed: size == 1,
+    };
+    let add = Uop::AddShifted {
+        t,
+        src: free,
+        shift: 0,
+        size: if a32 { 4 } else { 2 },
+    };
+    u.splice(site + 1..site + 1, [load, add]);
     true
 }
 

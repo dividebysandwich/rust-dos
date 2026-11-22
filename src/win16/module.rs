@@ -28,6 +28,7 @@ use super::{Module16, Segment16, builtin, global, ldt};
 use crate::cpu::Cpu;
 use crate::dpmi::Context;
 use crate::win32::memory::{PAGE, SHARED, SYSTEM, USER};
+use crate::win32::registry::{self, Open};
 use rust_dos_ne as ne;
 
 /// A module's segment's selector, and the entry points' addresses: a
@@ -60,8 +61,9 @@ impl From<LoadError> for String {
 }
 
 /// Load the module `name` (a module name, or a file's name or path) for
-/// the module in the directory `dir`: one loaded already, its count
-/// raised, a system module, or the file found where Windows 3.1 looks.
+/// a task whose executable is in the directory `dir` (`find_file`): one
+/// loaded already, its count raised, a system module, or the file found
+/// where Windows looks.
 /// Its place in `State::modules`, and the libraries loaded with it whose
 /// entry points are yet to run, in the order they are to run in.
 pub fn load(
@@ -90,14 +92,22 @@ pub fn load(
                 .next()
                 .is_some_and(|f| f.eq_ignore_ascii_case(file_name))
     };
-    if !has_path
-        && let Some(i) = cpu
-            .bus
-            .win32
-            .win16
-            .modules
-            .iter()
-            .position(|m| m.name == module_name || by_file(m))
+    // A loaded module is found by the name of the file asked for, with
+    // or without a path, as KERNEL finds it (Wine's
+    // NE_GetModuleByFilename): the base name of a loaded module's file, or
+    // the base name without its extension as a module name. The name
+    // inside the file asked for is never compared, so another file whose
+    // module has a loaded module's name loads as a module of its own.
+    // Sierra's setup copies itself to _SETUP.EXE and its resources to
+    // SETUPL.DLL, whose modules are all named SETUP, and runs the copy
+    // while it waits for it to end.
+    if let Some(i) = cpu
+        .bus
+        .win32
+        .win16
+        .modules
+        .iter()
+        .position(|m| m.name == module_name || by_file(m))
     {
         cpu.bus.win32.win16.modules[i].refs += 1;
         return Ok(i);
@@ -109,7 +119,7 @@ pub fn load(
             crate::win32::loader::SYSTEM_DIR,
             builtin::MODULES[index].file
         );
-        return load_file(cpu, image, &path, Some(index as u16), inits);
+        return load_file(cpu, image, &path, Some(index as u16), dir, inits);
     }
     let Some((path, file)) = find_file(cpu, name, dir) else {
         return Err(LoadError::new(
@@ -117,27 +127,62 @@ pub fn load(
             format!("{} can't be found.", file_name),
         ));
     };
-    // A module of that name may be loaded already from another path.
-    if let Ok(parsed) = ne::Module::parse(&file) {
-        let loaded_name = parsed.name().to_ascii_uppercase();
-        if let Some(i) = cpu
-            .bus
-            .win32
-            .win16
-            .modules
-            .iter()
-            .position(|m| m.name == loaded_name)
-        {
-            cpu.bus.win32.win16.modules[i].refs += 1;
-            return Ok(i);
-        }
-    }
-    load_file(cpu, file, &path, None, inits)
+    let loaded = load_file(cpu, file, &path, None, dir, inits)?;
+    remember_known(cpu, loaded);
+    Ok(loaded)
 }
 
-/// The file `name` and its path: as it is if it has a directory, else in
-/// the current directory, `dir`, Windows' directories and the PATH, with
-/// ".DLL" added to a name without an extension.
+/// Where Windows 95 and 98 keep the 16-bit DLLs they look for in the
+/// system directory first: one value for each, named after its file
+/// ("COMMCTRL.DLL"). The data can be anything; Windows writes the file's
+/// name (Microsoft's articles Q141969 and Q149430).
+const KNOWN16DLLS: &str = "System\\CurrentControlSet\\Control\\SessionManager\\Known16DLLs";
+
+/// Whether the file `name` is one of Known16DLLs: whether the key has a
+/// value of that name, whatever its type and data.
+fn is_known(cpu: &mut Cpu, name: &str) -> bool {
+    registry::has_value(cpu, registry::HKEY_LOCAL_MACHINE, KNOWN16DLLS, name)
+}
+
+/// A DLL that was loaded from the system directory becomes one of
+/// Known16DLLs, as Windows 95 makes it (Q141969, Q149430): from then on
+/// it is looked for there first, whatever directory a program has a
+/// copy of it in, and the value stays when the file is moved away.
+fn remember_known(cpu: &mut Cpu, index: usize) {
+    let m = &cpu.bus.win32.win16.modules[index];
+    if m.flags & ne::LIBMODULE == 0 {
+        return;
+    }
+    let dir = crate::win32::loader::directory_of(&m.path);
+    if !dir.eq_ignore_ascii_case(crate::win32::loader::SYSTEM_DIR) {
+        return;
+    }
+    let file = file_name_of(&m.path).to_ascii_uppercase();
+    if is_known(cpu, &file) {
+        return;
+    }
+    let reg = registry::get(cpu);
+    let Open::Key(root) = reg.open(registry::HKEY_LOCAL_MACHINE, 0) else {
+        return;
+    };
+    let (key, _) = reg.create(root, KNOWN16DLLS);
+    let mut data = file.clone().into_bytes();
+    data.push(0);
+    reg.set_value(key, &file, registry::REG_SZ, data);
+}
+
+fn file_name_of(path: &str) -> &str {
+    path.rsplit(['\\', '/', ':']).next().unwrap_or(path)
+}
+
+/// The file `name` and its path: as it is if it has a directory, else
+/// where Windows 3.1's LoadLibrary and LoadModule look for it, with
+/// ".DLL" added to a name without an extension. Windows 3.1's order is:
+/// the current directory, the Windows directory, the system directory,
+/// the directory of the current task's executable (`dir`), then the
+/// directories of PATH. For a file of Known16DLLs, Windows 95 and 98
+/// look in the system directory, the Windows directory, the current
+/// directory, the task's directory and PATH (Q141969).
 fn find_file(cpu: &mut Cpu, name: &str, dir: &str) -> Option<(String, Vec<u8>)> {
     let name = if name.contains('.') {
         name.to_string()
@@ -148,13 +193,17 @@ fn find_file(cpu: &mut Cpu, name: &str, dir: &str) -> Option<(String, Vec<u8>)> 
     if name.contains(['\\', '/', ':']) {
         candidates.push(name.clone());
     } else {
-        let cwd = crate::win32::kernel32::current_directory(cpu, cpu.bus.disk.get_current_drive());
-        for d in [
-            cwd.as_str(),
-            dir,
+        let (windows, system) = (
             crate::win32::loader::WINDOWS_DIR,
             crate::win32::loader::SYSTEM_DIR,
-        ] {
+        );
+        let cwd = crate::win32::kernel32::current_directory(cpu, cpu.bus.disk.get_current_drive());
+        let order = if is_known(cpu, &name) {
+            [system, windows, cwd.as_str(), dir]
+        } else {
+            [cwd.as_str(), windows, system, dir]
+        };
+        for d in order {
             if !d.is_empty() {
                 candidates.push(join(d, &name));
             }
@@ -188,12 +237,16 @@ fn join(dir: &str, file: &str) -> String {
 }
 
 /// Load the NE file `file` from `path` (a system module's image, for
-/// `builtin`).
+/// `builtin`), for a task whose executable is in the directory `dir`.
+/// The modules it imports from are looked for as `find_file` does, with
+/// `dir` as the task's directory; a program's own imports with its own
+/// directory, as it is the task they are loaded for.
 pub fn load_file(
     cpu: &mut Cpu,
     file: Vec<u8>,
     path: &str,
     builtin: Option<u16>,
+    dir: &str,
     inits: &mut Vec<usize>,
 ) -> Result<usize, LoadError> {
     let file_name = path
@@ -312,10 +365,15 @@ pub fn load_file(
         expected_version: parsed.expected_version,
         loaded: Vec::new(),
         unbooted: self_loading,
+        older: None,
     });
 
     // The modules it imports from.
-    let dir = crate::win32::loader::directory_of(path);
+    let dir = if parsed.is_dll() {
+        dir.to_string()
+    } else {
+        crate::win32::loader::directory_of(path)
+    };
     let mut deps = Vec::new();
     for dep in &parsed.module_refs {
         match load(cpu, dep, &dir, inits) {
@@ -443,10 +501,21 @@ pub fn entry_point(cpu: &Cpu, module: u16, ordinal: u16) -> u32 {
         };
         return match apis[i].run {
             builtin::Run::Value(f) => (CONSTANT_SEL as u32) << 16 | f(cpu) as u32,
-            _ => {
-                let sel = m.segments.first().map_or(0, |s| s.selector);
-                ((sel as u32) << 16) | (i as u32 * builtin::STUB)
+            builtin::Run::Data(_) => {
+                let sel = m.segments.get(1).map_or(0, |s| s.selector);
+                let offset = builtin::data_offset(builtin::MODULES[b as usize], i);
+                ((sel as u32) << 16) | offset as u32
             }
+            _ => match builtin::stub_offset(m, i) {
+                Some(offset) => {
+                    let sel = m.segments.first().map_or(0, |s| s.selector);
+                    ((sel as u32) << 16) | offset as u32
+                }
+                // A function the module's code segment, from an older
+                // table, lacks: the module didn't export it, and its
+                // program finds the function missing.
+                None => 0,
+            },
         };
     }
     let parsed = match parsed_of(cpu, m) {
@@ -763,6 +832,9 @@ fn unload(cpu: &mut Cpu, index: usize) {
     }
     global::free_owned(cpu, m.handle);
     global::free(cpu, m.handle);
+    if m.builtin.is_some() && m.name == "COMPOBJ" {
+        super::ole2::unloaded(cpu);
+    }
     if m.resources32 != 0 {
         let pid = cpu.bus.win32.win16.pid;
         super::with_win16(cpu, pid, |p, bus| {
@@ -825,19 +897,6 @@ pub fn new_instance(cpu: &mut Cpu, index: usize) -> u16 {
         super::poke(cpu, a.base, &bytes);
     }
     handle
-}
-
-/// The selector of the code segment of the loaded system module
-/// `builtin`.
-pub fn builtin_selector(cpu: &Cpu, builtin: usize) -> Option<u16> {
-    cpu.bus
-        .win32
-        .win16
-        .modules
-        .iter()
-        .find(|m| m.builtin == Some(builtin as u16))
-        .and_then(|m| m.segments.first())
-        .map(|s| s.selector)
 }
 
 // The module database.
@@ -933,7 +992,7 @@ fn write_tables(cpu: &mut Cpu, db: u16, parsed: &ne::Module, segments: &[Segment
 /// The selector of segment `n` (from 1) of the module `m`, if it has a
 /// block. A self-loading module's loader keeps them in the module
 /// database while it runs.
-fn segment_selector(cpu: &Cpu, m: &Module16, n: u8) -> Option<u16> {
+pub(super) fn segment_selector(cpu: &Cpu, m: &Module16, n: u8) -> Option<u16> {
     let i = (n as usize).checked_sub(1)?;
     let sel = if m.unbooted && i < m.segments.len() {
         global::handle_to_sel(db_segment(cpu, m.handle, n as u16).1)

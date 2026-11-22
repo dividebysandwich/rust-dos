@@ -11,6 +11,10 @@
 //! gives for it. DOS shows them in the directory (disk/system_files.rs),
 //! read-only; a file of the same name on the drive wins over one.
 //!
+//! MSVCRT20.DLL and MSVCRT40.DLL are there too, as files whose exports
+//! forward to MSVCRT.DLL (forwarders.rs), which the loader loads as
+//! any DLL file.
+//!
 //! Which DLLs are there is the loader's call (`loader::builtin_for`), so
 //! LoadLibrary and the files agree. They follow the settings: `sync` runs
 //! when the settings are applied, as a program starts and after a save
@@ -20,6 +24,7 @@
 //! are built in the same way: NOTEPAD.EXE (user32/notepad.rs), which
 //! setups run to show a readme.
 
+use super::forwarders;
 use super::loader::{self, SYSTEM_DIR, WINDOWS_DIR};
 use super::stubs::{self, DLLS};
 use super::version::WindowsVersion;
@@ -44,16 +49,23 @@ pub fn sync(bus: &mut Bus) {
     if bus.win32.dll_files.as_ref() == Some(&wanted) {
         return;
     }
-    let files = wanted
+    let mut files: Vec<_> = wanted
         .1
         .iter()
         .map(|&i| (DLLS[i].name.to_string(), stubs::file(i, version).into()))
         .collect();
+    if bus.win32.enabled {
+        files.extend(
+            forwarders::FORWARDERS
+                .iter()
+                .map(|f| (f.name.to_string(), forwarders::file(f, version).into())),
+        );
+    }
     bus.disk.set_system_files(SYSTEM_DIR, files);
     let programs = if bus.win32.enabled {
         vec![(
             "NOTEPAD.EXE".to_string(),
-            super::user32::notepad::file().into(),
+            super::user32::notepad::file(bus).into(),
         )]
     } else {
         Vec::new()

@@ -7,7 +7,7 @@ use rust_dos::interrupts::int10;
 use rust_dos::video::{self, Frame};
 use std::path::PathBuf;
 
-fn machine(mode: u8) -> Cpu {
+fn machine(mode: u8) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.set_ax(mode as u16);
     cpu.set_reg8(Register::AH, 0x00);

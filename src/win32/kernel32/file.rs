@@ -46,6 +46,8 @@ const ERROR_NEGATIVE_SEEK: u32 = 131;
 const ERROR_NOT_LOCKED: u32 = 158;
 const ERROR_BAD_NETPATH: u32 = 53;
 const ERROR_IO_INCOMPLETE: u32 = 996;
+pub(super) const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_GEN_FAILURE: u32 = 31;
 const STATUS_PENDING: u32 = 0x103;
 
 /// What _lopen, _lread and the others return when they fail.
@@ -151,11 +153,24 @@ pub(crate) fn open_file(
         _ => 0x40,
     };
     let disk = &mut cpu.bus.disk;
-    if disk.device(&name).is_some() {
-        return disk
+    if let Some(device) = disk.device(&name) {
+        // A serial port opens through VCOMM: one the machine has, once.
+        let port = device.com_port();
+        if let Some(n) = port {
+            super::comm::may_open(cpu, n)?;
+        }
+        let sft = cpu
+            .bus
+            .disk
             .open_file(&name, mode, psp)
-            .map(|sft| (sft, true))
-            .map_err(|e| e as u32);
+            .map_err(|e| e as u32)?;
+        if let Some(n) = port
+            && !super::comm::open(cpu, sft, n)
+        {
+            cpu.bus.disk.close_file(sft);
+            return Err(ERROR_GEN_FAILURE);
+        }
+        return Ok((sft, true));
     }
     if disk.is_directory(&name) {
         return Err(ERROR_ACCESS_DENIED);
@@ -304,10 +319,16 @@ pub(super) fn create_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// the function again: `read_console` asked for that the DOS way
 /// (`hle_wait`), which a Win32 thread does by sleeping.
 pub(super) fn wait_for_keys(cpu: &mut Cpu) {
+    let deadline = Some(cpu.bus.clock.now_micros() + KEY_POLL);
+    retry_at(cpu, deadline);
+}
+
+/// The running thread sleeps until `deadline` (the clock's microseconds),
+/// then calls the function it is in again.
+pub(super) fn retry_at(cpu: &mut Cpu, deadline: Option<u64>) {
     cpu.hle_retry = false;
     cpu.idle = false;
     cpu.set_eip(cpu.eip().wrapping_sub(4));
-    let deadline = Some(cpu.bus.clock.now_micros() + KEY_POLL);
     thread::block(
         cpu,
         Wait {
@@ -372,9 +393,20 @@ pub(super) fn read_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if read != 0 && !cpu.bus.guest_probe(read, 4, true) {
         return None;
     }
+    // A read of a file at its end reads no bytes and changes nothing but
+    // the count it writes, which an idle proof can follow
+    // (`idle::pure_call`), as it follows Smacker's read-ahead calling it
+    // at the end of a movie until the last frame's time. Not a read that
+    // empties a file a create call left for its first use, nor one of a
+    // device. It reads nothing but its arguments (`idle::reads_arguments`).
+    let follow = cpu.bus.observe.on && device.is_none() && !cpu.bus.disk.settles(open.sft);
     let (count, error) = read_open(cpu, open, buffer, n)?;
     if read != 0 {
         cpu.bus.guest_write_32(read, count);
+    }
+    if follow && count == 0 && error.is_none() {
+        crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
     }
     Some(result(cpu, error))
 }
@@ -396,6 +428,9 @@ fn result(cpu: &mut Cpu, error: Option<u32>) -> u32 {
 fn read_open(cpu: &mut Cpu, open: Open, buffer: u32, n: u32) -> Option<(u32, Option<u32>)> {
     if !cpu.bus.guest_probe(buffer, n as usize, true) {
         return None;
+    }
+    if let Some(i) = super::comm::port_of_file(cpu, open.sft) {
+        return super::comm::read(cpu, i, buffer, n);
     }
     if is_console(cpu, open.sft) {
         let line = read_console_line(cpu, n)?;
@@ -468,6 +503,9 @@ fn write_open(cpu: &mut Cpu, open: Open, buffer: u32, n: u32) -> Option<(u32, Op
     // All of it is there before any of it is written.
     if !cpu.bus.guest_probe(buffer, n as usize, false) {
         return None;
+    }
+    if let Some(i) = super::comm::port_of_file(cpu, open.sft) {
+        return super::comm::write(cpu, i, buffer, n);
     }
     let mut count = 0u32;
     let mut error = None;
@@ -691,9 +729,16 @@ pub(super) fn get_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// SetFileTime(handle, created, accessed, written): the time of the last
-/// write is the DOS time, which files on disk images keep; host files
-/// keep the host's, as with DOS. The others aren't kept.
+/// write becomes the file's DOS time (`DiskController::set_file_time`),
+/// which a file on a disk image keeps in its directory entry and a host
+/// file as its modification time. The others aren't kept. As on Windows
+/// 98 SE, a handle opened without GENERIC_WRITE fails with
+/// ERROR_ACCESS_DENIED, the time is rounded up to an even second, as
+/// its FAT driver stores it (19:20:01.5 becomes 19:20:02), and a time
+/// before 1980 or after 2107 fails with ERROR_INVALID_DATA.
 pub(super) fn set_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    const ERROR_INVALID_DATA: u32 = 13;
+    const TWO_SECONDS: u64 = 20_000_000;
     let Some(open) = open_or_fail(cpu, args[0]) else {
         return Some(FALSE);
     };
@@ -709,8 +754,11 @@ pub(super) fn set_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if cpu.bus.guest_faulted() {
         return None;
     }
-    let Some((date, time)) = crate::win32::convert::ticks_to_dos(high << 32 | low) else {
-        set_error(cpu, ERROR_INVALID_PARAMETER);
+    let rounded = (high << 32 | low)
+        .div_ceil(TWO_SECONDS)
+        .checked_mul(TWO_SECONDS);
+    let Some((date, time)) = rounded.and_then(crate::win32::convert::ticks_to_dos) else {
+        set_error(cpu, ERROR_INVALID_DATA);
         return Some(FALSE);
     };
     match cpu.bus.disk.set_file_time(open.sft, time, date) {

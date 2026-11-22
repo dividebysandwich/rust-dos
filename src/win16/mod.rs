@@ -15,8 +15,9 @@
 //! message or yields (the Win16 lock, `State::lock`), while the Win32
 //! processes' threads go on around them.
 
-mod builtin;
-mod comm;
+pub(crate) mod builtin;
+mod ddeml;
+pub(crate) mod comm;
 pub mod dos;
 pub(crate) mod dpmi;
 pub(crate) mod flat;
@@ -31,12 +32,16 @@ mod lz;
 mod message;
 mod misc;
 mod module;
+mod ole2;
+mod ole2disp;
 pub(crate) mod resource;
 pub mod task;
 pub(crate) mod thunk;
+mod typelib;
+mod typelib_invoke;
 mod user;
 
-pub use builtin::function_name;
+pub use builtin::{function_name, trap_name};
 
 use crate::bus::Bus;
 use crate::cpu::{ATTR_DB, Cpu, Seg};
@@ -48,7 +53,7 @@ use std::collections::BTreeMap;
 
 pub use global::Arena;
 pub use ldt::Ldt;
-pub use misc::wave_header16;
+pub use misc::{Mmsystem, call_queued16, queue_call16, wave_data, wave_header16};
 
 /// The Win16 tasks' state: the system's.
 #[derive(Clone, Debug, Default)]
@@ -98,10 +103,8 @@ pub struct State {
     /// WinG's bitmaps (misc.rs): each one's handle and the 16:16 pointer
     /// to its bits.
     pub wing_bitmaps: Vec<(u32, u32)>,
-    /// The wave headers given to waveOut (misc.rs): each one's linear
-    /// address, its own 16:16 address, and its data's 16:16 and linear
-    /// addresses.
-    pub wave_headers: Vec<[u32; 4]>,
+    /// MMSYSTEM's wave headers and callback calls (misc.rs).
+    pub mmsystem: Mmsystem,
     /// The blocks of linear memory DPMI function 0501h gave, by their
     /// addresses (their handles).
     pub dpmi_blocks: Vec<u32>,
@@ -129,6 +132,8 @@ pub struct State {
     pub links: Vec<flat::Link>,
     /// The serial ports open (comm.rs).
     pub comm: Vec<comm::Port>,
+    /// What the 16-bit OLE modules keep (ole2.rs).
+    pub ole: crate::savestate::Since<{ ole2::OLE16 }, ole2::Ole16>,
     /// The exit code of the last task that ended other than a client's,
     /// which the Win16 process ends with when a client outlived it.
     pub exit_code: u16,
@@ -172,6 +177,11 @@ pub struct Module16 {
     /// (module.rs): its database's segment table has the segments the
     /// loader made.
     pub unbooted: bool,
+    /// For a system module whose code segment is from an older table, of
+    /// a state that was loaded (`builtin::mend_order`): the offset of each
+    /// function's stub in it, by the function's place in the table now,
+    /// None for one it lacks. A load works it out again.
+    pub older: Option<Vec<Option<u16>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -228,7 +238,7 @@ pub struct Task16 {
 }
 
 /// A switch between a task's 16-bit and 32-bit code (thunk.rs).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Frame {
     /// 16-bit code called 32-bit code: its context, which goes on when
     /// that returns, and what is done with what it returns (`post`, a
@@ -345,6 +355,13 @@ pub fn current_task(cpu: &Cpu) -> Option<usize> {
     cpu.bus.win32.win16.tasks.iter().position(|t| t.tid == tid)
 }
 
+/// The running task's switches between 16-bit and 32-bit code: the
+/// contexts that go on when the code called returns, which the registers
+/// don't show (`Cpu::idle_key`). Empty outside a Win16 task.
+pub fn frames_of_running(cpu: &Cpu) -> Vec<Frame> {
+    current_task(cpu).map_or_else(Vec::new, |i| cpu.bus.win32.win16.tasks[i].frames.clone())
+}
+
 /// The running task: there is one.
 pub fn task(cpu: &mut Cpu) -> &mut Task16 {
     let i = current_task(cpu).expect("a Win16 task");
@@ -356,6 +373,7 @@ pub fn is_task(win32: &crate::win32::Win32, tid: u32) -> bool {
     win32.win16.pid != 0 && win32.win16.tasks.iter().any(|t| t.tid == tid)
 }
 
+pub use ddeml::free_dde_copy;
 pub use kernel::{atom_name, atom_of};
 
 /// The bytes of the global block `handle`, as a 16-bit program passes
@@ -616,7 +634,7 @@ crate::state_fields!(State {
     atoms,
     tb,
     wing_bitmaps,
-    wave_headers,
+    mmsystem,
     dpmi_blocks,
     callbacks,
     missing,
@@ -627,7 +645,8 @@ crate::state_fields!(State {
     aliases,
     links,
     exit_code,
-    comm
+    comm,
+    ole
 });
 crate::state_fields!(Module16 {
     name,
@@ -645,7 +664,8 @@ crate::state_fields!(Module16 {
     loaded,
     unbooted
 } skip {
-    image32
+    image32,
+    older
 });
 crate::state_fields!(Segment16 {
     handle,

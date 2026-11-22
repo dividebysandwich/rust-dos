@@ -457,7 +457,26 @@ pub fn get_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DSERR_INVALIDPARAM);
     }
     let id = state(cpu).buffers[i].id;
-    settle_now(cpu, id);
+    if settle(cpu, id) {
+        crate::win32::thread::wake(cpu);
+    } else if cpu.bus.observe.on {
+        // Nothing fired: the status stays as it is until the buffer's next
+        // notification or its end, and a stopped buffer, or a looping one
+        // without notifications, keeps it until a call changes it. An idle
+        // proof goes through it (#1306): Biosys asks it of each of its
+        // stopped buffers in the loop it waits in. It reads no RAM but its
+        // arguments and the interface block (`com::interface_of`). Only a
+        // proof running needs to know when that changes. Outside one the
+        // call doesn't work it out: Biosys's sensor read-out polls it in
+        // every pass, where working it out took about 4% of the host's
+        // time.
+        let next = state(cpu)
+            .buffer(id)
+            .and_then(|i| next_event(&state(cpu).buffers[i]));
+        let until = next.map(|tick| cpu.bus.clock.icount_at(tick));
+        crate::idle::pure_call(cpu, until);
+        crate::idle::reads_arguments(cpu);
+    }
     let status = state(cpu).buffer(id).map_or(0, |i| {
         let b = &state(cpu).buffers[i];
         match (b.playing, b.looping) {
@@ -1002,7 +1021,24 @@ fn voices(bus: &crate::bus::Bus) -> Vec<Voice> {
 /// The buffers that play, mixed at the primary buffer's format (its rate,
 /// its bits' steps, mono or stereo) for the host's frames `first` to
 /// `first + frames`, through the primary buffer's volume and pan.
-pub fn render(bus: &crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f32, f32)>> {
+///
+/// The host's frames lie between the primary format's, and the first of
+/// those can come before `first`: it was mixed for the frames before, and
+/// is taken from then (`State::mixed`). Mixed again now, it would read
+/// what a program wrote behind the play cursor since, which the device
+/// played before the program wrote it (Omikron's speech clicked every
+/// 60 ms).
+pub fn render(bus: &mut crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f32, f32)>> {
+    let (out, mixed) = mix(bus, first, frames)?;
+    bus.win32.dsound.mixed = mixed;
+    Some(out)
+}
+
+fn mix(
+    bus: &crate::bus::Bus,
+    first: u64,
+    frames: usize,
+) -> Option<(Vec<(f32, f32)>, super::Mixed)> {
     let ds = &bus.win32.dsound;
     let voices = voices(bus);
     if voices.is_empty() || frames == 0 {
@@ -1012,11 +1048,25 @@ pub fn render(bus: &crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f
     let rate = primary.rate as u64;
     let k0 = first * rate / device::RATE;
     let k1 = (first + frames as u64 - 1) * rate / device::RATE + 1;
-    let mut mix = vec![(0.0f32, 0.0f32); (k1 - k0 + 1) as usize];
+    // The frames from k0 on that the mix before this one made, when this
+    // one starts at the host's frame after that one's last. That mix
+    // ended at frame `last`, which is k0 or k0 + 1 (or k0 - 1 when the
+    // primary's rate is above the host's, and it made none of these).
+    let kept = ds.mixed;
+    let reuse = if kept.rate == primary.rate && kept.end == first {
+        let last = (first - 1) * rate / device::RATE + 1;
+        (last + 1).saturating_sub(k0) as usize
+    } else {
+        0
+    };
+    let from = k0 + reuse as u64;
+    let mut mix = Vec::with_capacity((k1 - k0 + 1) as usize);
+    mix.extend_from_slice(&kept.frames[2 - reuse..]);
+    mix.resize((k1 - k0 + 1) as usize, (0.0f32, 0.0f32));
     for v in &voices {
         let mut reader = Reader::new(bus, v.pid);
-        for (n, out) in mix.iter_mut().enumerate() {
-            let pos = device::position(v.tick, v.pos, v.rate, k0 + n as u64, rate);
+        for (n, out) in mix[reuse..].iter_mut().enumerate() {
+            let pos = device::position(v.tick, v.pos, v.rate, from + n as u64, rate);
             if !v.looping && pos >= (v.frames as u64) << 32 {
                 break;
             }
@@ -1026,7 +1076,7 @@ pub fn render(bus: &crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f
             out.1 += r * v.gains.1;
         }
     }
-    for frame in mix.iter_mut() {
+    for frame in mix[reuse..].iter_mut() {
         let mut l = frame.0.clamp(-32768.0, 32767.0);
         let mut r = frame.1.clamp(-32768.0, 32767.0);
         if primary.channels == 1 {
@@ -1039,6 +1089,12 @@ pub fn render(bus: &crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f
         }
         *frame = (l, r);
     }
+    let n = mix.len();
+    let mixed = super::Mixed {
+        rate: primary.rate,
+        end: first + frames as u64,
+        frames: [mix[n - 2], mix[n - 1]],
+    };
     let (gl, gr) = device::gains(ds.volume, ds.pan);
     let out = (0..frames as u64)
         .map(|n| {
@@ -1052,5 +1108,5 @@ pub fn render(bus: &crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f
             )
         })
         .collect();
-    Some(out)
+    Some((out, mixed))
 }

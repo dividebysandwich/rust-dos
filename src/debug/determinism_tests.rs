@@ -378,10 +378,23 @@ fn main_code(a: &mut CodeAssembler, audio_start: u32) -> Asm {
     outb(a, 0x43, 0x00)?;
     a.in_(al, 0x40)?;
     store(a, 70, ax)?;
-    // Channel 2 again, an octave up, as the last control word.
-    outb(a, 0x43, 0xB6)?;
+    // The same count again while the period runs, which waits for its
+    // end, and channel 1 as a square wave, given a second count while
+    // it runs, which waits for the end of its half-cycle.
+    outb(a, 0x40, 0x80)?;
+    outb(a, 0x43, 0x56)?;
+    outb(a, 0x41, 0x80)?;
+    outb(a, 0x41, 0x40)?;
+    // Channel 2 again, an octave up, as the last control word: a pulse
+    // train in mode 2, high for all but a tick of each period, so the
+    // speaker's level in the frame being made at a stop (`speaker_high`)
+    // isn't 0 (a square wave can be low through it at every stop).
+    outb(a, 0x43, 0xB4)?;
     outb(a, 0x42, 0x4E)?;
     outb(a, 0x42, 0x02)?;
+    // The status of channels 0 and 2, latched by a read-back command and
+    // left for a read that doesn't come.
+    outb(a, 0x43, 0xEA)?;
 
     // DOS's upper memory link, turned the other way.
     a.mov(ax, 0x5802u32)?;
@@ -459,6 +472,32 @@ fn main_code(a: &mut CodeAssembler, audio_start: u32) -> Asm {
         (0x04, 0x01),
     ] {
         opl(a, reg, value)?;
+    }
+
+    // The AdLib Gold: its output stage in spatial stereo, and sampling
+    // channel 0 playing what the CPU puts in its FIFO, without the
+    // interrupt and the DMA, which are the Sound Blaster's IRQ 7 and DMA 1.
+    for (port, value) in [
+        (0x38A, 0xFF),
+        (0x38A, 0x13),
+        (0x38B, 0x00),
+        (0x38A, 0x14),
+        (0x38B, 0x00),
+        (0x38A, 0x08),
+        (0x38B, 0xDE),
+        (0x38A, 0xFE),
+        (0x38C, 0x09),
+        (0x38D, 0x80),
+        (0x38D, 0x00),
+        (0x38C, 0x0C),
+        (0x38D, 0x02),
+        (0x38C, 0x0A),
+        (0x38D, 0xFF),
+        (0x38C, 0x09),
+        (0x38D, 0x36),
+        (0x38D, 0x37),
+    ] {
+        outb(a, port, value)?;
     }
 
     // The AWE32's sample counter.
@@ -897,6 +936,11 @@ fn main_code(a: &mut CodeAssembler, audio_start: u32) -> Asm {
     store(a, 59, ax)?;
     inb(a, 0x388)?;
     store(a, 60, ax)?;
+    // Two samples into the AdLib Gold's FIFO, and its status.
+    outb(a, 0x38C, 0x0B)?;
+    outb(a, 0x38D, 0x40)?;
+    outb(a, 0x38D, 0xC0)?;
+    inb(a, 0x38C)?;
     a.mov(dx, 0xE22u32)?;
     a.mov(ax, 0x3Bu32)?;
     a.out(dx, ax)?;
@@ -1048,6 +1092,7 @@ fn settings(dir: &Path) -> rust_dos::config::Settings {
     s.sound.sb.model = rust_dos::sb::SbModel::Awe32;
     s.sound.midisynth = rust_dos::config::MidiSynth::None;
     s.sound.lpt_dac = rust_dos::lpt_dac::LptDacType::Disney;
+    s.sound.adlibgold_installed = true;
     s.network.ne2000 = true;
     s.network.ipx = rust_dos::net::IpxMode::On;
     s.voodoo.enabled = true;
@@ -1067,7 +1112,7 @@ fn settings(dir: &Path) -> rust_dos::config::Settings {
 /// it, paused at the start, with the program as W.COM on C:, a CD image
 /// with a data track and an audio track as D:, and a CD made of a folder
 /// as E:.
-fn machine(name: &str) -> (Cpu, DebugHub, Deterministic) {
+fn machine(name: &str) -> (Box<Cpu>, DebugHub, Deterministic) {
     let mode = Deterministic::new(rust_dos::deterministic::default_start());
     let dir = crate::test_dir::path("determinism").join(name);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1464,12 +1509,18 @@ const STILL: &[(&str, &str)] = &[
     ("CORE.pit0_read_msb", "channel 0's read flip-flop, at rest after a whole read"),
     ("CORE.pit0_write_msb", "channel 0's write flip-flop, at rest after a whole write"),
     ("CORE.pit0_latched_active", "channel 0's latch, read out"),
+    ("8254.pit0_phase", "a mode 3 count loaded at a half-cycle, which the run's mode 2 has none of"),
+    ("8254.pit1_phase", "a count loaded at a half-cycle, which the run never reads channel 1 after"),
+    ("8254.pit2_phase", "a mode 3 count loaded at a half-cycle, which the run's mode 2 has none of"),
     ("VIDE.gate_array_shadow", "the PCjr's and Tandy's gate array"),
     ("VIDE.gate_array_shadow_at", "the PCjr's and Tandy's gate array"),
     ("SOUN.tandy_sound", "the PCjr's and Tandy's sound chip"),
     ("SOUN.gus_line", "the Ultrasound's interrupt line, up only until the handler reads the card"),
+    ("SOUN.opl_right", "the SB Pro 1's right OPL2: the machine's AWE32 has one OPL3"),
     ("DOS.dos_high", "the settings' DOS=HIGH"),
     ("DOS.disk_io", "the disk's speed settings, and the time charged until the next instruction takes it"),
+    ("CDHD", "MSCDEX's heads: the run's CD drive is a folder, which has no sectors to seek"),
+    ("VCPI", "VCPI's pages and PIC vectors: the run's program uses no DOS extender"),
     ("ENV", "the settings' environment variables"),
     ("SEP", "the SYSENTER MSRs, which only a Pentium II's WRMSR sets"),
     ("SSE", "the SSE registers and MXCSR, which only a Pentium III's instructions set"),
@@ -1495,10 +1546,13 @@ const SECTION_FIELDS: &[(&str, &str)] = &[
     ("ide", "IDE"),
     ("fdc", "FDC"),
     ("dpmi", "DPMI"),
+    ("vcpi", "VCPI"),
     ("net", "NET"),
     ("serial", "SER"),
     ("awe", "AWE"),
     ("isapnp", "PNP"),
+    ("adlib_gold", "AGLD"),
+    ("adlib_gold_line", "AGLD"),
     ("vfx1", "VFX1"),
     ("win32", "W32"),
     ("frame_cap", "PACE"),

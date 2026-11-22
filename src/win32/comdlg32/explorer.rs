@@ -206,7 +206,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
     match id {
         T_TOOLBAR => {
             d.toolbar = c.last;
-            toolbar(&mut o, c.last);
+            toolbar(cpu, &mut o, c.last);
         }
         T_CUSTOM => {
             d.custom = if c.word(0) != 0 { c.last } else { 0 };
@@ -228,7 +228,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             }
             let args = [d.custom, HWND_BOTTOM, 0, 0];
             let args = [&args[..], &[rc.right as u32, rc.bottom as u32, flags]].concat();
-            o.user("SetWindowPos", &args);
+            o.user(cpu, "SetWindowPos", &args);
             o.then(T_FILL, &[]);
         }
         T_FILL => {
@@ -244,27 +244,27 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                 | LBS_HASSTRINGS
                 | LBS_NOINTEGRALHEIGHT
                 | LBS_MULTICOLUMN;
-            create_window(&mut o, WS_EX_CLIENTEDGE, style, r, dlg, LST2);
+            create_window(cpu, &mut o, WS_EX_CLIENTEDGE, style, r, dlg, LST2);
             o.then(T_VIEW, &[]);
         }
         T_VIEW => {
             d.view = c.last;
-            let send = user32::address_of("SendMessageA");
-            o.send(dlg, WM_GETFONT, 0, 0);
+            let send = user32::address_of(cpu, "SendMessageA");
+            o.send(cpu, dlg, WM_GETFONT, 0, 0);
             let font_args = [Arg::V(d.view), Arg::V(WM_SETFONT), Arg::Last, Arg::V(0)];
             o.call(send, &font_args);
-            o.send(d.view, LB_SETCOLUMNWIDTH, 150, 0);
+            o.send(cpu, d.view, LB_SETCOLUMNWIDTH, 150, 0);
             let mut dir = d.dir.clone();
             if dir.is_empty() || !is_dir(cpu, &dir) {
                 dir = current_dir(cpu);
             }
             browse(cpu, &mut d, &dir, &mut o);
             if d.custom != 0 {
-                o.user("ShowWindow", &[d.custom, SW_SHOW]);
+                o.user(cpu, "ShowWindow", &[d.custom, SW_SHOW]);
             }
             if d.flags & OFN_EXPLORER != 0 {
-                notify(&d, &mut o, CDN_INITDONE);
-                notify(&d, &mut o, CDN_FOLDERCHANGE);
+                notify(cpu, &d, &mut o, CDN_INITDONE);
+                notify(cpu, &d, &mut o, CDN_FOLDERCHANGE);
             }
             o.then(T_VIEW_POS, &[]);
         }
@@ -277,11 +277,21 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                 let (x, y) = (want.left as u32, want.top as u32);
                 let (w, h) = (want.width() as u32, want.height() as u32);
                 let flags = SWP_NOACTIVATE | SWP_NOZORDER;
-                o.user("SetWindowPos", &[d.view, 0, x, y, w, h, flags]);
+                o.user(cpu, "SetWindowPos", &[d.view, 0, x, y, w, h, flags]);
             }
             if d.flags & OFN_EXPLORER != 0 {
-                notify(&d, &mut o, CDN_SELCHANGE);
+                notify(cpu, &d, &mut o, CDN_SELCHANGE);
             }
+            // The File name box gets the focus with its text selected, so
+            // a name typed replaces the one the program gave. Windows 98
+            // SE does this once the hook has had WM_INITDIALOG and
+            // CDN_INITDONE: a hook that moves the focus in either loses it
+            // to the box, and only one that moves it later (from a message
+            // it posts itself) keeps it. Wine's FILEDLG95_InitControls
+            // calls SetFocus alone, before the hook's dialog is made.
+            let edit = item(cpu, dlg, EDT1);
+            o.user(cpu, "SetFocus", &[edit]);
+            o.send(cpu, edit, EM_SETSEL, 0, u32::MAX);
         }
         T_TEXT => {
             d.text = scratch_text(cpu, c, B_TEXT, TEXT_SIZE);
@@ -295,13 +305,13 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
         T_FILEOK => {
             if c.last == 0 {
                 let args = [d.custom, d.fileok, 0, d.ofn];
-                o.user("SendMessageA", &args);
+                o.user(cpu, "SendMessageA", &args);
                 o.then(T_FILEOK_STRING, &[]);
             }
         }
         T_FILEOK_STRING => {
             if c.last == 0 {
-                o.user("EndDialog", &[dlg, 1]);
+                o.user(cpu, "EndDialog", &[dlg, 1]);
             }
         }
         T_TYPE => {
@@ -312,7 +322,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                 let dir = d.dir.clone();
                 browse(cpu, &mut d, &dir, &mut o);
                 if d.flags & OFN_EXPLORER != 0 {
-                    notify(&d, &mut o, CDN_TYPECHANGE);
+                    notify(cpu, &d, &mut o, CDN_TYPECHANGE);
                 }
             }
         }
@@ -324,10 +334,10 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
         T_SELECT => {
             d.selected = c.last as i32;
             if let Some((name, false)) = d.entries.get(c.last as usize).cloned() {
-                o.set_item_text(dlg, EDT1, &name);
+                o.set_item_text(cpu, dlg, EDT1, &name);
             }
             if d.flags & OFN_EXPLORER != 0 {
-                notify(&d, &mut o, CDN_SELCHANGE);
+                notify(cpu, &d, &mut o, CDN_SELCHANGE);
             }
         }
         T_DOUBLE_CLICK => match d.entries.get(c.last as usize).cloned() {
@@ -336,8 +346,8 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                 change_folder(cpu, &mut d, &path, &mut o);
             }
             Some((name, false)) => {
-                o.set_item_text(dlg, EDT1, &name);
-                o.send(dlg, WM_COMMAND, IDOK, 0);
+                o.set_item_text(cpu, dlg, EDT1, &name);
+                o.send(cpu, dlg, WM_COMMAND, IDOK, 0);
             }
             None => {}
         },
@@ -345,7 +355,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             let (size, at) = (c.word(0), c.word(1));
             let edit = item(cpu, dlg, EDT1);
             if at != 0 {
-                o.send(edit, WM_GETTEXT, size, at);
+                o.send(cpu, edit, WM_GETTEXT, size, at);
             }
             o.then(T_RESULT, &[c.last + 1]);
         }
@@ -376,8 +386,8 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
 }
 
 /// CreateWindowExA(ex, the class in B_CLASS, NULL, style, r, parent, id).
-fn create_window(o: &mut Ops, ex: u32, style: u32, r: Rect, parent: u32, id: u32) {
-    let target = user32::address_of("CreateWindowExA");
+fn create_window(cpu: &Cpu, o: &mut Ops, ex: u32, style: u32, r: Rect, parent: u32, id: u32) {
+    let target = user32::address_of(cpu, "CreateWindowExA");
     let v = |x: i32| Arg::V(x as u32);
     o.call(
         target,
@@ -399,12 +409,12 @@ fn create_window(o: &mut Ops, ex: u32, style: u32, r: Rect, parent: u32, id: u32
 }
 
 /// WM_NOTIFY with an OFNOTIFYA to the child dialog, if there is one.
-fn notify(d: &FileDlg, o: &mut Ops, code: u32) {
+fn notify(cpu: &Cpu, d: &FileDlg, o: &mut Ops, code: u32) {
     if d.custom == 0 {
         return;
     }
     o.write(B_NOTIFY, &[d.hwnd, 0, code, d.ofn, 0]);
-    let target = user32::address_of("SendMessageA");
+    let target = user32::address_of(cpu, "SendMessageA");
     o.call(
         target,
         &[
@@ -443,22 +453,20 @@ fn init(cpu: &mut Cpu, dlg: u32, id: u32) -> Option<u32> {
         | TBSTYLE_TOOLTIPS
         | CCS_NODIVIDER
         | CCS_NORESIZE;
-    create_window(&mut o, 0, style, r, dlg, STC1);
+    create_window(cpu, &mut o, 0, style, r, dlg, STC1);
     o.then(T_TOOLBAR, &[]);
 
     if !d.title.is_empty() {
-        o.set_text(dlg, &d.title);
+        o.set_text(cpu, dlg, &d.title);
     }
     let (dir, name) = initial(cpu, &d);
     d.dir = dir;
     let file = cpu.bus.guest_read_32(d.ofn + 4 * O_FILE as u32);
     if file != 0 {
-        o.set_item_text(dlg, EDT1, &name);
+        o.set_item_text(cpu, dlg, EDT1, &name);
     }
-    let edit = item(cpu, dlg, EDT1);
-    o.user("SetFocus", &[edit]);
     if d.flags & OFN_READONLY != 0 {
-        o.user("SendDlgItemMessageA", &[dlg, CHX1, BM_SETCHECK, 1, 0]);
+        o.user(cpu, "SendDlgItemMessageA", &[dlg, CHX1, BM_SETCHECK, 1, 0]);
     }
     let mut hide = Vec::new();
     if d.flags & OFN_HIDEREADONLY != 0 {
@@ -469,8 +477,8 @@ fn init(cpu: &mut Cpu, dlg: u32, id: u32) -> Option<u32> {
     }
     for id in hide {
         let h = item(cpu, dlg, id);
-        o.user("ShowWindow", &[h, SW_HIDE]);
-        o.user("EnableWindow", &[h, 0]);
+        o.user(cpu, "ShowWindow", &[h, SW_HIDE]);
+        o.user(cpu, "EnableWindow", &[h, 0]);
     }
     file_types(cpu, &mut d, &mut o);
 
@@ -486,15 +494,15 @@ fn init(cpu: &mut Cpu, dlg: u32, id: u32) -> Option<u32> {
     if d.flags & OFN_ENABLETEMPLATEHANDLE != 0 {
         let template = call_builtin(cpu, "KERNEL32.DLL", "LockResource", &[d.instance])?;
         let args = [DLL.base, template, dlg, proc_, ofn];
-        o.user("CreateDialogIndirectParamA", &args);
+        o.user(cpu, "CreateDialogIndirectParamA", &args);
     } else if d.flags & OFN_ENABLETEMPLATE != 0 {
         let args = [d.instance, d.template, dlg, proc_, ofn];
-        o.user("CreateDialogParamA", &args);
+        o.user(cpu, "CreateDialogParamA", &args);
     } else if d.hook != 0 {
         let style = WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE | DS_CONTROL | DS_3DLOOK;
         // DLGTEMPLATE: no items, no size; no menu, class or title.
         o.write(B_TEMPLATE, &[style, 0, 0, 0, 0]);
-        let target = user32::address_of("CreateDialogIndirectParamA");
+        let target = user32::address_of(cpu, "CreateDialogIndirectParamA");
         o.call(
             target,
             &[
@@ -556,14 +564,14 @@ fn initial(cpu: &mut Cpu, d: &FileDlg) -> (String, String) {
 }
 
 /// The toolbar's buttons: up one level, a new folder, list and details.
-fn toolbar(o: &mut Ops, tb: u32) {
+fn toolbar(cpu: &Cpu, o: &mut Ops, tb: u32) {
     if tb == 0 {
         return;
     }
-    o.send(tb, TB_BUTTONSTRUCTSIZE, 20, 0);
-    o.send(tb, TB_SETMAXTEXTROWS, 0, 0);
+    o.send(cpu, tb, TB_BUTTONSTRUCTSIZE, 20, 0);
+    o.send(cpu, tb, TB_SETMAXTEXTROWS, 0, 0);
     o.write(B_TBA, &[HINST_COMMCTRL, IDB_VIEW_SMALL_COLOR]);
-    let send = user32::address_of("SendMessageA");
+    let send = user32::address_of(cpu, "SendMessageA");
     o.call(
         send,
         &[Arg::V(tb), Arg::V(TB_ADDBITMAP), Arg::V(12), Arg::S(B_TBA)],
@@ -583,7 +591,7 @@ fn toolbar(o: &mut Ops, tb: u32) {
         send,
         &[Arg::V(tb), Arg::V(TB_ADDBUTTONSA), Arg::V(7), Arg::S(B_TBB)],
     );
-    o.send(tb, TB_AUTOSIZE, 0, 0);
+    o.send(cpu, tb, TB_AUTOSIZE, 0, 0);
 }
 
 /// The file type box filled with the filters, the one nFilterIndex
@@ -591,7 +599,7 @@ fn toolbar(o: &mut Ops, tb: u32) {
 fn file_types(cpu: &mut Cpu, d: &mut FileDlg, o: &mut Ops) {
     let cmb1 = item(cpu, d.hwnd, CMB1);
     for (title, _) in &d.filters {
-        o.send_text(cmb1, CB_ADDSTRING, 0, title);
+        o.send_text(cpu, cmb1, CB_ADDSTRING, 0, title);
     }
     let custom = d.custom_filter as u32;
     let n = d.filters.len() as u32;
@@ -603,7 +611,7 @@ fn file_types(cpu: &mut Cpu, d: &mut FileDlg, o: &mut Ops) {
             d.index = 1;
         }
         let cb = d.index - (1 - custom);
-        o.send(cmb1, CB_SETCURSEL, cb, 0);
+        o.send(cpu, cmb1, CB_SETCURSEL, cb, 0);
         if let Some((_, patterns)) = d.filters.get(cb as usize) {
             d.filter = patterns.to_ascii_lowercase();
         }
@@ -629,7 +637,7 @@ fn shrink(cpu: &mut Cpu, d: &FileDlg, o: &mut Ops) {
     let less = u.screen_rect(help).bottom - u.screen_rect(cancel).bottom;
     let (w, h) = (r.width() as u32, (r.height() - less) as u32);
     let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER;
-    o.user("SetWindowPos", &[dlg, 0, 0, 0, w, h, flags]);
+    o.user(cpu, "SetWindowPos", &[dlg, 0, 0, 0, w, h, flags]);
 }
 
 /// The child dialog's controls and the dialog's laid out around each
@@ -658,11 +666,11 @@ fn arrange(cpu: &mut Cpu, d: &FileDlg, o: &mut Ops) {
     if stc32 != 0 {
         let size = [parent.right as u32, parent.bottom as u32];
         let args = [stc32, 0, 0, 0, size[0], size[1], SWP_NOMOVE | SWP_NOZORDER];
-        o.user("SetWindowPos", &args);
+        o.user(cpu, "SetWindowPos", &args);
     }
-    let mv = |o: &mut Ops, h: u32, x: i32, y: i32| {
+    let mv = |cpu: &Cpu, o: &mut Ops, h: u32, x: i32, y: i32| {
         let args = [h, 0, x as u32, y as u32, 0, 0, SWP_NOSIZE | SWP_NOZORDER];
-        o.user("SetWindowPos", &args);
+        o.user(cpu, "SetWindowPos", &args);
     };
     for h in children(cpu, child) {
         if h == stc32 {
@@ -675,14 +683,14 @@ fn arrange(cpu: &mut Cpu, d: &FileDlg, o: &mut Ops) {
         if r.top >= r32.bottom {
             r.top += parent.bottom - (r32.bottom - r32.top);
         }
-        mv(o, h, r.left, r.top);
+        mv(cpu, o, h, r.left, r.top);
     }
     for h in children(cpu, dlg) {
         if h == child {
             continue;
         }
         let r = rect_in(cpu, h, dlg);
-        mv(o, h, r.left + r32.left, r.top + r32.top);
+        mv(cpu, o, h, r.left + r32.left, r.top + r32.top);
     }
     let parent = client_of(cpu, dlg);
     let rc = client_of(cpu, child);
@@ -704,7 +712,7 @@ fn arrange(cpu: &mut Cpu, d: &FileDlg, o: &mut Ops) {
     let w = screen(cpu, dlg);
     let size = [(w.width() + chgx) as u32, (w.height() + chgy) as u32];
     let args = [dlg, 0, 0, 0, size[0], size[1], SWP_NOMOVE | SWP_NOZORDER];
-    o.user("SetWindowPos", &args);
+    o.user(cpu, "SetWindowPos", &args);
 }
 
 /// Show the folder `dir`: it becomes the current directory, its
@@ -715,9 +723,9 @@ fn browse(cpu: &mut Cpu, d: &mut FileDlg, dir: &str, o: &mut Ops) {
     d.entries = list(cpu, &d.dir, &d.filter);
     d.selected = -1;
     if d.view != 0 {
-        o.send(d.view, LB_RESETCONTENT, 0, 0);
+        o.send(cpu, d.view, LB_RESETCONTENT, 0, 0);
         for (name, _) in &d.entries {
-            o.send_text(d.view, LB_ADDSTRING, 0, name);
+            o.send_text(cpu, d.view, LB_ADDSTRING, 0, name);
         }
     }
     // The drives, and the current one's folders down to the one shown.
@@ -739,11 +747,11 @@ fn browse(cpu: &mut Cpu, d: &mut FileDlg, dir: &str, o: &mut Ops) {
         }
     }
     let cmb2 = item(cpu, d.hwnd, CMB2);
-    o.send(cmb2, CB_RESETCONTENT, 0, 0);
+    o.send(cpu, cmb2, CB_RESETCONTENT, 0, 0);
     for (path, depth) in &d.look_in {
-        o.send_text(cmb2, CB_ADDSTRING, 0, &look_in_label(path, *depth));
+        o.send_text(cpu, cmb2, CB_ADDSTRING, 0, &look_in_label(path, *depth));
     }
-    o.send(cmb2, CB_SETCURSEL, current as u32, 0);
+    o.send(cpu, cmb2, CB_SETCURSEL, current as u32, 0);
 }
 
 /// What the Look in box shows for a folder: a drive's root, or the
@@ -763,7 +771,7 @@ fn change_folder(cpu: &mut Cpu, d: &mut FileDlg, dir: &str, o: &mut Ops) {
     }
     browse(cpu, d, dir, o);
     if d.flags & OFN_EXPLORER != 0 {
-        notify(d, o, CDN_FOLDERCHANGE);
+        notify(cpu, d, o, CDN_FOLDERCHANGE);
     }
 }
 
@@ -776,30 +784,30 @@ fn command(cpu: &mut Cpu, dlg: u32, wp: u32) -> Option<u32> {
     let mut o = Ops::new();
     match id {
         IDOK => {
-            o.get_item_text(dlg, EDT1);
+            o.get_item_text(cpu, dlg, EDT1);
             o.then(T_TEXT, &[]);
-            o.user("SendDlgItemMessageA", &[dlg, CHX1, BM_GETCHECK, 0, 0]);
+            o.user(cpu, "SendDlgItemMessageA", &[dlg, CHX1, BM_GETCHECK, 0, 0]);
             o.then(T_OPEN, &[]);
         }
         IDCANCEL => {
-            o.user("EndDialog", &[dlg, 0]);
+            o.user(cpu, "EndDialog", &[dlg, 0]);
         }
         CMB1 if code == CBN_SELENDOK => {
             let cmb1 = item(cpu, dlg, CMB1);
-            o.send(cmb1, CB_GETCURSEL, 0, 0);
+            o.send(cpu, cmb1, CB_GETCURSEL, 0, 0);
             o.then(T_TYPE, &[]);
         }
         CMB2 if code == CBN_SELENDOK => {
             let cmb2 = item(cpu, dlg, CMB2);
-            o.send(cmb2, CB_GETCURSEL, 0, 0);
+            o.send(cpu, cmb2, CB_GETCURSEL, 0, 0);
             o.then(T_LOOK_IN, &[]);
         }
         LST2 if code == LBN_SELCHANGE => {
-            o.send(d.view, LB_GETCURSEL, 0, 0);
+            o.send(cpu, d.view, LB_GETCURSEL, 0, 0);
             o.then(T_SELECT, &[]);
         }
         LST2 if code == LBN_DBLCLK => {
-            o.send(d.view, LB_GETCURSEL, 0, 0);
+            o.send(cpu, d.view, LB_GETCURSEL, 0, 0);
             o.then(T_DOUBLE_CLICK, &[]);
         }
         FCIDM_TB_UPFOLDER => {
@@ -904,7 +912,7 @@ fn open(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
             .is_some_and(|p| p.contains(['/', ':', '<', '>', '|']))
     {
         let msg = "A filename cannot contain any of the following characters:\n/ : < > |";
-        o.message_box(dlg, msg, &caption, MB_OK | MB_ICONEXCLAMATION);
+        o.message_box(cpu, dlg, msg, &caption, MB_OK | MB_ICONEXCLAMATION);
         return;
     }
     let at = name_offset(&path);
@@ -923,19 +931,19 @@ fn open(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
             .position(|(_, p)| p.eq_ignore_ascii_case(&base));
         if let Some(i) = found {
             let cmb1 = item(cpu, dlg, CMB1);
-            o.send(cmb1, CB_SETCURSEL, i as u32, 0);
+            o.send(cpu, cmb1, CB_SETCURSEL, i as u32, 0);
         }
         if dir.eq_ignore_ascii_case(&d.dir) {
             browse(cpu, d, &dir, o);
         } else {
             change_folder(cpu, d, &dir, o);
         }
-        o.send(edit, EM_SETSEL, 0, u32::MAX);
+        o.send(cpu, edit, EM_SETSEL, 0, u32::MAX);
         return;
     }
     if !base.is_empty() && is_dir(cpu, &path) || path.len() <= 3 {
         change_folder(cpu, d, &path, o);
-        o.send(edit, EM_SETSEL, 0, u32::MAX);
+        o.send(cpu, edit, EM_SETSEL, 0, u32::MAX);
         return;
     }
     if validate {
@@ -946,7 +954,7 @@ fn open(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
                     "{}\nPath does not exist.\nCheck the path and try again.",
                     path
                 );
-                o.message_box(dlg, &msg, &caption, MB_OK | MB_ICONEXCLAMATION);
+                o.message_box(cpu, dlg, &msg, &caption, MB_OK | MB_ICONEXCLAMATION);
                 return;
             }
         } else if d.flags & OFN_FILEMUSTEXIST != 0 && !d.save && !exists(cpu, &path) {
@@ -954,7 +962,7 @@ fn open(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
                 "{}\nFile not found.\nPlease verify the correct file name was given.",
                 base
             );
-            o.message_box(dlg, &msg, &caption, MB_OK | MB_ICONEXCLAMATION);
+            o.message_box(cpu, dlg, &msg, &caption, MB_OK | MB_ICONEXCLAMATION);
             return;
         }
     }
@@ -980,7 +988,7 @@ fn open(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
     let there = exists(cpu, &path);
     if d.save && d.flags & OFN_OVERWRITEPROMPT != 0 && there {
         let msg = format!("{} already exists.\nDo you want to replace it?", path);
-        o.message_box(dlg, &msg, &caption, MB_YESNO | MB_ICONEXCLAMATION);
+        o.message_box(cpu, dlg, &msg, &caption, MB_YESNO | MB_ICONEXCLAMATION);
         o.then(T_CONFIRM, &[read_only as u32]);
         return;
     }
@@ -989,7 +997,7 @@ fn open(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
             "{}\nThis file does not exist.\nDo you want to create it?",
             path
         );
-        o.message_box(dlg, &msg, &caption, MB_YESNO | MB_ICONEXCLAMATION);
+        o.message_box(cpu, dlg, &msg, &caption, MB_YESNO | MB_ICONEXCLAMATION);
         o.then(T_CONFIRM, &[read_only as u32]);
         return;
     }
@@ -1003,24 +1011,24 @@ fn finish(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
     let path = d.path.clone();
     if !write_result(cpu, d, &path) {
         set_extended_error(cpu, FNERR_BUFFERTOOSMALL);
-        o.user("EndDialog", &[d.hwnd, 0]);
+        o.user(cpu, "EndDialog", &[d.hwnd, 0]);
         return;
     }
-    file_ok(d, o);
+    file_ok(cpu, d, o);
 }
 
 /// Ask the hook whether the dialog may end, and end it if so.
-fn file_ok(d: &FileDlg, o: &mut Ops) {
+fn file_ok(cpu: &Cpu, d: &FileDlg, o: &mut Ops) {
     if d.hook == 0 || d.custom == 0 {
-        o.user("EndDialog", &[d.hwnd, 1]);
+        o.user(cpu, "EndDialog", &[d.hwnd, 1]);
         return;
     }
     if d.flags & OFN_EXPLORER != 0 {
-        notify(d, o, CDN_FILEOK);
+        notify(cpu, d, o, CDN_FILEOK);
         o.then(T_FILEOK, &[]);
     } else {
         let args = [d.custom, d.fileok, 0, d.ofn];
-        o.user("SendMessageA", &args);
+        o.user(cpu, "SendMessageA", &args);
         o.then(T_FILEOK_STRING, &[]);
     }
 }
@@ -1037,7 +1045,7 @@ fn open_several(cpu: &mut Cpu, d: &mut FileDlg, names: &[String], read_only: boo
                     name
                 );
                 let caption = if d.save { "Save As" } else { "Open" };
-                o.message_box(d.hwnd, &msg, caption, MB_OK | MB_ICONEXCLAMATION);
+                o.message_box(cpu, d.hwnd, &msg, caption, MB_OK | MB_ICONEXCLAMATION);
                 return;
             }
         }
@@ -1059,7 +1067,7 @@ fn open_several(cpu: &mut Cpu, d: &mut FileDlg, names: &[String], read_only: boo
             cpu.bus.guest_write_16(file, out.len() as u16);
         }
         set_extended_error(cpu, FNERR_BUFFERTOOSMALL);
-        o.user("EndDialog", &[d.hwnd, 0]);
+        o.user(cpu, "EndDialog", &[d.hwnd, 0]);
         return;
     }
     if file != 0 && cpu.bus.guest_probe(file, out.len(), true) {
@@ -1067,7 +1075,7 @@ fn open_several(cpu: &mut Cpu, d: &mut FileDlg, names: &[String], read_only: boo
     }
     cpu.bus.guest_write_16(d.ofn + 56, offset as u16);
     cpu.bus.guest_write_16(d.ofn + 58, 0);
-    file_ok(d, o);
+    file_ok(cpu, d, o);
 }
 
 /// The CDM_* messages a hook sends the dialog: what they return goes in
@@ -1081,7 +1089,7 @@ fn custom_message(cpu: &mut Cpu, dlg: u32, msg: u32, wp: u32, lp: u32) -> Option
     let edit = item(cpu, dlg, EDT1);
     match msg {
         CDM_GETSPEC => {
-            o.send(edit, WM_GETTEXTLENGTH, 0, 0);
+            o.send(cpu, edit, WM_GETTEXTLENGTH, 0, 0);
             o.then(T_SPEC, &[wp, lp]);
         }
         CDM_GETFILEPATH => {
@@ -1089,7 +1097,7 @@ fn custom_message(cpu: &mut Cpu, dlg: u32, msg: u32, wp: u32, lp: u32) -> Option
                 set_result(cpu, dlg, u32::MAX);
                 return Some(1);
             }
-            o.get_item_text(dlg, EDT1);
+            o.get_item_text(cpu, dlg, EDT1);
             o.then(T_FILE_PATH, &[wp, lp]);
         }
         CDM_GETFOLDERPATH => {
@@ -1110,7 +1118,7 @@ fn custom_message(cpu: &mut Cpu, dlg: u32, msg: u32, wp: u32, lp: u32) -> Option
         }
         CDM_SETCONTROLTEXT => {
             if lp != 0 {
-                o.user("SetDlgItemTextA", &[dlg, wp, lp]);
+                o.user(cpu, "SetDlgItemTextA", &[dlg, wp, lp]);
             }
             o.then(T_RESULT, &[1]);
         }
@@ -1121,7 +1129,7 @@ fn custom_message(cpu: &mut Cpu, dlg: u32, msg: u32, wp: u32, lp: u32) -> Option
             }
             let control = item(cpu, dlg, wp);
             if control != 0 {
-                o.user("ShowWindow", &[control, SW_HIDE]);
+                o.user(cpu, "ShowWindow", &[control, SW_HIDE]);
             }
             o.then(T_RESULT, &[1]);
         }

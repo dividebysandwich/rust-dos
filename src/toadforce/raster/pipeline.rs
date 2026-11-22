@@ -100,11 +100,16 @@ pub struct Blend {
 /// One thing done to the fragments of a row, in the order of the list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Step {
-    /// The depth and stencil tests, and their writes.
+    /// The depth and stencil tests, and their writes. With `ranged`,
+    /// which is the depth test being on (`ZENABLE` and a depth
+    /// buffer), a fragment whose depth is outside 0 to 1 is dropped
+    /// before either test; without, such a depth counts as the end of
+    /// the range it is past.
     Depth {
         func: u32,
         write: bool,
         stencil: Option<Stencil>,
+        ranged: bool,
     },
     /// The vertices' colours into `Diffuse` and `Specular`, and
     /// `Diffuse` into `Current`.
@@ -234,6 +239,11 @@ pub struct DrawState {
     /// What each slot's coordinates are for a vertex the card
     /// transforms.
     pub coords: Vec<Coord>,
+    /// For each slot in use, `WRAP0` to `WRAP7`'s bits for its
+    /// coordinate set: bit n has coordinate n go the shorter way round
+    /// between a primitive's vertices (`raster::wrap`). 0 for a slot
+    /// not in use.
+    pub wrap: [u8; SLOTS],
     pub shape: Shape,
     /// Whether `Specular` is read.
     pub specular: bool,
@@ -585,6 +595,7 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
             zfail: l.state(RS_STENCILZFAIL),
             pass: l.state(RS_STENCILPASS),
         }),
+        ranged: z_on,
     });
     let mask = (l.state(RS_COLORWRITEENABLE) & 0xF) as u8;
     let kills = alpha_test || keyed_any;
@@ -629,7 +640,13 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
             let (src, dst) = match l.state(RS_SRCBLEND) {
                 12 => (5, 6),
                 13 => (6, 5),
-                src => (src, l.state(RS_DESTBLEND)),
+                // The two as the pixel's factor, which Direct3D has
+                // for the fragment only, leave nothing of the pixel:
+                // Microsoft's rasterisers were measured to.
+                src => match l.state(RS_DESTBLEND) {
+                    12 | 13 => (src, 1),
+                    dst => (src, dst),
+                },
             };
             Blend {
                 src,
@@ -706,6 +723,11 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
         clip,
         tex: texs,
         sets: coords.iter().map(|c| c.set).collect(),
+        wrap: std::array::from_fn(|slot| {
+            coords.get(slot).map_or(0, |c: &Coord| {
+                (l.state(RS_WRAP0 + c.set as u32 % 8) & 0xF) as u8
+            })
+        }),
         coords,
         shape: Shape {
             half_centre: on(RS_PIXEL_CENTRE),
@@ -852,6 +874,7 @@ mod tests {
             func: 4,
             write: true,
             stencil: None,
+            ranged: true,
         };
         assert_eq!(lower(&l).unwrap().steps, [depth, COLOURS, PASS, WRITE]);
         // With an alpha test the depth is written only for what passes
@@ -882,8 +905,30 @@ mod tests {
                 zfail: 1,
                 pass: 3,
             }),
+            ranged: false,
         };
         assert_eq!(lower(&l).unwrap().steps, [stencil]);
+    }
+
+    /// `DESTBLEND` 12 or 13 beside another `SRCBLEND` leaves nothing
+    /// of the pixel, and as `SRCBLEND` either sets both factors.
+    #[test]
+    fn the_factors_that_set_both_are_zero_as_the_destination() {
+        let blend = |src: u32, dst: u32| {
+            let mut l = state();
+            l.render[RS_ALPHABLENDENABLE as usize] = 1;
+            l.render[RS_SRCBLEND as usize] = src;
+            l.render[RS_DESTBLEND as usize] = dst;
+            lower(&l).unwrap().steps.iter().find_map(|step| match *step {
+                Step::Write { blend, .. } => blend.map(|b| (b.src, b.dst)),
+                _ => None,
+            })
+        };
+        assert_eq!(blend(2, 12), Some((2, 1)));
+        assert_eq!(blend(5, 13), Some((5, 1)));
+        assert_eq!(blend(12, 2), Some((5, 6)));
+        assert_eq!(blend(13, 12), Some((6, 5)));
+        assert_eq!(blend(5, 6), Some((5, 6)));
     }
 
     #[test]

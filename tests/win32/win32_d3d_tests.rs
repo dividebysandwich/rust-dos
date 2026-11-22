@@ -34,7 +34,7 @@ impl Layout {
     }
 
     /// The import address table slot of the function `index`.
-    fn import(&self, index: usize) -> AsmMemoryOperand {
+    pub(super) fn import(&self, index: usize) -> AsmMemoryOperand {
         dword_ptr(self.iat[index] as u64)
     }
 }
@@ -84,13 +84,13 @@ pub(super) fn program(
 
 /// A machine with a Voodoo3 as its display adapter, the built-in
 /// Windows on and `program` loaded from the shell as T.EXE.
-pub(super) fn machine(test: &str, program: Vec<u8>) -> Cpu {
+pub(super) fn machine(test: &str, program: Vec<u8>) -> Box<Cpu> {
     machine_with(test, None, program)
 }
 
 /// A machine with a Voodoo3 as its display adapter or, given a `card`
 /// other than the Voodoo3, its usual adapter and that add-on card.
-fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
+fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_d3d").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -114,7 +114,7 @@ fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
 
 /// A machine with a ToadForce as its display adapter, the built-in
 /// Windows on and `program` loaded from the shell as T.EXE.
-pub(super) fn machine_toadforce(test: &str, program: Vec<u8>) -> Cpu {
+pub(super) fn machine_toadforce(test: &str, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_d3d").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -1192,6 +1192,7 @@ const DDPF_STENCILBUFFER: u32 = 0x4000;
 const DDLOCK_WAIT: u32 = 1;
 const DDFLIP_WAIT: u32 = 1;
 const DDFLIP_NOVSYNC: u32 = 8;
+const DDFLIP_DONOTWAIT: u32 = 0x20;
 const D3DCLEAR_TARGET: u32 = 1;
 const D3DCLEAR_ZBUFFER: u32 = 2;
 const D3DCLEAR_STENCIL: u32 = 4;
@@ -3029,11 +3030,18 @@ const DDERR_WASSTILLDRAWING: u32 = 0x8876_021C;
 const SURF_GET_FLIP_STATUS: u32 = 18;
 const DDGFS_ISFLIPDONE: u32 = 2;
 
+/// What card_polling_program calls until it succeeds.
+enum CardPoll {
+    /// Flip of the front buffer, with these flags.
+    Flip(u32),
+    /// GetFlipStatus of the back buffer.
+    FlipStatus,
+}
+
 /// A flip chain on the Voodoo2's 3dfx device and a flip, whose swap
-/// waits for the card's next retrace; then, again and again with
-/// nothing in between until it succeeds, Flip without DDFLIP_WAIT, or
-/// GetFlipStatus of the back buffer when `status`.
-fn card_polling_program(status: bool) -> (Vec<u8>, u32) {
+/// waits for the card's next retrace; then `poll`, again and again with
+/// nothing in between until it succeeds.
+fn card_polling_program(poll: CardPoll) -> (Vec<u8>, u32) {
     let mut d = data();
     guid(
         &mut d,
@@ -3070,12 +3078,15 @@ fn card_polling_program(status: bool) -> (Vec<u8>, u32) {
         let mut again = a.create_label();
         a.set_label(&mut again)?;
         a.inc(dword_ptr(l.at(POLLS)))?;
-        let (object, method) = if status {
-            push(a, l, &[Arg::I(DDGFS_ISFLIPDONE)])?;
-            (TARGET, SURF_GET_FLIP_STATUS)
-        } else {
-            push(a, l, &[Arg::I(0), Arg::I(0)])?;
-            (FRONT, SURF_FLIP)
+        let (object, method) = match poll {
+            CardPoll::FlipStatus => {
+                push(a, l, &[Arg::I(DDGFS_ISFLIPDONE)])?;
+                (TARGET, SURF_GET_FLIP_STATUS)
+            }
+            CardPoll::Flip(flags) => {
+                push(a, l, &[Arg::I(0), Arg::I(flags)])?;
+                (FRONT, SURF_FLIP)
+            }
         };
         a.mov(eax, dword_ptr(l.at(object)))?;
         a.push(eax)?;
@@ -3098,8 +3109,9 @@ fn flip_polled_on_a_voodoo2_waits_for_the_swap() {
     // The swap is pending until the card's next retrace, and each call
     // of Flip fails until then. A loop that only polls waits for that
     // retrace at its 16th call, which flips, instead of making a call
-    // for each pass until then.
-    let (exe, data) = card_polling_program(false);
+    // for each pass until then. Through IDirectDrawSurface7, Flip fails
+    // only with DDFLIP_DONOTWAIT.
+    let (exe, data) = card_polling_program(CardPoll::Flip(DDFLIP_DONOTWAIT));
     let mut cpu = machine_with("card_flip_polling", Some(Board::Voodoo2), exe);
     run_until_done(&mut cpu, data);
     assert_eq!(results(&cpu, data, 7)[1..], [0; 6]);
@@ -3109,10 +3121,23 @@ fn flip_polled_on_a_voodoo2_waits_for_the_swap() {
 }
 
 #[test]
+fn flip7_on_a_voodoo2_goes_behind_the_swap_by_default() {
+    // Through IDirectDrawSurface7 Flip waits by default (DirectX 7's
+    // ddraw.h, at DDFLIP_DONOTWAIT): its swap goes behind the one waiting
+    // for the retrace, and the first call succeeds.
+    let (exe, data) = card_polling_program(CardPoll::Flip(0));
+    let mut cpu = machine_with("card_flip7_default", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&cpu, data, 7)[1..], [0; 6]);
+    assert_eq!(peek(&cpu, data + FIRST_POLL), 0);
+    assert_eq!(peek(&cpu, data + POLLS), 1, "calls of Flip");
+}
+
+#[test]
 fn flip_status_on_a_voodoo2_follows_the_swap() {
     // GetFlipStatus says the flip is still to show while the card's swap
     // waits for its retrace, and a loop that only asks waits for it.
-    let (exe, data) = card_polling_program(true);
+    let (exe, data) = card_polling_program(CardPoll::FlipStatus);
     let mut cpu = machine_with("card_flip_status", Some(Board::Voodoo2), exe);
     run_until_done(&mut cpu, data);
     assert_eq!(results(&cpu, data, 7)[1..], [0; 6]);
@@ -3475,7 +3500,7 @@ fn rt_z_program(calls: &mut RtZCalls) -> (Vec<u8>, u32) {
 
 /// `rt_z_program` run to its end: the machine, where its data is, its
 /// calls' results and where some of them are.
-fn run_rt_z(test: &str) -> (Cpu, u32, Vec<u32>, RtZCalls) {
+fn run_rt_z(test: &str) -> (Box<Cpu>, u32, Vec<u32>, RtZCalls) {
     let mut calls = RtZCalls::default();
     let (exe, data) = rt_z_program(&mut calls);
     let mut cpu = machine(test, exe);
@@ -3594,7 +3619,7 @@ fn traced_scene() -> Scene {
 
 /// `exe` run to its end in the folder of `test`, with the 3D trace into
 /// `t.trace` there when `trace`: the machine, and the trace's path.
-fn run_traced(test: &str, exe: Vec<u8>, data: u32, trace: bool) -> (Cpu, PathBuf) {
+fn run_traced(test: &str, exe: Vec<u8>, data: u32, trace: bool) -> (Box<Cpu>, PathBuf) {
     let mut cpu = machine(test, exe);
     let path = PathBuf::from("target/test_win32_d3d")
         .join(test)
@@ -4569,7 +4594,7 @@ const CAPS7: u32 = 0x600;
 /// A program that lists Direct3D 7's devices, makes the T&L HAL
 /// device and reads its description: its results, with the machine
 /// and the lines of the 3D trace.
-fn tnl_device_program(test: &str, toadforce: bool) -> (Cpu, u32, Vec<String>) {
+fn tnl_device_program(test: &str, toadforce: bool) -> (Box<Cpu>, u32, Vec<String>) {
     let mut d = data();
     target_desc(&mut d, DESC, 124, 64, 64);
     tnl_guid(&mut d, IID_HAL);
@@ -4793,6 +4818,125 @@ fn a_toadforce_blends_the_normals_of_blended_vertices() {
     assert_rgb(&p, 20, 32, [0, 0, 0], 0);
 }
 
+/// D3DSHADE_FLAT gives a triangle its first vertex's colours and
+/// leaves the fog, the specular colour's alpha, each vertex's own
+/// ("the specular alpha is interpolated"): a white square whose left
+/// vertices have no fog and whose right ones are all fog is white on
+/// the left and the fog's green on the right, in both its triangles.
+#[test]
+fn a_toadforce_interpolates_the_fog_of_a_flat_shaded_triangle() {
+    let square = quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)
+        .into_iter()
+        .map(|v| with_fog(v, if v.x == 0.0 { 0xFF } else { 0 }))
+        .collect();
+    let scene = toadforce_scene(vec![
+        Step::State(RS_SHADEMODE, 1),
+        Step::State(RS_FOGENABLE, 1),
+        Step::State(RS_FOGCOLOR, 0x00_FF00),
+        Step::Draw(square),
+    ]);
+    let p = draw_scene_toadforce("toadforce_flat_fog", &scene);
+    // An eighth of the way across, an eighth of the colour is fog, in
+    // the first triangle and in the second.
+    assert_rgb(&p, 8, 30, [223, 255, 223], 12);
+    assert_rgb(&p, 8, 60, [223, 255, 223], 12);
+    assert_rgb(&p, 56, 4, [32, 255, 32], 12);
+    assert_rgb(&p, 56, 30, [32, 255, 32], 12);
+}
+
+const RS_WRAP0: u32 = 128;
+
+/// Red and green over blue and white, each a quarter of the texture.
+fn quarters() -> [u16; 64] {
+    std::array::from_fn(|i| match (i % 8 >= 4, i / 8 >= 4) {
+        (false, false) => 0xF800,
+        (true, false) => 0x07E0,
+        (false, true) => 0x001F,
+        (true, true) => 0xFFFF,
+    })
+}
+
+/// A square over the target whose u is 0.9 on the left and 0.3 on the
+/// right, in the texture's upper half.
+fn over_the_seam() -> Vec<Tl> {
+    quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)
+        .into_iter()
+        .map(|v| Tl {
+            u: if v.x == 0.0 { 0.9 } else { 0.3 },
+            v: 0.25,
+            ..v
+        })
+        .collect()
+}
+
+/// Texture wrapping (D3DRENDERSTATE_WRAP0): a u that is half a turn or
+/// more from that of the triangle's highest vertex goes a turn towards
+/// it. The upper triangle's u goes from 0.9 on through 1 to 1.3, where
+/// without it u runs back from 0.9 to 0.3, and the lower one's from
+/// -0.1 to 0.3.
+#[test]
+fn a_toadforce_wraps_texture_coordinates_the_shorter_way_round() {
+    // Unwrapped: green down to u of 0.5, two thirds of the way.
+    let scene = Scene {
+        texture: Some(quarters()),
+        ..toadforce_scene(vec![Step::Draw(over_the_seam())])
+    };
+    let p = draw_scene_toadforce("toadforce_unwrapped", &scene);
+    assert_rgb(&p, 6, 16, [0, 255, 0], 0);
+    assert_rgb(&p, 32, 16, [0, 255, 0], 0);
+    assert_rgb(&p, 60, 16, [255, 0, 0], 0);
+    assert_rgb(&p, 32, 48, [0, 255, 0], 0);
+
+    // Wrapped: green up to u of 1, a quarter of the way, then red. The
+    // lower triangle's highest vertex is the right one, so its u runs
+    // from -0.1, green, on through 0 to 0.3.
+    let scene = Scene {
+        texture: Some(quarters()),
+        ..toadforce_scene(vec![Step::State(RS_WRAP0, 1), Step::Draw(over_the_seam())])
+    };
+    let p = draw_scene_toadforce("toadforce_wrap0", &scene);
+    assert_rgb(&p, 6, 16, [0, 255, 0], 0);
+    assert_rgb(&p, 32, 16, [255, 0, 0], 0);
+    assert_rgb(&p, 60, 16, [255, 0, 0], 0);
+    assert_rgb(&p, 8, 60, [0, 255, 0], 0);
+    assert_rgb(&p, 32, 48, [255, 0, 0], 0);
+}
+
+/// The same with vertices the card transforms: the HAL sends it the
+/// wrap states, and it wraps what it makes of the coordinates.
+#[test]
+fn a_toadforce_wraps_the_coordinates_of_vertices_it_transforms() {
+    let corner = |x: f32, y: f32| [x, y, 0.5, if x < 0.0 { 0.9 } else { 0.3 }, 0.25];
+    let (a, b) = (corner(-1.0, 1.0), corner(1.0, 1.0));
+    let (c, d) = (corner(-1.0, -1.0), corner(1.0, -1.0));
+    let square = || bits(&[a, b, c, b, d, c].concat());
+    let fvf = D3DFVF_XYZ | 0x100;
+    let scene = Scene {
+        texture: Some(quarters()),
+        ..toadforce_scene(vec![
+            Step::State(RS_LIGHTING, 0),
+            Step::World(fvf, square(), 6),
+        ])
+    };
+    let p = draw_scene32_toadforce("toadforce_world_unwrapped", &scene);
+    assert_eq!(p[16 * 64 + 6], 0x00_FF00);
+    assert_eq!(p[16 * 64 + 32], 0x00_FF00);
+    assert_eq!(p[16 * 64 + 60], 0xFF_0000);
+    let scene = Scene {
+        texture: Some(quarters()),
+        ..toadforce_scene(vec![
+            Step::State(RS_LIGHTING, 0),
+            Step::State(RS_WRAP0, 1),
+            Step::World(fvf, square(), 6),
+        ])
+    };
+    let p = draw_scene32_toadforce("toadforce_world_wrapped", &scene);
+    assert_eq!(p[16 * 64 + 6], 0x00_FF00);
+    assert_eq!(p[16 * 64 + 32], 0xFF_0000);
+    assert_eq!(p[48 * 64 + 32], 0xFF_0000);
+    assert_eq!(p[16 * 64 + 60], 0xFF_0000);
+}
+
 // The software devices: Ramp and RGB, which draw on the processor into
 // any surface, with or without a 3D card.
 
@@ -4940,7 +5084,7 @@ const SEEN_HEL: u32 = 0x84;
 
 /// A machine with a Super VGA and no 3D card, the built-in Windows on
 /// and `program` loaded from the shell as T.EXE.
-fn machine_without_3d(test: &str, program: Vec<u8>) -> Cpu {
+fn machine_without_3d(test: &str, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_d3d").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -4957,7 +5101,7 @@ fn machine_without_3d(test: &str, program: Vec<u8>) -> Cpu {
 /// device on a 64x64 target in video memory with a 16-bit depth buffer
 /// in system memory, as Warhammer: Dark Omen does: the machine after
 /// it, and its data.
-fn ramp_device_program(test: &str, machine: fn(&str, Vec<u8>) -> Cpu) -> (Cpu, u32) {
+fn ramp_device_program(test: &str, machine: fn(&str, Vec<u8>) -> Box<Cpu>) -> (Box<Cpu>, u32) {
     let mut d = data();
     target_desc(&mut d, DESC, 108, 64, 64);
     ramp_guid(&mut d, IID_HAL);

@@ -60,7 +60,7 @@ use super::super::device::{
     TSS_ALPHAOP, TSS_COLOROP,
 };
 use super::super::pipeline::{
-    self, Blend, LIGHT_GLSPOT, Layout, Matrix, Rasterizer, SHADE_FLAT, ScreenVertex, Setup,
+    self, Blend, Layout, Matrix, Rasterizer, SHADE_FLAT, ScreenVertex, Setup,
     Vertex, ViewMap,
 };
 use super::{Description, Fill};
@@ -367,6 +367,10 @@ pub struct Sent {
     textures: [Option<Texture>; UNITS as usize],
     bound: [bool; UNITS as usize],
     geometry: Geometry,
+    /// `WRAP0` to `WRAP7`. They are apart from `render` so that a
+    /// draw that wraps nothing, as nearly every draw does, pays one
+    /// comparison for the eight of them.
+    wrap: [u8; 8],
 }
 
 /// What the HAL gives the card for the vertices the card transforms
@@ -404,6 +408,7 @@ impl Sent {
             viewport: Viewport::default(),
             textures: Default::default(),
             bound: [false; UNITS as usize],
+            wrap: [0; 8],
             geometry: Geometry {
                 transforms: [pipeline::IDENTITY; TRANSFORMS],
                 material: Material::default(),
@@ -545,10 +550,12 @@ pub fn there(cpu: &Cpu) -> bool {
 
 // What the device reports.
 
-/// The stage operations the card draws: all of Direct3D 7's but
-/// PREMODULATE.
-pub fn can_do(op: u32) -> bool {
-    states::Kind::Op.takes(op) && op <= 24
+/// The stage operations the card draws for a device of Direct3D
+/// `version`: all of that version's but PREMODULATE. MULTIPLYADD (25)
+/// and LERP (26) are Direct3D 8's: they take a third argument, which
+/// a device of an older version has no state for.
+pub fn can_do(op: u32, version: u32) -> bool {
+    states::Kind::Op.takes(op) && (op <= 24 || version >= 8)
 }
 
 fn rgb(bits: u32, a: u32, r: u32, g: u32, b: u32) -> DdFormat {
@@ -652,15 +659,28 @@ pub fn description() -> Description {
         // cards of the time with no limit reported it.
         texture_aspect: caps::TEXTURE_MAX,
         // D3DPRASTERCAPS_: anisotropic filtering, table fog by w and by
-        // z.
+        // z. No w buffer: the card's depth is z (`RS_ZENABLE`).
         raster: 0x2_0000 | 0x10_0000 | 0x20_0000,
-        texture: super::TEXTURECAPS_CUBEMAP,
+        // D3DPTEXTURECAPS_: cube maps, projected coordinates
+        // (D3DTTFF_PROJECTED), and coordinates that aren't scaled by
+        // the texture's size, which every HAL says to Direct3D 7.
+        texture: super::TEXTURECAPS_CUBEMAP | 0x400 | 0x40,
+        // No D3DPTEXTURECAPS_COLORKEYBLEND: the card drops a keyed
+        // texel's fragment and has no blend for one
+        // (D3DRENDERSTATE_COLORKEYBLENDENABLE).
+        texture7: 0,
+        // D3DPRASTERCAPS_COLORPERSPECTIVE: colours are interpolated
+        // with perspective, as texture coordinates are.
+        raster8: 0x40_0000,
+        // D3DTEXOPCAPS_MULTIPLYADD and LERP.
+        ops8: 0x300_0000,
         // D3DPTFILTERCAPS_: anisotropic minification and magnification,
         // and a linear filter between mipmap levels.
         filter: 0x400 | 0x400_0000 | 0x2_0000,
         // D3DPTADDRESSCAPS_: the border color.
         address: 0x8,
-        // D3DPBLENDCAPS_: every factor.
+        // D3DPBLENDCAPS_: every factor. The destination has all but
+        // the two that set both (`caps.rs`).
         blend: 0x1FFF,
         guard_band: VERTEX_BAND,
         // D3DSTENCILCAPS_: all eight operations.
@@ -790,7 +810,7 @@ fn sent(cpu: &mut Cpu) -> Sent {
 /// The surface `id` in card memory: where it is and its pitch.
 fn in_card(cpu: &mut Cpu, id: u32) -> Option<(u32, u32)> {
     let s = state(cpu).surface(id)?;
-    (s.memory == MEM_VIDEO && !s.lost).then_some((s.bits, s.pitch))
+    (s.memory == MEM_VIDEO && !s.lost.get()).then_some((s.bits, s.pitch))
 }
 
 /// The device's render target as the card takes it, with the depth
@@ -880,6 +900,10 @@ fn render_value(
         RS_SHADEMODE if lit => 2 - (setup.shade == SHADE_FLAT) as u32,
         RS_CLIPPING => setup.clip as u32,
         RS_LIGHTING => lighting.is_some() as u32,
+        // A material Direct3D 7 gives no highlight (`setup_of`): the
+        // card would raise to its power, and without the state its lit
+        // vertices have the black specular colour the device's have.
+        RS_SPECULARENABLE if lit && lighting.is_some_and(|l| !l.specular) => 0,
         RS_AMBIENT => lighting.map_or(0, |l| pipeline::color(l.ambient)),
         RS_COLORVERTEX => lighting.is_some_and(|l| l.color_vertex) as u32,
         RS_LOCALVIEWER => lighting.is_some_and(|l| l.local_viewer) as u32,
@@ -1166,7 +1190,7 @@ fn bind_as(
                 g.material = material;
                 g.back = material;
             }
-            let lights: Vec<Light> = l.lights.iter().map(card_light).collect();
+            let lights: Vec<Light> = l.lights.iter().map(|light| light.card()).collect();
             send_lights(&mut words, g, &lights);
         } else if let Some(l) = gl.and_then(|gl| gl.lighting.as_ref()) {
             if g.material != l.material {
@@ -1283,6 +1307,19 @@ fn bind_as(
             && !pairs.iter().any(|p| p.0 == states::RS_AMBIENT)
         {
             pairs.push((states::RS_AMBIENT, sent.render[at]));
+        }
+    }
+    // Each coordinate set's wrapping, which the setup has with
+    // Direct3D 5's two states for the first set in it. The card wraps
+    // the vertices it transforms; the pipeline has wrapped those it
+    // keeps before it clipped them, so the card gets none for them.
+    let wrap = if lit { setup.wrap } else { [0; 8] };
+    if sent.wrap != wrap {
+        for (set, (have, want)) in sent.wrap.iter_mut().zip(wrap).enumerate() {
+            if *have != want {
+                pairs.push((states::RS_WRAP0 + set as u32, want as u32));
+                *have = want;
+            }
         }
     }
     if !pairs.is_empty() {
@@ -1525,7 +1562,8 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool) -> Option<Texture> {
     forget(cpu, |c| c.surface == id);
     let image = image(cpu, id, key[0] != 0)?;
     let start = room(cpu, image.data.len() as u32)?;
-    screen::write(cpu, start, &image.data);
+    // The block is one no queued draw samples, so they stay queued.
+    screen::write_taken(cpu, start, &image.data);
     let mut texture = image.texture;
     for (offset, _) in &mut texture.images {
         *offset += start;
@@ -1575,7 +1613,7 @@ fn forget(cpu: &mut Cpu, gone: impl Fn(&Cached) -> bool) {
 fn room(cpu: &mut Cpu, len: u32) -> Option<u32> {
     let clock = hal(cpu).clock;
     loop {
-        if let Ok(at) = display::alloc(cpu, len.max(4)) {
+        if let Ok(at) = display::alloc_past_queue(cpu, len.max(4)) {
             return Some(at);
         }
         let textures = &hal(cpu).textures;
@@ -1624,6 +1662,7 @@ fn image(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Image> {
                 let step = if l.compressed() { line } else { l.pitch };
                 images.push((data.len() as u32, line));
                 let mut row = vec![0u8; line as usize];
+                surface::will_read_rows(cpu, &l, 0, step, lines, row.len());
                 for y in 0..lines {
                     surface::read_bytes(cpu, &l, y * step, &mut row);
                     data.extend_from_slice(&row);
@@ -1891,30 +1930,6 @@ fn send_lights(words: &mut Vec<u32>, g: &mut Geometry, lights: &[Light]) {
     g.on = on;
 }
 
-/// A light of the device as the card has one.
-fn card_light(l: &pipeline::Light) -> Light {
-    Light {
-        // Direct3D 5's second spot light is a spot light.
-        kind: if l.kind == LIGHT_GLSPOT {
-            level1::LIGHT_SPOT
-        } else {
-            l.kind
-        },
-        diffuse: l.diffuse,
-        specular: l.specular,
-        ambient: l.ambient,
-        position: l.position,
-        direction: l.direction,
-        // A range of 0 is no limit.
-        range: if l.range > 0.0 { l.range } else { f32::MAX },
-        falloff: l.falloff,
-        attenuation: l.attenuation,
-        theta: l.theta,
-        phi: l.phi,
-        spot_model: 0,
-    }
-}
-
 /// The world matrices the card blends the vertices of a draw with
 /// `setup` between, one more than the weights it takes from each
 /// vertex: None for a draw that isn't blended, or is blended in a way
@@ -1979,7 +1994,7 @@ fn can_transform(d: &Device, setup: &Setup, layout: &Layout) -> bool {
             && finite(&[m.diffuse, m.ambient, m.specular, m.emissive].concat())
             && m.power.is_finite()
             && l.lights.iter().all(|light| {
-                let l = card_light(light);
+                let l = light.card();
                 (level1::LIGHT_POINT..=level1::LIGHT_DIRECTIONAL).contains(&l.kind)
                     && finite(&[l.diffuse, l.specular, l.ambient].concat())
                     && finite(&[l.position, l.direction, l.attenuation].concat())

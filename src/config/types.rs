@@ -63,17 +63,29 @@ impl AspectRatio {
 /// How the picture is scaled up to the window (`filter`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Filter {
-    /// Sharp pixels.
+    /// Sharp pixels of equal size: each pixel of the picture covers the
+    /// same width and height on the screen, with a blended edge less than
+    /// one screen pixel wide where the scale isn't a whole number. At a
+    /// whole-number scale it is nearest-neighbour sampling.
     #[default]
-    Nearest,
+    Sharp,
+    /// Nearest-neighbour sampling: every screen pixel shows the one pixel
+    /// of the picture under its centre, unblended. Where the scale isn't
+    /// a whole number, pixels come out one screen pixel wider or taller
+    /// than their neighbours in turn.
+    Hard,
     /// Smooth, interpolated pixels.
     Linear,
 }
 
 impl Filter {
+    /// `nearest` is the old name of `sharp`, still read: every saved
+    /// configuration file has it, and the two draw the same at
+    /// whole-number scales. Nearest-neighbour sampling is `hard`.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
-            "nearest" => Some(Filter::Nearest),
+            "sharp" | "nearest" => Some(Filter::Sharp),
+            "hard" => Some(Filter::Hard),
             "linear" => Some(Filter::Linear),
             _ => None,
         }
@@ -81,7 +93,8 @@ impl Filter {
 
     pub fn name(self) -> &'static str {
         match self {
-            Filter::Nearest => "nearest",
+            Filter::Sharp => "sharp",
+            Filter::Hard => "hard",
             Filter::Linear => "linear",
         }
     }
@@ -201,6 +214,45 @@ impl DesktopDepth {
     }
 }
 
+/// The size of the built-in Windows' desktop (`win32_desktop`), as the
+/// Display Properties of Windows set it: 640x480 (the default), 800x600
+/// or 1024x768.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum DesktopSize {
+    #[default]
+    Vga,
+    Svga,
+    Xga,
+}
+
+impl DesktopSize {
+    pub const ALL: [Self; 3] = [Self::Vga, Self::Svga, Self::Xga];
+
+    /// "640x480", "800x600" or "1024x768".
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        Self::ALL.into_iter().find(|d| d.name().eq_ignore_ascii_case(s))
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Vga => "640x480",
+            Self::Svga => "800x600",
+            Self::Xga => "1024x768",
+        }
+    }
+
+    /// Its width and height in pixels. The sizes of `ALL` are the ones
+    /// ChangeDisplaySettings sets too (`screen::DESKTOP_SIZES`).
+    pub const fn size(self) -> (u32, u32) {
+        match self {
+            Self::Vga => (640, 480),
+            Self::Svga => (800, 600),
+            Self::Xga => (1024, 768),
+        }
+    }
+}
+
 pub use crate::win32::nls::Win32Locale;
 
 impl Win32Locale {
@@ -279,8 +331,9 @@ pub struct SoundConfig {
     /// The Sound Blaster's resources, and whether there is one.
     pub sb: crate::sb::SbConfig,
     pub sb_installed: bool,
-    /// OPL3 (as on an SB Pro 2 or SB16) rather than OPL2.
-    pub opl3: bool,
+    /// The FM chip (`opl`), or None for the Sound Blaster's own: two
+    /// OPL2s on an SB Pro 1, else an OPL3.
+    pub opl: Option<crate::opl::Chip>,
     /// The AWE32's sample ROM, a file or a directory with `awe32.raw`
     /// (`awe32rom`); without it, the usual places (`awe32::rom::find`).
     pub awe32rom: Option<PathBuf>,
@@ -305,6 +358,11 @@ pub struct SoundConfig {
     /// The host's MIDI port for `midisynth=host`: a part of its name or its
     /// number; empty for the first.
     pub midiport: String,
+    /// The AdLib Gold's resources (`adlibgoldbase`, `adlibgoldirq`,
+    /// `adlibgolddma`, `adlibgoldsurround`), and whether there is one
+    /// (`adlibgold`).
+    pub adlibgold: crate::adlibgold::AdlibGoldConfig,
+    pub adlibgold_installed: bool,
     /// The Covox or Disney Sound Source on LPT1 (`lpt_dac`).
     pub lpt_dac: LptDacType,
     /// The Tandy's and PCjr's sound chip (`tandy`).
@@ -333,7 +391,7 @@ impl Default for SoundConfig {
         Self {
             sb: crate::sb::SbConfig::default(),
             sb_installed: true,
-            opl3: true,
+            opl: None,
             awe32rom: None,
             awe32ram: crate::awe32::DEFAULT_RAM_KB,
             soundfont: None,
@@ -345,6 +403,8 @@ impl Default for SoundConfig {
             sc55roms: None,
             sc55model: "auto".to_string(),
             midiport: String::new(),
+            adlibgold: crate::adlibgold::AdlibGoldConfig::default(),
+            adlibgold_installed: false,
             lpt_dac: LptDacType::None,
             tandy: crate::sn76489::TandySound::Auto,
             pit2_gate_at_start: false,
@@ -363,11 +423,30 @@ impl SoundConfig {
         self.gus.enabled.then(|| self.gus.clone())
     }
 
+    /// The AdLib Gold to install, if any.
+    pub fn adlib_gold(&self) -> Option<crate::adlibgold::AdlibGoldConfig> {
+        self.adlibgold_installed.then_some(self.adlibgold)
+    }
+
+    /// The FM chip: as `opl` says, and always an OPL3 with an AdLib
+    /// Gold, whose chip it is. `opl=auto` gives the two OPL2s of the
+    /// first SB Pro (CT1330) with `sbtype=sbpro1`, and an OPL3 otherwise.
+    pub fn fm_chip(&self) -> crate::opl::Chip {
+        use crate::opl::Chip;
+        if self.adlibgold_installed {
+            return Chip::Opl3;
+        }
+        self.opl.unwrap_or(match self.card() {
+            Some(sb) if sb.model == crate::sb::SbModel::SbPro1 => Chip::DualOpl2,
+            _ => Chip::Opl3,
+        })
+    }
+
     /// Problems between settings, once the section is read: an Ultrasound
     /// on the Sound Blaster's ports is left out; shared IRQs and DMA
     /// channels only work while programs use one card at a time.
     pub fn check(&mut self) -> Vec<String> {
-        let mut warnings = Vec::new();
+        let mut warnings = self.check_adlib_gold();
         let Some(sb) = self.card() else { return warnings };
         if !self.gus.enabled {
             return warnings;
@@ -389,6 +468,29 @@ impl SoundConfig {
         warnings
     }
 
+    /// An AdLib Gold on another card's ports is left out. Its IRQ and DMA
+    /// channel are those of the Sound Blaster unless moved, which works
+    /// while programs use one card at a time, as on a real PC.
+    fn check_adlib_gold(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let Some(gold) = self.adlib_gold() else { return warnings };
+        let ports = gold.base..gold.base + 8;
+        let mut taken = vec![("the MPU-401", 0x330..0x332)];
+        if let Some(sb) = self.card() {
+            taken.push(("the Sound Blaster", sb.base..sb.base + 0x10));
+        }
+        if self.gus.enabled {
+            taken.push(("the Ultrasound", self.gus.base + 0x100..self.gus.base + 0x108));
+            taken.push(("the Ultrasound", self.gus.base..self.gus.base + 0x10));
+        }
+        if let Some((name, _)) = taken.iter().find(|(_, r)| r.start < ports.end && ports.start < r.end) {
+            warnings.push(format!("[sound]: adlibgoldbase {:X} is on {}'s ports; there is no AdLib Gold", gold.base, name));
+            self.adlibgold_installed = false;
+            return warnings;
+        }
+        warnings
+    }
+
     pub(super) fn set(&mut self, key: &str, value: &str, base_dir: &Path, home: Option<&Path>) -> Result<(), String> {
         let sb = &mut self.sb;
         let number = |min: u32, max: u32| match value.parse::<u32>() {
@@ -401,7 +503,7 @@ impl SoundConfig {
                     self.sb_installed = false;
                 } else {
                     sb.model = crate::sb::SbModel::parse(value)
-                        .ok_or_else(|| format!("invalid sbtype '{}' (sb16, sb16vibra, awe32, sbpro2, sb2 or none)", value))?;
+                        .ok_or_else(|| format!("invalid sbtype '{}' (sb16, sb16vibra, awe32, sbpro2, sbpro1, sb2 or none)", value))?;
                     self.sb_installed = true;
                 }
             }
@@ -422,10 +524,18 @@ impl SoundConfig {
             "dma" => sb.dma8 = number(0, 3).and_then(|d| if d == 2 { Err("dma 2 belongs to the floppy".to_string()) } else { Ok(d) })? as u8,
             "hdma" => sb.dma16 = number(5, 7)? as u8,
             "opl" => {
-                self.opl3 = match value.to_ascii_lowercase().as_str() {
-                    "opl3" => true,
-                    "opl2" => false,
-                    _ => return Err(format!("invalid opl '{}' (opl3 or opl2)", value)),
+                use crate::opl::Chip;
+                self.opl = match value.to_ascii_lowercase().as_str() {
+                    "auto" => None,
+                    "opl3" => Some(Chip::Opl3),
+                    "opl2" => Some(Chip::Opl2),
+                    "dualopl2" => Some(Chip::DualOpl2),
+                    _ => {
+                        return Err(format!(
+                            "invalid opl '{}' (auto, opl3, opl2 or dualopl2)",
+                            value
+                        ));
+                    }
                 }
             }
             "awe32rom" => self.awe32rom = Some(expand_host_path(value, base_dir, home)),
@@ -520,6 +630,34 @@ impl SoundConfig {
             "tandy" => {
                 self.tandy = crate::sn76489::TandySound::parse(value)
                     .ok_or_else(|| format!("invalid tandy '{}' (auto, on or off)", value))?;
+            }
+            "adlibgold" => {
+                self.adlibgold_installed =
+                    parse_bool(value).ok_or_else(|| format!("invalid adlibgold '{}' (true or false)", value))?;
+            }
+            "adlibgoldbase" => {
+                self.adlibgold.base = u16::from_str_radix(value.trim_start_matches("0x"), 16)
+                    .ok()
+                    .filter(|&b| crate::adlibgold::AdlibGoldConfig::valid_base(b))
+                    .ok_or_else(|| format!("invalid adlibgoldbase '{}' (200 to 3F8 in steps of 8, hex)", value))?;
+            }
+            "adlibgoldirq" => {
+                self.adlibgold.irq = value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|&i| crate::adlibgold::AdlibGoldConfig::valid_irq(i))
+                    .ok_or_else(|| format!("invalid adlibgoldirq '{}' (3, 4, 5 or 7)", value))?;
+            }
+            "adlibgolddma" => {
+                self.adlibgold.dma = value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|&d| crate::adlibgold::AdlibGoldConfig::valid_dma(d))
+                    .ok_or_else(|| format!("invalid adlibgolddma '{}' (1 or 3)", value))?;
+            }
+            "adlibgoldsurround" => {
+                self.adlibgold.surround =
+                    parse_bool(value).ok_or_else(|| format!("invalid adlibgoldsurround '{}' (true or false)", value))?;
             }
             "lpt_dac" => {
                 self.lpt_dac = LptDacType::parse(value)

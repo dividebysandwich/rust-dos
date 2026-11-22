@@ -109,6 +109,8 @@ const OPENGL32: &[&str] = &[
     "glTexCoord2f",
     "glIsTexture",
     "glDeleteTextures",
+    "glTexSubImage2D",
+    "glCopyTexSubImage2D",
 ];
 const GLU32: &[&str] = &[
     "gluBuild2DMipmaps",
@@ -117,6 +119,9 @@ const GLU32: &[&str] = &[
     "gluGetString",
 ];
 const KERNEL32: &[&str] = &["CreateThread"];
+/// USER32's imports after the others', so that the places above stay.
+const USER32_MORE: &[&str] = &["ChangeDisplaySettingsA", "SendMessageA"];
+const DDRAW: &[&str] = &["DirectDrawCreate"];
 const CREATE_WINDOW: usize = 0;
 const GET_DC: usize = 1;
 const CHOOSE_PIXEL_FORMAT: usize = 2;
@@ -192,12 +197,17 @@ const PIXEL_STOREI: usize = GL + 65;
 const TEX_COORD2F: usize = GL + 66;
 const IS_TEXTURE: usize = GL + 67;
 const DELETE_TEXTURES: usize = GL + 68;
+const TEX_SUB_IMAGE_2D: usize = GL + 69;
+const COPY_TEX_SUB_IMAGE_2D: usize = GL + 70;
 const GLU: usize = GL + OPENGL32.len();
 const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
 const ERROR_STRING: usize = GLU + 2;
 const GLU_GET_STRING: usize = GLU + 3;
 const CREATE_THREAD: usize = GLU + GLU32.len();
+const CHANGE_DISPLAY_SETTINGS: usize = CREATE_THREAD + KERNEL32.len();
+const SEND_MESSAGE: usize = CHANGE_DISPLAY_SETTINGS + 1;
+const DIRECT_DRAW_CREATE: usize = CHANGE_DISPLAY_SETTINGS + USER32_MORE.len();
 
 /// A program importing the functions above, with `data` and the code
 /// `f` makes, and where its data is.
@@ -205,20 +215,34 @@ fn program(
     data: &[u8],
     f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
 ) -> (Vec<u8>, u32) {
+    program_importing(data, true, f)
+}
+
+/// `program`, importing DirectDraw's function only with `ddraw`: a
+/// program without it doesn't load DDRAW.DLL, as GLQuake doesn't.
+fn program_importing(
+    data: &[u8],
+    ddraw: bool,
+    f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+) -> (Vec<u8>, u32) {
     let mut b = Builder::exe(BASE);
     let list =
         |names: &[&'static str]| -> Vec<Imp> { names.iter().map(|n| Imp::Name(n)).collect() };
     let (user, gdi, gl, glu) = (list(USER32), list(GDI32), list(OPENGL32), list(GLU32));
-    let kernel = list(KERNEL32);
-    let iat = b
-        .imports(&[
-            ("USER32.DLL", &user),
-            ("GDI32.DLL", &gdi),
-            ("OPENGL32.DLL", &gl),
-            ("GLU32.DLL", &glu),
-            ("KERNEL32.DLL", &kernel),
-        ])
-        .concat();
+    let (kernel, user_more) = (list(KERNEL32), list(USER32_MORE));
+    let ddraw_imports = list(DDRAW);
+    let mut dlls: Vec<(&str, &[Imp])> = vec![
+        ("USER32.DLL", &user),
+        ("GDI32.DLL", &gdi),
+        ("OPENGL32.DLL", &gl),
+        ("GLU32.DLL", &glu),
+        ("KERNEL32.DLL", &kernel),
+        ("USER32.DLL", &user_more),
+    ];
+    if ddraw {
+        dlls.push(("DDRAW.DLL", &ddraw_imports));
+    }
+    let iat = b.imports(&dlls).concat();
     let data_rva = b.section(
         ".data",
         data,
@@ -246,14 +270,14 @@ fn program(
 
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, and a Voodoo3 as its display adapter when `voodoo3`.
-fn machine(test: &str, voodoo3: bool, program: Vec<u8>) -> Cpu {
+fn machine(test: &str, voodoo3: bool, program: Vec<u8>) -> Box<Cpu> {
     machine_with(test, voodoo3.then_some(Board::Voodoo3), program)
 }
 
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, and the 3dfx card `card`: a Voodoo3 is the display
 /// adapter, a Voodoo2 a card beside the VGA.
-fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
+fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Box<Cpu> {
     let adapter = (card == Some(Board::Voodoo3)).then_some(Adapter::Voodoo3);
     boot(test, adapter, card, program)
 }
@@ -261,7 +285,7 @@ fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, `adapter` as its display adapter (the VGA when
 /// None), and the 3dfx card `voodoo`.
-fn boot(test: &str, adapter: Option<Adapter>, voodoo: Option<Board>, program: Vec<u8>) -> Cpu {
+fn boot(test: &str, adapter: Option<Adapter>, voodoo: Option<Board>, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_opengl").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -292,8 +316,9 @@ enum Draws {
 }
 
 /// A machine with the built-in Windows on, `program` loaded from the
-/// shell as T.EXE, and `card` as its display adapter.
-fn machine_on(test: &str, card: Draws, program: Vec<u8>) -> Cpu {
+/// shell as T.EXE, and `card` as its display adapter. Its folder is
+/// `folder_on(test, card)`.
+fn machine_on(test: &str, card: Draws, program: Vec<u8>) -> Box<Cpu> {
     match card {
         Draws::Voodoo3 => machine(test, true, program),
         Draws::ToadForce => boot(
@@ -303,6 +328,16 @@ fn machine_on(test: &str, card: Draws, program: Vec<u8>) -> Cpu {
             program,
         ),
     }
+}
+
+/// The folder of `machine_on(test, card)`'s machine, which only that
+/// test makes and empties: the place for the files the test writes.
+fn folder_on(test: &str, card: Draws) -> PathBuf {
+    let name = match card {
+        Draws::Voodoo3 => test.to_string(),
+        Draws::ToadForce => format!("{test}_toadforce"),
+    };
+    PathBuf::from("target/test_win32_opengl").join(name)
 }
 
 /// On a ToadForce, the card drew and took every command its drivers
@@ -809,7 +844,7 @@ const TOP_RIGHT: [[f32; 2]; 3] = [[1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
 /// green triangle over the top right half. The depth test is on for the
 /// triangles with `depth_test`; without it the frames are drawn as Oni's
 /// menus draw theirs.
-fn two_triangles(clear: bool, depth_test: bool) -> (Cpu, u32) {
+fn two_triangles(clear: bool, depth_test: bool) -> (Box<Cpu>, u32) {
     let (exe, data) = program(&data(), |a, l| {
         let mut c = Calls { next: 0 };
         start(a, l, &mut c)?;
@@ -866,7 +901,7 @@ fn a_depth_clear_without_the_depth_test_gives_the_card_the_depth_buffer() {
 /// window and then, with `second`, makes a context in another window,
 /// clears its color and depth buffers and draws a green triangle in it,
 /// with the depth test on if `second` is true.
-fn two_contexts(second: Option<bool>) -> (Cpu, u32) {
+fn two_contexts(second: Option<bool>) -> (Box<Cpu>, u32) {
     let (exe, data) = program(&data(), |a, l| {
         let mut c = Calls { next: 0 };
         let both = [Arg::I(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)];
@@ -1301,6 +1336,34 @@ fn on_a_voodoo2_a_context_draws_full_screen_on_the_card() {
     assert_eq!((v.fbi.width, v.fbi.height), (512, 384));
     assert_eq!(pixel(&cpu, data, 4, 4), [255, 0, 0]);
     assert_eq!(pixel(&cpu, data, 60, 60), [0, 0, 255]);
+}
+
+/// On a Voodoo2 a full-screen context puts DirectDraw's window procedure
+/// in front of the window's. A program that imports OpenGL alone, as
+/// GLQuake does, gets its messages through it all the same: DDRAW.DLL,
+/// where the procedure is, is loaded with the context.
+#[test]
+fn on_a_voodoo2_a_program_without_directdraw_gets_its_window_messages() {
+    let (exe, data) = program_importing(&data(), false, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        // WM_NULL, through the window's procedure.
+        c.api(
+            a,
+            l,
+            SEND_MESSAGE,
+            &[Arg::Val(HWND), Arg::I(0), Arg::I(0), Arg::I(0)],
+        )?;
+        c.api(a, l, SWAP_BUFFERS, &[Arg::Val(HDC)])?;
+        finish(a, l)
+    });
+    let mut cpu = machine_with("voodoo2_no_ddraw", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    let r: Vec<u32> = (0..8).map(|i| peek(&cpu, data + RESULTS + 4 * i)).collect();
+    assert_ne!(r[4], 0, "wglCreateContext");
+    assert_eq!(r[5], 1, "wglMakeCurrent");
+    assert_eq!(r[7], 1, "SwapBuffers");
+    assert!(cpu.bus.voodoo.as_ref().unwrap().output(), "the card shows");
 }
 
 /// Upload a 2x2 texture of the RGBA texel `texel` as texture `name` (a
@@ -1816,7 +1879,7 @@ fn lit_by_normals(card: Draws) {
 /// counter-clockwise, so its front shows, and the top right one
 /// clockwise, so its back shows. With `two_side`, lighting is
 /// two-sided.
-fn two_sided(two_side: bool, card: Draws) -> (Cpu, u32) {
+fn two_sided(two_side: bool, card: Draws) -> (Box<Cpu>, u32) {
     let mut d = data();
     put_f32s(&mut d, VECTORS, &[0.0, 0.0, -1.0, 0.0]);
     put_f32s(&mut d, VECTORS + 16, &[1.0, 0.0, 0.0, 1.0]);
@@ -2207,6 +2270,336 @@ fn pixels_read_back_in_the_packed_types_texels_come_in() {
                 assert_eq!(pixel, 0, "{kind:#x} on {name}");
             }
         }
+    }
+}
+
+/// glReadPixels of GL_DEPTH_COMPONENT reads the depth buffer: 1.0 where
+/// it was cleared, and 0.5 where a quad at z 0 was drawn with the
+/// identity matrices, which the 16-bit buffer holds as 0x7FFF or 0x8000.
+/// A float gets the depth, an unsigned integer of b bits the depth times
+/// 2^b - 1. Oni reads one pixel's depth so each frame.
+#[test]
+fn depth_reads_back_as_float_and_unsigned_integers() {
+    // (type, the cleared depth, the quad's, a value's bytes).
+    let reads = [
+        (GL_FLOAT, 1.0f32.to_bits(), 0.5f32.to_bits(), 4),
+        (GL_UNSIGNED_SHORT, 0xFFFF, 0x8000, 2),
+        (GL_UNSIGNED_INT, 0xFFFF_FFFF, 0x8000_0000, 4),
+    ];
+    // Outside the quad, then inside it.
+    let places = [(4, 4), (32, 32)];
+    for (card, name) in [
+        (Draws::Voodoo3, "a Voodoo3"),
+        (Draws::ToadForce, "a ToadForce"),
+    ] {
+        let mut at = 0;
+        let (exe, data) = program(&data(), |a, l| {
+            let mut c = Calls { next: 0 };
+            start(a, l, &mut c)?;
+            let both = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT;
+            c.api(a, l, CLEAR, &[Arg::I(both)])?;
+            c.api(a, l, ENABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+            c.api(a, l, DEPTH_FUNC, &[Arg::I(GL_LESS)])?;
+            c.api(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+            c.api(a, l, COLOR3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+            for (x, y) in [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
+                c.api(a, l, VERTEX3F, &[Arg::F(x), Arg::F(y), Arg::F(0.0)])?;
+            }
+            c.api(a, l, END, &[])?;
+            at = c.next;
+            for (i, (kind, ..)) in reads.iter().enumerate() {
+                for (j, (x, y)) in places.iter().enumerate() {
+                    let one = [
+                        Arg::I(*x),
+                        Arg::I(*y),
+                        Arg::I(1),
+                        Arg::I(1),
+                        Arg::I(GL_DEPTH_COMPONENT),
+                        Arg::I(*kind),
+                        Arg::At(PIXELS + 8 * (2 * i + j) as u32),
+                    ];
+                    c.api(a, l, READ_PIXELS, &one)?;
+                    c.api(a, l, GET_ERROR, &[])?;
+                }
+            }
+            finish(a, l)
+        });
+        let mut cpu = machine_on("depth_read_back", card, exe);
+        run_until_done(&mut cpu, data);
+        for (i, (kind, cleared, drawn, bytes)) in reads.iter().enumerate() {
+            for (j, want) in [cleared, drawn].iter().enumerate() {
+                let n = (2 * i + j) as u32;
+                let error = peek(&cpu, data + RESULTS + 4 * (at + 2 * n + 1));
+                assert_eq!(error, 0, "{kind:#x} on {name}");
+                // A value is its bytes alone: the ones after it stay 0.
+                let got = peek(&cpu, data + PIXELS + 8 * n);
+                assert_eq!(peek(&cpu, data + PIXELS + 8 * n + 4), 0, "{name}");
+                assert!(*bytes == 4 || got >> 16 == 0, "{kind:#x} on {name}");
+                // The quad's depth is a half, whichever way it rounds to
+                // 16 bits.
+                let near = match *kind {
+                    GL_FLOAT => (f32::from_bits(got) - f32::from_bits(**want)).abs() < 1e-4,
+                    GL_UNSIGNED_SHORT => got.abs_diff(**want) <= 1,
+                    _ => got.abs_diff(**want) <= 0x1_0001,
+                };
+                assert!(near, "{kind:#x} at {:?} on {name}: {got:#x}", places[j]);
+            }
+        }
+    }
+}
+
+/// Depth read back in bytes and signed types, laid out as the pack
+/// settings say. A 2 by 2 rectangle at (15, 15) has the corner at
+/// (16, 16) in the quad of `depth_reads_back_as_float_and_unsigned_integers`:
+/// its bottom row comes first, a row to each 4 bytes with the default
+/// alignment and to each 2 with an alignment of 1. A cleared pixel is
+/// 2^b - 1 as an unsigned byte, and (2^b - 2) / 2 as a signed type of b
+/// bits (OpenGL 1.1's section 4.3.2). GL_BITMAP is no type for depth.
+#[test]
+fn depth_reads_back_in_bytes_and_signed_types_as_packed() {
+    const GL_INT: u32 = 0x1404;
+    const GL_BITMAP: u32 = 0x1A00;
+    const GL_PACK_ALIGNMENT: u32 = 0x0D05;
+    let slot = |n: u32| PIXELS + 8 * n;
+    // (x, y, width, height, type, pack alignment).
+    let reads = [
+        (15, 15, 2, 2, GL_UNSIGNED_BYTE, 4),
+        (15, 15, 2, 2, GL_UNSIGNED_BYTE, 1),
+        (4, 4, 1, 1, GL_BYTE, 4),
+        (4, 4, 1, 1, GL_SHORT, 4),
+        (4, 4, 1, 1, GL_INT, 4),
+        (4, 4, 1, 1, GL_BITMAP, 4),
+    ];
+    for (card, name) in [
+        (Draws::Voodoo3, "a Voodoo3"),
+        (Draws::ToadForce, "a ToadForce"),
+    ] {
+        let mut errors = Vec::new();
+        let (exe, data) = program(&data(), |a, l| {
+            let mut c = Calls { next: 0 };
+            start(a, l, &mut c)?;
+            let both = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT;
+            c.api(a, l, CLEAR, &[Arg::I(both)])?;
+            c.api(a, l, ENABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+            c.api(a, l, DEPTH_FUNC, &[Arg::I(GL_LESS)])?;
+            c.api(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+            for (x, y) in [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
+                c.api(a, l, VERTEX3F, &[Arg::F(x), Arg::F(y), Arg::F(0.0)])?;
+            }
+            c.api(a, l, END, &[])?;
+            for (n, &(x, y, w, h, kind, align)) in reads.iter().enumerate() {
+                let pack = [Arg::I(GL_PACK_ALIGNMENT), Arg::I(align)];
+                gl(a, l, PIXEL_STOREI, &pack)?;
+                let read = [
+                    Arg::I(x),
+                    Arg::I(y),
+                    Arg::I(w),
+                    Arg::I(h),
+                    Arg::I(GL_DEPTH_COMPONENT),
+                    Arg::I(kind),
+                    Arg::At(slot(n as u32)),
+                ];
+                c.api(a, l, READ_PIXELS, &read)?;
+                errors.push(c.next);
+                c.api(a, l, GET_ERROR, &[])?;
+            }
+            finish(a, l)
+        });
+        let mut cpu = machine_on("depth_read_packed", card, exe);
+        run_until_done(&mut cpu, data);
+        let error = |n: usize| peek(&cpu, data + RESULTS + 4 * errors[n]);
+        let got = |n: u32, at: u32| peek(&cpu, data + slot(n) + at);
+        for n in 0..5 {
+            assert_eq!(error(n), 0, "read {n} on {name}");
+        }
+        // The quad's corner is a half: 0x7FFF or 0x8000, 127 either way.
+        assert_eq!(
+            (got(0, 0), got(0, 4)),
+            (0xFFFF, 0x7FFF),
+            "aligned to 4 on {name}"
+        );
+        assert_eq!(
+            (got(1, 0), got(1, 4)),
+            (0x7FFF_FFFF, 0),
+            "aligned to 1 on {name}"
+        );
+        assert_eq!(got(2, 0), 0x7F, "GL_BYTE on {name}");
+        assert_eq!(got(3, 0), 0x7FFF, "GL_SHORT on {name}");
+        assert_eq!(got(4, 0), 0x7FFF_FFFF, "GL_INT on {name}");
+        assert_eq!(error(5), GL_INVALID_ENUM, "GL_BITMAP on {name}");
+        assert_eq!(got(5, 0), 0, "GL_BITMAP on {name}");
+    }
+}
+
+/// A texture keeps its texels when the display's mode changes: the
+/// driver keeps OpenGL's textures, where DirectDraw's surfaces in video
+/// memory are lost. Oni draws its menus and play from textures it made
+/// before the player picks another resolution in its options.
+#[test]
+fn textures_survive_a_change_of_the_display_mode() {
+    const DEVMODE: u32 = 0x160;
+    // DM_BITSPERPEL, DM_PELSWIDTH and DM_PELSHEIGHT.
+    const DM_FIELDS: u32 = 0x1C_0000;
+    let mut d = data();
+    put(&mut d, DEVMODE + 36, &124u16.to_le_bytes());
+    put32(&mut d, DEVMODE + 40, DM_FIELDS);
+    put32(&mut d, DEVMODE + 104, 32);
+    put32(&mut d, DEVMODE + 108, 800);
+    put32(&mut d, DEVMODE + 112, 600);
+    textures_kept_through("textures_mode_change", d, |a, l, c| {
+        let changed = c.next;
+        let mode = [Arg::At(DEVMODE), Arg::I(0)];
+        c.api(a, l, CHANGE_DISPLAY_SETTINGS, &mode)?;
+        Ok(vec![changed])
+    });
+}
+
+/// The same through DirectDraw's SetDisplayMode, whose mode set clears
+/// the new picture's part of video memory before the surfaces there are
+/// lost: the textures leave it before that.
+#[test]
+fn textures_survive_a_display_mode_directdraw_sets() {
+    const DIRECT_DRAW: u32 = 0xE0;
+    // DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN.
+    const EXCLUSIVE: i32 = 0x11;
+    textures_kept_through("textures_ddraw_mode", data(), |a, l, c| {
+        let created = c.next;
+        let create = [Arg::I(0), Arg::At(DIRECT_DRAW), Arg::I(0)];
+        c.api(a, l, DIRECT_DRAW_CREATE, &create)?;
+        // IDirectDraw's SetCooperativeLevel (20) and SetDisplayMode (21).
+        let method = |a: &mut CodeAssembler, slot: i32| -> Result<(), IcedError> {
+            a.mov(eax, dword_ptr(l.at(DIRECT_DRAW)))?;
+            a.push(eax)?;
+            a.mov(ecx, dword_ptr(eax))?;
+            a.call(dword_ptr(ecx + 4 * slot))
+        };
+        let record = |a: &mut CodeAssembler, c: &mut Calls| -> Result<u32, IcedError> {
+            a.mov(dword_ptr(l.at(RESULTS + 4 * c.next)), eax)?;
+            c.next += 1;
+            Ok(c.next - 1)
+        };
+        a.push(EXCLUSIVE)?;
+        a.push(dword_ptr(l.at(HWND)))?;
+        method(a, 20)?;
+        let level = record(a, c)?;
+        a.push(32)?;
+        a.push(600)?;
+        a.push(800)?;
+        method(a, 21)?;
+        let mode = record(a, c)?;
+        Ok(vec![created, level, mode])
+    });
+}
+
+/// Draw with a green texture, change the mode with the code `change`
+/// makes (the places of the results it gives must be 0), and draw with
+/// it again, then with a red texture made after the change, on a
+/// Voodoo3 and on a ToadForce.
+fn textures_kept_through(
+    test: &str,
+    mut d: Vec<u8>,
+    change: impl Fn(&mut CodeAssembler, &Layout, &mut Calls) -> Result<Vec<u32>, IcedError>,
+) {
+    const SECOND: u32 = 0xE4;
+    for i in 0..4 {
+        put(&mut d, TEXELS + 4 * i, &[0, 255, 0, 255]);
+        put(&mut d, TEXELS + 16 + 4 * i, &[255, 0, 0, 255]);
+    }
+    let quad = |a: &mut CodeAssembler, l: &Layout, c: &mut Calls| -> Result<(), IcedError> {
+        c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        c.api(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let st = [Arg::F((x + 1.0) / 2.0), Arg::F((y + 1.0) / 2.0)];
+            c.api(a, l, TEX_COORD2F, &st)?;
+            c.api(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        c.api(a, l, END, &[])
+    };
+    let read = |a: &mut CodeAssembler, l: &Layout, c: &mut Calls, at| -> Result<(), IcedError> {
+        let one = [
+            Arg::I(32),
+            Arg::I(32),
+            Arg::I(1),
+            Arg::I(1),
+            Arg::I(GL_RGBA),
+            Arg::I(GL_UNSIGNED_BYTE),
+            Arg::At(at),
+        ];
+        c.api(a, l, READ_PIXELS, &one)
+    };
+    // Make the texture named at `name` from the 2x2 texels at `texels`,
+    // bound.
+    let texture = |a: &mut CodeAssembler,
+                   l: &Layout,
+                   c: &mut Calls,
+                   name: u32,
+                   texels: u32|
+     -> Result<(), IcedError> {
+        let texture_2d = Arg::I(GL_TEXTURE_2D);
+        c.api(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(name)])?;
+        c.api(a, l, BIND_TEXTURE, &[texture_2d, Arg::Val(name)])?;
+        let image = [
+            texture_2d,
+            Arg::I(0),
+            Arg::I(GL_RGB),
+            Arg::I(2),
+            Arg::I(2),
+            Arg::I(0),
+            Arg::I(GL_RGBA),
+            Arg::I(GL_UNSIGNED_BYTE),
+            Arg::At(texels),
+        ];
+        c.api(a, l, TEX_IMAGE_2D, &image)?;
+        let nearest = [
+            texture_2d,
+            Arg::I(GL_TEXTURE_MIN_FILTER),
+            Arg::I(GL_NEAREST),
+        ];
+        c.api(a, l, TEX_PARAMETERI, &nearest)
+    };
+    for (card, name) in [
+        (Draws::Voodoo3, "a Voodoo3"),
+        (Draws::ToadForce, "a ToadForce"),
+    ] {
+        let mut zeros = Vec::new();
+        let (exe, data) = program(&d, |a, l| {
+            let mut c = Calls { next: 0 };
+            start(a, l, &mut c)?;
+            texture(a, l, &mut c, TEXTURE, TEXELS)?;
+            let replace = [
+                Arg::I(GL_TEXTURE_ENV),
+                Arg::I(GL_TEXTURE_ENV_MODE),
+                Arg::I(GL_REPLACE),
+            ];
+            c.api(a, l, TEX_ENVI, &replace)?;
+            c.api(a, l, ENABLE, &[Arg::I(GL_TEXTURE_2D)])?;
+            quad(a, l, &mut c)?;
+            read(a, l, &mut c, PIXELS)?;
+            c.api(a, l, SWAP_BUFFERS, &[Arg::Val(HDC)])?;
+            zeros = change(a, l, &mut c)?;
+            // The swap after the change makes the buffers again.
+            c.api(a, l, SWAP_BUFFERS, &[Arg::Val(HDC)])?;
+            quad(a, l, &mut c)?;
+            read(a, l, &mut c, PIXELS + 4)?;
+            texture(a, l, &mut c, SECOND, TEXELS + 16)?;
+            quad(a, l, &mut c)?;
+            read(a, l, &mut c, PIXELS + 8)?;
+            finish(a, l)
+        });
+        let mut cpu = machine_on(test, card, exe);
+        run_until_done(&mut cpu, data);
+        for i in zeros {
+            let r = peek(&cpu, data + RESULTS + 4 * i);
+            assert_eq!(r, 0, "result {i} of the change on {name}");
+        }
+        let pixel = |at: u32| peek(&cpu, data + PIXELS + at) & 0xFF_FFFF;
+        assert_eq!(pixel(0), 0x00_FF00, "before the change on {name}");
+        assert_eq!(
+            pixel(8),
+            0x00_00FF,
+            "a texture made after the change on {name}"
+        );
+        assert_eq!(pixel(4), 0x00_FF00, "after the change on {name}");
     }
 }
 
@@ -2675,6 +3068,118 @@ fn a_display_list_keeps_texels_as_they_were_unpacked() {
     assert_eq!(pixel(&cpu, data, 48, 16), [0, 255, 0]);
     assert_eq!(pixel(&cpu, data, 16, 48), [0, 0, 255]);
     assert_eq!(pixel(&cpu, data, 48, 48), [255, 255, 255]);
+}
+
+#[test]
+fn sub_images_land_at_their_offsets() {
+    sub_images(Draws::Voodoo3);
+}
+
+#[test]
+fn sub_images_on_a_toadforce_land_at_their_offsets() {
+    sub_images(Draws::ToadForce);
+}
+
+/// glTexSubImage2D and glCopyTexSubImage2D write their texels into
+/// part of a level, row by row at the level's pitch, and leave the
+/// texels around them as they were: a black 4x4 texture gets a 2x2
+/// image at (1, 2) and a column of two texels copied from the blue
+/// color buffer at (3, 0). The quad drawn with it shows each texel 16
+/// pixels square.
+fn sub_images(card: Draws) {
+    const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
+    const SUB: u32 = TEXELS + 0x40;
+    let mut d = lists_data();
+    put(&mut d, TEXELS, [[0, 0, 0, 255u8]; 16].as_flattened());
+    let sub = [
+        [255, 0, 0, 255u8],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 255, 255],
+    ];
+    put(&mut d, SUB, sub.as_flattened());
+    let mut error_at = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(TEXTURE)])?;
+        let image = [
+            Arg::I(GL_TEXTURE_2D),
+            Arg::I(0),
+            Arg::I(GL_RGB),
+            Arg::I(4),
+            Arg::I(4),
+            Arg::I(0),
+            Arg::I(GL_RGBA),
+            Arg::I(GL_UNSIGNED_BYTE),
+            Arg::At(TEXELS),
+        ];
+        gl(a, l, TEX_IMAGE_2D, &image)?;
+        let part = [
+            Arg::I(GL_TEXTURE_2D),
+            Arg::I(0),
+            Arg::I(1),
+            Arg::I(2),
+            Arg::I(2),
+            Arg::I(2),
+            Arg::I(GL_RGBA),
+            Arg::I(GL_UNSIGNED_BYTE),
+            Arg::At(SUB),
+        ];
+        gl(a, l, TEX_SUB_IMAGE_2D, &part)?;
+        clear_blue(a, l)?;
+        let copy = [
+            Arg::I(GL_TEXTURE_2D),
+            Arg::I(0),
+            Arg::I(3),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(1),
+            Arg::I(2),
+        ];
+        gl(a, l, COPY_TEX_SUB_IMAGE_2D, &copy)?;
+        for filter in [GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER] {
+            let nearest = [Arg::I(GL_TEXTURE_2D), Arg::I(filter), Arg::I(GL_NEAREST)];
+            gl(a, l, TEX_PARAMETERI, &nearest)?;
+        }
+        gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_2D)])?;
+        let replace = [
+            Arg::I(GL_TEXTURE_ENV),
+            Arg::I(GL_TEXTURE_ENV_MODE),
+            Arg::I(GL_REPLACE),
+        ];
+        gl(a, l, TEX_ENVI, &replace)?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        for [x, y] in corners(WHOLE) {
+            let st = [x, y].map(|v| Arg::F((v + 1.0) / 2.0));
+            gl(a, l, TEX_COORD2F, &st)?;
+            gl(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        gl(a, l, END, &[])?;
+        read_into(a, l, PIXELS)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine_on("sub_images", card, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    card_drew(&cpu, card);
+    // Texel (x, y), the first row given the bottom one.
+    let texel = |x: u32, y: u32| pixel(&cpu, data, x * 16 + 8, y * 16 + 8);
+    let rows = [
+        [[0; 3], [0; 3], [0; 3], [0, 0, 255]],
+        [[0; 3], [0; 3], [0; 3], [0, 0, 255]],
+        [[0; 3], [255, 0, 0], [0, 255, 0], [0; 3]],
+        [[0; 3], [0, 0, 255], [255, 255, 255], [0; 3]],
+    ];
+    for (y, row) in rows.iter().enumerate() {
+        for (x, &rgb) in row.iter().enumerate() {
+            assert_eq!(texel(x as u32, y as u32), rgb, "texel ({x}, {y})");
+        }
+    }
 }
 
 /// Lists call lists 64 deep (GL_MAX_LIST_NESTING), and a call past
@@ -3261,12 +3766,10 @@ fn runs_draw_alike(card: Draws) {
             "list_runs"
         };
         let mut cpu = machine_on(name, card, exe.clone());
-        // A file of this card's run: both cards' tests run at once.
-        let file = match card {
-            Draws::Voodoo3 => "voodoo3.trace",
-            Draws::ToadForce => "toadforce.trace",
-        };
-        let path = PathBuf::from(format!("target/test_win32_opengl/{name}/{file}"));
+        // In this card's own folder: both cards' tests run at once, and
+        // each empties its folder as it starts, so a file in the other
+        // card's folder may be gone, or its folder not there yet.
+        let path = folder_on(name, card).join("t.trace");
         if traced {
             rust_dos::win32::trace3d::start(&mut cpu, &path).unwrap();
         }

@@ -95,7 +95,7 @@ impl Polls {
     /// no other built-in function called in between by any thread. A
     /// loop like that does the same until the frame the display waits
     /// for, so the caller can make the thread wait for that frame instead
-    /// of running each poll (a game calling Flip without DDFLIP_WAIT until
+    /// of running each poll (a game calling Flip without waiting until
     /// it succeeds makes hundreds of calls a millisecond). A loop that
     /// does more while it waits, such as filling its sound buffer or
     /// reading its messages, keeps every poll.
@@ -193,7 +193,7 @@ fn screen_len(cpu: &mut Cpu) -> u32 {
 /// Set the mode `w` x `h` x `bpp` for the DirectDraw object `owner`.
 /// The surfaces in video memory are lost.
 pub fn set_mode(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> u32 {
-    if !modes(cpu).contains(&(w, h, bpp)) || set(cpu, owner, w, h, bpp).is_none() {
+    if !modes(cpu).contains(&(w, h, bpp)) || set(cpu, owner, w, h, bpp, 60).is_none() {
         return DDERR_INVALIDMODE;
     }
     DD_OK
@@ -202,9 +202,13 @@ pub fn set_mode(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> u32 {
 /// Set the mode for `owner`, any the adapter has: the surfaces in video
 /// memory are lost, and the mouse moves over the picture. Unless it is
 /// Glide's, the screen takes the mode's size (`display_changed`).
-fn set(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> Option<Mode> {
+fn set(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32, hz: u32) -> Option<Mode> {
     let old = display_mode(cpu);
-    let mode = screen::set_mode(cpu, w, h, bpp)?;
+    // Before the mode set, which clears the new picture's part of video
+    // memory. If the adapter has no such mode, the textures stay in
+    // system memory, where they work as well.
+    super::surface::video_memory_to_change(cpu);
+    let mode = screen::set_mode_at(cpu, w, h, bpp, hz)?;
     super::surface::video_memory_lost(cpu);
     let display = &mut state(cpu).display;
     display.blocks.clear();
@@ -225,18 +229,19 @@ pub fn desktop_changed(cpu: &mut Cpu) {
     if owns_display(cpu) {
         return;
     }
+    super::surface::video_memory_to_change(cpu);
     super::surface::video_memory_lost(cpu);
     state(cpu).display.blocks.clear();
 }
 
 /// Take the display for Glide on a Banshee or Voodoo3: the mode `w` x
-/// `h` x `bpp` (any the adapter has) is set and its picture is at the
-/// start of video memory, which is Glide's until `give_back`. A mode
-/// DirectDraw set ends, and its surfaces in video memory are lost; GDI
-/// draws nowhere. None if the adapter has no such mode, and nothing
+/// `h` x `bpp` (any the adapter has) at `hz` is set and its picture is
+/// at the start of video memory, which is Glide's until `give_back`. A
+/// mode DirectDraw set ends, and its surfaces in video memory are lost;
+/// GDI draws nowhere. None if the adapter has no such mode, and nothing
 /// changes then.
-pub fn take(cpu: &mut Cpu, w: u32, h: u32, bpp: u32) -> Option<Mode> {
-    let mode = set(cpu, GLIDE, w, h, bpp)?;
+pub fn take(cpu: &mut Cpu, w: u32, h: u32, bpp: u32, hz: u32) -> Option<Mode> {
+    let mode = set(cpu, GLIDE, w, h, bpp, hz)?;
     state(cpu).display.exclusive = 0;
     Some(mode)
 }
@@ -263,6 +268,7 @@ pub fn restore(cpu: &mut Cpu) {
         return;
     }
     let old = display_mode(cpu);
+    super::surface::video_memory_to_change(cpu);
     super::surface::video_memory_lost(cpu);
     let display = &mut state(cpu).display;
     display.blocks.clear();
@@ -290,22 +296,35 @@ fn restore_screen(cpu: &mut Cpu) {
 /// Take a block of `len` bytes of video memory: its offset, or the
 /// error.
 pub fn alloc(cpu: &mut Cpu, len: u32) -> Result<u32, u32> {
+    alloc_avoiding(cpu, len, &[])
+}
+
+/// `alloc`, with the ranges `avoid` (start and end) kept out of the
+/// block as well as the blocks taken.
+fn alloc_avoiding(cpu: &mut Cpu, len: u32, avoid: &[(u32, u32)]) -> Result<u32, u32> {
     let floor = screen_len(cpu).next_multiple_of(ALIGN);
     let len = len.max(1).next_multiple_of(ALIGN);
-    let size = screen::memory_size(cpu);
+    let size = screen::memory_size(cpu) as u64;
     let display = &mut state(cpu).display;
+    let taken = if avoid.is_empty() {
+        std::borrow::Cow::Borrowed(&display.blocks[..])
+    } else {
+        let mut taken = display.blocks.clone();
+        taken.extend(avoid.iter().map(|&(start, end)| (start, end - start)));
+        taken.sort_unstable();
+        std::borrow::Cow::Owned(taken)
+    };
     let mut at = floor;
-    let mut index = 0;
-    for (i, &(start, size)) in display.blocks.iter().enumerate() {
+    for &(start, len_taken) in taken.iter() {
         if start >= at && start - at >= len {
             break;
         }
-        at = at.max((start + size).next_multiple_of(ALIGN));
-        index = i + 1;
+        at = at.max((start + len_taken).next_multiple_of(ALIGN));
     }
-    if at as u64 + len as u64 > size as u64 {
+    if at as u64 + len as u64 > size {
         return Err(DDERR_OUTOFVIDEOMEMORY);
     }
+    let index = display.blocks.partition_point(|&(start, _)| start < at);
     display.blocks.insert(index, (at, len));
     Ok(at)
 }
@@ -317,12 +336,28 @@ pub fn alloc_rest(cpu: &mut Cpu) -> Result<u32, u32> {
     alloc(cpu, screen::memory_size(cpu) - floor)
 }
 
-/// Give back the block at `offset`.
+/// Take a block of `len` bytes of video memory that no command a
+/// ToadForce has queued reads or draws, for a driver to write past the
+/// queue (`screen::write_taken`): a block given back while the commands
+/// were queued stays out of it. Its offset, or the error.
+pub fn alloc_past_queue(cpu: &mut Cpu, len: u32) -> Result<u32, u32> {
+    let retired = cpu.bus.toadforce_retired().to_vec();
+    alloc_avoiding(cpu, len, &retired).or_else(|_| {
+        // The retired blocks are free again once the queue has run.
+        cpu.bus.toadforce_flush();
+        alloc(cpu, len)
+    })
+}
+
+/// Give back the block at `offset`. A ToadForce's queued commands may
+/// still read or draw there, so it stays out of `alloc_past_queue`
+/// until they have run.
 pub fn free(cpu: &mut Cpu, offset: u32) {
-    state(cpu)
-        .display
-        .blocks
-        .retain(|&(start, _)| start != offset);
+    let blocks = &mut state(cpu).display.blocks;
+    if let Some(i) = blocks.iter().position(|&(start, _)| start == offset) {
+        let (start, len) = blocks.remove(i);
+        cpu.bus.toadforce_retire(start, len);
+    }
 }
 
 /// Video memory for surfaces, and how much of it is free.

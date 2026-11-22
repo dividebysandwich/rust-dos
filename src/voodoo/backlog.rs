@@ -461,7 +461,7 @@ pub fn triangle(layout: &TileLayout, st: &RasterState, verts: &[(f32, f32); 3]) 
 /// The buffer rows `r0..r1` a triangle with vertices `verts` drawn with
 /// `st` can write: its rounded vertex rows with a pixel to spare, within
 /// the clip rectangle when clipping is on. None if they could wrap around
-/// or a vertex isn't a number.
+/// outside it, or a vertex isn't a number.
 pub fn triangle_rows(st: &RasterState, verts: &[(f32, f32); 3]) -> Option<(i32, i32)> {
     if verts.iter().any(|v| !v.1.is_finite()) {
         return None;
@@ -471,13 +471,46 @@ pub fn triangle_rows(st: &RasterState, verts: &[(f32, f32); 3]) -> Option<(i32, 
     let clamp = |v: f32| v.clamp(-8192.0, 8192.0) as i32;
     let y0 = (clamp(miny.floor()) - 1).max(-2048);
     let y1 = (clamp(maxy.ceil()) + 2).min(4096);
-    let (mut r0, mut r1) = buffer_rows(st, y0, y1)?;
-    if st.fbz_mode & 1 != 0 {
-        let (_, _, low, high) = st.clip();
-        r0 = r0.max(low);
-        r1 = r1.min(high);
+    if st.fbz_mode & 1 == 0 {
+        return buffer_rows(st, y0, y1);
     }
-    Some((r0, r1))
+    let (_, _, low, high) = st.clip();
+    let Some((r0, r1)) = buffer_rows(st, y0, y1) else {
+        return Some(wrapped_rows(st, y0, y1, (low, high)));
+    };
+    Some((r0.max(low), r1.min(high)))
+}
+
+/// The buffer rows of rows `y0..y1` drawn with the Y origin at the
+/// bottom on a Voodoo Graphics or Voodoo2, within the clip rows
+/// `low..high`. The card takes a row's buffer row as the origin's minus
+/// the row, kept to its low ten bits (`raster::screen_y`), and tests the
+/// clip rectangle after: the rows of a triangle past the origin wrap
+/// around to the buffer's last rows (1023 down), far below a picture
+/// that has fewer, and the clip rectangle leaves them out. GLQuake's
+/// triangles at the bottom edge of the screen reach past the origin by
+/// the pixel `triangle_rows` spares, and were taken to draw anywhere,
+/// which read the OpenGL renderer's rows back for each (#1522).
+/// `buffer_rows` sends only a Voodoo Graphics's or Voodoo2's rows here,
+/// whose `ymask` is 0x3FF: a Banshee's rows don't wrap.
+fn wrapped_rows(st: &RasterState, y0: i32, y1: i32, (low, high): (i32, i32)) -> (i32, i32) {
+    debug_assert_eq!(st.ymask, 0x3FF);
+    let size = 0x400;
+    let (r0, r1) = (st.yorigin as i32 - (y1 - 1), st.yorigin as i32 - y0 + 1);
+    if r1 - r0 >= size {
+        return (low.max(0), high.min(size));
+    }
+    // The rows as the card counts them: one or two runs of them.
+    let first = r0.rem_euclid(size);
+    let end = first + (r1 - r0);
+    let mut rows: Option<(i32, i32)> = None;
+    for (a, b) in [(first, end.min(size)), (0, end - size)] {
+        let (a, b) = (a.max(low), b.min(high));
+        if a < b {
+            rows = Some(rows.map_or((a, b), |(c, d)| (c.min(a), d.max(b))));
+        }
+    }
+    rows.unwrap_or((0, 0))
 }
 
 /// The buffer rows a fastfill of rows `y0..y1` drawn with `st` writes;
@@ -581,9 +614,11 @@ impl Footprint {
             // Later data over these bytes has to come after them, and so
             // does data in the same words: a worker writes half a word by
             // reading it first.
-            Job::Bytes { at, bytes, .. } => {
-                let (start, end) = (*at as u64, (*at + bytes.len()) as u64);
-                self.texture((start & !1, end.next_multiple_of(2)));
+            Job::Bytes { runs, .. } => {
+                for &(at, len) in runs {
+                    let (start, end) = (at as u64, (at + len) as u64);
+                    self.texture((start & !1, end.next_multiple_of(2)));
+                }
             }
             _ => {}
         }
@@ -2005,5 +2040,86 @@ mod tests {
         assert_eq!(kept, (2..PIXEL_MARKS as u64 + 2).collect::<Vec<_>>());
         let covered = b.jobs[2].1.covered.as_ref().expect("pixels");
         assert!(covered.pixels[1].is_empty(), "a bitmap of none drawn over");
+    }
+
+    /// A triangle drawn with the Y origin at the bottom into the layout's
+    /// first colour buffer, with clipping to the picture.
+    fn flipped_state() -> RasterState {
+        let mut st =
+            crate::voodoo::raster::tests::two_unit_state([1 << 9 | 1 << 17 | 1, 0, 0, 0, 0, 0]);
+        st.dest = 0;
+        st.tmu = [None, None];
+        st.stride = Stride::linear(640);
+        st.aux_stride = Stride::linear(640);
+        st.rowpixels = 640;
+        st.aux = Some(2 * 640 * 480);
+        st
+    }
+
+    #[test]
+    fn rows_past_the_y_origin_wrap_outside_the_clip_rectangle() {
+        // A triangle along the bottom edge of the screen (GLQuake's floor,
+        // #1522): its spare row reaches past the origin, which the card
+        // wraps to buffer row 1023, outside the clip rectangle.
+        let st = flipped_state();
+        let verts = [(10.0, 470.0), (100.0, 479.0), (10.0, 479.0)];
+        assert_eq!(triangle_rows(&st, &verts), Some((0, 11)));
+        let access = triangle(&layout(), &st, &verts);
+        assert!(!access.pinned, "{access:?}");
+        assert_eq!(access.writes[0], Rect::new(0, 6, 0, 1));
+        // Without clipping, row 1023 is drawn: memory outside the tiles.
+        let mut unclipped = st.clone();
+        unclipped.fbz_mode &= !1;
+        assert_eq!(triangle_rows(&unclipped, &verts), None);
+        assert!(triangle(&layout(), &unclipped, &verts).pinned);
+        // A clip rectangle down to row 1023 takes the wrapped rows in.
+        let mut tall = st.clone();
+        tall.clip_low_y_high_y = 1024;
+        assert_eq!(triangle_rows(&tall, &verts), Some((0, 1024)));
+    }
+
+    #[test]
+    fn wrapped_rows_are_the_rows_the_card_draws() {
+        let st = flipped_state();
+        // Rows 478..482 are buffer rows 1, 0, 1023, 1022.
+        assert_eq!(wrapped_rows(&st, 478, 482, (0, 480)), (0, 2));
+        assert_eq!(wrapped_rows(&st, 478, 482, (0, 1024)), (0, 1024));
+        assert_eq!(wrapped_rows(&st, 478, 482, (1000, 1024)), (1022, 1024));
+        // Only the wrapped rows, all outside the clip rectangle.
+        assert_eq!(wrapped_rows(&st, 481, 490, (0, 480)), (0, 0));
+        // Rows that go round the whole buffer.
+        assert_eq!(wrapped_rows(&st, -600, 600, (8, 400)), (8, 400));
+    }
+
+    #[test]
+    fn wrapped_rows_cover_the_rows_screen_y_gives() {
+        // Against the rasterizer's own row mapping, for Y origins other
+        // than Glide's (a picture's height less one) and clip rectangles
+        // both inside and across the wrap.
+        let mut st = flipped_state();
+        for yorigin in [0, 1, 479, 599, 767, 1023] {
+            st.yorigin = yorigin;
+            for (low, high) in [(0, 480), (0, 1024), (100, 200), (1000, 1024), (0, 1)] {
+                for y0 in (-40..1100).step_by(37) {
+                    for len in [1, 2, 5, 30, 600, 1100] {
+                        let y1 = y0 + len;
+                        let drawn: Vec<i32> = (y0..y1)
+                            .map(|y| screen_y(&st, y, true))
+                            .filter(|r| (low..high).contains(r))
+                            .collect();
+                        let (r0, r1) = wrapped_rows(&st, y0, y1, (low, high));
+                        let case = (yorigin, low, high, y0, y1, r0, r1);
+                        assert!(drawn.iter().all(|r| (r0..r1).contains(r)), "{case:?}");
+                        if drawn.is_empty() {
+                            assert!(r0 >= r1, "{case:?}");
+                        } else {
+                            let lo = *drawn.iter().min().unwrap();
+                            let hi = *drawn.iter().max().unwrap() + 1;
+                            assert_eq!((r0, r1), (lo, hi), "{case:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

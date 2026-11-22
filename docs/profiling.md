@@ -94,15 +94,20 @@ The JSON's sections:
 - `ports`: port accesses by device and by port, with rates a second. A
   word or doubleword access to byte ports counts once.
 - `hle`: calls of the emulator's BIOS and DOS functions by interrupt and
-  function (AH, or AL for INT 33h), with names for the common ones, and
-  the emulator's other services (the DPMI host's entries, inline and
-  far-call traps).
+  function (AH, or AL for INT 33h), with names for the common ones, the
+  emulator's other services (the DPMI host's entries, inline and
+  far-call traps), and the built-in Windows' calls by function: `win32`
+  for its DLLs' functions and its own traps, `win16` for the functions
+  of the Win16 system modules 16-bit code called (`Win16
+  USER.PeekMessage`), whose ids number them apart. The text report
+  lists the most called of all of them under `Services`.
 - `irqs`, `exceptions`: hardware interrupts delivered by IRQ line, and
   exceptions by vector.
 - `mapped_memory`: reads and writes of memory that isn't plain RAM:
-  `video` (A0000h-BFFFFh), `upper` (C0000h-FFFFFh: the ROMs, the EMS page
-  frame, upper memory blocks) and `device` (above RAM: linear frame
-  buffers, the 3D cards). A word access made of byte accesses counts once.
+  `video` (A0000h-BFFFFh), `upper` (the ROMs at C0000h-C7FFFh and
+  F0000h-FFFFFh; the upper memory blocks and the EMS page frame between
+  them are plain RAM) and `device` (above RAM: linear frame buffers, the
+  3D cards). A word access made of byte accesses counts once.
 - `dynrec`: the recompiler in the window: blocks translated, thrown away
   as stale or self-modified, flushes, block exits by reason, the
   instructions it handed to the interpreter (`calls.fallback_top`, by
@@ -133,7 +138,7 @@ The JSON's sections:
 | `mem` | `mem.video`, `mem.upper`, `mem.device` |
 | `sb`, `gus`, `voodoo`, `powervr` | `sb.dma` (the Sound Blaster's DMA), `gus.advance` (the Ultrasound), `voodoo` and `voodoo.frame` (the 3dfx card's work on the emulation thread, and its frame), `voodoo.wait` (waiting for the worker threads to draw what was queued, as something reads the card's memory), `voodoo.readback` (reading the 3D buffers or the 2D engine's pages back from the OpenGL renderer, waiting for the GPU), `powervr` |
 | `toadforce` | `toadforce` (the ToadForce's commands on the emulation thread: decoding, transform, lighting and clipping, and the software renderer), `toadforce.host` (the OpenGL renderer's draws, clears and copies, as far as the driver takes them without waiting), `toadforce.readback` (a surface copied from the GPU to card memory, waiting for the GPU) |
-| `hle` | `hle.int08` ... `hle.int67`, `hle.other`, `hle.inline`, `hle.far`, `hle.dpmi`, `hle.win32` (the built-in Windows), and inside it for a Direct3D draw `hle.d3d.setup` (the device's state gathered), `hle.d3d.vertices` (vertices the layer transforms itself), `hle.d3d.bind` (the card's state brought up to the device's, with `hle.d3d.bind.target`, `hle.d3d.bind.textures` and `hle.d3d.bind.states` for its parts), `hle.d3d.draw` (the vertices handed to the card) and `hle.opengl` (the OpenGL front end's primitives built and joined to those that wait, with `hle.opengl.call` for its functions' handlers, `hle.opengl.vertex` for a vertex taken, `hle.opengl.end` for glEnd and `hle.opengl.apply` for the state put on the Direct3D device); around each call of a built-in function, `hle.win32.args` (its arguments read from the stack) and `hle.win32.after` (what follows the handler) |
+| `hle` | `hle.int08` ... `hle.int67`, `hle.other`, `hle.inline`, `hle.far`, `hle.dpmi`, `hle.win32` (the built-in Windows), and inside it for a Direct3D draw `hle.d3d.setup` (the device's state gathered), `hle.d3d.vertices` (vertices the layer transforms itself), `hle.d3d.bind` (the card's state brought up to the device's, with `hle.d3d.bind.target`, `hle.d3d.bind.textures` and `hle.d3d.bind.states` for its parts), `hle.d3d.draw` (the vertices handed to the card) and `hle.opengl` (the OpenGL front end's primitives built and joined to those that wait, with `hle.opengl.call` for its functions' handlers, `hle.opengl.vertex` for a vertex taken, `hle.opengl.end` for glEnd, `hle.opengl.apply` for the state put on the Direct3D device and `hle.opengl.texels` for a texture image's texels read, converted and written into its surface); around each call of a built-in function, `hle.win32.args` (its arguments read from the stack) and `hle.win32.after` (what follows the handler) |
 | `io` | One zone per device: `io.vga`, `io.pic`, `io.pit`, `io.sb`, `io.opl`, `io.ide`, `io.s3`, ... and `io.unhandled` |
 
 A zone inside another counts only its own time: a port write from

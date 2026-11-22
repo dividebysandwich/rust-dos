@@ -23,8 +23,9 @@ mod search;
 mod state;
 mod system_files;
 
-use host_dir::{HostDirCache, SearchKey, Usage};
+use host_dir::{DirCount, HostDirCache, SearchKey};
 pub use layout::{DriveKind, Fat32Layout, FatLayout, old_space};
+pub use search::NameFilter;
 
 /// The open files are numbered as DOS numbers the entries of its System
 /// File Table (see dos_files.rs), which the handles of each process refer
@@ -671,6 +672,10 @@ impl HostFile {
 
     fn modified(&self) -> Option<std::time::SystemTime> {
         self.file.modified()
+    }
+
+    fn set_modified(&self, time: std::time::SystemTime) -> std::io::Result<()> {
+        self.file.set_modified(time)
     }
 }
 

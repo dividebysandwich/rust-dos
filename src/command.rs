@@ -69,6 +69,28 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("AWEUTIL", &crate::aweutil::AweUtilCommand),
 ];
 
+/// The commands DOSBox has as programs on Z:, the first directory of its
+/// PATH (`z_program`).
+static Z_PROGRAMS: &[(&str, &(dyn ShellCommand + Sync))] =
+    &[("CONFIG", &crate::config_command::ConfigCommand)];
+
+/// `command` (a name, with .COM or not) as one of `Z_PROGRAMS`, where
+/// DOSBox would run its own: a program of the name in the current
+/// directory comes first (a game's CONFIG.EXE, its setup), and one in a
+/// directory of the PATH after Z:, which DOSBox's PATH starts with.
+fn z_program(cpu: &Cpu, command: &str) -> Option<&'static (dyn ShellCommand + Sync)> {
+    let name = command
+        .strip_suffix(".COM")
+        .or_else(|| command.strip_suffix(".com"))
+        .unwrap_or(command);
+    let &(_, program) = Z_PROGRAMS.iter().find(|(n, _)| n.eq_ignore_ascii_case(name))?;
+    // `find_program` gives a program in the current directory without a
+    // directory in front.
+    let here = crate::exec::find_program(cpu, command)
+        .is_some_and(|path| !path.contains(['\\', '/', ':']));
+    (!here).then_some(program)
+}
+
 /// The names of the built-in commands.
 pub(crate) fn names() -> impl Iterator<Item = &'static str> {
     COMMANDS.iter().map(|&(name, _)| name)
@@ -125,7 +147,7 @@ impl CommandDispatcher {
             PathCommand.execute(cpu, &format!("{} {}", value, args));
             return true;
         }
-        let Some(cmd) = builtin(command) else {
+        let Some(cmd) = builtin(command).or_else(|| z_program(cpu, command)) else {
             return false;
         };
         // ECHO prints its text as it is, spaces and all, which batch files

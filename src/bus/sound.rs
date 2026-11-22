@@ -12,15 +12,19 @@ impl Bus {
     }
 
     /// Replace the sound hardware: the Sound Blaster (None removes it) and
-    /// whether the FM chip is an OPL3.
-    pub fn configure_sound(&mut self, sb: Option<crate::sb::SbConfig>, opl3: bool) {
+    /// the FM chip (`true` is an OPL3, `false` an OPL2).
+    pub fn configure_sound(
+        &mut self,
+        sb: Option<crate::sb::SbConfig>,
+        chip: impl Into<crate::opl::Chip>,
+    ) {
         // The sound up to now is the old card's: mix it before the card
         // goes, so the new one's frames start where the mixer is.
         self.audio_catch_up();
         let now = self.clock.now_ticks();
         self.sb = sb.map(|config| crate::sb::SoundBlaster::new(config, now));
         self.isapnp = sb.filter(|sb| sb.model == crate::sb::SbModel::Sb16Vibra).map(|sb| crate::isapnp::IsaPnp::vibra16c(&sb));
-        self.opl = crate::opl::Opl::new(opl3);
+        self.opl = crate::opl::Opl::with_chip(chip.into());
         self.configure_awe();
         self.sync_sb_irq();
         self.clock.schedule(self.next_event());
@@ -34,9 +38,9 @@ impl Bus {
     /// resources outlast it: a reboot (`power_on_sound`) gives the BIOS's.
     pub fn reset_sound(&mut self) {
         let config = self.sb.as_ref().map(|sb| sb.config);
-        let opl3 = self.opl.is_opl3();
+        let chip = self.opl.chip();
         let pnp = self.isapnp.take();
-        self.configure_sound(config, opl3);
+        self.configure_sound(config, chip);
         if self.isapnp.is_some() && pnp.is_some() {
             self.isapnp = pnp;
             self.route_isapnp_audio();
@@ -59,8 +63,19 @@ impl Bus {
         if let Some(awe) = &mut self.awe {
             awe.silence();
         }
+        self.reset_adlib_gold();
         self.sync_gus_irq();
         self.clock.schedule(self.next_event());
+    }
+
+    /// Turn the PC speaker off: port 61h as the BIOS's POST leaves it, the
+    /// speaker data bit clear, channel 2's gate as `pit2_gate_at_start`
+    /// has it and the check enables as they were. For a program the
+    /// emulator ended itself (its close, a divide overflow): nothing of it
+    /// is left to switch off a note it was playing. A program that ends
+    /// through DOS keeps the speaker as it left it, as on a real PC.
+    pub fn silence_speaker(&mut self) {
+        self.set_pit2_gate_at_start(self.pit2_gate_at_start);
     }
 
     /// Power-on state of the sound hardware, at a reboot: as at a
@@ -222,5 +237,26 @@ mod tests {
         let step = render(&mut bus, 10);
         let low = step.iter().min().unwrap();
         assert!(*low < -20000, "{}", low);
+    }
+
+    /// The speaker held high, its level taken out by its filter, lets the
+    /// mixer rest also when the frame being made starts between two ticks,
+    /// as after a long pause skipped or a version 9 state loaded.
+    #[test]
+    fn a_speaker_held_high_rests_from_a_frame_start() {
+        use crate::bus::frame_tick;
+        let mut bus = Bus::new(std::path::PathBuf::from("."));
+        bus.set_cycles_per_ms(1000);
+        // The data bit with the gate low: channel 2's output is high.
+        bus.io_write(0x61, 0x02);
+        render(&mut bus, 2000);
+        assert!(bus.audio_quiet(), "the speaker rests at its level");
+        let frame = (1..100)
+            .map(|n| bus.audio_frames - n)
+            .find(|&f| frame_tick(f).fract() != 0.0);
+        bus.audio_frames = frame.unwrap();
+        bus.speaker_high = 0.0;
+        bus.speaker_until = frame_tick(bus.audio_frames);
+        assert!(bus.audio_quiet(), "and from the start of a frame");
     }
 }

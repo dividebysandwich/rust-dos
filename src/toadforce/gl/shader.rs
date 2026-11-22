@@ -189,15 +189,17 @@ out vec4 v_specular;
 out vec4 v_tex[4];
 out float v_zw;
 invariant gl_Position;
-// `math::pow_unit`.
+// `math::pow_unit`, whose most is `math::POW_MAX`.
 float pow_unit(float x, float y) {
-    if (!(y > 0.0)) {
+    if (isnan(y) || y == 0.0 || x >= 1.0) {
         return 1.0;
     }
-    if (!(x > 0.0)) {
-        return 0.0;
+    bool none = !(x > 0.0);
+    if (y < 0.0) {
+        float under = none ? 0.0 : pow(x, -y);
+        return under > 1.0e-18 ? 1.0 / under : 1.0e18;
     }
-    return x >= 1.0 ? 1.0 : pow(x, y);
+    return none ? 0.0 : pow(x, y);
 }
 // `geometry::normalize`.
 vec3 unit(vec3 a) {
@@ -225,13 +227,18 @@ void light(vec3 eye, vec3 n, vec4 own_diffuse, vec4 own_specular) {
         if (kind != 3.0) {
             to = u_lpos[i].xyz - eye;
             float d = length(to);
-            if (d > u_laxis[i].w) {
+            // A light reaches what is nearer than its range, and
+            // adds nothing with an attenuation sum of 0 or below.
+            if (d >= u_laxis[i].w) {
                 continue;
             }
             vec3 a = u_latt[i].xyz;
             float under = a.x + a.y * d + a.z * d * d;
+            if (under <= 0.0) {
+                continue;
+            }
             to = unit(to);
-            reach = under > 0.0 ? 1.0 / under : 1.0;
+            reach = 1.0 / under;
         }
         float cone = 1.0;
         if (kind == 2.0) {
@@ -250,9 +257,10 @@ void light(vec3 eye, vec3 n, vec4 own_diffuse, vec4 own_specular) {
             }
         }
         float factor = reach * cone;
-        if (!(factor > 0.0) || isinf(factor)) {
+        if (!(factor > 0.0)) {
             continue;
         }
+        factor = min(factor, 1.0e18);
         ambient += u_lambient[i].xyz * factor;
         float facing = dot(n, to);
         if (!(facing > 0.0)) {
@@ -305,12 +313,16 @@ void main() {
     if (u_vfog.w != 0.0) {
         float d = u_vfog.w >= 4.0 ? length(e) : abs(e.z);
         float mode = u_vfog.w >= 4.0 ? u_vfog.w - 4.0 : u_vfog.w;
-        float f = mode == 1.0 ? exp(-u_vfog.z * d)
+        // `geometry::fog_factor`: linear fog asks the start first
+        // and the end second, so one that starts where it ends, or
+        // after, leaves what is nearer than its start and fogs the
+        // rest. A distance or a factor that is no number is no fog.
+        float f = mode == 1.0 ? exp(-max(u_vfog.z * d, 0.0))
             : mode == 2.0 ? exp(-(u_vfog.z * d) * (u_vfog.z * d))
+            : d < u_vfog.x ? 1.0
+            : d >= u_vfog.y ? 0.0
             : (u_vfog.y - d) / (u_vfog.y - u_vfog.x);
-        // No number, as at the end of a fog that starts where it
-        // ends, is no fog.
-        f = isnan(f) ? 1.0 : clamp(f, 0.0, 1.0);
+        f = isnan(d) || isnan(f) ? 1.0 : clamp(f, 0.0, 1.0);
         v_specular.a = floor(f * 255.0 + 0.5);
     }
     v_tex[0] = a_tex0;
@@ -375,10 +387,12 @@ int tf_address(int at, int size, int mode) {
 // of two texels, where the card's planes give the edge itself and the
 // host's interpolation a value a little to either side of it. A
 // sixteenth of a step is added so that such a value is on the card's
-// side of the edge.
+// side of the edge. The number stops where the card's does, and a
+// coordinate that is no number gives 0.
 int tf_fixed(float c, int size) {
+    if (isnan(c)) return 0;
     float at = c * float(size) * 256.0 + 0.0625;
-    return int(floor(clamp(at, -2147483648.0, 2147483520.0)));
+    return int(floor(clamp(at, -2147483520.0, 2147483520.0)));
 }
 ivec4 tf_texel(sampler2D s, int level, int x, int y, ivec4 border) {
     if (x < 0 || y < 0) return border;
@@ -398,8 +412,9 @@ ivec4 tf_level(sampler2D s, int level, vec2 at, ivec2 size0, bool linear, ivec2 
         int y = tf_address(p.y >> 8, size.y, mode.y);
         return tf_texel(s, level, x, y, border);
     }
-    // A texel's centre is half a texel inside it.
-    p -= 128;
+    // A texel's centre is half a texel inside it. A coordinate that
+    // is no number is 0 with the shift, as the card has it.
+    p -= ivec2(isnan(at.x) ? 0 : 128, isnan(at.y) ? 0 : 128);
     ivec2 f = p & 255;
     p = p >> 8;
     int x0 = tf_address(p.x, size.x, mode.x);
@@ -476,8 +491,17 @@ pub fn native(tex: &Tex, anisotropic: bool) -> bool {
     tex.texture.cube || (anisotropic && tex.anisotropy > 1)
 }
 
-/// The key of the program that draws `state`.
-pub fn key(state: &DrawState, anisotropic: bool) -> Key {
+/// The key of the program that draws `state`, for vertices that have
+/// a depth outside 0 to 1 where `outside` says so.
+///
+/// With the depth test on (`Step::Depth`'s `ranged`) the card leaves
+/// out a pixel whose depth is outside 0 to 1, which the program of
+/// such vertices does with a `discard`. A `discard` keeps the host
+/// from testing depth before the shader runs, for every pixel of the
+/// draw, so the vertices nearly every draw has, whose depths are all
+/// inside the range and so are those of their pixels, get the program
+/// without one.
+pub fn key(state: &DrawState, anisotropic: bool, outside: bool) -> Key {
     let mut native_stages = 0;
     for (stage, tex) in state.tex.iter().enumerate() {
         if tex.as_ref().is_some_and(|tex| native(tex, anisotropic)) {
@@ -485,15 +509,24 @@ pub fn key(state: &DrawState, anisotropic: bool) -> Key {
         }
     }
     Key {
-        steps: steps_key(&state.steps),
+        steps: steps_key(&state.steps, outside),
         native: native_stages,
     }
 }
 
-fn steps_key(steps: &[Step]) -> Vec<Step> {
+fn steps_key(steps: &[Step], outside: bool) -> Vec<Step> {
     steps
         .iter()
         .filter_map(|step| match *step {
+            // The tests are the host's state. What the shader does
+            // for the step is drop a depth outside the range, which
+            // only vertices `outside` it can give.
+            Step::Depth { ranged: true, .. } if outside => Some(Step::Depth {
+                func: 0,
+                write: false,
+                stencil: None,
+                ranged: true,
+            }),
             Step::Depth { .. } => None,
             Step::Write { .. } => Some(Step::Write {
                 blend: None,
@@ -626,6 +659,11 @@ ivec4 mul(ivec4 a, ivec4 b) {
     // `write!` to a String can't fail.
     for step in steps {
         match *step {
+            // The host limits depth to its range (`DEPTH_CLAMP`), as
+            // the card does without the depth test.
+            Step::Depth { ranged: true, .. } => {
+                body.push_str("    if (v_z < 0.0 || v_z > 1.0) discard;\n");
+            }
             Step::Depth { .. } => {}
             Step::Colours { specular } => {
                 body.push_str("    dif = ivec4(clamp(v_diffuse, 0.0, 255.0) + 0.5);\n");
@@ -813,7 +851,14 @@ uniform ivec4 u_tb{stage};"
                         };
                         // Start, end and density.
                         let f = match mode {
-                            3 => "(u_fog.y - d) / (u_fog.y - u_fog.x)",
+                            // All of the colour nearer than the
+                            // start and none from the end on, asked
+                            // in that order, so the division is by
+                            // more than 0.
+                            3 => {
+                                "(d < u_fog.x ? 1.0 : d >= u_fog.y ? 0.0 : \
+                                 (u_fog.y - d) / (u_fog.y - u_fog.x))"
+                            }
                             1 => "exp(-max(u_fog.z * d, 0.0))",
                             _ => "exp(-(u_fog.z * d) * (u_fog.z * d))",
                         };
@@ -962,13 +1007,37 @@ mod tests {
             func: 4,
             write: true,
             stencil: None,
+            ranged: false,
         };
         let write = |mask| Step::Write { blend: None, mask };
         let colours = Step::Colours { specular: false };
-        let a = steps_key(&[depth, colours, write(0xF)]);
-        let b = steps_key(&[colours, write(0x7)]);
+        let a = steps_key(&[depth, colours, write(0xF)], false);
+        let b = steps_key(&[colours, write(0x7)], false);
         assert_eq!(a, b);
-        assert_ne!(a, steps_key(&[colours, Step::Dither, write(0xF)]));
+        assert_ne!(a, steps_key(&[colours, Step::Dither, write(0xF)], false));
+    }
+
+    /// The depth test's range takes a `discard`, which keeps the host
+    /// from testing depth early, only for vertices with a depth
+    /// outside it: the others have the program of a draw without it.
+    #[test]
+    fn only_vertices_outside_the_depth_range_have_its_discard() {
+        let ranged = Step::Depth {
+            func: 4,
+            write: true,
+            stencil: None,
+            ranged: true,
+        };
+        let steps = [ranged, Step::Colours { specular: false }];
+        let program = |outside: bool| {
+            fragment(&Key {
+                steps: steps_key(&steps, outside),
+                native: 0,
+            })
+        };
+        assert_eq!(steps_key(&steps, false), steps_key(&steps[1..], true));
+        assert!(!program(false).contains("discard"));
+        assert!(program(true).contains("v_z < 0.0 || v_z > 1.0) discard"));
     }
 
     #[test]

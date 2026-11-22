@@ -697,6 +697,7 @@ pub fn get(cpu: &mut Cpu) -> &mut Registry {
         let mut registry = Registry::seeded(text.as_deref(), version);
         registry.import(&devices(cd));
         registry.import(&super::nls::registry_values(cpu.bus.win32.os_locale));
+        registry.import(&super::version::display_registry_values(&cpu.bus.win32));
         registry.dirty = false;
         cpu.bus.win32.registry = registry;
     }
@@ -890,6 +891,24 @@ pub fn string_values(cpu: &mut Cpu, keys: &[(u32, &str)]) -> Vec<Vec<(String, St
     values
 }
 
+/// Whether the key `path` under the predefined key `hkey` has a value
+/// named `name` (in any case), of any type. As `string_values`, the
+/// registry is let go after with no program running.
+pub fn has_value(cpu: &mut Cpu, hkey: u32, path: &str, name: &str) -> bool {
+    let idle = cpu.bus.win32.processes.is_empty();
+    let registry = get(cpu);
+    let found = match registry.open(hkey, 0) {
+        Open::Key(root) => registry
+            .find(root, path)
+            .is_some_and(|key| registry.value(key, name).is_some()),
+        _ => false,
+    };
+    if idle {
+        cpu.bus.win32.registry = Registry::default();
+    }
+    found
+}
+
 /// Delete the value `name` of the key `path` under the predefined key
 /// `hkey`, and save the registry at once: false if there was no such
 /// value.
@@ -996,6 +1015,28 @@ mod tests {
         assert_eq!(value("RegisteredOwner"), b"Someone\0");
         // The values keep their places.
         assert_eq!(registry.key(key).values[0].name, "VersionNumber");
+    }
+
+    /// Display Properties writes the desktop's size to the registry, so
+    /// its Resolution follows `win32_desktop`, over what the file has.
+    #[test]
+    fn the_resolution_follows_the_desktops_own_size() {
+        let file = "REGEDIT4\r\n\r\n\
+                    [HKEY_LOCAL_MACHINE\\Config\\0001\\Display\\Settings]\r\n\
+                    \"Resolution\"=\"640,480\"\r\n";
+        let mut registry = Registry::seeded(Some(file), Win98Se);
+        let mut win32 = crate::win32::Win32 {
+            desktop: crate::config::DesktopSize::Svga,
+            ..Default::default()
+        };
+        crate::win32::version::start(&mut win32);
+        registry.import(&crate::win32::version::display_registry_values(&win32));
+        let key = registry
+            .find(LOCAL_MACHINE, "Config\\0001\\Display\\Settings")
+            .unwrap();
+        let value = |name| registry.value(key, name).unwrap().data.clone();
+        assert_eq!(value("Resolution"), b"800,600\0");
+        assert_eq!(value("BitsPerPixel"), b"8\0");
     }
 
     /// DirectX 8 is installed, as the built-in has D3D8 and DINPUT8: 8.0a

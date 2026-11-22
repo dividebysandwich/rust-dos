@@ -3,6 +3,7 @@
 //! them all, and must come out the same after every batch. Loops that
 //! change something every pass must not be skipped.
 
+use crate::cdimage;
 use crate::dyndiff;
 use crate::win16;
 
@@ -25,7 +26,7 @@ const KEY_AT: usize = 250;
 
 /// A machine that runs `T.COM`, the program `code` builds, from a
 /// directory of its own.
-fn machine(test: &str, name: &str, code: &[u8], core: CoreMode, skip: bool) -> Cpu {
+fn machine(test: &str, name: &str, code: &[u8], core: CoreMode, skip: bool) -> Box<Cpu> {
     let mut cpu = machine_with(test, name, ("T.COM", code), core, skip);
     cpu.load_shell();
     cpu.pending_command = Some("T".to_string());
@@ -36,7 +37,7 @@ fn machine(test: &str, name: &str, code: &[u8], core: CoreMode, skip: bool) -> C
 /// directory of its own, its shell not loaded yet. The host's time is
 /// fixed first, so machines built a moment apart start with the same
 /// BIOS tick count.
-fn machine_with(test: &str, name: &str, file: (&str, &[u8]), core: CoreMode, skip: bool) -> Cpu {
+fn machine_with(test: &str, name: &str, file: (&str, &[u8]), core: CoreMode, skip: bool) -> Box<Cpu> {
     let at = NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56).unwrap();
     rust_dos::hosttime::fix(Some(at));
     let dir = Path::new("target/idle_tests").join(test).join(name);
@@ -99,6 +100,66 @@ fn a_keyboard_poll_is_skipped() {
         finish(a)
     });
     assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+}
+
+#[test]
+fn a_dos_direct_console_poll_is_skipped() {
+    // Yendorian Tales 3 waits on INT 21h AH=06h DL=FFh, which reads the
+    // keystrokes the BIOS status call does.
+    let stats = compare("dos_console", |a| {
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.mov(ah, 6)?;
+        a.mov(dl, 0xFF)?;
+        a.int(0x21)?;
+        a.jz(wait)?;
+        a.mov(byte_ptr(DATA), al)?;
+        a.mov(ax, 0x4C00)?;
+        a.int(0x21)
+    });
+    assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+}
+
+#[test]
+fn a_dos_input_status_poll_is_skipped() {
+    let stats = compare("dos_status", |a| {
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.mov(ah, 0x0B)?;
+        a.int(0x21)?;
+        a.test(al, al)?;
+        a.jz(wait)?;
+        finish(a)
+    });
+    assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+}
+
+#[test]
+fn a_load_ends_what_was_armed_before_it() {
+    // A head armed or a proof running when an older state is loaded
+    // counts instructions of the run before the load, and the execution
+    // loop would watch, on the interpreter, until the count caught up.
+    let code = assemble(|a| {
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.mov(ah, 1)?;
+        a.int(0x16)?;
+        a.jz(wait)?;
+        finish(a)
+    });
+    let mut cpu = machine("load", "a", &code, CoreMode::Dynamic, true);
+    for _ in 0..5 {
+        dyndiff::batch(&mut cpu, 100_000, false);
+    }
+    let older = rust_dos::savestate::machine::save(&cpu);
+    let mut batches = 0;
+    while !cpu.bus.observe.watching() {
+        batches += 1;
+        assert!(batches < 1000, "no loop was armed: {:?}", cpu.bus.observe.stats);
+        dyndiff::batch(&mut cpu, 100_000, false);
+    }
+    rust_dos::savestate::machine::load(&mut cpu, &older).unwrap();
+    assert!(!cpu.bus.observe.watching(), "the load kept a loop of the run after the state armed");
 }
 
 #[test]
@@ -382,6 +443,40 @@ fn a_wait_for_the_display_after_the_retrace_is_skipped() {
         a.int(0x21)
     });
     assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+}
+
+#[test]
+fn a_skipped_wait_across_the_retrace_misses_no_retrace() {
+    // Raster code syncing to each line: wait for the display, then for the
+    // blanking. In the vertical blanking the wait for the display runs
+    // over the whole retrace pulse, reading the register all through it.
+    // Its mask leaves bit 3 out, but a skip still stops where the retrace
+    // begins (`CrtTiming::next_status_change`), so the passes after it
+    // read it as the interpreter's do, and no retrace counts as missed.
+    let code = assemble(|a| {
+        let mut shown = a.create_label();
+        let mut blank = a.create_label();
+        a.mov(dx, 0x3DA)?;
+        a.set_label(&mut shown)?;
+        a.in_(al, dx)?;
+        a.test(al, 1)?;
+        a.jnz(shown)?;
+        a.set_label(&mut blank)?;
+        a.in_(al, dx)?;
+        a.test(al, 1)?;
+        a.jz(blank)?;
+        a.jmp(shown)
+    });
+    let test = "line_waits";
+    let mut a = machine(test, "a", &code, CoreMode::Normal, false);
+    let mut b = machine(test, "b", &code, CoreMode::Dynamic, true);
+    if let Err(e) = lockstep(&mut a, &mut b, BATCHES, 100_000, |_, _| {}) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    let stats = b.bus.observe.stats;
+    assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+    assert_eq!(a.bus.activity.missed_retraces, 0);
+    assert_eq!(b.bus.activity.missed_retraces, 0, "{:?}", stats);
 }
 
 #[test]
@@ -721,7 +816,7 @@ fn a_loop_that_adds_up_the_pit_count_is_not_skipped() {
 
 /// A machine that runs the Windows 3.1 program `program` as T.EXE on the
 /// built-in Windows, as `machine` runs a DOS one.
-fn win16_machine(test: &str, name: &str, program: &[u8], core: CoreMode, skip: bool) -> Cpu {
+fn win16_machine(test: &str, name: &str, program: &[u8], core: CoreMode, skip: bool) -> Box<Cpu> {
     let mut cpu = machine_with(test, name, ("T.EXE", program), core, skip);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(rust_dos::cpu::HostConsole::default());
@@ -808,6 +903,469 @@ fn a_windows_3_1_timegettime_loop_is_skipped() {
     println!("{}: {:?}", test, stats);
     assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
     assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+#[test]
+fn a_win16_loop_that_reads_the_time_in_two_places_is_skipped() {
+    // This Means War!'s briefing waits in a PeekMessage(PM_REMOVE) loop
+    // that calls GetTickCount from two places in every pass. The thunk
+    // starts KERNEL32's GetTickCount with the same 32-bit registers from
+    // both, which differ only in the 16-bit context the thunk keeps and
+    // in the return address on the 16-bit stack. The proof has to tell
+    // the two calls apart, or it takes the return address for a count
+    // and fails at the RETF that reads it.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("USER", 13).emit(&[0x8B, 0xF0]); // GetTickCount; mov si,ax
+    let top = code.here();
+    code.emit(&[0x1E]) // push ds
+        .push(0x10) // the MSG at DS:10h
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(1) // PM_REMOVE
+        .call("USER", 109) // PeekMessage
+        .emit(&[0xBB, 0x05, 0x00]) // mov bx,5
+        .call("USER", 13)
+        .emit(&[0x8B, 0xF8]) // mov di,ax
+        .emit(&[0xBB, 0x9A, 0xB1]) // mov bx,0B19Ah
+        .call("USER", 13)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_two_clock_reads";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, |_, _| {}) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+#[test]
+fn a_win16_loop_that_counts_its_clock_reads_keeps_the_count() {
+    // A calibration loop: it counts in SI how many times it reads
+    // GetTickCount before 300 ms have gone by. The proof's head is in
+    // KERNEL32's GetTickCount, where the thunk starts the 32-bit code
+    // with the same registers in every pass, and SI waits in the 16-bit
+    // context the thunk keeps. A skip that compared the registers only
+    // took the passes for the same and lost the count; with the task's
+    // frames in the key the passes differ, and the loop runs as it is.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.emit(&[0x31, 0xF6]) // xor si,si
+        .call("USER", 13)
+        .emit(&[0x8B, 0xF8]); // mov di,ax
+    let top = code.here();
+    code.emit(&[0x46]) // inc si
+        .call("USER", 13)
+        .emit(&[0x2B, 0xC7]) // sub ax,di
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0x8B, 0xC6]) // mov ax,si
+        .emit(&[0x8A, 0xC4]) // mov al,ah
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_counted_clock_reads";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, |_, _| {}) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!(a.errorlevel, b.errorlevel, "the count");
+}
+
+#[test]
+fn an_mfc_idle_loop_of_window_queries_is_skipped() {
+    // Metal Marines' MFC message loop, which waits for 300 ms here: in
+    // every pass Catch, PeekMessage finding nothing, GetActiveWindow,
+    // GetParent of it, GetWindowWord(GWW_HINSTANCE) of that, IsIconic
+    // and timeGetTime. They only read the windows and the clock (Catch
+    // writes the same frame to its buffer in every pass), so the passes
+    // are skipped as the plain PeekMessage loop's are.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607).emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    let top = code.here();
+    code.emit(&[0x1E]) // push ds
+        .push(0x20) // the CATCHBUF at DS:20h
+        .call("KERNEL", 55) // Catch
+        .emit(&[0x1E]) // push ds
+        .push(0x10) // the MSG at DS:10h
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0) // PM_NOREMOVE
+        .call("USER", 109) // PeekMessage
+        .call("USER", 60) // GetActiveWindow
+        .emit(&[0x50]) // push ax
+        .call("USER", 46) // GetParent
+        .emit(&[0x50]) // push ax
+        .push(0xFFFA) // GWW_HINSTANCE
+        .call("USER", 133) // GetWindowWord
+        .push(0)
+        .call("USER", 31) // IsIconic
+        .call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_mfc_idle";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+#[test]
+fn a_loop_that_polls_a_key_and_the_cursor_is_skipped() {
+    // The War of the Worlds' film player waits for each frame's time in
+    // a loop of timeGetTime and GetAsyncKeyState(VK_ESCAPE), and Shadow
+    // of the Horned Rat's screens call GetCursorPos in theirs (#1284):
+    // here all three, for 300 ms. With no key pressed and the mouse
+    // still, the two reads of the devices change nothing but the POINT
+    // written, so the passes are skipped as a PeekMessage loop's are.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607).emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    let top = code.here();
+    code.push(0x1B) // VK_ESCAPE
+        .call("USER", 249) // GetAsyncKeyState
+        .emit(&[0x1E]) // push ds
+        .push(0x10) // the POINT at DS:10h
+        .call("USER", 17) // GetCursorPos
+        .call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_async_key";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+/// A loop of GetAsyncKeyState(VK_ESCAPE) and GetCursorPos that ends
+/// when the key is down or was pressed (exit code 1), when the cursor
+/// left where it was at the start (2), or after 3 s (3). `input` acts on
+/// the machine before batch 100, on both the skipping machine and the
+/// one that runs every pass. Returns the exit code and the instructions
+/// skipped before the input.
+fn polled_input_ends_the_loop(test: &str, input: fn(&mut Cpu)) -> (u8, u64) {
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607)
+        .emit(&[0x8B, 0xF0]) // timeGetTime; mov si,ax
+        .emit(&[0x1E]) // push ds
+        .push(0x10) // the POINT at DS:10h
+        .call("USER", 17) // GetCursorPos
+        .emit(&[0x8B, 0x3E, 0x10, 0x00]); // mov di,[10h]
+    let top = code.here();
+    code.push(0x1B) // VK_ESCAPE
+        .call("USER", 249) // GetAsyncKeyState
+        .emit(&[0xA9, 0x01, 0x80]) // test ax,8001h
+        .emit(&[0x75, 0]); // jnz key
+    let to_key = code.here() - 1;
+    code.emit(&[0x1E]) // push ds
+        .push(0x10)
+        .call("USER", 17) // GetCursorPos
+        .emit(&[0x39, 0x3E, 0x10, 0x00]) // cmp [10h],di
+        .emit(&[0x75, 0]); // jne moved
+    let to_moved = code.here() - 1;
+    code.call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0xB8, 0x0B]); // cmp ax,3000
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x03])
+        .exit_al();
+    for (at, exit) in [(to_key, 1), (to_moved, 2)] {
+        code.bytes[at as usize] = (code.here() - at - 1) as u8;
+        code.emit(&[0xB0, exit]).exit_al();
+    }
+    let program = program(&code, CODE);
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    // USER takes the keyboard's and the mouse's input only with the
+    // desktop on the screen.
+    for cpu in [&mut a, &mut b] {
+        rust_dos::win32::user32::paint::ensure_desktop(cpu);
+    }
+    let mut before = 0;
+    let each = |n: usize, cpu: &mut Cpu| {
+        if n == 100 {
+            // `b` comes second: what it skipped so far.
+            before = cpu.bus.observe.stats.skipped;
+            input(cpu);
+        }
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    println!("{}: {:?}", test, b.bus.observe.stats);
+    assert_eq!(a.errorlevel, b.errorlevel, "{test}: the same end");
+    (b.errorlevel, before)
+}
+
+#[test]
+fn a_key_pressed_during_a_skipped_key_poll_is_seen_in_the_same_pass() {
+    // The passes before the key are skipped; the key ends the loop at
+    // the same instruction on both machines (`lockstep`).
+    let (code, skipped) = polled_input_ends_the_loop("win16_async_key_press", |cpu| {
+        rust_dos::keyboard::key_event(&mut cpu.bus, 0x01, false, true, None)
+    });
+    assert_eq!(code, 1, "the key ended the loop");
+    assert!(skipped > 100_000, "skipped before the key: {}", skipped);
+}
+
+#[test]
+fn a_mouse_moved_during_a_skipped_cursor_poll_is_seen_in_the_same_pass() {
+    let (code, skipped) = polled_input_ends_the_loop("win16_cursor_move", |cpu| {
+        let (x, y) = (cpu.bus.mouse.x, cpu.bus.mouse.y);
+        cpu.bus.mouse.set_position(x + 7, y + 5);
+    });
+    assert_eq!(code, 2, "the move ended the loop");
+    assert!(skipped > 100_000, "skipped before the move: {}", skipped);
+}
+
+#[test]
+fn a_win16_loop_that_polls_the_cd_audio_mode_is_skipped_until_the_play_ends() {
+    // This Means War!'s menu: the CD plays its music, and in every pass
+    // the game asks the cdaudio device its mode with
+    // mciSendCommand(MCI_STATUS), then PeekMessage and GetTickCount. The
+    // mode stays MCI_MODE_PLAY until the mixer comes to the play's end,
+    // which it does between the batches here, as the front end renders
+    // the sound at its ticks. The skipping machine has to see the mode
+    // change in the same pass as the one that runs every pass, and leave
+    // the loop with the same mode: MCI_MODE_STOP (525, 20Dh).
+    use win16::{CODE, Code, program};
+    // MCI_OPEN_PARMS at DS:60h, MCI_SET_PARMS at DS:80h, MCI_PLAY_PARMS
+    // at DS:A0h and MCI_STATUS_PARMS at DS:40h; the device's id comes
+    // back at DS:64h.
+    let send = |code: &mut Code, msg: u16, flags: u16, parms: u16| {
+        code.emit(&[0xFF, 0x36, 0x64, 0x00]) // push word [64h]
+            .push(msg)
+            .push(0)
+            .push(flags)
+            .emit(&[0x1E]) // push ds
+            .push(parms)
+            .call("MMSYSTEM", 701); // mciSendCommand
+    };
+    let mut code = Code::new();
+    // The device type by its number, MCI_DEVTYPE_CD_AUDIO.
+    code.emit(&[0xC7, 0x06, 0x68, 0x00, 0x04, 0x02]); // mov word [68h],204h
+    send(&mut code, 0x803, 0x3000, 0x60); // MCI_OPEN, _TYPE | _TYPE_ID
+    code.emit(&[0xC7, 0x06, 0x84, 0x00, 0x0A, 0x00]); // mov word [84h],10
+    send(&mut code, 0x80D, 0x400, 0x80); // MCI_SET_TIME_FORMAT, TMSF
+    code.emit(&[0xC7, 0x06, 0xA4, 0x00, 0x02, 0x00]); // mov word [A4h],2
+    send(&mut code, 0x806, 0x4, 0xA0); // MCI_PLAY from track 2
+    code.emit(&[0xC7, 0x06, 0x48, 0x00, 0x04, 0x00]); // mov word [48h],4
+    let top = code.here();
+    send(&mut code, 0x814, 0x100, 0x40); // MCI_STATUS_ITEM, MCI_STATUS_MODE
+    code.emit(&[0x1E]) // push ds
+        .push(0x10) // the MSG at DS:10h
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(1) // PM_REMOVE
+        .call("USER", 109) // PeekMessage
+        .call("USER", 13) // GetTickCount
+        .emit(&[0x81, 0x3E, 0x44, 0x00, 0x0E, 0x02]); // cmp word [44h],20Eh
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x74, back as i8 as u8]) // je top
+        .emit(&[0xA0, 0x44, 0x00]) // mov al,[44h]
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_cd_mode";
+    let dir = cdimage::scratch(test);
+    let iso = cdimage::iso("TESTDISC", &[cdimage::file("A.TXT", b"a")]);
+    // 200 ms of audio in track 2.
+    let cue = cdimage::mixed_disc(&dir, &iso, 15);
+    let with_cd = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine_with(test, name, ("T.EXE", program.as_slice()), core, skip);
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.mount_drive(3, &cue, options, false).unwrap();
+        cpu.bus.win32.enabled = true;
+        cpu.host_console = Some(rust_dos::cpu::HostConsole::default());
+        cpu.load_shell();
+        assert!(cpu.load_executable("T.EXE", None));
+        cpu
+    };
+    let mut a = with_cd("a", CoreMode::Normal, false);
+    let mut b = with_cd("b", CoreMode::Dynamic, true);
+    let each = |_: usize, cpu: &mut Cpu| cpu.bus.audio_catch_up();
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (0x0D, 0x0D), "the play ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+#[test]
+fn a_win16_loop_with_a_long_count_on_its_stack_is_skipped() {
+    // MFC's CWinThread::Run in a 16-bit program (Metal Marines) keeps its
+    // idle count, a LONG, in its frame on the 16-bit stack: every pass
+    // adds 1 to the low word and the carry to the high word (add/adc),
+    // and OnIdle compares the high word with 0. The stack's top is a few
+    // bytes below the count when the pass calls PeekMessage, whose stub
+    // reads only its arguments: the proof follows the count through the
+    // call, and the passes are skipped to the clock's next millisecond.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607).emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    code.push(0).push(0).emit(&[0x8B, 0xEC]); // the count at SS:BP; mov bp,sp
+    let top = code.here();
+    code.emit(&[0x83, 0x46, 0x00, 0x01]) // add word [bp],1
+        .emit(&[0x83, 0x56, 0x02, 0x00]) // adc word [bp+2],0
+        .emit(&[0x83, 0x7E, 0x02, 0x00]) // cmp word [bp+2],0
+        .emit(&[0x1E]) // push ds
+        .push(0x10) // the MSG at DS:10h
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0) // PM_NOREMOVE
+        .call("USER", 109) // PeekMessage
+        .call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_long_count";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    // The batches of 100,000 instructions end the skips. After the first
+    // proof, each starts from what it found (the count's cells and the
+    // blocks its pass writes) and records one pass, where finding them
+    // again would run about four: the head never backs off for the cost.
+    // The one failure is where the loop ends, in the pass recorded then.
+    assert!(stats.proofs >= 10 && stats.failures <= 1, "{:?}", stats);
+    assert!(
+        stats.shaped + 1 >= stats.proofs && stats.costly == 0,
+        "{:?}",
+        stats
+    );
+    assert!(stats.proving < 40 * stats.proofs, "{:?}", stats);
+}
+
+#[test]
+fn a_win16_loop_that_works_out_a_progress_from_the_time_is_skipped_across_milliseconds() {
+    // Metal Marines' title (#1372) waits in MFC's idle loop, which counts
+    // its passes in a LONG on its stack, calls PeekMessage, and in every
+    // pass reads timeGetTime and works out how far the wait is from it
+    // with _lmul and _ldiv, into a progress value it keeps in RAM and
+    // compares. The pass is the same in every millisecond but for the
+    // time and what comes from it: the proof follows the clock's value
+    // through it as it follows a count (MUL, DIV and the halves of DX:AX
+    // Win16Return sets), and the passes skipped read the time each would,
+    // up to where the compare comes out otherwise. A proof then holds for
+    // many milliseconds, not to the next one.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607).emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    code.push(0).push(0).emit(&[0x8B, 0xEC]); // the count at SS:BP; mov bp,sp
+    let top = code.here();
+    code.emit(&[0x83, 0x46, 0x00, 0x01]) // add word [bp],1
+        .emit(&[0x83, 0x56, 0x02, 0x00]) // adc word [bp+2],0
+        .emit(&[0x1E]) // push ds
+        .push(0x10) // the MSG at DS:10h
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0) // PM_NOREMOVE
+        .call("USER", 109) // PeekMessage
+        .call("MMSYSTEM", 607) // timeGetTime
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0xBB, 0x64, 0x00]) // mov bx,100
+        .emit(&[0xF7, 0xE3]) // mul bx
+        .emit(&[0xBB, 0xE8, 0x03]) // mov bx,1000
+        .emit(&[0xF7, 0xF3]) // div bx: the progress, in tenths
+        .emit(&[0xA3, 0x40, 0x00]) // mov ds:[40h],ax
+        .emit(&[0x3D, 0x1E, 0x00]); // cmp ax,30
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_progress";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    // A proof that held only to the clock's next millisecond would skip
+    // less than a millisecond's instructions.
+    let ms = b.bus.clock.cycles_per_ms() as u64;
+    assert!(stats.proofs >= 1 && stats.skipped > 100 * ms, "{:?}", stats);
+    assert!(stats.skipped / stats.proofs > 4 * ms, "{:?}", stats);
 }
 
 /// Reads of the built-in Windows's clock in a row arm their place, but not

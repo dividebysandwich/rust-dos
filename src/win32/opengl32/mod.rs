@@ -108,6 +108,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: None,
 };
 
 const fn stdcall(
@@ -389,6 +390,13 @@ pub struct State {
 
 pub fn state(cpu: &mut Cpu) -> &mut State {
     &mut cpu.bus.win32.opengl32
+}
+
+/// The DirectDraw surfaces of every texture's levels: what the driver
+/// keeps through a change of the display's mode, as an ICD does
+/// (`ddraw::surface::video_memory_lost`).
+pub fn texture_surfaces(cpu: &mut Cpu) -> Vec<u32> {
+    state(cpu).lists.texture_surfaces().collect()
 }
 
 /// Handles of contexts are this plus their places.

@@ -150,7 +150,21 @@ fn free_space_allocation_info_and_dpb() {
     int21(&mut cpu, 0x36);
     assert_eq!((cpu.ax(), cpu.cx(), cpu.dx(), cpu.bx()), (1, 512, 2847, 2847));
 
-    fs::write(base.join("a/SAVE.DAT"), vec![0u8; 1024]).unwrap();
+    // A file the guest writes shows at once. (One another program writes
+    // shows within `HostDirCache::TRUST`, which the unit tests check on
+    // their own clock.)
+    set_dsdx_string(&mut cpu, "A:\\SAVE.DAT");
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x3C);
+    assert!(!cf(&cpu));
+    let handle = cpu.ax();
+    cpu.set_bx(handle);
+    cpu.set_cx(1024);
+    int21(&mut cpu, 0x40);
+    assert_eq!((cf(&cpu), cpu.ax()), (false, 1024));
+    cpu.set_bx(handle);
+    int21(&mut cpu, 0x3E);
+    assert!(!cf(&cpu));
     cpu.set_reg8(Register::DL, 1);
     int21(&mut cpu, 0x36);
     assert_eq!(cpu.bx(), 2845);
@@ -372,7 +386,8 @@ fn generic_ioctl_describes_floppies_and_hard_disks() {
     assert_eq!(ioctl(&mut cpu, 1, 0x0860), (false, 0));
     assert_eq!(cpu.bus.read_8(block), 0xAA); // special functions untouched
     assert_eq!(cpu.bus.read_8(block + 1), 0x07);
-    assert_eq!((cpu.bus.read_16(block + 2), cpu.bus.read_16(block + 4)), (0, 80));
+    // Removable, with a change line, as the BIOS's INT 13h AH=15h says
+    assert_eq!((cpu.bus.read_16(block + 2), cpu.bus.read_16(block + 4)), (2, 80));
     assert_eq!(cpu.bus.read_16(block + 7), 512);
     assert_eq!(cpu.bus.read_8(block + 9), 1); // sectors per cluster
     assert_eq!(cpu.bus.read_16(block + 0x0F), 2880); // total sectors
@@ -384,6 +399,11 @@ fn generic_ioctl_describes_floppies_and_hard_disks() {
     assert_eq!((cpu.bus.read_8(block + 1), cpu.bus.read_16(block + 2)), (0x05, 1));
     assert_eq!((cpu.bus.read_16(block + 0x0F), cpu.bus.read_8(block + 0x11)), (0, 0xF8));
     assert!(cpu.bus.read_32(block + 0x1C) > 0xFFFF);
+    // MS-DOS copies the BPB through its 32-bit sector count and no
+    // further: the 6 reserved bytes after it and the track layout are
+    // the caller's. Sierra's setup passes a block of 36 bytes, with its
+    // saved BP right after it.
+    assert_eq!(bytes(&cpu, 0x20, 0x20), [0xAA; 0x20]);
 
     // Get Media ID: the volume label and a FAT12 file system
     assert_eq!(ioctl(&mut cpu, 1, 0x0866), (false, 0));
@@ -842,4 +862,46 @@ fn fcb_file_functions_work_on_host_directories() {
     let mut cpu = Cpu::new(base.join("c"));
     fcb_file_functions_on(&mut cpu, 0);
     assert!(!base.join("c/SAME.BAK").exists() && !base.join("c/SAVE.DAT").exists());
+}
+
+/// 1830: Railroads & Robber Barons looks for each of its save slots, and
+/// asks for FFFFh paragraphs to learn the largest free block, many times
+/// a second on its menus. Each kind of failure is logged the first few
+/// times, the last of them saying so; another file or size still gets
+/// its own lines, and the next program starts counting again.
+#[test]
+fn repeated_dos_failures_are_logged_a_few_times() {
+    let base = scratch("repeated_failures", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    cpu.load_shell();
+    let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = lines.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        log.borrow_mut().push(line.to_string())
+    }));
+    set_dta(&mut cpu);
+    for _ in 0..100 {
+        set_dsdx_string(&mut cpu, "GAME0.SAV");
+        cpu.set_cx(0);
+        int21(&mut cpu, 0x4E);
+        assert!(cf(&cpu));
+        cpu.set_bx(0xFFFF);
+        int21(&mut cpu, 0x48);
+        assert!(cf(&cpu));
+    }
+    set_dsdx_string(&mut cpu, "GAME1.SAV");
+    int21(&mut cpu, 0x4E);
+    std::fs::write(base.join("c/NEXT.COM"), [0xC3]).unwrap();
+    assert!(cpu.load_executable("NEXT.COM", None));
+    set_dta(&mut cpu);
+    set_dsdx_string(&mut cpu, "GAME0.SAV");
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x4E);
+    cpu.bus.log_hook = None;
+    let lines = lines.take();
+    let of = |text: &str| lines.iter().filter(|l| l.contains(text)).count();
+    assert_eq!(of("Pattern='GAME0.SAV'"), 8 + 1, "{lines:?}");
+    assert_eq!(of("Alloc FFFF paras failed"), 8, "{lines:?}");
+    assert_eq!(of("(not logging more)"), 2, "{lines:?}");
+    assert_eq!(of("Pattern='GAME1.SAV'"), 1, "{lines:?}");
 }

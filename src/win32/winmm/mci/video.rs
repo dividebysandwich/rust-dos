@@ -225,7 +225,7 @@ fn calls(cpu: &mut Cpu) -> &mut Calls {
 /// the strings the call passes, each with the place of its argument.
 pub fn made(cpu: &mut Cpu, api: &str, args: &[u32], strings: &[(u32, &str)]) -> Option<u32> {
     let call = Call {
-        target: user32::address_of(api),
+        target: user32::address_of(cpu, api),
         args: args.to_vec(),
         strings: strings.iter().map(|&(k, s)| (k, s.to_string())).collect(),
     };
@@ -489,7 +489,7 @@ fn to_ms(cpu: &mut Cpu, i: usize, value: u32) -> u32 {
     if device(cpu, i).time_format != MCI_FORMAT_FRAMES {
         return value;
     }
-    media(cpu, i).map_or(0, |m| m.frame_ms(value))
+    media(cpu, i).map_or(0, |m| m.frames_to_ms(value))
 }
 
 /// A position in milliseconds, in the device's time format.
@@ -540,9 +540,12 @@ pub fn next_due(d: &Device) -> Option<u64> {
     if m.frames == 0 {
         return Some(end);
     }
-    // The next frame's start, from the frame drawn last.
+    // The millisecond the next frame shows in, from the frame drawn
+    // last. `draw` finds the frame from the position in whole
+    // milliseconds, so waking any earlier finds the same frame again,
+    // and the thread goes round its loop until the millisecond ends.
     let next = v.drawn.map_or(0, |n| n + 1);
-    let at = m.frame_ms(next) as u64;
+    let at = m.frame_shown_ms(next) as u64;
     let due = started + at.saturating_sub(v.pos as u64) * 1000;
     Some(due.min(end))
 }
@@ -872,7 +875,7 @@ fn step(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
     } else {
         at.saturating_add(frames).min(m.frames.saturating_sub(1))
     };
-    video(cpu, i).pos = m.frame_ms(n);
+    video(cpu, i).pos = m.frame_shown_ms(n);
     draw(cpu, i, None);
     0
 }
@@ -1300,3 +1303,37 @@ crate::state_fields!(Calls {
 } skip {
     media
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A device playing a film of 136 frames at 15 a second into a
+    /// window, from 0, started at 1 s, with the frame `drawn` drawn.
+    fn playing(drawn: u32) -> Device {
+        let mut d = Device::default();
+        let media = Media {
+            width: 8,
+            height: 8,
+            frames: 136,
+            rate: (15, 1),
+            ..Media::default()
+        };
+        d.video.to = media.length_ms();
+        d.video.media = Some(Arc::new(media));
+        d.video.hwnd = 1;
+        d.video.started = Some(1_000_000);
+        d.video.drawn = Some(drawn);
+        d
+    }
+
+    #[test]
+    fn the_next_frame_is_due_when_it_shows() {
+        // Frame 1 starts 66.67 ms in and shows from the 67th millisecond:
+        // at 66 ms `draw` would find frame 0 again.
+        assert_eq!(next_due(&playing(0)), Some(1_067_000));
+        assert_eq!(next_due(&playing(2)), Some(1_200_000));
+        // After the last frame, the end.
+        assert_eq!(next_due(&playing(135)), Some(1_000_000 + 9_066_000));
+    }
+}

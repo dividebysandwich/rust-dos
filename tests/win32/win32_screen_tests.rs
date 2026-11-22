@@ -101,7 +101,7 @@ fn program(
 
 /// A Voodoo3 machine with the built-in Windows on and `program` loaded
 /// from the shell as T.EXE.
-fn machine(test: &str, program: Vec<u8>) -> Cpu {
+fn machine(test: &str, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_screen").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -667,6 +667,81 @@ fn a_flip_on_the_card_counts_as_a_frame() {
     assert_eq!(cpu.bus.frames_drawn - before, 1);
 }
 
+/// On the desktop, through GDI: a pixel drawn red (step 1), the same
+/// pixel blue (step 2), and blue again (step 3).
+fn gdi_frames_program() -> (Vec<u8>, u32) {
+    program(&[USER32, GDI32, DDRAW], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        c.api(a, l, GET_DC, &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(HDC)), eax)?;
+        for (step, color) in [(1, 0x0000_00FF), (2, 0x00FF_0000)] {
+            c.api(
+                a,
+                l,
+                SET_PIXEL,
+                &[Arg::Val(HDC), Arg::I(300), Arg::I(200), Arg::I(color)],
+            )?;
+            wait(a, l, step)?;
+        }
+        c.api(
+            a,
+            l,
+            SET_PIXEL,
+            &[Arg::Val(HDC), Arg::I(300), Arg::I(200), Arg::I(0x00FF_0000)],
+        )?;
+        finish(a, l, 3)
+    })
+}
+
+/// The frames counted over the next few retraces.
+fn frames_over_retraces(cpu: &mut Cpu) -> u64 {
+    let before = cpu.bus.frames_drawn;
+    for _ in 0..3 {
+        next_retrace(cpu);
+    }
+    cpu.bus.frames_drawn - before
+}
+
+#[test]
+fn gdi_drawing_that_changes_the_cards_desktop_counts_as_a_frame() {
+    let (program, data) = gdi_frames_program();
+    let mut cpu = machine("gdi_frames", program);
+    run_until(&mut cpu, data, 1);
+    frames_over_retraces(&mut cpu);
+    // The card shows the desktop from its own memory, which the VGA's
+    // rows know nothing of.
+    assert!(cpu.bus.voodoo_output());
+    // The pixel changes: one frame.
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    assert_eq!(shown(&mut cpu, 300, 200), [0, 0, 0xFF]);
+    assert_eq!(frames_over_retraces(&mut cpu), 1);
+    // Drawn again the same: nothing changed, no frame.
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 3);
+    assert_eq!(frames_over_retraces(&mut cpu), 0);
+}
+
+#[test]
+fn the_status_names_the_cards_desktop_not_the_vgas_mode() {
+    let (program, data) = desktop_program();
+    let mut cpu = machine("scanout", program);
+    let vga = cpu.bus.scanout();
+    assert_eq!(
+        (vga.device, vga.name.as_str(), vga.bpp),
+        ("vga", "Text80x25Color", None)
+    );
+    run_until(&mut cpu, data, 1);
+    // The VGA keeps the BIOS's text mode under the card's desktop.
+    assert!(cpu.bus.video_mode.is_text());
+    let shown = cpu.bus.scanout();
+    assert_eq!(
+        (shown.device, shown.name.as_str(), shown.bpp),
+        ("banshee", "Banshee 640x480x16", Some(16))
+    );
+}
+
 /// Other modes: 320x200 at 8 bits with a palette, then 800x600 at 32.
 fn modes_program() -> (Vec<u8>, u32) {
     let mut d = data();
@@ -1190,7 +1265,7 @@ fn keyed_blits_on_a_voodoo_graphics_keep_what_the_keys_say() {
 
 /// A machine with its usual display adapter, the add-on card `board`
 /// (or none), the built-in Windows on and `program` loaded as T.EXE.
-fn card_machine(test: &str, board: Option<Board>, program: Vec<u8>) -> Cpu {
+fn card_machine(test: &str, board: Option<Board>, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_screen").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -1247,7 +1322,7 @@ type Log = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 /// `card_machine` for `program`, with WIN.INI's ScreenSaveActive=1 and
 /// ScreenSaveTimeOut=1, and SYSTEM.INI's SCRNSAVE.EXE a saver that ends
 /// with exit code 9.
-fn saver_machine(test: &str, program: Vec<u8>) -> (Cpu, Log) {
+fn saver_machine(test: &str, program: Vec<u8>) -> (Box<Cpu>, Log) {
     let mut cpu = card_machine(test, None, program);
     let base = PathBuf::from("target/test_win32_screen").join(test);
     fs::create_dir_all(base.join("WINDOWS")).unwrap();
@@ -1524,7 +1599,7 @@ fn guid(cpu: &Cpu, data: u32, offset: u32) -> Vec<u8> {
         .collect()
 }
 
-fn devices(test: &str, board: Board) -> (Cpu, u32) {
+fn devices(test: &str, board: Board) -> (Box<Cpu>, u32) {
     let (program, data) = devices_program();
     let mut cpu = card_machine(test, Some(board), program);
     run_until(&mut cpu, data, 1);
@@ -2035,7 +2110,7 @@ fn a_back_buffer_attached_on_a_voodoo2_has_the_cards_pitch() {
 }
 
 /// A machine with the VESA adapter `adapter`, the program loaded.
-fn vesa_machine(test: &str, adapter: Adapter, program: Vec<u8>) -> Cpu {
+fn vesa_machine(test: &str, adapter: Adapter, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_screen").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -3921,7 +3996,7 @@ fn set_window_pos_gives_a_mouse_move_only_when_the_window_moves() {
 }
 
 /// `card_machine` under Windows 98 SE, whose USER32 has TrackMouseEvent.
-fn machine_98(test: &str, program: Vec<u8>) -> Cpu {
+fn machine_98(test: &str, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_screen").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -4433,7 +4508,7 @@ fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
 
 /// `mode_cursor_program(w, h)` run to its step 1 on `board`, the mode
 /// set: a Voodoo3 shows it on the card, the others on the VGA.
-fn small_mode_machine(test: &str, board: Option<Board>, (w, h): (u32, u32)) -> (Cpu, u32) {
+fn small_mode_machine(test: &str, board: Option<Board>, (w, h): (u32, u32)) -> (Box<Cpu>, u32) {
     let (program, data) = mode_cursor_program(w, h);
     let mut cpu = if board == Some(Board::Voodoo3) {
         machine(test, program)
@@ -4703,6 +4778,191 @@ fn keyed_blits_into_a_toadforces_memory_keep_what_the_keys_say() {
     // a destination key are the processor's.
     let card = cpu.bus.toadforce.as_ref().unwrap();
     assert_eq!(card.counts().blt, 3);
+}
+
+/// The pixels a texture streamed through system memory has at each of
+/// its three uploads (`streamed_program`).
+const STREAMED: [u16; 3] = [0x1111, 0x2222, 0x3333];
+
+/// Full screen at 640x480x16 with a back buffer, filled, and a 16-bit
+/// surface of 4x2 in system memory; a Lock and Unlock of the back
+/// buffer (step 1). Then a texture streamed as Nocturne streams its
+/// own: three times over, the system memory surface locked, written
+/// whole with the next of `STREAMED`, unlocked, and blitted to the back
+/// buffer at (10 + 20 i, 10) (step 2).
+fn streamed_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    put32(&mut d, LOCKED, 108);
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        0,
+        0,
+        1,
+    );
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    desc(
+        &mut d,
+        SYSDESC,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+        DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY,
+        4,
+        2,
+        0,
+    );
+    let pf = SYSDESC + 0x48;
+    for (i, v) in [32, 0x40, 0, 16, 0xF800, 0x07E0, 0x001F].iter().enumerate() {
+        put32(&mut d, pf + 4 * i as u32, *v);
+    }
+    put32(&mut d, LOCK2, 108);
+    put32(&mut d, FX, 100);
+    put32(&mut d, FX + 0x50, FILL as u32);
+    for i in 0..3 {
+        let r = [10 + 20 * i, 10, 14 + 20 * i, 12];
+        for (j, v) in r.iter().enumerate() {
+            put32(&mut d, BLT_RECTS + 16 * i + 4 * j as u32, *v);
+        }
+    }
+    program(&[USER32, GDI32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(640), Arg::I(480), Arg::I(16)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(SYSDESC), Arg::At(SYS), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_BLT,
+            &[
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(DDBLT_COLORFILL | DDBLT_WAIT),
+                Arg::At(FX),
+            ],
+        )?;
+        // A lock of the back buffer has the fill done.
+        c.com(
+            a,
+            l,
+            BACK,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        c.com(a, l, BACK, S_UNLOCK, &[Arg::I(0)])?;
+        wait(a, l, 1)?;
+        for (i, &pixel) in STREAMED.iter().enumerate() {
+            c.com(
+                a,
+                l,
+                SYS,
+                S_LOCK,
+                &[Arg::I(0), Arg::At(LOCK2), Arg::I(1), Arg::I(0)],
+            )?;
+            a.mov(edi, dword_ptr(l.at(LOCK2 + 0x24)))?;
+            for x in 0..4 {
+                a.mov(word_ptr(edi + 2 * x), pixel as u32)?;
+            }
+            a.add(edi, dword_ptr(l.at(LOCK2 + 0x10)))?;
+            for x in 0..4 {
+                a.mov(word_ptr(edi + 2 * x), pixel as u32)?;
+            }
+            c.com(a, l, SYS, S_UNLOCK, &[Arg::I(0)])?;
+            c.com(
+                a,
+                l,
+                BACK,
+                S_BLT,
+                &[
+                    Arg::At(BLT_RECTS + 16 * i as u32),
+                    Arg::Val(SYS),
+                    Arg::I(0),
+                    Arg::I(DDBLT_WAIT),
+                    Arg::I(0),
+                ],
+            )?;
+        }
+        finish(a, l, 2)
+    })
+}
+
+/// A ToadForce's commands read and draw its own memory only, so a lock
+/// of a surface in system memory has nothing to wait for: the copies of
+/// a texture streamed through one wait in the queue behind each other,
+/// each from a block of card memory of its own, and each copies the
+/// pixels the surface had at its blit.
+#[test]
+fn a_texture_streamed_through_system_memory_waits_in_a_toadforces_queue() {
+    let (program, data) = streamed_program();
+    let mut cpu = vesa_machine("streamed_toadforce", Adapter::ToadForce, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 10);
+    assert!(r[1..].iter().all(|&v| v == 0), "{r:X?}");
+    let runs = |cpu: &Cpu| cpu.bus.toadforce.as_ref().unwrap().queue_runs();
+    let before = runs(&cpu);
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    let r = results(&cpu, data, 19);
+    assert!(r[10..].iter().all(|&v| v == 0), "{r:X?}");
+    // Nothing ran the queue: the three copies wait in it.
+    assert_eq!(runs(&cpu), before);
+    assert!(cpu.bus.toadforce_queued());
+    let card = cpu.bus.toadforce.as_ref().unwrap();
+    let blts = card.counts().blt;
+    cpu.bus.toadforce_flush();
+    assert_eq!(cpu.bus.toadforce.as_ref().unwrap().counts().blt, blts + 3);
+    assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+    // The back buffer is the one not shown.
+    let back = if cpu.bus.vbe.start == 0 {
+        640 * 480 * 2
+    } else {
+        0
+    };
+    let pixel = |x: u32, y: u32| vram_word(&cpu, back + (y * 640 + x) * 2);
+    for (i, &value) in STREAMED.iter().enumerate() {
+        let x = 10 + 20 * i as u32;
+        for (across, down) in [(0, 0), (3, 0), (0, 1), (3, 1)] {
+            let at = (x + across, 10 + down);
+            assert_eq!(pixel(at.0, at.1), value, "copy {i} at {at:?}");
+        }
+        assert_eq!(pixel(x + 4, 10), FILL);
+        assert_eq!(pixel(x, 12), FILL);
+    }
 }
 
 // The data of the program that blits inside video memory.

@@ -22,6 +22,7 @@ use crate::timer::CpuSpeed;
 mod args;
 mod clipboard;
 mod config_file;
+mod crash_dialog;
 mod debug;
 mod display;
 mod input;
@@ -225,6 +226,11 @@ fn main() -> Result<ExitCode, String> {
         || video_subsystem
             .current_video_driver()
             .eq_ignore_ascii_case("dummy");
+    // A crash from here on shows a dialog too, in a run a user watches.
+    let driver = video_subsystem.current_video_driver();
+    if crash_dialog::wanted(args.hidden, driver, args.debug_server.is_some()) {
+        crash_dialog::enable();
+    }
     let audio_output = sdl_audio::open_output(&sdl_context, &settings, headless);
     // Game controllers for the game port; the emulator does without them.
     let controller_subsystem = match sdl_context.gamepad() {
@@ -1023,10 +1029,11 @@ fn main() -> Result<ExitCode, String> {
                     if paused {
                         continue;
                     }
-                    // A key still held from the settings window repeats
-                    // for nobody.
+                    // The host's key repeat is for nobody: the machine's
+                    // keyboard repeats a held key itself, at its own
+                    // typematic rate.
                     let Some(scancode) = scancode else { continue };
-                    if repeat && !held.contains_key(&scancode) {
+                    if repeat {
                         continue;
                     }
                     // A key pressed stops a paste.
@@ -1649,6 +1656,7 @@ fn main() -> Result<ExitCode, String> {
         cpu.bus.set_fps_cap(settings.fps_cap);
         cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
         cpu.bus.set_powervr_filter(settings.powervr_filter);
+        cpu.bus.set_toadforce_gamma(settings.toadforce_gamma);
         // With a variable refresh rate, each frame runs to a vertical
         // retrace of the machine's display and is shown when it is due,
         // so the window refreshes at the machine's rate, where the host's
@@ -1825,6 +1833,10 @@ fn main() -> Result<ExitCode, String> {
             }
         }
 
+        if let Some(stall) = rust_dos::timer::test_stall(cpu.bus.clock.now_ns()) {
+            eprintln!("[stall] test stall of {} ms", stall.as_millis());
+            std::thread::sleep(stall);
+        }
         let exec_time = batch_start.elapsed();
         let stalled = cpu.bus.clock.stalled - batch_stalled;
         let idle = cpu.bus.clock.idle - batch_idle;
@@ -1867,6 +1879,33 @@ fn main() -> Result<ExitCode, String> {
         if std::mem::take(&mut cpu.bus.mixer_changed) {
             settings.mixer = cpu.bus.mixer.settings();
             ui.sync_mixer(settings.mixer);
+        }
+        // CONFIG -SET asked for settings: they are applied as the window's
+        // are, and the batch file waiting for them goes on.
+        let requests = rust_dos::shell::take_settings(&mut cpu);
+        if !requests.is_empty() {
+            let dir = cpu.bus.config_dir.clone().unwrap_or_else(|| PathBuf::from("."));
+            let home = rust_dos::hostdirs::home_dir();
+            let (new, warnings) =
+                crate::config::with_entries(&settings, &requests, &dir, home.as_deref());
+            for warning in warnings {
+                config_warning(&mut cpu, &format!("CONFIG -SET: {}", warning));
+            }
+            match host!().apply(&new) {
+                // A change of hardware under a running program waits for
+                // it to end: the log says so too, for a run without a
+                // window.
+                Ok(note) => {
+                    if let Some(note) = note {
+                        cpu.bus.log_string(&format!("[CONFIG] CONFIG -SET: {}", note));
+                        osd.show(note);
+                    }
+                }
+                Err(e) => {
+                    config_warning(&mut cpu, &format!("CONFIG -SET: {}", e));
+                    osd.show(e);
+                }
+            }
         }
         // A program from the prompt waiting for the almanac's settings, and
         // one that played with them and has ended.
@@ -2196,7 +2235,7 @@ fn main() -> Result<ExitCode, String> {
                     let paged = if record_ui { ui.with_layer(&screen, (1.0, 1.0)) } else { None };
                     let base = paged.as_ref().unwrap_or(&screen);
                     let shaded = (settings.record_shader && (screenshot || video_recording.is_some()))
-                        .then(|| display.shaded(base, &cached_frame))
+                        .then(|| display.shaded(base, &cached_frame, false))
                         .flatten();
                     let picture = shaded.as_ref().unwrap_or(base);
                     recorder.capture(base);
@@ -2271,7 +2310,7 @@ fn main() -> Result<ExitCode, String> {
                     let paged = ui.with_layer(&screen, (1.0, 1.0));
                     let frame = paged.as_ref().unwrap_or(&screen);
                     if dbg.wants_shader_frame() {
-                        let shaded = display.shaded(frame, &cached_frame);
+                        let shaded = display.shaded(frame, &cached_frame, true);
                         dbg.capture_frame_with_shader(frame, shaded.as_ref());
                     } else {
                         dbg.capture_frame(frame);

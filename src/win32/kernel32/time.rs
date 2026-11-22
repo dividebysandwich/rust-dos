@@ -145,6 +145,13 @@ pub(super) fn get_time_zone_information(cpu: &mut Cpu, args: &[u32]) -> Option<u
     Some(TIME_ZONE_ID_UNKNOWN)
 }
 
+/// The system's time (`now`) as a FILETIME's count of 100 ns since
+/// 1601, for other DLLs.
+pub(crate) fn file_time_now(cpu: &mut Cpu) -> u64 {
+    let st = convert::system_time_of(now(cpu));
+    convert::system_time_to_ticks(&st).unwrap_or(0)
+}
+
 /// GetSystemTimeAsFileTime: the system's time (`now`) as a FILETIME.
 pub(super) fn get_system_time_as_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let st = convert::system_time_of(now(cpu));

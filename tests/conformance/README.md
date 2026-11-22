@@ -19,8 +19,8 @@ changes listed below:
   `thread.c`, `time.c`, `timer.c`, `version.c`, `virtual.c` from
   `dlls/kernel32/tests/`;
 - `advapi32/`: `registry.c` from `dlls/advapi32/tests/`;
-- `user32/`: `class.c`, `dce.c`, `dialog.c`, `input.c`, `msg.c`,
-  `resource.c`, `static.c`, `text.c`, `uitools.c`, `win.c`,
+- `user32/`: `class.c`, `dce.c`, `dialog.c`, `input.c`, `listbox.c`,
+  `msg.c`, `resource.c`, `static.c`, `text.c`, `uitools.c`, `win.c`,
   `wsprintf.c`, and the resources they share, `resource.rc` with
   `test_mono.bmp`, from `dlls/user32/tests/`;
 - `gdi32/`: `bitmap.c`, `brush.c`, `clipping.c`, `dc.c`, `gdiobj.c`,
@@ -51,11 +51,15 @@ changes listed below:
 - `version/`: `info.c`, `install.c` and `version.rc`, the resource
   script `info.c`'s version resource is built from, from
   `dlls/version/tests/`.
-- `ole32/`: `compobj.c`, `hglobalstream.c` and `propvariant.c` from
-  `dlls/ole32/tests/`. `storage32.c` is left out, as OLE32 has no
-  structured storage, and so is user32's `dde.c`: it tests DDE
-  conversations between the test program and a child program, and the
-  built-in DDEML talks only to the built-in Program Manager server.
+- `ole32/`: `compobj.c`, `dragdrop.c`, `hglobalstream.c` and
+  `propvariant.c` from `dlls/ole32/tests/`. `storage32.c` is left out,
+  as OLE32 has no structured storage, and so is user32's `dde.c`: it
+  tests DDE conversations between the test program and a child
+  program, and the built-in DDEML talks only to the built-in Program
+  Manager server. `dropreg.c` is rust-dos's own, written with Wine's
+  framework: it checks what Windows 98 SE's RegisterDragDrop and
+  RevokeDragDrop returned where `dragdrop.c` doesn't look, in the
+  order of the checks, in threads and with another process's windows.
 - `shell32/`: `progman_dde.c`, `shelllink.c`, `shellpath.c`,
   `shlexec.c`, `shlfileop.c`, `string.c` and the header they share,
   `shell32_test.h`, from `dlls/shell32/tests/`.
@@ -119,6 +123,9 @@ patch the import table of SHELL32, which the built-in DLL doesn't have,
 to hook WaitForInputIdle, and then need the child program to be a DDE
 server the shell talks to; the built-in DDEML reaches only the
 built-in Program Manager server.
+
+`dragdrop.c` doesn't call `test_DoDragDrop`: the built-in OLE32 has no
+DoDragDrop yet (#1510).
 
 Of the 1.x releases compared (1.0.1, 1.2.3, 1.4.1, 1.6.2, 1.8.7), 1.2.3's
 kernel32 tests mention Windows 9x the most: later releases took many of

@@ -1,0 +1,1260 @@
+//! Glyphs drawn for MS Sans Serif's 8-point size, the 13-pixel font of
+//! Windows 98's menus, dialogs, buttons and captions.
+//!
+//! The other raster sizes squeeze the ROM font's glyphs into Windows'
+//! character widths (`raster_glyphs` in `font`). At 13 pixels most of
+//! those widths leave 4 or 5 columns for a glyph drawn in 8, and the
+//! squeeze ORs the 2-pixel stems, slab serifs and slashed zero of the
+//! EGA font into blobs: "t" and "r" lose their crossbar and arm and read
+//! as "l", "0" reads as "8", and a greyed item's embossed copy runs into
+//! its grey one. Windows draws this size with 1-pixel strokes. The
+//! glyphs here were drawn for this project, pixel by pixel: the printable
+//! ASCII characters, the Latin letters and punctuation of code page 1252
+//! that aren't an ASCII letter with an accent (ß, æ, ø, ð, þ, ¡, ¿, «,
+//! », ° and ·), and the letters with a stroke of the Central European
+//! and Baltic code pages (ł, Ł, đ, Đ). A character of code page 1252 is
+//! as wide as its character's width less the column between characters,
+//! with the size's metrics: 11 rows above the baseline, the capitals and
+//! ascenders 8 high (rows 3 to 10), the small letters 6 (rows 5 to 10),
+//! and descenders in rows 11 and 12.
+//!
+//! A letter with an accent is its letter's glyph with the mark drawn
+//! above or below it, or beside the ascender for the caron of ď, ľ, ť
+//! and Ľ. Characters these don't cover (Greek, Cyrillic, most symbols),
+//! and letters too wide for the width Windows 98 gives them (Š and Ž
+//! have 3 columns in code page 1252), keep the squeezed ROM glyph.
+
+use crate::win32::convert::{
+    ACUTE, BREVE, CARON, CEDILLA, CIRCUMFLEX, DIAERESIS, DOT_ABOVE, DOUBLE_ACUTE, GRAVE, MACRON,
+    OGONEK, RING, TILDE, decompose,
+};
+
+/// The size's height in pixels.
+pub const HEIGHT: usize = 13;
+
+/// The first row of a small letter.
+const X_TOP: usize = 5;
+
+/// The glyphs: each character, its top row and its rows, `#` lit.
+#[rustfmt::skip]
+pub(super) const GLYPHS: &[(char, usize, &[&str])] = &[
+    ('!', 3, &[
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "..",
+        "#.",
+    ]),
+    ('"', 3, &[
+        "#.#.",
+        "#.#.",
+        "#.#.",
+    ]),
+    ('#', 3, &[
+        ".#.#..",
+        ".#.#..",
+        "######",
+        ".#.#..",
+        ".#.#..",
+        "######",
+        ".#.#..",
+        ".#.#..",
+    ]),
+    ('$', 2, &[
+        "..#..",
+        ".####",
+        "#.#..",
+        "#.#..",
+        ".###.",
+        "..#.#",
+        "..#.#",
+        "####.",
+        "..#..",
+    ]),
+    ('%', 3, &[
+        ".#...#.",
+        "#.#..#.",
+        "#.#.#..",
+        ".#..#..",
+        "...#.#.",
+        "..#.#.#",
+        "..#.#.#",
+        ".#...#.",
+    ]),
+    ('&', 3, &[
+        ".##..",
+        "#..#.",
+        "#..#.",
+        ".##..",
+        "#.#.#",
+        "#..#.",
+        "#..#.",
+        ".##.#",
+    ]),
+    ('\'', 3, &[
+        "#",
+        "#",
+        "#",
+    ]),
+    ('(', 3, &[
+        ".#",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        ".#",
+    ]),
+    (')', 3, &[
+        "#.",
+        ".#",
+        ".#",
+        ".#",
+        ".#",
+        ".#",
+        ".#",
+        ".#",
+        ".#",
+        "#.",
+    ]),
+    ('*', 3, &[
+        "#.#",
+        ".#.",
+        "#.#",
+    ]),
+    ('+', 5, &[
+        "..#..",
+        "..#..",
+        "#####",
+        "..#..",
+        "..#..",
+    ]),
+    (',', 10, &[
+        "#.",
+        "#.",
+    ]),
+    ('-', 7, &[
+        "##",
+    ]),
+    ('.', 10, &[
+        "#.",
+    ]),
+    ('/', 3, &[
+        "...#",
+        "...#",
+        "..#.",
+        "..#.",
+        ".#..",
+        ".#..",
+        "#...",
+        "#...",
+    ]),
+    ('0', 3, &[
+        ".###.",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        ".###.",
+    ]),
+    ('1', 3, &[
+        "..#..",
+        ".##..",
+        "..#..",
+        "..#..",
+        "..#..",
+        "..#..",
+        "..#..",
+        "..#..",
+    ]),
+    ('2', 3, &[
+        ".###.",
+        "#...#",
+        "....#",
+        "...#.",
+        "..#..",
+        ".#...",
+        "#....",
+        "#####",
+    ]),
+    ('3', 3, &[
+        ".###.",
+        "#...#",
+        "....#",
+        "..##.",
+        "....#",
+        "....#",
+        "#...#",
+        ".###.",
+    ]),
+    ('4', 3, &[
+        "...#.",
+        "..##.",
+        ".#.#.",
+        "#..#.",
+        "#####",
+        "...#.",
+        "...#.",
+        "...#.",
+    ]),
+    ('5', 3, &[
+        "#####",
+        "#....",
+        "#....",
+        "####.",
+        "....#",
+        "....#",
+        "#...#",
+        ".###.",
+    ]),
+    ('6', 3, &[
+        ".###.",
+        "#...#",
+        "#....",
+        "####.",
+        "#...#",
+        "#...#",
+        "#...#",
+        ".###.",
+    ]),
+    ('7', 3, &[
+        "#####",
+        "....#",
+        "...#.",
+        "...#.",
+        "..#..",
+        "..#..",
+        ".#...",
+        ".#...",
+    ]),
+    ('8', 3, &[
+        ".###.",
+        "#...#",
+        "#...#",
+        ".###.",
+        "#...#",
+        "#...#",
+        "#...#",
+        ".###.",
+    ]),
+    ('9', 3, &[
+        ".###.",
+        "#...#",
+        "#...#",
+        "#...#",
+        ".####",
+        "....#",
+        "#...#",
+        ".###.",
+    ]),
+    (':', 5, &[
+        "#.",
+        "..",
+        "..",
+        "..",
+        "..",
+        "#.",
+    ]),
+    (';', 5, &[
+        "#.",
+        "..",
+        "..",
+        "..",
+        "..",
+        "#.",
+        "#.",
+    ]),
+    ('<', 4, &[
+        "....#",
+        "...#.",
+        "..#..",
+        ".#...",
+        "..#..",
+        "...#.",
+        "....#",
+    ]),
+    ('=', 6, &[
+        "#####",
+        ".....",
+        "#####",
+    ]),
+    ('>', 4, &[
+        "#....",
+        ".#...",
+        "..#..",
+        "...#.",
+        "..#..",
+        ".#...",
+        "#....",
+    ]),
+    ('?', 3, &[
+        ".###.",
+        "#...#",
+        "....#",
+        "...#.",
+        "..#..",
+        "..#..",
+        ".....",
+        "..#..",
+    ]),
+    ('@', 3, &[
+        "..#####...",
+        ".#.....#..",
+        "#..###..#.",
+        "#.#..#..#.",
+        "#.#..#..#.",
+        "#.#..#..#.",
+        "#..##.##..",
+        ".#........",
+        "..######..",
+    ]),
+    ('A', 3, &[
+        "..##..",
+        "..##..",
+        ".#..#.",
+        ".#..#.",
+        ".#..#.",
+        "######",
+        "#....#",
+        "#....#",
+    ]),
+    ('B', 3, &[
+        "#####.",
+        "#....#",
+        "#....#",
+        "#####.",
+        "#....#",
+        "#....#",
+        "#....#",
+        "#####.",
+    ]),
+    ('C', 3, &[
+        "..###.",
+        ".#...#",
+        "#.....",
+        "#.....",
+        "#.....",
+        "#.....",
+        ".#...#",
+        "..###.",
+    ]),
+    ('D', 3, &[
+        "#####..",
+        "#....#.",
+        "#.....#",
+        "#.....#",
+        "#.....#",
+        "#.....#",
+        "#....#.",
+        "#####..",
+    ]),
+    ('E', 3, &[
+        "#####.",
+        "#.....",
+        "#.....",
+        "####..",
+        "#.....",
+        "#.....",
+        "#.....",
+        "#####.",
+    ]),
+    ('F', 3, &[
+        "#####",
+        "#....",
+        "#....",
+        "####.",
+        "#....",
+        "#....",
+        "#....",
+        "#....",
+    ]),
+    ('G', 3, &[
+        "..###..",
+        ".#...#.",
+        "#......",
+        "#......",
+        "#...###",
+        "#.....#",
+        ".#...##",
+        "..###.#",
+    ]),
+    ('H', 3, &[
+        "#.....#",
+        "#.....#",
+        "#.....#",
+        "#######",
+        "#.....#",
+        "#.....#",
+        "#.....#",
+        "#.....#",
+    ]),
+    ('I', 3, &[
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+    ]),
+    ('J', 3, &[
+        "...#",
+        "...#",
+        "...#",
+        "...#",
+        "...#",
+        "#..#",
+        "#..#",
+        ".##.",
+    ]),
+    ('K', 3, &[
+        "#...#.",
+        "#..#..",
+        "#.#...",
+        "##....",
+        "#.#...",
+        "#..#..",
+        "#...#.",
+        "#....#",
+    ]),
+    ('L', 3, &[
+        "#....",
+        "#....",
+        "#....",
+        "#....",
+        "#....",
+        "#....",
+        "#....",
+        "#####",
+    ]),
+    ('M', 3, &[
+        "##....##",
+        "##....##",
+        "#.#..#.#",
+        "#.#..#.#",
+        "#..##..#",
+        "#..##..#",
+        "#......#",
+        "#......#",
+    ]),
+    ('N', 3, &[
+        "#.....#",
+        "##....#",
+        "#.#...#",
+        "#..#..#",
+        "#..#..#",
+        "#...#.#",
+        "#....##",
+        "#.....#",
+    ]),
+    ('O', 3, &[
+        "..###..",
+        ".#...#.",
+        "#.....#",
+        "#.....#",
+        "#.....#",
+        "#.....#",
+        ".#...#.",
+        "..###..",
+    ]),
+    ('P', 3, &[
+        "#####.",
+        "#....#",
+        "#....#",
+        "#....#",
+        "#####.",
+        "#.....",
+        "#.....",
+        "#.....",
+    ]),
+    ('Q', 3, &[
+        "..###..",
+        ".#...#.",
+        "#.....#",
+        "#.....#",
+        "#.....#",
+        "#...#.#",
+        ".#...#.",
+        "..###.#",
+    ]),
+    ('R', 3, &[
+        "#####..",
+        "#....#.",
+        "#....#.",
+        "#....#.",
+        "#####..",
+        "#...#..",
+        "#....#.",
+        "#.....#",
+    ]),
+    ('S', 3, &[
+        ".####.",
+        "#....#",
+        "#.....",
+        ".##...",
+        "...##.",
+        ".....#",
+        "#....#",
+        ".####.",
+    ]),
+    ('T', 3, &[
+        "#####.",
+        "..#...",
+        "..#...",
+        "..#...",
+        "..#...",
+        "..#...",
+        "..#...",
+        "..#...",
+    ]),
+    ('U', 3, &[
+        "#.....#",
+        "#.....#",
+        "#.....#",
+        "#.....#",
+        "#.....#",
+        "#.....#",
+        "#.....#",
+        ".#####.",
+    ]),
+    ('V', 3, &[
+        "#....#",
+        "#....#",
+        "#....#",
+        ".#..#.",
+        ".#..#.",
+        ".#..#.",
+        "..##..",
+        "..##..",
+    ]),
+    ('W', 3, &[
+        "#...#...#.",
+        "#...#...#.",
+        "#...#...#.",
+        ".#.#.#.#..",
+        ".#.#.#.#..",
+        ".#.#.#.#..",
+        "..#...#...",
+        "..#...#...",
+    ]),
+    ('X', 3, &[
+        "#....#",
+        "#....#",
+        ".#..#.",
+        "..##..",
+        "..##..",
+        ".#..#.",
+        "#....#",
+        "#....#",
+    ]),
+    ('Y', 3, &[
+        "#...#.",
+        "#...#.",
+        ".#.#..",
+        ".#.#..",
+        "..#...",
+        "..#...",
+        "..#...",
+        "..#...",
+    ]),
+    ('Z', 3, &[
+        "######",
+        ".....#",
+        "....#.",
+        "...#..",
+        "..#...",
+        ".#....",
+        "#.....",
+        "######",
+    ]),
+    ('[', 3, &[
+        "##",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "##",
+    ]),
+    ('\\', 3, &[
+        "#...",
+        "#...",
+        ".#..",
+        ".#..",
+        "..#.",
+        "..#.",
+        "...#",
+        "...#",
+    ]),
+    (']', 3, &[
+        "##",
+        ".#",
+        ".#",
+        ".#",
+        ".#",
+        ".#",
+        ".#",
+        ".#",
+        ".#",
+        "##",
+    ]),
+    ('^', 3, &[
+        "..#..",
+        ".#.#.",
+        "#...#",
+    ]),
+    ('_', 12, &[
+        "#####",
+    ]),
+    ('`', 3, &[
+        "#.",
+        ".#",
+    ]),
+    ('a', 5, &[
+        ".###.",
+        "....#",
+        ".####",
+        "#...#",
+        "#...#",
+        ".####",
+    ]),
+    ('b', 3, &[
+        "#....",
+        "#....",
+        "####.",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        "####.",
+    ]),
+    ('c', 5, &[
+        ".###.",
+        "#...#",
+        "#....",
+        "#....",
+        "#...#",
+        ".###.",
+    ]),
+    ('d', 3, &[
+        "....#",
+        "....#",
+        ".####",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        ".####",
+    ]),
+    ('e', 5, &[
+        ".###.",
+        "#...#",
+        "#####",
+        "#....",
+        "#...#",
+        ".###.",
+    ]),
+    ('f', 3, &[
+        ".#",
+        "#.",
+        "##",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+    ]),
+    ('g', 5, &[
+        ".####",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        ".####",
+        "....#",
+        "####.",
+    ]),
+    ('h', 3, &[
+        "#....",
+        "#....",
+        "####.",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+    ]),
+    ('i', 3, &[
+        "#",
+        ".",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+    ]),
+    ('j', 3, &[
+        "#",
+        ".",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+    ]),
+    ('k', 3, &[
+        "#....",
+        "#....",
+        "#...#",
+        "#..#.",
+        "#.#..",
+        "###..",
+        "#..#.",
+        "#...#",
+    ]),
+    ('l', 3, &[
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+    ]),
+    ('m', 5, &[
+        "###.##.",
+        "#..#..#",
+        "#..#..#",
+        "#..#..#",
+        "#..#..#",
+        "#..#..#",
+    ]),
+    ('n', 5, &[
+        "####.",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+    ]),
+    ('o', 5, &[
+        ".###.",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        ".###.",
+    ]),
+    ('p', 5, &[
+        "####.",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        "####.",
+        "#....",
+        "#....",
+    ]),
+    ('q', 5, &[
+        ".####",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        ".####",
+        "....#",
+        "....#",
+    ]),
+    ('r', 5, &[
+        "##",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+    ]),
+    ('s', 5, &[
+        ".###",
+        "#...",
+        ".##.",
+        "...#",
+        "...#",
+        "###.",
+    ]),
+    ('t', 4, &[
+        "#.",
+        "##",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        ".#",
+    ]),
+    ('u', 5, &[
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        ".####",
+    ]),
+    ('v', 5, &[
+        "#...#",
+        "#...#",
+        ".#.#.",
+        ".#.#.",
+        "..#..",
+        "..#..",
+    ]),
+    ('w', 5, &[
+        "#.....#",
+        "#.....#",
+        "#..#..#",
+        ".#.#.#.",
+        ".#.#.#.",
+        "..#.#..",
+    ]),
+    ('x', 5, &[
+        "#..#",
+        "#..#",
+        ".##.",
+        ".##.",
+        "#..#",
+        "#..#",
+    ]),
+    ('y', 5, &[
+        "#..#",
+        "#..#",
+        "#..#",
+        "#..#",
+        "#..#",
+        ".###",
+        "...#",
+        "###.",
+    ]),
+    ('z', 5, &[
+        "####",
+        "...#",
+        "..#.",
+        ".#..",
+        "#...",
+        "####",
+    ]),
+    ('{', 3, &[
+        "..#",
+        ".#.",
+        ".#.",
+        ".#.",
+        "#..",
+        ".#.",
+        ".#.",
+        ".#.",
+        ".#.",
+        "..#",
+    ]),
+    ('|', 3, &[
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+        "#",
+    ]),
+    ('}', 3, &[
+        "#..",
+        ".#.",
+        ".#.",
+        ".#.",
+        "..#",
+        ".#.",
+        ".#.",
+        ".#.",
+        ".#.",
+        "#..",
+    ]),
+    ('~', 6, &[
+        ".##..#",
+        "#..##.",
+    ]),
+    ('¡', 5, &[
+        "#.",
+        "..",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+    ]),
+    ('«', 5, &[
+        "..#.#",
+        ".#.#.",
+        "#.#..",
+        ".#.#.",
+        "..#.#",
+    ]),
+    ('°', 3, &[
+        ".#.",
+        "#.#",
+        ".#.",
+    ]),
+    ('·', 7, &[
+        "#.",
+    ]),
+    ('»', 5, &[
+        "#.#..",
+        ".#.#.",
+        "..#.#",
+        ".#.#.",
+        "#.#..",
+    ]),
+    ('¿', 5, &[
+        "..#..",
+        ".....",
+        "..#..",
+        "..#..",
+        ".#...",
+        "#....",
+        "#...#",
+        ".###.",
+    ]),
+    ('Æ', 3, &[
+        "...######",
+        "..#..#...",
+        "..#..#...",
+        ".#...####",
+        ".#####...",
+        "#....#...",
+        "#....#...",
+        "#....####",
+    ]),
+    ('Ð', 3, &[
+        ".####..",
+        ".#...#.",
+        ".#....#",
+        "###...#",
+        ".#....#",
+        ".#....#",
+        ".#...#.",
+        ".####..",
+    ]),
+    ('Ø', 3, &[
+        "..###.#",
+        ".#...#.",
+        "#...#.#",
+        "#..#..#",
+        "#.#...#",
+        "##....#",
+        ".#...#.",
+        "#.###..",
+    ]),
+    ('Þ', 3, &[
+        "#.....",
+        "#.....",
+        "#####.",
+        "#....#",
+        "#....#",
+        "#####.",
+        "#.....",
+        "#.....",
+    ]),
+    ('ß', 3, &[
+        ".##..",
+        "#..#.",
+        "#..#.",
+        "#.#..",
+        "#..#.",
+        "#...#",
+        "#...#",
+        "#.##.",
+    ]),
+    ('æ', 5, &[
+        ".###.###.",
+        "....#...#",
+        ".########",
+        "#...#....",
+        "#...#...#",
+        ".###.###.",
+    ]),
+    ('ð', 3, &[
+        ".#.#.",
+        "..#..",
+        ".#.#.",
+        "....#",
+        ".####",
+        "#...#",
+        "#...#",
+        ".###.",
+    ]),
+    ('ø', 5, &[
+        ".####",
+        "#..##",
+        "#.#.#",
+        "##..#",
+        "#...#",
+        "####.",
+    ]),
+    ('þ', 3, &[
+        "#....",
+        "#....",
+        "####.",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        "####.",
+        "#....",
+        "#....",
+    ]),
+    ('đ', 3, &[
+        "....#.",
+        "...###",
+        ".####.",
+        "#...#.",
+        "#...#.",
+        "#...#.",
+        "#...#.",
+        ".####.",
+    ]),
+    ('Ł', 3, &[
+        ".#....",
+        ".#....",
+        ".#....",
+        ".##...",
+        "##....",
+        ".#....",
+        ".#....",
+        ".#####",
+    ]),
+    ('ł', 3, &[
+        ".#.",
+        ".#.",
+        ".#.",
+        ".##",
+        "##.",
+        ".#.",
+        ".#.",
+        ".#.",
+    ]),
+];
+
+/// Where a mark goes on its letter.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Above,
+    Below,
+    /// Below, at the letter's right end.
+    BelowRight,
+    /// Right of the letter's ascender, two columns on, as the caron of
+    /// ď, ľ, ť and Ľ is written.
+    Beside,
+}
+
+/// The rows of the combining mark `m` on the letter `base` and where it
+/// goes.
+fn mark(m: u16, base: u16) -> Option<(&'static [&'static str], Place)> {
+    use Place::*;
+    Some(match m {
+        GRAVE => (&["#.", ".#"], Above),
+        ACUTE => (&[".#", "#."], Above),
+        CIRCUMFLEX => (&[".#.", "#.#"], Above),
+        CARON if matches!(base, 0x64 | 0x6C | 0x74 | 0x4C) => (&["#", "#"], Beside),
+        CARON => (&["#.#", ".#."], Above),
+        TILDE => (&[".#.#", "#.#."], Above),
+        DIAERESIS => (&["#.#"], Above),
+        DOT_ABOVE => (&["#"], Above),
+        MACRON => (&["###"], Above),
+        BREVE => (&["#..#", ".##."], Above),
+        RING => (&[".#.", "#.#", ".#."], Above),
+        DOUBLE_ACUTE => (&[".#.#", "#.#."], Above),
+        CEDILLA => (&[".#", "#."], Below),
+        OGONEK => (&["#.", ".#"], BelowRight),
+        _ => return None,
+    })
+}
+
+/// A row of `#` and `.` as a bit mask, bit 0 the leftmost pixel.
+fn bits(row: &str) -> u64 {
+    row.bytes()
+        .enumerate()
+        .filter(|&(_, b)| b == b'#')
+        .fold(0, |a, (x, _)| a | 1 << x)
+}
+
+/// How many columns the rows span from the left.
+fn span(rows: &[u64]) -> i32 {
+    64 - rows.iter().fold(0, |a, &r| a | r).leading_zeros() as i32
+}
+
+/// The rows `rows`, `from` columns wide, in `to` columns: a column is lit
+/// where any of those it covers is.
+fn squeeze(rows: &[u64], from: i32, to: i32) -> Vec<u64> {
+    rows.iter()
+        .map(|&row| {
+            (0..to).fold(0, |out, x| {
+                let a = x * from / to;
+                let b = ((x + 1) * from / to).max(a + 1);
+                let covered = (row >> a) & ((1 << (b - a)) - 1);
+                out | ((covered != 0) as u64) << x
+            })
+        })
+        .collect()
+}
+
+/// The entry of `GLYPHS` that draws the character `c`, if there is one.
+fn entry(c: u16) -> Option<&'static (char, usize, &'static [&'static str])> {
+    // Croatian's capital D with stroke looks like Icelandic's eth.
+    let c = if c == 0x0110 { 0xD0 } else { c };
+    let ch = char::from_u32(c as u32)?;
+    GLYPHS.iter().find(|g| g.0 == ch)
+}
+
+/// The drawn glyph of the character `c`, if it has one.
+fn drawn(c: u16) -> Option<[u64; HEIGHT]> {
+    let &(_, top, rows) = entry(c)?;
+    let mut out = [0; HEIGHT];
+    for (i, row) in rows.iter().enumerate() {
+        out[top + i] = bits(row);
+    }
+    Some(out)
+}
+
+/// The glyph of the character `c` built from its letter's: dotless i,
+/// or the letter with an accent's mark, in `body` columns. The letter is
+/// centred in them, and the mark on the letter. A mark wider than `body`
+/// is squeezed into it if `squeeze`, else there is no glyph; so is one
+/// whose letter is wider.
+fn composed(c: u16, body: i32, squeeze_mark: bool) -> Option<[u64; HEIGHT]> {
+    if c == 0x0131 {
+        let mut g = drawn(u16::from(b'i'))?;
+        g[..X_TOP].fill(0);
+        return Some(g).filter(|g| span(g) <= body);
+    }
+    let (base, m) = decompose(c)?;
+    let (pattern, place) = mark(m, base)?;
+    let mut g = drawn(base)?;
+    // An accent takes the place of the dot of i and j.
+    if place == Place::Above && matches!(base, 0x69 | 0x6A) {
+        g[..X_TOP].fill(0);
+    }
+    let letter = span(&g);
+    if letter > body {
+        return None;
+    }
+    // A mark beside the letter goes right of it, the others over its
+    // middle.
+    let shift = if place == Place::Beside {
+        0
+    } else {
+        (body - letter) / 2
+    };
+    for row in &mut g {
+        *row <<= shift;
+    }
+    let mut mark: Vec<u64> = pattern.iter().map(|r| bits(r)).collect();
+    let mut width = span(&mark);
+    if width > body && place != Place::Beside {
+        if !squeeze_mark {
+            return None;
+        }
+        mark = squeeze(&mark, width, body);
+        width = body;
+    }
+    let x = match place {
+        Place::BelowRight => (shift + letter - width).max(0),
+        // Two columns right of the ascender's top.
+        Place::Beside => (g[3] | g[4]).checked_ilog2()? as i32 + 2,
+        _ => (shift + (letter - width) / 2).clamp(0, body - width),
+    };
+    if x + width > body {
+        return None;
+    }
+    let top = match place {
+        // A blank row between mark and letter where the cell has room.
+        Place::Above => {
+            let letter_top = g.iter().position(|&r| r != 0).unwrap_or(X_TOP);
+            letter_top.saturating_sub(mark.len() + 1)
+        }
+        Place::Beside => 3,
+        _ => HEIGHT - mark.len(),
+    };
+    for (i, row) in mark.iter().enumerate() {
+        g[top + i] |= row << x;
+    }
+    Some(g)
+}
+
+/// The glyph of the character `c` in a cell `body` columns wide, its
+/// rows' lit pixels as bit masks (bit 0 the leftmost), if this size has
+/// one drawn and it fits: the character's own, or one `composed` from its
+/// letter's.
+pub fn glyph(c: u16, body: i32) -> Option<[u64; HEIGHT]> {
+    match drawn(c) {
+        Some(g) => Some(g).filter(|g| span(g) <= body),
+        None => composed(c, body, true),
+    }
+}
+
+/// How far the character `c` moves on, for one code page 1252 lacks: its
+/// glyph's width and the column between characters. An accented letter
+/// is as wide as its letter, or wider where the mark needs it, as Windows
+/// 98 widens í, î and ï; the letter is then centred under the mark.
+pub fn width(c: u16) -> Option<i32> {
+    // A drawn glyph's columns, its blank ones on the right included.
+    let columns = |c: u16| entry(c).map(|g| g.2[0].len() as i32);
+    if let Some(n) = columns(c) {
+        return Some(n + 1);
+    }
+    let base = if c == 0x0131 { 0x69 } else { decompose(c)?.0 };
+    (columns(base)?..=16)
+        .find(|&body| composed(c, body, false).is_some())
+        .map(|body| body + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accents_go_above_the_letter() {
+        let e = drawn(u16::from(b'e')).unwrap();
+        let e_acute = glyph(0xE9, 5).unwrap();
+        assert_eq!(e_acute[X_TOP..], e[X_TOP..]);
+        assert_ne!(e_acute[..X_TOP], e[..X_TOP]);
+        // The capital's accent is in the rows above its top, 3.
+        let a_ring = glyph(0xC5, 6).unwrap();
+        assert!(a_ring[..3].iter().all(|&r| r != 0));
+        // i with an acute has no dot, and stands under the mark.
+        let i_acute = glyph(0xED, 3).unwrap();
+        assert_eq!(i_acute[2], 0b100);
+        assert_eq!(i_acute[3], 0b010);
+        assert_eq!(i_acute[4], 0);
+        assert_eq!(i_acute[X_TOP], 0b10);
+        // A cedilla goes under the baseline.
+        let c_cedilla = glyph(0xE7, 5).unwrap();
+        assert_ne!(c_cedilla[HEIGHT - 1], 0);
+        // Cyrillic has no glyph here.
+        assert_eq!(glyph(0x0436, 5), None);
+    }
+}

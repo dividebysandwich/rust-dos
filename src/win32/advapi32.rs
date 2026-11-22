@@ -19,6 +19,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: None,
 };
 
 const fn stdcall(
@@ -215,7 +216,7 @@ macro_rules! key {
 
 /// RegOpenKeyA: as RegOpenKeyExA, but with no subkey the handle is the
 /// one given.
-fn reg_open_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn reg_open_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hkey, sub, phk] = args else {
         unreachable!()
     };
@@ -262,7 +263,7 @@ fn open_subkey(cpu: &mut Cpu, key: u32, path: &str, phk: u32) -> Option<u32> {
 }
 
 /// RegCreateKeyA: RegCreateKeyExA's work.
-fn reg_create_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn reg_create_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     create_key(cpu, args[0], args[1], args[2], 0)
 }
 
@@ -297,7 +298,7 @@ fn create_key(cpu: &mut Cpu, hkey: u32, sub: u32, phk: u32, disposition: u32) ->
 
 /// RegCloseKey. The predefined keys don't close. The registry is saved
 /// if it changed.
-fn reg_close_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn reg_close_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let hkey = args[0];
     if hkey == 0 {
         return Some(ERROR_BADKEY);
@@ -342,7 +343,7 @@ fn give_data(cpu: &mut Cpu, value: &[u8], kind: u32, at: (u32, u32, u32)) -> Opt
 /// RegQueryValueA: the default value of the subkey `args[1]` of the key
 /// `args[0]` (or of that key, with no subkey), as RegQueryValueExA gives
 /// it, an empty string when it has none.
-fn reg_query_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn reg_query_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hkey, sub, data, size] = args else {
         unreachable!()
     };
@@ -364,7 +365,7 @@ fn reg_query_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// `args[4]` and their size at `args[5]`, which says how much room there
 /// is. Without the value, Windows 95 sets the type to 0 and leaves the
 /// size as it was.
-fn reg_query_value_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn reg_query_value_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hkey, name, _, ptype, data, size] = args else {
         unreachable!()
     };
@@ -397,7 +398,7 @@ fn make_shell_folder(cpu: &mut Cpu, key: u32, value: &registry::Value) {
 /// key `args[0]`, made if it isn't there, to the string at `args[3]`.
 /// Windows 95 takes any type and ignores the size: the string is stored
 /// up to its zero.
-fn reg_set_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn reg_set_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hkey, sub, _, data, _] = args else {
         unreachable!()
     };
@@ -420,7 +421,7 @@ fn reg_set_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// RegSetValueExA: set the value `args[1]` of the key `args[0]` to the
 /// `args[5]` bytes at `args[4]`, of the type `args[3]`. A REG_SZ string is
 /// stored up to its zero, whatever the size says, as Windows 95 does.
-fn reg_set_value_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn reg_set_value_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hkey, name, _, kind, data, len] = args else {
         unreachable!()
     };
@@ -455,7 +456,7 @@ fn reg_set_value_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// RegDeleteKeyA: delete the subkey `args[1]` of the key `args[0]` with
 /// the keys under it, as Windows 95 does; with "", the key itself.
-fn reg_delete_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn reg_delete_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hkey, sub] = args else { unreachable!() };
     if sub == 0 {
         return Some(ERROR_BADKEY);
@@ -475,7 +476,7 @@ fn reg_delete_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// RegDeleteValueA: delete the value `args[1]` of the key `args[0]`.
-fn reg_delete_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn reg_delete_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let name = string_at(cpu, args[1])?;
     let key = key!(cpu, args[0]);
     if registry::get(cpu).delete_value(key, &name) {
@@ -501,7 +502,7 @@ fn write_string(cpu: &mut Cpu, at: u32, bytes: &[u8]) {
 
 /// RegEnumKeyA: the name of the subkey `args[1]` of the key `args[0]`
 /// into the buffer at `args[2]` of `args[3]` bytes.
-fn reg_enum_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn reg_enum_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hkey, index, buffer, size] = args else {
         unreachable!()
     };
@@ -553,7 +554,7 @@ fn reg_enum_key_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// only the type and the size it needs are given. When the name doesn't
 /// fit, Windows 95 gives as much of it as fits, with its zero, and that
 /// length; both are ERROR_MORE_DATA.
-fn reg_enum_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn reg_enum_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hkey, index, buffer, size, _, ptype, data, data_size] = args else {
         unreachable!()
     };
@@ -653,7 +654,7 @@ fn reg_query_info_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// RegFlushKey: write the registry to its file, if it changed.
-fn reg_flush_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn reg_flush_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     key!(cpu, args[0]);
     registry::save(cpu);
     Some(ERROR_SUCCESS)

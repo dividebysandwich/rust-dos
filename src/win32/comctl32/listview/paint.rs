@@ -135,14 +135,14 @@ fn paint_ops(cpu: &mut Cpu, hwnd: u32, lv: &ListView, hdc: u32) -> Vec<Op> {
         ops.extend(layout::update_scroll_ops(&lv));
     }
     if lv.header != 0 {
-        ops.push(user_op("UpdateWindow", &[Arg::V(lv.header)]));
+        ops.push(user_op(cpu, "UpdateWindow", &[Arg::V(lv.header)]));
     }
     if hdc != 0 {
         ops.push(step(T_REFRESH, &[hdc, 0]));
     } else {
-        ops.push(user_op("BeginPaint", &[Arg::V(hwnd), Arg::S(S_PS)]));
+        ops.push(user_op(cpu, "BeginPaint", &[Arg::V(hwnd), Arg::S(S_PS)]));
         ops.push(step(T_REFRESH, &[0, 1]));
-        ops.push(user_op("EndPaint", &[Arg::V(hwnd), Arg::S(S_PS)]));
+        ops.push(user_op(cpu, "EndPaint", &[Arg::V(hwnd), Arg::S(S_PS)]));
     }
     ops
 }
@@ -180,7 +180,7 @@ fn erase_ops(cpu: &mut Cpu, hwnd: u32, lv: &ListView, hdc: u32) -> (Vec<Op>, u32
     if lv.clr_bk == gfx::CLR_NONE {
         let msg = user32::message::WM_ERASEBKGND;
         let ops = vec![
-            send_op(lv.notify, msg, Arg::V(hdc), Arg::V(0)),
+            send_op(cpu, lv.notify, msg, Arg::V(hdc), Arg::V(0)),
             step(T_ERASED, &[]),
         ];
         return (ops, 0);
@@ -242,11 +242,12 @@ fn custom_draw_words(
 }
 
 /// The steps of NM_CUSTOMDRAW with `words`.
-fn custom_draw_ops(lv: &ListView, words: Vec<u32>) -> Vec<Op> {
+fn custom_draw_ops(cpu: &Cpu, lv: &ListView, words: Vec<u32>) -> Vec<Op> {
     let id = words[1];
     vec![
         Op::Write { at: S_NM, words },
         send_op(
+            cpu,
             lv.notify,
             user32::message::WM_NOTIFY,
             Arg::V(id),
@@ -338,7 +339,7 @@ fn refresh(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     put(cpu, c.hwnd, lv.clone());
     let rc = super::super::client(cpu, c.hwnd);
     let words = custom_draw_words(cpu, c.hwnd, &lv, CDDS_PREPAINT, rc, None);
-    let mut ops = custom_draw_ops(&lv, words);
+    let mut ops = custom_draw_ops(cpu, &lv, words);
     ops.push(step(T_REFRESH_PRE, &[]));
     ops
 }
@@ -526,7 +527,7 @@ fn draw_item(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
         return vec![step(T_DRAW_NEXT, &[])];
     }
     if cdmode & CDRF_NOTIFYITEMDRAW != 0 {
-        let mut ops = custom_draw_ops(&lv, words);
+        let mut ops = custom_draw_ops(cpu, &lv, words);
         ops.push(step(T_DRAW_ITEM2, &[1]));
         return ops;
     }
@@ -554,7 +555,7 @@ fn draw_item2(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
         let rc = pt.rc_box;
         let mut words = custom_draw_words(cpu, c.hwnd, &lv, CDDS_PREPAINT, rc, item);
         words[3] |= CDDS_SUBITEM;
-        let mut ops = custom_draw_ops(&lv, words);
+        let mut ops = custom_draw_ops(cpu, &lv, words);
         ops.push(step(T_DRAW_ITEM3, &[1]));
         return ops;
     }
@@ -719,7 +720,7 @@ fn post_item_ops(cpu: &mut Cpu, c: &mut Ctx, lv: &ListView) -> Vec<Op> {
         let (text, bk) = custom_draw_colors(cpu, c.scratch);
         words[12] = text;
         words[13] = bk;
-        ops.extend(custom_draw_ops(lv, words));
+        ops.extend(custom_draw_ops(cpu, lv, words));
     }
     ops.push(step(T_DRAW_NEXT, &[]));
     ops
@@ -772,7 +773,7 @@ fn owner_draw(cpu: &mut Cpu, c: &mut Ctx, lv: &ListView, item: i32) -> Vec<Op> {
         Some((item, 0, state, lparam)),
     );
     if lv.paint.cdmode & CDRF_NOTIFYITEMDRAW != 0 {
-        let mut ops = custom_draw_ops(&lv, words);
+        let mut ops = custom_draw_ops(cpu, &lv, words);
         ops.push(step(T_OWNER_DRAW, &[1]));
         return ops;
     }
@@ -794,7 +795,7 @@ fn owner_draw2(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
         prepaint_setup(cpu, &lv, hdc, text, bk, false, false);
         let id = id_of(cpu, c.hwnd);
         let msg = user32::message::WM_DRAWITEM;
-        ops.push(send_op(lv.notify, msg, Arg::V(id), Arg::S(S_AUX)));
+        ops.push(send_op(cpu, lv.notify, msg, Arg::V(id), Arg::S(S_AUX)));
     }
     ops.push(step(T_OWNER_DRAW2, &[]));
     ops
@@ -827,7 +828,7 @@ fn refresh_end(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
     if lv.paint.cdmode & CDRF_NOTIFYPOSTPAINT != 0 {
         let rc = super::super::client(cpu, c.hwnd);
         let words = custom_draw_words(cpu, c.hwnd, &lv, CDDS_POSTPAINT, rc, None);
-        ops.extend(custom_draw_ops(&lv, words));
+        ops.extend(custom_draw_ops(cpu, &lv, words));
     }
     ops.push(step(T_REFRESH_DONE, &[]));
     ops
@@ -895,7 +896,7 @@ pub(super) fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                 let pt = &lv.paint;
                 let item = Some((pt.item, 0, pt.state, pt.lparam));
                 let words = custom_draw_words(cpu, c.hwnd, &lv, CDDS_POSTPAINT, pt.rc_box, item);
-                ops.extend(custom_draw_ops(&lv, words));
+                ops.extend(custom_draw_ops(cpu, &lv, words));
             }
             ops.push(step(T_DRAW_NEXT, &[]));
             ops

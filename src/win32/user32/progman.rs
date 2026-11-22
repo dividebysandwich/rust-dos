@@ -19,10 +19,9 @@
 //! has besides Program Manager's (the "Shell" and "AppProperties"
 //! topics, the "Folders" application) get no answer.
 
-use super::class::{self, CS_GLOBALCLASS, Class};
 use super::message::{self, Msg};
-use super::window::{self, HWND_BOTTOM, LINKED, WS_POPUP, Window};
-use super::{DESKTOP, address_of, current_tid, user};
+use super::window::{self, Window};
+use super::{address_of, current_tid, user};
 use crate::cpu::Cpu;
 use crate::win32::task::{self, Next, Task};
 
@@ -51,64 +50,41 @@ pub const TITLE: &[u8] = b"Program Manager";
 /// The application and topic it answers to.
 const NAME: &str = "PROGMAN";
 
-fn proc_address() -> u32 {
-    address_of("ProgmanWndProc")
+/// Program Manager's window procedure, in the running process's USER32.
+pub fn proc_address(cpu: &Cpu) -> u32 {
+    address_of(cpu, "ProgmanWndProc")
 }
 
-/// Whether `w` is Program Manager's window.
-pub fn is_server(w: &Window) -> bool {
-    w.pid == 0 && w.proc == proc_address()
+/// Whether `w` is Program Manager's window, whose procedure is `proc`
+/// (`proc_address`).
+pub fn is_server(w: &Window, proc: u32) -> bool {
+    w.pid == 0 && w.proc == proc
+}
+
+/// The server's window if `server` made it already.
+pub fn existing_server(cpu: &mut Cpu) -> Option<u32> {
+    let proc = proc_address(cpu);
+    let state = user(cpu);
+    state
+        .top_levels()
+        .into_iter()
+        .find(|&h| state.window(h).is_some_and(|w| is_server(w, proc)))
 }
 
 /// Program Manager's window, made if it isn't there yet: its handle, or
 /// 0 when there is no room for it.
 pub fn server(cpu: &mut Cpu) -> u32 {
     super::init(cpu);
-    let state = user(cpu);
-    let found = state
-        .top_levels()
-        .into_iter()
-        .find(|&h| state.window(h).is_some_and(is_server));
-    if let Some(hwnd) = found {
+    if let Some(hwnd) = existing_server(cpu) {
         return hwnd;
     }
-    let proc = proc_address();
-    let class = match class::find_system(state, CLASS) {
-        Some(c) => c,
-        None => {
-            let atom = class::atom(state, CLASS);
-            state.classes.push(Some(Class {
-                atom,
-                name: CLASS.to_string(),
-                style: CS_GLOBALCLASS,
-                proc,
-                instance: super::DLL.base,
-                global: true,
-                system: true,
-                ..Class::default()
-            }));
-            state.classes.len() as u32 - 1
-        }
-    };
+    let proc = proc_address(cpu);
+    let state = user(cpu);
     let window = Window {
-        class,
-        style: WS_POPUP,
-        parent: DESKTOP,
         text: TITLE.to_vec(),
-        instance: super::DLL.base,
-        proc,
-        flags: LINKED,
-        icon_pos: (-1, -1),
         ..Window::default()
     };
-    let Some(hwnd) = state.new_window(window) else {
-        return 0;
-    };
-    if let Some(c) = state.classes[class as usize].as_mut() {
-        c.windows += 1;
-    }
-    window::link(state, hwnd, HWND_BOTTOM);
-    hwnd
+    window::new_hidden(state, CLASS, proc, window)
 }
 
 /// ProgmanWndProc(hwnd, message, wParam, lParam): the window's
@@ -173,10 +149,10 @@ fn initiate(cpu: &mut Cpu, hwnd: u32, client: u32, lp: u32) -> Option<u32> {
 
 /// The task that sends a message: variables 0 to 3 its window, message,
 /// wParam and lParam.
-pub fn step(_: &mut Cpu, t: &mut Task, _value: u32) -> Next {
+pub fn step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     if t.step == 0 {
         let args = [t.var(0), t.var(1), t.var(2), t.var(3)];
-        return Next::call(address_of("SendMessageA"), &args, 1);
+        return Next::call(address_of(cpu, "SendMessageA"), &args, 1);
     }
     Next::Done(0)
 }

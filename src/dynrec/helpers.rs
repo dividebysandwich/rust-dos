@@ -7,6 +7,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::block::{BlockData, Guard, Return};
 use crate::cpu::{Access, Cpu, Fault, MemRef, Seg};
+use crate::bus::lfb::{LfbDirect, NOTES};
+use crate::voodoo::banshee::direct::Direct;
 
 /// How translated code returned to the execution loop: the low byte of
 /// its return value. The rest is the index of the instruction it concerns.
@@ -158,9 +160,9 @@ pub struct JitCtx {
     /// a subtraction's carry is set where nothing was borrowed.
     pub szco: [[u16; 16]; 2],
     /// `jit_fpu_reg_op`, `jit_fpu_addsub_value`, `jit_fpu_to_int` and
-    /// `jit_fpu_div_zero`; and the trampoline's own exact 80-bit sum
-    /// (AArch64's `fpu_addsub`).
-    pub fpu: [usize; 5],
+    /// `jit_fpu_div_zero`; the trampoline's own exact 80-bit sum
+    /// (AArch64's `fpu_addsub`); and `jit_fpu_to_int64`.
+    pub fpu: [usize; 6],
     /// `jit_dev_read`, `jit_dev_write` and `jit_dev_write_run` (x86-64).
     pub dev: [usize; 3],
     /// `jit_fetch`.
@@ -185,6 +187,236 @@ pub struct JitCtx {
     pub vga_wrote: u8,
     pub vga_planes: [*mut u8; 4],
     pub vga_sink: Box<[u8]>,
+    /// A display card's memory where the code reads and writes it by
+    /// itself (`card_state`, x86-64): a Banshee's or Voodoo3's through
+    /// BAR1, or the VESA linear frame buffer. The host's address of its
+    /// first byte, its physical address, and how many bytes from there
+    /// an operand of up to 4 bytes may start at (0: none). `card_pages`
+    /// has a byte for every 4 KB of it (`card_map`, `PAGE_READ` and on)
+    /// that says what the code may do there. The code notes a write in
+    /// `card_wrote`, for the execution loop to mark a Banshee's picture
+    /// changed, and counts its reads and writes for a profile.
+    pub card_base: *mut u8,
+    pub card_lo: u32,
+    pub card_len: u32,
+    pub card_pages: *const u8,
+    pub card_wrote: u8,
+    pub card_reads: u64,
+    pub card_writes: u64,
+    /// For a write into a page with `PAGE_COUNT`: a ToadForce's counts
+    /// of the writes to each page, the generation and the first page's
+    /// (null without its host renderer), and the surfaces ahead on the
+    /// host whose written bytes the code notes (`PAGE_NOTE`).
+    pub card_generation: *mut u64,
+    pub card_counts: *mut u64,
+    pub card_notes: [NoteSlot; NOTES],
+    /// Whether a write the bus makes into the frame buffer can let the
+    /// code write it, wherever it is (`card_state` after it): commands
+    /// are queued.
+    card_retry: bool,
+    card_map: Vec<u8>,
+    /// What `card_map` was made for.
+    card_key: Option<CardKey>,
+}
+
+/// What `card_state` found: a Banshee's or Voodoo3's memory
+/// (`Bus::banshee_direct`) or the VESA frame buffer (`Bus::lfb_direct`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CardKey {
+    Banshee(u32, Direct),
+    Lfb(LfbDirect),
+}
+
+/// A surface ahead on a ToadForce's host renderer, as the code notes the
+/// bytes it writes into it (`toadforce::gpu::Note`): its first byte in
+/// video memory, its length, its `Written` bits (one for each byte from
+/// its first), and the flag that says it has any.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct NoteSlot {
+    pub start: u32,
+    pub len: u32,
+    pub bits: *mut u64,
+    pub any: *mut bool,
+    _pad: u64,
+}
+
+const NO_SLOT: NoteSlot = NoteSlot {
+    start: 0,
+    len: 0,
+    bits: std::ptr::null_mut(),
+    any: std::ptr::null_mut(),
+    _pad: 0,
+};
+
+/// What a byte of `JitCtx::card_pages` allows on its page: the code
+/// writes the bytes itself, it reads them itself, and with `PAGE_COUNT`
+/// a write also counts as the VESA frame buffer's writes count (bytes
+/// for `cycles=auto` within a burst, a ToadForce's page counts), with
+/// `PAGE_SHOWN` as bytes of the picture `cycles=auto` knows. Bits 4 to
+/// 6 hold the number (from 1) of the `card_notes` slot whose surface a
+/// write's bytes go into, noted there. `PAGE_RETRY`: a write through the
+/// bus there can let the code write the page (`card_state` after it).
+pub const PAGE_WRITE: u8 = 1;
+pub const PAGE_READ: u8 = 2;
+pub const PAGE_COUNT: u8 = 4;
+pub const PAGE_SHOWN: u8 = 8;
+pub const PAGE_NOTE_SHIFT: u8 = 4;
+pub const PAGE_RETRY: u8 = 0x80;
+// The code counts a write in the ToadForce's count of the 4 KB page its
+// byte of `card_pages` is for (`x64::card_count`, `gpu::Pages::wrote`).
+const _: () = assert!(crate::toadforce::gpu::PAGE == 0x1000);
+// A slot's number fits in bits 4 to 6.
+const _: () = assert!(NOTES < 8);
+
+/// Find out where the code may read and write a display card's memory
+/// by itself, for its loads and stores that aren't of plain RAM
+/// (`JitCtx::card_len`): where translated code is entered, and after
+/// anything in it that may change the card, what it has queued or the
+/// picture shown (writes to devices and ports and reads of ports, by the
+/// code or by handlers). A Banshee's or Voodoo3's memory comes first
+/// (`Bus::banshee_direct`), then the VESA frame buffer
+/// (`Bus::lfb_direct`). The pages a write does more for than the code
+/// does stay the bus's: a Banshee's desktop shown and command rings
+/// (`Direct::kept`), the frame buffer's picture shown
+/// (`LfbDirect::shown`) and the partial pages of the one `cycles=auto`
+/// counts, and pages where a ToadForce's host has newer pixels the code
+/// can't note.
+pub fn card_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    let key = match cpu.bus.banshee_direct() {
+        Some((bar1, direct)) => Some(CardKey::Banshee(bar1, direct)),
+        None => cpu.bus.lfb_direct().map(CardKey::Lfb),
+    };
+    if key == ctx.card_key {
+        // Commands queued or run since leave the answer as it was, but
+        // not whether a write through the bus may change it.
+        if key.is_none() {
+            ctx.card_retry = cpu.bus.toadforce_queued();
+        }
+        return;
+    }
+    // What the code wrote under the old answer, as the execution loop
+    // takes it after the code.
+    card_wrote(cpu, ctx);
+    ctx.card_key = key;
+    match key {
+        None => {
+            ctx.card_len = 0;
+            // A write runs the queued commands, after which the code
+            // may write the frame buffer itself.
+            ctx.card_retry = cpu.bus.toadforce_queued();
+        }
+        Some(CardKey::Banshee(bar1, direct)) => {
+            ctx.card_base = direct.base;
+            ctx.card_lo = bar1;
+            make_card_map(ctx, direct.len, 0, &direct.kept);
+            ctx.card_retry = false;
+        }
+        Some(CardKey::Lfb(direct)) => {
+            ctx.card_base = direct.base;
+            ctx.card_lo = direct.lo;
+            ctx.card_generation = direct.generation;
+            ctx.card_counts = direct.counts;
+            make_card_map(ctx, direct.len, PAGE_COUNT, &[direct.shown]);
+            ctx.card_retry = false;
+            // The bytes `cycles=auto` counts as the picture's: on its
+            // whole pages the code counts them too, the others are the
+            // bus's.
+            let (start, end) = direct.counted;
+            if let Some((first, last)) = page_span(start, end, ctx.card_map.len()) {
+                for (i, flags) in ctx.card_map[first..=last].iter_mut().enumerate() {
+                    let at = ((first + i) << 12) as u64;
+                    if at >= start as u64 && at + 0x1000 <= end as u64 {
+                        *flags |= PAGE_SHOWN;
+                    } else {
+                        *flags &= !PAGE_WRITE;
+                    }
+                }
+            }
+            ctx.card_notes = [NO_SLOT; NOTES];
+            for (i, note) in direct.notes[..direct.ahead].iter().enumerate() {
+                ctx.card_notes[i] = NoteSlot {
+                    start: note.start,
+                    len: note.end.saturating_sub(note.start),
+                    bits: note.bits,
+                    any: note.any,
+                    _pad: 0,
+                };
+                let Some((first, last)) = page_span(note.start, note.end, ctx.card_map.len()) else {
+                    continue;
+                };
+                for page in &mut ctx.card_map[first..=last] {
+                    // The bus answers reads with the host's pixels. A
+                    // write is noted where one surface has the page and
+                    // its bits are there.
+                    *page &= !PAGE_READ;
+                    if note.bits.is_null() {
+                        // The bus's first write there makes them.
+                        *page = *page & !PAGE_WRITE | PAGE_RETRY;
+                    } else if *page >> PAGE_NOTE_SHIFT & 7 != 0 {
+                        *page &= !PAGE_WRITE;
+                    } else {
+                        *page |= (i as u8 + 1) << PAGE_NOTE_SHIFT;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The byte of `card_map` for physical address `phys`: 0 outside it.
+fn card_page(ctx: &JitCtx, phys: u32) -> u8 {
+    if ctx.card_len == 0 {
+        return 0;
+    }
+    let page = phys.wrapping_sub(ctx.card_lo) as usize >> 12;
+    ctx.card_map.get(page).copied().unwrap_or(0)
+}
+
+/// The pages of `card_map` that the bytes `start` to before `end` are
+/// in, first and last, of `pages` pages.
+fn page_span(start: u32, end: u32, pages: usize) -> Option<(usize, usize)> {
+    if start >= end || pages == 0 {
+        return None;
+    }
+    let last = ((end as usize - 1) >> 12).min(pages - 1);
+    Some(((start as usize >> 12).min(last), last))
+}
+
+/// Make `card_map` for `len` bytes of memory: every page readable, the
+/// whole pages writable, `extra` on all of them, and the `kept` ranges
+/// left to the bus to write.
+fn make_card_map(ctx: &mut JitCtx, len: u32, extra: u8, kept: &[(u32, u32)]) {
+    // An operand of 4 bytes that starts below this ends in the memory.
+    ctx.card_len = len.saturating_sub(3);
+    let map = &mut ctx.card_map;
+    map.clear();
+    map.resize((len as usize).div_ceil(0x1000), PAGE_READ | extra);
+    let whole = len as usize >> 12;
+    for page in &mut map[..whole] {
+        *page |= PAGE_WRITE;
+    }
+    for &(start, end) in kept {
+        if let Some((first, last)) = page_span(start, end, map.len()) {
+            for page in &mut map[first..=last] {
+                *page &= !PAGE_WRITE;
+            }
+        }
+    }
+    ctx.card_pages = map.as_ptr();
+}
+
+/// The execution loop's part of `card_state` after a run of translated
+/// code: a Banshee's memory it wrote by itself means its picture
+/// changed. (Writes into the VESA frame buffer's picture are the bus's.)
+pub fn card_wrote(cpu: &mut Cpu, ctx: &mut JitCtx) {
+    let banshee = matches!(ctx.card_key, Some(CardKey::Banshee(..)));
+    if std::mem::take(&mut ctx.card_wrote) != 0 && banshee {
+        cpu.bus.banshee_wrote_directly();
+    }
 }
 
 /// Find out whether writes to the VGA's graphics window are plain ones
@@ -214,6 +446,26 @@ pub const CTX_SCRATCH: i32 = offset_of!(JitCtx, scratch) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_MXCSR: i32 = offset_of!(JitCtx, mxcsr) as i32;
 pub const CTX_VGA_WROTE: i32 = offset_of!(JitCtx, vga_wrote) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_CARD_BASE: i32 = offset_of!(JitCtx, card_base) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_CARD_LO: i32 = offset_of!(JitCtx, card_lo) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_CARD_LEN: i32 = offset_of!(JitCtx, card_len) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_CARD_PAGES: i32 = offset_of!(JitCtx, card_pages) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_CARD_WROTE: i32 = offset_of!(JitCtx, card_wrote) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_CARD_READS: i32 = offset_of!(JitCtx, card_reads) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_CARD_WRITES: i32 = offset_of!(JitCtx, card_writes) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_CARD_GENERATION: i32 = offset_of!(JitCtx, card_generation) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_CARD_COUNTS: i32 = offset_of!(JitCtx, card_counts) as i32;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const CTX_CARD_NOTES: i32 = offset_of!(JitCtx, card_notes) as i32;
 pub const CTX_VGA_PLANES: i32 = offset_of!(JitCtx, vga_planes) as i32;
 pub const CTX_REVALIDATE: i32 = offset_of!(JitCtx, revalidate) as i32;
 pub const CTX_EXIT: i32 = offset_of!(JitCtx, exit) as i32;
@@ -223,6 +475,8 @@ pub const CTX_THUNKS: i32 = offset_of!(JitCtx, thunks) as i32;
 pub const THUNKS: usize = 13;
 const _: () = assert!(CTX_THUNKS + 8 * THUNKS as i32 <= 128 && CTX_SMC < 128);
 const _: () = assert!(CTX_SMC_HI == CTX_SMC_LO + 4);
+// The code finds a slot at 32 times its number (`x64::store_thunk`).
+const _: () = assert!(std::mem::size_of::<NoteSlot>() == 32);
 pub const CTX_RAM: i32 = offset_of!(JitCtx, ram) as i32;
 pub const CTX_PAGE_GEN: i32 = offset_of!(JitCtx, page_gen) as i32;
 pub const CTX_CODE_BLOCKS: i32 = offset_of!(JitCtx, code_blocks) as i32;
@@ -341,6 +595,7 @@ impl JitCtx {
                 jit_fpu_to_int as *const () as usize,
                 jit_fpu_div_zero as *const () as usize,
                 0,
+                jit_fpu_to_int64 as *const () as usize,
             ],
             dev: [
                 jit_dev_read as *const () as usize,
@@ -358,6 +613,19 @@ impl JitCtx {
             vga_planes: [std::ptr::null_mut(); 4],
             // The window and a dword past its end.
             vga_sink: vec![0; 0x10004].into_boxed_slice(),
+            card_base: std::ptr::null_mut(),
+            card_lo: 0,
+            card_len: 0,
+            card_pages: std::ptr::null(),
+            card_wrote: 0,
+            card_reads: 0,
+            card_writes: 0,
+            card_generation: std::ptr::null_mut(),
+            card_counts: std::ptr::null_mut(),
+            card_notes: [NO_SLOT; NOTES],
+            card_retry: false,
+            card_map: Vec::new(),
+            card_key: None,
         }
     }
 }
@@ -414,6 +682,7 @@ jit_fn! {
                 // to memory (where a card mirrors them).
                 if writes || matches!(instr.mnemonic(), iced_x86::Mnemonic::Outsb | iced_x86::Mnemonic::Outsw | iced_x86::Mnemonic::Outsd) {
                     vga_state(cpu, ctx);
+                    card_state(cpu, ctx);
                 }
                 if writes && data.gens_now(&cpu.bus.page_gen) != before {
                     let code = written(cpu, data, ix);
@@ -663,6 +932,12 @@ jit_fn! {
             Ok(Ok(read)) => {
                 if out {
                     vga_state(cpu, ctx);
+                    card_state(cpu, ctx);
+                } else if ctx.card_len != 0 {
+                    // A read of the VGA's status latches the display
+                    // start at a retrace that passed (`Bus::sync_display`),
+                    // which moves the picture whose pages stay the bus's.
+                    card_state(cpu, ctx);
                 }
                 if data.gens_now(&cpu.bus.page_gen) != before && written(cpu, data, ix) != 0 {
                     ctx.after = EXIT_SMC as u8;
@@ -937,6 +1212,8 @@ jit_fn! {
         let _profile = crate::profile::zone(crate::profile::Zone::JitSlowMem);
         let r = ctx.refs[slot as usize & 3];
         guard(ctx, (), || cpu.mem_write(r, value));
+        // (An operand in two pages may be a card's registers.)
+        card_state(cpu, ctx);
         let in_first = 0x1000 - (r.phys & 0xFFF);
         let hit = (0..r.size as u32).any(|i| {
             let p = if i < in_first { r.phys + i } else { r.phys2 + i - in_first };
@@ -965,8 +1242,9 @@ jit_fn! {
     /// The register operations `desc >> 13` says: `Uop::FAddSt` (0, `desc`
     /// is dst, a << 4, b << 8 and sub << 12), `Uop::FChs` (1),
     /// `Uop::FLoad80` (2, from RAM at `arg`), `Uop::FToX80` (3, `desc`'s
-    /// low bits the part, which it returns), `Uop::FSqrt` (4) and
-    /// `Uop::FToSingle` (5, which returns the single).
+    /// low bits the part, which it returns), `Uop::FSqrt` (4),
+    /// `Uop::FToSingle` (5, which returns the single), `Uop::FRndint` (6),
+    /// `Uop::FAbs` (7) and `Uop::FTrig` (8 to 11, `FTrigOp::reg_op`).
     fn jit_fpu_reg_op(cpu: *mut Cpu, ctx: *mut JitCtx, desc: u32, arg: u32) -> u32 {
         use crate::instructions::fpu::arithmetic;
         let (dst, a, b) = ((desc & 7) as usize, (desc >> 4 & 7) as usize, (desc >> 8 & 7) as usize);
@@ -992,6 +1270,24 @@ jit_fn! {
                 0
             }
             5 => crate::instructions::fpu::data::st0_single_bits(cpu),
+            6 => {
+                arithmetic::frndint(cpu);
+                0
+            }
+            7 => {
+                arithmetic::fabs(cpu);
+                0
+            }
+            8..=11 => {
+                use crate::instructions::fpu::transcendental;
+                match desc >> 13 {
+                    8 => transcendental::fsin(cpu),
+                    9 => transcendental::fcos(cpu),
+                    10 => transcendental::fptan(cpu),
+                    _ => transcendental::fsincos(cpu),
+                }
+                0
+            }
             _ => {
                 let bytes = cpu.fpu_get(0).get_bytes();
                 let (at, mut part) = (dst * 4, [0; 4]);
@@ -1020,6 +1316,14 @@ jit_fn! {
 }
 
 jit_fn! {
+    /// `Uop::FToInt64`, for what the code's own conversion doesn't cover:
+    /// the qword FISTP stores of ST(0).
+    fn jit_fpu_to_int64(cpu: *mut Cpu, ctx: *mut JitCtx) -> u64 {
+        fpu_helper(cpu, ctx, |cpu| crate::instructions::fpu::data::st0_int_bits(cpu, 8))
+    }
+}
+
+jit_fn! {
     /// `Uop::FDiv` by 0, its quotient stored: `desc` is the register.
     fn jit_fpu_div_zero(cpu: *mut Cpu, ctx: *mut JitCtx, desc: u32) -> u32 {
         fpu_helper(cpu, ctx, |cpu| crate::instructions::fpu::arithmetic::divided_by_zero(cpu, (desc & 7) as usize));
@@ -1035,6 +1339,12 @@ jit_fn! {
         let (cpu, ctx) = unsafe { (&mut *cpu, &mut *ctx) };
         ctx.calls.dev += 1;
         let p = phys as usize;
+        // Pixels of a surface in a Banshee's or Voodoo3's memory, which a
+        // software renderer reads back as it draws: without the bus's
+        // way through every window before the card's.
+        if let Some(value) = guard(ctx, None, || cpu.bus.read_banshee_linear(p, size as usize)) {
+            return value;
+        }
         guard(ctx, 0, || match size {
             1 => cpu.bus.read_8(p) as u32,
             2 => cpu.bus.read_16(p) as u32,
@@ -1056,6 +1366,12 @@ jit_fn! {
         // nothing in RAM. (A panic in it is the store's, which isn't made
         // again below.)
         if guard(ctx, true, || cpu.bus.write_lfb(phys as usize, value, size as usize)) {
+            // A ToadForce ran its queued commands, or noted the first
+            // bytes written into a surface its host drew into: what the
+            // code may do with the frame buffer changed.
+            if ctx.card_retry || card_page(ctx, phys) & PAGE_RETRY != 0 {
+                card_state(cpu, ctx);
+            }
             return 0;
         }
         // Pixels into the VGA's planes, which mode X programs write one or
@@ -1064,12 +1380,19 @@ jit_fn! {
         if cpu.bus.write_planes_plainly(phys as usize, value, size as usize) {
             return 0;
         }
-        // Pixels into a 3dfx card's memory, which the same loops write on
-        // a Banshee or Voodoo3: in one call, without what a write to its
-        // registers would need. (A panic in it is the store's, as above.)
-        if size == 4
-            && guard(ctx, true, || cpu.bus.write_to_voodoo(phys as usize, &value.to_le_bytes()))
-        {
+        // Pixels into a Banshee's or Voodoo3's memory, which the same
+        // loops and a software renderer's write a byte, word or dword at
+        // a time: without what a write to its registers would need. (A
+        // panic in it is the store's, as above.)
+        let p = phys as usize;
+        if guard(ctx, true, || cpu.bus.write_banshee_linear(p, value, size as usize)) {
+            return 0;
+        }
+        // Dwords into a 3dfx card's frame buffer through its 3D engine,
+        // or into a Voodoo Graphics' or Voodoo2's window: what they queue
+        // changes what the code may do with a Banshee's memory.
+        if size == 4 && guard(ctx, true, || cpu.bus.write_to_voodoo(p, &value.to_le_bytes())) {
+            card_state(cpu, ctx);
             return 0;
         }
         dev_write(cpu, ctx, phys, value, size)
@@ -1099,8 +1422,17 @@ jit_fn! {
         // (A panic in it is the store's, which the dwords don't make
         // again.)
         let p = phys as usize;
-        guard(ctx, true, || cpu.bus.write_to_lfb(p, bytes) || cpu.bus.write_to_voodoo(p, bytes))
-            as u32
+        if guard(ctx, true, || cpu.bus.write_to_lfb(p, bytes)) {
+            // As in `jit_dev_write`.
+            if ctx.card_retry || card_page(ctx, phys) & PAGE_RETRY != 0 {
+                card_state(cpu, ctx);
+            }
+            return 1;
+        }
+        let wrote = guard(ctx, true, || cpu.bus.write_to_voodoo(p, bytes));
+        // (Dwords through a card's 3D engine queue drawing.)
+        card_state(cpu, ctx);
+        wrote as u32
     }
 }
 
@@ -1114,5 +1446,64 @@ fn dev_write(cpu: &mut Cpu, ctx: &mut JitCtx, phys: u32, value: u32, size: u32) 
         _ => cpu.bus.write_32(p, value),
     });
     vga_state(cpu, ctx);
+    card_state(cpu, ctx);
     (phys < ctx.smc_hi && phys.wrapping_add(size) > ctx.smc_lo) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::voodoo::banshee::{
+        INITIAL_BAR1, LFB_MEMORY_CONFIG, VGA_INIT0, VID_DESKTOP_OVERLAY_STRIDE,
+        VID_DESKTOP_START_ADDR, VID_PROC_CFG,
+    };
+
+    #[test]
+    fn the_code_writes_a_voodoo3s_memory_but_for_the_desktop_shown() {
+        if !cfg!(target_arch = "x86_64") {
+            return;
+        }
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let mut ctx = JitCtx::new(0);
+        card_state(&mut cpu, &mut ctx);
+        assert_eq!(ctx.card_len, 0, "no card");
+        cpu.bus.configure_voodoo(Some(crate::voodoo::Board::Voodoo3));
+        // BAR1 tiled from 4 MB on.
+        cpu.bus.voodoo_write_32(LFB_MEMORY_CONFIG, 0x400);
+        card_state(&mut cpu, &mut ctx);
+        assert_eq!((ctx.card_lo, ctx.card_len), (INITIAL_BAR1, 0x40_0000 - 3));
+        let v = cpu.bus.voodoo.as_ref().unwrap();
+        assert_eq!(Some(ctx.card_base), v.banshee_direct().map(|d| d.base));
+        let pages = |ctx: &JitCtx| -> Vec<usize> {
+            (0..ctx.card_map.len()).filter(|&p| ctx.card_map[p] & PAGE_WRITE != 0).collect()
+        };
+        assert_eq!(pages(&ctx), (0..0x400).collect::<Vec<_>>());
+        assert_eq!(ctx.card_pages, ctx.card_map.as_ptr());
+        // A desktop shown from 8000h, its rows 16 bytes apart: its pages,
+        // the last one in part, are the bus's to write.
+        cpu.bus.voodoo_write_32(VGA_INIT0, 0x0000_1140);
+        cpu.bus.voodoo_write_32(VID_PROC_CFG, 0x0004_0081);
+        cpu.bus.voodoo_write_32(VID_DESKTOP_OVERLAY_STRIDE, 0x10);
+        cpu.bus.voodoo_write_32(VID_DESKTOP_START_ADDR, 0x8000);
+        card_state(&mut cpu, &mut ctx);
+        let (start, span) = cpu.bus.banshee().unwrap().desktop_memory();
+        assert_eq!(start, 0x8000);
+        assert!((0x1010..0x1FF0).contains(&span), "{span:#x} bytes");
+        let kept = [8, 9];
+        assert_eq!(
+            pages(&ctx),
+            (0..0x400).filter(|p| !kept.contains(p)).collect::<Vec<_>>()
+        );
+        // The start moved, as a flip moves it.
+        cpu.bus.voodoo_write_32(VID_DESKTOP_START_ADDR, 0x3F_F000);
+        card_state(&mut cpu, &mut ctx);
+        assert_eq!(pages(&ctx), (0..0x3FF).collect::<Vec<_>>());
+        // A recording for the OpenGL renderer hears of every write.
+        cpu.bus.voodoo.as_mut().unwrap().set_mirror(true);
+        card_state(&mut cpu, &mut ctx);
+        assert_eq!(ctx.card_len, 0);
+        cpu.bus.voodoo.as_mut().unwrap().set_mirror(false);
+        card_state(&mut cpu, &mut ctx);
+        assert_eq!(ctx.card_len, 0x40_0000 - 3);
+    }
 }

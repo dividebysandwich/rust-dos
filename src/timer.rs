@@ -365,15 +365,18 @@ impl Clock {
     }
 }
 
-/// 8253 PIT channel 0, which drives IRQ 0. Only the timing is modelled;
+/// An 8254 counter whose gate is always up: channel 0, which drives IRQ 0,
+/// and channel 1, the DRAM refresh request. Only the timing is modelled;
 /// port-level byte sequencing (LSB/MSB toggles, latches) lives on the bus.
+#[derive(Clone, Debug)]
 pub struct Pit0 {
     /// Counter mode, 0..=5 (6 and 7 alias 2 and 3).
     mode: u8,
     /// Count loaded at each reload, 1..=65536.
     reload: u32,
-    /// Count written while a mode 2/3 period was running. It takes effect at
-    /// the end of that period, as on real hardware.
+    /// Count written while a mode 2/3 period was running. It takes effect
+    /// at `pending_at`, as on the 8254: at the end of the current
+    /// half-cycle in mode 3, of the current period in mode 2.
     pending_reload: Option<u32>,
     /// False after a control word until the first count is written.
     counting: bool,
@@ -385,12 +388,31 @@ pub struct Pit0 {
     armed: bool,
     period_start: u64,
     next_tc: u64,
+    /// How far into its period the count was at `period_start`: a mode 3
+    /// count loaded at the end of a high half-cycle starts with the low
+    /// half. Saved in the 8254 section, as are the next two.
+    pub(crate) phase: u64,
+    /// The tick `pending_reload` loads at.
+    pub(crate) pending_at: u64,
+    /// Bits 5-0 of the last control word (access, mode as written and
+    /// BCD), which the read-back command's status byte gives back.
+    pub(crate) control: u8,
 }
 
 impl Default for Pit0 {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The value a mode 3 count reads `into` ticks into its period. It runs
+/// down by two from the count, rounded down to an even number, in each
+/// half: an odd count N loads N - 1 and is high for one tick longer than
+/// it is low (the 8254 data sheet's mode 3).
+fn square_wave_count(reload: u64, into: u64) -> u16 {
+    let high = reload.div_ceil(2);
+    let into_half = if into < high { into } else { into - high };
+    ((reload & !1) - 2 * into_half) as u16
 }
 
 impl Pit0 {
@@ -405,7 +427,19 @@ impl Pit0 {
             armed: true,
             period_start: 0,
             next_tc: 0x10000,
+            phase: 0,
+            pending_at: 0,
+            control: 0x36,
         }
+    }
+
+    /// Channel 1 as the BIOS leaves it: mode 2, count 18, a refresh
+    /// request every 15 microseconds.
+    pub fn refresh() -> Self {
+        let mut counter = Self::new();
+        counter.set_mode(0x14, 0);
+        counter.write_count(18, 0);
+        counter
     }
 
     fn periodic(&self) -> bool {
@@ -417,21 +451,41 @@ impl Pit0 {
         self.reload
     }
 
+    /// Counter mode, 0..=5.
+    pub fn mode(&self) -> u8 {
+        self.mode
+    }
+
     /// False between a control word and the first count written after it.
     pub fn is_counting(&self) -> bool {
         self.counting
     }
 
-    /// Time of the next IRQ 0 edge, if one is coming.
+    /// Time of the next IRQ 0 edge, or of the end of the half-cycle a new
+    /// mode 3 count loads at, if one is coming. The count programs write
+    /// again on every tick, the one already loaded, gets no event of its
+    /// own: loading it at the half-cycle changes no edge, and `advance`
+    /// or the next count write makes the load.
     pub fn next_event(&self) -> Option<u64> {
-        (self.counting && self.armed).then_some(self.next_tc)
+        if !(self.counting && self.armed) {
+            return None;
+        }
+        Some(match self.pending_reload {
+            Some(reload) if self.pending_at < self.next_tc && reload != self.reload => {
+                self.pending_at
+            }
+            _ => self.next_tc,
+        })
     }
 
-    /// Control word for channel 0 at `now`: set the mode and stop counting
-    /// until a count is written. The count stays where it got to (Future
-    /// Crew's demos time a frame by stopping the counter so and reading it).
-    pub fn set_mode(&mut self, mode: u8, now: u64) {
+    /// Control word for the counter at `now`: set the mode and stop
+    /// counting until a count is written. The count stays where it got to
+    /// (Future Crew's demos time a frame by stopping the counter so and
+    /// reading it). `control` is the control word; its bits 5-0 are kept.
+    pub fn set_mode(&mut self, control: u8, now: u64) {
         self.stopped = self.count(now);
+        self.control = control & 0x3F;
+        let mode = (control >> 1) & 0x07;
         self.mode = if mode >= 6 { mode - 4 } else { mode };
         self.counting = false;
         self.armed = false;
@@ -441,8 +495,18 @@ impl Pit0 {
     /// A complete count was written (0 means 65536).
     pub fn write_count(&mut self, count: u16, now: u64) {
         let reload = if count == 0 { 0x10000 } else { count as u32 };
+        self.load_at_half_cycle(now);
         if self.counting && self.periodic() {
+            let current = self.reload as u64;
+            let into = (now.saturating_sub(self.period_start) + self.phase) % current;
+            let high = current.div_ceil(2);
+            let left = if self.mode == 3 && into < high {
+                high - into
+            } else {
+                current - into
+            };
             self.pending_reload = Some(reload);
+            self.pending_at = now + left;
             return;
         }
         self.reload = reload;
@@ -450,30 +514,77 @@ impl Pit0 {
         self.counting = true;
         self.armed = true;
         self.period_start = now;
+        self.phase = 0;
         self.next_tc = now + reload as u64;
+    }
+
+    /// Load a mode 3 count written in a high half-cycle if that half has
+    /// ended by `now`: it loads where the output goes low, and runs the
+    /// low half of its own period first. No event comes at the load, so
+    /// whatever changes the counter makes it first.
+    fn load_at_half_cycle(&mut self, now: u64) {
+        if let Some(reload) = self.pending_reload
+            && self.pending_at < self.next_tc
+            && self.pending_at <= now
+        {
+            self.pending_reload = None;
+            self.reload = reload;
+            self.period_start = self.pending_at;
+            self.phase = (reload as u64).div_ceil(2);
+            self.next_tc = self.pending_at + reload as u64 - self.phase;
+        }
     }
 
     /// Advance to `now`. Returns true if at least one IRQ 0 edge happened.
     pub fn advance(&mut self, now: u64) -> bool {
-        if !(self.counting && self.armed) || self.next_tc > now {
+        if !(self.counting && self.armed) {
             return false;
         }
-        if !self.periodic() {
-            // One-shot: the output stays high until the next count write,
-            // while the count keeps running down through zero.
-            self.armed = false;
-            return true;
+        let mut edge = false;
+        loop {
+            self.load_at_half_cycle(now);
+            if self.next_tc > now {
+                return edge;
+            }
+            edge = true;
+            if !self.periodic() {
+                // One-shot: the output stays high until the next count
+                // write, while the count keeps running down through zero.
+                self.armed = false;
+                return true;
+            }
+            self.period_start = self.next_tc;
+            self.phase = 0;
+            if let Some(reload) = self.pending_reload
+                && self.pending_at <= self.period_start
+            {
+                self.pending_reload = None;
+                self.reload = reload;
+            }
+            let reload = self.reload as u64;
+            if self.pending_reload.is_none() {
+                // Skip whole periods arithmetically; several may have
+                // passed.
+                let behind = now - self.period_start;
+                self.period_start += behind / reload * reload;
+            }
+            self.next_tc = self.period_start + reload;
         }
-        self.period_start = self.next_tc;
-        if let Some(reload) = self.pending_reload.take() {
-            self.reload = reload;
-        }
-        // Skip whole periods arithmetically; several may have passed.
-        let reload = self.reload as u64;
-        let behind = now - self.period_start;
-        self.period_start += behind / reload * reload;
-        self.next_tc = self.period_start + reload;
-        true
+    }
+
+    /// This counter with a pending count that is due by `now` loaded.
+    fn settled(&self, now: u64) -> Option<Self> {
+        let due = self.counting && self.pending_reload.is_some() && self.pending_at <= now;
+        due.then(|| {
+            let mut settled = self.clone();
+            settled.advance(now);
+            settled
+        })
+    }
+
+    /// Ticks into the current period at `now`, for a periodic mode.
+    fn period_position(&self, now: u64) -> u64 {
+        (now.saturating_sub(self.period_start) + self.phase) % self.reload as u64
     }
 
     /// The value a counter read returns at `now`. The count runs down from
@@ -484,16 +595,59 @@ impl Pit0 {
         if !self.counting {
             return self.stopped;
         }
-        let elapsed = now.saturating_sub(self.period_start);
+        if let Some(settled) = self.settled(now) {
+            return settled.count(now);
+        }
         if self.periodic() {
             let reload = self.reload as u64;
-            let into = elapsed % reload;
-            let down = if self.mode == 3 { 2 * into % reload } else { into };
-            (reload - down) as u16
+            let into = self.period_position(now);
+            if self.mode == 3 {
+                square_wave_count(reload, into)
+            } else {
+                (reload - into) as u16
+            }
         } else {
             // One-shot counters keep counting down through zero.
+            let elapsed = now.saturating_sub(self.period_start);
             (self.reload as u64).wrapping_sub(elapsed) as u16
         }
+    }
+
+    /// The counter's output at `now`.
+    pub fn output(&self, now: u64) -> bool {
+        if !self.counting {
+            // Mode 0's output goes low at the control word, the others'
+            // high.
+            return self.mode != 0;
+        }
+        if let Some(settled) = self.settled(now) {
+            return settled.output(now);
+        }
+        let reload = self.reload as u64;
+        let elapsed = now.saturating_sub(self.period_start);
+        match self.mode {
+            2 => self.period_position(now) != reload - 1,
+            3 => self.period_position(now) < reload.div_ceil(2),
+            0 | 1 => elapsed >= reload,
+            _ => elapsed != reload,
+        }
+    }
+
+    /// The parts a state saved before the 8254 section lacks: a pending
+    /// count loads at the end of the period, as it did then, and the
+    /// control word's bits are those `access` and the mode give.
+    pub(crate) fn without_8254_state(&mut self, access: u8) {
+        self.phase = 0;
+        self.pending_at = self.next_tc;
+        self.control = access << 4 | self.mode << 1;
+    }
+
+    /// The status byte the read-back command latches at `now`: the output,
+    /// the null count flag (a count or control word written and not yet
+    /// loaded into the counting element) and the control word's bits 5-0.
+    pub fn status(&self, now: u64) -> u8 {
+        let null = !self.counting || self.pending_reload.is_some() && self.pending_at > now;
+        (self.output(now) as u8) << 7 | (null as u8) << 6 | self.control
     }
 }
 
@@ -612,6 +766,9 @@ pub struct Pacer {
     protected: bool,
     /// As fast as the host keeps up with, estimated from its frames.
     host: HostEstimate,
+    /// While the program gets all the host has, whether the last frame
+    /// timed said the host can't run the speed it ran at (`cap_boost`).
+    boost_short: bool,
     /// The frames measured for the host's speed so far: the instructions
     /// they ran, the time those took and the rest of their work.
     sample: HostSample,
@@ -661,6 +818,7 @@ impl Pacer {
             auto: AutoSpeed::new(speed.initial_cycles(), auto_fps),
             protected: false,
             host: HostEstimate::default(),
+            boost_short: false,
             sample: HostSample::default(),
             offloaded: 0,
             idle: 0,
@@ -755,7 +913,8 @@ impl Pacer {
     /// built-in Windows is such a system from the start: its idle loop
     /// halts the processor whenever none of its threads can run, so a
     /// Win32 program that keeps it from halting is at work, even one that
-    /// never waits long enough for `Auto` to see the halt.
+    /// never waits long enough for `Auto` to see the halt. A client of the
+    /// emulator's DPMI host has no system under it (`set_dpmi_client`).
     pub fn end_cpu_frame(
         &mut self,
         cpu: &mut crate::cpu::Cpu,
@@ -765,6 +924,7 @@ impl Pacer {
     ) -> Option<u32> {
         self.auto.set_protected_least(cpu.model.auto_least());
         self.auto.set_idles(cpu.os_idles || cpu.bus.win32.active());
+        self.auto.set_dpmi_client(cpu.bus.dpmi.active() && !cpu.bus.win32.active());
         // What the idle skip's watching cost (`Observe::take_watched`) is
         // work of the frame's own, as the rest of `overhead` is: counted
         // per instruction, the proofs that come with each timer event would
@@ -938,11 +1098,28 @@ impl Pacer {
         let ns = bus.clock.now_ns();
         self.ran = ns > self.last_ns;
         self.last_ns = ns;
-        let ideal = self.sample.add(executed, exec, overhead).map(|(ns_per_instr, overhead_ns)| {
-            let frame_ns = self.period.as_nanos() as f64;
+        let frame_ns = self.period.as_nanos() as f64;
+        let ideal_of = |ns_per_instr: f64, overhead_ns: f64| {
             let budget_ns = (frame_ns * MAX_BUSY_SHARE - overhead_ns).max(frame_ns * 0.1);
             budget_ns / ns_per_instr / (frame_ns / 1_000_000.0)
+        };
+        // At auto, a frame of a stall stays out of the samples
+        // (`HostEstimate::outlier`).
+        let frame_ideal = (executed >= SAMPLE_INSTRUCTIONS).then(|| {
+            ideal_of(
+                exec.as_nanos() as f64 / executed as f64,
+                overhead.as_nanos() as f64,
+            )
         });
+        let outlier = matches!(self.speed, CpuSpeed::Auto(_))
+            && frame_ideal.is_some_and(|ideal| self.host.outlier(ideal));
+        let ideal = if outlier {
+            None
+        } else {
+            self.sample
+                .add(executed, exec, overhead)
+                .map(|(ns_per_instr, overhead_ns)| ideal_of(ns_per_instr, overhead_ns))
+        };
         match self.speed {
             CpuSpeed::Fixed(_) => None,
             CpuSpeed::Max => {
@@ -971,6 +1148,7 @@ impl Pacer {
                 if let Some(ideal) = ideal {
                     self.host.add(ideal, current);
                 }
+                self.cap_boost(frame_ideal, current);
                 // No lower than frames can be timed at, or a busy host could
                 // cap the speed where nothing measures it again (with a base
                 // speed below that, as `auto 300` has in real mode).
@@ -1043,6 +1221,63 @@ impl Pacer {
         (least as u32).clamp(MIN_CYCLES, MAX_CYCLES)
     }
 
+    /// While the program gets all the host has (`AutoSpeed::flat_out`),
+    /// its speed is the host's estimate and follows it down
+    /// (`AutoSpeed::update`), with no room above what the host runs. The
+    /// estimate leaves out up to `STALL_FRAMES` slow frames in a row as a
+    /// stall's (`HostEstimate::outlier`), and each of those runs as many
+    /// times slower than real time as the frame is slower than the
+    /// estimate. Zanzarah's intro movie starts right after a load the
+    /// estimate was taken on, at 1,074,449, with frames of 250 ms: eight
+    /// of them were two seconds of a frozen movie (#1223).
+    ///
+    /// So from the `TRY_BEHIND_FRAMES`th such frame in a row, as many late
+    /// frames as end a step up (`AutoSpeed::falling_behind`), a cap brings
+    /// the speed half the way down to that frame's (`HOST_FALL`). From then
+    /// on, two frames in a row short of the speed (`HOST_SHORT`) move it
+    /// half the way down to the second, as two such samples move the
+    /// estimate: one alone may be a present or a shader compiled, which
+    /// says nothing of the program's work (`HostEstimate::add`). The
+    /// frames are the emulator's, which run whether the program presents
+    /// or not, so a load without frames of its own is watched the same way.
+    ///
+    /// The cap is the boost's (`AutoSpeed::boost_cap`): the next
+    /// measurement decides from the estimate and drops it. The estimate
+    /// stays as the stall rule keeps it: a load's stall of three frames or
+    /// more (a disc read, a shader compiled) says nothing of the host's
+    /// speed at what the program does after the load, and an estimate, or
+    /// a measurement, taken down by it would start that from too low a
+    /// speed.
+    fn cap_boost(&mut self, frame_ideal: Option<f64>, current: u32) {
+        if !self.auto.flat_out() {
+            self.boost_short = false;
+            return;
+        }
+        let Some(ideal) = frame_ideal else {
+            return;
+        };
+        let short = ideal < current as f64 * HOST_SHORT;
+        let was_short = std::mem::replace(&mut self.boost_short, short);
+        let run = self.host.outliers;
+        let from = match self.auto.boost_cap() {
+            Some(cap) if short && was_short => cap,
+            None if run >= crate::autospeed::TRY_BEHIND_FRAMES => current as f64,
+            _ => return,
+        };
+        if ideal < from {
+            // No lower than frames can be timed at (see `end_frame`).
+            let cap = (from + (ideal - from) * HOST_FALL).max(self.least_timed() as f64);
+            self.auto.cap_boost(cap);
+            if crate::autospeed::trace() {
+                eprintln!(
+                    "[auto] boost capped at {cap:.0}: a frame at {ideal:.0}, {run} stalled \
+                     in a row (estimate {:.0})",
+                    self.host.max.unwrap_or(0.0)
+                );
+            }
+        }
+    }
+
     /// Sleep until the next video frame is due; fast forwarding, or once
     /// the frame was shown at its deadline (`wait_to_present`), not at all.
     pub fn wait_for_next_frame(&mut self) {
@@ -1062,6 +1297,39 @@ impl Pacer {
             self.next_frame = now;
         }
     }
+}
+
+/// Stalls of the host made on purpose, to test how `Auto` takes them:
+/// `RUST_DOS_TEST_STALL` lists them as `AT_MS:LENGTH_MS`, separated by
+/// commas, and the frame that first runs past each emulated time sleeps
+/// for that long while its instructions run, as a read of a file the host
+/// doesn't have in its cache does. The variable is read once; without it,
+/// no frame sleeps. Returns the stall due by `now_ns`, if one is.
+pub fn test_stall(now_ns: u64) -> Option<Duration> {
+    use std::sync::{Mutex, OnceLock};
+    /// The stalls not yet made, as (emulated ms, length in ms).
+    type Stalls = Mutex<Vec<(u64, u64)>>;
+    static STALLS: OnceLock<Option<Stalls>> = OnceLock::new();
+    let stalls = STALLS.get_or_init(|| {
+        let text = std::env::var("RUST_DOS_TEST_STALL").ok()?;
+        let mut stalls: Vec<(u64, u64)> = text
+            .split(',')
+            .filter_map(|stall| {
+                let (at, length) = stall.trim().split_once(':')?;
+                Some((at.trim().parse().ok()?, length.trim().parse().ok()?))
+            })
+            .collect();
+        // The latest first, so the next due is the last.
+        stalls.sort_unstable_by(|a, b| b.cmp(a));
+        Some(Mutex::new(stalls))
+    });
+    let mut stalls = stalls.as_ref()?.lock().ok()?;
+    let &(at_ms, length_ms) = stalls.last()?;
+    if now_ns < at_ms.saturating_mul(1_000_000) {
+        return None;
+    }
+    stalls.pop();
+    Some(Duration::from_millis(length_ms))
 }
 
 /// Frames summed up until their instructions took long enough to time
@@ -1106,9 +1374,51 @@ struct HostEstimate {
     /// Whether the last sample said the host can't run the speed it was
     /// taken at.
     short: bool,
+    /// The samples taken so far, up to `HOST_SEED`, and the frames in a
+    /// row left out as a stall's (`outlier`).
+    samples: u32,
+    outliers: u32,
 }
 
 impl HostEstimate {
+    /// Whether a frame whose instructions and other work say the host
+    /// keeps up with `ideal` is a stall's, which the samples leave out: a
+    /// read of a file the host doesn't have in its cache, done while the
+    /// instructions run, or a shader compiled. Its frames are `STALL_COST`
+    /// times as slow as the estimate or more, alone or a few in a row
+    /// between frames at the host's speed. Grom's loads (#783) read their
+    /// files a piece at a time, and with them not in the host's cache every
+    /// third frame said 24,000 to 28,000 against an estimate of 230,000:
+    /// two such samples in a row move it half the way down each
+    /// (`HOST_FALL`), and a few of them took it to 4,500. More such frames
+    /// in a row than a stall takes (`STALL_FRAMES`) are the host's speed at
+    /// the program's work now, and count.
+    ///
+    /// A program whose own work makes every few frames that slow reads high
+    /// the same way: 2.7 times what the host runs with every third frame
+    /// six times as slow, 1.5 times with every tenth. The pace bounds its
+    /// speed. A heavy frame drops time only where it ends `MAX_LAG` behind,
+    /// and at six times the light frames' cost and 50 frames a second or
+    /// more, that takes light frames filling 0.58 of a frame or more. At
+    /// half the estimate they fill 0.43 (`MAX_BUSY_SHARE` at all of it), so
+    /// the drops come above half the estimate, where a measurement counts
+    /// all its lag (`STALLED` in `AutoSpeed::update`), and the limits from
+    /// a host that fell behind hold the speed. Frames many times heavier
+    /// than that drop time under half the estimate too, which the
+    /// measurements leave out as stalls: those can't be told from a load
+    /// read cold.
+    fn outlier(&mut self, ideal: f64) -> bool {
+        let far = self
+            .max
+            .is_some_and(|max| ideal * crate::autospeed::STALL_COST as f64 <= max);
+        if !far {
+            self.outliers = 0;
+            return false;
+        }
+        self.outliers = self.outliers.saturating_add(1);
+        self.outliers <= crate::autospeed::STALL_FRAMES
+    }
+
     /// Add a sample that says `ideal`, taken at the speed `current`. The
     /// estimate moves a tenth of the way to each sample, so that a light
     /// stretch of the program moves it little. Two samples in a row that
@@ -1132,11 +1442,21 @@ impl HostEstimate {
     /// program running at more than a tenth of what the host has. Half the
     /// way down from there would cut the speed of every program above half
     /// the estimate, for a moment that says nothing of its work.
+    ///
+    /// The first `HOST_SEED` samples set it to the most of them. Before
+    /// them there is nothing to tell a stall by, and the first sample of a
+    /// run that a stall fell in said 1,200 to 2,500 where the host ran
+    /// 15,000 (Doom with its files not in the host's cache): taken as the
+    /// estimate, the first load ran at that, and a tenth of the way up a
+    /// sample took seconds to make up for it.
     fn add(&mut self, ideal: f64, current: u32) {
         let short = ideal < current as f64 * HOST_SHORT;
         let was_short = std::mem::replace(&mut self.short, short);
+        let seeding = self.samples < HOST_SEED;
+        self.samples = (self.samples + 1).min(HOST_SEED);
         self.max = Some(match self.max {
             None => ideal,
+            Some(max) if seeding => max.max(ideal),
             Some(max) => {
                 let share = if short && was_short && ideal < max {
                     HOST_FALL
@@ -1155,6 +1475,12 @@ const HOST_DRIFT: f64 = 0.1;
 /// The share it moves down when two samples in a row say the host can't
 /// run the speed it runs at.
 const HOST_FALL: f64 = 0.5;
+/// The first samples, the most of which is the estimate. Chosen: a sample
+/// is a frame, and in Doom's run the first said 1,200 to 2,500 where the
+/// host ran 15,000, so the most of three passes over one or two stalled
+/// frames. A run whose first three all stall starts low and climbs by
+/// `HOST_DRIFT`, as it did without the seed.
+const HOST_SEED: u32 = 3;
 /// The share of the speed below which a sample says the host can't run
 /// it: too far under the speed to be the scatter of samples taken at the
 /// estimate.
@@ -1164,16 +1490,17 @@ const HOST_SHORT: f64 = 0.8;
 /// and the output on port 61h bit 5. Its gate is port 61h bit 0. Programs
 /// time delay loops with it by raising the gate, running the loop, lowering
 /// the gate and reading the count that stopped (MS-Kermit), so the gate has
-/// to stop and restart the count as on the 8253. The speaker's tone is
-/// made from the divisor elsewhere and doesn't use this.
+/// to stop and restart the count as on the 8253. Its output, ANDed with
+/// port 61h bit 1, drives the PC speaker (`high_ticks`).
 #[derive(Clone, Debug)]
 pub struct Pit2 {
     /// Counter mode, 0..=5 (6 and 7 alias 2 and 3).
     mode: u8,
     /// Count loaded at each reload, 1..=65536.
     reload: u32,
-    /// Count written while a mode 2/3 period was running, and the tick the
-    /// period ends at, when it takes effect.
+    /// Count written while a mode 2/3 period was running, and the tick it
+    /// takes effect at: the end of the current half-cycle in mode 3, of the
+    /// current period in mode 2, as the 8254 data sheet has it.
     pending: Option<(u32, u64)>,
     /// Port 61h bit 0.
     gate: bool,
@@ -1195,6 +1522,16 @@ pub struct Pit2 {
     /// loads at once, even into a mode 2 or 3 period that ran on through
     /// the control word. Saved after the PIT2 section's first fields.
     pub count_due: bool,
+    /// How far into its period the count was at `start`: a mode 3 count
+    /// loaded at the end of a high half-cycle starts with the low half.
+    /// Saved in the 8254 section, as are the next two.
+    pub(crate) phase: u64,
+    /// Bits 5-0 of the last control word (access, mode as written and
+    /// BCD), which the read-back command's status byte gives back.
+    pub(crate) control: u8,
+    /// Status byte latched by a read-back command, which the next read of
+    /// port 42h returns before any latched count.
+    pub status: Option<u8>,
 }
 
 impl Default for Pit2 {
@@ -1217,6 +1554,9 @@ impl Pit2 {
             access: 3,
             latched: None,
             count_due: false,
+            phase: 0,
+            control: 0x36,
+            status: None,
         }
     }
 
@@ -1232,21 +1572,39 @@ impl Pit2 {
         self.gate
     }
 
+    /// Counter mode, 0..=5.
+    pub fn mode(&self) -> u8 {
+        self.mode
+    }
+
     /// A count written in mode 2 or 3 while a period ran, taking effect
-    /// when the period ends.
+    /// at the end of the half-cycle or period it was written in. A count
+    /// that loads where a mode 3 output goes low starts with the low half
+    /// of its own period. With the gate low the counter stops, and the
+    /// count loads when the gate triggers it (`set_gate`).
     fn apply_pending(&mut self, now: u64) {
         if let Some((reload, at)) = self.pending
             && at <= now
+            && self.held.is_none()
         {
+            let current = self.reload as u64;
+            let into = (at - self.start + self.phase) % current;
+            let low_next = self.mode == 3 && into == current.div_ceil(2);
             self.pending = None;
             self.reload = reload;
             self.from = reload;
             self.start = at;
+            self.phase = if low_next {
+                (reload as u64).div_ceil(2)
+            } else {
+                0
+            };
         }
     }
 
     /// Control word for channel 2: set the mode and stop the counter until
-    /// a count is written, as the 8254 data sheet has it.
+    /// a count is written, as the 8254 data sheet has it. `control` is the
+    /// control word; its bits 5-0 are kept.
     ///
     /// A mode 2 or 3 count that runs when a control word for the same mode
     /// comes goes on with the count it had. A switch between modes 2 and 3
@@ -1255,14 +1613,18 @@ impl Pit2 {
     /// and two reads of port 42h, never writing a count; a stopped count
     /// gives it the same number every time (DOSBox SVN's "every roll is
     /// 5", DOSBox-X issue 1274).
-    pub fn set_mode(&mut self, mode: u8, access: u8, now: u64) {
+    pub fn set_mode(&mut self, control: u8, now: u64) {
+        self.apply_pending(now);
         let (count, _) = self.read(now);
+        let mode = (control >> 1) & 0x07;
         let mode = if mode >= 6 { mode - 4 } else { mode };
         let runs_on = self.held.is_none() && self.periodic() && mode == self.mode;
         self.mode = mode;
-        self.access = access;
+        self.access = (control >> 4) & 0x03;
+        self.control = control & 0x3F;
         self.pending = None;
         self.latched = None;
+        self.status = None;
         self.count_due = true;
         if !runs_on {
             // Mode 0's output goes low at the control word, the others' high.
@@ -1275,15 +1637,22 @@ impl Pit2 {
         let reload = if count == 0 { 0x10000 } else { count as u32 };
         self.apply_pending(now);
         if self.held.is_none() && self.periodic() && !self.count_due {
-            let reload_now = self.reload as u64;
-            let into = (now - self.start) % reload_now;
-            self.pending = Some((reload, now - into + reload_now));
+            let current = self.reload as u64;
+            let into = (now - self.start + self.phase) % current;
+            let high = current.div_ceil(2);
+            let left = if self.mode == 3 && into < high {
+                high - into
+            } else {
+                current - into
+            };
+            self.pending = Some((reload, now + left));
             return;
         }
         self.count_due = false;
         self.reload = reload;
         self.from = reload;
         self.pending = None;
+        self.phase = 0;
         if matches!(self.mode, 1 | 5) {
             // Loaded, but counting waits for the gate to trigger it.
             self.held = Some((reload as u16, true));
@@ -1311,10 +1680,15 @@ impl Pit2 {
             return;
         }
         match self.mode {
-            // A rising gate reloads the count and starts a new period.
+            // A rising gate reloads the count and starts a new period,
+            // with a count written since if there is one.
             1 | 2 | 3 | 5 => {
+                if let Some((reload, _)) = self.pending.take() {
+                    self.reload = reload;
+                }
                 self.from = self.reload;
                 self.start = now;
+                self.phase = 0;
                 self.held = None;
             }
             // Modes 0 and 4 go on from where the gate stopped them.
@@ -1328,9 +1702,22 @@ impl Pit2 {
         }
     }
 
-    /// The count and output at `now`.
-    pub fn read(&mut self, now: u64) -> (u16, bool) {
-        self.apply_pending(now);
+    /// The count and output at `now`. A count that a mode 2 or 3 period
+    /// had pending takes effect here without being stored: the state
+    /// changes only at the writes to the channel and its gate, which the
+    /// speaker's model (`high_ticks`) follows.
+    pub fn read(&self, now: u64) -> (u16, bool) {
+        if let Some((_, at)) = self.pending
+            && at <= now
+        {
+            let mut applied = self.clone();
+            applied.apply_pending(now);
+            return applied.read_applied(now);
+        }
+        self.read_applied(now)
+    }
+
+    fn read_applied(&self, now: u64) -> (u16, bool) {
         if let Some(held) = self.held {
             return held;
         }
@@ -1338,33 +1725,260 @@ impl Pit2 {
         let reload = self.reload as u64;
         match self.mode {
             2 => {
-                let into = elapsed % reload;
-                let count = (reload - into) as u16;
-                (count, count != 1)
+                let into = (elapsed + self.phase) % reload;
+                ((reload - into) as u16, into != reload - 1)
             }
             3 => {
                 // The count runs down by two, twice a period, high for the
                 // first half.
-                let into = elapsed % reload;
-                ((reload - 2 * into % reload) as u16, into < reload.div_ceil(2))
+                let into = (elapsed + self.phase) % reload;
+                (square_wave_count(reload, into), into < reload.div_ceil(2))
             }
             // One-shot modes count down through zero and wrap: 0 and 1
             // raise their output at the terminal count, 4 and 5 pulse it low
             // for a tick there.
             _ => {
                 let count = (self.from as u64).wrapping_sub(elapsed) as u16;
-                let out = match self.mode {
-                    0 | 1 => elapsed >= self.from as u64,
-                    _ => elapsed != self.from as u64,
-                };
-                (count, out)
+                (count, self.output_at(elapsed))
+            }
+        }
+    }
+
+    /// The parts a state saved before the 8254 section lacks: no status
+    /// latched, counts that start their periods from the top, and the
+    /// control word's bits those the access and the mode give.
+    pub(crate) fn without_8254_state(&mut self) {
+        self.phase = 0;
+        self.control = self.access << 4 | self.mode << 1;
+        self.status = None;
+    }
+
+    /// The status byte the read-back command latches at `now`: the output,
+    /// the null count flag (a count or control word written and not yet
+    /// loaded into the counting element) and the control word's bits 5-0.
+    pub fn status(&self, now: u64) -> u8 {
+        let (_, out) = self.read(now);
+        let pending = self
+            .pending
+            .is_some_and(|(_, at)| at > now || self.held.is_some());
+        let untriggered = matches!(self.mode, 1 | 5) && self.held.is_some();
+        let null = self.count_due || pending || untriggered;
+        (out as u8) << 7 | (null as u8) << 6 | self.control
+    }
+
+    /// The output at `at` ticks into the count's run, counted from the
+    /// start of its period in the periodic modes (`start` plus `phase`).
+    fn output_at(&self, at: u64) -> bool {
+        let reload = self.reload as u64;
+        match self.mode {
+            2 => at % reload != reload - 1,
+            3 => at % reload < reload.div_ceil(2),
+            0 | 1 => at >= self.from as u64,
+            _ => at != self.from as u64,
+        }
+    }
+
+    /// How many of the first `at` ticks of the count's run the output is
+    /// high, counted as for `output_at`.
+    fn high_count(&self, at: u64) -> u64 {
+        let reload = self.reload as u64;
+        let from = self.from as u64;
+        match self.mode {
+            // Low for the last tick of each period.
+            2 => at - at / reload,
+            // High for the first half of each period, the longer one of an
+            // odd count.
+            3 => {
+                let high = reload.div_ceil(2);
+                at / reload * high + (at % reload).min(high)
+            }
+            0 | 1 => at.saturating_sub(from),
+            _ => at - (at > from) as u64,
+        }
+    }
+
+    /// How long the output is high from tick `a` to tick `b`, which can
+    /// fall between ticks: the output keeps each tick's level until the
+    /// next. The speaker's level is this output (with port 61h bit 1), and
+    /// its mean over a mix frame is what the speaker plays (see
+    /// `Bus::audio_catch_up`). `a` is no earlier than the last change to
+    /// the channel's mode, count or gate.
+    pub fn high_ticks(&self, a: f64, b: f64) -> f64 {
+        if b <= a {
+            return 0.0;
+        }
+        if let Some((_, at)) = self.pending
+            && self.held.is_none()
+        {
+            let at = at as f64;
+            if a < at {
+                let mut before = self.clone();
+                before.pending = None;
+                if b <= at {
+                    return before.high_ticks(a, b);
+                }
+                return before.high_ticks(a, at) + self.applied_at(at).high_ticks(at, b);
+            }
+            return self.applied_at(a).high_ticks(a, b);
+        }
+        if let Some((_, out)) = self.held {
+            return if out { b - a } else { 0.0 };
+        }
+        self.high_until(b) - self.high_until(a)
+    }
+
+    /// This counter with its pending count, which takes effect by `t`,
+    /// loaded.
+    fn applied_at(&self, t: f64) -> Self {
+        let mut applied = self.clone();
+        applied.apply_pending(t.ceil() as u64);
+        applied
+    }
+
+    /// How long the output is high from `start` to tick `t`, while the
+    /// count runs.
+    fn high_until(&self, t: f64) -> f64 {
+        let at = (t - self.start as f64).max(0.0) + self.phase as f64;
+        let whole = at.floor();
+        let ticks = whole as u64;
+        let part = if self.output_at(ticks) {
+            at - whole
+        } else {
+            0.0
+        };
+        (self.high_count(ticks) - self.high_count(self.phase)) as f64 + part
+    }
+
+    /// The output's level from `now` on while nothing is written to the
+    /// channel or its gate, if it holds one: the counter is stopped, or a
+    /// one-shot mode is past its terminal count.
+    pub fn steady_output(&self, now: u64) -> Option<bool> {
+        if let Some((_, out)) = self.held {
+            return Some(out);
+        }
+        let elapsed = now.saturating_sub(self.start);
+        let from = self.from as u64;
+        match self.mode {
+            0 | 1 if elapsed >= from => Some(true),
+            4 | 5 if elapsed > from => Some(true),
+            _ => None,
+        }
+    }
+}
+
+/// The byte interface of channel 1's port 41h: the access mode, the
+/// LSB/MSB flip-flops and the latches. Channels 0 and 2 keep theirs on the
+/// bus (`Bus::pit0_access`) and in `Pit2`.
+#[derive(Clone, Debug)]
+pub struct PitPort {
+    /// Access mode from the last control word: 1 = LSB only, 2 = MSB only,
+    /// 3 = LSB then MSB.
+    pub access: u8,
+    write_msb: bool,
+    read_msb: bool,
+    /// The count as assembled from the bytes written.
+    divisor: u16,
+    /// Count frozen by a latch command, read until both bytes are read.
+    latched: Option<u16>,
+    /// Status byte latched by a read-back command, read before the count.
+    status: Option<u8>,
+}
+
+impl Default for PitPort {
+    fn default() -> Self {
+        Self::new(3)
+    }
+}
+
+impl PitPort {
+    pub fn new(access: u8) -> Self {
+        Self {
+            access,
+            write_msb: false,
+            read_msb: false,
+            divisor: 0,
+            latched: None,
+            status: None,
+        }
+    }
+
+    /// A control word with `access` (not a latch command): the byte
+    /// sequencing starts over and the latches are dropped.
+    pub fn control(&mut self, access: u8) {
+        *self = Self::new(access);
+    }
+
+    /// A latch command, or a read-back command's count latch. A count
+    /// latched and not yet read stays: the 8254 ignores the later ones.
+    pub fn latch_count(&mut self, count: u16) {
+        if self.latched.is_none() {
+            self.latched = Some(count);
+            self.read_msb = false;
+        }
+    }
+
+    /// A read-back command's status latch, ignored while one is unread.
+    pub fn latch_status(&mut self, status: u8) {
+        self.status.get_or_insert(status);
+    }
+
+    /// A byte written to the port. Returns the count once it is complete.
+    pub fn write(&mut self, value: u8) -> Option<u16> {
+        match self.access {
+            1 => self.divisor = value as u16,
+            2 => self.divisor = (value as u16) << 8,
+            _ if !self.write_msb => {
+                self.divisor = (self.divisor & 0xFF00) | value as u16;
+                self.write_msb = true;
+                return None;
+            }
+            _ => {
+                self.divisor = (self.divisor & 0x00FF) | (value as u16) << 8;
+                self.write_msb = false;
+            }
+        }
+        Some(self.divisor)
+    }
+
+    /// A byte read from the port, with `live` the count at the moment: a
+    /// latched status first, then a latched count, else the live one.
+    pub fn read(&mut self, live: u16) -> u8 {
+        if let Some(status) = self.status.take() {
+            return status;
+        }
+        let count = self.latched.unwrap_or(live);
+        match self.access {
+            1 => {
+                self.latched = None;
+                count as u8
+            }
+            2 => {
+                self.latched = None;
+                (count >> 8) as u8
+            }
+            _ if !self.read_msb => {
+                self.read_msb = true;
+                count as u8
+            }
+            _ => {
+                self.read_msb = false;
+                self.latched = None;
+                (count >> 8) as u8
             }
         }
     }
 }
 
-crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc });
-crate::state_fields!(Pit2 { mode, reload, pending, gate, start, from, held, access, latched } skip { count_due });
+crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc } skip { phase, pending_at, control });
+crate::state_fields!(Pit2 { mode, reload, pending, gate, start, from, held, access, latched } skip { count_due, phase, control, status });
+crate::state_fields!(PitPort {
+    access,
+    write_msb,
+    read_msb,
+    divisor,
+    latched,
+    status
+});
 crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded, disk_wait });
 crate::state_fields!(Tsc { base, icount, hz });
 
@@ -1464,7 +2078,8 @@ mod tests {
         // 1,135,918, then the drawing that follows runs at 250,000.
         let mut host = HostEstimate {
             max: Some(1_135_918.0),
-            short: false,
+            samples: HOST_SEED,
+            ..HostEstimate::default()
         };
         let mut frames = 0;
         while let Some(max) = host.max.filter(|&max| max > 250_000.0 * 1.25) {
@@ -1479,7 +2094,12 @@ mod tests {
     #[test]
     fn the_host_estimate_drifts_where_the_host_keeps_up() {
         let estimate = |max: Option<f64>, short: bool, ideal: f64, current: u32| {
-            let mut host = HostEstimate { max, short };
+            let mut host = HostEstimate {
+                max,
+                short,
+                samples: HOST_SEED,
+                ..HostEstimate::default()
+            };
             host.add(ideal, current);
             host.max.unwrap()
         };
@@ -1513,12 +2133,88 @@ mod tests {
         // of a frame that stalled says 50,000, and the next ones the
         // host's speed again.
         let mut host = HostEstimate::default();
-        host.add(400_000.0, 300_000);
+        for _ in 0..HOST_SEED {
+            host.add(400_000.0, 300_000);
+        }
         host.add(50_000.0, 300_000);
         assert_eq!(host.max, Some(365_000.0));
         host.add(400_000.0, 300_000);
         assert!(!host.short);
         assert_eq!(host.max, Some(368_500.0));
+    }
+
+    /// The host estimate after frames of 200,000 instructions that take the
+    /// host the milliseconds of `frames_ms` each, in turn.
+    fn estimate_after(frames_ms: &[u64]) -> f64 {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, Instant::now());
+        for &ms in frames_ms {
+            cpu.bus.clock.icount += 200_000;
+            let exec = Duration::from_millis(ms);
+            pacer.end_cpu_frame(&mut cpu, 200_000, exec, Duration::ZERO);
+        }
+        pacer.host.max.unwrap()
+    }
+
+    #[test]
+    fn a_stall_in_the_first_samples_does_not_set_the_host_estimate() {
+        // Doom's first frames with its files not in the host's cache: the
+        // first sample says a tenth of what the host runs.
+        let mut host = HostEstimate::default();
+        host.add(1_500.0, 3000);
+        host.add(15_000.0, 3000);
+        assert_eq!(host.max, Some(15_000.0));
+        // From then on the estimate moves by shares.
+        host.add(15_000.0, 3000);
+        host.add(25_000.0, 3000);
+        assert_eq!(host.max, Some(16_000.0));
+    }
+
+    #[test]
+    fn the_frames_of_a_stall_stay_out_of_the_host_estimate() {
+        let steady = estimate_after(&[10; 30]);
+        // Frames of 200 and 120 ms, alone and a few in a row among frames
+        // of 10, leave the estimate where it was.
+        let mut frames = vec![10; 20];
+        for _ in 0..4 {
+            frames.extend([200, 10, 10, 120, 120, 120, 10]);
+        }
+        let stalled = estimate_after(&frames);
+        assert!(
+            (stalled / steady - 1.0).abs() < 0.01,
+            "{stalled} against {steady}"
+        );
+        // More of them in a row than a stall takes are the host's speed
+        // now.
+        let mut frames = vec![10; 20];
+        frames.extend([200; 14]);
+        let slow = estimate_after(&frames);
+        assert!(slow < steady / 4.0, "{slow} against {steady}");
+    }
+
+    #[test]
+    fn a_heavy_frame_every_few_frames_stays_out_of_the_host_estimate() {
+        // A program whose every Nth frame costs the host a little over six
+        // times what the others do: each such frame is alone between frames
+        // at the host's speed, so all of them stay out, and the estimate
+        // reads what the light frames ran at. Averaged over all frames the
+        // host runs 2.7 times fewer instructions a ms than that with every
+        // third frame heavy, and 1.51 times with every tenth
+        // (`HostEstimate::outlier` says what bounds the speed then).
+        let steady = estimate_after(&[10; 30]);
+        for (every, high) in [(3, 2.7), (10, 1.51)] {
+            let mut frames = vec![10; 20];
+            for i in 1..=60 {
+                frames.push(if i % every == 0 { 61 } else { 10 });
+            }
+            let mixed = estimate_after(&frames);
+            assert!(
+                (mixed / steady - 1.0).abs() < 0.01,
+                "{mixed} against {steady}"
+            );
+            let mean_ms = (61.0 + 10.0 * (every - 1) as f64) / every as f64;
+            assert!((mean_ms / 10.0 - high).abs() < 0.01, "{mean_ms}");
+        }
     }
 
     #[test]
@@ -1538,6 +2234,210 @@ mod tests {
             let max = host.max.unwrap();
             assert!((max / 400_000.0 - 1.0).abs() < 0.02, "{max}");
         }
+    }
+
+    /// The host's nanoseconds an instruction of a load takes: the host
+    /// keeps up with 1,075,000 instructions a ms of it (`MAX_BUSY_SHARE`).
+    const LOAD_NS: f64 = 0.85e6 / 1_075_000.0;
+
+    /// One frame of a protected-mode program at its speed, whose
+    /// instructions take the host `ns` each, reading its data if `reads`.
+    /// Returns the speed it ran at and the host's time it took.
+    fn boosted_frame(
+        cpu: &mut crate::cpu::Cpu,
+        pacer: &mut Pacer,
+        ns: f64,
+        reads: bool,
+    ) -> (u32, Duration) {
+        boosted_frame_with(cpu, pacer, ns, reads, Duration::ZERO)
+    }
+
+    /// `boosted_frame`, with `overhead` of the frame's other work (a
+    /// present).
+    fn boosted_frame_with(
+        cpu: &mut crate::cpu::Cpu,
+        pacer: &mut Pacer,
+        ns: f64,
+        reads: bool,
+        overhead: Duration,
+    ) -> (u32, Duration) {
+        let speed = cpu.bus.clock.cycles_per_ms();
+        let executed = (speed as f64 * FRAME.as_secs_f64() * 1000.0) as u64;
+        let exec = Duration::from_nanos((executed as f64 * ns) as u64);
+        cpu.bus.clock.icount += executed;
+        if reads {
+            cpu.bus.activity.io_bytes += 250_000;
+        }
+        if let Some(next) = pacer.end_cpu_frame(cpu, executed, exec, overhead) {
+            cpu.bus.clock.set_cycles_per_ms(next);
+        }
+        (speed, exec)
+    }
+
+    /// A protected-mode program at `Auto` that loads without frames at
+    /// 433,332, and then gets all the host has for it.
+    fn boosted() -> (Box<crate::cpu::Cpu>, Pacer) {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        cpu.pm_latched = true;
+        let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, Instant::now());
+        // The load at its speed before the boost, which seeds the estimate,
+        // then the measurement that finds it at work without frames.
+        cpu.bus.clock.set_cycles_per_ms(433_332);
+        for _ in 0..6 {
+            boosted_frame(&mut cpu, &mut pacer, LOAD_NS, true);
+        }
+        let loading = crate::autospeed::Measurement {
+            fps: None,
+            polling: 0.0,
+            halted: 0.0,
+            output: 14_800_000.0,
+            io: 14_800_000.0,
+            refresh: 60.0,
+            pace: 1.0,
+            missed: 0,
+        };
+        let host_max = pacer.host.max.unwrap() as u32;
+        let boost = pacer.auto.decide(433_332, &loading, true, host_max);
+        assert!(pacer.auto.flat_out());
+        assert!(boost > 1_000_000, "{boost}");
+        cpu.bus.clock.set_cycles_per_ms(boost);
+        for _ in 0..6 {
+            boosted_frame(&mut cpu, &mut pacer, LOAD_NS, true);
+        }
+        (cpu, pacer)
+    }
+
+    /// The boosted load of `boosted`, then `then`: the host's time each
+    /// frame of that takes, in nanoseconds an instruction, frame by frame.
+    /// Returns the speed and the host's time of each of those frames.
+    fn boosted_then(then: &[f64]) -> Vec<(u32, Duration)> {
+        let (mut cpu, mut pacer) = boosted();
+        then.iter()
+            .map(|&ns| boosted_frame(&mut cpu, &mut pacer, ns, true))
+            .collect()
+    }
+
+    /// Zanzarah's intro movie starts right after a load that `Auto` gave
+    /// all the host has, at 1,074,449, and its frames cost the host about
+    /// fifteen times as much an instruction as the load's (#1223). The
+    /// speed follows the estimate down, and the frames left out of it as a
+    /// stall's each run at a fifteenth of real time: eight of them, as
+    /// many as a stall may take, were two seconds of a frozen movie. Given
+    /// all the host has, the boost comes down from the third frame that
+    /// slow in a row.
+    #[test]
+    fn a_boost_into_work_the_host_runs_far_slower_comes_down_within_a_few_frames() {
+        let movie = LOAD_NS * 15.0;
+        // What the host keeps up with of the movie.
+        let keeps_up = 0.85e6 / movie;
+        let frames = boosted_then(&[movie; 40]);
+        // The host's time until the speed is within twice that.
+        let slow: Duration = frames
+            .iter()
+            .take_while(|&&(speed, _)| speed as f64 > keeps_up * 2.0)
+            .map(|&(_, exec)| exec)
+            .sum();
+        assert!(slow < Duration::from_millis(1000), "{slow:?}: {frames:?}");
+        // Three of them at the boost, then a frame of each speed down.
+        let at_boost = frames.iter().filter(|f| f.0 == frames[0].0).count();
+        assert_eq!(at_boost, crate::autospeed::TRY_BEHIND_FRAMES as usize);
+        // It comes down to what the host keeps up with, no lower than half.
+        let last = frames.last().unwrap().0 as f64;
+        assert!(last > keeps_up * 0.5 && last < keeps_up * 1.5, "{last}");
+    }
+
+    /// A stall of one or two frames in a row during a boosted load, as
+    /// Grom's cold reads are, leaves the speed: the frames after it run
+    /// at the load's cost again.
+    #[test]
+    fn a_short_stall_during_a_boost_leaves_the_speed() {
+        let stall = LOAD_NS * 15.0;
+        let frames = boosted_then(&[stall, LOAD_NS, LOAD_NS, stall, stall, LOAD_NS, LOAD_NS]);
+        let speeds: Vec<u32> = frames.iter().map(|f| f.0).collect();
+        // The estimate moves no more than its drift with the light frames.
+        assert!(
+            speeds.iter().all(|&s| s as f64 > speeds[0] as f64 * 0.9),
+            "{speeds:?}"
+        );
+    }
+
+    /// A stall of three frames or more in a row during a boosted load (a
+    /// disc read, a shader compiled) brings the boost down while it lasts,
+    /// and leaves the host's estimate as the stall rule keeps it: once the
+    /// load ends, the program goes back to the speed it had before the
+    /// boost, under the estimate it had before the stall, as it does
+    /// without a stall.
+    #[test]
+    fn a_long_stall_during_a_boost_leaves_the_estimate() {
+        let (mut cpu, mut pacer) = boosted();
+        let boost = cpu.bus.clock.cycles_per_ms();
+        let before = pacer.host.max.unwrap();
+        let stall = LOAD_NS * 15.0;
+        for ns in [stall; 4].into_iter().chain([LOAD_NS; 4]) {
+            boosted_frame(&mut cpu, &mut pacer, ns, true);
+        }
+        assert!(pacer.auto.flat_out());
+        let during = cpu.bus.clock.cycles_per_ms();
+        assert!(during < boost / 2, "{during} of {boost}");
+        let same = |pacer: &Pacer| (pacer.host.max.unwrap() - before).abs() < before * 1e-6;
+        assert!(same(&pacer), "{:?} against {before}", pacer.host.max);
+        // The load ends: no reads for longer than `WORK_DONE_NS`.
+        for _ in 0..10 {
+            boosted_frame(&mut cpu, &mut pacer, LOAD_NS, false);
+        }
+        assert!(!pacer.auto.flat_out());
+        assert_eq!(cpu.bus.clock.cycles_per_ms(), 433_332);
+        assert!(same(&pacer), "{:?} against {before}", pacer.host.max);
+        assert_eq!(pacer.auto.boost_cap(), None);
+    }
+
+    /// The same stall during a load that goes on past the next
+    /// measurement: that measurement decides from the estimate, as the
+    /// boost before the stall did, and boosts the load to it again rather
+    /// than to the speed the stall's frames left.
+    #[test]
+    fn a_long_stall_during_a_load_that_goes_on_ends_with_the_boost() {
+        let (mut cpu, mut pacer) = boosted();
+        let boost = cpu.bus.clock.cycles_per_ms();
+        let stall = LOAD_NS * 15.0;
+        let speeds: Vec<u32> = [stall; 4]
+            .into_iter()
+            .chain([LOAD_NS; 40])
+            .map(|ns| boosted_frame(&mut cpu, &mut pacer, ns, true).0)
+            .collect();
+        assert!(speeds.iter().any(|&s| s < boost / 2), "{speeds:?}");
+        // The measurement comes within 30 frames (`WINDOW_NS`).
+        let last = *speeds.last().unwrap();
+        assert!(last as f64 > boost as f64 * 0.9, "{boost}: {speeds:?}");
+        assert!(pacer.auto.flat_out());
+    }
+
+    /// Once slow frames cap a boost, a frame now and then whose other work
+    /// takes long (a loading screen's present) leaves the cap: one such
+    /// frame says nothing of the program's work, as it says nothing to the
+    /// estimate (`HostEstimate::add`).
+    #[test]
+    fn a_present_now_and_then_leaves_a_capped_boost() {
+        let (mut cpu, mut pacer) = boosted();
+        let stall = LOAD_NS * 15.0;
+        for _ in 0..4 {
+            boosted_frame(&mut cpu, &mut pacer, stall, true);
+        }
+        let capped = cpu.bus.clock.cycles_per_ms();
+        let present = Duration::from_millis(13);
+        let mut speeds = Vec::new();
+        // Short of the next measurement (`WINDOW_NS`).
+        for frame in 0..9 {
+            let overhead = if frame % 3 == 2 {
+                present
+            } else {
+                Duration::ZERO
+            };
+            let (speed, _) = boosted_frame_with(&mut cpu, &mut pacer, LOAD_NS, true, overhead);
+            speeds.push(speed);
+        }
+        assert!(pacer.auto.flat_out());
+        assert!(speeds.iter().all(|&s| s == capped), "{capped}: {speeds:?}");
     }
 
     #[test]
@@ -1761,7 +2661,7 @@ mod tests {
         // MS-Kermit's calibration: mode 2, count 0, gate up for a delay
         // loop, gate down, then read the count without a latch.
         let mut pit = Pit2::new();
-        pit.set_mode(2, 3, 1000);
+        pit.set_mode(0x34, 1000);
         pit.write_count(0, 1010);
         assert_eq!(pit.read(5000).0, 0);
         pit.set_gate(true, 20_000);
@@ -1776,7 +2676,7 @@ mod tests {
     fn channel_2_mode_0_resumes_where_the_gate_stopped_it() {
         let mut pit = Pit2::new();
         pit.set_gate(true, 0);
-        pit.set_mode(0, 3, 0);
+        pit.set_mode(0x30, 0);
         pit.write_count(100, 10);
         assert_eq!(pit.read(50), (60, false));
         pit.set_gate(false, 50);
@@ -1784,6 +2684,53 @@ mod tests {
         pit.set_gate(true, 1000);
         assert_eq!(pit.read(1059), (1, false));
         assert_eq!(pit.read(1060), (0, true));
+    }
+
+    /// How long the output is high over a span agrees with the output
+    /// read tick by tick, in every mode, across a count that a mode 2 or
+    /// 3 period had pending.
+    #[test]
+    fn the_time_high_matches_the_output() {
+        for mode in 0..6u8 {
+            for count in [2u16, 3, 7, 10] {
+                let mut pit = Pit2::new();
+                pit.set_mode(0x30 | mode << 1, 0);
+                pit.set_gate(true, 0);
+                pit.write_count(count, 5);
+                if matches!(mode, 1 | 5) {
+                    pit.set_gate(false, 6);
+                    pit.set_gate(true, 7);
+                }
+                // A new count while the period runs.
+                pit.write_count(count + 2, 13);
+                let mut high = 0.0;
+                for tick in 13..80u64 {
+                    let at = pit.high_ticks(13.0, tick as f64);
+                    assert_eq!(at, high, "mode {mode}, count {count}, to {tick}");
+                    high += pit.read(tick).1 as u8 as f64;
+                }
+                // A span between ticks takes in the parts of the ticks at
+                // its ends.
+                let part = pit.high_ticks(20.25, 40.5);
+                let whole = pit.high_ticks(21.0, 40.0);
+                let ends = 0.75 * pit.read(20).1 as u8 as f64 + 0.5 * pit.read(40).1 as u8 as f64;
+                assert!((part - whole - ends).abs() < 1e-9, "mode {mode}, count {count}");
+            }
+        }
+    }
+
+    /// A square wave's time high over whole periods: half of an even
+    /// count, the longer half of an odd one.
+    #[test]
+    fn a_square_wave_is_high_for_its_longer_half() {
+        let mut pit = Pit2::new();
+        pit.set_mode(0x36, 0);
+        pit.set_gate(true, 0);
+        pit.write_count(2, 0);
+        assert_eq!(pit.high_ticks(0.0, 1000.0), 500.0);
+        pit.set_mode(0x36, 1000);
+        pit.write_count(3, 1000);
+        assert_eq!(pit.high_ticks(1000.0, 1300.0), 200.0);
     }
 }
 

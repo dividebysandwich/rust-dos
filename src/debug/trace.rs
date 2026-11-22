@@ -58,7 +58,7 @@ impl TraceEntry {
     /// far more useful than the undefined opcode.
     pub fn disasm(&self) -> (usize, String) {
         let bytes = self.code_bytes();
-        if let Some(name) = trap_name(bytes, Some(self.gpr[0] as u16), self.pm) {
+        if let Some(name) = trap_name(bytes, Some(self.gpr[0] as u16), self.pm, self.code32) {
             return (trap_len(bytes), name);
         }
         disasm_one(bytes, self.eip, self.code32)
@@ -134,10 +134,12 @@ pub fn hex_bytes(bytes: &[u8]) -> String {
 /// An interrupt's line gives AX, its function, when `ax` is known. In
 /// protected mode (`pm`) `FE 38` and `FE 39` are the invalid FE /7 opcode
 /// they encode, as `exec::service_trap` runs them only in real and
-/// virtual-8086 mode.
-pub fn trap_name(bytes: &[u8], ax: Option<u16>, pm: bool) -> Option<String> {
+/// virtual-8086 mode. A built-in Windows trap in 16-bit protected-mode
+/// code (`code32` false) is a Win16 system module's stub.
+pub fn trap_name(bytes: &[u8], ax: Option<u16>, pm: bool, code32: bool) -> Option<String> {
     if let &[0xFE, rust_dos::win32::TRAP, lo, hi, ..] = bytes {
-        return Some(rust_dos::win32::trap_name(u16::from_le_bytes([lo, hi])));
+        let id = u16::from_le_bytes([lo, hi]);
+        return Some(rust_dos::win32::trap_name(id, pm && !code32));
     }
     let &[0xFE, kind @ 0x38..=0x3B, vv, ..] = bytes else {
         return None;
@@ -316,8 +318,11 @@ mod tests {
         // The Plug and Play BIOS's entry point, and the DPMI host's.
         assert_eq!(code(&[0xFE, 0x3A, 0x01, 0xCB]).disasm(), (3, "HLE far service 01h".to_string()));
         assert_eq!(code(&[0xFE, 0x3B, 0x01, 0x90]).disasm(), (3, "HLE DPMI 01h".to_string()));
-        assert_eq!(trap_name(&[0xFE, 0x38, 0x21], None, false).as_deref(), Some("HLE INT 21h"));
-        assert_eq!(trap_name(&[0xFE, 0x3C, 0x21], None, false), None);
+        assert_eq!(
+            trap_name(&[0xFE, 0x38, 0x21], None, false, false).as_deref(),
+            Some("HLE INT 21h")
+        );
+        assert_eq!(trap_name(&[0xFE, 0x3C, 0x21], None, false, false), None);
     }
 
     #[test]
@@ -329,7 +334,45 @@ mod tests {
         assert_eq!(pm(&[0xFE, 0x39, 0x08]).disasm().1, "(bad)");
         assert_eq!(pm(&[0xFE, 0x3A, 0x01]).disasm(), (3, "HLE far service 01h".to_string()));
         assert_eq!(pm(&[0xFE, 0x3B, 0x01]).disasm(), (3, "HLE DPMI 01h".to_string()));
-        assert_eq!(trap_name(&[0xFE, 0x39, 0x08], None, true), None);
+        assert_eq!(trap_name(&[0xFE, 0x39, 0x08], None, true, false), None);
+    }
+
+    #[test]
+    fn built_in_windows_traps_are_named_by_the_code_they_are_in() {
+        // The same id is a function of a Win16 system module in 16-bit
+        // protected-mode code and of a built-in DLL in 32-bit code: 0466h
+        // is USER's PeekMessage in the one and a 32-bit function in the
+        // other.
+        let id = |module: u16, index: u16| (module << 10 | index).to_le_bytes();
+        let [lo, hi] = id(1, 0x66);
+        let pm16 = TraceEntry {
+            pm: true,
+            ..code(&[0xFE, 0x3E, lo, hi])
+        };
+        assert_eq!(pm16.disasm(), (4, "Win16 USER.PeekMessage".to_string()));
+        let pm32 = TraceEntry {
+            pm: true,
+            code32: true,
+            ..code(&[0xFE, 0x3E, lo, hi])
+        };
+        assert_eq!(pm32.disasm().1, rust_dos::win32::trap_name(0x0466, false));
+        assert!(pm32.disasm().1.starts_with("Win32 "));
+        // KERNEL's last 64 ids, 3C0h on, are functions it doesn't have.
+        let [lo, hi] = id(0, 0x3C0 + 2);
+        let missing = TraceEntry {
+            pm: true,
+            ..code(&[0xFE, 0x3E, lo, hi])
+        };
+        assert_eq!(missing.disasm().1, "Win16 missing function 2");
+        // The system's traps keep their names in any code.
+        assert_eq!(
+            trap_name(&[0xFE, 0x3E, 0x00, 0xF3], None, false, false).as_deref(),
+            Some("Win32 start")
+        );
+        assert_eq!(
+            trap_name(&[0xFE, 0x3E, 0x00, 0xF3], None, true, false).as_deref(),
+            Some("Win32 start")
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod cursor;
 pub mod ddeml;
 pub mod defwnd;
 pub mod dialog;
+pub mod dlgdir;
 pub mod hook;
 pub mod input;
 pub mod menu;
@@ -49,6 +50,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: None,
 };
 
 const fn stdcall(
@@ -458,13 +460,25 @@ fn dll_index() -> usize {
 }
 
 /// The address of USER32's function `name`, for tasks that call it as
-/// the program would and for window procedures of the system's classes.
-pub fn address_of(name: &str) -> u32 {
+/// the program would and for window procedures of the system's classes:
+/// in the running process's image of USER32, which a state from an older
+/// table has in that table's order (stub_tables.rs).
+pub fn address_of(cpu: &Cpu, name: &str) -> u32 {
     let index = APIS
         .iter()
         .position(|a| a.name == name)
         .unwrap_or_else(|| panic!("USER32 has no {}", name));
-    super::stubs::stub_address(dll_index(), index)
+    super::stub_tables::address(cpu, dll_index(), index)
+}
+
+/// The address of USER32's function `name` in the image a process
+/// started now gets, for a program file the system makes (NOTEPAD.EXE).
+pub fn address_for_new(bus: &crate::bus::Bus, name: &str) -> u32 {
+    let index = APIS
+        .iter()
+        .position(|a| a.name == name)
+        .unwrap_or_else(|| panic!("USER32 has no {}", name));
+    super::stub_tables::address_for_new(bus, dll_index(), index)
 }
 
 /// The system starts: the desktop window, the system's classes, the
@@ -1239,17 +1253,50 @@ static APIS: &[Api] = &[
     ),
     stdcall("ExitWindowsEx", 209, 2, session::exit_windows_ex),
     stdcall("GetGuiResources", 260, 2, nothing),
-    stdcall(
-        "GetProcessWindowStation",
-        306,
-        0,
-        sysparams::get_process_window_station,
-    ),
+    // Windows 95 and 98 have no desktops or window stations of their
+    // own: these are their stubs that fail with
+    // ERROR_CALL_NOT_IMPLEMENTED, all of the family's functions but
+    // GetThreadDesktop and SetThreadDesktop. QuickTime 5 calls
+    // OpenDesktopA when it starts.
+    stdcall("CloseDesktop", 64, 1, not_implemented),
+    stdcall("CloseWindowStation", 66, 1, not_implemented),
+    stdcall("CreateDesktopA", 77, 6, not_implemented),
+    stdcall("CreateDesktopW", 78, 6, not_implemented),
+    stdcall("CreateWindowStationA", 93, 4, not_implemented),
+    stdcall("CreateWindowStationW", 94, 4, not_implemented),
+    stdcall("EnumDesktopWindows", 189, 3, not_implemented),
+    stdcall("EnumDesktopsA", 190, 3, not_implemented),
+    stdcall("EnumDesktopsW", 191, 3, not_implemented),
+    stdcall("EnumWindowStationsA", 204, 2, not_implemented),
+    stdcall("EnumWindowStationsW", 205, 2, not_implemented),
+    stdcall("GetInputDesktop", 262, 0, not_implemented),
+    stdcall("GetProcessWindowStation", 306, 0, not_implemented),
     stdcall("GetThreadDesktop", 322, 1, sysparams::get_thread_desktop),
     stdcall("GetUserObjectInformationA", 327, 5, not_implemented),
+    stdcall("GetUserObjectInformationW", 328, 5, not_implemented),
+    stdcall("GetUserObjectSecurity", 329, 5, not_implemented),
+    stdcall("LockWindowStation", 417, 1, not_implemented),
+    stdcall("OpenDesktopA", 452, 4, not_implemented),
+    stdcall("OpenDesktopW", 453, 4, not_implemented),
+    stdcall("OpenInputDesktop", 455, 3, not_implemented),
+    stdcall("OpenWindowStationA", 456, 3, not_implemented),
+    stdcall("OpenWindowStationW", 457, 3, not_implemented),
+    stdcall("SetProcessWindowStation", 546, 1, not_implemented),
+    stdcall("SetThreadDesktop", 558, 1, succeed),
+    stdcall("SetUserObjectInformationA", 560, 4, not_implemented),
+    stdcall("SetUserObjectInformationW", 561, 4, not_implemented),
+    stdcall("SetUserObjectSecurity", 562, 3, not_implemented),
+    stdcall("SwitchDesktop", 586, 1, not_implemented),
+    stdcall("UnlockWindowStation", 612, 1, not_implemented),
     stdcall("WinHelpA", 636, 4, winhelp::win_help),
     stdcall("GetSystemDefaultLangID", 652, 0, nothing),
     stdcall("EnumDisplayDevicesA", 192, 4, monitor::enum_display_devices),
+    stdcall(
+        "ChangeDisplaySettingsExA",
+        29,
+        5,
+        monitor::change_display_settings_ex,
+    ),
     // No monitor functions (430 to 433): they came with Windows 98, and
     // programs and Wine's tests look them up to tell Windows 95 apart.
     stdcall("SetWindowsHookW", 577, 2, not_implemented),
@@ -1294,10 +1341,19 @@ static APIS: &[Api] = &[
     stdcall("PackDDElParam", 458, 3, ddeml::pack_dde_lparam),
     stdcall("FreeDDElParam", 218, 2, ddeml::free_dde_lparam),
     stdcall("ImpersonateDdeClientWindow", 358, 2, not_implemented),
-    stdcall("DlgDirListA", 149, 5, nothing),
-    stdcall("DlgDirSelectExA", 155, 4, nothing),
-    stdcall("DlgDirListComboBoxA", 150, 5, nothing),
-    stdcall("DlgDirSelectComboBoxExA", 153, 4, nothing),
+    stdcall("DlgDirListA", 149, 5, dlgdir::dlg_dir_list),
+    stdcall("DlgDirSelectExA", 155, 4, dlgdir::dlg_dir_select_ex),
+    stdcall("DlgDirListComboBoxA", 150, 5, dlgdir::dlg_dir_list_combo_box),
+    stdcall(
+        "DlgDirSelectComboBoxExA",
+        153,
+        4,
+        dlgdir::dlg_dir_select_combo_box_ex,
+    ),
+    stdcall("DlgDirListW", 152, 5, not_implemented),
+    stdcall("DlgDirSelectExW", 156, 4, not_implemented),
+    stdcall("DlgDirListComboBoxW", 151, 5, not_implemented),
+    stdcall("DlgDirSelectComboBoxExW", 154, 4, not_implemented),
     stdcall("MonitorFromWindow", 440, 2, monitor::monitor_from_window),
     stdcall("MonitorFromPoint", 438, 3, monitor::monitor_from_point),
     stdcall("MonitorFromRect", 439, 2, monitor::monitor_from_rect),
@@ -1342,10 +1398,19 @@ static APIS: &[Api] = &[
         8,
         ddeml::dde_client_transaction,
     ),
-    stdcall("DdeAbandonTransaction", 95, 3, succeed),
+    stdcall(
+        "DdeAbandonTransaction",
+        95,
+        3,
+        ddeml::dde_abandon_transaction,
+    ),
     stdcall("DdeEnableCallback", 107, 3, succeed),
     stdcall("DdePostAdvise", 117, 3, succeed),
-    stdcall("DdeSetUserHandle", 124, 3, succeed),
+    stdcall("DdeSetUserHandle", 124, 3, ddeml::dde_set_user_handle),
+    stdcall("DdeQueryConvInfo", 118, 3, ddeml::dde_query_conv_info),
+    // The hidden windows that give DDEML's clients their asynchronous
+    // transactions' outcomes.
+    stdcall("DdemlWndProc", 0, 4, ddeml::wnd_proc),
     // The help viewer's window procedures (winhelp).
     stdcall("WinHelpWndProc", 0, 4, winhelp::frame_proc),
     stdcall("WinHelpTopicWndProc", 0, 4, winhelp::topic_proc),

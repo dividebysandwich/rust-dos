@@ -52,6 +52,16 @@ fn block_owner(cpu: &Cpu) -> u16 {
     if cpu.current_psp != 0 { cpu.current_psp } else { crate::mcb::DOS_OWNER }
 }
 
+/// Whether `segment` is the environment of the running program in DOS's
+/// environment area, where a program started from the shell has it
+/// (`dos_data::Layout`). Its MCB names the program but is not in the
+/// chain, and the block after it is the first MCB.
+fn is_shell_environment(cpu: &mut Cpu, segment: u16) -> bool {
+    let environment = cpu.get_physical_addr(cpu.current_psp, 0x2C);
+    segment == crate::dos_data::layout(&cpu.bus).environment
+        && cpu.bus.read_16(environment) == segment
+}
+
 /// The open file (its System File Table entry) handle `handle` of the
 /// running process refers to.
 fn file_of(cpu: &mut Cpu, handle: u16) -> Option<u16> {
@@ -95,10 +105,13 @@ pub(crate) fn write_handle(cpu: &mut Cpu, handle: u16, data: &[u8]) -> Result<u1
 /// Read up to `count` bytes of the open file `sft` (AH=3Fh on a file),
 /// charging the drive for them. Kernel32's ReadFile and the C runtime's
 /// reads go so to the files they opened, so that `cycles=auto` sees a
-/// Windows program load as it sees a DOS one.
+/// Windows program load as it sees a DOS one. A read at the file's end
+/// reads nothing and doesn't reach the drive.
 pub(crate) fn read_open_file(cpu: &mut Cpu, sft: u16, count: usize) -> Result<Vec<u8>, u16> {
     let bytes = cpu.bus.disk.read_file(sft, count)?;
-    file_io(cpu, sft, bytes.len() as u32, Some(false));
+    if !bytes.is_empty() {
+        file_io(cpu, sft, bytes.len() as u32, Some(false));
+    }
     Ok(bytes)
 }
 
@@ -279,10 +292,23 @@ fn generic_block_ioctl(cpu: &mut Cpu) {
                 _ => 0x05,                                                     // fixed disk
             };
             cpu.bus.guest_write_8(block + 0x01, device_type);
-            cpu.bus.guest_write_16(block + 0x02, if kind.is_removable() { 0 } else { 1 }); // 02: bit 0 = fixed
+            // 02: bit 0 = not removable, bit 1 = the drive has a change
+            // line, which MS-DOS sets for a diskette drive when INT 13h
+            // AH=15h says so, as the BIOS here does for every one.
+            let attributes = match kind {
+                DriveKind::Floppy => 0x0002,
+                _ if kind.is_removable() => 0x0000,
+                _ => 0x0001,
+            };
+            cpu.bus.guest_write_16(block + 0x02, attributes);
             cpu.bus.guest_write_16(block + 0x04, layout.cylinders());
             cpu.bus.guest_write_8(block + 0x06, 0); // 06: media type, the drive's own
-            cpu.bus.guest_write_bytes(block + 0x07, &layout.bpb());
+            // 07: the BPB through its 32-bit sector count, 25 bytes, as
+            // MS-DOS copies it ("small" BPB_TYPE in its MSIOCTL.INC).
+            // The 6 reserved bytes after it stay as the caller left them:
+            // Sierra's setup passes a block of 36 bytes, which ends in
+            // the middle of them.
+            cpu.bus.guest_write_bytes(block + 0x07, &layout.bpb()[..0x19]);
         }
         0x0866 => {
             cpu.bus.guest_write_16(block, 0); // 00: info level
@@ -707,6 +733,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     // No Key: Return 0 and Set Zero Flag
                     cpu.set_reg8(Register::AL, 0x00);
                     cpu.set_zflag(true);
+                    // A loop polling here waits, as one on INT 16h AH=01h
+                    // does: the idle proof may skip its passes.
+                    cpu.bus.observe.polled = true;
                 }
             } else {
                 // --- OUTPUT ---
@@ -777,6 +806,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x0B => {
             if crate::keyboard::peek_keystroke(&mut cpu.bus).is_none() && cpu.con_pending_scan.is_none() {
                 cpu.set_reg8(Register::AL, 0x00);
+                cpu.bus.observe.polled = true;
             } else {
                 cpu.set_reg8(Register::AL, 0xFF);
             }
@@ -1833,10 +1863,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     cpu.set_ax(crate::mcb::ERR_INSUFFICIENT as u16);
                     cpu.set_bx(max_free);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
-                    cpu.bus.log_string(&format!(
-                        "[DOS] Alloc {:04X} paras failed (max free {:04X})",
-                        requested, max_free
-                    ));
+                    // Programs ask for FFFFh paragraphs to learn the
+                    // largest free block, often many times a second.
+                    cpu.bus.log_limited(("alloc", requested), || {
+                        format!(
+                            "[DOS] Alloc {requested:04X} paras failed (max free {max_free:04X})"
+                        )
+                    });
                 }
             }
         }
@@ -1845,7 +1878,16 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         //   ES = segment returned by AH=48h
         0x49 => {
             let segment_to_free = cpu.es();
-            match crate::mcb::free(&mut cpu.bus, segment_to_free) {
+            // On DOS the environment is a block of the program's, which it
+            // may free, as a TSR does before it stays resident: the free
+            // succeeds, its MCB is left free, and the area stays for the
+            // next program.
+            let freed = if is_shell_environment(cpu, segment_to_free) {
+                crate::mcb::free_detached(&mut cpu.bus, segment_to_free)
+            } else {
+                crate::mcb::free(&mut cpu.bus, segment_to_free)
+            };
+            match freed {
                 Ok(()) => {
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                     cpu.set_ax(0);
@@ -1869,7 +1911,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let segment = cpu.es();
             let requested_size = cpu.get_reg16(Register::BX);
             let owner = block_owner(cpu);
-            match crate::mcb::set_block(&mut cpu.bus, owner, segment, requested_size) {
+            let resized = if is_shell_environment(cpu, segment) {
+                crate::mcb::set_detached_block(&mut cpu.bus, owner, segment, requested_size)
+            } else {
+                crate::mcb::set_block(&mut cpu.bus, owner, segment, requested_size)
+            };
+            match resized {
                 Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
                 Err(err) => {
                     if let crate::mcb::ResizeError::Insufficient(max) = err {
@@ -2095,10 +2142,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 Err(code) => {
-                    cpu.bus.log_string(&format!(
-                        "[DOS] FindFirst/Next Failed: Pattern='{}' Index={} Error={:02X}",
-                        search_pattern, index, code
-                    ));
+                    // A game looking for its save slots on every frame
+                    // of a menu asks for the same missing files again.
+                    cpu.bus.log_limited(("find", &search_pattern, code), || {
+                        format!(
+                            "[DOS] FindFirst/Next Failed: Pattern='{search_pattern}' Index={index} Error={code:02X}"
+                        )
+                    });
                     cpu.set_reg16(Register::AX, code as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
@@ -2107,6 +2157,21 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
         // AH = 0Dh: Disk reset (flush buffers). Nothing is buffered.
         0x0D => {}
+
+        // AH = 2Eh: Set the verify flag from bit 0 of AL (00h off, 01h on),
+        // as DOS does. It is kept for AH=54h; the drives here write
+        // without reading back either way.
+        0x2E => {
+            let flag = dos_data::address(dos_data::VERIFY_FLAG) as u32;
+            cpu.bus.guest_write_8(flag, cpu.get_al() & 1);
+        }
+
+        // AH = 54h: Get the verify flag in AL.
+        0x54 => {
+            let flag = dos_data::address(dos_data::VERIFY_FLAG) as u32;
+            let on = cpu.bus.guest_read_8(flag);
+            cpu.set_reg8(Register::AL, on);
+        }
 
         // AH = 2Ah: Get date. CX=year, DH=month, DL=day, AL=day of week.
         0x2A => {

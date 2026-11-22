@@ -21,6 +21,50 @@ fn dos4gw_can_allocate_an_unused_mouse_callback_vector() {
     assert_ne!(ivt[0x33], 0, "the mouse driver remains installed");
 }
 
+/// Wasteland looks at the INT 33h vector before it calls the driver, and
+/// takes a zero low byte of its offset or of its segment for no driver.
+/// A mouse driver's handler is in low memory, where it was loaded; with
+/// it at F000 the game played without the mouse.
+#[test]
+fn a_program_checking_the_vector_bytes_finds_the_driver() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    let mut a = CodeAssembler::new(16).unwrap();
+    let mut none = a.create_label();
+    let mut done = a.create_label();
+    a.xor(ax, ax).unwrap();
+    a.mov(es, ax).unwrap();
+    a.mov(di, 0x00CC).unwrap();
+    a.cmp(byte_ptr(di).es(), 0).unwrap();
+    a.je(none).unwrap();
+    a.add(di, 2).unwrap();
+    a.cmp(byte_ptr(di).es(), 0).unwrap();
+    a.je(none).unwrap();
+    a.int(0x33).unwrap();
+    a.jmp(done).unwrap();
+    a.set_label(&mut none).unwrap();
+    a.mov(ax, 0x1234).unwrap();
+    a.set_label(&mut done).unwrap();
+    a.hlt().unwrap();
+    let code = a.assemble(0x100).unwrap();
+    for (i, &byte) in code.iter().enumerate() {
+        cpu.bus.write_8(0x20100 + i, byte);
+    }
+    cpu.set_cs(0x2000);
+    cpu.set_ip(0x100);
+    cpu.set_ss(0x3000);
+    cpu.set_sp(0xFF00);
+    let end = 0x100 + code.len() as u16 - 1;
+    for _ in 0..40 {
+        if (cpu.cs(), cpu.ip()) == (0x2000, end) {
+            break;
+        }
+        cpu.step();
+    }
+    assert_eq!((cpu.cs(), cpu.ip()), (0x2000, end), "the check ran to its end");
+    assert_eq!(cpu.ax(), 0xFFFF, "the driver was called and answered");
+    assert!(cpu.bus.mouse.installed);
+}
+
 #[test]
 fn enable_activates_mouse_without_reset() {
     let mut cpu = Cpu::new(PathBuf::from("."));
@@ -118,7 +162,7 @@ const CALLBACK_IP: u16 = 0x0200;
 const CALLBACK_COUNT: usize = 0x20400;
 const CALLBACK_ARGS: usize = CALLBACK_COUNT + 2;
 
-fn polling_cpu() -> Cpu {
+fn polling_cpu() -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.set_cs(POLL_SEG);
     cpu.set_ip(0x100);
@@ -158,7 +202,7 @@ fn polling_cpu() -> Cpu {
 fn execute_poll(cpu: &mut Cpu, function: u16) {
     cpu.set_ax(function);
     cpu.step(); // INT 33h: enters the HLE trap with IF clear.
-    assert_eq!(cpu.cs(), 0xF000);
+    assert_eq!(cpu.cs(), (rust_dos::mouse::vector() >> 16) as u16);
     assert!(!cpu.get_cpu_flag(CpuFlags::IF));
     cpu.step(); // HLE service: simulated IRET, then synchronous dispatch.
 }
@@ -311,6 +355,71 @@ fn reflected_poll_without_matching_handler_leaves_event_pending() {
     }
 }
 
+/// Phar Lap's 286|DOS-Extender (Ultima VIII) switches the processor
+/// itself, without a DPMI host, and reads the mouse only through its event
+/// handler. In protected mode the driver raises IRQ 12, which such a
+/// system passes down to real mode, and its IRQ handler calls the event
+/// handler. From then on it calls it only from there, in real mode too:
+/// the extender's real-mode thunk that passes an interrupt down runs with
+/// interrupts on and can't be entered again halfway.
+#[test]
+fn without_the_dpmi_host_protected_mode_gets_the_handler_from_irq_12() {
+    let mut cpu = polling_cpu();
+    cpu.bus.mouse.callback_mask = 0x0002;
+    cpu.bus.mouse.button_down(0);
+    cpu.cr0 |= 1;
+    assert!(!rust_dos::mouse::deliver_callback(&mut cpu));
+    assert_eq!(cpu.bus.read_16(0x74 * 4 + 2), 0xF000, "the driver has INT 74h");
+    assert_eq!(cpu.bus.pic.slave.imr & 0x10, 0, "IRQ 12 let through");
+    assert_ne!(cpu.bus.pic.slave.irr & 0x10, 0, "IRQ 12 requested");
+    cpu.cr0 &= !1;
+
+    cpu.set_cpu_flag(CpuFlags::IF, true);
+    assert!(
+        !rust_dos::mouse::deliver_callback(&mut cpu),
+        "no call between two instructions"
+    );
+    assert_eq!(cpu.bus.read_16(CALLBACK_COUNT), 0);
+
+    cpu.bus.load_bytes(0x30000, &[0xFB, 0xEB, 0xFE]); // STI; JMP $
+    cpu.set_cs(0x3000);
+    cpu.set_ip(0);
+    for _ in 0..20 {
+        let end = cpu.bus.clock.icount + 10_000;
+        cpu.bus.start_batch(end);
+        rust_dos::exec::run_batch(&mut cpu, &mut rust_dos::exec::NoHook, false);
+    }
+    assert_eq!(cpu.bus.read_16(CALLBACK_COUNT), 1);
+    assert_eq!(cpu.bus.read_16(CALLBACK_ARGS), 2, "left press");
+    assert!(!cpu.bus.pic.busy(12), "acknowledged");
+    assert_eq!((cpu.cs(), cpu.sp()), (0x3000, 0xFF00), "back in the loop");
+}
+
+/// With EMS, DOS runs in virtual-8086 mode under the built-in monitor,
+/// as under EMM386. A DOS program there gets its event handler called as
+/// in real mode, between two of its instructions with interrupts on.
+#[test]
+fn under_the_v86_monitor_a_dos_program_gets_its_handler_called() {
+    let mut cpu = polling_cpu();
+    cpu.bus.mouse.callback_mask = 0x0002;
+    cpu.bus.load_bytes(0x30000, &[0xFB, 0xEB, 0xFE]); // STI; JMP $
+    cpu.set_cs(0x3000);
+    cpu.set_ip(0);
+    rust_dos::v86mon::install_rom(&mut cpu.bus);
+    rust_dos::v86mon::enter(&mut cpu);
+    assert!(cpu.v86() && cpu.dos_mode());
+    cpu.bus.mouse.button_down(0);
+    for _ in 0..20 {
+        let end = cpu.bus.clock.icount + 10_000;
+        cpu.bus.start_batch(end);
+        rust_dos::exec::run_batch(&mut cpu, &mut rust_dos::exec::NoHook, false);
+    }
+    assert_eq!(cpu.bus.read_16(CALLBACK_COUNT), 1);
+    assert_eq!(cpu.bus.read_16(CALLBACK_ARGS), 2, "left press");
+    assert!(cpu.v86(), "still under the monitor");
+    assert_eq!((cpu.cs(), cpu.sp()), (0x3000, 0xFF00), "back in the loop");
+}
+
 /// INT 10h with AX and BX, as a program sets a video mode.
 fn int10(cpu: &mut Cpu, function: u16, mode: u16) {
     cpu.set_ax(function);
@@ -354,6 +463,62 @@ fn a_video_mode_set_gives_the_cursor_the_new_screens_range() {
     let m = &cpu.bus.mouse;
     assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 479));
     assert_eq!(m.virtual_screen(&cpu.bus), (640, 480));
+}
+
+#[test]
+fn get_range_returns_the_virtual_coordinates_range() {
+    // AX=0031h, Microsoft's driver from 7.05 on: AX, BX = minimum x and
+    // y, CX, DX = maximum x and y. Waterworld asks after its mode sets.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x4F02, 0x0101);
+    call(&mut cpu, 0x0000);
+    cpu.set_bx(0x0003);
+    cpu.set_cx(0x49D0);
+    cpu.set_dx(0x1BC4);
+    call(&mut cpu, 0x0031);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (0, 0, 639, 479));
+
+    // A range the program set, with the bounds given in either order.
+    range(&mut cpu, 0x0007, 600, 16);
+    range(&mut cpu, 0x0008, 8, 399);
+    call(&mut cpu, 0x0031);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (16, 8, 600, 399));
+
+    // A standard mode set gives the new screen's.
+    int10(&mut cpu, 0x0013, 0);
+    call(&mut cpu, 0x0031);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (0, 0, 639, 199));
+}
+
+#[test]
+fn get_maximum_returns_the_screen_whatever_the_range() {
+    // AX=0026h: BX = 0 while enabled, CX, DX = the largest x and y of the
+    // mode's virtual screen. Drivers from 7.05 on return those after a
+    // range is set too (RBIL); AX=0031h returns the range.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0013, 0);
+    call(&mut cpu, 0x0000);
+    range(&mut cpu, 0x0007, 0, 319);
+    range(&mut cpu, 0x0008, 0, 99);
+    cpu.set_bx(0x1234);
+    call(&mut cpu, 0x0026);
+    assert_eq!((cpu.bx(), cpu.cx(), cpu.dx()), (0, 639, 199));
+    call(&mut cpu, 0x0031);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (0, 0, 319, 99));
+}
+
+#[test]
+fn active_advanced_functions_lists_the_ones_answered() {
+    // AX=0032h: bit 15 for AX=0025h down to bit 0 for AX=0034h. This
+    // driver answers 0026h (bit 14), 0031h (bit 3) and 0032h (bit 2).
+    // Unanswered, AX came back 0032h, claiming 002Fh, 0030h and 0033h.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    call(&mut cpu, 0x0000);
+    cpu.set_bx(0x1111);
+    cpu.set_cx(0x2222);
+    cpu.set_dx(0x3333);
+    call(&mut cpu, 0x0032);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (0x400C, 0, 0, 0));
 }
 
 #[test]

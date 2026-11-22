@@ -174,4 +174,77 @@ impl Bus {
             self.write_run(addr, &data[offset..offset + run]);
         }
     }
+
+    /// Write runs of bytes to the memory, as `guest_write_bytes` writes
+    /// each in turn: run `(lin, len)` takes the next `len` bytes of
+    /// `data`. Where every byte lands in a Banshee's or Voodoo3's memory
+    /// (`banshee_linear_at`), such as the rows GDI draws on a DirectDraw
+    /// surface's DC, the card gets them together (`runs_to_voodoo`): while
+    /// its render threads still draw, they then take their turn behind
+    /// the drawing queued before, where a write of each would wait for
+    /// all of it.
+    pub fn guest_write_runs(&mut self, runs: &[(u32, usize)], data: &[u8]) {
+        // The pieces of the runs within their pages: where each is, and
+        // its bytes' place in `data`, where they follow one another.
+        let mut pieces = Vec::with_capacity(runs.len());
+        let mut from = 0;
+        let mut whole = true;
+        'runs: for &(lin, len) in runs {
+            for (offset, run) in Self::page_runs(lin, len) {
+                let Some(addr) = self.guest_physical(lin.wrapping_add(offset as u32), true) else {
+                    whole = false;
+                    break 'runs;
+                };
+                pieces.push((addr, from + offset, run));
+            }
+            from += len;
+        }
+        if whole && let Some(card) = self.card_runs(&pieces) {
+            self.runs_to_voodoo(pieces[0].0, &card, &data[..from]);
+            return;
+        }
+        // Up to the page that isn't there, if one isn't, as
+        // `guest_write_bytes` of each run would get.
+        for &(addr, at, run) in &pieces {
+            self.write_run(addr, &data[at..at + run]);
+        }
+    }
+
+    /// Where the pieces of `guest_write_runs` (address, place, length)
+    /// are in a Banshee's or Voodoo3's memory, if all of them are: a
+    /// row that goes on into the next page goes on in the card's memory
+    /// too, and is one run there.
+    fn card_runs(&self, pieces: &[(usize, usize, usize)]) -> Option<Vec<(u32, usize)>> {
+        if pieces.is_empty() || self.banshee().is_none() {
+            return None;
+        }
+        let mut card: Vec<(u32, usize)> = Vec::with_capacity(pieces.len());
+        for &(addr, _, run) in pieces {
+            let at = self.banshee_linear_at(addr, run)?;
+            match card.last_mut() {
+                Some(last) if last.0 as usize + last.1 == at as usize => last.1 += run,
+                _ => card.push((at, run)),
+            }
+        }
+        Some(card)
+    }
+
+    /// Whether every byte of the `len` bytes at `lin` is in a Banshee's
+    /// or Voodoo3's memory, where `guest_write_runs` hands writes to the
+    /// card together and a read waits for the drawing queued before it.
+    /// False where a page isn't there, which faults as the read would.
+    pub fn guest_in_card_memory(&mut self, lin: u32, len: usize) -> bool {
+        if len == 0 || self.banshee().is_none() {
+            return false;
+        }
+        for (offset, run) in Self::page_runs(lin, len) {
+            let Some(addr) = self.guest_physical(lin.wrapping_add(offset as u32), false) else {
+                return false;
+            };
+            if self.banshee_linear_at(addr, run).is_none() {
+                return false;
+            }
+        }
+        true
+    }
 }

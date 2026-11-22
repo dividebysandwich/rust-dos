@@ -675,9 +675,17 @@ fn clipped(input: &Input, (w, h): (i32, i32), x: i32, y: i32) -> (i32, i32) {
     )
 }
 
-/// The screen's size changed (`sysparams::display_changed`): the cursor
-/// and ClipCursor's rectangle stay on it, and on the desktop the mouse
-/// moves over all of it.
+/// The display's mode changed (`sysparams::display_changed`): the cursor
+/// stays on the new screen, ClipCursor's rectangle goes, and on the
+/// desktop the mouse moves over all of the screen. Windows frees the
+/// cursor on every mode change, whether ChangeDisplaySettings or
+/// DirectDraw's SetDisplayMode made it (ReactOS's
+/// UserChangeDisplaySettings calls UserClipCursor(NULL), and Wine's
+/// display_mode_changed, which NtUserChangeDisplaySettings calls,
+/// NtUserClipCursor(NULL)), so a program that confined the cursor to its
+/// window at the desktop's size and then took a larger mode can move it
+/// over the whole new screen (Zanzarah clips to its 640x480 window
+/// before it sets 1024x768).
 pub fn screen_changed(cpu: &mut Cpu) {
     let (w, h) = screen_size(cpu);
     if user(cpu).desktop {
@@ -691,7 +699,7 @@ pub fn screen_changed(cpu: &mut Cpu) {
         }
     }
     let input = &mut user(cpu).input;
-    input.clip = input.clip.map(|r| r.intersect(&Rect::new(0, 0, w, h)));
+    input.clip = None;
     input.cursor = clipped(input, (w, h), input.cursor.0, input.cursor.1);
 }
 
@@ -777,25 +785,32 @@ fn mouse_event_at(cpu: &mut Cpu, message: u32, _button: u32) {
     let (x, y) = state.input.cursor;
     let capture = state.input.capture;
     let (hwnd, hit) = if capture != 0 && state.is_window(capture) {
+        // The capture window gets the mouse's messages even where it, or
+        // a window it is in, is disabled: Windows skips disabled windows
+        // only when it looks for the window under the cursor. A button's
+        // release then still reaches the window that took the capture
+        // when it was pressed, after a modal dialog disabled its frame
+        // in between, and it lets the capture go (Tribal Rage's view,
+        // #1410).
         (capture, HTCLIENT)
     } else {
         let hwnd = window::window_at(state, x, y);
         if hwnd == DESKTOP || hwnd == 0 {
             return;
         }
+        // A disabled window, or one in a disabled window, gets no input.
+        let mut h = hwnd;
+        while let Some(w) = state.window(h) {
+            if w.style & WS_DISABLED != 0 && message != WM_MOUSEMOVE {
+                return;
+            }
+            if w.style & WS_CHILD == 0 {
+                break;
+            }
+            h = w.parent;
+        }
         (hwnd, hit_test(state, hwnd, x, y))
     };
-    // A disabled window, or one in a disabled window, gets no input.
-    let mut h = hwnd;
-    while let Some(w) = state.window(h) {
-        if w.style & WS_DISABLED != 0 && message != WM_MOUSEMOVE {
-            return;
-        }
-        if w.style & WS_CHILD == 0 {
-            break;
-        }
-        h = w.parent;
-    }
     let Some(w) = state.window(hwnd) else {
         return;
     };
@@ -1281,11 +1296,13 @@ pub fn take_activation(cpu: &mut Cpu, step: u16) -> Option<Next> {
         EV_ACTIVATE | EV_SELECT if foreground && state.is_window(hwnd) => {
             let flags = if kind == EV_ACTIVATE { F_SWITCHED } else { 0 };
             let args = [hwnd, flags, other];
-            Some(Next::call(address_of("ActivateInQueue"), &args, step))
+            Some(Next::call(address_of(cpu, "ActivateInQueue"), &args, step))
         }
-        EV_DEACTIVATE if !foreground => {
-            Some(Next::call(address_of("DeactivateQueue"), &[other], step))
-        }
+        EV_DEACTIVATE if !foreground => Some(Next::call(
+            address_of(cpu, "DeactivateQueue"),
+            &[other],
+            step,
+        )),
         _ => None,
     }
 }
@@ -1378,7 +1395,7 @@ fn focus_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 if super::hook::has(cpu, super::window::WH_CBT) {
                     let previous = t.var(2);
                     let (cbt, code) = (super::window::WH_CBT, super::window::HCBT_SETFOCUS);
-                    return super::hook::call(cbt, code, hwnd, previous, 9);
+                    return super::hook::call(cpu, cbt, code, hwnd, previous, 9);
                 }
                 t.step = 10;
             }
@@ -1402,7 +1419,7 @@ fn focus_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 });
                 if hwnd != 0 && top != active(cpu) && activatable {
                     let args = [top, F_NOFOCUS, 0];
-                    return Next::call(address_of("ActivateInQueue"), &args, 1);
+                    return Next::call(address_of(cpu, "ActivateInQueue"), &args, 1);
                 }
                 t.step = 1;
             }
@@ -1518,9 +1535,9 @@ fn activate_send(cpu: &mut Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32, step: u16
         && !crate::win16::flat::is_client(win32, tid);
     if tid != me && !waits {
         let args = [hwnd, msg, wp, lp];
-        return Next::call(address_of("SendNotifyMessageA"), &args, step);
+        return Next::call(address_of(cpu, "SendNotifyMessageA"), &args, step);
     }
-    window::send(hwnd, msg, wp, lp, step)
+    window::send(cpu, hwnd, msg, wp, lp, step)
 }
 
 /// The top-level windows of the thread `tid`, each with WM_ACTIVATEAPP's
@@ -1601,7 +1618,7 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                         0,
                         SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
                     ];
-                    return Next::call(address_of("SetWindowPos"), &args, 3);
+                    return Next::call(address_of(cpu, "SetWindowPos"), &args, 3);
                 }
                 t.step = 3;
             }
@@ -1685,7 +1702,7 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     && (focus == 0 || hwnd == 0 || state.top_level(focus) != hwnd)
                     && (hwnd != 0 || focus != 0)
                 {
-                    return Next::call(address_of("SetFocus"), &[hwnd], 8);
+                    return Next::call(address_of(cpu, "SetFocus"), &[hwnd], 8);
                 }
                 return Next::Done(previous);
             }
@@ -1800,20 +1817,20 @@ fn start_switch(
     task::start(cpu, TASK_INPUT, vars, 0)
 }
 
-fn switch_step(t: &mut Task) -> Next {
+fn switch_step(cpu: &Cpu, t: &mut Task) -> Next {
     loop {
         match t.step {
             0 => {
                 t.step = 1;
                 if t.var(2) != 0 {
-                    return Next::call(address_of("DeactivateQueue"), &[t.var(3)], 1);
+                    return Next::call(address_of(cpu, "DeactivateQueue"), &[t.var(3)], 1);
                 }
             }
             1 => {
                 t.step = 2;
                 if t.var(4) != 0 {
                     let args = [t.var(5), t.var(6), t.var(7)];
-                    return Next::call(address_of("ActivateInQueue"), &args, 2);
+                    return Next::call(address_of(cpu, "ActivateInQueue"), &args, 2);
                 }
             }
             _ => return Next::Done(t.var(1)),
@@ -2008,9 +2025,9 @@ pub fn release_capture(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-fn capture_step(_cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
+fn capture_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     match t.step {
-        0 => window::send(t.var(1), WM_CAPTURECHANGED, 0, t.var(2), 1),
+        0 => window::send(cpu, t.var(1), WM_CAPTURECHANGED, 0, t.var(2), 1),
         _ => Next::Done(t.var(3)),
     }
 }
@@ -2022,7 +2039,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         K_ACTIVATE => activate_step(cpu, t, value),
         K_CAPTURE => capture_step(cpu, t, value),
         K_DEACTIVATE => deactivate_step(cpu, t, value),
-        _ => switch_step(t),
+        _ => switch_step(cpu, t),
     }
 }
 
@@ -2039,21 +2056,61 @@ pub fn get_key_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// GetAsyncKeyState(vk): 8000h down, 1 pressed since the last call; the
-/// devices as they are now.
+/// devices as they are now. A call that found the key not pressed since
+/// the last one, with nothing new from the devices, changed nothing, and
+/// an idle proof goes through it (`read_quiet`): The War of the Worlds
+/// plays its films in a loop of timeGetTime and
+/// GetAsyncKeyState(VK_ESCAPE) (#1284).
 pub fn get_async_key_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    poll(cpu);
     let vk = args[0] as usize & 0xFF;
-    let input = &mut user(cpu).input;
-    if input.async_keys.len() < 256 {
-        input.async_keys.resize(256, 0);
-    }
-    let k = input.async_keys[vk];
-    input.async_keys[vk] &= !1;
+    let mut k = 0;
+    read_quiet(cpu, |cpu| {
+        let input = &mut user(cpu).input;
+        if input.async_keys.len() < 256 {
+            input.async_keys.resize(256, 0);
+        }
+        k = input.async_keys[vk];
+        input.async_keys[vk] &= !1;
+        k & 1 == 0
+    });
     let mut v = (k & 1) as u32;
     if k & 0x80 != 0 {
         v |= 0xFFFF_8000;
     }
     Some(v)
+}
+
+/// Read the devices (`poll`), then run `read`, which looks at what they
+/// have and says whether it left the system as it was. During an idle
+/// proof a call whose read of the devices changed nothing either is
+/// followed by the proof: no key went down, the mouse stayed, and no
+/// message came of the read in any thread's queue (`settled`). The
+/// thread may have no queue: The War of the Worlds polls in a thread of
+/// its film player. The passes after it read the same until an input
+/// comes, which comes with an interrupt or between the host's frames,
+/// either of which ends the passes skipped. It reads no RAM but its
+/// arguments, and what it writes is noted as it writes it.
+fn read_quiet(cpu: &mut Cpu, read: impl FnOnce(&mut Cpu) -> bool) {
+    let before = cpu.bus.observe.on.then(|| settled(cpu)).flatten();
+    poll(cpu);
+    let kept = read(cpu);
+    if let Some(before) = before
+        && kept
+        && settled(cpu).is_some_and(|after| after == before)
+    {
+        crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
+    }
+}
+
+/// What a read of the devices may change (`seen`), and the messages in
+/// every queue it may post input to. None when a key went down.
+fn settled(cpu: &mut Cpu) -> Option<(Seen, usize, u32)> {
+    let seen = seen(cpu)?;
+    let queues = &user(cpu).queues;
+    let messages = queues.iter().map(|q| q.posted.len() + q.input.len()).sum();
+    let changed = queues.iter().fold(0, |all, q| all | q.changed);
+    Some((seen, messages, changed))
 }
 
 /// GetKeyboardState(buffer): the 256 keys' states.
@@ -2423,12 +2480,17 @@ pub fn mouse_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // The cursor.
 
-/// GetCursorPos(point): where the mouse is now.
+/// GetCursorPos(point): where the mouse is now. A read that found the
+/// mouse where it was changed nothing but the point, and an idle proof
+/// goes through it (`read_quiet`): Shadow of the Horned Rat calls it in
+/// every pass of the loop its screens wait in (#1284).
 pub fn get_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     super::init(cpu);
-    poll(cpu);
-    let (x, y) = user(cpu).input.cursor;
-    write_words(cpu, args[0], &[x as u32, y as u32]);
+    read_quiet(cpu, |cpu| {
+        let (x, y) = user(cpu).input.cursor;
+        write_words(cpu, args[0], &[x as u32, y as u32]);
+        !cpu.bus.guest_faulted()
+    });
     if cpu.bus.guest_faulted() {
         return None;
     }
@@ -2891,9 +2953,9 @@ mod tests {
         let task = user(&mut cpu).new_window(window(2)).expect("a window");
         let other = user(&mut cpu).new_window(window(3)).expect("a window");
         let client = user(&mut cpu).new_window(window(4)).expect("a window");
-        let send = address_of("SendMessageA");
+        let send = address_of(&cpu, "SendMessageA");
         assert_eq!(activation_call(&mut cpu, task), send);
-        let notify = address_of("SendNotifyMessageA");
+        let notify = address_of(&cpu, "SendNotifyMessageA");
         assert_eq!(activation_call(&mut cpu, other), notify);
         assert_eq!(activation_call(&mut cpu, client), notify);
     }
@@ -3121,5 +3183,56 @@ mod tests {
             .map(|m| (m.message, m.lparam))
             .collect();
         assert_eq!(keys, [(WM_KEYDOWN, 0x0148_0001)]);
+    }
+
+    /// A program clips the cursor to its window at the desktop's 640x480,
+    /// `set_mode` changes the display to 1024x768, and the program puts
+    /// the cursor in the middle of the new screen: the clip is gone and
+    /// the mouse takes the cursor to the new screen's far corner.
+    fn check_mode_change_frees_clip(set_mode: impl FnOnce(&mut Cpu)) {
+        use crate::video::adapter::{Adapter, VideoSetup};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let setup = VideoSetup {
+            adapter: Adapter::ToadForce,
+            ..Default::default()
+        };
+        crate::video::bios::install(&mut cpu.bus, setup);
+        super::super::init(&mut cpu);
+        user(&mut cpu).desktop = true;
+        assert_eq!(screen_size(&cpu), (640, 480));
+        let rect = 0x1_0000;
+        write_words(&mut cpu, rect, &[0, 0, 640, 480]);
+        clip_cursor(&mut cpu, &[rect]);
+        assert_eq!(user(&mut cpu).input.clip, Some(Rect::new(0, 0, 640, 480)));
+        set_mode(&mut cpu);
+        assert_eq!(screen_size(&cpu), (1024, 768));
+        assert_eq!(user(&mut cpu).input.clip, None);
+        set_cursor_pos(&mut cpu, &[512, 384]);
+        assert_eq!(user(&mut cpu).input.cursor, (512, 384));
+        cpu.bus.mouse.move_by(1000.0, 1000.0);
+        poll(&mut cpu);
+        assert_eq!(user(&mut cpu).input.cursor, (1023, 767));
+    }
+
+    /// ChangeDisplaySettings frees the cursor that ClipCursor confined,
+    /// as Windows does.
+    #[test]
+    fn change_display_settings_frees_the_clipped_cursor() {
+        check_mode_change_frees_clip(|cpu| {
+            let mode = Some((1024, 768, 32));
+            let changed = super::super::sysparams::set_display_mode(cpu, mode);
+            assert_eq!(changed, 0, "DISP_CHANGE_SUCCESSFUL");
+        });
+    }
+
+    /// DirectDraw's SetDisplayMode frees it too: Zanzarah clips the
+    /// cursor to its 640x480 window and then sets 1024x768 this way.
+    #[test]
+    fn set_display_mode_frees_the_clipped_cursor() {
+        check_mode_change_frees_clip(|cpu| {
+            let owner = 0x1000;
+            let hr = crate::win32::ddraw::display::set_mode(cpu, owner, 1024, 768, 32);
+            assert_eq!(hr, 0, "DD_OK");
+        });
     }
 }

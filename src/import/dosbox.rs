@@ -583,8 +583,9 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         },
         ("sblaster", "sbtype") => match first {
             "sb1" | "sb2" => imported.set("sound", "sbtype", "sb2"),
+            "sbpro1" => imported.set("sound", "sbtype", "sbpro1"),
             // DOSBox Staging's ESS AudioDrive, a Sound Blaster Pro to games.
-            "sbpro1" | "sbpro2" | "ess" => imported.set("sound", "sbtype", "sbpro2"),
+            "sbpro2" | "ess" => imported.set("sound", "sbtype", "sbpro2"),
             "sb16" => imported.set("sound", "sbtype", "sb16"),
             "sb16vibra" => imported.set("sound", "sbtype", "sb16vibra"),
             "none" => imported.set("sound", "sbtype", "none"),
@@ -599,7 +600,13 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         ("sblaster", "hdma") => imported.set("sound", "hdma", first),
         ("sblaster", "oplmode") => match first {
             "opl2" | "cms" => imported.set("sound", "opl", "opl2"),
-            "dualopl2" | "opl3" | "opl3gold" | "esfm" => imported.set("sound", "opl", "opl3"),
+            "dualopl2" => imported.set("sound", "opl", "dualopl2"),
+            "opl3" | "esfm" => imported.set("sound", "opl", "opl3"),
+            // DOSBox's AdLib Gold: its OPL3 and control chip at 388h.
+            "opl3gold" => {
+                imported.set("sound", "opl", "opl3");
+                imported.set("sound", "adlibgold", "true");
+            }
             "auto" => {}
             _ => unknown(imported),
         },
@@ -621,6 +628,9 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
             "soundcanvas" => imported.set("sound", "midisynth", "sc55"),
             "fluidsynth" => imported.set("sound", "midisynth", "soundfont"),
             "none" => imported.set("sound", "midisynth", "none"),
+            // The host's synthesizer, which a launcher's General MIDI
+            // choice sets back (Witchaven's): rust-dos's own.
+            "default" | "auto" => imported.set("sound", "midisynth", "auto"),
             _ => {}
         },
         // DOSBox Staging's FluidSynth and Munt: a game's own SoundFont (DOSBox
@@ -709,9 +719,99 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
     }
 }
 
-/// The sections of DOSBox's settings that are imported, for CONFIG -SET
-/// with a setting's name alone.
-const SECTIONS: [&str; 8] = ["cpu", "dosbox", "dos", "render", "sblaster", "gus", "midi", "speaker"];
+/// The sections of DOSBox's settings that are imported, in the order
+/// DOSBox keeps them (DOSBox Staging's, with DOSBox-X's own sections
+/// where DOSBox-X has them), for CONFIG -SET with a setting's name alone:
+/// the first section with a setting of that name has it. Each setting
+/// `setting` takes is in one of them only, as in DOSBox, apart from
+/// DOSBox-X's [pci] Voodoo settings, which it takes as [voodoo]'s.
+const SECTIONS: [&str; 20] = [
+    "dosbox",
+    "render",
+    "composite",
+    "cpu",
+    "voodoo",
+    "pci",
+    "midi",
+    "fluidsynth",
+    "mt32",
+    "soundcanvas",
+    "sblaster",
+    "gus",
+    "speaker",
+    "joystick",
+    "parallel",
+    "printer",
+    "dos",
+    "ipx",
+    "ne2000",
+    "ethernet",
+];
+
+/// What `CONFIG -SET` sets, as rust-dos's settings: `args` are the
+/// command's arguments, `-set` first, then the setting in one of the
+/// forms DOSBox takes, quoted or not: `section key=value`, `key=value`,
+/// `section key value` or `key value`. The settings go into
+/// `imported.settings`, and the values rust-dos has no equivalent for
+/// into its warnings. False if the arguments aren't a CONFIG -SET of a
+/// setting the import knows.
+fn config_set_into(imported: &mut Imported, args: &[&str]) -> bool {
+    let Some((flag, rest)) = args.split_first() else { return false };
+    if !flag.eq_ignore_ascii_case("-set") || rest.is_empty() {
+        return false;
+    }
+    let joined = rest.join(" ");
+    let (words, value): (Vec<String>, String) = match joined.split_once('=') {
+        Some((head, value)) => (
+            head.split_whitespace().map(str::to_ascii_lowercase).collect(),
+            value.trim().to_string(),
+        ),
+        // Without '=', the value is what follows the setting's name, which
+        // follows the section's, if the first word is one. [gus] and [ipx]
+        // have a setting of their own name (`gus true`).
+        None => {
+            let words: Vec<&str> = joined.split_whitespace().collect();
+            let named = |n: usize| {
+                let (head, value) = words.split_at(n.min(words.len()));
+                (head.iter().map(|w| w.to_ascii_lowercase()).collect(), value.join(" "))
+            };
+            let first = words.first().map(|w| w.to_ascii_lowercase()).unwrap_or_default();
+            if words.len() > 2 && SECTIONS.contains(&first.as_str()) { named(2) } else { named(1) }
+        }
+    };
+    let taken = |imported: &mut Imported, section: &str, key: &str| {
+        let (before, warnings) = (imported.settings.clone(), imported.warnings.len());
+        setting(imported, section, key, &value);
+        imported.settings != before || imported.warnings.len() != warnings
+    };
+    match words.as_slice() {
+        [section, key] => taken(imported, section, key),
+        [key] => SECTIONS.iter().any(|section| taken(imported, section, key)),
+        _ => false,
+    }
+}
+
+/// A setting of rust-dos's configuration: (section, key, value).
+pub type Entry = (String, String, String);
+
+/// What a `CONFIG` command line sets, with `args` the line after the
+/// command's name: rust-dos's settings as (section, key, value), and the
+/// values it has no equivalent for. Err, saying why, if it isn't a
+/// CONFIG -SET of a setting the import knows.
+pub fn config_set(args: &str) -> Result<(Vec<Entry>, Vec<String>), String> {
+    let tokens = tokenize(args)?;
+    let args: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let mut imported = Imported::default();
+    if config_set_into(&mut imported, &args) {
+        return Ok((imported.settings, imported.warnings));
+    }
+    Err(match args.split_first() {
+        Some((flag, rest)) if flag.eq_ignore_ascii_case("-set") && !rest.is_empty() => {
+            format!("rust-dos has no setting like {}", rest.join(" "))
+        }
+        _ => "only CONFIG -SET \"section setting=value\" is supported".to_string(),
+    })
+}
 
 /// A line of `[autoexec]`: MOUNT and IMGMOUNT become the profile's drives,
 /// with their host paths made absolute (a game's drives are mounted as it
@@ -827,26 +927,8 @@ fn autoexec_line(imported: &mut Imported, line: &str, bases: &[PathBuf], home: O
         // CONFIG -SET "section key=value", as the game's setting.
         "config" => {
             let args: Vec<&str> = tokens[1..].iter().map(String::as_str).collect();
-            match args.split_first() {
-                Some((flag, rest)) if flag.eq_ignore_ascii_case("-set") && !rest.is_empty() => {
-                    let joined = rest.join(" ");
-                    let (head, value) = joined.split_once('=').unwrap_or((joined.as_str(), ""));
-                    let words: Vec<&str> = head.split_whitespace().collect();
-                    let (before, warnings) = (imported.settings.clone(), imported.warnings.len());
-                    match words.as_slice() {
-                        [section, key] => setting(imported, &section.to_ascii_lowercase(), &key.to_ascii_lowercase(), value.trim()),
-                        [key] => {
-                            for section in SECTIONS {
-                                setting(imported, section, &key.to_ascii_lowercase(), value.trim());
-                            }
-                        }
-                        _ => {}
-                    }
-                    if imported.settings == before && imported.warnings.len() == warnings {
-                        imported.warnings.push(format!("[autoexec] {} isn't imported", line));
-                    }
-                }
-                _ => imported.warnings.push(format!("[autoexec] {} isn't imported", line)),
+            if !config_set_into(imported, &args) {
+                imported.warnings.push(format!("[autoexec] {} isn't imported", line));
             }
         }
         "exit" | "rescan" | "serial" | "intro" => {
@@ -1199,6 +1281,38 @@ mod tests {
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     }
 
+    /// `oplmode=opl3gold` is DOSBox's AdLib Gold: the card, with its
+    /// OPL3.
+    #[test]
+    fn opl3gold_installs_the_adlib_gold() {
+        let imported = import(&["[sblaster]
+sbtype=sb16
+oplmode=opl3gold
+"], &[PathBuf::from("/")], "x", None);
+        assert_eq!(get(&imported, "adlibgold").as_deref(), Some("true"));
+        assert_eq!(get(&imported, "opl").as_deref(), Some("opl3"));
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+    }
+
+    /// DOSBox's `sbpro1` answers DSP 3.00, which drivers for the first
+    /// SB Pro check for, so it stays an SB Pro and not an SB Pro 2.
+    #[test]
+    fn sbpro1_imports_as_the_first_sb_pro() {
+        let imported = import(&["[sblaster]\nsbtype=sbpro1\n"], &[PathBuf::from("/")], "x", None);
+        assert_eq!(get(&imported, "sbtype").as_deref(), Some("sbpro1"));
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+    }
+
+    /// DOSBox's two OPL2s, which its `oplmode=auto` gives an `sbpro1`,
+    /// are rust-dos's `dualopl2`, which its `auto` gives one too.
+    #[test]
+    fn dualopl2_imports_as_the_two_opl2s() {
+        let opl = |conf: &str| get(&import(&[conf], &[PathBuf::from("/")], "x", None), "opl");
+        let dual = opl("[sblaster]\nsbtype=sbpro2\noplmode=dualopl2\n");
+        assert_eq!(dual.as_deref(), Some("dualopl2"));
+        assert_eq!(opl("[sblaster]\nsbtype=sbpro1\noplmode=auto\n"), None);
+    }
+
     #[test]
     fn sound_settings_rust_dos_can_t_have_are_left_out() {
         let conf = "[sblaster]\nsbtype=ess\nsbbase=0x240\nirq=4\ndma=1\nhdma=1\noplmode=esfm\n[gus]\ngus=true\ngusbase=0x260\n[midi]\nmididevice=fluidsynth\n[fluidsynth]\nsoundfont=missing.sf2\n[mt32]\nmodel=cm32ln_100\n";
@@ -1207,6 +1321,7 @@ mod tests {
         assert_eq!(get(&imported, "sbbase").as_deref(), Some("240"), "{:?}", imported.warnings);
         assert_eq!(get(&imported, "gusbase").as_deref(), Some("260"));
         assert_eq!(get(&imported, "opl").as_deref(), Some("opl3"));
+        assert_eq!(get(&imported, "adlibgold"), None);
         assert_eq!(get(&imported, "midisynth").as_deref(), Some("soundfont"));
         assert_eq!(get(&imported, "mt32model").as_deref(), Some("cm32l"));
         assert_eq!(get(&imported, "irq"), None, "an SB can't have IRQ 4");
@@ -1243,6 +1358,45 @@ sbtype=sb16vibra
         assert_eq!(imported.autoexec, ["c:", "mixer sb 50:50 /noshow", "game.exe -nosound"]);
         assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
         assert!(imported.warnings[0].contains("config -get"));
+    }
+
+    /// A setting's name alone is looked for in every section the import
+    /// knows, as eXoDOS's launchers name them (Shamus' composite choice).
+    #[test]
+    fn config_set_finds_a_setting_by_its_name_alone() {
+        let conf = "[autoexec]\nconfig -set \"composite=on\"\nconfig -set mididevice=mt32\n";
+        let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
+        assert_eq!(get(&imported, "composite").as_deref(), Some("on"), "{:?}", imported.warnings);
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+    }
+
+    #[test]
+    fn config_set_of_a_batch_file_says_what_it_sets() {
+        let (settings, warnings) = config_set("-set \"cpu cycles=175000\"").unwrap();
+        let entry = |k: &str, v: &str| ("emulator".to_string(), k.to_string(), v.to_string());
+        assert_eq!(settings, [entry("cycles", "175000")]);
+        assert!(warnings.is_empty());
+        let (settings, _) = config_set("-SET composite=off").unwrap();
+        assert_eq!(settings, [entry("composite", "off")]);
+        // A value rust-dos has no equivalent for is a warning.
+        let (settings, warnings) = config_set("-set \"cpu core=bogus\"").unwrap();
+        assert!(settings.is_empty() && warnings.len() == 1, "{:?} {:?}", settings, warnings);
+        assert!(config_set("-set \"nosuch=1\"").unwrap_err().contains("no setting"));
+        assert!(config_set("-get cpu").unwrap_err().contains("only CONFIG -SET"));
+    }
+
+    /// DOSBox's forms without '=': the value after the setting's name, with
+    /// its section before it or not, and [gus]'s setting of its own name.
+    #[test]
+    fn config_set_takes_the_value_after_a_space() {
+        let cycles = [("emulator".to_string(), "cycles".to_string(), "9000".to_string())];
+        assert_eq!(config_set("-set cpu cycles 9000").unwrap().0, cycles);
+        assert_eq!(config_set("-set \"cycles 9000\"").unwrap().0, cycles);
+        assert_eq!(config_set("-set cpu cycles=9000").unwrap().0, cycles);
+        let gus = [("sound".to_string(), "gus".to_string(), "true".to_string())];
+        assert_eq!(config_set("-set gus true").unwrap().0, gus);
+        assert_eq!(config_set("-set gus gus true").unwrap().0, gus);
+        assert!(config_set("-set cpu cycles").is_err());
     }
 
     /// A configuration in a game's zip or folder, which is

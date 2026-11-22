@@ -15,12 +15,17 @@ pub mod dc;
 pub mod draw;
 #[cfg(test)]
 mod draw_tests;
+pub mod fnt;
 pub mod font;
+mod fot;
 mod gamma;
 pub mod metafile;
 pub mod palette;
 pub mod region;
 pub mod rgn;
+mod sans8;
+mod truetype;
+mod ttf;
 pub mod surface;
 
 pub use region::{Rect, Region};
@@ -38,6 +43,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: None,
 };
 
 const fn stdcall(
@@ -269,8 +275,8 @@ pub struct State {
     /// and the one realized last.
     pub primary_palette: u32,
     pub last_realized: u32,
-    /// The fonts AddFontResourceA added, by file name.
-    pub font_files: Vec<String>,
+    /// The files AddFontResourceA added and their fonts.
+    pub font_files: Vec<fnt::AddedFile>,
     /// The last blit's translation table from a color table onto a
     /// palette device (`draw::Translate::kept`). Not saved: a blit
     /// uses it only when it is of the same colors through the same map.
@@ -1132,7 +1138,7 @@ pub fn callback_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             t.set(CB_AT, 1);
             t.step = 2;
-            let send = super::user32::address_of("SendMessageA");
+            let send = super::user32::address_of(cpu, "SendMessageA");
             let msg = super::user32::message::WM_PALETTECHANGED;
             let to = super::user32::message::HWND_BROADCAST;
             Next::call(send, &[to, msg, t.var(CB_PARAM), 0], 2)
@@ -1529,6 +1535,12 @@ static APIS: &[Api] = &[
     stdcall("GetTextCharset", 303, 1, font::get_text_charset),
     stdcall("GetTextCharsetInfo", 304, 3, font::get_text_charset_info),
     stdcall("AddFontResourceA", 107, 1, font::add_font_resource),
+    stdcall(
+        "CreateScalableFontResourceA",
+        168,
+        4,
+        font::create_scalable_font_resource,
+    ),
     stdcall("RemoveFontResourceA", 359, 1, font::remove_font_resource),
     stdcall("GetOutlineTextMetricsA", 285, 3, nothing),
     stdcall("GetKerningPairsA", 269, 3, nothing),

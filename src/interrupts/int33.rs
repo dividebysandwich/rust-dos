@@ -6,6 +6,14 @@ use iced_x86::Register;
 /// address, the show/hide counter and the position.
 const STATE_SIZE: usize = 12;
 
+/// The functions from AX=0025h to AX=0034h this driver answers, as
+/// AX=0032h reports them: bit 15 for AX=0025h down to bit 0 for AX=0034h.
+const ADVANCED_FUNCTIONS: u16 = advanced_bit(0x0026) | advanced_bit(0x0031) | advanced_bit(0x0032);
+
+const fn advanced_bit(function: u16) -> u16 {
+    1 << (0x0034 - function)
+}
+
 pub fn handle(cpu: &mut Cpu) {
     // The VFX1's driver shares the interrupt (AH=60h..70h).
     if crate::vfx1::sense::handle(cpu) {
@@ -226,6 +234,45 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_bx(0x0814);
             cpu.set_reg8(Register::CH, 0x04);
             cpu.set_reg8(Register::CL, 0x00);
+        }
+
+        0x0026 => {
+            // Get the maximum virtual coordinates (6.26 on): BX = 0000h
+            // while the driver is enabled (this one has no AX=001Fh to
+            // disable it), CX and DX = the largest x and y of the video
+            // mode's virtual screen, the range a reset gives. From 7.05 on
+            // the driver returns these whatever range AX=0007h and
+            // AX=0008h set (RBIL); AX=0031h returns that range.
+            let (w, h) = crate::mouse::driver_screen(&cpu.bus);
+            cpu.set_bx(0);
+            cpu.set_cx((w - 1) as u16);
+            cpu.set_dx((h - 1) as u16);
+        }
+
+        0x0031 => {
+            // Get the virtual coordinates' range, which Microsoft's driver
+            // has from 7.05 on: AX = minimum x, BX = minimum y, CX =
+            // maximum x, DX = maximum y. It is the range AX=0007h and
+            // AX=0008h set, or the one a reset or a mode set gave.
+            // Waterworld asks for it after each mode set.
+            let m = &cpu.bus.mouse;
+            let (min_x, min_y, max_x, max_y) = (m.min_x, m.min_y, m.max_x, m.max_y);
+            cpu.set_ax(min_x as u16);
+            cpu.set_bx(min_y as u16);
+            cpu.set_cx(max_x as u16);
+            cpu.set_dx(max_y as u16);
+        }
+
+        0x0032 => {
+            // Get the active advanced functions (7.05 on): a bit in AX for
+            // each function from AX=0025h to AX=0034h the driver answers
+            // (`ADVANCED_FUNCTIONS`); BX, CX and DX are unused, 0 here.
+            // Left unanswered, AX would come back 0032h, whose bits claim
+            // AX=002Fh, 0030h and 0033h and deny AX=0031h.
+            cpu.set_ax(ADVANCED_FUNCTIONS);
+            cpu.set_bx(0);
+            cpu.set_cx(0);
+            cpu.set_dx(0);
         }
 
         _ => {

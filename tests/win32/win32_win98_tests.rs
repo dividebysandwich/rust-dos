@@ -390,6 +390,100 @@ fn get_monitor_info_gives_the_screen() {
     assert_eq!(run(Win98Se, "info_size", monitor_info(12, 4)).0, 0x4C);
 }
 
+/// A program that lists the display adapter with EnumDisplayDevicesA,
+/// then device `number` on it by the adapter's name, and ends with the
+/// second call's result in bit 7 and the byte `byte` of what it wrote
+/// in the low bits.
+fn display_device_on_adapter(number: u32, byte: u32) -> Vec<u8> {
+    const SIZE: u32 = 424;
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", &["EnumDisplayDevicesA"])];
+    let mut data = vec![0u8; 2 * SIZE as usize];
+    data[..4].copy_from_slice(&SIZE.to_le_bytes());
+    data[SIZE as usize..SIZE as usize + 4].copy_from_slice(&SIZE.to_le_bytes());
+    program(imports, &data, |a, l| {
+        a.push(0)?;
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        // DeviceName is at 4.
+        a.push(0)?;
+        a.push(l.at(SIZE) as i32)?;
+        a.push(number as i32)?;
+        a.push(l.at(4) as i32)?;
+        a.call(l.import(0))?;
+        a.shl(eax, 7)?;
+        a.movzx(ecx, byte_ptr(l.at(SIZE + byte)))?;
+        a.and(ecx, 0x7F)?;
+        a.or(eax, ecx)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn enum_display_devices_finds_the_monitor_on_the_adapter() {
+    // The monitor is device 0 of the adapter, with the adapter's
+    // StateFlags (at 164) as on Windows 98 SE, 15h: bit 0 is
+    // DISPLAY_DEVICE_ACTIVE. It is named "\\.\Display1\Monitor1" (the
+    // 'M' at 17, the '1' at 24) and described as "Default Monitor" (the
+    // 'D' at 36).
+    assert_eq!(
+        run(Win98Se, "monitor_flags", display_device_on_adapter(0, 164)).0,
+        0x80 | 0x15
+    );
+    assert_eq!(
+        run(Win98Se, "monitor_name", display_device_on_adapter(0, 17)).0,
+        0x80 | b'M'
+    );
+    assert_eq!(
+        run(Win98Se, "monitor_number", display_device_on_adapter(0, 24)).0,
+        0x80 | b'1'
+    );
+    assert_eq!(
+        run(Win98Se, "monitor_string", display_device_on_adapter(0, 36)).0,
+        0x80 | b'D'
+    );
+    // There is one monitor: device 1 fails and leaves the structure.
+    assert_eq!(
+        run(Win98Se, "monitor_1", display_device_on_adapter(1, 4)).0,
+        0
+    );
+}
+
+/// A program that calls ChangeDisplaySettingsExA with no DEVMODE for the
+/// device named in its data, with `window` and `flags`, and ends with
+/// the result's low byte.
+fn change_display_settings_ex(device: &str, window: i32, flags: i32) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", &["ChangeDisplaySettingsExA"])];
+    let mut data = device.as_bytes().to_vec();
+    data.push(0);
+    program(imports, &data, |a, l| {
+        a.push(0)?;
+        a.push(flags)?;
+        a.push(window)?;
+        a.push(0)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.ret()
+    })
+}
+
+#[test]
+fn change_display_settings_ex_takes_the_adapters_name() {
+    // The desktop's mode again: DISP_CHANGE_SUCCESSFUL. Another device:
+    // DISP_CHANGE_BADPARAM, -5. Windows 98 SE gives -5 too for a window,
+    // which must be NULL, and for CDS_VIDEOPARAMETERS (20h).
+    let own = "\\\\.\\DISPLAY1";
+    let cdsex = |test, device, window, flags| {
+        let program = change_display_settings_ex(device, window, flags);
+        run(Win98Se, test, program).0
+    };
+    assert_eq!(cdsex("cdsex_own", own, 0, 0), 0);
+    assert_eq!(cdsex("cdsex_other", "\\\\.\\Display2", 0, 0), 0xFB);
+    assert_eq!(cdsex("cdsex_window", own, 1, 0), 0xFB);
+    assert_eq!(cdsex("cdsex_video", own, 0, 0x20), 0xFB);
+}
+
 #[test]
 fn enum_display_monitors_calls_back_for_the_screen() {
     let imports: &[(&str, &[&str])] = &[("USER32.DLL", &["EnumDisplayMonitors"])];
@@ -1241,4 +1335,557 @@ fn ntdll_dll_is_there_under_windows_95_and_98() {
     assert_eq!(run(Win95, "ntdll", finds()).0, 7);
     assert_eq!(run(Win98, "ntdll", finds()).0, 7);
     assert_eq!(run(Win98Se, "ntdll", finds()).0, 7);
+}
+
+/// The critical section functions and the interlocked ones of Windows 98
+/// SE's KERNEL32, from its code: the program's CRITICAL_SECTION has the
+/// type byte 4 and a pointer to the section's object in the shared arena,
+/// and InitializeCriticalSection leaves its other bytes as they were. The
+/// object has the recursion count at 4, the owner at 8 (its TIB here),
+/// the lock count at 10h (1 when free) and the CRITICAL_SECTION at 1Ch.
+/// TryEnterCriticalSection is one of the stubs that fail with
+/// ERROR_CALL_NOT_IMPLEMENTED. EnterCriticalSection raises an access
+/// violation for a CRITICAL_SECTION that wasn't initialized, and goes on
+/// when the handler continues. The program ends with the number of the
+/// first check that failed, or 0.
+#[test]
+fn critical_sections_are_windows_98s() {
+    let names: &[&str] = &[
+        "InitializeCriticalSection",
+        "EnterCriticalSection",
+        "LeaveCriticalSection",
+        "TryEnterCriticalSection",
+        "GetLastError",
+        "InterlockedIncrement",
+        "InterlockedDecrement",
+        "InterlockedExchange",
+        "InterlockedCompareExchange",
+        "InterlockedExchangeAdd",
+        "DeleteCriticalSection",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // A CRITICAL_SECTION of AAh bytes at 0, a variable at 20h, a
+    // CRITICAL_SECTION of zeros at 40h, the exception's code at 60h.
+    let mut data = vec![0xAA; 0x18];
+    data.resize(0x20, 0);
+    data.extend_from_slice(&5u32.to_le_bytes());
+    data.resize(0x80, 0);
+    let exe = program(imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let section = l.at(0) as i32;
+        let var = l.at(0x20) as i32;
+        let zeros = l.at(0x40) as i32;
+        let mut fail = a.create_label();
+        a.push(section)?;
+        a.call(f("InitializeCriticalSection"))?;
+        a.mov(ebx, 1)?;
+        a.cmp(byte_ptr(l.at(0)), 4)?;
+        a.jne(fail)?;
+        a.mov(ebx, 2)?;
+        a.cmp(byte_ptr(l.at(1)), 0xAA)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(8)), 0xAAAA_AAAAu32 as i32)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x14)), 0xAAAA_AAAAu32 as i32)?;
+        a.jne(fail)?;
+        a.mov(esi, dword_ptr(l.at(4)))?;
+        a.mov(ebx, 3)?;
+        a.cmp(esi, 0x8000_0000u32 as i32)?;
+        a.jb(fail)?;
+        a.cmp(esi, 0xC000_0000u32 as i32)?;
+        a.jae(fail)?;
+        a.mov(ebx, 4)?;
+        a.cmp(byte_ptr(esi), 4)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 4), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 8), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x10), 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x1C), section)?;
+        a.jne(fail)?;
+        // In twice: the count at 2, the thread the owner.
+        a.push(section)?;
+        a.call(f("EnterCriticalSection"))?;
+        a.push(section)?;
+        a.call(f("EnterCriticalSection"))?;
+        a.mov(ebx, 5)?;
+        a.cmp(dword_ptr(esi + 4), 2)?;
+        a.jne(fail)?;
+        a.mov(eax, dword_ptr(0x18u64).fs())?;
+        a.cmp(dword_ptr(esi + 8), eax)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x10), -1)?;
+        a.jne(fail)?;
+        a.push(section)?;
+        a.call(f("LeaveCriticalSection"))?;
+        a.mov(ebx, 6)?;
+        a.cmp(dword_ptr(esi + 4), 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x10), 0)?;
+        a.jne(fail)?;
+        a.push(section)?;
+        a.call(f("LeaveCriticalSection"))?;
+        a.mov(ebx, 7)?;
+        a.cmp(dword_ptr(esi + 4), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 8), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x10), 1)?;
+        a.jne(fail)?;
+        a.push(section)?;
+        a.call(f("TryEnterCriticalSection"))?;
+        a.mov(ebx, 8)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.call(f("GetLastError"))?;
+        a.cmp(eax, 120)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x10), 1)?;
+        a.jne(fail)?;
+        // The interlocked functions, from 5.
+        a.push(var)?;
+        a.call(f("InterlockedIncrement"))?;
+        a.mov(ebx, 9)?;
+        a.cmp(eax, 6)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 6)?;
+        a.jne(fail)?;
+        a.push(var)?;
+        a.call(f("InterlockedDecrement"))?;
+        a.mov(ebx, 10)?;
+        a.cmp(eax, 5)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 5)?;
+        a.jne(fail)?;
+        a.push(3)?;
+        a.push(var)?;
+        a.call(f("InterlockedExchangeAdd"))?;
+        a.mov(ebx, 11)?;
+        a.cmp(eax, 5)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 8)?;
+        a.jne(fail)?;
+        a.push(8)?;
+        a.push(1)?;
+        a.push(var)?;
+        a.call(f("InterlockedCompareExchange"))?;
+        a.mov(ebx, 12)?;
+        a.cmp(eax, 8)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 1)?;
+        a.jne(fail)?;
+        a.push(8)?;
+        a.push(9)?;
+        a.push(var)?;
+        a.call(f("InterlockedCompareExchange"))?;
+        a.mov(ebx, 13)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 1)?;
+        a.jne(fail)?;
+        a.push(7)?;
+        a.push(var)?;
+        a.call(f("InterlockedExchange"))?;
+        a.mov(ebx, 14)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 7)?;
+        a.jne(fail)?;
+        // Deleted, the CRITICAL_SECTION stays as it was.
+        a.push(section)?;
+        a.call(f("DeleteCriticalSection"))?;
+        a.mov(ebx, 15)?;
+        a.cmp(byte_ptr(l.at(0)), 4)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(4)), esi)?;
+        a.jne(fail)?;
+        // A handler that keeps the exception's code, initializes the
+        // section and continues, whose address the CALL over it pushes.
+        let mut over = a.create_label();
+        a.call(over)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.mov(dword_ptr(l.at(0x60)), eax)?;
+        a.push(zeros)?;
+        a.call(f("InitializeCriticalSection"))?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut over)?;
+        a.push(dword_ptr(0).fs())?;
+        a.mov(dword_ptr(0).fs(), esp)?;
+        a.push(zeros)?;
+        a.call(f("EnterCriticalSection"))?;
+        a.pop(dword_ptr(0).fs())?;
+        a.add(esp, 4)?;
+        a.mov(ebx, 16)?;
+        a.cmp(dword_ptr(l.at(0x60)), 0xC000_0005u32 as i32)?;
+        a.jne(fail)?;
+        a.mov(ebx, 17)?;
+        a.mov(eax, dword_ptr(l.at(0x44)))?;
+        a.mov(ecx, dword_ptr(0x18u64).fs())?;
+        a.cmp(dword_ptr(eax + 8), ecx)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(eax + 4), 1)?;
+        a.jne(fail)?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run(Win98Se, "critical_sections", exe);
+    assert_eq!(code, 0, "check {} failed: {}", code, text);
+}
+
+/// A thread that enters a section another is in waits, counted in the
+/// section's lock count, and gets the section when the other leaves it:
+/// its owner then, with the count at 1. The program ends with the number
+/// of the first check that failed, or 0.
+#[test]
+fn a_section_left_goes_to_the_thread_waiting_for_it() {
+    let names: &[&str] = &[
+        "InitializeCriticalSection",
+        "EnterCriticalSection",
+        "LeaveCriticalSection",
+        "CreateThread",
+        "Sleep",
+        "WaitForSingleObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The CRITICAL_SECTION at 0, a flag the thread sets in the section at
+    // 20h, the thread's TIB at 24h.
+    let exe = program(imports, &[0; 0x40], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let section = l.at(0) as i32;
+        let mut fail = a.create_label();
+        let mut over = a.create_label();
+        a.push(section)?;
+        a.call(f("InitializeCriticalSection"))?;
+        a.push(section)?;
+        a.call(f("EnterCriticalSection"))?;
+        a.mov(esi, dword_ptr(l.at(4)))?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: in, the flag and its TIB, out.
+        a.push(section)?;
+        a.call(f("EnterCriticalSection"))?;
+        a.mov(dword_ptr(l.at(0x20)), 1)?;
+        a.mov(eax, dword_ptr(0x18u64).fs())?;
+        a.mov(dword_ptr(l.at(0x24)), eax)?;
+        a.push(section)?;
+        a.call(f("LeaveCriticalSection"))?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(edi, eax)?;
+        // The thread runs meanwhile and waits.
+        a.push(50)?;
+        a.call(f("Sleep"))?;
+        a.mov(ebx, 1)?;
+        a.cmp(dword_ptr(esi + 0x10), -1)?;
+        a.jne(fail)?;
+        a.mov(ebx, 2)?;
+        a.cmp(dword_ptr(l.at(0x20)), 0)?;
+        a.jne(fail)?;
+        a.push(section)?;
+        a.call(f("LeaveCriticalSection"))?;
+        // The thread's now, which hasn't run yet.
+        a.mov(ebx, 3)?;
+        a.mov(ebp, dword_ptr(esi + 8))?;
+        a.test(ebp, ebp)?;
+        a.je(fail)?;
+        a.cmp(ebp, dword_ptr(0x18u64).fs())?;
+        a.je(fail)?;
+        a.cmp(dword_ptr(esi + 4), 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x10), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 0)?;
+        a.jne(fail)?;
+        a.push(-1)?;
+        a.push(edi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(ebx, 4)?;
+        a.cmp(dword_ptr(l.at(0x20)), 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x24)), ebp)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(dword_ptr(esi + 0x10), 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 8), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 4), 0)?;
+        a.jne(fail)?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run(Win98Se, "section_handed_over", exe);
+    assert_eq!(code, 0, "check {} failed: {}", code, text);
+}
+
+#[test]
+fn try_enter_critical_section_is_exported_from_windows_98_on() {
+    let finds = || finds_system_dll("KERNEL32.DLL", "TryEnterCriticalSection");
+    assert_eq!(run(Win95, "try_enter", finds()).0, 3);
+    assert_eq!(run(Win98Se, "try_enter", finds()).0, 7);
+}
+
+/// A program that walks a Toolhelp32 snapshot of itself as SmartHeap's
+/// start does: it finds CreateToolhelp32Snapshot and Heap32ListFirst
+/// with GetProcAddress (1), takes a snapshot of its heaps, processes,
+/// threads and modules (2), finds its process heap first in the heap
+/// list, flagged as the default (3), walks that heap to a block it
+/// allocated (4), finds itself as the first process (5), its main
+/// thread (6) and its program's module (7), and ends with 0, or with
+/// the number of the check that failed.
+fn toolhelp_walk() -> Vec<u8> {
+    let names: &[&str] = &[
+        "GetModuleHandleA",
+        "GetProcAddress",
+        "CreateToolhelp32Snapshot",
+        "Heap32ListFirst",
+        "Heap32First",
+        "Heap32Next",
+        "Process32First",
+        "Thread32First",
+        "Module32First",
+        "Module32Next",
+        "GetProcessHeap",
+        "HeapAlloc",
+        "GetCurrentProcessId",
+        "CloseHandle",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // Names at 0, 20h and 40h; HEAPLIST32 at 100h, HEAPENTRY32 at 120h,
+    // THREADENTRY32 at 150h, PROCESSENTRY32 at 200h, MODULEENTRY32 at
+    // 400h, each with its dwSize.
+    let mut data = b"KERNEL32.DLL\0".to_vec();
+    data.resize(0x20, 0);
+    data.extend_from_slice(b"CreateToolhelp32Snapshot\0");
+    data.resize(0x40, 0);
+    data.extend_from_slice(b"Heap32ListFirst\0");
+    data.resize(0x700, 0);
+    for (at, size) in [
+        (0x100, 16u32),
+        (0x120, 36),
+        (0x150, 28),
+        (0x200, 296),
+        (0x400, 548),
+    ] {
+        data[at..at + 4].copy_from_slice(&size.to_le_bytes());
+    }
+    program(imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut fail = a.create_label();
+        a.mov(ebx, 1)?;
+        a.push(l.at(0) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.mov(esi, eax)?;
+        for name in [0x20, 0x40] {
+            a.push(l.at(name) as i32)?;
+            a.push(esi)?;
+            a.call(f("GetProcAddress"))?;
+            a.test(eax, eax)?;
+            a.jz(fail)?;
+        }
+        a.mov(ebx, 2)?;
+        a.push(0)?;
+        a.push(0xF)?;
+        a.call(f("CreateToolhelp32Snapshot"))?;
+        a.cmp(eax, -1)?;
+        a.je(fail)?;
+        a.mov(edi, eax)?;
+        a.mov(ebx, 3)?;
+        a.push(l.at(0x100) as i32)?;
+        a.push(edi)?;
+        a.call(f("Heap32ListFirst"))?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.call(f("GetProcessHeap"))?;
+        a.mov(esi, eax)?;
+        a.cmp(dword_ptr(l.at(0x108)), esi)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x10C)), 1)?;
+        a.jne(fail)?;
+        // A block of 40h bytes, and a walk of the heap until it comes.
+        a.mov(ebx, 4)?;
+        a.push(0x40)?;
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(f("HeapAlloc"))?;
+        a.mov(ebp, eax)?;
+        a.call(f("GetCurrentProcessId"))?;
+        a.push(esi)?;
+        a.push(eax)?;
+        a.push(l.at(0x120) as i32)?;
+        a.call(f("Heap32First"))?;
+        let mut next = a.create_label();
+        let mut found = a.create_label();
+        a.set_label(&mut next)?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.cmp(dword_ptr(l.at(0x128)), ebp)?;
+        a.je(found)?;
+        a.push(l.at(0x120) as i32)?;
+        a.call(f("Heap32Next"))?;
+        a.jmp(next)?;
+        a.set_label(&mut found)?;
+        a.cmp(dword_ptr(l.at(0x12C)), 0x40)?;
+        a.jne(fail)?;
+        // LF32_FIXED.
+        a.cmp(dword_ptr(l.at(0x130)), 1)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.call(f("GetCurrentProcessId"))?;
+        a.mov(esi, eax)?;
+        a.push(l.at(0x200) as i32)?;
+        a.push(edi)?;
+        a.call(f("Process32First"))?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.cmp(dword_ptr(l.at(0x208)), esi)?;
+        a.jne(fail)?;
+        a.mov(ebx, 6)?;
+        a.push(l.at(0x150) as i32)?;
+        a.push(edi)?;
+        a.call(f("Thread32First"))?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.cmp(dword_ptr(l.at(0x15C)), esi)?;
+        a.jne(fail)?;
+        // The modules until the program's, at its base.
+        a.mov(ebx, 7)?;
+        a.push(l.at(0x400) as i32)?;
+        a.push(edi)?;
+        a.call(f("Module32First"))?;
+        let mut module = a.create_label();
+        let mut program_found = a.create_label();
+        a.set_label(&mut module)?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.cmp(dword_ptr(l.at(0x41C)), BASE as i32)?;
+        a.je(program_found)?;
+        a.push(l.at(0x400) as i32)?;
+        a.push(edi)?;
+        a.call(f("Module32Next"))?;
+        a.jmp(module)?;
+        a.set_label(&mut program_found)?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn toolhelp32_walks_the_process_heaps_threads_and_modules() {
+    for version in [Win95, Win98Se] {
+        let (code, text) = run(version, "toolhelp", toolhelp_walk());
+        assert_eq!(code, 0, "check {} failed: {}", code, text);
+    }
+}
+
+/// Windows 98 SE's USER32 has no desktops or window stations: OpenDesktopA
+/// and GetProcessWindowStation are its stubs that fail with
+/// ERROR_CALL_NOT_IMPLEMENTED, GetThreadDesktop gives 12345678h for any
+/// thread and SetThreadDesktop succeeds. QuickTime 5 calls OpenDesktopA
+/// when it starts. The program imports the family's other stubs too, so
+/// it loads only if USER32 has them all. It ends with the number of the
+/// first check that failed, or 0.
+#[test]
+fn desktops_are_windows_98s_stubs() {
+    let names: &[&str] = &[
+        "OpenDesktopA",
+        "GetProcessWindowStation",
+        "GetThreadDesktop",
+        "SetThreadDesktop",
+        "CloseDesktop",
+        "CloseWindowStation",
+        "CreateDesktopA",
+        "CreateDesktopW",
+        "CreateWindowStationA",
+        "CreateWindowStationW",
+        "EnumDesktopWindows",
+        "EnumDesktopsA",
+        "EnumDesktopsW",
+        "EnumWindowStationsA",
+        "EnumWindowStationsW",
+        "GetInputDesktop",
+        "GetUserObjectInformationA",
+        "GetUserObjectInformationW",
+        "GetUserObjectSecurity",
+        "LockWindowStation",
+        "OpenDesktopW",
+        "OpenInputDesktop",
+        "OpenWindowStationA",
+        "OpenWindowStationW",
+        "SetProcessWindowStation",
+        "SetUserObjectInformationA",
+        "SetUserObjectInformationW",
+        "SetUserObjectSecurity",
+        "SwitchDesktop",
+        "UnlockWindowStation",
+    ];
+    let (get_last_error, set_last_error) = (names.len(), names.len() + 1);
+    let imports: &[(&str, &[&str])] = &[
+        ("USER32.DLL", names),
+        ("KERNEL32.DLL", &["GetLastError", "SetLastError"]),
+    ];
+    let exe = program(imports, b"Default\0", |a, l| {
+        let mut fail = a.create_label();
+        let check_error = |a: &mut CodeAssembler, n: i32, fail| {
+            a.mov(ebx, n)?;
+            a.call(l.import(get_last_error))?;
+            a.cmp(eax, 120)?;
+            a.jne(fail)
+        };
+        a.push(0)?;
+        a.call(l.import(set_last_error))?;
+        a.push(0x40)?;
+        a.push(0)?;
+        a.push(1)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 1)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        check_error(a, 2, fail)?;
+        a.push(0)?;
+        a.call(l.import(set_last_error))?;
+        a.call(l.import(1))?;
+        a.mov(ebx, 3)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        check_error(a, 4, fail)?;
+        a.push(0)?;
+        a.call(l.import(2))?;
+        a.mov(ebx, 5)?;
+        a.cmp(eax, 0x1234_5678)?;
+        a.jne(fail)?;
+        a.push(eax)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 6)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run(Win98Se, "desktops", exe);
+    assert_eq!(code, 0, "check {} failed: {}", code, text);
 }

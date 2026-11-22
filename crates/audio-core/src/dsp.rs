@@ -50,6 +50,55 @@ impl Biquad {
         Self::normalized(b0, -(1.0 + cos), b0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha)
     }
 
+    /// An all-pass at `freq` Hz with resonance `q`: every frequency at
+    /// its level, the phase turning through 360 degrees around `freq`.
+    pub fn allpass(freq: f32, q: f32) -> Self {
+        let (cos, alpha) = Self::angle(freq, q);
+        Self::normalized(1.0 - alpha, -2.0 * cos, 1.0 + alpha, 1.0 + alpha, -2.0 * cos, 1.0 - alpha)
+    }
+
+    /// A low shelf: `gain_db` below `freq` Hz, 0 dB above, with shelf
+    /// slope `slope` (1 the steepest without a bump).
+    pub fn low_shelf(freq: f32, gain_db: f32, slope: f32) -> Self {
+        let (a, cos, alpha) = Self::shelf(freq, gain_db, slope);
+        let s = 2.0 * a.sqrt() * alpha;
+        Self::normalized(
+            a * ((a + 1.0) - (a - 1.0) * cos + s),
+            2.0 * a * ((a - 1.0) - (a + 1.0) * cos),
+            a * ((a + 1.0) - (a - 1.0) * cos - s),
+            (a + 1.0) + (a - 1.0) * cos + s,
+            -2.0 * ((a - 1.0) + (a + 1.0) * cos),
+            (a + 1.0) + (a - 1.0) * cos - s,
+        )
+    }
+
+    /// A high shelf: `gain_db` above `freq` Hz, 0 dB below.
+    pub fn high_shelf(freq: f32, gain_db: f32, slope: f32) -> Self {
+        let (a, cos, alpha) = Self::shelf(freq, gain_db, slope);
+        let s = 2.0 * a.sqrt() * alpha;
+        Self::normalized(
+            a * ((a + 1.0) + (a - 1.0) * cos + s),
+            -2.0 * a * ((a - 1.0) + (a + 1.0) * cos),
+            a * ((a + 1.0) + (a - 1.0) * cos - s),
+            (a + 1.0) - (a - 1.0) * cos + s,
+            2.0 * ((a - 1.0) - (a + 1.0) * cos),
+            (a + 1.0) - (a - 1.0) * cos - s,
+        )
+    }
+
+    /// Take `other`'s response and keep this filter's state, so a change
+    /// of its settings while it plays makes no click.
+    pub fn retune(&mut self, other: Biquad) {
+        *self = Self { z1: self.z1, z2: self.z2, ..other };
+    }
+
+    fn shelf(freq: f32, gain_db: f32, slope: f32) -> (f32, f32, f32) {
+        let a = 10f32.powf(gain_db / 40.0);
+        let w = 2.0 * PI * freq.clamp(1.0, RATE * 0.49) / RATE;
+        let alpha = w.sin() / 2.0 * ((a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0).sqrt();
+        (a, w.cos(), alpha)
+    }
+
     fn angle(cutoff: f32, q: f32) -> (f32, f32) {
         let w = 2.0 * PI * cutoff.clamp(1.0, RATE * 0.49) / RATE;
         (w.cos(), w.sin() / (2.0 * q))
@@ -70,6 +119,11 @@ impl Biquad {
             self.z2 = 0.0;
         }
         y
+    }
+
+    /// Whether silence in gives silence out and leaves it as it is.
+    pub fn at_rest(&self) -> bool {
+        self.z1 == 0.0 && self.z2 == 0.0
     }
 }
 
@@ -96,6 +150,44 @@ impl OnePoleHighpass {
         self.x1 = x;
         self.y1 = y;
         y
+    }
+
+    /// Whether `x` would give exactly 0 and leave the filter as it is: it
+    /// got that level last, and what it passed of it has faded out.
+    pub fn rests_on(&self, x: f32) -> bool {
+        self.x1 == x && self.y1 == 0.0
+    }
+}
+
+/// A first-order high-pass at `COUPLING_HZ` on one channel, which takes a
+/// steady level out of a source and passes its sound as it was. It starts
+/// settled on the first sample it gets after `Default`, as
+/// `OutputCoupling` does.
+#[derive(Clone, Copy, Debug)]
+pub struct DcBlocker {
+    filter: OnePoleHighpass,
+    settled: bool,
+}
+
+impl Default for DcBlocker {
+    fn default() -> Self {
+        Self { filter: OnePoleHighpass::new(COUPLING_HZ), settled: false }
+    }
+}
+
+impl DcBlocker {
+    #[inline]
+    pub fn process(&mut self, x: f32) -> f32 {
+        if !self.settled {
+            self.settled = true;
+            self.filter.x1 = x;
+        }
+        self.filter.process(x)
+    }
+
+    /// Whether `x` would give exactly 0 and leave the filter as it is.
+    pub fn rests_on(&self, x: f32) -> bool {
+        !self.settled && x == 0.0 || self.settled && self.filter.rests_on(x)
     }
 }
 
@@ -157,24 +249,190 @@ impl OutputCoupling {
 
 /// The small speaker of a PC, as DOSBox Staging has it: a third-order
 /// high-pass at 120 Hz, as it can't move much air, and a second-order
-/// low-pass at 4.8 kHz.
+/// low-pass at 4.8 kHz. The high-pass takes out the steady level the
+/// speaker's cone rests at, so it starts settled on the first sample it
+/// gets after `Default` (a state loaded with the speaker's output high
+/// gives no click).
 #[derive(Clone, Copy, Debug)]
 pub struct SpeakerFilter {
     first: OnePoleHighpass,
     high: Biquad,
     low: Biquad,
+    settled: bool,
 }
 
 impl Default for SpeakerFilter {
     fn default() -> Self {
-        Self { first: OnePoleHighpass::new(120.0), high: Biquad::highpass(120.0, 1.0), low: Biquad::lowpass(4800.0, BUTTERWORTH_Q) }
+        Self {
+            first: OnePoleHighpass::new(120.0),
+            high: Biquad::highpass(120.0, 1.0),
+            low: Biquad::lowpass(4800.0, BUTTERWORTH_Q),
+            settled: false,
+        }
     }
 }
 
 impl SpeakerFilter {
     #[inline]
     pub fn process(&mut self, x: f32) -> f32 {
+        if !self.settled {
+            self.settled = true;
+            self.first.x1 = x;
+        }
         self.low.process(self.high.process(self.first.process(x)))
+    }
+
+    /// Whether `x` would give exactly 0 and leave the filter as it is: it
+    /// got that level last and has rung out.
+    pub fn rests_on(&self, x: f32) -> bool {
+        let rests = !self.settled && x == 0.0 || self.settled && self.first.rests_on(x);
+        rests && self.high.at_rest() && self.low.at_rest()
+    }
+}
+
+/// How many parts of each mix frame the PC speaker's level is taken in
+/// over, for `SpeakerDecimator`: 8, a rate of 352.8 kHz.
+pub const SPEAKER_OVERSAMPLE: usize = 8;
+
+/// The taps of the speaker's decimation filter, 24 mix frames' worth.
+const SPEAKER_TAPS: usize = 192;
+
+/// The PC speaker's level, taken in as its mean over each eighth of a mix
+/// frame, band-limited before one sample a frame is kept. The level is a
+/// pulse train with edges at any of the PIT's 1.19 MHz ticks, and its
+/// mean over a whole frame (a box filter, whose response falls off slowly)
+/// lets what lies above half the mix rate fold into the audible range: a
+/// pulse-width-modulated carrier's harmonics come out as tones. A
+/// windowed-sinc low-pass at the eighths' rate passes the audible range
+/// (within 0.003 dB to 15 kHz, 0.03 dB at 16 kHz, 1.5 dB down at
+/// 18 kHz) and takes everything that would fold below 20 kHz down by
+/// 70 dB or more (from 24.1 kHz on), and the eighths' own means take out
+/// what lies near their rate's multiples. The cost is the same in every
+/// frame: eight means and a 192-tap filter.
+///
+/// It starts settled on the first part it gets after `Default` (a reset
+/// of the mixer's filters, as after a state was loaded), as if the level
+/// had held that long. A level held for the filter's length comes out
+/// exactly, so a resting speaker stays exactly at its level.
+#[derive(Clone, Debug)]
+pub struct SpeakerDecimator {
+    /// The parts taken in, each written twice, `SPEAKER_TAPS` apart, so
+    /// the last `SPEAKER_TAPS` lie in one run.
+    history: Box<[f32; 2 * SPEAKER_TAPS]>,
+    /// Where the next part goes, below `SPEAKER_TAPS`.
+    at: usize,
+    /// The last part, and how many parts in a row had its value.
+    last: f32,
+    steady: usize,
+    settled: bool,
+}
+
+impl Default for SpeakerDecimator {
+    fn default() -> Self {
+        Self {
+            history: Box::new([0.0; 2 * SPEAKER_TAPS]),
+            at: 0,
+            last: 0.0,
+            steady: 0,
+            settled: false,
+        }
+    }
+}
+
+/// The decimation filter's taps: a sinc low-pass with its cutoff at
+/// 19.5 kHz, in a Kaiser window (beta 6.76, for 70 dB), summing to 1.
+fn speaker_taps() -> &'static [f32; SPEAKER_TAPS] {
+    static TAPS: std::sync::OnceLock<[f32; SPEAKER_TAPS]> = std::sync::OnceLock::new();
+    TAPS.get_or_init(|| {
+        let rate = (crate::RATE as usize * SPEAKER_OVERSAMPLE) as f64;
+        let cutoff = 19_550.0 / rate;
+        let beta = 0.1102 * (70.0 - 8.7);
+        let middle = (SPEAKER_TAPS - 1) as f64 / 2.0;
+        let mut taps = [0.0f64; SPEAKER_TAPS];
+        for (i, tap) in taps.iter_mut().enumerate() {
+            let x = i as f64 - middle;
+            let sinc = if x == 0.0 {
+                2.0 * cutoff
+            } else {
+                (2.0 * std::f64::consts::PI * cutoff * x).sin() / (std::f64::consts::PI * x)
+            };
+            let r = x / middle;
+            *tap = sinc * bessel_i0(beta * (1.0 - r * r).max(0.0).sqrt()) / bessel_i0(beta);
+        }
+        let sum: f64 = taps.iter().sum();
+        taps.map(|tap| (tap / sum) as f32)
+    })
+}
+
+/// The modified Bessel function of the first kind, order 0, by its series.
+fn bessel_i0(x: f64) -> f64 {
+    let mut sum = 1.0;
+    let mut term = 1.0;
+    let half = x / 2.0;
+    for k in 1..50 {
+        term *= half / k as f64;
+        sum += term * term;
+        if term * term < sum * 1e-17 {
+            break;
+        }
+    }
+    sum
+}
+
+impl SpeakerDecimator {
+    /// Take in the level's mean over the next eighth of a frame.
+    #[inline]
+    pub fn push(&mut self, x: f32) {
+        if !self.settled {
+            self.settled = true;
+            self.history.fill(x);
+            self.last = x;
+            self.steady = SPEAKER_TAPS;
+            return;
+        }
+        if x == self.last {
+            self.steady = self.steady.saturating_add(1);
+        } else {
+            self.last = x;
+            self.steady = 1;
+        }
+        self.history[self.at] = x;
+        self.history[self.at + SPEAKER_TAPS] = x;
+        self.at = if self.at + 1 == SPEAKER_TAPS {
+            0
+        } else {
+            self.at + 1
+        };
+    }
+
+    /// The sample for the frame whose last eighth came in last.
+    #[inline]
+    pub fn output(&self) -> f32 {
+        if self.steady >= SPEAKER_TAPS {
+            return self.last;
+        }
+        // The filter is symmetric, so the order the parts lie in, oldest
+        // first from `at`, doesn't matter to it.
+        let parts = &self.history[self.at..self.at + SPEAKER_TAPS];
+        // Eight sums side by side, which the compiler turns into vector
+        // instructions; one running sum can't be, as each addition would
+        // have to wait for the one before.
+        let (parts, _) = parts.as_chunks::<8>();
+        let (taps, _) = speaker_taps().as_chunks::<8>();
+        let mut sums = [0.0f32; 8];
+        for (x, h) in parts.iter().zip(taps) {
+            for ((sum, x), h) in sums.iter_mut().zip(x).zip(h) {
+                *sum += x * h;
+            }
+        }
+        sums.iter().sum()
+    }
+
+    /// Whether parts of `x` from now on give `x` exactly and leave the
+    /// filter as it is: it has had `x` for its whole length, or nothing
+    /// yet.
+    pub fn rests_on(&self, x: f32) -> bool {
+        !self.settled || self.steady >= SPEAKER_TAPS && self.last == x
     }
 }
 
@@ -469,6 +727,52 @@ rust_dos_savestate::state_fields!(OnePoleHighpass { x1, y1 } skip { a });
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The speaker's decimation's gain at `hz`: a sine at the eighths'
+    /// rate in, one output a frame, its amplitude after the filter filled.
+    fn decimated_gain(hz: f64) -> f64 {
+        let rate = (crate::RATE as usize * SPEAKER_OVERSAMPLE) as f64;
+        let mut decimator = SpeakerDecimator::default();
+        let mut peak = 0.0f64;
+        for n in 0..SPEAKER_OVERSAMPLE * 4000 {
+            let x = (2.0 * std::f64::consts::PI * hz * n as f64 / rate).sin();
+            decimator.push(x as f32);
+            if (n + 1) % SPEAKER_OVERSAMPLE == 0 && n > 4 * SPEAKER_TAPS {
+                peak = peak.max(decimator.output().abs() as f64);
+            }
+        }
+        peak
+    }
+
+    #[test]
+    fn the_speakers_decimation_passes_the_audible_range_and_stops_what_folds() {
+        for hz in [100.0, 1000.0, 5000.0, 12_000.0] {
+            let gain = decimated_gain(hz);
+            assert!((gain - 1.0).abs() < 0.01, "{hz} Hz at {gain}");
+        }
+        // What would fold below 20 kHz at the mix's rate: 70 dB down.
+        for hz in [24_100.0, 27_500.0, 60_000.0, 82_500.0, 170_000.0] {
+            let gain = decimated_gain(hz);
+            assert!(gain < 0.000_35, "{hz} Hz at {gain}");
+        }
+    }
+
+    #[test]
+    fn a_held_level_comes_out_exactly() {
+        let mut decimator = SpeakerDecimator::default();
+        decimator.push(0.25);
+        assert_eq!(decimator.output(), 0.25);
+        assert!(decimator.rests_on(0.25));
+        decimator.push(1.0);
+        assert!(!decimator.rests_on(1.0));
+        for _ in 2..SPEAKER_TAPS {
+            decimator.push(1.0);
+            assert!(!decimator.rests_on(1.0));
+        }
+        decimator.push(1.0);
+        assert!(decimator.rests_on(1.0));
+        assert_eq!(decimator.output(), 1.0);
+    }
 
     /// The loudest output of `filter` after it settled on a sine at `hz`.
     fn gain(mut filter: impl FnMut(f32) -> f32, hz: f32) -> f32 {

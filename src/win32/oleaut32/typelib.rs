@@ -157,7 +157,7 @@ fn pid(cpu: &Cpu) -> u32 {
 
 /// The library read from `data`, its strings in the code page `page`, or
 /// the built-in STDOLE `builtin`.
-fn parse(builtin: u16, data: &[u8], page: CodePage) -> Option<TypeLib> {
+pub(crate) fn parse(builtin: u16, data: &[u8], page: CodePage) -> Option<TypeLib> {
     if builtin != 0 {
         return Some(stdole::library(builtin));
     }
@@ -169,7 +169,7 @@ fn parse(builtin: u16, data: &[u8], page: CodePage) -> Option<TypeLib> {
 }
 
 /// The model of the library `lib`.
-fn model(cpu: &mut Cpu, lib: u32) -> Arc<TypeLib> {
+pub(super) fn model(cpu: &mut Cpu, lib: u32) -> Arc<TypeLib> {
     let page = crate::win32::nls::ansi(cpu);
     let s = state(cpu);
     if let Some(Some(m)) = s.parsed.0.get(lib as usize) {
@@ -198,7 +198,7 @@ fn add_ref_lib(cpu: &mut Cpu, lib: u32) {
     l.refs = l.refs.saturating_add(1);
 }
 
-fn release_lib(cpu: &mut Cpu, lib: u32) -> u32 {
+pub(super) fn release_lib(cpu: &mut Cpu, lib: u32) -> u32 {
     let l = lib_mut(cpu, lib);
     l.refs = l.refs.saturating_sub(1);
     let refs = l.refs;
@@ -295,7 +295,7 @@ fn library_bytes(file: Vec<u8>, resource: u32) -> Option<Vec<u8>> {
 /// number in the file before it. STDOLE2.TLB and STDOLE32.TLB are the
 /// built-in ones when there are no such files. The library and the
 /// file's full path.
-fn load(cpu: &mut Cpu, name: &str) -> Result<(u32, String), u32> {
+pub(super) fn load(cpu: &mut Cpu, name: &str) -> Result<(u32, String), u32> {
     let path = super::path_of(cpu, name);
     let mut found = crate::win32::kernel32::search_file(cpu, &path).map(|f| (f, 1));
     if found.is_none()
@@ -350,7 +350,12 @@ fn load_import(cpu: &mut Cpu, import: &ImportLib) -> Result<u32, u32> {
 /// The type the HREFTYPE `href` of the type at `index` of `lib` refers
 /// to: its library, with a reference added, its place, and whether it is
 /// the interface side of a dual interface.
-fn resolve_in(cpu: &mut Cpu, lib: u32, index: u32, href: u32) -> Result<(u32, u32, bool), u32> {
+pub(super) fn resolve_in(
+    cpu: &mut Cpu,
+    lib: u32,
+    index: u32,
+    href: u32,
+) -> Result<(u32, u32, bool), u32> {
     let m = model(cpu, lib);
     let interface_bit = m.format != Format::Sltg && href & HREF_INTERFACE != 0;
     match m
@@ -801,12 +806,25 @@ fn log(cpu: &mut Cpu, message: &str) {
 
 /// The registry's path of the library `guid` of the version `major`.`minor`
 /// or a later minor version, for `lcid` or its language or no language.
-fn query_path(
+pub(super) fn query_path(
     cpu: &mut Cpu,
     guid: &Guid,
     major: u16,
     minor: u16,
     lcid: u32,
+) -> Result<String, u32> {
+    query_path_on(cpu, guid, major, minor, lcid, "win32")
+}
+
+/// `query_path` for the platform `platform` ("win16", "win32"): the
+/// key under the language that has the file of the library made for it.
+pub(crate) fn query_path_on(
+    cpu: &mut Cpu,
+    guid: &Guid,
+    major: u16,
+    minor: u16,
+    lcid: u32,
+    platform: &str,
 ) -> Result<String, u32> {
     let page = crate::win32::nls::ansi(cpu);
     let reg = registry::get(cpu);
@@ -834,7 +852,7 @@ fn query_path(
         .min_by_key(|&(later, min, _)| (later, std::cmp::Reverse(min)))
         .ok_or(TYPE_E_LIBNOTREGISTERED)?;
     for l in [lcid, lcid & 0x3FF, 0] {
-        if let Some(key) = reg.find(version, &format!("{l:x}\\win32"))
+        if let Some(key) = reg.find(version, &format!("{l:x}\\{platform}"))
             && let Some(v) = reg.value(key, "")
         {
             let end = v.data.iter().position(|&b| b == 0).unwrap_or(v.data.len());
@@ -916,6 +934,12 @@ fn set_string(reg: &mut registry::Registry, page: CodePage, key: u32, name: &str
 /// marshals: its dispinterfaces, duals and [oleautomation] interfaces.
 fn register_lib(cpu: &mut Cpu, lib: u32, path: &str, help: Option<&str>) -> u32 {
     let m = model(cpu, lib);
+    register_model(cpu, &m, path, help)
+}
+
+/// Write the keys of the library `m`, whose file is `path`, as
+/// RegisterTypeLib does (`register_lib`).
+pub(crate) fn register_model(cpu: &mut Cpu, m: &TypeLib, path: &str, help: Option<&str>) -> u32 {
     let Some(platform) = platform(m.syskind) else {
         return E_FAIL;
     };
@@ -1672,10 +1696,52 @@ fn ids_at(cpu: &mut Cpu, ctx: &Ctx, names: u32, count: u32, ids: u32) -> u32 {
     hr
 }
 
-/// Invoke: calling a method of the program's object by the description
-/// of its vtable isn't done yet.
-pub fn invoke(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(E_NOTIMPL)
+/// The context of the ITypeInfo `this`, if it is one of these.
+pub(super) fn this_ctx(cpu: &mut Cpu, this: u32) -> Option<Ctx> {
+    this_info(cpu, this).map(|(_, ctx)| ctx)
+}
+
+/// The function `memid` that a call of the kinds `flags` (INVOKE_*)
+/// calls, in the type of `ctx` or one it inherits from, as the vtable
+/// has it: on the interface side of a dual interface. With it the
+/// library and the type it is in, a reference to the library held.
+pub(super) fn invokable(
+    cpu: &mut Cpu,
+    ctx: &Ctx,
+    memid: i32,
+    flags: u32,
+) -> Option<(Func, u32, u32)> {
+    add_ref_lib(cpu, ctx.lib);
+    let mut at = make_ctx(cpu, ctx.lib, ctx.index, ctx.interface);
+    for _ in 0..=MAX_BASES {
+        // A dual interface's dispinterface side, which a base can be as
+        // well: its interface side has the vtable's functions.
+        let m = model(cpu, at.lib);
+        if m.infos[at.index as usize].is_dual() && !at.interface {
+            let other = resolve(cpu, &at, 0xFFFF_FFFF);
+            release_ctx(cpu, &at);
+            at = other.ok()?;
+        }
+        let v = view(cpu, &at);
+        let found = v
+            .funcs
+            .iter()
+            .find(|f| f.memid == memid && f.invkind & flags != 0);
+        if let Some(f) = found {
+            let found = (f.clone(), at.lib, at.index);
+            add_ref_lib(cpu, at.lib);
+            release_ctx(cpu, &at);
+            return Some(found);
+        }
+        let Some(first) = v.impls.first() else {
+            break;
+        };
+        let next = resolve(cpu, &at, first.href);
+        release_ctx(cpu, &at);
+        at = next.ok()?;
+    }
+    release_ctx(cpu, &at);
+    None
 }
 
 /// GetDocumentation(memid, name, doc, help context, help file): of the

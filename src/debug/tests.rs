@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 
 mod paging;
 
-fn mouse_machine(mode: u16, max_x: u16, max_y: u16) -> (Cpu, DebugHub) {
+fn mouse_machine(mode: u16, max_x: u16, max_y: u16) -> (Box<Cpu>, DebugHub) {
     let mut cpu = Cpu::new(".".into());
     cpu.set_ax(mode);
     rust_dos::interrupts::int10::handle(&mut cpu);
@@ -306,7 +306,7 @@ const CRASH: [u8; 4] = [0x31, 0xC0, 0xF6, 0xF0];
 
 /// A machine at the prompt with PROBE.COM on C:, and a hub with no
 /// server, which takes its commands from `send`.
-fn machine(name: &str) -> (Cpu, DebugHub) {
+fn machine(name: &str) -> (Box<Cpu>, DebugHub) {
     let dir = crate::test_dir::path(&format!("debug-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let code: Vec<u8> = (0..PROBE.len()).step_by(2).map(|i| u8::from_str_radix(&PROBE[i..i + 2], 16).unwrap()).collect();
@@ -820,7 +820,7 @@ fn other_instructions_just_step() {
 
 /// A machine at the prompt in deterministic mode, paused at the start
 /// as the front end has it, with PROBE.COM on C:.
-fn deterministic_machine(name: &str) -> (Cpu, DebugHub, Deterministic) {
+fn deterministic_machine(name: &str) -> (Box<Cpu>, DebugHub, Deterministic) {
     let mode = Deterministic::new(rust_dos::deterministic::default_start());
     let dir = crate::test_dir::path(&format!("det-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
@@ -882,6 +882,38 @@ fn typed_run(name: &str, frame_ms: u64) -> (u64, Vec<u8>, Vec<Value>) {
         })
         .collect();
     (cpu.executed, cpu.bus.ram().to_vec(), journal)
+}
+
+/// Run T.BAT, whose CONFIG -SET asks for a setting, to 2 s of emulated
+/// time in host frames of `frame_ms`, with a frontend that takes the
+/// settings after each frame as the main loop does: when it took them,
+/// and the instructions executed.
+fn config_set_run(name: &str, frame_ms: u64) -> (u64, u64) {
+    let (mut cpu, mut hub, mut mode) = deterministic_machine(name);
+    let bat = "@echo off\r\nconfig -set composite=on\r\necho after\r\n";
+    std::fs::write(crate::test_dir::path(&format!("det-{name}")).join("T.BAT"), bat).unwrap();
+    reply(&mut cpu, &mut hub, typed("T\n")).unwrap();
+    reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(2000) }).unwrap();
+    let mut taken = None;
+    for _ in 0..1000 {
+        run_deterministic(&mut cpu, &mut hub, &mut mode, 1, frame_ms);
+        if !rust_dos::shell::take_settings(&mut cpu).is_empty() {
+            taken = Some(cpu.bus.clock.now_ns());
+        }
+        if hub.paused {
+            break;
+        }
+    }
+    (taken.expect("CONFIG -SET asked for a setting"), cpu.executed)
+}
+
+/// The frontend takes CONFIG -SET's settings at the same emulated time in
+/// host frames of any size, so the batch file goes on at the same time.
+#[test]
+fn config_set_is_taken_at_the_same_time_whatever_the_frames() {
+    let a = config_set_run("config-a", 16);
+    let b = config_set_run("config-b", 41);
+    assert_eq!(a, b);
 }
 
 #[test]

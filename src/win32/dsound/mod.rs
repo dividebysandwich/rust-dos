@@ -45,6 +45,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: VTABLES,
+    resources: None,
 };
 
 const fn stdcall(
@@ -611,6 +612,25 @@ pub struct State {
     pub due: Option<u64>,
     /// Whether `tick` runs, so that what it does doesn't run it again.
     ticking: bool,
+    /// The last two frames the mixer made at the primary format's rate.
+    mixed: Mixed,
+}
+
+/// The mixer's last two frames at the primary format's rate, which the
+/// next mix starts from instead of mixing them again (`buffer::render`).
+/// Each frame is mixed once, from the buffers' memory as it was then: a
+/// program may write behind the play cursor as soon as it has read it,
+/// and the first frame of a mix can lie before the time the mix starts at.
+/// Not in save states: a load starts with none, and its first mix makes
+/// them again.
+#[derive(Clone, Copy, Debug, Default)]
+struct Mixed {
+    /// The rate they were mixed at, 0 for none.
+    rate: u32,
+    /// The host's frame after the last one that mix was for: the next mix
+    /// takes them only when it starts there.
+    end: u64,
+    frames: [(f32, f32); 2],
 }
 
 /// The primary buffer's format when none is set: 22050 Hz, 8 bits,
@@ -800,7 +820,7 @@ pub fn next_event(ds: &State, now: u64) -> Option<u64> {
 
 /// DirectSound's sound for the host's frames `first` to `first +
 /// frames`. None if no buffer plays.
-fn render(bus: &crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f32, f32)>> {
+fn render(bus: &mut crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f32, f32)>> {
     buffer::render(bus, first, frames)
 }
 
@@ -864,5 +884,6 @@ crate::state_fields!(State {
     last_id,
     due
 } skip {
-    ticking
+    ticking,
+    mixed
 });

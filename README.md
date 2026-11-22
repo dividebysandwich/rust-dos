@@ -396,7 +396,10 @@ python3 -m http.server -d web/www
 
 Then open http://localhost:8000/. `web/www` is the whole site, for any web
 server that serves `.wasm` as `application/wasm`; releases include it as
-`rust-dos-<version>-web.zip`.
+`rust-dos-<version>-web.zip`. The build also writes gzipped copies of the
+module, `pkg/rust_dos_web_bg.wasm.gz` and `pkg/rust_dos_web.js.gz`. The page
+downloads the `.wasm.gz`, about half the size, and unpacks it itself, with
+the plain `.wasm` as the fallback, so a server needs no compression set up.
 
 * C: is a 250 MB hard disk image kept in the browser's storage. Drop files,
   folders or `.zip` archives on the page (or use *Add files* and *Add
@@ -504,6 +507,12 @@ lines. `--log FILE` writes it to `FILE` instead, so instances running
 at the same time keep separate logs. Rust-DOS stops with an error if it
 cannot create `FILE`.
 
+If Rust-DOS crashes, the log's last line starts with `[CRASH]` and says
+why: the error and where it happened, such as the graphics driver's
+file. A run in a window also shows the error in a dialog, with the text
+to report and the link to report it at; on Windows, Ctrl+C copies the
+dialog's text. Runs with `--hidden` or `--debug-server` only log it.
+
 ## Acknowledgements
 
 Rust-DOS is standing on the shoulders of giants. This would not have been possible 
@@ -541,3 +550,35 @@ about your contribution.
 
 Rust-DOS is licensed under the GNU General Public License, version 2 or later
 (see [LICENSE](LICENSE)).
+
+The AdLib Gold's surround processor (`crates/adlibgold/src/ym7128b.rs`)
+follows Andrea Zoppi's YM7128B_emu, which asks for its notice to come with
+Rust-DOS in source and binary form:
+
+```
+BSD 2-Clause License
+
+Copyright (c) 2020-2023, Andrea Zoppi
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```

@@ -15,8 +15,9 @@
 //! `Ems::write_back`). Where the program wrote one byte through both, the
 //! copy whose bytes go back first wins, whichever write came last.
 //!
-//! VCPI isn't there (AX=DE00h says so), as the CPU runs DOS in real mode,
-//! not virtual-8086 mode: DOS extenders then use XMS or raw mode.
+//! With expanded memory on, DOS runs in virtual-8086 mode under the
+//! built-in monitor (v86mon.rs), as under EMM386, which provides VCPI
+//! (AH=DEh, vcpi.rs) for DOS extenders.
 
 use crate::bus::Bus;
 use crate::cpu::Cpu;
@@ -412,6 +413,7 @@ pub fn install_device(bus: &mut Bus, nul: usize) {
 /// INT 67h: the function in AH, the status back in AH.
 pub fn handle(cpu: &mut Cpu) {
     let function = cpu.get_ah();
+    let (ax, bx, dx) = (cpu.ax(), cpu.bx(), cpu.dx());
     let Some(mut ems) = cpu.bus.ems.take() else {
         cpu.set_reg8(Register::AH, UNDEFINED_FUNCTION);
         return;
@@ -419,7 +421,12 @@ pub fn handle(cpu: &mut Cpu) {
     let status = call(cpu, &mut ems, function);
     cpu.bus.ems = Some(ems);
     if status != OK {
-        cpu.bus.log_string(&format!("[EMS] AX={:04X}: status {:02X}", cpu.ax(), status));
+        // Apart for each call, handle and status; the logical page in
+        // BX is shown but not kept apart, as a program walking past
+        // the end of its pages would log each one.
+        cpu.bus.log_limited(("EMS", ax, dx, status), || {
+            format!("[EMS] AX={ax:04X} BX={bx:04X} DX={dx:04X}: status {status:02X}")
+        });
     }
     cpu.set_reg8(Register::AH, status);
 }
@@ -595,7 +602,8 @@ fn call(cpu: &mut Cpu, ems: &mut Ems, function: u8) -> u8 {
         // Allocate standard or raw pages: as 43h, but zero pages will do.
         0x5A if al <= 1 => allocate(cpu, ems),
         0x5A => SUBFUNCTION,
-        // VCPI and everything else: not there.
+        // VCPI, from virtual-8086 mode under the built-in monitor.
+        0xDE => crate::vcpi::call(cpu),
         _ => UNDEFINED_FUNCTION,
     }
 }

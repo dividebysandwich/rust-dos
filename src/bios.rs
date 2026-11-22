@@ -52,6 +52,13 @@ pub const SERVICE_KBD_PAUSED: u8 = 0x22;
 pub const SERVICE_IPX: u8 = 0x23;
 /// The IPX IRQ handler's next completed ECB (`net::ipx::esr`).
 pub const SERVICE_IPX_ESR: u8 = 0x24;
+/// The scan code the built-in DOS's keyboard interrupt read, after INT 15h
+/// AH=4Fh had it: CF set, its keystrokes go into the BIOS's buffer; clear,
+/// the hook took the key (`keyboard::bios_intercepted`).
+pub const SERVICE_KBD_INTERCEPTED: u8 = 0x25;
+/// The INT 33h driver's IRQ handler: call the program's event handler, or
+/// pass the IRQ on to the BIOS's PS/2 handler (`mouse::irq_service`).
+pub const SERVICE_MOUSE_IRQ: u8 = 0x26;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Far-call services (`FE 3A nn`, then RETF) at the ROM's entry points for
@@ -60,6 +67,8 @@ pub const FAR_PNP: u8 = 0x01;
 pub const FAR_APM: u8 = 0x02;
 /// The ATI mach64 BIOS's extended services, at C000:0064h.
 pub const FAR_ATI: u8 = 0x03;
+/// The VCPI's protected-mode entry point (`vcpi::pm_entry`).
+pub const FAR_VCPI: u8 = 0x04;
 
 /// Offsets in the F000 segment.
 const TIMER_HANDLER: u16 = 0x1100;
@@ -73,7 +82,7 @@ pub const DISKETTE_PARAMS: u16 = 0x1150;
 pub const IO_WAIT: u16 = 0x1190;
 /// The PS/2 mouse's IRQ 12 handler (INT 74h), and where it finds the far
 /// address of the program's handler (INT 15h AX=C207h).
-const PS2_HANDLER: u16 = 0x11A0;
+pub const PS2_HANDLER: u16 = 0x11A0;
 pub const PS2_HANDLER_ADDRESS: u16 = 0x11E0;
 /// Where services in virtual-8086 mode return through when they changed
 /// hardware a V86 monitor follows through the ports it traps: it makes the
@@ -82,9 +91,17 @@ pub const PORT_ACCESSES: u16 = 0x11F0;
 /// The rest of the port accesses' kinds (`port_access_more`), which don't
 /// fit the loop.
 const PORT_ACCESSES_MORE: u16 = 0x1500;
+/// The INT 33h driver's IRQ 12 handler, through which a protected-mode
+/// system that passes the IRQ down to real mode gets the program's event
+/// handler called (`mouse::irq_service`).
+pub const MOUSE_IRQ: u16 = 0x1600;
 /// The keyboard interrupt (IRQ 1) of a booted system, which keeps the
 /// keystrokes in the BIOS data area as a PC's BIOS does.
 const KBD_HANDLER: u16 = 0x1230;
+/// The keyboard interrupt (IRQ 1) of the built-in DOS, which hands each
+/// scan code to INT 15h AH=4Fh as an AT's BIOS does, and moves the
+/// keystrokes the host typed into the BIOS's buffer.
+const DOS_KBD_HANDLER: u16 = 0x1320;
 /// The fixed disk parameter tables of the first two hard disks, which
 /// INT 41h and 46h point to.
 const FIXED_DISK_PARAMS: u16 = 0x12C0;
@@ -151,14 +168,20 @@ fn write_rom(bus: &mut Bus, offset: u16, code: &[u8]) {
 }
 
 /// The vector table the BIOS sets up: service traps, the timer and IRQ
-/// handlers, and an IRET for everything else except unused user vectors.
-/// Entries are segment:offset.
+/// handlers, and an IRET for everything else up to 77h except unused user
+/// vectors. Entries are segment:offset.
 pub fn default_ivt() -> [u32; 256] {
     let mut ivt = [far(IRET_HANDLER); 256];
     // DOS/4GW allocates an unused vector for its real-mode mouse callback
     // translator. It requires a null vector, not a pointer to an IRET.
     // Leave the same user-vector range available as DOSBox Staging.
     ivt[0x60..=0x65].fill(0);
+    // An AT BIOS sets up the vectors up to 77h and leaves the rest of the
+    // table zero, and DOSBox does too. Drivers look there for a free
+    // vector to install on: Creative's SBFMDRV takes the first null one
+    // from INT 80h, and without one it exits with "No interrupt vector
+    // available".
+    ivt[0x78..].fill(0);
     ivt[0x0A..=0x0F].fill(far(MASTER_EOI_HANDLER));
     ivt[0x70..=0x77].fill(far(SLAVE_EOI_HANDLER));
     ivt[0x71] = far(IRQ9_HANDLER);
@@ -167,6 +190,10 @@ pub fn default_ivt() -> [u32; 256] {
         ivt[vector as usize] = far(TRAP_BASE + 4 * i as u16);
     }
     ivt[0x08] = far(TIMER_HANDLER);
+    // The mouse driver's handler is in low memory, where a mouse driver's
+    // resident code is. Its trap in the ROM stays, for save states and
+    // programs that kept its address.
+    ivt[0x33] = crate::mouse::vector();
     ivt[0x1E] = far(DISKETTE_PARAMS);
     // The video BIOS's fonts: the second half of the 8x8 font for the CGA
     // graphics modes, and the graphics font of the mode it starts in.
@@ -390,11 +417,14 @@ pub fn install(bus: &mut Bus) {
     // completed ECB with an event service routine to it.
     write_rom(bus, IPX_ENTRY, &[0xFE, 0x39, SERVICE_IPX, 0xCB]);
     write_rom(bus, IPX_IRQ, &ipx_irq_handler());
+    write_rom(bus, MOUSE_IRQ, &mouse_irq_handler());
     // Services in V86 mode: make each port access the service left, then
     // return.
     write_rom(bus, PORT_ACCESSES, &port_access_loop());
     write_rom(bus, PORT_ACCESSES_MORE, &port_access_more());
     write_rom(bus, KBD_HANDLER, &keyboard_handler());
+    write_rom(bus, DOS_KBD_HANDLER, &dos_keyboard_handler());
+    write_rom(bus, hle_trap(0x09), &keyboard_trap(DOS_KBD_HANDLER));
     // The Plug and Play BIOS's and APM's entry points: the service, then a
     // far return (32-bit in APM's 32-bit code segment).
     write_rom(bus, crate::pnpbios::ENTRY, &[0xFE, 0x3A, FAR_PNP, 0xCB]);
@@ -500,6 +530,24 @@ fn ipx_irq_handler() -> Vec<u8> {
     code
 }
 
+/// The INT 33h driver's IRQ 12 handler: the service calls the program's
+/// event handler through the mouse's stub, which returns here, and the
+/// PICs are acknowledged; a PS/2 byte goes to the BIOS's handler instead.
+fn mouse_irq_handler() -> Vec<u8> {
+    let mut a = crate::asm16::Asm::new(MOUSE_IRQ);
+    a.op(&[0xFE, 0x39, SERVICE_MOUSE_IRQ]); // CF: the BIOS's PS/2 byte
+    a.jump(0x72, "ps2");
+    a.op(&[0x50, 0xB0, 0x20]); // PUSH AX; MOV AL, 20h
+    a.op(&[0xE6, 0xA0, 0xE6, 0x20, 0x58]); // OUT A0h, AL; OUT 20h, AL; POP AX
+    a.op(&[0xCF]); // IRET
+    a.label("ps2");
+    let [lo, hi] = PS2_HANDLER.to_le_bytes();
+    a.op(&[0xEA, lo, hi, 0x00, 0xF0]); // JMP FAR F000:PS2_HANDLER
+    let code = a.finish();
+    assert!(MOUSE_IRQ as usize + code.len() <= 0x1640);
+    code
+}
+
 /// Whether the vector table entry `entry` (segment:offset) is one of the
 /// BIOS's own IRQ handlers that only acknowledge the interrupt, or the
 /// IPX driver's, which a device may take the IRQ over from.
@@ -515,7 +563,7 @@ pub fn is_default_irq_handler(entry: u32) -> bool {
 fn keyboard_handler() -> Vec<u8> {
     let mut a = crate::asm16::Asm::new(KBD_HANDLER);
     a.op(&[0x50]); // PUSH AX
-    a.op(&[0xE4, 0x60]); // IN AL, 60h
+    a.op(&[0xE4, 0x60, 0xFB]); // IN AL, 60h; STI, as an AT's BIOS
     a.op(&[0xB4, 0x4F, 0xF9, 0xCD, 0x15]); // MOV AH, 4Fh; STC; INT 15h
     a.jump(0x73, "eoi"); // JNC eoi: the hook took the key
     a.op(&[0xFE, 0x39, SERVICE_KBD_SCAN]); // AH: what else to do
@@ -543,7 +591,46 @@ fn keyboard_handler() -> Vec<u8> {
     a.label("eoi");
     a.op(&[0xFA, 0xB0, 0x20, 0xE6, 0x20]); // CLI; MOV AL, 20h; OUT 20h, AL
     a.op(&[0x58, 0xCF]); // POP AX; IRET
-    a.finish()
+    let code = a.finish();
+    assert!(KBD_HANDLER as usize + code.len() <= FIXED_DISK_PARAMS as usize);
+    code
+}
+
+/// The keyboard interrupt of the built-in DOS, as an AT's BIOS runs it:
+/// read the scan code, let INT 15h AH=4Fh take it or change it, keep the
+/// keystrokes of a key it didn't take (`keyboard::bios_intercepted`), and
+/// acknowledge the interrupt. Programs that read the keyboard through the
+/// intercept alone, leaving INT 09h to the BIOS, see every key this way
+/// (Sink or Swim's setup and game keep a table of held keys from it).
+fn dos_keyboard_handler() -> Vec<u8> {
+    let mut a = crate::asm16::Asm::new(DOS_KBD_HANDLER);
+    a.op(&[0x50]); // PUSH AX
+    a.op(&[0xE4, 0x60, 0xFB]); // IN AL, 60h; STI, as an AT's BIOS
+    a.op(&[0xB4, 0x4F, 0xF9, 0xCD, 0x15]); // MOV AH, 4Fh; STC; INT 15h
+    a.op(&[0xFE, 0x39, SERVICE_KBD_INTERCEPTED]); // AL, CF: what the hook left
+    a.op(&[0xFA, 0xB0, 0x20, 0xE6, 0x20]); // CLI; MOV AL, 20h; OUT 20h, AL
+    a.op(&[0x58, 0xCF]); // POP AX; IRET
+    let code = a.finish();
+    assert!(DOS_KBD_HANDLER as usize + code.len() <= IPX_ENTRY as usize);
+    code
+}
+
+/// The keyboard interrupt's trap in the vector table's order of traps,
+/// where programs that kept its address still go: a jump to the keyboard
+/// interrupt `handler`.
+fn keyboard_trap(handler: u16) -> [u8; 4] {
+    let [lo, hi] = handler.wrapping_sub(hle_trap(0x09) + 3).to_le_bytes();
+    [0xE9, lo, hi, 0xCF] // JMP near handler
+}
+
+/// Point the keyboard interrupt's trap of a state saved before the built-in
+/// DOS had a keyboard interrupt of its own (`interrupts::int09`) at the
+/// ROM's handler, which calls INT 15h AH=4Fh, from the next key on.
+pub fn dos_keyboard(bus: &mut Bus) {
+    if !bus.kbd.windows {
+        write_rom(bus, DOS_KBD_HANDLER, &dos_keyboard_handler());
+        write_rom(bus, hle_trap(0x09), &keyboard_trap(DOS_KBD_HANDLER));
+    }
 }
 
 /// Windows' 386 enhanced mode starts (`on`) or ends: while it runs, its
@@ -559,24 +646,35 @@ pub fn windows_keyboard(bus: &mut Bus, on: bool) {
     }
     bus.kbd.windows = on;
     crate::keyboard::reset_keystrokes(bus);
-    let trap = hle_trap(0x09);
-    let code = if on {
-        let [lo, hi] = KBD_HANDLER.wrapping_sub(trap + 3).to_le_bytes();
-        [0xE9, lo, hi, 0xCF] // JMP near KBD_HANDLER
+    // The handler's code goes in with the jump: the ROM of a state saved
+    // before the built-in DOS had a handler of its own lacks it.
+    let (handler, code) = if on {
+        (KBD_HANDLER, keyboard_handler())
     } else {
-        [0xFE, 0x38, 0x09, 0xCF]
+        (DOS_KBD_HANDLER, dos_keyboard_handler())
     };
-    write_rom(bus, trap, &code);
+    write_rom(bus, handler, &code);
+    write_rom(bus, hle_trap(0x09), &keyboard_trap(handler));
 }
 
-/// Put the default vectors back, except those pointing into `keep`
-/// (the memory of resident programs, whose hooks must survive).
+/// Put the default vectors back where they point into memory the shell
+/// takes back: conventional or upper memory outside `keep` (the memory of
+/// resident programs, whose hooks must survive). DOS itself never puts
+/// vectors back when a program ends, only INT 22h-24h from the PSP. The
+/// shell does for these because it clears the memory a program leaves,
+/// and a frontend can stop a program before it unhooks, so such a vector
+/// would call into zeroed or reused memory. A vector that points at the
+/// BIOS's or the video BIOS's ROM still leads to code and stays, as in
+/// DOS: Rob Northen's CDPATCH moves DOS's INT 21h entry (F000:1030) to
+/// INT 6Fh and chains to it from its own INT 21h hook.
 pub fn restore_ivt(bus: &mut Bus, keep: &[std::ops::Range<usize>]) {
+    let upper = crate::mcb::UMB_START as usize * 16..crate::mcb::UMB_END as usize * 16;
     for (vector, &entry) in default_ivt().iter().enumerate() {
         let offset = bus.read_16(vector * 4) as usize;
         let segment = bus.read_16(vector * 4 + 2) as usize;
         let at = (segment << 4) + offset;
-        if keep.iter().any(|range| range.contains(&at)) {
+        let taken_back = at < 0xA0000 || upper.contains(&at);
+        if !taken_back || keep.iter().any(|range| range.contains(&at)) {
             continue;
         }
         bus.write_16(vector * 4, entry as u16);

@@ -13,7 +13,7 @@
 
 use super::Thunk;
 use super::handles::{icon16, icon32, menu16, menu32};
-use super::thunk::{self, ESP, KIND_DLGPROC};
+use super::thunk::{self, EAX, ESP, KIND_DLGPROC};
 use crate::cpu::{Cpu, Seg};
 use crate::dpmi::Context;
 
@@ -250,15 +250,52 @@ fn class_name(cpu: &Cpu, hwnd: u32) -> String {
         .map_or(String::new(), |c| c.name.to_ascii_lowercase())
 }
 
+/// The system's control whose window procedure `proc` is, by the name
+/// of its class, lower case: the system class with that procedure, if
+/// it is one of the controls whose messages Win32 numbers differently.
+/// The classes' procedures are looked at, not USER32's exports by name,
+/// as this runs for every WM_USER message 16-bit code sends.
+fn control_of_proc(cpu: &Cpu, proc: u32) -> Option<String> {
+    const CONTROLS: [&str; 7] = [
+        "edit",
+        "listbox",
+        "combolbox",
+        "combobox",
+        "button",
+        "static",
+        "scrollbar",
+    ];
+    if proc == 0 {
+        return None;
+    }
+    let class = cpu
+        .bus
+        .win32
+        .user
+        .classes
+        .iter()
+        .flatten()
+        .find(|c| c.system && c.proc == proc)?;
+    let name = class.name.to_ascii_lowercase();
+    CONTROLS.contains(&name.as_str()).then_some(name)
+}
+
 /// A 16-bit program's message to the window `hwnd` as Win32 numbers it:
 /// the controls' messages of the system's classes moved down from
-/// WM_USER.
-fn control_msg32(cpu: &Cpu, hwnd: u32, msg: u32) -> u32 {
+/// WM_USER. `target` is the 32-bit procedure that gets it, when it is
+/// known: a control's procedure takes them as its own control's
+/// messages whatever the window's class is called. A superclass of a
+/// control (Delphi's TListBox, whose procedure passes what it doesn't
+/// handle on to LISTBOX's with CallWindowProc) gets the message as the
+/// control's procedure would get it on Windows 3.1, and it is the call
+/// of that procedure that translates it.
+fn control_msg32(cpu: &Cpu, hwnd: u32, msg: u32, target: u32) -> u32 {
     if !(WM_USER..WM_USER + 0x40).contains(&msg) {
         return msg;
     }
     let n = msg - WM_USER;
-    match class_name(cpu, hwnd).as_str() {
+    let class = control_of_proc(cpu, target).unwrap_or_else(|| class_name(cpu, hwnd));
+    match class.as_str() {
         "edit" if n <= 0x29 => EM_GETSEL + n,
         "listbox" | "combolbox" if (1..=0x2A).contains(&n) => LB_ADDSTRING + n - 1,
         "combobox" if n <= 0x1C => CB_GETEDITSEL + n,
@@ -294,16 +331,18 @@ fn control_msg16(cpu: &Cpu, hwnd: u32, msg: u32) -> u32 {
 /// A message 16-bit code sends or passes on, as 32-bit code gets it:
 /// (msg, wParam, lParam), the structures it points to copied to `stack`,
 /// and what to write back when it returns (`data` grows).
+#[allow(clippy::too_many_arguments)]
 fn to32(
     cpu: &mut Cpu,
     hwnd: u32,
     msg16: u32,
     wp: u32,
     lp: u32,
+    target: u32,
     stack: &mut Stack32,
     data: &mut Vec<u32>,
 ) -> (u32, u32, u32) {
-    let msg = control_msg32(cpu, hwnd, msg16);
+    let msg = control_msg32(cpu, hwnd, msg16, target);
     let flat = |cpu: &Cpu, lp: u32| super::linear(cpu, lp);
     data.push(msg);
 
@@ -523,7 +562,7 @@ fn to32(
                     | CB_FINDSTRING
                     | CB_FINDSTRINGEXACT
                     | CB_SELECTSTRING
-            ) || has_strings(cpu, hwnd);
+            ) || has_strings(cpu, hwnd, msg);
             (
                 msg,
                 sx_wparam(msg, wp),
@@ -599,11 +638,13 @@ fn sx_wparam(msg: u32, wp: u32) -> u32 {
     }
 }
 
-/// Whether the list box or combo box `hwnd` keeps strings.
-fn has_strings(cpu: &Cpu, hwnd: u32) -> bool {
+/// Whether the list box or combo box `hwnd`, which gets the message
+/// `msg`, keeps strings. A CB_ message says it is a combo box, whose
+/// CBS_HASSTRINGS is another bit than LBS_HASSTRINGS, whatever its class
+/// is called: a superclass's (Delphi's TComboBox) is too.
+fn has_strings(cpu: &Cpu, hwnd: u32, msg: u32) -> bool {
     let style = cpu.bus.win32.user.window(hwnd).map_or(0, |w| w.style);
-    let class = class_name(cpu, hwnd);
-    let (owner_draw, strings) = if class == "combobox" {
+    let (owner_draw, strings) = if (CB_GETEDITSEL..LB_ADDSTRING).contains(&msg) {
         (0x0030, 0x0200)
     } else {
         (0x0030, 0x0040)
@@ -966,8 +1007,15 @@ pub fn call_wndproc16(cpu: &mut Cpu, thunk: &Thunk) {
     let mut stack = Stack16::new(cpu, at);
     let mut data = vec![thunk.kind as u32];
     let (msg16, wp16, lp16) = to16(cpu, hwnd, msg, wp, lp, &mut stack, &mut data);
-    let ds = window_ds(cpu, hwnd, thunk);
-    thunk::call16_at(
+    // As Windows' USER calls a window procedure: DS and ES the task's
+    // stack, which lasts as long as the task, and AX the instance's data
+    // segment for the prologue to load. DS can't be the instance's own:
+    // a procedure may free its window's instance block while it runs
+    // (Delphi's TMemo frees its edit control's in WM_NCDESTROY) and then
+    // restore a DS that is gone.
+    let mut regs = Context::default();
+    regs.gpr[EAX] = window_ds(cpu, hwnd, thunk) as u32;
+    thunk::call16_regs(
         cpu,
         thunk.target,
         &[
@@ -977,7 +1025,7 @@ pub fn call_wndproc16(cpu: &mut Cpu, thunk: &Thunk) {
             (lp16 >> 16) as u16,
             lp16 as u16,
         ],
-        ds,
+        regs,
         resume,
         thunk::THEN_MESSAGE,
         data,
@@ -985,8 +1033,8 @@ pub fn call_wndproc16(cpu: &mut Cpu, thunk: &Thunk) {
     );
 }
 
-/// The data segment a 16-bit window procedure of `hwnd` gets in AX and
-/// DS: its window's instance's, else its thunk's.
+/// The data segment a 16-bit window procedure of `hwnd` gets in AX:
+/// its window's instance's, else its thunk's.
 fn window_ds(cpu: &Cpu, hwnd: u32, thunk: &Thunk) -> u16 {
     let instance = cpu
         .bus
@@ -1059,7 +1107,7 @@ pub fn send32_with(
         top: thunk::scratch32(cpu, 0x400),
     };
     let mut data = Vec::new();
-    let (msg32, wp32, lp32) = to32(cpu, hwnd, msg, wp, lp, &mut stack, &mut data);
+    let (msg32, wp32, lp32) = to32(cpu, hwnd, msg, wp, lp, target, &mut stack, &mut data);
     let top = stack.top;
     let mut args = vec![hwnd];
     args.extend_from_slice(extra);
@@ -1074,8 +1122,8 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Option<
 }
 
 /// The address of USER32's function `name`.
-fn user32(name: &str) -> u32 {
-    crate::win32::user32::address_of(name)
+fn user32(cpu: &Cpu, name: &str) -> u32 {
+    crate::win32::user32::address_of(cpu, name)
 }
 
 /// SendMessage(hwnd, msg, wParam, lParam) of 16-bit code: USER32's
@@ -1087,7 +1135,7 @@ pub fn send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// DefWindowProc, DefDlgProc and the others that take a message.
 pub fn send32_fn(cpu: &mut Cpu, name: &str, args: &[u32]) {
-    let target = user32(name);
+    let target = user32(cpu, name);
     send32(cpu, target, args[0], args[1], args[2], args[3]);
 }
 
@@ -1099,9 +1147,9 @@ pub fn post_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         top: thunk::scratch32(cpu, 0x400),
     };
     let (msg, wp, lp) = to32(
-        cpu, args[0], args[1], args[2], args[3], &mut stack, &mut data,
+        cpu, args[0], args[1], args[2], args[3], 0, &mut stack, &mut data,
     );
-    let target = user32("PostMessageA");
+    let target = user32(cpu, "PostMessageA");
     let ctx = Context::of(cpu);
     thunk::enter32_at(
         cpu,
@@ -1166,7 +1214,7 @@ pub fn msg32(cpu: &mut Cpu, m16: u32, m: u32) -> u32 {
     let lp = r32(cpu, m16 + 6);
     let mut data = Vec::new();
     let mut stack = Stack32 { top: m };
-    let (msg, wp, lp) = to32(cpu, hwnd, msg, wp, lp, &mut stack, &mut data);
+    let (msg, wp, lp) = to32(cpu, hwnd, msg, wp, lp, 0, &mut stack, &mut data);
     let time = r32(cpu, m16 + 10);
     let x = sx(r16(cpu, m16 + 14));
     let y = sx(r16(cpu, m16 + 16));

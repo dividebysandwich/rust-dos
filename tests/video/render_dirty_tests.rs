@@ -19,7 +19,7 @@ fn scratch(name: &str) -> PathBuf {
 
 /// A shell-ready CPU whose frame has been rendered once, so later renders
 /// only repaint what gets marked dirty (like the main loop).
-fn rendered_shell(name: &str) -> (Cpu, Frame) {
+fn rendered_shell(name: &str) -> (Box<Cpu>, Frame) {
     let mut cpu = Cpu::new(scratch(name));
     cpu.load_shell();
     let mut frame = Frame::new(SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -377,5 +377,43 @@ fn moving_and_blinking_cursors_match_full_composition_in_text_and_graphics() {
             mono::apply(&mut full, monitor);
             assert!(output == full, "mode {mode:02x}, step {step}");
         }
+    }
+}
+
+#[test]
+fn rewriting_text_vram_with_the_same_bytes_repaints_nothing() {
+    // Sink or Swim's setup menu writes its whole screen again on every
+    // pass of its loop; the bytes are the ones already there.
+    let (mut cpu, _frame) = rendered_shell("same_bytes");
+    let cell = 0xB8000 + 2 * (5 * 80 + 10);
+    cpu.bus.write_8(cell, b'A');
+    cpu.bus.write_8(cell + 1, 0x1F);
+    assert!(cpu.bus.vga.dirty, "a new character is painted");
+    cpu.bus.vga.clear_dirty();
+    cpu.bus.write_8(cell, b'A');
+    cpu.bus.write_8(cell + 1, 0x1F);
+    assert!(!cpu.bus.vga.dirty, "the same character again changes no pixel");
+    cpu.bus.write_8(cell, b'B');
+    assert!(cpu.bus.vga.dirty, "another character is painted");
+}
+
+#[test]
+fn rewriting_a_gate_arrays_text_with_the_same_bytes_repaints_nothing() {
+    // The Tandy's and PCjr's window at B8000h onto system memory, as the
+    // card's text VRAM above.
+    use rust_dos::video::adapter::{Adapter, VideoSetup};
+    use rust_dos::video::bios;
+    for adapter in [Adapter::Tandy, Adapter::Pcjr] {
+        let mut cpu = Cpu::new(scratch("same_bytes_gate_array"));
+        bios::install(&mut cpu.bus, VideoSetup { adapter, ..Default::default() });
+        cpu.load_shell();
+        let cell = 0xB8000 + 2 * (5 * 80 + 10);
+        cpu.bus.write_8(cell, b'A');
+        assert!(cpu.bus.vga.dirty, "{adapter:?}: a new character is painted");
+        cpu.bus.vga.clear_dirty();
+        cpu.bus.write_8(cell, b'A');
+        assert!(!cpu.bus.vga.dirty, "{adapter:?}: the same character again changes no pixel");
+        cpu.bus.write_8(cell, b'B');
+        assert!(cpu.bus.vga.dirty, "{adapter:?}: another character is painted");
     }
 }

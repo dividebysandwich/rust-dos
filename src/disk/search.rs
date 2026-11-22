@@ -132,11 +132,19 @@ impl DiskController {
     /// mounting a huge directory as a floppy stays cheap. Symlinks are not
     /// followed.
     fn used_clusters(&self, root: &Path, cluster_bytes: u64, cap: u64) -> u64 {
+        let writing: Vec<&Path> = self
+            .open_files
+            .values()
+            .filter_map(|open| match &open.data {
+                OpenData::Host(_, Some(path)) => Some(path.as_path()),
+                _ => None,
+            })
+            .collect();
         let mut used = 0u64;
         let mut pending = vec![root.to_path_buf()];
         while let Some(dir) = pending.pop() {
             let (clusters, dirs) = self.host_dirs.usage(&dir, cluster_bytes, cap, || {
-                Self::dir_usage(&dir, cluster_bytes, cap)
+                Self::dir_usage(&dir, cluster_bytes, cap, &writing)
             });
             used += clusters + dirs.len() as u64;
             if used >= cap {
@@ -148,24 +156,42 @@ impl DiskController {
     }
 
     /// The clusters the files in the host folder `dir` take, up to `cap`,
-    /// and the folders in it.
-    fn dir_usage(dir: &Path, cluster_bytes: u64, cap: u64) -> Usage {
+    /// and the folders in it. A file's size comes with the listing where
+    /// the host gives it (`hostfs::DirEntry::len`), or from a stat. The
+    /// files in `writing`, which the guest holds open for writing, are
+    /// statted: NTFS may leave what a handle still open wrote out of the
+    /// size its listing gives, and the count would then depend on when it
+    /// was taken.
+    fn dir_usage(dir: &Path, cluster_bytes: u64, cap: u64, writing: &[&Path]) -> DirCount {
         let mut clusters = 0u64;
         let mut dirs = Vec::new();
+        let mut files = HashMap::new();
+        let mut complete = true;
         for entry in hostfs::read_dir(dir).unwrap_or_default() {
             if host_private(&entry.name.to_string_lossy()) {
                 continue;
             }
             if entry.is_dir {
                 dirs.push(entry.path);
-            } else if let Some(meta) = entry.metadata().ok().filter(|m| m.is_file()) {
-                clusters += meta.len.div_ceil(cluster_bytes);
+            } else if let Some(len) = entry
+                .len
+                .filter(|_| !writing.contains(&entry.path.as_path()))
+                .or_else(|| entry.metadata().ok().filter(|m| m.is_file()).map(|m| m.len))
+            {
+                let taken = len.div_ceil(cluster_bytes);
+                clusters += taken;
+                files.insert(entry.name, taken);
             }
             if clusters + dirs.len() as u64 >= cap {
+                complete = false;
                 break;
             }
         }
-        (clusters, dirs.into())
+        DirCount {
+            clusters,
+            dirs: dirs.into(),
+            files: complete.then_some(files),
+        }
     }
 
     // INT 21h, AH=43h: Get File Attributes
@@ -491,23 +517,46 @@ impl DiskController {
 
     // INT 21h, AH=4E/4F: Find First / Find Next
     // search_spec contains the path AND the pattern e.g. "C:\GAMES\*.EXE" or "*.EXE"
-    /// Entry `search_index` of the listing of `search_spec`. Off a FAT
-    /// disk FindNext passes the same spec with the next index each call
-    /// (`find_entry_from`); on a host drive the listing FindFirst (index
-    /// 0) made is kept for it, as long as the folder doesn't change
-    /// (`HostDirCache`), rather than listing the folder again for each
-    /// entry.
+    /// The entry at or after `search_index` of the listing of
+    /// `search_spec`. Off a FAT disk FindNext passes the same spec with
+    /// the next index each call (`find_entry_from`); on a host drive the
+    /// listing FindFirst (index 0) made is kept for it, as long as the
+    /// folder doesn't change (`HostDirCache`), rather than listing the
+    /// folder again for each entry.
     pub fn find_directory_entry(
         &self,
         search_spec: &str,
         search_index: usize,
         search_attr: u16,
     ) -> Result<DosDirEntry, u8> {
+        self.find_listed_entry(search_spec, search_index, search_attr)
+            .map(|(entry, _)| entry)
+    }
+
+    /// `find_directory_entry`, with where the search goes on from: past
+    /// the entry, which in a host folder the guest deleted or renamed
+    /// files in mid-search may be past an empty slot
+    /// (`HostDirCache::relist`).
+    fn find_listed_entry(
+        &self,
+        search_spec: &str,
+        search_index: usize,
+        search_attr: u16,
+    ) -> Result<(DosDirEntry, usize), u8> {
         let Some(key) = self.search_key(search_spec, search_attr) else {
-            return self.list_directory(search_spec, search_attr)?.into_iter().nth(search_index).ok_or(0x12);
+            let listed = self.list_directory(search_spec, search_attr)?;
+            let entry = listed.into_iter().nth(search_index).ok_or(0x12)?;
+            return Ok((entry, search_index + 1));
         };
-        let entries = self.host_dirs.search(key, search_index == 0, || self.list_directory(search_spec, search_attr))?;
-        entries.get(search_index).cloned().ok_or(0x12)
+        let slots = self.host_dirs.search(key, search_index, || {
+            self.list_directory(search_spec, search_attr)
+        })?;
+        slots
+            .iter()
+            .enumerate()
+            .skip(search_index)
+            .find_map(|(at, slot)| Some((slot.clone()?, at + 1)))
+            .ok_or(0x12)
     }
 
     /// The entry FindFirst or FindNext finds for `search_spec` at or after
@@ -515,7 +564,9 @@ impl DiskController {
     /// a slot of the directory, as in DOS: a program that deletes each
     /// file it finds (Windows 98 Setup's DELTEMP emptying its folder)
     /// doesn't make the next file move up to a slot the search has
-    /// passed. Elsewhere it counts the entries found.
+    /// passed. A search of a host folder keeps its entries in slots the
+    /// same way (`HostDirCache::relist`). Elsewhere it counts the entries
+    /// found.
     pub fn find_entry_from(
         &self,
         search_spec: &str,
@@ -523,9 +574,7 @@ impl DiskController {
         search_attr: u16,
     ) -> Result<(DosDirEntry, usize), u8> {
         let Some(listing) = self.fat_slots(search_spec, search_attr) else {
-            return self
-                .find_directory_entry(search_spec, from, search_attr)
-                .map(|entry| (entry, from + 1));
+            return self.find_listed_entry(search_spec, from, search_attr);
         };
         listing
             .into_iter()
@@ -643,15 +692,32 @@ impl DiskController {
         search_spec: &str,
         search_attr: u16,
     ) -> Result<Vec<DosDirEntry>, u8> {
-        let listed = self.list_drive_directory(search_spec, search_attr);
+        let listed = self.list_drive_directory(search_spec, search_attr, None);
         self.with_system_entries(search_spec, search_attr, listed)
     }
 
-    /// The entries of the drive's own matching a search spec.
+    /// `list_directory`, where the caller wants only the entries `wanted`
+    /// takes and drops the others itself. On a host drive the others are
+    /// left out before the stat each entry listed costs, and a search for
+    /// one name looks it up as a path does (`NameFilter::name`). Other
+    /// drives list as `list_directory` does.
+    pub fn list_directory_where(
+        &self,
+        search_spec: &str,
+        search_attr: u16,
+        wanted: &NameFilter,
+    ) -> Result<Vec<DosDirEntry>, u8> {
+        let listed = self.list_drive_directory(search_spec, search_attr, Some(wanted));
+        self.with_system_entries(search_spec, search_attr, listed)
+    }
+
+    /// The entries of the drive's own matching a search spec, on a host
+    /// drive only those `wanted` takes.
     fn list_drive_directory(
         &self,
         search_spec: &str,
         search_attr: u16,
+        wanted: Option<&NameFilter>,
     ) -> Result<Vec<DosDirEntry>, u8> {
         let normalized = search_spec.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized).ok_or(0x03)?;
@@ -756,7 +822,13 @@ impl DiskController {
         // stats every match anyway, so the read adds little. A search for
         // one name looks it up as a path does: the folder is read again
         // when nothing kept has it, unless a recent read hadn't it either.
-        let entries = if pattern.contains(['*', '?']) {
+        let keep = |long: &str, dos: &str| wanted.is_none_or(|w| (w.keep)(long, dos));
+        let entries = if let Some(name) = wanted.and_then(|w| w.name) {
+            let find = |entries: &[(String, String)]| {
+                entries.iter().any(|(l, d)| keep(l, d)).then_some(())
+            };
+            self.find_host_where(&host_dir, name, find).0
+        } else if pattern.contains(['*', '?']) {
             let (entries, kept) = self.host_entries(&host_dir);
             if kept {
                 self.host_dirs.reread(&host_dir, || Self::read_host_entries(&host_dir))
@@ -771,7 +843,7 @@ impl DiskController {
         for (original_name, final_name) in entries.iter() {
             // The name decides first: a stat per entry is what a listing
             // costs, and a search for one name needs only its own.
-            if !Self::matches_pattern(final_name, pattern) {
+            if !Self::matches_pattern(final_name, pattern) || !keep(original_name, final_name) {
                 continue;
             }
             let Ok(metadata) = hostfs::metadata(host_dir.join(original_name)) else {
@@ -804,6 +876,21 @@ impl DiskController {
 
         Ok(valid_entries)
     }
+}
+
+/// The entries a caller of `DiskController::list_directory_where` wants.
+pub struct NameFilter<'a> {
+    /// Takes an entry by its long name and its DOS name, which are the
+    /// same where it has no long name.
+    pub keep: &'a dyn Fn(&str, &str) -> bool,
+    /// The one name `keep` takes, by its long or its DOS name, where it
+    /// takes one alone (no wildcards). The folder's kept entries are then
+    /// used and read again only when none has the name, unless a read less
+    /// than `HostDirCache::TRUST` ago hadn't it either (`find_host_where`),
+    /// as for a path. Without it a host folder is read afresh: a wildcard
+    /// may match a file another program added without the folder's time
+    /// moving.
+    pub name: Option<&'a str>,
 }
 
 /// The free clusters of a hard disk made of a host folder, `used` of them

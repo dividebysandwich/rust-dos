@@ -199,6 +199,30 @@ fn run_machine(
     memory_mb: Option<usize>,
     setup: impl FnOnce(&mut Cpu, &Path),
 ) -> (u8, String) {
+    run_prompts(test, program, command, args, memory_mb, 1, setup)
+}
+
+/// `run_with`, going on until the prompt has come back `prompts` times:
+/// for what the shell runs after the program, which then gives the exit
+/// code.
+pub fn run_with_prompts(
+    test: &str,
+    program: Vec<u8>,
+    prompts: usize,
+    setup: impl FnOnce(&mut Cpu, &Path),
+) -> (u8, String) {
+    run_prompts(test, program, "T.EXE", "", None, prompts, setup)
+}
+
+fn run_prompts(
+    test: &str,
+    program: Vec<u8>,
+    command: &str,
+    args: &str,
+    memory_mb: Option<usize>,
+    prompts: usize,
+    setup: impl FnOnce(&mut Cpu, &Path),
+) -> (u8, String) {
     let base = scratch(test, &[("T.EXE", program)]);
     let mut cpu = match memory_mb {
         Some(mb) => Cpu::with_memory(base.clone(), mb),
@@ -217,15 +241,124 @@ fn run_machine(
         rust_dos::exec::run_program(&mut cpu, command, args, false),
         "{command} didn't start"
     );
-    let mut ended = false;
-    for _ in 0..400 {
+    let mut ended = 0;
+    for _ in 0..400 * prompts {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
         if run_batch(&mut cpu, &mut NoHook, false) == StopReason::ShellReloaded {
-            ended = true;
-            break;
+            ended += 1;
+            if ended == prompts {
+                break;
+            }
         }
     }
+    let ended = ended == prompts;
     let log = lines.lock().unwrap().join("\n");
     assert!(ended, "the program didn't end:\n{log}");
     (cpu.errorlevel, log)
+}
+
+/// A DOS program (a COM file) that changes to C:\SUB (if it is there),
+/// writes C:\MARK.TXT and ends with 5: the file holds what INT 2Fh
+/// AX=1600h gave it (Windows' version, as a DOS box on Windows has it),
+/// then its command tail.
+pub fn dos_marker() -> Vec<u8> {
+    const NAME: u16 = 0x0140;
+    const RESULT: u16 = 0x0150;
+    const SUB: u16 = 0x0160;
+    let [name_lo, name_hi] = NAME.to_le_bytes();
+    let [result_lo, result_hi] = RESULT.to_le_bytes();
+    let [sub_lo, sub_hi] = SUB.to_le_bytes();
+    let mut code = vec![
+        0xB4, 0x3B, // mov ah,3Bh
+        0xBA, sub_lo, sub_hi, // mov dx,sub
+        0xCD, 0x21, // int 21h
+        0xB8, 0x00, 0x16, // mov ax,1600h
+        0xCD, 0x2F, // int 2Fh
+        0xA3, result_lo, result_hi, // mov [result],ax
+        0xB4, 0x3C, // mov ah,3Ch
+        0x31, 0xC9, // xor cx,cx
+        0xBA, name_lo, name_hi, // mov dx,name
+        0xCD, 0x21, // int 21h
+        0x72, 0x22, // jc fail
+        0x89, 0xC3, // mov bx,ax
+        0xB4, 0x40, // mov ah,40h
+        0xB9, 0x02, 0x00, // mov cx,2
+        0xBA, result_lo, result_hi, // mov dx,result
+        0xCD, 0x21, // int 21h
+        0xB4, 0x40, // mov ah,40h
+        0x8A, 0x0E, 0x80, 0x00, // mov cl,[80h]
+        0x30, 0xED, // xor ch,ch
+        0xBA, 0x81, 0x00, // mov dx,81h
+        0xCD, 0x21, // int 21h
+        0xB4, 0x3E, // mov ah,3Eh
+        0xCD, 0x21, // int 21h
+        0xB8, 0x05, 0x4C, // mov ax,4C05h
+        0xCD, 0x21, // int 21h
+        0xB8, 0x06, 0x4C, // fail: mov ax,4C06h
+        0xCD, 0x21, // int 21h
+    ];
+    code.resize((NAME - 0x100) as usize, 0x90);
+    code.extend_from_slice(b"C:\\MARK.TXT\0");
+    code.resize((SUB - 0x100) as usize, 0);
+    code.extend_from_slice(b"C:\\SUB\0");
+    code
+}
+
+/// A DOS program (a COM file) that writes MARK.TXT in its current
+/// folder, with its command tail, and ends with 5 (6 when it can't make
+/// the file).
+pub fn dos_folder_marker() -> Vec<u8> {
+    const NAME: u16 = 0x0140;
+    let [name_lo, name_hi] = NAME.to_le_bytes();
+    let mut code = vec![
+        0xB4, 0x3C, // mov ah,3Ch
+        0x31, 0xC9, // xor cx,cx
+        0xBA, name_lo, name_hi, // mov dx,name
+        0xCD, 0x21, // int 21h
+        0x72, 0x18, // jc fail
+        0x89, 0xC3, // mov bx,ax
+        0xB4, 0x40, // mov ah,40h
+        0x8A, 0x0E, 0x80, 0x00, // mov cl,[80h]
+        0x30, 0xED, // xor ch,ch
+        0xBA, 0x81, 0x00, // mov dx,81h
+        0xCD, 0x21, // int 21h
+        0xB4, 0x3E, // mov ah,3Eh
+        0xCD, 0x21, // int 21h
+        0xB8, 0x05, 0x4C, // mov ax,4C05h
+        0xCD, 0x21, // int 21h
+        0xB8, 0x06, 0x4C, // fail: mov ax,4C06h
+        0xCD, 0x21, // int 21h
+    ];
+    code.resize((NAME - 0x100) as usize, 0x90);
+    code.extend_from_slice(b"MARK.TXT\0");
+    code
+}
+
+/// A PIF as Windows 98 writes one: the basic section with the program
+/// `program`, the working folder `directory` and the parameters
+/// `parameters`, then the "MICROSOFT PIFEX" record, the "WINDOWS 386
+/// 3.0" record with the parameters `enhanced`, and an empty "WINDOWS VMM
+/// 4.0" record.
+pub fn pif(program: &str, directory: &str, parameters: &str, enhanced: &str) -> Vec<u8> {
+    let mut data = vec![0u8; 0x171];
+    data[0x02..0x20].fill(b' ');
+    data[0x24..0x24 + program.len()].copy_from_slice(program.as_bytes());
+    data[0x65..0x65 + directory.len()].copy_from_slice(directory.as_bytes());
+    data[0xA5..0xA5 + parameters.len()].copy_from_slice(parameters.as_bytes());
+    let header = |data: &mut Vec<u8>, name: &[u8], next: u16, start: u16, size: u16| {
+        let mut h = [0u8; 22];
+        h[..name.len()].copy_from_slice(name);
+        h[16..18].copy_from_slice(&next.to_le_bytes());
+        h[18..20].copy_from_slice(&start.to_le_bytes());
+        h[20..22].copy_from_slice(&size.to_le_bytes());
+        data.extend_from_slice(&h);
+    };
+    header(&mut data, b"MICROSOFT PIFEX", 0x187, 0, 0x171);
+    header(&mut data, b"WINDOWS 386 3.0", 0x205, 0x19D, 0x68);
+    let mut record = [0u8; 0x68];
+    record[0x28..0x28 + enhanced.len()].copy_from_slice(enhanced.as_bytes());
+    data.extend_from_slice(&record);
+    header(&mut data, b"WINDOWS VMM 4.0", 0xFFFF, 0x21B, 0x1AC);
+    data.extend_from_slice(&[0u8; 0x1AC]);
+    data
 }

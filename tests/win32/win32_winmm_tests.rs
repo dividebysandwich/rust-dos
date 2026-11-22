@@ -109,7 +109,7 @@ fn machine(
     core: CoreMode,
     files: &[(&str, Vec<u8>)],
     prepare: impl FnOnce(&mut Cpu),
-) -> Cpu {
+) -> Box<Cpu> {
     let mut cpu = Cpu::new(scratch(test, files));
     cpu.core = core;
     cpu.bus.win32.enabled = true;
@@ -459,6 +459,106 @@ fn a_thread_preempted_while_it_preempts_another_goes_on_first() {
         run_to_exit(&mut cpu, 20_000, |_| {});
         let code = cpu.errorlevel;
         assert_eq!(code, 0, "{core:?}: exit code {code:#x}");
+        assert!(printed(&cpu).is_empty(), "{:?}", printed(&cpu));
+    }
+}
+
+const SET_EVENT: u32 = 0x00;
+const SET_FLAG: u32 = 0x04;
+const SET_START: u32 = 0x08;
+
+/// A thread that gives up its turn with Sleep(0) until a flag is set, and
+/// the main thread, five times over, waiting for an event that a one-shot
+/// timer of 10 ms sets (TIME_CALLBACK_EVENT_SET). The exit code is the
+/// longest of the five waits by timeGetTime, in milliseconds.
+fn timer_event_wait_program() -> Vec<u8> {
+    const TIME_CALLBACK_EVENT_SET: i32 = 0x10;
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.dll",
+            &[
+                "CreateThread",
+                "ExitProcess",
+                "Sleep",
+                "CreateEventA",
+                "WaitForSingleObject",
+            ],
+        ),
+        ("WINMM.dll", &["timeSetEvent", "timeGetTime"]),
+    ];
+    program(imports, &[0; 0x10], |a, l| {
+        // CreateThread's last three arguments, then its start address,
+        // which the call pushes: the code after it, the thread's.
+        let mut create = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(create)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(l.import(2))?;
+        a.cmp(dword_ptr(l.at(SET_FLAG)), 0)?;
+        a.je(spin)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut create)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        // An auto-reset event, not set.
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(l.import(3))?;
+        a.mov(dword_ptr(l.at(SET_EVENT)), eax)?;
+        a.xor(edi, edi)?;
+        a.mov(esi, 5)?;
+        let mut round = a.create_label();
+        a.set_label(&mut round)?;
+        a.call(l.import(6))?;
+        a.mov(dword_ptr(l.at(SET_START)), eax)?;
+        a.push(TIME_CALLBACK_EVENT_SET)?;
+        a.push(0)?;
+        a.push(dword_ptr(l.at(SET_EVENT)))?;
+        a.push(1)?;
+        a.push(10)?;
+        a.call(l.import(5))?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(SET_EVENT)))?;
+        a.call(l.import(4))?;
+        a.call(l.import(6))?;
+        a.sub(eax, dword_ptr(l.at(SET_START)))?;
+        let mut shorter = a.create_label();
+        a.cmp(eax, edi)?;
+        a.jbe(shorter)?;
+        a.mov(edi, eax)?;
+        a.set_label(&mut shorter)?;
+        a.dec(esi)?;
+        a.jnz(round)?;
+        a.mov(dword_ptr(l.at(SET_FLAG)), 1)?;
+        a.push(edi)?;
+        a.call(l.import(1))?;
+        a.int3()
+    })
+}
+
+/// A wait for an event a multimedia timer sets ends when the timer sets
+/// it, as SetEvent ends it on Windows, while another thread of the
+/// program gives up its turns with Sleep(0). The timer's thread used to
+/// set the event and leave the wait for the next look at all the waits
+/// (`thread::wake`), and Sleep(0), which doesn't look, found no other
+/// thread ready: the wait ended at a later timer event, up to the BIOS
+/// timer's next interrupt.
+#[test]
+fn a_wait_for_an_event_a_timer_sets_ends_when_it_is_set() {
+    for core in CORES {
+        let files = [("T.EXE", timer_event_wait_program())];
+        let mut cpu = machine("timer_event_wait", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        let code = cpu.errorlevel;
+        assert!((10..=11).contains(&code), "{core:?}: waited {code} ms");
         assert!(printed(&cpu).is_empty(), "{:?}", printed(&cpu));
     }
 }
@@ -897,6 +997,304 @@ fn mmio_reads_and_writes_riff_chunks() {
         expected.extend(3u32.to_le_bytes());
         expected.extend(b"abc\0");
         assert_eq!(out, expected, "{core:?}");
+    }
+}
+
+/// A program that installs an I/O procedure of its own for 'DOS ', as
+/// Stratosphere does to read its files from its archives, and opens
+/// two files that aren't on the disk: NONE.WAV, and PACK.ZZZ+NONE.WAV,
+/// whose extension has no procedure of its own. The procedure reads
+/// "PROC" for every file. Bits 0 and 2 of the exit code are set if the
+/// files opened, bits 1 and 3 if they read "PROC".
+fn mmio_dos_proc_program() -> Vec<u8> {
+    const MMIO_INSTALLPROC: i32 = 0x10000;
+    const MMIOM_READ: i32 = 0;
+    const MMIOM_SEEK: i32 = 2;
+    // MMIOINFO's lDiskOffset, where the procedure keeps its place.
+    const DISK_OFFSET: i32 = 44;
+    const NAME: u32 = 0x00;
+    const PACKED: u32 = 0x10;
+    const BUF: u32 = 0x30;
+    let fourcc = |s: &[u8; 4]| u32::from_le_bytes(*s) as i32;
+    let mut data = vec![0u8; 0x40];
+    put(&mut data, NAME as usize, b"NONE.WAV");
+    put(&mut data, PACKED as usize, b"PACK.ZZZ+NONE.WAV");
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        (
+            "WINMM.dll",
+            &["mmioInstallIOProcA", "mmioOpenA", "mmioRead", "mmioClose"],
+        ),
+    ];
+    program(imports, &data, |a, l| {
+        let at = |offset: u32| l.at(offset) as i32;
+        // The procedure's address in EBP, which the CALL over it
+        // pushes.
+        let mut start = a.create_label();
+        a.call(start)?;
+        // LRESULT CALLBACK IOProc(LPSTR info, UINT msg, LPARAM l1,
+        // LPARAM l2)
+        let mut read = a.create_label();
+        let mut seek = a.create_label();
+        let mut done = a.create_label();
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.cmp(eax, MMIOM_READ)?;
+        a.je(read)?;
+        a.cmp(eax, MMIOM_SEEK)?;
+        a.je(seek)?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        // Four bytes the first time, then the end of the file.
+        a.set_label(&mut read)?;
+        a.mov(ecx, dword_ptr(esp + 4))?;
+        a.xor(eax, eax)?;
+        a.cmp(dword_ptr(ecx + DISK_OFFSET), 0)?;
+        a.jne(done)?;
+        a.mov(edx, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(edx), fourcc(b"PROC"))?;
+        a.mov(dword_ptr(ecx + DISK_OFFSET), 4)?;
+        a.mov(eax, 4)?;
+        a.set_label(&mut done)?;
+        a.ret_1(16)?;
+        a.set_label(&mut seek)?;
+        a.mov(ecx, dword_ptr(esp + 4))?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(ecx + DISK_OFFSET), eax)?;
+        a.ret_1(16)?;
+
+        a.set_label(&mut start)?;
+        a.pop(ebp)?;
+        a.xor(ebx, ebx)?;
+        a.push(MMIO_INSTALLPROC)?;
+        a.push(ebp)?;
+        a.push(fourcc(b"DOS "))?;
+        a.call(l.import(1))?;
+        for (name, bit) in [(NAME, 0), (PACKED, 2)] {
+            let mut next = a.create_label();
+            a.mov(dword_ptr(l.at(BUF)), 0)?;
+            call(a, l.import(2), &[at(name), 0, 0])?;
+            a.mov(esi, eax)?;
+            a.test(eax, eax)?;
+            a.jz(next)?;
+            a.or(ebx, 1 << bit)?;
+            a.push(4)?;
+            a.push(at(BUF))?;
+            a.push(esi)?;
+            a.call(l.import(3))?;
+            a.mov(eax, dword_ptr(l.at(BUF)))?;
+            check_eax(a, fourcc(b"PROC"), bit + 1)?;
+            a.push(0)?;
+            a.push(esi)?;
+            a.call(l.import(4))?;
+            a.set_label(&mut next)?;
+            a.nop()?;
+        }
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    })
+}
+
+#[test]
+fn mmio_uses_the_dos_procedure_the_program_installed() {
+    for core in CORES {
+        let files = [("T.EXE", mmio_dos_proc_program())];
+        let mut cpu = machine("mmio_dos_proc", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        // NONE.WAV is read through the program's procedure. The packed
+        // name goes to the built-in DOS procedure, which finds no such
+        // file: Wine's test_mmioOpen_fourcc gets MMIOERR_FILENOTFOUND
+        // on Windows for a name like it.
+        assert_eq!(cpu.errorlevel, 0x03, "{core:?}: {:?}", printed(&cpu));
+    }
+}
+
+const MMIO_WRITE: i32 = 1;
+const MMIO_READWRITE: i32 = 2;
+const MMIO_CREATE: i32 = 0x1000;
+const MMIO_ALLOCBUF: i32 = 0x10000;
+
+/// The mmio functions `mmio_calls_program` imports, by their place in
+/// its list of imports.
+const MMIO_OPEN: usize = 1;
+const MMIO_ASCEND: usize = 2;
+const MMIO_CREATE_CHUNK: usize = 3;
+const MMIO_WRITE_FN: usize = 4;
+const MMIO_CLOSE: usize = 5;
+const MMIO_SEEK: usize = 6;
+
+/// A call of `mmio_calls_program`: the import, its arguments after the
+/// file's handle, and what it returns.
+type MmioCall = (usize, Vec<i32>, i32);
+
+/// A program that opens the file named at the start of `data` with
+/// `flags` and makes `calls` on it, which get the address of an offset
+/// in `data`. Exit code 1 if every call returned what it should.
+fn mmio_calls_program(
+    data: &[u8],
+    flags: i32,
+    calls: impl FnOnce(&dyn Fn(u32) -> i32) -> Vec<MmioCall>,
+) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        (
+            "WINMM.dll",
+            &[
+                "mmioOpenA",
+                "mmioAscend",
+                "mmioCreateChunk",
+                "mmioWrite",
+                "mmioClose",
+                "mmioSeek",
+            ],
+        ),
+    ];
+    program(imports, data, |a, l| {
+        let at = |offset: u32| l.at(offset) as i32;
+        a.xor(ebx, ebx)?;
+        let mut failed = a.create_label();
+        call(a, l.import(MMIO_OPEN), &[at(0), 0, flags])?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.jz(failed)?;
+        for (import, args, ok) in calls(&at) {
+            for &arg in args.iter().rev() {
+                a.push(arg)?;
+            }
+            a.push(esi)?;
+            a.call(l.import(import))?;
+            a.cmp(eax, ok)?;
+            a.jne(failed)?;
+        }
+        a.mov(ebx, 1)?;
+        a.set_label(&mut failed)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    })
+}
+
+/// The bytes the mmio tests write: byte `k` is `k * 7 + 1`.
+fn pattern(k: usize) -> u8 {
+    (k * 7 + 1) as u8
+}
+
+/// BIG.DAT made through mmio's own buffer, open for writing only, as
+/// Shadow of the Horned Rat writes its saves: a RIFF chunk holding a
+/// 'big ' chunk of 9000 bytes, more than the 8 KB buffer, then a 'tail'
+/// chunk of 3. Each mmioAscend goes back to write a size before the
+/// buffer's place.
+fn mmio_big_program() -> Vec<u8> {
+    const MMIO_CREATERIFF: i32 = 0x20;
+    const RIFF: u32 = 0x20;
+    const BIG: u32 = 0x40;
+    const TAIL: u32 = 0x60;
+    const BYTES: u32 = 0x100;
+    let mut data = vec![0u8; BYTES as usize + 9000];
+    put(&mut data, 0, b"BIG.DAT");
+    put(&mut data, (RIFF + 8) as usize, b"SAVE");
+    put(&mut data, BIG as usize, b"big ");
+    put(&mut data, TAIL as usize, b"tail");
+    for k in 0..9000 {
+        data[BYTES as usize + k] = pattern(k);
+    }
+    let flags = MMIO_CREATE | MMIO_WRITE | MMIO_ALLOCBUF;
+    mmio_calls_program(&data, flags, |at| {
+        vec![
+            (MMIO_CREATE_CHUNK, vec![at(RIFF), MMIO_CREATERIFF], 0),
+            (MMIO_CREATE_CHUNK, vec![at(BIG), 0], 0),
+            (MMIO_WRITE_FN, vec![at(BYTES), 5000], 5000),
+            (MMIO_WRITE_FN, vec![at(BYTES + 5000), 4000], 4000),
+            (MMIO_ASCEND, vec![at(BIG), 0], 0),
+            (MMIO_CREATE_CHUNK, vec![at(TAIL), 0], 0),
+            (MMIO_WRITE_FN, vec![at(BYTES), 3], 3),
+            (MMIO_ASCEND, vec![at(TAIL), 0], 0),
+            (MMIO_ASCEND, vec![at(RIFF), 0], 0),
+            (MMIO_CLOSE, vec![0], 0),
+        ]
+    })
+}
+
+/// SEEK.DAT made through mmio's own buffer with `mode`: 12000 bytes of
+/// the pattern, which the end is after while the buffer still holds the
+/// last 3808, then from 0 the 8202 bytes from the pattern's byte 1 on,
+/// which fill the buffer and go on into the next 8 KB, then a seek on
+/// to 8300, in that buffer, and the pattern's first 4 bytes there. The
+/// buffer still holds bytes it took before it went on.
+fn mmio_seek_on_program(mode: i32) -> Vec<u8> {
+    const BYTES: u32 = 0x100;
+    let mut data = vec![0u8; BYTES as usize + 12000];
+    put(&mut data, 0, b"SEEK.DAT");
+    for k in 0..12000 {
+        data[BYTES as usize + k] = pattern(k);
+    }
+    let flags = MMIO_CREATE | mode | MMIO_ALLOCBUF;
+    mmio_calls_program(&data, flags, |at| {
+        vec![
+            (MMIO_WRITE_FN, vec![at(BYTES), 12000], 12000),
+            (MMIO_SEEK, vec![0, 2], 12000),
+            (MMIO_SEEK, vec![0, 0], 0),
+            (MMIO_WRITE_FN, vec![at(BYTES + 1), 8202], 8202),
+            (MMIO_SEEK, vec![8300, 0], 8300),
+            (MMIO_WRITE_FN, vec![at(BYTES), 4], 4),
+            (MMIO_CLOSE, vec![0], 0),
+        ]
+    })
+}
+
+/// A size written back before the buffer's place leaves the rest of the
+/// file as it was. Without the fix the buffer, which can't be read from
+/// a file open for writing only, went out from the start of its 8 KB
+/// with the end of the 'big ' chunk's data still in it, over the RIFF
+/// header and the start of the data.
+#[test]
+fn mmio_writes_chunks_larger_than_its_buffer_to_a_write_only_file() {
+    for core in CORES {
+        let files = [("T.EXE", mmio_big_program())];
+        let mut cpu = machine("mmio-big", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 1, "{core:?}: {:?}", printed(&cpu));
+        let out = fs::read(scratch_path("mmio-big").join("BIG.DAT")).unwrap();
+        let mut expected = b"RIFF".to_vec();
+        expected.extend((4 + 8 + 9000 + 8 + 4u32).to_le_bytes());
+        expected.extend(b"SAVEbig ");
+        expected.extend(9000u32.to_le_bytes());
+        expected.extend((0..9000).map(pattern));
+        expected.extend(b"tail");
+        expected.extend(3u32.to_le_bytes());
+        expected.extend([1, 8, 15, 0]);
+        assert_eq!(out.len(), expected.len(), "{core:?}");
+        assert!(out == expected, "{core:?}: {:02X?}", &out[..24]);
+    }
+}
+
+/// A seek on inside the buffer that writes went on into, over bytes the
+/// file has, leaves those bytes as they were, open for writing only or
+/// for reading and writing. A seek to the end counts the bytes still in
+/// the buffer. Without the fix the buffer counted as holding the file
+/// there, and the flush at the close wrote what it still held from the
+/// first 8 KB over the bytes from 8202 to 8300; the seek to the end
+/// gave 8192.
+#[test]
+fn mmio_seeks_on_in_a_buffer_writes_went_on_into() {
+    let mut expected: Vec<u8> = (0..12000).map(pattern).collect();
+    for (k, byte) in expected[..8202].iter_mut().enumerate() {
+        *byte = pattern(k + 1);
+    }
+    for (k, byte) in expected[8300..8304].iter_mut().enumerate() {
+        *byte = pattern(k);
+    }
+    for mode in [MMIO_WRITE, MMIO_READWRITE] {
+        for core in CORES {
+            let files = [("T.EXE", mmio_seek_on_program(mode))];
+            let mut cpu = machine("mmio-seek-on", core, &files, |_| {});
+            run_to_exit(&mut cpu, 20_000, |_| {});
+            assert_eq!(cpu.errorlevel, 1, "{mode} {core:?}: {:?}", printed(&cpu));
+            let out = fs::read(scratch_path("mmio-seek-on").join("SEEK.DAT")).unwrap();
+            assert_eq!(out.len(), expected.len(), "{mode} {core:?}");
+            let wrong = (0..out.len()).find(|&k| out[k] != expected[k]);
+            assert_eq!(wrong, None, "{mode} {core:?}");
+        }
     }
 }
 

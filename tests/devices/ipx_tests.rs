@@ -254,7 +254,7 @@ fn loopback_program(irq: u8) -> Vec<u8> {
 
 /// A machine with the IPX driver installed and the program `name` in
 /// `files` loaded from the shell.
-fn machine(test: &str, files: &[(&str, Vec<u8>)], name: &str) -> (Cpu, u16) {
+fn machine(test: &str, files: &[(&str, Vec<u8>)], name: &str) -> (Box<Cpu>, u16) {
     let mut cpu = Cpu::new(scratch(test, files));
     cpu.bus.configure_network(&NetSettings { ipx: IpxMode::On, ..Default::default() });
     cpu.load_shell();

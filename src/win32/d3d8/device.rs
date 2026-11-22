@@ -31,6 +31,7 @@ use super::{
 use crate::cpu::Cpu;
 use crate::win32::com;
 use crate::win32::gdi32::Rect;
+use crate::win32::screen;
 
 /// D3DPRESENT_PARAMETERS' fields, by their places.
 pub const PP_WIDTH: usize = 0;
@@ -458,6 +459,11 @@ fn build_into(cpu: &mut Cpu, id: u32, p: &[u32], chain: &mut Chain) -> Result<()
         // Windows, making and releasing a full-screen device sends the
         // focus window's procedure no message of DirectDraw's window
         // changes (Wine's d3d8 test_wndproc checks that none comes).
+        // Exclusive mode on the focus window puts DirectDraw's procedure
+        // in front of the focus window's until the device is released,
+        // as Direct3D's is on Windows (`directdraw::window_proc`).
+        // CreateDevice and Reset make the device window cover the
+        // screen once the buffers are made (`cover_screen`).
         let flags = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_NOWINDOWCHANGES;
         ok(directdraw::set_cooperative_level(
             cpu,
@@ -579,7 +585,9 @@ pub fn set_targets(cpu: &mut Cpu, id: u32, target: u32, depth: u32) {
 }
 
 /// CreateDevice(this, adapter, type, focus, flags, params, out) of the
-/// IDirect3D8 `d3d`.
+/// IDirect3D8 `d3d`. A device of full screen ends with its focus window
+/// activated and its device window made to cover the screen
+/// (`cover_screen`), which calls the program's window procedures.
 #[allow(clippy::too_many_arguments)]
 pub fn create(
     cpu: &mut Cpu,
@@ -590,38 +598,38 @@ pub fn create(
     flags: u32,
     params_at: u32,
     out: u32,
-) -> u32 {
+) -> Option<u32> {
     if !com::write_out(cpu, out, 0) {
-        return D3DERR_INVALIDCALL;
+        return Some(D3DERR_INVALIDCALL);
     }
     if adapter != 0 {
-        return D3DERR_INVALIDCALL;
+        return Some(D3DERR_INVALIDCALL);
     }
     let Some(mut p) = read_params(cpu, params_at) else {
-        return D3DERR_INVALIDCALL;
+        return Some(D3DERR_INVALIDCALL);
     };
     let vp = flags
         & (CREATE_SOFTWARE_VERTEXPROCESSING
             | CREATE_HARDWARE_VERTEXPROCESSING
             | CREATE_MIXED_VERTEXPROCESSING);
     if vp.count_ones() != 1 {
-        return D3DERR_INVALIDCALL;
+        return Some(D3DERR_INVALIDCALL);
     }
     match devtype {
         DEVTYPE_HAL => {}
-        DEVTYPE_REF => return D3DERR_NOTAVAILABLE,
-        _ => return D3DERR_INVALIDCALL,
+        DEVTYPE_REF => return Some(D3DERR_NOTAVAILABLE),
+        _ => return Some(D3DERR_INVALIDCALL),
     }
     // A Voodoo Graphics or Voodoo2 add-on card has no Direct3D 8 driver.
     let Some(kind) = super::caps::card(cpu) else {
-        return D3DERR_NOTAVAILABLE;
+        return Some(D3DERR_NOTAVAILABLE);
     };
     // Hardware and mixed vertex processing are of a card that
     // transforms and lights. The draws are the same with each: the
     // HAL hands the card the vertices it can transform as the pipeline
     // would, and the pipeline does the others (`hal::draw_geometry`).
     if vp != CREATE_SOFTWARE_VERTEXPROCESSING && !hal::transforms(kind) {
-        return D3DERR_INVALIDCALL;
+        return Some(D3DERR_INVALIDCALL);
     }
     let window = if p[PP_WINDOW] != 0 {
         p[PP_WINDOW]
@@ -629,10 +637,10 @@ pub fn create(
         focus
     };
     if !cpu.bus.win32.user.is_window(window) || p[PP_WINDOWED] == 0 && focus == 0 {
-        return D3DERR_INVALIDCALL;
+        return Some(D3DERR_INVALIDCALL);
     }
     if let Err(e) = check_params(cpu, &mut p, window) {
-        return e;
+        return Some(e);
     }
 
     // The DirectDraw object.
@@ -640,7 +648,7 @@ pub fn create(
     let dd_iface = ddraw::iface(cpu, dd, V_DD7);
     if dd_iface == 0 {
         ddraw::destroy(cpu, dd);
-        return com::E_OUTOFMEMORY;
+        return Some(com::E_OUTOFMEMORY);
     }
     ddraw::add_ref(cpu, dd_iface);
     let device = Device {
@@ -661,14 +669,14 @@ pub fn create(
     let id = add(cpu, o, V_DEVICE8, 1);
     if id == 0 {
         ddraw::release(cpu, dd_iface);
-        return com::E_OUTOFMEMORY;
+        return Some(com::E_OUTOFMEMORY);
     }
     super::add_ref(cpu, d3d);
     let chain = match build(cpu, id, &p) {
         Ok(c) => c,
         Err(e) => {
             super::destroy(cpu, id);
-            return e;
+            return Some(e);
         }
     };
 
@@ -698,7 +706,7 @@ pub fn create(
     write_params(cpu, params_at, &p);
     let iface = super::iface(cpu, id);
     com::write_out(cpu, out, iface);
-    D3D_OK
+    cover_screen(cpu, id, true)
 }
 
 // The methods.
@@ -945,7 +953,21 @@ pub fn reset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     use_chain(cpu, id, chain, p.clone());
     super::states::defaults(cpu, id);
     write_params(cpu, at, &p);
-    Some(D3D_OK)
+    cover_screen(cpu, id, false)
+}
+
+/// CreateDevice or Reset made the device `id`'s buffers: in full screen
+/// its device window covers the screen of the mode it took, after
+/// CreateDevice (`created`) activates the focus window
+/// (`directdraw::cover_screen_with`). D3D_OK.
+fn cover_screen(cpu: &mut Cpu, id: u32, created: bool) -> Option<u32> {
+    match get(cpu, id) {
+        Some(d) if d.params.get(PP_WINDOWED) == Some(&0) => {
+            let (window, focus) = (d.window, d.focus);
+            directdraw::cover_screen_with(cpu, window, focus, created)
+        }
+        _ => Some(D3D_OK),
+    }
 }
 
 /// The rectangle (left, top, right, bottom) at `at`, if there is one.
@@ -972,11 +994,12 @@ fn present_buffer(
     if p[PP_WINDOWED] == 0 {
         // Full screen: the flip chain goes round, at the next frame but
         // for D3DPRESENT_INTERVAL_IMMEDIATE. Flip waits for the frame
-        // rate cap's turn whatever the flags (`surface::frame_held`).
+        // rate cap's turn whatever the flags (`surface::frame_held`). An
+        // immediate one doesn't wait for a swap still waiting on the card.
         let flags = if p[PP_INTERVAL] == PRESENT_INTERVAL_IMMEDIATE {
-            8
+            dd_surface::DDFLIP_NOVSYNC | dd_surface::DDFLIP_DONOTWAIT
         } else {
-            1
+            dd_surface::DDFLIP_WAIT
         };
         let copy = matches!(p[PP_SWAPEFFECT], SWAPEFFECT_COPY | SWAPEFFECT_COPY_VSYNC);
         let hr = dd_surface::flip(cpu, &[d.front_iface, 0, flags])?;
@@ -1076,7 +1099,10 @@ pub fn identity_gamma() -> Vec<u16> {
     (0..768).map(|i| ((i % 256) * 257) as u16).collect()
 }
 
-/// SetGammaRamp(this, flags, ramp): kept, not applied.
+/// SetGammaRamp(this, flags, ramp): kept, and the display's on a
+/// full-screen device where the display has a ramp
+/// (`screen::set_gamma_ramp`). On Windows it changes nothing on a
+/// windowed device.
 pub fn set_gamma_ramp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, _, at] = args[..] else {
         return Some(0);
@@ -1087,16 +1113,22 @@ pub fn set_gamma_ramp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if at == 0 || !cpu.bus.guest_probe(at, 1536, false) {
         return Some(0);
     }
-    let ramp: Vec<u16> = (0..768)
-        .map(|i| cpu.bus.guest_read_16(at + 2 * i))
-        .collect();
-    if let Some(d) = get(cpu, id) {
-        d.gamma = ramp;
+    let ramp: screen::GammaRamp = std::array::from_fn(|i| cpu.bus.guest_read_16(at + 2 * i as u32));
+    let Some(d) = get(cpu, id) else {
+        return Some(0);
+    };
+    d.gamma = ramp.to_vec();
+    if d.params.get(PP_WINDOWED) == Some(&0) {
+        screen::set_gamma_ramp(cpu, &ramp);
     }
     Some(0)
 }
 
-/// GetGammaRamp(this, ramp).
+/// GetGammaRamp(this, ramp): a full-screen device's is the display's
+/// where the display has one (`screen::gamma_ramp`), so that after a
+/// `Reset`, whose mode set brings the identity back, it is the one the
+/// screen shows, as on Windows, where it is the display driver's. Other
+/// devices give back the ramp they were given.
 pub fn get_gamma_ramp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, at] = args[..] else {
         return Some(0);
@@ -1107,10 +1139,11 @@ pub fn get_gamma_ramp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if at == 0 || !cpu.bus.guest_probe(at, 1536, true) {
         return Some(0);
     }
-    let ramp = if d.gamma.len() == 768 {
-        d.gamma
-    } else {
-        identity_gamma()
+    let full_screen = d.params.get(PP_WINDOWED) == Some(&0);
+    let ramp = match full_screen.then(|| screen::gamma_ramp(cpu)).flatten() {
+        Some(display) => display.to_vec(),
+        None if d.gamma.len() == 768 => d.gamma,
+        None => identity_gamma(),
     };
     for (i, v) in ramp.iter().enumerate() {
         cpu.bus.guest_write_16(at + 2 * i as u32, *v);
@@ -1323,10 +1356,10 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if op == 1 {
             break;
         }
-        if !hal::can_do(kind, op) {
+        if !hal::can_do(kind, op, 8) {
             return Some(D3DERR_UNSUPPORTEDCOLOROPERATION);
         }
-        if aop != 1 && !hal::can_do(kind, aop) {
+        if aop != 1 && !hal::can_do(kind, aop, 8) {
             return Some(D3DERR_UNSUPPORTEDALPHAOPERATION);
         }
         used += 1;

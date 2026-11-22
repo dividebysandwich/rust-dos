@@ -30,7 +30,7 @@ fn files(big: &[u8]) -> Vec<IsoFile<'_>> {
     ]
 }
 
-fn machine(name: &str) -> (Cpu, std::path::PathBuf) {
+fn machine(name: &str) -> (Box<Cpu>, std::path::PathBuf) {
     let dir = scratch(name);
     fs::create_dir_all(dir.join("c")).unwrap();
     (Cpu::new(dir.join("c")), dir)

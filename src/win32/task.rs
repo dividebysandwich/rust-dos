@@ -147,6 +147,9 @@ pub static TASKS: &[Step] = &[
     super::dplayx::call_step,
     super::dshow::filter::step,
     super::user32::notepad::step,
+    super::user32::dlgdir::step,
+    super::user32::ddeml::xact_step,
+    super::oleaut32::invoke_step,
 ];
 
 /// The `TASKS` places of the tasks other DLLs than USER32 start.
@@ -173,6 +176,9 @@ pub const MCI_CALL: u16 = 40;
 pub const DPLAY_CALL: u16 = 41;
 pub const DSHOW: u16 = 42;
 pub const NOTEPAD: u16 = 43;
+pub const DLG_DIR: u16 = 44;
+pub const DDEML_XACT: u16 = 45;
+pub const OLEAUT32_INVOKE: u16 = 46;
 
 /// Start the task `kind` with the variables `vars` and, if `scratch` is
 /// more than 0, that many bytes of scratch space: for a function's
@@ -232,6 +238,23 @@ fn run(cpu: &mut Cpu, mut task: Task, resume: (u32, u32), mut value: u32) -> Opt
             }
         }
     }
+}
+
+/// Whether a thread of the running process is in a task `kind` whose
+/// variables `test` holds for: one whose call into the program hasn't
+/// returned. A task whose thread ended, or which the program left by an
+/// exception, is none of them, as its call is gone with it. It looks at
+/// the calls' data as `Task::encode` lays it out, without decoding: a
+/// window procedure asks for each message.
+pub fn any_running(cpu: &mut Cpu, kind: u16, test: impl Fn(&[u32]) -> bool) -> bool {
+    super::process(cpu)
+        .threads
+        .iter()
+        .filter(|t| t.exit_code.is_none())
+        .flat_map(|t| &t.calls)
+        .filter(|c| c.then == call::TASK)
+        .filter(|c| c.data.first().is_some_and(|&head| head as u16 == kind))
+        .any(|c| test(c.data.get(2..).unwrap_or_default()))
 }
 
 /// A call a task made returned `value`: it goes on.

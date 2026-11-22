@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use web_time::Instant;
 
 use crate::disk::{DRIVE_SLOTS, DiskController, DriveKind, MountOptions};
+use crate::opl::Chip;
 use crate::video::{self, ADDR_VGA_GRAPHICS, SIZE_GRAPHICS, VideoMode};
 
 mod guest;
@@ -18,11 +19,13 @@ mod state;
 mod setup;
 mod drives;
 mod sound;
+mod adlib_gold;
 mod powervr;
 mod verite;
 mod mach64;
 pub(crate) mod toadforce;
 mod banshee;
+pub(crate) mod lfb;
 mod voodoo;
 
 pub use verite::bios as verite_bios;
@@ -49,6 +52,13 @@ pub const DEFAULT_MEMORY_MB: usize = 16;
 /// log2 of the bytes of RAM each code generation counter covers: small
 /// enough that a program's variables rarely share a block with its code.
 pub const GEN_SHIFT: usize = 6;
+
+/// The upper memory between the video BIOS and the BIOS: RAM, as on a PC
+/// with EMM386, which holds the upper memory blocks (`mcb::UMB_START`)
+/// and the EMS page frame (`ems::FRAME_SEGMENT`, which holds copies of the
+/// pages mapped there). DOS extenders keep their ring 0 stacks and task
+/// state segments in it, which every switch to ring 0 touches.
+pub const UPPER_RAM: std::ops::Range<usize> = 0xC8000..0xF0000;
 
 /// `Bus::code_blocks`' marks: a block with code, and every block while
 /// the writes are watched.
@@ -132,8 +142,6 @@ pub struct Bus {
     /// Something asked for a CPU reset (8042 or port 92h); the execution
     /// loop carries it out.
     pub reset_requested: bool,
-    /// Writes to the ROMs logged so far (`note_rom_write`).
-    rom_writes: u16,
     /// The port accesses a BIOS service left for a V86 monitor to see,
     /// which the BIOS makes on its way out (`bios::PORT_ACCESSES`).
     pub port_accesses: VecDeque<crate::bios::PortAccess>,
@@ -154,6 +162,8 @@ pub struct Bus {
     pub xms: crate::xms::Xms,
     /// The expanded memory manager (INT 67h), if EMS is on.
     pub ems: Option<crate::ems::Ems>,
+    /// VCPI's pages and the PIC mapping its client set (vcpi.rs).
+    pub vcpi: crate::vcpi::Vcpi,
     /// The DPMI host (INT 2Fh AX=1687h, INT 31h) and its clients.
     pub dpmi: crate::dpmi::Dpmi,
     /// The built-in Windows (`win32`) and its running Win32 program.
@@ -206,6 +216,10 @@ pub struct Bus {
     /// Retraces counted, and the one of the last page flip.
     retraces: u64,
     last_flip: Option<u64>,
+    /// The retrace of the last frame DirectDraw showed or the 3dfx card
+    /// swapped in, while the card drives the monitor. Not saved: a loaded
+    /// state starts without one.
+    last_present: Option<u64>,
     /// The Tandy's or PCjr's picture memory as it was at the last retrace,
     /// and where it was: programs (and the recompiler) write it as plain
     /// RAM, which marks nothing for repainting.
@@ -255,13 +269,26 @@ pub struct Bus {
     /// return this value instead of the live count until both bytes are read.
     pub pit0_latched: u16,
     pub pit0_latched_active: bool,
+    /// Channel 0's status byte latched by a read-back command, which the
+    /// next read of port 0x40 returns before any latched count.
+    pub pit0_status: Option<u8>,
     /// Channel 0 timing: when IRQ 0 fires.
     pub pit0: crate::timer::Pit0,
+    /// Channel 1, the DRAM refresh request, which nothing else uses: its
+    /// count on port 0x41.
+    pub pit1: crate::timer::Pit0,
+    pub pit1_port: crate::timer::PitPort,
     /// Emulated time, advanced by the main loop.
     pub clock: crate::timer::Clock,
     /// The two 8259 interrupt controllers.
     pub pic: crate::pic::Pic,
-    pub audio_phase: f32, // Track wave position to prevent clicking
+    /// How long the PC speaker's level was high in the eighth of the mix
+    /// frame being made, up to tick `speaker_until` (see
+    /// `speaker_take_in`).
+    pub speaker_high: f64,
+    /// The tick, which can fall between ticks, the speaker's level is
+    /// taken in up to: the last change to it, or an eighth's end.
+    pub speaker_until: f64,
     pub dta_segment: u16,
     pub dta_offset: u16,
     /// The state of DOS last written to the SDA (`dos_data::ProcessState`),
@@ -352,6 +379,10 @@ pub struct Bus {
     pub gus: Option<crate::gus::Gus>,
     /// The IRQ the Ultrasound's interrupt line holds up, if any.
     gus_line: Option<u8>,
+    /// The AdLib Gold, if one is installed (`adlibgold`).
+    pub adlib_gold: Option<Box<crate::adlibgold::AdlibGold>>,
+    /// The IRQ the AdLib Gold's interrupt line holds up, if any.
+    adlib_gold_line: Option<u8>,
     /// The AWE32's EMU8000, with a Sound Blaster AWE32.
     pub awe: Option<Box<crate::awe32::Emu8000>>,
     /// The ROM and RAM (KB) an AWE32 gets.
@@ -414,6 +445,10 @@ pub struct Bus {
     /// Writes logged so far to each port nothing emulates: a program
     /// polling for hardware that isn't there would flood the log.
     unhandled_writes: Vec<u8>,
+    /// Lines of each kind `log_limited` has logged since the last
+    /// program started, by the hash of the kind's key. The log's, and
+    /// left out of save states.
+    limited_logs: std::collections::HashMap<u64, u8>,
 
     /// Generation counter for every block of RAM (`GEN_SHIFT`). Bumped on
     /// every write inside the Bus write helpers. The decoded-instruction
@@ -441,6 +476,10 @@ pub struct Bus {
     /// The front end sets it at start and after it loads a save state,
     /// from the settings the load leaves (`slots::loaded_settings`).
     pub memory_derived: bool,
+    /// Whether the machine's processor is the default for its display
+    /// adapter, `cpu` not being set (`config::default_cpu`). Set as
+    /// `memory_derived` is, when the hardware is configured or applied.
+    pub cpu_derived: bool,
 
     /// Optional observer for every `log_string` line. Installed by the debug
     /// server so log output can be streamed to remote clients.
@@ -568,7 +607,7 @@ impl Bus {
     /// Whether `addr` is in a ROM, which ignores the CPU's writes: the video
     /// BIOS's 32 KB at C0000h, and the BIOS's 64 KB at F0000h.
     pub fn is_rom(addr: usize) -> bool {
-        (0xC0000..0xC8000).contains(&addr) || (0xF0000..0x10_0000).contains(&addr)
+        (0xC0000..UPPER_RAM.start).contains(&addr) || (UPPER_RAM.end..0x10_0000).contains(&addr)
     }
 
     /// Put `data` into a ROM at `addr`, as the emulator sets its ROMs up
@@ -839,6 +878,80 @@ impl Bus {
         self.vbe.lfb_offset(dst, len)
     }
 
+    /// Where `len` bytes written at `dst` go in the video memory, if all
+    /// of them go through a VESA mode's window at A0000h (`write_8`'s
+    /// `vbe_window` branch) to one contiguous range of it. They do when
+    /// the run stays in the bank or page the window shows, which a run in
+    /// one 4 KB page of the window does on the VBE's 64 KB banks and the
+    /// mach64's 32 KB pages. None where a byte would go elsewhere (memory
+    /// mapped registers) or the bank wraps around the end of the memory.
+    fn vesa_window_run(&self, dst: usize, len: usize) -> Option<usize> {
+        let last = dst + len - 1;
+        if dst < ADDR_VGA_GRAPHICS
+            || last >= ADDR_VGA_GRAPHICS + SIZE_GRAPHICS
+            || !self.vbe_window()
+            || [dst, last]
+                .iter()
+                .any(|&a| self.s3_mmio(a).is_some() || self.mach64_mmio(a).is_some())
+        {
+            return None;
+        }
+        let first = self.vesa_window(dst - ADDR_VGA_GRAPHICS, true);
+        let end = self.vesa_window(last - ADDR_VGA_GRAPHICS, true);
+        // The Vérité's byte swapping (`host_xor`) scatters a run's bytes.
+        let swapped = !self.mach64() && self.vbe.host_xor != 0;
+        (!swapped && end == first + len - 1 && end < self.vbe.vram.len()).then_some(first)
+    }
+
+    /// Write the `len` bytes of plain RAM at `src` into a VESA mode's
+    /// window at A0000h at `dst`, as a string move's writes through
+    /// `write_8` do (see `vesa_window_run`). Returns false, having written
+    /// nothing, where they don't all go to one range of video memory.
+    /// `size` is the element's, for the profile's count of writes.
+    pub(crate) fn move_to_vesa_window(
+        &mut self,
+        src: usize,
+        dst: usize,
+        len: usize,
+        size: usize,
+    ) -> bool {
+        let Some(offset) = self.vesa_window_run(dst, len) else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, (len / size) as u64));
+        self.toadforce_writing(offset, len);
+        self.vbe.vram[offset..offset + len].copy_from_slice(&self.ram[src..src + len]);
+        self.lfb_written(dst, offset, len);
+        true
+    }
+
+    /// Fill a VESA mode's window at A0000h at `dst` with `count` elements
+    /// of `size` bytes of `value`, as a string store's writes do (see
+    /// `move_to_vesa_window`).
+    pub(crate) fn fill_vesa_window(
+        &mut self,
+        dst: usize,
+        count: usize,
+        size: usize,
+        value: u32,
+    ) -> bool {
+        let len = count * size;
+        let Some(offset) = self.vesa_window_run(dst, len) else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, count as u64));
+        self.toadforce_writing(offset, len);
+        fill_pattern(&mut self.vbe.vram[offset..offset + len], size, value);
+        self.lfb_written(dst, offset, len);
+        true
+    }
+
     /// The rest of `write_vram` for `len` bytes written at `offset` (at
     /// `dst`) at once, and the hooks of the writes one by one.
     fn lfb_written(&mut self, dst: usize, offset: usize, len: usize) {
@@ -962,10 +1075,13 @@ impl Bus {
     }
 
     /// True for `len` bytes at `addr` that are plain RAM: conventional
-    /// memory below the video window, or extended memory above 1 MB.
+    /// memory below the video window, the upper memory between the ROMs
+    /// (`UPPER_RAM`), or extended memory above 1 MB.
     #[inline(always)]
     pub(crate) fn is_plain_ram(&self, addr: usize, len: usize) -> bool {
-        addr + len <= ADDR_VGA_GRAPHICS || (addr >= 0x10_0000 && addr + len <= self.ram.len())
+        addr + len <= ADDR_VGA_GRAPHICS
+            || (addr >= 0x10_0000 && addr + len <= self.ram.len())
+            || (addr >= UPPER_RAM.start && addr + len <= UPPER_RAM.end.min(self.ram.len()))
     }
 
     /// Read `S` bytes (1, 2 or 4) of plain RAM at `addr`, which
@@ -1198,6 +1314,7 @@ impl Bus {
         }
         // The Tandy's and PCjr's window onto system memory.
         if let Some(ram) = self.vga.cpu_window(addr) {
+            let unchanged = self.ram[ram] == value;
             self.ram[ram] = value;
             let page = ram >> GEN_SHIFT;
             self.page_gen[page] = self.page_gen[page].wrapping_add(1);
@@ -1205,12 +1322,18 @@ impl Bus {
             if !(base..base + size).contains(&ram) {
                 return false;
             }
-            self.mark_text_dirty(ram - base, ram - base + 1);
+            // As in the text window below: the same byte again changes no
+            // pixel, and the retrace's comparison with the shadow
+            // (`compare_gate_array`) still sees what other writes changed.
+            if !unchanged {
+                self.mark_text_dirty(ram - base, ram - base + 1);
+            }
             return true;
         }
         let (text, size, wrap) = self.vga.text_window();
         if (text..text + size).contains(&addr) {
             let text_off = (addr - text) & wrap;
+            let unchanged = self.vga.vram_text[text_off] == value;
             self.vga.vram_text[text_off] = value;
             self.note_video_write(text_off, 1);
 
@@ -1218,8 +1341,13 @@ impl Bus {
             // we're in a text mode (see `text::geometry`). CGA graphics modes
             // (4/5/6) also live in this VRAM but their byte-to-scanline
             // mapping is interleaved, so we conservatively repaint everything
-            // for those.
-            self.mark_text_dirty(text_off, text_off + 1);
+            // for those. A byte written with the value it had changes no
+            // pixel: programs that redraw a whole menu every pass of their
+            // loop (Sink or Swim's setup) would otherwise have the rows
+            // painted again every frame.
+            if !unchanged {
+                self.mark_text_dirty(text_off, text_off + 1);
+            }
 
             // Check if current mode uses this memory
             return matches!(
@@ -1291,12 +1419,9 @@ impl Bus {
     /// Log the first writes to the ROMs, which go nowhere.
     #[cold]
     fn note_rom_write(&mut self, addr: usize) {
-        const LOGGED: u16 = 8;
-        if self.rom_writes < LOGGED {
-            self.rom_writes += 1;
-            let more = if self.rom_writes == LOGGED { " (not logging more)" } else { "" };
-            self.log_string(&format!("[BIOS] Write to the ROM at {:05X} ignored{}", addr, more));
-        }
+        self.log_limited("rom write", || {
+            format!("[BIOS] Write to the ROM at {addr:05X} ignored")
+        });
     }
 
     /// A write of `size` bytes of `value` at `addr` into the VESA linear
@@ -1320,7 +1445,9 @@ impl Bus {
     }
 
     /// Write VESA video memory, marking the rows of the picture it shows
-    /// in for repainting.
+    /// in for repainting. Translated code does the same by itself on the
+    /// pages `lfb_direct` gives it (`dynrec::x64::card_count`): what
+    /// changes here changes there too.
     #[inline]
     fn write_vram(&mut self, offset: usize, bytes: &[u8]) {
         // What a ToadForce's driver queued to draw there comes first.
@@ -1393,6 +1520,12 @@ impl Bus {
         {
             self.powervr_write(at, value as u32, 2);
             return false;
+        }
+        // Both bytes into one place of a VESA mode's window, as the two
+        // `write_8` calls would put them.
+        if let Some(offset) = self.vesa_window_run(addr, 2) {
+            self.write_vram(offset, &value.to_le_bytes());
+            return true;
         }
         // Low byte
         let d1 = self.write_8(addr, (value & 0xFF) as u8);
@@ -1533,6 +1666,12 @@ impl Bus {
             self.powervr_write(at, value, 4);
             return;
         }
+        // All four bytes into one place of a VESA mode's window, as the
+        // `write_8` calls would put them.
+        if let Some(offset) = self.vesa_window_run(addr, 4) {
+            self.write_vram(offset, &value.to_le_bytes());
+            return;
+        }
         self.write_16(addr, (value & 0xFFFF) as u16);
         self.write_16(addr + 2, (value >> 16) as u16);
     }
@@ -1624,6 +1763,7 @@ impl Bus {
             self.pit0.next_event(),
             sb,
             gus,
+            self.adlib_gold_next_event(),
             self.voodoo_next_event(),
             self.banshee_next_event(),
             self.powervr_next_event(),
@@ -1634,6 +1774,7 @@ impl Bus {
             self.net_next_event(),
             self.serial_next_event(),
             self.kbc_release_at,
+            crate::keyboard::typematic_at(self),
             self.rtc_next,
             self.win32.next_event(),
             crate::win32::audio_next_event(&self.win32, self.clock.now_ticks()),
@@ -1660,6 +1801,12 @@ impl Bus {
         }
         if self.gus_next_event().is_some_and(|t| t <= now) {
             self.gus_advance();
+        }
+        if self.adlib_gold.is_some() {
+            // Its next event may be the OPL3's timer, which is in the past
+            // by now and so no longer its next event: the card's line is
+            // checked at every service.
+            self.adlib_gold_advance();
         }
         if self.voodoo_next_event().is_some_and(|t| t <= now) {
             self.voodoo_service();
@@ -1704,6 +1851,10 @@ impl Bus {
             self.kbc_release_at = None;
             self.kbc.release();
             self.sync_keyboard_irq();
+        }
+        // The keyboard repeats a held key.
+        if crate::keyboard::typematic_at(self).is_some_and(|t| t <= now) {
+            crate::keyboard::typematic(self);
         }
         self.clock.schedule(self.next_event());
         self.refresh_irq();
@@ -1810,6 +1961,7 @@ impl Bus {
         let _profile = crate::profile::zone(crate::profile::Zone::AudioSynth);
         self.sb_advance();
         self.gus_advance();
+        self.adlib_gold_advance();
         let rate = crate::opl::RATE as u64;
         let target = crate::timer::mul_div(self.clock.now_ticks(), rate, crate::timer::PIT_HZ);
         // After a long pause (a debugger stop, a slow host) start afresh
@@ -1820,11 +1972,15 @@ impl Bus {
             self.disknoise.skip(target - rate / 2 - self.audio_frames);
             self.serial.skip_sound(target - rate / 2 - self.audio_frames);
             self.audio_frames = target - rate / 2;
+            self.speaker_high = 0.0;
+            self.speaker_until = frame_tick(self.audio_frames);
         }
         let frames = target.saturating_sub(self.audio_frames) as usize;
         if frames == 0 {
+            self.speaker_take_in(self.clock.now_ticks() as f64);
             return;
         }
+        let first = self.audio_frames;
         self.audio_frames = target;
         // The Sound Blaster made its frames up to `target` too: those
         // before the span mixed now (skipped above) go.
@@ -1845,13 +2001,14 @@ impl Bus {
             }
             self.audio_out.extend(std::iter::repeat_n(0, 2 * frames));
             self.trim_audio();
+            // The speaker held its level through the frames.
+            self.speaker_high = 0.0;
+            self.speaker_until = frame_tick(target);
+            self.speaker_take_in(self.clock.now_ticks() as f64);
             return;
         }
         let mut settled = quiet;
 
-        let divisor = if self.pit_divisor == 0 { 65536.0 } else { self.pit_divisor as f32 };
-        let speaker_step = crate::timer::PIT_HZ as f32 / divisor / rate as f32;
-        let speaker = self.speaker_on && speaker_step * rate as f32 > 20.0;
         let ((vl, vr), (fl, fr)) = self.sb.as_ref().map_or(((1.0, 1.0), (1.0, 1.0)), |sb| sb.volumes());
         let (cl, cr) = self.sb.as_ref().map_or((1.0, 1.0), |sb| sb.cd_volume());
         // The built-in Windows's mixer and MIDI volume, 1 until a program
@@ -1862,14 +2019,14 @@ impl Bus {
             (cl * wl, cr * wr)
         };
         let sb_on = self.sb.as_ref().is_some_and(|sb| sb.output_on());
-        const SPEAKER: f32 = 3000.0;
+        const SPEAKER: f32 = SPEAKER_SWING / 2.0;
         const GUS_GAIN: f32 = 1.0;
         // The Sound Blaster's output filter, as its model has it: its
         // cutoff and order, or none.
         let sb_filter = match &self.sb {
             Some(sb) if self.mixer.settings().sb_filter == crate::mixer::SbFilter::Auto => match sb.config.model {
                 crate::sb::SbModel::Sb2 => Some((4800.0, 2)),
-                crate::sb::SbModel::SbPro2 => Some((3200.0, 2)),
+                crate::sb::SbModel::SbPro1 | crate::sb::SbModel::SbPro2 => Some((3200.0, 2)),
                 // The SB16 filters at half its sample rate.
                 m if m.is_sb16() && sb.out_rate >= 4000 => Some((sb.out_rate as f32 / 2.0, 4)),
                 _ => None,
@@ -1888,27 +2045,32 @@ impl Bus {
             let mut mix = crate::mixer::MixFrame::default();
             // The PC speaker, and the prompt's beep, through the speaker's
             // filter, which rings on a little after them.
-            let mut speaker_sample = 0.0;
-            let mut sounding = false;
-            if speaker {
-                self.audio_phase += speaker_step;
-                if self.audio_phase >= 1.0 {
-                    self.audio_phase -= 1.0;
-                }
-                speaker_sample += if self.audio_phase < 0.5 { SPEAKER } else { -SPEAKER };
-                sounding = true;
-            }
+            let mut speaker_sample = SPEAKER_SWING * self.speaker_frame(first + n as u64);
             if self.beep_frames > 0 {
                 self.beep_frames -= 1;
                 speaker_sample += if self.beep_frames % 50 < 25 { SPEAKER } else { -SPEAKER };
-                sounding = true;
             }
             let s = self.mixer.speaker_filter(speaker_sample);
-            if sounding || s != 0.0 {
+            if s != 0.0 {
                 self.mixer.add(&mut mix, &mut peaks, Channel::Speaker, (s, s));
             }
             let (ol, or) = self.opl.render();
-            self.mixer.add(&mut mix, &mut peaks, Channel::Fm, (ol as f32 * fl, or as f32 * fr));
+            let fm = (ol as f32 * fl, or as f32 * fr);
+            // On an AdLib Gold the FM goes through the card's mixer and
+            // output stage, with its sampled sound. Either way it reaches
+            // the line out through the capacitor on the card's output.
+            let (fm, gold_pcm) = match &mut self.adlib_gold {
+                Some(gold) => {
+                    let (fm, pcm) = gold.render(fm);
+                    (fm, Some(pcm))
+                }
+                None => (fm, None),
+            };
+            let fm = self.mixer.fm_coupling(fm);
+            self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
+            if let Some(pcm) = gold_pcm {
+                self.mixer.add(&mut mix, &mut peaks, Channel::AdlibGold, pcm);
+            }
             if let Some(sb) = &mut self.sb {
                 // The DAC's level at this frame's time, as the card worked
                 // it out from its own clock (`SoundBlaster::advance`).
@@ -1970,6 +2132,87 @@ impl Bus {
         self.audio_settled = settled;
         self.mixer.add_peaks(peaks);
         self.trim_audio();
+        self.speaker_take_in(self.clock.now_ticks() as f64);
+    }
+
+    /// How long the PC speaker drives its cone out from tick `a` to tick
+    /// `b`: channel 2's output with port 61h bit 1. With the bit clear the
+    /// cone rests, and with the gate low the output of modes 2 and 3
+    /// stays high, so bit 1 alone moves it.
+    fn speaker_high_ticks(&self, a: f64, b: f64) -> f64 {
+        if self.speaker_data { self.pit2.high_ticks(a, b) } else { 0.0 }
+    }
+
+    /// Take the speaker's level in up to tick `t`: the mean of each eighth
+    /// of a mix frame that ends by then goes to the band-limiting
+    /// (`Mixer::speaker_part`), and the time high in the eighth `t` falls
+    /// in stays in `speaker_high`. Every change to the level (port 61h, a
+    /// count or mode of channel 2) comes after this, through
+    /// `audio_catch_up`.
+    fn speaker_take_in(&mut self, t: f64) {
+        if t < self.speaker_until {
+            // The clock went back (a machine reset): start over from it.
+            self.speaker_high = 0.0;
+            self.speaker_until = t;
+            return;
+        }
+        loop {
+            let part = part_at(self.speaker_until);
+            let end = part_tick(part + 1);
+            if t < end {
+                break;
+            }
+            let high = self.speaker_high + self.speaker_high_ticks(self.speaker_until, end);
+            let len = end - part_tick(part);
+            self.mixer.speaker_part((high / len) as f32);
+            self.speaker_high = 0.0;
+            self.speaker_until = end;
+        }
+        self.speaker_high += self.speaker_high_ticks(self.speaker_until, t);
+        self.speaker_until = t;
+    }
+
+    /// The PC speaker's level for mix frame `n`, about 0 to 1: the share
+    /// of the time the cone was driven out, band-limited to the mix rate.
+    /// The output switches as fast as channel 2 counts, 1.19 MHz, and
+    /// programs play digitized sound through it by pulse-width modulation
+    /// (a one-shot count written at every sample, as Access's RealSound
+    /// does) or by switching port 61h's data bit; the mean level gives
+    /// the sample they make. A square wave too fast to hear gives its mean
+    /// level, which the speaker's filter takes out, and a tone heard keeps
+    /// the edges between frames, which point samples of it would fold into
+    /// tones of their own. The means are taken over eighths of the frame
+    /// and filtered before one sample a frame is kept
+    /// (`dsp::SpeakerDecimator`), so a PWM carrier's harmonics don't fold
+    /// into the audible range either, as they do from a mean over each
+    /// whole frame.
+    fn speaker_frame(&mut self, n: u64) -> f32 {
+        self.speaker_take_in(frame_tick(n + 1));
+        self.mixer.speaker_level()
+    }
+
+    /// The level the speaker holds from its last change on, 0 or 1, if it
+    /// holds one: the data bit is clear, or channel 2's output stays put.
+    fn speaker_steady(&self) -> Option<f32> {
+        if !self.speaker_data {
+            return Some(0.0);
+        }
+        let at = self.speaker_until.floor() as u64;
+        self.pit2.steady_output(at).map(|high| if high { 1.0 } else { 0.0 })
+    }
+
+    /// Whether the speaker adds nothing to the frames to mix and its
+    /// filter stays as it is: it held its level through the frame being
+    /// made, and the filter has taken that level out.
+    fn speaker_rests(&self) -> bool {
+        let Some(level) = self.speaker_steady() else {
+            return false;
+        };
+        let start = part_tick(part_at(self.speaker_until));
+        let held = level as f64 * (self.speaker_until - start);
+        (self.speaker_high - held).abs() < 1e-6
+            && self.mixer.speaker_level_rests_on(level)
+            && self.mixer.speaker_rests_on(SPEAKER_SWING * level)
     }
 
     /// Whether the Sound Blaster adds nothing to the mix and nothing it
@@ -1995,13 +2238,10 @@ impl Bus {
     /// sound coming later depends on, as the frames to mix start (see
     /// `audio_settled`).
     fn audio_quiet(&mut self) -> bool {
-        let speaker = self.speaker_on && {
-            let divisor = if self.pit_divisor == 0 { 65536.0 } else { self.pit_divisor as f32 };
-            crate::timer::PIT_HZ as f32 / divisor > 20.0
-        };
-        !speaker
+        self.speaker_rests()
             && self.beep_frames == 0
             && self.opl.is_idle()
+            && self.mixer.fm_coupling_rests()
             && self.sb_quiet()
             && self.mpu.is_idle()
             && self.cdaudio.is_idle()
@@ -2011,6 +2251,7 @@ impl Bus {
             && !crate::win32::audio_playing(&self.win32)
             && self.gus.as_ref().is_none_or(|g| g.is_idle())
             && self.awe.is_none()
+            && self.adlib_gold.as_ref().is_none_or(|g| g.pcm_quiet() && g.fm_chain_at_rest())
             && self.lpt_dac.is_none()
             && !self.tandy_sound_enabled()
     }
@@ -2086,10 +2327,12 @@ impl Bus {
         let model = self.sb.as_ref().map(|sb| sb.config.model);
         let fm_ports = model != Some(crate::sb::SbModel::Sb2);
         match offset {
-            0x0 | 0x8 => self.opl.write_address(0, value),
+            0x0 => self.opl.write_address(0, value),
+            0x8 => self.opl.write_address_all(value),
             0x2 if fm_ports => self.opl.write_address(1, value),
-            0x1 | 0x9 => self.opl_data(0, value),
-            0x3 if fm_ports => self.opl_data(1, value),
+            0x1 => self.opl_data(Some(0), value),
+            0x9 => self.opl_data(None, value),
+            0x3 if fm_ports => self.opl_data(Some(1), value),
             _ => {
                 // Once, as the reset starts (bit 0 set), not again as it
                 // ends.
@@ -2119,7 +2362,9 @@ impl Bus {
 
     fn sb_read(&mut self, offset: u16) -> u8 {
         match offset {
-            0x0 | 0x2 | 0x8 => self.opl.read_status(self.clock.now_micros()),
+            // On an SB Pro 1's dual OPL2, base+2 reads the right chip.
+            0x0 | 0x8 => self.opl.read_status(self.clock.now_micros()),
+            0x2 => self.opl.read_status_of(1, self.clock.now_micros()),
             _ => {
                 self.sb_advance();
                 let value = self.sb.as_mut().map_or(0xFF, |sb| sb.read(offset));
@@ -2130,11 +2375,35 @@ impl Bus {
         }
     }
 
-    /// Write an FM register at its emulated time.
-    fn opl_data(&mut self, bank: usize, value: u8) {
+    /// Pick a register of the FM chip's first bank through `port` (both
+    /// chips' on a dual OPL2).
+    fn opl_address(&mut self, port: u16, value: u8) {
+        self.opl.write_address_all(value);
+        // The Ultrasound latches the AdLib register numbers written to
+        // 388h too, whichever card's FM chip answers there (an AdLib
+        // Gold's at its default base); its detection reads them back at
+        // 2XAh.
+        if port == 0x388
+            && let Some(gus) = &mut self.gus
+        {
+            gus.write_adlib_address(value);
+        }
+    }
+
+    /// Write an FM register at its emulated time: of `bank`, or with None
+    /// through an AdLib port, which a dual OPL2 takes on both chips.
+    fn opl_data(&mut self, bank: Option<usize>, value: u8) {
         self.audio_catch_up();
         let now = self.clock.now_micros();
-        self.opl.write_data(bank, value, now);
+        match bank {
+            Some(bank) => self.opl.write_data(bank, value, now),
+            None => self.opl.write_data_all(value, now),
+        }
+        if self.adlib_gold.is_some() {
+            // The timers' interrupt goes out on the AdLib Gold's line.
+            self.sync_adlib_gold_irq();
+            self.clock.schedule(self.next_event());
+        }
     }
 
     /// The Sound Blaster's base port, if the card is there: a ViBRA16C's
@@ -2496,11 +2765,23 @@ impl Bus {
                 }
             }
 
+            // PIT channel 1, the DRAM refresh request: a counter like the
+            // others, which only programs that read it or reprogram it use.
+            0x41 => {
+                let now = self.clock.now_ticks();
+                self.pit1.advance(now);
+                if let Some(count) = self.pit1_port.write(value) {
+                    self.pit1.write_count(count, now);
+                }
+            }
+
             // PIT Channel 2 Data (Port 0x42)
             // This sets the frequency.
             // Frequency = 1,193,182 Hz / Divisor
             0x42 => {
-                if self.speaker_on {
+                // The speaker's level up to now, before the new count
+                // changes it.
+                if self.speaker_data {
                     self.audio_catch_up();
                 }
                 let now = self.clock.now_ticks();
@@ -2538,7 +2819,9 @@ impl Bus {
                 // Access bits (5-4): 00 = latch count value command.
                 let access = (value >> 4) & 0x03;
 
-                if access == 0 {
+                if channel == 3 {
+                    self.pit_read_back(value);
+                } else if access == 0 {
                     // Latch counter command: freeze the current count into
                     // the read buffer so LSB/MSB reads stay consistent.
                     if channel == 0 {
@@ -2548,6 +2831,10 @@ impl Bus {
                     } else if channel == 2 && self.pit2.latched.is_none() {
                         self.pit2.latched = Some(self.pit2.read(self.clock.now_ticks()).0);
                         self.pit_read_msb = false;
+                    } else if channel == 1 {
+                        let now = self.clock.now_ticks();
+                        self.pit1.advance(now);
+                        self.pit1_port.latch_count(self.pit1.count(now));
                     }
                 } else {
                     match channel {
@@ -2557,16 +2844,26 @@ impl Bus {
                             self.pit0_write_msb = false;
                             self.pit0_read_msb = false;
                             self.pit0_access = access;
-                            self.pit0.set_mode((value >> 1) & 0x07, self.clock.now_ticks());
+                            self.pit0_status = None;
+                            self.pit0.set_mode(value, self.clock.now_ticks());
                             self.clock.schedule(self.next_event());
                         }
+                        1 => {
+                            let now = self.clock.now_ticks();
+                            self.pit1.advance(now);
+                            self.pit1_port.control(access);
+                            self.pit1.set_mode(value, now);
+                        }
                         2 => {
+                            if self.speaker_data {
+                                self.audio_catch_up();
+                            }
                             // Reset Channel 2 LSB/MSB
                             self.pit_write_msb = false;
                             self.pit_read_msb = false;
-                            self.pit2.set_mode((value >> 1) & 0x07, access, self.clock.now_ticks());
+                            self.pit2.set_mode(value, self.clock.now_ticks());
                         }
-                        _ => {}
+                        _ => unreachable!(),
                     }
                 }
             }
@@ -2575,30 +2872,33 @@ impl Bus {
             // Bit 0: Timer 2 Gate (Must be 1 for timer to run)
             // Bit 1: Speaker Data (Must be 1 for sound to pass to speaker)
             0x61 => {
-                self.pit2.set_gate(value & 0x01 != 0, self.clock.now_ticks());
-                self.speaker_data = value & 0x02 != 0;
-                self.ppi_checks = value & 0x0C;
-                // If both Bit 0 and Bit 1 are set, the speaker is ON
-                let enabled = (value & 0x03) == 0x03;
-                if enabled != self.speaker_on {
+                let gate = value & 0x01 != 0;
+                let data = value & 0x02 != 0;
+                // The speaker's level up to now, before the data bit or the
+                // gate changes it. Programs switch the data bit at a
+                // sample rate to play digitized sound.
+                if data != self.speaker_data || data && gate != self.pit2.gate() {
                     self.audio_catch_up();
                 }
-                self.speaker_on = enabled;
+                self.pit2.set_gate(gate, self.clock.now_ticks());
+                self.speaker_data = data;
+                self.ppi_checks = value & 0x0C;
+                self.speaker_on = gate && data;
             }
 
+            // The AdLib Gold, at 388h unless moved, ahead of the plain
+            // FM ports below.
+            p if self.adlib_gold_claims(p) => self.adlib_gold_write(p, value),
+
             // The FM chip: AdLib ports 388h/389h, and the OPL3's second
-            // register bank at 38Ah/38Bh.
-            0x388 => {
-                self.opl.write_address(0, value);
-                // The Ultrasound latches AdLib register numbers too; its
-                // detection reads them back at 2XAh.
-                if let Some(gus) = &mut self.gus {
-                    gus.write_adlib_address(value);
-                }
-            }
-            0x389 => self.opl_data(0, value),
+            // register bank at 38Ah/38Bh. The first SB Pro (CT1330), whose
+            // dual OPL2 this is, decodes only 388h/389h, and writes both
+            // chips there.
+            0x388 => self.opl_address(0x388, value),
+            0x389 => self.opl_data(None, value),
+            0x38A | 0x38B if self.opl.chip() == Chip::DualOpl2 => {}
             0x38A => self.opl.write_address(1, value),
-            0x38B => self.opl_data(1, value),
+            0x38B => self.opl_data(Some(1), value),
 
             // The Sound Blaster, 16 ports from its base.
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_write(p & 0xF, value),
@@ -2628,20 +2928,28 @@ impl Bus {
             p if crate::dma::Dma::owns(p) => {
                 self.sb_advance();
                 self.gus_advance();
+                self.adlib_gold_advance();
                 self.dma.write(p, value);
                 self.sb_dma_write();
+                // An unmasked channel may fill the MMA's FIFOs at once.
+                self.adlib_gold_advance();
                 self.clock.schedule(self.next_event());
             }
 
             // Dispatch to Devices
             // TODO: Use a proper map lookup
-            // Ports we intentionally ignore — writes are harmless but other-
-            // wise spam the log. Programs blindly touch these as leftovers
-            // from CGA/EGA-era code even when they're really talking to VGA.
-            0x3D8 | 0x3D9 if !self.vga.decodes(port) => {
-                // CGA Mode Control / Color Select. Real VGA ignores writes
-                // here; VGA mode lives at 0x3D4/0x3D5 (handled by the VGA).
-            }
+            // The ports of the display adapter the machine hasn't, which
+            // nothing decodes on a real machine either: the monochrome
+            // adapter's 3B0h-3BBh and the Hercules configuration switch
+            // (3BFh) beside a colour card, the colour adapter's 3D0h-3DFh
+            // beside a monochrome one, and on an EGA or VGA whichever
+            // CRTC the Miscellaneous Output register's bit 0 doesn't
+            // select. Programs write there to find out whether a second
+            // adapter is there (Shadow Knights' CRTC probe on an EGA), or
+            // as leftovers of CGA code (3D8h, 3D9h), so the writes go
+            // nowhere without a log line. 3BCh-3BEh are the monochrome
+            // adapter's printer port.
+            0x3B0..=0x3BB | 0x3BF | 0x3D0..=0x3DF if !self.vga.decodes(port) => {}
             // Game port write: the one-shots fire.
             0x0201 => {
                 let now_ns = self.clock.now_ns();
@@ -2773,7 +3081,45 @@ impl Bus {
         }
     }
 
-    // Read from an I/O Port
+    /// The 8254's read-back command (control word bits 7-6 = 11): for each
+    /// counter selected by bits 1 to 3, latch its count unless bit 5 is set
+    /// and its status byte unless bit 4 is set. A latch already waiting to
+    /// be read stays as it was. The next read of the counter's port returns
+    /// the status first, then the count as a latch command leaves it.
+    fn pit_read_back(&mut self, value: u8) {
+        let now = self.clock.now_ticks();
+        let count = value & 0x20 == 0;
+        let status = value & 0x10 == 0;
+        if value & 0x02 != 0 {
+            if status && self.pit0_status.is_none() {
+                self.pit0_status = Some(self.pit0.status(now));
+            }
+            if count && !self.pit0_latched_active {
+                self.pit0_latched = self.pit0.count(now);
+                self.pit0_latched_active = true;
+                self.pit0_read_msb = false;
+            }
+        }
+        if value & 0x04 != 0 {
+            self.pit1.advance(now);
+            if status {
+                self.pit1_port.latch_status(self.pit1.status(now));
+            }
+            if count {
+                self.pit1_port.latch_count(self.pit1.count(now));
+            }
+        }
+        if value & 0x08 != 0 {
+            if status && self.pit2.status.is_none() {
+                self.pit2.status = Some(self.pit2.status(now));
+            }
+            if count && self.pit2.latched.is_none() {
+                self.pit2.latched = Some(self.pit2.read(now).0);
+                self.pit_read_msb = false;
+            }
+        }
+    }
+
     /// Read from an I/O port.
     pub fn io_read(&mut self, port: u16) -> u8 {
         let _profile = self.profile.as_mut().map(|p| p.port(port, false));
@@ -2831,6 +3177,9 @@ impl Bus {
             // which faults if elapsed == 0) issue a latch command and read
             // LSB then MSB.
             0x40 => {
+                if let Some(status) = self.pit0_status.take() {
+                    return status;
+                }
                 let val = if self.pit0_latched_active {
                     self.pit0_latched
                 } else {
@@ -2880,10 +3229,20 @@ impl Bus {
                 }
             }
 
+            // PIT channel 1, the DRAM refresh request.
+            0x41 => {
+                let now = self.clock.now_ticks();
+                self.pit1.advance(now);
+                self.pit1_port.read(self.pit1.count(now))
+            }
+
             // Port 0x42 — PIT channel 2 (PC speaker tone) data. Programs
             // read it as a free-running counter for timing loops, or time a
             // delay loop by gating it through port 61h bit 0.
             0x42 => {
+                if let Some(status) = self.pit2.status.take() {
+                    return status;
+                }
                 let count = match self.pit2.latched {
                     Some(latched) => latched,
                     None => self.pit2.read(self.clock.now_ticks()).0,
@@ -2926,9 +3285,13 @@ impl Bus {
             0x71 => self.cmos.read_register(),
             0x92 => (self.a20() as u8) << 1,
 
+            p if self.adlib_gold_claims(p) => self.adlib_gold_read(p),
+
             // The FM chip's status register: timer flags, which programs
             // poll to detect an AdLib.
-            0x388 | 0x38A => self.opl.read_status(self.clock.now_micros()),
+            0x388 => self.opl.read_status(self.clock.now_micros()),
+            0x38A if self.opl.chip() == Chip::DualOpl2 => 0xFF,
+            0x38A => self.opl.read_status(self.clock.now_micros()),
             0x389 | 0x38B => 0xFF,
 
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_read(p & 0xF),
@@ -2944,6 +3307,7 @@ impl Bus {
             p if crate::dma::Dma::owns(p) => {
                 self.sb_advance();
                 self.gus_advance();
+                self.adlib_gold_advance();
                 let value = self.dma.read(p);
                 self.clock.schedule(self.next_event());
                 value
@@ -3148,17 +3512,33 @@ impl Bus {
     /// flips (a flip within the last second or so) only the flips count.
     /// The 3dfx card only ever flips. A frame the built-in Windows'
     /// DirectDraw showed counts once, however many blits made it.
+    ///
+    /// GDI's drawing that changed the picture counts as a frame too. On
+    /// the VGA and the VESA modes it marks the rows it changed, as the
+    /// program's own writes do. A Banshee or Voodoo3 shows the desktop
+    /// from its own memory, which marks nothing, so there a retrace
+    /// after GDI changed the picture counts, unless DirectDraw showed a
+    /// frame or the card swapped in the last second or so: then those
+    /// are the frames, as flips are on the VGA.
     fn count_frame(&mut self) {
         self.retraces += 1;
         let flipped = std::mem::take(&mut self.vga.flipped);
         let drawn = std::mem::take(&mut self.vga.drawn);
         let presented = std::mem::take(&mut self.vga.presented);
+        let gdi = std::mem::take(&mut self.vga.gdi_changed);
         // While the 3dfx card shows, its buffer swaps are the frames, or
         // on a Banshee or Voodoo3, what DirectDraw shows in its memory.
         if let Some(v) = &mut self.voodoo {
             let swapped = std::mem::take(&mut v.swapped);
             if v.output() {
-                self.frames_drawn += swapped.max(u64::from(presented));
+                if presented || swapped > 0 {
+                    self.last_present = Some(self.retraces);
+                }
+                let presenting = self
+                    .last_present
+                    .is_some_and(|at| self.retraces - at < 70);
+                let shown = presented || (gdi && !presenting);
+                self.frames_drawn += swapped.max(u64::from(shown));
                 self.activity.swapped(swapped);
                 return;
             }
@@ -3244,6 +3624,41 @@ impl Bus {
         self.adapter_display_size()
     }
 
+    /// The picture on the monitor: which device scans it out, its name
+    /// and the bits a pixel of a card's own mode (the debugger's
+    /// `video.scanout` and `video.name`). It is the 3dfx card's while
+    /// it drives the monitor (a Banshee's or Voodoo3's desktop, or a
+    /// Voodoo Graphics' or Voodoo2's 3D picture), else the VGA's mode.
+    /// The VGA keeps the mode the BIOS last set while the card shows its
+    /// own, often text mode 3 under Windows, so `video_mode` says nothing
+    /// of the picture then.
+    pub fn scanout(&self) -> Scanout {
+        if let Some(v) = &self.voodoo
+            && v.output()
+        {
+            let (width, height) = v.size();
+            let (device, title, bpp) = match (v.banshee(), v.board.model()) {
+                (Some(b), _) => ("banshee", "Banshee", b.desktop_bytes_per_pixel() * 8),
+                (None, crate::voodoo::Model::Voodoo2) => ("voodoo2", "Voodoo2", 16),
+                (None, _) => ("voodoo1", "Voodoo1", 16),
+            };
+            return Scanout {
+                device,
+                name: format!("{title} {width}x{height}x{bpp}"),
+                bpp: Some(bpp),
+            };
+        }
+        let bpp = match self.video_mode {
+            VideoMode::Vesa => self.vbe.mode.map(|m| u32::from(m.bpp)),
+            _ => None,
+        };
+        Scanout {
+            device: "vga",
+            name: format!("{:?}", self.video_mode),
+            bpp,
+        }
+    }
+
     /// The size of the screen of the mode the display adapter is in:
     /// `display_size`, but a Voodoo Graphics or Voodoo2 showing its
     /// picture instead of the VGA's doesn't count. That card is a second
@@ -3321,7 +3736,30 @@ impl Bus {
         let timing = self.vga.timing();
         match self.vga.adapter {
             video::adapter::Adapter::Hercules => video::hercules::status(&timing, now),
-            _ => timing.status(now),
+            _ => {
+                let status = timing.status(now);
+                self.note_status(&timing, now, status);
+                status
+            }
+        }
+    }
+
+    /// The program read Input Status 1 as `status` at `now`, or the last
+    /// pass of a loop the idle skip skipped read it then: for the retraces
+    /// it let pass unseen (`Activity::status_read`).
+    fn note_status(&mut self, timing: &video::crt::CrtTiming, now: u64, status: u8) {
+        let retraces = timing.retraces(now);
+        let frame = timing.frame_ns();
+        self.activity.status_read(now, retraces, status & 0x08 != 0, frame);
+    }
+
+    /// For `idle`: the passes of a loop that reads port `port` (one
+    /// `idle_port` knows) were skipped up to now.
+    pub fn idle_port_skipped(&mut self, port: u16) {
+        if matches!(port, 0x3DA | 0x3BA) && self.vga.adapter != video::adapter::Adapter::Hercules {
+            let now = self.clock.now_ns();
+            let timing = self.vga.timing();
+            self.note_status(&timing, now, timing.status(now));
         }
     }
 
@@ -3351,6 +3789,41 @@ impl Bus {
         }
     }
 
+    /// Log the line `line` makes, the first few times a line of the kind
+    /// `key` comes after a program starts, the last of them saying no
+    /// more follow. For failures a program gets and ignores many times a
+    /// frame, such as an EMS map past the end of a handle or a search for
+    /// a file that isn't there, which would otherwise flood the log. The
+    /// key holds what a reader would want to see apart (the call and the
+    /// error, say), and is hashed, so a call costs no allocation.
+    pub fn log_limited(&mut self, key: impl std::hash::Hash, line: impl FnOnce() -> String) {
+        const LOGGED: u8 = 8;
+        if !self.logs() {
+            return;
+        }
+        let key = {
+            use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+            BuildHasherDefault::<DefaultHasher>::default().hash_one(key)
+        };
+        let count = self.limited_logs.entry(key).or_default();
+        if *count >= LOGGED {
+            return;
+        }
+        *count += 1;
+        let mut line = line();
+        if *count == LOGGED {
+            line.push_str(" (not logging more)");
+        }
+        self.log_string(&line);
+    }
+
+    /// Start counting `log_limited`'s lines again: a program starts, and
+    /// its first failures of each kind are logged even where the program
+    /// before it had the same ones.
+    pub fn reset_log_limits(&mut self) {
+        self.limited_logs.clear();
+    }
+
     /// The lines logged before the log hook was installed, with their
     /// times, and no more of them kept.
     pub fn take_log_backlog(&mut self) -> Vec<(u64, String)> {
@@ -3364,4 +3837,55 @@ impl Bus {
             log.flush();
         }
     }
+}
+
+/// The picture on the monitor (`Bus::scanout`): the device that scans
+/// it out (`vga`, `banshee`, `voodoo1` or `voodoo2`), its name (the VGA
+/// mode's, or the card's like `Banshee 640x480x16`), and the bits a
+/// pixel of a VESA mode or the card's own (None in the VGA's standard
+/// modes, which the name tells).
+pub struct Scanout {
+    pub device: &'static str,
+    pub name: String,
+    pub bpp: Option<u32>,
+}
+
+/// How far apart the PC speaker's two levels are in the mix: its cone
+/// driven out and at rest.
+const SPEAKER_SWING: f32 = 6000.0;
+
+/// The PIT tick mix frame `n` starts at, which can fall between ticks.
+fn frame_tick(n: u64) -> f64 {
+    part_tick(n * SPEAKER_PARTS)
+}
+
+/// How many parts of a mix frame the speaker's level is taken in over.
+const SPEAKER_PARTS: u64 = crate::dsp::SPEAKER_OVERSAMPLE as u64;
+
+/// The PIT tick part `n` of the speaker's mix frames starts at: frame
+/// `n / SPEAKER_PARTS`'s part `n % SPEAKER_PARTS`.
+fn part_tick(n: u64) -> f64 {
+    (n * crate::timer::PIT_HZ) as f64 / (crate::opl::RATE as u64 * SPEAKER_PARTS) as f64
+}
+
+/// The ticks the part and the mix frame that tick `t` falls in start at.
+fn speaker_starts(t: f64) -> (f64, f64) {
+    let part = part_at(t);
+    (
+        part_tick(part),
+        part_tick(part / SPEAKER_PARTS * SPEAKER_PARTS),
+    )
+}
+
+/// The part that tick `t` falls in, or starts.
+fn part_at(t: f64) -> u64 {
+    let rate = (crate::opl::RATE as u64 * SPEAKER_PARTS) as f64;
+    let mut n = (t * rate / crate::timer::PIT_HZ as f64).floor().max(0.0) as u64;
+    // The division above can round across a part's start.
+    if part_tick(n) > t {
+        n -= 1;
+    } else if part_tick(n + 1) <= t {
+        n += 1;
+    }
+    n
 }

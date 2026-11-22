@@ -1,8 +1,8 @@
 //! The settings in effect, and every setting as the file writes it.
 
 use super::{
-    AspectRatio, Config, DesktopDepth, DosVersion, Filter, Section, SoundConfig, Win32Locale,
-    Win32Trace, WindowsVersion,
+    AspectRatio, Config, DesktopDepth, DesktopSize, DosVersion, Filter, Section, SoundConfig,
+    Win32Locale, Win32Trace, WindowsVersion,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::diskio::DiskSettings;
@@ -49,6 +49,9 @@ pub struct Settings {
     pub toadforce_memory: u32,
     /// What draws a ToadForce's triangles.
     pub toadforce_renderer: crate::toadforce::Renderer,
+    /// The gamma a ToadForce's picture is shown with, after the card's
+    /// own ramp, or None for none.
+    pub toadforce_gamma: Option<f32>,
     /// Where screenshots and recordings go; relative to the working
     /// directory.
     pub capture_dir: PathBuf,
@@ -65,7 +68,10 @@ pub struct Settings {
     /// `cycles=auto` gives a program that keeps an idling system busy all
     /// the host has (`autospeed`).
     pub auto_busy_os: bool,
-    pub cpu: CpuModel,
+    /// The processor as `cpu` sets it, or None while it isn't set: the
+    /// machine then has `default_cpu`'s for its display adapter.
+    /// `cpu_model` is the model either way.
+    pub cpu: Option<CpuModel>,
     pub core: CoreMode,
     /// The FPU adds and subtracts as the host does (`fpu=fast`): faster,
     /// not exact (`Cpu::fpu_fast`).
@@ -93,6 +99,8 @@ pub struct Settings {
     pub win32_version: WindowsVersion,
     /// The depth of the built-in Windows' desktop.
     pub win32_depth: DesktopDepth,
+    /// The size of the built-in Windows' desktop.
+    pub win32_desktop: DesktopSize,
     /// The built-in Windows' system locale.
     pub win32_locale: Win32Locale,
     /// Which calls of its functions the log gets a line for.
@@ -173,7 +181,7 @@ impl Default for Settings {
             aspect: AspectRatio::None,
             vrr: false,
             fps_cap: crate::frame_cap::DEFAULT,
-            filter: Filter::Nearest,
+            filter: Filter::Sharp,
             shader: Shader::None,
             crt: CrtSettings::default(),
             monochrome: Monochrome::Off,
@@ -187,13 +195,14 @@ impl Default for Settings {
             verite: Default::default(),
             toadforce_memory: crate::toadforce::regs::DEFAULT_MEMORY >> 20,
             toadforce_renderer: Default::default(),
+            toadforce_gamma: None,
             capture_dir: PathBuf::from("capture"),
             record_ui: false,
             record_shader: false,
             cycles: CpuSpeed::default(),
             auto_fps: None,
             auto_busy_os: true,
-            cpu: CpuModel::I486,
+            cpu: None,
             core: CoreMode::Auto,
             fpu_fast: false,
             memsize: None,
@@ -205,6 +214,7 @@ impl Default for Settings {
             win32_dlls_replace: Vec::new(),
             win32_version: WindowsVersion::Win95,
             win32_depth: DesktopDepth::Adapter,
+            win32_desktop: DesktopSize::Vga,
             win32_locale: Win32Locale::EnUs,
             win32_trace: Win32Trace::Collapsed,
             dos_high: true,
@@ -339,18 +349,19 @@ impl Settings {
             toadforce_renderer: config
                 .toadforce_renderer
                 .unwrap_or(default.toadforce_renderer),
+            toadforce_gamma: config.toadforce_gamma.unwrap_or(default.toadforce_gamma),
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             record_ui: config.record_ui.unwrap_or(default.record_ui),
             record_shader: config.record_shader.unwrap_or(default.record_shader),
             cycles: config.cycles.unwrap_or(default.cycles),
             auto_fps: config.auto_fps.unwrap_or(default.auto_fps),
             auto_busy_os: config.auto_busy_os.unwrap_or(default.auto_busy_os),
-            cpu: config.cpu.unwrap_or(default.cpu),
+            cpu: config.cpu,
             core: config.core.unwrap_or(default.core),
             fpu_fast: config.fpu_fast.unwrap_or(default.fpu_fast),
             memsize: config
                 .memsize
-                .map(|mb| mb.min(config.cpu.unwrap_or(default.cpu).max_memsize())),
+                .map(|mb| mb.min(config.cpu_model().max_memsize())),
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
             dpmi: config.dpmi.unwrap_or(default.dpmi),
@@ -362,6 +373,7 @@ impl Settings {
                 .unwrap_or(default.win32_dlls_replace),
             win32_version: config.win32_version.unwrap_or(default.win32_version),
             win32_depth: config.win32_depth.unwrap_or(default.win32_depth),
+            win32_desktop: config.win32_desktop.unwrap_or(default.win32_desktop),
             win32_locale: config.win32_locale.unwrap_or(default.win32_locale),
             win32_trace: config.win32_trace.unwrap_or(default.win32_trace),
             dos_high: config.dos_high.unwrap_or(default.dos_high),
@@ -400,6 +412,56 @@ impl Settings {
     }
 }
 
+/// The processor of a machine whose `cpu` isn't set, from its display
+/// adapter: a 486, or with a ToadForce a Pentium III. The ToadForce's games
+/// (2000 to 2002) were written for a Pentium II or better, and a card of
+/// its class was never sold for a 486; `cycles=auto` takes its least speed
+/// from the model (`CpuModel::auto_least`).
+pub fn default_cpu(machine: Adapter) -> CpuModel {
+    if machine.is_toadforce() { CpuModel::PentiumIII } else { CpuModel::I486 }
+}
+
+impl Settings {
+    /// The machine's processor: `cpu` where it is set, else `default_cpu`
+    /// of the display adapter.
+    pub fn cpu_model(&self) -> CpuModel {
+        self.cpu.unwrap_or_else(|| default_cpu(self.machine))
+    }
+
+    /// Whether `cpu` sets a model the display adapter's games don't run on:
+    /// one older than the Pentium II beside a ToadForce. The log warns of
+    /// it (`cpu_lines`), and the settings window unsets it when the card is
+    /// changed to one it doesn't suit.
+    pub fn cpu_below_card(&self) -> bool {
+        self.cpu.is_some_and(|cpu| self.machine.is_toadforce() && cpu < CpuModel::PentiumII)
+    }
+
+    /// A line for the log on the processor a machine with these settings
+    /// starts with, and where it comes from, and a second where `cpu` sets
+    /// a model the card's games don't run on (`cpu_below_card`). That line
+    /// says how to get the card's default: a configuration file saved from
+    /// the settings window before the model followed the card has `cpu=486`.
+    pub fn cpu_lines(&self) -> Vec<String> {
+        let cpu = self.cpu_model();
+        let mut lines = vec![match self.cpu {
+            Some(_) => format!("[CONFIG] A {} (cpu)", cpu.describe()),
+            None if self.machine.is_toadforce() => {
+                format!("[CONFIG] A {} (the default with a ToadForce)", cpu.describe())
+            }
+            None => format!("[CONFIG] A {} (the default)", cpu.describe()),
+        }];
+        if self.cpu_below_card() {
+            lines.push(format!(
+                "[CONFIG] cpu sets a {} with a ToadForce: its games expect a Pentium II \
+                 or better, and without the cpu line the machine has a {}",
+                cpu.describe(),
+                default_cpu(self.machine).describe()
+            ));
+        }
+        lines
+    }
+}
+
 /// The RAM in MB of a machine whose `memsize` isn't set, from its CPU and
 /// its display adapter: what a machine of the CPU's years came with. Up to
 /// a Pentium that is `DEFAULT_MEMORY_MB` (16), which runs DOS programs,
@@ -424,13 +486,13 @@ impl Settings {
     /// the CPU takes.
     pub fn memory_mb(&self) -> usize {
         self.memsize
-            .unwrap_or_else(|| default_memsize(self.cpu, self.machine))
-            .min(self.cpu.max_memsize())
+            .unwrap_or_else(|| default_memsize(self.cpu_model(), self.machine))
+            .min(self.cpu_model().max_memsize())
     }
 
     /// The RAM a machine with these settings starts with.
     pub fn memory(&self) -> Memory {
-        let cpu = self.cpu.describe();
+        let cpu = self.cpu_model().describe();
         let source = match self.memsize {
             Some(_) => "memsize".to_string(),
             None if self.machine.is_toadforce() => {
@@ -521,6 +583,15 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
             "toadforce_renderer",
             Some(settings.toadforce_renderer.name().to_string()),
         ),
+        (
+            Emulator,
+            "toadforce_gamma",
+            Some(
+                settings
+                    .toadforce_gamma
+                    .map_or("off".to_string(), |g| g.to_string()),
+            ),
+        ),
         (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
         (Emulator, "record_ui", yes_no(settings.record_ui)),
         (Emulator, "record_shader", yes_no(settings.record_shader)),
@@ -534,17 +605,19 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (
             Emulator,
             "cpu",
-            Some(match settings.cpu {
-                CpuModel::I386 => "386",
-                CpuModel::I486 => "486",
-                CpuModel::Pentium => "pentium",
-                CpuModel::PentiumMmx => "pentium_mmx",
-                CpuModel::K6_2 => "k6_2",
-                CpuModel::PentiumPro => "pentium_pro",
-                CpuModel::PentiumII => "pentium_ii",
-                CpuModel::PentiumIII => "pentium_iii",
-            }
-            .to_string()),
+            settings.cpu.map(|cpu| {
+                match cpu {
+                    CpuModel::I386 => "386",
+                    CpuModel::I486 => "486",
+                    CpuModel::Pentium => "pentium",
+                    CpuModel::PentiumMmx => "pentium_mmx",
+                    CpuModel::K6_2 => "k6_2",
+                    CpuModel::PentiumPro => "pentium_pro",
+                    CpuModel::PentiumII => "pentium_ii",
+                    CpuModel::PentiumIII => "pentium_iii",
+                }
+                .to_string()
+            }),
         ),
         (Emulator, "core", Some(settings.core.name().to_string())),
         (Emulator, "fpu", Some(if settings.fpu_fast { "fast" } else { "exact" }.to_string())),
@@ -561,6 +634,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         ),
         (Emulator, "win32_version", Some(settings.win32_version.name().to_string())),
         (Emulator, "win32_depth", Some(settings.win32_depth.name().to_string())),
+        (Emulator, "win32_desktop", Some(settings.win32_desktop.name().to_string())),
         (Emulator, "win32_locale", Some(settings.win32_locale.name().to_string())),
         (Emulator, "win32_trace", Some(settings.win32_trace.name().to_string())),
         (Emulator, "dos_high", yes_no(settings.dos_high)),
@@ -593,7 +667,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Sound, "irq", Some(sb.irq.to_string())),
         (Sound, "dma", Some(sb.dma8.to_string())),
         (Sound, "hdma", Some(sb.dma16.to_string())),
-        (Sound, "opl", Some(if sound.opl3 { "opl3" } else { "opl2" }.to_string())),
+        (Sound, "opl", Some(sound.opl.map_or("auto", |chip| chip.name()).to_string())),
         (Sound, "awe32rom", sound.awe32rom.as_deref().map(|p| contract_home(p, home))),
         (Sound, "awe32ram", Some(sound.awe32ram.to_string())),
         (Sound, "soundfont", sound.soundfont.as_deref().map(|p| contract_home(p, home))),
@@ -614,6 +688,11 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Sound, "sc55roms", sound.sc55roms.as_deref().map(|p| contract_home(p, home))),
         (Sound, "sc55model", Some(sound.sc55model.clone())),
         (Sound, "midiport", (!sound.midiport.is_empty()).then(|| sound.midiport.clone())),
+        (Sound, "adlibgold", yes_no(sound.adlibgold_installed)),
+        (Sound, "adlibgoldbase", Some(format!("{:X}", sound.adlibgold.base))),
+        (Sound, "adlibgoldirq", Some(sound.adlibgold.irq.to_string())),
+        (Sound, "adlibgolddma", Some(sound.adlibgold.dma.to_string())),
+        (Sound, "adlibgoldsurround", yes_no(sound.adlibgold.surround)),
         (Sound, "lpt_dac", Some(sound.lpt_dac.name().to_string())),
         (Sound, "tandy", Some(sound.tandy.name().to_string())),
         (Sound, "pit2_gate_at_start", yes_no(sound.pit2_gate_at_start)),

@@ -6,6 +6,8 @@
 //! groups): each file is a module, and the helpers they share are
 //! declared here, once.
 
+#[path = "../common/cdimage/mod.rs"]
+mod cdimage;
 #[path = "../common/dyndiff/mod.rs"]
 mod dyndiff;
 #[path = "../common/pmrig/mod.rs"]
@@ -25,9 +27,11 @@ mod cpu_tests;
 mod cpu_transfer_tests;
 mod dyndiff_tests;
 mod dynrec_speed;
+mod dynrec_lfb_tests;
 mod dynrec_tests;
 mod f80_tests;
 mod fpu_arithmetic_tests;
+mod fpu_compare_status_tests;
 mod fpu_comparison_tests;
 mod fpu_control_tests;
 mod fpu_data_tests;
@@ -46,3 +50,4 @@ mod sse_tests;
 mod sst386;
 mod string_bulk_tests;
 mod test386;
+mod v86_monitor_tests;

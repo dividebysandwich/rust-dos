@@ -395,7 +395,7 @@ mod tests {
     use super::*;
     use crate::joystick::{JoystickSettings, JoystickType, PAD_A, PadState};
 
-    fn machine(kind: JoystickType) -> Cpu {
+    fn machine(kind: JoystickType) -> Box<Cpu> {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         cpu.bus.set_joystick(JoystickSettings { kind, deadzone: 0 });
         cpu

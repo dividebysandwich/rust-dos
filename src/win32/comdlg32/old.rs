@@ -130,7 +130,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
         T_FILE_SELECTED => {
             let lst1 = item(cpu, dlg, LST1);
             if let Some((text, _)) = user32::controls::listbox::item(cpu, lst1, index as i32) {
-                o.set_item_text(dlg, EDT1, &crate::dosstr::from_bytes(&text));
+                o.set_item_text(cpu, dlg, EDT1, &crate::dosstr::from_bytes(&text));
             }
             selected(&d, &mut o, LST1, index);
         }
@@ -145,7 +145,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
                 d.index = index + 1;
                 cpu.bus.guest_write_32(d.ofn + 4 * O_INDEX as u32, d.index);
                 d.filter = patterns.to_ascii_lowercase();
-                o.set_item_text(dlg, EDT1, &d.filter);
+                o.set_item_text(cpu, dlg, EDT1, &d.filter);
                 let dir = d.dir.clone();
                 scan(cpu, &mut d, &dir, &mut o);
             }
@@ -168,7 +168,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             }
         }
         T_FILEOK if c.last == 0 => {
-            o.user("EndDialog", &[dlg, 1]);
+            o.user(cpu, "EndDialog", &[dlg, 1]);
         }
         _ => {}
     }
@@ -214,16 +214,16 @@ fn init(cpu: &mut Cpu, dlg: u32, id: u32) -> Option<(Ops, u32)> {
     };
     d.hwnd = dlg;
     if !d.title.is_empty() {
-        o.set_text(dlg, &d.title);
+        o.set_text(cpu, dlg, &d.title);
     }
     let cmb1 = item(cpu, dlg, CMB1);
     for (title, _) in &d.filters {
-        o.send_text(cmb1, CB_ADDSTRING, 0, title);
+        o.send_text(cpu, cmb1, CB_ADDSTRING, 0, title);
     }
     if d.index == 0 && !d.custom_filter {
         d.index = 1;
     }
-    o.send(cmb1, CB_SETCURSEL, d.index.wrapping_sub(1), 0);
+    o.send(cpu, cmb1, CB_SETCURSEL, d.index.wrapping_sub(1), 0);
     if let Some((_, patterns)) = d.filters.get(d.index.wrapping_sub(1) as usize) {
         d.filter = patterns.to_ascii_lowercase();
     }
@@ -232,11 +232,11 @@ fn init(cpu: &mut Cpu, dlg: u32, id: u32) -> Option<(Ops, u32)> {
     } else {
         d.file.clone()
     };
-    o.set_item_text(dlg, EDT1, &text);
+    o.set_item_text(cpu, dlg, EDT1, &text);
     d.drives = drives(cpu);
     let cmb2 = item(cpu, dlg, CMB2);
     for &drive in &d.drives {
-        o.send_text(cmb2, CB_ADDSTRING, 0, &drive_label(drive));
+        o.send_text(cpu, cmb2, CB_ADDSTRING, 0, &drive_label(drive));
     }
     let mut dir = current_dir(cpu);
     if !d.initial_dir.is_empty() {
@@ -248,14 +248,14 @@ fn init(cpu: &mut Cpu, dlg: u32, id: u32) -> Option<(Ops, u32)> {
     scan(cpu, &mut d, &dir, &mut o);
     if d.flags & OFN_SHOWHELP == 0 {
         let help = item(cpu, dlg, PSH_HELP);
-        o.user("ShowWindow", &[help, SW_HIDE]);
+        o.user(cpu, "ShowWindow", &[help, SW_HIDE]);
     }
     if d.flags & OFN_HIDEREADONLY != 0 {
         let check = item(cpu, dlg, CHX1);
-        o.user("ShowWindow", &[check, SW_HIDE]);
+        o.user(cpu, "ShowWindow", &[check, SW_HIDE]);
     }
     if d.flags & OFN_READONLY != 0 {
-        o.user("SendDlgItemMessageA", &[dlg, CHX1, BM_SETCHECK, 1, 0]);
+        o.user(cpu, "SendDlgItemMessageA", &[dlg, CHX1, BM_SETCHECK, 1, 0]);
     }
     let hook = d.hook;
     let ofn = d.ofn;
@@ -335,9 +335,9 @@ fn scan(cpu: &mut Cpu, d: &mut FileDlg, dir: &str, o: &mut Ops) -> bool {
     let dlg = d.hwnd;
     let lst1 = item(cpu, dlg, LST1);
     let lst2 = item(cpu, dlg, LST2);
-    o.send(lst1, LB_RESETCONTENT, 0, 0);
+    o.send(cpu, lst1, LB_RESETCONTENT, 0, 0);
     for f in &files {
-        o.send_text(lst1, LB_ADDSTRING, 0, f);
+        o.send_text(cpu, lst1, LB_ADDSTRING, 0, f);
     }
     // The folder's own folders in the order LBS_SORT would give them,
     // since they go in unsorted (below): "a~1" above "ab".
@@ -349,16 +349,16 @@ fn scan(cpu: &mut Cpu, d: &mut FileDlg, dir: &str, o: &mut Ops) -> bool {
     // Each at the end, in this order, as Windows does: the list has
     // LBS_SORT, and LB_ADDSTRING would put a folder "1997" above c:\
     // and sort the open folders in among the others.
-    o.send(lst2, LB_RESETCONTENT, 0, 0);
+    o.send(cpu, lst2, LB_RESETCONTENT, 0, 0);
     for (name, _, _) in &list {
-        o.send_text(lst2, LB_INSERTSTRING, u32::MAX, name);
+        o.send_text(cpu, lst2, LB_INSERTSTRING, u32::MAX, name);
     }
     d.look_in = list.into_iter().map(|(_, path, depth)| (path, depth)).collect();
-    o.set_item_text(dlg, STC1, &d.dir.to_ascii_lowercase());
+    o.set_item_text(cpu, dlg, STC1, &d.dir.to_ascii_lowercase());
     let drive = d.dir.as_bytes()[0].to_ascii_uppercase().wrapping_sub(b'A');
     if let Some(i) = d.drives.iter().position(|&x| x == drive) {
         let cmb2 = item(cpu, dlg, CMB2);
-        o.send(cmb2, CB_SETCURSEL, i as u32, 0);
+        o.send(cpu, cmb2, CB_SETCURSEL, i as u32, 0);
     }
     true
 }
@@ -369,42 +369,42 @@ fn command(cpu: &mut Cpu, dlg: u32, wp: u32, o: &mut Ops) -> u32 {
     let control = item(cpu, dlg, id);
     match id {
         LST1 if code == LBN_DBLCLK => {
-            o.send(dlg, WM_COMMAND, IDOK, 0);
+            o.send(cpu, dlg, WM_COMMAND, IDOK, 0);
             1
         }
         LST1 if code == LBN_SELCHANGE => {
-            o.send(control, LB_GETCURSEL, 0, 0);
+            o.send(cpu, control, LB_GETCURSEL, 0, 0);
             o.then(T_FILE_SELECTED, &[]);
             1
         }
         LST2 if code == LBN_DBLCLK => {
-            o.send(control, LB_GETCURSEL, 0, 0);
+            o.send(cpu, control, LB_GETCURSEL, 0, 0);
             o.then(T_FOLDER, &[]);
             1
         }
         CMB1 if code == CBN_SELCHANGE => {
-            o.send(control, CB_GETCURSEL, 0, 0);
+            o.send(cpu, control, CB_GETCURSEL, 0, 0);
             o.then(T_TYPE, &[]);
             1
         }
         CMB2 if code == CBN_SELCHANGE => {
-            o.send(control, CB_GETCURSEL, 0, 0);
+            o.send(cpu, control, CB_GETCURSEL, 0, 0);
             o.then(T_DRIVE, &[]);
             1
         }
         IDOK => {
-            o.get_item_text(dlg, EDT1);
+            o.get_item_text(cpu, dlg, EDT1);
             o.then(T_TEXT, &[]);
-            o.user("SendDlgItemMessageA", &[dlg, CHX1, BM_GETCHECK, 0, 0]);
+            o.user(cpu, "SendDlgItemMessageA", &[dlg, CHX1, BM_GETCHECK, 0, 0]);
             o.then(T_OK, &[]);
             1
         }
         IDCANCEL => {
-            o.user("EndDialog", &[dlg, 0]);
+            o.user(cpu, "EndDialog", &[dlg, 0]);
             1
         }
         IDABORT => {
-            o.user("EndDialog", &[dlg, 1]);
+            o.user(cpu, "EndDialog", &[dlg, 1]);
             1
         }
         _ => 0,
@@ -434,13 +434,13 @@ fn ok(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
     };
     if base.contains(['*', '?']) {
         d.filter = base.to_ascii_lowercase();
-        o.set_item_text(dlg, EDT1, &d.filter);
+        o.set_item_text(cpu, dlg, EDT1, &d.filter);
         let dir = folder(&path[..at]);
         scan(cpu, d, &dir, o);
         return;
     }
     if is_dir(cpu, &path) {
-        o.set_item_text(dlg, EDT1, &d.filter);
+        o.set_item_text(cpu, dlg, EDT1, &d.filter);
         scan(cpu, d, &path, o);
         return;
     }
@@ -452,7 +452,7 @@ fn ok(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
                     "{}\nPath does not exist.\nCheck the path and try again.",
                     path
                 );
-                o.message_box(dlg, &msg, &caption, MB_OK | MB_ICONEXCLAMATION);
+                o.message_box(cpu, dlg, &msg, &caption, MB_OK | MB_ICONEXCLAMATION);
                 return;
             }
         } else if extension(&base).is_empty() && !d.def_ext.is_empty() {
@@ -463,7 +463,7 @@ fn ok(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
                 "{}\nFile not found.\nPlease verify the correct file name was given.",
                 &path[at..]
             );
-            o.message_box(dlg, &msg, &caption, MB_OK | MB_ICONEXCLAMATION);
+            o.message_box(cpu, dlg, &msg, &caption, MB_OK | MB_ICONEXCLAMATION);
             return;
         }
     }
@@ -483,7 +483,7 @@ fn ok(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
         None
     };
     if let Some(msg) = ask {
-        o.message_box(dlg, &msg, &caption, MB_YESNO | MB_ICONEXCLAMATION);
+        o.message_box(cpu, dlg, &msg, &caption, MB_YESNO | MB_ICONEXCLAMATION);
         o.then(T_CONFIRM, &[read_only as u32]);
         return;
     }
@@ -501,7 +501,7 @@ fn finish(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
     let path = d.path.clone();
     if !write_result(cpu, d, &path) {
         set_extended_error(cpu, FNERR_BUFFERTOOSMALL);
-        o.user("EndDialog", &[d.hwnd, 0]);
+        o.user(cpu, "EndDialog", &[d.hwnd, 0]);
         return;
     }
     if d.hook != 0 {
@@ -509,7 +509,7 @@ fn finish(cpu: &mut Cpu, d: &mut FileDlg, read_only: bool, o: &mut Ops) {
         o.call(d.hook, &args);
         o.then(T_FILEOK, &[]);
     } else {
-        o.user("EndDialog", &[d.hwnd, 1]);
+        o.user(cpu, "EndDialog", &[d.hwnd, 1]);
     }
 }
 

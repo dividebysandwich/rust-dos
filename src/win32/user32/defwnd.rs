@@ -117,12 +117,18 @@ fn script(cpu: &mut Cpu, mode: u32, fixed: u32, calls: &[(u32, Vec<u32>)]) -> Op
     task::start(cpu, TASK_DEFWND, vars, 0)
 }
 
-fn send_call(hwnd: u32, msg: u32, wp: u32, lp: u32) -> (u32, Vec<u32>) {
-    (address_of("SendMessageA"), vec![hwnd, msg, wp, lp])
+fn send_call(cpu: &Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32) -> (u32, Vec<u32>) {
+    send_call_to(address_of(cpu, "SendMessageA"), hwnd, msg, wp, lp)
 }
 
-fn call(name: &str, args: &[u32]) -> (u32, Vec<u32>) {
-    (address_of(name), args.to_vec())
+/// `send_call` with SendMessageA's address `send`, for where USER's state
+/// is borrowed.
+fn send_call_to(send: u32, hwnd: u32, msg: u32, wp: u32, lp: u32) -> (u32, Vec<u32>) {
+    (send, vec![hwnd, msg, wp, lp])
+}
+
+fn call(cpu: &Cpu, name: &str, args: &[u32]) -> (u32, Vec<u32>) {
+    (address_of(cpu, name), args.to_vec())
 }
 
 fn script_step(_cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
@@ -149,7 +155,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         K_POS_CHANGING => pos_changing_step(cpu, t, value),
         K_TRACK_BUTTON => track_button_step(cpu, t, value),
         K_MOVE_SIZE => move_size_step(cpu, t, value),
-        K_SYS_COMMAND => sys_command_step(t, value),
+        K_SYS_COMMAND => sys_command_step(cpu, t, value),
         _ => set_cursor_step(cpu, t, value),
     }
 }
@@ -254,6 +260,7 @@ pub fn def_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         WM_WINDOWPOSCHANGED => {
             let flags = cpu.bus.guest_read_32(lp + 24);
+            let send = address_of(cpu, "SendMessageA");
             let state = user(cpu);
             let Some(w) = state.window(hwnd) else {
                 return Some(0);
@@ -262,7 +269,7 @@ pub fn def_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let mut calls = Vec::new();
             if flags & window::SWP_NOCLIENTMOVE == 0 {
                 let pos = super::make_long(client.left, client.top);
-                calls.push(send_call(hwnd, WM_MOVE, 0, pos));
+                calls.push(send_call_to(send, hwnd, WM_MOVE, 0, pos));
             }
             if flags & window::SWP_NOCLIENTSIZE == 0 || flags & window::SWP_STATECHANGED != 0 {
                 let (wp, size) = if w.style & WS_MINIMIZE != 0 {
@@ -271,7 +278,7 @@ pub fn def_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                     let wp = if w.style & WS_MAXIMIZE != 0 { 2 } else { 0 };
                     (wp, super::make_long(client.width(), client.height()))
                 };
-                calls.push(send_call(hwnd, WM_SIZE, wp, size));
+                calls.push(send_call_to(send, hwnd, WM_SIZE, wp, size));
             }
             if calls.is_empty() {
                 return Some(0);
@@ -328,19 +335,19 @@ pub fn def_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             paint::fill(cpu, hdc, r, brush);
             Some(1)
         }
-        WM_CLOSE => script(cpu, R_FIXED, 0, &[call("DestroyWindow", &[hwnd])]),
+        WM_CLOSE => script(cpu, R_FIXED, 0, &[call(cpu, "DestroyWindow", &[hwnd])]),
         WM_MOUSEACTIVATE => {
             let state = user(cpu);
             if style_of(state, hwnd) & WS_CHILD != 0 {
                 let parent = state.parent(hwnd);
-                let ask = send_call(parent, WM_MOUSEACTIVATE, wp, lp);
+                let ask = send_call(cpu, parent, WM_MOUSEACTIVATE, wp, lp);
                 return script(cpu, R_LAST_OR, MA_ACTIVATE, &[ask]);
             }
             Some(MA_ACTIVATE)
         }
         WM_ACTIVATE => {
             if wp & 0xFFFF != 0 && style_of(user(cpu), hwnd) & WS_MINIMIZE == 0 {
-                return script(cpu, R_FIXED, 0, &[call("SetFocus", &[hwnd])]);
+                return script(cpu, R_FIXED, 0, &[call(cpu, "SetFocus", &[hwnd])]);
             }
             Some(0)
         }
@@ -381,27 +388,31 @@ pub fn def_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         WM_NCLBUTTONDBLCLK => nc_double_click(cpu, hwnd, wp, lp),
         WM_NCRBUTTONDOWN => {
             if wp == HTCAPTION {
-                return script(cpu, R_FIXED, 0, &[call("SetCapture", &[hwnd])]);
+                let capture = call(cpu, "SetCapture", &[hwnd]);
+                return script(cpu, R_FIXED, 0, &[capture]);
             }
             Some(0)
         }
         WM_RBUTTONUP => {
+            let release = call(cpu, "ReleaseCapture", &[]);
+            let send = address_of(cpu, "SendMessageA");
             let state = user(cpu);
             let mut calls = Vec::new();
             if state.input.capture == hwnd {
-                calls.push(call("ReleaseCapture", &[]));
+                calls.push(release);
             }
             let (x, y) = super::point_of(lp);
             let (cx, cy) = state.client_origin(hwnd);
             let pt = super::make_long(x + cx, y + cy);
-            calls.push(send_call(hwnd, WM_CONTEXTMENU, hwnd, pt));
+            calls.push(send_call_to(send, hwnd, WM_CONTEXTMENU, hwnd, pt));
             script(cpu, R_FIXED, 0, &calls)
         }
         WM_CONTEXTMENU => {
             let state = user(cpu);
             if style_of(state, hwnd) & WS_CHILD != 0 {
                 let parent = state.parent(hwnd);
-                return script(cpu, R_FIXED, 0, &[send_call(parent, msg, wp, lp)]);
+                let send = send_call(cpu, parent, msg, wp, lp);
+                return script(cpu, R_FIXED, 0, &[send]);
             }
             let has_menu = state
                 .window(hwnd)
@@ -412,7 +423,7 @@ pub fn def_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 let menu = super::menu::get_system_menu(cpu, &[hwnd, FALSE]).unwrap_or(0);
                 if menu != 0 {
                     let args = [menu, 0x0002, x as u32, y as u32, 0, hwnd, 0];
-                    return script(cpu, R_FIXED, 0, &[call("TrackPopupMenu", &args)]);
+                    return script(cpu, R_FIXED, 0, &[call(cpu, "TrackPopupMenu", &args)]);
                 }
             }
             Some(0)
@@ -433,7 +444,7 @@ pub fn def_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                     cpu,
                     R_FIXED,
                     0,
-                    &[send_call(top, WM_SYSCOMMAND, SC_KEYMENU, 0)],
+                    &[send_call(cpu, top, WM_SYSCOMMAND, SC_KEYMENU, 0)],
                 );
             }
             Some(0)
@@ -443,7 +454,7 @@ pub fn def_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         WM_CANCELMODE => {
             user(cpu).input.menu_keys = 0;
             if user(cpu).input.capture == hwnd {
-                return script(cpu, R_FIXED, 0, &[call("ReleaseCapture", &[])]);
+                return script(cpu, R_FIXED, 0, &[call(cpu, "ReleaseCapture", &[])]);
             }
             Some(0)
         }
@@ -492,7 +503,7 @@ pub fn def_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         WM_HELP => {
             let parent = user(cpu).parent(hwnd);
-            script(cpu, R_FIXED, 0, &[send_call(parent, msg, wp, lp)])
+            script(cpu, R_FIXED, 0, &[send_call(cpu, parent, msg, wp, lp)])
         }
         _ => Some(0),
     }
@@ -565,11 +576,11 @@ fn set_cursor_for(cpu: &mut Cpu, hwnd: u32, lp: u32) -> u32 {
     TRUE
 }
 
-fn sys_command_step(t: &mut Task, value: u32) -> Next {
+fn sys_command_step(cpu: &Cpu, t: &mut Task, value: u32) -> Next {
     let (hwnd, wp, lp) = (t.var(1), t.var(2), t.var(3));
     match t.step {
-        0 => super::hook::call(window::WH_CBT, HCBT_SYSCOMMAND, wp, lp, 1),
-        1 if value == 0 => Next::call(address_of("DefSysCommand"), &[hwnd, wp, lp], 2),
+        0 => super::hook::call(cpu, window::WH_CBT, HCBT_SYSCOMMAND, wp, lp, 1),
+        1 if value == 0 => Next::call(address_of(cpu, "DefSysCommand"), &[hwnd, wp, lp], 2),
         1 => Next::Done(0),
         _ => Next::Done(value),
     }
@@ -587,7 +598,7 @@ pub fn def_sys_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn set_cursor_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let (hwnd, wp, lp, parent) = (t.var(1), t.var(2), t.var(3), t.var(4));
     match t.step {
-        0 => window::send(parent, WM_SETCURSOR, wp, lp, 1),
+        0 => window::send(cpu, parent, WM_SETCURSOR, wp, lp, 1),
         _ => {
             if value != 0 {
                 return Next::Done(TRUE);
@@ -836,9 +847,10 @@ fn fill_band(cpu: &mut Cpu, hdc: u32, outer: Rect, inner: Rect, color: u32) {
 
 /// WM_NCLBUTTONDOWN.
 fn nc_button_down(cpu: &mut Cpu, hwnd: u32, hit: u32, lp: u32) -> Option<u32> {
+    let send = address_of(cpu, "SendMessageA");
     let state = user(cpu);
     let style = style_of(state, hwnd);
-    let command = |sc: u32| send_call(hwnd, WM_SYSCOMMAND, sc, lp);
+    let command = |sc: u32| send_call_to(send, hwnd, WM_SYSCOMMAND, sc, lp);
     match hit {
         HTCAPTION => {
             let top = state.top_level(hwnd);
@@ -887,9 +899,10 @@ fn nc_button_down(cpu: &mut Cpu, hwnd: u32, hit: u32, lp: u32) -> Option<u32> {
 
 /// WM_NCLBUTTONDBLCLK, and WM_LBUTTONDBLCLK as HTCLIENT.
 fn nc_double_click(cpu: &mut Cpu, hwnd: u32, hit: u32, lp: u32) -> Option<u32> {
+    let send = address_of(cpu, "SendMessageA");
     let state = user(cpu);
     let style = style_of(state, hwnd);
-    let command = |sc: u32| send_call(hwnd, WM_SYSCOMMAND, sc, lp);
+    let command = |sc: u32| send_call_to(send, hwnd, WM_SYSCOMMAND, sc, lp);
     match hit {
         HTCLIENT if style & WS_MINIMIZE != 0 => script(cpu, R_FIXED, 0, &[command(SC_RESTORE)]),
         HTCAPTION if style & WS_MAXIMIZEBOX != 0 => {
@@ -961,10 +974,25 @@ fn sys_command(cpu: &mut Cpu, hwnd: u32, wp: u32, lp: u32) -> Option<u32> {
             ];
             task::start(cpu, TASK_DEFWND, vars, 28)
         }
-        SC_MINIMIZE => script(cpu, R_FIXED, 0, &[call("ShowWindow", &[hwnd, SW_MINIMIZE])]),
-        SC_MAXIMIZE => script(cpu, R_FIXED, 0, &[call("ShowWindow", &[hwnd, SW_MAXIMIZE])]),
-        SC_RESTORE => script(cpu, R_FIXED, 0, &[call("ShowWindow", &[hwnd, SW_RESTORE])]),
-        SC_CLOSE => script(cpu, R_FIXED, 0, &[send_call(hwnd, WM_CLOSE, 0, 0)]),
+        SC_MINIMIZE => script(
+            cpu,
+            R_FIXED,
+            0,
+            &[call(cpu, "ShowWindow", &[hwnd, SW_MINIMIZE])],
+        ),
+        SC_MAXIMIZE => script(
+            cpu,
+            R_FIXED,
+            0,
+            &[call(cpu, "ShowWindow", &[hwnd, SW_MAXIMIZE])],
+        ),
+        SC_RESTORE => script(
+            cpu,
+            R_FIXED,
+            0,
+            &[call(cpu, "ShowWindow", &[hwnd, SW_RESTORE])],
+        ),
+        SC_CLOSE => script(cpu, R_FIXED, 0, &[send_call(cpu, hwnd, WM_CLOSE, 0, 0)]),
         super::saver::SC_SCREENSAVE => {
             super::saver::start(cpu);
             Some(0)
@@ -999,7 +1027,7 @@ fn sys_key_down(cpu: &mut Cpu, hwnd: u32, wp: u32, lp: u32) -> Option<u32> {
                 cpu,
                 R_FIXED,
                 0,
-                &[send_call(hwnd, WM_CONTEXTMENU, hwnd, u32::MAX)],
+                &[send_call(cpu, hwnd, WM_CONTEXTMENU, hwnd, u32::MAX)],
             );
         }
     } else if wp == VK_ESCAPE && input.key(0x10) & 0x80 != 0 {
@@ -1007,7 +1035,7 @@ fn sys_key_down(cpu: &mut Cpu, hwnd: u32, wp: u32, lp: u32) -> Option<u32> {
             cpu,
             R_FIXED,
             0,
-            &[send_call(hwnd, WM_SYSCOMMAND, SC_KEYMENU, 0x20)],
+            &[send_call(cpu, hwnd, WM_SYSCOMMAND, SC_KEYMENU, 0x20)],
         );
     }
     Some(0)
@@ -1028,13 +1056,18 @@ fn sys_char(cpu: &mut Cpu, hwnd: u32, wp: u32, lp: u32) -> Option<u32> {
         }
         if wp == u32::from(b' ') && style & WS_CHILD != 0 {
             let parent = state.parent(hwnd);
-            return script(cpu, R_FIXED, 0, &[send_call(parent, WM_SYSCHAR, wp, lp)]);
+            return script(
+                cpu,
+                R_FIXED,
+                0,
+                &[send_call(cpu, parent, WM_SYSCHAR, wp, lp)],
+            );
         }
         return script(
             cpu,
             R_FIXED,
             0,
-            &[send_call(hwnd, WM_SYSCOMMAND, SC_KEYMENU, wp)],
+            &[send_call(cpu, hwnd, WM_SYSCOMMAND, SC_KEYMENU, wp)],
         );
     }
     Some(0)
@@ -1046,7 +1079,7 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let (hwnd, icon) = (t.var(1), t.var(2));
     let ps = t.scratch;
     match t.step {
-        0 => Next::call(address_of("BeginPaint"), &[hwnd, ps], 1),
+        0 => Next::call(address_of(cpu, "BeginPaint"), &[hwnd, ps], 1),
         1 => {
             let hdc = value;
             if hdc != 0 && icon != 0 {
@@ -1055,7 +1088,7 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let at = ((c.width() - cx) / 2, (c.height() - cy) / 2);
                 paint::draw_icon_at(cpu, hdc, at, icon, (cx, cy), paint::DI_NORMAL);
             }
-            Next::call(address_of("EndPaint"), &[hwnd, ps], 2)
+            Next::call(address_of(cpu, "EndPaint"), &[hwnd, ps], 2)
         }
         _ => Next::Done(0),
     }
@@ -1067,7 +1100,7 @@ fn pos_changing_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     match t.step {
         0 => {
             window::write_min_max(cpu, hwnd, mm);
-            window::send(hwnd, WM_GETMINMAXINFO, 0, mm, 1)
+            window::send(cpu, hwnd, WM_GETMINMAXINFO, 0, mm, 1)
         }
         _ => {
             let m = read_words(cpu, mm, 10);
@@ -1096,11 +1129,11 @@ fn track_button_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         match t.step {
             0 => {
                 redraw_button(cpu, hwnd, hit, true);
-                return Next::call(address_of("SetCapture"), &[hwnd], 1);
+                return Next::call(address_of(cpu, "SetCapture"), &[hwnd], 1);
             }
             1 => {
                 let args = [msg, 0, WM_MOUSEFIRST, WM_MOUSELAST];
-                return Next::call(address_of("GetMessageA"), &args, 2);
+                return Next::call(address_of(cpu, "GetMessageA"), &args, 2);
             }
             2 => {
                 let m = read_words(cpu, msg, 7);
@@ -1117,11 +1150,11 @@ fn track_button_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 t.step = 1;
             }
-            3 => return Next::call(address_of("ReleaseCapture"), &[], 4),
+            3 => return Next::call(address_of(cpu, "ReleaseCapture"), &[], 4),
             4 => {
                 redraw_button(cpu, hwnd, hit, false);
                 if t.var(5) != 0 && user(cpu).is_window(hwnd) {
-                    return window::send(hwnd, WM_SYSCOMMAND, sc, lp, 5);
+                    return window::send(cpu, hwnd, WM_SYSCOMMAND, sc, lp, 5);
                 }
                 return Next::Done(0);
             }
@@ -1150,11 +1183,11 @@ fn move_size_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let msg = t.scratch;
     loop {
         match t.step {
-            0 => return window::send(hwnd, WM_ENTERSIZEMOVE, 0, 0, 1),
-            1 => return Next::call(address_of("SetCapture"), &[hwnd], 2),
+            0 => return window::send(cpu, hwnd, WM_ENTERSIZEMOVE, 0, 0, 1),
+            1 => return Next::call(address_of(cpu, "SetCapture"), &[hwnd], 2),
             2 => {
                 let args = [msg, 0, WM_MOUSEFIRST, WM_MOUSELAST];
-                return Next::call(address_of("GetMessageA"), &args, 3);
+                return Next::call(address_of(cpu, "GetMessageA"), &args, 3);
             }
             3 => {
                 if !user(cpu).is_window(hwnd) {
@@ -1206,14 +1239,14 @@ fn move_size_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     r.height() as u32,
                     flags,
                 ];
-                return Next::call(address_of("SetWindowPos"), &args, 5);
+                return Next::call(address_of(cpu, "SetWindowPos"), &args, 5);
             }
             5 => {
                 // Paint what the move showed before the next one.
-                return Next::call(address_of("UpdateWindow"), &[hwnd], 2);
+                return Next::call(address_of(cpu, "UpdateWindow"), &[hwnd], 2);
             }
-            4 => return Next::call(address_of("ReleaseCapture"), &[], 6),
-            6 => return window::send(hwnd, WM_EXITSIZEMOVE, 0, 0, 7),
+            4 => return Next::call(address_of(cpu, "ReleaseCapture"), &[], 6),
+            6 => return window::send(cpu, hwnd, WM_EXITSIZEMOVE, 0, 0, 7),
             _ => return Next::Done(0),
         }
     }

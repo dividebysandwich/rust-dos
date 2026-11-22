@@ -473,8 +473,14 @@ impl DiskController {
         let target = parent.join(super::new_entry_name(leaf));
         let renamed = hostfs::rename(&source, &target);
         self.host_dirs.changed();
-        self.host_dirs.touched(&source);
-        self.host_dirs.touched(&target);
+        if renamed.is_ok() {
+            let from_leaf = from.rsplit(['\\', '/', ':']).next().unwrap_or(from);
+            let from_leaf = Self::dos_component(from_leaf);
+            self.host_dirs.renamed(&source, &target, from_leaf, leaf);
+        } else {
+            self.host_dirs.touched(&source);
+            self.host_dirs.touched(&target);
+        }
         renamed.map_err(|_| 0x05)
     }
 
@@ -498,14 +504,25 @@ impl DiskController {
         Ok((time, date))
     }
 
-    /// INT 21h AX=5701h: set the time and date of an open file. Only
-    /// files on disk images keep them; host files keep their own.
+    /// INT 21h AX=5701h: set the time and date of an open file. A file
+    /// on a disk image keeps them in its directory entry, and a host file
+    /// opened for writing as its modification time, which installers set
+    /// to the date in their archives. A host file opened only for reading
+    /// keeps its own: the host doesn't let it be changed through it.
     pub fn set_file_time(&mut self, handle: u16, time: u16, date: u16) -> Result<(), u8> {
         // Emptying a disk-image file at its first use stamps it with the
         // current time, which would replace the one set here.
         self.settle(handle);
         match &self.open_files.get(&handle).ok_or(0x06u8)?.data {
             OpenData::Fat { volume, at, .. } => volume.set_time(*at, time, date),
+            OpenData::Host(f, Some(_)) => {
+                if let Some(t) = dos_to_system_time(time, date) {
+                    // A host that refuses keeps the file's own time, as
+                    // before.
+                    let _ = f.set_modified(t);
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -752,4 +769,25 @@ impl DiskController {
         let _ = self.seek_file(handle, was as i64, 0);
         result
     }
+}
+
+/// The host's time a DOS time and date give as the host's local time,
+/// which `file_time` reads back the same, whatever the host's time zone.
+/// None for one that isn't a time (a month 0, a 30th of February). A
+/// time the host's clocks skip as daylight saving time starts is taken
+/// as the hour after it, as `hosttime::now` does, and the earlier of
+/// the two a time the clocks go through twice can be.
+fn dos_to_system_time(time: u16, date: u16) -> Option<std::time::SystemTime> {
+    use chrono::{NaiveDate, TimeDelta, TimeZone};
+    let year = 1980 + i32::from(date >> 9);
+    let (month, day) = (u32::from(date >> 5 & 15), u32::from(date & 31));
+    let (hour, minute) = (u32::from(time >> 11), u32::from(time >> 5 & 63));
+    let second = u32::from(time & 31) * 2;
+    let at = NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, second)?;
+    let t = Local.from_local_datetime(&at).earliest().or_else(|| {
+        Local
+            .from_local_datetime(&(at + TimeDelta::hours(1)))
+            .earliest()
+    })?;
+    Some(t.into())
 }

@@ -449,6 +449,47 @@ fn tlb_keeps_old_translations_until_invlpg() {
 }
 
 #[test]
+fn a_cr3_load_drops_every_translation_however_many_were_filled() {
+    // A flush empties the slots filled since the one before, or all of
+    // them where more were filled than it notes: both must drop the stale
+    // translation, twice in a row.
+    for others in [0u32, 40, 300, 1000] {
+        let mut rig = Rig::new();
+        page_tables(&mut rig);
+        rig.write32(0x90000, 0x9999);
+        rig.write32(0x91000, 0x1111);
+        rig.write32(0x92000, 0x2222);
+        rig.write32(0x81000 + 0x50 * 4, 0x90000 | 0x3);
+        rig.run(|a| {
+            let mut touch = a.create_label();
+            let mut touched = a.create_label();
+            enable_paging(a)?;
+            a.mov(eax, dword_ptr(0x50000))?;
+            // Fill the slots of other pages.
+            a.mov(esi, 0x1000u32)?;
+            a.mov(ecx, others)?;
+            a.jecxz(touched)?;
+            a.set_label(&mut touch)?;
+            a.mov(edx, dword_ptr(esi))?;
+            a.add(esi, 0x1000)?;
+            a.loop_(touch)?;
+            a.set_label(&mut touched)?;
+            a.mov(dword_ptr(0x81000 + 0x50 * 4), 0x91003u32)?;
+            a.mov(edx, cr3)?;
+            a.mov(cr3, edx)?;
+            a.mov(ebx, dword_ptr(0x50000))?;
+            a.mov(dword_ptr(0x81000 + 0x50 * 4), 0x92003u32)?;
+            a.mov(cr3, edx)?;
+            a.mov(ecx, dword_ptr(0x50000))?;
+            a.hlt()
+        });
+        assert_eq!(rig.cpu.eax(), 0x9999, "{others} other pages");
+        assert_eq!(rig.cpu.ebx(), 0x1111, "{others} other pages");
+        assert_eq!(rig.cpu.ecx(), 0x2222, "{others} other pages");
+    }
+}
+
+#[test]
 fn cr0_rejects_paging_without_protection() {
     let mut rig = Rig::new();
     rig.record(GP);
@@ -961,9 +1002,9 @@ fn dos_takes_the_current_directory_from_the_machines_cds() {
 #[test]
 fn the_keyboard_interrupt_reads_its_scan_code_through_the_ports_in_virtual_8086_mode() {
     let mut rig = Rig::new();
-    // IRQ 1 as a monitor reflects it (Windows' VKD): the scan code is read,
-    // and the interrupt acknowledged, where the monitor traps them, as it
-    // hands the machine its keys one at a time.
+    // IRQ 1 as a monitor reflects it (Windows' VKD): the BIOS reads the
+    // scan code with IN AL, 60h, as an AT's does, and the monitor traps
+    // the read, as it hands the machine its keys one at a time.
     let v86 = asm16(0x30000, |a| {
         a.pushf()?;
         a.db(&[0x9A, 0x04, 0x10, 0x00, 0xF0])?; // CALL FAR F000:1004, INT 09h
@@ -979,7 +1020,9 @@ fn the_keyboard_interrupt_reads_its_scan_code_through_the_ports_in_virtual_8086_
     });
     let (vector, stack) = rig.recorded();
     assert_eq!((vector, stack[2]), (GP as u32, 0xF000));
-    assert_eq!(rig.cpu.dx(), 0x60, "reading the scan code");
+    let at = 0xF0000 + stack[1] as usize;
+    let fault = [rig.cpu.bus.read_8(at), rig.cpu.bus.read_8(at + 1)];
+    assert_eq!(fault, [0xE4, 0x60], "reading the scan code");
 }
 
 #[test]

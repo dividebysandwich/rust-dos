@@ -112,6 +112,16 @@ pub const LBN_SELCANCEL: u32 = 3;
 pub const LBN_SETFOCUS: u32 = 4;
 pub const LBN_KILLFOCUS: u32 = 5;
 
+// LB_DIR's and DlgDirList's attributes (wParam).
+pub const DDL_READONLY: u32 = 0x0001;
+pub const DDL_HIDDEN: u32 = 0x0002;
+pub const DDL_SYSTEM: u32 = 0x0004;
+pub const DDL_DIRECTORY: u32 = 0x0010;
+pub const DDL_ARCHIVE: u32 = 0x0020;
+pub const DDL_POSTMSGS: u32 = 0x2000;
+pub const DDL_DRIVES: u32 = 0x4000;
+pub const DDL_EXCLUSIVE: u32 = 0x8000;
+
 const LB_OKAY: i32 = 0;
 const LB_ERR: i32 = -1;
 
@@ -572,7 +582,7 @@ impl Ctx {
     /// Put the state back, invalidate the window if it changed, and give
     /// the calls to make.
     fn finish(mut self, cpu: &mut Cpu) -> Calls {
-        self.scroll_info();
+        self.scroll_info(cpu);
         self.put(cpu);
         if self.redraw {
             paint::invalidate_rect(cpu, &[self.hwnd, 0, 1]);
@@ -585,9 +595,9 @@ impl Ctx {
         run(cpu, LISTBOX, out, result as u32)
     }
 
-    fn notify(&mut self, code: u32) {
+    fn notify(&mut self, cpu: &Cpu, code: u32) {
         let wp = self.id | code << 16;
-        self.out.send(self.l.owner, WM_COMMAND, wp, self.hwnd);
+        self.out.send(cpu, self.l.owner, WM_COMMAND, wp, self.hwnd);
     }
 
     fn visible(&self, cpu: &mut Cpu) -> bool {
@@ -598,7 +608,7 @@ impl Ctx {
 
     /// SetScrollInfo for the scroll bars whose values changed, as
     /// LISTBOX_UpdateScroll has them.
-    fn scroll_info(&mut self) {
+    fn scroll_info(&mut self, cpu: &Cpu) {
         let l = &self.l;
         if l.style & LBS_NOREDRAW != 0 {
             return;
@@ -628,7 +638,7 @@ impl Ctx {
                 let si = [28, v[0], 0, v[1], v[2], v[3], 0];
                 self.out.write(SCRATCH_DATA, &si);
                 let args = [self.hwnd, SB_VERT, SCRATCH_DATA, 1];
-                self.out.call_with("SetScrollInfo", &args, 4, false);
+                self.out.call_with(cpu, "SetScrollInfo", &args, 4, false);
             }
         }
         if let Some(h) = h
@@ -640,7 +650,7 @@ impl Ctx {
                 let si = [28, h[0], 0, h[1], h[2], h[3], 0];
                 self.out.write(SCRATCH_DATA + 32, &si);
                 let args = [self.hwnd, SB_HORZ, SCRATCH_DATA + 32, 1];
-                self.out.call_with("SetScrollInfo", &args, 4, false);
+                self.out.call_with(cpu, "SetScrollInfo", &args, 4, false);
             }
         }
         self.l.bars = bars;
@@ -749,7 +759,7 @@ impl Ctx {
                 let (w, h) = (rect.width(), rect.height() - remaining);
                 let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE;
                 let args = [self.hwnd, 0, 0, 0, w as u32, h as u32, flags];
-                self.out.call("SetWindowPos", &args);
+                self.out.call(cpu, "SetWindowPos", &args);
                 return;
             }
         }
@@ -942,11 +952,14 @@ impl Ctx {
             self.repaint_item(index);
         }
         if notify && !self.l.items.is_empty() {
-            self.notify(if index != -1 {
-                LBN_SELCHANGE
-            } else {
-                LBN_SELCANCEL
-            });
+            self.notify(
+                cpu,
+                if index != -1 {
+                    LBN_SELCHANGE
+                } else {
+                    LBN_SELCANCEL
+                },
+            );
         } else if self.l.combo != 0 {
             combobox::set_state(cpu, self.l.combo, CBF_SELCHANGE, true);
         }
@@ -982,7 +995,7 @@ impl Ctx {
     /// WM_MEASUREITEM to the owner for the item `index` (-1 for all of an
     /// LBS_OWNERDRAWFIXED list), whose answer comes back as
     /// LB_SETITEMHEIGHT.
-    fn measure_item(&mut self, index: i32, data: u32) {
+    fn measure_item(&mut self, cpu: &Cpu, index: i32, data: u32) {
         let mis = [
             ODT_LISTBOX,
             self.id,
@@ -992,14 +1005,20 @@ impl Ctx {
             data,
         ];
         self.out.write(SCRATCH_DATA, &mis);
-        self.out
-            .send_struct(self.l.owner, WM_MEASUREITEM, self.id, SCRATCH_DATA, false);
+        self.out.send_struct(
+            cpu,
+            self.l.owner,
+            WM_MEASUREITEM,
+            self.id,
+            SCRATCH_DATA,
+            false,
+        );
         let at = index.max(0) as u32;
         self.out
-            .send_read(self.hwnd, LB_SETITEMHEIGHT, at, SCRATCH_DATA + 16);
+            .send_read(cpu, self.hwnd, LB_SETITEMHEIGHT, at, SCRATCH_DATA + 16);
     }
 
-    fn insert_item(&mut self, index: i32, text: Vec<u8>, data: u32) -> i32 {
+    fn insert_item(&mut self, cpu: &Cpu, index: i32, text: Vec<u8>, data: u32) -> i32 {
         let n = self.l.count();
         let index = if index == -1 { n } else { index };
         if index < 0 || index > n {
@@ -1015,7 +1034,7 @@ impl Ctx {
         };
         self.l.items.insert(index as usize, item);
         if self.l.style & LBS_OWNERDRAWVARIABLE != 0 {
-            self.measure_item(index, data);
+            self.measure_item(cpu, index, data);
         }
         self.invalidate_items(index);
         if self.l.count() == 1 {
@@ -1027,34 +1046,63 @@ impl Ctx {
         LB_OKAY
     }
 
-    fn insert_string(&mut self, index: i32, s: Option<Vec<u8>>, data: u32) -> i32 {
+    fn insert_string(&mut self, cpu: &Cpu, index: i32, s: Option<Vec<u8>>, data: u32) -> i32 {
         let (text, data) = if self.l.has_strings() {
             (s.unwrap_or_default(), 0)
         } else {
             (Vec::new(), data)
         };
         let index = if index == -1 { self.l.count() } else { index };
-        let r = self.insert_item(index, text, data);
+        let r = self.insert_item(cpu, index, text, data);
         if r != 0 { r } else { index }
     }
 
+    /// LB_DIR's additions (Wine's LISTBOX_Directory): each of `files`
+    /// where LB_ADDFILE puts it, then each of `drives` at the end. The
+    /// answer is the index of the last one added, or LB_ERR for none.
+    fn add_directory(&mut self, cpu: &Cpu, files: Vec<Vec<u8>>, drives: Vec<Vec<u8>>) -> i32 {
+        let mut last = LB_ERR;
+        for name in files {
+            let pos = self.l.find_file_str_pos(&name).unwrap_or(-1);
+            let index = self.insert_string(cpu, pos, Some(name), 0);
+            if index < 0 {
+                return index;
+            }
+            // A file put above the last one moves that one down.
+            last = if index <= last { last + 1 } else { index };
+        }
+        for name in drives {
+            last = self.insert_string(cpu, -1, Some(name), 0);
+            if last < 0 {
+                break;
+            }
+        }
+        last
+    }
+
     /// WM_DELETEITEM for an item that goes, if the owner needs it.
-    fn delete_item(&mut self, index: i32, data: u32) {
+    fn delete_item(&mut self, cpu: &Cpu, index: i32, data: u32) {
         if self.l.owner_draw() || data != 0 {
             let dis = [ODT_LISTBOX, self.id, index as u32, self.hwnd, data];
             self.out.write(SCRATCH_DATA, &dis);
-            self.out
-                .send_struct(self.l.owner, WM_DELETEITEM, self.id, SCRATCH_DATA, false);
+            self.out.send_struct(
+                cpu,
+                self.l.owner,
+                WM_DELETEITEM,
+                self.id,
+                SCRATCH_DATA,
+                false,
+            );
         }
     }
 
-    fn remove_item(&mut self, index: i32) -> i32 {
+    fn remove_item(&mut self, cpu: &Cpu, index: i32) -> i32 {
         if index < 0 || index >= self.l.count() {
             return LB_ERR;
         }
         self.invalidate_items(index);
         let item = self.l.items.remove(index as usize);
-        self.delete_item(index, item.data);
+        self.delete_item(cpu, index, item.data);
         let l = &mut self.l;
         if l.items.is_empty() {
             // As LB_RESETCONTENT leaves it.
@@ -1085,10 +1133,10 @@ impl Ctx {
         LB_OKAY
     }
 
-    fn reset_content(&mut self) {
+    fn reset_content(&mut self, cpu: &Cpu) {
         for i in (0..self.l.count()).rev() {
             let data = self.l.items[i as usize].data;
-            self.delete_item(i, data);
+            self.delete_item(cpu, i, data);
         }
         let l = &mut self.l;
         l.items.clear();
@@ -1098,19 +1146,19 @@ impl Ctx {
         l.anchor = -1;
     }
 
-    fn set_count(&mut self, count: i32) -> i32 {
+    fn set_count(&mut self, cpu: &Cpu, count: i32) -> i32 {
         if self.l.has_strings() {
             return LB_ERR;
         }
         while count > self.l.count() {
-            let r = self.insert_string(-1, None, 0);
+            let r = self.insert_string(cpu, -1, None, 0);
             if r < 0 {
                 return r;
             }
         }
         while count < self.l.count() {
             let n = self.l.count();
-            let r = self.remove_item(n - 1);
+            let r = self.remove_item(cpu, n - 1);
             if r < 0 {
                 return r;
             }
@@ -1186,7 +1234,7 @@ impl Ctx {
                 let c = combobox::state(cpu, self.l.combo);
                 if c.edit != 0 { c.edit } else { self.l.combo }
             };
-            self.out.call("SetFocus", &[to]);
+            self.out.call(cpu, "SetFocus", &[to]);
         }
         if index == -1 {
             return;
@@ -1195,10 +1243,10 @@ impl Ctx {
         if self.l.combo == 0 && notify {
             let lp = make_long(x, y);
             self.out
-                .send(self.l.owner, WM_LBTRACKPOINT, index as u32, lp);
+                .send(cpu, self.l.owner, WM_LBTRACKPOINT, index as u32, lp);
         }
         self.l.flags |= LF_CAPTURED;
-        self.out.call("SetCapture", &[self.hwnd]);
+        self.out.call(cpu, "SetCapture", &[self.hwnd]);
         let selected = self.l.items[index as usize].selected;
         if self.l.style & (LBS_EXTENDEDSEL | LBS_MULTIPLESEL) != 0 {
             if keys & MK_SHIFT == 0 {
@@ -1238,7 +1286,7 @@ impl Ctx {
                 combobox::set_dropped_index(cpu, combo, index);
                 self.lbutton_down(cpu, keys, x, y);
             } else if self.l.style & LBS_NOTIFY != 0 {
-                self.notify(LBN_DBLCLK);
+                self.notify(cpu, LBN_DBLCLK);
             }
             return;
         }
@@ -1247,7 +1295,7 @@ impl Ctx {
         let screen = state.screen_rect(self.hwnd);
         let origin = state.client_origin(self.hwnd);
         let style = state.window(self.hwnd).map_or(0, |w| w.style);
-        self.out.call("ReleaseCapture", &[]);
+        self.out.call(cpu, "ReleaseCapture", &[]);
         let (sx, sy) = (x + origin.0, y + origin.1);
         if !screen.contains(sx, sy) {
             let dropped = combobox::state(cpu, combo).dropped_index;
@@ -1273,10 +1321,10 @@ impl Ctx {
         }
         if hit != 0 {
             self.out
-                .send(self.hwnd, WM_NCLBUTTONDOWN, hit, make_long(sx, sy));
+                .send(cpu, self.hwnd, WM_NCLBUTTONDOWN, hit, make_long(sx, sy));
         }
         if old_capture != 0 {
-            self.out.call("SetCapture", &[old_capture]);
+            self.out.call(cpu, "SetCapture", &[old_capture]);
         }
     }
 
@@ -1284,10 +1332,10 @@ impl Ctx {
         if self.l.flags & LF_CAPTURED != 0 {
             self.l.flags &= !LF_CAPTURED;
             if user(cpu).input.capture == self.hwnd {
-                self.out.call("ReleaseCapture", &[]);
+                self.out.call(cpu, "ReleaseCapture", &[]);
             }
             if self.l.style & LBS_NOTIFY != 0 && !self.l.items.is_empty() {
-                self.notify(LBN_SELCHANGE);
+                self.notify(cpu, LBN_SELCHANGE);
             }
         }
     }
@@ -1419,7 +1467,7 @@ impl Ctx {
                 combobox::set_state(cpu, self.l.combo, CBF_NOROLLUP, true);
             }
             if !self.l.items.is_empty() {
-                self.notify(LBN_SELCHANGE);
+                self.notify(cpu, LBN_SELCHANGE);
             }
         }
     }
@@ -1439,7 +1487,7 @@ impl Ctx {
         }
         self.move_caret(cpu, caret, true);
         if self.l.style & LBS_NOTIFY != 0 && !self.l.items.is_empty() {
-            self.notify(LBN_SELCHANGE);
+            self.notify(cpu, LBN_SELCHANGE);
         }
     }
 }
@@ -1453,6 +1501,68 @@ fn string_arg(cpu: &mut Cpu, at: u32) -> Option<Vec<u8>> {
     } else {
         Some(bytes_at(cpu, at).unwrap_or_default())
     }
+}
+
+/// LB_DIR's entries: the files and folders, then the drives.
+type Listing = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+
+/// What LB_DIR adds for the DDL_ attributes `attrib` and the file spec
+/// `spec` (Wine's LISTBOX_Directory): the files and folders `spec`
+/// matches, a folder as "[name]", in the order the search finds them,
+/// and then each drive there is as "[-c-]" if `attrib` has DDL_DRIVES.
+/// The search is FindFirstFileA's for `spec`. Names are long ones, as
+/// they are on disk, or with `short` (a 16-bit program's list, Wine's
+/// LB_DIR16) 8.3 ones in small letters, as Windows 3.1 lists them.
+/// Folders come only with DDL_DIRECTORY, and hidden or system entries
+/// only with DDL_HIDDEN or DDL_SYSTEM. With DDL_EXCLUSIVE a file comes
+/// only if its read-only, hidden, system and archive attributes are the
+/// ones `attrib` asks for, and with DDL_DRIVES | DDL_EXCLUSIVE alone the
+/// folder isn't searched. None when the search fails other than by
+/// finding nothing.
+fn directory(cpu: &Cpu, attrib: u32, spec: Option<&[u8]>, short: bool) -> Option<Listing> {
+    const ATTRIBS: u32 = DDL_READONLY | DDL_HIDDEN | DDL_SYSTEM | DDL_ARCHIVE;
+    let mut files = Vec::new();
+    if attrib != DDL_DRIVES | DDL_EXCLUSIVE {
+        let spec = crate::dosstr::from_bytes(spec?);
+        let entries = match crate::win32::kernel32::files::find_spec(cpu, &spec) {
+            Ok(entries) => entries,
+            // ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES: nothing matches.
+            Err(2 | 18) => Vec::new(),
+            Err(_) => return None,
+        };
+        let acp = crate::win32::nls::ansi(cpu);
+        for e in entries {
+            let a = e.attributes;
+            if a & 0x08 != 0 || a & (DDL_HIDDEN | DDL_SYSTEM) & !attrib != 0 {
+                continue;
+            }
+            let mut name = if short && !e.short.is_empty() {
+                crate::dosstr::to_bytes(&e.short)
+            } else {
+                crate::dosstr::to_bytes(&e.name)
+            };
+            if short {
+                name = name.iter().map(|&b| text::ansi_case(acp, b, false)).collect();
+            }
+            if a & 0x10 != 0 {
+                if attrib & DDL_DIRECTORY == 0 || e.name == "." {
+                    continue;
+                }
+                files.push([b"[", &name[..], b"]"].concat());
+            } else if attrib & DDL_EXCLUSIVE == 0 || attrib & ATTRIBS == a & ATTRIBS {
+                files.push(name);
+            }
+        }
+    }
+    let drives = if attrib & DDL_DRIVES != 0 {
+        (0..26u8)
+            .filter(|&d| cpu.bus.disk.is_mounted(d))
+            .map(|d| vec![b'[', b'-', b'a' + d, b'-', b']'])
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Some((files, drives))
 }
 
 pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1470,7 +1580,7 @@ pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let combo = c.l.combo;
     let result: i32 = match msg {
         LB_RESETCONTENT => {
-            c.reset_content();
+            c.reset_content(cpu);
             c.redraw = true;
             0
         }
@@ -1487,7 +1597,7 @@ pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 c.l.find_file_str_pos(&key)
             };
             match pos {
-                Some(pos) => c.insert_string(pos, s, lp),
+                Some(pos) => c.insert_string(cpu, pos, s, lp),
                 None => {
                     let out = c.finish(cpu);
                     return sort(cpu, out, hwnd, lp, false);
@@ -1500,10 +1610,10 @@ pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             } else {
                 None
             };
-            c.insert_string(wp as i32, s, lp)
+            c.insert_string(cpu, wp as i32, s, lp)
         }
         LB_DELETESTRING => {
-            if c.remove_item(wp as i32) != LB_ERR {
+            if c.remove_item(cpu, wp as i32) != LB_ERR {
                 c.l.count()
             } else {
                 LB_ERR
@@ -1666,15 +1776,22 @@ pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 LB_OKAY
             }
         }
-        // Listing a directory isn't done.
-        LB_DIR => LB_ERR,
+        LB_DIR => {
+            let spec = string_arg(cpu, lp);
+            let tid = user(cpu).window(hwnd).map_or(0, |w| w.tid);
+            let short = crate::win16::is_task(&cpu.bus.win32, tid);
+            match directory(cpu, wp, spec.as_deref(), short) {
+                Some((files, drives)) => c.add_directory(cpu, files, drives),
+                None => LB_ERR,
+            }
+        }
         LB_GETLOCALE => c.l.locale as i32,
         // A locale that isn't installed is refused, as IsValidLocale
         // refuses it, and the list keeps its own.
         LB_SETLOCALE if crate::win32::nls::by_lcid(wp).is_none() => LB_ERR,
         LB_SETLOCALE => std::mem::replace(&mut c.l.locale, wp) as i32,
         LB_INITSTORAGE => LB_OKAY,
-        LB_SETCOUNT => c.set_count(wp as i32),
+        LB_SETCOUNT => c.set_count(cpu, wp as i32),
         LB_SETTABSTOPS => {
             if c.l.style & LBS_USETABSTOPS == 0 {
                 0
@@ -1702,7 +1819,7 @@ pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             LB_OKAY
         }
         WM_DESTROY => {
-            c.reset_content();
+            c.reset_content(cpu);
             c.l.flags &= !LF_CREATED;
             1
         }
@@ -1734,7 +1851,7 @@ pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         WM_SETFOCUS => {
             c.l.flags |= LF_IN_FOCUS | LF_CARET_ON;
             c.draw_focus_rect();
-            c.notify(LBN_SETFOCUS);
+            c.notify(cpu, LBN_SETFOCUS);
             0
         }
         WM_KILLFOCUS => {
@@ -1742,7 +1859,7 @@ pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 c.redraw = true;
             }
             c.l.flags &= !LF_IN_FOCUS;
-            c.notify(LBN_KILLFOCUS);
+            c.notify(cpu, LBN_KILLFOCUS);
             0
         }
         WM_HSCROLL => {
@@ -1760,7 +1877,7 @@ pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             } else if msg == WM_LBUTTONDOWN {
                 c.lbutton_down(cpu, wp, x, y);
             } else if c.l.style & LBS_NOTIFY != 0 {
-                c.notify(LBN_DBLCLK);
+                c.notify(cpu, LBN_DBLCLK);
             }
             0
         }
@@ -1905,7 +2022,7 @@ fn create(cpu: &mut Cpu, hwnd: u32, cs: u32) -> Option<u32> {
         if combo != 0 && cs.style & combobox::CBS_DROPDOWN != 0 {
             c.l.item_height = cs.fixed_height.max(1);
         } else {
-            c.measure_item(-1, 0);
+            c.measure_item(cpu, -1, 0);
         }
     }
     c.store(cpu, 0)
@@ -1939,7 +2056,7 @@ fn sort_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let index = t.var(6) as i32;
             let res = value as i32;
             if res == 0 {
-                return finish_sort(t, index);
+                return finish_sort(cpu, t, index);
             }
             if res < 0 {
                 t.set(5, index as u32);
@@ -1958,7 +2075,7 @@ fn compare_next(cpu: &mut Cpu, t: &mut Task) -> Next {
     let (min, max) = (t.var(4) as i32, t.var(5) as i32);
     if min == max {
         let find = t.var(3) != 0;
-        return finish_sort(t, if find { -1 } else { max });
+        return finish_sort(cpu, t, if find { -1 } else { max });
     }
     let index = (min + max) / 2;
     t.set(6, index as u32);
@@ -1981,17 +2098,17 @@ fn compare_next(cpu: &mut Cpu, t: &mut Task) -> Next {
     ];
     write_words(cpu, t.scratch + SCRATCH_DATA, &cis);
     let args = [owner, WM_COMPAREITEM, id, t.scratch + SCRATCH_DATA];
-    Next::call(super::super::address_of("SendMessageA"), &args, 1)
+    Next::call(super::super::address_of(cpu, "SendMessageA"), &args, 1)
 }
 
 /// The search found `index`: LB_FINDSTRINGEXACT's answer, or where
 /// LB_ADDSTRING inserts the item.
-fn finish_sort(t: &mut Task, index: i32) -> Next {
+fn finish_sort(cpu: &Cpu, t: &mut Task, index: i32) -> Next {
     if t.var(3) != 0 {
         return Next::Done(index as u32);
     }
     let args = [t.var(1), LB_INSERTSTRING, index as u32, t.var(2)];
-    Next::call(super::super::address_of("SendMessageA"), &args, 2)
+    Next::call(super::super::address_of(cpu, "SendMessageA"), &args, 2)
 }
 
 /// LBS_WANTKEYBOARDINPUT: the owner says which item a key goes to with
@@ -2016,7 +2133,7 @@ fn key_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     match t.step {
         0 => {
             let args = [t.var(4), msg, t.var(5), hwnd];
-            Next::call(super::super::address_of("SendMessageA"), &args, 1)
+            Next::call(super::super::address_of(cpu, "SendMessageA"), &args, 1)
         }
         1 => {
             let caret = value as i32;
@@ -2058,7 +2175,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 /// first of its own variables): the owner draws an owner-drawn list's
 /// items, in calls whose list the second gives.
 fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
-    if let Some(next) = paint_head(t, value) {
+    if let Some(next) = paint_head(cpu, t, value) {
         return next;
     }
     let (hwnd, hdc) = (t.var(P_HWND), t.var(P_HDC));
@@ -2088,7 +2205,7 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             if let Some(next) = ops_step(cpu, t, base, value) {
                 return next;
             }
-            paint_end(t, 5)
+            paint_end(cpu, t, 5)
         }
         _ => Next::Done(0),
     }
@@ -2159,7 +2276,7 @@ fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32, brush: u32, rect: u32) -> Calls {
                 it.data,
             ];
             out.write(SCRATCH_DATA, &dis);
-            out.send_struct(l.owner, WM_DRAWITEM, id, SCRATCH_DATA, false);
+            out.send_struct(cpu, l.owner, WM_DRAWITEM, id, SCRATCH_DATA, false);
             return;
         }
         if focused {

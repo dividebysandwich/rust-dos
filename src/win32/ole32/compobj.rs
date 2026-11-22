@@ -26,7 +26,7 @@ use crate::win32::task::{Next, Task};
 use crate::win32::user32::{current_pid, current_tid};
 
 const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
-const RPC_E_WRONG_THREAD: u32 = 0x8001_010E;
+pub(super) const RPC_E_WRONG_THREAD: u32 = 0x8001_010E;
 const CO_E_NOT_SUPPORTED: u32 = 0x8000_4021;
 const CO_E_CLASSSTRING: u32 = 0x8004_01F3;
 const CO_E_DLLNOTFOUND: u32 = 0x8004_01F8;
@@ -41,8 +41,8 @@ const CLSCTX_LOCAL_SERVER: u32 = 0x4;
 /// The methods of IUnknown and the others called here, by their places
 /// in the vtables.
 const QUERY_INTERFACE: u32 = 0;
-const ADD_REF: u32 = 1;
-const RELEASE: u32 = 2;
+pub(super) const ADD_REF: u32 = 1;
+pub(super) const RELEASE: u32 = 2;
 const CREATE_INSTANCE: u32 = 3;
 const STREAM_READ: u32 = 3;
 const STREAM_WRITE: u32 = 4;
@@ -71,6 +71,12 @@ pub struct Registered {
     context: u32,
     tid: u32,
     pid: u32,
+    /// REGCLS: whether one client (REGCLS_SINGLEUSE) or many may get it,
+    /// and whether it is suspended until CoResumeClassObjects.
+    flags: super::Added<u32>,
+    /// A client of another process got it: one registered for a single
+    /// use is no longer found.
+    used: super::Added<bool>,
 }
 
 /// A proxy/stub class CoRegisterPSClsid set for a thread's apartment.
@@ -88,6 +94,9 @@ pub struct Com {
     registered: Vec<Registered>,
     next_cookie: u32,
     ps_classes: Vec<PsClass>,
+    /// Each local server's count of CoAddRefServerProcess: (process,
+    /// count).
+    server_refs: super::Added<Vec<(u32, u32)>>,
 }
 
 fn com_state(cpu: &mut Cpu) -> &mut Com {
@@ -100,6 +109,7 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
     com.apartments.retain(|a| a.pid != pid);
     com.registered.retain(|r| r.pid != pid);
     com.ps_classes.retain(|p| !tids.contains(&p.tid));
+    com.server_refs.0.retain(|&(p, _)| p != pid);
 }
 
 fn apartment(cpu: &mut Cpu) -> Option<&mut Apartment> {
@@ -171,7 +181,9 @@ pub fn ole_initialize(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         return Some(result);
     };
     a.ole += 1;
-    Some(if a.ole == 1 { S_OK } else { S_FALSE })
+    let first = a.ole == 1;
+    super::dragdrop::ole_initialized(cpu);
+    Some(if first { S_OK } else { S_FALSE })
 }
 
 /// CoUninitialize: the last one ends the thread's apartment, revoking
@@ -208,7 +220,7 @@ fn release_all(cpu: &mut Cpu, value: u32, objects: impl Iterator<Item = u32>) ->
     call_each(cpu, value, RELEASE, objects)
 }
 
-fn call_each(
+pub(super) fn call_each(
     cpu: &mut Cpu,
     value: u32,
     method: u32,
@@ -227,7 +239,7 @@ fn call_each(
 }
 
 /// The string of the registry key `path` under HKEY_CLASSES_ROOT.
-fn class_value(cpu: &mut Cpu, path: &str) -> Option<String> {
+pub fn class_value(cpu: &mut Cpu, path: &str) -> Option<String> {
     registry::string_value(cpu, HKEY_CLASSES_ROOT, path, "")
 }
 
@@ -322,6 +334,50 @@ pub fn co_get_treat_as_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
+/// CoTreatAsClass(old, new): the registry's TreatAs key of `old` names
+/// `new` from now on, as Wine's compobj.c sets it. With `new` the same
+/// as `old`, the key names the class AutoTreatAs names, or goes when
+/// there is none; with GUID_NULL it goes. REGDB_E_CLASSNOTREG when
+/// `old` has no key under HKEY_CLASSES_ROOT\CLSID.
+pub fn co_treat_as_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [old, new] = args[..] else {
+        return Some(E_INVALIDARG);
+    };
+    let (Some(old), Some(new)) = (Guid::read(cpu, old), Guid::read(cpu, new)) else {
+        return Some(E_INVALIDARG);
+    };
+    let path = format!("CLSID\\{}", old);
+    let auto = class_value(cpu, &format!("{}\\AutoTreatAs", path));
+    let registry = registry::get(cpu);
+    let registry::Open::Key(root) = registry.open(HKEY_CLASSES_ROOT, 0) else {
+        return Some(REGDB_E_CLASSNOTREG);
+    };
+    let Some(key) = registry.find(root, &path) else {
+        return Some(REGDB_E_CLASSNOTREG);
+    };
+    let target = if old == new {
+        auto.as_deref().and_then(Guid::parse)
+    } else if new == com::GUID_NULL {
+        None
+    } else {
+        Some(new)
+    };
+    match target {
+        Some(class) => {
+            let (treat_as, _) = registry.create(key, "TreatAs");
+            let mut text = crate::dosstr::to_bytes(&class.to_string());
+            text.push(0);
+            registry.set_value(treat_as, "", registry::REG_SZ, text);
+        }
+        None => {
+            if let Some(treat_as) = registry.child(key, "TreatAs") {
+                registry.delete(treat_as);
+            }
+        }
+    }
+    Some(S_OK)
+}
+
 /// CoRegisterPSClsid(iid, clsid): the thread's apartment uses `clsid`
 /// as the proxy/stub class of `iid`.
 pub fn co_register_ps_clsid(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -361,24 +417,30 @@ pub fn co_get_ps_clsid(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if out == 0 || !cpu.bus.guest_probe(out, 16, true) {
         return Some(E_INVALIDARG);
     }
+    let Some(clsid) = ps_clsid(cpu, &iid) else {
+        return Some(REGDB_E_IIDNOTREG);
+    };
+    clsid.write(cpu, out);
+    Some(S_OK)
+}
+
+/// The proxy/stub class of `iid` for the running thread: the one
+/// CoRegisterPSClsid set, or the registry's
+/// Interface\{iid}\ProxyStubClsid32.
+pub fn ps_clsid(cpu: &mut Cpu, iid: &Guid) -> Option<Guid> {
     let tid = current_tid(cpu);
     let set = com_state(cpu)
         .ps_classes
         .iter()
         .find(|p| p.tid == tid && p.iid == iid.0)
         .and_then(|p| <[u8; 16]>::try_from(p.clsid.as_slice()).ok());
-    let clsid = match set {
-        Some(bytes) => Guid(bytes),
+    match set {
+        Some(bytes) => Some(Guid(bytes)),
         None => {
             let path = format!("Interface\\{}\\ProxyStubClsid32", iid);
-            match class_value(cpu, &path).as_deref().and_then(Guid::parse) {
-                Some(clsid) => clsid,
-                None => return Some(REGDB_E_IIDNOTREG),
-            }
+            class_value(cpu, &path).as_deref().and_then(Guid::parse)
         }
-    };
-    clsid.write(cpu, out);
-    Some(S_OK)
+    }
 }
 
 /// CoRegisterMessageFilter(filter, previous): a single-threaded
@@ -403,9 +465,11 @@ pub fn co_register_message_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// CoRegisterClassObject(clsid, object, context, flags, cookie): COM
 /// holds a reference to the object until CoRevokeClassObject or the
-/// apartment's end.
+/// apartment's end. One registered for CLSCTX_LOCAL_SERVER is there for
+/// other processes too, whose calls come to the registering thread's
+/// apartment window (rpc.rs).
 pub fn co_register_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [clsid, object, context, _, cookie_at] = args[..] else {
+    let [clsid, object, context, flags, cookie_at] = args[..] else {
         return Some(E_INVALIDARG);
     };
     if object == 0 || cookie_at == 0 {
@@ -428,8 +492,13 @@ pub fn co_register_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         context,
         tid,
         pid,
+        flags: crate::savestate::Since(flags),
+        used: crate::savestate::Since(false),
     });
     com::write_out(cpu, cookie_at, cookie);
+    if context & CLSCTX_LOCAL_SERVER != 0 {
+        super::rpc::class_registered(cpu);
+    }
     call_each(cpu, S_OK, ADD_REF, [object].into_iter())
 }
 
@@ -450,7 +519,101 @@ pub fn co_revoke_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(RPC_E_WRONG_THREAD);
     }
     let gone = com.registered.remove(i);
+    // An export of it to other processes takes the registration's
+    // reference.
+    if super::rpc::class_revoked(cpu, gone.object) {
+        return Some(S_OK);
+    }
     release_all(cpu, S_OK, [gone.object].into_iter())
+}
+
+const REGCLS_MULTIPLEUSE: u32 = 1;
+const REGCLS_MULTI_SEPARATE: u32 = 2;
+const REGCLS_SUSPENDED: u32 = 4;
+
+/// The class object of `clsid` another process registered for
+/// CLSCTX_LOCAL_SERVER that a client of the running process may get:
+/// not suspended, and not one for a single use that a client got
+/// already.
+pub fn local_class(cpu: &mut Cpu, clsid: &Guid) -> Option<super::rpc::Remote> {
+    let pid = current_pid(cpu);
+    com_state(cpu)
+        .registered
+        .iter()
+        .find(|r| {
+            r.clsid == clsid.0
+                && r.pid != pid
+                && r.context & CLSCTX_LOCAL_SERVER != 0
+                && r.flags.0 & REGCLS_SUSPENDED == 0
+                && !r.used.0
+        })
+        .map(|r| super::rpc::Remote {
+            pid: r.pid,
+            tid: r.tid,
+            object: r.object,
+        })
+}
+
+/// A client got the class object of `clsid` the process `pid`
+/// registered: one for a single use is used up.
+pub fn class_used(cpu: &mut Cpu, clsid: &Guid, pid: u32) {
+    for r in com_state(cpu).registered.iter_mut() {
+        if r.clsid == clsid.0
+            && r.pid == pid
+            && r.flags.0 & (REGCLS_MULTIPLEUSE | REGCLS_MULTI_SEPARATE) == 0
+        {
+            r.used.0 = true;
+        }
+    }
+}
+
+/// CoAddRefServerProcess(): the process's count of references that keep
+/// it running as a server, one more.
+pub fn co_add_ref_server_process(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let pid = current_pid(cpu);
+    let refs = &mut com_state(cpu).server_refs.0;
+    let count = match refs.iter_mut().find(|(p, _)| *p == pid) {
+        Some((_, n)) => {
+            *n += 1;
+            *n
+        }
+        None => {
+            refs.push((pid, 1));
+            1
+        }
+    };
+    Some(count)
+}
+
+/// CoReleaseServerProcess(): one reference less; with the last, the
+/// process's class objects are suspended, as on Windows, so that no
+/// client gets one while the server shuts down.
+pub fn co_release_server_process(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let pid = current_pid(cpu);
+    let com = com_state(cpu);
+    let Some((_, n)) = com.server_refs.0.iter_mut().find(|(p, _)| *p == pid) else {
+        return Some(0);
+    };
+    *n = n.saturating_sub(1);
+    let count = *n;
+    if count == 0 {
+        for r in com.registered.iter_mut().filter(|r| r.pid == pid) {
+            r.flags.0 |= REGCLS_SUSPENDED;
+        }
+    }
+    Some(count)
+}
+
+/// CoResumeClassObjects(): the process's class objects registered with
+/// REGCLS_SUSPENDED are there for clients from now on.
+pub fn co_resume_class_objects(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let pid = current_pid(cpu);
+    for r in com_state(cpu).registered.iter_mut() {
+        if r.pid == pid {
+            r.flags.0 &= !REGCLS_SUSPENDED;
+        }
+    }
+    Some(S_OK)
 }
 
 /// Where a class's objects come from.
@@ -461,6 +624,9 @@ pub enum Source {
     Builtin(usize),
     /// A DLL the registry names as the class's in-process server.
     Server,
+    /// A class object another process registered, or the program the
+    /// registry names as the class's local server (rpc.rs).
+    Local,
 }
 
 /// Where the objects of `clsid` come from for `context`, for the
@@ -485,6 +651,14 @@ pub fn source(cpu: &mut Cpu, clsid: &Guid, context: u32) -> Option<Source> {
         let path = format!("CLSID\\{}\\InprocServer32", clsid);
         if class_value(cpu, &path).is_some_and(|d| !d.is_empty()) {
             return Some(Source::Server);
+        }
+    }
+    if context & CLSCTX_LOCAL_SERVER != 0 {
+        let path = format!("CLSID\\{}\\LocalServer32", clsid);
+        if local_class(cpu, clsid).is_some()
+            || class_value(cpu, &path).is_some_and(|d| !d.trim().is_empty())
+        {
+            return Some(Source::Local);
         }
     }
     None
@@ -556,7 +730,7 @@ pub fn class_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return Next::Done(REGDB_E_CLASSNOTREG);
             };
             put_text(cpu, s + S_TEXT, &dll);
-            let load = crate::win32::kernel32::address_of("LoadLibraryA");
+            let load = crate::win32::kernel32::address_of(cpu, "LoadLibraryA");
             Next::call(load, &[s + S_TEXT], 1)
         }
         1 => {
@@ -564,7 +738,7 @@ pub fn class_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return Next::Done(CO_E_DLLNOTFOUND);
             }
             put_text(cpu, s + S_TEXT, "DllGetClassObject");
-            let find = crate::win32::kernel32::address_of("GetProcAddress");
+            let find = crate::win32::kernel32::address_of(cpu, "GetProcAddress");
             Next::call(find, &[value, s + S_TEXT], 2)
         }
         2 => {
@@ -621,7 +795,7 @@ const S_STUB: u32 = RECORD + 8;
 const S_PS_IID: u32 = RECORD + 12;
 pub const MARSHAL_SCRATCH: u32 = RECORD + 28;
 
-const IID_IPSFACTORYBUFFER: Guid = Guid::new(
+pub const IID_IPSFACTORYBUFFER: Guid = Guid::new(
     0xD5F5_69D0,
     0x593B,
     0x101A,
@@ -898,12 +1072,15 @@ crate::state_fields!(Registered {
     object,
     context,
     tid,
-    pid
+    pid,
+    flags,
+    used
 });
 crate::state_fields!(PsClass { tid, iid, clsid });
 crate::state_fields!(Com {
     apartments,
     registered,
     next_cookie,
-    ps_classes
+    ps_classes,
+    server_refs
 });

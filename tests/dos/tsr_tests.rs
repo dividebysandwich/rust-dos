@@ -183,6 +183,51 @@ fn tsr_started_from_shell_stays_resident() {
 }
 
 #[test]
+fn a_vector_a_tsr_points_at_a_service_entry_survives_the_shell() {
+    // Rob Northen's CDPATCH hooks INT 21h and moves DOS's entry to INT 6Fh
+    // to chain to it. That entry is in the BIOS ROM, outside the TSR, and
+    // must stay through the shell and the next program.
+    let base = scratch(
+        "chained",
+        &[("TSR.COM", &[0xEB, 0xFE]), ("APP.COM", &[0xEB, 0xFE])],
+    );
+    let mut cpu = Cpu::new(base);
+    cpu.load_shell();
+    let dos = ivt(&cpu, 0x21);
+    let iret = ivt(&cpu, 0x6F);
+    assert_ne!(dos, iret);
+
+    assert!(cpu.load_executable("TSR.COM", None));
+    let tsr = cpu.current_psp;
+    set_ivt(&mut cpu, 0x6F, dos.0, dos.1);
+    set_ivt(&mut cpu, 0x21, tsr, 0x0180);
+    cpu.set_dx(0x20);
+    cpu.set_reg8(Register::AL, 0);
+    int21(&mut cpu, 0x31);
+    cpu.load_shell();
+    assert_eq!(ivt(&cpu, 0x21), (tsr, 0x0180));
+    assert_eq!(ivt(&cpu, 0x6F), dos);
+
+    // A program that ends with a vector into its own memory has it put
+    // back, since the shell takes that memory back. One pointed at the
+    // BIOS's ROM stays as the program left it, as in DOS: here INT 05h
+    // pointed at the video BIOS's entry.
+    assert!(cpu.load_executable("APP.COM", None));
+    assert_eq!(ivt(&cpu, 0x6F), dos);
+    let app = cpu.current_psp;
+    let timer = ivt(&cpu, 0x1C);
+    let video = ivt(&cpu, 0x10);
+    assert_ne!(ivt(&cpu, 0x05), video);
+    set_ivt(&mut cpu, 0x05, video.0, video.1);
+    set_ivt(&mut cpu, 0x1C, app, 0x0100);
+    cpu.set_reg8(Register::AL, 0);
+    int21(&mut cpu, 0x4C);
+    cpu.load_shell();
+    assert_eq!((ivt(&cpu, 0x05), ivt(&cpu, 0x1C)), (video, timer));
+    assert_eq!(ivt(&cpu, 0x6F), dos);
+}
+
+#[test]
 fn tsr_started_from_shell_gives_up_its_ctrl_break_and_critical_error_handlers() {
     // DOS sets INT 22h, 23h and 24h from the PSP for a process that stays
     // resident too, so handlers it pointed into its own memory go: a TSR
@@ -328,4 +373,157 @@ fn tsr_loaded_by_a_program_gives_back_the_rest_of_its_memory() {
     cpu.set_bx(0x1000);
     int21(&mut cpu, 0x48);
     assert!(!cpu.get_cpu_flag(CpuFlags::CF), "allocation failed, max free {:04X}", cpu.bx());
+}
+
+#[test]
+fn a_program_started_from_the_shell_frees_its_environment() {
+    // A TSR frees its environment (ES = PSP:[2Ch]) before it stays
+    // resident, as Rob Northen's CDPATCH does; DOS lets it.
+    let base = scratch(
+        "free_environment",
+        &[("TSR.COM", &[0xEB, 0xFE]), ("APP.COM", &[0xEB, 0xFE])],
+    );
+    let mut cpu = Cpu::new(base);
+    cpu.load_shell();
+    assert!(cpu.load_executable("TSR.COM", None));
+    let tsr = cpu.current_psp;
+    let environment = cpu.bus.read_16(cpu.get_physical_addr(tsr, 0x2C));
+    let block = |cpu: &mut Cpu| {
+        (0..0x40)
+            .map(|i| cpu.bus.read_8(environment as usize * 16 + i))
+            .collect::<Vec<u8>>()
+    };
+    let before = block(&mut cpu);
+    cpu.set_reg16(Register::ES, environment);
+    int21(&mut cpu, 0x49);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    // Its MCB is free, as DOS leaves a freed block.
+    assert!(mcb::read_mcb(&mut cpu.bus, environment - 1).is_free());
+
+    // A segment that is no block of its fails as before.
+    cpu.set_reg16(Register::ES, environment + 1);
+    int21(&mut cpu, 0x49);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.ax(), 9);
+
+    cpu.set_dx(0x20);
+    cpu.set_reg8(Register::AL, 0);
+    int21(&mut cpu, 0x31);
+    cpu.load_shell();
+    assert_eq!(walk(&mut cpu.bus)[0].1.owner, tsr);
+    // The next program gets the environment area again.
+    assert!(cpu.load_executable("APP.COM", None));
+    let app = cpu.current_psp;
+    assert_eq!(
+        cpu.bus.read_16(cpu.get_physical_addr(app, 0x2C)),
+        environment
+    );
+    assert_eq!(block(&mut cpu)[..8], before[..8]);
+}
+
+#[test]
+fn a_program_started_from_the_shell_owns_its_environment_block() {
+    // The paragraph before PSP:[2Ch] is the environment's MCB, owned by
+    // the program and as large as the block, as MS-DOS's EXEC allocates
+    // it, and the chain goes on from it to the program's own block. The
+    // BASIC runtime of Z's installer checks the owner before it reads
+    // COMSPEC, and finds no variable without it.
+    let base = scratch(
+        "environment_mcb",
+        &[("ONE.COM", &[0xEB, 0xFE]), ("TWO.COM", &[0xEB, 0xFE])],
+    );
+    for high in [true, false] {
+        let mut cpu = Cpu::new(base.clone());
+        cpu.load_shell();
+        cpu.set_dos_high(high).unwrap();
+        for program in ["ONE.COM", "TWO.COM"] {
+            assert!(cpu.load_executable(program, None));
+            let psp = cpu.current_psp;
+            let environment = cpu.bus.read_16(cpu.get_physical_addr(psp, 0x2C));
+            let header = mcb::read_mcb(&mut cpu.bus, environment - 1);
+            assert_eq!(header.signature, MCB_M, "{program}, dos_high={high}");
+            assert_eq!(header.owner, psp, "{program}, dos_high={high}");
+            let bytes = environment_bytes(&mut cpu, environment);
+            assert_eq!(
+                header.size as usize,
+                bytes.div_ceil(16),
+                "{program}, dos_high={high}"
+            );
+            assert!(
+                reaches(&mut cpu, environment - 1, psp - 1),
+                "{program}, dos_high={high}"
+            );
+            assert!(mcb::read_name(&mut cpu.bus, environment - 1).is_empty());
+            cpu.load_shell();
+        }
+    }
+}
+
+#[test]
+fn resizing_the_shell_environment_keeps_the_chain() {
+    // Loaded high, the program leaves the first block of conventional
+    // memory free, and the environment area ends at it. The area is not
+    // in the chain, so AH=4Ah on the environment must neither take that
+    // block (growing) nor merge a freed tail into it (shrinking).
+    let base = scratch("resize_environment", &[("ONE.COM", &[0xEB, 0xFE])]);
+    let mut cpu = Cpu::new(base);
+    cpu.set_upper_memory(false, true).unwrap();
+    cpu.load_shell();
+    assert!(cpu.load_executable_high("ONE.COM"));
+    let psp = cpu.current_psp;
+    assert!(psp >= mcb::UMB_START);
+    let environment = cpu.bus.read_16(cpu.get_physical_addr(psp, 0x2C));
+    let before = walk(&mut cpu.bus);
+    assert!(before[0].1.is_free());
+    let size = mcb::read_mcb(&mut cpu.bus, environment - 1).size;
+
+    cpu.set_reg16(Register::ES, environment);
+    cpu.set_bx(size + 0x100);
+    int21(&mut cpu, 0x4A);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!((cpu.ax(), cpu.bx()), (8, size));
+    assert_eq!(walk(&mut cpu.bus), before);
+
+    cpu.set_reg16(Register::ES, environment);
+    cpu.set_bx(1);
+    int21(&mut cpu, 0x4A);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(walk(&mut cpu.bus), before);
+    let header = mcb::read_mcb(&mut cpu.bus, environment - 1);
+    assert_eq!((header.owner, header.size), (psp, 1));
+    // The freed tail is a free block that the chain from the environment
+    // goes through to the first MCB.
+    assert!(mcb::read_mcb(&mut cpu.bus, environment + 1).is_free());
+    assert!(reaches(&mut cpu, environment - 1, FIRST_MCB_SEG));
+}
+
+/// The bytes of the environment block at `segment`: the variables, the
+/// word count and the program's path with its NUL.
+fn environment_bytes(cpu: &mut Cpu, segment: u16) -> usize {
+    let at = |cpu: &mut Cpu, i: usize| cpu.bus.read_8(segment as usize * 16 + i);
+    let mut i = 0;
+    while at(cpu, i) != 0 || at(cpu, i + 1) != 0 {
+        i += 1;
+    }
+    i += 4;
+    while at(cpu, i) != 0 {
+        i += 1;
+    }
+    i + 1
+}
+
+/// Whether the MCBs from `from` on, read by their sizes, come to `to`.
+fn reaches(cpu: &mut Cpu, from: u16, to: u16) -> bool {
+    let mut seg = from;
+    for _ in 0..8 {
+        if seg == to {
+            return true;
+        }
+        let header = mcb::read_mcb(&mut cpu.bus, seg);
+        if header.signature != MCB_M || seg > to {
+            return false;
+        }
+        seg += header.size + 1;
+    }
+    false
 }

@@ -43,7 +43,15 @@ as the AWE32 came, up to 28 MB as it could be fitted with.
 The chip that plays the music of Sound Blaster and AdLib games.
 **OPL3** plays both kinds of music; **OPL2** is the older chip of the
 AdLib and first Sound Blasters, for the few games that sound wrong on an
-OPL3.
+OPL3. **2 x OPL2** is the first SB Pro's pair, one chip on the left and
+one on the right. **Auto** picks the pair with the SB Pro and an OPL3
+with the other cards.
+
+**AdLib Gold** is AdLib's own card: an OPL3 with 12-bit digital sound
+and a surround module, which a few games offer (The Jungle Book, Dune).
+Its port shows with it, 388h unless the configuration file moves it
+(`adlibgoldbase`). Choose *AdLib Gold* in a game's setup only with it
+here; most of these games play as well on the Sound Blaster.
 
 # Gravis Ultrasound {#gus}
 

@@ -40,6 +40,9 @@ const DEVICE_HEADER_SIZE: u16 = 0x12;
 /// The FCB table (FCBS=4), an SFT block of its own.
 const FCB_TABLE: u16 = 0x0160;
 const FCBS: u16 = 4;
+/// The verify flag (INT 21h AH=2Eh and 54h): 01h when DOS is to read
+/// back what it writes to disk, 00h (as at boot) when not.
+pub const VERIFY_FLAG: u16 = 0x0300;
 /// A byte VSHARE.386 sets while Windows runs, at its MS-DOS 5 offset.
 const VSHARE_FLAG: u16 = 0x0303;
 /// The zero-terminated list of the places to patch for critical sections
@@ -77,6 +80,11 @@ const DISK_BUFFER: u16 = CDS + LASTDRIVE as u16 * CDS_SIZE;
 /// programs load stay as they were.
 pub const DBCS_TABLE: u16 = DISK_BUFFER + 0x14 + 0x200;
 const DBCS_TABLE_SIZE: u16 = 4;
+/// The mouse driver's INT 33h handler (`mouse::install_entry`), in low
+/// memory as a mouse driver's resident code is. Programs look at the
+/// vector before they call the driver, and some, such as Wasteland, take
+/// one whose segment has a zero low byte, as F000 has, for no driver.
+pub const MOUSE_ENTRY: u16 = EMM_IMPORT - 0x10;
 /// The expanded memory manager's Global EMM Import record for Windows
 /// (`ems::ioctl_read`).
 pub const EMM_IMPORT: u16 = 0x1D00;
@@ -85,18 +93,23 @@ pub const EMM_IMPORT: u16 = 0x1D00;
 pub const XMS_ENTRY: u16 = EMM_IMPORT + 0x200;
 const END: u16 = XMS_ENTRY + 0x10;
 
-const _: () = assert!(DBCS_TABLE + DBCS_TABLE_SIZE <= EMM_IMPORT);
+const _: () = assert!(DBCS_TABLE + DBCS_TABLE_SIZE <= MOUSE_ENTRY);
+// Neither half of the INT 33h vector may have a zero low byte (Wasteland).
+const _: () = assert!(SEGMENT & 0xFF != 0 && MOUSE_ENTRY & 0xFF != 0);
 
 const _: () = assert!(DEVICE_RETF < DOSMGR_PATCHES && DOSMGR_PATCHES + 0x0E <= DEVICE_HEADERS);
 const _: () = assert!(
     DEVICE_HEADERS + DEVICES.len() as u16 * DEVICE_HEADER_SIZE <= FCB_TABLE
 );
-const _: () = assert!(FCB_TABLE + 6 + FCBS * crate::dos_files::ENTRY_SIZE as u16 <= VSHARE_FLAG);
+const _: () = assert!(FCB_TABLE + 6 + FCBS * crate::dos_files::ENTRY_SIZE as u16 <= VERIFY_FLAG);
+const _: () = assert!(VERIFY_FLAG < VSHARE_FLAG);
 const _: () = assert!(VSHARE_FLAG < CRIT_PATCHES);
 
 /// What DOS keeps after its data segment, below the first MCB: the file
 /// table with the system JFT after it, and the environment of programs
-/// started from the shell, up to the first MCB.
+/// started from the shell, up to the first MCB. The paragraph before the
+/// environment is its MCB (`Cpu::load_program_bytes` writes it), as the
+/// environment DOS gives a program is a block of the program's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
     pub sft: u16,
@@ -115,12 +128,13 @@ impl Layout {
 pub const LOW: Layout = Layout { sft: 0x0A20, environment: 0x0C00, first_mcb: 0x0FFF };
 
 /// Packed (`dos_high`), as DOS=HIGH leaves conventional memory: the file
-/// table right after the data segment and 2 KB of environment after it.
-/// The HMA stays free for programs: DOS has no code there to move.
+/// table right after the data segment and 2 KB of environment after it,
+/// its MCB included. The HMA stays free for programs: DOS has no code
+/// there to move.
 pub const HIGH: Layout = {
     let sft = (address(END) as u16).div_ceil(16);
-    let environment = sft + (crate::dos_files::TABLE_BYTES as u16).div_ceil(16);
-    Layout { sft, environment, first_mcb: environment + HIGH_ENVIRONMENT_PARAS }
+    let table_end = sft + (crate::dos_files::TABLE_BYTES as u16).div_ceil(16);
+    Layout { sft, environment: table_end + 1, first_mcb: table_end + HIGH_ENVIRONMENT_PARAS }
 };
 const HIGH_ENVIRONMENT_PARAS: u16 = 0x80;
 
@@ -130,7 +144,13 @@ pub fn layout(bus: &Bus) -> Layout {
 }
 
 const _: () = assert!(address(END) <= LOW.sft as usize * 16);
-const _: () = assert!(LOW.sft as usize * 16 + crate::dos_files::TABLE_BYTES <= LOW.environment as usize * 16);
+// The environment's MCB comes after the file table.
+const _: () = assert!(
+    LOW.sft as usize * 16 + crate::dos_files::TABLE_BYTES <= (LOW.environment - 1) as usize * 16
+);
+const _: () = assert!(
+    HIGH.sft as usize * 16 + crate::dos_files::TABLE_BYTES <= (HIGH.environment - 1) as usize * 16
+);
 
 /// A device DOS has built in: its name and attributes.
 struct Device {
@@ -191,6 +211,16 @@ pub const fn dpb(drive: u8) -> u16 {
 
 /// The NUL device's header, in the List of Lists.
 pub const NUL_DEVICE: u16 = SYSVARS + 0x22;
+
+/// Write the code the built-in drivers keep in DOS's data segment, as
+/// resident drivers keep theirs in low memory: the XMS driver's entry
+/// (`xms::install_entry`) and the mouse driver's INT 33h handler
+/// (`mouse::install_entry`). Called with DOS's memory set up afresh, not
+/// while a program runs, which may have hooked either.
+pub fn write_driver_code(bus: &mut Bus) {
+    crate::xms::install_entry(bus);
+    crate::mouse::install_entry(bus);
+}
 
 /// Write the DOS data segment afresh for the mounted drives: the List of
 /// Lists and its tables, the drive parameter blocks, the current directory

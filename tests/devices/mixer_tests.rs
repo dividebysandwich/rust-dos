@@ -2,6 +2,7 @@
 //! mix, the mute, which silences the output device but not the samples
 //! handed on for recordings, and the filters and effects.
 
+use rust_dos::adlibgold::AdlibGoldConfig;
 use rust_dos::audio::{AudioOutput, pump_audio};
 use rust_dos::bus::Bus;
 use rust_dos::mixer::{Channel, ChorusPreset, MixerSettings, ReverbPreset, SbFilter};
@@ -50,6 +51,24 @@ fn speaker_on(bus: &mut Bus) {
     bus.io_write(0x61, 0x03);
 }
 
+/// The speaker on at 1 kHz for a second, its sound thrown away: the
+/// square wave's mean level, which the speaker's filter takes out (or,
+/// with the filter off, the high-pass that keeps the mix centred), has
+/// gone, and the wave swings evenly about 0.
+fn speaker_settled(bus: &mut Bus) {
+    speaker_on(bus);
+    wait_ms(bus, 1000);
+    peak(bus);
+}
+
+/// Whether two peaks are the same, but for the rounding of a sample and
+/// for where the speaker's band-limited edges fall among the frames: the
+/// overshoot of an edge peaks between frames, so the loudest sample of a
+/// window differs a little from one window to the next (up to 0.5%).
+fn near(a: u16, b: u16) -> bool {
+    a.abs_diff(b) <= 2.max(b / 200)
+}
+
 /// The loudest sample rendered since the last call.
 fn peak(bus: &mut Bus) -> u16 {
     bus.audio_catch_up();
@@ -65,29 +84,32 @@ fn with_level(channel: Channel, percent: u16) -> MixerSettings {
 #[test]
 fn a_source_plays_at_its_volume() {
     let mut bus = bus();
-    speaker_on(&mut bus);
+    speaker_settled(&mut bus);
     wait_ms(&mut bus, 20);
     let full = peak(&mut bus);
     assert!(full > 1000, "peak {}", full);
 
     bus.set_mixer(with_level(Channel::Speaker, 50));
     wait_ms(&mut bus, 20);
-    assert_eq!(peak(&mut bus), full / 2);
+    let half = peak(&mut bus);
+    assert!(near(half, full / 2), "{half} against {full}");
 
     // Another source's volume leaves the speaker alone.
     bus.set_mixer(with_level(Channel::Fm, 0));
     wait_ms(&mut bus, 20);
-    assert_eq!(peak(&mut bus), full);
+    let same = peak(&mut bus);
+    assert!(near(same, full), "{same} against {full}");
 
     bus.set_mixer(with_level(Channel::Speaker, 200));
     wait_ms(&mut bus, 20);
-    assert_eq!(peak(&mut bus), full * 2);
+    let double = peak(&mut bus);
+    assert!(near(double, full * 2), "{double} against {full}");
 }
 
 #[test]
 fn master_is_the_volume_of_the_mix() {
     let mut bus = bus();
-    speaker_on(&mut bus);
+    speaker_settled(&mut bus);
     wait_ms(&mut bus, 20);
     let full = peak(&mut bus);
 
@@ -100,13 +122,58 @@ fn master_is_the_volume_of_the_mix() {
     bus.set_mixer(settings);
     bus.mixer.take_peaks();
     wait_ms(&mut bus, 20);
-    assert_eq!(peak(&mut bus), full / 4);
+    let quarter = peak(&mut bus);
+    assert!(near(quarter, full / 4), "{quarter} against {full}");
 
     // The meters: the speaker at its volume, the mix at the master's.
     let peaks = bus.mixer.take_peaks();
     assert!((peaks[Channel::Speaker as usize] - full as f32 / 2.0 / 32768.0).abs() < 1e-3, "{:?}", peaks);
     assert!((peaks[Channel::Master as usize] - full as f32 / 4.0 / 32768.0).abs() < 1e-3, "{:?}", peaks);
     assert_eq!(peaks[Channel::Fm as usize], 0.0);
+}
+
+/// PIT channel 2's divisor, written as Xenon 2 writes it: the mode, then
+/// the low and high bytes.
+fn speaker_divisor(bus: &mut Bus, divisor: u16) {
+    bus.io_write(0x43, 0xB6);
+    bus.io_write(0x42, divisor as u8);
+    bus.io_write(0x42, (divisor >> 8) as u8);
+}
+
+#[test]
+fn an_ultrasonic_divisor_silences_the_speaker() {
+    // Xenon 2 leaves the speaker gated on and sets a divisor of 2
+    // (596 kHz) between its notes: too fast for the cone, which rests at
+    // the wave's mean level, and the speaker's filter takes that out.
+    // What is left is the frames' means differing by a part of a period,
+    // far below a sound.
+    let mut bus = bus();
+    bus.set_mixer(MixerSettings::default());
+    speaker_on(&mut bus);
+    speaker_divisor(&mut bus, 2);
+    wait_ms(&mut bus, 200);
+    peak(&mut bus);
+    wait_ms(&mut bus, 20);
+    let peak = peak(&mut bus);
+    assert!(peak < 32, "peak {peak}");
+}
+
+#[test]
+fn a_tone_after_an_ultrasonic_divisor_sounds() {
+    let mut bus = bus();
+    speaker_on(&mut bus);
+    // Long enough at 596 kHz to have pushed the wave's phase far out of
+    // its period, were it not wrapped.
+    speaker_divisor(&mut bus, 2);
+    wait_ms(&mut bus, 200);
+    peak(&mut bus);
+    speaker_divisor(&mut bus, 0x04A9);
+    wait_ms(&mut bus, 20);
+    // The 1 kHz square wave swings both ways, not a level held on one
+    // side of it.
+    let tone = samples(&mut bus);
+    assert!(tone.iter().any(|&s| s > 1000), "no high half");
+    assert!(tone.iter().any(|&s| s < -1000), "no low half");
 }
 
 /// An output device that keeps what it is given.
@@ -168,10 +235,12 @@ fn steepest(samples: &[i16]) -> i32 {
 #[test]
 fn the_speaker_filter_softens_the_square_wave() {
     let mut bus = bus();
-    speaker_on(&mut bus);
+    speaker_settled(&mut bus);
     wait_ms(&mut bus, 20);
+    // The edges of a square wave, band-limited to the mix's rate: each
+    // rises over two or three frames.
     let square = steepest(&samples(&mut bus));
-    assert_eq!(square, 6000, "the edges of a square wave");
+    assert!(square > 4000, "the edges of a square wave: {square}");
 
     bus.set_mixer(MixerSettings::default());
     wait_ms(&mut bus, 20);
@@ -252,6 +321,67 @@ fn the_dac_level_held_fades_out_of_the_mix() {
         assert!(tenth > 0 && tenth < loud / 10, "{model:?}: {tenth}");
         let tail = &coupled[coupled.len() - 4410..];
         assert!(tail.iter().all(|s| s.abs() <= 1), "{model:?}: {tail:?}");
+    }
+}
+
+/// The left samples of the second after an FM note is stopped the way
+/// Covert Action's AdLib driver stops its sounds (issue 1689): the
+/// frequency set to 0 and the key released, with a release rate of 0.
+/// The phase stops and the envelope stays, so the chip holds its output at
+/// a level. With the capacitor on the card's output (`sb_coupling`) or
+/// without, on an AdLib or an AdLib Gold.
+fn fm_hold(coupling: bool, gold: bool) -> Vec<i16> {
+    let mut bus = bus();
+    bus.set_mixer(unfiltered_with(|m| m.sb_coupling = coupling));
+    bus.configure_adlib_gold(gold.then(AdlibGoldConfig::default));
+    let write = |bus: &mut Bus, reg: u8, value: u8| {
+        bus.io_write(0x388, reg);
+        bus.io_write(0x389, value);
+    };
+    // A plain sine at full level, attack at once, no decay or release.
+    for (reg, value) in [
+        (0x20, 0x01),
+        (0x40, 0x3F),
+        (0x60, 0xF0),
+        (0x80, 0x00),
+        (0x23, 0x01),
+        (0x43, 0x00),
+        (0x63, 0xF0),
+        (0x83, 0x00),
+        (0xC0, 0x30),
+        (0xA0, 0x98),
+        (0xB0, 0x31),
+    ] {
+        write(&mut bus, reg, value);
+    }
+    wait_ms(&mut bus, 7);
+    samples(&mut bus);
+    write(&mut bus, 0xA0, 0x00);
+    write(&mut bus, 0xB0, 0x00);
+    let mut left = Vec::new();
+    for _ in 0..100 {
+        wait_ms(&mut bus, 10);
+        left.extend(samples(&mut bus).chunks(2).map(|frame| frame[0]));
+    }
+    left
+}
+
+/// The level the FM chip holds after such a note fades out of the mix
+/// through the capacitor on the card's output, as on a real AdLib or
+/// Sound Blaster: a second later the output is back at silence. Without
+/// the capacitor it stays as a constant offset. An AdLib Gold's output
+/// stage passes the level on to the same capacitor.
+#[test]
+fn the_fm_level_held_fades_out_of_the_mix() {
+    for gold in [false, true] {
+        let raw = fm_hold(false, gold);
+        let held = *raw.last().unwrap();
+        assert!(held.unsigned_abs() > 1000, "{held}, gold {gold}");
+        let tail = &raw[raw.len() - 4410..];
+        assert!(tail.iter().all(|&s| s == held), "the chip holds its level, gold {gold}");
+        let coupled = fm_hold(true, gold);
+        let tail = &coupled[coupled.len() - 4410..];
+        assert!(tail.iter().all(|s| s.abs() <= 1), "gold {gold}: {tail:?}");
     }
 }
 

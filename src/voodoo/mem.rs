@@ -34,6 +34,16 @@ impl Vram {
         self.words.is_empty()
     }
 
+    /// The memory's first byte on the host: its words one after the
+    /// other, each little-endian on the hosts the recompiler has code
+    /// for. For translated code to read and write the bytes itself
+    /// (`Voodoo::banshee_direct`), on the thread that owns the card while
+    /// no worker draws; the words being atomics, a write through it is a
+    /// write of theirs.
+    pub fn as_mut_ptr(&self) -> *mut u8 {
+        self.words.as_ptr() as *mut u8
+    }
+
     /// The word at index `i`.
     #[inline]
     pub fn get(&self, i: usize) -> u16 {

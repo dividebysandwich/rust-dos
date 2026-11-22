@@ -537,6 +537,12 @@ mod engine {
             let returns = vec![Return::NONE; 1 << RETURN_BITS].into_boxed_slice();
             let mut ctx = Box::new(JitCtx::new(base + tramp.exit));
             ctx.fpu[4] = base + tramp.addsub;
+            // Upper memory read and written without the helpers' calls.
+            #[cfg(target_arch = "aarch64")]
+            {
+                ctx.dev[0] = base + tramp.dev_read;
+                ctx.dev[1] = base + tramp.dev_write;
+            }
             #[cfg(target_arch = "x86_64")]
             for (thunk, at) in ctx.thunks.iter_mut().zip(tramp.thunks) {
                 *thunk = base + at;
@@ -942,6 +948,7 @@ mod engine {
             self.ctx.far_block = std::ptr::null();
             self.ctx.stack32 = mode & 4 != 0;
             vga_state(cpu, &mut self.ctx);
+            card_state(cpu, &mut self.ctx);
             loop {
                 stats.runs += 1;
                 // SAFETY: the code was generated for this trampoline, and
@@ -954,6 +961,16 @@ mod engine {
                 if std::mem::take(&mut self.ctx.vga_wrote) != 0 {
                     // The code wrote the VGA's planes itself.
                     cpu.bus.vga.mark_dirty_full();
+                }
+                // And a Banshee's or Voodoo3's memory.
+                card_wrote(cpu, &mut self.ctx);
+                let card = (
+                    std::mem::take(&mut self.ctx.card_reads),
+                    std::mem::take(&mut self.ctx.card_writes),
+                );
+                if let (true, Some(p)) = (card != (0, 0), cpu.bus.profile.as_deref()) {
+                    // Counted as the bus counts those it makes.
+                    p.mem_direct(card.0, card.1);
                 }
                 if let Some(payload) = self.ctx.panic.take() {
                     // Rust code the block called panicked (it went on with

@@ -1,10 +1,12 @@
 //! The smaller system modules: KEYBOARD, SOUND, SYSTEM, WIN87EM,
-//! TOOLHELP, SHELL, COMMDLG, MMSYSTEM, LZEXPAND, VER, WING, DDEML and
-//! DISPLAY. Most of their functions go on to the built-in DLL that has
-//! them in Win32 (USER32, WINMM, COMDLG32, VERSION); the rest are done
-//! here, or answer as Windows 3.1 does when there is no such device.
+//! TOOLHELP, SHELL, COMMDLG, MMSYSTEM, LZEXPAND, VER, WING and DISPLAY
+//! (DDEML has a file of its own, ddeml.rs). Most of their functions go
+//! on to the built-in DLL that has them in Win32 (USER32, WINMM,
+//! COMDLG32, VERSION); the rest are done here, or answer as Windows 3.1
+//! does when there is no such device.
 
 use super::builtin::{Def, register, rust, win32};
+use super::global::{HeapItem, HeapPlace};
 use super::lz;
 use super::thunk;
 use super::user::{P_MISC, P_WORDS};
@@ -100,21 +102,21 @@ pub static TOOLHELP: Def = Def {
     file: "TOOLHELP.DLL",
     apis: &[
         rust("GlobalHandleToSel", 50, "w", global_handle_to_sel),
-        rust("GlobalFirst", 51, "pw", zero),
-        rust("GlobalNext", 52, "pw", zero),
-        rust("GlobalInfo", 53, "p", zero),
-        rust("GlobalEntryHandle", 54, "pw", zero),
-        rust("GlobalEntryModule", 55, "pww", zero),
-        rust("LocalInfo", 56, "pw", zero),
-        rust("LocalFirst", 57, "pw", zero),
-        rust("LocalNext", 58, "p", zero),
-        rust("ModuleFirst", 59, "p", zero),
-        rust("ModuleNext", 60, "p", zero),
-        rust("ModuleFindName", 61, "pp", zero),
-        rust("ModuleFindHandle", 62, "pw", zero),
-        rust("TaskFirst", 63, "p", zero),
-        rust("TaskNext", 64, "p", zero),
-        rust("TaskFindHandle", 65, "pw", zero),
+        rust("GlobalFirst", 51, "pw", global_first),
+        rust("GlobalNext", 52, "pw", global_next),
+        rust("GlobalInfo", 53, "p", global_info),
+        rust("GlobalEntryHandle", 54, "pw", global_entry_handle),
+        rust("GlobalEntryModule", 55, "pww", global_entry_module),
+        rust("LocalInfo", 56, "pw", local_info),
+        rust("LocalFirst", 57, "pw", local_first),
+        rust("LocalNext", 58, "p", local_next),
+        rust("ModuleFirst", 59, "p", module_first),
+        rust("ModuleNext", 60, "p", module_next),
+        rust("ModuleFindName", 61, "pp", module_find_name),
+        rust("ModuleFindHandle", 62, "pw", module_find_handle),
+        rust("TaskFirst", 63, "p", task_first),
+        rust("TaskNext", 64, "p", task_next),
+        rust("TaskFindHandle", 65, "pw", task_find_handle),
         rust("StackTraceFirst", 66, "pw", zero),
         rust("StackTraceCSIPFirst", 67, "pwwww", zero),
         rust("StackTraceNext", 68, "p", zero),
@@ -136,13 +138,13 @@ pub static SHELL: Def = Def {
     name: "SHELL",
     file: "SHELL.DLL",
     apis: &[
-        rust("RegOpenKey", 1, "lpp", super::kernel::reg_fail),
-        rust("RegCreateKey", 2, "lpp", super::kernel::reg_fail),
-        rust("RegCloseKey", 3, "l", zero),
-        rust("RegDeleteKey", 4, "lp", super::kernel::reg_fail),
-        rust("RegSetValue", 5, "lplpl", super::kernel::reg_fail),
-        rust("RegQueryValue", 6, "lppp", super::kernel::reg_fail),
-        rust("RegEnumKey", 7, "llpl", super::kernel::reg_fail),
+        rust("RegOpenKey", 1, "lpp", super::kernel::reg_open_key),
+        rust("RegCreateKey", 2, "lpp", super::kernel::reg_create_key),
+        rust("RegCloseKey", 3, "l", super::kernel::reg_close_key),
+        rust("RegDeleteKey", 4, "lp", super::kernel::reg_delete_key),
+        rust("RegSetValue", 5, "lplpl", super::kernel::reg_set_value),
+        rust("RegQueryValue", 6, "lppp", super::kernel::reg_query_value),
+        rust("RegEnumKey", 7, "llpl", super::kernel::reg_enum_key),
         win32("DragAcceptFiles", 9, "ww", SH, "DragAcceptFiles", b'w'),
         win32("DragQueryFile", 11, "wspw", SH, "DragQueryFileA", b'w'),
         win32("DragFinish", 12, "w", SH, "DragFinish", b'w'),
@@ -207,7 +209,7 @@ pub static MMSYSTEM: Def = Def {
             b'w',
         ),
         rust("waveOutOpen", 404, "pwplll", wave_out_open),
-        win32("waveOutClose", 405, "w", MM, "waveOutClose", b'w'),
+        rust("waveOutClose", 405, "w", wave_out_close),
         rust("waveOutPrepareHeader", 406, "wSw", wave_out_prepare_header),
         rust(
             "waveOutUnprepareHeader",
@@ -218,7 +220,7 @@ pub static MMSYSTEM: Def = Def {
         rust("waveOutWrite", 408, "wSw", wave_out_write),
         win32("waveOutPause", 409, "w", MM, "waveOutPause", b'w'),
         win32("waveOutRestart", 410, "w", MM, "waveOutRestart", b'w'),
-        win32("waveOutReset", 411, "w", MM, "waveOutReset", b'w'),
+        rust("waveOutReset", 411, "w", wave_out_reset),
         rust("waveOutGetPosition", 412, "wpw", wave_out_get_position),
         win32("waveOutGetVolume", 415, "wp", MM, "waveOutGetVolume", b'w'),
         win32("waveOutSetVolume", 416, "wl", MM, "waveOutSetVolume", b'w'),
@@ -350,19 +352,6 @@ pub static WING: Def = Def {
     library: true,
 };
 
-/// DDEML: there are no DDE servers to talk to; DdeInitialize fails as it
-/// does when DDEML can't start.
-pub static DDEML: Def = Def {
-    name: "DDEML",
-    file: "DDEML.DLL",
-    apis: &[
-        rust("DdeInitialize", 2, "pSll", dde_initialize),
-        rust("DdeUninitialize", 3, "l", one),
-        rust("DdeGetLastError", 20, "l", dde_error),
-    ],
-    library: true,
-};
-
 /// DISPLAY: the display driver, which programs import for its resources
 /// (the system's cursors and icons) more than its functions.
 pub static DISPLAY: Def = Def {
@@ -412,8 +401,8 @@ fn w32(cpu: &mut Cpu, at: u32, value: u32) {
 }
 
 /// The address of the built-in DLL `dll`'s function `name`.
-fn api(dll: &str, name: &str) -> u32 {
-    super::builtin::win32_address(dll, name).unwrap_or_else(|| panic!("{} has no {}", dll, name))
+fn api(cpu: &Cpu, dll: &str, name: &str) -> u32 {
+    super::builtin::win32_address(cpu, dll, name).unwrap_or_else(|| panic!("{} has no {}", dll, name))
 }
 
 /// Go on to `dll`'s `name` with `args`, the 32-bit stack below `top`,
@@ -432,11 +421,18 @@ fn go_at(
     } else {
         thunk::POST_USER
     };
-    thunk::enter32_at(cpu, ctx, top, api(dll, name), args, post, data);
+    let target = api(cpu, dll, name);
+    thunk::enter32_at(cpu, ctx, top, target, args, post, data);
     None
 }
 
-fn go(cpu: &mut Cpu, dll: &str, name: &str, args: &[u32], data: Vec<u32>) -> Option<u32> {
+pub(super) fn go(
+    cpu: &mut Cpu,
+    dll: &str,
+    name: &str,
+    args: &[u32],
+    data: Vec<u32>,
+) -> Option<u32> {
     let top = thunk::scratch32(cpu, 0);
     go_at(cpu, top, dll, name, args, data)
 }
@@ -452,6 +448,7 @@ const P_MMTIME: u32 = P_MISC + 6;
 const P_WING_BITMAP: u32 = P_MISC + 7;
 const P_SEGPTR: u32 = P_MISC + 8;
 const P_MCI: u32 = P_MISC + 9;
+const P_WAVE_CALLS: u32 = P_MISC + 10;
 
 /// The size of Windows 3.1's MMTIME: wType and a union of 6 bytes, its
 /// SMPTE time being hour, minute, second, frame, fps and a pad byte
@@ -464,8 +461,9 @@ const TIME_SMPTE: u32 = 8;
 const MMSYSERR_INVALPARAM: u32 = 11;
 const TIMERR_NOCANDO: u32 = 97;
 
-/// A 32-bit function returned `value`: what 16-bit code gets.
-pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
+/// A 32-bit function returned `value`: what 16-bit code gets, None
+/// when 16-bit code is called before the function returns (`ctx`).
+pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     let d = |i: usize| data.get(i).copied().unwrap_or(0);
     match d(0) {
         P_OFN => {
@@ -501,9 +499,14 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
             if value == 0 && d(2) != 0 {
                 let handle = r32(cpu, d(1));
                 super::write_16(cpu, d(2), handle as u16);
+                if d(3) != 0 {
+                    let tid = super::task(cpu).tid;
+                    crate::win32::winmm::wave::call16_on(cpu, handle, tid, d(3));
+                }
             }
-            Some(value)
+            return_after_calls(cpu, value, ctx)
         }
+        P_WAVE_CALLS => return_after_calls(cpu, value, ctx),
         P_WAVE_UNPREPARE => {
             if value == 0 {
                 unprepared(cpu, d(1));
@@ -520,6 +523,15 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
         P_MCI => {
             if value == 0 {
                 mci_returned(cpu, d(1), d(2), d(3));
+            }
+            // A status's answer, copied to the program's block, and the
+            // error code in DX:AX as it is: WINMM's function already
+            // said whether an idle proof goes through the command.
+            if d(3) == wmci::MCI_STATUS {
+                crate::idle::pure_call(cpu, None);
+                crate::idle::reads_arguments(cpu);
+                crate::idle::reads_also(cpu, d(1) + 4, 4);
+                crate::idle::resumed16(cpu, true);
             }
             Some(value)
         }
@@ -570,6 +582,169 @@ fn global_handle_to_sel(_: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(super::global::handle_to_sel(args[0] as u16) as u32)
 }
 
+/// GlobalFirst's and GlobalNext's flags: every block and free piece, the
+/// blocks of the LRU list, or the free pieces.
+const GLOBAL_ALL: u32 = 0;
+const GLOBAL_LRU: u32 = 1;
+const GLOBAL_FREE: u32 = 2;
+
+/// GLOBALENTRY's size, which its dwSize must be, and its wFlags' bit
+/// for a block a task owns. The low byte of wFlags is KERNEL's flags of
+/// the block.
+const GLOBALENTRY_SIZE: u32 = 36;
+const GF_PDB_OWNER: u16 = 0x0100;
+
+/// Whether `place` is on the list GlobalFirst's `flags` walk.
+fn on_list(place: &HeapPlace, flags: u32) -> bool {
+    match flags {
+        GLOBAL_ALL => true,
+        GLOBAL_LRU => place.lru,
+        GLOBAL_FREE => place.is_free(),
+        _ => false,
+    }
+}
+
+/// Whether `at` is a GLOBALENTRY whose dwSize is set, as TOOLHELP checks
+/// before it writes one.
+fn global_entry_at(cpu: &Cpu, at: u32) -> bool {
+    at != 0 && super::read_32(cpu, at) == GLOBALENTRY_SIZE
+}
+
+/// Fill the GLOBALENTRY at `at` with `item`. dwNext is the address of
+/// the item after it in the heap (`places`), and dwNextAlt that of the
+/// item after it on the LRU or free list it is on, 0 at a list's end
+/// and for a discarded block, which isn't in the heap; GlobalNext goes
+/// on from there.
+fn fill_global_entry(cpu: &mut Cpu, at: u32, places: &[HeapPlace], item: &HeapItem) {
+    let after = |list: Option<u32>| {
+        if item.address == 0 {
+            return 0;
+        }
+        places
+            .iter()
+            .find(|p| p.address > item.address && list.is_none_or(|f| on_list(p, f)))
+            .map_or(0, |p| p.address)
+    };
+    let alt = if item.lru {
+        Some(GLOBAL_LRU)
+    } else if item.kind == super::global::GT_FREE {
+        Some(GLOBAL_FREE)
+    } else {
+        None
+    };
+    let next = after(None);
+    let next_alt = alt.map_or(0, |f| after(Some(f)));
+    super::write_32(cpu, at + 4, item.address);
+    super::write_32(cpu, at + 8, item.size);
+    let words = [
+        item.handle,
+        item.lock,
+        item.page_lock,
+        item.flags as u16 | if item.pdb_owner { GF_PDB_OWNER } else { 0 },
+        item.heap_present as u16,
+        item.owner,
+        item.kind,
+        item.data,
+    ];
+    for (i, w) in words.into_iter().enumerate() {
+        super::write_16(cpu, at + 12 + 2 * i as u32, w);
+    }
+    super::write_32(cpu, at + 28, next);
+    super::write_32(cpu, at + 32, next_alt);
+}
+
+/// GlobalFirst(lpGlobal, wFlags): the first item of the list `wFlags`
+/// names.
+fn global_first(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (at, flags) = (args[0], args[1] & 0xFFFF);
+    if !global_entry_at(cpu, at) {
+        return Some(0);
+    }
+    let places = super::global::heap_places(cpu);
+    let Some(place) = places.iter().find(|p| on_list(p, flags)) else {
+        return Some(0);
+    };
+    let item = super::global::place_item(cpu, place);
+    fill_global_entry(cpu, at, &places, &item);
+    Some(1)
+}
+
+/// GlobalNext(lpGlobal, wFlags): the item the entry's dwNext (for
+/// GLOBAL_ALL) or dwNextAlt (for the LRU and free lists) points to, or
+/// the first one after it if that block is gone.
+fn global_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (at, flags) = (args[0], args[1] & 0xFFFF);
+    if !global_entry_at(cpu, at) {
+        return Some(0);
+    }
+    let cursor = super::read_32(cpu, at + if flags == GLOBAL_ALL { 28 } else { 32 });
+    if cursor == 0 {
+        return Some(0);
+    }
+    let places = super::global::heap_places(cpu);
+    let found = places
+        .iter()
+        .find(|p| p.address >= cursor && on_list(p, flags));
+    let Some(place) = found else {
+        return Some(0);
+    };
+    let item = super::global::place_item(cpu, place);
+    fill_global_entry(cpu, at, &places, &item);
+    Some(1)
+}
+
+/// GlobalInfo(lpGlobalInfo): GLOBALINFO's counts of the heap's items,
+/// its free pieces and the LRU list's blocks.
+fn global_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = args[0];
+    if at == 0 {
+        return Some(0);
+    }
+    let places = super::global::heap_places(cpu);
+    let count = |flags| places.iter().filter(|p| on_list(p, flags)).count() as u16;
+    let counts = [count(GLOBAL_ALL), count(GLOBAL_FREE), count(GLOBAL_LRU)];
+    for (i, v) in counts.into_iter().enumerate() {
+        super::write_16(cpu, at + 4 + 2 * i as u32, v);
+    }
+    Some(1)
+}
+
+/// Fill the GLOBALENTRY at `at` with the block whose handle or selector
+/// is `handle`: whether there is one.
+fn entry_of_block(cpu: &mut Cpu, at: u32, handle: u16) -> u32 {
+    if !global_entry_at(cpu, at) {
+        return 0;
+    }
+    let Some(item) = super::global::heap_item(cpu, handle) else {
+        return 0;
+    };
+    let places = if item.address == 0 {
+        Vec::new()
+    } else {
+        super::global::heap_places(cpu)
+    };
+    fill_global_entry(cpu, at, &places, &item);
+    1
+}
+
+/// GlobalEntryHandle(lpGlobal, hItem): the block whose handle or
+/// selector is `hItem`.
+fn global_entry_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(entry_of_block(cpu, args[0], args[1] as u16))
+}
+
+/// GlobalEntryModule(lpGlobal, hModule, wSeg): the block of segment
+/// `wSeg` (from 1) of the module `hModule` (or its instance).
+fn global_entry_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (at, module, seg) = (args[0], args[1] as u16, args[2] as u16);
+    let sel = super::module_index(cpu, module).and_then(|i| {
+        let m = &cpu.bus.win32.win16.modules[i];
+        let n = u8::try_from(seg).ok()?;
+        super::module::segment_selector(cpu, m, n)
+    });
+    Some(sel.map_or(0, |sel| entry_of_block(cpu, at, sel)))
+}
+
 fn system_heap_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // SYSHEAPINFO: dwSize, wUserFreePercent, wGDIFreePercent,
     // hUserSegment, hGDISegment.
@@ -592,6 +767,292 @@ fn mem_man_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     super::write_16(cpu, at + 40, 4096);
     Some(1)
+}
+
+/// Whether the structure at `at` has `size` in its dwSize, as TOOLHELP
+/// checks before it fills one.
+fn sized(cpu: &Cpu, at: u32, size: u32) -> bool {
+    at != 0 && super::read_32(cpu, at) == size
+}
+
+/// Write `name` into the `len` bytes at `at`, cut short and ended with
+/// a NUL, the rest zeroed.
+fn put_name(cpu: &mut Cpu, at: u32, len: usize, name: &[u8]) {
+    let mut bytes = name[..name.len().min(len - 1)].to_vec();
+    bytes.resize(len, 0);
+    super::poke(cpu, at, &bytes);
+}
+
+/// TASKENTRY's size: dwSize, hTask, hTaskParent, hInst, hModule, wSS,
+/// wSP, wStackTop, wStackMinimum, wStackBottom, wcEvents, hQueue,
+/// szModule[10], wPSPOffset, hNext.
+const TASKENTRY_SIZE: u32 = 0x28;
+
+/// The tasks TaskFirst and TaskNext walk: those that haven't ended, in
+/// the order they started, the first the one GetCurrentTask gives in DX.
+fn live_tasks(cpu: &Cpu) -> Vec<usize> {
+    let tasks = &cpu.bus.win32.win16.tasks;
+    (0..tasks.len())
+        .filter(|&t| tasks[t].exit_code.is_none())
+        .collect()
+}
+
+/// Fill the TASKENTRY at `at` with the task whose handle is `handle`:
+/// whether there is one. hNext is the next task's handle, 0 after the
+/// last.
+fn fill_task_entry(cpu: &mut Cpu, at: u32, handle: u16) -> u32 {
+    if handle == 0 || !sized(cpu, at, TASKENTRY_SIZE) {
+        return 0;
+    }
+    let live = live_tasks(cpu);
+    let Some(place) = live
+        .iter()
+        .position(|&t| cpu.bus.win32.win16.tasks[t].handle == handle)
+    else {
+        return 0;
+    };
+    let t = live[place];
+    let task = cpu.bus.win32.win16.tasks[t].clone();
+    let next = live
+        .get(place + 1)
+        .map_or(0, |&n| cpu.bus.win32.win16.tasks[n].handle);
+    let (ss, sp) = thunk::task_stack16(cpu, t);
+    // INSTANCEDATA at the start of the automatic data segment: the
+    // stack's top, its lowest SP so far and its bottom, as InitTask set
+    // them.
+    let data = super::lin(cpu, super::global::handle_to_sel(task.instance), 0);
+    let (top, min, bottom) = if task.instance == 0 {
+        (0, 0, 0)
+    } else {
+        (
+            super::read_16(cpu, data + 0x0A),
+            super::read_16(cpu, data + 0x0C),
+            super::read_16(cpu, data + 0x0E),
+        )
+    };
+    let name = super::module_index(cpu, task.module)
+        .map(|i| cpu.bus.win32.win16.modules[i].name.clone())
+        .unwrap_or_default();
+    // hQueue and wcEvents: the message queue is USER32's thread queue,
+    // which has no 16-bit handle, so both are 0.
+    let words = [
+        task.handle,
+        task.parent,
+        task.instance,
+        task.module,
+        ss,
+        sp,
+        top,
+        min,
+        bottom,
+        0,
+        0,
+    ];
+    for (i, w) in words.into_iter().enumerate() {
+        super::write_16(cpu, at + 4 + 2 * i as u32, w);
+    }
+    put_name(cpu, at + 0x1A, 10, name.as_bytes());
+    // The PDB is at 100h in the task database.
+    super::write_16(cpu, at + 0x24, 0x100);
+    super::write_16(cpu, at + 0x26, next);
+    1
+}
+
+/// TaskFirst(lpte): the first task.
+fn task_first(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let first = live_tasks(cpu)
+        .first()
+        .map_or(0, |&t| cpu.bus.win32.win16.tasks[t].handle);
+    Some(fill_task_entry(cpu, args[0], first))
+}
+
+/// TaskNext(lpte): the task the entry's hNext names.
+fn task_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = args[0];
+    if !sized(cpu, at, TASKENTRY_SIZE) {
+        return Some(0);
+    }
+    let next = super::read_16(cpu, at + 0x26);
+    Some(fill_task_entry(cpu, at, next))
+}
+
+/// TaskFindHandle(lpte, hTask): the task `hTask`.
+fn task_find_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(fill_task_entry(cpu, args[0], args[1] as u16))
+}
+
+/// MODULEENTRY's size: dwSize, szModule[10], hModule, wcUsage,
+/// szExePath[256], wNext.
+const MODULEENTRY_SIZE: u32 = 0x114;
+
+/// Fill the MODULEENTRY at `at` with the module `modules[index]`. wNext
+/// is the next module's handle, 0 after the last; the system's modules
+/// come first, KERNEL the first of them, as in Windows' module list.
+fn fill_module_entry(cpu: &mut Cpu, at: u32, index: usize) -> u32 {
+    let modules = &cpu.bus.win32.win16.modules;
+    let m = &modules[index];
+    let (name, handle, refs) = (m.name.clone(), m.handle, m.refs);
+    let path = crate::dosstr::to_bytes(&m.path);
+    let next = modules.get(index + 1).map_or(0, |n| n.handle);
+    put_name(cpu, at + 4, 10, name.as_bytes());
+    super::write_16(cpu, at + 0x0E, handle);
+    super::write_16(cpu, at + 0x10, refs);
+    put_name(cpu, at + 0x12, 256, &path);
+    super::write_16(cpu, at + 0x112, next);
+    1
+}
+
+/// Fill the MODULEENTRY at `at` with the module whose handle is exactly
+/// `handle`, after checking dwSize.
+fn module_entry_of(cpu: &mut Cpu, at: u32, handle: u16) -> u32 {
+    if handle == 0 || !sized(cpu, at, MODULEENTRY_SIZE) {
+        return 0;
+    }
+    let modules = &cpu.bus.win32.win16.modules;
+    match modules.iter().position(|m| m.handle == handle) {
+        Some(i) => fill_module_entry(cpu, at, i),
+        None => 0,
+    }
+}
+
+/// ModuleFirst(lpme): the first module, KERNEL.
+fn module_first(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let first = cpu.bus.win32.win16.modules.first().map_or(0, |m| m.handle);
+    Some(module_entry_of(cpu, args[0], first))
+}
+
+/// ModuleNext(lpme): the module the entry's wNext names.
+fn module_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = args[0];
+    if !sized(cpu, at, MODULEENTRY_SIZE) {
+        return Some(0);
+    }
+    let next = super::read_16(cpu, at + 0x112);
+    Some(module_entry_of(cpu, at, next))
+}
+
+/// ModuleFindName(lpme, lpszName): the module named `lpszName`, in any
+/// case.
+fn module_find_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[1] == 0 {
+        return Some(0);
+    }
+    let name = super::string(cpu, args[1]).to_ascii_uppercase();
+    let handle = cpu
+        .bus
+        .win32
+        .win16
+        .modules
+        .iter()
+        .find(|m| m.name == name)
+        .map_or(0, |m| m.handle);
+    Some(module_entry_of(cpu, args[0], handle))
+}
+
+/// ModuleFindHandle(lpme, hModule): the module `hModule`, or the one
+/// whose instance or segment it is, as GetExePtr takes them.
+fn module_find_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let handle = super::module_index(cpu, args[1] as u16)
+        .map_or(0, |i| cpu.bus.win32.win16.modules[i].handle);
+    Some(module_entry_of(cpu, args[0], handle))
+}
+
+/// LOCALINFO's and LOCALENTRY's sizes. LOCALENTRY: dwSize, hHandle,
+/// wAddress, wSize, wFlags, wcLock, wType, hHeap, wHeapType, wNext.
+const LOCALINFO_SIZE: u32 = 6;
+const LOCALENTRY_SIZE: u32 = 0x16;
+/// LOCALENTRY's wFlags: a fixed, free or moveable block. wType is
+/// LT_NORMAL for a block and LT_FREE for a free piece, and wHeapType
+/// NORMAL_HEAP: USER's and GDI's heaps are USER32's and GDI32's.
+const LF_FIXED: u16 = 1;
+const LF_FREE: u16 = 2;
+const LF_MOVEABLE: u16 = 4;
+const LT_NORMAL: u16 = 0;
+const LT_FREE: u16 = 0xFF;
+
+/// The items of the local heap in the segment whose handle or selector
+/// is `heap`.
+fn local_items(cpu: &Cpu, heap: u16) -> Option<Vec<super::local::WalkItem>> {
+    super::local::walk(cpu, super::global::handle_to_sel(heap))
+}
+
+/// LocalInfo(lpli, hHeap): the number of items in the heap.
+fn local_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = args[0];
+    if !sized(cpu, at, LOCALINFO_SIZE) {
+        return Some(0);
+    }
+    let Some(items) = local_items(cpu, args[1] as u16) else {
+        return Some(0);
+    };
+    super::write_16(cpu, at + 4, items.len() as u16);
+    Some(1)
+}
+
+/// Fill the LOCALENTRY at `at` with the item of the heap `heap` whose
+/// arena starts at `arena`, or the first one for None. wNext is where
+/// the next item's arena starts, 0 after the last.
+fn fill_local_entry(cpu: &mut Cpu, at: u32, heap: u16, arena: Option<u16>) -> u32 {
+    let Some(items) = local_items(cpu, heap) else {
+        return 0;
+    };
+    let place = match arena {
+        None => 0,
+        Some(a) => match items.iter().position(|i| i.arena == a) {
+            Some(p) => p,
+            None => return 0,
+        },
+    };
+    let Some(item) = items.get(place) else {
+        return 0;
+    };
+    let next = items.get(place + 1).map_or(0, |n| n.arena);
+    let (flags, kind) = if item.free {
+        (LF_FREE, LT_FREE)
+    } else if item.moveable {
+        (LF_MOVEABLE, LT_NORMAL)
+    } else {
+        (LF_FIXED, LT_NORMAL)
+    };
+    let words = [
+        item.handle,
+        item.address,
+        item.size,
+        flags,
+        item.lock as u16,
+        kind,
+        heap,
+        0,
+        next,
+    ];
+    for (i, w) in words.into_iter().enumerate() {
+        super::write_16(cpu, at + 4 + 2 * i as u32, w);
+    }
+    1
+}
+
+/// LocalFirst(lple, hHeap): the heap's first item.
+fn local_first(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = args[0];
+    if !sized(cpu, at, LOCALENTRY_SIZE) {
+        return Some(0);
+    }
+    Some(fill_local_entry(cpu, at, args[1] as u16, None))
+}
+
+/// LocalNext(lple): the item the entry's wNext names, in the heap its
+/// hHeap names.
+fn local_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = args[0];
+    if !sized(cpu, at, LOCALENTRY_SIZE) {
+        return Some(0);
+    }
+    let heap = super::read_16(cpu, at + 0x10);
+    let next = super::read_16(cpu, at + 0x14);
+    if next == 0 {
+        return Some(0);
+    }
+    Some(fill_local_entry(cpu, at, heap, Some(next)))
 }
 
 fn memory_read(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -786,16 +1247,22 @@ fn wave_out_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 const CALLBACK_TYPEMASK: u32 = 0x0007_0000;
 const CALLBACK_WINDOW: u32 = 0x0001_0000;
 const CALLBACK_TASK: u32 = 0x0002_0000;
+const CALLBACK_FUNCTION: u32 = 0x0003_0000;
 
 /// waveOutOpen(handle *, device, format, callback, instance, flags): a
-/// window or a task is told about the buffers played, as in Win32; a
-/// 16-bit function isn't called (programs that ask for one poll the
-/// headers' WHDR_DONE as well).
+/// window or a task is told about the buffers played, as in Win32, and a
+/// 16-bit function is called in its task (`queue_call16`).
 fn wave_out_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let out = thunk::scratch32(cpu, 4);
     w32(cpu, out, 0);
     let device = if args[1] == 0xFFFF { u32::MAX } else { args[1] };
     let mut flags = args[5];
+    // WINMM opens the device without a callback, and is given the
+    // function once it is open (P_WAVE_OPEN).
+    let function = match flags & CALLBACK_TYPEMASK {
+        CALLBACK_FUNCTION if args[0] != 0 => args[3],
+        _ => 0,
+    };
     let callback = match flags & CALLBACK_TYPEMASK {
         CALLBACK_WINDOW => args[3] & 0xFFFF,
         CALLBACK_TASK => {
@@ -820,59 +1287,207 @@ fn wave_out_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         MM,
         "waveOutOpen",
         &[target, device, args[2], callback, args[4], flags],
-        vec![P_WAVE_OPEN, out, args[0]],
+        vec![P_WAVE_OPEN, out, args[0], function],
     )
 }
 
-/// The WAVEHDR at 16:16 `segptr` made one WINMM can use where it is: the
-/// two have the same layout but for the data's pointer, which is made
-/// flat while WINMM has the header. Its linear address.
+/// What `Mmsystem` keeps of a call: the task's thread, the function and
+/// its five arguments.
+pub type MmCall = [u32; 7];
+
+/// Queue the call of the 16-bit function `function` with `args` (the
+/// device's handle, the message, the instance and two parameters) for
+/// the task whose thread is `tid`. Windows 3.1 calls such a function at
+/// interrupt time, which tasks taking turns have no room for: the task
+/// makes the call when it next asks for a message (`call_queued16`), or
+/// before the MMSYSTEM function it is in returns (`return_after_calls`).
+/// A task that waits is given WM_NULL, so that it asks; one that has
+/// ended makes no calls.
+pub fn queue_call16(cpu: &mut Cpu, tid: u32, function: u32, args: [u32; 5]) {
+    let Some((p, t)) = crate::win32::thread::find(&cpu.bus.win32, tid) else {
+        return;
+    };
+    let waits = cpu.bus.win32.processes[p].threads[t].wait.is_some();
+    let [a, b, c, d, e] = args;
+    let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
+    calls.push([tid, function, a, b, c, d, e]);
+    // Each call, not only the first: a task that went on to wait in
+    // WaitMessage with a call queued would otherwise never be woken.
+    if waits {
+        crate::win32::user32::message::post_thread_message(cpu, &[tid, 0, 0, 0]);
+    }
+}
+
+/// Make the first call queued for the running task (`queue_call16`);
+/// the ones after it follow when it returns (`then_calls16`), and then
+/// the task goes on with `resume`. False when there is none.
+fn make_call16(cpu: &mut Cpu, resume: Context) -> bool {
+    if cpu.bus.win32.win16.mmsystem.calls.is_empty() {
+        return false;
+    }
+    let Some(t) = super::current_task(cpu) else {
+        return false;
+    };
+    let tid = cpu.bus.win32.win16.tasks[t].tid;
+    let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
+    let Some(i) = calls.iter().position(|c| c[0] == tid) else {
+        return false;
+    };
+    let [_, function, handle, msg, instance, p1, p2] = calls.remove(i);
+    // void CALLBACK f(HANDLE, UINT, DWORD, DWORD, DWORD), Pascal's.
+    let words = [
+        handle as u16,
+        msg as u16,
+        (instance >> 16) as u16,
+        instance as u16,
+        (p1 >> 16) as u16,
+        p1 as u16,
+        (p2 >> 16) as u16,
+        p2 as u16,
+    ];
+    thunk::call16(
+        cpu,
+        function,
+        &words,
+        0,
+        resume,
+        thunk::THEN_CALLS16,
+        Vec::new(),
+    );
+    true
+}
+
+/// A function `make_call16` called returned: the task's next call, or
+/// the context it was to go on with.
+pub(super) fn then_calls16(cpu: &mut Cpu, _: u32, _: &[u32], ctx: &mut Context) -> Option<u32> {
+    if make_call16(cpu, *ctx) {
+        None
+    } else {
+        Some(ctx.gpr[thunk::EAX])
+    }
+}
+
+/// The running task, as it asks for a message, makes the calls queued
+/// for it (`queue_call16`), and asks again when they are made. False
+/// when there are none.
+pub fn call_queued16(cpu: &mut Cpu) -> bool {
+    let mut resume = Context::of(cpu);
+    resume.eip = resume.eip.wrapping_sub(4);
+    make_call16(cpu, resume)
+}
+
+/// An MMSYSTEM function that returns `value` to the 16-bit context
+/// `ctx` makes the calls its WINMM function queued for the task before
+/// it returns, as Windows 3.1 calls the function within waveOutOpen
+/// (MM_WOM_OPEN), waveOutReset (MM_WOM_DONE) and waveOutClose
+/// (MM_WOM_CLOSE). A program may free the headers and the function's
+/// library once they return.
+fn return_after_calls(cpu: &mut Cpu, value: u32, ctx: &Context) -> Option<u32> {
+    let mut resume = *ctx;
+    resume.gpr[thunk::EAX] = resume.gpr[thunk::EAX] & 0xFFFF_0000 | value & 0xFFFF;
+    resume.gpr[thunk::EDX] = resume.gpr[thunk::EDX] & 0xFFFF_0000 | value >> 16;
+    if make_call16(cpu, resume) {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// A task ended: the calls queued for it go.
+pub fn task_ended(cpu: &mut Cpu, tid: u32) {
+    cpu.bus.win32.win16.mmsystem.calls.retain(|c| c[0] != tid);
+}
+
+/// What MMSYSTEM keeps for the 16-bit programs: the wave headers WINMM
+/// has (`wave_header`), each one's process, linear address and 16:16
+/// address, and the calls of callback functions that wait for their
+/// tasks (`queue_call16`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Mmsystem {
+    pub headers: Vec<[u32; 3]>,
+    pub calls: Vec<MmCall>,
+}
+
+/// The W32 section's version that first keeps `Mmsystem`. An older
+/// rust-dos kept the wave headers alone, and put the data's flat address
+/// in the program's own header while WINMM had it. Their headers are
+/// forgotten on loading: WINMM then tells the program about them by
+/// their linear addresses.
+const MMSYSTEM_SAVED: u16 = 74;
+
+impl crate::savestate::State for Mmsystem {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        crate::savestate::State::save(&self.headers, w);
+        crate::savestate::State::save(&self.calls, w);
+    }
+
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        // Bytes outside a section are in this rust-dos's own layout.
+        if r.version().is_some_and(|v| v < MMSYSTEM_SAVED) {
+            let mut old: Vec<[u32; 4]> = Vec::new();
+            crate::savestate::State::load(&mut old, r)?;
+            *self = Mmsystem::default();
+            return Ok(());
+        }
+        crate::savestate::State::load(&mut self.headers, r)?;
+        crate::savestate::State::load(&mut self.calls, r)
+    }
+}
+
+/// The WAVEHDR at 16:16 `segptr`, given to WINMM where it is, as
+/// Windows 98's MMSYSTEM gives a 16-bit program's own header to the
+/// driver: its linear address. The two layouts are the same, and the
+/// header keeps what the program wrote, its data's 16:16 pointer too;
+/// WINMM changes only dwFlags. The header's process and addresses are
+/// kept, so that WINMM reads the data's pointer as a 16:16 one
+/// (`wave_data`) and gives the program its own pointer to the header in
+/// MM_WOM_DONE (`wave_header16`).
 fn wave_header(cpu: &mut Cpu, segptr: u32) -> u32 {
     let at = super::linear(cpu, segptr);
     if at == 0 {
         return 0;
     }
-    let data = r32(cpu, at);
-    let headers = &mut cpu.bus.win32.win16.wave_headers;
-    let known = headers.iter().position(|h| h[0] == at);
-    // The pointer is the flat one put there before: the program didn't
-    // change it.
-    if let Some(i) = known
-        && headers[i][3] == data
-    {
-        return at;
+    let pid = crate::win32::user32::current_pid(cpu);
+    let headers = &mut cpu.bus.win32.win16.mmsystem.headers;
+    match headers.iter_mut().find(|h| h[0] == pid && h[1] == at) {
+        Some(h) => h[2] = segptr,
+        None => headers.push([pid, at, segptr]),
     }
-    let flat = super::linear(cpu, data);
-    let entry = [at, segptr, data, flat];
-    let headers = &mut cpu.bus.win32.win16.wave_headers;
-    match known {
-        Some(i) => headers[i] = entry,
-        None => headers.push(entry),
-    }
-    w32(cpu, at, flat);
     at
 }
 
-/// WINMM let go of the header at `at`: its data's 16:16 pointer back.
+/// WINMM let go of the header at `at`.
 fn unprepared(cpu: &mut Cpu, at: u32) {
-    let headers = &mut cpu.bus.win32.win16.wave_headers;
-    if let Some(i) = headers.iter().position(|h| h[0] == at) {
-        let h = headers.remove(i);
-        w32(cpu, at, h[2]);
-    }
+    let pid = crate::win32::user32::current_pid(cpu);
+    let headers = &mut cpu.bus.win32.win16.mmsystem.headers;
+    headers.retain(|h| h[0] != pid || h[1] != at);
 }
 
-/// The 16:16 address of the wave header at the linear `at`, which WINMM
-/// puts in MM_WOM_DONE for a 16-bit program; `at` for a header that
-/// isn't a 16-bit program's.
-pub fn wave_header16(cpu: &Cpu, at: u32) -> u32 {
-    cpu.bus
-        .win32
-        .win16
-        .wave_headers
+/// The 16:16 address of the 16-bit program's wave header at the linear
+/// `at` in the process `pid`, if it is one.
+fn wave_header_of(cpu: &Cpu, pid: u32, at: u32) -> Option<u32> {
+    let headers = &cpu.bus.win32.win16.mmsystem.headers;
+    headers
         .iter()
-        .find(|h| h[0] == at)
-        .map_or(at, |h| h[1])
+        .find(|h| h[0] == pid && h[1] == at)
+        .map(|h| h[2])
+}
+
+/// The 16:16 address of the wave header at the linear `at` in the
+/// process `pid`, which WINMM puts in MM_WOM_DONE for a 16-bit program;
+/// `at` for a header that isn't a 16-bit program's.
+pub fn wave_header16(cpu: &Cpu, pid: u32, at: u32) -> u32 {
+    wave_header_of(cpu, pid, at).unwrap_or(at)
+}
+
+/// The linear address of the data `data` that the wave header at the
+/// linear `at` in the process `pid` points to: a 16-bit program's header
+/// has a 16:16 pointer there, the others a flat one.
+pub fn wave_data(cpu: &Cpu, pid: u32, at: u32, data: u32) -> u32 {
+    match wave_header_of(cpu, pid, at) {
+        Some(_) => super::linear(cpu, data),
+        None => data,
+    }
 }
 
 fn wave_out_prepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -900,6 +1515,14 @@ fn wave_out_unprepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn wave_out_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let at = wave_header(cpu, args[1]);
     go(cpu, MM, "waveOutWrite", &[args[0], at, 32], Vec::new())
+}
+
+fn wave_out_reset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    go(cpu, MM, "waveOutReset", &[args[0]], vec![P_WAVE_CALLS])
+}
+
+fn wave_out_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    go(cpu, MM, "waveOutClose", &[args[0]], vec![P_WAVE_CALLS])
 }
 
 fn wave_out_get_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1259,6 +1882,16 @@ fn mci_send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         mci_block32(cpu, segptr, at16, block, msg, flags);
         block
     };
+    // A status's block is copied as it is, into the 32-bit stack's
+    // scratch space: WINMM's function says for itself whether an idle
+    // proof goes through the command (`mci::send_command`), and `post`
+    // whether it goes through what comes back.
+    if msg == wmci::MCI_STATUS && at16 != 0 {
+        let room = super::segment_room(cpu, segptr).min(MCI_BLOCK);
+        crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
+        crate::idle::reads_also(cpu, at16, room);
+    }
     // The program's block goes to `post` as its 16:16 pointer: the
     // command can call into USER32, whose messages run the program's
     // window procedures, and a segment they grow can move.
@@ -1494,15 +2127,4 @@ fn wing_bit_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut all = args[..8].to_vec();
     all.push(SRCCOPY);
     go(cpu, G, "BitBlt", &all, Vec::new())
-}
-
-// DDEML.
-
-/// DMLERR_DLL_USAGE.
-fn dde_initialize(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0x4004)
-}
-
-fn dde_error(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0x4004)
 }

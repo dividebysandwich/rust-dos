@@ -10,10 +10,15 @@ mod win16;
 
 mod win16_comm_tests;
 mod win16_conformance_tests;
+mod win16_ddeml_tests;
 mod win16_drive_tests;
 mod win16_exec_tests;
 mod win16_hook_tests;
 mod win16_mmsystem_tests;
+mod win16_ole2_tests;
+mod win16_registry_tests;
 mod win16_resource_tests;
 mod win16_tests;
+mod win16_toolhelp_tests;
+mod win16_typelib_tests;
 mod win16_user_tests;

@@ -147,13 +147,13 @@ fn scratch(name: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
 
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, and what it prints kept.
-fn machine(test: &str, program: Vec<u8>) -> Cpu {
+fn machine(test: &str, program: Vec<u8>) -> Box<Cpu> {
     machine_with(test, &[("T.EXE", program)])
 }
 
 /// A machine with the built-in Windows on, T.EXE of `files` loaded from
 /// the shell, and what it prints kept.
-fn machine_with(test: &str, files: &[(&str, Vec<u8>)]) -> Cpu {
+fn machine_with(test: &str, files: &[(&str, Vec<u8>)]) -> Box<Cpu> {
     let mut cpu = Cpu::new(scratch(test, files));
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
@@ -549,6 +549,42 @@ fn without_the_built_in_windows_the_dos_stub_runs() {
         printed(&cpu)
     );
     assert_eq!(cpu.errorlevel, 1);
+}
+
+/// 1000 calls of QueryPerformanceCounter in a row take the time Windows
+/// 98's VTD takes for its port accesses, about 2.75 us each, at a speed
+/// where the loop's own instructions take a fraction of that: the count
+/// moves on by 1000 calls' worth of PIT ticks, at 1.193182 MHz.
+#[test]
+fn query_performance_counter_takes_the_time_of_its_port_accesses() {
+    let names: &[&str] = &["QueryPerformanceCounter"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let image = program(BASE, false, imports, &[0; 16], |a, l| {
+        let mut again = a.create_label();
+        a.push(l.data)?;
+        a.call(l.import(0))?;
+        a.mov(esi, 1000)?;
+        a.set_label(&mut again)?;
+        a.push(l.data + 8)?;
+        a.call(l.import(0))?;
+        a.dec(esi)?;
+        a.jnz(again)?;
+        // The ticks between the first call and the last, by 64.
+        a.mov(eax, dword_ptr(l.data + 8))?;
+        a.sub(eax, dword_ptr(l.data))?;
+        a.shr(eax, 6)?;
+        a.ret()
+    });
+    let mut cpu = machine("qpc_cost", image);
+    cpu.bus.clock.set_cycles_per_ms(200_000);
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    // 1000 * 2.75 us is 3281 ticks, 51 by 64; the instructions add a few.
+    let ticks_by_64 = cpu.errorlevel as u32;
+    assert!((51..=53).contains(&ticks_by_64), "{ticks_by_64} * 64 ticks");
 }
 
 #[test]
@@ -1033,6 +1069,57 @@ fn a_wait_on_the_clock_is_skipped_exactly() {
     }
 }
 
+/// An idle loop that waits for a deadline as Tribal Rage's MFC loop does
+/// (#1339): it counts its passes in RAM, reads GetTickCount and compares
+/// how long it has waited with its deadline. The compare's flags reach
+/// the next pass's call, and change with the time. A count proof follows
+/// the time as it follows a count, so the passes it skips run up to the
+/// deadline rather than to the clock's next millisecond, and they come
+/// out the same as when they all run.
+#[test]
+fn an_idle_loop_that_waits_for_a_deadline_by_get_tick_count_is_skipped_to_it() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetTickCount"])];
+    // The count at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut spin = a.create_label();
+        a.call(l.import(0))?;
+        a.mov(ebx, eax)?;
+        a.set_label(&mut spin)?;
+        a.inc(dword_ptr(l.data))?;
+        a.call(l.import(0))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start("deadline_plain", CoreMode::Normal, false);
+    let mut skipping = start("deadline_skipping", CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    let stats = &skipping.bus.observe.stats;
+    assert_eq!(skipping.errorlevel, 0x2A, "{stats:?}");
+    // A proof that held only to the clock's next millisecond would skip
+    // less than a millisecond's instructions.
+    let ms = skipping.bus.clock.cycles_per_ms() as u64;
+    assert!(stats.proofs >= 1 && stats.skipped > 100 * ms, "{stats:?}");
+    assert!(stats.skipped / stats.proofs > 4 * ms, "{stats:?}");
+}
+
 /// Run `image` on a machine that skips passes (on the recompiler) and one
 /// that runs them all (on the interpreter), in lockstep: they must come
 /// out the same after every batch, and the program must end with 2Ah.
@@ -1225,9 +1312,10 @@ fn a_sleep_zero_loop_that_counts_runs_all_its_passes() {
     });
     let stats = idle_lockstep("sleep_zero_count", image);
     // The memory loop's flags at the head come from comparing its count,
-    // so no two passes are the same: its proofs fail and back off rather
-    // than start again every few calls.
-    assert!(failed_by(&stats, "count passes") > 0, "{stats:?}");
+    // so no two passes leave the same there: the passes skipped leave
+    // those of the last.
+    assert!(stats.skipped > 0, "{stats:?}");
+    assert_eq!(failed_by(&stats, "count passes"), 0, "{stats:?}");
     assert!(stats.starts < 1000, "{stats:?}");
 }
 
@@ -1349,6 +1437,339 @@ fn failed_by(stats: &rust_dos::idle::IdleStats, why: &str) -> u64 {
         .map_or(0, |&(_, n)| n)
 }
 
+/// A thread that polls an event with WaitForSingleObject and no time to
+/// wait, while the main thread sleeps and then sets it: the waits that
+/// find it unset change nothing, so the loop's passes are skipped to the
+/// end of the main thread's Sleep, and come out the same as when they all
+/// run (#1222).
+#[test]
+fn a_loop_that_polls_an_event_with_no_time_to_wait_is_skipped() {
+    let names: &[&str] = &[
+        "CreateThread",
+        "CreateEventA",
+        "SetEvent",
+        "Sleep",
+        "WaitForSingleObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The event's handle at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(1)?;
+        a.push(0)?;
+        a.call(f("CreateEventA"))?;
+        a.mov(dword_ptr(l.data), eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: poll the event until it is set.
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.push(dword_ptr(l.data))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.test(eax, eax)?;
+        a.jnz(spin)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(30)?;
+        a.call(f("Sleep"))?;
+        a.push(dword_ptr(l.data))?;
+        a.call(f("SetEvent"))?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("poll_event", image);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// A thread that polls a mutex with WaitForMultipleObjects and no time to
+/// wait while the main thread holds it and sleeps, counting its passes in
+/// memory, with the handles in an array on its stack or elsewhere: the
+/// waits read only their arguments and that array, and the passes are
+/// skipped with the count moved on as they would have. The main thread
+/// then releases the mutex, and the thread takes it.
+fn mutex_poll(handles_on_stack: bool) -> rust_dos::idle::IdleStats {
+    let names: &[&str] = &[
+        "CreateThread",
+        "CreateMutexA",
+        "ReleaseMutex",
+        "Sleep",
+        "WaitForSingleObject",
+        "WaitForMultipleObjects",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The mutex's handle at 0, the count at 4, the array elsewhere at 8.
+    let image = program(BASE, false, imports, &[0; 0x10], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        // The mutex, taken by the main thread.
+        a.push(0)?;
+        a.push(1)?;
+        a.push(0)?;
+        a.call(f("CreateMutexA"))?;
+        a.mov(dword_ptr(l.data), eax)?;
+        a.mov(dword_ptr(l.at(8)), eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: poll the mutex, counting, until it has it.
+        a.sub(esp, 8)?;
+        a.mov(eax, dword_ptr(l.data))?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.set_label(&mut spin)?;
+        if handles_on_stack {
+            a.lea(eax, dword_ptr(esp))?;
+        } else {
+            a.mov(eax, l.at(8) as i32)?;
+        }
+        a.push(0)?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.push(1)?;
+        a.call(f("WaitForMultipleObjects"))?;
+        // Counted after the call, so that the flags the call is reached
+        // with are the compare's, the same in every pass.
+        a.add(dword_ptr(l.at(4)), 1)?;
+        a.cmp(eax, 0x102)?;
+        a.je(spin)?;
+        a.add(esp, 8)?;
+        a.push(dword_ptr(l.data))?;
+        a.call(f("ReleaseMutex"))?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(30)?;
+        a.call(f("Sleep"))?;
+        a.push(dword_ptr(l.data))?;
+        a.call(f("ReleaseMutex"))?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let test = if handles_on_stack {
+        "poll_mutex_stack"
+    } else {
+        "poll_mutex_data"
+    };
+    idle_lockstep(test, image)
+}
+
+#[test]
+fn a_loop_that_polls_a_mutex_and_counts_is_skipped() {
+    let stats = mutex_poll(true);
+    // A proof here skips about ten thousand instructions, too few for a
+    // proof over counts to pay for itself again and again (`costly`), so
+    // the head backs off after the first proofs.
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// The same loop with the handles' array away from the stack: the wait
+/// names the array it reads (`idle::reads_also`), which holds no count,
+/// so the passes are skipped as with the array on the stack.
+#[test]
+fn a_loop_that_polls_handles_elsewhere_and_counts_is_skipped() {
+    let stats = mutex_poll(false);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+    assert_eq!(failed_by(&stats, "count service"), 0, "{stats:?}");
+}
+
+/// Waits with no time to wait, which return at once, and SetEvent from
+/// another thread ending a wait: what they return, the last error they
+/// leave, and what they take (#1222). A failed check exits with its
+/// number; all passing, with 0x2A.
+#[test]
+fn waits_with_no_time_to_wait_return_what_windows_returns() {
+    let names: &[&str] = &[
+        "CreateThread",
+        "CreateEventA",
+        "CreateMutexA",
+        "SetEvent",
+        "ReleaseMutex",
+        "Sleep",
+        "WaitForSingleObject",
+        "WaitForMultipleObjects",
+        "SetLastError",
+        "GetLastError",
+        "GetExitCodeThread",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // An unset event at 0 and again at 8, a set one at 4, a mutex at
+    // 0xC, the event a thread waits for at 0x10, that
+    // thread's exit code at 0x14.
+    let data = vec![0; 0x20];
+    let (code, out) = run(
+        "wait_results",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut fail = a.create_label();
+            let mut main_start = a.create_label();
+            a.jmp(main_start)?;
+            a.set_label(&mut fail)?;
+            a.push(ebx)?;
+            a.call(f("ExitProcess"))?;
+            a.set_label(&mut main_start)?;
+            for (at, initial) in [(0, 0), (4, 1), (0x10, 0)] {
+                a.push(0)?;
+                a.push(initial)?;
+                a.push(0)?;
+                a.push(0)?;
+                a.call(f("CreateEventA"))?;
+                a.mov(dword_ptr(l.at(at)), eax)?;
+            }
+            a.mov(eax, dword_ptr(l.at(0)))?;
+            a.mov(dword_ptr(l.at(8)), eax)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateMutexA"))?;
+            a.mov(dword_ptr(l.at(0xC)), eax)?;
+            let check = |a: &mut CodeAssembler, n: u32, want: u32| {
+                a.mov(ebx, n)?;
+                a.cmp(eax, want)?;
+                a.jne(fail)
+            };
+            // An unset event: WAIT_TIMEOUT, the last error as it was.
+            a.push(0x1234)?;
+            a.call(f("SetLastError"))?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(0)))?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 1, 0x102)?;
+            a.call(f("GetLastError"))?;
+            check(a, 2, 0x1234)?;
+            // One of an unset and a set auto-reset event: the second,
+            // which the wait resets.
+            a.push(0)?;
+            a.push(0)?;
+            a.push(l.at(0) as i32)?;
+            a.push(2)?;
+            a.call(f("WaitForMultipleObjects"))?;
+            check(a, 3, 1)?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(4)))?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 4, 0x102)?;
+            // Both, with one unset: WAIT_TIMEOUT, and the set one stays
+            // set.
+            a.push(dword_ptr(l.at(4)))?;
+            a.call(f("SetEvent"))?;
+            a.push(0)?;
+            a.push(1)?;
+            a.push(l.at(0) as i32)?;
+            a.push(2)?;
+            a.call(f("WaitForMultipleObjects"))?;
+            check(a, 5, 0x102)?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(4)))?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 6, 0)?;
+            // Not a handle: WAIT_FAILED, ERROR_INVALID_HANDLE.
+            a.push(0)?;
+            a.push(0xDEAD)?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 7, 0xFFFF_FFFF)?;
+            a.call(f("GetLastError"))?;
+            check(a, 8, 6)?;
+            // A mutex whose owner ended holding it: WAIT_ABANDONED_0 and
+            // its index, and the waiter owns it.
+            let mut over = a.create_label();
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(over)?;
+            a.push(-1)?;
+            a.push(dword_ptr(l.at(0xC)))?;
+            a.call(f("WaitForSingleObject"))?;
+            a.ret_1(4)?;
+            a.set_label(&mut over)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateThread"))?;
+            a.push(-1)?;
+            a.push(eax)?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 9, 0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(l.at(8) as i32)?;
+            a.push(2)?;
+            a.call(f("WaitForMultipleObjects"))?;
+            check(a, 10, 0x81)?;
+            a.push(dword_ptr(l.at(0xC)))?;
+            a.call(f("ReleaseMutex"))?;
+            check(a, 11, 1)?;
+            // Released again: not the owner.
+            a.push(dword_ptr(l.at(0xC)))?;
+            a.call(f("ReleaseMutex"))?;
+            check(a, 12, 0)?;
+            a.call(f("GetLastError"))?;
+            check(a, 13, 288)?;
+            // SetEvent ends another thread's wait for the event, which
+            // returns WAIT_OBJECT_0 as the thread's exit code.
+            let mut over = a.create_label();
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(over)?;
+            a.push(-1)?;
+            a.push(dword_ptr(l.at(0x10)))?;
+            a.call(f("WaitForSingleObject"))?;
+            a.ret_1(4)?;
+            a.set_label(&mut over)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateThread"))?;
+            a.mov(esi, eax)?;
+            a.push(10)?;
+            a.call(f("Sleep"))?;
+            a.push(dword_ptr(l.at(0x10)))?;
+            a.call(f("SetEvent"))?;
+            a.push(-1)?;
+            a.push(esi)?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 14, 0)?;
+            a.push(l.at(0x14) as i32)?;
+            a.push(esi)?;
+            a.call(f("GetExitCodeThread"))?;
+            a.mov(eax, dword_ptr(l.at(0x14)))?;
+            check(a, 16, 0)?;
+            // The thread's wait took the auto-reset event.
+            a.push(0)?;
+            a.push(dword_ptr(l.at(0x10)))?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 15, 0x102)?;
+            a.push(0x2A)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 0x2A, "{}", out);
+}
+
 /// A wait on the clock that counts its passes in memory, as a frame
 /// limiter counts the passes it waited: with paging on, as the built-in
 /// Windows runs, the passes are skipped as long as the counts let them
@@ -1372,6 +1793,301 @@ fn a_wait_on_the_clock_that_counts_its_passes_is_skipped() {
     let stats = idle_lockstep("counting_clock_wait", image);
     assert!(stats.proofs >= 10, "{stats:?}");
     assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// A program that runs `setup`, then waits `ms` on the clock calling
+/// `poll` in every pass, as Biosys waits in its menus (#1306), and then
+/// runs `after`. GetTickCount is its first import. A failed step returns
+/// its number in `ebx` instead of 2Ah.
+fn poll_wait(
+    imports: &[(&str, &[&str])],
+    data: &[u8],
+    ms: i32,
+    setup: impl FnOnce(&mut CodeAssembler, &Layout, CodeLabel) -> Result<(), IcedError>,
+    poll: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+    after: impl FnOnce(&mut CodeAssembler, &Layout, CodeLabel) -> Result<(), IcedError>,
+) -> Vec<u8> {
+    program(BASE, false, imports, data, |a, l| {
+        let mut fail = a.create_label();
+        let mut wait = a.create_label();
+        a.push(ebx)?;
+        a.push(esi)?;
+        setup(a, l, fail)?;
+        a.call(l.import(0))?;
+        a.lea(esi, dword_ptr(eax + ms))?;
+        a.set_label(&mut wait)?;
+        poll(a, l)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, esi)?;
+        a.jb(wait)?;
+        after(a, l, fail)?;
+        a.mov(ebx, 0x2A)?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.pop(esi)?;
+        a.pop(ebx)?;
+        a.ret()
+    })
+}
+
+/// Set `ebx` to `step` and go to `fail` if the call before returned
+/// other than 0.
+fn fail_unless_ok(a: &mut CodeAssembler, fail: CodeLabel, step: i32) -> Result<(), IcedError> {
+    a.mov(ebx, step)?;
+    a.test(eax, eax)?;
+    a.jnz(fail)
+}
+
+/// A wait on the clock that asks IsIconic in every pass, as Biosys's
+/// menus do (#1306): IsIconic changes nothing, so the passes are skipped
+/// and come out as when they all run.
+#[test]
+fn a_wait_that_asks_is_iconic_is_skipped() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("USER32.DLL", &["IsIconic"]),
+    ];
+    let image = poll_wait(
+        imports,
+        &[0; 8],
+        20,
+        |_, _, _| Ok(()),
+        |a, l| {
+            a.push(0)?;
+            a.call(l.import(1))
+        },
+        |_, _, _| Ok(()),
+    );
+    let stats = idle_lockstep("is_iconic_wait", image);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// A wait on the clock that asks IDirectDrawSurface::IsLost of the
+/// primary surface in every pass, as Biosys's menus do (#1306): IsLost
+/// changes nothing, so the passes are skipped and come out as when they
+/// all run.
+#[test]
+fn a_wait_that_asks_is_lost_is_skipped() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("DDRAW.DLL", &["DirectDrawCreate"]),
+    ];
+    // DirectDraw at 0, the surface at 4, its DDSURFACEDESC at 0x10:
+    // DDSD_CAPS and DDSCAPS_PRIMARYSURFACE.
+    let mut data = vec![0u8; 0x80];
+    data[0x10..0x14].copy_from_slice(&108u32.to_le_bytes());
+    data[0x14..0x18].copy_from_slice(&1u32.to_le_bytes());
+    data[0x78..0x7C].copy_from_slice(&0x200u32.to_le_bytes());
+    let image = poll_wait(
+        imports,
+        &data,
+        20,
+        |a, l, fail| {
+            // DirectDrawCreate(NULL, &dd, NULL).
+            a.push(0)?;
+            a.push(l.at(0) as i32)?;
+            a.push(0)?;
+            a.call(l.import(1))?;
+            fail_unless_ok(a, fail, 1)?;
+            // SetCooperativeLevel(dd, NULL, DDSCL_NORMAL).
+            com_call(a, l, 0, 20, &[0, 8])?;
+            fail_unless_ok(a, fail, 2)?;
+            // CreateSurface(dd, &desc, &surface, NULL).
+            com_call(a, l, 0, 6, &[l.at(0x10) as i32, l.at(4) as i32, 0])?;
+            fail_unless_ok(a, fail, 3)
+        },
+        |a, l| com_call(a, l, 4, 24, &[]),
+        |a, l, fail| {
+            com_call(a, l, 4, 24, &[])?;
+            fail_unless_ok(a, fail, 4)
+        },
+    );
+    let stats = idle_lockstep("is_lost_wait", image);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// A DirectSound program's data: DirectSound at 0, the buffer at 4, the
+/// status at 8, a DSBUFFERDESC at 0x10 for `bytes` of 16-bit mono at
+/// 22050 Hz with DSBCAPS_GLOBALFOCUS, its WAVEFORMATEX at 0x30 (the
+/// program points the description at it).
+fn status_wait_data(bytes: u32) -> Vec<u8> {
+    let mut data = vec![0u8; 0x80];
+    let mut put = |at: usize, value: u32| data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    put(0x10, 20);
+    put(0x14, 0x8000);
+    put(0x18, bytes);
+    put(0x30, 1 | (1 << 16));
+    put(0x34, 22050);
+    put(0x38, 44100);
+    put(0x3C, 2 | (16 << 16));
+    data
+}
+
+/// A wait on the clock that asks IDirectSoundBuffer::GetStatus of a
+/// buffer in every pass, as Biosys's close-ups do (#1306), the buffer
+/// played once first if `play`: a stopped buffer's status changes only
+/// with a call, a playing one's when it ends, so the passes are skipped,
+/// up to the end of the sound if it plays, and come out as when they all
+/// run. The buffer is stopped at the end either way.
+fn status_wait(test: &str, play: bool) -> rust_dos::idle::IdleStats {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("DSOUND.DLL", &["DirectSoundCreate"]),
+    ];
+    // 10 ms of sound, inside a wait of 20 ms.
+    let image = poll_wait(
+        imports,
+        &status_wait_data(442),
+        20,
+        |a, l, fail| {
+            a.mov(dword_ptr(l.at(0x20)), l.at(0x30) as u32)?;
+            // DirectSoundCreate(NULL, &ds, NULL).
+            a.push(0)?;
+            a.push(l.at(0) as i32)?;
+            a.push(0)?;
+            a.call(l.import(1))?;
+            fail_unless_ok(a, fail, 1)?;
+            // SetCooperativeLevel(ds, NULL, DSSCL_NORMAL).
+            com_call(a, l, 0, 6, &[0, 1])?;
+            fail_unless_ok(a, fail, 2)?;
+            // CreateSoundBuffer(ds, &desc, &buffer, NULL).
+            com_call(a, l, 0, 3, &[l.at(0x10) as i32, l.at(4) as i32, 0])?;
+            fail_unless_ok(a, fail, 3)?;
+            if play {
+                // Play(buffer, 0, 0, 0): once, no loop.
+                com_call(a, l, 4, 12, &[0, 0, 0])?;
+                fail_unless_ok(a, fail, 4)?;
+            }
+            Ok(())
+        },
+        |a, l| {
+            // GetStatus(buffer, &status).
+            com_call(a, l, 4, 9, &[l.at(8) as i32])
+        },
+        |a, l, fail| {
+            a.mov(eax, dword_ptr(l.at(8)))?;
+            fail_unless_ok(a, fail, 5)
+        },
+    );
+    idle_lockstep(test, image)
+}
+
+#[test]
+fn a_wait_that_asks_a_stopped_buffers_status_is_skipped() {
+    let stats = status_wait("stopped_status_wait", false);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+#[test]
+fn a_wait_that_asks_a_playing_buffers_status_is_skipped_to_its_end() {
+    let stats = status_wait("playing_status_wait", true);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// A wait on the clock as MFC's CWinThread::Run waits for a message
+/// (#1308): it counts its passes in EDI and hands the count to its
+/// OnIdle, which keeps it in ESI and compares it with 0 and 1, runs
+/// `body` with it there, and returns TRUE. GetTickCount and IsIconic are
+/// its imports.
+fn idle_count_wait(
+    body: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("USER32.DLL", &["IsIconic"]),
+    ];
+    program(BASE, false, imports, &[0; 16], |a, l| {
+        let mut wait = a.create_label();
+        let mut on_idle = a.create_label();
+        let mut later = a.create_label();
+        a.push(ebx)?;
+        a.push(esi)?;
+        a.push(edi)?;
+        a.xor(edi, edi)?;
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 20))?;
+        a.set_label(&mut wait)?;
+        a.push(edi)?;
+        a.mov(eax, edi)?;
+        a.inc(edi)?;
+        a.call(on_idle)?;
+        // (As MFC asks what OnIdle returned.)
+        a.test(eax, eax)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.mov(dword_ptr(l.data), edi)?;
+        a.mov(eax, 0x2A)?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.pop(ebx)?;
+        a.ret()?;
+        // OnIdle(count), as CWinApp's: the first passes differ.
+        a.set_label(&mut on_idle)?;
+        a.push(esi)?;
+        a.mov(esi, dword_ptr(esp + 8))?;
+        a.test(esi, esi)?;
+        a.jg(later)?;
+        a.inc(dword_ptr(l.at(4)))?;
+        a.set_label(&mut later)?;
+        a.cmp(esi, 1)?;
+        body(a, l)?;
+        a.mov(eax, 1)?;
+        a.pop(esi)?;
+        a.ret_1(4)
+    })
+}
+
+/// MFC's idle loop with an OnIdle that asks IsIconic: the count in EDI
+/// and its copies on the stack and in ESI change from pass to pass, but
+/// only compares with 0 and 1 look at them, so the passes are skipped,
+/// with the count moved on as the passes would have.
+#[test]
+fn a_wait_that_counts_its_passes_in_a_register_is_skipped() {
+    let image = idle_count_wait(|a, l| {
+        a.push(0)?;
+        a.call(l.import(1))
+    });
+    let stats = idle_lockstep("register_count_wait", image);
+    // A millisecond here is a few passes, too few for a proof over counts
+    // to pay for itself again and again (`costly`), so the head backs off
+    // after the first proofs.
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// The count handed to a built-in function as its argument: what it does
+/// may depend on it, and the passes aren't skipped.
+#[test]
+fn a_wait_whose_count_is_a_calls_argument_is_not_skipped() {
+    let image = idle_count_wait(|a, l| {
+        a.push(esi)?;
+        a.call(l.import(1))
+    });
+    let stats = idle_lockstep("register_count_argument_wait", image);
+    assert_eq!(stats.skipped, 0, "{stats:?}");
+}
+
+/// The count's lowest bit chooses what a pass does, as an animation that
+/// runs from OnIdle would: no two passes in a row run the same, and none
+/// are skipped.
+#[test]
+fn a_wait_whose_count_chooses_what_it_does_is_not_skipped() {
+    let image = idle_count_wait(|a, l| {
+        let mut even = a.create_label();
+        a.test(esi, 1)?;
+        a.jz(even)?;
+        a.inc(dword_ptr(l.at(8)))?;
+        a.set_label(&mut even)?;
+        a.push(0)?;
+        a.call(l.import(1))
+    });
+    let stats = idle_lockstep("register_count_parity_wait", image);
+    assert_eq!(stats.skipped, 0, "{stats:?}");
 }
 
 /// The program, waiting on the clock, asks where a file is and seeks to
@@ -1433,6 +2149,59 @@ fn a_wait_that_asks_where_a_file_is_and_counts_its_passes_is_skipped() {
     let stats = idle_lockstep("file_count_wait", file_and_table_wait(false, true));
     assert!(stats.proofs >= 10, "{stats:?}");
     assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// The program, waiting on the clock, reads 128 bytes of T.EXE from its
+/// end in every pass, as Smacker's read-ahead does once a movie's file is
+/// all read, and with `count` counts its passes in memory. It returns 2Ah
+/// if every read read nothing.
+fn end_of_file_wait(count: bool) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["GetTickCount", "CreateFileA", "SetFilePointer", "ReadFile"],
+    )];
+    let mut data = vec![0; 0x200];
+    put(&mut data, 0x10, b"T.EXE\0");
+    program(BASE, false, imports, &data, |a, l| {
+        use Arg::{Esi, I};
+        let mut wait = a.create_label();
+        let mut fail = a.create_label();
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let open = [at(0x10), I(0x8000_0000), I(1), I(0), I(3), I(0x80), I(0)];
+        call_with(a, l.import(1), &open)?;
+        a.mov(esi, eax)?;
+        call_with(a, l.import(2), &[Esi, I(0), I(0), I(2)])?;
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 20))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.mov(edi, eax)?;
+        call_with(a, l.import(3), &[Esi, at(0x100), I(0x80), at(0x20), I(0)])?;
+        a.cmp(dword_ptr(l.at(0x20)), 0)?;
+        a.jne(fail)?;
+        if count {
+            a.inc(dword_ptr(l.data))?;
+        }
+        a.cmp(edi, ebx)?;
+        a.jb(wait)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, 1)?;
+        a.ret()
+    })
+}
+
+/// A read at the end of a file reads nothing and changes nothing: a wait
+/// that makes one in every pass is skipped, also when it counts its
+/// passes, as ReadFile reads nothing but its arguments.
+#[test]
+fn a_wait_that_reads_at_the_end_of_a_file_is_skipped() {
+    for (test, count) in [("eof_wait", false), ("eof_count_wait", true)] {
+        let stats = idle_lockstep(test, end_of_file_wait(count));
+        assert!(stats.proofs >= 10, "{test}: {stats:?}");
+        assert!(stats.skipped > 0, "{test}: {stats:?}");
+    }
 }
 
 /// LoadAcceleratorsA reads the table's name and the program's resources,
@@ -1620,20 +2389,23 @@ fn a_program_uses_the_heap_tls_environment_and_exports() {
 /// 7, or 8 when its command line starts with a quote, so 71h is the
 /// program started, waited for and its exit code read.
 fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
-    let child_program = {
-        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetCommandLineA", "ExitProcess"])];
-        program(BASE, false, imports, &[0; 4], |a, l| {
-            a.call(l.import(0))?;
-            a.cmp(byte_ptr(eax), b'"' as i32)?;
-            a.sete(al)?;
-            a.movzx(eax, al)?;
-            a.add(eax, 7)?;
-            a.push(eax)?;
-            a.call(l.import(1))?;
-            a.int3()
-        })
-    };
-    start_program(test, line, child, child_program, dirs)
+    start_program(test, line, child, child_program(), dirs)
+}
+
+/// `start_child`'s C.EXE: it ends with 7, or 8 when its command line
+/// starts with a quote.
+fn child_program() -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetCommandLineA", "ExitProcess"])];
+    program(BASE, false, imports, &[0; 4], |a, l| {
+        a.call(l.import(0))?;
+        a.cmp(byte_ptr(eax), b'"' as i32)?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        a.add(eax, 7)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.int3()
+    })
 }
 
 /// `start_child`, with `program_bytes` for C.EXE: T.EXE's exit code is 1
@@ -1653,31 +2425,107 @@ fn start_program_from(
     program_bytes: Vec<u8>,
     dirs: &[&str],
 ) -> u8 {
+    start_programs(test, parent_at, line, vec![(child, program_bytes)], dirs)
+}
+
+/// `start_program_from`, with the files `files` (each a path and its
+/// bytes) in place of C.EXE.
+fn start_programs(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    files: Vec<(&str, Vec<u8>)>,
+    dirs: &[&str],
+) -> u8 {
+    start_programs_in(test, parent_at, line, None, files, dirs)
+}
+
+/// `start_programs`, with `directory` as CreateProcessA's
+/// lpCurrentDirectory. When CreateProcessA fails, T.EXE ends with the
+/// low byte of GetLastError's code instead.
+fn start_programs_in(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    directory: Option<&str>,
+    files: Vec<(&str, Vec<u8>)>,
+    dirs: &[&str],
+) -> u8 {
+    start_programs_using(test, parent_at, line, directory, 0, files, dirs)
+}
+
+/// `start_programs_in`, with a parent that first commits `used` bytes
+/// (VirtualAlloc), writes to each of their pages and releases them.
+fn start_programs_using(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    directory: Option<&str>,
+    used: u32,
+    files: Vec<(&str, Vec<u8>)>,
+    dirs: &[&str],
+) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",
         "GetExitCodeProcess",
         "CloseHandle",
         "ExitProcess",
+        "GetLastError",
+        "VirtualAlloc",
+        "VirtualFree",
     ];
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
     // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
-    // the exit code at 0xA0.
+    // the exit code at 0xA0, the directory at 0xB0.
     let mut data = line.as_bytes().to_vec();
     assert!(data.len() < 0x40);
-    data.resize(0xB0, 0);
+    data.resize(0xF0, 0);
     data[0x40] = 68;
+    if let Some(directory) = directory {
+        assert!(directory.len() < 0x40);
+        data[0xB0..0xB0 + directory.len()].copy_from_slice(directory.as_bytes());
+    }
     let parent = program(BASE, false, imports, &data, |a, l| {
         let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        if used > 0 {
+            // MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE.
+            a.push(4)?;
+            a.push(0x3000)?;
+            a.push(used as i32)?;
+            a.push(0)?;
+            a.call(f("VirtualAlloc"))?;
+            a.mov(edi, eax)?;
+            a.mov(ecx, used / 0x1000)?;
+            let mut touch = a.create_label();
+            a.set_label(&mut touch)?;
+            a.mov(byte_ptr(eax), 1)?;
+            a.add(eax, 0x1000)?;
+            a.dec(ecx)?;
+            a.jnz(touch)?;
+            // MEM_RELEASE.
+            a.push(0x8000)?;
+            a.push(0)?;
+            a.push(edi)?;
+            a.call(f("VirtualFree"))?;
+        }
         a.push(l.at(0x90) as i32)?;
         a.push(l.at(0x40) as i32)?;
-        for _ in 0..6 {
+        a.push(directory.map_or(0, |_| l.at(0xB0) as i32))?;
+        for _ in 0..5 {
             a.push(0)?;
         }
         a.push(l.at(0) as i32)?;
         a.push(0)?;
         a.call(f("CreateProcessA"))?;
         a.mov(ebx, eax)?;
+        let mut started = a.create_label();
+        a.test(eax, eax)?;
+        a.jnz(started)?;
+        a.call(f("GetLastError"))?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.set_label(&mut started)?;
         a.push(-1)?;
         a.push(dword_ptr(l.at(0x90)))?;
         a.call(f("WaitForSingleObject"))?;
@@ -1703,7 +2551,7 @@ fn start_program_from(
     for dir in dirs {
         fs::create_dir_all(base.join(dir)).unwrap();
     }
-    for (at, bytes) in [(parent_at, parent), (child, program_bytes)] {
+    for (at, bytes) in [(parent_at, parent)].into_iter().chain(files) {
         let file = base.join(at.replace('\\', "/"));
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(file, bytes).unwrap();
@@ -1743,6 +2591,530 @@ fn a_program_starts_a_windows_3_1_program_and_waits_for_it() {
     let child = win16::program(&code, win16::CODE);
     let code = start_program("child_win16", "C.EXE an argument", "C.EXE", child, &[]);
     assert_eq!(code, 0x71);
+}
+
+/// CreateProcessA of a DOS program, which Windows 98 runs in a DOS box:
+/// it succeeds, the process handle is signaled when the program ends,
+/// and GetExitCodeProcess gives its exit code. The child (a COM file)
+/// ends with 7 when its command tail is the line's arguments, " an
+/// argument", else 9; so 71h.
+#[test]
+fn a_program_starts_a_dos_program_and_waits_for_it() {
+    let child = vec![
+        0xA0, 0x80, 0x00, // mov al,[80h]: the tail's length
+        0x3C, 0x0C, // cmp al,12
+        0xB0, 0x07, // mov al,7
+        0x74, 0x02, // je end
+        0xB0, 0x09, // mov al,9
+        0xB4, 0x4C, 0xCD, 0x21, // end: mov ah,4Ch; int 21h
+    ];
+    let code = start_program("child_dos", "C.COM an argument", "C.COM", child, &[]);
+    assert_eq!(code, 0x71);
+}
+
+/// CreateProcessA of a batch file: Windows 98 runs it with COMMAND.COM
+/// /C in a DOS box, and the programs it starts see its arguments. The
+/// batch file starts the DOS program D.COM with its first argument,
+/// which writes C:\MARK.TXT (`win16::dos_marker`).
+#[test]
+fn a_program_starts_a_batch_file() {
+    let batch = b"@D.COM %1\r\n".to_vec();
+    let files = vec![("C.BAT", batch), ("D.COM", win16::dos_marker())];
+    let code = start_programs("child_batch", "T.EXE", "C.BAT ARG", files, &[]);
+    let base = PathBuf::from("target/test_win32/child_batch");
+    // CreateProcessA's TRUE and the wait's WAIT_OBJECT_0.
+    assert_eq!(code & 0x0F, 0x01);
+    let written = fs::read(base.join("MARK.TXT")).unwrap();
+    assert_eq!(&written[2..], b" ARG");
+}
+
+/// CreateProcessA of a PIF: Windows 98 runs the program the PIF names,
+/// in the PIF's working folder, with the parameters of its 386 enhanced
+/// record in place of those of its basic section (as Wine's winevdm
+/// reads them). The program, a batch file named without a folder, is
+/// found in the PIF's folder, and the DOS program it starts writes
+/// MARK.TXT in its current folder with its command tail.
+#[test]
+fn a_program_starts_a_pif() {
+    let pif = win16::pif("Z.BAT", "C:\\GAME\\RUN", "/B", "/E");
+    let files = vec![
+        ("GAME\\Z.PIF", pif),
+        ("GAME\\Z.BAT", b"@C:\\GAME\\MARK.COM %1\r\n".to_vec()),
+        ("GAME\\MARK.COM", win16::dos_folder_marker()),
+    ];
+    let line = "C:\\GAME\\Z.PIF";
+    let code = start_programs("child_pif", "T.EXE", line, files, &["GAME/RUN"]);
+    // CreateProcessA's TRUE and the wait's WAIT_OBJECT_0.
+    assert_eq!(code & 0x0F, 0x01);
+    let base = PathBuf::from("target/test_win32/child_pif");
+    let written = fs::read(base.join("GAME/RUN/MARK.TXT")).unwrap();
+    assert_eq!(written, b" /E");
+}
+
+/// CreateProcessA with lpCurrentDirectory starts a DOS program in that
+/// folder, and fails with ERROR_DIRECTORY for a folder that isn't
+/// there.
+#[test]
+fn a_dos_program_starts_in_the_current_directory_it_is_given() {
+    let files = vec![("MARK.COM", win16::dos_folder_marker())];
+    let line = "C:\\MARK.COM X";
+    let sub = Some("C:\\SUB");
+    let code = start_programs_in("child_dos_dir", "T.EXE", line, sub, files, &["SUB"]);
+    // 5 from the program, WAIT_OBJECT_0 and TRUE.
+    assert_eq!(code, 0x51);
+    let base = PathBuf::from("target/test_win32/child_dos_dir");
+    assert_eq!(fs::read(base.join("SUB/MARK.TXT")).unwrap(), b" X");
+    assert!(!base.join("MARK.TXT").exists());
+    let files = vec![("MARK.COM", win16::dos_folder_marker())];
+    let none = Some("C:\\NONE");
+    let code = start_programs_in("child_dos_no_dir", "T.EXE", line, none, files, &[]);
+    // ERROR_DIRECTORY's low byte (267, 10Bh).
+    assert_eq!(code, 0x0B);
+}
+
+/// CreateProcessA of a Windows program with lpCurrentDirectory: a folder
+/// that is there lets it start as without one (#1611: it starts in its
+/// parent's folder for now), and one that isn't fails with
+/// ERROR_DIRECTORY before the program is looked at, for a Win32 and a
+/// Windows 3.1 child alike, as Windows 98's CreateProcessA does.
+#[test]
+fn a_windows_program_given_a_missing_current_directory_does_not_start() {
+    let line = "C.EXE an argument";
+    let sub = Some("C:\\SUB");
+    let files = vec![("C.EXE", child_program())];
+    let code = start_programs_in("child_win32_dir", "T.EXE", line, sub, files, &["SUB"]);
+    assert_eq!(code, 0x71);
+    let none = Some("C:\\NONE");
+    let files = vec![("C.EXE", child_program())];
+    let code = start_programs_in("child_win32_no_dir", "T.EXE", line, none, files, &[]);
+    // ERROR_DIRECTORY's low byte (267, 10Bh).
+    assert_eq!(code, 0x0B);
+    let mut code = win16::Code::new();
+    code.emit(&[0xB0, 0x07]).exit_al(); // mov al,7
+    let files = vec![("C.EXE", win16::program(&code, win16::CODE))];
+    let code = start_programs_in("child_win16_no_dir", "T.EXE", line, none, files, &[]);
+    assert_eq!(code, 0x0B);
+}
+
+/// A DOS program (a COM file) that changes what Windows 98 keeps apart
+/// for each DOS machine and leaves it so: the FPU's control word, the
+/// mouse driver's event handler, the master PIC's mask (IRQ 6 masked),
+/// the timer's rate (1000 Hz) and DOS's memory strategy. It counts down
+/// for a while, then ends with 7.
+fn dos_machine_changer() -> Vec<u8> {
+    let mut code = vec![
+        0xDB, 0xE3, // fninit
+        0xD9, 0x2E, 0x00, 0x00, // fldcw [cw]
+        0xB8, 0x0C, 0x00, // mov ax,000Ch
+        0xB9, 0x7F, 0x00, // mov cx,007Fh
+        0x0E, 0x07, // push cs; pop es
+        0xBA, 0x00, 0x00, // mov dx,handler
+        0xCD, 0x33, // int 33h
+        0xE4, 0x21, // in al,21h
+        0x0C, 0x40, // or al,40h
+        0xE6, 0x21, // out 21h,al
+        0xB0, 0x36, // mov al,36h
+        0xE6, 0x43, // out 43h,al
+        0xB8, 0xA9, 0x04, // mov ax,1193
+        0xE6, 0x40, // out 40h,al
+        0x88, 0xE0, // mov al,ah
+        0xE6, 0x40, // out 40h,al
+        0xB8, 0x01, 0x58, // mov ax,5801h
+        0xBB, 0x02, 0x00, // mov bx,0002h: last fit
+        0xCD, 0x21, // int 21h
+        0xBB, 0x04, 0x00, // mov bx,4
+        0xB9, 0xFF, 0xFF, // outer: mov cx,0FFFFh
+        0xE2, 0xFE, // inner: loop inner
+        0x4B, // dec bx
+        0x75, 0xF8, // jnz outer
+        0xB8, 0x07, 0x4C, // mov ax,4C07h
+        0xCD, 0x21, // int 21h
+    ];
+    let handler = 0x100 + code.len() as u16;
+    code.push(0xCB); // retf
+    let cw = 0x100 + code.len() as u16;
+    code.extend_from_slice(&0x0F7Fu16.to_le_bytes());
+    code[4..6].copy_from_slice(&cw.to_le_bytes());
+    code[15..17].copy_from_slice(&handler.to_le_bytes());
+    code
+}
+
+/// T.EXE sets the FPU's control word to 027Fh, starts C.COM
+/// (`dos_machine_changer`) with CreateProcessA, waits for it and ends
+/// with 1 for CreateProcessA's TRUE, the wait's result shifted left by
+/// one, 8 if its control word changed, and the child's exit code
+/// shifted left by four: 71h. With `reload`, a state saved while C.COM
+/// runs is loaded once the run has ended, and runs to the end again.
+/// Each run checks what C.COM changed when it has ended.
+fn run_dos_machine_changer(test: &str, reload: bool) {
+    const CW: u16 = 0x027F;
+    let names: &[&str] = &[
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
+    // the exit code at 0xA0, the control words at 0xA4 and 0xA6.
+    let mut data = b"C.COM".to_vec();
+    data.resize(0xB0, 0);
+    data[0x40] = 68;
+    data[0xA4..0xA6].copy_from_slice(&CW.to_le_bytes());
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.fldcw(word_ptr(l.at(0xA4)))?;
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        a.mov(ebx, eax)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.shl(eax, 1)?;
+        a.or(ebx, eax)?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("GetExitCodeProcess"))?;
+        a.fnstcw(word_ptr(l.at(0xA6)))?;
+        a.cmp(word_ptr(l.at(0xA6)), CW as i32)?;
+        a.setne(al)?;
+        a.movzx(eax, al)?;
+        a.shl(eax, 3)?;
+        a.or(ebx, eax)?;
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        a.shl(eax, 4)?;
+        a.or(eax, ebx)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let files = [("T.EXE", parent), ("C.COM", dos_machine_changer())];
+    let mut cpu = machine_with(test, &files);
+    let seen = std::rc::Rc::new(std::cell::Cell::new((false, false)));
+    let hook = seen.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        let (started, ended) = hook.get();
+        hook.set((
+            started || line.contains("C.COM starts"),
+            ended || line.contains("C.COM ended with exit code 7"),
+        ));
+    }));
+    let before = (
+        cpu.bus.pic.master.imr,
+        cpu.bus.pit0.reload(),
+        cpu.bus.mouse.callback_cs,
+        cpu.alloc_strategy,
+    );
+    // Runs until C.COM has ended, then checks what it changed is back,
+    // then runs to the end: T.EXE's exit code.
+    let finish = |cpu: &mut Cpu| {
+        let mut batches = 0;
+        while !seen.get().1 {
+            batches += 1;
+            assert!(batches < 2_000_000, "C.COM didn't end: {}", printed(cpu));
+            cpu.bus.start_batch(cpu.bus.clock.icount + 1);
+            run_batch(cpu, &mut NoHook, false);
+        }
+        let after = (
+            cpu.bus.pic.master.imr,
+            cpu.bus.pit0.reload(),
+            cpu.bus.mouse.callback_cs,
+            cpu.alloc_strategy,
+        );
+        assert_eq!(after, before, "the machine as C.COM left it");
+        assert!(run_to_exit(cpu, 200), "{}", printed(cpu));
+        cpu.errorlevel
+    };
+    // Up to C.COM's count.
+    while !seen.get().0 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 1_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+    }
+    cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+    run_batch(&mut cpu, &mut NoHook, false);
+    assert!(!seen.get().1, "C.COM ended before the state");
+    let state = reload.then(|| rust_dos::savestate::machine::save(&cpu));
+    assert_eq!(finish(&mut cpu), 0x71);
+    if let Some(state) = state {
+        rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+        seen.set((true, false));
+        assert_eq!(finish(&mut cpu), 0x71, "after the load");
+    }
+}
+
+/// What a DOS program changes of the machine that Windows 98 keeps for
+/// its DOS machine alone is as it was for the program that started it
+/// when it ends: the thread's FPU, the PIC's masks, the timer's rate,
+/// the mouse driver's event handler and DOS's memory strategy.
+#[test]
+fn a_dos_program_leaves_the_machine_as_it_found_it() {
+    run_dos_machine_changer("dos_machine", false);
+}
+
+/// A state saved while a DOS program a Windows program started runs
+/// loads with it running, and it ends as it would have.
+#[test]
+fn a_state_saved_while_a_dos_program_runs_goes_on_with_it() {
+    run_dos_machine_changer("dos_machine_state", true);
+}
+
+/// A DOS program that asks the XMS driver for its free memory (function
+/// 88h, as MEM /C does) and writes the largest free block and the total
+/// free, in KB, to XMS.BIN: exit code 5, or 6 if there is no XMS driver
+/// or the file can't be made.
+fn xms_reporter() -> Vec<u8> {
+    const NAME: u16 = 0x0180;
+    const FREE: u16 = 0x0190;
+    const ENTRY: u16 = 0x01A0;
+    let assemble = || -> Result<Vec<u8>, IcedError> {
+        let mut a = CodeAssembler::new(16)?;
+        let mut fail = a.create_label();
+        a.mov(ax, 0x4300)?;
+        a.int(0x2F)?;
+        a.cmp(al, 0x80)?;
+        a.jne(fail)?;
+        a.mov(ax, 0x4310)?;
+        a.int(0x2F)?;
+        a.mov(word_ptr(ENTRY), bx)?;
+        a.mov(word_ptr(ENTRY + 2), es)?;
+        a.mov(ah, 0x88)?;
+        // call far [ENTRY]
+        let [lo, hi] = ENTRY.to_le_bytes();
+        a.db(&[0xFF, 0x1E, lo, hi])?;
+        a.mov(dword_ptr(FREE), eax)?;
+        a.mov(dword_ptr(FREE + 4), edx)?;
+        a.mov(ah, 0x3C)?;
+        a.xor(cx, cx)?;
+        a.mov(dx, NAME as u32)?;
+        a.int(0x21)?;
+        a.jc(fail)?;
+        a.mov(bx, ax)?;
+        a.mov(ah, 0x40)?;
+        a.mov(cx, 8)?;
+        a.mov(dx, FREE as u32)?;
+        a.int(0x21)?;
+        a.mov(ah, 0x3E)?;
+        a.int(0x21)?;
+        a.mov(ax, 0x4C05)?;
+        a.int(0x21)?;
+        a.set_label(&mut fail)?;
+        a.mov(ax, 0x4C06)?;
+        a.int(0x21)?;
+        a.assemble(0x100)
+    };
+    let mut code = assemble().unwrap();
+    assert!(code.len() <= (NAME - 0x100) as usize);
+    code.resize((NAME - 0x100) as usize, 0x90);
+    code.extend_from_slice(b"XMS.BIN\0");
+    code
+}
+
+/// The largest free block of XMS and the XMS free, in KB, that a DOS
+/// program a Windows program starts finds, after the Windows program
+/// used and released `used` bytes of memory.
+fn xms_free_after(test: &str, used: u32) -> (u32, u32) {
+    let files = vec![("XMS.COM", xms_reporter())];
+    let code = start_programs_using(test, "T.EXE", "C:\\XMS.COM", None, used, files, &[]);
+    // 5 from the program, WAIT_OBJECT_0 and TRUE.
+    assert_eq!(code, 0x51);
+    let base = PathBuf::from("target/test_win32").join(test);
+    let report = fs::read(base.join("XMS.BIN")).unwrap();
+    let word = |at: usize| u32::from_le_bytes(report[at..at + 4].try_into().unwrap());
+    (word(0), word(4))
+}
+
+/// A DOS program a Windows program starts gets the memory the Windows
+/// programs have free as XMS, as in a DOS box of Windows 98, where the
+/// VMM gives it from the memory the system has: memory a Windows program
+/// used and gave back counts as well as memory never used. 4 MB used and
+/// released before CreateProcessA leaves the XMS the DOS program finds
+/// as it was without them (a page table or two of the system's may
+/// stay).
+#[test]
+fn a_dos_program_gets_the_memory_windows_programs_gave_back_as_xms() {
+    let (largest, total) = xms_free_after("dos_xms_unused", 0);
+    assert!(largest >= 8 * 1024, "only {largest} KB of XMS");
+    let (largest_after, total_after) = xms_free_after("dos_xms_given_back", 0x40_0000);
+    assert!(
+        largest_after + 64 >= largest,
+        "{largest_after} KB, {largest} KB before"
+    );
+    assert!(
+        total_after + 64 >= total,
+        "{total_after} KB, {total} KB before"
+    );
+}
+
+/// The pages a Windows program keeps while a DOS program it starts runs
+/// stay its own, with their bytes, wherever the system put them to lend
+/// the memory under them (`memory::compact`): T.EXE fills a view of a
+/// mapping of the swap file and, above 2 MB it touches and releases, a
+/// block it may run code in, each page with its address, and calls a
+/// function in that block. It then starts XMS.COM (`xms_reporter`),
+/// waits for it, and ends with 1 for CreateProcessA's TRUE, 2 if the
+/// block's pages read back right, 4 if the view's do, 8 if the function
+/// returns what it did, and the child's exit code shifted left by four:
+/// 5Fh. The XMS the child finds is what it finds when no memory was used
+/// and released, less what T.EXE still holds: the block moved down into
+/// the pages released, which the DOS program got.
+#[test]
+fn a_programs_pages_read_back_after_a_dos_program_got_the_memory_under_them() {
+    const RELEASED: i32 = 0x20_0000;
+    const KEPT: i32 = 0x1_0000;
+    const RESULT: i32 = 0x1234_5678;
+    let names: &[&str] = &[
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "VirtualAlloc",
+        "VirtualFree",
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
+    // the exit code at 0xA0, the view's address at 0xB0 and the block's
+    // at 0xB4.
+    let mut data = b"C:\\XMS.COM".to_vec();
+    data.resize(0xC0, 0);
+    data[0x40] = 68;
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        // Each of the `KEPT / 4096` pages from eax on gets its address.
+        let fill = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.mov(ecx, KEPT as u32 / 0x1000)?;
+            let mut page = a.create_label();
+            a.set_label(&mut page)?;
+            a.mov(dword_ptr(eax), eax)?;
+            a.add(eax, 0x1000)?;
+            a.dec(ecx)?;
+            a.jnz(page)
+        };
+        // `bit` in ebx if each of those pages from eax on still has it.
+        let check = |a: &mut CodeAssembler, bit: u32| -> Result<(), IcedError> {
+            a.mov(edx, bit)?;
+            a.mov(ecx, KEPT as u32 / 0x1000)?;
+            let mut page = a.create_label();
+            let mut same = a.create_label();
+            a.set_label(&mut page)?;
+            a.cmp(dword_ptr(eax), eax)?;
+            a.je(same)?;
+            a.xor(edx, edx)?;
+            a.set_label(&mut same)?;
+            a.add(eax, 0x1000)?;
+            a.dec(ecx)?;
+            a.jnz(page)?;
+            a.or(ebx, edx)
+        };
+        // A mapping of the swap file (PAGE_READWRITE), its view
+        // (FILE_MAP_WRITE), filled.
+        a.push(0)?;
+        a.push(KEPT)?;
+        a.push(0)?;
+        a.push(4)?;
+        a.push(0)?;
+        a.push(-1)?;
+        a.call(f("CreateFileMappingA"))?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(2)?;
+        a.push(eax)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(dword_ptr(l.at(0xB0)), eax)?;
+        fill(a)?;
+        // The memory released later: MEM_COMMIT | MEM_RESERVE,
+        // PAGE_READWRITE, each page touched.
+        a.push(4)?;
+        a.push(0x3000)?;
+        a.push(RELEASED)?;
+        a.push(0)?;
+        a.call(f("VirtualAlloc"))?;
+        a.mov(edi, eax)?;
+        a.mov(ecx, RELEASED as u32 / 0x1000)?;
+        let mut touch = a.create_label();
+        a.set_label(&mut touch)?;
+        a.mov(byte_ptr(eax), 1)?;
+        a.add(eax, 0x1000)?;
+        a.dec(ecx)?;
+        a.jnz(touch)?;
+        // The block kept, PAGE_EXECUTE_READWRITE, filled, with
+        // `mov eax,RESULT; ret` in its last page, which runs once.
+        a.push(0x40)?;
+        a.push(0x3000)?;
+        a.push(KEPT)?;
+        a.push(0)?;
+        a.call(f("VirtualAlloc"))?;
+        a.mov(dword_ptr(l.at(0xB4)), eax)?;
+        fill(a)?;
+        a.mov(esi, dword_ptr(l.at(0xB4)))?;
+        a.add(esi, KEPT - 0x1000 + 0x100)?;
+        let [r0, r1, r2, r3] = RESULT.to_le_bytes();
+        a.mov(dword_ptr(esi), u32::from_le_bytes([0xB8, r0, r1, r2]))?;
+        a.mov(dword_ptr(esi + 4), u32::from_le_bytes([r3, 0xC3, 0, 0]))?;
+        a.call(esi)?;
+        // MEM_RELEASE.
+        a.push(0x8000)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("VirtualFree"))?;
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        a.mov(ebx, eax)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("GetExitCodeProcess"))?;
+        a.mov(eax, dword_ptr(l.at(0xB4)))?;
+        check(a, 2)?;
+        a.mov(eax, dword_ptr(l.at(0xB0)))?;
+        check(a, 4)?;
+        a.mov(esi, dword_ptr(l.at(0xB4)))?;
+        a.add(esi, KEPT - 0x1000 + 0x100)?;
+        a.call(esi)?;
+        a.cmp(eax, RESULT)?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        a.shl(eax, 3)?;
+        a.or(ebx, eax)?;
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        a.shl(eax, 4)?;
+        a.or(eax, ebx)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let test = "dos_xms_pages_kept";
+    let base = scratch(test, &[]);
+    fs::write(base.join("T.EXE"), parent).unwrap();
+    fs::write(base.join("XMS.COM"), xms_reporter()).unwrap();
+    let mut cpu = Cpu::new(base.clone());
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x5F);
+    let report = fs::read(base.join("XMS.BIN")).unwrap();
+    let total = u32::from_le_bytes(report[4..8].try_into().unwrap());
+    let (_, before) = xms_free_after("dos_xms_pages_kept_unused", 0);
+    // The view, the block and a page table or two.
+    assert!(total + 256 >= before, "{total} KB, {before} KB without");
 }
 
 #[test]
@@ -1791,6 +3163,125 @@ fn win_exec_starts_a_program_or_says_why_not() {
     assert!(cpu.load_executable("T.EXE", None));
     assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
     assert_eq!(cpu.errorlevel, 3, "{}", printed(&cpu));
+}
+
+/// LoadModule, which Windows 95 and 98 export and Smacker's UPX-packed
+/// SMACKW32.DLL imports: a name without an extension is a program's
+/// (C, for C.EXE), the child's command line is its path, a space and
+/// the LOADPARMS32's Pascal string, unquoted when the path has a space
+/// in it, its environment is the block's and its STARTUPINFOA has the
+/// show command at lpCmdShow. Over 31 for a program started, 2 for one
+/// not found.
+#[test]
+fn load_module_starts_a_program_or_says_why_not() {
+    let child = {
+        let names: &[&str] = &["GetStdHandle", "GetCommandLineA", "lstrlenA", "WriteFile"];
+        let more: &[&str] = &["ExitProcess", "GetEnvironmentStringsA", "GetStartupInfoA"];
+        let names = [names, more].concat();
+        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &names)];
+        // The count WriteFile writes at 0, the STARTUPINFOA at 4 and the
+        // text that shows its flags and show command at 0x48.
+        program(BASE, false, imports, &[0; 0x50], |a, l| {
+            a.push(STD_OUTPUT_HANDLE)?;
+            a.call(l.import(0))?;
+            a.mov(ebx, eax)?;
+            // The command line, then the environment's first string.
+            for get in [1, 5] {
+                a.call(l.import(get))?;
+                a.mov(esi, eax)?;
+                a.push(eax)?;
+                a.call(l.import(2))?;
+                a.push(0)?;
+                a.push(l.at(0) as i32)?;
+                a.push(eax)?;
+                a.push(esi)?;
+                a.push(ebx)?;
+                a.call(l.import(3))?;
+            }
+            // "S", then dwFlags' low byte and wShowWindow as digits.
+            a.push(l.at(4) as i32)?;
+            a.call(l.import(6))?;
+            a.mov(byte_ptr(l.at(0x48)), b'S' as i32)?;
+            for (field, at) in [(44, 0x49), (48, 0x4A)] {
+                a.mov(al, byte_ptr(l.at(4 + field)))?;
+                a.add(al, b'0' as i32)?;
+                a.mov(byte_ptr(l.at(at)), al)?;
+            }
+            a.push(0)?;
+            a.push(l.at(0) as i32)?;
+            a.push(3)?;
+            a.push(l.at(0x48) as i32)?;
+            a.push(ebx)?;
+            a.call(l.import(3))?;
+            a.push(0)?;
+            a.call(l.import(4))?;
+            a.int3()
+        })
+    };
+    let names: &[&str] = &["LoadModule", "Sleep", "ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The names at 0, 0x10 and 0x48, LOADPARMS32 at 0x20, the arguments
+    // at 0x30, the show command at 0x40 and the environment at 0x58.
+    let mut data = b"C".to_vec();
+    data.resize(0x10, 0);
+    data.extend_from_slice(b"NONE");
+    data.resize(0x40, 0);
+    data[0x30] = 11;
+    data[0x31..0x3C].copy_from_slice(b"an argument");
+    // SW_SHOWMINNOACTIVE, 7.
+    data.extend_from_slice(&[2, 0, 7, 0]);
+    data.resize(0x48, 0);
+    data.extend_from_slice(b"SUB DIR\\D");
+    data.resize(0x58, 0);
+    data.extend_from_slice(b"LM=1\0\0");
+    data.resize(0x60, 0);
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        for (field, value) in [(0x20, 0x58), (0x24, 0x30), (0x28, 0x40)] {
+            a.mov(dword_ptr(l.at(field)), l.at(value) as i32)?;
+        }
+        a.xor(ebx, ebx)?;
+        // Bit 0 and 1 for C and SUB DIR\D started, 2 for NONE not found.
+        for (name, bit) in [(0, 0), (0x48, 1), (0x10, 2)] {
+            a.push(l.at(0x20) as i32)?;
+            a.push(l.at(name) as i32)?;
+            a.call(f("LoadModule"))?;
+            if bit < 2 {
+                a.cmp(eax, 31)?;
+                a.seta(al)?;
+            } else {
+                a.cmp(eax, 2)?;
+                a.sete(al)?;
+            }
+            a.shl(al, bit)?;
+            a.or(bl, al)?;
+        }
+        // The children end before the parent.
+        a.push(100)?;
+        a.call(f("Sleep"))?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let files = &[("T.EXE", parent), ("C.EXE", child.clone())];
+    let base = scratch("load_module", files);
+    fs::create_dir_all(base.join("SUB DIR")).unwrap();
+    fs::write(base.join("SUB DIR/D.EXE"), child).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    let text = printed(&cpu);
+    assert_eq!(cpu.errorlevel, 7, "{text}");
+    assert!(text.contains("C:\\C.EXE an argument"), "{text}");
+    // Given as is, as Wine gives it with the program named.
+    assert!(text.contains("C:\\SUB DIR\\D.EXE an argument"), "{text}");
+    assert!(!text.contains('"'), "{text}");
+    assert_eq!(text.matches("LM=1").count(), 2, "{text}");
+    // STARTF_USESHOWWINDOW and the show command from lpCmdShow.
+    assert_eq!(text.matches("S17").count(), 2, "{text}");
 }
 
 /// A command line naming its program without quotes, in a folder with
@@ -2009,12 +3500,15 @@ fn slept_ms(test: &str, spin: bool) -> u8 {
     code
 }
 
-/// A Sleep ends when its time is up, to the millisecond, as on Windows
-/// 98: with no other thread to run, and with another of the program's
-/// threads spinning, which the sleeping thread takes the processor from
-/// when it wakes (the boost Windows gives a thread whose wait ends). It
-/// used to end at the timer's next interrupt, up to 55 ms later, and the
-/// spinning thread kept the processor until its turn was over.
+/// A Sleep ends when its time is up, to the millisecond: with no other
+/// thread to run, and with another of the program's threads spinning,
+/// which the sleeping thread takes the processor from when it wakes (the
+/// boost Windows gives a thread whose wait ends). It used to end at the
+/// timer's next interrupt, up to 55 ms later, and the spinning thread
+/// kept the processor until its turn was over. Windows 98 SE, measured,
+/// is slower to hand over to a thread of the spinning one's priority: a
+/// 30 ms Sleep there ended a median 9 ms late, at one of its 5 ms ticks,
+/// which the built-in Windows' scheduler doesn't follow yet (#1239).
 #[test]
 fn a_sleep_ends_on_time_also_while_another_thread_spins() {
     let slept = [slept_ms("sleep_alone", false), slept_ms("sleep_spinning", true)];
@@ -3483,18 +4977,107 @@ fn a_program_uses_heaps_global_memory_and_mappings() {
 /// Run T.EXE from a folder with `files` to its end, on a machine with
 /// `memory_mb` MB of RAM; its exit code and what it printed.
 fn run_files_in(test: &str, files: &[(&str, Vec<u8>)], memory_mb: usize) -> (u8, String) {
+    let (code, text, _) = run_files_counted(test, files, memory_mb);
+    (code, text)
+}
+
+/// `run_files_in`, with the paging counts of the run, as they were at
+/// the end of its last batch that ran before the built-in Windows gave
+/// its memory back and its counts went with it.
+fn run_files_counted(
+    test: &str,
+    files: &[(&str, Vec<u8>)],
+    memory_mb: usize,
+) -> (u8, String, rust_dos::win32::PagingCounts) {
     let mut cpu = Cpu::with_memory(scratch(test, files), memory_mb);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable("T.EXE", None));
-    assert!(
-        run_to_exit(&mut cpu, 400),
-        "the program didn't end: {:?}",
-        printed(&cpu)
-    );
+    let mut counts = rust_dos::win32::PagingCounts::default();
+    let mut ended = false;
+    for _ in 0..400 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        let stop = run_batch(&mut cpu, &mut NoHook, false);
+        if cpu.bus.win32.active() {
+            counts = rust_dos::win32::paging_counts(&cpu.bus);
+        }
+        if stop == StopReason::ShellReloaded {
+            ended = true;
+            break;
+        }
+    }
+    assert!(ended, "the program didn't end: {:?}", printed(&cpu));
     assert!(!cpu.bus.win32.active());
-    (cpu.errorlevel, printed(&cpu))
+    (cpu.errorlevel, printed(&cpu), counts)
+}
+
+/// A program whose image is larger than the machine's memory: 24 MB of
+/// initialized data on a 16 MB machine, as Shadow of the Horned Rat loads
+/// a DLL of 10 MB of bitmaps beside its own memory. The image's pages go
+/// out to the page file as the loader maps them, and come back as the
+/// program touches them: it finds each page's number there, writes a
+/// value to each page, and finds the values after the pages went out
+/// again. A bit each in the exit code.
+#[test]
+fn an_image_larger_than_memory_loads_and_its_pages_come_back() {
+    const PAGES: u32 = 24 * 256;
+    const MARK: u32 = 0x3C3C_0000;
+    let mut data = vec![0u8; (PAGES * 0x1000) as usize];
+    for page in 0..PAGES {
+        let at = (page * 0x1000) as usize;
+        data[at..at + 4].copy_from_slice(&page.to_le_bytes());
+    }
+    // The page at EAX << 12 of the data at ESI, in EAX: whether it has
+    // its number (EDX) at 0, and with `mark` the number xor MARK at 8.
+    let compare = |a: &mut CodeAssembler, wrong: CodeLabel, mark: bool| {
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        a.cmp(dword_ptr(esi + eax), edx)?;
+        a.jne(wrong)?;
+        if mark {
+            a.mov(ecx, edx)?;
+            a.xor(ecx, MARK as i32)?;
+            a.cmp(dword_ptr(esi + eax + 8), ecx)?;
+            a.jne(wrong)?;
+        }
+        Ok::<(), IcedError>(())
+    };
+    let exe = program(BASE, false, &[], &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        a.mov(esi, l.at(0) as u32)?;
+        for (bit, mark) in [(0, false), (1, true)] {
+            if mark {
+                let mut write = a.create_label();
+                a.xor(edx, edx)?;
+                a.set_label(&mut write)?;
+                a.mov(eax, edx)?;
+                a.shl(eax, 12)?;
+                a.mov(ecx, edx)?;
+                a.xor(ecx, MARK as i32)?;
+                a.mov(dword_ptr(esi + eax + 8), ecx)?;
+                a.inc(edx)?;
+                a.cmp(edx, PAGES as i32)?;
+                a.jne(write)?;
+            }
+            let mut check = a.create_label();
+            let mut wrong = a.create_label();
+            a.xor(edx, edx)?;
+            a.set_label(&mut check)?;
+            compare(a, wrong, mark)?;
+            a.inc(edx)?;
+            a.cmp(edx, PAGES as i32)?;
+            a.jne(check)?;
+            a.set_label(&mut wrong)?;
+            a.cmp(edx, PAGES as i32)?;
+            bit_if_equal(a, bit)?;
+        }
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "image_larger_than_memory";
+    let (code, text) = run_files_in(test, &[("T.EXE", exe)], 16);
+    assert_eq!(code, 3, "the checks that failed: {:02b} {}", !code & 3, text);
 }
 
 /// A read-only mapping of a file larger than the machine's memory, as
@@ -3681,6 +5264,492 @@ fn a_read_write_mapping_writes_back_only_the_pages_it_read() {
     expected[0x1005] = 0x55;
     let written = fs::read(PathBuf::from("target/test_win32").join(test).join("RW.DAT")).unwrap();
     assert!(written == expected, "the file isn't the one expected");
+}
+
+/// The data file of the mapping tests that write every page: `pages`
+/// pages, each starting with its number.
+fn numbered_pages(pages: u32) -> Vec<u8> {
+    let mut file = vec![0u8; (pages * 0x1000) as usize];
+    for page in 0..pages {
+        let at = (page * 0x1000) as usize;
+        file[at..at + 4].copy_from_slice(&page.to_le_bytes());
+    }
+    file
+}
+
+/// Write `page ^ mark` at offset 8 of each of `pages` pages of the view
+/// at ESI, then check twice that each still has its number at 0 and that
+/// value at 8, setting `bit` of EBX if all do the first time and the next
+/// bit if they do the second, when pages that left memory once come back
+/// a second time. Uses EAX, ECX and EDX.
+fn write_and_check_every_page(
+    a: &mut CodeAssembler,
+    pages: u32,
+    mark: u32,
+    bit: u32,
+) -> Result<(), IcedError> {
+    let mut write = a.create_label();
+    a.xor(edx, edx)?;
+    a.set_label(&mut write)?;
+    a.mov(eax, edx)?;
+    a.shl(eax, 12)?;
+    a.mov(ecx, edx)?;
+    a.xor(ecx, mark as i32)?;
+    a.mov(dword_ptr(esi + eax + 8), ecx)?;
+    a.inc(edx)?;
+    a.cmp(edx, pages as i32)?;
+    a.jne(write)?;
+    for pass in 0..2 {
+        let mut check = a.create_label();
+        let mut wrong = a.create_label();
+        a.xor(edx, edx)?;
+        a.set_label(&mut check)?;
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        a.cmp(dword_ptr(esi + eax), edx)?;
+        a.jne(wrong)?;
+        a.mov(ecx, edx)?;
+        a.xor(ecx, mark as i32)?;
+        a.cmp(dword_ptr(esi + eax + 8), ecx)?;
+        a.jne(wrong)?;
+        a.inc(edx)?;
+        a.cmp(edx, pages as i32)?;
+        a.jne(check)?;
+        a.set_label(&mut wrong)?;
+        a.cmp(edx, pages as i32)?;
+        bit_if_equal(a, bit + pass)?;
+    }
+    Ok(())
+}
+
+/// The paging of a run that went three times through a view of `pages`
+/// pages, more than memory holds (`write_and_check_every_page`). Each
+/// pass brings most of its pages in, and none twice: fewer than three
+/// times `pages` in all, where views that thrash bring in millions. A
+/// search for pages to give back gives back a batch, so it serves many
+/// faults: one search for every 16 pages brought in, at most.
+fn paged_a_view_without_thrashing(counts: rust_dos::win32::PagingCounts, pages: u32) {
+    let faults = counts.ins + counts.reads + counts.zero_ins;
+    assert!(faults > pages as u64, "{counts:?}");
+    assert!(faults < 3 * pages as u64, "pages came in again: {counts:?}");
+    assert!(counts.sweeps * 16 <= faults, "{counts:?}");
+}
+
+/// A copy-on-write view (PAGE_WRITECOPY, FILE_MAP_COPY) of a file larger
+/// than the machine's memory, every page of it written, as Oni maps and
+/// fixes up its level files: the written pages leave memory for the page
+/// file and come back from there, and the file keeps what it had. Then,
+/// with memory full of the view's pages, services write and read memory
+/// the program committed and never touched (ReadFile into it, WriteFile
+/// from it), whose pages need room that only the view's pages can make.
+/// Windows 98 pages all of it. A bit each in the exit code.
+#[test]
+fn a_copy_on_write_mapping_larger_than_memory_sends_written_pages_to_the_page_file() {
+    const PAGES: u32 = 24 * 256;
+    const MARK: u32 = 0xA5A5_0000;
+    const TEXT: &[u8] = b"read into memory the page file held\r\n";
+    const GENERIC_READ: i32 = 0x8000_0000u32 as i32;
+    const FILE_SHARE_READ: i32 = 1;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_WRITECOPY: i32 = 8;
+    const FILE_MAP_COPY: i32 = 1;
+    const MEM_COMMIT: i32 = 0x1000;
+    const PAGE_READWRITE: i32 = 4;
+    const BUFFER: i32 = 0x10000;
+    let file = numbered_pages(PAGES);
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "VirtualAlloc",
+        "ReadFile",
+        "GetStdHandle",
+        "WriteFile",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // Data: the files' names at 0 and 10h, ReadFile's count at 20h and
+    // WriteFile's at 24h.
+    let mut data = b"BIG.DAT\0".to_vec();
+    data.resize(0x10, 0);
+    data.extend_from_slice(b"SMALL.TXT\0");
+    data.resize(0x30, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let (read, written) = (l.at(0x20), l.at(0x24));
+        let open = |a: &mut CodeAssembler, name: u64| {
+            push_args(
+                a,
+                &[name as i32, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0],
+            )?;
+            a.call(f("CreateFileA"))
+        };
+        a.xor(ebx, ebx)?;
+        open(a, l.at(0))?;
+        push_args(a, &[PAGE_WRITECOPY, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.call(f("CreateFileMappingA"))?;
+        push_args(a, &[FILE_MAP_COPY, 0, 0, 0])?;
+        a.push(eax)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        a.setne(cl)?;
+        a.cmp(cl, 1)?;
+        bit_if_equal(a, 0)?;
+        write_and_check_every_page(a, PAGES, MARK, 1)?;
+        // Committed, in the page file and never touched.
+        push_args(a, &[0, BUFFER, MEM_COMMIT, PAGE_READWRITE])?;
+        a.call(f("VirtualAlloc"))?;
+        a.mov(edi, eax)?;
+        open(a, l.at(0x10))?;
+        a.push(0)?;
+        a.push(read as i32)?;
+        a.push(TEXT.len() as i32)?;
+        a.lea(ecx, dword_ptr(edi + 0x8000))?;
+        a.push(ecx)?;
+        a.push(eax)?;
+        a.call(f("ReadFile"))?;
+        a.cmp(dword_ptr(read), TEXT.len() as i32)?;
+        bit_if_equal(a, 3)?;
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(f("GetStdHandle"))?;
+        a.push(0)?;
+        a.push(written as i32)?;
+        a.push(TEXT.len() as i32)?;
+        a.lea(ecx, dword_ptr(edi + 0x8000))?;
+        a.push(ecx)?;
+        a.push(eax)?;
+        a.call(f("WriteFile"))?;
+        a.cmp(dword_ptr(written), TEXT.len() as i32)?;
+        bit_if_equal(a, 4)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "mapping_copy_on_write_pages";
+    let files = [
+        ("T.EXE", exe),
+        ("BIG.DAT", file.clone()),
+        ("SMALL.TXT", TEXT.to_vec()),
+    ];
+    let (code, text, counts) = run_files_counted(test, &files, 16);
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b} {}", !code & 0x1F, text);
+    paged_a_view_without_thrashing(counts, PAGES);
+    assert_eq!(text.as_bytes(), TEXT);
+    let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
+    assert!(after == file, "the file of a copy-on-write view changed");
+}
+
+/// A read-write view of a file larger than the machine's memory, every
+/// page of it written: the written pages are written to the file as they
+/// leave memory, and read from it again when they are touched again. A
+/// bit each in the exit code.
+#[test]
+fn a_read_write_mapping_larger_than_memory_writes_pages_to_its_file_as_they_leave() {
+    const PAGES: u32 = 24 * 256;
+    const MARK: u32 = 0x5A5A_0000;
+    const GENERIC_READ_WRITE: i32 = 0xC000_0000u32 as i32;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_READWRITE: i32 = 4;
+    const FILE_MAP_WRITE: i32 = 2;
+    let file = numbered_pages(PAGES);
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "UnmapViewOfFile",
+        "CloseHandle",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"BIG.DAT\0".to_vec();
+    data.resize(0x10, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0) as i32, GENERIC_READ_WRITE, 0, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        a.mov(edi, eax)?;
+        push_args(a, &[PAGE_READWRITE, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("CreateFileMappingA"))?;
+        a.mov(ebp, eax)?;
+        push_args(a, &[FILE_MAP_WRITE, 0, 0, 0])?;
+        a.push(ebp)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        a.setne(cl)?;
+        a.cmp(cl, 1)?;
+        bit_if_equal(a, 0)?;
+        write_and_check_every_page(a, PAGES, MARK, 1)?;
+        a.push(esi)?;
+        a.call(f("UnmapViewOfFile"))?;
+        a.push(ebp)?;
+        a.call(f("CloseHandle"))?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "mapping_read_write_pages";
+    let files = [("T.EXE", exe), ("BIG.DAT", file.clone())];
+    let (code, text, counts) = run_files_counted(test, &files, 16);
+    assert_eq!(code, 7, "the checks that failed: {:03b} {}", !code & 7, text);
+    paged_a_view_without_thrashing(counts, PAGES);
+    // The pages that left memory are in the file already, the rest since
+    // the view went.
+    let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
+    let mut expected = file;
+    for page in 0..PAGES {
+        let at = (page * 0x1000 + 8) as usize;
+        expected[at..at + 4].copy_from_slice(&(page ^ MARK).to_le_bytes());
+    }
+    assert!(after == expected, "the file doesn't have what the view wrote");
+}
+
+/// A program whose image and a copy-on-write view of a file, 12 MB each,
+/// are together more than the 16 MB machine holds, and whose loops touch
+/// a page of each in turn: it writes `page ^ mark` at offset 8 of every
+/// page of both, then checks twice that each has its number at 0 and its
+/// value at 8. The image's pages and the view's written ones go out to
+/// the page file on one clock and come back, and neither kind thrashes
+/// for the other. A bit each in the exit code.
+#[test]
+fn an_image_and_a_copy_on_write_view_larger_than_memory_together_page() {
+    const PAGES: u32 = 12 * 256;
+    const IMAGE_MARK: u32 = 0x6969_0000;
+    const VIEW_MARK: u32 = 0x9696_0000;
+    const GENERIC_READ: i32 = 0x8000_0000u32 as i32;
+    const FILE_SHARE_READ: i32 = 1;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_WRITECOPY: i32 = 8;
+    const FILE_MAP_COPY: i32 = 1;
+    let names: &[&str] = &["CreateFileA", "CreateFileMappingA", "MapViewOfFile"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // Data: the file's name in the first page, after its number.
+    let mut data = numbered_pages(PAGES);
+    data[0x10..0x18].copy_from_slice(b"BIG.DAT\0");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0x10) as i32, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        push_args(a, &[PAGE_WRITECOPY, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.call(f("CreateFileMappingA"))?;
+        push_args(a, &[FILE_MAP_COPY, 0, 0, 0])?;
+        a.push(eax)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(edi, eax)?;
+        a.mov(esi, l.at(0) as u32)?;
+        a.test(edi, edi)?;
+        a.setne(cl)?;
+        a.cmp(cl, 1)?;
+        bit_if_equal(a, 0)?;
+        let mut write = a.create_label();
+        a.xor(edx, edx)?;
+        a.set_label(&mut write)?;
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        for (base, mark) in [(esi, IMAGE_MARK), (edi, VIEW_MARK)] {
+            a.mov(ecx, edx)?;
+            a.xor(ecx, mark as i32)?;
+            a.mov(dword_ptr(base + eax + 8), ecx)?;
+        }
+        a.inc(edx)?;
+        a.cmp(edx, PAGES as i32)?;
+        a.jne(write)?;
+        for pass in 0..2 {
+            let mut check = a.create_label();
+            let mut wrong = a.create_label();
+            a.xor(edx, edx)?;
+            a.set_label(&mut check)?;
+            a.mov(eax, edx)?;
+            a.shl(eax, 12)?;
+            for (base, mark) in [(esi, IMAGE_MARK), (edi, VIEW_MARK)] {
+                a.cmp(dword_ptr(base + eax), edx)?;
+                a.jne(wrong)?;
+                a.mov(ecx, edx)?;
+                a.xor(ecx, mark as i32)?;
+                a.cmp(dword_ptr(base + eax + 8), ecx)?;
+                a.jne(wrong)?;
+            }
+            a.inc(edx)?;
+            a.cmp(edx, PAGES as i32)?;
+            a.jne(check)?;
+            a.set_label(&mut wrong)?;
+            a.cmp(edx, PAGES as i32)?;
+            bit_if_equal(a, 1 + pass)?;
+        }
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "image_and_copy_on_write_view";
+    let file = numbered_pages(PAGES);
+    let files = [("T.EXE", exe), ("BIG.DAT", file.clone())];
+    let (code, text, counts) = run_files_counted(test, &files, 16);
+    assert_eq!(code, 7, "the checks that failed: {:03b} {}", !code & 7, text);
+    paged_a_view_without_thrashing(counts, 2 * PAGES);
+    // Both kinds left memory.
+    assert!(counts.outs > PAGES as u64 / 2, "{counts:?}");
+    assert!(counts.evicted > PAGES as u64 / 2, "{counts:?}");
+    let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
+    assert!(after == file, "the file of a copy-on-write view changed");
+}
+
+/// A CD-ROM read that the system finishes after the call, into a buffer
+/// on a page of a read-write view of a file that left memory while the
+/// read waited: the program reads through the rest of the view, more
+/// than memory holds, before it waits for the read. The system reads the
+/// page in again to write the sector there, as the program's own write
+/// would. A bit each in the exit code.
+#[test]
+fn a_read_finished_later_into_a_view_page_that_left_memory_reaches_it() {
+    const PAGES: u32 = 24 * 256;
+    const GENERIC_READ_WRITE: i32 = 0xC000_0000u32 as i32;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_READWRITE: i32 = 4;
+    const FILE_MAP_WRITE: i32 = 2;
+    const SRB: u32 = 0x40;
+    const EVENT: u32 = 0x100;
+    let dir = cdimage::scratch("wnaspi32_view");
+    let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let file = numbered_pages(PAGES);
+    let aspi: &[&str] = &["GetASPI32SupportInfo", "SendASPI32Command"];
+    let kernel: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "UnmapViewOfFile",
+        "CloseHandle",
+        "CreateEventA",
+        "WaitForSingleObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("WNASPI32.DLL", aspi), ("KERNEL32.DLL", kernel)];
+    // Data: the file's name at 0, a READ(10) of the primary volume
+    // descriptor with SRB_EVENT_NOTIFY at SRB, its event at EVENT.
+    let mut data = b"BIG.DAT\0".to_vec();
+    data.resize(0x110, 0);
+    let mut srb = read10_srb(16);
+    srb[3] |= 0x40;
+    data[SRB as usize..SRB as usize + srb.len()].copy_from_slice(&srb);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| match aspi.iter().position(|n| *n == name) {
+            Some(i) => l.import(i),
+            None => l.import(aspi.len() + kernel.iter().position(|n| *n == name).unwrap()),
+        };
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0) as i32, GENERIC_READ_WRITE, 0, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        a.mov(edi, eax)?;
+        push_args(a, &[PAGE_READWRITE, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("CreateFileMappingA"))?;
+        a.mov(ebp, eax)?;
+        push_args(a, &[FILE_MAP_WRITE, 0, 0, 0])?;
+        a.push(ebp)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        // A manual-reset event, not signaled, in the block and kept.
+        push_args(a, &[0, 1, 0, 0])?;
+        a.call(f("CreateEventA"))?;
+        a.mov(dword_ptr(l.at(SRB + 24)), eax)?;
+        a.mov(dword_ptr(l.at(EVENT)), eax)?;
+        // The read into the view's first page: pending, as the drive
+        // spins up first.
+        a.mov(dword_ptr(l.at(SRB + 0x10)), esi)?;
+        a.push(l.at(SRB) as i32)?;
+        a.call(f("SendASPI32Command"))?;
+        a.add(esp, 4)?;
+        a.cmp(eax, 0)?;
+        bit_if_equal(a, 0)?;
+        // Every other page has its number, and is written as the first
+        // one was: more of them than memory holds, so the first page
+        // leaves memory.
+        let mut next = a.create_label();
+        let mut wrong = a.create_label();
+        a.mov(edx, 1)?;
+        a.set_label(&mut next)?;
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        a.cmp(dword_ptr(esi + eax), edx)?;
+        a.jne(wrong)?;
+        a.mov(dword_ptr(esi + eax + 8), edx)?;
+        a.inc(edx)?;
+        a.cmp(edx, PAGES as i32)?;
+        a.jne(next)?;
+        a.set_label(&mut wrong)?;
+        a.cmp(edx, PAGES as i32)?;
+        bit_if_equal(a, 1)?;
+        // The read was still pending then, so it ends after the page left.
+        a.cmp(byte_ptr(l.at(SRB + 1)), 0)?;
+        bit_if_equal(a, 5)?;
+        // The read ends, done, with the sector in the buffer.
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(EVENT)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.cmp(eax, 0)?;
+        bit_if_equal(a, 2)?;
+        a.cmp(byte_ptr(l.at(SRB + 1)), 1)?;
+        bit_if_equal(a, 3)?;
+        a.cmp(dword_ptr(esi + 1), 0x3030_4443)?;
+        bit_if_equal(a, 4)?;
+        a.push(esi)?;
+        a.call(f("UnmapViewOfFile"))?;
+        a.push(ebp)?;
+        a.call(f("CloseHandle"))?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "aspi_into_view_page";
+    let files = [("T.EXE", exe), ("BIG.DAT", file)];
+    let mut cpu = Cpu::with_memory(scratch(test, &files), 16);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    let mut evicted = 0;
+    let mut ended = false;
+    for _ in 0..400 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        let stop = run_batch(&mut cpu, &mut NoHook, false);
+        if cpu.bus.win32.active() {
+            evicted = rust_dos::win32::paging_counts(&cpu.bus).evicted;
+        }
+        if stop == StopReason::ShellReloaded {
+            ended = true;
+            break;
+        }
+    }
+    assert!(ended, "the program didn't end: {:?}", printed(&cpu));
+    let (code, text) = (cpu.errorlevel, printed(&cpu));
+    assert_eq!(code, 0x3F, "the checks that failed: {:06b} {}", !code & 0x3F, text);
+    assert!(evicted as u32 > PAGES / 2, "{evicted} pages of the view left memory");
+    // The sector reached the file too, when the view went.
+    let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
+    assert_eq!(&after[1..6], b"CD001");
 }
 
 /// ReleaseStgMedium, as Windows' table of it has it: a global block no
@@ -4265,6 +6334,95 @@ fn a_program_makes_reads_finds_moves_and_deletes_files() {
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
     let dir = PathBuf::from("target/test_win32/files");
     assert!(!dir.join("D").exists() && !dir.join("G.TXT").exists());
+}
+
+/// SetFileTime on a file in a host folder, as Windows 98 SE does it on
+/// FAT: the time of the last write is rounded up to an even second
+/// (2001-10-08 19:20:01.5 is kept as 19:20:02), a time before 1980 fails
+/// with ERROR_INVALID_DATA (13), and a handle opened only for reading
+/// fails with ERROR_ACCESS_DENIED (5). The program ends with the number
+/// of the first check that failed, or 0.
+#[test]
+fn set_file_time_rounds_up_to_even_seconds() {
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &[
+            "CreateFileA",
+            "SetFileTime",
+            "GetFileTime",
+            "GetLastError",
+            "CloseHandle",
+        ],
+    )];
+    let mut data = b"F.TXT\0".to_vec();
+    data.resize(0x10, 0);
+    // FILETIMEs: 2001-10-08 19:20:01.5 and 1979-10-08 19:20:04 (UTC, which
+    // is the built-in Windows' local time), then room for one read back.
+    data.extend(0x01C1_502E_3A01_D1C0u64.to_le_bytes());
+    data.extend(0x01A8_A576_DBF0_4A00u64.to_le_bytes());
+    data.resize(0x28, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        let open = |a: &mut CodeAssembler, access: u32, share, disposition| {
+            for arg in [0, 0, disposition, 0, share, access as i32, l.at(0) as i32] {
+                a.push(arg)?;
+            }
+            a.call(l.import(0))?;
+            a.mov(esi, eax)
+        };
+        let set = |a: &mut CodeAssembler, at: u32| {
+            a.push(l.at(at) as i32)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(esi)?;
+            a.call(l.import(1))
+        };
+        // GENERIC_WRITE, CREATE_ALWAYS.
+        open(a, 0x4000_0000, 0, 2)?;
+        set(a, 0x10)?;
+        a.mov(ebx, 1)?;
+        a.test(eax, eax)?;
+        a.je(fail)?;
+        a.push(l.at(0x20) as i32)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(l.import(2))?;
+        a.mov(ebx, 2)?;
+        a.cmp(dword_ptr(l.at(0x20)), 0x3A4E_1D00)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x24)), 0x01C1_502E)?;
+        a.jne(fail)?;
+        set(a, 0x18)?;
+        a.mov(ebx, 3)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 4)?;
+        a.cmp(eax, 13)?;
+        a.jne(fail)?;
+        a.push(esi)?;
+        a.call(l.import(4))?;
+        // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING.
+        open(a, 0x8000_0000, 1, 3)?;
+        set(a, 0x10)?;
+        a.mov(ebx, 5)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 6)?;
+        a.cmp(eax, 5)?;
+        a.jne(fail)?;
+        a.push(esi)?;
+        a.call(l.import(4))?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let mut cpu = machine_with("set_file_time", &[("T.EXE", exe)]);
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0);
 }
 
 /// A change notification for C:\ with FILE_NOTIFY_CHANGE_FILE_NAME isn't
@@ -7152,6 +9310,70 @@ fn a_program_reads_its_resources_and_file_name() {
     );
     let (code, _) = run_files("resources", &[("T.EXE", exe)]);
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
+}
+
+/// LoadImageA with LR_CREATEDIBSECTION of an RLE8 bitmap gives a DIB
+/// section with the codes unpacked into plain rows, as Windows 95 and 98
+/// do (CreateDIBSection itself refuses a compressed one). Beasts and
+/// Bumpkins loads its fonts this way, and crashed when it got none.
+#[test]
+fn load_image_unpacks_an_rle8_bitmap_into_a_dib_section() {
+    let names: &[&str] = &["GetModuleHandleA", "LoadImageA", "GetObjectA"];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &names[..1]),
+        ("USER32.DLL", &names[1..2]),
+        ("GDI32.DLL", &names[2..]),
+    ];
+    const RT_BITMAP: u16 = 2;
+    const LR_CREATEDIBSECTION: u32 = 0x2000;
+    const DIBSECTION: u32 = 0x100;
+    // A 4x2 bitmap of 8 bits, two colors. Bottom row: two of color 5 and
+    // two of 7; top row: four of 9; then the end of the bitmap.
+    let mut dib = Vec::new();
+    for w in [40u32, 4, 2, 1 | 8 << 16, 1, 8, 0, 0, 2, 0] {
+        dib.extend_from_slice(&w.to_le_bytes());
+    }
+    dib.extend_from_slice(&[0; 8]);
+    dib.extend_from_slice(&[2, 5, 2, 7, 0, 0, 4, 9, 0, 1]);
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        call_with(a, l.import(0), &[Arg::I(0)])?;
+        a.mov(esi, eax)?;
+        let image = [Arg::Esi, Arg::I(3), Arg::I(0), Arg::I(0), Arg::I(0)];
+        let flags = [Arg::I(LR_CREATEDIBSECTION)];
+        call_with(a, l.import(1), &[&image[..], &flags[..]].concat())?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        check(a, true, 0)?;
+        let out = l.at(DIBSECTION) as u32;
+        call_with(a, l.import(2), &[Arg::Esi, Arg::I(84), Arg::I(out)])?;
+        a.cmp(eax, 84)?;
+        check(a, false, 1)?;
+        // dsBmih.biCompression: plain rows.
+        a.cmp(dword_ptr(l.at(DIBSECTION + 40)), 0)?;
+        check(a, false, 2)?;
+        a.mov(esi, dword_ptr(l.at(DIBSECTION + 20)))?;
+        let mut no_bits = a.create_label();
+        a.test(esi, esi)?;
+        a.jz(no_bits)?;
+        a.cmp(dword_ptr(esi), 0x0707_0505)?;
+        check(a, false, 3)?;
+        a.cmp(dword_ptr(esi + 4), 0x0909_0909)?;
+        check(a, false, 4)?;
+        a.set_label(&mut no_bits)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(
+        BASE,
+        None,
+        imports,
+        &[0; 0x200],
+        &[("", &main)],
+        &[(RT_BITMAP, 3, 0x409, &dib)],
+    );
+    let (code, text) = run_files("load_image_rle8", &[("T.EXE", exe)]);
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b} {text}", !code & 0x1F);
 }
 
 /// LoadLibraryA of files Windows 95 can't load: an empty one is in a bad
@@ -11023,6 +13245,251 @@ fn restarts_windows() -> Vec<u8> {
 }
 
 #[test]
+fn a_popup_menu_has_its_owner_measure_and_draw_its_owner_drawn_items() {
+    // A popup menu of two owner-drawn items, made with AppendMenuA as
+    // CyberStorm 2 makes its in-game menu, tracked by TrackPopupMenu.
+    // Before the popup shows, its owner gets WM_MEASUREITEM for each
+    // item, and its answer (100 by 30) sizes the item; as the popup is
+    // drawn, the owner gets WM_DRAWITEM for each, with ODT_MENU, the
+    // item's id and data, the menu as hwndItem and the item's rectangle.
+    // An Escape posted before the call closes the menu.
+    const WM_KEYDOWN: i32 = 0x0100;
+    const WM_DRAWITEM: i32 = 0x002B;
+    const WM_MEASUREITEM: i32 = 0x002C;
+    const VK_ESCAPE: i32 = 0x1B;
+    const MF_OWNERDRAW: i32 = 0x0100;
+    const TPM_RETURNCMD: i32 = 0x0100;
+    fn ae(a: &mut CodeAssembler, r: AsmRegister8) -> Result<(), IcedError> {
+        a.setae(r)
+    }
+    fn ge(a: &mut CodeAssembler, r: AsmRegister8) -> Result<(), IcedError> {
+        a.setge(r)
+    }
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "CreatePopupMenu",
+        "AppendMenuA",
+        "PostMessageA",
+        "TrackPopupMenu",
+    ];
+    // What the window procedure saw: WM_MEASUREITEM's count at 0xA0,
+    // WM_DRAWITEM's at 0xA4, and from the last DRAWITEMSTRUCT its
+    // CtlType at 0xB0, itemID at 0xB4, hwndItem at 0xB8, itemData at
+    // 0xBC and rcItem at 0xC0.
+    let data = session_data(&[(0x10, "Owner")]);
+    let exe = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        session_class(a, l, f, |a| {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_MEASUREITEM)?;
+            a.jne(other)?;
+            a.inc(dword_ptr(l.at(0xA0)))?;
+            a.mov(ecx, dword_ptr(esp + 16))?;
+            a.mov(dword_ptr(ecx + 12), 100)?;
+            a.mov(dword_ptr(ecx + 16), 30)?;
+            a.mov(eax, 1)?;
+            a.ret_1(16)?;
+            a.set_label(&mut other)?;
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_DRAWITEM)?;
+            a.jne(other)?;
+            a.inc(dword_ptr(l.at(0xA4)))?;
+            a.mov(ecx, dword_ptr(esp + 16))?;
+            for (from, to) in [(0, 0xB0), (8, 0xB4), (20, 0xB8), (44, 0xBC)] {
+                a.mov(eax, dword_ptr(ecx + from))?;
+                a.mov(dword_ptr(l.at(to)), eax)?;
+            }
+            for k in 0..4 {
+                a.mov(eax, dword_ptr(ecx + 28 + 4 * k))?;
+                a.mov(dword_ptr(l.at(0xC0 + 4 * k as u32)), eax)?;
+            }
+            a.mov(eax, 1)?;
+            a.ret_1(16)?;
+            a.set_label(&mut other)?;
+            a.nop()
+        })?;
+        session_window(a, l, f)?;
+        a.mov(esi, eax)?;
+        a.call(f("CreatePopupMenu"))?;
+        a.mov(edi, eax)?;
+        for (id, item) in [(0x1234, 0xCAFE), (0x1235, 0xBEEF)] {
+            push_args(a, &[MF_OWNERDRAW, id, item])?;
+            a.push(edi)?;
+            a.call(f("AppendMenuA"))?;
+        }
+        push_args(a, &[WM_KEYDOWN, VK_ESCAPE, 0])?;
+        a.push(esi)?;
+        a.call(f("PostMessageA"))?;
+        a.push(0)?;
+        a.push(esi)?;
+        push_args(a, &[TPM_RETURNCMD, 10, 10, 0])?;
+        a.push(edi)?;
+        a.call(f("TrackPopupMenu"))?;
+        a.xor(ebx, ebx)?;
+        a.cmp(dword_ptr(l.at(0xA0)), 2)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(l.at(0xA4)), 2)?;
+        bit_if(a, ae, 1)?;
+        a.cmp(dword_ptr(l.at(0xB0)), 1)?;
+        bit_if(a, eq, 2)?;
+        a.cmp(dword_ptr(l.at(0xB4)), 0x1235)?;
+        bit_if(a, eq, 3)?;
+        a.cmp(dword_ptr(l.at(0xB8)), edi)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xBC)), 0xBEEF)?;
+        bit_if(a, eq, 5)?;
+        // rcItem: 30 high, and at least the 100 asked for wide.
+        a.mov(eax, dword_ptr(l.at(0xCC)))?;
+        a.sub(eax, dword_ptr(l.at(0xC4)))?;
+        a.cmp(eax, 30)?;
+        bit_if(a, eq, 6)?;
+        a.mov(eax, dword_ptr(l.at(0xC8)))?;
+        a.sub(eax, dword_ptr(l.at(0xC0)))?;
+        a.cmp(eax, 100)?;
+        bit_if(a, ge, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("owner_drawn_menu", &[("T.EXE", exe)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn owner_drawn_popup_items_are_measured_drawn_and_selected_as_on_windows_98() {
+    // As Windows 98 SE does with a popup of owner-drawn items: the
+    // MEASUREITEMSTRUCT's height starts as the menu font's (13), the item
+    // is as wide as the owner asked plus two of the font's average
+    // characters (6), and rcItem is in the popup's client area, inside
+    // its 3-pixel edge, so the first item's starts at 0,0. A Down key
+    // selects the first item: the owner draws that item alone again,
+    // with ODA_SELECT and ODS_SELECTED.
+    const WM_KEYDOWN: i32 = 0x0100;
+    const WM_DRAWITEM: i32 = 0x002B;
+    const WM_MEASUREITEM: i32 = 0x002C;
+    const VK_DOWN: i32 = 0x28;
+    const VK_ESCAPE: i32 = 0x1B;
+    const MF_OWNERDRAW: i32 = 0x0100;
+    const TPM_RETURNCMD: i32 = 0x0100;
+    const ODA_SELECT: i32 = 2;
+    fn ae(a: &mut CodeAssembler, r: AsmRegister8) -> Result<(), IcedError> {
+        a.setae(r)
+    }
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "CreatePopupMenu",
+        "AppendMenuA",
+        "PostMessageA",
+        "TrackPopupMenu",
+    ];
+    // What the window procedure saw: WM_MEASUREITEM's count at 0xA0 and
+    // the first one's itemHeight at 0xA8, WM_DRAWITEM's count at 0xA4
+    // and the first one's rcItem left and right at 0xB0 and 0xB4, the
+    // count of ODA_SELECT at 0xB8 and the first one's itemID and
+    // itemState at 0xBC and 0xC0.
+    let data = session_data(&[(0x10, "Owner")]);
+    let exe = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        session_class(a, l, f, |a| {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_MEASUREITEM)?;
+            a.jne(other)?;
+            a.inc(dword_ptr(l.at(0xA0)))?;
+            a.mov(ecx, dword_ptr(esp + 16))?;
+            let mut later = a.create_label();
+            a.cmp(dword_ptr(l.at(0xA0)), 1)?;
+            a.jne(later)?;
+            a.mov(eax, dword_ptr(ecx + 16))?;
+            a.mov(dword_ptr(l.at(0xA8)), eax)?;
+            a.set_label(&mut later)?;
+            a.mov(dword_ptr(ecx + 12), 100)?;
+            a.mov(dword_ptr(ecx + 16), 30)?;
+            a.mov(eax, 1)?;
+            a.ret_1(16)?;
+            a.set_label(&mut other)?;
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_DRAWITEM)?;
+            a.jne(other)?;
+            a.inc(dword_ptr(l.at(0xA4)))?;
+            a.mov(ecx, dword_ptr(esp + 16))?;
+            let mut later = a.create_label();
+            a.cmp(dword_ptr(l.at(0xA4)), 1)?;
+            a.jne(later)?;
+            a.mov(eax, dword_ptr(ecx + 28))?;
+            a.mov(dword_ptr(l.at(0xB0)), eax)?;
+            a.mov(eax, dword_ptr(ecx + 36))?;
+            a.mov(dword_ptr(l.at(0xB4)), eax)?;
+            a.set_label(&mut later)?;
+            let mut done = a.create_label();
+            a.cmp(dword_ptr(ecx + 12), ODA_SELECT)?;
+            a.jne(done)?;
+            a.inc(dword_ptr(l.at(0xB8)))?;
+            a.cmp(dword_ptr(l.at(0xB8)), 1)?;
+            a.jne(done)?;
+            a.mov(eax, dword_ptr(ecx + 8))?;
+            a.mov(dword_ptr(l.at(0xBC)), eax)?;
+            a.mov(eax, dword_ptr(ecx + 16))?;
+            a.mov(dword_ptr(l.at(0xC0)), eax)?;
+            a.set_label(&mut done)?;
+            a.mov(eax, 1)?;
+            a.ret_1(16)?;
+            a.set_label(&mut other)?;
+            a.nop()
+        })?;
+        session_window(a, l, f)?;
+        a.mov(esi, eax)?;
+        a.call(f("CreatePopupMenu"))?;
+        a.mov(edi, eax)?;
+        for (id, item) in [(0x1234, 0xCAFE), (0x1235, 0xBEEF)] {
+            push_args(a, &[MF_OWNERDRAW, id, item])?;
+            a.push(edi)?;
+            a.call(f("AppendMenuA"))?;
+        }
+        for key in [VK_DOWN, VK_ESCAPE] {
+            push_args(a, &[WM_KEYDOWN, key, 0])?;
+            a.push(esi)?;
+            a.call(f("PostMessageA"))?;
+        }
+        a.push(0)?;
+        a.push(esi)?;
+        push_args(a, &[TPM_RETURNCMD, 10, 10, 0])?;
+        a.push(edi)?;
+        a.call(f("TrackPopupMenu"))?;
+        a.xor(ebx, ebx)?;
+        a.cmp(dword_ptr(l.at(0xA8)), 13)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(l.at(0xB0)), 0)?;
+        bit_if(a, eq, 1)?;
+        a.mov(eax, dword_ptr(l.at(0xB4)))?;
+        a.sub(eax, dword_ptr(l.at(0xB0)))?;
+        a.cmp(eax, 112)?;
+        bit_if(a, eq, 2)?;
+        a.cmp(dword_ptr(l.at(0xB8)), 1)?;
+        bit_if(a, ae, 3)?;
+        a.cmp(dword_ptr(l.at(0xBC)), 0x1234)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xC0)), 1)?;
+        bit_if(a, eq, 5)?;
+        // Two whole draws when the popup shows, and the selection's
+        // draws after them, never a whole draw again.
+        a.mov(eax, dword_ptr(l.at(0xA4)))?;
+        a.sub(eax, dword_ptr(l.at(0xB8)))?;
+        a.cmp(eax, 2)?;
+        bit_if(a, eq, 6)?;
+        a.or(ebx, 0x80)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("owner_drawn_select", &[("T.EXE", exe)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
 fn a_window_that_refuses_keeps_the_session_going() {
     // The second window asked refuses: ExitWindowsEx returns FALSE, the
     // first window learns that the session goes on, and the second isn't
@@ -11236,6 +13703,256 @@ fn a_window_that_doesnt_answer_doesnt_stop_the_session_from_ending() {
     // The window gets 5 seconds for each of the two messages.
     let files = [("T.EXE", parent), ("C.EXE", child)];
     assert_eq!(run_family_for("session_no_answer", &files, 4000), 0);
+}
+
+#[test]
+fn keyboard_and_mouse_hooks_see_input_before_the_program() {
+    // T.EXE hooks its thread's keyboard and mouse (WH_KEYBOARD,
+    // WH_MOUSE), then presses and lets go of A and clicks its window.
+    // As on Windows, each hook is called as the thread takes a message
+    // of its device: the keyboard's with HC_NOREMOVE for a peek that
+    // leaves the key in the queue and HC_ACTION for one that takes it,
+    // and a keyboard hook that returns nonzero throws the key away; the
+    // mouse's with the message and a MOUSEHOOKSTRUCT. (Stratosphere
+    // reads its keys and clicks in play this way.)
+    const WH_KEYBOARD: i32 = 2;
+    const WH_MOUSE: i32 = 7;
+    const HC_NOREMOVE: i32 = 3;
+    const VK_A: i32 = 0x41;
+    const KEYEVENTF_KEYUP: i32 = 2;
+    const WM_KEYDOWN: i32 = 0x0100;
+    const WM_KEYUP: i32 = 0x0101;
+    const WM_LBUTTONDOWN: i32 = 0x0201;
+    const MOUSEEVENTF_LEFTDOWN: i32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: i32 = 0x0004;
+    const HTCLIENT: i32 = 1;
+    const PM_NOREMOVE: i32 = 0;
+    let kernel32 = ["GetCurrentThreadId", "ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "SetFocus",
+        "SetWindowsHookExA",
+        "PeekMessageA",
+        "DispatchMessageA",
+        "SetCursorPos",
+        "keybd_event",
+        "mouse_event",
+    ];
+    // What the hooks and the program saw: the keyboard hook's HC_ACTION
+    // calls at 0xA0, the last key it got at 0xA4, its HC_NOREMOVE calls
+    // at 0xA8; the keys the program got at 0xAC; the MOUSEHOOKSTRUCT of
+    // WM_LBUTTONDOWN at 0xB0; the clicks the program got at 0x80. A MSG
+    // at 0xC0.
+    let data = child_data(&[(0x10, "Static")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        let mut keyboard = a.create_label();
+        let mut mouse = a.create_label();
+        a.jmp(start)?;
+
+        // The keyboard hook: it throws every key away that is taken.
+        a.set_label(&mut keyboard)?;
+        let mut action = a.create_label();
+        let mut out = a.create_label();
+        a.cmp(dword_ptr(esp + 4), HC_NOREMOVE)?;
+        a.jne(action)?;
+        a.inc(dword_ptr(l.at(0xA8)))?;
+        a.jmp(out)?;
+        a.set_label(&mut action)?;
+        a.cmp(dword_ptr(esp + 4), 0)?;
+        a.jne(out)?;
+        a.inc(dword_ptr(l.at(0xA0)))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(l.at(0xA4)), eax)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)?;
+        a.set_label(&mut out)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+
+        // The mouse hook: it keeps WM_LBUTTONDOWN's MOUSEHOOKSTRUCT.
+        a.set_label(&mut mouse)?;
+        let mut pass = a.create_label();
+        a.cmp(dword_ptr(esp + 4), 0)?;
+        a.jne(pass)?;
+        a.cmp(dword_ptr(esp + 8), WM_LBUTTONDOWN)?;
+        a.jne(pass)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        for k in 0..4i32 {
+            a.mov(ecx, dword_ptr(eax + 4 * k))?;
+            a.mov(dword_ptr(l.at((0xB0 + 4 * k) as u32)), ecx)?;
+        }
+        a.set_label(&mut pass)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+
+        a.set_label(&mut start)?;
+        a.xor(ebx, ebx)?;
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, class, style, 0, 0, 200, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.push(esi)?;
+        a.call(f("SetFocus"))?;
+        pump(a, l, f, 0xC0)?;
+        a.call(f("GetCurrentThreadId"))?;
+        a.mov(edi, eax)?;
+        for (kind, proc) in [(WH_KEYBOARD, keyboard), (WH_MOUSE, mouse)] {
+            a.push(edi)?;
+            a.push(0)?;
+            push_label(a, proc)?;
+            a.push(kind)?;
+            a.call(f("SetWindowsHookExA"))?;
+        }
+        for flags in [0, KEYEVENTF_KEYUP] {
+            push_args(a, &[VK_A, 0, flags, 0])?;
+            a.call(f("keybd_event"))?;
+        }
+        push_args(a, &[50, 25])?;
+        a.call(f("SetCursorPos"))?;
+        for flags in [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP] {
+            push_args(a, &[flags, 0, 0, 0, 0])?;
+            a.call(f("mouse_event"))?;
+        }
+        let msg = l.at(0xC0) as i32;
+        push_args(a, &[msg, 0, 0, 0, PM_NOREMOVE])?;
+        a.call(f("PeekMessageA"))?;
+        let mut next = a.create_label();
+        let mut key = a.create_label();
+        let mut done = a.create_label();
+        a.set_label(&mut next)?;
+        push_args(a, &[msg, 0, 0, 0, PM_REMOVE])?;
+        a.call(f("PeekMessageA"))?;
+        a.test(eax, eax)?;
+        a.je(done)?;
+        a.mov(eax, dword_ptr(l.at(0xC4)))?;
+        a.cmp(eax, WM_KEYDOWN)?;
+        a.je(key)?;
+        a.cmp(eax, WM_KEYUP)?;
+        a.je(key)?;
+        a.cmp(eax, WM_LBUTTONDOWN)?;
+        a.jne(next)?;
+        a.inc(dword_ptr(l.at(0x80)))?;
+        a.jmp(next)?;
+        a.set_label(&mut key)?;
+        a.inc(dword_ptr(l.at(0xAC)))?;
+        a.jmp(next)?;
+        a.set_label(&mut done)?;
+        // Both keys went to the hook and none to the program.
+        a.cmp(dword_ptr(l.at(0xA0)), 2)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(l.at(0xA4)), VK_A)?;
+        bit_if(a, eq, 1)?;
+        a.cmp(dword_ptr(l.at(0xA8)), 0)?;
+        bit_if(a, ne, 2)?;
+        a.cmp(dword_ptr(l.at(0xAC)), 0)?;
+        bit_if(a, eq, 3)?;
+        // The click: its point on the screen, its window and HTCLIENT,
+        // and the program got it.
+        a.mov(eax, dword_ptr(l.at(0xB4)))?;
+        a.shl(eax, 16)?;
+        a.or(eax, dword_ptr(l.at(0xB0)))?;
+        a.cmp(eax, 25 << 16 | 50)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xB8)), esi)?;
+        bit_if(a, eq, 5)?;
+        a.cmp(dword_ptr(l.at(0xBC)), HTCLIENT)?;
+        bit_if(a, eq, 6)?;
+        a.cmp(dword_ptr(l.at(0x80)), 1)?;
+        bit_if(a, eq, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("input_hooks", &[("T.EXE", parent)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn a_keyboard_hook_that_peeks_with_the_programs_msg_doesnt_change_its_key() {
+    // T.EXE's keyboard hook peeks at the queue with the MSG the program
+    // takes its messages with, as a hook that reads a global MSG may.
+    // The program still gets A going down first: Windows fills the MSG
+    // of GetMessageA or PeekMessageA once the hooks have let the message
+    // through.
+    const WH_KEYBOARD: i32 = 2;
+    const VK_A: i32 = 0x41;
+    const KEYEVENTF_KEYUP: i32 = 2;
+    const WM_KEYDOWN: i32 = 0x0100;
+    const WM_KEYUP: i32 = 0x0101;
+    const PM_NOREMOVE: i32 = 0;
+    let kernel32 = ["GetCurrentThreadId", "ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "SetFocus",
+        "SetWindowsHookExA",
+        "PeekMessageA",
+        "DispatchMessageA",
+        "keybd_event",
+    ];
+    // The first key message the program got at 0xA0, its wParam at
+    // 0xA4. A MSG at 0xC0.
+    let data = child_data(&[(0x10, "Static")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let msg = l.at(0xC0) as i32;
+        let mut start = a.create_label();
+        let mut keyboard = a.create_label();
+        a.jmp(start)?;
+
+        a.set_label(&mut keyboard)?;
+        push_args(a, &[msg, 0, 0, 0, PM_NOREMOVE])?;
+        a.call(f("PeekMessageA"))?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+
+        a.set_label(&mut start)?;
+        a.xor(ebx, ebx)?;
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, class, style, 0, 0, 200, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.push(eax)?;
+        a.call(f("SetFocus"))?;
+        pump(a, l, f, 0xC0)?;
+        a.call(f("GetCurrentThreadId"))?;
+        a.push(eax)?;
+        a.push(0)?;
+        push_label(a, keyboard)?;
+        a.push(WH_KEYBOARD)?;
+        a.call(f("SetWindowsHookExA"))?;
+        for flags in [0, KEYEVENTF_KEYUP] {
+            push_args(a, &[VK_A, 0, flags, 0])?;
+            a.call(f("keybd_event"))?;
+        }
+        let mut next = a.create_label();
+        let mut key = a.create_label();
+        let mut done = a.create_label();
+        a.set_label(&mut next)?;
+        push_args(a, &[msg, 0, 0, 0, PM_REMOVE])?;
+        a.call(f("PeekMessageA"))?;
+        a.test(eax, eax)?;
+        a.je(done)?;
+        a.mov(eax, dword_ptr(l.at(0xC4)))?;
+        a.cmp(eax, WM_KEYDOWN)?;
+        a.je(key)?;
+        a.cmp(eax, WM_KEYUP)?;
+        a.jne(next)?;
+        a.set_label(&mut key)?;
+        a.mov(dword_ptr(l.at(0xA0)), eax)?;
+        a.mov(eax, dword_ptr(l.at(0xC8)))?;
+        a.mov(dword_ptr(l.at(0xA4)), eax)?;
+        a.set_label(&mut done)?;
+        a.cmp(dword_ptr(l.at(0xA0)), WM_KEYDOWN)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(l.at(0xA4)), VK_A)?;
+        bit_if(a, eq, 1)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("input_hook_peeks", &[("T.EXE", parent)]);
+    assert_eq!(code, 0x03, "the checks that failed: {:02b}", !code & 3);
 }
 
 #[test]
@@ -11568,6 +14285,131 @@ fn set_window_pos_without_changing_still_sends_changed_with_the_new_place() {
     assert_eq!(code, 0x7F, "the checks that failed: {:07b}", !code & 0x7F);
 }
 
+#[test]
+fn set_window_pos_to_where_a_window_already_is_sends_no_changed() {
+    // SetWindowPos that puts a window where it already is among its
+    // siblings adds SWP_NOZORDER after WM_WINDOWPOSCHANGING, so with
+    // SWP_NOSIZE | SWP_NOMOVE nothing changes and no
+    // WM_WINDOWPOSCHANGED comes: HWND_TOP for the first sibling,
+    // HWND_BOTTOM for the last, the sibling it already comes after and
+    // HWND_TOPMOST for a topmost first one (msg.c's
+    // WmSwitchNotMaximizedChild, recorded on Windows; Wine's
+    // fixup_swp_flags). A real move still sends it.
+    const WM_WINDOWPOSCHANGING: i32 = 0x0046;
+    const WM_WINDOWPOSCHANGED: i32 = 0x0047;
+    const WS_CHILD: i32 = 0x4000_0000;
+    const SWP_NOSIZE: i32 = 0x0001;
+    const SWP_NOMOVE: i32 = 0x0002;
+    const SWP_NOACTIVATE: i32 = 0x0010;
+    const HWND_TOP: i32 = 0;
+    const HWND_BOTTOM: i32 = 1;
+    const HWND_TOPMOST: i32 = -1;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "SetWindowPos",
+    ];
+    // What the window procedure saw: WM_WINDOWPOSCHANGING's count at
+    // 0xA0 and WM_WINDOWPOSCHANGED's at 0xA4; the frame at 0xB8. A
+    // WNDCLASSA at 0xE0, its procedure put in by the code.
+    let mut data = child_data(&[(0x10, "Frame")]);
+    data.resize(0x110, 0);
+    data[0xF0..0xF4].copy_from_slice(&BASE.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        for (message, at) in [(WM_WINDOWPOSCHANGING, 0xA0), (WM_WINDOWPOSCHANGED, 0xA4)] {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), message)?;
+            a.jne(other)?;
+            a.inc(dword_ptr(l.at(at)))?;
+            a.set_label(&mut other)?;
+        }
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0xE4)), eax)?;
+        a.mov(dword_ptr(l.at(0xE0 + 36)), l.at(0x10) as i32)?;
+        a.push(l.at(0xE0) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        let class = l.at(0x10) as i32;
+        let instance = BASE as i32;
+        // The frame, then its children A (in ESI) and B (in EDI).
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(
+            a,
+            &[0, class, class, style, 0, 0, 200, 200, 0, 0, instance, 0],
+        )?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(dword_ptr(l.at(0xB8)), eax)?;
+        let style = WS_CHILD | WS_VISIBLE;
+        for (id, reg) in [(1, esi), (2, edi)] {
+            push_args(
+                a,
+                &[0, class, class, style, 0, 0, 50, 50, 0, id, instance, 0],
+            )?;
+            a.mov(eax, dword_ptr(l.at(0xB8)))?;
+            a.mov(dword_ptr(esp + 32), eax)?;
+            a.call(f("CreateWindowExA"))?;
+            a.mov(reg, eax)?;
+        }
+        let flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE;
+        // Calls of SetWindowPos(hwnd, after, 0, 0, 0, 0, flags).
+        let swp = |a: &mut CodeAssembler, hwnd: AsmRegister32, after: Option<i32>| {
+            push_args(a, &[0, 0, 0, 0, flags])?;
+            match after {
+                Some(after) => a.push(after)?,
+                None => a.push(esi)?,
+            }
+            a.push(hwnd)?;
+            a.call(f("SetWindowPos"))
+        };
+        // A first, B after it.
+        swp(a, esi, Some(HWND_TOP))?;
+        swp(a, edi, None)?;
+        a.xor(ebx, ebx)?;
+        a.mov(dword_ptr(l.at(0xA0)), 0)?;
+        a.mov(dword_ptr(l.at(0xA4)), 0)?;
+        // Each call where the window already is (None: after A):
+        // WM_WINDOWPOSCHANGING only.
+        let calls = [
+            (esi, Some(HWND_TOP)),
+            (edi, Some(HWND_BOTTOM)),
+            (edi, None),
+        ];
+        for (bit, (hwnd, after)) in calls.into_iter().enumerate() {
+            swp(a, hwnd, after)?;
+            all_equal(a, l, &[(0xA0, bit as i32 + 1), (0xA4, 0)], bit as u32)?;
+        }
+        // B to the top moves it: both messages.
+        swp(a, edi, Some(HWND_TOP))?;
+        all_equal(a, l, &[(0xA0, 4), (0xA4, 1)], 3)?;
+        // HWND_TOPMOST makes it topmost, a change; once more is none.
+        for bit in [4, 5] {
+            swp(a, edi, Some(HWND_TOPMOST))?;
+            all_equal(a, l, &[(0xA0, bit + 1), (0xA4, 2)], bit as u32)?;
+        }
+        // A after B, which it already comes after: B is topmost and A
+        // isn't, but children have no topmost band, so nothing changes.
+        // (A top-level window placed so becomes topmost on Windows 98
+        // SE, a change: win32_zorder_tests.rs.)
+        a.push(flags)?;
+        push_args(a, &[0, 0, 0, 0])?;
+        a.push(edi)?;
+        a.push(esi)?;
+        a.call(f("SetWindowPos"))?;
+        all_equal(a, l, &[(0xA0, 7), (0xA4, 2)], 6)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (code, _) = run("swp_already_there", program);
+    assert_eq!(code, 0x7F, "the checks that failed: {:07b}", !code & 0x7F);
+}
+
 /// Set bit `bit` of EBX if every dword at the data offsets in `checks`
 /// holds its value.
 fn all_equal(
@@ -11815,6 +14657,377 @@ fn a_dialog_selects_the_edit_text_it_gives_the_focus_as_windows_98_does() {
     });
     let (code, _) = run("dialog_edit_selection", program);
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
+}
+
+const WS_HSCROLL: i32 = 0x0010_0000;
+const WS_VSCROLL: i32 = 0x0020_0000;
+/// SM_CXVSCROLL and SM_CYHSCROLL.
+const SCROLL_BAR: i32 = 16;
+
+/// Run a 640x480 popup holding an MDI client of `style` that fills it,
+/// with a child of size `first` at the client's corner.
+/// WM_MDIICONARRANGE has the client set its scroll bars
+/// (CalcChildScroll); then the child takes the size `then` and the
+/// client sets them again. Checks that the three windows were made and
+/// that the client's client area is `areas[0]` and then `areas[1]`.
+fn check_mdi_scroll_bars(
+    test: &str,
+    style: i32,
+    first: (i32, i32),
+    then: (i32, i32),
+    areas: [(i32, i32); 2],
+) {
+    const WS_CHILD: i32 = 0x4000_0000;
+    const WM_MDIICONARRANGE: i32 = 0x0228;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "SendMessageA",
+        "GetClientRect",
+        "MoveWindow",
+    ];
+    // The frame, the client and the child at 0, 4 and 8, the classes'
+    // names at 0x10 and 0x20, a CLIENTCREATESTRUCT at 0x30 (no window
+    // menu, the first child's id 1), and the client's client rectangle
+    // at 0x40 and then at 0x50.
+    let mut data = vec![0; 0x60];
+    put(&mut data, 0x10, b"Static");
+    put(&mut data, 0x20, b"MDICLIENT");
+    put(&mut data, 0x34, &1u32.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let at = |offset: u32| l.at(offset) as i32;
+        a.xor(ebx, ebx)?;
+        let client = WS_CHILD | WS_VISIBLE | style;
+        let windows = [
+            (0x10, WS_POPUP | WS_VISIBLE, (640, 480), None, 0),
+            (0x20, client, (640, 480), Some(0), at(0x30)),
+            (0x10, WS_CHILD | WS_VISIBLE, first, Some(4), 0),
+        ];
+        for (slot, (class, style, (w, h), parent, param)) in (0..).step_by(4).zip(windows) {
+            let instance = BASE as i32;
+            push_args(
+                a,
+                &[0, at(class), 0, style, 0, 0, w, h, 0, 0, instance, param],
+            )?;
+            if let Some(parent) = parent {
+                a.mov(eax, dword_ptr(l.at(parent)))?;
+                a.mov(dword_ptr(esp + 32), eax)?;
+            }
+            a.call(f("CreateWindowExA"))?;
+            a.mov(dword_ptr(l.at(slot)), eax)?;
+        }
+        let mut missing = a.create_label();
+        for slot in [0, 4, 8] {
+            a.cmp(dword_ptr(l.at(slot)), 0)?;
+            a.je(missing)?;
+        }
+        a.or(ebx, 1)?;
+        a.set_label(&mut missing)?;
+        // The client sets its bars, and its client rectangle goes to
+        // `rect`.
+        let arrange = |a: &mut CodeAssembler, rect: u32| -> Result<(), IcedError> {
+            push_args(a, &[WM_MDIICONARRANGE, 0, 0])?;
+            a.push(dword_ptr(l.at(4)))?;
+            a.call(f("SendMessageA"))?;
+            a.push(at(rect))?;
+            a.push(dword_ptr(l.at(4)))?;
+            a.call(f("GetClientRect"))
+        };
+        arrange(a, 0x40)?;
+        let (w, h) = then;
+        push_args(a, &[0, 0, w, h, 1])?;
+        a.push(dword_ptr(l.at(8)))?;
+        a.call(f("MoveWindow"))?;
+        arrange(a, 0x50)?;
+        for (bit, (rect, (w, h))) in (1..).zip([0x40, 0x50].into_iter().zip(areas)) {
+            let checks = [(rect, 0), (rect + 4, 0), (rect + 8, w), (rect + 12, h)];
+            all_equal(a, l, &checks, bit)?;
+        }
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (code, _) = run(test, program);
+    assert_eq!(code, 7, "the checks that failed: {:03b}", !code & 7);
+}
+
+#[test]
+fn an_mdi_client_without_scroll_styles_shows_no_scroll_bars() {
+    // Windows sets only the bars a client was made with: Fields of
+    // Fire's child is two pixels past its client, which has neither.
+    let areas = [(640, 480), (640, 480)];
+    check_mdi_scroll_bars("mdi_no_scroll", 0, (700, 500), (800, 600), areas);
+}
+
+#[test]
+fn an_mdi_clients_scroll_bars_come_back_after_the_children_fit() {
+    // The child fits at first, so both bars go, and their style bits
+    // with them; the child past the edges brings them back.
+    let style = WS_HSCROLL | WS_VSCROLL;
+    let areas = [(640, 480), (640 - SCROLL_BAR, 480 - SCROLL_BAR)];
+    check_mdi_scroll_bars("mdi_scroll", style, (100, 100), (700, 500), areas);
+}
+
+#[test]
+fn an_mdi_client_with_only_a_vertical_bar_gets_no_horizontal_one() {
+    // Windows keeps a flag for each bar the client was made with (Wine
+    // sets both bars if the client has either style): the child past the
+    // right edge brings no horizontal bar.
+    let areas = [(640, 480), (640 - SCROLL_BAR, 480)];
+    check_mdi_scroll_bars("mdi_vscroll", WS_VSCROLL, (100, 100), (700, 500), areas);
+}
+
+#[test]
+fn an_mdi_child_brought_to_the_top_in_a_hidden_frame_is_the_active_one() {
+    // As MFC's CMDIChildWnd makes a document's frame while the main
+    // frame is still hidden (This Means War!): WM_MDICREATE of a hidden
+    // child, ShowWindow(SW_SHOW), which with the frame hidden only sets
+    // WS_VISIBLE, then BringWindowToTop. Its SetWindowPos sends the child
+    // WM_CHILDACTIVATE, and DefMDIChildProc makes it the client's active
+    // child, which WM_MDIGETACTIVE then returns.
+    const WS_CHILD: i32 = 0x4000_0000;
+    const WM_MDICREATE: i32 = 0x0220;
+    const WM_MDIGETACTIVE: i32 = 0x0229;
+    const SW_SHOW: i32 = 5;
+    const CW_USEDEFAULT: u32 = 0x8000_0000;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "SendMessageA",
+        "ShowWindow",
+        "BringWindowToTop",
+        "DefMDIChildProcA",
+    ];
+    // The frame, the client and the child at 0, 4 and 8, the active
+    // child at 0x0C, the classes' names at 0x10, 0x20 and 0x88, a
+    // CLIENTCREATESTRUCT at 0x30, an MDICREATESTRUCTA at 0x38 (its class
+    // set by the code, no title, the instance, default places, no style)
+    // and a WNDCLASSA at 0x60.
+    let mut data = vec![0; 0x90];
+    put(&mut data, 0x10, b"Static");
+    put(&mut data, 0x20, b"MDICLIENT");
+    put(&mut data, 0x88, b"Kid");
+    put(&mut data, 0x34, &1u32.to_le_bytes());
+    let mdi_create = [
+        0,
+        0,
+        BASE,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+    ];
+    for (i, v) in mdi_create.iter().enumerate() {
+        put(&mut data, 0x38 + 4 * i, &v.to_le_bytes());
+    }
+    put(&mut data, 0x60 + 16, &BASE.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let at = |offset: u32| l.at(offset) as i32;
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The child's window procedure.
+        a.jmp(f("DefMDIChildProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0x60 + 4)), eax)?;
+        a.mov(dword_ptr(l.at(0x60 + 36)), at(0x88))?;
+        a.mov(dword_ptr(l.at(0x38)), at(0x88))?;
+        a.push(at(0x60))?;
+        a.call(f("RegisterClassA"))?;
+        a.xor(ebx, ebx)?;
+        let instance = BASE as i32;
+        // The frame, hidden, and the client in it.
+        let frame = [0, at(0x10), 0, WS_POPUP, 0, 0, 640, 480, 0, 0, instance, 0];
+        push_args(a, &frame)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(dword_ptr(l.at(0)), eax)?;
+        let client = WS_CHILD | WS_VISIBLE;
+        let client = [
+            0,
+            at(0x20),
+            0,
+            client,
+            0,
+            0,
+            640,
+            480,
+            0,
+            0,
+            instance,
+            at(0x30),
+        ];
+        push_args(a, &client)?;
+        a.mov(eax, dword_ptr(l.at(0)))?;
+        a.mov(dword_ptr(esp + 32), eax)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(dword_ptr(l.at(4)), eax)?;
+        // The child, made hidden by the client.
+        push_args(a, &[WM_MDICREATE, 0, at(0x38)])?;
+        a.push(dword_ptr(l.at(4)))?;
+        a.call(f("SendMessageA"))?;
+        a.mov(dword_ptr(l.at(8)), eax)?;
+        let mut missing = a.create_label();
+        for slot in [0, 4, 8] {
+            a.cmp(dword_ptr(l.at(slot)), 0)?;
+            a.je(missing)?;
+        }
+        a.or(ebx, 1)?;
+        a.push(SW_SHOW)?;
+        a.push(dword_ptr(l.at(8)))?;
+        a.call(f("ShowWindow"))?;
+        a.push(dword_ptr(l.at(8)))?;
+        a.call(f("BringWindowToTop"))?;
+        push_args(a, &[WM_MDIGETACTIVE, 0, 0])?;
+        a.push(dword_ptr(l.at(4)))?;
+        a.call(f("SendMessageA"))?;
+        a.mov(dword_ptr(l.at(0x0C)), eax)?;
+        // Bit 2: the child is the active one.
+        a.cmp(eax, dword_ptr(l.at(8)))?;
+        a.jne(missing)?;
+        a.or(ebx, 2)?;
+        a.set_label(&mut missing)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (code, _) = run("mdi_child_bring_to_top", program);
+    assert_eq!(code, 3, "the checks that failed: {:02b}", !code & 3);
+}
+
+#[test]
+fn wm_mdiactivate_makes_the_child_the_active_one() {
+    // The MDI client answers WM_MDIACTIVATE with SetWindowPos(SWP_NOSIZE
+    // | SWP_NOMOVE) of the child, whose WM_CHILDACTIVATE makes
+    // DefMDIChildProc activate it (Wine's MDIClientWndProc; msg.c's
+    // WmSwitchChild, recorded on Windows, has the WM_CHILDACTIVATE).
+    const WS_CHILD: i32 = 0x4000_0000;
+    const WM_MDICREATE: i32 = 0x0220;
+    const WM_MDIACTIVATE: i32 = 0x0222;
+    const WM_MDIGETACTIVE: i32 = 0x0229;
+    const CW_USEDEFAULT: u32 = 0x8000_0000;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "SendMessageA",
+        "DefMDIChildProcA",
+    ];
+    // The frame, the client and the two children at 0, 4, 8 and 0x0C,
+    // the classes' names at 0x10, 0x20 and 0x88, a CLIENTCREATESTRUCT at
+    // 0x30, an MDICREATESTRUCTA at 0x38 (its class set by the code, no
+    // title, the instance, default places, WS_VISIBLE) and a WNDCLASSA
+    // at 0x60.
+    let mut data = vec![0; 0x90];
+    put(&mut data, 0x10, b"Static");
+    put(&mut data, 0x20, b"MDICLIENT");
+    put(&mut data, 0x88, b"Kid");
+    put(&mut data, 0x34, &1u32.to_le_bytes());
+    let mdi_create = [
+        0,
+        0,
+        BASE,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        WS_VISIBLE as u32,
+    ];
+    for (i, v) in mdi_create.iter().enumerate() {
+        put(&mut data, 0x38 + 4 * i, &v.to_le_bytes());
+    }
+    put(&mut data, 0x60 + 16, &BASE.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let at = |offset: u32| l.at(offset) as i32;
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The children's window procedure.
+        a.jmp(f("DefMDIChildProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0x60 + 4)), eax)?;
+        a.mov(dword_ptr(l.at(0x60 + 36)), at(0x88))?;
+        a.mov(dword_ptr(l.at(0x38)), at(0x88))?;
+        a.push(at(0x60))?;
+        a.call(f("RegisterClassA"))?;
+        a.xor(ebx, ebx)?;
+        let instance = BASE as i32;
+        // The frame, shown, and the client in it.
+        let frame = [
+            0,
+            at(0x10),
+            0,
+            WS_POPUP | WS_VISIBLE,
+            0,
+            0,
+            640,
+            480,
+            0,
+            0,
+            instance,
+            0,
+        ];
+        push_args(a, &frame)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(dword_ptr(l.at(0)), eax)?;
+        let client = WS_CHILD | WS_VISIBLE;
+        let client = [
+            0,
+            at(0x20),
+            0,
+            client,
+            0,
+            0,
+            640,
+            480,
+            0,
+            0,
+            instance,
+            at(0x30),
+        ];
+        push_args(a, &client)?;
+        a.mov(eax, dword_ptr(l.at(0)))?;
+        a.mov(dword_ptr(esp + 32), eax)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(dword_ptr(l.at(4)), eax)?;
+        // Two children, shown: the second is the active one.
+        for slot in [8, 0x0C] {
+            push_args(a, &[WM_MDICREATE, 0, at(0x38)])?;
+            a.push(dword_ptr(l.at(4)))?;
+            a.call(f("SendMessageA"))?;
+            a.mov(dword_ptr(l.at(slot)), eax)?;
+        }
+        let mut missing = a.create_label();
+        for slot in [0, 4, 8, 0x0C] {
+            a.cmp(dword_ptr(l.at(slot)), 0)?;
+            a.je(missing)?;
+        }
+        push_args(a, &[WM_MDIGETACTIVE, 0, 0])?;
+        a.push(dword_ptr(l.at(4)))?;
+        a.call(f("SendMessageA"))?;
+        // Bit 1: the second child was the active one.
+        a.cmp(eax, dword_ptr(l.at(0x0C)))?;
+        a.jne(missing)?;
+        a.or(ebx, 1)?;
+        a.push(0)?;
+        a.push(dword_ptr(l.at(8)))?;
+        a.push(WM_MDIACTIVATE)?;
+        a.push(dword_ptr(l.at(4)))?;
+        a.call(f("SendMessageA"))?;
+        push_args(a, &[WM_MDIGETACTIVE, 0, 0])?;
+        a.push(dword_ptr(l.at(4)))?;
+        a.call(f("SendMessageA"))?;
+        // Bit 2: WM_MDIACTIVATE made the first one the active one.
+        a.cmp(eax, dword_ptr(l.at(8)))?;
+        a.jne(missing)?;
+        a.or(ebx, 2)?;
+        a.set_label(&mut missing)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (code, _) = run("mdi_activate", program);
+    assert_eq!(code, 3, "the checks that failed: {:02b}", !code & 3);
 }
 
 #[test]
@@ -14543,8 +17756,10 @@ fn icinfo_lists_the_installed_codecs() {
     let upper = u32::from_le_bytes(*b"CVID");
     assert_eq!(info("icinfo_cvid", vidc, upper, None), 1);
     assert_eq!(info("icinfo_index", vidc, 0, Some(8)), b'c');
-    assert_eq!(info("icinfo_past", vidc, 5, None), 0);
-    assert_eq!(info("icinfo_msvc", vidc, u32::from_le_bytes(*b"msvc"), None), 0);
+    assert_eq!(info("icinfo_last", vidc, 5, Some(8)), b'm');
+    assert_eq!(info("icinfo_past", vidc, 6, None), 0);
+    assert_eq!(info("icinfo_msvc", vidc, u32::from_le_bytes(*b"MSVC"), None), 1);
+    assert_eq!(info("icinfo_mrle", vidc, u32::from_le_bytes(*b"mrle"), None), 0);
     assert_eq!(info("icinfo_vids", u32::from_le_bytes(*b"vids"), iv41, None), 0);
 }
 
@@ -14592,10 +17807,179 @@ fn icopen_opens_installed_decompressors() {
     assert_eq!(ic_open("icopen_iv50", vidc, b"IV50", ICMODE_DECOMPRESS), 0xF8);
     assert_eq!(ic_open("icopen_cvid", vidc, b"cvid", ICMODE_QUERY), 0xF8);
     assert_eq!(ic_open("icopen_vidc_upper", b"VIDC", b"iv41", ICMODE_FASTDECOMPRESS), 0xF8);
-    assert_eq!(ic_open("icopen_msvc", vidc, b"MSVC", ICMODE_DECOMPRESS), 0xEE);
+    assert_eq!(ic_open("icopen_msvc", vidc, b"MSVC", ICMODE_DECOMPRESS), 0xF8);
+    assert_eq!(ic_open("icopen_mrle", vidc, b"MRLE", ICMODE_DECOMPRESS), 0xEE);
     assert_eq!(ic_open("icopen_vids", b"vids", b"IV50", ICMODE_DECOMPRESS), 0xEE);
     assert_eq!(ic_open("icopen_compress", vidc, b"IV50", ICMODE_COMPRESS), 0xEE);
     assert_eq!(ic_open("icopen_draw", vidc, b"IV50", ICMODE_DRAW), 0xEE);
+}
+
+/// A BITMAPINFOHEADER of a Microsoft Video 1 stream of 8 by 4 pixels and
+/// `bits` bits, with an 8-bit one's two colours: blue and red.
+fn cram_info(bits: u16) -> Vec<u8> {
+    let mut info = bitmap_info(8, 4, bits, b"CRAM");
+    if bits == 8 {
+        info[32] = 2;
+        info.extend_from_slice(&[0xFF, 0, 0, 0, 0, 0, 0xFF, 0]);
+    }
+    info
+}
+
+/// What `ICLocate(kind, handler, input, output, mode)` gives for a
+/// stream of `input` and an output of `output` (none for None): 1 for a
+/// handle, which ICClose then closes with ICERR_OK, 0 for none.
+fn ic_locate(
+    test: &str,
+    kind: &[u8; 4],
+    handler: u32,
+    input: &[u8],
+    output: Option<&[u8]>,
+    mode: i32,
+) -> u8 {
+    let imports: &[(&str, &[&str])] = &[("MSVFW32.DLL", &["ICLocate", "ICClose"])];
+    let mut data = input.to_vec();
+    data.resize(0x100, 0);
+    data.extend_from_slice(output.unwrap_or_default());
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut none = a.create_label();
+        a.push(mode)?;
+        a.push(if output.is_some() { l.at(0x100) as i32 } else { 0 })?;
+        a.push(l.at(0) as i32)?;
+        a.push(handler as i32)?;
+        a.push(i32::from_le_bytes(*kind))?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.jz(none)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.cmp(eax, 0)?;
+        a.mov(eax, 1)?;
+        a.jz(none)?;
+        a.mov(eax, 0xEE)?;
+        a.set_label(&mut none)?;
+        a.ret()
+    });
+    run(test, exe).0
+}
+
+/// ICLocate finds Microsoft Video 1 for a CRAM stream as Windows 98
+/// SE's MSVFW32 finds msvidc32.dll, as Biosys looks for the decoder of
+/// its films: by the stream's handler, or by its biCompression when the
+/// handler names no codec that takes it, with or without an output
+/// format. It finds none for an output the codec doesn't give (a 16-bit
+/// stream as 8 bits, another size), for a mode that compresses, and for
+/// a type other than `vidc`.
+#[test]
+fn iclocate_finds_microsoft_video_1_for_cram_streams() {
+    const ICMODE_COMPRESS: i32 = 1;
+    const ICMODE_DECOMPRESS: i32 = 2;
+    let (vidc, msvc) = (b"vidc", u32::from_le_bytes(*b"msvc"));
+    let (cram8, cram16) = (cram_info(8), cram_info(16));
+    let rgb = |w, h, bits| bitmap_info(w, h, bits, &[0; 4]);
+    let locate = |test, handler, input: &[u8], output: Option<&[u8]>, mode| {
+        ic_locate(test, vidc, handler, input, output, mode)
+    };
+    let out8 = rgb(8, 4, 8);
+    assert_eq!(locate("iclocate_msvc", msvc, &cram8, Some(&out8), ICMODE_DECOMPRESS), 1);
+    let cvid = u32::from_le_bytes(*b"cvid");
+    assert_eq!(locate("iclocate_by_bi", cvid, &cram8, Some(&out8), ICMODE_DECOMPRESS), 1);
+    assert_eq!(locate("iclocate_any", 0, &cram16, None, ICMODE_DECOMPRESS), 1);
+    let out24 = rgb(8, 4, 24);
+    assert_eq!(locate("iclocate_24", msvc, &cram8, Some(&out24), ICMODE_DECOMPRESS), 1);
+    let top_down16 = bitmap_info(8, -4i32 as u32, 16, &[0; 4]);
+    let to16 = Some(&top_down16[..]);
+    assert_eq!(locate("iclocate_16", msvc, &cram16, to16, ICMODE_DECOMPRESS), 1);
+    assert_eq!(locate("iclocate_16_to_8", msvc, &cram16, Some(&out8), ICMODE_DECOMPRESS), 0);
+    let large = rgb(16, 4, 8);
+    assert_eq!(locate("iclocate_size", msvc, &cram8, Some(&large), ICMODE_DECOMPRESS), 0);
+    assert_eq!(locate("iclocate_compress", msvc, &cram8, None, ICMODE_COMPRESS), 0);
+    let vids = ic_locate("iclocate_vids", b"vids", msvc, &cram8, None, ICMODE_DECOMPRESS);
+    assert_eq!(vids, 0);
+}
+
+/// ICDecompress decodes Microsoft Video 1 frames onto the program's
+/// buffer, as Biosys plays its films: the codec ICLocate found draws an
+/// 8-bit frame's palette indexes as they are, and the blocks a frame
+/// skips keep the pixels the buffer had. Through ICSendMessage,
+/// ICM_DECOMPRESS_QUERY takes the pair and ICM_DECOMPRESS_GET_FORMAT
+/// gives the 8-bit format with the stream's colours. The program ends
+/// with a bit set for each check that held.
+#[test]
+fn icdecompress_draws_microsoft_video_1_frames_in_place() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let msvfw32: &[&str] = &["ICLocate", "ICDecompress", "ICSendMessage", "ICClose"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
+    const OUT: usize = 0x100;
+    const FRAMES: usize = 0x200;
+    const BITS: usize = 0x300;
+    const FORMAT: usize = 0x400;
+    let mut data = cram_info(8);
+    data.resize(OUT, 0);
+    data.extend(bitmap_info(8, 4, 8, &[0; 4]));
+    data.resize(FRAMES, 0);
+    // A key frame: the left block colour 1, the right one two colours,
+    // 7 for the set bits of 0x0F21 and 9 for the others.
+    data.extend_from_slice(&[1, 0x80, 0x21, 0x0F, 7, 9]);
+    data.resize(FRAMES + 0x10, 0);
+    // The next: the left block skipped, the right one colour 0x33.
+    data.extend_from_slice(&[1, 0x84, 0x33, 0x80]);
+    data.resize(BITS, 0);
+    data.extend_from_slice(&[0xCC; 32]);
+    data.resize(FORMAT + 0x500, 0);
+    const ICM_DECOMPRESS_GET_FORMAT: i32 = 0x400A;
+    const ICM_DECOMPRESS_QUERY: i32 = 0x400B;
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = msvfw32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let at = |offset: usize| l.at(offset as u32) as i32;
+        a.xor(ebx, ebx)?;
+        push_args(a, &[i32::from_le_bytes(*b"vidc"), 0, at(0), at(OUT), 2])?;
+        a.call(f("ICLocate"))?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.setnz(bl)?;
+        let decompress = |a: &mut CodeAssembler, frame: usize| {
+            push_args(a, &[0, 0, at(0), at(frame), at(OUT), at(BITS)])?;
+            a.mov(dword_ptr(esp), esi)?;
+            a.call(f("ICDecompress"))?;
+            a.add(esp, 24)?;
+            a.cmp(eax, 0)
+        };
+        let row = |y: u32, x: u32| dword_ptr(l.at(BITS as u32 + 8 * y + x));
+        decompress(a, FRAMES)?;
+        bit_if_equal(a, 1)?;
+        // The bottom row: 1 four times, then 7, 9, 9, 9.
+        a.cmp(row(0, 0), 0x0101_0101)?;
+        bit_if_equal(a, 2)?;
+        a.cmp(row(0, 4), 0x0909_0907)?;
+        bit_if_equal(a, 3)?;
+        // The top row after the next frame: 1s kept, then 0x33s.
+        decompress(a, FRAMES + 0x10)?;
+        a.cmp(row(3, 0), 0x0101_0101)?;
+        bit_if_equal(a, 4)?;
+        a.cmp(row(3, 4), 0x3333_3333)?;
+        bit_if_equal(a, 5)?;
+        push_args(a, &[0, ICM_DECOMPRESS_QUERY, at(0), at(OUT)])?;
+        a.mov(dword_ptr(esp), esi)?;
+        a.call(f("ICSendMessage"))?;
+        a.cmp(eax, 0)?;
+        bit_if_equal(a, 6)?;
+        // The format with the stream's colours: the second is red.
+        push_args(a, &[0, ICM_DECOMPRESS_GET_FORMAT, at(0), at(FORMAT)])?;
+        a.mov(dword_ptr(esp), esi)?;
+        a.call(f("ICSendMessage"))?;
+        a.cmp(dword_ptr(l.at(FORMAT as u32 + 44)), 0xFF_0000)?;
+        bit_if_equal(a, 7)?;
+        a.push(esi)?;
+        a.call(f("ICClose"))?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family("icdecompress_cram", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
 /// A program linked with MFC's OLE support imports OLEDLG.DLL's
@@ -14731,4 +18115,1418 @@ fn an_olepro32_function_not_written_fails_guest_code_with_e_notimpl() {
     });
     let (code, out) = run_with_guest_dll("olepro32_guest", exe, "OLEUSER.DLL", dll, false);
     assert_eq!(code, 3, "the checks that failed: {:02b} {out}", !code & 3);
+}
+
+/// A version 3.0 FNT raster font of the face `face`, `height` pixels
+/// high, with the characters 20h to 22h: a blank 3 pixels wide, a bar 2
+/// wide and a glyph 9 wide, as a .FON file's RT_FONT resource holds it.
+fn fnt(face: &str, height: u16) -> Vec<u8> {
+    let mut d = vec![0u8; 0x94];
+    d[0..2].copy_from_slice(&0x300u16.to_le_bytes());
+    d[0x4A..0x4C].copy_from_slice(&(height - 2).to_le_bytes());
+    d[0x4C..0x4E].copy_from_slice(&1u16.to_le_bytes());
+    d[0x53..0x55].copy_from_slice(&700u16.to_le_bytes());
+    d[0x58..0x5A].copy_from_slice(&height.to_le_bytes());
+    d[0x5A] = 0x21; // FF_SWISS, variable pitch
+    d[0x5B..0x5D].copy_from_slice(&4u16.to_le_bytes());
+    d[0x5F] = 0x20;
+    d[0x60] = 0x22;
+    // Each character's width and where its bits are, and the sentinel.
+    let widths = [3u16, 2, 9, 0];
+    let columns = [1usize, 1, 2, 1];
+    let start = d.len() + 6 * widths.len();
+    let mut bits = Vec::new();
+    for (&w, &c) in widths.iter().zip(&columns) {
+        d.extend(w.to_le_bytes());
+        d.extend(((start + bits.len()) as u32).to_le_bytes());
+        bits.extend(vec![0xC0u8; c * height as usize]);
+    }
+    d.extend(bits);
+    let face_at = d.len() as u32;
+    d[0x69..0x6D].copy_from_slice(&face_at.to_le_bytes());
+    d.extend(face.as_bytes());
+    d.push(0);
+    let size = d.len() as u32;
+    d[2..6].copy_from_slice(&size.to_le_bytes());
+    d
+}
+
+/// A .FON file: a 16-bit NE module whose RT_FONT resources are `fonts`.
+fn fon(fonts: &[Vec<u8>]) -> Vec<u8> {
+    let ne = 0x40;
+    let mut d = vec![0u8; ne + 0x40];
+    d[0..2].copy_from_slice(b"MZ");
+    d[0x3C..0x40].copy_from_slice(&(ne as u32).to_le_bytes());
+    d[ne..ne + 2].copy_from_slice(b"NE");
+    d[ne + 0x24..ne + 0x26].copy_from_slice(&0x40u16.to_le_bytes());
+    // The resource table: an alignment shift of 4, one type (RT_FONT)
+    // with an entry for each font, and the zero type that ends it.
+    d.extend(4u16.to_le_bytes());
+    d.extend(0x8008u16.to_le_bytes());
+    d.extend((fonts.len() as u16).to_le_bytes());
+    d.extend([0; 4]);
+    let entries = d.len();
+    d.resize(entries + 12 * fonts.len() + 2, 0);
+    for (i, f) in fonts.iter().enumerate() {
+        let at = d.len().next_multiple_of(16);
+        let e = entries + 12 * i;
+        d[e..e + 2].copy_from_slice(&((at >> 4) as u16).to_le_bytes());
+        d[e + 2..e + 4].copy_from_slice(&(f.len().div_ceil(16) as u16).to_le_bytes());
+        d.resize(at, 0);
+        d.extend(f);
+    }
+    d
+}
+
+/// A program adds F.FON, a file of two sizes of the face "Test Face",
+/// with AddFontResourceA, measures two characters in a font of the face
+/// 12 pixels high and counts the sizes EnumFontsA lists of the face. Its
+/// exit code: the width in the low 4 bits, the sizes listed in the next
+/// 2, and the fonts AddFontResourceA added in the 2 above them.
+#[test]
+fn a_font_file_a_program_adds_is_listed_and_drawn() {
+    let names: &[&str] = &[
+        "AddFontResourceA",
+        "CreateCompatibleDC",
+        "CreateFontIndirectA",
+        "SelectObject",
+        "GetTextExtentPoint32A",
+        "EnumFontsA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names)];
+    // The file's name at 0, a LOGFONTA at 0x10, the text at 0x50, a SIZE
+    // at 0x58, the count of sizes listed at 0x60 and the face at 0x64.
+    let mut data = b"F.FON\0".to_vec();
+    data.resize(0x10, 0);
+    data.extend(12i32.to_le_bytes());
+    data.resize(0x10 + 28, 0);
+    data.extend(b"Test Face");
+    data.resize(0x50, 0);
+    data.extend(b"!\"");
+    data.resize(0x64, 0);
+    data.extend(b"Test Face\0");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut proc = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.push(l.at(0) as i32)?;
+        a.call(f("AddFontResourceA"))?;
+        a.shl(eax, 6)?;
+        a.or(ebx, eax)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(esi, eax)?;
+        a.push(l.at(0x10) as i32)?;
+        a.call(f("CreateFontIndirectA"))?;
+        a.push(eax)?;
+        a.push(esi)?;
+        a.call(f("SelectObject"))?;
+        a.push(l.at(0x58) as i32)?;
+        a.push(2)?;
+        a.push(l.at(0x50) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetTextExtentPoint32A"))?;
+        a.or(ebx, dword_ptr(l.at(0x58)))?;
+        a.push(0)?;
+        push_label(a, proc)?;
+        a.push(l.at(0x64) as i32)?;
+        a.push(esi)?;
+        a.call(f("EnumFontsA"))?;
+        a.mov(eax, dword_ptr(l.at(0x60)))?;
+        a.shl(eax, 4)?;
+        a.or(eax, ebx)?;
+        a.ret()?;
+        // The callback: count the font, go on.
+        a.set_label(&mut proc)?;
+        a.inc(dword_ptr(l.at(0x60)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)
+    });
+    let file = fon(&[fnt("Test Face", 12), fnt("Test Face", 24)]);
+    let mut cpu = machine_with("font_file", &[("T.EXE", exe), ("F.FON", file)]);
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    // Two fonts added, both sizes listed, and "!\"" 2 + 9 pixels wide.
+    assert_eq!(cpu.errorlevel, 2 << 6 | 2 << 4 | 11);
+}
+
+/// A program asks CreateScalableFontResourceA for a .FOT of `ttf`, with
+/// the last error set to 55h before, and ends with the result in bit 7
+/// and the last error after it below that.
+fn scalable_font_resource(test: &str, ttf: &[u8]) -> u8 {
+    let imports: &[(&str, &[&str])] = &[
+        ("GDI32.DLL", &["CreateScalableFontResourceA"]),
+        ("KERNEL32.DLL", &["GetLastError", "SetLastError"]),
+    ];
+    let mut data = b"Q.FOT\0".to_vec();
+    data.resize(0x10, 0);
+    data.extend(ttf);
+    data.push(0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        a.push(0x55)?;
+        a.call(l.import(2))?;
+        a.push(0)?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.shl(eax, 7)?;
+        a.mov(ebx, eax)?;
+        a.call(l.import(1))?;
+        a.or(eax, ebx)?;
+        a.ret()
+    });
+    let file = fon(&[fnt("Test Face", 12)]);
+    let mut cpu = machine_with(test, &[("T.EXE", exe), ("F.FON", file)]);
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    cpu.errorlevel
+}
+
+/// Windows 98 SE's CreateScalableFontResourceA fails for a file that
+/// isn't TrueType (a .FON here) without setting an error, and for a file
+/// that isn't there with ERROR_FILE_NOT_FOUND (2). It writes no .FOT
+/// either way.
+#[test]
+fn create_scalable_font_resource_takes_only_truetype() {
+    assert_eq!(scalable_font_resource("scalable_font", b"F.FON"), 0x55);
+    assert_eq!(scalable_font_resource("scalable_missing", b"NONE.TTF"), 2);
+}
+
+/// An argument for `call_pushing`: a number or a register's value.
+#[derive(Clone, Copy)]
+enum Pushed {
+    Imm(i32),
+    Reg(AsmRegister32),
+}
+
+/// Call `function` with `args`, pushed last first, as stdcall takes them.
+fn call_pushing(
+    a: &mut CodeAssembler,
+    function: AsmMemoryOperand,
+    args: &[Pushed],
+) -> Result<(), IcedError> {
+    for &arg in args.iter().rev() {
+        match arg {
+            Pushed::Imm(v) => a.push(v)?,
+            Pushed::Reg(r) => a.push(r)?,
+        }
+    }
+    a.call(function)
+}
+
+/// WinG's WING32.DLL, which 32-bit games of 1995 import and their setups
+/// installed: WinGRecommendDIBFormat gives an 8-bit top-down format;
+/// WinGCreateBitmap makes a DIB section of a BITMAPINFO and writes its
+/// bits' address, which WinGGetDIBPointer gives with the header;
+/// WinGBitBlt and WinGStretchBlt copy between two WinG DCs; the colour
+/// table functions read and write the selected bitmap's table; and the
+/// halftone palette and brush are made. The program ends with the
+/// number of the first check that went wrong, or 0.
+#[test]
+fn wing32_makes_dib_bitmaps_and_blits_between_them() {
+    use Pushed::{Imm, Reg};
+    let wing: &[&str] = &[
+        "WinGRecommendDIBFormat",
+        "WinGCreateDC",
+        "WinGCreateBitmap",
+        "WinGGetDIBPointer",
+        "WinGBitBlt",
+        "WinGStretchBlt",
+        "WinGGetDIBColorTable",
+        "WinGSetDIBColorTable",
+        "WinGCreateHalftonePalette",
+        "WinGCreateHalftoneBrush",
+    ];
+    let imports: &[(&str, &[&str])] = &[("WING32.DLL", wing), ("GDI32.DLL", &["SelectObject"])];
+    let names: Vec<&str> = imports.iter().flat_map(|(_, n)| n.iter().copied()).collect();
+    // The BITMAPINFO at 0 with two colours at 0x28, the bits' addresses
+    // at 0x80 and 0x84, colours read at 0x90, a header at 0x100.
+    let (info, bits1, bits2, read, header) = (0u32, 0x80, 0x84, 0x90, 0x100);
+    let mut data = vec![0; 0x140];
+    data[0x28..0x30].copy_from_slice(&[0x33, 0x22, 0x11, 0, 0x66, 0x55, 0x44, 0]);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| Imm(l.at(offset) as i32);
+        let mut wrong = a.create_label();
+        let mut number = 0;
+        // Check that the doubleword at `offset` of the data is `value`.
+        let mut expect = |a: &mut CodeAssembler, offset: u32, value: i32| {
+            number += 1;
+            a.mov(ebx, number)?;
+            a.cmp(dword_ptr(l.at(offset)), value)?;
+            a.jne(wrong)
+        };
+        // EAX kept at 0x130 to check it.
+        let keep = |a: &mut CodeAssembler| a.mov(dword_ptr(l.at(0x130)), eax);
+
+        call_pushing(a, f("WinGRecommendDIBFormat"), &[at(info)])?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        expect(a, info, 40)?;
+        expect(a, info + 8, -1)?;
+        expect(a, info + 12, 0x0008_0001)?;
+        // 4 by 4 pixels, top-down, two colours.
+        a.mov(dword_ptr(l.at(info + 4)), 4)?;
+        a.mov(dword_ptr(l.at(info + 8)), -4)?;
+        a.mov(dword_ptr(l.at(info + 32)), 2)?;
+        // A DC in ESI and one in EDI, each with a bitmap selected; the
+        // second bitmap's handle stays in EBP.
+        for (dc, out) in [(esi, bits1), (edi, bits2)] {
+            call_pushing(a, f("WinGCreateDC"), &[])?;
+            a.mov(dc, eax)?;
+            call_pushing(a, f("WinGCreateBitmap"), &[Reg(dc), at(info), at(out)])?;
+            a.mov(ebp, eax)?;
+            call_pushing(a, f("SelectObject"), &[Reg(dc), Reg(ebp)])?;
+        }
+        call_pushing(a, f("WinGGetDIBPointer"), &[Reg(ebp), at(header)])?;
+        keep(a)?;
+        a.mov(eax, dword_ptr(l.at(bits2)))?;
+        a.mov(ebx, 100)?;
+        a.test(eax, eax)?;
+        a.je(wrong)?;
+        a.cmp(eax, dword_ptr(l.at(0x130)))?;
+        a.jne(wrong)?;
+        expect(a, header + 4, 4)?;
+        expect(a, header + 8, -4)?;
+        // Index 1 in the first row of the first bitmap, copied to the
+        // second's first row, then stretched to its rows 1 and 2.
+        a.mov(eax, dword_ptr(l.at(bits1)))?;
+        a.mov(dword_ptr(eax), 0x0101_0101)?;
+        let blt = [Reg(edi), Imm(0), Imm(0), Imm(4), Imm(1), Reg(esi), Imm(0), Imm(0)];
+        call_pushing(a, f("WinGBitBlt"), &blt)?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        let stretch = [
+            Reg(edi),
+            Imm(0),
+            Imm(1),
+            Imm(4),
+            Imm(2),
+            Reg(esi),
+            Imm(0),
+            Imm(0),
+            Imm(4),
+            Imm(1),
+        ];
+        call_pushing(a, f("WinGStretchBlt"), &stretch)?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        for (row, value) in [(0, 0x0101_0101), (1, 0x0101_0101), (2, 0x0101_0101), (3, 0)] {
+            a.mov(eax, dword_ptr(l.at(bits2)))?;
+            a.mov(eax, dword_ptr(eax + 4 * row))?;
+            keep(a)?;
+            expect(a, 0x130, value)?;
+        }
+        // The colour table: entry 1 read, then entry 0 set to entry 1's
+        // colour and read back.
+        let get = [Reg(esi), Imm(1), Imm(1), at(read)];
+        call_pushing(a, f("WinGGetDIBColorTable"), &get)?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        expect(a, read, 0x0044_5566)?;
+        let set = [Reg(esi), Imm(0), Imm(1), at(0x2C)];
+        call_pushing(a, f("WinGSetDIBColorTable"), &set)?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        let get = [Reg(esi), Imm(0), Imm(1), at(read + 4)];
+        call_pushing(a, f("WinGGetDIBColorTable"), &get)?;
+        expect(a, read + 4, 0x0044_5566)?;
+        call_pushing(a, f("WinGCreateHalftonePalette"), &[])?;
+        a.mov(ebx, 200)?;
+        a.test(eax, eax)?;
+        a.je(wrong)?;
+        let brush = [Reg(esi), Imm(0xFF), Imm(0)];
+        call_pushing(a, f("WinGCreateHalftoneBrush"), &brush)?;
+        a.mov(ebx, 201)?;
+        a.test(eax, eax)?;
+        a.je(wrong)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, out) = run("wing32", exe);
+    assert_eq!(code, 0, "check {code} went wrong {out}");
+}
+
+/// Where GDI32's image is, and where its stubs start in it.
+const GDI32_BASE: u32 = 0xBFF3_0000;
+const STUBS_RVA: u32 = 0x1000;
+
+/// The running process's memory at `lin`, through its page tables.
+fn peek(cpu: &mut Cpu, lin: u32, data: &mut [u8]) {
+    for (i, byte) in data.iter_mut().enumerate() {
+        let phys = cpu.lin_to_phys(lin + i as u32, false, false).unwrap();
+        *byte = cpu.bus.read_8(phys as usize);
+    }
+}
+
+fn peek_32(cpu: &mut Cpu, lin: u32) -> u32 {
+    let mut bytes = [0; 4];
+    peek(cpu, lin, &mut bytes);
+    u32::from_le_bytes(bytes)
+}
+
+fn poke(cpu: &mut Cpu, lin: u32, data: &[u8]) {
+    for (i, &byte) in data.iter().enumerate() {
+        let phys = cpu.lin_to_phys(lin + i as u32, false, false).unwrap();
+        cpu.bus.write_8(phys as usize, byte);
+    }
+}
+
+/// GDI32's export directory in the running process: its function count,
+/// and where its function, name and name ordinal tables are.
+fn gdi32_exports(cpu: &mut Cpu) -> (u32, u32, u32, u32, u32) {
+    exports_at(cpu, GDI32_BASE)
+}
+
+/// `gdi32_exports` of the image at `base`.
+fn exports_at(cpu: &mut Cpu, base: u32) -> (u32, u32, u32, u32, u32) {
+    let pe = base + peek_32(cpu, base + 0x3C);
+    let dir = base + peek_32(cpu, pe + 0x78);
+    let functions = peek_32(cpu, dir + 20);
+    let names = peek_32(cpu, dir + 24);
+    let tables = [28, 32, 36].map(|at| base + peek_32(cpu, dir + at));
+    (functions, names, tables[0], tables[1], tables[2])
+}
+
+/// Where GDI32's export directory has the address of its export `name`.
+fn gdi32_export(cpu: &mut Cpu, name: &str) -> u32 {
+    let (_, names, function_table, name_table, ordinal_table) = gdi32_exports(cpu);
+    let wanted = [name.as_bytes(), &[0]].concat();
+    let index = (0..names)
+        .find(|&i| {
+            let at = GDI32_BASE + peek_32(cpu, name_table + 4 * i);
+            let mut text = vec![0u8; wanted.len()];
+            peek(cpu, at, &mut text);
+            text == wanted
+        })
+        .map(|i| {
+            let mut ordinal = [0u8; 2];
+            peek(cpu, ordinal_table + 2 * i, &mut ordinal);
+            u16::from_le_bytes(ordinal) as u32
+        })
+        .unwrap_or_else(|| panic!("GDI32 exports {name}"));
+    function_table + 4 * index
+}
+
+/// Turn the running process's GDI32 image into what a build from before
+/// CreateScalableFontResourceA went into the middle of GDI32's table
+/// (#1583) made, and its imports into what that build bound: the stubs
+/// after the entry's place one place earlier, each trapping with its
+/// place, the slot after them empty, and the exports and the import
+/// table slots `iat` that point at them 8 bytes earlier.
+fn without_create_scalable_font_resource(cpu: &mut Cpu, iat: &[u32]) {
+    let (functions, _, function_table, _, _) = gdi32_exports(cpu);
+    let entry = gdi32_export(cpu, "CreateScalableFontResourceA");
+    let inserted = peek_32(cpu, entry);
+    let k = (inserted - STUBS_RVA) / 8;
+    let mut stubs = Vec::new();
+    loop {
+        let mut stub = [0u8; 8];
+        peek(cpu, GDI32_BASE + STUBS_RVA + 8 * stubs.len() as u32, &mut stub);
+        if stub[..2] != [0xFE, 0x3E] {
+            break;
+        }
+        stubs.push(stub);
+    }
+    let n = stubs.len() as u32;
+    let end = STUBS_RVA + 8 * n;
+    let dll = u16::from_le_bytes([stubs[0][2], stubs[0][3]]) >> 10;
+    for slot in 0..n {
+        let mut stub = [0u8; 8];
+        if slot + 1 < n {
+            stub = stubs[(if slot < k { slot } else { slot + 1 }) as usize];
+            stub[2..4].copy_from_slice(&(dll << 10 | slot as u16).to_le_bytes());
+        }
+        poke(cpu, GDI32_BASE + STUBS_RVA + 8 * slot, &stub);
+    }
+    for i in 0..functions {
+        let rva = peek_32(cpu, function_table + 4 * i);
+        if rva == inserted {
+            poke(cpu, function_table + 4 * i, &0u32.to_le_bytes());
+        } else if rva > inserted && rva < end {
+            poke(cpu, function_table + 4 * i, &(rva - 8).to_le_bytes());
+        }
+    }
+    for &slot in iat {
+        let address = peek_32(cpu, slot);
+        if address > GDI32_BASE + inserted && address < GDI32_BASE + end {
+            poke(cpu, slot, &(address - 8).to_le_bytes());
+        }
+    }
+}
+
+/// Run until the program runs on in its wait, past its start.
+fn run_into_the_wait(cpu: &mut Cpu) {
+    while !cpu.bus.win32.active() {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 10_000);
+        run_batch(cpu, &mut NoHook, false);
+    }
+    for _ in 0..20 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 10_000);
+        run_batch(cpu, &mut NoHook, false);
+    }
+    assert!(cpu.bus.win32.active() && cpu.pe());
+}
+
+/// A state saved by a build from before CreateScalableFontResourceA went
+/// into the middle of GDI32's table (#1583) calls the GDI32 functions its
+/// program was bound to after a load. GetRasterizerCaps is after the
+/// insertion: without the mending its old stub calls EnumFontFamiliesExW,
+/// the function before it in the table now.
+#[test]
+fn a_state_from_before_a_gdi32_insertion_calls_what_it_was_bound_to() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("GDI32.DLL", &["GetRasterizerCaps"]),
+    ];
+    let mut iat = Vec::new();
+    let image = program(BASE, false, imports, &[0xEE; 8], |a, l| {
+        iat = l.iat.clone();
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 300))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.push(6)?;
+        a.push(l.data as i32)?;
+        a.call(l.import(1))?;
+        // The size it wrote, and TRUE in the high nibble: 16h.
+        a.shl(eax, 4)?;
+        a.movzx(ecx, byte_ptr(l.at(0)))?;
+        a.add(eax, ecx)?;
+        a.ret()
+    });
+    let mut cpu = machine("stub_tables_gdi32", image);
+    run_into_the_wait(&mut cpu);
+    without_create_scalable_font_resource(&mut cpu, &iat);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    // A state the mended machine saves loads again as it was: the stubs
+    // already trap with their ids of now, and the load works out the
+    // image's order again.
+    let mut stubs = vec![0u8; 0x1000];
+    peek(&mut cpu, GDI32_BASE + STUBS_RVA, &mut stubs);
+    let mended = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &mended).unwrap();
+    let mut again = vec![0u8; 0x1000];
+    peek(&mut cpu, GDI32_BASE + STUBS_RVA, &mut again);
+    assert!(stubs == again, "a second load changed GDI32's stubs");
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x16, "{}", printed(&cpu));
+}
+
+/// A program that hooked a GDI32 function by rewriting its export, so
+/// that the export points into the program, has its state load as it
+/// is: the export says nothing of the order of GDI32's stubs.
+#[test]
+fn a_state_with_a_hooked_gdi32_export_loads() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("GDI32.DLL", &["GetRasterizerCaps"]),
+    ];
+    let mut iat = Vec::new();
+    let image = program(BASE, false, imports, &[0xEE; 8], |a, l| {
+        iat = l.iat.clone();
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 300))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.push(6)?;
+        a.push(l.data as i32)?;
+        a.call(l.import(1))?;
+        a.shl(eax, 4)?;
+        a.movzx(ecx, byte_ptr(l.at(0)))?;
+        a.add(eax, ecx)?;
+        a.ret()
+    });
+    let mut cpu = machine("stub_tables_hooked", image);
+    run_into_the_wait(&mut cpu);
+    // RemoveFontResourceA, the first export after the inserted entry,
+    // which `mend` looks at, points into the program.
+    let entry = gdi32_export(&mut cpu, "RemoveFontResourceA");
+    poke(&mut cpu, entry, &BASE.wrapping_sub(GDI32_BASE).to_le_bytes());
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x16, "{}", printed(&cpu));
+}
+
+/// The 16-bit GDI's GetRasterizerCaps goes on to GDI32's at the address
+/// Rust works out: in a state from before the insertion, that is where
+/// the older image has it.
+#[test]
+fn a_win16_call_into_an_older_gdi32_image_reaches_its_function() {
+    let mut code = win16::Code::new();
+    code.call("USER", 13); // GetTickCount
+    code.emit(&[0x89, 0xC6]); // mov si, ax
+    let wait = code.here();
+    code.call("USER", 13);
+    code.emit(&[0x29, 0xF0]); // sub ax, si
+    code.emit(&[0x3D, 0x2C, 0x01]); // cmp ax, 300
+    let back = wait.wrapping_sub(code.here() + 2) as u8;
+    code.emit(&[0x72, back]); // jb wait
+    code.emit(&[0x83, 0xEC, 0x06]); // sub sp, 6
+    code.emit(&[0x89, 0xE5]); // mov bp, sp
+    code.emit(&[0xC6, 0x46, 0x00, 0xEE]); // mov byte [bp], 0EEh
+    code.emit(&[0x16, 0x55]); // push ss, push bp
+    code.push(6);
+    code.call("GDI", 313); // GetRasterizerCaps
+    code.emit(&[0xC0, 0xE0, 0x04]); // shl al, 4
+    code.emit(&[0x02, 0x46, 0x00]); // add al, [bp]
+    code.exit_al();
+    let mut cpu = machine(
+        "stub_tables_win16",
+        win16::program(&code, win16::CODE),
+    );
+    run_into_the_wait(&mut cpu);
+    without_create_scalable_font_resource(&mut cpu, &[]);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x16, "{}", printed(&cpu));
+}
+
+/// A state whose GDI32 stubs are where no table put them doesn't load:
+/// its stubs would call other functions than the program's.
+#[test]
+fn a_state_with_gdi32_stubs_no_table_had_is_refused() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("GDI32.DLL", &["GetRasterizerCaps"]),
+    ];
+    let image = program(BASE, false, imports, &[0], |a, l| {
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 300))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.xor(eax, eax)?;
+        a.ret()
+    });
+    let mut cpu = machine("stub_tables_refused", image);
+    run_into_the_wait(&mut cpu);
+    let good = rust_dos::savestate::machine::save(&cpu);
+    // Every export of a GDI32 stub 16 bytes on: two places later, which
+    // no table had.
+    let (functions, _, function_table, _, _) = gdi32_exports(&mut cpu);
+    for i in 0..functions {
+        let rva = peek_32(&mut cpu, function_table + 4 * i);
+        if (STUBS_RVA..0x2000).contains(&rva) {
+            poke(&mut cpu, function_table + 4 * i, &(rva + 16).to_le_bytes());
+        }
+    }
+    let bad = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &good).unwrap();
+    let refused = rust_dos::savestate::machine::load(&mut cpu, &bad).unwrap_err();
+    assert!(refused.to_string().contains("GDI32.DLL"), "{refused}");
+    // The machine is as it was, and goes on.
+    assert!(run_to_exit(&mut cpu, 2000));
+    assert_eq!(cpu.errorlevel, 0);
+}
+
+const KERNEL32_BASE: u32 = 0xBFF7_0000;
+const USER32_BASE: u32 = 0xBFF5_0000;
+
+/// The entries put into the middle of USER32's table since the W32
+/// section's version 71, a group per change, in the order main merged
+/// them (#1613).
+const USER32_INSERTED: [&[&str]; 4] = [
+    // 565d1c81 (#1237).
+    &[
+        "DlgDirListW",
+        "DlgDirSelectExW",
+        "DlgDirListComboBoxW",
+        "DlgDirSelectComboBoxExW",
+    ],
+    // d34ee52d (#1231).
+    &["DdeQueryConvInfo", "DdemlWndProc"],
+    // 236f17e3 (#1497).
+    &[
+        "CloseDesktop",
+        "CloseWindowStation",
+        "CreateDesktopA",
+        "CreateDesktopW",
+        "CreateWindowStationA",
+        "CreateWindowStationW",
+        "EnumDesktopWindows",
+        "EnumDesktopsA",
+        "EnumDesktopsW",
+        "EnumWindowStationsA",
+        "EnumWindowStationsW",
+        "GetInputDesktop",
+        "GetUserObjectInformationW",
+        "GetUserObjectSecurity",
+        "LockWindowStation",
+        "OpenDesktopA",
+        "OpenDesktopW",
+        "OpenInputDesktop",
+        "OpenWindowStationA",
+        "OpenWindowStationW",
+        "SetProcessWindowStation",
+        "SetThreadDesktop",
+        "SetUserObjectInformationA",
+        "SetUserObjectInformationW",
+        "SetUserObjectSecurity",
+        "SwitchDesktop",
+        "UnlockWindowStation",
+    ],
+    // 73150cd8 (#1498).
+    &["ChangeDisplaySettingsExA"],
+];
+
+/// Turn the running process's image of the built-in DLL `dll`, at `base`,
+/// into the one a build whose table lacked `lacking` and ended after
+/// `len` entries made, and the import table slots `iat` into what that
+/// build bound. Each function's stub goes to its place in that table: a
+/// trap with the place's id, or a jump to the function's code, which
+/// follows the stubs, as the image builder lays it out. The rest of the
+/// section is empty. The exports and slots that point at stubs or code
+/// move with them, and the exports of the functions it lacks become 0.
+fn make_older(cpu: &mut Cpu, dll: &str, base: u32, lacking: &[&str], len: usize, iat: &[u32]) {
+    let names = rust_dos::win32::builtin_functions(dll).unwrap();
+    let n = names.len();
+    let order: Vec<usize> = (0..n)
+        .filter(|&api| !lacking.contains(&names[api]))
+        .take(len)
+        .collect();
+    assert_eq!(order.len(), len, "{dll} has fewer entries");
+    let mut place = vec![None; n];
+    // The first section, with the stubs and then the code of the
+    // functions given as code: it moves up by `shift`.
+    let pe = base + peek_32(cpu, base + 0x3C);
+    let section = pe + 24 + (peek_32(cpu, pe + 20) & 0xFFFF);
+    let end = base + peek_32(cpu, section + 12) + peek_32(cpu, section + 8);
+    let code = base + STUBS_RVA + 8 * n as u32;
+    let shift = 8 * (n - len) as u32;
+    let mut now = vec![0u8; (end - base - STUBS_RVA) as usize];
+    peek(cpu, base + STUBS_RVA, &mut now);
+    let mut older = vec![0u8; now.len()];
+    older[8 * len..now.len() - shift as usize].copy_from_slice(&now[8 * n..]);
+    for (q, &api) in order.iter().enumerate() {
+        place[api] = Some(q as u32);
+        let stub = &mut older[8 * q..8 * q + 8];
+        stub.copy_from_slice(&now[8 * api..8 * api + 8]);
+        match stub[0] {
+            0xFE => {
+                let id = u16::from_le_bytes([stub[2], stub[3]]) & !0x3FF | q as u16;
+                stub[2..4].copy_from_slice(&id.to_le_bytes());
+            }
+            0xE9 => {
+                let rel = i32::from_le_bytes(stub[1..5].try_into().unwrap());
+                let rel = rel + 8 * (api as i32 - q as i32) - shift as i32;
+                stub[1..5].copy_from_slice(&rel.to_le_bytes());
+            }
+            other => panic!("{dll}'s stub {api} starts with {other:02X}"),
+        }
+    }
+    poke(cpu, base + STUBS_RVA, &older);
+    // Where an address of a stub went: None for one that isn't a stub's.
+    let stubs = base + STUBS_RVA..base + STUBS_RVA + 8 * n as u32;
+    let moved = |address: u32| {
+        if (code..end).contains(&address) {
+            return Some(address - shift);
+        }
+        let api = (address.wrapping_sub(base + STUBS_RVA) / 8) as usize;
+        (stubs.contains(&address) && address.is_multiple_of(8))
+            .then(|| place[api].map_or(0, |q| base + STUBS_RVA + 8 * q))
+    };
+    let (functions, _, function_table, _, _) = exports_at(cpu, base);
+    for i in 0..functions {
+        let rva = peek_32(cpu, function_table + 4 * i);
+        if let Some(address) = moved(base.wrapping_add(rva)) {
+            let rva = if address == 0 { 0 } else { address - base };
+            poke(cpu, function_table + 4 * i, &rva.to_le_bytes());
+        }
+    }
+    for &slot in iat {
+        if let Some(address) = moved(peek_32(cpu, slot)) {
+            assert_ne!(address, 0, "the program imports a function {dll} lacks");
+            poke(cpu, slot, &address.to_le_bytes());
+        }
+    }
+}
+
+/// Save the machine and load the state, then save what the load made and
+/// load that: the second load leaves the stubs of the DLLs at `bases` as
+/// the first left them.
+fn load_twice(cpu: &mut Cpu, bases: &[u32]) {
+    let state = rust_dos::savestate::machine::save(cpu);
+    rust_dos::savestate::machine::load(cpu, &state).unwrap();
+    let stubs = |cpu: &mut Cpu| {
+        let mut all = Vec::new();
+        for &base in bases {
+            let mut stubs = vec![0u8; 0x2000];
+            peek(cpu, base + STUBS_RVA, &mut stubs);
+            all.push(stubs);
+        }
+        all
+    };
+    let first = stubs(cpu);
+    let mended = rust_dos::savestate::machine::save(cpu);
+    rust_dos::savestate::machine::load(cpu, &mended).unwrap();
+    assert!(first == stubs(cpu), "a second load changed the stubs");
+}
+
+/// A state saved by a build from before entries went into the middle of
+/// USER32's and KERNEL32's tables (#1613), with each older image main
+/// had, calls what its program was bound to after a load, and the
+/// addresses Rust works out are those of its images. GetKBCodePage,
+/// IsCharUpperW and AreFileApisANSI are after the insertions, and a
+/// WH_GETMESSAGE hook runs through USER32's CallHooks, whose address Rust
+/// gives the hook's task. GDI32's image is an older one too, so the state
+/// has three older images at once.
+#[test]
+fn a_state_from_before_the_user32_and_kernel32_insertions_calls_what_it_was_bound_to() {
+    const WH_GETMESSAGE: i32 = 3;
+    const WM_USER: i32 = 0x0400;
+    const PM_REMOVE: i32 = 1;
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["GetTickCount", "GetCurrentThreadId", "AreFileApisANSI"],
+        ),
+        (
+            "USER32.DLL",
+            &[
+                "GetKBCodePage",
+                "IsCharUpperW",
+                "SetWindowsHookExA",
+                "PostThreadMessageA",
+                "PeekMessageA",
+            ],
+        ),
+        ("GDI32.DLL", &["GetRasterizerCaps"]),
+    ];
+    // Each image: the USER32 groups it has, and how many entries its
+    // USER32 and KERNEL32 tables have.
+    for (groups, user32_len, kernel32_len) in
+        [(0, 524, 483), (1, 528, 484), (2, 530, 490), (3, 557, 502)]
+    {
+        let mut iat = Vec::new();
+        // The hook notes its call at 0, a MSG is at 0x10, GetRasterizerCaps
+        // writes at 0x40.
+        let image = program(BASE, false, imports, &[0; 0x50], |a, l| {
+            iat = l.iat.clone();
+            let mut hook = a.create_label();
+            let mut start = a.create_label();
+            a.jmp(start)?;
+            a.set_label(&mut hook)?;
+            a.mov(dword_ptr(l.at(0)), 1)?;
+            a.xor(eax, eax)?;
+            a.ret_1(12)?;
+            a.set_label(&mut start)?;
+            let mut wait = a.create_label();
+            a.call(l.import(0))?;
+            a.lea(ebx, dword_ptr(eax + 300))?;
+            a.set_label(&mut wait)?;
+            a.call(l.import(0))?;
+            a.cmp(eax, ebx)?;
+            a.jb(wait)?;
+            a.xor(ebx, ebx)?;
+            a.call(l.import(3))?;
+            a.cmp(eax, 437)?;
+            bit_if(a, eq, 0)?;
+            a.push(b'A' as i32)?;
+            a.call(l.import(4))?;
+            a.cmp(eax, 1)?;
+            bit_if(a, eq, 1)?;
+            a.call(l.import(2))?;
+            a.cmp(eax, 1)?;
+            bit_if(a, eq, 2)?;
+            a.call(l.import(1))?;
+            a.mov(esi, eax)?;
+            a.push(esi)?;
+            a.push(0)?;
+            push_label(a, hook)?;
+            a.push(WH_GETMESSAGE)?;
+            a.call(l.import(5))?;
+            push_args(a, &[0, WM_USER, 0, 0])?;
+            a.mov(dword_ptr(esp), esi)?;
+            a.call(l.import(6))?;
+            push_args(a, &[l.at(0x10) as i32, 0, 0, 0, PM_REMOVE])?;
+            a.call(l.import(7))?;
+            a.cmp(dword_ptr(l.at(0)), 1)?;
+            bit_if(a, eq, 3)?;
+            a.push(6)?;
+            a.push(l.at(0x40) as i32)?;
+            a.call(l.import(8))?;
+            a.cmp(byte_ptr(l.at(0x40)), 6)?;
+            bit_if(a, eq, 4)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        });
+        let mut cpu = machine(&format!("stub_tables_user32_{groups}"), image);
+        run_into_the_wait(&mut cpu);
+        let lacking: Vec<&str> = USER32_INSERTED[groups..].concat();
+        make_older(
+            &mut cpu,
+            "USER32.DLL",
+            USER32_BASE,
+            &lacking,
+            user32_len,
+            &iat,
+        );
+        let lacking: &[&str] = if groups == 0 { &["LoadModule"] } else { &[] };
+        make_older(
+            &mut cpu,
+            "KERNEL32.DLL",
+            KERNEL32_BASE,
+            lacking,
+            kernel32_len,
+            &iat,
+        );
+        without_create_scalable_font_resource(&mut cpu, &iat);
+        load_twice(&mut cpu, &[USER32_BASE, KERNEL32_BASE, GDI32_BASE]);
+        assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+        assert_eq!(cpu.errorlevel, 0x1F, "image {groups}: {}", printed(&cpu));
+    }
+}
+
+/// A program started after the load of a state from before the USER32
+/// insertions gets the state's older image of USER32 (#1613): the
+/// system's windows hold addresses in it. GetProcAddress gives
+/// GetKBCodePage's stub at its older place. SetThreadDesktop, which the
+/// older image lacks and doesn't export, is bound and found at the stub
+/// the load gave it, and runs. The parent hooked
+/// GetKBCodePage by writing over its stub before the save, and the child
+/// calls the stub as the image builder made it, as a process on main
+/// gets an image of its own. A bit each in the child's exit code.
+#[test]
+fn a_program_started_after_an_older_user32_state_loads_gets_its_image() {
+    let names = rust_dos::win32::builtin_functions("USER32.DLL").unwrap();
+    let lacking: Vec<&str> = USER32_INSERTED.concat();
+    let older: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|n| !lacking.contains(n))
+        .take(524)
+        .collect();
+    let place = older.iter().position(|&n| n == "GetKBCodePage").unwrap();
+    let kb_code_page = USER32_BASE + STUBS_RVA + 8 * place as u32;
+    let child = {
+        let imports: &[(&str, &[&str])] = &[
+            ("KERNEL32.DLL", &["GetModuleHandleA", "GetProcAddress"]),
+            ("USER32.DLL", &["GetKBCodePage", "SetThreadDesktop"]),
+        ];
+        // GetKBCodePage's older address at 0, the names from 0x10.
+        let mut data = vec![0u8; 0x60];
+        data[..4].copy_from_slice(&kb_code_page.to_le_bytes());
+        data[0x10..0x1B].copy_from_slice(b"USER32.DLL\0");
+        data[0x20..0x2E].copy_from_slice(b"GetKBCodePage\0");
+        data[0x30..0x41].copy_from_slice(b"SetThreadDesktop\0");
+        program(BASE, false, imports, &data, |a, l| {
+            a.xor(ebx, ebx)?;
+            a.call(l.import(2))?;
+            a.cmp(eax, 437)?;
+            bit_if(a, eq, 0)?;
+            a.push(l.at(0x10) as i32)?;
+            a.call(l.import(0))?;
+            a.mov(esi, eax)?;
+            a.push(l.at(0x20) as i32)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+            a.cmp(eax, dword_ptr(l.at(0)))?;
+            bit_if(a, eq, 1)?;
+            a.push(l.at(0x30) as i32)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+            a.mov(edi, eax)?;
+            a.test(edi, edi)?;
+            bit_if(a, ne, 2)?;
+            a.cmp(edi, dword_ptr(l.iat[3] as u64))?;
+            bit_if(a, eq, 3)?;
+            a.push(0)?;
+            a.call(l.import(3))?;
+            a.test(eax, eax)?;
+            bit_if(a, ne, 4)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        })
+    };
+    let names_p: &[&str] = &[
+        "GetTickCount",
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", names_p),
+        ("USER32.DLL", &["GetKBCodePage"]),
+    ];
+    // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
+    // the exit code at 0xA0.
+    let mut data = b"C.EXE".to_vec();
+    data.resize(0xB0, 0);
+    data[0x40] = 68;
+    let mut iat = Vec::new();
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        iat = l.iat.clone();
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 300))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(l.import(1))?;
+        // 0EEh when CreateProcessA fails.
+        let mut started = a.create_label();
+        a.test(eax, eax)?;
+        a.jnz(started)?;
+        a.mov(eax, 0xEE)?;
+        a.ret()?;
+        a.set_label(&mut started)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(l.import(2))?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(l.import(3))?;
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        a.ret()
+    });
+    let mut cpu = machine_with(
+        "stub_tables_user32_new_process",
+        &[("T.EXE", parent), ("C.EXE", child)],
+    );
+    run_into_the_wait(&mut cpu);
+    make_older(&mut cpu, "USER32.DLL", USER32_BASE, &lacking, 524, &iat);
+    // mov eax, 1234; ret: a hook the parent wrote over the stub.
+    poke(&mut cpu, kb_code_page, &[0xB8, 0xD2, 0x04, 0, 0, 0xC3, 0x90, 0x90]);
+    load_twice(&mut cpu, &[USER32_BASE]);
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x1F, "{}", printed(&cpu));
+}
+
+/// An exception raised in a handler, in a state from before LoadModule
+/// went into the middle of KERNEL32's table (#1173): the system's frame
+/// around the handler has the address Rust works out for KERNEL32's
+/// NestedExceptionHandler, which is after the insertion, so it must be
+/// that function's in the older image for the dispatch to see the frame
+/// as the system's. As `an_exception_in_a_handler_is_nested_until_its_frame`.
+#[test]
+fn an_exception_in_a_handler_of_a_state_from_before_load_module_is_nested() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetTickCount"])];
+    let mut iat = Vec::new();
+    let image = program(BASE, false, imports, &[0; 12], |a, l| {
+        iat = l.iat.clone();
+        let mut outer = a.create_label();
+        let mut inner = a.create_label();
+        let mut again = a.create_label();
+        let mut start = a.create_label();
+        let mut once = a.create_label();
+        a.jmp(start)?;
+        a.set_label(&mut outer)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(eax, dword_ptr(eax + 4))?;
+        a.mov(dword_ptr(l.at(8)), eax)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.add(dword_ptr(eax + 0xB8), 5)?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut inner)?;
+        a.inc(dword_ptr(l.at(0)))?;
+        a.cmp(dword_ptr(l.at(0)), 1)?;
+        a.jne(again)?;
+        a.mov(eax, dword_ptr(0))?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.add(dword_ptr(eax + 0xB8), 2)?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut again)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(eax, dword_ptr(eax + 4))?;
+        a.mov(dword_ptr(l.at(4)), eax)?;
+        a.mov(eax, 1)?;
+        a.ret()?;
+        a.set_label(&mut start)?;
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 300))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        push_label(a, outer)?;
+        a.push(dword_ptr(0).fs())?;
+        a.mov(dword_ptr(0).fs(), esp)?;
+        push_label(a, inner)?;
+        a.push(dword_ptr(0).fs())?;
+        a.mov(dword_ptr(0).fs(), esp)?;
+        a.xor(edx, edx)?;
+        a.xor(ecx, ecx)?;
+        a.mov(eax, 1)?;
+        a.div(ecx)?;
+        a.pop(dword_ptr(0).fs())?;
+        a.add(esp, 4)?;
+        a.pop(dword_ptr(0).fs())?;
+        a.add(esp, 4)?;
+        // 1 for the inner handler's NESTED_CALL, 2 for none at the outer
+        // one's, 4 for the inner handler called twice.
+        a.xor(eax, eax)?;
+        a.mov(ecx, dword_ptr(l.at(4)))?;
+        a.shr(ecx, 4)?;
+        a.and(ecx, 1)?;
+        a.or(eax, ecx)?;
+        a.mov(ecx, dword_ptr(l.at(8)))?;
+        a.not(ecx)?;
+        a.shr(ecx, 3)?;
+        a.and(ecx, 2)?;
+        a.or(eax, ecx)?;
+        a.cmp(dword_ptr(l.at(0)), 2)?;
+        a.jne(once)?;
+        a.or(eax, 4)?;
+        a.set_label(&mut once)?;
+        a.ret()
+    });
+    let mut cpu = machine("stub_tables_nested", image);
+    run_into_the_wait(&mut cpu);
+    make_older(
+        &mut cpu,
+        "KERNEL32.DLL",
+        KERNEL32_BASE,
+        &["LoadModule"],
+        483,
+        &iat,
+    );
+    load_twice(&mut cpu, &[KERNEL32_BASE]);
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 7, "{}", printed(&cpu));
+}
+
+/// `peek`, of the running process's memory whether its pages are in
+/// memory or in the page file, as the 16-bit global heap's may be.
+fn process_peek(cpu: &Cpu, lin: u32, len: usize) -> Vec<u8> {
+    rust_dos::win32::process_bytes(cpu, lin, len).unwrap()
+}
+
+/// `poke`, as `process_peek` reads.
+fn process_poke(cpu: &mut Cpu, lin: u32, data: &[u8]) {
+    rust_dos::win32::write_process_bytes(cpu, lin, data).unwrap();
+}
+
+/// The linear address of the 16-bit selector `selector`'s block.
+fn block_base(cpu: &Cpu, selector: u16) -> u32 {
+    cpu.bus.win32.win16.arena[&(selector >> 3)].base
+}
+
+/// Turn the 16-bit USER's code segment and entry table into those of a
+/// build from before DlgDirSelectComboBox (ordinal 194) went into the
+/// middle of its table (#1237), and the far calls into USER that the
+/// program's code segment has into what that build relocated: the stubs
+/// after its place one place earlier, each trapping with its place, the
+/// last place empty, its entry pointing at no stub, as the older table had
+/// none for it, and the entries and calls of the stubs after it 8 bytes
+/// earlier.
+fn without_dlg_dir_select_combo_box(cpu: &mut Cpu) {
+    let modules = &cpu.bus.win32.win16.modules;
+    let user = modules.iter().find(|m| m.name == "USER").unwrap();
+    let (db, selector, size) = (
+        user.handle,
+        user.segments[0].selector,
+        user.segments[0].size,
+    );
+    let program = modules.iter().find(|m| m.builtin.is_none()).unwrap();
+    let program = (program.segments[0].selector, program.segments[0].size);
+    let (db, code) = (block_base(cpu, db), block_base(cpu, selector));
+    let word = |cpu: &Cpu, at: u32| {
+        let bytes = process_peek(cpu, at, 2);
+        u16::from_le_bytes([bytes[0], bytes[1]])
+    };
+    let table = db + word(cpu, db + 4) as u32;
+    // Where each entry's offset is, by ordinal from 1: the moveable and
+    // the fixed bundles of the entry table.
+    let mut offsets = Vec::new();
+    let mut at = table;
+    loop {
+        let head = process_peek(cpu, at, 2);
+        let (count, kind) = (head[0] as u32, head[1]);
+        at += 2;
+        match (count, kind) {
+            (0, _) => break,
+            (_, 0) => offsets.extend((0..count).map(|_| None)),
+            (_, 0xFE) => {
+                offsets.extend((0..count).map(|_| None));
+                at += 3 * count;
+            }
+            (_, 0xFF) => {
+                offsets.extend((0..count).map(|i| Some(at + 6 * i + 4)));
+                at += 6 * count;
+            }
+            _ => {
+                offsets.extend((0..count).map(|i| Some(at + 3 * i + 1)));
+                at += 3 * count;
+            }
+        }
+    }
+    let inserted = word(cpu, offsets[193].unwrap());
+    let stubs = process_peek(cpu, code, size as usize);
+    let n = stubs
+        .chunks(8)
+        .take_while(|s| s[..2] == [0xFE, 0x3E])
+        .count();
+    let k = inserted as usize / 8;
+    let module = u16::from_le_bytes([stubs[2], stubs[3]]) >> 10;
+    let mut older = vec![0u8; 8 * n];
+    for slot in 0..n - 1 {
+        let from = if slot < k { slot } else { slot + 1 };
+        older[8 * slot..8 * slot + 8].copy_from_slice(&stubs[8 * from..8 * from + 8]);
+        let id = module << 10 | slot as u16;
+        older[8 * slot + 2..8 * slot + 4].copy_from_slice(&id.to_le_bytes());
+    }
+    process_poke(cpu, code, &older);
+    let end = 8 * n as u16;
+    for at in offsets.into_iter().flatten() {
+        let offset = word(cpu, at);
+        if offset == inserted {
+            process_poke(cpu, at, &1u16.to_le_bytes());
+        } else if offset > inserted && offset < end {
+            process_poke(cpu, at, &(offset - 8).to_le_bytes());
+        }
+    }
+    let base = block_base(cpu, program.0);
+    let bytes = process_peek(cpu, base, program.1 as usize);
+    for i in 0..bytes.len().saturating_sub(4) {
+        let offset = u16::from_le_bytes([bytes[i + 1], bytes[i + 2]]);
+        let target = u16::from_le_bytes([bytes[i + 3], bytes[i + 4]]);
+        if bytes[i] == 0x9A && target == selector && offset > inserted && offset < end {
+            process_poke(cpu, base + i as u32 + 1, &(offset - 8).to_le_bytes());
+        }
+    }
+}
+
+/// A 16-bit program in a state from before DlgDirSelectComboBox went into
+/// the middle of the 16-bit USER's table (#1237) calls the functions it
+/// was relocated to after a load, and GetProcAddress gives the address of
+/// a USER function in the older segment. GetDesktopHwnd (278) and
+/// GetDesktopWindow (286) are after the insertion.
+#[test]
+fn a_win16_state_from_before_a_user_insertion_calls_what_it_was_bound_to() {
+    let mut code = win16::Code::new();
+    code.call("USER", 13); // GetTickCount
+    code.emit(&[0x89, 0xC6]); // mov si, ax
+    let wait = code.here();
+    code.call("USER", 13);
+    code.emit(&[0x29, 0xF0]); // sub ax, si
+    code.emit(&[0x3D, 0x2C, 0x01]); // cmp ax, 300
+    let back = wait.wrapping_sub(code.here() + 2) as u8;
+    code.emit(&[0x72, back]); // jb wait
+    code.emit(&[0x31, 0xF6]); // xor si, si
+    code.call("USER", 278); // GetDesktopHwnd
+    code.emit(&[0x89, 0xC7]); // mov di, ax
+    code.emit(&[0x85, 0xC0, 0x74, 0x03]); // test ax, ax; jz +3
+    code.emit(&[0x83, 0xCE, 0x01]); // or si, 1
+    code.call("USER", 286); // GetDesktopWindow
+    code.emit(&[0x39, 0xF8, 0x75, 0x03]); // cmp ax, di; jne +3
+    code.emit(&[0x83, 0xCE, 0x02]); // or si, 2
+    let name = code.here() + 2;
+    code.push_far(0);
+    code.call("KERNEL", 47); // GetModuleHandle
+    code.emit(&[0x50]); // push ax
+    code.push(0);
+    code.push(278);
+    code.call("KERNEL", 50); // GetProcAddress
+    code.emit(&[0x52, 0x50]); // push dx, push ax
+    code.emit(&[0x89, 0xE5]); // mov bp, sp
+    code.emit(&[0xFF, 0x5E, 0x00]); // call far [bp]
+    code.emit(&[0x83, 0xC4, 0x04]); // add sp, 4
+    code.emit(&[0x39, 0xF8, 0x75, 0x03]); // cmp ax, di; jne +3
+    code.emit(&[0x83, 0xCE, 0x04]); // or si, 4
+    code.emit(&[0x89, 0xF0]); // mov ax, si
+    code.exit_al();
+    let at = code.here();
+    code.patch(name, at);
+    code.emit(b"USER\0");
+    let mut cpu = machine("stub_tables_win16_user", win16::program(&code, win16::CODE));
+    run_into_the_wait(&mut cpu);
+    without_dlg_dir_select_combo_box(&mut cpu);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    let mended = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &mended).unwrap();
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 7, "{}", printed(&cpu));
+}
+
+/// KERNEL's stubs for imports nothing has: the first one's id and its
+/// place in KERNEL's code segment (`win16::builtin::FIRST_MISSING`), and
+/// how many there are.
+const FIRST_MISSING16: u32 = 0x3C0;
+const MISSING16: u32 = 64;
+
+/// How many functions the 16-bit KERNEL's table has.
+fn kernel16_functions() -> u32 {
+    (0..0x400)
+        .take_while(|&i| rust_dos::win16::function_name(i).is_some())
+        .count() as u32
+}
+
+/// The Win16 KERNEL's place in the module list, and where its code
+/// segment is: its selector and linear address.
+fn kernel16(cpu: &Cpu) -> (usize, u16, u32) {
+    let modules = &cpu.bus.win32.win16.modules;
+    let i = modules.iter().position(|m| m.builtin == Some(0)).unwrap();
+    let sel = modules[i].segments[0].selector;
+    (i, sel, rust_dos::win16::linear(cpu, (sel as u32) << 16))
+}
+
+/// A stub for an import nothing has, with the trap id `id`.
+fn missing_stub16(id: u32) -> [u8; 8] {
+    let [lo, hi] = (id as u16).to_le_bytes();
+    [0xFE, 0x3E, lo, hi, 0xCB, 0x90, 0x90, 0x90]
+}
+
+/// Turn the running Win16 process's KERNEL into what a build from before
+/// #1599 made with a KERNEL table of `functions` entries, and the
+/// program's calls of missing stubs into what that build bound: the
+/// missing stubs right after KERNEL's own, each trapping with its place,
+/// and the code segment ending after them.
+fn kernel16_from_before_1599(cpu: &mut Cpu, functions: u32) {
+    let (i, sel, base) = kernel16(cpu);
+    for k in 0..MISSING16 {
+        let at = base + 8 * (functions + k);
+        poke(cpu, at, &missing_stub16(functions + k));
+    }
+    let end = 8 * (functions + MISSING16);
+    poke(cpu, base + end, &vec![0; (0x2000 - end) as usize]);
+    cpu.bus.win32.win16.modules[i].segments[0].size = end;
+    // The program's far calls of missing stubs.
+    let program = &cpu.bus.win32.win16.modules;
+    let t = program.iter().find(|m| m.name == "T").unwrap();
+    let (code_sel, size) = (t.segments[0].selector, t.segments[0].size);
+    let code = rust_dos::win16::linear(cpu, (code_sel as u32) << 16);
+    let mut bytes = vec![0u8; size as usize];
+    peek(cpu, code, &mut bytes);
+    for at in 0..bytes.len().saturating_sub(3) {
+        let offset = u16::from_le_bytes([bytes[at], bytes[at + 1]]) as u32;
+        let selector = u16::from_le_bytes([bytes[at + 2], bytes[at + 3]]);
+        let missing = 8 * FIRST_MISSING16..8 * (FIRST_MISSING16 + MISSING16);
+        if selector == sel && missing.contains(&offset) {
+            let then = (offset - 8 * FIRST_MISSING16 + 8 * functions) as u16;
+            poke(cpu, code + at as u32, &then.to_le_bytes());
+        }
+    }
+}
+
+/// A Win16 program that waits 300 ms, then calls USER's #9999, which
+/// USER doesn't have.
+fn calls_a_missing_import16() -> Vec<u8> {
+    let mut code = win16::Code::new();
+    code.call("USER", 13); // GetTickCount
+    code.emit(&[0x89, 0xC6]); // mov si, ax
+    let wait = code.here();
+    code.call("USER", 13);
+    code.emit(&[0x29, 0xF0]); // sub ax, si
+    code.emit(&[0x3D, 0x2C, 0x01]); // cmp ax, 300
+    let back = wait.wrapping_sub(code.here() + 2) as u8;
+    code.emit(&[0x72, back]); // jb wait
+    code.call("USER", 9999);
+    code.emit(&[0xB0, 0x00]); // mov al, 0
+    code.exit_al();
+    win16::program(&code, win16::CODE)
+}
+
+const MISSING_CALL16: &str = "a call of USER.#9999, which the built-in Windows doesn't have yet";
+
+/// A state saved by a build from before #1599, whose KERNEL table then
+/// grew by an append: its call of a missing import still reaches the
+/// missing-import stub, named. Without the mending, the stub traps with
+/// the id KERNEL's last function, the one appended since, has now.
+#[test]
+fn a_win16_state_from_before_a_kernel_append_still_calls_its_missing_import() {
+    let mut cpu = machine("missing16_older", calls_a_missing_import16());
+    run_into_the_wait(&mut cpu);
+    kernel16_from_before_1599(&mut cpu, kernel16_functions() - 1);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    // A state the mended machine saves loads again as it was.
+    let (_, _, base) = kernel16(&cpu);
+    let mut stubs = vec![0u8; 0x2000];
+    peek(&mut cpu, base, &mut stubs);
+    let mended = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &mended).unwrap();
+    let mut again = vec![0u8; 0x2000];
+    peek(&mut cpu, base, &mut again);
+    assert!(stubs == again, "a second load changed KERNEL's stubs");
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert!(printed(&cpu).contains(MISSING_CALL16), "{}", printed(&cpu));
+}
+
+/// In a state from before #1599 whose KERNEL table grew since, the
+/// function appended has no stub in the state's KERNEL: GetProcAddress
+/// finds none, where it would give the first missing stub's address.
+#[test]
+fn a_win16_state_from_before_a_kernel_append_has_no_address_for_it() {
+    let mut code = win16::Code::new();
+    code.call("USER", 13); // GetTickCount
+    code.emit(&[0x89, 0xC6]); // mov si, ax
+    let wait = code.here();
+    code.call("USER", 13);
+    code.emit(&[0x29, 0xF0]); // sub ax, si
+    code.emit(&[0x3D, 0x2C, 0x01]); // cmp ax, 300
+    let back = wait.wrapping_sub(code.here() + 2) as u8;
+    code.emit(&[0x72, back]); // jb wait
+    let name = code.here() + 1;
+    code.push_far(0); // "KERNEL"
+    code.call("KERNEL", 47); // GetModuleHandle
+    code.emit(&[0x50]); // push ax
+    code.push(0);
+    code.push(110); // PatchCodeHandle, KERNEL's last function
+    code.call("KERNEL", 50); // GetProcAddress
+    code.emit(&[0x09, 0xD0]); // or ax, dx
+    code.emit(&[0x74, 0x02]); // jz +2
+    code.emit(&[0xB0, 0x01]); // mov al, 1
+    code.exit_al();
+    let text = code.here();
+    code.emit(b"KERNEL\0");
+    code.patch(name + 1, text);
+    let mut cpu = machine("missing16_address", win16::program(&code, win16::CODE));
+    run_into_the_wait(&mut cpu);
+    kernel16_from_before_1599(&mut cpu, kernel16_functions() - 1);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+/// A state of now calls its missing import after a load. Its KERNEL has
+/// the missing stubs at their fixed place, and a function appended to
+/// KERNEL's table after the state was saved gets its stub in the zeros
+/// before them.
+#[test]
+fn a_win16_state_of_now_calls_its_missing_import() {
+    let mut cpu = machine("missing16_now", calls_a_missing_import16());
+    run_into_the_wait(&mut cpu);
+    let (i, _, base) = kernel16(&cpu);
+    assert_eq!(cpu.bus.win32.win16.modules[i].segments[0].size, 0x2000);
+    let mut first = [0u8; 8];
+    peek(&mut cpu, base + 8 * FIRST_MISSING16, &mut first);
+    assert_eq!(first, missing_stub16(FIRST_MISSING16));
+    // KERNEL's last function, as if appended after the state was saved.
+    let last = base + 8 * (kernel16_functions() - 1);
+    let mut stub = [0u8; 8];
+    peek(&mut cpu, last, &mut stub);
+    poke(&mut cpu, last, &[0; 8]);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    let mut mended = [0u8; 8];
+    peek(&mut cpu, last, &mut mended);
+    assert_eq!(mended, stub);
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert!(printed(&cpu).contains(MISSING_CALL16), "{}", printed(&cpu));
 }

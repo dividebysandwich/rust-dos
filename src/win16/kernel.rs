@@ -8,6 +8,7 @@ use super::{Frame, dos, dpmi, global, ldt, local, module, resource, task};
 use crate::cpu::{Cpu, Seg};
 use crate::disk::LASTDRIVE;
 use crate::dpmi::Context;
+use crate::win32::advapi32;
 use rust_dos_ne as ne;
 
 pub static MODULE: Def = Def {
@@ -265,18 +266,18 @@ static APIS: &[Api16] = &[
     rust("GetWinDebugInfo", 355, "pw", zero),
     rust("SetWinDebugInfo", 356, "p", zero),
     rust("FarSetOwner", 403, "ww", far_set_owner),
-    rust("RegOpenKey", 217, "lpp", reg_fail),
-    rust("RegCreateKey", 218, "lpp", reg_fail),
-    rust("RegDeleteKey", 219, "lp", reg_fail),
-    rust("RegCloseKey", 220, "l", zero),
-    rust("RegSetValue", 221, "lplpl", reg_fail),
-    rust("RegDeleteValue", 222, "lp", reg_fail),
-    rust("RegEnumValue", 223, "llpppppp", reg_fail),
-    rust("RegQueryValue", 224, "lppp", reg_fail),
-    rust("RegQueryValueEx", 225, "lppppp", reg_fail),
-    rust("RegSetValueEx", 226, "lpllpl", reg_fail),
-    rust("RegFlushKey", 227, "l", zero),
-    rust("RegEnumKey", 216, "llpl", reg_fail),
+    rust("RegOpenKey", 217, "lpp", reg_open_key),
+    rust("RegCreateKey", 218, "lpp", reg_create_key),
+    rust("RegDeleteKey", 219, "lp", reg_delete_key),
+    rust("RegCloseKey", 220, "l", reg_close_key),
+    rust("RegSetValue", 221, "lplpl", reg_set_value),
+    rust("RegDeleteValue", 222, "lp", reg_delete_value),
+    rust("RegEnumValue", 223, "llpppppp", reg_enum_value),
+    rust("RegQueryValue", 224, "lppp", reg_query_value),
+    rust("RegQueryValueEx", 225, "lppppp", reg_query_value_ex),
+    rust("RegSetValueEx", 226, "lpllpl", reg_set_value_ex),
+    rust("RegFlushKey", 227, "l", reg_flush_key),
+    rust("RegEnumKey", 216, "llpl", reg_enum_key),
     rust("GetSetKernelDOSProc", 311, "S", zero),
     rust("GetModuleName", 27, "wpw", get_module_name),
     rust("GetCurrentDirectory", 411, "lp", get_current_directory),
@@ -307,9 +308,83 @@ fn same(_: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(args[0])
 }
 
-pub(super) fn reg_fail(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    // ERROR_BADKEY: the 16-bit registry isn't kept.
-    Some(2)
+// The registry. Windows 95's KERNEL and SHELL have the same functions,
+// on the one registry the Win32 functions use; a 16-bit program's
+// HKEY_CLASSES_ROOT is 1 (and 0 is taken for it), the other predefined
+// keys those of Win32. The rest is ADVAPI32's (advapi32.rs), as Wine's
+// KRNL386 calls it.
+
+/// The Win32 key of the 16-bit `hkey`.
+fn hkey32(hkey: u32) -> u32 {
+    match hkey {
+        0 | 1 => crate::win32::registry::HKEY_CLASSES_ROOT,
+        _ => hkey,
+    }
+}
+
+/// `f`, ADVAPI32's function, with the key of `args[0]` made Win32's.
+fn reg(cpu: &mut Cpu, args: &[u32], f: fn(&mut Cpu, &[u32]) -> Option<u32>) -> Option<u32> {
+    let mut args = args.to_vec();
+    args[0] = hkey32(args[0]);
+    f(cpu, &args)
+}
+
+pub(super) fn reg_open_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    reg(cpu, args, advapi32::reg_open_key)
+}
+
+pub(super) fn reg_create_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    reg(cpu, args, advapi32::reg_create_key)
+}
+
+pub(super) fn reg_delete_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    reg(cpu, args, advapi32::reg_delete_key)
+}
+
+pub(super) fn reg_close_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    reg(cpu, args, advapi32::reg_close_key)
+}
+
+/// RegSetValue(hkey, lpszSubKey, fdwType, lpszValue, cb): the value is
+/// a string, whatever cb says.
+pub(super) fn reg_set_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    reg(cpu, args, advapi32::reg_set_value)
+}
+
+pub(super) fn reg_delete_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    reg(cpu, args, advapi32::reg_delete_value)
+}
+
+pub(super) fn reg_enum_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    reg(cpu, args, advapi32::reg_enum_value)
+}
+
+/// RegQueryValue(hkey, lpszSubKey, lpszValue, lpcb): only the low word
+/// of the size at lpcb counts, as programs made for Windows 3.1 set
+/// only that.
+pub(super) fn reg_query_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let size = args[3];
+    if size != 0 {
+        let room = super::read_32(cpu, size) & 0xFFFF;
+        super::write_32(cpu, size, room);
+    }
+    reg(cpu, args, advapi32::reg_query_value)
+}
+
+pub(super) fn reg_query_value_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    reg(cpu, args, advapi32::reg_query_value_ex)
+}
+
+pub(super) fn reg_set_value_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    reg(cpu, args, advapi32::reg_set_value_ex)
+}
+
+pub(super) fn reg_flush_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    reg(cpu, args, advapi32::reg_flush_key)
+}
+
+pub(super) fn reg_enum_key(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    reg(cpu, args, advapi32::reg_enum_key)
 }
 
 fn call_return16(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -648,7 +723,7 @@ fn selector_access_rights(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// Whether `len` bytes at the 16:16 pointer `ptr` aren't all there.
-fn bad_range(cpu: &Cpu, ptr: u32, len: u32) -> bool {
+pub(super) fn bad_range(cpu: &Cpu, ptr: u32, len: u32) -> bool {
     let Some((_, limit, _)) = super::selector_base(cpu, (ptr >> 16) as u16) else {
         return true;
     };
@@ -797,8 +872,16 @@ fn fatal_app_exit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Catch(buffer), a register function: the caller's place, where Throw
 /// goes back to, in the buffer's nine words; 0 returned.
 fn catch(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    // It changes only the buffer, in RAM, and the registers, from the
+    // registers and its stack: an idle proof goes through it. MFC's
+    // message loop calls it in every pass (Metal Marines).
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_registers(cpu);
+    crate::idle::reads_arguments(cpu);
     let mut ctx = Context::of(cpu);
     let (ip, cs, buffer) = far_call_frame(cpu, &ctx);
+    let frame = super::selector_base(cpu, ctx.seg[Seg::SS as usize]).map_or(0, |(b, _, _)| b);
+    crate::idle::reads_also(cpu, frame.wrapping_add(ctx.gpr[ESP] & 0xFFFF), 8);
     let sp = (ctx.gpr[ESP] as u16).wrapping_add(8);
     let at = super::linear(cpu, buffer);
     let words = [

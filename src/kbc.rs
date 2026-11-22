@@ -32,6 +32,10 @@ pub const OUT_A20: u8 = 0x02;
 /// output buffer, in PIT ticks: about 0.3 ms.
 pub const KBD_BYTE_TICKS: u64 = 358;
 
+/// The typematic rate and delay a keyboard starts with, and sets again
+/// at reset and with F5h and F6h: 10.9 characters a second after 500 ms.
+pub const TYPEMATIC_DEFAULT: u8 = 0x2B;
+
 /// Status register bits.
 const STATUS_OBF: u8 = 0x01;
 const STATUS_SYSTEM: u8 = 0x04;
@@ -76,9 +80,15 @@ pub struct Kbc {
     aux_irq: bool,
     /// The CPU read a keyboard byte: the next one waits until `release`.
     held: bool,
+    /// The keyboard byte the CPU last took from the output buffer, if it
+    /// took one since the machine started or a state was loaded.
+    keyboard_read: Option<u8>,
     /// The keyboard's lights as the system last set them (command ED):
     /// bit 0 Scroll Lock, bit 1 Num Lock, bit 2 Caps Lock.
     pub lights: Option<u8>,
+    /// The keyboard's typematic rate and delay, as command F3h's parameter
+    /// byte has them (`keyboard::typematic_delay_ticks`).
+    pub typematic: u8,
 }
 
 impl Default for Kbc {
@@ -103,6 +113,18 @@ impl Kbc {
         })
     }
 
+    /// The two bytes an MF2 keyboard answers the identify command (F2h)
+    /// with, the first in the low byte: ABh 83h, which the controller
+    /// turns into ABh 41h while it translates scan codes. INT 16h AH=0Ah
+    /// returns the same word in BX.
+    pub fn keyboard_id(&self) -> u16 {
+        if self.command_byte & CMD_TRANSLATE != 0 {
+            0x41AB
+        } else {
+            0x83AB
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             queue: VecDeque::new(),
@@ -118,7 +140,9 @@ impl Kbc {
             output_aux: false,
             aux_irq: false,
             held: false,
+            keyboard_read: None,
             lights: None,
+            typematic: TYPEMATIC_DEFAULT,
         }
     }
 
@@ -244,7 +268,10 @@ impl Kbc {
             Some(byte) => {
                 // The keyboard sends its next byte after a while; the
                 // mouse's can come at once.
-                self.held |= !self.output_aux;
+                if !self.output_aux {
+                    self.held = true;
+                    self.keyboard_read = Some(byte);
+                }
                 byte
             }
             None => self.last,
@@ -252,6 +279,20 @@ impl Kbc {
         self.output_aux = false;
         self.refill();
         byte
+    }
+
+    /// The keyboard byte the CPU last took from the output buffer: what the
+    /// BIOS's keyboard interrupt read, whatever an INT 15h AH=4Fh hook it
+    /// calls then hands back in AL. None until the CPU takes one.
+    pub fn keyboard_byte_read(&self) -> Option<u8> {
+        self.keyboard_read
+    }
+
+    /// A state was loaded: the keyboard's next byte comes at once, and the
+    /// byte the CPU read before is the running machine's, not the state's.
+    pub fn after_load(&mut self) {
+        self.keyboard_read = None;
+        self.release();
     }
 
     /// Port 64h read: the status register.
@@ -342,6 +383,8 @@ impl Kbc {
             // The parameter of ED (LEDs) or F3 (typematic rate).
             if command == 0xED {
                 self.lights = Some(value & 0x07);
+            } else {
+                self.typematic = value & 0x7F;
             }
             self.reply(0xFA);
             return effects;
@@ -354,12 +397,20 @@ impl Kbc {
             0xEE => self.reply(0xEE), // echo
             0xF2 => {
                 // Identify: an MF2 keyboard.
-                self.queue.push_front(0x83);
-                self.queue.push_front(0xAB);
+                let [first, second] = self.keyboard_id().to_le_bytes();
+                self.queue.push_front(second);
+                self.queue.push_front(first);
+                self.reply(0xFA);
+            }
+            // Set the defaults, with the keyboard enabled (F6) or
+            // disabled until F4h (F5): the typematic rate among them.
+            0xF5 | 0xF6 => {
+                self.typematic = TYPEMATIC_DEFAULT;
                 self.reply(0xFA);
             }
             0xFF => {
-                // Reset: ACK, then self test passed.
+                // Reset: ACK, then self test passed, with the defaults.
+                self.typematic = TYPEMATIC_DEFAULT;
                 self.queue.push_front(0xAA);
                 self.reply(0xFA);
             }
@@ -372,4 +423,4 @@ impl Kbc {
 crate::state_fields!(Kbc {
     queue, output, last, command_byte, output_port, pending_command, pending_kbd, last_was_command, irq,
     aux, output_aux, aux_irq,
-} skip { held, lights });
+} skip { held, keyboard_read, lights, typematic });

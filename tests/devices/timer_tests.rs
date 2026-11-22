@@ -213,7 +213,9 @@ fn a_control_word_stops_the_count_where_it_got_to() {
     let elapsed = bus.clock.now_ticks() - start;
     let read = |bus: &mut Bus| bus.io_read(0x40) as u16 | (bus.io_read(0x40) as u16) << 8;
     let stopped = read(&mut bus);
-    assert_eq!(stopped as u64, 0xFFFF - 2 * elapsed);
+    // An odd count runs down from the even number below it (the 8254's
+    // mode 3).
+    assert_eq!(stopped as u64, 0xFFFE - 2 * elapsed);
     bus.clock.icount += 10_000;
     assert_eq!(read(&mut bus), stopped, "still where it stopped");
 }
@@ -1084,7 +1086,7 @@ fn a_due_count_and_port_61h_survive_a_save_state() {
     // A PIT2 section that ends before the flag, as states saved before it
     // was kept, loads without it.
     let range = |name: &str| parts.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no {}", name)).1.clone();
-    let later = range("PIT2.pit2_count_due").start..range("TSC").start;
+    let later = range("PIT2.pit2_count_due").start..range("8254").start;
     let mut old = bytes[..later.start].to_vec();
     old.extend_from_slice(&bytes[later.end..]);
     // The section's length follows its tag and version.

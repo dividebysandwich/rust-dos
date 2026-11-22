@@ -99,6 +99,11 @@ pub static THENS: &[Then] = &[
     super::hook::then,
     super::dpmi::then_callback,
     super::module::then_boot,
+    super::misc::then_calls16,
+    super::ole2::then_method,
+    super::ole2::then_block,
+    super::ole2disp::then,
+    super::typelib_invoke::then,
 ];
 
 // Place 0 is then_keep, which no call names now.
@@ -112,6 +117,11 @@ pub const THEN_FLAT_INITS: u16 = 7;
 pub const THEN_HOOK: u16 = 8;
 pub const THEN_CALLBACK: u16 = 9;
 pub const THEN_BOOT: u16 = 10;
+pub const THEN_CALLS16: u16 = 11;
+pub const THEN_OLE_METHOD: u16 = 12;
+pub const THEN_OLE_BLOCK: u16 = 13;
+pub const THEN_OLE2DISP: u16 = 14;
+pub const THEN_TYPELIB_INVOKE: u16 = 15;
 
 fn post_plain(_: &mut Cpu, value: u32, _: &[u32], _: &mut Context) -> Option<u32> {
     Some(value)
@@ -174,12 +184,35 @@ fn stack16(cpu: &mut Cpu, from: &Context) -> (u16, u16) {
     if !is_flat(from) {
         return (from.seg[Seg::SS as usize], from.gpr[ESP] as u16);
     }
-    let task = super::task(cpu);
+    stack16_of(super::task(cpu), from)
+}
+
+/// `stack16` for the task `task`, whose context is `from`.
+fn stack16_of(task: &super::Task16, from: &Context) -> (u16, u16) {
+    if !is_flat(from) {
+        return (from.seg[Seg::SS as usize], from.gpr[ESP] as u16);
+    }
     let waiting = task.frames.iter().rev().find_map(|f| match f {
         Frame::To32 { ctx, .. } => Some((ctx.seg[Seg::SS as usize], ctx.gpr[ESP] as u16)),
         _ => None,
     });
     waiting.unwrap_or(task.stack16)
+}
+
+/// The 16-bit stack (SS, SP) of the task `t` as its 16-bit code left
+/// it: the processor's for the running task, else its thread's saved
+/// context's, or that of the 16-bit code waiting for the 32-bit code it
+/// called.
+pub fn task_stack16(cpu: &Cpu, t: usize) -> (u16, u16) {
+    let task = &cpu.bus.win32.win16.tasks[t];
+    let ctx = if super::current_task(cpu) == Some(t) {
+        Some(Context::of(cpu))
+    } else {
+        super::win16_ref(cpu)
+            .and_then(|p| p.threads.iter().find(|th| th.id == task.tid))
+            .map(|th| th.ctx)
+    };
+    ctx.map_or(task.stack16, |ctx| stack16_of(task, &ctx))
 }
 
 /// From 16-bit code, as a function of a system module: call the 32-bit
@@ -230,7 +263,7 @@ pub fn enter32_at(
     data: Vec<u32>,
 ) {
     let esp = top - 4 * (args.len() as u32 + 1);
-    let mut words = vec![crate::win32::kernel32::win16_return_address()];
+    let mut words = vec![crate::win32::kernel32::win16_return_address(cpu)];
     words.extend_from_slice(args);
     for (i, &word) in words.iter().enumerate() {
         cpu.bus.guest_write_32(esp + 4 * i as u32, word);
@@ -279,7 +312,12 @@ pub fn win16_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         None => Some(value),
     };
     if plain && cpu.bus.observe.on {
+        // The frame is the emulator's; of the machine, `post_auto` reads
+        // only the copies it names (`idle::reads_also`).
         crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
+        let as_is = post == POST_PLAIN || ret.is_some_and(super::builtin::returns_as_is);
+        crate::idle::resumed16(cpu, as_is);
     }
     if let Some(value) = result {
         resume16(cpu, ctx, value);

@@ -32,7 +32,6 @@ impl Bus {
             port_accesses: VecDeque::new(),
             port_log: None,
             profile: None,
-            rom_writes: 0,
             config_ui_requested: false,
             exit_requested: false,
             config_dir: None,
@@ -41,6 +40,7 @@ impl Bus {
             debug_console: Vec::new(),
             xms: crate::xms::Xms::new(),
             ems: None,
+            vcpi: crate::vcpi::Vcpi::default(),
             dpmi: crate::dpmi::Dpmi::default(),
             win32: crate::win32::Win32::default(),
             dos_version: crate::config::DosVersion::default(),
@@ -63,6 +63,7 @@ impl Bus {
             activity: crate::autospeed::Activity::new(),
             retraces: 0,
             last_flip: None,
+            last_present: None,
             gate_array_shadow: Vec::new(),
             gate_array_shadow_at: usize::MAX,
             refresh_toggle: false,
@@ -87,10 +88,14 @@ impl Bus {
             pit0_access: 3,
             pit0_latched: 0,
             pit0_latched_active: false,
+            pit0_status: None,
             pit0: crate::timer::Pit0::new(),
+            pit1: crate::timer::Pit0::refresh(),
+            pit1_port: crate::timer::PitPort::new(1),
             clock: crate::timer::Clock::new(crate::timer::CpuSpeed::Max.initial_cycles()),
             pic: crate::pic::Pic::new(),
-            audio_phase: 0.0,
+            speaker_high: 0.0,
+            speaker_until: 0.0,
             log_file: None,
             dta_segment: 0x1000,
             dta_offset: 0x0000,
@@ -127,6 +132,8 @@ impl Bus {
             mpu: crate::mpu401::Mpu401::new(),
             gus: Some(crate::gus::Gus::new(crate::gus::GusConfig::default(), 0)),
             gus_line: None,
+            adlib_gold: None,
+            adlib_gold_line: None,
             awe: None,
             awe_rom: std::sync::Arc::from([]),
             awe_ram_kb: crate::awe32::DEFAULT_RAM_KB,
@@ -154,10 +161,12 @@ impl Bus {
             audio_underruns: 0,
             host_frames: crate::hostframes::HostFrames::new(),
             unhandled_writes: vec![0; 0x10000],
+            limited_logs: std::collections::HashMap::new(),
             page_gen: vec![0; ram_len >> GEN_SHIFT],
             observe: crate::idle::Observe::default(),
             code_blocks: vec![0; ram_len >> GEN_SHIFT],
             memory_derived: false,
+            cpu_derived: false,
             log_hook: None,
             log_backlog: None,
             audio_hook: None,
@@ -167,10 +176,10 @@ impl Bus {
         // The default Ultrasound's software, and the equipment word, hard
         // disk count and DPBs for the drives C:, X: and Z:.
         let _ = bus.mount_ultrasnd(crate::gus::GusConfig::default().drive);
-        // The file table, with the standard devices open, and the XMS
-        // driver's entry.
+        // The file table, with the standard devices open, and the code the
+        // built-in drivers keep in DOS's data segment.
         crate::dos_files::write_table(&mut bus);
-        crate::xms::install_entry(&mut bus);
+        crate::dos_data::write_driver_code(&mut bus);
 
         bus
     }
@@ -265,7 +274,7 @@ impl Bus {
         crate::mcb::build_upper(self);
         self.sync_drive_bda();
         crate::dos_files::write_table(self);
-        crate::xms::install_entry(self);
+        crate::dos_data::write_driver_code(self);
     }
 
     /// The layout text typed in from the host goes in as: the keyboard's,
@@ -368,13 +377,14 @@ impl Bus {
     pub fn reset_timers(&mut self) {
         // Mode 3, count 65536, counting from now.
         let now = self.clock.now_ticks();
-        self.pit0.set_mode(3, now);
+        self.pit0.set_mode(0x36, now);
         self.pit0.write_count(0, now);
         self.pit0_divisor = 0;
         self.pit0_write_msb = false;
         self.pit0_read_msb = false;
         self.pit0_access = 3;
         self.pit0_latched_active = false;
+        self.pit0_status = None;
         self.pic = crate::pic::Pic::new();
         if let Some(irq) = self.kbc.output_irq() {
             self.pic.raise(irq);

@@ -470,10 +470,12 @@ pub fn install_rom(bus: &mut Bus) {
 }
 
 /// INT 2Fh AX=1687h: the host is there, unless it is off or a V86 monitor
-/// (Windows' 386 enhanced mode) or a booted system runs, which have their
-/// own. Returns whether it answered.
+/// of the guest's (Windows' 386 enhanced mode) or a booted system runs,
+/// which have their own. Under the built-in monitor it is there, as a
+/// DPMI host is with a memory manager that provides one (386MAX, QEMM).
+/// Returns whether it answered.
 pub fn installation_check(cpu: &mut Cpu) -> bool {
-    if !cpu.bus.dpmi.enabled || cpu.v86() || cpu.bus.boot.is_some() {
+    if !cpu.bus.dpmi.enabled || cpu.guest_v86() || cpu.bus.boot.is_some() {
         return false;
     }
     if cpu.bus.dpmi.passed_over == Some(cpu.current_psp) {
@@ -516,8 +518,8 @@ pub fn passes_over(bytes: &[u8]) -> bool {
 pub fn accepts(cpu: &Cpu, kind: u8) -> bool {
     let active = cpu.bus.dpmi.active();
     match kind {
-        T_ENTRY | T_RM_RETURN | T_RM_INT | T_CALLBACK => !cpu.pe(),
-        T_RAW_TO_PM | T_SAVE_RM => !cpu.pe() && active,
+        T_ENTRY | T_RM_RETURN | T_RM_INT | T_CALLBACK => cpu.dos_mode(),
+        T_RAW_TO_PM | T_SAVE_RM => cpu.dos_mode() && active,
         T_IDT => cpu.pm() && cpu.cpl == 0 && active,
         T_DEFAULT_INT | T_DEFAULT_EXC | T_RET_HWINT | T_RET_CALLBACK | T_RET_EXCEPTION | T_RAW_TO_RM
         | T_SAVE_PM | T_MSDOS_API => cpu.pm() && cpu.cpl == 3 && active,
@@ -883,8 +885,10 @@ fn host_ring0(cpu: &mut Cpu) {
     let at = (host + HOST_GDT) as usize + (HOST_LDT >> 3) as usize * 8;
     cpu.bus.write_32(at, desc as u32);
     cpu.bus.write_32(at + 4, (desc >> 32) as u32);
-    if !cpu.pe() {
+    if !cpu.pm() {
+        // From real mode, or virtual-8086 mode under the built-in monitor.
         cpu.cr0 |= CR0_PE;
+        cpu.set_cpu_flag(CpuFlags::VM, false);
         cpu.note_mode_switch(true);
     }
     cpu.gdtr = DescTable { base: host + HOST_GDT, limit: (GDT_ENTRIES * 8 - 1) as u16 };
@@ -935,7 +939,8 @@ fn resume(cpu: &mut Cpu, ctx: &Context) {
 }
 
 /// Switch to real mode with the context `ctx` (segments, not selectors),
-/// with 64 KB segments and the real-mode vector table.
+/// with 64 KB segments and the real-mode vector table, or to
+/// virtual-8086 mode under the built-in monitor, where DOS runs there.
 fn enter_rm(cpu: &mut Cpu, ctx: &Context) {
     if cpu.pe() {
         cpu.cr0 &= !CR0_PE;
@@ -952,6 +957,10 @@ fn enter_rm(cpu: &mut Cpu, ctx: &Context) {
     cpu.set_eip(ctx.eip & 0xFFFF);
     cpu.set_cpu_flag(CpuFlags::VM, false);
     cpu.load_eflags(ctx.eflags & !(IOPL3 | CpuFlags::NT.bits()));
+    // Where DOS runs under the built-in monitor, there.
+    if crate::v86mon::installed(&cpu.bus) {
+        crate::v86mon::enter(cpu);
+    }
 }
 
 /// Return from a real-mode interrupt handler, as its IRET would.
@@ -1355,6 +1364,13 @@ fn take_frame(cpu: &mut Cpu, kinds: &[u8]) -> Option<Frame> {
 /// the handler the vector had before the stub. The vector may hold
 /// another program's handler by now that chains to the stub, as a child
 /// of a client installs one, and going back to it would loop.
+///
+/// With no original recorded, the host forgot the hook (it stopped, or
+/// the program was closed) while a resident program's handler still
+/// chains to the stub: the interrupt goes on to the BIOS's handler, which
+/// ends a hardware interrupt at the PIC. Returning from the stub would
+/// leave that IRQ in service, and it and those of lower priority would
+/// never come again.
 fn rm_interrupt(cpu: &mut Cpu, vector: u8) {
     let dpmi = &cpu.bus.dpmi;
     let reflecting = dpmi.frames.iter().any(|f| f.kind == F_REFLECT && f.vector == vector);
@@ -1386,7 +1402,11 @@ fn rm_interrupt(cpu: &mut Cpu, vector: u8) {
             resume(cpu, &ctx);
         }
         _ => {
-            let target = cpu.bus.dpmi.hooked_original(vector).unwrap_or(0);
+            let target = cpu
+                .bus
+                .dpmi
+                .hooked_original(vector)
+                .unwrap_or_else(|| crate::bios::default_ivt()[vector as usize]);
             if target == 0 || target == rm_stub(vector) {
                 iret_real(cpu);
             } else {
@@ -1677,15 +1697,25 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
     }
 }
 
+/// Put back what the real-mode vectors held before the host's stubs took
+/// them over, where a stub is still in the vector, and forget the hooks.
+/// For the last client's end, and for a program closed while it runs
+/// (`Cpu::load_shell`), which no DOS exit ends: a stub left in a vector
+/// with no client and no original behind it returns from a hardware
+/// interrupt without the BIOS handler's end of interrupt, and that IRQ
+/// and those below it never come again.
+pub fn release_vectors(bus: &mut Bus) {
+    for (vector, original) in std::mem::take(&mut bus.dpmi.hooks) {
+        if read_ivt(bus, vector) == rm_stub(vector) {
+            write_ivt(bus, vector, original);
+        }
+    }
+}
+
 /// The last client ended: the host's tables go, and the A20 gate is as it
 /// was before.
 fn stop_host(cpu: &mut Cpu) {
-    let dpmi = &mut cpu.bus.dpmi;
-    for (vector, original) in std::mem::take(&mut dpmi.hooks) {
-        if read_ivt(&cpu.bus, vector) == rm_stub(vector) {
-            write_ivt(&mut cpu.bus, vector, original);
-        }
-    }
+    release_vectors(&mut cpu.bus);
     let dpmi = &mut cpu.bus.dpmi;
     if let Some(host) = dpmi.host.take() {
         cpu.bus.xms.release_dpmi(host);

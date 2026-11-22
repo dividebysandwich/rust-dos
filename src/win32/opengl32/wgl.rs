@@ -543,7 +543,7 @@ pub fn fit_buffers(cpu: &mut Cpu, index: usize) -> bool {
     let lost = |cpu: &mut Cpu, id: u32| {
         ddraw::state(cpu)
             .surface(id)
-            .is_none_or(|s| s.lost || s.memory == dd_surface::MEM_NONE)
+            .is_none_or(|s| s.lost.get() || s.memory == dd_surface::MEM_NONE)
     };
     if c.target != 0 && c.size == size && !lost(cpu, c.target) && !lost(cpu, c.depth) {
         return true;
@@ -725,7 +725,17 @@ pub fn create_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
 
     // The DirectDraw object: in a window, or the Voodoo2's, which takes
-    // the card full screen when the context is first made current.
+    // the card full screen when the context is first made current. Either
+    // ICD draws through DirectDraw and loads DDRAW.DLL with the context,
+    // as Direct3DCreate8 does: the Voodoo2's exclusive mode puts
+    // DirectDraw's window procedure, which is in DDRAW.DLL's image, in
+    // front of the window's, and a program that imports only OPENGL32.DLL
+    // (GLQuake) hasn't loaded it.
+    if crate::win32::loader::map_builtin_named(cpu, "DDRAW.DLL").is_none() {
+        super::super::kernel32::free_pages(cpu, strings);
+        super::super::gdi32::set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
+        return Some(0);
+    }
     let card = icd == Icd::FullScreen;
     let dd = directdraw::new_ddraw(cpu, true, card);
     let dd_iface = ddraw::iface(cpu, dd, V_DD7);

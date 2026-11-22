@@ -25,6 +25,7 @@ use iced_x86::ConditionCode;
 use super::block::{BlockData, LINKS, RETURN_BITS, RETURN_LINK, RETURN_MISS, SIDE_LINK};
 use super::helpers::*;
 use super::uop::*;
+use crate::bus::UPPER_RAM;
 use crate::cpu::Seg;
 use crate::cpu::alu::ShiftOp;
 use crate::cpu::layout;
@@ -50,6 +51,13 @@ const _: () = assert!(crate::config::MAX_MEMSIZE << 20 <= 0x8000_0000 && SLOW as
 /// (both multiples of 4 KB, so they fit a compare's shifted immediate).
 const VIDEO: u32 = 0xA0000;
 const EXTENDED: u32 = 0x10_0000;
+/// The upper memory between the ROMs (`bus::UPPER_RAM`), RAM that the
+/// inline checks don't take (`dev_read`, `dev_write`): its first page and
+/// its number of pages. Its ends are on page boundaries, so an operand
+/// within one page is all in it or all out.
+const UPPER_START: u32 = (UPPER_RAM.start >> 12) as u32;
+const UPPER_PAGES: u32 = ((UPPER_RAM.end - UPPER_RAM.start) >> 12) as u32;
+const _: () = assert!(UPPER_RAM.start & 0xFFF == 0 && UPPER_RAM.end & 0xFFF == 0);
 
 /// The lowest of `fields`, rounded down to 16 bytes.
 const fn lowest(fields: &[usize]) -> usize {
@@ -100,6 +108,9 @@ pub struct Trampoline {
     pub exit: usize,
     /// `fpu_addsub`.
     pub addsub: usize,
+    /// `dev_read` and `dev_write`, for `JitCtx::dev`.
+    pub dev_read: usize,
+    pub dev_write: usize,
 }
 
 pub type Enter = unsafe extern "C" fn(*mut crate::cpu::Cpu, *mut JitCtx, *const u8) -> u64;
@@ -146,7 +157,75 @@ pub fn trampoline() -> Trampoline {
     );
     let addsub = ops.offset().0;
     fpu_addsub(&mut ops);
-    Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub }
+    let dev_read = ops.offset().0;
+    dev_read_routine(&mut ops);
+    let dev_write = ops.offset().0;
+    dev_write_routine(&mut ops);
+    Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub, dev_read, dev_write }
+}
+
+/// `jit_dev_read`'s way in (`JitCtx::dev`), with its arguments: an operand
+/// of W3 bytes at physical address W2, within one page, that the inline
+/// checks didn't take as plain RAM. The upper memory between the ROMs is
+/// RAM (`UPPER_PAGES`), read here into W0 without the call; the rest goes
+/// on to `jit_dev_read`. Keeping the check here rather than at each
+/// operand keeps the blocks' code as small as without it. X9 and X16 are
+/// changed.
+fn dev_read_routine(ops: &mut Asm) {
+    dynasm!(ops
+        ; .arch aarch64
+        ; sub w9, w2, UPPER_START, lsl 12
+        ; cmp w9, UPPER_PAGES, lsl 12
+        ; b.hs >helper
+        ; cmp w3, 2
+        ; b.lo >byte
+        ; b.eq >word
+        ; ldr w0, [x21, x2]
+        ; ret
+        ; byte:
+        ; ldrb w0, [x21, x2]
+        ; ret
+        ; word:
+        ; ldrh w0, [x21, x2]
+        ; ret
+        ; helper:
+    );
+    mov64(ops, 16, jit_dev_read as *const () as u64);
+    dynasm!(ops ; .arch aarch64 ; br x16);
+}
+
+/// `jit_dev_write`'s way in, as `dev_read_routine` is `jit_dev_read`'s:
+/// W3 written as W4 bytes at W2. Upper memory of a block without code is
+/// written here, as the inline stores write RAM (without bumping its
+/// generation, see `Bus::code_blocks`), and W0 = 0: it can't have hit
+/// the running block's bytes, which are code. The rest goes on to
+/// `jit_dev_write`. X9-X11 and X16 are changed.
+fn dev_write_routine(ops: &mut Asm) {
+    dynasm!(ops
+        ; .arch aarch64
+        ; sub w9, w2, UPPER_START, lsl 12
+        ; cmp w9, UPPER_PAGES, lsl 12
+        ; b.hs >helper
+        ; ldr x10, [x1, CTX_CODE_BLOCKS as u32]
+        ; lsr w11, w2, crate::bus::GEN_SHIFT as u32
+        ; ldrb w11, [x10, x11]
+        ; cbnz w11, >helper
+        ; mov w0, wzr
+        ; cmp w4, 2
+        ; b.lo >byte
+        ; b.eq >word
+        ; str w3, [x21, x2]
+        ; ret
+        ; byte:
+        ; strb w3, [x21, x2]
+        ; ret
+        ; word:
+        ; strh w3, [x21, x2]
+        ; ret
+        ; helper:
+    );
+    mov64(ops, 16, jit_dev_write as *const () as u64);
+    dynasm!(ops ; .arch aarch64 ; br x16);
 }
 
 /// ST(dst) = a + b, or a - b with W3 set, rounded to the control word's
@@ -1205,15 +1284,17 @@ impl Gen<'_> {
                     ; b.ne >precise_done
                 );
             }
-            Precise::Equal(a, b) => {
-                // Not equal where unordered either.
+            Precise::Compare(a, b) => {
+                // Unordered (V set): the handler. W4 = 1 where equal.
                 dynasm!(self.ops
                     ; .arch aarch64
                     ; fcmp D(d(a)), D(d(b))
-                    ; b.ne >precise_done
+                    ; b.vs =>at
+                    ; cset w4, eq
                 );
             }
         }
+        let compare = matches!(when, Precise::Compare(..));
         dynasm!(self.ops ; .arch aarch64 ; precise_regs:);
         self.field(Access::Ldr64, 1, layout::fpu::TOP);
         for i in (0..8).filter(|i| regs >> i & 1 != 0) {
@@ -1230,6 +1311,21 @@ impl Gen<'_> {
                 ; .arch aarch64
                 ; add x2, x2, x3, lsl 4
                 ; ldr x0, [x2]
+            );
+            if compare {
+                // As x86-64's.
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; tbnz x0, 63, >precise_int
+                    ; ldrh w5, [x2, 8]
+                    ; tst w5, 0x7FFF
+                    ; b.ne =>at
+                    ; precise_int:
+                    ; cbz w4, >precise_next
+                );
+            }
+            dynasm!(self.ops
+                ; .arch aarch64
                 ; tst x0, 0x7FF
                 ; b.ne =>at
                 ; precise_next:
@@ -1287,38 +1383,88 @@ impl Gen<'_> {
         );
     }
 
-    /// `Uop::FToInt64`: the conversion where the control word rounds to
-    /// nearest or chops, else the handler's. AArch64's conversions saturate
-    /// and make a NaN 0: a NaN and the limits go to the handler too.
+    /// `Uop::FToInt64`, as x86-64's (see `x64::Gen::fpu_to_int64`).
+    /// AArch64's conversions saturate and make a NaN 0: a NaN and the
+    /// limits go through `jit_fpu_to_int64` too.
     fn fpu_to_int64(&mut self, lo: T, hi: T, x: X) {
-        let x_ = d(x);
-        let at = self.ops.new_dynamic_label();
+        let (l, h, x_) = (r(lo), r(hi), d(x));
+        self.fpu_phys(1, 0);
+        self.cpu_addr(2, layout::fpu::STALE);
+        dynasm!(self.ops ; .arch aarch64 ; ldrb w3, [x2, x1] ; cbnz w3, >toint64_double);
+        self.cpu_addr(2, layout::fpu::X80);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; add x2, x2, x1, lsl 4
+            ; ldr x3, [x2]
+            ; tst x3, 0x7FF
+            ; b.eq >toint64_double
+            // The 80 bits: exponent e from 53 to 62 (W5 e - 53), the
+            // integer bit set, and the significand's 63 - e bits below
+            // the point 0.
+            ; ldrh w4, [x2, 8]
+            ; and w5, w4, 0x7FFF
+            ; movz w0, 16383 + 53
+            ; sub w5, w5, w0
+            ; cmp w5, 9
+            ; b.hi >toint64_frac
+            ; tbz x3, 63, >toint64_frac
+            ; movz w0, 10
+            ; sub w5, w0, w5
+            ; lsr X(l), x3, x5
+            ; lsl x0, X(l), x5
+            ; cmp x0, x3
+            ; b.ne >toint64_frac
+            ; tbz w4, 15, >toint64_split
+            ; neg X(l), X(l)
+            ; b >toint64_split
+            // The double, as `fpu_bail_precise` checks it for
+            // `Precise::Int`.
+            ; toint64_frac:
+            ; fmov x0, D(x_)
+            ; ubfx x2, x0, 52, 11
+            ; cmp w2, 1023 + 52
+            ; b.hs >toint64_slow
+            ; cmp w2, 1023 - 1
+            ; b.lo >toint64_double
+            ; mov w3, 1023 + 51
+            ; sub w3, w3, w2
+            ; mov x2, 1
+            ; lsl x2, x2, x3
+            ; sub x2, x2, 1
+            ; tst x0, x2
+            ; b.eq >toint64_slow
+            ; toint64_double:
+        );
         self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
         dynasm!(self.ops
             ; .arch aarch64
             ; fcmp D(x_), D(x_)
-            ; b.vs =>at
+            ; b.vs >toint64_slow
             ; and w0, w0, 0xC00
             ; cbnz w0, >toint64_other
-            ; fcvtns x1, D(x_)
+            ; fcvtns X(l), D(x_)
             ; b >toint64_check
             ; toint64_other:
             ; cmp w0, 0xC00
-            ; b.ne =>at
-            ; fcvtzs x1, D(x_)
+            ; b.ne >toint64_slow
+            ; fcvtzs X(l), D(x_)
             ; toint64_check:
             ; movz x2, 0x8000, lsl 48
-            ; cmp x1, x2
-            ; b.eq =>at
+            ; cmp X(l), x2
+            ; b.eq >toint64_slow
             ; sub x2, x2, 1
-            ; cmp x1, x2
-            ; b.eq =>at
-            ; mov W(r(lo)), w1
-            ; lsr x1, x1, 32
-            ; mov W(r(hi)), w1
+            ; cmp X(l), x2
+            ; b.ne >toint64_split
+            ; toint64_slow:
+            ; mov x0, x19
+            ; mov x1, x20
+            ; ldr x16, [x20, (CTX_FPU + 40) as u32]
+            ; blr x16
+            ; mov X(l), x0
+            ; toint64_split:
+            ; lsr X(h), X(l), 32
+            ; mov W(l), W(l)
         );
-        let end = self.end();
-        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
     }
 
     /// Add `v` to the u64 CPU field at `off`.
@@ -1845,6 +1991,34 @@ impl Gen<'_> {
                 }
             }
             Uop::SarConst { t, count } => dynasm!(self.ops ; .arch aarch64 ; asr W(r(t)), W(r(t)), count as u32),
+            Uop::AddDir { t, step, size } => {
+                let t = r(t);
+                self.field(Access::Ldr32, 0, layout::FLAGS);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; movz w1, step as u32
+                    // DF.
+                    ; tbz w0, 10, >up
+                    ; neg w1, w1
+                    ; up:
+                    ; add W(t), W(t), w1
+                );
+                if size == 2 {
+                    dynasm!(self.ops ; .arch aarch64 ; uxth W(t), W(t));
+                }
+            }
+            Uop::AddShifted {
+                t,
+                src,
+                shift,
+                size,
+            } => {
+                let (t, src) = (r(t), r(src));
+                dynasm!(self.ops ; .arch aarch64 ; add W(t), W(t), W(src), lsl shift as u32);
+                if size == 2 {
+                    dynasm!(self.ops ; .arch aarch64 ; uxth W(t), W(t));
+                }
+            }
             Uop::Extend { t, from, signed } => {
                 let t = r(t);
                 match (from, signed) {
@@ -1965,6 +2139,19 @@ impl Gen<'_> {
                         BitKind::Reset => dynasm!(self.ops ; .arch aarch64 ; bic W(r(t)), W(r(t)), w3),
                         _ => dynasm!(self.ops ; .arch aarch64 ; eor W(r(t)), W(r(t)), w3),
                     }
+                }
+            }
+            Uop::BitScan { forward, dst, src } => {
+                let (dst, src) = (r(dst), r(src));
+                dynasm!(self.ops ; .arch aarch64 ; movz w5, ZF ; cbz W(src), >zero);
+                if forward {
+                    dynasm!(self.ops ; .arch aarch64 ; rbit w4, W(src) ; clz W(dst), w4);
+                } else {
+                    dynasm!(self.ops ; .arch aarch64 ; clz w4, W(src) ; movz w3, 31 ; sub W(dst), w3, w4);
+                }
+                dynasm!(self.ops ; .arch aarch64 ; movz w5, 0 ; zero:);
+                if self.live_after & ZF != 0 {
+                    self.merge(ZF);
                 }
             }
             Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
@@ -2227,8 +2414,7 @@ impl Gen<'_> {
                 // As x86-64's.
                 let t_ = r(t);
                 let at = self.ops.new_dynamic_label();
-                self.field(Access::Ldr8, 1, layout::CPL);
-                dynasm!(self.ops ; .arch aarch64 ; cbnz w1, =>at);
+                let mask = self.ops.new_dynamic_label();
                 self.field(Access::Ldr32, 0, layout::FLAGS);
                 if size == 4 {
                     self.mov32(2, POPF_KEPT);
@@ -2239,9 +2425,25 @@ impl Gen<'_> {
                         ; b.ne =>at
                     );
                 }
+                // W2: the flags it loads at this CPL and IOPL.
+                self.field(Access::Ldr8, 1, layout::CPL);
                 self.mov32(2, POPF_RING0);
+                dynasm!(self.ops ; .arch aarch64 ; cbz w1, =>mask);
                 dynasm!(self.ops
                     ; .arch aarch64
+                    ; lsl w1, w1, 12
+                    ; and w3, w0, 0x3000
+                );
+                self.mov32(2, POPF_IOPL);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; cmp w1, w3
+                    ; b.ls =>mask
+                );
+                self.mov32(2, POPF_USER);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; =>mask
                     ; and w1, W(t_), w2
                     ; bic w0, w0, w2
                     ; orr w0, w0, w1
@@ -2285,19 +2487,17 @@ impl Gen<'_> {
                 }
             }
             Uop::RepStart { t, count, max } => {
-                // As x86-64's: a count up to `max`, forward and not traced,
-                // runs here; else the handler.
+                // As x86-64's: a count up to `max`, not traced, runs here;
+                // else the handler.
                 let access = if count.size == 4 { Access::Ldr32 } else { Access::Ldr16 };
                 self.field(access, r(t), gpr_offset(count));
                 let at = self.ops.new_dynamic_label();
                 self.field(Access::Ldr32, 0, layout::FLAGS);
                 self.mov32(1, max);
-                // TF or DF.
-                self.mov32(2, 0x500);
                 dynasm!(self.ops
                     ; .arch aarch64
-                    ; tst w0, w2
-                    ; b.ne =>at
+                    // TF.
+                    ; tbnz w0, 8, =>at
                     ; cmp W(r(t)), w1
                     ; b.hi =>at
                 );
@@ -2310,13 +2510,6 @@ impl Gen<'_> {
             Uop::RepEnd { t } => {
                 let top = self.rep_top.take().expect("RepStart before RepEnd");
                 dynasm!(self.ops ; .arch aarch64 ; cbnz W(r(t)), =>top);
-            }
-            Uop::Forward => {
-                let at = self.ops.new_dynamic_label();
-                self.field(Access::Ldr32, 0, layout::FLAGS);
-                dynasm!(self.ops ; .arch aarch64 ; tbnz w0, 10, =>at);
-                let end = self.end();
-                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
             }
             Uop::FpuGuard { valid } => self.fpu_guard(valid),
             Uop::FBailPrecise { regs, when } => self.fpu_bail_precise(regs, when),
@@ -2512,21 +2705,36 @@ impl Gen<'_> {
                     self.fpu_canon(d(x));
                 }
             }
-            Uop::FLoadInt64 { x, m } => {
-                // As x86-64's.
-                let at = self.ops.new_dynamic_label();
+            Uop::FPushInt64 { m } => {
+                // As x86-64's: D16 the double, rounded to nearest, X3 the
+                // significand and W5 the sign and exponent.
+                self.fpu_known = self.fpu_known << 1 | 1;
                 dynasm!(self.ops
                     ; .arch aarch64
-                    ; ldr x1, [x21, X(r(m))]
-                    ; asr x2, x1, 53
-                    ; add x2, x2, 1
-                    ; cmp x2, 1
-                    ; b.hi =>at
-                    ; scvtf D(d(x)), x1
+                    ; ldr x0, [x21, X(r(m))]
+                    ; scvtf d16, x0
+                    ; cmp x0, 0
+                    ; cneg x3, x0, lt
+                    ; cset w5, lt
+                    ; lsl w5, w5, 15
+                    ; clz x4, x3
+                    ; lsl x3, x3, x4
+                    ; cbz x3, >fild64_zero
+                    ; movz w0, 16383 + 63
+                    ; sub w0, w0, w4
+                    ; orr w5, w5, w0
+                    ; fild64_zero:
                 );
-                let end = self.end();
-                let (ix, dirty) = (self.ix, self.dirty);
-                self.slow.push(Slow::Bail { at, end, ix, dirty, leave: false });
+                self.field(Access::Ldr64, 1, layout::fpu::TOP);
+                dynasm!(self.ops ; .arch aarch64 ; sub w1, w1, 1 ; and w1, w1, 7);
+                self.field(Access::Str64, 1, layout::fpu::TOP);
+                self.cpu_addr(2, layout::fpu::F64);
+                dynasm!(self.ops ; .arch aarch64 ; str d16, [x2, x1, lsl 3]);
+                self.cpu_addr(2, layout::fpu::STALE);
+                dynasm!(self.ops ; .arch aarch64 ; strb wzr, [x2, x1]);
+                self.fpu_tag(1, FPU_VALID);
+                self.cpu_addr(2, layout::fpu::X80);
+                dynasm!(self.ops ; .arch aarch64 ; add x2, x2, x1, lsl 4 ; stp x3, x5, [x2]);
             }
             Uop::FToHalf { t, x, high } => {
                 dynasm!(self.ops ; .arch aarch64 ; fmov X(r(t)), D(d(x)));
@@ -2571,6 +2779,15 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch aarch64 ; addsub_done:);
             }
             Uop::FChs => self.fpu_op(1 << 13, None),
+            Uop::FRndint => self.fpu_op(6 << 13, None),
+            Uop::FAbs => self.fpu_op(7 << 13, None),
+            Uop::FTrig { op } => {
+                self.fpu_op(op.reg_op() << 13, None);
+                if op.pushes() {
+                    // As x86-64's: the registers known in range or out of it.
+                    self.fpu_known &= self.fpu_known << 1 | 1;
+                }
+            }
             Uop::FSqrt => {
                 const C1: u32 = 0x200;
                 // The root inline where the double is above 0, else (a
@@ -2599,7 +2816,10 @@ impl Gen<'_> {
                 self.fpu_op(4 << 13, None);
                 dynasm!(self.ops ; .arch aarch64 ; fsqrt_done:);
             }
-            Uop::FLoad80 { m } => self.fpu_op(2 << 13, Some(m)),
+            Uop::FLoad80 { m } => {
+                self.fpu_known = self.fpu_known << 1 | 1;
+                self.fpu_op(2 << 13, Some(m));
+            }
             Uop::FAddValue { kind, x } => {
                 use crate::instructions::fpu::arithmetic::{ADD_VALUE, SUB_VALUE};
                 // 8: the double in D16.
@@ -2617,8 +2837,9 @@ impl Gen<'_> {
             }
             Uop::FCom { a, b } => {
                 // C0 where less or unordered, C2 where unordered, C3 where
-                // equal or unordered (an unordered FCMP sets C and V).
-                const C0_C2_C3: u32 = 0x4500;
+                // equal or unordered (an unordered FCMP sets C and V). C1
+                // is cleared.
+                const C0_TO_C3: u32 = 0x4700;
                 dynasm!(self.ops
                     ; .arch aarch64
                     ; fcmp D(d(a)), D(d(b))
@@ -2634,7 +2855,7 @@ impl Gen<'_> {
                 dynasm!(self.ops
                     ; .arch aarch64
                     ; ldrh w4, [x2]
-                    ; movz w5, C0_C2_C3
+                    ; movz w5, C0_TO_C3
                     ; bic w4, w4, w5
                     ; orr w4, w4, w1
                     ; strh w4, [x2]

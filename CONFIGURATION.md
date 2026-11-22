@@ -124,8 +124,19 @@ limit, so without a connection it goes on as it would with one:
   display's rate), `off`, or 10 to 240. See [Frame rate
   cap](#frame-rate-cap). `--fps-cap` sets it for a run.
   `voodoo_fps_cap` is its old name, still read.
-* `filter` is how the picture is scaled up: `nearest` (the default, sharp
-  pixels) or `linear` (smooth). It applies without a CRT shader.
+* `filter` is how the picture is scaled up: `sharp` (the default),
+  `hard` or `linear` (smooth). It applies without a CRT shader. `sharp`
+  gives every pixel of the picture the same size on the screen. At a
+  whole-number scale that is nearest-neighbour sampling; at others, such
+  as 640x480 in fullscreen on a 1920x1200 display (2.5 times) or a
+  320x200 picture shown at `aspect=4:3`, the edge between two pixels is
+  blended over less than one screen pixel, so one-pixel lines and text
+  strokes keep one width. `nearest`, its old name, is still read. `hard`
+  is nearest-neighbour sampling at every scale: nothing is blended, and
+  at a scale that isn't a whole number pixels come out in two widths.
+  Below twice the size, as with 1024x768 on a 1280x1024 display,
+  `sharp` often draws a one-pixel stroke as two half-tone screen pixels,
+  and `hard` keeps it crisp at the cost of the uneven widths.
 * `shader` gives the picture a look: `none` (the default), one of the
   CRT looks `scanlines`, `aperture` or `crt`, or `xbrz`, which scales the
   picture 2x with xBRZ, a pixel-art upscaler, without a CRT look. See
@@ -177,17 +188,21 @@ limit, so without a connection it goes on as it would with one:
   default, finds the speed the running program needs from the frames it
   draws (its page flips, or the bursts of writes that copy a finished
   picture to video memory): it goes up while the frame rate follows it,
-  stops where the frame rate stops following (a game that caps its own
-  frame rate) or reaches the display's refresh rate (frames nobody sees,
-  and some games, such as Descent, play badly at such rates), and goes
-  down while the program waits for a key or calls DOS's idle interrupt. It
-  then tries lower speeds, down to where they cost more than 3% of the
-  frame rate. A speed the host falls behind at is left for a lower one,
-  and the limit that sets rises again while the host keeps up. A real-mode
-  program with no frames to go by (most games of the 1980s, which update the
-  screen piecemeal) runs at 3000, about a 286, as in DOSBox's `cycles=auto`,
-  and at max while it reads or writes its drives (loading), unless it would
-  sit halted for 30% of the time or more at the real-mode speed, as a game
+  stops where the frame rate stops following (a game that caps its own frame
+  rate) or reaches the display's refresh rate (frames nobody sees, and some
+  games, such as Descent, play badly at such rates), and goes down while the
+  program waits for a key or calls DOS's idle interrupt. It doesn't go up
+  for a program that sits halted for half the time or more, and longer than
+  waiting for a retrace or two a frame takes: it waits for something else,
+  as a Windows game that draws only when something changes does. It then
+  tries lower speeds, down to where they cost more than 3% of the frame
+  rate, or make a program that polls for the vertical retrace miss one. A
+  speed the host falls behind at is left for a lower one, and the limit that
+  sets rises again while the host keeps up. A real-mode program with no
+  frames to go by (most games of the 1980s, which update the screen
+  piecemeal) runs at 3000, about a 286, as in DOSBox's `cycles=auto`, and at
+  max while it reads or writes its drives (loading), unless it would sit
+  halted for 30% of the time or more at the real-mode speed, as a game
   playing speech from its CD does. A protected-mode one runs at max while it
   reads and writes (loading, computing), and otherwise goes down to 20000, a
   486's speed, or a quarter of a faster `cpu` model's clock (50000 on a
@@ -221,51 +236,68 @@ limit, so without a connection it goes on as it would with one:
   building its next scene) runs at max instead of slowing down as a
   spinning menu would. The built-in Windows (`win32`) idles so too,
   and `auto` knows it from the start: a Win32 program that computes
-  without drawing, such as a game unpacking its level, runs at max.
-  What `auto` has seen goes into save states, and is forgotten when the
-  machine goes back to real mode (a reboot, a DOS program's end). It
-  applies at once.
-* `cpu` is the emulated processor: `486` (the default, a 486DX with FPU),
-  `386`, or `pentium`, a Pentium as DOSBox-X has one: CPUID (a
-  GenuineIntel family 5), the time stamp counter, which counts the
-  instructions and so runs at a fixed `cycles` speed (at `max` and
-  `auto`, whose speed changes as they run, it runs at a clock rate of the
-  model's own: 200 MHz on a Pentium or Pentium Pro, 233 on a Pentium MMX,
-  450 on a Pentium II, 550 on a K6-2 and 600 on a Pentium III, so that
-  programs which time with it, such as 3DMark 2000, measure right), its
-  MSRs, CMPXCHG8B and 4 MB pages, without the virtual-8086 mode extensions; `pentium_mmx`,
-  that Pentium with MMX (CPUID family 5, model 4), whose eight MM
-  registers are the FPU's; `k6_2`, an AMD K6-2 (CPUID AuthenticAMD
-  family 5, model 8, with AMD's extended leaves): the Pentium MMX's with
-  3DNow!, SYSCALL/SYSRET and the K6's MSRs (EFER, STAR, the write
-  handling control and test register 12), without the P6 instructions.
-  Its 3DNow! arithmetic follows AMD's manual: it rounds to nearest, gives
-  a zero below 2^-126 and the largest normal from 2^128, and has no
-  exceptions; PFRCP and PFRSQRT give the exact results rounded to a
-  single where the real one's tables give 14 and 15 bits.
-  `pentium_pro`, a Pentium Pro as DOSBox-X's
-  `ppro_slow` (CPUID family 6, model 1): the Pentium's with CMOVcc,
-  FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and the local APIC base
-  and microcode revision MSRs Windows 98 and ME read, without MMX;
-  `pentium_ii`, a Pentium II as DOSBox-X's (family 6, model 3): the
-  Pentium Pro's with MMX and SYSENTER/SYSEXIT; or `pentium_iii`, a
+  without drawing, such as a game unpacking its level, runs at max. A
+  DOS program that the emulator's own DPMI host runs (DOS/4GW and the
+  other extenders that use it) has no such system under it: its waits
+  don't count, and its menus slow down as any other's. What `auto` has
+  seen goes into save states, and is forgotten when the machine goes
+  back to real mode (a reboot, a DOS program's end). It applies at
+  once.
+* `cpu` is the emulated processor: `486` (a 486DX with FPU), `386`, or
+  `pentium`, a Pentium as DOSBox-X has one: CPUID (a GenuineIntel family 5),
+  the time stamp counter, which counts the instructions and so runs at a
+  fixed `cycles` speed (at `max` and `auto`, whose speed changes as they
+  run, it runs at a clock rate of the model's own: 200 MHz on a Pentium or
+  Pentium Pro, 233 on a Pentium MMX, 450 on a Pentium II, 550 on a K6-2 and
+  600 on a Pentium III, so that programs which time with it, such as 3DMark
+  2000, measure right), its MSRs, CMPXCHG8B and 4 MB pages, without the
+  virtual-8086 mode extensions; `pentium_mmx`, that Pentium with MMX (CPUID
+  family 5, model 4), whose eight MM registers are the FPU's; `k6_2`, an AMD
+  K6-2 (CPUID AuthenticAMD family 5, model 8, with AMD's extended leaves):
+  the Pentium MMX's with 3DNow!, SYSCALL/SYSRET and the K6's MSRs (EFER,
+  STAR, the write handling control and test register 12), without the P6
+  instructions. Its 3DNow! arithmetic follows AMD's manual: it rounds to
+  nearest, gives a zero below 2^-126 and the largest normal from 2^128, and
+  has no exceptions; PFRCP and PFRSQRT give the exact results rounded to a
+  single where the real one's tables give 14 and 15 bits. `pentium_pro`, a
+  Pentium Pro as DOSBox-X's `ppro_slow` (CPUID family 6, model 1): the
+  Pentium's with CMOVcc, FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and
+  the local APIC base and microcode revision MSRs Windows 98 and ME read,
+  without MMX; `pentium_ii`, a Pentium II as DOSBox-X's (family 6, model 3):
+  the Pentium Pro's with MMX and SYSENTER/SYSEXIT; or `pentium_iii`, a
   Pentium III (Katmai, family 6, model 7): the Pentium II's with SSE,
-  FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT, the processor serial
-  number (CPUID leaf 3, until MSR 119h switches it off) and the cache
-  descriptors of CPUID leaf 2. Its SSE arithmetic rounds as MXCSR says,
-  flushes to zero, and sets and masks the six exception flags as a
-  Pentium III does: an unmasked one raises #XM, or #UD without
-  OSXMMEXCPT. RCPPS and RSQRTPS give the exact reciprocal rounded to a
-  single, within the precision Intel specifies for them. SSE needs
-  CR4.OSFXSR, which a system that saves the SSE state sets; rust-dos's
-  DPMI host sets it for its clients on a Pentium III. None of them has
-  RDPMC, a local APIC or memory type range registers, as in DOSBox-X. A
-  DOSBox configuration's `cputype` of a Pentium imports as `pentium`, of
-  a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, of
-  a Pentium II as `pentium_ii`, and of a Pentium III or DOSBox-X's
-  `experimental` as `pentium_iii`. The `cpu` also gives the memory of a
-  machine without a `memsize` line: 16 MB up to a Pentium and 32 to
-  128 MB with the later ones (see `memsize`).
+  FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT, the processor serial number
+  (CPUID leaf 3, until MSR 119h switches it off) and the cache descriptors
+  of CPUID leaf 2. Its SSE arithmetic rounds as MXCSR says, flushes to zero,
+  and sets and masks the six exception flags as a Pentium III does: an
+  unmasked one raises #XM, or #UD without OSXMMEXCPT. RCPPS and RSQRTPS give
+  the exact reciprocal rounded to a single, within the precision Intel
+  specifies for them. SSE needs CR4.OSFXSR, which a system that saves the
+  SSE state sets; rust-dos's DPMI host sets it for its clients on a Pentium
+  III. None of them has RDPMC, a local APIC or memory type range registers,
+  as in DOSBox-X. A DOSBox configuration's `cputype` of a Pentium imports as
+  `pentium`, of a Pentium MMX as `pentium_mmx`, of a Pentium Pro as
+  `pentium_pro`, of a Pentium II as `pentium_ii`, and of a Pentium III or
+  DOSBox-X's `experimental` as `pentium_iii`. The `cpu` also gives the
+  memory of a machine without a `memsize` line: 16 MB up to a Pentium and 32
+  to 128 MB with the later ones (see `memsize`). Without a `cpu` line the
+  processor follows the display adapter: a `486`, or a `pentium_iii` with
+  `machine=svga_toadforce`, as the ToadForce's games were written for a
+  Pentium II or better and a card of its class was never sold for a 486.
+  That model isn't written to the configuration; the settings window shows
+  it with **(auto)**, `cycles=auto` takes its least speed from it, and save
+  states, `/api/status` and almanac reports carry the model the machine has.
+  A `cpu` line wins: with a ToadForce, a model older than the Pentium II
+  runs as set, with a line in the log that the card's games expect a Pentium
+  II or better. The settings window of an earlier rust-dos wrote `cpu=486`
+  into the configuration file it saved. When the video card is changed to
+  the ToadForce in the settings window, a processor older than the Pentium
+  II goes back to **(auto)**, and saving comments out the `cpu` line; a
+  processor picked after that stays. In a file edited by hand, remove the
+  `cpu` line, or press Delete on the processor in the settings window, to
+  have the card's default. A save state keeps the processor it was saved
+  with, so one saved with a ToadForce by an earlier rust-dos loads as a
+  486.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
@@ -466,9 +498,15 @@ limit, so without a connection it goes on as it would with one:
 * `ems` gives programs expanded memory (LIM EMS 4.0, INT 67h), which
   many games of the early 1990s want: `true` (the default) or `false`.
   As with EMM386, 16 KB pages of extended memory show through a page
-  frame at E000h, and EMS and XMS share the same memory. There is no
-  VCPI: DOS extenders use the DPMI host (`dpmi`), or run as they do
-  without EMM386. A change takes effect at the DOS prompt.
+  frame at E000h, and EMS and XMS share the same memory. With EMS, DOS
+  runs in virtual-8086 mode under a built-in monitor, as under EMM386:
+  installers that look for a memory manager by reading CR0 find one, and
+  DOS extenders that find no DPMI host switch to protected mode through
+  VCPI (INT 67h AX=DE00h-DE0Ch). Programs that switch the processor
+  themselves (to "unreal" mode, or with a DOS extender that only knows
+  plain DOS) stop with a message, as they do under EMM386, and need
+  `ems=false`, which runs DOS in real mode. A change takes effect at the
+  DOS prompt.
 * `umb` gives DOS upper memory blocks between 640 KB and 1 MB, from
   D000h to EFFFh (to DFFFh with EMS), as DOS 5 with EMM386 has them:
   `true` (the default) or `false`. `LOADHIGH` (or `LH`) at the prompt
@@ -481,7 +519,8 @@ limit, so without a connection it goes on as it would with one:
   conventional memory, as `DOS=HIGH` leaves it: `true` (the default) or
   `false`. The first memory block is then at 05A9h, about 617 KB of
   conventional memory are free, and programs load below 64 KB, with a
-  2 KB environment (`SET` says *Out of environment space* past it).
+  2 KB environment, its MCB included (`SET` says *Out of environment
+  space* past it).
   `false` spreads them up to 0FFFh, where programs start at segment 1000h
   with 576 KB free, for an old program that fails below 64 KB ("Packed
   file is corrupt"). DOS keeps no code in the HMA, which stays free for
@@ -496,8 +535,9 @@ limit, so without a connection it goes on as it would with one:
   from it as they need it, so a DOS/4GW program can start another DOS
   extender's (demos such as Scoop's Luminous do). As under Windows, its
   clients can call DOS with INT 21h in protected mode, with selectors
-  for their buffers. Off, they run as they do on plain DOS with HIMEM. A
-  change takes effect for the programs started after it.
+  for their buffers. Off, they use VCPI with EMS on, as under EMM386, and
+  run as they do on plain DOS with HIMEM with EMS off. A change takes
+  effect for the programs started after it.
 * `win32` turns on the built-in Windows: `true` or `false` (the default). A
   Win32 program, a Windows 95 .EXE, then runs from the DOS prompt in
   protected mode with paging, as Windows 95 runs it, and ends back at the
@@ -573,8 +613,8 @@ limit, so without a connection it goes on as it would with one:
   8.1 under `98` and `98se`. The registry's
   `HKLM\Software\Microsoft\DirectX` gives `Version` 4.08.00.0400 or
   4.08.01.0881 and `InstalledVersion` 8.0 or 8.1, and the version
-  resources of DDRAW, DSOUND, DINPUT, DPLAYX, D3D8, DINPUT8 and the
-  DirectMusic DLLs, which GetFileVersionInfo reads, say the same. A
+  resources of DDRAW, DSOUND, DINPUT, DPLAYX, DPNET, D3D8, DINPUT8 and
+  the DirectMusic DLLs, which GetFileVersionInfo reads, say the same. A
   change takes effect for the next program that starts when none runs.
 * `win32_locale` is the system locale of the built-in Windows, the
   language edition of Windows 98 it is. `en-US` is the default. The
@@ -634,6 +674,15 @@ limit, so without a connection it goes on as it would with one:
   bit screen mode, such as Moto Racer, need when the adapter's own is
   deeper. Like `win32_version`, a change takes effect for the next
   program that starts when none runs.
+* `win32_desktop` is the size of the built-in Windows' desktop:
+  `640x480` (the default), `800x600` or `1024x768`, as Display
+  Properties set it on Windows. GetSystemMetrics, EnumDisplaySettings
+  and the `Resolution` of `HKLM\Config\0001\Display\Settings` report
+  it, and the desktop shows at that size. Programs that say they need
+  800x600 or more, such as Fields of Fire, need `800x600`. A program can
+  still change the size with ChangeDisplaySettings while it runs; its
+  end gives this size back. Like `win32_depth`, a change takes effect
+  for the next program that starts when none runs.
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or `7.10`;
   `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS has the FAT32
@@ -752,10 +801,18 @@ limit, so without a connection it goes on as it would with one:
 ### `[sound]`
 
 * `sbtype` is the Sound Blaster: `sb16` (the default), `sb16vibra`,
-  `awe32`, `sbpro2`, `sb2` or `none`. `sbbase` (hex), `irq`, `dma` and
-  `hdma` (the SB16's and AWE32's 16-bit channel) set its resources; the
-  defaults are 220, 7, 1 and 5. The `BLASTER` environment variable follows
-  them.
+  `awe32`, `sbpro2`, `sbpro1`, `sb2` or `none`. `sbbase` (hex), `irq`,
+  `dma` and `hdma` (the SB16's and AWE32's 16-bit channel) set its
+  resources; the defaults are 220, 7, 1 and 5. The `BLASTER` environment
+  variable follows them.
+* `sbpro1` is the first Sound Blaster Pro (CT1330, DSP 3.00), which
+  DOSBox's `sbtype=sbpro1` imports as. Creative's early drivers for it,
+  such as Mega lo Mania's, take only DSP 3.00 and 3.01 and don't find an
+  `sbpro2`, whose DSP is 3.02. Its FM synthesizer is two OPL2 chips, as
+  on the real card (`opl=dualopl2`, which `opl=auto` gives it): the left
+  one at base+0/1 plays on the left only, the right one at base+2/3 on
+  the right only, and base+8/9 and 388h/389h write both. A program that
+  checks for an OPL3 finds none.
 * `sb16vibra` is an SB16 as Creative's ViBRA16C (CTL0070, DSP 4.13), an
   ISA Plug and Play card, as DOSBox-X's `sbtype=sb16vibra` is. The BIOS
   leaves it configured at the resources above, so DOS programs find it as
@@ -779,7 +836,35 @@ limit, so without a connection it goes on as it would with one:
   the instruments programs load into its RAM; the ROM's are silent.
   `awe32ram` is the RAM in KB: `512` (the default, as the AWE32 came),
   `0`, `1024`, `2048`, `4096`, `8192`, `12288`, `16384` or `28672`.
-* `opl` is the FM synthesizer: `opl3` (the default) or `opl2`.
+* `opl` is the FM synthesizer: `auto` (the default), `opl3`, `opl2` or
+  `dualopl2`. `auto` is two OPL2s with `sbtype=sbpro1` and an OPL3 with
+  every other card. `dualopl2` is the first SB Pro's pair of OPL2s:
+  base+0/1 writes the left chip, base+2/3 the right one, and base+8/9 and
+  388h/389h both; 38Ah and 38Bh aren't there, as on that card. The status
+  at base+0, base+8 and 388h is the left chip's, at base+2 the right
+  chip's. It reads as an OPL2's, so a program's OPL3 check fails as on the
+  real card. The left chip plays on the left output only and the right
+  chip on the right only, and the Sound Blaster mixer's FM volume sets
+  each side. A DOSBox configuration's `oplmode=dualopl2` imports as
+  `dualopl2`, and its `auto` as `auto`.
+* `adlibgold` installs the AdLib Gold 1000: `true` or `false` (the
+  default). It is an OPL3 with a control chip (mixer, EEPROM), a stereo
+  processor (TDA8425), the optional surround module (YM7128B) and two
+  12-bit sample channels (the YMZ263 MMA) with their own IRQ and DMA. It
+  takes eight ports, 388h to 38Fh unless `adlibgoldbase` (hex, 200 to 3F8
+  in steps of 8) moves it; the FM chip still answers at 388h then. With
+  the card the FM synthesizer is an OPL3 whatever `opl` says, and its
+  timers interrupt on the card's IRQ. `adlibgoldirq` (3, 4, 5 or 7) and
+  `adlibgolddma` (1 or 3) set the card's resources; the defaults are 7 and
+  1, the Sound Blaster's, which works while a game uses one card at a
+  time. The FM chip is both cards' here, though: a Sound Blaster game that
+  looks for an AdLib by running the FM timers also raises the card's IRQ,
+  which its Sound Blaster driver may take for its own. Leave `adlibgold`
+  off for such games, or move `adlibgoldirq`. `adlibgoldsurround` fits the
+  surround module: `true` (the default) or `false`. A DOSBox
+  configuration's `oplmode=opl3gold` imports as `adlibgold=true`. The
+  card's sampled sound is the mixer's `adlibgold` channel; its FM goes
+  through the card's output stage on the `fm` channel.
 * `soundfont` is a General MIDI SoundFont (`.sf2`) for music programs
   send to the MPU-401 at 330h.
 * `gus` installs the Gravis Ultrasound: `true` (the default) or `false`.
@@ -884,12 +969,14 @@ programs set.
   filters as the model in `sbtype` does, at 4.8 kHz on an SB 2.0, 3.2 kHz
   on an SB Pro and half the sample rate on an SB16; `off` leaves the
   sound as the card makes it.
-* `sb_coupling` is the capacitor on the Sound Blaster's output, a
-  high-pass at 3 Hz: `on` (the default) or `off`. A card's DAC holds its
-  last sample until the next, and with the capacitor that level fades
-  out of the mix within a fraction of a second, as on the real card;
-  `off` mixes the DAC's level as it is, so a level a program leaves the
-  card at stays in the mix as a constant offset.
+* `sb_coupling` is the capacitor on the outputs of the Sound Blaster and
+  the AdLib, a high-pass at 3 Hz: `on` (the default) or `off`. A card's
+  DAC holds its last sample until the next, and the FM synthesizer holds
+  a level when a program stops a note by setting its frequency to 0
+  without a release. With the capacitor that level fades out of the mix
+  within a fraction of a second, as on the real card; `off` mixes it as
+  it is, so a level a program leaves the card at stays in the mix as a
+  constant offset.
 * `reverb` adds a room to the music of the FM synthesizer, the Gravis
   Ultrasound and MIDI: `off` (the default), `tiny`, `small`, `medium`,
   `large` or `huge`. `chorus` thickens them: `off` (the default),
@@ -1428,10 +1515,14 @@ A game set up for DOSBox becomes a profile with its **Import** row, or
 `--import PATH` at startup (which also launches it): a GOG install's folder
 (its `goggame-*.info` says how GOG runs DOSBox), a folder with DOSBox
 configuration files (GOG's older `dosboxGame.conf` and
-`dosboxGame_single.conf`), or one such file. The profile gets the CPU,
-memory, video, sound, joystick and keyboard settings the configuration has,
-the drives its `[autoexec]` mounts (CD images included), and its commands
-but EXIT; what doesn't come across goes to the log. DOSBox Staging's
+`dosboxGame_single.conf`), or one such file. GOG Galaxy's install script
+copies the DOSBox configuration files from `gog-support\<product id>\app`
+into the install's folder; an install downloaded with gogdl (the
+downloader Heroic uses) leaves them there, and a file the install's
+folder lacks is read from there. The profile gets the CPU, memory, video,
+sound, joystick and keyboard settings the configuration has, the drives
+its `[autoexec]` mounts (CD images included), and its commands but EXIT;
+what doesn't come across goes to the log. DOSBox Staging's
 `cpu_cycles` and `cpu_cycles_protected` become `cycles` (a real-mode speed
 with a faster protected mode is `auto` with that speed), `CONFIG -SET`
 lines become the profile's settings, and `LOADFIX` runs the program it
@@ -1464,18 +1555,19 @@ game plays, F2 saves the settings window's changes to its profile.
 its name, and so does `?game=NAME` in the browser.
 
 `year`, `publisher` and `notes` in `[game]` describe the game for
-[almanac.rust-dos.com](#emulator): its reports carry them, the year
-and publisher filling in what the almanac doesn't know of the game, and
-the notes (one line, how it plays and what it needs) showing with the
-report. **Ins** asks for them, and the report dialog keeps what you type
-there in the profile of the game playing. `uuid` is the profile's own,
-which new and imported profiles get and an older one gets with its
-first report: a report sent with it replaces the one sent with it on
-the same game before, instead of adding another, and a profile that runs
-several games (a Windows 98 image, say) keeps a report on each. Keep it
-to yourself, as anyone with it can replace your reports; a package's own
-`uuid` is never copied into the profiles made from it, each of which
-gets its own.
+[almanac.rust-dos.com](#emulator): its reports carry them, the year and
+publisher filling in what the almanac doesn't know of the game, and the
+notes (one line, how it plays and what it needs) showing with the report.
+**Ins** asks for them, and the report dialog keeps what you type there in
+the profile of the game playing. `uuid` is the profile's own, which new and
+imported profiles get and an older one gets with its first report: a report
+sent with it replaces the one sent with it on the same game before, instead
+of adding another, and a profile that runs several games (a Windows 98
+image, say) keeps a report on each. The games and versions its reports added
+can be corrected with it on the almanac's site (their platform, files and
+name, say), until a moderator edits them. Keep it to yourself, as anyone
+with it can replace your reports; a package's own `uuid` is never copied
+into the profiles made from it, each of which gets its own.
 
 ```ini
 [game]
@@ -1559,10 +1651,11 @@ profile:
 | Setting | Set it to | Why |
 |---|---|---|
 | `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. Of the 3dfx cards, it and the Banshee are the ones Direct3D 8 runs on and OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too. A game from 2000 on that asks for more than a Voodoo3 has (32-bit color, large textures, hardware transform and lighting) takes `svga_toadforce` ([ToadForce](#toadforce)) |
-| `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both |
+| `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both. With `svga_toadforce` the machine has a Pentium III without the line |
 | `memsize` | leave it out, or `128` for a 3D game from 1998 on | Without it a Pentium II has 64 MB, which most Windows 98 games asked for (the default 486 has 16 MB). The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
 | `win32_depth` | `8` only for a game that says it needs 256 colours, `16` for one that says it needs 16 bits | The default desktop has the card's own depth (16 bits on a Voodoo3, 32 on an S3 Trio, 24 on a ViRGE). A GDI game that draws with a palette needs `8`. A game that checks the desktop's depth before it sets its own mode, such as Moto Racer, needs `16` on a card whose desktop is deeper. Other DirectDraw games set their own mode and don't need it |
+| `win32_desktop` | `800x600` only for a game that says it needs that screen resolution | The desktop is 640x480 by default. A game that checks the desktop's size before it starts, such as Fields of Fire, needs `800x600` (or `1024x768`, if it asks for that). Games that set their own mode with DirectDraw don't need it |
 | `cycles` | leave it at `auto` | The game's timers follow the emulated clock, and `auto` finds the speed its frames need |
 
 The `[autoexec]` lines run in the built-in DOS, so they use 8.3 names
@@ -1741,7 +1834,9 @@ last. Go through these in order:
 1. **It stops at once with an invalid opcode:** set `cpu=pentium_ii`.
 2. **Its message names `win32_version`:** set `win32_version=98se`.
 3. **It says it needs 256 colours or a 16 bit screen mode:** set
-   `win32_depth=8` for 256 colours, `win32_depth=16` for 16 bits.
+   `win32_depth=8` for 256 colours, `win32_depth=16` for 16 bits. If
+   it says it needs a screen resolution of 800x600, set
+   `win32_desktop=800x600`.
 4. **It says there isn't enough memory:** raise `memsize`.
 5. **It can't find its CD or its files:** check its
    [registry keys](#registry-keys) and
@@ -2759,7 +2854,18 @@ SubCulture on Windows 95 and Expendable on Windows 98 SE.
 
 The card swaps its buffers at the vertical retrace a game asks it to wait
 for, and reports the swaps still waiting and its busy state as the real
-one does, so games that pace themselves by it run at its 60 Hz. The
+one does, so games that pace themselves by it run at its refresh rate.
+The rate comes from the video timing Glide programs: the frame in the
+card's video registers at the pixel clock of its DAC's PLL, which Glide
+sets for the rate a game asks for (at 640x480, 60, 75, 85 or 120 Hz).
+Until a program sets that clock, the card runs its frame at 60 Hz. The
+built-in Windows' Glide does the same, and on a Voodoo3 sets the mode at
+the rate asked for. A rate the size doesn't have opens the size's own
+mode, as 3dfx's libraries do: 70 Hz at 640x400, 72 Hz at 512x384 on a
+Voodoo Graphics, and 60 Hz at the other sizes. The environment overrides
+the game's rate as they read it: `SST_SCREENREFRESH` on a Voodoo
+Graphics, `SSTV2_SCREENREFRESH` and `SSTV2_REFRESH_640x480` (by size) on
+a Voodoo2, and `FX_GLIDE_REFRESH` for Glide 3 on a Voodoo3. The
 triangles are drawn on up to four threads of their own: rust-dos keeps
 running the game meanwhile, and the picture is the same however many
 there are. Save states and rewind keep the card with everything in its
@@ -3065,15 +3171,15 @@ were tried on Windows 98 SE with the 1.07.00 driver:
 * Direct3D: Incoming (the GOG release, run without GOG's wrapper DLLs),
   its menus and the first level of its arcade game.
 
-The 1.07.00 driver's Direct3D needs DirectX 7, as its readme says; Windows
-98 SE comes with 6.1. With 6.1 the driver takes the structure DirectDraw
-gives it when a program starts Direct3D for the one DirectX 7 has, and
-faults: the program's window stays white and the card draws nothing. Install
-DirectX 7.0 (`dx70eng.exe`) or later first. Glover draws wrongly with
-1.07.00 and needs the earlier 4.11.01.1151, from 3dfx's [Voodoo3 driver CD
-1.2](https://archive.org/details/voodoo3v12), which runs on 6.1 too;
-[docs/compatibility.md](docs/compatibility.md) names the games that need
-another driver.
+The 1.07.00 driver's Direct3D needs DirectX 7, as its readme says;
+Windows 98 SE comes with 6.1. With 6.1 the driver takes the structure
+DirectDraw gives it when a program starts Direct3D for the one DirectX 7
+has, and faults: the program's window stays white and the card draws
+nothing. Install DirectX 7.0 (`dx70eng.exe`) or later first. Some games
+draw wrongly with 1.07.00 and need the earlier 4.11.01.1151, from 3dfx's
+[Voodoo3 driver CD 1.2](https://archive.org/details/voodoo3v12), which
+runs on 6.1 too; [docs/compatibility.md](docs/compatibility.md) names
+them.
 
 With `voodoo_renderer=opengl` the window's OpenGL draws the card's 3D at
 `voodoo_scale` times its resolution, as for the Voodoo Graphics (see [the
@@ -3295,18 +3401,36 @@ machine=svga_toadforce
 ```
 
 The machine has 128 MB of memory with this card unless `memsize` says
-otherwise, which is what the games it is for recommend. The `cpu` stays
-the default 486 unless it is set; most of those games want
-`cpu=pentium_iii`.
+otherwise, which is what the games it is for recommend, and a Pentium
+III unless `cpu` says otherwise (see `cpu` in
+[`[emulator]`](#emulator)).
 
 | Setting | Values | What it does |
 |---|---|---|
 | `toadforce_memory` | 32, 64 (default), 128 | The megabytes of video memory the card has |
 | `toadforce_renderer` | `auto` (default), `opengl`, `software` | What draws the card's 3D: your graphics card through OpenGL, or Rust-DOS on the processor |
+| `toadforce_gamma` | `off` (default), 0.1 to 2 | A gamma the card's 16- and 32-bit pictures are shown with, after the game's own |
 
 A change of `toadforce_memory` takes effect at the DOS prompt, and one
-of `toadforce_renderer` at once. The card's registers and commands are
-specified in [docs/toadforce-spec.md](docs/toadforce-spec.md).
+of `toadforce_renderer` or `toadforce_gamma` at once. The card's
+registers and commands are specified in
+[docs/toadforce-spec.md](docs/toadforce-spec.md).
+
+If Rust-DOS crashes while it sets up the OpenGL renderer, which happens
+inside your graphics driver, the next start with `auto` on the same
+driver and Rust-DOS version uses the software renderer and says so in
+the log. Updating the driver, or starting with
+`toadforce_renderer=opengl`, tries OpenGL again. The mark it keeps for
+that is the file `toadforce-opengl-setup` next to `rust-dos.log`.
+
+The card's 16- and 32-bit modes go through its gamma ramp, which games
+set for their brightness controls and fades through
+`SetDeviceGammaRamp`, DirectDraw's gamma control and Direct3D 8's
+`SetGammaRamp`. `toadforce_gamma` adds a gamma of your own after it, as
+Glide's gamma does on a 3dfx card: a value v from 0 to 1 is shown as
+v^(1 / gamma), so above 1 the dark colours come up. It changes the
+screen, screenshots and recordings, not what the program reads or a
+saved state.
 
 With `auto` and `opengl`, OpenGL draws the triangles and the card's
 memory gets the pixels when the program or the screen reads them. The
@@ -3600,6 +3724,8 @@ Join a room, start the game on each computer, and pick its network play:
   98 image in another instance doesn't see these sessions, nor these
   games its. The lobby (games started by a lobby program such as the
   Zone) isn't there.
+* Games that play through DirectPlay 8, DirectX 8's, find no connection
+  for network play yet, and play alone.
 
 ### Serial and modem games
 
@@ -3764,10 +3890,10 @@ and the libretro core among its Video options.
   of a 72, 75 or 85 Hz mode shows a frame at each, and one that counts
   its frames for its timing keeps its speed. A program synced to a 100
   or 120 Hz mode shows 100 or 120 frames a second, and the host draws
-  each of them. A DOS Glide game can set such a mode, and so can a
-  game under a Windows booted from a disk image with the card's own
-  driver; the built-in Windows' Glide opens the display at 60 Hz
-  whatever rate a game asks for.
+  each of them. A Glide game sets such a mode when its settings ask for
+  it, under DOS, the built-in Windows or a Windows booted from a disk
+  image with the card's own driver (see [3dfx Voodoo
+  Graphics](#3dfx-voodoo-graphics)).
 - A number holds every frame to that rate, also one that waits for the
   retrace of a faster display: on a host too slow for a game's 100 or
   120 Hz mode, `fps_cap=60` holds it to 60.
@@ -3796,15 +3922,24 @@ one's, in emulated time:
   starts again: the next frame shows as soon as it is done, and the
   ones after it wait a frame time each. A game that draws in bursts
   between such steps therefore counts fewer frames under a cap than
-  the cap's number. Grom's menu at 150,000 cycles spends 114 to 190 ms
-  on each step of its simulation and draws frames 3 ms apart between
-  them, 71 a second without a cap, of which a 60 Hz display shows
-  about 20. Under a cap of 60 the frames of a burst after the first
-  two wait a frame time each, and the next step comes due sooner, so
-  it shows 25 a second, more than a game synced to a 60 Hz display
-  shows. That is the rate of a simulation that runs on the clock,
-  which keeps its speed under the cap; with more cycles the menu shows
-  60.
+  the cap's number. Grom's menu at 150,000 cycles runs a step of its
+  menu script, 110 to 200 ms, once 33 ms have passed since the last
+  one ended, and draws frames in those 33 ms: twelve, 2.8 ms apart,
+  without a cap, 71 a second, of which a 60 Hz display shows two or
+  three a step. Under a cap of 60 four of them show, 25 a second, and
+  the steps come as often as without it. No rule of the cap shows
+  more of them a refresh apart: the cap's rate needs steps short
+  enough to leave room for it, which `cycles=max` gives the menu (60 a
+  second).
+- `cycles=auto` counts the frames a program shows through the cap, as
+  it counts those a display shows of a game that waits for its
+  retrace. A program held to the cap's rate settles where that game
+  does, coming down by steps that try less instead of at once. One
+  that shows fewer, as Grom's menu does between its steps, gets the
+  speed that shows the cap's rate. One that shows fewer because it
+  draws fewer, such as a game that draws 30 frames a second on the
+  clock or a movie, shows no more with more speed and settles where it
+  does without the cap.
 - A present that waits for the display's retrace (a flip, or a swap
   with a swap interval) is already held to the display's rate. Under
   `auto`, or with the cap at that rate or above it, the cap holds none

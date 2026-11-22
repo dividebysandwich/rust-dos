@@ -3,6 +3,7 @@
 
 pub(super) mod atom;
 pub(super) mod change;
+pub(crate) mod comm;
 mod console;
 mod disk;
 mod env;
@@ -25,6 +26,7 @@ mod sync;
 mod text;
 mod threads;
 pub(crate) mod time;
+mod toolhelp;
 mod win98;
 pub use win98::is_directory;
 pub(crate) mod virtual_memory;
@@ -53,6 +55,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: None,
 };
 
 const fn stdcall(
@@ -66,6 +69,24 @@ const fn stdcall(
         ordinal,
         args,
         conv: Conv::Stdcall,
+        handler,
+    }
+}
+
+/// A stdcall function that is x86 code (`Conv::Code`), whose `handler`
+/// runs only in a state saved when it was a trap.
+const fn code(
+    name: &'static str,
+    ordinal: u16,
+    args: u8,
+    code: &'static [u8],
+    handler: super::stubs::Handler,
+) -> Api {
+    Api {
+        name,
+        ordinal,
+        args,
+        conv: Conv::Code(code),
         handler,
     }
 }
@@ -96,9 +117,27 @@ static APIS: &[Api] = &[
     stdcall("HeapFree", 513, 3, memory::heap_free),
     stdcall("HeapReAlloc", 515, 4, memory::heap_realloc),
     stdcall("HeapSize", 517, 3, memory::heap_size),
-    stdcall("InterlockedIncrement", 528, 1, memory::interlocked_increment),
-    stdcall("InterlockedDecrement", 525, 1, memory::interlocked_decrement),
-    stdcall("InterlockedExchange", 526, 2, memory::interlocked_exchange),
+    code(
+        "InterlockedIncrement",
+        528,
+        1,
+        memory::INTERLOCKED_INCREMENT,
+        memory::interlocked_increment,
+    ),
+    code(
+        "InterlockedDecrement",
+        525,
+        1,
+        memory::INTERLOCKED_DECREMENT,
+        memory::interlocked_decrement,
+    ),
+    code(
+        "InterlockedExchange",
+        526,
+        2,
+        memory::INTERLOCKED_EXCHANGE,
+        memory::interlocked_exchange,
+    ),
     stdcall("GetProcAddress", 419, 2, module::get_proc_address),
     stdcall("GetVersionExA", 477, 1, module::get_version_ex),
     stdcall("GetLogicalDrives", 391, 0, disk::get_logical_drives),
@@ -199,21 +238,40 @@ static APIS: &[Api] = &[
     ),
     stdcall("Sleep", 758, 1, sync::sleep),
     stdcall("SleepEx", 759, 2, sync::sleep),
-    stdcall(
+    // Critical sections are x86 code (sync.rs), which traps only to make
+    // or free a section's object and to wait or wake a waiter. The
+    // handlers are for states saved before, whose stubs trap.
+    code(
         "InitializeCriticalSection",
         522,
         1,
+        sync::INITIALIZE_CRITICAL_SECTION,
         sync::initialize_critical_section,
     ),
-    stdcall("DeleteCriticalSection", 214, 1, sync::delete_critical_section),
-    stdcall("EnterCriticalSection", 225, 1, sync::enter_critical_section),
-    stdcall("LeaveCriticalSection", 552, 1, sync::leave_critical_section),
-    stdcall(
-        "TryEnterCriticalSection",
-        779,
+    code(
+        "DeleteCriticalSection",
+        214,
         1,
-        sync::try_enter_critical_section,
+        sync::DELETE_CRITICAL_SECTION,
+        sync::delete_critical_section,
     ),
+    code(
+        "EnterCriticalSection",
+        225,
+        1,
+        sync::ENTER_CRITICAL_SECTION,
+        sync::enter_critical_section,
+    ),
+    code(
+        "LeaveCriticalSection",
+        552,
+        1,
+        sync::LEAVE_CRITICAL_SECTION,
+        sync::leave_critical_section,
+    ),
+    // Windows 98 SE's is one of its stubs that fail with
+    // ERROR_CALL_NOT_IMPLEMENTED and return FALSE; Windows 95 has none.
+    stdcall("TryEnterCriticalSection", 779, 1, not_implemented),
     stdcall("RaiseException", 627, 4, super::seh::raise_exception),
     stdcall("RtlUnwind", 657, 4, super::seh::rtl_unwind),
     stdcall(
@@ -538,10 +596,23 @@ static APIS: &[Api] = &[
     stdcall("GlobalAddAtomW", 485, 1, not_implemented),
     stdcall("CreateProcessW", 199, 10, not_implemented),
     stdcall("WinExec", 812, 2, process::win_exec),
+    stdcall("LoadModule", 557, 2, process::load_module),
     stdcall("GetDiskFreeSpaceExA", 357, 4, win98::get_disk_free_space_ex),
     stdcall("IsDebuggerPresent", 539, 0, win98::is_debugger_present),
-    stdcall("InterlockedCompareExchange", 524, 3, win98::interlocked_compare_exchange),
-    stdcall("InterlockedExchangeAdd", 527, 2, win98::interlocked_exchange_add),
+    code(
+        "InterlockedCompareExchange",
+        524,
+        3,
+        memory::INTERLOCKED_COMPARE_EXCHANGE,
+        win98::interlocked_compare_exchange,
+    ),
+    code(
+        "InterlockedExchangeAdd",
+        527,
+        2,
+        memory::INTERLOCKED_EXCHANGE_ADD,
+        win98::interlocked_exchange_add,
+    ),
     stdcall("GetFileAttributesExA", 371, 3, win98::get_file_attributes_ex),
     stdcall("GetLongPathNameA", 392, 3, win98::get_long_path_name),
     stdcall("GetPrivateProfileSectionW", 414, 4, profile::get_private_profile_section_w),
@@ -697,6 +768,56 @@ static APIS: &[Api] = &[
     stdcall("AreFileApisANSI", 126, 0, are_file_apis_ansi),
     stdcall("SetFileApisToOEM", 716, 0, set_file_apis_to_oem),
     stdcall("SetFileApisToANSI", 715, 0, set_file_apis_to_ansi),
+    stdcall("SetupComm", 754, 3, comm::setup_comm),
+    stdcall("PurgeComm", 619, 2, comm::purge_comm),
+    stdcall("GetCommState", 327, 2, comm::get_comm_state),
+    stdcall("SetCommState", 688, 2, comm::set_comm_state),
+    stdcall("ClearCommError", 159, 3, comm::clear_comm_error),
+    stdcall("SetCommMask", 687, 2, comm::set_comm_mask),
+    stdcall("GetCommMask", 324, 2, comm::get_comm_mask),
+    stdcall("GetCommModemStatus", 325, 2, comm::get_comm_modem_status),
+    stdcall("EscapeCommFunction", 247, 2, comm::escape_comm_function),
+    stdcall("SetCommBreak", 685, 1, comm::set_comm_break),
+    stdcall("ClearCommBreak", 158, 1, comm::clear_comm_break),
+    stdcall("TransmitCommChar", 778, 2, comm::transmit_comm_char),
+    stdcall("GetCommTimeouts", 328, 2, comm::get_comm_timeouts),
+    stdcall("SetCommTimeouts", 689, 2, comm::set_comm_timeouts),
+    // Windows 9x has no MoveFileEx: both are stubs that fail with
+    // ERROR_CALL_NOT_IMPLEMENTED, and programs move a file in use at the
+    // next start through WININIT.INI instead. InstallShield 6's engine
+    // calls MoveFileExA(NULL, NULL, 4) and edits WININIT.INI when
+    // GetLastError is then 120.
+    stdcall("MoveFileExA", 590, 3, not_implemented),
+    stdcall("MoveFileExW", 591, 3, not_implemented),
+    // What the critical sections' code traps to (sync.rs): make and free
+    // a section's object, wait for a section another thread is in, and
+    // hand one that was left to a thread waiting for it.
+    stdcall("CriticalSectionCreate", 0, 1, sync::critical_section_create),
+    stdcall("CriticalSectionDelete", 0, 1, sync::critical_section_delete),
+    stdcall("CriticalSectionWait", 0, 1, sync::critical_section_wait),
+    stdcall("CriticalSectionWake", 0, 1, sync::critical_section_wake),
+    stdcall(
+        "CreateToolhelp32Snapshot",
+        206,
+        2,
+        toolhelp::create_toolhelp32_snapshot,
+    ),
+    stdcall("Heap32ListFirst", 506, 2, toolhelp::heap32_list_first),
+    stdcall("Heap32ListNext", 507, 2, toolhelp::heap32_list_next),
+    stdcall("Heap32First", 505, 3, toolhelp::heap32_first),
+    stdcall("Heap32Next", 508, 1, toolhelp::heap32_next),
+    stdcall("Process32First", 617, 2, toolhelp::process32_first),
+    stdcall("Process32Next", 618, 2, toolhelp::process32_next),
+    stdcall("Thread32First", 767, 2, toolhelp::thread32_first),
+    stdcall("Thread32Next", 768, 2, toolhelp::thread32_next),
+    stdcall("Module32First", 587, 2, toolhelp::module32_first),
+    stdcall("Module32Next", 588, 2, toolhelp::module32_next),
+    stdcall(
+        "Toolhelp32ReadProcessMemory",
+        776,
+        5,
+        toolhelp::toolhelp32_read_process_memory,
+    ),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -707,7 +828,7 @@ const THREAD_RETURN: usize = 46;
 
 /// Where calls into the program return to (call.rs).
 pub fn call_return_address() -> u32 {
-    super::stubs::stub_address(0, CALL_RETURN)
+    super::stub_tables::fixed_address(0, CALL_RETURN)
 }
 
 /// Whether the running process's environment has the variable `name`.
@@ -857,22 +978,20 @@ pub fn program_path(cpu: &mut Cpu) -> Option<String> {
         .map(|m| m.path.clone())
 }
 
-/// The address of KERNEL32's function `name`, for a task to call.
-pub fn address_of(name: &str) -> u32 {
+/// The address of KERNEL32's function `name`, for a task to call: in the
+/// running process's image of KERNEL32, which a state from an older table
+/// has in that table's order (stub_tables.rs).
+pub fn address_of(cpu: &Cpu, name: &str) -> u32 {
     let index = APIS
         .iter()
         .position(|a| a.name == name)
         .unwrap_or_else(|| panic!("KERNEL32 has no {}", name));
-    let dll = super::stubs::DLLS
-        .iter()
-        .position(|d| d.name == DLL.name)
-        .expect("KERNEL32 is a built-in DLL");
-    super::stubs::stub_address(dll, index)
+    super::stub_tables::address(cpu, 0, index)
 }
 
 /// Where 32-bit code that 16-bit code called returns to (Win16Return).
-pub fn win16_return_address() -> u32 {
-    address_of("Win16Return")
+pub fn win16_return_address(cpu: &Cpu) -> u32 {
+    address_of(cpu, "Win16Return")
 }
 
 /// The trap id of the 32-bit slots that call 16-bit procedures
@@ -949,6 +1068,28 @@ pub mod files {
     pub fn find(cpu: &Cpu, dir: &str, pattern: &str) -> Result<Vec<FindEntry>, u32> {
         let full = full_path(cpu, dir);
         path::find_entries(cpu, &full, pattern)
+    }
+
+    /// What FindFirstFileA and FindNextFileA find for `spec`, a path
+    /// with a file name or a pattern, all at once; or the error
+    /// FindFirstFileA sets.
+    pub fn find_spec(cpu: &Cpu, spec: &str) -> Result<Vec<FindEntry>, u32> {
+        if spec.is_empty() {
+            return Err(super::ERROR_PATH_NOT_FOUND);
+        }
+        path::find_path(cpu, &path::dos_path(spec))
+    }
+
+    /// The bytes of the file `name`, read as ReadFile reads them.
+    pub fn read_whole(cpu: &mut Cpu, name: &str) -> Result<Vec<u8>, u32> {
+        let full = full_path(cpu, name);
+        path::read_whole(cpu, &full).map(|(data, _, _)| data)
+    }
+
+    /// Whether `name` is a file.
+    pub fn is_file(cpu: &mut Cpu, name: &str) -> bool {
+        let full = full_path(cpu, name);
+        cpu.bus.disk.is_file(&full)
     }
 
     /// Write `data` as the whole file `name`, made anew.
@@ -1127,21 +1268,21 @@ pub fn read_whole_file(cpu: &mut Cpu, name: u32) -> Option<Option<(u32, u32)>> {
 /// Where the main thread starts when DLLs' entry points run first.
 pub fn process_start_address() -> u32 {
     let index = APIS.iter().position(|a| a.name == "ProcessStart");
-    super::stubs::stub_address(0, index.expect("ProcessStart"))
+    super::stub_tables::fixed_address(0, index.expect("ProcessStart"))
 }
 
 /// The idle loop's stub (thread.rs).
 pub fn idle_address() -> u32 {
-    super::stubs::stub_address(0, IDLE)
+    super::stub_tables::fixed_address(0, IDLE)
 }
 
 /// Where a new thread starts, and where its function returns to.
 pub fn thread_start_address() -> u32 {
-    super::stubs::stub_address(0, THREAD_START)
+    super::stub_tables::fixed_address(0, THREAD_START)
 }
 
 pub fn thread_return_address() -> u32 {
-    super::stubs::stub_address(0, THREAD_RETURN)
+    super::stub_tables::fixed_address(0, THREAD_RETURN)
 }
 
 fn call_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {

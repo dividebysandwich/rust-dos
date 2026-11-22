@@ -431,9 +431,17 @@ fn run_to_exit(cpu: &mut Cpu, batches: usize) -> bool {
 }
 
 /// A machine with the program `name` in `files` loaded from the shell.
-fn machine(test: &str, files: &[(&str, Vec<u8>)], name: &str) -> (Cpu, u16) {
+fn machine(test: &str, files: &[(&str, Vec<u8>)], name: &str) -> (Box<Cpu>, u16) {
+    machine_with(test, files, name, false)
+}
+
+/// `machine`, with expanded memory on (`ems`): DOS then runs in
+/// virtual-8086 mode under the built-in monitor.
+fn machine_with(test: &str, files: &[(&str, Vec<u8>)], name: &str, ems: bool) -> (Box<Cpu>, u16) {
     let mut cpu = Cpu::new(scratch(test, files));
+    rust_dos::ems::set_enabled(&mut cpu.bus, ems);
     cpu.load_shell();
+    assert_eq!(cpu.v86(), ems);
     assert!(cpu.load_executable(name, None));
     let psp = cpu.current_psp;
     (cpu, psp)
@@ -444,11 +452,17 @@ fn word(cpu: &Cpu, psp: u16, offset: u16) -> u16 {
 }
 
 fn check_services(bits32: bool) {
-    let (mut cpu, psp) = machine(
-        if bits32 { "services32" } else { "services16" },
-        &[("T.COM", services_program(bits32))],
-        "T.COM",
-    );
+    check_services_with(bits32, false);
+}
+
+fn check_services_with(bits32: bool, ems: bool) {
+    let test = match (bits32, ems) {
+        (false, false) => "services16",
+        (true, false) => "services32",
+        (false, true) => "services16_v86",
+        (true, true) => "services32_v86",
+    };
+    let (mut cpu, psp) = machine_with(test, &[("T.COM", services_program(bits32))], "T.COM", ems);
     let a20 = cpu.bus.a20();
     let timer = cpu.bus.read_32(8 * 4);
     assert!(run_to_exit(&mut cpu, 2000), "the program didn't end (step {})", word(&cpu, psp, STEP));
@@ -485,6 +499,8 @@ fn check_services(bits32: bool) {
     assert_eq!(cpu.bus.read_32(8 * 4), timer);
     assert_eq!(cpu.bus.a20(), a20);
     assert_eq!(cpu.state, CpuState::Running);
+    // Back at the prompt in the mode DOS runs in.
+    assert_eq!(cpu.v86(), ems);
 }
 
 #[test]
@@ -495,6 +511,15 @@ fn a_16_bit_client_uses_the_services() {
 #[test]
 fn a_32_bit_client_uses_the_services() {
     check_services(true);
+}
+
+/// With expanded memory DOS runs in virtual-8086 mode under the built-in
+/// monitor, and the host is there as with a memory manager that has one:
+/// it switches from there to protected mode and back to it for DOS.
+#[test]
+fn a_client_uses_the_services_under_the_v86_monitor() {
+    check_services_with(false, true);
+    check_services_with(true, true);
 }
 
 #[test]
@@ -771,6 +796,149 @@ fn a_real_mode_handler_chained_to_the_stub_outlives_the_pm_handler() {
     );
     assert!(!cpu.bus.dpmi.active());
     assert_eq!(cpu.bus.read_32(8 * 4), timer);
+}
+
+/// A client that sets a protected-mode timer handler and then waits in
+/// protected mode for good, as a DOS/4GW game does in its main loop.
+fn waiting_client_program() -> Vec<u8> {
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, false, fail)?;
+        step(a, 50)?;
+        set_pm_tick_handler(a, fail)?;
+        step(a, 51)?;
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.sti()?;
+        a.hlt()?;
+        a.jmp(wait)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    com(&[(0x100, main), (TICK_HANDLER, pm_tick_handler())])
+}
+
+/// A client closed while it runs (the settings window's close, the debug
+/// server's reboot_shell) never ends through DOS, so the host never
+/// stops. The real-mode vectors its stubs took over for the client's
+/// handlers go back to what they held, the BIOS's: with the stub left in
+/// INT 08h, the timer's IRQ 0 reached a stub with no client and no
+/// original behind it, which returned without the BIOS's end of
+/// interrupt. IRQ 0 stayed in service, so neither the timer nor the
+/// keyboard interrupted again, and the next program hung.
+#[test]
+fn closing_a_client_gives_its_hooked_vectors_back() {
+    let files = [("T.COM", waiting_client_program())];
+    let (mut cpu, psp) = machine("closed_client", &files, "T.COM");
+    let timer = cpu.bus.read_32(8 * 4);
+    for _ in 0..200 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+        if word(&cpu, psp, TICKS) >= 2 {
+            break;
+        }
+    }
+    assert!(
+        word(&cpu, psp, TICKS) >= 2,
+        "the client's handler didn't run (step {})",
+        word(&cpu, psp, STEP)
+    );
+    assert_ne!(
+        cpu.bus.read_32(8 * 4),
+        timer,
+        "the host's stub is in INT 08h"
+    );
+
+    cpu.close_program();
+    assert!(run_to_exit(&mut cpu, 100), "the shell didn't come back");
+    assert!(!cpu.bus.dpmi.active());
+    assert_eq!(cpu.bus.read_32(8 * 4), timer);
+
+    // The BIOS's tick count goes on at the prompt.
+    let ticks = cpu.bus.read_32(0x046C);
+    for _ in 0..200 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+    }
+    assert!(
+        cpu.bus.read_32(0x046C) > ticks.wrapping_add(1),
+        "the timer stopped"
+    );
+    assert_eq!(cpu.bus.pic.master.isr, 0, "an IRQ stayed in service");
+}
+
+/// A client that sets a protected-mode timer handler, chains a real-mode
+/// one in front of the host's stub and stays resident (AH=31h) with it in
+/// the vector.
+fn resident_chained_client_program() -> Vec<u8> {
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, false, fail)?;
+        step(a, 60)?;
+        set_pm_tick_handler(a, fail)?;
+        a.mov(ax, 0x0200)?;
+        a.mov(bl, 8)?;
+        a.int(0x31)?;
+        a.mov(word_ptr(OLDRM), dx)?;
+        a.mov(word_ptr(OLDRM + 2), cx)?;
+        a.mov(ax, 0x0201)?;
+        a.mov(bl, 8)?;
+        a.mov(cx, word_ptr(RMSEG))?;
+        a.mov(dx, RM_TICK as u32)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        step(a, 61)?;
+        a.mov(dx, 0x1000)?;
+        a.mov(ax, 0x3100)?;
+        a.int(0x21)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    let rm_tick = asm16(RM_TICK, |a| {
+        a.inc(word_ptr(TICKS).cs())?;
+        a.db(&[0x2E, 0xFF, 0x2E])?;
+        a.dw(&[OLDRM])
+    });
+    com(&[
+        (0x100, main),
+        (TICK_HANDLER, pm_tick_handler()),
+        (RM_TICK, rm_tick),
+    ])
+}
+
+/// A resident program's real-mode timer handler that chains to the host's
+/// stub outlives the host. Ticks that reach the stub with no client and no
+/// original recorded go on to the BIOS's handler, which ends the
+/// interrupt: returning from the stub instead left IRQ 0 in service, and
+/// neither the timer nor the keyboard interrupted again.
+#[test]
+fn a_resident_handler_chained_to_the_stub_outlives_the_host() {
+    let files = [("T.COM", resident_chained_client_program())];
+    let (mut cpu, psp) = machine("resident_chained", &files, "T.COM");
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end (step {})",
+        word(&cpu, psp, STEP)
+    );
+    assert_eq!(word(&cpu, psp, STEP), 61);
+    assert!(!cpu.bus.dpmi.active());
+    assert_eq!(cpu.bus.read_32(8 * 4), (psp as u32) << 16 | RM_TICK as u32);
+
+    let ticks = cpu.bus.read_32(0x046C);
+    let resident_ticks = word(&cpu, psp, TICKS);
+    for _ in 0..200 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+    }
+    assert!(
+        word(&cpu, psp, TICKS).wrapping_sub(resident_ticks) > 1,
+        "the resident handler stopped counting"
+    );
+    assert!(
+        cpu.bus.read_32(0x046C) > ticks.wrapping_add(1),
+        "the timer stopped"
+    );
+    assert_eq!(cpu.bus.pic.master.isr, 0, "an IRQ stayed in service");
 }
 
 /// Where the DOS program keeps things: results (a word each), the "MS-DOS"
@@ -1135,6 +1303,62 @@ fn a_client_moves_to_and_from_debug_and_control_registers() {
     assert_eq!(cpu.errorlevel, 0x2A, "failed at step {}", word(&cpu, psp, STEP));
     assert_eq!(cpu.bus.read_32(psp as usize * 16 + R as usize), 0x1234_5678);
     assert_eq!(word(&cpu, psp, R + 4) & 1, 1);
+}
+
+#[test]
+fn a_limit_above_1_mb_not_ending_a_page_covers_the_page() {
+    // INT 31h AX=0008h with CX:DX=FFFF:F000, as Virtuoso sets its sound
+    // driver's data selector: DOS/4GW's own host takes it and the limit
+    // is FFFFFFFFh. DPMI 0.9 would refuse it with 8021h. 0010:0000, one
+    // byte past 1 MB, gives the whole page that byte is in: 00100FFFh.
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, true, fail)?;
+        step(a, 4)?;
+        a.xor(ax, ax)?;
+        a.mov(cx, 1)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(R), ax)?;
+        step(a, 5)?;
+        a.mov(bx, ax)?;
+        a.mov(ax, 0x0008)?;
+        a.mov(cx, 0xFFFF)?;
+        a.mov(dx, 0xF000)?;
+        a.int(0x31)?;
+        a.mov(word_ptr(R + 2), ax)?;
+        a.jc(fail)?;
+        step(a, 6)?;
+        a.movzx(ebx, word_ptr(R))?;
+        a.lsl(eax, ebx)?;
+        a.mov(dword_ptr(R + 4), eax)?;
+        step(a, 7)?;
+        a.mov(bx, word_ptr(R))?;
+        a.mov(ax, 0x0008)?;
+        a.mov(cx, 0x0010)?;
+        a.xor(dx, dx)?;
+        a.int(0x31)?;
+        a.mov(word_ptr(R + 2), ax)?;
+        a.jc(fail)?;
+        a.movzx(ebx, word_ptr(R))?;
+        a.lsl(eax, ebx)?;
+        a.mov(dword_ptr(R + 8), eax)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    let (mut cpu, psp) = machine("pagelimit", &[("T.COM", com(&[(0x100, main)]))], "T.COM");
+    let w = |cpu: &Cpu, offset: u16| word(cpu, psp, offset);
+    let ended = run_to_exit(&mut cpu, 200);
+    assert!(ended, "the program didn't end (step {})", w(&cpu, STEP));
+    let (stage, code) = (w(&cpu, STEP), w(&cpu, R + 2));
+    assert_eq!(
+        cpu.errorlevel, 0x2A,
+        "failed at step {stage} (AX {code:04X})"
+    );
+    let dword = |offset: u16| cpu.bus.read_32(psp as usize * 16 + offset as usize);
+    assert_eq!(dword(R + 4), 0xFFFF_FFFF);
+    assert_eq!(dword(R + 8), 0x0010_0FFF);
 }
 
 #[test]

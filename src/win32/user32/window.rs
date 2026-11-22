@@ -609,6 +609,49 @@ pub fn link(state: &mut State, hwnd: u32, after: u32) {
     }
 }
 
+/// A hidden top-level window of the system's own, of the class
+/// `class_name` whose procedure is `proc` (registered the first time):
+/// `w` with its class, style, parent, instance, procedure and flags set
+/// here, put at the bottom. Its handle, or 0 when there is no room.
+pub fn new_hidden(state: &mut State, class_name: &str, proc: u32, w: Window) -> u32 {
+    use super::class::{self, CS_GLOBALCLASS, Class};
+    let class = match class::find_system(state, class_name) {
+        Some(c) => c,
+        None => {
+            let atom = class::atom(state, class_name);
+            state.classes.push(Some(Class {
+                atom,
+                name: class_name.to_string(),
+                style: CS_GLOBALCLASS,
+                proc,
+                instance: super::DLL.base,
+                global: true,
+                system: true,
+                ..Class::default()
+            }));
+            state.classes.len() as u32 - 1
+        }
+    };
+    let window = Window {
+        class,
+        style: WS_POPUP,
+        parent: DESKTOP,
+        instance: super::DLL.base,
+        proc,
+        flags: LINKED,
+        icon_pos: (-1, -1),
+        ..w
+    };
+    let Some(hwnd) = state.new_window(window) else {
+        return 0;
+    };
+    if let Some(c) = state.classes[class as usize].as_mut() {
+        c.windows += 1;
+    }
+    link(state, hwnd, HWND_BOTTOM);
+    hwnd
+}
+
 /// Take `hwnd` out of its parent's list.
 pub fn unlink(state: &mut State, hwnd: u32) {
     let parent = state.parent(hwnd);
@@ -887,7 +930,7 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 if super::hook::has(cpu, WH_CBT) {
                     let cbt = t.scratch + CREATE_CBT;
                     write_words(cpu, cbt, &[cs, HWND_TOP]);
-                    return super::hook::call(WH_CBT, HCBT_CREATEWND, hwnd, cbt, 1);
+                    return super::hook::call(cpu, WH_CBT, HCBT_CREATEWND, hwnd, cbt, 1);
                 }
                 t.step = 1;
             }
@@ -907,7 +950,7 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 if style & WS_THICKFRAME != 0 || style & (WS_POPUP | WS_CHILD) == 0 {
                     let mm = t.scratch + CREATE_MINMAX;
                     write_min_max(cpu, hwnd, mm);
-                    return send(hwnd, WM_GETMINMAXINFO, 0, mm, 2);
+                    return send(cpu, hwnd, WM_GETMINMAXINFO, 0, mm, 2);
                 }
                 t.step = 3;
             }
@@ -932,12 +975,12 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 t.step = 3;
             }
-            3 => return send(hwnd, WM_NCCREATE, 0, cs, 4),
+            3 => return send(cpu, hwnd, WM_NCCREATE, 0, cs, 4),
             4 => {
                 if value == 0 || !user(cpu).is_window(hwnd) {
                     // The window goes, with WM_NCDESTROY.
                     t.set(C_NOTIFY, 0);
-                    return send(hwnd, WM_NCDESTROY, 0, 0, 20);
+                    return send(cpu, hwnd, WM_NCDESTROY, 0, 0, 20);
                 }
                 // In its parent's list now.
                 let state = user(cpu);
@@ -958,7 +1001,7 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let origin = state.screen_client(t.var(C_PARENT));
                 rect.offset(origin.left, origin.top)
                     .write(cpu, t.scratch + CREATE_RECT);
-                return send(hwnd, WM_NCCALCSIZE, 0, t.scratch + CREATE_RECT, 5);
+                return send(cpu, hwnd, WM_NCCALCSIZE, 0, t.scratch + CREATE_RECT, 5);
             }
             5 => {
                 let origin = user(cpu).screen_client(t.var(C_PARENT));
@@ -967,17 +1010,17 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 if let Some(w) = user(cpu).window_mut(hwnd) {
                     w.client = client;
                 }
-                return send(hwnd, WM_CREATE, 0, cs, 6);
+                return send(cpu, hwnd, WM_CREATE, 0, cs, 6);
             }
             6 => {
                 if value as i32 == -1 || !user(cpu).is_window(hwnd) {
-                    return Next::call(address_of("DestroyWindow"), &[hwnd], 21);
+                    return Next::call(address_of(cpu, "DestroyWindow"), &[hwnd], 21);
                 }
                 let style = t.var(C_STYLE);
                 if style & (WS_CHILD | WS_POPUP) != 0 {
                     let client = user(cpu).window(hwnd).map(|w| w.client).unwrap_or_default();
                     let size = super::make_long(client.width(), client.height());
-                    return send(hwnd, WM_SIZE, SIZE_RESTORED, size, 7);
+                    return send(cpu, hwnd, WM_SIZE, SIZE_RESTORED, size, 7);
                 }
                 if let Some(w) = user(cpu).window_mut(hwnd) {
                     w.flags |= NEED_SIZE;
@@ -987,7 +1030,7 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             7 => {
                 let client = user(cpu).window(hwnd).map(|w| w.client).unwrap_or_default();
                 let pos = super::make_long(client.left, client.top);
-                return send(hwnd, WM_MOVE, 0, pos, 8);
+                return send(cpu, hwnd, WM_MOVE, 0, pos, 8);
             }
             8 => {
                 // Created minimized or maximized: it becomes so now, and
@@ -1009,7 +1052,7 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     } else {
                         SW_MAXIMIZE
                     };
-                    return super::hook::call(WH_CBT, HCBT_MINMAX, hwnd, cmd, 30);
+                    return super::hook::call(cpu, WH_CBT, HCBT_MINMAX, hwnd, cmd, 30);
                 }
                 continue;
             }
@@ -1025,7 +1068,7 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 let mm = t.scratch + CREATE_MINMAX;
                 write_min_max(cpu, hwnd, mm);
-                return send(hwnd, WM_GETMINMAXINFO, 0, mm, 31);
+                return send(cpu, hwnd, WM_GETMINMAXINFO, 0, mm, 31);
             }
             31 => {
                 let new = if t.var(C_STYLE) & WS_MINIMIZE != 0 {
@@ -1041,7 +1084,7 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let (x, y) = (new.left as u32, new.top as u32);
                 let (cx, cy) = (new.width() as u32, new.height() as u32);
                 let args = [hwnd, HWND_TOP, x, y, cx, cy, swp];
-                return Next::call(address_of("SetWindowPos"), &args, 9);
+                return Next::call(address_of(cpu, "SetWindowPos"), &args, 9);
             }
             9 => {
                 // WM_PARENTNOTIFY goes to the parent, and on up through
@@ -1057,7 +1100,7 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     t.set(C_NOTIFY, parent);
                     let wp = WM_CREATE | (id & 0xFFFF) << 16;
                     t.set(C_PARENT, wp);
-                    return send(parent, WM_PARENTNOTIFY, wp, hwnd, 10);
+                    return send(cpu, parent, WM_PARENTNOTIFY, wp, hwnd, 10);
                 }
                 t.step = 11;
             }
@@ -1072,7 +1115,7 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     {
                         let next = p.parent;
                         t.set(C_NOTIFY, next);
-                        return send(next, WM_PARENTNOTIFY, t.var(C_PARENT), hwnd, 10);
+                        return send(cpu, next, WM_PARENTNOTIFY, t.var(C_PARENT), hwnd, 10);
                     }
                     _ => t.step = 11,
                 }
@@ -1090,7 +1133,7 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     } else {
                         SW_SHOW
                     };
-                    return Next::call(address_of("ShowWindow"), &[hwnd, cmd], 12);
+                    return Next::call(address_of(cpu, "ShowWindow"), &[hwnd, cmd], 12);
                 }
                 t.step = 12;
             }
@@ -1102,7 +1145,7 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     t.var(C_STYLE) & WS_VISIBLE != 0 && w.ex_style & WS_EX_MDICHILD != 0
                 });
                 if let Some(client) = mdi.map(|w| w.parent) {
-                    let calls = super::controls::mdi::child_shown(hwnd, client);
+                    let calls = super::controls::mdi::child_shown(cpu, hwnd, client);
                     let (at, args) = &calls[(t.step - 12) as usize];
                     return Next::call(*at, args, t.step + 1);
                 }
@@ -1122,8 +1165,8 @@ pub fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 }
 
 /// Send `msg` to `hwnd` through SendMessageA, going on at `step`.
-pub fn send(hwnd: u32, msg: u32, wp: u32, lp: u32, step: u16) -> Next {
-    Next::call(address_of("SendMessageA"), &[hwnd, msg, wp, lp], step)
+pub fn send(cpu: &Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32, step: u16) -> Next {
+    Next::call(address_of(cpu, "SendMessageA"), &[hwnd, msg, wp, lp], step)
 }
 
 /// Fill the MINMAXINFO at `at` for `hwnd`, as WM_GETMINMAXINFO's sender
@@ -1182,6 +1225,21 @@ pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
     let Some(w) = state.windows.get(slot).and_then(|w| w.clone()) else {
         return;
     };
+    // A window still on the screen goes off it as a hide takes it, so
+    // what it showed is painted again as SetWindowPos's hide paints it.
+    // A child of a window hidden before it (DestroyWindow hides the
+    // window it destroys before it frees the children) keeps WS_VISIBLE
+    // but showed nothing, and uncovers nothing.
+    if state.is_visible(hwnd) {
+        let old = state.screen_rect(hwnd);
+        if let Some(w) = state.window_mut(hwnd) {
+            w.style &= !WS_VISIBLE;
+        }
+        super::paint::tree_changed(cpu);
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW;
+        super::paint::moved(cpu, hwnd, old, true, false, flags);
+    }
+    let state = user(cpu);
     for &child in &w.children {
         if let Some(c) = state.window_mut(child) {
             c.parent = DESKTOP;
@@ -1224,15 +1282,6 @@ pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
     }
     crate::win32::gdi32::dc::window_gone(cpu, hwnd);
     super::paint::tree_changed(cpu);
-    if w.style & WS_VISIBLE != 0 {
-        super::paint::expose(cpu, &Region::from_rect(screen_rect_of(&w, cpu)));
-    }
-}
-
-/// The window's rectangle on the screen, from what it was before it went.
-fn screen_rect_of(w: &Window, cpu: &Cpu) -> Rect {
-    let (x, y) = cpu.bus.win32.user.client_origin(w.parent);
-    w.rect.offset(x, y)
 }
 
 /// The variables of DestroyWindow's task.
@@ -1268,7 +1317,7 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         match t.step {
             0 => {
                 if super::hook::has(cpu, WH_CBT) {
-                    return super::hook::call(WH_CBT, HCBT_DESTROYWND, hwnd, 0, 1);
+                    return super::hook::call(cpu, WH_CBT, HCBT_DESTROYWND, hwnd, 0, 1);
                 }
                 t.step = 2;
             }
@@ -1287,7 +1336,7 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     let wp = WM_DESTROY | (w.id & 0xFFFF) << 16;
                     let parent = w.parent;
                     t.set(D_AT, parent);
-                    return send(parent, WM_PARENTNOTIFY, wp, hwnd, 3);
+                    return send(cpu, parent, WM_PARENTNOTIFY, wp, hwnd, 3);
                 }
                 t.step = 4;
             }
@@ -1304,7 +1353,7 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                         let next = p.parent;
                         t.set(D_AT, next);
                         let wp = WM_DESTROY | (id & 0xFFFF) << 16;
-                        return send(next, WM_PARENTNOTIFY, wp, hwnd, 3);
+                        return send(cpu, next, WM_PARENTNOTIFY, wp, hwnd, 3);
                     }
                     _ => t.step = 4,
                 }
@@ -1316,12 +1365,12 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 };
                 if w.style & WS_VISIBLE != 0 {
                     if t.var(D_CHILD) != 0 {
-                        return Next::call(address_of("ShowWindow"), &[hwnd, SW_HIDE], 5);
+                        return Next::call(address_of(cpu, "ShowWindow"), &[hwnd, SW_HIDE], 5);
                     }
                     let flags =
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW;
                     return Next::call(
-                        address_of("SetWindowPos"),
+                        address_of(cpu, "SetWindowPos"),
                         &[hwnd, 0, 0, 0, 0, 0, flags],
                         5,
                     );
@@ -1350,7 +1399,7 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                             if let Some(w) = state.window_mut(h) {
                                 w.flags |= DESTROYING;
                             }
-                            return Next::call(address_of("DestroyWindow"), &[h], 5);
+                            return Next::call(address_of(cpu, "DestroyWindow"), &[h], 5);
                         }
                         Some((h, _)) => {
                             if let Some(w) = state.window_mut(h) {
@@ -1368,7 +1417,7 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 // the owner of a popup hidden so and destroyed is active.
                 t.step = 9;
                 if user(cpu).is_active(hwnd) {
-                    return Next::call(address_of("ActivateOtherWindow"), &[hwnd], 9);
+                    return Next::call(address_of(cpu, "ActivateOtherWindow"), &[hwnd], 9);
                 }
             }
             9 => {
@@ -1410,7 +1459,7 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                         w.flags |= IN_DESTROY_MSG;
                     }
                     super::input::destroy_caret_of(cpu, h);
-                    return send(h, WM_DESTROY, 0, 0, 6);
+                    return send(cpu, h, WM_DESTROY, 0, 0, 6);
                 }
             }
             7 => {
@@ -1424,7 +1473,7 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     && w.flags & NC_DESTROYED == 0
                 {
                     w.flags |= NC_DESTROYED;
-                    return send(h, WM_NCDESTROY, 0, 0, 8);
+                    return send(cpu, h, WM_NCDESTROY, 0, 0, 8);
                 }
             }
             8 => {
@@ -1521,7 +1570,7 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 t.step = 20;
                 if super::hook::has(cpu, WH_CBT) {
-                    return super::hook::call(WH_CBT, HCBT_MINMAX, hwnd, cmd, 20);
+                    return super::hook::call(cpu, WH_CBT, HCBT_MINMAX, hwnd, cmd, 20);
                 }
             }
             20 => {
@@ -1534,7 +1583,7 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 write_min_max(cpu, hwnd, t.scratch);
                 t.set(S_MINMAX, 1);
-                return send(hwnd, WM_GETMINMAXINFO, 0, t.scratch, 30);
+                return send(cpu, hwnd, WM_GETMINMAXINFO, 0, t.scratch, 30);
             }
             30 => {
                 let state = user(cpu);
@@ -1627,7 +1676,7 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     && cmd != SW_SHOWMAXIMIZED
                     && swp & SWP_STATECHANGED == 0
                 {
-                    return send(hwnd, WM_SHOWWINDOW, show as u32, 0, 1);
+                    return send(cpu, hwnd, WM_SHOWWINDOW, show as u32, 0, 1);
                 }
                 t.step = 1;
             }
@@ -1652,14 +1701,14 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     t.var(S_RECT + 3),
                     swp | state_changed,
                 ];
-                return Next::call(address_of("SetWindowPos"), &args, 2);
+                return Next::call(address_of(cpu, "SetWindowPos"), &args, 2);
             }
             2 => {
                 // The active window hidden: another is activated, after
                 // WM_WINDOWPOSCHANGED, as in Wine's WmHideOverlappedSeq.
                 if cmd == SW_HIDE && user(cpu).is_active(hwnd) {
                     t.step = 6;
-                    return Next::call(address_of("ActivateOtherWindow"), &[hwnd], 6);
+                    return Next::call(address_of(cpu, "ActivateOtherWindow"), &[hwnd], 6);
                 }
                 t.step = 6;
             }
@@ -1673,7 +1722,7 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                             parent = 0;
                         }
                         t.step = 5;
-                        return Next::call(address_of("SetFocus"), &[parent], 5);
+                        return Next::call(address_of(cpu, "SetFocus"), &[parent], 5);
                     }
                     return Next::Done(was as u32);
                 }
@@ -1691,13 +1740,14 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                         SIZE_RESTORED
                     };
                     let size = super::make_long(w.client.width(), w.client.height());
-                    return send(hwnd, WM_SIZE, wp, size, 3);
+                    return send(cpu, hwnd, WM_SIZE, wp, size, 3);
                 }
                 t.step = 4;
             }
             3 => {
                 let client = user(cpu).window(hwnd).map(|w| w.client).unwrap_or_default();
                 return send(
+                    cpu,
                     hwnd,
                     WM_MOVE,
                     0,
@@ -1815,15 +1865,18 @@ pub fn set_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if rect.left == x as i32 && rect.top == y as i32 {
         flags |= SWP_NOMOVE;
     }
-    let child = style & WS_CHILD != 0;
-    // A window already active in the foreground isn't activated again.
-    // The active window of a queue in the background is: the activation
-    // brings it to the foreground if SetForegroundWindow may, as when a
-    // program's message box made active behind the foreground (its
-    // SetFocus came first) is then shown. Hiding it adds nothing: Windows
-    // passes the flags as they were (WM_WINDOWPOSCHANGING of Wine's
+    // Windows adds no SWP_NOACTIVATE for a child: WM_WINDOWPOSCHANGING
+    // gets the caller's flags, and the child gets WM_CHILDACTIVATE unless
+    // they hold SWP_NOACTIVATE or SWP_HIDEWINDOW (msg.c's
+    // WmShowChildSeq_2 and WmReparentButtonSeq). A top-level window
+    // already active in the foreground isn't activated again. The active
+    // window of a queue in the background is: the activation brings it
+    // to the foreground if SetForegroundWindow may, as when a program's
+    // message box made active behind the foreground (its SetFocus came
+    // first) is then shown. Hiding it adds nothing: Windows passes the
+    // flags as they were (WM_WINDOWPOSCHANGING of Wine's
     // WmHideOverlappedSeq and WmSWP_HideOverlappedSeq).
-    if child || (state.foreground_window() == hwnd && flags & SWP_HIDEWINDOW == 0) {
+    if style & WS_CHILD == 0 && state.foreground_window() == hwnd && flags & SWP_HIDEWINDOW == 0 {
         flags |= SWP_NOACTIVATE;
     }
     let mut after = after;
@@ -1861,6 +1914,59 @@ pub fn set_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     task::start(cpu, TASK_SET_POS, vars, P_SCRATCH)
 }
 
+/// Whether SetWindowPos's `after` leaves `hwnd` where it already is
+/// among its siblings, so the call adds SWP_NOZORDER: HWND_TOP for the
+/// first sibling, HWND_BOTTOM for the last one that isn't topmost,
+/// HWND_TOPMOST for a topmost first sibling, or the sibling that already
+/// comes before it (for a top-level window, when both are topmost or
+/// neither is). Windows decides this after WM_WINDOWPOSCHANGING, which
+/// still gets the caller's flags, so a call that changes nothing ends
+/// without WM_WINDOWPOSCHANGED (msg.c's WmSwitchNotMaximizedChild and
+/// WmCreateMDIchildVisibleSeq, recorded on Windows; Wine's
+/// fixup_swp_flags).
+///
+/// Wine also adds it for HWND_NOTOPMOST on a window that isn't topmost,
+/// and for the sibling before a top-level window whatever their topmost
+/// flags. Windows 98 SE doesn't (win32_zorder_tests.rs, recorded there):
+/// HWND_NOTOPMOST on such a window still takes the flag from the windows
+/// it owns and puts them below the topmost ones, and a top-level window
+/// placed after the topmost window just above it becomes topmost.
+fn zorder_unchanged(state: &State, hwnd: u32, after: u32, flags: u32) -> bool {
+    if flags & SWP_NOZORDER != 0 {
+        return false;
+    }
+    let Some(w) = state.window(hwnd) else {
+        return false;
+    };
+    let topmost = w.ex_style & WS_EX_TOPMOST != 0;
+    let siblings: &[u32] = state
+        .window(w.parent)
+        .map(|p| p.children.as_slice())
+        .unwrap_or_default();
+    let first = siblings.first() == Some(&hwnd);
+    match after {
+        HWND_TOP => first,
+        HWND_BOTTOM => !topmost && siblings.last() == Some(&hwnd),
+        HWND_TOPMOST => topmost && first,
+        HWND_NOTOPMOST => false,
+        h => {
+            // Only top-level windows have a topmost band: a child placed
+            // after a sibling keeps its WS_EX_TOPMOST (`set_topmost`).
+            let same_band = w.parent != DESKTOP
+                || state
+                    .window(h)
+                    .is_some_and(|a| (a.ex_style & WS_EX_TOPMOST != 0) == topmost);
+            h == hwnd
+                || (same_band
+                    && siblings
+                        .iter()
+                        .position(|&s| s == h)
+                        .and_then(|i| siblings.get(i + 1))
+                        == Some(&hwnd))
+        }
+    }
+}
+
 /// SetWindowPos's steps.
 pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     let hwnd = t.var(P_HWND);
@@ -1874,7 +1980,7 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if words[6] & SWP_NOSENDCHANGING == 0 {
                     // The flags it sees are without SWP_STATECHANGED's
                     // own place in them.
-                    return send(hwnd, WM_WINDOWPOSCHANGING, 0, winpos, 1);
+                    return send(cpu, hwnd, WM_WINDOWPOSCHANGING, 0, winpos, 1);
                 }
                 t.step = 1;
             }
@@ -1882,7 +1988,11 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if !user(cpu).is_window(hwnd) {
                     return Next::Done(FALSE);
                 }
-                let p = read_words(cpu, winpos, 7);
+                let mut p = read_words(cpu, winpos, 7);
+                if zorder_unchanged(user(cpu), hwnd, p[1], p[6]) {
+                    p[6] |= SWP_NOZORDER;
+                    cpu.bus.guest_write_32(winpos + 24, p[6]);
+                }
                 let flags = p[6];
                 let old = rect_var(t, P_OLD);
                 let (x, y, cx, cy) = (p[2] as i32, p[3] as i32, p[4] as i32, p[5] as i32);
@@ -1907,7 +2017,7 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     bytes.extend_from_slice(&old_client.bytes());
                     bytes.extend_from_slice(&winpos.to_le_bytes());
                     cpu.bus.guest_write_bytes(calc, &bytes);
-                    return send(hwnd, WM_NCCALCSIZE, TRUE, calc, 2);
+                    return send(cpu, hwnd, WM_NCCALCSIZE, TRUE, calc, 2);
                 }
                 // The client area moves with the window.
                 let old_client = rect_var(t, P_OLD_CLIENT);
@@ -2050,10 +2160,19 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     .window(hwnd)
                     .is_some_and(|w| w.style & WS_CHILD != 0);
                 if flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW) == 0 && !child {
-                    return Next::call(address_of("SetForegroundWindow"), &[hwnd], 4);
+                    return Next::call(address_of(cpu, "SetForegroundWindow"), &[hwnd], 4);
                 }
-                if child && flags & SWP_NOACTIVATE == 0 && flags & SWP_SHOWWINDOW != 0 {
-                    return send(hwnd, WM_CHILDACTIVATE, 0, 0, 4);
+                // A child gets WM_CHILDACTIVATE instead, whether this
+                // shows it or only moves it or brings it to the top, as
+                // BringWindowToTop does (msg.c's WmReparentButtonSeq,
+                // recorded on Windows, has it for a SWP_NOSIZE move). An
+                // MDI child activates itself there (DefMDIChildProc):
+                // MFC's CMDIChildWnd shows a new child while its frame is
+                // still hidden, which ShowWindow leaves at WS_VISIBLE, and
+                // then brings it to the top, which makes it the active
+                // one that WM_MDIGETACTIVE returns.
+                if child && flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW) == 0 {
+                    return send(cpu, hwnd, WM_CHILDACTIVATE, 0, 0, 4);
                 }
                 t.step = 4;
             }
@@ -2083,7 +2202,7 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     && parent != DESKTOP
                 {
                     let erase = super::paint::RDW_ERASENOW | super::paint::RDW_NOCHILDREN;
-                    return Next::call(address_of("RedrawWindow"), &[parent, 0, 0, erase], 7);
+                    return Next::call(address_of(cpu, "RedrawWindow"), &[parent, 0, 0, erase], 7);
                 }
             }
             7 => {
@@ -2107,7 +2226,7 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     && user(cpu).is_visible(hwnd)
                 {
                     let erase = super::paint::RDW_ERASENOW | super::paint::RDW_NOCHILDREN;
-                    return Next::call(address_of("RedrawWindow"), &[hwnd, 0, 0, erase], 5);
+                    return Next::call(address_of(cpu, "RedrawWindow"), &[hwnd, 0, 0, erase], 5);
                 }
                 t.step = 5;
             }
@@ -2142,7 +2261,7 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     let r = rect_var(t, P_WAS_VISIBLE + 1);
                     let place = [r.left, r.top, r.width(), r.height()];
                     write_words(cpu, winpos + 8, &place.map(|v| v as u32));
-                    return send(hwnd, WM_WINDOWPOSCHANGED, 0, winpos, 6);
+                    return send(cpu, hwnd, WM_WINDOWPOSCHANGED, 0, winpos, 6);
                 }
                 return Next::Done(TRUE);
             }
@@ -2246,19 +2365,19 @@ pub fn misc_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         MISC_ENABLE => {
             let hwnd = t.var(1);
             match t.step {
-                0 if t.var(4) != 0 => Next::call(address_of("SetFocus"), &[0], 1),
-                0 | 1 => send(hwnd, WM_ENABLE, t.var(2), 0, 2),
+                0 if t.var(4) != 0 => Next::call(address_of(cpu, "SetFocus"), &[0], 1),
+                0 | 1 => send(cpu, hwnd, WM_ENABLE, t.var(2), 0, 2),
                 _ => Next::Done(t.var(3)),
             }
         }
         MISC_SET_TEXT => match t.step {
             // SetWindowTextA: WM_SETTEXT.
-            0 => send(t.var(1), WM_SETTEXT, 0, t.var(2), 1),
+            0 => send(cpu, t.var(1), WM_SETTEXT, 0, t.var(2), 1),
             _ => Next::Done(value),
         },
         MISC_SET_PARENT => set_parent_step(cpu, t, value),
         MISC_CLOSE => match t.step {
-            0 => send(t.var(1), WM_SYSCOMMAND, SC_MINIMIZE, 0, 1),
+            0 => send(cpu, t.var(1), WM_SYSCOMMAND, SC_MINIMIZE, 0, 1),
             _ => Next::Done(TRUE),
         },
         MISC_SET_LONG => match t.step {
@@ -2268,7 +2387,7 @@ pub fn misc_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let (hwnd, which) = (t.var(1), t.var(2));
                 let ss = t.scratch;
                 write_words(cpu, ss, &[t.var(3), t.var(4)]);
-                send(hwnd, WM_STYLECHANGING, which, ss, 1)
+                send(cpu, hwnd, WM_STYLECHANGING, which, ss, 1)
             }
             1 => {
                 let (hwnd, which) = (t.var(1), t.var(2));
@@ -2286,14 +2405,14 @@ pub fn misc_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     w.ex_style = new;
                 }
                 super::paint::tree_changed(cpu);
-                send(hwnd, WM_STYLECHANGED, which, ss, 2)
+                send(cpu, hwnd, WM_STYLECHANGED, which, ss, 2)
             }
             _ => Next::Done(t.var(3)),
         },
         MISC_PLACEMENT => match t.step {
             0 => {
                 let (hwnd, cmd) = (t.var(1), t.var(2));
-                Next::call(address_of("ShowWindow"), &[hwnd, cmd], 1)
+                Next::call(address_of(cpu, "ShowWindow"), &[hwnd, cmd], 1)
             }
             _ => Next::Done(TRUE),
         },
@@ -2306,7 +2425,12 @@ pub fn is_child(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(user(cpu).is_descendant(args[0], args[1]) as u32)
 }
 
+/// IsIconic(hwnd). It reads the window's style, which only a call or a
+/// message changes, so an idle proof goes through it (#1306): Biosys
+/// asks it in every pass of the loop it waits in.
 pub fn is_iconic(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     Some(
         user(cpu)
             .window(args[0])
@@ -2322,14 +2446,19 @@ pub fn is_zoomed(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
-/// GetParent: a child's parent, a popup's owner, or 0.
+/// GetParent: a child's parent, a popup's owner, or 0. It reads the
+/// window list, which only a call or a message changes, so an idle proof
+/// goes through it: Metal Marines asks it three times in every pass of
+/// the PeekMessage loop it waits in.
 pub fn get_parent(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     Some(parent_of(user(cpu), args[0]))
 }
 
 /// GetParent's answer: a popup's owner (even if it is a child too), a
 /// child's parent, nothing for an overlapped window.
-fn parent_of(state: &State, hwnd: u32) -> u32 {
+pub fn parent_of(state: &State, hwnd: u32) -> u32 {
     let Some(w) = state.window(hwnd) else {
         return 0;
     };
@@ -2421,7 +2550,7 @@ pub fn set_parent(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn set_parent_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     let (hwnd, parent, old, visible) = (t.var(1), t.var(2), t.var(3), t.var(4) != 0);
     match t.step {
-        0 if visible => Next::call(address_of("ShowWindow"), &[hwnd, SW_HIDE], 1),
+        0 if visible => Next::call(address_of(cpu, "ShowWindow"), &[hwnd, SW_HIDE], 1),
         0 | 1 => {
             let state = user(cpu);
             unlink(state, hwnd);
@@ -2437,7 +2566,7 @@ fn set_parent_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
             // top of the z-order, and shows again if it showed.
             let flags = SWP_NOSIZE | SWP_NOMOVE | if visible { SWP_SHOWWINDOW } else { 0 };
             Next::call(
-                address_of("SetWindowPos"),
+                address_of(cpu, "SetWindowPos"),
                 &[hwnd, HWND_TOP, 0, 0, 0, 0, flags],
                 2,
             )
@@ -2510,6 +2639,11 @@ pub const DWL_USER: i32 = 8;
 
 /// GetWindowLongA(hwnd, index).
 pub fn get_window_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // It only reads the window (an index it doesn't know sets the last
+    // error, which a proof allows), so an idle proof goes through it, as
+    // through IsIconic.
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     let (hwnd, index) = (args[0], args[1] as i32);
     let Some(w) = get(cpu, hwnd) else {
         return Some(0);
@@ -2537,6 +2671,9 @@ pub fn get_window_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// GetWindowWord(hwnd, index): the extra bytes, or GWL_ID and
 /// GWL_HINSTANCE as words.
 pub fn get_window_word(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // Only a read of the window, as GetWindowLongA.
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     let (hwnd, index) = (args[0], args[1] as i32);
     let Some(w) = get(cpu, hwnd) else {
         return Some(0);
@@ -3021,7 +3158,18 @@ pub fn get_window_thread_process_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
 /// deepest child there. As WindowFromPoint and the mouse's messages do,
 /// a child that answers WM_NCHITTEST with HTTRANSPARENT (a group box, a
 /// static control) is passed over for the windows below it, so the
-/// check boxes inside a group box get their clicks.
+/// check boxes inside a group box get their clicks. WS_EX_TRANSPARENT
+/// changes only the order windows paint in: Windows passes the mouse
+/// through a window with it only when the window is layered too
+/// (Windows 2000's WS_EX_LAYERED), and Windows 98 has no layered
+/// windows. CyberStorm 2 sets it on every control of its dialogs, and
+/// they take clicks.
+///
+/// A disabled child is passed over too, with its children, as Wine's
+/// server and ReactOS search for the window at a point: a click on it
+/// goes to the window it is in, which can tell which child was under it
+/// with ChildWindowFromPoint. A disabled top-level window is the window
+/// there, and gets nothing.
 pub fn window_at(state: &State, x: i32, y: i32) -> u32 {
     let mut hwnd = DESKTOP;
     'down: loop {
@@ -3038,10 +3186,9 @@ pub fn window_at(state: &State, x: i32, y: i32) -> u32 {
             if !state.screen_rect(child).contains(x, y) {
                 continue;
             }
-            if c.ex_style & WS_EX_TRANSPARENT != 0 && c.style & WS_CHILD != 0 {
-                continue;
-            }
-            if c.style & WS_CHILD != 0 && super::controls::hit_transparent(state, child) {
+            if c.style & WS_CHILD != 0
+                && (c.style & WS_DISABLED != 0 || super::controls::hit_transparent(state, child))
+            {
                 continue;
             }
             hwnd = child;
@@ -3344,7 +3491,7 @@ const ENUM_DEFER: u32 = 4;
 const TASK_ENUM_DEFER: u16 = 16;
 
 /// EndDeferWindowPos's steps: SetWindowPos for each.
-pub fn defer_step(_cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
+pub fn defer_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     let at = t.var(E_AT) as usize;
     let Some(call) = t
         .vars
@@ -3354,7 +3501,7 @@ pub fn defer_step(_cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
         return Next::Done(TRUE);
     };
     t.set(E_AT, at as u32 + 1);
-    Next::call(address_of("SetWindowPos"), &call, 1)
+    Next::call(address_of(cpu, "SetWindowPos"), &call, 1)
 }
 
 /// SetWindowRgn(hwnd, region, redraw): the window takes the region,
@@ -3570,6 +3717,89 @@ mod tests {
             (mm[2], mm[3], mm[4] as i32, mm[5] as i32),
             (374, 235, 0, 0)
         );
+    }
+
+    /// A child of a hidden window shows nothing, so freeing it leaves
+    /// nothing to paint. DestroyWindow hides the window it destroys and
+    /// then frees its children, which keep WS_VISIBLE: Shadow of the
+    /// Horned Rat's camp screen, drawn after its regiment book went, was
+    /// erased by its parents' WM_PAINT that the book's buttons asked for.
+    /// A visible child still uncovers its parent where it was, and
+    /// nothing of a window under the parent.
+    #[test]
+    fn a_child_of_a_hidden_window_uncovers_nothing() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        create_desktop(&mut cpu);
+        let state = user(&mut cpu);
+        let r = Rect::new(0, 0, 640, 480);
+        let top_level = || Window {
+            style: WS_VISIBLE,
+            parent: DESKTOP,
+            rect: r,
+            client: r,
+            ..Window::default()
+        };
+        let under = state.new_window(top_level()).expect("a window");
+        link(state, under, HWND_TOP);
+        let top = state.new_window(top_level()).expect("a window");
+        link(state, top, HWND_TOP);
+        let child = |parent, style| Window {
+            style: WS_CHILD | style,
+            parent,
+            rect: Rect::new(10, 10, 100, 40),
+            client: Rect::new(10, 10, 100, 40),
+            ..Window::default()
+        };
+        let page = state.new_window(child(top, 0)).expect("a page");
+        link(state, page, HWND_TOP);
+        let button = state.new_window(child(page, WS_VISIBLE)).expect("a button");
+        link(state, button, HWND_TOP);
+        let shown = state.new_window(child(top, WS_VISIBLE)).expect("a child");
+        link(state, shown, HWND_TOP);
+        free_window(&mut cpu, button);
+        let w = user(&mut cpu).window(top).expect("the window");
+        assert!(w.update.is_empty(), "a hidden button uncovered {:?}", w.update);
+        free_window(&mut cpu, shown);
+        let state = user(&mut cpu);
+        let w = state.window(top).expect("the window");
+        assert_eq!(w.update.bounds(), Rect::new(10, 10, 100, 40));
+        let w = state.window(under).expect("the window under");
+        assert!(w.update.is_empty(), "the window under uncovered {:?}", w.update);
+    }
+
+    /// A disabled child isn't the window at a point: the window it is in
+    /// is, as Wine's server and ReactOS find it, so a click on a disabled
+    /// button goes to its dialog. A disabled top-level window is still
+    /// the window there.
+    #[test]
+    fn a_disabled_child_leaves_the_point_to_its_parent() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        create_desktop(&mut cpu);
+        let state = user(&mut cpu);
+        let r = Rect::new(0, 0, 640, 480);
+        let dialog = Window {
+            style: WS_VISIBLE,
+            parent: DESKTOP,
+            rect: r,
+            client: r,
+            ..Window::default()
+        };
+        let dialog = state.new_window(dialog).expect("a window");
+        link(state, dialog, HWND_TOP);
+        let button = Window {
+            style: WS_CHILD | WS_VISIBLE | WS_DISABLED,
+            parent: dialog,
+            rect: Rect::new(10, 10, 100, 40),
+            client: Rect::new(10, 10, 100, 40),
+            ..Window::default()
+        };
+        let button = state.new_window(button).expect("a button");
+        link(state, button, HWND_TOP);
+        assert_eq!(window_at(state, 20, 20), dialog);
+        state.window_mut(button).expect("the button").style &= !WS_DISABLED;
+        assert_eq!(window_at(state, 20, 20), button);
+        state.window_mut(dialog).expect("the dialog").style |= WS_DISABLED;
+        assert_eq!(window_at(state, 20, 20), dialog);
     }
 
     /// SetWindowLong(GWL_HWNDPARENT) can make two top-level windows own

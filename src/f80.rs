@@ -279,7 +279,7 @@ impl F80 {
         if !a_nan && !b_nan {
             return None;
         }
-        let signalling = |x: &F80| x.is_nan() && x.st & QUIET == 0;
+        let signalling = |x: &F80| x.is_signalling();
         let invalid = signalling(self) || signalling(&b);
         let mut nan = *self;
         if a_nan && b_nan {
@@ -341,6 +341,11 @@ impl F80 {
     pub fn is_nan(&self) -> bool {
         let exponent = (self.st >> 64) & 0x7FFF;
         exponent == 0x7FFF && self.st & MANTISSA_MASK_NOINT != 0
+    }
+
+    /// A NaN with the quiet bit (bit 62 of the significand) clear.
+    pub fn is_signalling(&self) -> bool {
+        self.is_nan() && self.st & 1 << 62 == 0
     }
 
     /// The value as FBSTP stores it, rounded as `rc` (the control word's RC
@@ -761,7 +766,8 @@ impl FpuRegs {
     /// is rounded to nearest, so FIST, FST to a single (or to a double under
     /// another rounding), FRNDINT and the compares then work from the 80
     /// bits; the recompiler's code leaves those cases to the handlers
-    /// (`Uop::FBailPrecise`, and `Uop::FToSingle` for the single).
+    /// (`Uop::FBailPrecise`, `Uop::FToSingle` for the single and
+    /// `Uop::FToInt64` for a qword).
     #[inline]
     pub fn beyond_double(&self, i: usize) -> bool {
         self.stale[i] == 0 && self.x80[i].st & 0x7FF != 0

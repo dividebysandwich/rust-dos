@@ -2,9 +2,10 @@
 //! shell link saved through IShellLinkA and IPersistFile, a Program
 //! Manager group made through DDEML as InstallShield makes one and
 //! through raw DDE messages, a file copied by SHFileOperationA,
-//! FindExecutableA following the registry's associations, and Notepad
-//! showing the file WinExec gives it. Each runs on the interpreter and
-//! on the dynamic recompiler. The programs are PE files made with
+//! FindExecutableA following the registry's associations, Notepad
+//! showing the file WinExec gives it, and ShellExecuteA starting a DOS
+//! program and a PIF in a working folder. Each runs on the interpreter
+//! and on the dynamic recompiler. The programs are PE files made with
 //! rust-dos-pe's builder, their code assembled with iced.
 
 use iced_x86::code_asm::*;
@@ -13,6 +14,8 @@ use rust_dos::exec::{NoHook, StopReason, run_batch};
 use rust_dos_pe::{self as pe, Builder, Imp};
 use std::fs;
 use std::path::PathBuf;
+
+use crate::win16;
 
 const BASE: u32 = 0x40_0000;
 const CORES: [CoreMode; 2] = [CoreMode::Normal, CoreMode::Dynamic];
@@ -89,7 +92,7 @@ fn scratch(name: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
 
 /// A machine on `core` with the built-in Windows on and `program`
 /// loaded from the shell as T.EXE, with `files` on drive C:.
-fn machine(test: &str, core: CoreMode, files: &[(&str, Vec<u8>)]) -> Cpu {
+fn machine(test: &str, core: CoreMode, files: &[(&str, Vec<u8>)]) -> Box<Cpu> {
     let mut cpu = Cpu::new(scratch(test, files));
     cpu.core = core;
     cpu.bus.win32.enabled = true;
@@ -833,5 +836,66 @@ fn notepad_shows_a_readme_that_winexec_opens() {
         run_to_exit(&mut cpu);
         assert_eq!(printed(&cpu), "Hello\r\nthere", "{core:?}");
         assert_eq!(cpu.errorlevel, 0x3F, "{core:?}");
+    }
+}
+
+/// ShellExecuteA of a DOS program with a working folder (lpDirectory,
+/// which is what a shell link's working folder becomes): Windows 98
+/// starts the program in that folder. The built-in Windows starts the
+/// DOS program once ShellExecuteA has returned, when ShellExecuteA has
+/// changed back to its caller's folder, so the folder has to go with
+/// the program. The second case is a PIF with no working folder of its
+/// own, as the ones Z (1996)'s setup makes, which names its program
+/// without a folder or an extension: it starts in the link's folder.
+/// The program writes MARK.TXT in its current folder with its command
+/// tail (`win16::dos_folder_marker`).
+#[test]
+fn shellexecute_starts_a_dos_program_in_its_working_folder() {
+    let cases: [(&str, &str, &str, &str, &str); 2] = [
+        ("dos_folder", "C:\\SUB\\MARK.COM", "X", "C:\\SUB", " X"),
+        ("pif_folder", "C:\\GAME\\Z.PIF", "", "C:\\GAME", " /E"),
+    ];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        ("SHELL32.dll", &["ShellExecuteA"]),
+    ];
+    for (test, file, parameters, directory, tail) in cases {
+        // The file at 0, the parameters at 0x40, the folder at 0x80.
+        let mut data = vec![0u8; 0xC0];
+        put(&mut data, 0x00, file.as_bytes());
+        put(&mut data, 0x40, parameters.as_bytes());
+        put(&mut data, 0x80, directory.as_bytes());
+        let code = program(imports, &data, |a, l| {
+            a.xor(ebx, ebx)?;
+            let parameters_at = if parameters.is_empty() { 0 } else { l.at(0x40) };
+            let args = [0, 0, l.at(0), parameters_at, l.at(0x80), 1];
+            call(a, l.import(1), &args)?;
+            let mut skip = a.create_label();
+            a.cmp(eax, 32)?;
+            a.jbe(skip)?;
+            a.or(ebx, 1)?;
+            a.set_label(&mut skip)?;
+            exit(a, l.import(0))
+        });
+        let folder = &directory[3..];
+        for core in CORES {
+            let base = scratch(test, &[("T.EXE", code.clone())]);
+            let dir = base.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("MARK.COM"), win16::dos_folder_marker()).unwrap();
+            fs::write(dir.join("Z.PIF"), win16::pif("MARK", "", "", "/E")).unwrap();
+            let mut cpu = Cpu::new(base.clone());
+            cpu.core = core;
+            cpu.bus.win32.enabled = true;
+            cpu.host_console = Some(HostConsole::default());
+            cpu.load_shell();
+            assert!(cpu.load_executable("T.EXE", None));
+            run_to_exit(&mut cpu);
+            assert_eq!(cpu.errorlevel, 1, "{test} {core:?}: {}", printed(&cpu));
+            let written = fs::read(dir.join("MARK.TXT")).ok();
+            let tail = Some(tail.as_bytes());
+            assert_eq!(written.as_deref(), tail, "{test} {core:?}");
+            assert!(!base.join("MARK.TXT").exists(), "{test} {core:?}");
+        }
     }
 }

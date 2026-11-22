@@ -280,7 +280,7 @@ impl Bus {
     /// first byte's address in the card's memory. None where any of them
     /// is somewhere else, such as a register or another card's window,
     /// which reads and writes reach a byte at a time.
-    fn banshee_linear_at(&self, addr: usize, len: usize) -> Option<u32> {
+    pub(super) fn banshee_linear_at(&self, addr: usize, len: usize) -> Option<u32> {
         let v = self.voodoo.as_ref().filter(|v| v.banshee.is_some())?;
         let last = addr.checked_add(len.checked_sub(1)?)?;
         let first = self.voodoo_at(addr)?;
@@ -346,9 +346,33 @@ impl Bus {
         true
     }
 
+    /// Runs of bytes written into a Banshee's or Voodoo3's memory, as
+    /// `bytes_to_voodoo` writes each in turn: run `(addr, len)` is at
+    /// `addr` of the card's memory and takes the next `len` bytes of
+    /// `data`, and `dst` is where the first is on the bus. The card gets
+    /// them together (`Voodoo::banshee_memory_write_runs`), which queues
+    /// them behind its render threads' drawing.
+    pub(super) fn runs_to_voodoo(&mut self, dst: usize, runs: &[(u32, usize)], data: &[u8]) {
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, data.len().div_ceil(4) as u64));
+        if self.observe.on {
+            self.observe.mapped_write(dst, self.ram.len());
+        }
+        let _zone = crate::profile::zone(crate::profile::Zone::Voodoo);
+        self.voodoo_swap_wait();
+        if let Some(v) = &mut self.voodoo {
+            v.banshee_memory_write_runs(runs, data);
+        }
+        for &(addr, len) in runs {
+            self.note_banshee_memory_write(addr, len as u32);
+        }
+    }
+
     /// A write behind a swap the frame rate cap holds back (the rest of
     /// the code the program ran before it was held) waits for the swap.
-    fn voodoo_swap_wait(&mut self) {
+    pub(super) fn voodoo_swap_wait(&mut self) {
         if let Some(due) = self.voodoo.as_ref().and_then(|v| v.deferred_swap()) {
             self.clock.stall_to(due);
             let now = self.voodoo_now();

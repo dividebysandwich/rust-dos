@@ -215,6 +215,7 @@ pub(super) fn span(
 /// OpenGL's: `pixel_layout`'s for the format and type, and
 /// GL_INVALID_ENUM for texels that can't be read.
 fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Result<Vec<[u8; 4]>, u32> {
+    let _profile = crate::profile::zone(crate::profile::Zone::OpenGlTexels);
     let types = super::wgl::packed_pixels(cpu);
     let (pixel, size, packed) = pixel_layout(src.format, src.kind, types)?;
     let place = || {
@@ -227,26 +228,55 @@ fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Result<Vec<[u8; 4]>,
     }
     let mut bytes = vec![0u8; len];
     cpu.bus.guest_read_bytes(start, &mut bytes);
-    let mut out = Vec::with_capacity((src.width * src.height) as usize);
-    for y in 0..src.height {
-        let row = &bytes[(y * stride) as usize..];
-        for x in 0..src.width {
-            let p = &row[(x * pixel) as usize..];
-            out.push(match packed {
-                Some((_, widths, rev)) => {
-                    let mut v = [0u8; 4];
-                    v[..size as usize].copy_from_slice(&p[..size as usize]);
-                    let v = u32::from_le_bytes(v);
-                    rgba_of(src.format, |i| packed_component(v, widths, rev, i))
-                }
-                None => rgba_of(src.format, |i| {
-                    let at = (i * size) as usize;
-                    (component(&p[at..at + size as usize], src.kind) * 255.0 + 0.5) as u8
-                }),
-            });
+    Ok(convert(&bytes, stride, src, (pixel, size, packed)))
+}
+
+/// The texels of `src` from `bytes`, its rows `stride` bytes apart, as
+/// red, green, blue and alpha bytes, with the layout `pixel_layout`
+/// gave.
+fn convert(
+    bytes: &[u8],
+    stride: u32,
+    src: &Source,
+    layout: (u32, u32, Option<Packed>),
+) -> Vec<[u8; 4]> {
+    let (pixel, size, packed) = layout;
+    let (w, pixel, size) = (src.width as usize, pixel as usize, size as usize);
+    let mut out = Vec::with_capacity(w * src.height as usize);
+    for y in 0..src.height as usize {
+        let row = &bytes[y * stride as usize..][..w * pixel];
+        let pixels = row.chunks_exact(pixel);
+        match packed {
+            Some((_, widths, rev)) => out.extend(pixels.map(|p| {
+                let mut v = [0u8; 4];
+                v[..size].copy_from_slice(p);
+                let v = u32::from_le_bytes(v);
+                rgba_of(src.format, |i| packed_component(v, widths, rev, i))
+            })),
+            // A byte is the component as it is: `component`'s fraction
+            // scaled back to 255 rounds to the byte it came from.
+            None if src.kind == GL_UNSIGNED_BYTE => {
+                out.extend(pixels.map(|p| rgba_of(src.format, |i| p[i as usize])))
+            }
+            None => out.extend(pixels.map(|p| {
+                rgba_of(src.format, |i| {
+                    let at = i as usize * size;
+                    (component(&p[at..at + size], src.kind) * 255.0 + 0.5) as u8
+                })
+            })),
         }
     }
-    Ok(out)
+    out
+}
+
+/// `texels` as the texture keeps them (`encode`), two bytes each, low
+/// byte first.
+fn encode_all(texels: &[[u8; 4]], base: Base) -> Vec<u8> {
+    let mut out = Vec::with_capacity(texels.len() * 2);
+    for &p in texels {
+        out.extend_from_slice(&encode(p, base).to_le_bytes());
+    }
+    out
 }
 
 /// A packed pixel type: the bytes of its element, the bits of each
@@ -648,23 +678,26 @@ fn fits(at: u32, len: u32, size: u32) -> bool {
     at.checked_add(len).is_some_and(|end| end <= size)
 }
 
-/// Write `texels` (16 bits each), `w` by `h`, into level surface `id`
-/// at (`x`, `y`).
-fn write_level(cpu: &mut Cpu, id: u32, x: u32, y: u32, w: u32, h: u32, texels: &[u16]) {
+/// Write `texels`, `w` by `h`, into level surface `id` at (`x`, `y`),
+/// kept as `base` (`encode_all`): all the rows in one write, which in
+/// video memory is one run when they fill the pitch.
+fn write_level(
+    cpu: &mut Cpu,
+    id: u32,
+    (x, y): (u32, u32),
+    (w, h): (u32, u32),
+    texels: &[[u8; 4]],
+    base: Base,
+) {
+    let _profile = crate::profile::zone(crate::profile::Zone::OpenGlTexels);
     let Some(s) = ddraw::state(cpu).surface(id).cloned() else {
         return;
     };
     if !fits(x, w, s.width) || !fits(y, h, s.height) {
         return;
     }
-    let mut row = Vec::with_capacity(w as usize * 2);
-    for r in 0..h {
-        row.clear();
-        for t in &texels[(r * w) as usize..((r + 1) * w) as usize] {
-            row.extend_from_slice(&t.to_le_bytes());
-        }
-        dd_surface::write_bytes(cpu, &s, (y + r) * s.pitch + x * 2, &row);
-    }
+    let bytes = encode_all(&texels[..w as usize * h as usize], base);
+    dd_surface::write_rows(cpu, &s, y * s.pitch + x * 2, w as usize * 2, &bytes);
     dd_surface::changed(cpu, id);
 }
 
@@ -765,8 +798,7 @@ fn define(cpu: &mut Cpu, img: &Image, texels: Option<Vec<[u8; 4]>>) {
     let id = t.levels[level as usize];
     store(cpu, t);
     if let Some(texels) = unpacked {
-        let words: Vec<u16> = texels.into_iter().map(|p| encode(p, base)).collect();
-        write_level(cpu, id, 0, 0, w, h, &words);
+        write_level(cpu, id, (0, 0), (w, h), &texels, base);
     }
 }
 
@@ -886,8 +918,7 @@ pub fn tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
     };
     let base = base_of(t.internal).unwrap_or(if t.alpha { Base::Rgba } else { Base::Rgb });
-    let words: Vec<u16> = texels.into_iter().map(|p| encode(p, base)).collect();
-    write_level(cpu, id, x, y, width, height, &words);
+    write_level(cpu, id, (x, y), (width, height), &texels, base);
     Some(0)
 }
 
@@ -895,31 +926,65 @@ pub fn tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// left, `w` by `h`, as red, green, blue and alpha, from the bottom row
 /// up.
 pub fn read_frame(cpu: &mut Cpu, x: i32, y: i32, w: u32, h: u32) -> Option<Vec<[u8; 4]>> {
-    let (target, height) = ctx(cpu).map(|c| (c.target, c.height))?;
-    super::super::ddraw::d3d::shadow::expose(cpu, target);
-    let s = ddraw::state(cpu).surface(target)?.clone();
+    let target = ctx(cpu)?.target;
+    // 5-6-5, or X8R8G8B8 (`wgl::color_bits`).
+    read_rect(cpu, target, (x, y, w, h), [0, 0, 0, 255], |p| match p {
+        [b, g, r, _] => [*r, *g, *b, 255],
+        _ => rgb565(u16::from_le_bytes([p[0], p[1]])),
+    })
+}
+
+/// The values of the depth buffer from (`x`, `y`), from the bottom
+/// left, `w` by `h`, from the bottom row up: its 16 bits, 0 the near
+/// plane and 0xFFFF the far one. What is off the buffer reads as the
+/// far plane.
+pub fn read_depth(cpu: &mut Cpu, x: i32, y: i32, w: u32, h: u32) -> Option<Vec<u16>> {
+    let depth = ctx(cpu)?.depth;
+    read_rect(cpu, depth, (x, y, w, h), u16::MAX, |p| {
+        u16::from_le_bytes([p[0], p[1]])
+    })
+}
+
+/// The pixels of a rectangle of `surface`, the context's color or depth
+/// buffer, at (`x`, `y`) from the bottom left, `w` by `h`, from the
+/// bottom row up: each pixel's bytes through `pixel`, or `outside`
+/// where it is off the surface.
+fn read_rect<T: Copy>(
+    cpu: &mut Cpu,
+    surface: u32,
+    (x, y, w, h): (i32, i32, u32, u32),
+    outside: T,
+    pixel: impl Fn(&[u8]) -> T,
+) -> Option<Vec<T>> {
+    let height = ctx(cpu)?.height;
+    super::super::ddraw::d3d::shadow::expose(cpu, surface);
+    let s = ddraw::state(cpu).surface(surface)?.clone();
     let mut out = Vec::with_capacity(w as usize * h as usize);
     let mut row = vec![0u8; s.pitch as usize];
-    // 5-6-5, or X8R8G8B8 (`wgl::color_bits`).
     let bytes = s.bytes_per_pixel() as usize;
+    // The surface's rows the rectangle's lie in, read at once.
+    let top = i64::from(height) - 1 - i64::from(y);
+    let first = (top - i64::from(h) + 1).max(0);
+    let last = top.min(i64::from(s.height) - 1);
+    if first <= last {
+        let rows = (last - first + 1) as u32;
+        dd_surface::will_read_rows(cpu, &s, first as u32 * s.pitch, s.pitch, rows, row.len());
+    }
     for r in 0..i64::from(h) {
         let sy = i64::from(height) - 1 - (i64::from(y) + r);
         if sy < 0 || sy >= i64::from(s.height) {
-            out.extend(std::iter::repeat_n([0, 0, 0, 255], w as usize));
+            out.extend(std::iter::repeat_n(outside, w as usize));
             continue;
         }
         dd_surface::read_bytes(cpu, &s, sy as u32 * s.pitch, &mut row);
         for i in 0..i64::from(w) {
             let sx = i64::from(x) + i;
             if sx < 0 || sx >= i64::from(s.width) {
-                out.push([0, 0, 0, 255]);
+                out.push(outside);
                 continue;
             }
             let at = sx as usize * bytes;
-            out.push(match bytes {
-                4 => [row[at + 2], row[at + 1], row[at], 255],
-                _ => rgb565(u16::from_le_bytes([row[at], row[at + 1]])),
-            });
+            out.push(pixel(&row[at..at + bytes]));
         }
     }
     Some(out)
@@ -990,8 +1055,7 @@ pub fn copy_tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     let base = base_of(t.internal).unwrap_or(Base::Rgb);
-    let words: Vec<u16> = texels.into_iter().map(|p| encode(p, base)).collect();
-    write_level(cpu, id, xo, yo, width, height, &words);
+    write_level(cpu, id, (xo, yo), (width, height), &texels, base);
     Some(0)
 }
 
@@ -1362,6 +1426,167 @@ mod tests {
         // Luminance from red, and alpha textures white.
         assert_eq!(encode([255, 0, 0, 255], Base::Luminance), 0xFFFF);
         assert_eq!(encode([0, 0, 0, 0x80], Base::Alpha), 0x8FFF);
+    }
+
+    fn source(width: u32, height: u32, format: u32, kind: u32) -> Source {
+        Source {
+            width,
+            height,
+            format,
+            kind,
+            at: 0,
+        }
+    }
+
+    /// Bytes are taken as they are, as `component` reads them: its
+    /// fraction scaled back rounds to the byte for every value.
+    #[test]
+    fn byte_texels_keep_their_bytes() {
+        let types = PackedPixels::Core12;
+        for v in 0..=255u8 {
+            let b = [v];
+            assert_eq!((component(&b, GL_UNSIGNED_BYTE) * 255.0 + 0.5) as u8, v);
+        }
+        let bytes: Vec<u8> = (0..=255).collect();
+        let src = source(64, 1, GL_RGBA, GL_UNSIGNED_BYTE);
+        let layout = pixel_layout(GL_RGBA, GL_UNSIGNED_BYTE, types).unwrap();
+        let texels = convert(&bytes, 256, &src, layout);
+        assert_eq!(texels.len(), 64);
+        assert_eq!(texels[0], [0, 1, 2, 3]);
+        assert_eq!(texels[63], [252, 253, 254, 255]);
+        let src = source(2, 1, GL_BGR_EXT, GL_UNSIGNED_BYTE);
+        let layout = pixel_layout(GL_BGR_EXT, GL_UNSIGNED_BYTE, types).unwrap();
+        let texels = convert(&[1, 2, 3, 4, 5, 6], 6, &src, layout);
+        assert_eq!(texels, [[3, 2, 1, 255], [6, 5, 4, 255]]);
+    }
+
+    /// Rows start a stride apart, and what is between the end of one
+    /// and the start of the next isn't a texel.
+    #[test]
+    fn texels_are_read_row_by_row_at_the_stride() {
+        let types = PackedPixels::Core12;
+        let src = source(1, 2, GL_RGB, GL_UNSIGNED_BYTE);
+        let layout = pixel_layout(GL_RGB, GL_UNSIGNED_BYTE, types).unwrap();
+        let bytes = [10, 20, 30, 99, 40, 50, 60];
+        let texels = convert(&bytes, 4, &src, layout);
+        assert_eq!(texels, [[10, 20, 30, 255], [40, 50, 60, 255]]);
+        // Other types go through `component`.
+        let src = source(1, 1, GL_LUMINANCE, GL_UNSIGNED_SHORT);
+        let layout = pixel_layout(GL_LUMINANCE, GL_UNSIGNED_SHORT, types).unwrap();
+        let texels = convert(&[0xFF, 0xFF], 2, &src, layout);
+        assert_eq!(texels, [[255, 255, 255, 255]]);
+    }
+
+    /// The texels as the loop before `convert` read them: each pixel at
+    /// its byte in its row, each component through `component` and
+    /// scaled back to a byte.
+    fn convert_per_component(bytes: &[u8], stride: u32, src: &Source) -> Vec<[u8; 4]> {
+        let types = PackedPixels::Core12;
+        let (pixel, size, packed) = pixel_layout(src.format, src.kind, types).unwrap();
+        let mut out = Vec::new();
+        for y in 0..src.height {
+            let row = &bytes[(y * stride) as usize..];
+            for x in 0..src.width {
+                let p = &row[(x * pixel) as usize..];
+                out.push(match packed {
+                    Some((_, widths, rev)) => {
+                        let mut v = [0u8; 4];
+                        v[..size as usize].copy_from_slice(&p[..size as usize]);
+                        let v = u32::from_le_bytes(v);
+                        rgba_of(src.format, |i| packed_component(v, widths, rev, i))
+                    }
+                    None => rgba_of(src.format, |i| {
+                        let at = (i * size) as usize;
+                        (component(&p[at..at + size as usize], src.kind) * 255.0 + 0.5) as u8
+                    }),
+                });
+            }
+        }
+        out
+    }
+
+    /// `convert` gives the texels the per-component loop gives, for
+    /// every format and type, packed or not, under alignments, row
+    /// lengths and skips that leave bytes between the rows; and
+    /// `encode_all` the words `encode` gives, for every base.
+    #[test]
+    fn convert_matches_the_per_component_loop() {
+        let types = PackedPixels::Core12;
+        let formats = [
+            GL_RED,
+            GL_GREEN,
+            GL_BLUE,
+            GL_ALPHA,
+            GL_LUMINANCE,
+            GL_COLOR_INDEX,
+            GL_LUMINANCE_ALPHA,
+            GL_RGB,
+            GL_BGR_EXT,
+            GL_RGBA,
+            GL_BGRA_EXT,
+        ];
+        let plain = [
+            GL_BYTE,
+            GL_UNSIGNED_BYTE,
+            GL_SHORT,
+            GL_UNSIGNED_SHORT,
+            GL_INT,
+            GL_UNSIGNED_INT,
+            GL_FLOAT,
+        ];
+        let packed = (0x8032..=0x8036).chain(0x8362..=0x8368);
+        // Bytes from a linear congruential sequence.
+        let mut seed = 0x1234_5678u32;
+        let noise: Vec<u8> = (0..0x4000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 24) as u8
+            })
+            .collect();
+        let bases = [
+            Base::Alpha,
+            Base::Luminance,
+            Base::LuminanceAlpha,
+            Base::Intensity,
+            Base::Rgb,
+            Base::Rgba,
+        ];
+        let mut cases = 0;
+        for kind in plain.into_iter().chain(packed) {
+            for format in formats {
+                let Ok(layout) = pixel_layout(format, kind, types) else {
+                    continue;
+                };
+                for (w, h) in [(1, 1), (3, 2), (5, 3), (16, 4)] {
+                    let unpacks = [[1, 0, 0, 0], [4, 0, 0, 0], [8, w + 3, 1, 2], [2, 0, 2, 0]];
+                    for unpack in unpacks {
+                        let (stride, skip, len) = span(unpack, w, h, layout.0).unwrap();
+                        let bytes = &noise[skip as usize..][..len];
+                        let src = source(w, h, format, kind);
+                        let texels = convert(bytes, stride, &src, layout);
+                        let old = convert_per_component(bytes, stride, &src);
+                        assert_eq!(texels, old, "{format:#x} {kind:#x} {w}x{h} {unpack:?}");
+                        for base in bases {
+                            let words: Vec<u8> = old
+                                .iter()
+                                .flat_map(|&p| encode(p, base).to_le_bytes())
+                                .collect();
+                            assert_eq!(encode_all(&texels, base), words);
+                        }
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        // 7 plain types by 11 formats; 4 packed types of GL_RGB, and 8
+        // of GL_RGBA that take GL_BGRA as well.
+        assert_eq!(cases, (7 * 11 + 4 + 8 * 2) * 16);
+    }
+
+    #[test]
+    fn encoded_texels_are_little_endian_words() {
+        let bytes = encode_all(&[[255, 0, 0, 0], [0, 0, 0, 255]], Base::Rgba);
+        assert_eq!(bytes, [0x00, 0x0F, 0x00, 0xF0]);
     }
 
     /// OpenGL 1.2's table of packed types: the first component is in

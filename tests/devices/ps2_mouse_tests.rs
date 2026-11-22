@@ -109,6 +109,41 @@ fn the_handler_gets_the_motion_and_buttons_on_irq_12() {
     assert_eq!(cpu.bus.read_16(0x20106), 3);
 }
 
+/// Once the INT 33h driver has taken INT 74h over (for a program in
+/// protected mode without the DPMI host), its IRQ handler passes the PS/2
+/// mouse's bytes on to the BIOS's handler, so a later program that uses
+/// the BIOS's services still gets its reports.
+#[test]
+fn the_bios_handler_gets_reports_through_the_mouse_drivers_irq_handler() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    let at = 0x74 * 4;
+    cpu.bus.write_16(at, rust_dos::bios::MOUSE_IRQ);
+    cpu.bus.write_16(at + 2, 0xF000);
+
+    let mut handler = HANDLER.to_vec();
+    handler.push(0xCB); // RETF
+    cpu.bus.load_bytes(0x20000, &handler);
+    assert_eq!(bios(&mut cpu, 0xC205, 0x0300), (0, false));
+    cpu.set_es(0x2000);
+    assert_eq!(bios(&mut cpu, 0xC207, 0x0000), (0, false));
+    assert_eq!(bios(&mut cpu, 0xC200, 0x0100), (0, false));
+
+    cpu.bus.mouse.move_by(5.0, -3.0);
+    cpu.bus.mouse.button_down(0);
+    run_until(&mut cpu, 1);
+    assert_eq!(
+        cpu.bus.read_16(0x20100),
+        0x09,
+        "left button, positive X and Y"
+    );
+    assert_eq!(cpu.bus.read_16(0x20102), 5);
+    assert_eq!(cpu.bus.read_16(0x20104), 3);
+    run(&mut cpu, 20);
+    assert_eq!(cpu.bus.read_16(0x20106), 1, "one report");
+    assert_eq!(cpu.sp(), 0x1000, "the stack as it was");
+    assert!(!cpu.bus.pic.busy(12), "acknowledged");
+}
+
 #[test]
 fn the_mouse_talks_through_the_keyboard_controller() {
     let mut cpu = Cpu::new(PathBuf::from("."));

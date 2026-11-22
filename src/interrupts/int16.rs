@@ -5,6 +5,9 @@ const BDA_SHIFT_FLAGS: usize = 0x0417;
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
+    if keyboard_settings(cpu, ah) {
+        return;
+    }
     if crate::keyboard::bios_keystrokes(&cpu.bus) {
         return booted(cpu, ah);
     }
@@ -96,6 +99,38 @@ pub fn handle(cpu: &mut Cpu) {
     }
 }
 
+/// The functions about the keyboard itself, which an AT BIOS with an MF2
+/// keyboard has, booted or not, the same way. False for the others.
+fn keyboard_settings(cpu: &mut Cpu, ah: u8) -> bool {
+    match ah {
+        // The typematic rate and delay, which the BIOS sends to the
+        // keyboard with command F3h: AL=00h the defaults, AL=05h the
+        // delay in BH (0-3: 250 ms to 1 s) and the rate in BL (0-1Fh: 30
+        // to 2 a second), and AL=06h returns them in BH and BL. Others,
+        // such as the PCjr's AL=04h (no repeat), do nothing.
+        0x03 => {
+            let (al, bx) = (cpu.get_al(), cpu.bx());
+            let kbc = &mut cpu.bus.kbc;
+            match al {
+                0x00 => kbc.typematic = crate::kbc::TYPEMATIC_DEFAULT,
+                0x05 => kbc.typematic = ((bx >> 8) as u8 & 3) << 5 | (bx as u8 & 0x1F),
+                0x06 => {
+                    let typematic = kbc.typematic as u16;
+                    cpu.set_bx((typematic >> 5 & 3) << 8 | (typematic & 0x1F));
+                }
+                _ => {}
+            }
+        }
+        // The functions there are: AH=0Ah and 10h-12h (bits 4 and 5),
+        // and AH=03h's AL=00h, 05h and 06h (bits 0, 2 and 3).
+        0x09 => cpu.set_reg8(iced_x86::Register::AL, 0x3D),
+        // The keyboard's ID, as the identify command returns it.
+        0x0A => cpu.set_bx(cpu.bus.kbc.keyboard_id()),
+        _ => return false,
+    }
+    true
+}
+
 /// Whether only the enhanced keyboard's functions (AH=10h and 11h) return
 /// a keystroke: those of F11 and F12 and of the combinations the older
 /// keyboards had no code for (Ctrl+Up, Alt+Tab and the like), whose codes
@@ -158,17 +193,11 @@ fn booted(cpu: &mut Cpu, ah: u8) {
             let high = (flags2 & 0x03) | (flags3 & 0x0C) | (flags2 & 0x70) | ((flags2 & 0x04) << 5);
             cpu.set_ax((high as u16) << 8 | flags as u16);
         }
-        // Set the typematic rate: the host's keyboard repeats.
-        0x03 => {}
         0x05 => {
             let key = cpu.cx();
             let full = !BiosBuffer::push(&mut cpu.bus, key);
             cpu.set_reg8(iced_x86::Register::AL, full as u8);
         }
-        // The functions there are: AH=0Ah and 10h-12h.
-        0x09 => cpu.set_reg8(iced_x86::Register::AL, 0x30),
-        // The keyboard's ID: an MF2 keyboard, translated.
-        0x0A => cpu.set_bx(0x41AB),
         _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}", ah)),
     }
 }

@@ -815,7 +815,7 @@ mod tests {
 
     /// A machine with a desktop of 256 colours and a memory DC, which
     /// realizes its palette in the background.
-    fn palette_machine() -> (Cpu, u32) {
+    fn palette_machine() -> (Box<Cpu>, u32) {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         cpu.bus.win32.desktop_depth = crate::config::DesktopDepth::Palette;
         let hdc = dc::create_compatible_dc(&mut cpu, &[0]).unwrap();

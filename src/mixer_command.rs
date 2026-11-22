@@ -33,6 +33,7 @@ fn channel_named(name: &str) -> Option<Channel> {
         "TANDY" | "PCJR" | "PSG" => Channel::Tandy,
         "AWE32" | "AWE" | "EMU8000" => Channel::Awe,
         "MONITOR" => Channel::Monitor,
+        "ADLIBGOLD" | "AGOLD" => Channel::AdlibGold,
         "MODEM" => Channel::Modem,
         "WINDOWS" | "WIN32" | "DSOUND" => Channel::Windows,
         _ => return None,
@@ -56,6 +57,7 @@ fn display_name(channel: Channel) -> &'static str {
         Channel::Monitor => "MONITOR",
         Channel::Modem => "MODEM",
         Channel::Windows => "WINDOWS",
+        Channel::AdlibGold => "ADLIBGOLD",
     }
 }
 
@@ -74,6 +76,7 @@ pub fn active_channels(cpu: &Cpu) -> Vec<Channel> {
             Channel::Sb => bus.sb.is_some(),
             Channel::Gus => bus.gus.is_some(),
             Channel::Awe => bus.awe.is_some(),
+            Channel::AdlibGold => bus.adlib_gold.is_some(),
             Channel::LptDac => bus.lpt_dac.is_some(),
             Channel::Tandy => bus.tandy_sound_enabled(),
             Channel::Monitor => bus.monitor_noise.enabled,

@@ -275,6 +275,7 @@ impl Voodoo {
     /// A swap happened: the overlay shows `addr`, which needs the jobs up
     /// to batch `mark` drawn (`swap_mark`).
     fn banshee_show(&mut self, addr: u32, mark: Option<u64>) {
+        self.held = None;
         if let Some(b) = &mut self.banshee {
             b.overlay_addr = addr;
             b.swap_count = b.swap_count.saturating_sub(1);
@@ -514,6 +515,315 @@ pub(crate) mod tests {
         picture_comes_before(&mut v, &gate, "double buffering");
         open(&gate);
         v.flush();
+    }
+
+    /// A card double buffering as Test Drive 4 does: a swap to B waits for
+    /// the retrace, and the program clears and draws its next frame into
+    /// A, which is still shown. On the card those commands wait in the
+    /// FIFO behind the swap, and A stays on the screen as it was. Here
+    /// they go ahead, and the picture holds until the swap shows B.
+    fn drawn_behind_a_waiting_swap() -> Voodoo {
+        use super::super::VIDPROC_ENABLE;
+        drawn_behind_a_waiting_swap_in(VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE)
+    }
+
+    /// The same, with the video processor configured as `cfg` says.
+    fn drawn_behind_a_waiting_swap_in(cfg: u32) -> Voodoo {
+        use super::super::{VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VID_PROC_CFG};
+
+        let (a, b) = (0x10_0000u32, 0x20_0000u32);
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 0);
+        v.write(
+            VGA_INIT0,
+            VGAINIT0_EXTENDED_SHIFT_OUT,
+            u32::MAX,
+            Now::default(),
+        );
+        v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+        reg3d(&mut v, LEFT_OVERLAY_BUF, a);
+        reg3d(&mut v, SWAPBUFFER_CMD, 0);
+        assert!(v.prepare_display(), "the card shows A");
+        v.mark_drawn(b as usize / 2);
+        reg3d(&mut v, LEFT_OVERLAY_BUF, b);
+        reg3d(&mut v, SWAPBUFFER_CMD, 1);
+        assert!(!v.picture_held(), "nothing drawn into A yet");
+        v.mark_drawn(a as usize / 2);
+        assert!(v.picture_held(), "drawn into A");
+        assert!(v.prepare_display(), "the copy of A is drawn");
+        assert!(!v.prepare_display(), "the picture shown stays");
+        v
+    }
+
+    /// The picture held is a copy made before the drawing: the next
+    /// frame's clear of the buffer shown doesn't reach it, however the
+    /// host's frames fall.
+    #[test]
+    fn the_held_picture_is_the_frame_shown_before_the_drawing() {
+        use super::super::{
+            VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VID_DESKTOP_OVERLAY_STRIDE,
+            VID_DESKTOP_START_ADDR, VID_PROC_CFG, VIDPROC_DESKTOP_CLUT_BYPASS, VIDPROC_ENABLE,
+        };
+
+        let (a, b) = (0x10_0000u32, 0x20_0000u32);
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 0);
+        let write = |v: &mut Voodoo, reg, value| {
+            v.write(reg, value, u32::MAX, Now::default());
+        };
+        write(&mut v, VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT);
+        // The desktop shows A, in 5-6-5.
+        write(&mut v, VID_DESKTOP_START_ADDR, a);
+        write(&mut v, VID_DESKTOP_OVERLAY_STRIDE, 1280);
+        let cfg = VIDPROC_ENABLE | VIDPROC_DESKTOP_CLUT_BYPASS | 1 << 18;
+        write(&mut v, VID_PROC_CFG, cfg);
+        v.fbi.ram.set(a as usize / 2, 0xF800);
+        let (w, h) = v.picture_size();
+        let picture = |v: &Voodoo, memory: bool| {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            if memory {
+                v.render_memory(&mut rgba, w as usize);
+            } else {
+                v.render(&mut rgba, w as usize);
+            }
+            rgba
+        };
+        let shown = picture(&v, true);
+        reg3d(&mut v, LEFT_OVERLAY_BUF, b);
+        reg3d(&mut v, SWAPBUFFER_CMD, 1);
+        // The next frame's clear of A, behind the swap.
+        v.hold_shown(a as usize / 2);
+        v.fbi.ram.set(a as usize / 2, 0);
+        v.mark_drawn(a as usize / 2);
+        assert!(v.picture_held());
+        assert!(v.prepare_display());
+        assert_eq!(picture(&v, false), shown, "the frame shown");
+        assert_ne!(picture(&v, true), shown, "the memory has the clear");
+    }
+
+    #[test]
+    fn drawing_into_the_buffer_shown_behind_a_waiting_swap_holds_the_picture() {
+        let mut v = drawn_behind_a_waiting_swap();
+        let due = v.next_event().expect("the swap waits for a retrace");
+        v.service(Now {
+            ns: 1_000_000_000,
+            ticks: due,
+        });
+        assert_eq!(v.banshee.as_ref().unwrap().overlay_addr, 0x20_0000);
+        assert!(!v.picture_held());
+        assert!(v.prepare_display(), "the swap shows B");
+    }
+
+    /// A program double buffering through the overlay with swaps that wait
+    /// for the retrace, as Test Drive 4 does, step by step, with a host
+    /// frame (`prepare_display`, then `render` into the frame the last one
+    /// drew, as the main loop does) after each step in `frames`: the colour
+    /// of the first pixel of each host frame's picture, by step. Without
+    /// the `overlay`, the desktop shows A all along, and the swaps, which
+    /// move only the overlay, just wait for their retraces.
+    fn host_frames_over_double_buffering(
+        overlay: bool,
+        frames: &[usize],
+    ) -> Vec<(usize, [u8; 3])> {
+        use super::super::{
+            VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VID_DESKTOP_OVERLAY_STRIDE,
+            VID_OVERLAY_END_SCREEN_COORDS, VIDPROC_DESKTOP_CLUT_BYPASS, VIDPROC_ENABLE,
+            VIDPROC_OVERLAY_CLUT_BYPASS,
+        };
+
+        let (a, b) = (0x10_0000u32, 0x20_0000u32);
+        let mut v = card();
+        let write = |v: &mut Voodoo, reg, value| {
+            v.write(reg, value, u32::MAX, Now::default());
+        };
+        write(&mut v, VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT);
+        let desktop = if overlay { 0x30_0000 } else { a };
+        write(&mut v, VID_DESKTOP_START_ADDR, desktop);
+        write(&mut v, VID_DESKTOP_OVERLAY_STRIDE, 1280 << 16 | 1280);
+        let (w, h) = v.picture_size();
+        write(
+            &mut v,
+            VID_OVERLAY_END_SCREEN_COORDS,
+            (w - 1) | (h - 1) << 12,
+        );
+        // The desktop and the overlay in 5-6-5, the overlay over all of it.
+        let cfg = VIDPROC_ENABLE
+            | VIDPROC_DESKTOP_CLUT_BYPASS
+            | VIDPROC_OVERLAY_CLUT_BYPASS
+            | 1 << 18
+            | 1 << 21;
+        let cfg = if overlay {
+            cfg | VIDPROC_OVERLAY_ENABLE
+        } else {
+            cfg
+        };
+        write(&mut v, VID_PROC_CFG, cfg);
+        reg3d(&mut v, COL_BUFFER_STRIDE, 1280);
+        reg3d(&mut v, CLIP_LEFT_RIGHT, 4);
+        reg3d(&mut v, CLIP_LOW_Y_HIGH_Y, 1);
+        reg3d(&mut v, FBZ_MODE, 1 << 9);
+        let fill = |v: &mut Voodoo, buffer, color| {
+            reg3d(v, COL_BUFFER_ADDR, buffer);
+            reg3d(v, COLOR1, color);
+            reg3d(v, FASTFILL_CMD, 0);
+        };
+        let swap = |v: &mut Voodoo, buffer, data| {
+            reg3d(v, LEFT_OVERLAY_BUF, buffer);
+            reg3d(v, SWAPBUFFER_CMD, data);
+        };
+        let retrace = |v: &mut Voodoo| {
+            let due = v.next_event().expect("a swap waits for its retrace");
+            v.service(Now { ns: 0, ticks: due });
+        };
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        let mut first = true;
+        let mut seen = Vec::new();
+        for step in 0..6 {
+            match step {
+                // A frame into A, shown at once.
+                0 => {
+                    fill(&mut v, a, 0xFF_0000);
+                    swap(&mut v, a, 0);
+                }
+                // The next into B, swapped at the next retrace.
+                1 => {
+                    fill(&mut v, b, 0x00_FF00);
+                    swap(&mut v, b, 1);
+                }
+                // The next into A, still shown: the card holds it back.
+                2 => fill(&mut v, a, 0x00_00FF),
+                3 => retrace(&mut v),
+                // Again the other way round.
+                4 => {
+                    swap(&mut v, a, 1);
+                    fill(&mut v, if overlay { b } else { a }, 0xFF_FFFF);
+                }
+                _ => retrace(&mut v),
+            }
+            if frames.contains(&step) {
+                if v.prepare_display() || std::mem::take(&mut first) {
+                    v.render(&mut rgba, w as usize);
+                }
+                seen.push((step, [rgba[0], rgba[1], rgba[2]]));
+            }
+        }
+        seen
+    }
+
+    /// The card shows the last frame complete, however the host's frames
+    /// fall between the program's steps: the frame a swap showed even if
+    /// no host frame drew it before the next frame's drawing into it
+    /// began, and never the start of that drawing. Through the overlay
+    /// and on the desktop alone.
+    #[test]
+    fn the_held_picture_is_the_same_whenever_the_host_draws() {
+        let (red, green, blue) = ([255, 0, 0], [0, 255, 0], [0, 0, 255]);
+        let white = [255, 255, 255];
+        for (overlay, shown) in [
+            (true, [red, red, red, green, green, blue]),
+            (false, [red, red, red, blue, blue, white]),
+        ] {
+            for schedule in 1u32..64 {
+                let frames: Vec<usize> = (0..6).filter(|&s| schedule & 1 << s != 0).collect();
+                for (step, seen) in host_frames_over_double_buffering(overlay, &frames) {
+                    assert_eq!(
+                        seen, shown[step],
+                        "overlay {overlay}, step {step}, host frames {frames:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A hold keeps the memory's words where the picture is in 16-bit
+    /// formats, and draws a picture from them only when one is asked for;
+    /// in 8 bits it draws the picture at once.
+    #[test]
+    fn a_held_picture_is_drawn_only_when_asked_for() {
+        use super::super::VIDPROC_ENABLE;
+
+        let held = |v: &Voodoo, key: &str| v.describe(Now::default())[key].as_u64().unwrap();
+        let v = drawn_behind_a_waiting_swap();
+        assert_eq!(held(&v, "held_keeps"), 0);
+        assert_eq!(held(&v, "held_copies"), 1);
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE | 1 << 18 | 1 << 21;
+        let mut v = drawn_behind_a_waiting_swap_in(cfg);
+        assert_eq!(held(&v, "held_keeps"), 1);
+        assert_eq!(held(&v, "held_copies"), 0);
+        // The host frame the hold began with (`prepare_display` above).
+        let asked = held(&v, "held_conversions");
+        let (w, h) = v.picture_size();
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        v.render(&mut rgba, w as usize);
+        assert_eq!(held(&v, "held_conversions"), asked + 1);
+        let due = v.next_event().expect("the swap waits for a retrace");
+        v.service(Now { ns: 0, ticks: due });
+        v.render(&mut rgba, w as usize);
+        assert_eq!(held(&v, "held_conversions"), asked + 1, "the hold is over");
+    }
+
+    /// A new size from the CRTC ends the hold, as a new mode does: the
+    /// card never shows the frame held at another size, and the picture
+    /// is drawn from the memory again, kept as words or copied.
+    #[test]
+    fn a_new_screen_size_lets_the_held_picture_go() {
+        use super::super::VIDPROC_ENABLE;
+
+        let words = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE | 1 << 18 | 1 << 21;
+        for cfg in [VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE, words] {
+            let mut v = drawn_behind_a_waiting_swap_in(cfg);
+            // The next frame's drawing, into the desktop and into A.
+            for at in (0..4096).chain(0x8_0000..0x8_1000) {
+                v.fbi.ram.set(at, 0xFFFF);
+            }
+            let picture = |v: &Voodoo, memory: bool| {
+                let (w, h) = v.picture_size();
+                let mut rgba = vec![1u8; (w * h * 4) as usize];
+                if memory {
+                    v.render_memory(&mut rgba, w as usize);
+                } else {
+                    v.render(&mut rgba, w as usize);
+                }
+                rgba
+            };
+            assert!(picture(&v, false) != picture(&v, true), "held, {cfg:08X}");
+            let b = v.banshee.as_mut().unwrap();
+            b.crtc[0x01] = b.crtc[0x01].wrapping_add(10);
+            assert!(!v.picture_held(), "{cfg:08X}");
+            assert!(picture(&v, false) == picture(&v, true), "{cfg:08X}");
+        }
+    }
+
+    /// The hold ends whenever the picture no longer is what the swap
+    /// would replace: a swap shown at once, the video processor showing
+    /// something else (another mode, the display off, the desktop
+    /// without the overlay), a reset and a load.
+    #[test]
+    fn the_held_picture_lets_go_when_the_card_shows_something_else() {
+        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+        for case in [
+            "swap at once",
+            "mode",
+            "display off",
+            "desktop",
+            "reset",
+            "load",
+        ] {
+            let mut v = drawn_behind_a_waiting_swap();
+            let write = |v: &mut Voodoo, value| {
+                v.write(VID_PROC_CFG, value, u32::MAX, Now::default());
+            };
+            match case {
+                "swap at once" => reg3d(&mut v, SWAPBUFFER_CMD, 0),
+                "mode" => write(&mut v, cfg | 1 << 18),
+                "display off" => write(&mut v, 0),
+                "desktop" => write(&mut v, VIDPROC_ENABLE),
+                "reset" => v.reset(),
+                "load" => v.after_load(),
+                _ => unreachable!(),
+            }
+            assert!(!v.picture_held(), "{case}");
+        }
     }
 
     /// Frame buffer writes into the buffer shown, queued right after the
@@ -1929,12 +2239,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn gpu_reads_a_buffer_blitted_from_every_frame_goes_back_to_the_gpu_once_cool() {
-        // The rows a copy reads back stay hot for `HOT_FRAMES` frames of
-        // the picture. Then one frame into the buffer goes to the GPU,
-        // its copy reads it back, and the buffer is hot again: the
-        // desktop gets the renderer's pixels in that frame and the
-        // software rasterizer's in the others.
+    fn gpu_reads_a_buffer_blitted_from_every_frame_stays_with_software_until_the_blits_stop() {
+        // The rows a copy reads back turn hot, and stay hot while a copy
+        // reads them at least once a period of `HOT_FRAMES` frames: the
+        // frames into the buffer after the first are drawn in software,
+        // and the desktop gets the software rasterizer's pixels. Once the
+        // copies stop for a period, the rows cool and the next frame goes
+        // to the GPU again.
         use super::super::super::gpu::HOT_FRAMES;
         let log = Rc::default();
         let mut v = gpu_frame_in_linear_buffer(&log);
@@ -1946,21 +2257,28 @@ pub(crate) mod tests {
         blit_2d(&mut sw, false, (0, 0), (640, 64));
         let software = desktop(&sw, 320, 30);
         assert_ne!(software, 0x1234);
-        let mut on_gpu = Vec::new();
-        for frame in 1..=2 * HOT_FRAMES + 2 {
+        for frame in 1..=3 * HOT_FRAMES {
             let before = gpu_only(&v);
             draw_frame(&mut v, A);
             blit_2d(&mut v, false, (0, 0), (640, 64));
+            assert_eq!(gpu_only(&v), before, "frame {frame}");
+            assert_eq!(desktop(&v, 320, 30), software, "frame {frame}");
+        }
+        // Without copies the frames stay in software until the rows cool,
+        // within two periods.
+        let mut on_gpu = None;
+        for frame in 1..=2 * HOT_FRAMES + 1 {
+            let before = gpu_only(&v);
+            draw_frame(&mut v, A);
             if gpu_only(&v) > before {
-                on_gpu.push(frame);
-                assert_eq!(desktop(&v, 320, 30), 0x1234, "frame {frame}");
-            } else {
-                assert_eq!(desktop(&v, 320, 30), software, "frame {frame}");
+                on_gpu = Some(frame);
+                break;
             }
         }
-        // One frame in each period of `HOT_FRAMES` frames goes to the GPU.
-        assert_eq!(on_gpu.len(), 2, "{on_gpu:?}");
-        assert_eq!(on_gpu[1] - on_gpu[0], HOT_FRAMES, "{on_gpu:?}");
+        let frame = on_gpu.expect("back on the GPU");
+        assert!(frame > 1, "{frame}");
+        blit_2d(&mut v, false, (0, 0), (640, 64));
+        assert_eq!(desktop(&v, 320, 30), 0x1234);
     }
 
     #[test]

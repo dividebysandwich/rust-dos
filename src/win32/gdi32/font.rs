@@ -1,6 +1,8 @@
-//! Fonts and text. GDI here has raster fonts only, all drawn from the
+//! Fonts and text. GDI's own faces are raster fonts, all drawn from the
 //! glyphs of the VGA's ROM fonts (8x8, 8x14, 8x16), scaled to the size a
-//! font asks for. A font of variable pitch has each glyph as wide as its
+//! font asks for. The fonts of files a program adds are drawn from the
+//! files: raster ones from their glyphs (`fnt`), TrueType ones from their
+//! outlines (`ttf`). A font of variable pitch has each glyph as wide as its
 //! lit columns and a column between glyphs. The ROM's glyphs are code
 //! page 437's; the characters of the other code pages the built-in
 //! Windows has (Central European, Cyrillic, Greek, Turkish, Baltic) are
@@ -24,14 +26,29 @@
 //! has the width it has in VGASYS.FON or SSERIFE.FON, and its ROM glyph is
 //! squeezed or stretched to fit. Dialogs size themselves from these widths
 //! (GdiGetCharDimensions), so a dialog's size and the way its text wraps
-//! come out as on Windows.
+//! come out as on Windows. MS Sans Serif's 8-point size, too narrow for
+//! a squeezed ROM glyph to stay legible, has glyphs drawn for it in
+//! `sans8`.
+//!
+//! Arial, Times New Roman and Courier New, the TrueType faces, take
+//! metrics and widths that roughly match the real fonts' dimensions
+//! (`truetype`): the size a height gets, the TEXTMETRIC, and each
+//! character's hinted width at that size, in the regular, bold, italic or
+//! bold italic font the weight and slant pick. Programs that size their
+//! controls for the text in them, measured or not, then have it fit
+//! about as on Windows.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::dc::{self, Dc, OPAQUE};
+use super::fnt::{AddedFile, Fnt};
+use super::ttf::{self, Ttf};
 use super::draw::{Canvas, Fill, value_for};
+use super::sans8;
+use super::truetype;
 use super::{CB_AT, CB_LIST, CB_PARAM, CB_PROC};
 use super::{
     ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, Font, GDI_ERROR, Kind, Rect, TRUE, add,
@@ -90,6 +107,10 @@ const ETO_OPAQUE: u32 = 2;
 const ETO_CLIPPED: u32 = 4;
 
 const RASTER_FONTTYPE: u32 = 1;
+const TRUETYPE_FONTTYPE: u32 = 4;
+/// TEXTMETRIC's tmPitchAndFamily bits of a TrueType font.
+const TMPF_VECTOR: u8 = 0x02;
+const TMPF_TRUETYPE: u8 = 0x04;
 
 /// The character sets a face has.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -113,13 +134,15 @@ const WGL4: [u8; 6] = [
 ];
 
 /// A face GDI has: its name, pitch and family, character sets, the cell
-/// height it has when no height is asked for, and its weight.
+/// height it has when no height is asked for, its weight, and for one of
+/// Windows 98's TrueType faces its family in `truetype`.
 struct Face {
     name: &'static str,
     pitch_family: u8,
     charset: Sets,
     cell: i32,
     weight: i32,
+    truetype: Option<usize>,
 }
 
 /// What a font of the system locale is made of: the character set of
@@ -188,6 +211,7 @@ const FACES: &[Face] = &[
         charset: Sets::System,
         cell: 16,
         weight: 700,
+        truetype: None,
     },
     Face {
         name: "Fixedsys",
@@ -195,6 +219,7 @@ const FACES: &[Face] = &[
         charset: Sets::System,
         cell: 15,
         weight: 400,
+        truetype: None,
     },
     Face {
         name: "Terminal",
@@ -202,6 +227,7 @@ const FACES: &[Face] = &[
         charset: Sets::Oem,
         cell: 12,
         weight: 400,
+        truetype: None,
     },
     Face {
         name: "MS Sans Serif",
@@ -209,6 +235,7 @@ const FACES: &[Face] = &[
         charset: Sets::System,
         cell: 13,
         weight: 400,
+        truetype: None,
     },
     Face {
         name: "MS Serif",
@@ -216,6 +243,7 @@ const FACES: &[Face] = &[
         charset: Sets::System,
         cell: 13,
         weight: 400,
+        truetype: None,
     },
     Face {
         name: "Courier",
@@ -223,6 +251,7 @@ const FACES: &[Face] = &[
         charset: Sets::System,
         cell: 13,
         weight: 400,
+        truetype: None,
     },
     Face {
         name: "Small Fonts",
@@ -230,6 +259,7 @@ const FACES: &[Face] = &[
         charset: Sets::System,
         cell: 11,
         weight: 400,
+        truetype: None,
     },
     Face {
         name: "Arial",
@@ -237,6 +267,7 @@ const FACES: &[Face] = &[
         charset: Sets::Wgl4,
         cell: 16,
         weight: 400,
+        truetype: Some(truetype::ARIAL),
     },
     Face {
         name: "Times New Roman",
@@ -244,6 +275,7 @@ const FACES: &[Face] = &[
         charset: Sets::Wgl4,
         cell: 16,
         weight: 400,
+        truetype: Some(truetype::TIMES_NEW_ROMAN),
     },
     Face {
         name: "Courier New",
@@ -251,6 +283,7 @@ const FACES: &[Face] = &[
         charset: Sets::Wgl4,
         cell: 16,
         weight: 400,
+        truetype: Some(truetype::COURIER_NEW),
     },
 ];
 
@@ -461,20 +494,32 @@ const RASTERS: &[Raster] = &[
 /// else the lowest, and it is drawn a whole number of times higher when
 /// the height asked for is near enough to a multiple of it.
 fn raster_of(fi: usize, device_height: i32) -> Option<(usize, i32)> {
-    let sizes = || (0..RASTERS.len()).filter(move |&i| RASTERS[i].face == fi);
+    let sizes: Vec<usize> = (0..RASTERS.len()).filter(|&i| RASTERS[i].face == fi).collect();
     if device_height == 0 {
-        let i = sizes().find(|&i| RASTERS[i].height == FACES[fi].cell);
-        return i.or_else(|| sizes().next()).map(|i| (i, 1));
+        let i = sizes.iter().find(|&&i| RASTERS[i].height == FACES[fi].cell);
+        return i.or(sizes.first()).map(|&i| (i, 1));
     }
+    let heights: Vec<(i32, i32)> = sizes
+        .iter()
+        .map(|&i| (RASTERS[i].height, RASTERS[i].internal))
+        .collect();
+    size_of(&heights, device_height).map(|(k, scale)| (sizes[k], scale))
+}
+
+/// Which of a raster face's sizes, each its height and internal leading
+/// in pixels, a font `device_height` (not 0) high gets by `raster_of`'s
+/// rule, and how many times higher it is drawn.
+fn size_of(sizes: &[(i32, i32)], device_height: i32) -> Option<(usize, i32)> {
     let measure = |i: usize| {
-        let r = &RASTERS[i];
-        if device_height < 0 { r.height - r.internal } else { r.height }
+        let (height, internal) = sizes[i];
+        let h = if device_height < 0 { height - internal } else { height };
+        h.max(1)
     };
     let want = device_height.saturating_abs();
-    let i = sizes()
+    let i = (0..sizes.len())
         .filter(|&i| measure(i) <= want)
         .max_by_key(|&i| measure(i))
-        .or_else(|| sizes().min_by_key(|&i| measure(i)))?;
+        .or_else(|| (0..sizes.len()).min_by_key(|&i| measure(i)))?;
     let h = measure(i);
     let mut scale = want / h + (want % h != 0) as i32;
     // The next multiple only once the height asked for is within a
@@ -485,7 +530,7 @@ fn raster_of(fi: usize, device_height: i32) -> Option<(usize, i32)> {
         scale -= 1;
     }
     // Cells are at most 128 pixels high, as for the other faces.
-    Some((i, scale.clamp(1, 128 / RASTERS[i].height)))
+    Some((i, scale.clamp(1, (128 / sizes[i].0.max(1)).max(1))))
 }
 
 /// How far the byte `b` of the code page `page` moves on in the raster
@@ -499,7 +544,13 @@ fn raster_width(r: &Raster, page: CodePage, b: u8, x_scale: i32) -> i32 {
         return w(r.default);
     }
     let c = page.char(b);
+    // The US fonts give every character from 81h to 9Fh the same width,
+    // that of a character they lack, Š, Ž and Ÿ among them. Under
+    // another locale these letters get a width of their own, as the
+    // letters code page 1252 lacks do.
+    let localized = page.number() != CodePage::WESTERN.number();
     match CodePage::WESTERN.byte(c) {
+        Some(0x80..0xA0) if localized && decompose(c).is_some() => derived_width(r, c) * x_scale,
         Some(western) if western >= 0x20 => w(western),
         _ => derived_width(r, c) * x_scale,
     }
@@ -509,8 +560,15 @@ fn raster_width(r: &Raster, page: CodePage, b: u8, x_scale: i32) -> i32 {
 /// that of the ASCII character whose glyph it is drawn with, or whose
 /// 8x16 glyph is the same (Cyrillic and Greek letters that look like Latin
 /// ones), or else the most common width of the ASCII letters with as many
-/// lit columns, or the size's average.
+/// lit columns, or the size's average. In MS Sans Serif's 8-point size, a
+/// letter `sans8` draws (one with an accent, or with a stroke) is as wide
+/// as its glyph.
 fn derived_width(r: &Raster, c: u16) -> i32 {
+    if is_sans8(r)
+        && let Some(w) = sans8::width(c)
+    {
+        return w;
+    }
     let ascii = |b: u8| r.widths[(b - 0x20) as usize] as i32;
     let src = source(c);
     if let Src::Rom(g) = src
@@ -684,20 +742,32 @@ struct Key {
     glyph_width: i32,
     bold: bool,
     fixed: bool,
-    /// The raster size (in RASTERS) whose widths the glyphs take.
-    raster: Option<usize>,
+    /// Whose widths the glyphs take.
+    widths: Widths,
+}
+
+/// Where a font's widths come from.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Widths {
+    /// The ROM glyphs' lit columns.
+    Rom,
+    /// A raster size (in RASTERS).
+    Raster(usize),
+    /// A TrueType font (`truetype::style`) at so many pixels to the em
+    /// across.
+    TrueType(usize, i32),
 }
 
 /// A glyph: its rows' lit pixels as bit masks (bit 0 the leftmost), how
 /// far it moves on and where its pixels start.
-struct Glyph {
+pub(super) struct Glyph {
     rows: Vec<u64>,
     advance: i32,
     offset: i32,
 }
 
 /// A font's glyphs, one for each byte of its code page.
-struct Glyphs {
+pub(super) struct Glyphs {
     glyphs: Vec<Glyph>,
 }
 
@@ -834,10 +904,49 @@ fn rom_rows(key: &Key, src: Src, gw: i32) -> Vec<u64> {
     rows
 }
 
+/// Whether the raster size `r` is MS Sans Serif's 8-point one, whose
+/// glyphs `sans8` draws.
+fn is_sans8(r: &Raster) -> bool {
+    r.face == SANS_FACE && r.height == sans8::HEIGHT as i32
+}
+
+/// The glyph `sans8` draws for the byte `b` of the code page `page` in
+/// the raster size `r`, `w` wide, if `r` is MS Sans Serif's 8-point size
+/// and the character has one: its rows stretched to the key's cell and
+/// width by whole numbers, and made bold as `raster_glyphs` does. A
+/// character stretched past the 60 columns `raster_glyphs` gives a glyph
+/// has none: its ROM glyph squeezed into them keeps all its strokes,
+/// where the drawn one would lose its right side.
+fn drawn_rows(key: &Key, r: &Raster, page: CodePage, b: u8, w: i32) -> Option<Vec<u64>> {
+    if !is_sans8(r) || b < 0x20 || w - 1 > 60 {
+        return None;
+    }
+    let x_scale = key.glyph_width.max(1);
+    let y_scale = (key.cell / r.height).max(1) as usize;
+    let rows = sans8::glyph(page.char(b), w / x_scale - 1)?;
+    let wide = |row: u64| {
+        (0..64 / x_scale)
+            .filter(|x| row >> x & 1 != 0)
+            .fold(0u64, |a, x| a | ((1u64 << x_scale) - 1) << (x * x_scale))
+    };
+    Some(
+        rows.iter()
+            .flat_map(|&row| {
+                let mut out = wide(row);
+                if key.bold {
+                    out |= out << 1;
+                }
+                std::iter::repeat_n(out, y_scale)
+            })
+            .collect(),
+    )
+}
+
 /// The glyphs of a raster size: each byte's ROM glyph, its lit columns
 /// squeezed or stretched to the character's width less the column
-/// between characters. A bold face's widths have its extra column in
-/// them; a font made bold moves on a column more.
+/// between characters, or the glyph `sans8` draws. A bold face's widths
+/// have its extra column in them; a font made bold moves on a column
+/// more.
 fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
     let native_bold = FACES[r.face].weight >= 600;
     let made_bold = key.bold && !native_bold;
@@ -845,32 +954,16 @@ fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
     let glyphs = (0..256usize)
         .map(|b| {
             let w = raster_width(r, page, b as u8, key.glyph_width);
-            let mut rows = rom_rows(&key, byte_source(page, b as u8), 8);
-            let all = rows.iter().fold(0u64, |a, &r| a | r);
-            if all != 0 {
-                let left = all.trailing_zeros() as i32;
-                let lit = 64 - all.leading_zeros() as i32 - left;
-                // A row holds 64 columns: past 60, as for the other
-                // faces, the glyph keeps its advance but no wider.
-                let body = (w - 1 - native_bold as i32).clamp(1, 60);
-                for bits in &mut rows {
-                    let mut out = 0u64;
-                    for tx in 0..body {
-                        // The source columns this one covers, at least one.
-                        let from = left + tx * lit / body;
-                        let to = (left + (tx + 1) * lit / body).max(from + 1);
-                        if *bits >> from & ((1 << (to - from)) - 1) != 0 {
-                            out |= 1 << tx;
-                        }
-                    }
-                    if key.bold {
-                        out |= out << 1;
-                    }
-                    *bits = out;
-                }
+            if let Some(rows) = drawn_rows(&key, r, page, b as u8, w) {
+                return Glyph {
+                    rows,
+                    advance: w + made_bold as i32,
+                    offset: 0,
+                };
             }
+            let body = w - 1 - native_bold as i32;
             Glyph {
-                rows,
+                rows: fitted_rows(&key, byte_source(page, b as u8), body),
                 advance: w + made_bold as i32,
                 offset: 0,
             }
@@ -879,9 +972,91 @@ fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
     Glyphs { glyphs }
 }
 
+/// The ROM glyph `src` at the key's cell height, its lit columns
+/// squeezed or stretched to `body` columns, and made bold as the key
+/// says: each pixel ORed with the one to its left.
+fn fitted_rows(key: &Key, src: Src, body: i32) -> Vec<u64> {
+    let mut rows = rom_rows(key, src, 8);
+    let all = rows.iter().fold(0u64, |a, &r| a | r);
+    if all == 0 {
+        return rows;
+    }
+    let left = all.trailing_zeros() as i32;
+    let lit = 64 - all.leading_zeros() as i32 - left;
+    // A row holds 64 columns: past 60, as for the other faces, the glyph
+    // keeps its advance but no wider.
+    let body = body.clamp(1, 60);
+    for bits in &mut rows {
+        let mut out = 0u64;
+        for tx in 0..body {
+            // The source columns this one covers, at least one.
+            let from = left + tx * lit / body;
+            let to = (left + (tx + 1) * lit / body).max(from + 1);
+            if *bits >> from & ((1 << (to - from)) - 1) != 0 {
+                out |= 1 << tx;
+            }
+        }
+        if key.bold {
+            out |= out << 1;
+        }
+        *bits = out;
+    }
+    rows
+}
+
+/// The character of the byte `b` of the code page `page` in a TrueType
+/// font, as Windows 98's tables of the code pages have it, `None` for
+/// one drawn with the font's missing glyph. Those tables are older than
+/// the code pages: they lack the control characters, Z and z with caron
+/// in 1252, the horizontal bar in 1253 and seven of 1257's accents; and
+/// some bytes 1250 and 1253 leave undefined have 1252's characters
+/// there. A byte no table has is a character the font has no width for,
+/// which `truetype::advance` draws with the missing glyph too.
+fn truetype_char(page: CodePage, b: u8) -> Option<u16> {
+    let (lacks, western) = match page.number() {
+        1252 => (matches!(b, 0x8E | 0x9E), false),
+        1250 => (false, matches!(b, 0x83 | 0x88 | 0x98)),
+        1253 => (
+            b == 0xAF,
+            matches!(b, 0x88 | 0x8A | 0x8C | 0x98 | 0x9A | 0x9C | 0x9F | 0xAA),
+        ),
+        1257 => (
+            matches!(b, 0x8D | 0x8E | 0x8F | 0x9D | 0x9E | 0xB4 | 0xFF),
+            false,
+        ),
+        _ => (false, false),
+    };
+    let page = if western { CodePage::WESTERN } else { page };
+    (b >= 0x20 && b != 0x7F && !lacks).then(|| page.char(b))
+}
+
+/// The glyphs of a TrueType font of the size `s`: each byte's ROM glyph
+/// fitted to the width Windows 98 gives its character, less a column
+/// between characters. The bold fonts have widths of their own, so a
+/// bold glyph moves on no further than its width.
+fn truetype_glyphs(key: Key, s: &truetype::Size) -> Glyphs {
+    let page = CodePage::by_number(key.page as u32).unwrap_or(CodePage::WESTERN);
+    let glyphs = (0..=255u8)
+        .map(|b| {
+            let w = truetype::advance(s, truetype_char(page, b));
+            let body = w - 1 - key.bold as i32;
+            Glyph {
+                rows: fitted_rows(&key, byte_source(page, b), body),
+                advance: w,
+                offset: 0,
+            }
+        })
+        .collect();
+    Glyphs { glyphs }
+}
+
 fn make_glyphs(key: Key) -> Glyphs {
-    if let Some(i) = key.raster {
-        return raster_glyphs(key, &RASTERS[i]);
+    match key.widths {
+        Widths::Raster(i) => return raster_glyphs(key, &RASTERS[i]),
+        Widths::TrueType(style, x_ppem) => {
+            return truetype_glyphs(key, &truetype::across(style, x_ppem));
+        }
+        Widths::Rom => {}
     }
     let page = CodePage::by_number(key.page as u32).unwrap_or(CodePage::WESTERN);
     let gw = key.glyph_width.clamp(1, 60);
@@ -926,13 +1101,20 @@ fn glyphs_of(key: Key) -> Rc<Glyphs> {
 /// A font as GDI realizes it on the screen.
 #[derive(Clone)]
 pub struct Realized {
-    pub face: &'static str,
+    pub face: Cow<'static, str>,
     pub height: i32,
     pub ascent: i32,
     pub descent: i32,
     pub internal_leading: i32,
+    pub external_leading: i32,
     pub weight: i32,
     pub italic: bool,
+    /// The glyphs are leaned right as they are drawn: an italic font made
+    /// from an upright one.
+    lean: bool,
+    /// Drawn from a TrueType file's outlines: TEXTMETRIC's
+    /// tmPitchAndFamily has TMPF_VECTOR and TMPF_TRUETYPE.
+    truetype: bool,
     pub underline: bool,
     pub strike: bool,
     pub charset: u8,
@@ -942,14 +1124,14 @@ pub struct Realized {
     /// The face's character sets as a FONTSIGNATURE's code page bits.
     csb: u32,
     average: i32,
+    /// tmMaxCharWidth.
+    max: i32,
+    /// TEXTMETRIC's first, last, default and break characters.
+    chars: [u8; 4],
     glyphs: Rc<Glyphs>,
 }
 
 impl Realized {
-    fn oem(&self) -> bool {
-        self.charset == OEM_CHARSET
-    }
-
     /// The glyph of the byte `b` of the font's character set.
     fn glyph(&self, b: u8) -> &Glyph {
         &self.glyphs.glyphs[b as usize]
@@ -965,8 +1147,17 @@ impl Realized {
     }
 
     pub fn max_width(&self) -> i32 {
-        (0x20..=0xFFu8).map(|b| self.advance(b)).max().unwrap_or(0)
+        self.max
     }
+}
+
+/// The widest of the glyphs' advances, a raster font's tmMaxCharWidth.
+fn widest(glyphs: &Glyphs) -> i32 {
+    glyphs.glyphs[0x20..]
+        .iter()
+        .map(|g| g.advance)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Realize the logical font `log` for heights in device units, under the
@@ -975,6 +1166,9 @@ fn realize(log: &Log, sys: &System, device_height: i32, device_width: i32) -> Re
     let (fi, charset) = choose(log, sys);
     let face = &FACES[fi];
     let page = sys.code_page(charset);
+    if let Some(family) = face.truetype {
+        return realize_truetype(log, sys, fi, charset, family, device_height, device_width);
+    }
     let (cell, internal) = match device_height {
         0 => (face.cell, (face.cell + 3) / 6),
         h if h < 0 => {
@@ -1030,7 +1224,7 @@ fn realize(log: &Log, sys: &System, device_height: i32, device_width: i32) -> Re
         glyph_width: if raster.is_some() { x_scale } else { glyph_width },
         bold: weight >= 600,
         fixed,
-        raster: raster.map(|(i, _)| i),
+        widths: raster.map_or(Widths::Rom, |(i, _)| Widths::Raster(i)),
     };
     let glyphs = glyphs_of(key);
     let average = match raster {
@@ -1045,27 +1239,390 @@ fn realize(log: &Log, sys: &System, device_height: i32, device_width: i32) -> Re
         Some(a) => cell - a,
         None => ((cell * 4 + 8) / 16).max(1),
     };
+    let chars = if charset == OEM_CHARSET {
+        [1, 0xFF, 0xFE, 0x20]
+    } else {
+        [0x20, 0xFF, 0x80, 0x20]
+    };
     Realized {
-        face: face.name,
+        face: Cow::Borrowed(face.name),
         height: cell,
         ascent: cell - descent,
         descent,
         internal_leading: internal,
+        external_leading: 0,
         weight,
         italic: log.italic,
+        lean: log.italic,
+        truetype: false,
         underline: log.underline,
         strike: log.strike,
         charset,
         pitch_family: face.pitch_family,
         page,
-        csb: sys
-            .sets(fi)
-            .iter()
-            .filter_map(|&c| nls::charset(c))
-            .fold(0, |a, c| a | c.csb),
+        csb: csb_of(sys, fi),
         average,
+        max: widest(&glyphs),
+        chars,
         glyphs,
     }
+}
+
+/// The face `fi`'s character sets as a FONTSIGNATURE's code page bits.
+fn csb_of(sys: &System, fi: usize) -> u32 {
+    sys.sets(fi)
+        .iter()
+        .filter_map(|&c| nls::charset(c))
+        .fold(0, |a, c| a | c.csb)
+}
+
+/// Realize the logical font `log` as the TrueType face `fi` (of the
+/// `truetype` family `family`) in the character set `charset`: with
+/// Windows 98's metrics and widths for the size, of its bold font from
+/// weight 600 up and of its italic one when italic.
+fn realize_truetype(
+    log: &Log,
+    sys: &System,
+    fi: usize,
+    charset: u8,
+    family: usize,
+    device_height: i32,
+    device_width: i32,
+) -> Realized {
+    let face = &FACES[fi];
+    let page = sys.code_page(charset);
+    let weight = if log.weight == 0 {
+        face.weight
+    } else {
+        log.weight
+    };
+    let bold = weight >= 600;
+    let size = truetype::size(
+        truetype::style(family, bold, log.italic),
+        device_height,
+        device_width,
+    );
+    // The ROM glyphs are drawn over the cell, of which the 16-row ones
+    // fill the most.
+    let cell = size.height.clamp(4, 128);
+    let base = if cell <= 9 {
+        8
+    } else if cell <= 14 {
+        14
+    } else {
+        16
+    };
+    let key = Key {
+        page: page.number() as u16,
+        base,
+        cell,
+        glyph_width: 0,
+        bold,
+        fixed: face.pitch_family & 3 == FIXED_PITCH,
+        widths: Widths::TrueType(size.style, size.x_ppem),
+    };
+    let glyphs = glyphs_of(key);
+    Realized {
+        face: Cow::Borrowed(face.name),
+        height: size.height,
+        ascent: size.ascent,
+        descent: size.height - size.ascent,
+        internal_leading: size.internal,
+        external_leading: size.external,
+        weight,
+        italic: log.italic,
+        lean: log.italic,
+        truetype: false,
+        underline: log.underline,
+        strike: log.strike,
+        charset,
+        pitch_family: face.pitch_family,
+        page,
+        csb: csb_of(sys, fi),
+        average: size.average,
+        max: size.max,
+        // Windows 98's TrueType fonts start at 1Fh, which is their
+        // default character too.
+        chars: [0x1F, 0xFF, 0x1F, 0x20],
+        glyphs,
+    }
+}
+
+/// The fonts of the files AddFontResourceA added, those of a file added
+/// more than once once: Windows loads such a file once and counts the
+/// times it was added, which RemoveFontResourceA counts down.
+fn added_fonts(files: &[AddedFile]) -> impl Iterator<Item = &Rc<Fnt>> {
+    files
+        .iter()
+        .enumerate()
+        .filter(|&(i, file)| {
+            !files[..i]
+                .iter()
+                .any(|f| f.name.eq_ignore_ascii_case(&file.name))
+        })
+        .flat_map(|(_, file)| file.fonts.iter())
+}
+
+/// The sizes of the face a logical font names among the fonts
+/// AddFontResourceA added, in the character set it asks for.
+fn file_sizes(cpu: &mut Cpu, log: &Log) -> Vec<Rc<Fnt>> {
+    if log.face.is_empty() {
+        return Vec::new();
+    }
+    added_fonts(&gdi(cpu).font_files)
+        .filter(|f| f.face.eq_ignore_ascii_case(&log.face))
+        .filter(|f| log.charset == DEFAULT_CHARSET || log.charset == f.charset)
+        .cloned()
+        .collect()
+}
+
+/// Realize the logical font `log` as one of `sizes`, the sizes of a face
+/// a file added, picked and stretched as Windows does its own raster
+/// fonts (`raster_of`). A font asked for bold of a face that isn't is
+/// made bold, a column wider.
+fn realize_file(
+    log: &Log,
+    sys: &System,
+    sizes: &[Rc<Fnt>],
+    device_height: i32,
+    device_width: i32,
+) -> Option<Realized> {
+    let heights: Vec<(i32, i32)> = sizes.iter().map(|f| (f.height, f.internal)).collect();
+    let (picked, y_scale) = match device_height {
+        0 => (0, 1),
+        h => size_of(&heights, h)?,
+    };
+    // Of the fonts as high as the one picked, the one nearest the weight
+    // asked for, then upright or italic as asked: Windows' mapper weighs
+    // the height first, then the weight, then the slant.
+    let weight = if log.weight == 0 { 400 } else { log.weight };
+    let i = (0..sizes.len())
+        .filter(|&j| heights.get(j) == heights.get(picked))
+        .min_by_key(|&j| {
+            (
+                (sizes[j].weight - weight).abs(),
+                sizes[j].italic != log.italic,
+            )
+        })?;
+    let f = sizes.get(i)?;
+    let x_scale = if device_width > 0 {
+        (device_width / f.average.max(1)).clamp(1, 8)
+    } else {
+        y_scale
+    };
+    let made_bold = log.weight >= 600 && f.weight < 600;
+    let glyphs = file_glyphs(f, x_scale, y_scale, made_bold);
+    let height = f.height * y_scale;
+    let ascent = f.ascent * y_scale;
+    // dfPitchAndFamily's bit 0 says the pitch is variable.
+    let pitch = if f.pitch_family & 1 != 0 {
+        VARIABLE_PITCH
+    } else {
+        FIXED_PITCH
+    };
+    Some(Realized {
+        face: Cow::Owned(f.face.clone()),
+        height,
+        ascent,
+        descent: height - ascent,
+        internal_leading: f.internal * y_scale,
+        external_leading: f.external * y_scale,
+        weight: if made_bold { 700 } else { f.weight },
+        italic: log.italic,
+        lean: log.italic,
+        truetype: false,
+        underline: log.underline || f.underline,
+        strike: log.strike || f.strike,
+        charset: f.charset,
+        pitch_family: f.pitch_family & FF_FAMILY | pitch,
+        page: sys.code_page(f.charset),
+        csb: nls::charset(f.charset).map_or(0, |c| c.csb),
+        average: f.average * x_scale + made_bold as i32,
+        max: widest(&glyphs),
+        chars: [f.first, f.last, f.default, f.break_char],
+        glyphs,
+    })
+}
+
+/// The glyphs of the file's font `f` drawn `x_scale` times wider and
+/// `y_scale` times higher, and made bold: each pixel ORed with the one to
+/// its left, moving on a column more.
+fn file_glyphs(f: &Fnt, x_scale: i32, y_scale: i32, bold: bool) -> Rc<Glyphs> {
+    let make = || {
+        let glyphs = (0..=255u8)
+            .map(|b| {
+                let g = f.glyph(b);
+                let rows = g
+                    .rows
+                    .iter()
+                    .flat_map(|&row| {
+                        let mut out = 0u64;
+                        for x in (0..64).filter(|x| row >> x & 1 != 0) {
+                            for k in 0..x_scale {
+                                if let Some(bit) = 1u64.checked_shl((x * x_scale + k) as u32) {
+                                    out |= bit;
+                                }
+                            }
+                        }
+                        if bold {
+                            out |= out << 1;
+                        }
+                        std::iter::repeat_n(out, y_scale as usize)
+                    })
+                    .collect();
+                Glyph {
+                    rows,
+                    advance: g.width * x_scale + bold as i32,
+                    offset: 0,
+                }
+            })
+            .collect();
+        Rc::new(Glyphs { glyphs })
+    };
+    f.drawn
+        .borrow_mut()
+        .entry((x_scale, y_scale, bold))
+        .or_insert_with(make)
+        .clone()
+}
+
+/// The TrueType font of a file AddFontResourceA added whose family the
+/// logical font `log` names, and the character set it is realized in:
+/// SYMBOL_CHARSET for a symbol font, whatever was asked for, else the
+/// one asked for where the font's code page bits have it (or the system
+/// locale's for DEFAULT_CHARSET), else the first the font has. Of the
+/// family's fonts, the one nearest the weight asked for, then upright or
+/// italic as asked, as Windows' mapper weighs them.
+fn added_truetype(files: &[AddedFile], log: &Log, sys: &System) -> Option<(Rc<Ttf>, u8)> {
+    if log.face.is_empty() {
+        return None;
+    }
+    let weight = if log.weight == 0 { 400 } else { log.weight };
+    let t = added_fonts_truetype(files)
+        .filter(|t| t.face.eq_ignore_ascii_case(&log.face))
+        .min_by_key(|t| ((t.weight - weight).abs(), t.italic != log.italic))?
+        .clone();
+    let charset = truetype_charset(&t, log.charset, sys);
+    Some((t, charset))
+}
+
+/// The character sets of the TrueType font `t`: SYMBOL_CHARSET alone
+/// for a symbol font, else those its code page bits have, in the order
+/// of `nls::CHARSETS` (ANSI_CHARSET first), and ANSI_CHARSET for a font
+/// whose bits have none GDI knows.
+fn truetype_charsets(t: &Ttf) -> Vec<u8> {
+    if t.symbol {
+        return vec![SYMBOL_CHARSET];
+    }
+    let sets: Vec<u8> = nls::CHARSETS
+        .iter()
+        .filter(|c| t.code_pages & c.csb != 0)
+        .map(|c| c.charset)
+        .collect();
+    if sets.is_empty() {
+        vec![ANSI_CHARSET]
+    } else {
+        sets
+    }
+}
+
+/// The character set the TrueType font `t` is realized in for a logical
+/// font asking for `asked`: the one asked for (the system locale's for
+/// DEFAULT_CHARSET) where the font has it, else its first.
+fn truetype_charset(t: &Ttf, asked: u8, sys: &System) -> u8 {
+    let sets = truetype_charsets(t);
+    let want = if asked == DEFAULT_CHARSET {
+        sys.charset
+    } else {
+        asked
+    };
+    if sets.contains(&want) { want } else { sets[0] }
+}
+
+/// The TrueType fonts of the files added, those of a file added more
+/// than once once (`added_fonts`).
+fn added_fonts_truetype(files: &[AddedFile]) -> impl Iterator<Item = &Rc<Ttf>> {
+    files
+        .iter()
+        .enumerate()
+        .filter(|&(i, file)| {
+            !files[..i]
+                .iter()
+                .any(|f| f.name.eq_ignore_ascii_case(&file.name))
+        })
+        .flat_map(|(_, file)| file.truetype.iter())
+}
+
+/// Realize the logical font `log` as the TrueType font of an added file
+/// it names (`added_truetype`), drawn from its outlines (`ttf`). A font
+/// asked for bold of a font that isn't is made bold, a column wider; one
+/// asked for italic of an upright font is leaned as it is drawn.
+fn realize_added_truetype(
+    files: &[AddedFile],
+    log: &Log,
+    sys: &System,
+    device_height: i32,
+    device_width: i32,
+) -> Option<Realized> {
+    let (t, charset) = added_truetype(files, log, sys)?;
+    let made_bold = log.weight >= 600 && t.weight < 600;
+    let m = t.metrics(device_height, device_width, made_bold);
+    let page = sys.code_page(charset);
+    let glyphs = truetype_file_glyphs(&t, &m, page, charset == SYMBOL_CHARSET);
+    Some(Realized {
+        face: Cow::Owned(t.face.clone()),
+        height: m.height,
+        ascent: m.ascent,
+        descent: m.height - m.ascent,
+        internal_leading: m.internal,
+        external_leading: m.external,
+        weight: if made_bold { 700 } else { t.weight },
+        italic: log.italic || t.italic,
+        lean: log.italic && !t.italic,
+        truetype: true,
+        underline: log.underline,
+        strike: log.strike,
+        charset,
+        pitch_family: t.pitch_family,
+        page,
+        csb: nls::charset(charset).map_or(0, |c| c.csb),
+        average: m.average,
+        max: m.max,
+        // As Windows 98's own TrueType fonts (`realize_truetype`).
+        chars: [0x1F, 0xFF, 0x1F, 0x20],
+        glyphs,
+    })
+}
+
+/// The glyphs of the TrueType font `t` at the size `m` for the bytes of
+/// the code page `page`, or of a symbol font's bytes with `symbol`: the
+/// control characters and the bytes a code page leaves out are drawn
+/// with the font's missing glyph (`truetype_char`).
+fn truetype_file_glyphs(t: &Ttf, m: &ttf::Metrics, page: CodePage, symbol: bool) -> Rc<Glyphs> {
+    let make = || {
+        let drawn = t.draw(m, |b| {
+            if symbol {
+                Some(b as u32)
+            } else {
+                truetype_char(page, b).map(u32::from)
+            }
+        });
+        let glyphs = drawn
+            .into_iter()
+            .map(|d| Glyph {
+                rows: d.rows,
+                advance: d.advance,
+                offset: d.offset,
+            })
+            .collect();
+        Rc::new(Glyphs { glyphs })
+    };
+    let page = if symbol { 0 } else { page.number() as u16 };
+    t.drawn
+        .borrow_mut()
+        .entry((m.key, page))
+        .or_insert_with(make)
+        .clone()
 }
 
 /// The font selected into the DC `dc`, realized.
@@ -1081,7 +1638,15 @@ pub fn realized_of(cpu: &mut Cpu, dc: &Dc) -> Realized {
         (y1 - y0).abs() * log.height.signum()
     };
     let width = dc.width_to_device(log.width.abs());
-    realize(&log, &System::of(cpu), height, width)
+    let sys = System::of(cpu);
+    let sizes = file_sizes(cpu, &log);
+    if let Some(f) = realize_file(&log, &sys, &sizes, height, width) {
+        return f;
+    }
+    if let Some(f) = realize_added_truetype(&gdi(cpu).font_files, &log, &sys, height, width) {
+        return f;
+    }
+    realize(&log, &sys, height, width)
 }
 
 /// The font of the DC `hdc`, or None with the error set.
@@ -1167,7 +1732,7 @@ fn text_metric(dc: &Dc, f: &Realized) -> Vec<u8> {
         lh(f.ascent),
         lh(f.descent),
         lh(f.internal_leading),
-        0,
+        lh(f.external_leading),
         lw(f.average_width()),
         lw(f.max_width()),
         f.weight,
@@ -1177,14 +1742,17 @@ fn text_metric(dc: &Dc, f: &Realized) -> Vec<u8> {
     ] {
         b.extend_from_slice(&v.to_le_bytes());
     }
-    let first = if f.oem() { 1 } else { 0x20 };
     // TMPF_FIXED_PITCH says the pitch is variable.
-    let pitch = (f.pitch_family & FF_FAMILY) | (f.pitch_family & 3 == VARIABLE_PITCH) as u8;
+    let mut pitch = (f.pitch_family & FF_FAMILY) | (f.pitch_family & 3 == VARIABLE_PITCH) as u8;
+    if f.truetype {
+        pitch |= TMPF_VECTOR | TMPF_TRUETYPE;
+    }
+    let [first, last, default, break_char] = f.chars;
     b.extend_from_slice(&[
         first,
-        0xFF,
-        if f.oem() { 0xFE } else { 0x80 },
-        0x20,
+        last,
+        default,
+        break_char,
         f.italic as u8,
         f.underline as u8,
         f.strike as u8,
@@ -1457,7 +2025,7 @@ pub fn draw_text(
             }
             let sy = gy + row as i32;
             // Italic leans the glyph right above its baseline.
-            let lean = if f.italic {
+            let lean = if f.lean {
                 (f.ascent - row as i32) / 3
             } else {
                 0
@@ -1726,15 +2294,123 @@ pub fn get_rasterizer_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// AddFontResourceA(file): the fonts it added. The file's fonts aren't
-/// drawn; a font that asks for their face gets one GDI has.
+/// The error Windows 98 SE's font functions set for a file that isn't
+/// there.
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+
+/// AddFontResourceA(file): how many fonts it added, 0 if the file can't
+/// be read. The raster fonts of a .FON or .FNT file are drawn, listed
+/// with the system's faces and chosen by their face's name, and so are
+/// the TrueType fonts of a .TTF or .TTC file (`ttf`), by their family's
+/// name, and those of the TrueType file a .FOT names (`fot`,
+/// `scalable_file`). A file of other fonts counts as one font none of
+/// whose faces is drawn: a font that asks for its face gets one GDI has.
+/// So does a .FOT whose TrueType file isn't found, which Windows 98 SE
+/// adds all the same.
 pub fn add_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    use crate::win32::winmm::mci::media::read_file;
     let Some(name) = crate::win32::user32::string_at(cpu, args[0]) else {
         return Some(0);
     };
+    let Some(mut bytes) = read_file(cpu, &name) else {
+        // As Windows 98 SE sets it for a file that isn't there.
+        set_error(cpu, ERROR_FILE_NOT_FOUND);
+        return Some(0);
+    };
+    if let Some(target) = super::fot::target(&bytes) {
+        bytes = scalable_file(cpu, &target).unwrap_or_default();
+    }
+    let fonts: Vec<Rc<Fnt>> = super::fnt::fonts_of_file(&bytes)
+        .into_iter()
+        .map(Rc::new)
+        .collect();
+    let truetype: Vec<Rc<Ttf>> = if fonts.is_empty() {
+        Ttf::fonts_of_file(&bytes)
+            .into_iter()
+            .map(Rc::new)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let count = (fonts.len() + truetype.len()).max(1) as u32;
     init(cpu);
-    gdi(cpu).font_files.push(name);
-    Some(1)
+    gdi(cpu).font_files.push(AddedFile {
+        name,
+        fonts,
+        truetype,
+    });
+    Some(count)
+}
+
+/// The TrueType file `name` a .FOT names: as it is, which finds a full
+/// path, or a name relative to the current folder. Windows 98 SE then
+/// looks for a bare file name in the fonts, Windows and system folders,
+/// and not in the .FOT's own folder.
+fn scalable_file(cpu: &mut Cpu, name: &str) -> Option<Vec<u8>> {
+    use crate::win32::kernel32::path::{SYSTEM, WINDOWS};
+    use crate::win32::winmm::mci::media::read_file;
+    if let Some(bytes) = read_file(cpu, name) {
+        return Some(bytes);
+    }
+    if name.contains(['\\', '/', ':']) {
+        return None;
+    }
+    let fonts = format!("{WINDOWS}\\FONTS");
+    [fonts.as_str(), WINDOWS, SYSTEM]
+        .iter()
+        .find_map(|dir| read_file(cpu, &format!("{dir}\\{name}")))
+}
+
+/// CreateScalableFontResourceA(hidden, fot, ttf, path): write the .FOT
+/// file `fot` for the TrueType file `ttf`, which AddFontResourceA then
+/// takes. The .FOT names `ttf` as it is given: with `path`, the folder
+/// `ttf` is read from now, the name is usually a bare one, which
+/// AddFontResourceA looks for in the Windows folders (`scalable_file`).
+/// As on Windows 98 SE, a `ttf` that isn't there fails with
+/// ERROR_FILE_NOT_FOUND, and one that isn't TrueType, or a `fot` that is
+/// there already, fails without setting an error. QuickTime 5 installs
+/// its font this way, with a full path and no `path`, each time it
+/// starts.
+pub fn create_scalable_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    use crate::win32::kernel32;
+    use crate::win32::user32::string_at;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const CREATE_NEW: u32 = 1;
+    let &[hidden, fot, ttf, path] = args else {
+        unreachable!()
+    };
+    let (Some(fot), Some(ttf)) = (string_at(cpu, fot), string_at(cpu, ttf)) else {
+        set_error(cpu, ERROR_INVALID_PARAMETER);
+        return Some(FALSE);
+    };
+    let full = if path == 0 {
+        ttf.clone()
+    } else {
+        let Some(path) = string_at(cpu, path) else {
+            set_error(cpu, ERROR_INVALID_PARAMETER);
+            return Some(FALSE);
+        };
+        format!("{}\\{}", path.trim_end_matches('\\'), ttf)
+    };
+    let Some(bytes) = crate::win32::winmm::mci::media::read_file(cpu, &full) else {
+        set_error(cpu, ERROR_FILE_NOT_FOUND);
+        return Some(FALSE);
+    };
+    let Some(data) = super::fot::for_truetype(&ttf, &bytes, hidden != 0) else {
+        return Some(FALSE);
+    };
+    let Ok(handle) = kernel32::open_handle(cpu, &fot, GENERIC_WRITE, 0, CREATE_NEW) else {
+        return Some(FALSE);
+    };
+    let written = kernel32::write_file(cpu, handle, &data);
+    crate::win32::object::close(cpu, handle);
+    match written {
+        Ok(_) => Some(TRUE),
+        Err(code) => {
+            set_error(cpu, code);
+            Some(FALSE)
+        }
+    }
 }
 
 /// RemoveFontResourceA(file).
@@ -1743,13 +2419,94 @@ pub fn remove_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(FALSE);
     };
     let files = &mut gdi(cpu).font_files;
-    match files.iter().position(|f| f.eq_ignore_ascii_case(&name)) {
+    match files.iter().position(|f| f.name.eq_ignore_ascii_case(&name)) {
         Some(i) => {
             files.remove(i);
             Some(TRUE)
         }
         None => Some(FALSE),
     }
+}
+
+/// An enumeration's item for the font `i` of those files added, counting
+/// through every file's (`added_font`).
+const ADDED_ITEM: u32 = 1 << 16;
+
+/// The `i`th font of those files added.
+fn added_font(cpu: &mut Cpu, i: usize) -> Option<Rc<Fnt>> {
+    added_fonts(&gdi(cpu).font_files).nth(i).cloned()
+}
+
+/// The enumeration's items of the fonts files added: with no `family`
+/// each face once, its first size, and with one every size of that face,
+/// as Windows lists raster fonts. `charset` keeps those of one character
+/// set (DEFAULT_CHARSET any).
+fn added_items(cpu: &mut Cpu, family: Option<&str>, charset: u8) -> Vec<u32> {
+    let fonts: Vec<Rc<Fnt>> = added_fonts(&gdi(cpu).font_files).cloned().collect();
+    let mut seen: Vec<&str> = Vec::new();
+    let mut items = Vec::new();
+    for (i, f) in fonts.iter().enumerate() {
+        if charset != DEFAULT_CHARSET && f.charset != charset {
+            continue;
+        }
+        let pick = match family {
+            Some(name) => f.face.eq_ignore_ascii_case(name),
+            None => !seen.iter().any(|s| s.eq_ignore_ascii_case(&f.face)),
+        };
+        if pick {
+            seen.push(&f.face);
+            items.push(ADDED_ITEM | i as u32);
+        }
+    }
+    items
+}
+
+/// An enumeration's item for the TrueType font `i` of those files added
+/// (`added_fonts_truetype`) in a character set: ADDED_TRUETYPE | i << 8
+/// | charset.
+const ADDED_TRUETYPE: u32 = 1 << 24;
+
+/// The enumeration's items of the TrueType fonts files added, as Windows
+/// lists TrueType families: with no `family` each family once, with one
+/// each font (style) of that family. `each_set` lists each in every
+/// character set it has that `charset` lets through (DEFAULT_CHARSET
+/// any), as EnumFontFamiliesEx does; without it each is listed once, in
+/// the character set a logical font of DEFAULT_CHARSET gets, as
+/// EnumFontFamilies does.
+fn added_truetype_items(
+    files: &[AddedFile],
+    sys: &System,
+    family: Option<&str>,
+    charset: u8,
+    each_set: bool,
+) -> Vec<u32> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut items = Vec::new();
+    for (i, t) in added_fonts_truetype(files).enumerate().take(0xFFFF) {
+        let pick = match family {
+            Some(name) => t.face.eq_ignore_ascii_case(name),
+            None => !seen.iter().any(|s| s.eq_ignore_ascii_case(&t.face)),
+        };
+        if !pick {
+            continue;
+        }
+        let sets = if each_set {
+            truetype_charsets(t)
+                .into_iter()
+                .filter(|&c| charset == DEFAULT_CHARSET || c == charset)
+                .collect()
+        } else {
+            vec![truetype_charset(t, DEFAULT_CHARSET, sys)]
+        };
+        if !sets.is_empty() {
+            seen.push(&t.face);
+        }
+        items.extend(
+            sets.into_iter()
+                .map(|c| ADDED_TRUETYPE | (i as u32) << 8 | c as u32),
+        );
+    }
+    items
 }
 
 /// Scratch space a font enumeration's callback gets: ENUMLOGFONTEXA
@@ -1793,10 +2550,18 @@ pub fn enum_font_families(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // Each face once, in its first character set: the system's where it
     // has it.
     let sys = System::of(cpu);
-    let items = faces_named(family.as_deref())
+    let mut items: Vec<u32> = faces_named(family.as_deref())
         .into_iter()
         .map(|i| enum_item(i, sys.sets(i)[0]))
         .collect();
+    items.extend(added_items(cpu, family.as_deref(), DEFAULT_CHARSET));
+    items.extend(added_truetype_items(
+        &gdi(cpu).font_files,
+        &sys,
+        family.as_deref(),
+        DEFAULT_CHARSET,
+        false,
+    ));
     start_enum(cpu, items, args[2], args[3])
 }
 
@@ -1816,12 +2581,20 @@ pub fn enum_font_families_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let family = (!log.face.is_empty()).then_some(log.face.as_str());
     // A face in each of its character sets, or in the one asked for.
     let sys = System::of(cpu);
-    let items = faces_named(family)
+    let mut items: Vec<u32> = faces_named(family)
         .into_iter()
         .flat_map(|i| sys.sets(i).into_iter().map(move |c| (i, c)))
         .filter(|&(_, c)| log.charset == DEFAULT_CHARSET || c == log.charset)
         .map(|(i, c)| enum_item(i, c))
         .collect();
+    items.extend(added_items(cpu, family, log.charset));
+    items.extend(added_truetype_items(
+        &gdi(cpu).font_files,
+        &sys,
+        family,
+        log.charset,
+        true,
+    ));
     start_enum(cpu, items, args[2], args[3])
 }
 
@@ -1832,31 +2605,81 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
         return Next::Done(1);
     };
     t.set(CB_AT, at as u32 + 1);
-    let face = &FACES[(item & 0xFF) as usize % FACES.len()];
-    let charset = (item >> 8) as u8;
-    let mut log_bytes = logfont(
-        face.cell,
-        0,
-        face.weight,
-        charset,
-        face.pitch_family,
-        face.name,
-    );
-    log_bytes[24] = 1; // OUT_STRING_PRECIS
-    log_bytes[25] = 2; // CLIP_STROKE_PRECIS
-    log_bytes[26] = 2; // PROOF_QUALITY
-    let f = realize(&Log::of(&log_bytes), &System::of(cpu), face.cell, 0);
+    let sys = System::of(cpu);
+    let mut truetype = None;
+    let (mut log_bytes, f) = if item & ADDED_TRUETYPE != 0 {
+        let files = &gdi(cpu).font_files;
+        let Some(t) = added_fonts_truetype(files)
+            .nth((item >> 8 & 0xFFFF) as usize)
+            .cloned()
+        else {
+            return Next::Done(1);
+        };
+        // The font at its default size, as Windows lists a TrueType font;
+        // lfHeight is the cell's height there.
+        let mut b = logfont(0, 0, t.weight, item as u8, t.pitch_family, &t.face);
+        b[20] = t.italic as u8;
+        let Some(f) = realize_added_truetype(files, &Log::of(&b), &sys, 0, 0) else {
+            return Next::Done(1);
+        };
+        b[0..4].copy_from_slice(&f.height.to_le_bytes());
+        truetype = Some(t);
+        (b, f)
+    } else if item & ADDED_ITEM != 0 {
+        let Some(font) = added_font(cpu, (item & 0xFFFF) as usize) else {
+            return Next::Done(1);
+        };
+        let mut b = logfont(font.height, 0, font.weight, font.charset, 0, &font.face);
+        b[20] = font.italic as u8;
+        b[21] = font.underline as u8;
+        b[22] = font.strike as u8;
+        let log = Log::of(&b);
+        let Some(f) = realize_file(&log, &sys, &[font], log.height, 0) else {
+            return Next::Done(1);
+        };
+        b[27] = f.pitch_family;
+        (b, f)
+    } else {
+        let face = &FACES[(item & 0xFF) as usize % FACES.len()];
+        let charset = (item >> 8) as u8;
+        let b = logfont(
+            face.cell,
+            0,
+            face.weight,
+            charset,
+            face.pitch_family,
+            face.name,
+        );
+        let f = realize(&Log::of(&b), &sys, face.cell, 0);
+        (b, f)
+    };
+    let charset = f.charset;
+    // OUT_STRING_PRECIS, CLIP_STROKE_PRECIS and PROOF_QUALITY for a
+    // raster font; OUT_STROKE_PRECIS, CLIP_STROKE_PRECIS and
+    // DRAFT_QUALITY for a TrueType one.
+    let precision = if truetype.is_some() {
+        [3, 2, 1]
+    } else {
+        [1, 2, 2]
+    };
+    log_bytes[24..27].copy_from_slice(&precision);
     log_bytes[4..8].copy_from_slice(&f.average_width().to_le_bytes());
     let mut elf = log_bytes;
-    let mut full = face.name.as_bytes().to_vec();
+    // A TrueType font's full name and style are its name table's.
+    let mut full = match &truetype {
+        Some(t) => t.full_name.as_bytes().to_vec(),
+        None => f.face.as_bytes().to_vec(),
+    };
     full.resize(64, 0);
+    full[63] = 0;
     elf.extend_from_slice(&full);
-    let mut style = if face.weight >= 600 {
-        b"Bold".to_vec()
-    } else {
-        b"Regular".to_vec()
+    let mut style = match &truetype {
+        Some(t) => t.style.as_bytes().to_vec(),
+        None if f.weight >= 600 => b"Bold".to_vec(),
+        None => b"Regular".to_vec(),
     };
     style.resize(32, 0);
+    style[31] = 0;
     elf.extend_from_slice(&style);
     let mut script = match nls::charset(charset) {
         _ if charset == OEM_CHARSET => b"OEM/DOS".to_vec(),
@@ -1870,29 +2693,37 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
     // NEWTEXTMETRICA starts with a TEXTMETRICA, padding included, so
     // ntmFlags is at 56.
     ntm.resize(TEXTMETRICA_SIZE, 0);
-    // ntmFlags (NTM_REGULAR or NTM_BOLD), ntmSizeEM, ntmCellHeight,
-    // ntmAvgWidth, then the FONTSIGNATURE.
-    let flags: u32 = if face.weight >= 600 { 0x20 } else { 0x40 };
-    for v in [
-        flags,
-        (f.height - f.internal_leading) as u32,
-        f.height as u32,
-        f.average_width() as u32,
-    ] {
+    // ntmFlags (NTM_ITALIC, NTM_BOLD, else NTM_REGULAR), ntmSizeEM,
+    // ntmCellHeight, ntmAvgWidth, then the FONTSIGNATURE. A TrueType
+    // font's sizes are in its design units.
+    let flags: u32 = match (f.italic, f.weight >= 600) {
+        (false, false) => 0x40,
+        (italic, bold) => italic as u32 | (bold as u32) << 5,
+    };
+    let (em, cell, average) = match &truetype {
+        Some(t) => t.design_sizes(),
+        None => (f.height - f.internal_leading, f.height, f.average_width()),
+    };
+    for v in [flags, em as u32, cell as u32, average as u32] {
         ntm.extend_from_slice(&v.to_le_bytes());
     }
     // The FONTSIGNATURE: no Unicode ranges, the face's code pages.
+    let csb = match &truetype {
+        Some(t) if t.code_pages != 0 => t.code_pages,
+        _ => f.csb,
+    };
     ntm.resize(72 + 16, 0);
-    ntm.extend_from_slice(&f.csb.to_le_bytes());
+    ntm.extend_from_slice(&csb.to_le_bytes());
     ntm.resize(96, 0);
+    let font_type = if truetype.is_some() {
+        TRUETYPE_FONTTYPE
+    } else {
+        RASTER_FONTTYPE
+    };
     let s = t.scratch;
     cpu.bus.guest_write_bytes(s, &elf);
     cpu.bus.guest_write_bytes(s + 188, &ntm);
-    Next::call(
-        t.var(CB_PROC),
-        &[s, s + 188, RASTER_FONTTYPE, t.var(CB_PARAM)],
-        1,
-    )
+    Next::call(t.var(CB_PROC), &[s, s + 188, font_type, t.var(CB_PARAM)], 1)
 }
 
 #[cfg(test)]
@@ -2012,6 +2843,163 @@ mod tests {
     }
 
     #[test]
+    fn ms_sans_serif_8_glyphs_fit_its_widths() {
+        let r = &RASTERS[1];
+        assert_eq!((r.face, r.height), (SANS_FACE, sans8::HEIGHT as i32));
+        for &(ch, top, rows) in sans8::GLYPHS {
+            assert!(top + rows.len() <= sans8::HEIGHT, "{ch}");
+            let len = rows[0].chars().count();
+            assert!(rows.iter().all(|row| row.chars().count() == len), "{ch}");
+            // A character of code page 1252 fills its Windows 98 width
+            // less a column; one 1252 lacks takes its glyph's width.
+            if let Some(b) = CodePage::WESTERN.byte(ch as u16) {
+                assert_eq!(len, r.widths[b as usize - 0x20] as usize - 1, "{ch}");
+            } else {
+                assert_eq!(sans8::width(ch as u16), Some(len as i32 + 1), "{ch}");
+            }
+        }
+        let drawn: Vec<char> = sans8::GLYPHS.iter().map(|g| g.0).collect();
+        assert!(('!'..='~').all(|c| drawn.contains(&c)));
+    }
+
+    #[test]
+    fn ms_sans_serif_8_glyphs_keep_off_their_neighbours() {
+        // In every system locale's code page, each glyph of the 8-point
+        // size, drawn or squeezed, regular or bold, leaves the last
+        // column of its advance blank.
+        for charset in [
+            nls::ANSI_CHARSET,
+            nls::EASTEUROPE_CHARSET,
+            nls::RUSSIAN_CHARSET,
+            nls::GREEK_CHARSET,
+            nls::TURKISH_CHARSET,
+            nls::BALTIC_CHARSET,
+        ] {
+            let sys = System {
+                charset,
+                oem: CodePage::US_OEM,
+            };
+            for weight in [400, 700] {
+                let log = Log::of(&logfont(-11, 0, weight, 1, 0, "MS Sans Serif"));
+                let f = super::realize(&log, &sys, -11, 0);
+                assert_eq!(f.face, "MS Sans Serif");
+                for b in 0x20..=0xFF {
+                    let g = f.glyph(b);
+                    let all = g.rows.iter().fold(0, |a, &r| a | r);
+                    let c = f.page.char(b);
+                    assert!(
+                        64 - all.leading_zeros() < g.advance as u32,
+                        "{charset} {weight} U+{c:04X}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ms_sans_serif_8_accents_fit_narrow_letters() {
+        let e = System {
+            charset: nls::EASTEUROPE_CHARSET,
+            oem: CodePage::US_OEM,
+        };
+        let log = Log::of(&logfont(-11, 0, 400, 1, 0, "MS Sans Serif"));
+        let f = super::realize(&log, &e, -11, 0);
+        let width = |c: u16| f.advance(f.page.byte(c).unwrap());
+        // A letter with an accent is as wide as its letter, as in code
+        // page 1252: N acute as N, s caron as s.
+        assert_eq!(width(0x0143), width(u16::from(b'N')));
+        assert_eq!(width(0x0161), width(u16::from(b's')));
+        // The caron of d, l, t and L is written beside the ascender,
+        // which widens d, l and t.
+        assert_eq!(width(0x013D), width(u16::from(b'L')));
+        assert!(width(0x010F) > width(u16::from(b'd')));
+        // Polish l with stroke has a glyph drawn for it.
+        let l = f.glyph(f.page.byte(0x0142).unwrap());
+        assert!(l.rows.iter().any(|&r| r.count_ones() == 2));
+        // Western i grave is i's width, 2: its mark is squeezed into the
+        // one column above the dotless stem.
+        let w = realize(&log, -11, 0);
+        let i_grave = &w.glyph(0xEC).rows;
+        assert_eq!(w.advance(0xEC), 2);
+        assert_eq!(&i_grave[2..5], &[1, 1, 0]);
+    }
+
+    #[test]
+    fn ms_sans_serif_8_stretched_past_its_rows_keeps_whole_glyphs() {
+        // Eight times wider, W's 10 drawn columns would need 80; it takes
+        // its ROM glyph squeezed into 60, as the other faces do.
+        let log = Log::of(&logfont(-11, 40, 400, 0, 0, "MS Sans Serif"));
+        let f = realize(&log, -11, 40);
+        assert_eq!(f.advance(b'W'), 88);
+        let all = f.glyph(b'W').rows.iter().fold(0, |a, &r| a | r);
+        assert!(all >> 60 == 0, "no lit column past 60");
+        // n fits, and is drawn: its 5 columns are 40.
+        let n = f.glyph(b'n').rows.iter().fold(0, |a, &r| a | r);
+        assert_eq!(n, (1 << 40) - 1);
+    }
+
+    #[test]
+    fn ms_sans_serif_8_keeps_thin_strokes() {
+        let log = Log::of(&logfont(-11, 0, 400, 0, 0, "MS Sans Serif"));
+        let f = realize(&log, -11, 0);
+        let rows = |b: u8| f.glyph(b).rows.clone();
+        // Every printable character has a glyph of its own: t and r keep
+        // their crossbar and arm, 0 and 8 differ. I and l are the same
+        // line, I a column wider.
+        let look = |b: u8| (rows(b), f.advance(b));
+        for a in 0x21..0x7F {
+            for b in a + 1..0x7F {
+                assert_ne!(look(a), look(b), "{} {}", a as char, b as char);
+            }
+        }
+        // Strokes are a pixel wide: l is one column, o two of them.
+        assert!(rows(b'l').iter().all(|&r| r == 0 || r == 1));
+        assert!(
+            rows(b'o')
+                .iter()
+                .all(|&r| r.count_ones() != 2 || r == 0b10001)
+        );
+        // The glyphs stay inside the advance less a column.
+        for b in 0x21..0x7F {
+            let all = rows(b).iter().fold(0, |a, &r| a | r);
+            assert!(
+                64 - all.leading_zeros() < f.advance(b) as u32,
+                "{}",
+                b as char
+            );
+        }
+    }
+
+    #[test]
+    fn ms_sans_serif_8_bold_and_wide() {
+        let regular = realize(
+            &Log::of(&logfont(-11, 0, 400, 0, 0, "MS Sans Serif")),
+            -11,
+            0,
+        );
+        let bold = realize(
+            &Log::of(&logfont(-11, 0, 700, 0, 0, "MS Sans Serif")),
+            -11,
+            0,
+        );
+        // Bold is the glyph smeared a pixel to the right, a column wider.
+        let (r, b) = (regular.glyph(b'H'), bold.glyph(b'H'));
+        let smeared: Vec<u64> = r.rows.iter().map(|&x| x | x << 1).collect();
+        assert_eq!(b.rows, smeared);
+        assert_eq!(b.advance, r.advance + 1);
+        // Twice as wide, each pixel is drawn as two.
+        let wide = realize(
+            &Log::of(&logfont(-11, 10, 400, 0, 0, "MS Sans Serif")),
+            -11,
+            10,
+        );
+        let (l, w) = (regular.glyph(b'l'), wide.glyph(b'l'));
+        let doubled: Vec<u64> = l.rows.iter().map(|&x| x * 0b11).collect();
+        assert_eq!(w.rows, doubled);
+        assert_eq!(w.advance, 2 * l.advance);
+    }
+
+    #[test]
     fn big_ms_sans_serif_glyphs_stay_in_their_rows() {
         // 128 pixels scales the 37 pixel size's widths past the 64
         // columns a glyph row holds. The glyph is drawn no wider than
@@ -2029,5 +3017,211 @@ mod tests {
         let log = Log::of(&logfont(0, 0, 0, 0, 0, "Courier"));
         let f = realize(&log, 0, 0);
         assert_eq!(f.advance(b'i'), f.advance(b'W'));
+    }
+
+    fn extent(f: &Realized, text: &str) -> i32 {
+        text.bytes().map(|b| f.advance(b)).sum()
+    }
+
+    /// Arial as CyberStorm 2 asks for it (10, 12 and 16 points) takes the
+    /// room it takes in Windows 98 SE: its GetTextMetricsA and
+    /// GetTextExtentPoint32A there.
+    #[test]
+    fn arial_takes_windows_98s_room() {
+        let f = realize(&Log::of(&logfont(-13, 0, 400, 0, 0, "Arial")), -13, 0);
+        assert_eq!(
+            (f.height, f.ascent, f.internal_leading, f.average_width()),
+            (16, 13, 3, 6)
+        );
+        assert_eq!(f.max_width(), 35);
+        assert_eq!(extent(&f, "Sound Effects"), 81);
+        assert_eq!(extent(&f, "Extreme Confirmation"), 125);
+        assert_eq!(extent(&f, "Extreme Information"), 116);
+        let f = realize(&Log::of(&logfont(-16, 0, 700, 0, 0, "Arial")), -16, 0);
+        assert_eq!((f.height, f.average_width()), (19, 8));
+        assert_eq!(extent(&f, "Hercbase Ambient Animations"), 230);
+        let f = realize(&Log::of(&logfont(-21, 0, 700, 0, 0, "Arial")), -21, 0);
+        assert_eq!(extent(&f, "CUC (Celestine UltraCryo Inc.)"), 298);
+    }
+
+    /// Times New Roman and Courier New the same.
+    #[test]
+    fn times_and_courier_new_take_windows_98s_room() {
+        let log = Log::of(&logfont(-13, 0, 400, 0, 0, "Times New Roman"));
+        let f = realize(&log, -13, 0);
+        assert_eq!(extent(&f, "The quick brown fox jumps over the lazy dog"), 239);
+        let f = realize(&Log::of(&logfont(16, 0, 400, 0, 0, "Courier New")), 16, 0);
+        assert_eq!((f.height, f.average_width()), (16, 8));
+        assert_eq!(extent(&f, "Sound Effects"), 13 * 8);
+    }
+
+    fn arial(height: i32, charset: u8) -> Realized {
+        realize(&Log::of(&logfont(height, 0, 400, charset, 0, "Arial")), height, 0)
+    }
+
+    /// Code page 1252 of Windows 98 has no Z with caron: its TrueType
+    /// fonts draw 8Eh with the missing glyph. Code page 1250 has it, and
+    /// 1257 lacks its dot above (FFh). Some bytes 1250 and 1253 leave
+    /// undefined are 1252's characters, others the missing glyph.
+    #[test]
+    fn truetype_fonts_lack_what_windows_98s_code_pages_lack() {
+        let f = arial(-80, ANSI_CHARSET);
+        assert_eq!(f.advance(0x8E), 60);
+        assert_eq!(f.advance(0x81), 60);
+        assert_eq!(arial(-80, nls::EASTEUROPE_CHARSET).advance(0x8E), 49);
+        assert_eq!(arial(-80, nls::BALTIC_CHARSET).advance(0xFF), 60);
+        // 1253 leaves 8Ch undefined, and its table has 1252's OE there.
+        assert_eq!(arial(-80, nls::GREEK_CHARSET).advance(0x8C), 80);
+        assert_eq!(arial(-80, nls::GREEK_CHARSET).advance(0xD2), 60);
+        assert_eq!(arial(-80, nls::EASTEUROPE_CHARSET).advance(0x83), 44);
+    }
+
+    /// The other code pages' letters have Windows 98's hinted widths too:
+    /// Cyrillic Zhe is 11 pixels in Arial -13, a pixel less than its
+    /// advance scaled.
+    #[test]
+    fn cyrillic_letters_have_windows_98s_widths() {
+        let f = arial(-13, nls::RUSSIAN_CHARSET);
+        assert_eq!(f.advance(0xC6), 11);
+        assert_eq!(f.advance(0xD4), 11);
+    }
+
+    /// A font of an added face, 12 pixels high, of the weight `weight`.
+    fn added(face: &str, weight: u16) -> Rc<Fnt> {
+        let mut bytes = super::super::fnt::tests::fnt(face, 12);
+        bytes[0x53..0x55].copy_from_slice(&weight.to_le_bytes());
+        Rc::new(Fnt::parse(bytes).unwrap())
+    }
+
+    /// Of an added face's fonts of the height asked for, a bold font
+    /// gets the bold one and a regular font the regular one, whatever
+    /// their order; with one of them alone, bold is made of the regular.
+    #[test]
+    fn an_added_face_gives_the_font_of_the_weight_asked_for() {
+        let sizes = [added("Two", 400), added("Two", 700)];
+        for order in [[0, 1], [1, 0]] {
+            let sizes = order.map(|i| sizes[i].clone());
+            for (asked, got) in [(700, 700), (400, 400), (0, 400)] {
+                let log = Log::of(&logfont(12, 0, asked, 0, 0, "Two"));
+                let f = realize_file(&log, &System::WESTERN, &sizes, 12, 0).unwrap();
+                assert_eq!(f.weight, got, "{asked} of {order:?}");
+                assert_eq!(f.advance(b'!'), 2, "{asked} of {order:?}");
+            }
+        }
+        let log = Log::of(&logfont(12, 0, 700, 0, 0, "Two"));
+        let f = realize_file(&log, &System::WESTERN, &[added("Two", 400)], 12, 0).unwrap();
+        assert_eq!((f.weight, f.advance(b'!')), (700, 3));
+    }
+
+    /// A TrueType file added: its family's fonts are drawn from its
+    /// outlines at the size asked for, with its metrics, where GDI's own
+    /// faces would draw a ROM glyph.
+    #[test]
+    fn an_added_truetype_face_is_drawn_from_its_outlines() {
+        let files = [AddedFile {
+            name: "FACE.TTF".into(),
+            fonts: Vec::new(),
+            truetype: Ttf::fonts_of_file(&super::super::ttf::tests::ttf("Outlined", false))
+                .into_iter()
+                .map(Rc::new)
+                .collect(),
+        }];
+        let log = Log::of(&logfont(-20, 0, 0, 0, 0, "Outlined"));
+        let f = realize_added_truetype(&files, &log, &System::WESTERN, -20, 0).unwrap();
+        assert_eq!(f.face, "Outlined");
+        assert_eq!((f.height, f.ascent, f.charset), (20, 16, ANSI_CHARSET));
+        assert_eq!(f.average_width(), 10);
+        // "A" is the font's square: 10 pixels a side on the baseline.
+        let a = f.glyph(b'A');
+        assert_eq!((a.advance, a.offset), (12, 2));
+        assert_eq!(a.rows.iter().filter(|&&r| r == (1 << 10) - 1).count(), 10);
+        assert_eq!(a.rows[15], (1 << 10) - 1);
+        assert_eq!(a.rows[16], 0);
+        // Another face isn't the file's.
+        let other = Log::of(&logfont(-20, 0, 0, 0, 0, "Arial"));
+        assert!(realize_added_truetype(&files, &other, &System::WESTERN, -20, 0).is_none());
+        // Bold of the regular font is made bold, a column wider.
+        let bold = Log::of(&logfont(-20, 0, 700, 0, 0, "Outlined"));
+        let b = realize_added_truetype(&files, &bold, &System::WESTERN, -20, 0).unwrap();
+        assert_eq!((b.weight, b.advance(b'A')), (700, 13));
+        assert_eq!(b.glyph(b'A').rows[15], (1 << 11) - 1);
+    }
+
+    /// An added TrueType font says it is one in its metrics, and is
+    /// listed as Windows lists TrueType families: each family once
+    /// without a family's name, each of its fonts with one, in each of
+    /// its character sets for EnumFontFamiliesEx.
+    #[test]
+    fn an_added_truetype_font_is_listed_and_says_it_is_one() {
+        let ttf = super::super::ttf::tests::ttf;
+        let fonts = |family: &str, symbol: bool| -> Vec<Rc<Ttf>> {
+            Ttf::fonts_of_file(&ttf(family, symbol))
+                .into_iter()
+                .map(Rc::new)
+                .collect()
+        };
+        let file = |name: &str, truetype| AddedFile {
+            name: name.into(),
+            fonts: Vec::new(),
+            truetype,
+        };
+        let files = [
+            file("A.TTF", fonts("Listed", false)),
+            file("B.TTF", fonts("Listed", false)),
+            file("S.TTF", fonts("Marks", true)),
+        ];
+        let log = Log::of(&logfont(-20, 0, 0, 0, 0, "Listed"));
+        let f = realize_added_truetype(&files, &log, &System::WESTERN, -20, 0).unwrap();
+        let tm = text_metric(&Dc::new(dc::DISPLAY), &f);
+        assert_eq!(
+            tm[51] & (TMPF_VECTOR | TMPF_TRUETYPE),
+            TMPF_VECTOR | TMPF_TRUETYPE
+        );
+        let sys = &System::WESTERN;
+        let item = |i: u32, c: u8| ADDED_TRUETYPE | i << 8 | c as u32;
+        assert_eq!(
+            added_truetype_items(&files, sys, None, DEFAULT_CHARSET, false),
+            [item(0, ANSI_CHARSET), item(2, SYMBOL_CHARSET)]
+        );
+        assert_eq!(
+            added_truetype_items(&files, sys, Some("listed"), DEFAULT_CHARSET, false),
+            [item(0, ANSI_CHARSET), item(1, ANSI_CHARSET)]
+        );
+        assert_eq!(
+            added_truetype_items(&files, sys, None, SYMBOL_CHARSET, true),
+            [item(2, SYMBOL_CHARSET)]
+        );
+        assert!(added_truetype_items(&files, sys, Some("Arial"), DEFAULT_CHARSET, true).is_empty());
+    }
+
+    /// A symbol font's bytes are its characters F000h up, in
+    /// SYMBOL_CHARSET whatever character set the logical font asks for.
+    #[test]
+    fn an_added_symbol_font_draws_its_bytes() {
+        let files = [AddedFile {
+            name: "SYM.TTF".into(),
+            fonts: Vec::new(),
+            truetype: Ttf::fonts_of_file(&super::super::ttf::tests::ttf("Symbols", true))
+                .into_iter()
+                .map(Rc::new)
+                .collect(),
+        }];
+        let log = Log::of(&logfont(-20, 0, 0, ANSI_CHARSET, 0, "Symbols"));
+        let f = realize_added_truetype(&files, &log, &System::WESTERN, -20, 0).unwrap();
+        assert_eq!(f.charset, SYMBOL_CHARSET);
+        assert_eq!(f.advance(b'A'), 12);
+        assert!(f.glyph(b'A').rows.iter().any(|&r| r != 0));
+    }
+
+    /// A file added twice lists its fonts once.
+    #[test]
+    fn a_file_added_twice_has_its_fonts_once() {
+        let file = |name: &str| AddedFile {
+            name: name.into(),
+            fonts: vec![added("Twice", 400)],
+            truetype: Vec::new(),
+        };
+        let files = [file("A.FON"), file("a.fon"), file("B.FON")];
+        assert_eq!(added_fonts(&files).count(), 2);
     }
 }

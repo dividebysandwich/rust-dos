@@ -31,7 +31,7 @@ pub const API_VARIABLE: &str = "RUST_DOS_ALMANAC_API";
 /// The settings the almanac knows, by section and key: those of the
 /// machine a game runs on, and the frame rate cap, which some games need
 /// (Test Drive 4 misbehaves above 60) and a benchmark's entry turns off.
-pub const KEYS: [(&str, &str); 40] = [
+pub const KEYS: [(&str, &str); 42] = [
     ("emulator", "machine"),
     ("emulator", "cpu"),
     ("emulator", "core"),
@@ -46,6 +46,7 @@ pub const KEYS: [(&str, &str); 40] = [
     ("emulator", "win32"),
     ("emulator", "win32_version"),
     ("emulator", "win32_depth"),
+    ("emulator", "win32_desktop"),
     ("emulator", "win32_locale"),
     ("emulator", "voodoo"),
     ("emulator", "voodoo_model"),
@@ -69,6 +70,7 @@ pub const KEYS: [(&str, &str); 40] = [
     ("sound", "gusdma"),
     ("sound", "midisynth"),
     ("sound", "mt32model"),
+    ("sound", "adlibgold"),
     ("sound", "lpt_dac"),
     ("sound", "tandy"),
     ("joystick", "joysticktype"),
@@ -126,13 +128,24 @@ pub fn platform_of(bytes: &[u8]) -> &'static str {
     }
 }
 
+/// Whether the program file `name` (lower case, without a directory) is
+/// a game's installer: `SETUP.EXE`, `INSTALL.EXE` and the like, or the
+/// engine InstallShield's launcher unpacks (`_INS0432._MP`). What an
+/// installer is says nothing of the game it installs: a Windows 95 game
+/// often comes with a Windows 3.1 setup.
+pub fn is_installer(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    matches!(stem, "setup" | "_setup" | "install" | "instal") || stem.starts_with("_ins")
+}
+
 /// The program a game starts with, as the settings window asks about it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Program {
     /// Its file, a DOS path.
     pub path: String,
     pub files: Vec<FileInfo>,
-    /// [`platform_of`] its file, when there is one.
+    /// [`platform_of`] its file, when there is one and it isn't an
+    /// installer's ([`is_installer`]).
     pub platform: Option<String>,
     /// The name to look the game up by: its profile's, or the program's.
     pub name: String,
@@ -180,13 +193,16 @@ impl About {
     }
 }
 
-/// A report the almanac took: its number, and whether it replaced the one
-/// the profile sent before.
+/// A report the almanac took: its number, whether it replaced the one
+/// the profile sent before, and whether the game it was to add as a new
+/// one was in the almanac already, so it went to that game.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub struct Reported {
     pub id: i64,
     #[serde(default)]
     pub replaced: bool,
+    #[serde(skip)]
+    pub existing: bool,
 }
 
 /// The program at the DOS path `path`, read from the machine's drives.
@@ -198,10 +214,11 @@ pub fn program(cpu: &mut Cpu, path: &str) -> Option<Program> {
         .rsplit_once('.')
         .map_or(file.name.as_str(), |(stem, _)| stem)
         .to_ascii_uppercase();
+    let platform = (!is_installer(&file.name)).then(|| platform_of(&bytes).to_string());
     Some(Program {
         path: path.to_string(),
         files: vec![file],
-        platform: Some(platform_of(&bytes).to_string()),
+        platform,
         name,
         about: None,
     })
@@ -308,6 +325,45 @@ pub enum Source {
     None,
 }
 
+/// What a report the recommendation comes from says: its player's notes,
+/// and a moderator's description of how the game plays.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct Note {
+    pub rating: Rating,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub rust_dos_version: Option<String>,
+}
+
+impl Note {
+    /// `"Crashes in the menu" (red, 1.8.3)`, a moderator's words first;
+    /// None if it says nothing.
+    pub fn describe(&self) -> Option<String> {
+        let words: Vec<&str> = [self.description.as_deref(), self.notes.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .collect();
+        if words.is_empty() {
+            return None;
+        }
+        let colour = match self.rating {
+            Rating::Green => "green",
+            Rating::Yellow => "yellow",
+            Rating::Red => "red",
+        };
+        let from = match &self.rust_dos_version {
+            Some(v) => format!("{}, {}", colour, v),
+            None => colour.to_string(),
+        };
+        Some(format!("\u{201C}{}\u{201D} ({})", words.join(" "), from))
+    }
+}
+
 /// A game's recommended settings (`GET /games/{slug}/config`).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Recommendation {
@@ -316,6 +372,10 @@ pub struct Recommendation {
     pub rating: Ratings,
     #[serde(default)]
     pub settings: Vec<Setting>,
+    /// The notes of the reports it comes from, newest first: the blessed
+    /// one's, or those of the reports the consensus counts, red ones too.
+    #[serde(default)]
+    pub notes: Vec<Note>,
 }
 
 impl Recommendation {
@@ -338,6 +398,12 @@ impl Recommendation {
             Source::Consensus { reports } => format!("the choice of {} reports", reports),
             Source::None => "no settings reported yet".to_string(),
         }
+    }
+
+    /// Its notes, `Note::describe`d, one after the other.
+    pub fn notes_text(&self) -> String {
+        let notes: Vec<String> = self.notes.iter().filter_map(Note::describe).collect();
+        notes.join(" ")
     }
 }
 
@@ -387,13 +453,16 @@ pub fn best(candidates: &[Candidate]) -> Option<&Candidate> {
 /// what the game ran with, and whoever takes the report's settings may
 /// have another. (A CPU chosen in the settings window changes the
 /// settings' default at once, the machine's memory at the next start.)
+/// The CPU is the model the machine has, also where `cpu` isn't set and
+/// the model follows the display adapter (`Settings::cpu_model`).
 pub fn report_settings(
     settings: &Settings,
     memory_mb: usize,
     home: Option<&Path>,
 ) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    let memory = Settings { memsize: Some(memory_mb), ..settings.clone() };
+    let memory =
+        Settings { memsize: Some(memory_mb), cpu: Some(settings.cpu_model()), ..settings.clone() };
     for (section, key, value) in config::values(&memory, home) {
         if let Some(value) = value
             && known(section, key)
@@ -417,7 +486,10 @@ pub fn report_settings(
 /// adapter, it stays unset: the machine gets the same size, and saving
 /// the settings writes no `memsize` line that would stop it following a
 /// later change of the CPU or the adapter. Any other recommended size is
-/// set, below the default too, as the game is known to run with it.
+/// set, below the default too, as the game is known to run with it. The
+/// CPU, which reports always send too, stays unset the same way where
+/// `base` doesn't set it and the recommended model is the default for the
+/// recommended display adapter (`default_cpu`).
 pub fn layer(base: &Settings, settings: &[&Setting], home: Option<&Path>) -> Settings {
     let mut sections: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for s in settings {
@@ -434,8 +506,11 @@ pub fn layer(base: &Settings, settings: &[&Setting], home: Option<&Path>) -> Set
         text.push_str(&format!("\n[{}]\n{}\n", section, lines.join("\n")));
     }
     let mut layered = Settings::from_config(&config::parse(&text, Path::new("/"), home));
+    if base.cpu.is_none() && layered.cpu == Some(config::default_cpu(layered.machine)) {
+        layered.cpu = None;
+    }
     if base.memsize.is_none()
-        && layered.memsize == Some(config::default_memsize(layered.cpu, layered.machine))
+        && layered.memsize == Some(config::default_memsize(layered.cpu_model(), layered.machine))
     {
         layered.memsize = None;
     }
@@ -602,10 +677,27 @@ pub mod client {
             .into()
     }
 
-    /// The answer's JSON, or the almanac's error.
-    fn answer<T: DeserializeOwned>(
+    /// Why the almanac didn't do what it was asked: the message for the
+    /// user, and the game whose name a new game took (`POST /games`
+    /// answers 409 with its slug as `game`).
+    struct Problem {
+        message: String,
+        game: Option<String>,
+    }
+
+    impl From<String> for Problem {
+        fn from(message: String) -> Problem {
+            Problem {
+                message,
+                game: None,
+            }
+        }
+    }
+
+    /// The answer's JSON, or why there is none.
+    fn reply<T: DeserializeOwned>(
         result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
-    ) -> Result<T, String> {
+    ) -> Result<T, Problem> {
         let mut response = result.map_err(|e| format!("{} didn't answer: {}", SITE, e))?;
         let status = response.status();
         let text = response
@@ -616,14 +708,27 @@ pub mod client {
             .map_err(|e| format!("{}: {}", SITE, e))?;
         if !status.is_success() {
             #[derive(Deserialize)]
-            struct Problem {
+            struct Error {
                 error: String,
+                #[serde(default)]
+                game: Option<String>,
             }
-            let why = serde_json::from_str::<Problem>(&text)
-                .map_or_else(|_| status.to_string(), |p| p.error);
-            return Err(format!("{}: {}", SITE, why));
+            return Err(match serde_json::from_str::<Error>(&text) {
+                Ok(e) => Problem {
+                    message: format!("{}: {}", SITE, e.error),
+                    game: e.game.filter(|_| status == 409),
+                },
+                Err(_) => format!("{}: {}", SITE, status).into(),
+            });
         }
-        serde_json::from_str(&text).map_err(|e| format!("{}'s answer: {}", SITE, e))
+        Ok(serde_json::from_str(&text).map_err(|e| format!("{}'s answer: {}", SITE, e))?)
+    }
+
+    /// The answer's JSON, or the almanac's error.
+    fn answer<T: DeserializeOwned>(
+        result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<T, String> {
+        reply(result).map_err(|p| p.message)
     }
 
     /// The API's address: `API`, or the one `API_VARIABLE` names.
@@ -639,8 +744,13 @@ pub mod client {
     }
 
     fn post<T: DeserializeOwned>(path: &str, body: &impl Serialize) -> Result<T, String> {
+        post_reply(path, body).map_err(|p| p.message)
+    }
+
+    /// `post`, with why the almanac said no.
+    fn post_reply<T: DeserializeOwned>(path: &str, body: &impl Serialize) -> Result<T, Problem> {
         let body = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        answer(
+        reply(
             agent()
                 .post(&format!("{}{}", api(), path))
                 .header("Content-Type", "application/json")
@@ -763,10 +873,55 @@ pub mod client {
         }
     }
 
+    /// The version of the game `slug` that has the program's `files`:
+    /// one it has, or one added with the program's `platform` and the
+    /// profile's `key`, which lets its holder correct it on the almanac's
+    /// site. None without files. The game's slug, as the almanac gives it.
+    fn version_of(
+        slug: &str,
+        files: &[FileInfo],
+        platform: Option<&str>,
+        key: Option<&str>,
+    ) -> Result<(String, Option<i64>), String> {
+        let game: Game = get(&format!("/games/{}", escape(slug)))?;
+        let same = |f: &FileInfo| files.iter().any(|g| g.md5.is_some() && g.md5 == f.md5);
+        let known = game
+            .versions
+            .iter()
+            .find(|v| v.files.iter().any(same))
+            .map(|v| v.id);
+        let version = match (known, new_version(files, platform, key)) {
+            (Some(id), _) => Some(id),
+            (None, Some(body)) => {
+                let path = format!("/games/{}/versions", escape(&game.slug));
+                Some(post::<Version>(&path, &body)?.id)
+            }
+            (None, None) => None,
+        };
+        Ok((game.slug, version))
+    }
+
+    /// A new version for the program's `files`, None without any.
+    fn new_version(
+        files: &[FileInfo],
+        platform: Option<&str>,
+        key: Option<&str>,
+    ) -> Option<serde_json::Value> {
+        (!files.is_empty()).then(|| {
+            serde_json::json!({
+                "label": version_label(files),
+                "platform": platform,
+                "files": files,
+                "key": key,
+            })
+        })
+    }
+
     /// Report that the game played `rating` with `settings`, and what its
     /// profile says of it (`about`): to its version of the program's
     /// `files`, which is added, with the program's `platform`, if the game
-    /// doesn't have it yet, and the game too if it is new. The almanac
+    /// doesn't have it yet, and the game too if it is new. A new game
+    /// whose name the almanac has already is that game. The almanac
     /// replaces the report sent with `about`'s key on the game before.
     pub fn report(
         subject: &Subject,
@@ -776,15 +931,8 @@ pub mod client {
         settings: &BTreeMap<String, BTreeMap<String, String>>,
         about: &About,
     ) -> Result<Reported, String> {
-        let new_version = || {
-            (!files.is_empty()).then(|| {
-                serde_json::json!({
-                    "label": version_label(files),
-                    "platform": platform,
-                    "files": files,
-                })
-            })
-        };
+        let key = about.key.as_deref();
+        let mut existing = false;
         let (slug, version) = match subject {
             Subject::Game {
                 slug,
@@ -793,35 +941,28 @@ pub mod client {
             Subject::Game {
                 slug,
                 version: None,
-            } => {
-                // The version with this file, if the game has one; else a new one.
-                let game: Game = get(&format!("/games/{}", escape(slug)))?;
-                let same = |f: &FileInfo| files.iter().any(|g| g.md5.is_some() && g.md5 == f.md5);
-                let known = game
-                    .versions
-                    .iter()
-                    .find(|v| v.files.iter().any(same))
-                    .map(|v| v.id);
-                let version = match (known, new_version()) {
-                    (Some(id), _) => Some(id),
-                    (None, Some(body)) => Some(
-                        post::<Version>(&format!("/games/{}/versions", escape(slug)), &body)?.id,
-                    ),
-                    (None, None) => None,
-                };
-                (game.slug, version)
-            }
+            } => version_of(slug, files, platform, key)?,
             Subject::New(name) => {
                 let body = serde_json::json!({
                     "name": name.trim(),
                     "year": about.year,
                     "publisher": about.publisher,
                     "key": about.key,
-                    "version": new_version(),
+                    "version": new_version(files, platform, key),
                 });
-                let game: Game = post("/games", &body)?;
-                let version = game.versions.first().map(|v| v.id);
-                (game.slug, version)
+                match post_reply::<Game>("/games", &body) {
+                    Ok(game) => {
+                        let version = game.versions.first().map(|v| v.id);
+                        (game.slug, version)
+                    }
+                    Err(Problem {
+                        game: Some(slug), ..
+                    }) => {
+                        existing = true;
+                        version_of(&slug, files, platform, key)?
+                    }
+                    Err(problem) => return Err(problem.message),
+                }
             }
         };
         let body = serde_json::json!({
@@ -835,7 +976,11 @@ pub mod client {
             "year": about.year,
             "publisher": about.publisher,
         });
-        post("/reports", &body)
+        let reported: Reported = post("/reports", &body)?;
+        Ok(Reported {
+            existing,
+            ..reported
+        })
     }
 }
 
@@ -891,6 +1036,41 @@ mod tests {
     }
 
     #[test]
+    fn an_installer_says_nothing_of_the_games_platform() {
+        for name in [
+            "setup.exe",
+            "install.exe",
+            "_setup.exe",
+            "instal.exe",
+            "_ins0432._mp",
+        ] {
+            assert!(is_installer(name), "{}", name);
+        }
+        for name in ["andretti.exe", "setupx.exe", "keen4e.exe", "installer.exe"] {
+            assert!(!is_installer(name), "{}", name);
+        }
+    }
+
+    #[test]
+    fn a_recommendation_brings_its_reports_notes() {
+        let text = r#"{"source":{"kind":"consensus","reports":2},"settings":[],
+            "notes":[{"report_id":2,"version_id":null,"rating":"red",
+                      "notes":"Voodoo 3: crashes in the menu","rust_dos_version":"1.8.3",
+                      "updated_at":2},
+                     {"report_id":1,"version_id":null,"rating":"green",
+                      "description":"Needs the CD in D:","notes":"Fine on Voodoo 2",
+                      "rust_dos_version":null,"updated_at":1},
+                     {"report_id":3,"version_id":null,"rating":"green","notes":"  ",
+                      "rust_dos_version":null,"updated_at":0}]}"#;
+        let r: Recommendation = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            r.notes_text(),
+            "\u{201C}Voodoo 3: crashes in the menu\u{201D} (red, 1.8.3) \
+             \u{201C}Needs the CD in D: Fine on Voodoo 2\u{201D} (green)"
+        );
+    }
+
+    #[test]
     fn a_file_is_known_by_its_name_size_and_checksums() {
         let f = file_info("C:\\KEEN4\\KEEN4E.EXE", b"hello");
         assert_eq!(f.name, "keen4e.exe");
@@ -922,7 +1102,8 @@ mod tests {
         assert!(!settings.contains_key("drives"));
         // The size the machine runs with, whatever the settings give now:
         // a Pentium II chosen after a start with the 486's 16 MB.
-        let pentium_ii = Settings { cpu: crate::cpu::CpuModel::PentiumII, ..Settings::default() };
+        let pentium_ii =
+            Settings { cpu: Some(crate::cpu::CpuModel::PentiumII), ..Settings::default() };
         assert_eq!(pentium_ii.memory_mb(), 64);
         assert_eq!(report_settings(&pentium_ii, 16, None)["emulator"]["memsize"], "16");
         assert_eq!(report_settings(&pentium_ii, 64, None)["emulator"]["memsize"], "64");
@@ -934,6 +1115,7 @@ mod tests {
     #[test]
     fn a_recommended_cpu_brings_its_default_memory() {
         use crate::cpu::CpuModel;
+        use crate::video::adapter::Adapter;
         let setting = |key: &str, value: &str| Setting {
             section: "emulator".into(),
             key: key.into(),
@@ -941,10 +1123,36 @@ mod tests {
         };
         let cpu = setting("cpu", "pentium_ii");
         let layered = layer(&Settings::default(), &[&cpu], None);
-        assert_eq!(layered.cpu, CpuModel::PentiumII);
+        assert_eq!(layered.cpu, Some(CpuModel::PentiumII));
         assert_eq!((layered.memsize, layered.memory_mb()), (None, 64));
         let card = setting("machine", "svga_toadforce");
         assert_eq!(layer(&Settings::default(), &[&card], None).memory_mb(), 128);
+
+        // A report of a ToadForce machine whose CPU follows the card sends
+        // the Pentium III, which stays unset when it comes back.
+        let toadforce = Settings { machine: Adapter::ToadForce, ..Settings::default() };
+        let reported = report_settings(&toadforce, toadforce.memory_mb(), None);
+        assert_eq!(reported["emulator"]["cpu"], "pentium_iii");
+        let sent: Vec<Setting> = reported
+            .iter()
+            .flat_map(|(section, keys)| {
+                keys.iter().map(|(key, value)| Setting {
+                    section: section.clone(),
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+            })
+            .collect();
+        let sent: Vec<&Setting> = sent.iter().collect();
+        let layered = layer(&Settings::default(), &sent, None);
+        assert_eq!((layered.machine, layered.cpu), (Adapter::ToadForce, None));
+        assert_eq!(layered.cpu_model(), CpuModel::PentiumIII);
+        // A configuration that sets the CPU keeps it set, and a Pentium II
+        // recommended for the card is set.
+        let base = Settings { cpu: Some(CpuModel::PentiumIII), ..Settings::default() };
+        assert_eq!(layer(&base, &sent, None).cpu, Some(CpuModel::PentiumIII));
+        let layered = layer(&Settings::default(), &[&card, &cpu], None);
+        assert_eq!(layered.cpu, Some(CpuModel::PentiumII));
 
         // The configuration's memsize stays, and so does the
         // recommendation's own.
@@ -1039,6 +1247,7 @@ mod tests {
             source: Source::Consensus { reports: 2 },
             rating: Ratings::default(),
             settings: vec![setting("voodoo_fps_cap", "60")],
+            notes: Vec::new(),
         };
         assert_eq!(r.usable().len(), 1, "the old name is the setting's");
     }
@@ -1088,6 +1297,7 @@ mod tests {
                     key: "memsize".into(),
                     value: "8".into(),
                 }],
+                notes: Vec::new(),
             }),
         };
         let list = [

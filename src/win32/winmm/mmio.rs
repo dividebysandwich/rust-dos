@@ -334,7 +334,10 @@ impl File {
         self.next = self.buffer;
         self.end_read = self.buffer;
         self.end_write = self.buffer.wrapping_add(self.cch);
-        self.loaded = true;
+        // A buffer taken for writing holds what it held before, none of
+        // the file's bytes: a seek in it reloads it before it moves on
+        // over them, or the next flush would write the old bytes there.
+        self.loaded = for_read;
         if !for_read {
             return self.cch as i32;
         }
@@ -431,8 +434,13 @@ impl File {
                 self.buf_offset as i64 + self.next.wrapping_sub(self.buffer) as i64 + offset as i64
             }
             2 => {
+                // The end counts what the buffer holds for the file and
+                // hasn't written yet, which the flush writes.
                 let end = if self.fcc == FOURCC_MEM {
                     self.cch
+                } else if self.flags & MMIO_DIRTY != 0 {
+                    let buffered = self.buf_offset + self.next.wrapping_sub(self.buffer);
+                    self.size.max(buffered)
                 } else {
                     self.size
                 };
@@ -463,7 +471,16 @@ impl File {
             if self.proc_seek(cpu, base as i32, 0) == -1 {
                 return -1;
             }
-            self.grab_next(cpu, true);
+            let read = self.grab_next(cpu, true);
+            if read < (to - base) as i32 {
+                // The file can't be read up to `to` (it is open for
+                // writing only): the buffer starts at `to`, so a flush
+                // writes only what the program writes from there, and
+                // nothing the buffer held before over what lies between.
+                self.buf_offset = to;
+                self.end_read = self.buffer;
+                self.loaded = false;
+            }
         }
         self.next = self.buffer.wrapping_add(to - self.buf_offset);
         to as i32
@@ -585,20 +602,28 @@ pub fn mmio_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (mut fcc, mut io_proc) = (read(cpu, I_FCC), read(cpu, I_PROC));
     let (cch, buffer, info0) = (read(cpu, I_CCH), read(cpu, I_BUFFER), read(cpu, I_ADW_INFO));
     let pid = crate::win32::user32::current_pid(cpu);
-    if fcc == 0 && io_proc == 0 {
-        fcc = name
-            .as_deref()
-            .and_then(parse_extension)
-            .unwrap_or(FOURCC_DOS);
-        if fcc != FOURCC_DOS && fcc != FOURCC_MEM {
-            match installed(cpu, pid, fcc) {
-                Some(p) => io_proc = p,
-                None => fcc = FOURCC_DOS,
-            }
+    if io_proc == 0 {
+        // A procedure the program installed comes first, also for DOS
+        // and MEM: Windows searches the installed ones before its own,
+        // so a program can replace the DOS procedure, as Stratosphere
+        // does to read its files from its archives. A name with no '+'
+        // asks for 'DOS ' and gets that search too.
+        let named = fcc == 0;
+        if named {
+            fcc = name
+                .as_deref()
+                .and_then(parse_extension)
+                .unwrap_or(FOURCC_DOS);
         }
-    } else if io_proc == 0 && fcc != FOURCC_DOS && fcc != FOURCC_MEM {
         match installed(cpu, pid, fcc) {
             Some(p) => io_proc = p,
+            None if fcc == FOURCC_DOS || fcc == FOURCC_MEM => {}
+            // An extension with no procedure goes to the built-in DOS
+            // procedure, also when the program installed a 'DOS ' one:
+            // Wine's test_mmioOpen_fourcc, which passes on Windows, gets
+            // MMIOERR_FILENOTFOUND for such a name with a 'DOS '
+            // procedure installed that opens anything.
+            None if named => fcc = FOURCC_DOS,
             None => {
                 set_error_ret(cpu, info, MMIOERR_CANNOTOPEN);
                 return Some(0);
@@ -1312,7 +1337,8 @@ pub fn mmio_rename(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let pid = crate::win32::user32::current_pid(cpu);
         let proc = if proc != 0 {
             Some(proc)
-        } else if fcc != 0 && fcc != FOURCC_DOS && fcc != FOURCC_MEM {
+        } else if fcc != 0 {
+            // An installed DOS procedure too, as in mmioOpenA.
             installed(cpu, pid, fcc)
         } else {
             None

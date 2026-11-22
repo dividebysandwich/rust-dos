@@ -13,7 +13,9 @@ use super::{
     ERROR_PATH_NOT_FOUND, FALSE, INVALID_HANDLE_VALUE, TRUE, set_error, string_at,
 };
 use crate::cpu::Cpu;
+use crate::disk::NameFilter;
 use crate::win32::object::{self, FindEntry, Kind};
+use std::collections::HashMap;
 
 pub(super) const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_NOT_SAME_DEVICE: u32 = 17;
@@ -28,8 +30,8 @@ const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
 
 /// Where Windows 95 is, as far as programs ask.
-const WINDOWS: &str = "C:\\WINDOWS";
-const SYSTEM: &str = "C:\\WINDOWS\\SYSTEM";
+pub(crate) const WINDOWS: &str = "C:\\WINDOWS";
+pub(crate) const SYSTEM: &str = "C:\\WINDOWS\\SYSTEM";
 
 /// WIN32_FIND_DATAA's size, and where its names are.
 const FIND_DATA: usize = 320;
@@ -41,7 +43,7 @@ const MAX_PATH: usize = 260;
 
 /// A Win32 path as DOS takes it: '/' as '\', and the dots and spaces that
 /// end a name gone, as Windows drops them ("Remove Me." is "Remove Me").
-pub(super) fn dos_path(path: &str) -> String {
+pub(crate) fn dos_path(path: &str) -> String {
     path.replace('/', "\\")
         .split('\\')
         .map(|part| match part.trim_end_matches(['.', ' ']) {
@@ -273,7 +275,7 @@ fn short_name(cpu: &Cpu, dir: &str, name: &str) -> String {
 
 /// The path `path` with each name its 8.3 one, as GetShortPathNameA makes
 /// it: a relative path stays relative.
-fn short_path(cpu: &Cpu, path: &str) -> String {
+pub(crate) fn short_path(cpu: &Cpu, path: &str) -> String {
     let path = dos_path(path);
     let bytes = path.as_bytes();
     let prefix_len = match bytes {
@@ -400,6 +402,8 @@ pub(super) fn get_temp_file_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let file = name(n);
         match super::file::open_file(cpu, &file, super::file::GENERIC_WRITE, 0, 1) {
             Ok((sft, _)) => {
+                // A name such as COM1.TMP opened a serial port.
+                super::comm::file_closed(&mut cpu.bus, sft);
                 cpu.bus.disk.close_file(sft);
                 put_string(cpu, buffer, u32::MAX, &file)?;
                 set_error(cpu, 0);
@@ -846,18 +850,31 @@ pub(crate) fn matches(name: &str, pattern: &str) -> bool {
 }
 
 /// The entries of the directory `dir` (a full path) whose long or short
-/// names match `pattern`.
+/// names match `pattern`. On a host drive only those are statted, and a
+/// pattern without wildcards is looked up as a path is
+/// (`DiskController::list_directory_where`): installers ask for each file
+/// they are about to copy, in folders of hundreds.
 pub(crate) fn find_entries(cpu: &Cpu, dir: &str, pattern: &str) -> Result<Vec<FindEntry>, u32> {
     let disk = &cpu.bus.disk;
     let spec = format!("{}\\*.*", dir.trim_end_matches('\\'));
-    let listed = disk.list_directory(&spec, 0x16).map_err(|e| e as u32)?;
-    let long = disk.long_names(dir).unwrap_or_default();
+    let wanted = NameFilter {
+        keep: &|long, short| matches(long, pattern) || matches(short, pattern),
+        name: (!has_wildcards(pattern)).then_some(pattern),
+    };
+    let listed = disk
+        .list_directory_where(&spec, 0x16, &wanted)
+        .map_err(|e| e as u32)?;
+    // The long name of each short one, the first where two had one.
+    let names = disk.long_names(dir).unwrap_or_default();
+    let mut long = HashMap::new();
+    for (name, short) in names.iter() {
+        long.entry(short.as_str()).or_insert(name.as_str());
+    }
     let mut entries = Vec::new();
     for entry in listed {
         let name = long
-            .iter()
-            .find(|(_, short)| *short == entry.filename)
-            .map_or(entry.filename.clone(), |(long, _)| long.clone());
+            .get(entry.filename.as_str())
+            .map_or_else(|| entry.filename.clone(), |name| name.to_string());
         if !matches(&name, pattern) && !matches(&entry.filename, pattern) {
             continue;
         }
@@ -909,23 +926,19 @@ fn write_find_data(cpu: &mut Cpu, at: u32, entry: &FindEntry) -> Option<()> {
     Some(())
 }
 
-/// FindFirstFileA(pattern, data): the first file or directory whose name
-/// matches the last part of `pattern` in the directory before it, to
-/// `data`, and a handle for FindNextFileA; a device's name finds the
-/// device. INVALID_HANDLE_VALUE with ERROR_FILE_NOT_FOUND when nothing
+/// FindFirstFileA's search for the DOS path `path`: every file or
+/// directory whose name matches its last part in the directory before
+/// it, or the device it names. ERROR_FILE_NOT_FOUND when nothing
 /// matches, ERROR_PATH_NOT_FOUND when there is no such directory.
-pub(super) fn find_first_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(path) = path_arg(cpu, args[0])? else {
-        return Some(INVALID_HANDLE_VALUE);
-    };
-    let full = full_path(cpu, &path);
+pub(crate) fn find_path(cpu: &Cpu, path: &str) -> Result<Vec<FindEntry>, u32> {
+    let full = full_path(cpu, path);
     let (dir, pattern) = match full.rfind('\\') {
         Some(i) if i <= 2 => (&full[..3], &full[i + 1..]),
         Some(i) => (&full[..i], &full[i + 1..]),
         None => (full.as_str(), ""),
     };
     let disk = &cpu.bus.disk;
-    let found = if !disk.is_directory(dir) {
+    if !disk.is_directory(dir) {
         Err(ERROR_PATH_NOT_FOUND)
     } else if pattern.is_empty() {
         Err(ERROR_FILE_NOT_FOUND)
@@ -944,8 +957,19 @@ pub(super) fn find_first_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 Ok(e)
             }
         })
+    }
+}
+
+/// FindFirstFileA(pattern, data): the first file or directory whose name
+/// matches the last part of `pattern` in the directory before it, to
+/// `data`, and a handle for FindNextFileA; a device's name finds the
+/// device. INVALID_HANDLE_VALUE with ERROR_FILE_NOT_FOUND when nothing
+/// matches, ERROR_PATH_NOT_FOUND when there is no such directory.
+pub(super) fn find_first_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let Some(path) = path_arg(cpu, args[0])? else {
+        return Some(INVALID_HANDLE_VALUE);
     };
-    let mut entries = match found {
+    let mut entries = match find_path(cpu, &path) {
         Ok(entries) => entries,
         Err(code) => {
             set_error(cpu, code);

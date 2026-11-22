@@ -2,15 +2,15 @@
 //! with its standard color scheme, and the display's mode, which the
 //! screen's size follows.
 //!
-//! The screen is as large as the display mode: the desktop's, 640x480
-//! unless ChangeDisplaySettings set another, or the one DirectDraw set
-//! while it has the display. GetSystemMetrics, the desktop window, the
-//! monitor, the cursor's range and the rest take their size from
-//! `screen_size`. A change of the mode (`set_display_mode`, DirectDraw's
-//! SetDisplayMode and RestoreDisplayMode, the end of the process that
-//! set it) resizes the desktop window, keeps the cursor on the screen
-//! and tells the top-level windows with WM_DISPLAYCHANGE
-//! (`display_changed`).
+//! The screen is as large as the display mode: the desktop's, its own
+//! size (`win32_desktop`, 640x480 by default) unless
+//! ChangeDisplaySettings set another, or the one DirectDraw set while it
+//! has the display. GetSystemMetrics, the desktop window, the monitor,
+//! the cursor's range and the rest take their size from `screen_size`.
+//! A change of the mode (`set_display_mode`, DirectDraw's SetDisplayMode
+//! and RestoreDisplayMode, the end of the process that set it) resizes
+//! the desktop window, keeps the cursor on the screen and tells the
+//! top-level windows with WM_DISPLAYCHANGE (`display_changed`).
 
 use super::{FALSE, TRUE, read_words, user, write_words};
 use crate::cpu::Cpu;
@@ -93,9 +93,10 @@ pub fn set_display_mode(cpu: &mut Cpu, mode: Option<(u32, u32, u32)>) -> u32 {
 
 /// The display's mode may have changed from `old` (`display_mode`). If
 /// it has, the desktop window takes the new size, the cursor stays on
-/// the screen (`input::screen_changed`), and each top-level window gets
-/// WM_DISPLAYCHANGE with the bits a pixel and the size. Windows sends
-/// it with SendNotifyMessage, which to the broadcast address posts it.
+/// the screen and ClipCursor's rectangle goes (`input::screen_changed`),
+/// and each top-level window gets WM_DISPLAYCHANGE with the bits a pixel
+/// and the size. Windows sends it with SendNotifyMessage, which to the
+/// broadcast address posts it.
 pub fn display_changed(cpu: &mut Cpu, old: (u32, u32, u32)) {
     let mode = display_mode(cpu);
     if mode == old {
@@ -324,6 +325,17 @@ fn set_param(cpu: &mut Cpu, action: u32, value: u32) {
     }
 }
 
+/// Program the keyboard's typematic rate and delay with Windows' keyboard
+/// speed (0-31: 2 to 30 a second, rate 1Fh to 00h) and delay (0-3: 250
+/// ms to 1 s), as Windows' keyboard driver does when it starts and when
+/// SPI_SETKEYBOARDSPEED or SPI_SETKEYBOARDDELAY changes them. Windows'
+/// defaults, 31 and 1, repeat a held key 30 times a second after 500 ms.
+pub fn program_keyboard(cpu: &mut Cpu) {
+    let speed = param(cpu, 11, 31).min(31) as u8;
+    let delay = param(cpu, 23, 1).min(3) as u8;
+    cpu.bus.kbc.typematic = delay << 5 | (31 - speed);
+}
+
 /// SystemParametersInfoA(action, ui, pv, flags).
 pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (action, ui, pv) = (args[0], args[1], args[2]);
@@ -381,8 +393,15 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let v = param(cpu, 107, 400);
             put(cpu, pv, v)
         }
-        2 | 11 | 23 | 37 | 57 | 107 => {
+        2 | 37 | 57 | 107 => {
             set_param(cpu, action, ui);
+            TRUE
+        }
+        // SPI_SETKEYBOARDSPEED and SPI_SETKEYBOARDDELAY: the keyboard
+        // repeats at the new rate.
+        11 | 23 => {
+            set_param(cpu, action, ui);
+            program_keyboard(cpu);
             TRUE
         }
         // SPI_GETMOUSEHOVERWIDTH, SPI_GETMOUSEHOVERHEIGHT and
@@ -546,7 +565,7 @@ pub fn enum_display_settings(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mode = match mode {
         0xFFFF_FFFF => display_mode(cpu),
         0xFFFF_FFFE => {
-            let (w, h) = screen::DESKTOP;
+            let (w, h) = crate::win32::version::own_size(&cpu.bus.win32);
             (w, h, screen::desktop(cpu).bpp)
         }
         i => match display_modes().get(i as usize) {
@@ -598,14 +617,10 @@ pub fn change_display_settings(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(set_display_mode(cpu, Some(mode)))
 }
 
-/// GetProcessWindowStation: the one window station.
-pub fn get_process_window_station(_cpu: &mut Cpu, _args: &[u32]) -> Option<u32> {
-    Some(0x0030)
-}
-
-/// GetThreadDesktop(tid): the one desktop.
+/// GetThreadDesktop(tid): the handle Windows 98's USER32 gives for any
+/// thread, which no other function takes.
 pub fn get_thread_desktop(_cpu: &mut Cpu, _args: &[u32]) -> Option<u32> {
-    Some(0x0034)
+    Some(0x1234_5678)
 }
 
 #[cfg(test)]

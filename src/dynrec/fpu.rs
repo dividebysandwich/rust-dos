@@ -5,11 +5,15 @@
 //! except in fast mode (`Cpu::fpu_fast`), where they are the doubles' too.
 //! Every instruction starts with a `FpuGuard`, which leaves the rare cases
 //! (no coprocessor, an empty register) to the handler. Double stores,
-//! integer conversions and compares also leave a register whose 80 bits
-//! hold more than its double to the handler (`FBailPrecise`); a single
-//! store rounds those 80 bits through the handlers' code and goes on
-//! (`Uop::FToSingle`), as games that round down store singles all the
-//! time.
+//! word and dword integer conversions and compares also leave a register
+//! whose 80 bits hold more than its double to the handler
+//! (`FBailPrecise`); a single store rounds those 80 bits through the
+//! handlers' code and goes on (`Uop::FToSingle`), as games that round
+//! down store singles all the time. Compares leave a NaN and a format the
+//! FPU doesn't take to the handler too, which sets IE for them. FILD of a
+//! qword pushes its exact 80 bits and FISTP of a qword converts them
+//! (`Uop::FToInt64`), so the 8-byte copies MSVC makes with the pair stay
+//! in translated code.
 
 use iced_x86::{Code, Instruction, OpKind, Register};
 
@@ -195,7 +199,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
                 return false;
             }
             u.push(Uop::FGet { x: X1, i: 0 });
-            precise(u, 1, Precise::Equal(X1, X0));
+            precise(u, 1, Precise::Compare(X1, X0));
             u.push(Uop::FCom { a: X1, b: X0 });
             if instr.code() == Fcomp_m64fp {
                 u.push(Uop::FPop { n: 1 });
@@ -225,6 +229,28 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
         Fsqrt => {
             guard(u, 1);
             u.push(Uop::FSqrt);
+        }
+        // The handler rounds by the control word's mode, from the 80 bits
+        // where they hold more than the double.
+        Frndint => {
+            guard(u, 1);
+            u.push(Uop::FRndint);
+        }
+        Fabs => {
+            guard(u, 1);
+            u.push(Uop::FAbs);
+        }
+        // The handlers take the double of the 80 bits themselves, and set C2
+        // for an operand out of range.
+        Fsin | Fcos | Fptan | Fsincos => {
+            let op = match instr.code() {
+                Fsin => FTrigOp::Sin,
+                Fcos => FTrigOp::Cos,
+                Fptan => FTrigOp::Tan,
+                _ => FTrigOp::SinCos,
+            };
+            guard(u, 1);
+            u.push(Uop::FTrig { op });
         }
         // (The integer comes to the same 80 bits as the double of it.)
         Fiadd_m16int | Fiadd_m32int | Fisub_m16int | Fisub_m32int | Fisubr_m16int | Fisubr_m32int => {
@@ -291,8 +317,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             if !qword(u) {
                 return false;
             }
-            u.push(Uop::FLoadInt64 { x: X0, m: T1 });
-            u.push(Uop::FPush { x: X0, canon: false });
+            u.push(Uop::FPushInt64 { m: T1 });
         }
         Fist_m16int | Fist_m32int | Fistp_m16int | Fistp_m32int => {
             let size = if matches!(instr.code(), Fist_m16int | Fistp_m16int) { 2 } else { 4 };
@@ -315,7 +340,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             }
             u.push(Uop::BailUnlessRam { t: T1 });
             u.push(Uop::FGet { x: X0, i: 0 });
-            precise(u, 1, Precise::Int(X0));
+            // (From the 80 bits where they hold more than the double.)
             u.push(Uop::FToInt64 { lo: T0, hi: T2, x: X0 });
             u.push(Uop::FPop { n: 1 });
             // As the handler writes it: the low dword, then the high one.
@@ -451,9 +476,24 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
                 return false;
             }
             u.push(Uop::FGet { x: X1, i: 0 });
-            precise(u, 1, Precise::Equal(X1, X0));
+            precise(u, 1, Precise::Compare(X1, X0));
             u.push(Uop::FCom { a: X1, b: X0 });
             if instr.code() == Fcomp_m32fp {
+                u.push(Uop::FPop { n: 1 });
+            }
+        }
+        // A word or dword is a double, as a single is: where ST(0) holds
+        // more than its double, the doubles compare as the handler's 80
+        // bits do unless they are equal or unordered (`Precise::Compare`).
+        Ficom_m16int | Ficom_m32int | Ficomp_m16int | Ficomp_m32int => {
+            guard(u, 1);
+            if !int(u) {
+                return false;
+            }
+            u.push(Uop::FGet { x: X1, i: 0 });
+            precise(u, 1, Precise::Compare(X1, X0));
+            u.push(Uop::FCom { a: X1, b: X0 });
+            if matches!(instr.code(), Ficomp_m16int | Ficomp_m32int) {
                 u.push(Uop::FPop { n: 1 });
             }
         }
@@ -463,7 +503,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             guard(u, 1 << lhs | 1 << rhs);
             u.push(Uop::FGet { x: X0, i: lhs as u8 });
             u.push(Uop::FGet { x: X1, i: rhs as u8 });
-            precise(u, 1 << lhs | 1 << rhs, Precise::Equal(X0, X1));
+            precise(u, 1 << lhs | 1 << rhs, Precise::Compare(X0, X1));
             u.push(Uop::FCom { a: X0, b: X1 });
             if pops > 0 {
                 u.push(Uop::FPop { n: pops });

@@ -121,11 +121,22 @@ impl Writer {
 pub struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
+    version: Option<u16>,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self {
+            data,
+            pos: 0,
+            version: None,
+        }
+    }
+
+    /// The version of the section this reads (`section_of`), or None for
+    /// bytes outside one, which are in this rust-dos's own layout.
+    pub fn version(&self) -> Option<u16> {
+        self.version
     }
 
     pub fn take(&mut self, len: usize) -> Result<&'a [u8]> {
@@ -142,6 +153,13 @@ impl<'a> Reader<'a> {
     /// The section `tag` in the version `version`: a reader of it. Sections
     /// come in the order they were written.
     pub fn section(&mut self, tag: &[u8; 4], version: u16) -> Result<Reader<'a>> {
+        self.section_of(tag, &[version])
+    }
+
+    /// The section `tag` in one of the `versions` this rust-dos reads, the
+    /// last its own: a reader of it, whose `version` is the one saved, for
+    /// the parts of a section that read an older version's layout.
+    pub fn section_of(&mut self, tag: &[u8; 4], versions: &[u16]) -> Result<Reader<'a>> {
         let found: [u8; 4] = self.take(4)?.try_into().unwrap();
         if &found != tag {
             return Err(StateError::Invalid(format!(
@@ -152,17 +170,19 @@ impl<'a> Reader<'a> {
         }
         let mut saved = 0u16;
         saved.load(self)?;
-        if saved != version {
+        if !versions.contains(&saved) {
             return Err(StateError::Mismatch(format!(
                 "its {} is version {}, this rust-dos reads version {}",
                 String::from_utf8_lossy(tag).trim(),
                 saved,
-                version
+                versions.last().copied().unwrap_or(0)
             )));
         }
         let mut len = 0u32;
         len.load(self)?;
-        Ok(Reader::new(self.take(len as usize)?))
+        let mut section = Reader::new(self.take(len as usize)?);
+        section.version = Some(saved);
+        Ok(section)
     }
 
     /// Whether the next section is `tag`, for a section a state has only
@@ -423,6 +443,39 @@ impl<T: State + Default> State for Option<T> {
     }
 }
 
+/// A field a section's layout gained in its version `V`: a section saved
+/// in an older version has no bytes for it, so it loads as its default,
+/// and the older states still load.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Since<const V: u16, T>(pub T);
+
+impl<const V: u16, T> std::ops::Deref for Since<V, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<const V: u16, T> std::ops::DerefMut for Since<V, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+
+impl<const V: u16, T: State + Default> State for Since<V, T> {
+    fn save(&self, w: &mut Writer) {
+        self.0.save(w);
+    }
+    fn load(&mut self, r: &mut Reader) -> Result<()> {
+        // Bytes outside a section are in this rust-dos's own layout.
+        if r.version().is_some_and(|v| v < V) {
+            self.0 = T::default();
+            return Ok(());
+        }
+        self.0.load(r)
+    }
+}
+
 impl<A: State, B: State> State for (A, B) {
     fn save(&self, w: &mut Writer) {
         self.0.save(w);
@@ -583,6 +636,11 @@ mod tests {
 
         // Another version, another section, or too few bytes are refused.
         assert!(matches!(Reader::new(&w.buf).section(b"TEST", 2), Err(StateError::Mismatch(_))));
+        // A reader of older versions too tells which one it read.
+        let mut r = Reader::new(&w.buf);
+        assert_eq!(r.section_of(b"TEST", &[1, 2]).unwrap().version(), Some(1));
+        assert_eq!(Reader::new(&w.buf).version(), None);
+        assert!(Reader::new(&w.buf).section_of(b"TEST", &[0, 2]).is_err());
         assert!(Reader::new(&w.buf).section(b"OTHR", 1).is_err());
         let mut short = Reader::new(&w.buf[..w.buf.len() - 1]);
         assert_eq!(short.section(b"TEST", 1).err(), Some(StateError::Truncated));
@@ -599,6 +657,27 @@ mod tests {
         let mut back = HashMap::new();
         back.load(&mut Reader::new(&wa.buf)).unwrap();
         assert_eq!(back, a);
+    }
+
+    #[test]
+    fn a_field_since_a_version_loads_its_default_from_an_older_section() {
+        let mut w = Writer::new();
+        w.section(b"OLD ", 1, |w| 7u32.save(w));
+        w.section(b"NEW ", 2, |w| {
+            7u32.save(w);
+            9u32.save(w);
+        });
+        let mut r = Reader::new(&w.buf);
+        let (mut a, mut b) = (0u32, Since::<2, u32>(5));
+        let mut old = r.section_of(b"OLD ", &[1, 2]).unwrap();
+        a.load(&mut old).unwrap();
+        b.load(&mut old).unwrap();
+        assert_eq!((a, b.0), (7, 0));
+        assert!(old.is_empty());
+        let mut new = r.section_of(b"NEW ", &[1, 2]).unwrap();
+        a.load(&mut new).unwrap();
+        b.load(&mut new).unwrap();
+        assert_eq!((a, b.0), (7, 9));
     }
 
     #[test]

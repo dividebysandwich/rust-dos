@@ -141,6 +141,14 @@ pub struct ToadForce {
     /// When the oldest of them was queued, in nanoseconds of the
     /// emulated clock.
     queue_since: u64,
+    /// The ranges of card memory, start and end, that the drivers gave
+    /// back while commands were queued (`retire`): queued commands may
+    /// still read or draw there. Emptied when the queue runs. No part
+    /// of the card's state.
+    retired: Vec<(u32, u32)>,
+    /// How many times the queue ran, for a look at how the drivers'
+    /// commands are batched. No part of the card's state.
+    queue_runs: u64,
     /// The commands since the card was made, for a look at what drives
     /// it. No part of the card's state.
     counts: Counts,
@@ -152,12 +160,18 @@ pub struct ToadForce {
     /// or the machine's RAM changes (`Bus::toadforce_moved`), so that
     /// an access compares its address with them and nothing else.
     pub decoded: [Option<(u32, u32)>; 2],
+    /// The screen's own gamma (`toadforce_gamma`), which the picture
+    /// goes through after the card's ramp, and the 8-bit value each
+    /// value shows as through it, worked out when it is set: the
+    /// picture asks for it at every frame. The host's setting, no part
+    /// of the card's state.
+    screen_gamma: Option<(f32, [u32; 256])>,
 }
 
 /// The version of the card's saved state, which a saved state's `TOAD`
 /// section and a recording (`capture`) carry. A change to what
 /// `state_fields!` below saves takes a new one.
-pub const STATE_VERSION: u16 = 4;
+pub const STATE_VERSION: u16 = 5;
 
 /// How long a queued command waits at most, in nanoseconds of the
 /// emulated clock: well under a frame, so that a picture drawn straight
@@ -206,7 +220,7 @@ crate::state_fields!(ToadForce {
     level1,
     queue,
     queue_since,
-} skip { counts, raster, gpu, capture, decoded });
+} skip { counts, raster, gpu, capture, decoded, screen_gamma, retired, queue_runs });
 
 impl ToadForce {
     /// A card with `memory` bytes of card memory (one of
@@ -235,10 +249,50 @@ impl ToadForce {
             irq_up: None,
             queue: Vec::new(),
             queue_since: 0,
+            retired: Vec::new(),
+            queue_runs: 0,
             counts: Counts::default(),
             capture: capture::Slot::default(),
             decoded: [None; 2],
+            screen_gamma: None,
         }
+    }
+
+    /// Set the screen's own gamma (`toadforce_gamma`): Glide's
+    /// exponent, which takes a value v of 0 to 1 to v^(1 / gamma), or
+    /// None for none. True if it changed.
+    pub fn set_screen_gamma(&mut self, gamma: Option<f32>) -> bool {
+        let gamma = gamma.filter(|g| g.is_finite() && *g > 0.0 && *g != 1.0);
+        if self.screen_gamma.map(|(g, _)| g) == gamma {
+            return false;
+        }
+        self.screen_gamma = gamma.map(|gamma| {
+            let curve = std::array::from_fn(|v| {
+                let v = (v as f64 / 255.0).powf(1.0 / gamma as f64);
+                (v * 255.0).round().clamp(0.0, 255.0) as u32
+            });
+            (gamma, curve)
+        });
+        true
+    }
+
+    /// The colours the picture's 8-bit components show as, in the
+    /// palette's layout: the card's gamma ramp (`GAMMA`), then the
+    /// screen's own gamma. None where the picture shows its pixels as
+    /// they are: while the card shows no mode of direct colour, or both
+    /// are the identity.
+    pub fn picture_ramp(&self) -> Option<[u32; 256]> {
+        if !self.display.direct_colour() {
+            return None;
+        }
+        let ramp = self.display.gamma();
+        let Some((_, curve)) = &self.screen_gamma else {
+            return (*ramp != display::IDENTITY).then_some(*ramp);
+        };
+        Some(ramp.map(|rgb| {
+            let [r, g, b] = [rgb >> 16, rgb >> 8 & 0xFF, rgb & 0xFF].map(|c| curve[c as usize]);
+            r << 16 | g << 8 | b
+        }))
     }
 
     /// Record what the card is given to draw from its next run of
@@ -289,6 +343,21 @@ impl ToadForce {
         self.gpu.ahead()
     }
 
+    /// What translated code needs to write card memory by itself as
+    /// `writing` and `wrote` see the writes (`Bus::lfb_direct`): where
+    /// the host's copies count the writes to each page
+    /// (`gpu::Pages::counters`), and the surfaces ahead on the host
+    /// (`gpu::Gpu::notes`).
+    pub fn direct(
+        &mut self,
+    ) -> (
+        Option<(*mut u64, *mut u64)>,
+        impl Iterator<Item = gpu::Note> + '_,
+    ) {
+        let gpu = &mut self.gpu;
+        (gpu.pages.counters(), gpu.notes())
+    }
+
     /// Before the processor reads or writes the bytes `range` of
     /// `memory`, card memory (all of it for None): read back the
     /// surfaces the host renderer drew into that share a byte with
@@ -302,6 +371,13 @@ impl ToadForce {
     /// counts.
     pub fn settle_for(&mut self, memory: &mut [u8], range: Option<(u32, u32)>, why: gpu::Cause) {
         self.gpu.settle(memory, range, why);
+    }
+
+    /// `settle_for` of bytes the emulator only reads: the rows they lie
+    /// in come back, and the surfaces stay with the host renderer
+    /// (`Gpu::settle_rows`).
+    pub fn settle_rows(&mut self, memory: &mut [u8], range: (u32, u32), why: gpu::Cause) {
+        self.gpu.settle_rows(memory, range, why);
     }
 
     /// The processor wrote `len` bytes of card memory at `offset`: the
@@ -324,6 +400,12 @@ impl ToadForce {
     pub fn forget(&mut self) {
         self.gpu.forget();
         self.record_end();
+        // What the drivers gave back while the state's queue was filled
+        // isn't known: all of card memory may be in use by it.
+        self.retired.clear();
+        if self.queued() {
+            self.retired.push((0, self.memory));
+        }
     }
 
     /// The processor is about to write `len` bytes of `memory`, card
@@ -386,6 +468,7 @@ impl ToadForce {
             "error": self.error,
             "error_at": format!("{:X}", self.error_at),
             "bars": bars,
+            "queue_runs": self.queue_runs,
             "commands": {
                 "nop": counts.nop,
                 "fill": counts.fill,
@@ -402,6 +485,7 @@ impl ToadForce {
             "host": {
                 "read_backs": self.gpu.read_backs(),
                 "read_backs_for": self.gpu.causes(),
+                "read_back_rows": self.gpu.read_back_rows(),
                 "declined_draws": self.gpu.declined(),
                 "declined_for": self.gpu.declined_for(),
                 "writes": self.gpu.writes(),
@@ -501,7 +585,37 @@ impl ToadForce {
         // The buffer is kept for the next batch.
         words.clear();
         self.queue = words;
+        self.retired.clear();
+        self.queue_runs += 1;
         fx
+    }
+
+    /// A driver gave back the bytes `range` of card memory, start and
+    /// end. While commands are queued, they may still read or draw
+    /// there, so the range stays retired until they have run.
+    pub fn retire(&mut self, range: (u32, u32)) {
+        if self.queued() && range.0 < range.1 {
+            self.retired.push(range);
+        }
+    }
+
+    /// Whether a queued command may read or draw any of the bytes
+    /// `range` of card memory, a range a driver took after the
+    /// commands queued before it took theirs: only one that overlaps
+    /// what was given back while they were queued (`retire`) may.
+    pub fn queue_may_touch(&self, range: (u32, u32)) -> bool {
+        self.queued() && self.retired.iter().any(|r| r.0 < range.1 && range.0 < r.1)
+    }
+
+    /// How many times the queue ran (`run_queue`).
+    pub fn queue_runs(&self) -> u64 {
+        self.queue_runs
+    }
+
+    /// The ranges `retire` holds, which a driver doesn't take for a
+    /// block it writes past the queue.
+    pub fn retired(&self) -> &[(u32, u32)] {
+        &self.retired
     }
 
     /// Bring the card up to `live`: the vertical blanks that began, and
@@ -542,9 +656,9 @@ impl ToadForce {
             regs::ERROR => self.error,
             regs::ERROR_AT => self.error_at,
             regs::MEMORY => self.memory,
-            regs::MODE_ENABLE..=regs::SCANLINE | regs::PALETTE..regs::PALETTE_END => {
-                self.display.read(offset, live)
-            }
+            regs::MODE_ENABLE..=regs::SCANLINE
+            | regs::PALETTE..regs::PALETTE_END
+            | regs::GAMMA..regs::GAMMA_END => self.display.read(offset, live),
             regs::CAPS..regs::CAPS_END => {
                 caps::read(self.level, ((offset - regs::CAPS) / 4) as usize)
             }
@@ -583,7 +697,9 @@ impl ToadForce {
                 self.error_at = 0;
             }
             regs::RESET if value & 1 != 0 => self.reset(live, &mut fx),
-            regs::MODE_ENABLE..=regs::MODE_REFRESH | regs::PALETTE..regs::PALETTE_END => {
+            regs::MODE_ENABLE..=regs::MODE_REFRESH
+            | regs::PALETTE..regs::PALETTE_END
+            | regs::GAMMA..regs::GAMMA_END => {
                 match self.display.write(offset, value, self.memory, live) {
                     Ok(change) => fx.display = fx.display.max(change),
                     Err(error) => self.latch(error, regs::AT_REGISTER),
@@ -726,12 +842,22 @@ impl ToadForce {
         fx: &mut Effects,
     ) -> Result<(), Error> {
         // What the queued draws were to draw is there before anything
-        // else reads or writes the memory.
-        if !matches!(
-            command,
-            Command::Nop | Command::Level1(level1::Command::Draw(_))
-        ) && !matches!(command, Command::Level1(c) if c.sets_state())
-        {
+        // else reads or writes the memory they use. A `FILL` or a
+        // `BLT` of other surfaces runs while they wait, as the card
+        // would run it after them: no byte either touches is the
+        // other's (`Renderer::waits`). Nocturne copies a texture in
+        // between draws some 25 times a frame, and the host renderer
+        // draws them all in one batch.
+        let waits = match &command {
+            Command::Nop | Command::Level1(level1::Command::Draw(_)) => false,
+            Command::Level1(c) if c.sets_state() => false,
+            Command::Fill { dst, .. } => self.raster.waits(gpu::range(dst), None),
+            Command::Blt { dst, src, .. } => {
+                self.raster.waits(gpu::range(dst), Some(gpu::range(src)))
+            }
+            _ => true,
+        };
+        if waits {
             self.raster.flush(memory, &mut self.gpu);
         }
         // The commands below that run on the processor read back what

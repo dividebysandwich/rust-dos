@@ -243,12 +243,12 @@ fn alias_of<'a>(copies: &'a [Copy], s: &Surface) -> Option<&'a Copy> {
     of.clone().find(|c| c.ahead).or_else(|| of.next())
 }
 
-/// `pixels`, the rows of `s` with nothing between them, put where `s`
-/// is in `memory`.
-fn put_rows(s: &Surface, pixels: &[u8], memory: &mut [u8]) {
+/// `pixels`, rows of `s` from its row `first` with nothing between
+/// them, put where they are in `memory`.
+fn put_rows(s: &Surface, first: u32, pixels: &[u8], memory: &mut [u8]) {
     let len = (s.width * s.format.bytes()) as usize;
-    for (y, row) in pixels.chunks_exact(len).enumerate() {
-        let at = s.at(0, y as u32);
+    for (y, row) in (first..).zip(pixels.chunks_exact(len)) {
+        let at = s.at(0, y);
         memory[at..at + len].copy_from_slice(row);
     }
 }
@@ -333,7 +333,13 @@ void main() {
 const CONVERT: &str = "
 uniform sampler2D u_source;
 uniform int u_mode;
+uniform bool u_ramp_on;
+uniform uvec4 u_ramp[64];
 out vec4 o_color;
+// The card's gamma ramp for an 8-bit value, as the palette has it.
+uint ramp(int v) {
+    return u_ramp[v >> 2][v & 3];
+}
 void main() {
     vec4 c = texelFetch(u_source, ivec2(gl_FragCoord.xy), 0);
     if (u_mode == 1) {
@@ -347,6 +353,11 @@ void main() {
         v = ivec3((v.r << 3) | (v.r >> 2), (v.g << 2) | (v.g >> 4), (v.b << 3) | (v.b >> 2));
         c = vec4(vec3(v) / 255.0, 1.0);
     }
+    if (u_ramp_on) {
+        ivec3 v = ivec3(c.rgb * 255.0 + 0.5);
+        uvec3 r = uvec3(ramp(v.r) >> 16, ramp(v.g) >> 8, ramp(v.b)) & 255u;
+        c.rgb = vec3(r) / 255.0;
+    }
     o_color = c;
 }
 ";
@@ -354,6 +365,11 @@ void main() {
 /// Where `CONVERT`'s uniforms are.
 struct Convert {
     mode: Option<glow::UniformLocation>,
+    /// Whether the colours go through `ramp`: only those of the
+    /// picture the window shows (`composite`).
+    ramp_on: Option<glow::UniformLocation>,
+    /// The card's gamma ramp, four entries a vector.
+    ramp: Option<glow::UniformLocation>,
 }
 
 impl Locations for Convert {
@@ -366,6 +382,8 @@ impl Locations for Convert {
             gl.uniform_1_i32(source.as_ref(), SCRATCH_UNIT as i32);
             Convert {
                 mode: gl.get_uniform_location(program, "u_mode"),
+                ramp_on: gl.get_uniform_location(program, "u_ramp_on"),
+                ramp: gl.get_uniform_location(program, "u_ramp"),
             }
         }
     }
@@ -437,6 +455,9 @@ pub struct ToadForceGl {
     /// it.
     picture: Option<(glow::Framebuffer, glow::Texture, glow::Texture, (u32, u32))>,
     convert: Program<Convert>,
+    /// The gamma ramp `convert` has in `u_ramp`, set when the picture
+    /// shown first needed another.
+    ramp: Option<[u32; 256]>,
     copies: Vec<Copy>,
     /// Counted up with every change of a copy's pixels: the version of
     /// the copy changed last.
@@ -476,6 +497,9 @@ pub struct ToadForceGl {
     /// The host has no framebuffer the card's surfaces fit: nothing is
     /// taken.
     broken: bool,
+    /// What the renderer has to say for the log (`take_notes`): a
+    /// format or a program the host doesn't have.
+    notes: RefCell<Vec<String>>,
 }
 
 impl ToadForceGl {
@@ -552,6 +576,7 @@ impl ToadForceGl {
                 plain,
                 picture: None,
                 convert,
+                ramp: None,
                 copies: Vec::new(),
                 changes: 0,
                 textures: HashMap::new(),
@@ -571,19 +596,32 @@ impl ToadForceGl {
                 writes: 0,
                 presents: 0,
                 broken: false,
+                notes: RefCell::default(),
             }
         };
         if host.packed
             && let Some(fault) = host.packed_fault()
         {
-            eprintln!(
+            host.note(format!(
                 "[TOADFORCE] the host's 5-6-5 targets don't hold what the card's do ({fault}): \
                  16-bit targets are drawn with 8 bits a channel"
-            );
+            ));
             host.packed = false;
         }
         host.forget();
         Ok(host)
+    }
+
+    /// Keep `line` for the log. What the renderer notes is what it chose
+    /// for this host (as the 5-6-5 targets drawn with 8 bits a channel
+    /// on most NVIDIA cards), which the log is enough for.
+    fn note(&self, line: String) {
+        self.notes.borrow_mut().push(line);
+    }
+
+    /// The lines for the log since the last call.
+    pub fn take_notes(&self) -> Vec<String> {
+        self.notes.take()
     }
 
     /// Whether `R5G6B5` targets are in the host's 5-6-5 format.
@@ -650,6 +688,7 @@ impl ToadForceGl {
                 tex: Default::default(),
                 sets: Vec::new(),
                 coords: Vec::new(),
+                wrap: [0; pipeline::SLOTS],
                 shape: Shape {
                     half_centre: false,
                     cull: 1,
@@ -689,7 +728,7 @@ impl ToadForceGl {
                 // A new copy of the target each time, from memory.
                 self.forget();
                 fill(&mut memory);
-                let vertices = triangle(c).map(|v| gpu::Vertex::of(&v, &v, &[]));
+                let vertices = triangle(c).map(|v| gpu::Vertex::of(&v, &[]));
                 let runs = [gpu::Run {
                     state: state(blend),
                     vertices: 0..3,
@@ -740,7 +779,7 @@ impl ToadForceGl {
         // A target read back unchanged.
         self.forget();
         fill(&mut memory);
-        let vertices = triangle([0; 4]).map(|v| gpu::Vertex::of(&v, &v, &[]));
+        let vertices = triangle([0; 4]).map(|v| gpu::Vertex::of(&v, &[]));
         let mut hidden = (*state(None)).clone();
         hidden.clip = [0, 0, 0, 0];
         let runs = [gpu::Run {
@@ -807,8 +846,10 @@ impl ToadForceGl {
             // The card's dither is the shader's.
             gl.disable(glow::DITHER);
             gl.disable(glow::TEXTURE_CUBE_MAP_SEAMLESS);
-            // Depth outside 0 to 1 is clamped, as `span.rs` clamps it,
-            // and cuts nothing off.
+            // Depth outside 0 to 1 cuts no triangle. Without the
+            // depth test it is clamped, as `span.rs` clamps it, and
+            // with the test the shader drops the fragment (`draw`
+            // gives a run that has such a depth that shader).
             gl.enable(glow::DEPTH_CLAMP);
         }
     }
@@ -906,6 +947,65 @@ impl ToadForceGl {
         let copy = &mut self.copies[at];
         copy.ahead = true;
         copy.version = self.changes;
+    }
+
+    /// The pixels of rows `rows` (first to after last) of `surface`,
+    /// whose copy is `texture`, as card memory has them, row after row
+    /// with nothing between them. The copy is at the card's own size,
+    /// one sample a pixel, with its rows the surface's from the top, as
+    /// `upload` fills it. None when the copy can't be read.
+    fn read_rows(
+        &mut self,
+        texture: glow::Texture,
+        surface: &Surface,
+        rows: (u32, u32),
+    ) -> Option<Vec<u8>> {
+        let (_, format, kind) = self.formats(surface.format);
+        let depth_format = surface.format.in_mask(super::caps::DEPTH_FORMATS);
+        let wide = !depth_format && self.colour(surface.format) == Colour::Wide;
+        let (w, h) = (surface.width as i32, (rows.1 - rows.0) as i32);
+        let bytes = if wide { 4 } else { surface.format.bytes() };
+        let mut pixels = vec![0u8; (surface.width * (rows.1 - rows.0) * bytes) as usize];
+        // SAFETY: the context is current (see the module comment), and
+        // every object used is this host's.
+        unsafe {
+            self.enter();
+            if depth_format {
+                let gl = &*self.gl;
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.depth_only));
+                let d16 = surface.format == Format::D16;
+                let (point, other) = if d16 {
+                    (glow::DEPTH_ATTACHMENT, glow::DEPTH_STENCIL_ATTACHMENT)
+                } else {
+                    (glow::DEPTH_STENCIL_ATTACHMENT, glow::DEPTH_ATTACHMENT)
+                };
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, other, glow::TEXTURE_2D, None, 0);
+                gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER,
+                    point,
+                    glow::TEXTURE_2D,
+                    Some(texture),
+                    0,
+                );
+            } else if !self.attach(texture, None) {
+                self.leave();
+                return None;
+            } else {
+                self.gl.read_buffer(glow::COLOR_ATTACHMENT0);
+            }
+            let data = glow::PixelPackData::Slice(Some(&mut pixels));
+            self.gl.read_pixels(0, rows.0 as i32, w, h, format, kind, data);
+            self.leave();
+        }
+        if wide {
+            pixels = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|c| (span::pack(Format::R5G6B5, *c) as u16).to_le_bytes())
+                .collect();
+        }
+        Some(pixels)
     }
 
     /// The pixels of `rect` of `surface` in `memory`, as the host's
@@ -1139,10 +1239,13 @@ impl ToadForceGl {
                 None => {}
             }
             if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
-                eprintln!(
-                    "[TOADFORCE] the host has no framebuffer for the card's target: \
-                     the software renderer draws"
-                );
+                if !self.broken {
+                    self.note(
+                        "[TOADFORCE] the host has no framebuffer for the card's target: \
+                         the software renderer draws"
+                            .to_string(),
+                    );
+                }
                 self.broken = true;
             }
         }
@@ -1182,7 +1285,9 @@ impl ToadForceGl {
             }
             Err(e) => {
                 let e = e.replacen("a 3dfx shader", "a ToadForce shader", 1);
-                eprintln!("[TOADFORCE] {e}: the software renderer draws this state");
+                self.note(format!(
+                    "[TOADFORCE] {e}: the software renderer draws this state"
+                ));
                 self.failed.borrow_mut().insert(key.clone());
                 false
             }
@@ -1220,7 +1325,9 @@ impl ToadForceGl {
             }
             Err(e) => {
                 let e = e.replacen("a 3dfx shader", "a ToadForce shader", 1);
-                eprintln!("[TOADFORCE] {e}: the card transforms the vertices of this state");
+                self.note(format!(
+                    "[TOADFORCE] {e}: the card transforms the vertices of this state"
+                ));
                 self.tnl_failed.borrow_mut().insert(key.clone());
                 false
             }
@@ -1708,11 +1815,14 @@ impl ToadForceGl {
     /// The picture of `surface`, which the screen shows, from the
     /// host's copy of it, with `screen`'s pixels over it where they
     /// differ from `base` (a cursor, messages): a texture of 8 bits a
-    /// channel with the picture's first row first, and its size. None
-    /// without a copy of the surface.
+    /// channel with the picture's first row first, and its size. The
+    /// picture goes through the card's gamma `ramp`, if it has one,
+    /// and what is drawn over it doesn't. None without a copy of the
+    /// surface.
     pub fn composite(
         &mut self,
         surface: &Surface,
+        ramp: Option<&[u32; 256]>,
         screen: &Frame,
         base: &Frame,
     ) -> Option<(glow::Texture, (u32, u32))> {
@@ -1803,8 +1913,19 @@ impl ToadForceGl {
             gl.use_program(Some(self.convert.program));
             gl.bind_vertex_array(Some(self.plain));
             gl.uniform_1_i32(self.convert.uniforms.mode.as_ref(), mode);
+            let uniforms = &self.convert.uniforms;
+            if let Some(ramp) = ramp
+                && self.ramp.as_ref() != Some(ramp)
+            {
+                gl.uniform_4_u32_slice(uniforms.ramp.as_ref(), ramp);
+                self.ramp = Some(*ramp);
+            }
+            gl.uniform_1_i32(uniforms.ramp_on.as_ref(), ramp.is_some() as i32);
             gl.bind_texture(glow::TEXTURE_2D, Some(source));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            // The textures `CONVERT` fills, and what is drawn over the
+            // picture, keep their colours.
+            gl.uniform_1_i32(uniforms.ramp_on.as_ref(), 0);
             if let Some((first, rows, pixels)) = over {
                 gl.bind_texture(glow::TEXTURE_2D, Some(staging));
                 let data = glow::PixelUnpackData::Slice(Some(&pixels));
@@ -1849,6 +1970,7 @@ impl ToadForceGl {
                 func,
                 write,
                 stencil,
+                ..
             } => Some((func, write, stencil)),
             _ => None,
         });
@@ -2135,7 +2257,7 @@ impl Host for ToadForceGl {
             }
         }
         // SAFETY: the context is current (see the module comment).
-        if unsafe { self.compiled(&shader::key(state, self.anisotropy > 0.0)) } {
+        if unsafe { self.compiled(&shader::key(state, self.anisotropy > 0.0, false)) } {
             None
         } else {
             Some(Decline::ProgramFailed)
@@ -2148,7 +2270,7 @@ impl Host for ToadForceGl {
             return false;
         }
         // SAFETY: the context is current (see the module comment).
-        unsafe { self.compiled_tnl(&shader::key(state, self.anisotropy > 0.0)) }
+        unsafe { self.compiled_tnl(&shader::key(state, self.anisotropy > 0.0, false)) }
     }
 
     fn status(&self) -> serde_json::Value {
@@ -2219,7 +2341,18 @@ impl Host for ToadForceGl {
             for run in batch.runs {
                 let from = &batch.vertices[run.vertices.clone()];
                 let count = vertices(&run.state.shape, from, &mut bytes);
-                firsts.push((first as i32, count as i32));
+                // Whether the shader leaves out a depth outside 0 to 1
+                // (`shader::key`): only a vertex outside it makes one.
+                // A pixel's depth goes linearly between those of the
+                // vertices, which the host clamps to the range.
+                let ranged = run
+                    .state
+                    .steps
+                    .iter()
+                    .any(|step| matches!(step, Step::Depth { ranged: true, .. }));
+                let outside =
+                    ranged && from.iter().any(|v| v.place[2] < 0.0 || v.place[2] > 1.0);
+                firsts.push((first as i32, count as i32, outside));
                 first += count;
             }
             gl.bind_vertex_array(Some(self.array));
@@ -2238,14 +2371,24 @@ impl Host for ToadForceGl {
                 gl.bind_vertex_array(Some(self.array));
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.buffer));
             }
-            for (run, (first, count)) in batch.runs.iter().zip(firsts) {
+            for (run, (first, count, outside)) in batch.runs.iter().zip(firsts) {
                 let state = &*run.state;
                 let geometry = run.geometry.as_ref().filter(|g| !g.indices.is_empty());
                 if (count == 0 && geometry.is_none()) || !self.fixed(state) {
                     continue;
                 }
-                // `declines` compiled it.
-                let key = shader::key(state, self.anisotropy > 0.0);
+                // `declines` compiled the program without the range's
+                // `discard`. The one with it is compiled when a run
+                // first needs it; were it to fail, the run is drawn
+                // without, with its pixels outside the range.
+                let anisotropic = self.anisotropy > 0.0;
+                let base = shader::key(state, anisotropic, false);
+                let key = match outside {
+                    true => Some(shader::key(state, anisotropic, true))
+                        .filter(|key| self.compiled(key))
+                        .unwrap_or(base),
+                    false => base,
+                };
                 for (stage, tex) in state.tex.iter().enumerate() {
                     if let Some(tex) = tex {
                         self.bind(stage, tex, key.native(stage));
@@ -2648,52 +2791,29 @@ impl Host for ToadForceGl {
             copy.stamp = pages.stamp(gpu::range(&copy.surface));
         }
         let texture = copy.texture;
-        let (_, format, kind) = self.formats(surface.format);
-        let depth_format = surface.format.in_mask(super::caps::DEPTH_FORMATS);
-        let wide = !depth_format && self.colour(surface.format) == Colour::Wide;
-        let (w, h) = (surface.width as i32, surface.height as i32);
-        let bytes = if wide { 4 } else { surface.format.bytes() };
-        let mut pixels = vec![0u8; (surface.width * surface.height * bytes) as usize];
-        // SAFETY: the context is current (see the module comment), and
-        // every object used is this host's.
-        unsafe {
-            self.enter();
-            if depth_format {
-                let gl = &*self.gl;
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.depth_only));
-                let d16 = surface.format == Format::D16;
-                let (point, other) = if d16 {
-                    (glow::DEPTH_ATTACHMENT, glow::DEPTH_STENCIL_ATTACHMENT)
-                } else {
-                    (glow::DEPTH_STENCIL_ATTACHMENT, glow::DEPTH_ATTACHMENT)
-                };
-                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, other, glow::TEXTURE_2D, None, 0);
-                gl.framebuffer_texture_2d(
-                    glow::FRAMEBUFFER,
-                    point,
-                    glow::TEXTURE_2D,
-                    Some(texture),
-                    0,
-                );
-            } else if !self.attach(texture, None) {
-                self.leave();
-                return false;
-            } else {
-                self.gl.read_buffer(glow::COLOR_ATTACHMENT0);
-            }
-            let data = glow::PixelPackData::Slice(Some(&mut pixels));
-            self.gl.read_pixels(0, 0, w, h, format, kind, data);
-            self.leave();
+        let Some(pixels) = self.read_rows(texture, surface, (0, surface.height)) else {
+            return false;
+        };
+        put_rows(surface, 0, &pixels, memory);
+        true
+    }
+
+    fn read_back_rows(&mut self, surface: &Surface, rows: (u32, u32), memory: &mut [u8]) -> bool {
+        let found = self
+            .copies
+            .iter()
+            .find(|c| gpu::within(surface, &c.surface));
+        let Some(texture) = found.map(|c| c.texture) else {
+            return false;
+        };
+        let rows = (rows.0, rows.1.min(surface.height));
+        if rows.0 >= rows.1 {
+            return true;
         }
-        if wide {
-            pixels = pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|c| (span::pack(Format::R5G6B5, *c) as u16).to_le_bytes())
-                .collect();
-        }
-        put_rows(surface, &pixels, memory);
+        let Some(pixels) = self.read_rows(texture, surface, rows) else {
+            return false;
+        };
+        put_rows(surface, rows.0, &pixels, memory);
         true
     }
 

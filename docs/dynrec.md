@@ -94,11 +94,11 @@ IN, OUT, STI, POPF, MOV SS, POP SS and LSS can change the same, but
 programs run them so often (a timer read, a sound driver's status, a CLI
 and STI or a PUSHF and POPF around each, a switch to a stack of its own)
 that the block goes on after them where they changed none of it. They run
-in the block (IN, OUT and STI translated on x86-64 hosts, with IN and OUT
-through `jit_port`, MOV SS and POP SS outside real mode through
-`jit_load_seg`; the others, and all of them elsewhere, through their
-handlers and `jit_fallback`), which stops after the instruction
-(`EXIT_AFTER`) only if:
+in the block (IN, OUT, STI and POPF translated, POPF outside real mode,
+with IN and OUT through `jit_port`, MOV SS and POP SS outside real mode
+through `jit_load_seg`; the others through their handlers and
+`jit_fallback`), which stops after the instruction (`EXIT_AFTER`) only
+if:
 
 - after IN or OUT, an interrupt can be delivered (a device raised one, or
   the PIC let one through, with IF set), the timer deadline or the A20
@@ -108,8 +108,7 @@ handlers and `jit_fallback`), which stops after the instruction
 - after STI, an interrupt waits: the execution loop runs the next
   instruction, in the interrupt shadow, and delivers it. Where none waits
   the shadow ends in the block, at the next instruction;
-- after POPF (through its handler), TF is set, or IF is set with an
-  interrupt waiting;
+- after POPF, TF is set, or IF is set with an interrupt waiting;
 - after a load of SS, the stack's width changed, which the block was
   translated for (its key's stack bit; `Uop::SsLoaded` checks it where
   the load is translated). Otherwise the interrupt shadow ends in the
@@ -232,7 +231,12 @@ physical page (`Engine::pokes`). Once a byte has been counted twice
   (`translate::live_immediate`, `Uop::LoadCode`), and never leaves the
   block for it. An MMX shift by a constant whose count is poked (Delta
   Force's terrain loop) reads the count the same way and shifts by it as
-  by a register (`translate::live_shift`).
+  by a register (`translate::live_shift`). Where the watched bytes are
+  all in the displacement of a memory operand (the Build engine pokes the
+  addresses of each column's palette and texture into the
+  `MOV AL, [EAX+disp32]` of its drawing loops, Unreal's Fire.dll those of
+  its textures into its loads), the address is computed without it and
+  the displacement read from RAM is added (`translate::live_displacement`).
 - The block's own checks leave the watched bytes out, so it stays valid
   while only they change. That holds for its own stores too: a block that
   pokes the immediates of its later instructions just ahead of running
@@ -315,8 +319,15 @@ compute what the handlers' own doubles do there), as their handlers do:
 - FILD, FIST and FISTP of a word and a dword (converted inline where the
   control word rounds to nearest or chops and the result fits, else by
   the handler's own `fpu::data::to_int`);
-- FILD of a qword within 2^53 either way, which a double holds exactly
-  (a larger one goes to the handler, which keeps all 64 bits);
+- FILD and FISTP of a qword, so the 8-byte copies MSVC makes with the
+  pair stay in translated code: FILD pushes the qword's exact 80 bits
+  and the double they round to, as its handler does; FISTP stores the
+  integer the 80 bits hold where it is from 2^53 to 2^63, converts the
+  register's double inline where the control word rounds to nearest or
+  chops and the 80 bits round to the same integer (they hold no more
+  than the double, or the double is under 2^52 and neither an integer
+  nor halfway between two), and leaves the rest to the handler's own
+  `fpu::data::st0_int_bits`;
 - FMUL, FDIV, FDIVR and their popping forms, with a single or ST(i) (a
   division by 0 through `fpu::arithmetic::divided_by_zero`);
 - FADD, FSUB, FSUBR and their popping forms, and FIADD, FISUB and
@@ -463,6 +474,44 @@ first instruction in a block that changes them:
   `video_write` does (leaving a write that starts a burst of its own to
   `jit_dev_write`). The execution loop marks the picture changed after
   code that wrote there (`JitCtx::vga_wrote`).
+- A Banshee's or Voodoo3's memory through BAR1 below the tile base, where
+  a software renderer reads and writes the pixels of a locked DirectDraw
+  surface one at a time, is the card's memory in order. An access there
+  is its bytes and what the card does around them: the drawing queued
+  before is done first, what only the OpenGL renderer has is read back,
+  and a write marks the picture changed and tells the recording.
+  `jit_dev_read` and `jit_dev_write` do that without the bus's way
+  through every window and the card's registers
+  (`Bus::read_banshee_linear`, `write_banshee_linear`). On x86-64 hosts,
+  while there is nothing of it to do (`Voodoo::banshee_direct`: nothing
+  queued for the render workers, no swap held back by the frame rate cap,
+  the software rasterizer drawing the picture), the load and store
+  routines move the bytes from and into the card's memory on the host
+  themselves (`helpers::card_state`, found at the same points as
+  `vga_state`). A byte for each 4 KB page of the BAR says where the code
+  may write: the pages of the desktop shown, whose writes count in
+  `Activity`, and of a command FIFO's ring stay `jit_dev_write`'s. The
+  execution loop marks the card's picture changed after code that wrote
+  there (`JitCtx::card_wrote`), and adds the accesses to a profile's
+  count of device memory accesses.
+- The VESA linear frame buffer (a ToadForce's, an S3's, a mach64's or
+  the VBE's own BAR), where a game draws into a locked surface a pixel
+  at a time, is handled the same way where the code doesn't write a
+  Banshee's memory itself (`Bus::lfb_direct`): no ToadForce commands
+  queued, no observer, no Vérité byte swapping, no card registers
+  inside the window, and a picture `cycles=auto` knows the bytes of. A
+  write there through the bus counts in `Activity`, counts the page
+  for the ToadForce host renderer's copies (`gpu::Pages::wrote`) and,
+  in a surface the host drew into, notes the bytes as card memory's
+  (`gpu::Written`). The store routines do all of that themselves for
+  bytes, words, dwords and the 8 and 16 bytes of an MMX or SSE store,
+  on pages out of the picture shown: each page's byte says whether the
+  code writes it, whether it reads it (the pages of a surface the host
+  has newer pixels of stay `jit_dev_read`'s), whether the bytes count
+  as those of the picture `cycles=auto` knows, and which of up to four
+  surfaces ahead on the host notes them. A write that starts a burst,
+  one that spans two words of a surface's bits, and the first into a
+  surface without its bits yet go to the bus.
 
 On x86-64, the four guest registers a block's operations use most (twice
 or more) stay in host registers within it (`x64::Cache`). An instruction
@@ -728,7 +777,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/cpu/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/cpu/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, immediates poked into three and into twelve places of a block, bytes poked into sign-extended immediates, an immediate, an IMUL's factor and an address a block pokes just ahead of itself, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real and protected mode going on in translated code, segment loads in big real mode, LAR and stack switches like DOS/4GW's thunks into 16-bit code, a link to a page the TLB lost, and the translated MMX and SSE instructions on singles of every kind under each rounding mode and flush to zero, with exceptions MXCSR unmasks, misaligned operands, MMX registers the FPU left stale, and stores into video memory and a block of RAM with code |
+| `tests/cpu/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, immediates poked into three and into twelve places of a block, bytes poked into sign-extended immediates, displacements of 32, 16 and 8 bits poked before each loop, a ModRM changed under a displacement read from RAM, an immediate, an IMUL's factor and an address a block pokes just ahead of itself, and an address poked with its opcode, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real and protected mode going on in translated code, segment loads in big real mode, LAR and stack switches like DOS/4GW's thunks into 16-bit code, a link to a page the TLB lost, and the translated MMX and SSE instructions on singles of every kind under each rounding mode and flush to zero, with exceptions MXCSR unmasks, misaligned operands, MMX registers the FPU left stale, and stores into video memory and a block of RAM with code |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:

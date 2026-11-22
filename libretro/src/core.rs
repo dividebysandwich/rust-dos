@@ -177,7 +177,7 @@ impl Core {
             None => settings.memory(),
         };
 
-        let mut cpu = Box::new(Cpu::with_memory(plan.c_root.clone(), memory.mb));
+        let mut cpu = Cpu::with_memory(plan.c_root.clone(), memory.mb);
         let log = *cb;
         cpu.bus.log_hook = Some(Box::new(move |line: &str| {
             let level = if line.contains("Warning") { RETRO_LOG_WARN } else { RETRO_LOG_DEBUG };
@@ -446,6 +446,22 @@ impl Core {
         if std::mem::take(&mut m.cpu.bus.mixer_changed) {
             m.settings.mixer = m.cpu.bus.mixer.settings();
             self.ui.sync_mixer(m.settings.mixer);
+        }
+        // CONFIG -SET asked for settings: they are applied as the window's
+        // are, and the batch file waiting for them goes on.
+        let requests = rust_dos::shell::take_settings(&mut m.cpu);
+        if !requests.is_empty() {
+            let dir = m.cpu.bus.config_dir.clone().unwrap_or_else(|| PathBuf::from("."));
+            let home = rust_dos::hostdirs::home_dir();
+            let (new, warnings) =
+                rust_dos::config::with_entries(&m.settings, &requests, &dir, home.as_deref());
+            for warning in warnings {
+                m.warn(&format!("CONFIG -SET: {}", warning));
+            }
+            match rust_dos::config_ui::Host::apply(m, &new) {
+                Ok(note) => m.notices.extend(note),
+                Err(e) => m.warn(&format!("CONFIG -SET: {}", e)),
+            }
         }
         // A launched game that has ended: the settings from before it come
         // back.

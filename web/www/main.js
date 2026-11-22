@@ -44,9 +44,9 @@ const DEFAULT_CONFIG = `# Rust-DOS settings, in the format of rust-dos.conf. Rem
 [emulator]
 # Display ratio: none, 4:3, 5:4, 16:10 or 16:9.
 aspect=4:3
-# How the picture is scaled up: nearest (sharp pixels) or linear (smooth),
-# without a CRT shader.
-#filter=nearest
+# How the picture is scaled up: sharp (pixels of equal size), hard
+# (nearest neighbour) or linear (smooth), without a CRT shader.
+#filter=sharp
 # A look: none, scanlines, aperture, crt or xbrz (xBRZ 2x). It needs WebGL 2.
 #shader=none
 # How far the crt look's tube bends, in percent (0 flat to 100), and how
@@ -76,14 +76,14 @@ aspect=4:3
 #floppy_disk_speed=maximum
 
 [sound]
-# The Sound Blaster: sb16, sbpro2, sb2 or none.
+# The Sound Blaster: sb16, sbpro2, sbpro1, sb2 or none.
 #sbtype=sb16
 #sbbase=220
 #irq=7
 #dma=1
 #hdma=5
-# FM synthesizer: opl3 or opl2.
-#opl=opl3
+# FM synthesizer: auto, opl3, opl2 or dualopl2.
+#opl=auto
 # The Gravis Ultrasound, with its MIDI patches on drive X:.
 #gus=true
 # A DAC on the parallel port: none, disney (the Disney Sound Source) or
@@ -460,7 +460,8 @@ function makeGlScreen() {
   let overlayFrame;
   let xbrzCache;
   let look = 'none';
-  let smooth = false;
+  /// The `filter` setting: sharp, hard or linear.
+  let scaling = 'sharp';
   /// A monochrome tube, whose phosphor is one colour: no colour mask.
   let mono = false;
   /// How far the CRT look's tube bends, across and down, and how much
@@ -526,6 +527,7 @@ function makeGlScreen() {
       line: gl.getUniformLocation(program, 'u_line'),
       overlay: gl.getUniformLocation(program, 'u_overlay_enabled'),
       unflipped: gl.getUniformLocation(program, 'u_unflipped'),
+      sharp: gl.getUniformLocation(program, 'u_sharp'),
     };
   }
 
@@ -539,12 +541,14 @@ function makeGlScreen() {
     return programs.get(name);
   }
 
-  /// Set the texture's filter: the CRT looks read its mipmap, and the
-  /// picture without one is sharp or smooth.
+  /// Set the texture's filter: the CRT looks read its mipmap. The
+  /// picture without one is read linearly when it is sharp or smooth (the
+  /// plain look moves where it samples for a sharp one, `u_sharp`), and
+  /// from the nearest texel when it is hard.
   function filter() {
     const mipmaps = look !== 'none' && look !== 'xbrz';
+    const magnify = mipmaps || scaling !== 'hard' ? gl.LINEAR : gl.NEAREST;
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    const magnify = mipmaps || smooth ? gl.LINEAR : gl.NEAREST;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mipmaps ? gl.LINEAR_MIPMAP_LINEAR : magnify);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magnify);
     if (mipmaps && frame) {
@@ -716,13 +720,13 @@ function makeGlScreen() {
       return look === 'xbrz';
     },
 
-    /// Draw through the look `name`, or the plain picture, `smooth` or
-    /// sharp, on a colour or a monochrome (`isMono`) tube that bends and
-    /// glows as `bend` and `shine` say. A look that doesn't compile leaves
-    /// the picture plain.
-    select(name, isSmooth, isMono, bend, shine) {
+    /// Draw through the look `name`, or the plain picture scaled as
+    /// `filterName` says (sharp, hard or linear), on a colour or a
+    /// monochrome (`isMono`) tube that bends and glows as `bend` and
+    /// `shine` say. A look that doesn't compile leaves the picture plain.
+    select(name, filterName, isMono, bend, shine) {
       look = program(name) ? name : 'none';
-      smooth = isSmooth;
+      scaling = filterName;
       mono = isMono;
       curvature = bend;
       glow = shine;
@@ -841,6 +845,7 @@ function makeGlScreen() {
       gl.uniform1f(entry.line, 1);
       gl.uniform1i(entry.overlay, look === 'xbrz' && overlayVisible ? 1 : 0);
       gl.uniform1i(entry.unflipped, 0);
+      gl.uniform1i(entry.sharp, scaling === 'sharp' ? 1 : 0);
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, overlayTexture);
       gl.bindVertexArray(vao);
@@ -2271,21 +2276,21 @@ async function restoreStates() {
 }
 
 /// Show the picture as the settings have it: stretched to 4:3 or not,
-/// sharp or smooth, through a CRT shader or not, on a colour or a
+/// sharp, hard or smooth, through a CRT shader or not, on a colour or a
 /// monochrome tube, bent and glowing as the CRT look's settings say.
 function showPicture() {
   if (screenGl) {
     const look = {
       name: machine.shader(),
-      smooth: machine.smooth(),
+      filter: machine.filter(),
       mono: machine.mono(),
       curvature: Array.from(machine.shader_curvature()),
       glow: machine.shader_glow(),
     };
-    const same = ['name', 'smooth', 'mono', 'glow'].every((key) => look[key] === shownLook?.[key]);
+    const same = ['name', 'filter', 'mono', 'glow'].every((key) => look[key] === shownLook?.[key]);
     if (!same || look.curvature.join() !== shownLook.curvature.join()) {
       shownLook = look;
-      screenGl.select(look.name, look.smooth, look.mono, look.curvature, look.glow);
+      screenGl.select(look.name, look.filter, look.mono, look.curvature, look.glow);
       machine.refresh_picture();
       if (machine.screen_width() && machine.screen_height()
         && (!screenGl.xbrz() || (machine.shader_width() && machine.shader_height()))) {
@@ -2391,10 +2396,30 @@ window.addEventListener('pagehide', () => saveC());
 // Start
 // ---------------------------------------------------------------------
 
+/// Start the WebAssembly module from pkg/rust_dos_web_bg.wasm.gz, which
+/// build.sh makes at about half the plain module's size, and from the plain
+/// one where there's no .gz or the browser can't unpack it. A server that
+/// sends the .gz with Content-Encoding: gzip has the browser unpack it
+/// already: only what starts with gzip's magic bytes is unpacked here.
+async function loadEmulator() {
+  if (typeof DecompressionStream === 'function') {
+    const response = await fetch(new URL('./pkg/rust_dos_web_bg.wasm.gz', import.meta.url)).catch(() => null);
+    if (response?.ok) {
+      let bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+        const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+        bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+      }
+      return init({ module_or_path: bytes });
+    }
+  }
+  return init();
+}
+
 async function start() {
   showSound();
   try {
-    wasm = await init();
+    wasm = await loadEmulator();
   } catch (error) {
     $('loading').querySelector('p').textContent = `Rust-DOS didn't load: ${error.message ?? error}`;
     return;

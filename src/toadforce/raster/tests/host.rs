@@ -15,7 +15,7 @@ use super::*;
 use crate::toadforce::blit;
 use crate::toadforce::command;
 use crate::toadforce::format::Rect;
-use crate::toadforce::gpu::{self, Batch, Decline, Host, Pages, Stamp};
+use crate::toadforce::gpu::{self, Batch, Cause, Decline, Host, Pages, Stamp};
 use crate::toadforce::raster::mem::Mem;
 use crate::toadforce::raster::pipeline::{self, DrawState};
 use crate::toadforce::raster::setup::Prim;
@@ -33,6 +33,10 @@ struct Log {
     batches: u32,
     triangles: u32,
     read_backs: u32,
+    /// Reads of some rows of a surface (`read_back_rows`), and of how
+    /// many rows in all.
+    row_reads: u32,
+    rows_read: u32,
     forgets: u32,
     /// Buffers a `CLEAR` wrote in the host's copy.
     clears: u32,
@@ -502,6 +506,27 @@ impl Host for TestHost {
             }
             None => false,
         }
+    }
+
+    fn read_back_rows(&mut self, surface: &Surface, rows: (u32, u32), memory: &mut [u8]) -> bool {
+        let found = self
+            .copies
+            .iter()
+            .find(|c| gpu::within(surface, &c.surface));
+        let Some(copy) = found else {
+            return false;
+        };
+        let mut log = self.log.borrow_mut();
+        log.row_reads += 1;
+        log.rows_read += rows.1 - rows.0;
+        let view = pixels(&packed_view(surface, &copy.surface), &copy.pixels);
+        let len = (surface.width * surface.format.bytes()) as usize;
+        for y in rows.0..rows.1.min(surface.height) {
+            let at = surface.at(0, y);
+            let from = y as usize * len;
+            memory[at..at + len].copy_from_slice(&view[from..from + len]);
+        }
+        true
     }
 
     fn shows(&mut self, surface: &Surface, pages: &Pages) -> bool {
@@ -1159,6 +1184,266 @@ fn a_surface_written_in_parts_of_pixels_is_read_back_around_them() {
     assert_eq!(rig.px(5, 34), 0xFF_0000);
 }
 
+/// The bytes of rows `first` to before `end` of the rig's target, the
+/// pixels of columns `left` to before `right`: what a driver's copy of
+/// that rectangle reads.
+fn band(rig: &Rig, left: u32, right: u32, first: u32, end: u32) -> (u32, u32) {
+    let colour = rig.colour();
+    let bytes = colour.format.bytes();
+    let start = colour.at(left, first) as u32;
+    (start, colour.at(right - 1, end - 1) as u32 + bytes)
+}
+
+/// The rows `first` to before `end` of the rig's target as card memory
+/// has them.
+fn rows_in(rig: &Rig, first: u32, end: u32) -> Vec<u8> {
+    let colour = rig.colour();
+    let len = (colour.pitch * (end - first)) as usize;
+    rig.memory[colour.at(0, first)..][..len].to_vec()
+}
+
+#[test]
+fn a_driver_read_of_some_rows_reads_back_those_rows_alone() {
+    let mut software = Rig::new(FORMAT, Some(DEPTH_FORMAT));
+    triangles(&mut software);
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    // A copy of an 8x8 rectangle out of the target, as DirectDraw's
+    // blit into system memory does it: the eight rows it is in come
+    // back, as the software renderer drew them, and nothing else does.
+    // The target stays ahead.
+    let read = band(&rig, 2, 10, 30, 38);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert!(rig.card.ahead());
+    assert_eq!(rows_in(&rig, 30, 38), rows_in(&software, 30, 38));
+    assert_ne!(rows_in(&rig, 29, 30), rows_in(&software, 29, 30));
+    assert_ne!(rows_in(&rig, 38, 39), rows_in(&software, 38, 39));
+    let counts = |log: &Rc<RefCell<Log>>| {
+        let log = log.borrow();
+        (log.read_backs, log.row_reads, log.rows_read)
+    };
+    assert_eq!(counts(&log), (0, 1, 8));
+    let host = rig.card.describe(Rig::live());
+    assert_eq!(host["host"]["read_backs"], 0);
+    assert_eq!(host["host"]["read_back_rows"]["reads"], 1);
+    assert_eq!(host["host"]["read_back_rows"]["rows"], 8);
+    assert_eq!(host["host"]["read_back_rows"]["bytes"], 8 * SIZE * 4);
+    // A row of them again, as the copy reads them one by one, reads
+    // nothing; a band over them and the four rows below reads those
+    // four.
+    let read = band(&rig, 2, 10, 31, 32);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert_eq!(counts(&log), (0, 1, 8));
+    let read = band(&rig, 0, 4, 34, 42);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert_eq!(counts(&log), (0, 2, 12));
+    assert_eq!(rows_in(&rig, 30, 42), rows_in(&software, 30, 42));
+    // The processor writes into rows read back (the copy put back) and
+    // into rows that weren't: a read of the second keeps the write, and
+    // nothing reads the first again.
+    let colour = rig.colour();
+    poke(&mut rig, colour.at(4, 33), &[1, 2, 3, 4]);
+    poke(&mut rig, colour.at(4, 50), &[5, 6, 7, 8]);
+    let read = band(&rig, 0, 64, 48, 52);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert_eq!(counts(&log), (0, 3, 16));
+    assert_eq!((rig.px(4, 33), rig.px(4, 50)), (0x0403_0201, 0x0807_0605));
+    assert_eq!(rig.px(5, 50), software.px(5, 50));
+    // The next draw takes the two pixels into the host's copy, which
+    // reads nothing back and copies nothing of the surface again. The
+    // copy changed, so the rows are read anew, with the pixels.
+    let uploads = log.borrow().uploads;
+    assert_eq!(rig.draw(4, &corner(40.0, 40.0, 8.0, 0.0, 0xFF00_00FF)), 0);
+    assert_eq!((log.borrow().writes, log.borrow().uploads), (1, uploads));
+    let read = band(&rig, 2, 10, 30, 38);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert_eq!(counts(&log), (0, 4, 24));
+    assert_eq!(rig.px(4, 33), 0x0403_0201);
+    // A read of every row reads the surface back whole, after which
+    // it isn't ahead.
+    let all = band(&rig, 0, SIZE, 0, SIZE);
+    rig.card.settle_rows(&mut rig.memory, all, Cause::Driver);
+    assert_eq!(counts(&log).0, 1);
+    assert_eq!(rig.px(4, 33), 0x0403_0201);
+    assert_eq!(rig.px(4, 50), 0x0807_0605);
+    assert_eq!(rig.px(41, 41), 0x00_00FF);
+    rig.card.settle(&mut rig.memory, None);
+    assert!(!rig.card.ahead());
+}
+
+#[test]
+fn the_cards_own_work_on_some_rows_reads_the_surface_back_whole() {
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    // The card's processor copies and fills write card memory with no
+    // note of what they write: the surface they touch comes back whole
+    // and isn't ahead after it, whatever rows they need.
+    let colour = rig.colour();
+    let read = band(&rig, 2, 10, 30, 38);
+    rig.card
+        .settle_for(&mut rig.memory, Some(read), Cause::Blit);
+    assert_eq!((log.borrow().read_backs, log.borrow().row_reads), (1, 0));
+    let host = rig.card.describe(Rig::live());
+    assert_eq!(host["host"]["read_backs_for"]["blit"], 1);
+    let ahead = rig.card.read_ahead(colour.at(4, 4) as u32, 4, &rig.memory);
+    assert_eq!(ahead, None);
+}
+
+/// The reads of whole surfaces and of rows the host made: `read_back`
+/// and `read_back_rows`.
+fn host_reads(log: &Rc<RefCell<Log>>) -> (u32, u32) {
+    let log = log.borrow();
+    (log.read_backs, log.row_reads)
+}
+
+/// Whether the rig's target is ahead on the host. Its depth buffer may
+/// be ahead as well, so `Gpu::ahead` doesn't tell. The look fetches
+/// the host's pixels of the target, which leaves card memory as it is
+/// and isn't one of the reads the tests count, so the log forgets it.
+fn colour_ahead(rig: &Rig, log: &Rc<RefCell<Log>>) -> bool {
+    let reads = log.borrow().read_backs;
+    let at = rig.colour().at(4, 4) as u32;
+    let ahead = rig.card.read_ahead(at, 4, &rig.memory).is_some();
+    log.borrow_mut().read_backs = reads;
+    ahead
+}
+
+#[test]
+fn rows_read_back_are_read_again_after_the_host_changes_its_copy() {
+    // A FILL, a BLT within the target and a CLEAR of a part of it, each
+    // over rows read back before it. The host does each on its copy,
+    // so card memory's rows are stale and the next read brings them
+    // again, as the software renderer drew them.
+    for change in ["fill", "blt", "clear"] {
+        let colour = rig_colour();
+        let part = rect(4, 12, 8, 4);
+        let work = |rig: &mut Rig| {
+            let error = rig.run(|w| match change {
+                "fill" => command::encode::fill(w, &colour, &part, 0x12_3456),
+                "blt" => {
+                    let from = rect(40, 40, 8, 4);
+                    command::encode::blt(w, &colour, &part, &colour, &from, None)
+                }
+                _ => encode::clear(w, CLEAR_COLOUR, 0x65_4321, 0.0, 0, &[part]),
+            });
+            assert_eq!(error, 0, "{change}");
+        };
+        let mut software = Rig::new(FORMAT, Some(DEPTH_FORMAT));
+        triangles(&mut software);
+        work(&mut software);
+        let (mut rig, log) = hosted(takes_all);
+        triangles(&mut rig);
+        let read = band(&rig, 0, SIZE, 10, 18);
+        rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+        assert_eq!(host_reads(&log), (0, 1), "{change}");
+        let done = |log: &Rc<RefCell<Log>>| {
+            let log = log.borrow();
+            log.fills + log.blits + log.clears
+        };
+        let before = done(&log);
+        work(&mut rig);
+        assert_eq!(done(&log), before + 1, "{change}: the host did it");
+        assert!(colour_ahead(&rig, &log), "{change}");
+        rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+        assert_eq!(host_reads(&log), (0, 2), "{change}");
+        let (now, drawn) = (rows_in(&rig, 10, 18), rows_in(&software, 10, 18));
+        assert_eq!(now, drawn, "{change}");
+    }
+}
+
+/// The rig's target, as `Rig::colour` gives it.
+fn rig_colour() -> Surface {
+    Rig::new(FORMAT, Some(DEPTH_FORMAT)).colour()
+}
+
+#[test]
+fn bands_that_share_rows_read_each_row_once_and_most_rows_read_it_whole() {
+    let mut software = Rig::new(FORMAT, Some(DEPTH_FORMAT));
+    triangles(&mut software);
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    let rows_read = |log: &Rc<RefCell<Log>>| log.borrow().rows_read;
+    // Rows 10 to 20, then 15 to 25 (the five not read yet), then 5 to
+    // 30 (the five above and the five below what was read), the same
+    // band again (nothing), and a single row inside (nothing).
+    let reads = [
+        (10, 20, 1, 10),
+        (15, 25, 2, 15),
+        (5, 30, 4, 25),
+        (5, 30, 4, 25),
+    ];
+    for (first, end, reads, rows) in reads {
+        let read = band(&rig, 0, SIZE, first, end);
+        rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+        assert_eq!(host_reads(&log), (0, reads), "{first}..{end}");
+        assert_eq!(rows_read(&log), rows, "{first}..{end}");
+    }
+    let read = band(&rig, 3, 4, 17, 18);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert_eq!(host_reads(&log), (0, 4));
+    assert_eq!(rows_in(&rig, 5, 30), rows_in(&software, 5, 30));
+    assert!(colour_ahead(&rig, &log));
+    // Ten more rows would make 35 of the 64 read in pieces, past half
+    // (`ROW_SHARE`): the surface comes back whole instead, the same,
+    // and isn't ahead after it. A whole surface read band by band ends
+    // so too.
+    let read = band(&rig, 0, SIZE, 30, 40);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert_eq!(host_reads(&log), (1, 4));
+    assert!(!colour_ahead(&rig, &log));
+    assert_eq!(rows_in(&rig, 0, SIZE), rows_in(&software, 0, SIZE));
+}
+
+#[test]
+fn a_cursor_reading_a_few_bands_a_frame_keeps_the_target_on_the_host() {
+    // Evil Islands' cursor: each frame the host draws, and a driver's
+    // blit reads a 32x32 rectangle out of the target, here three bands
+    // of eight rows of the rig's 64. Ten frames read rows alone.
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    for frame in 0..10 {
+        let colour = 0xFF00_0000 | (frame * 0x10);
+        let quad = corner(2.0 + frame as f32, 2.0, 40.0, 0.0, colour);
+        assert_eq!(rig.draw(4, &quad), 0);
+        for first in [8 * (frame % 4), 40, 50] {
+            let read = band(&rig, 2, 34, first, first + 8);
+            rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+        }
+    }
+    assert_eq!(host_reads(&log), (0, 30));
+    assert!(colour_ahead(&rig, &log));
+}
+
+#[test]
+fn a_read_of_a_rectangle_a_row_at_a_time_reads_the_surface_back_once() {
+    let mut software = Rig::new(FORMAT, Some(DEPTH_FORMAT));
+    triangles(&mut software);
+    // A driver that asks for the rectangle's rows first
+    // (`ddraw::surface::will_read_rows`) and then reads them one by one
+    // reads them back with one read.
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    let read = band(&rig, 2, 34, 10, 40);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    for y in 10..40 {
+        let row = band(&rig, 2, 34, y, y + 1);
+        rig.card.settle_rows(&mut rig.memory, row, Cause::Driver);
+    }
+    assert_eq!(host_reads(&log), (0, 1));
+    assert_eq!(rows_in(&rig, 10, 40), rows_in(&software, 10, 40));
+    // One that doesn't reads eight rows on their own (`ROW_READS`), and
+    // then the surface whole: every row of it, the same.
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    for y in 0..SIZE {
+        let row = band(&rig, 0, SIZE, y, y + 1);
+        rig.card.settle_rows(&mut rig.memory, row, Cause::Driver);
+    }
+    assert_eq!(host_reads(&log), (1, 8));
+    assert!(!colour_ahead(&rig, &log));
+    assert_eq!(rows_in(&rig, 0, SIZE), rows_in(&software, 0, SIZE));
+}
+
 /// A scene's depth kept in a second depth buffer the processor wrote,
 /// and put back with a `BLT` that names both as colour, as DirectDraw
 /// blits between two z-buffers: the triangle drawn after it is cut by
@@ -1447,6 +1732,265 @@ fn surfaces_over_the_same_bytes_take_each_others_pixels() {
     // corner, and the main target's kept it out of the red one's.
     assert_eq!(rig.px(6, 6), 0xFF_0000);
     assert_eq!(rig.px(45, 10), 0x00_00FF);
+}
+
+/// A 16x16 surface at `offset`, as a texture's image or as the copy
+/// it is filled from.
+fn tile(offset: u32) -> Surface {
+    Surface {
+        offset,
+        pitch: 16 * 4,
+        width: 16,
+        height: 16,
+        format: FORMAT,
+    }
+}
+
+/// The colour of the texels the tile at `STAGED + n * TILE` holds.
+fn staged(n: u32) -> u32 {
+    0xFF00_0000 | 0x11_2233 * (n + 1)
+}
+
+const STAGED: u32 = BUFFER;
+const TILE: u32 = 0x1000;
+/// A surface no draw uses, which a `FILL` and a `BLT` write.
+const ASIDE: u32 = TEXTURE + 0x8000;
+
+/// Textures streamed as Nocturne streams them, in one run of
+/// commands: a `BLT` copies a texture's texels in from a tile of
+/// their own before the draws that sample it. Texture 1 is filled
+/// before the first draw, texture 2 while that draw waits, and
+/// texture 1 again while a draw that samples it waits. A `FILL` of a
+/// surface no draw uses comes in between, and a `BLT` out of the
+/// target while a draw into it waits.
+fn streamed_textures(rig: &mut Rig) {
+    for n in 0..3 {
+        let texels = staged(n).to_le_bytes().repeat(16 * 16);
+        poke(rig, (STAGED + n * TILE) as usize, &texels);
+    }
+    let texture = |n: u32| Texture {
+        format: FORMAT,
+        width: 16,
+        height: 16,
+        levels: 1,
+        images: vec![(TEXTURE + n * TILE, 16 * 4)],
+        ..Texture::default()
+    };
+    rig.stage(
+        0,
+        &[(TSS_COLOROP, OP_SELECT_ARG1), (TSS_COLORARG1, ARG_TEXTURE)],
+    );
+    let whole = rect(0, 0, 16, 16);
+    let copy = |w: &mut Vec<u32>, into: u32, from: u32| {
+        let (dst, src) = (tile(TEXTURE + into * TILE), tile(STAGED + from * TILE));
+        command::encode::blt(w, &dst, &whole, &src, &whole, None);
+    };
+    let colour = rig.colour();
+    let error = rig.run(|w| {
+        encode::define_texture(w, 1, &texture(0));
+        encode::define_texture(w, 2, &texture(1));
+        copy(w, 0, 0);
+        encode::set_texture(w, 0, 1);
+        encode::draw(w, 5, TL, 4, &quad(0.0, 0.0, 16.0));
+        copy(w, 1, 1);
+        command::encode::fill(w, &tile(ASIDE), &whole, 0x00AB_CDEF);
+        encode::set_texture(w, 0, 2);
+        encode::draw(w, 5, TL, 4, &quad(16.0, 0.0, 16.0));
+        copy(w, 0, 2);
+        encode::set_texture(w, 0, 1);
+        encode::draw(w, 5, TL, 4, &quad(32.0, 0.0, 16.0));
+        // Out of the target, into the half of the tile aside the
+        // `FILL` left alone.
+        let half = rect(0, 8, 16, 8);
+        let drawn = rect(32, 8, 16, 8);
+        command::encode::blt(w, &tile(ASIDE), &half, &colour, &drawn, None);
+        encode::set_texture(w, 0, 2);
+        encode::draw(w, 5, TL, 4, &quad(48.0, 0.0, 16.0));
+    });
+    assert_eq!(error, 0);
+}
+
+#[test]
+fn a_blt_of_surfaces_no_waiting_draw_uses_leaves_the_hosts_batch_growing() {
+    let (rig, log) = same(takes_all, streamed_textures);
+    // Each draw sampled the texels copied in before it, and the
+    // second copy into texture 1 waited for the draw before it.
+    let rgb = |n| staged(n) & 0xFF_FFFF;
+    assert_eq!(rig.px(8, 8), rgb(0));
+    assert_eq!(rig.px(24, 8), rgb(1));
+    assert_eq!(rig.px(40, 8), rgb(2));
+    assert_eq!(rig.px(56, 8), rgb(1));
+    // The `BLT` out of the target waited for the draw into it, and
+    // the `FILL` is there.
+    let aside = tile(ASIDE);
+    assert_eq!(rig.word(aside.at(4, 12), 4) & 0xFF_FFFF, rgb(2));
+    assert_eq!(rig.word(aside.at(4, 4), 4), 0x00AB_CDEF);
+    // The first two draws are one batch: the copy into texture 2 and
+    // the `FILL` don't touch what the first draw uses. The copy into
+    // texture 1 ends it, as the first draw samples texture 1, and the
+    // `BLT` out of the target ends the next.
+    assert_eq!(log.borrow().batches, 3);
+}
+
+/// Where `queued_reads` keeps a palette and the one it copies over it.
+const PALETTE: u32 = BUFFER + 0x1_0000;
+const NEW_PALETTE: u32 = BUFFER + 0x1_1000;
+/// Its texture's two levels, and the texels copied into the second.
+const LEVELS: u32 = BUFFER + 0x2_0000;
+const NEW_LEVEL: u32 = BUFFER + 0x2_1000;
+/// A surface no draw uses.
+const UNUSED: u32 = BUFFER + 0x3_0000;
+
+/// A colour of the palette at `PALETTE`, and of the one copied over it.
+const OLD_COLOUR: u32 = 0xFF11_2233;
+const NEW_COLOUR: u32 = 0xFF44_5566;
+
+/// A surface of `width` by `height` pixels of `format` at `offset`,
+/// its rows one after the other.
+fn packed_at(offset: u32, width: u32, height: u32, format: Format) -> Surface {
+    Surface {
+        offset,
+        pitch: width * format.bytes(),
+        width,
+        height,
+        format,
+    }
+}
+
+/// Draws that wait in one run of commands while a `FILL` or a `BLT`
+/// touches, by turns, each kind of memory they use besides the
+/// target's colour: their texture's palette, a level of the texture
+/// they don't sample, the depth buffer written, the depth buffer read,
+/// and last memory none of them uses.
+fn queued_reads(rig: &mut Rig) {
+    let palette = |colour: u32| {
+        let mut words = [0u32; 256];
+        words[1] = colour;
+        words.map(u32::to_le_bytes).concat()
+    };
+    poke(rig, PALETTE as usize, &palette(OLD_COLOUR));
+    poke(rig, NEW_PALETTE as usize, &palette(NEW_COLOUR));
+    // Index 1 everywhere, in a 4x4 level and a 2x2 one.
+    poke(rig, LEVELS as usize, &[1; 16 + 4]);
+    poke(rig, NEW_LEVEL as usize, &[2; 4]);
+    let texture = Texture {
+        format: Format::P8,
+        width: 4,
+        height: 4,
+        levels: 2,
+        palette: Some(PALETTE),
+        images: vec![(LEVELS, 4), (LEVELS + 16, 2)],
+        ..Texture::default()
+    };
+    let error = rig.run(|w| {
+        encode::define_texture(w, 1, &texture);
+        encode::set_texture(w, 0, 1);
+    });
+    assert_eq!(error, 0);
+    rig.stage(
+        0,
+        &[(TSS_COLOROP, OP_SELECT_ARG1), (TSS_COLORARG1, ARG_TEXTURE)],
+    );
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF00_0000, 1.0, 0);
+    rig.states(&[(RS_ZENABLE, 1)]);
+
+    let depth = target(rig).depth_surface().expect("a depth buffer");
+    // The depth buffer under the name of a colour format of its size,
+    // as a `FILL` or a `BLT` takes it.
+    let depth = Surface {
+        format: Format::R5G6B5,
+        ..depth
+    };
+    let bottom = rect(0, 32, 64, 32);
+    let unused = packed_at(UNUSED, 64, 32, Format::R5G6B5);
+    let all = rect(0, 0, 64, 32);
+    let new_palette = packed_at(NEW_PALETTE, 256, 1, FORMAT);
+    let old_palette = packed_at(PALETTE, 256, 1, FORMAT);
+    let level = |offset| packed_at(offset, 2, 2, Format::P8);
+    let error = rig.run(|w| {
+        encode::draw(w, 5, TL, 4, &quad(0.0, 0.0, 16.0));
+        let whole = rect(0, 0, 256, 1);
+        command::encode::blt(w, &old_palette, &whole, &new_palette, &whole, None);
+        encode::draw(w, 5, TL, 4, &quad(16.0, 0.0, 16.0));
+        let texels = rect(0, 0, 2, 2);
+        let (into, from) = (level(LEVELS + 16), level(NEW_LEVEL));
+        command::encode::blt(w, &into, &texels, &from, &texels, None);
+        encode::draw(w, 5, TL, 4, &quad(32.0, 0.0, 16.0));
+        command::encode::fill(w, &depth, &bottom, 0);
+        encode::draw(w, 5, TL, 4, &quad(48.0, 0.0, 16.0));
+        command::encode::blt(w, &unused, &all, &depth, &bottom, None);
+        encode::draw(w, 5, TL, 4, &quad(0.0, 16.0, 16.0));
+        command::encode::fill(w, &unused, &all, 0x1234);
+        encode::draw(w, 5, TL, 4, &quad(16.0, 16.0, 16.0));
+    });
+    assert_eq!(error, 0);
+}
+
+#[test]
+fn a_fill_or_blt_of_any_memory_a_waiting_draw_uses_ends_the_batch() {
+    let (rig, log) = same(takes_all, queued_reads);
+    // The draw before the copy of the palette has the old colour, the
+    // one after it the new.
+    assert_eq!(rig.px(8, 8), OLD_COLOUR & 0xFF_FFFF);
+    assert_eq!(rig.px(24, 8), NEW_COLOUR & 0xFF_FFFF);
+    // The palette, the level, the depth written and the depth read
+    // each end a batch, and the `FILL` of the unused surface doesn't:
+    // the last two draws are one batch.
+    assert_eq!(log.borrow().batches, 5);
+}
+
+/// Draws into the top half of a surface wait while a `BLT` and a
+/// `FILL` write its bottom half: the halves are views of one surface,
+/// which the host keeps as one copy and has ahead. (The left and right
+/// halves would share bytes between their rows, so a `BLT` into one
+/// would wait for draws into the other.)
+fn beside_the_target(rig: &mut Rig) {
+    let whole = texture_surface();
+    let half = |y: u32| Surface {
+        offset: whole.at(0, y) as u32,
+        height: 32,
+        ..whole
+    };
+    let (top, bottom) = (half(0), half(32));
+    let texels = staged(0).to_le_bytes().repeat(16 * 16);
+    poke(rig, STAGED as usize, &texels);
+    let on = |colour: Surface| Target {
+        colour,
+        depth: None,
+    };
+    rig.stage(
+        0,
+        &[(TSS_COLOROP, OP_SELECT_ARG1), (TSS_COLORARG1, ARG_DIFFUSE)],
+    );
+    aim(rig, &on(whole));
+    rig.clear(CLEAR_COLOUR, 0xFF10_1010, 0.0, 0);
+    assert_eq!(rig.draw(4, &corner(0.0, 0.0, 64.0, 0.0, 0xFFFF_0000)), 0);
+    aim(rig, &on(top));
+    let whole_tile = rect(0, 0, 16, 16);
+    let error = rig.run(|w| {
+        encode::draw(w, 4, TL, 3, &corner(0.0, 0.0, 16.0, 0.0, 0xFF00_FF00));
+        let into = rect(0, 0, 16, 16);
+        command::encode::blt(w, &bottom, &into, &tile(STAGED), &whole_tile, None);
+        encode::draw(w, 4, TL, 3, &corner(32.0, 0.0, 16.0, 0.0, 0xFF00_00FF));
+        command::encode::fill(w, &bottom, &rect(48, 16, 16, 16), 0x00AB_CDEF);
+        encode::draw(w, 4, TL, 3, &corner(48.0, 0.0, 16.0, 0.0, 0xFFFF_FF00));
+    });
+    assert_eq!(error, 0);
+}
+
+#[test]
+fn a_blt_into_a_view_below_the_target_leaves_the_batch_growing() {
+    let (rig, log) = same(takes_all, beside_the_target);
+    let whole = texture_surface();
+    let px = |x, y| rig.word(whole.at(x, y), 4) & 0xFF_FFFF;
+    assert_eq!(px(2, 2), 0x00_FF00);
+    assert_eq!(px(34, 2), 0x00_00FF);
+    assert_eq!(px(50, 2), 0xFF_FF00);
+    assert_eq!(px(4, 36), staged(0) & 0xFF_FFFF);
+    assert_eq!(px(60, 60), 0xAB_CDEF);
+    // The red triangle's batch, and one for the three draws into the
+    // top half.
+    assert_eq!(log.borrow().batches, 2);
 }
 
 /// The first half of a scene, and the half after a state was saved.

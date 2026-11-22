@@ -23,6 +23,7 @@ fn audio_json(cpu: &Cpu) -> Value {
         "queue_growth_frames": cpu.bus.audio_feed.extra_frames(),
         "sound_blaster": cpu.bus.sb_blaster(),
         "opl3": cpu.bus.opl.is_opl3(),
+        "fm_chip": cpu.bus.opl.chip().name(),
         "ultrasound": cpu.bus.gus.as_ref().map(|gus| gus.config.ultrasnd()),
         "midi_synth": cpu.bus.mpu.synth_name(),
         "midi_voices": cpu.bus.mpu.gus_synth().map(|s| s.active_voices()),
@@ -46,6 +47,7 @@ impl DebugHub {
         let (frame_w, frame_h) = video::frame_size(&cpu.bus);
         let crtc = &cpu.bus.vga.crtc_regs;
         let timing = cpu.bus.vga.peek_timing();
+        let shown = cpu.bus.scanout();
         let mut status = json!({
             "paused": self.paused,
             "settings_window": self.divert,
@@ -58,6 +60,12 @@ impl DebugHub {
             "memory": {
                 "mb": cpu.bus.ram().len() >> 20,
                 "derived": cpu.bus.memory_derived,
+            },
+            // The processor, and whether it is the default for the display
+            // adapter (`cpu` isn't set).
+            "cpu": {
+                "model": cpu.model.describe(),
+                "derived": cpu.bus.cpu_derived,
             },
             // Deterministic mode: the clock's start, the machine's clock
             // now, emulated time, and every how many emulated ms input is
@@ -76,8 +84,9 @@ impl DebugHub {
             // what changed), its page flips (the frames it draws, however
             // many), the frames the built-in Windows showed for it (its
             // blits to the screen, as bursts and copies), its checks for
-            // keys that weren't there and idle calls, and its reads of the
-            // input status register (retrace polling).
+            // keys that weren't there and idle calls, its reads of the
+            // input status register (retrace polling), and the vertical
+            // retraces it let pass while it polled for them.
             "activity": {
                 "emulated_ns": cpu.bus.clock.now_ns(),
                 "frames_drawn": cpu.bus.frames_drawn,
@@ -87,6 +96,7 @@ impl DebugHub {
                 "presents": cpu.bus.activity.presents,
                 "polls": cpu.bus.activity.polls,
                 "status_reads": cpu.bus.activity.status_reads,
+                "missed_retraces": cpu.bus.activity.missed_retraces,
             },
             "cs_ip": cs_ip(cpu),
             "cpu_mode": pm::mode_name(cpu),
@@ -97,8 +107,11 @@ impl DebugHub {
             "video": {
                 // The display adapter programs see (`machine`).
                 "adapter": cpu.bus.vga.adapter.name(),
+                // The mode the BIOS last set (the VGA's), and the name of
+                // the picture on the monitor (`Bus::scanout`), which
+                // `scanout` below adds to.
                 "mode": cpu.bus.video_mode as u8,
-                "name": format!("{:?}", cpu.bus.video_mode),
+                "name": shown.name,
                 "width": w, "height": h,
                 // The picture as screenshots have it.
                 "frame": {"width": frame_w, "height": frame_h},
@@ -231,6 +244,9 @@ impl DebugHub {
         // What draws the window on the host (the `[DISPLAY]` line). Set
         // apart from the rest, which is at json!'s recursion limit.
         status["display"] = self.display.clone().into();
+        // Which device scans the picture out, and the bits of its pixels
+        // (`Bus::scanout`). Set apart for the same reason.
+        status["video"]["scanout"] = json!({"device": shown.device, "bpp": shown.bpp});
         // The frame rate cap in force (`fps_cap`: "auto", a rate, or null
         // for off), which a frame rate measured through the run can't
         // pass, and when the last frame it let through showed. Set apart
@@ -363,7 +379,7 @@ impl DebugHub {
         for _ in 0..count.min(1000) {
             let p = start.byte(cpu, at);
             let bytes = start.read_from(cpu, at, 15);
-            let (len, text) = if let Some(name) = trace::trap_name(&bytes, None, cpu.pm()) {
+            let (len, text) = if let Some(name) = trace::trap_name(&bytes, None, cpu.pm(), code32) {
                 (trace::trap_len(&bytes), name)
             } else {
                 // 32-bit code without a segment is taken to be flat, so
@@ -747,7 +763,15 @@ pub(super) fn sound_json(cpu: &Cpu) -> Value {
         .collect();
     let silenced: Vec<&str> =
         rust_dos::mixer::Channel::ALL.iter().filter(|c| bus.mixer.silenced >> c.index() & 1 != 0).map(|c| c.key()).collect();
-    json!({ "fm": { "opl3": bus.opl.is_opl3(), "idle": bus.opl.is_idle(), "channels": fm }, "gus": gus, "midi": midi, "silenced": silenced })
+    let fm = json!({
+        "opl3": bus.opl.is_opl3(),
+        "chip": bus.opl.chip().name(),
+        "idle": bus.opl.is_idle(),
+        // Frozen: it gives the frame it holds without running.
+        "held": bus.opl.is_held(),
+        "channels": fm,
+    });
+    json!({ "fm": fm, "gus": gus, "midi": midi, "silenced": silenced })
 }
 
 pub(super) fn ivt_json(cpu: &Cpu) -> Value {

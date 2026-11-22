@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use crate::testrunners;
 use testrunners::run_cpu_code;
 
-fn cpu() -> Cpu {
+fn cpu() -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.set_ss(0);
     cpu.set_sp(0x8000);
@@ -68,6 +68,24 @@ fn memory_above_1mb_and_past_the_end_of_ram() {
     assert_eq!(bus.read_8(0x0040_0000), 0xFF);
     // The top of the address space mirrors the BIOS ROM.
     assert_eq!(bus.read_8(0xFFFF_FFFE), 0xFC, "model byte");
+}
+
+#[test]
+fn vectors_past_the_bios_ones_start_null_as_on_an_at() {
+    // An AT BIOS sets up INT 00h-77h and leaves the rest zero. SBFMDRV
+    // installs on the first null vector from INT 80h up, and exits with
+    // "No interrupt vector available" when there is none.
+    let cpu = cpu();
+    let vector = |v: usize| cpu.bus.read_32(v * 4);
+    let free = (0x80..=0xFF).find(|&v| vector(v) == 0);
+    assert_eq!(free, Some(0x80), "INT 80h is free for SBFMDRV");
+    for v in 0x78..=0xFF {
+        let hle = rust_dos::bios::HLE_VECTORS.contains(&(v as u8));
+        assert_eq!(vector(v) == 0, !hle, "INT {v:02X}h");
+    }
+    for v in 0x70..=0x77 {
+        assert_ne!(vector(v), 0, "IRQ {} has a handler", v - 0x68);
+    }
 }
 
 #[test]
@@ -201,6 +219,29 @@ fn keyboard_acknowledges_commands() {
     assert_eq!(bus.io_read(0x60), 0xFA);
     bus.io_write(0x64, 0xAA); // controller self test
     assert_eq!(bus.io_read(0x60), 0x55);
+}
+
+#[test]
+fn the_keyboard_id_is_translated_while_the_controller_translates() {
+    let mut cpu = cpu();
+    let identify = |cpu: &mut Cpu| {
+        cpu.bus.io_write(0x60, 0xF2);
+        let mut bytes = Vec::new();
+        while cpu.bus.io_read(0x64) & 0x01 != 0 {
+            bytes.push(cpu.bus.io_read(0x60));
+            // The keyboard's next byte, without waiting for it.
+            cpu.bus.kbc.release();
+        }
+        cpu.set_ax(0x0A00);
+        rust_dos::interrupts::int16::handle(cpu);
+        (bytes, cpu.bx())
+    };
+    // An MF2 keyboard answers ABh 83h, and the 8042 turns the 83h into
+    // 41h while it translates, as it does by default.
+    assert_eq!(identify(&mut cpu), (vec![0xFA, 0xAB, 0x41], 0x41AB));
+    cpu.bus.io_write(0x64, 0x60);
+    cpu.bus.io_write(0x60, 0x01);
+    assert_eq!(identify(&mut cpu), (vec![0xFA, 0xAB, 0x83], 0x83AB));
 }
 
 #[test]
@@ -425,6 +466,45 @@ fn f11_and_f12_send_their_make_codes_and_only_the_enhanced_reads_return_them() {
 }
 
 #[test]
+fn the_bios_answers_the_keyboard_settings_functions_at_the_dos_prompt() {
+    let mut cpu = cpu();
+    let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = lines.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        log.borrow_mut().push(line.to_string())
+    }));
+
+    // AH=03h, AL=05h: set the typematic rate (BL) and delay (BH), as
+    // 1830's SOUND.EXE does on its way out. Nothing comes back.
+    cpu.set_ax(0x0305);
+    cpu.set_bx(0x0000);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!((cpu.ax(), cpu.bx()), (0x0305, 0x0000));
+    assert_eq!(cpu.bus.kbc.typematic, 0x00, "250 ms, 30 a second");
+    // AH=09h: the functions there are, which the configuration table's
+    // feature byte 2 (bit 6) says to ask for.
+    cpu.set_ax(0x0900);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!(
+        cpu.get_al(),
+        0x3D,
+        "AH=0Ah, AH=10h-12h and AX=0300h, 0305h and 0306h"
+    );
+    // AH=0Ah: the keyboard's ID, an MF2 keyboard behind the translating
+    // controller.
+    cpu.set_ax(0x0A00);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!(cpu.bx(), 0x41AB);
+
+    cpu.bus.log_hook = None;
+    let lines = lines.take();
+    assert!(
+        !lines.iter().any(|l| l.contains("Unhandled INT 16h")),
+        "{lines:?}"
+    );
+}
+
+#[test]
 fn the_bios_keeps_left_and_right_ctrl_and_alt_apart() {
     use rust_dos::keyboard::key_event;
     let mut cpu = cpu();
@@ -486,7 +566,11 @@ fn the_system_configuration_table_is_in_the_rom() {
     let table = cpu.get_physical_addr(cpu.es(), cpu.bx());
     assert!(rust_dos::bus::Bus::is_rom(table));
     let bytes: Vec<u8> = (0..6).map(|i| cpu.bus.read_8(table + i)).collect();
-    assert_eq!(bytes, [0x08, 0x00, 0xFC, 0x01, 0x00, 0x60], "an AT with a clock and two PICs");
+    assert_eq!(
+        bytes,
+        [0x08, 0x00, 0xFC, 0x01, 0x00, 0x70],
+        "an AT with a clock, two PICs and the keyboard intercept"
+    );
 }
 
 #[test]
@@ -509,6 +593,115 @@ fn the_bios_keyboard_interrupt_puts_the_keystroke_in_its_buffer() {
     rust_dos::interrupts::int16::handle(&mut cpu);
     assert_eq!(cpu.ax(), 0x1E61);
     assert!(BiosBuffer::keys(&mut cpu.bus).is_empty());
+}
+
+/// Run from CS:IP until a HLT, through the ROM's code and service traps.
+fn run_to_hlt(cpu: &mut Cpu) {
+    for _ in 0..1000 {
+        let at = cpu.get_physical_addr(cpu.cs(), cpu.ip());
+        if cpu.bus.read_8(at) == 0xF4 {
+            return;
+        }
+        cpu.step();
+    }
+    panic!("no HLT reached");
+}
+
+/// Press and let go of the key `scan`: the make code goes through the
+/// BIOS's keyboard interrupt as IRQ 1 (STI, then CLI and HLT once it ran),
+/// and the break code goes by unread, as for a program that doesn't care.
+fn press_through_the_bios(cpu: &mut Cpu, scan: u8) {
+    use rust_dos::keyboard::key_event;
+    key_event(&mut cpu.bus, scan, false, true, None);
+    cpu.set_cpu_flag(CpuFlags::IF, false);
+    cpu.set_ss(0);
+    cpu.set_sp(0x8000);
+    cpu.set_ds(0);
+    cpu.set_cs(0);
+    cpu.set_ip(0x100);
+    cpu.bus.load_bytes(0x100, &[0xFB, 0x90, 0xFA, 0xF4]); // STI; NOP; CLI; HLT
+    run_to_hlt(cpu);
+    cpu.bus.kbc.release();
+    key_event(&mut cpu.bus, scan, false, false, None);
+    cpu.bus.io_read(0x60);
+    cpu.bus.kbc.release();
+}
+
+#[test]
+fn the_bios_keyboard_interrupt_types_the_key_int_15h_4fh_hands_back() {
+    // A key remapper's hook hands back another scan code with CF set: the
+    // BIOS goes on with that one, as an AT's does with AL after the call.
+    use rust_dos::keyboard::BiosBuffer;
+    let mut cpu = cpu();
+    // The hook at 0000:0500: AH=4Fh with AL the byte at 0603h changes AL
+    // to the byte at 0604h; every key goes on to the BIOS (CF set).
+    let hook = [
+        0x80, 0xFC, 0x4F, // CMP AH, 4Fh
+        0x75, 0x0D, // JNE out
+        0x3A, 0x06, 0x03, 0x06, // CMP AL, [0603h]
+        0x75, 0x03, // JNE keep
+        0xA0, 0x04, 0x06, // MOV AL, [0604h]
+        0xF9, // keep: STC
+        0xCA, 0x02, 0x00, // RETF 2
+        0xCF, // out: IRET
+    ];
+    cpu.bus.load_bytes(0x500, &hook);
+    cpu.bus.write_16(0x15 * 4, 0x0500);
+    cpu.bus.write_16(0x15 * 4 + 2, 0x0000);
+
+    // A becomes B: B's keystroke, not the A the host typed.
+    cpu.bus.load_bytes(0x603, &[0x1E, 0x30]);
+    press_through_the_bios(&mut cpu, 0x1E);
+    assert_eq!(BiosBuffer::keys(&mut cpu.bus), [0x3062]);
+    assert!(cpu.bus.keyboard_buffer.is_empty(), "A is not typed later");
+    // A's make code becomes a break code: no keystroke, and the next key
+    // still types its own.
+    cpu.bus.load_bytes(0x603, &[0x1E, 0x9E]);
+    press_through_the_bios(&mut cpu, 0x1E);
+    press_through_the_bios(&mut cpu, 0x1F);
+    assert_eq!(BiosBuffer::keys(&mut cpu.bus), [0x3062, 0x1F73]);
+    assert!(cpu.bus.keyboard_buffer.is_empty());
+}
+
+#[test]
+fn the_bios_keyboard_interrupt_hands_each_scan_code_to_int_15h_4fh() {
+    // Sink or Swim leaves INT 09h to the BIOS and keeps its table of held
+    // keys from INT 15h AH=4Fh, which an AT's BIOS calls with each scan
+    // code. Its hook takes the key (CF clear), so no keystroke is kept.
+    use rust_dos::keyboard::BiosBuffer;
+    let mut cpu = cpu();
+    // The hook at 0000:0500: AH=4Fh puts AL at 0600h and counts the call
+    // at 0601h, then returns with CF from 0602h.
+    let hook = [
+        0x80, 0xFC, 0x4F, // CMP AH, 4Fh
+        0x75, 0x13, // JNE out
+        0xA2, 0x00, 0x06, // MOV [0600h], AL
+        0xFE, 0x06, 0x01, 0x06, // INC BYTE [0601h]
+        0xF8, // CLC
+        0x80, 0x3E, 0x02, 0x06, 0x00, // CMP BYTE [0602h], 0
+        0x74, 0x01, // JE keep
+        0xF9, // STC
+        0xCA, 0x02, 0x00, // keep: RETF 2
+        0xCF, // out: IRET
+    ];
+    cpu.bus.load_bytes(0x500, &hook);
+    cpu.bus.write_16(0x15 * 4, 0x0500);
+    cpu.bus.write_16(0x15 * 4 + 2, 0x0000);
+    let press = |cpu: &mut Cpu, scan: u8, pass_on: bool| {
+        cpu.bus.write_8(0x602, pass_on as u8);
+        press_through_the_bios(cpu, scan);
+    };
+
+    press(&mut cpu, 0x1E, false);
+    assert_eq!(cpu.bus.read_8(0x600), 0x1E, "the hook saw A's make code");
+    assert_eq!(cpu.bus.read_8(0x601), 1);
+    assert!(BiosBuffer::keys(&mut cpu.bus).is_empty(), "the hook took the key");
+    assert!(cpu.bus.keyboard_buffer.is_empty(), "nor is it typed later");
+
+    press(&mut cpu, 0x1F, true);
+    assert_eq!(cpu.bus.read_8(0x600), 0x1F);
+    assert_eq!(cpu.bus.read_8(0x601), 2);
+    assert_eq!(BiosBuffer::keys(&mut cpu.bus), [0x1F73], "a key passed on is typed");
 }
 
 #[test]

@@ -14,10 +14,14 @@
 //! When no thread can run, the processor runs the idle loop, a trap in
 //! KERNEL32 that lets time pass to the next interrupt or timeout.
 //!
-//! Waits are kept with the threads (`Wait`). Whatever may end one (an
-//! object signaled, a thread ended, time passing) calls `wake`, which
-//! ends the waits it can, in the threads' order, taking what they waited
-//! for (an auto-reset event's signal, a semaphore's count, a mutex).
+//! Waits are kept with the threads (`Wait`). An object signaled ends the
+//! waits for it at once (`object_changed`): SetEvent, ReleaseMutex and
+//! ReleaseSemaphore, and the events the system sets
+//! (`winmm::callback::set_event`). Whatever else may end one (a thread
+//! ended, time passing, input, a device's work) calls `wake`, which reads
+//! the devices and ends every wait that can end. Both end waits in the
+//! threads' order, taking what they waited for (an auto-reset event's
+//! signal, a semaphore's count, a mutex).
 
 use super::call::{self, THREAD_ATTACHED};
 use super::memory::{GRANULARITY, Memory, PRIVATE, SHARED, USER, WRITABLE};
@@ -508,7 +512,7 @@ fn signaled(objects: &Objects, id: u32, tid: u32) -> bool {
         }
         Some(Kind::Dos { .. } | Kind::File { .. }) => true,
         Some(Kind::Change { signaled, .. }) => *signaled,
-        Some(Kind::Mapping { .. } | Kind::Find { .. }) | None => false,
+        Some(Kind::Mapping { .. } | Kind::Find { .. } | Kind::Snapshot { .. }) | None => false,
     }
 }
 
@@ -549,25 +553,26 @@ fn try_wait(objects: &mut Objects, tid: u32, wait: &Wait) -> Option<u32> {
     if wait.section != 0 {
         return None;
     }
-    if wait.all {
-        if wait.objects.is_empty() || !wait.objects.iter().all(|&o| signaled(objects, o, tid)) {
+    try_take(objects, tid, &wait.objects, wait.all)
+}
+
+/// What a wait of the thread `tid` for the objects `ids` (all of them, or
+/// one) returns if it ends now, having taken what it waited for, or None
+/// if it goes on.
+fn try_take(objects: &mut Objects, tid: u32, ids: &[u32], all: bool) -> Option<u32> {
+    if all {
+        if ids.is_empty() || !ids.iter().all(|&o| signaled(objects, o, tid)) {
             return None;
         }
-        let abandoned = wait
-            .objects
-            .iter()
-            .fold(false, |a, &o| take(objects, o, tid) | a);
+        let abandoned = ids.iter().fold(false, |a, &o| take(objects, o, tid) | a);
         return Some(if abandoned {
             WAIT_ABANDONED_0
         } else {
             WAIT_OBJECT_0
         });
     }
-    let i = wait
-        .objects
-        .iter()
-        .position(|&o| signaled(objects, o, tid))?;
-    let abandoned = take(objects, wait.objects[i], tid);
+    let i = ids.iter().position(|&o| signaled(objects, o, tid))?;
+    let abandoned = take(objects, ids[i], tid);
     Some(
         i as u32
             + if abandoned {
@@ -581,9 +586,19 @@ fn try_wait(objects: &mut Objects, tid: u32, wait: &Wait) -> Option<u32> {
 /// What a wait for `wait` returns at once, if the running thread doesn't
 /// have to wait.
 pub fn wait_now(cpu: &mut Cpu, wait: &Wait) -> Option<u32> {
-    super::kernel32::change::poll(cpu, &wait.objects);
+    if wait.section != 0 {
+        return None;
+    }
+    poll_objects(cpu, &wait.objects, wait.all)
+}
+
+/// What a wait of the running thread for the objects `ids` (all of them,
+/// or one) returns at once, having taken what it waited for, if it doesn't
+/// have to wait.
+pub fn poll_objects(cpu: &mut Cpu, ids: &[u32], all: bool) -> Option<u32> {
+    super::kernel32::change::poll(cpu, ids);
     let tid = process(cpu).current_thread()?.id;
-    try_wait(&mut cpu.bus.win32.objects, tid, wait)
+    try_take(&mut cpu.bus.win32.objects, tid, ids, all)
 }
 
 /// The running thread waits for `wait`, and another runs meanwhile. What
@@ -632,6 +647,36 @@ pub fn end_wait(win32: &mut Win32, (p, t): At, result: u32) {
     thread.ctx.gpr[EAX] = result;
     for id in wait.objects {
         win32.objects.release(id);
+    }
+}
+
+/// The object `id` changed: the running thread set an event or released a
+/// mutex or a semaphore, or the system set an event
+/// (`winmm::callback::set_event`). The waits of the other threads that it
+/// may end, end, in the threads' order, as `wake` ends them. Only a wait
+/// for the object can. Whatever signals an object calls this or `wake`
+/// then, so a wait for it doesn't wait for a later `wake`. What else ends
+/// waits (time passing, input, the devices' notifications) `wake` looks
+/// at where it comes: at the timer's events (`preempt`), after
+/// interrupts, in the idle loop, and at the calls that post messages or
+/// play sound. Calling `wake` here as well polled the devices and copied
+/// every thread's wait at each SetEvent and ReleaseMutex, which made
+/// ReleaseMutex cost the host as much as two other calls (#1222).
+pub fn object_changed(win32: &mut Win32, id: u32) {
+    let running = current(win32);
+    for p in 0..win32.processes.len() {
+        for t in 0..win32.processes[p].threads.len() {
+            if running == Some((p, t)) {
+                continue;
+            }
+            let thread = &win32.processes[p].threads[t];
+            let Some(wait) = thread.wait.as_ref().filter(|w| w.objects.contains(&id)) else {
+                continue;
+            };
+            if let Some(result) = try_wait(&mut win32.objects, thread.id, wait) {
+                end_wait(win32, (p, t), result);
+            }
+        }
     }
 }
 

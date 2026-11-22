@@ -19,6 +19,7 @@ use iced_x86::ConditionCode;
 use super::block::{BlockData, LINKS, RETURN_LINK, RETURN_MISS, SIDE_LINK};
 use super::helpers::*;
 use super::uop::*;
+use crate::bus::UPPER_RAM;
 use crate::cpu::Seg;
 use crate::cpu::alu::ShiftOp;
 use crate::cpu::layout;
@@ -168,23 +169,26 @@ enum Thunk {
     /// handle, or negative for a fault.
     MemRef,
     /// EAX = the bytes (ECX of them) at handle RDX, which isn't RAM's,
-    /// through `jit_dev_read` or `jit_read`.
+    /// through `jit_dev_read` or `jit_read`, or from a Banshee's or
+    /// Voodoo3's memory itself where `card_state` found it may.
     Load,
     /// Store the byte, word or dword in ECX at handle RDX. RAX holds the
     /// block's bytes after the instruction, `smc_lo | smc_hi << 32`. A
-    /// handle that isn't RAM's goes into the VGA's planes inline where
-    /// `vga_ok` says so, else through `jit_dev_write` or `jit_write`. A RAM
-    /// handle is one in a block with code (the inline path writes the
-    /// rest): the store, the code generations of the first and last byte's
-    /// blocks bumped, as the bus's writes bump them, and a store into the
-    /// block's later bytes noted.
+    /// handle that isn't RAM's goes into a Banshee's or Voodoo3's memory
+    /// inline on a page `card_state` marked, into the VGA's planes inline
+    /// where `vga_ok` says so, else through `jit_dev_write` or `jit_write`.
+    /// A RAM handle is one in a block with code (the inline path writes
+    /// the rest): the store, the code generations of the first and last
+    /// byte's blocks bumped, as the bus's writes bump them, and a store
+    /// into the block's later bytes noted.
     Store1,
     Store2,
     Store4,
-    /// The handle of an operand at physical address EAX that isn't plain
-    /// RAM, as `MemRef` gives it for offset EDX and `memref_desc` ECX: the
-    /// address with `DEV_BIT` where the operand is within one page, else
-    /// `jit_memref`'s.
+    /// The handle of an operand at physical address EAX that the inline
+    /// checks didn't take as plain RAM, as `MemRef` gives it for offset EDX
+    /// and `memref_desc` ECX: where the operand is within one page, the
+    /// address, with `DEV_BIT` unless it is in the upper memory between
+    /// the ROMs; else `jit_memref`'s.
     Dev,
     /// The same for linear address EAX, through the TLB's set for
     /// supervisor or user code, for a read or a write.
@@ -297,6 +301,40 @@ fn memref_thunk(ops: &mut Asm) {
 }
 
 fn load_thunk(ops: &mut Asm) {
+    // A display card's memory where the code reads it by itself
+    // (`helpers::card_state`): on a page that allows it, the bytes at the
+    // handle's address less the memory's, from the memory on the host.
+    dynasm!(ops
+        ; .arch x64
+        ; bt rdx, DEV_BIT as i8
+        ; jnc >helper
+        ; mov eax, edx
+        ; sub eax, DWORD [r12 + CTX_CARD_LO]
+        ; cmp eax, DWORD [r12 + CTX_CARD_LEN]
+        ; jae >helper
+        ; push rdx
+        ; push rax
+        ; mov rdx, QWORD [r12 + CTX_CARD_PAGES]
+        ; shr eax, 12
+        ; test BYTE [rdx + rax], PAGE_READ as i8
+        ; pop rax
+        ; pop rdx
+        ; jz >helper
+        ; add rax, QWORD [r12 + CTX_CARD_BASE]
+        ; inc QWORD [r12 + CTX_CARD_READS]
+        ; cmp ecx, 2
+        ; je >two
+        ; ja >four
+        ; movzx eax, BYTE [rax]
+        ; ret
+        ; two:
+        ; movzx eax, WORD [rax]
+        ; ret
+        ; four:
+        ; mov eax, DWORD [rax]
+        ; ret
+        ; helper:
+    );
     thunk_save(ops);
     dynasm!(ops
         ; .arch x64
@@ -313,8 +351,158 @@ fn load_thunk(ops: &mut Asm) {
     dynasm!(ops ; .arch x64 ; ret);
 }
 
-/// `Thunk::StoreRun8` and `Thunk::StoreRun16`.
+/// What the bus does for a write of `s` bytes into the VESA frame
+/// buffer out of the picture shown (`Bus::write_lfb`, `write_to_lfb`),
+/// where it only counts: the bytes of a burst for `cycles=auto`, as the
+/// VGA's in `store_thunk` (a write that starts a burst goes to the bus),
+/// on a page of the picture `cycles=auto` knows also as that picture's,
+/// the page's count for a ToadForce's host renderer
+/// (`gpu::Pages::wrote`), and the bytes of the surface ahead on the host
+/// that has the page (`gpu::Written::note`). AL has the page's flags
+/// (`helpers::PAGE_WRITE` and on), R8D the bytes' offset in video
+/// memory; R8, R9 and RCX are pushed. It goes on at the `plain` label
+/// before it to store the bytes, or at the `slow` label after it to
+/// leave them to the bus. Everything is checked before anything is
+/// done, so a write that goes to the bus is counted once.
+fn card_count(ops: &mut Asm, s: i32) {
+    let mask = ((1u64 << s) - 1) as i32;
+    let slots = CTX_CARD_NOTES - 32;
+    dynasm!(ops
+        ; .arch x64
+        ; push r10
+        ; push r11
+        ; mov r10, QWORD [rbx + layout::ICOUNT as i32]
+        ; sub r10, QWORD [rbx + layout::LAST_WRITE as i32]
+        ; cmp r10, layout::BURST_GAP as i32
+        ; ja >unwind
+        ; movzx r11d, al
+        ; shr r11d, PAGE_NOTE_SHIFT as i8
+        ; and r11d, 7
+        ; jz >noted
+        // The slot (from 1) and the bytes' place in its surface, which
+        // has them all in one word of its bits.
+        ; shl r11d, 5
+        ; lea r11, [r12 + r11 + slots]
+        ; mov r9d, r8d
+        ; sub r9d, DWORD [r11]
+        ; cmp r9d, DWORD [r11 + 4]
+        ; jae >unwind
+        ; lea eax, [r9 + s]
+        ; cmp eax, DWORD [r11 + 4]
+        ; ja >unwind
+        ; mov eax, r9d
+        ; and eax, 63
+        ; cmp eax, 64 - s
+        ; ja >unwind
+        ; push rcx
+        ; mov ecx, eax
+        ; mov r10d, mask
+        ; shl r10, cl
+        ; pop rcx
+        ; shr r9d, 6
+        ; mov rax, QWORD [r11 + 8]
+        ; or QWORD [rax + r9 * 8], r10
+        ; mov rax, QWORD [r11 + 16]
+        ; mov BYTE [rax], 1
+        ; noted:
+        // Bytes of the picture `cycles=auto` knows: their count, and the
+        // lowest offset and the one past the highest of the burst's.
+        ; mov r9, QWORD [r12 + CTX_CARD_PAGES]
+        ; mov eax, r8d
+        ; shr eax, 12
+        ; test BYTE [r9 + rax], PAGE_SHOWN as i8
+        ; jz >unshown
+        ; add QWORD [rbx + layout::SHOWN_BYTES as i32], s
+        ; mov r9d, r8d
+        ; cmp r9, QWORD [rbx + layout::LOW as i32]
+        ; jae >low
+        ; mov QWORD [rbx + layout::LOW as i32], r9
+        ; low:
+        ; add r9, s
+        ; cmp r9, QWORD [rbx + layout::HIGH as i32]
+        ; jbe >unshown
+        ; mov QWORD [rbx + layout::HIGH as i32], r9
+        ; unshown:
+        ; mov r10, QWORD [rbx + layout::ICOUNT as i32]
+        ; add QWORD [rbx + layout::VIDEO_BYTES as i32], s
+        ; add QWORD [rbx + layout::BURST as i32], s
+        ; mov QWORD [rbx + layout::LAST_WRITE as i32], r10
+        ; mov rax, QWORD [r12 + CTX_CARD_GENERATION]
+        ; test rax, rax
+        ; jz >counted
+        ; inc QWORD [rax]
+        ; mov rax, QWORD [r12 + CTX_CARD_COUNTS]
+        ; mov r9d, r8d
+        ; shr r9d, 12
+        ; inc QWORD [rax + r9 * 8]
+        ; counted:
+        ; pop r11
+        ; pop r10
+        ; jmp <plain
+        ; unwind:
+        ; pop r11
+        ; pop r10
+        ; jmp >slow
+    );
+}
+
+/// `Thunk::StoreRun8` and `Thunk::StoreRun16`. Into a display card's
+/// memory on a page the code may write (`helpers::card_state`), the
+/// bytes go in by themselves, as `store_thunk` puts a dword: DirectDraw's
+/// and a software renderer's MMX stores into a locked surface.
 fn store_run_thunk(ops: &mut Asm, size: i32) {
+    dynasm!(ops
+        ; .arch x64
+        ; bt rdx, DEV_BIT as i8
+        ; jnc >helper
+        ; push r8
+        ; push r9
+        ; mov r8d, edx
+        ; sub r8d, DWORD [r12 + CTX_CARD_LO]
+        ; cmp r8d, DWORD [r12 + CTX_CARD_LEN]
+        ; jae >slow
+        // (All in one page, which the frame buffer has all of.)
+        ; mov eax, r8d
+        ; and eax, 0xFFF
+        ; cmp eax, 0x1000 - size
+        ; ja >slow
+        ; mov r9, QWORD [r12 + CTX_CARD_PAGES]
+        ; mov eax, r8d
+        ; shr eax, 12
+        ; movzx eax, BYTE [r9 + rax]
+        ; test al, PAGE_WRITE as i8
+        ; jz >slow
+        ; test al, PAGE_COUNT as i8
+        ; jnz >count
+        ; plain:
+        ; add r8, QWORD [r12 + CTX_CARD_BASE]
+    );
+    for at in (0..size).step_by(8) {
+        dynasm!(ops
+            ; .arch x64
+            ; mov r9, QWORD [rcx + at]
+            ; mov QWORD [r8 + at], r9
+        );
+    }
+    dynasm!(ops
+        ; .arch x64
+        ; mov BYTE [r12 + CTX_CARD_WROTE], 1
+        // Counted as the bus counts the run: as its dwords.
+        ; add QWORD [r12 + CTX_CARD_WRITES], size / 4
+        ; pop r9
+        ; pop r8
+        ; mov eax, 1
+        ; ret
+        ; count:
+    );
+    card_count(ops, size);
+    dynasm!(ops
+        ; .arch x64
+        ; slow:
+        ; pop r9
+        ; pop r8
+        ; helper:
+    );
     thunk_save(ops);
     dynasm!(ops
         ; .arch x64
@@ -336,10 +524,47 @@ fn store_thunk(ops: &mut Asm, size: u8, code: DynamicLabel) {
         ; mov QWORD [r12 + CTX_SMC_LO], rax
         ; push r8
         ; push r9
-        // Pixels into the VGA's planes, which mode X programs write one or
-        // two at a time (see `helpers::vga_state`).
         ; bt rdx, DEV_BIT as i8
         ; jnc >slow
+        // Pixels into a display card's memory, which a software renderer
+        // writes into a locked surface one at a time (see
+        // `helpers::card_state`): on a page the code may write, into the
+        // memory on the host.
+        ; mov r8d, edx
+        ; sub r8d, DWORD [r12 + CTX_CARD_LO]
+        ; cmp r8d, DWORD [r12 + CTX_CARD_LEN]
+        ; jae >vga
+        ; mov r9, QWORD [r12 + CTX_CARD_PAGES]
+        ; mov eax, r8d
+        ; shr eax, 12
+        ; movzx eax, BYTE [r9 + rax]
+        ; test al, PAGE_WRITE as i8
+        ; jz >slow
+        ; test al, PAGE_COUNT as i8
+        ; jnz >count
+        ; plain:
+        ; add r8, QWORD [r12 + CTX_CARD_BASE]
+    );
+    match size {
+        1 => dynasm!(ops ; .arch x64 ; mov BYTE [r8], cl),
+        2 => dynasm!(ops ; .arch x64 ; mov WORD [r8], cx),
+        _ => dynasm!(ops ; .arch x64 ; mov DWORD [r8], ecx),
+    }
+    dynasm!(ops
+        ; .arch x64
+        ; mov BYTE [r12 + CTX_CARD_WROTE], 1
+        ; inc QWORD [r12 + CTX_CARD_WRITES]
+        ; pop r9
+        ; pop r8
+        ; ret
+        ; count:
+    );
+    card_count(ops, s);
+    dynasm!(ops
+        ; .arch x64
+        // Pixels into the VGA's planes, which mode X programs write one or
+        // two at a time (see `helpers::vga_state`).
+        ; vga:
         ; cmp BYTE [r12 + CTX_VGA_OK], 0
         ; je >slow
         ; mov eax, edx
@@ -468,11 +693,20 @@ fn dev_thunk(ops: &mut Asm, tlb: Option<(i32, i32)>, memref: DynamicLabel) {
             ; or eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_PHYS as i32]
         );
     }
+    // The upper memory between the ROMs is RAM (`bus::UPPER_RAM`): its
+    // handle is the address, which the inline checks only don't take
+    // because they stop at A0000h. Its ends are on page boundaries, so the
+    // operand, within one page, is all in it or all out.
+    const _: () = assert!(UPPER_RAM.start & 0xFFF == 0 && UPPER_RAM.end & 0xFFF == 0);
     dynasm!(ops
         ; .arch x64
         ; add rsp, 16
         ; mov eax, eax
+        ; lea ecx, [eax - UPPER_RAM.start as i32]
+        ; cmp ecx, (UPPER_RAM.end - UPPER_RAM.start) as i32
+        ; jb >ram
         ; bts rax, 32
+        ; ram:
         ; ret
         ; slow:
         ; pop rdx
@@ -1944,6 +2178,41 @@ impl Gen<'_> {
                 }
             }
             Uop::SarConst { t, count } => dynasm!(self.ops ; .arch x64 ; sar Rd(r(t)), count as i8),
+            Uop::AddDir { t, step, size } => {
+                const DF: i32 = 0x400;
+                let t = r(t);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov eax, step as i32
+                    ; test DWORD [rbx + FLAGS], DF
+                    ; jz >up
+                    ; neg eax
+                    ; up:
+                    ; add Rd(t), eax
+                );
+                if size == 2 {
+                    dynasm!(self.ops ; .arch x64 ; movzx Rd(t), Rw(t));
+                }
+            }
+            Uop::AddShifted {
+                t,
+                src,
+                shift,
+                size,
+            } => {
+                let (t, src) = (r(t), r(src));
+                // (LEA changes no flags; the 64-bit sum's low dword is
+                // the 32-bit one.)
+                match shift {
+                    0 => dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(t) + Rq(src)]),
+                    1 => dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(t) + Rq(src) * 2]),
+                    2 => dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(t) + Rq(src) * 4]),
+                    _ => dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(t) + Rq(src) * 8]),
+                }
+                if size == 2 {
+                    dynasm!(self.ops ; .arch x64 ; movzx Rd(t), Rw(t));
+                }
+            }
             Uop::Extend { t, from, signed } => {
                 let t = r(t);
                 match (from, signed) {
@@ -2106,6 +2375,19 @@ impl Gen<'_> {
                     (BitKind::Reset, _) => dynasm!(self.ops ; .arch x64 ; btr Rd(t), ecx),
                     (BitKind::Complement, 2) => dynasm!(self.ops ; .arch x64 ; btc Rw(t), cx),
                     (BitKind::Complement, _) => dynasm!(self.ops ; .arch x64 ; btc Rd(t), ecx),
+                }
+            }
+            Uop::BitScan { forward, dst, src } => {
+                let (dst, src) = (r(dst), r(src));
+                dynasm!(self.ops ; .arch x64 ; mov eax, ZF as i32 ; test Rd(src), Rd(src) ; jz >zero);
+                if forward {
+                    dynasm!(self.ops ; .arch x64 ; bsf Rd(dst), Rd(src));
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; bsr Rd(dst), Rd(src));
+                }
+                dynasm!(self.ops ; .arch x64 ; xor eax, eax ; zero:);
+                if self.wanted(ZF) {
+                    self.merge(ZF, ZF);
                 }
             }
             Uop::SetCond { t, cc } => {
@@ -2390,12 +2672,11 @@ impl Gen<'_> {
             Uop::Out { size, port, t } => self.port_io(true, size, port, t),
             Uop::RepStart { t, count, max } => {
                 const TF: i32 = 0x100;
-                const DF: i32 = 0x400;
                 self.get_into(r(t), count);
                 let at = self.ops.new_dynamic_label();
                 dynasm!(self.ops
                     ; .arch x64
-                    ; test DWORD [rbx + FLAGS], TF | DF
+                    ; test DWORD [rbx + FLAGS], TF
                     ; jnz =>at
                     ; cmp Rd(r(t)), max as i32
                     ; ja =>at
@@ -2415,14 +2696,6 @@ impl Gen<'_> {
             Uop::RepEnd { t } => {
                 let top = self.rep_top.take().expect("RepStart before RepEnd");
                 dynasm!(self.ops ; .arch x64 ; test Rd(r(t)), Rd(r(t)) ; jnz =>top);
-            }
-            Uop::Forward => {
-                const DF: i32 = 0x400;
-                let at = self.ops.new_dynamic_label();
-                dynasm!(self.ops ; .arch x64 ; test DWORD [rbx + FLAGS], DF ; jnz =>at);
-                let end = self.end();
-                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
-                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
             }
             Uop::FpuGuard { valid } => self.fpu_guard(valid),
             Uop::FBailPrecise { regs, when } => self.fpu_bail_precise(regs, when),
@@ -2639,22 +2912,42 @@ impl Gen<'_> {
                     self.fpu_canon(x.0);
                 }
             }
-            Uop::FLoadInt64 { x, m } => {
-                let at = self.ops.new_dynamic_label();
-                // Within 2^53 either way, the qword shifted right by 53 is
-                // 0 or -1.
+            Uop::FPushInt64 { m } => {
+                self.fpu_known = self.fpu_known << 1 | 1;
                 dynasm!(self.ops
                     ; .arch x64
                     ; mov rax, QWORD [r13 + Rq(r(m))]
-                    ; mov rcx, rax
-                    ; sar rcx, 53
-                    ; add rcx, 1
-                    ; cmp rcx, 1
-                    ; ja =>at
-                    ; pxor Rx(x.0), Rx(x.0)
-                    ; cvtsi2sd Rx(x.0), rax
+                    // The double, rounded to nearest as `F80::get_f64`
+                    // rounds the 80 bits.
+                    ; pxor xmm2, xmm2
+                    ; cvtsi2sd xmm2, rax
+                    // EDX the sign as the 80 bits' bit 15 of their top
+                    // word, RAX the magnitude (i64::MIN's is 2^63).
+                    ; mov rdx, rax
+                    ; sar rdx, 63
+                    ; xor rax, rdx
+                    ; sub rax, rdx
+                    ; and edx, 0x8000
+                    // 0 is all zeros. Else the exponent is 16383 plus the
+                    // top bit's place, and the significand the magnitude
+                    // shifted up to bit 63.
+                    ; bsr rcx, rax
+                    ; jz >fild64_zero
+                    ; lea edx, [rdx + rcx + 16383]
+                    ; xor ecx, 63
+                    ; shl rax, cl
+                    ; fild64_zero:
+                    ; mov ecx, DWORD [rbx + FPU_TOP]
+                    ; dec ecx
+                    ; and ecx, 7
+                    ; mov QWORD [rbx + FPU_TOP], rcx
+                    ; movsd QWORD [rbx + rcx * 8 + FPU_F64], xmm2
+                    ; mov BYTE [rbx + rcx + FPU_STALE], 0
+                    ; mov BYTE [rbx + rcx + FPU_TAGS], FPU_VALID
+                    ; shl ecx, 4
+                    ; mov QWORD [rbx + rcx + FPU_X80], rax
+                    ; mov QWORD [rbx + rcx + FPU_X80 + 8], rdx
                 );
-                self.bail(at, false);
             }
             Uop::FToHalf { t, x, high } => {
                 dynasm!(self.ops ; .arch x64 ; movq rax, Rx(x.0));
@@ -2706,6 +2999,66 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; addsub_done:);
             }
             Uop::FChs => self.fpu_op(1 << 13, None),
+            Uop::FRndint => {
+                const C1: i16 = 0x200;
+                const C1_C2: i16 = 0x600;
+                const PE: i16 = 0x20;
+                // Inline where the control word rounds to nearest (as the
+                // host's MXCSR does) and ST(0) is its double (stale) below
+                // 2^52 in magnitude: CVTSD2SI rounds it, and the sign is
+                // the value's, which keeps a -0 from a value in (-0.5, 0).
+                // (FRNDINT doesn't use the precision control.) Else
+                // (another rounding, 80 bits that hold more, a magnitude
+                // of 2^52 or more, which is an integer already, an
+                // infinity or a NaN) the handler's.
+                self.fpu_phys(RAX, 0);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; test WORD [rbx + FPU_CONTROL], 0xC00
+                    ; jnz >frndint_other
+                    ; cmp BYTE [rbx + rax + FPU_STALE], 0
+                    ; je >frndint_other
+                    ; movsd xmm2, QWORD [rbx + rax * 8 + FPU_F64]
+                    ; movq rdx, xmm2
+                    ; mov rcx, rdx
+                    ; shl rcx, 1
+                    ; shr rcx, 53
+                    ; cmp ecx, 0x433
+                    ; jae >frndint_other
+                    ; cvtsd2si rcx, xmm2
+                    ; cvtsi2sd xmm3, rcx
+                    ; movq rcx, xmm3
+                    ; btr rdx, 63
+                    ; jnc >frndint_positive
+                    ; bts rcx, 63
+                    ; frndint_positive:
+                    ; movq xmm3, rcx
+                    ; movsd QWORD [rbx + rax * 8 + FPU_F64], xmm3
+                    ; mov BYTE [rbx + rax + FPU_STALE], 1
+                    ; and WORD [rbx + FPU_FLAGS], !C1_C2
+                    // Inexact: PE, and C1 where the magnitude went up.
+                    ; btr rcx, 63
+                    ; cmp rcx, rdx
+                    ; je >frndint_done
+                    ; jb >frndint_down
+                    ; or WORD [rbx + FPU_FLAGS], C1
+                    ; frndint_down:
+                    ; or WORD [rbx + FPU_FLAGS], PE
+                    ; jmp >frndint_done
+                    ; frndint_other:
+                );
+                self.fpu_op(6 << 13, None);
+                dynasm!(self.ops ; .arch x64 ; frndint_done:);
+            }
+            Uop::FAbs => self.fpu_op(7 << 13, None),
+            Uop::FTrig { op } => {
+                self.fpu_op((op.reg_op() << 13) as i32, None);
+                if op.pushes() {
+                    // Pushed in range, as it was out of it: the registers
+                    // known either way.
+                    self.fpu_known &= self.fpu_known << 1 | 1;
+                }
+            }
             Uop::FSqrt => {
                 const C1: i16 = 0x200;
                 // The root inline where the double is above 0, else (a
@@ -2727,7 +3080,10 @@ impl Gen<'_> {
                 self.fpu_op(4 << 13, None);
                 dynasm!(self.ops ; .arch x64 ; fsqrt_done:);
             }
-            Uop::FLoad80 { m } => self.fpu_op(2 << 13, Some(m)),
+            Uop::FLoad80 { m } => {
+                self.fpu_known = self.fpu_known << 1 | 1;
+                self.fpu_op(2 << 13, Some(m));
+            }
             Uop::FAddValue { kind, x } => {
                 use crate::instructions::fpu::arithmetic::{ADD_VALUE, SUB_VALUE};
                 // 8: the double in X.
@@ -2754,10 +3110,11 @@ impl Gen<'_> {
             }
             Uop::FCom { a, b } => {
                 // C0, C2 and C3 are where CF, PF and ZF are in AH's flags.
-                const C0_C2_C3: i16 = 0x4500;
+                // C1 is cleared.
+                const C0_TO_C3: i16 = 0x4700;
                 dynasm!(self.ops
                     ; .arch x64
-                    ; and WORD [rbx + FPU_FLAGS], !C0_C2_C3
+                    ; and WORD [rbx + FPU_FLAGS], !C0_TO_C3
                     ; ucomisd Rx(a.0), Rx(b.0)
                     ; mov eax, 0
                     ; mov ecx, 0
@@ -2880,8 +3237,6 @@ impl Gen<'_> {
                 let at = self.ops.new_dynamic_label();
                 dynasm!(self.ops
                     ; .arch x64
-                    ; cmp BYTE [rbx + CPL], 0
-                    ; jne =>at
                     ; mov eax, DWORD [rbx + FLAGS]
                 );
                 if size == 4 {
@@ -2893,11 +3248,26 @@ impl Gen<'_> {
                         ; jnz =>at
                     );
                 }
+                // EDX: the flags it loads at this CPL and IOPL (CPL and
+                // IOPL compared as bits 12-13).
                 dynasm!(self.ops
                     ; .arch x64
+                    ; movzx ecx, BYTE [rbx + CPL]
+                    ; mov edx, POPF_RING0 as i32
+                    ; test ecx, ecx
+                    ; jz >mask
+                    ; shl ecx, 12
+                    ; mov edx, eax
+                    ; and edx, 0x3000
+                    ; cmp ecx, edx
+                    ; mov edx, POPF_IOPL as i32
+                    ; jbe >mask
+                    ; mov edx, POPF_USER as i32
+                    ; mask:
                     ; mov ecx, Rd(r(t))
-                    ; and ecx, POPF_RING0 as i32
-                    ; and eax, !POPF_RING0 as i32
+                    ; and ecx, edx
+                    ; not edx
+                    ; and eax, edx
                     ; or eax, ecx
                     ; or eax, 2
                     ; mov DWORD [rbx + FLAGS], eax
@@ -3384,15 +3754,18 @@ impl Gen<'_> {
                     ; jnz >precise_done
                 );
             }
-            Precise::Equal(a, b) => {
+            Precise::Compare(a, b) => {
+                // Unordered: the handler. EDX = 1 where equal.
                 dynasm!(self.ops
                     ; .arch x64
                     ; ucomisd Rx(a.0), Rx(b.0)
-                    ; jne >precise_done
-                    ; jp >precise_done
+                    ; jp =>at
+                    ; mov edx, 0
+                    ; sete dl
                 );
             }
         }
+        let compare = matches!(when, Precise::Compare(..));
         dynasm!(self.ops ; .arch x64 ; precise_regs:);
         dynasm!(self.ops ; .arch x64 ; mov eax, DWORD [rbx + FPU_TOP]);
         for i in (0..8).filter(|i| regs >> i & 1 != 0) {
@@ -3403,6 +3776,24 @@ impl Gen<'_> {
                 ; cmp BYTE [rbx + rcx + FPU_STALE], 0
                 ; jne >precise_next
                 ; shl ecx, 4
+            );
+            if compare {
+                // A nonzero exponent with the integer bit clear: a format
+                // the FPU doesn't take. The bits below a double's only
+                // where the doubles are equal.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; test BYTE [rbx + rcx + FPU_X80 + 7], 0x80u8 as i8
+                    ; jnz >precise_int
+                    ; test WORD [rbx + rcx + FPU_X80 + 8], 0x7FFF
+                    ; jnz =>at
+                    ; precise_int:
+                    ; test edx, edx
+                    ; jz >precise_next
+                );
+            }
+            dynasm!(self.ops
+                ; .arch x64
                 ; test WORD [rbx + rcx + FPU_X80], 0x7FF
                 ; jnz =>at
                 ; precise_next:
@@ -3539,34 +3930,102 @@ impl Gen<'_> {
         dynasm!(self.ops ; .arch x64 ; mov Rd(t_), eax ; toint_done:);
     }
 
-    /// `Uop::FToInt64`: the conversion where the control word rounds to
-    /// nearest or chops, else the handler's. A value that doesn't fit, or a
-    /// NaN, converts to the integer indefinite (i64::MIN), which goes to
-    /// the handler too.
+    /// `Uop::FToInt64`. A register that holds no more than its double
+    /// converts the double where the control word rounds to nearest or
+    /// chops; one whose 80 bits hold more converts them where they are an
+    /// integer of 2^53 to 2^63, which every rounding leaves as it is, and
+    /// converts the double as well where that is under 2^52 and neither an
+    /// integer nor halfway between two (`Precise::Int`): the 80 bits then
+    /// round to nearest or chop to the same integer. A value that doesn't
+    /// fit, a NaN, other roundings and the rest go through
+    /// `jit_fpu_to_int64`.
     fn fpu_to_int64(&mut self, lo: T, hi: T, x: X) {
-        let at = self.ops.new_dynamic_label();
+        let (l, h) = (r(lo), r(hi));
         dynasm!(self.ops
             ; .arch x64
+            ; mov eax, DWORD [rbx + FPU_TOP]
+            ; cmp BYTE [rbx + rax + FPU_STALE], 0
+            ; jne >toint64_double
+            ; shl eax, 4
+            ; mov rdx, QWORD [rbx + rax + FPU_X80]
+            ; test edx, 0x7FF
+            ; jz >toint64_double
+            // The 80 bits: exponent e from 53 to 62 (ECX e - 53), the
+            // integer bit set, and the significand's 63 - e bits below
+            // the point 0.
+            ; movzx eax, WORD [rbx + rax + FPU_X80 + 8]
+            ; mov ecx, eax
+            ; and ecx, 0x7FFF
+            ; sub ecx, 16383 + 53
+            ; cmp ecx, 9
+            ; ja >toint64_frac
+            ; test rdx, rdx
+            ; jns >toint64_frac
+            ; neg ecx
+            ; add ecx, 10
+            ; mov Rq(l), rdx
+            ; shr Rq(l), cl
+            ; mov Rq(h), Rq(l)
+            ; shl Rq(h), cl
+            ; cmp Rq(h), rdx
+            ; jne >toint64_frac
+            ; test eax, 0x8000
+            ; jz >toint64_split
+            ; neg Rq(l)
+            ; jmp >toint64_split
+            // The double, as `fpu_bail_precise` checks it for
+            // `Precise::Int`: from 2^52 on, or a multiple of 1/2 from 1/2
+            // on, the handlers' code has it.
+            ; toint64_frac:
+            ; movq rax, Rx(x.0)
+            ; mov rdx, rax
+            ; shr rdx, 52
+            ; and edx, 0x7FF
+            ; cmp edx, 1023 + 52
+            ; jae >toint64_slow
+            ; cmp edx, 1023 - 1
+            ; jb >toint64_double
+            ; mov ecx, 1023 + 51
+            ; sub ecx, edx
+            ; mov edx, 1
+            ; shl rdx, cl
+            ; dec rdx
+            ; test rax, rdx
+            ; jz >toint64_slow
+            ; toint64_double:
             ; movzx eax, WORD [rbx + FPU_CONTROL]
             ; and eax, 0xC00
             ; jnz >toint64_other
-            ; cvtsd2si rcx, Rx(x.0)
+            ; cvtsd2si Rq(l), Rx(x.0)
             ; jmp >toint64_check
             ; toint64_other:
             ; cmp eax, 0xC00
-            ; jne =>at
-            ; cvttsd2si rcx, Rx(x.0)
+            ; jne >toint64_slow
+            ; cvttsd2si Rq(l), Rx(x.0)
             ; toint64_check:
-            // (Only i64::MIN overflows when 1 is taken from it.)
-            ; cmp rcx, 1
-            ; jo =>at
-            ; mov Rd(r(lo)), ecx
-            ; shr rcx, 32
-            ; mov Rd(r(hi)), ecx
+            // A value that doesn't fit, or a NaN, converts to i64::MIN,
+            // the only one that overflows when 1 is taken from it: the
+            // helper tells -2^63 from the integer indefinite (and IE).
+            ; cmp Rq(l), 1
+            ; jno >toint64_split
+            ; toint64_slow:
         );
-        let end = self.end();
-        let (wb, reload) = (self.cache.dirty, self.cache.loaded);
-        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
+        self.save_for_call();
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov rsi, r12
+            ; mov rdi, rbx
+            ; call QWORD [r12 + CTX_FPU + 40]
+        );
+        self.restore_after_call();
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov Rq(l), rax
+            ; toint64_split:
+            ; mov Rq(h), Rq(l)
+            ; shr Rq(h), 32
+            ; mov Rd(l), Rd(l)
+        );
     }
 
     /// Keep the temporaries and the cached guest registers around a call

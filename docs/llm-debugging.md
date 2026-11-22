@@ -96,7 +96,10 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   `rust-dos.log` in the per-user config directory, replaced on every start.
   Read it through `/api/log` instead, which can filter it. When running
   several instances, give each its own file with `--log FILE`, or they
-  replace each other's log.
+  replace each other's log. A crash ends the log with a `[CRASH]` line:
+  a panic's message and place, or on Windows an exception's code and
+  module. A run with `--hidden` or the debug server shows no dialog for
+  it, so nothing waits for a click.
 
 All examples below use `H=localhost:8086` and `J='-H content-type:application/json'`.
 
@@ -122,10 +125,14 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Capture the display shader** with `/api/screenshot?shader=true`. This
   explicitly renders and reads back one frame through the active shader,
   independent of `record_shader`; the default endpoint stays unfiltered.
-  The response uses the filtered output size. It returns HTTP 409 when the
-  display has no shader output, such as with the SDL renderer or `shader=none`.
-  For example, `curl -fsS "$H/api/screenshot?shader=true" -o xbrz.png` saves
-  the filtered PNG; add `&format=raw` for RGB24 bytes and size headers.
+  The response uses the filtered output size: the size the window shows
+  the picture at, without the black bars. With `shader=none` it is the
+  picture scaled as the window scales it (`filter`), which shows how
+  evenly its pixels come out at a scale that isn't a whole number. It
+  returns HTTP 409 with the SDL renderer, which has no OpenGL output to
+  read back. For example,
+  `curl -fsS "$H/api/screenshot?shader=true" -o xbrz.png` saves the
+  filtered PNG; add `&format=raw` for RGB24 bytes and size headers.
 - **Find the highlighted item in a text-mode menu.** The text alone doesn't
   show which item is selected. The JSON reply of `/api/screen/text` (without
   `format=text`) has `attrs`: for each row, runs of cells with the same
@@ -141,38 +148,47 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
   DOS prompt), `cs_ip`, the video mode and `video.adapter` (the display
   adapter `machine` gives programs), `paused`, `input_queue`, and
-  `cycles_per_ms`, the current CPU speed. `memory` has the RAM's size
-  (`mb`) and whether it is the default for the CPU and the display
-  adapter (`derived`: true while `memsize` isn't set; after a save state
-  is loaded, while the state's size is the default for its CPU and
-  adapter). `paused` (with `stop` and `stop_seq`) says whether the
-  debugger has stopped the machine, at a breakpoint or otherwise.
-  `cpu_state` is the processor's own state: `Running`, or `Halted` after
-  HLT until an interrupt. It stays `Running` while the machine is
-  paused, so wait for a stop with `paused` or the journal's `paused`
-  entry, not with `cpu_state`. `video.vga` shows the CRTC Start Address
-  the program set and the one on screen, which helps when a game
-  that flips pages flickers or shows half-drawn frames. `video.crt` is the
-  display timing the VGA registers describe (refresh rate, total and
-  displayed scanlines): port 3DAh reports retrace and display enable from
-  it in emulated time, and the Start Address is latched at each retrace. In
-  a VESA mode (`video.name` is `Vesa`), `video.vbe` shows the VBE mode
-  number, size and bits per pixel, the bank of the window at A0000h, the
-  bytes per scan line, the displayed start offset and the DAC width; the
-  log has a `Switch to VESA mode` line for each mode set. With
-  `machine=svga_et4000`, `video.et4000` has the chip's CR30-3Fh, whether
-  the KEY is set, Segment Select (write bank low, read bank high), the
-  Sierra DAC's command register and HiColor bits, and the VESA mode set;
-  its Super VGA modes are VGA modes (`Graphics320x200` for 256 colours or
-  HiColor, `Vga640x480` for 16) at the size `video.width`/`height` give,
-  and the log has a `Switch to Tseng mode` line for each. `pic` shows both
-  interrupt controllers' vector bases and their request (`irr`), mask
-  (`imr`) and in-service (`isr`) registers, master first: a request that
-  stays set under a mask bit is an IRQ the program has turned off. With
-  `[vfx1]`, `vfx1` has the VFX1's port, the driver's video mode (0 mono,
-  1 pages, 2 lines), the page select register, how often it was written
-  and how often the game read the head tracker (`polls`), and whether the
-  shutter glasses' 3D BIOS has its glasses on.
+  `cycles_per_ms`, the current CPU speed. `memory` has the RAM's size (`mb`)
+  and whether it is the default for the CPU and the display adapter
+  (`derived`: true while `memsize` isn't set; after a save state is loaded,
+  while the state's size is the default for its CPU and adapter). `cpu` has
+  the processor's `model` and whether it is the default for the display
+  adapter (`derived`: true while `cpu` isn't set; after a save state is
+  loaded, while the state's model is the default for its adapter). `paused`
+  (with `stop` and `stop_seq`) says whether the debugger has stopped the
+  machine, at a breakpoint or otherwise. `cpu_state` is the processor's own
+  state: `Running`, or `Halted` after HLT until an interrupt. It stays
+  `Running` while the machine is paused, so wait for a stop with `paused` or
+  the journal's `paused` entry, not with `cpu_state`. `video.name` names the
+  picture on the monitor, `video.width`/`height` give its size, and
+  `video.scanout` says which device scans it out (`device`: `vga` for the
+  adapter's VGA and VESA modes, or the 3dfx card's `banshee`, `voodoo1` or
+  `voodoo2`) and the bits of its pixels (`bpp`, in a VESA mode or the card's
+  own; null in the VGA's standard modes, which the name tells). While a
+  Banshee's or Voodoo3's desktop shows, as under Windows, `name` is like
+  `Banshee 640x480x16`, and `video.mode` is still the mode the BIOS last
+  set, often text mode 3. `video.vga` shows the CRTC Start Address the
+  program set and the one on screen, which helps when a game that flips
+  pages flickers or shows half-drawn frames. `video.crt` is the display
+  timing the VGA registers describe (refresh rate, total and displayed
+  scanlines): port 3DAh reports retrace and display enable from it in
+  emulated time, and the Start Address is latched at each retrace. In a VESA
+  mode (`video.name` is `Vesa`), `video.vbe` shows the VBE mode number, size
+  and bits per pixel, the bank of the window at A0000h, the bytes per scan
+  line, the displayed start offset and the DAC width; the log has a `Switch
+  to VESA mode` line for each mode set. With `machine=svga_et4000`,
+  `video.et4000` has the chip's CR30-3Fh, whether the KEY is set, Segment
+  Select (write bank low, read bank high), the Sierra DAC's command register
+  and HiColor bits, and the VESA mode set; its Super VGA modes are VGA modes
+  (`Graphics320x200` for 256 colours or HiColor, `Vga640x480` for 16) at the
+  size `video.width`/`height` give, and the log has a `Switch to Tseng mode`
+  line for each. `pic` shows both interrupt controllers' vector bases and
+  their request (`irr`), mask (`imr`) and in-service (`isr`) registers,
+  master first: a request that stays set under a mask bit is an IRQ the
+  program has turned off. With `[vfx1]`, `vfx1` has the VFX1's port, the
+  driver's video mode (0 mono, 1 pages, 2 lines), the page select register,
+  how often it was written and how often the game read the head tracker
+  (`polls`), and whether the shutter glasses' 3D BIOS has its glasses on.
 - **Check which host GPU draws with `/api/status` → `display`.** It is
   the log's `[DISPLAY]` line: with OpenGL, its version, the graphics chip
   (GL_RENDERER) and its vendor (GL_VENDOR), which on a laptop with two
@@ -296,6 +312,12 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   follow motion, so steer their pointer with these.
   `/api/status` → `mouse` shows the driver's position and whether it is
   installed.
+- **A held key repeats** as a PC keyboard's does, in emulated time: its
+  make code (and keystroke) comes again 500 ms after it went down, then
+  10.9 times a second, or at the rate a program set (command F3h, INT 16h
+  AX=0305h), until it comes up or another key goes down. A game that
+  moves one step for each make code it reads (Starflight) walks for as
+  long as `hold_ms` holds the key.
 - **Keys arrive at most one scan code per frame** (about 16 ms). A long
   `type` string takes roughly 2 frames per character, or 4 for shifted
   characters.
@@ -1094,14 +1116,15 @@ the DOS prompt to write the changes into it. The log's `[DISK]` line at
 the mount names the delta file. `-inplace` writes the image itself.
 
 - **Status:** `/api/status` has `cpu_mode` `v86` while a DOS box or the
-  BIOS runs under Windows, `video.s3` with the S3's extended CRTC
-  registers and hardware cursor position (with `machine=svga_s3`, and a
-  ViRGE's), and with `svga_s3virge`/`svga_s3virgevx` `video.s3.virge`:
-  the 2D engine's BitBLTs, rectangles, lines and polygons, the 3D
-  engine's `triangles` and `lines_3d`, the last 3D command (`cmd_3d`),
-  the subsystem status, and the overlay, if one is shown,
-  `video.vga.crtc` with the standard CRTC registers, and `kbc` with the
-  keyboard controller's output buffer and queues.
+  BIOS runs under Windows, and while DOS runs under the built-in
+  virtual-8086 monitor (with EMS on), `video.s3` with the S3's extended
+  CRTC registers and hardware cursor position (with `machine=svga_s3`, and
+  a ViRGE's), and with `svga_s3virge`/`svga_s3virgevx` `video.s3.virge`:
+  the 2D engine's BitBLTs, rectangles, lines and polygons, the 3D engine's
+  `triangles` and `lines_3d`, the last 3D command (`cmd_3d`), the
+  subsystem status, and the overlay, if one is shown, `video.vga.crtc`
+  with the standard CRTC registers, and `kbc` with the keyboard
+  controller's output buffer and queues.
 - **The mouse:** Windows reads the PS/2 mouse's motion and accelerates
   it, so move in small relative steps (`{"action":"move","dx":10,"dy":-6}`)
   a few tenths of a second apart and read where the pointer went from
@@ -1175,6 +1198,10 @@ counts what the OpenGL renderer costs and misses:
   surface. A screenshot, a recording, the debugger's picture and an
   open settings window each read the picture back, so `show` counts
   the frames one of them wanted.
+- `read_back_rows`: reads of some rows of a surface, which stays on the
+  GPU (a driver's blit of a rectangle out of it): `reads`, the `rows`
+  they read, and `bytes`, the bytes of pixels read back in all, whole
+  surfaces' (`read_backs`) and rows'.
 - `declined_draws`: draws the software renderer drew because OpenGL
   doesn't draw their state as the card does. Each reads its target
   back first. `declined_for` has them by reason, every reason listed
@@ -1217,6 +1244,15 @@ draws in the deterministic run too. The program runs the same in both
 as long as it doesn't act on the pixels it reads, and the frames
 differ only where the renderers do. Check `renderer` before trusting
 identical pictures.
+
+Screenshots, `/ws/screen` and recordings show the surface at the
+card's `MODE_START` (in `mode.start`), with either renderer. After a
+flip without the wait, the built-in Windows' DirectDraw Flip, that is
+the frame just flipped to, from that moment on: a shot at a fixed
+emulated time shows the last frame the program finished, never the
+buffer it goes on to draw its next frame into. A flip that waits
+shows at the next vertical blank ("Flips" in
+`docs/toadforce-spec.md`).
 
 To find the draws a difference between the renderers comes from,
 record what the card is given and draw the recording through both:
@@ -1298,6 +1334,14 @@ usually left `fbiInit` at their power-on values (`00000410 00201102
   have: alpha written with another colour buffer, by the CPU or by the
   blitter, or a depth test against them. From then on every job is drawn
   in software too, and `released_jobs` grows with `triangles`.
+- **Held pictures:** on a Banshee or Voodoo3, a program that draws into
+  the buffer shown while a swap waits for its retrace holds the picture
+  until the swap shows. With the software picture, `held_keeps` counts
+  the holds that kept the memory's 16-bit words (a 16-bit desktop, the
+  overlay off or in a 16-bit format, the cursor off), `held_conversions`
+  the pictures drawn from those words because a host frame or a capture
+  asked for one during the hold, and `held_copies` the holds of other
+  modes, which draw the picture at once. OpenGL counts none of them.
 - **2D on the GPU:** on a Banshee or Voodoo3, `gpu_2d` counts the 2D
   operations done in OpenGL's copy of the memory (`blits`), the pages
   read back for the CPU (`pages_read_back`), and the operations left to
@@ -1391,10 +1435,12 @@ half the screen, frames copied as what changed; counted as frames for
 protected-mode programs only), `flips` (display start changes), `presents`
 (what the built-in Windows drew on the screen for the program, its blits to
 the primary surface and GDI's drawing, in bursts that are a frame or a copy
-by the same rules), `polls` (key checks that found nothing, idle calls) and
-`status_reads` (port 3DAh), with `emulated_ns` to make rates of them. Sample
-it twice and divide: a game's frame rate at a few fixed speeds shows where
-it stops growing. `presents` count only what lands in the picture shown, not
+by the same rules), `polls` (key checks that found nothing, idle calls),
+`status_reads` (port 3DAh) and `missed_retraces` (vertical retraces that
+began and ended between two reads of 3DAh less than a quarter of a frame
+apart: the program polled for one and an interrupt covered it), with
+`emulated_ns` to make rates of them. Sample it twice and divide: a game's
+frame rate at a few fixed speeds shows where it stops growing. `presents` count only what lands in the picture shown, not
 the copies to surfaces out of sight, and where there are any, they are the
 frames instead of the program's own bursts and copies, which may be the same
 frames drawn in video memory before they were shown. Start the emulator with
@@ -1517,11 +1563,16 @@ With `win32` on, a Win32 console program runs on the built-in Windows
   of standard input, output and error.
 - `page_file`, in pages: its `size` (twice the machine's memory), the
   committed pages it holds (`used`), the physical pages of programs' own
-  memory that may go out to it (`pageable`), and since start the pages
-  of zeros given a physical page (`zero_ins`, most of them on a
-  program's first touch of memory it committed), the pages read back
-  (`ins`) and those written out to make room (`outs`). Null until the
-  built-in Windows has its memory.
+  memory and modules' images that may go out to it (`pageable`), and
+  since start the pages of zeros given a physical page (`zero_ins`, most
+  of them on a program's first touch of memory it committed), the pages
+  read back (`ins`) and those written out to make room (`outs`). For
+  views of mapped files: the pages read from their files (`view_reads`),
+  those given back to the pool to make room (`view_evicted`), and the
+  searches of the views for pages to give back (`view_sweeps`), counted
+  whether they found any or not; each gives back at most a batch, so
+  many more searches than pages given back means the views have little
+  left to give. Null until the built-in Windows has its memory.
 
 `GET /api/win32/page_file` lists the pages of the running address space
 (`cr3`) that are in the page file, as `ranges` of pages next to each
@@ -1736,27 +1787,30 @@ by physical address.
   frame rate cap (`fps_cap`, `auto` by default: 60, and the display's rate
   for a present that waits for the retrace; CONFIGURATION.md's "Frame rate
   cap"), which holds the 3dfx card's swaps and the built-in Windows'
-  presents: start a run that measures how fast a game draws with
-  `--fps-cap off` (or `POST /api/fps_cap {"fps_cap":"off"}`), and check
-  `video.fps_cap` in `/api/status` ("auto", a rate, or null for off)
-  before quoting a frame rate. `fps_cap` in `/api/stats` (`features` has
-  `fps_cap_stats`) counts what the cap did to the frames since the machine
-  started: `shown` (the frames through it, without the presents it leaves
-  to the display's retrace), `held` (those that waited for their turn),
-  `late` (those that came after it), `reanchors` (those late enough for the
-  turns to start again from them) and `dropped_ms` (the time held frames
-  waited because of that). Take the difference of two readings:
-  `dropped_ms` over the emulated time between them is the most a game
-  whose logic steps once a frame ran slow for the cap, and `held` at 0
-  says the cap held nothing. `/api/stats` reports `mips` (host speed while
-  executing guest code), `emulated_mips` (guest instructions per wall-clock
-  second) and the decode-cache hit rate, averaged over about a second. Its
-  `frame` object has the settings window's Stats page numbers and the
-  emulated speed over the last quarter second: the game runs at full speed
-  when `emulated_speed` (emulated seconds a wall second) stays near 1,
-  `frame.fps` is the frames the program draws a second (the top-level `fps`
-  counts the window's frames), and `cpu_use` is the percent of the wall time
-  the emulator's main thread works (running the machine and drawing the
+  presents: start a run that measures how fast a game draws with `--fps-cap
+  off` (or `POST /api/fps_cap {"fps_cap":"off"}`), and check `video.fps_cap`
+  in `/api/status` ("auto", a rate, or null for off) before quoting a frame
+  rate. `fps_cap` in `/api/stats` (`features` has `fps_cap_stats`) counts
+  what the cap did to the frames since the machine started: `shown` (the
+  frames through it, without the presents it leaves to the display's
+  retrace), `held` (those that waited for their turn), `late` (those that
+  came after it), `reanchors` (those late enough for the turns to start
+  again from them) and `dropped_ms` (the time held frames waited because of
+  that). Take the difference of two readings: `dropped_ms` over the emulated
+  time between them is the most a game whose logic steps once a frame ran
+  slow for the cap, and `held` at 0 says the cap held nothing. `/api/stats`
+  reports `mips` (host speed while executing guest code), `emulated_mips`
+  (guest instructions per wall-clock second) and the decode-cache hit rate,
+  averaged over about a second. Its `frame` object has the settings window's
+  Stats page numbers and the emulated speed over the last quarter second:
+  the game runs at full speed when `emulated_speed` (emulated seconds a wall
+  second) stays near 1, `frame.fps` is the frames the program draws a second
+  (the top-level `fps` counts the window's frames; a frame is a retrace
+  after which the picture changed: the program's own drawing, a page flip, a
+  3dfx buffer swap, a blit or flip of DirectDraw's primary surface, or GDI's
+  drawing that changed pixels on the screen, so a repaint of the same pixels
+  counts as none), and `cpu_use` is the percent of the wall time the
+  emulator's main thread works (running the machine and drawing the
   picture), so 100 minus it is that thread's time to spare, on one host
   core. `audio_driver` is what played the sound during the run. Its
   `frame_times` object covers the host's last 1024 frames while the machine

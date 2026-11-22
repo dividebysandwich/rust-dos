@@ -11,13 +11,22 @@ on:
   # ready_for_review too, as drafts skip the release builds (see `scope`).
   # A pull request that changes only the documentation outside `src`
   # doesn't run this workflow: nothing reads it but the packages, which
-  # copy it as it is. `src/config_ui/help/*.md` is compiled into the
-  # program, so `*.md` stops at the top folder.
+  # copy it as it is, and two tests, which check that the debugging guide
+  # and the ToadForce specification list every name the code has (so
+  # those two files run it). `src/config_ui/help/*.md` is compiled into
+  # the program, so `*.md` stops at the top folder. `.claude/` holds the
+  # coding agents' skills and scripts, which no build or test reads.
+  # GitHub documents `!` patterns for `paths` alone, where a later
+  # pattern that matches a file overrides an earlier one.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore:
-      - "*.md"
-      - "docs/**"
+    paths:
+      - "**"
+      - "!*.md"
+      - "!docs/**"
+      - "docs/llm-debugging.md"
+      - "docs/toadforce-spec.md"
+      - "!.claude/**"
   # Manual runs build every artifact (downloadable from the run page)
   # without creating a release.
   workflow_dispatch:
@@ -25,9 +34,13 @@ on:
 # A push to a pull request cancels that pull request's run still going,
 # whose results nobody needs any more. Every other run has a group of its
 # own (its run ID), so pushes to main and tags neither wait for each
-# other nor get cancelled.
+# other nor get cancelled. The run that marking a draft ready starts has a
+# group of its own per pull request, so it leaves the draft's run on the
+# same commit going: that run's tests are the ones this run then skips
+# (see `tested`). A push after that cancels the draft's run but not the
+# ready run, whose release builds then finish on the older commit.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}${{ github.event.action == 'ready_for_review' && '-ready' || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -42,8 +55,81 @@ defaults:
     shell: bash
 
 jobs:
+  # When a draft is marked ready for review: whether another run of this
+  # workflow on the same commit of the pull request succeeded or is still
+  # going, with its tests passed or still running. That run is the
+  # draft's, which runs every job but the release builds and `web`, so
+  # this run then skips the tests and the libretro jobs and makes only
+  # those, while the draft's run reports the tests on the pull request.
+  # The tests run here instead when no run counts: one that failed or
+  # was cancelled doesn't, nor one with a test job that failed, was
+  # cancelled or was skipped (an earlier ready run that counted on
+  # another), nor a ready run still going (this run's start cancels it).
+  # A lookup that fails shows its error and counts nothing. Each
+  # pull_request run tests the pull request merged into main as it was
+  # when the run started, so the tests skipped here may have run against
+  # an older main. Nothing tests the merge again when it lands either:
+  # main's own push run is what finds a pull request that main has
+  # broken. Skipped on every other event, which costs the jobs below no
+  # wait.
+  tested:
+    name: tested
+    if: github.event.action == 'ready_for_review'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      covered: ${{ steps.check.outputs.covered }}
+    steps:
+      - name: Look for another passed or running run on this commit
+        id: check
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          runs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/rust.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100" \
+            --jq '.workflow_runs[] | [.id, .status, .conclusion // "-", .html_url] | @tsv')
+          while IFS=$'\t' read -r id status conclusion url; do
+            [[ -n $id && $id != "$RUN_ID" ]] || continue
+            # A run waiting for approval (a fork's) or for an environment
+            # may never start.
+            case "$status $conclusion" in
+              "completed success" | requested* | pending* | queued* | in_progress*) ;;
+              *)
+                echo "$url: $status $conclusion"
+                continue
+                ;;
+            esac
+            # A test job's name starts with "test (", also when it is skipped
+            # and its matrix isn't expanded. A job still going has no
+            # conclusion.
+            flags=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100" \
+              --jq '.jobs[]
+                | if (.name | startswith("test (")) and .conclusion != null
+                    and .conclusion != "success" then "test-not-passed"
+                  elif .name == "tested" and .conclusion != "skipped" then "ready-run"
+                  else empty end')
+            if [[ $flags == *test-not-passed* ]]; then
+              echo "$url: a test job failed, was cancelled or was skipped"
+              continue
+            fi
+            if [[ $status != completed && $flags == *ready-run* ]]; then
+              echo "$url: a ready run, which this one cancels"
+              continue
+            fi
+            echo "$url: $status $conclusion, covers the tests"
+            echo "covered=true" >> "$GITHUB_OUTPUT"
+            break
+          done <<< "$runs"
+
   test:
     name: test (${{ matrix.label }})
+    # `tested` is skipped on every event but ready_for_review, and a job
+    # whose need was skipped runs only with a status function in its `if`.
+    needs: tested
+    if: ${{ !cancelled() && needs.tested.outputs.covered != 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -156,7 +242,7 @@ jobs:
           # SDL3.dll for the program the tests start.
           echo "${{ github.workspace }}/SDL3/lib/x64" >> "$GITHUB_PATH"
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
       # Saved only from main: every PR restores main's entries, while a
@@ -199,6 +285,10 @@ jobs:
             video::shader::tests::sources_compile
           xvfb-run -a cargo test --locked --bin rust-dos \
             display::gl:: -- --ignored --test-threads=1
+          # SDL's renderer (OpenGL on Mesa here) in its pixel-art mode.
+          xvfb-run -a cargo test --locked --bin rust-dos \
+            display::tests::sdl_sharp_scaling_gives_texels_one_width -- \
+            --ignored --test-threads=1
           xvfb-run -a cargo test --locked --test program \
             debug_journal_tests::xbrz_window_screenshots_use_the_selected_shader -- \
             --ignored --test-threads=1
@@ -248,7 +338,8 @@ jobs:
   build:
     name: ${{ matrix.label }}
     needs: [test, scope]
-    if: needs.scope.outputs.builds != '[]'
+    # A skipped `test` (see `tested`) passes; a failed one stops the builds.
+    if: ${{ !cancelled() && !failure() && needs.scope.outputs.builds != '[]' }}
     runs-on: ${{ matrix.os }}
     # Empty for every non-compat entry, which means "no container". zizmor
     # can't see the images in a matrix that comes from `scope`, so it
@@ -417,7 +508,7 @@ jobs:
           strip openxr/libopenxr_loader.so.1
           cp "OpenXR-SDK-release-$OPENXR_VERSION/LICENSE" openxr/openxr-LICENSE.txt
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         if: ${{ !matrix.win7 }}
         with:
           toolchain: stable
@@ -426,7 +517,7 @@ jobs:
       # (is_console was missing), nightly-2026-10-31's does. Move it on now
       # and then, after checking with `cargo +nightly-<date> check
       # -Zbuild-std --target x86_64-win7-windows-msvc`.
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         if: matrix.win7
         with:
           toolchain: nightly-2026-10-31
@@ -598,14 +689,14 @@ jobs:
   web:
     name: web
     needs: test
-    if: ${{ !github.event.pull_request.draft }}
+    if: ${{ !cancelled() && !failure() && !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
@@ -760,15 +851,17 @@ jobs:
   # picks: its tests and clippy, without the release build or the package.
   libretro-pr:
     name: libretro (linux-x86_64, tests and clippy)
-    needs: [test, scope]
-    if: needs.scope.outputs.libretro != 'true'
+    needs: [tested, test, scope]
+    if: >-
+      ${{ !cancelled() && !failure() && needs.tested.outputs.covered != 'true'
+      && needs.scope.outputs.libretro != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
           components: clippy
@@ -792,8 +885,10 @@ jobs:
   # the library without SDL or ALSA, which the frontend has in their place.
   libretro:
     name: libretro (${{ matrix.label }})
-    needs: [test, scope]
-    if: needs.scope.outputs.libretro == 'true'
+    needs: [tested, test, scope]
+    if: >-
+      ${{ !cancelled() && !failure() && needs.tested.outputs.covered != 'true'
+      && needs.scope.outputs.libretro == 'true' }}
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     strategy:
@@ -845,7 +940,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
           components: clippy
@@ -906,8 +1001,10 @@ jobs:
   # Cross-built, so its tests run in the libretro job above instead.
   libretro-android:
     name: libretro (android-${{ matrix.abi }})
-    needs: [test, scope]
-    if: needs.scope.outputs.libretro == 'true'
+    needs: [tested, test, scope]
+    if: >-
+      ${{ !cancelled() && !failure() && needs.tested.outputs.covered != 'true'
+      && needs.scope.outputs.libretro == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -924,7 +1021,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -974,7 +1071,9 @@ jobs:
 
   release:
     name: create release
-    if: github.ref_type == 'tag'
+    # `tested` is skipped on tags, and without a status function this `if`
+    # would also need every job before its own needs to have succeeded.
+    if: ${{ !cancelled() && !failure() && github.ref_type == 'tag' }}
     needs: [build, web, libretro, libretro-android]
     runs-on: ubuntu-latest
     permissions:

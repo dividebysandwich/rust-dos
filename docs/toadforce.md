@@ -222,6 +222,7 @@ All are 32 bits, little-endian.
 | 064h | `SCANLINE` | R | current scan line |
 | 100h- | `CAPS[n]` | R | capability table of `LEVEL` (see "Feature levels") |
 | 400h- | `PALETTE[n]` | R/W | the 256 colours of a P8 mode |
+| 800h- | `GAMMA[n]` | R/W | the gamma ramp of the 16- and 32-bit modes; the identity after reset |
 
 `STATUS`, `IRQ_STATUS`, `MODE_START`, `FRAME` and `SCANLINE` follow the
 emulated clock, so they read the same in two deterministic runs. There
@@ -506,10 +507,20 @@ section covers names that section.
   processing.
 - **W buffer.** The card has none. A program that turns one on
   (`D3DZB_USEW`) draws with the z-buffer.
-- **Gamma ramp.** The card has none. DirectDraw's gamma control and
-  Direct3D 8's `SetGammaRamp` keep the ramp and give it back, and the
-  picture stays as it was: a brightness slider or a fade that a game
-  makes with the ramp shows nothing.
+- **Gamma ramp.** The card's 16- and 32-bit modes go through its
+  `GAMMA` registers. `SetDeviceGammaRamp`, DirectDraw's gamma control
+  on the primary surface and Direct3D 8's `SetGammaRamp` on a
+  full-screen device set them, and a brightness slider or a fade that
+  a game makes with the ramp shows. DirectDraw's caps have
+  `DDCAPS2_PRIMARYGAMMA` and Direct3D 8's `D3DCAPS2_FULLSCREENGAMMA`,
+  which games such as Max Payne read before they set a ramp. The card
+  keeps 8 bits of each of the ramp's 16-bit words, the top ones, as
+  cards of the time did. A mode set brings the identity back, so a
+  ramp lasts until the game's mode ends. The `GetGammaRamp` of the
+  primary surface and of a full-screen device read the registers, so
+  after a mode set, a Direct3D 8 `Reset`'s too, they give the identity
+  back. In 256 colours there is no ramp: `SetDeviceGammaRamp` fails,
+  and the others keep the ramp and give it back.
 - **Render targets and depth buffers.** Direct3D draws into 5-6-5 and
   32-bit surfaces in video memory, and so not in a 256-colour mode or
   into a 5-5-5 surface. A depth buffer has 16 bits, or 24 in a 32-bit
@@ -584,9 +595,9 @@ section covers names that section.
   blend ("After the cascade"), so blended layers band slightly more
   than on a card that dithers after it. Direct3D's two cubic
   magnification filters are the linear one. Vertex fog goes by the
-  camera-space z under any projection, and the reflection vector and
-  the sphere map take the direction from the eye to the vertex whatever
-  `LOCALVIEWER` says; neither is checked against a real Direct3D.
+  size of the camera-space z under any projection, which is
+  Direct3D 8's rule. "What is frozen" in the specification lists where
+  level 1 differs from what Direct3D was measured to do, and why.
 
 ### What costs speed
 
@@ -594,10 +605,10 @@ section covers names that section.
   lights, clips and culls every vertex on the emulator's thread, and
   so does the OpenGL renderer for the draws its vertex shader doesn't
   take ("The OpenGL renderer"): blended vertices, a back lit by
-  itself, generated or transformed texture coordinates, clip planes
-  of the program's, flat shading, lines and points. A draw's setup
-  (matrix products, lights in camera space) is worked out again for
-  every draw.
+  itself, generated, transformed or wrapped texture coordinates, clip
+  planes of the program's, flat shading, lines and points. A draw's
+  setup (matrix products, lights in camera space) is worked out again
+  for every draw.
 - **The software renderer** is too slow for some games at their usual
   resolutions ("The software renderer"). It draws wherever the OpenGL
   renderer doesn't: a host without desktop OpenGL 3.2, a window drawn
@@ -658,6 +669,16 @@ are rounded to 1/256 of a pixel before rasterising.
 What a program reads back from vertex processing (`ProcessVertices`,
 clip status, extents) is Direct3D's pipeline's: the HAL leaves those
 draws to it, and the card never computes them.
+
+With `D3DRENDERSTATE_CLIPPING` off the two ways a draw's vertices are
+transformed differ, as they do on Windows. The card cuts the vertices it
+transforms at the near and far planes whatever the state says, which is what
+Direct3D 7, 8 and 9 were measured to draw with hardware vertex processing.
+The pipeline of the built-in Windows, which transforms the draws the card
+doesn't take, projects every vertex then, as Microsoft's software vertex
+processing does, and the card gets screen vertices: with the depth test on
+it leaves out the pixels whose depth is outside 0 to 1, and with it off it
+draws them all.
 
 ### Rasterising
 
@@ -748,6 +769,9 @@ smoke and particles.
 | A sample of a 2D texture | 1 in 255, and 2 with a projected texture. The shader takes the card's steps in the card's whole numbers (`shader::SAMPLING`): the level of detail, the levels and the filter, the coordinates in 1/256 of a texel, the weights of 8 bits. What is left is a coordinate or a level of detail that the host's interpolation puts on the other side of one of those steps: a weight one of 256 off, or the next level where the level of detail is within 1/4096 of the change. Coordinates the card has exactly (a texel to a pixel from whole coordinates) give the same texels |
 | A sample of a cube map | 1 in 255 on a smooth texture, 3 where neighbouring texels differ by most of a channel's range. The host's own filter samples it: it rounds a weight to its 8 bits where the card cuts it off, works out the face's coordinates in its own arithmetic, and picks the mip level |
 | Bump offsets from a linearly filtered bump texture | as the weights, except between texels whose offsets differ in sign: both renderers blend the signed bytes as unsigned ones, so there a weight that is one off can turn 127 into -128 |
+| Bump offsets and the bump stage's luminance | the shader multiplies the offsets by the stage's matrix and scales the luminance in the host's single precision: a coordinate one step of 1/256 of a texel off, as a sample's, and 1 in 255 on the colour the luminance scales |
+| A table fog factor | 1 in 255 on a channel: the shader works out the distance, the exponential and the factor's 8 bits in the host's single precision |
+| The colour key of a cube map | the host looks the key up at its own nearest texel, from face coordinates it works out itself: a pixel on the edge of a keyed texel may be dropped by one renderer and drawn by the other |
 | Anisotropic filtering, where the host has it | the host GPU's, which reads more texels than the card's stand-in (trilinear at the level of the shorter side); compared by eye and by a mean error. Measured: a mean of 1.5 and at most 29 on the test's square going into the distance; in Giants 12% of the frame's pixels, 0.2% of the frame by more than 8 (the ground's normal map through `DOTPRODUCT3`) |
 | The alpha test and the colour key after a filtered sample | a pixel whose alpha is within the sample's bound of the reference is drawn by one renderer and not by the other. Measured: 0 to 6 pixels a frame of Zanzarah's leaves |
 | Depth | 1 step of a 16-bit buffer, 4 steps of a 24-bit one: the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way, and so does a test between two surfaces closer than the bound: Giants' marks on the ground, 2 steps of 24 bits in front of it, differ by more than 8 on 0.06% of the frame's pixels, where one renderer alone drew the mark |
@@ -835,12 +859,12 @@ directly, at the points where the software renderer would draw them
   names. The card keeps the draws with blend weights, with a back lit
   by itself (`TWO_SIDED_LIGHTING`), with texture coordinates it makes
   or puts through a texture matrix, with point sizes or with clip
-  planes of the program's (`geometry::Setup::hosted`), and flat
-  shading, lines and points: for those the host gets screen vertices
-  after the card's transform, lighting, clipping and culling. It
-  keeps no copies of the vertex buffers in card memory. Under
-  `--deterministic` the software renderer draws, so the card
-  transforms everything there.
+  planes of the program's (`geometry::Setup::hosted`), and wrapped
+  coordinates (`WRAP0` to `WRAP7`), flat shading, lines and points:
+  for those the host gets screen vertices after the card's transform,
+  lighting, clipping and culling. It keeps no copies of the vertex
+  buffers in card memory. Under `--deterministic` the software
+  renderer draws, so the card transforms everything there.
 - **Textures** are host textures decoded once and kept by their
   description (format, size, levels and the offset of each image), with
   the write counters of the pages their images cover. A write to any of
@@ -964,7 +988,7 @@ compile is declined from its first draw on, since the program is
 compiled when the host is asked whether it takes the state.
 
 The agreement tests (`toadforce::gl::tests`, which need a desktop OpenGL
-context) draw 422 scenes in software and through the host and compare
+context) draw 457 scenes in software and through the host and compare
 card memory. On a GeForce RTX 4080: untextured triangles, every stage
 operation at each result scale, four stages with four textures, the
 alpha test, fog, the specular add, the stencil operations, the write
@@ -1027,7 +1051,9 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   The coordinates of texture slot `n` are in set `n` of every vertex,
   whichever set of the program's vertex they came from, and the three
   vertices of a flat-shaded triangle all have the colours of the one
-  that gives it them.
+  that gives it them, each with its own fog factor in the specular
+  colour's alpha. The coordinates are wrapped already where a `WRAP`
+  state says so.
 - **A draw the host doesn't take.** The host is asked for each state
   (`Host::declines`). A draw it declines (the states listed under "The
   OpenGL renderer") is drawn by the software renderer, and so is a draw
@@ -1040,6 +1066,17 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   why the host takes points and lines as triangles the card builds. The
   queue holds draws of one renderer at a time, and a draw of the other
   empties it first, which keeps the card's order on a target.
+- **Where a batch ends.** The queue goes to the host at the end of a
+  run of commands, before a draw of the other renderer or into another
+  target, and before a command that touches memory the queued draws
+  use. A `FILL` or a `BLT` that writes none of their textures, their
+  target or its depth buffer, and reads neither of those two, runs
+  while they wait, and the batch goes on growing
+  (`Renderer::waits`). The host copies a texture from card memory when
+  the batch is drawn, after such a copy, so a draw queued after a
+  `BLT` into its texture samples what the `BLT` wrote. Nocturne copies
+  some 25 textures a frame into card memory between its draws, and
+  they stay in one batch.
 - **Who has the newer pixels.** A surface the host drew into is ahead
   on the host, and card memory is stale there. Before the emulator's
   own code reads that memory on the processor the card reads the
@@ -1052,6 +1089,36 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   (`Bus::sync_display`). Running the queued commands and reading back
   are separate: the queue is run at every such point as before, and a
   surface is read back only when its own bytes are asked for.
+- **A read of some rows.** A driver's read of bytes in some of a
+  surface's rows (`win32::screen::read`, `Gpu::settle_rows`) brings back
+  only those rows (`Host::read_back_rows`, `glReadPixels` of the rows of
+  the host's copy, which is at the card's size with row 0 at the top),
+  and the surface stays ahead. Each read brings its own rows, so a
+  driver that copies a rectangle a row at a time (a DirectDraw blit on
+  the processor, Direct3D 8's `CopyRects`, a texture's `Load`, OpenGL's
+  `glReadPixels`) asks for the rectangle's rows at once first
+  (`ddraw::surface::will_read_rows`, `win32::screen::will_read`), and
+  the reads of single rows after it read nothing back. The card keeps
+  the rows read back for each surface that is ahead (`Ahead::back`, the
+  Voodoo tracker's `Ranges`) until the host changes its copy (a draw,
+  `CLEAR`, `FILL` or `BLT` into it), so another read of them reads
+  nothing back, and one of other rows brings those. What the processor
+  wrote of them stays, and goes to the host's copy as below. A read of
+  every row, and the card's own work on the processor (its `FILL`, `BLT`
+  and `CLEAR`, a declined draw), which writes card memory with no note
+  of what it writes, read the surface back whole, and it is no longer
+  ahead. So does a read of rows that would make more than eight reads
+  of rows of one surface (`ROW_READS`), or more than half its rows
+  (`ROW_SHARE`), since the host last changed its copy: a loop that
+  reads a row at a time without asking first then costs eight small
+  reads and a whole one, and a read of most of the rows costs about
+  what the whole surface does. The reads are of whole rows rather than
+  of the rectangle asked for: a smaller `glReadPixels` waits for the GPU
+  as long, and the bytes are few either way. Evil Islands' software
+  cursor saves the 32x32 pixels under it out of the 800x600 back buffer
+  and the screen every frame: that reads about three bands of 32 rows a
+  frame, some 170,000 bytes, where each frame read the whole
+  960,000-byte back buffer, and the surfaces stay on the GPU.
 - **What the program and the drivers write.** A write into a surface
   that is ahead reads nothing back. The card notes each byte written
   (`Gpu::writing`, a bit for each byte of the surface), and card
@@ -1151,6 +1218,13 @@ commands and reads everything back before the renderer changes.
   SDL's renderer, a card that has a link loses it, and its memory
   holds every pixel from then on. `opengl` says once in the log why
   OpenGL doesn't draw; `auto` says nothing.
+- Setting the renderer up compiles shaders and draws a test on the
+  driver, and a driver that crashes there ends the program. The setup
+  leaves the file `toadforce-opengl-setup` in rust-dos's directory,
+  holding the version and the OpenGL driver's description, until the
+  frame after it (`display/setup_guard.rs`). A start that finds it with
+  the same key draws in software with `auto` and logs why; `opengl`
+  tries again.
 - The renderer ends with the window, before the context does. A card
   that lives longer keeps a link that takes no draw, so it draws in
   software. The emulator's own order ends the machine first.
@@ -1182,10 +1256,14 @@ The picture comes from card memory, read back once a frame
   copy first);
 - a mode with a palette, or one shown doubled.
 
-The surface shown is the one the card shows as of the commands it has
-run, with the queued ones left queued. The one latched at the last
-retrace would be wrong here: a program that flipped is already
-drawing its next frame into it.
+Both draw the same surface, the one at `MODE_START` as of the
+commands the card has run, with the queued ones left queued:
+`Bus::toadforce_picture` makes it the Super VGA's display start,
+`vbe.latched_start`, which `video::render_vbe`, the read-back's
+`Vbe::picture` and `Bus::toadforce_host_picture` all take. A flip
+without the wait shows at once ("Flips" in `docs/toadforce-spec.md`):
+the surface the screen had until then is the one a program that
+flipped draws its next frame into.
 
 `/api/status` has the renderer's name and what it costs under
 `video.toadforce` (`docs/llm-debugging.md`): the read-backs by what
@@ -1261,9 +1339,12 @@ are the emulator's.
   reads it (`win32::screen`), with a flip or a mode set, and before a
   call that lets the program read it or shows a window
   (`screen::api_settles`: all of DirectDraw and Direct3D 8 but the
-  Direct3D devices' methods and those of what they draw from, with a
-  scene's end and Direct3D 8's present among those that settle; GDI;
-  USER; WGL; and OpenGL's pixel transfers). It also runs when it is
+  Direct3D devices' methods and those of what they draw from, with
+  Direct3D 8's present among those that settle; GDI; USER but its
+  arithmetic on rectangles; WGL; and OpenGL's pixel transfers). A
+  scene's end doesn't settle, as EndScene doesn't wait for a real card:
+  a game that makes a scene of each object would have the renderer
+  draw its queue a few draws at a time. It also runs when it is
   full, and 5 ms of emulated time after its first command, so a
   program that reads video memory it kept a pointer to sees the picture
   a frame's fraction late at worst, as it would beside a real card that
@@ -1307,25 +1388,23 @@ are the emulator's.
   which the tests are, bind again for every kept draw and stop if the
   bind sends a word or gives another result. `/api/win32/ddraw` counts
   the binds and those kept.
-- **Screen vertices go from the program's memory to the queue.** A
-  draw of transformed vertices has nothing for the pipeline to work
-  out unless a triangle needs cutting, a point or a line needs its
-  pixels, or a flat-shaded triangle its colours. `hal::draw_screen`
-  (`hal/toadforce/direct.rs`) writes such a draw into the card's
-  queue as one `DRAW_INDEXED` triangle list: the vertices read from
-  the program's memory into the command's words, in one copy where
-  the program's layout is the card's (`D3DFVF_TLVERTEX` with one
-  stage) and gathered word by word otherwise, and the indices of the
-  triangles the cull mode keeps, a strip's and a fan's too. It
-  declines points, lines, the wireframe and point fill modes, flat
-  shading, a clip status the program asked for, a draw with a vertex
-  outside the guard band or, while the device clips, outside the
-  depth range, a draw too large for one command, and vertices in
-  memory that isn't plain RAM: those go through the pipeline, as
-  every draw of vertices to transform does. A test draws 8000
-  made-up draws both ways and compares the triangles the card gets,
-  word for word.
-  `/api/win32/ddraw` counts the draws of each way (`screen_draws`).
+- **Screen vertices go from the program's memory to the queue.** A draw of
+  transformed vertices has nothing for the pipeline to work out unless a
+  triangle needs cutting, a point or a line needs its pixels, or a
+  flat-shaded triangle its colours. `hal::draw_screen`
+  (`hal/toadforce/direct.rs`) writes such a draw into the card's queue as
+  one `DRAW_INDEXED` triangle list: the vertices read from the program's
+  memory into the command's words, in one copy where the program's layout is
+  the card's (`D3DFVF_TLVERTEX` with one stage) and gathered word by word
+  otherwise, and the indices of the triangles the cull mode keeps, a strip's
+  and a fan's too. It declines points, lines, the wireframe and point fill
+  modes, flat shading, texture wrapping (`D3DRENDERSTATE_WRAP0` to `WRAP7`),
+  a clip status the program asked for, a draw with a vertex outside the
+  guard band, a draw too large for one command, and vertices in memory that
+  isn't plain RAM: those go through the pipeline, as every draw of vertices
+  to transform does. A test draws 8000 made-up draws both ways and compares
+  the triangles the card gets, word for word. `/api/win32/ddraw` counts the
+  draws of each way (`screen_draws`).
 - **Direct3D 8** (`d3d8/`) sits on the Direct3D 7 device, with
   `D3DCAPS8` filled from the HAL's device description
   (`hal::description`, whose sizes and counts are the level's
@@ -1411,6 +1490,7 @@ users.
 | `machine` | `svga_toadforce` | |
 | `toadforce_memory` | `32`, `64`, `128` | `64` |
 | `toadforce_renderer` | `auto`, `opengl`, `software` | `auto`: OpenGL where the window has a desktop OpenGL 3.2 context |
+| `toadforce_gamma` | `off`, 0.1 to 2 | `off`: the picture through the card's ramp alone |
 
 The card has one level of 3D, so no key chooses one.
 

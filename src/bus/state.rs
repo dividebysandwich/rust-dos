@@ -8,20 +8,69 @@ use crate::savestate::{Reader, Result, State, StateError, Writer, load_device, s
 
 /// The sections' versions, changed with what a section holds.
 const RAM_VERSION: u16 = 2;
-const CORE_VERSION: u16 = 9;
+const CORE_VERSION: u16 = 11;
+/// The CORE versions this rust-dos loads: its own, 9, which kept the
+/// phase of the speaker's square wave where 10 and 11 keep its level, and
+/// 10, which keeps the time high in the frame being made where 11 keeps
+/// it in the eighth of the frame being made (`Bus::speaker_high`).
+const CORE_LOADS: [u16; 3] = [9, 10, CORE_VERSION];
 const VIDEO_VERSION: u16 = 2;
-const SOUND_VERSION: u16 = 4;
+const SOUND_VERSION: u16 = 5;
+/// The SOUN versions this rust-dos loads: its own, and 4, which has no
+/// right OPL2 of a dual OPL2 (`Opl::save_right`): on a machine with one,
+/// it gets what the one chip's second bank held (`Opl::right_from_bank_1`).
+const SOUND_LOADS: [u16; 2] = [4, SOUND_VERSION];
 const DOS_VERSION: u16 = 6;
+const CD_HEAD_VERSION: u16 = 1;
+const VCPI_VERSION: u16 = 1;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 67;
+const WIN32_VERSION: u16 = 86;
+/// The W32 versions this rust-dos loads: its own, and those an older one
+/// saved. 71's keeps only the names of the font files a program added
+/// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
+/// (`version::OwnSize`), 71's to 73's MMSYSTEM's wave headers in an
+/// older form and no callback calls (`win16::Mmsystem`), 71's to 74's
+/// not DDEML's 16-bit copies, user handles and asynchronous transactions
+/// (`ddeml::DDE_SAVED`), 71's to 75's no DirectPlay 8 objects
+/// (`dpnet::State`), 71's to 76's not OLE32's local servers and proxies
+/// (`ole32::LOCAL_SERVERS`), 71's to 77's not owner-drawn menu items'
+/// sizes and drawing (`user32::menu::OWNER_DRAWN`), 71's to 78's no
+/// system heaps (`heap::SYSTEM_HEAP_SAVED`), 71's to 79's no Toolhelp32
+/// snapshots (`object::Kind::Snapshot`, which they load without), 71's
+/// to 80's not the TrueType fonts of the files a program added
+/// (`gdi32::fnt::TRUETYPE_SAVED`), 71's to 81's no drop targets
+/// (`ole32::DROP_TARGETS`), 71's to 82's no ExitWindowsExec command
+/// line (`boot::EXIT_EXEC`), 71's to 83's not the 16-bit OLE modules'
+/// state (`win16::ole2::OLE16`), 71's to 84's no DOS program a
+/// Windows program started (`dosvm::DOSVM_SAVED`), and 85's not the
+/// folder it starts in (`dosvm::DOSVM_DIRECTORY`).
+const WIN32_LOADS: [u16; 16] = [
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    83,
+    84,
+    85,
+    WIN32_VERSION,
+];
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
 const AWE_VERSION: u16 = 1;
+const ADLIB_GOLD_VERSION: u16 = 1;
 const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 3;
 const ET4000_VERSION: u16 = 1;
@@ -31,8 +80,13 @@ const SHARED_VERSION: u16 = 1;
 const SB_HIGH_SPEED_VERSION: u16 = 1;
 const ISAPNP_VERSION: u16 = 1;
 const PIT2_VERSION: u16 = 1;
+/// The 8254's parts that states saved before it lack: where a mode 3
+/// count loaded at a half-cycle starts, the control words' bits the
+/// read-back status gives, the status latches and channel 1.
+const PIT_8254_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
 const KEY_QUEUE_VERSION: u16 = 1;
+const TYPEMATIC_VERSION: u16 = 1;
 const FRAME_CAP_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
@@ -84,7 +138,10 @@ impl Bus {
             pit0_access,
             pit0_latched,
             pit0_latched_active,
+            pit0_status,
             pit0,
+            pit1,
+            pit1_port,
             clock,
             pic,
             dma,
@@ -100,7 +157,8 @@ impl Bus {
             post_code,
             refresh_toggle,
             speaker_on,
-            audio_phase,
+            speaker_high,
+            speaker_until,
             audio_frames,
             sb_frame,
             beep_frames,
@@ -115,6 +173,7 @@ impl Bus {
             toadforce_memory,
             retraces,
             last_flip,
+            last_present: _,
             gate_array_shadow,
             gate_array_shadow_at,
             opl,
@@ -125,6 +184,8 @@ impl Bus {
             mpu,
             gus,
             gus_line,
+            adlib_gold,
+            adlib_gold_line,
             awe,
             awe_rom: _,
             awe_ram_kb: _,
@@ -133,6 +194,7 @@ impl Bus {
             cdaudio,
             xms,
             ems,
+            vcpi,
             dpmi,
             win32,
             umb,
@@ -166,8 +228,6 @@ impl Bus {
             profile: _,
             guest_paging: _,
             guest_fault: _,
-            // How many ignored ROM writes were logged.
-            rom_writes: _,
             // Requests to the front end, which it carries out before a
             // state can be saved.
             reset_requested: _,
@@ -201,8 +261,10 @@ impl Bus {
             host_frames: _,
             key_waits: _,
             unhandled_writes: _,
+            limited_logs: _,
             attribute_reset: _,
             memory_derived: _,
+            cpu_derived: _,
             log_hook: _,
             log_backlog: _,
             audio_hook: _,
@@ -215,8 +277,8 @@ impl Bus {
                 pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
                 pit0, clock, pic, dma, joystick,
                 dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
-                post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_frame, beep_frames,
-                boot, pci,
+                post_code, refresh_toggle, speaker_on, speaker_high, speaker_until,
+                audio_frames, sb_frame, beep_frames, boot, pci,
             );
         });
         // Channel 2's counter and gate, in a section of their own so states
@@ -226,12 +288,32 @@ impl Bus {
         w.section(b"PIT2", PIT2_VERSION, |w| {
             save_all!(w; pit2, speaker_data, pit2_count_due, ppi_checks);
         });
+        // The 8254's read-back state, channel 1 and the half-cycle loads,
+        // in a section of their own so states saved before it load.
+        // Channel 1's phase, load tick and control word go with it, which
+        // `Pit0`'s own fields leave out as channel 0's CORE layout does.
+        let (pit0_phase, pit0_pending_at, pit0_control) =
+            (&pit0.phase, &pit0.pending_at, &pit0.control);
+        let (pit1_phase, pit1_pending_at, pit1_control) =
+            (&pit1.phase, &pit1.pending_at, &pit1.control);
+        let (pit2_phase, pit2_control, pit2_status) = (&pit2.phase, &pit2.control, &pit2.status);
+        w.section(b"8254", PIT_8254_VERSION, |w| {
+            save_all!(w;
+                pit0_phase, pit0_pending_at, pit0_control, pit0_status, pit1, pit1_port,
+                pit1_phase, pit1_pending_at, pit1_control,
+                pit2_phase, pit2_control, pit2_status,
+            );
+        });
         // The time stamp counter's clock, in a section of its own so states
         // saved before it load (counting instructions, as it did then).
         w.section(b"TSC ", TSC_VERSION, |w| clock.tsc.save(w));
         // Which queued keystrokes the BIOS never saw, in a section of its
         // own so states saved before it load.
         w.section(b"KEYQ", KEY_QUEUE_VERSION, |w| kbd.save_queue(w));
+        // The keyboard's typematic rate and the key it repeats, likewise.
+        w.section(b"TYPM", TYPEMATIC_VERSION, |w| {
+            kbd.save_typematic(kbc.typematic, w)
+        });
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga);
             // A ToadForce's memory is saved with what its host renderer
@@ -290,12 +372,20 @@ impl Bus {
             w.label("disk");
             disk.save_state(w);
         });
+        // Where MSCDEX's drives' heads are, in a section of their own so
+        // states saved before it load (with every head at sector 0).
+        w.section(b"CDHD", CD_HEAD_VERSION, |w| mscdex.save_heads(w));
+        // VCPI's, in a section of its own so states saved before it load
+        // (with none of its pages handed out).
+        w.section(b"VCPI", VCPI_VERSION, |w| vcpi.save(w));
         // The Ultrasound's memory first, where it stays in place for
         // rewind's deltas (rewind.rs) whatever the queues after it hold.
         w.section(b"SOUN", SOUND_VERSION, |w| {
             w.label("gus");
             save_device(gus, w);
             save_all!(w; opl, mpu, gus_line, tandy_sound);
+            w.label("opl_right");
+            opl.save_right(w);
             w.label("sb");
             save_device(sb, w);
             w.label("lpt_dac");
@@ -311,6 +401,13 @@ impl Bus {
         // The ISA Plug and Play cards (a ViBRA16C), likewise.
         if let Some(isapnp) = isapnp {
             w.section(b"PNP ", ISAPNP_VERSION, |w| isapnp.save(w));
+        }
+        // The AdLib Gold, likewise.
+        if let Some(gold) = adlib_gold {
+            w.section(b"AGLD", ADLIB_GOLD_VERSION, |w| {
+                gold.save(w);
+                adlib_gold_line.save(w);
+            });
         }
         // A 3dfx card, whose memory comes first, and only on a machine
         // with one, so states of machines without load as they did.
@@ -415,7 +512,10 @@ impl Bus {
             pit0_access,
             pit0_latched,
             pit0_latched_active,
+            pit0_status,
             pit0,
+            pit1,
+            pit1_port,
             clock,
             pic,
             dma,
@@ -431,7 +531,8 @@ impl Bus {
             post_code,
             refresh_toggle,
             speaker_on,
-            audio_phase,
+            speaker_high,
+            speaker_until,
             audio_frames,
             sb_frame,
             beep_frames,
@@ -446,6 +547,7 @@ impl Bus {
             toadforce_memory,
             retraces,
             last_flip,
+            last_present,
             gate_array_shadow,
             gate_array_shadow_at,
             opl,
@@ -456,6 +558,8 @@ impl Bus {
             mpu,
             gus,
             gus_line,
+            adlib_gold,
+            adlib_gold_line,
             awe,
             awe_rom: _,
             awe_ram_kb: _,
@@ -464,6 +568,7 @@ impl Bus {
             cdaudio,
             xms,
             ems,
+            vcpi,
             dpmi,
             win32,
             umb,
@@ -493,7 +598,6 @@ impl Bus {
             profile: _,
             guest_paging: _,
             guest_fault: _,
-            rom_writes: _,
             config_ui_requested: _,
             exit_requested: _,
             mixer_changed: _,
@@ -521,10 +625,12 @@ impl Bus {
             host_frames: _,
             key_waits: _,
             unhandled_writes: _,
+            limited_logs: _,
             attribute_reset: _,
-            // The front end's, which sets it from the settings a load
+            // The front end's, which sets them from the settings a load
             // leaves (`slots::loaded_settings`).
             memory_derived: _,
+            cpu_derived: _,
             log_hook: _,
             log_backlog: _,
             audio_hook: _,
@@ -542,16 +648,38 @@ impl Bus {
             *code_blocks = vec![0; len >> super::GEN_SHIFT];
         }
         ram.copy_from_slice(section.take(len)?);
-        let mut section = r.section(b"CORE", CORE_VERSION)?;
+        let mut section = r.section_of(b"CORE", &CORE_LOADS)?;
         load_all!(&mut section;
             keyboard_buffer, kbd, kbc, a20_mask, cmos,
             pit_divisor, pit_read_msb, pit_mode, pit_write_msb,
             pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
             pit0, clock, pic, dma, joystick,
             dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
-            post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_frame, beep_frames,
-                boot, pci,
+            post_code, refresh_toggle, speaker_on,
         );
+        if section.version() == Some(9) {
+            // The square wave's phase, which the speaker's level replaced:
+            // the frame being made starts at the frames mixed.
+            let mut phase = 0.0f32;
+            load_all!(&mut section; &mut phase, audio_frames);
+            *speaker_high = 0.0;
+            *speaker_until = super::frame_tick(*audio_frames);
+        } else {
+            load_all!(&mut section; speaker_high, speaker_until, audio_frames);
+            if section.version() == Some(10) {
+                // The time high since the frame began: its mean over that
+                // time, over the eighth being made.
+                let (part, frame) = super::speaker_starts(*speaker_until);
+                let span = *speaker_until - frame;
+                let mean = if span > 0.0 {
+                    *speaker_high / span
+                } else {
+                    0.0
+                };
+                *speaker_high = mean * (*speaker_until - part);
+            }
+        }
+        load_all!(&mut section; sb_frame, beep_frames, boot, pci);
         if r.next_is(b"PIT2") {
             let mut section = r.section(b"PIT2", PIT2_VERSION)?;
             load_all!(&mut section; pit2, speaker_data);
@@ -570,6 +698,24 @@ impl Bus {
             *speaker_data = *speaker_on;
             *ppi_checks = 0;
         }
+        if r.next_is(b"8254") {
+            let mut section = r.section(b"8254", PIT_8254_VERSION)?;
+            load_all!(&mut section;
+                &mut pit0.phase, &mut pit0.pending_at, &mut pit0.control, pit0_status, pit1, pit1_port,
+                &mut pit1.phase, &mut pit1.pending_at, &mut pit1.control,
+                &mut pit2.phase, &mut pit2.control, &mut pit2.status,
+            );
+        } else {
+            // An older state: counts loaded at the end of a period, which
+            // is where it kept a pending channel 0 count, no status
+            // latched, the control words' bits as the access and mode give
+            // them (not BCD), and channel 1 as the BIOS leaves it.
+            pit0.without_8254_state(*pit0_access);
+            *pit0_status = None;
+            *pit1 = crate::timer::Pit0::refresh();
+            *pit1_port = crate::timer::PitPort::new(1);
+            pit2.without_8254_state();
+        }
         clock.tsc = Default::default();
         if r.next_is(b"TSC ") {
             clock.tsc.load(&mut r.section(b"TSC ", TSC_VERSION)?)?;
@@ -579,8 +725,14 @@ impl Bus {
         } else {
             kbd.forget_queue();
         }
+        kbc.typematic = if r.next_is(b"TYPM") {
+            kbd.load_typematic(&mut r.section(b"TYPM", TYPEMATIC_VERSION)?)?
+        } else {
+            kbd.forget_typematic()
+        };
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+        *last_present = None;
         *virge = Default::default();
         if r.next_is(b"VIRG") {
             virge.load(&mut r.section(b"VIRG", VIRGE_VERSION)?)?;
@@ -637,9 +789,24 @@ impl Bus {
         load_device(umb, "upper memory", &mut section)?;
         dos_high.load(&mut section)?;
         let lost = disk.load_state(&mut section)?;
-        let mut section = r.section(b"SOUN", SOUND_VERSION)?;
+        if r.next_is(b"CDHD") {
+            mscdex.load_heads(Some(&mut r.section(b"CDHD", CD_HEAD_VERSION)?))?;
+        } else {
+            mscdex.load_heads(None)?;
+        }
+        if r.next_is(b"VCPI") {
+            vcpi.load(&mut r.section(b"VCPI", VCPI_VERSION)?)?;
+        } else {
+            *vcpi = crate::vcpi::Vcpi::default();
+        }
+        let mut section = r.section_of(b"SOUN", &SOUND_LOADS)?;
         load_device(gus, "Gravis Ultrasound", &mut section)?;
         load_all!(&mut section; opl, mpu, gus_line, tandy_sound);
+        if section.version() >= Some(5) {
+            opl.load_right(&mut section)?;
+        } else {
+            opl.right_from_bank_1();
+        }
         load_device(sb, "Sound Blaster", &mut section)?;
         load_device(lpt_dac, "DAC on LPT1", &mut section)?;
         cdaudio.load_state(&mut section, |drive| disk.cd_image(drive))?;
@@ -654,6 +821,16 @@ impl Bus {
             (false, None) => {}
             (true, None) => return Err(StateError::Mismatch("it has a ViBRA16C and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has a ViBRA16C and it hasn't".into())),
+        }
+        match (r.next_is(b"AGLD"), adlib_gold) {
+            (true, Some(gold)) => {
+                let mut section = r.section(b"AGLD", ADLIB_GOLD_VERSION)?;
+                gold.load(&mut section)?;
+                adlib_gold_line.load(&mut section)?;
+            }
+            (false, None) => {}
+            (true, None) => return Err(StateError::Mismatch("it has an AdLib Gold and this machine hasn't".into())),
+            (false, Some(_)) => return Err(StateError::Mismatch("this machine has an AdLib Gold and it hasn't".into())),
         }
         // A state saved before the cap had its section has the 3dfx
         // card's last capped frame, which the card's load puts in.
@@ -696,7 +873,7 @@ impl Bus {
         }
         win32.reset();
         if r.next_is(b"W32 ") {
-            win32.load(&mut r.section(b"W32 ", WIN32_VERSION)?)?;
+            win32.load(&mut r.section_of(b"W32 ", &WIN32_LOADS)?)?;
         }
         // The extended memory they hold.
         xms.dpmi = dpmi.reservations();
@@ -740,6 +917,12 @@ impl Bus {
             None if high_speed => return Err(StateError::Invalid("a Sound Blaster's high-speed mode without a Sound Blaster".into())),
             None => {}
         }
+        // The processes' stubs from older tables call what their programs
+        // were bound to.
+        crate::win32::stub_tables::mend(self)?;
+        // The Win16 KERNEL's stubs for imports nothing has keep their ids
+        // when KERNEL's table grows.
+        crate::win16::builtin::mend(self)?;
         Ok(lost)
     }
 
@@ -749,9 +932,11 @@ impl Bus {
     /// the interrupt lines follow the devices, the picture is drawn anew,
     /// the FM chip and the MIDI synthesizer are told their registers and
     /// setup again, and the sound rendered before the load is dropped with
-    /// what rang on of it in the mixer.
+    /// what rang on of it in the mixer, and the idle skipper forgets the
+    /// loops of the run before the load.
     pub(crate) fn after_load(&mut self) {
         self.after_reload();
+        self.observe.after_load();
         self.opl.after_load();
         self.mpu.after_load();
         if let Some(gus) = &mut self.gus {
@@ -768,7 +953,7 @@ impl Bus {
         self.rtc_next = None;
         self.schedule_rtc();
         self.kbc_release_at = None;
-        self.kbc.release();
+        self.kbc.after_load();
         self.net.nic_changed();
         // What the machine last wrote into its SDA isn't what the state's
         // SDA holds: until the next DOS call writes it, nothing in it
@@ -896,7 +1081,25 @@ mod tests {
         (61, 0x9267_6BA0_CE58_B06F), // OpenGL's display lists
         (62, 0x9F78_ACB5_CCD2_8975), // OpenGL's textures in their contexts' group
         (63, 0xD1E3_14A4_31DE_2AAA), // OpenGL's vertices as given, and the card's lights
+        (65, 0x0208_3289_86A2_082E), // Win32's serial ports
         (67, 0xD1E3_14A4_31DE_2AAA), // a Direct3D device made as a software device
+        (69, 0x0328_CB26_D841_A2ED), // Win32's serial ports, merged with 63's and 67's
+        (71, 0x0DD2_950E_C2FB_1628), // copy-on-write views paged, pages held for a fault
+        (72, 0x0DD2_950E_C2FB_1628), // the fonts of files AddFontResource added
+        (73, 0x2412_6CA7_250D_4193), // the desktop's own size, `win32_desktop`
+        (74, 0x6C70_EAD3_11EB_EDB6), // MMSYSTEM's headers keep lpData, callbacks
+        (75, 0x9B62_A189_49CB_DB03), // DDEML's 16-bit copies, user handles and transactions
+        (76, 0xF698_DBEB_B887_D533), // DirectPlay 8's objects
+        (77, 0xA5E9_A942_6FF9_9965), // OLE32's local servers, proxies and stubs
+        (78, 0x9A03_DEE6_921B_EE10), // owner-drawn menu items' sizes and drawing
+        (79, 0x3960_B363_99FF_D384), // each process's system heap
+        (80, 0x2471_174C_D479_E2F6), // Toolhelp32 snapshots
+        (81, 0x2471_174C_D479_E2F6), // the TrueType fonts of files AddFontResource added
+        (82, 0x7F8F_BB1B_6F82_7B99), // OLE32's drop targets and OleInitialize's processes
+        (83, 0xE951_CEB4_D9AD_4CAC), // ExitWindowsExec's command line
+        (84, 0x3A9C_D1FD_6601_1D0E), // the 16-bit OLE modules' state
+        (85, 0xD065_06B4_D1EE_C645), // the DOS program a Windows program started
+        (86, 0x64E2_699F_8225_8EB3), // the DOS program's folder and lent memory
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

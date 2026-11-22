@@ -501,6 +501,9 @@ impl DebugHub {
                 "failure": cpu.bus.observe.stats.failure,
                 "arms": cpu.bus.observe.stats.arms,
                 "backed_off": cpu.bus.observe.stats.backed_off,
+                "costly": cpu.bus.observe.stats.costly,
+                "proving": cpu.bus.observe.stats.proving,
+                "shaped": cpu.bus.observe.stats.shaped,
                 "starts": cpu.bus.observe.stats.starts,
                 "cut": cpu.bus.observe.stats.cut,
                 "failed_by": cpu
