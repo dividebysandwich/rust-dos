@@ -1345,6 +1345,13 @@ fn peek_lockstep(test: &str, image: Vec<u8>) -> (rust_dos::idle::IdleStats, u64)
         cpu.bus.observe.enabled = skip;
         cpu
     };
+    // Both machines start their clocks at the same host time, which a
+    // second passing between them would otherwise make differ.
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
     let mut plain = start(&format!("{test}_plain"), CoreMode::Normal, false);
     let mut skipping = start(&format!("{test}_skipping"), CoreMode::Dynamic, true);
     let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
