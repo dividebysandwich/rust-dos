@@ -571,6 +571,9 @@ pub struct Cpu {
     pub con_line: Option<crate::interrupts::int21::ConLine>,
     /// What is left of the last line read from CON, for the next reads.
     pub con_pending: VecDeque<u8>,
+    /// ANSI.SYS's state in the console output: the colours of the text,
+    /// and a sequence part written.
+    pub ansi: crate::video::ansi::Ansi,
     /// Memory allocation strategy (INT 21h AH=58h).
     pub alloc_strategy: u16,
     /// End of an INT 15h AH=86h wait in progress, in PIT ticks.
@@ -835,6 +838,7 @@ impl Cpu {
             con_pending_scan: None,
             con_line: None,
             con_pending: VecDeque::new(),
+            ansi: Default::default(),
             alloc_strategy: 0,
             bios_wait_until: None,
             process_stack: Vec::new(),

@@ -174,7 +174,7 @@ pub(crate) fn write_open_file(cpu: &mut Cpu, handle: u16, sft: u16, data: &[u8])
         if let Some(console) = cpu.host_console.as_mut() {
             console.to_stderr = stderr;
         }
-        crate::video::print_cp437(cpu, &visible, 0x07);
+        crate::video::print_console(cpu, &visible);
         if let Some(console) = cpu.host_console.as_mut() {
             console.to_stderr = false;
         }

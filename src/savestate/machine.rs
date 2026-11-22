@@ -12,6 +12,7 @@ const SSE_VERSION: u16 = 1;
 const K6_VERSION: u16 = 1;
 const IDLE_VERSION: u16 = 1;
 const RC_VERSION: u16 = 1;
+const ANSI_VERSION: u16 = 1;
 
 /// The machine's state, between batches.
 pub fn save(cpu: &Cpu) -> Vec<u8> {
@@ -40,6 +41,7 @@ fn write(cpu: &Cpu, w: &mut Writer) {
     w.section(b"K6  ", K6_VERSION, |w| cpu.k6.save(w));
     w.section(b"IDLE", IDLE_VERSION, |w| cpu.os_idles.save(w));
     w.section(b"RC  ", RC_VERSION, |w| cpu.rc_resume.save(w));
+    w.section(b"ANSI", ANSI_VERSION, |w| cpu.ansi.save(w));
 }
 
 /// Load a state `save` wrote into the machine, between batches. A state
@@ -130,6 +132,13 @@ fn load_sections(cpu: &mut Cpu, data: &[u8]) -> Result<Vec<String>> {
     } else {
         cpu.rc_resume = None;
     }
+    // A state from before the console took ANSI.SYS's sequences writes in
+    // light grey.
+    if r.next_is(b"ANSI") {
+        cpu.ansi.load(&mut r.section(b"ANSI", ANSI_VERSION)?)?;
+    } else {
+        cpu.ansi = Default::default();
+    }
     // Less than a section's header left: a state cut short.
     if !r.is_empty() && r.take(10).is_err() {
         return Err(super::StateError::Truncated);
@@ -174,7 +183,7 @@ mod tests {
         // A state from before the section (the last then) has none seen.
         let idle = parts.iter().find(|(name, _)| name == "IDLE").expect("the section").1.clone();
         let rc = parts.iter().find(|(name, _)| name == "RC").expect("RC's section").1.clone();
-        assert_eq!((idle.end, rc.end), (rc.start, state.len()));
+        assert_eq!(idle.end, rc.start);
         load(&mut cpu, &state[..idle.start]).unwrap();
         assert!(!cpu.os_idles);
     }
@@ -253,5 +262,25 @@ mod tests {
         let rc = parts.iter().find(|(name, _)| name == "RC").expect("the section").1.clone();
         load(&mut cpu, &state[..rc.start]).unwrap();
         assert!(cpu.rc_resume.is_none());
+    }
+
+    #[test]
+    fn a_state_keeps_the_console_s_colours() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.ansi.attr = 0x1E;
+        let (state, parts) = save_parts(&cpu);
+        cpu.ansi = Default::default();
+        load(&mut cpu, &state).unwrap();
+        assert_eq!(cpu.ansi.attr, 0x1E);
+        // The last section; a state from before it has none.
+        let ansi = parts
+            .iter()
+            .find(|(name, _)| name == "ANSI")
+            .expect("the section")
+            .1
+            .clone();
+        assert_eq!(ansi.end, state.len());
+        load(&mut cpu, &state[..ansi.start]).unwrap();
+        assert_eq!(cpu.ansi.attr, 0x07);
     }
 }

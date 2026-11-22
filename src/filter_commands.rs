@@ -4,7 +4,7 @@
 use crate::command::ShellCommand;
 use crate::cpu::Cpu;
 use crate::shell::{ShellWait, enter_wait};
-use crate::video::{print_cp437, print_string};
+use crate::video::print_string;
 
 /// What a filter reads: the file its arguments name, else its redirected
 /// input. None, with the message printed, if it has neither or the file
@@ -50,7 +50,7 @@ fn text_lines(text: &[u8]) -> Vec<Vec<u8>> {
 }
 
 fn print_line(cpu: &mut Cpu, line: &[u8]) {
-    print_cp437(cpu, line, 0x07);
+    crate::video::print_console(cpu, line);
     print_string(cpu, "\r\n");
 }
 

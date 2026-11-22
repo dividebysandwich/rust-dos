@@ -268,7 +268,10 @@ or the current drive's root, deleted once the line has run. `MORE`, `FIND`
 and `SORT` read a pipe, `<file` or the file they are given; `PAUSE`,
 `CHOICE`, `DATE` and `TIME` take their keys or lines from a pipe too
 (`ECHO Y | CHOICE`). `PROMPT` takes DOS's `$` codes (`$P$G` is the
-default), and ANSI colors after `$E` (`$E[1;33m`).
+default), and ANSI colors after `$E` (`$E[1;33m`). DOS's output, `ECHO`'s
+and programs', takes ANSI.SYS's escape sequences as DOSBox's does:
+colors (`ESC[1;33m`), moving the cursor (`ESC[r;cH`, `ESC[nA` to
+`ESC[nD`, `ESC[s`, `ESC[u`) and clearing (`ESC[2J`, `ESC[K`).
 
 ### The prompt
 
