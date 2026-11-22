@@ -48,14 +48,18 @@ use web_time::Instant;
 /// FindNext (`DiskController::find_directory_entry`), whatever their size:
 /// a listing stats each entry. FindFirst always lists afresh, so where a
 /// folder's time doesn't move, a file another program adds mid-search
-/// shows on the next FindFirst.
+/// shows on the next FindFirst. A search keeps its listing as the slots
+/// of a FAT directory: a search whose folder changed lists it again and
+/// puts each entry back in its slot (`relist`), so that a program
+/// deleting or renaming each file it finds gets the next one, as DOS
+/// gives it on a disk.
 #[derive(Default)]
 pub(super) struct HostDirCache {
     /// Counts the guest's changes to the names in host folders.
     pub(super) changes: Cell<u64>,
     pub(super) dirs: RefCell<HashMap<PathBuf, HostDir>>,
-    /// The most recent search last. The guest's changes drop the searches
-    /// of the folders they were made in (`touched`).
+    /// The most recent search last. The guest's changes mark the searches
+    /// of the folders they were made in stale (`touched`).
     pub(super) searches: RefCell<Vec<HostSearch>>,
     /// What the files in host folders take, as counted for the free space
     /// of their drives, by (folder, cluster size, most counted). Counting
@@ -159,11 +163,21 @@ impl Settled {
     }
 }
 
-/// A search of a host folder, as FindFirst listed it.
+/// A search of a host folder, as last listed.
 pub(super) struct HostSearch {
     pub(super) key: SearchKey,
-    modified: std::time::SystemTime,
-    entries: Rc<[DosDirEntry]>,
+    /// The folder's time when listed; None for a `RECENT` folder, or one
+    /// `std::fs` doesn't reach, which is listed again for each FindNext.
+    modified: Option<std::time::SystemTime>,
+    /// The guest changed something in the folder since (`touched`).
+    stale: bool,
+    /// The guest's renames in the folder since, old and new DOS names
+    /// (`renamed`), which keep the file in its slot.
+    renames: Vec<(String, String)>,
+    /// The matching entries in their slots, in the order FindFirst listed
+    /// them. A slot whose file went is None and stays, as a deleted entry
+    /// does in a FAT directory, so FindNext's index keeps its place.
+    slots: Rc<[Option<DosDirEntry>]>,
 }
 
 /// What a search lists: the matches of `pattern` (in the 8.3 form the DTA
@@ -269,7 +283,31 @@ impl HostDirCache {
                 _ => false,
             }
         });
-        self.searches.borrow_mut().retain(|s| Some(s.key.dir.as_path()) != parent && !s.key.dir.starts_with(path));
+        for search in self.searches.borrow_mut().iter_mut() {
+            if Some(search.key.dir.as_path()) == parent || search.key.dir.starts_with(path) {
+                search.stale = true;
+            }
+        }
+    }
+
+    /// The guest renamed the host file or folder `source` to `target`,
+    /// whose DOS names are `from` and `to` (`touched` for both). In one
+    /// folder, DOS renames the entry in its slot: a search of the folder
+    /// that found it doesn't find it again under its new name, and one
+    /// that hasn't finds it there.
+    pub(super) fn renamed(&self, source: &Path, target: &Path, from: &str, to: &str) {
+        self.touched(source);
+        self.touched(target);
+        let dir = source.parent();
+        if dir.is_none() || dir != target.parent() {
+            return;
+        }
+        let names = (from.to_ascii_uppercase(), to.to_ascii_uppercase());
+        for search in self.searches.borrow_mut().iter_mut() {
+            if Some(search.key.dir.as_path()) == dir {
+                search.renames.push(names.clone());
+            }
+        }
     }
 
     /// What the files in the host folder `dir` take with clusters of
@@ -482,28 +520,80 @@ impl HostDirCache {
         self.clock.set(Some(self.now() + Self::TRUST));
     }
 
-    /// The listing of the search `key`: the one kept, unless `first` (a
-    /// new search lists the folder as it is now), or from `list`.
+    /// The slots of the search `key` (`HostSearch::slots`) for its entry
+    /// `index`: those kept, unless `index` is 0 (a new search lists the
+    /// folder as it is now) or the folder changed since, when they come
+    /// from `list`. A search that goes on puts the new listing in the
+    /// slots it had (`relist`), so `index` keeps its place.
     pub(super) fn search(
         &self,
         key: SearchKey,
-        first: bool,
+        index: usize,
         list: impl FnOnce() -> Result<Vec<DosDirEntry>, u8>,
-    ) -> Result<Rc<[DosDirEntry]>, u8> {
+    ) -> Result<Rc<[Option<DosDirEntry>]>, u8> {
         let mut searches = self.searches.borrow_mut();
         let at = searches.iter().position(|s| s.key == key);
         let kept = at.map(|i| searches.remove(i));
-        let Settled::At(modified) = Self::settled(&key.dir) else {
-            return list().map(Into::into);
-        };
-        let entries = match kept {
-            Some(kept) if !first && kept.modified == modified => kept.entries,
-            _ => list()?.into(),
+        let modified = Self::settled(&key.dir).time();
+        let slots = match kept {
+            Some(kept)
+                if index > 0 && !kept.stale && modified.is_some() && kept.modified == modified =>
+            {
+                kept.slots
+            }
+            Some(kept) if index > 0 => Self::relist(&kept.slots, &kept.renames, list()?).into(),
+            _ => list()?.into_iter().map(Some).collect(),
         };
         if searches.len() >= Self::MAX_SEARCHES {
             searches.remove(0);
         }
-        searches.push(HostSearch { key, modified, entries: entries.clone() });
-        Ok(entries)
+        searches.push(HostSearch {
+            key,
+            modified,
+            stale: false,
+            renames: Vec::new(),
+            slots: slots.clone(),
+        });
+        Ok(slots)
+    }
+
+    /// The slots of a search that had `old`, with `new`, a listing of its
+    /// folder made since, put in them as DOS keeps a FAT directory's
+    /// entries: a file still there stays in its slot, under its new name
+    /// when the guest renamed it (`renames`, in order), a file gone leaves
+    /// its slot empty, and a new file takes the first empty slot or one
+    /// after the last. A program that deletes each file it finds (Ultima
+    /// VII's U7.EXE emptying GAMEDAT for a new game) so gets every one,
+    /// and one that renames each file it finds gets none of them twice.
+    fn relist(
+        old: &[Option<DosDirEntry>],
+        renames: &[(String, String)],
+        new: Vec<DosDirEntry>,
+    ) -> Vec<Option<DosDirEntry>> {
+        let mut new: Vec<Option<DosDirEntry>> = new.into_iter().map(Some).collect();
+        let at: HashMap<String, usize> = new
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| Some((e.as_ref()?.filename.to_ascii_uppercase(), i)))
+            .collect();
+        let mut slots: Vec<Option<DosDirEntry>> = old
+            .iter()
+            .map(|slot| {
+                let mut name = slot.as_ref()?.filename.to_ascii_uppercase();
+                for (from, to) in renames {
+                    if name == *from {
+                        name.clone_from(to);
+                    }
+                }
+                new[*at.get(&name)?].take()
+            })
+            .collect();
+        for entry in new.into_iter().flatten() {
+            match slots.iter_mut().find(|slot| slot.is_none()) {
+                Some(slot) => *slot = Some(entry),
+                None => slots.push(Some(entry)),
+            }
+        }
+        slots
     }
 }

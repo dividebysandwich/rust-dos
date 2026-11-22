@@ -67,6 +67,8 @@ pub const FAR_PNP: u8 = 0x01;
 pub const FAR_APM: u8 = 0x02;
 /// The ATI mach64 BIOS's extended services, at C000:0064h.
 pub const FAR_ATI: u8 = 0x03;
+/// The VCPI's protected-mode entry point (`vcpi::pm_entry`).
+pub const FAR_VCPI: u8 = 0x04;
 
 /// Offsets in the F000 segment.
 const TIMER_HANDLER: u16 = 0x1100;
