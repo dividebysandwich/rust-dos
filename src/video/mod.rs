@@ -1505,10 +1505,22 @@ pub fn print_cp437(cpu: &mut Cpu, text: &[u8], attr: u8) {
 }
 
 /// Print text of the host, such as a host path, as the code page 437
-/// glyphs that show it (`dosstr::encode_cp437`): `D:\Über` with the
-/// Ü as 9Ah, and '?' for a character code page 437 lacks.
+/// glyphs that show it: `D:\Über` with the Ü as 9Ah, and '?' for a
+/// character code page 437 lacks. (`dosstr::encode_cp437` gives a Latin-1
+/// letter it lacks its Latin-1 byte instead, for MOUNT to read back;
+/// shown, that byte would be another glyph, ø as °.)
 pub fn print_host_text(cpu: &mut Cpu, text: &str) {
-    print_cp437(cpu, &crate::dosstr::encode_cp437(text), 0x07);
+    let glyphs: Vec<u8> = text
+        .chars()
+        .map(|c| {
+            if c.is_ascii() {
+                c as u8
+            } else {
+                crate::keylayout::cp437(c).unwrap_or(b'?')
+            }
+        })
+        .collect();
+    print_cp437(cpu, &glyphs, 0x07);
 }
 
 /// Whether console output goes through the video BIOS: in a virtual

@@ -128,8 +128,9 @@ fn mount_takes_a_host_folder_with_a_letter_code_page_437_lacks() {
 fn mount_shows_host_paths_in_code_page_437() {
     // The Ü of a host folder `Über` shows as code page 437's Ü (9Ah) in
     // MOUNT's messages and its list, and a character code page 437 lacks
-    // as '?'.
-    let base = scratch("mount_cp437_shown", &["c", "\u{DC}ber", "Euro \u{20AC}"]);
+    // as '?': the Latin-1 ø too, not as the glyph of its byte (°).
+    let folders = ["c", "\u{DC}ber", "Euro \u{20AC}", "Bj\u{F8}rn"];
+    let base = scratch("mount_cp437_shown", &folders);
     let mut cpu = Cpu::new(base.join("c"));
     let host = format!("MOUNT E \"{}\"", base.join("\u{DC}ber").display());
     let line = rust_dos::dosstr::from_bytes(&rust_dos::dosstr::encode_cp437(&host));
@@ -137,9 +138,12 @@ fn mount_shows_host_paths_in_code_page_437() {
     assert!(shown.ends_with("\\\u{9A}ber"), "{:?}", shown);
     let euro = base.join("Euro \u{20AC}");
     cpu.bus.mount_drive(5, &euro, MountOptions::default(), false).unwrap();
+    let bjorn = base.join("Bj\u{F8}rn");
+    cpu.bus.mount_drive(6, &bjorn, MountOptions::default(), false).unwrap();
     let listing = run(&mut cpu, "MOUNT").replace('\n', "");
     assert!(listing.contains("\\\u{9A}ber"), "{:?}", listing);
     assert!(listing.contains("\\Euro ?"), "{:?}", listing);
+    assert!(listing.contains("\\Bj?rn"), "{:?}", listing);
 }
 
 #[test]
