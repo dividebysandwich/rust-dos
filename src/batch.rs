@@ -717,6 +717,7 @@ PROBE.COM
         );
         // Lines from the host's text, as a configuration's [autoexec] has
         // them, run as the bytes that show them.
+        let mut batch = Batch::default();
         batch.append_lines(["echo ╔═╗ ä"]);
         assert_eq!(
             dosstr::to_bytes(&batch.next_line(&[]).unwrap().text),
