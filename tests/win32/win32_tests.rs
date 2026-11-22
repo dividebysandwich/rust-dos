@@ -1244,6 +1244,68 @@ fn a_sleep_zero_loop_that_counts_while_it_waits_is_skipped() {
     assert!(stats.skipped > 100_000, "{stats:?}");
 }
 
+/// A wait for a timer's WM_TIMER in a loop of PeekMessageA, as Wizardry
+/// Gold waits between the steps of its animations (#1692), then the same
+/// with a GetTickCount in each pass, as its loop over its mouse hot spots
+/// does. A PeekMessageA that finds nothing changes nothing up to the
+/// timer, so the passes are skipped to it in both loops, and come out the
+/// same as when they all run.
+#[test]
+fn a_peek_message_loop_that_waits_for_a_timer_is_skipped() {
+    let names: &[&str] = &["SetTimer", "PeekMessageA"];
+    let imports: &[(&str, &[&str])] =
+        &[("USER32.DLL", names), ("KERNEL32.DLL", &["GetTickCount"])];
+    // The MSG at 0.
+    let image = program(BASE, false, imports, &[0; 32], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(0)?;
+        a.push(50)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("SetTimer"))?;
+        for clock in [false, true] {
+            let mut spin = a.create_label();
+            a.set_label(&mut spin)?;
+            if clock {
+                a.call(l.import(names.len()))?;
+            }
+            a.push(1)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(l.data)?;
+            a.call(f("PeekMessageA"))?;
+            a.test(eax, eax)?;
+            a.jz(spin)?;
+            // WM_TIMER.
+            a.cmp(dword_ptr(l.at(4)), 0x113)?;
+            a.jne(spin)?;
+        }
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    let mut plain = start("peek_timer_plain", CoreMode::Normal, false);
+    let mut skipping = start("peek_timer_skipping", CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}
+  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the waits ended");
+    let stats = &skipping.bus.observe.stats;
+    assert_eq!(skipping.errorlevel, 0x2A, "{stats:?}");
+    // The two waits come to 100 ms; the passes run to prove the loops
+    // are a small part of them.
+    let ms = skipping.bus.clock.cycles_per_ms() as u64;
+    assert!(stats.skipped > 80 * ms, "{stats:?}");
+}
+
 /// A Sleep(0) loop that leaves after 50 ms by GetTickCount, alone in its
 /// process: skipped or run, it reads the clock 50 ms on when it leaves,
 /// neither sooner nor later.

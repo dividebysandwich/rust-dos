@@ -44,16 +44,16 @@
 //!
 //! **Where loops come from.** A head is armed at the service trap where the
 //! BIOS keyboard's status call found no key, the built-in Windows's clock
-//! was read or its Sleep(0) found no other thread to run many times in a
-//! row, after many reads of the VGA's status or latches of the PIT's count
-//! with no other port between them, and where two timer events in a row
-//! found the CPU at the same instruction with the same flags and registers
-//! but for one (a loop, whose register may be a time read that the event
-//! between moved on). A head whose passes were skipped is armed again at
-//! the next event, as its loop usually goes on after it, and whenever an
-//! event finds the CPU there later, as a game comes back to its frame
-//! limiter every frame. Failed proofs at a head make the next tries at it
-//! rarer.
+//! was read, its PeekMessage found no message or its Sleep(0) found no
+//! other thread to run many times (`poll_at`), after many reads of the
+//! VGA's status or latches of the PIT's count with no other port between
+//! them, and where two timer events in a row found the CPU at the same
+//! instruction with the same flags and registers but for one (a loop, whose
+//! register may be a time read that the event between moved on). A head
+//! whose passes were skipped is armed again at the next event, as its loop
+//! usually goes on after it, and whenever an event finds the CPU there
+//! later, as a game comes back to its frame limiter every frame. Failed
+//! proofs at a head make the next tries at it rarer.
 
 mod count;
 mod time;
@@ -73,9 +73,15 @@ const ARM_LIMIT: u64 = 20_000;
 const VISITS: usize = 64;
 /// Blocks of RAM a loop may write.
 const CHUNKS: usize = 256;
-/// Keyboard status calls finding no key, or reads of the built-in Windows's
-/// clock, at one place in a row before it is armed.
+/// Keyboard status calls finding no key, reads of the built-in Windows's
+/// clock or its PeekMessages finding nothing, at one place before it is
+/// armed (`poll_at`).
 const POLLS: u32 = 8;
+/// Places of polled services whose polls are counted at once. A loop may
+/// poll at two: Wizardry Gold peeks at its messages and reads the clock
+/// in each pass (#1692), and a count of polls in a row at one place would
+/// start again at every call of the other.
+const POLL_HEADS: usize = 4;
 /// Heads whose failed proofs are remembered, to arm them less often.
 const BACKOFF_HEADS: usize = 8;
 /// Heads whose passes were skipped that are remembered, to arm them when
@@ -235,6 +241,16 @@ struct Shape {
     blocks: Vec<usize>,
 }
 
+/// The polls of a service at one place (`poll_at`): how many came since
+/// it was armed or the count started, and the clock's run count at the
+/// last.
+#[derive(Clone, Copy, Default)]
+struct Poll {
+    head: Option<Head>,
+    count: u32,
+    at: u64,
+}
+
 /// What the proofs at a head saved, and what they cost (`PAYOFF`): the
 /// instructions each failed proof ran, and for each that skipped, what
 /// the proof after it is expected to run. Each proof counts less by
@@ -330,6 +346,8 @@ pub struct Observe {
     /// Set by the BIOS keyboard's status call finding no key, and by a
     /// Sleep(0) of the built-in Windows that found no other thread to run.
     pub polled: bool,
+    /// Set by a PeekMessage of the built-in Windows that found nothing.
+    pub peeked: bool,
     /// Set by an access the proof can't follow, to what it was.
     failed: Cell<Option<&'static str>>,
     /// The blocks written since the last look.
@@ -338,11 +356,8 @@ pub struct Observe {
     /// The millisecond the first read of the built-in Windows's clock since
     /// the base found (`clock_read`), up to which its passes read the same.
     clock_read: Option<u64>,
-    /// `Clock::run_count` at the last read of that clock.
-    clock_read_at: u64,
-    /// Where the keyboard status call found no key or the clock was read
-    /// last, and how many times in a row.
-    poll: (Option<Head>, u32),
+    /// The places where a service was polled last (`poll_at`).
+    polls_at: [Poll; POLL_HEADS],
     /// Where the CPU was at the last timer event, with its general
     /// registers and flags.
     last_event: Option<(Head, [u32; 8], u32)>,
@@ -474,12 +489,12 @@ impl Default for Observe {
             on: false,
             enabled: default_enabled(),
             polled: false,
+            peeked: false,
             failed: Cell::new(None),
             chunks: Vec::new(),
             phase: Phase::Off,
             clock_read: None,
-            clock_read_at: 0,
-            poll: (None, 0),
+            polls_at: [Poll::default(); POLL_HEADS],
             last_event: None,
             proven: None,
             proven_time: false,
@@ -1256,7 +1271,18 @@ fn head_of(cpu: &Cpu) -> Head {
 /// events, which an event finding the CPU in it would arm too late.
 pub fn service_polled(cpu: &mut Cpu, cs: u16, eip: u32) {
     let head = Head { cs, eip, pe: cpu.pe() };
-    poll_at(cpu, head);
+    poll_at(cpu, head, false);
+}
+
+/// A PeekMessage of the built-in Windows found nothing, at the service
+/// trap at `cs:eip`: the program waits for a message in a loop, as
+/// Wizardry Gold does for its timer's (#1692). A proof follows the call
+/// up to the thread's next timer (`pure_call`). As for the clock, peeks
+/// further apart than a head stays armed are no such loop: a game that
+/// peeks once a frame and draws between arms nothing.
+pub fn message_peeked(cpu: &mut Cpu, cs: u16, eip: u32) {
+    let head = Head { cs, eip, pe: cpu.pe() };
+    poll_at(cpu, head, true);
 }
 
 /// The built-in Windows's clock was read, at the service trap at `cs:eip`.
@@ -1268,33 +1294,43 @@ pub fn service_polled(cpu: &mut Cpu, cs: u16, eip: u32) {
 /// interpreter for it.
 pub fn clock_read(cpu: &mut Cpu, cs: u16, eip: u32) {
     let head = Head { cs, eip, pe: cpu.pe() };
-    let run = cpu.bus.clock.run_count();
     let o = &mut cpu.bus.observe;
     if o.on && !std::mem::take(&mut o.clock_modelled) {
         let ms = cpu.bus.clock.now_micros() / 1000;
         o.clock_read.get_or_insert(ms);
     }
-    if run.saturating_sub(std::mem::replace(&mut o.clock_read_at, run)) > ARM_LIMIT {
-        o.poll = (None, 0);
-    }
-    poll_at(cpu, head);
+    poll_at(cpu, head, true);
 }
 
-/// A service was polled at `head`: armed once that happened enough times
-/// in a row.
-fn poll_at(cpu: &mut Cpu, head: Head) {
+/// A service was polled at `head`: armed once that happened `POLLS` times
+/// with no more than `POLL_HEADS - 1` other places polled between, and,
+/// where `near`, each poll within `ARM_LIMIT` instructions of the one
+/// before it there.
+fn poll_at(cpu: &mut Cpu, head: Head, near: bool) {
     let now = cpu.bus.clock.icount;
+    let run = cpu.bus.clock.run_count();
     let o = &mut cpu.bus.observe;
     if !o.enabled {
         return;
     }
-    if o.poll.0 == Some(head) {
-        o.poll.1 += 1;
-    } else {
-        o.poll = (Some(head), 1);
+    let polls = &mut o.polls_at;
+    let i = match polls.iter().position(|p| p.head == Some(head)) {
+        Some(i) => i,
+        None => {
+            // The place polled least lately makes room.
+            let (i, _) = polls.iter().enumerate().min_by_key(|(_, p)| p.at).unwrap();
+            polls[i] = Poll { head: Some(head), count: 0, at: run };
+            i
+        }
+    };
+    let p = &mut polls[i];
+    if near && run.saturating_sub(p.at) > ARM_LIMIT {
+        p.count = 0;
     }
-    if o.poll.1 >= POLLS {
-        o.poll.1 = 0;
+    p.at = run;
+    p.count += 1;
+    if p.count >= POLLS {
+        p.count = 0;
         o.arm(head, now);
     }
 }

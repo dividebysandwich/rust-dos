@@ -1096,6 +1096,13 @@ pub fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         vec![msg, hwnd, min, max, flags & !WAITS, 0],
         0,
     );
+    // A loop that peeks and finds nothing waits for a message, as one
+    // that reads GetTickCount waits for the time: its place is armed for
+    // an idle proof once that happened enough times close together
+    // (`idle::message_peeked`).
+    if result == Some(FALSE) {
+        cpu.bus.observe.peeked = true;
+    }
     // Found nothing and changed nothing: an idle proof goes through it,
     // up to when the thread's next timer is due. It read no RAM but its
     // arguments: the queue it looked in is the system's, and the message
