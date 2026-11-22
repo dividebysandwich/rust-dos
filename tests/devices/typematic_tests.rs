@@ -165,3 +165,17 @@ fn a_save_state_keeps_the_rate_and_the_repeating_key() {
     wait_ms(&mut loaded.bus, 20);
     assert_eq!(makes(&mut loaded.bus, A), 1);
 }
+
+#[test]
+fn the_built_in_windows_repeats_keys_at_its_keyboard_speed() {
+    use rust_dos::win32::user32::sysparams::{program_keyboard, system_parameters_info};
+    let mut cpu = cpu();
+    // Windows' defaults: speed 31 (30 a second), delay 1 (500 ms).
+    program_keyboard(&mut cpu);
+    assert_eq!(cpu.bus.kbc.typematic, 0x20);
+    // SPI_SETKEYBOARDSPEED 0 (2 a second), SPI_SETKEYBOARDDELAY 3 (1 s).
+    system_parameters_info(&mut cpu, &[11, 0, 0, 0]);
+    assert_eq!(cpu.bus.kbc.typematic, 0x3F);
+    system_parameters_info(&mut cpu, &[23, 3, 0, 0]);
+    assert_eq!(cpu.bus.kbc.typematic, 0x7F);
+}
