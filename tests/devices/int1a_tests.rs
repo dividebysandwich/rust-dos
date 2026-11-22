@@ -2,16 +2,22 @@
 //! BIOS has, the carry flag of those it hasn't, and the clock's alarm.
 
 use chrono::{NaiveDate, NaiveDateTime};
-use rust_dos::video::bios;
 use rust_dos::cpu::{Cpu, CpuFlags};
 use rust_dos::exec::{self, NoHook};
 use rust_dos::interrupts::int1a;
 use rust_dos::video::adapter::{Adapter, VideoSetup};
+use rust_dos::video::bios;
 
 fn machine(adapter: Adapter) -> Box<Cpu> {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.bus.set_cycles_per_ms(1000);
-    bios::install(&mut cpu.bus, VideoSetup { adapter, ..Default::default() });
+    bios::install(
+        &mut cpu.bus,
+        VideoSetup {
+            adapter,
+            ..Default::default()
+        },
+    );
     cpu
 }
 
@@ -74,12 +80,20 @@ fn the_tandy_dac_probe_finds_no_dac_and_is_not_logged() {
 fn the_sound_multiplexer_is_the_pcjrs_and_tandys_alone() {
     // On the PCjr and the Tandy 1000 AH=80h selects the speaker's source
     // and returns with the caller's flags; an AT's BIOS lacks it.
-    for (adapter, has_it) in [(Adapter::Pcjr, true), (Adapter::Tandy, true), (Adapter::Svga, false)] {
+    for (adapter, has_it) in [
+        (Adapter::Pcjr, true),
+        (Adapter::Tandy, true),
+        (Adapter::Svga, false),
+    ] {
         for cf in [false, true] {
             let mut cpu = machine(adapter);
             call(&mut cpu, 0x8003, cf);
             let expected = if has_it { cf } else { true };
-            assert_eq!(cpu.get_cpu_flag(CpuFlags::CF), expected, "{adapter:?}, CF {cf}");
+            assert_eq!(
+                cpu.get_cpu_flag(CpuFlags::CF),
+                expected,
+                "{adapter:?}, CF {cf}"
+            );
         }
     }
 }
@@ -92,7 +106,14 @@ fn the_alarm_is_set_once_until_it_is_reset() {
     cpu.set_dx(0x5800);
     call(&mut cpu, 0x0600, true);
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
-    assert_eq!((cmos(&mut cpu, 0x05), cmos(&mut cpu, 0x03), cmos(&mut cpu, 0x01)), (0x23, 0x59, 0x58));
+    assert_eq!(
+        (
+            cmos(&mut cpu, 0x05),
+            cmos(&mut cpu, 0x03),
+            cmos(&mut cpu, 0x01)
+        ),
+        (0x23, 0x59, 0x58)
+    );
     assert_eq!(cmos(&mut cpu, 0x0B) & 0x20, 0x20, "alarm interrupt enabled");
     assert_eq!(cpu.bus.io_read(0xA1) & 0x01, 0, "IRQ 8 unmasked");
     // Set already: CF set, the alarm as it was.
@@ -110,7 +131,10 @@ fn the_alarm_is_set_once_until_it_is_reset() {
 }
 
 fn noon(seconds: u32) -> NaiveDateTime {
-    NaiveDate::from_ymd_opt(2026, 1, 1).unwrap().and_hms_opt(12, 0, seconds).unwrap()
+    NaiveDate::from_ymd_opt(2026, 1, 1)
+        .unwrap()
+        .and_hms_opt(12, 0, seconds)
+        .unwrap()
 }
 
 /// Run a second of emulated time with no instructions, as the main loop
@@ -159,7 +183,8 @@ fn the_bios_clock_interrupt_calls_int_4ah_for_the_alarm() {
     rust_dos::hosttime::fix(Some(noon(1)));
     assert!(run_a_second(&mut cpu));
     // INT 4Ah: MOV BYTE [0500h],1; IRET. The program: INT 70h; HLT.
-    cpu.bus.load_bytes(0x21000, &[0xC6, 0x06, 0x00, 0x05, 0x01, 0xCF]);
+    cpu.bus
+        .load_bytes(0x21000, &[0xC6, 0x06, 0x00, 0x05, 0x01, 0xCF]);
     cpu.bus.write_16(0x4A * 4, 0x0000);
     cpu.bus.write_16(0x4A * 4 + 2, 0x2100);
     cpu.bus.load_bytes(0x20000, &[0xCD, 0x70, 0xF4]);

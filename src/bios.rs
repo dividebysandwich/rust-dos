@@ -576,7 +576,9 @@ fn mouse_irq_handler() -> Vec<u8> {
 /// BIOS's own IRQ handlers that only acknowledge the interrupt, or the
 /// IPX driver's, which a device may take the IRQ over from.
 pub fn is_default_irq_handler(entry: u32) -> bool {
-    [MASTER_EOI_HANDLER, SLAVE_EOI_HANDLER, IRQ9_HANDLER, RTC_HANDLER, IRET_HANDLER, IPX_IRQ].into_iter().any(|h| far(h) == entry)
+    [MASTER_EOI_HANDLER, SLAVE_EOI_HANDLER, IRQ9_HANDLER, RTC_HANDLER, IRET_HANDLER, IPX_IRQ]
+        .into_iter()
+        .any(|h| far(h) == entry)
 }
 
 /// The keyboard interrupt of a booted system, as a PC's BIOS runs it:

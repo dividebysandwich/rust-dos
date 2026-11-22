@@ -1852,7 +1852,8 @@ impl Bus {
         {
             let poll = crate::cmos::ALARM_POLL_TICKS;
             let enabled = self.cmos.alarm_enabled();
-            self.rtc_alarm_next = enabled.then(|| if at + poll > now { at + poll } else { now + poll });
+            let next = if at + poll > now { at + poll } else { now + poll };
+            self.rtc_alarm_next = enabled.then_some(next);
             if self.cmos.alarm_due() {
                 self.pic.raise(8);
             }
