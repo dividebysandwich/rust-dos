@@ -6,7 +6,7 @@
 use crate::command::ShellCommand;
 use crate::cpu::Cpu;
 use crate::disk::{DriveKind, FLOPPY_DRIVES, drive_key, drive_number, numbered_drive};
-use crate::mount::{MountCmd, PathContext, parse_drive_name, parse_mount_tokens, tokenize};
+use crate::mount::{MountCmd, PathContext, parse_dos_mount_tokens, parse_drive_name, tokenize};
 use crate::video::print_string;
 
 pub const BOOT_USAGE: &str = concat!(
@@ -71,8 +71,7 @@ pub struct BootCommand;
 
 impl ShellCommand for BootCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
-        // Host paths as the host spells them (see MOUNT).
-        let request = tokenize(&crate::dosstr::host_text(args)).and_then(|tokens| parse(&tokens));
+        let request = tokenize(args).and_then(|tokens| parse(&tokens));
         let (drive, images) = match request {
             Ok(Request::Help) => {
                 print_string(cpu, BOOT_USAGE);
@@ -123,10 +122,11 @@ fn mount_as(cpu: &mut Cpu, drive: u8, images: &[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let home = crate::hostdirs::home_dir();
     let disk = &cpu.bus.disk;
-    let locate = |path: &str| disk.resolve_path(&crate::dosstr::from_host_text(path));
+    let locate = |path: &str| disk.resolve_path(path);
     let paths =
         PathContext { base: &cwd, config_dir: cpu.bus.config_dir.as_deref(), home: home.as_deref(), locate: &locate };
-    let spec = match parse_mount_tokens(&tokens, &paths)? {
+    // Host paths as the host spells them (see MOUNT).
+    let spec = match parse_dos_mount_tokens(&tokens, &paths)? {
         MountCmd::Mount(spec) => spec,
         _ => return Err("BOOT needs disk images".to_string()),
     };

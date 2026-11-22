@@ -668,6 +668,20 @@ impl Opl3Chip {
         self.chip.active_voice_count()
     }
 
+    /// rust-dos: whether the chip's output can't change until a register
+    /// is written: every slot that sounds, and every one that modulates
+    /// it, holds its phase, its envelope and its feedback.
+    pub fn is_frozen(&self) -> bool {
+        self.chip.is_frozen()
+    }
+
+    /// rust-dos: the next resampled frame of a chip `is_frozen` found
+    /// frozen, which is the last one, without working out its slots: only
+    /// its clocks move, as `generate_resampled` would move them.
+    pub fn advance_frozen(&mut self) {
+        self.chip.advance_frozen();
+    }
+
     /// rust-dos: leave the channels whose bits are set (bit 0 channel 0,
     /// up to bit 17) out of the mix; the chip goes on as before.
     pub fn set_mute(&mut self, mask: u32) {

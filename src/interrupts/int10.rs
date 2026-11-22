@@ -521,7 +521,7 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         } else {
             cpu.bus.fill_ram(base..base + size, 0);
         }
-    } else if !keep && cpu.v86() {
+    } else if !keep && cpu.guest_v86() {
         // Under a V86 monitor the BIOS clears the memory the machine has
         // where it maps it, on its way out (Windows gives a DOS box in a
         // window a copy of it, and maps it in a page at a time).
@@ -1362,6 +1362,16 @@ pub fn handle(cpu: &mut Cpu) {
                     cpu.set_reg8(Register::BL, 3);
                     cpu.set_reg8(Register::CL, switches & 0x0F);
                     cpu.set_reg8(Register::CH, switches >> 4);
+                }
+                0x20 => {
+                    // Alternate Print Screen: the EGA's and VGA's BIOS
+                    // point INT 05h at a print screen routine of their own,
+                    // which prints the rows the screen has (43, 50) rather
+                    // than 25, and return nothing. Rust-DOS's print screen
+                    // is the BIOS's IRET, which prints nothing whatever the
+                    // rows: INT 05h goes back to it, as a program that
+                    // hooked it before loses its hook on a real card.
+                    set_vector(cpu, 0x05, 0xF000_0000 | crate::bios::IRET_HANDLER as u32);
                 }
                 0x30 => {
                     // Select Scan Lines (AL = 0, 1, 2)

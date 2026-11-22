@@ -2064,9 +2064,22 @@ impl Gen<'_> {
     /// as HIMEM leaves them, with base 0: the block's environment has
     /// that), run the instruction through its handler (and with `leave`,
     /// stop the block after it). The selector is in `sel` (or not known
-    /// yet: then no segment with a 4 GB limit).
+    /// yet: then no segment with a 4 GB limit). In virtual-8086 mode the
+    /// same, unless the register has the 64 KB level-3 segment that
+    /// `Cpu::load_seg_v86` keeps (never flat), as every load there leaves.
     fn real_load(&mut self, seg: Seg, sel: Option<T>, leave: bool) {
         let at = self.ops.new_dynamic_label();
+        if self.env.bits & super::ENV_V86 != 0 {
+            dynasm!(self.ops
+                ; .arch x64
+                ; cmp WORD [rbx + seg_field(seg, layout::SEG_ATTR)], layout::AR_DATA_RW_V86 as i16
+                ; jne =>at
+                ; cmp DWORD [rbx + seg_field(seg, layout::SEG_LIMIT)], 0xFFFF
+                ; jne =>at
+            );
+            self.bail_load(at, leave);
+            return;
+        }
         dynasm!(self.ops
             ; .arch x64
             ; cmp BYTE [rbx + seg_field(seg, layout::SEG_ATTR)], layout::AR_DATA_RW as i8
@@ -2089,6 +2102,11 @@ impl Gen<'_> {
                 ; plain:
             ),
         }
+        self.bail_load(at, leave);
+    }
+
+    /// The handler's call for `real_load`'s instruction at `at`.
+    fn bail_load(&mut self, at: DynamicLabel, leave: bool) {
         let end = self.end();
         let (wb, reload) = (self.cache.dirty, self.cache.loaded);
         self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave });
@@ -2600,10 +2618,10 @@ impl Gen<'_> {
                 }
             }
             Uop::ExitIf { cond, taken, next, commit } => self.exit_if(cond, taken, next, commit),
-            Uop::LoadSeg { seg, t } if self.env.bits & super::ENV_REAL != 0 => {
-                // As `Cpu::load_seg_real` loads it once it is a plain
-                // segment (which it stays): its handler runs the
-                // instruction otherwise, and the block stops after it.
+            Uop::LoadSeg { seg, t } if self.env.bits & (super::ENV_REAL | super::ENV_V86) != 0 => {
+                // As `Cpu::load_seg_real` (or `load_seg_v86`) loads it once
+                // it is a plain segment (which it stays): its handler runs
+                // the instruction otherwise, and the block stops after it.
                 self.real_load(seg, Some(t), true);
                 dynasm!(self.ops
                     ; .arch x64
@@ -2612,6 +2630,11 @@ impl Gen<'_> {
                     ; shl eax, 4
                     ; mov DWORD [rbx + seg_field(seg, layout::SEG_BASE)], eax
                 );
+                if seg == Seg::SS {
+                    // Interrupts wait for the instruction after a stack
+                    // switch, as `Cpu::load_segment` has them.
+                    dynasm!(self.ops ; .arch x64 ; mov BYTE [rbx + layout::IRQ_SHADOW as i32], 1);
+                }
             }
             Uop::LoadSeg { seg, t } => {
                 let fail = self.fail();

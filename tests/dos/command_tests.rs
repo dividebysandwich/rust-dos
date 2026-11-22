@@ -111,6 +111,20 @@ fn mount_takes_a_host_folder_named_in_code_page_437() {
 }
 
 #[test]
+fn mount_takes_a_host_folder_with_a_letter_code_page_437_lacks() {
+    // `MOUNT E ...\Bjørn` from a configuration's [autoexec]: code page 437
+    // has no ø, so the line carries its Latin-1 byte F8h, which MOUNT
+    // reads back as ø when ° (F8h in code page 437) names nothing.
+    let base = scratch("mount_latin1", &["c", "Bj\u{F8}rn"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    let host = format!("MOUNT E \"{}\"", base.join("Bj\u{F8}rn").display());
+    let line = rust_dos::dosstr::from_bytes(&rust_dos::dosstr::encode_cp437(&host));
+    let (command, args) = split_command(&line);
+    assert!(CommandDispatcher::new().dispatch(&mut cpu, command, args));
+    assert_eq!(cpu.bus.disk.drive_kind(4), Some(DriveKind::HardDisk));
+}
+
+#[test]
 fn mount_shows_host_paths_in_code_page_437() {
     // The Ü of a host folder `Über` shows as code page 437's Ü (9Ah) in
     // MOUNT's messages and its list, and a character code page 437 lacks
@@ -545,6 +559,42 @@ fn echo_prints_its_text_as_it_is() {
     run(&mut cpu, "ECHO \u{C9}\u{84}");
     assert_eq!(&cpu.bus.vga.vram_text[..4], &[0xC9, 0x07, 0x84, 0x07]);
     assert_eq!(run(&mut cpu, "REM nothing"), "");
+}
+
+#[test]
+fn verify_and_break_set_and_show_dos_s_flags() {
+    // As MS-DOS 6.22's COMMAND.COM answers.
+    let base = scratch("verify_break", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    rust_dos::dos_data::write(&mut cpu.bus);
+    for name in ["VERIFY", "BREAK"] {
+        assert_eq!(run(&mut cpu, name), format!("{} is off", name));
+        assert_eq!(run(&mut cpu, &format!("{} on", name.to_lowercase())), "");
+        assert_eq!(run(&mut cpu, name), format!("{} is on", name));
+        assert_eq!(run(&mut cpu, &format!("{}=OFF  ", name)), "");
+        assert_eq!(run(&mut cpu, name), format!("{} is off", name));
+        for bad in ["x", "on;", "on off", "o"] {
+            assert_eq!(
+                run(&mut cpu, &format!("{} {}", name, bad)),
+                "Must specify ON or OFF"
+            );
+        }
+    }
+    // The flags are DOS's, as INT 21h AH=54h and AX=3300h tell them.
+    run(&mut cpu, "VERIFY ON");
+    run(&mut cpu, "BREAK ON");
+    cpu.set_ax(0x5400);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.get_al(), 1);
+    cpu.set_ax(0x3300);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.dx() & 0xFF, 1);
+    // AX=3302h sets the flag from DL and gives the old one back.
+    cpu.set_ax(0x3302);
+    cpu.set_dx(0);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert_eq!(cpu.dx() & 0xFF, 1);
+    assert_eq!(run(&mut cpu, "BREAK"), "BREAK is off");
 }
 
 #[test]

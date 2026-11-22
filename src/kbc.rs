@@ -32,6 +32,10 @@ pub const OUT_A20: u8 = 0x02;
 /// output buffer, in PIT ticks: about 0.3 ms.
 pub const KBD_BYTE_TICKS: u64 = 358;
 
+/// The typematic rate and delay a keyboard starts with, and sets again
+/// at reset and with F5h and F6h: 10.9 characters a second after 500 ms.
+pub const TYPEMATIC_DEFAULT: u8 = 0x2B;
+
 /// Status register bits.
 const STATUS_OBF: u8 = 0x01;
 const STATUS_SYSTEM: u8 = 0x04;
@@ -82,6 +86,9 @@ pub struct Kbc {
     /// The keyboard's lights as the system last set them (command ED):
     /// bit 0 Scroll Lock, bit 1 Num Lock, bit 2 Caps Lock.
     pub lights: Option<u8>,
+    /// The keyboard's typematic rate and delay, as command F3h's parameter
+    /// byte has them (`keyboard::typematic_delay_ticks`).
+    pub typematic: u8,
 }
 
 impl Default for Kbc {
@@ -135,6 +142,7 @@ impl Kbc {
             held: false,
             keyboard_read: None,
             lights: None,
+            typematic: TYPEMATIC_DEFAULT,
         }
     }
 
@@ -375,6 +383,8 @@ impl Kbc {
             // The parameter of ED (LEDs) or F3 (typematic rate).
             if command == 0xED {
                 self.lights = Some(value & 0x07);
+            } else {
+                self.typematic = value & 0x7F;
             }
             self.reply(0xFA);
             return effects;
@@ -392,8 +402,15 @@ impl Kbc {
                 self.queue.push_front(first);
                 self.reply(0xFA);
             }
+            // Set the defaults, with the keyboard enabled (F6) or
+            // disabled until F4h (F5): the typematic rate among them.
+            0xF5 | 0xF6 => {
+                self.typematic = TYPEMATIC_DEFAULT;
+                self.reply(0xFA);
+            }
             0xFF => {
-                // Reset: ACK, then self test passed.
+                // Reset: ACK, then self test passed, with the defaults.
+                self.typematic = TYPEMATIC_DEFAULT;
                 self.queue.push_front(0xAA);
                 self.reply(0xFA);
             }
@@ -406,4 +423,4 @@ impl Kbc {
 crate::state_fields!(Kbc {
     queue, output, last, command_byte, output_port, pending_command, pending_kbd, last_was_command, irq,
     aux, output_aux, aux_irq,
-} skip { held, keyboard_read, lights });
+} skip { held, keyboard_read, lights, typematic });
