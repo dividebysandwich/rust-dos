@@ -81,7 +81,7 @@ impl VizAction {
         match self {
             VizAction::Source(channel, solo) => {
                 let bit = 1u16 << channel.index();
-                let all = (1u16 << CHANNELS) - 1;
+                let all = ((1u32 << CHANNELS) - 1) as u16;
                 let master = 1u16 << Channel::Master.index();
                 let mixer = &mut bus.mixer;
                 mixer.silenced = if !solo {
@@ -189,6 +189,7 @@ fn source_label(channel: Channel) -> &'static str {
         Channel::Modem => "Modem",
         Channel::Windows => "Windows",
         Channel::AdlibGold => "AdLib Gold",
+        Channel::Cms => "CMS",
     }
 }
 

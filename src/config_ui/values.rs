@@ -351,21 +351,27 @@ impl Item {
             AutoBusyOs => on_off(|s, on| s.auto_busy_os = on),
             RewindMemory => each(s, REWIND_MEMORY, |s, mb| s.rewind_memory = mb),
             SbType => {
+                // A model, or none: the Game Blaster (true) or no card.
                 let models = [
-                    Some(SbModel::Sb16),
-                    Some(SbModel::Awe32),
-                    Some(SbModel::SbPro2),
-                    Some(SbModel::SbPro1),
-                    Some(SbModel::Sb2),
-                    Some(SbModel::Sb16Vibra),
-                    None,
+                    Ok(SbModel::Sb16),
+                    Ok(SbModel::Awe32),
+                    Ok(SbModel::SbPro2),
+                    Ok(SbModel::SbPro1),
+                    Ok(SbModel::Sb2),
+                    Ok(SbModel::Sb16Vibra),
+                    Err(true),
+                    Err(false),
                 ];
                 each(s, models, |s, model| match model {
-                    Some(model) => {
+                    Ok(model) => {
                         s.sound.sb.model = model;
                         s.sound.sb_installed = true;
+                        s.sound.game_blaster = false;
                     }
-                    None => s.sound.sb_installed = false,
+                    Err(game_blaster) => {
+                        s.sound.sb_installed = false;
+                        s.sound.game_blaster = game_blaster;
+                    }
                 })
             }
             SbBase => each(s, [0x210, 0x220, 0x230, 0x240, 0x250, 0x260, 0x270, 0x280], |s, base| s.sound.sb.base = base),
@@ -440,6 +446,7 @@ impl Item {
             LptDac => each(s, crate::lpt_dac::LptDacType::ALL, |s, dac| s.sound.lpt_dac = dac),
             TandySound => each(s, crate::sn76489::TandySound::ALL, |s, tandy| s.sound.tandy = tandy),
             Pit2GateAtStart => on_off(|s, on| s.sound.pit2_gate_at_start = on),
+            Cms => on_off(|s, on| s.sound.cms = on),
             Ipx => each(s, crate::net::IpxMode::ALL, |s, mode| s.network.ipx = mode),
             IpxIrq => each(s, [None, Some(3), Some(4), Some(5), Some(7), Some(9), Some(10), Some(11), Some(15)], |s, irq| {
                 s.network.ipx_irq = irq

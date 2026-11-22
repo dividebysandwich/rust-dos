@@ -801,10 +801,30 @@ limit, so without a connection it goes on as it would with one:
 ### `[sound]`
 
 * `sbtype` is the Sound Blaster: `sb16` (the default), `sb16vibra`,
-  `awe32`, `sbpro2`, `sbpro1`, `sb2` or `none`. `sbbase` (hex), `irq`,
-  `dma` and `hdma` (the SB16's and AWE32's 16-bit channel) set its
+  `awe32`, `sbpro2`, `sbpro1`, `sb2`, `gb` or `none`. `sbbase` (hex),
+  `irq`, `dma` and `hdma` (the SB16's and AWE32's 16-bit channel) set its
   resources; the defaults are 220, 7, 1 and 5. The `BLASTER` environment
   variable follows them.
+* `gb` is Creative's Game Blaster (the Creative Music System, C/MS) in
+  place of a Sound Blaster: two Philips SAA1099 chips on a 7.16 MHz
+  clock, twelve square-wave voices with noise and envelopes, at `sbbase`
+  (220h unless set). The first chip is at base+0 (data) and base+1
+  (address), the second at base+2 and base+3. The card's detection chip
+  is at base+4 to base+0Fh: base+4 reads 7Fh, and a byte written to
+  base+6 or base+7 reads back from base+0Ah and base+0Bh, which
+  Creative's drivers and the games that look for the card check. The
+  card has no IRQ, DMA or digitized sound, and no `BLASTER` variable. It
+  plays on the mixer's `cms` channel. DOSBox's `sbtype=gb` imports as
+  this.
+* `cms=true` fits the two SAA1099s to the SB 2.0 (`sbtype=sb2`), at its
+  base+0 to base+3, where its DSP has no ports. The first Sound Blaster
+  (1.0) had the chips fitted for C/MS games, and the SB 1.5 and 2.0 had
+  empty sockets for them, sold as an upgrade, so the default is `false`.
+  The SB 2.0 with them has no detection chip, as on the real cards. The
+  SB Pro and SB16 have no sockets, and `cms` does nothing on them. From a
+  DOSBox configuration, `sbtype=sb1` (with DOSBox Staging's `cms=auto`,
+  its default) imports as `sbtype=sb2` with `cms=true`, `cms=on` or
+  `off` as itself, and DOSBox 0.74's `oplmode=cms` as `cms=true`.
 * `sbpro1` is the first Sound Blaster Pro (CT1330, DSP 3.00), which
   DOSBox's `sbtype=sbpro1` imports as. Creative's early drivers for it,
   such as Mega lo Mania's, take only DSP 3.00 and 3.01 and don't find an
@@ -954,8 +974,9 @@ The volume of each sound source in percent, from 0 to 200: `speaker` (the
 PC speaker and the prompt's beeps), `sb` (the Sound Blaster's digital
 audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
 `lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
-PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer),
-`monitor` (the [monitor's effects](#emulator)), `modem` (the [modem's
+PCjr's sound chip), `cms` (the Game Blaster's SAA1099s), `awe32` (the
+AWE32's wavetable synthesizer), `monitor` (the [monitor's
+effects](#emulator)), `modem` (the [modem's
 speaker](#serial-and-modem-games)), `windows` (the built-in Windows's
 sound: DirectSound and WinMM's wave audio), and `master` for all of them
 together. At 100, the default, a source plays as loud as its card makes

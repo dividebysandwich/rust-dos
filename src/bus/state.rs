@@ -71,6 +71,7 @@ const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
 const AWE_VERSION: u16 = 1;
 const ADLIB_GOLD_VERSION: u16 = 1;
+const CMS_VERSION: u16 = 1;
 const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 3;
 const ET4000_VERSION: u16 = 1;
@@ -192,6 +193,7 @@ impl Bus {
             awe_rom: _,
             awe_ram_kb: _,
             tandy_sound,
+            cms,
             lpt_dac,
             cdaudio,
             xms,
@@ -416,6 +418,10 @@ impl Bus {
                 adlib_gold_line.save(w);
             });
         }
+        // The CMS chips, likewise.
+        if let Some(cms) = cms {
+            w.section(b"CMS ", CMS_VERSION, |w| cms.save(w));
+        }
         // A 3dfx card, whose memory comes first, and only on a machine
         // with one, so states of machines without load as they did.
         if let Some(voodoo) = voodoo {
@@ -575,6 +581,7 @@ impl Bus {
             awe_rom: _,
             awe_ram_kb: _,
             tandy_sound,
+            cms,
             lpt_dac,
             cdaudio,
             xms,
@@ -847,6 +854,16 @@ impl Bus {
             (false, None) => {}
             (true, None) => return Err(StateError::Mismatch("it has an AdLib Gold and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has an AdLib Gold and it hasn't".into())),
+        }
+        match (r.next_is(b"CMS "), cms) {
+            (true, Some(cms)) => cms.load(&mut r.section(b"CMS ", CMS_VERSION)?)?,
+            (false, None) => {}
+            (true, None) => {
+                return Err(StateError::Mismatch("it has CMS chips and this machine hasn't".into()));
+            }
+            (false, Some(_)) => {
+                return Err(StateError::Mismatch("this machine has CMS chips and it hasn't".into()));
+            }
         }
         // A state saved before the cap had its section has the 3dfx
         // card's last capped frame, which the card's load puts in.
