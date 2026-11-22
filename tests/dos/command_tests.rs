@@ -33,8 +33,7 @@ fn clear_screen(cpu: &mut Cpu) {
     for b in cpu.bus.vga.vram_text.iter_mut() {
         *b = 0;
     }
-    cpu.bus.cursor_x = 0;
-    cpu.bus.cursor_y = 0;
+    cpu.bus.set_console_cursor(0, 0);
 }
 
 /// The text on the screen, as `run` returns it.
@@ -633,4 +632,36 @@ fn cd_md_and_rd_take_quoted_paths() {
     assert_eq!(run(&mut cpu, r#"RD "C:\New Folder""#), "");
     assert!(!base.join("c/NEW FOLDER").exists());
     assert_eq!(run(&mut cpu, r#"MD """#), "Required parameter missing");
+}
+
+/// CLS puts the cursor at the top left, and what is printed next starts
+/// there, as MS-DOS's COMMAND.COM has it in a batch file: GOG's launchers
+/// clear the screen in `[autoexec]` and then draw their menus.
+#[test]
+fn output_after_cls_starts_on_the_top_row() {
+    let base = scratch("cls_cursor", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    clear_screen(&mut cpu);
+    rust_dos::video::print_string(&mut cpu, "one\r\ntwo\r\nthree\r\n");
+    let (command, args) = split_command("CLS");
+    assert!(CommandDispatcher::new().dispatch(&mut cpu, command, args));
+    rust_dos::video::print_string(&mut cpu, "first\r\nsecond");
+    let text = screen(&cpu);
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    assert_eq!(lines, ["first", "second"]);
+    assert_eq!(cpu.bus.console_cursor(), (6, 1));
+}
+
+/// DOS's output goes on at the BIOS's cursor, wherever a program put it:
+/// through INT 10h or by writing the BIOS data (BDA 0450h) itself.
+#[test]
+fn output_goes_on_at_the_cursor_a_program_set() {
+    let base = scratch("bios_cursor", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    clear_screen(&mut cpu);
+    rust_dos::video::print_string(&mut cpu, "a");
+    cpu.bus.write_8(0x0450, 10);
+    cpu.bus.write_8(0x0451, 2);
+    rust_dos::video::print_string(&mut cpu, "b");
+    assert_eq!(screen(&cpu), "a\n\n          b");
 }

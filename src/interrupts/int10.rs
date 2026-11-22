@@ -1663,7 +1663,7 @@ pub fn handle(cpu: &mut Cpu) {
     }
 }
 
-/// Sets the cursor position in BOTH BDA and Internal State
+/// Sets the cursor position in the BDA and the CRTC
 fn set_cursor(cpu: &mut Cpu, col: u8, row: u8, page: u8) {
     if page < 8 {
         // Update BDA (The Source of Truth for BIOS)
@@ -1678,13 +1678,6 @@ fn set_cursor(cpu: &mut Cpu, col: u8, row: u8, page: u8) {
             let location = start + row as usize * text_cols(cpu) + col as usize;
             cpu.bus.vga.crtc_regs[0x0E] = (location >> 8) as u8;
             cpu.bus.vga.crtc_regs[0x0F] = location as u8;
-        }
-
-        // Update Internal State (If Active Page)
-        // This fixes the desync where renderer looked at old internal state
-        if page == 0 {
-            cpu.bus.cursor_x = col as usize;
-            cpu.bus.cursor_y = row as usize;
         }
     }
 }

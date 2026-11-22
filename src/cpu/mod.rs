@@ -1841,10 +1841,7 @@ impl Cpu {
         crate::keyboard::drop_unseen_keys(&mut self.bus);
         match kept_cursor {
             Some((col, row)) => {
-                self.bus.write_8(0x0450, col);
-                self.bus.write_8(0x0451, row);
-                self.bus.cursor_x = col as usize;
-                self.bus.cursor_y = row as usize;
+                self.bus.set_console_cursor(col as usize, row as usize);
             }
             None => {
                 // Clear text VRAM so we don't show leftover text from the

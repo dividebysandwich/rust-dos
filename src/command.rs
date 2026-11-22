@@ -563,7 +563,7 @@ impl ShellCommand for TypeCommand {
             Some(file) => match file.read() {
                 Ok(bytes) => {
                     print_cp437(cpu, &type_text(&bytes), 0x07);
-                    if cpu.bus.cursor_x != 0 {
+                    if cpu.bus.console_cursor().0 != 0 {
                         print_string(cpu, "\r\n");
                     }
                 }
@@ -604,8 +604,8 @@ impl ShellCommand for ClsCommand {
             cpu.bus.write_8(base + i, 0x20);
             cpu.bus.write_8(base + i + 1, 0x07);
         }
-        // Reset Cursor (BDA 0x0450)
-        cpu.bus.write_16(0x0450, 0x0000);
+        // The cursor to the top left, where the next output goes on.
+        cpu.bus.set_console_cursor(0, 0);
     }
 }
 

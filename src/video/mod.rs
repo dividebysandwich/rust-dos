@@ -1381,55 +1381,54 @@ fn render_cga_composite(
     }
 }
 
-// Prints a character and advances cursor, handling scrolling
+/// Print a character at the BIOS's cursor (`Bus::console_cursor`) and
+/// move the cursor on, scrolling at the bottom.
 pub fn print_char(bus: &mut Bus, ascii: u8) {
+    let (mut col, mut row) = bus.console_cursor();
     match ascii {
         0x0D => {
             // Carriage Return (\r)
-            bus.cursor_x = 0;
+            col = 0;
         }
         0x0A => {
             // Line Feed (\n)
-            bus.cursor_y += 1;
+            row += 1;
         }
         0x08 => {
             // Backspace
-            if bus.cursor_x > 0 {
-                bus.cursor_x -= 1;
+            if col > 0 {
+                col -= 1;
                 // Visually clear the character
-                let offset = (bus.cursor_y * 80 + bus.cursor_x) * 2;
+                let offset = (row * 80 + col) * 2;
                 bus.text_mem_mut()[offset] = 0x20; // Space
                 bus.mark_text_dirty(offset, offset + 2);
             }
         }
         _ => {
             // Print standard character
-            let offset = (bus.cursor_y * 80 + bus.cursor_x) * 2;
+            let offset = (row * 80 + col) * 2;
             let text = bus.text_mem_mut();
             text[offset] = ascii;
             text[offset + 1] = 0x07; // Light Gray Attribute
-            bus.cursor_x += 1;
+            col += 1;
             bus.mark_text_dirty(offset, offset + 2);
         }
     }
 
     // Handle Line Wrap
-    if bus.cursor_x >= 80 {
-        bus.cursor_x = 0;
-        bus.cursor_y += 1;
+    if col >= 80 {
+        col = 0;
+        row += 1;
     }
 
     // Handle Scrolling, using the row count from BDA so 80x43 / 80x50 modes
     // get proper scroll behaviour rather than being clamped to 25.
     let rows = bus.text_rows();
-    if bus.cursor_y >= rows {
+    if row >= rows {
         bus.scroll_up();
-        bus.cursor_y = rows - 1;
+        row = rows - 1;
     }
-    // The BIOS's cursor follows, as `print_cells` keeps it.
-    let (col, row) = (bus.cursor_x as u8, bus.cursor_y as u8);
-    bus.write_8(0x0450, col);
-    bus.write_8(0x0451, row);
+    bus.set_console_cursor(col, row);
 }
 
 /// The box above the first DOS prompt: the emulator and its version, then
@@ -1536,14 +1535,14 @@ pub fn console_write(cpu: &mut Cpu, text: &[u8]) {
 /// The column console output goes on at and the width of a line, as
 /// `console_write` and `print_cp437` place it: the BIOS's cursor of the
 /// active page in a Windows virtual machine, `print_char`'s 80 columns
-/// from `cursor_x` elsewhere.
+/// from page 0's elsewhere.
 pub fn console_column(cpu: &mut Cpu) -> (u16, u16) {
     if through_video_bios(cpu) {
         let page = cpu.bus.guest_read_8(0x0462) as u32;
         let col = cpu.bus.guest_read_8(0x0450 + 2 * page) as u16;
         (col, cpu.bus.guest_read_16(0x044A).max(1))
     } else {
-        (cpu.bus.cursor_x as u16, 80)
+        (cpu.bus.console_cursor().0 as u16, 80)
     }
 }
 
@@ -1563,8 +1562,7 @@ fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
         console.write(&text);
     }
     let text = text.into_iter();
-    let mut col = cpu.bus.cursor_x;
-    let mut row = cpu.bus.cursor_y;
+    let (mut col, mut row) = cpu.bus.console_cursor();
     let max_cols = 80;
     let max_rows = cpu.bus.text_rows();
     // Text VRAM range written directly below, for the dirty-rect renderer
@@ -1638,15 +1636,8 @@ fn print_cells(cpu: &mut Cpu, text: impl Iterator<Item = u8>, attr: u8) {
         }
     }
 
-    // Update Internal Bus State
-    cpu.bus.cursor_x = col;
-    cpu.bus.cursor_y = row;
-
-    // Update BIOS Data Area (BDA)
-    // The Assembly Shell reads [0x0450] to know where to print the next prompt.
-    // If we don't update this, the shell will print over our output.
-    cpu.bus.write_8(0x0450, col as u8);
-    cpu.bus.write_8(0x0451, row as u8);
+    // The BIOS's cursor, where the next output and the prompt go on.
+    cpu.bus.set_console_cursor(col, row);
 
     if scrolled {
         cpu.bus.vga.mark_dirty_full();

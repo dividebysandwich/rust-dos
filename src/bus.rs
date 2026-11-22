@@ -233,8 +233,6 @@ pub struct Bus {
     /// Port 61h bit 4, the DRAM refresh request, toggles on every read;
     /// delay loops count the toggles.
     refresh_toggle: bool,
-    pub cursor_x: usize,
-    pub cursor_y: usize,
     pub start_time: Instant, // System timer
     /// The game port at 201h and the joysticks on it (see joystick.rs).
     pub joystick: crate::joystick::GamePort,
@@ -540,6 +538,22 @@ impl Bus {
             0 => 25,
             rows => rows as usize + 1,
         }
+    }
+
+    /// Where DOS's console output goes on: the BIOS's cursor of page 0
+    /// (BDA 0450h), which CLS, INT 10h and programs that write the BIOS
+    /// data move as well, kept inside the 80 columns and the rows of the
+    /// text screen.
+    pub fn console_cursor(&self) -> (usize, usize) {
+        let col = (self.read_8(0x0450) as usize).min(79);
+        let row = (self.read_8(0x0451) as usize).min(self.text_rows() - 1);
+        (col, row)
+    }
+
+    /// Put the cursor `console_cursor` reads at `col`, `row`.
+    pub fn set_console_cursor(&mut self, col: usize, row: usize) {
+        self.write_8(0x0450, col as u8);
+        self.write_8(0x0451, row as u8);
     }
 
     /// The characters in a row of an 80-column text mode: 80, or what an
