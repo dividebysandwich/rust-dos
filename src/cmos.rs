@@ -70,7 +70,12 @@ impl Cmos {
         ram[0x18] = (ext >> 8) as u8;
         ram[0x30] = ext as u8;
         ram[0x31] = (ext >> 8) as u8;
-        let mut cmos = Self { index: 0, ram, offset: TimeDelta::zero(), alarm_checked: None };
+        let mut cmos = Self {
+            index: 0,
+            ram,
+            offset: TimeDelta::zero(),
+            alarm_checked: None,
+        };
         cmos.update_checksum();
         cmos
     }
@@ -209,7 +214,10 @@ impl Cmos {
         let alarm = [self.ram[0x05], self.ram[0x03], self.ram[0x01]];
         let matches = |at: NaiveDateTime| {
             let clock = [bcd(at.hour()), bcd(at.minute()), bcd(at.second())];
-            alarm.iter().zip(clock).all(|(&alarm, clock)| alarm >= 0xC0 || alarm == clock)
+            alarm
+                .iter()
+                .zip(clock)
+                .all(|(&alarm, clock)| alarm >= 0xC0 || alarm == clock)
         };
         // A day covers every time the alarm can match, after a pause or a
         // clock set forward.
