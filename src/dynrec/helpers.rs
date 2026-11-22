@@ -993,9 +993,14 @@ fn far_goes_on(cpu: &Cpu, ctx: &mut JitCtx, pm: bool, tr: u16, cpl: u8) -> u32 {
         ctx.stack32 = mode & 4 != 0;
         return 0;
     }
-    let phys = (cs.base.wrapping_add(cpu.eip()) & cpu.bus.a20_mask()) as usize;
+    // A VCPI client's virtual-8086 task may run with paging on, where the
+    // target's linear address isn't its physical one. Where the TLB doesn't
+    // hold its page, the execution loop looks the target up.
+    let Some(phys) = cpu.translated(cs.base.wrapping_add(cpu.eip()), cpu.cpl == 3) else {
+        return EXIT_AFTER;
+    };
     let cs_bits = super::seg_env_mask(Seg::CS) | 1;
-    let goes_on = (cpu.pm() || !crate::exec::is_service_trap(cpu.bus.ram(), phys))
+    let goes_on = !crate::exec::is_service_trap(cpu.bus.ram(), phys as usize)
         && code32 | super::flat_bit(cpu, Seg::CS) == ctx.mode & cs_bits;
     if goes_on { 0 } else { EXIT_AFTER }
 }
