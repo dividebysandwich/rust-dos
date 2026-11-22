@@ -999,6 +999,9 @@ impl Bus {
         // SDA holds: until the next DOS call writes it, nothing in it
         // counts as the program's.
         self.sda_written = None;
+        // DOS's Ctrl+C code in the ROM, which a state of an older build
+        // lacks.
+        crate::bios::write_break_code(self);
     }
 
     /// `after_load` for a state loaded into the machine that saved it,
