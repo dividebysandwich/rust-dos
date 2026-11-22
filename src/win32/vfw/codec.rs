@@ -265,6 +265,17 @@ impl Codec {
         }
     }
 
+    /// The last picture of a Cinepak decoder as iccvid.dll gives it in 8
+    /// bits, `zoom` times the size `width` by `height` (1 or 2): rows of
+    /// indexes of `cinepak::palette_8` from the top. None for another
+    /// codec, a picture of another size or another zoom.
+    pub fn indexes_8(&self, width: u32, height: u32, zoom: u32) -> Option<Vec<u8>> {
+        match self.0.as_ref()? {
+            Decoder::Cinepak(d) => d.indexes(width as usize, height as usize, zoom as usize),
+            _ => None,
+        }
+    }
+
     /// The last picture as a bottom-up 24-bit DIB, if it is `width` by
     /// `height`.
     pub fn picture(&self, width: u32, height: u32) -> Option<Vec<u8>> {
@@ -316,7 +327,7 @@ fn cinepak_dib(d: &super::cinepak::Decoder, width: u32, height: u32) -> Vec<u8> 
     let mut out = vec![0; stride * h];
     for y in 0..h {
         let row = out[(h - 1 - y) * stride..][..w * 3].as_chunks_mut::<3>().0;
-        for (o, &[r, g, b]) in row.iter_mut().zip(d.row(y)) {
+        for (o, [r, g, b]) in row.iter_mut().zip(d.row(y)) {
             *o = [b, g, r];
         }
     }
