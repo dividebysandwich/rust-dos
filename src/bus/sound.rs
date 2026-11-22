@@ -68,6 +68,21 @@ impl Bus {
         self.clock.schedule(self.next_event());
     }
 
+    /// Turn the PC speaker off: port 61h's timer 2 gate and speaker data
+    /// bits clear, as the BIOS's POST leaves them, with the check enables
+    /// as they were. For a program the emulator ended itself (its close,
+    /// a divide overflow): nothing of it is left to switch off a note it
+    /// was playing. A program that ends through DOS keeps the speaker as
+    /// it left it, as on a real PC.
+    pub fn silence_speaker(&mut self) {
+        if self.speaker_data || self.pit2.gate() {
+            self.audio_catch_up();
+        }
+        self.pit2.set_gate(false, self.clock.now_ticks());
+        self.speaker_data = false;
+        self.speaker_on = false;
+    }
+
     /// Power-on state of the sound hardware, at a reboot: as at a
     /// program's end, with a ViBRA16C back at the resources the BIOS gives
     /// it.
