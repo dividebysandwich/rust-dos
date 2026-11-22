@@ -312,6 +312,12 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   follow motion, so steer their pointer with these.
   `/api/status` → `mouse` shows the driver's position and whether it is
   installed.
+- **A held key repeats** as a PC keyboard's does, in emulated time: its
+  make code (and keystroke) comes again 500 ms after it went down, then
+  10.9 times a second, or at the rate a program set (command F3h, INT 16h
+  AX=0305h), until it comes up or another key goes down. A game that
+  moves one step for each make code it reads (Starflight) walks for as
+  long as `hold_ms` holds the key.
 - **Keys arrive at most one scan code per frame** (about 16 ms). A long
   `type` string takes roughly 2 frames per character, or 4 for shifted
   characters.
@@ -1110,14 +1116,15 @@ the DOS prompt to write the changes into it. The log's `[DISK]` line at
 the mount names the delta file. `-inplace` writes the image itself.
 
 - **Status:** `/api/status` has `cpu_mode` `v86` while a DOS box or the
-  BIOS runs under Windows, `video.s3` with the S3's extended CRTC
-  registers and hardware cursor position (with `machine=svga_s3`, and a
-  ViRGE's), and with `svga_s3virge`/`svga_s3virgevx` `video.s3.virge`:
-  the 2D engine's BitBLTs, rectangles, lines and polygons, the 3D
-  engine's `triangles` and `lines_3d`, the last 3D command (`cmd_3d`),
-  the subsystem status, and the overlay, if one is shown,
-  `video.vga.crtc` with the standard CRTC registers, and `kbc` with the
-  keyboard controller's output buffer and queues.
+  BIOS runs under Windows, and while DOS runs under the built-in
+  virtual-8086 monitor (with EMS on), `video.s3` with the S3's extended
+  CRTC registers and hardware cursor position (with `machine=svga_s3`, and
+  a ViRGE's), and with `svga_s3virge`/`svga_s3virgevx` `video.s3.virge`:
+  the 2D engine's BitBLTs, rectangles, lines and polygons, the 3D engine's
+  `triangles` and `lines_3d`, the last 3D command (`cmd_3d`), the
+  subsystem status, and the overlay, if one is shown, `video.vga.crtc`
+  with the standard CRTC registers, and `kbc` with the keyboard
+  controller's output buffer and queues.
 - **The mouse:** Windows reads the PS/2 mouse's motion and accelerates
   it, so move in small relative steps (`{"action":"move","dx":10,"dy":-6}`)
   a few tenths of a second apart and read where the pointer went from

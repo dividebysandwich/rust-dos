@@ -217,6 +217,28 @@ const SAME: f64 = 0.05;
 /// Quake, Oni and Rage of Mages 2, 3 sat halted for more than a tenth of
 /// the measurement.
 const SPARE: f64 = 0.1;
+/// A program halted this share of a measurement or more, and for longer
+/// than `RETRACES` retraces a frame, isn't stepped up: its frames don't
+/// wait for the processor. One whose frames do waits for its pace (a
+/// retrace, a timer tick) only until the next one comes: once a frame
+/// takes more than one, that is less than half its time. Wizardry Gold
+/// draws its forest 1.5 to 2.4 times a second while it walks, halted for
+/// 81% to 97% of each measurement, and steps up to the host's estimate
+/// (548,695) froze it for seconds whenever a step's animation spun
+/// instead of halting (#1677).
+///
+/// The time a program waits in a loop the idle skip skips counts as
+/// halted, as a DOS game's poll for the retrace does (`idle`).
+const WAITS: f64 = 0.5;
+/// Retraces a frame a program whose frames wait for the processor may
+/// wait for: a DOS game that waits for two after each frame, for 35
+/// frames a second on a 70 Hz display, and draws a frame in 1.2 retraces
+/// shows one every three, 23 a second, halted for 60% of the time, and
+/// at more speed one every two. So does one whose frames take one
+/// retrace or two by turns, between half the refresh rate and all of it.
+/// Of the time of `fps` frames, `RETRACES` retraces each are
+/// `RETRACES * fps / refresh`.
+const RETRACES: f64 = 2.0;
 /// Chosen: the longest wait is `HOLD_WINDOWS` << 4, 480 measurements of
 /// `WINDOW_NS`, four minutes, which keeps a game that misses every probe
 /// (Doom's 35) above its speed for 1% of the time, and still probes again
@@ -2223,8 +2245,12 @@ impl AutoSpeed {
         }
         // More, by as much as would take the frame rate to the display's.
         let busy = self.busy(protected, m.halted, m.io);
+        // Halted for longer than frames that wait for the processor are
+        // (`WAITS`): it waits for something else, and more speed draws no
+        // more frames.
+        let waits = m.halted >= WAITS.max(RETRACES * fps / m.refresh);
         let up = |this: &mut Self, most: f64, below: (u32, f64)| {
-            if fps >= m.refresh * AT_REFRESH || current >= top {
+            if fps >= m.refresh * AT_REFRESH || current >= top || waits {
                 return hold(this, c, HOLD_WINDOWS, false);
             }
             this.step = Step::Raised { from: current, fps, below };
@@ -2525,14 +2551,17 @@ impl AutoSpeed {
                     climbed: 0,
                 };
                 let fewer = |r: Record| recent < r.fps * KEPT && seen >= JUDGED;
+                // Fewer frames from a program that sits halted (`WAITS`)
+                // came from what it waited for, not from the speed.
+                let climbs = |r: Record| fewer(r) && !waits;
                 match self.held {
                     // Fewer frames than the record's speed drew: back to
                     // it, or further up if it is there, and down from
                     // there as far as that keeps them.
-                    Some(r) if fewer(r) && current < r.at.min(top) => {
+                    Some(r) if climbs(r) && current < r.at.min(top) => {
                         return hold(self, r.at as f64, JUDGED, false);
                     }
-                    Some(r) if fewer(r) && r.climbed < CLIMBS && current < top => {
+                    Some(r) if climbs(r) && r.climbed < CLIMBS && current < top => {
                         let at = clamp(c * FINE_STEP);
                         self.held = Some(Record {
                             at,
@@ -6607,5 +6636,47 @@ mod tests {
         let mean = sum / n as u64;
         assert!(missed <= 40, "{missed} missed, mean speed {mean}");
         assert!((8500..=13_000).contains(&mean), "{mean}");
+    }
+
+    /// Wizardry Gold walking in its forest at any speed: a frame or two a
+    /// second, as the party moves, and halted for most of each
+    /// measurement under the built-in Windows, whose idle loop halts.
+    fn wizardry(i: usize) -> Measurement {
+        const READS: [(f64, f64); 4] = [(1.49, 0.81), (2.37, 0.93), (1.49, 0.96), (1.98, 0.95)];
+        let (fps, halted) = READS[i % READS.len()];
+        Measurement {
+            fps: Some(fps),
+            halted,
+            refresh: 59.94,
+            ..STILL
+        }
+    }
+
+    #[test]
+    fn a_program_halted_most_of_the_time_is_not_stepped_up() {
+        let mut auto = pentium_ii();
+        let mut speed = 150_000;
+        for i in 0..200 {
+            speed = auto.decide(speed, &wizardry(i), true, HOST);
+            assert!(speed <= 150_000, "{speed} at {i}");
+        }
+    }
+
+    #[test]
+    fn a_program_halted_for_its_retraces_is_stepped_up() {
+        // Waiting for two retraces after each frame of 1.2 (23 frames a
+        // second at 70 Hz, halted 60%), and frames of one retrace and two
+        // by turns (40 at 60 Hz, halted 56%): more speed draws more.
+        for (fps, halted, refresh) in [(23.4, 0.6, 70.09), (40.0, 0.56, 59.94)] {
+            let mut auto = AutoSpeed::new(3000, None);
+            let m = Measurement {
+                fps: Some(fps),
+                halted,
+                refresh,
+                ..STILL
+            };
+            let speed = auto.decide(10_000, &m, false, HOST);
+            assert!(speed > 10_000, "{speed} at {fps} frames a second");
+        }
     }
 }

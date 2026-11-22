@@ -188,6 +188,9 @@ fn enter(cpu: &mut Cpu, rm: &Context) {
     for s in [Seg::ES, Seg::DS, Seg::FS, Seg::GS] {
         cpu.set_seg_cache(s, SegCache::real(seg(s)));
     }
+    if crate::v86mon::installed(&cpu.bus) {
+        crate::v86mon::enter(cpu);
+    }
 }
 
 /// The trap at `RETURN`: the innermost real-mode code the system called

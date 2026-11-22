@@ -1103,16 +1103,18 @@ impl Cpu {
     /// shell is loaded again without them having exited: a divide
     /// overflow, the tripwire, a DPMI client that can't go on, the
     /// debugger's or a frontend's close, a reboot. One exit is recorded,
-    /// for the program that ran last, with no exit code.
-    fn note_abort(&mut self) {
+    /// for the program that ran last, with no exit code. Returns whether
+    /// one was running.
+    fn note_abort(&mut self) -> bool {
         let name = self.program.clone();
         let events = &mut self.programs;
         if events.running == 0 {
-            return;
+            return false;
         }
         events.running = 0;
         events.ended += 1;
         events.last_exit = Some(ProgramExit { name, code: None, resident: false });
+        true
     }
 
     /// Stop the running program for the shell to be loaded again, with
@@ -1330,18 +1332,26 @@ impl Cpu {
         self.load_flags16(new_flags.bits() as u16);
     }
 
-    /// See `set_cpu_flags`.
+    /// See `set_cpu_flags`. In virtual-8086 mode IOPL stays as it is, as
+    /// POPF and IRET leave it there: a BIOS service under the built-in
+    /// monitor that hands back the flags its caller pushed keeps IOPL 3.
     pub fn load_flags16(&mut self, value: u16) {
         let upper = self.flags.bits() & 0xFFFF_0000;
-        self.flags = CpuFlags::from_bits_retain(upper | (value as u32 & FLAGS16_WRITABLE) | 0x0002);
+        let writable = if self.v86() { FLAGS16_WRITABLE & !CpuFlags::IOPL.bits() } else { FLAGS16_WRITABLE };
+        let kept = self.flags.bits() & FLAGS16_WRITABLE & !writable;
+        self.flags = CpuFlags::from_bits_retain(upper | kept | (value as u32 & writable) | 0x0002);
     }
 
     /// Load EFLAGS, as POPFD and IRETD do in real mode (IRETD loads RF
     /// too). VM and RF can't be set this way; AC only exists from the 486
-    /// on, ID on a Pentium.
+    /// on, ID on a Pentium. In virtual-8086 mode IOPL stays as it is.
     pub fn load_eflags(&mut self, value: u32) {
-        let writable = FLAGS16_WRITABLE | self.model.eflags_extra();
-        let keep = self.flags.bits() & CpuFlags::VM.bits();
+        let mut writable = FLAGS16_WRITABLE | self.model.eflags_extra();
+        let mut keep = self.flags.bits() & CpuFlags::VM.bits();
+        if keep != 0 {
+            writable &= !CpuFlags::IOPL.bits();
+            keep |= self.flags.bits() & CpuFlags::IOPL.bits();
+        }
         self.flags = CpuFlags::from_bits_retain(keep | (value & writable) | 0x0002);
     }
 
@@ -1647,6 +1657,9 @@ impl Cpu {
     /// is until rust-dos starts again.
     pub fn set_upper_memory(&mut self, ems: bool, umb: bool) -> Result<(), String> {
         crate::ems::set_enabled(&mut self.bus, ems);
+        // At the prompt, DOS goes on under the virtual-8086 monitor with
+        // EMS, in real mode without.
+        crate::v86mon::sync(self);
         // With EMS, its page frame takes the upper half of upper memory.
         let size = if ems { 0x1000 } else { 0x2000 };
         let wanted = umb.then_some(size);
@@ -1701,7 +1714,7 @@ impl Cpu {
     }
 
     pub fn load_shell(&mut self) {
-        self.note_abort();
+        let aborted = self.note_abort();
         // A shell reload always starts outside any DOS process. Normally
         // termination restored this to the shell's PSP; frontends that
         // explicitly close a running process have no parent context to do so.
@@ -1886,11 +1899,17 @@ impl Cpu {
         self.bus.reset_serial_irqs();
         self.keep_resident_irqs(slave_imr);
         self.bus.reset_sound();
+        // A note the ended program was playing on the speaker would sound
+        // on at the prompt, with nothing left to switch it off.
+        if aborted {
+            self.bus.silence_speaker();
+        }
         self.bus.reset_network();
         // No program runs any more: its extended memory and A20 go too,
         // but for what resident programs hold, and a reset from now on is
         // a cold boot.
         let a20 = self.bus.xms.program_ended();
+        crate::vcpi::program_ended(&mut self.bus);
         self.bus.dpmi.reset();
         // The loops of a program that ends here get their summaries.
         crate::win32::trace::flush(self);
@@ -1914,6 +1933,13 @@ impl Cpu {
         crate::dos_data::write_driver_code(&mut self.bus);
         self.bus.write_8(verify_flag, verify);
         self.bus.write_8(break_flag, ctrl_break);
+
+        // With expanded memory, DOS runs in virtual-8086 mode under the
+        // built-in monitor, as under EMM386.
+        if crate::v86mon::installed(&self.bus) {
+            crate::v86mon::install_rom(&mut self.bus);
+            crate::v86mon::enter(self);
+        }
 
         self.bus.log_string("[SYSTEM] Shell Loaded. Ready.");
     }

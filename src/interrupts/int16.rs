@@ -103,14 +103,27 @@ pub fn handle(cpu: &mut Cpu) {
 /// keyboard has, booted or not, the same way. False for the others.
 fn keyboard_settings(cpu: &mut Cpu, ah: u8) -> bool {
     match ah {
-        // Set the typematic rate and delay. The keyboard controller
-        // takes the rate a program sends to the keyboard (F3h) and
-        // keeps nothing of it, and keys repeat as the host's do
-        // (#1486), so there is nothing to set and nothing to return.
-        0x03 => {}
-        // The functions there are: AH=0Ah and 10h-12h, and none of
-        // AH=03h's subfunctions, as Bochs' BIOS returns.
-        0x09 => cpu.set_reg8(iced_x86::Register::AL, 0x30),
+        // The typematic rate and delay, which the BIOS sends to the
+        // keyboard with command F3h: AL=00h the defaults, AL=05h the
+        // delay in BH (0-3: 250 ms to 1 s) and the rate in BL (0-1Fh: 30
+        // to 2 a second), and AL=06h returns them in BH and BL. Others,
+        // such as the PCjr's AL=04h (no repeat), do nothing.
+        0x03 => {
+            let (al, bx) = (cpu.get_al(), cpu.bx());
+            let kbc = &mut cpu.bus.kbc;
+            match al {
+                0x00 => kbc.typematic = crate::kbc::TYPEMATIC_DEFAULT,
+                0x05 => kbc.typematic = ((bx >> 8) as u8 & 3) << 5 | (bx as u8 & 0x1F),
+                0x06 => {
+                    let typematic = kbc.typematic as u16;
+                    cpu.set_bx((typematic >> 5 & 3) << 8 | (typematic & 0x1F));
+                }
+                _ => {}
+            }
+        }
+        // The functions there are: AH=0Ah and 10h-12h (bits 4 and 5),
+        // and AH=03h's AL=00h, 05h and 06h (bits 0, 2 and 3).
+        0x09 => cpu.set_reg8(iced_x86::Register::AL, 0x3D),
         // The keyboard's ID, as the identify command returns it.
         0x0A => cpu.set_bx(cpu.bus.kbc.keyboard_id()),
         _ => return false,
