@@ -27,7 +27,7 @@ const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
-const DPMI_VERSION: u16 = 2;
+const DPMI_VERSION: u16 = 3;
 const WIN32_VERSION: u16 = 86;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
@@ -436,7 +436,10 @@ impl Bus {
         }
         // The DPMI host, while it has clients.
         if dpmi.active() {
-            w.section(b"DPMI", DPMI_VERSION, |w| dpmi.save(w));
+            w.section(b"DPMI", DPMI_VERSION, |w| {
+                dpmi.save(w);
+                dpmi.save_ldt_limits(w);
+            });
         }
         // The built-in Windows, while it runs a program or is about to.
         if win32.active() || win32.pending() {
@@ -869,7 +872,11 @@ impl Bus {
         }
         dpmi.reset();
         if r.next_is(b"DPMI") {
-            dpmi.load(&mut r.section(b"DPMI", DPMI_VERSION)?)?;
+            // Version 2 has no LDT limits (`Dpmi::load_ldt_limits`).
+            let mut section = r.section_of(b"DPMI", &[2, DPMI_VERSION])?;
+            dpmi.load(&mut section)?;
+            let version = section.version();
+            dpmi.load_ldt_limits(&mut section, version)?;
         }
         win32.reset();
         if r.next_is(b"W32 ") {
