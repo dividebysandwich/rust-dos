@@ -13,6 +13,7 @@ mod batch_tests;
 mod bios_drive_tests;
 mod boot_tests;
 mod command_tests;
+mod ctrl_break_tests;
 mod disk_speed_tests;
 mod dos_features_test;
 mod dpmi_tests;

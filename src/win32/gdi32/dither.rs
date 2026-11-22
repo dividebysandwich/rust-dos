@@ -35,8 +35,8 @@
 //!
 //! Windows 98 doesn't draw Cinepak movies this way: Cinepak's codec
 //! decodes them to 8 bits itself, in a palette and with a dither of its
-//! own, which MCIAVI realizes. Until rust-dos has that (#1712), they are
-//! dithered here as the other movies are.
+//! own (`vfw::cinepak`), which MCIAVI realizes, and DrawDib stretches
+//! that 8-bit picture (`stretch_8`).
 
 use super::palette::{HALFTONE, halftone_colors};
 use super::surface::{Surface, default_masks};
@@ -201,6 +201,84 @@ pub fn to_halftone(src: &Surface, from: (i32, i32, i32, i32), width: i32, height
     out
 }
 
+/// The part `from` (left, top, right, bottom, with rows counted from the
+/// top) of an 8-bit picture, `indexes` in rows of `src_width` from the
+/// top, stretched to `width` by `height` as Windows 98's DrawDib stretches
+/// Cinepak's 8-bit pictures: an 8-bit picture of the colours `palette`,
+/// each pixel a copy of one of the source's (`stretch_map`).
+pub fn stretch_8(
+    indexes: &[u8],
+    src_width: i32,
+    palette: Vec<u32>,
+    from: (i32, i32, i32, i32),
+    width: i32,
+    height: i32,
+) -> Surface {
+    let mut out = Surface::memory(width.max(0), height.max(0), 8, palette, default_masks(8));
+    let (left, top, right, bottom) = from;
+    let (sw, sh) = (right - left, bottom - top);
+    let src_height = if src_width > 0 {
+        (indexes.len() / src_width as usize) as i32
+    } else {
+        0
+    };
+    if width <= 0 || height <= 0 || sw <= 0 || sh <= 0 || src_width <= 0 || src_height <= 0 {
+        return out;
+    }
+    let (columns, rows) = stretch_map((sw, sh), (width, height));
+    let mut values = vec![0; width as usize];
+    for (y, &sy) in rows.iter().enumerate() {
+        let sy = (top + sy).clamp(0, src_height - 1) as usize;
+        let line = &indexes[sy * src_width as usize..][..src_width as usize];
+        for (v, &sx) in values.iter_mut().zip(&columns) {
+            *v = u32::from(line[(left + sx).clamp(0, src_width - 1) as usize]);
+        }
+        out.put_row(0, y as i32, &values);
+    }
+    out
+}
+
+/// Which source column each destination column copies, and which source
+/// row (from the top) each destination row, when DrawDib stretches an
+/// 8-bit picture of `source` size to `dest`. Measured on Windows 98 SE
+/// from Cinepak's 8-bit output at 13 sizes, each pixel exact: when
+/// neither side shrinks, the column `x` takes the source's `x * sw / dw`
+/// and the row `y` from the bottom the source's `y * sh / dh` from the
+/// bottom. When either shrinks, the column takes `(x * sw + c) / dw` and
+/// the row from the top `(y * sh + c) / dh`, `c` being `sw - dw / 2`
+/// for a narrower picture, else `(sw - 1) / 2`, and `sh - (dh + 1) / 2`
+/// for a lower one, else `(sh + 1) / 2`. Every measured size that
+/// shrinks was stretched from 256 by 64, so how `c` follows the source's
+/// size is the simplest rule that fits; other sources may differ
+/// (#1730).
+fn stretch_map((sw, sh): (i32, i32), (dw, dh): (i32, i32)) -> (Vec<i32>, Vec<i32>) {
+    let (sw64, sh64, dw64, dh64) = (sw as i64, sh as i64, dw as i64, dh as i64);
+    if dw >= sw && dh >= sh {
+        let columns = (0..dw64).map(|x| (x * sw64 / dw64) as i32).collect();
+        let rows = (0..dh64)
+            .map(|y| sh - 1 - ((dh64 - 1 - y) * sh64 / dh64) as i32)
+            .collect();
+        return (columns, rows);
+    }
+    let cx = if dw < sw {
+        sw64 - dw64 / 2
+    } else {
+        (sw64 - 1) / 2
+    };
+    let cy = if dh < sh {
+        sh64 - (dh64 + 1) / 2
+    } else {
+        (sh64 + 1) / 2
+    };
+    let columns = (0..dw64)
+        .map(|x| ((x * sw64 + cx) / dw64).min(sw64 - 1) as i32)
+        .collect();
+    let rows = (0..dh64)
+        .map(|y| ((y * sh64 + cy) / dh64).min(sh64 - 1) as i32)
+        .collect();
+    (columns, rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +400,24 @@ mod tests {
             raised += row.iter().filter(|&&v| v == cube_index(3, 3, 3)).count();
         }
         assert_eq!(raised, 10);
+    }
+
+    #[test]
+    fn stretch_map_matches_windows_98s_drawdib() {
+        // Columns and rows Windows 98 SE's DrawDib took for Cinepak's 8-bit
+        // picture of 256 by 64 (read from the pixels it drew).
+        let (x, y) = stretch_map((256, 64), (255, 63));
+        assert_eq!((x[125], x[126], x[254]), (125, 127, 255));
+        assert_eq!((y[0], y[30], y[31], y[62]), (0, 30, 32, 63));
+        let (x, y) = stretch_map((256, 64), (200, 50));
+        assert_eq!(&x[..6], [0, 2, 3, 4, 5, 7]);
+        assert_eq!(&y[..6], [0, 2, 3, 4, 5, 7]);
+        let (x, y) = stretch_map((256, 64), (100, 100));
+        assert_eq!(&x[..4], [2, 4, 7, 9]);
+        assert_eq!(&y[..4], [0, 0, 1, 2]);
+        // Larger both ways: from the left and from the bottom.
+        let (x, y) = stretch_map((256, 64), (384, 96));
+        assert_eq!(&x[..4], [0, 0, 1, 2]);
+        assert_eq!((y[0], y[1], y[95]), (0, 1, 63));
     }
 }

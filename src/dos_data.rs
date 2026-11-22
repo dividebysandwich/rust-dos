@@ -61,6 +61,9 @@ pub const SDA_ALWAYS: u16 = 0x001A;
 /// The InDOS flag (AH=34h), after the critical error flag.
 pub const INDOS: u16 = SDA + 0x01;
 const SDA_AX: u16 = SDA + 0x1A;
+/// The caller's SP while DOS runs its INT 23h handler, where it is again
+/// when the handler returns with an IRET, and two less after a RETF.
+pub const SDA_BREAK_SP: u16 = SDA + 0x12;
 /// The machine number SHARE tells processes apart by.
 const SDA_USER_ID: u16 = SDA + 0x1E;
 /// The media ID byte AH=1Bh and 1Ch point DS:BX at.

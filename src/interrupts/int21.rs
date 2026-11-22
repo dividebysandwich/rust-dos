@@ -45,6 +45,21 @@ fn save_caller(cpu: &mut Cpu) {
     cpu.bus.guest_write_16(base + 0x30, ss);
 }
 
+/// End the running process with exit code `code`, of termination type
+/// `kind` (0 normal, 1 Ctrl+C), kept for the parent to retrieve (AH=4Dh)
+/// or as the ERRORLEVEL. A process a program made returns with the
+/// registers its parent saved.
+fn exit_process(cpu: &mut Cpu, code: u8, kind: u8) {
+    if !cpu.started_by_exec(cpu.current_psp) {
+        cpu.terminate(code);
+    } else if cpu.terminate(code) {
+        cpu.bus.log_string("[DOS] Returning to Parent Process");
+        cpu.set_ax(code as u16);
+        cpu.set_cpu_flag(CpuFlags::CF, false);
+    }
+    cpu.last_child_exit = (kind as u16) << 8 | code as u16;
+}
+
 /// The owner of a block AH=48h or 4Ah gives the running process. Before
 /// any program is running (shell), DOS owns it, so that it isn't confused
 /// with a free block.
@@ -523,6 +538,15 @@ pub fn handle(cpu: &mut Cpu) {
     if writes_console(cpu, ah) && !crate::video::console_ready(cpu) {
         return;
     }
+    // Ctrl+C typed: the program's Ctrl+C handler before the call. The
+    // keyboard comes first, two reads of the BIOS data in the usual case
+    // of no key, as the function's test may look up a handle's file.
+    if break_waits(cpu) && checks_break(cpu, ah) {
+        crate::keyboard::take_keystroke(&mut cpu.bus);
+        dos_data::leave_dos(cpu);
+        call_break_handler(cpu);
+        return;
+    }
     // These DOS runs on the caller's stack, without saving anything.
     if !matches!(ah, 0x33 | 0x50 | 0x51 | 0x62 | 0x64) {
         save_caller(cpu);
@@ -536,6 +560,92 @@ pub fn handle(cpu: &mut Cpu) {
         cpu.last_dos_error = cpu.ax();
     }
     dos_data::leave_dos(cpu);
+}
+
+/// Whether DOS looks for Ctrl+C on entry to function AH, as MS-DOS does:
+/// in the character I/O functions (01h to 0Ch but the direct console
+/// I/O, 06h and 07h, which 0Ch can run too) and the reads and writes of
+/// the console in cooked mode always, and in the others while BREAK is on
+/// (AX=3301h), but for those DOS answers on the caller's stack.
+fn checks_break(cpu: &mut Cpu, ah: u8) -> bool {
+    let flag = dos_data::address(dos_data::BREAK_FLAG) as u32;
+    let break_on = |cpu: &mut Cpu| cpu.bus.guest_read_8(flag) & 1 != 0;
+    match ah {
+        0x01..=0x05 | 0x08..=0x0B => true,
+        0x0C => !matches!(cpu.get_al(), 0x06 | 0x07),
+        0x00 | 0x06 | 0x07 | 0x33 | 0x50 | 0x51 | 0x62 | 0x64 => false,
+        0x3F | 0x40 => {
+            break_on(cpu)
+                || file_of(cpu, cpu.bx()).is_some_and(|sft| {
+                    cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con)
+                        && !cpu.bus.disk.device_raw(sft)
+                })
+        }
+        _ => break_on(cpu),
+    }
+}
+
+/// Whether a Ctrl+C (03h) or Ctrl+Break (0000h) is the next key the
+/// console reads, as DOS's check reads the console's next character and
+/// leaves any other, for a program running in real or virtual-8086 mode:
+/// Windows' virtual machines have their own check, and the shell takes
+/// its Ctrl+C itself.
+fn break_waits(cpu: &mut Cpu) -> bool {
+    if cpu.current_psp == 0
+        || cpu.pm()
+        || cpu.bus.guest_paging.is_some()
+        || cpu.con_pending_scan.is_some()
+    {
+        return false;
+    }
+    crate::keyboard::peek_keystroke(&mut cpu.bus)
+        .is_some_and(|key| key & 0xFF == 0x03 || key == 0x0000)
+}
+
+/// Run the program's Ctrl+C handler (INT 23h) as MS-DOS does when it finds
+/// one typed: echo `^C`, keep the caller's SP (SDA+12h), and call the
+/// handler with the caller's registers, its return frame to DOS
+/// (`bios::BREAK_RETURN`) under the caller's own. The service returns
+/// into the handler: the frame on top is the one its IRET takes.
+fn call_break_handler(cpu: &mut Cpu) {
+    cpu.screen_only(|cpu| console_write(cpu, b"^C\r\n"));
+    cpu.con_line = None;
+    let sp = cpu.sp();
+    let at = dos_data::address(dos_data::SDA_BREAK_SP) as u32;
+    cpu.bus.guest_write_16(at, sp);
+    let flags = cpu
+        .read_u16(crate::cpu::Seg::SS, sp.wrapping_add(4) as u32)
+        .unwrap_or(0x0202);
+    cpu.push(flags);
+    cpu.push(0xF000);
+    cpu.push(crate::bios::BREAK_RETURN);
+    let handler = cpu.bus.guest_read_32(0x23 * 4);
+    let entry = (CpuFlags::IF | CpuFlags::TF).bits() as u16;
+    cpu.push(flags & !entry);
+    cpu.push((handler >> 16) as u16);
+    cpu.push(handler as u16);
+}
+
+/// DOS back from the Ctrl+C handler `call_break_handler` called. With an
+/// IRET, or a RETF and CF clear, the call it interrupted runs again from
+/// DOS's entry, with the registers the handler left; a RETF with CF set
+/// ends the program, as Ctrl+C does (termination type 1, AH=4Dh's AH).
+pub fn break_return(cpu: &mut Cpu) {
+    let at = dos_data::address(dos_data::SDA_BREAK_SP) as u32;
+    let sp = cpu.bus.guest_read_16(at);
+    if cpu.sp() == sp.wrapping_sub(2) {
+        // A RETF: the flags it left on the stack.
+        cpu.pop();
+        if cpu.get_cpu_flag(CpuFlags::CF) {
+            dos_data::enter_dos(cpu);
+            exit_process(cpu, 0, 1);
+            dos_data::leave_dos(cpu);
+            crate::interrupts::return_from_hle(cpu, 0x21);
+            return;
+        }
+    }
+    cpu.set_cs(0xF000);
+    cpu.set_ip(crate::bios::hle_trap(0x21));
 }
 
 /// Whether the function AH writes to the screen: the console functions
@@ -1953,16 +2063,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 exit_code
             ));
 
-            // Kept for the parent to retrieve, or as the ERRORLEVEL. High
-            // byte = termination type 0 (normal). A process a program made
-            // returns with the registers its parent saved.
-            if !cpu.started_by_exec(cpu.current_psp) {
-                cpu.terminate(exit_code);
-            } else if cpu.terminate(exit_code) {
-                cpu.bus.log_string("[DOS] Returning to Parent Process");
-                cpu.set_ax(exit_code as u16);
-                cpu.set_cpu_flag(CpuFlags::CF, false);
-            }
+            exit_process(cpu, exit_code, 0);
         }
 
         // AH = 4Dh: Get Return Code of child process (ERRORLEVEL)

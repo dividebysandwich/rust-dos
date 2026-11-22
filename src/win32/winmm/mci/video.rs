@@ -1157,10 +1157,39 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
     // MCIAVI draws through DrawDib, which on a display of 256 colours
     // stretches a movie of more than 8 bits to the destination and
     // dithers that to the halftone palette `select_movie_palette`
-    // selects. A movie with colours of its own is drawn in them.
+    // selects. A movie with colours of its own is drawn in them. A
+    // Cinepak movie is decoded to 8 bits by the codec, in the palette
+    // `select_movie_palette` selects for it, at twice the size when it
+    // is drawn whole at twice the size, which the codec does itself, and
+    // DrawDib stretches that 8-bit picture to other sizes.
     let deep = matches!(&m.video, MediaKind::Avi(v) if v.colors().is_empty());
+    let cinepak = match &m.video {
+        MediaKind::Avi(v) if v.cinepak() => {
+            Some(v.cinepak_palette(crate::win32::gdi32::static_colors()))
+        }
+        _ => None,
+    };
     let (pw, ph) = (x1 - x0, y1 - y0);
-    if deep && palette::palette_device(cpu) && pw > 0 && ph > 0 && sw > 0 && sh > 0 {
+    let shown = pw > 0 && ph > 0 && sw > 0 && sh > 0 && palette::palette_device(cpu);
+    let zoom = if src == (0, 0, w, h) && (pw, ph) == (2 * w, 2 * h) {
+        2
+    } else {
+        1
+    };
+    // A Cinepak picture the codec can't give in 8 bits (its frames are
+    // of another size than the movie's) is dithered as other movies are.
+    let cinepak = match cinepak {
+        Some(colors) if shown => video(cpu, i)
+            .pictures
+            .cinepak_8(&m, n, zoom as u32)
+            .map(|indexes| (indexes, colors)),
+        _ => None,
+    };
+    if let Some((indexes, colors)) = cinepak {
+        let from = if zoom == 2 { (0, 0, pw, ph) } else { src };
+        surface = crate::win32::gdi32::dither::stretch_8(&indexes, w * zoom, colors, from, pw, ph);
+        src = (0, 0, pw, ph);
+    } else if deep && shown {
         surface = crate::win32::gdi32::dither::to_halftone(&surface, src, pw, ph);
         src = (0, 0, pw, ph);
     }
@@ -1213,8 +1242,9 @@ fn realize(cpu: &mut Cpu, i: usize, flags: u32) -> u32 {
 
 /// On a palette device, select the movie's palette into `hdc` and
 /// realize it, as MCIAVI's DrawDib does before it draws: the movie's own
-/// colours for an 8-bit movie, the halftone palette for one of more
-/// bits. Unless MCI_REALIZE asked for the background, it is selected as
+/// colours for an 8-bit movie, the palette of iccvid.dll's 8-bit output
+/// for a Cinepak movie, the halftone palette for one of more bits.
+/// Unless MCI_REALIZE asked for the background, it is selected as
 /// a foreground palette, so in the foreground window or a child of it,
 /// its colours take the system palette's free entries. Returns the
 /// palette it replaced, which goes back in after the picture is drawn.
@@ -1225,6 +1255,9 @@ fn select_movie_palette(cpu: &mut Cpu, i: usize, m: &Media, hdc: u32) -> Option<
     let mut hpal = video(cpu, i).palette;
     if crate::win32::gdi32::gdi(cpu).palette(hpal).is_none() {
         let mut colors = match &m.video {
+            MediaKind::Avi(v) if v.cinepak() => {
+                v.cinepak_palette(crate::win32::gdi32::static_colors())
+            }
             MediaKind::Avi(v) => v.colors(),
             _ => Vec::new(),
         };
