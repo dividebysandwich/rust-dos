@@ -373,6 +373,53 @@ fn an_irq_at_moved_vectors_reaches_the_bios_vector() {
     assert_eq!(cpu.bus.read_8(0x20010), 1, "INT 0Bh's handler ran once");
 }
 
+/// Freed VCPI pages go back to the memory EMS and XMS allocate from:
+/// Phar Lap's 286|DOS-Extender allocates the pages there are and frees
+/// most of them as it starts (Ultima VIII).
+#[test]
+fn freed_vcpi_pages_go_back_to_the_pool() {
+    let mut cpu = machine(true);
+    run(&mut cpu, |a| {
+        // The free EMS pages before, after five VCPI pages (two 16 KB
+        // pages) and after freeing them.
+        a.mov(ah, 0x42)?;
+        a.int(0x67)?;
+        a.mov(word_ptr(0), bx)?;
+        a.mov(si, 0x10)?;
+        a.mov(cx, 5)?;
+        let mut more = a.create_label();
+        a.set_label(&mut more)?;
+        a.mov(ax, 0xDE04)?;
+        a.int(0x67)?;
+        a.mov(dword_ptr(si), edx)?;
+        a.add(si, 4)?;
+        a.loop_(more)?;
+        a.mov(ah, 0x42)?;
+        a.int(0x67)?;
+        a.mov(word_ptr(2), bx)?;
+        a.mov(si, 0x10)?;
+        a.mov(cx, 5)?;
+        let mut free = a.create_label();
+        a.set_label(&mut free)?;
+        a.mov(edx, dword_ptr(si))?;
+        a.mov(ax, 0xDE05)?;
+        a.int(0x67)?;
+        a.add(si, 4)?;
+        a.loop_(free)?;
+        a.mov(ah, 0x42)?;
+        a.int(0x67)?;
+        a.mov(word_ptr(4), bx)?;
+        a.mov(ax, 0xDE03)?;
+        a.int(0x67)?;
+        a.mov(dword_ptr(8), edx)?;
+        a.hlt()
+    });
+    let (before, taken, freed) = (read16(&cpu, 0), read16(&cpu, 2), read16(&cpu, 4));
+    assert_eq!(taken, before - 2);
+    assert_eq!(freed, before, "the 16 KB pages are back in the pool");
+    assert_eq!(read32(&cpu, 8), before as u32 * 4, "and DE03h counts them once");
+}
+
 /// In real mode (EMS off, or a state saved before the monitor), VCPI
 /// isn't there.
 #[test]
