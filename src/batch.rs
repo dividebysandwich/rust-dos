@@ -112,7 +112,10 @@ pub struct CrLf {
     pub null_line: bool,
 }
 
-crate::state_fields!(CrLf { command_ran, null_line });
+crate::state_fields!(CrLf {
+    command_ran,
+    null_line
+});
 
 impl Default for Batch {
     fn default() -> Self {
@@ -241,7 +244,11 @@ impl Batch {
                 // An empty line, for the pipe's files to be deleted once
                 // its last command has run.
                 if kind == FrameKind::Pipe {
-                    return Some(BatchLine { text: String::new(), echo: false, breaks });
+                    return Some(BatchLine {
+                        text: String::new(),
+                        echo: false,
+                        breaks,
+                    });
                 }
                 // COMMAND.COM prints CR LF when a FOR ends in a batch file
                 // that goes on, with ECHO on (FORTERM in MS-DOS 4.0's
@@ -290,7 +297,11 @@ impl Batch {
             if text.trim_end().is_empty() {
                 self.crlf.null_line = true;
             }
-            return Some(BatchLine { text: text.to_string(), echo, breaks });
+            return Some(BatchLine {
+                text: text.to_string(),
+                echo,
+                breaks,
+            });
         }
     }
 
@@ -520,14 +531,30 @@ mod tests {
         let mut batch = Batch::default();
         batch.append_file("GO", b"echo %0 %1 %2 [%3]\r\necho %GAME% %path% %NONE%.\r\necho 100%% %\r\necho 50% off\r\n", "a b,c");
         // The last, empty line is the one after the file's last CR LF.
-        assert_eq!(run_all(&mut batch), ["echo GO a b [c]", "echo KEEN C:\\DOS .", "echo 100% ", "echo 50 off", ""]);
+        assert_eq!(
+            run_all(&mut batch),
+            [
+                "echo GO a b [c]",
+                "echo KEEN C:\\DOS .",
+                "echo 100% ",
+                "echo 50 off",
+                ""
+            ]
+        );
     }
 
     #[test]
     fn blank_lines_labels_and_the_end_of_file_mark() {
         let mut batch = Batch::default();
-        batch.append_file("X", b"\r\n  \r\n:start\r\n:: comment\r\n  echo one\nrem two\recho three\x1Aecho junk", "");
-        assert_eq!(run_all(&mut batch), ["", "", "echo one", "rem two", "echo three"]);
+        batch.append_file(
+            "X",
+            b"\r\n  \r\n:start\r\n:: comment\r\n  echo one\nrem two\recho three\x1Aecho junk",
+            "",
+        );
+        assert_eq!(
+            run_all(&mut batch),
+            ["", "", "echo one", "rem two", "echo three"]
+        );
         assert!(!batch.is_active());
     }
 
@@ -535,8 +562,16 @@ mod tests {
     fn echoed_lines_come_after_a_cr_lf_unless_the_line_before_was_empty() {
         let mut batch = Batch::default();
         batch.append_file("X", b"echo a\r\n\r\necho b\r\n@echo c\r\necho d", "");
-        let lines: Vec<(String, bool, usize)> = std::iter::from_fn(|| batch.next_line(&[])).map(|l| (l.text, l.echo, l.breaks)).collect();
-        let expected = [("echo a", true, 1), ("", true, 1), ("echo b", true, 0), ("echo c", false, 0), ("echo d", true, 1)];
+        let lines: Vec<(String, bool, usize)> = std::iter::from_fn(|| batch.next_line(&[]))
+            .map(|l| (l.text, l.echo, l.breaks))
+            .collect();
+        let expected = [
+            ("echo a", true, 1),
+            ("", true, 1),
+            ("echo b", true, 0),
+            ("echo c", false, 0),
+            ("echo d", true, 1),
+        ];
         assert_eq!(lines, expected.map(|(t, e, b)| (t.to_string(), e, b)));
         // A file without CR LF after its last line has no empty line after it.
         assert!(!batch.is_active());
@@ -546,9 +581,23 @@ mod tests {
     fn at_hides_a_line_and_echo_comes_back_when_the_batch_ends() {
         let mut batch = Batch::default();
         batch.append_lines(["@echo off", "dir"]);
-        assert_eq!(batch.next_line(&[]), Some(BatchLine { text: "echo off".into(), echo: false, breaks: 0 }));
+        assert_eq!(
+            batch.next_line(&[]),
+            Some(BatchLine {
+                text: "echo off".into(),
+                echo: false,
+                breaks: 0
+            })
+        );
         batch.echo = false;
-        assert_eq!(batch.next_line(&[]), Some(BatchLine { text: "dir".into(), echo: false, breaks: 0 }));
+        assert_eq!(
+            batch.next_line(&[]),
+            Some(BatchLine {
+                text: "dir".into(),
+                echo: false,
+                breaks: 0
+            })
+        );
         assert_eq!(batch.next_line(&[]), None);
         assert!(batch.echo, "ECHO is on again at the prompt");
     }
@@ -568,7 +617,10 @@ mod tests {
         batch.dispatching = true;
         batch.start_file("SUB", b"in sub %1\r\n", "x", true);
         batch.dispatching = false;
-        assert_eq!(run_all(&mut batch), ["in sub x", "", "after sub", "", "later"]);
+        assert_eq!(
+            run_all(&mut batch),
+            ["in sub x", "", "after sub", "", "later"]
+        );
     }
 
     #[test]
@@ -601,8 +653,14 @@ PROBE.COM
         batch.append_marked("TARGET.COM", 1);
         assert_eq!(batch.next_line(&[]).unwrap().text, "echo off");
         batch.echo = false;
-        assert!(!batch.next_line(&[]).unwrap().echo, "PROBE.COM under ECHO OFF");
-        assert!(!batch.next_line(&[]).unwrap().echo, "the empty line after its last CR LF");
+        assert!(
+            !batch.next_line(&[]).unwrap().echo,
+            "PROBE.COM under ECHO OFF"
+        );
+        assert!(
+            !batch.next_line(&[]).unwrap().echo,
+            "the empty line after its last CR LF"
+        );
         let line = batch.next_line(&[]).unwrap();
         assert_eq!((line.text.as_str(), line.echo), ("TARGET.COM", true));
     }

@@ -258,7 +258,8 @@ pub fn prompt(cpu: &mut Cpu) {
     // The batch files have run: ECHO is as it was before them.
     cpu.batch.settle();
     cpu.shell_prompt_at = None;
-    let reads_line = cpu.shell_wait.is_none() && cpu.pending_command.is_none() && !cpu.batch.is_active();
+    let reads_line =
+        cpu.shell_wait.is_none() && cpu.pending_command.is_none() && !cpu.batch.is_active();
     if reads_line {
         prompt_break(cpu);
     }

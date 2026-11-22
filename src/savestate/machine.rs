@@ -135,7 +135,9 @@ fn load_sections(cpu: &mut Cpu, data: &[u8]) -> Result<Vec<String>> {
     // A state from before the shell's CR LFs followed COMMAND.COM's prints
     // none before the next prompt.
     if r.next_is(b"CRLF") {
-        cpu.batch.crlf.load(&mut r.section(b"CRLF", CRLF_VERSION)?)?;
+        cpu.batch
+            .crlf
+            .load(&mut r.section(b"CRLF", CRLF_VERSION)?)?;
     } else {
         cpu.batch.crlf = Default::default();
     }
@@ -273,7 +275,12 @@ mod tests {
         load(&mut cpu, &state).unwrap();
         assert!(cpu.batch.crlf.command_ran);
         // The last section; a state from before it has none.
-        let crlf = parts.iter().find(|(name, _)| name == "CRLF").expect("the section").1.clone();
+        let crlf = parts
+            .iter()
+            .find(|(name, _)| name == "CRLF")
+            .expect("the section")
+            .1
+            .clone();
         assert_eq!(crlf.end, state.len());
         load(&mut cpu, &state[..crlf.start]).unwrap();
         assert!(!cpu.batch.crlf.command_ran);

@@ -95,7 +95,11 @@ fn lines_are_echoed_at_the_prompt_unless_echo_is_off() {
     // COMMAND.COM prints CR LF before each line it echoes, and none
     // before the prompt when the file's last line, the empty one after its
     // CR LF, is unechoed.
-    assert!(screen.contains("C:\\>echo one\none\ntwo\n\nC:\\>echo off\nthree\nC:\\>"), "{}", screen);
+    assert!(
+        screen.contains("C:\\>echo one\none\ntwo\n\nC:\\>echo off\nthree\nC:\\>"),
+        "{}",
+        screen
+    );
 }
 
 #[test]
@@ -419,7 +423,11 @@ fn programs_are_found_in_the_current_directory_then_on_the_path() {
     cpu.queue_batch_lines(["@TOOL.EXE.TXT"]);
     run_batch_files(&mut cpu);
     let screen = screen(&cpu);
-    assert!(screen.contains("went there\n\nC:\\>\nBad command or file name."), "{}", screen);
+    assert!(
+        screen.contains("went there\n\nC:\\>\nBad command or file name."),
+        "{}",
+        screen
+    );
 }
 
 #[test]
@@ -586,12 +594,18 @@ fn screen_after(name: &str, lines: &[&str]) -> String {
         &[
             ("HICR.COM", &hicr),
             ("HICRLF.COM", &hicrlf),
-            ("T1.BAT", b"echo a\r\necho hi\r\n\r\nrem x\r\n@echo y\r\nhicr\r\n"),
+            (
+                "T1.BAT",
+                b"echo a\r\necho hi\r\n\r\nrem x\r\n@echo y\r\nhicr\r\n",
+            ),
             ("T2.BAT", b"echo a\r\n:lbl\r\necho b"),
             ("T3.BAT", b"@echo off\r\necho a\r\n"),
             ("T4.BAT", b"@echo off\r\necho a"),
             ("T5.BAT", b"@echo off\r\nhicrlf\r\n"),
-            ("T6.BAT", b"echo a\r\nfor %%a in (1 2) do echo %%a\r\necho b"),
+            (
+                "T6.BAT",
+                b"echo a\r\nfor %%a in (1 2) do echo %%a\r\necho b",
+            ),
             ("T7.BAT", b"echo a\r\n\r\n\r\necho b\r\n"),
             ("T8.BAT", b"cls\r\necho a\r\n"),
             ("T9.BAT", b"@echo off\r\ncls\r\necho on\r\necho a\r\n"),
@@ -600,7 +614,9 @@ fn screen_after(name: &str, lines: &[&str]) -> String {
     let mut cpu = machine(&dir);
     for line in lines {
         type_line(&mut cpu, format!("{}\r", line).as_bytes());
-        let idle = run_until(&mut cpu, 2000, |cpu| !cpu.batch.is_active() && cpu.shell_idle());
+        let idle = run_until(&mut cpu, 2000, |cpu| {
+            !cpu.batch.is_active() && cpu.shell_idle()
+        });
         assert!(idle, "{}", line);
     }
     screen(&cpu)
@@ -667,8 +683,14 @@ fn batch_lines_are_echoed_between_cr_lfs_as_command_com_does() {
     );
     // After CLS the next line echoed comes on the top line, even with
     // lines run unechoed between.
-    assert_eq!(screen_after("crlf_t8", &["t8"]), "C:\\>echo a\na\n\nC:\\>\nC:\\>");
-    assert_eq!(screen_after("crlf_t9", &["t9"]), "C:\\>echo a\na\n\nC:\\>\nC:\\>");
+    assert_eq!(
+        screen_after("crlf_t8", &["t8"]),
+        "C:\\>echo a\na\n\nC:\\>\nC:\\>"
+    );
+    assert_eq!(
+        screen_after("crlf_t9", &["t9"]),
+        "C:\\>echo a\na\n\nC:\\>\nC:\\>"
+    );
 }
 
 #[test]
@@ -840,7 +862,11 @@ fn more_shows_a_screenful_at_a_time() {
     cpu.bus.keyboard_buffer.push_back(0x3920);
     run_batch_files(&mut cpu);
     let text = screen(&cpu);
-    assert!(text.contains("line 24\nline 25") && text.ends_with("line 30\n\nC:\\>"), "{}", text);
+    assert!(
+        text.contains("line 24\nline 25") && text.ends_with("line 30\n\nC:\\>"),
+        "{}",
+        text
+    );
     assert!(!text.contains("More"), "{}", text);
     assert!(pipe_files(&dir).is_empty());
 }
