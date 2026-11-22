@@ -135,15 +135,17 @@ fn mount_shows_host_paths_in_code_page_437() {
     let host = format!("MOUNT E \"{}\"", base.join("\u{DC}ber").display());
     let line = rust_dos::dosstr::from_bytes(&rust_dos::dosstr::encode_cp437(&host));
     let shown = run(&mut cpu, &line).replace('\n', "");
-    assert!(shown.ends_with("\\\u{9A}ber"), "{:?}", shown);
+    // The host's separator: '\' on Windows, '/' elsewhere.
+    let sep = std::path::MAIN_SEPARATOR;
+    assert!(shown.ends_with(&format!("{sep}\u{9A}ber")), "{:?}", shown);
     let euro = base.join("Euro \u{20AC}");
     cpu.bus.mount_drive(5, &euro, MountOptions::default(), false).unwrap();
     let bjorn = base.join("Bj\u{F8}rn");
     cpu.bus.mount_drive(6, &bjorn, MountOptions::default(), false).unwrap();
     let listing = run(&mut cpu, "MOUNT").replace('\n', "");
-    assert!(listing.contains("\\\u{9A}ber"), "{:?}", listing);
-    assert!(listing.contains("\\Euro ?"), "{:?}", listing);
-    assert!(listing.contains("\\Bj?rn"), "{:?}", listing);
+    assert!(listing.contains(&format!("{sep}\u{9A}ber")), "{:?}", listing);
+    assert!(listing.contains(&format!("{sep}Euro ?")), "{:?}", listing);
+    assert!(listing.contains(&format!("{sep}Bj?rn")), "{:?}", listing);
 }
 
 #[test]
