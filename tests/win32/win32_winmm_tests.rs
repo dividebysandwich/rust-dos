@@ -1787,8 +1787,16 @@ fn avivideo_dithers_a_true_colour_movie_on_a_256_colour_desktop() {
     put(&mut data, CLIP_NAME as usize, b"C:\\CLIP.AVI\0");
     put(&mut data, STATIC as usize, b"Static\0");
     let open = OPEN_PARMS as usize;
-    put(&mut data, open + 20, &(WS_CHILD_VISIBLE as u32).to_le_bytes());
-    put(&mut data, STATUS_PARMS as usize + 8, &0x4001u32.to_le_bytes());
+    put(
+        &mut data,
+        open + 20,
+        &(WS_CHILD_VISIBLE as u32).to_le_bytes(),
+    );
+    put(
+        &mut data,
+        STATUS_PARMS as usize + 8,
+        &0x4001u32.to_le_bytes(),
+    );
     let imports: &[(&str, &[&str])] = &[
         ("KERNEL32.dll", &["Sleep", "ExitProcess"]),
         ("WINMM.dll", &["mciSendCommandA"]),
@@ -1856,7 +1864,10 @@ fn avivideo_dithers_a_true_colour_movie_on_a_256_colour_desktop() {
         a.call(l.import(1))?;
         a.int3()
     });
-    let files = [("T.EXE", exe), ("CLIP.AVI", avi_clip_of(&[[128; 3]; 2], &[]))];
+    let files = [
+        ("T.EXE", exe),
+        ("CLIP.AVI", avi_clip_of(&[[128; 3]; 2], &[])),
+    ];
     let mut cpu = machine("dither", CoreMode::Normal, &files, |cpu| {
         cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
     });

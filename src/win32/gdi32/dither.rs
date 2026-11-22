@@ -58,7 +58,13 @@ pub fn halftone_index(x: i32, y: i32, color: u32) -> u8 {
 /// one of the halftone palette's colours, of the same size. The matrix
 /// starts at the picture's top left pixel.
 pub fn to_halftone(src: &Surface) -> Surface {
-    let mut out = Surface::memory(src.width, src.height, 8, halftone_colors(), default_masks(8));
+    let mut out = Surface::memory(
+        src.width,
+        src.height,
+        8,
+        halftone_colors(),
+        default_masks(8),
+    );
     let area = src.loaded().intersect(&src.rect());
     if area.is_empty() {
         return out;

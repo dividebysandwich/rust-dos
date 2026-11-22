@@ -624,7 +624,9 @@ fn draw_gradient(halftone: bool) -> (Vec<u8>, Vec<u32>) {
     header.extend_from_slice(&[1, 0, 24, 0]);
     header.resize(40, 0);
     cpu.bus.guest_write_bytes(SCRATCH, &header);
-    let row: Vec<u8> = (0..w).flat_map(|x| [255 - x as u8, (x / 2) as u8, x as u8]).collect();
+    let row: Vec<u8> = (0..w)
+        .flat_map(|x| [255 - x as u8, (x / 2) as u8, x as u8])
+        .collect();
     for y in 0..h {
         cpu.bus.guest_write_bytes(BITS + y * w * 3, &row);
     }
@@ -653,7 +655,11 @@ fn stretch_di_bits_maps_true_colour_to_the_nearest_colour() {
         let want = x | (x / 2) << 8 | (255 - x) << 16;
         let distance = |c: u32| {
             (0..3)
-                .map(|s| ((c >> (8 * s)) & 0xFF).abs_diff((want >> (8 * s)) & 0xFF).pow(2))
+                .map(|s| {
+                    ((c >> (8 * s)) & 0xFF)
+                        .abs_diff((want >> (8 * s)) & 0xFF)
+                        .pow(2)
+                })
                 .sum::<u32>()
         };
         let best = halftone.iter().map(|&c| distance(c)).min().unwrap();
@@ -690,5 +696,8 @@ fn drawdib_dithers_true_colour_to_the_halftone_cube() {
     };
     let nearest = count(&draw_gradient(false).0);
     let dithered = count(&drawn);
-    assert!(dithered > nearest + 10, "{dithered} colours dithered, {nearest} nearest");
+    assert!(
+        dithered > nearest + 10,
+        "{dithered} colours dithered, {nearest} nearest"
+    );
 }
