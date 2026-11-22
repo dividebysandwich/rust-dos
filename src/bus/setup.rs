@@ -27,6 +27,7 @@ impl Bus {
             kbc: crate::kbc::Kbc::new(),
             kbc_release_at: None,
             rtc_next: None,
+            rtc_alarm_next: None,
             a20_mask: !0x0010_0000,
             reset_requested: false,
             port_accesses: VecDeque::new(),

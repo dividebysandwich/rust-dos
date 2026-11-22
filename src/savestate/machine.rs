@@ -12,6 +12,7 @@ const SSE_VERSION: u16 = 1;
 const K6_VERSION: u16 = 1;
 const IDLE_VERSION: u16 = 1;
 const RC_VERSION: u16 = 1;
+const CRLF_VERSION: u16 = 1;
 const ANSI_VERSION: u16 = 1;
 
 /// The machine's state, between batches.
@@ -41,6 +42,7 @@ fn write(cpu: &Cpu, w: &mut Writer) {
     w.section(b"K6  ", K6_VERSION, |w| cpu.k6.save(w));
     w.section(b"IDLE", IDLE_VERSION, |w| cpu.os_idles.save(w));
     w.section(b"RC  ", RC_VERSION, |w| cpu.rc_resume.save(w));
+    w.section(b"CRLF", CRLF_VERSION, |w| cpu.batch.crlf.save(w));
     w.section(b"ANSI", ANSI_VERSION, |w| cpu.ansi.save(w));
 }
 
@@ -131,6 +133,15 @@ fn load_sections(cpu: &mut Cpu, data: &[u8]) -> Result<Vec<String>> {
         cpu.rc_resume.load(&mut r.section(b"RC  ", RC_VERSION)?)?;
     } else {
         cpu.rc_resume = None;
+    }
+    // A state from before the shell's CR LFs followed COMMAND.COM's prints
+    // none before the next prompt.
+    if r.next_is(b"CRLF") {
+        cpu.batch
+            .crlf
+            .load(&mut r.section(b"CRLF", CRLF_VERSION)?)?;
+    } else {
+        cpu.batch.crlf = Default::default();
     }
     // A state from before the console took ANSI.SYS's sequences writes in
     // light grey.
@@ -262,6 +273,25 @@ mod tests {
         let rc = parts.iter().find(|(name, _)| name == "RC").expect("the section").1.clone();
         load(&mut cpu, &state[..rc.start]).unwrap();
         assert!(cpu.rc_resume.is_none());
+    }
+
+    #[test]
+    fn a_state_keeps_whether_the_prompt_comes_after_a_cr_lf() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.batch.crlf.command_ran = true;
+        let (state, parts) = save_parts(&cpu);
+        cpu.batch.crlf.command_ran = false;
+        load(&mut cpu, &state).unwrap();
+        assert!(cpu.batch.crlf.command_ran);
+        // A state from before the section (the last then) has none.
+        let section = |name: &str| {
+            let found = parts.iter().find(|(n, _)| n == name);
+            found.expect("the section").1.clone()
+        };
+        let crlf = section("CRLF");
+        assert_eq!(crlf.end, section("ANSI").start);
+        load(&mut cpu, &state[..crlf.start]).unwrap();
+        assert!(!cpu.batch.crlf.command_ran);
     }
 
     #[test]

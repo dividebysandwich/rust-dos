@@ -502,10 +502,7 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
             cpu.batch.clear();
             crate::video::print_string(cpu, "^C\r\n");
         } else if let Some(line) = cpu.batch.next_line(&cpu.environment) {
-            if line.echo {
-                crate::shell::show_prompt(cpu);
-                crate::video::print_string(cpu, &format!("{}\r\n", line.text));
-            }
+            crate::shell::echo_batch_line(cpu, &line);
             cpu.pending_command = Some(line.text);
             from_batch = true;
             cpu.bus.clock.stall(BATCH_LINE_NS);
@@ -540,11 +537,6 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
     if cpu.state == CpuState::RebootShell {
         cpu.load_shell();
         cpu.state = CpuState::Running;
-
-        // Start the prompt on a new line.
-        if cpu.bus.read_8(0x0450) != 0 {
-            cpu.screen_only(|cpu| crate::video::print_string(cpu, "\r\n"));
-        }
         return Shell::Reloaded;
     }
 
@@ -571,6 +563,11 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
     // A leading '@' (which hides a batch line's echo) means nothing here.
     let cmd = cmd.trim_start();
     let cmd = cmd.strip_prefix('@').unwrap_or(cmd);
+    // COMMAND.COM goes back to its prompt through a CR LF once a command
+    // line has run (`shell::prompt_break`).
+    if !cmd.trim().is_empty() {
+        cpu.batch.crlf.command_ran = true;
+    }
     let stages = split_pipes(cmd);
     if stages.len() > 1 {
         return start_pipe(cpu, &stages);
