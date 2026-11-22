@@ -63,6 +63,13 @@ pub struct Opl {
     /// Frames rendered since `render` last checked whether the chip has
     /// gone quiet.
     unchecked_frames: u32,
+    /// Whether the last check found the chip frozen (`is_frozen` of
+    /// `nuked_opl3`): its output can't change until a register is
+    /// written.
+    frozen: bool,
+    /// The frame a chip found frozen at two checks in a row gives from
+    /// then on, without running it, until a register is written.
+    held: Option<(i16, i16)>,
     /// The chip's registers as written, for a save state: the chip can't
     /// be saved, so a loaded state writes them to a new one (`after_load`).
     regs: [[u8; 256]; 2],
@@ -114,6 +121,8 @@ impl Opl {
             timer_expired: [false; 2],
             active: false,
             unchecked_frames: 0,
+            frozen: false,
+            held: None,
             regs: [[0; 256]; 2],
             mute: 0,
             right: None,
@@ -187,6 +196,9 @@ impl Opl {
         if (0xA0..=0xB8).contains(&reg) || reg == 0xBD {
             self.active = true;
         }
+        // Any register can move a frozen chip's output: a level or a rate
+        // applies to the note held, as a frequency does.
+        self.wake();
         self.regs[bank][reg as usize] = value;
         self.chip.write_register((bank as u16) << 8 | reg as u16, value);
     }
@@ -202,6 +214,7 @@ impl Opl {
         }
         self.chip = Opl3Chip::new(RATE);
         self.chip.set_mute(self.mute);
+        self.wake();
         let key_part = |reg: usize| (0xA0..=0xB8).contains(&reg) || reg == 0xBD;
         let mut order = Vec::with_capacity(512);
         if self.opl3 {
@@ -383,6 +396,8 @@ impl Opl {
         };
         self.mute = own;
         self.chip.set_mute(own);
+        // The frame held was mixed with the old mute.
+        self.wake();
         if let Some(right) = &mut self.right {
             right.set_mute(mask >> 9 & 0x1FF);
         }
@@ -414,11 +429,27 @@ impl Opl {
         }
     }
 
+    /// Run the chip again from the next frame on, if it holds a frame.
+    fn wake(&mut self) {
+        self.frozen = false;
+        self.held = None;
+    }
+
+    /// Whether the chip gives a frame it holds without running
+    /// (`render_chip`).
+    pub fn is_held(&self) -> bool {
+        self.held.is_some() || self.right.as_ref().is_some_and(|r| r.is_held())
+    }
+
     /// One frame of this chip alone.
     #[inline]
     fn render_chip(&mut self) -> (i16, i16) {
         if !self.active {
             return (0, 0);
+        }
+        if let Some(frame) = self.held {
+            self.chip.advance_frozen();
+            return frame;
         }
         let mut frame = [0i16; 2];
         let _ = self.chip.generate_resampled(&mut frame);
@@ -431,11 +462,29 @@ impl Opl {
         // 0. The chip's clock stops meanwhile, so the vibrato and tremolo
         // go on from where they were rather than where a running chip's
         // would be, which no program can read and nobody hears.
+        //
+        // A chip whose notes are held but can't move (a program stopped
+        // them by setting the frequency to 0, without a release, as
+        // Covert Action's AdLib driver does) is frozen: it gives the same
+        // frame until a register is written, and once two checks in a row
+        // find it so, that frame is held without running it. The second
+        // check lets the frames the chip works out a sample or two late
+        // catch up. A released slot's sign bit, which may still move, is
+        // left out as above. The chip's clocks go on meanwhile
+        // (`advance_frozen`), unlike an idle chip's, so that from a write
+        // on it gives the frames of a chip that ran all along.
         self.unchecked_frames += 1;
         if self.unchecked_frames == IDLE_CHECK_FRAMES {
             self.unchecked_frames = 0;
             if self.chip.active_voice_count() == 0 {
                 self.active = false;
+            } else if self.chip.is_frozen() {
+                if self.frozen {
+                    self.held = Some((frame[0], frame[1]));
+                }
+                self.frozen = true;
+            } else {
+                self.frozen = false;
             }
         }
         (frame[0], frame[1])
@@ -449,7 +498,7 @@ const IDLE_CHECK_FRAMES: u32 = 64;
 // written anew from `regs` after a load.
 // A dual OPL2's right chip is saved apart (`save_right`), so that the
 // layout of the one chip stays as it was.
-rust_dos_savestate::state_fields!(Opl { address, timer_value, timer_start, timer_mask, timer_expired, active, regs } skip { chip, opl3, mute, unchecked_frames, right });
+rust_dos_savestate::state_fields!(Opl { address, timer_value, timer_start, timer_mask, timer_expired, active, regs } skip { chip, opl3, mute, unchecked_frames, frozen, held, right });
 
 impl Opl {
     /// Save the right chip of a dual OPL2, if there is one.
@@ -656,6 +705,151 @@ mod idle_tests {
         assert_eq!(loudest(&mut loaded, 2000), 0);
         write(&mut loaded, 0xB0, 0x32);
         assert!(loudest(&mut loaded, 2000) > 1000);
+    }
+}
+
+#[cfg(test)]
+mod frozen_tests {
+    use super::*;
+
+    /// Channel 0's registers for a note held at a level once stopped: a
+    /// sine on both operators, the carrier at full volume, attack at once,
+    /// no decay and no release, with `am` (tremolo) on both operators or
+    /// not, the release rate `rr` and the modulator's feedback `fb`.
+    fn instrument(am: bool, rr: u8, fb: u8) -> Vec<(u16, u8)> {
+        let multi = if am { 0x81 } else { 0x01 };
+        vec![
+            (0x20, multi),
+            (0x23, multi),
+            (0x40, 0x10),
+            (0x43, 0x00),
+            (0x60, 0xF0),
+            (0x63, 0xF0),
+            (0x80, rr),
+            (0x83, rr),
+            (0xC0, fb << 1),
+            (0xA0, 0x98),
+            (0xB0, 0x31),
+        ]
+    }
+
+    /// The note played for 300 frames, then stopped as Covert Action's
+    /// AdLib driver stops its sounds: the frequency set to 0 and the key
+    /// released.
+    const STOP: [(u16, u8); 2] = [(0xA0, 0x00), (0xB0, 0x00)];
+
+    fn write(opl: &mut Opl, writes: &[(u16, u8)]) {
+        for &(reg, value) in writes {
+            opl.write_address(0, reg as u8);
+            opl.write_data(0, value, 0);
+        }
+    }
+
+    /// The first `frames` frames from an `Opl` given the writes, and the
+    /// same from the chip run on its own, as the reference.
+    type Frames = Vec<(i16, i16)>;
+
+    fn both(writes: &[(u16, u8)], frames: usize) -> (Opl, Frames, Frames) {
+        let mut opl = Opl::new(false);
+        let mut chip = Opl3Chip::new(RATE);
+        let mut ours = Vec::new();
+        let mut reference = Vec::new();
+        for &(reg, value) in writes {
+            chip.write_register(reg, value);
+        }
+        write(&mut opl, writes);
+        for n in 0..frames {
+            if n == 300 {
+                write(&mut opl, &STOP);
+                for (reg, value) in STOP {
+                    chip.write_register(reg, value);
+                }
+            }
+            ours.push(opl.render());
+            let mut frame = [0i16; 2];
+            let _ = chip.generate_resampled(&mut frame);
+            reference.push((frame[0], frame[1]));
+        }
+        (opl, ours, reference)
+    }
+
+    /// The note stopped at a frequency of 0 with no release holds its
+    /// level: the chip is held, and gives what it would give running.
+    #[test]
+    fn a_note_stopped_at_frequency_0_is_held() {
+        let (opl, ours, reference) = both(&instrument(false, 0x00, 0), 2000);
+        assert!(opl.is_held());
+        assert!(!opl.is_idle());
+        assert_eq!(ours, reference);
+        let held = *ours.last().unwrap();
+        assert!(held.0.unsigned_abs() > 100, "{held:?}");
+    }
+
+    /// A write to any register runs the chip again: a new level applies
+    /// to the note held at once.
+    #[test]
+    fn a_write_wakes_the_held_chip() {
+        let (mut opl, ours, _) = both(&instrument(false, 0x00, 0), 2000);
+        assert!(opl.is_held());
+        write(&mut opl, &[(0x43, 0x3F)]);
+        assert!(!opl.is_held());
+        let quiet = (0..10).map(|_| opl.render()).last().unwrap();
+        assert!(quiet.0.unsigned_abs() < ours.last().unwrap().0.unsigned_abs() / 4, "{quiet:?}");
+    }
+
+    /// A release that goes on, tremolo, or feedback that goes round a
+    /// cycle of outputs moves the output: the chip runs.
+    #[test]
+    fn a_moving_note_is_not_held() {
+        for (am, rr, fb) in [(false, 0x01, 0), (true, 0x00, 0), (false, 0x00, 7)] {
+            let (opl, ours, reference) = both(&instrument(am, rr, fb), 2000);
+            assert!(!opl.is_held(), "am {am} rr {rr} fb {fb}");
+            assert_eq!(ours, reference, "am {am} rr {rr} fb {fb}");
+        }
+    }
+
+    /// The clocks of a held chip go on: a note with tremolo and vibrato
+    /// keyed on channel 1 by the write that wakes it gives the frames of
+    /// the chip that ran all along.
+    #[test]
+    fn a_held_chip_goes_on_as_one_that_ran() {
+        const NEXT: [(u16, u8); 10] = [
+            (0x21, 0xC1),
+            (0x24, 0xC1),
+            (0x41, 0x10),
+            (0x44, 0x00),
+            (0x61, 0xF4),
+            (0x64, 0xF4),
+            (0x81, 0x35),
+            (0x84, 0x35),
+            (0xA1, 0x98),
+            (0xB1, 0x31),
+        ];
+        let mut opl = Opl::new(false);
+        let mut chip = Opl3Chip::new(RATE);
+        let mut ours = Vec::new();
+        let mut reference = Vec::new();
+        let both_write = |opl: &mut Opl, chip: &mut Opl3Chip, writes: &[(u16, u8)]| {
+            write(opl, writes);
+            for &(reg, value) in writes {
+                chip.write_register(reg, value);
+            }
+        };
+        both_write(&mut opl, &mut chip, &instrument(false, 0x00, 0));
+        for n in 0..8000 {
+            if n == 300 {
+                both_write(&mut opl, &mut chip, &STOP);
+            }
+            if n == 3000 {
+                assert!(opl.is_held());
+                both_write(&mut opl, &mut chip, &NEXT);
+            }
+            ours.push(opl.render());
+            let mut frame = [0i16; 2];
+            let _ = chip.generate_resampled(&mut frame);
+            reference.push((frame[0], frame[1]));
+        }
+        assert_eq!(ours, reference);
     }
 }
 

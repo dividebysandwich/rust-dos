@@ -207,12 +207,12 @@ pub fn jcxz(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
 }
 
 /// A software interrupt: INT n, INT3, INT1 or INTO. EIP already points at
-/// the next instruction. In real mode, a vector the interrupt table leaves
-/// at 0000:0000 is skipped, as programs call interrupts nothing has
-/// installed yet.
+/// the next instruction. In real mode (and virtual-8086 mode under the
+/// built-in monitor), a vector the interrupt table leaves at 0000:0000 is
+/// skipped, as programs call interrupts nothing has installed yet.
 pub fn software_interrupt(cpu: &mut Cpu, vector: u8) -> CpuResult {
-    if !cpu.pe() {
-        let entry = cpu.idtr.base.wrapping_add(vector as u32 * 4);
+    if cpu.dos_mode() {
+        let entry = cpu.ivt_base().wrapping_add(vector as u32 * 4);
         if cpu.read_linear_u16(entry) == 0 && cpu.read_linear_u16(entry.wrapping_add(2)) == 0 {
             cpu.note_null_interrupt(vector);
             return Ok(());

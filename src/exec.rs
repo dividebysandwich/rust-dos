@@ -403,7 +403,7 @@ impl Cpu {
     /// (DOS/4GW's code is 0070h), whose program is anything but idle. On a
     /// booted system there is no shell (and IO.SYS runs at 0070h).
     pub fn in_shell_code(&self) -> bool {
-        !self.pe() && self.cs() == SHELL_SEGMENT && self.bus.boot.is_none()
+        self.dos_mode() && self.cs() == SHELL_SEGMENT && self.bus.boot.is_none()
     }
 
     /// True while no program runs: the shell is at its prompt, or in the
@@ -419,7 +419,7 @@ impl Cpu {
             let frame = self.get_physical_addr(self.ss(), self.sp().wrapping_add(if waiting { 12 } else { 2 }));
             self.bus.read_16(frame)
         };
-        !self.pe() && (self.cs() == SHELL_SEGMENT || (self.cs() == 0xF000 && caller_cs() == SHELL_SEGMENT))
+        self.dos_mode() && (self.cs() == SHELL_SEGMENT || (self.cs() == 0xF000 && caller_cs() == SHELL_SEGMENT))
     }
 }
 
@@ -446,8 +446,10 @@ fn deliver_pending(cpu: &mut Cpu) -> bool {
             p.irqs[irq as usize & 15] += 1;
         }
         let vector = cpu.bus.pic.vector(irq);
-        if !cpu.pe() {
-            let entry = cpu.idtr.base.wrapping_add(vector as u32 * 4);
+        if cpu.dos_mode() {
+            // Under the monitor, where it reflects the IRQ (`v86mon::event`).
+            let real = if cpu.pe() { cpu.bus.vcpi.real_mode_vector(vector) } else { vector };
+            let entry = cpu.ivt_base().wrapping_add(real as u32 * 4);
             if cpu.read_linear_u16(entry) == 0 && cpu.read_linear_u16(entry.wrapping_add(2)) == 0 {
                 // No handler installed — drop the IRQ rather than spinning on it.
                 cpu.bus.pic_drop(irq);
@@ -1361,7 +1363,7 @@ fn locate(cpu: &mut Cpu, fetch: &mut Fetch, eip: u32, lin_ip: u32, cs_limit: u32
     // us here.
     if cpu.cs() == 0
         && cpu.ip() < 0x100
-        && !cpu.pe()
+        && cpu.dos_mode()
         && cpu.ds() != 0
         && cpu.ds() != cpu.transient_segment()
         && cpu.current_psp != 0
@@ -1465,13 +1467,19 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
             {
                 return true;
             }
+            if cpu.pm() {
+                // The service took the caller to protected mode (VCPI's
+                // switch, AX=DE0Ch): its frame is gone with the call.
+                flush_stale_tlb(cpu);
+                return true;
+            }
             let disk_time = cpu.bus.disk_io.take_pending();
             if cpu.hle_retry {
                 cpu.hle_retry = false;
                 if vector == 0x16 && crate::shell::abandon_input(cpu) {
                     // Batch lines came while the prompt waited for a key.
                     cpu.idle = false;
-                } else if vector == 0x21 && cpu.v86() {
+                } else if vector == 0x21 && cpu.guest_v86() {
                     // DOS waiting for a key under a V86 monitor: its idle
                     // calls between the tries, for the monitor to see.
                     cpu.set_ip(crate::bios::DOS_IDLE);
@@ -1486,7 +1494,7 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
                 crate::diskio::begin_wait(cpu, vector, disk_time);
             } else {
                 crate::interrupts::return_from_hle(cpu, vector);
-                if mouse_poll && !cpu.pe() && !cpu.get_cpu_flag(CpuFlags::IF) {
+                if mouse_poll && cpu.dos_mode() && !cpu.get_cpu_flag(CpuFlags::IF) {
                     // A synchronous driver call, not a PIC IRQ: no EOI. With
                     // IF set the usual path delivers it. The trampoline
                     // preserves the poll's results, and its busy byte guards
