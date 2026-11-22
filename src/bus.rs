@@ -177,6 +177,9 @@ pub struct Bus {
     pub ide_hard_disks: bool,
     /// A booted system has a floppy disk controller (`floppy_controller`).
     pub floppy_controller: bool,
+    /// DOS's console takes ANSI.SYS's escape sequences (`ansi_sys`,
+    /// video/ansi.rs).
+    pub ansi_sys: bool,
     /// A booted system has a CD-ROM drive even with no CD mounted, for one
     /// to go in later (`boot_cdrom`).
     pub boot_cdrom: bool,
@@ -203,6 +206,9 @@ pub struct Bus {
     /// `tandy_sound_enabled`.
     pub tandy_sound: crate::sn76489::Sn76489,
     pub tandy_mode: crate::sn76489::TandySound,
+    /// The Creative Music System's two SAA1099s: a Game Blaster, or the
+    /// chips in an SB 2.0's sockets (`sbtype=gb`, `cms`).
+    pub cms: Option<Box<crate::gameblaster::GameBlaster>>,
     /// Values the settings window's Cheats page froze, put back before
     /// every frame while the program runs (`apply_freezes`).
     pub freezes: Vec<crate::cheats::Freeze>,
@@ -2090,6 +2096,10 @@ impl Bus {
             // On an AdLib Gold the FM goes through the card's mixer and
             // output stage, with its sampled sound. Either way it reaches
             // the line out through the capacitor on the card's output.
+            // The Gold has one capacitor for each output, after the
+            // TDA8425, which gets the FM and the sampled sound mixed. It
+            // is linear, so one for each source sums to the same and keeps
+            // the two apart for the host's mixer, as the card's chain does.
             let (fm, gold_pcm) = match &mut self.adlib_gold {
                 Some(gold) => {
                     let (fm, pcm) = gold.render(fm);
@@ -2100,6 +2110,7 @@ impl Bus {
             let fm = self.mixer.fm_coupling(fm);
             self.mixer.add(&mut mix, &mut peaks, Channel::Fm, fm);
             if let Some(pcm) = gold_pcm {
+                let pcm = self.mixer.adlib_gold_coupling(pcm);
                 self.mixer.add(&mut mix, &mut peaks, Channel::AdlibGold, pcm);
             }
             if let Some(sb) = &mut self.sb {
@@ -2151,6 +2162,10 @@ impl Bus {
             if tandy_on {
                 let s = self.tandy_sound.render();
                 self.mixer.add(&mut mix, &mut peaks, Channel::Tandy, (s, s));
+            }
+            if let Some(cms) = &mut self.cms {
+                let frame = cms.render();
+                self.mixer.add(&mut mix, &mut peaks, Channel::Cms, frame);
             }
             if let Some(frames) = &windows {
                 self.mixer.add(&mut mix, &mut peaks, Channel::Windows, frames[n]);
@@ -2282,9 +2297,14 @@ impl Bus {
             && !crate::win32::audio_playing(&self.win32)
             && self.gus.as_ref().is_none_or(|g| g.is_idle())
             && self.awe.is_none()
-            && self.adlib_gold.as_ref().is_none_or(|g| g.pcm_quiet() && g.fm_chain_at_rest())
+            // Without a Gold its capacitor never gets a frame, and one that
+            // got none doesn't rest (`OutputCoupling::rests_on`).
+            && self.adlib_gold.as_ref().is_none_or(|g| {
+                g.pcm_quiet() && g.fm_chain_at_rest() && self.mixer.adlib_gold_coupling_rests()
+            })
             && self.lpt_dac.is_none()
             && !self.tandy_sound_enabled()
+            && self.cms.as_ref().is_none_or(|cms| cms.is_quiet())
     }
 
     /// Keep the queues of output in bounds.
@@ -2940,6 +2960,16 @@ impl Bus {
             0x38A => self.opl.write_address(1, value),
             0x38B => self.opl_data(Some(1), value),
 
+            // The CMS chips, at the first four ports of the Game Blaster
+            // or of an SB 2.0 with them (whose DSP has none there), and
+            // the Game Blaster's detection chip after them.
+            p if self.cms.as_ref().is_some_and(|cms| cms.claims(p)) => {
+                self.audio_catch_up();
+                if let Some(cms) = &mut self.cms {
+                    cms.write(p, value);
+                }
+            }
+
             // The Sound Blaster, 16 ports from its base.
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_write(p & 0xF, value),
 
@@ -3031,6 +3061,15 @@ impl Bus {
             }
             p if self.s3() && s3::is_engine_port(p) => self.engine_write(p, value as u32, 1),
             0xCFC..=0xCFF if self.pci_present() => self.pci_write(port, value),
+
+            // The DSP reset port of a Sound Blaster at a base where the
+            // machine has none (any of `SbConfig::BASES`), after the arms
+            // of every device that may sit there. Sound drivers look for
+            // the card by writing 1 and 0 there at each base in turn and
+            // reading 2xEh for the DSP's AAh, as Prehistorik 2's does from
+            // 210h on. Nothing decodes the port on a real machine, so the
+            // writes go nowhere without a log line.
+            p if p & 0xF == 6 && crate::sb::SbConfig::BASES.contains(&(p & !0xF)) => {}
 
             _ => {
                 if self.vga.ports().contains(&port) {
@@ -3334,6 +3373,9 @@ impl Bus {
             0x38A => self.opl.read_status(self.clock.now_micros()),
             0x389 | 0x38B => 0xFF,
 
+            p if self.cms.as_ref().is_some_and(|cms| cms.claims(p)) => {
+                self.cms.as_ref().map_or(0xFF, |cms| cms.read(p))
+            }
             p if self.sb_base().is_some_and(|b| p & 0xFFF0 == b) => self.sb_read(p & 0xF),
 
             p if self.gus_claims(p) => self.gus_read(p),

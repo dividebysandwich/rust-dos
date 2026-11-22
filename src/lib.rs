@@ -120,6 +120,7 @@ pub mod serial;
 pub mod shell;
 pub mod shared_disk;
 pub use rust_dos_tandy as sn76489;
+pub use rust_dos_gameblaster as gameblaster;
 pub mod sound;
 pub mod stats;
 #[cfg(test)]

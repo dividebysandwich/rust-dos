@@ -357,15 +357,19 @@
 # The Sound Blaster: sb16 (the default), sb16vibra (an SB16 as the ViBRA16C,
 # an ISA Plug and Play card whose resources Windows 95 sets), awe32 (an
 # SB16 with the EMU8000 wavetable synthesizer), sbpro2, sbpro1 (the first
-# SB Pro, DSP 3.00, for drivers that take no later one), sb2, or none.
-# Programs learn its settings from the BLASTER environment variable, which
-# follows these.
+# SB Pro, DSP 3.00, for drivers that take no later one), sb2, gb (the Game
+# Blaster, Creative Music System, at sbbase in place of a Sound Blaster),
+# or none. Programs learn its settings from the BLASTER environment
+# variable, which follows these.
 #sbtype=sb16
 # Base port (hex), IRQ, 8-bit DMA channel, and the SB16's 16-bit channel.
 #sbbase=220
 #irq=7
 #dma=1
 #hdma=5
+# The Game Blaster's two SAA1099 chips in the SB 2.0's sockets (sbtype=sb2),
+# at its base+0 to base+3, for games with CMS music.
+#cms=false
 # The AWE32's 1 MB sample ROM with its General MIDI instruments, which
 # doesn't come with rust-dos. Without it rust-dos looks for awe32.raw
 # beside this file's default location and in the working directory; the
