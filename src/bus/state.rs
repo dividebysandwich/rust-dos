@@ -8,13 +8,12 @@ use crate::savestate::{Reader, Result, State, StateError, Writer, load_device, s
 
 /// The sections' versions, changed with what a section holds.
 const RAM_VERSION: u16 = 2;
-const CORE_VERSION: u16 = 12;
+const CORE_VERSION: u16 = 11;
 /// The CORE versions this rust-dos loads: its own, 9, which kept the
 /// phase of the speaker's square wave where 10 and 11 keep its level, and
 /// 10, which keeps the time high in the frame being made where 11 keeps
-/// it in the eighth of the frame being made (`Bus::speaker_high`). 9 to
-/// 11 keep the shell's own cursor, which the BIOS's replaced.
-const CORE_LOADS: [u16; 4] = [9, 10, 11, CORE_VERSION];
+/// it in the eighth of the frame being made (`Bus::speaker_high`).
+const CORE_LOADS: [u16; 3] = [9, 10, CORE_VERSION];
 const VIDEO_VERSION: u16 = 2;
 const SOUND_VERSION: u16 = 5;
 /// The SOUN versions this rust-dos loads: its own, and 4, which has no
@@ -103,6 +102,9 @@ macro_rules! load_all {
 impl Bus {
     /// Write the bus's sections.
     pub(crate) fn save_state(&self, w: &mut Writer) {
+        // Where the shell's own cursor was kept: the BIOS's now, so that a
+        // build that still has it loads the cursor the screen has.
+        let (cursor_x, cursor_y) = &self.console_cursor();
         let Bus {
             ram,
             boot,
@@ -275,7 +277,7 @@ impl Bus {
                 pit_divisor, pit_read_msb, pit_mode, pit_write_msb,
                 pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
                 pit0, clock, pic, dma, joystick,
-                dta_segment, dta_offset, search_handles, search_serial,
+                dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
                 post_code, refresh_toggle, speaker_on, speaker_high, speaker_until,
                 audio_frames, sb_frame, beep_frames, boot, pci,
             );
@@ -645,20 +647,18 @@ impl Bus {
             *code_blocks = vec![0; len >> super::GEN_SHIFT];
         }
         ram.copy_from_slice(section.take(len)?);
+        // Where the shell's own cursor was kept. The BIOS's, in the RAM,
+        // is the cursor now.
+        let (mut cursor_x, mut cursor_y) = (0usize, 0usize);
         let mut section = r.section_of(b"CORE", &CORE_LOADS)?;
         load_all!(&mut section;
             keyboard_buffer, kbd, kbc, a20_mask, cmos,
             pit_divisor, pit_read_msb, pit_mode, pit_write_msb,
             pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
             pit0, clock, pic, dma, joystick,
-            dta_segment, dta_offset, search_handles, search_serial,
+            dta_segment, dta_offset, search_handles, search_serial, &mut cursor_x, &mut cursor_y,
+            post_code, refresh_toggle, speaker_on,
         );
-        if section.version().is_some_and(|version| version < 12) {
-            // The shell's own cursor, which the BIOS's (in the RAM) replaced.
-            let (mut col, mut row) = (0usize, 0usize);
-            load_all!(&mut section; &mut col, &mut row);
-        }
-        load_all!(&mut section; post_code, refresh_toggle, speaker_on);
         if section.version() == Some(9) {
             // The square wave's phase, which the speaker's level replaced:
             // the frame being made starts at the frames mixed.
