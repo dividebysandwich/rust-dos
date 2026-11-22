@@ -1102,6 +1102,8 @@ pub fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // (`idle::message_peeked`).
     if result == Some(FALSE) {
         cpu.bus.observe.peeked = true;
+    } else if result.is_some() {
+        crate::idle::message_found(cpu);
     }
     // Found nothing and changed nothing: an idle proof goes through it,
     // up to when the thread's next timer is due. It read no RAM but its
@@ -1122,6 +1124,20 @@ pub fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let until = due.map(|due| cpu.bus.clock.icount_at_micros(due));
         crate::idle::pure_call(cpu, until);
         crate::idle::reads_arguments(cpu);
+        // From when a timer whose message the peek takes is due, the peek
+        // finds that message.
+        let f = Filter { hwnd, min, max };
+        let state: &super::State = user(cpu);
+        let found = state
+            .timers
+            .iter()
+            .filter(|t| t.tid == tid && t.due > now && timer_wanted(state, t, &f))
+            .map(|t| t.due)
+            .min();
+        if let Some(due) = found {
+            let at = cpu.bus.clock.icount_at_micros(due);
+            crate::idle::found_at(cpu, at);
+        }
     }
     result
 }

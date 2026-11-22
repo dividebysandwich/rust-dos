@@ -366,6 +366,9 @@ pub struct Observe {
     /// Whether `proven` latches the PIT's count: a time proof starts
     /// there again at once (`time`).
     proven_time: bool,
+    /// When a service the passes skipped up to the next event call finds
+    /// what the loop waits for (`found_at`), if it does.
+    proven_found: Option<u64>,
     /// The instruction count when the proof running started.
     started: u64,
     /// The last `KNOWN_HEADS` heads whose passes were skipped, oldest
@@ -429,6 +432,9 @@ pub struct Observe {
     /// The built-in Windows' service running said it changed nothing but
     /// RAM and registers (`pure_call`).
     pure: bool,
+    /// The service running found what the loop waits for
+    /// (`message_found`).
+    wait_over: bool,
     /// It said too that it read no RAM but its arguments on the stack
     /// and what it names (`reads_arguments`), as a pass `Phase::Count`
     /// records needs where RAM holds counts.
@@ -463,6 +469,9 @@ pub struct Observe {
     /// services read would read otherwise, and when the last service
     /// started the thread's turn over.
     holds_until: Option<u64>,
+    /// The first instruction count at which a service the passes call
+    /// finds what the loop waits for (`found_at`).
+    found_at: Option<u64>,
     turn_at: Option<u64>,
     pub stats: IdleStats,
     /// Since when the execution loop has been watching (one instruction
@@ -498,6 +507,7 @@ impl Default for Observe {
             last_event: None,
             proven: None,
             proven_time: false,
+            proven_found: None,
             started: 0,
             known: Vec::new(),
             shapes: Vec::new(),
@@ -523,6 +533,7 @@ impl Default for Observe {
             latch_at: None,
             writes: Vec::new(),
             pure: false,
+            wait_over: false,
             arguments: false,
             service_top: 0,
             service_flat: false,
@@ -535,6 +546,7 @@ impl Default for Observe {
             clock_modelled: false,
             nesting: 0,
             holds_until: None,
+            found_at: None,
             turn_at: None,
             stats: IdleStats::default(),
             watch_since: None,
@@ -787,6 +799,7 @@ impl Observe {
         self.ports.clear();
         self.first_read = None;
         self.holds_until = None;
+        self.found_at = None;
         self.turn_at = None;
     }
 
@@ -1058,6 +1071,7 @@ pub fn pure_service(cpu: &mut Cpu, kind: u8, vector: u8) -> bool {
 #[inline(always)]
 pub fn before_service(cpu: &mut Cpu) {
     cpu.bus.observe.pure = false;
+    cpu.bus.observe.wait_over = false;
     cpu.bus.observe.arguments = false;
     if matches!(cpu.bus.observe.phase, Phase::Count { .. }) {
         let ss = cpu.seg_cache(crate::cpu::Seg::SS);
@@ -1079,15 +1093,21 @@ pub fn before_service(cpu: &mut Cpu) {
 /// After it, during a proof: a service that said it changed nothing but
 /// RAM and registers is followed, but not in a time proof, which doesn't
 /// look at `holds_until`, nor one that found a page missing, which runs
-/// again after the system's handler. Any other ends the proof. In a pass
-/// `Phase::Count` records it must also have kept the registers that hold
-/// counts and read no RAM that does (`count::after_service`): the passes
-/// after it may otherwise not run the same.
+/// again after the system's handler. Any other ends the proof: as a
+/// failure, or as a cut where it found what the loop waits for
+/// (`message_found`). In a pass `Phase::Count` records it must also have
+/// kept the registers that hold counts and read no RAM that does
+/// (`count::after_service`): the passes after it may otherwise not run
+/// the same.
 pub fn after_service(cpu: &mut Cpu) {
     let faulted = cpu.bus.guest_faulted();
     let o = &mut cpu.bus.observe;
     if !(o.pure && !faulted && !matches!(o.phase, Phase::Time(_))) {
-        o.opaque();
+        if std::mem::take(&mut o.wait_over) && o.on && o.failed.get().is_none() {
+            o.cut();
+        } else {
+            o.opaque();
+        }
     } else if matches!(o.phase, Phase::Count { .. }) {
         count::after_service(cpu);
     }
@@ -1120,6 +1140,30 @@ pub fn pure_call(cpu: &mut Cpu, until: Option<u64>) {
     if let Some(until) = until {
         o.holds_until = Some(o.holds_until.map_or(until, |h| h.min(until)));
     }
+}
+
+/// What the service running read changes at `until` (given to
+/// `pure_call`) to what the loop waits for: a PeekMessage whose filter
+/// takes the WM_TIMER of the timer due then finds it. The passes skipped up
+/// to then end the wait, so the place isn't armed again at once, as it is
+/// after a skip up to GetTickCount's next millisecond: the next pass's
+/// peek finds the message, and a proof started there fails at it. The
+/// place is armed again by its polls when the loop comes back to it.
+pub fn found_at(cpu: &mut Cpu, until: u64) {
+    if !cpu.bus.observe.on {
+        return;
+    }
+    let o = &mut cpu.bus.observe;
+    o.found_at = Some(o.found_at.map_or(until, |f| f.min(until)));
+}
+
+/// The service running found what the loop waits for: a PeekMessage found
+/// a message. The proof running ends there, as at a timer event, which
+/// also ends a wait (`at_event`): the loop was waiting as the proof took
+/// it to, and leaves its wait now. That isn't a failure, which would hold
+/// back the next proofs at the place (`backs_off`).
+pub fn message_found(cpu: &mut Cpu) {
+    cpu.bus.observe.wait_over = true;
 }
 
 /// The service running that called `pure_call` read the general
@@ -1360,6 +1404,13 @@ pub fn at_event(cpu: &mut Cpu) {
         head == here.0 && flags == here.2 && differ <= 1
     });
     o.last_event = Some(here);
+    // The passes skipped up to here waited for what a service they call
+    // finds from now on (`found_at`): the loop goes on to it, and its
+    // polls arm it again when it comes back to waiting.
+    if o.proven_found.take().is_some_and(|f| f <= now) && !o.proven_time {
+        o.proven = None;
+        return;
+    }
     if let Some(head) = o.proven.take() {
         if std::mem::take(&mut o.proven_time) {
             o.time_from(head, now);
@@ -1711,6 +1762,7 @@ fn finish(
     let o = &mut cpu.bus.observe;
     let turn_at = o.turn_at;
     let by_service = o.holds_until.filter(|&until| until < limit);
+    let found_at = o.found_at;
     if let Some(until) = by_service {
         limit = until;
     }
@@ -1787,6 +1839,7 @@ fn finish(
                 cpu.bus.observe.keep_shape(shape);
             }
             cpu.bus.observe.proved(head);
+            cpu.bus.observe.proven_found = found_at;
             let plain = &mut cpu.bus.observe.plain_clock;
             if let Some(at) = plain.iter().position(|p| Some(p.head) == head) {
                 if plain[at].left == 0 {
@@ -1802,7 +1855,11 @@ fn finish(
             if let Some(at) = turn_at {
                 win32.slice_start = cpu.bus.clock.micros_at(at + skipped);
             }
-            if let (Some(_), Some(head)) = (by_service, head) {
+            // Not where a service then finds what the loop waits for
+            // (`found_at`).
+            if let (Some(_), Some(head)) = (by_service, head)
+                && found_at != by_service
+            {
                 let now = cpu.bus.clock.icount;
                 cpu.bus.observe.arm(head, now);
             }

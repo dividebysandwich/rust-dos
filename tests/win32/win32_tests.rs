@@ -1335,6 +1335,52 @@ fn a_peek_message_loop_that_draws_between_peeks_runs_as_it_would() {
     assert!(stats.arms > 0, "the peeks armed the loop: {stats:?}");
 }
 
+/// A PeekMessageA loop that takes five of a 20 ms timer's WM_TIMERs: each
+/// wait is skipped up to the timer, and the peek after the skip finds the
+/// message. The place isn't proven again right there, where the proof
+/// would end at that peek, but once the loop has peeked its way back to
+/// waiting; a proof that a message ends hasn't failed.
+#[test]
+fn a_peek_message_loop_is_not_proven_again_where_its_timer_comes() {
+    let names: &[&str] = &["SetTimer", "PeekMessageA"];
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", names)];
+    // The MSG at 0.
+    let image = program(BASE, false, imports, &[0; 32], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(0)?;
+        a.push(20)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("SetTimer"))?;
+        a.mov(esi, 5)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        // PM_REMOVE.
+        a.push(1)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(l.data)?;
+        a.call(f("PeekMessageA"))?;
+        a.test(eax, eax)?;
+        a.jz(spin)?;
+        // WM_TIMER.
+        a.cmp(dword_ptr(l.at(4)), 0x113)?;
+        a.jne(spin)?;
+        a.dec(esi)?;
+        a.jnz(spin)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let (stats, ms) = peek_lockstep("peek_timers", image);
+    assert!(stats.skipped > 80 * ms, "{stats:?}");
+    // Armed again where the timer comes, every wait would fail a proof
+    // at its first peek. A proof that is running when the timer comes
+    // (the last one is due a few instructions after the event before it)
+    // ends at the peek that finds its message, as at a timer event.
+    assert_eq!(stats.failures, 0, "{stats:?}");
+}
+
 /// Run `image` on a machine that skips idle loops and one that doesn't,
 /// in lockstep, up to its exit with 0x2A: the skips found and the
 /// instructions in a millisecond.
