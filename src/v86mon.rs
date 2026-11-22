@@ -184,7 +184,8 @@ pub fn sync(cpu: &mut Cpu) {
 /// the processor hands over where its IDT would take it to level 0.
 pub fn event(cpu: &mut Cpu, vector: u8, source: IntSource, error: Option<u32>) -> CpuResult {
     match source {
-        IntSource::External | IntSource::Software => reflect(cpu, vector),
+        IntSource::External => reflect(cpu, cpu.bus.vcpi.real_mode_vector(vector)),
+        IntSource::Software => reflect(cpu, vector),
         IntSource::Exception if vector == 13 && error == Some(0) => general_protection(cpu),
         // The others go to the program's handlers as in real mode:
         // divide errors, single steps and breakpoints, #UD, the FPU's.

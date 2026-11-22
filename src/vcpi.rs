@@ -64,6 +64,22 @@ impl Vcpi {
     pub fn pages(&self) -> usize {
         self.pages.len()
     }
+
+    /// The vector of the handler in the real-mode vector table for an
+    /// IRQ that came at `vector`: a client that moved the PICs' vectors
+    /// told the monitor where (DE0Bh), and the IRQs that come there from
+    /// virtual-8086 mode go to the BIOS's vectors, 08h-0Fh and 70h-77h,
+    /// as EMM386 reflects them.
+    pub fn real_mode_vector(&self, vector: u8) -> u8 {
+        let (master, slave) = self.pic;
+        if vector.wrapping_sub(master) < 8 {
+            0x08 + (vector - master)
+        } else if vector.wrapping_sub(slave) < 8 {
+            0x70 + (vector - slave)
+        } else {
+            vector
+        }
+    }
 }
 
 /// INT 67h AH=DEh from virtual-8086 mode, AL the function: the status.

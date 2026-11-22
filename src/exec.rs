@@ -447,7 +447,9 @@ fn deliver_pending(cpu: &mut Cpu) -> bool {
         }
         let vector = cpu.bus.pic.vector(irq);
         if cpu.dos_mode() {
-            let entry = cpu.ivt_base().wrapping_add(vector as u32 * 4);
+            // Under the monitor, where it reflects the IRQ (`v86mon::event`).
+            let real = if cpu.pe() { cpu.bus.vcpi.real_mode_vector(vector) } else { vector };
+            let entry = cpu.ivt_base().wrapping_add(real as u32 * 4);
             if cpu.read_linear_u16(entry) == 0 && cpu.read_linear_u16(entry.wrapping_add(2)) == 0 {
                 // No handler installed — drop the IRQ rather than spinning on it.
                 cpu.bus.pic_drop(irq);

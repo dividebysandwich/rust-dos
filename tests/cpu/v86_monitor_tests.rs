@@ -326,6 +326,53 @@ fn vcpi_pages_are_allocated_and_freed() {
     assert_eq!(cpu.bus.read_8(0x20012), 0x8A, "not allocated any more");
 }
 
+/// A VCPI client that moves the master PIC's vectors tells the monitor
+/// so (DE0Bh), and an IRQ that comes at the new vector while DOS runs is
+/// reflected to the BIOS's vector, as EMM386 does: IRQ 3, at 53h, reaches
+/// the handler INT 0Bh has, and none is installed at 53h.
+#[test]
+fn an_irq_at_moved_vectors_reaches_the_bios_vector() {
+    let mut cpu = machine(true);
+    let handler = asm16(0x100, |a| {
+        a.inc(byte_ptr(0x10).ds())?;
+        a.mov(al, 0x20)?;
+        a.out(0x20, al)?;
+        a.iret()
+    });
+    cpu.bus.load_bytes(0x30100, &handler);
+    cpu.bus.write_32(0x0B * 4, 0x3000_0100);
+    run(&mut cpu, |a| {
+        a.mov(ax, 0xDE0B)?;
+        a.mov(bx, 0x50)?;
+        a.mov(cx, 0x70)?;
+        a.int(0x67)?;
+        a.mov(byte_ptr(0x11), ah)?;
+        // ICW1 to ICW4: the master's vectors from 50h; then only IRQ 3
+        // unmasked.
+        for (port, value) in [
+            (0x20, 0x11),
+            (0x21, 0x50),
+            (0x21, 0x04),
+            (0x21, 0x01),
+            (0x21, 0xF7),
+        ] {
+            a.mov(al, value)?;
+            a.out(port, al)?;
+        }
+        a.sti()?;
+        a.hlt()
+    });
+    assert_eq!(cpu.bus.read_8(0x20011), 0, "DE0Bh");
+    assert_eq!(cpu.bus.pic.vector(3), 0x53);
+    cpu.bus.pic.raise(3);
+    cpu.bus.refresh_irq();
+    for _ in 0..10 {
+        cpu.step();
+    }
+    assert!(cpu.v86());
+    assert_eq!(cpu.bus.read_8(0x20010), 1, "INT 0Bh's handler ran once");
+}
+
 /// In real mode (EMS off, or a state saved before the monitor), VCPI
 /// isn't there.
 #[test]
