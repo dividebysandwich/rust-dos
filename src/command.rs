@@ -984,54 +984,110 @@ impl ShellCommand for ChoiceCommand {
                 crate::shell::enter_wait(cpu, crate::shell::ShellWait::Choice(choice));
             }
             Err(e) => {
-                print_string(cpu, &format!("{}\r\n", e));
+                print_string(cpu, &e);
                 cpu.errorlevel = 255;
             }
         }
     }
 }
 
+/// The form CHOICE's messages about its switches end with.
+const CHOICE_FORM: &str = "    CHOICE [/C[:]choices] [/N] [/S] [/T[:]c,nn] [text]\r\n";
+
 /// CHOICE's switches: the keys to wait for, its text, and whether to show
-/// the keys.
+/// the keys. As MS-DOS's CHOICE.COM reads them: switches before and after
+/// the text, a `/` in the text starting one unless the text is in quotes,
+/// and the text as typed up to the next switch, its spaces too. Errors
+/// are CHOICE.COM's messages, line ends included.
 fn parse_choice<'a>(cpu: &Cpu, args: &'a str) -> Result<(crate::shell::Choice, &'a str, bool), String> {
     let mut keys = b"YN".to_vec();
     let (mut case_sensitive, mut show_keys, mut timeout) = (false, true, None);
-    let mut rest = args.trim_start();
-    while let Some(switch) = rest.strip_prefix('/') {
-        let (word, after) = first_word(switch);
-        rest = after.trim_start();
-        let (letter, value) = word.split_at(word.chars().next().map_or(0, char::len_utf8));
-        let value = value.strip_prefix(':').unwrap_or(value);
-        match letter.to_ascii_uppercase().as_str() {
-            "C" => keys = crate::dosstr::to_bytes(value),
-            "N" => show_keys = false,
-            "S" => case_sensitive = true,
-            "T" => {
-                let (key, seconds) = value.split_once(',').ok_or("Invalid switch - /T")?;
-                let (key, seconds) = (key.bytes().next(), seconds.trim().parse::<u64>().ok());
-                let (Some(key), Some(seconds)) = (key, seconds.filter(|&s| s <= 99)) else {
-                    return Err("Invalid switch - /T".into());
-                };
-                timeout = Some((key, seconds));
+    let mut text = None;
+    let mut rest = args;
+    loop {
+        rest = rest.trim_start_matches(WHITESPACE);
+        let Some(switch) = rest.strip_prefix('/') else {
+            if rest.is_empty() {
+                break;
             }
-            _ => return Err(format!("Invalid switch - /{}", word)),
+            if text.is_some() {
+                return Err(format!(
+                    "CHOICE: only one prompt string allowed. Expected Form:\r\n{CHOICE_FORM}\r\n"
+                ));
+            }
+            // Quotes keep a `/` in the text and are taken off it.
+            let (found, after) = match rest.strip_prefix('"') {
+                Some(quoted) => quoted.split_once('"').unwrap_or((quoted, "")),
+                None => rest.split_at(rest.find('/').unwrap_or(rest.len())),
+            };
+            text = Some(found);
+            rest = after;
+            continue;
+        };
+        let mut chars = switch.chars();
+        let letter = chars.next().map(|c| c.to_ascii_uppercase());
+        let value = chars.as_str();
+        rest = value;
+        match letter {
+            Some('N') => show_keys = false,
+            Some('S') => case_sensitive = true,
+            Some('C') => {
+                let value = value.strip_prefix(':').unwrap_or(value);
+                let end = value.find([' ', '\t', '/']).unwrap_or(value.len());
+                if end == 0 {
+                    return Err(
+                        "CHOICE: invalid choice switch syntax. Expected form: /C[:]choices\r\n"
+                            .into(),
+                    );
+                }
+                keys = crate::dosstr::to_bytes(&value[..end]);
+                rest = &value[end..];
+            }
+            Some('T') => {
+                // A key, a comma and one or two digits; a third digit
+                // starts the text.
+                let value = value.strip_prefix(':').unwrap_or(value);
+                let mut chars = value.chars();
+                let (key, comma) = (chars.next(), chars.next());
+                let after = chars.as_str();
+                let digits = after.bytes().take(2).take_while(u8::is_ascii_digit).count();
+                let (Some(key), Some(','), 1..) = (key, comma, digits) else {
+                    return Err(
+                        "CHOICE: Incorrect timeout syntax.  Expected form Tc,nn or T:c,nn\r\n"
+                            .into(),
+                    );
+                };
+                let seconds = after[..digits].parse::<u64>().unwrap_or(0);
+                timeout = Some((crate::dosstr::to_bytes(&key.to_string())[0], seconds));
+                rest = &after[digits..];
+            }
+            _ => {
+                return Err(format!(
+                    "Invalid switch on command line. Expected form:\r\n{CHOICE_FORM}\r\n"
+                ));
+            }
         }
     }
     if !case_sensitive {
         keys.make_ascii_uppercase();
     }
-    if keys.is_empty() {
-        return Err("Invalid switch - /C".into());
-    }
     let mut choice = crate::shell::Choice { keys, case_sensitive, timeout: None };
     if let Some((key, seconds)) = timeout {
-        let Some(i) = choice.keys.iter().position(|&k| if case_sensitive { k == key } else { k.eq_ignore_ascii_case(&key) }) else {
-            return Err("Timeout default not in specified (or default) choices.".into());
+        let Some(i) = choice.keys.iter().position(|&k| {
+            if case_sensitive {
+                k == key
+            } else {
+                k.eq_ignore_ascii_case(&key)
+            }
+        }) else {
+            return Err(
+                "CHOICE: Timeout default not in specified (or default) choices.\r\n".into(),
+            );
         };
         let at = cpu.bus.clock.now_ticks() + seconds * crate::timer::PIT_HZ;
         choice.timeout = Some((choice.keys[i], at));
     }
-    Ok((choice, rest, show_keys))
+    Ok((choice, text.unwrap_or(""), show_keys))
 }
 
 /// KEYB [code[,codepage]]: type in another keyboard layout (keylayout.rs),
