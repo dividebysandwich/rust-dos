@@ -822,7 +822,14 @@ impl Activity {
     /// two retraces more than `n` or longer is a pause (a scene that
     /// changed, a frame lost whole, which the frame rate shows), counted
     /// neither here nor in the cadence, unless 4 come in a row: then the
-    /// program flips at a slower cadence, which starts from it.
+    /// program flips at a slower cadence, which starts from it. So is one
+    /// two retraces or more under `n`, and 4 of those start a faster
+    /// cadence. The first interval starts the cadence too, and is often a
+    /// pause; judged from it, the intervals after it would stray from the
+    /// cadence by the same sign for the dozens of flips it takes to come
+    /// down, and their sums would read as a program drawing as fast as it
+    /// can (`follows`, `AutoSpeed::free_running`): from a first interval
+    /// of 2 s, Prehistorik 2's level 1 reads +0.94 over its next 1250.
     ///
     /// The same interval at `k` times the speed (`AHEAD`) is predicted to
     /// be as far from the cadence over `k`, and adds to `late_ahead` the
@@ -858,7 +865,7 @@ impl Activity {
         // The cadence in whole retraces, rounded up past a twentieth: one
         // of 2.0 retraces measures 1.98 to 2.02.
         let n = (self.cadence_ns / frame - 0.05).ceil().max(1.0);
-        if interval >= (n + 2.0) * frame {
+        if interval >= (n + 2.0) * frame || interval <= (n - 2.0) * frame {
             self.off = None;
             self.pauses += 1;
             if self.pauses >= 4 {
@@ -8183,5 +8190,29 @@ mod tests {
         }
         assert!(!matches!(auto.step, Step::Evened { .. }), "{speed}");
         assert_eq!(auto.even_at, None);
+    }
+
+    #[test]
+    fn a_cadence_that_starts_from_a_pause_reads_as_the_program_paces() {
+        // Prehistorik 2's level 1 after a first interval of its own
+        // cadence, of 2 s, and of ten retraces: the cadence comes to the
+        // game's within a few flips, and the lag-1 autocorrelation of the
+        // next 1250 intervals reads -0.03 (shuffled), as from the game's
+        // own cadence. Judged from the first interval's cadence, they read
+        // +0.94 and +0.83, as a program drawing as fast as it can.
+        let reads = |first: f64| {
+            let game = Flipper::new(&LEVEL1_3000, None, 0x1733);
+            let mut a = Activity::new();
+            a.flip_interval(first, FRAME_NS);
+            for x in game.intervals.iter().take(1250) {
+                a.flip_interval(x * FRAME_NS, FRAME_NS);
+            }
+            a.follows / a.spread
+        };
+        let own = reads(Flipper::new(&LEVEL1_3000, None, 0x1733).mean * FRAME_NS);
+        for first in [2e9, 10.0 * FRAME_NS] {
+            let r = reads(first);
+            assert!(r < FREE_RUNNING && (r - own).abs() < 0.01, "{r} {own}");
+        }
     }
 }
