@@ -1,5 +1,8 @@
-// GPU xBRZ at 2x. Channels stay at whole numbers from 0 to 255 to
-// preserve integer blend rounding across the separate passes.
+// An implementation of Zenju's xBRZ algorithm at 2x, written from the
+// algorithm. Its output was compared against the xbrz-rs crate during
+// development; no code was taken from it. Channels stay at whole numbers
+// from 0 to 255 to preserve integer blend rounding across the separate
+// passes.
 
 uniform sampler2D u_frame;
 uniform vec2 u_source;
@@ -46,8 +49,10 @@ vec4 texel(ivec2 p) {
     return floor(texelFetch(u_frame, p, 0) * 255.0 + 0.5);
 }
 
-// Quantized YCbCr distance: channel differences are halved, truncated,
-// then cut to steps of 8 and doubled.
+// The distance of two colours: the length of their RGB difference
+// converted to YCbCr with the Rec. 2020 weights, mixed with the alpha
+// difference. Negating the difference negates Y, Cb and Cr, so
+// dist(p, q) equals dist(q, p).
 float dist(vec4 p, vec4 q) {
     const float K_B = 0.0593;
     const float K_R = 0.2627;
@@ -55,9 +60,7 @@ float dist(vec4 p, vec4 q) {
     const float SCALE_B = 0.5 / (1.0 - K_B);
     const float SCALE_R = 0.5 / (1.0 - K_R);
 
-    vec3 d = p.rgb - q.rgb;
-    vec3 half_diff = sign(d) * floor(abs(d) * 0.5);
-    vec3 c = 16.0 * floor(half_diff / 8.0);
+    vec3 c = p.rgb - q.rgb;
     float y = K_R * c.r + K_G * c.g + K_B * c.b;
     float cb = SCALE_B * (c.b - y);
     float cr = SCALE_R * (c.r - y);
