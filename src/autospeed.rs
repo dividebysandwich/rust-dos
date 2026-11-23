@@ -537,6 +537,9 @@ const PACED_FLIPS: u64 = 300;
 /// from 9354. The runs of #1733 measured 0.02% to 0.18% late from 10,000
 /// to 15,000.
 const POOLED: u64 = 1200;
+/// How near a whole number of retraces an interval between flips is
+/// shown for that number (`Activity::flip_interval`).
+const SYNCED: f64 = 0.1;
 /// The lag-1 autocorrelation of the pooled intervals about the cadence
 /// (`Activity::follows`) over which a program draws as fast as it can, and
 /// steps for evenness leave it be, if they stray from the cadence by
@@ -651,6 +654,8 @@ pub struct Activity {
     /// The last read of the status register outside the vertical retrace:
     /// its emulated time, and the retraces begun by then.
     outside_retrace: Option<(u64, u64)>,
+    /// Whether the program read the status register since its last flip.
+    read_since_flip: bool,
     /// The burst of the built-in Windows' writes going on.
     shown: Burst,
 }
@@ -800,10 +805,13 @@ impl Activity {
     /// `n + 1` retraces or more with a chance of `interval / frame - n`, up
     /// to 1, which adds to `late_flips`: whatever the phase is, that counts
     /// the frames held late as the display shows them, and without the
-    /// noise of one phase. In Prehistorik 2's level 1, 2.1% of the frames
-    /// at 3000, 0.8% at 5000, 0.2% at 10,000 and none at 20,000. A program
-    /// whose flips wait for the retrace shows `interval / frame` whole, and
-    /// counts exactly the frames that took a retrace more.
+    /// noise of one phase. A flip that waited for the retrace, one within
+    /// `SYNCED` of a whole number of retraces or after the program read
+    /// the status register, is shown for that whole number: it counts
+    /// `round(interval / frame) - n`. Prehistorik 2's level 1 flips 3.05
+    /// to 3.07 retraces after the last flip now and then, each shown for
+    /// three. Counted so, 1.8% of the frames at 3000 are late, 0.7% at
+    /// 5000, 0.15% at 10,000 and none at 20,000.
     ///
     /// The cadence is the interval smoothed over 16 flips. An interval of
     /// two retraces more than `n` or longer is a pause (a scene that
@@ -812,16 +820,20 @@ impl Activity {
     /// program flips at a slower cadence, which starts from it.
     ///
     /// The same interval at `k` times the speed (`AHEAD`) is predicted to
-    /// be as far from the cadence over `k`, and adds to `late_ahead` as it
-    /// would to `late_flips` there. The spread follows the speed that way
-    /// in both games measured: Prehistorik 2's level 1 strays from its
-    /// cadence by 0.110 retraces on average at 3000, 0.069 at 5000 and
-    /// 0.036 at 10,000; Doom standing in E1M1 by 0.044 at 48,000 and 0.017
-    /// at 151,000. Predicted from 3000, level 1's share is 0.92% at 4560
-    /// and 0.38% at 6940, against 0.83% measured at 5000 and 0.37% at
-    /// 7000. Doom flips every 2.002 retraces, 4 ticks of its 140 Hz timer,
-    /// and a frame that much over two retraces is late whatever the speed:
-    /// predicted from 75,000, 0.51% at 3.5 times that.
+    /// be as far from the cadence over `k`, and adds to `late_ahead` the
+    /// share of a frame it runs over `n` retraces, whole or not: whether a
+    /// flip there would wait for the retrace isn't known. The spread
+    /// follows the speed that way in both games measured: Prehistorik 2's
+    /// level 1 strays from its cadence by 0.110 retraces on average at
+    /// 3000, 0.069 at 5000 and 0.036 at 10,000; Doom standing in E1M1 by
+    /// 0.044 at 48,000 and 0.017 at 151,000. Predicted from 3000, level
+    /// 1's share is 0.92% at 4560 and 0.38% at 6940, against 0.83% at 5000
+    /// and 0.37% at 7000 measured in shares of a frame. Doom flips every
+    /// 2.002 retraces, 4 ticks of its 140 Hz timer, and a frame that much
+    /// over two retraces is late whatever the speed: predicted from
+    /// 75,000, 0.51% at 3.5 times that. Predicted in whole retraces, its
+    /// frames would come under the line at 3.5 times 48,000, where they
+    /// stay as late.
     ///
     /// That holds for programs paced by a timer or the retrace, whose
     /// flips keep to the clock: an interval that runs long takes from the
@@ -833,6 +845,7 @@ impl Activity {
     /// 0.99 retraces). `follows` and `spread` tell the two apart: their
     /// ratio is the intervals' lag-1 autocorrelation about the cadence.
     fn flip_interval(&mut self, interval: f64, frame: f64) {
+        let synced = std::mem::take(&mut self.read_since_flip);
         if self.cadence_ns == 0.0 || frame <= 0.0 {
             self.cadence_ns = interval;
             return;
@@ -850,7 +863,9 @@ impl Activity {
         }
         self.pauses = 0;
         let (cadence, retraces) = (self.cadence_ns / frame, interval / frame);
-        self.late_flips += (retraces - n).clamp(0.0, 1.0);
+        let whole = retraces.round();
+        let shown = if synced || (retraces - whole).abs() <= SYNCED { whole } else { retraces };
+        self.late_flips += (shown - n).clamp(0.0, 1.0);
         for (late, k) in self.late_ahead.iter_mut().zip(AHEAD) {
             *late += (cadence + (retraces - cadence) / k - n).clamp(0.0, 1.0);
         }
@@ -886,6 +901,7 @@ impl Activity {
     /// timer tick, its next frame's drawing) reads a frame or more apart
     /// and misses nothing it waits for.
     pub fn status_read(&mut self, ns: u64, retraces: u64, in_retrace: bool, frame_ns: u64) {
+        self.read_since_flip = true;
         if in_retrace {
             self.outside_retrace = None;
             return;
@@ -7345,7 +7361,7 @@ mod tests {
     #[test]
     fn level_1_at_3000_is_predicted_under_the_line_from_about_7000() {
         let (late, ahead) = Flipper::shares(&LEVEL1_3000);
-        assert!((late - 0.0206).abs() < 0.0005, "{late}");
+        assert!((late - 0.0175).abs() < 0.0005, "{late}");
         // 6940 and 7980; 0.37% was measured at 7000.
         assert_eq!(AHEAD.iter().position(|&k| k * 3000.0 > 7000.0), Some(5));
         assert!(ahead[4] > UNEVEN && ahead[5] < UNEVEN, "{ahead:?}");
@@ -7359,10 +7375,11 @@ mod tests {
 
     #[test]
     fn doom_standing_is_predicted_over_the_line_at_every_speed_ahead() {
-        // It flips every 2.002 retraces: a frame in 400 is late from that
-        // alone, at any speed.
+        // It flips every 2.002 retraces, and a frame in 400 is predicted
+        // late from that alone, at any speed. (Its frames that took three
+        // retraces count as shown: 1.06%.)
         let (late, ahead) = Flipper::shares(&E1M1_48000);
-        assert!((late - 0.0226).abs() < 0.0005, "{late}");
+        assert!((late - 0.0106).abs() < 0.0005, "{late}");
         assert!(ahead.iter().all(|&late| late > 2.0 * UNEVEN), "{ahead:?}");
     }
 
@@ -7446,25 +7463,26 @@ mod tests {
 
     #[test]
     fn a_program_that_draws_as_fast_as_it_can_takes_no_steps_for_evenness() {
-        // As A-10 Tank Killer at 12,900: a frame every 0.99 retraces, its
-        // drawing time drifting with the scene, so that one long interval
-        // follows another. The intervals over a retrace count as late,
-        // more than the line allows, and more speed is predicted to take
-        // them under it, but no step is taken.
+        // As A-10 Tank Killer near 12,900: a frame every 0.96 retraces,
+        // its drawing time drifting with the scene, so that one long
+        // interval follows another. The intervals over a retrace count
+        // as late, more than the line allows, and more speed is predicted
+        // to take them under it: without the sums that tell such a
+        // program, it steps. With them, it doesn't.
         let mut a = Activity::new();
-        let mut auto = AutoSpeed::new(3000, None);
-        let (mut seed, mut drift, mut steps) = (0x1755, 0.0, 0);
+        let (mut auto, mut blind) = (AutoSpeed::new(3000, None), AutoSpeed::new(3000, None));
+        let (mut seed, mut drift, mut steps, mut blind_steps) = (0x1755, 0.0, 0, 0);
         let flat_out = Measurement {
-            fps: Some(70.8),
+            fps: Some(72.8),
             halted: 0.0,
             ..LEVEL1
         };
         for _ in 0..200 {
             let (late, paced, ahead) = (a.late_flips, a.paced_flips, a.late_ahead);
             let (follows, spread) = (a.follows, a.spread);
-            for _ in 0..35 {
-                drift = 0.5 * drift + 0.03 * (noise(&mut seed, 1.0) - 1.0);
-                a.flip_interval((0.99 + drift) * FRAME_NS, FRAME_NS);
+            for _ in 0..36 {
+                drift = 0.7 * drift + 0.1 * (noise(&mut seed, 1.0) - 1.0);
+                a.flip_interval((0.96 + drift) * FRAME_NS, FRAME_NS);
             }
             let m = Measurement {
                 late: a.late_flips - late,
@@ -7474,15 +7492,49 @@ mod tests {
                 spread: a.spread - spread,
                 ..flat_out
             };
-            let stepping = matches!(auto.step, Step::Evened { .. });
-            auto.decide(12_900, &m, false, HOST);
-            steps += u32::from(!stepping && matches!(auto.step, Step::Evened { .. }));
+            for (auto, steps, m) in [
+                (&mut auto, &mut steps, m),
+                (
+                    &mut blind,
+                    &mut blind_steps,
+                    Measurement {
+                        follows: 0.0,
+                        ..m
+                    },
+                ),
+            ] {
+                let stepping = matches!(auto.step, Step::Evened { .. });
+                auto.decide(12_900, &m, false, HOST);
+                *steps += u32::from(!stepping && matches!(auto.step, Step::Evened { .. }));
+            }
         }
+        assert!(a.late_flips / a.paced_flips as f64 > UNEVEN);
         assert!(a.follows > FREE_RUNNING * a.spread, "{} {}", a.follows, a.spread);
-        assert!(auto.free_running);
-        assert!(auto.pooled_late(12_900.0).unwrap() > UNEVEN);
-        assert!(auto.pooled_late(12_900.0 * AHEAD[7]).unwrap() <= UNEVEN);
+        assert!(auto.free_running && !blind.free_running);
         assert_eq!(steps, 0);
+        assert!(blind_steps > 0);
+    }
+
+    #[test]
+    fn flips_that_wait_for_the_retrace_count_whole_retraces() {
+        let frame = FRAME_NS;
+        let mut a = Activity::new();
+        a.flip_interval(3.0 * frame, frame);
+        // Near three: shown for three, none late.
+        a.flip_interval(3.06 * frame, frame);
+        assert_eq!(a.late_flips, 0.0);
+        // Between three and four, without a read of the status register:
+        // the share of a frame over three.
+        a.flip_interval(3.3 * frame, frame);
+        assert!((a.late_flips - 0.3).abs() < 1e-9, "{}", a.late_flips);
+        // With one, whole: three.
+        a.status_read(0, 0, false, frame as u64);
+        a.flip_interval(3.3 * frame, frame);
+        assert!((a.late_flips - 0.3).abs() < 1e-9, "{}", a.late_flips);
+        // Near four: a whole frame late.
+        a.flip_interval(3.95 * frame, frame);
+        assert!((a.late_flips - 1.3).abs() < 1e-9, "{}", a.late_flips);
+        assert_eq!(a.paced_flips, 4);
     }
 
     #[test]
