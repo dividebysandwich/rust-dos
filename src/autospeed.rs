@@ -1530,13 +1530,14 @@ pub struct AutoSpeed {
     /// whatever speed each ran: the late frames predicted at more speed.
     /// Kept until another program, or a reset.
     pool: VecDeque<Paced>,
-    /// Steps for evenness (`Step::Evened`) are over: one missed, or one
-    /// brought the share of late frames under the line. Late frames ask for
-    /// no more speed until the scene gets heavier, or the search starts
-    /// over while no step has gained (`even_at`). A program whose frames
-    /// are late about as often as the line whatever the speed passes half
-    /// the steps on noise, and steps that went on after one passed would
-    /// each raise the least speed for good, three times or so.
+    /// Steps for evenness (`Step::Evened`) are over: one missed. Late
+    /// frames ask for no more speed until the scene gets heavier, or the
+    /// search starts over while no step has gained (`even_at`). One that
+    /// gained leaves them open: the pool then holds what the step
+    /// measured, and the hold steps again only while it predicts the
+    /// speed over the line. A program whose frames are late as often
+    /// whatever the speed passes a step on noise now and then, and the
+    /// next one it takes misses, or the one after.
     even_done: bool,
     /// The speed a step for evenness that gained went to (`Step::Evened`):
     /// the least speed until a DOS program starts or ends (`set_programs`)
@@ -3042,20 +3043,20 @@ impl AutoSpeed {
                 if paced < PACED_FLIPS {
                     return current;
                 }
-                // Closer to the line than to the share predicted before, in
-                // the logarithm: the late frames came from too little speed,
-                // and this is the least speed for the program (`even_at`).
-                // If the share is still over the line, the hold steps again
-                // on what the pool holds then. Otherwise they come whatever
+                // Not closer to the line than to the share predicted
+                // before, in the logarithm: the late frames come whatever
                 // the speed, and the step goes back. The share here is
                 // measured over few intervals, so a step can miss on noise:
                 // until one has gained, the search starting over tries
-                // again (`even_done`).
+                // again (`even_done`). Otherwise they came from too little
+                // speed, and this is the least speed for the program
+                // (`even_at`). The hold steps again if the pool, with this
+                // speed's intervals in it, still predicts it over the line
+                // (one window here can miss a burst of late frames).
                 if late > (was * UNEVEN).sqrt() {
                     self.even_done = true;
                     return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
                 }
-                self.even_done = late <= UNEVEN;
                 self.even_at = Some(current.max(self.even_at.unwrap_or(0)));
                 hold_drawing(self, fps, current, HOLD_WINDOWS, false)
             }
