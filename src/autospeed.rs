@@ -1549,6 +1549,12 @@ pub struct AutoSpeed {
     /// the retrace, or draws nothing for a while), from which the frame
     /// rate alone brought it back to 4000.
     even_at: Option<u32>,
+    /// The speed the program's first step for evenness came from, for as
+    /// long as `even_at` lasts. No step goes past `AHEAD`'s last times it
+    /// (3.5): Prehistorik 2's late frames come in bursts, and steps on
+    /// one after another took level 1 from 3500 to 18,000, where 7500
+    /// keeps it under the line.
+    even_from: Option<u32>,
     /// DOS programs started and ended so far (`set_programs`).
     programs: u64,
     /// While a program gets all the host has for its reads and writes, the
@@ -1636,6 +1642,7 @@ impl AutoSpeed {
             pool: VecDeque::new(),
             even_done: false,
             even_at: None,
+            even_from: None,
             programs: 0,
             working: None,
             work_cuts: 0,
@@ -1709,7 +1716,7 @@ impl AutoSpeed {
     pub fn set_programs(&mut self, programs: u64) {
         if programs != self.programs {
             self.programs = programs;
-            (self.even_at, self.even_done) = (None, false);
+            (self.even_at, self.even_from, self.even_done) = (None, None, false);
             self.pool.clear();
         }
     }
@@ -1743,7 +1750,7 @@ impl AutoSpeed {
     /// (a save state loaded).
     pub fn reset(&mut self) {
         self.start_over();
-        (self.even_at, self.even_done) = (None, false);
+        (self.even_at, self.even_from, self.even_done) = (None, None, false);
         self.pool.clear();
         self.lagged = None;
         self.pace = 1.0;
@@ -1819,13 +1826,17 @@ impl AutoSpeed {
 
     /// Where a step for evenness from `speed` goes (`Step::Evened`), and
     /// the share of frames predicted late at `speed`, if that is over the
-    /// line and a speed of `AHEAD` is predicted under it.
+    /// line and a speed of `AHEAD` is predicted under it, no more than
+    /// `AHEAD`'s last times the speed of the program's first step came from
+    /// (`even_from`).
     fn evened_to(&self, speed: f64) -> Option<(f64, f64)> {
         let late = self.pooled_late(speed).filter(|&late| late > UNEVEN)?;
+        let most = AHEAD[AHEAD.len() - 1];
         let to = AHEAD
             .iter()
             .map(|k| speed * k)
-            .find(|&to| self.pooled_late(to).is_some_and(|late| late <= UNEVEN))?;
+            .find(|&to| self.pooled_late(to).is_some_and(|late| late <= UNEVEN))
+            .filter(|&to| self.even_from.is_none_or(|from| to <= from as f64 * most))?;
         Some((to, late))
     }
 
@@ -2921,6 +2932,7 @@ impl AutoSpeed {
                     && let Some((to, late)) = self.evened_to(c)
                     && to <= room
                 {
+                    self.even_from.get_or_insert(current);
                     self.step = Step::Evened {
                         from: current,
                         fps: recent,
@@ -7298,6 +7310,31 @@ mod tests {
             assert!(late <= 0.004, "{runs:?}");
             assert!(steps <= 8, "{runs:?}");
         }
+    }
+
+    #[test]
+    fn steps_for_evenness_go_no_further_than_three_and_a_half_times() {
+        // At 9000, frames as late as level 1's at 3000, 1200 of them:
+        // 27,531 is the least speed of `AHEAD` predicted under the line.
+        // After a first step from 3000 none goes past 10,560 (3000 x
+        // 3.52), and after one from 8000 the step goes there.
+        let mut game = Flipper::new(&LEVEL1_3000, Some(3000), 0x1733);
+        let mut auto = AutoSpeed::new(3000, None);
+        for _ in 0..100 {
+            let m = game.measure(3000, 12, LEVEL1);
+            auto.pool_paced(super::Paced {
+                speed: 9000,
+                late: m.late,
+                paced: m.paced,
+                ahead: m.ahead,
+            });
+        }
+        let (to, _) = auto.evened_to(9000.0).unwrap();
+        assert!((to / 9000.0 - AHEAD[6]).abs() < 1e-9, "{to}");
+        auto.even_from = Some(3000);
+        assert_eq!(auto.evened_to(9000.0), None);
+        auto.even_from = Some(8000);
+        assert_eq!(auto.evened_to(9000.0).map(|(to, _)| to), Some(to));
     }
 
     #[test]
