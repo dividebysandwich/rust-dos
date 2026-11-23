@@ -31,13 +31,13 @@
 //! before.
 //!
 //! The flags a comparison sets that something reads are the same in each
-//! pass as long as none of these crosses a bound: each operand, taken as a number from 0, stays in the half of its
-//! range it is in (so it neither wraps nor changes its sign); their sum or
-//! difference, taken as a number with no wrap, stays between the same two
-//! multiples of half the range and off a multiple of the whole range (CF,
-//! SF and ZF); and the same of the operands taken with their signs (OF).
-//! The values move by steps, so they cross a bound at a pass that is found
-//! by a division. PF and AF are tied to the low bits, which change in
+//! pass as long as none of these crosses a bound: each operand, taken as a
+//! number from 0, stays in the half of its range it is in (so it neither
+//! wraps nor changes its sign); their sum or difference, taken as a number
+//! with no wrap, stays between the same two multiples of half the range
+//! and off a multiple of the whole range (CF, SF and ZF); and the same of
+//! the operands taken with their signs (OF). The values move by steps, so
+//! they cross a bound at a pass that is found by a division. PF and AF are tied to the low bits, which change in
 //! every pass a value moves: where something reads them, no pass is known
 //! to run the same.
 
@@ -374,5 +374,219 @@ mod tests {
         // 0xF0 + a count from 0x08 going up by 1: the sum reaches 0x100,
         // which sets CF and ZF, at the 8th pass on.
         assert_eq!(arith(1, (0xF0, 0), (0x08, 1), 0, false), 7);
+    }
+
+    /// A xorshift generator, so the programs below are the same in every
+    /// run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+
+        fn pick<T: Copy>(&mut self, of: &[T]) -> T {
+            of[self.below(of.len() as u64) as usize]
+        }
+    }
+
+    /// The passes that run as the recorded one, the cells after them and
+    /// the flags they leave the head, from running the model on each pass
+    /// as `counted_passes` did before it had `Drift`.
+    fn one_by_one(
+        model: &Model,
+        mut state: State,
+        most: u64,
+        clock: impl Fn(u64, u64) -> u32,
+    ) -> (u64, State, (u32, u32)) {
+        let mut done = state.clone();
+        let mut passes = 0;
+        let mut head = (0, 0);
+        while passes < most {
+            let p = passes;
+            let mut left = head;
+            let same = model.run(
+                &mut state,
+                |offset| clock(p, offset),
+                |i, _, flags| {
+                    let (live, seen, out) = model.checks[i];
+                    left = (left.0 | out, left.1 & !out | flags & out);
+                    flags & live == seen
+                },
+            );
+            if !same {
+                break;
+            }
+            passes += 1;
+            head = left;
+            done.clone_from(&state);
+        }
+        (passes, done, head)
+    }
+
+    /// A pass over counts in slots 0 to 11, with the clock read into
+    /// slots 12 to 15: counts that move by steps, as an idle loop's do, and
+    /// comparisons of them with values close to where their flags change,
+    /// with now and then what `Drift` doesn't follow. The flags something
+    /// reads are those of the pass with `clock`.
+    fn program(rng: &mut Rng, clock: impl Fn(u64) -> u32) -> (Model, State) {
+        use crate::cpu::alu::{ARITH, CF, OF, SF, ZF, size_mask};
+        const CLOCK: usize = 12;
+        let near = |rng: &mut Rng, size: u8| -> u32 {
+            let bits = 8 * size as u32;
+            let edge = rng.pick(&[0u64, 1 << (bits - 1), 1 << bits]) as i64;
+            ((edge + rng.below(9) as i64 - 4) as u32) & size_mask(size)
+        };
+        let mut state: State = vec![None; 16];
+        let size_of_count = rng.pick(&[1u8, 2, 4]);
+        for count in [0, 4, 8] {
+            let value = near(rng, size_of_count);
+            for i in 0..4 {
+                state[count + i] = Some((value >> (8 * i)) as u8);
+            }
+        }
+        let mut runs = Vec::new();
+        for _ in 0..1 + rng.below(6) {
+            let size = if rng.below(4) == 0 {
+                rng.pick(&[1u8, 2, 4])
+            } else {
+                size_of_count
+            };
+            // Mostly the counts as they are laid out, now and then a
+            // value's upper bytes or the bytes of two.
+            let slot = |rng: &mut Rng| -> usize {
+                if rng.below(8) == 0 {
+                    rng.below(13 - size as u64) as usize
+                } else {
+                    rng.pick(&[0, 4, 8])
+                }
+            };
+            if rng.below(8) == 0 {
+                runs.push(Run::Clock {
+                    slot: CLOCK,
+                    offset: rng.below(64),
+                });
+                continue;
+            }
+            if rng.below(30) == 0 {
+                runs.push(Run::Kill(slot(rng)));
+                continue;
+            }
+            let op = rng.pick(&[
+                CountOp::Mov,
+                CountOp::Inc,
+                CountOp::Inc,
+                CountOp::Dec,
+                CountOp::Add,
+                CountOp::Add,
+                CountOp::Sub,
+                CountOp::Adc,
+                CountOp::Sbb,
+                CountOp::Neg,
+                CountOp::Not,
+                CountOp::And,
+                CountOp::Or,
+                CountOp::Xor,
+                CountOp::Mul,
+                CountOp::Div,
+                CountOp::Cmp,
+                CountOp::Cmp,
+                CountOp::Cmp,
+                CountOp::Test,
+                CountOp::Test,
+            ]);
+            let dst_slot = if rng.below(10) == 0 { CLOCK } else { slot(rng) };
+            let dst = (Some(dst_slot), near(rng, size));
+            let src = match rng.below(4) {
+                // The same value twice, as TEST EAX,EAX reads it.
+                0 => dst,
+                1 => (Some(slot(rng)), near(rng, size)),
+                _ => {
+                    let step = rng.pick(&[1u32, 2, 3, 0xFF, 0xFFFF, u32::MAX, 0x7F, 0x80]);
+                    let value = if rng.below(2) == 0 {
+                        near(rng, size)
+                    } else {
+                        step
+                    };
+                    (None, value & size_mask(size))
+                }
+            };
+            runs.push(Run::Op {
+                op,
+                size,
+                dst,
+                src,
+                hi: (None, 0),
+                carry: rng.below(2) == 0,
+            });
+        }
+        let mut model = Model {
+            cells: (0..16).collect(),
+            seeds: (0..12).collect(),
+            runs,
+            checks: Vec::new(),
+        };
+        let mut flags = Vec::new();
+        model.run(&mut state.clone(), clock, |_, _, f| {
+            flags.push(f);
+            true
+        });
+        let ops = model.runs.iter().filter_map(|run| match *run {
+            Run::Op { op, .. } => Some(op),
+            _ => None,
+        });
+        model.checks = flags
+            .iter()
+            .zip(ops)
+            .map(|(&f, op)| {
+                let live = op.sets() & rng.pick(&[ARITH, ZF, CF, SF, OF, ZF | SF, CF | ZF, PF, 0]);
+                let out = op.sets() & rng.pick(&[0, ARITH, ZF | CF]);
+                (live, f & live, out)
+            })
+            .collect();
+        (model, state)
+    }
+
+    /// `passes_from` must find what running the model on each pass finds,
+    /// whatever it skips: the passes, the cells after them and the flags
+    /// they leave the head.
+    #[test]
+    fn skipping_passes_finds_what_running_each_finds() {
+        let mut rng = Rng(0x1729_1749_DEAD_BEEF);
+        let (mut skipped, mut rounds, mut stopped) = (0u64, 0u64, 0u64);
+        for round in 0..50_000 {
+            let most = 1 + rng.below(3000);
+            let from = rng.below(1 << 20);
+            let period = 1 + rng.below(300);
+            let per_ms = 50 + rng.below(20_000);
+            let clock = |p: u64, offset: u64| ((from + p * period + offset) / per_ms + 7) as u32;
+            let (model, state) = program(&mut rng, |offset| clock(0, offset));
+            let (passes, done, head) = one_by_one(&model, state.clone(), most, clock);
+            let counted = super::super::passes_from(&model, state, most, clock);
+            let values: Vec<(u64, u8)> = done
+                .iter()
+                .zip(&model.cells)
+                .filter_map(|(v, &c)| v.map(|v| (c, v)))
+                .collect();
+            assert_eq!(
+                (counted.passes, &counted.values, counted.flags),
+                (passes, &values, head),
+                "round {round}"
+            );
+            rounds += 1;
+            stopped += u64::from(counted.modelled < passes && passes < most);
+            skipped += u64::from(counted.modelled < passes);
+        }
+        // Enough of them skip, and enough stop at a pass whose flags differ
+        // after skipping, for the comparison to say something.
+        assert!(skipped * 10 > rounds, "{skipped} of {rounds}");
+        assert!(stopped * 100 > rounds, "{stopped} of {rounds}");
     }
 }
