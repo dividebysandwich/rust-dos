@@ -2623,14 +2623,21 @@ impl AutoSpeed {
             .map(|(floor, left)| (floor, left - 1));
         // The flips' pacing at this speed, over the measurements since it
         // was set, and whether too many frames came late (`UNEVEN`). Not
-        // from measurements behind: the host's hitches move the flips.
+        // from measurements behind: the host's hitches move the flips. Nor
+        // from those where the program polls the retrace: the missed
+        // retraces count those frames (`missed`), and the scene is another
+        // than play. Prehistorik 2's death and restart screens poll for 4%
+        // to 9% of the time and miss a retrace in one measurement of two
+        // at any speed; one judged a step that play would have kept, and
+        // sent it back (#1757). A step's intervals from play before such a
+        // scene still count, and play after it adds to them.
         if self.paced.speed != current {
             self.paced = Paced {
                 speed: current,
                 ..Paced::default()
             };
         }
-        if !lagged && m.pace >= KEPT_UP && m.paced > 0 {
+        if !lagged && m.pace >= KEPT_UP && m.paced > 0 && m.polling == 0.0 {
             let p = &mut self.paced;
             p.late += m.late;
             p.paced += m.paced;
@@ -7816,6 +7823,48 @@ mod tests {
         };
         assert_eq!(auto.decide(10_869, &polling, false, HOST), 3000);
         assert_eq!(auto.even_at, None);
+    }
+
+    #[test]
+    fn frames_of_a_scene_that_polls_the_retrace_judge_no_step() {
+        // Prehistorik 2's level 1, stepped from 3000 to 7000: 200
+        // intervals of play with none late, then its death screen, which
+        // polls the retrace for 7% of the time and misses it twice in each
+        // measurement, then play again. The death screen's frames go
+        // neither into the pool nor into the step's judgement, which play
+        // completes: the step stays.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Evened {
+            from: 3000,
+            fps: 23.95,
+            late: 0.0175,
+        };
+        let play = Measurement {
+            paced: 20,
+            ..LEVEL1
+        };
+        let dying = Measurement {
+            polling: 0.07,
+            missed: 2,
+            late: 2.0,
+            ..play
+        };
+        for _ in 0..10 {
+            assert_eq!(auto.decide(7000, &play, false, HOST), 7000);
+        }
+        let pooled = auto.pool.len();
+        for _ in 0..20 {
+            assert_eq!(auto.decide(7000, &dying, false, HOST), 7000);
+        }
+        assert_eq!(auto.pool.len(), pooled);
+        assert_eq!((auto.paced.late, auto.paced.paced), (0.0, 200));
+        for _ in 0..4 {
+            assert_eq!(auto.decide(7000, &play, false, HOST), 7000);
+        }
+        assert!(matches!(auto.step, Step::Evened { .. }));
+        assert_eq!(auto.decide(7000, &play, false, HOST), 7000);
+        assert_eq!(auto.even_at, Some(7000));
+        assert!(!auto.even_done);
     }
 
     #[test]
