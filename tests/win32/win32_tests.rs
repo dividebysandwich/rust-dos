@@ -19757,3 +19757,185 @@ fn a_win16_state_of_now_calls_its_missing_import() {
     assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
     assert!(printed(&cpu).contains(MISSING_CALL16), "{}", printed(&cpu));
 }
+
+/// VWIN32's services that need no real mode, called with VxDCall0 as
+/// Win32 programs call them: its version (GetVersion's, major in the
+/// high byte), VMCPD's version for one argument (4.05), and the debugger
+/// dispatch, which gives back the function it is passed. The services
+/// pop their arguments, so the stack is as it was before they were
+/// pushed. The exit code is the step that failed.
+#[test]
+fn vwin32_gives_its_version_and_pops_its_arguments() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["#1", "GetVersion", "ExitProcess"])];
+    let exe = program(BASE, false, imports, &[0; 0x10], |a, l| {
+        let mut fail = a.create_label();
+        a.call(l.import(1))?;
+        a.mov(ecx, eax)?;
+        a.xchg(cl, ch)?;
+        a.movzx(ecx, cx)?;
+        a.mov(esi, esp)?;
+        a.push(0x002A_0000)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 1)?;
+        a.cmp(eax, ecx)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.push(0)?;
+        a.push(0x002A_0020)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 2)?;
+        a.cmp(eax, 0x0405)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.push(0x1234)?;
+        a.push(0x002A_002A)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 3)?;
+        a.cmp(eax, 0x1234)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let (code, text) = run("vwin32_version", exe);
+    assert_eq!(code, 0, "{}", text);
+}
+
+/// A real mode call structure for INT 2Fh's MSCDEX function `function`
+/// on drive D:, with SI:DI `sector` and DX `count` (an absolute read's)
+/// and its buffer at 9000:0000.
+fn mscdex_structure(function: u16, sector: u32, count: u16) -> [u8; 0x32] {
+    let mut s = [0u8; 0x32];
+    s[0x00..0x02].copy_from_slice(&(sector as u16).to_le_bytes());
+    s[0x04..0x06].copy_from_slice(&((sector >> 16) as u16).to_le_bytes());
+    s[0x14..0x16].copy_from_slice(&count.to_le_bytes());
+    s[0x18] = 3;
+    s[0x1C..0x1E].copy_from_slice(&function.to_le_bytes());
+    s[0x20] = 0x02;
+    s[0x22..0x24].copy_from_slice(&0x9000u16.to_le_bytes());
+    s
+}
+
+/// VWIN32's Int31Dispatch (VxDCall0 of 002A0029h with the DPMI function
+/// and ECX pushed), as CopyLok calls it: DPMI 0300h runs INT 2Fh in real
+/// mode, MSCDEX answers, and the call structure at EDI gets the
+/// registers and flags it left. The program goes on with AX the
+/// function, CF clear, its other registers as they were and the two
+/// arguments popped. On a disc with a band of sectors the drive can't
+/// read, MSCDEX's absolute read of one fails with a data error (CF and
+/// AX=17h in the structure), and the sector after the band reads. A
+/// function VWIN32 doesn't give fails with CF and 8001h; 0400h gives the
+/// DPMI version, 0.90. The exit code is the step that failed.
+#[test]
+fn vwin32_int31_dispatch_calls_mscdex_in_real_mode() {
+    let dir = cdimage::scratch("vwin32_mscdex");
+    let mut image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    let band = (image.len() / 2048) as u32;
+    image.extend(vec![0x77; 4 * 2048]);
+    let mut raw = cdimage::mode1_2352(&image);
+    for lba in band..band + 2 {
+        let at = lba as usize * 2352;
+        raw[at + 16..at + 2352].fill(0x55);
+    }
+    fs::write(dir.join("GAME.BIN"), raw).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    const CHECK: u32 = 0x00;
+    const READ: u32 = 0x40;
+    let mut data = vec![0u8; 0x80];
+    let check = mscdex_structure(0x150B, 0, 0);
+    data[CHECK as usize..CHECK as usize + 0x32].copy_from_slice(&check);
+    let read = mscdex_structure(0x1508, band, 1);
+    data[READ as usize..READ as usize + 0x32].copy_from_slice(&read);
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["#1", "ExitProcess"])];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        // Int31Dispatch(function, ECX) with BL the interrupt and EDI the
+        // structure. EBP keeps the step, ESI the stack.
+        let dispatch = |a: &mut CodeAssembler, function: i32, structure: u32| {
+            a.mov(esi, esp)?;
+            a.mov(ebx, 0x2F)?;
+            a.mov(edi, l.at(structure) as i32)?;
+            a.push(0)?;
+            a.push(function)?;
+            a.push(0x002A_0029)?;
+            a.call(l.import(0))
+        };
+        // The drive check, 150Bh: D: is a CD-ROM drive, and BX=ADADh.
+        dispatch(a, 0x0300, CHECK)?;
+        a.mov(ebp, 1)?;
+        a.jc(fail)?;
+        a.cmp(eax, 0x0300)?;
+        a.jne(fail)?;
+        a.mov(ebp, 2)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.cmp(ebx, 0x2F)?;
+        a.jne(fail)?;
+        a.cmp(edi, l.at(CHECK) as i32)?;
+        a.jne(fail)?;
+        a.mov(ebp, 3)?;
+        a.cmp(word_ptr(l.at(CHECK + 0x1C)), 0x5AD8)?;
+        a.jne(fail)?;
+        a.cmp(word_ptr(l.at(CHECK + 0x10)), 0xADAD)?;
+        a.jne(fail)?;
+        // An absolute read (1508h) of the band's first sector: a data
+        // error.
+        dispatch(a, 0x0300, READ)?;
+        a.mov(ebp, 4)?;
+        a.jc(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.test(byte_ptr(l.at(READ + 0x20)), 1)?;
+        a.je(fail)?;
+        a.cmp(word_ptr(l.at(READ + 0x1C)), 0x17)?;
+        a.jne(fail)?;
+        // Then of the sector after the band: read.
+        a.mov(word_ptr(l.at(READ)), (band + 2) as i32)?;
+        a.mov(word_ptr(l.at(READ + 0x1C)), 0x1508)?;
+        dispatch(a, 0x0300, READ)?;
+        a.mov(ebp, 5)?;
+        a.jc(fail)?;
+        a.test(byte_ptr(l.at(READ + 0x20)), 1)?;
+        a.jne(fail)?;
+        // A function VWIN32 doesn't give.
+        dispatch(a, 0x0500, CHECK)?;
+        a.mov(ebp, 6)?;
+        a.jnc(fail)?;
+        a.cmp(eax, 0x8001)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        // The DPMI version.
+        dispatch(a, 0x0400, CHECK)?;
+        a.mov(ebp, 7)?;
+        a.jc(fail)?;
+        a.cmp(eax, 0x005A)?;
+        a.jne(fail)?;
+        a.xor(ebp, ebp)?;
+        a.set_label(&mut fail)?;
+        a.push(ebp)?;
+        a.call(l.import(1))?;
+        a.int3()
+    });
+    let mut cpu = machine("vwin32_mscdex", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+    // The sector after the band went to 9000:0000.
+    assert_eq!(cpu.bus.read_8(0x9_0000), 0x77);
+}

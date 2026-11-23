@@ -31,6 +31,7 @@ mod win98;
 pub use win98::is_directory;
 pub(crate) mod virtual_memory;
 mod vxd;
+pub(super) use vxd::call_returned as vxd_call_returned;
 
 pub(super) use locale::enum_returned;
 pub(crate) use path::{change_directory, current_directory, find_entries, full_path, matches};
