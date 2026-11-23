@@ -517,8 +517,8 @@ const MISS_GAP: f64 = 0.25;
 /// Judged over `PACED_FLIPS` intervals at one speed, 12 seconds of that
 /// game's: the share is a few frames of them, and over fewer, a frame more
 /// or less moves it past the line. A hold whose frames are late more often
-/// over `TRY_FLIPS` intervals tries more speed (`Step::Evened`), and steps
-/// down stop for the scene at the speed of a try that cut them. A program
+/// over `TRY_FLIPS` intervals tries more speed (`Step::Evened`), and the
+/// speed of a try that cut them is the least for the program. A program
 /// whose frames come unevenly whatever the speed (a timedemo's frames,
 /// which take as long as their scene does; a screen that stops scrolling
 /// for a frame now and then) shows it at the try, whose frames are as
@@ -1501,8 +1501,13 @@ pub struct AutoSpeed {
     /// this scene, up to `MOST_PROBE_BACKOFFS`.
     even_wait: u32,
     even_misses: u32,
-    /// The speed a try for evenness that gained went to (`Step::Evened`),
-    /// under which steps down don't go in this scene.
+    /// The speed a try for evenness that gained went to (`Step::Evened`):
+    /// the least speed until `reset` (a program enters or leaves protected
+    /// mode, a state loads), as far as the host has it (`least`). Steps
+    /// under it show too few frames to tell whether they lost evenness,
+    /// and Prehistorik 2's level 1 starts the search over every half a
+    /// minute or so (when it polls for the retrace, or draws nothing for a
+    /// while), from which the frame rate alone brought it back to 4000.
     even_at: Option<u32>,
     /// While a program gets all the host has for its reads and writes, the
     /// speed it had before.
@@ -1682,6 +1687,7 @@ impl AutoSpeed {
     /// (a save state loaded).
     pub fn reset(&mut self) {
         self.start_over();
+        self.even_at = None;
         self.lagged = None;
         self.pace = 1.0;
         self.behind = false;
@@ -1728,7 +1734,6 @@ impl AutoSpeed {
         self.paced = (0, 0.0, 0);
         self.even_wait = 0;
         self.even_misses = 0;
-        self.even_at = None;
     }
 
     /// `speed` lost frames: raises the floor to `over` times it, no higher
@@ -2163,16 +2168,17 @@ impl AutoSpeed {
         (before != current).then_some(before)
     }
 
-    /// The least speed there is: a faster model's only up to what the host
-    /// has.
+    /// The least speed there is: a faster model's, and the one a try for
+    /// evenness found (`even_at`), only up to what the host has.
     fn least(&self, protected: bool, host_max: u32) -> u32 {
-        if protected {
+        let least = if protected {
             self.base
                 .max(PROTECTED_LEAST)
                 .max(self.protected_least.min(host_max))
         } else {
             self.base
-        }
+        };
+        least.max(self.even_at.map_or(0, |even| even.min(host_max)))
     }
 
     /// The speed to go on at from `current`, after a measurement there.
@@ -2459,10 +2465,8 @@ impl AutoSpeed {
             }
             // A step that would pass the floor stops at it. At the floor,
             // trying more instead, the only way left to go, would climb.
-            // The speed a try for evenness found is one for the scene.
-            let floor = this.floor.map(|(floor, _)| floor).max(this.even_at);
-            let to = match floor {
-                Some(floor) if c / FINE_STEP < floor as f64 => {
+            let to = match this.floor {
+                Some((floor, _)) if c / FINE_STEP < floor as f64 => {
                     if floor as f64 * 1.01 >= c {
                         return hold_drawing(this, fps, clamp(c), HOLD_WINDOWS, false);
                     }
@@ -2713,7 +2717,6 @@ impl AutoSpeed {
                     self.least_held = None;
                     self.probe_misses = 0;
                     self.even_misses = 0;
-                    self.even_at = None;
                     self.unsure = false;
                     if !lagged && self.lagged.is_some() && current >= top && top < host_top {
                         let most = (top as f64 * HEAVIER) as u32;
@@ -2917,9 +2920,9 @@ impl AutoSpeed {
                 }
                 // Few enough late frames now, or fewer by as much as
                 // `EVEN_FOLLOWS` says and by more than the noise
-                // (`TRY_FLIPS`): they came from too little speed, and it
-                // holds here, with steps down stopping here for the scene.
-                // Otherwise they come whatever the speed.
+                // (`TRY_FLIPS`): they came from too little speed, and this
+                // is the least speed for the program (`even_at`). Otherwise
+                // they come whatever the speed.
                 let even = late <= UNEVEN;
                 let follows = late <= was * (from as f64 / c).powf(EVEN_FOLLOWS);
                 let noise = (was / paced_from as f64 + late / paced as f64).sqrt();
@@ -7001,6 +7004,22 @@ mod tests {
             let mean = speeds[300..].iter().sum::<u64>() / 1200;
             assert!(mean <= 170_000, "{mean}");
         }
+    }
+
+    #[test]
+    fn the_speed_found_even_is_the_least_until_another_program() {
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.even_at = Some(9000);
+        // Polling for the retrace starts the search over a step down,
+        // which stops at the speed found even.
+        let polling = Measurement {
+            polling: WAITING,
+            ..level1(9000, &mut 1, |_| 0.0)
+        };
+        assert_eq!(auto.decide(9000, &polling, false, HOST), 9000);
+        assert_eq!(auto.even_at, Some(9000));
+        auto.reset();
+        assert_eq!(auto.decide(9000, &polling, false, HOST), 7200);
     }
 
     #[test]
