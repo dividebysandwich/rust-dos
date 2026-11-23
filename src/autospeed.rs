@@ -2518,20 +2518,36 @@ impl AutoSpeed {
             let enough = (c * m.refresh / fps).round() as u32;
             self.even_at = Some(even.min(enough));
         }
+        // A step for evenness that the search starting over cuts short
+        // is judged on the intervals it measured, if they are half of
+        // `PACED_FLIPS` or more, as it would have been on all of them: it
+        // stays, as the least speed for the program (`even_at`), or the
+        // search goes on from the speed it came from. Prehistorik 2's
+        // level 1 polls the retrace every half a minute or so, and a step
+        // it cut short after 180 intervals went back from 10,900 to 3000,
+        // where its frames ran late for 20 seconds until the pool asked
+        // for the step again. With fewer intervals, going on from the
+        // step's speed, the program would climb by steps nothing judged.
+        let judged = match self.step {
+            Step::Evened { from, late: was, .. } if current > from => {
+                let p = self.paced;
+                let held = p.speed == current
+                    && p.paced >= PACED_FLIPS / 2
+                    && p.late / p.paced as f64 <= (was * UNEVEN).sqrt();
+                if held {
+                    self.even_at = Some(current.max(self.even_at.unwrap_or(0)));
+                    c
+                } else {
+                    from as f64
+                }
+            }
+            _ => c,
+        };
         // Nor past a step above where the host fell behind (`fell_at`).
         let past_fall = self.fell_at.map(|at| (at as f64 * FINE_STEP) as u32);
         let base = self.least(protected, past_fall.map_or(have, |most| most.min(have)));
         let top = have.max(base);
         let clamp = |speed: f64| (speed.round() as u32).clamp(base, top);
-        // A step for evenness that the search starting over cuts short
-        // wasn't judged: the search goes on from the speed the step came
-        // from. Going on from the step's, a program whose search starts
-        // over every half a minute, as Prehistorik 2's level 1 does, would
-        // climb by steps nothing judged.
-        let judged = match self.step {
-            Step::Evened { from, .. } if current > from => from as f64,
-            _ => c,
-        };
         if m.polling >= WAITING {
             self.restart_search();
             return clamp(judged * WAITING_STEP);
@@ -7666,6 +7682,47 @@ mod tests {
         auto.even_at = Some(9000);
         auto.set_programs(1);
         assert_eq!(auto.decide(9000, &polling, false, HOST), 7200);
+    }
+
+    #[test]
+    fn a_step_for_evenness_cut_short_after_enough_intervals_is_judged() {
+        // Prehistorik 2's level 1, stepped from 3553 to 10,869, polls the
+        // retrace after 180 intervals there with 0.08 frames late: the
+        // step stays, as the least speed for the program.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Evened {
+            from: 3553,
+            fps: 24.29,
+            late: 0.01,
+        };
+        auto.paced = super::Paced {
+            speed: 10_869,
+            late: 0.08,
+            paced: 180,
+            ..super::Paced::default()
+        };
+        let polling = Measurement {
+            polling: WAITING,
+            ..LEVEL1
+        };
+        assert_eq!(auto.decide(10_869, &polling, false, HOST), 10_869);
+        assert_eq!(auto.even_at, Some(10_869));
+        assert_eq!(auto.decide(10_869, &polling, false, HOST), 10_869);
+        // As many late there as before the step: it goes back.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Evened {
+            from: 3553,
+            fps: 24.29,
+            late: 0.01,
+        };
+        auto.paced = super::Paced {
+            speed: 10_869,
+            late: 1.8,
+            paced: 180,
+            ..super::Paced::default()
+        };
+        assert_eq!(auto.decide(10_869, &polling, false, HOST), 3000);
+        assert_eq!(auto.even_at, None);
     }
 
     #[test]
