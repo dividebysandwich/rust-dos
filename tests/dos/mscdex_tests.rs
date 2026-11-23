@@ -348,10 +348,15 @@ fn copylok_disc(name: &str) -> (Box<Cpu>, u32) {
     }
     fs::write(dir.join("GAME.BIN"), raw).unwrap();
     let cue = dir.join("GAME.CUE");
-    fs::write(&cue, "FILE \"GAME.BIN\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n")
-        .unwrap();
+    fs::write(
+        &cue,
+        "FILE \"GAME.BIN\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n",
+    )
+    .unwrap();
     let mut cpu = Cpu::new(dir.join("c"));
-    cpu.bus.mount_drive(3, &cue, MountOptions::default(), false).unwrap();
+    cpu.bus
+        .mount_drive(3, &cue, MountOptions::default(), false)
+        .unwrap();
     (cpu, band)
 }
 
@@ -388,7 +393,11 @@ fn a_copylok_band_fails_to_read() {
         assert!(!cpu.get_cpu_flag(CpuFlags::CF), "sector {}", lba);
         assert_eq!(read_raw(&mut cpu, lba, 1), 0x0100, "sector {}", lba);
     }
-    assert_eq!(cpu.bus.read_8(BUFFER + 16), 0x77, "the sector after the band, raw");
+    assert_eq!(
+        cpu.bus.read_8(BUFFER + 16),
+        0x77,
+        "the sector after the band, raw"
+    );
 }
 
 /// Seek (83h) to sector `lba` in HSG addressing.

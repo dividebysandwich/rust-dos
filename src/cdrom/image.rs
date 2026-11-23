@@ -171,7 +171,8 @@ pub struct CdImage {
     /// files keep none.
     sub_file: Option<SubFile>,
     /// What opening the image found that the user should hear of: the
-    /// subchannel file it reads, or why it reads none it found.
+    /// subchannel file it reads, or why it reads none it found, and a
+    /// CopyLok disc and whether the image can pass its check.
     notes: Vec<String>,
 }
 
@@ -250,7 +251,9 @@ impl CdImage {
         self.notes.push(if raw {
             format!(
                 "{} is a CopyLok disc ({}): its sectors whose EDC doesn't match their data \
-                 read as errors, as the protection expects",
+                 read as errors, so the protection's check passes if the image keeps the \
+                 band of unreadable sectors, as Redump's dumps do. A BIN made from an ISO \
+                 doesn't keep it",
                 shown,
                 variant.describe()
             )
@@ -625,7 +628,7 @@ impl CdImage {
 
     /// What opening the image found that the user should hear of: the
     /// subchannel file beside it that it reads, or why it reads none of
-    /// those it found.
+    /// those it found, and a CopyLok disc (`note_copylok`).
     pub fn notes(&self) -> &[String] {
         &self.notes
     }
@@ -681,10 +684,20 @@ impl CdImage {
     pub fn from_memory(name: &str, data: MemoryImage) -> Result<Self, String> {
         #[cfg(feature = "chd")]
         if is_chd_memory(&data) {
-            return Self::chd(Path::new(name), Box::new(MemoryReader { data, pos: 0 }));
+            let mut image = Self::chd(Path::new(name), Box::new(MemoryReader { data, pos: 0 }))?;
+            image.note_copylok();
+            return Ok(image);
         }
         let len = data.len();
-        Self::bare(Path::new(name), Backing { source: Source::Memory(data), data_offset: 0, len, swap: false })
+        let backing = Backing {
+            source: Source::Memory(data),
+            data_offset: 0,
+            len,
+            swap: false,
+        };
+        let mut image = Self::bare(Path::new(name), backing)?;
+        image.note_copylok();
+        Ok(image)
     }
 
     /// The disc made from the host folder `root` (`folder::build`).
@@ -1991,8 +2004,7 @@ mod tests {
         )
         .unwrap();
         let image = CdImage::open(&dir.join("disc.cue")).unwrap();
-        let notes = image.notes().join("
-");
+        let notes = image.notes().join("\n");
         assert!(
             notes.contains("CopyLok")
                 && notes.contains("early variant")
@@ -2003,8 +2015,16 @@ mod tests {
         let mut data = [0u8; DATA_SECTOR];
         let mut raw = [0u8; RAW_SECTOR];
         for lba in 20..30 {
-            assert!(is_unreadable(&image.read_data(lba, &mut data).unwrap_err()), "{}", lba);
-            assert!(is_unreadable(&image.read_raw(lba, &mut raw).unwrap_err()), "{}", lba);
+            assert!(
+                is_unreadable(&image.read_data(lba, &mut data).unwrap_err()),
+                "{}",
+                lba
+            );
+            assert!(
+                is_unreadable(&image.read_raw(lba, &mut raw).unwrap_err()),
+                "{}",
+                lba
+            );
         }
         // The sectors around the band read as they are.
         for lba in [17, 19, 30, 39] {
@@ -2025,15 +2045,18 @@ mod tests {
             .chunks(RAW_SECTOR)
             .flat_map(|raw| raw[16..16 + DATA_SECTOR].to_vec())
             .collect();
-        fs::write(dir.join("disc.iso"), iso).unwrap();
+        fs::write(dir.join("disc.iso"), &iso).unwrap();
+        // The same image held in memory, as one from an archive is.
+        let in_memory = CdImage::from_memory("disc.iso", iso.into()).unwrap();
         let image = CdImage::open(&dir.join("disc.iso")).unwrap();
-        let notes = image.notes().join("
-");
-        assert!(
-            notes.contains("CopyLok") && notes.contains("check fails"),
-            "{}",
-            notes
-        );
+        for image in [&image, &in_memory] {
+            let notes = image.notes().join("\n");
+            assert!(
+                notes.contains("CopyLok") && notes.contains("check fails"),
+                "{}",
+                notes
+            );
+        }
         let mut data = [0u8; DATA_SECTOR];
         image.read_data(16, &mut data).unwrap();
         assert_eq!(data, pvd);
@@ -2059,7 +2082,11 @@ mod tests {
         )
         .unwrap();
         let image = CdImage::open(&dir.join("disc.cue")).unwrap();
-        assert!(image.notes().iter().all(|n| !n.contains("CopyLok")), "{:?}", image.notes());
+        assert!(
+            image.notes().iter().all(|n| !n.contains("CopyLok")),
+            "{:?}",
+            image.notes()
+        );
     }
 
     /// Raw sector `lba` of a BlindWrite data file: a Mode 1 sector whose
