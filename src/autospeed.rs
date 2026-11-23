@@ -1975,6 +1975,22 @@ impl AutoSpeed {
         Some((to, late))
     }
 
+    /// Whether a step for evenness to `current`, from a hold whose frames
+    /// were predicted late for a `was` share, holds on fewer intervals
+    /// than `PACED_FLIPS`, half of them or more: by the test of a step
+    /// judged on all of them (`Step::Evened`). Its speed is then the least
+    /// for the program (`even_at`).
+    fn evened_held(&mut self, current: u32, was: f64) -> bool {
+        let p = self.paced;
+        let held = p.speed == current
+            && p.paced >= PACED_FLIPS / 2
+            && p.late / p.paced as f64 <= (was * UNEVEN).sqrt();
+        if held {
+            self.even_at = Some(current.max(self.even_at.unwrap_or(0)));
+        }
+        held
+    }
+
     /// The search starts again from the next measurement, forgetting the
     /// frame rate it held, and the pacing measured at the speed. While no
     /// step for evenness has gained (`even_at`), steps for evenness are
@@ -2594,14 +2610,14 @@ impl AutoSpeed {
         // where its frames ran late for 20 seconds until the pool asked
         // for the step again. With fewer intervals, going on from the
         // step's speed, the program would climb by steps nothing judged.
+        // Only where the search starts over: otherwise the step goes on to
+        // `PACED_FLIPS`, and a share under the line over the first half
+        // would make the step's speed the least before the whole of it is
+        // judged, so that a step that misses there couldn't go back.
+        let restarts = m.polling >= WAITING || m.fps.is_none();
         let judged = match self.step {
-            Step::Evened { from, late: was, .. } if current > from => {
-                let p = self.paced;
-                let held = p.speed == current
-                    && p.paced >= PACED_FLIPS / 2
-                    && p.late / p.paced as f64 <= (was * UNEVEN).sqrt();
-                if held {
-                    self.even_at = Some(current.max(self.even_at.unwrap_or(0)));
+            Step::Evened { from, late: was, .. } if restarts && current > from => {
+                if self.evened_held(current, was) {
                     c
                 } else {
                     from as f64
@@ -8074,5 +8090,36 @@ mod tests {
         a.flip_interval(1e9, frame);
         assert!((a.late_flips - 0.5).abs() < 1e-6, "{}", a.late_flips);
         assert_eq!(a.paced_flips, 40);
+    }
+
+    #[test]
+    fn a_step_for_evenness_judged_late_over_its_intervals_goes_back() {
+        // Stepped from 3000 to 7000: 160 intervals with none late, then
+        // 140 with 7 late. Over its 300 intervals the share (2.3%) is no
+        // closer to the line than before the step, and the step goes
+        // back. The first 150 intervals alone don't make it the least
+        // speed: only a search that starts over judges a step on them.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Evened {
+            from: 3000,
+            fps: 23.95,
+            late: 0.0175,
+            polls: false,
+        };
+        let play = Measurement {
+            paced: 20,
+            ..LEVEL1
+        };
+        let late = Measurement { late: 1.0, ..play };
+        for _ in 0..8 {
+            assert_eq!(auto.decide(7000, &play, false, HOST), 7000);
+        }
+        for _ in 0..6 {
+            assert_eq!(auto.decide(7000, &late, false, HOST), 7000);
+        }
+        assert_eq!(auto.even_at, None);
+        assert_eq!(auto.decide(7000, &late, false, HOST), 3000);
+        assert_eq!(auto.even_at, None);
+        assert!(auto.even_done[0]);
     }
 }
