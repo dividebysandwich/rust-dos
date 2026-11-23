@@ -2300,6 +2300,7 @@ mod tests {
             missed: 0,
             late: 0.0,
             paced: 0,
+            ahead: Default::default(),
         };
         let host_max = pacer.host.max.unwrap() as u32;
         let boost = pacer.auto.decide(433_332, &loading, true, host_max);
