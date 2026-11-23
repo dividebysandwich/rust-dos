@@ -201,19 +201,22 @@ limit, so without a connection it goes on as it would with one:
   (flipped after the retrace it was due at, as when a game's drawing runs
   long) goes up to where fewer would be, if the host has room for it: the
   intervals between the program's flips stray from their average less, the
-  more speed it has, and the last 1200 it showed while it didn't poll the
-  retrace, at whatever speed, tell how many would run late at each. Where no
-  speed up to 3.5 times as much would do, it stays, and so it does past 3.5
-  times the speed of the program's first such step, or for a program that
-  draws as fast as it can, whose intervals shrink with more speed and drift
-  with what it draws. A frame flipped within a tenth of a whole number of
-  retraces, or after the program read the status register, counts as shown
-  for that number. It keeps that speed if far fewer frames come late there,
-  also when the program polls for the retrace before the step is judged, and
-  it is then the least for the program. A speed the host falls behind at is
-  left for a lower one, and the limit that sets rises again while the host
-  keeps up. A real-mode program with no frames to go by (most games of the
-  1980s, which update the screen piecemeal) runs at 3000, about a 286, as in
+  more speed it has, and the last 1200 it showed, at whatever speed, tell
+  how many would run late at each. Frames shown while the program polls the
+  retrace and frames shown while it doesn't are counted apart, and a step
+  taken for one kind is judged on that kind alone: a game that doesn't poll
+  while it plays isn't judged on its death screens, which do. Where no speed
+  up to 3.5 times as much would do, it stays, and so it does past 3.5 times
+  the speed of the program's first such step, or for a program that draws as
+  fast as it can, whose intervals shrink with more speed and drift with what
+  it draws. A frame flipped within a tenth of a whole number of retraces, or
+  after the program read the status register, counts as shown for that
+  number. It keeps that speed if far fewer frames come late there, also when
+  the program polls for the retrace before the step is judged, and it is
+  then the least for the program. A speed the host falls behind at is left
+  for a lower one, and the limit that sets rises again while the host keeps
+  up. A real-mode program with no frames to go by (most games of the 1980s,
+  which update the screen piecemeal) runs at 3000, about a 286, as in
   DOSBox's `cycles=auto`, and at max while it reads or writes its drives
   (loading), unless it would sit halted for 30% of the time or more at the
   real-mode speed, as a game playing speech from its CD does. A

@@ -1170,7 +1170,8 @@ pub struct Measurement {
 /// The flips' pacing at one speed, over one measurement or summed over
 /// several: the frames shown late, the intervals judged, the late frames
 /// predicted at each speed of `AHEAD`, and the sums of
-/// `Activity::follows` (`Measurement::late`).
+/// `Activity::follows` (`Measurement::late`), and whether the program
+/// polled the retrace (`kind`).
 #[derive(Clone, Copy, Debug, Default)]
 struct Paced {
     speed: u32,
@@ -1179,6 +1180,18 @@ struct Paced {
     ahead: [f64; AHEAD.len()],
     follows: f64,
     spread: f64,
+    polls: bool,
+}
+
+/// The kind of play a measurement with flips is: 1 where the program
+/// polls the retrace for some of the time (under `WAITING`), as most DOS
+/// games do to flip on it, and 0 where it doesn't poll at all, as
+/// Prehistorik 2's level 1, paced by its timer. Steps for evenness are
+/// predicted and judged on one kind (`Step::Evened`): a game that plays
+/// without polling polls on its death and restart screens, which miss a
+/// retrace now and then at any speed (#1757).
+fn kind(m: &Measurement) -> usize {
+    usize::from(m.polling > 0.0)
 }
 
 /// Where the search for the speed is.
@@ -1240,8 +1253,15 @@ enum Step {
     /// A step up from a hold at `from`, which drew `fps`, whose frames were
     /// predicted late (`UNEVEN`) for a `late` share of the intervals pooled
     /// there, to where that share is predicted to come under the line
-    /// (`AHEAD`). It holds if the share comes far enough toward that.
-    Evened { from: u32, fps: f64, late: f64 },
+    /// (`AHEAD`). It holds if the share comes far enough toward that, over
+    /// the measurements of the kind it was predicted from (`polls`,
+    /// `kind`); those of the other kind wait.
+    Evened {
+        from: u32,
+        fps: f64,
+        late: f64,
+        polls: bool,
+    },
 }
 
 /// What the pacer dropped behind the wall clock, sorted into lag and
@@ -1596,9 +1616,9 @@ pub struct AutoSpeed {
     frames: Frames,
     /// The flips' pacing since the speed was what it is (`UNEVEN`).
     paced: Paced,
-    /// The pacing of the measurements of the last `POOLED` intervals, at
-    /// whatever speed each ran: the late frames predicted at more speed.
-    /// Kept until another program, or a reset.
+    /// The pacing of the measurements of the last `POOLED` intervals of
+    /// each `kind`, at whatever speed each ran: the late frames predicted
+    /// at more speed. Kept until another program, or a reset.
     pool: VecDeque<Paced>,
     /// Steps for evenness (`Step::Evened`) are over: one missed. Late
     /// frames ask for no more speed until the scene gets heavier, or the
@@ -1607,8 +1627,8 @@ pub struct AutoSpeed {
     /// measured, and the hold steps again only while it predicts the
     /// speed over the line. A program whose frames are late as often
     /// whatever the speed passes a step on noise now and then, and the
-    /// next one it takes misses, or the one after.
-    even_done: bool,
+    /// next one it takes misses, or the one after. One for each `kind`.
+    even_done: [bool; 2],
     /// The speed a step for evenness that gained went to (`Step::Evened`):
     /// the least speed until a DOS program starts or ends (`set_programs`)
     /// or `reset` (a program enters or leaves protected mode, a state
@@ -1631,8 +1651,9 @@ pub struct AutoSpeed {
     /// ends or `reset`. One pool doesn't tell: where A-10 Tank Killer
     /// draws a still scene, its intervals stray from the cadence as a
     /// timer's would. The least speed steps gave stays: the menus before
-    /// Prehistorik 2's level 1, or its game-over screen, read so too.
-    free_running: bool,
+    /// Prehistorik 2's level 1, or its game-over screen, read so too. One
+    /// for each `kind`, from its own pool.
+    free_running: [bool; 2],
     /// DOS programs started and ended so far (`set_programs`).
     programs: u64,
     /// While a program gets all the host has for its reads and writes, the
@@ -1718,10 +1739,10 @@ impl AutoSpeed {
             frames: Frames::default(),
             paced: Paced::default(),
             pool: VecDeque::new(),
-            even_done: false,
+            even_done: [false; 2],
             even_at: None,
             even_from: None,
-            free_running: false,
+            free_running: [false; 2],
             programs: 0,
             working: None,
             work_cuts: 0,
@@ -1795,8 +1816,8 @@ impl AutoSpeed {
     pub fn set_programs(&mut self, programs: u64) {
         if programs != self.programs {
             self.programs = programs;
-            (self.even_at, self.even_from, self.even_done) = (None, None, false);
-            self.free_running = false;
+            (self.even_at, self.even_from) = (None, None);
+            (self.even_done, self.free_running) = ([false; 2], [false; 2]);
             self.pool.clear();
         }
     }
@@ -1830,8 +1851,8 @@ impl AutoSpeed {
     /// (a save state loaded).
     pub fn reset(&mut self) {
         self.start_over();
-        (self.even_at, self.even_from, self.even_done) = (None, None, false);
-        self.free_running = false;
+        (self.even_at, self.even_from) = (None, None);
+        (self.even_done, self.free_running) = ([false; 2], [false; 2]);
         self.pool.clear();
         self.lagged = None;
         self.pace = 1.0;
@@ -1869,20 +1890,27 @@ impl AutoSpeed {
     /// Pools a measurement's pacing, and lets go of those older than the
     /// last `POOLED` intervals.
     fn pool_paced(&mut self, paced: Paced) {
+        let polls = paced.polls;
         self.pool.push_back(paced);
-        let mut pooled: u64 = self.pool.iter().map(|p| p.paced).sum();
-        while let Some(oldest) = self.pool.front()
-            && pooled - oldest.paced >= POOLED
+        let mut pooled: u64 = self
+            .pool
+            .iter()
+            .filter(|p| p.polls == polls)
+            .map(|p| p.paced)
+            .sum();
+        while let Some(i) = self.pool.iter().position(|p| p.polls == polls)
+            && pooled - self.pool[i].paced >= POOLED
         {
-            pooled -= oldest.paced;
-            self.pool.pop_front();
+            pooled -= self.pool[i].paced;
+            self.pool.remove(i);
         }
         if pooled >= POOLED {
-            let (runs_free, follows) = self.pool_follows();
+            let kind = usize::from(polls);
+            let (runs_free, follows) = self.pool_follows(kind);
             if runs_free {
-                self.free_running = true;
+                self.free_running[kind] = true;
             } else if follows < PACED_AGAIN {
-                self.free_running = false;
+                self.free_running[kind] = false;
             }
         }
     }
@@ -1890,9 +1918,9 @@ impl AutoSpeed {
     /// The pooled intervals' lag-1 autocorrelation about the cadence
     /// (`Activity::follows`), and whether it is that of a program that
     /// draws as fast as it can (`FREE_RUNNING`).
-    fn pool_follows(&self) -> (bool, f64) {
+    fn pool_follows(&self, kind: usize) -> (bool, f64) {
         let (mut follows, mut spread, mut paced) = (0.0, 0.0, 0);
-        for p in &self.pool {
+        for p in self.pool.iter().filter(|p| usize::from(p.polls) == kind) {
             (follows, spread, paced) = (follows + p.follows, spread + p.spread, paced + p.paced);
         }
         let r = if spread > 0.0 { follows / spread } else { 0.0 };
@@ -1903,9 +1931,9 @@ impl AutoSpeed {
     /// (`pool`) predict at `speed`: each of those it is 1 to `AHEAD`'s last
     /// times the speed of. None if those hold fewer than half of `POOLED`
     /// intervals.
-    fn pooled_late(&self, speed: f64) -> Option<f64> {
+    fn pooled_late(&self, speed: f64, kind: usize) -> Option<f64> {
         let (mut late, mut paced) = (0.0, 0);
-        for p in &self.pool {
+        for p in self.pool.iter().filter(|p| usize::from(p.polls) == kind) {
             let k = speed / p.speed as f64;
             if !(1.0 - 1e-9..=AHEAD[AHEAD.len() - 1] * (1.0 + 1e-9)).contains(&k) {
                 continue;
@@ -1930,16 +1958,21 @@ impl AutoSpeed {
     /// line and a speed of `AHEAD` is predicted under it, no more than
     /// `AHEAD`'s last times the speed of the program's first step came from
     /// (`even_from`).
-    fn evened_to(&self, speed: f64) -> Option<(f64, f64)> {
-        if self.free_running || self.pool_follows().0 {
+    fn evened_to(&self, speed: f64, kind: usize) -> Option<(f64, f64)> {
+        if self.free_running[kind] || self.pool_follows(kind).0 {
             return None;
         }
-        let late = self.pooled_late(speed).filter(|&late| late > UNEVEN)?;
+        let late = self
+            .pooled_late(speed, kind)
+            .filter(|&late| late > UNEVEN)?;
         let most = AHEAD[AHEAD.len() - 1];
         let to = AHEAD
             .iter()
             .map(|k| speed * k)
-            .find(|&to| self.pooled_late(to).is_some_and(|late| late <= UNEVEN))
+            .find(|&to| {
+                self.pooled_late(to, kind)
+                    .is_some_and(|late| late <= UNEVEN)
+            })
             .filter(|&to| self.even_from.is_none_or(|from| to <= from as f64 * most))?;
         Some((to, late))
     }
@@ -1955,7 +1988,9 @@ impl AutoSpeed {
         self.probe_misses = 0;
         self.unsure = false;
         self.paced = Paced::default();
-        self.even_done &= self.even_at.is_some();
+        if self.even_at.is_none() {
+            self.even_done = [false; 2];
+        }
     }
 
     /// `speed` lost frames: raises the floor to `over` times it, no higher
@@ -2623,24 +2658,27 @@ impl AutoSpeed {
             .map(|(floor, left)| (floor, left - 1));
         // The flips' pacing at this speed, over the measurements since it
         // was set, and whether too many frames came late (`UNEVEN`). Not
-        // from measurements behind: the host's hitches move the flips. Nor
-        // from those where the program polls the retrace: the missed
-        // retraces count those frames (`missed`), and the scene is another
-        // than play. Prehistorik 2's death and restart screens poll for 4%
-        // to 9% of the time and miss a retrace in one measurement of two
-        // at any speed; one judged a step that play would have kept, and
-        // sent it back (#1757). A step's intervals from play before such a
-        // scene still count, and play after it adds to them.
+        // from measurements behind: the host's hitches move the flips. A
+        // step for evenness counts only the measurements of the `kind` it
+        // was predicted from: Prehistorik 2's death and restart screens
+        // poll for 4% to 9% of the time and miss a retrace in one
+        // measurement of two at any speed, and one judged a step that
+        // play, which doesn't poll, would have kept, and sent it back
+        // (#1757). The step waits through them, and play after them adds
+        // to what play measured before.
         if self.paced.speed != current {
             self.paced = Paced {
                 speed: current,
                 ..Paced::default()
             };
         }
-        if !lagged && m.pace >= KEPT_UP && m.paced > 0 && m.polling == 0.0 {
-            let p = &mut self.paced;
-            p.late += m.late;
-            p.paced += m.paced;
+        let kind = kind(m);
+        if !lagged && m.pace >= KEPT_UP && m.paced > 0 {
+            if !matches!(self.step, Step::Evened { polls, .. } if usize::from(polls) != kind) {
+                let p = &mut self.paced;
+                p.late += m.late;
+                p.paced += m.paced;
+            }
             self.pool_paced(Paced {
                 speed: current,
                 late: m.late,
@@ -2648,6 +2686,7 @@ impl AutoSpeed {
                 ahead: m.ahead,
                 follows: m.follows,
                 spread: m.spread,
+                polls: kind == 1,
             });
         }
         let paced = self.paced.paced;
@@ -2655,11 +2694,16 @@ impl AutoSpeed {
         // A step for evenness that ends here missed: more speed drew frames
         // nobody sees (Prehistorik 2's difficulty screen flips twice a
         // frame from 15,000 up), or the host fell behind at it.
-        let evened = matches!(self.step, Step::Evened { from, .. } if current > from);
+        let evened = match self.step {
+            Step::Evened { from, polls, .. } if current > from => Some(usize::from(polls)),
+            _ => None,
+        };
         // Frames nobody sees: as many less as the frame rate is too high
         // (it follows the speed there).
         if fps > m.refresh / AT_REFRESH {
-            self.even_done |= evened;
+            if let Some(kind) = evened {
+                self.even_done[kind] = true;
+            }
             self.step = Step::Hold {
                 fps: m.refresh,
                 left: HOLD_WINDOWS,
@@ -2692,7 +2736,9 @@ impl AutoSpeed {
         // Whatever the search was doing, it holds there, and measures the
         // frame rate it draws.
         if lagged && current > top {
-            self.even_done |= evened;
+            if let Some(kind) = evened {
+                self.even_done[kind] = true;
+            }
             return hold(self, top as f64, HOLD_WINDOWS, false);
         }
         // More, by as much as would take the frame rate to the display's.
@@ -2984,7 +3030,7 @@ impl AutoSpeed {
                     self.fell = None;
                     self.least_held = None;
                     self.probe_misses = 0;
-                    self.even_done = false;
+                    self.even_done = [false; 2];
                     self.unsure = false;
                     if !lagged && self.lagged.is_some() && current >= top && top < host_top {
                         let most = (top as f64 * HEAVIER) as u32;
@@ -3056,11 +3102,11 @@ impl AutoSpeed {
                 // it, as for probes. Where none is, more speed isn't what
                 // they need.
                 let room = (host_max as f64 / STALLED).min(top as f64);
-                if !self.even_done
+                if !self.even_done[kind]
                     && !lagged
                     && m.pace >= KEPT_UP
                     && self.fell_at.is_none()
-                    && let Some((to, late)) = self.evened_to(c)
+                    && let Some((to, late)) = self.evened_to(c, kind)
                     && to <= room
                 {
                     self.even_from.get_or_insert(current);
@@ -3068,6 +3114,7 @@ impl AutoSpeed {
                         from: current,
                         fps: recent,
                         late,
+                        polls: kind == 1,
                     };
                     return clamp(to);
                 }
@@ -3176,11 +3223,12 @@ impl AutoSpeed {
                 from,
                 fps: before,
                 late: was,
+                polls,
             } if current > from => {
                 // Behind: the host can't run it now, and its hitches move
                 // the flips.
                 if lagged || m.pace < KEPT_UP {
-                    self.even_done = true;
+                    self.even_done[usize::from(polls)] = true;
                     return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
                 }
                 if paced < PACED_FLIPS {
@@ -3197,7 +3245,7 @@ impl AutoSpeed {
                 // speed's intervals in it, still predicts it over the line
                 // (one window here can miss a burst of late frames).
                 if late > (was * UNEVEN).sqrt() {
-                    self.even_done = true;
+                    self.even_done[usize::from(polls)] = true;
                     return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
                 }
                 self.even_at = Some(current.max(self.even_at.unwrap_or(0)));
@@ -7473,12 +7521,12 @@ mod tests {
                 ..Default::default()
             });
         }
-        let (to, _) = auto.evened_to(9000.0).unwrap();
+        let (to, _) = auto.evened_to(9000.0, 0).unwrap();
         assert!((to / 9000.0 - AHEAD[6]).abs() < 1e-9, "{to}");
         auto.even_from = Some(3000);
-        assert_eq!(auto.evened_to(9000.0), None);
+        assert_eq!(auto.evened_to(9000.0, 0), None);
         auto.even_from = Some(8000);
-        assert_eq!(auto.evened_to(9000.0).map(|(to, _)| to), Some(to));
+        assert_eq!(auto.evened_to(9000.0, 0).map(|(to, _)| to), Some(to));
     }
 
     #[test]
@@ -7530,7 +7578,7 @@ mod tests {
         }
         assert!(a.late_flips / a.paced_flips as f64 > UNEVEN);
         assert!(a.follows > FREE_RUNNING * a.spread, "{} {}", a.follows, a.spread);
-        assert!(auto.free_running && !blind.free_running);
+        assert!(auto.free_running[0] && !blind.free_running[0]);
         assert_eq!(steps, 0);
         assert!(blind_steps > 0);
     }
@@ -7554,13 +7602,13 @@ mod tests {
             }
         };
         pool(&mut auto, 1.0, 60);
-        assert!(auto.free_running);
+        assert!(auto.free_running[0]);
         assert_eq!(auto.even_at, Some(9000));
         // Halfway: the pool reads about +0.1, neither.
         pool(&mut auto, -0.6, 30);
-        assert!(auto.free_running);
+        assert!(auto.free_running[0]);
         pool(&mut auto, -0.6, 30);
-        assert!(!auto.free_running);
+        assert!(!auto.free_running[0]);
     }
 
     #[test]
@@ -7710,7 +7758,7 @@ mod tests {
         };
         let mut auto = pooled(&LEVEL1_BURSTS);
         // 380 intervals measured at 7073 or less: too few to tell.
-        assert_eq!(auto.evened_to(7073.0), None);
+        assert_eq!(auto.evened_to(7073.0, 0), None);
         // The burst at 7073 alone, over the 300 intervals there, was
         // predicted under the line only at twice the speed (14,226), and
         // under half of it at 16,360, where the first version went. With
@@ -7724,7 +7772,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        let (to, late) = auto.evened_to(7073.0).unwrap();
+        let (to, late) = auto.evened_to(7073.0, 0).unwrap();
         assert_eq!(to.round(), 9354.0);
         assert!((late - 0.00434).abs() < 0.0001, "{late}");
         // Wherever the bursts came in those intervals.
@@ -7735,7 +7783,7 @@ mod tests {
             .collect();
         for turn in [17, 29] {
             rows.rotate_left(turn);
-            let (again, was) = pooled(&rows).evened_to(7073.0).unwrap();
+            let (again, was) = pooled(&rows).evened_to(7073.0, 0).unwrap();
             assert_eq!(again, to);
             assert!((was - late).abs() < 1e-12);
         }
@@ -7794,6 +7842,7 @@ mod tests {
             from: 3553,
             fps: 24.29,
             late: 0.01,
+            polls: false,
         };
         auto.paced = super::Paced {
             speed: 10_869,
@@ -7814,6 +7863,7 @@ mod tests {
             from: 3553,
             fps: 24.29,
             late: 0.01,
+            polls: false,
         };
         auto.paced = super::Paced {
             speed: 10_869,
@@ -7826,18 +7876,19 @@ mod tests {
     }
 
     #[test]
-    fn frames_of_a_scene_that_polls_the_retrace_judge_no_step() {
+    fn a_step_predicted_from_play_waits_through_a_scene_that_polls() {
         // Prehistorik 2's level 1, stepped from 3000 to 7000: 200
         // intervals of play with none late, then its death screen, which
         // polls the retrace for 7% of the time and misses it twice in each
-        // measurement, then play again. The death screen's frames go
-        // neither into the pool nor into the step's judgement, which play
-        // completes: the step stays.
+        // measurement, then play again. The death screen's frames go into
+        // the pool of their own kind, not into play's or into the step's
+        // judgement, which play completes: the step stays.
         let mut auto = AutoSpeed::new(3000, None);
         auto.step = Step::Evened {
             from: 3000,
             fps: 23.95,
             late: 0.0175,
+            polls: false,
         };
         let play = Measurement {
             paced: 20,
@@ -7852,11 +7903,13 @@ mod tests {
         for _ in 0..10 {
             assert_eq!(auto.decide(7000, &play, false, HOST), 7000);
         }
-        let pooled = auto.pool.len();
+        let play_pool = |auto: &AutoSpeed| auto.pool.iter().filter(|p| !p.polls).count();
+        let pooled = play_pool(&auto);
         for _ in 0..20 {
             assert_eq!(auto.decide(7000, &dying, false, HOST), 7000);
         }
-        assert_eq!(auto.pool.len(), pooled);
+        assert_eq!(play_pool(&auto), pooled);
+        assert_eq!(auto.pool.len(), pooled + 20);
         assert_eq!((auto.paced.late, auto.paced.paced), (0.0, 200));
         for _ in 0..4 {
             assert_eq!(auto.decide(7000, &play, false, HOST), 7000);
@@ -7864,7 +7917,83 @@ mod tests {
         assert!(matches!(auto.step, Step::Evened { .. }));
         assert_eq!(auto.decide(7000, &play, false, HOST), 7000);
         assert_eq!(auto.even_at, Some(7000));
-        assert!(!auto.even_done);
+        assert!(!auto.even_done[0]);
+    }
+
+    #[test]
+    fn a_game_whose_play_polls_steps_from_its_own_pool() {
+        // Frames as late as level 1's at 3000, from a game that polls the
+        // retrace for a moment before each flip: its pool predicts a step
+        // for it, and play that doesn't poll, pooled after it, neither
+        // predicts one nor pushes its intervals out of the pool.
+        let mut game = Flipper::new(&LEVEL1_3000, Some(3000), 0x1757);
+        let mut auto = AutoSpeed::new(3000, None);
+        let mut pool = |auto: &mut AutoSpeed, polls: bool, late: bool| {
+            for _ in 0..100 {
+                let m = game.measure(3000, 12, LEVEL1);
+                auto.pool_paced(super::Paced {
+                    speed: 3000,
+                    late: if late { m.late } else { 0.0 },
+                    paced: m.paced,
+                    ahead: if late { m.ahead } else { [0.0; AHEAD.len()] },
+                    polls,
+                    ..Default::default()
+                });
+            }
+        };
+        pool(&mut auto, true, true);
+        let (to, _) = auto.evened_to(3000.0, 1).unwrap();
+        assert_eq!(auto.evened_to(3000.0, 0), None);
+        pool(&mut auto, false, false);
+        assert_eq!(auto.evened_to(3000.0, 1).map(|(to, _)| to), Some(to));
+        assert_eq!(auto.evened_to(3000.0, 0), None);
+    }
+
+    #[test]
+    fn a_step_predicted_from_play_that_polls_is_judged_on_it() {
+        // Stepped from 3000 to 7000 on play that polls the retrace: frames
+        // late in a scene that doesn't poll wait, and the step is judged
+        // on play that polls. One that misses there ends steps from play
+        // that polls only.
+        let step = Step::Evened {
+            from: 3000,
+            fps: 23.95,
+            late: 0.0175,
+            polls: true,
+        };
+        let polling = Measurement {
+            polling: 0.05,
+            paced: 20,
+            ..LEVEL1
+        };
+        let still = Measurement {
+            polling: 0.0,
+            late: 2.0,
+            ..polling
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = step;
+        for _ in 0..10 {
+            assert_eq!(auto.decide(7000, &polling, false, HOST), 7000);
+            assert_eq!(auto.decide(7000, &still, false, HOST), 7000);
+        }
+        assert_eq!((auto.paced.late, auto.paced.paced), (0.0, 200));
+        for _ in 0..5 {
+            assert_eq!(auto.decide(7000, &polling, false, HOST), 7000);
+        }
+        assert_eq!(auto.even_at, Some(7000));
+        // As late as before the step: it goes back.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = step;
+        let late = Measurement {
+            late: 0.4,
+            ..polling
+        };
+        for _ in 0..14 {
+            assert_eq!(auto.decide(7000, &late, false, HOST), 7000);
+        }
+        assert_eq!(auto.decide(7000, &late, false, HOST), 3000);
+        assert_eq!(auto.even_done, [false, true]);
     }
 
     #[test]
@@ -7877,13 +8006,14 @@ mod tests {
             from: 4000,
             fps: 23.95,
             late: 0.02,
+            polls: false,
         };
         let polling = Measurement {
             polling: WAITING,
             ..LEVEL1
         };
         assert_eq!(auto.decide(10_000, &polling, false, HOST), 3200);
-        assert!(auto.even_at.is_none() && !auto.even_done);
+        assert!(auto.even_at.is_none() && !auto.even_done[0]);
     }
 
     #[test]
