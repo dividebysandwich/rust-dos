@@ -819,7 +819,18 @@ static APIS: &[Api] = &[
         5,
         toolhelp::toolhelp32_read_process_memory,
     ),
+    stdcall("DebugBreak", 210, 0, debug_break),
 ];
+
+/// DebugBreak: Windows 98's is an INT 3, whose breakpoint exception goes
+/// to the program's handlers without a debugger, and ends the program if
+/// none handles it. A handler that goes on goes on after the call. KISS
+/// Psycho Circus imports it, and CopyLok's loader refuses to start a game
+/// whose imports aren't all there.
+fn debug_break(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    const EXCEPTION_BREAKPOINT: u32 = 0x8000_0003;
+    super::seh::raise_from_call(cpu, 0, EXCEPTION_BREAKPOINT, 0, &[])
+}
 
 /// The places in `APIS` of the system's own stubs.
 const CALL_RETURN: usize = 43;

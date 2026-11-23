@@ -19939,3 +19939,32 @@ fn vwin32_int31_dispatch_calls_mscdex_in_real_mode() {
     // The sector after the band went to 9000:0000.
     assert_eq!(cpu.bus.read_8(0x9_0000), 0x77);
 }
+
+/// KERNEL32 exports DebugBreak, as Windows 98's does: games import it,
+/// and CopyLok's loader refuses to start a game with an import it can't
+/// find.
+#[test]
+fn kernel32_exports_debug_break() {
+    let mut data = vec![0u8; 0x40];
+    data[..9].copy_from_slice(b"KERNEL32\0");
+    data[0x10..0x1B].copy_from_slice(b"DebugBreak\0");
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["GetModuleHandleA", "GetProcAddress", "ExitProcess"],
+    )];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.test(eax, eax)?;
+        a.setne(al)?;
+        a.movzx(eax, al)?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let (code, text) = run("debug_break_export", exe);
+    assert_eq!(code, 1, "{}", text);
+}
