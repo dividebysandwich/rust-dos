@@ -639,11 +639,13 @@ fn draw_gradient(halftone: bool) -> (Vec<u8>, Vec<u32>) {
     (drawn, palette::system_colors(&mut cpu))
 }
 
-/// StretchDIBits maps each pixel of a 24-bit DIB to the nearest colour of
-/// the DC's palette, as Windows 98's GDI does whatever the stretch mode:
-/// no dither, so the four rows of the gradient are the same.
+/// StretchDIBits maps each pixel of a 24-bit DIB through Windows 98's
+/// inverse colour table, whatever the stretch mode: no dither, so the
+/// four rows of the gradient are the same, and each pixel takes the
+/// palette's colour nearest to the middle of its cell of 5 bits a
+/// channel (`DeviceMap::deep_color`).
 #[test]
-fn stretch_di_bits_maps_true_colour_to_the_nearest_colour() {
+fn stretch_di_bits_maps_true_colour_through_the_cells() {
     let (drawn, system) = draw_gradient(false);
     let (top, rest) = drawn.split_at(256);
     for row in rest.chunks(256) {
@@ -653,11 +655,12 @@ fn stretch_di_bits_maps_true_colour_to_the_nearest_colour() {
     for (x, &i) in top.iter().enumerate() {
         let x = x as u32;
         let want = x | (x / 2) << 8 | (255 - x) << 16;
+        let middle = (want & 0xF8_F8F8) + 0x04_0404;
         let distance = |c: u32| {
             (0..3)
                 .map(|s| {
                     ((c >> (8 * s)) & 0xFF)
-                        .abs_diff((want >> (8 * s)) & 0xFF)
+                        .abs_diff((middle >> (8 * s)) & 0xFF)
                         .pow(2)
                 })
                 .sum::<u32>()

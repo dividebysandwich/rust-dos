@@ -304,14 +304,15 @@ limit, so without a connection it goes on as it would with one:
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
-  `core=auto` does; `dynamic` always runs the recompiler, and `normal`
-  the interpreter. The recompiler translates blocks of the program's code
-  into the host's own and runs CPU-bound code several times faster. Both
-  run programs exactly the same way, instruction for instruction, so
-  there is no need to switch back for a game that misbehaves. The
-  recompiler needs an x86-64 or ARM64 host; on others and in the browser
-  the interpreter runs everything. `--core` overrides it. See
-  [docs/dynrec.md](docs/dynrec.md).
+  `core=auto` does, and for one that runs in real mode with segment
+  limits above 64 KB ("big real mode", which Ultima VII runs in);
+  `dynamic` always runs the recompiler, and `normal` the interpreter.
+  The recompiler translates blocks of the program's code into the host's
+  own and runs CPU-bound code several times faster. Both run programs
+  exactly the same way, instruction for instruction, so there is no need
+  to switch back for a game that misbehaves. The recompiler needs an
+  x86-64 or ARM64 host; on others and in the browser the interpreter runs
+  everything. `--core` overrides it. See [docs/dynrec.md](docs/dynrec.md).
 * `fpu` is how the FPU adds and subtracts: `exact` (the default) close to
   what a real 387 does, or `fast` on the host's 64-bit doubles, as it
   multiplies and divides anyway. `exact` adds on 80 bits where the control

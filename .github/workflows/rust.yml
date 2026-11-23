@@ -253,6 +253,13 @@ jobs:
           key: test-${{ matrix.label }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # THIRD-PARTY-NOTICES carries the licence of every crate the release
+      # packages are built with, so a change of the dependencies brings the
+      # file up to date with it.
+      - name: Check THIRD-PARTY-NOTICES (Linux x86_64)
+        if: matrix.label == 'linux-x86_64'
+        run: python3 tools/third_party_notices.py --check
+
       # The tests run with cargo-nextest (.config/nextest.toml), each in a
       # process of its own, as each file in tests/ had a program of its own
       # before the files became modules of a few programs (#549).
@@ -333,8 +340,8 @@ jobs:
           du -sh target target/debug/deps || true
 
   # The release builds and packages, the ones `scope` picks: every target
-  # on pushes, tags and manual runs, one on most pull requests and none on
-  # drafts.
+  # on pushes, tags and manual runs and on the pull requests `scope` lists,
+  # none on other pull requests and on drafts.
   build:
     name: ${{ matrix.label }}
     needs: [test, scope]
@@ -568,7 +575,7 @@ jobs:
           strip sdl3/libSDL3.so.0
           cp "$SDL3_PREFIX/share/licenses/SDL3/LICENSE.txt" sdl3/SDL3-LICENSE.txt
           cp target/release/rust-dos target/release/rust-dos-relay openxr/* README.md CONFIGURATION.md LICENSE \
-            sdl3/SDL3-LICENSE.txt stage/rust-dos/
+            THIRD-PARTY-NOTICES sdl3/SDL3-LICENSE.txt stage/rust-dos/
           cp sdl3/libSDL3.so.0 stage/rust-dos/lib/
           # The bundled SDL3 is the one found, without the build's on the
           # loader's path.
@@ -623,8 +630,8 @@ jobs:
           cp packaging/linux/rust-dos.png $APPDIR/
           cp packaging/linux/rust-dos.png $APPDIR/usr/share/icons/hicolor/256x256/apps/
           ln -s rust-dos.png $APPDIR/.DirIcon
-          cp README.md CONFIGURATION.md LICENSE openxr/openxr-LICENSE.txt sdl3/SDL3-LICENSE.txt \
-            $APPDIR/usr/share/doc/rust-dos/
+          cp README.md CONFIGURATION.md LICENSE THIRD-PARTY-NOTICES openxr/openxr-LICENSE.txt \
+            sdl3/SDL3-LICENSE.txt $APPDIR/usr/share/doc/rust-dos/
 
           curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-$ARCH.AppImage"
           curl -fsSL -o runtime "https://github.com/AppImage/type2-runtime/releases/download/$APPIMAGE_RUNTIME_VERSION/runtime-$ARCH"
@@ -643,6 +650,8 @@ jobs:
           mkdir -p out stage/rust-dos
           cp target/release/rust-dos.exe target/release/rust-dos-relay.exe SDL3/lib/x64/SDL3.dll mt32emu/* openxr/* README.md CONFIGURATION.md stage/rust-dos/
           cp LICENSE stage/rust-dos/LICENSE.txt
+          cp THIRD-PARTY-NOTICES stage/rust-dos/THIRD-PARTY-NOTICES.txt
+          cp SDL3/LICENSE.txt stage/rust-dos/SDL3-LICENSE.txt
           7z a "out/$PKG.zip" ./stage/rust-dos > /dev/null
           dotnet tool install --global wix --version 5.0.2
           wix build packaging/windows/main.wxs -arch x64 \
@@ -657,6 +666,8 @@ jobs:
           BIN=target/x86_64-win7-windows-msvc/release
           cp $BIN/rust-dos.exe $BIN/rust-dos-relay.exe SDL3/lib/x64/SDL3.dll mt32emu/* README.md CONFIGURATION.md stage/rust-dos/
           cp LICENSE stage/rust-dos/LICENSE.txt
+          cp THIRD-PARTY-NOTICES stage/rust-dos/THIRD-PARTY-NOTICES.txt
+          cp SDL3/LICENSE.txt stage/rust-dos/SDL3-LICENSE.txt
           7z a "out/$PKG.zip" ./stage/rust-dos > /dev/null
 
       - name: Package (macOS)
@@ -670,14 +681,15 @@ jobs:
             echo "::error::No .app in $APP_DIR"
             exit 1
           fi
-          # The relay, the docs and LICENSE beside the app, so the zip has
-          # clean paths.
+          # The relay, the docs, LICENSE and THIRD-PARTY-NOTICES beside the
+          # app, so the zip has clean paths.
           if otool -L target/release/rust-dos-relay | grep -i sdl; then
             echo "::warning::rust-dos-relay links SDL3"
           fi
-          cp target/release/rust-dos-relay README.md CONFIGURATION.md LICENSE "$APP_DIR/"
+          cp target/release/rust-dos-relay README.md CONFIGURATION.md LICENSE THIRD-PARTY-NOTICES "$APP_DIR/"
           mkdir -p out
-          (cd "$APP_DIR" && zip -r -q "$GITHUB_WORKSPACE/out/$PKG.zip" "$APP" rust-dos-relay README.md CONFIGURATION.md LICENSE)
+          (cd "$APP_DIR" && zip -r -q "$GITHUB_WORKSPACE/out/$PKG.zip" "$APP" rust-dos-relay README.md CONFIGURATION.md LICENSE \
+            THIRD-PARTY-NOTICES)
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -735,6 +747,9 @@ jobs:
           fi
           mkdir -p out
           (cd web/www && zip -r -q "$GITHUB_WORKSPACE/out/rust-dos-$RELEASE_VERSION-web.zip" .)
+          # The licences at the top of the site, where a web server serves
+          # them with it.
+          zip -q -j "out/rust-dos-$RELEASE_VERSION-web.zip" LICENSE THIRD-PARTY-NOTICES
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -753,13 +768,17 @@ jobs:
   #   no `hostmidi`), so code that needs those breaks it.
   # - `builds`: the release builds `build` makes, as its matrix. All of
   #   them on pushes, tags and manual runs, and on pull requests that change
-  #   the manifests, build.rs, the packaging or the workflows, or that have
-  #   the `full-build` label (read when the job runs, so after adding it,
-  #   re-run the workflow). Other pull requests get linux-x86_64-compat
-  #   alone: the test jobs have compiled and linked the program on every
-  #   system already, and this build is the one that finds code needing a
-  #   newer glibc than Ubuntu 22.04's 2.35. Drafts get none, and a
-  #   `ready_for_review` run makes them.
+  #   the manifests, build.rs, the packaging or anything in `.github`, or
+  #   that have the `full-build` label (read when the job runs, so after
+  #   adding it, re-run the workflow). Other pull requests get none: the
+  #   test jobs have compiled and linked the program on Linux, macOS and
+  #   Windows already. What they don't find is code that needs a newer
+  #   glibc than Ubuntu 22.04's 2.35, which the linux-x86_64-compat build
+  #   would. That comes from the manifests or the build far more often than
+  #   from the code: in the 1000 runs from 14 to 22 November 2026, the one
+  #   pull request whose compat build failed lost its network connection.
+  #   Main's push run, which builds every target, finds it instead. Drafts
+  #   get none, and a `ready_for_review` run makes those they would get.
   scope:
     name: scope
     runs-on: ubuntu-latest
@@ -801,7 +820,7 @@ jobs:
           builds=all
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
             libretro=false
-            builds=compat
+            builds=none
             # The API lists at most 3000 files: a longer list counts as a
             # match.
             files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename')
@@ -837,7 +856,6 @@ jobs:
           fi
           case "$builds" in
             all) matrix=$(jq -c . <<< "$BUILDS") ;;
-            compat) matrix=$(jq -c 'map(select(.label == "linux-x86_64-compat"))' <<< "$BUILDS") ;;
             none) matrix='[]' ;;
           esac
           echo "libretro=$libretro"
@@ -983,7 +1001,7 @@ jobs:
           mkdir -p "$PKG" out
           # The name frontends look for: without the lib prefix.
           cp "libretro/target/release/${{ matrix.lib }}" "$PKG/${{ matrix.core }}"
-          cp libretro/rust_dos_libretro.info libretro/README.md LICENSE "$PKG/"
+          cp libretro/rust_dos_libretro.info libretro/README.md LICENSE THIRD-PARTY-NOTICES "$PKG/"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             7z a -tzip "out/$PKG.zip" "$PKG" > /dev/null
           else
@@ -1060,7 +1078,7 @@ jobs:
           # The name RetroArch's cores have on Android.
           cp "libretro/target/${{ matrix.target }}/release/librust_dos_libretro.so" \
             "$PKG/rust_dos_libretro_android.so"
-          cp libretro/rust_dos_libretro.info libretro/README.md LICENSE "$PKG/"
+          cp libretro/rust_dos_libretro.info libretro/README.md LICENSE THIRD-PARTY-NOTICES "$PKG/"
           zip -r -q "out/$PKG.zip" "$PKG"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

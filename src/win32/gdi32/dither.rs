@@ -6,8 +6,9 @@
 //! cube's colours becomes a pattern of both. The picture is then drawn
 //! as an 8-bit DIB of the halftone palette's colours. GDI's own
 //! StretchDIBits and SetDIBitsToDevice don't dither: on Windows 95 and
-//! 98 they map each pixel to the nearest colour of the DC's palette,
-//! whatever the stretch mode (those have no HALFTONE mode).
+//! 98 they map each pixel to one colour of the DC's palette through an
+//! inverse colour table (`DeviceMap::deep_color`), whatever the stretch
+//! mode (those have no HALFTONE mode).
 //!
 //! This is what Windows 98 SE's DrawDib draws, read back pixel by pixel
 //! from pictures drawn on an 8-bit desktop (a 24-bit and a 16-bit DIB,
@@ -37,7 +38,7 @@
 //! own (`vfw::cinepak`), which MCIAVI realizes, and DrawDib stretches
 //! that 8-bit picture (`stretch_8`).
 
-use super::palette::halftone_colors;
+use super::palette::{HALFTONE, halftone_colors};
 use super::surface::{Surface, default_masks};
 
 /// The 4x4 ordered dither matrix: the rank of the pixel `x` from the
@@ -48,9 +49,42 @@ const BAYER: [[usize; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [1
 /// which a pixel of each rank takes the next level; 6 never does.
 const THRESHOLDS_16: [usize; 16] = [2, 6, 4, 4, 6, 3, 5, 3, 5, 3, 5, 2, 4, 4, 2, 6];
 
-/// The halftone palette's index of the cube's colour (0, 0, 0); the
-/// colour of levels (r, g, b) is at `CUBE + r + 6 g + 36 b`.
-pub const CUBE: u32 = 10;
+/// The halftone palette's index of the cube's colour of levels (r, g,
+/// b), at `r + 6 g + 36 b`. The palette lacks four of the cube's colours,
+/// those of one channel 0, one 51 and one 255: Windows 98's DrawDib
+/// draws (0, 51, 255) and (51, 0, 255) as (0, 0, 255), and (0, 255, 51)
+/// and (51, 255, 0) as (0, 255, 0), the last of the palette's colours
+/// nearest to them, as here.
+static CUBE: [u8; 216] = cube();
+
+const fn cube() -> [u8; 216] {
+    let mut table = [0u8; 216];
+    let mut at = 0;
+    while at < 216 {
+        let want = [at % 6 * 51, at / 6 % 6 * 51, at / 36 * 51];
+        let mut best = (u32::MAX, 0);
+        let mut i = 0;
+        while i < 256 {
+            let c = HALFTONE[i];
+            let mut d = 0;
+            let mut s = 0;
+            while s < 3 {
+                let v = (c >> (8 * s)) & 0xFF;
+                let w = want[s] as u32;
+                let e = v.abs_diff(w);
+                d += e * e;
+                s += 1;
+            }
+            if d <= best.0 {
+                best = (d, i);
+            }
+            i += 1;
+        }
+        table[at] = best.1 as u8;
+        at += 1;
+    }
+    table
+}
 
 /// For each rank and 8-bit channel value, the cube's level it takes.
 static LEVELS: [[u8; 256]; 16] = levels();
@@ -97,7 +131,7 @@ fn rank(x: i32, y: i32) -> usize {
 /// The halftone palette's index of the cube's colour of levels (r, g, b).
 #[inline]
 fn cube_index(r: u8, g: u8, b: u8) -> u32 {
-    CUBE + r as u32 + 6 * g as u32 + 36 * b as u32
+    CUBE[r as usize + 6 * g as usize + 36 * b as usize] as u32
 }
 
 /// The halftone palette's index of the colour (a COLORREF) of the pixel
@@ -298,6 +332,22 @@ mod tests {
         }
     }
 
+    /// Every colour of the cube the palette has is drawn as itself, and
+    /// the four it lacks as Windows 98's DrawDib draws them.
+    #[test]
+    fn the_cube_maps_to_the_palette() {
+        for at in 0..216u32 {
+            let (r, g, b) = (at % 6 * 51, at / 6 % 6 * 51, at / 36 * 51);
+            let want = match (r, g, b) {
+                (0, 51, 255) | (51, 0, 255) => 0xFF0000,
+                (0, 255, 51) | (51, 255, 0) => 0x00FF00,
+                _ => r | g << 8 | b << 16,
+            };
+            let i = cube_index((r / 51) as u8, (g / 51) as u8, (b / 51) as u8);
+            assert_eq!(HALFTONE[i as usize], want, "({r}, {g}, {b})");
+        }
+    }
+
     /// A value between levels averages to itself over the matrix.
     #[test]
     fn a_value_between_levels_is_a_pattern_of_both() {
@@ -305,8 +355,7 @@ mod tests {
             let mut sum = 0;
             for y in 0..4 {
                 for x in 0..4 {
-                    let i = halftone_index(x, y, v) as u32 - CUBE;
-                    sum += (i % 6) * 51;
+                    sum += HALFTONE[halftone_index(x, y, v) as usize] & 0xFF;
                 }
             }
             let average = sum / 16;

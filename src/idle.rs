@@ -44,16 +44,16 @@
 //!
 //! **Where loops come from.** A head is armed at the service trap where the
 //! BIOS keyboard's status call found no key, the built-in Windows's clock
-//! was read or its Sleep(0) found no other thread to run many times in a
-//! row, after many reads of the VGA's status or latches of the PIT's count
-//! with no other port between them, and where two timer events in a row
-//! found the CPU at the same instruction with the same flags and registers
-//! but for one (a loop, whose register may be a time read that the event
-//! between moved on). A head whose passes were skipped is armed again at
-//! the next event, as its loop usually goes on after it, and whenever an
-//! event finds the CPU there later, as a game comes back to its frame
-//! limiter every frame. Failed proofs at a head make the next tries at it
-//! rarer.
+//! was read, its PeekMessage found no message or its Sleep(0) found no
+//! other thread to run many times (`poll_at`), after many reads of the
+//! VGA's status or latches of the PIT's count with no other port between
+//! them, and where two timer events in a row found the CPU at the same
+//! instruction with the same flags and registers but for one (a loop, whose
+//! register may be a time read that the event between moved on). A head
+//! whose passes were skipped is armed again at the next event, as its loop
+//! usually goes on after it, and whenever an event finds the CPU there
+//! later, as a game comes back to its frame limiter every frame. Failed
+//! proofs at a head make the next tries at it rarer.
 
 mod count;
 mod time;
@@ -73,9 +73,15 @@ const ARM_LIMIT: u64 = 20_000;
 const VISITS: usize = 64;
 /// Blocks of RAM a loop may write.
 const CHUNKS: usize = 256;
-/// Keyboard status calls finding no key, or reads of the built-in Windows's
-/// clock, at one place in a row before it is armed.
+/// Keyboard status calls finding no key, reads of the built-in Windows's
+/// clock or its PeekMessages finding nothing, at one place before it is
+/// armed (`poll_at`).
 const POLLS: u32 = 8;
+/// Places of polled services whose polls are counted at once. A loop may
+/// poll at two: Wizardry Gold peeks at its messages and reads the clock
+/// in each pass (#1692), and a count of polls in a row at one place would
+/// start again at every call of the other.
+const POLL_HEADS: usize = 4;
 /// Heads whose failed proofs are remembered, to arm them less often.
 const BACKOFF_HEADS: usize = 8;
 /// Heads whose passes were skipped that are remembered, to arm them when
@@ -235,6 +241,16 @@ struct Shape {
     blocks: Vec<usize>,
 }
 
+/// The polls of a service at one place (`poll_at`): how many came since
+/// it was armed or the count started, and the clock's run count at the
+/// last.
+#[derive(Clone, Copy, Default)]
+struct Poll {
+    head: Option<Head>,
+    count: u32,
+    at: u64,
+}
+
 /// What the proofs at a head saved, and what they cost (`PAYOFF`): the
 /// instructions each failed proof ran, and for each that skipped, what
 /// the proof after it is expected to run. Each proof counts less by
@@ -298,6 +314,10 @@ pub struct IdleStats {
     /// Of the proofs that skipped, those that started from what the last
     /// proof at their head found (`Shape`).
     pub shaped: u64,
+    /// The passes the model of a proof over counts ran to find how many
+    /// of the passes after the one recorded run the same
+    /// (`count::counted_passes`).
+    pub modelled: u64,
     /// The failures by why, in the order the reasons first came up (an
     /// empty one is a free slot).
     pub failed_by: [(&'static str, u64); 16],
@@ -330,6 +350,8 @@ pub struct Observe {
     /// Set by the BIOS keyboard's status call finding no key, and by a
     /// Sleep(0) of the built-in Windows that found no other thread to run.
     pub polled: bool,
+    /// Set by a PeekMessage of the built-in Windows that found nothing.
+    pub peeked: bool,
     /// Set by an access the proof can't follow, to what it was.
     failed: Cell<Option<&'static str>>,
     /// The blocks written since the last look.
@@ -338,11 +360,8 @@ pub struct Observe {
     /// The millisecond the first read of the built-in Windows's clock since
     /// the base found (`clock_read`), up to which its passes read the same.
     clock_read: Option<u64>,
-    /// `Clock::run_count` at the last read of that clock.
-    clock_read_at: u64,
-    /// Where the keyboard status call found no key or the clock was read
-    /// last, and how many times in a row.
-    poll: (Option<Head>, u32),
+    /// The places where a service was polled last (`poll_at`).
+    polls_at: [Poll; POLL_HEADS],
     /// Where the CPU was at the last timer event, with its general
     /// registers and flags.
     last_event: Option<(Head, [u32; 8], u32)>,
@@ -351,6 +370,9 @@ pub struct Observe {
     /// Whether `proven` latches the PIT's count: a time proof starts
     /// there again at once (`time`).
     proven_time: bool,
+    /// When a service the passes skipped up to the next event call finds
+    /// what the loop waits for (`found_at`), if it does.
+    proven_found: Option<u64>,
     /// The instruction count when the proof running started.
     started: u64,
     /// The last `KNOWN_HEADS` heads whose passes were skipped, oldest
@@ -414,6 +436,9 @@ pub struct Observe {
     /// The built-in Windows' service running said it changed nothing but
     /// RAM and registers (`pure_call`).
     pure: bool,
+    /// The service running found what the loop waits for
+    /// (`message_found`).
+    wait_over: bool,
     /// It said too that it read no RAM but its arguments on the stack
     /// and what it names (`reads_arguments`), as a pass `Phase::Count`
     /// records needs where RAM holds counts.
@@ -448,6 +473,9 @@ pub struct Observe {
     /// services read would read otherwise, and when the last service
     /// started the thread's turn over.
     holds_until: Option<u64>,
+    /// The first instruction count at which a service the passes call
+    /// finds what the loop waits for (`found_at`).
+    found_at: Option<u64>,
     turn_at: Option<u64>,
     pub stats: IdleStats,
     /// Since when the execution loop has been watching (one instruction
@@ -474,15 +502,16 @@ impl Default for Observe {
             on: false,
             enabled: default_enabled(),
             polled: false,
+            peeked: false,
             failed: Cell::new(None),
             chunks: Vec::new(),
             phase: Phase::Off,
             clock_read: None,
-            clock_read_at: 0,
-            poll: (None, 0),
+            polls_at: [Poll::default(); POLL_HEADS],
             last_event: None,
             proven: None,
             proven_time: false,
+            proven_found: None,
             started: 0,
             known: Vec::new(),
             shapes: Vec::new(),
@@ -508,6 +537,7 @@ impl Default for Observe {
             latch_at: None,
             writes: Vec::new(),
             pure: false,
+            wait_over: false,
             arguments: false,
             service_top: 0,
             service_flat: false,
@@ -520,6 +550,7 @@ impl Default for Observe {
             clock_modelled: false,
             nesting: 0,
             holds_until: None,
+            found_at: None,
             turn_at: None,
             stats: IdleStats::default(),
             watch_since: None,
@@ -772,6 +803,7 @@ impl Observe {
         self.ports.clear();
         self.first_read = None;
         self.holds_until = None;
+        self.found_at = None;
         self.turn_at = None;
     }
 
@@ -1043,6 +1075,7 @@ pub fn pure_service(cpu: &mut Cpu, kind: u8, vector: u8) -> bool {
 #[inline(always)]
 pub fn before_service(cpu: &mut Cpu) {
     cpu.bus.observe.pure = false;
+    cpu.bus.observe.wait_over = false;
     cpu.bus.observe.arguments = false;
     if matches!(cpu.bus.observe.phase, Phase::Count { .. }) {
         let ss = cpu.seg_cache(crate::cpu::Seg::SS);
@@ -1064,15 +1097,21 @@ pub fn before_service(cpu: &mut Cpu) {
 /// After it, during a proof: a service that said it changed nothing but
 /// RAM and registers is followed, but not in a time proof, which doesn't
 /// look at `holds_until`, nor one that found a page missing, which runs
-/// again after the system's handler. Any other ends the proof. In a pass
-/// `Phase::Count` records it must also have kept the registers that hold
-/// counts and read no RAM that does (`count::after_service`): the passes
-/// after it may otherwise not run the same.
+/// again after the system's handler. Any other ends the proof: as a
+/// failure, or as a cut where it found what the loop waits for
+/// (`message_found`). In a pass `Phase::Count` records it must also have
+/// kept the registers that hold counts and read no RAM that does
+/// (`count::after_service`): the passes after it may otherwise not run
+/// the same.
 pub fn after_service(cpu: &mut Cpu) {
     let faulted = cpu.bus.guest_faulted();
     let o = &mut cpu.bus.observe;
     if !(o.pure && !faulted && !matches!(o.phase, Phase::Time(_))) {
-        o.opaque();
+        if std::mem::take(&mut o.wait_over) && o.on && o.failed.get().is_none() {
+            o.cut();
+        } else {
+            o.opaque();
+        }
     } else if matches!(o.phase, Phase::Count { .. }) {
         count::after_service(cpu);
     }
@@ -1105,6 +1144,30 @@ pub fn pure_call(cpu: &mut Cpu, until: Option<u64>) {
     if let Some(until) = until {
         o.holds_until = Some(o.holds_until.map_or(until, |h| h.min(until)));
     }
+}
+
+/// What the service running read changes at `until` (given to
+/// `pure_call`) to what the loop waits for: a PeekMessage whose filter
+/// takes the WM_TIMER of the timer due then finds it. The passes skipped up
+/// to then end the wait, so the place isn't armed again at once, as it is
+/// after a skip up to GetTickCount's next millisecond: the next pass's
+/// peek finds the message, and a proof started there fails at it. The
+/// place is armed again by its polls when the loop comes back to it.
+pub fn found_at(cpu: &mut Cpu, until: u64) {
+    if !cpu.bus.observe.on {
+        return;
+    }
+    let o = &mut cpu.bus.observe;
+    o.found_at = Some(o.found_at.map_or(until, |f| f.min(until)));
+}
+
+/// The service running found what the loop waits for: a PeekMessage found
+/// a message. The proof running ends there, as at a timer event, which
+/// also ends a wait (`at_event`): the loop was waiting as the proof took
+/// it to, and leaves its wait now. That isn't a failure, which would hold
+/// back the next proofs at the place (`backs_off`).
+pub fn message_found(cpu: &mut Cpu) {
+    cpu.bus.observe.wait_over = true;
 }
 
 /// The service running that called `pure_call` read the general
@@ -1256,7 +1319,18 @@ fn head_of(cpu: &Cpu) -> Head {
 /// events, which an event finding the CPU in it would arm too late.
 pub fn service_polled(cpu: &mut Cpu, cs: u16, eip: u32) {
     let head = Head { cs, eip, pe: cpu.pe() };
-    poll_at(cpu, head);
+    poll_at(cpu, head, false);
+}
+
+/// A PeekMessage of the built-in Windows found nothing, at the service
+/// trap at `cs:eip`: the program waits for a message in a loop, as
+/// Wizardry Gold does for its timer's (#1692). A proof follows the call
+/// up to the thread's next timer (`pure_call`). As for the clock, peeks
+/// further apart than a head stays armed are no such loop: a game that
+/// peeks once a frame and draws between arms nothing.
+pub fn message_peeked(cpu: &mut Cpu, cs: u16, eip: u32) {
+    let head = Head { cs, eip, pe: cpu.pe() };
+    poll_at(cpu, head, true);
 }
 
 /// The built-in Windows's clock was read, at the service trap at `cs:eip`.
@@ -1268,33 +1342,43 @@ pub fn service_polled(cpu: &mut Cpu, cs: u16, eip: u32) {
 /// interpreter for it.
 pub fn clock_read(cpu: &mut Cpu, cs: u16, eip: u32) {
     let head = Head { cs, eip, pe: cpu.pe() };
-    let run = cpu.bus.clock.run_count();
     let o = &mut cpu.bus.observe;
     if o.on && !std::mem::take(&mut o.clock_modelled) {
         let ms = cpu.bus.clock.now_micros() / 1000;
         o.clock_read.get_or_insert(ms);
     }
-    if run.saturating_sub(std::mem::replace(&mut o.clock_read_at, run)) > ARM_LIMIT {
-        o.poll = (None, 0);
-    }
-    poll_at(cpu, head);
+    poll_at(cpu, head, true);
 }
 
-/// A service was polled at `head`: armed once that happened enough times
-/// in a row.
-fn poll_at(cpu: &mut Cpu, head: Head) {
+/// A service was polled at `head`: armed once that happened `POLLS` times
+/// with no more than `POLL_HEADS - 1` other places polled between, and,
+/// where `near`, each poll within `ARM_LIMIT` instructions of the one
+/// before it there.
+fn poll_at(cpu: &mut Cpu, head: Head, near: bool) {
     let now = cpu.bus.clock.icount;
+    let run = cpu.bus.clock.run_count();
     let o = &mut cpu.bus.observe;
     if !o.enabled {
         return;
     }
-    if o.poll.0 == Some(head) {
-        o.poll.1 += 1;
-    } else {
-        o.poll = (Some(head), 1);
+    let polls = &mut o.polls_at;
+    let i = match polls.iter().position(|p| p.head == Some(head)) {
+        Some(i) => i,
+        None => {
+            // The place polled least lately makes room.
+            let (i, _) = polls.iter().enumerate().min_by_key(|(_, p)| p.at).unwrap();
+            polls[i] = Poll { head: Some(head), count: 0, at: run };
+            i
+        }
+    };
+    let p = &mut polls[i];
+    if near && run.saturating_sub(p.at) > ARM_LIMIT {
+        p.count = 0;
     }
-    if o.poll.1 >= POLLS {
-        o.poll.1 = 0;
+    p.at = run;
+    p.count += 1;
+    if p.count >= POLLS {
+        p.count = 0;
         o.arm(head, now);
     }
 }
@@ -1324,6 +1408,13 @@ pub fn at_event(cpu: &mut Cpu) {
         head == here.0 && flags == here.2 && differ <= 1
     });
     o.last_event = Some(here);
+    // The passes skipped up to here waited for what a service they call
+    // finds from now on (`found_at`): the loop goes on to it, and its
+    // polls arm it again when it comes back to waiting.
+    if o.proven_found.take().is_some_and(|f| f <= now) && !o.proven_time {
+        o.proven = None;
+        return;
+    }
     if let Some(head) = o.proven.take() {
         if std::mem::take(&mut o.proven_time) {
             o.time_from(head, now);
@@ -1675,6 +1766,7 @@ fn finish(
     let o = &mut cpu.bus.observe;
     let turn_at = o.turn_at;
     let by_service = o.holds_until.filter(|&until| until < limit);
+    let found_at = o.found_at;
     if let Some(until) = by_service {
         limit = until;
     }
@@ -1690,11 +1782,12 @@ fn finish(
     {
         let room = limit.min(cpu.bus.clock.deadline) - visit.icount;
         let most = (room / period).min(COUNTED_PASSES);
-        let (same, values, flags) = count::counted_passes(cpu, pass, most, visit.icount, period);
-        if most > 0 && same == 0 {
+        let counted = count::counted_passes(cpu, pass, most, visit.icount, period);
+        cpu.bus.observe.stats.modelled += counted.modelled;
+        if most > 0 && counted.passes == 0 {
             return cpu.bus.observe.fail("count passes");
         }
-        counted_run = Some((same, values, flags));
+        counted_run = Some((counted.passes, counted.values, counted.flags));
     }
     let o = &mut cpu.bus.observe;
     let head = o.head();
@@ -1751,6 +1844,7 @@ fn finish(
                 cpu.bus.observe.keep_shape(shape);
             }
             cpu.bus.observe.proved(head);
+            cpu.bus.observe.proven_found = found_at;
             let plain = &mut cpu.bus.observe.plain_clock;
             if let Some(at) = plain.iter().position(|p| Some(p.head) == head) {
                 if plain[at].left == 0 {
@@ -1766,7 +1860,11 @@ fn finish(
             if let Some(at) = turn_at {
                 win32.slice_start = cpu.bus.clock.micros_at(at + skipped);
             }
-            if let (Some(_), Some(head)) = (by_service, head) {
+            // Not where a service then finds what the loop waits for
+            // (`found_at`).
+            if let (Some(_), Some(head)) = (by_service, head)
+                && found_at != by_service
+            {
                 let now = cpu.bus.clock.icount;
                 cpu.bus.observe.arm(head, now);
             }

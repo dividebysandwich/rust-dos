@@ -1596,6 +1596,9 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     if reads_clock {
         crate::idle::clock_read(cpu, trap.0, trap.1);
     }
+    if std::mem::take(&mut cpu.bus.observe.peeked) {
+        crate::idle::message_peeked(cpu, trap.0, trap.1);
+    }
     if std::mem::take(&mut cpu.bus.observe.polled) {
         crate::idle::service_polled(cpu, trap.0, trap.1);
     }

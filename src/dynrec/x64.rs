@@ -2064,9 +2064,12 @@ impl Gen<'_> {
     /// as HIMEM leaves them, with base 0: the block's environment has
     /// that), run the instruction through its handler (and with `leave`,
     /// stop the block after it). The selector is in `sel` (or not known
-    /// yet: then no segment with a 4 GB limit). In virtual-8086 mode the
-    /// same, unless the register has the 64 KB level-3 segment that
-    /// `Cpu::load_seg_v86` keeps (never flat), as every load there leaves.
+    /// yet: then no segment with a 4 GB limit). Where the block's
+    /// environment has the register big (`big_load`), the load may make
+    /// it flat or not, which the caller notes (`note_big_load`). In
+    /// virtual-8086 mode the same, unless the register has the 64 KB
+    /// level-3 segment that `Cpu::load_seg_v86` keeps (never flat), as
+    /// every load there leaves.
     fn real_load(&mut self, seg: Seg, sel: Option<T>, leave: bool) {
         let at = self.ops.new_dynamic_label();
         if self.env.bits & super::ENV_V86 != 0 {
@@ -2092,6 +2095,7 @@ impl Gen<'_> {
         );
         match sel {
             None => dynasm!(self.ops ; .arch x64 ; je =>at),
+            Some(_) if self.big_load(seg) => dynasm!(self.ops ; .arch x64 ; jne =>at),
             Some(t) => dynasm!(self.ops
                 ; .arch x64
                 ; jne >plain
@@ -2103,6 +2107,34 @@ impl Gen<'_> {
             ),
         }
         self.bail_load(at, leave);
+    }
+
+    /// Whether the block's environment has segment register `seg` big
+    /// (a 4 GB limit) in real mode: a load there keeps the limit and
+    /// changes the base, which makes the segment flat (base 0) or not.
+    fn big_load(&self, seg: Seg) -> bool {
+        let bits = self.env.bits;
+        bits & super::ENV_V86 == 0 && bits & super::ENV_BIG << seg as u32 != 0
+    }
+
+    /// After a load of big segment register `seg` in real mode, with its
+    /// new base in EAX: whether it is flat now goes into the context, as
+    /// `jit_load_seg` notes it, and the rest of the block checks its
+    /// accesses as a segment's that isn't flat, taking its links only
+    /// where the segments are flat as they were (`check_flat`).
+    fn note_big_load(&mut self, seg: Seg) {
+        let bit = (super::ENV_FLAT << seg as u32) as i32;
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov ecx, DWORD [r12 + CTX_FLAT]
+            ; and ecx, !bit
+            ; test eax, eax
+            ; jnz >based
+            ; or ecx, bit
+            ; based:
+            ; mov DWORD [r12 + CTX_FLAT], ecx
+        );
+        self.loaded_segs |= 1 << seg as u8;
     }
 
     /// The handler's call for `real_load`'s instruction at `at`.
@@ -2622,6 +2654,7 @@ impl Gen<'_> {
                 // As `Cpu::load_seg_real` (or `load_seg_v86`) loads it once
                 // it is a plain segment (which it stays): its handler runs
                 // the instruction otherwise, and the block stops after it.
+                let big = self.big_load(seg);
                 self.real_load(seg, Some(t), true);
                 dynasm!(self.ops
                     ; .arch x64
@@ -2630,6 +2663,9 @@ impl Gen<'_> {
                     ; shl eax, 4
                     ; mov DWORD [rbx + seg_field(seg, layout::SEG_BASE)], eax
                 );
+                if big {
+                    self.note_big_load(seg);
+                }
                 if seg == Seg::SS {
                     // Interrupts wait for the instruction after a stack
                     // switch, as `Cpu::load_segment` has them.
