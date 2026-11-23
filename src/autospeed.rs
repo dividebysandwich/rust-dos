@@ -1502,13 +1502,17 @@ pub struct AutoSpeed {
     even_wait: u32,
     even_misses: u32,
     /// The speed a try for evenness that gained went to (`Step::Evened`):
-    /// the least speed until `reset` (a program enters or leaves protected
-    /// mode, a state loads), as far as the host has it (`least`). Steps
-    /// under it show too few frames to tell whether they lost evenness,
-    /// and Prehistorik 2's level 1 starts the search over every half a
-    /// minute or so (when it polls for the retrace, or draws nothing for a
-    /// while), from which the frame rate alone brought it back to 4000.
+    /// the least speed until a DOS program starts or ends (`set_programs`)
+    /// or `reset` (a program enters or leaves protected mode, a state
+    /// loads), as far as the host has it (`least`), and no more than draws
+    /// the display's frames (`decide`). Steps under it show too few frames
+    /// to tell whether they lost evenness, and Prehistorik 2's level 1
+    /// starts the search over every half a minute or so (when it polls for
+    /// the retrace, or draws nothing for a while), from which the frame
+    /// rate alone brought it back to 4000.
     even_at: Option<u32>,
+    /// DOS programs started and ended so far (`set_programs`).
+    programs: u64,
     /// While a program gets all the host has for its reads and writes, the
     /// speed it had before.
     working: Option<u32>,
@@ -1594,6 +1598,7 @@ impl AutoSpeed {
             even_wait: 0,
             even_misses: 0,
             even_at: None,
+            programs: 0,
             working: None,
             work_cuts: 0,
             flat_out: false,
@@ -1656,6 +1661,18 @@ impl AutoSpeed {
     /// (`auto_busy_os`), or treat it as any other.
     pub fn set_busy_os(&mut self, on: bool) {
         self.busy_os = on;
+    }
+
+    /// `programs` DOS programs have started and ended so far. The speed a
+    /// try for evenness found (`even_at`) is the program's: the next one,
+    /// or the shell, starts without it, as a 1980s game that updates the
+    /// screen piecemeal would otherwise run at the speed Prehistorik 2's
+    /// level 1 needed instead of the real-mode one.
+    pub fn set_programs(&mut self, programs: u64) {
+        if programs != self.programs {
+            self.programs = programs;
+            self.even_at = None;
+        }
     }
 
     /// Whether a client of the emulator's own DPMI host runs (`dpmi_client`).
@@ -2013,10 +2030,9 @@ impl AutoSpeed {
     /// the program presents through it, as a display shows no more than its
     /// refresh rate: more speed only adds to the time its frames are held.
     fn refresh(&self, bus: &Bus, now_ns: u64) -> f64 {
-        let refresh = match (self.target_fps, &bus.voodoo) {
-            (Some(fps), _) => fps as f64,
-            (None, Some(v)) if v.output() => v.refresh_hz(),
-            (None, _) => bus.vga.peek_timing().hz(),
+        let refresh = match self.target_fps {
+            Some(fps) => fps as f64,
+            None => bus.peek_refresh_timing().hz(),
         };
         match bus.frame_cap.get().refresh_timing(now_ns) {
             Some(cap) => refresh.min(cap.hz()),
@@ -2315,6 +2331,22 @@ impl AutoSpeed {
         // up would otherwise take the speed back past the cap at once.
         let host_top = top;
         let have = self.lagged.map_or(have, |(most, _)| most.min(have));
+        // Frames nobody sees at the speed a try for evenness found, or under
+        // it: no least for this scene, which needs only as much as draws
+        // the display's frames, and the least comes down to that. Kept,
+        // it would hold a scene that flips more often with more speed
+        // there: a try in Prehistorik 2's level 1 from 12,563 to 25,126
+        // read 0.45% late against 2% when the search restarted, short of
+        // the intervals it needed, on track to be kept, and the game's
+        // difficulty screen flips twice a frame from 15,000 up (#1753). A
+        // scene that polls for the retrace (`WAITING`) doesn't get to the
+        // check of the frame rate below, so this comes first.
+        if let (Some(fps), Some(even)) = (m.fps, self.even_at)
+            && fps > m.refresh / AT_REFRESH
+        {
+            let enough = (c * m.refresh / fps).round() as u32;
+            self.even_at = Some(even.min(enough));
+        }
         // Nor past a step above where the host fell behind (`fell_at`).
         let past_fall = self.fell_at.map(|at| (at as f64 * FINE_STEP) as u32);
         let base = self.least(protected, past_fall.map_or(have, |most| most.min(have)));
@@ -7020,6 +7052,38 @@ mod tests {
         assert_eq!(auto.even_at, Some(9000));
         auto.reset();
         assert_eq!(auto.decide(9000, &polling, false, HOST), 7200);
+        // A DOS program that starts or ends takes it away too.
+        auto.even_at = Some(9000);
+        auto.set_programs(1);
+        assert_eq!(auto.decide(9000, &polling, false, HOST), 7200);
+    }
+
+    #[test]
+    fn the_speed_found_even_gives_way_to_frames_nobody_sees() {
+        // Prehistorik 2's difficulty screen at 25,000, a least a try in
+        // level 1 could find: it polls for the retrace and flips twice a
+        // frame from 15,000 up (#1753). The search steps down from there,
+        // as far as draws the display's frames.
+        let screen = Measurement {
+            fps: Some(131.0),
+            polling: WAITING,
+            ..level1(25_000, &mut 1, |_| 0.0)
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.even_at = Some(25_000);
+        assert_eq!(auto.decide(25_000, &screen, false, HOST), 20_000);
+        assert_eq!(auto.even_at, Some(13_376));
+        // Without the poll, the frame rate takes it down that far at once.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.even_at = Some(25_000);
+        let drawn = Measurement {
+            polling: 0.0,
+            ..screen
+        };
+        assert_eq!(auto.decide(25_000, &drawn, false, HOST), 13_376);
+        // Frames nobody sees well above it leave it as it is.
+        assert_eq!(auto.decide(60_000, &drawn, false, HOST), 32_102);
+        assert_eq!(auto.even_at, Some(13_376));
     }
 
     #[test]
