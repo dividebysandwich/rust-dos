@@ -66,6 +66,8 @@
 //! of the Sound Blaster, which comes before a driver times the card, goes
 //! back at once (`Bus::end_work_boost`).
 
+use std::collections::VecDeque;
+
 use crate::bus::Bus;
 use crate::video::VideoMode;
 
@@ -514,21 +516,32 @@ const MISS_GAP: f64 = 0.25;
 /// 48 is held late, at 5000 one in 125, at 10,000 one in 500 (#1733).
 /// Chosen: one in 300, between its 7000 and its 10,000.
 ///
-/// Judged over `PACED_FLIPS` intervals at one speed, 12 seconds of that
-/// game's: the share is a few frames of them, and over fewer, a frame more
-/// or less moves it past the line. A hold over the line steps to the
-/// lowest speed of `AHEAD` at which the same intervals, closer to the
-/// cadence by as much as the speed is higher, would show under `AIM` of
-/// the line (`Activity::flip_interval`), and the host has room for, if
-/// one does (`Step::Evened`). If the share there, over as many intervals,
-/// comes at least halfway to that, the step holds and its speed is the
-/// least for the program; otherwise it goes back.
+/// A hold whose intervals of the last `POOLED` predict more late frames
+/// than that at its speed steps to the lowest speed of `AHEAD` they
+/// predict under the line at, and the host has room for, if one is
+/// (`Step::Evened`). Over `PACED_FLIPS` intervals there, 12 seconds of
+/// that game's, the step holds if the share comes at least halfway to the
+/// line (in the logarithm), and its speed is then the least for the
+/// program; otherwise it goes back. Over fewer, a frame more or less moves
+/// the share past the line.
 const UNEVEN: f64 = 1.0 / 300.0;
 const PACED_FLIPS: u64 = 300;
+/// The flip intervals the predictions pool (`AutoSpeed::pooled_late`),
+/// 50 seconds of Prehistorik 2's level 1, measurement by measurement,
+/// whatever the speed each ran at. A prediction needs half of them
+/// measured at speeds it can be made from. Its late frames come in bursts
+/// of a few seconds, a frame or two late in each, a minute or so apart:
+/// over one window of `PACED_FLIPS` that held one at 7073 (2.6 frames
+/// late, 0.86%), the frames were predicted under the line only at
+/// 14,200; over the last 1200, which held two more at 9242, under it
+/// from 9354. The runs of #1733 measured 0.02% to 0.18% late from 10,000
+/// to 15,000.
+const POOLED: u64 = 1200;
 /// The speeds the share of late frames is predicted at, as many times the
 /// speed measured as these: `TWO_STEPS` (a smaller step changes less than
 /// the share's noise over `PACED_FLIPS`) and a `FINE_STEP` more at a time,
-/// up to 3.5 times.
+/// up to 3.5 times. Between them, and from 1, the share is taken as
+/// changing in step with the logarithm of the speed.
 const AHEAD: [f64; 8] = {
     let mut ahead = [TWO_STEPS; 8];
     let mut i = 1;
@@ -538,12 +551,6 @@ const AHEAD: [f64; 8] = {
     }
     ahead
 };
-/// The share of `UNEVEN` a prediction has to come under. From 300 to 900
-/// intervals of Prehistorik 2's level 1 at 3000 (the log of #1733), that
-/// puts the step at 5200 to 10,500, and 3 steps in 8 at a speed whose
-/// share is still over the line (0.52% at 6000, 0.69% at 5200); aimed at
-/// the line itself, 6 in 9, as low as 4000.
-const AIM: f64 = 0.5;
 
 /// What the running program does that tells the speed it needs, counted
 /// as it runs.
@@ -1093,9 +1100,9 @@ pub struct Measurement {
     pub ahead: [f64; AHEAD.len()],
 }
 
-/// The flips' pacing at one speed, summed over its measurements: the
-/// frames shown late, the intervals judged, and the late frames predicted
-/// at each speed of `AHEAD` (`Measurement::late`).
+/// The flips' pacing at one speed, over one measurement or summed over
+/// several: the frames shown late, the intervals judged, and the late
+/// frames predicted at each speed of `AHEAD` (`Measurement::late`).
 #[derive(Clone, Copy, Debug, Default)]
 struct Paced {
     speed: u32,
@@ -1161,9 +1168,9 @@ enum Step {
         loaded: u32,
     },
     /// A step up from a hold at `from`, which drew `fps`, whose frames were
-    /// shown late (`UNEVEN`) for a `late` share of the intervals judged
-    /// there, to where that share is predicted to come under `AIM` of the
-    /// line (`AHEAD`). It holds if the share comes far enough toward that.
+    /// predicted late (`UNEVEN`) for a `late` share of the intervals pooled
+    /// there, to where that share is predicted to come under the line
+    /// (`AHEAD`). It holds if the share comes far enough toward that.
     Evened { from: u32, fps: f64, late: f64 },
 }
 
@@ -1519,6 +1526,10 @@ pub struct AutoSpeed {
     frames: Frames,
     /// The flips' pacing since the speed was what it is (`UNEVEN`).
     paced: Paced,
+    /// The pacing of the measurements of the last `POOLED` intervals, at
+    /// whatever speed each ran: the late frames predicted at more speed.
+    /// Kept until another program, or a reset.
+    pool: VecDeque<Paced>,
     /// Steps for evenness (`Step::Evened`) are over: one missed, or one
     /// brought the share of late frames under the line. Late frames ask for
     /// no more speed until the scene gets heavier, or the search starts
@@ -1621,6 +1632,7 @@ impl AutoSpeed {
             slow_host: None,
             frames: Frames::default(),
             paced: Paced::default(),
+            pool: VecDeque::new(),
             even_done: false,
             even_at: None,
             programs: 0,
@@ -1697,6 +1709,7 @@ impl AutoSpeed {
         if programs != self.programs {
             self.programs = programs;
             (self.even_at, self.even_done) = (None, false);
+            self.pool.clear();
         }
     }
 
@@ -1730,6 +1743,7 @@ impl AutoSpeed {
     pub fn reset(&mut self) {
         self.start_over();
         (self.even_at, self.even_done) = (None, false);
+        self.pool.clear();
         self.lagged = None;
         self.pace = 1.0;
         self.behind = false;
@@ -1763,6 +1777,57 @@ impl AutoSpeed {
 
     /// The search starts again from the next measurement, forgetting the
     /// frame rate it held.
+    /// Pools a measurement's pacing, and lets go of those older than the
+    /// last `POOLED` intervals.
+    fn pool_paced(&mut self, paced: Paced) {
+        self.pool.push_back(paced);
+        let mut pooled: u64 = self.pool.iter().map(|p| p.paced).sum();
+        while let Some(oldest) = self.pool.front()
+            && pooled - oldest.paced >= POOLED
+        {
+            pooled -= oldest.paced;
+            self.pool.pop_front();
+        }
+    }
+
+    /// The share of frames shown late that the pooled measurements
+    /// (`pool`) predict at `speed`: each of those it is 1 to `AHEAD`'s last
+    /// times the speed of. None if those hold fewer than half of `POOLED`
+    /// intervals.
+    fn pooled_late(&self, speed: f64) -> Option<f64> {
+        let (mut late, mut paced) = (0.0, 0);
+        for p in &self.pool {
+            let k = speed / p.speed as f64;
+            if !(1.0 - 1e-9..=AHEAD[AHEAD.len() - 1] * (1.0 + 1e-9)).contains(&k) {
+                continue;
+            }
+            // Between the speeds either side of `k`, in the logarithm.
+            let mut below = (1.0, p.late);
+            for (above, ahead) in AHEAD.into_iter().zip(p.ahead) {
+                if k <= above || above == AHEAD[AHEAD.len() - 1] {
+                    let t = (k.max(1.0) / below.0).ln() / (above / below.0).ln();
+                    late += below.1 + (ahead - below.1) * t.min(1.0);
+                    break;
+                }
+                below = (above, ahead);
+            }
+            paced += p.paced;
+        }
+        (paced >= POOLED / 2).then(|| late / paced as f64)
+    }
+
+    /// Where a step for evenness from `speed` goes (`Step::Evened`), and
+    /// the share of frames predicted late at `speed`, if that is over the
+    /// line and a speed of `AHEAD` is predicted under it.
+    fn evened_to(&self, speed: f64) -> Option<(f64, f64)> {
+        let late = self.pooled_late(speed).filter(|&late| late > UNEVEN)?;
+        let to = AHEAD
+            .iter()
+            .map(|k| speed * k)
+            .find(|&to| self.pooled_late(to).is_some_and(|late| late <= UNEVEN))?;
+        Some((to, late))
+    }
+
     fn restart_search(&mut self) {
         self.step = Step::Start;
         self.held = None;
@@ -2431,13 +2496,16 @@ impl AutoSpeed {
                 ..Paced::default()
             };
         }
-        if !lagged && m.pace >= KEPT_UP {
+        if !lagged && m.pace >= KEPT_UP && m.paced > 0 {
             let p = &mut self.paced;
             p.late += m.late;
             p.paced += m.paced;
-            for (sum, late) in p.ahead.iter_mut().zip(m.ahead) {
-                *sum += late;
-            }
+            self.pool_paced(Paced {
+                speed: current,
+                late: m.late,
+                paced: m.paced,
+                ahead: m.ahead,
+            });
         }
         let paced = self.paced.paced;
         let late = self.paced.late / paced.max(1) as f64;
@@ -2839,21 +2907,15 @@ impl AutoSpeed {
                     let least = self.least_held.map_or(r.at, |least| least.min(r.at));
                     self.least_held = Some(least);
                 }
-                // Frames shown late too often (`UNEVEN`): up to the least
-                // speed they are predicted to come under `AIM` of the line
-                // at, if the host has room for it, as for probes. Where
-                // none does, more speed isn't what they need.
+                // Frames predicted late too often here (`UNEVEN`), from
+                // the intervals pooled: up to the least speed they are
+                // predicted under the line at, if the host has room for
+                // it, as for probes. Where none is, more speed isn't what
+                // they need.
                 let room = (host_max as f64 / STALLED).min(top as f64);
-                let aim = UNEVEN * AIM * paced as f64;
-                let to = AHEAD
-                    .iter()
-                    .zip(self.paced.ahead)
-                    .find(|&(_, late)| late <= aim)
-                    .map(|(k, _)| c * k)
-                    .filter(|&to| to <= room);
-                let uneven = paced >= PACED_FLIPS && late > UNEVEN && !self.even_done;
-                if let Some(to) = to
-                    && uneven
+                if let Some((to, late)) = self.evened_to(c)
+                    && to <= room
+                    && !self.even_done
                     && !lagged
                     && m.pace >= KEPT_UP
                     && self.fell_at.is_none()
@@ -2980,17 +3042,16 @@ impl AutoSpeed {
                 if paced < PACED_FLIPS {
                     return current;
                 }
-                // Closer to `AIM` of the line than to the share before, in
+                // Closer to the line than to the share predicted before, in
                 // the logarithm: the late frames came from too little speed,
                 // and this is the least speed for the program (`even_at`).
                 // If the share is still over the line, the hold steps again
-                // on what it measured here (a step that a low reading
-                // started falls short). Otherwise they come whatever the
-                // speed, and the step goes back. The share before the step
-                // was measured over as few intervals, so a step can miss on
-                // noise: until one has gained, the search starting over
-                // tries again (`even_done`).
-                if late > (was * UNEVEN * AIM).sqrt() {
+                // on what the pool holds then. Otherwise they come whatever
+                // the speed, and the step goes back. The share here is
+                // measured over few intervals, so a step can miss on noise:
+                // until one has gained, the search starting over tries
+                // again (`even_done`).
+                if late > (was * UNEVEN).sqrt() {
                     self.even_done = true;
                     return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
                 }
@@ -7169,12 +7230,12 @@ mod tests {
         // 6940 and 7980; 0.37% was measured at 7000.
         assert_eq!(AHEAD.iter().position(|&k| k * 3000.0 > 7000.0), Some(5));
         assert!(ahead[4] > UNEVEN && ahead[5] < UNEVEN, "{ahead:?}");
-        // Under `AIM` of the line at 10,550; 0.19% was measured at 10,000.
+        // Under half the line at 10,550; 0.19% was measured at 10,000.
         // (0.15% in the log's order, 0.17% shuffled: its intervals that
         // run long are followed by ones that run short, which keeps the
         // cadence steadier.)
-        assert!(ahead[6] > UNEVEN * AIM, "{ahead:?}");
-        assert!((ahead[7] - UNEVEN * AIM).abs() < 0.0002, "{ahead:?}");
+        assert!(ahead[6] > UNEVEN / 2.0, "{ahead:?}");
+        assert!((ahead[7] - UNEVEN / 2.0).abs() < 0.0002, "{ahead:?}");
     }
 
     #[test]
@@ -7265,8 +7326,8 @@ mod tests {
 
     #[test]
     fn frames_late_whatever_the_speed_step_up_little() {
-        // 0.5% late, predicted under `AIM` of the line at 3.06 times the
-        // speed, where it is as late. Half the steps pass on noise, and the
+        // 0.5% late, predicted under the line at twice the speed or so,
+        // where it is as late. Half the steps pass on noise, and the
         // first that does brings the share under the line, or a step that
         // misses after it ends them for the program: one step up at most.
         for seed in [0x1733, 0x1734, 0x1735, 0x1736, 0x1737, 0x1738] {
@@ -7277,21 +7338,138 @@ mod tests {
         }
     }
 
+    /// Prehistorik 2's level 1, 60 measurements of 20 intervals each from
+    /// a run of #1755's first version (the last 1200 intervals before
+    /// its step from 7073 to 16,360): the speed each ran at, the frames
+    /// shown late, and those predicted at each speed of `AHEAD`. They
+    /// hold three bursts of late frames: two at 9242 and one at 7073.
+    #[rustfmt::skip]
+    const LEVEL1_BURSTS: [(u32, f64, [f64; 8]); 60] = [
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.004, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        (9242, 0.0, [0.0; 8]),
+        (10628, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.005, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        (9242, 0.008, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.002, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        (9242, 0.181, [0.11, 0.081, 0.056, 0.034, 0.015, 0.0, 0.0, 0.0]),
+        (9242, 0.156, [0.087, 0.059, 0.035, 0.014, 0.0, 0.0, 0.0, 0.0]),
+        (9242, 0.353, [0.206, 0.147, 0.096, 0.051, 0.012, 0.0, 0.0, 0.0]),
+        (9242, 0.178, [0.107, 0.078, 0.053, 0.031, 0.012, 0.0, 0.0, 0.0]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.019, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        (9242, 0.033, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        (9242, 0.087, [0.033, 0.013, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (9242, 0.0, [0.0; 8]),
+        (8037, 0.0, [0.0; 8]),
+        (8037, 0.0, [0.0; 8]),
+        (8037, 0.0, [0.0; 8]),
+        (6430, 0.025, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        (18394, 0.0, [0.0; 8]),
+        (18394, 0.0, [0.0; 8]),
+        (18394, 0.0, [0.0; 8]),
+        (7073, 0.0, [0.0; 8]),
+        (7073, 0.0, [0.0; 8]),
+        (7073, 0.0, [0.0; 8]),
+        (7073, 0.0, [0.0; 8]),
+        (8134, 0.017, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        (7073, 0.209, [0.13, 0.097, 0.07, 0.045, 0.024, 0.006, 0.0, 0.0]),
+        (7073, 0.569, [0.367, 0.285, 0.214, 0.153, 0.099, 0.052, 0.012, 0.0]),
+        (7073, 1.446, [0.942, 0.738, 0.56, 0.406, 0.272, 0.155, 0.054, 0.0]),
+        (7073, 0.326, [0.217, 0.173, 0.135, 0.101, 0.072, 0.047, 0.025, 0.006]),
+        (7073, 0.037, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        (7073, 0.0, [0.0; 8]),
+        (7073, 0.0, [0.0; 8]),
+        (7073, 0.0, [0.0; 8]),
+        (7073, 0.0, [0.0; 8]),
+        (7073, 0.0, [0.0; 8]),
+        (7073, 0.0, [0.0; 8]),
+        (7073, 0.0, [0.0; 8]),
+        (7073, 0.001, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        (7073, 0.0, [0.0; 8]),
+    ];
+
+    #[test]
+    fn a_burst_of_late_frames_steps_as_far_as_the_intervals_around_it_ask() {
+        let pooled = |rows: &[(u32, f64, [f64; 8])]| {
+            let mut auto = AutoSpeed::new(3000, None);
+            for &(speed, late, ahead) in rows {
+                auto.pool_paced(super::Paced {
+                    speed,
+                    late,
+                    paced: 20,
+                    ahead,
+                });
+            }
+            auto
+        };
+        let mut auto = pooled(&LEVEL1_BURSTS);
+        // 380 intervals measured at 7073 or less: too few to tell.
+        assert_eq!(auto.evened_to(7073.0), None);
+        // The burst at 7073 alone, over the 300 intervals there, was
+        // predicted under the line only at twice the speed (14,226), and
+        // under half of it at 16,360, where the first version went. With
+        // the bursts at 9242, which were fewer frames late at more speed,
+        // and half the pool measured at 7073 or less, the frames are
+        // predicted under it from 9354 (0.22%).
+        for _ in 0..11 {
+            auto.pool_paced(super::Paced {
+                speed: 7073,
+                paced: 20,
+                ..Default::default()
+            });
+        }
+        let (to, late) = auto.evened_to(7073.0).unwrap();
+        assert_eq!(to.round(), 9354.0);
+        assert!((late - 0.00434).abs() < 0.0001, "{late}");
+        // Wherever the bursts came in those intervals.
+        let mut rows: Vec<_> = auto
+            .pool
+            .iter()
+            .map(|p| (p.speed, p.late, p.ahead))
+            .collect();
+        for turn in [17, 29] {
+            rows.rotate_left(turn);
+            let (again, was) = pooled(&rows).evened_to(7073.0).unwrap();
+            assert_eq!(again, to);
+            assert!((was - late).abs() < 1e-12);
+        }
+    }
+
     #[test]
     fn steps_for_evenness_that_draw_frames_nobody_sees_go_back() {
-        // A scene at the display's rate that flips twice a frame from
-        // 15,000 up, as Prehistorik 2's difficulty screen does (#1753).
-        // The step back holds steps off for the scene.
+        // A scene at the display's rate that flips twice a frame with
+        // the speed of a step, as Prehistorik 2's difficulty screen does
+        // from 15,000 up (#1753). The step back holds steps off for the
+        // scene.
         let mut game = Flipper::new(&slips(5), None, 0x1753);
         let mut auto = AutoSpeed::new(3000, None);
         let (mut speed, mut steps) = (10_000, 0);
         for _ in 0..2000 {
+            let stepping = matches!(auto.step, Step::Evened { .. });
             let m = Measurement {
-                fps: Some(if speed >= 15_000 { 131.0 } else { 69.8 }),
+                fps: Some(if stepping { 131.0 } else { 69.8 }),
                 ..LEVEL1
             };
             let m = game.measure(speed, 12, m);
-            let stepping = matches!(auto.step, Step::Evened { .. });
             speed = auto.decide(speed, &m, false, 2_000_000);
             steps += u32::from(!stepping && matches!(auto.step, Step::Evened { .. }));
         }
