@@ -212,14 +212,14 @@ limit, so without a connection it goes on as it would with one:
   it draws. A frame flipped within a tenth of a whole number of retraces, or
   after the program read the status register, counts as shown for that
   number. It keeps that speed if far fewer frames come late there, also when
-  the program polls for the retrace before the step is judged, and it is
-  then the least for the program. A speed the host falls behind at is left
-  for a lower one, and the limit that sets rises again while the host keeps
-  up. A real-mode program with no frames to go by (most games of the 1980s,
-  which update the screen piecemeal) runs at 3000, about a 286, as in
-  DOSBox's `cycles=auto`, and at max while it reads or writes its drives
-  (loading), unless it would sit halted for 30% of the time or more at the
-  real-mode speed, as a game playing speech from its CD does. A
+  the program polls for the retrace, or flips no pages for a while, before the
+  step is judged, and it is then the least for the program. A speed the host
+  falls behind at is left for a lower one, and the limit that sets rises again
+  while the host keeps up. A real-mode program with no frames to go by (most
+  games of the 1980s, which update the screen piecemeal) runs at 3000, about a
+  286, as in DOSBox's `cycles=auto`, and at max while it reads or writes its
+  drives (loading), unless it would sit halted for 30% of the time or more at
+  the real-mode speed, as a game playing speech from its CD does. A
   protected-mode one runs at max while it reads and writes (loading,
   computing), and otherwise goes down to 20000, a 486's speed, or a quarter
   of a faster `cpu` model's clock (50000 on a Pentium, 112500 on a Pentium

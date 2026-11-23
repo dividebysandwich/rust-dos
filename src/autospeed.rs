@@ -1255,12 +1255,14 @@ enum Step {
     /// there, to where that share is predicted to come under the line
     /// (`AHEAD`). It holds if the share comes far enough toward that, over
     /// the measurements of the kind it was predicted from (`polls`,
-    /// `kind`); those of the other kind wait.
+    /// `kind`); those of the other kind wait, for no more than
+    /// `HOLD_WINDOWS` in a row (`idle`).
     Evened {
         from: u32,
         fps: f64,
         late: f64,
         polls: bool,
+        idle: u32,
     },
 }
 
@@ -3133,6 +3135,7 @@ impl AutoSpeed {
                         fps: recent,
                         late,
                         polls: kind == 1,
+                        idle: 0,
                     };
                     return clamp(to);
                 }
@@ -3242,6 +3245,7 @@ impl AutoSpeed {
                 fps: before,
                 late: was,
                 polls,
+                idle,
             } if current > from => {
                 // Behind: the host can't run it now, and its hitches move
                 // the flips.
@@ -3249,7 +3253,32 @@ impl AutoSpeed {
                     self.even_done[usize::from(polls)] = true;
                     return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
                 }
+                // A scene that brings no intervals of the step's kind (it
+                // polls where play didn't, or the other way round, or it
+                // copies its frames) holds the search at the step's speed
+                // while it waits, whatever its frames ask for. After
+                // `HOLD_WINDOWS` of them in a row, the step is judged on
+                // what it measured, as one the search cut short.
+                let idle = if m.paced > 0 && kind == usize::from(polls) {
+                    0
+                } else {
+                    idle + 1
+                };
+                if paced < PACED_FLIPS && idle >= HOLD_WINDOWS {
+                    return if self.evened_held(current, was) {
+                        hold_drawing(self, fps, current, HOLD_WINDOWS, false)
+                    } else {
+                        hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false)
+                    };
+                }
                 if paced < PACED_FLIPS {
+                    self.step = Step::Evened {
+                        from,
+                        fps: before,
+                        late: was,
+                        polls,
+                        idle,
+                    };
                     return current;
                 }
                 // Not closer to the line than to the share predicted
@@ -7863,6 +7892,7 @@ mod tests {
             fps: 24.29,
             late: 0.01,
             polls: false,
+            idle: 0,
         };
         auto.paced = super::Paced {
             speed: 10_869,
@@ -7884,6 +7914,7 @@ mod tests {
             fps: 24.29,
             late: 0.01,
             polls: false,
+            idle: 0,
         };
         auto.paced = super::Paced {
             speed: 10_869,
@@ -7909,6 +7940,7 @@ mod tests {
             fps: 23.95,
             late: 0.0175,
             polls: false,
+            idle: 0,
         };
         let play = Measurement {
             paced: 20,
@@ -7980,6 +8012,7 @@ mod tests {
             fps: 23.95,
             late: 0.0175,
             polls: true,
+            idle: 0,
         };
         let polling = Measurement {
             polling: 0.05,
@@ -8027,6 +8060,7 @@ mod tests {
             fps: 23.95,
             late: 0.02,
             polls: false,
+            idle: 0,
         };
         let polling = Measurement {
             polling: WAITING,
@@ -8105,6 +8139,7 @@ mod tests {
             fps: 23.95,
             late: 0.0175,
             polls: false,
+            idle: 0,
         };
         let play = Measurement {
             paced: 20,
@@ -8121,5 +8156,32 @@ mod tests {
         assert_eq!(auto.decide(7000, &late, false, HOST), 3000);
         assert_eq!(auto.even_at, None);
         assert!(auto.even_done[0]);
+    }
+
+    #[test]
+    fn a_step_for_evenness_without_intervals_to_judge_it_ends() {
+        // Stepped from 3000 to 7000, after which the game copies its
+        // frames into video memory: no intervals between flips come, and
+        // its frames fall short of what it drew. The step doesn't wait
+        // for intervals for ever: it goes back, and the search goes on.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Evened {
+            from: 3000,
+            fps: 23.95,
+            late: 0.0175,
+            polls: false,
+            idle: 0,
+        };
+        let copied = Measurement {
+            fps: Some(12.0),
+            halted: 0.0,
+            ..LEVEL1
+        };
+        let mut speed = 7000;
+        for _ in 0..HOLD_WINDOWS * 2 {
+            speed = auto.decide(speed, &copied, false, HOST);
+        }
+        assert!(!matches!(auto.step, Step::Evened { .. }), "{speed}");
+        assert_eq!(auto.even_at, None);
     }
 }
