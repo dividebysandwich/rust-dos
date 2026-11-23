@@ -1885,8 +1885,6 @@ impl AutoSpeed {
         self.loading = false;
     }
 
-    /// The search starts again from the next measurement, forgetting the
-    /// frame rate it held.
     /// Pools a measurement's pacing, and lets go of those older than the
     /// last `POOLED` intervals.
     fn pool_paced(&mut self, paced: Paced) {
@@ -1977,6 +1975,10 @@ impl AutoSpeed {
         Some((to, late))
     }
 
+    /// The search starts again from the next measurement, forgetting the
+    /// frame rate it held, and the pacing measured at the speed. While no
+    /// step for evenness has gained (`even_at`), steps for evenness are
+    /// open again.
     fn restart_search(&mut self) {
         self.step = Step::Start;
         self.held = None;
