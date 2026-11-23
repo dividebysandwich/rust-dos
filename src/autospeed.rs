@@ -2914,12 +2914,12 @@ impl AutoSpeed {
                 // it, as for probes. Where none is, more speed isn't what
                 // they need.
                 let room = (host_max as f64 / STALLED).min(top as f64);
-                if let Some((to, late)) = self.evened_to(c)
-                    && to <= room
-                    && !self.even_done
+                if !self.even_done
                     && !lagged
                     && m.pace >= KEPT_UP
                     && self.fell_at.is_none()
+                    && let Some((to, late)) = self.evened_to(c)
+                    && to <= room
                 {
                     self.step = Step::Evened {
                         from: current,
