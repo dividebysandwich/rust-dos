@@ -537,6 +537,22 @@ const PACED_FLIPS: u64 = 300;
 /// from 9354. The runs of #1733 measured 0.02% to 0.18% late from 10,000
 /// to 15,000.
 const POOLED: u64 = 1200;
+/// The lag-1 autocorrelation of the pooled intervals about the cadence
+/// (`Activity::follows`) over which a program draws as fast as it can, and
+/// steps for evenness leave it be, if they stray from the cadence by
+/// `STRAYS` on average. Over 1200 intervals at a time, A-10 Tank Killer
+/// reads over it four times in five, up to +0.35, and -0.08 where it
+/// draws a still scene. Prehistorik 2's level 1 reads -0.37 to +0.03, Doom
+/// standing -0.52 to -0.43, Demon Stalkers -0.17 to -0.15 and Xenon 2
+/// -0.5. Shadow Knights reads -0.05, and up to +1.06 over the flips that
+/// follow one late by 0.3 retraces, as the cadence comes back down, its
+/// intervals 0.0013 retraces from it on average.
+const FREE_RUNNING: f64 = 0.1;
+/// The mean square, in retraces, of the intervals' distance from the
+/// cadence under which `FREE_RUNNING` isn't judged: A-10 strays by 0.011
+/// or more (1.2e-4) at up to 40,000, three times the speed it runs late
+/// at.
+const STRAYS: f64 = 1e-4;
 /// The speeds the share of late frames is predicted at, as many times the
 /// speed measured as these: `TWO_STEPS` (a smaller step changes less than
 /// the share's noise over `PACED_FLIPS`) and a `FINE_STEP` more at a time,
@@ -584,6 +600,11 @@ pub struct Activity {
     pub late_flips: f64,
     pub paced_flips: u64,
     pub late_ahead: [f64; AHEAD.len()],
+    /// Of the same intervals, in retraces from the cadence: the products
+    /// of each one's with the one's before, and the squares
+    /// (`flip_interval`).
+    pub follows: f64,
+    pub spread: f64,
     /// Bytes written to video memory, and moved on drives.
     pub video_bytes: u64,
     pub io_bytes: u64,
@@ -624,6 +645,9 @@ pub struct Activity {
     flip_ns: Option<u64>,
     cadence_ns: f64,
     pauses: u32,
+    /// The last interval judged, in retraces from the cadence, unless a
+    /// pause came after it.
+    off: Option<f64>,
     /// The last read of the status register outside the vertical retrace:
     /// its emulated time, and the retraces begun by then.
     outside_retrace: Option<(u64, u64)>,
@@ -798,6 +822,16 @@ impl Activity {
     /// 7000. Doom flips every 2.002 retraces, 4 ticks of its 140 Hz timer,
     /// and a frame that much over two retraces is late whatever the speed:
     /// predicted from 75,000, 0.51% at 3.5 times that.
+    ///
+    /// That holds for programs paced by a timer or the retrace, whose
+    /// flips keep to the clock: an interval that runs long takes from the
+    /// next. A program that draws as fast as it can has no cadence of its
+    /// own: its intervals shrink with more speed, and drift with what it
+    /// draws, so one long interval follows another. Its late frames are
+    /// the counter's, from a cadence near a whole number of retraces, and
+    /// steps don't remove them (A-10 Tank Killer at 12,900 flips every
+    /// 0.99 retraces). `follows` and `spread` tell the two apart: their
+    /// ratio is the intervals' lag-1 autocorrelation about the cadence.
     fn flip_interval(&mut self, interval: f64, frame: f64) {
         if self.cadence_ns == 0.0 || frame <= 0.0 {
             self.cadence_ns = interval;
@@ -807,6 +841,7 @@ impl Activity {
         // of 2.0 retraces measures 1.98 to 2.02.
         let n = (self.cadence_ns / frame - 0.05).ceil().max(1.0);
         if interval >= (n + 2.0) * frame {
+            self.off = None;
             self.pauses += 1;
             if self.pauses >= 4 {
                 (self.cadence_ns, self.pauses) = (interval, 0);
@@ -820,6 +855,10 @@ impl Activity {
             *late += (cadence + (retraces - cadence) / k - n).clamp(0.0, 1.0);
         }
         self.paced_flips += 1;
+        let off = retraces - cadence;
+        self.follows += off * self.off.unwrap_or(0.0);
+        self.spread += off * off;
+        self.off = Some(off);
         self.cadence_ns += (interval - self.cadence_ns) / 16.0;
     }
 
@@ -981,6 +1020,8 @@ struct Mark {
     late: f64,
     paced: u64,
     ahead: [f64; AHEAD.len()],
+    follows: f64,
+    spread: f64,
     output: u64,
     io: u64,
     /// The emulated time dropped behind the wall clock, and the emulated
@@ -1011,6 +1052,8 @@ impl Mark {
             late: a.late_flips,
             paced: a.paced_flips,
             ahead: a.late_ahead,
+            follows: a.follows,
+            spread: a.spread,
             output: a.video_bytes + a.io_bytes,
             io: a.io_bytes,
         }
@@ -1094,21 +1137,27 @@ pub struct Measurement {
     /// Frames shown a retrace longer than the program's cadence asks for,
     /// an estimate, and the intervals between page flips that were judged
     /// for it (`Activity::flip_interval`), and the late frames predicted
-    /// at each speed of `AHEAD`.
+    /// at each speed of `AHEAD`, and the sums that tell a program that
+    /// draws as fast as it can (`Activity::follows`).
     pub late: f64,
     pub paced: u64,
     pub ahead: [f64; AHEAD.len()],
+    pub follows: f64,
+    pub spread: f64,
 }
 
 /// The flips' pacing at one speed, over one measurement or summed over
-/// several: the frames shown late, the intervals judged, and the late
-/// frames predicted at each speed of `AHEAD` (`Measurement::late`).
+/// several: the frames shown late, the intervals judged, the late frames
+/// predicted at each speed of `AHEAD`, and the sums of
+/// `Activity::follows` (`Measurement::late`).
 #[derive(Clone, Copy, Debug, Default)]
 struct Paced {
     speed: u32,
     late: f64,
     paced: u64,
     ahead: [f64; AHEAD.len()],
+    follows: f64,
+    spread: f64,
 }
 
 /// Where the search for the speed is.
@@ -1555,6 +1604,12 @@ pub struct AutoSpeed {
     /// one after another took level 1 from 3500 to 18,000, where 7500
     /// keeps it under the line.
     even_from: Option<u32>,
+    /// The program draws as fast as it can: a full pool read so
+    /// (`FREE_RUNNING`). Steps for evenness are over, and the least speed
+    /// they gave goes, until a DOS program starts or ends or `reset`. One
+    /// pool doesn't tell: where A-10 Tank Killer draws a still scene, its
+    /// intervals stray from the cadence as a timer's would.
+    free_running: bool,
     /// DOS programs started and ended so far (`set_programs`).
     programs: u64,
     /// While a program gets all the host has for its reads and writes, the
@@ -1643,6 +1698,7 @@ impl AutoSpeed {
             even_done: false,
             even_at: None,
             even_from: None,
+            free_running: false,
             programs: 0,
             working: None,
             work_cuts: 0,
@@ -1717,6 +1773,7 @@ impl AutoSpeed {
         if programs != self.programs {
             self.programs = programs;
             (self.even_at, self.even_from, self.even_done) = (None, None, false);
+            self.free_running = false;
             self.pool.clear();
         }
     }
@@ -1751,6 +1808,7 @@ impl AutoSpeed {
     pub fn reset(&mut self) {
         self.start_over();
         (self.even_at, self.even_from, self.even_done) = (None, None, false);
+        self.free_running = false;
         self.pool.clear();
         self.lagged = None;
         self.pace = 1.0;
@@ -1796,6 +1854,20 @@ impl AutoSpeed {
             pooled -= oldest.paced;
             self.pool.pop_front();
         }
+        if pooled >= POOLED && self.pool_runs_free() {
+            self.free_running = true;
+            (self.even_at, self.even_from) = (None, None);
+        }
+    }
+
+    /// Whether the pooled intervals are those of a program that draws as
+    /// fast as it can (`FREE_RUNNING`).
+    fn pool_runs_free(&self) -> bool {
+        let (mut follows, mut spread, mut paced) = (0.0, 0.0, 0);
+        for p in &self.pool {
+            (follows, spread, paced) = (follows + p.follows, spread + p.spread, paced + p.paced);
+        }
+        spread >= STRAYS * paced as f64 && follows > FREE_RUNNING * spread
     }
 
     /// The share of frames shown late that the pooled measurements
@@ -1830,6 +1902,9 @@ impl AutoSpeed {
     /// `AHEAD`'s last times the speed of the program's first step came from
     /// (`even_from`).
     fn evened_to(&self, speed: f64) -> Option<(f64, f64)> {
+        if self.free_running || self.pool_runs_free() {
+            return None;
+        }
         let late = self.pooled_late(speed).filter(|&late| late > UNEVEN)?;
         let most = AHEAD[AHEAD.len() - 1];
         let to = AHEAD
@@ -2065,6 +2140,8 @@ impl AutoSpeed {
             late: now.late - mark.late,
             paced: now.paced - mark.paced,
             ahead: std::array::from_fn(|i| now.ahead[i] - mark.ahead[i]),
+            follows: now.follows - mark.follows,
+            spread: now.spread - mark.spread,
         };
         // The step up's first measurement is in: the frames kept up with it.
         self.trying = None;
@@ -2517,6 +2594,8 @@ impl AutoSpeed {
                 late: m.late,
                 paced: m.paced,
                 ahead: m.ahead,
+                follows: m.follows,
+                spread: m.spread,
             });
         }
         let paced = self.paced.paced;
@@ -3101,6 +3180,8 @@ mod tests {
         late: 0.0,
         paced: 0,
         ahead: [0.0; AHEAD.len()],
+        follows: 0.0,
+        spread: 0.0,
     };
 
     /// A game that draws `per_cycle` frames a second for each instruction
@@ -3118,6 +3199,8 @@ mod tests {
             late: 0.0,
             paced: 0,
             ahead: [0.0; AHEAD.len()],
+            follows: 0.0,
+            spread: 0.0,
         }
     }
 
@@ -3178,6 +3261,8 @@ mod tests {
             late: 0.0,
             paced: 0,
             ahead: [0.0; AHEAD.len()],
+            follows: 0.0,
+            spread: 0.0,
         };
         let speeds = run(f117, false, 60);
         assert!((20_000..=30_000).contains(&speeds[59]), "{:?}", speeds);
@@ -6982,6 +7067,8 @@ mod tests {
             late: 0.0,
             paced: 0,
             ahead: [0.0; AHEAD.len()],
+            follows: 0.0,
+            spread: 0.0,
         }
     }
 
@@ -7194,6 +7281,7 @@ mod tests {
         fn measure(&mut self, speed: u32, flips: usize, m: Measurement) -> Measurement {
             let a = &mut self.activity;
             let (late, paced, ahead) = (a.late_flips, a.paced_flips, a.late_ahead);
+            let (follows, spread) = (a.follows, a.spread);
             let flips = if self.intervals.is_empty() { 0 } else { flips };
             for _ in 0..flips {
                 noise(&mut self.seed, 1.0);
@@ -7208,6 +7296,8 @@ mod tests {
                 late: a.late_flips - late,
                 paced: a.paced_flips - paced,
                 ahead: std::array::from_fn(|i| a.late_ahead[i] - ahead[i]),
+                follows: a.follows - follows,
+                spread: a.spread - spread,
                 ..m
             }
         }
@@ -7327,6 +7417,7 @@ mod tests {
                 late: m.late,
                 paced: m.paced,
                 ahead: m.ahead,
+                ..Default::default()
             });
         }
         let (to, _) = auto.evened_to(9000.0).unwrap();
@@ -7335,6 +7426,47 @@ mod tests {
         assert_eq!(auto.evened_to(9000.0), None);
         auto.even_from = Some(8000);
         assert_eq!(auto.evened_to(9000.0).map(|(to, _)| to), Some(to));
+    }
+
+    #[test]
+    fn a_program_that_draws_as_fast_as_it_can_takes_no_steps_for_evenness() {
+        // As A-10 Tank Killer at 12,900: a frame every 0.99 retraces, its
+        // drawing time drifting with the scene, so that one long interval
+        // follows another. The intervals over a retrace count as late,
+        // more than the line allows, and more speed is predicted to take
+        // them under it, but no step is taken.
+        let mut a = Activity::new();
+        let mut auto = AutoSpeed::new(3000, None);
+        let (mut seed, mut drift, mut steps) = (0x1755, 0.0, 0);
+        let flat_out = Measurement {
+            fps: Some(70.8),
+            halted: 0.0,
+            ..LEVEL1
+        };
+        for _ in 0..200 {
+            let (late, paced, ahead) = (a.late_flips, a.paced_flips, a.late_ahead);
+            let (follows, spread) = (a.follows, a.spread);
+            for _ in 0..35 {
+                drift = 0.5 * drift + 0.03 * (noise(&mut seed, 1.0) - 1.0);
+                a.flip_interval((0.99 + drift) * FRAME_NS, FRAME_NS);
+            }
+            let m = Measurement {
+                late: a.late_flips - late,
+                paced: a.paced_flips - paced,
+                ahead: std::array::from_fn(|i| a.late_ahead[i] - ahead[i]),
+                follows: a.follows - follows,
+                spread: a.spread - spread,
+                ..flat_out
+            };
+            let stepping = matches!(auto.step, Step::Evened { .. });
+            auto.decide(12_900, &m, false, HOST);
+            steps += u32::from(!stepping && matches!(auto.step, Step::Evened { .. }));
+        }
+        assert!(a.follows > FREE_RUNNING * a.spread, "{} {}", a.follows, a.spread);
+        assert!(auto.free_running);
+        assert!(auto.pooled_late(12_900.0).unwrap() > UNEVEN);
+        assert!(auto.pooled_late(12_900.0 * AHEAD[7]).unwrap() <= UNEVEN);
+        assert_eq!(steps, 0);
     }
 
     #[test]
@@ -7455,6 +7587,7 @@ mod tests {
                     late,
                     paced: 20,
                     ahead,
+                    ..Default::default()
                 });
             }
             auto

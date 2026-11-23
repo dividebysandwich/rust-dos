@@ -2301,6 +2301,8 @@ mod tests {
             late: 0.0,
             paced: 0,
             ahead: Default::default(),
+            follows: 0.0,
+            spread: 0.0,
         };
         let host_max = pacer.host.max.unwrap() as u32;
         let boost = pacer.auto.decide(433_332, &loading, true, host_max);
