@@ -1120,6 +1120,67 @@ fn an_idle_loop_that_waits_for_a_deadline_by_get_tick_count_is_skipped_to_it() {
     assert!(stats.skipped / stats.proofs > 4 * ms, "{stats:?}");
 }
 
+/// Tribal Rage's MFC idle loop (#1729): it counts its passes in RAM, hands
+/// the count to OnIdle, which compares it with 0 and 1, and waits for a
+/// deadline by GetTickCount. A proof skips up to the next timer event,
+/// hundreds of passes at the speed below, and the passes skipped must come
+/// out as when they all run. The model of the counts finds how many run
+/// the same without running each of them: they move the count by one and
+/// read the clock as the one before did until its next millisecond.
+#[test]
+fn an_idle_loop_that_counts_its_passes_is_proven_without_modelling_each() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetTickCount"])];
+    // The count at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut spin = a.create_label();
+        let mut idle = a.create_label();
+        a.call(l.import(0))?;
+        a.mov(ebx, eax)?;
+        a.set_label(&mut spin)?;
+        a.mov(ecx, dword_ptr(l.data))?;
+        a.inc(dword_ptr(l.data))?;
+        // OnIdle(count): more idle work for counts 0 and 1.
+        a.test(ecx, ecx)?;
+        a.jle(idle)?;
+        a.cmp(ecx, 1)?;
+        a.je(idle)?;
+        a.set_label(&mut idle)?;
+        // OnIdle returns with ECX as it left it, not the count.
+        a.mov(ecx, 0)?;
+        a.call(l.import(0))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu.bus.set_cycles_per_ms(100_000);
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start("idle_count_plain", CoreMode::Normal, false);
+    let mut skipping = start("idle_count_skipping", CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 400, 100_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    let stats = &skipping.bus.observe.stats;
+    assert_eq!(skipping.errorlevel, 0x2A, "{stats:?}");
+    assert!(stats.proofs >= 10 && stats.skipped > 100 * 100_000, "{stats:?}");
+    // A few passes of the model for each proof, where running each pass
+    // skipped would take hundreds.
+    assert!(stats.modelled < 20 * stats.proofs, "{stats:?}");
+}
+
 /// Run `image` on a machine that skips passes (on the recompiler) and one
 /// that runs them all (on the interpreter), in lockstep: they must come
 /// out the same after every batch, and the program must end with 2Ah.
