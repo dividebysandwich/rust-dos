@@ -1244,6 +1244,172 @@ fn a_sleep_zero_loop_that_counts_while_it_waits_is_skipped() {
     assert!(stats.skipped > 100_000, "{stats:?}");
 }
 
+/// A wait for a timer's WM_TIMER in a loop of PeekMessageA, as Wizardry
+/// Gold waits between the steps of its animations (#1692), then the same
+/// with a GetTickCount in each pass, as its loop over its mouse hot spots
+/// does. A PeekMessageA that finds nothing changes nothing up to the
+/// timer, so the passes are skipped to it in both loops, and come out the
+/// same as when they all run.
+#[test]
+fn a_peek_message_loop_that_waits_for_a_timer_is_skipped() {
+    let names: &[&str] = &["SetTimer", "PeekMessageA"];
+    let imports: &[(&str, &[&str])] =
+        &[("USER32.DLL", names), ("KERNEL32.DLL", &["GetTickCount"])];
+    // The MSG at 0.
+    let image = program(BASE, false, imports, &[0; 32], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(0)?;
+        a.push(50)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("SetTimer"))?;
+        for clock in [false, true] {
+            let mut spin = a.create_label();
+            a.set_label(&mut spin)?;
+            if clock {
+                a.call(l.import(names.len()))?;
+            }
+            a.push(1)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(l.data)?;
+            a.call(f("PeekMessageA"))?;
+            a.test(eax, eax)?;
+            a.jz(spin)?;
+            // WM_TIMER.
+            a.cmp(dword_ptr(l.at(4)), 0x113)?;
+            a.jne(spin)?;
+        }
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let (stats, ms) = peek_lockstep("peek_timer", image);
+    // The two waits come to 100 ms; the passes run to prove the loops
+    // are a small part of them.
+    assert!(stats.skipped > 80 * ms, "{stats:?}");
+}
+
+/// A loop that draws a frame between its PeekMessageAs (PM_NOREMOVE)
+/// until the timer's WM_TIMER comes, as a game's main loop does: its
+/// passes peek close enough together to arm the place, but each writes
+/// another frame number over the frame, so they aren't all the same.
+/// Whatever the proofs make of them, the program draws as many frames,
+/// and leaves its memory and registers, as when every pass runs.
+#[test]
+fn a_peek_message_loop_that_draws_between_peeks_runs_as_it_would() {
+    let names: &[&str] = &["SetTimer", "PeekMessageA"];
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", names)];
+    // The MSG at 0, the frame of 64 dwords at 32, the frames drawn after.
+    let image = program(BASE, false, imports, &[0; 0x200], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(0)?;
+        a.push(50)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("SetTimer"))?;
+        a.xor(ebx, ebx)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        a.inc(ebx)?;
+        a.mov(eax, ebx)?;
+        a.mov(edi, l.data + 32)?;
+        a.mov(ecx, 64)?;
+        a.rep().stosd()?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(l.data)?;
+        a.call(f("PeekMessageA"))?;
+        a.test(eax, eax)?;
+        a.jz(spin)?;
+        // WM_TIMER.
+        a.cmp(dword_ptr(l.at(4)), 0x113)?;
+        a.jne(spin)?;
+        a.mov(dword_ptr(l.at(0x120)), ebx)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let (stats, _) = peek_lockstep("peek_draw", image);
+    assert!(stats.arms > 0, "the peeks armed the loop: {stats:?}");
+}
+
+/// A PeekMessageA loop that takes five of a 20 ms timer's WM_TIMERs: each
+/// wait is skipped up to the timer, and the peek after the skip finds the
+/// message. The place isn't proven again right there, where the proof
+/// would end at that peek, but once the loop has peeked its way back to
+/// waiting; a proof that a message ends hasn't failed.
+#[test]
+fn a_peek_message_loop_is_not_proven_again_where_its_timer_comes() {
+    let names: &[&str] = &["SetTimer", "PeekMessageA"];
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", names)];
+    // The MSG at 0.
+    let image = program(BASE, false, imports, &[0; 32], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(0)?;
+        a.push(20)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("SetTimer"))?;
+        a.mov(esi, 5)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        // PM_REMOVE.
+        a.push(1)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(l.data)?;
+        a.call(f("PeekMessageA"))?;
+        a.test(eax, eax)?;
+        a.jz(spin)?;
+        // WM_TIMER.
+        a.cmp(dword_ptr(l.at(4)), 0x113)?;
+        a.jne(spin)?;
+        a.dec(esi)?;
+        a.jnz(spin)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let (stats, ms) = peek_lockstep("peek_timers", image);
+    assert!(stats.skipped > 80 * ms, "{stats:?}");
+    // Armed again where the timer comes, every wait would fail a proof
+    // at its first peek. A proof that is running when the timer comes
+    // (the last one is due a few instructions after the event before it)
+    // ends at the peek that finds its message, as at a timer event.
+    assert_eq!(stats.failures, 0, "{stats:?}");
+}
+
+/// Run `image` on a machine that skips idle loops and one that doesn't,
+/// in lockstep, up to its exit with 0x2A: the skips found and the
+/// instructions in a millisecond.
+fn peek_lockstep(test: &str, image: Vec<u8>) -> (rust_dos::idle::IdleStats, u64) {
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    // Both machines start their clocks at the same host time, which a
+    // second passing between them would otherwise make differ.
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start(&format!("{test}_plain"), CoreMode::Normal, false);
+    let mut skipping = start(&format!("{test}_skipping"), CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the waits ended");
+    let stats = skipping.bus.observe.stats;
+    assert_eq!(skipping.errorlevel, 0x2A, "{stats:?}");
+    (stats, skipping.bus.clock.cycles_per_ms() as u64)
+}
+
 /// A Sleep(0) loop that leaves after 50 ms by GetTickCount, alone in its
 /// process: skipped or run, it reads the clock 50 ms on when it leaves,
 /// neither sooner nor later.
