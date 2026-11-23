@@ -7565,10 +7565,7 @@ mod tests {
                 (
                     &mut blind,
                     &mut blind_steps,
-                    Measurement {
-                        follows: 0.0,
-                        ..m
-                    },
+                    Measurement { follows: 0.0, ..m },
                 ),
             ] {
                 let stepping = matches!(auto.step, Step::Evened { .. });
@@ -7577,7 +7574,12 @@ mod tests {
             }
         }
         assert!(a.late_flips / a.paced_flips as f64 > UNEVEN);
-        assert!(a.follows > FREE_RUNNING * a.spread, "{} {}", a.follows, a.spread);
+        assert!(
+            a.follows > FREE_RUNNING * a.spread,
+            "{} {}",
+            a.follows,
+            a.spread
+        );
         assert!(auto.free_running[0] && !blind.free_running[0]);
         assert_eq!(steps, 0);
         assert!(blind_steps > 0);
