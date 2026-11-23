@@ -318,10 +318,7 @@ fn console_output_expands_tabs_to_the_next_multiple_of_eight() {
     fs::create_dir_all(&root_path).unwrap();
     let mut cpu = Cpu::new(root_path);
     cpu.load_shell();
-    cpu.bus.cursor_x = 0;
-    cpu.bus.cursor_y = 0;
-    cpu.bus.write_8(0x0450, 0);
-    cpu.bus.write_8(0x0451, 0);
+    cpu.bus.set_console_cursor(0, 0);
     let cell = |cpu: &Cpu, col: usize| cpu.bus.read_8(0xB8000 + 2 * col);
 
     // AH=09h: "A", a tab to column 8, "B".
@@ -337,20 +334,20 @@ fn console_output_expands_tabs_to_the_next_multiple_of_eight() {
         assert_eq!(cell(&cpu, col), b' ', "column {}", col);
     }
     assert_eq!(cell(&cpu, 8), b'B');
-    assert_eq!(cpu.bus.cursor_x, 9);
+    assert_eq!(cpu.bus.console_cursor().0, 9);
 
     // AH=02h: a tab from column 9 goes to 16.
     cpu.set_reg8(Register::AH, 0x02);
     cpu.set_reg8(Register::DL, 0x09);
     rust_dos::interrupts::int21::handle(&mut cpu);
-    assert_eq!(cpu.bus.cursor_x, 16);
+    assert_eq!(cpu.bus.console_cursor().0, 16);
 
     // AH=06h: the tab's own character, one column.
     cpu.set_reg8(Register::AH, 0x06);
     cpu.set_reg8(Register::DL, 0x09);
     rust_dos::interrupts::int21::handle(&mut cpu);
     assert_eq!(cell(&cpu, 16), 0x09);
-    assert_eq!(cpu.bus.cursor_x, 17);
+    assert_eq!(cpu.bus.console_cursor().0, 17);
 
     // AH=40h to handle 1: a tab from column 17 goes to 24, then "Z".
     for (i, &b) in b"\tZ".iter().enumerate() {
@@ -363,7 +360,7 @@ fn console_output_expands_tabs_to_the_next_multiple_of_eight() {
     rust_dos::interrupts::int21::handle(&mut cpu);
     assert_eq!(cpu.get_reg16(Register::AX), 2);
     assert_eq!(cell(&cpu, 24), b'Z');
-    assert_eq!(cpu.bus.cursor_x, 25);
+    assert_eq!(cpu.bus.console_cursor().0, 25);
 }
 
 /// A program that puts CON in raw (binary) mode with IOCTL 4401h gets its
@@ -375,8 +372,7 @@ fn raw_console_output_keeps_tabs() {
     fs::create_dir_all(&root_path).unwrap();
     let mut cpu = Cpu::new(root_path);
     cpu.load_shell();
-    cpu.bus.cursor_x = 0;
-    cpu.bus.cursor_y = 0;
+    cpu.bus.set_console_cursor(0, 0);
     let cell = |cpu: &Cpu, col: usize| cpu.bus.read_8(0xB8000 + 2 * col);
     let device_info = |cpu: &mut Cpu| {
         cpu.set_reg16(Register::AX, 0x4400);
@@ -406,7 +402,7 @@ fn raw_console_output_keeps_tabs() {
     write_a_tab_b(&mut cpu);
     assert_eq!(cell(&cpu, 1), 0x09);
     assert_eq!(cell(&cpu, 2), b'B');
-    assert_eq!(cpu.bus.cursor_x, 3);
+    assert_eq!(cpu.bus.console_cursor().0, 3);
 
     // Back to cooked: from column 3, the tab goes to 8.
     cpu.set_reg16(Register::AX, 0x4401);
@@ -417,7 +413,7 @@ fn raw_console_output_keeps_tabs() {
     write_a_tab_b(&mut cpu);
     assert_eq!(cell(&cpu, 4), b' ');
     assert_eq!(cell(&cpu, 8), b'B');
-    assert_eq!(cpu.bus.cursor_x, 9);
+    assert_eq!(cpu.bus.console_cursor().0, 9);
 }
 
 /// MS-DOS 7 fails IOCTL subfunctions past 11h with error 1. Windows 98

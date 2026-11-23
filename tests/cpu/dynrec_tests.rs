@@ -1584,7 +1584,11 @@ fn segment_loads_in_big_real_mode_keep_the_limits_and_flatness() {
     // Back in real mode from protected mode, the data segments keep their
     // 4 GB limit ("big real mode", as HIMEM leaves them). A loop loads DS
     // with selectors 0 to 3000h in turn, making it flat (base 0) and not,
-    // and reads and writes through it above 1 MB.
+    // and reads and writes through it above 1 MB; then pops 0 into ES and
+    // DS's selector after it, as Ultima VII's memory manager loads and
+    // restores its segments around each copy. The loads run in
+    // translated code, which goes on after them, not through their
+    // handlers.
     const PM16: u32 = 0x8000;
     const REAL: u32 = 0x9000;
     let (mut a, mut b) = twins(|rig| {
@@ -1614,12 +1618,108 @@ fn segment_loads_in_big_real_mode_keep_the_limits_and_flatness() {
             a.mov(dx, ds)?;
             a.add(si, dx)?;
             a.add(si, word_ptr(ebx))?;
+            a.push(ds)?;
+            a.xor(dx, dx)?;
+            a.push(dx)?;
+            a.pop(es)?;
+            a.add(di, word_ptr(ebx).es())?;
+            a.pop(es)?;
+            a.add(di, word_ptr(ebx).es())?;
             a.loop_(top)?;
             a.hlt()
         }));
     });
     run_both(&mut a, &mut b);
     assert_ne!(b.cpu.esi() & 0xFFFF, 0);
+    if AVAILABLE {
+        let calls = b.cpu.dynrec.calls().unwrap();
+        use iced_x86::Mnemonic::*;
+        for m in [Mov, Pop] {
+            let n = calls.fallback[m as usize];
+            assert!(n < 100, "{n} {m:?} through their handlers");
+        }
+    }
+}
+
+#[test]
+fn far_transfers_after_a_load_in_big_real_mode_run_code_for_the_segments_as_they_are() {
+    // In big real mode a loop loads DS with 0 and 1000h in turn, which
+    // makes it flat and not, and after each load, in the same block,
+    // calls an interrupt handler (INT, which runs through its handler) or
+    // a far procedure (CALL FAR, which is translated) that add through
+    // DS above 1 MB. Both go
+    // on through the links a return takes, to blocks translated for DS
+    // as it is after the load, not as it was when the block was entered.
+    const PM16: u32 = 0x8000;
+    const REAL: u32 = 0x9000;
+    const FAR: u32 = 0xA000;
+    const IVT_PTR: u32 = 0x5100;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.db(&[0xEA])?;
+                a.dd(&[PM16])?;
+                a.dw(&[CODE16])
+            }),
+        );
+        rig.load(
+            PM16,
+            &asm16(PM16, |a| {
+                a.mov(eax, cr0)?;
+                a.and(eax, 0xFFFF_FFFEu32 as i32)?;
+                a.mov(cr0, eax)?;
+                a.db(&[0xEA])?;
+                a.dw(&[0, (REAL >> 4) as u16])
+            }),
+        );
+        rig.load(
+            REAL,
+            &asm16(0, |a| {
+                let mut top = a.create_label();
+                // The real-mode interrupt vectors at 0.
+                a.xor(ax, ax)?;
+                a.mov(ds, ax)?;
+                a.lidt(ptr(IVT_PTR))?;
+                a.mov(cx, 2000)?;
+                a.xor(si, si)?;
+                a.mov(ebx, 0x20_0000u32)?;
+                a.set_label(&mut top)?;
+                a.mov(ax, cx)?;
+                a.and(ax, 1)?;
+                a.shl(ax, 12)?;
+                a.mov(ds, ax)?;
+                a.int(0x60)?;
+                a.xor(ax, 0x1000)?;
+                a.mov(ds, ax)?;
+                a.db(&[0x9A])?;
+                a.dw(&[0, (FAR >> 4) as u16])?;
+                a.xor(ax, 0x1000)?;
+                a.mov(ds, ax)?;
+                a.loop_(top)?;
+                a.hlt()
+            }),
+        );
+        rig.load(
+            FAR,
+            &asm16(0, |a| {
+                a.add(word_ptr(ebx), cx)?;
+                a.add(si, word_ptr(ebx))?;
+                a.retf()
+            }),
+        );
+        rig.load(
+            FAR + 0x100,
+            &asm16(0x100, |a| {
+                a.add(word_ptr(ebx), si)?;
+                a.iret()
+            }),
+        );
+        rig.load(0x60 * 4, &[0x00, 0x01, (FAR >> 4) as u8, (FAR >> 12) as u8]);
+        rig.load(IVT_PTR, &[0xFF, 0x03, 0, 0, 0, 0]);
+    });
+    run_both(&mut a, &mut b);
+    assert_ne!(b.cpu.bus.read_16(0x21_0000), 0);
 }
 
 #[test]
@@ -2388,6 +2488,56 @@ fn auto_uses_the_recompiler_from_protected_mode_until_the_program_ends() {
     // The program ends: back to the shell, on the interpreter.
     rig.cpu.load_shell();
     assert!(!rig.cpu.dynamic_active());
+}
+
+#[test]
+fn auto_uses_the_recompiler_in_big_real_mode_a_program_before_set_up() {
+    // A program switches to protected mode, where the rig loads the data
+    // segments with 4 GB limits, switches back to real mode, which keeps
+    // them ("big real mode"), and ends. The next program runs in real
+    // mode with those limits without switching itself, as Ultima VII's
+    // U7.EXE does after MAINMENU.EXE, and reads and writes above 1 MB
+    // through DS = 0: it runs on the recompiler too.
+    const PM16: u32 = 0x8000;
+    const REAL: u32 = 0x9000;
+    let mut rig = Rig::new();
+    rig.cpu.core = CoreMode::Auto;
+    rig.load(CODE, &asm32(CODE, |a| {
+        a.db(&[0xEA])?;
+        a.dd(&[PM16])?;
+        a.dw(&[CODE16])
+    }));
+    rig.load(PM16, &asm16(PM16, |a| {
+        a.mov(eax, cr0)?;
+        a.and(eax, 0xFFFF_FFFEu32 as i32)?;
+        a.mov(cr0, eax)?;
+        a.db(&[0xEA])?;
+        a.dw(&[0, (REAL >> 4) as u16])
+    }));
+    rig.load(REAL, &asm16(0, |a| a.hlt()));
+    rig.enter_pm();
+    rig.run_batched_to_halt();
+    assert!(!rig.cpu.pe(), "back in real mode");
+    // The program ends (`Cpu::restore_context`), and the limits stay.
+    rig.cpu.pm_latched = false;
+    assert_eq!(rig.cpu.dynamic_active(), AVAILABLE, "big real mode runs on the recompiler");
+    rig.load(REAL + 0x100, &asm16(0x100, |a| {
+        let mut top = a.create_label();
+        a.xor(ax, ax)?;
+        a.mov(ds, ax)?;
+        a.mov(ebx, 0x20_0000u32)?;
+        a.mov(cx, 1000)?;
+        a.set_label(&mut top)?;
+        a.add(word_ptr(ebx), cx)?;
+        a.loop_(top)?;
+        a.hlt()
+    }));
+    rig.cpu.set_ip(0x100);
+    rig.run_batched_to_halt();
+    assert_eq!(rig.cpu.bus.read_16(0x20_0000), (500_500 % 65_536) as u16);
+    if AVAILABLE {
+        assert!(rig.cpu.dynrec.stats().runs > 0, "{:?}", rig.cpu.dynrec.stats());
+    }
 }
 
 #[test]

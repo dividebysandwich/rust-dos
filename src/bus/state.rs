@@ -71,7 +71,7 @@ const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
 const AWE_VERSION: u16 = 1;
 const ADLIB_GOLD_VERSION: u16 = 1;
-const CMS_VERSION: u16 = 1;
+const CMS_VERSION: u16 = 2;
 const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 3;
 const ET4000_VERSION: u16 = 1;
@@ -104,6 +104,9 @@ macro_rules! load_all {
 impl Bus {
     /// Write the bus's sections.
     pub(crate) fn save_state(&self, w: &mut Writer) {
+        // Where the shell's own cursor was kept: the BIOS's now, so that a
+        // build that still has it loads the cursor the screen has.
+        let (cursor_x, cursor_y) = &self.console_cursor();
         let Bus {
             ram,
             boot,
@@ -155,8 +158,6 @@ impl Bus {
             sda_written: _,
             search_handles,
             search_serial,
-            cursor_x,
-            cursor_y,
             post_code,
             refresh_toggle,
             speaker_on,
@@ -544,8 +545,6 @@ impl Bus {
             sda_written: _,
             search_handles,
             search_serial,
-            cursor_x,
-            cursor_y,
             post_code,
             refresh_toggle,
             speaker_on,
@@ -668,13 +667,16 @@ impl Bus {
             *code_blocks = vec![0; len >> super::GEN_SHIFT];
         }
         ram.copy_from_slice(section.take(len)?);
+        // Where the shell's own cursor was kept. The BIOS's, in the RAM,
+        // is the cursor now.
+        let (mut cursor_x, mut cursor_y) = (0usize, 0usize);
         let mut section = r.section_of(b"CORE", &CORE_LOADS)?;
         load_all!(&mut section;
             keyboard_buffer, kbd, kbc, a20_mask, cmos,
             pit_divisor, pit_read_msb, pit_mode, pit_write_msb,
             pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
             pit0, clock, pic, dma, joystick,
-            dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
+            dta_segment, dta_offset, search_handles, search_serial, &mut cursor_x, &mut cursor_y,
             post_code, refresh_toggle, speaker_on,
         );
         if section.version() == Some(9) {
@@ -999,6 +1001,9 @@ impl Bus {
         // SDA holds: until the next DOS call writes it, nothing in it
         // counts as the program's.
         self.sda_written = None;
+        // DOS's Ctrl+C code in the ROM, which a state of an older build
+        // lacks.
+        crate::bios::write_break_code(self);
     }
 
     /// `after_load` for a state loaded into the machine that saved it,

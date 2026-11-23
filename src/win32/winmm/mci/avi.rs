@@ -52,6 +52,19 @@ impl Video {
         self.chunks.iter().map(|c| c.size as usize).sum()
     }
 
+    /// Whether a Cinepak codec decodes it, which on a display of 256
+    /// colours gives 8-bit pictures of its own palette (`cinepak_8`).
+    pub fn cinepak(&self) -> bool {
+        codec::upper(self.compression) == codec::upper(u32::from_le_bytes(*b"cvid"))
+    }
+
+    /// The palette of a Cinepak movie's 8-bit pictures, which iccvid.dll
+    /// gives with ICM_DECOMPRESS_GET_PALETTE, as COLORREFs, with the
+    /// static colours `statics`.
+    pub fn cinepak_palette(&self, statics: &[u32; 20]) -> Vec<u32> {
+        crate::win32::vfw::cinepak::palette_8(statics, self.format.bits == 8)
+    }
+
     /// An 8-bit picture's colours, as COLORREFs; none for a picture of
     /// more bits.
     pub fn colors(&self) -> Vec<u32> {
@@ -235,6 +248,23 @@ impl Pictures {
                 .map(|dib| flip(&dib, stride));
         }
         self.shown.as_deref()
+    }
+
+    /// The frame `n` of a Cinepak video as iccvid.dll decodes it to 8
+    /// bits, at `zoom` times the size (1 or 2): rows of indexes of
+    /// `Video::cinepak_palette` from the top.
+    pub fn cinepak_8(
+        &mut self,
+        video: &Video,
+        size: (u32, u32),
+        n: u32,
+        zoom: u32,
+    ) -> Option<Vec<u8>> {
+        if !video.cinepak() {
+            return None;
+        }
+        self.frame(video, size, n)?;
+        self.codec.indexes_8(size.0, size.1, zoom)
     }
 
     /// The frame `n` of an RLE8 video, as `frame` gives it: each frame's

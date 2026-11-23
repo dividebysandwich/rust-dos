@@ -59,6 +59,9 @@ pub const GEN_SHIFT: usize = 6;
 /// pages mapped there). DOS extenders keep their ring 0 stacks and task
 /// state segments in it, which every switch to ring 0 touches.
 pub const UPPER_RAM: std::ops::Range<usize> = 0xC8000..0xF0000;
+/// B0000h-BFFFFh, where the text modes' memory is: an EGA or VGA answers
+/// in the part GR06 maps (`VgaCard::decoded_text_window`).
+const TEXT_SEGMENTS: std::ops::Range<usize> = 0xB0000..0xC0000;
 
 /// `Bus::code_blocks`' marks: a block with code, and every block while
 /// the writes are watched.
@@ -241,8 +244,6 @@ pub struct Bus {
     /// Port 61h bit 4, the DRAM refresh request, toggles on every read;
     /// delay loops count the toggles.
     refresh_toggle: bool,
-    pub cursor_x: usize,
-    pub cursor_y: usize,
     pub start_time: Instant, // System timer
     /// The game port at 201h and the joysticks on it (see joystick.rs).
     pub joystick: crate::joystick::GamePort,
@@ -548,6 +549,22 @@ impl Bus {
             0 => 25,
             rows => rows as usize + 1,
         }
+    }
+
+    /// Where DOS's console output goes on: the BIOS's cursor of page 0
+    /// (BDA 0450h), which CLS, INT 10h and programs that write the BIOS
+    /// data move as well, kept inside the 80 columns and the rows of the
+    /// text screen.
+    pub fn console_cursor(&self) -> (usize, usize) {
+        let col = (self.read_8(0x0450) as usize).min(79);
+        let row = (self.read_8(0x0451) as usize).min(self.text_rows() - 1);
+        (col, row)
+    }
+
+    /// Put the cursor `console_cursor` reads at `col`, `row`.
+    pub fn set_console_cursor(&mut self, col: usize, row: usize) {
+        self.write_8(0x0450, col as u8);
+        self.write_8(0x0451, row as u8);
     }
 
     /// The characters in a row of an 80-column text mode: 80, or what an
@@ -1186,9 +1203,18 @@ impl Bus {
         if let Some(ram) = self.vga.cpu_window(addr) {
             return self.ram[ram];
         }
-        let (text, size, wrap) = self.vga.text_window();
-        if (text..text + size).contains(&addr) {
+        if let Some((text, size, wrap)) = self.vga.decoded_text_window()
+            && (text..text + size).contains(&addr)
+        {
             return self.vga.vram_text[(addr - text) & wrap];
+        }
+        if TEXT_SEGMENTS.contains(&addr) && self.vga.adapter.ega_bios() {
+            // What GR06 doesn't map there: the planes go on from A0000h in
+            // its 128 KB window, and otherwise nothing answers.
+            if self.vga.maps_128k() && !self.vbe_window() {
+                return self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS);
+            }
+            return 0xFF;
         }
         if addr < self.ram.len() {
             return self.ram[addr];
@@ -1238,6 +1264,13 @@ impl Bus {
             }
             let saved = self.vga.latches.get();
             let v = self.vga.read_graphics(self.vga_window(addr, false));
+            self.vga.latches.set(saved);
+            return v;
+        }
+        // The planes past 64 KB of GR06's 128 KB window, latches kept too.
+        if TEXT_SEGMENTS.contains(&addr) && self.vga.maps_128k() && !self.vbe_window() {
+            let saved = self.vga.latches.get();
+            let v = self.vga.read_graphics(addr - ADDR_VGA_GRAPHICS);
             self.vga.latches.set(saved);
             return v;
         }
@@ -1356,8 +1389,9 @@ impl Bus {
             }
             return true;
         }
-        let (text, size, wrap) = self.vga.text_window();
-        if (text..text + size).contains(&addr) {
+        if let Some((text, size, wrap)) = self.vga.decoded_text_window()
+            && (text..text + size).contains(&addr)
+        {
             let text_off = (addr - text) & wrap;
             let unchanged = self.vga.vram_text[text_off] == value;
             self.vga.vram_text[text_off] = value;
@@ -1388,6 +1422,17 @@ impl Bus {
                     | VideoMode::Cga320x200Color
                     | VideoMode::Cga640x200
             );
+        }
+        if TEXT_SEGMENTS.contains(&addr) && self.vga.adapter.ega_bios() {
+            // As in `mapped_8`: the planes in GR06's 128 KB window, else
+            // lost.
+            if !self.vga.maps_128k() || self.vbe_window() {
+                return false;
+            }
+            let offset = addr - ADDR_VGA_GRAPHICS;
+            self.note_video_write(offset, 1);
+            self.vga.write_graphics(offset, value);
+            return true;
         }
 
         // The ROMs ignore writes; the upper memory between them is RAM.
