@@ -551,6 +551,11 @@ const SYNCED: f64 = 0.1;
 /// follow one late by 0.3 retraces, as the cadence comes back down, its
 /// intervals 0.0013 retraces from it on average.
 const FREE_RUNNING: f64 = 0.1;
+/// The lag-1 autocorrelation of a full pool under which a program marked
+/// as drawing as fast as it can is paced again. Prehistorik 2's menus
+/// before level 1 read +0.37 and +0.52 over the first full pool, and level
+/// 1 then -0.20 to -0.43 at 3000 to 5000; A-10 reads -0.08 at the least.
+const PACED_AGAIN: f64 = -0.15;
 /// The mean square, in retraces, of the intervals' distance from the
 /// cadence under which `FREE_RUNNING` isn't judged: A-10 strays by 0.011
 /// or more (1.2e-4) at up to 40,000, three times the speed it runs late
@@ -1621,10 +1626,12 @@ pub struct AutoSpeed {
     /// keeps it under the line.
     even_from: Option<u32>,
     /// The program draws as fast as it can: a full pool read so
-    /// (`FREE_RUNNING`). Steps for evenness are over, and the least speed
-    /// they gave goes, until a DOS program starts or ends or `reset`. One
-    /// pool doesn't tell: where A-10 Tank Killer draws a still scene, its
-    /// intervals stray from the cadence as a timer's would.
+    /// (`FREE_RUNNING`), and none since read under `PACED_AGAIN`. It takes
+    /// no steps for evenness, until then or until a DOS program starts or
+    /// ends or `reset`. One pool doesn't tell: where A-10 Tank Killer
+    /// draws a still scene, its intervals stray from the cadence as a
+    /// timer's would. The least speed steps gave stays: the menus before
+    /// Prehistorik 2's level 1, or its game-over screen, read so too.
     free_running: bool,
     /// DOS programs started and ended so far (`set_programs`).
     programs: u64,
@@ -1870,20 +1877,26 @@ impl AutoSpeed {
             pooled -= oldest.paced;
             self.pool.pop_front();
         }
-        if pooled >= POOLED && self.pool_runs_free() {
-            self.free_running = true;
-            (self.even_at, self.even_from) = (None, None);
+        if pooled >= POOLED {
+            let (runs_free, follows) = self.pool_follows();
+            if runs_free {
+                self.free_running = true;
+            } else if follows < PACED_AGAIN {
+                self.free_running = false;
+            }
         }
     }
 
-    /// Whether the pooled intervals are those of a program that draws as
-    /// fast as it can (`FREE_RUNNING`).
-    fn pool_runs_free(&self) -> bool {
+    /// The pooled intervals' lag-1 autocorrelation about the cadence
+    /// (`Activity::follows`), and whether it is that of a program that
+    /// draws as fast as it can (`FREE_RUNNING`).
+    fn pool_follows(&self) -> (bool, f64) {
         let (mut follows, mut spread, mut paced) = (0.0, 0.0, 0);
         for p in &self.pool {
             (follows, spread, paced) = (follows + p.follows, spread + p.spread, paced + p.paced);
         }
-        spread >= STRAYS * paced as f64 && follows > FREE_RUNNING * spread
+        let r = if spread > 0.0 { follows / spread } else { 0.0 };
+        (spread >= STRAYS * paced as f64 && r > FREE_RUNNING, r)
     }
 
     /// The share of frames shown late that the pooled measurements
@@ -1918,7 +1931,7 @@ impl AutoSpeed {
     /// `AHEAD`'s last times the speed of the program's first step came from
     /// (`even_from`).
     fn evened_to(&self, speed: f64) -> Option<(f64, f64)> {
-        if self.free_running || self.pool_runs_free() {
+        if self.free_running || self.pool_follows().0 {
             return None;
         }
         let late = self.pooled_late(speed).filter(|&late| late > UNEVEN)?;
@@ -7513,6 +7526,34 @@ mod tests {
         assert!(auto.free_running && !blind.free_running);
         assert_eq!(steps, 0);
         assert!(blind_steps > 0);
+    }
+
+    #[test]
+    fn a_program_drawn_flat_out_is_paced_again_once_its_intervals_say_so() {
+        // Prehistorik 2's menus before level 1 mark it; level 1's
+        // intervals, a long one followed by a short one, take the mark
+        // away, and its least speed stays meanwhile.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.even_at = Some(9000);
+        let pool = |auto: &mut AutoSpeed, follows: f64, n: usize| {
+            for _ in 0..n {
+                auto.pool_paced(super::Paced {
+                    speed: 3000,
+                    paced: 20,
+                    follows,
+                    spread: 2.0,
+                    ..Default::default()
+                });
+            }
+        };
+        pool(&mut auto, 1.0, 60);
+        assert!(auto.free_running);
+        assert_eq!(auto.even_at, Some(9000));
+        // Halfway: the pool reads about +0.1, neither.
+        pool(&mut auto, -0.6, 30);
+        assert!(auto.free_running);
+        pool(&mut auto, -0.6, 30);
+        assert!(!auto.free_running);
     }
 
     #[test]
