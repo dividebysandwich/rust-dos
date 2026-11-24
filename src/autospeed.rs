@@ -16,6 +16,12 @@
 //! shows fewer, as Grom's menu does between the long steps of its
 //! simulation, gets the speed that shows more.
 //!
+//! A real-mode program's frames get no more than its CPU model ran
+//! (`CpuModel::auto_real_most`, a 486DX2-66 for the 486), whatever the
+//! host has: such a game paces its main loop by the timer ticks a pass
+//! takes, and at the host's speed a pass can end inside one tick
+//! (Ultimate Domain divides by the count, #1813).
+//!
 //! The frames are counted on the bus (`Activity`): page flips, or where a
 //! program draws out of sight and copies the finished picture to video
 //! memory, the bursts of writes that copy it. A protected-mode program may
@@ -1699,6 +1705,9 @@ pub struct AutoSpeed {
     /// The least speed of a protected-mode program for the CPU model
     /// (`CpuModel::auto_least`), when that is more than `PROTECTED_LEAST`.
     protected_least: u32,
+    /// The most a real-mode program gets for its frames on the CPU model
+    /// (`CpuModel::auto_real_most`), if it has one.
+    real_most: Option<u32>,
     /// The protected-mode system halted at least `IDLES` of a measurement
     /// since it started: it has an idle loop. Kept until the machine goes
     /// back to real mode (a reboot, the program's end), and in save states
@@ -1761,6 +1770,7 @@ impl AutoSpeed {
             io: (0, 0),
             loading: false,
             protected_least: PROTECTED_LEAST,
+            real_most: None,
             idles: false,
             busy_os: true,
             dpmi_client: false,
@@ -1768,11 +1778,12 @@ impl AutoSpeed {
     }
 
     /// The same search with another base and target, keeping what it knows
-    /// of the machine (the CPU model's least speed, whether the system
-    /// idles) and `busy_os`.
+    /// of the machine (the CPU model's least and most speeds, whether the
+    /// system idles) and `busy_os`.
     pub fn with(&self, base: u32, target_fps: Option<u32>) -> Self {
         Self {
             protected_least: self.protected_least,
+            real_most: self.real_most,
             idles: self.idles,
             busy_os: self.busy_os,
             dpmi_client: self.dpmi_client,
@@ -1839,6 +1850,12 @@ impl AutoSpeed {
     /// The least speed of a protected-mode program on this CPU model.
     pub fn set_protected_least(&mut self, least: u32) {
         self.protected_least = least.max(PROTECTED_LEAST);
+    }
+
+    /// The most a real-mode program gets for its frames on this CPU model,
+    /// or `None` for all the host has.
+    pub fn set_real_most(&mut self, most: Option<u32>) {
+        self.real_most = most;
     }
 
     /// The machine left protected mode: whatever runs next hasn't shown
@@ -2466,7 +2483,34 @@ impl AutoSpeed {
     /// speed: from the frame rates at two speeds, one below that point, it
     /// is at the speed the lower one would have grown to the higher frame
     /// rate at.
+    ///
+    /// A real-mode program with frames goes no faster than its CPU model
+    /// ran (`real_most`, see `search`), also where the search keeps the
+    /// speed it had: one that comes to its frames from all the host has,
+    /// after loading, goes down to it with the first measurement that
+    /// counts them. The frames it draws before that, while the loading
+    /// boost lasts, still get all the host has (#1820).
     pub fn decide(&mut self, current: u32, m: &Measurement, protected: bool, host_max: u32) -> u32 {
+        let next = self.search(current, m, protected, host_max);
+        self.real_top(m, protected).map_or(next, |most| next.min(most))
+    }
+
+    /// The most `decide` goes to for the CPU model (`real_most`): only a
+    /// real-mode program's frames have one, and it is never under the
+    /// real-mode speed `auto` was given. The least speed a step for
+    /// evenness found (`even_at`) doesn't raise it: one found on a faster
+    /// model, before the settings window changed it, would take the
+    /// program past what its CPU ran. Real mode is `protected` false
+    /// (`Cpu::pm_latched`), so a game in virtual-8086 mode under a booted
+    /// DOS's EMM386 counts as protected and has no most yet (#1822).
+    fn real_top(&self, m: &Measurement, protected: bool) -> Option<u32> {
+        self.real_most
+            .filter(|_| !protected && m.fps.is_some())
+            .map(|most| most.max(self.base))
+    }
+
+    /// `decide`'s search, before the CPU model's most for real mode.
+    fn search(&mut self, current: u32, m: &Measurement, protected: bool, host_max: u32) -> u32 {
         let top = host_max.max(self.least(protected, host_max));
         let c = current as f64;
         self.flat_out = false;
@@ -2592,8 +2636,18 @@ impl AutoSpeed {
         // A faster CPU model's least speed is only up to what the host has,
         // the cap included: an estimate that reads high where the host keeps
         // up would otherwise take the speed back past the cap at once.
-        let host_top = top;
+        //
+        // A real-mode program's frames get no more than its CPU model ran
+        // (`real_most`), as the host's estimate isn't a speed of the
+        // machine's: a real-mode game paces its main loop by the timer
+        // ticks a pass takes, and a pass inside one tick can break it.
+        // Ultimate Domain divides by the count, and on a 486 its map went
+        // to 108,668 and crashed (#1813). Without frames the program loads
+        // (`loading`) or keeps the real-mode speed, as above.
+        let real_most = self.real_top(m, protected);
+        let host_top = real_most.map_or(top, |most| top.min(most));
         let have = self.lagged.map_or(have, |(most, _)| most.min(have));
+        let have = real_most.map_or(have, |most| have.min(most));
         // Frames nobody sees at the speed a step for evenness found, or
         // under it: no least for this scene, which needs only as much as
         // draws the display's frames, and the least comes down to that.
@@ -5171,6 +5225,67 @@ mod tests {
         // The 486 keeps the 486's.
         auto.set_protected_least(crate::cpu::CpuModel::I486.auto_least());
         assert_eq!(settle(&mut auto, true, HOST), PROTECTED_LEAST);
+    }
+
+    #[test]
+    fn a_real_mode_game_goes_no_faster_than_its_cpu_ran() {
+        // Ultimate Domain's map (#1813): its frame rate follows the speed,
+        // 23 frames a second at 51,000, as far as the host goes. Past about
+        // 78,500 a pass of its main loop can end inside one timer tick,
+        // and the game divides by the ticks it counted.
+        let map = game(0.00045, f64::INFINITY);
+        let speeds = |most: Option<u32>, protected| {
+            let mut auto = AutoSpeed::new(3000, None);
+            auto.set_real_most(most);
+            let mut speed = 3000;
+            (0..40)
+                .map(|_| {
+                    speed = auto.decide(speed, &map(speed), protected, HOST);
+                    speed
+                })
+                .collect::<Vec<_>>()
+        };
+        let free = speeds(None, false);
+        assert!(free.iter().any(|&s| s > 100_000), "{:?}", free);
+        let most = crate::cpu::CpuModel::I486.auto_real_most();
+        assert_eq!(most, Some(52_800));
+        let on_a_486 = speeds(most, false);
+        assert!(on_a_486.iter().all(|&s| s <= 52_800), "{:?}", on_a_486);
+        assert!(on_a_486[39] >= 40_000, "{:?}", on_a_486);
+        // A protected-mode program has the model's least speed instead.
+        let protected = speeds(most, true);
+        assert!(protected.iter().any(|&s| s > 100_000), "{:?}", protected);
+        // The Pentium and later models run more than hosts do.
+        assert_eq!(crate::cpu::CpuModel::Pentium.auto_real_most(), None);
+
+        // Loading without frames still gets all the host has, and the
+        // first measurement of the frames after it goes down to the
+        // model's speed.
+        let doing = |io| Measurement { io, ..STILL };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_real_most(most);
+        auto.decide(3000, &doing(363_698.0), false, HOST);
+        assert_eq!(auto.decide(3000, &doing(77_304.0), false, HOST), HOST);
+        assert!(auto.decide(HOST, &map(HOST), false, HOST) <= 52_800);
+        // A least speed for evenness (`even_at`) found on a faster model
+        // doesn't raise the most either. The settings window changes the
+        // model while the program runs, and a hold (`Step::Hold`) keeps
+        // the speed the search had.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.even_at = Some(90_000);
+        auto.step = Step::Hold {
+            fps: f64::NAN,
+            left: HOLD_WINDOWS,
+            more: false,
+            recent: f64::NAN,
+            seen: 0,
+            dipped: 0,
+        };
+        assert_eq!(auto.clone().decide(90_000, &map(90_000), false, HOST), 90_000);
+        auto.set_real_most(most);
+        assert_eq!(auto.decide(90_000, &map(90_000), false, HOST), 52_800);
+        // A search started afresh keeps the model's most.
+        assert_eq!(auto.with(3000, None).real_most, most);
     }
 
     /// Omikron's first dialogue on the software Voodoo renderer (#849), on
