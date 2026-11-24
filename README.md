@@ -60,14 +60,15 @@ chmod +x rust-dos-*-x86_64.AppImage
 It mounts itself with FUSE, and where there is none, as in most
 containers, it stops with an error. Pass `--appimage-extract-and-run`
 before the other options, or set `APPIMAGE_EXTRACT_AND_RUN=1`, and it
-unpacks itself to a temporary directory and runs from there. Its
-settings, log and downloaded ROMs stay in `~/.config/rust-dos/`, so a
-newer AppImage in place of the old one keeps them. Rust-DOS reads a
-`rust-dos.conf` in the folder it is started from, so one beside the
-AppImage is read when you start it there. That doesn't make a portable
-install: the program runs from inside the image, so its log and ROMs
-still go to `~/.config/rust-dos/`. The portable install below needs the
-`.tar.gz`.
+unpacks itself to a temporary directory and runs from there.
+
+Its settings, log and downloaded ROMs are kept in
+`~/.config/rust-dos/`, so replacing the AppImage with a newer one keeps
+them. Rust-DOS also reads a `rust-dos.conf` in the shell's current
+directory: to use settings kept next to the AppImage, `cd` to its folder
+before you run it. The log and ROMs still go to `~/.config/rust-dos/`
+either way. To keep everything in one folder, use the `.tar.gz` as a
+portable install, described below.
 
 ### First DOS game
 
