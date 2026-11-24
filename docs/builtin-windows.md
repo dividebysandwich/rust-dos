@@ -104,13 +104,17 @@ finds enough. DOS's own answer for such a drive is 160 to 480 MB.
 
 ### The system folder
 
-The built-in DLLs show as read-only files in `C:\WINDOWS\SYSTEM`, to
-Windows programs and DOS programs alike, as on Windows 98. A game that
-looks for a DLL there before it loads it finds the ones the built-in
-Windows has. `GLIDE2X.DLL` and `GLIDE3X.DLL` are among them only with a
-3dfx card (`voodoo=true`, or `machine=svga_voodoo3` or `svga_banshee`),
-so a game that checks for Glide by its file sees none without one. A DLL
-of the same name that a game copies to C: wins over the built-in one.
+The built-in DLLs show as files in `C:\WINDOWS\SYSTEM`, to Windows
+programs and DOS programs alike, as on Windows 98. A game that looks for
+a DLL there before it loads it finds the ones the built-in Windows has.
+`GLIDE2X.DLL` and `GLIDE3X.DLL` are among them only with a 3dfx card
+(`voodoo=true`, or `machine=svga_voodoo3` or `svga_banshee`), so a game
+that checks for Glide by its file sees none without one.
+
+A file of the same name that a game copies to C: takes the shown file's
+place, as a copy over Windows' own file does: setups that copy their own
+`COMMDLG.DLL` or `VER.DLL` there succeed. Deleting a shown file, or
+changing its attributes, changes nothing.
 
 `WING32.DLL`, WinG, is among them too. Games of 1995 that draw through
 WinG installed it from their CDs; on the built-in Windows they find it
@@ -123,6 +127,15 @@ their colour, without WinG's dithering.
 programs and DLLs built with those compilers. Their functions are
 `MSVCRT.DLL`'s, so the three share one heap and one set of open files,
 where Windows' own keep one each.
+
+The 16-bit system modules are there too, as on Windows 95 and 98:
+`KRNL386.EXE`, `USER.EXE`, `GDI.EXE`, `MMSYSTEM.DLL`, `COMMDLG.DLL` and
+the others the built-in Windows has for Windows 3.1 programs. Each is an
+NE file with the module's name, its exports and a version resource, so
+a program that looks for `MMSYSTEM.DLL` by its file, as the Autodesk
+Animator player `AAPLAY.DLL` does, finds it. Loading one by its name,
+by its path in the system folder or as a copy of the file under another
+name gives the built-in module.
 
 ### DOS programs started from Windows
 
@@ -139,7 +152,7 @@ aren't used yet.
 
 ### Notepad
 
-`C:\WINDOWS\NOTEPAD.EXE` is there, read-only, as on Windows 98, and the
+`C:\WINDOWS\NOTEPAD.EXE` is there, as on Windows 98, and the
 registry opens text files (`.txt`) with it. A setup that offers to show
 its readme when it ends starts it, by its name or by opening the file,
 and the readme opens in a window titled with its name
@@ -149,6 +162,28 @@ button). The text, in the system's fixed font, scrolls and can be
 selected and copied. Notepad's menus aren't there, so nothing can be
 saved, and a file that isn't there opens an empty window instead of
 asking whether to make it.
+
+### Registry Editor
+
+`C:\WINDOWS\REGEDIT.EXE` is there too, for setups that import a
+registration file with it, as Video for Windows 1.1's setup runs
+`regedit.exe /s C:\WINDOWS\mplayer.reg`. Its command line works as on
+Windows 98:
+
+- `regedit file.reg` puts the file's keys into the registry and saves
+  it at once. The file is in Windows 95's format (`REGEDIT4`, then
+  `[key]` and `"name"="value"` lines) or in Windows 3.1's (`REGEDIT`,
+  then `HKEY_CLASSES_ROOT\key = value` lines); any other file isn't
+  imported. A message box then says that the file was imported, or why
+  it wasn't. With `/s` there is no message box.
+- `regedit /e file.reg` writes the whole registry to the file, in
+  Windows 95's format, and `regedit /e file.reg HKEY_CLASSES_ROOT\key`
+  that key with its subkeys. Nothing is written for a key that isn't
+  there.
+
+The editor's window isn't there: REGEDIT started without a file ends at
+once. `/c` (replace the registry with a file) and `/d` (delete a key)
+do nothing, and `/l:` and `/r:` are ignored.
 
 ### Text and dialogs
 

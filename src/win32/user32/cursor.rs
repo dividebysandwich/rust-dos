@@ -2,10 +2,14 @@
 //! SetCursor last set over everything at the mouse's place while
 //! ShowCursor's count is 0 or more. USER keeps the cursor's pixels here
 //! as it is set, so that the front ends can draw it over each frame
-//! (`video::overlay`) from the machine's state alone.
+//! (`video::overlay`) from the machine's state alone. An animated
+//! cursor keeps the pixels of each of its steps, and the step shown is
+//! the one the emulated time is at.
 
+use super::resource::{ANI_CURSORS, Icon};
 use super::user;
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 use crate::win32::gdi32::surface::{Surface, Target};
 
 /// What a pixel of the cursor does to the screen under it: its top byte
@@ -27,14 +31,33 @@ pub struct CursorImage {
     /// The rows, the top first: PIXEL_KEEP, or PIXEL_SET or PIXEL_XOR
     /// with a color.
     pub pixels: Vec<u32>,
+    /// An animated cursor's steps, each with its own picture: empty for
+    /// one that isn't animated. The picture above is the first step's.
+    pub steps: Since<ANI_CURSORS, Vec<CursorStep>>,
+}
+
+/// A step of an animated cursor: its picture, which has no steps, and
+/// how long it shows, in emulated microseconds.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CursorStep {
+    pub micros: u64,
+    pub image: CursorImage,
 }
 
 crate::state_fields!(CursorImage {
     width,
     height,
     hotspot,
-    pixels
+    pixels,
+    steps
 });
+crate::state_fields!(CursorStep { micros, image });
+
+/// `jiffies`, the unit an .ANI file gives its rates in (sixtieths of a
+/// second), in microseconds.
+fn jiffies_micros(jiffies: u32) -> u64 {
+    jiffies as u64 * 1_000_000 / 60
+}
 
 impl CursorImage {
     /// What the pixel (`x`, `y`) of the cursor does.
@@ -44,23 +67,69 @@ impl CursorImage {
         }
         self.pixels[(y * self.width + x) as usize]
     }
+
+    /// The picture the cursor shows `micros` of emulated time after it
+    /// was set: itself, or the step of an animated cursor that time is
+    /// at. The steps follow each other from the first, each for its own
+    /// time, and start again after the last. The time being the
+    /// machine's, a screenshot at an emulated moment shows the same step
+    /// in every run.
+    pub fn at(&self, micros: u64) -> &CursorImage {
+        let total: u64 = self.steps.iter().map(|s| s.micros).sum();
+        if total == 0 {
+            return self;
+        }
+        let mut t = micros % total;
+        for s in self.steps.iter() {
+            if t < s.micros {
+                return &s.image;
+            }
+            t -= s.micros;
+        }
+        self
+    }
 }
 
 /// SetCursor's work: `handle` becomes the cursor (0 for none), and its
 /// picture the one the screen shows. The cursor it replaced.
+///
+/// A cursor other than the current one starts its animation at its
+/// first step, and setting the current one again, as programs do on
+/// each WM_SETCURSOR, leaves it running. The X server animates Wine's
+/// .ANI cursors that way (render/animcur.c, AnimCurDisplayCursor).
 pub fn set(cpu: &mut Cpu, handle: u32) -> u32 {
     let image = image_of(cpu, handle).unwrap_or_default();
+    let now = cpu.bus.clock.now_micros();
     let input = &mut user(cpu).input;
+    if input.cursor_handle != handle {
+        input.cursor_since = Since(now);
+    }
     input.cursor_image = image;
     std::mem::replace(&mut input.cursor_handle, handle)
 }
 
-/// The picture of the icon or cursor `handle`: None for none, or when
-/// one of its bitmaps can't be read. The screen's pixel is ANDed with
-/// the mask and XORed with the image, as DrawIcon does, so the picture
-/// keeps which of the two each pixel needs.
+/// The picture of the icon or cursor `handle`, with an animated one's
+/// steps: None for none, or when one of its bitmaps can't be read.
 fn image_of(cpu: &mut Cpu, handle: u32) -> Option<CursorImage> {
     let ic = super::resource::icon(cpu, handle)?;
+    let mut image = picture(cpu, &ic)?;
+    let mut steps = Vec::with_capacity(ic.steps.len());
+    for (n, s) in ic.steps.iter().enumerate() {
+        let step = ic.step(n as u32)?;
+        steps.push(CursorStep {
+            micros: jiffies_micros(s.jiffies),
+            image: picture(cpu, &step)?,
+        });
+    }
+    image.steps = Since(steps);
+    Some(image)
+}
+
+/// The picture of the icon or cursor `ic`, without steps: None when one
+/// of its bitmaps can't be read. The screen's pixel is ANDed with the
+/// mask and XORed with the image, as DrawIcon does, so the picture keeps
+/// which of the two each pixel needs.
+fn picture(cpu: &mut Cpu, ic: &Icon) -> Option<CursorImage> {
     let mask = Surface::load_all(cpu, Target::Bitmap(ic.mask))?;
     // Without a color bitmap, the image is the mask's lower half.
     let (color, image_top) = match ic.color {
@@ -91,23 +160,26 @@ fn image_of(cpu: &mut Cpu, handle: u32) -> Option<CursorImage> {
         height: h,
         hotspot: ic.hotspot,
         pixels,
+        steps: Since(Vec::new()),
     })
 }
 
-/// The cursor the screen shows, if it shows one: its picture and where
-/// its hot spot is, in the screen's pixels (`screen_size`). It shows
-/// while a Win32 program runs with the desktop on the screen, a cursor
-/// is set, ShowCursor's count is 0 or more and DirectInput doesn't have
-/// the mouse exclusively, which hides it on Windows.
-pub fn shown(win32: &crate::win32::Win32) -> Option<(&CursorImage, (i32, i32))> {
+/// The cursor the screen shows at `now` (`Clock::now_micros`), if it
+/// shows one: its picture, an animated cursor's step at that time, and
+/// where its hot spot is, in the screen's pixels (`screen_size`). It
+/// shows while a Win32 program runs with the desktop on the screen, a
+/// cursor is set, ShowCursor's count is 0 or more and DirectInput
+/// doesn't have the mouse exclusively, which hides it on Windows.
+pub fn shown(win32: &crate::win32::Win32, now: u64) -> Option<(&CursorImage, (i32, i32))> {
     let user = &win32.user;
     let input = &user.input;
     let shows = win32.active() && user.desktop && input.cursor_count >= 0;
+    let since = now.saturating_sub(*input.cursor_since);
     (shows
         && input.cursor_handle != 0
         && !input.cursor_image.pixels.is_empty()
         && !win32.dinput.mouse_taken())
-    .then_some((&input.cursor_image, input.cursor))
+    .then(|| (input.cursor_image.at(since), input.cursor))
 }
 
 /// The screen the host's pointer spans while the built-in Windows has
@@ -129,4 +201,40 @@ pub fn screen_size(win32: &crate::win32::Win32) -> (i32, i32) {
         (w, h, _) => (w, h),
     };
     (w as i32, h as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A one-pixel picture that sets the screen's pixel to `color`.
+    fn dot(color: u32) -> CursorImage {
+        CursorImage {
+            width: 1,
+            height: 1,
+            pixels: vec![PIXEL_SET | color],
+            ..CursorImage::default()
+        }
+    }
+
+    /// An animated cursor's steps follow each other in emulated time,
+    /// each for its rate in jiffies, and start again after the last.
+    /// One that isn't animated shows itself at every time.
+    #[test]
+    fn the_step_shown_follows_the_emulated_time() {
+        let mut ani = dot(1);
+        let step = |jiffies, color| CursorStep {
+            micros: jiffies_micros(jiffies),
+            image: dot(color),
+        };
+        ani.steps = Since(vec![step(6, 1), step(12, 2), step(3, 3)]);
+        let times = [0, 99_999, 100_000, 299_999, 300_000, 349_999, 350_000];
+        let shown: Vec<u32> = times
+            .iter()
+            .map(|&t| ani.at(t).pixel(0, 0) & 0xFF)
+            .collect();
+        assert_eq!(shown, [1, 1, 2, 2, 3, 3, 1]);
+        let still = dot(7);
+        assert_eq!(still.at(123_456), &still);
+    }
 }

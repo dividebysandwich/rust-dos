@@ -6,7 +6,8 @@
 
 use crate::win16;
 
-use win16::{CODE, Code, program, run};
+use std::fs;
+use win16::{CODE, Code, program, run, run_with};
 
 /// SHELL's ordinals, and KERNEL's RegQueryValueEx.
 const REG_OPEN_KEY: u16 = 1;
@@ -188,4 +189,128 @@ fn a_program_writes_and_reads_the_registry() {
 
     let (status, log) = run("registry16", program(&code, CODE));
     assert_eq!(status, 0, "check {status} failed:\n{log}");
+}
+
+/// KERNEL's WinExec and Yield.
+const WIN_EXEC: u16 = 166;
+const YIELD: u16 = 29;
+
+/// A registration file of Windows 3.1's REGEDIT, as Video for Windows
+/// 1.1's MPLAYER.REG is: a key's default value on each line, a comment,
+/// an empty value, and Ctrl+Z at the end.
+const MPLAYER_REG: &[u8] = b"REGEDIT\r\n\
+HKEY_CLASSES_ROOT\\mplayer = Media Clip\r\n\
+HKEY_CLASSES_ROOT\\mplayer\\protocol\\StdFileEditing\\PackageObjects = \r\n\
+HKEY_CLASSES_ROOT\\mplayer\\shell\\open\\command = mplayer.exe /play /close %1\r\n\
+\r\n\
+;OLE2 Compatibility entries.\r\n\
+HKEY_CLASSES_ROOT\\MPlayer\\CLSID = {0003000E-0000-0000-C000-000000000046}\r\n\
+HKEY_CLASSES_ROOT\\.avi = mplayer\r\n\
+\x1A";
+
+/// A Windows 3.1 program runs `regedit /s C:\WINDOWS\MPLAYER.REG` with
+/// WinExec, as Video for Windows 1.1's setup does, and reads the keys
+/// back with RegQueryValue. Windows 95 and 98 have REGEDIT.EXE in the
+/// Windows directory, and `/s` imports the file, in Windows 3.1's format
+/// as in Windows 95's, without a message box; Windows 3.1's REGEDIT takes
+/// the same command line. WinExec gives 33 for the Win32 program, which
+/// runs beside the task: the program yields until the first key is
+/// there (it ends with 20 if it never comes). Without REGEDIT.EXE,
+/// WinExec gave 2, file not found. A file on the command line that isn't
+/// there, put before MPLAYER.REG here, doesn't stop REGEDIT importing
+/// the next.
+#[test]
+fn a_program_imports_a_windows_31_registration_file_with_regedit() {
+    let mut code = Code::new();
+    let line = 0x80;
+    let first = 0xC0;
+    let last = 0xD0;
+    let command = 0xE0;
+    let regedit = b"regedit /s C:\\NONE.REG C:\\WINDOWS\\MPLAYER.REG";
+    put_string(&mut code, line, regedit);
+    put_string(&mut code, first, b"mplayer");
+    put_string(&mut code, last, b".avi");
+    put_string(&mut code, command, b"MPlayer\\shell\\open\\command");
+
+    // WinExec(line, SW_SHOWNORMAL): 33.
+    push_data(&mut code, line);
+    code.push(1).call("KERNEL", WIN_EXEC);
+    code.emit(&[0x3D, 0x21, 0x00, 0x74, 0x06]) // cmp ax,33; je over the exit
+        .emit(&[0xB0, 0x01, 0xB4, 0x4C, 0xCD, 0x21]);
+
+    // Until RegQueryValue(HKEY_CLASSES_ROOT, "mplayer") finds the key,
+    // yield, 1000 times at most.
+    code.emit(&[0xBE, 0xE8, 0x03]); // mov si,1000
+    let again = code.here();
+    set(&mut code, SIZE, 0x40);
+    set(&mut code, SIZE + 2, 0);
+    push_long(&mut code, HKEY_CLASSES_ROOT as u32);
+    push_data(&mut code, first);
+    push_data(&mut code, BUFFER);
+    push_data(&mut code, SIZE);
+    code.call("SHELL", REG_QUERY_VALUE);
+    code.emit(&[0x0B, 0xC2]); // or ax,dx
+    let found_at = code.here() + 1;
+    code.emit(&[0x74, 0x00]); // jz found
+    code.call("KERNEL", YIELD);
+    code.emit(&[0x4E, 0x74, 0x03]); // dec si; jz gave up
+    let back = again as i32 - (code.here() as i32 + 3);
+    code.emit(&[0xE9]).emit(&(back as i16).to_le_bytes()); // jmp again
+    code.emit(&[0xB0, 20]).exit_al(); // gave up
+    let found = code.here();
+    code.bytes[found_at as usize] = (found - found_at - 1) as u8;
+    expect_byte(&mut code, BUFFER, b'M', 2);
+    expect_byte(&mut code, BUFFER + 6, b'C', 3);
+    expect(&mut code, SIZE, 11, 4);
+
+    // The last line's key, and a key named in another case.
+    set(&mut code, SIZE, 0x40);
+    push_long(&mut code, HKEY_CLASSES_ROOT as u32);
+    push_data(&mut code, last);
+    push_data(&mut code, BUFFER);
+    push_data(&mut code, SIZE);
+    code.call("SHELL", REG_QUERY_VALUE);
+    expect_success(&mut code, 5);
+    expect_byte(&mut code, BUFFER, b'm', 6);
+    expect(&mut code, SIZE, 8, 7);
+    set(&mut code, SIZE, 0x40);
+    push_long(&mut code, HKEY_CLASSES_ROOT as u32);
+    push_data(&mut code, command);
+    push_data(&mut code, BUFFER);
+    push_data(&mut code, SIZE);
+    code.call("SHELL", REG_QUERY_VALUE);
+    expect_success(&mut code, 8);
+    expect_byte(&mut code, BUFFER + 12, b'/', 9);
+
+    // `regedit /e` writes a branch to a file; the program doesn't wait.
+    let export = 0x100;
+    let export_line = b"regedit /e C:\\OUT.REG HKEY_CLASSES_ROOT\\.AVI";
+    put_string(&mut code, export, export_line);
+    push_data(&mut code, export);
+    code.push(1).call("KERNEL", WIN_EXEC);
+    code.emit(&[0x3D, 0x21, 0x00, 0x74, 0x06]) // cmp ax,33; je over the exit
+        .emit(&[0xB0, 10, 0xB4, 0x4C, 0xCD, 0x21]);
+    code.emit(&[0xB0, 0x00]).exit_al();
+
+    let mut folder = None;
+    let (status, log) = run_with("regedit16", program(&code, CODE), |_, base| {
+        fs::create_dir_all(base.join("WINDOWS")).unwrap();
+        fs::write(base.join("WINDOWS").join("MPLAYER.REG"), MPLAYER_REG).unwrap();
+        folder = Some(base.to_path_buf());
+    });
+    assert_eq!(status, 0, "check {status} failed:\n{log}");
+    assert!(log.contains("REGEDIT.EXE ended with exit code 0"), "{log}");
+    // Saved at once to the registry's file, the empty value too.
+    let folder = folder.unwrap();
+    let saved = fs::read_to_string(folder.join("REGISTRY.REG")).unwrap();
+    let objects = "[HKEY_LOCAL_MACHINE\\Software\\Classes\\mplayer\\protocol\\\
+                   StdFileEditing\\PackageObjects]\r\n@=\"\"\r\n";
+    assert!(saved.contains(objects), "{saved}");
+    // The branch, its key by the name it was made with, in Windows 95's
+    // format.
+    let exported = fs::read_to_string(folder.join("OUT.REG")).unwrap();
+    assert_eq!(
+        exported,
+        "REGEDIT4\r\n\r\n[HKEY_CLASSES_ROOT\\.avi]\r\n@=\"mplayer\"\r\n"
+    );
 }

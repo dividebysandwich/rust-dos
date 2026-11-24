@@ -3905,6 +3905,254 @@ fn set_system_cursor_gives_the_arrow_another_picture() {
     assert!(system == ibeam, "the arrow shows the I-beam's picture");
 }
 
+const USER32_CURSOR_FILE: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "LoadCursorFromFileA",
+        "GetDC",
+        "DrawIconEx",
+        "DestroyCursor",
+        "SetCursor",
+        "SetCursorPos",
+    ],
+);
+const FILE_LOAD: usize = 1;
+const FILE_GET_DC: usize = 2;
+const FILE_DRAW_ICON_EX: usize = 3;
+const FILE_DESTROY_CURSOR: usize = 4;
+const FILE_SET_CURSOR: usize = 5;
+const FILE_SET_CURSOR_POS: usize = 6;
+/// The files' names in the data.
+const CUR_NAME: u32 = 0x380;
+const ANI_NAME: u32 = 0x3A0;
+const MISSING_NAME: u32 = 0x3C0;
+const DI_NORMAL: u32 = 3;
+
+/// A .CUR file of one 32 x 32 monochrome cursor whose hot spot is `hot`:
+/// a 16 x 16 square at its top left, white or black, and the rest
+/// transparent.
+fn cur_file(hot: (u16, u16), white: bool) -> Vec<u8> {
+    let mut f = Vec::new();
+    for w in [0u16, 2, 1] {
+        f.extend(w.to_le_bytes());
+    }
+    f.extend([32, 32, 2, 0]);
+    f.extend(hot.0.to_le_bytes());
+    f.extend(hot.1.to_le_bytes());
+    f.extend((40u32 + 8 + 2 * 128).to_le_bytes());
+    f.extend(22u32.to_le_bytes());
+    for w in [40u32, 32, 64] {
+        f.extend(w.to_le_bytes());
+    }
+    f.extend(1u16.to_le_bytes());
+    f.extend(1u16.to_le_bytes());
+    f.extend([0u8; 24]);
+    f.extend([0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0]);
+    // The XOR mask, then the AND mask, rows from the bottom up: the
+    // square is the first 16 pixels of the top 16 rows.
+    for xor in [true, false] {
+        for row in (0..32).rev() {
+            let bits = match (xor, row < 16) {
+                (true, true) if white => [0xFF, 0xFF, 0, 0],
+                (true, _) => [0; 4],
+                (false, true) => [0, 0, 0xFF, 0xFF],
+                (false, false) => [0xFF; 4],
+            };
+            f.extend(bits);
+        }
+    }
+    f
+}
+
+/// A RIFF chunk: its id, its length and its data, padded to an even
+/// length.
+fn riff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut c = id.to_vec();
+    c.extend((body.len() as u32).to_le_bytes());
+    c.extend(body);
+    if body.len() % 2 == 1 {
+        c.push(0);
+    }
+    c
+}
+
+fn dwords(list: &[u32]) -> Vec<u8> {
+    list.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+/// An .ANI file of two frames, the black square (0) and the white one
+/// (1), both with their hot spot at the top left, in three steps: frame
+/// 1 for 6 jiffies, frame 0 for 12 and frame 1 for 3, which a "seq " and
+/// a "rate" chunk give.
+fn ani_file() -> Vec<u8> {
+    const AF_ICON: u32 = 1;
+    const AF_SEQUENCE: u32 = 2;
+    let header = dwords(&[36, 2, 3, 0, 0, 0, 0, 10, AF_ICON | AF_SEQUENCE]);
+    let mut frames = b"fram".to_vec();
+    frames.extend(riff_chunk(b"icon", &cur_file((0, 0), false)));
+    frames.extend(riff_chunk(b"icon", &cur_file((0, 0), true)));
+    let mut acon = b"ACON".to_vec();
+    acon.extend(riff_chunk(b"LIST", b"INFOINAM\x05\0\0\0Spin\0\0"));
+    acon.extend(riff_chunk(b"anih", &header));
+    acon.extend(riff_chunk(b"rate", &dwords(&[6, 12, 3])));
+    acon.extend(riff_chunk(b"seq ", &dwords(&[1, 0, 1])));
+    acon.extend(riff_chunk(b"LIST", &frames));
+    riff_chunk(b"RIFF", &acon)
+}
+
+/// LoadCursorFromFileA loads a .CUR file and an .ANI one, as Windows 98
+/// does, and fails for a file that isn't there. The .CUR's picture shows
+/// at its hot spot. The .ANI's steps show one after another in emulated
+/// time from when SetCursor set it, each for its rate in jiffies, in the
+/// order its "seq " chunk gives: white for 100 ms, black for 200 ms,
+/// white for 50 ms, and again. Setting it again goes on with its steps,
+/// and setting another cursor and then it starts them over. DrawIconEx
+/// draws a step the animated cursor has and fails past its last, and
+/// DestroyCursor destroys one. Warhammer: Dark Omen loads its cursors
+/// this way and showed none in its 3D battles.
+#[test]
+fn cursors_load_from_cur_and_ani_files_and_animate() {
+    let mut data = data();
+    put(&mut data, CUR_NAME, b"C:\\ARROW.CUR\0");
+    put(&mut data, ANI_NAME, b"C:\\SPIN.ANI\0");
+    put(&mut data, MISSING_NAME, b"C:\\NONE.CUR\0");
+    let (program, data) = program(&[USER32_CURSOR_FILE], &data, |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, FILE_LOAD, &[Arg::At(CUR_NAME)])?;
+        c.api(a, l, FILE_LOAD, &[Arg::At(ANI_NAME)])?;
+        c.api(a, l, FILE_LOAD, &[Arg::At(MISSING_NAME)])?;
+        c.api(a, l, FILE_GET_DC, &[Arg::Val(RESULTS)])?;
+        let hdc = Arg::Val(RESULTS + 16);
+        let ani = Arg::Val(RESULTS + 8);
+        for step in [2, 3] {
+            let at = [hdc, Arg::I(0), Arg::I(0), ani, Arg::I(0), Arg::I(0)];
+            let rest = [Arg::I(step), Arg::I(0), Arg::I(DI_NORMAL)];
+            c.api(a, l, FILE_DRAW_ICON_EX, &[&at[..], &rest[..]].concat())?;
+        }
+        c.api(a, l, FILE_LOAD, &[Arg::At(ANI_NAME)])?;
+        c.api(a, l, FILE_DESTROY_CURSOR, &[Arg::Val(RESULTS + 28)])?;
+        c.api(a, l, FILE_SET_CURSOR, &[Arg::Val(RESULTS + 4)])?;
+        c.api(a, l, FILE_SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        wait(a, l, 1)?;
+        c.api(a, l, FILE_SET_CURSOR, &[ani])?;
+        wait(a, l, 2)?;
+        c.api(a, l, FILE_SET_CURSOR, &[ani])?;
+        wait(a, l, 3)?;
+        c.api(a, l, FILE_SET_CURSOR, &[Arg::Val(RESULTS + 4)])?;
+        c.api(a, l, FILE_SET_CURSOR, &[ani])?;
+        finish(a, l, 4)
+    });
+    let test = "cursor_files";
+    let mut cpu = card_machine(test, None, program);
+    let dir = PathBuf::from("target/test_win32_screen").join(test);
+    fs::write(dir.join("ARROW.CUR"), cur_file((8, 8), true)).unwrap();
+    fs::write(dir.join("SPIN.ANI"), ani_file()).unwrap();
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 11);
+    assert_ne!(r[0], 0, "CreateWindowExA");
+    assert_ne!(r[1], 0, "LoadCursorFromFileA of the .CUR");
+    assert_ne!(r[2], 0, "LoadCursorFromFileA of the .ANI");
+    assert_eq!(r[3], 0, "LoadCursorFromFileA of a file that isn't there");
+    assert_ne!(r[4], 0, "GetDC");
+    assert_eq!(r[5], 1, "DrawIconEx of the .ANI's step 2");
+    assert_eq!(r[6], 0, "DrawIconEx of the .ANI's step 3, which it hasn't");
+    assert_ne!(r[7], 0, "LoadCursorFromFileA of the .ANI again");
+    assert_eq!(r[8], 1, "DestroyCursor of it");
+    assert_eq!(r[10], 1, "SetCursorPos");
+    const WHITE: [u8; 3] = [0xFF, 0xFF, 0xFF];
+    const BLACK: [u8; 3] = [0, 0, 0];
+    // The .CUR's white square, 16 x 16 around its hot spot (8, 8).
+    let shown = with_cursors(&cpu, &[(92, 92), (107, 107), (108, 108)]);
+    assert_eq!(shown[0], WHITE, "the .CUR's square's top left");
+    assert_eq!(shown[1], WHITE, "the .CUR's square's bottom right");
+    assert_ne!(shown[2], WHITE, "past the .CUR's square");
+    // The .ANI's square at the cursor's place, through at least one
+    // round of its 350 ms: each look shows the step of its moment after
+    // SetCursor, which ran between the times `set` gives. A look too
+    // near a step's end to tell which step it is at isn't counted.
+    let step_at = |t: u64| match t % 350_000 {
+        t if t < 100_000 => WHITE,
+        t if t < 300_000 => BLACK,
+        _ => WHITE,
+    };
+    let want = |cpu: &Cpu, set: (u64, u64)| {
+        let now = cpu.bus.clock.now_micros();
+        let (a, b) = (step_at(now - set.0), step_at(now - set.1));
+        (a == b).then_some(a)
+    };
+    let look = |cpu: &Cpu| {
+        let shown = with_cursors(cpu, &[(100, 100), (115, 115)]);
+        assert_eq!(shown[0], shown[1], "the square is one color");
+        shown[0]
+    };
+    let run = |cpu: &mut Cpu, n: u64| {
+        cpu.bus.start_batch(cpu.bus.clock.icount + n);
+        run_batch(cpu, &mut NoHook, false);
+    };
+    go_on(&mut cpu, data);
+    let set = run_to(&mut cpu, data, 2);
+    let start = cpu.bus.clock.now_micros();
+    let (mut whites, mut blacks) = (0, 0);
+    while cpu.bus.clock.now_micros() <= start + 400_000 {
+        let now = cpu.bus.clock.now_micros();
+        if let Some(want) = want(&cpu, set) {
+            assert_eq!(look(&cpu), want, "the step at {now} us");
+            if want == WHITE {
+                whites += 1;
+            } else {
+                blacks += 1;
+            }
+        }
+        run(&mut cpu, 5_000);
+    }
+    assert!(whites > 0 && blacks > 0, "both frames showed");
+    // SetCursor of it again while its black step has 100 ms to go: it
+    // goes on with that step rather than starting over with white.
+    let in_black = |cpu: &Cpu| {
+        let now = cpu.bus.clock.now_micros();
+        (110_000..200_000).contains(&((now - set.0) % 350_000))
+            && (110_000..200_000).contains(&((now - set.1) % 350_000))
+    };
+    while !in_black(&cpu) {
+        run(&mut cpu, 5_000);
+    }
+    go_on(&mut cpu, data);
+    run_to(&mut cpu, data, 3);
+    assert!(in_black(&cpu), "still in the black step");
+    assert_eq!(look(&cpu), BLACK, "the same cursor set again");
+    // The .CUR and then the .ANI again: it starts over, white, while it
+    // would still be black had it gone on.
+    go_on(&mut cpu, data);
+    let again = run_to(&mut cpu, data, 4);
+    assert!(in_black(&cpu), "still in the black step");
+    assert_eq!(want(&cpu, again), Some(WHITE));
+    assert_eq!(look(&cpu), WHITE, "the .ANI set after another cursor");
+}
+
+/// Run the program in small batches until it is at `step`: the emulated
+/// times between which its last call ran, from before the batch ahead
+/// of the one it got there in to after that one.
+fn run_to(cpu: &mut Cpu, data: u32, step: u32) -> (u64, u64) {
+    let mut before = cpu.bus.clock.now_micros();
+    for _ in 0..1_000_000 {
+        let batch = cpu.bus.clock.now_micros();
+        cpu.bus.start_batch(cpu.bus.clock.icount + 1_000);
+        run_batch(cpu, &mut NoHook, false);
+        // The program's memory is there while its code runs, with paging.
+        let paged = cpu.cr0 & 0x8000_0001 == 0x8000_0001;
+        if paged && peek(cpu, data + DONE) == step {
+            let after = cpu.bus.clock.now_micros();
+            assert!(after - before < 10_000, "the call's time is known");
+            return (before, after);
+        }
+        before = batch;
+    }
+    panic!("the program didn't get to step {step}");
+}
+
 const USER32_FIRST_CURSOR: (&str, &[&str]) = (
     "USER32.DLL",
     &[

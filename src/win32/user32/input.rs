@@ -21,6 +21,7 @@ use super::message::{
     WM_NCLBUTTONDOWN, WM_NCMOUSEMOVE, WM_QUERYNEWPALETTE, WM_SETFOCUS, WM_SYSCHAR, WM_SYSKEYDOWN,
     WM_SYSKEYUP,
 };
+use super::resource::ANI_CURSORS;
 use super::sysparams::{metric, screen_size};
 use super::window::{
     self, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_CAPTION, WS_CHILD, WS_DISABLED,
@@ -32,6 +33,7 @@ use super::{
     current_tid, read_words, set_error, string_at, user, write_words,
 };
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 use crate::win32::gdi32::{self, Rect};
 use crate::win32::task::{self, Next, Task};
 
@@ -118,6 +120,9 @@ pub struct Input {
     pub cursor_handle: u32,
     pub cursor_image: super::cursor::CursorImage,
     pub cursor_count: i32,
+    /// When SetCursor last set another cursor, in emulated microseconds
+    /// (`Clock::now_micros`): an animated cursor's steps count from it.
+    pub cursor_since: Since<ANI_CURSORS, u64>,
     /// What the devices had when they were last read: the keys held, the
     /// mouse's place, its buttons and how often each was pressed and
     /// released.
@@ -2896,6 +2901,7 @@ crate::state_fields!(Input {
     cursor_handle,
     cursor_image,
     cursor_count,
+    cursor_since,
     held,
     device_pos,
     buttons,

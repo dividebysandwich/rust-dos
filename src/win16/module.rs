@@ -113,8 +113,10 @@ fn find_or_load(
         .to_ascii_uppercase();
     let has_path = name.contains(['\\', '/', ':']);
     // A system module is found by its file's name too, which may differ
-    // from its module's (KRNL386.EXE is KERNEL), as Windows finds it.
-    let builtin = builtin::find(file_name).filter(|_| !has_path);
+    // from its module's (KRNL386.EXE is KERNEL), as Windows finds it. A
+    // path names it in the system directory, where its file is
+    // (win32/dll_files.rs); one elsewhere names a file of the program's.
+    let builtin = builtin::find(file_name).filter(|_| !has_path || in_system_dir(cpu, name));
     let module_name = builtin.map_or(module_name, |i| {
         builtin::MODULES[i].name.to_ascii_uppercase()
     });
@@ -159,6 +161,12 @@ fn find_or_load(
             format!("{} can't be found.", file_name),
         ));
     };
+    // A copy of a system module's file, under any name, is that module:
+    // its code is stubs of the built-in functions, which only the
+    // built-in module may run.
+    if let Some(index) = builtin::of_file(&file) {
+        return load(cpu, builtin::MODULES[index].file, dir, inits);
+    }
     let loaded = load_file(cpu, file, &path, None, dir, inits)?;
     remember_known(cpu, loaded);
     Ok(loaded)
@@ -201,6 +209,17 @@ fn remember_known(cpu: &mut Cpu, index: usize) {
     let mut data = file.clone().into_bytes();
     data.push(0);
     reg.set_value(key, &file, registry::REG_SZ, data);
+}
+
+/// Whether the path `name` is of a file in the system directory.
+fn in_system_dir(cpu: &Cpu, name: &str) -> bool {
+    cpu.bus
+        .disk
+        .qualify_path(name.trim_end_matches(' '))
+        .is_some_and(|path| {
+            crate::win32::loader::directory_of(&path)
+                .eq_ignore_ascii_case(crate::win32::loader::SYSTEM_DIR)
+        })
 }
 
 fn file_name_of(path: &str) -> &str {
@@ -906,7 +925,7 @@ pub fn release(cpu: &mut Cpu, handle: u16) {
 /// The W32 section's version that first counts a Win16 module's users
 /// (`add_user`). An older one counted one for each load of the module
 /// and one for each loaded module that imports it (`recount_users`).
-pub(crate) const USERS_COUNTED: u16 = 90;
+pub(crate) const USERS_COUNTED: u16 = 91;
 
 /// Count the users of the modules of a state saved before
 /// `USERS_COUNTED` as `add_user` counts them. A module's old count less
