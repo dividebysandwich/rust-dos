@@ -410,7 +410,7 @@ cpu=pentium_ii
 win32_version=98se
 
 [drives]
-C=~/games/rom2-c
+C=~/games/rom2
 
 [autoexec]
 C:
@@ -418,10 +418,11 @@ CD \ROM2
 ALLODS2.EXE -1024
 ```
 
-Here the game's folder was copied to `~/games/rom2-c/ROM2`, so the game
-sees it as `C:\ROM2`. Games that read their folders or their CD's drive
-letter from the registry need those keys in `games/rom2.reg`, as
-REGEDIT4 text, beside the profile:
+Here `~/games/rom2` is drive C:, and the game's folder was copied into
+it as `~/games/rom2/ROM2`, so the game sees it as `C:\ROM2`, where it
+was installed. Games that read their folders or their CD's drive letter
+from the registry need those keys in `games/rom2.reg`, as REGEDIT4
+text, beside the profile:
 
 ```
 REGEDIT4
