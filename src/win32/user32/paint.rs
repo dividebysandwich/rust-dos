@@ -817,12 +817,72 @@ pub fn raised_but(cpu: &mut Cpu, hwnd: u32, before: &Region, but: u32) {
     }
 }
 
-/// SetWindowPos moved, sized, showed or hid `hwnd`: what it uncovered
-/// shows what is under it, and the window needs painting where it is.
+/// What of the screen the window `hwnd` shows, frame and children
+/// included: its visible region less what the siblings above it cover,
+/// all of them for a top-level window and for a child with
+/// WS_CLIPSIBLINGS. SetWindowPos takes it before and after a change, and
+/// what the window showed before and not after is what it uncovered.
+pub fn shown_region(state: &State, hwnd: u32) -> Region {
+    visible_region(state, hwnd, fix_flags(state, hwnd, DCX_WINDOW | DCX_USESTYLE))
+}
+
+/// The windows `gone` leave the screen with the task that made them,
+/// before they are unlinked. Windows destroys each window a task left
+/// with DestroyWindow, from the top of the windows down, and the hide
+/// that starts gives a CS_SAVEBITS window's saved bits back, as
+/// `moved` does. The result is what of the screen is left to paint: the
+/// visible regions of the windows, frames included, less what saved
+/// bits put back. What windows that stay cover above them is left out,
+/// as nothing changes there.
+pub fn windows_gone(cpu: &mut Cpu, gone: &[u32]) -> Region {
+    let state = user(cpu);
+    // A child that goes from a parent that stays (a Win16 task's child of
+    // another task's window) uncovers its part of its parent. The
+    // children of the top-level windows that go are in theirs.
+    let mut area = gone
+        .iter()
+        .filter(|&&h| !matches!(state.parent(h), DESKTOP | 0))
+        .fold(Region::new(), |area, &h| area.or(&shown_region(state, h)));
+    let tops: Vec<u32> = state
+        .top_levels()
+        .into_iter()
+        .filter(|h| gone.contains(h))
+        .collect();
+    for hwnd in tops {
+        let state = user(cpu);
+        if !state.is_visible(hwnd) {
+            continue;
+        }
+        let old = state.screen_rect(hwnd);
+        let shown = shown_region(state, hwnd);
+        stale_bits_under(state, hwnd, &Region::from_rect(old));
+        if let Some(w) = state.window_mut(hwnd) {
+            w.style &= !WS_VISIBLE;
+        }
+        let stale = if user(cpu).desktop {
+            restore_bits(cpu, hwnd, old)
+        } else {
+            None
+        };
+        area = match stale {
+            // The bits went back where it showed and they weren't stale,
+            // over whatever a window above it that went left to paint.
+            Some(stale) => area.diff(&shown.diff(&stale)).or(&shown.and(&stale)),
+            None => area.or(&shown),
+        };
+    }
+    area
+}
+
+/// SetWindowPos moved, sized, showed, hid or restacked `hwnd`, which
+/// showed `old_shown` of the screen (`shown_region`) at `old` before:
+/// what it uncovered shows what is under it, and the window needs
+/// painting where it is.
 pub fn moved(
     cpu: &mut Cpu,
     hwnd: u32,
     old: Rect,
+    old_shown: &Region,
     was_visible: bool,
     now_visible: bool,
     flags: u32,
@@ -865,14 +925,19 @@ pub fn moved(
         None
     };
     let state = user(cpu);
-    if was_visible && (!now_visible || old != new) {
-        let mut gone = Region::from_rect(old);
-        if now_visible {
-            gone = gone.diff_rect(&new);
-        }
-        if let Some(stale) = &stale {
-            gone = gone.and(stale);
-        }
+    // What it showed before and doesn't now. The windows above it covered
+    // the rest of where it was, before and after, so nothing changes for
+    // them there; a window that went down under others uncovers them
+    // where it showed over them.
+    let mut gone = if was_visible {
+        old_shown.diff(&shown_region(state, hwnd))
+    } else {
+        Region::new()
+    };
+    if let Some(stale) = &stale {
+        gone = gone.and(stale);
+    }
+    if !gone.is_empty() {
         // What is under it: its parent, or the desktop and the windows
         // there.
         let parent = state.parent(hwnd);
