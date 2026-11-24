@@ -1303,3 +1303,90 @@ fn a_freed_librarys_class_with_a_window_stays() {
     });
     assert_eq!(exit, 0, "{log}");
 }
+
+/// USER's SendMessage.
+const SEND_MESSAGE: u16 = 111;
+
+/// A SINGLEDATA program's window procedure runs with the data segment of
+/// the window's instance, as Windows' loader leaves the "mov ax,ds; nop"
+/// prologue of a program's export taking AX from USER. The program, T
+/// (SINGLEDATA, as Borland's linker marks Memphis Math's MMAP.EXE),
+/// registers the global class "Probe" with its exported procedure and
+/// runs C:\CHILD.EXE, which makes a window of that class with its own
+/// instance and sends it WM_USER: the procedure answers with the DS its
+/// prologue set up. CHILD ends with 5 if that was its own data segment
+/// (its SS), 6 if not, 7 if CreateWindow failed. T ends with 1, or 3 if
+/// RegisterClass failed.
+#[test]
+fn a_singledata_programs_window_procedure_runs_on_the_windows_instance() {
+    let mut code = Code::new();
+    let mut probe = Probe::default();
+    let mut paths_at = Vec::new();
+    code.emit(&[0x8B, 0xC7]); // mov ax,di: the program's instance
+    register_probe(&mut code, &mut probe, true);
+    let proc_at = probe.proc_at.take().unwrap();
+    exit_if_zero(&mut code, 3);
+    run_child(&mut code, &mut paths_at);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let path = code.here();
+    for at in paths_at {
+        code.patch(at, path);
+    }
+    code.emit(b"C:\\CHILD.EXE\0");
+    let proc = code.here();
+    code.patch(proc_at, proc);
+    code.emit(&[
+        0x8C, 0xD8, 0x90, // mov ax,ds; nop: the prologue the loader patches
+        0x45, // inc bp
+        0x55, // push bp
+        0x8B, 0xEC, // mov bp,sp
+        0x1E, // push ds
+        0x8E, 0xD8, // mov ds,ax
+        0x81, 0x7E, 0x0C, 0x00, 0x04, // cmp word [bp+0Ch],400h: WM_USER
+        0x75, 0x05, // jne to DefWindowProc
+        0x8C, 0xD8, // mov ax,ds: the data segment it got
+        0x99, // cwd
+        0xEB, 0x14, // jmp to the epilogue
+        0xFF, 0x76, 0x0E, // push word [bp+0Eh]: hwnd
+        0xFF, 0x76, 0x0C, // push word [bp+0Ch]: msg
+        0xFF, 0x76, 0x0A, // push word [bp+0Ah]: wParam
+        0xFF, 0x76, 0x08, // push word [bp+8]: lParam
+        0xFF, 0x76, 0x06, // push word [bp+6]
+    ])
+    .call("USER", DEF_WINDOW_PROC)
+    .emit(&[
+        0x1F, // pop ds
+        0x5D, // pop bp
+        0x4D, // dec bp
+        0xCA, 0x0A, 0x00, // retf 10
+    ]);
+    finish_probe(&mut code, probe);
+    let program = win16::module(&code, CODE, ne::SINGLEDATA, &[], &[proc]);
+
+    let mut child = Code::new();
+    let mut probe = Probe::default();
+    create_probe(&mut child, &mut probe);
+    exit_if_zero(&mut child, 7);
+    child
+        .emit(&[0x50]) // push ax: the window
+        .push(0x400)
+        .push(0)
+        .push(0)
+        .push(0)
+        .call("USER", SEND_MESSAGE)
+        .emit(&[
+            0x8C, 0xD1, // mov cx,ss
+            0x3B, 0xC1, // cmp ax,cx
+            0xB0, 0x05, // mov al,5
+            0x74, 0x02, // je over the next
+            0xB0, 0x06, // mov al,6
+        ])
+        .exit_al();
+    finish_probe(&mut child, probe);
+    let child = program_named("CHILD", &child, CODE);
+    let (exit, log) = run_with("singledata_window_proc", program, |_, base| {
+        fs::write(base.join("CHILD.EXE"), child).unwrap();
+    });
+    assert_eq!(exit, 1, "{log}");
+    assert!(ended_with(&log, 5), "{log}");
+}

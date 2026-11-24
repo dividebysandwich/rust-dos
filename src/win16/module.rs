@@ -791,21 +791,28 @@ fn unresolved(cpu: &mut Cpu, module: u16, what: &str) -> u32 {
 /// `segnum`, whose bytes are `bytes`, as Windows 3.1's loader does:
 /// "push ds; pop ax" and "mov ax, ds" become "mov ax, DGROUP", whose
 /// selector is `dgroup_sel`, in a function flagged as using the shared
-/// data segment and in an exported one of a module with a single data
-/// segment (SINGLEDATA): a library, or a program Borland's linker
-/// marked so. They become "nop; nop" in an exported function of a
-/// module with an instance for each task, which gets its data segment
-/// in AX from its caller (a MakeProcInstance thunk). Nothing changes
-/// for a module without a data segment.
+/// data segment and in an exported function of a library with a single
+/// data segment (SINGLEDATA), which programs call directly. They become
+/// "nop; nop" in an exported function of a program, SINGLEDATA or
+/// MULTIPLEDATA, which gets its data segment in AX from its caller: a
+/// MakeProcInstance thunk loads its instance's, and USER the instance
+/// of the window whose procedure it calls. Nothing changes for a module
+/// without a data segment.
 ///
 /// Wine patches only the functions flagged as using the shared data,
 /// which leaves "mov ax, ds" in an exported function of a SINGLEDATA
-/// program whose linker didn't set that flag: called through its
-/// MakeProcInstance thunk, it then runs with its caller's data segment.
-/// Windows runs such programs (Memphis Math's MMAP.EXE, whose IPC
-/// callback MCLIB.DLL calls through the thunk), so its loader patches
-/// their exports too. With one data segment "mov ax, DGROUP" is right
-/// whether the function is called through the thunk or directly.
+/// program whose linker (Borland's) didn't set that flag: called
+/// through its MakeProcInstance thunk, it then runs with its caller's
+/// data segment. Windows runs such programs, so its loader patches
+/// their exports too, and to "nop; nop": their window procedures run
+/// with the data segment of the window's instance, which isn't the
+/// program's own when another program made the window. Memphis Math's
+/// MMAP.EXE registers the global class "__canim_class"; MPHSROOM.EXE's
+/// RegisterClass of that name then fails, and it makes its window of
+/// MMAP's class. The procedure, in MMAP's code, reads the window's
+/// object in MPHSROOM's data segment and calls through the object's
+/// table there. MMAP's IPC callback, which MCLIB.DLL calls through the
+/// thunk, gets MMAP's data segment either way.
 fn patch_prologues(parsed: &ne::Module, segnum: u8, bytes: &mut [u8], dgroup_sel: u16) {
     if parsed.auto_data == 0 || dgroup_sel == 0 {
         return;
@@ -836,12 +843,13 @@ fn patch_prologues(parsed: &ne::Module, segnum: u8, bytes: &mut [u8], dgroup_sel
         }
         if p[0] == 0x8C && p[1] == 0xD8 {
             let exported = flags & ne::ENTRY_EXPORTED != 0;
+            let library = parsed.flags & ne::LIBMODULE != 0;
             if flags & ne::ENTRY_SHARED_DATA != 0
-                || (exported && parsed.flags & ne::SINGLEDATA != 0)
+                || (exported && library && parsed.flags & ne::SINGLEDATA != 0)
             {
                 p[0] = 0xB8;
                 p[1..3].copy_from_slice(&dgroup_sel.to_le_bytes());
-            } else if exported && parsed.flags & ne::MULTIPLEDATA != 0 {
+            } else if exported && (!library || parsed.flags & ne::MULTIPLEDATA != 0) {
                 p[0] = 0x90;
                 p[1] = 0x90;
             }
