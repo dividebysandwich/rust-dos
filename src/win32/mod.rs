@@ -874,6 +874,7 @@ fn start(cpu: &mut Cpu) {
     }
     let (psp, rm_stack, a20, cr4) = (cpu.current_psp, (cpu.ss(), cpu.sp()), cpu.bus.a20(), cpu.cr4);
     let win32 = &mut cpu.bus.win32;
+    let first = win32.processes.is_empty();
     win32.psp = psp;
     win32.rm_stack = rm_stack;
     win32.a20 = a20;
@@ -883,7 +884,12 @@ fn start(cpu: &mut Cpu) {
     dll_files::sync(&mut cpu.bus);
     directories::session_starts(&mut cpu.bus.win32);
     boot::session_starts(cpu);
-    // Windows sets the keyboard's typematic rate from its own settings.
+    // Windows sets the keyboard's typematic rate from its own settings,
+    // which it reads from the registry and WIN.INI as it starts: when
+    // the first program does.
+    if first {
+        user32::sysparams::read_keyboard_settings(cpu);
+    }
     user32::sysparams::program_keyboard(cpu);
     loop {
         let Some(program) = cpu.bus.win32.pending.take() else {

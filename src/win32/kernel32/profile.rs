@@ -345,7 +345,7 @@ pub(super) fn get_profile_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The number at the start of `text` as Windows 95 reads it: an
 /// optional '-' and decimal digits, in 32 bits; 0 if there are none.
-fn parse_int(text: &[u8]) -> u32 {
+pub(in crate::win32) fn parse_int(text: &[u8]) -> u32 {
     let (negative, digits) = match text.split_first() {
         Some((b'-', rest)) => (true, rest),
         _ => (false, text),
@@ -480,6 +480,22 @@ pub(in crate::win32) fn profile_int(
 ) -> u32 {
     let sections = load(cpu, Some(file));
     int_in(&sections, section, key, default)
+}
+
+/// `profile_value` as a number, as GetPrivateProfileIntA reads it, or
+/// None where it gives its default: the file doesn't have the key, or
+/// its value is empty.
+pub(in crate::win32) fn profile_number(
+    cpu: &mut Cpu,
+    file: &[u8],
+    section: &[u8],
+    key: &[u8],
+) -> Option<u32> {
+    let sections = load(cpu, Some(file));
+    find(&sections, section)
+        .and_then(|s| value_of(s, key))
+        .filter(|value| !value.is_empty() && !key.is_empty())
+        .map(parse_int)
 }
 
 /// GetPrivateProfileSectionNamesA(buffer, size, file).

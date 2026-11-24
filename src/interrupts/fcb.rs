@@ -390,6 +390,16 @@ pub fn set_random(cpu: &mut Cpu) {
     set_random_record(&mut cpu.bus, fcb, record);
 }
 
+/// Whether another's lock (INT 21h AH=5Ch) has some of the `count` bytes
+/// from `at` of the open file `sft` that an FCB call reads or writes. DOS
+/// checks an FCB's I/O as it checks a handle's. For an FCB it raises INT
+/// 24h first, and Fail, which the built-in DOS answers for it, ends the
+/// call with AL=01h and nothing moved (FCBIO2.ASM's FCBDeath).
+fn locked(cpu: &Cpu, sft: u16, at: u64, count: u32, write: bool) -> bool {
+    let disk = &cpu.bus.disk;
+    disk.has_locks() && disk.io_locked_at(sft, super::int21::lock_owner(cpu), at, count, write)
+}
+
 /// Read `count` records from `record` on of the FCB's file into the DTA.
 /// Returns the records read (a partial last one, padded with zeros,
 /// counts) and AL: 00h, 01h at the end of the file with nothing read, 02h
@@ -399,6 +409,9 @@ fn read_records(cpu: &mut Cpu, fcb: u32, record: u32, count: u32) -> (u32, u8) {
     let size = record_size(&mut cpu.bus, fcb).max(1) as u32;
     if cpu.bus.dta_offset as u32 + size * count > 0x1_0000 {
         return (0, 0x02);
+    }
+    if locked(cpu, handle, record as u64 * size as u64, size * count, false) {
+        return (0, 0x01);
     }
     let dta = cpu.get_physical_addr(cpu.bus.dta_segment, cpu.bus.dta_offset) as u32;
     // The DTA is all there before the file moves on.
@@ -431,6 +444,9 @@ fn write_records(cpu: &mut Cpu, fcb: u32, record: u32, count: u32) -> (u32, u8) 
         return (0, 0x02);
     }
     let at = record as u64 * size as u64;
+    if locked(cpu, handle, at, size * count, true) {
+        return (0, 0x01);
+    }
     if count == 0 {
         let al = if cpu.bus.disk.set_file_size(handle, at).is_ok() { 0x00 } else { 0x01 };
         cpu.bus.guest_write_32(fcb + 0x10, at as u32);

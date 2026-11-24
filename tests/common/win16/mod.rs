@@ -112,7 +112,7 @@ pub fn program(code: &Code, flags: u16) -> Vec<u8> {
 /// program the first one starts, which would otherwise be another
 /// instance of T.
 pub fn program_named(name: &str, code: &Code, flags: u16) -> Vec<u8> {
-    build(name, code, flags, &[])
+    build(name, code, flags, ne::MULTIPLEDATA, &[], &[])
 }
 
 /// `program`, with the resources `resources` (type, name, data),
@@ -122,16 +122,34 @@ pub fn program_with_resources(
     flags: u16,
     resources: &[(ne::ResId, ne::ResId, &[u8])],
 ) -> Vec<u8> {
-    build("T", code, flags, resources)
+    module(code, flags, ne::MULTIPLEDATA, resources, &[])
 }
 
+/// The program `program_with_resources` makes, with the module flags
+/// `module_flags`, and the functions at the offsets `exports` of the
+/// code in the entry table as ordinals 1, 2 and on, flagged exported
+/// only (not as using the shared data segment, which Borland's linker
+/// leaves out).
+pub fn module(
+    code: &Code,
+    flags: u16,
+    module_flags: u16,
+    resources: &[(ne::ResId, ne::ResId, &[u8])],
+    exports: &[u16],
+) -> Vec<u8> {
+    build("T", code, flags, module_flags, resources, exports)
+}
+
+/// `module`, with the module name `name`.
 fn build(
     name: &str,
     code: &Code,
     flags: u16,
+    module_flags: u16,
     resources: &[(ne::ResId, ne::ResId, &[u8])],
+    exports: &[u16],
 ) -> Vec<u8> {
-    let mut b = ne::Builder::new(name, ne::MULTIPLEDATA);
+    let mut b = ne::Builder::new(name, module_flags);
     for (kind, name, data) in resources {
         b.resource(kind.clone(), name.clone(), 0x1030, data);
     }
@@ -162,6 +180,15 @@ fn build(
         alloc: 0x100,
         relocations: Vec::new(),
     });
+    for (i, &offset) in exports.iter().enumerate() {
+        let entry = ne::Entry::Code {
+            segment: text as u8,
+            offset,
+            flags: ne::ENTRY_EXPORTED,
+            moveable: true,
+        };
+        b.entry(i as u16 + 1, entry);
+    }
     b.auto_data(data, 0x400, 0x800);
     b.entry_point(text, 0);
     b.initial_stack(data, 0);

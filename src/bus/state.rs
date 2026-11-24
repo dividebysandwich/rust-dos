@@ -23,6 +23,7 @@ const SOUND_LOADS: [u16; 2] = [4, SOUND_VERSION];
 const DOS_VERSION: u16 = 6;
 const CD_HEAD_VERSION: u16 = 1;
 const VCPI_VERSION: u16 = 1;
+const LOCK_VERSION: u16 = 1;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
@@ -394,6 +395,11 @@ impl Bus {
         // VCPI's, in a section of its own so states saved before it load
         // (with none of its pages handed out).
         w.section(b"VCPI", VCPI_VERSION, |w| vcpi.save(w));
+        // The locked ranges of open files (INT 21h AH=5Ch), only with any,
+        // so other states are as they were.
+        if !disk.locks().is_empty() {
+            w.section(b"LOCK", LOCK_VERSION, |w| disk.locks().to_vec().save(w));
+        }
         // The Ultrasound's memory first, where it stays in place for
         // rewind's deltas (rewind.rs) whatever the queues after it hold.
         w.section(b"SOUN", SOUND_VERSION, |w| {
@@ -830,6 +836,11 @@ impl Bus {
             vcpi.load(&mut r.section(b"VCPI", VCPI_VERSION)?)?;
         } else {
             *vcpi = crate::vcpi::Vcpi::default();
+        }
+        if r.next_is(b"LOCK") {
+            let mut locks = Vec::new();
+            locks.load(&mut r.section(b"LOCK", LOCK_VERSION)?)?;
+            disk.set_locks(locks);
         }
         let mut section = r.section_of(b"SOUN", &SOUND_LOADS)?;
         load_device(gus, "Gravis Ultrasound", &mut section)?;
