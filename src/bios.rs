@@ -85,6 +85,11 @@ const MASTER_EOI_HANDLER: u16 = 0x1110;
 /// segment and returns with it, which, passed back to the code the tick
 /// interrupted, sends that code's writes into the program's runtime.
 ///
+/// The AT's handler also starts with STI and loads DS with 0040h to count
+/// the tick, so INT 1Ch is entered with IF set and DS = 0040h. Here the
+/// tick is counted by the emulator, and INT 1Ch gets IF clear and the
+/// interrupted program's DS (#1838): the code fills its slot.
+///
 /// A save state keeps the ROM it was saved with (it is part of the RAM),
 /// so a state of an older build runs on with its own handler: its stack
 /// may hold a return into the old handler's code after INT 1Ch.
