@@ -62,12 +62,9 @@ containers, it stops with an error. Pass `--appimage-extract-and-run`
 before the other options, or set `APPIMAGE_EXTRACT_AND_RUN=1`, and it
 unpacks itself to a temporary directory and runs from there.
 
-Its settings, log and downloaded ROMs are kept in
+Its settings, game profiles, saves, log and downloaded ROMs are kept in
 `~/.config/rust-dos/`, so replacing the AppImage with a newer one keeps
-them. Rust-DOS also reads a `rust-dos.conf` in the shell's current
-directory: to use settings kept next to the AppImage, `cd` to its folder
-before you run it. The log and ROMs still go to `~/.config/rust-dos/`
-either way. To keep everything in one folder, use the `.tar.gz` as a
+them. To keep all of that in one folder instead, use the `.tar.gz` as a
 portable install, described below.
 
 ### First DOS game
