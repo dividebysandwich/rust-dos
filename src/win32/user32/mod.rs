@@ -1060,7 +1060,7 @@ static APIS: &[Api] = &[
     stdcall("LoadIconW", 406, 2, resource::load_icon),
     stdcall("LoadCursorW", 404, 2, resource::load_cursor),
     stdcall("CopyImage", 70, 5, resource::copy_image),
-    stdcall("LoadCursorFromFileA", 402, 1, nothing),
+    stdcall("LoadCursorFromFileA", 402, 1, resource::load_cursor_from_file),
     stdcall(
         "CreateIconFromResource",
         84,

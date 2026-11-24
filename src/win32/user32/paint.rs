@@ -2365,16 +2365,31 @@ const SRCAND: u32 = 0x0088_00C6;
 const SRCINVERT: u32 = 0x0066_0046;
 
 /// Draw the icon or cursor `icon` at (`x`, `y`) of `hdc`, `cx` by `cy`
-/// (0: its own size): its mask by AND, then its image by XOR.
+/// (0: its own size): its mask by AND, then its image by XOR. An
+/// animated cursor draws its first step.
 pub fn draw_icon_at(
+    cpu: &mut Cpu,
+    hdc: u32,
+    at: (i32, i32),
+    icon: u32,
+    size: (i32, i32),
+    flags: u32,
+) -> bool {
+    draw_icon_step(cpu, hdc, at, icon, 0, size, flags)
+}
+
+/// `draw_icon_at` for step `step` of an animated cursor, which another
+/// icon or cursor ignores: false past an animated cursor's last step.
+fn draw_icon_step(
     cpu: &mut Cpu,
     hdc: u32,
     (x, y): (i32, i32),
     icon: u32,
+    step: u32,
     (cx, cy): (i32, i32),
     flags: u32,
 ) -> bool {
-    let Some(ic) = super::resource::icon(cpu, icon) else {
+    let Some(ic) = super::resource::icon(cpu, icon).and_then(|ic| ic.step(step)) else {
         return false;
     };
     let (w, h) = (ic.width, ic.height);
@@ -2440,9 +2455,10 @@ pub fn draw_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// DrawIconEx(hdc, x, y, icon, cx, cy, step, brush, flags): with a brush,
-/// the rectangle is filled with it first.
+/// the rectangle is filled with it first. `step` picks an animated
+/// cursor's step.
 pub fn draw_icon_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[hdc, x, y, icon, cx, cy, _step, brush, flags] = args else {
+    let &[hdc, x, y, icon, cx, cy, step, brush, flags] = args else {
         unreachable!()
     };
     let (x, y, cx, cy) = (x as i32, y as i32, cx as i32, cy as i32);
@@ -2457,7 +2473,7 @@ pub fn draw_icon_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         flags
     };
-    Some(draw_icon_at(cpu, hdc, (x, y), icon, (cx, cy), flags) as u32)
+    Some(draw_icon_step(cpu, hdc, (x, y), icon, step, (cx, cy), flags) as u32)
 }
 
 /// DrawCaption's flags.
