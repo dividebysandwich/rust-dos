@@ -81,10 +81,14 @@ impl DiskController {
         // the create's handle is still unused must find it empty.
         self.settle_named(filename);
         if let Some(data) = self.system_file(filename) {
-            if create {
-                return Err(0x05);
+            if !create && mode & 0x03 != 1 && mode & 0x03 != 2 {
+                return self.open_system_file(filename, data, mode, owner);
             }
-            return self.open_system_file(filename, data, mode, owner);
+            // Written to, it becomes a file of the drive's, which then
+            // shadows the shown one: a create makes it empty, an open
+            // for writing starts it as a copy.
+            let start: &[u8] = if create { &[] } else { &data };
+            self.write_whole_file(filename, start, None)?;
         }
         // A system directory the drive hasn't is no file to open (05h), and
         // a file in it that isn't a system file is not found (02h), as in
@@ -232,8 +236,9 @@ impl DiskController {
         let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
         self.host_dirs.creating();
-        // A system file or directory is there already.
-        if self.is_system_entry(filename) {
+        // A system directory is there already; a system file is made a
+        // file of the drive's (`open_or_create`).
+        if self.is_system_dir(filename) {
             return Err(0x05);
         }
         self.make_system_dirs(filename);
@@ -341,7 +346,9 @@ impl DiskController {
         self.host_dirs.creating();
         // Before the file is replaced: a FAT image's entry may move.
         self.settle_named(dos_path);
-        if self.is_system_entry(dos_path) {
+        // A system file written becomes a file of the drive's, which
+        // shadows the shown one; a system directory is no file.
+        if self.is_system_dir(dos_path) {
             return Err(0x05);
         }
         self.make_system_dirs(dos_path);
@@ -380,8 +387,11 @@ impl DiskController {
     pub fn delete_file(&mut self, filename: &str) -> Result<(), u8> {
         // A disk image's entry must not be emptied after it is freed.
         self.settle_named(filename);
+        // The built-in Windows's own files can't go: deleting one changes
+        // nothing, so a setup that deletes it before it puts its own copy
+        // there goes on (Windows' own files are writable).
         if self.system_file(filename).is_some() {
-            return Err(0x05);
+            return Ok(());
         }
         // A system directory the drive hasn't, or a file in it, is not
         // found (02h), as a directory or a missing file is on the host.
@@ -416,15 +426,26 @@ impl DiskController {
         // A disk image's entry may move: empty the file while it is where
         // the handle has it.
         self.settle_named(from);
-        // A system file is read-only, and a system directory has them.
-        if self.is_system_entry(from) || self.is_system_entry(to) {
+        // A system directory has system files: it doesn't move, and
+        // nothing takes its name.
+        if self.is_system_dir(from) || self.is_system_dir(to) {
             return Err(0x05);
+        }
+        // A system file to rename stays, as it can't be deleted
+        // (`delete_file`): the new name gets a copy of it.
+        if let Some(data) = self.system_file(from) {
+            if self.exists(to) && self.system_file(to).is_none() {
+                return Err(0x05);
+            }
+            return self.write_whole_file(to, &data, None);
         }
         // A file in a system directory the drive hasn't is not found
         // (02h), on a disk image as on the host.
         if self.in_system_dir(from) {
             return Err(0x02);
         }
+        // A file renamed to a system file's name shadows it: the system
+        // file is gone as far as the program can tell (`delete_file`).
         self.make_system_dirs(to);
         if let Some((drive, volume, from_parts)) = self.locate_fat(from) {
             let from_parts = refs(&from_parts);

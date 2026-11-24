@@ -104,13 +104,17 @@ finds enough. DOS's own answer for such a drive is 160 to 480 MB.
 
 ### The system folder
 
-The built-in DLLs show as read-only files in `C:\WINDOWS\SYSTEM`, to
-Windows programs and DOS programs alike, as on Windows 98. A game that
-looks for a DLL there before it loads it finds the ones the built-in
-Windows has. `GLIDE2X.DLL` and `GLIDE3X.DLL` are among them only with a
-3dfx card (`voodoo=true`, or `machine=svga_voodoo3` or `svga_banshee`),
-so a game that checks for Glide by its file sees none without one. A DLL
-of the same name that a game copies to C: wins over the built-in one.
+The built-in DLLs show as files in `C:\WINDOWS\SYSTEM`, to Windows
+programs and DOS programs alike, as on Windows 98. A game that looks for
+a DLL there before it loads it finds the ones the built-in Windows has.
+`GLIDE2X.DLL` and `GLIDE3X.DLL` are among them only with a 3dfx card
+(`voodoo=true`, or `machine=svga_voodoo3` or `svga_banshee`), so a game
+that checks for Glide by its file sees none without one.
+
+A file of the same name that a game copies to C: takes the shown file's
+place, as a copy over Windows' own file does: setups that copy their own
+`COMMDLG.DLL` or `VER.DLL` there succeed. Deleting a shown file, or
+changing its attributes, changes nothing.
 
 `WING32.DLL`, WinG, is among them too. Games of 1995 that draw through
 WinG installed it from their CDs; on the built-in Windows they find it
@@ -129,9 +133,9 @@ The 16-bit system modules are there too, as on Windows 95 and 98:
 the others the built-in Windows has for Windows 3.1 programs. Each is an
 NE file with the module's name, its exports and a version resource, so
 a program that looks for `MMSYSTEM.DLL` by its file, as the Autodesk
-Animator player `AAPLAY.DLL` does, finds it. Loading one by its
-name, by its path in the system folder or as a copy of the file under
-another name gives the built-in module.
+Animator player `AAPLAY.DLL` does, finds it. Loading one by its name,
+by its path in the system folder or as a copy of the file under another
+name gives the built-in module.
 
 ### DOS programs started from Windows
 
@@ -148,7 +152,7 @@ aren't used yet.
 
 ### Notepad
 
-`C:\WINDOWS\NOTEPAD.EXE` is there, read-only, as on Windows 98, and the
+`C:\WINDOWS\NOTEPAD.EXE` is there, as on Windows 98, and the
 registry opens text files (`.txt`) with it. A setup that offers to show
 its readme when it ends starts it, by its name or by opening the file,
 and the readme opens in a window titled with its name

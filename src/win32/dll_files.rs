@@ -8,8 +8,9 @@
 //! Each file is a PE image of the DLL: its headers, sections and export
 //! directory as the DLL is mapped in a process, with the functions the
 //! version of Windows has, and the version resource GetFileVersionInfo
-//! gives for it. DOS shows them in the directory (disk/system_files.rs),
-//! read-only; a file of the same name on the drive wins over one.
+//! gives for it. DOS shows them in the directory (disk/system_files.rs);
+//! a file of the same name on the drive wins over one, and writing to
+//! one makes such a file.
 //!
 //! MSVCRT20.DLL and MSVCRT40.DLL are there too, as files whose exports
 //! forward to MSVCRT.DLL (forwarders.rs), which the loader loads as

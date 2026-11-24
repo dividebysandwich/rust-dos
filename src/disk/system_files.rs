@@ -1,15 +1,17 @@
 //! Files the machine shows in directories of a drive that the drive
 //! doesn't have: the built-in Windows's DLLs in C:\WINDOWS\SYSTEM and its
 //! programs in C:\WINDOWS (win32/dll_files.rs). DOS and the programs
-//! above it see them as any other file: they open for reading, and show
-//! in searches and to the attribute calls as read-only files. Opening one
-//! for writing, making, deleting or renaming one, or changing its
-//! attributes is access denied, as for a read-only file.
+//! above it see them as any other file: they open, and show in searches
+//! and to the attribute calls as files of their own.
 //!
 //! A file or directory the drive has of the same name wins: a game that
-//! copies its own GLIDE2X.DLL there has that one. The directories on the
-//! way to the files show while the drive hasn't them, and are made on the
-//! drive when a file or directory is made in them.
+//! copies its own GLIDE2X.DLL there has that one. Writing to a system
+//! file makes it such a file, as Windows' own files are writable: making
+//! it or opening it for writing, or renaming a file to its name. Setups
+//! copy their own COMMDLG.DLL or VER.DLL there. Deleting one or changing
+//! its attributes changes nothing, and renaming one copies it. The
+//! directories on the way to the files show while the drive hasn't them,
+//! and are made on the drive when a file or directory is made in them.
 
 use super::*;
 use std::collections::BTreeMap;
@@ -160,10 +162,10 @@ impl DiskController {
     }
 
     /// The attributes of the system file or directory `dos_path` names:
-    /// read-only and archive, or directory.
+    /// archive, as Windows' own files have, or directory.
     pub(super) fn system_attribute(&self, dos_path: &str) -> Option<u16> {
         match self.shown(dos_path)? {
-            Shown::File(_) => Some(0x21),
+            Shown::File(_) => Some(0x20),
             Shown::Dir => Some(0x10),
         }
     }
@@ -271,10 +273,10 @@ impl DiskController {
                     filename: name.clone(),
                     size: data.len() as u32,
                     is_dir: false,
-                    is_readonly: true,
+                    is_readonly: false,
                     dos_time: MEMORY_TIME,
                     dos_date: MEMORY_DATE,
-                    attr: 0x21,
+                    attr: 0x20,
                 });
             }
         }

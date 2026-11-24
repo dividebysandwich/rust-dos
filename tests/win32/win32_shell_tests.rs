@@ -791,9 +791,9 @@ fn notepad_shows_a_readme_that_winexec_opens() {
     ];
     let code = program(imports, &data, |a, l| {
         a.xor(ebx, ebx)?;
-        // A read-only file in the Windows directory.
+        // A file in the Windows directory.
         call(a, l.import(1), &[l.at(0)])?;
-        check_eax(a, 0x21, 0)?;
+        check_eax(a, 0x20, 0)?;
         call(a, l.import(2), &[0, l.at(0x20), 0, 0x104, l.at(0x100), 0])?;
         check_eax(a, 22, 1)?;
         // WinExec returns once Notepad waits for input, its window made.
