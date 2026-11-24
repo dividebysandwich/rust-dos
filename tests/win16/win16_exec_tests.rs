@@ -698,8 +698,215 @@ fn library_importing(name: &str, dll: &str) -> Vec<u8> {
     b.build()
 }
 
-/// USER's RegisterClass.
+/// KERNEL's GetModuleUsage, and USER's CreateWindow, RegisterClass and
+/// DefWindowProc.
+const GET_MODULE_USAGE: u16 = 48;
+const CREATE_WINDOW: u16 = 41;
 const REGISTER_CLASS: u16 = 57;
+const DEF_WINDOW_PROC: u16 = 107;
+
+/// The places in a code segment that `register_probe` and
+/// `create_probe` read: the class's name and its window procedure.
+#[derive(Default)]
+struct Probe {
+    names_at: Vec<u16>,
+    proc_at: Option<u16>,
+}
+
+/// Code that registers the class "Probe", global (CS_GLOBALCLASS) if
+/// `global`, with the instance in AX, from a WNDCLASS on the stack: AX
+/// is then RegisterClass's atom, or 0. `finish_probe` writes the name
+/// and the procedure.
+fn register_probe(code: &mut Code, probe: &mut Probe, global: bool) {
+    let style: u16 = if global { 0x4000 } else { 0 };
+    let [lo, hi] = style.to_le_bytes();
+    code.emit(&[
+        0x83, 0xEC, 0x1A, // sub sp,26
+        0x8B, 0xDC, // mov bx,sp
+        0x36, 0xC7, 0x07, lo, hi, // mov word [ss:bx],style
+    ]);
+    probe.proc_at = Some(code.here() + 4);
+    code.emit(&[
+        0x36, 0xC7, 0x47, 0x02, 0x00, 0x00, // mov word [ss:bx+2],proc
+        0x36, 0x8C, 0x4F, 0x04, // mov [ss:bx+4],cs
+        0x36, 0x89, 0x47, 0x0A, // mov [ss:bx+10],ax: the instance
+    ]);
+    // No extra bytes, icon, cursor, brush or menu.
+    for at in [6, 8, 12, 14, 16, 18, 20] {
+        code.emit(&[0x36, 0xC7, 0x47, at, 0x00, 0x00]);
+    }
+    probe.names_at.push(code.here() + 4);
+    code.emit(&[
+        0x36, 0xC7, 0x47, 0x16, 0x00, 0x00, // mov word [ss:bx+22],name
+        0x36, 0x8C, 0x4F, 0x18, // mov [ss:bx+24],cs
+        0x16, 0x53, // push ss; push bx
+    ]);
+    code.call("USER", REGISTER_CLASS);
+    code.emit(&[0x83, 0xC4, 0x1A]); // add sp,26
+}
+
+/// Code that makes a popup window of the class "Probe" with the
+/// instance in DI, and leaves it there: AX is then its handle, or 0.
+fn create_probe(code: &mut Code, probe: &mut Probe) {
+    probe.names_at.push(code.here() + 2);
+    code.push_far(0); // the class
+    probe.names_at.push(code.here() + 2);
+    code.push_far(0); // the title: the class's name too
+    code.push(0x8000).push(0); // WS_POPUP
+    for v in [0, 0, 10, 10, 0, 0] {
+        code.push(v); // the place, the size, no parent, no menu
+    }
+    code.emit(&[0x57]); // push di: the instance
+    code.push(0).push(0).call("USER", CREATE_WINDOW);
+}
+
+/// The class's name, and its window procedure (a jump to
+/// DefWindowProc), at the end of `code`.
+fn finish_probe(code: &mut Code, probe: Probe) {
+    let here = code.here();
+    for at in probe.names_at {
+        code.patch(at, here);
+    }
+    code.emit(b"Probe\0");
+    if let Some(at) = probe.proc_at {
+        let here = code.here();
+        code.patch(at, here);
+        let user = code.module("USER");
+        let target = ne::Target::Ordinal {
+            module: user,
+            ordinal: DEF_WINDOW_PROC,
+        };
+        let at = code.here() + 1;
+        code.emit(&[0xEA, 0xFF, 0xFF, 0x00, 0x00]); // jmp far DefWindowProc
+        code.fixup(at, ne::ADDR_FARPTR, target);
+    }
+}
+
+/// `mov al,exit`, and the end of the program, if AX is 0.
+fn exit_if_zero(code: &mut Code, exit: u8) {
+    code.emit(&[
+        0x0B, 0xC0, // or ax,ax
+        0x75, 0x06, // jnz over the exit
+        0xB0, exit, 0xB4, 0x4C, 0xCD, 0x21, // mov al,exit; exit
+    ]);
+}
+
+/// A library's classes are unregistered when the library is freed, as
+/// Windows 3.1's and Windows 95's USER does when KERNEL frees a module:
+/// a global class registered with the instance of C:\PROBE.DLL is gone
+/// once FreeLibrary has freed it, so the program can register its own
+/// global class of that name. Exit code 1, 2 if LoadLibrary failed, 3 if
+/// the library's class wasn't registered, 4 if the program's wasn't.
+#[test]
+fn a_freed_librarys_classes_are_unregistered() {
+    let mut code = Code::new();
+    let mut probe = Probe::default();
+    let path_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+    code.emit(&[
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0x73, 0x06, // jae over the exit
+        0xB0, 0x02, 0xB4, 0x4C, 0xCD, 0x21, // mov al,2; exit
+        0x8B, 0xF0, // mov si,ax: the library
+    ]);
+    register_probe(&mut code, &mut probe, true);
+    exit_if_zero(&mut code, 3);
+    code.emit(&[0x56]).call("KERNEL", FREE_LIBRARY); // push si
+    code.emit(&[0x8B, 0xC7]); // mov ax,di: the program's instance
+    register_probe(&mut code, &mut probe, true);
+    exit_if_zero(&mut code, 4);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let path = code.here();
+    code.patch(path_at, path);
+    code.emit(b"C:\\PROBE.DLL\0");
+    finish_probe(&mut code, probe);
+    let (exit, log) = run_with("freed_library_classes", program(&code, CODE), |_, base| {
+        fs::write(base.join("PROBE.DLL"), library("PROBE")).unwrap();
+    });
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// C:\CHILD.EXE: it registers the class "Probe" with its instance,
+/// global if `global`, makes a window of it if `window` and leaves it
+/// there, and ends with 5; with 6 if RegisterClass failed, 7 if
+/// CreateWindow did.
+fn probe_child(global: bool, window: bool) -> Vec<u8> {
+    let mut child = Code::new();
+    let mut probe = Probe::default();
+    child.emit(&[0x8B, 0xC7]); // mov ax,di: its instance
+    register_probe(&mut child, &mut probe, global);
+    exit_if_zero(&mut child, 6);
+    if window {
+        create_probe(&mut child, &mut probe);
+        exit_if_zero(&mut child, 7);
+    }
+    child.emit(&[0xB0, 0x05]).exit_al();
+    finish_probe(&mut child, probe);
+    program(&child, CODE)
+}
+
+/// Code that starts C:\CHILD.EXE and waits until it has ended and its
+/// module is gone (Yield, GetModuleUsage), or ends with 2 if WinExec
+/// failed. The place of the path's offset is put in `paths_at`.
+fn run_child(code: &mut Code, paths_at: &mut Vec<u16>) {
+    paths_at.push(code.here() + 2);
+    code.push_far(0).push(1).call("KERNEL", WIN_EXEC); // SW_SHOWNORMAL
+    code.emit(&[
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0x73, 0x06, // jae over the exit
+        0xB0, 0x02, 0xB4, 0x4C, 0xCD, 0x21, // mov al,2; exit
+        0x8B, 0xF0, // mov si,ax: the child's instance
+    ]);
+    let wait = code.here();
+    code.call("KERNEL", YIELD).emit(&[0x56]); // push si
+    code.call("KERNEL", GET_MODULE_USAGE);
+    let back = wait as i32 - (code.here() as i32 + 4);
+    code.emit(&[0x0B, 0xC0, 0x75, back as u8]); // or ax,ax; jnz wait
+}
+
+/// A program runs C:\CHILD.EXE (`probe_child(true, window)`) to its
+/// end, then registers a global class "Probe" itself: 1, or 4 if that
+/// failed.
+fn after_global_child(test: &str, window: bool) -> (u8, String) {
+    let mut code = Code::new();
+    let mut probe = Probe::default();
+    let mut paths_at = Vec::new();
+    run_child(&mut code, &mut paths_at);
+    code.emit(&[0x8B, 0xC7]); // mov ax,di: the program's instance
+    register_probe(&mut code, &mut probe, true);
+    exit_if_zero(&mut code, 4);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let path = code.here();
+    for at in paths_at {
+        code.patch(at, path);
+    }
+    code.emit(b"C:\\CHILD.EXE\0");
+    finish_probe(&mut code, probe);
+    let child = probe_child(true, window);
+    run_with(test, program(&code, CODE), |_, base| {
+        fs::write(base.join("CHILD.EXE"), child).unwrap();
+    })
+}
+
+/// A program's classes are unregistered when it ends while other
+/// programs go on: once C:\CHILD.EXE, which registered the global class
+/// "Probe", has ended, the program registers a global class of that
+/// name.
+#[test]
+fn an_ended_programs_classes_are_unregistered() {
+    let (exit, log) = after_global_child("ended_program_classes", false);
+    assert_eq!(exit, 1, "{log}");
+    assert!(log.contains("ended with exit code 5"), "{log}");
+}
+
+/// The windows a program leaves when it ends go with it, and so its
+/// classes, which those windows kept, are unregistered too.
+#[test]
+fn an_ended_programs_classes_go_with_the_windows_it_left() {
+    let (exit, log) = after_global_child("ended_program_window_classes", true);
+    assert_eq!(exit, 1, "{log}");
+    assert!(log.contains("ended with exit code 5"), "{log}");
+}
 
 /// Where the class test keeps the library's instance and its WNDCLASS.
 const LIB: u16 = 0x20;
@@ -791,21 +998,14 @@ fn a_freed_librarys_classes_go_with_it() {
     assert_eq!(exit, 0, "{log}");
 }
 
-/// USER's CreateWindow, GetClassName and DefWindowProc.
-const CREATE_WINDOW: u16 = 41;
+/// USER's GetClassName.
 const GET_CLASS_NAME: u16 = 58;
-const DEF_WINDOW_PROC: u16 = 107;
 
 /// Where the kept-class test keeps the program's instance, its window
 /// and the name GetClassName gives.
 const INSTANCE: u16 = 0x22;
 const HWND: u16 = 0x24;
 const CLASS_NAME: u16 = 0x60;
-
-/// `test ax,ax`, and the program ends with `exit` if AX is 0.
-fn exit_if_zero(code: &mut Code, exit: u8) {
-    code.emit(&[0x85, 0xC0, 0x75, 0x06, 0xB0, exit, 0xB4, 0x4C, 0xCD, 0x21]);
-}
 
 /// A freed library's class that still has a window stays, as
 /// UnregisterClass leaves one. The window keeps its class, so a class
