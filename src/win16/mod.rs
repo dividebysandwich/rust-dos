@@ -31,7 +31,7 @@ mod local;
 mod lz;
 mod message;
 mod misc;
-mod module;
+pub(crate) mod module;
 mod ole2;
 mod ole2disp;
 pub(crate) mod resource;

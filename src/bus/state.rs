@@ -983,6 +983,9 @@ impl Bus {
         // The Win16 KERNEL's stubs for imports nothing has keep their ids
         // when KERNEL's table grows.
         crate::win16::builtin::mend(self)?;
+        // The Win16 modules' counts of an older state, which counted each
+        // import, cover every user that reaches a module.
+        crate::win16::module::mend_users(self);
         Ok(lost)
     }
 
