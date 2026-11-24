@@ -86,7 +86,23 @@ static APIS: &[Api] = &[
     stdcall("EqualSid", 100, 2, not_implemented),
     stdcall("GetTokenInformation", 148, 5, not_implemented),
     stdcall("OpenThreadToken", 204, 4, not_implemented),
+    // The Registry Editor, C:\WINDOWS\REGEDIT.EXE: its work (regedit.rs).
+    stdcall("RegeditMain", 0, 1, super::regedit::main),
 ];
+
+/// The address of ADVAPI32's function `name` in the image a process
+/// started now gets, for a program file the system makes (REGEDIT.EXE).
+pub(super) fn address_for_new(bus: &crate::bus::Bus, name: &str) -> u32 {
+    let dll = super::stubs::DLLS
+        .iter()
+        .position(|d| d.name == DLL.name)
+        .expect("ADVAPI32 is a built-in DLL");
+    let api = APIS
+        .iter()
+        .position(|a| a.name == name)
+        .unwrap_or_else(|| panic!("ADVAPI32 has no {}", name));
+    super::stub_tables::address_for_new(bus, dll, api)
+}
 
 const FALSE: u32 = 0;
 const TRUE: u32 = 1;
