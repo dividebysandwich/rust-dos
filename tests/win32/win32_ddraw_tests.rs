@@ -1120,6 +1120,161 @@ fn a_back_buffer_in_system_memory_doesnt_flip_with_the_primary_surface() {
     assert_eq!(back & DDSCAPS_FLIP, 0);
 }
 
+/// Where the second back buffer's DDSCAPS is, after the first's at CAPS.
+const NEXT_CAPS: u32 = CAPS + 0x10;
+/// Where Lock describes the front buffer: the palette's entries' place,
+/// which the programs that use it don't need.
+const FRONT_LOCKED: u32 = ENTRIES;
+
+/// The data of a program that makes a flip chain in system memory, as
+/// G-Police's software renderer does: the primary surface and
+/// `backbuffers` back buffers asked for with DDSCAPS_SYSTEMMEMORY.
+fn system_flip_chain_data(backbuffers: u32) -> Vec<u8> {
+    let mut d = data();
+    let caps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX | DDSCAPS_SYSTEMMEMORY;
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        caps,
+        0,
+        0,
+        backbuffers,
+    );
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    put32(&mut d, NEXT_CAPS, DDSCAPS_FLIP);
+    put32(&mut d, LOCKED, 108);
+    put32(&mut d, FRONT_LOCKED, 108);
+    d
+}
+
+/// Write `value` at the start of the first row of the surface at data
+/// offset `slot`, through Lock (described at LOCKED) and Unlock.
+fn draw_first_pixels(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    slot: u32,
+    value: u32,
+) -> Result<(), IcedError> {
+    c.com(
+        a,
+        l,
+        slot,
+        S_LOCK,
+        &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+    )?;
+    a.mov(edi, dword_ptr(l.at(LOCKED + 0x24)))?;
+    a.mov(dword_ptr(edi), value as i32)?;
+    c.com(a, l, slot, S_UNLOCK, &[Arg::I(0)])
+}
+
+/// The frames the program of the system memory flip chain draws in its
+/// back buffer, one a flip: an odd number of them, so that a flip that
+/// swapped the front buffer's memory with the back buffer's would leave
+/// the system memory on the screen.
+const SYSTEM_FRAMES: [u32; 3] = [0x4433_2211, 0x8877_6655, 0xCCBB_AA99];
+
+/// Full screen with a flip chain in system memory with one back buffer:
+/// each of SYSTEM_FRAMES drawn in the back buffer and flipped, then the
+/// front buffer locked (described at FRONT_LOCKED) and unlocked.
+fn system_flip_chain_program() -> (Vec<u8>, u32) {
+    let d = system_flip_chain_data(1);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start_flip_chain(a, l, &mut c)?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        for value in SYSTEM_FRAMES {
+            draw_first_pixels(a, l, &mut c, BACK, value)?;
+            c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        }
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(FRONT_LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        c.com(a, l, FRONT, S_UNLOCK, &[Arg::I(0)])?;
+        finish(a, l)
+    })
+}
+
+/// G-Police's software renderer (#1830): the display shows video memory
+/// only, so a flip of a primary surface whose back buffer is in system
+/// memory copies the back buffer's pixels to the screen. Every flip
+/// shows the frame just drawn, the screen stays at the start of video
+/// memory, the back buffer in system memory, and the primary surface's
+/// Lock still gives the screen.
+#[test]
+fn a_flip_chain_in_system_memory_shows_every_frame() {
+    let (program, data) = system_flip_chain_program();
+    let mut cpu = machine("system_flip_chain", program);
+    run_until_done(&mut cpu, data);
+    // The calls after CreateWindowExA's all succeed: 5 to make the chain
+    // and find the back buffer, 3 a frame, and the front buffer's Lock
+    // and Unlock.
+    assert_eq!(results(&mut cpu, data, 17)[1..], [0; 16]);
+    assert_eq!(cpu.bus.vbe.start, 0);
+    let last = SYSTEM_FRAMES[SYSTEM_FRAMES.len() - 1];
+    assert_eq!(cpu.bus.vbe.vram[..4], last.to_le_bytes());
+    // The front buffer is the screen, in the program's view of video
+    // memory; the back buffer is elsewhere, and keeps the frame it had.
+    let front = peek(&cpu, data + FRONT_LOCKED + 0x24);
+    let back = peek(&cpu, data + LOCKED + 0x24);
+    assert_eq!(front & 0x3F_FFFF, 0);
+    assert_ne!(back, front);
+    assert_eq!(peek(&cpu, back), last);
+}
+
+/// Full screen with a flip chain in system memory with two back buffers:
+/// a frame drawn in each, then two flips.
+fn system_flip_chain_of_two_program() -> (Vec<u8>, u32) {
+    let d = system_flip_chain_data(2);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start_flip_chain(a, l, &mut c)?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(NEXT_CAPS), Arg::At(OFFSCREEN)],
+        )?;
+        draw_first_pixels(a, l, &mut c, BACK, SYSTEM_FRAMES[0])?;
+        draw_first_pixels(a, l, &mut c, OFFSCREEN, SYSTEM_FRAMES[1])?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        finish(a, l)
+    })
+}
+
+/// The back buffers of a flip chain in system memory go round as a page
+/// flip's do: the second flip shows the frame drawn in the second back
+/// buffer.
+#[test]
+fn a_flip_chain_in_system_memory_shows_its_back_buffers_in_turn() {
+    let (program, data) = system_flip_chain_of_two_program();
+    let mut cpu = machine("system_flip_chain_of_two", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 13)[1..], [0; 12]);
+    assert_eq!(cpu.bus.vbe.start, 0);
+    assert_eq!(cpu.bus.vbe.vram[..4], SYSTEM_FRAMES[1].to_le_bytes());
+}
+
 /// A primary surface that says it is a back buffer.
 fn primary_back_buffer_program() -> (Vec<u8>, u32) {
     let mut d = data();
