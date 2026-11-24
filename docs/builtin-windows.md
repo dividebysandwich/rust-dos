@@ -150,6 +150,28 @@ selected and copied. Notepad's menus aren't there, so nothing can be
 saved, and a file that isn't there opens an empty window instead of
 asking whether to make it.
 
+### Registry Editor
+
+`C:\WINDOWS\REGEDIT.EXE` is there too, for setups that import a
+registration file with it, as Video for Windows 1.1's setup runs
+`regedit.exe /s C:\WINDOWS\mplayer.reg`. Its command line works as on
+Windows 98:
+
+- `regedit file.reg` puts the file's keys into the registry and saves
+  it at once. The file is in Windows 95's format (`REGEDIT4`, then
+  `[key]` and `"name"="value"` lines) or in Windows 3.1's (`REGEDIT`,
+  then `HKEY_CLASSES_ROOT\key = value` lines); any other file isn't
+  imported. A message box then says that the file was imported, or why
+  it wasn't. With `/s` there is no message box.
+- `regedit /e file.reg` writes the whole registry to the file, in
+  Windows 95's format, and `regedit /e file.reg HKEY_CLASSES_ROOT\key`
+  that key with its subkeys. Nothing is written for a key that isn't
+  there.
+
+The editor's window isn't there: REGEDIT started without a file ends at
+once. `/c` (replace the registry with a file) and `/d` (delete a key)
+do nothing, and `/l:` and `/r:` are ignored.
+
 ### Text and dialogs
 
 MS Sans Serif 8, the font of menus, dialogs and buttons, has glyphs drawn in

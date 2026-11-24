@@ -22,7 +22,8 @@
 //!
 //! The Windows directory, C:\WINDOWS, has the programs of Windows that
 //! are built in the same way: NOTEPAD.EXE (user32/notepad.rs), which
-//! setups run to show a readme.
+//! setups run to show a readme, and REGEDIT.EXE (regedit.rs), which they
+//! run to import a registration file.
 
 use super::forwarders;
 use super::loader::{self, SYSTEM_DIR, WINDOWS_DIR};
@@ -63,10 +64,13 @@ pub fn sync(bus: &mut Bus) {
     }
     bus.disk.set_system_files(SYSTEM_DIR, files);
     let programs = if bus.win32.enabled {
-        vec![(
-            "NOTEPAD.EXE".to_string(),
-            super::user32::notepad::file(bus).into(),
-        )]
+        vec![
+            (
+                "NOTEPAD.EXE".to_string(),
+                super::user32::notepad::file(bus).into(),
+            ),
+            ("REGEDIT.EXE".to_string(), super::regedit::file(bus).into()),
+        ]
     } else {
         Vec::new()
     };

@@ -557,6 +557,7 @@ FreeSid
 EqualSid
 GetTokenInformation
 OpenThreadToken
+RegeditMain
 
 DLL MSVCRT.DLL
 __getmainargs
