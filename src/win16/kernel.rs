@@ -2,7 +2,7 @@
 //! their resources, tasks, files through DOS, and the profile and
 //! string functions, which go on to KERNEL32's.
 
-use super::builtin::{Api16, Def, register, rust, value, win32};
+use super::builtin::{Api16, Def, cdecl, register, rust, value, win32};
 use super::thunk::{self, EBP, EDI, ESI, ESP};
 use super::{Frame, dos, dpmi, global, ldt, local, module, resource, task};
 use crate::cpu::{Cpu, Seg};
@@ -290,6 +290,10 @@ static APIS: &[Api16] = &[
     rust("MyAlloc", 668, "www", my_alloc),
     rust("EntryAddrProc", 667, "ww", entry_addr_proc),
     rust("PatchCodeHandle", 110, "w", patch_code_handle),
+    // Saved states keep the stubs in this order: new functions go after
+    // the others (src/win32/stub_tables.rs).
+    cdecl("_DebugOutput", 328, "wS", debug_output),
+    rust("DirectedYield", 150, "w", directed_yield),
 ];
 
 /// GetWinFlags': protected mode, 386 enhanced mode, a 486 with a
@@ -769,6 +773,28 @@ fn yield16(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     None
 }
 
+/// DirectedYield(task): the running task gives up its turn, and `task`
+/// has the next one if it can run, before the other tasks that are
+/// ready, as with a message sent to it (task::hand_turn). A handle that
+/// is no task's, or the running task's own, makes it Yield.
+fn directed_yield(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let to = cpu
+        .bus
+        .win32
+        .win16
+        .tasks
+        .iter()
+        .find(|t| t.handle == args[0] as u16 && t.exit_code.is_none())
+        .map(|t| t.tid);
+    let from = crate::win32::user32::current_tid(cpu);
+    if let Some(to) = to {
+        task::hand_turn(&mut cpu.bus.win32, from, to);
+    }
+    let ctx = Context::of(cpu);
+    task::yield_now(cpu, ctx);
+    None
+}
+
 /// WaitEvent: the task gives up its turn, as there are no events but
 /// messages, which GetMessage waits for.
 fn wait_event(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -859,6 +885,36 @@ fn output_debug_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let text = super::string(cpu, args[0]);
     cpu.bus
         .log_string(&format!("[W16] Debug: {}", text.trim_end()));
+    Some(0)
+}
+
+/// _DebugOutput(flags, format, ...), cdecl: a message for the debugger,
+/// formatted as wsprintf does with the arguments after `format`. The
+/// retail KERNEL of Windows 3.1 and 95 writes nothing and returns, so
+/// the program goes on whatever the severity; only the debug KERNEL
+/// prints it, and breaks for DBF_FATAL. Here the message goes to the
+/// log, with the severity in the flags' top two bits (DBF_TRACE,
+/// DBF_WARNING, DBF_ERROR, DBF_FATAL) and the flags themselves.
+fn debug_output(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // The variable arguments follow the return address, the flags and
+    // the format's far pointer.
+    let base = cpu.seg_cache(Seg::SS).base;
+    let list = base.wrapping_add(cpu.sp() as u32 + 10);
+    let flags = args[0] as u16;
+    let text = super::user::format_bytes(cpu, args[1], list);
+    let text = String::from_utf8_lossy(&text);
+    let level = match flags >> 14 {
+        0 => "trace",
+        1 => "warning",
+        2 => "error",
+        _ => "fatal",
+    };
+    cpu.bus.log_string(&format!(
+        "[W16] _DebugOutput ({}, flags {:04X}): {}",
+        level,
+        flags,
+        text.trim_end()
+    ));
     Some(0)
 }
 

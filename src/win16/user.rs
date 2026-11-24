@@ -1874,6 +1874,18 @@ fn wvsprintf(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Format the string `format` (16:16) with the arguments at the linear
 /// `list` into `buffer` (16:16), at most 1024 bytes: its length.
 fn format16(cpu: &mut Cpu, buffer: u32, format: u32, list: u32) -> u32 {
+    let mut out = format_bytes(cpu, format, list);
+    let len = out.len() as u32;
+    out.push(0);
+    let to = super::linear(cpu, buffer);
+    super::poke(cpu, to, &out);
+    len
+}
+
+/// The string `format` (16:16) formatted as wsprintf does with the
+/// arguments at the linear `list`: at most 1023 bytes, without the
+/// terminating zero.
+pub(super) fn format_bytes(cpu: &Cpu, format: u32, list: u32) -> Vec<u8> {
     let fmt = super::string_bytes(cpu, super::linear(cpu, format), 0x400);
     let mut out = Vec::new();
     let mut at = list;
@@ -1995,11 +2007,7 @@ fn format16(cpu: &mut Cpu, buffer: u32, format: u32, list: u32) -> u32 {
         out.extend_from_slice(&text);
     }
     out.truncate(1023);
-    let len = out.len() as u32;
-    out.push(0);
-    let to = super::linear(cpu, buffer);
-    super::poke(cpu, to, &out);
-    len
+    out
 }
 
 fn change_case(cpu: &mut Cpu, at: u32, len: usize, upper: bool) {
