@@ -49,7 +49,8 @@ On a Linux desktop the `.AppImage` is the simplest download: one file,
 for glibc 2.35 or later (Ubuntu 22.04, Debian 12 and newer), that uses
 the system's SDL3 or its own where the system has none. Take the
 `x86_64` one for PCs and the `aarch64` one for ARM machines. Make it
-executable and run it with the options this README gives `rust-dos`:
+executable, then use the file's path wherever a command in this README
+starts with `rust-dos`. The options stay the same:
 
 ```sh
 chmod +x rust-dos-*-x86_64.AppImage
