@@ -2272,6 +2272,14 @@ image as Redump or CloneCD makes it passes their check, and an ISO of the
 same disc fails it. Sectors with an EDC of 0, which tools that turn an ISO
 into a BIN leave, aren't checked.
 
+CopyLok (CodeLok) discs have a band of a few hundred to a few thousand
+such sectors. Redump's images keep them as redumper writes a sector it
+couldn't read, with sync and header and 55h bytes for the rest, so their
+EDC fails and they read as errors. Opening an image of a CopyLok disc
+says so in the log, from the mark the protection leaves in the primary
+volume descriptor, and warns when the image keeps only 2048 bytes of
+each sector (an ISO), which can't pass the check.
+
 The IDE drive also reads each sector's subchannel: READ CD returns it after
 the sector (raw P-W, formatted Q, or R-W), and READ SUB-CHANNEL reports the
 Q at the head (where audio plays, or else the last sector read or sought)

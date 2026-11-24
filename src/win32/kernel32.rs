@@ -31,6 +31,7 @@ mod win98;
 pub use win98::is_directory;
 pub(crate) mod virtual_memory;
 mod vxd;
+pub(super) use vxd::call_returned as vxd_call_returned;
 
 pub(super) use locale::enum_returned;
 pub(crate) use path::{change_directory, current_directory, find_entries, full_path, matches};
@@ -818,7 +819,23 @@ static APIS: &[Api] = &[
         5,
         toolhelp::toolhelp32_read_process_memory,
     ),
+    stdcall("DebugBreak", 210, 0, debug_break),
 ];
+
+/// DebugBreak: Windows 98's is an INT 3, whose breakpoint exception goes
+/// to the program's handlers without a debugger, and ends the program if
+/// none handles it. A handler that goes on goes on after the call. The
+/// record has the one parameter the processor's breakpoint gives. KISS
+/// Psycho Circus imports it, and CopyLok's loader refuses to start a game
+/// whose imports aren't all there.
+///
+/// It is a trap, not INT 3 and RET as code: older tables lack it, and
+/// `stub_tables::mend` can only give them a trap. So the exception is at
+/// the caller's return address rather than at an INT 3 in KERNEL32.
+fn debug_break(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    const EXCEPTION_BREAKPOINT: u32 = 0x8000_0003;
+    super::seh::raise_from_call(cpu, 0, EXCEPTION_BREAKPOINT, 0, &[0])
+}
 
 /// The places in `APIS` of the system's own stubs.
 const CALL_RETURN: usize = 43;
