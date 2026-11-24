@@ -712,3 +712,113 @@ fn a_freed_librarys_classes_go_with_it() {
     });
     assert_eq!(exit, 0, "{log}");
 }
+
+/// USER's CreateWindow, GetClassName and DefWindowProc.
+const CREATE_WINDOW: u16 = 41;
+const GET_CLASS_NAME: u16 = 58;
+const DEF_WINDOW_PROC: u16 = 107;
+
+/// Where the kept-class test keeps the program's instance, its window
+/// and the name GetClassName gives.
+const INSTANCE: u16 = 0x22;
+const HWND: u16 = 0x24;
+const CLASS_NAME: u16 = 0x60;
+
+/// `test ax,ax`, and the program ends with `exit` if AX is 0.
+fn exit_if_zero(code: &mut Code, exit: u8) {
+    code.emit(&[0x85, 0xC0, 0x75, 0x06, 0xB0, exit, 0xB4, 0x4C, 0xCD, 0x21]);
+}
+
+/// A freed library's class that still has a window stays, as
+/// UnregisterClass leaves one. The window keeps its class, so a class
+/// registered after the library went doesn't take its place: the
+/// window's class is still MINE. The program ends with 1 to 3 when
+/// RegisterClass, CreateWindow or the second RegisterClass fails, 4 when
+/// GetClassName gives another name, else with 0.
+#[test]
+fn a_freed_librarys_class_with_a_window_stays() {
+    let mut code = Code::new();
+    let [a, b] = INSTANCE.to_le_bytes();
+    code.emit(&[0x89, 0x3E, a, b]); // mov [INSTANCE],di
+    let path_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+    let [l, m] = LIB.to_le_bytes();
+    code.emit(&[0xA3, l, m]); // mov [LIB],ax
+    let mine = register_class(&mut code);
+    exit_if_zero(&mut code, 1);
+    let class_at = code.here() + 2;
+    code.push_far(0);
+    let title_at = code.here() + 2;
+    code.push_far(0)
+        .push(0x8000) // WS_POPUP
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(10)
+        .push(10)
+        .push(0) // parent
+        .push(0) // menu
+        .emit(&[0xFF, 0x36, l, m]) // push word [LIB]
+        .push(0)
+        .push(0)
+        .call("USER", CREATE_WINDOW);
+    let [h, i] = HWND.to_le_bytes();
+    code.emit(&[0xA3, h, i]); // mov [HWND],ax
+    exit_if_zero(&mut code, 2);
+    code.emit(&[0xFF, 0x36, l, m]) // push word [LIB]
+        .call("KERNEL", FREE_LIBRARY);
+    // OTHER, the program's own class.
+    code.emit(&[0xA1, a, b, 0xA3, l, m]); // mov ax,[INSTANCE]; mov [LIB],ax
+    let other = register_class(&mut code);
+    exit_if_zero(&mut code, 3);
+    code.emit(&[0xFF, 0x36, h, i]) // push word [HWND]
+        .emit(&[0x1E]) // push ds
+        .push(CLASS_NAME)
+        .push(16)
+        .call("USER", GET_CLASS_NAME);
+    let [n0, n1] = CLASS_NAME.to_le_bytes();
+    let [n2, n3] = (CLASS_NAME + 2).to_le_bytes();
+    let [n4, n5] = (CLASS_NAME + 4).to_le_bytes();
+    code.emit(&[
+        0xB0, 0x04, // mov al,4
+        0x81, 0x3E, n0, n1, b'M', b'I', // cmp word [CLASS_NAME],'MI'
+        0x75, 0x11, // jne end
+        0x81, 0x3E, n2, n3, b'N', b'E', // cmp word [CLASS_NAME+2],'NE'
+        0x75, 0x09, // jne end
+        0x80, 0x3E, n4, n5, 0x00, // cmp byte [CLASS_NAME+4],0
+        0x75, 0x02, // jne end
+        0xB0, 0x00, // mov al,0
+    ])
+    .exit_al();
+    // The window procedure, in the program: DefWindowProc's.
+    let proc = code.here();
+    code.emit(&[
+        0x55, 0x8B, 0xEC, // push bp; mov bp,sp
+        0xFF, 0x76, 0x0E, // push word [bp+0Eh]: hwnd
+        0xFF, 0x76, 0x0C, // push word [bp+0Ch]: msg
+        0xFF, 0x76, 0x0A, // push word [bp+0Ah]: wParam
+        0xFF, 0x76, 0x08, // push word [bp+8]: lParam
+        0xFF, 0x76, 0x06, // push word [bp+6]
+    ])
+    .call("USER", DEF_WINDOW_PROC)
+    .emit(&[0x5D, 0xCA, 0x0A, 0x00]); // pop bp; retf 10
+    let mine_name = code.here();
+    code.emit(b"MINE\0");
+    let other_name = code.here();
+    code.emit(b"OTHER\0");
+    let title = code.here();
+    code.emit(b"\0");
+    let path = code.here();
+    code.emit(b"C:\\LIB.DLL\0");
+    code.patch(path_at, path);
+    code.patch(class_at, mine_name);
+    code.patch(title_at, title);
+    for ((proc_at, name_at), name) in [(mine, mine_name), (other, other_name)] {
+        code.patch(proc_at, proc);
+        code.patch(name_at, name);
+    }
+    let (exit, log) = run_with("kept_class", program(&code, CODE), |_, base| {
+        fs::write(base.join("LIB.DLL"), library("LIB")).unwrap();
+    });
+    assert_eq!(exit, 0, "{log}");
+}
