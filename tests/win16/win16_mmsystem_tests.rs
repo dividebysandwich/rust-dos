@@ -14,6 +14,13 @@ const WAVE_OUT_UNPREPARE_HEADER: u16 = 407;
 const WAVE_OUT_WRITE: u16 = 408;
 const WAVE_OUT_RESET: u16 = 411;
 const WAVE_OUT_GET_POSITION: u16 = 412;
+const WAVE_OUT_GET_DEV_CAPS: u16 = 402;
+const WAVE_OUT_GET_ID: u16 = 420;
+const MIDI_OUT_GET_ID: u16 = 215;
+const AUX_GET_NUM_DEVS: u16 = 350;
+const AUX_GET_DEV_CAPS: u16 = 351;
+const AUX_GET_VOLUME: u16 = 352;
+const AUX_SET_VOLUME: u16 = 353;
 const TIME_GET_SYSTEM_TIME: u16 = 601;
 const TIME_GET_DEV_CAPS: u16 = 604;
 const GET_CURRENT_TASK: u16 = 36;
@@ -223,6 +230,140 @@ fn a_wave_position_gets_windows_3_1s_eight_bytes_and_no_more() {
         .emit(&[0xB0, 0x01])
         .exit_al();
     let (exit, log) = run("wave_position", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn wave_out_get_id_writes_a_16_bit_uint() {
+    // waveOutGetID of an open device, as Battle Beast calls it: 0 in the
+    // word, the word after it left alone. A handle that isn't one gets
+    // MMSYSERR_INVALHANDLE and nothing written; midiOutGetID's too,
+    // since 16-bit MIDI output opens nothing yet (#1243).
+    let mut code = Code::new();
+    open_wave(&mut code, |code| _ = code.push(0), 0, 7);
+    mark(&mut code);
+    push_word(&mut code, HANDLE);
+    code.emit(&[0x1E])
+        .push(TIME)
+        .call("MMSYSTEM", WAVE_OUT_GET_ID);
+    expect_ax(&mut code, 0, 2);
+    expect(&mut code, TIME, 0, true, 3);
+    expect(&mut code, TIME + 2, 0xFFFF, true, 4);
+    set(&mut code, TIME, 0xEEEE);
+    code.push(0x1234)
+        .emit(&[0x1E])
+        .push(TIME)
+        .call("MMSYSTEM", WAVE_OUT_GET_ID);
+    expect_ax(&mut code, 5, 5);
+    expect(&mut code, TIME, 0xEEEE, true, 6);
+    code.push(0x1234)
+        .emit(&[0x1E])
+        .push(TIME)
+        .call("MMSYSTEM", MIDI_OUT_GET_ID);
+    expect_ax(&mut code, 5, 8);
+    expect(&mut code, TIME, 0xEEEE, true, 9);
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", WAVE_OUT_CLOSE)
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let (exit, log) = run("wave_get_id", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// Where the aux test puts its AUXCAPS16 (44 bytes) and the word after.
+const CAPS: u16 = 0x80;
+
+#[test]
+fn aux_devices_are_winmms_with_16_bit_caps() {
+    // auxGetNumDevs counts WINMM's devices; auxGetDevCaps fills the 44
+    // bytes of an AUXCAPS16 (a WORD version at 4, the name at 6, the
+    // technology at 38, dwSupport at 40 with AUXCAPS_VOLUME) and not the
+    // word after; AUX_MAPPER is a bad id; auxSetVolume and auxGetVolume
+    // set and read a device's volume as a DWORD.
+    let mut code = Code::new();
+    code.call("MMSYSTEM", AUX_GET_NUM_DEVS);
+    expect_nonzero(&mut code, 2);
+    set(&mut code, CAPS + 40, 0);
+    set(&mut code, CAPS + 44, 0xBEEF);
+    code.push(0)
+        .emit(&[0x1E])
+        .push(CAPS)
+        .push(44)
+        .call("MMSYSTEM", AUX_GET_DEV_CAPS);
+    expect_ax(&mut code, 0, 3);
+    // Device 0 is "Sound Card Aux: Wave", AUXCAPS_WAVE (32), version 4.0.
+    expect(&mut code, CAPS + 4, 0x0400, true, 12);
+    expect(&mut code, CAPS + 6, u16::from_le_bytes(*b"So"), true, 13);
+    expect(&mut code, CAPS + 38, 32, true, 14);
+    code.emit(&[0xF6, 0x06, lo(CAPS + 40), hi(CAPS + 40), 0x01]) // test byte [..],1
+        .emit(&[0x75, 0x06]) // jnz over the next
+        .emit(&[0xB0, 4, 0xB4, 0x4C, 0xCD, 0x21]);
+    expect(&mut code, CAPS + 44, 0xBEEF, true, 5);
+    code.push(0xFFFF)
+        .emit(&[0x1E])
+        .push(CAPS)
+        .push(44)
+        .call("MMSYSTEM", AUX_GET_DEV_CAPS);
+    expect_ax(&mut code, 2, 6); // MMSYSERR_BADDEVICEID
+    code.push(0xFFFF)
+        .push(0x1234)
+        .push(0x5678)
+        .call("MMSYSTEM", AUX_SET_VOLUME);
+    expect_ax(&mut code, 2, 15);
+    code.push(0)
+        .push(0x1234)
+        .push(0x5678)
+        .call("MMSYSTEM", AUX_SET_VOLUME);
+    expect_ax(&mut code, 0, 7);
+    mark(&mut code);
+    code.push(0)
+        .emit(&[0x1E])
+        .push(TIME)
+        .call("MMSYSTEM", AUX_GET_VOLUME);
+    expect_ax(&mut code, 0, 8);
+    expect(&mut code, TIME, 0x5678, true, 9);
+    expect(&mut code, TIME + 2, 0x1234, true, 10);
+    expect(&mut code, TIME + 4, 0xFFFF, true, 11);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let (exit, log) = run("aux_devices", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// Call the MMSYSTEM function `ordinal` with `first` (a handle or a
+/// device) and a null pointer, and `size` after it when there is one;
+/// end with `fail` unless AX is `error`.
+fn null_call(code: &mut Code, ordinal: u16, first: u16, size: Option<u16>, error: u16, fail: u8) {
+    code.push(first).push(0).push(0);
+    if let Some(size) = size {
+        code.push(size);
+    }
+    code.call("MMSYSTEM", ordinal);
+    expect_ax(code, error, fail);
+}
+
+#[test]
+fn a_null_pointer_is_refused_after_the_handle_or_device() {
+    // A null pointer is MMSYSERR_INVALPARAM (11) for a good handle or
+    // device, and the handle's MMSYSERR_INVALHANDLE (5) or the device's
+    // MMSYSERR_BADDEVICEID (2) for a bad one; nothing is written at
+    // linear 0.
+    let mut code = Code::new();
+    open_wave(&mut code, |code| _ = code.push(0), 0, 2);
+    push_word(&mut code, HANDLE);
+    code.push(0).push(0).call("MMSYSTEM", WAVE_OUT_GET_ID);
+    expect_ax(&mut code, 11, 3);
+    null_call(&mut code, WAVE_OUT_GET_ID, 0x1234, None, 5, 4);
+    null_call(&mut code, WAVE_OUT_GET_DEV_CAPS, 0, Some(52), 11, 5);
+    null_call(&mut code, WAVE_OUT_GET_DEV_CAPS, 0x1234, Some(52), 2, 6);
+    null_call(&mut code, AUX_GET_DEV_CAPS, 0, Some(44), 11, 7);
+    null_call(&mut code, AUX_GET_DEV_CAPS, 0xFFFF, Some(44), 2, 8);
+    null_call(&mut code, AUX_GET_VOLUME, 0, None, 11, 9);
+    null_call(&mut code, AUX_GET_VOLUME, 0xFFFF, None, 2, 10);
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", WAVE_OUT_CLOSE)
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let (exit, log) = run("null_pointers", program(&code, CODE));
     assert_eq!(exit, 1, "{log}");
 }
 

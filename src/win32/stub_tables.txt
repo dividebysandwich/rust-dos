@@ -6042,6 +6042,13 @@ mciSendCommand
 mciSendString
 mciGetDeviceID
 mciGetErrorString
+midiOutGetVolume
+midiOutSetVolume
+midiOutGetID
+auxGetDevCaps
+auxGetVolume
+auxSetVolume
+waveOutGetID
 
 MODULE LZEXPAND
 LZCopy
