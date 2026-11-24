@@ -345,7 +345,7 @@ pub(super) fn get_profile_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The number at the start of `text` as Windows 95 reads it: an
 /// optional '-' and decimal digits, in 32 bits; 0 if there are none.
-fn parse_int(text: &[u8]) -> u32 {
+pub(in crate::win32) fn parse_int(text: &[u8]) -> u32 {
     let (negative, digits) = match text.split_first() {
         Some((b'-', rest)) => (true, rest),
         _ => (false, text),

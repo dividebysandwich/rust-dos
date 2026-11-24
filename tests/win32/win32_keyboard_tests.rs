@@ -141,36 +141,56 @@ fn the_registry_comes_before_win_ini() {
     assert_eq!(typematic, 0x4B);
 }
 
-/// Values out of range are the largest, as SystemParametersInfo takes
-/// them; text in the registry that isn't a number is no value.
+/// The registry's values are numbers as Wine reads them (wcstol): the
+/// digits at the start, 0 for text without any. They are kept out of
+/// range, as Wine keeps them, and SPI_GETKEYBOARDSPEED and
+/// SPI_GETKEYBOARDDELAY give them back; the keyboard gets the largest.
+/// A value the registry has, number or not, comes before WIN.INI's.
 #[test]
-fn out_of_range_settings_are_the_largest() {
+fn registry_settings_are_kept_out_of_range() {
     let registry = "REGEDIT4\r\n\r\n\
                     [HKEY_USERS\\.Default\\Control Panel\\Keyboard]\r\n\
                     \"KeyboardSpeed\"=\"40\"\r\n\
                     \"KeyboardDelay\"=\"fast\"\r\n";
-    let win_ini = "[windows]\r\nKeyboardDelay=7\r\n";
+    let win_ini = "[windows]\r\nKeyboardDelay=2\r\n";
     let dir = scratch("range", Some(registry), Some(win_ini));
     let (code, typematic) = run(&dir, program(&[]));
-    assert_eq!(code, settings(3, 31));
-    assert_eq!(typematic, 0x60);
+    // Speed 40, delay 0.
+    assert_eq!(code, 40);
+    // 250 ms, 30 a second.
+    assert_eq!(typematic, 0x00);
 }
 
 /// WIN.INI's values are numbers as GetProfileInt reads them, as Windows
 /// 3.1 does: the digits at the start, 0 for text without any, and -1 as
-/// the largest unsigned value, which is out of range.
+/// the largest unsigned value. Out of range, they are kept as the
+/// registry's are.
 #[test]
 fn win_ini_settings_are_read_as_get_profile_int_reads_them() {
     let win_ini = "[windows]\r\nKeyboardSpeed=-1\r\nKeyboardDelay=fast\r\n";
     let dir = scratch("win_ini_int", None, Some(win_ini));
     let (code, typematic) = run(&dir, program(&[]));
-    assert_eq!(code, settings(0, 31));
+    // Speed FFFFFFFFh, delay 0: the exit code's low byte.
+    assert_eq!(code, 0xFF);
     assert_eq!(typematic, 0x00);
-    let win_ini = "[windows]\r\nKeyboardSpeed=12 a second\r\nKeyboardDelay=2\r\n";
+    let win_ini = "[windows]\r\nKeyboardSpeed=12 a second\r\nKeyboardDelay=7\r\n";
     let dir = scratch("win_ini_digits", None, Some(win_ini));
     let (code, typematic) = run(&dir, program(&[]));
-    assert_eq!(code, settings(2, 12));
-    assert_eq!(typematic, 0x53);
+    assert_eq!(code, settings(7, 12));
+    // 1 s, rate 31 - 12.
+    assert_eq!(typematic, 0x73);
+}
+
+/// SPI_SETKEYBOARDSPEED takes a speed over 31 as 31, as Wine does;
+/// SPI_SETKEYBOARDDELAY keeps any delay, as Wine does, and the keyboard
+/// gets at most 3.
+#[test]
+fn spi_set_takes_a_speed_over_31_as_31() {
+    let dir = scratch("set_range", None, None);
+    let calls = [(SPI_SETKEYBOARDSPEED, 40, 0), (SPI_SETKEYBOARDDELAY, 5, 0)];
+    let (code, typematic) = run(&dir, program(&calls));
+    assert_eq!(code, settings(5, 31));
+    assert_eq!(typematic, 0x60);
 }
 
 /// SPIF_UPDATEINIFILE writes the value to the registry, which the next

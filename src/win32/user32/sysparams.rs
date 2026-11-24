@@ -342,9 +342,13 @@ const KEYBOARD_KEY: &str = r"Control Panel\Keyboard";
 
 /// The keyboard's speed and delay as SPI_SETKEYBOARDSPEED (11) and
 /// SPI_SETKEYBOARDDELAY (23) keep them, by their names in the registry
-/// and in WIN.INI, and their largest values.
+/// and in WIN.INI, and the largest value each SET action takes. Only
+/// the speed has one: Wine's SPI_SETKEYBOARDSPEED takes a value over 31
+/// as 31, its SPI_SETKEYBOARDDELAY keeps any value, and
+/// SPI_GETKEYBOARDDELAY gives it back. `program_keyboard` gives the
+/// keyboard at most 3 either way.
 const KEYBOARD_SETTINGS: [(u32, &str, u32); 2] =
-    [(11, "KeyboardSpeed", 31), (23, "KeyboardDelay", 3)];
+    [(11, "KeyboardSpeed", 31), (23, "KeyboardDelay", u32::MAX)];
 
 /// Windows starts: the keyboard's speed and delay the user chose, which
 /// `program_keyboard` then gives the keyboard. Windows 95 and 98 read
@@ -353,32 +357,38 @@ const KEYBOARD_SETTINGS: [(u32, &str, u32); 2] =
 /// WIN.INI values into the registry; here nothing does, so a value the
 /// registry doesn't have comes from WIN.INI, where a Windows 3.1 setup
 /// put it, and then Windows' default. WIN.INI's values are read as
-/// Windows 3.1 reads them, with GetProfileInt. A value out of range is
-/// taken as its largest, as SPI_SETKEYBOARDSPEED and
-/// SPI_SETKEYBOARDDELAY take it.
+/// Windows 3.1 reads them, with GetProfileInt; the registry's as Wine
+/// reads them, the digits at the start (wcstol), so text with none is
+/// 0. Both are kept as they are, out of range or not, as Wine keeps
+/// the registry's: SPI_GETKEYBOARDSPEED and SPI_GETKEYBOARDDELAY give
+/// them back, and `program_keyboard` takes a value over the largest as
+/// the largest.
 pub fn read_keyboard_settings(cpu: &mut Cpu) {
     let hkcu = crate::win32::registry::HKEY_CURRENT_USER;
     let registry = crate::win32::registry::string_values(cpu, &[(hkcu, KEYBOARD_KEY)]);
     let registry = registry.into_iter().next().unwrap_or_default();
-    for (action, name, max) in KEYBOARD_SETTINGS {
+    for (action, name, _) in KEYBOARD_SETTINGS {
         let stored = registry
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .and_then(|(_, text)| text.trim().parse::<u32>().ok());
+            .map(|(_, text)| {
+                let text = crate::dosstr::to_bytes(text.trim_start());
+                crate::win32::kernel32::parse_int(&text)
+            });
         let value = stored.or_else(|| {
             let key = name.as_bytes();
             crate::win32::kernel32::profile_number(cpu, b"WIN.INI", b"windows", key)
         });
         match value {
-            Some(value) => set_param(cpu, action, value.min(max)),
+            Some(value) => set_param(cpu, action, value),
             None => user(cpu).params.retain(|p| p.0 != action),
         }
     }
 }
 
 /// SPI_SETKEYBOARDSPEED or SPI_SETKEYBOARDDELAY (`action`) set the
-/// keyboard's speed or delay to `ui`, taking a value over the largest
-/// as the largest, and the keyboard repeats at the new rate. With
+/// keyboard's speed or delay to `ui`, taking a speed over 31 as 31, and
+/// the keyboard repeats at the new rate. With
 /// SPIF_UPDATEINIFILE in `flags`, the value goes into the registry,
 /// where Windows 95 and 98 keep it and `read_keyboard_settings` finds
 /// it at the next start.
