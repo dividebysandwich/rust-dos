@@ -53,7 +53,7 @@ static APIS: &[Api16] = &[
     rust("GlobalFreeAll", 26, "w", global_free_all),
     rust("Yield", 29, "", yield16),
     rust("WaitEvent", 30, "w", wait_event),
-    rust("PostEvent", 31, "w", zero),
+    rust("PostEvent", 31, "w", post_event),
     rust("SetPriority", 32, "ws", zero),
     rust("LockCurrentTask", 33, "w", zero),
     rust("GetCurrentTask", 36, "", get_current_task),
@@ -769,13 +769,28 @@ fn yield16(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     None
 }
 
-/// WaitEvent: the task gives up its turn, as there are no events but
-/// messages, which GetMessage waits for.
-fn wait_event(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+/// WaitEvent(task): an event the running task has (PostEvent's, or the
+/// one LoadModule gives a new task) is taken, and the task goes on: 0.
+/// Without one, the task gives up its turn, as there are no other
+/// events but messages, which GetMessage waits for. As in Windows 3.1,
+/// a task waits for its own events only: another task's handle gives 0
+/// at once.
+fn wait_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let handle = args[0] as u16;
+    if task::take_event(cpu, handle) || !task::is_running_task(cpu, handle) {
+        return Some(0);
+    }
     let mut ctx = Context::of(cpu);
     thunk::set_ax(&mut ctx, 0);
     task::yield_now(cpu, ctx);
     None
+}
+
+/// PostEvent(task): an event for the task (0 for the running one), which
+/// its next WaitEvent takes without waiting.
+fn post_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    task::post_event(cpu, args[0] as u16);
+    Some(0)
 }
 
 /// GetCurrentTask: the task in AX, the first task in DX.

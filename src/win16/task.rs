@@ -321,6 +321,9 @@ fn create_task(
         environment,
         arguments,
     );
+    // LoadModule posts the new task an event, which its startup code's
+    // WaitEvent(0) takes without giving up its turn.
+    super::write_16(cpu, tdb_base + TDB_EVENTS, 1);
 
     // The 16-bit stack, in the automatic data segment unless the header
     // says otherwise.
@@ -422,6 +425,60 @@ fn create_task(
         tdb, m.name, cs, ip, ss, sp
     ));
     Ok(cpu.bus.win32.win16.tasks.len() - 1)
+}
+
+/// Where a task database keeps its events (Windows 3.1's nEvents): those
+/// PostEvent gave the task that WaitEvent hasn't taken yet.
+const TDB_EVENTS: u32 = 0x06;
+
+/// The task `handle`, or the running task for 0: its index in
+/// `State::tasks`, if it is a task that hasn't ended.
+fn live_task(cpu: &Cpu, handle: u16) -> Option<usize> {
+    if handle == 0 {
+        return super::current_task(cpu);
+    }
+    cpu.bus
+        .win32
+        .win16
+        .tasks
+        .iter()
+        .position(|t| t.handle == handle && t.exit_code.is_none())
+}
+
+/// The linear address of the events count in the task database of the
+/// task `handle` (0 for the running task).
+fn events_at(cpu: &Cpu, handle: u16) -> Option<u32> {
+    let t = live_task(cpu, handle)?;
+    let tdb = cpu.bus.win32.win16.tasks[t].handle;
+    global::get(cpu, tdb).map(|a| a.base + TDB_EVENTS)
+}
+
+/// PostEvent(task): one more event for the task (0 for the running
+/// one), which its next WaitEvent takes.
+pub fn post_event(cpu: &mut Cpu, handle: u16) {
+    if let Some(at) = events_at(cpu, handle) {
+        let events = super::read_16(cpu, at);
+        super::write_16(cpu, at, events.saturating_add(1));
+    }
+}
+
+/// WaitEvent's part before any waiting: an event of the task (0 for the
+/// running one) taken, if it has one. Whether it had.
+pub fn take_event(cpu: &mut Cpu, handle: u16) -> bool {
+    let Some(at) = events_at(cpu, handle) else {
+        return false;
+    };
+    let events = super::read_16(cpu, at);
+    if events == 0 {
+        return false;
+    }
+    super::write_16(cpu, at, events - 1);
+    true
+}
+
+/// Whether `handle` is the running task (or 0, which means it).
+pub fn is_running_task(cpu: &Cpu, handle: u16) -> bool {
+    handle == 0 || live_task(cpu, handle) == super::current_task(cpu)
 }
 
 /// The bytes of a client task's 16-bit stack.

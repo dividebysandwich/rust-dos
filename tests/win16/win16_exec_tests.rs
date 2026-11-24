@@ -13,6 +13,8 @@ use win16::{CODE, Code, dos_marker, program, run_command, run_with};
 const GET_MODULE_FILE_NAME: u16 = 49;
 const LOAD_LIBRARY: u16 = 95;
 const WIN_EXEC: u16 = 166;
+const YIELD: u16 = 29;
+const WAIT_EVENT: u16 = 30;
 
 /// A program named `name` that imports the DLL `dll` (calling nothing in
 /// it) and ends at once: with exit code 1 if GetModuleFileName gives its
@@ -80,9 +82,9 @@ fn library(name: &str) -> Vec<u8> {
 #[test]
 fn a_program_started_with_a_slash_path_finds_its_dlls_beside_it() {
     // WinExec("C:/SUB/CHILD.EXE"), whose HELPER.DLL is in C:\SUB only.
-    // The child ends after the program, so the exit code is its own: 1
-    // when it started and has its path as Windows keeps it. The program
-    // ends with WinExec's error if it fails (0Bh when the DLL isn't
+    // The child runs and ends before WinExec returns: with 1 when it
+    // started and has its path as Windows keeps it. The program then
+    // ends with WinExec's error if it failed (0Bh when the DLL isn't
     // found), or 10h.
     let mut code = Code::new();
     let path_at = code.here() + 2;
@@ -104,7 +106,15 @@ fn a_program_started_with_a_slash_path_finds_its_dlls_beside_it() {
         fs::write(sub.join("CHILD.EXE"), importer("CHILD", "HELPER")).unwrap();
         fs::write(sub.join("HELPER.DLL"), library("HELPER")).unwrap();
     });
-    assert_eq!(exit, 1, "{log}");
+    assert_eq!(exit, 0x10, "{log}");
+    assert!(ended_with(&log, 1), "{log}");
+}
+
+/// Whether a task ended with the exit code `code`, as the log says.
+fn ended_with(log: &str, code: u8) -> bool {
+    let line = format!(" ended with exit code {:X}", code);
+    log.lines()
+        .any(|l| l.starts_with("[W16] Task ") && l.ends_with(&line))
 }
 
 /// A Win32 program whose entry point returns `code`, its exit code.
@@ -203,9 +213,10 @@ fn a_command_with_non_ascii_bytes_is_looked_up() {
 fn a_program_with_a_loaded_module_name_runs_its_own_code() {
     // The program, module T, runs C:\SUB\CHILD.EXE, another program whose
     // module is named T too, as Sierra's setup runs its copy _SETUP.EXE.
-    // That file loads as a module of its own and ends with 7. Taken for
-    // a second instance of the program, it would run the program's code
-    // again instead.
+    // That file loads as a module of its own and ends with 7, before
+    // WinExec returns. Taken for a second instance of the program, it
+    // would run the program's code again instead. The program ends with
+    // 1 when WinExec gave an instance.
     let mut code = Code::new();
     let path_at = code.here() + 2;
     code.push_far(0)
@@ -229,7 +240,75 @@ fn a_program_with_a_loaded_module_name_runs_its_own_code() {
         fs::create_dir_all(&sub).unwrap();
         fs::write(sub.join("CHILD.EXE"), child).unwrap();
     });
-    assert_eq!(exit, 7, "{log}");
+    assert_eq!(exit, 1, "{log}");
+    assert!(ended_with(&log, 7), "{log}");
+}
+
+#[test]
+fn a_started_program_runs_until_it_yields_before_win_exec_returns() {
+    // Windows 3.1's LoadModule gives the task it starts a DirectedYield,
+    // and returns when the task yields back: the new program's startup
+    // code runs first. Memphis Math's MEMPHIS starts its map, MMAP, and
+    // at once posts it the show command through MCLIB.DLL, which finds
+    // MMAP's task in a table MMAP fills as it starts; with the program
+    // going on first, MMAP wasn't in it yet and never showed.
+    //
+    // CHILD.EXE calls WaitEvent(0), writes C:\MARK.TXT, yields and ends
+    // with 7. The program ends with 1 if MARK.TXT is there when WinExec
+    // returns, 2 if it isn't, and 10h if WinExec failed.
+    let mut code = Code::new();
+    let path_at = code.here() + 2;
+    code.push_far(0).push(1).call("KERNEL", WIN_EXEC);
+    let mark_at = code.here() + 10;
+    code.emit(&[
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0xB0, 0x10, // mov al,10h
+        0x72, 0x10, // jb end
+        0x0E, 0x1F, // push cs; pop ds
+        0xBA, 0xFF, 0xFF, // mov dx,mark
+        0xB8, 0x00, 0x3D, // mov ax,3D00h
+        0xCD, 0x21, // int 21h
+        0xB0, 0x01, // mov al,1
+        0x73, 0x02, // jnc end
+        0xB0, 0x02, // mov al,2
+    ])
+    .exit_al();
+    let path = code.here();
+    code.emit(b"C:\\CHILD.EXE\0");
+    code.patch(path_at, path);
+    let mark = code.here();
+    code.emit(b"C:\\MARK.TXT\0");
+    code.patch(mark_at, mark);
+
+    let mut child = Code::new();
+    // WaitEvent(0) first, as the C runtime's startup code calls it after
+    // InitTask: it takes the event LoadModule gave the task.
+    child.push(0).call("KERNEL", WAIT_EVENT);
+    let name_at = child.here() + 3;
+    child
+        .emit(&[
+            0x0E, 0x1F, // push cs; pop ds
+            0xBA, 0xFF, 0xFF, // mov dx,name
+            0x33, 0xC9, // xor cx,cx
+            0xB4, 0x3C, // mov ah,3Ch
+            0xCD, 0x21, // int 21h
+            0x72, 0x06, // jc over the close
+            0x8B, 0xD8, // mov bx,ax
+            0xB4, 0x3E, // mov ah,3Eh
+            0xCD, 0x21, // int 21h
+        ])
+        .call("KERNEL", YIELD)
+        .emit(&[0xB0, 0x07]) // mov al,7
+        .exit_al();
+    let name = child.here();
+    child.emit(b"C:\\MARK.TXT\0");
+    child.patch(name_at, name);
+    let child = program(&child, CODE);
+    let (_, log) = run_with("first_turn", program(&code, CODE), |_, base| {
+        fs::write(base.join("CHILD.EXE"), child).unwrap();
+    });
+    assert!(ended_with(&log, 7), "{log}");
+    assert!(ended_with(&log, 1), "{log}");
 }
 
 #[test]
