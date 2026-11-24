@@ -5139,6 +5139,64 @@ IPSFactoryBuffer_Release
 IPSFactoryBuffer_CreateProxy
 IPSFactoryBuffer_CreateStub
 
+DLL D3DRM.DLL
+D3DRMColorGetAlpha
+D3DRMColorGetBlue
+D3DRMColorGetGreen
+D3DRMColorGetRed
+D3DRMCreateColorRGB
+D3DRMCreateColorRGBA
+D3DRMMatrixFromQuaternion
+D3DRMQuaternionFromRotation
+D3DRMQuaternionMultiply
+D3DRMQuaternionSlerp
+D3DRMVectorAdd
+D3DRMVectorCrossProduct
+D3DRMVectorDotProduct
+D3DRMVectorModulus
+D3DRMVectorNormalize
+D3DRMVectorRandom
+D3DRMVectorReflect
+D3DRMVectorRotate
+D3DRMVectorScale
+D3DRMVectorSubtract
+Direct3DRMCreate
+IUnknown_QueryInterface
+IUnknown_AddRef
+IUnknown_Release
+D3DRM_CreateObject
+D3DRM_CreateFrame
+D3DRM_CreateMesh
+D3DRM_CreateMeshBuilder
+D3DRM_CreateFace
+D3DRM_CreateAnimation
+D3DRM_CreateAnimationSet
+D3DRM_CreateTexture
+D3DRM_CreateLight
+D3DRM_CreateLightRGB
+D3DRM_CreateMaterial
+D3DRM_CreateDevice
+D3DRM_CreateDeviceFromSurface
+D3DRM_CreateDeviceFromD3D
+D3DRM_CreateDeviceFromClipper
+D3DRM_CreateTextureFromSurface
+D3DRM_CreateShadow
+D3DRM_CreateViewport
+D3DRM_CreateWrap
+D3DRM_CreateUserVisual
+D3DRM_LoadTexture
+D3DRM_LoadTextureFromResource
+D3DRM_SetSearchPath
+D3DRM_AddSearchPath
+D3DRM_GetSearchPath
+D3DRM_SetDefaultTextureColors
+D3DRM_SetDefaultTextureShades
+D3DRM_GetDevices
+D3DRM_GetNamedObject
+D3DRM_EnumerateObjects
+D3DRM_Load
+D3DRM_Tick
+
 MODULE KERNEL
 CallReturn16
 Thunk16
@@ -6653,3 +6711,6 @@ strings 320
 VARS GLU32.DLL
 texts 3584
 wide 7168
+
+VARS D3DRM.DLL
+seed 4
