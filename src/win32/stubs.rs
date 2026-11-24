@@ -201,6 +201,7 @@ pub static DLLS: &[&Dll] = &[
     &super::wing32::DLL,
     &super::dpnet::DLL,
     &super::rpcrt4::DLL,
+    &super::d3drm::DLL,
 ];
 
 /// Bytes each function's stub takes.
@@ -694,6 +695,7 @@ mod tests {
         "WING32.DLL",
         "DPNET.DLL",
         "RPCRT4.DLL",
+        "D3DRM.DLL",
     ];
 
     #[test]

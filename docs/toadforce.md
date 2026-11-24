@@ -1,4 +1,4 @@
-# ToadForce: a synthetic 3D card for games of 2000 to 2002
+# ToadForce: a synthetic 3D card for GeForce-class games
 
 This document says why the card exists, how it is defined, how the
 emulator draws it and what the guest software does with it. What a guest

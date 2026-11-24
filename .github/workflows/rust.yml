@@ -574,7 +574,7 @@ jobs:
           cp -L "$SDL3_PREFIX/lib/libSDL3.so.0" sdl3/
           strip sdl3/libSDL3.so.0
           cp "$SDL3_PREFIX/share/licenses/SDL3/LICENSE.txt" sdl3/SDL3-LICENSE.txt
-          cp target/release/rust-dos target/release/rust-dos-relay openxr/* README.md CONFIGURATION.md LICENSE \
+          cp target/release/rust-dos target/release/rust-dos-relay openxr/* README.md TUTORIALS.md REFERENCE.md CONFIGURATION.md LICENSE \
             THIRD-PARTY-NOTICES sdl3/SDL3-LICENSE.txt stage/rust-dos/
           cp sdl3/libSDL3.so.0 stage/rust-dos/lib/
           # The bundled SDL3 is the one found, without the build's on the
@@ -630,7 +630,7 @@ jobs:
           cp packaging/linux/rust-dos.png $APPDIR/
           cp packaging/linux/rust-dos.png $APPDIR/usr/share/icons/hicolor/256x256/apps/
           ln -s rust-dos.png $APPDIR/.DirIcon
-          cp README.md CONFIGURATION.md LICENSE THIRD-PARTY-NOTICES openxr/openxr-LICENSE.txt \
+          cp README.md TUTORIALS.md REFERENCE.md CONFIGURATION.md LICENSE THIRD-PARTY-NOTICES openxr/openxr-LICENSE.txt \
             sdl3/SDL3-LICENSE.txt $APPDIR/usr/share/doc/rust-dos/
 
           curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-$ARCH.AppImage"
@@ -648,7 +648,7 @@ jobs:
         if: runner.os == 'Windows' && !matrix.win7
         run: |
           mkdir -p out stage/rust-dos
-          cp target/release/rust-dos.exe target/release/rust-dos-relay.exe SDL3/lib/x64/SDL3.dll mt32emu/* openxr/* README.md CONFIGURATION.md stage/rust-dos/
+          cp target/release/rust-dos.exe target/release/rust-dos-relay.exe SDL3/lib/x64/SDL3.dll mt32emu/* openxr/* README.md TUTORIALS.md REFERENCE.md CONFIGURATION.md stage/rust-dos/
           cp LICENSE stage/rust-dos/LICENSE.txt
           cp THIRD-PARTY-NOTICES stage/rust-dos/THIRD-PARTY-NOTICES.txt
           cp SDL3/LICENSE.txt stage/rust-dos/SDL3-LICENSE.txt
@@ -664,7 +664,7 @@ jobs:
         run: |
           mkdir -p out stage/rust-dos
           BIN=target/x86_64-win7-windows-msvc/release
-          cp $BIN/rust-dos.exe $BIN/rust-dos-relay.exe SDL3/lib/x64/SDL3.dll mt32emu/* README.md CONFIGURATION.md stage/rust-dos/
+          cp $BIN/rust-dos.exe $BIN/rust-dos-relay.exe SDL3/lib/x64/SDL3.dll mt32emu/* README.md TUTORIALS.md REFERENCE.md CONFIGURATION.md stage/rust-dos/
           cp LICENSE stage/rust-dos/LICENSE.txt
           cp THIRD-PARTY-NOTICES stage/rust-dos/THIRD-PARTY-NOTICES.txt
           cp SDL3/LICENSE.txt stage/rust-dos/SDL3-LICENSE.txt
@@ -686,9 +686,9 @@ jobs:
           if otool -L target/release/rust-dos-relay | grep -i sdl; then
             echo "::warning::rust-dos-relay links SDL3"
           fi
-          cp target/release/rust-dos-relay README.md CONFIGURATION.md LICENSE THIRD-PARTY-NOTICES "$APP_DIR/"
+          cp target/release/rust-dos-relay README.md TUTORIALS.md REFERENCE.md CONFIGURATION.md LICENSE THIRD-PARTY-NOTICES "$APP_DIR/"
           mkdir -p out
-          (cd "$APP_DIR" && zip -r -q "$GITHUB_WORKSPACE/out/$PKG.zip" "$APP" rust-dos-relay README.md CONFIGURATION.md LICENSE \
+          (cd "$APP_DIR" && zip -r -q "$GITHUB_WORKSPACE/out/$PKG.zip" "$APP" rust-dos-relay README.md TUTORIALS.md REFERENCE.md CONFIGURATION.md LICENSE \
             THIRD-PARTY-NOTICES)
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

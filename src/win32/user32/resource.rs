@@ -72,7 +72,7 @@ pub struct Icon {
 }
 
 /// The W32 section's version that added animated cursors.
-pub const ANI_CURSORS: u16 = 89;
+pub const ANI_CURSORS: u16 = 90;
 
 /// A step of an animated cursor: the picture it shows, and for how long,
 /// in jiffies (sixtieths of a second) as an .ANI file gives it.

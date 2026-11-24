@@ -35,7 +35,7 @@ The built-in Windows is Windows 95 unless `win32_version` says `98` or
 added doesn't start, and its message names the setting. Most games and
 setups were tested with `win32_version=98se`.
 
-When a game doesn't run, the [log file](../README.md#log-file) says what
+When a game doesn't run, the [log file](../REFERENCE.md#log-file) says what
 the built-in Windows did last: its `[W32]` lines name each call, and the
 last ones name a missing function or DLL.
 [When a game doesn't run](../CONFIGURATION.md#when-a-game-doesnt-run)

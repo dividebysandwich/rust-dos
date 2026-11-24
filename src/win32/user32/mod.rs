@@ -512,9 +512,13 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
     }
     forget_windows(cpu, |w| w.pid == pid, tids);
     let state = user(cpu);
-    state
-        .classes
-        .retain(|c| c.as_ref().is_none_or(|c| c.pid != pid));
+    // Their slots empty, not taken out: the other processes' windows
+    // keep their classes by place.
+    for c in state.classes.iter_mut() {
+        if c.as_ref().is_some_and(|c| c.pid == pid) {
+            *c = None;
+        }
+    }
     state.hooks.retain(|h| h.pid != pid);
     for m in state.menus.iter_mut() {
         if m.as_ref().is_some_and(|m| m.pid == pid) {
@@ -554,9 +558,18 @@ fn forget_windows(cpu: &mut Cpu, gone: impl Fn(&Window) -> bool, tids: &[u32]) {
     for &hwnd in &gone {
         window::unlink(state, hwnd);
     }
+    // Their classes have them no more, as when DestroyWindow takes them:
+    // a module freed after its task's windows went unregisters its
+    // classes.
     for &hwnd in &gone {
-        if let Some(i) = slot(hwnd) {
-            state.windows[i] = None;
+        if let Some(i) = slot(hwnd)
+            && let Some(w) = state.windows[i].take()
+            && let Some(c) = state
+                .classes
+                .get_mut(w.class as usize)
+                .and_then(|c| c.as_mut())
+        {
+            c.windows = c.windows.saturating_sub(1);
         }
     }
     state.saved_bits.retain(|s| !gone.contains(&s.hwnd));

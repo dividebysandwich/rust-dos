@@ -45,8 +45,8 @@ and `cargo clippy --all-targets` stop at the link step with
 environment, not the code: don't change the code or the build to get
 around it.
 
-- Set up SDL3's Visual C++ package as the README's build section says,
-  and add its `lib\x64` to `LIB` before building.
+- Set up SDL3's Visual C++ package as `docs/building.md` says, and add
+  its `lib\x64` to `LIB` before building.
 - A new shell, a git worktree, or a subagent's shell may not have the
   `LIB` you set elsewhere, so set it in the same command as the build,
   for example `LIB='C:\SDL3-3.4.20\lib\x64' cargo test` in Git Bash.
