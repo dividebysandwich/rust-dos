@@ -4,7 +4,7 @@ Rust-DOS takes its settings from a configuration file, from the settings
 window while it runs, and from game profiles for games that need settings
 of their own. This page is the reference, to look settings up in. To get
 a game running, start with the [README](README.md#start-here) and the
-[cookbook](COOKBOOK.md), which has whole configurations to copy.
+[tutorials](TUTORIALS.md), which have whole configurations to copy.
 [REFERENCE.md](REFERENCE.md) describes the DOS prompt, the keys and save
 states.
 

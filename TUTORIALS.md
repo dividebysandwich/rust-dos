@@ -1,11 +1,12 @@
-# Cookbook: configurations that work
+# Tutorials: setting up a game
 
-Each recipe here is a whole configuration for one common case, ready to
-copy and change. The paths are examples: put your own in their place.
-[CONFIGURATION.md](CONFIGURATION.md) has every setting the recipes
-use, and the links after each recipe go to the part that explains it.
+Each tutorial here sets up one common case, with a whole configuration
+ready to copy and change. The paths are examples: put your own in their
+place. [CONFIGURATION.md](CONFIGURATION.md) has every setting the
+tutorials use, and the links after each one go to the part that explains
+it.
 
-Most recipes are a game profile: a file such as `games/doom.conf` in the
+Most tutorials make a game profile: a file such as `games/doom.conf` in the
 `games` folder beside your `rust-dos.conf` (`%APPDATA%\rust-dos\games` on
 Windows, `~/.config/rust-dos/games` on Linux,
 `~/Library/Application Support/rust-dos/games` on macOS; make the folder
@@ -18,7 +19,7 @@ Paths in a profile are relative to the `games` folder, `~` is your home
 folder, and a path with spaces goes in quotes. On Windows, either kind
 of slash works: `C=D:\Games\Doom` or `C="D:/My Games/Doom"`.
 
-* [Which recipe](#which-recipe)
+* [Which tutorial](#which-tutorial)
 * DOS games: [from a folder](#a-dos-game-from-a-folder),
   [in a profile](#a-dos-game-in-a-profile),
   [from a zip](#a-dos-game-from-a-zip-or-7z-archive),
@@ -34,9 +35,9 @@ of slash works: `C=D:\Games\Doom` or `C="D:/My Games/Doom"`.
   [on a Windows 98 image](#a-windows-game-on-a-windows-98-image-with-its-cd-image)
   and [on a Voodoo2 in Windows 98](#a-windows-98-game-on-a-voodoo2)
 
-## Which recipe
+## Which tutorial
 
-| The game | Recipe | What you need besides the game |
+| The game | Tutorial | What you need besides the game |
 |---|---|---|
 | A DOS game in a folder | [From a folder](#a-dos-game-from-a-folder), then [in a profile](#a-dos-game-in-a-profile) | Nothing |
 | A DOS game in a zip or 7z | [From a zip](#a-dos-game-from-a-zip-or-7z-archive) | Nothing |
@@ -50,7 +51,7 @@ of slash works: `C=D:\Games\Doom` or `C="D:/My Games/Doom"`.
 
 DOS games run on Rust-DOS's own DOS. Windows games run on its built-in
 Windows first: it needs no copy of Windows, and most of the Windows
-recipes use it. A game it doesn't run yet runs on a real Windows 98
+tutorials use it. A game it doesn't run yet runs on a real Windows 98
 installed on a disk image, which takes a Windows CD and an hour or so
 of setting up ([win9x-howto.md](docs/win9x-howto.md)).
 
@@ -59,7 +60,7 @@ Before you write settings by hand, check whether
 settings window's *Fetch settings from Almanac* puts other players'
 settings in place ([compatibility.md](docs/compatibility.md#the-almanac-first)).
 [compatibility.md](docs/compatibility.md) lists what particular games need
-beyond the recipes here.
+beyond the tutorials here.
 
 ## A DOS game from a folder
 
@@ -376,7 +377,7 @@ rust-dos --import "C:\GOG Games\Some Game"
 makes a `windows=builtin` profile that runs the program GOG's launcher
 starts, with the game's folder as C:. The import writes no `[emulator]`
 section: open the profile in a text editor (it is in the `games` folder)
-and add the one from the recipe above (`machine=svga_voodoo3`,
+and add the one from the tutorial above (`machine=svga_voodoo3`,
 `cpu=pentium_ii`, `win32_version=98se`). Take GOG's wrapper DLLs
 (`ddraw.dll`, `aqrit.cfg`, dgVoodoo's files and the like) out of the
 game's folder when it has them: they replace parts of Windows that
@@ -453,7 +454,7 @@ CD \PROGRA~1\ZANZARAH\SYSTEM
 ZANZARAH.EXE
 ```
 
-This is the recipe for [a game installed from its CD
+This is the tutorial for [a game installed from its CD
 image](#a-windows-95-or-98-game-installed-from-its-cd-image) with
 another card: `machine=svga_toadforce`. With it the machine gets a
 Pentium III and 128 MB of memory unless `cpu` and `memsize` say

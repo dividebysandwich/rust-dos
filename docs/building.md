@@ -1,10 +1,10 @@
 # Building Rust-DOS
 
-To play games, download Rust-DOS from the
-[releases page](https://github.com/dividebysandwich/rust-dos/releases)
-instead: the [README](../README.md#start-here) says how to start. This
-page is for building it from source, and running its tests and
-benchmarks.
+Most players download Rust-DOS from the
+[releases page](https://github.com/dividebysandwich/rust-dos/releases),
+and the [README](../README.md#start-here) says how to start. Build it
+from source to play with fixes and features that main has and no release
+has yet, or to work on Rust-DOS and run its tests and benchmarks.
 
 ## The program
 

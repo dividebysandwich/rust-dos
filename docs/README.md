@@ -6,14 +6,14 @@ is about a subject, to look things up in. Developer pages are about how
 Rust-DOS is built and tested.
 
 New to Rust-DOS? Start with the [README](../README.md#start-here): it
-says where to download it, how to start a first game, and which recipe
+says where to download it, how to start a first game, and which tutorial
 fits what you want to play.
 
 ## Guides
 
 | Page | What it helps with |
 |---|---|
-| [COOKBOOK.md](../COOKBOOK.md) | Whole configurations for common cases: a DOS game from a folder, a zip, a GOG install, a CD or floppies; better music; 3dfx games; Windows games on the built-in Windows, on the ToadForce and on a Windows 98 image |
+| [TUTORIALS.md](../TUTORIALS.md) | Whole configurations for common cases: a DOS game from a folder, a zip, a GOG install, a CD or floppies; better music; 3dfx games; Windows games on the built-in Windows, on the ToadForce and on a Windows 98 image |
 | [win9x-howto.md](win9x-howto.md) | Making a Windows 95 or 98 disk image, installing its drivers, and running games in it |
 | [3dfx.md](3dfx.md) | Which 3dfx card a game needs, and how to set it up |
 | [builtin-windows.md](builtin-windows.md) | Using the built-in Windows: turning it on, installing games, and how it differs from Windows 98 |

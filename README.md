@@ -32,16 +32,16 @@ its notes say which file to take. Then pick what you want to do:
 | I want to... | Go to |
 |---|---|
 | Try a DOS game I have in a folder | [First DOS game](#first-dos-game) below |
-| Play a DOS game from a zip, a GOG install or a DOSBox setup | [Cookbook: from a zip](COOKBOOK.md#a-dos-game-from-a-zip-or-7z-archive), [from GOG or DOSBox](COOKBOOK.md#a-game-set-up-for-dosbox-or-gog) |
-| Play a DOS game from its CD or floppy images | [Cookbook: CD image](COOKBOOK.md#a-dos-game-on-a-cd-image), [floppy images](COOKBOOK.md#a-dos-game-on-floppy-images) |
-| Play a DOS game's 3dfx version | [Cookbook: a 3dfx card](COOKBOOK.md#a-dos-game-with-a-3dfx-card) |
-| Install and play a Windows 95 or 98 game from its CD | [Cookbook: installed from a CD image](COOKBOOK.md#a-windows-95-or-98-game-installed-from-its-cd-image) |
-| Play a Windows game I already have installed (GOG, or copied from a PC) | [Cookbook: an installed Windows game](COOKBOOK.md#an-installed-windows-game-gog-or-a-copied-folder) |
-| Play a Windows game of 2000 to 2002 | [Cookbook: the ToadForce](COOKBOOK.md#a-demanding-windows-game-from-2000-to-2002-toadforce) |
-| Run a game in a real Windows 98 | [Cookbook: a Windows 98 image](COOKBOOK.md#a-windows-game-on-a-windows-98-image-with-its-cd-image), then [docs/win9x-howto.md](docs/win9x-howto.md) |
+| Play a DOS game from a zip, a GOG install or a DOSBox setup | [Tutorial: from a zip](TUTORIALS.md#a-dos-game-from-a-zip-or-7z-archive), [from GOG or DOSBox](TUTORIALS.md#a-game-set-up-for-dosbox-or-gog) |
+| Play a DOS game from its CD or floppy images | [Tutorial: CD image](TUTORIALS.md#a-dos-game-on-a-cd-image), [floppy images](TUTORIALS.md#a-dos-game-on-floppy-images) |
+| Play a DOS game's 3dfx version | [Tutorial: a 3dfx card](TUTORIALS.md#a-dos-game-with-a-3dfx-card) |
+| Install and play a Windows 95 or 98 game from its CD | [Tutorial: installed from a CD image](TUTORIALS.md#a-windows-95-or-98-game-installed-from-its-cd-image) |
+| Play a Windows game I already have installed (GOG, or copied from a PC) | [Tutorial: an installed Windows game](TUTORIALS.md#an-installed-windows-game-gog-or-a-copied-folder) |
+| Play a Windows game of 2000 to 2002 | [Tutorial: the ToadForce](TUTORIALS.md#a-demanding-windows-game-from-2000-to-2002-toadforce) |
+| Run a game in a real Windows 98 | [Tutorial: a Windows 98 image](TUTORIALS.md#a-windows-game-on-a-windows-98-image-with-its-cd-image), then [docs/win9x-howto.md](docs/win9x-howto.md) |
 | Find out what a particular game needs | [almanac.rust-dos.com](https://almanac.rust-dos.com), then [docs/compatibility.md](docs/compatibility.md) |
 | Look up a setting, a command or a key | [Documentation](#documentation) below |
-| Build Rust-DOS from source | [docs/building.md](docs/building.md) |
+| Build Rust-DOS from source, for what main has that no release has yet | [docs/building.md](docs/building.md) |
 
 ### First DOS game
 
@@ -61,7 +61,7 @@ default, `auto`: it finds the speed the game needs.
 
 To start the game with one command next time, with its saves kept apart
 from its files, give it a [game
-profile](COOKBOOK.md#a-dos-game-in-a-profile). `rust-dos --help` lists
+profile](TUTORIALS.md#a-dos-game-in-a-profile). `rust-dos --help` lists
 the command-line options, and
 [CONFIGURATION.md](CONFIGURATION.md#command-line-options) describes
 them, with `rust-dos run` for DOS tools and `rust-dos unpack` for
@@ -91,8 +91,8 @@ the program's folder instead ([where Rust-DOS
 looks](CONFIGURATION.md#configuration-file)). The settings window
 (Ctrl+F12) changes them while a game runs, and F2 there saves them to
 the file. A game's own settings go in a game profile beside it, so they
-don't change the others'. The [cookbook](COOKBOOK.md) has whole
-configurations to copy.
+don't change the others'. The [tutorials](TUTORIALS.md) have
+whole configurations to copy.
 
 ### When a game doesn't run
 
@@ -113,7 +113,7 @@ configurations to copy.
 
 **Guides**, to get something done:
 
-* [COOKBOOK.md](COOKBOOK.md): whole configurations for common cases,
+* [TUTORIALS.md](TUTORIALS.md): whole configurations for common cases,
   from a DOS game in a folder to a Windows game on a Windows 98 image
 * [docs/win9x-howto.md](docs/win9x-howto.md): making a Windows 95 or 98
   disk image, and running games in it
@@ -242,8 +242,10 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 
 ## Building from source
 
-[docs/building.md](docs/building.md) says how to build Rust-DOS, its
-browser version and its libretro core, and how to run the tests.
+Build Rust-DOS yourself to get the fixes and features on main before
+they are released. [docs/building.md](docs/building.md) says how to
+build it, its browser version and its libretro core, and how to run the
+tests.
 
 ## Acknowledgements
 

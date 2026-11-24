@@ -4,7 +4,7 @@ The complete description of using Rust-DOS: its DOS prompt and commands,
 the keys, save states, the log, the browser and libretro versions, and
 the debug server. Every setting of the configuration file is in
 [CONFIGURATION.md](CONFIGURATION.md). To get started instead, see the
-[README](README.md#start-here) and the [cookbook](COOKBOOK.md).
+[README](README.md#start-here) and the [tutorials](TUTORIALS.md).
 
 * [The DOS prompt](#the-dos-prompt): [batch files](#batch-files),
   [commands](#commands) and [the prompt's line editing](#the-prompt)
