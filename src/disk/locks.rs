@@ -124,6 +124,32 @@ impl DiskController {
     /// bytes, which cuts the file or makes it longer, is checked for the
     /// 64 KB from the position, as DOS does.
     pub fn io_locked(&self, sft: u16, owner: u32, count: u32, write: bool) -> bool {
+        self.locked_from(sft, owner, count, write, || self.position(sft))
+    }
+
+    /// `io_locked` for I/O from `position` rather than from the file's
+    /// own, as an FCB's record gives it.
+    pub fn io_locked_at(
+        &self,
+        sft: u16,
+        owner: u32,
+        position: u64,
+        count: u32,
+        write: bool,
+    ) -> bool {
+        self.locked_from(sft, owner, count, write, || Some(position))
+    }
+
+    /// `io_locked`, asking for the position only when another's lock of
+    /// the file could be in the way.
+    fn locked_from(
+        &self,
+        sft: u16,
+        owner: u32,
+        count: u32,
+        write: bool,
+        position: impl FnOnce() -> Option<u64>,
+    ) -> bool {
         if self.locks.is_empty() {
             return false;
         }
@@ -139,7 +165,7 @@ impl DiskController {
         if others.peek().is_none() {
             return false;
         }
-        let Some(position) = self.position(sft) else {
+        let Some(position) = position() else {
             return false;
         };
         let at = position.min(u32::MAX as u64) as u32;
@@ -171,8 +197,17 @@ impl DiskController {
         &self.locks
     }
 
-    /// The locks a save state has.
-    pub fn set_locks(&mut self, locks: Vec<Lock>) {
+    /// Whether any byte of any file is locked. Without, the I/O checks
+    /// have nothing to look at, nor need to know who asks.
+    pub fn has_locks(&self) -> bool {
+        !self.locks.is_empty()
+    }
+
+    /// The locks a save state has, of the files it opened again. Those of
+    /// a file the load couldn't open, whose entry stays free, go, as they
+    /// would have when it closed.
+    pub fn set_locks(&mut self, mut locks: Vec<Lock>) {
+        locks.retain(|l| self.open_files.get(&l.sft).is_some_and(|f| f.key == l.key));
         self.locks = locks;
     }
 }

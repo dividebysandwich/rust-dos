@@ -87,11 +87,26 @@ fn file_of(cpu: &mut Cpu, handle: u16) -> Option<u16> {
 /// Who the running code is to the locks of AH=5Ch: the running process,
 /// or in the built-in Windows the Win16 task, whose DOS calls all run in
 /// the process Windows runs in (disk/locks.rs).
-fn lock_owner(cpu: &Cpu) -> u32 {
+pub(crate) fn lock_owner(cpu: &Cpu) -> u32 {
     match crate::win16::current_task(cpu) {
         Some(task) => crate::disk::TASK_OWNER | cpu.bus.win32.win16.tasks[task].psp as u32,
         None => cpu.current_psp as u32,
     }
+}
+
+/// Whether a read (`write` false) or a write of `count` bytes at the
+/// position of the open file `sft` by the running code reaches bytes
+/// another's lock has (`DiskController::io_locked`). With no locks at
+/// all it asks nothing more.
+fn sft_locked(cpu: &Cpu, sft: u16, count: u32, write: bool) -> bool {
+    cpu.bus.disk.has_locks() && cpu.bus.disk.io_locked(sft, lock_owner(cpu), count, write)
+}
+
+/// `sft_locked` for handle `handle` of the running process: false for a
+/// handle that refers to nothing.
+pub(crate) fn handle_locked(cpu: &mut Cpu, handle: u16, count: u32, write: bool) -> bool {
+    cpu.bus.disk.has_locks()
+        && file_of(cpu, handle).is_some_and(|sft| sft_locked(cpu, sft, count, write))
 }
 
 /// A handle of the running process for the file just opened at `sft`.
@@ -1688,7 +1703,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 cpu.bus.guest_write_bytes(buf_addr, &taken);
                 cpu.set_ax(taken.len() as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
-            } else if cpu.bus.disk.io_locked(sft, lock_owner(cpu), count as u32, false) {
+            } else if sft_locked(cpu, sft, count as u32, false) {
                 // Another's lock has some of the bytes. SHARE asks INT 24h
                 // first for a file opened in compatibility mode; Fail, what
                 // Windows answers for its programs, comes to this.
@@ -1727,7 +1742,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 return set_result(cpu, Err(0x06));
             };
             // Another's lock has some of the bytes, as with a read.
-            if cpu.bus.disk.io_locked(sft, lock_owner(cpu), count as u32, true) {
+            if sft_locked(cpu, sft, count as u32, true) {
                 return set_result(cpu, Err(LOCK_VIOLATION));
             }
             // Handles 1 and 2 are the screen unless the command line

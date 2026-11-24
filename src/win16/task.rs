@@ -571,6 +571,11 @@ pub(super) fn end_client_task(cpu: &mut Cpu, tid: u32) {
     super::comm::task_ended(cpu, task.handle);
     super::ole2::task_ended(cpu, task.handle);
     super::misc::task_ended(cpu, task.tid);
+    // Its locks (INT 21h AH=5Ch) go before its PDB's selector is free
+    // for another task to have, and them with it.
+    cpu.bus
+        .disk
+        .release_locks(crate::disk::TASK_OWNER | task.psp as u32);
     global::free_owned(cpu, task.handle);
     cpu.bus.win32.win16.ldt.free(task.psp, 1);
     global::free(cpu, task.handle);

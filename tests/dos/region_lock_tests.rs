@@ -238,3 +238,53 @@ fn a_save_state_keeps_the_locks() {
     rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
     assert_eq!(lock(&mut cpu, other, 0, 4), Ok(()));
 }
+
+#[test]
+fn a_file_a_loaded_state_cannot_open_keeps_no_locks() {
+    // The file is gone when the state loads: its entry stays free, and a
+    // new open of the file, back again, finds its bytes free.
+    let mut cpu = machine("state_lost");
+    let dir = PathBuf::from("target/test_region_locks/state_lost");
+    let (mine, other) = (open(&mut cpu), open(&mut cpu));
+    lock(&mut cpu, mine, 0, 4).unwrap();
+    let state = rust_dos::savestate::machine::save(&cpu);
+    dos(&mut cpu, 0x3E00, mine, 0, 0).unwrap();
+    dos(&mut cpu, 0x3E00, other, 0, 0).unwrap();
+    fs::remove_file(dir.join("DATA.TXT")).unwrap();
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    fs::write(dir.join("DATA.TXT"), b"0123456789").unwrap();
+    let (first, second) = (open(&mut cpu), open(&mut cpu));
+    assert_eq!(read_at(&mut cpu, second, 0, 4).unwrap(), b"0123");
+    assert_eq!(lock(&mut cpu, first, 0, 4), Ok(()));
+}
+
+#[test]
+fn an_fcb_neither_reads_nor_writes_locked_bytes() {
+    // DOS checks the I/O of FCBs as that of handles: AL=01h, nothing
+    // moved.
+    let mut cpu = machine("fcb");
+    let h = open(&mut cpu);
+    let base = cpu.current_psp as usize * 16;
+    let mut fcb = [0u8; 0x25];
+    fcb[1..12].copy_from_slice(b"DATA    TXT");
+    cpu.bus.load_bytes(base + 0x400, &fcb);
+    assert_eq!(dos(&mut cpu, 0x0F00, 0, 0, 0x400).map(|ax| ax as u8), Ok(0));
+    dos(&mut cpu, 0x1A00, 0, 0, 0x500).unwrap();
+    lock(&mut cpu, h, 2, 2).unwrap();
+    // The sequential record, record 0 of 128 bytes.
+    assert_eq!(
+        dos(&mut cpu, 0x1400, 0, 0, 0x400).map(|ax| ax as u8),
+        Ok(0x01)
+    );
+    assert_eq!(
+        dos(&mut cpu, 0x1500, 0, 0, 0x400).map(|ax| ax as u8),
+        Ok(0x01)
+    );
+    unlock(&mut cpu, h, 2, 2).unwrap();
+    assert_eq!(
+        dos(&mut cpu, 0x1400, 0, 0, 0x400).map(|ax| ax as u8),
+        Ok(0x03),
+        "the file's 10 bytes, a partial record"
+    );
+    assert_eq!(cpu.bus.read_8(base + 0x502), b'2');
+}
