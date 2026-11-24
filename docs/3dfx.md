@@ -107,7 +107,7 @@ Banshee, which always has 16 MB. The others work for every 3dfx card.
 | `voodoo` | `false`, `true` | Adds the Voodoo Graphics or Voodoo2 add-on card |
 | `voodoo_model` | `voodoo1`, `voodoo2` | The add-on card's chip |
 | `voodoo_memory` | `12`, `8`, `4` | The add-on card's memory in MB: 12 is two texture units with 4 MB each, 8 a Voodoo2 with 2 MB each (it picks the Voodoo2 when `voodoo_model` isn't set; a Voodoo Graphics takes it as 12), 4 a Voodoo Graphics with one texture unit (a Voodoo2 takes it as 8) |
-| `voodoo_renderer` | `software`, `opengl` | What draws the card's picture. `opengl` draws it again at a higher resolution, and needs OpenGL 3 on the host |
+| `voodoo_renderer` | `software`, `opengl` | What draws the card's picture. `software` draws it at the card's resolution; `opengl` has your graphics card draw it again at `voodoo_scale` times that. `opengl` needs OpenGL 3.2 from your graphics driver; without it the `software` picture shows and a `[DISPLAY]` line at startup says why |
 | `voodoo_scale` | `2`, 1 to 4 | How many times the card's resolution OpenGL draws at |
 | `voodoo_scale_shader` | `true`, `false` | Whether the CRT looks keep one scanline per line of the card's resolution; `false` gives a line per pixel of the bigger picture (above 1x only) |
 | `voodoo_msaa` | `off`, `2`, `4`, `8` | OpenGL's antialiasing |

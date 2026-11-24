@@ -31,7 +31,7 @@ of slash works: `C=D:\Games\Doom` or `C="D:/My Games/Doom"`.
 * Windows games:
   [installed from a CD image](#a-windows-95-or-98-game-installed-from-its-cd-image),
   [already installed](#an-installed-windows-game-gog-or-a-copied-folder),
-  [from 2000 to 2002, on the ToadForce](#a-demanding-windows-game-from-2000-to-2002-toadforce),
+  [demanding 3D, on the ToadForce](#a-demanding-windows-3d-game-toadforce),
   [on a Windows 98 image](#a-windows-game-on-a-windows-98-image-with-its-cd-image)
   and [on a Voodoo2 in Windows 98](#a-windows-98-game-on-a-voodoo2)
 
@@ -46,7 +46,7 @@ of slash works: `C=D:\Games\Doom` or `C="D:/My Games/Doom"`.
 | A DOS game with a 3dfx version | [With a 3dfx card](#a-dos-game-with-a-3dfx-card) | Nothing, or 3dfx's `GLIDE2X.OVL`, which the settings window downloads |
 | A Windows 95 or 98 game on CD | [Installed from a CD image](#a-windows-95-or-98-game-installed-from-its-cd-image) | An image of the CD |
 | A Windows game already installed (GOG, or copied from a PC) | [Already installed](#an-installed-windows-game-gog-or-a-copied-folder) | Its registry keys, for some games |
-| A Windows game of 2000 to 2002 that a Voodoo3 doesn't run | [On the ToadForce](#a-demanding-windows-game-from-2000-to-2002-toadforce) | Nothing |
+| A Windows 3D game that wants a GeForce-class card, or that a Voodoo3 doesn't run | [On the ToadForce](#a-demanding-windows-3d-game-toadforce) | Nothing |
 | A Windows game the built-in Windows doesn't run yet | [On a Windows 98 image](#a-windows-game-on-a-windows-98-image-with-its-cd-image) | A Windows 98 SE CD, and an image with Windows installed on it |
 
 DOS games run on Rust-DOS's own DOS. Windows games run on its built-in
@@ -307,8 +307,19 @@ it can't find `GLIDE2X.OVL` wants 3dfx's DOS overlay, which doesn't come
 with Rust-DOS: open the settings window (Ctrl+F12), and on the Emulator
 page choose *Download Glide's DOS overlay...*.
 
-`voodoo_renderer=opengl` needs OpenGL 3 on your computer. `voodoo_scale`
-goes up to 4; `voodoo_msaa=4` smooths the edges.
+The `voodoo_renderer` and `voodoo_scale` lines are optional. Without
+them Rust-DOS draws the 3D picture itself at the card's resolution
+(640x480 for Tomb Raider), as the real card did. With them your graphics
+card draws it again at `voodoo_scale` times that resolution: 2 gives
+1280x960, 4 (the most) gives 2560x1920. Add `voodoo_msaa=4` to smooth the
+jagged edges of the 3D shapes as well.
+
+Your graphics card does this through OpenGL 3.2, which a graphics card or
+chip made in the last fifteen years has once its maker's driver is
+installed. Where OpenGL 3.2 isn't there (Windows' Basic Display Adapter,
+the browser version), the game still runs: Rust-DOS draws the picture at
+the card's resolution, `voodoo_scale` and `voodoo_msaa` do nothing, and a
+`[DISPLAY]` line at startup says why.
 
 See: [3dfx.md](docs/3dfx.md), [the 3dfx OpenGL
 renderer](CONFIGURATION.md#the-3dfx-opengl-renderer).
@@ -423,12 +434,17 @@ REGEDIT4
 See: [copying an installed game](CONFIGURATION.md#copying-an-installed-game),
 [registry keys](CONFIGURATION.md#registry-keys).
 
-## A demanding Windows game from 2000 to 2002 (ToadForce)
+## A demanding Windows 3D game (ToadForce)
 
-Games from 2000 on that ask for more than a Voodoo3 has (32-bit
-textures, compressed textures, hardware transform and lighting, Direct3D
-8) run on the ToadForce, a 3D card Rust-DOS defines for them. Zanzarah:
-The Hidden Portal, installed from its CD image:
+Some Windows games were made for a GeForce, a Radeon or a card like
+them, and want more than a Voodoo3 has: 32-bit colour and textures,
+compressed textures, hardware transform and lighting, Direct3D 8. Such a
+game may refuse to start on a Voodoo3, crash, or draw parts of its
+picture wrong. Those games run on the ToadForce, a 3D card Rust-DOS
+defines with that class of features. The year a game came out doesn't
+matter: what decides is what it asks of the card, and older Direct3D and
+OpenGL games run on the ToadForce too. Zanzarah: The Hidden Portal,
+installed from its CD image:
 
 ```ini
 # games/zanzarah.conf
@@ -508,10 +524,13 @@ session with Start, Shut Down.
 
 Give every game that boots the image the same `[emulator]`, `[sound]`
 and network settings the image was installed with: Windows asks for
-drivers again when it finds other hardware. A few games need a
-particular driver version: Glover draws right only with the Voodoo3
-driver 4.11.01.1151 ([compatibility.md](docs/compatibility.md) names
-the others).
+drivers again when it finds other hardware.
+
+A few games draw correctly only with one version of the card's Windows
+driver. Glover, for example, flickers with 3dfx's later Voodoo3 driver
+1.07.00 and draws correctly with the older 4.11.01.1151.
+[compatibility.md](docs/compatibility.md) lists the games that need a
+particular driver.
 
 See: [booting a disk image](CONFIGURATION.md#booting-a-disk-image),
 [Windows 98](CONFIGURATION.md#windows-98),

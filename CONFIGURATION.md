@@ -447,17 +447,19 @@ limit, so without a connection it goes on as it would with one:
   renderer](#the-3dfx-opengl-renderer)), with `voodoo_msaa` (`off`, the
   default, `2`, `4` or `8`) samples a pixel of multisampled antialiasing and
   `voodoo_anisotropy` (`off`, the default, `2`, `4`, `8` or `16`) filters
-  textures at oblique angles; `voodoo_gamma` (`off`, the default, or 0.1
-  to 2) is the gamma Glide gives the card's picture (see [3dfx
-  gamma](#3dfx-gamma)); without OpenGL 3 (in the browser, or with SDL's
-  dummy video driver) the software rasterizer's picture shows. The card's
-  frames are held to `fps_cap` with every other card's (see [Frame rate
-  cap](#frame-rate-cap)). The
-  settings from `voodoo_texture_sampling` on change at once, `voodoo_gamma`
-  at the DOS prompt. All of them but `voodoo_gamma` also work on a Voodoo3
-  or Banshee display adapter (`machine=svga_voodoo3` or `svga_banshee`; see
-  [3dfx Voodoo3](#3dfx-voodoo3-and-banshee)), whose card and memory don't
-  depend on `voodoo`, `voodoo_model` or `voodoo_memory`.
+  textures at oblique angles; `voodoo_gamma` (`off`, the default, or 0.1 to
+  2) is the gamma Glide gives the card's picture (see [3dfx
+  gamma](#3dfx-gamma)); `voodoo_renderer=opengl` needs OpenGL 3.2 from the
+  host's graphics driver, and without it (a generic or old driver, the
+  browser, SDL's dummy video driver) the software rasterizer's picture shows
+  at the card's resolution and a `[DISPLAY]` line at startup says why. The
+  card's frames are held to `fps_cap` with every other card's (see [Frame
+  rate cap](#frame-rate-cap)). The settings from `voodoo_texture_sampling`
+  on change at once, `voodoo_gamma` at the DOS prompt. All of them but
+  `voodoo_gamma` also work on a Voodoo3 or Banshee display adapter
+  (`machine=svga_voodoo3` or `svga_banshee`; see [3dfx
+  Voodoo3](#3dfx-voodoo3-and-banshee)), whose card and memory don't depend
+  on `voodoo`, `voodoo_model` or `voodoo_memory`.
 * `powervr=pcx1` or `pcx2` adds a PowerVR 3D card beside the display
   adapter, for games with a PowerVR version: the PCX1 (VideoLogic
   Apocalypse 3D) or the PCX2 (Matrox m3D, VideoLogic Apocalypse 3Dx; see
@@ -1702,7 +1704,7 @@ profile:
 
 | Setting | Set it to | Why |
 |---|---|---|
-| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. Of the 3dfx cards, it and the Banshee are the ones Direct3D 8 runs on and OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too. A game from 2000 on that asks for more than a Voodoo3 has (32-bit color, large textures, hardware transform and lighting) takes `svga_toadforce` ([ToadForce](#toadforce)) |
+| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. Of the 3dfx cards, it and the Banshee are the ones Direct3D 8 runs on and OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too. A game made for a GeForce-class card, which asks for more than a Voodoo3 has (32-bit color, large textures, hardware transform and lighting), takes `svga_toadforce` ([ToadForce](#toadforce)) |
 | `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both. With `svga_toadforce` the machine has a Pentium III without the line |
 | `memsize` | leave it out, or `128` for a 3D game from 1998 on | Without it a Pentium II has 64 MB, which most Windows 98 games asked for (the default 486 has 16 MB). The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
