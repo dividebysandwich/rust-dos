@@ -2008,6 +2008,14 @@ patch of its own. If a fix doesn't apply to your copy (no `[game fix]`
 line in the log), install the game's last official patch, or use the
 GOG release.
 
+We aim to fix as many of the games' own bugs as we can, in any game
+Rust-DOS runs, and a savegame or a [save state](REFERENCE.md#save-states)
+from just before one helps most. Attach it to [an
+issue](https://github.com/dividebysandwich/rust-dos/issues) (zipped),
+with the steps that make the bug happen and the game's version. A save
+state holds the machine without the game's files on the host, so it
+plays back only on the same version of them.
+
 Some fixes patch the game's code in memory. They look for it each time
 a program resets the Sound Blaster's DSP, which a game's sound driver
 does before it sets anything up, and patch only code that is there as

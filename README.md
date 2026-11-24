@@ -109,6 +109,13 @@ whole configurations to copy.
 4. [Open an issue](https://github.com/dividebysandwich/rust-dos/issues)
    with the game's name, your settings and the log.
 
+Bugs of the games themselves are welcome too: a crash, a hang or a
+glitch that happened on real PCs as well. If you have a savegame or a
+[save state](REFERENCE.md#save-states) from just before one, attach it
+to an issue (zipped) with the steps that make it happen. We aim to fix
+as many of these bugs as we can, in any game Rust-DOS runs, as [game
+fixes](CONFIGURATION.md#game-fixes).
+
 ## Documentation
 
 **Guides**, to get something done:
