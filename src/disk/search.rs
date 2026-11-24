@@ -245,7 +245,13 @@ impl DiskController {
     /// Hidden/System bits. Directory and Volume Label bits cannot be set via
     /// this call on real DOS either.
     pub fn set_file_attribute(&self, filename: &str, attr: u16) -> Result<(), u8> {
-        if self.is_system_entry(filename) {
+        // A system file keeps its attributes, as it keeps its contents
+        // until it is written to (system_files.rs); a setup that clears
+        // the read-only bit before it copies over a file goes on.
+        if self.system_file(filename).is_some() {
+            return Ok(());
+        }
+        if self.is_system_dir(filename) {
             return Err(0x05);
         }
         // A file in a system directory the drive hasn't is not found

@@ -80,8 +80,10 @@ pub fn load(
         .to_ascii_uppercase();
     let has_path = name.contains(['\\', '/', ':']);
     // A system module is found by its file's name too, which may differ
-    // from its module's (KRNL386.EXE is KERNEL), as Windows finds it.
-    let builtin = builtin::find(file_name).filter(|_| !has_path);
+    // from its module's (KRNL386.EXE is KERNEL), as Windows finds it. A
+    // path names it in the system directory, where its file is
+    // (win32/dll_files.rs); one elsewhere names a file of the program's.
+    let builtin = builtin::find(file_name).filter(|_| !has_path || in_system_dir(cpu, name));
     let module_name = builtin.map_or(module_name, |i| {
         builtin::MODULES[i].name.to_ascii_uppercase()
     });
@@ -127,6 +129,12 @@ pub fn load(
             format!("{} can't be found.", file_name),
         ));
     };
+    // A copy of a system module's file, under any name, is that module:
+    // its code is stubs of the built-in functions, which only the
+    // built-in module may run.
+    if let Some(index) = builtin::of_file(&file) {
+        return load(cpu, builtin::MODULES[index].file, dir, inits);
+    }
     let loaded = load_file(cpu, file, &path, None, dir, inits)?;
     remember_known(cpu, loaded);
     Ok(loaded)
@@ -169,6 +177,17 @@ fn remember_known(cpu: &mut Cpu, index: usize) {
     let mut data = file.clone().into_bytes();
     data.push(0);
     reg.set_value(key, &file, registry::REG_SZ, data);
+}
+
+/// Whether the path `name` is of a file in the system directory.
+fn in_system_dir(cpu: &Cpu, name: &str) -> bool {
+    cpu.bus
+        .disk
+        .qualify_path(name.trim_end_matches(' '))
+        .is_some_and(|path| {
+            crate::win32::loader::directory_of(&path)
+                .eq_ignore_ascii_case(crate::win32::loader::SYSTEM_DIR)
+        })
 }
 
 fn file_name_of(path: &str) -> &str {
@@ -832,8 +851,10 @@ pub fn release(cpu: &mut Cpu, handle: u16) {
     }
 }
 
-/// Take the module at `index` away: its blocks, and its entry.
+/// Take the module at `index` away: its window classes, its blocks, and
+/// its entry.
 fn unload(cpu: &mut Cpu, index: usize) {
+    free_classes(cpu, index);
     let m = cpu.bus.win32.win16.modules.remove(index);
     let code: Vec<u16> = m
         .segments
@@ -856,6 +877,51 @@ fn unload(cpu: &mut Cpu, index: usize) {
             p.memory.release_region(bus, m.resources32);
             p.modules.retain(|x| x.base != m.resources32);
         });
+    }
+}
+
+/// Unregister the window classes the module at `index` registered, as
+/// Windows 3.1's and Windows 95's USER does when KERNEL frees a module:
+/// a later program may register the same names with the same handles.
+/// A class is the module's when it was registered with the module's
+/// 32-bit image or with one of its 16-bit handles (the module's, an
+/// instance's, a segment's).
+fn free_classes(cpu: &mut Cpu, index: usize) {
+    let pid = cpu.bus.win32.win16.pid;
+    let image = cpu.bus.win32.win16.modules[index].resources32;
+    let mut instances: Vec<u32> = crate::win32::user32::user(cpu)
+        .classes
+        .iter()
+        .flatten()
+        .filter(|c| !c.system && c.pid == pid)
+        .map(|c| c.instance)
+        .collect();
+    instances.sort_unstable();
+    instances.dedup();
+    instances.retain(|&i| {
+        (image != 0 && i == image)
+            || (i != 0 && i < 0x1_0000 && super::module_index(cpu, i as u16) == Some(index))
+    });
+    if instances.is_empty() {
+        return;
+    }
+    let user = crate::win32::user32::user(cpu);
+    let mut gone = crate::win32::user32::class::module_freed(user, pid, &instances);
+    // GetClassInfo's menu names of those classes, which pointed into the
+    // module's segments. They are kept by name alone, so a name that
+    // another module's class of the process still has keeps its entry.
+    gone.retain(|(name, _)| {
+        !user
+            .classes
+            .iter()
+            .flatten()
+            .any(|c| !c.system && c.pid == pid && c.name.eq_ignore_ascii_case(name))
+    });
+    let menus = &mut cpu.bus.win32.win16.class_menus;
+    for (name, atom) in gone {
+        let name = name.to_ascii_uppercase();
+        let atom = format!("#{}", atom);
+        menus.retain(|(k, _)| *k != name && *k != atom);
     }
 }
 

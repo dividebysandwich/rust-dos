@@ -38,6 +38,7 @@ const GENERAL_FAILURE: u16 = 0x810C;
 
 /// Errors of the INT 2Fh calls, in AX with CF set: DOS's error codes.
 /// NOT_READY and DATA_ERROR are the device's errors 2 and 4 plus 19.
+const INVALID_FUNCTION: u16 = 1;
 const INVALID_DRIVE: u16 = 15;
 const NOT_READY: u16 = 21;
 const DATA_ERROR: u16 = 23;
@@ -104,9 +105,8 @@ fn clear_error(cpu: &mut Cpu) {
     cpu.set_cpu_flag(CpuFlags::CF, false);
 }
 
-/// The image in CD drive `drive` (from CX), or the INT 2Fh error for it.
-fn drive_image(cpu: &Cpu, drive: u16) -> Result<Rc<CdImage>, u16> {
-    let drive = u8::try_from(drive).map_err(|_| INVALID_DRIVE)?;
+/// The image in CD drive `drive` (0 = A:), or the INT 2Fh error for it.
+fn drive_image(cpu: &Cpu, drive: u8) -> Result<Rc<CdImage>, u16> {
     if cpu.bus.disk.drive_kind(drive) != Some(DriveKind::CdRom) {
         return Err(INVALID_DRIVE);
     }
@@ -142,7 +142,22 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
     if cd_drives.is_empty() {
         return;
     }
+    // MSCDEX 2.25 has functions 00h to 10h. Above them it returns AX=1,
+    // invalid function, with CF set (load-module offset 32E6h). For its
+    // own functions its dispatcher clears the caller's CF first (3344h),
+    // and those that fail set it again.
+    if function > 0x10 {
+        cpu.bus.log_string(&format!("[MSCDEX] Unhandled INT 2Fh AX={:04X}", cpu.ax()));
+        return set_error(cpu, INVALID_FUNCTION);
+    }
+    clear_error(cpu);
     let es_bx = cpu.get_physical_addr(cpu.es(), cpu.bx());
+    // The functions that take a drive (0 = A:) look it up from CL alone,
+    // as MSCDEX 2.25 does: it takes the low byte of the caller's CX and
+    // widens it with `sub ah,ah` before the lookup. Ultimate Domain sends
+    // its requests with garbage in CH (#1796). Of these functions only
+    // 150Fh reads CH, whose bit 0 is a copy flag rust-dos ignores (#1807).
+    let drive = cpu.get_reg8(Register::CL);
 
     match function {
         // Installation check: BX = number of CD-ROM drives, CX = first one (0=A)
@@ -162,7 +177,7 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
         // Copyright, abstract and bibliographic file names from the
         // Primary Volume Descriptor: 37 characters in ISO 9660, 32 in
         // High Sierra, which has no bibliographic file.
-        0x02..=0x04 => match drive_image(cpu, cpu.cx()) {
+        0x02..=0x04 => match drive_image(cpu, drive) {
             Ok(image) => match cdrom::iso9660::file_identifiers(&image) {
                 Ok(ids) => {
                     let id = &ids[function as usize - 2];
@@ -170,7 +185,6 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
                         cpu.bus.guest_write_8((es_bx + i) as u32, b);
                     }
                     cpu.bus.guest_write_8((es_bx + id.len()) as u32, 0);
-                    clear_error(cpu);
                 }
                 Err(_) => set_error(cpu, NOT_READY),
             },
@@ -179,7 +193,7 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
         // Read volume descriptor DX (0 = the first, at sector 16). AX is
         // its type: 1 primary, FFh terminator, 0 others. High Sierra has
         // the type at byte 8, after the descriptor's sector number.
-        0x05 => match drive_image(cpu, cpu.cx()) {
+        0x05 => match drive_image(cpu, drive) {
             Ok(image) => {
                 let start = image.data_track().map_or(0, |t| t.start);
                 let mut sector = [0u8; DATA_SECTOR];
@@ -199,14 +213,13 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
                     0xFF => 0xFF,
                     _ => 0,
                 });
-                clear_error(cpu);
             }
             Err(code) => set_error(cpu, code),
         },
-        // Debugging on and off: nothing to do.
-        0x06 | 0x07 => {}
+        // Debugging on and off, and the reserved 0Ah: nothing to do.
+        0x06 | 0x07 | 0x0A => {}
         // Absolute read: DX sectors from SI:DI into ES:BX.
-        0x08 => match drive_image(cpu, cpu.cx()) {
+        0x08 => match drive_image(cpu, drive) {
             Ok(image) => {
                 let start = (cpu.si() as u32) << 16 | cpu.di() as u32;
                 let mut sector = [0u8; DATA_SECTOR];
@@ -227,19 +240,16 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
                         cpu.bus.guest_write_8((at + j) as u32, b);
                     }
                 }
-                clear_error(cpu);
             }
             Err(code) => set_error(cpu, code),
         },
-        // Absolute write: CDs are read-only.
-        0x09 => match drive_image(cpu, cpu.cx()) {
-            Ok(_) => set_error(cpu, NOT_READY),
-            Err(code) => set_error(cpu, code),
-        },
-        // CD-ROM drive check: CX = drive. BX=ADADh marks MSCDEX; AX is
+        // Absolute write: MSCDEX 2.25 has none. It fails every call with
+        // AX=1, invalid function, and doesn't look at the drive (27EFh).
+        0x09 => set_error(cpu, INVALID_FUNCTION),
+        // CD-ROM drive check: CL = drive. BX=ADADh marks MSCDEX; AX is
         // nonzero when the drive is a CD-ROM.
         0x0B => {
-            let is_cd = cpu.cx() < 26 && cd_drives.contains(&(cpu.cx() as u8));
+            let is_cd = cd_drives.contains(&drive);
             cpu.set_ax(if is_cd { 0x5AD8 } else { 0 });
             cpu.set_bx(0xADAD);
         }
@@ -251,32 +261,42 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
                 cpu.bus.guest_write_8((es_bx + i) as u32, drive);
             }
         }
-        // Volume descriptor preference: always the primary one.
-        0x0E => {
-            if cpu.bx() == 0 {
-                cpu.set_dx(0x0100);
+        // Volume descriptor preference of drive CL: BX=0 gets it in DX,
+        // BX=1 sets it from DX (2869h). rust-dos reads only the primary
+        // descriptor, so a get answers DX=0100h. MSCDEX takes a set to
+        // the primary descriptor (DH=1) or to the Shift-JIS supplementary
+        // one (DX=0201h), which rust-dos doesn't keep (#1807), and fails
+        // any other with AX=1 and DX=0.
+        0x0E if !cd_drives.contains(&drive) => set_error(cpu, INVALID_DRIVE),
+        0x0E => match cpu.bx() {
+            0 => cpu.set_dx(0x0100),
+            1 if cpu.dx() >> 8 == 1 || cpu.dx() == 0x0201 => {}
+            1 => {
+                cpu.set_dx(0);
+                set_error(cpu, INVALID_FUNCTION);
             }
-            clear_error(cpu);
-        }
+            _ => set_error(cpu, INVALID_FUNCTION),
+        },
         // Directory entry of the path at ES:BX, copied to SI:DI. AX is
         // the disc's format: 0 High Sierra, 1 ISO 9660.
-        0x0F => get_directory_entry(cpu, es_bx),
-        // Send device driver request: CX = drive, ES:BX -> request header
-        0x10 => {
-            let drive = u8::try_from(cpu.cx()).ok().filter(|d| cd_drives.contains(d));
-            if let Some(unit) = drive.and_then(|d| cd_drives.iter().position(|&x| x == d)) {
+        0x0F => get_directory_entry(cpu, drive, es_bx),
+        // Send device driver request: CL = drive, ES:BX -> request header.
+        // MSCDEX puts the drive's subunit in the header and calls the
+        // driver. For a drive that isn't a CD drive it fails the call and
+        // leaves the header as it was.
+        0x10 => match cd_drives.iter().position(|&d| d == drive) {
+            Some(unit) => {
                 cpu.bus.guest_write_8((es_bx + 1) as u32, unit as u8);
+                device_request(cpu, Some(drive), es_bx);
             }
-            device_request(cpu, drive, es_bx);
-        }
-        _ => {
-            cpu.bus.log_string(&format!("[MSCDEX] Unhandled INT 2Fh AX={:04X}", cpu.ax()));
-        }
+            None => set_error(cpu, INVALID_DRIVE),
+        },
+        // Above 10h: answered before the match.
+        _ => {}
     }
 }
 
-fn get_directory_entry(cpu: &mut Cpu, path_addr: usize) {
-    let drive = cpu.get_reg8(Register::CL) as u16;
+fn get_directory_entry(cpu: &mut Cpu, drive: u8, path_addr: usize) {
     let image = match drive_image(cpu, drive) {
         Ok(image) => image,
         Err(code) => return set_error(cpu, code),
@@ -300,7 +320,6 @@ fn get_directory_entry(cpu: &mut Cpu, path_addr: usize) {
             }
             // The disc's format: 0 High Sierra, 1 ISO 9660.
             cpu.set_ax((format == cdrom::iso9660::Format::Iso9660) as u16);
-            clear_error(cpu);
         }
         None => set_error(cpu, FILE_NOT_FOUND),
     }
