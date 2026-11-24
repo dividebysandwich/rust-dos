@@ -216,7 +216,9 @@ HKEY_CLASSES_ROOT\\.avi = mplayer\r\n\
 /// the same command line. WinExec gives 33 for the Win32 program, which
 /// runs beside the task: the program yields until the first key is
 /// there (it ends with 20 if it never comes). Without REGEDIT.EXE,
-/// WinExec gave 2, file not found.
+/// WinExec gave 2, file not found. A file on the command line that isn't
+/// there, put before MPLAYER.REG here, doesn't stop REGEDIT importing
+/// the next.
 #[test]
 fn a_program_imports_a_windows_31_registration_file_with_regedit() {
     let mut code = Code::new();
@@ -224,7 +226,8 @@ fn a_program_imports_a_windows_31_registration_file_with_regedit() {
     let first = 0xC0;
     let last = 0xD0;
     let command = 0xE0;
-    put_string(&mut code, line, b"regedit /s C:\\WINDOWS\\MPLAYER.REG");
+    let regedit = b"regedit /s C:\\NONE.REG C:\\WINDOWS\\MPLAYER.REG";
+    put_string(&mut code, line, regedit);
     put_string(&mut code, first, b"mplayer");
     put_string(&mut code, last, b".avi");
     put_string(&mut code, command, b"MPlayer\\shell\\open\\command");

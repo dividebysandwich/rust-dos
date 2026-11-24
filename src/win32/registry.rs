@@ -499,8 +499,10 @@ impl Registry {
     /// Windows 3.1's REGEDIT, into the registry. After its first line,
     /// `REGEDIT`, each line is a key and the string its default value
     /// gets: `HKEY_CLASSES_ROOT\mplayer\shell\open\command = mplayer.exe
-    /// /play /close %1`. A line without `=` makes the key alone. Lines
-    /// that name no key (comments) are left out.
+    /// /play /close %1`. A line without `=` makes the key alone. Windows
+    /// 3.1's registration database is HKEY_CLASSES_ROOT alone, so a line
+    /// that starts with another tree is left out, as are those that name
+    /// no key (comments).
     pub fn import_win31(&mut self, text: &str) {
         for line in text.lines().skip(1) {
             let line = line.trim_start();
@@ -513,6 +515,9 @@ impl Registry {
                 None => (line.trim_end(), None),
             };
             let (tree, rest) = path.split_once('\\').unwrap_or((path, ""));
+            if !tree.eq_ignore_ascii_case("HKEY_CLASSES_ROOT") {
+                continue;
+            }
             let Some((root, base)) = Registry::tree(tree) else {
                 continue;
             };
@@ -1308,7 +1313,8 @@ mod tests {
     /// A registration file of Windows 3.1's REGEDIT, as Video for
     /// Windows 1.1's MPLAYER.REG has it: each line sets a key's default
     /// value, `= ` with nothing after it the empty string; comment lines
-    /// name no key.
+    /// name no key, and a line of a tree other than HKEY_CLASSES_ROOT is
+    /// left out.
     #[test]
     fn a_windows_31_file_sets_default_values() {
         let file = [
@@ -1321,6 +1327,7 @@ mod tests {
             "// a comment",
             r"HKEY_CLASSES_ROOT\MPlayer\CLSID = {0003000E-0000-0000-C000-000000000046}",
             r"HKEY_CLASSES_ROOT\.avi = mplayer",
+            r"HKEY_LOCAL_MACHINE\Software\Win31 = no such tree in 3.1",
         ]
         .join("\r\n");
         assert_eq!(script_kind(&file), Some(Script::Win31));
@@ -1343,6 +1350,7 @@ mod tests {
         assert_eq!(default(".avi"), b"mplayer\0");
         let comment = registry.find(classes, ";OLE2 Compatibility entries.");
         assert!(comment.is_none());
+        assert!(registry.find(LOCAL_MACHINE, r"Software\Win31").is_none());
     }
 
     /// REGEDIT /e of a branch names its keys from the tree's full name,

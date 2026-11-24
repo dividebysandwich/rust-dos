@@ -22,8 +22,8 @@
 //! C:\WINDOWS with Notepad (dll_files.rs), so WinExec, CreateProcess
 //! and the prompt find it and start it as a process of its own. Its code
 //! calls RegeditMain, a function of ADVAPI32 that ADVAPI32 doesn't
-//! export, which does the work, then shows the message RegeditMain
-//! leaves with MessageBoxA, if there is one, and ends.
+//! export, which does the work, and shows the message RegeditMain leaves
+//! with MessageBoxA, until RegeditMain leaves none; then it ends.
 
 use super::kernel32;
 use super::registry;
@@ -34,13 +34,15 @@ use rust_dos_pe::{self as pe, Builder, Imp};
 const BASE: u32 = 0x40_0000;
 
 /// What RegeditMain leaves in the program's data, by offset: the message
-/// box's type, its caption and its text.
+/// box's type, its caption and its text, and the place on the command
+/// line of the next file to import (0 before the first call).
 const D_TYPE: u32 = 0;
 const D_CAPTION: u32 = 4;
 const CAPTION_SIZE: u32 = 64;
 const D_TEXT: u32 = D_CAPTION + CAPTION_SIZE;
 const TEXT_SIZE: u32 = 1024;
-const DATA_SIZE: u32 = D_TEXT + TEXT_SIZE;
+const D_NEXT: u32 = D_TEXT + TEXT_SIZE;
+const DATA_SIZE: u32 = D_NEXT + 4;
 
 const MB_ICONERROR: u32 = 0x10;
 const MB_ICONINFORMATION: u32 = 0x40;
@@ -49,7 +51,8 @@ const MB_ICONINFORMATION: u32 = 0x40;
 const CAPTION: &str = "Registry Editor";
 
 /// The file of REGEDIT.EXE: a program for the GUI subsystem that calls
-/// RegeditMain(data), shows the message box it asks for, and ends.
+/// RegeditMain(data) and shows the message box it asks for, again until
+/// it asks for none, and ends.
 pub fn file(bus: &crate::bus::Bus) -> Vec<u8> {
     let mut b = Builder::exe(BASE);
     b.subsystem(pe::SUBSYSTEM_GUI);
@@ -74,16 +77,18 @@ pub fn file(bus: &crate::bus::Bus) -> Vec<u8> {
             code.extend_from_slice(&v.to_le_bytes());
         }
     };
+    // loop:
     op(&[0x68], Some(data)); // push data
     op(&[0xB8], Some(main)); // mov eax, RegeditMain
     op(&[0xFF, 0xD0], None); // call eax
     op(&[0x85, 0xC0], None); // test eax, eax
-    op(&[0x74, 24], None); // jz done
+    op(&[0x74, 26], None); // jz done
     op(&[0xFF, 0x35], Some(data + D_TYPE)); // push dword [type]
     op(&[0x68], Some(data + D_CAPTION)); // push caption
     op(&[0x68], Some(data + D_TEXT)); // push text
     op(&[0x6A, 0], None); // push 0: no owner
     op(&[0xFF, 0x15], Some(message_box)); // call [MessageBoxA]
+    op(&[0xEB, (-42i8) as u8], None); // jmp loop
     // done:
     op(&[0x6A, 0], None); // push 0
     op(&[0xFF, 0x15], Some(exit)); // call [ExitProcess]
@@ -161,9 +166,17 @@ fn parse(line: &str) -> Command {
 
 /// RegeditMain(data): REGEDIT's work, as its command line asks. TRUE
 /// when the message box whose type, caption and text it leaves in `data`
-/// is to be shown, FALSE when there is none.
+/// is to be shown, and RegeditMain called again after it; FALSE when
+/// there is none and the program ends.
+///
+/// The files on the command line are imported in turn, a failed one
+/// too, and without `/s` each has its own message box, shown before the
+/// next is imported, as Windows' REGEDIT does: a call imports one file
+/// and keeps the place of the next in `data`. With `/s` the first call
+/// imports them all.
 pub fn main(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let data = args[0];
+    let next = cpu.bus.guest_read_32(data + D_NEXT) as usize;
     let line = match crate::win32::process(cpu).command_line {
         0 => String::new(),
         at => {
@@ -172,37 +185,38 @@ pub fn main(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
     };
     let command = parse(&line);
-    cpu.bus
-        .log_string(&format!("[W32] REGEDIT: {}", line.trim()));
-    if command.unsupported || command.names.is_empty() {
+    if next == 0 {
+        cpu.bus
+            .log_string(&format!("[W32] REGEDIT: {}", line.trim()));
+    }
+    if command.unsupported {
         return Some(0);
     }
+    // These end the program, so they come only in the first call.
     if command.export {
         export(cpu, &command.names);
         return Some(0);
     }
-    // Each file is imported in turn; the message is the last one's, as
-    // Windows 95's REGEDIT shows one for each, and a failure stops it.
-    let mut message = None;
-    for name in &command.names {
-        let outcome = import(cpu, name);
-        let failed = outcome.is_err();
-        message = Some(outcome.map_or_else(|e| (MB_ICONERROR, e), |m| (MB_ICONINFORMATION, m)));
-        if failed {
-            break;
+    if command.silent {
+        for name in &command.names {
+            let _ = import(cpu, name);
         }
+        return Some(0);
     }
-    match message {
-        Some((kind, text)) if !command.silent => {
-            let mut block = vec![0u8; DATA_SIZE as usize];
-            block[..4].copy_from_slice(&kind.to_le_bytes());
-            put_string(&mut block, D_CAPTION, CAPTION_SIZE, CAPTION);
-            put_string(&mut block, D_TEXT, TEXT_SIZE, &text);
-            cpu.bus.guest_write_bytes(data, &block);
-            Some(1)
-        }
-        _ => Some(0),
-    }
+    let Some(name) = command.names.get(next) else {
+        return Some(0);
+    };
+    cpu.bus.guest_write_32(data + D_NEXT, next as u32 + 1);
+    let (kind, text) = match import(cpu, name) {
+        Ok(text) => (MB_ICONINFORMATION, text),
+        Err(text) => (MB_ICONERROR, text),
+    };
+    let mut block = vec![0u8; D_NEXT as usize];
+    block[..4].copy_from_slice(&kind.to_le_bytes());
+    put_string(&mut block, D_CAPTION, CAPTION_SIZE, CAPTION);
+    put_string(&mut block, D_TEXT, TEXT_SIZE, &text);
+    cpu.bus.guest_write_bytes(data, &block);
+    Some(1)
 }
 
 /// Put `text`, ended by a zero, at `offset` of `block`, cut to fit `size`.
