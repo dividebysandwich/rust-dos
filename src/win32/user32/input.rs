@@ -110,7 +110,11 @@ pub struct Input {
     pub async_keys: Vec<u8>,
     /// ClipCursor's rectangle.
     pub clip: Option<Rect>,
-    /// SetCursor's cursor, its picture, and ShowCursor's count.
+    /// SetCursor's cursor, its picture, and ShowCursor's count. The count
+    /// is a 16-bit value, as Windows 9x's USER keeps it, widened to 32
+    /// bits so that the saved state keeps its shape; `show_cursor` steps
+    /// it. A state saved before it wrapped at 16 bits can hold a count
+    /// outside that range until the next ShowCursor takes its low bits.
     pub cursor_handle: u32,
     pub cursor_image: super::cursor::CursorImage,
     pub cursor_count: i32,
@@ -2969,7 +2973,9 @@ mod tests {
     /// ShowCursor's count is 16 bits, as Windows 9x's USER keeps it: it
     /// wraps from -32768 to 32767 and back, and comes back sign-extended.
     /// Dark Omen's loop that calls ShowCursor(FALSE) while the count is
-    /// below 0 ends at the wrap, from any count it starts at.
+    /// below 0 ends at the wrap, from any count it starts at. That
+    /// includes F231607Ch, the 32-bit count a state saved by an older
+    /// build inside the loop holds: its low 16 bits are taken.
     #[test]
     fn show_cursor_counts_in_16_bits() {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
@@ -2978,7 +2984,7 @@ mod tests {
         user(&mut cpu).input.cursor_count = -32768;
         assert_eq!(show_cursor(&mut cpu, &[0]), Some(32767));
         assert_eq!(show_cursor(&mut cpu, &[1]), Some(-32768i32 as u32));
-        for start in [-1, -2, i32::from(i16::MIN), 0x7FFF_607C] {
+        for start in [-1, -2, i32::from(i16::MIN), 0xF231_607C_u32 as i32] {
             user(&mut cpu).input.cursor_count = start;
             let calls = (1..=65536)
                 .find(|_| show_cursor(&mut cpu, &[0]).is_some_and(|c| (c as i32) >= 0))
