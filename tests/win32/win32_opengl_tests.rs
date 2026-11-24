@@ -4152,3 +4152,55 @@ fn a_deleted_texture_is_unbound_in_the_contexts_that_share_it() {
     );
     assert!(all(SHOTS[2], 0x00_FF00), "the new texture in the first");
 }
+
+/// glGenTextures gives the lowest names not in use. Soldier of Fortune
+/// binds its images to names it counts up itself from 0x481 and takes
+/// a few names from glGenTextures between them: a name above the ones
+/// in use would be the next image's, which would then replace the
+/// texture made under it. Here the program binds 0x481 (red), takes
+/// two names and gives the first a blue image, then binds 0x482
+/// (green), and the generated texture still draws blue.
+#[test]
+fn generated_texture_names_stay_clear_of_the_names_a_program_counts_itself() {
+    const FIRST: u32 = KEPT;
+    const NEXT: u32 = KEPT + 4;
+    const NAMES: u32 = KEPT + 8;
+    const BLUE_TEXELS: u32 = TEXELS + 0x10;
+    const GREEN_TEXELS: u32 = TEXELS + 0x20;
+    let mut d = lists_data();
+    put32(&mut d, FIRST, 0x481);
+    put32(&mut d, NEXT, 0x482);
+    put(&mut d, TEXELS, [[255u8, 0, 0, 255]; 4].as_flattened());
+    put(&mut d, BLUE_TEXELS, [[0u8, 0, 255, 255]; 4].as_flattened());
+    put(&mut d, GREEN_TEXELS, [[0u8, 255, 0, 255]; 4].as_flattened());
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        texture_2x2(a, l, &mut c, FIRST, TEXELS)?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(2), Arg::At(NAMES)])?;
+        texture_2x2(a, l, &mut c, NAMES, BLUE_TEXELS)?;
+        texture_2x2(a, l, &mut c, NEXT, GREEN_TEXELS)?;
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(NAMES)])?;
+        clear_blue(a, l)?;
+        gl(a, l, COLOR3F, &[1.0, 1.0, 1.0].map(Arg::F))?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        for [x, y] in corners(WHOLE) {
+            let st = [x, y].map(|v| Arg::F((v + 1.0) / 2.0));
+            gl(a, l, TEX_COORD2F, &st)?;
+            gl(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        gl(a, l, END, &[])?;
+        read_into(a, l, SHOTS[0])?;
+        finish(a, l)
+    });
+    let mut cpu = machine("texture_gen_lowest", true, exe);
+    run_until_done(&mut cpu, data);
+    let names = [NAMES, NAMES + 4].map(|at| peek(&cpu, data + at));
+    assert_eq!(names, [1, 2], "the names glGenTextures gave");
+    let drawn = shot(&cpu, data, SHOTS[0]);
+    assert!(
+        drawn.iter().all(|&p| p == 0xFF_0000),
+        "the generated texture draws blue: {:06X}",
+        drawn[0]
+    );
+}
