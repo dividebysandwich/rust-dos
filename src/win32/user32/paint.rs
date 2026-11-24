@@ -823,7 +823,8 @@ pub fn raised_but(cpu: &mut Cpu, hwnd: u32, before: &Region, but: u32) {
 /// WS_CLIPSIBLINGS. SetWindowPos takes it before and after a change, and
 /// what the window showed before and not after is what it uncovered.
 pub fn shown_region(state: &State, hwnd: u32) -> Region {
-    visible_region(state, hwnd, fix_flags(state, hwnd, DCX_WINDOW | DCX_USESTYLE))
+    let flags = fix_flags(state, hwnd, DCX_WINDOW | DCX_USESTYLE);
+    visible_region(state, hwnd, flags)
 }
 
 /// The windows `gone` leave the screen with the task that made them,
