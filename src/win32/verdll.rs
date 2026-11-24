@@ -408,6 +408,50 @@ const FIXED_SIZE: usize = 52;
 /// version of the file unless the table says otherwise, with its name.
 fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
     let base = name.trim_end_matches(".DLL").trim_end_matches(".dll");
+    Resource::Unicode(write_unicode(&builtin_node(
+        name,
+        base,
+        windows,
+        VOS_DOS_WINDOWS32,
+        (VFT_DLL, 0),
+    )))
+}
+
+/// VS_FIXEDFILEINFO's dwFileOS for a 16-bit and a 32-bit file, and its
+/// dwFileType for a DLL and a driver.
+const VOS_DOS_WINDOWS16: u32 = 0x0001_0001;
+const VOS_DOS_WINDOWS32: u32 = 0x0001_0004;
+const VFT_DLL: u32 = 2;
+const VFT_DRV: u32 = 3;
+
+/// The version resource, in the ANSI layout of 16-bit files, of the
+/// built-in 16-bit module whose file is `file` ("MMSYSTEM.DLL",
+/// "KRNL386.EXE"), as its file in the system directory has it
+/// (win32/dll_files.rs): Windows 95's version, as the 32-bit DLLs'. A
+/// driver is a VFT_DRV of its kind, the others VFT_DLL.
+pub(crate) fn builtin16_version(file: &str, windows: WindowsVersion) -> Vec<u8> {
+    let base = file.split('.').next().unwrap_or(file);
+    // VFT2_DRV_KEYBOARD, _DISPLAY, _SYSTEM and _SOUND.
+    let kind = match base.to_ascii_uppercase().as_str() {
+        "KEYBOARD" => (VFT_DRV, 2),
+        "DISPLAY" => (VFT_DRV, 4),
+        "SYSTEM" => (VFT_DRV, 7),
+        "SOUND" => (VFT_DRV, 9),
+        _ => (VFT_DLL, 0),
+    };
+    write_ansi(&builtin_node(file, base, windows, VOS_DOS_WINDOWS16, kind))
+}
+
+/// The tree of a built-in file's version resource: `name` the file's,
+/// `base` the name without its extension, `os` the dwFileOS and `kind`
+/// the dwFileType and dwFileSubtype.
+fn builtin_node(
+    name: &str,
+    base: &str,
+    windows: WindowsVersion,
+    os: u32,
+    kind: (u32, u32),
+) -> Node {
     // Windows 95's own files are 4.00.950. DirectX's are those of the
     // DirectX the registry gives (version.rs): DirectX 8.0a and 8.1 give
     // the DLLs of their runtime their own version, as DxDiag shows them
@@ -445,7 +489,7 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
     let ls = (version[2] as u32) << 16 | version[3] as u32;
     let mut fixed = Vec::with_capacity(FIXED_SIZE);
     // Signature, structure version, file and product versions, flags
-    // mask, flags, VOS_DOS_WINDOWS32, VFT_DLL, no subtype, no date.
+    // mask, flags, the system, the type and subtype, no date.
     let words = [
         VS_FFI_SIGNATURE,
         0x0001_0000,
@@ -455,9 +499,9 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
         ls,
         0x3F,
         0,
-        0x0001_0004,
-        2,
-        0,
+        os,
+        kind.0,
+        kind.1,
         0,
         0,
     ];
@@ -486,7 +530,7 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
         ],
         ..Node::default()
     };
-    let root = Node {
+    Node {
         key: b"VS_VERSION_INFO".to_vec(),
         value: fixed,
         text: false,
@@ -508,8 +552,7 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
                 ..Node::default()
             },
         ],
-    };
-    Resource::Unicode(write_unicode(&root))
+    }
 }
 
 /// The version resource of the built-in DLL `name`, as its file in the

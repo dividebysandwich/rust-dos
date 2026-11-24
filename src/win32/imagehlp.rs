@@ -391,13 +391,13 @@ struct Request {
 /// .DBG files on the symbol path aren't updated. The last error is 0 when
 /// it succeeds.
 ///
-/// The built-in DLLs' files in the system directory are read-only, so
-/// moving one fails with ERROR_ACCESS_DENIED, and a file a process has
-/// loaded can't be written, which fails with ERROR_SHARING_VIOLATION.
-/// MDK2 moves OPENGL32.DLL (to just below 64500000h) before it loads it:
-/// on Windows 98 that is the system's OPENGL32.DLL; here the built-in
-/// one, which isn't loaded from its file, can't be moved, and the game
-/// goes on, as it ignores the result.
+/// A file a process has loaded can't be written, which fails with
+/// ERROR_SHARING_VIOLATION. The built-in DLLs' files in the system
+/// directory have no base relocations, so moving one fails with
+/// ERROR_INVALID_ADDRESS. MDK2 moves OPENGL32.DLL (to just below
+/// 64500000h) before it loads it: on Windows 98 that is the system's
+/// OPENGL32.DLL; here the built-in one, which isn't loaded from its
+/// file, can't be moved, and the game goes on, as it ignores the result.
 fn rebase_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[
         name,
