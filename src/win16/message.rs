@@ -123,8 +123,9 @@ const FIX_RANGE: u32 = 9;
 /// A buffer of `len` bytes the callee filled whatever it returned: a
 /// list box's item data, for LB_GETTEXT on one without strings.
 const FIX_BYTES: u32 = 10;
-/// EM_GETLINE's buffer: as many bytes as the call returned, with no NUL
-/// after them.
+/// EM_GETLINE's buffer, a copy of the caller's of `len` bytes: the line
+/// the call returned the length of and the byte after it, which the edit
+/// control makes a NUL when the buffer has room.
 const FIX_LINE: u32 = 11;
 
 fn lo(v: u32) -> u32 {
@@ -658,6 +659,20 @@ fn has_strings(cpu: &Cpu, hwnd: u32, msg: u32) -> bool {
     style & owner_draw == 0 || style & strings != 0
 }
 
+/// The length of the text of the item `index` that USER32's list box
+/// `hwnd` keeps, or the one of the combo box `hwnd` for CB_GETLBTEXT:
+/// none for a window that is neither or an index it doesn't have.
+fn item_text_len(cpu: &Cpu, hwnd: u32, msg: u32, index: u32) -> Option<u32> {
+    let user = &cpu.bus.win32.user;
+    let list = if msg == CB_GETLBTEXT {
+        user.window(hwnd)?.control.combo.list
+    } else {
+        hwnd
+    };
+    let item = user.window(list)?.control.list.items.get(index as usize)?;
+    Some(item.text.len() as u32)
+}
+
 /// A WINDOWPOS16 at `p16` as a WINDOWPOS at `p`.
 fn windowpos32(cpu: &mut Cpu, p16: u32, p: u32) {
     let fields = [
@@ -854,7 +869,9 @@ pub(super) fn to16(
         }
         // The text of an item, into the caller's buffer once the 16-bit
         // procedure returned its length; a list without strings copies
-        // the item's data, a DWORD.
+        // the item's data, a DWORD. The control the procedure passes the
+        // message on to writes the whole text, so the buffer holds at
+        // least that.
         LB_GETTEXT | CB_GETLBTEXT => {
             let msg16 = control_msg16(cpu, hwnd, msg);
             if lp == 0 {
@@ -862,8 +879,11 @@ pub(super) fn to16(
                 return (msg16, lo(wp), 0);
             }
             if has_strings(cpu, hwnd, msg) {
-                let (seg, b16) = stack.alloc(0x800);
-                data.extend([FIX_TEXT, lp, b16, 0x800]);
+                let size = item_text_len(cpu, hwnd, msg, wp)
+                    .map_or(0, |len| len + 1)
+                    .clamp(0x800, 0x8000);
+                let (seg, b16) = stack.alloc(size);
+                data.extend([FIX_TEXT, lp, b16, size]);
                 (msg16, lo(wp), seg)
             } else {
                 let (seg, b16) = stack.alloc(4);
@@ -871,18 +891,23 @@ pub(super) fn to16(
                 (msg16, lo(wp), seg)
             }
         }
-        // The line's buffer starts with its size in a word; the line
-        // comes back without a NUL.
+        // The line's buffer starts with its size in a word, which the
+        // procedure gets as the caller set it. The copy has the caller's
+        // bytes, so that the ones the procedure doesn't write go back as
+        // they were, as through a mapped pointer.
         EM_GETLINE => {
             let msg16 = control_msg16(cpu, hwnd, msg);
             if lp == 0 {
                 data.push(FIX_NONE);
                 return (msg16, lo(wp), 0);
             }
-            let size = r16(cpu, lp).clamp(2, 0x800);
-            let (seg, b16) = stack.alloc(size);
+            let size = r16(cpu, lp).min(0x800);
+            let len = size.max(2);
+            let (seg, b16) = stack.alloc(len);
+            let bytes = super::peek(cpu, lp, len as usize).unwrap_or_default();
+            super::poke(cpu, b16, &bytes);
             w16(cpu, b16, size);
-            data.extend([FIX_LINE, lp, b16, size]);
+            data.extend([FIX_LINE, lp, b16, len]);
             (msg16, lo(wp), seg)
         }
         WM_COMMAND => {
@@ -1045,7 +1070,7 @@ fn returned32(cpu: &mut Cpu, value: u32, data: &[u32], dialog: bool) -> u32 {
             }
             FIX_LINE => {
                 let size = fix.get(3).copied().unwrap_or(0);
-                let len = (value & 0xFFFF).min(size);
+                let len = ((value & 0xFFFF) + 1).min(size);
                 let bytes = super::peek(cpu, p16, len as usize).unwrap_or_default();
                 super::poke(cpu, p, &bytes);
             }
