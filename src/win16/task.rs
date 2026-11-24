@@ -1134,6 +1134,7 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     super::hook::task_ended(cpu, task.tid, ds);
     if freed {
         global::free(cpu, task.instance);
+        cpu.bus.win32.win16.tasks[t].instance = 0;
     }
     cpu.bus.win32.win16.ldt.free(task.psp, 1);
     global::free(cpu, task.handle);
