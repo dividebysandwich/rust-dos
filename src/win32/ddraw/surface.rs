@@ -2141,14 +2141,13 @@ fn chain(cpu: &mut Cpu, front: u32) -> Vec<u32> {
 /// Flip(this, target, flags): the front buffer takes the pixels of the
 /// back buffer (or of `target`), the back buffers the next ones', and
 /// the last the front buffer's. A primary front buffer is shown from
-/// the next frame; one whose chain has buffers in system memory takes a
-/// copy of the back buffer's pixels instead (`copy_flip`), and shows
-/// them at once. With a flip still to show, it waits for that frame
-/// when it waits (`flip_waits`), and fails otherwise; a thread that
-/// calls it again and again with nothing else in between waits too
-/// (`display::Polls`). On the 3D-only card the card swaps its buffers at
-/// a retrace, and a flip that doesn't wait fails the same way while a
-/// swap waits.
+/// the next frame; a back buffer in system memory is copied to it instead
+/// (`copy_flip`), and shows at once. With a flip still to show, it waits
+/// for that frame when it waits (`flip_waits`), and fails otherwise; a
+/// thread that calls it again and again with nothing else in between
+/// waits too (`display::Polls`). On the 3D-only card the card swaps its
+/// buffers at a retrace, and a flip that doesn't wait fails the same way
+/// while a swap waits.
 pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, target, flags] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -2249,13 +2248,15 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .iter()
         .filter_map(|&m| state(cpu).surface(m).map(|s| (s.memory, s.bits)))
         .collect();
-    // A primary surface's chain with buffers in system memory, which the
-    // display can't show, flips by copying (`copy_flip`): the front
-    // buffer stays the screen, and only the others go round.
-    let copies = primary
-        && list
-            .iter()
-            .any(|&m| state(cpu).surface(m).is_some_and(|s| s.memory != MEM_VIDEO));
+    // A buffer in system memory that the flip brings to the front of the
+    // primary surface's chain, which the display can't show, is copied
+    // there instead (`copy_flip`): the front buffer stays the screen,
+    // and only the others go round. A buffer in video memory is shown
+    // where it is, and the front buffer takes its memory. So a page flip
+    // also puts right a chain whose front buffer an older build left in
+    // system memory (a save state of G-Police made before #1830 was
+    // fixed): its next flip brings the screen back to the front.
+    let copies = primary && memory.get(1).is_some_and(|&(m, _)| m == MEM_SYSTEM);
     let first = if copies {
         copy_flip(cpu, id, order[1]);
         1
@@ -2280,19 +2281,19 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(DD_OK)
 }
 
-/// A flip of the primary surface's chain whose back buffers are in system
-/// memory (G-Police's software renderer asks for one): the front buffer,
-/// the screen at the start of video memory, takes a copy of the pixels of
-/// `next`, the buffer the flip brings to the front. The display shows
-/// video memory only, so the front buffer can't take `next`'s memory as
-/// a page flip does; it stays the screen, and the primary surface's Lock
-/// and DC still draw on what is shown after the flip. DirectDraw emulates
-/// a flip it can't make on the card with copies too: Wine's tests
-/// (`test_flip`) see Windows with its primary surface in system memory
-/// copy the back buffers' pixels instead of swapping them. The back
-/// buffers still go round among themselves (`flip`): the last one takes
-/// `next`'s memory, with the frame now on the screen, where a page flip
-/// would leave it the frame shown before.
+/// A flip of the primary surface's chain that brings `next`, a buffer in
+/// system memory, to the front (G-Police's software renderer asks for its
+/// back buffer there): the front buffer, the screen at the start of video
+/// memory, takes a copy of `next`'s pixels. The display shows video
+/// memory only, so the front buffer can't take `next`'s memory as a page
+/// flip does; it stays the screen, and the primary surface's Lock and DC
+/// still draw on what is shown after the flip. DirectDraw emulates a flip
+/// it can't make on the card with copies too: Wine's tests (`test_flip`)
+/// see Windows with its primary surface in system memory copy the back
+/// buffers' pixels instead of swapping them. The back buffers still go
+/// round among themselves (`flip`): the last one takes `next`'s memory,
+/// with the frame now on the screen, where a page flip would leave it the
+/// frame shown before.
 fn copy_flip(cpu: &mut Cpu, front: u32, next: u32) {
     let st = &*state(cpu);
     let (Some(to), Some(from)) = (st.surface(front).cloned(), st.surface(next).cloned()) else {
