@@ -544,17 +544,18 @@ const SYNCED: f64 = 0.1;
 /// (`Activity::follows`) over which a program draws as fast as it can, and
 /// steps for evenness leave it be, if they stray from the cadence by
 /// `STRAYS` on average. Over 1200 intervals at a time, A-10 Tank Killer
-/// reads over it four times in five, up to +0.35, and -0.08 where it
-/// draws a still scene. Prehistorik 2's level 1 reads -0.37 to +0.03, Doom
-/// standing -0.52 to -0.43, Demon Stalkers -0.17 to -0.15 and Xenon 2
-/// -0.5. Shadow Knights reads -0.05, and up to +1.06 over the flips that
-/// follow one late by 0.3 retraces, as the cadence comes back down, its
-/// intervals 0.0013 retraces from it on average.
+/// reads over it in 64% to 90% of the pools, up to +0.32, and -0.07 where
+/// it draws a still scene. Prehistorik 2's level 1, with the menus before
+/// it in its first pool, reads -0.45 to -0.23, and Doom standing -0.50 to
+/// -0.43. Shadow Knights, Demon Stalkers and Xenon 2 read -0.50 to +1.07,
+/// where their intervals stray from the cadence by 1.2e-5 on average or
+/// less, except Demon Stalkers' first pool after a state loads, as its
+/// cadence comes down from the first interval (+1.07 at 1.6e-4, #1761).
 const FREE_RUNNING: f64 = 0.1;
 /// The lag-1 autocorrelation of a full pool under which a program marked
-/// as drawing as fast as it can is paced again. Prehistorik 2's menus
-/// before level 1 read +0.37 and +0.52 over the first full pool, and level
-/// 1 then -0.20 to -0.43 at 3000 to 5000; A-10 reads -0.08 at the least.
+/// as drawing as fast as it can is paced again: under Prehistorik 2's
+/// level 1's greatest reading (-0.23), and over A-10 Tank Killer's least
+/// (-0.07).
 const PACED_AGAIN: f64 = -0.15;
 /// The mean square, in retraces, of the intervals' distance from the
 /// cadence under which `FREE_RUNNING` isn't judged: A-10 strays by 0.011
@@ -1659,9 +1660,8 @@ pub struct AutoSpeed {
     /// no steps for evenness, until then or until a DOS program starts or
     /// ends or `reset`. One pool doesn't tell: where A-10 Tank Killer
     /// draws a still scene, its intervals stray from the cadence as a
-    /// timer's would. The least speed steps gave stays: the menus before
-    /// Prehistorik 2's level 1, or its game-over screen, read so too. One
-    /// for each `kind`, from its own pool.
+    /// timer's would. The least speed steps gave stays while the mark
+    /// lasts. One for each `kind`, from its own pool.
     free_running: [bool; 2],
     /// DOS programs started and ended so far (`set_programs`).
     programs: u64,
@@ -7641,8 +7641,8 @@ mod tests {
 
     #[test]
     fn a_program_drawn_flat_out_is_paced_again_once_its_intervals_say_so() {
-        // Prehistorik 2's menus before level 1 mark it; level 1's
-        // intervals, a long one followed by a short one, take the mark
+        // A pool that reads as drawing flat out marks the program; level
+        // 1's intervals, a long one followed by a short one, take the mark
         // away, and its least speed stays meanwhile.
         let mut auto = AutoSpeed::new(3000, None);
         auto.even_at = Some(9000);
