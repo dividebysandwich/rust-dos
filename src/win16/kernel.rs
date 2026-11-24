@@ -1166,11 +1166,20 @@ fn free_library(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// GetModuleHandle(name): a module name's module, or with a selector of
 /// 0 the module of the instance it is.
 fn get_module_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // Only a read of the module table, which no service an idle proof
+    // follows changes: a proof goes through it. A program that waits for
+    // a task it started to end asks it and GetModuleUsage in every pass
+    // of its PeekMessage loop (Memphis Math's INSTALL.EXE, #1775).
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     if args[0] >> 16 == 0 {
         let index = super::module_index(cpu, args[0] as u16);
         return Some(index.map_or(0, |i| cpu.bus.win32.win16.modules[i].handle) as u32);
     }
-    let name = super::string(cpu, super::linear(cpu, args[0]));
+    let at = super::linear(cpu, args[0]);
+    let bytes = super::string_bytes(cpu, at, 0x1_0000);
+    crate::idle::reads_also(cpu, at, bytes.len() as u32 + 1);
+    let name = crate::dosstr::from_bytes(&bytes);
     let base = name
         .rsplit(['\\', '/', ':'])
         .next()
@@ -1190,7 +1199,11 @@ fn get_module_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
+/// GetModuleUsage(module): how many times the module is loaded.
 fn get_module_usage(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // A read of the module table, as GetModuleHandle's.
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     let index = super::module_index(cpu, args[0] as u16);
     Some(index.map_or(0, |i| cpu.bus.win32.win16.modules[i].refs) as u32)
 }
