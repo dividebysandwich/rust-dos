@@ -517,7 +517,7 @@ Commands that run each time Rust-DOS starts, before you get the prompt,
 as in a DOS `AUTOEXEC.BAT`. For example, to mount a CD and start a game:
 
 ```
-MOUNT D ~/dos/cds/game.cue
+MOUNT D ~/games/my-game/disc.cue
 C:
 CD GAME
 GAME.EXE

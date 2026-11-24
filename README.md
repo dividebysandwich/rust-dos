@@ -54,7 +54,7 @@ starts with `rust-dos`. The options stay the same:
 
 ```sh
 chmod +x rust-dos-*-x86_64.AppImage
-./rust-dos-*-x86_64.AppImage -d ~/games/doom
+./rust-dos-*-x86_64.AppImage -d ~/games/doom/game
 ```
 
 It mounts itself with FUSE, and where there is none, as in most
@@ -72,7 +72,7 @@ portable install, described below.
 Start Rust-DOS with the game's folder as drive C:
 
 ```sh
-rust-dos -d ~/games/doom
+rust-dos -d ~/games/doom/game
 ```
 
 and type the game's program at the prompt, `DOOM` here. `DIR` lists the

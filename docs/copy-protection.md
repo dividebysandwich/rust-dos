@@ -128,10 +128,10 @@ Mount the descriptor or CUE sheet, not the data file:
 
 ```ini
 [drives]
-D=~/cds/game.mds cdrom
+D=~/games/my-game/disc.mds cdrom
 ```
 
-At the DOS prompt, `MOUNT D ~/cds/game.mds` does the same. For a game on
+At the DOS prompt, `MOUNT D ~/games/my-game/disc.mds` does the same. For a game on
 the built-in Windows, that drive line goes in the game's profile
 ([Windows games](../CONFIGURATION.md#windows-games)). A booted Windows
 image gets the CD in its IDE CD-ROM drive

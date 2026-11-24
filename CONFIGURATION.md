@@ -1565,7 +1565,7 @@ name=Commander Keen 4
 cycles=10000
 
 [drives]
-C=~/dos/keen4
+C=~/games/commander-keen-4/game
 
 [autoexec]
 C:
@@ -1695,8 +1695,8 @@ cpu=pentium_ii
 win32_version=98se
 
 [drives]
-C=~/dos/ei
-D=~/cd/EnemyInfestation.iso cdrom
+C=~/games/enemy-infestation/game
+D=~/games/enemy-infestation/disc.iso cdrom
 
 [autoexec]
 SET TEMP=C:\WINDOWS\TEMP
@@ -1755,8 +1755,8 @@ cpu=pentium_ii
 win32_version=98se
 
 [drives]
-C=~/dos/ei
-D=~/cd/EnemyInfestation.iso cdrom
+C=~/games/enemy-infestation/game
+D=~/games/enemy-infestation/disc.iso cdrom
 
 [autoexec]
 SET TEMP=C:\WINDOWS\TEMP
@@ -1884,8 +1884,9 @@ registry keys or its own files, and often by the disc's label too.
 - Keep the CD on the letter it had when the setup ran. With keys from
   another machine, change the letter in the `.reg` file to the
   profile's.
-- A CD image carries the disc's label. A folder copied from the CD needs
-  the label given with `-label` (`D=~/cd/ei cdrom -label EI`).
+- A CD image carries the disc's label. A folder copied from the CD needs the
+  label given with `-label` (`D=~/games/enemy-infestation/disc cdrom -label
+  EI`).
 
 #### When a game doesn't run
 
@@ -2176,7 +2177,7 @@ the prompt:
 MOUNT                                     list drives
 MOUNT A ~/dos/floppy                      mount a host directory
 MOUNT D ~/dos/cd -t cdrom -label GAMECD   same, with -t for the type
-MOUNT D ~/dos/game.cue                    mount a CD image
+MOUNT D ~/games/my-game/disc.cue          mount a CD image
 MOUNT D C:\GAME\CD\GAME.CUE               the same, by its DOS path
 MOUNT A disk1.img disk2.img               floppy images; Ctrl+F4 changes disks
 MOUNT A disk*.img                         the same, with a wildcard
@@ -2564,7 +2565,7 @@ its slave. A system's own IDE driver (Windows 9x's 32-bit disk access,
 Linux, a DOS ATA driver) finds them there, by LBA or by cylinder, head and
 sector with no more than 16 heads (1024/64/63 for INT 13h is 4096/16/63),
 and the CMOS lists them as the user-defined type 47. A CD image or folder mounted
-as a CD-ROM drive (`MOUNT D ~/dos/game.cue`) is an ATAPI CD-ROM drive on the
+as a CD-ROM drive (`MOUNT D ~/games/my-game/disc.cue`) is an ATAPI CD-ROM drive on the
 secondary channel's master (ports 170h-177h and 376h, IRQ 15), and without
 one there is an empty drive (see below). Windows 95
 finds the channels through the Plug and Play BIOS with its own driver,
@@ -3032,7 +3033,7 @@ here in an [`-overlay`](#mounting-drives) folder for the game:
 # stays as it is: what is written to it goes into the folder overlays/oni
 # (made if it isn't there), as overlays/oni/win98.img.rdelta.
 C=~/images/win98.img -overlay overlays/oni -boot
-D=~/cds/oni.cue cdrom
+D=~/games/oni/disc.cue cdrom
 
 [autoexec]
 # Runs in the built-in DOS before the image boots.
@@ -4524,7 +4525,7 @@ path is left out unless `--group` names a group that places it.
 
 ```sh
 rust-dos unpack --list /cdrom/SETUP/DATA1.HDR
-rust-dos unpack --to ~/games/oni --group "Files (Data)" /cdrom/DATA1.HDR
+rust-dos unpack --to ~/games/oni/game --group "Files (Data)" /cdrom/DATA1.HDR
 rust-dos unpack --old-compression --to out /cdrom/DATA1.CAB
 ```
 

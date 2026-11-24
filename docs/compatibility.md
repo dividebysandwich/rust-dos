@@ -193,11 +193,11 @@ opcode, `win32_version=98se` when a message names the version, more
 * **Rage of Mages II: Necromancer** (GOG): `cpu=pentium_ii`. On the default
   486, `cycles=auto` holds the game at about 30000 in a mission, where it
   draws 4 to 12 frames a second. Copy the game's folder into a folder of
-  drive C:, such as `C:\GAME` (any name works, as long as the keys below
+  drive C:, such as `C:\RAGE2` (any name works, as long as the keys below
   name it). The game reads its folders from
   `HKEY_LOCAL_MACHINE\Software\Rage of Mages 2` in a [`.reg`
-  file](../CONFIGURATION.md#registry-keys): `"INSTALLDIR"="C:\\GAME"` and
-  `"CD"="C:\\GAME"`. GOG's folder holds the disc's files, so no CD drive is
+  file](../CONFIGURATION.md#registry-keys): `"INSTALLDIR"="C:\\RAGE2"` and
+  `"CD"="C:\\RAGE2"`. GOG's folder holds the disc's files, so no CD drive is
   needed. Without `CD` the game says "Incorrect CD or no CD detected" and
   offers only to join a multiplayer game. Start it with `ALLODS2.EXE -1024`
   (or `-800`) for 1024x768 (800x600); with neither it runs at 640x480.
