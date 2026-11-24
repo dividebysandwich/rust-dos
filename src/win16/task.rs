@@ -271,6 +271,13 @@ fn create_task(
         module::release(cpu, m.handle);
         return Err(format!("{} is a library, not a program.", path));
     }
+    // KERNEL, USER and GDI are programs by their flags, but the built-in
+    // ones have stubs where a program's code starts: their files in the
+    // system directory don't start.
+    if m.builtin.is_some() {
+        module::release(cpu, m.handle);
+        return Err(format!("{} is a part of Windows, not a program.", path));
+    }
     let parsed = module::parsed_of(cpu, &m).ok_or("The program can't be read.")?;
     let prev = cpu
         .bus
