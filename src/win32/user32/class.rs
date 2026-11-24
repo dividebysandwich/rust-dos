@@ -473,9 +473,19 @@ pub fn unregister_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Windows 3.1 and Windows 95 when KERNEL frees a module (an
 /// application's when its last instance ends, a library's when its last
 /// user frees it). `ours` holds the instance handles the module's
-/// classes were registered with. As with UnregisterClass, a class that
-/// still has windows stays, since they use it. Gives the names and
-/// atoms of the classes that went.
+/// classes were registered with. Those handles can come back as another
+/// module's, whose RegisterClass of a class of the same name then failed
+/// and whose CreateWindow got the freed module's class, with a window
+/// procedure in code that had gone (Memphis Math's MMAP after STORYBRD,
+/// MS Setup's second bootstrapper after the first).
+///
+/// A class that still has windows stays, as UnregisterClass leaves it
+/// (and Wine's CLASS_FreeClass): a window keeps its class by its index
+/// here, and with the class gone, the next class registered would take
+/// that slot and the window with it. A task's own windows go before its
+/// module does (`task::exit`), so this leaves only the classes of a
+/// library freed while another task's windows of them were open. Gives
+/// the names and atoms of the classes that went.
 pub fn module_freed(state: &mut State, pid: u32, ours: &[u32]) -> Vec<(String, u16)> {
     let mut gone = Vec::new();
     for slot in state.classes.iter_mut() {

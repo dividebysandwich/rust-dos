@@ -12,6 +12,7 @@ use super::thunk;
 use super::user::{P_MISC, P_WORDS};
 use crate::cpu::Cpu;
 use crate::dpmi::Context;
+use crate::win32::winmm::{midi as wmidi, wave as wwave};
 
 const U: &str = "USER32.DLL";
 const K: &str = "KERNEL32.DLL";
@@ -191,12 +192,12 @@ pub static MMSYSTEM: Def = Def {
         rust("joySetCapture", 106, "wwww", joy_unplugged),
         rust("joySetThreshold", 107, "ww", joy_unplugged),
         rust("joySetCalibration", 109, "w", joy_unplugged),
-        rust("midiOutGetNumDevs", 201, "", zero),
-        rust("midiOutGetDevCaps", 202, "wpw", no_driver),
-        rust("midiOutOpen", 204, "pwlll", no_driver),
-        rust("midiOutClose", 205, "w", no_driver),
-        rust("midiOutShortMsg", 208, "wl", no_driver),
-        rust("midiOutReset", 210, "w", no_driver),
+        win32("midiOutGetNumDevs", 201, "", MM, "midiOutGetNumDevs", b'w'),
+        rust("midiOutGetDevCaps", 202, "wpw", midi_out_get_dev_caps),
+        rust("midiOutOpen", 204, "pwlll", midi_out_open),
+        rust("midiOutClose", 205, "w", midi_out_close),
+        win32("midiOutShortMsg", 208, "wl", MM, "midiOutShortMsg", b'w'),
+        rust("midiOutReset", 210, "w", midi_out_reset),
         win32("auxGetNumDevs", 350, "", MM, "auxGetNumDevs", b'w'),
         win32("waveOutGetNumDevs", 401, "", MM, "waveOutGetNumDevs", b'w'),
         rust("waveOutGetDevCaps", 402, "wpw", wave_out_get_dev_caps),
@@ -227,7 +228,7 @@ pub static MMSYSTEM: Def = Def {
         win32("waveOutBreakLoop", 419, "w", MM, "waveOutBreakLoop", b'w'),
         rust("timeGetSystemTime", 601, "pw", time_get_system_time),
         rust("timeSetEvent", 602, "wwSlw", time_set_event),
-        rust("timeKillEvent", 603, "w", zero),
+        win32("timeKillEvent", 603, "w", MM, "timeKillEvent", b'w'),
         rust("timeGetDevCaps", 604, "pw", time_get_dev_caps),
         win32("timeBeginPeriod", 605, "w", MM, "timeBeginPeriod", b'w'),
         win32("timeEndPeriod", 606, "w", MM, "timeEndPeriod", b'w'),
@@ -266,13 +267,98 @@ pub static MMSYSTEM: Def = Def {
         ),
         // Saved states keep the stubs in this order: new functions go
         // after the others (src/win32/stub_tables.rs).
-        rust("midiOutGetVolume", 211, "wp", no_driver),
-        rust("midiOutSetVolume", 212, "wl", no_driver),
-        rust("midiOutGetID", 215, "wp", invalid_handle),
+        rust("midiOutGetVolume", 211, "wp", midi_out_get_volume),
+        rust("midiOutSetVolume", 212, "wl", midi_out_set_volume),
+        rust("midiOutGetID", 215, "wp", midi_out_get_id),
         rust("auxGetDevCaps", 351, "wpw", aux_get_dev_caps),
         rust("auxGetVolume", 352, "wp", aux_get_volume),
         rust("auxSetVolume", 353, "wl", aux_set_volume),
         rust("waveOutGetID", 420, "wp", wave_out_get_id),
+        win32(
+            "midiOutGetErrorText",
+            203,
+            "wpw",
+            MM,
+            "midiOutGetErrorTextA",
+            b'w',
+        ),
+        rust("midiOutPrepareHeader", 206, "wSw", midi_out_prepare_header),
+        rust(
+            "midiOutUnprepareHeader",
+            207,
+            "wSw",
+            midi_out_unprepare_header,
+        ),
+        rust("midiOutLongMsg", 209, "wSw", midi_out_long_msg),
+        win32(
+            "midiOutCachePatches",
+            213,
+            "wwpw",
+            MM,
+            "midiOutCachePatches",
+            b'w',
+        ),
+        win32(
+            "midiOutCacheDrumPatches",
+            214,
+            "wwpw",
+            MM,
+            "midiOutCacheDrumPatches",
+            b'w',
+        ),
+        // waveIn: there is no input device, as WINMM has it.
+        win32("waveInGetNumDevs", 501, "", MM, "waveInGetNumDevs", b'w'),
+        rust("waveInGetDevCaps", 502, "wpw", wwave::wave_in_bad_device),
+        win32(
+            "waveInGetErrorText",
+            503,
+            "wpw",
+            MM,
+            "waveInGetErrorTextA",
+            b'w',
+        ),
+        rust("waveInOpen", 504, "pwplll", wwave::wave_in_bad_device),
+        rust("waveInClose", 505, "w", wwave::wave_in_bad_handle),
+        rust("waveInPrepareHeader", 506, "wSw", wwave::wave_in_bad_handle),
+        rust(
+            "waveInUnprepareHeader",
+            507,
+            "wSw",
+            wwave::wave_in_bad_handle,
+        ),
+        rust("waveInAddBuffer", 508, "wSw", wwave::wave_in_bad_handle),
+        rust("waveInStart", 509, "w", wwave::wave_in_bad_handle),
+        rust("waveInStop", 510, "w", wwave::wave_in_bad_handle),
+        rust("waveInReset", 511, "w", wwave::wave_in_bad_handle),
+        rust("waveInGetPosition", 512, "wpw", wwave::wave_in_bad_handle),
+        rust("waveInGetID", 513, "wp", wwave::wave_in_bad_handle),
+        rust("waveInMessage", 514, "wwll", wwave::wave_in_bad_handle),
+        // midiIn: there is no input device either.
+        win32("midiInGetNumDevs", 301, "", MM, "midiInGetNumDevs", b'w'),
+        rust("midiInGetDevCaps", 302, "wpw", wmidi::midi_in_bad_device),
+        win32(
+            "midiInGetErrorText",
+            303,
+            "wpw",
+            MM,
+            "midiInGetErrorTextA",
+            b'w',
+        ),
+        rust("midiInOpen", 304, "pwlll", wmidi::midi_in_bad_device),
+        rust("midiInClose", 305, "w", wmidi::midi_in_bad_handle),
+        rust("midiInPrepareHeader", 306, "wSw", wmidi::midi_in_bad_handle),
+        rust(
+            "midiInUnprepareHeader",
+            307,
+            "wSw",
+            wmidi::midi_in_bad_handle,
+        ),
+        rust("midiInAddBuffer", 308, "wSw", wmidi::midi_in_bad_handle),
+        rust("midiInStart", 309, "w", wmidi::midi_in_bad_handle),
+        rust("midiInStop", 310, "w", wmidi::midi_in_bad_handle),
+        rust("midiInReset", 311, "w", wmidi::midi_in_bad_handle),
+        rust("midiInGetID", 312, "wp", wmidi::midi_in_bad_handle),
+        rust("midiInMessage", 313, "wwll", wmidi::midi_in_bad_handle),
     ],
     library: true,
 };
@@ -452,15 +538,19 @@ const P_COLOR: u32 = P_MISC + 1;
 const P_TIMER: u32 = P_MISC + 2;
 const P_WAVE_CAPS: u32 = P_MISC + 3;
 const P_WAVE_OPEN: u32 = P_MISC + 4;
-const P_WAVE_UNPREPARE: u32 = P_MISC + 5;
+const P_UNPREPARE: u32 = P_MISC + 5;
 const P_MMTIME: u32 = P_MISC + 6;
 const P_WING_BITMAP: u32 = P_MISC + 7;
 const P_SEGPTR: u32 = P_MISC + 8;
 const P_MCI: u32 = P_MISC + 9;
-const P_WAVE_CALLS: u32 = P_MISC + 10;
+const P_CALLS: u32 = P_MISC + 10;
 const P_UINT: u32 = P_MISC + 11;
 const P_DWORD: u32 = P_MISC + 12;
 const P_AUX_CAPS: u32 = P_MISC + 13;
+const P_MIDI_OPEN: u32 = P_MISC + 14;
+const P_MIDI_CAPS: u32 = P_MISC + 15;
+const P_HEADER: u32 = P_MISC + 16;
+const P_HEADER_CALLS: u32 = P_MISC + 17;
 
 /// The size of Windows 3.1's MMTIME: wType and a union of 6 bytes, its
 /// SMPTE time being hour, minute, second, frame, fps and a pad byte
@@ -507,18 +597,22 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
             }
             Some(value)
         }
-        P_WAVE_OPEN => {
+        P_WAVE_OPEN | P_MIDI_OPEN => {
             if value == 0 && d(2) != 0 {
                 let handle = r32(cpu, d(1));
                 super::write_16(cpu, d(2), handle as u16);
                 if d(3) != 0 {
                     let tid = super::task(cpu).tid;
-                    crate::win32::winmm::wave::call16_on(cpu, handle, tid, d(3));
+                    if d(0) == P_WAVE_OPEN {
+                        wwave::call16_on(cpu, handle, tid, d(3));
+                    } else {
+                        wmidi::call16_on(cpu, handle, tid, d(3));
+                    }
                 }
             }
             return_after_calls(cpu, value, ctx)
         }
-        P_WAVE_CALLS => return_after_calls(cpu, value, ctx),
+        P_CALLS => return_after_calls(cpu, value, ctx),
         P_UINT => {
             // A UINT the 32-bit function wrote at d(1), as Windows 3.1's
             // 16-bit one at d(2); nothing when it failed.
@@ -541,11 +635,29 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
             }
             Some(value)
         }
-        P_WAVE_UNPREPARE => {
+        P_MIDI_CAPS => {
             if value == 0 {
+                midi_caps16(cpu, d(1), d(2), d(3));
+            }
+            Some(value)
+        }
+        P_UNPREPARE => {
+            if value == 0 || d(2) != 0 {
                 unprepared(cpu, d(1));
             }
             Some(value)
+        }
+        P_HEADER | P_HEADER_CALLS => {
+            // A header kept for this call alone goes again when WINMM
+            // refused it (`program_header`).
+            if value != 0 && d(2) != 0 {
+                unprepared(cpu, d(1));
+            }
+            if d(0) == P_HEADER_CALLS {
+                return_after_calls(cpu, value, ctx)
+            } else {
+                Some(value)
+            }
         }
         P_MMTIME => {
             if value == 0 {
@@ -1244,17 +1356,6 @@ fn joy_get_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
-/// MMSYSERR_NODRIVER.
-fn no_driver(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(6)
-}
-
-/// MMSYSERR_INVALHANDLE: midiOutGetID, whose handle can't be one, since
-/// midiOutOpen opens nothing (#1243).
-fn invalid_handle(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(5)
-}
-
 /// waveOutGetID(handle, id): WINMM's answer, written as the 16-bit UINT
 /// Windows 3.1 has. A null `id` goes to WINMM as null, which refuses it
 /// after it has checked the handle, as Windows does.
@@ -1271,9 +1372,10 @@ fn wave_out_get_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
-/// The 32-bit device id of a 16-bit one: WAVE_MAPPER and AUX_MAPPER,
-/// FFFFh, are -1 in Win32. WINMM has no aux mapper, and answers -1 as a
-/// bad id.
+/// The 32-bit device id of a 16-bit one: WAVE_MAPPER, MIDI_MAPPER and
+/// AUX_MAPPER, FFFFh, are -1 in Win32. WINMM has no aux mapper, and
+/// answers -1 as a bad id. A device's handle stays as it is: WINMM's
+/// handles are below FFFFh, so that 16-bit programs can hold them.
 fn device32(id: u32) -> u32 {
     if id == 0xFFFF { u32::MAX } else { id }
 }
@@ -1363,30 +1465,28 @@ fn wave_out_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
-/// The callback kinds of waveOutOpen's flags.
+/// The callback kinds of waveOutOpen's and midiOutOpen's flags.
 const CALLBACK_TYPEMASK: u32 = 0x0007_0000;
 const CALLBACK_WINDOW: u32 = 0x0001_0000;
 const CALLBACK_TASK: u32 = 0x0002_0000;
 const CALLBACK_FUNCTION: u32 = 0x0003_0000;
 
-/// waveOutOpen(handle *, device, format, callback, instance, flags): a
-/// window or a task is told about the buffers played, as in Win32, and a
-/// 16-bit function is called in its task (`queue_call16`).
-fn wave_out_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let out = thunk::scratch32(cpu, 4);
-    w32(cpu, out, 0);
-    let device = device32(args[1]);
-    let mut flags = args[5];
-    // WINMM opens the device without a callback, and is given the
-    // function once it is open (P_WAVE_OPEN).
+/// The callback of a 16-bit waveOutOpen or midiOutOpen, `callback` with
+/// `flags`, as WINMM's function takes it: the flags, the callback, and
+/// the 16-bit function to call (`queue_call16`), or 0. A window is the
+/// same handle in Win32, and a task is its thread. WINMM opens the
+/// device without a function, and is given it once the device is open
+/// (`P_WAVE_OPEN`, `P_MIDI_OPEN`); that needs the handle, so there is no
+/// function when the program gave no place for it (`opens`).
+fn callback16(cpu: &Cpu, callback: u32, flags: u32, opens: bool) -> (u32, u32, u32) {
     let function = match flags & CALLBACK_TYPEMASK {
-        CALLBACK_FUNCTION if args[0] != 0 => args[3],
+        CALLBACK_FUNCTION if opens => callback,
         _ => 0,
     };
     let callback = match flags & CALLBACK_TYPEMASK {
-        CALLBACK_WINDOW => args[3] & 0xFFFF,
+        CALLBACK_WINDOW => callback & 0xFFFF,
         CALLBACK_TASK => {
-            let task = args[3] as u16;
+            let task = callback as u16;
             cpu.bus
                 .win32
                 .win16
@@ -1395,11 +1495,19 @@ fn wave_out_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 .find(|t| t.handle == task)
                 .map_or(0, |t| t.tid)
         }
-        _ => {
-            flags &= !CALLBACK_TYPEMASK;
-            0
-        }
+        _ => return (flags & !CALLBACK_TYPEMASK, 0, function),
     };
+    (flags, callback, function)
+}
+
+/// waveOutOpen(handle *, device, format, callback, instance, flags): a
+/// window or a task is told about the buffers played, as in Win32, and a
+/// 16-bit function is called in its task (`queue_call16`).
+fn wave_out_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let out = thunk::scratch32(cpu, 4);
+    w32(cpu, out, 0);
+    let device = device32(args[1]);
+    let (flags, callback, function) = callback16(cpu, args[3], args[5], args[0] != 0);
     let target = if args[0] == 0 { 0 } else { out };
     go_at(
         cpu,
@@ -1408,6 +1516,144 @@ fn wave_out_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         "waveOutOpen",
         &[target, device, args[2], callback, args[4], flags],
         vec![P_WAVE_OPEN, out, args[0], function],
+    )
+}
+
+/// MIDIOUTCAPSA at `caps` as MIDIOUTCAPS16 at `caps16`, `size` bytes of
+/// it at most: the head the caps share, then wTechnology, wVoices,
+/// wNotes, wChannelMask and dwSupport as they are, 50 bytes in all.
+fn midi_caps16(cpu: &mut Cpu, caps: u32, caps16: u32, size: u32) {
+    let mut b = caps16_head(cpu, caps);
+    b.extend(super::peek(cpu, caps + 40, 12).unwrap_or(vec![0; 12]));
+    b.truncate(size as usize);
+    super::poke(cpu, caps16, &b);
+}
+
+/// midiOutGetDevCaps(device, caps, size): WINMM's synthesizer or its
+/// MIDI mapper (FFFFh). A null `caps` goes to WINMM as null, which
+/// refuses it once it has checked the device.
+fn midi_out_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let caps = thunk::scratch32(cpu, 52);
+    let out = if args[1] == 0 { 0 } else { caps };
+    go_at(
+        cpu,
+        caps,
+        MM,
+        "midiOutGetDevCapsA",
+        &[device32(args[0]), out, 52],
+        vec![P_MIDI_CAPS, caps, args[1], args[2]],
+    )
+}
+
+/// midiOutOpen(handle *, device, callback, instance, flags): WINMM's
+/// device, whose 32-bit handle fits the program's HMIDIOUT, with the
+/// callback as waveOutOpen's (`callback16`). MM_MOM_OPEN reaches a
+/// function before midiOutOpen returns, as on Windows 3.1.
+fn midi_out_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let out = thunk::scratch32(cpu, 4);
+    w32(cpu, out, 0);
+    let (flags, callback, function) = callback16(cpu, args[2], args[4], args[0] != 0);
+    let target = if args[0] == 0 { 0 } else { out };
+    go_at(
+        cpu,
+        out,
+        MM,
+        "midiOutOpen",
+        &[target, device32(args[1]), callback, args[3], flags],
+        vec![P_MIDI_OPEN, out, args[0], function],
+    )
+}
+
+/// midiOutClose(handle): MM_MOM_CLOSE reaches a function before it
+/// returns.
+fn midi_out_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    go(cpu, MM, "midiOutClose", &[args[0]], vec![P_CALLS])
+}
+
+/// midiOutReset(handle): every note and the sustain end on every
+/// channel.
+fn midi_out_reset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    go(cpu, MM, "midiOutReset", &[args[0]], vec![P_CALLS])
+}
+
+/// midiOutPrepareHeader(handle, header, size): the MIDIHDR at 16:16
+/// `header` goes to WINMM where it is (`program_header`). Windows 3.1's
+/// MIDIHDR is Win32's without dwOffset and what follows it; WINMM takes
+/// the 28 bytes they share, and refuses fewer, as Windows does.
+fn midi_out_prepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (at, new) = program_header(cpu, args[1]);
+    go(
+        cpu,
+        MM,
+        "midiOutPrepareHeader",
+        &[args[0], at, args[2]],
+        vec![P_HEADER, at, new],
+    )
+}
+
+fn midi_out_unprepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (at, new) = program_header(cpu, args[1]);
+    go(
+        cpu,
+        MM,
+        "midiOutUnprepareHeader",
+        &[args[0], at, args[2]],
+        vec![P_UNPREPARE, at, new],
+    )
+}
+
+/// midiOutLongMsg(handle, header, size): WINMM sends the buffer whole
+/// and is done with it before it returns, so MM_MOM_DONE, with the
+/// program's 16:16 pointer to the header, reaches a function before
+/// midiOutLongMsg returns; when a callback function calls it, as soon
+/// as that function returns (`make_call16`).
+fn midi_out_long_msg(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (at, new) = program_header(cpu, args[1]);
+    go(
+        cpu,
+        MM,
+        "midiOutLongMsg",
+        &[args[0], at, args[2]],
+        vec![P_HEADER_CALLS, at, new],
+    )
+}
+
+/// midiOutGetVolume(device or handle, volume): the DWORD WINMM gives.
+fn midi_out_get_volume(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let volume = thunk::scratch32(cpu, 4);
+    let out = if args[1] == 0 { 0 } else { volume };
+    go_at(
+        cpu,
+        volume,
+        MM,
+        "midiOutGetVolume",
+        &[device32(args[0]), out],
+        vec![P_DWORD, volume, args[1]],
+    )
+}
+
+fn midi_out_set_volume(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    go(
+        cpu,
+        MM,
+        "midiOutSetVolume",
+        &[device32(args[0]), args[1]],
+        Vec::new(),
+    )
+}
+
+/// midiOutGetID(handle, id): WINMM's answer as a 16-bit UINT, so that
+/// MIDI_MAPPER is FFFFh.
+fn midi_out_get_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let id = thunk::scratch32(cpu, 4);
+    let out = if args[1] == 0 { 0 } else { id };
+    go_at(
+        cpu,
+        id,
+        MM,
+        "midiOutGetID",
+        &[args[0], out],
+        vec![P_UINT, id, args[1]],
     )
 }
 
@@ -1427,7 +1673,13 @@ pub fn queue_call16(cpu: &mut Cpu, tid: u32, function: u32, args: [u32; 5]) {
     let Some((p, t)) = crate::win32::thread::find(&cpu.bus.win32, tid) else {
         return;
     };
-    let waits = cpu.bus.win32.processes[p].threads[t].wait.is_some();
+    // An ended thread stays in its process's list until the process
+    // ends, and its task makes no more calls.
+    let thread = &cpu.bus.win32.processes[p].threads[t];
+    if thread.exit_code.is_some() {
+        return;
+    }
+    let waits = thread.wait.is_some();
     let [a, b, c, d, e] = args;
     let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
     calls.push([tid, function, a, b, c, d, e]);
@@ -1441,6 +1693,14 @@ pub fn queue_call16(cpu: &mut Cpu, tid: u32, function: u32, args: [u32; 5]) {
 /// Make the first call queued for the running task (`queue_call16`);
 /// the ones after it follow when it returns (`then_calls16`), and then
 /// the task goes on with `resume`. False when there is none.
+///
+/// The calls don't nest. While the task is in a function of the queue,
+/// such as a timer's function that calls midiOutLongMsg or midiOutReset,
+/// the calls queued meanwhile wait until that function returns, as the
+/// multimedia thread makes a 32-bit program's calls one at a time
+/// (winmm/callback.rs). Otherwise a periodic timer that fell due again
+/// would call its function inside itself, where Windows 95's timer
+/// thread makes the calls one after another (winmm/timer.rs).
 fn make_call16(cpu: &mut Cpu, resume: Context) -> bool {
     if cpu.bus.win32.win16.mmsystem.calls.is_empty() {
         return false;
@@ -1448,6 +1708,13 @@ fn make_call16(cpu: &mut Cpu, resume: Context) -> bool {
     let Some(t) = super::current_task(cpu) else {
         return false;
     };
+    let in_call = cpu.bus.win32.win16.tasks[t]
+        .frames
+        .iter()
+        .any(|f| matches!(f, super::Frame::To16 { then, .. } if *then == thunk::THEN_CALLS16));
+    if in_call {
+        return false;
+    }
     let tid = cpu.bus.win32.win16.tasks[t].tid;
     let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
     let Some(i) = calls.iter().position(|c| c[0] == tid) else {
@@ -1501,7 +1768,9 @@ pub fn call_queued16(cpu: &mut Cpu) -> bool {
 /// it returns, as Windows 3.1 calls the function within waveOutOpen
 /// (MM_WOM_OPEN), waveOutReset (MM_WOM_DONE) and waveOutClose
 /// (MM_WOM_CLOSE). A program may free the headers and the function's
-/// library once they return.
+/// library once they return. Called from a function of the queue, the
+/// function returns first, and the calls follow when that one returns
+/// (`make_call16`).
 fn return_after_calls(cpu: &mut Cpu, value: u32, ctx: &Context) -> Option<u32> {
     let mut resume = *ctx;
     resume.gpr[thunk::EAX] = resume.gpr[thunk::EAX] & 0xFFFF_0000 | value & 0xFFFF;
@@ -1513,15 +1782,26 @@ fn return_after_calls(cpu: &mut Cpu, value: u32, ctx: &Context) -> Option<u32> {
     }
 }
 
-/// A task ended: the calls queued for it go.
+/// A task ended: its multimedia timers and the calls queued for it go.
 pub fn task_ended(cpu: &mut Cpu, tid: u32) {
+    crate::win32::winmm::timer::task_ended16(cpu, tid);
     cpu.bus.win32.win16.mmsystem.calls.retain(|c| c[0] != tid);
 }
 
-/// What MMSYSTEM keeps for the 16-bit programs: the wave headers WINMM
-/// has (`wave_header`), each one's process, linear address and 16:16
-/// address, and the calls of callback functions that wait for their
-/// tasks (`queue_call16`).
+/// The calls of the 16-bit `function` that the timer `id` queued for the
+/// task whose thread is `tid` go unmade (`queue_call16`). A timer's call
+/// has the message 0, which no device's has: a program may give a
+/// device and a timer the same function, and a device's handle may be
+/// the same number as a timer's id.
+pub fn cancel_timer_calls16(cpu: &mut Cpu, tid: u32, function: u32, id: u32) {
+    let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
+    calls.retain(|c| !(c[0] == tid && c[1] == function && c[2] == id && c[3] == 0));
+}
+
+/// What MMSYSTEM keeps for the 16-bit programs: the wave and MIDI
+/// headers WINMM has (`program_header`), each one's process, linear
+/// address and 16:16 address, and the calls of callback functions that
+/// wait for their tasks (`queue_call16`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Mmsystem {
     pub headers: Vec<[u32; 3]>,
@@ -1554,26 +1834,34 @@ impl crate::savestate::State for Mmsystem {
     }
 }
 
-/// The WAVEHDR at 16:16 `segptr`, given to WINMM where it is, as
-/// Windows 98's MMSYSTEM gives a 16-bit program's own header to the
-/// driver: its linear address. The two layouts are the same, and the
-/// header keeps what the program wrote, its data's 16:16 pointer too;
-/// WINMM changes only dwFlags. The header's process and addresses are
-/// kept, so that WINMM reads the data's pointer as a 16:16 one
-/// (`wave_data`) and gives the program its own pointer to the header in
-/// MM_WOM_DONE (`wave_header16`).
-fn wave_header(cpu: &mut Cpu, segptr: u32) -> u32 {
+/// The WAVEHDR or MIDIHDR at 16:16 `segptr`, given to WINMM where it
+/// is, as Windows 98's MMSYSTEM gives a 16-bit program's own header to
+/// the driver: its linear address. The 16-bit layouts are Win32's (a
+/// MIDIHDR without its tail), and the header keeps what the program
+/// wrote, its data's 16:16 pointer too; WINMM changes only dwFlags. The
+/// header's process and addresses are kept, so that WINMM reads the
+/// data's pointer as a 16:16 one (`header_data`) and gives the program
+/// its own pointer to the header in MM_WOM_DONE and MM_MOM_DONE
+/// (`header16`). The linear address, and 1 when the header wasn't kept
+/// before: it goes again if WINMM refuses the call (`P_HEADER`), so that
+/// failed calls leave nothing behind.
+fn program_header(cpu: &mut Cpu, segptr: u32) -> (u32, u32) {
     let at = super::linear(cpu, segptr);
     if at == 0 {
-        return 0;
+        return (0, 0);
     }
     let pid = crate::win32::user32::current_pid(cpu);
     let headers = &mut cpu.bus.win32.win16.mmsystem.headers;
     match headers.iter_mut().find(|h| h[0] == pid && h[1] == at) {
-        Some(h) => h[2] = segptr,
-        None => headers.push([pid, at, segptr]),
+        Some(h) => {
+            h[2] = segptr;
+            (at, 0)
+        }
+        None => {
+            headers.push([pid, at, segptr]);
+            (at, 1)
+        }
     }
-    at
 }
 
 /// WINMM let go of the header at `at`.
@@ -1583,9 +1871,9 @@ fn unprepared(cpu: &mut Cpu, at: u32) {
     headers.retain(|h| h[0] != pid || h[1] != at);
 }
 
-/// The 16:16 address of the 16-bit program's wave header at the linear
-/// `at` in the process `pid`, if it is one.
-fn wave_header_of(cpu: &Cpu, pid: u32, at: u32) -> Option<u32> {
+/// The 16:16 address of the 16-bit program's header at the linear `at`
+/// in the process `pid`, if it is one.
+fn header_of(cpu: &Cpu, pid: u32, at: u32) -> Option<u32> {
     let headers = &cpu.bus.win32.win16.mmsystem.headers;
     headers
         .iter()
@@ -1593,56 +1881,63 @@ fn wave_header_of(cpu: &Cpu, pid: u32, at: u32) -> Option<u32> {
         .map(|h| h[2])
 }
 
-/// The 16:16 address of the wave header at the linear `at` in the
-/// process `pid`, which WINMM puts in MM_WOM_DONE for a 16-bit program;
-/// `at` for a header that isn't a 16-bit program's.
-pub fn wave_header16(cpu: &Cpu, pid: u32, at: u32) -> u32 {
-    wave_header_of(cpu, pid, at).unwrap_or(at)
+/// The 16:16 address of the wave or MIDI header at the linear `at` in
+/// the process `pid`, which WINMM puts in MM_WOM_DONE and MM_MOM_DONE
+/// for a 16-bit program; `at` for a header that isn't a 16-bit
+/// program's.
+pub fn header16(cpu: &Cpu, pid: u32, at: u32) -> u32 {
+    header_of(cpu, pid, at).unwrap_or(at)
 }
 
-/// The linear address of the data `data` that the wave header at the
-/// linear `at` in the process `pid` points to: a 16-bit program's header
-/// has a 16:16 pointer there, the others a flat one.
-pub fn wave_data(cpu: &Cpu, pid: u32, at: u32, data: u32) -> u32 {
-    match wave_header_of(cpu, pid, at) {
+/// The linear address of the data `data` that the wave or MIDI header
+/// at the linear `at` in the process `pid` points to: a 16-bit program's
+/// header has a 16:16 pointer there, the others a flat one.
+pub fn header_data(cpu: &Cpu, pid: u32, at: u32, data: u32) -> u32 {
+    match header_of(cpu, pid, at) {
         Some(_) => super::linear(cpu, data),
         None => data,
     }
 }
 
 fn wave_out_prepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let at = wave_header(cpu, args[1]);
+    let (at, new) = program_header(cpu, args[1]);
     go(
         cpu,
         MM,
         "waveOutPrepareHeader",
         &[args[0], at, 32],
-        Vec::new(),
+        vec![P_HEADER, at, new],
     )
 }
 
 fn wave_out_unprepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let at = wave_header(cpu, args[1]);
+    let (at, new) = program_header(cpu, args[1]);
     go(
         cpu,
         MM,
         "waveOutUnprepareHeader",
         &[args[0], at, 32],
-        vec![P_WAVE_UNPREPARE, at],
+        vec![P_UNPREPARE, at, new],
     )
 }
 
 fn wave_out_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let at = wave_header(cpu, args[1]);
-    go(cpu, MM, "waveOutWrite", &[args[0], at, 32], Vec::new())
+    let (at, new) = program_header(cpu, args[1]);
+    go(
+        cpu,
+        MM,
+        "waveOutWrite",
+        &[args[0], at, 32],
+        vec![P_HEADER, at, new],
+    )
 }
 
 fn wave_out_reset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    go(cpu, MM, "waveOutReset", &[args[0]], vec![P_WAVE_CALLS])
+    go(cpu, MM, "waveOutReset", &[args[0]], vec![P_CALLS])
 }
 
 fn wave_out_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    go(cpu, MM, "waveOutClose", &[args[0]], vec![P_WAVE_CALLS])
+    go(cpu, MM, "waveOutClose", &[args[0]], vec![P_CALLS])
 }
 
 fn wave_out_get_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1701,13 +1996,14 @@ fn time_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// timeSetEvent: Windows 3.1 calls the callback at interrupt time, which
-/// tasks taking turns have no room for; programs are told there is no
-/// timer, as when they are all taken.
-fn time_set_event(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    cpu.bus
-        .log_string("[W16] timeSetEvent's callbacks aren't called");
-    Some(0)
+/// timeSetEvent(delay, resolution, function, user, flags): WINMM's
+/// timer, whose function the task calls. Windows 3.1 calls it at
+/// interrupt time, which tasks taking turns have no room for: the task
+/// calls it when it next asks for a message (`queue_call16`), as it
+/// calls the wave and MIDI callbacks.
+fn time_set_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let tid = super::task(cpu).tid;
+    crate::win32::winmm::timer::time_set_event16(cpu, args, tid)
 }
 
 // MMIO: WINMM's functions, called here with MMIOINFO16 translated to and

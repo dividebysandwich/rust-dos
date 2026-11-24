@@ -19712,8 +19712,10 @@ fn a_win16_state_from_before_a_kernel_append_has_no_address_for_it() {
     code.push_far(0); // "KERNEL"
     code.call("KERNEL", 47); // GetModuleHandle
     code.emit(&[0x50]); // push ax
-    code.push(0);
-    code.push(110); // PatchCodeHandle, KERNEL's last function
+    // KERNEL's last function, by its name, which stays right when
+    // another function is appended to the table.
+    let last = code.here() + 1;
+    code.push_far(0);
     code.call("KERNEL", 50); // GetProcAddress
     code.emit(&[0x09, 0xD0]); // or ax, dx
     code.emit(&[0x74, 0x02]); // jz +2
@@ -19722,6 +19724,11 @@ fn a_win16_state_from_before_a_kernel_append_has_no_address_for_it() {
     let text = code.here();
     code.emit(b"KERNEL\0");
     code.patch(name + 1, text);
+    let function = rust_dos::win16::function_name(kernel16_functions() as u16 - 1).unwrap();
+    let function = function.strip_prefix("KERNEL.").unwrap();
+    let text = code.here();
+    code.emit(function.as_bytes()).emit(&[0]);
+    code.patch(last + 1, text);
     let mut cpu = machine("missing16_address", win16::program(&code, win16::CODE));
     run_into_the_wait(&mut cpu);
     kernel16_from_before_1599(&mut cpu, kernel16_functions() - 1);
