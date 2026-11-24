@@ -282,9 +282,10 @@ pub fn image(cpu: &Cpu, index: usize) -> Vec<u8> {
 /// (win32/dll_files.rs): its image, with `version` (VS_VERSIONINFO in
 /// the ANSI layout) as its version resource, so that a program that
 /// reads the file finds the module's name, its exports and its version.
-/// The constants whose values the machine gives (__0040H) are 0 in it,
-/// as no machine is running. Loading it binds the built-in module
-/// (module.rs), so its stubs never run as a module of their own.
+/// Its constants (KERNEL's __0040H, __AHINCR, __WINFLAGS) are all 0, as
+/// their values come from a running machine (`Run::Value` takes the
+/// CPU). Loading it binds the built-in module (module.rs), so its stubs
+/// never run as a module of their own.
 pub fn file(index: usize, version: &[u8]) -> Vec<u8> {
     let mut b = builder(index, |_| 0);
     b.resource(ne::ResId::Int(RT_VERSION), ne::ResId::Int(1), 0, version);
