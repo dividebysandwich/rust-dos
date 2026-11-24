@@ -321,6 +321,9 @@ fn create_task(
         environment,
         arguments,
     );
+    // LoadModule posts the new task an event, which its startup code's
+    // WaitEvent(0) takes without giving up its turn.
+    super::write_16(cpu, tdb_base + TDB_EVENTS, 1);
 
     // The 16-bit stack, in the automatic data segment unless the header
     // says otherwise.
@@ -426,6 +429,60 @@ fn create_task(
         tdb, m.name, cs, ip, ss, sp
     ));
     Ok(cpu.bus.win32.win16.tasks.len() - 1)
+}
+
+/// Where a task database keeps its events (Windows 3.1's nEvents): those
+/// PostEvent gave the task that WaitEvent hasn't taken yet.
+const TDB_EVENTS: u32 = 0x06;
+
+/// The task `handle`, or the running task for 0: its index in
+/// `State::tasks`, if it is a task that hasn't ended.
+fn live_task(cpu: &Cpu, handle: u16) -> Option<usize> {
+    if handle == 0 {
+        return super::current_task(cpu);
+    }
+    cpu.bus
+        .win32
+        .win16
+        .tasks
+        .iter()
+        .position(|t| t.handle == handle && t.exit_code.is_none())
+}
+
+/// The linear address of the events count in the task database of the
+/// task `handle` (0 for the running task).
+fn events_at(cpu: &Cpu, handle: u16) -> Option<u32> {
+    let t = live_task(cpu, handle)?;
+    let tdb = cpu.bus.win32.win16.tasks[t].handle;
+    global::get(cpu, tdb).map(|a| a.base + TDB_EVENTS)
+}
+
+/// PostEvent(task): one more event for the task (0 for the running
+/// one), which its next WaitEvent takes.
+pub fn post_event(cpu: &mut Cpu, handle: u16) {
+    if let Some(at) = events_at(cpu, handle) {
+        let events = super::read_16(cpu, at);
+        super::write_16(cpu, at, events.saturating_add(1));
+    }
+}
+
+/// WaitEvent's part before any waiting: an event of the task (0 for the
+/// running one) taken, if it has one. Whether it had.
+pub fn take_event(cpu: &mut Cpu, handle: u16) -> bool {
+    let Some(at) = events_at(cpu, handle) else {
+        return false;
+    };
+    let events = super::read_16(cpu, at);
+    if events == 0 {
+        return false;
+    }
+    super::write_16(cpu, at, events - 1);
+    true
+}
+
+/// Whether `handle` is the running task (or 0, which means it).
+pub fn is_running_task(cpu: &Cpu, handle: u16) -> bool {
+    handle == 0 || live_task(cpu, handle) == super::current_task(cpu)
 }
 
 /// The bytes of a client task's 16-bit stack.
@@ -969,9 +1026,18 @@ pub fn then(_: &mut Cpu, _: u32, _: &[u32], ctx: &mut Context) -> Option<u32> {
     Some(ctx.gpr[EAX])
 }
 
+/// What `exec` started: the instance the caller gets (33 for a Win32 or
+/// DOS program), and the new task's thread when it is a Windows 3.1
+/// program's.
+pub struct Started {
+    pub instance: u16,
+    pub thread: Option<u32>,
+}
+
 /// WinExec and EXEC from the running task: the program at `path` as a
-/// new task. Its instance, or the error below 32 Windows gives.
-pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16, u16> {
+/// new task. What it started, or the error below 32 Windows gives. The
+/// caller then lets a new task run first (`after_exec`).
+pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<Started, u16> {
     let parent = super::current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].handle);
     let environment = super::win16_ref(cpu).map_or(Vec::new(), |p| p.environment.clone());
     let path = if path.contains('.') {
@@ -997,23 +1063,54 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
     // A DOS program starts in a DOS machine, as CreateProcessA starts
     // one (win32/dosvm.rs).
     if pe::is_pe(&file) || crate::win32::dosvm::is_program(&path, &file) {
-        return exec_win32(cpu, &path, arguments, show, environment);
+        let instance = exec_win32(cpu, &path, arguments, show, environment)?;
+        return Ok(Started {
+            instance,
+            thread: None,
+        });
     }
     match spawn(cpu, &path, arguments, show, parent, environment) {
-        Ok(spawned) => Ok(cpu
-            .bus
-            .win32
-            .win16
-            .tasks
-            .iter()
-            .find(|t| t.handle == spawned.task)
-            .map_or(0, |t| t.instance)),
+        Ok(spawned) => Ok(Started {
+            instance: cpu
+                .bus
+                .win32
+                .win16
+                .tasks
+                .iter()
+                .find(|t| t.handle == spawned.task)
+                .map_or(0, |t| t.instance),
+            thread: Some(spawned.thread.1),
+        }),
         Err(message) => {
             cpu.bus
                 .log_string(&format!("[W16] {} can't start: {}", path, message));
             Err(if message.contains("memory") { 8 } else { 11 })
         }
     }
+}
+
+/// The running task goes on at `ctx`, which holds what `exec` gives it,
+/// after starting `started`. A new task runs first: Windows 3.1's
+/// LoadModule gives it a DirectedYield and returns only when it yields
+/// back, so the new program's startup code and WinMain run until it
+/// first waits for a message or yields. A program may count on that: it
+/// sends a program it just started a message at once, and that program
+/// has to have registered itself somewhere before (Memphis Math's
+/// MEMPHIS starts MMAP and then shows it through MCLIB.DLL, which posts
+/// the show command to the task MMAP put in MCLIB's table as it
+/// started). True when the task gave up its turn, so that `ctx` goes on
+/// later; false when it goes on now.
+pub fn after_exec(cpu: &mut Cpu, ctx: Context, started: &Started) -> bool {
+    let Some(to) = started.thread else {
+        return false;
+    };
+    let from = crate::win32::user32::current_tid(cpu);
+    if from == to || !both_tasks(&cpu.bus.win32, from, to) {
+        return false;
+    }
+    hand_turn(&mut cpu.bus.win32, from, to);
+    yield_now(cpu, ctx);
+    true
 }
 
 /// `exec` of the Win32 or DOS program at `path`: as on Windows 98, a
