@@ -261,8 +261,8 @@ fn images_answer_the_volume_calls() {
     assert_eq!(cpu.bus.read_32(0x33000 + 10), 4, "file size");
 }
 
-/// MSCDEX 2.25 reads the drive from CL and ignores CH: Ultimate Domain
-/// sends its device status request with CX=2E03h (#1796).
+/// MSCDEX 2.25 looks the drive up from CL alone: Ultimate Domain sends its
+/// device status request with CX=2E03h (#1796).
 #[test]
 fn the_drive_is_in_cl() {
     let (mut cpu, _) = disc("cl");
@@ -312,6 +312,56 @@ fn the_drive_is_in_cl() {
     int2f(&mut cpu, 0x1508, 0, 0x4103);
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
     assert_eq!(cpu.bus.read_8(BUFFER + 5), b'1');
+
+    // The volume descriptor preference: for D:, and C: is no CD drive.
+    cpu.set_dx(0x1234);
+    int2f(&mut cpu, 0x150E, 0, 0x7703);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.dx(), 0x0100, "the primary descriptor");
+    int2f(&mut cpu, 0x150E, 0, 0x0302);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.ax(), 15);
+}
+
+/// MSCDEX 2.25's dispatcher clears CF before each of its functions, 00h
+/// to 10h, and fails the others with AX=1 (invalid function). Absolute
+/// write (1509h) is one it doesn't have.
+#[test]
+fn cf_and_the_functions_mscdex_lacks() {
+    let (mut cpu, _) = disc("dispatch");
+    cpu.set_es(0x3100);
+
+    // Functions that don't fail clear a CF the caller left set.
+    for (ax, cx) in [(0x1500, 0), (0x150A, 0), (0x150B, 3), (0x150C, 0)] {
+        cpu.set_cpu_flag(CpuFlags::CF, true);
+        int2f(&mut cpu, ax, 0, cx);
+        assert!(!cpu.get_cpu_flag(CpuFlags::CF), "AX={:04X}", ax);
+    }
+    assert_eq!(cpu.bx(), 0x0217, "150Ch ran");
+
+    for (ax, cx) in [(0x1509, 3), (0x1509, 2), (0x1511, 3), (0x15FF, 3)] {
+        cpu.set_cpu_flag(CpuFlags::CF, false);
+        int2f(&mut cpu, ax, 0, cx);
+        assert!(cpu.get_cpu_flag(CpuFlags::CF), "AX={:04X}", ax);
+        assert_eq!(cpu.ax(), 1, "AX={:04X}", ax);
+    }
+
+    // 150Eh sets the preference to the primary descriptor or the
+    // supplementary one in Shift-JIS, and fails anything else.
+    for dx in [0x0100, 0x0105, 0x0201] {
+        cpu.set_dx(dx);
+        int2f(&mut cpu, 0x150E, 1, 3);
+        assert!(!cpu.get_cpu_flag(CpuFlags::CF), "DX={:04X}", dx);
+        assert_eq!(cpu.dx(), dx);
+    }
+    cpu.set_dx(0x0202);
+    int2f(&mut cpu, 0x150E, 1, 3);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!((cpu.ax(), cpu.dx()), (1, 0));
+    cpu.set_dx(0x0100);
+    int2f(&mut cpu, 0x150E, 2, 3);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!((cpu.ax(), cpu.dx()), (1, 0x0100));
 }
 
 #[test]
