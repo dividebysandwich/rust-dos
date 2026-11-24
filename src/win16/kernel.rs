@@ -791,19 +791,23 @@ fn yield16(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     None
 }
 
-/// WaitEvent(task): an event the running task has (PostEvent's, or the
-/// one LoadModule gives a new task) is taken, and the task goes on: 0.
-/// Without one, the task gives up its turn, as there are no other
-/// events but messages, which GetMessage waits for. As in Windows 3.1,
-/// a task waits for its own events only: another task's handle gives 0
-/// at once.
+/// WaitEvent(task): an event the task has (PostEvent's, or the one
+/// LoadModule gives a new task) is taken, and the task goes on: 0, as
+/// it didn't wait. Without one, the running task gives up its turn, as
+/// there are no other events but messages, which GetMessage waits for,
+/// and gets 1 when its turn comes again. Another task's handle with no
+/// event gives 1 at once: a task waits for its own events only (Wine's
+/// WaitEvent16, which keeps the count where Windows 3.1's TDB has it).
 fn wait_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let handle = args[0] as u16;
-    if task::take_event(cpu, handle) || !task::is_running_task(cpu, handle) {
+    if task::take_event(cpu, handle) {
         return Some(0);
     }
+    if !task::is_running_task(cpu, handle) {
+        return Some(1);
+    }
     let mut ctx = Context::of(cpu);
-    thunk::set_ax(&mut ctx, 0);
+    thunk::set_ax(&mut ctx, 1);
     task::yield_now(cpu, ctx);
     None
 }
