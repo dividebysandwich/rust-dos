@@ -157,7 +157,7 @@ label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
 5. **On the built-in Windows, a message naming a function or DLL:** the
    check may have passed, and the game stops at something the built-in
    Windows doesn't have yet. The last `[W32]` lines of the [log
-   file](../README.md#log-file) name it.
+   file](../REFERENCE.md#log-file) name it.
 
 If it still fails,
 [open an issue](https://github.com/dividebysandwich/rust-dos/issues)
