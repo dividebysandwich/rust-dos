@@ -21,7 +21,7 @@ pub static DLL: Dll = Dll {
     base: 0xBF4E_0000,
     apis: APIS,
     vars: VARS,
-    init: None,
+    init: Some(init),
     term: None,
     vtables: VTABLES,
     resources: None,
@@ -192,6 +192,13 @@ static VARS: &[Var] = &[Var {
 }];
 
 const VAR_SEED: usize = 0;
+
+/// The DLL's `init`: the seed starts at 1, as the C runtime's rand()'s
+/// does, so the first vector comes from 41, 18467 and 6334.
+fn init(bus: &mut crate::bus::Bus, process: &mut super::Process) -> Option<()> {
+    let seed_at = super::stubs::var_address(dll_index(), VAR_SEED);
+    process.memory.write_32(bus, seed_at, 1)
+}
 
 pub const IID_IDIRECT3DRM: Guid = Guid::new(
     0x2BC4_9361,
@@ -577,8 +584,11 @@ fn vector_random(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         (seed >> 16 & 0x7FFF) as f32
     };
     let v = [rand(), rand(), rand()];
-    cpu.bus.guest_write_32(seed_at, seed);
+    // The vector first: if its page is missing, the call runs again once
+    // it is there, and the seed, which a fault leaves unwritten, gives the
+    // same numbers then.
     write_floats(cpu, args[0], &normalize(v));
+    cpu.bus.guest_write_32(seed_at, seed);
     Some(args[0])
 }
 

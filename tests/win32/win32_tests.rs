@@ -20041,9 +20041,9 @@ fn debug_break_raises_a_breakpoint_the_handler_goes_on_from() {
 /// colors from components (clamped, cut to 255ths) and back, a
 /// quaternion from a rotation (normalizing the axis in place), the
 /// product of quaternions, the matrix of one, a reflection, a rotation,
-/// a slerp between equal quaternions, the sum, the difference and a
-/// scaled vector. The program ends with the number of the first check
-/// that went wrong, or 0.
+/// a slerp between equal quaternions, the sum, the difference, a scaled
+/// vector, and a random vector from the C runtime's series. The program
+/// ends with the number of the first check that went wrong, or 0.
 #[test]
 fn d3drm_math_helpers_compute_as_native_d3drm() {
     const ONE: u32 = 0x3F80_0000;
@@ -20068,6 +20068,9 @@ fn d3drm_math_helpers_compute_as_native_d3drm() {
         "D3DRMVectorAdd",
         "D3DRMVectorSubtract",
         "D3DRMVectorScale",
+        "D3DRMColorGetRed",
+        "D3DRMColorGetBlue",
+        "D3DRMVectorRandom",
     ];
     let imports: &[(&str, &[&str])] = &[("D3DRM.DLL", &functions)];
     let index = |name: &str| functions.iter().position(|n| *n == name).unwrap();
@@ -20136,26 +20139,74 @@ fn d3drm_math_helpers_compute_as_native_d3drm() {
             Ok(())
         };
         let normalized = [(1, 0, 0), (1, 1, 0), (1, 2, ONE)];
-        check(a, "D3DRMVectorNormalize", &[p(1)], Ret::Eax(p(1)), &normalized)?;
+        check(
+            a,
+            "D3DRMVectorNormalize",
+            &[p(1)],
+            Ret::Eax(p(1)),
+            &normalized,
+        )?;
         let zero = [(2, 0, ONE), (2, 1, 0), (2, 2, 0)];
         check(a, "D3DRMVectorNormalize", &[p(2)], Ret::Eax(p(2)), &zero)?;
         let cross = [(20, 0, 0), (20, 1, 0), (20, 2, ONE)];
-        check(a, "D3DRMVectorCrossProduct", &[p(20), p(3), p(4)], Ret::Eax(p(20)), &cross)?;
+        check(
+            a,
+            "D3DRMVectorCrossProduct",
+            &[p(20), p(3), p(4)],
+            Ret::Eax(p(20)),
+            &cross,
+        )?;
         let dot = [(30, 0, float(32.0))];
         check(a, "D3DRMVectorDotProduct", &[p(5), p(6)], Ret::Float, &dot)?;
-        check(a, "D3DRMVectorModulus", &[p(7)], Ret::Float, &[(30, 0, float(5.0))])?;
-        check(a, "D3DRMColorGetGreen", &[0x0000_FF00], Ret::Float, &[(30, 0, ONE)])?;
-        check(a, "D3DRMColorGetAlpha", &[0x00FF_FFFF], Ret::Float, &[(30, 0, 0)])?;
+        check(
+            a,
+            "D3DRMVectorModulus",
+            &[p(7)],
+            Ret::Float,
+            &[(30, 0, float(5.0))],
+        )?;
+        check(
+            a,
+            "D3DRMColorGetGreen",
+            &[0x0000_FF00],
+            Ret::Float,
+            &[(30, 0, ONE)],
+        )?;
+        check(
+            a,
+            "D3DRMColorGetAlpha",
+            &[0x00FF_FFFF],
+            Ret::Float,
+            &[(30, 0, 0)],
+        )?;
         let rgba = [ONE, HALF, 0, TWO];
         check(a, "D3DRMCreateColorRGBA", &rgba, Ret::Eax(0xFFFF_7F00), &[])?;
         let rgb = [MINUS_ONE, 0, ONE];
         check(a, "D3DRMCreateColorRGB", &rgb, Ret::Eax(0xFF00_00FF), &[])?;
-        let rotation = [(21, 0, ONE), (21, 1, 0), (21, 2, 0), (21, 3, 0), (8, 2, ONE)];
+        let rotation = [
+            (21, 0, ONE),
+            (21, 1, 0),
+            (21, 2, 0),
+            (21, 3, 0),
+            (8, 2, ONE),
+        ];
         let args = [p(21), p(8), 0];
-        check(a, "D3DRMQuaternionFromRotation", &args, Ret::Eax(p(21)), &rotation)?;
+        check(
+            a,
+            "D3DRMQuaternionFromRotation",
+            &args,
+            Ret::Eax(p(21)),
+            &rotation,
+        )?;
         let product = [(22, 0, 0), (22, 1, 0), (22, 2, 0), (22, 3, ONE)];
         let args = [p(22), p(9), p(10)];
-        check(a, "D3DRMQuaternionMultiply", &args, Ret::Eax(p(22)), &product)?;
+        check(
+            a,
+            "D3DRMQuaternionMultiply",
+            &args,
+            Ret::Eax(p(22)),
+            &product,
+        )?;
         // Half a turn about x: the diagonal 1, -1, -1, 1, the rest 0.
         let matrix: Vec<(u32, u32, u32)> = (0..16u32)
             .map(|i| {
@@ -20167,7 +20218,13 @@ fn d3drm_math_helpers_compute_as_native_d3drm() {
                 (24 + i / 4, i % 4, value)
             })
             .collect();
-        check(a, "D3DRMMatrixFromQuaternion", &[p(24), p(9)], Ret::Nothing, &matrix)?;
+        check(
+            a,
+            "D3DRMMatrixFromQuaternion",
+            &[p(24), p(9)],
+            Ret::Nothing,
+            &matrix,
+        )?;
         let reflected = [(28, 0, MINUS_ONE), (28, 1, ONE), (28, 2, 0)];
         let args = [p(28), p(11), p(4)];
         check(a, "D3DRMVectorReflect", &args, Ret::Eax(p(28)), &reflected)?;
@@ -20177,13 +20234,61 @@ fn d3drm_math_helpers_compute_as_native_d3drm() {
         let slerp = [(31, 0, ONE), (31, 1, 0), (31, 2, 0), (31, 3, 0)];
         let args = [p(31), p(13), p(13), HALF];
         check(a, "D3DRMQuaternionSlerp", &args, Ret::Eax(p(31)), &slerp)?;
-        let sum = [(32, 0, float(5.0)), (32, 1, float(7.0)), (32, 2, float(9.0))];
-        check(a, "D3DRMVectorAdd", &[p(32), p(5), p(6)], Ret::Eax(p(32)), &sum)?;
-        let difference = [(33, 0, float(3.0)), (33, 1, float(3.0)), (33, 2, float(3.0))];
+        let sum = [
+            (32, 0, float(5.0)),
+            (32, 1, float(7.0)),
+            (32, 2, float(9.0)),
+        ];
+        check(
+            a,
+            "D3DRMVectorAdd",
+            &[p(32), p(5), p(6)],
+            Ret::Eax(p(32)),
+            &sum,
+        )?;
+        let difference = [
+            (33, 0, float(3.0)),
+            (33, 1, float(3.0)),
+            (33, 2, float(3.0)),
+        ];
         let args = [p(33), p(6), p(5)];
-        check(a, "D3DRMVectorSubtract", &args, Ret::Eax(p(33)), &difference)?;
+        check(
+            a,
+            "D3DRMVectorSubtract",
+            &args,
+            Ret::Eax(p(33)),
+            &difference,
+        )?;
         let scaled = [(34, 0, TWO), (34, 1, float(4.0)), (34, 2, float(6.0))];
-        check(a, "D3DRMVectorScale", &[p(34), p(5), TWO], Ret::Eax(p(34)), &scaled)?;
+        check(
+            a,
+            "D3DRMVectorScale",
+            &[p(34), p(5), TWO],
+            Ret::Eax(p(34)),
+            &scaled,
+        )?;
+        check(
+            a,
+            "D3DRMColorGetRed",
+            &[0x00FF_0000],
+            Ret::Float,
+            &[(30, 0, ONE)],
+        )?;
+        check(
+            a,
+            "D3DRMColorGetBlue",
+            &[0x00FF_0000],
+            Ret::Float,
+            &[(30, 0, 0)],
+        )?;
+        // The C runtime's first three numbers, its seed 1: 41, 18467 and
+        // 6334, made length 1.
+        let v = [41.0f32, 18467.0, 6334.0];
+        let reciprocal = 1.0 / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        let random: Vec<(u32, u32, u32)> = (0..3u32)
+            .map(|i| (35, i, float(v[i as usize] * reciprocal)))
+            .collect();
+        check(a, "D3DRMVectorRandom", &[p(35)], Ret::Eax(p(35)), &random)?;
         a.xor(ebx, ebx)?;
         a.set_label(&mut wrong)?;
         a.mov(eax, ebx)?;
@@ -20207,8 +20312,8 @@ fn direct3drm_create_makes_an_object_that_counts_its_references() {
     data[16 + 8] = 0xC0;
     data[16 + 15] = 0x46;
     data[32..48].copy_from_slice(&[
-        0x61, 0x93, 0xC4, 0x2B, 0x27, 0x83, 0xCF, 0x11, 0xAC, 0x4A, 0x00, 0x00, 0xC0, 0x38,
-        0x25, 0xA1,
+        0x61, 0x93, 0xC4, 0x2B, 0x27, 0x83, 0xCF, 0x11, 0xAC, 0x4A, 0x00, 0x00, 0xC0, 0x38, 0x25,
+        0xA1,
     ]);
     let exe = program(BASE, false, imports, &data, |a, l| {
         let mut wrong = a.create_label();
