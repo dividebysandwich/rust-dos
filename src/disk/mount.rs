@@ -368,7 +368,8 @@ impl DiskController {
             None => (MemFs::new(), "AUDIO_CD".to_string(), 0),
         };
         let volume_label = if volume_label.is_empty() { "CDROM".to_string() } else { volume_label };
-        // Which subchannel file beside the image it reads, for the log.
+        // Which subchannel file beside the image it reads, and whether it
+        // is a CopyLok disc, for the log.
         for note in image.notes() {
             crate::diskdelta::note(note.clone());
         }

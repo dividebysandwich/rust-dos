@@ -4,9 +4,10 @@
 //! interrupt that came while a program ran (system.rs), the handler a
 //! program put in the real-mode vector table for a Win16 task's INT n
 //! (win16/dos.rs), the code a Win16 task calls with DPMI's INT 31h
-//! AX=0300h, 0301h and 0302h (win16/dpmi.rs), and DOS's EXEC of a DOS
-//! program a Windows program started, which runs until the program ends
-//! (dosvm.rs).
+//! AX=0300h, 0301h and 0302h (win16/dpmi.rs), the same calls of a Win32
+//! program through VWIN32's DPMI dispatch (kernel32/vxd.rs), and DOS's
+//! EXEC of a DOS program a Windows program started, which runs until the
+//! program ends (dosvm.rs).
 //!
 //! Each goes the same way. `call` keeps what the system goes on with
 //! afterwards in a `Frame`, switches the processor to real mode with the
@@ -55,6 +56,10 @@ pub enum Kind {
     /// DOS's EXEC of a DOS program a Windows program started: the
     /// program that started it goes on when it ends (dosvm.rs).
     Exec,
+    /// Real-mode code a Win32 program called through VWIN32's DPMI
+    /// dispatch: the call structure, at this flat address of the
+    /// program's, gets the registers the code left (kernel32/vxd.rs).
+    Vxd,
 }
 
 /// What the system goes on with when the code it called returns.
@@ -65,7 +70,8 @@ pub struct Frame {
     /// code's for a `Callback`.
     pub ctx: Context,
     /// A `Call`'s call structure, at this linear address of the Win16
-    /// process; a `Callback`'s slot.
+    /// process; a `Vxd`'s, at this flat address of the Win32 program's;
+    /// a `Callback`'s slot.
     pub at: u32,
 }
 
@@ -220,6 +226,7 @@ pub fn returned(cpu: &mut Cpu) {
         }
         Kind::Call => crate::win16::dpmi::call_returned(cpu, frame, &rm),
         Kind::Exec => super::dosvm::ended(cpu, frame, &rm),
+        Kind::Vxd => super::kernel32::vxd_call_returned(cpu, frame, &rm),
         Kind::Callback => unreachable!("a callback's code returned to the system"),
     }
 }
@@ -267,6 +274,7 @@ crate::state_enum!(Kind {
     Kind::Int,
     Kind::Call,
     Kind::Callback,
-    Kind::Exec
+    Kind::Exec,
+    Kind::Vxd
 });
 crate::state_fields!(Frame { kind, ctx, at });
