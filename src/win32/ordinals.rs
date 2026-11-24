@@ -9,6 +9,10 @@
 //! it, made by `tools/win98_ordinals.py` from the DLLs on its CD (DirectX
 //! 6.1's DDRAW, DSOUND, DINPUT and DirectMusic): a line an export, its
 //! ordinal and its name, or "-" for one exported by ordinal only.
+//! D3DRM's list is DirectX 5's D3DRM.DLL (4.05.00.0155), from a game's
+//! CD: Windows 98 SE's is in an LZX cabinet that wasn't unpacked when
+//! the DLL was added. DirectX 3's lists the same 21 exports under the
+//! same ordinals, numbered in the order of their names.
 //!
 //! A built-in function's ordinal follows these rules, which the tests
 //! check:
@@ -41,6 +45,7 @@ static LISTS: &[(&str, &str)] = &[
     ("COMCTL32.DLL", include_str!("ordinals/comctl32_dll.txt")),
     ("COMDLG32.DLL", include_str!("ordinals/comdlg32_dll.txt")),
     ("DCIMAN32.DLL", include_str!("ordinals/dciman32_dll.txt")),
+    ("D3DRM.DLL", include_str!("ordinals/d3drm_dll.txt")),
     ("DDRAW.DLL", include_str!("ordinals/ddraw_dll.txt")),
     ("DINPUT.DLL", include_str!("ordinals/dinput_dll.txt")),
     ("DMBAND.DLL", include_str!("ordinals/dmband_dll.txt")),

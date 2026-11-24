@@ -20034,3 +20034,219 @@ fn debug_break_raises_a_breakpoint_the_handler_goes_on_from() {
     let (code, text) = run("debug_break_seh", exe);
     assert_eq!(code, 7, "{}", text);
 }
+
+/// D3DRM.DLL's math helpers compute what native D3DRM does, on values
+/// whose results are exact in single precision: normalizing (in place,
+/// a zero vector to (1, 0, 0)), the cross and dot products, the modulus,
+/// colors from components (clamped, cut to 255ths) and back, a
+/// quaternion from a rotation (normalizing the axis in place), the
+/// product of quaternions, the matrix of one, a reflection, a rotation,
+/// a slerp between equal quaternions, the sum, the difference and a
+/// scaled vector. The program ends with the number of the first check
+/// that went wrong, or 0.
+#[test]
+fn d3drm_math_helpers_compute_as_native_d3drm() {
+    const ONE: u32 = 0x3F80_0000;
+    const TWO: u32 = 0x4000_0000;
+    const HALF: u32 = 0x3F00_0000;
+    const MINUS_ONE: u32 = 0xBF80_0000;
+    let functions = [
+        "D3DRMVectorNormalize",
+        "D3DRMVectorCrossProduct",
+        "D3DRMVectorDotProduct",
+        "D3DRMVectorModulus",
+        "D3DRMCreateColorRGBA",
+        "D3DRMCreateColorRGB",
+        "D3DRMColorGetGreen",
+        "D3DRMColorGetAlpha",
+        "D3DRMQuaternionFromRotation",
+        "D3DRMQuaternionMultiply",
+        "D3DRMMatrixFromQuaternion",
+        "D3DRMVectorReflect",
+        "D3DRMVectorRotate",
+        "D3DRMQuaternionSlerp",
+        "D3DRMVectorAdd",
+        "D3DRMVectorSubtract",
+        "D3DRMVectorScale",
+    ];
+    let imports: &[(&str, &[&str])] = &[("D3DRM.DLL", &functions)];
+    let index = |name: &str| functions.iter().position(|n| *n == name).unwrap();
+    let float = |v: f32| v.to_bits();
+    // Each operand and result has a block of 16 bytes of the data, by
+    // number. Quaternions have the scalar first.
+    let operands: &[(u32, [f32; 4])] = &[
+        (1, [0.0, 0.0, 2.0, 0.0]),
+        (2, [0.0, 0.0, 0.0, 0.0]),
+        (3, [1.0, 0.0, 0.0, 0.0]),
+        (4, [0.0, 1.0, 0.0, 0.0]),
+        (5, [1.0, 2.0, 3.0, 0.0]),
+        (6, [4.0, 5.0, 6.0, 0.0]),
+        (7, [3.0, 4.0, 0.0, 0.0]),
+        (8, [0.0, 0.0, 2.0, 0.0]),
+        (9, [0.0, 1.0, 0.0, 0.0]),
+        (10, [0.0, 0.0, 1.0, 0.0]),
+        (11, [1.0, 1.0, 0.0, 0.0]),
+        (12, [0.0, 0.0, 1.0, 0.0]),
+        (13, [1.0, 0.0, 0.0, 0.0]),
+    ];
+    let mut data = vec![0u8; 64 * 16];
+    for (n, values) in operands {
+        for (i, v) in values.iter().enumerate() {
+            let at = (*n * 16) as usize + 4 * i;
+            data[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    // What a function returns: in EAX, a D3DVALUE in ST(0), or nothing.
+    enum Ret {
+        Eax(u32),
+        Float,
+        Nothing,
+    }
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut wrong = a.create_label();
+        let p = |n: u32| l.at(n * 16) as u32;
+        let mut step = 0;
+        // Call `name` with `args`; what it returns must be `ret`, then
+        // each (block, word, value) must hold. Block 30 gets a D3DVALUE
+        // the function returns in ST(0).
+        let mut check = |a: &mut CodeAssembler,
+                         name: &str,
+                         args: &[u32],
+                         ret: Ret,
+                         words: &[(u32, u32, u32)]|
+         -> Result<(), IcedError> {
+            step += 1;
+            a.mov(ebx, step)?;
+            for &arg in args.iter().rev() {
+                a.push(arg as i32)?;
+            }
+            a.call(l.import(index(name)))?;
+            match ret {
+                Ret::Eax(ret) => {
+                    a.cmp(eax, ret as i32)?;
+                    a.jne(wrong)?;
+                }
+                Ret::Float => a.fstp(dword_ptr(l.at(30 * 16)))?,
+                Ret::Nothing => {}
+            }
+            for &(block, word, value) in words {
+                a.cmp(dword_ptr(l.at(block * 16 + 4 * word)), value as i32)?;
+                a.jne(wrong)?;
+            }
+            Ok(())
+        };
+        let normalized = [(1, 0, 0), (1, 1, 0), (1, 2, ONE)];
+        check(a, "D3DRMVectorNormalize", &[p(1)], Ret::Eax(p(1)), &normalized)?;
+        let zero = [(2, 0, ONE), (2, 1, 0), (2, 2, 0)];
+        check(a, "D3DRMVectorNormalize", &[p(2)], Ret::Eax(p(2)), &zero)?;
+        let cross = [(20, 0, 0), (20, 1, 0), (20, 2, ONE)];
+        check(a, "D3DRMVectorCrossProduct", &[p(20), p(3), p(4)], Ret::Eax(p(20)), &cross)?;
+        let dot = [(30, 0, float(32.0))];
+        check(a, "D3DRMVectorDotProduct", &[p(5), p(6)], Ret::Float, &dot)?;
+        check(a, "D3DRMVectorModulus", &[p(7)], Ret::Float, &[(30, 0, float(5.0))])?;
+        check(a, "D3DRMColorGetGreen", &[0x0000_FF00], Ret::Float, &[(30, 0, ONE)])?;
+        check(a, "D3DRMColorGetAlpha", &[0x00FF_FFFF], Ret::Float, &[(30, 0, 0)])?;
+        let rgba = [ONE, HALF, 0, TWO];
+        check(a, "D3DRMCreateColorRGBA", &rgba, Ret::Eax(0xFFFF_7F00), &[])?;
+        let rgb = [MINUS_ONE, 0, ONE];
+        check(a, "D3DRMCreateColorRGB", &rgb, Ret::Eax(0xFF00_00FF), &[])?;
+        let rotation = [(21, 0, ONE), (21, 1, 0), (21, 2, 0), (21, 3, 0), (8, 2, ONE)];
+        let args = [p(21), p(8), 0];
+        check(a, "D3DRMQuaternionFromRotation", &args, Ret::Eax(p(21)), &rotation)?;
+        let product = [(22, 0, 0), (22, 1, 0), (22, 2, 0), (22, 3, ONE)];
+        let args = [p(22), p(9), p(10)];
+        check(a, "D3DRMQuaternionMultiply", &args, Ret::Eax(p(22)), &product)?;
+        // Half a turn about x: the diagonal 1, -1, -1, 1, the rest 0.
+        let matrix: Vec<(u32, u32, u32)> = (0..16u32)
+            .map(|i| {
+                let value = match i {
+                    0 | 15 => ONE,
+                    5 | 10 => MINUS_ONE,
+                    _ => 0,
+                };
+                (24 + i / 4, i % 4, value)
+            })
+            .collect();
+        check(a, "D3DRMMatrixFromQuaternion", &[p(24), p(9)], Ret::Nothing, &matrix)?;
+        let reflected = [(28, 0, MINUS_ONE), (28, 1, ONE), (28, 2, 0)];
+        let args = [p(28), p(11), p(4)];
+        check(a, "D3DRMVectorReflect", &args, Ret::Eax(p(28)), &reflected)?;
+        let rotated = [(29, 0, ONE), (29, 1, 0), (29, 2, 0)];
+        let args = [p(29), p(3), p(12), 0];
+        check(a, "D3DRMVectorRotate", &args, Ret::Eax(p(29)), &rotated)?;
+        let slerp = [(31, 0, ONE), (31, 1, 0), (31, 2, 0), (31, 3, 0)];
+        let args = [p(31), p(13), p(13), HALF];
+        check(a, "D3DRMQuaternionSlerp", &args, Ret::Eax(p(31)), &slerp)?;
+        let sum = [(32, 0, float(5.0)), (32, 1, float(7.0)), (32, 2, float(9.0))];
+        check(a, "D3DRMVectorAdd", &[p(32), p(5), p(6)], Ret::Eax(p(32)), &sum)?;
+        let difference = [(33, 0, float(3.0)), (33, 1, float(3.0)), (33, 2, float(3.0))];
+        let args = [p(33), p(6), p(5)];
+        check(a, "D3DRMVectorSubtract", &args, Ret::Eax(p(33)), &difference)?;
+        let scaled = [(34, 0, TWO), (34, 1, float(4.0)), (34, 2, float(6.0))];
+        check(a, "D3DRMVectorScale", &[p(34), p(5), TWO], Ret::Eax(p(34)), &scaled)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, out) = run("d3drm_math", exe);
+    assert_eq!(code, 0, "check {code} went wrong {out}");
+}
+
+/// A program that imports D3DRM.DLL's Direct3DRMCreate alone, as
+/// Warhammer: Dark Omen's CD release does, starts and gets a Direct3DRM
+/// object: QueryInterface gives the same interface for IUnknown and for
+/// IDirect3DRM and counts a reference, and Release counts them down. The
+/// program ends with the number of the first check that went wrong, or
+/// 0.
+#[test]
+fn direct3drm_create_makes_an_object_that_counts_its_references() {
+    let imports: &[(&str, &[&str])] = &[("D3DRM.DLL", &["Direct3DRMCreate"])];
+    let mut data = vec![0u8; 64];
+    // IID_IUnknown at 16, IID_IDirect3DRM at 32.
+    data[16 + 8] = 0xC0;
+    data[16 + 15] = 0x46;
+    data[32..48].copy_from_slice(&[
+        0x61, 0x93, 0xC4, 0x2B, 0x27, 0x83, 0xCF, 0x11, 0xAC, 0x4A, 0x00, 0x00, 0xC0, 0x38,
+        0x25, 0xA1,
+    ]);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut wrong = a.create_label();
+        a.mov(ebx, 1)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.jne(wrong)?;
+        a.mov(esi, dword_ptr(l.at(0)))?;
+        a.test(esi, esi)?;
+        a.je(wrong)?;
+        // QueryInterface of each IID: S_OK and the same pointer.
+        for (step, iid) in [(2, 16), (3, 32)] {
+            a.mov(ebx, step)?;
+            a.push(l.at(4) as i32)?;
+            a.push(l.at(iid) as i32)?;
+            a.push(esi)?;
+            a.mov(eax, dword_ptr(esi))?;
+            a.call(dword_ptr(eax))?;
+            a.test(eax, eax)?;
+            a.jne(wrong)?;
+            a.cmp(dword_ptr(l.at(4)), esi)?;
+            a.jne(wrong)?;
+        }
+        // Three references, released one by one.
+        for (step, left) in [(4, 2), (5, 1), (6, 0)] {
+            a.mov(ebx, step)?;
+            a.push(esi)?;
+            a.mov(eax, dword_ptr(esi))?;
+            a.call(dword_ptr(eax + 8))?;
+            a.cmp(eax, left)?;
+            a.jne(wrong)?;
+        }
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, out) = run("direct3drm_create", exe);
+    assert_eq!(code, 0, "check {code} went wrong {out}");
+}

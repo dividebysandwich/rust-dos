@@ -21,6 +21,7 @@ mod comctl32;
 mod comdlg32;
 mod convert;
 mod d3d8;
+mod d3drm;
 mod dciman32;
 mod ddraw;
 pub use ddraw::is_lost_cache;
