@@ -548,6 +548,74 @@ fn auto_speed_keeps_a_real_mode_game_within_its_cpu() {
 }
 
 #[test]
+fn a_fixed_speed_past_the_cpus_real_mode_speed_says_so_once() {
+    // `cycles=auto` keeps a real-mode game within what its CPU ran
+    // (52,800 on a 486). A fixed speed or `max` stays what the user chose,
+    // and the log says once that a game timing its loop by the timer may
+    // fail there (#1813). Choosing a speed again says it again.
+    let lines = |model, speed: CpuSpeed, cycles: u32, frames: usize| {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.model = model;
+        cpu.bus.set_cycles_per_ms(cycles);
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = log.clone();
+        cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+            if line.starts_with("[SPEED]") {
+                sink.lock().unwrap().push(line.to_string());
+            }
+        }));
+        let mut pacer = Pacer::new(speed, None, Instant::now());
+        for i in 0..frames {
+            if i == frames / 2 {
+                pacer.set_speed(speed);
+            }
+            let executed = cpu.bus.clock.cycles_per_ms() as u64 * 50 / 3;
+            cpu.bus.clock.icount += executed;
+            // 2 ns an instruction: the host runs about 400,000 a ms.
+            let exec = Duration::from_nanos(executed * 2);
+            if let Some(next) = pacer.end_cpu_frame(&mut cpu, executed, exec, Duration::ZERO) {
+                cpu.bus.set_cycles_per_ms(next);
+            }
+        }
+        let speed = cpu.bus.clock.cycles_per_ms();
+        let lines = log.lock().unwrap().clone();
+        (speed, lines)
+    };
+    let (speed, said) = lines(CpuModel::I486, CpuSpeed::Fixed(100_000), 100_000, 20);
+    assert_eq!(speed, 100_000);
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(
+        said[0].contains("cycles=100000") && said[0].contains("52800"),
+        "{}",
+        said[0]
+    );
+    // `max` goes as far as the host keeps up with, here past 52,800.
+    let (speed, said) = lines(CpuModel::I486, CpuSpeed::Max, 20_000, 600);
+    assert!(speed > 100_000, "{speed}");
+    assert!(
+        !said.is_empty() && said[0].contains("cycles=max"),
+        "{said:?}"
+    );
+    // Within the 486's speed, and on a model with no such speed, nothing.
+    assert!(
+        lines(CpuModel::I486, CpuSpeed::Fixed(40_000), 40_000, 20)
+            .1
+            .is_empty()
+    );
+    assert!(
+        lines(CpuModel::Pentium, CpuSpeed::Fixed(100_000), 100_000, 20)
+            .1
+            .is_empty()
+    );
+    // `auto` keeps within it, and says nothing.
+    assert!(
+        lines(CpuModel::I486, CpuSpeed::Auto(3000), 3000, 600)
+            .1
+            .is_empty()
+    );
+}
+
+#[test]
 fn auto_speed_parses_and_prints() {
     assert_eq!(CpuSpeed::default(), CpuSpeed::Auto(3000));
     assert_eq!(CpuSpeed::parse("auto"), Ok(CpuSpeed::Auto(3000)));

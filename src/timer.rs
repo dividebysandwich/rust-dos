@@ -809,6 +809,10 @@ pub struct Pacer {
     presented: bool,
     /// The emulated time the batch covers, a frame's.
     period: Duration,
+    /// Whether the log has said that a fixed or `max` speed is past what
+    /// the CPU model ran in real mode (`hint_real_most`), once for each
+    /// speed set.
+    real_most_hinted: bool,
 }
 
 impl Pacer {
@@ -837,6 +841,7 @@ impl Pacer {
             deadline: None,
             presented: false,
             period: FRAME,
+            real_most_hinted: false,
         }
     }
 
@@ -884,6 +889,7 @@ impl Pacer {
             self.auto = self.auto.with(base, self.auto.target_fps());
         }
         self.speed = speed;
+        self.real_most_hinted = false;
     }
 
     /// Change the frame rate `Auto` aims for (`auto_fps`), None for the
@@ -977,6 +983,7 @@ impl Pacer {
         let share = (1.0 - halted / BLITS_UNTIL_HALTED).clamp(0.0, 1.0);
         let executed = executed + (offloaded as f64 * share) as u64;
         let next = self.end_frame(&cpu.bus, cpu.pm_latched, executed, exec, overhead);
+        self.hint_real_most(cpu, next);
         cpu.os_idles = self.auto.idles();
         // What a device may go back to in the middle of the next frame
         // (`Bus::end_work_boost`): only a speed `Auto` set.
@@ -985,6 +992,35 @@ impl Pacer {
             _ => None,
         };
         next
+    }
+
+    /// Say once in the log, for each speed set, that a fixed or `max`
+    /// speed runs real-mode code faster than the CPU model ran
+    /// (`CpuModel::auto_real_most`). `cycles=auto` keeps a real-mode
+    /// program's frames within that, as a game that counts the timer ticks
+    /// a pass of its main loop takes can count none past it and fail
+    /// (Ultimate Domain divides by the count, #1813). A fixed speed and
+    /// `max` are the user's choice and stay as they are.
+    fn hint_real_most(&mut self, cpu: &mut crate::cpu::Cpu, next: Option<u32>) {
+        if self.real_most_hinted || cpu.pm_latched || matches!(self.speed, CpuSpeed::Auto(_)) {
+            return;
+        }
+        let Some(most) = cpu.model.auto_real_most() else {
+            return;
+        };
+        let speed = next.unwrap_or_else(|| cpu.bus.clock.cycles_per_ms());
+        if speed <= most {
+            return;
+        }
+        self.real_most_hinted = true;
+        let setting = match self.speed {
+            CpuSpeed::Max => "max".to_string(),
+            _ => speed.to_string(),
+        };
+        cpu.bus.log_string(&format!(
+            "[SPEED] cycles={setting} runs real-mode code at {speed} instructions per ms,              more than the {most} cycles=auto gives a {}: a game that times its main              loop by the timer may fail at this speed",
+            cpu.model.describe()
+        ));
     }
 
     /// The instruction count the next batch should run to, so emulated time
