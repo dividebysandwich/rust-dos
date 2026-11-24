@@ -1077,17 +1077,14 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<Sta
         });
     }
     match spawn(cpu, &path, arguments, show, parent, environment) {
-        Ok(spawned) => Ok(Started {
-            instance: cpu
-                .bus
-                .win32
-                .win16
-                .tasks
-                .iter()
-                .find(|t| t.handle == spawned.task)
-                .map_or(0, |t| t.instance),
-            thread: Some(spawned.thread.1),
-        }),
+        Ok(spawned) => {
+            let win16 = &cpu.bus.win32.win16;
+            Ok(Started {
+                instance: super::live_task(win16, spawned.task)
+                    .map_or(0, |t| win16.tasks[t].instance),
+                thread: Some(spawned.thread.1),
+            })
+        }
         Err(message) => {
             cpu.bus
                 .log_string(&format!("[W16] {} can't start: {}", path, message));
@@ -1238,6 +1235,7 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     super::hook::task_ended(cpu, task.tid, ds);
     if freed {
         global::free(cpu, task.instance);
+        cpu.bus.win32.win16.tasks[t].instance = 0;
     }
     cpu.bus.win32.win16.ldt.free(task.psp, 1);
     global::free(cpu, task.handle);

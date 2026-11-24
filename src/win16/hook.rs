@@ -96,8 +96,8 @@ pub fn set_windows_hook_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         0
     } else {
         let win16 = &cpu.bus.win32.win16;
-        match win16.tasks.iter().find(|t| t.handle == task) {
-            Some(t) => t.tid,
+        match super::live_task(win16, task) {
+            Some(t) => win16.tasks[t].tid,
             None => return Some(0),
         }
     };

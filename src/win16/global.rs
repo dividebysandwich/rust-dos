@@ -531,11 +531,11 @@ fn describe(cpu: &Cpu, a: &Arena) -> HeapItem {
     let sel = handle_to_sel(a.handle);
     // A task's block may have its PSP as the owner (WinG's, and those
     // FarSetOwner gave to GetCurrentPDB's answer); TOOLHELP gives the
-    // task for both.
+    // task for both. An ended task's were freed and may be another's now.
     let task = state
         .tasks
         .iter()
-        .find(|t| t.handle == a.owner || t.psp == a.owner);
+        .find(|t| t.exit_code.is_none() && (t.handle == a.owner || t.psp == a.owner));
     let (kind, data) = kind_of(cpu, a);
     HeapItem {
         address: a.base,
@@ -559,7 +559,7 @@ fn describe(cpu: &Cpu, a: &Arena) -> HeapItem {
 /// The blocks programs allocate are GT_UNKNOWN, as Windows 3.1 has them.
 fn kind_of(cpu: &Cpu, a: &Arena) -> (u16, u16) {
     let state = &cpu.bus.win32.win16;
-    if state.tasks.iter().any(|t| t.handle == a.handle) {
+    if super::live_task(state, a.handle).is_some() {
         return (GT_TASK, 0);
     }
     if state.modules.iter().any(|m| m.handle == a.handle) {

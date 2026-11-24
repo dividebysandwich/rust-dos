@@ -856,6 +856,14 @@ pub fn release(cpu: &mut Cpu, handle: u16) {
 fn unload(cpu: &mut Cpu, index: usize) {
     free_classes(cpu, index);
     let m = cpu.bus.win32.win16.modules.remove(index);
+    // The tasks of it that ended hold neither it nor its data segment
+    // from now on, whose handles a module loaded later may get.
+    for t in &mut cpu.bus.win32.win16.tasks {
+        if t.exit_code.is_some() && t.module == m.handle {
+            t.module = 0;
+            t.instance = 0;
+        }
+    }
     let code: Vec<u16> = m
         .segments
         .iter()
@@ -929,7 +937,9 @@ fn free_classes(cpu: &mut Cpu, index: usize) {
 /// segment, the module's own for the first instance, a fresh copy from
 /// the file, relocated, for the others. The module's own stays with an
 /// instance that ended while others kept the module loaded, since its
-/// data is that instance's: later instances get copies. Its handle, or
+/// data is that instance's: later instances get copies. An ended task
+/// claims it only while the module is loaded (`unload`), so a module
+/// loaded again with the same handles starts in its own. Its handle, or
 /// 0.
 pub fn new_instance(cpu: &mut Cpu, index: usize) -> u16 {
     let m = cpu.bus.win32.win16.modules[index].clone();
