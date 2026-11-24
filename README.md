@@ -43,6 +43,30 @@ its notes say which file to take. Then pick what you want to do:
 | Look up a setting, a command or a key | [Documentation](#documentation) below |
 | Build Rust-DOS from source, for what main has that no release has yet | [docs/building.md](docs/building.md) |
 
+### The Linux AppImage
+
+On a Linux desktop the `.AppImage` is the simplest download: one file,
+for glibc 2.35 or later (Ubuntu 22.04, Debian 12 and newer), that uses
+the system's SDL3 or its own where the system has none. Take the
+`x86_64` one for PCs and the `aarch64` one for ARM machines. Make it
+executable, then use the file's path wherever a command in this README
+starts with `rust-dos`. The options stay the same:
+
+```sh
+chmod +x rust-dos-*-x86_64.AppImage
+./rust-dos-*-x86_64.AppImage -d ~/games/doom
+```
+
+It mounts itself with FUSE, and where there is none, as in most
+containers, it stops with an error. Pass `--appimage-extract-and-run`
+before the other options, or set `APPIMAGE_EXTRACT_AND_RUN=1`, and it
+unpacks itself to a temporary directory and runs from there.
+
+Its settings, game profiles, saves, log and downloaded ROMs are kept in
+`~/.config/rust-dos/`, so replacing the AppImage with a newer one keeps
+them. To keep all of that in one folder instead, use the `.tar.gz` as a
+portable install, described below.
+
 ### First DOS game
 
 Start Rust-DOS with the game's folder as drive C:
