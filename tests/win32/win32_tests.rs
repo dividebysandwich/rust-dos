@@ -6566,9 +6566,9 @@ fn a_program_makes_reads_finds_moves_and_deletes_files() {
 /// The names a Win32 program makes keep the case it gives them, as
 /// Windows 98's VFAT keeps them: CreateDirectoryA's "Program Files" and
 /// "Base", CreateFileA's "config.cfg" (an 8.3 name, which DOS's own calls
-/// uppercase), MoveFileA's "Old.cfg" and CopyFileA's "save.dat". American
-/// McGee's Alice's installer makes its folders so, and the game its
-/// files.
+/// uppercase), MoveFileA's "Old.cfg" and CopyFileA's "save.dat". MoveFileA
+/// gives "save.dat" another case, as Windows 9x lets it. American McGee's
+/// Alice's installer makes its folders so, and the game its files.
 #[test]
 fn win32_calls_make_names_in_the_case_they_are_given() {
     use Arg::{Esi, I};
@@ -6586,6 +6586,7 @@ fn win32_calls_make_names_in_the_case_they_are_given() {
     put(&mut data, 0x40, b"C:\\Program Files\\Base\\config.cfg\0");
     put(&mut data, 0x80, b"C:\\Program Files\\Base\\Old.cfg\0");
     put(&mut data, 0xC0, b"C:\\Program Files\\Base\\save.dat\0");
+    put(&mut data, 0xE0, b"C:\\Program Files\\Base\\Save.dat\0");
     let (code, text) = run(
         "name_case",
         program(BASE, false, imports, &data, |a, l| {
@@ -6611,8 +6612,11 @@ fn win32_calls_make_names_in_the_case_they_are_given() {
             call_with(a, f("CopyFileA"), &[at(0x80), at(0xC0), I(1)])?;
             a.test(eax, eax)?;
             check(a, true, 4)?;
+            call_with(a, f("MoveFileA"), &[at(0xC0), at(0xE0)])?;
+            a.test(eax, eax)?;
+            check(a, true, 5)?;
             a.mov(eax, ebx)?;
-            a.or(eax, 0xE0)?;
+            a.or(eax, 0xC0)?;
             a.ret()
         }),
     );
@@ -6628,7 +6632,7 @@ fn win32_calls_make_names_in_the_case_they_are_given() {
     };
     assert!(listed("").contains(&"Program Files".to_string()));
     assert_eq!(listed("Program Files"), ["Base"]);
-    assert_eq!(listed("Program Files/Base"), ["Old.cfg", "save.dat"]);
+    assert_eq!(listed("Program Files/Base"), ["Old.cfg", "Save.dat"]);
 }
 
 /// SetFileTime on a file in a host folder, as Windows 98 SE does it on

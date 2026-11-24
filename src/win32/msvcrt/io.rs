@@ -1008,7 +1008,8 @@ pub fn unlink(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn rename(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let from = dos_path(&cstr(cpu, args[0])?);
     let to = dos_path(&cstr(cpu, args[1])?);
-    if cpu.bus.disk.exists(&to) {
+    // The same name in another case renames it, as MoveFileA does.
+    if cpu.bus.disk.exists(&to) && !from.eq_ignore_ascii_case(&to) {
         return dos_result(cpu, Err(5));
     }
     let disk = &mut cpu.bus.disk;

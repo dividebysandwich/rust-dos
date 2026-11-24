@@ -749,14 +749,16 @@ pub(super) fn move_path(cpu: &mut Cpu, from: &str, to: &str) -> Result<(), u32> 
     if has_wildcards(to) {
         return Err(ERROR_INVALID_NAME);
     }
-    if from_full.eq_ignore_ascii_case(&to_full) {
+    // The same name in another case renames it (`rename_file`).
+    let recased = from_full.eq_ignore_ascii_case(&to_full);
+    if from_full == to_full {
         return Ok(());
     }
     if open_sharing(cpu, from).is_some() {
         return Err(ERROR_ACCESS_DENIED);
     }
     let disk = &mut cpu.bus.disk;
-    if disk.exists(to) {
+    if disk.exists(to) && !recased {
         return Err(ERROR_ALREADY_EXISTS);
     }
     if drive_of(&from_full) == drive_of(&to_full) {

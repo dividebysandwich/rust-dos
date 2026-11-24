@@ -536,10 +536,12 @@ fn store(
     if !change(&mut sections) {
         return Some(TRUE);
     }
+    // A new file's name keeps the case it is given, as on Windows 9x.
+    let data = unparse(&sections);
     match cpu
         .bus
         .disk
-        .write_whole_file(&path, &unparse(&sections), None)
+        .long_name_call(|disk| disk.write_whole_file(&path, &data, None))
     {
         Ok(()) => Some(TRUE),
         Err(code) => {
