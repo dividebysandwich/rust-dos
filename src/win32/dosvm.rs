@@ -32,8 +32,9 @@
 //!
 //! That is what a full-screen DOS box does on Windows 98, but for the
 //! Windows programs, which go on running there behind it. It shares
-//! DOS's drives and current directories with the Windows programs, so
-//! what the DOS program writes is there for them.
+//! DOS's drives with the Windows programs, so what the DOS program
+//! writes is there for them, and starts in the current directories of
+//! the program that started it (directories.rs).
 //!
 //! The rest of a virtual machine waits for later: the Windows programs
 //! running beside the DOS program, a window for it, and a first megabyte
@@ -48,7 +49,7 @@
 //! files are freed by DOS when it ends, and the screen is the desktop
 //! again, in its mode, with the mouse's range over it.
 
-use super::boot::Directories;
+use super::directories::{self, Directories};
 use super::realmode::{self, Frame, Kind};
 use super::{Context, EAX, EBX, EDX, ESP, ROM_SEG, object};
 use crate::cpu::{Cpu, CpuFlags};
@@ -611,7 +612,7 @@ pub fn ended(cpu: &mut Cpu, frame: Frame, rm: &Context) {
         let _ = crate::mcb::free(&mut cpu.bus, session.block);
     });
     cpu.current_psp = session.psp;
-    super::boot::put_back(cpu, session.directories);
+    directories::put_back(cpu, session.directories);
     session.machine.put_back(cpu);
     if !super::memory::Pool::take_back(&mut cpu.bus, *session.lent) {
         cpu.bus.log_string(&format!(

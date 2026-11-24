@@ -38,6 +38,7 @@
 //! restart adds its value again. A value that is gone when its turn
 //! comes doesn't run.
 
+use super::directories::Directories;
 use super::registry::{self, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use super::{kernel32, launcher};
 use crate::cpu::Cpu;
@@ -82,18 +83,6 @@ pub struct Boot {
 /// The W32 section's version that added ExitWindowsExec's command line.
 pub const EXIT_EXEC: u16 = 83;
 
-/// DOS's current drive and each drive's current directory, and the long
-/// names SetCurrentDirectoryA was given for them (`Win32::long_dirs`).
-/// The program DOS started gets them back after the commands, which run
-/// in the same DOS process: on Windows a command changes Explorer's
-/// directory for no other program. A DOS program a Windows program
-/// started gives them back too (dosvm.rs).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Directories {
-    current: (u8, Vec<(u8, String)>),
-    long: Vec<(String, String)>,
-}
-
 /// A command of a RunOnce key: the key, as `KEYS` has it, the value's
 /// name and its command line.
 #[derive(Clone, Debug, Default)]
@@ -127,16 +116,6 @@ pub fn session_starts(cpu: &mut Cpu) {
     cpu.bus.win32.boot.program = cpu.bus.win32.pending.take();
     cpu.bus.win32.boot.directories = Some(Directories::now(cpu));
     next(cpu);
-}
-
-impl Directories {
-    /// DOS's current drive and directories as they are now.
-    pub fn now(cpu: &Cpu) -> Directories {
-        Directories {
-            current: cpu.bus.disk.current_directories(),
-            long: cpu.bus.win32.long_dirs.clone(),
-        }
-    }
 }
 
 /// ExitWindowsEx ends the session with a restart.
@@ -209,22 +188,11 @@ pub fn next(cpu: &mut Cpu) -> bool {
         return false;
     };
     if let Some(directories) = cpu.bus.win32.boot.directories.take() {
-        put_back(cpu, directories);
+        super::directories::put_back(cpu, directories);
     }
     cpu.bus.win32.pending = Some(program);
     cpu.bus.win32.boot.command = false;
     true
-}
-
-/// Make `directories` DOS's current ones again, in its tables too.
-pub fn put_back(cpu: &mut Cpu, directories: Directories) {
-    cpu.bus.disk.set_current_directories(&directories.current);
-    cpu.bus.win32.long_dirs = directories.long;
-    super::dos(cpu, |cpu| {
-        for &(drive, _) in &directories.current.1 {
-            crate::dos_data::write_cds(&mut cpu.bus, drive);
-        }
-    });
 }
 
 /// Whether the program that starts is one of the boot's commands' rather
@@ -381,7 +349,6 @@ pub fn renames(text: &[u8]) -> Vec<(String, String)> {
 
 crate::state_fields!(Command { key, name, line });
 crate::state_fields!(Program { path, line, win16 });
-crate::state_fields!(Directories { current, long });
 crate::state_fields!(Boot {
     booted,
     restart,

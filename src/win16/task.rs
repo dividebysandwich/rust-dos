@@ -379,6 +379,9 @@ fn create_task(
             }
         }
     };
+    // It starts in the current directories of the program that starts
+    // it, which DOS has (win32/directories.rs).
+    let directories = crate::win32::directories::Directories::now(cpu);
     // Its process object, which its starters wait on.
     let win32 = &mut cpu.bus.win32;
     let process_id = if first {
@@ -416,6 +419,7 @@ fn create_task(
             .iter()
             .map(|&i| win32.win16.modules[i].handle)
             .collect(),
+        directories: crate::savestate::Since(Some(directories)),
     });
     cpu.bus.log_string(&format!(
         "[W16] Task {:04X} of {} starts at {:04X}:{:04X}, stack {:04X}:{:04X}",

@@ -217,6 +217,7 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
     let tid = win32.processes[p].threads[t].id;
     win32.preempted.retain(|&(id, _)| id != tid);
     crate::win16::task::entered(win32, tid);
+    let owner = super::directories::owner_of(win32, p, t);
     let process = &mut win32.processes[p];
     process.current = Some(t);
     let thread = &process.threads[t];
@@ -238,6 +239,7 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
         cpu.sse.mxcsr = mxcsr;
     }
     seh::set_debug_registers(cpu, &dr);
+    super::directories::switch(cpu, owner);
     super::system::enter_user(cpu, &ctx);
 }
 
