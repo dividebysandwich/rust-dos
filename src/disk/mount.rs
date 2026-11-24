@@ -628,6 +628,7 @@ impl DiskController {
             .collect();
         for sft in gone {
             self.open_files.remove(&sft);
+            self.forget_locks(sft);
             self.mark_dirty(sft);
         }
     }

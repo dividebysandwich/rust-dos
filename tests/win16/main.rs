@@ -14,6 +14,8 @@ mod win16_ddeml_tests;
 mod win16_drive_tests;
 mod win16_exec_tests;
 mod win16_hook_tests;
+mod win16_kernel_debug_tests;
+mod win16_lock_tests;
 mod win16_mmsystem_tests;
 mod win16_ole2_tests;
 mod win16_registry_tests;

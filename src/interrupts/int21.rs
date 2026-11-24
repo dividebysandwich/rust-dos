@@ -6,7 +6,7 @@ use iced_x86::Register;
 use super::utils::{pattern_to_fcb, read_asciiz_string, read_dta_template};
 use crate::audio::play_sdl_beep;
 use crate::cpu::{Cpu, CpuFlags, CpuState};
-use crate::disk::{CharDevice, DriveKind, parse_drive_prefix};
+use crate::disk::{CharDevice, DriveKind, LOCK_VIOLATION, parse_drive_prefix};
 use crate::diskio;
 use crate::disknoise::Access;
 use crate::dos_data;
@@ -82,6 +82,31 @@ fn is_shell_environment(cpu: &mut Cpu, segment: u16) -> bool {
 fn file_of(cpu: &mut Cpu, handle: u16) -> Option<u16> {
     let psp = cpu.current_psp;
     dos_files::sft_of(&mut cpu.bus, psp, handle)
+}
+
+/// Who the running code is to the locks of AH=5Ch: the running process,
+/// or in the built-in Windows the Win16 task, whose DOS calls all run in
+/// the process Windows runs in (disk/locks.rs).
+pub(crate) fn lock_owner(cpu: &Cpu) -> u32 {
+    match crate::win16::current_task(cpu) {
+        Some(task) => crate::disk::TASK_OWNER | cpu.bus.win32.win16.tasks[task].psp as u32,
+        None => cpu.current_psp as u32,
+    }
+}
+
+/// Whether a read (`write` false) or a write of `count` bytes at the
+/// position of the open file `sft` by the running code reaches bytes
+/// another's lock has (`DiskController::io_locked`). With no locks at
+/// all it asks nothing more.
+fn sft_locked(cpu: &Cpu, sft: u16, count: u32, write: bool) -> bool {
+    cpu.bus.disk.has_locks() && cpu.bus.disk.io_locked(sft, lock_owner(cpu), count, write)
+}
+
+/// `sft_locked` for handle `handle` of the running process: false for a
+/// handle that refers to nothing.
+pub(crate) fn handle_locked(cpu: &mut Cpu, handle: u16, count: u32, write: bool) -> bool {
+    cpu.bus.disk.has_locks()
+        && file_of(cpu, handle).is_some_and(|sft| sft_locked(cpu, sft, count, write))
 }
 
 /// A handle of the running process for the file just opened at `sft`.
@@ -1678,6 +1703,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 cpu.bus.guest_write_bytes(buf_addr, &taken);
                 cpu.set_ax(taken.len() as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
+            } else if sft_locked(cpu, sft, count as u32, false) {
+                // Another's lock has some of the bytes. SHARE asks INT 24h
+                // first for a file opened in compatibility mode; Fail, what
+                // Windows answers for its programs, comes to this.
+                set_result(cpu, Err(LOCK_VIOLATION));
             } else {
                 match read_open_file(cpu, sft, count) {
                     Ok(bytes) => {
@@ -1711,6 +1741,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let Some(sft) = file_of(cpu, handle) else {
                 return set_result(cpu, Err(0x06));
             };
+            // Another's lock has some of the bytes, as with a read.
+            if sft_locked(cpu, sft, count as u32, true) {
+                return set_result(cpu, Err(LOCK_VIOLATION));
+            }
             // Handles 1 and 2 are the screen unless the command line
             // redirected them.
             let console = cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con);
@@ -2486,6 +2520,34 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 file_io(cpu, sft, diskio::CREATE_BYTES, None);
             }
             set_result(cpu, result.map(|(_, handle)| handle));
+        }
+
+        // AH = 5Ch: lock (AL=00h) or unlock (AL=01h) the SI:DI bytes from
+        // offset CX:DX of handle BX's file, as SHARE does and Windows 95's
+        // VSHARE, which is always there (disk/locks.rs). MS-DOS checks AL
+        // before the handle. Btrieve for Windows locks bytes past the end
+        // of its files to tell other programs it has them open.
+        0x5C => {
+            let al = cpu.get_al();
+            if al > 0x01 {
+                return set_result(cpu, Err(0x01));
+            }
+            let Some(sft) = file_of(cpu, cpu.bx()) else {
+                return set_result(cpu, Err(0x06));
+            };
+            let offset = (cpu.cx() as u32) << 16 | cpu.dx() as u32;
+            let len = (cpu.si() as u32) << 16 | cpu.di() as u32;
+            let owner = lock_owner(cpu);
+            let disk = &mut cpu.bus.disk;
+            let result = if al == 0x00 {
+                disk.lock_region(sft, owner, offset, len)
+            } else {
+                disk.unlock_region(sft, owner, offset, len)
+            };
+            match result {
+                Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
+                Err(code) => set_result(cpu, Err(code)),
+            }
         }
 
         // AX = 5F07h, 5F08h: enable and disable drive DL (DOS 5+), which

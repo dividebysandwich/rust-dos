@@ -23,12 +23,13 @@ const SOUND_LOADS: [u16; 2] = [4, SOUND_VERSION];
 const DOS_VERSION: u16 = 6;
 const CD_HEAD_VERSION: u16 = 1;
 const VCPI_VERSION: u16 = 1;
+const LOCK_VERSION: u16 = 1;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 87;
+const WIN32_VERSION: u16 = 88;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -47,10 +48,11 @@ const WIN32_VERSION: u16 = 87;
 /// line (`boot::EXIT_EXEC`), 71's to 83's not the 16-bit OLE modules'
 /// state (`win16::ole2::OLE16`), 71's to 84's no DOS program a
 /// Windows program started (`dosvm::DOSVM_SAVED`), 85's not the folder
-/// it starts in (`dosvm::DOSVM_DIRECTORY`), and 71's to 86's no
-/// real-mode calls through VWIN32's DPMI dispatch
-/// (`realmode::Kind::Vxd`, which they load without).
-const WIN32_LOADS: [u16; 17] = [
+/// it starts in (`dosvm::DOSVM_DIRECTORY`), 71's to 86's no real-mode
+/// calls through VWIN32's DPMI dispatch (`realmode::Kind::Vxd`, which
+/// they load without), and 71's to 87's no 16-bit programs' multimedia
+/// timers (`winmm::timer::Action::Call16`, which they load without).
+const WIN32_LOADS: [u16; 18] = [
     71,
     72,
     73,
@@ -67,6 +69,7 @@ const WIN32_LOADS: [u16; 17] = [
     84,
     85,
     86,
+    87,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -392,6 +395,11 @@ impl Bus {
         // VCPI's, in a section of its own so states saved before it load
         // (with none of its pages handed out).
         w.section(b"VCPI", VCPI_VERSION, |w| vcpi.save(w));
+        // The locked ranges of open files (INT 21h AH=5Ch), only with any,
+        // so other states are as they were.
+        if !disk.locks().is_empty() {
+            w.section(b"LOCK", LOCK_VERSION, |w| disk.locks().to_vec().save(w));
+        }
         // The Ultrasound's memory first, where it stays in place for
         // rewind's deltas (rewind.rs) whatever the queues after it hold.
         w.section(b"SOUN", SOUND_VERSION, |w| {
@@ -829,6 +837,11 @@ impl Bus {
         } else {
             *vcpi = crate::vcpi::Vcpi::default();
         }
+        if r.next_is(b"LOCK") {
+            let mut locks = Vec::new();
+            locks.load(&mut r.section(b"LOCK", LOCK_VERSION)?)?;
+            disk.set_locks(locks);
+        }
         let mut section = r.section_of(b"SOUN", &SOUND_LOADS)?;
         load_device(gus, "Gravis Ultrasound", &mut section)?;
         load_all!(&mut section; opl, mpu, gus_line, tandy_sound);
@@ -1149,6 +1162,7 @@ mod tests {
         (85, 0xD065_06B4_D1EE_C645), // the DOS program a Windows program started
         (86, 0x64E2_699F_8225_8EB3), // the DOS program's folder and lent memory
         (87, 0x3CCD_B401_AB6D_F5EF), // real-mode calls through VWIN32's DPMI dispatch
+        (88, 0x0BDC_B050_4D43_8EE6), // 16-bit programs' multimedia timers
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
