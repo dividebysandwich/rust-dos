@@ -619,3 +619,96 @@ fn library_importing(name: &str, dll: &str) -> Vec<u8> {
     b.entry_point(text, 0);
     b.build()
 }
+
+/// USER's RegisterClass.
+const REGISTER_CLASS: u16 = 57;
+
+/// Where the class test keeps the library's instance and its WNDCLASS.
+const LIB: u16 = 0x20;
+const WNDCLASS: u16 = 0x40;
+
+/// `mov word [at],value`. Where `value` is, to patch.
+fn store_word(code: &mut Code, at: u16, value: u16) -> u16 {
+    let [a, b] = at.to_le_bytes();
+    let [v, w] = value.to_le_bytes();
+    let operand = code.here() + 4;
+    code.emit(&[0xC7, 0x06, a, b, v, w]);
+    operand
+}
+
+/// `mov [at],cs`.
+fn store_cs(code: &mut Code, at: u16) {
+    let [a, b] = at.to_le_bytes();
+    code.emit(&[0x8C, 0x0E, a, b]);
+}
+
+/// Code that registers a class for the instance in [LIB], with its
+/// WNDCLASS at WNDCLASS: the atom in AX. Where the offsets of its window
+/// procedure and its name (both in the code segment) go, to patch.
+fn register_class(code: &mut Code) -> (u16, u16) {
+    store_word(code, WNDCLASS, 0); // style
+    let proc = store_word(code, WNDCLASS + 2, 0);
+    store_cs(code, WNDCLASS + 4);
+    store_word(code, WNDCLASS + 6, 0); // cbClsExtra
+    store_word(code, WNDCLASS + 8, 0); // cbWndExtra
+    let [a, b] = LIB.to_le_bytes();
+    code.emit(&[0xA1, a, b]); // mov ax,[LIB]
+    let [a, b] = (WNDCLASS + 10).to_le_bytes();
+    code.emit(&[0xA3, a, b]); // mov [hInstance],ax
+    for at in [12, 14, 16, 18, 20] {
+        store_word(code, WNDCLASS + at, 0); // icon, cursor, brush, menu
+    }
+    let name = store_word(code, WNDCLASS + 22, 0);
+    store_cs(code, WNDCLASS + 24);
+    code.emit(&[0x1E])
+        .push(WNDCLASS)
+        .call("USER", REGISTER_CLASS);
+    (proc, name)
+}
+
+/// Windows 3.1 frees a module's window classes with the module. A class
+/// registered for a library's instance goes when FreeLibrary frees the
+/// library, so the library loaded again registers its class again. A
+/// class left behind kept the name, and the new instance could be the
+/// old one's: its RegisterClass failed and its windows got the old
+/// class, with a window procedure in code that had gone (Memphis Math's
+/// MMAP after STORYBRD). The program ends with 1 if the first
+/// RegisterClass fails, 2 if the second does, else with 0.
+#[test]
+fn a_freed_librarys_classes_go_with_it() {
+    let mut code = Code::new();
+    let mut paths = Vec::new();
+    let mut operands = Vec::new();
+    for fail in [1u8, 2] {
+        paths.push(code.here() + 2);
+        code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+        let [a, b] = LIB.to_le_bytes();
+        code.emit(&[0xA3, a, b]); // mov [LIB],ax
+        operands.push(register_class(&mut code));
+        code.emit(&[0x85, 0xC0]) // test ax,ax
+            .emit(&[0x75, 0x06]) // jnz over the exit
+            .emit(&[0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21]);
+        if fail == 1 {
+            code.emit(&[0xFF, 0x36, a, b]) // push word [LIB]
+                .call("KERNEL", FREE_LIBRARY);
+        }
+    }
+    code.emit(&[0xB0, 0x00]).exit_al();
+    let proc = code.here();
+    code.emit(&[0x33, 0xC0, 0x99, 0xCA, 0x0A, 0x00]); // xor ax,ax; cwd; retf 10
+    let name = code.here();
+    code.emit(b"MINE\0");
+    let path = code.here();
+    code.emit(b"C:\\LIB.DLL\0");
+    for at in paths {
+        code.patch(at, path);
+    }
+    for (proc_at, name_at) in operands {
+        code.patch(proc_at, proc);
+        code.patch(name_at, name);
+    }
+    let (exit, log) = run_with("freed_classes", program(&code, CODE), |_, base| {
+        fs::write(base.join("LIB.DLL"), library("LIB")).unwrap();
+    });
+    assert_eq!(exit, 0, "{log}");
+}

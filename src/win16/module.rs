@@ -852,6 +852,7 @@ fn unload(cpu: &mut Cpu, index: usize) {
     }
     if m.resources32 != 0 {
         let pid = cpu.bus.win32.win16.pid;
+        crate::win32::user32::class::module_freed(cpu, pid, m.resources32);
         super::with_win16(cpu, pid, |p, bus| {
             p.memory.release_region(bus, m.resources32);
             p.modules.retain(|x| x.base != m.resources32);
