@@ -1178,7 +1178,10 @@ fn get_module_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let at = super::linear(cpu, args[0]);
     let bytes = super::string_bytes(cpu, at, 0x1_0000);
-    crate::idle::reads_also(cpu, at, bytes.len() as u32 + 1);
+    // A selector that isn't there gives no address, and nothing is read.
+    if at != 0 {
+        crate::idle::reads_also(cpu, at, bytes.len() as u32 + 1);
+    }
     let name = crate::dosstr::from_bytes(&bytes);
     let base = name
         .rsplit(['\\', '/', ':'])

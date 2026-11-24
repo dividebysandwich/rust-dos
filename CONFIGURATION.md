@@ -812,9 +812,9 @@ limit, so without a connection it goes on as it would with one:
   tell the passes apart (it reads no device but the video card's status,
   whose bits it looks at only through a mask, and the PIT's count, and
   calls no service of the built-in Windows but the clocks, PeekMessage
-  and those that only read what Windows keeps, such as GetActiveWindow
-  or GetModuleUsage), so programs see the same as without it. `false`
-  runs every pass.
+  and others that change nothing but the program's memory and registers,
+  such as GetActiveWindow, GetModuleUsage or KERNEL's Catch), so programs
+  see the same as without it. `false` runs every pass.
 * `idle_hint=true` lets Windows' own idle calls wait for the next timer
   event, as a halted CPU does: Windows 3.1's idle loop in 386 enhanced
   mode (its VMPOLL device calling out, and the kernel's idle call), which
