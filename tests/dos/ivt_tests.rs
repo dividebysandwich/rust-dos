@@ -1,4 +1,6 @@
 use rust_dos::cpu::{Cpu, SHELL_SEGMENT};
+use rust_dos::exec::{self, ExecHook};
+use rust_dos::shell;
 use std::fs;
 use std::path::PathBuf;
 
@@ -58,6 +60,57 @@ fn int_1_3_and_4_point_at_an_iret_in_segment_0070_as_in_ms_dos() {
     let psp = cpu.current_psp;
     run_to_hlt(&mut cpu, psp);
     assert_eq!(cpu.ax(), 0x1234);
+}
+
+/// Where the shell was each time it took a command line to run.
+struct ShellAt(Vec<(u16, u16)>);
+
+impl ExecHook for ShellAt {
+    fn before_exec(&mut self, _cpu: &Cpu, _phys_ip: usize, _ram: &[u8]) -> bool {
+        false
+    }
+
+    fn before_shell(&mut self, cpu: &Cpu) -> bool {
+        self.0.push((cpu.cs(), cpu.ip()));
+        false
+    }
+}
+
+#[test]
+fn a_handler_at_the_iret_is_not_the_shell() {
+    // A resident program's handler can reach the IRET while the shell
+    // waits at its prompt: an INT 3 or INTO in a timer hook, or code
+    // traced with TF. It runs in the shell's segment, but the shell must
+    // not take a batch line there: the line would run inside the handler,
+    // which would never return or send its EOI.
+    let base = scratch("not_the_shell", &[]);
+    let mut cpu = Cpu::new(base);
+    cpu.bus.set_cycles_per_ms(1000);
+    cpu.load_shell();
+    let at_shell = (cpu.cs(), cpu.ip());
+    // The handler, INT 3 and IRET, entered as an interrupt would be
+    // before the shell's first instruction.
+    let handler = 0x9000;
+    cpu.bus.write_8(handler * 16, 0xCC);
+    cpu.bus.write_8(handler * 16 + 1, 0xCF);
+    cpu.push(cpu.flags16());
+    cpu.push(at_shell.0);
+    cpu.push(at_shell.1);
+    cpu.set_cs(handler as u16);
+    cpu.set_ip(0);
+    cpu.queue_batch_lines(["REM"]);
+
+    cpu.step();
+    assert_eq!((cpu.cs(), cpu.ip()), (SHELL_SEGMENT, shell::labels().int_iret));
+    assert!(!cpu.in_shell_code());
+    assert!(!cpu.at_shell_prompt());
+    assert!(!cpu.shell_idle());
+
+    // The line waits until the handler has returned to the shell.
+    let mut hook = ShellAt(Vec::new());
+    cpu.bus.start_batch(cpu.bus.clock.icount + 100);
+    exec::run_batch(&mut cpu, &mut hook, true);
+    assert_eq!(hook.0.first(), Some(&at_shell));
 }
 
 #[test]
