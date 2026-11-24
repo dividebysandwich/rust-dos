@@ -426,8 +426,7 @@ fn a_program_starts_a_dos_program_and_sees_what_it_wrote() {
     assert_eq!(&written[2..], b" /X");
 }
 
-/// KERNEL's Yield and GetModuleUsage.
-const YIELD: u16 = 29;
+/// KERNEL's GetModuleUsage.
 const GET_MODULE_USAGE: u16 = 48;
 
 #[test]
@@ -698,9 +697,7 @@ fn library_importing(name: &str, dll: &str) -> Vec<u8> {
     b.build()
 }
 
-/// KERNEL's GetModuleUsage, and USER's CreateWindow, RegisterClass and
-/// DefWindowProc.
-const GET_MODULE_USAGE: u16 = 48;
+/// USER's CreateWindow, RegisterClass and DefWindowProc.
 const CREATE_WINDOW: u16 = 41;
 const REGISTER_CLASS: u16 = 57;
 const DEF_WINDOW_PROC: u16 = 107;
