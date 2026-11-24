@@ -932,7 +932,9 @@ fn riff_chunks(data: &[u8], from: usize, end: usize) -> Vec<(u32, usize, usize)>
     let word = |o: usize| u32::from_le_bytes(data[o..o + 4].try_into().unwrap());
     let mut chunks = Vec::new();
     let mut o = from;
-    while o + 8 <= end {
+    // `o` saturates past a chunk whose length runs off the end; on a
+    // 32-bit host (the web build) `o + 8` would then overflow.
+    while end.saturating_sub(o) >= 8 {
         let (id, len) = (word(o), word(o + 4) as usize);
         let body = o + 8;
         chunks.push((id, body, body.saturating_add(len).min(end)));
