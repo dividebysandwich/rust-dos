@@ -2487,15 +2487,26 @@ impl AutoSpeed {
     /// A real-mode program with frames goes no faster than its CPU model
     /// ran (`real_most`, see `search`), also where the search keeps the
     /// speed it had: one that comes to its frames from all the host has,
-    /// after loading, goes down to it at once.
+    /// after loading, goes down to it with the first measurement that
+    /// counts them. The frames it draws before that, while the loading
+    /// boost lasts, still get all the host has (#1820).
     pub fn decide(&mut self, current: u32, m: &Measurement, protected: bool, host_max: u32) -> u32 {
         let next = self.search(current, m, protected, host_max);
-        match self.real_most {
-            Some(most) if !protected && m.fps.is_some() => {
-                next.min(most.max(self.least(protected, host_max)))
-            }
-            _ => next,
-        }
+        self.real_top(m, protected).map_or(next, |most| next.min(most))
+    }
+
+    /// The most `decide` goes to for the CPU model (`real_most`): only a
+    /// real-mode program's frames have one, and it is never under the
+    /// real-mode speed `auto` was given. The least speed a step for
+    /// evenness found (`even_at`) doesn't raise it: one found on a faster
+    /// model, before the settings window changed it, would take the
+    /// program past what its CPU ran. Real mode is `protected` false
+    /// (`Cpu::pm_latched`), so a game in virtual-8086 mode under a booted
+    /// DOS's EMM386 counts as protected and has no most yet (#1822).
+    fn real_top(&self, m: &Measurement, protected: bool) -> Option<u32> {
+        self.real_most
+            .filter(|_| !protected && m.fps.is_some())
+            .map(|most| most.max(self.base))
     }
 
     /// `decide`'s search, before the CPU model's most for real mode.
@@ -2633,10 +2644,8 @@ impl AutoSpeed {
         // Ultimate Domain divides by the count, and on a 486 its map went
         // to 108,668 and crashed (#1813). Without frames the program loads
         // (`loading`) or keeps the real-mode speed, as above.
-        let real_most = self.real_most.filter(|_| !protected && m.fps.is_some());
-        let host_top = real_most.map_or(top, |most| {
-            top.min(most.max(self.least(protected, host_max)))
-        });
+        let real_most = self.real_top(m, protected);
+        let host_top = real_most.map_or(top, |most| top.min(most));
         let have = self.lagged.map_or(have, |(most, _)| most.min(have));
         let have = real_most.map_or(have, |most| have.min(most));
         // Frames nobody sees at the speed a step for evenness found, or
@@ -5250,13 +5259,31 @@ mod tests {
         assert_eq!(crate::cpu::CpuModel::Pentium.auto_real_most(), None);
 
         // Loading without frames still gets all the host has, and the
-        // frames after it go down to the model's speed at once.
+        // first measurement of the frames after it goes down to the
+        // model's speed.
         let doing = |io| Measurement { io, ..STILL };
         let mut auto = AutoSpeed::new(3000, None);
         auto.set_real_most(most);
         auto.decide(3000, &doing(363_698.0), false, HOST);
         assert_eq!(auto.decide(3000, &doing(77_304.0), false, HOST), HOST);
         assert!(auto.decide(HOST, &map(HOST), false, HOST) <= 52_800);
+        // A least speed for evenness (`even_at`) found on a faster model
+        // doesn't raise the most either. The settings window changes the
+        // model while the program runs, and a hold (`Step::Hold`) keeps
+        // the speed the search had.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.even_at = Some(90_000);
+        auto.step = Step::Hold {
+            fps: f64::NAN,
+            left: HOLD_WINDOWS,
+            more: false,
+            recent: f64::NAN,
+            seen: 0,
+            dipped: 0,
+        };
+        assert_eq!(auto.clone().decide(90_000, &map(90_000), false, HOST), 90_000);
+        auto.set_real_most(most);
+        assert_eq!(auto.decide(90_000, &map(90_000), false, HOST), 52_800);
         // A search started afresh keeps the model's most.
         assert_eq!(auto.with(3000, None).real_most, most);
     }
