@@ -997,9 +997,8 @@ fn callback_functions_are_not_called_inside_each_other() {
     // MM_MOM_DONE of an earlier one, isn't called again before it
     // returns: the MM_MOM_DONE of its own message comes after it
     // returns, and still before the program's midiOutLongMsg returns.
-    // A timer's function that calls such a function isn't called inside
-    // itself either. Exit code 1, 5 for MM_MOM_DONEs that didn't come,
-    // 6 for calls inside each other, or the call that failed.
+    // Exit code 1, 5 for MM_MOM_DONEs that didn't come, 6 for calls
+    // inside each other, or the call that failed.
     let mut code = Code::new();
     for at in [DEPTH, MAX_DEPTH, DONES] {
         set(&mut code, at, 0);
