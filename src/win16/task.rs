@@ -965,9 +965,18 @@ pub fn then(_: &mut Cpu, _: u32, _: &[u32], ctx: &mut Context) -> Option<u32> {
     Some(ctx.gpr[EAX])
 }
 
+/// What `exec` started: the instance the caller gets (33 for a Win32 or
+/// DOS program), and the new task's thread when it is a Windows 3.1
+/// program's.
+pub struct Started {
+    pub instance: u16,
+    pub thread: Option<u32>,
+}
+
 /// WinExec and EXEC from the running task: the program at `path` as a
-/// new task. Its instance, or the error below 32 Windows gives.
-pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16, u16> {
+/// new task. What it started, or the error below 32 Windows gives. The
+/// caller then lets a new task run first (`after_exec`).
+pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<Started, u16> {
     let parent = super::current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].handle);
     let environment = super::win16_ref(cpu).map_or(Vec::new(), |p| p.environment.clone());
     let path = if path.contains('.') {
@@ -993,23 +1002,54 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
     // A DOS program starts in a DOS machine, as CreateProcessA starts
     // one (win32/dosvm.rs).
     if pe::is_pe(&file) || crate::win32::dosvm::is_program(&path, &file) {
-        return exec_win32(cpu, &path, arguments, show, environment);
+        let instance = exec_win32(cpu, &path, arguments, show, environment)?;
+        return Ok(Started {
+            instance,
+            thread: None,
+        });
     }
     match spawn(cpu, &path, arguments, show, parent, environment) {
-        Ok(spawned) => Ok(cpu
-            .bus
-            .win32
-            .win16
-            .tasks
-            .iter()
-            .find(|t| t.handle == spawned.task)
-            .map_or(0, |t| t.instance)),
+        Ok(spawned) => Ok(Started {
+            instance: cpu
+                .bus
+                .win32
+                .win16
+                .tasks
+                .iter()
+                .find(|t| t.handle == spawned.task)
+                .map_or(0, |t| t.instance),
+            thread: Some(spawned.thread.1),
+        }),
         Err(message) => {
             cpu.bus
                 .log_string(&format!("[W16] {} can't start: {}", path, message));
             Err(if message.contains("memory") { 8 } else { 11 })
         }
     }
+}
+
+/// The running task goes on at `ctx`, which holds what `exec` gives it,
+/// after starting `started`. A new task runs first: Windows 3.1's
+/// LoadModule gives it a DirectedYield and returns only when it yields
+/// back, so the new program's startup code and WinMain run until it
+/// first waits for a message or yields. A program may count on that: it
+/// sends a program it just started a message at once, and that program
+/// has to have registered itself somewhere before (Memphis Math's
+/// MEMPHIS starts MMAP and then shows it through MCLIB.DLL, which posts
+/// the show command to the task MMAP put in MCLIB's table as it
+/// started). True when the task gave up its turn, so that `ctx` goes on
+/// later; false when it goes on now.
+pub fn after_exec(cpu: &mut Cpu, ctx: Context, started: &Started) -> bool {
+    let Some(to) = started.thread else {
+        return false;
+    };
+    let from = crate::win32::user32::current_tid(cpu);
+    if from == to || !both_tasks(&cpu.bus.win32, from, to) {
+        return false;
+    }
+    hand_turn(&mut cpu.bus.win32, from, to);
+    yield_now(cpu, ctx);
+    true
 }
 
 /// `exec` of the Win32 or DOS program at `path`: as on Windows 98, a

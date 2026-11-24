@@ -1240,10 +1240,26 @@ fn win_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Some(n) => (&line[..n], line[n..].trim_start()),
         None => (line, ""),
     };
-    Some(match task::exec(cpu, path, arguments, args[1] as u16) {
-        Ok(instance) => instance as u32,
-        Err(code) => code as u32,
-    })
+    let started = task::exec(cpu, path, arguments, args[1] as u16);
+    exec_result(cpu, started)
+}
+
+/// What WinExec and LoadModule give: the instance, or the error below
+/// 32. A task they started runs first, and the caller gets the instance
+/// when the new task yields (`task::after_exec`).
+fn exec_result(cpu: &mut Cpu, started: Result<task::Started, u16>) -> Option<u32> {
+    match started {
+        Ok(started) => {
+            let mut ctx = Context::of(cpu);
+            thunk::set_ax(&mut ctx, started.instance);
+            if task::after_exec(cpu, ctx, &started) {
+                None
+            } else {
+                Some(started.instance as u32)
+            }
+        }
+        Err(code) => Some(code as u32),
+    }
 }
 
 /// LoadModule(name, parameters): WinExec's, with the command tail and
@@ -1264,10 +1280,8 @@ fn load_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         1
     };
-    Some(match task::exec(cpu, &path, arguments.trim(), show) {
-        Ok(instance) => instance as u32,
-        Err(code) => code as u32,
-    })
+    let started = task::exec(cpu, &path, arguments.trim(), show);
+    exec_result(cpu, started)
 }
 
 // Resources.
