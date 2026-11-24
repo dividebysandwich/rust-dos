@@ -117,31 +117,48 @@ fn a_program_loaded_again_after_its_task_ended_runs_in_its_own_data_segment() {
     // first instance. It ends with 7 when DS is the selector its code
     // was relocated with for that segment, and with 9 when it was given
     // a copy of the segment, as the second instance of a module that is
-    // still running is.
+    // still running is. The program waits for the second CHILD to end
+    // too, and ends with 1 when the second WinExec gave an instance
+    // handle (32 or more), 3 when it gave an error.
     const GET_MODULE_HANDLE: u16 = 47;
     const YIELD: u16 = 29;
     let mut code = Code::new();
+    let mut names = Vec::new();
+    // Until GetModuleHandle("CHILD") gives 0, Yield.
+    let wait_for_child = |code: &mut Code, names: &mut Vec<u16>| {
+        let wait = code.here();
+        names.push(code.here() + 2);
+        code.push_far(0).call("KERNEL", GET_MODULE_HANDLE).emit(&[
+            0x0B, 0xC0, // or ax,ax
+            0x74, 0x07, // jz over the next two
+        ]);
+        code.call("KERNEL", YIELD);
+        let back = wait.wrapping_sub(code.here() + 2) as u8;
+        code.emit(&[0xEB, back]); // jmp wait
+    };
     let first_at = code.here() + 2;
     code.push_far(0).push(1).call("KERNEL", WIN_EXEC);
-    let wait = code.here();
-    let name_at = code.here() + 2;
-    code.push_far(0).call("KERNEL", GET_MODULE_HANDLE).emit(&[
-        0x0B, 0xC0, // or ax,ax
-        0x74, 0x07, // jz over the next two
-    ]);
-    code.call("KERNEL", YIELD);
-    let back = wait.wrapping_sub(code.here() + 2) as u8;
-    code.emit(&[0xEB, back]); // jmp wait
+    wait_for_child(&mut code, &mut names);
     let second_at = code.here() + 2;
     code.push_far(0).push(1).call("KERNEL", WIN_EXEC);
-    code.emit(&[0xB0, 0x01]).exit_al(); // mov al,1
+    code.emit(&[0x8B, 0xF0]); // mov si,ax
+    wait_for_child(&mut code, &mut names);
+    code.emit(&[
+        0x83, 0xFE, 0x20, // cmp si,32
+        0xB0, 0x01, // mov al,1
+        0x73, 0x02, // jae over the next
+        0xB0, 0x03, // mov al,3
+    ])
+    .exit_al();
     let path = code.here();
     code.emit(b"C:\\CHILD.EXE\0");
     code.patch(first_at, path);
     code.patch(second_at, path);
     let name = code.here();
     code.emit(b"CHILD\0");
-    code.patch(name_at, name);
+    for at in names {
+        code.patch(at, name);
+    }
 
     let mut child = Code::new();
     child
@@ -166,7 +183,8 @@ fn a_program_loaded_again_after_its_task_ended_runs_in_its_own_data_segment() {
     let (exit, log) = run_with("reloaded_module_data", program(&code, CODE), |_, base| {
         fs::write(base.join("CHILD.EXE"), child).unwrap();
     });
-    // The second CHILD has the first one's handles, which the fault needs.
+    // The second CHILD has the first one's handles, without which a copy
+    // of its data segment can't be taken for the first's.
     let loads: Vec<&str> = log
         .lines()
         .filter(|l| l.contains("Loaded CHILD"))
@@ -174,7 +192,15 @@ fn a_program_loaded_again_after_its_task_ended_runs_in_its_own_data_segment() {
         .collect();
     assert_eq!(loads.len(), 2, "{log}");
     assert_eq!(loads[0], loads[1], "{log}");
-    assert_eq!(exit, 7, "{log}");
+    let ends: Vec<&str> = log
+        .lines()
+        .filter(|l| l.starts_with("[W16] Task") && l.contains("ended with exit code"))
+        .map(|l| l.rsplit(' ').next().unwrap_or(""))
+        .collect();
+    // Both CHILDs, then the program.
+    assert_eq!(ends.len(), 3, "{log}");
+    assert_eq!(ends[1], "7", "{log}");
+    assert_eq!(exit, 1, "{log}");
 }
 
 /// A Win32 program whose entry point returns `code`, its exit code.

@@ -1195,15 +1195,8 @@ fn enum_child_windows(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn enum_task_windows(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let task = args[0] as u16;
-    let tid = cpu
-        .bus
-        .win32
-        .win16
-        .tasks
-        .iter()
-        .find(|t| t.handle == task)
-        .map_or(0, |t| t.tid);
+    let win16 = &cpu.bus.win32.win16;
+    let tid = super::live_task(win16, args[0] as u16).map_or(0, |t| win16.tasks[t].tid);
     let proc = thunk::proc32(cpu, args[1], KIND_PLAIN, ENUM_PROC);
     go(cpu, "EnumThreadWindows", &[tid, proc, args[2]])
 }
@@ -1615,15 +1608,8 @@ fn call_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn post_app_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let task = args[0] as u16;
-    let tid = cpu
-        .bus
-        .win32
-        .win16
-        .tasks
-        .iter()
-        .find(|t| t.handle == task)
-        .map_or(0, |t| t.tid);
+    let win16 = &cpu.bus.win32.win16;
+    let tid = super::live_task(win16, args[0] as u16).map_or(0, |t| win16.tasks[t].tid);
     go(cpu, "PostThreadMessageA", &[tid, args[1], args[2], args[3]])
 }
 

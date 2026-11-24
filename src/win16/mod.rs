@@ -365,6 +365,16 @@ pub fn current_task(cpu: &Cpu) -> Option<usize> {
     cpu.bus.win32.win16.tasks.iter().position(|t| t.tid == tid)
 }
 
+/// The task whose handle is `handle`, if it hasn't ended. The tasks that
+/// ended stay in the list with the handle of their task database, which
+/// was freed at their end and which a task started later may get.
+pub fn live_task(win16: &State, handle: u16) -> Option<usize> {
+    win16
+        .tasks
+        .iter()
+        .position(|t| handle != 0 && t.handle == handle && t.exit_code.is_none())
+}
+
 /// The running task's switches between 16-bit and 32-bit code: the
 /// contexts that go on when the code called returns, which the registers
 /// don't show (`Cpu::idle_key`). Empty outside a Win16 task.

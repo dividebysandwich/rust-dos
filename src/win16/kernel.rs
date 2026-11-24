@@ -787,14 +787,8 @@ fn directed_yield(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// The running task hands the next turn to the task whose handle is
 /// `handle`, if that task hasn't ended (task::hand_turn).
 fn direct_turn(cpu: &mut Cpu, handle: u16) {
-    let to = cpu
-        .bus
-        .win32
-        .win16
-        .tasks
-        .iter()
-        .find(|t| t.handle == handle && t.exit_code.is_none())
-        .map(|t| t.tid);
+    let win16 = &cpu.bus.win32.win16;
+    let to = super::live_task(win16, handle).map(|t| win16.tasks[t].tid);
     let from = crate::win32::user32::current_tid(cpu);
     if let Some(to) = to {
         task::hand_turn(&mut cpu.bus.win32, from, to);
@@ -841,14 +835,7 @@ fn get_num_tasks(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 fn is_task(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let h = args[0] as u16;
-    Some(
-        cpu.bus
-            .win32
-            .win16
-            .tasks
-            .iter()
-            .any(|t| t.exit_code.is_none() && t.handle == h && h != 0) as u32,
-    )
+    Some(super::live_task(&cpu.bus.win32.win16, h).is_some() as u32)
 }
 
 fn get_task_ds(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -1214,8 +1201,9 @@ fn get_proc_address(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// GetExePtr(handle): the module of an instance, a task or a module.
 fn get_exe_ptr(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let h = args[0] as u16;
-    if let Some(t) = cpu.bus.win32.win16.tasks.iter().find(|t| t.handle == h) {
-        return Some(t.module as u32);
+    let win16 = &cpu.bus.win32.win16;
+    if let Some(t) = super::live_task(win16, h) {
+        return Some(win16.tasks[t].module as u32);
     }
     let index = super::module_index(cpu, h);
     Some(index.map_or(0, |i| cpu.bus.win32.win16.modules[i].handle) as u32)

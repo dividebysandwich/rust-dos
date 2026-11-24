@@ -1000,14 +1000,10 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
         return exec_win32(cpu, &path, arguments, show, environment);
     }
     match spawn(cpu, &path, arguments, show, parent, environment) {
-        Ok(spawned) => Ok(cpu
-            .bus
-            .win32
-            .win16
-            .tasks
-            .iter()
-            .find(|t| t.handle == spawned.task)
-            .map_or(0, |t| t.instance)),
+        Ok(spawned) => {
+            let win16 = &cpu.bus.win32.win16;
+            Ok(super::live_task(win16, spawned.task).map_or(0, |t| win16.tasks[t].instance))
+        }
         Err(message) => {
             cpu.bus
                 .log_string(&format!("[W16] {} can't start: {}", path, message));

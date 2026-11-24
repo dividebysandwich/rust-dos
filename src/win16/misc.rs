@@ -1486,14 +1486,8 @@ fn callback16(cpu: &Cpu, callback: u32, flags: u32, opens: bool) -> (u32, u32, u
     let callback = match flags & CALLBACK_TYPEMASK {
         CALLBACK_WINDOW => callback & 0xFFFF,
         CALLBACK_TASK => {
-            let task = callback as u16;
-            cpu.bus
-                .win32
-                .win16
-                .tasks
-                .iter()
-                .find(|t| t.handle == task)
-                .map_or(0, |t| t.tid)
+            let win16 = &cpu.bus.win32.win16;
+            super::live_task(win16, callback as u16).map_or(0, |t| win16.tasks[t].tid)
         }
         _ => return (flags & !CALLBACK_TYPEMASK, 0, function),
     };
