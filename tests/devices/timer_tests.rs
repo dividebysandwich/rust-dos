@@ -381,6 +381,51 @@ fn bios_timer_handler_returns_with_the_interrupted_flags() {
     }
 }
 
+/// Whale's Voyage's music player hooks INT 1Ch with PUSHA, PUSH CS, POP
+/// DS ... POPA, IRET, and so returns with DS set to its own segment. The
+/// IBM AT's timer interrupt saves DS, AX and DX around INT 1Ch, so the
+/// code the tick interrupted gets its own back.
+#[test]
+fn bios_timer_handler_keeps_ds_ax_and_dx_across_int_1ch() {
+    use rust_dos::exec::{self, NoHook};
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    // INT 1Ch at 2000:0000: DS = CS, AX and DX zero, and a count of its
+    // calls at 2000:0100.
+    cpu.bus.load_bytes(
+        0x20000,
+        &[
+            0x0E, 0x1F, // PUSH CS; POP DS
+            0x31, 0xC0, // XOR AX, AX
+            0x31, 0xD2, // XOR DX, DX
+            0xFF, 0x06, 0x00, 0x01, // INC WORD [0100h]
+            0xCF, // IRET
+        ],
+    );
+    cpu.bus.write_16(0x1C * 4, 0x0000);
+    cpu.bus.write_16(0x1C * 4 + 2, 0x2000);
+    // The program the ticks interrupt: STI; JMP $ at 3000:0000.
+    cpu.bus.load_bytes(0x30000, &[0xFB, 0xEB, 0xFE]);
+    cpu.set_cs(0x3000);
+    cpu.set_ip(0);
+    cpu.set_ss(0x4000);
+    cpu.set_sp(0x1000);
+    cpu.set_ds(0x5000);
+    cpu.set_ax(0x1234);
+    cpu.set_dx(0x5678);
+    for _ in 0..1000 {
+        let end = cpu.bus.clock.icount + 10_000;
+        cpu.bus.start_batch(end);
+        exec::run_batch(&mut cpu, &mut NoHook, false);
+        if cpu.bus.read_16(0x20100) >= 2 && cpu.cs() == 0x3000 {
+            break;
+        }
+    }
+    assert!(cpu.bus.read_16(0x20100) >= 2, "INT 1Ch ran on the ticks");
+    assert_eq!(cpu.cs(), 0x3000, "back in the program");
+    assert_eq!((cpu.ds(), cpu.ax(), cpu.dx()), (0x5000, 0x1234, 0x5678));
+    assert_eq!(cpu.sp(), 0x1000, "the stack as it was");
+}
+
 #[test]
 fn shell_reload_resets_timer_and_pic() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
