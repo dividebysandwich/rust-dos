@@ -32,6 +32,8 @@ pub struct ShellLabels {
     pub shell_wait: u16,
     /// The key they waited for is handed over here, in AX.
     pub key_ready: u16,
+    /// An IRET, which INT 01h, 03h and 04h point at (`dos_iret`).
+    pub int_iret: u16,
 }
 
 /// A Tiny "OS" written in Machine Code, and its labels. Asks the emulator
@@ -88,12 +90,17 @@ fn assemble() -> (Vec<u8>, ShellLabels) {
     a.op(&[0xFE, 0x39, SERVICE_SHELL_KEY_READY]); // `key_ready`
     a.jump(0xEB, "PROMPT_START");
 
+    // The IRET that INT 01h, 03h and 04h point at (`dos_iret`).
+    a.label("INT_IRET");
+    a.op(&[0xCF]); // IRET
+
     let labels = ShellLabels {
         prompt_start: a.at("PROMPT_START"),
         key_read: a.at("KEY_READ"),
         after_trap: a.at("AFTER_TRAP"),
         shell_wait: a.at("SHELL_WAIT"),
         key_ready: a.at("KEY_READY"),
+        int_iret: a.at("INT_IRET"),
     };
     (a.finish(), labels)
 }
@@ -108,6 +115,17 @@ pub fn get_shell_code() -> Vec<u8> {
 /// Where the parts of the shell's code are.
 pub fn labels() -> ShellLabels {
     SHELL.get_or_init(assemble).1
+}
+
+/// Where the built-in DOS points INT 01h, 03h and 04h, as segment:offset:
+/// the IRET in the shell's code. MS-DOS's IO.SYS points them at an IRET
+/// in its own segment, 0070h (INTRET, in MSINIT.ASM of MS-DOS 4.0's
+/// source), which is the shell's segment here. A program that reads the
+/// vectors then finds 0070h as their segment, not the BIOS's F000h:
+/// Maelstrom takes INT 3's segment as the flags of a button it has no
+/// pointer to, and calls the button only while bit 4 of them is clear.
+pub fn dos_iret() -> u32 {
+    (crate::cpu::SHELL_SEGMENT as u32) << 16 | labels().int_iret as u32
 }
 
 /// INT 10h with these registers.

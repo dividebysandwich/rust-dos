@@ -201,6 +201,11 @@ pub fn default_ivt() -> [u32; 256] {
         ivt[vector as usize] = far(TRAP_BASE + 4 * i as u16);
     }
     ivt[0x08] = far(TIMER_HANDLER);
+    // The built-in DOS's IRET for INT 01h, 03h and 04h, in segment 0070h
+    // as MS-DOS's IO.SYS has it (`shell::dos_iret`).
+    for vector in [0x01, 0x03, 0x04] {
+        ivt[vector] = crate::shell::dos_iret();
+    }
     // The mouse driver's handler is in low memory, where a mouse driver's
     // resident code is. Its trap in the ROM stays, for save states and
     // programs that kept its address.
@@ -221,7 +226,9 @@ pub fn default_ivt() -> [u32; 256] {
 /// in the BIOS data area, and the fixed disk parameter tables.
 pub fn boot_ivt() -> [u32; 256] {
     let mut ivt = default_ivt();
-    for vector in [0x00, 0x20, 0x21, 0x23, 0x25, 0x26, 0x27, 0x29, 0x2F, 0x33, 0x67, 0x7A] {
+    for vector in [
+        0x00, 0x01, 0x03, 0x04, 0x20, 0x21, 0x23, 0x25, 0x26, 0x27, 0x29, 0x2F, 0x33, 0x67, 0x7A,
+    ] {
         ivt[vector] = far(IRET_HANDLER);
     }
     ivt[0x09] = far(KBD_HANDLER);
@@ -479,6 +486,11 @@ pub fn install(bus: &mut Bus) {
     write_rom(bus, 0xFFF5, b"01/10/92");
     set_machine_id(bus);
 
+    // The IRET INT 01h, 03h and 04h point at is in the shell's code, which
+    // the shell puts there again each time it loads; this one is for a
+    // program that runs before it does.
+    let dos_iret = crate::shell::dos_iret();
+    bus.write_8(((dos_iret >> 16) as usize) * 16 + (dos_iret as u16) as usize, 0xCF);
     write_ivt(bus, &default_ivt());
     // The video BIOS's VESA data.
     crate::interrupts::vbe::install_rom(bus);
