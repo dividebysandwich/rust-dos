@@ -398,7 +398,7 @@ what particular GOG games need besides.
 A game copied from a PC where it is installed:
 
 ```ini
-# games/rom2.conf
+# games/rage-of-mages-2.conf
 [game]
 name=Rage of Mages II
 windows=builtin
@@ -410,26 +410,27 @@ cpu=pentium_ii
 win32_version=98se
 
 [drives]
-C=~/games/rom2
+C=~/games/rage-of-mages-2
 
 [autoexec]
 C:
-CD \ROM2
+CD \RAGE2
 ALLODS2.EXE -1024
 ```
 
-Here `~/games/rom2` is drive C:, and the game's folder was copied into
-it as `~/games/rom2/ROM2`, so the game sees it as `C:\ROM2`, where it
-was installed. Games that read their folders or their CD's drive letter
-from the registry need those keys in `games/rom2.reg`, as REGEDIT4
-text, beside the profile:
+Here `~/games/rage-of-mages-2` is drive C:, and the game's folder was copied
+into it as `~/games/rage-of-mages-2/RAGE2`, so the game sees it as
+`C:\RAGE2`. Any folder name works: the game finds its folder through the
+registry, so the keys below name the same one. Games that read their folders
+or their CD's drive letter from the registry need those keys in
+`games/rage-of-mages-2.reg`, as REGEDIT4 text, beside the profile:
 
 ```
 REGEDIT4
 
 [HKEY_LOCAL_MACHINE\Software\Rage of Mages 2]
-"INSTALLDIR"="C:\\ROM2"
-"CD"="C:\\ROM2"
+"INSTALLDIR"="C:\\RAGE2"
+"CD"="C:\\RAGE2"
 ```
 
 See: [copying an installed game](CONFIGURATION.md#copying-an-installed-game),
