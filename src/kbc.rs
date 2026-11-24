@@ -109,6 +109,7 @@ impl Kbc {
             "pending_command": self.pending_command.map(|b| format!("{:02X}", b)),
             "pending_kbd": self.pending_kbd.map(|b| format!("{:02X}", b)),
             "irq": self.irq,
+            "typematic": format!("{:02X}", self.typematic),
             "aux_irq": self.aux_irq,
         })
     }
