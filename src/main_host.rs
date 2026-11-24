@@ -570,6 +570,7 @@ impl Host for MainHost<'_, '_> {
         self.cpu.bus.ide_hard_disks = new.ide_hard_disks;
         self.cpu.bus.boot_cdrom = new.boot_cdrom;
         self.cpu.bus.floppy_controller = new.floppy_controller;
+        self.cpu.bus.ansi_sys = new.ansi_sys;
         if new.dos_version != old.dos_version {
             rust_dos::dos_data::set_version(&mut self.cpu.bus, new.dos_version);
         }

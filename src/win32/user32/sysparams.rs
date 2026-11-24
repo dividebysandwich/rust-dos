@@ -336,6 +336,80 @@ pub fn program_keyboard(cpu: &mut Cpu) {
     cpu.bus.kbc.typematic = delay << 5 | (31 - speed);
 }
 
+/// The registry key Windows 95 and 98 keep the keyboard's speed and
+/// delay in, under HKEY_CURRENT_USER, as strings.
+const KEYBOARD_KEY: &str = r"Control Panel\Keyboard";
+
+/// The keyboard's speed and delay as SPI_SETKEYBOARDSPEED (11) and
+/// SPI_SETKEYBOARDDELAY (23) keep them, by their names in the registry
+/// and in WIN.INI, and the largest value each SET action takes. Only
+/// the speed has one: Wine's SPI_SETKEYBOARDSPEED takes a value over 31
+/// as 31, its SPI_SETKEYBOARDDELAY keeps any value, and
+/// SPI_GETKEYBOARDDELAY gives it back. `program_keyboard` gives the
+/// keyboard at most 3 either way.
+const KEYBOARD_SETTINGS: [(u32, &str, u32); 2] =
+    [(11, "KeyboardSpeed", 31), (23, "KeyboardDelay", u32::MAX)];
+
+/// Windows starts: the keyboard's speed and delay the user chose, which
+/// `program_keyboard` then gives the keyboard. Windows 95 and 98 read
+/// them from `HKEY_CURRENT_USER\Control Panel\Keyboard`, Windows 3.1
+/// from WIN.INI's `[windows]` section. Windows 95's setup moves the
+/// WIN.INI values into the registry; here nothing does, so a value the
+/// registry doesn't have comes from WIN.INI, where a Windows 3.1 setup
+/// put it, and then Windows' default. WIN.INI's values are read as
+/// Windows 3.1 reads them, with GetProfileInt; the registry's as Wine
+/// reads them, the digits at the start (wcstol), so text with none is
+/// 0. Both are kept as they are, out of range or not, as Wine keeps
+/// the registry's: SPI_GETKEYBOARDSPEED and SPI_GETKEYBOARDDELAY give
+/// them back, and `program_keyboard` takes a value over the largest as
+/// the largest.
+pub fn read_keyboard_settings(cpu: &mut Cpu) {
+    let hkcu = crate::win32::registry::HKEY_CURRENT_USER;
+    let registry = crate::win32::registry::string_values(cpu, &[(hkcu, KEYBOARD_KEY)]);
+    let registry = registry.into_iter().next().unwrap_or_default();
+    for (action, name, _) in KEYBOARD_SETTINGS {
+        let stored = registry
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, text)| {
+                let text = crate::dosstr::to_bytes(text.trim_start());
+                crate::win32::kernel32::parse_int(&text)
+            });
+        let value = stored.or_else(|| {
+            let key = name.as_bytes();
+            crate::win32::kernel32::profile_number(cpu, b"WIN.INI", b"windows", key)
+        });
+        match value {
+            Some(value) => set_param(cpu, action, value),
+            None => user(cpu).params.retain(|p| p.0 != action),
+        }
+    }
+}
+
+/// SPI_SETKEYBOARDSPEED or SPI_SETKEYBOARDDELAY (`action`) set the
+/// keyboard's speed or delay to `ui`, taking a speed over 31 as 31, and
+/// the keyboard repeats at the new rate. With
+/// SPIF_UPDATEINIFILE in `flags`, the value goes into the registry,
+/// where Windows 95 and 98 keep it and `read_keyboard_settings` finds
+/// it at the next start.
+fn set_keyboard_setting(cpu: &mut Cpu, action: u32, ui: u32, flags: u32) {
+    let Some(&(_, name, max)) = KEYBOARD_SETTINGS.iter().find(|s| s.0 == action) else {
+        return;
+    };
+    let value = ui.min(max);
+    set_param(cpu, action, value);
+    program_keyboard(cpu);
+    if flags & SPIF_UPDATEINIFILE != 0 {
+        let hkcu = crate::win32::registry::HKEY_CURRENT_USER;
+        let text = value.to_string();
+        crate::win32::registry::set_string_now(cpu, hkcu, KEYBOARD_KEY, name, &text);
+    }
+}
+
+/// SystemParametersInfo's flag that writes a SET action's value to where
+/// Windows reads it from when it starts.
+const SPIF_UPDATEINIFILE: u32 = 1;
+
 /// SystemParametersInfoA(action, ui, pv, flags).
 pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (action, ui, pv) = (args[0], args[1], args[2]);
@@ -398,10 +472,10 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             TRUE
         }
         // SPI_SETKEYBOARDSPEED and SPI_SETKEYBOARDDELAY: the keyboard
-        // repeats at the new rate.
+        // repeats at the new rate, and with SPIF_UPDATEINIFILE the
+        // registry keeps it for the next start.
         11 | 23 => {
-            set_param(cpu, action, ui);
-            program_keyboard(cpu);
+            set_keyboard_setting(cpu, action, ui, args[3]);
             TRUE
         }
         // SPI_GETMOUSEHOVERWIDTH, SPI_GETMOUSEHOVERHEIGHT and

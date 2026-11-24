@@ -175,6 +175,7 @@ pub(super) enum Item {
     Dpmi,
     /// The DOS version programs are told.
     DosVersion,
+    AnsiSys,
     /// A booted system's hard disks on the IDE channels.
     IdeHardDisks,
     /// A booted system's CD-ROM drive, with or without a CD.
@@ -274,6 +275,8 @@ pub(super) enum Item {
     TandySound,
     /// PIT channel 2's gate at startup (`pit2_gate_at_start`).
     Pit2GateAtStart,
+    /// The CMS chips in the SB 2.0's sockets (`cms`).
+    Cms,
     /// The configuration file's `[autoexec]` commands (autoexec.rs).
     Autoexec,
     /// The IPX driver, its IRQ and its frame type.
@@ -403,6 +406,7 @@ impl Item {
             DosHigh => "DOS high",
             Dpmi => "DPMI host",
             DosVersion => "Reported DOS version",
+            AnsiSys => "ANSI.SYS",
             IdeHardDisks => "IDE hard disks (BOOT)",
             BootCdrom => "CD-ROM drive (BOOT)",
             FloppyController => "Floppy controller (BOOT)",
@@ -466,6 +470,7 @@ impl Item {
             LptDac => "Parallel port DAC",
             TandySound => "Tandy/PCjr sound",
             Pit2GateAtStart => "Timer 2 gate at startup",
+            Cms => "CMS chips on the SB 2.0",
             Autoexec => "Edit the [autoexec] commands...",
             Ipx => "IPX driver",
             IpxIrq => "  IRQ",
@@ -635,6 +640,7 @@ impl Item {
                 s.machine.is_verite() && s.verite.risc == crate::verite::Risc::Lle
             }
             Item::Awe32Rom | Item::Awe32Ram => awe32(s),
+            Item::Cms => s.sound.sb_installed && s.sound.sb.model == crate::sb::SbModel::Sb2,
             // Until there is a ROM.
             Item::Awe32Download => awe32(s) && crate::awe32::rom::find(s.sound.awe32rom.as_deref()).is_none(),
             Item::Sc55Roms | Item::Sc55Model => s.sound.midisynth == MidiSynth::Sc55,
@@ -670,7 +676,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Vrr | FpsCap | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
+            Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | AnsiSys | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | ToadForceRenderer
             | ToadForceGamma
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooOverlay | PowerVrFilter => Applies::Now,
@@ -901,6 +907,7 @@ impl Item {
             DosHigh => on_off(s.dos_high),
             Dpmi => on_off(s.dpmi),
             DosVersion => s.dos_version.name(),
+            AnsiSys => on_off(s.ansi_sys),
             IdeHardDisks => on_off(s.ide_hard_disks),
             BootCdrom => if s.boot_cdrom { "always" } else { "with a CD" }.to_string(),
             FloppyController => on_off(s.floppy_controller),
@@ -919,6 +926,7 @@ impl Item {
             AlmanacFetch | AlmanacReport => String::new(),
             Rewind => on_off(s.rewind),
             RewindMemory => format!("{} MB", s.rewind_memory),
+            SbType if s.sound.game_blaster => "Game Blaster".to_string(),
             SbType if !s.sound.sb_installed => "none".to_string(),
             SbType => match sb.model {
                 SbModel::Sb16 => "SB16",
@@ -1027,6 +1035,7 @@ impl Item {
             LptDac => s.sound.lpt_dac.describe().to_string(),
             TandySound => s.sound.tandy.describe().to_string(),
             Pit2GateAtStart => on_off(s.sound.pit2_gate_at_start),
+            Cms => on_off(s.sound.cms),
             Autoexec | Rooms | Phonebook => String::new(),
             Ipx => match s.network.ipx {
                 crate::net::IpxMode::Auto => "auto (with LAN HOST or JOIN)",

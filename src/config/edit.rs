@@ -323,7 +323,7 @@ pub fn save(
     home: Option<&Path>,
     saving: Saving,
 ) -> Result<(), String> {
-    let original = read_or_template(path)?;
+    let (original, encoding) = read_or_template(path)?;
     let text = match saving {
         Saving::All => {
             let absolute = crate::hostfs::absolute(path).unwrap_or_else(|_| path.to_path_buf());
@@ -332,7 +332,7 @@ pub fn save(
         }
         Saving::Changes => update_text(&original, baseline, settings, drives, home),
     };
-    replace_file(path, &text)
+    replace_file(path, &encoding.encode(&text))
 }
 
 /// The lines of `text`'s `[autoexec]` sections as they are written,
@@ -395,22 +395,45 @@ pub fn with_autoexec(original: &str, autoexec: &[String]) -> String {
 /// The `[autoexec]` lines of the configuration file at `path` (see
 /// `autoexec_lines`), which has the template's text if it isn't there yet.
 pub fn load_autoexec(path: &Path) -> Result<Vec<String>, String> {
-    read_or_template(path).map(|text| autoexec_lines(&text))
+    read_or_template(path).map(|(text, _)| autoexec_lines(&text))
 }
 
 /// Make `autoexec` the `[autoexec]` section of the configuration file at
 /// `path` (see `load_autoexec`).
 pub fn save_autoexec(path: &Path, autoexec: &[String]) -> Result<(), String> {
-    let original = read_or_template(path)?;
-    replace_file(path, &with_autoexec(&original, autoexec))
+    let (original, encoding) = read_or_template(path)?;
+    replace_file(path, &encoding.encode(&with_autoexec(&original, autoexec)))
+}
+
+/// How a configuration file is written: UTF-8, or code page 437, as
+/// DOSBox's often are (`dosstr::decode_cp437`).
+#[derive(Clone, Copy)]
+enum Encoding {
+    Utf8,
+    Cp437,
+}
+
+impl Encoding {
+    /// `text` as the file's bytes, the encoding it was read in.
+    fn encode(self, text: &str) -> Vec<u8> {
+        match self {
+            Encoding::Utf8 => text.as_bytes().to_vec(),
+            Encoding::Cp437 => crate::dosstr::encode_cp437(text),
+        }
+    }
 }
 
 /// The text of the configuration file at `path`, or the template's if it
-/// isn't there yet.
-fn read_or_template(path: &Path) -> Result<String, String> {
-    match crate::hostfs::read_to_string(path) {
-        Ok(text) => Ok(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TEMPLATE.to_string()),
+/// isn't there yet, and the encoding to write it back in.
+fn read_or_template(path: &Path) -> Result<(String, Encoding), String> {
+    match crate::hostfs::read(path) {
+        Ok(bytes) => Ok(match String::from_utf8(bytes) {
+            Ok(text) => (text, Encoding::Utf8),
+            Err(e) => (crate::dosstr::decode_cp437(e.as_bytes()), Encoding::Cp437),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok((TEMPLATE.to_string(), Encoding::Utf8))
+        }
         Err(e) => Err(format!("cannot read {}: {}", path.display(), e)),
     }
 }
@@ -418,7 +441,7 @@ fn read_or_template(path: &Path) -> Result<String, String> {
 /// Replace the file at `path` with `text` in one step, so a failed write
 /// leaves the old one. Where the frontend keeps the files (`hostfs`), it
 /// is written as it is.
-fn replace_file(path: &Path, text: &str) -> Result<(), String> {
+fn replace_file(path: &Path, text: &[u8]) -> Result<(), String> {
     if crate::hostfs::is_foreign(path) {
         return crate::hostfs::write(path, text).map_err(|e| format!("cannot write {}: {}", path.display(), e));
     }

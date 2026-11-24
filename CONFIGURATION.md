@@ -197,27 +197,43 @@ limit, so without a connection it goes on as it would with one:
   as a Windows game that draws only when something changes does. It then
   tries lower speeds, down to where they cost more than 3% of the frame
   rate, or make a program that waits for the vertical retrace miss one. A
-  speed the host falls behind at is left for a lower one, and the limit that
-  sets rises again while the host keeps up. A real-mode program with no
-  frames to go by (most games of the 1980s, which update the screen
-  piecemeal) runs at 3000, about a 286, as in DOSBox's `cycles=auto`, and at
-  max while it reads or writes its drives (loading), unless it would sit
-  halted for 30% of the time or more at the real-mode speed, as a game
-  playing speech from its CD does. A protected-mode one runs at max while it
-  reads and writes (loading, computing), and otherwise goes down to 20000, a
-  486's speed, or a quarter of a faster `cpu` model's clock (50000 on a
-  Pentium, 112500 on a Pentium II), no more than the host has. Either goes
-  back to its speed 100 ms after the work stops. Resetting the Sound
-  Blaster, as a sound driver does before it times the card with delay loops,
-  ends the loading speed at once. `auto 10000` makes that real-mode speed,
-  and the least `auto` goes down to, 10000. `max` runs everything as fast as
-  the host keeps up with in real time. Use a number such as `3000` for a
-  fixed speed. `--cycles` overrides it. Loading a [save
-  state](README.md#save-states) keeps the speed the machine runs at (this
-  setting, `--cycles`, or the last one the window, the speed keys or
-  `/api/speed` set): a fixed speed and `max` go on at the rate they had, and
-  `auto` starts its search from the rate the state was saved at. Only
-  `--deterministic` runs at the state's speed.
+  speed at which more than one frame in 300 would be shown a retrace late
+  (flipped after the retrace it was due at, as when a game's drawing runs
+  long) goes up to where fewer would be, if the host has room for it: the
+  intervals between the program's flips stray from their average less, the
+  more speed it has, and the last 1200 it showed, at whatever speed, tell
+  how many would run late at each. Frames shown while the program polls the
+  retrace and frames shown while it doesn't are counted apart, and a step
+  taken for one kind is judged on that kind alone: a game that doesn't poll
+  while it plays isn't judged on its death screens, which do. Where no speed
+  up to 3.5 times as much would do, it stays, and so it does past 3.5 times
+  the speed of the program's first such step, or for a program that draws as
+  fast as it can, whose intervals shrink with more speed and drift with what
+  it draws. A frame flipped within a tenth of a whole number of retraces, or
+  after the program read the status register, counts as shown for that
+  number. It keeps that speed if far fewer frames come late there, also when
+  the program polls for the retrace, or flips no pages for a while, before the
+  step is judged, and it is then the least for the program. A speed the host
+  falls behind at is left for a lower one, and the limit that sets rises again
+  while the host keeps up. A real-mode program with no frames to go by (most
+  games of the 1980s, which update the screen piecemeal) runs at 3000, about a
+  286, as in DOSBox's `cycles=auto`, and at max while it reads or writes its
+  drives (loading), unless it would sit halted for 30% of the time or more at
+  the real-mode speed, as a game playing speech from its CD does. A
+  protected-mode one runs at max while it reads and writes (loading,
+  computing), and otherwise goes down to 20000, a 486's speed, or a quarter
+  of a faster `cpu` model's clock (50000 on a Pentium, 112500 on a Pentium
+  II), no more than the host has. Either goes back to its speed 100 ms after
+  the work stops. Resetting the Sound Blaster, as a sound driver does before
+  it times the card with delay loops, ends the loading speed at once. `auto
+  10000` makes that real-mode speed, and the least `auto` goes down to,
+  10000. `max` runs everything as fast as the host keeps up with in real
+  time. Use a number such as `3000` for a fixed speed. `--cycles` overrides
+  it. Loading a [save state](README.md#save-states) keeps the speed the
+  machine runs at (this setting, `--cycles`, or the last one the window, the
+  speed keys or `/api/speed` set): a fixed speed and `max` go on at the rate
+  they had, and `auto` starts its search from the rate the state was saved
+  at. Only `--deterministic` runs at the state's speed.
 * `auto_fps` is the frame rate `cycles=auto` aims for: `auto`, the
   default, is the display's refresh rate (the 3dfx card's while it
   shows), and a number from 10 to 240 takes its place. A lower one, such
@@ -301,14 +317,15 @@ limit, so without a connection it goes on as it would with one:
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
-  `core=auto` does; `dynamic` always runs the recompiler, and `normal`
-  the interpreter. The recompiler translates blocks of the program's code
-  into the host's own and runs CPU-bound code several times faster. Both
-  run programs exactly the same way, instruction for instruction, so
-  there is no need to switch back for a game that misbehaves. The
-  recompiler needs an x86-64 or ARM64 host; on others and in the browser
-  the interpreter runs everything. `--core` overrides it. See
-  [docs/dynrec.md](docs/dynrec.md).
+  `core=auto` does, and for one that runs in real mode with segment
+  limits above 64 KB ("big real mode", which Ultima VII runs in);
+  `dynamic` always runs the recompiler, and `normal` the interpreter.
+  The recompiler translates blocks of the program's code into the host's
+  own and runs CPU-bound code several times faster. Both run programs
+  exactly the same way, instruction for instruction, so there is no need
+  to switch back for a game that misbehaves. The recompiler needs an
+  x86-64 or ARM64 host; on others and in the browser the interpreter runs
+  everything. `--core` overrides it. See [docs/dynrec.md](docs/dynrec.md).
 * `fpu` is how the FPU adds and subtracts: `exact` (the default) close to
   what a real 387 does, or `fast` on the host's 64-bit doubles, as it
   multiplies and divides anyway. `exact` adds on 80 bits where the control
@@ -697,6 +714,15 @@ limit, so without a connection it goes on as it would with one:
   way. Below 7.10, INT 25h and 26h still read and write FAT32 drives, unlike
   MS-DOS 7.1, so DOS 5 programs that know only them keep reaching the
   volume. A change takes effect at once.
+* `ansi_sys` is whether DOS's console takes ANSI.SYS's escape sequences:
+  `true` (the default), as DOSBox's CON has them, or `false`, as a DOS
+  without `DEVICE=ANSI.SYS`. With it on, the output of `ECHO`, of `TYPE`
+  and of programs through DOS (INT 21h, INT 29h) takes colours
+  (`ESC[...m`), cursor moves (`ESC[r;cH`, `ESC[nA` to `ESC[nD`, `ESC[s`,
+  `ESC[u`) and clearing (`ESC[2J`, `ESC[K`), and INT 2Fh AX=1A00h reports
+  ANSI.SYS installed. Turn it off for a program that misbehaves when it
+  finds ANSI.SYS. A DOSBox-X configuration's `ansi.sys` in `[dos]`
+  imports as it. A change takes effect at once.
 * `keyboard_layout` is the layout the keyboard types in, as DOS's KEYB
   has them: `auto` (the default) takes the host keyboard's, or one of
   `us`, `uk`, `gr` (German, also `de`), `sg` and `sf` (Swiss German and
@@ -801,10 +827,30 @@ limit, so without a connection it goes on as it would with one:
 ### `[sound]`
 
 * `sbtype` is the Sound Blaster: `sb16` (the default), `sb16vibra`,
-  `awe32`, `sbpro2`, `sbpro1`, `sb2` or `none`. `sbbase` (hex), `irq`,
-  `dma` and `hdma` (the SB16's and AWE32's 16-bit channel) set its
+  `awe32`, `sbpro2`, `sbpro1`, `sb2`, `gb` or `none`. `sbbase` (hex),
+  `irq`, `dma` and `hdma` (the SB16's and AWE32's 16-bit channel) set its
   resources; the defaults are 220, 7, 1 and 5. The `BLASTER` environment
   variable follows them.
+* `gb` is Creative's Game Blaster (the Creative Music System, C/MS) in
+  place of a Sound Blaster: two Philips SAA1099 chips on a 7.16 MHz
+  clock, twelve square-wave voices with noise and envelopes, at `sbbase`
+  (220h unless set). The first chip is at base+0 (data) and base+1
+  (address), the second at base+2 and base+3. The card's detection chip
+  is at base+4 to base+0Fh: base+4 reads 7Fh, and a byte written to
+  base+6 or base+7 reads back from base+0Ah and base+0Bh, which
+  Creative's drivers and the games that look for the card check. The
+  card has no IRQ, DMA or digitized sound, and no `BLASTER` variable. It
+  plays on the mixer's `cms` channel. DOSBox's `sbtype=gb` imports as
+  this.
+* `cms=true` fits the two SAA1099s to the SB 2.0 (`sbtype=sb2`), at its
+  base+0 to base+3, where its DSP has no ports. The first Sound Blaster
+  (1.0) had the chips fitted for C/MS games, and the SB 1.5 and 2.0 had
+  empty sockets for them, sold as an upgrade, so the default is `false`.
+  The SB 2.0 with them has no detection chip, as on the real cards. The
+  SB Pro and SB16 have no sockets, and `cms` does nothing on them. From a
+  DOSBox configuration, `sbtype=sb1` (with DOSBox Staging's `cms=auto`,
+  its default) imports as `sbtype=sb2` with `cms=true`, `cms=on` or
+  `off` as itself, and DOSBox 0.74's `oplmode=cms` as `cms=true`.
 * `sbpro1` is the first Sound Blaster Pro (CT1330, DSP 3.00), which
   DOSBox's `sbtype=sbpro1` imports as. Creative's early drivers for it,
   such as Mega lo Mania's, take only DSP 3.00 and 3.01 and don't find an
@@ -954,8 +1000,9 @@ The volume of each sound source in percent, from 0 to 200: `speaker` (the
 PC speaker and the prompt's beeps), `sb` (the Sound Blaster's digital
 audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
 `lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
-PCjr's sound chip), `awe32` (the AWE32's wavetable synthesizer),
-`monitor` (the [monitor's effects](#emulator)), `modem` (the [modem's
+PCjr's sound chip), `cms` (the Game Blaster's SAA1099s), `awe32` (the
+AWE32's wavetable synthesizer), `monitor` (the [monitor's
+effects](#emulator)), `modem` (the [modem's
 speaker](#serial-and-modem-games)), `windows` (the built-in Windows's
 sound: DirectSound and WinMM's wave audio), and `master` for all of them
 together. At 100, the default, a source plays as loud as its card makes
@@ -969,12 +1016,15 @@ programs set.
   filters as the model in `sbtype` does, at 4.8 kHz on an SB 2.0, 3.2 kHz
   on an SB Pro and half the sample rate on an SB16; `off` leaves the
   sound as the card makes it.
-* `sb_coupling` is the capacitor on the Sound Blaster's output, a
-  high-pass at 3 Hz: `on` (the default) or `off`. A card's DAC holds its
-  last sample until the next, and with the capacitor that level fades
+* `sb_coupling` is the capacitor on the outputs of the Sound Blaster, the
+  AdLib and the AdLib Gold, a high-pass at 3 Hz: `on` (the default) or
+  `off`. A card's DAC (the Sound Blaster's, or the AdLib Gold's for its
+  sampled sound) holds its last sample until the next, and the FM
+  synthesizer holds a level when a program stops a note by setting its
+  frequency to 0 without a release. With the capacitor that level fades
   out of the mix within a fraction of a second, as on the real card;
-  `off` mixes the DAC's level as it is, so a level a program leaves the
-  card at stays in the mix as a constant offset.
+  `off` mixes it as it is, so a level a program leaves the card at stays
+  in the mix as a constant offset.
 * `reverb` adds a room to the music of the FM synthesizer, the Gravis
   Ultrasound and MIDI: `off` (the default), `tiny`, `small`, `medium`,
   `large` or `huge`. `chorus` thickens them: `off` (the default),
@@ -2221,6 +2271,14 @@ sectors on purpose and refuse to run when reading them succeeds, so an
 image as Redump or CloneCD makes it passes their check, and an ISO of the
 same disc fails it. Sectors with an EDC of 0, which tools that turn an ISO
 into a BIN leave, aren't checked.
+
+CopyLok (CodeLok) discs have a band of a few hundred to a few thousand
+such sectors. Redump's images keep them as redumper writes a sector it
+couldn't read, with sync and header and 55h bytes for the rest, so their
+EDC fails and they read as errors. Opening an image of a CopyLok disc
+says so in the log, from the mark the protection leaves in the primary
+volume descriptor, and warns when the image keeps only 2048 bytes of
+each sector (an ISO), which can't pass the check.
 
 The IDE drive also reads each sector's subchannel: READ CD returns it after
 the sector (raw P-W, formatted Q, or R-W), and READ SUB-CHANNEL reports the

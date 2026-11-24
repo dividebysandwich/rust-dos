@@ -168,7 +168,8 @@ pub fn restore_console(bus: &mut Bus, psp: u16) {
 }
 
 /// Close the handles of the process `psp`, which is ending, and the files
-/// it opened for FCBs.
+/// it opened for FCBs. The locks it holds go, also those of files that
+/// stay open in another process (AH=5Ch).
 pub fn close_all(bus: &mut Bus, psp: u16) {
     if let Some((_, size)) = jft(bus, psp) {
         for handle in 0..size {
@@ -176,6 +177,7 @@ pub fn close_all(bus: &mut Bus, psp: u16) {
         }
     }
     bus.disk.close_fcb_files(psp);
+    bus.disk.release_locks(psp as u32);
 }
 
 /// Give the PSP at `psp` its JFT, in the PSP itself: the handles of the

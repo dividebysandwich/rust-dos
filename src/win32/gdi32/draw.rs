@@ -1820,8 +1820,13 @@ impl Translate {
             if src.device {
                 return v;
             }
-            let hint = (src.bpp <= 8).then_some(v);
-            return map.blit_color(src.color_of(v), hint);
+            // Deeper pixels go through Windows' inverse color table
+            // (`DeviceMap::deep_color`), those of a color table to the
+            // nearest color.
+            if src.bpp > 8 {
+                return map.deep_color(src.color_of(v));
+            }
+            return map.blit_color(src.color_of(v), Some(v));
         }
         convert(src, v, dst, self.src_bk, self.text, self.bk)
     }

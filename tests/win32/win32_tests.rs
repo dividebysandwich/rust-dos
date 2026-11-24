@@ -1120,6 +1120,67 @@ fn an_idle_loop_that_waits_for_a_deadline_by_get_tick_count_is_skipped_to_it() {
     assert!(stats.skipped / stats.proofs > 4 * ms, "{stats:?}");
 }
 
+/// Tribal Rage's MFC idle loop (#1729): it counts its passes in RAM, hands
+/// the count to OnIdle, which compares it with 0 and 1, and waits for a
+/// deadline by GetTickCount. A proof skips up to the next timer event,
+/// hundreds of passes at the speed below, and the passes skipped must come
+/// out as when they all run. The model of the counts finds how many run
+/// the same without running each of them: they move the count by one and
+/// read the clock as the one before did until its next millisecond.
+#[test]
+fn an_idle_loop_that_counts_its_passes_is_proven_without_modelling_each() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetTickCount"])];
+    // The count at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut spin = a.create_label();
+        let mut idle = a.create_label();
+        a.call(l.import(0))?;
+        a.mov(ebx, eax)?;
+        a.set_label(&mut spin)?;
+        a.mov(ecx, dword_ptr(l.data))?;
+        a.inc(dword_ptr(l.data))?;
+        // OnIdle(count): more idle work for counts 0 and 1.
+        a.test(ecx, ecx)?;
+        a.jle(idle)?;
+        a.cmp(ecx, 1)?;
+        a.je(idle)?;
+        a.set_label(&mut idle)?;
+        // OnIdle returns with ECX as it left it, not the count.
+        a.mov(ecx, 0)?;
+        a.call(l.import(0))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu.bus.set_cycles_per_ms(100_000);
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start("idle_count_plain", CoreMode::Normal, false);
+    let mut skipping = start("idle_count_skipping", CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 400, 100_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    let stats = &skipping.bus.observe.stats;
+    assert_eq!(skipping.errorlevel, 0x2A, "{stats:?}");
+    assert!(stats.proofs >= 10 && stats.skipped > 100 * 100_000, "{stats:?}");
+    // A few passes of the model for each proof, where running each pass
+    // skipped would take hundreds.
+    assert!(stats.modelled < 20 * stats.proofs, "{stats:?}");
+}
+
 /// Run `image` on a machine that skips passes (on the recompiler) and one
 /// that runs them all (on the interpreter), in lockstep: they must come
 /// out the same after every batch, and the program must end with 2Ah.
@@ -1242,6 +1303,172 @@ fn a_sleep_zero_loop_that_counts_while_it_waits_is_skipped() {
     });
     let stats = idle_lockstep("sleep_zero_count_wait", image);
     assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// A wait for a timer's WM_TIMER in a loop of PeekMessageA, as Wizardry
+/// Gold waits between the steps of its animations (#1692), then the same
+/// with a GetTickCount in each pass, as its loop over its mouse hot spots
+/// does. A PeekMessageA that finds nothing changes nothing up to the
+/// timer, so the passes are skipped to it in both loops, and come out the
+/// same as when they all run.
+#[test]
+fn a_peek_message_loop_that_waits_for_a_timer_is_skipped() {
+    let names: &[&str] = &["SetTimer", "PeekMessageA"];
+    let imports: &[(&str, &[&str])] =
+        &[("USER32.DLL", names), ("KERNEL32.DLL", &["GetTickCount"])];
+    // The MSG at 0.
+    let image = program(BASE, false, imports, &[0; 32], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(0)?;
+        a.push(50)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("SetTimer"))?;
+        for clock in [false, true] {
+            let mut spin = a.create_label();
+            a.set_label(&mut spin)?;
+            if clock {
+                a.call(l.import(names.len()))?;
+            }
+            a.push(1)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(l.data)?;
+            a.call(f("PeekMessageA"))?;
+            a.test(eax, eax)?;
+            a.jz(spin)?;
+            // WM_TIMER.
+            a.cmp(dword_ptr(l.at(4)), 0x113)?;
+            a.jne(spin)?;
+        }
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let (stats, ms) = peek_lockstep("peek_timer", image);
+    // The two waits come to 100 ms; the passes run to prove the loops
+    // are a small part of them.
+    assert!(stats.skipped > 80 * ms, "{stats:?}");
+}
+
+/// A loop that draws a frame between its PeekMessageAs (PM_NOREMOVE)
+/// until the timer's WM_TIMER comes, as a game's main loop does: its
+/// passes peek close enough together to arm the place, but each writes
+/// another frame number over the frame, so they aren't all the same.
+/// Whatever the proofs make of them, the program draws as many frames,
+/// and leaves its memory and registers, as when every pass runs.
+#[test]
+fn a_peek_message_loop_that_draws_between_peeks_runs_as_it_would() {
+    let names: &[&str] = &["SetTimer", "PeekMessageA"];
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", names)];
+    // The MSG at 0, the frame of 64 dwords at 32, the frames drawn after.
+    let image = program(BASE, false, imports, &[0; 0x200], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(0)?;
+        a.push(50)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("SetTimer"))?;
+        a.xor(ebx, ebx)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        a.inc(ebx)?;
+        a.mov(eax, ebx)?;
+        a.mov(edi, l.data + 32)?;
+        a.mov(ecx, 64)?;
+        a.rep().stosd()?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(l.data)?;
+        a.call(f("PeekMessageA"))?;
+        a.test(eax, eax)?;
+        a.jz(spin)?;
+        // WM_TIMER.
+        a.cmp(dword_ptr(l.at(4)), 0x113)?;
+        a.jne(spin)?;
+        a.mov(dword_ptr(l.at(0x120)), ebx)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let (stats, _) = peek_lockstep("peek_draw", image);
+    assert!(stats.arms > 0, "the peeks armed the loop: {stats:?}");
+}
+
+/// A PeekMessageA loop that takes five of a 20 ms timer's WM_TIMERs: each
+/// wait is skipped up to the timer, and the peek after the skip finds the
+/// message. The place isn't proven again right there, where the proof
+/// would end at that peek, but once the loop has peeked its way back to
+/// waiting; a proof that a message ends hasn't failed.
+#[test]
+fn a_peek_message_loop_is_not_proven_again_where_its_timer_comes() {
+    let names: &[&str] = &["SetTimer", "PeekMessageA"];
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", names)];
+    // The MSG at 0.
+    let image = program(BASE, false, imports, &[0; 32], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(0)?;
+        a.push(20)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("SetTimer"))?;
+        a.mov(esi, 5)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        // PM_REMOVE.
+        a.push(1)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(l.data)?;
+        a.call(f("PeekMessageA"))?;
+        a.test(eax, eax)?;
+        a.jz(spin)?;
+        // WM_TIMER.
+        a.cmp(dword_ptr(l.at(4)), 0x113)?;
+        a.jne(spin)?;
+        a.dec(esi)?;
+        a.jnz(spin)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let (stats, ms) = peek_lockstep("peek_timers", image);
+    assert!(stats.skipped > 80 * ms, "{stats:?}");
+    // Armed again where the timer comes, every wait would fail a proof
+    // at its first peek. A proof that is running when the timer comes
+    // (the last one is due a few instructions after the event before it)
+    // ends at the peek that finds its message, as at a timer event.
+    assert_eq!(stats.failures, 0, "{stats:?}");
+}
+
+/// Run `image` on a machine that skips idle loops and one that doesn't,
+/// in lockstep, up to its exit with 0x2A: the skips found and the
+/// instructions in a millisecond.
+fn peek_lockstep(test: &str, image: Vec<u8>) -> (rust_dos::idle::IdleStats, u64) {
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    // Both machines start their clocks at the same host time, which a
+    // second passing between them would otherwise make differ.
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start(&format!("{test}_plain"), CoreMode::Normal, false);
+    let mut skipping = start(&format!("{test}_skipping"), CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the waits ended");
+    let stats = skipping.bus.observe.stats;
+    assert_eq!(skipping.errorlevel, 0x2A, "{stats:?}");
+    (stats, skipping.bus.clock.cycles_per_ms() as u64)
 }
 
 /// A Sleep(0) loop that leaves after 50 ms by GetTickCount, alone in its
@@ -19529,4 +19756,281 @@ fn a_win16_state_of_now_calls_its_missing_import() {
     assert_eq!(mended, stub);
     assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
     assert!(printed(&cpu).contains(MISSING_CALL16), "{}", printed(&cpu));
+}
+
+/// VWIN32's services that need no real mode, called with VxDCall0 as
+/// Win32 programs call them: its version (GetVersion's, major in the
+/// high byte), VMCPD's version for one argument (4.05), and the debugger
+/// dispatch, which gives back the whole dword it is passed. The services
+/// pop their arguments and no more, so the stack is as it was before
+/// they were pushed, also when the program calls VxDCall2, which on
+/// Windows 98 is the same function as VxDCall0. The exit code is the
+/// step that failed.
+#[test]
+fn vwin32_gives_its_version_and_pops_its_arguments() {
+    let imports: &[(&str, &[&str])] =
+        &[("KERNEL32.DLL", &["#1", "GetVersion", "ExitProcess", "#3"])];
+    let exe = program(BASE, false, imports, &[0; 0x10], |a, l| {
+        let mut fail = a.create_label();
+        a.call(l.import(1))?;
+        a.mov(ecx, eax)?;
+        a.xchg(cl, ch)?;
+        a.movzx(ecx, cx)?;
+        // Room above the stack pointer: VxDCall2's stub reads its two
+        // dwords whether the program pushed them or not.
+        a.sub(esp, 0x20)?;
+        a.mov(esi, esp)?;
+        a.push(0x002A_0000)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 1)?;
+        a.cmp(eax, ecx)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.push(0)?;
+        a.push(0x002A_0020)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 2)?;
+        a.cmp(eax, 0x0405)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.push(0x0001_004F)?;
+        a.push(0x002A_002A)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 3)?;
+        a.cmp(eax, 0x0001_004F)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        // The same services through VxDCall2, whose stub pops two dwords
+        // after the service: one more than VMCPD's version takes and two
+        // more than VWIN32's, which stay the program's.
+        a.push(0)?;
+        a.push(0x002A_0020)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 4)?;
+        a.cmp(eax, 0x0405)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.push(0x002A_0000)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 5)?;
+        a.cmp(eax, ecx)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let (code, text) = run("vwin32_version", exe);
+    assert_eq!(code, 0, "{}", text);
+}
+
+/// A real mode call structure for INT 2Fh's MSCDEX function `function`
+/// on drive D:, with SI:DI `sector` and DX `count` (an absolute read's)
+/// and its buffer at 9000:0000.
+fn mscdex_structure(function: u16, sector: u32, count: u16) -> [u8; 0x32] {
+    let mut s = [0u8; 0x32];
+    s[0x00..0x02].copy_from_slice(&(sector as u16).to_le_bytes());
+    s[0x04..0x06].copy_from_slice(&((sector >> 16) as u16).to_le_bytes());
+    s[0x14..0x16].copy_from_slice(&count.to_le_bytes());
+    s[0x18] = 3;
+    s[0x1C..0x1E].copy_from_slice(&function.to_le_bytes());
+    s[0x20] = 0x02;
+    s[0x22..0x24].copy_from_slice(&0x9000u16.to_le_bytes());
+    s
+}
+
+/// VWIN32's Int31Dispatch (VxDCall0 of 002A0029h with the DPMI function
+/// and ECX pushed), as CopyLok calls it: DPMI 0300h runs INT 2Fh in real
+/// mode, MSCDEX answers, and the call structure at EDI gets the
+/// registers and flags it left. The program goes on with AX the
+/// function, CF clear, its other registers as they were and the two
+/// arguments popped. On a disc with a band of sectors the drive can't
+/// read, MSCDEX's absolute read of one fails with a data error (CF and
+/// AX=17h in the structure), and the sector after the band reads. A
+/// function VWIN32 doesn't give fails with CF and 8001h; 0400h gives the
+/// DPMI version, 0.90. The exit code is the step that failed.
+#[test]
+fn vwin32_int31_dispatch_calls_mscdex_in_real_mode() {
+    let dir = cdimage::scratch("vwin32_mscdex");
+    let mut image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    let band = (image.len() / 2048) as u32;
+    image.extend(vec![0x77; 4 * 2048]);
+    let mut raw = cdimage::mode1_2352(&image);
+    for lba in band..band + 2 {
+        let at = lba as usize * 2352;
+        raw[at + 16..at + 2352].fill(0x55);
+    }
+    fs::write(dir.join("GAME.BIN"), raw).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    const CHECK: u32 = 0x00;
+    const READ: u32 = 0x40;
+    let mut data = vec![0u8; 0x80];
+    let check = mscdex_structure(0x150B, 0, 0);
+    data[CHECK as usize..CHECK as usize + 0x32].copy_from_slice(&check);
+    let read = mscdex_structure(0x1508, band, 1);
+    data[READ as usize..READ as usize + 0x32].copy_from_slice(&read);
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["#1", "ExitProcess"])];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        // Int31Dispatch(function, ECX) with BL the interrupt and EDI the
+        // structure. EBP keeps the step, ESI the stack.
+        let dispatch = |a: &mut CodeAssembler, function: i32, structure: u32| {
+            a.mov(esi, esp)?;
+            a.mov(ebx, 0x2F)?;
+            a.mov(edi, l.at(structure) as i32)?;
+            a.push(0)?;
+            a.push(function)?;
+            a.push(0x002A_0029)?;
+            a.call(l.import(0))
+        };
+        // The drive check, 150Bh: D: is a CD-ROM drive, and BX=ADADh.
+        dispatch(a, 0x0300, CHECK)?;
+        a.mov(ebp, 1)?;
+        a.jc(fail)?;
+        a.cmp(eax, 0x0300)?;
+        a.jne(fail)?;
+        a.mov(ebp, 2)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.cmp(ebx, 0x2F)?;
+        a.jne(fail)?;
+        a.cmp(edi, l.at(CHECK) as i32)?;
+        a.jne(fail)?;
+        a.mov(ebp, 3)?;
+        a.cmp(word_ptr(l.at(CHECK + 0x1C)), 0x5AD8)?;
+        a.jne(fail)?;
+        a.cmp(word_ptr(l.at(CHECK + 0x10)), 0xADAD)?;
+        a.jne(fail)?;
+        // An absolute read (1508h) of the band's first sector: a data
+        // error.
+        dispatch(a, 0x0300, READ)?;
+        a.mov(ebp, 4)?;
+        a.jc(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.test(byte_ptr(l.at(READ + 0x20)), 1)?;
+        a.je(fail)?;
+        a.cmp(word_ptr(l.at(READ + 0x1C)), 0x17)?;
+        a.jne(fail)?;
+        // Then of the sector after the band: read.
+        a.mov(word_ptr(l.at(READ)), (band + 2) as i32)?;
+        a.mov(word_ptr(l.at(READ + 0x1C)), 0x1508)?;
+        dispatch(a, 0x0300, READ)?;
+        a.mov(ebp, 5)?;
+        a.jc(fail)?;
+        a.test(byte_ptr(l.at(READ + 0x20)), 1)?;
+        a.jne(fail)?;
+        // A function VWIN32 doesn't give.
+        dispatch(a, 0x0500, CHECK)?;
+        a.mov(ebp, 6)?;
+        a.jnc(fail)?;
+        a.cmp(eax, 0x8001)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        // The DPMI version.
+        dispatch(a, 0x0400, CHECK)?;
+        a.mov(ebp, 7)?;
+        a.jc(fail)?;
+        a.cmp(eax, 0x005A)?;
+        a.jne(fail)?;
+        a.xor(ebp, ebp)?;
+        a.set_label(&mut fail)?;
+        a.push(ebp)?;
+        a.call(l.import(1))?;
+        a.int3()
+    });
+    let mut cpu = machine("vwin32_mscdex", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+    // The sector after the band went to 9000:0000.
+    assert_eq!(cpu.bus.read_8(0x9_0000), 0x77);
+}
+
+/// KERNEL32 exports DebugBreak, as Windows 98's does: games import it,
+/// and CopyLok's loader refuses to start a game with an import it can't
+/// find.
+#[test]
+fn kernel32_exports_debug_break() {
+    let mut data = vec![0u8; 0x40];
+    data[..9].copy_from_slice(b"KERNEL32\0");
+    data[0x10..0x1B].copy_from_slice(b"DebugBreak\0");
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["GetModuleHandleA", "GetProcAddress", "ExitProcess"],
+    )];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.test(eax, eax)?;
+        a.setne(al)?;
+        a.movzx(eax, al)?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let (code, text) = run("debug_break_export", exe);
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// DebugBreak raises a breakpoint, as the INT 3 of Windows 98's does: the
+/// program's handler gets the exception with the one parameter the
+/// processor's breakpoint gives, and when it goes on the call returns,
+/// here with the EAX it put in the context. The exit code is 7 when the
+/// record was right, 1 when it wasn't.
+#[test]
+fn debug_break_raises_a_breakpoint_the_handler_goes_on_from() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["DebugBreak", "ExitProcess"])];
+    let exe = program(BASE, false, imports, &[0; 4], |a, l| {
+        let mut over = a.create_label();
+        let mut bad = a.create_label();
+        a.call(over)?;
+        // The handler: EDX 7 if the record (its first argument) is a
+        // breakpoint with one parameter, else 1, into the context's Eax
+        // (B0h).
+        a.mov(edx, 1)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.cmp(dword_ptr(eax), 0x8000_0003u32 as i32)?;
+        a.jne(bad)?;
+        a.cmp(dword_ptr(eax + 16), 1)?;
+        a.jne(bad)?;
+        a.mov(edx, 7)?;
+        a.set_label(&mut bad)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(eax + 0xB0), edx)?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut over)?;
+        a.push(dword_ptr(0).fs())?;
+        a.mov(dword_ptr(0).fs(), esp)?;
+        a.xor(eax, eax)?;
+        a.call(l.import(0))?;
+        a.pop(dword_ptr(0).fs())?;
+        a.add(esp, 4)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.int3()
+    });
+    let (code, text) = run("debug_break_seh", exe);
+    assert_eq!(code, 7, "{}", text);
 }

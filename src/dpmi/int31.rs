@@ -606,6 +606,7 @@ pub(super) fn retile(cpu: &mut Cpu, first: usize, count: usize, base: u32, bytes
     let c = client(cpu);
     if needed > count {
         c.ldt[first + count..first + needed].fill(LDT_FIXED);
+        super::grow_ldt(cpu);
     }
     for index in first + needed..first + count {
         free_entry(cpu, index);

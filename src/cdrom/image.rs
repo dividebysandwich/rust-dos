@@ -171,7 +171,8 @@ pub struct CdImage {
     /// files keep none.
     sub_file: Option<SubFile>,
     /// What opening the image found that the user should hear of: the
-    /// subchannel file it reads, or why it reads none it found.
+    /// subchannel file it reads, or why it reads none it found, and a
+    /// CopyLok disc and whether the image can pass its check.
     notes: Vec<String>,
 }
 
@@ -215,7 +216,7 @@ impl CdImage {
     /// .bin, .img), whose sector format is found from where the ISO 9660 or
     /// High Sierra volume descriptor is.
     pub fn open(path: &Path) -> Result<Self, String> {
-        if is_b6t(path) {
+        let mut image = if is_b6t(path) {
             Self::open_b6t(path)
         } else if is_mds(path) {
             Self::open_mds(path)
@@ -225,7 +226,47 @@ impl CdImage {
             Self::open_chd(path)
         } else {
             Self::open_bare(path)
+        }?;
+        image.note_copylok();
+        Ok(image)
+    }
+
+    /// Note a disc that CopyLok protects (`super::copylok`), and whether
+    /// the image can pass its check: the band of sectors the check expects
+    /// to fail is there only in an image of whole 2352-byte sectors, where
+    /// the EDC of each says whether a drive reads it.
+    fn note_copylok(&mut self) {
+        let Some(track) = self.data_track() else {
+            return;
+        };
+        let mut pvd = [0u8; DATA_SECTOR];
+        if self.read_data(track.start + 16, &mut pvd).is_err() {
+            return;
         }
+        let Some(variant) = super::copylok::variant(&pvd) else {
+            return;
+        };
+        let raw = matches!(track.mode, TrackMode::Mode1_2352 | TrackMode::Mode2_2352);
+        let shown = crate::mount::display_host_path(&self.path);
+        self.notes.push(if raw {
+            format!(
+                "{} is a CopyLok disc ({}): its sectors whose EDC doesn't match their data \
+                 read as errors, so the protection's check passes if the image keeps the \
+                 band of unreadable sectors, as Redump's dumps do. A BIN made from an ISO \
+                 doesn't keep it",
+                shown,
+                variant.describe()
+            )
+        } else {
+            format!(
+                "{} is a CopyLok disc ({}), but the image doesn't keep whole 2352-byte \
+                 sectors, so it can't hold the sectors a drive fails to read and the \
+                 protection's check fails. An image of whole sectors, as Redump's BIN and CUE, \
+                 passes it",
+                shown,
+                variant.describe()
+            )
+        });
     }
 
     fn open_cue(path: &Path, sheet: CueSheet) -> Result<Self, String> {
@@ -587,7 +628,7 @@ impl CdImage {
 
     /// What opening the image found that the user should hear of: the
     /// subchannel file beside it that it reads, or why it reads none of
-    /// those it found.
+    /// those it found, and a CopyLok disc (`note_copylok`).
     pub fn notes(&self) -> &[String] {
         &self.notes
     }
@@ -643,10 +684,20 @@ impl CdImage {
     pub fn from_memory(name: &str, data: MemoryImage) -> Result<Self, String> {
         #[cfg(feature = "chd")]
         if is_chd_memory(&data) {
-            return Self::chd(Path::new(name), Box::new(MemoryReader { data, pos: 0 }));
+            let mut image = Self::chd(Path::new(name), Box::new(MemoryReader { data, pos: 0 }))?;
+            image.note_copylok();
+            return Ok(image);
         }
         let len = data.len();
-        Self::bare(Path::new(name), Backing { source: Source::Memory(data), data_offset: 0, len, swap: false })
+        let backing = Backing {
+            source: Source::Memory(data),
+            data_offset: 0,
+            len,
+            swap: false,
+        };
+        let mut image = Self::bare(Path::new(name), backing)?;
+        image.note_copylok();
+        Ok(image)
     }
 
     /// The disc made from the host folder `root` (`folder::build`).
@@ -1917,6 +1968,125 @@ mod tests {
         );
         // Past the disc is another error.
         assert!(!is_unreadable(&image.read_data(10, &mut data).unwrap_err()));
+    }
+
+    /// A disc of 40 Mode 1 sectors whose volume descriptor carries
+    /// CopyLok's mark, as whole sectors: the descriptor at 16, and a band
+    /// of sectors 20 to 29 as Redump's dumps keep a CopyLok disc's, sync,
+    /// header and 55h for the rest. Returns the raw sectors and the
+    /// descriptor.
+    fn copylok_disc() -> (Vec<u8>, [u8; DATA_SECTOR]) {
+        let pvd = crate::cdrom::copylok::marked_pvd(&crate::cdrom::copylok::early_mark());
+        let mut data = Vec::new();
+        for lba in 0..40u32 {
+            let mut raw = crate::cdrom::mode1_sector(lba, lba as u8);
+            if lba == 16 {
+                raw[16..16 + DATA_SECTOR].copy_from_slice(&pvd);
+                let edc = crate::cdrom::edc(&raw[..2064]);
+                raw[2064..2068].copy_from_slice(&edc.to_le_bytes());
+            }
+            if (20..30).contains(&lba) {
+                raw[16..].fill(0x55);
+            }
+            data.extend(raw);
+        }
+        (data, pvd)
+    }
+
+    #[test]
+    fn a_copylok_disc_reads_its_band_as_errors() {
+        let dir = scratch("copylok");
+        let (data, _) = copylok_disc();
+        fs::write(dir.join("disc.bin"), data).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        let notes = image.notes().join("\n");
+        assert!(
+            notes.contains("CopyLok")
+                && notes.contains("early variant")
+                && notes.contains("read as errors"),
+            "{}",
+            notes
+        );
+        let mut data = [0u8; DATA_SECTOR];
+        let mut raw = [0u8; RAW_SECTOR];
+        for lba in 20..30 {
+            assert!(
+                is_unreadable(&image.read_data(lba, &mut data).unwrap_err()),
+                "{}",
+                lba
+            );
+            assert!(
+                is_unreadable(&image.read_raw(lba, &mut raw).unwrap_err()),
+                "{}",
+                lba
+            );
+        }
+        // The sectors around the band read as they are.
+        for lba in [17, 19, 30, 39] {
+            image.read_data(lba, &mut data).unwrap();
+            assert!(data.iter().all(|&b| b == lba as u8), "{}", lba);
+            image.read_raw(lba, &mut raw).unwrap();
+            assert_eq!(raw[16], lba as u8);
+        }
+    }
+
+    #[test]
+    fn a_copylok_disc_in_an_iso_is_noted_as_failing_the_check() {
+        let dir = scratch("copylok_iso");
+        let (data, pvd) = copylok_disc();
+        // The user data of the same sectors, as an ISO keeps them: the
+        // band reads as 55h, as good data.
+        let iso: Vec<u8> = data
+            .chunks(RAW_SECTOR)
+            .flat_map(|raw| raw[16..16 + DATA_SECTOR].to_vec())
+            .collect();
+        fs::write(dir.join("disc.iso"), &iso).unwrap();
+        // The same image held in memory, as one from an archive is.
+        let in_memory = CdImage::from_memory("disc.iso", iso.into()).unwrap();
+        let image = CdImage::open(&dir.join("disc.iso")).unwrap();
+        for image in [&image, &in_memory] {
+            let notes = image.notes().join("\n");
+            assert!(
+                notes.contains("CopyLok") && notes.contains("check fails"),
+                "{}",
+                notes
+            );
+        }
+        let mut data = [0u8; DATA_SECTOR];
+        image.read_data(16, &mut data).unwrap();
+        assert_eq!(data, pvd);
+        image.read_data(25, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 0x55));
+    }
+
+    #[test]
+    fn discs_without_copylok_have_no_note_of_it() {
+        let dir = scratch("no_copylok");
+        let (mut data, _) = copylok_disc();
+        // The same disc with a plain volume descriptor.
+        let mut pvd = crate::cdrom::mode1_sector(16, 0);
+        pvd[16] = 1;
+        pvd[17..22].copy_from_slice(b"CD001");
+        let edc = crate::cdrom::edc(&pvd[..2064]);
+        pvd[2064..2068].copy_from_slice(&edc.to_le_bytes());
+        data[16 * RAW_SECTOR..17 * RAW_SECTOR].copy_from_slice(&pvd);
+        fs::write(dir.join("disc.bin"), data).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        assert!(
+            image.notes().iter().all(|n| !n.contains("CopyLok")),
+            "{:?}",
+            image.notes()
+        );
     }
 
     /// Raw sector `lba` of a BlindWrite data file: a Mode 1 sector whose

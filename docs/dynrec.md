@@ -19,7 +19,7 @@ settings window's Emulator page) picks what runs the instructions:
 
 | `core` | Runs |
 |---|---|
-| `auto` (default) | The interpreter, and the recompiler for a program from its first switch to protected mode (CR0.PE 0 to 1) until it ends, as DOSBox's `core=auto` does. The latch is `Cpu::dyn_latched`: `note_mode_switch` sets it, `restore_process_context` and `load_shell` clear it. |
+| `auto` (default) | The interpreter, and the recompiler for a program from its first switch to protected mode (CR0.PE 0 to 1) until it ends, as DOSBox's `core=auto` does. The latch is `Cpu::pm_latched`: `note_mode_switch` sets it, `restore_process_context` and `load_shell` clear it. The recompiler also runs while the CPU is in real mode with a data segment limit above 64 KB (`Cpu::big_real`, "big real mode"): a program that switched to protected mode set it, and the program running may be a later one, as Ultima VII's U7.EXE runs in the limits MAINMENU.EXE left. |
 | `dynamic` | The recompiler throughout. |
 | `normal` | The interpreter. |
 
@@ -698,11 +698,17 @@ in real mode leaves it, loading it changes only its selector and base
 (`Uop::CsReal`, `LoadCsReal`; elsewhere the handler runs the instruction),
 and the block leaves for the target through the links a return takes.
 Loads of DS, ES, FS and GS in real mode (MOV, POP, LES, LDS, LFS, LGS)
-are translated the same way on both hosts, segments with a 4 GB limit
-("big real mode", as HIMEM leaves them) included but where the load
-would make the segment flat or not (base 0), and a load that would change
+are translated the same way on both hosts, and a load that would change
 more than the selector and base runs through its handler and stops the
-block after it.
+block after it. A segment with a 4 GB limit ("big real mode", as HIMEM
+leaves them) becomes flat when it is loaded with 0 and stops being flat
+when it is loaded with anything else, as Ultima VII's memory manager
+does around each copy to and from extended memory: where the block's
+environment has the segment big (`Gen::big_load`), the code notes in
+`JitCtx::flat` whether it is flat after the load, as `jit_load_seg`
+does, and the block goes on, checking the segment's accesses as a
+segment's that isn't flat and taking its links only where the segments
+are flat as they were (`check_flat`).
 INT and IRET, and far transfers in virtual-8086 and protected mode, run
 through their handlers and end their block, but where that leaves
 translated code nothing to check (`helpers::far_goes_on`: still in the

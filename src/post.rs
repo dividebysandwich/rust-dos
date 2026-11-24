@@ -118,10 +118,7 @@ fn clear(cpu: &mut Cpu) {
 }
 
 fn set_cursor(cpu: &mut Cpu, col: usize, row: usize) {
-    cpu.bus.cursor_x = col;
-    cpu.bus.cursor_y = row;
-    cpu.bus.write_8(0x0450, col as u8);
-    cpu.bus.write_8(0x0451, row as u8);
+    cpu.bus.set_console_cursor(col, row);
 }
 
 /// What the screen lists under the memory: the drives and the sound

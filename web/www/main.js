@@ -76,7 +76,7 @@ aspect=4:3
 #floppy_disk_speed=maximum
 
 [sound]
-# The Sound Blaster: sb16, sbpro2, sbpro1, sb2 or none.
+# The Sound Blaster: sb16, sbpro2, sbpro1, sb2, gb (Game Blaster) or none.
 #sbtype=sb16
 #sbbase=220
 #irq=7

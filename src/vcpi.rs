@@ -7,8 +7,10 @@
 //! The interface is there only in virtual-8086 mode under the monitor:
 //! in real mode (a state saved before the monitor, a test) AX=DE00h says
 //! it isn't, as with an EMS board and no memory manager. The 4 KB pages
-//! (DE04h) come from the expanded memory's pool, 16 KB at a time, and go
-//! back to it when no program runs any more, with its pages.
+//! (DE04h) come from the expanded memory's pool, 16 KB at a time. A 16 KB
+//! page goes back to the pool as soon as its four 4 KB pages are free
+//! (DE05h), where XMS and EMS can allocate it again, and all of them go
+//! back when no program runs any more.
 
 use crate::bus::Bus;
 use crate::cpu::{CR0_PG, Cpu, CpuFlags, CpuState, DescTable, Seg, SegCache};
@@ -206,7 +208,11 @@ fn allocate(cpu: &mut Cpu) -> u8 {
     OK
 }
 
-/// DE05h: free the page at EDX.
+/// DE05h: free the page at EDX. Once none of its 16 KB page is handed out,
+/// that goes back to the pool, where EMS and XMS see it as free again.
+/// Phar Lap's 286|DOS-Extender allocates the pages there are and frees
+/// most of them as it starts; kept apart, they left Ultima VIII's heap
+/// short and the game stopped.
 fn free(cpu: &mut Cpu) -> u8 {
     let page = cpu.edx() & !(PAGE - 1);
     let vcpi = &mut cpu.bus.vcpi;
@@ -215,6 +221,14 @@ fn free(cpu: &mut Cpu) -> u8 {
     };
     vcpi.pages.swap_remove(i);
     vcpi.spare.push(page);
+    let Some(block) = cpu.bus.xms.page_holding(page) else {
+        return OK;
+    };
+    let in_block = |p: &u32| (block..block + 4 * PAGE).contains(p);
+    if !vcpi.pages.iter().any(in_block) {
+        vcpi.spare.retain(|p| !in_block(p));
+        cpu.bus.xms.release_page(block);
+    }
     OK
 }
 

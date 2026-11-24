@@ -174,10 +174,7 @@ pub(super) fn set_console_cursor_position(cpu: &mut Cpu, args: &[u32]) -> Option
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
-    cpu.bus.cursor_x = x as usize;
-    cpu.bus.cursor_y = y as usize;
-    cpu.bus.write_8(0x450, x as u8);
-    cpu.bus.write_8(0x451, y as u8);
+    cpu.bus.set_console_cursor(x as usize, y as usize);
     Some(TRUE)
 }
 

@@ -140,6 +140,7 @@ pub fn handle_inline_bop(cpu: &mut Cpu, service: u8) {
         crate::bios::SERVICE_KBD_INTERCEPTED => crate::keyboard::bios_intercepted(cpu),
         crate::bios::SERVICE_IPX => crate::net::ipx::api(cpu),
         crate::bios::SERVICE_IPX_ESR => crate::net::ipx::esr(cpu),
+        crate::bios::SERVICE_BREAK_RETURN => int21::break_return(cpu),
         _ => cpu.bus.log_string(&format!(
             "[CPU] Unknown inline emulator service {:02X}",
             service
@@ -221,6 +222,20 @@ pub fn teletype(cpu: &mut Cpu, text: &[u8]) {
             cpu.set_bx(0x0007);
             int10::handle(cpu);
         }
+    });
+    cpu.restore(&saved);
+}
+
+/// Call the video BIOS's function AX with BX, CX and DX (INT 10h), keeping
+/// the caller's registers.
+pub fn video_service(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
+    let saved = cpu.snapshot();
+    video_bios(cpu, (ax >> 8) as u8, ax as u8, |cpu| {
+        cpu.set_ax(ax);
+        cpu.set_bx(bx);
+        cpu.set_cx(cx);
+        cpu.set_dx(dx);
+        int10::handle(cpu);
     });
     cpu.restore(&saved);
 }

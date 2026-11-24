@@ -18,9 +18,12 @@ const DF: u32 = 0x0400;
 /// wrap in 16-bit code), and `stack32` the stack's width (SS's B flag),
 /// which blocks are translated for. With `system`, the code generator has
 /// the operations of segment loads, port I/O, STI and REP string loops.
-/// `real`: the block runs in real mode, where far transfers are translated.
+/// `real`: the block runs in real mode, where far transfers are translated;
+/// `v86`: in virtual-8086 mode, where they are translated as in real mode,
+/// and segment loads too (`Uop::LoadSeg`, `Uop::CsReal`).
 /// With `segments`, the code generator has the loads of data segment
-/// registers in protected mode too (in real mode it always has them).
+/// registers in protected mode too (in real and virtual-8086 mode it always
+/// has them).
 /// With `fpu`, FPU instructions are translated, for `fast_fpu`'s arithmetic
 /// (`Cpu::fpu_fast`) if set. `i486`: the CPU is a 486 or later, which
 /// has BSWAP and XADD (a 386 faults on them). `p6`: the CPU is a P6,
@@ -36,20 +39,23 @@ pub fn translate(
     fpu: bool,
     fast_fpu: bool,
     real: bool,
+    v86: bool,
     i486: bool,
     p6: bool,
     simd: u8,
 ) -> Option<Vec<Uop>> {
     use Mnemonic::*;
     let mut u = Vec::with_capacity(8);
+    // Segments are loaded, and far transfers made, as in real mode.
+    let real_segs = real || v86;
     let ok = match instr.mnemonic() {
-        Mov if (segments || real) && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
-            mov_to_seg(instr, stack32, real, &mut u)
+        Mov if (segments || real_segs) && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
+            mov_to_seg(instr, stack32, &mut u)
         }
-        Pop if (segments || real) && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
-            pop_seg(instr, stack32, real, &mut u)
+        Pop if (segments || real_segs) && instr.op0_kind() == OpKind::Register && instr.op0_register().is_segment_register() => {
+            pop_seg(instr, stack32, &mut u)
         }
-        Les | Lds | Lfs | Lgs if segments || real => far_pointer(instr, &mut u),
+        Les | Lds | Lfs | Lgs if segments || real_segs => far_pointer(instr, &mut u),
         Lar if segments && !real => lar(instr, &mut u),
         In if system => port_in(instr, &mut u),
         Out if system => port_out(instr, &mut u),
@@ -132,10 +138,14 @@ pub fn translate(
         Btc => bit_op(instr, BitKind::Complement, &mut u),
         Bsf => bit_scan(instr, true, &mut u),
         Bsr => bit_scan(instr, false, &mut u),
-        Jmp if instr.is_jmp_far() || instr.is_jmp_far_indirect() => real && far_jump(instr, next, stack32, false, &mut u),
-        Call if (instr.is_call_far() || instr.is_call_far_indirect()) && real => far_jump(instr, next, stack32, true, &mut u),
+        Jmp if instr.is_jmp_far() || instr.is_jmp_far_indirect() => {
+            real_segs && far_jump(instr, next, stack32, false, &mut u)
+        }
+        Call if (instr.is_call_far() || instr.is_call_far_indirect()) && real_segs => {
+            far_jump(instr, next, stack32, true, &mut u)
+        }
         Call if instr.is_call_far() || instr.is_call_far_indirect() => system && far_call_pm(instr, next, stack32, &mut u),
-        Retf if real => far_ret(instr, stack32, &mut u),
+        Retf if real_segs => far_ret(instr, stack32, &mut u),
         Retf => system && far_ret_pm(instr, stack32, &mut u),
         Jmp => jmp(instr, &mut u),
         Jo | Jno | Jb | Jae | Je | Jne | Jbe | Ja | Js | Jns | Jp | Jnp | Jl | Jge | Jle | Jg => jcc(instr, next, &mut u),
@@ -840,9 +850,9 @@ fn mov_from_seg(instr: &Instruction, seg: Seg, u: &mut Vec<Uop>) -> bool {
 }
 
 /// The segment register a MOV or POP loads, but CS, which can't be loaded
-/// so, and in real mode SS.
-fn loaded_seg(instr: &Instruction, real: bool) -> Option<Seg> {
-    Seg::from_register(instr.op0_register()).filter(|&s| s != Seg::CS && !(real && s == Seg::SS))
+/// so.
+fn loaded_seg(instr: &Instruction) -> Option<Seg> {
+    Seg::from_register(instr.op0_register()).filter(|&s| s != Seg::CS)
 }
 
 /// After a load of SS, as `jit_fallback` goes on after one: the block stops
@@ -855,8 +865,8 @@ fn ss_loaded(seg: Seg, stack32: bool, u: &mut Vec<Uop>) {
 }
 
 /// MOV Sreg, r/m16: the selector from a register's low word or memory.
-fn mov_to_seg(instr: &Instruction, stack32: bool, real: bool, u: &mut Vec<Uop>) -> bool {
-    let Some(seg) = loaded_seg(instr, real) else { return false };
+fn mov_to_seg(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let Some(seg) = loaded_seg(instr) else { return false };
     match instr.op1_kind() {
         OpKind::Register => {
             let Some(r) = gpr(instr.op1_register()).filter(|r| r.size > 1) else { return false };
@@ -878,8 +888,8 @@ fn mov_to_seg(instr: &Instruction, stack32: bool, real: bool, u: &mut Vec<Uop>) 
 /// POP Sreg, as `transfer::pop`: only the selector's word read, the
 /// segment loaded, then the stack pointer moved by the operand's size (at
 /// the width of the stack popped, where POP SS switches stacks).
-fn pop_seg(instr: &Instruction, stack32: bool, real: bool, u: &mut Vec<Uop>) -> bool {
-    let Some(seg) = loaded_seg(instr, real) else { return false };
+fn pop_seg(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+    let Some(seg) = loaded_seg(instr) else { return false };
     let size = match instr.stack_pointer_increment() {
         2 => 2,
         4 => 4,

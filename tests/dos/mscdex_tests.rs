@@ -326,6 +326,80 @@ fn read_long_cooked_and_raw() {
     assert_eq!(request(&mut cpu, 0x80, &params), 0x8108);
 }
 
+/// A CopyLok disc as Redump dumps it, mounted as D:. It has an ISO 9660
+/// file system whose volume descriptor carries the protection's mark,
+/// then a band of 8 sectors as redumper writes those a drive can't read
+/// (sync, header, and 55h for the rest), then 4 good sectors. Returns the
+/// first sector of the band.
+fn copylok_disc(name: &str) -> (Box<Cpu>, u32) {
+    let dir = cdimage::scratch(&format!("mscdex_{}", name));
+    fs::create_dir_all(dir.join("c")).unwrap();
+    let mut image = iso("TESTDISC", &[file("HELLO.TXT", b"hello")]);
+    // The early variant's mark: its first dword and the word after it in
+    // the application use field, at byte 883 of the descriptor.
+    let at = 16 * 2048 + 883;
+    image[at..at + 6].copy_from_slice(&[0xE1, 0x8A, 0xD3, 0x4E, 0xAD, 0xD1]);
+    let band = (image.len() / 2048) as u32;
+    image.extend(vec![0x77; 12 * 2048]);
+    let mut raw = cdimage::mode1_2352(&image);
+    for lba in band..band + 8 {
+        let at = lba as usize * 2352;
+        raw[at + 16..at + 2352].fill(0x55);
+    }
+    fs::write(dir.join("GAME.BIN"), raw).unwrap();
+    let cue = dir.join("GAME.CUE");
+    fs::write(
+        &cue,
+        "FILE \"GAME.BIN\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n",
+    )
+    .unwrap();
+    let mut cpu = Cpu::new(dir.join("c"));
+    cpu.bus
+        .mount_drive(3, &cue, MountOptions::default(), false)
+        .unwrap();
+    (cpu, band)
+}
+
+#[test]
+fn a_copylok_band_fails_to_read() {
+    let (mut cpu, band) = copylok_disc("copylok");
+    // Absolute read (1508h) of a sector of the band, and of 3 sectors
+    // that end in it: a data error.
+    cpu.set_es(0x3100);
+    cpu.set_bx(0);
+    for (first, count) in [(band + 3, 1), (band - 2, 3)] {
+        cpu.set_si((first >> 16) as u16);
+        cpu.set_di(first as u16);
+        cpu.set_dx(count);
+        int2f(&mut cpu, 0x1508, 0, 3);
+        assert!(cpu.get_cpu_flag(CpuFlags::CF), "sector {} on", first);
+        assert_eq!(cpu.ax(), 23, "data error, sector {} on", first);
+    }
+    // READ LONG through the device driver, cooked and raw: a CRC error.
+    for raw in [0, 1] {
+        let mut params = vec![0, 0x00, 0x00, 0x00, 0x31, 1, 0];
+        params.extend(le(band + 7));
+        params.push(raw);
+        assert_eq!(request(&mut cpu, 0x80, &params), 0x8104, "raw {}", raw);
+    }
+
+    // The sectors before and after the band read.
+    for lba in [band - 1, band + 8, band + 11] {
+        cpu.set_es(0x3100);
+        cpu.set_si(0);
+        cpu.set_di(lba as u16);
+        cpu.set_dx(1);
+        int2f(&mut cpu, 0x1508, 0, 3);
+        assert!(!cpu.get_cpu_flag(CpuFlags::CF), "sector {}", lba);
+        assert_eq!(read_raw(&mut cpu, lba, 1), 0x0100, "sector {}", lba);
+    }
+    assert_eq!(
+        cpu.bus.read_8(BUFFER + 16),
+        0x77,
+        "the sector after the band, raw"
+    );
+}
+
 /// Seek (83h) to sector `lba` in HSG addressing.
 fn seek(cpu: &mut Cpu, lba: u32) -> u16 {
     let mut params = vec![0, 0, 0, 0, 0, 0, 0];

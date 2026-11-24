@@ -43,6 +43,10 @@ const FCBS: u16 = 4;
 /// The verify flag (INT 21h AH=2Eh and 54h): 01h when DOS is to read
 /// back what it writes to disk, 00h (as at boot) when not.
 pub const VERIFY_FLAG: u16 = 0x0300;
+/// The Ctrl+Break check flag (INT 21h AX=3300h to 3302h): 01h when DOS
+/// checks for Ctrl+C in every call, 00h (as at boot) when only in the
+/// console's.
+pub const BREAK_FLAG: u16 = 0x0301;
 /// A byte VSHARE.386 sets while Windows runs, at its MS-DOS 5 offset.
 const VSHARE_FLAG: u16 = 0x0303;
 /// The zero-terminated list of the places to patch for critical sections
@@ -57,6 +61,9 @@ pub const SDA_ALWAYS: u16 = 0x001A;
 /// The InDOS flag (AH=34h), after the critical error flag.
 pub const INDOS: u16 = SDA + 0x01;
 const SDA_AX: u16 = SDA + 0x1A;
+/// The caller's SP while DOS runs its INT 23h handler, where it is again
+/// when the handler returns with an IRET, and two less after a RETF.
+pub const SDA_BREAK_SP: u16 = SDA + 0x12;
 /// The machine number SHARE tells processes apart by.
 const SDA_USER_ID: u16 = SDA + 0x1E;
 /// The media ID byte AH=1Bh and 1Ch point DS:BX at.
@@ -102,7 +109,7 @@ const _: () = assert!(
     DEVICE_HEADERS + DEVICES.len() as u16 * DEVICE_HEADER_SIZE <= FCB_TABLE
 );
 const _: () = assert!(FCB_TABLE + 6 + FCBS * crate::dos_files::ENTRY_SIZE as u16 <= VERIFY_FLAG);
-const _: () = assert!(VERIFY_FLAG < VSHARE_FLAG);
+const _: () = assert!(VERIFY_FLAG < BREAK_FLAG && BREAK_FLAG < VSHARE_FLAG);
 const _: () = assert!(VSHARE_FLAG < CRIT_PATCHES);
 
 /// What DOS keeps after its data segment, below the first MCB: the file

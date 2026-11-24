@@ -22,8 +22,10 @@ pub const SIGN_SHIFT: u32 = 79;
 pub const EXP_SHIFT: u32 = 64;
 pub const INT_BIT_SHIFT: u32 = 63;
 
-// f80 emulation
-// Source: https://github.com/sha0coder/mwemu
+// f80 emulation, from libmwemu 0.23's src/fpu/f80.rs by sha0coder
+// (https://github.com/sha0coder/mwemu), which crates.io publishes under
+// the MIT licence. Its notice (Copyright (c) sha0coder) and the licence
+// text are in THIRD-PARTY-NOTICES, section 1.
 #[derive(Copy, Clone)]
 pub struct F80 {
     pub st: u128,

@@ -23,12 +23,13 @@ const SOUND_LOADS: [u16; 2] = [4, SOUND_VERSION];
 const DOS_VERSION: u16 = 6;
 const CD_HEAD_VERSION: u16 = 1;
 const VCPI_VERSION: u16 = 1;
+const LOCK_VERSION: u16 = 1;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
-const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 86;
+const DPMI_VERSION: u16 = 3;
+const WIN32_VERSION: u16 = 87;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -46,9 +47,11 @@ const WIN32_VERSION: u16 = 86;
 /// (`ole32::DROP_TARGETS`), 71's to 82's no ExitWindowsExec command
 /// line (`boot::EXIT_EXEC`), 71's to 83's not the 16-bit OLE modules'
 /// state (`win16::ole2::OLE16`), 71's to 84's no DOS program a
-/// Windows program started (`dosvm::DOSVM_SAVED`), and 85's not the
-/// folder it starts in (`dosvm::DOSVM_DIRECTORY`).
-const WIN32_LOADS: [u16; 16] = [
+/// Windows program started (`dosvm::DOSVM_SAVED`), 85's not the folder
+/// it starts in (`dosvm::DOSVM_DIRECTORY`), and 71's to 86's no
+/// real-mode calls through VWIN32's DPMI dispatch
+/// (`realmode::Kind::Vxd`, which they load without).
+const WIN32_LOADS: [u16; 17] = [
     71,
     72,
     73,
@@ -64,6 +67,7 @@ const WIN32_LOADS: [u16; 16] = [
     83,
     84,
     85,
+    86,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -71,6 +75,7 @@ const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
 const AWE_VERSION: u16 = 1;
 const ADLIB_GOLD_VERSION: u16 = 1;
+const CMS_VERSION: u16 = 2;
 const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 3;
 const ET4000_VERSION: u16 = 1;
@@ -86,6 +91,7 @@ const PIT2_VERSION: u16 = 1;
 const PIT_8254_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
 const KEY_QUEUE_VERSION: u16 = 1;
+const RTC_ALARM_VERSION: u16 = 1;
 const TYPEMATIC_VERSION: u16 = 1;
 const FRAME_CAP_VERSION: u16 = 1;
 
@@ -102,6 +108,9 @@ macro_rules! load_all {
 impl Bus {
     /// Write the bus's sections.
     pub(crate) fn save_state(&self, w: &mut Writer) {
+        // Where the shell's own cursor was kept: the BIOS's now, so that a
+        // build that still has it loads the cursor the screen has.
+        let (cursor_x, cursor_y) = &self.console_cursor();
         let Bus {
             ram,
             boot,
@@ -122,6 +131,7 @@ impl Bus {
             kbc,
             kbc_release_at: _,
             rtc_next: _,
+            rtc_alarm_next: _,
             a20_mask,
             cmos,
             pit_divisor,
@@ -152,8 +162,6 @@ impl Bus {
             sda_written: _,
             search_handles,
             search_serial,
-            cursor_x,
-            cursor_y,
             post_code,
             refresh_toggle,
             speaker_on,
@@ -190,6 +198,7 @@ impl Bus {
             awe_rom: _,
             awe_ram_kb: _,
             tandy_sound,
+            cms,
             lpt_dac,
             cdaudio,
             xms,
@@ -210,6 +219,7 @@ impl Bus {
             dos_version: _,
             ide_hard_disks: _,
             floppy_controller: _,
+            ansi_sys: _,
             boot_cdrom: _,
             idle_hint: _,
             disk_notices: _,
@@ -314,6 +324,11 @@ impl Bus {
         w.section(b"TYPM", TYPEMATIC_VERSION, |w| {
             kbd.save_typematic(kbc.typematic, w)
         });
+        // Where the look for the clock's alarm got to, while the alarm is
+        // enabled: only then, so other states load as they did.
+        if let Some(at) = cmos.alarm_look() {
+            w.section(b"RTCA", RTC_ALARM_VERSION, |w| at.save(w));
+        }
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga);
             // A ToadForce's memory is saved with what its host renderer
@@ -378,6 +393,11 @@ impl Bus {
         // VCPI's, in a section of its own so states saved before it load
         // (with none of its pages handed out).
         w.section(b"VCPI", VCPI_VERSION, |w| vcpi.save(w));
+        // The locked ranges of open files (INT 21h AH=5Ch), only with any,
+        // so other states are as they were.
+        if !disk.locks().is_empty() {
+            w.section(b"LOCK", LOCK_VERSION, |w| disk.locks().to_vec().save(w));
+        }
         // The Ultrasound's memory first, where it stays in place for
         // rewind's deltas (rewind.rs) whatever the queues after it hold.
         w.section(b"SOUN", SOUND_VERSION, |w| {
@@ -409,6 +429,10 @@ impl Bus {
                 adlib_gold_line.save(w);
             });
         }
+        // The CMS chips, likewise.
+        if let Some(cms) = cms {
+            w.section(b"CMS ", CMS_VERSION, |w| cms.save(w));
+        }
         // A 3dfx card, whose memory comes first, and only on a machine
         // with one, so states of machines without load as they did.
         if let Some(voodoo) = voodoo {
@@ -436,7 +460,10 @@ impl Bus {
         }
         // The DPMI host, while it has clients.
         if dpmi.active() {
-            w.section(b"DPMI", DPMI_VERSION, |w| dpmi.save(w));
+            w.section(b"DPMI", DPMI_VERSION, |w| {
+                dpmi.save(w);
+                dpmi.save_ldt_limits(w);
+            });
         }
         // The built-in Windows, while it runs a program or is about to.
         if win32.active() || win32.pending() {
@@ -496,6 +523,7 @@ impl Bus {
             kbc,
             kbc_release_at: _,
             rtc_next: _,
+            rtc_alarm_next: _,
             a20_mask,
             cmos,
             pit_divisor,
@@ -526,8 +554,6 @@ impl Bus {
             sda_written: _,
             search_handles,
             search_serial,
-            cursor_x,
-            cursor_y,
             post_code,
             refresh_toggle,
             speaker_on,
@@ -564,6 +590,7 @@ impl Bus {
             awe_rom: _,
             awe_ram_kb: _,
             tandy_sound,
+            cms,
             lpt_dac,
             cdaudio,
             xms,
@@ -582,6 +609,7 @@ impl Bus {
             dos_version: _,
             ide_hard_disks: _,
             floppy_controller: _,
+            ansi_sys: _,
             boot_cdrom: _,
             idle_hint: _,
             disk_notices: _,
@@ -648,13 +676,16 @@ impl Bus {
             *code_blocks = vec![0; len >> super::GEN_SHIFT];
         }
         ram.copy_from_slice(section.take(len)?);
+        // Where the shell's own cursor was kept. The BIOS's, in the RAM,
+        // is the cursor now.
+        let (mut cursor_x, mut cursor_y) = (0usize, 0usize);
         let mut section = r.section_of(b"CORE", &CORE_LOADS)?;
         load_all!(&mut section;
             keyboard_buffer, kbd, kbc, a20_mask, cmos,
             pit_divisor, pit_read_msb, pit_mode, pit_write_msb,
             pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
             pit0, clock, pic, dma, joystick,
-            dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
+            dta_segment, dta_offset, search_handles, search_serial, &mut cursor_x, &mut cursor_y,
             post_code, refresh_toggle, speaker_on,
         );
         if section.version() == Some(9) {
@@ -730,6 +761,11 @@ impl Bus {
         } else {
             kbd.forget_typematic()
         };
+        if r.next_is(b"RTCA") {
+            let mut at = 0i64;
+            at.load(&mut r.section(b"RTCA", RTC_ALARM_VERSION)?)?;
+            cmos.set_alarm_look(at);
+        }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         *last_present = None;
@@ -799,6 +835,11 @@ impl Bus {
         } else {
             *vcpi = crate::vcpi::Vcpi::default();
         }
+        if r.next_is(b"LOCK") {
+            let mut locks = Vec::new();
+            locks.load(&mut r.section(b"LOCK", LOCK_VERSION)?)?;
+            disk.set_locks(locks);
+        }
         let mut section = r.section_of(b"SOUN", &SOUND_LOADS)?;
         load_device(gus, "Gravis Ultrasound", &mut section)?;
         load_all!(&mut section; opl, mpu, gus_line, tandy_sound);
@@ -831,6 +872,16 @@ impl Bus {
             (false, None) => {}
             (true, None) => return Err(StateError::Mismatch("it has an AdLib Gold and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has an AdLib Gold and it hasn't".into())),
+        }
+        match (r.next_is(b"CMS "), cms) {
+            (true, Some(cms)) => cms.load(&mut r.section(b"CMS ", CMS_VERSION)?)?,
+            (false, None) => {}
+            (true, None) => {
+                return Err(StateError::Mismatch("it has CMS chips and this machine hasn't".into()));
+            }
+            (false, Some(_)) => {
+                return Err(StateError::Mismatch("this machine has CMS chips and it hasn't".into()));
+            }
         }
         // A state saved before the cap had its section has the 3dfx
         // card's last capped frame, which the card's load puts in.
@@ -869,7 +920,11 @@ impl Bus {
         }
         dpmi.reset();
         if r.next_is(b"DPMI") {
-            dpmi.load(&mut r.section(b"DPMI", DPMI_VERSION)?)?;
+            // Version 2 has no LDT limits (`Dpmi::load_ldt_limits`).
+            let mut section = r.section_of(b"DPMI", &[2, DPMI_VERSION])?;
+            dpmi.load(&mut section)?;
+            let version = section.version();
+            dpmi.load_ldt_limits(&mut section, version)?;
         }
         win32.reset();
         if r.next_is(b"W32 ") {
@@ -948,9 +1003,10 @@ impl Bus {
         // and the IPX driver's node is the state's.
         self.net.ipx_queue.clear();
         self.net.ipx_installed();
-        // The clock's periodic interrupt as the state's registers have it,
-        // and the keyboard's next byte at once.
+        // The clock's periodic interrupt and the look for its alarm as the
+        // state's registers have them, and the keyboard's next byte at once.
         self.rtc_next = None;
+        self.rtc_alarm_next = None;
         self.schedule_rtc();
         self.kbc_release_at = None;
         self.kbc.after_load();
@@ -959,6 +1015,9 @@ impl Bus {
         // SDA holds: until the next DOS call writes it, nothing in it
         // counts as the program's.
         self.sda_written = None;
+        // DOS's Ctrl+C code in the ROM, which a state of an older build
+        // lacks.
+        crate::bios::write_break_code(self);
     }
 
     /// `after_load` for a state loaded into the machine that saved it,
@@ -1100,6 +1159,7 @@ mod tests {
         (84, 0x3A9C_D1FD_6601_1D0E), // the 16-bit OLE modules' state
         (85, 0xD065_06B4_D1EE_C645), // the DOS program a Windows program started
         (86, 0x64E2_699F_8225_8EB3), // the DOS program's folder and lent memory
+        (87, 0x3CCD_B401_AB6D_F5EF), // real-mode calls through VWIN32's DPMI dispatch
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

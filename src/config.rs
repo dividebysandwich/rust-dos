@@ -239,6 +239,8 @@ pub struct Config {
     pub dos_high: Option<bool>,
     /// The DOS version programs are told (`dos_version`).
     pub dos_version: Option<DosVersion>,
+    /// DOS's console takes ANSI.SYS's escape sequences (`ansi_sys`).
+    pub ansi_sys: Option<bool>,
     /// A booted system's hard disks on the IDE channels (`ide_hard_disks`).
     pub ide_hard_disks: Option<bool>,
     /// A booted system has a CD-ROM drive with no disc in it (`boot_cdrom`).
@@ -521,8 +523,9 @@ pub fn load(
         }
     };
 
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
+    // A DOSBox configuration is often in code page 437 (`decode_cp437`).
+    let text = match fs::read(&path) {
+        Ok(bytes) => crate::dosstr::decode_cp437(&bytes),
         Err(e) => {
             let msg = format!("cannot read {}: {}", path.display(), e);
             if source == ConfigSource::CommandLine {

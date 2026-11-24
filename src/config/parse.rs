@@ -411,6 +411,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.floppy_controller = Some(on),
                             None => warn(format!("invalid floppy_controller '{}' (true or false)", value)),
                         },
+                        "ansi_sys" => match parse_bool(value) {
+                            Some(on) => config.ansi_sys = Some(on),
+                            None => warn(format!("invalid ansi_sys '{}' (true or false)", value)),
+                        },
                         "dos_version" => match DosVersion::parse(value) {
                             Some(version) => config.dos_version = Some(version),
                             None => warn(format!("invalid dos_version '{}' (such as 5.00, 6.22 or 7.10)", value)),

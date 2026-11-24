@@ -40,10 +40,12 @@ unfiltered: crisper, but harsher.
 
 # Sound Blaster coupling {#sb-coupling}
 
-The capacitor on the real card's output. A program can leave the card's
-DAC at a level other than silence; with this **on**, that level fades
-out within a fraction of a second, as on the real card. **off** keeps it
-in the mix as a constant offset, heard as a thump when it changes.
+The capacitor on the real card's output, the Sound Blaster's, the
+AdLib's or the AdLib Gold's. A program can leave the card's DAC or its
+FM synthesizer at a level other than silence; with this **on**, that
+level fades out within a fraction of a second, as on the real card.
+**off** keeps it in the mix as a constant offset, heard as a thump when
+it changes.
 
 # Reverb {#reverb}
 

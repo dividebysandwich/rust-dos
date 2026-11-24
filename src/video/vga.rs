@@ -352,6 +352,17 @@ impl VgaCard {
         self.get_rgb(self.dac_index(value))
     }
 
+    /// Whether the card answers at A0000h-AFFFFh, its graphics window. An
+    /// EGA or VGA decodes the addresses the Graphics Controller's
+    /// Miscellaneous register (GR06) maps its memory at: A0000h for 128 KB
+    /// or 64 KB (Memory Map Select 00b and 01b), B0000h or B8000h for 32 KB
+    /// (10b and 11b, the text modes'). Outside them the processor reaches
+    /// no memory of the card: reads find the open bus, and writes go
+    /// nowhere. The other adapters keep the window as they had it.
+    pub fn maps_graphics_window(&self) -> bool {
+        !self.adapter.ega_bios() || self.graphics_regs[0x06] & 0x08 == 0
+    }
+
     /// Where the text and CGA modes' memory is, how big the window onto it
     /// is, and where the memory wraps (a mask): 32 KB at B8000h, or at
     /// B0000h when the Graphics Miscellaneous register maps memory there
@@ -366,6 +377,28 @@ impl VgaCard {
         }
         let base = if self.graphics_regs[0x06] & 0x0C == 0x08 { 0xB0000 } else { 0xB8000 };
         (base, 0x8000, 0x7FFF)
+    }
+
+    /// `text_window` while the card answers there: always on the CGA,
+    /// Tandy, PCjr and Hercules, and on an EGA or VGA only while GR06's
+    /// Memory Map Select maps the memory at B0000h (10b) or B8000h (11b).
+    #[inline]
+    pub fn decoded_text_window(&self) -> Option<(usize, usize, usize)> {
+        if !self.adapter.ega_bios() {
+            return Some(self.text_window());
+        }
+        match self.graphics_regs[0x06] & 0x0C {
+            0x08 => Some((0xB0000, 0x8000, 0x7FFF)),
+            0x0C => Some((0xB8000, 0x8000, 0x7FFF)),
+            _ => None,
+        }
+    }
+
+    /// Whether GR06 maps an EGA's or VGA's memory at A0000h-BFFFFh, 128 KB
+    /// (Memory Map Select 00b): B0000h-BFFFFh reach the planes from offset
+    /// 10000h on, as the window from A0000h goes on.
+    pub fn maps_128k(&self) -> bool {
+        self.adapter.ega_bios() && self.graphics_regs[0x06] & 0x0C == 0
     }
 
     /// Whether attribute bit 7 makes characters blink rather than select

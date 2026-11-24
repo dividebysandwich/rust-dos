@@ -396,3 +396,92 @@ fn graphics_pixels_xor_and_scroll() {
     int10(&mut cpu, 0x0D00, 0, 100, 100);
     assert_eq!(cpu.get_al(), 2);
 }
+
+#[test]
+fn alternate_print_screen_points_int_05h_at_the_bios_s_routine() {
+    // Ultima VIII's INSTALL selects it at startup: INT 10h AH=12h BL=20h
+    // points INT 05h at the video BIOS's print screen, over a hook a
+    // program left there, and returns nothing.
+    let mut cpu = machine(0x03);
+    let routine = (0xF000, rust_dos::bios::IRET_HANDLER);
+    cpu.bus.write_16(0x14, 0x5678);
+    cpu.bus.write_16(0x16, 0x1234);
+    int10(&mut cpu, 0x1200, 0x0020, 0x1111, 0x2222);
+    assert_eq!((cpu.bus.read_16(0x16), cpu.bus.read_16(0x14)), routine);
+    assert_eq!(
+        (cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()),
+        (0x1200, 0x0020, 0x1111, 0x2222)
+    );
+}
+
+#[test]
+fn the_text_modes_map_the_memory_at_b8000h_alone() {
+    // Mode 3 maps the VGA's memory at B8000h (GR06's Memory Map Select
+    // 11b): A0000h reaches none of it. Ultima VIII's INSTALL keeps a
+    // block of its own at A000:0000 there, which must not show.
+    let mut cpu = machine(0x03);
+    int10(&mut cpu, 0x0941, 0x0007, 1, 0);
+    let screen: Vec<u8> = (0..16).map(|i| cpu.bus.read_8(0xB8000 + i)).collect();
+    cpu.bus.write_32(0xA0000, 0x89AB_CDEF);
+    for (i, &b) in b"C:\\0".iter().enumerate() {
+        cpu.bus.write_8(0xA0004 + i, b);
+    }
+    cpu.bus.write_16(0xA0008, 0x1234);
+    let after: Vec<u8> = (0..16).map(|i| cpu.bus.read_8(0xB8000 + i)).collect();
+    assert_eq!(after, screen, "the text screen is as the BIOS left it");
+    assert_eq!(cpu.bus.read_32(0xA0000), 0xFFFF_FFFF, "the open bus");
+    assert_eq!(
+        cell_colors(&picture(&mut cpu), 1, 0),
+        [(0, 0, 0)],
+        "the second cell stays blank"
+    );
+
+    // Mapped at A0000h (64 KB, as Windows' VDD maps it to read a text
+    // screen through the planes), the planes are there in odd/even mode:
+    // the character in plane 0, its attribute in plane 1.
+    cpu.bus.io_write(0x3CE, 0x06);
+    cpu.bus.io_write(0x3CF, 0x06);
+    assert_eq!(cpu.bus.read_8(0xA0000), b'A');
+    assert_eq!(cpu.bus.read_8(0xA0001), 0x07);
+    cpu.bus.write_8(0xA0002, b'B');
+    assert_eq!(cpu.bus.vga.vram_text[2], b'B');
+}
+
+#[test]
+fn b0000h_and_b8000h_answer_only_where_gr06_maps_the_memory() {
+    // Mode 13h maps 64 KB at A0000h (Memory Map Select 01b): B0000h and
+    // B8000h reach nothing of the VGA. Writes go nowhere, reads find the
+    // open bus.
+    let mut cpu = machine(0x13);
+    let text = cpu.bus.vga.vram_text.clone();
+    cpu.bus.write_8(0xB8000, b'A');
+    cpu.bus.write_16(0xB8010, 0x1234);
+    cpu.bus.write_32(0xB0000, 0x89AB_CDEF);
+    assert!(cpu.bus.vga.vram_text == text, "the text memory is as it was");
+    assert_eq!(cpu.bus.read_8(0xB8000), 0xFF);
+    assert_eq!(cpu.bus.read_16(0xB8010), 0xFFFF);
+    assert_eq!(cpu.bus.read_32(0xB0000), 0xFFFF_FFFF);
+
+    // Mode 3 (11b): the 32 KB at B8000h, and nothing at B0000h.
+    let mut cpu = machine(0x03);
+    cpu.bus.write_8(0xB8000, b'A');
+    assert_eq!(cpu.bus.read_8(0xB8000), b'A');
+    cpu.bus.write_8(0xB0000, 0x55);
+    assert_eq!(cpu.bus.read_8(0xB0000), 0xFF);
+
+    // The monochrome window (10b): B0000h, and nothing at B8000h.
+    cpu.bus.io_write(0x3CE, 0x06);
+    cpu.bus.io_write(0x3CF, 0x0A);
+    cpu.bus.write_8(0xB0002, b'B');
+    assert_eq!(cpu.bus.vga.vram_text[2], b'B');
+    assert_eq!(cpu.bus.read_8(0xB0000), b'A');
+    assert_eq!(cpu.bus.read_8(0xB8000), 0xFF);
+
+    // 128 KB from A0000h (00b): B0000h-BFFFFh go on into the planes, the
+    // offsets past 64 KB of the window.
+    let mut cpu = machine(0x12);
+    cpu.bus.io_write(0x3CE, 0x06);
+    cpu.bus.io_write(0x3CF, 0x01);
+    cpu.bus.write_8(0xB8005, 0x5A);
+    assert_eq!(cpu.bus.read_8(0xB8005), 0x5A);
+}

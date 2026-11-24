@@ -2,6 +2,7 @@
 //! mix, the mute, which silences the output device but not the samples
 //! handed on for recordings, and the filters and effects.
 
+use rust_dos::adlibgold::AdlibGoldConfig;
 use rust_dos::audio::{AudioOutput, pump_audio};
 use rust_dos::bus::Bus;
 use rust_dos::mixer::{Channel, ChorusPreset, MixerSettings, ReverbPreset, SbFilter};
@@ -321,6 +322,113 @@ fn the_dac_level_held_fades_out_of_the_mix() {
         let tail = &coupled[coupled.len() - 4410..];
         assert!(tail.iter().all(|s| s.abs() <= 1), "{model:?}: {tail:?}");
     }
+}
+
+/// The left samples of the second after an FM note is stopped the way
+/// Covert Action's AdLib driver stops its sounds (issue 1689): the
+/// frequency set to 0 and the key released, with a release rate of 0.
+/// The phase stops and the envelope stays, so the chip holds its output at
+/// a level. With the capacitor on the card's output (`sb_coupling`) or
+/// without, on an AdLib or an AdLib Gold.
+fn fm_hold(coupling: bool, gold: bool) -> Vec<i16> {
+    let mut bus = bus();
+    bus.set_mixer(unfiltered_with(|m| m.sb_coupling = coupling));
+    bus.configure_adlib_gold(gold.then(AdlibGoldConfig::default));
+    let write = |bus: &mut Bus, reg: u8, value: u8| {
+        bus.io_write(0x388, reg);
+        bus.io_write(0x389, value);
+    };
+    // A plain sine at full level, attack at once, no decay or release.
+    for (reg, value) in [
+        (0x20, 0x01),
+        (0x40, 0x3F),
+        (0x60, 0xF0),
+        (0x80, 0x00),
+        (0x23, 0x01),
+        (0x43, 0x00),
+        (0x63, 0xF0),
+        (0x83, 0x00),
+        (0xC0, 0x30),
+        (0xA0, 0x98),
+        (0xB0, 0x31),
+    ] {
+        write(&mut bus, reg, value);
+    }
+    wait_ms(&mut bus, 7);
+    samples(&mut bus);
+    write(&mut bus, 0xA0, 0x00);
+    write(&mut bus, 0xB0, 0x00);
+    let mut left = Vec::new();
+    for _ in 0..100 {
+        wait_ms(&mut bus, 10);
+        left.extend(samples(&mut bus).chunks(2).map(|frame| frame[0]));
+    }
+    left
+}
+
+/// The level the FM chip holds after such a note fades out of the mix
+/// through the capacitor on the card's output, as on a real AdLib or
+/// Sound Blaster: a second later the output is back at silence. Without
+/// the capacitor it stays as a constant offset. An AdLib Gold's output
+/// stage passes the level on to the same capacitor.
+#[test]
+fn the_fm_level_held_fades_out_of_the_mix() {
+    for gold in [false, true] {
+        let raw = fm_hold(false, gold);
+        let held = *raw.last().unwrap();
+        assert!(held.unsigned_abs() > 1000, "{held}, gold {gold}");
+        let tail = &raw[raw.len() - 4410..];
+        assert!(tail.iter().all(|&s| s == held), "the chip holds its level, gold {gold}");
+        let coupled = fm_hold(true, gold);
+        let tail = &coupled[coupled.len() - 4410..];
+        assert!(tail.iter().all(|s| s.abs() <= 1), "gold {gold}: {tail:?}");
+    }
+}
+
+/// The left samples of the second after the AdLib Gold's MMA plays a
+/// FIFO of one level, 6000h, on channel 0 at 11 kHz and runs out of
+/// samples: its DAC holds the last one. With the capacitor on the card's
+/// output (`sb_coupling`) or without.
+fn gold_dac_hold(coupling: bool) -> Vec<i16> {
+    let mut bus = bus();
+    bus.set_mixer(unfiltered_with(|m| m.sb_coupling = coupling));
+    bus.configure_adlib_gold(Some(AdlibGoldConfig::default()));
+    let mma = |bus: &mut Bus, reg: u8, value: u8| {
+        bus.io_write(0x38C, reg);
+        bus.io_write(0x38D, value);
+    };
+    mma(&mut bus, 0x09, 0x80);
+    mma(&mut bus, 0x0C, 0x00);
+    mma(&mut bus, 0x0A, 0xFF);
+    for _ in 0..128 {
+        mma(&mut bus, 0x0B, 0x60);
+    }
+    // Both outputs, 11 kHz, PCM playback, go.
+    mma(&mut bus, 0x09, 0x77);
+    let mut left = Vec::new();
+    for _ in 0..100 {
+        wait_ms(&mut bus, 10);
+        left.extend(samples(&mut bus).chunks(2).map(|frame| frame[0]));
+    }
+    left
+}
+
+/// The level the AdLib Gold's DAC holds after the sampled sound stops
+/// fades out of the mix through the capacitor on the card's output, as
+/// the FM's does: the step is heard, and a second later the output is
+/// back at silence. Without the capacitor it stays as a constant offset.
+#[test]
+fn the_adlib_gold_dac_level_held_fades_out_of_the_mix() {
+    let raw = gold_dac_hold(false);
+    let held = *raw.last().unwrap();
+    assert!(held > 1000, "{held}");
+    let tail = &raw[raw.len() - 4410..];
+    assert!(tail.iter().all(|&s| s == held), "the DAC holds its level");
+    let coupled = gold_dac_hold(true);
+    let peak = *coupled.iter().max().unwrap();
+    assert!(peak > held - held / 10, "the step is heard: {peak}");
+    let tail = &coupled[coupled.len() - 4410..];
+    assert!(tail.iter().all(|s| s.abs() <= 1), "{tail:?}");
 }
 
 /// An FM note that plays for 50 ms, then the loudness of the 250 ms after

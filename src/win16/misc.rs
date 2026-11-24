@@ -197,7 +197,7 @@ pub static MMSYSTEM: Def = Def {
         rust("midiOutClose", 205, "w", no_driver),
         rust("midiOutShortMsg", 208, "wl", no_driver),
         rust("midiOutReset", 210, "w", no_driver),
-        rust("auxGetNumDevs", 350, "", zero),
+        win32("auxGetNumDevs", 350, "", MM, "auxGetNumDevs", b'w'),
         win32("waveOutGetNumDevs", 401, "", MM, "waveOutGetNumDevs", b'w'),
         rust("waveOutGetDevCaps", 402, "wpw", wave_out_get_dev_caps),
         win32(
@@ -264,6 +264,15 @@ pub static MMSYSTEM: Def = Def {
             "mciGetErrorStringA",
             b'b',
         ),
+        // Saved states keep the stubs in this order: new functions go
+        // after the others (src/win32/stub_tables.rs).
+        rust("midiOutGetVolume", 211, "wp", no_driver),
+        rust("midiOutSetVolume", 212, "wl", no_driver),
+        rust("midiOutGetID", 215, "wp", invalid_handle),
+        rust("auxGetDevCaps", 351, "wpw", aux_get_dev_caps),
+        rust("auxGetVolume", 352, "wp", aux_get_volume),
+        rust("auxSetVolume", 353, "wl", aux_set_volume),
+        rust("waveOutGetID", 420, "wp", wave_out_get_id),
     ],
     library: true,
 };
@@ -449,6 +458,9 @@ const P_WING_BITMAP: u32 = P_MISC + 7;
 const P_SEGPTR: u32 = P_MISC + 8;
 const P_MCI: u32 = P_MISC + 9;
 const P_WAVE_CALLS: u32 = P_MISC + 10;
+const P_UINT: u32 = P_MISC + 11;
+const P_DWORD: u32 = P_MISC + 12;
+const P_AUX_CAPS: u32 = P_MISC + 13;
 
 /// The size of Windows 3.1's MMTIME: wType and a union of 6 bytes, its
 /// SMPTE time being hour, minute, second, frame, fps and a pad byte
@@ -507,6 +519,28 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
             return_after_calls(cpu, value, ctx)
         }
         P_WAVE_CALLS => return_after_calls(cpu, value, ctx),
+        P_UINT => {
+            // A UINT the 32-bit function wrote at d(1), as Windows 3.1's
+            // 16-bit one at d(2); nothing when it failed.
+            if value == 0 {
+                let v = r32(cpu, d(1));
+                super::write_16(cpu, d(2), v as u16);
+            }
+            Some(value)
+        }
+        P_DWORD => {
+            if value == 0 {
+                let v = r32(cpu, d(1));
+                super::write_32(cpu, d(2), v);
+            }
+            Some(value)
+        }
+        P_AUX_CAPS => {
+            if value == 0 {
+                aux_caps16(cpu, d(1), d(2), d(3));
+            }
+            Some(value)
+        }
         P_WAVE_UNPREPARE => {
             if value == 0 {
                 unprepared(cpu, d(1));
@@ -1215,14 +1249,98 @@ fn no_driver(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(6)
 }
 
-/// WAVEOUTCAPSA at `caps` as WAVEOUTCAPS16 at `caps16`, `size` bytes of
-/// it at most.
-fn wave_caps16(cpu: &mut Cpu, caps: u32, caps16: u32, size: u32) {
-    let mut b = Vec::new();
+/// MMSYSERR_INVALHANDLE: midiOutGetID, whose handle can't be one, since
+/// midiOutOpen opens nothing (#1243).
+fn invalid_handle(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(5)
+}
+
+/// waveOutGetID(handle, id): WINMM's answer, written as the 16-bit UINT
+/// Windows 3.1 has. A null `id` goes to WINMM as null, which refuses it
+/// after it has checked the handle, as Windows does.
+fn wave_out_get_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let id = thunk::scratch32(cpu, 4);
+    let out = if args[1] == 0 { 0 } else { id };
+    go_at(
+        cpu,
+        id,
+        MM,
+        "waveOutGetID",
+        &[args[0], out],
+        vec![P_UINT, id, args[1]],
+    )
+}
+
+/// The 32-bit device id of a 16-bit one: WAVE_MAPPER and AUX_MAPPER,
+/// FFFFh, are -1 in Win32. WINMM has no aux mapper, and answers -1 as a
+/// bad id.
+fn device32(id: u32) -> u32 {
+    if id == 0xFFFF { u32::MAX } else { id }
+}
+
+/// The head the 16-bit caps structures share, from a Win32 one at
+/// `caps`: wMid, wPid, the driver's version as a WORD (a DWORD in Win32)
+/// and the 32 bytes of szPname. Win32's structure goes on at `caps` + 40,
+/// the 16-bit one at 38.
+fn caps16_head(cpu: &Cpu, caps: u32) -> Vec<u8> {
+    let mut b = Vec::with_capacity(52);
     b.extend_from_slice(&(r16(cpu, caps) as u16).to_le_bytes());
     b.extend_from_slice(&(r16(cpu, caps + 2) as u16).to_le_bytes());
     b.extend_from_slice(&(r32(cpu, caps + 4) as u16).to_le_bytes());
     b.extend(super::peek(cpu, caps + 8, 32).unwrap_or(vec![0; 32]));
+    b
+}
+
+/// AUXCAPSA at `caps` as AUXCAPS16 at `caps16`, `size` bytes of it at
+/// most: the driver's version is a WORD, and there is no wReserved1.
+fn aux_caps16(cpu: &mut Cpu, caps: u32, caps16: u32, size: u32) {
+    let mut b = caps16_head(cpu, caps);
+    b.extend_from_slice(&(r16(cpu, caps + 40) as u16).to_le_bytes());
+    b.extend_from_slice(&r32(cpu, caps + 44).to_le_bytes());
+    b.truncate(size as usize);
+    super::poke(cpu, caps16, &b);
+}
+
+fn aux_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let caps = thunk::scratch32(cpu, 48);
+    let out = if args[1] == 0 { 0 } else { caps };
+    go_at(
+        cpu,
+        caps,
+        MM,
+        "auxGetDevCapsA",
+        &[device32(args[0]), out, 48],
+        vec![P_AUX_CAPS, caps, args[1], args[2]],
+    )
+}
+
+fn aux_get_volume(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let volume = thunk::scratch32(cpu, 4);
+    let out = if args[1] == 0 { 0 } else { volume };
+    go_at(
+        cpu,
+        volume,
+        MM,
+        "auxGetVolume",
+        &[device32(args[0]), out],
+        vec![P_DWORD, volume, args[1]],
+    )
+}
+
+fn aux_set_volume(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    go(
+        cpu,
+        MM,
+        "auxSetVolume",
+        &[device32(args[0]), args[1]],
+        Vec::new(),
+    )
+}
+
+/// WAVEOUTCAPSA at `caps` as WAVEOUTCAPS16 at `caps16`, `size` bytes of
+/// it at most.
+fn wave_caps16(cpu: &mut Cpu, caps: u32, caps16: u32, size: u32) {
+    let mut b = caps16_head(cpu, caps);
     b.extend_from_slice(&r32(cpu, caps + 40).to_le_bytes());
     b.extend_from_slice(&(r16(cpu, caps + 44) as u16).to_le_bytes());
     b.extend_from_slice(&r32(cpu, caps + 48).to_le_bytes());
@@ -1230,15 +1348,17 @@ fn wave_caps16(cpu: &mut Cpu, caps: u32, caps16: u32, size: u32) {
     super::poke(cpu, caps16, &b);
 }
 
+/// waveOutGetDevCaps(device, caps, size): a null `caps` goes to WINMM as
+/// null, which refuses it once it has checked the device.
 fn wave_out_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let caps = thunk::scratch32(cpu, 52);
-    let device = if args[0] == 0xFFFF { u32::MAX } else { args[0] };
+    let out = if args[1] == 0 { 0 } else { caps };
     go_at(
         cpu,
         caps,
         MM,
         "waveOutGetDevCapsA",
-        &[device, caps, 52],
+        &[device32(args[0]), out, 52],
         vec![P_WAVE_CAPS, caps, args[1], args[2]],
     )
 }
@@ -1255,7 +1375,7 @@ const CALLBACK_FUNCTION: u32 = 0x0003_0000;
 fn wave_out_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let out = thunk::scratch32(cpu, 4);
     w32(cpu, out, 0);
-    let device = if args[1] == 0xFFFF { u32::MAX } else { args[1] };
+    let device = device32(args[1]);
     let mut flags = args[5];
     // WINMM opens the device without a callback, and is given the
     // function once it is open (P_WAVE_OPEN).

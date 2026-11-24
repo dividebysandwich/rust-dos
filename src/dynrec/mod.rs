@@ -163,6 +163,10 @@ pub const ENV_USER: u32 = 1 << 5;
 /// Real mode (CR0.PE clear): far transfers are translated.
 #[cfg(dynrec)]
 pub const ENV_REAL: u32 = 1 << 6;
+/// Virtual-8086 mode: segment loads and far transfers are translated as in
+/// real mode, for segments of `Cpu::load_seg_v86`'s.
+#[cfg(dynrec)]
+pub const ENV_V86: u32 = 1 << 7;
 /// Segment register `seg` is flat (bit 8 + `seg as u32`): base 0, every
 /// offset in its limits, readable and writable.
 #[cfg(dynrec)]
@@ -201,6 +205,8 @@ pub fn env_bits(cpu: &Cpu) -> u32 {
     }
     if !cpu.pe() {
         bits |= ENV_REAL;
+    } else if cpu.v86() {
+        bits |= ENV_V86;
     }
     bits
 }
@@ -645,6 +651,7 @@ mod engine {
             let pokes = self.pokes.get(&(key.phys >> 12)).map(|p| &p[..]);
             let stack32 = key.mode & 4 != 0;
             let real = key.mode & ENV_REAL != 0;
+            let v86 = key.mode & ENV_V86 != 0;
             let fast_fpu = cpu.fpu_fast;
             let i486 = cpu.model >= CpuModel::I486;
             let p6 = cpu.model.is_p6();
@@ -660,7 +667,8 @@ mod engine {
             let uops = |instr: &iced_x86::Instruction, next: u32| {
                 use super::translate::translate;
                 translate(
-                    instr, next, stack32, system, segments, fpu, fast_fpu, real, i486, p6, simd,
+                    instr, next, stack32, system, segments, fpu, fast_fpu, real, v86, i486, p6,
+                    simd,
                 )
             };
             // The block goes on after a conditional jump its code takes.

@@ -40,6 +40,10 @@ pub fn handle(cpu: &mut Cpu) {
         }
         // DOS's data segment in DS.
         0x1203 => cpu.set_ds(dos_data::SEGMENT),
+        // ANSI.SYS's installation check: installed (AL=FFh) while the
+        // console takes its sequences (`ansi_sys`, video/ansi.rs), as
+        // DOSBox answers; else AL=00h, as with no ANSI.SYS loaded.
+        0x1A00 if cpu.bus.ansi_sys => cpu.set_ax(0x1AFF),
         // Windows' DOS manager asking about DOS's data, which the DOS 5
         // kernel answers itself.
         0x1607 if cpu.bx() == 0x0015 => dosmgr(cpu),

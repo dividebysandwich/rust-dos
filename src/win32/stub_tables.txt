@@ -507,6 +507,7 @@ Thread32Next
 Module32First
 Module32Next
 Toolhelp32ReadProcessMemory
+DebugBreak
 
 DLL ADVAPI32.DLL
 InitializeSecurityDescriptor
@@ -6041,6 +6042,13 @@ mciSendCommand
 mciSendString
 mciGetDeviceID
 mciGetErrorString
+midiOutGetVolume
+midiOutSetVolume
+midiOutGetID
+auxGetDevCaps
+auxGetVolume
+auxSetVolume
+waveOutGetID
 
 MODULE LZEXPAND
 LZCopy

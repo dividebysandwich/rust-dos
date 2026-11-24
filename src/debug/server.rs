@@ -2435,7 +2435,9 @@ MEMORY HEATMAP
 SOUND
   GET  /api/sound            what the sound visualizer (Ctrl+Shift+S) shows: the FM
                              channels' notes and envelopes, the Ultrasound's voices,
-                             the MIDI notes held, and what it muted
+                             the MIDI notes held, and what it muted; "cms" the
+                             Game Blaster's SAA1099s (each channel's tone, noise,
+                             octave, frequency, Hz and amplitudes), or null
   GET  /api/gus              the Gravis Ultrasound: latches, IRQ status, timers,
                              DMA and every voice's registers
   GET  /api/awe32            the AWE32's EMU8000: ROM, RAM, configuration, effects

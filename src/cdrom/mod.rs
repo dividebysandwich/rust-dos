@@ -7,6 +7,7 @@ pub mod b6t;
 pub mod ccd;
 #[cfg(feature = "chd")]
 pub mod chd;
+pub mod copylok;
 pub mod cue;
 #[cfg(feature = "cdaudio")]
 pub mod decoded;
@@ -243,5 +244,29 @@ mod tests {
         raw[15] = 2;
         raw[16..24].fill(0);
         assert!(!edc_fails(&raw), "formless Mode 2");
+    }
+
+    /// A sector as redumper writes one it couldn't read into a dump
+    /// (Redump's "generated sectors (0x55)"): sync, header, and 55h for
+    /// the rest, EDC and ECC included.
+    fn generated(mode: u8) -> [u8; RAW_SECTOR] {
+        let mut raw = [0x55u8; RAW_SECTOR];
+        raw[..12].copy_from_slice(&SYNC);
+        raw[12..16].copy_from_slice(&[0x00, 0x05, 0x01, mode]);
+        raw
+    }
+
+    #[test]
+    fn sectors_redumper_couldnt_read() {
+        // Copy protections such as CopyLok master a band of these; their
+        // EDC fails in Mode 1 and in Mode 2, whose subheader of 55h says
+        // Form 1.
+        assert!(edc_fails(&generated(1)), "Mode 1");
+        assert!(edc_fails(&generated(2)), "Mode 2");
+        // The same sector of zeros, as redumper fills optional tracks,
+        // has an EDC of 0 and reads.
+        let mut zeros = generated(1);
+        zeros[16..].fill(0);
+        assert!(!edc_fails(&zeros));
     }
 }

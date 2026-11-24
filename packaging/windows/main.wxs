@@ -6,11 +6,12 @@
          -o <out>.msi
 
      rust-dos.exe links SDL3 dynamically, so SDL3.dll is installed beside
-     it, and munt's MT-32 emulation, mt32emu-2.dll, which it loads for
-     midisynth=mt32, with the library's licence (LGPL 2.1), and the Khronos
-     OpenXR loader, openxr_loader.dll, which it loads for VR headsets, with
-     its licence (Apache 2.0). The LAN relay, rust-dos-relay.exe, needs none
-     of them. -->
+     it with its licence (zlib), and munt's MT-32 emulation, mt32emu-2.dll,
+     which it loads for midisynth=mt32, with the library's licence (LGPL
+     2.1), and the Khronos OpenXR loader, openxr_loader.dll, which it loads
+     for VR headsets, with its licence (Apache 2.0). The LAN relay,
+     rust-dos-relay.exe, needs none of them. THIRD-PARTY-NOTICES.txt holds
+     the notices of the code and crates the programs are built from. -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
     <Package Name="rust-dos"
              Manufacturer="dividebysandwich"
@@ -38,6 +39,7 @@
                 </Component>
                 <Component Id="SdlDll" Guid="F95EF6E3-DE4A-4F34-84CE-4071FD9A1228">
                     <File Id="Sdl3Dll" Source="$(var.SdlDir)/SDL3.dll" KeyPath="yes" />
+                    <File Id="Sdl3License" Source="$(var.SdlDir)/../../LICENSE.txt" Name="SDL3-LICENSE.txt" />
                 </Component>
                 <Component Id="MuntDll" Guid="3962CD19-6D47-4ED2-B1A1-86AD0B2F3577">
                     <File Id="Mt32EmuDll" Source="$(var.MuntDir)/mt32emu-2.dll" KeyPath="yes" />
@@ -49,6 +51,7 @@
                 </Component>
                 <Component Id="Docs" Guid="6F2EB829-9BFC-4A1D-946B-D20FCC688BC9">
                     <File Id="LicenseTxt" Source="LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+                    <File Id="ThirdPartyNoticesTxt" Source="THIRD-PARTY-NOTICES" Name="THIRD-PARTY-NOTICES.txt" />
                     <File Id="ReadmeMd" Source="README.md" />
                     <File Id="ConfigurationMd" Source="CONFIGURATION.md" />
                 </Component>
