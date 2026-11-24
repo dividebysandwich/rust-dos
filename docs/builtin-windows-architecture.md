@@ -369,12 +369,12 @@ against that DLL's results in `undname_vc6.txt`).
   function of the same name. The loader loads them as DLL files and
   follows the forwarders, so they are modules of their own names.
 
-  The files are read-only: they open for reading alone, show as
-  read-only (FILE_ATTRIBUTE_READONLY and ARCHIVE), and opening one for
-  writing, making, deleting or renaming one, copying a file over it or
-  changing its attributes fails with ERROR_ACCESS_DENIED, as for a
-  read-only file. A file of the same name on C: wins: a game that copies
-  its own DLL there has it. `DiskController` shows them
+  The files are writable, as Windows' own are, and show as
+  FILE_ATTRIBUTE_ARCHIVE. A file of the same name on C: wins: a game
+  that copies its own DLL there has it, and making a file of that name,
+  opening one for writing or renaming a file to its name makes the file
+  on C:. Deleting one or changing its attributes succeeds and changes
+  nothing, and renaming one copies it to C:. `DiskController` shows them
   (`src/disk/system_files.rs`), under the drive's own files, so DOS sees
   them too: `DIR C:\WINDOWS\SYSTEM` and a DOS program's INT 21h list and
   open them, as in a DOS box of Windows 98. A save state opens a file
