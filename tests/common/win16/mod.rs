@@ -108,6 +108,13 @@ pub fn program(code: &Code, flags: u16) -> Vec<u8> {
     program_with_resources(code, flags, &[])
 }
 
+/// `program`, with the module name `name` rather than T: for a second
+/// program the first one starts, which would otherwise be another
+/// instance of T.
+pub fn program_named(name: &str, code: &Code, flags: u16) -> Vec<u8> {
+    build(name, code, flags, ne::MULTIPLEDATA, &[], &[])
+}
+
 /// `program`, with the resources `resources` (type, name, data),
 /// moveable and discardable.
 pub fn program_with_resources(
@@ -130,7 +137,19 @@ pub fn module(
     resources: &[(ne::ResId, ne::ResId, &[u8])],
     exports: &[u16],
 ) -> Vec<u8> {
-    let mut b = ne::Builder::new("T", module_flags);
+    build("T", code, flags, module_flags, resources, exports)
+}
+
+/// `module`, with the module name `name`.
+fn build(
+    name: &str,
+    code: &Code,
+    flags: u16,
+    module_flags: u16,
+    resources: &[(ne::ResId, ne::ResId, &[u8])],
+    exports: &[u16],
+) -> Vec<u8> {
+    let mut b = ne::Builder::new(name, module_flags);
     for (kind, name, data) in resources {
         b.resource(kind.clone(), name.clone(), 0x1030, data);
     }

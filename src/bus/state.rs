@@ -29,7 +29,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 89;
+const WIN32_VERSION: u16 = 90;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -51,9 +51,11 @@ const WIN32_VERSION: u16 = 89;
 /// it starts in (`dosvm::DOSVM_DIRECTORY`), 71's to 86's no real-mode
 /// calls through VWIN32's DPMI dispatch (`realmode::Kind::Vxd`, which
 /// they load without), 71's to 87's no 16-bit programs' multimedia
-/// timers (`winmm::timer::Action::Call16`, which they load without), and
-/// 71's to 88's no animated cursors (`user32::resource::ANI_CURSORS`).
-const WIN32_LOADS: [u16; 19] = [
+/// timers (`winmm::timer::Action::Call16`, which they load without),
+/// 71's to 88's not each program's current directories
+/// (`directories::DIRECTORIES_SAVED`), and 71's to 89's no animated
+/// cursors (`user32::resource::ANI_CURSORS`).
+const WIN32_LOADS: [u16; 20] = [
     71,
     72,
     73,
@@ -72,6 +74,7 @@ const WIN32_LOADS: [u16; 19] = [
     86,
     87,
     88,
+    89,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1165,7 +1168,8 @@ mod tests {
         (86, 0x64E2_699F_8225_8EB3), // the DOS program's folder and lent memory
         (87, 0x3CCD_B401_AB6D_F5EF), // real-mode calls through VWIN32's DPMI dispatch
         (88, 0x0BDC_B050_4D43_8EE6), // 16-bit programs' multimedia timers
-        (89, 0x5012_617B_659E_80ED), // animated cursors
+        (89, 0x8834_B549_9A47_3653), // each program's current directories
+        (90, 0x4476_2201_FFFD_7B1E), // animated cursors
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

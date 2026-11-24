@@ -2,7 +2,11 @@
 
 Rust-DOS takes its settings from a configuration file, from the settings
 window while it runs, and from game profiles for games that need settings
-of their own. See the [README](README.md) for everything else.
+of their own. This page is the reference, to look settings up in. To get
+a game running, start with the [README](README.md#start-here) and the
+[tutorials](TUTORIALS.md), which have whole configurations to copy.
+[REFERENCE.md](REFERENCE.md) describes the DOS prompt, the keys and save
+states.
 
 * [Configuration file](#configuration-file): where it is, and every setting in
   [`[emulator]`](#emulator), [`[sound]`](#sound), [`[mixer]`](#mixer),
@@ -229,7 +233,7 @@ limit, so without a connection it goes on as it would with one:
   10000` makes that real-mode speed, and the least `auto` goes down to,
   10000. `max` runs everything as fast as the host keeps up with in real
   time. Use a number such as `3000` for a fixed speed. `--cycles` overrides
-  it. Loading a [save state](README.md#save-states) keeps the speed the
+  it. Loading a [save state](REFERENCE.md#save-states) keeps the speed the
   machine runs at (this setting, `--cycles`, or the last one the window, the
   speed keys or `/api/speed` set): a fixed speed and `max` go on at the rate
   they had, and `auto` starts its search from the rate the state was saved
@@ -443,17 +447,19 @@ limit, so without a connection it goes on as it would with one:
   renderer](#the-3dfx-opengl-renderer)), with `voodoo_msaa` (`off`, the
   default, `2`, `4` or `8`) samples a pixel of multisampled antialiasing and
   `voodoo_anisotropy` (`off`, the default, `2`, `4`, `8` or `16`) filters
-  textures at oblique angles; `voodoo_gamma` (`off`, the default, or 0.1
-  to 2) is the gamma Glide gives the card's picture (see [3dfx
-  gamma](#3dfx-gamma)); without OpenGL 3 (in the browser, or with SDL's
-  dummy video driver) the software rasterizer's picture shows. The card's
-  frames are held to `fps_cap` with every other card's (see [Frame rate
-  cap](#frame-rate-cap)). The
-  settings from `voodoo_texture_sampling` on change at once, `voodoo_gamma`
-  at the DOS prompt. All of them but `voodoo_gamma` also work on a Voodoo3
-  or Banshee display adapter (`machine=svga_voodoo3` or `svga_banshee`; see
-  [3dfx Voodoo3](#3dfx-voodoo3-and-banshee)), whose card and memory don't
-  depend on `voodoo`, `voodoo_model` or `voodoo_memory`.
+  textures at oblique angles; `voodoo_gamma` (`off`, the default, or 0.1 to
+  2) is the gamma Glide gives the card's picture (see [3dfx
+  gamma](#3dfx-gamma)); `voodoo_renderer=opengl` needs OpenGL 3.2 from the
+  host's graphics driver, and without it (a generic or old driver, the
+  browser, SDL's dummy video driver) the software rasterizer's picture shows
+  at the card's resolution and a `[DISPLAY]` line at startup says why. The
+  card's frames are held to `fps_cap` with every other card's (see [Frame
+  rate cap](#frame-rate-cap)). The settings from `voodoo_texture_sampling`
+  on change at once, `voodoo_gamma` at the DOS prompt. All of them but
+  `voodoo_gamma` also work on a Voodoo3 or Banshee display adapter
+  (`machine=svga_voodoo3` or `svga_banshee`; see [3dfx
+  Voodoo3](#3dfx-voodoo3-and-banshee)), whose card and memory don't depend
+  on `voodoo`, `voodoo_model` or `voodoo_memory`.
 * `powervr=pcx1` or `pcx2` adds a PowerVR 3D card beside the display
   adapter, for games with a PowerVR version: the PCX1 (VideoLogic
   Apocalypse 3D) or the PCX2 (Matrox m3D, VideoLogic Apocalypse 3Dx; see
@@ -667,7 +673,7 @@ limit, so without a connection it goes on as it would with one:
   starts when none runs, and a saved state goes on under the locale it
   was saved with.
 * `win32_trace` picks which calls of the built-in Windows' functions
-  get a `[W32]` line in the [log file](README.md#log-file) (and `[W16]`
+  get a `[W32]` line in the [log file](REFERENCE.md#log-file) (and `[W16]`
   for the 16-bit modules), with the caller's address, the arguments and
   the result. `collapsed` (the default) writes the first 3 calls from
   each place in a program in a second of emulated time and counts the
@@ -790,7 +796,7 @@ limit, so without a connection it goes on as it would with one:
   by default; 16 to 4096): each state takes only what changed since the
   one after it, so a game that changes little goes back a long way. The
   states start over when a game starts or ends, the hardware changes or
-  a [save state](README.md#save-states) is loaded. Off by default.
+  a [save state](REFERENCE.md#save-states) is loaded. Off by default.
 * `idle_skip=true` (the default) lets the emulator skip the passes of a
   program's busy-wait loops up to the next timer event, and sleep
   instead of running them: a program polling the keyboard through the
@@ -1251,7 +1257,7 @@ message and the log say where it went.
 
 ### `[shell]`
 
-The DOS prompt's line editor (see [the prompt](README.md#the-prompt)).
+The DOS prompt's line editor (see [the prompt](REFERENCE.md#the-prompt)).
 
 * `autosuggest` shows the rest of the line in dark grey, from the newest
   matching line in the history or else the first name Tab would complete:
@@ -1417,10 +1423,10 @@ image](#booting-a-disk-image)).
 
 ### `[autoexec]`
 
-Commands that run at the DOS prompt on startup, before `C:\AUTOEXEC.BAT`,
-as a [batch file](README.md#batch-files). A program started here delays the
-following lines until it exits. The settings window's Emulator page edits
-them.
+Commands that run at the DOS prompt on startup, before
+`C:\AUTOEXEC.BAT`, as a [batch file](REFERENCE.md#batch-files). A
+program started here delays the following lines until it exits. The
+settings window's Emulator page edits them.
 
 A reboot runs them again, with `C:\AUTOEXEC.BAT`. Ctrl+Alt+Del reboots, as
 does a program that resets the machine (through the keyboard controller,
@@ -1481,10 +1487,10 @@ Esc closes it.
   TCP calls.
 * **Games:** the [game profiles](#game-profiles): Enter launches one, Ins
   makes one from the settings as they are, Del deletes one.
-* **States:** the [save state](README.md#save-states) slots of the game playing,
-  with when each was saved, in which program, and a picture of the screen:
-  Enter loads one, Ins saves to one, Del empties one. Ctrl+F9 opens the
-  window on this page.
+* **States:** the [save state](REFERENCE.md#save-states) slots of the
+  game playing, with when each was saved, in which program, and a picture
+  of the screen: Enter loads one, Ins saves to one, Del empties one.
+  Ctrl+F9 opens the window on this page.
 * **Cheats:** finds a game's values in memory, such as its lives or money,
   and changes them. Search for the value the game shows (or for any value,
   when the game shows none, such as an energy bar), close the window and
@@ -1698,7 +1704,7 @@ profile:
 
 | Setting | Set it to | Why |
 |---|---|---|
-| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. Of the 3dfx cards, it and the Banshee are the ones Direct3D 8 runs on and OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too. A game from 2000 on that asks for more than a Voodoo3 has (32-bit color, large textures, hardware transform and lighting) takes `svga_toadforce` ([ToadForce](#toadforce)) |
+| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. Of the 3dfx cards, it and the Banshee are the ones Direct3D 8 runs on and OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too. A game made for a GeForce-class card, which asks for more than a Voodoo3 has (32-bit color, large textures, hardware transform and lighting), takes `svga_toadforce` ([ToadForce](#toadforce)) |
 | `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both. With `svga_toadforce` the machine has a Pentium III without the line |
 | `memsize` | leave it out, or `128` for a 3D game from 1998 on | Without it a Pentium II has 64 MB, which most Windows 98 games asked for (the default 486 has 16 MB). The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
@@ -1775,7 +1781,7 @@ Windows unpacks the 32-bit engine from that archive into `TEMP` instead,
 and starts it with the command line the launcher gives it on Windows 98
 SE.
 
-If the setup doesn't run, look in [the log](README.md#log-file):
+If the setup doesn't run, look in [the log](REFERENCE.md#log-file):
 
 - **`SETUP.EXE` says it needs Windows:** it is a 16-bit program the
   built-in Windows doesn't run. Either it isn't InstallShield's
@@ -1876,7 +1882,7 @@ registry keys or its own files, and often by the disc's label too.
 
 #### When a game doesn't run
 
-The [log file](README.md#log-file) says what the built-in Windows did
+The [log file](REFERENCE.md#log-file) says what the built-in Windows did
 last. Go through these in order:
 
 1. **It stops at once with an invalid opcode:** set `cpu=pentium_ii`.
@@ -1994,6 +2000,22 @@ in `[emulator]` turns them all off, and `game_fixes_off` leaves out the
 ones it names. The log has a `[game fix]` line, with the fix's name,
 each time one applies.
 
+A fix recognises the game's files as one release shipped them, in
+general the last patched version, or the one GOG sells. Many games came
+out in several versions, each with its own executables, and a fix for
+every one of them would take a version of the game to test with and a
+patch of its own. If a fix doesn't apply to your copy (no `[game fix]`
+line in the log), install the game's last official patch, or use the
+GOG release.
+
+We aim to fix as many of the games' own bugs as we can, in any game
+Rust-DOS runs, and a savegame or a [save state](REFERENCE.md#save-states)
+from just before one helps most. Attach it to [an
+issue](https://github.com/dividebysandwich/rust-dos/issues) (zipped),
+with the steps that make the bug happen and the game's version. A save
+state holds the machine without the game's files on the host, so it
+plays back only on the same version of them.
+
 Some fixes patch the game's code in memory. They look for it each time
 a program resets the Sound Blaster's DSP, which a game's sound driver
 does before it sets anything up, and patch only code that is there as
@@ -2072,14 +2094,15 @@ for version 1.2, which the game's patch TD42UP.EXE makes: 3.EXE of
 Without the fix, on version 1.0 or on a Windows image, F4 in the race
 steps through the camera views, each at its own distance; the fifth
 press reaches the chase view. `voodoo_fps_cap=30` ([3dfx frame rate
-cap](#3dfx-frame-rate-cap)) holds the intro to 30 frames a second, where
+cap](#frame-rate-cap)) holds the intro to 30 frames a second, where
 the shot ends a little behind the chase view's distance.
 
 To add a fix: an entry in `FIXES` in `src/game_fixes.rs` with a name of its
 own, the game, the reason, and how to recognise it; a test that runs it
 (`tests/program/game_fixes_tests.rs`, `tests/dos/exec_tests.rs` for a
 program skipped as it starts, or `tests/win32/win32_tests.rs` for a Win32
-program); and a row in the table above.
+program); and a row in the table above. In general, write it for the
+game's last patched version, or for GOG's release where that differs.
 
 ## RetroAchievements
 
@@ -2694,7 +2717,7 @@ What the system writes to a hard disk image goes to its delta file
 (`<image>.rdelta` beside it, or in the [`-overlay DIR`](#mounting-drives)
 folder), and the image stays as it is until `COMMIT` writes the changes
 into it (see [Disk images](#disk-images)); with `-inplace` it goes into
-the image. [Save states](README.md#save-states) and rewind keep the disks
+the image. [Save states](REFERENCE.md#save-states) and rewind keep the disks
 in step with the system's memory: in a run, the disks go back with a
 state through a journal of what the system wrote over (the last 256 MB of
 it), and a state file keeps each disk beside it, which loading it puts
@@ -4365,7 +4388,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `-d, --dir DIR` | Make the host directory `DIR` drive C: (default: the configuration's C:, or the current directory) |
 | `-c, --config FILE` | Use this configuration file (see [Configuration file](#configuration-file)) |
 | `--no-config` | Read and create no configuration file |
-| `--log FILE` | Write the [log](README.md#log-file) to `FILE` instead of `rust-dos.log` in the configuration directory; stop if it cannot be created |
+| `--log FILE` | Write the [log](REFERENCE.md#log-file) to `FILE` instead of `rust-dos.log` in the configuration directory; stop if it cannot be created |
 | `--no-boot` | Start at the DOS prompt, without booting the disk image marked `-boot` in `[drives]` |
 | `-s, --scale N` | The window scale factor, 1 to 16 |
 | `--vrr` | Show frames at the machine's refresh rate, for a VRR display (`vrr`) |
@@ -4383,7 +4406,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--core auto\|dynamic\|normal` | What runs the instructions (`core`) |
 | `--game NAME` | Launch a [game profile](#game-profiles) at startup, by its file name or its name |
 | `--import PATH` | Import a game set up for DOSBox as a game profile, and launch it |
-| `--debug-server [ADDR]` | Start the [debug server](README.md#debug--remote-control-server) (default `127.0.0.1:8086`; port 0 takes a free port, printed on stdout) |
+| `--debug-server [ADDR]` | Start the [debug server](REFERENCE.md#debug--remote-control-server) (default `127.0.0.1:8086`; port 0 takes a free port, printed on stdout) |
 | `--exit-with-parent [PID]` | Quit when the process that started rust-dos ends, or the process `PID`, as `POST /api/control/quit` does, with exit code 4. A process that has ended already ends rust-dos at once (see [docs/llm-debugging.md](docs/llm-debugging.md#the-journal-what-happened-in-order)) |
 | `--trace-capacity N` | Entries in the debug server's instruction trace (default 1,000,000) |
 | `--deterministic` | Run on emulated time alone, so that the same input gives the same run every time: a fixed speed, a clock that starts at `--start-time`, and the debug server's input delivered at emulated times. With `--debug-server` the machine starts paused (see [docs/llm-debugging.md](docs/llm-debugging.md#deterministic-runs)) |
