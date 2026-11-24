@@ -37,7 +37,7 @@ its notes say which file to take. Then pick what you want to do:
 | Play a DOS game's 3dfx version | [Tutorial: a 3dfx card](TUTORIALS.md#a-dos-game-with-a-3dfx-card) |
 | Install and play a Windows 95 or 98 game from its CD | [Tutorial: installed from a CD image](TUTORIALS.md#a-windows-95-or-98-game-installed-from-its-cd-image) |
 | Play a Windows game I already have installed (GOG, or copied from a PC) | [Tutorial: an installed Windows game](TUTORIALS.md#an-installed-windows-game-gog-or-a-copied-folder) |
-| Play a Windows game of 2000 to 2002 | [Tutorial: the ToadForce](TUTORIALS.md#a-demanding-windows-game-from-2000-to-2002-toadforce) |
+| Play a demanding Windows 3D game made for a GeForce-class card | [Tutorial: the ToadForce](TUTORIALS.md#a-demanding-windows-3d-game-toadforce) |
 | Run a game in a real Windows 98 | [Tutorial: a Windows 98 image](TUTORIALS.md#a-windows-game-on-a-windows-98-image-with-its-cd-image), then [docs/win9x-howto.md](docs/win9x-howto.md) |
 | Find out what a particular game needs | [almanac.rust-dos.com](https://almanac.rust-dos.com), then [docs/compatibility.md](docs/compatibility.md) |
 | Look up a setting, a command or a key | [Documentation](#documentation) below |
@@ -108,6 +108,13 @@ whole configurations to copy.
    causes.
 4. [Open an issue](https://github.com/dividebysandwich/rust-dos/issues)
    with the game's name, your settings and the log.
+
+Bugs of the games themselves are welcome too: a crash, a hang or a
+glitch that happened on real PCs as well. If you have a savegame or a
+[save state](REFERENCE.md#save-states) from just before one, attach it
+to an issue (zipped) with the steps that make it happen. We aim to fix
+as many of these bugs as we can, in any game Rust-DOS runs, as [game
+fixes](CONFIGURATION.md#game-fixes).
 
 ## Documentation
 
