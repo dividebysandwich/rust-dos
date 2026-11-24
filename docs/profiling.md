@@ -38,7 +38,7 @@ starts.
 From the command line, with no debug server:
 
 ```sh
-rust-dos --profile run.json -d ~/dos/game
+rust-dos --profile run.json -d ~/games/my-game/game
 ```
 
 profiles from startup until the emulator exits, then writes `run.json`

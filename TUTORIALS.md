@@ -68,7 +68,7 @@ The quickest way to try a game. Start Rust-DOS with the game's folder as
 drive C:
 
 ```sh
-rust-dos -d ~/games/doom
+rust-dos -d ~/games/doom/game
 ```
 
 and type the game's program at the prompt (`DOOM`). Or start Rust-DOS
@@ -98,7 +98,7 @@ name=Doom
 overlay=true
 
 [drives]
-C=~/games/doom
+C=~/games/doom/game
 
 [autoexec]
 C:
@@ -187,8 +187,8 @@ name=Descent II
 overlay=true
 
 [drives]
-C=~/games/descent2
-D=~/cd/descent2.cue cdrom
+C=~/games/descent-2/game
+D=~/games/descent-2/disc.cue cdrom
 
 [autoexec]
 D:
@@ -198,17 +198,19 @@ CD \DESCENT2
 DESCENT2
 ```
 
-`~/games/descent2` starts as an empty folder. The first start runs the
-installer from the CD; the `IF NOT EXIST` line skips it on later starts.
-Install to `C:\DESCENT2` so the line finds the game. CD audio tracks
-play from the image.
+Each game has a folder of its own, `~/games/descent-2` here: `game` in it is
+drive C:, and the disc image sits beside it, so it doesn't show up on C:.
+`game` starts as an empty folder. The first start runs the installer from
+the CD; the `IF NOT EXIST` line skips it on later starts. Install to
+`C:\DESCENT2` so the line finds the game. CD audio tracks play from the
+image.
 
-Images that work: a CUE sheet with its BIN files (or with WAV, MP3, OGG
-or FLAC tracks), an ISO, a CHD, a CloneCD `.ccd`, an Alcohol 120% `.mds`,
-a BlindWrite `.b5t` or `.b6t`, and GOG's `.ins` and `.gog`. For a game on
-several CDs, list them all on the line (`D=~/cd/disc1.cue ~/cd/disc2.cue
-cdrom`) and press Ctrl+F4 to change discs. A copy-protected disc may need
-an image that keeps more than an ISO does
+Images that work: a CUE sheet with its BIN files (or with WAV, MP3, OGG or
+FLAC tracks), an ISO, a CHD, a CloneCD `.ccd`, an Alcohol 120% `.mds`, a
+BlindWrite `.b5t` or `.b6t`, and GOG's `.ins` and `.gog`. For a game on
+several CDs, list them all on the line (`D=~/games/my-game/disc1.cue
+~/games/my-game/disc2.cue cdrom`) and press Ctrl+F4 to change discs. A
+copy-protected disc may need an image that keeps more than an ISO does
 ([copy-protection.md](docs/copy-protection.md)).
 
 See: [CD images](CONFIGURATION.md#cd-images).
@@ -222,8 +224,8 @@ name=The Secret of Monkey Island
 overlay=true
 
 [drives]
-C=~/games/monkey
-A=~/floppies/monkey1.img ~/floppies/monkey2.img ~/floppies/monkey3.img ~/floppies/monkey4.img
+C=~/games/monkey-island/game
+A=~/games/monkey-island/disk1.img ~/games/monkey-island/disk2.img ~/games/monkey-island/disk3.img ~/games/monkey-island/disk4.img
 
 [autoexec]
 A:
@@ -292,8 +294,8 @@ voodoo_renderer=opengl
 voodoo_scale=2
 
 [drives]
-C=~/games/tombraid
-D=~/cd/tombraider.cue cdrom
+C=~/games/tomb-raider/game
+D=~/games/tomb-raider/disc.cue cdrom
 
 [autoexec]
 C:
@@ -342,8 +344,8 @@ cpu=pentium_ii
 win32_version=98se
 
 [drives]
-C=~/games/ei
-D=~/cd/EnemyInfestation.iso cdrom
+C=~/games/enemy-infestation/game
+D=~/games/enemy-infestation/disc.iso cdrom
 
 [autoexec]
 SET TEMP=C:\WINDOWS\TEMP
@@ -354,11 +356,11 @@ CD \PROGRA~1\ENEMYI~1
 EI.EXE
 ```
 
-`~/games/ei` starts as an empty folder: the setup installs into it. The
-`[emulator]` lines are the ones every Windows game wants: a Voodoo3 for
-Direct3D, OpenGL and Glide, a Pentium II for the instructions games of
-the time use, and Windows 98 SE. Add `memsize=128` for a 3D game from
-1998 on.
+`~/games/enemy-infestation/game` starts as an empty folder: the setup
+installs into it. The `[emulator]` lines are the ones every Windows game
+wants: a Voodoo3 for Direct3D, OpenGL and Glide, a Pentium II for the
+instructions games of the time use, and Windows 98 SE. Add `memsize=128` for
+a 3D game from 1998 on.
 
 The `[autoexec]` lines run at the DOS prompt, so they use 8.3 names
 (`PROGRA~1` for `Program Files`). After the first install, `DIR C:\` at
@@ -398,7 +400,7 @@ what particular GOG games need besides.
 A game copied from a PC where it is installed:
 
 ```ini
-# games/rom2.conf
+# games/rage-of-mages-2.conf
 [game]
 name=Rage of Mages II
 windows=builtin
@@ -410,25 +412,28 @@ cpu=pentium_ii
 win32_version=98se
 
 [drives]
-C=~/games/rom2-c
+C=~/games/rage-of-mages-2/game
 
 [autoexec]
 C:
-CD \ROM2
+CD \RAGE2
 ALLODS2.EXE -1024
 ```
 
-Here the game's folder was copied to `~/games/rom2-c/ROM2`, so the game
-sees it as `C:\ROM2`. Games that read their folders or their CD's drive
-letter from the registry need those keys in `games/rom2.reg`, as
-REGEDIT4 text, beside the profile:
+Here `~/games/rage-of-mages-2/game` is drive C:, and the game's folder was
+copied into it as `game/RAGE2`, so the game sees it as `C:\RAGE2`. Any
+folder name works: the game finds its folder through the registry, so the
+keys below name the same one. Keep a game's folder out of the root of C:,
+though: with its files there, Rage of Mages II stops at start. Games that
+read their folders or their CD's drive letter from the registry need those
+keys in `games/rage-of-mages-2.reg`, as REGEDIT4 text, beside the profile:
 
 ```
 REGEDIT4
 
 [HKEY_LOCAL_MACHINE\Software\Rage of Mages 2]
-"INSTALLDIR"="C:\\ROM2"
-"CD"="C:\\ROM2"
+"INSTALLDIR"="C:\\RAGE2"
+"CD"="C:\\RAGE2"
 ```
 
 See: [copying an installed game](CONFIGURATION.md#copying-an-installed-game),
@@ -458,8 +463,8 @@ machine=svga_toadforce
 win32_version=98se
 
 [drives]
-C=~/games/zanzarah
-D=~/cd/zanzarah.iso cdrom
+C=~/games/zanzarah/game
+D=~/games/zanzarah/disc.iso cdrom
 
 [autoexec]
 SET TEMP=C:\WINDOWS\TEMP
@@ -510,7 +515,7 @@ sbtype=sb16
 
 [drives]
 C=~/images/win98se.img
-D=~/cd/glover.iso cdrom
+D=~/games/glover/disc.iso cdrom
 
 [autoexec]
 BOOT -l C
@@ -560,7 +565,7 @@ voodoo_memory=12
 
 [drives]
 C=~/images/win98se-voodoo2.img
-D=~/cd/td4.cue cdrom
+D=~/games/test-drive-4/disc.cue cdrom
 
 [autoexec]
 BOOT -l C
