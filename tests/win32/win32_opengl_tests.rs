@@ -4158,27 +4158,28 @@ fn a_deleted_texture_is_unbound_in_the_contexts_that_share_it() {
 /// a few names from glGenTextures between them: a name above the ones
 /// in use would be the next image's, which would then replace the
 /// texture made under it. Here the program binds 0x481 (red), takes
-/// two names and gives the first a blue image, then binds 0x482
-/// (green), and the generated texture still draws blue.
+/// two names and gives the first a cyan image, then binds 0x482
+/// (green), and the generated texture still draws cyan. Cyan, so that
+/// the shot tells it from the blue the window is cleared to.
 #[test]
 fn generated_texture_names_stay_clear_of_the_names_a_program_counts_itself() {
     const FIRST: u32 = KEPT;
     const NEXT: u32 = KEPT + 4;
     const NAMES: u32 = KEPT + 8;
-    const BLUE_TEXELS: u32 = TEXELS + 0x10;
+    const CYAN_TEXELS: u32 = TEXELS + 0x10;
     const GREEN_TEXELS: u32 = TEXELS + 0x20;
     let mut d = lists_data();
     put32(&mut d, FIRST, 0x481);
     put32(&mut d, NEXT, 0x482);
     put(&mut d, TEXELS, [[255u8, 0, 0, 255]; 4].as_flattened());
-    put(&mut d, BLUE_TEXELS, [[0u8, 0, 255, 255]; 4].as_flattened());
+    put(&mut d, CYAN_TEXELS, [[0u8, 255, 255, 255]; 4].as_flattened());
     put(&mut d, GREEN_TEXELS, [[0u8, 255, 0, 255]; 4].as_flattened());
     let (exe, data) = program(&d, |a, l| {
         let mut c = Calls { next: 0 };
         start(a, l, &mut c)?;
         texture_2x2(a, l, &mut c, FIRST, TEXELS)?;
         gl(a, l, GEN_TEXTURES, &[Arg::I(2), Arg::At(NAMES)])?;
-        texture_2x2(a, l, &mut c, NAMES, BLUE_TEXELS)?;
+        texture_2x2(a, l, &mut c, NAMES, CYAN_TEXELS)?;
         texture_2x2(a, l, &mut c, NEXT, GREEN_TEXELS)?;
         let generated = [Arg::I(GL_TEXTURE_2D), Arg::Val(NAMES)];
         gl(a, l, BIND_TEXTURE, &generated)?;
@@ -4200,8 +4201,8 @@ fn generated_texture_names_stay_clear_of_the_names_a_program_counts_itself() {
     assert_eq!(names, [1, 2], "the names glGenTextures gave");
     let drawn = shot(&cpu, data, SHOTS[0]);
     assert!(
-        drawn.iter().all(|&p| p == 0xFF_0000),
-        "the generated texture draws blue: {:06X}",
+        drawn.iter().all(|&p| p == 0xFF_FF00),
+        "the generated texture draws cyan: {:06X}",
         drawn[0]
     );
 }
