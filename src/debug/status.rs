@@ -85,8 +85,10 @@ impl DebugHub {
             // many), the frames the built-in Windows showed for it (its
             // blits to the screen, as bursts and copies), its checks for
             // keys that weren't there and idle calls, its reads of the
-            // input status register (retrace polling), and the vertical
-            // retraces it let pass while it polled for them.
+            // input status register (retrace polling), the vertical
+            // retraces it let pass while it polled for them, and of the
+            // intervals between its page flips, how many were judged and
+            // how many frames they showed a retrace late (an estimate).
             "activity": {
                 "emulated_ns": cpu.bus.clock.now_ns(),
                 "frames_drawn": cpu.bus.frames_drawn,
@@ -97,6 +99,8 @@ impl DebugHub {
                 "polls": cpu.bus.activity.polls,
                 "status_reads": cpu.bus.activity.status_reads,
                 "missed_retraces": cpu.bus.activity.missed_retraces,
+                "late_flips": cpu.bus.activity.late_flips,
+                "paced_flips": cpu.bus.activity.paced_flips,
             },
             "cs_ip": cs_ip(cpu),
             "cpu_mode": pm::mode_name(cpu),

@@ -1477,7 +1477,11 @@ impl Bus {
         } else {
             (self.vga.crtc_regs[0x0C] as u32) << 8 | self.vga.crtc_regs[0x0D] as u32
         };
-        self.activity.display_start(self.clock.icount, start);
+        // The retraces of the picture the monitor shows: a Banshee's or
+        // Voodoo3's own timing in its modes.
+        let frame = self.peek_refresh_timing().frame_ns();
+        let (at, ns) = (self.clock.icount, self.clock.now_ns());
+        self.activity.display_start(at, start, ns, frame);
     }
 
     /// The CPU wrote `bytes` bytes to video memory at `offset` (in the
@@ -3502,6 +3506,16 @@ impl Bus {
         match &self.voodoo {
             Some(v) if v.output() => v.timing(),
             _ => self.vga.timing(),
+        }
+    }
+
+    /// `refresh_timing`, without caching the display's (for `cycles=auto`'s
+    /// measurements, which shouldn't change when the display takes a new
+    /// timing).
+    pub fn peek_refresh_timing(&self) -> crate::video::crt::CrtTiming {
+        match &self.voodoo {
+            Some(v) if v.output() => v.timing(),
+            _ => self.vga.peek_timing(),
         }
     }
 
