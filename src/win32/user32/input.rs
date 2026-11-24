@@ -2563,10 +2563,16 @@ pub fn get_cursor(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(user(cpu).input.cursor_handle)
 }
 
-/// ShowCursor(show): the count it then has.
+/// ShowCursor(show): the count it then has. Windows 9x's USER32 thunks
+/// to 16-bit USER's ShowCursor, whose count is 16 bits: it wraps from
+/// -32768 to 32767, and USER32 returns it sign-extended. Warhammer: Dark
+/// Omen hides the cursor with a loop that calls ShowCursor(FALSE) while
+/// the count is below 0, which ends at the wrap after at most 32768
+/// calls; a 32-bit count would take 2^31.
 pub fn show_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let input = &mut user(cpu).input;
-    input.cursor_count += if args[0] != 0 { 1 } else { -1 };
+    let step = if args[0] != 0 { 1 } else { -1 };
+    input.cursor_count = (input.cursor_count as i16).wrapping_add(step) as i32;
     Some(input.cursor_count as u32)
 }
 
@@ -2958,6 +2964,27 @@ mod tests {
         let notify = address_of(&cpu, "SendNotifyMessageA");
         assert_eq!(activation_call(&mut cpu, other), notify);
         assert_eq!(activation_call(&mut cpu, client), notify);
+    }
+
+    /// ShowCursor's count is 16 bits, as Windows 9x's USER keeps it: it
+    /// wraps from -32768 to 32767 and back, and comes back sign-extended.
+    /// Dark Omen's loop that calls ShowCursor(FALSE) while the count is
+    /// below 0 ends at the wrap, from any count it starts at.
+    #[test]
+    fn show_cursor_counts_in_16_bits() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        assert_eq!(show_cursor(&mut cpu, &[0]), Some(u32::MAX));
+        assert_eq!(show_cursor(&mut cpu, &[1]), Some(0));
+        user(&mut cpu).input.cursor_count = -32768;
+        assert_eq!(show_cursor(&mut cpu, &[0]), Some(32767));
+        assert_eq!(show_cursor(&mut cpu, &[1]), Some(-32768i32 as u32));
+        for start in [-1, -2, i32::from(i16::MIN), 0x7FFF_607C] {
+            user(&mut cpu).input.cursor_count = start;
+            let calls = (1..=65536)
+                .find(|_| show_cursor(&mut cpu, &[0]).is_some_and(|c| (c as i32) >= 0))
+                .expect("the loop ends");
+            assert!(calls <= 32768, "{calls} calls from {start}");
+        }
     }
 
     /// A program that hid the cursor and took the capture steers with
