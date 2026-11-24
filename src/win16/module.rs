@@ -887,9 +887,17 @@ fn free_classes(cpu: &mut Cpu, index: usize) {
         return;
     }
     let user = crate::win32::user32::user(cpu);
-    let gone = crate::win32::user32::class::module_freed(user, pid, &instances);
+    let mut gone = crate::win32::user32::class::module_freed(user, pid, &instances);
     // GetClassInfo's menu names of those classes, which pointed into the
-    // module's segments.
+    // module's segments. They are kept by name alone, so a name that
+    // another module's class of the process still has keeps its entry.
+    gone.retain(|(name, _)| {
+        !user
+            .classes
+            .iter()
+            .flatten()
+            .any(|c| !c.system && c.pid == pid && c.name.eq_ignore_ascii_case(name))
+    });
     let menus = &mut cpu.bus.win32.win16.class_menus;
     for (name, atom) in gone {
         let name = name.to_ascii_uppercase();
