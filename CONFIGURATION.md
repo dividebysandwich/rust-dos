@@ -2,7 +2,11 @@
 
 Rust-DOS takes its settings from a configuration file, from the settings
 window while it runs, and from game profiles for games that need settings
-of their own. See the [README](README.md) for everything else.
+of their own. This page is the reference, to look settings up in. To get
+a game running, start with the [README](README.md#start-here) and the
+[cookbook](COOKBOOK.md), which has whole configurations to copy.
+[REFERENCE.md](REFERENCE.md) describes the DOS prompt, the keys and save
+states.
 
 * [Configuration file](#configuration-file): where it is, and every setting in
   [`[emulator]`](#emulator), [`[sound]`](#sound), [`[mixer]`](#mixer),
@@ -229,7 +233,7 @@ limit, so without a connection it goes on as it would with one:
   10000` makes that real-mode speed, and the least `auto` goes down to,
   10000. `max` runs everything as fast as the host keeps up with in real
   time. Use a number such as `3000` for a fixed speed. `--cycles` overrides
-  it. Loading a [save state](README.md#save-states) keeps the speed the
+  it. Loading a [save state](REFERENCE.md#save-states) keeps the speed the
   machine runs at (this setting, `--cycles`, or the last one the window, the
   speed keys or `/api/speed` set): a fixed speed and `max` go on at the rate
   they had, and `auto` starts its search from the rate the state was saved
@@ -667,7 +671,7 @@ limit, so without a connection it goes on as it would with one:
   starts when none runs, and a saved state goes on under the locale it
   was saved with.
 * `win32_trace` picks which calls of the built-in Windows' functions
-  get a `[W32]` line in the [log file](README.md#log-file) (and `[W16]`
+  get a `[W32]` line in the [log file](REFERENCE.md#log-file) (and `[W16]`
   for the 16-bit modules), with the caller's address, the arguments and
   the result. `collapsed` (the default) writes the first 3 calls from
   each place in a program in a second of emulated time and counts the
@@ -790,7 +794,7 @@ limit, so without a connection it goes on as it would with one:
   by default; 16 to 4096): each state takes only what changed since the
   one after it, so a game that changes little goes back a long way. The
   states start over when a game starts or ends, the hardware changes or
-  a [save state](README.md#save-states) is loaded. Off by default.
+  a [save state](REFERENCE.md#save-states) is loaded. Off by default.
 * `idle_skip=true` (the default) lets the emulator skip the passes of a
   program's busy-wait loops up to the next timer event, and sleep
   instead of running them: a program polling the keyboard through the
@@ -1251,7 +1255,7 @@ message and the log say where it went.
 
 ### `[shell]`
 
-The DOS prompt's line editor (see [the prompt](README.md#the-prompt)).
+The DOS prompt's line editor (see [the prompt](REFERENCE.md#the-prompt)).
 
 * `autosuggest` shows the rest of the line in dark grey, from the newest
   matching line in the history or else the first name Tab would complete:
@@ -1417,10 +1421,10 @@ image](#booting-a-disk-image)).
 
 ### `[autoexec]`
 
-Commands that run at the DOS prompt on startup, before `C:\AUTOEXEC.BAT`,
-as a [batch file](README.md#batch-files). A program started here delays the
-following lines until it exits. The settings window's Emulator page edits
-them.
+Commands that run at the DOS prompt on startup, before
+`C:\AUTOEXEC.BAT`, as a [batch file](REFERENCE.md#batch-files). A
+program started here delays the following lines until it exits. The
+settings window's Emulator page edits them.
 
 A reboot runs them again, with `C:\AUTOEXEC.BAT`. Ctrl+Alt+Del reboots, as
 does a program that resets the machine (through the keyboard controller,
@@ -1481,10 +1485,10 @@ Esc closes it.
   TCP calls.
 * **Games:** the [game profiles](#game-profiles): Enter launches one, Ins
   makes one from the settings as they are, Del deletes one.
-* **States:** the [save state](README.md#save-states) slots of the game playing,
-  with when each was saved, in which program, and a picture of the screen:
-  Enter loads one, Ins saves to one, Del empties one. Ctrl+F9 opens the
-  window on this page.
+* **States:** the [save state](REFERENCE.md#save-states) slots of the
+  game playing, with when each was saved, in which program, and a picture
+  of the screen: Enter loads one, Ins saves to one, Del empties one.
+  Ctrl+F9 opens the window on this page.
 * **Cheats:** finds a game's values in memory, such as its lives or money,
   and changes them. Search for the value the game shows (or for any value,
   when the game shows none, such as an energy bar), close the window and
@@ -1775,7 +1779,7 @@ Windows unpacks the 32-bit engine from that archive into `TEMP` instead,
 and starts it with the command line the launcher gives it on Windows 98
 SE.
 
-If the setup doesn't run, look in [the log](README.md#log-file):
+If the setup doesn't run, look in [the log](REFERENCE.md#log-file):
 
 - **`SETUP.EXE` says it needs Windows:** it is a 16-bit program the
   built-in Windows doesn't run. Either it isn't InstallShield's
@@ -1876,7 +1880,7 @@ registry keys or its own files, and often by the disc's label too.
 
 #### When a game doesn't run
 
-The [log file](README.md#log-file) says what the built-in Windows did
+The [log file](REFERENCE.md#log-file) says what the built-in Windows did
 last. Go through these in order:
 
 1. **It stops at once with an invalid opcode:** set `cpu=pentium_ii`.
@@ -2072,7 +2076,7 @@ for version 1.2, which the game's patch TD42UP.EXE makes: 3.EXE of
 Without the fix, on version 1.0 or on a Windows image, F4 in the race
 steps through the camera views, each at its own distance; the fifth
 press reaches the chase view. `voodoo_fps_cap=30` ([3dfx frame rate
-cap](#3dfx-frame-rate-cap)) holds the intro to 30 frames a second, where
+cap](#frame-rate-cap)) holds the intro to 30 frames a second, where
 the shot ends a little behind the chase view's distance.
 
 To add a fix: an entry in `FIXES` in `src/game_fixes.rs` with a name of its
@@ -2694,7 +2698,7 @@ What the system writes to a hard disk image goes to its delta file
 (`<image>.rdelta` beside it, or in the [`-overlay DIR`](#mounting-drives)
 folder), and the image stays as it is until `COMMIT` writes the changes
 into it (see [Disk images](#disk-images)); with `-inplace` it goes into
-the image. [Save states](README.md#save-states) and rewind keep the disks
+the image. [Save states](REFERENCE.md#save-states) and rewind keep the disks
 in step with the system's memory: in a run, the disks go back with a
 state through a journal of what the system wrote over (the last 256 MB of
 it), and a state file keeps each disk beside it, which loading it puts
@@ -4365,7 +4369,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `-d, --dir DIR` | Make the host directory `DIR` drive C: (default: the configuration's C:, or the current directory) |
 | `-c, --config FILE` | Use this configuration file (see [Configuration file](#configuration-file)) |
 | `--no-config` | Read and create no configuration file |
-| `--log FILE` | Write the [log](README.md#log-file) to `FILE` instead of `rust-dos.log` in the configuration directory; stop if it cannot be created |
+| `--log FILE` | Write the [log](REFERENCE.md#log-file) to `FILE` instead of `rust-dos.log` in the configuration directory; stop if it cannot be created |
 | `--no-boot` | Start at the DOS prompt, without booting the disk image marked `-boot` in `[drives]` |
 | `-s, --scale N` | The window scale factor, 1 to 16 |
 | `--vrr` | Show frames at the machine's refresh rate, for a VRR display (`vrr`) |
@@ -4383,7 +4387,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--core auto\|dynamic\|normal` | What runs the instructions (`core`) |
 | `--game NAME` | Launch a [game profile](#game-profiles) at startup, by its file name or its name |
 | `--import PATH` | Import a game set up for DOSBox as a game profile, and launch it |
-| `--debug-server [ADDR]` | Start the [debug server](README.md#debug--remote-control-server) (default `127.0.0.1:8086`; port 0 takes a free port, printed on stdout) |
+| `--debug-server [ADDR]` | Start the [debug server](REFERENCE.md#debug--remote-control-server) (default `127.0.0.1:8086`; port 0 takes a free port, printed on stdout) |
 | `--exit-with-parent [PID]` | Quit when the process that started rust-dos ends, or the process `PID`, as `POST /api/control/quit` does, with exit code 4. A process that has ended already ends rust-dos at once (see [docs/llm-debugging.md](docs/llm-debugging.md#the-journal-what-happened-in-order)) |
 | `--trace-capacity N` | Entries in the debug server's instruction trace (default 1,000,000) |
 | `--deterministic` | Run on emulated time alone, so that the same input gives the same run every time: a fixed speed, a clock that starts at `--start-time`, and the debug server's input delivered at emulated times. With `--debug-server` the machine starts paused (see [docs/llm-debugging.md](docs/llm-debugging.md#deterministic-runs)) |
