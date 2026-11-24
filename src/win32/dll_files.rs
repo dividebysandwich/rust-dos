@@ -108,7 +108,8 @@ mod tests {
             assert_eq!(parsed.name(), def.name);
             assert_eq!(parsed.is_dll(), def.library, "{}", def.file);
             for api in def.apis.iter().filter(|a| a.ordinal != 0) {
-                assert_eq!(parsed.ordinal_of(api.name), Some(api.ordinal), "{}", api.name);
+                let ordinal = parsed.ordinal_of(api.name);
+                assert_eq!(ordinal, Some(api.ordinal), "{}", api.name);
                 assert!(parsed.entry(api.ordinal).is_some(), "{}", api.name);
             }
             assert_eq!(builtin16::of_file(&file), Some(i), "{}", def.file);
