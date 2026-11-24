@@ -495,9 +495,31 @@ fn local_heap_size(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 // The global heap.
 
+/// GlobalAlloc(flags, size): a block the running task owns, which goes
+/// when the task ends. A GMEM_DDESHARE block is the calling code's
+/// module's instead, as in Windows 3.1, and stays until that module is
+/// freed: a DLL keeps its shared blocks whichever task it ran for, as
+/// the Borland runtime's heap in a DLL does with the blocks it chains
+/// together (Memphis Math's MEMPHDB.DLL walked into a block freed with
+/// the task that had asked for it).
 fn global_alloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let owner = current_handle(cpu);
-    Some(global::alloc(cpu, args[0] as u16, args[1], owner, false) as u32)
+    let flags = args[0] as u16;
+    let caller = if flags & global::GMEM_DDESHARE != 0 {
+        caller_module(cpu)
+    } else {
+        None
+    };
+    let owner = caller.unwrap_or_else(|| current_handle(cpu));
+    Some(global::alloc(cpu, flags, args[1], owner, false) as u32)
+}
+
+/// The module whose code called the function running now: the one its
+/// far return address is in.
+fn caller_module(cpu: &mut Cpu) -> Option<u16> {
+    let base = cpu.seg_cache(Seg::SS).base;
+    let ret = cpu.bus.guest_read_32(base.wrapping_add(cpu.sp() as u32));
+    let index = super::module_index(cpu, (ret >> 16) as u16)?;
+    Some(cpu.bus.win32.win16.modules[index].handle)
 }
 
 fn global_realloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
