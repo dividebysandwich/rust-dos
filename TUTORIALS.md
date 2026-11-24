@@ -414,23 +414,23 @@ C=~/games/rage-of-mages-2
 
 [autoexec]
 C:
-CD \RAGE2
+CD \GAME
 ALLODS2.EXE -1024
 ```
 
 Here `~/games/rage-of-mages-2` is drive C:, and the game's folder was copied
-into it as `~/games/rage-of-mages-2/RAGE2`, so the game sees it as
-`C:\RAGE2`. Any folder name works: the game finds its folder through the
-registry, so the keys below name the same one. Games that read their folders
-or their CD's drive letter from the registry need those keys in
+into it as `~/games/rage-of-mages-2/GAME`, so the game sees it as `C:\GAME`.
+Any folder name works: the game finds its folder through the registry, so
+the keys below name the same one. Games that read their folders or their
+CD's drive letter from the registry need those keys in
 `games/rage-of-mages-2.reg`, as REGEDIT4 text, beside the profile:
 
 ```
 REGEDIT4
 
 [HKEY_LOCAL_MACHINE\Software\Rage of Mages 2]
-"INSTALLDIR"="C:\\RAGE2"
-"CD"="C:\\RAGE2"
+"INSTALLDIR"="C:\\GAME"
+"CD"="C:\\GAME"
 ```
 
 See: [copying an installed game](CONFIGURATION.md#copying-an-installed-game),
