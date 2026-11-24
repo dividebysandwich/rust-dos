@@ -352,9 +352,10 @@ const KEYBOARD_SETTINGS: [(u32, &str, u32); 2] =
 /// from WIN.INI's `[windows]` section. Windows 95's setup moves the
 /// WIN.INI values into the registry; here nothing does, so a value the
 /// registry doesn't have comes from WIN.INI, where a Windows 3.1 setup
-/// put it, and then Windows' default. A value out of range is taken as
-/// its largest, as SPI_SETKEYBOARDSPEED and SPI_SETKEYBOARDDELAY take
-/// it.
+/// put it, and then Windows' default. WIN.INI's values are read as
+/// Windows 3.1 reads them, with GetProfileInt. A value out of range is
+/// taken as its largest, as SPI_SETKEYBOARDSPEED and
+/// SPI_SETKEYBOARDDELAY take it.
 pub fn read_keyboard_settings(cpu: &mut Cpu) {
     let hkcu = crate::win32::registry::HKEY_CURRENT_USER;
     let registry = crate::win32::registry::string_values(cpu, &[(hkcu, KEYBOARD_KEY)]);
@@ -366,8 +367,7 @@ pub fn read_keyboard_settings(cpu: &mut Cpu) {
             .and_then(|(_, text)| text.trim().parse::<u32>().ok());
         let value = stored.or_else(|| {
             let key = name.as_bytes();
-            crate::win32::kernel32::profile_value(cpu, b"WIN.INI", b"windows", key)
-                .and_then(|v| crate::dosstr::from_bytes(&v).trim().parse::<u32>().ok())
+            crate::win32::kernel32::profile_number(cpu, b"WIN.INI", b"windows", key)
         });
         match value {
             Some(value) => set_param(cpu, action, value.min(max)),
@@ -376,17 +376,24 @@ pub fn read_keyboard_settings(cpu: &mut Cpu) {
     }
 }
 
-/// SPI_SETKEYBOARDSPEED or SPI_SETKEYBOARDDELAY (`action`) with
-/// SPIF_UPDATEINIFILE: the value goes into the registry, where Windows
-/// 95 and 98 keep it and `read_keyboard_settings` finds it at the next
-/// start.
-fn save_keyboard_setting(cpu: &mut Cpu, action: u32) {
-    let Some(&(_, name, _)) = KEYBOARD_SETTINGS.iter().find(|s| s.0 == action) else {
+/// SPI_SETKEYBOARDSPEED or SPI_SETKEYBOARDDELAY (`action`) set the
+/// keyboard's speed or delay to `ui`, taking a value over the largest
+/// as the largest, and the keyboard repeats at the new rate. With
+/// SPIF_UPDATEINIFILE in `flags`, the value goes into the registry,
+/// where Windows 95 and 98 keep it and `read_keyboard_settings` finds
+/// it at the next start.
+fn set_keyboard_setting(cpu: &mut Cpu, action: u32, ui: u32, flags: u32) {
+    let Some(&(_, name, max)) = KEYBOARD_SETTINGS.iter().find(|s| s.0 == action) else {
         return;
     };
-    let hkcu = crate::win32::registry::HKEY_CURRENT_USER;
-    let text = param(cpu, action, 0).to_string();
-    crate::win32::registry::set_string_now(cpu, hkcu, KEYBOARD_KEY, name, &text);
+    let value = ui.min(max);
+    set_param(cpu, action, value);
+    program_keyboard(cpu);
+    if flags & SPIF_UPDATEINIFILE != 0 {
+        let hkcu = crate::win32::registry::HKEY_CURRENT_USER;
+        let text = value.to_string();
+        crate::win32::registry::set_string_now(cpu, hkcu, KEYBOARD_KEY, name, &text);
+    }
 }
 
 /// SystemParametersInfo's flag that writes a SET action's value to where
@@ -455,16 +462,10 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             TRUE
         }
         // SPI_SETKEYBOARDSPEED and SPI_SETKEYBOARDDELAY: the keyboard
-        // repeats at the new rate.
-        // A value over the largest (31, 3) is taken as the largest. With
-        // SPIF_UPDATEINIFILE, the registry keeps it for the next start.
+        // repeats at the new rate, and with SPIF_UPDATEINIFILE the
+        // registry keeps it for the next start.
         11 | 23 => {
-            let max = if action == 11 { 31 } else { 3 };
-            set_param(cpu, action, ui.min(max));
-            program_keyboard(cpu);
-            if args[3] & SPIF_UPDATEINIFILE != 0 {
-                save_keyboard_setting(cpu, action);
-            }
+            set_keyboard_setting(cpu, action, ui, args[3]);
             TRUE
         }
         // SPI_GETMOUSEHOVERWIDTH, SPI_GETMOUSEHOVERHEIGHT and

@@ -142,7 +142,7 @@ fn the_registry_comes_before_win_ini() {
 }
 
 /// Values out of range are the largest, as SystemParametersInfo takes
-/// them; text that isn't a number is no value.
+/// them; text in the registry that isn't a number is no value.
 #[test]
 fn out_of_range_settings_are_the_largest() {
     let registry = "REGEDIT4\r\n\r\n\
@@ -154,6 +154,23 @@ fn out_of_range_settings_are_the_largest() {
     let (code, typematic) = run(&dir, program(&[]));
     assert_eq!(code, settings(3, 31));
     assert_eq!(typematic, 0x60);
+}
+
+/// WIN.INI's values are numbers as GetProfileInt reads them, as Windows
+/// 3.1 does: the digits at the start, 0 for text without any, and -1 as
+/// the largest unsigned value, which is out of range.
+#[test]
+fn win_ini_settings_are_read_as_get_profile_int_reads_them() {
+    let win_ini = "[windows]\r\nKeyboardSpeed=-1\r\nKeyboardDelay=fast\r\n";
+    let dir = scratch("win_ini_int", None, Some(win_ini));
+    let (code, typematic) = run(&dir, program(&[]));
+    assert_eq!(code, settings(0, 31));
+    assert_eq!(typematic, 0x00);
+    let win_ini = "[windows]\r\nKeyboardSpeed=12 a second\r\nKeyboardDelay=2\r\n";
+    let dir = scratch("win_ini_digits", None, Some(win_ini));
+    let (code, typematic) = run(&dir, program(&[]));
+    assert_eq!(code, settings(2, 12));
+    assert_eq!(typematic, 0x53);
 }
 
 /// SPIF_UPDATEINIFILE writes the value to the registry, which the next
