@@ -19761,18 +19761,24 @@ fn a_win16_state_of_now_calls_its_missing_import() {
 /// VWIN32's services that need no real mode, called with VxDCall0 as
 /// Win32 programs call them: its version (GetVersion's, major in the
 /// high byte), VMCPD's version for one argument (4.05), and the debugger
-/// dispatch, which gives back the function it is passed. The services
-/// pop their arguments, so the stack is as it was before they were
-/// pushed. The exit code is the step that failed.
+/// dispatch, which gives back the whole dword it is passed. The services
+/// pop their arguments and no more, so the stack is as it was before
+/// they were pushed, also when the program calls VxDCall2, which on
+/// Windows 98 is the same function as VxDCall0. The exit code is the
+/// step that failed.
 #[test]
 fn vwin32_gives_its_version_and_pops_its_arguments() {
-    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["#1", "GetVersion", "ExitProcess"])];
+    let imports: &[(&str, &[&str])] =
+        &[("KERNEL32.DLL", &["#1", "GetVersion", "ExitProcess", "#3"])];
     let exe = program(BASE, false, imports, &[0; 0x10], |a, l| {
         let mut fail = a.create_label();
         a.call(l.import(1))?;
         a.mov(ecx, eax)?;
         a.xchg(cl, ch)?;
         a.movzx(ecx, cx)?;
+        // Room above the stack pointer: VxDCall2's stub reads its two
+        // dwords whether the program pushed them or not.
+        a.sub(esp, 0x20)?;
         a.mov(esi, esp)?;
         a.push(0x002A_0000)?;
         a.call(l.import(0))?;
@@ -19789,11 +19795,29 @@ fn vwin32_gives_its_version_and_pops_its_arguments() {
         a.jne(fail)?;
         a.cmp(esp, esi)?;
         a.jne(fail)?;
-        a.push(0x1234)?;
+        a.push(0x0001_004F)?;
         a.push(0x002A_002A)?;
         a.call(l.import(0))?;
         a.mov(ebx, 3)?;
-        a.cmp(eax, 0x1234)?;
+        a.cmp(eax, 0x0001_004F)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        // The same services through VxDCall2, whose stub pops two dwords
+        // after the service: one more than VMCPD's version takes and two
+        // more than VWIN32's, which stay the program's.
+        a.push(0)?;
+        a.push(0x002A_0020)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 4)?;
+        a.cmp(eax, 0x0405)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.push(0x002A_0000)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 5)?;
+        a.cmp(eax, ecx)?;
         a.jne(fail)?;
         a.cmp(esp, esi)?;
         a.jne(fail)?;
@@ -19967,4 +19991,46 @@ fn kernel32_exports_debug_break() {
     });
     let (code, text) = run("debug_break_export", exe);
     assert_eq!(code, 1, "{}", text);
+}
+
+/// DebugBreak raises a breakpoint, as the INT 3 of Windows 98's does: the
+/// program's handler gets the exception with the one parameter the
+/// processor's breakpoint gives, and when it goes on the call returns,
+/// here with the EAX it put in the context. The exit code is 7 when the
+/// record was right, 1 when it wasn't.
+#[test]
+fn debug_break_raises_a_breakpoint_the_handler_goes_on_from() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["DebugBreak", "ExitProcess"])];
+    let exe = program(BASE, false, imports, &[0; 4], |a, l| {
+        let mut over = a.create_label();
+        let mut bad = a.create_label();
+        a.call(over)?;
+        // The handler: EDX 7 if the record (its first argument) is a
+        // breakpoint with one parameter, else 1, into the context's Eax
+        // (B0h).
+        a.mov(edx, 1)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.cmp(dword_ptr(eax), 0x8000_0003u32 as i32)?;
+        a.jne(bad)?;
+        a.cmp(dword_ptr(eax + 16), 1)?;
+        a.jne(bad)?;
+        a.mov(edx, 7)?;
+        a.set_label(&mut bad)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(eax + 0xB0), edx)?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut over)?;
+        a.push(dword_ptr(0).fs())?;
+        a.mov(dword_ptr(0).fs(), esp)?;
+        a.xor(eax, eax)?;
+        a.call(l.import(0))?;
+        a.pop(dword_ptr(0).fs())?;
+        a.add(esp, 4)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.int3()
+    });
+    let (code, text) = run("debug_break_seh", exe);
+    assert_eq!(code, 7, "{}", text);
 }

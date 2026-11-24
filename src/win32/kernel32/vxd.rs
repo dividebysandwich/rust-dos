@@ -48,8 +48,10 @@ const UNSUPPORTED: u16 = 0x8001;
 /// VxDCallN(service, N arguments).
 pub fn vxd_call(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let service = args[0];
-    // The stub pops the service and N dwords after it, which are the
-    // service's own arguments either way.
+    // The stub pops the service and N dwords after it. On Windows 98
+    // VxDCall0 to VxDCall8 are one function that pops only the service,
+    // and the service pops its own arguments, however many the N of the
+    // name says: `pop_arguments` evens out the difference.
     let popped = 4 * (args.len() as u32 - 1);
     if service >> 16 == VWIN32
         && let Some(result) = vwin32(cpu, service & 0xFFFF, popped)
@@ -76,17 +78,22 @@ fn argument(cpu: &mut Cpu, index: u32) -> u32 {
     cpu.bus.guest_read_32(esp.wrapping_add(8 + 4 * index))
 }
 
-/// Pop the `count` dwords of the service's arguments. The stub pops
-/// `popped` bytes of them; for the rest the return address moves up, so
-/// that the stub's RET leaves the stack after them.
+/// Pop the `count` dwords of the service's arguments, and no more. The
+/// stub pops `popped` bytes after the service: the return address moves
+/// up past the arguments it leaves, or down by the dwords past them it
+/// would take, so that the stub's RET leaves the stack right after the
+/// arguments. A page fault leaves the stack as it was.
 fn pop_arguments(cpu: &mut Cpu, count: u32, popped: u32) {
-    let extra = (4 * count).saturating_sub(popped);
-    if extra == 0 {
+    let shift = (4 * count).wrapping_sub(popped);
+    if shift == 0 {
         return;
     }
     let esp = cpu.esp();
     let ret = cpu.bus.guest_read_32(esp);
-    let esp = esp.wrapping_add(extra);
+    if cpu.bus.guest_faulted() {
+        return;
+    }
+    let esp = esp.wrapping_add(shift);
     cpu.bus.guest_write_32(esp, ret);
     if !cpu.bus.guest_faulted() {
         cpu.set_esp(esp);
@@ -103,6 +110,7 @@ fn vwin32(cpu: &mut Cpu, number: u32, popped: u32) -> Option<Option<u32>> {
         0x0000 => {
             let version = crate::win32::version::current(cpu);
             let v = crate::win32::version::info(version).get_version;
+            pop_arguments(cpu, 0, popped);
             Some((v & 0xFF) << 8 | (v >> 8) & 0xFF)
         }
         // The version of VMCPD, the coprocessor's VxD, which takes one
@@ -123,12 +131,15 @@ fn vwin32(cpu: &mut Cpu, number: u32, popped: u32) -> Option<Option<u32>> {
             int31_dispatch(cpu, function, parm, popped)
         }
         // Int41Dispatch(function): the kernel debugger's INT 41h. There
-        // is no debugger, and the function comes back, as when none is
-        // loaded.
+        // is no debugger, and the function comes back whole, EAX as INT
+        // 41h leaves it when none is loaded.
         0x002A => {
             let function = argument(cpu, 0);
+            if cpu.bus.guest_faulted() {
+                return Some(None);
+            }
             pop_arguments(cpu, 1, popped);
-            Some(function & 0xFFFF)
+            Some(function)
         }
         _ => return None,
     };
@@ -150,14 +161,17 @@ fn int31_dispatch(cpu: &mut Cpu, function: u32, parm: u32, popped: u32) -> Optio
     ctx.gpr[EAX] = function;
     ctx.gpr[ECX] = parm;
     // The caller's stack once the call has returned, where 0300h's CX
-    // words are: after the return address, the service and the
-    // arguments.
-    ctx.gpr[ESP] = ctx.gpr[ESP].wrapping_add(8 + popped.max(8));
+    // words are: after the return address, the service and the two
+    // arguments, whichever VxDCallN the program called.
+    ctx.gpr[ESP] = ctx.gpr[ESP].wrapping_add(16);
     let call = Kind::of(function as u16).map(|kind| read_call(cpu, &ctx, kind));
     if cpu.bus.guest_faulted() {
         return None;
     }
     pop_arguments(cpu, 2, popped);
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
     ctx.gpr[ESP] = cpu.esp();
     let result = match call {
         Some(call) => {
