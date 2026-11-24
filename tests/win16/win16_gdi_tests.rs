@@ -4,7 +4,8 @@
 
 use crate::win16;
 
-use win16::{CODE, Code, program, run};
+use rust_dos::config::DesktopDepth;
+use win16::{CODE, Code, program, run, run_with};
 
 /// USER's ordinals.
 const CREATE_WINDOW: u16 = 41;
@@ -46,14 +47,13 @@ fn select(code: &mut Code, at: u8, background: u16) {
     .call("USER", SELECT_PALETTE);
 }
 
-#[test]
-fn is_dc_current_palette_tells_whether_the_dc_has_the_foreground_palette() {
-    // GDI.412, IsDCCurrentPalette(hdc), which Video for Windows 1.1's
-    // DrawDib calls: Windows 98's compares the DC's palette with the one
-    // GDISelectPalette last selected in the foreground, which USER's
-    // SelectPalette does for a DC of the active window without
-    // bForceBackground. A window's DC, palettes A and B: exit code 1
-    // when every answer is right, the failing step's code otherwise.
+/// The program of the IsDCCurrentPalette tests: a window's DC, palettes
+/// A and B, and IsDCCurrentPalette after each SelectPalette, which must
+/// answer TRUE where the palette is the foreground one when `palette`,
+/// on a palette device, and never otherwise. Exit code 1 when every
+/// answer is right, the failing step's code otherwise.
+fn current_palette_program(palette: bool) -> Vec<u8> {
+    let foreground = palette as u16;
     let mut code = Code::new();
     let class_at = code.here() + 2;
     code.push_far(0);
@@ -86,13 +86,13 @@ fn is_dc_current_palette_tells_whether_the_dc_has_the_foreground_palette() {
     expect_current(&mut code, 0, 2);
     // A in the foreground.
     select(&mut code, 2, 0);
-    expect_current(&mut code, 1, 3);
+    expect_current(&mut code, foreground, 3);
     // B in the background: the DC no longer has the foreground palette.
     select(&mut code, 0, 1);
     expect_current(&mut code, 0, 4);
     // A again, in the background: still the foreground palette.
     select(&mut code, 2, 1);
-    expect_current(&mut code, 1, 5);
+    expect_current(&mut code, foreground, 5);
     // A handle that isn't a DC.
     code.push(0);
     code.call("GDI", IS_DC_CURRENT_PALETTE);
@@ -111,6 +111,31 @@ fn is_dc_current_palette_tells_whether_the_dc_has_the_foreground_palette() {
     for at in palette_at {
         code.patch(at, palette);
     }
-    let (exit, log) = run("is_dc_current_palette", program(&code, CODE));
+    program(&code, CODE)
+}
+
+#[test]
+fn is_dc_current_palette_tells_whether_the_dc_has_the_foreground_palette() {
+    // GDI.412, IsDCCurrentPalette(hdc), which Video for Windows 1.1's
+    // DrawDib calls on a 256-colour display: Windows 98's compares the
+    // DC's palette with the one GDISelectPalette last selected in the
+    // foreground, which USER's SelectPalette does for a DC of the active
+    // window without bForceBackground.
+    let (exit, log) = run_with(
+        "is_dc_current_palette",
+        current_palette_program(true),
+        |cpu, _| {
+            cpu.bus.win32.depth = DesktopDepth::Palette;
+        },
+    );
+    assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn is_dc_current_palette_is_false_without_a_palette_device() {
+    // USER's SelectPalette selects a palette in the foreground only on a
+    // palette device, so on a desktop of more colours no DC has the
+    // foreground palette.
+    let (exit, log) = run("is_dc_current_palette_deep", current_palette_program(false));
     assert_eq!(exit, 1, "{log}");
 }
