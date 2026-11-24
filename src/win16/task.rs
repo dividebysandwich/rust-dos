@@ -1093,6 +1093,11 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
         *exit_code = Some(code as u32);
     }
     objects.release(task.process_object);
+    // The byte ranges it locked (INT 21h AH=5Ch) are free again, as when
+    // Windows closes an ending task's files.
+    cpu.bus
+        .disk
+        .release_locks(crate::disk::TASK_OWNER | task.psp as u32);
     let others = cpu
         .bus
         .win32

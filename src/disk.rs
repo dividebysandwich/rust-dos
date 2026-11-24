@@ -17,6 +17,7 @@ mod drives;
 mod files;
 mod host_dir;
 mod layout;
+mod locks;
 mod mount;
 mod paths;
 mod search;
@@ -25,6 +26,7 @@ mod system_files;
 
 use host_dir::{DirCount, HostDirCache, SearchKey};
 pub use layout::{DriveKind, Fat32Layout, FatLayout, old_space};
+pub use locks::{LOCK_VIOLATION, Lock, TASK_OWNER};
 pub use search::NameFilter;
 
 /// The open files are numbered as DOS numbers the entries of its System
@@ -839,6 +841,8 @@ pub struct DiskController {
     /// only the position (`dos_files::flush`).
     sft_dirty: u128,
     position_dirty: u128,
+    /// The locked ranges of the open files (INT 21h AH=5Ch, locks.rs).
+    locks: Vec<locks::Lock>,
 
     // File System State
     /// The lettered drives, then the disks mounted by number.
@@ -912,6 +916,7 @@ impl DiskController {
             open_files: HashMap::new(),
             sft_dirty: 0,
             position_dirty: 0,
+            locks: Vec::new(),
             drives,
             current_drive: DRIVE_C, // Default to C:
             emm_device: false,
