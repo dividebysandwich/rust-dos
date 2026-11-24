@@ -119,6 +119,10 @@ pub struct Settings {
     /// A booted system has a floppy disk controller for its floppy drives.
     pub floppy_controller: bool,
     pub keyboard_layout: LayoutSetting,
+    /// How long a key is held before the keyboard repeats it, in
+    /// milliseconds, whatever typematic delay the program set; None (the
+    /// default) for the typematic delay (`key_repeat_delay`).
+    pub key_repeat_delay: Option<u32>,
     /// The mouse captured as it moves over the window while a program
     /// uses the mouse driver, and let go as the program's cursor leaves
     /// the screen.
@@ -226,6 +230,7 @@ impl Default for Settings {
             boot_cdrom: true,
             floppy_controller: true,
             keyboard_layout: LayoutSetting::Auto,
+            key_repeat_delay: None,
             mouse_autocapture: true,
             mouse_sensitivity: 1.0,
             mouse_capture_messages: true,
@@ -257,6 +262,34 @@ impl Default for Settings {
 }
 
 /// Parse the host mouse motion multiplier, rejecting non-finite values too.
+/// The shortest and longest `key_repeat_delay`, in milliseconds.
+pub const KEY_REPEAT_DELAY_RANGE: std::ops::RangeInclusive<u32> = 10..=1000;
+
+/// The `key_repeat_delay` setting's value: `off` (or nothing) for the
+/// typematic delay, else milliseconds in `KEY_REPEAT_DELAY_RANGE`.
+pub fn parse_key_repeat_delay(value: &str) -> Result<Option<u32>, String> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("off") {
+        return Ok(None);
+    }
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|ms| KEY_REPEAT_DELAY_RANGE.contains(ms))
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "invalid key_repeat_delay '{}' (off, or 10 to 1000 ms)",
+                value
+            )
+        })
+}
+
+/// How the file writes the `key_repeat_delay` setting.
+pub fn key_repeat_delay_name(delay: Option<u32>) -> String {
+    delay.map_or("off".to_string(), |ms| ms.to_string())
+}
+
 pub fn parse_mouse_sensitivity(value: &str) -> Result<f64, String> {
     value.trim().parse::<f64>().ok()
         .filter(|n| (0.1..=10.0).contains(n))
@@ -399,6 +432,7 @@ impl Settings {
             game_fixes: config.game_fixes.unwrap_or(default.game_fixes),
             game_fixes_off: config.game_fixes_off.clone().unwrap_or(default.game_fixes_off),
             keyboard_layout: config.keyboard_layout.unwrap_or(default.keyboard_layout),
+            key_repeat_delay: config.key_repeat_delay.unwrap_or(default.key_repeat_delay),
             sound: config.sound.clone(),
             disk: config.disk,
             mixer: config.mixer,
@@ -648,6 +682,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "boot_cdrom", yes_no(settings.boot_cdrom)),
         (Emulator, "floppy_controller", yes_no(settings.floppy_controller)),
         (Emulator, "keyboard_layout", Some(settings.keyboard_layout.name().to_string())),
+        (Emulator, "key_repeat_delay", Some(key_repeat_delay_name(settings.key_repeat_delay))),
         (Emulator, "mouse_autocapture", yes_no(settings.mouse_autocapture)),
         (Emulator, "mouse_sensitivity", Some(settings.mouse_sensitivity.to_string())),
         (Emulator, "mouse_capture_messages", yes_no(settings.mouse_capture_messages)),

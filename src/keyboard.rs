@@ -151,6 +151,11 @@ pub struct KeyboardState {
     pub windows: bool,
     /// The key the keyboard repeats while it is held, and when (`typematic`).
     repeat: Option<Repeat>,
+    /// The `key_repeat_delay` setting: how long, in milliseconds, a key is
+    /// held before the keyboard repeats it, in place of the typematic
+    /// delay the program set; None for the typematic delay. A player's
+    /// choice, not the hardware's, so states don't keep it.
+    pub repeat_delay: Option<u32>,
 }
 
 /// The key a keyboard repeats: the one that went down last, while it is
@@ -176,6 +181,7 @@ impl Default for KeyboardState {
             made: Default::default(),
             windows: false,
             repeat: None,
+            repeat_delay: None,
         }
     }
 }
@@ -431,15 +437,17 @@ fn set_bit(byte: &mut u8, bit: u8, on: bool) {
 /// The keyboard repeats a held key by itself, as a PC's does: the last
 /// key to go down sends its make code again after the typematic delay and
 /// then at the typematic rate (`typematic`), until it comes up or another
-/// key goes down. A key going down again while it is held, as the host's
-/// own key repeat sends it, changes nothing.
+/// key goes down. The `key_repeat_delay` setting, where it is set, takes
+/// the typematic delay's place (`repeat_delay_ticks`). A key going down
+/// again while it is held, as the host's own key repeat sends it, changes
+/// nothing.
 pub fn key_event(bus: &mut Bus, scan: u8, extended: bool, down: bool, host_char: Option<u8>) {
     let id = key_id(scan, extended);
     if down {
         if bus.kbd.is_held(id) {
             return;
         }
-        let at = bus.clock.now_ticks() + typematic_delay_ticks(bus.kbc.typematic);
+        let at = bus.clock.now_ticks() + repeat_delay_ticks(bus);
         bus.kbd.repeat = Some(Repeat {
             scan,
             extended,
@@ -462,6 +470,17 @@ pub fn key_event(bus: &mut Bus, scan: u8, extended: bool, down: bool, host_char:
 pub fn typematic_delay_ticks(typematic: u8) -> u64 {
     let quarters = 1 + (typematic >> 5 & 3) as u64;
     crate::timer::mul_div(quarters, crate::timer::PIT_HZ, 4)
+}
+
+/// How long a key is held before the keyboard repeats it, in PIT ticks:
+/// the `key_repeat_delay` setting's time where it is set, which can be
+/// shorter than any typematic delay a keyboard has, else the typematic
+/// delay.
+pub fn repeat_delay_ticks(bus: &Bus) -> u64 {
+    match bus.kbd.repeat_delay {
+        Some(ms) => crate::timer::mul_div(ms as u64, crate::timer::PIT_HZ, 1000),
+        None => typematic_delay_ticks(bus.kbc.typematic),
+    }
 }
 
 /// The time between two repeats, in PIT ticks: (8 + A) * 2^B * 4.17 ms,

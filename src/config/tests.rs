@@ -966,6 +966,7 @@ fn changed_settings() -> Settings {
         boot_cdrom: false,
         floppy_controller: false,
         keyboard_layout: LayoutSetting::Named("gr"),
+        key_repeat_delay: Some(30),
         mouse_autocapture: false,
         mouse_sensitivity: 2.3,
         mouse_capture_messages: false,

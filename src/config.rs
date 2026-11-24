@@ -42,7 +42,7 @@ pub use edit::{
 };
 pub use parse::{MAX_MEMSIZE, MIN_MEMSIZE, parse, parse_memsize};
 pub use settings::{Memory, default_cpu, default_memsize};
-pub use settings::{Settings, parse_mouse_sensitivity};
+pub use settings::{Settings, parse_key_repeat_delay, parse_mouse_sensitivity};
 pub use types::{
     AspectRatio, DesktopDepth, DesktopSize, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig,
     Win32Locale, Win32Trace, WindowsVersion,
@@ -249,6 +249,10 @@ pub struct Config {
     pub floppy_controller: Option<bool>,
     /// The keyboard layout (`keyboard_layout`).
     pub keyboard_layout: Option<LayoutSetting>,
+    /// How long a key is held before the keyboard repeats it, in
+    /// milliseconds, or Some(None) for the typematic delay
+    /// (`key_repeat_delay`).
+    pub key_repeat_delay: Option<Option<u32>>,
     /// The mouse captured by itself (`mouse_autocapture`).
     pub mouse_autocapture: Option<bool>,
     /// The captured mouse's motion multiplier (`mouse_sensitivity`).

@@ -598,6 +598,8 @@ impl Host for MainHost<'_, '_> {
         if new.keyboard_layout != old.keyboard_layout {
             apply_keyboard_layout(self.cpu, new.keyboard_layout);
         }
+        // From the next key that goes down.
+        self.cpu.bus.kbd.repeat_delay = new.key_repeat_delay;
         if new.achievements != old.achievements {
             self.achievements.apply(&new.achievements);
         }

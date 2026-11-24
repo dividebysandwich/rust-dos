@@ -71,6 +71,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     cpu.bus.set_joystick(settings.joystick);
     cpu.bus.vga.set_composite(settings.composite);
     cpu.bus.kbd.layout = settings.keyboard_layout.layout(host_layout);
+    cpu.bus.kbd.repeat_delay = settings.key_repeat_delay;
     warnings.extend(cpu.set_dos_high(settings.dos_high).err());
     warnings.extend(cpu.set_upper_memory(settings.ems, settings.umb).err());
     cpu.bus.dpmi.enabled = settings.dpmi;

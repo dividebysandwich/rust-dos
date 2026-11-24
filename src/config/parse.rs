@@ -3,7 +3,7 @@
 use super::types::parse_bool;
 use super::{
     AspectRatio, Config, DesktopDepth, DesktopSize, DosVersion, Filter, RunLockSetting, Section,
-    Win32Locale, Win32Trace, WindowsVersion, parse_mouse_sensitivity,
+    Win32Locale, Win32Trace, WindowsVersion, parse_key_repeat_delay, parse_mouse_sensitivity,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::DRIVE_Z;
@@ -501,6 +501,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "rewind_memory" => match value.parse::<usize>() {
                             Ok(mb) if (16..=4096).contains(&mb) => config.rewind_memory = Some(mb),
                             _ => warn(format!("invalid rewind_memory '{}' (16 to 4096 MB)", value)),
+                        },
+                        "key_repeat_delay" => match parse_key_repeat_delay(value) {
+                            Ok(delay) => config.key_repeat_delay = Some(delay),
+                            Err(e) => warn(e),
                         },
                         "keyboard_layout" => match LayoutSetting::parse(value) {
                             Some(layout) => config.keyboard_layout = Some(layout),

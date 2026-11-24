@@ -179,3 +179,27 @@ fn the_built_in_windows_repeats_keys_at_its_keyboard_speed() {
     system_parameters_info(&mut cpu, &[23, 3, 0, 0]);
     assert_eq!(cpu.bus.kbc.typematic, 0x7F);
 }
+
+#[test]
+fn key_repeat_delay_replaces_the_typematic_delay() {
+    let mut cpu = cpu();
+    let bus = &mut cpu.bus;
+    // 30 ms, below any delay a keyboard has; the rate stays the
+    // program's (10.9 a second here).
+    bus.kbd.repeat_delay = Some(30);
+    key_event(bus, A, false, true, None);
+    assert_eq!(makes(bus, A), 1);
+    wait_ms(bus, 25);
+    assert_eq!(makes(bus, A), 0);
+    wait_ms(bus, 10);
+    assert_eq!(makes(bus, A), 1, "the first repeat at 30 ms");
+    wait_ms(bus, 92);
+    assert_eq!(makes(bus, A), 1, "the next a period later");
+    key_event(bus, A, false, false, None);
+    // Off: the typematic delay again.
+    bus.kbd.repeat_delay = None;
+    key_event(bus, A, false, true, None);
+    makes(bus, A);
+    wait_ms(bus, 495);
+    assert_eq!(makes(bus, A), 0);
+}
