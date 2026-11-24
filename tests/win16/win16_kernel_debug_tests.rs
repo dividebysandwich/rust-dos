@@ -15,7 +15,7 @@ const DEBUG_OUTPUT: u16 = 328;
 #[test]
 fn debug_output_formats_its_message_into_the_log_and_returns() {
     // _DebugOutput(DBF_ERROR, "count %d of %s", 42, "MCLIB"), cdecl:
-    // the caller takes its 14 bytes of arguments off the stack. Windows'
+    // the caller takes its 12 bytes of arguments off the stack. Windows'
     // retail KERNEL returns without a word; Memphis Math's MCLIB.DLL calls
     // it with its own warnings and goes on. The program ends with 1 once
     // it is back, with SP where it was.
