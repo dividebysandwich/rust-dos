@@ -1124,7 +1124,8 @@ the mount names the delta file. `-inplace` writes the image itself.
   `triangles` and `lines_3d`, the last 3D command (`cmd_3d`), the
   subsystem status, and the overlay, if one is shown, `video.vga.crtc`
   with the standard CRTC registers, and `kbc` with the keyboard
-  controller's output buffer and queues.
+  controller's output buffer and queues and the keyboard's `typematic`
+  byte (command F3h's: bits 5-6 the delay, bits 0-4 the rate).
 - **The mouse:** Windows reads the PS/2 mouse's motion and accelerates
   it, so move in small relative steps (`{"action":"move","dx":10,"dy":-6}`)
   a few tenths of a second apart and read where the pointer went from

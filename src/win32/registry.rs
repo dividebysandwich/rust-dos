@@ -928,6 +928,25 @@ pub fn delete_value_now(cpu: &mut Cpu, hkey: u32, path: &str, name: &str) -> boo
     deleted
 }
 
+/// Set the string value `name` of the key `path` under the predefined key
+/// `hkey` to `text`, making the key if it isn't there, and save the
+/// registry at once.
+pub fn set_string_now(cpu: &mut Cpu, hkey: u32, path: &str, name: &str, text: &str) {
+    let mut data = crate::dosstr::to_bytes(text);
+    data.push(0);
+    let ((), saved) = change_and_save(cpu, |registry| {
+        let Open::Key(root) = registry.open(hkey, 0) else {
+            return;
+        };
+        let (key, _) = registry.create(root, path);
+        registry.set_value(key, name, REG_SZ, data);
+    });
+    if saved.is_err() {
+        cpu.bus
+            .log_string(&format!("[W32] The registry can't be saved to {}", FILE));
+    }
+}
+
 /// The process `id` ended: its keys close. After the last process, the
 /// registry is saved and read again by the next program, which sees what
 /// was changed in the file meanwhile.
