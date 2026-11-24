@@ -124,6 +124,15 @@ programs and DLLs built with those compilers. Their functions are
 `MSVCRT.DLL`'s, so the three share one heap and one set of open files,
 where Windows' own keep one each.
 
+The 16-bit system modules are there too, as on Windows 95 and 98:
+`KRNL386.EXE`, `USER.EXE`, `GDI.EXE`, `MMSYSTEM.DLL`, `COMMDLG.DLL` and
+the others the built-in Windows has for Windows 3.1 programs. Each is an
+NE file with the module's name, its exports and a version resource, so
+a program that looks for `MMSYSTEM.DLL` by its file, as the Autodesk
+Animator player `AAPLAY.DLL` does, finds it. Loading one by its
+name, by its path in the system folder or as a copy of the file under
+another name gives the built-in module.
+
 ### DOS programs started from Windows
 
 A Windows program can start a DOS program, as setups do to run a DOS

@@ -80,8 +80,10 @@ pub fn load(
         .to_ascii_uppercase();
     let has_path = name.contains(['\\', '/', ':']);
     // A system module is found by its file's name too, which may differ
-    // from its module's (KRNL386.EXE is KERNEL), as Windows finds it.
-    let builtin = builtin::find(file_name).filter(|_| !has_path);
+    // from its module's (KRNL386.EXE is KERNEL), as Windows finds it. A
+    // path names it in the system directory, where its file is
+    // (win32/dll_files.rs); one elsewhere names a file of the program's.
+    let builtin = builtin::find(file_name).filter(|_| !has_path || in_system_dir(cpu, name));
     let module_name = builtin.map_or(module_name, |i| {
         builtin::MODULES[i].name.to_ascii_uppercase()
     });
@@ -127,6 +129,12 @@ pub fn load(
             format!("{} can't be found.", file_name),
         ));
     };
+    // A copy of a system module's file, under any name, is that module:
+    // its code is stubs of the built-in functions, which only the
+    // built-in module may run.
+    if let Some(index) = builtin::of_file(&file) {
+        return load(cpu, builtin::MODULES[index].file, dir, inits);
+    }
     let loaded = load_file(cpu, file, &path, None, dir, inits)?;
     remember_known(cpu, loaded);
     Ok(loaded)
@@ -169,6 +177,17 @@ fn remember_known(cpu: &mut Cpu, index: usize) {
     let mut data = file.clone().into_bytes();
     data.push(0);
     reg.set_value(key, &file, registry::REG_SZ, data);
+}
+
+/// Whether the path `name` is of a file in the system directory.
+fn in_system_dir(cpu: &Cpu, name: &str) -> bool {
+    cpu.bus
+        .disk
+        .qualify_path(name.trim_end_matches(' '))
+        .is_some_and(|path| {
+            crate::win32::loader::directory_of(&path)
+                .eq_ignore_ascii_case(crate::win32::loader::SYSTEM_DIR)
+        })
 }
 
 fn file_name_of(path: &str) -> &str {
