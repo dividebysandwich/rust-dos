@@ -624,6 +624,17 @@ pub fn animate_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
+/// Whether the DC `hdc` holds the primary palette, the one selected last
+/// into a DC of the foreground window without bForceBackground: Windows
+/// 3.1's and 98's IsDCCurrentPalette (GDI.412), which compares the DC's
+/// palette with the one GDISelectPalette last selected in the
+/// foreground. False for a handle that isn't a DC.
+pub fn is_dc_current_palette(cpu: &mut Cpu, hdc: u32) -> bool {
+    let state = gdi(cpu);
+    let primary = state.primary_palette;
+    primary != 0 && state.dc(hdc).is_some_and(|d| d.attrs.palette == primary)
+}
+
 /// SelectPalette(hdc, hpal, background): the palette it had. As USER's
 /// SelectPalette, it makes the palette the primary one when it isn't
 /// selected as a background palette into a DC of the foreground window
