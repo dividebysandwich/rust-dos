@@ -53,6 +53,8 @@
                     <File Id="LicenseTxt" Source="LICENSE" Name="LICENSE.txt" KeyPath="yes" />
                     <File Id="ThirdPartyNoticesTxt" Source="THIRD-PARTY-NOTICES" Name="THIRD-PARTY-NOTICES.txt" />
                     <File Id="ReadmeMd" Source="README.md" />
+                    <File Id="TutorialsMd" Source="TUTORIALS.md" />
+                    <File Id="ReferenceMd" Source="REFERENCE.md" />
                     <File Id="ConfigurationMd" Source="CONFIGURATION.md" />
                 </Component>
                 <!-- So rust-dos can be started from a command prompt with
