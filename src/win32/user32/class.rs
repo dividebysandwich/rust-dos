@@ -468,6 +468,34 @@ pub fn unregister_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
+/// The Win16 module whose instance the 32-bit functions know as
+/// `instance`, in the process `pid`, was freed: its classes go with it,
+/// local and global, as Windows 3.1's USER frees a module's classes
+/// when the module goes. Its 32-bit instance can come back as another
+/// module's, whose RegisterClass of a class of the same name then failed
+/// and whose CreateWindow got the freed module's class, with a window
+/// procedure in code that had gone (Memphis Math's MMAP after
+/// STORYBRD).
+///
+/// A class that still has windows stays, as UnregisterClass leaves it
+/// (and Wine's CLASS_FreeClass): a window keeps its class by its index
+/// here, and with the class gone, the next class registered would take
+/// that slot and the window with it. A task's own windows go before its
+/// module does (`task::exit`), so this leaves only the classes of a
+/// library freed while another task's windows of them were open.
+pub fn module_freed(cpu: &mut Cpu, pid: u32, instance: u32) {
+    if instance == 0 {
+        return;
+    }
+    for c in user(cpu).classes.iter_mut() {
+        if c.as_ref()
+            .is_some_and(|c| !c.system && c.pid == pid && c.instance == instance && c.windows == 0)
+        {
+            *c = None;
+        }
+    }
+}
+
 /// Whether `c` is one of COMCTL32's classes.
 fn is_comctl32(c: &Class) -> bool {
     c.system && c.instance == crate::win32::comctl32::DLL.base

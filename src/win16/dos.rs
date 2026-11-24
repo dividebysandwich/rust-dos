@@ -504,7 +504,11 @@ fn int21(cpu: &mut Cpu, ctx: &mut Context) -> bool {
             }
         }
         // EXEC: a Windows program becomes a task; DOS programs don't run.
-        0x4B => exec(cpu, ctx, al),
+        0x4B => {
+            if !exec(cpu, ctx, al) {
+                return false;
+            }
+        }
         // Long file names: not on Windows 3.1.
         0x71 => fail(ctx, 0x7100),
         // A name at DS:DX.
@@ -720,11 +724,13 @@ fn read_write(cpu: &mut Cpu, ctx: &mut Context, write: bool) {
 /// AH=4Bh: EXEC. AL=0 starts the program at DS:DX as a task if it is a
 /// Windows program, with the parameter block at ES:BX: the environment's
 /// selector, the command tail, and for Windows programs the show
-/// command's two words.
-fn exec(cpu: &mut Cpu, ctx: &mut Context, al: u8) {
+/// command's two words. A new task runs first, as KERNEL's EXEC goes on
+/// to LoadModule (`task::after_exec`): false when the caller's context
+/// goes on later, after the new task's first turn.
+fn exec(cpu: &mut Cpu, ctx: &mut Context, al: u8) -> bool {
     if al != 0 {
         fail(ctx, INVALID_FUNCTION);
-        return;
+        return true;
     }
     let ds = sel(ctx, Seg::DS);
     let path = super::string(cpu, at(cpu, ds, w(ctx, EDX)));
@@ -739,11 +745,15 @@ fn exec(cpu: &mut Cpu, ctx: &mut Context, al: u8) {
         1
     };
     match super::task::exec(cpu, &path, arguments.trim_start(), show) {
-        Ok(instance) => {
-            set_w(ctx, EAX, instance);
+        Ok(started) => {
+            set_w(ctx, EAX, started.instance);
             set_cf(ctx, false);
+            !super::task::after_exec(cpu, *ctx, &started)
         }
-        Err(code) => fail(ctx, if code == 0 { BAD_FORMAT } else { code }),
+        Err(code) => {
+            fail(ctx, if code == 0 { BAD_FORMAT } else { code });
+            true
+        }
     }
 }
 
