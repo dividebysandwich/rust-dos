@@ -2244,19 +2244,47 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Some(t) => vec![id, t],
         None => list.clone(),
     };
-    let memory: Vec<(u32, u32)> = order
-        .iter()
-        .filter_map(|&m| state(cpu).surface(m).map(|s| (s.memory, s.bits)))
-        .collect();
     // A buffer in system memory that the flip brings to the front of the
     // primary surface's chain, which the display can't show, is copied
     // there instead (`copy_flip`): the front buffer stays the screen,
     // and only the others go round. A buffer in video memory is shown
-    // where it is, and the front buffer takes its memory. So a page flip
-    // also puts right a chain whose front buffer an older build left in
-    // system memory (a save state of G-Police made before #1830 was
-    // fixed): its next flip brings the screen back to the front.
-    let copies = primary && memory.get(1).is_some_and(|&(m, _)| m == MEM_SYSTEM);
+    // where it is, and the front buffer takes its memory.
+    let copies = primary
+        && order.get(1).is_some_and(|&m| {
+            state(cpu)
+                .surface(m)
+                .is_some_and(|s| s.memory == MEM_SYSTEM)
+        });
+    // An older build left the front buffer in system memory after some
+    // flips of such a chain (a save state of G-Police made before #1830
+    // was fixed), and the screen with one of the back buffers. A page
+    // flip puts that right by itself. Before a copy, the front buffer
+    // first trades memory with the buffer that has the screen, so that
+    // the copy lands on what the display shows; with two back buffers
+    // or more, the one brought to the front can be in system memory
+    // while the front buffer still is.
+    let front = state(cpu)
+        .surface(id)
+        .map_or((MEM_NONE, 0), |f| (f.memory, f.bits));
+    if copies && front.0 != MEM_VIDEO {
+        let screen = list.iter().find_map(|&m| {
+            let b = state(cpu).surface(m)?;
+            (b.memory == MEM_VIDEO).then_some((m, b.bits))
+        });
+        if let Some((m, bits)) = screen {
+            if let Some(b) = surface(cpu, m) {
+                (b.memory, b.bits) = front;
+            }
+            if let Some(f) = surface(cpu, id) {
+                (f.memory, f.bits) = (MEM_VIDEO, bits);
+            }
+            changed(cpu, m);
+        }
+    }
+    let memory: Vec<(u32, u32)> = order
+        .iter()
+        .filter_map(|&m| state(cpu).surface(m).map(|s| (s.memory, s.bits)))
+        .collect();
     let first = if copies {
         copy_flip(cpu, id, order[1]);
         1
@@ -2289,11 +2317,13 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// flip does; it stays the screen, and the primary surface's Lock and DC
 /// still draw on what is shown after the flip. DirectDraw emulates a flip
 /// it can't make on the card with copies too: Wine's tests (`test_flip`)
-/// see Windows with its primary surface in system memory copy the back
-/// buffers' pixels instead of swapping them. The back buffers still go
-/// round among themselves (`flip`): the last one takes `next`'s memory,
-/// with the frame now on the screen, where a page flip would leave it the
-/// frame shown before.
+/// accept, as `broken()`, Windows machines with their primary surface in
+/// system memory that copy pixels between the chain's surfaces instead
+/// of swapping them. What those machines leave in the back buffers
+/// differs from a page flip and isn't copied here. The back buffers
+/// still go round among themselves (`flip`): the last one takes `next`'s
+/// memory, with the frame now on the screen, where a page flip would
+/// leave it the frame shown before.
 fn copy_flip(cpu: &mut Cpu, front: u32, next: u32) {
     let st = &*state(cpu);
     let (Some(to), Some(from)) = (st.surface(front).cloned(), st.surface(next).cloned()) else {
