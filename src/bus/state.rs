@@ -28,7 +28,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 86;
+const WIN32_VERSION: u16 = 87;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -46,9 +46,11 @@ const WIN32_VERSION: u16 = 86;
 /// (`ole32::DROP_TARGETS`), 71's to 82's no ExitWindowsExec command
 /// line (`boot::EXIT_EXEC`), 71's to 83's not the 16-bit OLE modules'
 /// state (`win16::ole2::OLE16`), 71's to 84's no DOS program a
-/// Windows program started (`dosvm::DOSVM_SAVED`), and 85's not the
-/// folder it starts in (`dosvm::DOSVM_DIRECTORY`).
-const WIN32_LOADS: [u16; 16] = [
+/// Windows program started (`dosvm::DOSVM_SAVED`), 85's not the folder
+/// it starts in (`dosvm::DOSVM_DIRECTORY`), and 71's to 86's no
+/// real-mode calls through VWIN32's DPMI dispatch
+/// (`realmode::Kind::Vxd`, which they load without).
+const WIN32_LOADS: [u16; 17] = [
     71,
     72,
     73,
@@ -64,6 +66,7 @@ const WIN32_LOADS: [u16; 16] = [
     83,
     84,
     85,
+    86,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1145,6 +1148,7 @@ mod tests {
         (84, 0x3A9C_D1FD_6601_1D0E), // the 16-bit OLE modules' state
         (85, 0xD065_06B4_D1EE_C645), // the DOS program a Windows program started
         (86, 0x64E2_699F_8225_8EB3), // the DOS program's folder and lent memory
+        (87, 0x3CCD_B401_AB6D_F5EF), // real-mode calls through VWIN32's DPMI dispatch
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
