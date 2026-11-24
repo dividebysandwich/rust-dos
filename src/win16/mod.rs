@@ -39,6 +39,7 @@ pub mod task;
 pub(crate) mod thunk;
 mod typelib;
 mod typelib_invoke;
+pub(crate) mod universal;
 mod user;
 
 pub use builtin::{function_name, trap_name};
@@ -136,6 +137,8 @@ pub struct State {
     pub comm: Vec<comm::Port>,
     /// What the 16-bit OLE modules keep (ole2.rs).
     pub ole: crate::savestate::Since<{ ole2::OLE16 }, ole2::Ole16>,
+    /// The Universal Thunks and their selectors (universal.rs).
+    pub universal: crate::savestate::Since<{ universal::UT_SAVED }, universal::Universal>,
     /// The exit code of the last task that ended other than a client's,
     /// which the Win16 process ends with when a client outlived it.
     pub exit_code: u16,
@@ -666,7 +669,8 @@ crate::state_fields!(State {
     links,
     exit_code,
     comm,
-    ole
+    ole,
+    universal
 });
 crate::state_fields!(Module16 {
     name,

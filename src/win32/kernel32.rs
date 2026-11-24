@@ -820,6 +820,11 @@ static APIS: &[Api] = &[
         toolhelp::toolhelp32_read_process_memory,
     ),
     stdcall("DebugBreak", 210, 0, debug_break),
+    // Win32s's Universal Thunks (src/win16/universal.rs), and where their
+    // thunks' code goes.
+    stdcall("UTRegister", 780, 7, crate::win16::universal::ut_register),
+    stdcall("UTUnRegister", 781, 1, crate::win16::universal::ut_unregister),
+    stdcall("UTGlue32", 0, 4, crate::win16::universal::ut_glue32),
 ];
 
 /// DebugBreak: Windows 98's is an INT 3, whose breakpoint exception goes

@@ -1,0 +1,367 @@
+//! Win32s's Universal Thunks on the built-in Windows 98: KERNEL32's
+//! UTRegister and UTUnRegister, the thunk UTRegister makes, and
+//! WIN32S16's UTLinearToSelectorOffset and UTSelectorOffsetToLinear,
+//! which the 16-bit side calls. The Win32 program is a PE file made here
+//! with rust-dos-pe's builder, its code assembled with iced, and the
+//! 16-bit DLL an NE file rust-dos-ne's builder makes.
+
+use iced_x86::code_asm::*;
+use rust_dos::config::WindowsVersion;
+use rust_dos::cpu::{Cpu, HostConsole};
+use rust_dos::exec::{NoHook, StopReason, run_batch};
+use rust_dos_ne as ne;
+use rust_dos_pe::{self as pe, Builder, Imp};
+use std::fs;
+use std::path::PathBuf;
+
+const BASE: u32 = 0x40_0000;
+
+/// Where a test program's data and imports are, for its code.
+struct Layout {
+    /// The data's address.
+    data: u32,
+    /// The import address table slot of each function, in the order the
+    /// program imports them.
+    iat: Vec<u32>,
+}
+
+impl Layout {
+    /// The address of byte `offset` of the data.
+    fn at(&self, offset: u32) -> u32 {
+        self.data + offset
+    }
+
+    /// The dword at byte `offset` of the data.
+    fn dword(&self, offset: u32) -> AsmMemoryOperand {
+        dword_ptr(self.at(offset) as u64)
+    }
+
+    /// The import address table slot of the function `index`.
+    fn import(&self, index: usize) -> AsmMemoryOperand {
+        dword_ptr(self.iat[index] as u64)
+    }
+}
+
+/// A program importing `imports`, with `data` and the code `f` makes.
+fn program(
+    imports: &[(&str, &[&str])],
+    data: &[u8],
+    f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+) -> Vec<u8> {
+    let mut b = Builder::exe(BASE);
+    let lists: Vec<Vec<Imp>> = imports
+        .iter()
+        .map(|(_, names)| names.iter().map(|n| Imp::Name(n)).collect())
+        .collect();
+    let dlls: Vec<(&str, &[Imp])> = imports
+        .iter()
+        .zip(&lists)
+        .map(|((dll, _), list)| (*dll, list.as_slice()))
+        .collect();
+    let iat = b.imports(&dlls).concat();
+    let data_rva = b.section(
+        ".data",
+        data,
+        pe::SCN_INITIALIZED_DATA | pe::SCN_READ | pe::SCN_WRITE,
+    );
+    let layout = Layout {
+        data: BASE + data_rva,
+        iat,
+    };
+    let code_rva = b.next_rva();
+    let mut a = CodeAssembler::new(32).unwrap();
+    f(&mut a, &layout).unwrap();
+    let code = a.assemble((BASE + code_rva) as u64).unwrap();
+    b.section(
+        ".text",
+        &code,
+        pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ,
+    );
+    b.entry(code_rva);
+    b.build()
+}
+
+/// Run `program` as T.EXE, with `more` files beside it, on the built-in
+/// Windows 98 SE to its end: its exit code and what it printed.
+fn run(test: &str, program: Vec<u8>, more: &[(&str, Vec<u8>)]) -> (u8, String) {
+    let base = PathBuf::from("target/test_win32_universal").join(test);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    for (file, bytes) in more {
+        fs::write(base.join(file), bytes).unwrap();
+    }
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    cpu.bus.win32.version = WindowsVersion::Win98Se;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    let mut ended = false;
+    for _ in 0..400 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        if run_batch(&mut cpu, &mut NoHook, false) == StopReason::ShellReloaded {
+            ended = true;
+            break;
+        }
+    }
+    let console = cpu.host_console.as_ref().unwrap();
+    let mut text = console.stdout.clone();
+    text.extend(&console.stderr);
+    let text = String::from_utf8_lossy(&text).into_owned();
+    assert!(ended, "the program didn't end: {:?}", text);
+    // The Win16 process the thunk's calls ran in ended with the program.
+    assert!(!cpu.bus.win32.active());
+    (cpu.errorlevel, text)
+}
+
+/// UT16.DLL, the 16-bit DLL of a Universal Thunk. UTINIT(callback,
+/// buffer) fails for a callback, and otherwise writes 1616h at the
+/// buffer's byte 8. UTPROC(buffer, value) adds the value to the word the
+/// 16:16 pointer at the buffer's byte 0 points to, writes 5678h at the
+/// flat address at its byte 4 through the pointer
+/// UTLinearToSelectorOffset makes of it, and returns what
+/// UTSelectorOffsetToLinear makes of the buffer's pointer. It imports
+/// the first by name, as Lunicus's LUNIFX.DLL does, and the second by
+/// ordinal.
+fn ut_dll16() -> Vec<u8> {
+    let mut b = ne::Builder::new("UT16", ne::LIBMODULE | ne::SINGLEDATA | ne::PROTMODE);
+    b.expected_version(0x0400);
+    let win32s16 = b.import_module("WIN32S16");
+    let by_name = b.imported_name("UTLINEARTOSELECTOROFFSET");
+    let mut code = vec![
+        0x55, // push bp
+        0x8B, 0xEC, // mov bp, sp
+        0x31, 0xC0, // xor ax, ax
+        0x31, 0xD2, // xor dx, dx
+        0x8B, 0x4E, 0x0A, // mov cx, [bp+0Ah] (the callback)
+        0x0B, 0x4E, 0x0C, // or cx, [bp+0Ch]
+        0x75, 0x0A, // jnz done
+        0xC4, 0x5E, 0x06, // les bx, [bp+6] (the buffer)
+        0x26, 0xC7, 0x47, 0x08, 0x16, 0x16, // mov word es:[bx+8], 1616h
+        0x40, // inc ax
+        0x5D, // done: pop bp
+        0xCA, 0x08, 0x00, // retf 8
+    ];
+    code.resize(0x40, 0x90);
+    code.extend_from_slice(&[
+        0x55, // push bp
+        0x8B, 0xEC, // mov bp, sp
+        0xC4, 0x5E, 0x0A, // les bx, [bp+0Ah] (the buffer)
+        0x26, 0xC4, 0x1F, // les bx, es:[bx]
+        0x8B, 0x46, 0x06, // mov ax, [bp+6] (the value)
+        0x26, 0x01, 0x07, // add es:[bx], ax
+        0xC4, 0x5E, 0x0A, // les bx, [bp+0Ah]
+        0x66, 0x26, 0xFF, 0x77, 0x04, // push dword es:[bx+4]
+    ]);
+    let linear_to_segptr = code.len() as u16 + 1;
+    code.extend_from_slice(&[
+        0x9A, 0xFF, 0xFF, 0x00, 0x00, // call far UTLinearToSelectorOffset
+        0x8E, 0xC2, // mov es, dx
+        0x8B, 0xD8, // mov bx, ax
+        0x26, 0xC7, 0x07, 0x78, 0x56, // mov word es:[bx], 5678h
+        0x66, 0xFF, 0x76, 0x0A, // push dword [bp+0Ah]
+    ]);
+    let segptr_to_linear = code.len() as u16 + 1;
+    code.extend_from_slice(&[
+        0x9A, 0xFF, 0xFF, 0x00, 0x00, // call far UTSelectorOffsetToLinear
+        0x5D, // pop bp
+        0xCA, 0x08, 0x00, // retf 8
+    ]);
+    let farptr = |offset: u16, target: ne::Target| ne::Relocation {
+        source: ne::ADDR_FARPTR,
+        additive: false,
+        offset,
+        target,
+    };
+    let text = b.segment(ne::SegmentSpec {
+        data: code,
+        flags: 0,
+        alloc: 0,
+        relocations: vec![
+            farptr(
+                linear_to_segptr,
+                ne::Target::Name {
+                    module: win32s16,
+                    name_offset: by_name,
+                },
+            ),
+            farptr(
+                segptr_to_linear,
+                ne::Target::Ordinal {
+                    module: win32s16,
+                    ordinal: 45,
+                },
+            ),
+        ],
+    });
+    let data = b.segment(ne::SegmentSpec {
+        data: vec![0; 0x10],
+        flags: ne::SEG_DATA,
+        alloc: 0x100,
+        relocations: Vec::new(),
+    });
+    b.auto_data(data, 0, 0);
+    for (ordinal, name, offset) in [(1, "UTINIT", 0), (2, "UTPROC", 0x40)] {
+        b.entry(
+            ordinal,
+            ne::Entry::Code {
+                segment: text as u8,
+                offset,
+                flags: ne::ENTRY_EXPORTED,
+                moveable: false,
+            },
+        );
+        b.export(name, ordinal, true);
+    }
+    b.build()
+}
+
+/// The program's data: the names UTRegister takes, where the thunks'
+/// addresses go (30h, 34h), the second block's address (38h), the
+/// buffer (40h), the value UTPROC adds to (80h) and the translation list
+/// (90h).
+fn ut_data() -> Vec<u8> {
+    let mut data = vec![0u8; 0x100];
+    data[..9].copy_from_slice(b"UT16.DLL\0");
+    data[0x10..0x17].copy_from_slice(b"UTInit\0");
+    data[0x20..0x27].copy_from_slice(b"UTProc\0");
+    data[0x80..0x84].copy_from_slice(&0x1000u32.to_le_bytes());
+    data
+}
+
+const MEM_COMMIT: i32 = 0x1000;
+const MEM_RESERVE: i32 = 0x2000;
+const PAGE_READWRITE: i32 = 4;
+
+#[test]
+fn a_universal_thunk_calls_its_16_bit_dll_with_the_pointers_translated() {
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["UTRegister", "UTUnRegister", "VirtualAlloc", "ExitProcess"],
+    )];
+    let exe = program(imports, &ut_data(), |a, l| {
+        let mut fail = a.create_label();
+        // UTRegister(BASE, "UT16.DLL", "UTInit", "UTProc", where,
+        // callback, buffer).
+        let register = |a: &mut CodeAssembler, module: u32, callback: u32, at: u32| {
+            a.push(l.at(0x40))?;
+            a.push(callback)?;
+            a.push(l.at(at))?;
+            for name in [0x20, 0x10, 0] {
+                a.push(l.at(name))?;
+            }
+            a.push(module)?;
+            a.call(l.import(0))
+        };
+        // A call of the thunk, with the value `value`: its pointer to the
+        // value is to be turned through the list, the flat address of the
+        // second block's byte `at` is for UTLinearToSelectorOffset.
+        let call = |a: &mut CodeAssembler, value: i32, at: i32| {
+            a.mov(l.dword(0x40), l.at(0x80))?;
+            a.mov(eax, l.dword(0x38))?;
+            a.add(eax, at)?;
+            a.mov(l.dword(0x44), eax)?;
+            a.mov(l.dword(0x90), l.at(0x40))?;
+            a.mov(l.dword(0x94), 0)?;
+            a.push(l.at(0x90))?;
+            a.push(value)?;
+            a.push(l.at(0x40))?;
+            a.call(l.dword(0x30))
+        };
+        // A second block of 64 KB, its first page committed.
+        a.push(PAGE_READWRITE)?;
+        a.push(MEM_RESERVE)?;
+        a.push(0x1_0000)?;
+        a.push(0)?;
+        a.call(l.import(2))?;
+        a.mov(l.dword(0x38), eax)?;
+        a.mov(ebx, 1)?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.push(PAGE_READWRITE)?;
+        a.push(MEM_COMMIT)?;
+        a.push(0x1000)?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        a.mov(ebx, 2)?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        // Registered, its UTInit run with the buffer and no callback.
+        register(a, BASE, 0, 0x30)?;
+        a.mov(ebx, 3)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.mov(ebx, 4)?;
+        a.cmp(word_ptr(l.at(0x48) as u64), 0x1616)?;
+        a.jne(fail)?;
+        // UTProc gets the value, reaches the value through the list's
+        // pointer and the second block through its own selector, and
+        // returns the buffer's flat address.
+        call(a, 5, 0x10)?;
+        a.mov(ebx, 5)?;
+        a.cmp(eax, l.at(0x40))?;
+        a.jne(fail)?;
+        a.mov(ebx, 6)?;
+        a.cmp(l.dword(0x80), 0x1005)?;
+        a.jne(fail)?;
+        a.mov(eax, l.dword(0x38))?;
+        a.mov(ebx, 7)?;
+        a.cmp(word_ptr(eax + 0x10), 0x5678)?;
+        a.jne(fail)?;
+        // The list's pointer stays a 16:16 one, its offset the value's
+        // in its 32 KB block.
+        a.mov(eax, l.at(0x80) & 0x7FFF)?;
+        a.mov(ebx, 8)?;
+        a.cmp(word_ptr(l.at(0x40) as u64), ax)?;
+        a.jne(fail)?;
+        // The second block's next page, committed after its selector was
+        // made, is under that selector too.
+        a.mov(eax, l.dword(0x38))?;
+        a.add(eax, 0x1000)?;
+        a.push(PAGE_READWRITE)?;
+        a.push(MEM_COMMIT)?;
+        a.push(0x1000)?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        a.mov(ebx, 9)?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        call(a, 7, 0x1010)?;
+        a.mov(ebx, 10)?;
+        a.cmp(l.dword(0x80), 0x100C)?;
+        a.jne(fail)?;
+        a.mov(eax, l.dword(0x38))?;
+        a.mov(ebx, 11)?;
+        a.cmp(word_ptr(eax + 0x1010), 0x5678)?;
+        a.jne(fail)?;
+        // A DLL registers once, and a callback, which Windows 98 doesn't
+        // have, fails.
+        register(a, BASE, 0, 0x34)?;
+        a.mov(ebx, 12)?;
+        a.test(eax, eax)?;
+        a.jnz(fail)?;
+        register(a, BASE + 1, BASE, 0x34)?;
+        a.mov(ebx, 13)?;
+        a.test(eax, eax)?;
+        a.jnz(fail)?;
+        // Once unregistered, it registers again, UTInit run again.
+        a.push(BASE)?;
+        a.call(l.import(1))?;
+        a.mov(word_ptr(l.at(0x48) as u64), 0)?;
+        register(a, BASE, 0, 0x30)?;
+        a.mov(ebx, 14)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.mov(ebx, 15)?;
+        a.cmp(word_ptr(l.at(0x48) as u64), 0x1616)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(3))?;
+        a.int3()
+    });
+    let (code, text) = run("thunk", exe, &[("UT16.DLL", ut_dll16())]);
+    assert_eq!(code, 0, "{}", text);
+}
