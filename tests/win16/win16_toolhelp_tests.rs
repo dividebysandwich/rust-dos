@@ -29,6 +29,7 @@ const GLOBAL_ENTRY_MODULE: u16 = 55;
 /// GlobalAlloc's flags.
 const GMEM_MOVEABLE: u16 = 0x0002;
 const GMEM_DISCARDABLE: u16 = 0x0100;
+const GMEM_DDESHARE: u16 = 0x2000;
 
 /// GlobalFirst's flags, and GLOBALENTRY's wType values and its wFlags'
 /// GF_PDB_OWNER.
@@ -328,6 +329,37 @@ fn global_entry_module_describes_segments() {
     exit_ok(&mut code);
 
     let (status, log) = run("toolhelp_entry_module", program(&code, CODE));
+    assert_eq!(status, 0, "check {status} failed:\n{log}");
+}
+
+/// A GMEM_DDESHARE block belongs to the module whose code allocated it,
+/// as Windows 3.1's GlobalAlloc gives it, so it stays when the task
+/// running then ends: GlobalEntryHandle has the program's module as its
+/// owner, without GF_PDB_OWNER. A block without the flag is the task's.
+#[test]
+fn a_shared_block_belongs_to_the_calling_module() {
+    let mut code = Code::new();
+    code.emit(&[0x8C, 0x1E, lo(DS), hi(DS)]); // mov [DS],ds
+    push_word(&mut code, DS);
+    code.call("KERNEL", GET_EXE_PTR);
+    store_ax(&mut code, MODULE);
+    code.call("KERNEL", GET_CURRENT_TASK);
+    store_ax(&mut code, TASK);
+
+    alloc_block(&mut code, GMEM_MOVEABLE | GMEM_DDESHARE);
+    entry_size(&mut code, 36);
+    entry_handle(&mut code, HANDLE);
+    expect_ax(&mut code, 1, 1);
+    expect_same(&mut code, H_OWNER, MODULE, 2);
+    expect_byte(&mut code, W_FLAGS + 1, 0, 3);
+
+    alloc_block(&mut code, GMEM_MOVEABLE);
+    entry_handle(&mut code, HANDLE);
+    expect_ax(&mut code, 1, 4);
+    expect_same(&mut code, H_OWNER, TASK, 5);
+    exit_ok(&mut code);
+
+    let (status, log) = run("toolhelp_shared_block", program(&code, CODE));
     assert_eq!(status, 0, "check {status} failed:\n{log}");
 }
 
