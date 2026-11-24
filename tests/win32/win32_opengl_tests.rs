@@ -4180,7 +4180,8 @@ fn generated_texture_names_stay_clear_of_the_names_a_program_counts_itself() {
         gl(a, l, GEN_TEXTURES, &[Arg::I(2), Arg::At(NAMES)])?;
         texture_2x2(a, l, &mut c, NAMES, BLUE_TEXELS)?;
         texture_2x2(a, l, &mut c, NEXT, GREEN_TEXELS)?;
-        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(NAMES)])?;
+        let generated = [Arg::I(GL_TEXTURE_2D), Arg::Val(NAMES)];
+        gl(a, l, BIND_TEXTURE, &generated)?;
         clear_blue(a, l)?;
         gl(a, l, COLOR3F, &[1.0, 1.0, 1.0].map(Arg::F))?;
         gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
