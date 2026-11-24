@@ -174,6 +174,25 @@ impl CpuModel {
         self.tsc_hz().map_or(0, |hz| (hz / 4_000) as u32)
     }
 
+    /// The most `cycles=auto` gives a real-mode program for its frames, in
+    /// instructions per ms: what the model ran. `autospeed`'s least speed
+    /// for protected mode, 20,000, is a 486 at 25 MHz, 800 instructions
+    /// per ms for each MHz. At that rate the 486DX2-66, the 486 most PCs
+    /// of 1993 and 1994 had, runs 52,800. The 386 does about half the
+    /// 486's work a clock, so a 386DX-40 runs 16,000. The Pentium does
+    /// about twice the 486's, 320,000 at its 200 MHz (`tsc_hz`), more
+    /// than hosts run the emulator at, and the later models more still:
+    /// they have none. A real-mode game paces its main loop by the timer
+    /// ticks a pass takes, and at a speed past its CPU's a pass can end
+    /// inside one tick: Ultimate Domain divides by the count (#1813).
+    pub fn auto_real_most(self) -> Option<u32> {
+        match self {
+            CpuModel::I386 => Some(16_000),
+            CpuModel::I486 => Some(52_800),
+            _ => None,
+        }
+    }
+
     /// The family, model and stepping CPUID reports, which DX also holds
     /// after a reset.
     pub fn signature(self) -> u32 {

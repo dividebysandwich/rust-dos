@@ -925,6 +925,7 @@ impl Pacer {
         overhead: Duration,
     ) -> Option<u32> {
         self.auto.set_protected_least(cpu.model.auto_least());
+        self.auto.set_real_most(cpu.model.auto_real_most());
         self.auto.set_idles(cpu.os_idles || cpu.bus.win32.active());
         self.auto.set_dpmi_client(cpu.bus.dpmi.active() && !cpu.bus.win32.active());
         self.auto.set_programs(cpu.programs.started + cpu.programs.ended);

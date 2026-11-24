@@ -1,5 +1,5 @@
 use rust_dos::bus::Bus;
-use rust_dos::cpu::Cpu;
+use rust_dos::cpu::{Cpu, CpuModel};
 use rust_dos::timer::{Clock, CpuSpeed, PIT_HZ, Pacer};
 use std::time::{Duration, Instant};
 
@@ -509,6 +509,42 @@ fn auto_speed_follows_the_program() {
     assert_eq!(bus.clock.cycles_per_ms(), 20_000);
     // Once it ends, whatever runs next starts from the real-mode speed.
     assert_eq!(run(&mut bus, &mut pacer, false, 0, 16), Some(3000));
+}
+
+#[test]
+fn auto_speed_keeps_a_real_mode_game_within_its_cpu() {
+    // Ultimate Domain's map (#1813): a real-mode game whose frame rate
+    // follows the speed, 23 frames a second at 51,000, on a host that runs
+    // far more. Past about 78,500 a pass of its main loop can end inside
+    // one timer tick, and the game divides by the ticks it counted. The
+    // 486 it runs on, a DX2-66, stops short of that.
+    let fastest = |model| {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.model = model;
+        cpu.bus.set_cycles_per_ms(3000);
+        let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, Instant::now());
+        let (mut frames, mut fastest) = (0.0, 0);
+        for _ in 0..60 * 30 {
+            let speed = cpu.bus.clock.cycles_per_ms();
+            let executed = speed as u64 * 50 / 3;
+            cpu.bus.clock.icount += executed;
+            frames += speed as f64 * 0.00045 / 60.0;
+            cpu.bus.activity.swapped(frames as u64);
+            frames = frames.fract();
+            // 2 ns an instruction: the host runs about 400,000 a ms.
+            let exec = Duration::from_nanos(executed * 2);
+            if let Some(next) = pacer.end_cpu_frame(&mut cpu, executed, exec, Duration::ZERO) {
+                cpu.bus.set_cycles_per_ms(next);
+            }
+            fastest = fastest.max(cpu.bus.clock.cycles_per_ms());
+        }
+        fastest
+    };
+    let on_a_486 = fastest(CpuModel::I486);
+    assert!((40_000..=52_800).contains(&on_a_486), "{on_a_486}");
+    // A Pentium runs more than hosts do: the game gets what the host has.
+    let on_a_pentium = fastest(CpuModel::Pentium);
+    assert!(on_a_pentium > 100_000, "{on_a_pentium}");
 }
 
 #[test]

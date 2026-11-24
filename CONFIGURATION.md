@@ -219,25 +219,30 @@ limit, so without a connection it goes on as it would with one:
   the program polls for the retrace, or flips no pages for a while, before the
   step is judged, and it is then the least for the program. A speed the host
   falls behind at is left for a lower one, and the limit that sets rises again
-  while the host keeps up. A real-mode program with no frames to go by (most
-  games of the 1980s, which update the screen piecemeal) runs at 3000, about a
-  286, as in DOSBox's `cycles=auto`, and at max while it reads or writes its
-  drives (loading), unless it would sit halted for 30% of the time or more at
-  the real-mode speed, as a game playing speech from its CD does. A
-  protected-mode one runs at max while it reads and writes (loading,
-  computing), and otherwise goes down to 20000, a 486's speed, or a quarter
-  of a faster `cpu` model's clock (50000 on a Pentium, 112500 on a Pentium
-  II), no more than the host has. Either goes back to its speed 100 ms after
-  the work stops. Resetting the Sound Blaster, as a sound driver does before
-  it times the card with delay loops, ends the loading speed at once. `auto
-  10000` makes that real-mode speed, and the least `auto` goes down to,
-  10000. `max` runs everything as fast as the host keeps up with in real
-  time. Use a number such as `3000` for a fixed speed. `--cycles` overrides
-  it. Loading a [save state](REFERENCE.md#save-states) keeps the speed the
-  machine runs at (this setting, `--cycles`, or the last one the window, the
-  speed keys or `/api/speed` set): a fixed speed and `max` go on at the rate
-  they had, and `auto` starts its search from the rate the state was saved
-  at. Only `--deterministic` runs at the state's speed.
+  while the host keeps up. A real-mode program's frames get no more than its
+  `cpu` ran: 52800 on a 486 (a 486DX2-66) and 16000 on a 386. At more, a
+  game that counts the timer ticks each pass of its main loop takes can
+  count none, and Ultimate Domain then divides by zero. The Pentium and
+  later models run more than hosts do, and have no such limit. A real-mode
+  program with no frames to go by (most games of the 1980s, which update the
+  screen piecemeal) runs at 3000, about a 286, as in DOSBox's `cycles=auto`,
+  and at max while it reads or writes its drives (loading), unless it would
+  sit halted for 30% of the time or more at the real-mode speed, as a game
+  playing speech from its CD does. A protected-mode one runs at max while it
+  reads and writes (loading, computing), and otherwise goes down to 20000, a
+  486's speed, or a quarter of a faster `cpu` model's clock (50000 on a
+  Pentium, 112500 on a Pentium II), no more than the host has. Either goes
+  back to its speed 100 ms after the work stops. Resetting the Sound
+  Blaster, as a sound driver does before it times the card with delay loops,
+  ends the loading speed at once. `auto 10000` makes that real-mode speed,
+  and the least `auto` goes down to, 10000. `max` runs everything as fast as
+  the host keeps up with in real time. Use a number such as `3000` for a
+  fixed speed. `--cycles` overrides it. Loading a [save
+  state](REFERENCE.md#save-states) keeps the speed the machine runs at (this
+  setting, `--cycles`, or the last one the window, the speed keys or
+  `/api/speed` set): a fixed speed and `max` go on at the rate they had, and
+  `auto` starts its search from the rate the state was saved at. Only
+  `--deterministic` runs at the state's speed.
 * `auto_fps` is the frame rate `cycles=auto` aims for: `auto`, the
   default, is the display's refresh rate (the 3dfx card's while it
   shows), and a number from 10 to 240 takes its place. A lower one, such
