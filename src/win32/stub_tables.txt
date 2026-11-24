@@ -5349,6 +5349,8 @@ ThunkConnect16
 MyAlloc
 EntryAddrProc
 PatchCodeHandle
+_DebugOutput
+DirectedYield
 
 MODULE USER
 MessageBox
@@ -6049,6 +6051,39 @@ auxGetDevCaps
 auxGetVolume
 auxSetVolume
 waveOutGetID
+midiOutGetErrorText
+midiOutPrepareHeader
+midiOutUnprepareHeader
+midiOutLongMsg
+midiOutCachePatches
+midiOutCacheDrumPatches
+waveInGetNumDevs
+waveInGetDevCaps
+waveInGetErrorText
+waveInOpen
+waveInClose
+waveInPrepareHeader
+waveInUnprepareHeader
+waveInAddBuffer
+waveInStart
+waveInStop
+waveInReset
+waveInGetPosition
+waveInGetID
+waveInMessage
+midiInGetNumDevs
+midiInGetDevCaps
+midiInGetErrorText
+midiInOpen
+midiInClose
+midiInPrepareHeader
+midiInUnprepareHeader
+midiInAddBuffer
+midiInStart
+midiInStop
+midiInReset
+midiInGetID
+midiInMessage
 
 MODULE LZEXPAND
 LZCopy

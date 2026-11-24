@@ -54,6 +54,8 @@ impl DiskController {
             open_files,
             sft_dirty: _,
             position_dirty: _,
+            // In a section of their own, after this one (bus/state.rs).
+            locks: _,
             drives,
             current_drive,
             emm_device: _,
@@ -135,6 +137,8 @@ impl DiskController {
         self.load_checkpoints(0..LASTDRIVE, r)?;
 
         self.open_files.clear();
+        // The state's, if it has any, come in a later section.
+        self.locks.clear();
         let mut files = Vec::new();
         for _ in 0..r.count()? {
             let mut file = SavedFile::default();

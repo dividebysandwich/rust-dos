@@ -569,6 +569,7 @@ impl DiskController {
         let Some(open) = self.open_files.get_mut(&sft) else { return false };
         open.refs = open.refs.saturating_sub(1);
         if open.refs == 0 && sft >= FIRST_FILE {
+            self.forget_locks(sft);
             // The host may set a written file's time when it is closed.
             if let Some(OpenFile { data: OpenData::Host(_, Some(path)), .. }) = self.open_files.remove(&sft) {
                 self.host_dirs.touched(&path);
@@ -605,6 +606,7 @@ impl DiskController {
             self.open_files.iter().filter(|(_, f)| f.fcb && f.owner == owner).map(|(&sft, _)| sft).collect();
         for sft in gone {
             self.open_files.remove(&sft);
+            self.forget_locks(sft);
             self.mark_dirty(sft);
         }
     }
@@ -614,6 +616,7 @@ impl DiskController {
     /// was aborted or the machine reset before it wrote its save.
     pub fn close_all_files(&mut self) {
         self.open_files.clear();
+        self.locks.clear();
         self.open_standard_devices();
     }
 

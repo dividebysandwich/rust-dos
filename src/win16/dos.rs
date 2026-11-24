@@ -341,7 +341,15 @@ pub fn full_name(cpu: &mut Cpu, name: &[u8]) -> Option<Vec<u8>> {
 /// Read (or, with `write`, write) `len` bytes of the file `handle` to
 /// (from) the linear address `at`, in the transfer buffer's pieces. The
 /// bytes moved, or DOS's error.
+///
+/// Up to 64 KB is one DOS call in Windows, which checks the locks of
+/// AH=5Ch for all its bytes first: when another's lock has any of them,
+/// none move and the call fails with error 21h, where the pieces alone
+/// would move those before the lock.
 pub fn transfer(cpu: &mut Cpu, handle: u16, at: u32, len: u32, write: bool) -> Result<u32, u16> {
+    if len <= 0xFFFF && crate::interrupts::int21::handle_locked(cpu, handle, len, write) {
+        return Err(crate::disk::LOCK_VIOLATION as u16);
+    }
     let (tb_seg, _) = tb(cpu);
     let mut done = 0u32;
     loop {
