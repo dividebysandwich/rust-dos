@@ -391,7 +391,11 @@ impl GlScreen {
             toadforce: HostCell::default(),
             toadforce_failed: None,
             voodoo: Rc::new(RefCell::new(None)),
-            voodoo_failed: (glsl == Glsl::Es300).then(|| "OpenGL ES can't draw it".to_string()),
+            // The window's renderer is also the card's GPU link
+            // (`voodoo_link`), which reads depth and the card's memory
+            // back in formats OpenGL ES 3.0 doesn't read.
+            voodoo_failed: (glsl == Glsl::Es300)
+                .then(|| "OpenGL ES can't read the card's buffers back".to_string()),
             texture_barrier,
             gpu_2d_logged: false,
             capture: None,

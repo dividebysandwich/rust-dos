@@ -774,9 +774,6 @@ impl VoodooGl {
         anisotropy: u32,
         limits: Limits,
     ) -> Result<Self, String> {
-        if glsl == Glsl::Es300 {
-            return Err("OpenGL ES has no noperspective interpolation".to_string());
-        }
         let attributes = [
             (0, "a_pos"),
             (1, "a_color"),
@@ -1527,7 +1524,7 @@ impl VoodooGl {
                 }
                 if let Ok(target) = target(gl, (w, h), self.samples, self.depth) {
                     gl.clear_color(0.0, 0.0, 0.0, 1.0);
-                    gl.clear_depth_f64(1.0);
+                    gl.clear_depth(1.0);
                     gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
                     self.targets.insert(offs, target);
                 }
@@ -2076,7 +2073,7 @@ impl VoodooGl {
                     gl.clear(glow::COLOR_BUFFER_BIT);
                 } else if self.depth.is_some() {
                     gl.depth_mask(true);
-                    gl.clear_depth_f64(aux as f64 / 65535.0);
+                    gl.clear_depth(aux as f64 / 65535.0);
                     gl.clear(glow::DEPTH_BUFFER_BIT);
                 }
             }
@@ -2921,7 +2918,11 @@ pub(crate) fn compile<U: Locations>(
             for &(index, name) in attributes {
                 gl.bind_attrib_location(program, index, name);
             }
-            gl.bind_frag_data_location(program, 0, "o_color");
+            // OpenGL ES has no glBindFragDataLocation: a shader's one
+            // output is at location 0 there.
+            if glsl != Glsl::Es300 {
+                gl.bind_frag_data_location(program, 0, "o_color");
+            }
             gl.link_program(program);
             if !gl.get_program_link_status(program) {
                 problem = Some(format!("a 3dfx shader doesn't link: {}", gl.get_program_info_log(program)));

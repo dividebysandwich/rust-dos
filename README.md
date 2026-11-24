@@ -25,13 +25,15 @@ may not run yet.
 
 ## Start here
 
-Download Rust-DOS for Windows, macOS, Linux, the browser or RetroArch
-from the [releases page](https://github.com/dividebysandwich/rust-dos/releases);
-its notes say which file to take. Then pick what you want to do:
+Download Rust-DOS for Windows, macOS, Linux, the browser, or RetroArch
+on a desktop or on Android, from the
+[releases page](https://github.com/dividebysandwich/rust-dos/releases); its
+notes say which file to take. Then pick what you want to do:
 
 | I want to... | Go to |
 |---|---|
 | Try a DOS game I have in a folder | [First DOS game](#first-dos-game) below |
+| Play on an Android phone or tablet, or in RetroArch | [Android and RetroArch](#android-and-retroarch) below |
 | Play a DOS game from a zip, a GOG install or a DOSBox setup | [Tutorial: from a zip](TUTORIALS.md#a-dos-game-from-a-zip-or-7z-archive), [from GOG or DOSBox](TUTORIALS.md#a-game-set-up-for-dosbox-or-gog) |
 | Play a DOS game from its CD or floppy images | [Tutorial: CD image](TUTORIALS.md#a-dos-game-on-a-cd-image), [floppy images](TUTORIALS.md#a-dos-game-on-floppy-images) |
 | Play a DOS game's 3dfx version | [Tutorial: a 3dfx card](TUTORIALS.md#a-dos-game-with-a-3dfx-card) |
@@ -66,6 +68,20 @@ Its settings, game profiles, saves, log and downloaded ROMs are kept in
 `~/.config/rust-dos/`, so replacing the AppImage with a newer one keeps
 them. To keep all of that in one folder instead, use the `.tar.gz` as a
 portable install, described below.
+
+### Android and RetroArch
+
+On Android, Rust-DOS runs as a libretro core in
+[RetroArch](https://www.retroarch.com/). Take the
+`-libretro-android-<abi>.zip` from the releases page (`arm64-v8a` on most
+phones and tablets), copy `rust_dos_libretro_android.so` to the device and
+install it in RetroArch with *Load Core → Install or Restore a Core*. The
+same core runs in RetroArch on Windows, macOS and Linux. It starts games
+from folders, zips, CD and floppy images and game profiles, and its
+settings are RetroArch's core options. With RetroArch's `gl` or `glcore`
+video driver, OpenGL ES 3 on Android included, it draws the 3dfx card with
+OpenGL. [libretro/README.md](libretro/README.md) has the details: which
+content it takes, its options, the keyboard and gamepad, and save states.
 
 ### First DOS game
 
@@ -156,6 +172,8 @@ fixes](CONFIGURATION.md#game-fixes).
   and manuals in one zip
 * [docs/compatibility.md](docs/compatibility.md): what particular games
   need
+* [libretro/README.md](libretro/README.md): the libretro core, for
+  RetroArch on Android and on the desktop
 * [docs/copy-protection.md](docs/copy-protection.md): which image of a
   copy-protected disc a game needs
 
