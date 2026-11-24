@@ -2017,17 +2017,17 @@ fn system_files_show_in_a_directory_the_drive_lacks() {
     assert_eq!(names(&disk, "C:\\WINDOWS\\SYSTEM\\*.DLL", 0), ["DDRAW.DLL"]);
     assert_eq!(
         disk.get_file_attribute("C:\\WINDOWS\\SYSTEM\\DDRAW.DLL"),
-        Ok(0x21)
+        Ok(0x20)
     );
     assert_eq!(disk.get_file_attribute("C:\\WINDOWS"), Ok(0x10));
     assert!(disk.set_current_directory("C:\\WINDOWS\\SYSTEM"));
     let h = disk.open_file("DDRAW.DLL", 0, PSP).unwrap();
     assert_eq!(disk.read_file(h, 16).unwrap(), b"MZddraw");
     disk.close_file(h);
-    assert_eq!(disk.open_file("DDRAW.DLL", 2, PSP), Err(0x05));
-    assert_eq!(disk.create_file("DDRAW.DLL", PSP), Err(0x05));
-    assert_eq!(disk.delete_file("DDRAW.DLL"), Err(0x05));
-    assert_eq!(disk.rename_file("DDRAW.DLL", "OTHER.DLL"), Err(0x05));
+    // Deleting it or setting its attributes changes nothing.
+    assert_eq!(disk.delete_file("DDRAW.DLL"), Ok(()));
+    assert_eq!(disk.set_file_attribute("DDRAW.DLL", 0x01), Ok(()));
+    assert!(disk.is_file("DDRAW.DLL"));
     assert_eq!(disk.create_directory("C:\\WINDOWS\\SYSTEM"), Err(0x05));
     assert!(!base.join("WINDOWS").exists());
     // A file that isn't there is not found, its directory being there:
@@ -2070,6 +2070,49 @@ fn system_files_show_in_a_directory_the_drive_lacks() {
     assert!(!disk.is_file("C:\\WINDOWS\\SYSTEM\\OTHER.DLL"));
 }
 
+/// Written to, a system file becomes a file of the drive's, as Windows'
+/// own files are writable: setups copy their own COMMDLG.DLL over them.
+#[test]
+fn a_system_file_written_to_becomes_the_drives() {
+    let base = scratch("system-files-write");
+    let mut disk = DiskController::new(base.clone());
+    let file = |name: &str, data: &[u8]| (name.to_string(), Bytes::from(data.to_vec()));
+    let files = vec![
+        file("DDRAW.DLL", b"MZddraw"),
+        file("DSOUND.DLL", b"MZdsound"),
+        file("D3D.DLL", b"MZd3d"),
+    ];
+    disk.set_system_files("C:\\WINDOWS\\SYSTEM", files);
+    let system = base.join("WINDOWS/SYSTEM");
+    // Opened for writing, it starts as a copy.
+    let h = disk
+        .open_file("C:\\WINDOWS\\SYSTEM\\DDRAW.DLL", 2, PSP)
+        .unwrap();
+    assert_eq!(disk.write_file(h, b"XY"), Ok(2));
+    disk.close_file(h);
+    assert_eq!(fs::read(system.join("DDRAW.DLL")).unwrap(), b"XYddraw");
+    // Made, it starts empty.
+    let h = disk
+        .create_file("C:\\WINDOWS\\SYSTEM\\DSOUND.DLL", PSP)
+        .unwrap();
+    disk.close_file(h);
+    assert_eq!(fs::read(system.join("DSOUND.DLL")).unwrap(), b"");
+    // Renamed, the new name gets a copy and the shown one stays.
+    let d3d = "C:\\WINDOWS\\SYSTEM\\D3D.DLL";
+    let old = "C:\\WINDOWS\\SYSTEM\\OLD.DLL";
+    assert_eq!(disk.rename_file(d3d, old), Ok(()));
+    assert_eq!(fs::read(system.join("OLD.DLL")).unwrap(), b"MZd3d");
+    assert!(disk.is_file(d3d));
+    // A file renamed to its name takes its place.
+    let h = disk.create_file("C:\\NEW.DLL", PSP).unwrap();
+    assert_eq!(disk.write_file(h, b"new"), Ok(3));
+    disk.close_file(h);
+    assert_eq!(disk.rename_file("C:\\NEW.DLL", d3d), Ok(()));
+    assert_eq!(fs::read(system.join("D3D.DLL")).unwrap(), b"new");
+    // The directory stays one.
+    assert_eq!(disk.create_file("C:\\WINDOWS\\SYSTEM", PSP), Err(0x05));
+}
+
 #[test]
 fn system_files_show_in_two_directories() {
     let base = scratch("system-files-two");
@@ -2094,7 +2137,7 @@ fn system_files_show_in_two_directories() {
     assert_eq!(names(&disk, "C:\\WINDOWS\\SYSTEM\\*.*", 0), ["DDRAW.DLL"]);
     assert_eq!(
         disk.get_file_attribute("C:\\WINDOWS\\NOTEPAD.EXE"),
-        Ok(0x21)
+        Ok(0x20)
     );
     let h = disk.open_file("C:\\WINDOWS\\NOTEPAD.EXE", 0, PSP).unwrap();
     assert_eq!(disk.read_file(h, 16).unwrap(), b"MZnotepad");
@@ -2156,10 +2199,12 @@ fn system_files_on_a_disk_image() {
     let listed = disk.list_directory(r"A:\WINDOWS\SYSTEM\*.*", 0x10).unwrap();
     let names: Vec<&str> = listed.iter().map(|e| e.filename.as_str()).collect();
     assert_eq!(names, [".", "..", "DDRAW.DLL", "DSOUND.DLL"]);
-    assert_eq!(
-        disk.open_file(r"A:\WINDOWS\SYSTEM\DDRAW.DLL", 1, PSP),
-        Err(0x05)
-    );
+    // Opened for writing, one becomes a file of the image's.
+    let h = disk
+        .open_file(r"A:\WINDOWS\SYSTEM\DDRAW.DLL", 1, PSP)
+        .unwrap();
+    disk.close_file(h);
+    assert!(disk.real_is_file(r"A:\WINDOWS\SYSTEM\DDRAW.DLL"));
 }
 
 #[test]
