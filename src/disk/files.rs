@@ -491,7 +491,7 @@ impl DiskController {
         if super::host_private(leaf) || self.find_existing_child(&parent, leaf).is_some() {
             return Err(0x05);
         }
-        let target = parent.join(super::new_entry_name(leaf));
+        let target = parent.join(self.entry_name(leaf));
         let renamed = hostfs::rename(&source, &target);
         self.host_dirs.changed();
         if renamed.is_ok() {

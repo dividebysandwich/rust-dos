@@ -71,6 +71,8 @@ impl DiskController {
             host_dirs: _,
             // The built-in Windows's, which shows them as configured.
             system_files: _,
+            // Set only while a call runs (`long_name_call`).
+            keep_case: _,
         } = self;
         current_drive.save(w);
         for drive in &drives[..LASTDRIVE as usize] {

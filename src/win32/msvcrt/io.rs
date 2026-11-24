@@ -1011,7 +1011,8 @@ pub fn rename(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if cpu.bus.disk.exists(&to) {
         return dos_result(cpu, Err(5));
     }
-    let result = cpu.bus.disk.rename_file(&from, &to);
+    let disk = &mut cpu.bus.disk;
+    let result = disk.long_name_call(|disk| disk.rename_file(&from, &to));
     dos_result(cpu, result)
 }
 
@@ -1023,7 +1024,8 @@ pub fn mkdir(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_doserrno(cpu, 183);
         return Some(EOF);
     }
-    let result = cpu.bus.disk.create_directory(&path);
+    let disk = &mut cpu.bus.disk;
+    let result = disk.long_name_call(|disk| disk.create_directory(&path));
     dos_result(cpu, result)
 }
 
