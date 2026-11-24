@@ -468,6 +468,29 @@ pub fn unregister_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
+/// A Win16 module of the process `pid` was freed: the classes it
+/// registered, local and global, are unregistered, as USER does for
+/// Windows 3.1 and Windows 95 when KERNEL frees a module (an
+/// application's when its last instance ends, a library's when its last
+/// user frees it). `ours` holds the instance handles the module's
+/// classes were registered with. As with UnregisterClass, a class that
+/// still has windows stays, since they use it. Gives the names and
+/// atoms of the classes that went.
+pub fn module_freed(state: &mut State, pid: u32, ours: &[u32]) -> Vec<(String, u16)> {
+    let mut gone = Vec::new();
+    for slot in state.classes.iter_mut() {
+        let Some(c) = slot else {
+            continue;
+        };
+        if c.system || c.pid != pid || !ours.contains(&c.instance) || c.windows > 0 {
+            continue;
+        }
+        gone.push((c.name.clone(), c.atom));
+        *slot = None;
+    }
+    gone
+}
+
 /// Whether `c` is one of COMCTL32's classes.
 fn is_comctl32(c: &Class) -> bool {
     c.system && c.instance == crate::win32::comctl32::DLL.base
