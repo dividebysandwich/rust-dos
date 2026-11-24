@@ -26,6 +26,7 @@ mod fat_image_tests;
 mod file_table_tests;
 mod int21_reproduction;
 mod int21_test;
+mod ivt_tests;
 mod load_exe_test;
 mod makeimg_tests;
 mod mcb_tests;
