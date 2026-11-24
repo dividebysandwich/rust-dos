@@ -1304,21 +1304,23 @@ fn a_freed_librarys_class_with_a_window_stays() {
     assert_eq!(exit, 0, "{log}");
 }
 
-/// USER's SendMessage.
+/// USER's SendMessage, CallWindowProc and GetWindowLong.
 const SEND_MESSAGE: u16 = 111;
+const CALL_WINDOW_PROC: u16 = 122;
+const GET_WINDOW_LONG: u16 = 135;
 
 /// A SINGLEDATA program's window procedure runs with the data segment of
-/// the window's instance, as Windows' loader leaves the "mov ax,ds; nop"
-/// prologue of a program's export taking AX from USER. The program, T
-/// (SINGLEDATA, as Borland's linker marks Memphis Math's MMAP.EXE),
-/// registers the global class "Probe" with its exported procedure and
-/// runs C:\CHILD.EXE, which makes a window of that class with its own
-/// instance and sends it WM_USER: the procedure answers with the DS its
-/// prologue set up. CHILD ends with 5 if that was its own data segment
-/// (its SS), 6 if not, 7 if CreateWindow failed. T ends with 1, or 3 if
-/// RegisterClass failed.
-#[test]
-fn a_singledata_programs_window_procedure_runs_on_the_windows_instance() {
+/// the window's instance, as Windows' loader makes the "mov ax,ds; nop"
+/// prologue of a program's export "nop; nop", which takes DS from the AX
+/// USER loads. The program, T (SINGLEDATA, as Borland's linker marks
+/// Memphis Math's MMAP.EXE), registers the global class "Probe" with its
+/// exported procedure and runs C:\CHILD.EXE, which makes a window of that
+/// class with its own instance and passes it WM_USER: with SendMessage,
+/// or with CallWindowProc and DS 0 if `call_window_proc`. The procedure
+/// answers with the DS its prologue set up. CHILD ends with 5 if that
+/// was its own data segment (its SS), 6 if not, 7 if CreateWindow
+/// failed. T ends with 1, or 3 if RegisterClass failed.
+fn window_procedure_data_segment(test: &str, call_window_proc: bool) -> (u8, String) {
     let mut code = Code::new();
     let mut probe = Probe::default();
     let mut paths_at = Vec::new();
@@ -1367,13 +1369,28 @@ fn a_singledata_programs_window_procedure_runs_on_the_windows_instance() {
     let mut probe = Probe::default();
     create_probe(&mut child, &mut probe);
     exit_if_zero(&mut child, 7);
+    if call_window_proc {
+        child
+            .emit(&[0x8B, 0xF0, 0x56]) // mov si,ax: the window; push si
+            .push(0xFFFC) // GWL_WNDPROC
+            .call("USER", GET_WINDOW_LONG)
+            .emit(&[0x52, 0x50, 0x56]) // push dx; push ax; push si
+            .push(0x400)
+            .push(0)
+            .push(0)
+            .push(0)
+            .emit(&[0x31, 0xC0, 0x8E, 0xD8]) // xor ax,ax; mov ds,ax
+            .call("USER", CALL_WINDOW_PROC);
+    } else {
+        child
+            .emit(&[0x50]) // push ax: the window
+            .push(0x400)
+            .push(0)
+            .push(0)
+            .push(0)
+            .call("USER", SEND_MESSAGE);
+    }
     child
-        .emit(&[0x50]) // push ax: the window
-        .push(0x400)
-        .push(0)
-        .push(0)
-        .push(0)
-        .call("USER", SEND_MESSAGE)
         .emit(&[
             0x8C, 0xD1, // mov cx,ss
             0x3B, 0xC1, // cmp ax,cx
@@ -1384,9 +1401,24 @@ fn a_singledata_programs_window_procedure_runs_on_the_windows_instance() {
         .exit_al();
     finish_probe(&mut child, probe);
     let child = program_named("CHILD", &child, CODE);
-    let (exit, log) = run_with("singledata_window_proc", program, |_, base| {
+    run_with(test, program, |_, base| {
         fs::write(base.join("CHILD.EXE"), child).unwrap();
-    });
+    })
+}
+
+#[test]
+fn a_singledata_programs_window_procedure_runs_on_the_windows_instance() {
+    let (exit, log) = window_procedure_data_segment("singledata_window_proc", false);
+    assert_eq!(exit, 1, "{log}");
+    assert!(ended_with(&log, 5), "{log}");
+}
+
+/// CallWindowProc loads AX with the data segment of the window's
+/// instance, as Windows' does, whatever DS its caller (a DLL's subclass
+/// procedure, say) has.
+#[test]
+fn call_window_proc_gives_a_programs_procedure_the_windows_instance() {
+    let (exit, log) = window_procedure_data_segment("call_window_proc_ds", true);
     assert_eq!(exit, 1, "{log}");
     assert!(ended_with(&log, 5), "{log}");
 }

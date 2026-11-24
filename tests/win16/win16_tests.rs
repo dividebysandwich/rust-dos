@@ -236,15 +236,20 @@ fn a_real_mode_handler_a_task_set_runs_for_its_int() {
 
 /// A program with the module flags `module_flags` that calls its
 /// exported function through MakeProcInstance's thunk, kept at 10h of
-/// its data segment, with DS 0. The function has the "mov ax,ds; nop"
+/// its data segment, with DS 0. It passes MakeProcInstance its instance
+/// if `instance`, else 0. The function has the "mov ax,ds; nop"
 /// prologue, sets DS from AX and returns it; the program ends with 0 if
 /// that was its data segment (SS) and 1 if not.
-fn exported_callback_program(module_flags: u16) -> Vec<u8> {
+fn exported_callback_program(module_flags: u16, instance: bool) -> Vec<u8> {
     let mut code = Code::new();
     let function_at = code.here() + 2;
-    code.push_far(0)
-        .emit(&[0x57]) // push di: the instance
-        .call("KERNEL", MAKE_PROC_INSTANCE)
+    code.push_far(0);
+    if instance {
+        code.emit(&[0x57]); // push di: the instance
+    } else {
+        code.push(0);
+    }
+    code.call("KERNEL", MAKE_PROC_INSTANCE)
         .emit(&[
             0x36, 0xA3, 0x10, 0x00, // mov ss:[10h],ax
             0x36, 0x89, 0x16, 0x12, 0x00, // mov ss:[12h],dx
@@ -283,15 +288,25 @@ fn an_exported_function_of_a_singledata_program_gets_its_data_segment() {
     // not as using the shared data segment. Windows still patches their
     // prologues: with "mov ax,ds" left in, a call through the thunk runs
     // the function with the caller's DS.
-    let program = exported_callback_program(ne::SINGLEDATA);
+    let program = exported_callback_program(ne::SINGLEDATA, true);
     let (exit, log) = run("singledata_callback", program);
     assert_eq!(exit, 0, "{log}");
 }
 
 #[test]
 fn an_exported_function_of_a_multipledata_program_gets_its_data_segment() {
-    let program = exported_callback_program(ne::MULTIPLEDATA);
+    let program = exported_callback_program(ne::MULTIPLEDATA, true);
     let (exit, log) = run("multipledata_callback", program);
+    assert_eq!(exit, 0, "{log}");
+}
+
+/// MakeProcInstance with no instance makes a thunk for the caller's data
+/// segment, as Wine's does: the program's export, whose prologue the
+/// loader made "nop; nop", gets the program's data segment through it.
+#[test]
+fn make_proc_instance_without_an_instance_uses_the_callers_data_segment() {
+    let program = exported_callback_program(ne::SINGLEDATA, false);
+    let (exit, log) = run("callback_no_instance", program);
     assert_eq!(exit, 0, "{log}");
 }
 

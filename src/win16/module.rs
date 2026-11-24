@@ -817,6 +817,7 @@ fn patch_prologues(parsed: &ne::Module, segnum: u8, bytes: &mut [u8], dgroup_sel
     if parsed.auto_data == 0 || dgroup_sel == 0 {
         return;
     }
+    let library = parsed.flags & ne::LIBMODULE != 0;
     for entry in &parsed.entries {
         let ne::Entry::Code {
             segment,
@@ -843,7 +844,6 @@ fn patch_prologues(parsed: &ne::Module, segnum: u8, bytes: &mut [u8], dgroup_sel
         }
         if p[0] == 0x8C && p[1] == 0xD8 {
             let exported = flags & ne::ENTRY_EXPORTED != 0;
-            let library = parsed.flags & ne::LIBMODULE != 0;
             if flags & ne::ENTRY_SHARED_DATA != 0
                 || (exported && library && parsed.flags & ne::SINGLEDATA != 0)
             {
