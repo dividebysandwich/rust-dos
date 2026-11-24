@@ -25,6 +25,7 @@ mod dciman32;
 mod ddraw;
 pub use ddraw::is_lost_cache;
 mod dinput;
+pub(crate) mod directories;
 pub mod dll_files;
 mod forwarders;
 mod dmusic;
@@ -308,6 +309,12 @@ pub struct Process {
     /// The system's heap in the shared arena (`Heap::create_shared`),
     /// once a critical section needs it.
     system_heap: heap::SystemHeap,
+    /// Its current drive and directories while another program's are
+    /// DOS's (directories.rs): None while they are DOS's.
+    directories: crate::savestate::Since<
+        { directories::DIRECTORIES_SAVED },
+        Option<directories::Directories>,
+    >,
     /// Its images of built-in DLLs made from an older table, which keep
     /// its order, and which the addresses Rust works out for it follow. A
     /// load works them out again (`stub_tables::mend`).
@@ -458,7 +465,8 @@ pub struct Win32 {
     sections: Vec<Option<mapping::Section>>,
 
     /// The current directories SetCurrentDirectoryA was given with long
-    /// names, as (the directory in short names, as DOS has it; as given).
+    /// names, as (the directory in short names, as DOS has it; as given),
+    /// of the program whose directories DOS has (directories.rs).
     long_dirs: Vec<(String, String)>,
     /// The console's input and output modes (SetConsoleMode), or None
     /// for those it starts with.
@@ -512,6 +520,10 @@ pub struct Win32 {
     dpnet: dpnet::State,
     /// The DOS program a Windows program started (dosvm.rs).
     pub(crate) dosvm: crate::savestate::Since<{ dosvm::DOSVM_SAVED }, dosvm::State>,
+    /// Whose current directories DOS has, and DOS's own while a
+    /// program's are there (directories.rs).
+    directories:
+        crate::savestate::Since<{ directories::DIRECTORIES_SAVED }, directories::State>,
 }
 
 impl Win32 {
@@ -869,6 +881,7 @@ fn start(cpu: &mut Cpu) {
     version::start(win32);
     nls::start(win32);
     dll_files::sync(&mut cpu.bus);
+    directories::session_starts(&mut cpu.bus.win32);
     boot::session_starts(cpu);
     // Windows sets the keyboard's typematic rate from its own settings.
     user32::sysparams::program_keyboard(cpu);
@@ -1011,6 +1024,9 @@ pub(crate) fn create_process_from(
     let file = patched.as_deref().unwrap_or(file);
     let loaded = loader::load(cpu, path, line, file, environment)?;
     let mut process = loaded.process;
+    // It starts in the current directories of the program that starts
+    // it, which DOS has.
+    process.directories.0 = Some(directories::Directories::now(cpu));
     process.priority_class = 0x20;
     process.startup = startup;
     let return_address = stub_tables::fixed_address(0, kernel32::PROCESS_RETURN);
@@ -1239,6 +1255,8 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     let (rm_stack, a20) = (cpu.bus.win32.rm_stack, cpu.bus.win32.a20);
     // The breakpoints were the last thread's, which is gone.
     seh::set_debug_registers(cpu, &[0; 6]);
+    // DOS has the directories back that it had before the session.
+    directories::session_ended(cpu);
     system::enter_real(cpu, (ROM_SEG, EXIT), rm_stack, 0x0202);
     // The session's files are closed before a restart's work, as Windows
     // closes them before it restarts: WININIT.INI's renames and deletes
@@ -1696,6 +1714,7 @@ crate::state_fields!(Process {
     parent,
     vfw,
     system_heap,
+    directories,
 } skip {
     file_apis_oem,
     older_images,
@@ -1756,6 +1775,7 @@ crate::state_fields!(Win32 {
     comm,
     dpnet,
     dosvm,
+    directories,
 } skip {
     enabled,
     guest_dlls,

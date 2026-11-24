@@ -235,6 +235,12 @@ pub struct Task16 {
     /// The libraries it came with whose entry points InitTask is yet to
     /// call, by module handle.
     pub inits: Vec<u16>,
+    /// Its current drive and directories while another program's are
+    /// DOS's (win32/directories.rs): None while they are DOS's.
+    pub directories: crate::savestate::Since<
+        { crate::win32::directories::DIRECTORIES_SAVED },
+        Option<crate::win32::directories::Directories>,
+    >,
 }
 
 /// A switch between a task's 16-bit and 32-bit code (thunk.rs).
@@ -692,7 +698,8 @@ crate::state_fields!(Task16 {
     error_mode,
     yielding,
     vectors,
-    inits
+    inits,
+    directories
 });
 crate::win32::state_variants!(Frame {
     To32 { ctx, post, data },

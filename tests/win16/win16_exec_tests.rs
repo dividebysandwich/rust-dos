@@ -4,10 +4,11 @@
 
 use crate::win16;
 
+use rust_dos::disk::MountOptions;
 use rust_dos_ne as ne;
 use rust_dos_pe as pe;
 use std::fs;
-use win16::{CODE, Code, dos_marker, program, run_command, run_with};
+use win16::{CODE, Code, dos_marker, program, program_named, run_command, run_with};
 
 /// KERNEL's ordinals.
 const GET_MODULE_FILE_NAME: u16 = 49;
@@ -344,6 +345,83 @@ fn a_program_starts_a_dos_program_and_sees_what_it_wrote() {
     // Windows 4.x, and the command tail with its blank.
     assert_eq!(written[0], 4, "{written:?}");
     assert_eq!(&written[2..], b" /X");
+}
+
+/// KERNEL's Yield and GetModuleUsage.
+const YIELD: u16 = 29;
+const GET_MODULE_USAGE: u16 = 48;
+
+#[test]
+fn a_task_keeps_its_directories_when_the_task_it_started_changes_its_own() {
+    // The program, started at C:\, starts CHILD.EXE, which changes to
+    // C:\SUB and then to drive D: and ends with 7. On Windows 3.1 and
+    // 9x each task has its own current drive and directory: once the
+    // child has ended (GetModuleUsage of its instance is 0, the program
+    // yielding until then), the program is still at C:\ and opens
+    // MARK.TXT there, which C:\SUB and D:\ don't have. It ends with 1
+    // when it can open the file, 2 when it can't, and 10h when WinExec
+    // fails.
+    let mut child = Code::new();
+    let sub_at = child.here() + 3;
+    child
+        .emit(&[
+            0x0E, 0x1F, // push cs; pop ds
+            0xBA, 0xFF, 0xFF, // mov dx,sub
+            0xB4, 0x3B, 0xCD, 0x21, // mov ah,3Bh; int 21h: CHDIR
+            0xB4, 0x0E, 0xB2, 0x03, 0xCD, 0x21, // mov ah,0Eh; mov dl,3; int 21h
+            0xB0, 0x07, // mov al,7
+        ])
+        .exit_al();
+    let sub = child.here();
+    child.emit(b"SUB\0");
+    child.patch(sub_at, sub);
+
+    let mut code = Code::new();
+    let path_at = code.here() + 2;
+    code.push_far(0).push(1).call("KERNEL", WIN_EXEC);
+    code.emit(&[
+        0x8B, 0xF0, // mov si,ax: the child's instance
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0x73, 0x06, // jae wait
+        0xB0, 0x10, // mov al,10h
+    ])
+    .exit_al();
+    let wait = code.here();
+    code.emit(&[0x56]) // push si
+        .call("KERNEL", GET_MODULE_USAGE)
+        .emit(&[0x0B, 0xC0, 0x74, 0x07]) // or ax,ax; jz done
+        .call("KERNEL", YIELD);
+    let back = wait as i32 - (code.here() as i32 + 2);
+    code.emit(&[0xEB, back as i8 as u8]); // jmp wait
+    let mark_at = code.here() + 3;
+    code.emit(&[
+        0x0E, 0x1F, // done: push cs; pop ds
+        0xBA, 0xFF, 0xFF, // mov dx,mark
+        0xB8, 0x00, 0x3D, // mov ax,3D00h
+        0xCD, 0x21, // int 21h
+        0xB0, 0x01, // mov al,1
+        0x73, 0x02, // jnc end
+        0xB0, 0x02, // mov al,2
+    ])
+    .exit_al();
+    let path = code.here();
+    code.emit(b"CHILD.EXE\0");
+    code.patch(path_at, path);
+    let mark = code.here();
+    code.emit(b"MARK.TXT\0");
+    code.patch(mark_at, mark);
+    let (exit, log) = run_with("own_directories", program(&code, CODE), |cpu, base| {
+        fs::write(base.join("CHILD.EXE"), program_named("CHILD", &child, CODE)).unwrap();
+        fs::write(base.join("MARK.TXT"), b"mark").unwrap();
+        fs::create_dir_all(base.join("SUB")).unwrap();
+        let d = base.join("d");
+        fs::create_dir_all(&d).unwrap();
+        cpu.bus
+            .mount_drive(3, &d, MountOptions::default(), false)
+            .unwrap();
+    });
+    assert!(log.contains("ended with exit code 7"), "{log}");
+    assert_eq!(exit, 1, "{log}");
 }
 
 /// KERNEL's FreeLibrary and GetModuleHandle.
