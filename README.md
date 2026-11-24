@@ -47,7 +47,8 @@ its notes say which file to take. Then pick what you want to do:
 
 On a Linux desktop the `.AppImage` is the simplest download: one file,
 for glibc 2.35 or later (Ubuntu 22.04, Debian 12 and newer), that uses
-the system's SDL3 or its own where the system has none. Make it
+the system's SDL3 or its own where the system has none. Take the
+`x86_64` one for PCs and the `aarch64` one for ARM machines. Make it
 executable and run it with the options this README gives `rust-dos`:
 
 ```sh
@@ -55,14 +56,16 @@ chmod +x rust-dos-*-x86_64.AppImage
 ./rust-dos-*-x86_64.AppImage -d ~/games/doom
 ```
 
-It mounts itself with FUSE. Where there is no FUSE, as in a container
-or on WSL, it stops with an error about it; pass
-`--appimage-extract-and-run` before the other options, or set
-`APPIMAGE_EXTRACT_AND_RUN=1`, and it unpacks itself to a temporary
-directory and runs from there. Its settings stay in
-`~/.config/rust-dos/`, so a newer AppImage in place of the old one keeps
-them. A `rust-dos.conf` beside the AppImage isn't read: the program runs
-from inside the image, so the portable install below needs the
+It mounts itself with FUSE, and where there is none, as in most
+containers, it stops with an error. Pass `--appimage-extract-and-run`
+before the other options, or set `APPIMAGE_EXTRACT_AND_RUN=1`, and it
+unpacks itself to a temporary directory and runs from there. Its
+settings, log and downloaded ROMs stay in `~/.config/rust-dos/`, so a
+newer AppImage in place of the old one keeps them. Rust-DOS reads a
+`rust-dos.conf` in the folder it is started from, so one beside the
+AppImage is read when you start it there. That doesn't make a portable
+install: the program runs from inside the image, so its log and ROMs
+still go to `~/.config/rust-dos/`. The portable install below needs the
 `.tar.gz`.
 
 ### First DOS game
