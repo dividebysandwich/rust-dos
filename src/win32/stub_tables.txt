@@ -5349,6 +5349,8 @@ ThunkConnect16
 MyAlloc
 EntryAddrProc
 PatchCodeHandle
+_DebugOutput
+DirectedYield
 
 MODULE USER
 MessageBox
