@@ -229,9 +229,8 @@ this way).
 
 Rust-DOS also comes as a [libretro](https://www.libretro.com/) core,
 for RetroArch and the other libretro frontends. Releases include it as
-`rust-dos-<version>-libretro-<system>.zip`, and
-[docs/building.md](docs/building.md#the-libretro-core) says how to build
-it:
+`rust-dos-<version>-libretro-<system>.zip`, whose core a frontend loads
+with a game:
 
 ```sh
 retroarch -L rust_dos_libretro.so ~/games/keen.zip
@@ -244,7 +243,9 @@ disk control), or starts at the prompt without content. The core options set
 the machine, `system/rust-dos/rust-dos.conf` the rest, and the settings
 window (Ctrl+F12) is there too. Save states, rewind and
 RetroAchievements are the frontend's.
-**[libretro/README.md](libretro/README.md)** has the details.
+**[libretro/README.md](libretro/README.md)** has the details, and
+[docs/building.md](docs/building.md#the-libretro-core) says how to build
+the core.
 
 ## Debug & remote-control server
 

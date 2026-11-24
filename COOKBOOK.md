@@ -72,8 +72,9 @@ rust-dos -d ~/games/doom
 
 and type the game's program at the prompt (`DOOM`). Or start Rust-DOS
 with no options and drop the folder onto its window: it is mounted on
-the first free drive from D:. `DIR` lists the files, and the program to
-start is usually the `.EXE` or `.BAT` named after the game.
+the first free drive from D:, which the message names, so type `D:`
+first. `DIR` lists the files, and the program to start is usually the
+`.EXE` or `.BAT` named after the game.
 
 Many games need their setup run once (`SETUP` or `INSTALL`) to choose
 the sound card. The defaults that setup programs offer work: a Sound
@@ -465,7 +466,7 @@ pixel shaders, and no driver for a booted Windows 95 or 98.
 
 See: [ToadForce](CONFIGURATION.md#toadforce), and
 [compatibility.md](docs/compatibility.md#windows-games-on-the-built-in-windows)
-for the games tested on it (Grom, Evil Islands and Zanzarah).
+for what particular games need on it.
 
 ## A Windows game on a Windows 98 image, with its CD image
 

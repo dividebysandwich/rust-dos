@@ -51,15 +51,21 @@ Start Rust-DOS with the game's folder as drive C:
 rust-dos -d ~/games/doom
 ```
 
-and type the game's program at the prompt, `DOOM` here. Or start
-Rust-DOS on its own and drop the folder, a zip of the game, a CD image
-or a GOG install onto its window. `DIR` lists the files, and the program
-to start is usually the `.EXE` or `.BAT` named after the game. Leave the
-speed at its default, `auto`: it finds the speed the game needs.
+and type the game's program at the prompt, `DOOM` here. `DIR` lists the
+files, and the program to start is usually the `.EXE` or `.BAT` named
+after the game. Or start Rust-DOS on its own and drop the folder onto
+its window: it becomes the first free drive from D:, which the message
+names, so type `D:` before the program. A zip of the game or a GOG
+install dropped there becomes a game and starts. Leave the speed at its
+default, `auto`: it finds the speed the game needs.
 
 To start the game with one command next time, with its saves kept apart
 from its files, give it a [game
-profile](COOKBOOK.md#a-dos-game-in-a-profile).
+profile](COOKBOOK.md#a-dos-game-in-a-profile). `rust-dos --help` lists
+the command-line options, and
+[CONFIGURATION.md](CONFIGURATION.md#command-line-options) describes
+them, with `rust-dos run` for DOS tools and `rust-dos unpack` for
+InstallShield archives.
 
 ### The keys you need first
 
@@ -69,7 +75,7 @@ profile](COOKBOOK.md#a-dos-game-in-a-profile).
 | Alt+Enter | Fullscreen, and back |
 | Ctrl+F10 | Capture the mouse for the game, and let it go |
 | Ctrl+F1, Ctrl+F2 | Save the machine to a save state, and load it |
-| Ctrl+F4 | The next disc or floppy, when a game asks for one |
+| Ctrl+F4 | The next disc or floppy, in a drive mounted from a list of images |
 | Ctrl+F11, Ctrl+Shift+F11 | Slow the machine down, and speed it up |
 | Ctrl+F5 | A screenshot |
 
@@ -79,7 +85,10 @@ profile](COOKBOOK.md#a-dos-game-in-a-profile).
 
 Rust-DOS keeps its settings in `rust-dos.conf`, in `%APPDATA%\rust-dos\`
 on Windows, `~/.config/rust-dos/` on Linux and
-`~/Library/Application Support/rust-dos/` on macOS. The settings window
+`~/Library/Application Support/rust-dos/` on macOS. A `rust-dos.conf`
+beside the program makes a portable install, which keeps everything in
+the program's folder instead ([where Rust-DOS
+looks](CONFIGURATION.md#configuration-file)). The settings window
 (Ctrl+F12) changes them while a game runs, and F2 there saves them to
 the file. A game's own settings go in a game profile beside it, so they
 don't change the others'. The [cookbook](COOKBOOK.md) has whole
@@ -93,7 +102,8 @@ configurations to copy.
 2. Read [docs/compatibility.md](docs/compatibility.md) for what the game
    needs beyond settings.
 3. Read the end of the [log file](REFERENCE.md#log-file), `rust-dos.log`
-   in the folder of your settings. For a Windows game, [when a game doesn't
+   in the folder above (the program's, in a portable install). For a
+   Windows game, [when a game doesn't
    run](CONFIGURATION.md#when-a-game-doesnt-run) goes through the usual
    causes.
 4. [Open an issue](https://github.com/dividebysandwich/rust-dos/issues)
@@ -137,8 +147,8 @@ configurations to copy.
   [docs/dynrec.md](docs/dynrec.md))
 * **DOS built in:** no DOS or BIOS images needed. XMS, EMS, a DPMI host
   for DOS extenders, upper memory (`LOADHIGH`), a mouse driver, keyboard
-  layouts, and a [DOS prompt](REFERENCE.md#the-dos-prompt) with batch files and a
-  `COMMAND.COM` programs can shell out to
+  layouts, and a [DOS prompt](REFERENCE.md#the-dos-prompt) with batch
+  files and a `COMMAND.COM` programs can shell out to
 * **Windows built in (experimental):** Windows 95 and 98 games without
   a Windows image (`win32=true`, or `windows=builtin` in a
   [game profile](CONFIGURATION.md#windows-games)). Rust-DOS has its own
@@ -198,7 +208,8 @@ configurations to copy.
   over the picture (Ctrl+Shift+M), for its copy protection, and game
   packages: one zip with the game, its CD, settings and manuals
   ([GAME-PACKAGES.md](GAME-PACKAGES.md))
-* **[Save states](REFERENCE.md#save-states)** (nine slots per game) and rewind
+* **[Save states](REFERENCE.md#save-states)** (nine slots per game) and
+  rewind
 * **Cheats:** find a game's values in memory, and change or freeze them
 * **[RetroAchievements](CONFIGURATION.md#retroachievements):**
   achievements, leaderboards and rich presence, hardcore mode included
@@ -216,8 +227,10 @@ configurations to copy.
 * **[Printer](CONFIGURATION.md#printer):** an Epson ESC/P 2 printer on
   LPT1 that prints to PDF documents, PNG pictures, the host's printer or
   a file of what the program sent
-* Runs in a **[web browser](REFERENCE.md#running-in-a-browser)** as WebAssembly
-* A web-based **[debugger](REFERENCE.md#debug--remote-control-server)** and HTTP API
+* Runs in a **[web browser](REFERENCE.md#running-in-a-browser)** as
+  WebAssembly
+* A web-based
+  **[debugger](REFERENCE.md#debug--remote-control-server)** and HTTP API
 * **VR support**: Model your childhood bedroom in Blender and play your favorite
   DOS games in an OpenXR VR headset or in 2D mode  ([more](CONFIGURATION.md#3d-scene-and-vr))
 

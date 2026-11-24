@@ -485,7 +485,7 @@ Pick the file in any of these ways:
 A room that can't be loaded (a missing file, a picture that isn't PNG or
 JPEG, no screen) is replaced by the test room. The reason is printed in the
 terminal and written to the [log file](../REFERENCE.md#log-file)
-(`Rust-DOS.log`), on a line starting with `[VR]`.
+(`rust-dos.log`), on a line starting with `[VR]`.
 
 ## Sharing a room
 
