@@ -120,6 +120,12 @@ const FIX_INTS: u32 = 8;
 /// A scroll bar's range: the 32-bit addresses of its two integers, and
 /// the value Windows 3.1's SBM_GETRANGE returns has both.
 const FIX_RANGE: u32 = 9;
+/// A buffer of `len` bytes the callee filled whatever it returned: a
+/// list box's item data, for LB_GETTEXT on one without strings.
+const FIX_BYTES: u32 = 10;
+/// EM_GETLINE's buffer: as many bytes as the call returned, with no NUL
+/// after them.
+const FIX_LINE: u32 = 11;
 
 fn lo(v: u32) -> u32 {
     v & 0xFFFF
@@ -817,6 +823,68 @@ pub(super) fn to16(
             data.push(FIX_NONE);
             (msg, wp, seg)
         }
+        // The list box, combo box and edit messages that carry a string
+        // or a buffer for one. A 16-bit procedure that subclasses the
+        // control (CTL3D, Borland's BWCC, Memphis Math's SDSC) gets a
+        // 16:16 copy, as Windows 95's thunks give it; a list without
+        // strings has item data in lParam, which goes as it is.
+        LB_ADDSTRING | LB_INSERTSTRING | LB_FINDSTRING | LB_FINDSTRINGEXACT | LB_SELECTSTRING
+        | LB_DIR | LB_ADDFILE | CB_ADDSTRING | CB_INSERTSTRING | CB_FINDSTRING
+        | CB_FINDSTRINGEXACT | CB_SELECTSTRING | CB_DIR | EM_REPLACESEL => {
+            let strings = !matches!(
+                msg,
+                LB_ADDSTRING
+                    | LB_INSERTSTRING
+                    | LB_FINDSTRING
+                    | LB_FINDSTRINGEXACT
+                    | LB_SELECTSTRING
+                    | CB_ADDSTRING
+                    | CB_INSERTSTRING
+                    | CB_FINDSTRING
+                    | CB_FINDSTRINGEXACT
+                    | CB_SELECTSTRING
+            ) || has_strings(cpu, hwnd, msg);
+            let seg = if lp == 0 || !strings {
+                lp
+            } else {
+                string16(cpu, stack, lp)
+            };
+            data.push(FIX_NONE);
+            (control_msg16(cpu, hwnd, msg), lo(wp), seg)
+        }
+        // The text of an item, into the caller's buffer once the 16-bit
+        // procedure returned its length; a list without strings copies
+        // the item's data, a DWORD.
+        LB_GETTEXT | CB_GETLBTEXT => {
+            let msg16 = control_msg16(cpu, hwnd, msg);
+            if lp == 0 {
+                data.push(FIX_NONE);
+                return (msg16, lo(wp), 0);
+            }
+            if has_strings(cpu, hwnd, msg) {
+                let (seg, b16) = stack.alloc(0x800);
+                data.extend([FIX_TEXT, lp, b16, 0x800]);
+                (msg16, lo(wp), seg)
+            } else {
+                let (seg, b16) = stack.alloc(4);
+                data.extend([FIX_BYTES, lp, b16, 4]);
+                (msg16, lo(wp), seg)
+            }
+        }
+        // The line's buffer starts with its size in a word; the line
+        // comes back without a NUL.
+        EM_GETLINE => {
+            let msg16 = control_msg16(cpu, hwnd, msg);
+            if lp == 0 {
+                data.push(FIX_NONE);
+                return (msg16, lo(wp), 0);
+            }
+            let size = r16(cpu, lp).clamp(2, 0x800);
+            let (seg, b16) = stack.alloc(size);
+            w16(cpu, b16, size);
+            data.extend([FIX_LINE, lp, b16, size]);
+            (msg16, lo(wp), seg)
+        }
         WM_COMMAND => {
             data.push(FIX_NONE);
             (msg, lo(wp), make_long(lp, hi(wp)))
@@ -960,7 +1028,9 @@ fn returned32(cpu: &mut Cpu, value: u32, data: &[u32], dialog: bool) -> u32 {
             }
             FIX_TEXT => {
                 let size = fix.get(3).copied().unwrap_or(0);
-                if size > 0 {
+                // LB_ERR and CB_ERR (-1) leave the caller's buffer as it
+                // was.
+                if size > 0 && (value as u16 as i16) >= 0 {
                     let len = (value & 0xFFFF).min(size - 1);
                     let mut text = super::peek(cpu, p16, len as usize).unwrap_or_default();
                     text.push(0);
@@ -968,6 +1038,17 @@ fn returned32(cpu: &mut Cpu, value: u32, data: &[u32], dialog: bool) -> u32 {
                 }
             }
             FIX_STRING => copy_string(cpu, p16, p),
+            FIX_BYTES if (value as u16 as i16) >= 0 => {
+                let len = fix.get(3).copied().unwrap_or(0);
+                let bytes = super::peek(cpu, p16, len as usize).unwrap_or_default();
+                super::poke(cpu, p, &bytes);
+            }
+            FIX_LINE => {
+                let size = fix.get(3).copied().unwrap_or(0);
+                let len = (value & 0xFFFF).min(size);
+                let bytes = super::peek(cpu, p16, len as usize).unwrap_or_default();
+                super::poke(cpu, p, &bytes);
+            }
             FIX_RANGE => {
                 // Into the integers Win32's caller gave (p, then p16).
                 for (at, v) in [(p, lo(value)), (p16, hi(value))] {
