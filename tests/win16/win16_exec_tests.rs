@@ -1006,19 +1006,38 @@ fn an_ended_programs_classes_go_with_the_windows_it_left() {
     assert!(log.contains("ended with exit code 5"), "{log}");
 }
 
-/// USER's ShowWindow, ValidateRect and GetUpdateRect, and SW_SHOWNA.
+/// USER's ShowWindow, ValidateRect, GetUpdateRect and SetWindowPos,
+/// SW_SHOWNA, and SetWindowPos's flags SWP_NOSIZE, SWP_NOMOVE,
+/// SWP_NOACTIVATE and SWP_SHOWWINDOW together.
 const SHOW_WINDOW: u16 = 42;
 const VALIDATE_RECT: u16 = 127;
 const GET_UPDATE_RECT: u16 = 190;
+const SET_WINDOW_POS: u16 = 232;
 const SW_SHOWNA: u16 = 8;
+const SWP_SHOW_IN_PLACE: u16 = 0x53;
+
+/// Where the window C:\CHILD.EXE leaves is, against the program's at
+/// (100, 100), 50 by 50.
+#[derive(Clone, Copy, PartialEq)]
+enum ChildWindow {
+    /// No window.
+    None,
+    /// Over the program's, in the same place.
+    Over,
+    /// Beside it, at (200, 100): they don't overlap.
+    Beside,
+    /// Under it, at (80, 80), at the bottom of the windows: the
+    /// program's covers part of it.
+    Under,
+}
 
 /// A program shows a window at (100, 100) and validates it, runs
 /// C:\CHILD.EXE to its end, and ends with 10 if its window has nothing
 /// to paint then (GetUpdateRect), 11 if it has; 3 if RegisterClass
-/// failed, 4 if CreateWindow did. The child registers "Probe" and, with
-/// `window`, shows a window of it over the program's and leaves it
-/// there; it ends with 5.
-fn update_after_child(test: &str, window: bool) -> (u8, String) {
+/// failed, 4 if CreateWindow did. The child registers "Probe", shows a
+/// window of it where `window` says and leaves it there, and ends with
+/// 5.
+fn update_after_child(test: &str, window: ChildWindow) -> (u8, String) {
     let mut code = Code::new();
     let mut probe = Probe::default();
     let mut paths_at = Vec::new();
@@ -1051,15 +1070,30 @@ fn update_after_child(test: &str, window: bool) -> (u8, String) {
     child.emit(&[0x8B, 0xC7]); // mov ax,di: its instance
     register_probe(&mut child, &mut probe, false);
     exit_if_zero(&mut child, 6);
-    if window {
+    let place = match window {
+        ChildWindow::None => None,
+        ChildWindow::Over => Some([100, 100, 50, 50]),
+        ChildWindow::Beside => Some([200, 100, 50, 50]),
+        ChildWindow::Under => Some([80, 80, 50, 50]),
+    };
+    if let Some(place) = place {
         // Shown without taking the activation, which would wait for the
         // program, busy in its loop, to answer.
-        create_probe_at(&mut child, &mut probe, false, [100, 100, 50, 50]);
+        create_probe_at(&mut child, &mut probe, false, place);
         exit_if_zero(&mut child, 7);
-        child
-            .emit(&[0x50]) // push ax: the window
-            .push(SW_SHOWNA)
-            .call("USER", SHOW_WINDOW);
+        child.emit(&[0x50]); // push ax: the window
+        if window == ChildWindow::Under {
+            child
+                .push(1) // HWND_BOTTOM
+                .push(0)
+                .push(0)
+                .push(0)
+                .push(0)
+                .push(SWP_SHOW_IN_PLACE)
+                .call("USER", SET_WINDOW_POS);
+        } else {
+            child.push(SW_SHOWNA).call("USER", SHOW_WINDOW);
+        }
     }
     child.emit(&[0xB0, 0x05]).exit_al();
     finish_probe(&mut child, probe);
@@ -1078,7 +1112,7 @@ fn update_after_child(test: &str, window: bool) -> (u8, String) {
 /// its display profiler ended).
 #[test]
 fn an_ended_program_without_windows_leaves_the_others_painted() {
-    let (exit, log) = update_after_child("ended_program_no_repaint", false);
+    let (exit, log) = update_after_child("ended_program_no_repaint", ChildWindow::None);
     assert_eq!(exit, 10, "{log}");
     assert!(log.contains("ended with exit code 5"), "{log}");
 }
@@ -1087,8 +1121,27 @@ fn an_ended_program_without_windows_leaves_the_others_painted() {
 /// under it paints again: the window under it needs painting.
 #[test]
 fn an_ended_programs_window_uncovers_the_one_under_it() {
-    let (exit, log) = update_after_child("ended_program_uncovers", true);
+    let (exit, log) = update_after_child("ended_program_uncovers", ChildWindow::Over);
     assert_eq!(exit, 11, "{log}");
+    assert!(log.contains("ended with exit code 5"), "{log}");
+}
+
+/// Only what an ended program's windows showed paints again: a window
+/// beside them has nothing to paint.
+#[test]
+fn an_ended_programs_window_leaves_one_beside_it_painted() {
+    let (exit, log) = update_after_child("ended_program_beside", ChildWindow::Beside);
+    assert_eq!(exit, 10, "{log}");
+    assert!(log.contains("ended with exit code 5"), "{log}");
+}
+
+/// A window over an ended program's window covered that part of it, so
+/// nothing changes there as it goes, as when DestroyWindow hides a
+/// window on Windows: the window above has nothing to paint.
+#[test]
+fn an_ended_programs_window_leaves_the_one_over_it_painted() {
+    let (exit, log) = update_after_child("ended_program_under", ChildWindow::Under);
+    assert_eq!(exit, 10, "{log}");
     assert!(log.contains("ended with exit code 5"), "{log}");
 }
 

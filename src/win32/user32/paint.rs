@@ -309,7 +309,7 @@ fn fix_flags(state: &State, hwnd: u32, flags: u32) -> u32 {
 }
 
 /// The window's shape on the screen: its rectangle, or its region.
-pub fn shape(state: &State, hwnd: u32) -> Region {
+fn shape(state: &State, hwnd: u32) -> Region {
     let r = state.screen_rect(hwnd);
     match state.window(hwnd).and_then(|w| w.region.as_ref()) {
         Some(region) => region.offset_by(r.left, r.top).and_rect(&r),
