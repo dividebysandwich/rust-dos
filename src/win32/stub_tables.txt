@@ -6049,6 +6049,25 @@ auxGetDevCaps
 auxGetVolume
 auxSetVolume
 waveOutGetID
+midiOutGetErrorText
+midiOutPrepareHeader
+midiOutUnprepareHeader
+midiOutLongMsg
+midiOutCachePatches
+midiOutCacheDrumPatches
+waveInGetNumDevs
+waveInGetDevCaps
+waveInGetErrorText
+waveInOpen
+waveInClose
+waveInPrepareHeader
+waveInUnprepareHeader
+waveInAddBuffer
+waveInStart
+waveInStop
+waveInReset
+waveInGetPosition
+waveInGetID
 
 MODULE LZEXPAND
 LZCopy

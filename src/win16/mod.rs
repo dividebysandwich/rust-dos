@@ -53,7 +53,7 @@ use std::collections::BTreeMap;
 
 pub use global::Arena;
 pub use ldt::Ldt;
-pub use misc::{Mmsystem, call_queued16, queue_call16, wave_data, wave_header16};
+pub use misc::{Mmsystem, call_queued16, header_data, header16, queue_call16};
 
 /// The Win16 tasks' state: the system's.
 #[derive(Clone, Debug, Default)]
