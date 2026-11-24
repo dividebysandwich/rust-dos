@@ -780,8 +780,16 @@ fn a_dlls_import_is_looked_for_in_the_tasks_directory() {
 /// A DLL named `name` that imports the DLL `dll`, whose LibMain returns
 /// 1.
 fn library_importing(name: &str, dll: &str) -> Vec<u8> {
+    library_importing_all(name, &[dll])
+}
+
+/// A DLL named `name` that imports the DLLs `dlls`, in that order, whose
+/// LibMain returns 1.
+fn library_importing_all(name: &str, dlls: &[&str]) -> Vec<u8> {
     let mut b = ne::Builder::new(name, ne::LIBMODULE);
-    b.import_module(dll);
+    for dll in dlls {
+        b.import_module(dll);
+    }
     let text = b.segment(ne::SegmentSpec {
         data: vec![0xB8, 0x01, 0x00, 0xCB], // mov ax,1; retf
         flags: CODE,
@@ -790,6 +798,109 @@ fn library_importing(name: &str, dll: &str) -> Vec<u8> {
     });
     b.entry_point(text, 0);
     b.build()
+}
+
+/// Code that ends the program with `fail` unless a module of the name
+/// is loaded, when `loaded`, or isn't, when not. It returns where the
+/// name's offset goes, which is patched once the name has its place.
+fn check_loaded(code: &mut Code, loaded: bool, fail: u8) -> u16 {
+    let name_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", GET_MODULE_HANDLE);
+    let skip = if loaded { 0x75 } else { 0x74 }; // jnz or jz
+    code.emit(&[
+        0x0B, 0xC0, // or ax,ax
+        skip, 0x06, // over the exit
+        0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21, // mov al,fail; exit
+    ]);
+    name_at
+}
+
+#[test]
+fn dlls_that_import_each_other_go_with_their_last_user() {
+    // A.DLL and B.DLL import each other, as MS Setup's MSSHLSTF and
+    // MSCOMSTF do, and C.DLL imports B. The program loads A, then C,
+    // then frees A: B and A stay, since C imports B and B imports A.
+    // Then it frees C, and all three go, as KERNEL counts each module
+    // once for each load that reaches it (IncExeUsage), not for each
+    // import. It ends with 1, or with the number of the check that
+    // failed.
+    let mut code = Code::new();
+    let a_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+    code.emit(&[0x8B, 0xF0]); // mov si,ax
+    let c_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+    code.emit(&[0x8B, 0xF8]); // mov di,ax
+    code.emit(&[0x56]).call("KERNEL", FREE_LIBRARY); // push si
+    let names = [
+        check_loaded(&mut code, true, 2),
+        check_loaded(&mut code, true, 3),
+    ];
+    code.emit(&[0x57]).call("KERNEL", FREE_LIBRARY); // push di
+    let gone = [
+        check_loaded(&mut code, false, 4),
+        check_loaded(&mut code, false, 5),
+        check_loaded(&mut code, false, 6),
+    ];
+    code.emit(&[0xB0, 0x01]).exit_al(); // mov al,1
+    for (at, text) in [(a_at, &b"C:\\A.DLL\0"[..]), (c_at, b"C:\\C.DLL\0")] {
+        let here = code.here();
+        code.patch(at, here);
+        code.emit(text);
+    }
+    for (at, text) in names.iter().zip([b"A\0", b"B\0"]) {
+        let here = code.here();
+        code.patch(*at, here);
+        code.emit(text);
+    }
+    for (at, text) in gone.iter().zip([b"A\0", b"B\0", b"C\0"]) {
+        let here = code.here();
+        code.patch(*at, here);
+        code.emit(text);
+    }
+    let (exit, log) = run_with("circular_imports", program(&code, CODE), |_, base| {
+        fs::write(base.join("A.DLL"), library_importing("A", "B")).unwrap();
+        fs::write(base.join("B.DLL"), library_importing("B", "A")).unwrap();
+        fs::write(base.join("C.DLL"), library_importing("C", "B")).unwrap();
+    });
+    assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn a_load_that_fails_takes_away_the_modules_it_loaded() {
+    // A.DLL imports B.DLL, then MISSING.DLL, which isn't there, and B
+    // and C.DLL import each other. LoadLibrary of A fails, and A, B and
+    // C go with it, as none of them has a user. It ends with 1, or with
+    // the number of the check that failed.
+    let mut code = Code::new();
+    let a_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+    code.emit(&[
+        0x3D, 0x20, 0x00, // cmp ax,32
+        0x72, 0x06, // jb over the exit
+        0xB0, 0x02, 0xB4, 0x4C, 0xCD, 0x21, // mov al,2; exit
+    ]);
+    let gone = [
+        check_loaded(&mut code, false, 3),
+        check_loaded(&mut code, false, 4),
+        check_loaded(&mut code, false, 5),
+    ];
+    code.emit(&[0xB0, 0x01]).exit_al(); // mov al,1
+    let here = code.here();
+    code.patch(a_at, here);
+    code.emit(b"C:\\A.DLL\0");
+    for (at, text) in gone.iter().zip([b"A\0", b"B\0", b"C\0"]) {
+        let here = code.here();
+        code.patch(*at, here);
+        code.emit(text);
+    }
+    let (exit, log) = run_with("failed_import", program(&code, CODE), |_, base| {
+        let a = library_importing_all("A", &["B", "MISSING"]);
+        fs::write(base.join("A.DLL"), a).unwrap();
+        fs::write(base.join("B.DLL"), library_importing("B", "C")).unwrap();
+        fs::write(base.join("C.DLL"), library_importing("C", "B")).unwrap();
+    });
+    assert_eq!(exit, 1, "{log}");
 }
 
 /// USER's CreateWindow, RegisterClass and DefWindowProc.

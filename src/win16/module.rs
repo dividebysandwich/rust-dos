@@ -62,11 +62,44 @@ impl From<LoadError> for String {
 
 /// Load the module `name` (a module name, or a file's name or path) for
 /// a task whose executable is in the directory `dir` (`find_file`): one
-/// loaded already, its count raised, a system module, or the file found
-/// where Windows looks.
-/// Its place in `State::modules`, and the libraries loaded with it whose
-/// entry points are yet to run, in the order they are to run in.
+/// loaded already, a system module, or the file found where Windows
+/// looks. The module and every module it imports from, directly or
+/// through others, then count one user more (`add_user`), as KERNEL's
+/// LoadModule calls IncExeUsage once, after the imports of all levels
+/// are loaded (Pietrek, Windows Internals, LMImports). The imports
+/// themselves count nothing, so DLLs that import each other go when
+/// the last program that loaded them frees them. A load that fails
+/// takes away the modules it loaded. Its place in `State::modules`, and
+/// the libraries loaded with it whose entry points are yet to run, in
+/// the order they are to run in.
 pub fn load(
+    cpu: &mut Cpu,
+    name: &str,
+    dir: &str,
+    inits: &mut Vec<usize>,
+) -> Result<usize, LoadError> {
+    let before = cpu.bus.win32.win16.modules.len();
+    match find_or_load(cpu, name, dir, inits) {
+        Ok(index) => {
+            let handle = cpu.bus.win32.win16.modules[index].handle;
+            add_user(cpu, handle);
+            Ok(index)
+        }
+        Err(e) => {
+            // The modules loaded for it, which no one uses: the newest
+            // are last.
+            while cpu.bus.win32.win16.modules.len() > before {
+                unload(cpu, cpu.bus.win32.win16.modules.len() - 1);
+            }
+            inits.retain(|&i| i < before);
+            Err(e)
+        }
+    }
+}
+
+/// `load` without the count: the module `name`, loaded already or now,
+/// with the modules it imports from.
+fn find_or_load(
     cpu: &mut Cpu,
     name: &str,
     dir: &str,
@@ -111,7 +144,6 @@ pub fn load(
         .iter()
         .position(|m| m.name == module_name || by_file(m))
     {
-        cpu.bus.win32.win16.modules[i].refs += 1;
         return Ok(i);
     }
     if let Some(index) = builtin {
@@ -259,8 +291,10 @@ fn join(dir: &str, file: &str) -> String {
 /// `builtin`), for a task whose executable is in the directory `dir`.
 /// The modules it imports from are looked for as `find_file` does, with
 /// `dir` as the task's directory; a program's own imports with its own
-/// directory, as it is the task they are loaded for.
-pub fn load_file(
+/// directory, as it is the task they are loaded for. It counts no user
+/// (`load` adds one); a load that fails leaves the modules it made to
+/// `load` to take away.
+fn load_file(
     cpu: &mut Cpu,
     file: Vec<u8>,
     path: &str,
@@ -375,7 +409,7 @@ pub fn load_file(
         },
         segments: segments.clone(),
         dgroup,
-        refs: 1,
+        refs: 0,
         builtin,
         resources32: 0,
         image32: None,
@@ -395,13 +429,9 @@ pub fn load_file(
     };
     let mut deps = Vec::new();
     for dep in &parsed.module_refs {
-        match load(cpu, dep, &dir, inits) {
+        match find_or_load(cpu, dep, &dir, inits) {
             Ok(i) => deps.push(cpu.bus.win32.win16.modules[i].handle),
             Err(e) => {
-                for h in deps {
-                    release(cpu, h);
-                }
-                unload(cpu, index);
                 let message = format!("{} needs {}: {}", file_name, dep, e.message);
                 return Err(LoadError::new(e.code, message));
             }
@@ -827,27 +857,105 @@ pub const SYSTEM_MODULES: [&str; 8] = [
     "KERNEL", "USER", "GDI", "KEYBOARD", "SYSTEM", "DISPLAY", "SOUND", "MMSYSTEM",
 ];
 
-/// Let go of a reference to the module `handle`: at the last, it goes,
-/// and so do the references it held to the modules it imports from.
+/// The indexes of the module `handle` and of every module it imports
+/// from, directly or through others, each once: the modules KERNEL's
+/// IncExeUsage and DecExeUsage count, which DLLs that import each other
+/// don't make go round for ever.
+fn users_of(cpu: &Cpu, handle: u16) -> Vec<usize> {
+    super::module_index(cpu, handle)
+        .map_or_else(Vec::new, |index| reach(&cpu.bus.win32.win16.modules, index))
+}
+
+/// The indexes in `modules` of the module at `start` and of every module
+/// it imports from, directly or through others, each once.
+fn reach(modules: &[Module16], start: usize) -> Vec<usize> {
+    let mut found: Vec<usize> = Vec::new();
+    let mut next = vec![start];
+    while let Some(index) = next.pop() {
+        if found.contains(&index) {
+            continue;
+        }
+        found.push(index);
+        for d in modules[index].deps.iter().rev() {
+            if let Some(i) = modules.iter().position(|m| m.handle == *d) {
+                next.push(i);
+            }
+        }
+    }
+    found
+}
+
+/// The module `handle` has one user more: it, and every module it
+/// imports from, directly or through others, once each, count one more
+/// (KERNEL's IncExeUsage). A module's count is so the number of loads
+/// and tasks that use it, whichever module they loaded.
+pub fn add_user(cpu: &mut Cpu, handle: u16) {
+    for index in users_of(cpu, handle) {
+        let m = &mut cpu.bus.win32.win16.modules[index];
+        m.refs = m.refs.saturating_add(1);
+    }
+}
+
+/// A user of the module `handle` lets go of it (FreeLibrary, or a task's
+/// end): it, and every module it imports from, directly or through
+/// others, once each, count one less (KERNEL's DecExeUsage). Those whose
+/// count is 0 go, the system's own modules apart.
 pub fn release(cpu: &mut Cpu, handle: u16) {
-    let Some(index) = super::module_index(cpu, handle) else {
-        return;
-    };
-    let m = &mut cpu.bus.win32.win16.modules[index];
-    // The system's own modules stay; the other built-in libraries go when
-    // the last user frees them, as DLLs do.
-    if m.builtin.is_some() && SYSTEM_MODULES.contains(&m.name.as_str()) {
-        m.refs = m.refs.saturating_sub(1).max(1);
-        return;
+    let mut gone = Vec::new();
+    for index in users_of(cpu, handle) {
+        let m = &mut cpu.bus.win32.win16.modules[index];
+        // The system's own modules stay; the other built-in libraries go
+        // when the last user frees them, as DLLs do.
+        if m.builtin.is_some() && SYSTEM_MODULES.contains(&m.name.as_str()) {
+            m.refs = m.refs.saturating_sub(1).max(1);
+            continue;
+        }
+        m.refs = m.refs.saturating_sub(1);
+        if m.refs == 0 {
+            gone.push(m.handle);
+        }
     }
-    m.refs = m.refs.saturating_sub(1);
-    if m.refs > 0 {
-        return;
+    for h in gone {
+        if let Some(index) = super::module_index(cpu, h) {
+            unload(cpu, index);
+        }
     }
-    let deps = m.deps.clone();
-    unload(cpu, index);
-    for d in deps {
-        release(cpu, d);
+}
+
+/// The W32 section's version that first counts a Win16 module's users
+/// (`add_user`). An older one counted one for each load of the module
+/// and one for each loaded module that imports it (`recount_users`).
+pub(crate) const USERS_COUNTED: u16 = 91;
+
+/// Count the users of the modules of a state saved before
+/// `USERS_COUNTED` as `add_user` counts them. A module's old count less
+/// the imports of it by loaded modules is the loads and tasks that use
+/// the module itself; its new count adds up those of every module that
+/// reaches it, itself among them. A module no load or task reaches, one
+/// of the DLLs importing each other that the old counts kept, counts 0
+/// and goes when its next user lets go of it. The system's own modules
+/// count at least 1.
+pub(crate) fn recount_users(modules: &mut [Module16]) {
+    let mut own: Vec<u16> = modules.iter().map(|m| m.refs).collect();
+    for m in modules.iter() {
+        for d in &m.deps {
+            if let Some(i) = modules.iter().position(|x| x.handle == *d) {
+                own[i] = own[i].saturating_sub(1);
+            }
+        }
+    }
+    let mut counts = vec![0u16; modules.len()];
+    for (i, &n) in own.iter().enumerate() {
+        if n == 0 {
+            continue;
+        }
+        for j in reach(modules, i) {
+            counts[j] = counts[j].saturating_add(n);
+        }
+    }
+    for (m, count) in modules.iter_mut().zip(counts) {
+        let system = m.builtin.is_some() && SYSTEM_MODULES.contains(&m.name.as_str());
+        m.refs = if system { count.max(1) } else { count };
     }
 }
 
@@ -1279,4 +1387,38 @@ pub fn patch_code_handle(cpu: &mut Cpu, handle: u16) -> u32 {
     patch_prologues(&parsed, n as u8, &mut bytes, dgroup_sel);
     super::poke(cpu, a.base, &bytes);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn module(name: &str, handle: u16, refs: u16, deps: &[u16]) -> Module16 {
+        Module16 {
+            name: name.to_string(),
+            handle,
+            refs,
+            deps: deps.to_vec(),
+            ..Module16::default()
+        }
+    }
+
+    #[test]
+    fn old_counts_of_imports_become_counts_of_users() {
+        // An older state: a program P imports D1 and D2, both import E,
+        // and A and B, which import each other, were loaded by a
+        // LoadLibrary of A and then freed. Each import counted one, so
+        // E counted 2, and A and B kept 1 each with nothing using them.
+        let mut modules = vec![
+            module("P", 0x10, 1, &[0x20, 0x30]),
+            module("D1", 0x20, 1, &[0x40]),
+            module("D2", 0x30, 1, &[0x40]),
+            module("E", 0x40, 2, &[]),
+            module("A", 0x50, 1, &[0x60]),
+            module("B", 0x60, 1, &[0x50]),
+        ];
+        recount_users(&mut modules);
+        let counts: Vec<u16> = modules.iter().map(|m| m.refs).collect();
+        assert_eq!(counts, [1, 1, 1, 1, 0, 0]);
+    }
 }

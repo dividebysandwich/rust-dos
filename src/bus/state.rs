@@ -29,7 +29,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 90;
+const WIN32_VERSION: u16 = 91;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -53,9 +53,11 @@ const WIN32_VERSION: u16 = 90;
 /// they load without), 71's to 87's no 16-bit programs' multimedia
 /// timers (`winmm::timer::Action::Call16`, which they load without),
 /// 71's to 88's not each program's current directories
-/// (`directories::DIRECTORIES_SAVED`), and 71's to 89's no animated
-/// cursors (`user32::resource::ANI_CURSORS`).
-const WIN32_LOADS: [u16; 20] = [
+/// (`directories::DIRECTORIES_SAVED`), 71's to 89's no animated
+/// cursors (`user32::resource::ANI_CURSORS`), and 71's to 90's Win16
+/// modules counted once for each import of them
+/// (`win16::module::USERS_COUNTED`).
+const WIN32_LOADS: [u16; 21] = [
     71,
     72,
     73,
@@ -75,6 +77,7 @@ const WIN32_LOADS: [u16; 20] = [
     87,
     88,
     89,
+    90,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -935,7 +938,14 @@ impl Bus {
         }
         win32.reset();
         if r.next_is(b"W32 ") {
-            win32.load(&mut r.section_of(b"W32 ", &WIN32_LOADS)?)?;
+            let mut section = r.section_of(b"W32 ", &WIN32_LOADS)?;
+            win32.load(&mut section)?;
+            if section
+                .version()
+                .is_some_and(|v| v < crate::win16::module::USERS_COUNTED)
+            {
+                crate::win16::module::recount_users(&mut win32.win16.modules);
+            }
         }
         // The extended memory they hold.
         xms.dpmi = dpmi.reservations();
@@ -1170,6 +1180,7 @@ mod tests {
         (88, 0x0BDC_B050_4D43_8EE6), // 16-bit programs' multimedia timers
         (89, 0x8834_B549_9A47_3653), // each program's current directories
         (90, 0x73E4_9EC8_9162_D561), // animated cursors
+        (91, 0x73E4_9EC8_9162_D561), // Win16 modules counting their users, not imports
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
