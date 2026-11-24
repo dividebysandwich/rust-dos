@@ -236,7 +236,9 @@ pub struct Task16 {
     /// call, by module handle.
     pub inits: Vec<u16>,
     /// Its current drive and directories while another program's are
-    /// DOS's (win32/directories.rs): None while they are DOS's.
+    /// DOS's (win32/directories.rs): None while they are DOS's, and
+    /// always for a task that runs a Win32 process's 16-bit calls, which
+    /// works in that process's.
     pub directories: crate::savestate::Since<
         { crate::win32::directories::DIRECTORIES_SAVED },
         Option<crate::win32::directories::Directories>,

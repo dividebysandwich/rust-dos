@@ -28,6 +28,7 @@
 
 use super::link;
 use crate::cpu::Cpu;
+use crate::win32::directories::{self, Directories};
 use crate::win32::kernel32::files;
 use crate::win32::registry::{self, HKEY_CLASSES_ROOT, Open};
 use crate::win32::user32::string_at;
@@ -282,9 +283,10 @@ fn find_command(
 }
 
 /// Run the command line `line` in `directory`, if that is one: the
-/// process's handle, or the SE_ERR_ code.
+/// process's handle, or the SE_ERR_ code. The caller's current drive
+/// and its directories on every drive are as they were afterwards.
 fn run(cpu: &mut Cpu, line: &str, directory: &str, show: u32) -> Result<u32, u32> {
-    let before = files::current_directory(cpu);
+    let before = Directories::now(cpu);
     let moved = !directory.is_empty()
         && is_directory(cpu, directory)
         && files::change_directory(cpu, directory).is_ok();
@@ -292,7 +294,7 @@ fn run(cpu: &mut Cpu, line: &str, directory: &str, show: u32) -> Result<u32, u32
         .log_string(&format!("[W32] ShellExecute runs {}", line));
     let started = files::run(cpu, line, show);
     if moved {
-        let _ = files::change_directory(cpu, &before);
+        directories::put_back(cpu, before);
     }
     started.map_err(|code| match code {
         2 => SE_ERR_FNF,

@@ -13,8 +13,11 @@
 //! functions of both kinds of programs go by. So the system keeps the
 //! directories of each program that isn't running in its entry
 //! (`Process::directories`, `Task16::directories`) and puts them in DOS
-//! when one of its threads runs (`switch`), as Windows 3.1's KERNEL does
-//! with the task database at a task switch. `State::owner` says whose
+//! when one of its threads runs (`switch`), as Windows 3.1's KERNEL puts
+//! a task's drive and directory from its task database in DOS at a task
+//! switch. KERNEL keeps only the current drive and the directory on it
+//! there, and the tasks share the other drives' directories; here a
+//! program keeps the directory of every drive. `State::owner` says whose
 //! are in DOS now.
 //!
 //! The directories DOS had when the session started are DOS's own: the
