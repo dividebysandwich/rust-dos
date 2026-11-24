@@ -29,7 +29,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 89;
+const WIN32_VERSION: u16 = 90;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -51,10 +51,11 @@ const WIN32_VERSION: u16 = 89;
 /// it starts in (`dosvm::DOSVM_DIRECTORY`), 71's to 86's no real-mode
 /// calls through VWIN32's DPMI dispatch (`realmode::Kind::Vxd`, which
 /// they load without), 71's to 87's no 16-bit programs' multimedia
-/// timers (`winmm::timer::Action::Call16`, which they load without), and
+/// timers (`winmm::timer::Action::Call16`, which they load without),
 /// 71's to 88's not each program's current directories
-/// (`directories::DIRECTORIES_SAVED`).
-const WIN32_LOADS: [u16; 19] = [
+/// (`directories::DIRECTORIES_SAVED`), and 71's to 89's Win16 modules
+/// counted once for each import of them (`win16::module::USERS_COUNTED`).
+const WIN32_LOADS: [u16; 20] = [
     71,
     72,
     73,
@@ -73,6 +74,7 @@ const WIN32_LOADS: [u16; 19] = [
     86,
     87,
     88,
+    89,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -933,7 +935,14 @@ impl Bus {
         }
         win32.reset();
         if r.next_is(b"W32 ") {
-            win32.load(&mut r.section_of(b"W32 ", &WIN32_LOADS)?)?;
+            let mut section = r.section_of(b"W32 ", &WIN32_LOADS)?;
+            win32.load(&mut section)?;
+            if section
+                .version()
+                .is_some_and(|v| v < crate::win16::module::USERS_COUNTED)
+            {
+                crate::win16::module::recount_users(&mut win32.win16.modules);
+            }
         }
         // The extended memory they hold.
         xms.dpmi = dpmi.reservations();
@@ -983,9 +992,6 @@ impl Bus {
         // The Win16 KERNEL's stubs for imports nothing has keep their ids
         // when KERNEL's table grows.
         crate::win16::builtin::mend(self)?;
-        // The Win16 modules' counts of an older state, which counted each
-        // import, cover every user that reaches a module.
-        crate::win16::module::mend_users(self);
         Ok(lost)
     }
 
@@ -1170,6 +1176,7 @@ mod tests {
         (87, 0x3CCD_B401_AB6D_F5EF), // real-mode calls through VWIN32's DPMI dispatch
         (88, 0x0BDC_B050_4D43_8EE6), // 16-bit programs' multimedia timers
         (89, 0x8834_B549_9A47_3653), // each program's current directories
+        (90, 0x8834_B549_9A47_3653), // Win16 modules counting their users, not imports
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
