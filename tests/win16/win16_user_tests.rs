@@ -388,6 +388,240 @@ fn a_superclass_of_listbox_takes_windows_3_1s_list_box_messages() {
     assert_eq!(exit, 1, "{log}");
 }
 
+/// Where the subclass tests keep a buffer in their data segment.
+const BUFFER: u16 = 0x20;
+
+/// Subclass the control in SI with a 16-bit window procedure that
+/// passes every message on to its class's procedure, as CTL3D, BWCC and
+/// Memphis Math's SDSC.DLL do: USER32 then sends the control's messages
+/// to 16-bit code, and they come back to 32-bit code through
+/// CallWindowProc. Returns where the procedure's offset is to be
+/// patched in.
+fn subclass(p: &mut Program) -> u16 {
+    p.code
+        .emit(&[0x56]) // push si
+        .push(0xFFFC); // GWL_WNDPROC
+    let proc_at = p.code.here() + 2;
+    p.code.push_far(0).call("USER", SET_WINDOW_LONG);
+    proc_at
+}
+
+/// The procedure `subclass` installs: CallWindowProc(the class's
+/// procedure, hwnd, msg, wParam, lParam).
+fn pass_on_procedure(p: &mut Program, proc_at: u16) {
+    let proc = p.code.here();
+    p.code
+        .emit(&[
+            0x55, // push bp
+            0x8B, 0xEC, // mov bp,sp
+            0xFF, 0x76, 0x0E, // push [bp+0Eh] (hwnd)
+        ])
+        .push(0xFFE8) // GCL_WNDPROC
+        .call("USER", GET_CLASS_LONG)
+        .emit(&[
+            0x52, // push dx
+            0x50, // push ax
+            0xFF, 0x76, 0x0E, // push [bp+0Eh] (hwnd)
+            0xFF, 0x76, 0x0C, // push [bp+0Ch] (msg)
+            0xFF, 0x76, 0x0A, // push [bp+0Ah] (wParam)
+            0xFF, 0x76, 0x08, // push [bp+8] (lParam)
+            0xFF, 0x76, 0x06, // push [bp+6]
+        ])
+        .call("USER", CALL_WINDOW_PROC)
+        .emit(&[
+            0x5D, // pop bp
+            0xCA, 0x0A, 0x00, // retf 0Ah
+        ]);
+    p.code.patch(proc_at, proc);
+}
+
+/// SendMessage(SI, msg, wParam, the string `text`).
+fn send_string(p: &mut Program, msg: u16, wp: u16, text: &'static [u8]) {
+    p.code.emit(&[0x56]).push(msg).push(wp);
+    p.push_string(text);
+    p.code.call("USER", SEND_MESSAGE);
+}
+
+/// SendMessage(SI, msg, wParam, DS:BUFFER).
+fn send_buffer(p: &mut Program, msg: u16, wp: u16) {
+    p.code
+        .emit(&[0x56])
+        .push(msg)
+        .push(wp)
+        .emit(&[0x1E]) // push ds
+        .push(BUFFER)
+        .call("USER", SEND_MESSAGE);
+}
+
+/// End with `fail` unless AX is `value`.
+fn expect_ax(code: &mut Code, value: u16, fail: u8) {
+    let [lo, hi] = value.to_le_bytes();
+    code.emit(&[0x3D, lo, hi]) // cmp ax,value
+        .emit(&[0x74, 0x06]) // je over the next
+        .emit(&[0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21]);
+}
+
+/// End with `fail` unless the bytes at DS:BUFFER are `text`, compared a
+/// word at a time (`text` has an even length).
+fn expect_buffer(code: &mut Code, text: &[u8], fail: u8) {
+    for (i, pair) in text.chunks(2).enumerate() {
+        let [at_lo, at_hi] = (BUFFER + 2 * i as u16).to_le_bytes();
+        code.emit(&[0x81, 0x3E, at_lo, at_hi, pair[0], pair[1]]) // cmp word
+            .emit(&[0x74, 0x06])
+            .emit(&[0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21]);
+    }
+}
+
+#[test]
+fn a_subclassed_list_box_takes_and_gives_back_its_strings() {
+    // LB_ADDSTRING, LB_FINDSTRING and LB_GETTEXT sent to a list box with
+    // a 16-bit window procedure: Windows 95's thunks give the procedure
+    // a 16:16 copy of each string, and copy the text it writes back into
+    // the caller's buffer. Exit code 1, or which check failed.
+    const LB_ADDSTRING16: u16 = 0x0401;
+    const LB_GETTEXT16: u16 = 0x040A;
+    const LB_FINDSTRING16: u16 = 0x0410;
+    let mut p = Program::default();
+    p.create_window(b"LISTBOX\0", POPUP, [0, 0, 100, 60], false, 0);
+    p.code.emit(&[0x8B, 0xF0]); // mov si,ax
+    let proc_at = subclass(&mut p);
+    send_string(&mut p, LB_ADDSTRING16, 0, b"alpha\0");
+    expect_ax(&mut p.code, 0, 2);
+    send_string(&mut p, LB_ADDSTRING16, 0, b"beta\0");
+    expect_ax(&mut p.code, 1, 3);
+    send_string(&mut p, LB_FINDSTRING16, 0xFFFF, b"be\0");
+    expect_ax(&mut p.code, 1, 4);
+    send_buffer(&mut p, LB_GETTEXT16, 1);
+    expect_ax(&mut p.code, 4, 5);
+    expect_buffer(&mut p.code, b"beta\0\0", 6);
+    // LB_ERR for an item the list doesn't have, the buffer as it was.
+    send_buffer(&mut p, LB_GETTEXT16, 5);
+    expect_ax(&mut p.code, 0xFFFF, 7);
+    expect_buffer(&mut p.code, b"beta\0\0", 8);
+    p.code.emit(&[0xB0, 0x01]).exit_al();
+    pass_on_procedure(&mut p, proc_at);
+    let (exit, log) = run("listbox_subclass_strings", p.build());
+    assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn a_subclassed_list_box_without_strings_gives_back_item_data() {
+    // An owner-drawn list box without LBS_HASSTRINGS keeps a DWORD for
+    // each item: LB_ADDSTRING's lParam is the data, which goes to the
+    // 16-bit window procedure as it is, and LB_GETTEXT writes the DWORD
+    // into the caller's buffer, or nothing for an item it doesn't have.
+    // Exit code 1, or which check failed.
+    const LB_ADDSTRING16: u16 = 0x0401;
+    const LB_GETTEXT16: u16 = 0x040A;
+    const LBS_OWNERDRAWFIXED: u32 = 0x0010;
+    let mut p = Program::default();
+    p.create_window(
+        b"LISTBOX\0",
+        POPUP | LBS_OWNERDRAWFIXED,
+        [0, 0, 100, 60],
+        false,
+        0,
+    );
+    p.code.emit(&[0x8B, 0xF0]); // mov si,ax
+    let proc_at = subclass(&mut p);
+    p.code
+        .emit(&[0x56])
+        .push(LB_ADDSTRING16)
+        .push(0)
+        .push(0x1234)
+        .push(0x5678)
+        .call("USER", SEND_MESSAGE);
+    expect_ax(&mut p.code, 0, 2);
+    send_buffer(&mut p, LB_GETTEXT16, 0);
+    expect_ax(&mut p.code, 4, 3);
+    expect_buffer(&mut p.code, &[0x78, 0x56, 0x34, 0x12], 4);
+    send_buffer(&mut p, LB_GETTEXT16, 3);
+    expect_ax(&mut p.code, 0xFFFF, 5);
+    expect_buffer(&mut p.code, &[0x78, 0x56, 0x34, 0x12], 6);
+    p.code.emit(&[0xB0, 0x01]).exit_al();
+    pass_on_procedure(&mut p, proc_at);
+    let (exit, log) = run("listbox_subclass_item_data", p.build());
+    assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn a_subclassed_combo_box_gives_back_the_selected_items_text() {
+    // Memphis Math's Objective Selection: SDSC.DLL subclasses the combo
+    // box after the game added its objectives, and the game reads the
+    // first one's text with CB_GETLBTEXT to find it in its database. The
+    // text has to reach the game's buffer through the 16-bit procedure.
+    // Exit code 1, or which check failed.
+    const CB_ADDSTRING16: u16 = 0x0403;
+    const CB_GETLBTEXT16: u16 = 0x0408;
+    const CB_SETCURSEL16: u16 = 0x040E;
+    const CBS_DROPDOWNLIST: u32 = 0x0003;
+    let mut p = Program::default();
+    p.create_window(
+        b"COMBOBOX\0",
+        POPUP | CBS_DROPDOWNLIST,
+        [0, 0, 200, 100],
+        false,
+        0,
+    );
+    p.code.emit(&[0x8B, 0xF0]); // mov si,ax
+    send_string(&mut p, CB_ADDSTRING16, 0, b"FEQ01 - fractions\0");
+    expect_ax(&mut p.code, 0, 2);
+    let proc_at = subclass(&mut p);
+    send_string(&mut p, CB_ADDSTRING16, 0, b"FLT01\0");
+    expect_ax(&mut p.code, 1, 3);
+    p.code
+        .emit(&[0x56])
+        .push(CB_SETCURSEL16)
+        .push(0)
+        .push(0)
+        .push(0)
+        .call("USER", SEND_MESSAGE);
+    send_buffer(&mut p, CB_GETLBTEXT16, 0);
+    expect_ax(&mut p.code, 17, 4);
+    expect_buffer(&mut p.code, b"FEQ01 - fractions\0", 5);
+    send_buffer(&mut p, CB_GETLBTEXT16, 1);
+    expect_ax(&mut p.code, 5, 6);
+    expect_buffer(&mut p.code, b"FLT01\0", 7);
+    p.code.emit(&[0xB0, 0x01]).exit_al();
+    pass_on_procedure(&mut p, proc_at);
+    let (exit, log) = run("combobox_subclass_strings", p.build());
+    assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn a_subclassed_edit_control_replaces_and_gives_back_a_line() {
+    // EM_REPLACESEL's string and EM_GETLINE's buffer, whose first word
+    // is its size, through a 16-bit window procedure: the buffer gets
+    // what the edit control writes, the line and a NUL after it where
+    // the buffer has room, and keeps its other bytes. Exit code 1, or
+    // which check failed.
+    const EM_REPLACESEL16: u16 = 0x0412;
+    const EM_GETLINE16: u16 = 0x0414;
+    let mut p = Program::default();
+    p.create_window(b"EDIT\0", POPUP, [0, 0, 200, 20], false, 0);
+    p.code.emit(&[0x8B, 0xF0]); // mov si,ax
+    let proc_at = subclass(&mut p);
+    send_string(&mut p, EM_REPLACESEL16, 0, b"hello!\0");
+    // The buffer: 16 bytes, and 'xx' after where the line ends, of
+    // which the NUL replaces the first.
+    let [at_lo, at_hi] = BUFFER.to_le_bytes();
+    p.code
+        .emit(&[0xC7, 0x06, at_lo, at_hi, 16, 0]) // mov word [BUFFER],16
+        .emit(&[0xC7, 0x06, at_lo + 6, at_hi, b'x', b'x']);
+    send_buffer(&mut p, EM_GETLINE16, 0);
+    expect_ax(&mut p.code, 6, 2);
+    expect_buffer(&mut p.code, b"hello!\0x", 3);
+    // A size of 0 copies nothing.
+    p.code.emit(&[0xC7, 0x06, at_lo, at_hi, 0, 0]); // mov word [BUFFER],0
+    send_buffer(&mut p, EM_GETLINE16, 0);
+    expect_ax(&mut p.code, 0, 4);
+    expect_buffer(&mut p.code, b"\0\0llo!\0x", 5);
+    p.code.emit(&[0xB0, 0x01]).exit_al();
+    pass_on_procedure(&mut p, proc_at);
+    let (exit, log) = run("edit_subclass_line", p.build());
+    assert_eq!(exit, 1, "{log}");
+}
+
 #[test]
 fn a_window_procedure_gets_the_stack_in_ds_and_its_instance_in_ax() {
     // A window whose instance is a global block of its own, as Delphi

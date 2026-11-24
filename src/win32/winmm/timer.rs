@@ -9,6 +9,10 @@
 //! looked at on its multimedia thread (`poll`), which makes the calls
 //! one after another as Windows 95's timer thread did: a callback slower
 //! than the period delays the next one, and doesn't run twice at once.
+//!
+//! A Windows 3.1 program's timers (MMSYSTEM's timeSetEvent) are the same
+//! timers, whose function its task calls (`Action::Call16`). Their ids
+//! are 16-bit, as Windows 9x's, which MMSYSTEM keeps for WINMM too.
 
 use super::callback::{self, Callback};
 use super::{MMSYSERR_INVALPARAM, MMSYSERR_NOERROR};
@@ -51,6 +55,13 @@ pub enum Action {
     },
     Pulse {
         event: u32,
+    },
+    /// Calls a 16-bit program's function at the 16:16 `address`, which
+    /// the task whose thread is `tid` calls (`win16::queue_call16`).
+    Call16 {
+        tid: u32,
+        address: u32,
+        user: u32,
     },
 }
 
@@ -181,26 +192,61 @@ pub fn time_set_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             user,
         }
     };
+    Some(add(cpu, delay, flags & TIME_PERIODIC != 0, action))
+}
+
+/// MMSYSTEM's timeSetEvent(delay, resolution, proc, user, flags) for a
+/// Windows 3.1 program, whose task's thread is `tid`: a timer whose
+/// 16-bit function at the 16:16 `proc` the task calls. Windows 3.1's
+/// flags are only TIME_PERIODIC.
+pub fn time_set_event16(cpu: &mut Cpu, args: &[u32], tid: u32) -> Option<u32> {
+    let &[delay, _resolution, address, user, flags] = args else {
+        unreachable!()
+    };
+    if !(1..=DELAY_MAX).contains(&delay) || address == 0 {
+        return Some(0);
+    }
+    let action = Action::Call16 { tid, address, user };
+    Some(add(cpu, delay, flags & TIME_PERIODIC != 0, action))
+}
+
+/// The highest id a timer has: ids are 1 to FFFFh.
+const ID_MAX: u32 = 0xFFFF;
+
+/// A timer of the running process due in `delay` milliseconds that does
+/// `action`: its id, or 0 when the process's multimedia thread can't be
+/// made or every id is in use. Ids go up to FFFFh and then start again,
+/// past those in use, so that a 16-bit program can hold them.
+fn add(cpu: &mut Cpu, delay: u32, periodic: bool, action: Action) -> u32 {
     if callback::ensure_thread(cpu).is_none() {
         release(cpu, &action);
-        return Some(0);
+        return 0;
     }
     let pid = crate::win32::user32::current_pid(cpu);
     let now = cpu.bus.clock.now_micros();
     let t = timers(cpu);
-    t.last_id = t.last_id.wrapping_add(1).max(1);
-    let id = t.last_id;
+    // The ids after the last one given, round to it, the first free.
+    let last = t.last_id.min(ID_MAX);
+    let free = (1..=ID_MAX)
+        .map(|n| (last + n - 1) % ID_MAX + 1)
+        .find(|&id| !t.timers.iter().any(|timer| timer.id == id));
+    let Some(id) = free else {
+        release(cpu, &action);
+        return 0;
+    };
+    let t = timers(cpu);
+    t.last_id = id;
     let period = delay as u64 * 1000;
     t.timers.push(Timer {
         id,
         pid,
         period,
         next: now + period,
-        periodic: flags & TIME_PERIODIC != 0,
+        periodic,
         action,
     });
     super::schedule(cpu);
-    Some(id)
+    id
 }
 
 /// Let go of the event a timer's action holds.
@@ -218,9 +264,29 @@ pub fn time_kill_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(MMSYSERR_INVALPARAM);
     };
     let timer = t.timers.remove(i);
+    // A 16-bit function's call that waits for its task is not made: the
+    // program may free the function once timeKillEvent returns.
+    if let Action::Call16 { tid, address, .. } = timer.action {
+        crate::win16::cancel_timer_calls16(cpu, tid, address, id);
+    }
     release(cpu, &timer.action);
     super::schedule(cpu);
     Some(TIMERR_NOERROR)
+}
+
+/// The 16-bit task whose thread is `tid` ended: its timers go, as a
+/// process's go when it ends (`process_ended`). No task is left to make
+/// their calls, and the code of their functions may be gone with it.
+/// The other tasks keep the Win16 process, so `process_ended` doesn't
+/// see to them, and a periodic timer would go on firing for nothing.
+pub fn task_ended16(cpu: &mut Cpu, tid: u32) {
+    let t = timers(cpu);
+    let before = t.timers.len();
+    t.timers
+        .retain(|timer| !matches!(timer.action, Action::Call16 { tid: owner, .. } if owner == tid));
+    if t.timers.len() != before {
+        super::schedule(cpu);
+    }
 }
 
 /// The timers of the process `pid` that are due at `now` do what they
@@ -247,6 +313,10 @@ pub fn poll(cpu: &mut Cpu, pid: u32, now: u64) -> bool {
             }
             Action::Set { event } => callback::set_event(cpu, event),
             Action::Pulse { event } => callback::pulse_event(cpu, event),
+            Action::Call16 { tid, address, user } => {
+                let to = Callback::Function16 { tid, address };
+                callback::notify(cpu, &to, id, 0, user, 0, 0);
+            }
         }
         if !periodic {
             // A one-shot timer is gone once it fired.
@@ -283,6 +353,7 @@ crate::win32::state_variants!(Action {
     Call { address, user },
     Set { event },
     Pulse { event },
+    Call16 { tid, address, user },
 });
 crate::state_fields!(Timer {
     id,

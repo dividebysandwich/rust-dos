@@ -2102,7 +2102,7 @@ crate::state_fields!(QueueWait {
 });
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use super::super::input;
     use super::*;
 
@@ -2234,7 +2234,7 @@ pub(super) mod tests {
 
     /// A Win16 process whose tasks run the threads `tids`, the first of
     /// which is the running one, for tests of how tasks take turns.
-    pub(in super::super) fn win16_process(cpu: &mut Cpu, tids: &[u32]) {
+    pub(crate) fn win16_process(cpu: &mut Cpu, tids: &[u32]) {
         let win32 = &mut cpu.bus.win32;
         let mut process = crate::win32::Process {
             id: 0x50,
