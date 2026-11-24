@@ -566,9 +566,11 @@ D=~/cd/td4.cue cdrom
 BOOT -l C
 ```
 
-The image needs 3dfx's Voodoo2 driver 3.03.00, installed as [3dfx
-Voodoo2](CONFIGURATION.md#3dfx-voodoo2) says. Keep it an image of its
-own: Windows installed on a Voodoo3 machine finds other hardware here.
+Windows 98 has no driver for the Voodoo2, so the image needs 3dfx's.
+[3dfx Voodoo2](CONFIGURATION.md#3dfx-voodoo2) says where to get it and
+how to install it; its reference driver 3.03.00 is the version Rust-DOS
+is tested with. Keep it an image of its own: Windows installed on a
+Voodoo3 machine finds other hardware here.
 Windows' OpenGL doesn't use an add-on card by itself, so an OpenGL game
 needs one more step ([OpenGL games under
 Windows](CONFIGURATION.md#opengl-games-under-windows)).

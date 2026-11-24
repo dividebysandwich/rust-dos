@@ -2000,6 +2000,14 @@ in `[emulator]` turns them all off, and `game_fixes_off` leaves out the
 ones it names. The log has a `[game fix]` line, with the fix's name,
 each time one applies.
 
+A fix recognises the game's files as one release shipped them, in
+general the last patched version, or the one GOG sells. Many games came
+out in several versions, each with its own executables, and a fix for
+every one of them would take a version of the game to test with and a
+patch of its own. If a fix doesn't apply to your copy (no `[game fix]`
+line in the log), install the game's last official patch, or use the
+GOG release.
+
 Some fixes patch the game's code in memory. They look for it each time
 a program resets the Sound Blaster's DSP, which a game's sound driver
 does before it sets anything up, and patch only code that is there as
@@ -2085,7 +2093,8 @@ To add a fix: an entry in `FIXES` in `src/game_fixes.rs` with a name of its
 own, the game, the reason, and how to recognise it; a test that runs it
 (`tests/program/game_fixes_tests.rs`, `tests/dos/exec_tests.rs` for a
 program skipped as it starts, or `tests/win32/win32_tests.rs` for a Win32
-program); and a row in the table above.
+program); and a row in the table above. In general, write it for the
+game's last patched version, or for GOG's release where that differs.
 
 ## RetroAchievements
 
