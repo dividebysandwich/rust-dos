@@ -446,7 +446,7 @@ impl<T: State + Default> State for Option<T> {
 /// A field a section's layout gained in its version `V`: a section saved
 /// in an older version has no bytes for it, so it loads as its default,
 /// and the older states still load.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Since<const V: u16, T>(pub T);
 
 impl<const V: u16, T> std::ops::Deref for Since<V, T> {

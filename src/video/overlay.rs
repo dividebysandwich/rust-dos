@@ -71,16 +71,17 @@ struct CursorRect {
 }
 
 /// The cursor of the built-in Windows, if the screen shows one: its
-/// picture and where its hot spot is, in the screen's pixels.
-/// Windows draws it on the desktop and over DirectDraw's modes, which a
-/// Voodoo3 or Banshee shows in its extended modes; Glide's picture on a
-/// 3dfx card has none.
+/// picture (an animated cursor's step at the emulated time) and where
+/// its hot spot is, in the screen's pixels. Windows draws it on the
+/// desktop and over DirectDraw's modes, which a Voodoo3 or Banshee shows
+/// in its extended modes; Glide's picture on a 3dfx card has none.
 fn shown_windows_cursor(bus: &Bus) -> Option<(&CursorImage, (i32, i32))> {
     let glide = bus.banshee().is_none() || bus.win32.glide_open();
     if bus.voodoo_output() && glide {
         return None;
     }
-    cursor::shown(&bus.win32)
+    let (image, at) = cursor::shown(&bus.win32)?;
+    Some((image.at(bus.clock.now_micros()), at))
 }
 
 /// The cursor of the built-in Windows, if it shows one, and where it
