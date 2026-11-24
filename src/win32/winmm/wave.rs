@@ -285,7 +285,7 @@ fn done(cpu: &mut Cpu, i: usize, header: u32) {
         header + HDR_FLAGS,
         flags & !WHDR_INQUEUE | WHDR_DONE,
     );
-    let header = crate::win16::wave_header16(cpu, pid, header);
+    let header = crate::win16::header16(cpu, pid, header);
     callback::notify(cpu, &cb, handle, WOM_DONE, instance, header, 0);
 }
 
@@ -600,7 +600,7 @@ pub fn wave_out_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // A 16-bit program's header keeps its 16:16 pointer to the data.
     let pid = wave(cpu).outs[i].pid;
     let data = cpu.bus.guest_read_32(header + HDR_DATA);
-    let data = crate::win16::wave_data(cpu, pid, header, data);
+    let data = crate::win16::header_data(cpu, pid, header, data);
     let length = cpu.bus.guest_read_32(header + HDR_LENGTH);
     let loops = cpu.bus.guest_read_32(header + HDR_LOOPS);
     // The device reads the block as it plays, without a page fault, as

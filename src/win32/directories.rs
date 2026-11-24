@@ -29,7 +29,7 @@ use super::{Win32, kernel32};
 use crate::cpu::Cpu;
 
 /// The W32 section's version that added each program's directories.
-pub const DIRECTORIES_SAVED: u16 = 88;
+pub const DIRECTORIES_SAVED: u16 = 89;
 
 /// DOS's current drive and each drive's current directory, and the long
 /// names SetCurrentDirectoryA was given for them (`Win32::long_dirs`).
