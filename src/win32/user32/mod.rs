@@ -34,7 +34,8 @@ pub mod text;
 pub mod window;
 pub mod winhelp;
 
-use super::gdi32::Rect;
+use super::gdi32::dc::{DCX_CLIPSIBLINGS, DCX_WINDOW};
+use super::gdi32::{Rect, Region};
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
 
@@ -510,7 +511,7 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
     if user(cpu).windows.is_empty() {
         return;
     }
-    forget_windows(cpu, |w| w.pid == pid, tids);
+    let shown = forget_windows(cpu, |w| w.pid == pid, tids);
     let state = user(cpu);
     // Their slots empty, not taken out: the other processes' windows
     // keep their classes by place.
@@ -533,7 +534,7 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
         let arrow = resource::system_cursor(cpu, resource::IDC_ARROW);
         cursor::set(cpu, arrow);
     }
-    redraw_after(cpu);
+    redraw_after(cpu, &shown);
 }
 
 /// A Win16 task, a thread of the Win16 process, ended: its windows go,
@@ -543,18 +544,30 @@ pub fn destroy_thread_windows(cpu: &mut Cpu, tid: u32) {
     if user(cpu).windows.is_empty() {
         return;
     }
-    forget_windows(cpu, |w| w.tid == tid, &[tid]);
-    redraw_after(cpu);
+    let shown = forget_windows(cpu, |w| w.tid == tid, &[tid]);
+    redraw_after(cpu, &shown);
 }
 
 /// Drop the windows `gone` says, without the messages DestroyWindow
-/// sends, and the timers and queues of the threads `tids`.
-fn forget_windows(cpu: &mut Cpu, gone: impl Fn(&Window) -> bool, tids: &[u32]) {
+/// sends, and the timers and queues of the threads `tids`. What of the
+/// screen they showed on is the result: their visible regions, frames
+/// included. What windows that stay cover above them is left out, as a
+/// window going changes nothing there.
+fn forget_windows(cpu: &mut Cpu, gone: impl Fn(&Window) -> bool, tids: &[u32]) -> Region {
     let state = user(cpu);
     let gone: Vec<u32> = (1..state.windows.len())
         .filter(|&i| state.windows[i].as_ref().is_some_and(&gone))
         .map(handle)
         .collect();
+    // Where a window that goes covers one below that goes too, the one
+    // above has that part in its own visible region.
+    let shown = gone.iter().fold(Region::new(), |area, &hwnd| {
+        area.or(&paint::visible_region(
+            state,
+            hwnd,
+            DCX_WINDOW | DCX_CLIPSIBLINGS,
+        ))
+    });
     for &hwnd in &gone {
         window::unlink(state, hwnd);
     }
@@ -604,18 +617,24 @@ fn forget_windows(cpu: &mut Cpu, gone: impl Fn(&Window) -> bool, tids: &[u32]) {
     if had_foreground && state.foreground_window() == 0 {
         input::foreground_gone(cpu);
     }
+    shown
 }
 
-/// Windows went: the desktop left when none are left, redrawn when some
-/// are.
-fn redraw_after(cpu: &mut Cpu) {
+/// Windows went from `shown` of the screen: the desktop leaves when none
+/// are left, and when some are, what is under them paints there, as when
+/// DestroyWindow hides a window. Hidden windows going change nothing on
+/// the screen: a Win16 task that destroyed its window before it ended
+/// leaves the other windows as they are. A CS_SAVEBITS window's saved
+/// bits are dropped here, where DestroyWindow would put them back, so
+/// what is under it paints instead (#1843).
+fn redraw_after(cpu: &mut Cpu, shown: &Region) {
     let state = user(cpu);
     let empty = state.windows.iter().skip(1).all(|w| w.is_none());
     if state.desktop {
         if empty {
             paint::leave_desktop(cpu);
         } else {
-            paint::redraw_screen(cpu);
+            paint::expose(cpu, shown);
         }
     }
 }
