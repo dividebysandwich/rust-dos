@@ -739,6 +739,71 @@ fn a_known_dll_moved_away_is_looked_for_in_the_windows_directory_next() {
     assert_eq!(exit, IN_WINDOWS, "{log}");
 }
 
+/// A program, started as C:\APP\T.EXE with C:\ the current directory,
+/// that runs WinExec("CHILD") and ends with 10h when it gave an
+/// instance, or with its error. `places` (directories under C:\) get a
+/// CHILD.EXE each, which ends with the place's number in `places` plus
+/// 1. The log tells which one ran.
+fn exec_search(test: &str, places: &[&str]) -> (u8, String) {
+    let mut code = Code::new();
+    let name_at = code.here() + 2;
+    code.push_far(0)
+        .push(1) // SW_SHOWNORMAL
+        .call("KERNEL", WIN_EXEC)
+        .emit(&[
+            0x3D, 0x20, 0x00, // cmp ax,20h
+            0x72, 0x02, // jb over the next
+            0xB0, 0x10, // mov al,10h
+        ])
+        .exit_al();
+    let name = code.here();
+    code.emit(b"CHILD\0");
+    code.patch(name_at, name);
+    let exe = program(&code, CODE);
+    let copy = exe.clone();
+    let places: Vec<String> = places.iter().map(|p| p.to_string()).collect();
+    run_command(test, exe, "APP\\T.EXE", "", move |_, base| {
+        fs::create_dir_all(base.join("APP")).unwrap();
+        fs::write(base.join("APP").join("T.EXE"), copy).unwrap();
+        for (i, place) in places.iter().enumerate() {
+            let dir = base.join(place);
+            fs::create_dir_all(&dir).unwrap();
+            let mut child = Code::new();
+            child.emit(&[0xB0, i as u8 + 1]).exit_al(); // mov al,place
+            fs::write(dir.join("CHILD.EXE"), program_named("CHILD", &child, CODE)).unwrap();
+        }
+    })
+}
+
+/// WinExec looks for a program named without a directory where
+/// LoadLibrary looks for a DLL (Windows 3.1's LoadModule does both),
+/// so a program finds one beside itself in its task's directory.
+/// Microsoft Setup's bootstrapper starts `_MSTEST` from the CD that way
+/// (#1851).
+#[test]
+fn win_exec_looks_for_a_program_in_the_tasks_directory() {
+    let (exit, log) = exec_search("exec_search_app", &["APP"]);
+    assert_eq!(exit, 0x10, "{log}");
+    assert!(ended_with(&log, 1), "{log}");
+}
+
+/// The system directory comes before the task's directory for programs
+/// too.
+#[test]
+fn win_exec_looks_in_the_system_directory_before_the_tasks_directory() {
+    let (exit, log) = exec_search("exec_search_system", &["APP", "WINDOWS/SYSTEM"]);
+    assert_eq!(exit, 0x10, "{log}");
+    assert!(ended_with(&log, 2), "{log}");
+    assert!(!ended_with(&log, 1), "{log}");
+}
+
+/// A program found nowhere gives error 2, file not found.
+#[test]
+fn win_exec_of_a_program_found_nowhere_gives_file_not_found() {
+    let (exit, log) = exec_search("exec_search_none", &[]);
+    assert_eq!(exit, 2, "{log}");
+}
+
 /// A DLL that imports another is in C:\LIBS, with a copy of the other
 /// beside it and one in C:\APP, the program's directory. Windows looks
 /// for the import in the current task's directory, not in that of the
