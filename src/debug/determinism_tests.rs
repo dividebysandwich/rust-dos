@@ -1497,6 +1497,7 @@ const ABSENT_SECTIONS: &[(&str, &str)] = &[
     ("VFX1", "the VFX1 headset is a VR headset's: its tracking is the host's, as the VR pads are"),
     ("W32", "the built-in Windows runs Win32 programs, which the run doesn't start"),
     ("RTCA", "the clock's alarm, which the run's program never enables"),
+    ("LOCK", "file region locks (INT 21h AH=5Ch), which the run's program never takes"),
 ];
 
 /// Parts of the save state that the run doesn't change, and why.
