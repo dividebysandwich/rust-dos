@@ -4004,11 +4004,13 @@ fn ani_file() -> Vec<u8> {
 /// LoadCursorFromFileA loads a .CUR file and an .ANI one, as Windows 98
 /// does, and fails for a file that isn't there. The .CUR's picture shows
 /// at its hot spot. The .ANI's steps show one after another in emulated
-/// time, each for its rate in jiffies, in the order its "seq " chunk
-/// gives: white for 100 ms, black for 200 ms, white for 50 ms, and
-/// again. DrawIconEx draws a step the animated cursor has and fails past
-/// its last, and DestroyCursor destroys one. Warhammer: Dark Omen loads
-/// its cursors this way and showed none in its 3D battles.
+/// time from when SetCursor set it, each for its rate in jiffies, in the
+/// order its "seq " chunk gives: white for 100 ms, black for 200 ms,
+/// white for 50 ms, and again. Setting it again goes on with its steps,
+/// and setting another cursor and then it starts them over. DrawIconEx
+/// draws a step the animated cursor has and fails past its last, and
+/// DestroyCursor destroys one. Warhammer: Dark Omen loads its cursors
+/// this way and showed none in its 3D battles.
 #[test]
 fn cursors_load_from_cur_and_ani_files_and_animate() {
     let mut data = data();
@@ -4035,7 +4037,12 @@ fn cursors_load_from_cur_and_ani_files_and_animate() {
         c.api(a, l, FILE_SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
         wait(a, l, 1)?;
         c.api(a, l, FILE_SET_CURSOR, &[ani])?;
-        finish(a, l, 2)
+        wait(a, l, 2)?;
+        c.api(a, l, FILE_SET_CURSOR, &[ani])?;
+        wait(a, l, 3)?;
+        c.api(a, l, FILE_SET_CURSOR, &[Arg::Val(RESULTS + 4)])?;
+        c.api(a, l, FILE_SET_CURSOR, &[ani])?;
+        finish(a, l, 4)
     });
     let test = "cursor_files";
     let mut cpu = card_machine(test, None, program);
@@ -4062,37 +4069,88 @@ fn cursors_load_from_cur_and_ani_files_and_animate() {
     assert_eq!(shown[0], WHITE, "the .CUR's square's top left");
     assert_eq!(shown[1], WHITE, "the .CUR's square's bottom right");
     assert_ne!(shown[2], WHITE, "past the .CUR's square");
-    go_on(&mut cpu, data);
-    run_until(&mut cpu, data, 2);
     // The .ANI's square at the cursor's place, through at least one
-    // round of its 350 ms: each look shows the step of its moment.
+    // round of its 350 ms: each look shows the step of its moment after
+    // SetCursor, which ran between the times `set` gives. A look too
+    // near a step's end to tell which step it is at isn't counted.
+    let step_at = |t: u64| match t % 350_000 {
+        t if t < 100_000 => WHITE,
+        t if t < 300_000 => BLACK,
+        _ => WHITE,
+    };
+    let want = |cpu: &Cpu, set: (u64, u64)| {
+        let now = cpu.bus.clock.now_micros();
+        let (a, b) = (step_at(now - set.0), step_at(now - set.1));
+        (a == b).then_some(a)
+    };
+    let look = |cpu: &Cpu| {
+        let shown = with_cursors(cpu, &[(100, 100), (115, 115)]);
+        assert_eq!(shown[0], shown[1], "the square is one color");
+        shown[0]
+    };
+    let run = |cpu: &mut Cpu, n: u64| {
+        cpu.bus.start_batch(cpu.bus.clock.icount + n);
+        run_batch(cpu, &mut NoHook, false);
+    };
+    go_on(&mut cpu, data);
+    let set = run_to(&mut cpu, data, 2);
     let start = cpu.bus.clock.now_micros();
     let (mut whites, mut blacks) = (0, 0);
-    for _ in 0..5000 {
+    while cpu.bus.clock.now_micros() <= start + 400_000 {
         let now = cpu.bus.clock.now_micros();
-        if now > start + 400_000 {
-            break;
+        if let Some(want) = want(&cpu, set) {
+            assert_eq!(look(&cpu), want, "the step at {now} us");
+            if want == WHITE {
+                whites += 1;
+            } else {
+                blacks += 1;
+            }
         }
-        let want = match now % 350_000 {
-            t if t < 100_000 => WHITE,
-            t if t < 300_000 => BLACK,
-            _ => WHITE,
-        };
-        let shown = with_cursors(&cpu, &[(100, 100), (115, 115)]);
-        assert_eq!(shown, [want, want], "the step at {now} us");
-        if want == WHITE {
-            whites += 1;
-        } else {
-            blacks += 1;
-        }
-        cpu.bus.start_batch(cpu.bus.clock.icount + 5_000);
-        run_batch(&mut cpu, &mut NoHook, false);
+        run(&mut cpu, 5_000);
     }
-    assert!(
-        cpu.bus.clock.now_micros() > start + 400_000,
-        "a round went by"
-    );
     assert!(whites > 0 && blacks > 0, "both frames showed");
+    // SetCursor of it again while its black step has 100 ms to go: it
+    // goes on with that step rather than starting over with white.
+    let in_black = |cpu: &Cpu| {
+        let now = cpu.bus.clock.now_micros();
+        (110_000..200_000).contains(&((now - set.0) % 350_000))
+            && (110_000..200_000).contains(&((now - set.1) % 350_000))
+    };
+    while !in_black(&cpu) {
+        run(&mut cpu, 5_000);
+    }
+    go_on(&mut cpu, data);
+    run_to(&mut cpu, data, 3);
+    assert!(in_black(&cpu), "still in the black step");
+    assert_eq!(look(&cpu), BLACK, "the same cursor set again");
+    // The .CUR and then the .ANI again: it starts over, white, while it
+    // would still be black had it gone on.
+    go_on(&mut cpu, data);
+    let again = run_to(&mut cpu, data, 4);
+    assert!(in_black(&cpu), "still in the black step");
+    assert_eq!(want(&cpu, again), Some(WHITE));
+    assert_eq!(look(&cpu), WHITE, "the .ANI set after another cursor");
+}
+
+/// Run the program in small batches until it is at `step`: the emulated
+/// times between which its last call ran, from before the batch ahead
+/// of the one it got there in to after that one.
+fn run_to(cpu: &mut Cpu, data: u32, step: u32) -> (u64, u64) {
+    let mut before = cpu.bus.clock.now_micros();
+    for _ in 0..1_000_000 {
+        let batch = cpu.bus.clock.now_micros();
+        cpu.bus.start_batch(cpu.bus.clock.icount + 1_000);
+        run_batch(cpu, &mut NoHook, false);
+        // The program's memory is there while its code runs, with paging.
+        let paged = cpu.cr0 & 0x8000_0001 == 0x8000_0001;
+        if paged && peek(cpu, data + DONE) == step {
+            let after = cpu.bus.clock.now_micros();
+            assert!(after - before < 10_000, "the call's time is known");
+            return (before, after);
+        }
+        before = batch;
+    }
+    panic!("the program didn't get to step {step}");
 }
 
 const USER32_FIRST_CURSOR: (&str, &[&str]) = (

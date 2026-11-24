@@ -80,8 +80,7 @@ fn shown_windows_cursor(bus: &Bus) -> Option<(&CursorImage, (i32, i32))> {
     if bus.voodoo_output() && glide {
         return None;
     }
-    let (image, at) = cursor::shown(&bus.win32)?;
-    Some((image.at(bus.clock.now_micros()), at))
+    cursor::shown(&bus.win32, bus.clock.now_micros())
 }
 
 /// The cursor of the built-in Windows, if it shows one, and where it

@@ -68,12 +68,12 @@ impl CursorImage {
         self.pixels[(y * self.width + x) as usize]
     }
 
-    /// The picture the cursor shows at `micros` of emulated time
-    /// (`Clock::now_micros`): itself, or the step of an animated cursor
-    /// that time is at. The steps follow each other from time 0, each
-    /// for its own time, and start again after the last, as USER's timer
-    /// steps the cursor on Windows. The time being the machine's, a
-    /// screenshot at an emulated moment shows the same step in every run.
+    /// The picture the cursor shows `micros` of emulated time after it
+    /// was set: itself, or the step of an animated cursor that time is
+    /// at. The steps follow each other from the first, each for its own
+    /// time, and start again after the last. The time being the
+    /// machine's, a screenshot at an emulated moment shows the same step
+    /// in every run.
     pub fn at(&self, micros: u64) -> &CursorImage {
         let total: u64 = self.steps.iter().map(|s| s.micros).sum();
         if total == 0 {
@@ -92,9 +92,18 @@ impl CursorImage {
 
 /// SetCursor's work: `handle` becomes the cursor (0 for none), and its
 /// picture the one the screen shows. The cursor it replaced.
+///
+/// A cursor other than the current one starts its animation at its
+/// first step, and setting the current one again, as programs do on
+/// each WM_SETCURSOR, leaves it running. The X server animates Wine's
+/// .ANI cursors that way (render/animcur.c, AnimCurDisplayCursor).
 pub fn set(cpu: &mut Cpu, handle: u32) -> u32 {
     let image = image_of(cpu, handle).unwrap_or_default();
+    let now = cpu.bus.clock.now_micros();
     let input = &mut user(cpu).input;
+    if input.cursor_handle != handle {
+        input.cursor_since = Since(now);
+    }
     input.cursor_image = image;
     std::mem::replace(&mut input.cursor_handle, handle)
 }
@@ -155,20 +164,22 @@ fn picture(cpu: &mut Cpu, ic: &Icon) -> Option<CursorImage> {
     })
 }
 
-/// The cursor the screen shows, if it shows one: its picture and where
-/// its hot spot is, in the screen's pixels (`screen_size`). It shows
-/// while a Win32 program runs with the desktop on the screen, a cursor
-/// is set, ShowCursor's count is 0 or more and DirectInput doesn't have
-/// the mouse exclusively, which hides it on Windows.
-pub fn shown(win32: &crate::win32::Win32) -> Option<(&CursorImage, (i32, i32))> {
+/// The cursor the screen shows at `now` (`Clock::now_micros`), if it
+/// shows one: its picture, an animated cursor's step at that time, and
+/// where its hot spot is, in the screen's pixels (`screen_size`). It
+/// shows while a Win32 program runs with the desktop on the screen, a
+/// cursor is set, ShowCursor's count is 0 or more and DirectInput
+/// doesn't have the mouse exclusively, which hides it on Windows.
+pub fn shown(win32: &crate::win32::Win32, now: u64) -> Option<(&CursorImage, (i32, i32))> {
     let user = &win32.user;
     let input = &user.input;
     let shows = win32.active() && user.desktop && input.cursor_count >= 0;
+    let since = now.saturating_sub(*input.cursor_since);
     (shows
         && input.cursor_handle != 0
         && !input.cursor_image.pixels.is_empty()
         && !win32.dinput.mouse_taken())
-    .then_some((&input.cursor_image, input.cursor))
+    .then(|| (input.cursor_image.at(since), input.cursor))
 }
 
 /// The screen the host's pointer spans while the built-in Windows has

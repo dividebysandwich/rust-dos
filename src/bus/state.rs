@@ -1165,7 +1165,7 @@ mod tests {
         (86, 0x64E2_699F_8225_8EB3), // the DOS program's folder and lent memory
         (87, 0x3CCD_B401_AB6D_F5EF), // real-mode calls through VWIN32's DPMI dispatch
         (88, 0x0BDC_B050_4D43_8EE6), // 16-bit programs' multimedia timers
-        (89, 0x5012_617B_659E_80ED), // animated cursors
+        (89, 0x74DC_90AC_AA46_7178), // animated cursors
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
