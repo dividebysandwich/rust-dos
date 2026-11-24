@@ -53,7 +53,7 @@ static APIS: &[Api16] = &[
     rust("GlobalFreeAll", 26, "w", global_free_all),
     rust("Yield", 29, "", yield16),
     rust("WaitEvent", 30, "w", wait_event),
-    rust("PostEvent", 31, "w", zero),
+    rust("PostEvent", 31, "w", post_event),
     rust("SetPriority", 32, "ws", zero),
     rust("LockCurrentTask", 33, "w", zero),
     rust("GetCurrentTask", 36, "", get_current_task),
@@ -499,9 +499,31 @@ fn local_heap_size(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 // The global heap.
 
+/// GlobalAlloc(flags, size): a block the running task owns, which goes
+/// when the task ends. A GMEM_DDESHARE block is the calling code's
+/// module's instead, as in Windows 3.1, and stays until that module is
+/// freed: a DLL keeps its shared blocks whichever task it ran for, as
+/// the Borland runtime's heap in a DLL does with the blocks it chains
+/// together (Memphis Math's MEMPHDB.DLL walked into a block freed with
+/// the task that had asked for it).
 fn global_alloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let owner = current_handle(cpu);
-    Some(global::alloc(cpu, args[0] as u16, args[1], owner, false) as u32)
+    let flags = args[0] as u16;
+    let caller = if flags & global::GMEM_DDESHARE != 0 {
+        caller_module(cpu)
+    } else {
+        None
+    };
+    let owner = caller.unwrap_or_else(|| current_handle(cpu));
+    Some(global::alloc(cpu, flags, args[1], owner, false) as u32)
+}
+
+/// The module whose code called the function running now: the one its
+/// far return address is in.
+fn caller_module(cpu: &mut Cpu) -> Option<u16> {
+    let base = cpu.seg_cache(Seg::SS).base;
+    let ret = cpu.bus.guest_read_32(base.wrapping_add(cpu.sp() as u32));
+    let index = super::module_index(cpu, (ret >> 16) as u16)?;
+    Some(cpu.bus.win32.win16.modules[index].handle)
 }
 
 fn global_realloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -795,13 +817,32 @@ fn direct_turn(cpu: &mut Cpu, handle: u16) {
     }
 }
 
-/// WaitEvent: the task gives up its turn, as there are no events but
-/// messages, which GetMessage waits for.
-fn wait_event(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+/// WaitEvent(task): an event the task has (PostEvent's, or the one
+/// LoadModule gives a new task) is taken, and the task goes on: 0, as
+/// it didn't wait. Without one, the running task gives up its turn, as
+/// there are no other events but messages, which GetMessage waits for,
+/// and gets 1 when its turn comes again. Another task's handle with no
+/// event gives 1 at once: a task waits for its own events only (Wine's
+/// WaitEvent16, which keeps the count where Windows 3.1's TDB has it).
+fn wait_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let handle = args[0] as u16;
+    if task::take_event(cpu, handle) {
+        return Some(0);
+    }
+    if !task::is_running_task(cpu, handle) {
+        return Some(1);
+    }
     let mut ctx = Context::of(cpu);
-    thunk::set_ax(&mut ctx, 0);
+    thunk::set_ax(&mut ctx, 1);
     task::yield_now(cpu, ctx);
     None
+}
+
+/// PostEvent(task): an event for the task (0 for the running one), which
+/// its next WaitEvent takes without waiting.
+fn post_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    task::post_event(cpu, args[0] as u16);
+    Some(0)
 }
 
 /// GetCurrentTask: the task in AX, the first task in DX.
@@ -1290,10 +1331,26 @@ fn win_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Some(n) => (&line[..n], line[n..].trim_start()),
         None => (line, ""),
     };
-    Some(match task::exec(cpu, path, arguments, args[1] as u16) {
-        Ok(instance) => instance as u32,
-        Err(code) => code as u32,
-    })
+    let started = task::exec(cpu, path, arguments, args[1] as u16);
+    exec_result(cpu, started)
+}
+
+/// What WinExec and LoadModule give: the instance, or the error below
+/// 32. A task they started runs first, and the caller gets the instance
+/// when the new task yields (`task::after_exec`).
+fn exec_result(cpu: &mut Cpu, started: Result<task::Started, u16>) -> Option<u32> {
+    match started {
+        Ok(started) => {
+            let mut ctx = Context::of(cpu);
+            thunk::set_ax(&mut ctx, started.instance);
+            if task::after_exec(cpu, ctx, &started) {
+                None
+            } else {
+                Some(started.instance as u32)
+            }
+        }
+        Err(code) => Some(code as u32),
+    }
 }
 
 /// LoadModule(name, parameters): WinExec's, with the command tail and
@@ -1314,10 +1371,8 @@ fn load_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         1
     };
-    Some(match task::exec(cpu, &path, arguments.trim(), show) {
-        Ok(instance) => instance as u32,
-        Err(code) => code as u32,
-    })
+    let started = task::exec(cpu, &path, arguments.trim(), show);
+    exec_result(cpu, started)
 }
 
 // Resources.

@@ -14,6 +14,8 @@ use win16::{CODE, Code, dos_marker, program, program_named, run_command, run_wit
 const GET_MODULE_FILE_NAME: u16 = 49;
 const LOAD_LIBRARY: u16 = 95;
 const WIN_EXEC: u16 = 166;
+const YIELD: u16 = 29;
+const WAIT_EVENT: u16 = 30;
 
 /// A program named `name` that imports the DLL `dll` (calling nothing in
 /// it) and ends at once: with exit code 1 if GetModuleFileName gives its
@@ -81,9 +83,9 @@ fn library(name: &str) -> Vec<u8> {
 #[test]
 fn a_program_started_with_a_slash_path_finds_its_dlls_beside_it() {
     // WinExec("C:/SUB/CHILD.EXE"), whose HELPER.DLL is in C:\SUB only.
-    // The child ends after the program, so the exit code is its own: 1
-    // when it started and has its path as Windows keeps it. The program
-    // ends with WinExec's error if it fails (0Bh when the DLL isn't
+    // The child runs and ends before WinExec returns: with 1 when it
+    // started and has its path as Windows keeps it. The program then
+    // ends with WinExec's error if it failed (0Bh when the DLL isn't
     // found), or 10h.
     let mut code = Code::new();
     let path_at = code.here() + 2;
@@ -105,7 +107,15 @@ fn a_program_started_with_a_slash_path_finds_its_dlls_beside_it() {
         fs::write(sub.join("CHILD.EXE"), importer("CHILD", "HELPER")).unwrap();
         fs::write(sub.join("HELPER.DLL"), library("HELPER")).unwrap();
     });
-    assert_eq!(exit, 1, "{log}");
+    assert_eq!(exit, 0x10, "{log}");
+    assert!(ended_with(&log, 1), "{log}");
+}
+
+/// Whether a task ended with the exit code `code`, as the log says.
+fn ended_with(log: &str, code: u8) -> bool {
+    let line = format!(" ended with exit code {:X}", code);
+    log.lines()
+        .any(|l| l.starts_with("[W16] Task ") && l.ends_with(&line))
 }
 
 #[test]
@@ -299,9 +309,10 @@ fn a_command_with_non_ascii_bytes_is_looked_up() {
 fn a_program_with_a_loaded_module_name_runs_its_own_code() {
     // The program, module T, runs C:\SUB\CHILD.EXE, another program whose
     // module is named T too, as Sierra's setup runs its copy _SETUP.EXE.
-    // That file loads as a module of its own and ends with 7. Taken for
-    // a second instance of the program, it would run the program's code
-    // again instead.
+    // That file loads as a module of its own and ends with 7, before
+    // WinExec returns. Taken for a second instance of the program, it
+    // would run the program's code again instead. The program ends with
+    // 1 when WinExec gave an instance.
     let mut code = Code::new();
     let path_at = code.here() + 2;
     code.push_far(0)
@@ -325,7 +336,75 @@ fn a_program_with_a_loaded_module_name_runs_its_own_code() {
         fs::create_dir_all(&sub).unwrap();
         fs::write(sub.join("CHILD.EXE"), child).unwrap();
     });
-    assert_eq!(exit, 7, "{log}");
+    assert_eq!(exit, 1, "{log}");
+    assert!(ended_with(&log, 7), "{log}");
+}
+
+#[test]
+fn a_started_program_runs_until_it_yields_before_win_exec_returns() {
+    // Windows 3.1's LoadModule gives the task it starts a DirectedYield,
+    // and returns when the task yields back: the new program's startup
+    // code runs first. Memphis Math's MEMPHIS starts its map, MMAP, and
+    // at once posts it the show command through MCLIB.DLL, which finds
+    // MMAP's task in a table MMAP fills as it starts; with the program
+    // going on first, MMAP wasn't in it yet and never showed.
+    //
+    // CHILD.EXE calls WaitEvent(0), writes C:\MARK.TXT, yields and ends
+    // with 7. The program ends with 1 if MARK.TXT is there when WinExec
+    // returns, 2 if it isn't, and 10h if WinExec failed.
+    let mut code = Code::new();
+    let path_at = code.here() + 2;
+    code.push_far(0).push(1).call("KERNEL", WIN_EXEC);
+    let mark_at = code.here() + 10;
+    code.emit(&[
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0xB0, 0x10, // mov al,10h
+        0x72, 0x10, // jb end
+        0x0E, 0x1F, // push cs; pop ds
+        0xBA, 0xFF, 0xFF, // mov dx,mark
+        0xB8, 0x00, 0x3D, // mov ax,3D00h
+        0xCD, 0x21, // int 21h
+        0xB0, 0x01, // mov al,1
+        0x73, 0x02, // jnc end
+        0xB0, 0x02, // mov al,2
+    ])
+    .exit_al();
+    let path = code.here();
+    code.emit(b"C:\\CHILD.EXE\0");
+    code.patch(path_at, path);
+    let mark = code.here();
+    code.emit(b"C:\\MARK.TXT\0");
+    code.patch(mark_at, mark);
+
+    let mut child = Code::new();
+    // WaitEvent(0) first, as the C runtime's startup code calls it after
+    // InitTask: it takes the event LoadModule gave the task.
+    child.push(0).call("KERNEL", WAIT_EVENT);
+    let name_at = child.here() + 3;
+    child
+        .emit(&[
+            0x0E, 0x1F, // push cs; pop ds
+            0xBA, 0xFF, 0xFF, // mov dx,name
+            0x33, 0xC9, // xor cx,cx
+            0xB4, 0x3C, // mov ah,3Ch
+            0xCD, 0x21, // int 21h
+            0x72, 0x06, // jc over the close
+            0x8B, 0xD8, // mov bx,ax
+            0xB4, 0x3E, // mov ah,3Eh
+            0xCD, 0x21, // int 21h
+        ])
+        .call("KERNEL", YIELD)
+        .emit(&[0xB0, 0x07]) // mov al,7
+        .exit_al();
+    let name = child.here();
+    child.emit(b"C:\\MARK.TXT\0");
+    child.patch(name_at, name);
+    let child = program(&child, CODE);
+    let (_, log) = run_with("first_turn", program(&code, CODE), |_, base| {
+        fs::write(base.join("CHILD.EXE"), child).unwrap();
+    });
+    assert!(ended_with(&log, 7), "{log}");
+    assert!(ended_with(&log, 1), "{log}");
 }
 
 #[test]
@@ -442,8 +521,7 @@ fn a_program_starts_a_dos_program_and_sees_what_it_wrote() {
     assert_eq!(&written[2..], b" /X");
 }
 
-/// KERNEL's Yield and GetModuleUsage.
-const YIELD: u16 = 29;
+/// KERNEL's GetModuleUsage.
 const GET_MODULE_USAGE: u16 = 48;
 
 #[test]
@@ -712,4 +790,405 @@ fn library_importing(name: &str, dll: &str) -> Vec<u8> {
     });
     b.entry_point(text, 0);
     b.build()
+}
+
+/// USER's CreateWindow, RegisterClass and DefWindowProc.
+const CREATE_WINDOW: u16 = 41;
+const REGISTER_CLASS: u16 = 57;
+const DEF_WINDOW_PROC: u16 = 107;
+
+/// The places in a code segment that `register_probe` and
+/// `create_probe` read: the class's name and its window procedure.
+#[derive(Default)]
+struct Probe {
+    names_at: Vec<u16>,
+    proc_at: Option<u16>,
+}
+
+/// Code that registers the class "Probe", global (CS_GLOBALCLASS) if
+/// `global`, with the instance in AX, from a WNDCLASS on the stack: AX
+/// is then RegisterClass's atom, or 0. `finish_probe` writes the name
+/// and the procedure.
+fn register_probe(code: &mut Code, probe: &mut Probe, global: bool) {
+    let style: u16 = if global { 0x4000 } else { 0 };
+    let [lo, hi] = style.to_le_bytes();
+    code.emit(&[
+        0x83, 0xEC, 0x1A, // sub sp,26
+        0x8B, 0xDC, // mov bx,sp
+        0x36, 0xC7, 0x07, lo, hi, // mov word [ss:bx],style
+    ]);
+    probe.proc_at = Some(code.here() + 4);
+    code.emit(&[
+        0x36, 0xC7, 0x47, 0x02, 0x00, 0x00, // mov word [ss:bx+2],proc
+        0x36, 0x8C, 0x4F, 0x04, // mov [ss:bx+4],cs
+        0x36, 0x89, 0x47, 0x0A, // mov [ss:bx+10],ax: the instance
+    ]);
+    // No extra bytes, icon, cursor, brush or menu.
+    for at in [6, 8, 12, 14, 16, 18, 20] {
+        code.emit(&[0x36, 0xC7, 0x47, at, 0x00, 0x00]);
+    }
+    probe.names_at.push(code.here() + 4);
+    code.emit(&[
+        0x36, 0xC7, 0x47, 0x16, 0x00, 0x00, // mov word [ss:bx+22],name
+        0x36, 0x8C, 0x4F, 0x18, // mov [ss:bx+24],cs
+        0x16, 0x53, // push ss; push bx
+    ]);
+    code.call("USER", REGISTER_CLASS);
+    code.emit(&[0x83, 0xC4, 0x1A]); // add sp,26
+}
+
+/// Code that makes a popup window of the class "Probe" with the
+/// instance in DI, and leaves it there: AX is then its handle, or 0.
+fn create_probe(code: &mut Code, probe: &mut Probe) {
+    probe.names_at.push(code.here() + 2);
+    code.push_far(0); // the class
+    probe.names_at.push(code.here() + 2);
+    code.push_far(0); // the title: the class's name too
+    code.push(0x8000).push(0); // WS_POPUP
+    for v in [0, 0, 10, 10, 0, 0] {
+        code.push(v); // the place, the size, no parent, no menu
+    }
+    code.emit(&[0x57]); // push di: the instance
+    code.push(0).push(0).call("USER", CREATE_WINDOW);
+}
+
+/// The class's name, and its window procedure (a jump to
+/// DefWindowProc), at the end of `code`.
+fn finish_probe(code: &mut Code, probe: Probe) {
+    let here = code.here();
+    for at in probe.names_at {
+        code.patch(at, here);
+    }
+    code.emit(b"Probe\0");
+    if let Some(at) = probe.proc_at {
+        let here = code.here();
+        code.patch(at, here);
+        let user = code.module("USER");
+        let target = ne::Target::Ordinal {
+            module: user,
+            ordinal: DEF_WINDOW_PROC,
+        };
+        let at = code.here() + 1;
+        code.emit(&[0xEA, 0xFF, 0xFF, 0x00, 0x00]); // jmp far DefWindowProc
+        code.fixup(at, ne::ADDR_FARPTR, target);
+    }
+}
+
+/// `mov al,exit`, and the end of the program, if AX is 0.
+fn exit_if_zero(code: &mut Code, exit: u8) {
+    code.emit(&[
+        0x0B, 0xC0, // or ax,ax
+        0x75, 0x06, // jnz over the exit
+        0xB0, exit, 0xB4, 0x4C, 0xCD, 0x21, // mov al,exit; exit
+    ]);
+}
+
+/// A library's classes are unregistered when the library is freed, as
+/// Windows 3.1's and Windows 95's USER does when KERNEL frees a module:
+/// a global class registered with the instance of C:\PROBE.DLL is gone
+/// once FreeLibrary has freed it, so the program can register its own
+/// global class of that name. Exit code 1, 2 if LoadLibrary failed, 3 if
+/// the library's class wasn't registered, 4 if the program's wasn't.
+#[test]
+fn a_freed_librarys_classes_are_unregistered() {
+    let mut code = Code::new();
+    let mut probe = Probe::default();
+    let path_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+    code.emit(&[
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0x73, 0x06, // jae over the exit
+        0xB0, 0x02, 0xB4, 0x4C, 0xCD, 0x21, // mov al,2; exit
+        0x8B, 0xF0, // mov si,ax: the library
+    ]);
+    register_probe(&mut code, &mut probe, true);
+    exit_if_zero(&mut code, 3);
+    code.emit(&[0x56]).call("KERNEL", FREE_LIBRARY); // push si
+    code.emit(&[0x8B, 0xC7]); // mov ax,di: the program's instance
+    register_probe(&mut code, &mut probe, true);
+    exit_if_zero(&mut code, 4);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let path = code.here();
+    code.patch(path_at, path);
+    code.emit(b"C:\\PROBE.DLL\0");
+    finish_probe(&mut code, probe);
+    let (exit, log) = run_with("freed_library_classes", program(&code, CODE), |_, base| {
+        fs::write(base.join("PROBE.DLL"), library("PROBE")).unwrap();
+    });
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// C:\CHILD.EXE: it registers the class "Probe" with its instance,
+/// global if `global`, makes a window of it if `window` and leaves it
+/// there, and ends with 5; with 6 if RegisterClass failed, 7 if
+/// CreateWindow did.
+fn probe_child(global: bool, window: bool) -> Vec<u8> {
+    let mut child = Code::new();
+    let mut probe = Probe::default();
+    child.emit(&[0x8B, 0xC7]); // mov ax,di: its instance
+    register_probe(&mut child, &mut probe, global);
+    exit_if_zero(&mut child, 6);
+    if window {
+        create_probe(&mut child, &mut probe);
+        exit_if_zero(&mut child, 7);
+    }
+    child.emit(&[0xB0, 0x05]).exit_al();
+    finish_probe(&mut child, probe);
+    program(&child, CODE)
+}
+
+/// Code that starts C:\CHILD.EXE and waits until it has ended and its
+/// module is gone (Yield, GetModuleUsage), or ends with 2 if WinExec
+/// failed. The place of the path's offset is put in `paths_at`.
+fn run_child(code: &mut Code, paths_at: &mut Vec<u16>) {
+    paths_at.push(code.here() + 2);
+    code.push_far(0).push(1).call("KERNEL", WIN_EXEC); // SW_SHOWNORMAL
+    code.emit(&[
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0x73, 0x06, // jae over the exit
+        0xB0, 0x02, 0xB4, 0x4C, 0xCD, 0x21, // mov al,2; exit
+        0x8B, 0xF0, // mov si,ax: the child's instance
+    ]);
+    let wait = code.here();
+    code.call("KERNEL", YIELD).emit(&[0x56]); // push si
+    code.call("KERNEL", GET_MODULE_USAGE);
+    let back = wait as i32 - (code.here() as i32 + 4);
+    code.emit(&[0x0B, 0xC0, 0x75, back as u8]); // or ax,ax; jnz wait
+}
+
+/// A program runs C:\CHILD.EXE (`probe_child(true, window)`) to its
+/// end, then registers a global class "Probe" itself: 1, or 4 if that
+/// failed.
+fn after_global_child(test: &str, window: bool) -> (u8, String) {
+    let mut code = Code::new();
+    let mut probe = Probe::default();
+    let mut paths_at = Vec::new();
+    run_child(&mut code, &mut paths_at);
+    code.emit(&[0x8B, 0xC7]); // mov ax,di: the program's instance
+    register_probe(&mut code, &mut probe, true);
+    exit_if_zero(&mut code, 4);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let path = code.here();
+    for at in paths_at {
+        code.patch(at, path);
+    }
+    code.emit(b"C:\\CHILD.EXE\0");
+    finish_probe(&mut code, probe);
+    let child = probe_child(true, window);
+    run_with(test, program(&code, CODE), |_, base| {
+        fs::write(base.join("CHILD.EXE"), child).unwrap();
+    })
+}
+
+/// A program's classes are unregistered when it ends while other
+/// programs go on: once C:\CHILD.EXE, which registered the global class
+/// "Probe", has ended, the program registers a global class of that
+/// name.
+#[test]
+fn an_ended_programs_classes_are_unregistered() {
+    let (exit, log) = after_global_child("ended_program_classes", false);
+    assert_eq!(exit, 1, "{log}");
+    assert!(log.contains("ended with exit code 5"), "{log}");
+}
+
+/// The windows a program leaves when it ends go with it, and so its
+/// classes, which those windows kept, are unregistered too.
+#[test]
+fn an_ended_programs_classes_go_with_the_windows_it_left() {
+    let (exit, log) = after_global_child("ended_program_window_classes", true);
+    assert_eq!(exit, 1, "{log}");
+    assert!(log.contains("ended with exit code 5"), "{log}");
+}
+
+/// Where the class test keeps the library's instance and its WNDCLASS.
+const LIB: u16 = 0x20;
+const WNDCLASS: u16 = 0x40;
+
+/// `mov word [at],value`. Where `value` is, to patch.
+fn store_word(code: &mut Code, at: u16, value: u16) -> u16 {
+    let [a, b] = at.to_le_bytes();
+    let [v, w] = value.to_le_bytes();
+    let operand = code.here() + 4;
+    code.emit(&[0xC7, 0x06, a, b, v, w]);
+    operand
+}
+
+/// `mov [at],cs`.
+fn store_cs(code: &mut Code, at: u16) {
+    let [a, b] = at.to_le_bytes();
+    code.emit(&[0x8C, 0x0E, a, b]);
+}
+
+/// Code that registers a class for the instance in [LIB], with its
+/// WNDCLASS at WNDCLASS: the atom in AX. Where the offsets of its window
+/// procedure and its name (both in the code segment) go, to patch.
+fn register_class(code: &mut Code) -> (u16, u16) {
+    store_word(code, WNDCLASS, 0); // style
+    let proc = store_word(code, WNDCLASS + 2, 0);
+    store_cs(code, WNDCLASS + 4);
+    store_word(code, WNDCLASS + 6, 0); // cbClsExtra
+    store_word(code, WNDCLASS + 8, 0); // cbWndExtra
+    let [a, b] = LIB.to_le_bytes();
+    code.emit(&[0xA1, a, b]); // mov ax,[LIB]
+    let [a, b] = (WNDCLASS + 10).to_le_bytes();
+    code.emit(&[0xA3, a, b]); // mov [hInstance],ax
+    for at in [12, 14, 16, 18, 20] {
+        store_word(code, WNDCLASS + at, 0); // icon, cursor, brush, menu
+    }
+    let name = store_word(code, WNDCLASS + 22, 0);
+    store_cs(code, WNDCLASS + 24);
+    code.emit(&[0x1E])
+        .push(WNDCLASS)
+        .call("USER", REGISTER_CLASS);
+    (proc, name)
+}
+
+/// Windows 3.1 frees a module's window classes with the module. A class
+/// registered for a library's instance goes when FreeLibrary frees the
+/// library, so the library loaded again registers its class again. A
+/// class left behind kept the name, and the new instance could be the
+/// old one's: its RegisterClass failed and its windows got the old
+/// class, with a window procedure in code that had gone (Memphis Math's
+/// MMAP after STORYBRD). The program ends with 1 if the first
+/// RegisterClass fails, 2 if the second does, else with 0.
+#[test]
+fn a_freed_librarys_classes_go_with_it() {
+    let mut code = Code::new();
+    let mut paths = Vec::new();
+    let mut operands = Vec::new();
+    for fail in [1u8, 2] {
+        paths.push(code.here() + 2);
+        code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+        let [a, b] = LIB.to_le_bytes();
+        code.emit(&[0xA3, a, b]); // mov [LIB],ax
+        operands.push(register_class(&mut code));
+        code.emit(&[0x85, 0xC0]) // test ax,ax
+            .emit(&[0x75, 0x06]) // jnz over the exit
+            .emit(&[0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21]);
+        if fail == 1 {
+            code.emit(&[0xFF, 0x36, a, b]) // push word [LIB]
+                .call("KERNEL", FREE_LIBRARY);
+        }
+    }
+    code.emit(&[0xB0, 0x00]).exit_al();
+    let proc = code.here();
+    code.emit(&[0x33, 0xC0, 0x99, 0xCA, 0x0A, 0x00]); // xor ax,ax; cwd; retf 10
+    let name = code.here();
+    code.emit(b"MINE\0");
+    let path = code.here();
+    code.emit(b"C:\\LIB.DLL\0");
+    for at in paths {
+        code.patch(at, path);
+    }
+    for (proc_at, name_at) in operands {
+        code.patch(proc_at, proc);
+        code.patch(name_at, name);
+    }
+    let (exit, log) = run_with("freed_classes", program(&code, CODE), |_, base| {
+        fs::write(base.join("LIB.DLL"), library("LIB")).unwrap();
+    });
+    assert_eq!(exit, 0, "{log}");
+}
+
+/// USER's GetClassName.
+const GET_CLASS_NAME: u16 = 58;
+
+/// Where the kept-class test keeps the program's instance, its window
+/// and the name GetClassName gives.
+const INSTANCE: u16 = 0x22;
+const HWND: u16 = 0x24;
+const CLASS_NAME: u16 = 0x60;
+
+/// A freed library's class that still has a window stays, as
+/// UnregisterClass leaves one. The window keeps its class, so a class
+/// registered after the library went doesn't take its place: the
+/// window's class is still MINE. The program ends with 1 to 3 when
+/// RegisterClass, CreateWindow or the second RegisterClass fails, 4 when
+/// GetClassName gives another name, else with 0.
+#[test]
+fn a_freed_librarys_class_with_a_window_stays() {
+    let mut code = Code::new();
+    let [a, b] = INSTANCE.to_le_bytes();
+    code.emit(&[0x89, 0x3E, a, b]); // mov [INSTANCE],di
+    let path_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY);
+    let [l, m] = LIB.to_le_bytes();
+    code.emit(&[0xA3, l, m]); // mov [LIB],ax
+    let mine = register_class(&mut code);
+    exit_if_zero(&mut code, 1);
+    let class_at = code.here() + 2;
+    code.push_far(0);
+    let title_at = code.here() + 2;
+    code.push_far(0)
+        .push(0x8000) // WS_POPUP
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(10)
+        .push(10)
+        .push(0) // parent
+        .push(0) // menu
+        .emit(&[0xFF, 0x36, l, m]) // push word [LIB]
+        .push(0)
+        .push(0)
+        .call("USER", CREATE_WINDOW);
+    let [h, i] = HWND.to_le_bytes();
+    code.emit(&[0xA3, h, i]); // mov [HWND],ax
+    exit_if_zero(&mut code, 2);
+    code.emit(&[0xFF, 0x36, l, m]) // push word [LIB]
+        .call("KERNEL", FREE_LIBRARY);
+    // OTHER, the program's own class.
+    code.emit(&[0xA1, a, b, 0xA3, l, m]); // mov ax,[INSTANCE]; mov [LIB],ax
+    let other = register_class(&mut code);
+    exit_if_zero(&mut code, 3);
+    code.emit(&[0xFF, 0x36, h, i]) // push word [HWND]
+        .emit(&[0x1E]) // push ds
+        .push(CLASS_NAME)
+        .push(16)
+        .call("USER", GET_CLASS_NAME);
+    let [n0, n1] = CLASS_NAME.to_le_bytes();
+    let [n2, n3] = (CLASS_NAME + 2).to_le_bytes();
+    let [n4, n5] = (CLASS_NAME + 4).to_le_bytes();
+    code.emit(&[
+        0xB0, 0x04, // mov al,4
+        0x81, 0x3E, n0, n1, b'M', b'I', // cmp word [CLASS_NAME],'MI'
+        0x75, 0x11, // jne end
+        0x81, 0x3E, n2, n3, b'N', b'E', // cmp word [CLASS_NAME+2],'NE'
+        0x75, 0x09, // jne end
+        0x80, 0x3E, n4, n5, 0x00, // cmp byte [CLASS_NAME+4],0
+        0x75, 0x02, // jne end
+        0xB0, 0x00, // mov al,0
+    ])
+    .exit_al();
+    // The window procedure, in the program: DefWindowProc's.
+    let proc = code.here();
+    code.emit(&[
+        0x55, 0x8B, 0xEC, // push bp; mov bp,sp
+        0xFF, 0x76, 0x0E, // push word [bp+0Eh]: hwnd
+        0xFF, 0x76, 0x0C, // push word [bp+0Ch]: msg
+        0xFF, 0x76, 0x0A, // push word [bp+0Ah]: wParam
+        0xFF, 0x76, 0x08, // push word [bp+8]: lParam
+        0xFF, 0x76, 0x06, // push word [bp+6]
+    ])
+    .call("USER", DEF_WINDOW_PROC)
+    .emit(&[0x5D, 0xCA, 0x0A, 0x00]); // pop bp; retf 10
+    let mine_name = code.here();
+    code.emit(b"MINE\0");
+    let other_name = code.here();
+    code.emit(b"OTHER\0");
+    let title = code.here();
+    code.emit(b"\0");
+    let path = code.here();
+    code.emit(b"C:\\LIB.DLL\0");
+    code.patch(path_at, path);
+    code.patch(class_at, mine_name);
+    code.patch(title_at, title);
+    for ((proc_at, name_at), name) in [(mine, mine_name), (other, other_name)] {
+        code.patch(proc_at, proc);
+        code.patch(name_at, name);
+    }
+    let (exit, log) = run_with("kept_class", program(&code, CODE), |_, base| {
+        fs::write(base.join("LIB.DLL"), library("LIB")).unwrap();
+    });
+    assert_eq!(exit, 0, "{log}");
 }
