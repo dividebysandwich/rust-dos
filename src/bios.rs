@@ -76,6 +76,38 @@ pub const FAR_VCPI: u8 = 0x04;
 /// Offsets in the F000 segment.
 const TIMER_HANDLER: u16 = 0x1100;
 const MASTER_EOI_HANDLER: u16 = 0x1110;
+
+/// The timer interrupt (IRQ 0) as the IBM AT's BIOS has it: save DS, AX
+/// and DX, count the tick, call the user timer hook INT 1Ch, acknowledge
+/// the interrupt, and restore the three. An INT 1Ch handler that changes
+/// them and returns without restoring them is harmless on a PC, and games
+/// have such handlers: Whale's Voyage's music player sets DS to its own
+/// segment and returns with it, which, passed back to the code the tick
+/// interrupted, sends that code's writes into the program's runtime.
+///
+/// The AT's handler also starts with STI and loads DS with 0040h to count
+/// the tick, so INT 1Ch is entered with IF set and DS = 0040h. Here the
+/// tick is counted by the emulator, and INT 1Ch gets IF clear and the
+/// interrupted program's DS (#1838): the code fills its slot.
+///
+/// A save state keeps the ROM it was saved with (it is part of the RAM),
+/// so a state of an older build runs on with its own handler: its stack
+/// may hold a return into the old handler's code after INT 1Ch.
+#[rustfmt::skip]
+const TIMER_CODE: [u8; 16] = [
+    0x1E, // PUSH DS
+    0x50, // PUSH AX
+    0x52, // PUSH DX
+    0xFE, 0x39, SERVICE_TIMER_TICK, // count the tick
+    0xCD, 0x1C, // INT 1Ch
+    0xB0, 0x20, // MOV AL, 20h
+    0xE6, 0x20, // OUT 20h, AL
+    0x5A, // POP DX
+    0x58, // POP AX
+    0x1F, // POP DS
+    0xCF, // IRET
+];
+const _: () = assert!(TIMER_HANDLER as usize + TIMER_CODE.len() <= MASTER_EOI_HANDLER as usize);
 const SLAVE_EOI_HANDLER: u16 = 0x1120;
 const IRQ9_HANDLER: u16 = 0x1130;
 /// The diskette parameter table INT 1Eh points to, for 1.44 MB drives.
@@ -355,21 +387,7 @@ pub fn install(bus: &mut Bus) {
     for (i, &vector) in HLE_VECTORS.iter().enumerate() {
         write_rom(bus, TRAP_BASE + 4 * i as u16, &[0xFE, 0x38, vector, 0xCF]);
     }
-    // Timer (IRQ 0): count the tick, call the user timer hook INT 1Ch,
-    // acknowledge the interrupt, as the IBM BIOS does.
-    write_rom(
-        bus,
-        TIMER_HANDLER,
-        &[
-            0xFE, 0x39, SERVICE_TIMER_TICK, // count the tick
-            0xCD, 0x1C, // INT 1Ch
-            0x50, // PUSH AX
-            0xB0, 0x20, // MOV AL, 20h
-            0xE6, 0x20, // OUT 20h, AL
-            0x58, // POP AX
-            0xCF, // IRET
-        ],
-    );
+    write_rom(bus, TIMER_HANDLER, &TIMER_CODE);
     // IRQs nothing else handles: acknowledge them.
     write_rom(bus, MASTER_EOI_HANDLER, &[0x50, 0xB0, 0x20, 0xE6, 0x20, 0x58, 0xCF]);
     write_rom(
