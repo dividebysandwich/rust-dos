@@ -27,6 +27,7 @@ mod win32_dpnet_tests;
 mod win32_dshow_tests;
 mod win32_glide_tests;
 mod win32_imagehlp_tests;
+mod win32_keyboard_tests;
 mod win32_locale_tests;
 mod win32_opengl_tests;
 mod win32_screen_tests;
