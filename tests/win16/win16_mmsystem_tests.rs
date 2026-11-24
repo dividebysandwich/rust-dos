@@ -695,6 +695,11 @@ const WAVE_IN_GET_NUM_DEVS: u16 = 501;
 const WAVE_IN_GET_DEV_CAPS: u16 = 502;
 const WAVE_IN_OPEN: u16 = 504;
 const WAVE_IN_CLOSE: u16 = 505;
+const WAVE_IN_MESSAGE: u16 = 514;
+const MIDI_IN_GET_NUM_DEVS: u16 = 301;
+const MIDI_IN_GET_DEV_CAPS: u16 = 302;
+const MIDI_IN_OPEN: u16 = 304;
+const MIDI_IN_CLOSE: u16 = 305;
 
 /// The MIDI callback messages.
 const MM_MOM_OPEN: u16 = 0x3C7;
@@ -710,9 +715,10 @@ fn midi_out_devices_are_winmms_with_16_bit_caps() {
     // (MIDICAPS_VOLUME, LRVOLUME and STREAM). MIDI_MAPPER (FFFFh) is
     // MOD_MAPPER (5), and device 7 a bad id. The volume set is read back
     // as a DWORD, and midiOutGetErrorText has a text. With no input
-    // device, waveInGetNumDevs is 0, waveInGetDevCaps and waveInOpen get
-    // MMSYSERR_BADDEVICEID and waveInClose MMSYSERR_INVALHANDLE. Exit
-    // code 1, or the check that failed.
+    // device, waveInGetNumDevs and midiInGetNumDevs are 0, the
+    // GetDevCaps and Open functions get MMSYSERR_BADDEVICEID, and
+    // waveInClose, waveInMessage and midiInClose MMSYSERR_INVALHANDLE.
+    // Exit code 1, or the check that failed.
     let mut code = Code::new();
     code.call("MMSYSTEM", MIDI_OUT_GET_NUM_DEVS);
     expect_nonzero(&mut code, 2);
@@ -790,6 +796,35 @@ fn midi_out_devices_are_winmms_with_16_bit_caps() {
     expect_ax(&mut code, 2, 22);
     code.push(0x1234).call("MMSYSTEM", WAVE_IN_CLOSE);
     expect_ax(&mut code, 5, 23);
+    code.push(0x1234)
+        .push(0x0400) // MM_USER
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .call("MMSYSTEM", WAVE_IN_MESSAGE);
+    expect_ax(&mut code, 5, 24);
+    code.call("MMSYSTEM", MIDI_IN_GET_NUM_DEVS);
+    expect_ax(&mut code, 0, 25);
+    code.push(0)
+        .emit(&[0x1E])
+        .push(CAPS)
+        .push(44)
+        .call("MMSYSTEM", MIDI_IN_GET_DEV_CAPS);
+    expect_ax(&mut code, 2, 26);
+    code.emit(&[0x1E]) // push ds
+        .push(HANDLE)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .call("MMSYSTEM", MIDI_IN_OPEN);
+    expect_ax(&mut code, 2, 27);
+    code.push(0x1234).call("MMSYSTEM", MIDI_IN_CLOSE);
+    expect_ax(&mut code, 5, 28);
     code.emit(&[0xB0, 0x01]).exit_al();
     let (exit, log) = run("midi_caps", program(&code, CODE));
     assert_eq!(exit, 1, "{log}");
@@ -909,6 +944,92 @@ fn a_midi_callback_function_is_called_with_the_programs_header() {
     let callback = callback_function(&mut code, MM_MOM_DONE);
     code.patch(callback_at, callback);
     let (exit, log) = run("midi_callback", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// Where `nested_long_msg_callback` keeps how deep its calls are, the
+/// deepest they went, and the MM_MOM_DONEs it got.
+const DEPTH: u16 = 0x2A;
+const MAX_DEPTH: u16 = 0x2C;
+const DONES: u16 = 0x2E;
+
+/// A MIDI callback function that counts how deep its calls nest in
+/// SS:DEPTH and SS:MAX_DEPTH and its MM_MOM_DONEs in SS:DONES, and sends
+/// the header of the first MM_MOM_DONE again with midiOutLongMsg, as a
+/// program that sends a SysEx from the callback does.
+fn nested_long_msg_callback(code: &mut Code) -> u16 {
+    let at = code.here();
+    #[rustfmt::skip]
+    let head = [
+        0x55, 0x8B, 0xEC, // push bp; mov bp,sp
+        0x36, 0xFF, 0x06, lo(DEPTH), hi(DEPTH), // inc word ss:[DEPTH]
+        0x36, 0xA1, lo(DEPTH), hi(DEPTH), // mov ax,ss:[DEPTH]
+        0x36, 0x3B, 0x06, lo(MAX_DEPTH), hi(MAX_DEPTH), // cmp ax,ss:[MAX_DEPTH]
+        0x76, 0x04, // jbe not_deeper
+        0x36, 0xA3, lo(MAX_DEPTH), hi(MAX_DEPTH), // mov ss:[MAX_DEPTH],ax
+        // not_deeper:
+        0x8B, 0x46, 0x12, // mov ax,[bp+12h]: the message
+        0x3D, lo(MM_MOM_DONE), hi(MM_MOM_DONE), // cmp ax,MM_MOM_DONE
+        0x75, 0x1E, // jne end
+        0x36, 0xFF, 0x06, lo(DONES), hi(DONES), // inc word ss:[DONES]
+        0x36, 0x83, 0x3E, lo(DONES), hi(DONES), 0x01, // cmp word ss:[DONES],1
+        0x75, 0x11, // jne end
+        0xFF, 0x76, 0x14, // push word [bp+14h]: the handle
+        0xFF, 0x76, 0x0C, // push word [bp+0Ch]: dwParam1, the header
+        0xFF, 0x76, 0x0A, // push word [bp+0Ah]
+    ];
+    code.emit(&head)
+        .push(28)
+        .call("MMSYSTEM", MIDI_OUT_LONG_MSG);
+    #[rustfmt::skip]
+    let end = [
+        // end:
+        0x36, 0xFF, 0x0E, lo(DEPTH), hi(DEPTH), // dec word ss:[DEPTH]
+        0x5D, 0xCA, 0x10, 0x00, // pop bp; retf 10h
+    ];
+    code.emit(&end);
+    at
+}
+
+#[test]
+fn callback_functions_are_not_called_inside_each_other() {
+    // A callback function that calls midiOutLongMsg, here for the
+    // MM_MOM_DONE of an earlier one, isn't called again before it
+    // returns: the MM_MOM_DONE of its own message comes after it
+    // returns, and still before the program's midiOutLongMsg returns.
+    // A timer's function that calls such a function isn't called inside
+    // itself either. Exit code 1, 5 for MM_MOM_DONEs that didn't come,
+    // 6 for calls inside each other, or the call that failed.
+    let mut code = Code::new();
+    for at in [DEPTH, MAX_DEPTH, DONES] {
+        set(&mut code, at, 0);
+    }
+    let mut callback_at = 0;
+    open_midi(
+        &mut code,
+        0xFFFF, // MIDI_MAPPER
+        |code| {
+            callback_at = code.here() + 2;
+            code.push_far(0);
+        },
+        CALLBACK_FUNCTION,
+        2,
+    );
+    midi_header(&mut code);
+    midi_header_call(&mut code, MIDI_OUT_PREPARE_HEADER, 28, 0, 3);
+    midi_header_call(&mut code, MIDI_OUT_LONG_MSG, 28, 0, 4);
+    expect(&mut code, DONES, 2, true, 5);
+    expect(&mut code, MAX_DEPTH, 1, true, 6);
+    expect_header(&mut code, 0x03, 7);
+    midi_header_call(&mut code, MIDI_OUT_UNPREPARE_HEADER, 28, 0, 9);
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", MIDI_OUT_CLOSE);
+    expect_ax(&mut code, 0, 10);
+    expect(&mut code, MAX_DEPTH, 1, true, 11);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let callback = nested_long_msg_callback(&mut code);
+    code.patch(callback_at, callback);
+    let (exit, log) = run("midi_nested", program(&code, CODE));
     assert_eq!(exit, 1, "{log}");
 }
 

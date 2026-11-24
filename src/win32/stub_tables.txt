@@ -6068,6 +6068,20 @@ waveInStop
 waveInReset
 waveInGetPosition
 waveInGetID
+waveInMessage
+midiInGetNumDevs
+midiInGetDevCaps
+midiInGetErrorText
+midiInOpen
+midiInClose
+midiInPrepareHeader
+midiInUnprepareHeader
+midiInAddBuffer
+midiInStart
+midiInStop
+midiInReset
+midiInGetID
+midiInMessage
 
 MODULE LZEXPAND
 LZCopy

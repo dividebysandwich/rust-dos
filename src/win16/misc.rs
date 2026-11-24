@@ -332,6 +332,33 @@ pub static MMSYSTEM: Def = Def {
         rust("waveInReset", 511, "w", wwave::wave_in_bad_handle),
         rust("waveInGetPosition", 512, "wpw", wwave::wave_in_bad_handle),
         rust("waveInGetID", 513, "wp", wwave::wave_in_bad_handle),
+        rust("waveInMessage", 514, "wwll", wwave::wave_in_bad_handle),
+        // midiIn: there is no input device either.
+        win32("midiInGetNumDevs", 301, "", MM, "midiInGetNumDevs", b'w'),
+        rust("midiInGetDevCaps", 302, "wpw", wmidi::midi_in_bad_device),
+        win32(
+            "midiInGetErrorText",
+            303,
+            "wpw",
+            MM,
+            "midiInGetErrorTextA",
+            b'w',
+        ),
+        rust("midiInOpen", 304, "pwlll", wmidi::midi_in_bad_device),
+        rust("midiInClose", 305, "w", wmidi::midi_in_bad_handle),
+        rust("midiInPrepareHeader", 306, "wSw", wmidi::midi_in_bad_handle),
+        rust(
+            "midiInUnprepareHeader",
+            307,
+            "wSw",
+            wmidi::midi_in_bad_handle,
+        ),
+        rust("midiInAddBuffer", 308, "wSw", wmidi::midi_in_bad_handle),
+        rust("midiInStart", 309, "w", wmidi::midi_in_bad_handle),
+        rust("midiInStop", 310, "w", wmidi::midi_in_bad_handle),
+        rust("midiInReset", 311, "w", wmidi::midi_in_bad_handle),
+        rust("midiInGetID", 312, "wp", wmidi::midi_in_bad_handle),
+        rust("midiInMessage", 313, "wwll", wmidi::midi_in_bad_handle),
     ],
     library: true,
 };
@@ -522,6 +549,8 @@ const P_DWORD: u32 = P_MISC + 12;
 const P_AUX_CAPS: u32 = P_MISC + 13;
 const P_MIDI_OPEN: u32 = P_MISC + 14;
 const P_MIDI_CAPS: u32 = P_MISC + 15;
+const P_HEADER: u32 = P_MISC + 16;
+const P_HEADER_CALLS: u32 = P_MISC + 17;
 
 /// The size of Windows 3.1's MMTIME: wType and a union of 6 bytes, its
 /// SMPTE time being hour, minute, second, frame, fps and a pad byte
@@ -613,10 +642,22 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
             Some(value)
         }
         P_UNPREPARE => {
-            if value == 0 {
+            if value == 0 || d(2) != 0 {
                 unprepared(cpu, d(1));
             }
             Some(value)
+        }
+        P_HEADER | P_HEADER_CALLS => {
+            // A header kept for this call alone goes again when WINMM
+            // refused it (`program_header`).
+            if value != 0 && d(2) != 0 {
+                unprepared(cpu, d(1));
+            }
+            if d(0) == P_HEADER_CALLS {
+                return_after_calls(cpu, value, ctx)
+            } else {
+                Some(value)
+            }
         }
         P_MMTIME => {
             if value == 0 {
@@ -1540,39 +1581,40 @@ fn midi_out_reset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// MIDIHDR is Win32's without dwOffset and what follows it; WINMM takes
 /// the 28 bytes they share, and refuses fewer, as Windows does.
 fn midi_out_prepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let at = program_header(cpu, args[1]);
+    let (at, new) = program_header(cpu, args[1]);
     go(
         cpu,
         MM,
         "midiOutPrepareHeader",
         &[args[0], at, args[2]],
-        Vec::new(),
+        vec![P_HEADER, at, new],
     )
 }
 
 fn midi_out_unprepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let at = program_header(cpu, args[1]);
+    let (at, new) = program_header(cpu, args[1]);
     go(
         cpu,
         MM,
         "midiOutUnprepareHeader",
         &[args[0], at, args[2]],
-        vec![P_UNPREPARE, at],
+        vec![P_UNPREPARE, at, new],
     )
 }
 
 /// midiOutLongMsg(handle, header, size): WINMM sends the buffer whole
 /// and is done with it before it returns, so MM_MOM_DONE, with the
 /// program's 16:16 pointer to the header, reaches a function before
-/// midiOutLongMsg returns.
+/// midiOutLongMsg returns; when a callback function calls it, as soon
+/// as that function returns (`make_call16`).
 fn midi_out_long_msg(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let at = program_header(cpu, args[1]);
+    let (at, new) = program_header(cpu, args[1]);
     go(
         cpu,
         MM,
         "midiOutLongMsg",
         &[args[0], at, args[2]],
-        vec![P_CALLS],
+        vec![P_HEADER_CALLS, at, new],
     )
 }
 
@@ -1631,7 +1673,13 @@ pub fn queue_call16(cpu: &mut Cpu, tid: u32, function: u32, args: [u32; 5]) {
     let Some((p, t)) = crate::win32::thread::find(&cpu.bus.win32, tid) else {
         return;
     };
-    let waits = cpu.bus.win32.processes[p].threads[t].wait.is_some();
+    // An ended thread stays in its process's list until the process
+    // ends, and its task makes no more calls.
+    let thread = &cpu.bus.win32.processes[p].threads[t];
+    if thread.exit_code.is_some() {
+        return;
+    }
+    let waits = thread.wait.is_some();
     let [a, b, c, d, e] = args;
     let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
     calls.push([tid, function, a, b, c, d, e]);
@@ -1645,6 +1693,14 @@ pub fn queue_call16(cpu: &mut Cpu, tid: u32, function: u32, args: [u32; 5]) {
 /// Make the first call queued for the running task (`queue_call16`);
 /// the ones after it follow when it returns (`then_calls16`), and then
 /// the task goes on with `resume`. False when there is none.
+///
+/// The calls don't nest. While the task is in a function of the queue,
+/// such as a timer's function that calls midiOutLongMsg or midiOutReset,
+/// the calls queued meanwhile wait until that function returns, as the
+/// multimedia thread makes a 32-bit program's calls one at a time
+/// (winmm/callback.rs). Otherwise a periodic timer that fell due again
+/// would call its function inside itself, where Windows 95's timer
+/// thread makes the calls one after another (winmm/timer.rs).
 fn make_call16(cpu: &mut Cpu, resume: Context) -> bool {
     if cpu.bus.win32.win16.mmsystem.calls.is_empty() {
         return false;
@@ -1652,6 +1708,13 @@ fn make_call16(cpu: &mut Cpu, resume: Context) -> bool {
     let Some(t) = super::current_task(cpu) else {
         return false;
     };
+    let in_call = cpu.bus.win32.win16.tasks[t]
+        .frames
+        .iter()
+        .any(|f| matches!(f, super::Frame::To16 { then, .. } if *then == thunk::THEN_CALLS16));
+    if in_call {
+        return false;
+    }
     let tid = cpu.bus.win32.win16.tasks[t].tid;
     let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
     let Some(i) = calls.iter().position(|c| c[0] == tid) else {
@@ -1705,7 +1768,9 @@ pub fn call_queued16(cpu: &mut Cpu) -> bool {
 /// it returns, as Windows 3.1 calls the function within waveOutOpen
 /// (MM_WOM_OPEN), waveOutReset (MM_WOM_DONE) and waveOutClose
 /// (MM_WOM_CLOSE). A program may free the headers and the function's
-/// library once they return.
+/// library once they return. Called from a function of the queue, the
+/// function returns first, and the calls follow when that one returns
+/// (`make_call16`).
 fn return_after_calls(cpu: &mut Cpu, value: u32, ctx: &Context) -> Option<u32> {
     let mut resume = *ctx;
     resume.gpr[thunk::EAX] = resume.gpr[thunk::EAX] & 0xFFFF_0000 | value & 0xFFFF;
@@ -1717,9 +1782,20 @@ fn return_after_calls(cpu: &mut Cpu, value: u32, ctx: &Context) -> Option<u32> {
     }
 }
 
-/// A task ended: the calls queued for it go.
+/// A task ended: its multimedia timers and the calls queued for it go.
 pub fn task_ended(cpu: &mut Cpu, tid: u32) {
+    crate::win32::winmm::timer::task_ended16(cpu, tid);
     cpu.bus.win32.win16.mmsystem.calls.retain(|c| c[0] != tid);
+}
+
+/// The calls of the 16-bit `function` that the timer `id` queued for the
+/// task whose thread is `tid` go unmade (`queue_call16`). A timer's call
+/// has the message 0, which no device's has: a program may give a
+/// device and a timer the same function, and a device's handle may be
+/// the same number as a timer's id.
+pub fn cancel_timer_calls16(cpu: &mut Cpu, tid: u32, function: u32, id: u32) {
+    let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
+    calls.retain(|c| !(c[0] == tid && c[1] == function && c[2] == id && c[3] == 0));
 }
 
 /// What MMSYSTEM keeps for the 16-bit programs: the wave and MIDI
@@ -1766,19 +1842,26 @@ impl crate::savestate::State for Mmsystem {
 /// header's process and addresses are kept, so that WINMM reads the
 /// data's pointer as a 16:16 one (`header_data`) and gives the program
 /// its own pointer to the header in MM_WOM_DONE and MM_MOM_DONE
-/// (`header16`).
-fn program_header(cpu: &mut Cpu, segptr: u32) -> u32 {
+/// (`header16`). The linear address, and 1 when the header wasn't kept
+/// before: it goes again if WINMM refuses the call (`P_HEADER`), so that
+/// failed calls leave nothing behind.
+fn program_header(cpu: &mut Cpu, segptr: u32) -> (u32, u32) {
     let at = super::linear(cpu, segptr);
     if at == 0 {
-        return 0;
+        return (0, 0);
     }
     let pid = crate::win32::user32::current_pid(cpu);
     let headers = &mut cpu.bus.win32.win16.mmsystem.headers;
     match headers.iter_mut().find(|h| h[0] == pid && h[1] == at) {
-        Some(h) => h[2] = segptr,
-        None => headers.push([pid, at, segptr]),
+        Some(h) => {
+            h[2] = segptr;
+            (at, 0)
+        }
+        None => {
+            headers.push([pid, at, segptr]);
+            (at, 1)
+        }
     }
-    at
 }
 
 /// WINMM let go of the header at `at`.
@@ -1817,30 +1900,36 @@ pub fn header_data(cpu: &Cpu, pid: u32, at: u32, data: u32) -> u32 {
 }
 
 fn wave_out_prepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let at = program_header(cpu, args[1]);
+    let (at, new) = program_header(cpu, args[1]);
     go(
         cpu,
         MM,
         "waveOutPrepareHeader",
         &[args[0], at, 32],
-        Vec::new(),
+        vec![P_HEADER, at, new],
     )
 }
 
 fn wave_out_unprepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let at = program_header(cpu, args[1]);
+    let (at, new) = program_header(cpu, args[1]);
     go(
         cpu,
         MM,
         "waveOutUnprepareHeader",
         &[args[0], at, 32],
-        vec![P_UNPREPARE, at],
+        vec![P_UNPREPARE, at, new],
     )
 }
 
 fn wave_out_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let at = program_header(cpu, args[1]);
-    go(cpu, MM, "waveOutWrite", &[args[0], at, 32], Vec::new())
+    let (at, new) = program_header(cpu, args[1]);
+    go(
+        cpu,
+        MM,
+        "waveOutWrite",
+        &[args[0], at, 32],
+        vec![P_HEADER, at, new],
+    )
 }
 
 fn wave_out_reset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {

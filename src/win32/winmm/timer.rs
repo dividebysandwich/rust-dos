@@ -210,10 +210,13 @@ pub fn time_set_event16(cpu: &mut Cpu, args: &[u32], tid: u32) -> Option<u32> {
     Some(add(cpu, delay, flags & TIME_PERIODIC != 0, action))
 }
 
+/// The highest id a timer has: ids are 1 to FFFFh.
+const ID_MAX: u32 = 0xFFFF;
+
 /// A timer of the running process due in `delay` milliseconds that does
 /// `action`: its id, or 0 when the process's multimedia thread can't be
-/// made. Ids go up to FFFFh and then start again, past those in use, so
-/// that a 16-bit program can hold them.
+/// made or every id is in use. Ids go up to FFFFh and then start again,
+/// past those in use, so that a 16-bit program can hold them.
 fn add(cpu: &mut Cpu, delay: u32, periodic: bool, action: Action) -> u32 {
     if callback::ensure_thread(cpu).is_none() {
         release(cpu, &action);
@@ -222,13 +225,16 @@ fn add(cpu: &mut Cpu, delay: u32, periodic: bool, action: Action) -> u32 {
     let pid = crate::win32::user32::current_pid(cpu);
     let now = cpu.bus.clock.now_micros();
     let t = timers(cpu);
-    let mut id = t.last_id;
-    loop {
-        id = if id >= 0xFFFF { 1 } else { id + 1 };
-        if !t.timers.iter().any(|timer| timer.id == id) {
-            break;
-        }
-    }
+    // The ids after the last one given, round to it, the first free.
+    let last = t.last_id.min(ID_MAX);
+    let free = (1..=ID_MAX)
+        .map(|n| (last + n - 1) % ID_MAX + 1)
+        .find(|&id| !t.timers.iter().any(|timer| timer.id == id));
+    let Some(id) = free else {
+        release(cpu, &action);
+        return 0;
+    };
+    let t = timers(cpu);
     t.last_id = id;
     let period = delay as u64 * 1000;
     t.timers.push(Timer {
@@ -258,9 +264,29 @@ pub fn time_kill_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(MMSYSERR_INVALPARAM);
     };
     let timer = t.timers.remove(i);
+    // A 16-bit function's call that waits for its task is not made: the
+    // program may free the function once timeKillEvent returns.
+    if let Action::Call16 { tid, address, .. } = timer.action {
+        crate::win16::cancel_timer_calls16(cpu, tid, address, id);
+    }
     release(cpu, &timer.action);
     super::schedule(cpu);
     Some(TIMERR_NOERROR)
+}
+
+/// The 16-bit task whose thread is `tid` ended: its timers go, as a
+/// process's go when it ends (`process_ended`). No task is left to make
+/// their calls, and the code of their functions may be gone with it.
+/// The other tasks keep the Win16 process, so `process_ended` doesn't
+/// see to them, and a periodic timer would go on firing for nothing.
+pub fn task_ended16(cpu: &mut Cpu, tid: u32) {
+    let t = timers(cpu);
+    let before = t.timers.len();
+    t.timers
+        .retain(|timer| !matches!(timer.action, Action::Call16 { tid: owner, .. } if owner == tid));
+    if t.timers.len() != before {
+        super::schedule(cpu);
+    }
 }
 
 /// The timers of the process `pid` that are due at `now` do what they
