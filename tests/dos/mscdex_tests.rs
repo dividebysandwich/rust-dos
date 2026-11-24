@@ -261,6 +261,109 @@ fn images_answer_the_volume_calls() {
     assert_eq!(cpu.bus.read_32(0x33000 + 10), 4, "file size");
 }
 
+/// MSCDEX 2.25 looks the drive up from CL alone: Ultimate Domain sends its
+/// device status request with CX=2E03h (#1796).
+#[test]
+fn the_drive_is_in_cl() {
+    let (mut cpu, _) = disc("cl");
+
+    // Device status through AX=1510h for D:, with garbage in CH.
+    for i in 0..16 {
+        cpu.bus.write_8(BUFFER + i, 0);
+    }
+    cpu.bus.write_8(BUFFER, 0x06);
+    for i in 0..0x1A {
+        cpu.bus.write_8(HEADER + i, 0);
+    }
+    cpu.bus.write_8(HEADER, 0x1A);
+    cpu.bus.write_8(HEADER + 1, 0xEE);
+    cpu.bus.write_8(HEADER + 2, 0x03);
+    cpu.bus.write_16(HEADER + 0x10, 0x3100);
+    cpu.bus.write_16(HEADER + 0x12, 5);
+    cpu.set_es(0x3000);
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    int2f(&mut cpu, 0x1510, 0, 0x2E03);
+    assert_eq!(cpu.bus.read_16(HEADER + 3), 0x0100, "done, no error");
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.bus.read_8(HEADER + 1), 0, "D: is subunit 0");
+    assert_eq!(cpu.bus.read_32(BUFFER + 1) & 0x0800, 0, "a disc is in");
+
+    // C: isn't a CD drive: the call fails and the header stays as it was.
+    cpu.bus.write_16(HEADER + 3, 0x1234);
+    int2f(&mut cpu, 0x1510, 0, 0x2E02);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.ax(), 15);
+    assert_eq!(cpu.bus.read_16(HEADER + 3), 0x1234);
+
+    int2f(&mut cpu, 0x150B, 0, 0xFF03);
+    assert_eq!(cpu.bx(), 0xADAD);
+    assert_ne!(cpu.ax(), 0);
+    int2f(&mut cpu, 0x150B, 0, 0x0302);
+    assert_eq!(cpu.ax(), 0, "C: is no CD drive");
+
+    cpu.set_es(0x3100);
+    cpu.set_dx(0);
+    int2f(&mut cpu, 0x1505, 0, 0x8003);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.ax(), 1);
+    cpu.set_si(0);
+    cpu.set_di(16);
+    cpu.set_dx(1);
+    int2f(&mut cpu, 0x1508, 0, 0x4103);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.bus.read_8(BUFFER + 5), b'1');
+
+    // The volume descriptor preference: for D:, and C: is no CD drive.
+    cpu.set_dx(0x1234);
+    int2f(&mut cpu, 0x150E, 0, 0x7703);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.dx(), 0x0100, "the primary descriptor");
+    int2f(&mut cpu, 0x150E, 0, 0x0302);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.ax(), 15);
+}
+
+/// MSCDEX 2.25's dispatcher clears CF before each of its functions, 00h
+/// to 10h, and fails the others with AX=1 (invalid function). Absolute
+/// write (1509h) is one it doesn't have.
+#[test]
+fn cf_and_the_functions_mscdex_lacks() {
+    let (mut cpu, _) = disc("dispatch");
+    cpu.set_es(0x3100);
+
+    // Functions that don't fail clear a CF the caller left set.
+    for (ax, cx) in [(0x1500, 0), (0x150A, 0), (0x150B, 3), (0x150C, 0)] {
+        cpu.set_cpu_flag(CpuFlags::CF, true);
+        int2f(&mut cpu, ax, 0, cx);
+        assert!(!cpu.get_cpu_flag(CpuFlags::CF), "AX={:04X}", ax);
+    }
+    assert_eq!(cpu.bx(), 0x0217, "150Ch ran");
+
+    for (ax, cx) in [(0x1509, 3), (0x1509, 2), (0x1511, 3), (0x15FF, 3)] {
+        cpu.set_cpu_flag(CpuFlags::CF, false);
+        int2f(&mut cpu, ax, 0, cx);
+        assert!(cpu.get_cpu_flag(CpuFlags::CF), "AX={:04X}", ax);
+        assert_eq!(cpu.ax(), 1, "AX={:04X}", ax);
+    }
+
+    // 150Eh sets the preference to the primary descriptor or the
+    // supplementary one in Shift-JIS, and fails anything else.
+    for dx in [0x0100, 0x0105, 0x0201] {
+        cpu.set_dx(dx);
+        int2f(&mut cpu, 0x150E, 1, 3);
+        assert!(!cpu.get_cpu_flag(CpuFlags::CF), "DX={:04X}", dx);
+        assert_eq!(cpu.dx(), dx);
+    }
+    cpu.set_dx(0x0202);
+    int2f(&mut cpu, 0x150E, 1, 3);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!((cpu.ax(), cpu.dx()), (1, 0));
+    cpu.set_dx(0x0100);
+    int2f(&mut cpu, 0x150E, 2, 3);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!((cpu.ax(), cpu.dx()), (1, 0x0100));
+}
+
 #[test]
 fn high_sierra_discs_answer_the_volume_calls() {
     let dir = cdimage::scratch("mscdex_high_sierra");
