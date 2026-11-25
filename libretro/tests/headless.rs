@@ -465,8 +465,10 @@ fn without_the_frontend_s_opengl_the_3dfx_card_is_drawn_in_software() {
     let dir = scratch("voodoo_gl");
     start(&dir, &[("rust_dos_voodoo", "true"), ("rust_dos_voodoo_renderer", "opengl")]);
     assert!(load(None));
-    // An OpenGL 3.2 core context, then any of 3.0 or later.
-    assert_eq!(with(|fe| fe.hw_render_requests.clone()), [RETRO_HW_CONTEXT_OPENGL_CORE, RETRO_HW_CONTEXT_OPENGL]);
+    // An OpenGL 3.2 core context, then any of 3.0 or later, then OpenGL
+    // ES 3.0.
+    let asked = [RETRO_HW_CONTEXT_OPENGL_CORE, RETRO_HW_CONTEXT_OPENGL, RETRO_HW_CONTEXT_OPENGLES3];
+    assert_eq!(with(|fe| fe.hw_render_requests.clone()), asked);
     run(120);
     with(|fe| {
         assert_eq!((fe.width, fe.height), (640, 400));

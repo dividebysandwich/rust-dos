@@ -5,7 +5,6 @@
 
 use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error, string_at};
 use crate::cpu::Cpu;
-use crate::win32::heap::Heap;
 use crate::win32::object::{self, Kind};
 use crate::win32::thread::{self, WAIT_TIMEOUT, Wait};
 use crate::win32::{TRAP, process, with_process};
@@ -393,8 +392,6 @@ const LOCK: u32 = 0x10;
 const HANDOVERS: u32 = 0x18;
 const SECTION: u32 = 0x1C;
 const OBJECT_SIZE: u32 = 0x20;
-/// The system heap's size: room for 32768 sections' objects.
-const SYSTEM_HEAP_SIZE: u32 = 0x10_0000;
 
 /// What Windows 98 raises for a CRITICAL_SECTION it didn't initialize.
 const STATUS_ACCESS_VIOLATION: u32 = 0xC000_0005;
@@ -519,13 +516,7 @@ pub(super) fn critical_section_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32
         return None;
     }
     let object = with_process(cpu, |p, bus| {
-        if p.system_heap.is_none() {
-            *p.system_heap = Heap::create_shared(&mut p.memory, SYSTEM_HEAP_SIZE);
-        }
-        let object = p
-            .system_heap
-            .as_mut()?
-            .alloc(&mut p.memory, bus, OBJECT_SIZE)?;
+        let object = p.system_alloc(bus, OBJECT_SIZE)?;
         let mut bytes = [0; OBJECT_SIZE as usize];
         bytes[0] = SECTION_TYPE;
         bytes[LOCK as usize..][..4].copy_from_slice(&1u32.to_le_bytes());
@@ -556,9 +547,7 @@ pub(super) fn critical_section_delete(cpu: &mut Cpu, args: &[u32]) -> Option<u32
     if kind != SECTION_TYPE {
         return super::super::seh::raise_from_call(cpu, 1, STATUS_ACCESS_VIOLATION, 0, &[]);
     }
-    if let Some(heap) = process(cpu).system_heap.as_mut() {
-        heap.free(object);
-    }
+    process(cpu).system_free(object);
     Some(0)
 }
 

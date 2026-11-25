@@ -2248,6 +2248,63 @@ fn a_created_long_name_keeps_its_case_and_a_short_one_is_uppercased() {
     assert!(disk.is_file(r"C:\LEVEL0_FINAL.DAT"));
 }
 
+/// A directory's name keeps its case by the rule a file's follows: a long
+/// one from any call, an 8.3 one from a long-name call only. DOS's own
+/// calls uppercase an 8.3 name, of a directory or a file; a long-name
+/// call (`long_name_call`) keeps it as given, as Windows 9x's VFAT does.
+#[test]
+fn a_long_name_call_keeps_the_case_of_an_8_3_name() {
+    let root = scratch("long_name_call_case");
+    let mut disk = DiskController::new(root.clone());
+    disk.create_directory(r"C:\Program Files").unwrap();
+    disk.create_directory(r"C:\saves").unwrap();
+    disk.long_name_call(|disk| disk.create_directory(r"C:\Program Files\Base"))
+        .unwrap();
+    let handle = disk.create_file(r"C:\dos.cfg", PSP).unwrap();
+    disk.close_file(handle);
+    let handle = disk
+        .long_name_call(|disk| disk.create_file(r"C:\config.cfg", PSP))
+        .unwrap();
+    disk.close_file(handle);
+    disk.long_name_call(|disk| disk.rename_file(r"C:\CONFIG.CFG", r"C:\Old.cfg"))
+        .unwrap();
+    let listed = |dir: &Path| {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(listed(&root), ["DOS.CFG", "Old.cfg", "Program Files", "SAVES"]);
+    assert_eq!(listed(&root.join("Program Files")), ["Base"]);
+    // The call ended, so the next one is DOS's again.
+    let handle = disk.create_file(r"C:\after.txt", PSP).unwrap();
+    disk.close_file(handle);
+    assert!(listed(&root).contains(&"AFTER.TXT".to_string()));
+}
+
+/// A long-name call may give a name only another case, as MoveFileA does
+/// on Windows 9x; DOS's rename still finds the name taken.
+#[test]
+fn a_long_name_call_renames_a_name_to_another_case() {
+    let root = scratch("long_name_call_recase");
+    let mut disk = DiskController::new(root.clone());
+    let handle = disk
+        .long_name_call(|disk| disk.create_file(r"C:\config.cfg", PSP))
+        .unwrap();
+    disk.close_file(handle);
+    assert_eq!(disk.rename_file(r"C:\config.cfg", r"C:\CONFIG.CFG"), Err(0x05));
+    disk.long_name_call(|disk| disk.rename_file(r"C:\config.cfg", r"C:\Config.cfg"))
+        .unwrap();
+    let names: Vec<String> = fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["Config.cfg"]);
+    assert!(disk.is_file(r"C:\CONFIG.CFG"));
+}
+
 /// Where the host's own file pointer of the host file open at `sft` is,
 /// asked of the host.
 fn host_pointer(disk: &DiskController, sft: u16) -> u64 {
