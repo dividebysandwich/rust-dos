@@ -445,7 +445,12 @@ fn bound(cpu: &mut Cpu) -> Option<&mut Texture> {
     texture_mut(s, index, name)
 }
 
-/// glGenTextures(n, textures).
+/// glGenTextures(n, textures): the lowest names no texture of the
+/// group has, from 1 up. A program may bind names it never asked for:
+/// Soldier of Fortune counts its images' names up from 0x481 itself and
+/// takes others from glGenTextures between them. A name past the
+/// highest in use would be the one it gives its next image, and the
+/// two textures would be one.
 pub fn gen_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [n, at] = args[..] else {
         return Some(0);
@@ -464,13 +469,12 @@ pub fn gen_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(textures) = lists::textures_mut(state(cpu), index) else {
         return Some(0);
     };
-    let mut names = Vec::with_capacity(n as usize);
-    let mut next = textures.iter().map(|t| t.name).max().unwrap_or(0);
-    for _ in 0..n {
-        next += 1;
-        names.push(next);
-        textures.push(new(next));
-    }
+    let used: std::collections::HashSet<u32> = textures.iter().map(|t| t.name).collect();
+    let names: Vec<u32> = (1..=u32::MAX)
+        .filter(|name| !used.contains(name))
+        .take(n as usize)
+        .collect();
+    textures.extend(names.iter().map(|&name| new(name)));
     for (i, name) in names.into_iter().enumerate() {
         cpu.bus.guest_write_32(at + 4 * i as u32, name);
     }

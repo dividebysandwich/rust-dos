@@ -1043,28 +1043,15 @@ pub struct Started {
     pub thread: Option<u32>,
 }
 
-/// WinExec and EXEC from the running task: the program at `path` as a
-/// new task. What it started, or the error below 32 Windows gives. The
-/// caller then lets a new task run first (`after_exec`).
+/// WinExec and EXEC from the running task: the program at `path`, or
+/// found where LoadModule looks for it (`module::find_program`), as a new
+/// task. What it started, or the error below 32 Windows gives (2 when no
+/// file is found). The caller then lets a new task run first
+/// (`after_exec`).
 pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<Started, u16> {
     let parent = super::current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].handle);
     let environment = super::win16_ref(cpu).map_or(Vec::new(), |p| p.environment.clone());
-    let path = if path.contains('.') {
-        path.to_string()
-    } else {
-        format!("{}.EXE", path)
-    };
-    let (path, file) = match cpu.read_program_file(&path) {
-        Some(file) => (path, file),
-        None => {
-            let windows = format!("{}\\{}", crate::win32::loader::WINDOWS_DIR, path);
-            if path.contains(['\\', '/', ':']) {
-                return Err(2);
-            }
-            let file = cpu.read_program_file(&windows).ok_or(2u16)?;
-            (windows, file)
-        }
-    };
+    let (path, file) = module::find_program(cpu, path).ok_or(2u16)?;
     // The module's path as Windows keeps it, whatever form the caller
     // gave: full, with backslashes (D:/METAL.EXE is D:\METAL.EXE), which
     // GetModuleFileName gives and the module's DLLs are looked for by.

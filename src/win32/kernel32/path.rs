@@ -571,7 +571,8 @@ pub(super) fn make_directory(cpu: &mut Cpu, path: &str) -> Result<(), u32> {
     if disk.exists(full) {
         return Err(ERROR_ALREADY_EXISTS);
     }
-    disk.create_directory(full).map_err(u32::from)
+    disk.long_name_call(|disk| disk.create_directory(full))
+        .map_err(u32::from)
 }
 
 /// RemoveDirectoryA(path): an empty directory, not the current one.
@@ -665,7 +666,7 @@ fn copy(cpu: &mut Cpu, from: &str, to: &str) -> Result<(), u32> {
     if disk.is_directory(to) {
         return Err(ERROR_ACCESS_DENIED);
     }
-    disk.write_whole_file(to, &data, Some(stamp))
+    disk.long_name_call(|disk| disk.write_whole_file(to, &data, Some(stamp)))
         .map_err(|e| e as u32)?;
     if attr & 0x01 != 0 {
         let _ = disk.set_file_attribute(to, 0x01);
@@ -748,18 +749,20 @@ pub(super) fn move_path(cpu: &mut Cpu, from: &str, to: &str) -> Result<(), u32> 
     if has_wildcards(to) {
         return Err(ERROR_INVALID_NAME);
     }
-    if from_full.eq_ignore_ascii_case(&to_full) {
+    // The same name in another case renames it (`rename_file`).
+    let recased = from_full.eq_ignore_ascii_case(&to_full);
+    if from_full == to_full {
         return Ok(());
     }
     if open_sharing(cpu, from).is_some() {
         return Err(ERROR_ACCESS_DENIED);
     }
     let disk = &mut cpu.bus.disk;
-    if disk.exists(to) {
+    if disk.exists(to) && !recased {
         return Err(ERROR_ALREADY_EXISTS);
     }
     if drive_of(&from_full) == drive_of(&to_full) {
-        disk.rename_file(&from_full, &to_full)
+        disk.long_name_call(|disk| disk.rename_file(&from_full, &to_full))
             .map_err(|e| e as u32)
     } else if disk.is_directory(from) {
         Err(ERROR_NOT_SAME_DEVICE)

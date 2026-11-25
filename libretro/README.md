@@ -3,7 +3,9 @@
 Rust-DOS runs in [RetroArch](https://www.retroarch.com/) and the other
 [libretro](https://www.libretro.com/) frontends as the core `rust_dos_libretro`.
 It is the same emulator as the Rust-DOS program, with the frontend's window,
-sound, gamepads, save states and RetroAchievements.
+sound, gamepads, save states and RetroAchievements. It is also how Rust-DOS
+runs on Android phones and tablets: in RetroArch for Android, with the core
+from the `-libretro-android-` zip (see [Installing](#installing)).
 
 ## Installing
 
@@ -119,21 +121,22 @@ again.
 
 ## The 3dfx Voodoo with OpenGL
 
-With the core options **3dfx Voodoo** on and **3dfx renderer** set to
-OpenGL (`voodoo_renderer=opengl`), the frontend's OpenGL draws the card's
-picture, as the program's window does: at **3dfx OpenGL scale** times its
-resolution (`voodoo_scale`), with **3dfx OpenGL antialiasing**
-(`voodoo_msaa`) and **3dfx OpenGL dithering** (`voodoo_dither`, the
-card's dither pattern, on by default). That needs RetroArch's `glcore`
-or `gl` video driver (OpenGL 3, not OpenGL ES). The renderer is picked
-when content is loaded; without such a driver, the software renderer
-draws the card, as it does by default. A Voodoo3 or Banshee is always
-drawn in software: its picture is the whole desktop, with the video
-overlay and the hardware cursor, which the OpenGL renderer doesn't draw.
-Save states and the settings window work as with the software renderer;
-while the settings window or the performance overlay is open, the card's
-picture is the software one. A Voodoo3 or Banshee (`machine=svga_voodoo3`
-or `svga_banshee`) is always drawn in software in the core.
+With the core options **3dfx Voodoo** on and **3dfx renderer** set to OpenGL
+(`voodoo_renderer=opengl`), the frontend's OpenGL draws the card's picture,
+as the program's window does: at **3dfx OpenGL scale** times its resolution
+(`voodoo_scale`), with **3dfx OpenGL antialiasing** (`voodoo_msaa`) and
+**3dfx OpenGL dithering** (`voodoo_dither`, the card's dither pattern, on by
+default). That needs RetroArch's `glcore` or `gl` video driver: OpenGL 3, or
+OpenGL ES 3 as RetroArch has on Android. The renderer is picked when content
+is loaded; without such a driver, the software renderer draws the card, as
+it does by default. With OpenGL ES, antialiasing takes the pixels' resolved
+colours where a draw blends, as on a desktop driver without
+`GL_ARB_sample_shading`. A Voodoo3 or Banshee (`machine=svga_voodoo3` or
+`svga_banshee`) is always drawn in software in the core: its picture is the
+whole desktop, with the video overlay and the hardware cursor, which the
+OpenGL renderer doesn't draw. Save states and the settings window work as
+with the software renderer; while the settings window or the performance
+overlay is open, the card's picture is the software one.
 
 ## Controls
 

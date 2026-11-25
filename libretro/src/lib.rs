@@ -491,7 +491,10 @@ pub unsafe extern "C" fn retro_load_game(game: *const retro_game_info) -> bool {
         if gl::request(&cb) {
             core.hardware_rendering();
         } else {
-            cb.log(RETRO_LOG_WARN, "The frontend has no OpenGL 3 for the 3dfx card: the software renderer draws it");
+            cb.log(
+                RETRO_LOG_WARN,
+                "The frontend has no OpenGL 3 or OpenGL ES 3 for the 3dfx card: the software renderer draws it",
+            );
         }
     }
     let mut yes = true;

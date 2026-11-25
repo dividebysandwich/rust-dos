@@ -185,8 +185,9 @@ pub(crate) fn open_file(
     let disk = &mut cpu.bus.disk;
     let result = match disposition {
         CREATE_NEW if exists => return Err(ERROR_FILE_EXISTS),
-        CREATE_NEW | CREATE_ALWAYS => disk.create_file(&name, psp),
-        OPEN_ALWAYS if !exists => disk.create_file(&name, psp),
+        // A new file's name keeps the case it is given, as on Windows 9x.
+        CREATE_NEW | CREATE_ALWAYS => disk.long_name_call(|disk| disk.create_file(&name, psp)),
+        OPEN_ALWAYS if !exists => disk.long_name_call(|disk| disk.create_file(&name, psp)),
         OPEN_EXISTING | OPEN_ALWAYS => disk.open_file(&name, mode, psp),
         TRUNCATE_EXISTING => {
             let sft = disk.open_file(&name, mode, psp).map_err(|e| e as u32)?;
