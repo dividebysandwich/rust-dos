@@ -356,9 +356,6 @@ pub(super) fn refresh(cpu: &mut Cpu, source: u32, sels: &[u16]) {
                 let lin = first.wrapping_add(i * PAGE);
                 let at = a.window + i * PAGE;
                 let mapped = old & PRESENT != 0;
-                if mapped {
-                    continue;
-                }
                 let now = m.entry(bus, lin).filter(|e| e & PRESENT != 0);
                 if let Some(e) = now.filter(|e| mapped && (e ^ old) & !(PAGE - 1) == 0) {
                     if is_pageable(bus, m.cr3, lin) {
