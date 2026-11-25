@@ -2370,7 +2370,8 @@ fn scalable_file(cpu: &mut Cpu, name: &str) -> Option<Vec<u8>> {
 /// ERROR_FILE_NOT_FOUND, and one that isn't TrueType, or a `fot` that is
 /// there already, fails without setting an error. QuickTime 5 installs
 /// its font this way, with a full path and no `path`, each time it
-/// starts.
+/// starts. An empty `path` is no path, as for NULL: the documentation
+/// asks for either with a full path in `ttf`.
 pub fn create_scalable_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     use crate::win32::kernel32;
     use crate::win32::user32::string_at;
@@ -2383,13 +2384,18 @@ pub fn create_scalable_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32>
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     };
-    let full = if path == 0 {
-        ttf.clone()
+    let path = if path == 0 {
+        String::new()
     } else {
         let Some(path) = string_at(cpu, path) else {
             set_error(cpu, ERROR_INVALID_PARAMETER);
             return Some(FALSE);
         };
+        path
+    };
+    let full = if path.is_empty() {
+        ttf.clone()
+    } else {
         format!("{}\\{}", path.trim_end_matches('\\'), ttf)
     };
     let Some(bytes) = crate::win32::winmm::mci::media::read_file(cpu, &full) else {
