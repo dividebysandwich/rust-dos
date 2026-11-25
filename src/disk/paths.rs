@@ -79,9 +79,7 @@ impl DiskController {
             "" => return Cow::Borrowed(part),
             trimmed => trimmed,
         };
-        if !long
-            && let Some((stem, ext)) = trimmed.split_once('.')
-        {
+        if !long && let Some((stem, ext)) = trimmed.split_once('.') {
             let stem_unpadded = stem.trim_end_matches(' ');
             if stem_unpadded.len() < stem.len() && !stem_unpadded.is_empty() {
                 return Cow::Owned(format!("{stem_unpadded}.{ext}"));
@@ -323,7 +321,11 @@ impl DiskController {
         let (drive_num, rest) = self.split_drive(&normalized)?;
         let drive = self.drive(drive_num)?;
         let volume = drive.fat()?.clone();
-        let parts = self.logical_components(drive, rest).into_iter().map(Cow::into_owned).collect();
+        let parts = self
+            .logical_components(drive, rest)
+            .into_iter()
+            .map(Cow::into_owned)
+            .collect();
         Some((drive_num, volume, parts))
     }
 

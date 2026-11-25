@@ -295,11 +295,15 @@ fn spaces_before_the_extension_pad_the_name() {
     // So do a directory made and a file renamed by such a name.
     disk.create_directory("SAVES   .DIR").unwrap();
     assert!(base.join("SAVES.DIR").is_dir());
-    disk.rename_file(r"DUNECD\DUNE.BAT", r"SAVES.DIR\GAME  .SAV").unwrap();
+    disk.rename_file(r"DUNECD\DUNE.BAT", r"SAVES.DIR\GAME  .SAV")
+        .unwrap();
     assert!(base.join("SAVES.DIR/GAME.SAV").is_file());
 
     // Spaces inside the name stay, and a name of spaces is no name.
-    assert_eq!(disk.qualify_path("A B .TXT").as_deref(), Some(r"C:\A B.TXT"));
+    assert_eq!(
+        disk.qualify_path("A B .TXT").as_deref(),
+        Some(r"C:\A B.TXT")
+    );
     assert_eq!(disk.qualify_path("   .TXT").as_deref(), Some(r"C:\   .TXT"));
 
     // A long name keeps them.
