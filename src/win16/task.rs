@@ -860,6 +860,12 @@ pub fn entered(win32: &mut crate::win32::Win32, tid: u32) {
 /// and this one when its turn comes again. It goes on at `ctx`.
 pub fn yield_now(cpu: &mut Cpu, ctx: Context) {
     crate::win32::system::load_context(cpu, &ctx);
+    give_up_turn(cpu);
+}
+
+/// The running task gives up its turn where the processor is: another
+/// task that is ready runs, the one `hand_turn` named first.
+pub fn give_up_turn(cpu: &mut Cpu) {
     cpu.bus.win32.win16.lock = 0;
     crate::win32::thread::reschedule(cpu);
 }

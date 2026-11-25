@@ -225,7 +225,9 @@ impl Msg {
 
 /// A message another thread sent: what it waits for the reply of
 /// (`kind` 0), or a notification it doesn't (1), or one whose reply goes
-/// to a callback of the sender (2: `callback` and its data).
+/// to a callback of the sender (2: `callback` and its data), or one a
+/// Win16 task sent to another task's window and waits for the reply of
+/// (`SENT_WIN16`).
 #[derive(Clone, Debug, Default)]
 pub struct Sent {
     pub id: u32,
@@ -236,6 +238,20 @@ pub struct Sent {
     pub lparam: u32,
     pub kind: u32,
     pub callback: (u32, u32),
+}
+
+/// The `kind` of a message a Win16 task sent to another task's window
+/// (`send_message16`): its sender waits for the reply, as for kind 0,
+/// and the message is in Win16's form, as the sender gave it. The
+/// receiving thread sends it there with the 16-bit SendMessage, which
+/// calls a 16-bit window procedure with it as it is (`handle_sent`).
+pub const SENT_WIN16: u32 = 3;
+
+impl Sent {
+    /// Whether its sender waits for the reply.
+    fn awaited(&self) -> bool {
+        self.kind == 0 || self.kind == SENT_WIN16
+    }
 }
 
 /// A callback of SendMessageCallbackA to call in the sender's thread:
@@ -520,7 +536,14 @@ fn send(
     let (tid, proc) = (w.tid, w.proc);
     let me = current_tid(cpu);
     if tid != me && hwnd != DESKTOP && tid != 0 {
-        return send_other(cpu, hwnd, tid, msg, wp, lp, timeout);
+        let sent = Sent {
+            hwnd,
+            message: msg,
+            wparam: wp,
+            lparam: lp,
+            ..Sent::default()
+        };
+        return send_other(cpu, tid, sent, timeout);
     }
     if !callable(proc) {
         return Some(0);
@@ -546,18 +569,12 @@ fn send_result(cpu: &mut Cpu, t: &Task, result: u32) -> u32 {
     result
 }
 
-/// Send a message to the window of another thread, `tid`: queued there,
-/// and the thread waits for the reply. A function that runs again after
-/// its wait finds its own message among those it waits for.
-fn send_other(
-    cpu: &mut Cpu,
-    hwnd: u32,
-    tid: u32,
-    msg: u32,
-    wp: u32,
-    lp: u32,
-    timeout: Option<(u32, u32)>,
-) -> Option<u32> {
+/// Send the message `sent` (its window, message, wParam, lParam and
+/// kind, 0 or `SENT_WIN16`) to the window of another thread, `tid`:
+/// queued there, and the thread waits for the reply. A function that
+/// runs again after its wait finds its own message among those it waits
+/// for.
+fn send_other(cpu: &mut Cpu, tid: u32, mut sent: Sent, timeout: Option<(u32, u32)>) -> Option<u32> {
     let me = current_tid(cpu);
     let now = cpu.bus.clock.now_micros();
     let state = user(cpu);
@@ -570,31 +587,59 @@ fn send_other(
         }
         _ => {
             let deadline = timeout.map(|(ms, _)| now + ms as u64 * 1000);
-            let sent = Sent {
-                from: me,
-                hwnd,
-                message: msg,
-                wparam: wp,
-                lparam: lp,
-                ..Sent::default()
-            };
-            queue_send(cpu, tid, sent, deadline)
+            sent.from = me;
+            queue_send(cpu, tid, sent.clone(), deadline)
         }
     };
     let out = timeout.map_or(0, |(_, out)| out);
+    let (hwnd, msg, wp, lp) = (sent.hwnd, sent.message, sent.wparam, sent.lparam);
     task::start(cpu, TASK_SEND, vec![hwnd, msg, wp, lp, 0, 1, id, out], 0)
 }
 
-/// Queue `sent` for the thread `tid`, whose reply its sender waits for
-/// until `deadline` (in the clock's microseconds), if there is one: the
-/// message's id.
+/// SendMessage16(hwnd, message, wParam, lParam), the built-in Windows's
+/// own: Win16's SendMessage to a window of another Win16 task. Windows
+/// 3.1 switches to that task and calls the window procedure there with
+/// the caller's wParam and lParam, which point into the address space
+/// all tasks share. So the message is queued for the task's thread as it
+/// is (`SENT_WIN16`), and the thread sends it with the 16-bit
+/// SendMessage (`handle_sent`); the result is the window procedure's
+/// DX:AX.
+pub fn send_message16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[hwnd, msg, wp, lp] = args else {
+        unreachable!()
+    };
+    let me = current_tid(cpu);
+    let Some(tid) = user(cpu).window(hwnd).map(|w| w.tid) else {
+        if let Some(next) = resume_wait(cpu, hwnd, msg, wp, lp, None) {
+            return next;
+        }
+        set_error(cpu, ERROR_INVALID_WINDOW_HANDLE);
+        return Some(0);
+    };
+    if tid == me || tid == 0 || hwnd == DESKTOP {
+        // The 16-bit SendMessage sends to these itself.
+        return Some(0);
+    }
+    let sent = Sent {
+        hwnd,
+        message: msg,
+        wparam: wp,
+        lparam: lp,
+        kind: SENT_WIN16,
+        ..Sent::default()
+    };
+    send_other(cpu, tid, sent, None)
+}
+
+/// Queue `sent` (of kind 0 or `SENT_WIN16`) for the thread `tid`, whose
+/// reply its sender waits for until `deadline` (in the clock's
+/// microseconds), if there is one: the message's id.
 fn queue_send(cpu: &mut Cpu, tid: u32, mut sent: Sent, deadline: Option<u64>) -> u32 {
     let me = sent.from;
     let state = user(cpu);
     state.last_sent += 1;
     let id = state.last_sent;
     sent.id = id;
-    sent.kind = 0;
     let deadline = deadline.map_or(0, |d| d.max(1));
     state.queue_mut(me).waiting.push((id, deadline));
     state.queue_mut(tid).sent.push_back(sent);
@@ -657,7 +702,7 @@ pub fn thread_ended(win32: &mut crate::win32::Win32, tid: u32) {
     let handled = q.in_send.drain(..).flatten();
     let pending: Vec<(u32, u32)> = handled
         .chain(q.sent.drain(..))
-        .filter(|s| s.kind == 0)
+        .filter(Sent::awaited)
         .map(|s| (s.from, s.id))
         .collect();
     for (from, id) in pending {
@@ -779,10 +824,17 @@ fn reply_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 /// Start handling the first message another thread sent to this one, or
 /// the first callback of SendMessageCallbackA due, taking it off the
 /// queue: a call, going on at `step` with its result. None when there is
-/// none.
+/// none. A message sent goes to SendMessageA, and one a Win16 task sent
+/// (`SENT_WIN16`) to the 16-bit SendMessage, as it is.
 fn handle_sent(cpu: &mut Cpu, step: u16) -> Option<Next> {
     let me = current_tid(cpu);
-    let send = address_of(cpu, "SendMessageA");
+    let q = user(cpu).queue_mut(me);
+    let win16 = q.callbacks.is_empty() && q.sent.front().is_some_and(|s| s.kind == SENT_WIN16);
+    let send = if win16 {
+        crate::win16::send_message_slot(cpu)
+    } else {
+        address_of(cpu, "SendMessageA")
+    };
     let state = user(cpu);
     let q = state.queue_mut(me);
     let (call, args) = if let Some(cb) = q.callbacks.pop_front() {
@@ -817,7 +869,7 @@ fn finish_sent(cpu: &mut Cpu, result: u32) {
         return;
     };
     match sent.kind {
-        0 => {
+        0 | SENT_WIN16 => {
             state.queue_mut(sent.from).replies.push((sent.id, result));
             crate::win16::task::hand_turn(&mut cpu.bus.win32, me, sent.from);
         }
@@ -1728,7 +1780,7 @@ pub fn reply_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(Some(sent)) = q.in_send.last_mut() else {
         return Some(FALSE);
     };
-    if sent.kind != 0 {
+    if !sent.awaited() {
         return Some(FALSE);
     }
     sent.kind = 1;
@@ -1937,6 +1989,53 @@ pub fn idle_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             _ => return idle_done(cpu, t, 0),
         }
     }
+}
+
+/// UserYield16, which KERNEL's Yield and USER's WaitMessage call for a
+/// Win16 task: the messages other threads sent to this one, and the
+/// callbacks of SendMessageCallbackA due, are handled, so that their
+/// senders get the reply. Windows 3.1's USER does it in UserYield
+/// (Wine's UserYield16 peeks with PM_QS_SENDMESSAGE). Returns 0 when
+/// none is left.
+pub fn user_yield16(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    task::start(cpu, task::RECEIVE, Vec::new(), 0)
+}
+
+/// UserYield16's steps: `handle_sent` until none is left. A reply to
+/// another task gives that task the turn at once, and UserYield16 runs
+/// again from its start when the turn comes back: on Windows 95 the
+/// sender runs on, to its end if it doesn't wait, before the Yield that
+/// replied returns (#1913's measurements in 86Box).
+pub fn receive_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    if t.step == 1 {
+        let tid = current_tid(cpu);
+        let from = match user(cpu).queue_mut(tid).in_send.last() {
+            Some(Some(sent)) if sent.awaited() => sent.from,
+            _ => tid,
+        };
+        finish_sent(cpu, value);
+        let win32 = &mut cpu.bus.win32;
+        let q = win32.user.queue_mut(tid);
+        if q.waiting.last() == Some(&(0, 0)) {
+            q.waiting.pop();
+        }
+        if from != tid && crate::win16::task::both_tasks(win32, tid, from) {
+            t.retry(cpu);
+            crate::win16::task::give_up_turn(cpu);
+            return Next::Stop;
+        }
+    }
+    t.step = 0;
+    handle_sent(cpu, 1).unwrap_or(Next::Done(0))
+}
+
+/// Whether the running thread has messages sent to it, or callbacks of
+/// SendMessageCallbackA, to handle.
+pub fn has_sent(cpu: &mut Cpu) -> bool {
+    let tid = current_tid(cpu);
+    user(cpu)
+        .queue(tid)
+        .is_some_and(|q| !q.sent.is_empty() || !q.callbacks.is_empty())
 }
 
 /// WaitForInputIdle is done: it returns `result`, having closed its

@@ -119,7 +119,7 @@ static APIS: &[Api16] = &[
     rust("SetDlgItemText", 92, "wwl", set_dlg_item_text),
     rust("GetDlgItemText", 93, "wwlw", get_dlg_item_text),
     rust("SetDlgItemInt", 94, "wwww", set_dlg_item_int),
-    rust("GetDlgItemInt", 95, "wwpw", get_dlg_item_int),
+    rust("GetDlgItemInt", 95, "wwlw", get_dlg_item_int),
     win32("CheckRadioButton", 96, "wwww", U, "CheckRadioButton", b'b'),
     win32("CheckDlgButton", 97, "www", U, "CheckDlgButton", b'b'),
     win32(
@@ -152,7 +152,7 @@ static APIS: &[Api16] = &[
     rust("PeekMessage", 109, "pwwww", peek_message),
     rust("PostMessage", 110, "wwwl", message::post_message),
     rust("SendMessage", 111, "wwwl", message::send_message),
-    win32("WaitMessage", 112, "", U, "WaitMessage", b'b'),
+    rust("WaitMessage", 112, "", wait_message),
     rust("TranslateMessage", 113, "p", translate_message),
     rust("DispatchMessage", 114, "p", dispatch_message),
     win32("ReplyMessage", 115, "l", U, "ReplyMessage", b'b'),
@@ -595,9 +595,10 @@ const P_RECT: u32 = 10;
 const P_PEEK: u32 = 11;
 const P_SCROLL_RANGE: u32 = 12;
 const P_MODULE: u32 = 13;
-const P_DLG_INT: u32 = 14;
+// 14 was GetDlgItemInt's, which `then_dlg_int` took over.
 const P_CLASS_MENU: u32 = 15;
 const P_EX_STYLE: u32 = 16;
+const P_WAIT_MESSAGE: u32 = 17;
 
 /// The extended style USER32 gives captioned windows, which Windows 95
 /// doesn't show programs for Windows 3.1.
@@ -676,14 +677,10 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
             }
         }
         P_EX_STYLE => return Some(value & !WS_EX_WINDOWEDGE),
-        // GetDlgItemInt: the text at d(1) taken, TRUE or FALSE at d(2).
-        P_DLG_INT => {
-            let text = super::string_bytes(cpu, d(1), DLG_INT_TEXT as usize);
-            let found = dlg_int(&text, d(3) != 0);
-            if d(2) != 0 {
-                super::write_16(cpu, d(2), found.is_some() as u16);
-            }
-            return Some(found.unwrap_or(0) as u32);
+        // The sent messages were handled: WaitMessage waits on.
+        P_WAIT_MESSAGE => {
+            wait_on(cpu, *ctx);
+            return None;
         }
         // A class registered (d(1) its name, d(2) its menu's name) or, with
         // d(3), unregistered: what GetClassInfo gives as its menu's name.
@@ -1463,22 +1460,69 @@ fn set_dlg_item_int(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     go(cpu, "SetDlgItemInt", &[args[0], args[1], value, args[3]])
 }
 
-/// GetDlgItemInt(dialog, id, translated, signed): the control's text
-/// read with GetDlgItemTextA, then taken as Windows 3.1 does
-/// (`dlg_int`).
+/// GetDlgItemInt(dialog, id, translated, signed). Windows 98's 16-bit
+/// USER (segment 8, 2DBCh) sets *translated to FALSE, reads the
+/// control's text as GetDlgItemText does, sending WM_GETTEXT for 47
+/// characters into a buffer on its stack, and returns 0 when that gives
+/// a length of 0, whatever the buffer holds; else it takes the number
+/// from the buffer. The message goes as SendMessage sends it
+/// (`message::send16`): a 16-bit window procedure, of this task or of
+/// another, gets it as it is and writes into the buffer itself, and the
+/// text is taken when it returns (`then_dlg_int`).
 fn get_dlg_item_int(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let buf = thunk::scratch32(cpu, DLG_INT_TEXT);
-    go_at(
+    let (translated, signed) = (args[2], args[3]);
+    if translated != 0 {
+        let at = super::linear(cpu, translated);
+        super::write_16(cpu, at, 0);
+    }
+    let hwnd = dlg_item(cpu, args[0], args[1]);
+    let target = message::send_message_entry(cpu);
+    if hwnd == 0 || target == 0 {
+        return Some(0);
+    }
+    let ctx = Context::of(cpu);
+    let ss = ctx.seg[Seg::SS as usize];
+    let buffer = (ctx.gpr[thunk::ESP] as u16).wrapping_sub(DLG_INT_TEXT) & !1;
+    let segptr = (ss as u32) << 16 | buffer as u32;
+    let at = super::linear(cpu, segptr);
+    super::write_16(cpu, at, 0);
+    thunk::call16_at(
         cpu,
-        buf,
-        "GetDlgItemTextA",
-        &[args[0], args[1], buf, DLG_INT_TEXT],
-        vec![P_DLG_INT, buf, args[2], args[3]],
-    )
+        target,
+        &[hwnd as u16, WM_GETTEXT as u16, DLG_INT_TEXT - 1, ss, buffer],
+        0,
+        ctx,
+        thunk::THEN_DLG_INT,
+        vec![segptr, translated, signed],
+        (ss, buffer),
+    );
+    None
 }
 
-/// The bytes of a control's text GetDlgItemInt reads.
-const DLG_INT_TEXT: u32 = 64;
+/// The bytes of the buffer GetDlgItemInt reads a control's text into.
+const DLG_INT_TEXT: u16 = 48;
+
+/// The WM_GETTEXT `get_dlg_item_int` sent returned `value` (DX:AX): the
+/// number in the buffer, taken as `dlg_int` does, in AX, and TRUE or
+/// FALSE at `translated`. A length of 0 is no number.
+pub fn then_dlg_int(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
+    let &[buffer, translated, signed] = data else {
+        return Some(ctx.gpr[thunk::EAX]);
+    };
+    let found = if value & 0xFFFF != 0 {
+        let at = super::linear(cpu, buffer);
+        let text = super::string_bytes(cpu, at, DLG_INT_TEXT as usize);
+        dlg_int(&text, signed != 0)
+    } else {
+        None
+    };
+    if translated != 0 {
+        let at = super::linear(cpu, translated);
+        super::write_16(cpu, at, found.is_some() as u16);
+    }
+    ctx.gpr[thunk::EDX] &= 0xFFFF_0000;
+    Some(ctx.gpr[thunk::EAX] & 0xFFFF_0000 | found.unwrap_or(0) as u32)
+}
 
 /// GetDlgItemInt's number in `text`: blanks around it, a sign if
 /// `signed`, the digits, and a value that fits a 16-bit int (or word);
@@ -1545,14 +1589,22 @@ fn send_dlg_item_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 const WM_SETTEXT: u32 = 0x000C;
 const WM_GETTEXT: u32 = 0x000D;
 
+/// Whether a message 16-bit code sends to `hwnd` reaches it as it is,
+/// through `message::send16`: a window of the running task with a 16-bit
+/// procedure, or another Win16 task's window.
+fn sent_as_is(cpu: &Cpu, hwnd: u32) -> bool {
+    message::window_proc16(cpu, hwnd).is_some() || message::other_task(cpu, hwnd)
+}
+
 /// GetWindowText(hwnd, buffer, size). Windows 3.1's sends WM_GETTEXT
 /// and returns what the window procedure does: a window with a 16-bit
-/// procedure gets the message as SendMessage gives it
-/// (`message::send16`), with the caller's buffer. The others, USER32's
-/// controls and other tasks' windows, go to GetWindowTextA.
+/// procedure, and another Win16 task's window, get the message as
+/// SendMessage gives it (`sent_as_is`), with the caller's buffer. The
+/// others, USER32's controls of the running task and the windows of
+/// Win32 threads, go to GetWindowTextA.
 fn get_window_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hwnd, buffer, size) = (args[0], args[1], args[2]);
-    if message::window_proc16(cpu, hwnd).is_some() {
+    if sent_as_is(cpu, hwnd) {
         message::send16(cpu, hwnd, WM_GETTEXT, size & 0xFFFF, buffer);
         return None;
     }
@@ -1564,7 +1616,7 @@ fn get_window_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// WM_GETTEXT.
 fn set_window_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hwnd, text) = (args[0], args[1]);
-    if message::window_proc16(cpu, hwnd).is_some() {
+    if sent_as_is(cpu, hwnd) {
         message::send16(cpu, hwnd, WM_SETTEXT, 0, text);
         return None;
     }
@@ -1576,7 +1628,7 @@ fn set_window_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// control.
 fn get_dlg_item_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let hwnd = dlg_item(cpu, args[0], args[1]);
-    if message::window_proc16(cpu, hwnd).is_some() {
+    if sent_as_is(cpu, hwnd) {
         message::send16(cpu, hwnd, WM_GETTEXT, args[3], args[2]);
         return None;
     }
@@ -1587,7 +1639,7 @@ fn get_dlg_item_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// SetDlgItemText(dialog, id, text): SetWindowText of the control.
 fn set_dlg_item_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let hwnd = dlg_item(cpu, args[0], args[1]);
-    if message::window_proc16(cpu, hwnd).is_some() {
+    if sent_as_is(cpu, hwnd) {
         message::send16(cpu, hwnd, WM_SETTEXT, 0, args[2]);
         return None;
     }
@@ -1676,6 +1728,27 @@ fn post_app_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 // The message loop: MSG16s.
+
+/// WaitMessage: the messages other tasks sent to this one are handled
+/// first (UserYield16), and the task then waits for one to come. Windows
+/// handles them in WaitMessage, as in GetMessage and PeekMessage, and
+/// waits on; USER32's WaitMessage would return at once while any is
+/// left, so a task that waits in a WaitMessage loop for what another
+/// sends it would never get it.
+fn wait_message(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    if crate::win32::user32::message::has_sent(cpu) {
+        return go_post(cpu, "UserYield16", &[], vec![P_WAIT_MESSAGE]);
+    }
+    wait_on(cpu, Context::of(cpu));
+    None
+}
+
+/// Go on to USER32's WaitMessage, as the automatic thunk of a BOOL
+/// does, and then with the context `ctx`.
+fn wait_on(cpu: &mut Cpu, ctx: Context) {
+    let target = api(cpu, "WaitMessage");
+    thunk::enter32(cpu, ctx, target, &[], thunk::POST_AUTO, vec![b'b' as u32]);
+}
 
 fn get_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if super::call_queued16(cpu) {
