@@ -1345,8 +1345,6 @@ static APIS: &[Api] = &[
     ),
     stdcall("CallMsgFilter", 19, 2, hook::call_msg_filter),
     stdcall("CallHooks", 0, 4, hook::call_hooks),
-    stdcall("SendMessage16", 0, 4, message::send_message16),
-    stdcall("UserYield16", 0, 0, message::user_yield16),
     stdcall("DefSysCommand", 0, 3, defwnd::def_sys_command),
     stdcall("ActivateOtherWindow", 0, 1, input::activate_other_window),
     stdcall("IsHungAppWindow", 653, 1, nothing),
@@ -1450,6 +1448,10 @@ static APIS: &[Api] = &[
     // procedure (notepad.rs).
     stdcall("NotepadMain", 0, 0, notepad::main),
     stdcall("NotepadWndProc", 0, 4, notepad::wnd_proc),
+    // A 16-bit SendMessage to another task's window, and the 16-bit
+    // Yield that receives what other tasks sent (message.rs).
+    stdcall("SendMessage16", 0, 4, message::send_message16),
+    stdcall("UserYield16", 0, 0, message::user_yield16),
 ];
 
 crate::state_fields!(State {
