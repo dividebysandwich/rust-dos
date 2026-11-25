@@ -452,7 +452,11 @@ impl DiskController {
             if from_parts.is_empty() {
                 return Err(0x05);
             }
-            volume.find(&from_parts)?;
+            if self.keep_case {
+                volume.find_long(&from_parts)?;
+            } else {
+                volume.find(&from_parts)?;
+            }
             self.check_writable(drive)?;
             let normalized = to.replace('/', "\\");
             let (to_drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
@@ -460,8 +464,13 @@ impl DiskController {
                 return Err(0x11); // Not same device
             }
             let to_parts = Self::logical_components(self.drive(drive).ok_or(0x03u8)?, rest);
-            if to_parts.is_empty() {
-                return Err(0x03);
+            let (leaf, to_dir) = to_parts.split_last().ok_or(0x03u8)?;
+            // A long-name call (MoveFileA, msvcrt's rename) names the entry
+            // as VFAT does on Windows 9x: a long name gets its long name
+            // entries, and the name may be the entry's own in another
+            // case. DOS's rename keeps to 8.3 names and drops a long one.
+            if self.keep_case {
+                return volume.rename_long(&from_parts, to_dir, leaf).map(|_| ());
             }
             return volume.rename(&from_parts, &to_parts);
         }
