@@ -87,8 +87,14 @@ fn prim_caps(d: &Description) -> [u32; 13] {
     // The destination has no factor that sets both (BOTHSRCALPHA and
     // BOTHINVSRCALPHA, 0x800 and 0x1000).
     let dest_blend = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | d.blend & 0x7FF;
-    // D3DPSHADECAPS_: Gouraud color, specular, alpha, fog.
-    let shade = 0x8 | 0x200 | 0x4000 | 0x8_0000 | 0x2 | 0x80;
+    // D3DPSHADECAPS_: color, specular, alpha blending and fog, flat and
+    // Gouraud, and specular in the mono model too: 0xC53CA, what 3dfx's
+    // Voodoo3 driver (3dfx32v3.dll 4.12.01.0666) reports for lines and
+    // triangles. Flat shading gives the face the first vertex's colors,
+    // alpha among them, and leaves its fog interpolated
+    // (`Processed::take_flat_colors`, a ToadForce's `Vertex::flat`): the
+    // flat alpha and fog that ALPHAFLATBLEND and FOGFLAT say it does.
+    let shade = 0x2 | 0x8 | 0x40 | 0x80 | 0x100 | 0x200 | 0x1000 | 0x4000 | 0x4_0000 | 0x8_0000;
     // D3DPTEXTURECAPS_: perspective, powers of 2, alpha, transparency,
     // repeat not scaled by size, alpha in palettes, and the card's own,
     // color key blending among them where it has it.

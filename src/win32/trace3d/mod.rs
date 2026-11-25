@@ -1189,12 +1189,13 @@ pub(crate) fn pixel_format_item(cpu: &Cpu, args: &[u32]) -> String {
 pub(crate) fn d3d_device_item(cpu: &Cpu, args: &[u32]) -> String {
     let w = |o: u32| peek(cpu, args[3].wrapping_add(o)).unwrap_or(0);
     format!(
-        "{} \"{}\" devcaps=0x{:X} raster=0x{:X} texcaps=0x{:X} texblend=0x{:X} \
-         depths=0x{:X} zdepths=0x{:X}",
+        "{} \"{}\" devcaps=0x{:X} raster=0x{:X} shade=0x{:X} texcaps=0x{:X} \
+         texblend=0x{:X} depths=0x{:X} zdepths=0x{:X}",
         guid(cpu, args[0]),
         peek_str(cpu, args[2]).unwrap_or_default(),
         w(12),
         w(108),
+        w(128),
         w(132),
         w(140),
         w(156),
@@ -1207,11 +1208,12 @@ pub(crate) fn d3d_device_item(cpu: &Cpu, args: &[u32]) -> String {
 pub(crate) fn d3d_device7_item(cpu: &Cpu, args: &[u32]) -> String {
     let w = |o: u32| peek(cpu, args[2].wrapping_add(o)).unwrap_or(0);
     format!(
-        "\"{}\" devcaps=0x{:X} raster=0x{:X} texcaps=0x{:X} texblend=0x{:X} \
-         depths=0x{:X} zdepths=0x{:X}",
+        "\"{}\" devcaps=0x{:X} raster=0x{:X} shade=0x{:X} texcaps=0x{:X} \
+         texblend=0x{:X} depths=0x{:X} zdepths=0x{:X}",
         peek_str(cpu, args[1]).unwrap_or_default(),
         w(0),
         w(68),
+        w(88),
         w(92),
         w(100),
         w(116),

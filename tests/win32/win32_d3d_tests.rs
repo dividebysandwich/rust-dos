@@ -2902,6 +2902,43 @@ fn flat_shading_keeps_each_vertex_fog() {
     assert_rgb(&p, 18, 18, [128, 128, 0], 32);
 }
 
+/// Flat shading takes the first vertex's alpha with its colors, as
+/// D3DPSHADECAPS_ALPHAFLATBLEND says the HAL does: a red first vertex
+/// of alpha 0x80 blends half over the blue clear all over the face,
+/// though the other vertices are opaque and clear. Gouraud alpha would
+/// go from the first corner's half to red at the second and blue at
+/// the third.
+#[test]
+fn a_flat_shaded_triangle_blends_by_its_first_vertex_alpha() {
+    let tri = vec![
+        tl(4.0, 4.0, 0.5, 0x80FF_0000),
+        tl(60.0, 4.0, 0.5, GREEN),
+        tl(4.0, 60.0, 0.5, GREEN & 0xFF_FFFF),
+    ];
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: BLUE,
+        zbuffer: None,
+        texture: None,
+        texture_alpha: false,
+        texture_system: false,
+        steps: vec![
+            Step::State(RS_SHADEMODE, 1),
+            // SRCALPHA and INVSRCALPHA.
+            Step::State(RS_ALPHABLENDENABLE, 1),
+            Step::State(RS_SRCBLEND, 5),
+            Step::State(RS_DESTBLEND, 6),
+            Step::Draw(tri),
+        ],
+    };
+    let p = draw_scene("flat-alpha", &scene);
+    for (x, y) in [(5, 5), (56, 6), (6, 56), (20, 20)] {
+        assert_rgb(&p, x, y, [128, 0, 127], 16);
+    }
+    assert_rgb(&p, 60, 60, [0, 0, 255], 0);
+}
+
 /// A scene with the add-on card `board`: flat, gouraud, z-tested and
 /// textured quads on its back buffer.
 fn card_scene(test: &str, board: Board) {
@@ -5075,12 +5112,15 @@ fn the_rgb_device_tests_depth_blends_and_fogs() {
 
 const D3D2_ENUM_DEVICES: u32 = 3;
 /// What the device list's callback saw: how many devices, and for each
-/// the first word of its GUID and its HAL and HEL descriptions' color
-/// models.
+/// the first word of its GUID, its HAL and HEL descriptions' color
+/// models, and its HAL description's dwShadeCaps for lines and for
+/// triangles.
 const SEEN: u32 = 0x40;
 const SEEN_GUIDS: u32 = 0x44;
 const SEEN_HAL: u32 = 0x64;
 const SEEN_HEL: u32 = 0x84;
+const SEEN_LINE_SHADE: u32 = 0xA4;
+const SEEN_TRI_SHADE: u32 = 0xC4;
 
 /// A machine with a Super VGA and no 3D card, the built-in Windows on
 /// and `program` loaded from the shell as T.EXE.
@@ -5097,10 +5137,10 @@ fn machine_without_3d(test: &str, program: Vec<u8>) -> Box<Cpu> {
     cpu
 }
 
-/// A program that lists IDirect3D2's devices, then makes the Ramp
-/// device on a 64x64 target in video memory with a 16-bit depth buffer
-/// in system memory, as Warhammer: Dark Omen does: the machine after
-/// it, and its data.
+/// A program that lists IDirect3D2's devices, noting what each says
+/// (`SEEN`), then makes the Ramp device on a 64x64 target in video
+/// memory with a 16-bit depth buffer in system memory, as Warhammer:
+/// Dark Omen does: the machine after it, and its data.
 fn ramp_device_program(test: &str, machine: fn(&str, Vec<u8>) -> Box<Cpu>) -> (Box<Cpu>, u32) {
     let mut d = data();
     target_desc(&mut d, DESC, 108, 64, 64);
@@ -5125,9 +5165,14 @@ fn ramp_device_program(test: &str, machine: fn(&str, Vec<u8>) -> Box<Cpu>) -> (B
         a.mov(eax, dword_ptr(esp + 4))?;
         a.mov(eax, dword_ptr(eax))?;
         a.mov(dword_ptr(ecx * 4 + l.at(SEEN_GUIDS)), eax)?;
-        a.mov(eax, dword_ptr(esp + 16))?;
-        a.mov(eax, dword_ptr(eax + 8))?;
+        a.mov(edx, dword_ptr(esp + 16))?;
+        a.mov(eax, dword_ptr(edx + 8))?;
         a.mov(dword_ptr(ecx * 4 + l.at(SEEN_HAL)), eax)?;
+        // D3DDEVICEDESC's dpcLineCaps and dpcTriCaps' dwShadeCaps.
+        a.mov(eax, dword_ptr(edx + 0x48))?;
+        a.mov(dword_ptr(ecx * 4 + l.at(SEEN_LINE_SHADE)), eax)?;
+        a.mov(eax, dword_ptr(edx + 0x80))?;
+        a.mov(dword_ptr(ecx * 4 + l.at(SEEN_TRI_SHADE)), eax)?;
         a.mov(eax, dword_ptr(esp + 20))?;
         a.mov(eax, dword_ptr(eax + 8))?;
         a.mov(dword_ptr(ecx * 4 + l.at(SEEN_HEL)), eax)?;
@@ -5185,6 +5230,25 @@ fn direct3d_5_lists_the_ramp_and_rgb_devices_before_the_hal() {
     assert_eq!(seen_devices(&cpu, data), [[RAMP, 0, 1], [RGB, 0, 2]]);
     let r = results(&cpu, data, peek(&cpu, data + CALLS));
     assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+}
+
+/// The Voodoo3's HAL description, as Direct3D 5's device list gives it,
+/// says the device blends and fogs flat-shaded lines and triangles as
+/// it does Gouraud-shaded ones: dwShadeCaps 0xC53CA, the value 3dfx's
+/// Voodoo3 driver (3dfx32v3.dll 4.12.01.0666) sets for both, with
+/// D3DPSHADECAPS_ALPHAFLATBLEND (0x1000) and FOGFLAT (0x40000).
+/// G-Police offers its haze and lens flares only on a HAL with
+/// ALPHAFLATBLEND (issue 1831).
+#[test]
+fn the_voodoo3s_hal_says_it_blends_and_fogs_flat_shading() {
+    let (cpu, data) = ramp_device_program("hal_shade_caps", machine);
+    let devices = seen_devices(&cpu, data);
+    let hal = devices.iter().position(|d| d[0] == HAL);
+    let hal = hal.unwrap_or_else(|| panic!("no HAL device: {devices:X?}")) as u32;
+    let lines = peek(&cpu, data + SEEN_LINE_SHADE + 4 * hal);
+    let triangles = peek(&cpu, data + SEEN_TRI_SHADE + 4 * hal);
+    assert_eq!(lines, 0xC_53CA, "lines: {lines:#X}");
+    assert_eq!(triangles, 0xC_53CA, "triangles: {triangles:#X}");
 }
 
 #[test]
