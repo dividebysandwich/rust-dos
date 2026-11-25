@@ -17,9 +17,28 @@ impl DiskController {
 
     /// A file just opened as `filename` with access `mode`, with the one
     /// reference of whoever opened it.
-    pub(super) fn opened(&mut self, data: OpenData, drive: u8, owner: u16, key: u64, filename: &str, mode: u8) -> OpenFile {
+    pub(super) fn opened(
+        &mut self,
+        data: OpenData,
+        drive: u8,
+        owner: u16,
+        id: FileId,
+        filename: &str,
+        mode: u8,
+    ) -> OpenFile {
         let path = self.qualify_path(filename).unwrap_or_else(|| filename.to_ascii_uppercase());
-        OpenFile { data, drive, owner, key, path, mode, refs: 1, fcb: false, empty_on_use: false, raw: false }
+        OpenFile {
+            data,
+            drive,
+            owner,
+            id,
+            path,
+            mode,
+            refs: 1,
+            fcb: false,
+            empty_on_use: false,
+            raw: false,
+        }
     }
 
     /// The lowest unused entry of the file table.
@@ -73,7 +92,9 @@ impl DiskController {
         // create.
         if let Some(device) = self.device(filename) {
             let handle = self.free_handle()?;
-            let file = self.opened(OpenData::Device(device), self.current_drive, owner, 0, filename, mode);
+            let data = OpenData::Device(device);
+            let drive = self.current_drive;
+            let file = self.opened(data, drive, owner, FileId::Device, filename, mode);
             self.insert(handle, file);
             return Ok(handle);
         }
@@ -115,8 +136,8 @@ impl DiskController {
                 _ => return Err(0x0C),
             }
             let handle = self.free_handle()?;
-            let key = self.file_key(filename);
-            let file = self.opened(data, drive, owner, key, filename, mode);
+            let id = FileId::Named(format!("{}:\\{}", drive_letter(drive), path));
+            let file = self.opened(data, drive, owner, id, filename, mode);
             self.insert(handle, file);
             return Ok(handle);
         }
@@ -144,14 +165,15 @@ impl DiskController {
                 return Err(0x05);
             }
             let at = entry.at.ok_or(0x05u8)?;
+            let id = FileId::fat(drive, &volume, at);
             let data = OpenData::Fat { volume, at, pos: Rc::new(Cell::new(0)), write };
-            let key = self.file_key(filename);
-            let file = self.opened(data, drive, owner, key, filename, mode);
+            let file = self.opened(data, drive, owner, id, filename, mode);
             self.insert(handle, file);
             return Ok(handle);
         }
 
-        let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?; // Path not found
+        let (drive, walk) = self.locate_walk(filename).ok_or(0x03)?; // Path not found
+        let (path, missing) = (walk.path, walk.missing);
         // A directory (or a bare "D:") isn't a file: access denied. A name
         // its folder's entries lack names nothing there (`locate_found`):
         // programs poll for files that aren't there, and a stat or an
@@ -161,6 +183,12 @@ impl DiskController {
             return Err(0x05);
         }
         let writable = self.is_writable(drive);
+        // The access the host's handle has.
+        let (read, write) = match mode & 0x03 {
+            0 => (true, false),
+            1 => (false, true),
+            _ => (true, writable),
+        };
 
         let mut options = OpenOptions::new();
         match mode & 0x03 {
@@ -187,10 +215,15 @@ impl DiskController {
         }
 
         let handle = self.free_handle()?;
-        let opened = if missing && !create {
-            Err(std::io::ErrorKind::NotFound.into())
-        } else {
-            options.open(&path)
+        // A file the guest just wrote and closed opens through the handle
+        // that wrote it, which costs the host nothing (`ClosedFiles`).
+        let reused = existing
+            .as_ref()
+            .and_then(|meta| self.host_dirs.closed.take(&path, read, write, meta));
+        let opened = match reused {
+            Some(file) => Ok(file),
+            None if missing && !create => Err(std::io::ErrorKind::NotFound.into()),
+            None => options.open(&path),
         };
         // Opening a file that is there already adds no name to its folder.
         if create && existing.is_none() {
@@ -199,10 +232,19 @@ impl DiskController {
         }
         match opened {
             Ok(file) => {
-                let key = self.file_key(filename);
+                // A path each of whose names the walk found has the
+                // host's names already (`host_file_id`), and so has a file
+                // this call made in a folder the walk found: no second
+                // walk. Others are asked of the host (`file_id`).
+                let made = create && existing.is_none() && walk.dirs_matched;
+                let id = if walk.matched || made {
+                    FileId::Host(path.clone())
+                } else {
+                    self.file_id(filename)
+                };
                 let written = (writable && mode & 0x03 != 0).then_some(path);
                 let data = OpenData::Host(HostFile::new(file), written);
-                let file = self.opened(data, drive, owner, key, filename, mode);
+                let file = self.opened(data, drive, owner, id, filename, mode);
                 self.insert(handle, file);
                 Ok(handle)
             }
@@ -281,7 +323,7 @@ impl DiskController {
         self.open_files.get(&sft).is_some_and(|open| {
             self.open_files
                 .values()
-                .any(|f| f.empty_on_use && f.key == open.key)
+                .any(|f| f.empty_on_use && f.id == open.id)
         })
     }
 
@@ -289,8 +331,8 @@ impl DiskController {
     /// use, through whichever handle: DOS emptied it for all of them.
     fn settle(&mut self, sft: u16) {
         if self.settles(sft) {
-            let key = self.open_files[&sft].key;
-            self.settle_where(|_, f| f.key == key);
+            let id = self.open_files[&sft].id.clone();
+            self.settle_where(|_, f| f.id == id);
         }
     }
 
@@ -324,8 +366,8 @@ impl DiskController {
     /// does to the file the create already emptied.
     fn settle_named(&mut self, filename: &str) {
         if self.open_files.values().any(|f| f.empty_on_use) {
-            let key = self.file_key(filename);
-            self.settle_where(|_, f| f.key == key);
+            let id = self.file_id(filename);
+            self.settle_where(|_, f| f.id == id);
         }
     }
 
@@ -389,6 +431,7 @@ impl DiskController {
         if hostfs::metadata(&path).is_ok_and(|m| m.readonly) {
             return Err(0x05);
         }
+        self.host_dirs.closed.drop_under(&path);
         let written = hostfs::write(&path, data);
         self.host_dirs.changed();
         self.host_dirs.touched(&path);
@@ -430,6 +473,7 @@ impl DiskController {
             return Err(0x02); // File not found
         }
         self.check_writable(drive)?;
+        self.host_dirs.closed.drop_under(&path);
         let removed = hostfs::remove_file(&path);
         self.host_dirs.changed();
         self.host_dirs.touched(&path);
@@ -500,6 +544,10 @@ impl DiskController {
                         *at = new;
                     }
                 }
+                // So do their ids, which name the entry by its slot.
+                let old = FileId::fat(drive, &volume, old);
+                let new = FileId::fat(drive, &volume, new);
+                self.moved_files(|id| (*id == old).then(|| new.clone()));
             }
             return Ok(());
         }
@@ -507,6 +555,7 @@ impl DiskController {
         if !hostfs::exists(&source) {
             return Err(0x02);
         }
+        let source_id = self.file_id(from);
         self.check_writable(drive)?;
         let normalized = to.replace('/', "\\");
         let (to_drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
@@ -534,12 +583,34 @@ impl DiskController {
             return Err(0x05);
         }
         let target = parent.join(self.entry_name(leaf));
+        self.host_dirs.closed.drop_under(&source);
+        self.host_dirs.closed.drop_under(&target);
         let renamed = hostfs::rename(&source, &target);
         self.host_dirs.changed();
         if renamed.is_ok() {
             let from_leaf = from.rsplit(['\\', '/', ':']).next().unwrap_or(from);
             let from_leaf = Self::dos_component(from_leaf);
             self.host_dirs.renamed(&source, &target, from_leaf, leaf);
+            // The files open there, or in the directory renamed, are
+            // there under the new name now.
+            if let (FileId::Host(old), FileId::Host(new)) = (source_id, self.file_id(to)) {
+                self.moved_files(Self::host_files_moved(&old, &new));
+            }
+            // A rename that changes only the case of a name keeps its
+            // alias on Windows 9x, so a current directory there or below
+            // names the folder still (`walk_host`). Other renames leave
+            // the current directory naming the folder that was there.
+            if recased {
+                for (_, folder) in self.current_folders.values_mut() {
+                    if let Ok(below) = folder.strip_prefix(&source) {
+                        *folder = if below.as_os_str().is_empty() {
+                            target.clone()
+                        } else {
+                            target.join(below)
+                        };
+                    }
+                }
+            }
         } else {
             self.host_dirs.touched(&source);
             self.host_dirs.touched(&target);
@@ -613,12 +684,26 @@ impl DiskController {
         if open.refs == 0 && sft >= FIRST_FILE {
             self.forget_locks(sft);
             // The host may set a written file's time when it is closed.
-            if let Some(OpenFile { data: OpenData::Host(_, Some(path)), .. }) = self.open_files.remove(&sft) {
+            // Its handle stays open a moment for an open that follows
+            // (`ClosedFiles`).
+            if let Some(OpenFile { data: OpenData::Host(file, Some(path)), mode, .. }) =
+                self.open_files.remove(&sft)
+            {
                 self.host_dirs.touched(&path);
+                if file.wrote.get() {
+                    self.host_dirs.closed.keep(path, file.file, mode & 0x03 != 1);
+                }
             }
         }
         self.mark_dirty(sft);
         true
+    }
+
+    /// Close the host handles kept of files the guest closed a while ago
+    /// (`ClosedFiles`). The frame loop calls this, so that a guest that
+    /// goes quiet after writing a file doesn't leave it open on the host.
+    pub fn close_idle_files(&self) {
+        self.host_dirs.closed.expire();
     }
 
     /// Whether a process started now gets a handle for the open file
@@ -655,9 +740,13 @@ impl DiskController {
 
     /// Close every open file, for when the shell is reloaded. A file a
     /// create call left for its first use keeps its bytes: the program
-    /// was aborted or the machine reset before it wrote its save.
+    /// was aborted or the machine reset before it wrote its save. The
+    /// host handles kept of closed files go too (`ClosedFiles`): a system
+    /// booted next writes its disks without the guest's file calls, which
+    /// would otherwise close them.
     pub fn close_all_files(&mut self) {
         self.open_files.clear();
+        self.host_dirs.closed.clear();
         self.locks.clear();
         self.open_standard_devices();
     }

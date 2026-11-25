@@ -13,9 +13,11 @@ use crate::hostfs::{self, File, OpenOptions};
 use crate::memfs::{Bytes, MemFs, Node};
 use crate::mount::MountSpec;
 
+mod closed_files;
 mod drives;
 mod files;
 mod host_dir;
+mod identity;
 mod layout;
 mod locks;
 mod mount;
@@ -24,7 +26,9 @@ mod search;
 mod state;
 mod system_files;
 
+use closed_files::ClosedFiles;
 use host_dir::{DirCount, HostDirCache, SearchKey};
+use identity::FileId;
 pub use layout::{DriveKind, Fat32Layout, FatLayout, old_space};
 pub use locks::{LOCK_VIOLATION, Lock, TASK_OWNER};
 pub use search::NameFilter;
@@ -564,8 +568,8 @@ struct OpenFile {
     /// PSP of the process that opened the file. DOS closes a process's files
     /// when it terminates.
     owner: u16,
-    /// Tells the file apart from others (`DiskController::file_key`).
-    key: u64,
+    /// The file, whatever name opened it (`DiskController::file_id`).
+    id: FileId,
     /// The file as it was opened, for a save state to open it again: its
     /// full DOS path and access mode.
     path: String,
@@ -581,6 +585,13 @@ struct OpenFile {
     /// A device a program put in raw (binary) mode with IOCTL 4401h:
     /// its output goes out as it is, a tab without being expanded.
     raw: bool,
+}
+
+impl OpenFile {
+    /// The number for the file (`FileId::key`).
+    fn key(&self) -> u64 {
+        self.id.key()
+    }
 }
 
 /// Empty a file a create call opened, which nothing has used yet.
@@ -627,6 +638,9 @@ enum OpenData {
 /// itself.
 struct HostFile {
     file: File,
+    /// Whether anything was written or cut through it: only such a
+    /// handle is kept after the guest closes it (`ClosedFiles`).
+    wrote: Cell<bool>,
     /// None until it is asked for, and after a call that failed, which
     /// may have left the pointer anywhere.
     pos: Cell<Option<u64>>,
@@ -636,6 +650,7 @@ impl HostFile {
     fn new(file: File) -> Self {
         HostFile {
             file,
+            wrote: Cell::new(false),
             pos: Cell::new(None),
         }
     }
@@ -671,6 +686,7 @@ impl HostFile {
     /// seldom cut a file, so that costs nothing that matters.
     fn set_len(&self, len: u64) -> std::io::Result<()> {
         self.pos.set(None);
+        self.wrote.set(true);
         self.file.set_len(len)
     }
 
@@ -691,6 +707,7 @@ impl Read for HostFile {
 
 impl Write for HostFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.wrote.set(true);
         self.moved((&self.file).write(buf))
     }
 
@@ -873,6 +890,10 @@ pub struct DiskController {
     pub(crate) media: Cell<Option<crate::savestate::media::Kept>>,
     /// The entries of host folders as last read (`host_entries`).
     host_dirs: HostDirCache,
+    /// The host folder each host drive's current directory named when
+    /// CHDIR made it current or a state was loaded, with the current
+    /// directory it was for (`walk_host`).
+    current_folders: HashMap<u8, (String, PathBuf)>,
     /// The files shown in directories that the drive doesn't have: the
     /// built-in Windows's DLLs and its NOTEPAD.EXE (system_files.rs).
     system_files: system_files::SystemFiles,
@@ -932,6 +953,7 @@ impl DiskController {
             notes: Vec::new(),
             media: Cell::new(None),
             host_dirs: HostDirCache::default(),
+            current_folders: HashMap::new(),
             system_files: Default::default(),
             long_call: false,
         };
@@ -978,7 +1000,7 @@ impl DiskController {
                 data: OpenData::Device(device),
                 drive: DRIVE_C,
                 owner: 0,
-                key: 0,
+                id: FileId::Device,
                 path: name.to_string(),
                 mode: 0x02,
                 refs: 0,

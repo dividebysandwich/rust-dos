@@ -9,13 +9,19 @@ use win16::{CODE, Code, program, run, run_with};
 
 /// USER's ordinals.
 const CREATE_WINDOW: u16 = 41;
+const SHOW_WINDOW: u16 = 42;
+const DESTROY_WINDOW: u16 = 53;
 const GET_DC: u16 = 66;
 const SELECT_PALETTE: u16 = 282;
 
 /// GDI's ordinals.
+const CREATE_COMPATIBLE_DC: u16 = 52;
 const CREATE_PALETTE: u16 = 360;
 const GDI_SELECT_PALETTE: u16 = 361;
+const REALIZE_DEFAULT_PALETTE: u16 = 365;
 const IS_DC_CURRENT_PALETTE: u16 = 412;
+
+const SW_MINIMIZE: u16 = 6;
 
 /// WS_POPUP | WS_VISIBLE.
 const POPUP: u32 = 0x9000_0000;
@@ -54,8 +60,8 @@ fn select_with(code: &mut Code, f: (&str, u16), at: u8, background: u16) {
     .call(f.0, f.1);
 }
 
-/// A program of the IsDCCurrentPalette tests: a window, its DC in DI,
-/// and palettes A at [BP+2] and B at [BP], both from the same
+/// A program of the IsDCCurrentPalette tests: a window, in SI, its DC
+/// in DI, and palettes A at [BP+2] and B at [BP], both from the same
 /// LOGPALETTE, then the code `steps` adds, and exit code 1.
 fn palette_program(steps: impl FnOnce(&mut Code)) -> Vec<u8> {
     let mut code = Code::new();
@@ -75,6 +81,7 @@ fn palette_program(steps: impl FnOnce(&mut Code)) -> Vec<u8> {
         .push(0)
         .push(0) // no parameter
         .call("USER", CREATE_WINDOW)
+        .emit(&[0x8B, 0xF0]) // mov si,ax
         .emit(&[0x50]) // push ax
         .call("USER", GET_DC)
         .emit(&[0x8B, 0xF8]); // mov di,ax
@@ -147,6 +154,113 @@ fn gdi_select_palette_program(palette: bool) -> Vec<u8> {
         select(code, 0, 0);
         expect_current(code, palette as u16, 4);
     })
+}
+
+/// IsDCCurrentPalette of the memory DC at [BP-at]: what AX must be.
+fn expect_current_at(code: &mut Code, at: u8, value: u16, fail: u8) {
+    code.emit(&[0xFF, 0x76, 0u8.wrapping_sub(at)]) // push word [bp-at]
+        .call("GDI", IS_DC_CURRENT_PALETTE);
+    expect_ax(code, value, fail);
+}
+
+/// A memory DC, pushed, so at [BP-at] for the `at` the pushes before it
+/// make.
+fn push_memory_dc(code: &mut Code) {
+    code.push(0).call("GDI", CREATE_COMPATIBLE_DC).emit(&[0x50]); // push ax
+}
+
+/// How the window with the foreground palette goes.
+#[derive(Clone, Copy)]
+enum Gone {
+    Destroyed,
+    Minimized,
+    /// RealizeDefaultPalette (GDI.365) is called on its DC instead.
+    DefaultRealized,
+}
+
+/// The program of the tests of what becomes of the foreground palette:
+/// A selected into the window's DC with USER's SelectPalette, and with
+/// GDISelectPalette and wBkg FALSE, which makes it the foreground
+/// palette on any display; A selected in the background into a memory
+/// DC; then the window goes as `gone` says. After it, on a palette
+/// device (`palette`), DEFAULT_PALETTE is the foreground palette, as a
+/// new memory DC, which holds it, shows; elsewhere A still is. Exit code
+/// 1 when every answer is right, the failing step's code otherwise.
+fn palette_gone_program(palette: bool, gone: Gone) -> Vec<u8> {
+    palette_program(|code| {
+        select(code, 2, 0);
+        select_with(code, ("GDI", GDI_SELECT_PALETTE), 2, 0);
+        // A memory DC at [BP-2] holding A.
+        push_memory_dc(code);
+        code.emit(&[0xFF, 0x76, 0xFE, 0xFF, 0x76, 0x02]) // push word [bp-2], [bp+2]
+            .push(1)
+            .call("GDI", GDI_SELECT_PALETTE);
+        expect_current_at(code, 2, 1, 2);
+        match gone {
+            Gone::Destroyed => {
+                code.emit(&[0x56]).call("USER", DESTROY_WINDOW); // push si
+            }
+            Gone::Minimized => {
+                code.emit(&[0x56]) // push si
+                    .push(SW_MINIMIZE)
+                    .call("USER", SHOW_WINDOW);
+            }
+            Gone::DefaultRealized => {
+                code.emit(&[0x57]) // push di
+                    .call("GDI", REALIZE_DEFAULT_PALETTE);
+                // Windows 98's returns 0 on a palette device, and what AX
+                // happens to hold on another.
+                if palette {
+                    expect_ax(code, 0, 5);
+                }
+            }
+        }
+        expect_current_at(code, 2, !palette as u16, 3);
+        // A memory DC at [BP-4], with DEFAULT_PALETTE.
+        push_memory_dc(code);
+        expect_current_at(code, 4, palette as u16, 4);
+    })
+}
+
+/// Run the program of `palette_gone_program` on a desktop of 256 colours
+/// and on one of more: its exit code must be 1.
+fn check_palette_gone(test: &str, gone: Gone) {
+    let (exit, log) = run_with(test, palette_gone_program(true, gone), |cpu, _| {
+        cpu.bus.win32.depth = DesktopDepth::Palette;
+    });
+    assert_eq!(exit, 1, "{log}");
+    let deep = format!("{test}_deep");
+    let (exit, log) = run(&deep, palette_gone_program(false, gone));
+    assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn destroying_the_window_with_the_foreground_palette_makes_the_default_one_foreground() {
+    // Windows 98 SE's DestroyWindow of the active window, which selected
+    // a palette on a palette device, calls USER's function at segment
+    // 11, 195Eh, once the next window is active. When none is, or it
+    // has no palette, that calls RealizeDefaultPalette on the screen,
+    // which makes DEFAULT_PALETTE the foreground palette (PDEVICE+A4h).
+    // On a desktop of more colours it does nothing, and the palette
+    // selected with GDISelectPalette stays the foreground one.
+    check_palette_gone("palette_destroyed", Gone::Destroyed);
+}
+
+#[test]
+fn minimizing_the_window_with_the_foreground_palette_makes_the_default_one_foreground() {
+    // ShowWindow's minimizing of a top-level window that selected a
+    // palette calls the same function, with the window activated next;
+    // a minimized active window keeps no palette.
+    check_palette_gone("palette_minimized", Gone::Minimized);
+}
+
+#[test]
+fn realize_default_palette_makes_the_default_palette_foreground_on_a_palette_device() {
+    // GDI.365, RealizeDefaultPalette(hdc): Windows 98 SE's (GDI.EXE
+    // segment 2 at 1942h) sets the device's foreground palette to
+    // DEFAULT_PALETTE and returns 0 on a device with RC_PALETTE, and
+    // does nothing on another.
+    check_palette_gone("realize_default_palette", Gone::DefaultRealized);
 }
 
 #[test]

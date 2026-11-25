@@ -72,31 +72,57 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("AWEUTIL", &crate::aweutil::AweUtilCommand),
 ];
 
-/// The commands DOSBox has as programs on Z:, the first directory of its
-/// PATH (`z_program`).
-static Z_PROGRAMS: &[(&str, &(dyn ShellCommand + Sync))] =
-    &[("CONFIG", &crate::config_command::ConfigCommand)];
+/// Where a command that stands for a program looks for a program of its
+/// name first, which then runs instead.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProgramFirst {
+    /// In the current directory only: DOSBox has the command as a
+    /// program on Z:, the first directory of its PATH.
+    Here,
+    /// In the current directory and the PATH: MS-DOS has the command as a
+    /// program in C:\DOS, which a normal install puts last on its PATH.
+    OnPath,
+}
 
-/// `command` (a name, with .COM or not) as one of `Z_PROGRAMS`, where
-/// DOSBox would run its own: a program of the name in the current
-/// directory comes first (a game's CONFIG.EXE, its setup), and one in a
-/// directory of the PATH after Z:, which DOSBox's PATH starts with.
+/// The commands that stand for programs DOSBox has on Z: or MS-DOS in
+/// C:\DOS (`z_program`), and where a program of their name comes first.
+static Z_PROGRAMS: &[(&str, &(dyn ShellCommand + Sync), ProgramFirst)] = &[
+    (
+        "CONFIG",
+        &crate::config_command::ConfigCommand,
+        ProgramFirst::Here,
+    ),
+    (
+        "MODE",
+        &crate::mode_command::ModeCommand,
+        ProgramFirst::OnPath,
+    ),
+];
+
+/// `command` (a name, with .COM or not) as one of `Z_PROGRAMS`, unless a
+/// program of the name comes first: one in the current directory always
+/// does (a game's CONFIG.EXE, its setup), and one in a directory of the
+/// PATH does for the commands MS-DOS has as programs (a MODE.COM there).
 fn z_program(cpu: &Cpu, command: &str) -> Option<&'static (dyn ShellCommand + Sync)> {
     let name = command
         .strip_suffix(".COM")
         .or_else(|| command.strip_suffix(".com"))
         .unwrap_or(command);
-    let &(_, program) = Z_PROGRAMS.iter().find(|(n, _)| n.eq_ignore_ascii_case(name))?;
+    let &(_, program, first) = Z_PROGRAMS
+        .iter()
+        .find(|(n, _, _)| n.eq_ignore_ascii_case(name))?;
     // `find_program` gives a program in the current directory without a
     // directory in front.
-    let here = crate::exec::find_program(cpu, command)
-        .is_some_and(|path| !path.contains(['\\', '/', ':']));
-    (!here).then_some(program)
+    let found = crate::exec::find_program(cpu, command)
+        .is_some_and(|path| first == ProgramFirst::OnPath || !path.contains(['\\', '/', ':']));
+    (!found).then_some(program)
 }
 
-/// The names of the built-in commands.
+/// The names of the built-in commands, and of those that stand for
+/// programs (`Z_PROGRAMS`).
 pub(crate) fn names() -> impl Iterator<Item = &'static str> {
-    COMMANDS.iter().map(|&(name, _)| name)
+    let programs = Z_PROGRAMS.iter().map(|&(name, _, _)| name);
+    COMMANDS.iter().map(|&(name, _)| name).chain(programs)
 }
 
 /// The built-in command called `name`, in any case.

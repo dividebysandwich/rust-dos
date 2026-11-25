@@ -126,6 +126,9 @@ pub const IN_DESTROY_MSG: u32 = 0x10;
 pub const NC_DESTROYED: u32 = 0x20;
 /// Its last WM_SIZE was sent.
 pub const SIZE_SENT: u32 = 0x40;
+/// A palette was selected into a DC of it or of a descendant on a
+/// palette device (`palette::selected`). 0x80 is defwnd.rs's NC_ACTIVE.
+pub const HAS_PALETTE: u32 = 0x100;
 
 /// A window.
 #[derive(Clone, Debug, Default)]
@@ -553,6 +556,31 @@ fn keep_above_owners(state: &mut State, hwnd: u32, left_topmost: bool) {
     if let Some(d) = state.window_mut(DESKTOP) {
         d.children = rest;
     }
+}
+
+/// Whether the window `hwnd` belongs to a thread of a program made for
+/// a version of Windows before 4.0: a Windows 3.x program's task
+/// (`win16::task_expects_win3`), or a Win32 program whose header gives a
+/// subsystem version below 4.0. Windows 98's USER keeps this version in
+/// each thread's message queue, from KERNEL's GetExeVersion (the task's
+/// expected version) when it makes the queue, and the controls check it
+/// as the window's thread runs their procedure, whatever instance the
+/// window was made with. A process loaded from a save state made before
+/// the version was kept has 0, and counts as a 4.0 program.
+pub(crate) fn thread_expects_win3(cpu: &mut Cpu, hwnd: u32) -> bool {
+    let Some((pid, tid, instance)) = user(cpu).window(hwnd).map(|w| (w.pid, w.tid, w.instance))
+    else {
+        return false;
+    };
+    if pid == cpu.bus.win32.win16.pid {
+        return crate::win16::task_expects_win3(cpu, tid)
+            .unwrap_or_else(|| crate::win16::expects_win3(cpu, pid, instance));
+    }
+    let processes = &cpu.bus.win32.processes;
+    processes
+        .iter()
+        .find(|p| p.id == pid)
+        .is_some_and(|p| p.subsystem_version != 0 && p.subsystem_version < 0x4_0000)
 }
 
 /// Put `hwnd` in its parent's list of children, after `after` (HWND_TOP,
@@ -1290,6 +1318,9 @@ const D_HWND: usize = 0;
 const D_CHILD: usize = 1;
 const D_AT: usize = 2;
 const D_LIST: usize = 3;
+/// The window activated next, while the palette is to go, before the
+/// list is there.
+const D_NEXT: usize = 3;
 
 /// DestroyWindow(hwnd).
 pub fn destroy_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1418,8 +1449,21 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 // the owner of a popup hidden so and destroyed is active.
                 t.step = 9;
                 if user(cpu).is_active(hwnd) {
-                    return Next::call(address_of(cpu, "ActivateOtherWindow"), &[hwnd], 9);
+                    // Windows 98 then lets a palette the window kept in
+                    // the foreground go (`palette`).
+                    if super::palette::destroy_restores(user(cpu), hwnd) {
+                        let next = super::input::other_window(cpu, hwnd);
+                        t.set(D_NEXT, next);
+                        t.step = 10;
+                    }
+                    let step = t.step;
+                    return Next::call(address_of(cpu, "ActivateOtherWindow"), &[hwnd], step);
                 }
+            }
+            10 => {
+                t.step = 9;
+                let args = [t.var(D_NEXT), hwnd];
+                return Next::call(address_of(cpu, "RestoreDefaultPalette"), &args, 9);
             }
             9 => {
                 if !user(cpu).is_window(hwnd) {
@@ -1528,6 +1572,9 @@ const S_FLAGS: usize = 3;
 const S_RECT: usize = 4;
 /// Whether WM_GETMINMAXINFO filled the MINMAXINFO in the scratch space.
 const S_MINMAX: usize = 8;
+/// Whether it minimizes a top-level window with a palette, whose
+/// palette is then to go (`palette`).
+const S_PALETTE: usize = 9;
 const SHOW_SCRATCH: u32 = 40;
 
 /// ShowWindow(hwnd, command): whether it was visible.
@@ -1614,6 +1661,11 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                             swp |= SWP_NOACTIVATE | SWP_NOZORDER;
                         }
                         if style & WS_MINIMIZE == 0 {
+                            let state = user(cpu);
+                            let palette = state
+                                .window(hwnd)
+                                .is_some_and(|w| w.parent == DESKTOP && w.flags & HAS_PALETTE != 0);
+                            t.set(S_PALETTE, palette as u32);
                             new = minimize(cpu, hwnd);
                             swp |= SWP_STATECHANGED;
                         } else {
@@ -1755,6 +1807,17 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     super::make_long(client.left, client.top),
                     4,
                 );
+            }
+            4 => {
+                // A window with a palette was minimized. Windows 98 passes
+                // the window SW_MINIMIZE activates, and none for the other
+                // commands, which means the active window; the built-in
+                // SW_MINIMIZE activates none, so the active window it is.
+                t.step = 7;
+                if t.var(S_PALETTE) != 0 {
+                    let args = [0, hwnd];
+                    return Next::call(address_of(cpu, "RestoreDefaultPalette"), &args, 7);
+                }
             }
             _ => return Next::Done(was as u32),
         }
