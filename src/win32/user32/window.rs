@@ -97,7 +97,7 @@ pub const SW_FORCEMINIMIZE: u32 = 11;
 pub const CW_USEDEFAULT: u32 = 0x8000_0000;
 
 /// The W32 version whose sections have `State::cascade`.
-pub const CASCADE_SAVED: u16 = 100;
+pub const CASCADE_SAVED: u16 = 101;
 
 /// The area overlapped windows of CW_USEDEFAULT share out, as Windows
 /// 98 has it: the work area less a row of minimized windows
