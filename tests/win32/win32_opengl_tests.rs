@@ -4696,3 +4696,58 @@ fn the_vertex_functions_and_a_list_of_them_run_between_begin_and_end() {
     let material = floats(&cpu, data, MATERIAL);
     assert_eq!(material, [0.25, 0.5, 0.75, 1.0], "the diffuse material");
 }
+
+/// glDrawArrays and glDrawElements compiled between a list's glBegin
+/// and its glEnd are recorded as they are, and have the error when
+/// the list runs, as the program's own calls there do.
+#[test]
+fn a_list_draw_of_the_arrays_between_begin_and_end_is_refused() {
+    let mut d = lists_data();
+    put_f32s(&mut d, VERTICES, &[-1.0, -1.0, 3.0, -1.0, -1.0, 3.0]);
+    put(&mut d, INDICES, &[0, 1, 2]);
+    let mut at_result = Vec::new();
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let pointer = [Arg::I(2), Arg::I(GL_FLOAT), Arg::I(0), Arg::At(VERTICES)];
+        gl(a, l, VERTEX_POINTER, &pointer)?;
+        gl(a, l, ENABLE_CLIENT_STATE, &[Arg::I(GL_VERTEX_ARRAY)])?;
+        let indices = [GL_TRIANGLES, 3, GL_UNSIGNED_BYTE].map(Arg::I);
+        let mut indices = indices.to_vec();
+        indices.push(Arg::At(INDICES));
+        let draws = [
+            (DRAW_ARRAYS, [GL_TRIANGLES, 0, 3].map(Arg::I).to_vec()),
+            (DRAW_ELEMENTS, indices),
+        ];
+        for (list, (index, args)) in draws.iter().enumerate() {
+            gl(a, l, NEW_LIST, &[Arg::I(list as u32 + 1), Arg::I(GL_COMPILE)])?;
+            gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+            gl(a, l, *index, args)?;
+            gl(a, l, END, &[])?;
+            gl(a, l, END_LIST, &[])?;
+        }
+        c.api(a, l, GET_ERROR, &[])?;
+        at_result.push(("compiling", c.next - 1));
+        for (list, what) in [(1, "glDrawArrays"), (2, "glDrawElements")] {
+            gl(a, l, CALL_LIST, &[Arg::I(list)])?;
+            c.api(a, l, GET_ERROR, &[])?;
+            at_result.push((what, c.next - 1));
+        }
+        finish(a, l)
+    });
+    let mut cpu = machine("list_draw_begin_end", true, exe);
+    run_until_done(&mut cpu, data);
+    let results: Vec<(&str, u32)> = at_result
+        .iter()
+        .map(|&(what, i)| (what, peek(&cpu, data + RESULTS + 4 * i)))
+        .collect();
+    let refused = GL_INVALID_OPERATION;
+    assert_eq!(
+        results,
+        [
+            ("compiling", 0),
+            ("glDrawArrays", refused),
+            ("glDrawElements", refused),
+        ]
+    );
+}

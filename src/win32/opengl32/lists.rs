@@ -35,10 +35,10 @@
 //! A list is three flat arrays (`List`): its calls, their argument
 //! words and the bytes copied for them.
 //!
-//! The calls that run a handler, the program's, a list's and GLU32's,
-//! are where the functions OpenGL doesn't allow between glBegin and
-//! glEnd are refused there (`refused`): one table of the exports, in
-//! place of a check in each function.
+//! The functions OpenGL doesn't allow between glBegin and glEnd are
+//! refused there where their handler would run, for the program, a
+//! list or GLU32 (`refused`): one table of the exports, in place of a
+//! check in each function.
 //!
 //! A run of calls from a glBegin to its glEnd that only give vertices
 //! (glVertex, glColor, glNormal, glTexCoord and glMultiTexCoordARB) is
@@ -794,7 +794,9 @@ fn push_element(cpu: &mut Cpu, open: &mut Open, e: &Elements, i: u32) {
 /// Record glDrawArrays or glDrawElements with `args` as glBegin, the
 /// elements and glEnd, or glArrayElement as its element. A call whose
 /// arguments are an error is recorded as it is: its handler reads no
-/// array before it gives the error, so a replay gives the same.
+/// array before it gives the error, so a replay gives the same. So is
+/// one between the list's glBegin and its glEnd, which the replay
+/// refuses as the program's call is (`refused`).
 fn push_arrays(cpu: &mut Cpu, open: &mut Open, at: usize, when: When, args: &[u32]) {
     if when == When::Element {
         if let Some(e) = elements(cpu) {
@@ -817,9 +819,12 @@ fn push_arrays(cpu: &mut Cpu, open: &mut Open, at: usize, when: When, args: &[u3
         push(cpu, open, at, args, None, false);
         return;
     };
-    // As the handlers have it: nothing between glBegin and glEnd, and
-    // nothing without vertices.
-    if count == 0 || open.begun {
+    if open.begun {
+        push(cpu, open, at, args, None, false);
+        return;
+    }
+    // Without vertices it draws nothing.
+    if count == 0 {
         return;
     }
     let Some(e) = elements(cpu) else {
