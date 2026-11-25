@@ -72,15 +72,17 @@ pub fn cursor_shape(adapter: Adapter, height: u16) -> u16 {
 }
 
 /// The scanlines a VGA BIOS gives the text mode `mode` (0-3, 7) at its
-/// next mode set, as INT 10h AH=12h BL=30h selected them in BDA 0489h
-/// bits 7 and 4: 200 (10), 350 (00) or 400 (01). Mode 7 has no 200-line
-/// form and takes 350. 400 on other adapters and in the graphics modes,
-/// whose registers this doesn't change.
-pub fn text_lines(bus: &Bus, mode: u8) -> u16 {
-    if !bus.vga.adapter.vga_bios() {
+/// next mode set, as INT 10h AH=12h BL=30h selected them in `flags`, BDA
+/// 0489h, bits 7 and 4: 200 (10), 350 (00) or 400 (01). Mode 7 has no
+/// 200-line form and takes 350. 400 on other adapters and in the graphics
+/// modes, whose registers this doesn't change. The caller reads `flags`
+/// where its other BIOS data is: through the guest's paging in an
+/// INT 10h service, whose BDA may be a DOS box's own copy.
+pub fn text_lines(adapter: Adapter, mode: u8, flags: u8) -> u16 {
+    if !adapter.vga_bios() {
         return 400;
     }
-    match (mode, bus.read_8(0x0489) & 0x90) {
+    match (mode, flags & 0x90) {
         (0x00..=0x03 | 0x07, 0x10) => 400,
         (0x00..=0x03, 0x80) => 200,
         (0x00..=0x03 | 0x07, _) => 350,
@@ -119,7 +121,7 @@ pub fn reset_for_shell(bus: &mut Bus) {
     bus.write_8(0x0451, 0); // Cursor row
     bus.write_8(0x0465, 0x29);
     bus.write_8(0x0466, 0x30);
-    let lines = text_lines(bus, mode as u8);
+    let lines = text_lines(adapter, mode as u8, bus.read_8(0x0489));
     let height = match adapter {
         Adapter::Cga | Adapter::Tandy | Adapter::Pcjr => 0,
         Adapter::Ega | Adapter::Hercules => 14,

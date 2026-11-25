@@ -120,3 +120,32 @@ fn an_unknown_selection_changes_nothing() {
     assert_eq!(cpu.get_al(), 0x03);
     assert_eq!(cpu.bus.read_8(0x0489) & 0x90, 0x10);
 }
+
+#[test]
+fn the_selection_sets_the_ega_switches_too() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    let high = cpu.bus.read_8(0x0488) & 0xF0;
+    // 200 lines are the EGA's CGA emulation (switches 8), which AH=12h
+    // BL=10h returns in CL.
+    int10(&mut cpu, 0x1200, 0x0030);
+    assert_eq!(cpu.bus.read_8(0x0488), high | 0x08);
+    int10(&mut cpu, 0x1200, 0x0010);
+    assert_eq!(cpu.get_reg8(Register::CL), 0x08);
+    // 350 and 400 lines the enhanced display (9).
+    int10(&mut cpu, 0x1201, 0x0030);
+    assert_eq!(cpu.bus.read_8(0x0488), high | 0x09);
+    int10(&mut cpu, 0x1200, 0x0030);
+    int10(&mut cpu, 0x1202, 0x0030);
+    assert_eq!(cpu.bus.read_8(0x0488), high | 0x09);
+}
+
+#[test]
+fn a_font_taller_than_the_lines_shown_leaves_one_row() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0003, 0);
+    // A program's CRTC showing 8 lines, with no overflow bits.
+    cpu.bus.vga.crtc_regs[0x07] = 0;
+    cpu.bus.vga.crtc_regs[0x12] = 7;
+    int10(&mut cpu, 0x1114, 0);
+    assert_eq!(rows_and_height(&cpu), (1, 16));
+}

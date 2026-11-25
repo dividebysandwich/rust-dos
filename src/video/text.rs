@@ -225,12 +225,8 @@ fn crtc_shape(bus: &Bus) -> Option<(usize, usize)> {
     if bus.boot.is_none() || !bus.vga.adapter.ega_bios() {
         return None;
     }
-    let crtc = &bus.vga.crtc_regs;
-    let height = (crtc[0x09] & 0x1F) as usize + 1;
-    let mut lines = (crtc[0x12] as usize | (crtc[0x07] as usize & 0x02) << 7 | (crtc[0x07] as usize & 0x40) << 3) + 1;
-    if crtc[0x09] & 0x80 != 0 {
-        lines /= 2;
-    }
+    let height = (bus.vga.crtc_regs[0x09] & 0x1F) as usize + 1;
+    let lines = bus.vga.text_scanlines() as usize;
     Some(((lines / height).clamp(1, 60), height))
 }
 

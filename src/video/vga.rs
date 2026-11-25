@@ -1043,6 +1043,21 @@ impl VgaCard {
         }
     }
 
+    /// The scanlines a text mode's rows go over, as a VGA BIOS reads them
+    /// from the CRTC: Vertical Display End and its overflow bits, plus
+    /// one, halved when Maximum Scan Line (09h bit 7) scans each line
+    /// twice. 400, 350 or 200 after a text mode set.
+    pub fn text_scanlines(&self) -> u16 {
+        let crtc = &self.crtc_regs;
+        let overflow = crtc[0x07] as u16;
+        let lines = (crtc[0x12] as u16 | (overflow & 0x02) << 7 | (overflow & 0x40) << 3) + 1;
+        if crtc[0x09] & 0x80 != 0 {
+            lines / 2
+        } else {
+            lines
+        }
+    }
+
     /// The timing given the display instead of the registers', if any.
     pub fn fixed_timing(&self) -> Option<CrtTiming> {
         self.fixed_timing
