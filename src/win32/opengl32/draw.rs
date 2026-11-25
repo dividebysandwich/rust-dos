@@ -1407,9 +1407,12 @@ pub(super) fn draw_fragments(
             RS_CULLMODE => 1,
             RS_FILLMODE => 3,
             RS_SHADEMODE => 1,
+            // The clip planes cut the raster position, not its fragments.
+            RS_CLIPPLANEENABLE => 0,
             _ => *v,
         };
     }
+    applied.planes = Since(Vec::new());
     applied.depth_bias = 0;
     // Fog by the raster position's distance, as the vertices' fog
     // factor; without fog, none of it.

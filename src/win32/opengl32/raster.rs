@@ -4,12 +4,13 @@
 //!
 //! glRasterPos puts a point through the modelview and projection
 //! matrices as a vertex goes, and the position is valid if the point is
-//! inside the view volume. Its window coordinates come from the viewport
-//! and the depth range, unrounded; with it the raster position keeps
-//! the point's distance from the eye, the current color (lit with
-//! GL_LIGHTING on) and each unit's texture coordinates through the
-//! texture matrix. An invalid position keeps the rest as it was, and
-//! glBitmap and glCopyPixels then draw nothing.
+//! inside the view volume and on the kept side of each clip plane that
+//! is on. Its window coordinates come from the viewport and the depth
+//! range, unrounded; with it the raster position keeps the point's
+//! distance from the eye, the current color (lit with GL_LIGHTING on)
+//! and each unit's texture coordinates, generated where glTexGen is on,
+//! through the texture matrix. An invalid position keeps the rest as it
+//! was, and glBitmap and glCopyPixels then draw nothing.
 //!
 //! What they draw are fragments that aren't a primitive's
 //! (`draw::draw_fragments`): rectangles of pixels drawn through the
@@ -17,7 +18,7 @@
 
 use super::draw::{self, Fragments};
 use super::{GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, UNITS, ctx, error, matrix};
-use super::{IDENTITY, texture};
+use super::{IDENTITY, ImmVertex, texgen, texture};
 use crate::cpu::Cpu;
 
 /// The W32 section's version that has the raster position, in the
@@ -96,8 +97,15 @@ pub fn raster_pos(cpu: &mut Cpu, p: [f32; 4]) {
     let eye = matrix::apply(&modelview, p);
     let [x, y, z, w] = matrix::apply(&projection, eye).map(f64::from);
     // Inside the view volume, -w <= x, y, z <= w; a number that isn't
-    // one is outside.
-    if ![x, y, z].iter().all(|&v| -w <= v && v <= w) {
+    // one is outside. A clip plane keeps the eye coordinates whose dot
+    // product with it isn't negative.
+    let kept = |plane: [f32; 4]| {
+        let d: f64 = (0..4)
+            .map(|i| f64::from(plane[i]) * f64::from(eye[i]))
+            .sum();
+        d >= 0.0
+    };
+    if ![x, y, z].iter().all(|&v| -w <= v && v <= w) || !c.clip.on().into_iter().all(kept) {
         c.raster.valid = false;
         return;
     }
@@ -115,9 +123,17 @@ pub fn raster_pos(cpu: &mut Cpu, p: [f32; 4]) {
     };
     let distance = (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt();
     let color = draw::lit_color(c, p, c.normal, c.color).unwrap_or(c.color);
+    // The coordinates glTexGen gives the point as a vertex.
+    let vertex = ImmVertex {
+        position: p,
+        normal: c.normal,
+        tex: c.tex_coord,
+        ..ImmVertex::default()
+    };
+    let given = texgen::generate(c, &[vertex]).map_or(c.tex_coord, |v| v[0].tex);
     let tex = std::array::from_fn(|u| match c.texture_matrix[u].last() {
-        Some(m) if *m != IDENTITY => matrix::apply(m, c.tex_coord[u]),
-        _ => c.tex_coord[u],
+        Some(m) if *m != IDENTITY => matrix::apply(m, given[u]),
+        _ => given[u],
     });
     *c.raster = Raster {
         window: [

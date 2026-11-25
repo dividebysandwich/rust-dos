@@ -4955,6 +4955,78 @@ fn the_raster_position_is_a_transformed_point() {
     assert_eq!(peek(&cpu, data + LISTED_VALID), 1);
 }
 
+/// glRasterPos's point is a vertex to the clip planes and to texture
+/// coordinate generation as well (section 2.12): a point inside the
+/// view volume but outside a clip plane that is on makes the position
+/// invalid, and the raster position's texture coordinates are the ones
+/// glTexGen gives the point.
+#[test]
+fn the_raster_position_takes_clip_planes_and_texgen() {
+    const CLIP: u32 = LIST_DATA;
+    const S_PLANE: u32 = LIST_DATA + 0x40;
+    const KEPT_VALID: u32 = KEPT;
+    const CUT_VALID: u32 = KEPT + 4;
+    const TEX: u32 = KEPT + 0x10;
+    let mut d = lists_data();
+    for (i, v) in [1.0f64, 0.0, 0.0, 0.0].iter().enumerate() {
+        put(&mut d, CLIP + 8 * i as u32, &v.to_le_bytes());
+    }
+    for (i, v) in [2.0f32, 0.0, 0.0, 0.5].iter().enumerate() {
+        put(&mut d, S_PLANE + 4 * i as u32, &v.to_le_bytes());
+    }
+    let mut error_at = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let valid = |a: &mut CodeAssembler, to: u32| {
+            let p = GL_CURRENT_RASTER_POSITION_VALID;
+            gl(a, l, GET_INTEGERV, &[Arg::I(p), Arg::At(to)])
+        };
+        // Keeps x >= 0.
+        let plane0 = Arg::I(GL_CLIP_PLANE0);
+        gl(a, l, CLIP_PLANE, &[plane0, Arg::At(CLIP)])?;
+        gl(a, l, ENABLE, &[plane0])?;
+        gl(a, l, RASTER_POS3F, &[Arg::F(0.5), Arg::F(0.0), Arg::F(0.0)])?;
+        valid(a, KEPT_VALID)?;
+        gl(
+            a,
+            l,
+            RASTER_POS3F,
+            &[Arg::F(-0.5), Arg::F(0.0), Arg::F(0.0)],
+        )?;
+        valid(a, CUT_VALID)?;
+        gl(a, l, DISABLE, &[plane0])?;
+        // s = 2x + 1/2.
+        let mode = [GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR].map(Arg::I);
+        gl(a, l, TEX_GENI, &mode)?;
+        let plane = [Arg::I(GL_S), Arg::I(GL_OBJECT_PLANE), Arg::At(S_PLANE)];
+        gl(a, l, TEX_GENFV, &plane)?;
+        gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_GEN_S)])?;
+        gl(a, l, TEX_COORD2F, &[Arg::F(0.0), Arg::F(0.25)])?;
+        gl(
+            a,
+            l,
+            RASTER_POS3F,
+            &[Arg::F(0.25), Arg::F(0.0), Arg::F(0.0)],
+        )?;
+        gl(
+            a,
+            l,
+            GET_FLOATV,
+            &[Arg::I(GL_CURRENT_RASTER_TEXTURE_COORDS), Arg::At(TEX)],
+        )?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine("raster_clip_texgen", true, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    assert_eq!(peek(&cpu, data + KEPT_VALID), 1, "inside the plane");
+    assert_eq!(peek(&cpu, data + CUT_VALID), 0, "outside the plane");
+    assert_eq!(floats(&cpu, data, TEX), [1.0, 0.25, 0.0, 1.0]);
+}
+
 #[test]
 fn a_bitmap_draws_at_the_raster_position() {
     bitmap_draws(Draws::Voodoo3);
