@@ -1601,14 +1601,14 @@ pub struct AutoSpeed {
     /// a new search and by a heavier scene, which searches again.
     unsure: bool,
     /// The hold was taken because the program waited (`WAITS`), and the
-    /// measurements since that didn't wait: Some(n). A hold is no place to
-    /// wait for that to change, as it measures only the frame rate. A
-    /// program waits while it loads, and the busy scene after the load
-    /// was held where the load left it: Dark Omen's movie was held at
-    /// 112,500 for 30 measurements and then stepped down, showing 5 of its
-    /// 15 pictures a second with the host's estimate at 500,000 (#1889).
-    /// After `CALM_MEASUREMENTS` in a row that are far from waiting
-    /// (`CALM`), the search goes on up.
+    /// measurements in a row since that were calm (`CALM`): Some(n). A
+    /// hold is no place to wait for that to change, as it measures only
+    /// the frame rate. A program waits while it loads, and the busy scene
+    /// after the load was held where the load left it: Dark Omen's movie
+    /// was held at 112,500 for 30 measurements and then stepped down,
+    /// showing 5 of its 15 pictures a second with the host's estimate at
+    /// 500,000 (#1889). After `CALM_MEASUREMENTS` in a row that are far
+    /// from waiting, the search goes on up.
     waiting_hold: Option<u32>,
     /// The last measurement moved `LOADS` on its drives.
     loaded: bool,
@@ -3190,6 +3190,7 @@ impl AutoSpeed {
                 // kept, the speed it waited at would be the least that drew
                 // the record (`least_held`), and frames lost far above it
                 // would raise no floor.
+                let mut left = left;
                 if let Some(calm) = self.waiting_hold {
                     let calm = if m.halted < CALM { calm + 1 } else { 0 };
                     if calm >= CALM_MEASUREMENTS {
@@ -3198,6 +3199,15 @@ impl AutoSpeed {
                         return up(self, FIRST_STEP, here);
                     }
                     self.waiting_hold = Some(calm);
+                    // A count under way outlasts the hold. Run out first,
+                    // the hold would step down to where it is, as a hold
+                    // for the frames it draws, or a fine step up that
+                    // keeps what the load held at: a load that ended in
+                    // the hold's last measurement held the scene after it
+                    // for `HOLD_WINDOWS` more.
+                    if calm > 0 {
+                        left = left.max(CALM_MEASUREMENTS - calm + 1);
+                    }
                 }
                 // Up to the floor, the same hold: one taken because the
                 // program waited stays one.
@@ -6687,6 +6697,19 @@ mod tests {
         // soon as it would after a short load.
         let (_, speeds) = load_then_movie(45, |_| 0);
         assert!(speeds.iter().any(|&s| s >= 300_000), "{speeds:?}");
+    }
+
+    #[test]
+    fn a_load_of_any_length_goes_on_up_once_the_program_works() {
+        // A load of 30 measurements ends as its hold does: the hold's last
+        // measurement is the movie's first calm one, and the count of
+        // calm ones runs on past it instead of the hold stepping down and
+        // holding the movie at 112,500 for `HOLD_WINDOWS` more.
+        let short: Vec<_> = (1..=2 * HOLD_WINDOWS as usize + 10)
+            .map(|loads| (loads, load_then_movie(loads, |_| 0).1))
+            .filter(|(_, speeds)| !speeds.iter().any(|&s| s >= 300_000))
+            .collect();
+        assert!(short.is_empty(), "{short:?}");
     }
 
     #[test]
