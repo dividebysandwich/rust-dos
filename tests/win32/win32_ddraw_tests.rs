@@ -2299,8 +2299,12 @@ fn palette_before_mode_program() -> (Vec<u8>, u32) {
 fn a_palette_selected_on_a_deep_desktop_realizes_in_the_background_in_an_8_bit_mode() {
     // Windows 98's USER selects a palette in the foreground only on a
     // palette device, so A, selected on the desktop of 32 bits, isn't
-    // the foreground palette in the 8-bit mode: realized there, it
-    // takes a free entry and leaves B's.
+    // the foreground palette in the 8-bit mode. Realized there in the
+    // background, it maps to the first entry after the static ones, as
+    // B did, and puts its color in no entry, since that one isn't free
+    // (Windows 95 OSR2.5's rule, `gdi32::palette`). In the foreground
+    // it would take the next entry, which is free, and put its color
+    // there.
     let (program, data) = palette_before_mode_program();
     let mut cpu = machine("palette_before_mode", program);
     run_until_done(&mut cpu, data);
@@ -2308,12 +2312,11 @@ fn a_palette_selected_on_a_deep_desktop_realizes_in_the_background_in_an_8_bit_m
     // RealizePalette on the desktop of 32 bits maps nothing.
     assert_eq!(r[4], 0);
     assert_eq!(r[5..8], [0; 3]);
-    // B takes the first entry after the static ones, A the next.
     assert_eq!(r[11..13], [1, 1]);
     let (dac, b) = dac_entry(&cpu, 10, D_COLOR);
     assert_eq!(dac, b, "B's entry");
     let (dac, a) = dac_entry(&cpu, 11, G_COLOR);
-    assert_eq!(dac, a, "A's entry");
+    assert_ne!(dac, a, "the next entry");
 }
 
 const DD_QUERY_INTERFACE: u32 = 0;
