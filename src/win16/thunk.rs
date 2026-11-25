@@ -77,6 +77,7 @@ pub static POSTS: &[Post] = &[
     super::message::post,
     super::hook::post,
     super::hook::post_msg_filter,
+    super::message::post_send16_hooks,
 ];
 
 pub const POST_PLAIN: u16 = 0;
@@ -85,6 +86,7 @@ pub const POST_USER: u16 = 2;
 pub const POST_MESSAGE: u16 = 3;
 pub const POST_HOOK: u16 = 4;
 pub const POST_MSG_FILTER: u16 = 5;
+pub const POST_SEND16_HOOKS: u16 = 6;
 
 /// The thens, by their place. Append only.
 pub static THENS: &[Then] = &[
@@ -104,6 +106,7 @@ pub static THENS: &[Then] = &[
     super::ole2::then_block,
     super::ole2disp::then,
     super::typelib_invoke::then,
+    super::message::then_send16,
 ];
 
 // Place 0 is then_keep, which no call names now.
@@ -122,6 +125,7 @@ pub const THEN_OLE_METHOD: u16 = 12;
 pub const THEN_OLE_BLOCK: u16 = 13;
 pub const THEN_OLE2DISP: u16 = 14;
 pub const THEN_TYPELIB_INVOKE: u16 = 15;
+pub const THEN_SEND16: u16 = 16;
 
 fn post_plain(_: &mut Cpu, value: u32, _: &[u32], _: &mut Context) -> Option<u32> {
     Some(value)

@@ -55,8 +55,8 @@ static APIS: &[Api16] = &[
     win32("GetClientRect", 33, "wR", U, "GetClientRect", b'b'),
     win32("EnableWindow", 34, "ww", U, "EnableWindow", b'b'),
     win32("IsWindowEnabled", 35, "w", U, "IsWindowEnabled", b'b'),
-    win32("GetWindowText", 36, "wps", U, "GetWindowTextA", b'w'),
-    win32("SetWindowText", 37, "wp", U, "SetWindowTextA", b'b'),
+    rust("GetWindowText", 36, "wls", get_window_text),
+    rust("SetWindowText", 37, "wl", set_window_text),
     win32(
         "GetWindowTextLength",
         38,
@@ -116,8 +116,8 @@ static APIS: &[Api16] = &[
     rust("CreateDialog", 89, "nrwS", create_dialog),
     rust("IsDialogMessage", 90, "wp", is_dialog_message),
     win32("GetDlgItem", 91, "ww", U, "GetDlgItem", b'w'),
-    win32("SetDlgItemText", 92, "wwp", U, "SetDlgItemTextA", b'b'),
-    win32("GetDlgItemText", 93, "wwpw", U, "GetDlgItemTextA", b'w'),
+    rust("SetDlgItemText", 92, "wwl", set_dlg_item_text),
+    rust("GetDlgItemText", 93, "wwlw", get_dlg_item_text),
     rust("SetDlgItemInt", 94, "wwww", set_dlg_item_int),
     rust("GetDlgItemInt", 95, "wwpw", get_dlg_item_int),
     win32("CheckRadioButton", 96, "wwww", U, "CheckRadioButton", b'b'),
@@ -1538,15 +1538,61 @@ fn send_dlg_item_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if hwnd == 0 {
         return Some(0);
     }
-    message::send32(
-        cpu,
-        api(cpu, "SendMessageA"),
-        hwnd,
-        args[2],
-        args[3],
-        args[4],
-    );
+    message::send16(cpu, hwnd, args[2], args[3], args[4]);
     None
+}
+
+const WM_SETTEXT: u32 = 0x000C;
+const WM_GETTEXT: u32 = 0x000D;
+
+/// GetWindowText(hwnd, buffer, size). Windows 3.1's sends WM_GETTEXT
+/// and returns what the window procedure does: a window with a 16-bit
+/// procedure gets the message as SendMessage gives it
+/// (`message::send16`), with the caller's buffer. The others, USER32's
+/// controls and other tasks' windows, go to GetWindowTextA.
+fn get_window_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (hwnd, buffer, size) = (args[0], args[1], args[2]);
+    if message::window_proc16(cpu, hwnd).is_some() {
+        message::send16(cpu, hwnd, WM_GETTEXT, size & 0xFFFF, buffer);
+        return None;
+    }
+    let buffer = super::linear(cpu, buffer);
+    go(cpu, "GetWindowTextA", &[hwnd, buffer, size])
+}
+
+/// SetWindowText(hwnd, text): WM_SETTEXT, as GetWindowText sends
+/// WM_GETTEXT.
+fn set_window_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (hwnd, text) = (args[0], args[1]);
+    if message::window_proc16(cpu, hwnd).is_some() {
+        message::send16(cpu, hwnd, WM_SETTEXT, 0, text);
+        return None;
+    }
+    let text = super::linear(cpu, text);
+    go(cpu, "SetWindowTextA", &[hwnd, text])
+}
+
+/// GetDlgItemText(dialog, id, buffer, size): GetWindowText of the
+/// control.
+fn get_dlg_item_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let hwnd = dlg_item(cpu, args[0], args[1]);
+    if message::window_proc16(cpu, hwnd).is_some() {
+        message::send16(cpu, hwnd, WM_GETTEXT, args[3], args[2]);
+        return None;
+    }
+    let buffer = super::linear(cpu, args[2]);
+    go(cpu, "GetDlgItemTextA", &[args[0], args[1], buffer, args[3]])
+}
+
+/// SetDlgItemText(dialog, id, text): SetWindowText of the control.
+fn set_dlg_item_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let hwnd = dlg_item(cpu, args[0], args[1]);
+    if message::window_proc16(cpu, hwnd).is_some() {
+        message::send16(cpu, hwnd, WM_SETTEXT, 0, args[2]);
+        return None;
+    }
+    let text = super::linear(cpu, args[2]);
+    go(cpu, "SetDlgItemTextA", &[args[0], args[1], text])
 }
 
 fn def_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
