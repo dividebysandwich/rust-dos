@@ -103,8 +103,8 @@ installing the system on it first, as
   its [`automount` folder](../GAME-PACKAGES.md#the-automount-folder).
 * A game with a configuration of its own (a `rust-dos.conf` or
   `dosbox.conf` in it, or a DOSBox `GAME.conf` beside `GAME.zip`)
-  ignores **Boot OS** and runs as its configuration says. So do an `.exe` loaded directly and disk images
-  loaded as content.
+  ignores **Boot OS** and runs as its configuration says. So do an
+  `.exe` loaded directly and disk images loaded as content.
 * The image file itself is never written. What the system and the game
   change on C: (a game installed from D: to C:, saved settings) goes to
   a delta file for that game in `saves/rust-dos/saves/<name>`. One
