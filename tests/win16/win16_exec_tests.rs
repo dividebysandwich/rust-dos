@@ -115,9 +115,7 @@ fn a_program_started_with_a_slash_path_finds_its_dlls_beside_it() {
 
 /// Whether a task ended with the exit code `code`, as the log says.
 fn ended_with(log: &str, code: u8) -> bool {
-    let line = format!(" ended with exit code {:X}", code);
-    log.lines()
-        .any(|l| l.starts_with("[W16] Task ") && l.ends_with(&line))
+    ended_count(log, code) > 0
 }
 
 #[test]
@@ -218,9 +216,10 @@ fn a_program_loaded_again_after_its_task_ended_runs_in_its_own_data_segment() {
 /// The program runs C:\CHILD.EXE twice while the first CHILD runs:
 /// CHILD, a program with the module flags `module_flags`, yields three
 /// times and ends with 7. The program waits (Yield) until
-/// GetModuleUsage of the first instance is `left` or less, and ends
-/// with 1 when both WinExecs gave the same instance, 2 when they gave
-/// two, and 3 when the first failed. Its exit code and the log.
+/// GetModuleUsage of the first instance is `left` or less. It ends with
+/// 4 when the usage went below `left`, else with 3 when the first
+/// WinExec failed, 1 when both gave the same instance and 2 when they
+/// gave two. Its exit code and the log.
 fn run_child_twice(test: &str, module_flags: u16, left: u8) -> (u8, String) {
     let mut code = Code::new();
     let first_at = code.here() + 2;
@@ -237,7 +236,10 @@ fn run_child_twice(test: &str, module_flags: u16, left: u8) -> (u8, String) {
     let back = wait as i32 - (code.here() as i32 + 2);
     code.emit(&[0xEB, back as i8 as u8]); // jmp wait
     code.emit(&[
-        0xB0, 0x03, // done: mov al,3
+        0x3D, left, 0x00, // done: cmp ax,left
+        0xB0, 0x04, // mov al,4
+        0x75, 0x0F, // jne end
+        0xB0, 0x03, // mov al,3
         0x83, 0xFE, 0x20, // cmp si,20h
         0x72, 0x08, // jb end
         0xB0, 0x01, // mov al,1
@@ -280,8 +282,9 @@ fn a_singledata_program_started_again_gives_the_running_copys_instance() {
     // program only when it is MULTIPLEDATA; for another it counts one
     // more user of the module and gives the loaded copy's instance. So
     // the second WinExec gives the first one's instance and one CHILD
-    // runs. The module then stays loaded, with the user the second
-    // WinExec counted, which the program waits for.
+    // runs. The module then stays loaded after CHILD ends, with the user
+    // the second WinExec counted: the program waits for a usage of 1 and
+    // ends with 4 if it fell to 0.
     let (exit, log) = run_child_twice("singledata_twice", ne::SINGLEDATA, 1);
     assert_eq!(ended_count(&log, 7), 1, "{log}");
     assert_eq!(exit, 1, "{log}");
