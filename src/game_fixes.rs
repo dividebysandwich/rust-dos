@@ -548,6 +548,14 @@ const TD4_INTRO_CAMERA: CodePatch = CodePatch {
     data: &[],
 };
 
+/// What the player sees: the CD edition's intro (the title, the story
+/// screens with the crew's portraits) was drawn twice, in 320x200 and in
+/// 640x400 Super VGA. Without the fix it always plays the 320x200
+/// version, blocky and with blurred small print, though the video card
+/// has the 640x400 mode; with it, the sharp 640x400 one, without the
+/// VESA driver the CD has for cards whose BIOS lacks VESA. The game
+/// after the intro is 320x200 either way.
+///
 /// The VESA check of Whale's Voyage's CD intro (INTRO.EXE in \WV, which
 /// WV.EXE starts). Addresses here are offsets in its code segment, which
 /// starts 10h bytes into the file's load module, at 210h in the file; the
@@ -704,7 +712,7 @@ pub const FIXES: &[Fix] = &[
     Fix {
         name: "whales-voyage-vesa-intro",
         game: "Whale's Voyage",
-        reason: "the CD intro's VESA mode-info buffer is 35 bytes with code after it",
+        reason: "the CD intro plays in 320x200 instead of its 640x400 Super VGA version",
         kind: Kind::AtLoad {
             programs: &[("INTRO.EXE", &WHALES_VOYAGE_VESA_INTRO)],
             beside: Some("WVD.EXE"),
