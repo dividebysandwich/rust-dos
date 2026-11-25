@@ -2114,7 +2114,7 @@ fn read_quiet(cpu: &mut Cpu, read: impl FnOnce(&mut Cpu) -> bool) {
 
 /// What a read of the devices may change (`seen`), and the messages in
 /// every queue it may post input to. None when a key went down.
-fn settled(cpu: &mut Cpu) -> Option<(Seen, usize, u32)> {
+pub(crate) fn settled(cpu: &mut Cpu) -> Option<(Seen, usize, u32)> {
     let seen = seen(cpu)?;
     let queues = &user(cpu).queues;
     let messages = queues.iter().map(|q| q.posted.len() + q.input.len()).sum();

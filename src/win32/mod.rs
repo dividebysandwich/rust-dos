@@ -467,6 +467,11 @@ pub struct Win32 {
     /// time rather than at the next interrupt. Worked out again after a
     /// load.
     pub(crate) wait_due: Option<u64>,
+    /// When the running thread's turn ends, by the clock's microseconds
+    /// (`thread::turn_due`), so that another thread that is ready takes
+    /// over then rather than at the BIOS's next interrupt. Worked out
+    /// again after a load.
+    pub(crate) turn_due: Option<u64>,
     /// Where the system's time was taken from the machine's clock
     /// (`kernel32::time::now`). Worked out again after a load.
     pub(crate) system_clock: Option<kernel32::time::Anchor>,
@@ -602,11 +607,14 @@ impl Win32 {
     }
 
     /// When WinMM next has work to do (its timers, MIDI streams and MCI
-    /// devices) or a thread's wait times out, in PIT ticks, for the bus's
-    /// timer events.
+    /// devices), a thread's wait times out or the running thread's turn
+    /// ends, in PIT ticks, for the bus's timer events.
     pub fn next_event(&self) -> Option<u64> {
         let saver = Some(self.user.input.saver_due).filter(|&due| due != 0);
-        let micros = [self.winmm.due, self.wait_due, saver].into_iter().flatten().min()?;
+        let micros = [self.winmm.due, self.wait_due, self.turn_due, saver]
+            .into_iter()
+            .flatten()
+            .min()?;
         Some(crate::timer::mul_div_ceil(micros, crate::timer::PIT_HZ, 1_000_000))
     }
 
@@ -642,17 +650,23 @@ impl Win32 {
     }
 }
 
-/// WinMM's or the sound device's time for work came, or a thread's wait
-/// timed out (`Win32::due`), between two instructions: the work is done,
-/// and if the program's code was running, a thread of a higher priority
-/// that it readied (the multimedia thread, whose callbacks ran at
-/// interrupt time on Windows 95) or one whose wait timed out runs at
-/// once (`thread::preempt`).
+/// WinMM's or the sound device's time for work came, a thread's wait
+/// timed out or the running thread's turn ended (`Win32::due`), between
+/// two instructions: the work is done, and if the program's code was
+/// running, a thread of a higher priority that it readied (the
+/// multimedia thread, whose callbacks ran at interrupt time on Windows
+/// 95) or one whose wait timed out runs at once (`thread::preempt`), and
+/// at the end of a turn the next thread in turn does
+/// (`thread::turn_over`).
 pub fn timer(cpu: &mut Cpu) {
+    let now = cpu.bus.clock.now_micros();
+    if cpu.bus.win32.turn_due.is_some_and(|due| due <= now) {
+        let in_program = in_program(cpu);
+        thread::turn_over(cpu, in_program);
+    }
     // A wait that ended before its time out (its object was signaled)
     // leaves its event behind: with nothing else due it does nothing, as
     // in a machine loaded from a state, which has no such event.
-    let now = cpu.bus.clock.now_micros();
     let ticks = cpu.bus.clock.now_ticks();
     let w = &cpu.bus.win32;
     let others = w.winmm.due.is_some_and(|d| d <= now)
@@ -676,12 +690,7 @@ pub fn timer(cpu: &mut Cpu) {
         return;
     }
     user32::saver::tick(cpu);
-    let in_program = cpu.pe()
-        && !cpu.v86()
-        && cpu.cpl == 3
-        && !realmode::waiting(cpu)
-        && running(cpu).is_some_and(|p| p.current.is_some());
-    if in_program {
+    if in_program(cpu) {
         thread::preempt(cpu);
     } else {
         winmm::tick(cpu);
@@ -692,6 +701,16 @@ pub fn timer(cpu: &mut Cpu) {
     let now = cpu.bus.clock.now_micros();
     cpu.bus.win32.wait_due = thread::wait_due(&cpu.bus.win32, now);
     winmm::schedule(cpu);
+}
+
+/// Whether a thread of a program runs its code at level 3, where the
+/// system may switch threads.
+fn in_program(cpu: &Cpu) -> bool {
+    cpu.pe()
+        && !cpu.v86()
+        && cpu.cpl == 3
+        && !realmode::waiting(cpu)
+        && running(cpu).is_some_and(|p| p.current.is_some())
 }
 
 /// The running process.
@@ -1169,6 +1188,9 @@ pub(crate) fn create_process_from(
         thread: (thread_object, tid),
     };
     win32.processes.push(process);
+    // The thread that made it may have run alone: it has a turn to end
+    // now.
+    thread::arm_turn(cpu);
     Ok(created)
 }
 
@@ -1821,6 +1843,7 @@ crate::state_fields!(Win32 {
     trace,
     trace3d,
     wait_due,
+    turn_due,
     system_clock,
     tlb_stale,
     paging,

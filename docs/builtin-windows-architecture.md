@@ -115,8 +115,7 @@ does, but with paging on (`system.rs`, `memory.rs`):
   memory, taken from the XMS pool when the first process starts.
 - An IDT whose gates lead to service traps in the ROM. Hardware
   interrupts go to their real-mode handlers (the BIOS's, DOS's, resident
-  programs') as under Windows 95, through `realmode.rs`, and the timer's
-  drives thread switching.
+  programs') as under Windows 95, through `realmode.rs`.
 - A TSS whose I/O permission bitmap leaves every port open, as Windows
   95 leaves those no driver of its own claims. Some games read the
   joystick port or check the Sound Blaster themselves.
@@ -248,10 +247,11 @@ in Rust tables of plain data, which the save state covers.
 Guest threads are saved CPU contexts, switched on one host thread
 (`thread.rs`). A thread that blocks (`WaitForSingleObject`,
 `GetMessage`, `Sleep`) is switched out at once; one that runs gives way
-to another that is ready after a fixed slice, switched on the timer's
-interrupt, because games spin on flags that another thread sets. There
-are no host threads, so the web build works, and runs stay
-deterministic.
+to another that is ready when its turn ends, because games spin on flags
+that another thread sets. A turn ends at the fourth of Windows 98's 5 ms
+timer ticks after it began, an event of the machine's clock of its own,
+as the BIOS's timer interrupt comes only every 55 ms. There are no host
+threads, so the web build works, and runs stay deterministic.
 
 ## Exceptions
 

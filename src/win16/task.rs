@@ -786,6 +786,8 @@ fn new_thread(cpu: &mut Cpu, ctx: Context) -> Option<(u32, u32)> {
         ctx,
         ..Thread::default()
     });
+    // A task that ran alone has a turn to end now, as after CreateThread.
+    crate::win32::thread::arm_turn(cpu);
     Some((id, top))
 }
 

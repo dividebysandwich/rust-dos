@@ -1589,7 +1589,7 @@ breakpoints and watchpoints on pages in the page file.
 
 Ids, addresses and exit codes are 8-digit hex strings; handles and
 `last_error` are numbers. Pause the machine first for a view that
-holds still: the threads take turns as the timer's interrupts come.
+holds still: the threads take turns of 20 ms.
 
 `trace` is the `win32_trace` level: which calls of the built-in
 functions get a `[W32]` (or `[W16]`) line in the log. `collapsed`, the
