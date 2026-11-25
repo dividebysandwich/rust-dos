@@ -7075,6 +7075,117 @@ fn win32_calls_name_files_by_long_names_on_a_disk_image() {
     );
 }
 
+/// A file opened by its long name and by its 8.3 alias is one file, as
+/// on Windows 98, where VFAT finds the same directory entry through both
+/// names: on drive `drive` the program writes "Saved game one.dat",
+/// asks GetShortPathNameA for its alias, and checks that a CREATE_ALWAYS
+/// by the long name empties the file that an open by the alias then reads
+/// (GetFileSize 0), and that a handle opened by either name with no
+/// sharing makes an open by the other fail with ERROR_SHARING_VIOLATION.
+/// Each check sets a bit of the exit code.
+fn check_long_name_and_alias_are_one_file(test: &str, drive: &str, image: bool) {
+    use Arg::{Esi, I};
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const CREATE_ALWAYS: u32 = 2;
+    const OPEN_EXISTING: u32 = 3;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    let names: &[&str] = &[
+        "CreateFileA",
+        "WriteFile",
+        "CloseHandle",
+        "GetShortPathNameA",
+        "GetFileSize",
+        "GetLastError",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x200];
+    put(&mut data, 0, format!("{drive}\\Saved game one.dat\0").as_bytes());
+    // The alias, at 40h; the bytes to write and the count written.
+    let (alias, old, written) = (0x40, 0x180, 0x190);
+    put(&mut data, old, b"old data");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: usize| I(l.at(offset as u32) as u32);
+        let open = |a: &mut CodeAssembler, name, access, share, disposition| {
+            let args = [at(name), I(access), I(share), I(0), I(disposition), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &args)
+        };
+        a.xor(ebx, ebx)?;
+        open(a, 0, GENERIC_WRITE, 0, CREATE_ALWAYS)?;
+        a.mov(esi, eax)?;
+        call_with(a, f("WriteFile"), &[Esi, at(old), I(8), at(written), I(0)])?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        a.cmp(dword_ptr(l.at(written as u32)), 8)?;
+        check(a, false, 0)?;
+        call_with(a, f("GetShortPathNameA"), &[at(0), at(alias), I(0x100)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        // Emptied at the create, for whatever name the file is opened by
+        // next.
+        open(a, 0, GENERIC_WRITE, 3, CREATE_ALWAYS)?;
+        a.mov(esi, eax)?;
+        open(a, alias, GENERIC_READ, 3, OPEN_EXISTING)?;
+        a.mov(edi, eax)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("GetFileSize"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        // Opened by one name with no sharing, the file can't be opened
+        // by the other.
+        for (bit, (first, second)) in [(3, (0, alias)), (5, (alias, 0))] {
+            open(a, first, GENERIC_READ, 0, OPEN_EXISTING)?;
+            a.mov(esi, eax)?;
+            open(a, second, GENERIC_READ, 1, OPEN_EXISTING)?;
+            a.cmp(eax, -1)?;
+            check(a, false, bit)?;
+            a.call(f("GetLastError"))?;
+            a.cmp(eax, ERROR_SHARING_VIOLATION)?;
+            check(a, false, bit + 1)?;
+            call_with(a, f("CloseHandle"), &[Esi])?;
+        }
+        a.mov(eax, ebx)?;
+        a.or(eax, 0x80)?;
+        a.ret()
+    });
+    let mut cpu = machine(test, exe);
+    if image {
+        let image_dir = PathBuf::from("target/test_win32").join(format!("{test}_d"));
+        let _ = fs::remove_dir_all(&image_dir);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image = image_dir.join("d.img");
+        rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.disk.mount(3, &image, options, true).unwrap();
+    }
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+}
+
+#[test]
+fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_host_drive() {
+    check_long_name_and_alias_are_one_file("one_file_host", "C:", false);
+}
+
+#[test]
+fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_disk_image() {
+    check_long_name_and_alias_are_one_file("one_file_image", "D:", true);
+}
+
 /// SetFileTime on a file in a host folder, as Windows 98 SE does it on
 /// FAT: the time of the last write is rounded up to an even second
 /// (2001-10-08 19:20:01.5 is kept as 19:20:02), a time before 1980 fails
@@ -21021,4 +21132,106 @@ fn direct3drm_create_makes_an_object_that_counts_its_references() {
     });
     let (code, out) = run("direct3drm_create", exe);
     assert_eq!(code, 0, "check {code} went wrong {out}");
+}
+
+/// A GUI program made for the Windows `major`.`minor` (its subsystem
+/// version) with a visible edit control of the style `style` in a popup
+/// of its own class. The popup's procedure notes the WM_CTLCOLOR*
+/// messages it gets, 1 for WM_CTLCOLOREDIT and 2 for WM_CTLCOLORSTATIC,
+/// and passes them on to DefWindowProcA. The program paints the edit
+/// with UpdateWindow and ends with what was noted.
+fn edit_colors_program(style: i32, (major, minor): (u16, u16)) -> Vec<u8> {
+    const WM_CTLCOLOREDIT: i32 = 0x0133;
+    const WM_CTLCOLORSTATIC: i32 = 0x0138;
+    const WS_CHILD_VISIBLE: i32 = 0x5000_0000;
+    let names: &[&str] = &[
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "UpdateWindow",
+    ];
+    let kernel: &[&str] = &["ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("USER32.dll", names), ("KERNEL32.dll", kernel)];
+    let mut d = Data::default();
+    let name = d.text("EditColors");
+    let edit = d.text("Edit");
+    let text = d.text("WWWW");
+    let asked = d.add(&[0; 4]);
+    let mut wndclass = [0; 40];
+    wndclass[16..20].copy_from_slice(&BASE.to_le_bytes());
+    let class = d.add(&wndclass);
+    let mut b = Builder::exe(BASE);
+    b.subsystem(pe::SUBSYSTEM_GUI)
+        .subsystem_version(major, minor);
+    program_with(b, false, imports, &d.0, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut not_edit = a.create_label();
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_CTLCOLOREDIT)?;
+        a.jne(not_edit)?;
+        a.or(dword_ptr(l.at(asked)), 1)?;
+        a.set_label(&mut not_edit)?;
+        a.cmp(dword_ptr(esp + 8), WM_CTLCOLORSTATIC)?;
+        a.jne(other)?;
+        a.or(dword_ptr(l.at(asked)), 2)?;
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(class + 4)), eax)?;
+        a.mov(dword_ptr(l.at(class + 36)), l.at(name) as i32)?;
+        a.push(l.at(class) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        for value in [0, BASE as i32, 0, 0, 100, 200, 0, 0, POPUP] {
+            a.push(value)?;
+        }
+        a.push(l.at(name) as i32)?;
+        a.push(l.at(name) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.push(0)?;
+        a.push(BASE as i32)?;
+        a.push(5)?;
+        a.push(eax)?;
+        for value in [40, 100, 0, 0, WS_CHILD_VISIBLE | style] {
+            a.push(value)?;
+        }
+        a.push(l.at(text) as i32)?;
+        a.push(l.at(edit) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.push(eax)?;
+        a.call(f("UpdateWindow"))?;
+        a.push(dword_ptr(l.at(asked)))?;
+        a.call(l.import(names.len()))
+    })
+}
+
+#[test]
+fn a_win32_program_for_windows_3_gets_edit_colors_for_a_read_only_edit() {
+    // Windows 98's USER checks the version the program was made for,
+    // which for a Win32 program is its header's subsystem version: one
+    // made for 3.10 gets WM_CTLCOLOREDIT for a read-only edit, one made
+    // for 4.0 WM_CTLCOLORSTATIC.
+    const ES_MULTILINE: i32 = 0x0004;
+    const ES_READONLY: i32 = 0x0800;
+    const WS_DISABLED: i32 = 0x0800_0000;
+    for (style, what) in [
+        (ES_MULTILINE | ES_READONLY, "read-only"),
+        (ES_MULTILINE | WS_DISABLED, "disabled"),
+        (WS_DISABLED, "disabled single-line"),
+    ] {
+        let exe = edit_colors_program(style, (3, 10));
+        let (code, out) = run("edit_colors_win32_3", exe);
+        assert_eq!(code, 1, "a {what} edit of a 3.10 program: {out}");
+        let exe = edit_colors_program(style, (4, 0));
+        let (code, out) = run("edit_colors_win32_4", exe);
+        assert_eq!(code, 2, "a {what} edit of a 4.0 program: {out}");
+    }
+    let exe = edit_colors_program(ES_MULTILINE, (4, 0));
+    let (code, out) = run("edit_colors_win32_plain", exe);
+    assert_eq!(code, 1, "an edit that takes input: {out}");
 }

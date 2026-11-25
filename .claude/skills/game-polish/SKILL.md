@@ -292,25 +292,29 @@ Fix the issues in rank order. For each one:
    the branch, and open the pull request as a draft. It follows
    `.github/pull_request_template.md`, with `Fixes #<N>` under related
    issues; leave manual testing to be filled in after step 7.
-6. **Review it, and push the review's fixes.** In the worktree, run the
-   code review skill (`/review`, named `code-review` in some setups) on
-   the branch's changes:
+6. **Review it, and push the review's fixes.** Have a reviewer that
+   doesn't share your view of the change run the review: a fresh
+   subagent, never a fork of your own context, which would inherit your
+   reading of the bug and its blind spots. Give it only the pull
+   request's number, its worktree and target directory, and the
+   machine's rules, not your explanation of the change or why you think
+   it is right. It runs, in the worktree, the code review skill
+   (`/code-review`) with the prompt in step 2 of `AGENTS.md`'s pull
+   request lifecycle, which treats the description's claims as
+   unverified and checks each against the code.
 
-   ```
-   /review high --fix do not skip optional improvements, make judgement
-   calls prioritizing long-term quality and architecture over simplest
-   solution / smallest scope
-   ```
-
-   Apply each finding that is a net improvement, optional ones included,
-   choosing the change that is better for the code in the long run over
-   the smallest one. Leave out a finding that the review or you judge not
-   actually useful (a false positive, or a change that costs more than it
-   gives), and say in the pull request which ones were left out and why.
-   Check the result again as in step 4, commit, and push to the pull
-   request's branch. Validation in step 7 runs on this pushed head, never
-   on the code from before the review: if validation leads to more
-   changes, push them, and run the review again on what changed.
+   Then check each finding yourself, as `AGENTS.md` asks: keep the fixes
+   of those a test, a trace or a read of the code path confirms, and
+   revert a fix only with evidence that rules its finding out (the code
+   path, a test that would fail if the bug were real, or what the real
+   hardware or Windows does). List each rejected finding and its
+   evidence, and the judgement calls, in a comment on the pull request.
+   A confirmed finding the pull request doesn't fix gets an issue, linked
+   from that comment. Check the result again as in step 4, commit, and
+   push to the pull request's branch. Validation in step 7 runs on this
+   pushed head, never on the code from before the review: if validation
+   leads to more changes, push them, and run the review again on what
+   changed.
 7. **Validate against the game.** Build the worktree's release binary
    from the pushed head, then run the game as in Phase 0 with that
    binary, and with the shared build of the commit the branch starts
@@ -335,7 +339,10 @@ Fix the issues in rank order. For each one:
 8. **Mark the pull request ready for review** once validation succeeds:
    write what step 7 did and found under manual testing, then take it out
    of draft. If validation fails, go back to step 2; the pull request
-   stays a draft until a pushed head passes.
+   stays a draft until a pushed head passes. When a session runs as one
+   of several under a coordinator, don't mark it ready yourself: send the
+   coordinator a note that review, validation and evidence are done, and
+   it marks the pull request ready.
 9. **If it can't be fixed** in reasonable time, comment on the issue with
    what you found, and go on to the next one. Leave the draft pull
    request, if there is one, and the worktree for whoever goes on with

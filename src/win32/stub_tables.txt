@@ -1671,6 +1671,7 @@ NotepadMain
 NotepadWndProc
 SendMessage16
 UserYield16
+RestoreDefaultPalette
 
 DLL GDI32.DLL
 GetStockObject
@@ -5941,6 +5942,7 @@ SetArcDirection
 GetAspectRatioFilter
 GetAspectRatioFilterEx
 IsDCCurrentPalette
+CreateScalableFontResource
 
 MODULE KEYBOARD
 ToAscii

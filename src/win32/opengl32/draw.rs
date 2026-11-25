@@ -1268,10 +1268,8 @@ pub fn begin(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(c) = ctx(cpu) else {
         return Some(0);
     };
-    if c.begin.is_some() {
-        error(cpu, GL_INVALID_OPERATION);
-        return Some(0);
-    }
+    // A glBegin between glBegin and glEnd doesn't get here: the calls
+    // are refused there (`lists::refused`).
     c.begin = Some(args[0]);
     c.vertices.clear();
     Some(0)
@@ -1687,7 +1685,7 @@ pub fn draw_arrays(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         error(cpu, GL_INVALID_VALUE);
         return Some(0);
     }
-    if count == 0 || ctx(cpu).is_some_and(|c| c.begin.is_some()) {
+    if count == 0 {
         return Some(0);
     }
     // A range past the end of the address space is a program's error.
@@ -1720,7 +1718,7 @@ pub fn draw_elements(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(0);
         }
     };
-    if count == 0 || ctx(cpu).is_some_and(|c| c.begin.is_some()) {
+    if count == 0 {
         return Some(0);
     }
     let len = count as usize * size;
@@ -1832,10 +1830,6 @@ fn rect(cpu: &mut Cpu, r: [f32; 4]) {
     let Some(c) = ctx(cpu) else {
         return;
     };
-    if c.begin.is_some() {
-        error(cpu, GL_INVALID_OPERATION);
-        return;
-    }
     // A rectangle is a polygon of four vertices, lit as glVertex's are.
     let corners = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
     let vertices = corners.map(|[x, y]| ImmVertex {
@@ -1934,10 +1928,6 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((index, _)) = current(cpu) else {
         return Some(0);
     };
-    if ctx(cpu).is_some_and(|c| c.begin.is_some()) {
-        error(cpu, GL_INVALID_OPERATION);
-        return Some(0);
-    }
     clear_in(
         cpu,
         index,

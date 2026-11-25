@@ -114,7 +114,7 @@ impl DiskController {
         let open = self.open_files.get(&sft).ok_or(0x06)?;
         match open.data {
             super::OpenData::Device(_) => Err(LOCK_VIOLATION),
-            _ => Ok(open.key),
+            _ => Ok(open.key()),
         }
     }
 
@@ -158,7 +158,7 @@ impl DiskController {
         let Some(open) = self.open_files.get(&sft) else {
             return false;
         };
-        let key = open.key;
+        let key = open.key();
         let mut others = self
             .locks
             .iter()
@@ -207,9 +207,26 @@ impl DiskController {
 
     /// The locks a save state has, of the files it opened again. Those of
     /// a file the load couldn't open, whose entry stays free, go, as they
-    /// would have when it closed.
+    /// would have when it closed. Each takes the key of the file open
+    /// again in its entry: a state saved by an older build has keys made
+    /// another way.
     pub fn set_locks(&mut self, mut locks: Vec<Lock>) {
-        locks.retain(|l| self.open_files.get(&l.sft).is_some_and(|f| f.key == l.key));
+        locks.retain_mut(|l| match self.open_files.get(&l.sft) {
+            Some(file) => {
+                l.key = file.key();
+                true
+            }
+            None => false,
+        });
         self.locks = locks;
+    }
+
+    /// Give the locks made through the entry `sft` the key `key`, which
+    /// the file open there has after a rename moved it
+    /// (`moved_files`).
+    pub(super) fn rekey_locks(&mut self, sft: u16, key: u64) {
+        for lock in self.locks.iter_mut().filter(|l| l.sft == sft) {
+            lock.key = key;
+        }
     }
 }
