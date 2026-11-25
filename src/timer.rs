@@ -62,8 +62,9 @@ pub(crate) const LOAD_SETTLE_HOST: Duration = Duration::from_secs(5);
 /// game's own, which the frame watch then held it under (a speed of
 /// 446,852 against 586,534 without the settling, for 40 s).
 ///
-/// Until `LOAD_SETTLE` is over, a frame after which the pacer dropped
-/// emulated time (`MAX_LAG`) settles again, until as many frames in a row
+/// Until `LOAD_SETTLE` is over, a frame that leaves emulated time more
+/// than `MAX_LAG` behind the wall clock, which the next batch then drops,
+/// settles again with the frame after it, until as many frames in a row
 /// are on time. Alice's load on a busy host has frames of 45 to 80 ms
 /// between frames on time: in one probe of five, 24 frames on time and
 /// then frames of 56 to 64 ms at 0.6 s, which six more would have left
@@ -869,12 +870,13 @@ pub struct Pacer {
     settle_until_ns: u64,
     settle_host_left: Duration,
     /// Frames on time in a row while a load settles (`LOAD_CALM_FRAMES`),
-    /// held at `LOAD_CALM_FRAMES` once reached until a frame drops
-    /// emulated time, and how much later the last batch started than one of a host that
-    /// keeps up. `batch_end`'s batches of such a host start a frame behind
-    /// the wall clock, as the frontend sleeps out the rest of each frame
-    /// (`wait_for_next_frame`); `retrace_batch_end`'s start at the last
-    /// one's deadline, once its frame is shown (`wait_to_present`).
+    /// held at `LOAD_CALM_FRAMES` once reached until a frame falls past
+    /// `MAX_LAG` or drops emulated time, and how much later the last batch
+    /// started than one of a host that keeps up. `batch_end`'s batches of
+    /// such a host start a frame behind the wall clock, as the frontend
+    /// sleeps out the rest of each frame (`wait_for_next_frame`);
+    /// `retrace_batch_end`'s start at the last one's deadline, once its
+    /// frame is shown (`wait_to_present`).
     settle_calm: u32,
     /// `lost_ns` as the last frame left it: what a frame dropped is what
     /// it grew by since.
@@ -1245,9 +1247,19 @@ impl Pacer {
         // (`HostEstimate::outlier`), and so do the frames of a state's load
         // (`LOAD_SETTLE`, `LOAD_SETTLE_HOST`, `LOAD_CALM_FRAMES`).
         let auto = matches!(self.speed, CpuSpeed::Auto(_));
+        // How far the emulated time is behind the wall clock now: what the
+        // next batch runs to catch up, as `batch_end` reckons it.
+        let behind = (auto && self.wall_paced).then(|| {
+            let since = Instant::now().saturating_duration_since(self.anchor_wall);
+            let wall = self.anchor_ticks + duration_to_ticks(since);
+            ticks_to_duration(wall.saturating_sub(bus.clock.now_ticks()))
+        });
         if self.ran && ns < self.settle_until_ns {
             self.settle_host_left = self.settle_host_left.saturating_sub(exec + overhead);
-            let dropped = self.lost_ns > self.settle_lost_ns;
+            // A frame that fell this far behind is the load's as much as
+            // the one after it, whose batch drops the backlog (`lose`).
+            let falls = behind.is_some_and(|behind| behind > MAX_LAG && behind < GAP);
+            let dropped = falls || self.lost_ns > self.settle_lost_ns;
             let on_time = self.batch_late < self.period / 2;
             let calm = self.settle_calm >= LOAD_CALM_FRAMES;
             self.settle_calm = if dropped || !(on_time || calm) {
@@ -1332,18 +1344,16 @@ impl Pacer {
                     return None;
                 }
                 // Nor while a state's load settles: what the pacer drops
-                // then is the load's, neither lag nor a stall.
+                // then is the load's, neither lag nor a stall, and no run
+                // of short or stalled frames goes on across the settling
+                // (`cap_boost`, `HostEstimate::outlier`).
                 if settling {
                     self.backlog.skip(self.lost_ns);
+                    self.boost_short = false;
+                    self.host.outliers = 0;
                     return None;
                 }
-                if self.wall_paced {
-                    // How far the emulated time is behind the wall clock
-                    // now: what the next batch runs to catch up, as
-                    // `batch_end` reckons it.
-                    let since = Instant::now().saturating_duration_since(self.anchor_wall);
-                    let wall = self.anchor_ticks + duration_to_ticks(since);
-                    let behind = ticks_to_duration(wall.saturating_sub(bus.clock.now_ticks()));
+                if let Some(behind) = behind {
                     let behind_ns = behind.as_nanos() as u64;
                     // A frame of a paused machine (the debugger, the
                     // settings window, a rewind) runs nothing and falls
@@ -3058,11 +3068,11 @@ mod tests {
     }
 
     /// Alice's load as the probes on a busy host saw it: after a first
-    /// frame of 400 ms, frames of 45 to 80 ms for 100 ms, half a second on
-    /// time, then frames of 56 to 64 ms at 0.7 s and of 25 to 37 ms at
-    /// 1.2 s. The frames on time between the spikes end the settling
-    /// early, and the spikes that drop emulated time settle it again: the
-    /// speed stays. Without that, it fell from 260,870 to 212,125.
+    /// frame of 400 ms, frames of 45 to 80 ms for 100 ms, 0.6 s on time,
+    /// then frames of 56 to 64 ms at 0.7 s and of 25 to 37 ms at 1.2 s.
+    /// The frames on time between the spikes end the settling early, and
+    /// the spikes that drop emulated time settle it again: the speed stays.
+    /// Without that, it fell from 260,870 to 212,125.
     #[test]
     fn a_loads_spikes_after_frames_on_time_leave_the_speed() {
         let mut game = Game::new();
@@ -3076,6 +3086,56 @@ mod tests {
         });
         let least = *after.iter().min().unwrap();
         assert!(least as f64 >= before as f64 * 0.9, "{before}: {after:?}");
+    }
+
+    /// A frame that leaves the emulated time more than `MAX_LAG` behind the
+    /// wall clock while a load settles settles again itself, as well as the
+    /// frame after it, whose batch drops the backlog: measured, it would be
+    /// a late frame of the load's and a sample of the host's at it.
+    #[test]
+    fn a_frame_that_falls_past_max_lag_while_a_load_settles_settles_again() {
+        let mut game = Game::new();
+        let now = Instant::now();
+        game.pacer.rebase(&mut game.cpu.bus, now);
+        game.pacer.settle_calm = LOAD_CALM_FRAMES;
+        let bus = &mut game.cpu.bus;
+        // On time: a frame behind the wall clock.
+        let target = game.pacer.batch_end(&bus.clock, now + FRAME);
+        let executed = target - bus.clock.icount;
+        bus.clock.icount = target;
+        let late = game.pacer.batch_late;
+        assert!(late < FRAME / 2, "{late:?}");
+        std::thread::sleep(MAX_LAG * 2);
+        game.pacer
+            .end_cpu_frame(&mut game.cpu, executed, MAX_LAG * 2, Duration::ZERO);
+        assert_eq!(game.pacer.settle_calm, 0);
+    }
+
+    /// Once `LOAD_CALM_FRAMES` frames in a row were on time, a late frame
+    /// that falls short of `MAX_LAG` and drops nothing keeps the settling
+    /// over: it is measured, as frames of 25 to 37 ms are. Before that, it
+    /// starts the count again.
+    #[test]
+    fn a_late_frame_that_drops_nothing_ends_the_settling_only_before_its_end() {
+        for (calm, after) in [(LOAD_CALM_FRAMES, LOAD_CALM_FRAMES), (5, 0)] {
+            let mut game = Game::new();
+            // Ahead of the host's clock, so that nothing of the test's own
+            // time falls behind.
+            let now = Instant::now() + Duration::from_secs(10);
+            game.pacer.rebase(&mut game.cpu.bus, now);
+            game.pacer.settle_calm = calm;
+            let bus = &mut game.cpu.bus;
+            // Two frames behind the wall clock: a frame late.
+            let target = game.pacer.batch_end(&bus.clock, now + FRAME * 2);
+            let executed = target - bus.clock.icount;
+            bus.clock.icount = target;
+            let late = game.pacer.batch_late;
+            assert!(late >= FRAME / 2, "{late:?}");
+            game.pacer
+                .end_cpu_frame(&mut game.cpu, executed, FRAME, Duration::ZERO);
+            assert_eq!(game.pacer.settle_calm, after, "from {calm}");
+            assert_eq!(game.pacer.lost(), Duration::ZERO);
+        }
     }
 
     /// A load whose frames are back on time at once, after its first: the
