@@ -70,8 +70,8 @@ impl DiskController {
             media: _,
             // Read again from the host folders.
             host_dirs: _,
-            // Found again at the next CHDIR; until then a current
-            // directory is taken by its name alone.
+            // Found again from the current directories as the state is
+            // loaded (`find_current_folders`).
             current_folders: _,
             // The built-in Windows's, which shows them as configured.
             system_files: _,
@@ -140,6 +140,9 @@ impl DiskController {
     /// its files again. Returns the files that couldn't be opened.
     pub(crate) fn load_state(&mut self, r: &mut Reader) -> Result<Vec<String>> {
         self.host_dirs.forget();
+        // The folders the current directories named before the load
+        // aren't the state's (`find_current_folders`).
+        self.current_folders.clear();
         // Taken by this load alone: a failed load's roll back to the
         // machine from before mounts its drives where they were.
         let folders = std::mem::take(&mut self.folders_from_state);
@@ -217,6 +220,7 @@ impl DiskController {
         if !r.is_empty() {
             self.load_checkpoints(LASTDRIVE..DRIVE_SLOTS, r)?;
         }
+        self.find_current_folders();
         Ok(lost)
     }
 

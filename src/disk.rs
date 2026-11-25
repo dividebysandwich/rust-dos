@@ -883,8 +883,8 @@ pub struct DiskController {
     /// The entries of host folders as last read (`host_entries`).
     host_dirs: HostDirCache,
     /// The host folder each host drive's current directory named when
-    /// CHDIR made it current, with the current directory it was for
-    /// (`walk_host`).
+    /// CHDIR made it current or a state was loaded, with the current
+    /// directory it was for (`walk_host`).
     current_folders: HashMap<u8, (String, PathBuf)>,
     /// The files shown in directories that the drive doesn't have: the
     /// built-in Windows's DLLs and its NOTEPAD.EXE (system_files.rs).

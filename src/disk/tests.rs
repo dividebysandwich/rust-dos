@@ -2572,6 +2572,59 @@ fn a_renamed_current_directory_names_nothing() {
     }
 }
 
+/// A host folder's alias is made from the names its folder has, so a
+/// folder made next to the current directory may take its alias:
+/// "Parent a" takes PARENT~1 from "Parent two". On Windows 9x a folder
+/// keeps its alias until it is renamed, so the current directory names
+/// "Parent two" still, and nothing once it is renamed.
+#[test]
+fn a_host_current_directory_keeps_its_folder_when_another_takes_its_alias() {
+    let base = scratch("current_dir_alias_taken");
+    fs::create_dir_all(base.join("CWW").join("Parent two")).unwrap();
+    let mut disk = DiskController::new(base.clone());
+    assert!(disk.set_current_directory(r"C:\CWW\PARENT~1"));
+    disk.long_name_call(|disk| disk.create_directory(r"C:\CWW\Parent a"))
+        .unwrap();
+    let alias = disk.resolve_path(r"C:\CWW\PARENT~1").unwrap();
+    assert_eq!(alias.file_name().unwrap(), "Parent a");
+    assert_eq!(disk.get_current_directory_of(2).unwrap(), r"CWW\PARENT~1");
+    let here = disk.create_file("C:HERE.TXT", PSP).unwrap();
+    disk.close_file(here);
+    let cww = base.join("CWW");
+    assert!(cww.join("Parent two").join("HERE.TXT").is_file());
+    assert!(!cww.join("Parent a").join("HERE.TXT").exists());
+
+    disk.long_name_call(|disk| disk.rename_file(r"C:\CWW\Parent two", r"C:\CWW\Parent moved"))
+        .unwrap();
+    assert_eq!(disk.create_file("C:THERE.TXT", PSP), Err(0x03));
+}
+
+/// A state loaded keeps the folder its current directory names, as the
+/// run that saved it kept it: a rename of the folder then leaves the
+/// current directory naming nothing in both.
+#[test]
+fn a_loaded_state_keeps_the_folder_of_its_current_directory() {
+    let base = scratch("current_dir_state");
+    fs::create_dir_all(base.join("CWW").join("Parent two").join("Sub")).unwrap();
+    let mut disk = DiskController::new(base.clone());
+    assert!(disk.set_current_directory(r"C:\CWW\PARENT~1\SUB"));
+    let mut w = crate::savestate::Writer::new();
+    disk.save_state(&mut w);
+    let mut loaded = DiskController::new(base.clone());
+    let lost = loaded
+        .load_state(&mut crate::savestate::Reader::new(&w.buf))
+        .unwrap();
+    assert!(lost.is_empty());
+    loaded
+        .long_name_call(|disk| disk.rename_file(r"C:\CWW\Parent two", r"C:\CWW\Parent moved"))
+        .unwrap();
+    assert_eq!(
+        loaded.get_current_directory_of(2).unwrap(),
+        r"CWW\PARENT~1\SUB"
+    );
+    assert_eq!(loaded.create_file("C:HERE.TXT", PSP), Err(0x03));
+}
+
 /// Where the host's own file pointer of the host file open at `sft` is,
 /// asked of the host.
 fn host_pointer(disk: &DiskController, sft: u16) -> u64 {

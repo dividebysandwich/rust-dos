@@ -176,14 +176,24 @@ impl DiskController {
             full_path.push(host_name);
             dos_path.push(dos_name);
             // DOS keeps the current directory by its names, which find
-            // what they name now. On a VFAT disk a folder renamed gets a
-            // new alias, so its old one names nothing; here aliases are
-            // made from the names a folder has, and the renamed folder may
-            // get the old one. A current directory whose names find
-            // another folder than CHDIR found names nothing, as on
-            // Windows 9x.
-            if i + 1 == kept && matched && current.is_some_and(|folder| folder != full_path) {
-                return None;
+            // what they name now. On a VFAT disk a folder keeps its alias
+            // until it is renamed, and a renamed one gets a new alias, so
+            // its old one names nothing. Here aliases are made from the
+            // names a folder has: a folder made next to the current one
+            // may take its alias, and the renamed folder may get its old
+            // one. So where the current directory's names find another
+            // folder than CHDIR found, they name that folder while it is
+            // there under the name it had, as its alias would on Windows
+            // 9x, and nothing once it is gone or renamed.
+            if i + 1 == kept
+                && matched
+                && let Some(folder) = current
+                && folder != full_path
+            {
+                if !hostfs::is_dir(folder) {
+                    return None;
+                }
+                full_path = folder.to_path_buf();
             }
         }
 
@@ -204,7 +214,7 @@ impl DiskController {
     /// The host folder the first `kept` names of drive `drive`'s current
     /// directory named when CHDIR made it current (`current_folders`):
     /// None for no names, or where CHDIR didn't find the folder by
-    /// matching each name or another call set the current directory.
+    /// matching each name, or another call set another current directory.
     fn current_folder(&self, drive: u8, kept: usize) -> Option<&Path> {
         if kept == 0 {
             return None;
@@ -216,6 +226,29 @@ impl DiskController {
         }
         let names = dir.split('\\').filter(|p| !p.is_empty()).count();
         folder.ancestors().nth(names.checked_sub(kept)?)
+    }
+
+    /// Keep the host folder each host drive's current directory names
+    /// now (`current_folders`), as a CHDIR to it does: a state loaded sets
+    /// the current directories by their names, and a run from the state
+    /// goes on as the run that saved it did.
+    pub(super) fn find_current_folders(&mut self) {
+        self.current_folders.clear();
+        for drive in 0..DRIVE_SLOTS {
+            let Some(d) = self.drive(drive) else {
+                continue;
+            };
+            if d.host_root().is_none() || d.current_dir.is_empty() {
+                continue;
+            }
+            let dir = d.current_dir.clone();
+            if let Some(walk) = self.walk_host(drive, &format!("\\{dir}"))
+                && walk.matched
+                && hostfs::is_dir(&walk.path)
+            {
+                self.current_folders.insert(drive, (dir, walk.path));
+            }
+        }
     }
 
     /// Whether `part`, which no entry of the folder `dir` matches, is a
