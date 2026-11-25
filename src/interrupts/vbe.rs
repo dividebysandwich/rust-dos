@@ -314,7 +314,17 @@ pub(super) fn color_masks(bpp: u8) -> [u8; 8] {
     }
 }
 
-/// Function 01h: the ModeInfoBlock of mode CX.
+/// Function 01h: the ModeInfoBlock of mode CX, all 256 bytes of it, with
+/// the fields VBE 2.0 doesn't define zeroed. The VBE 2.0 standard says
+/// so ("Version 1.1 and later VBE will zero out all unused fields in the
+/// Mode Information Block, always returning exactly 256 bytes"), and the
+/// video BIOSes of the time do it: Cirrus's 5428 and 5436, S3's
+/// Vision964, Trio64V+ and ViRGE, Tseng's ET4000/W32, ATI's mach64 and
+/// Trident's 9440 change all 256 bytes of the caller's buffer, those
+/// that report VBE 1.2 too. DOSBox and DOSBox-X write 256 bytes as well.
+/// A program that gives a smaller buffer loses what follows it, on a
+/// real PC too; `game_fixes` patches the ones known
+/// (`whales-voyage-vesa-intro`).
 fn mode_info(cpu: &mut Cpu, number: u16, addr: usize) -> u16 {
     let Some(mode) = vbe::adapter_mode(number, cpu.bus.vga.adapter) else {
         return FAILED;

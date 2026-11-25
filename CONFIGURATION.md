@@ -2047,6 +2047,7 @@ program the game starts, with the exit code it would have given.
 | `microprose-dswap` | F-117A, F-19, Gunship 2000, Covert Action | DSWAP.EXE wants the original install disk and waits for it | Skips DSWAP.EXE with exit code 1, as if the disk was there |
 | `microprose-player` | The same games | Their PLAYER.EXE, the title and cutscene player, loops forever without the copy protection's data | Skips PLAYER.EXE, when DSWAP.EXE is beside it, with exit code 0 |
 | `td4-intro-camera` | Test Drive 4 (version 1.2 only, on the built-in Windows) | At 60 frames a second the race is seen from just above the car, or at lower rates from too close or too far, for the whole race | Patches 3.EXE as it loads to move the intro's last camera shot by the game's ticks instead of its frames |
+| `whales-voyage-vesa-intro` | Whale's Voyage (the 1993 CD release) | The CD intro plays in 320x200: its VESA check gives the BIOS a 35-byte buffer for the 256-byte mode information, which overwrites the intro's code, on a real PC with VESA in its video BIOS too | Patches INTRO.EXE, when WVD.EXE is beside it, as it loads to use its 256-byte VESA controller buffer for the mode information, which it no longer needs by then |
 
 The two Titus games share a sound engine that turns each signed sample
 into an unsigned 0 to 63 and scales it by the note's volume without
