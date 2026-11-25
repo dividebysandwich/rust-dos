@@ -2932,11 +2932,16 @@ fn a_flat_shaded_triangle_blends_by_its_first_vertex_alpha() {
             Step::Draw(tri),
         ],
     };
-    let p = draw_scene("flat-alpha", &scene);
-    for (x, y) in [(5, 5), (56, 6), (6, 56), (20, 20)] {
-        assert_rgb(&p, x, y, [128, 0, 127], 16);
+    // The Voodoo3's HAL, and a ToadForce's, which flat-shades on the
+    // card (`gpu::Vertex::flat`).
+    let voodoo = draw_scene("flat-alpha", &scene);
+    let toadforce = draw_scene_toadforce("toadforce_flat_alpha", &scene);
+    for p in [voodoo, toadforce] {
+        for (x, y) in [(5, 5), (56, 6), (6, 56), (20, 20)] {
+            assert_rgb(&p, x, y, [128, 0, 127], 16);
+        }
+        assert_rgb(&p, 60, 60, [0, 0, 255], 0);
     }
-    assert_rgb(&p, 60, 60, [0, 0, 255], 0);
 }
 
 /// A scene with the add-on card `board`: flat, gouraud, z-tested and
