@@ -113,6 +113,7 @@ const OPENGL32: &[&str] = &[
     "glCopyTexSubImage2D",
     "glAreTexturesResident",
     "glPrioritizeTextures",
+    "glGetTexLevelParameteriv",
 ];
 const GLU32: &[&str] = &[
     "gluBuild2DMipmaps",
@@ -203,6 +204,7 @@ const TEX_SUB_IMAGE_2D: usize = GL + 69;
 const COPY_TEX_SUB_IMAGE_2D: usize = GL + 70;
 const ARE_TEXTURES_RESIDENT: usize = GL + 71;
 const PRIORITIZE_TEXTURES: usize = GL + 72;
+const GET_TEX_LEVEL_PARAMETERIV: usize = GL + 73;
 const GLU: usize = GL + OPENGL32.len();
 const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
@@ -4483,4 +4485,214 @@ fn texture_object_functions_are_refused_between_begin_and_end() {
     let bound: Vec<u32> = (0..3).map(|i| word(BINDING + 4 * i)).collect();
     assert_eq!(bound, [5, 5, 7], "the binding");
     assert_eq!(word(RESIDENCES), 0xFF, "glAreTexturesResident wrote nothing");
+}
+
+/// Between glBegin and glEnd OpenGL 1.1 allows only the functions that
+/// give vertices and their values, glMaterial, glEvalCoord and
+/// glEvalPoint, glCallList and glCallLists, glArrayElement and glEnd
+/// (2.6.3). Each other one is GL_INVALID_OPERATION there and does
+/// nothing else: here the state (glEnable, glDepthFunc), the matrices
+/// (glMatrixMode, glTranslatef), a texture's image and environment
+/// (glTexImage2D, glTexEnvi), the pixel store and glReadPixels, a draw
+/// of the arrays, and the queries: glGetIntegerv and
+/// glGetTexLevelParameteriv write nothing, and glGetError gives 0 and
+/// records its own error.
+#[test]
+fn functions_other_than_the_vertices_are_refused_between_begin_and_end() {
+    const GL_GREATER: u32 = 0x0204;
+    const GL_DEPTH_FUNC: u32 = 0x0B74;
+    const GL_MATRIX_MODE: u32 = 0x0BA0;
+    const GL_UNPACK_ALIGNMENT: u32 = 0x0CF5;
+    const GL_TEXTURE_WIDTH: u32 = 0x1000;
+    // What the queries inside write, what those after them read, and
+    // the modelview matrix.
+    const INSIDE: u32 = KEPT;
+    const AFTER: u32 = KEPT + 0x10;
+    const MATRIX: u32 = KEPT + 0x20;
+    let mut d = lists_data();
+    for i in 0..3 {
+        put32(&mut d, INSIDE + 4 * i, 0xDEAD);
+    }
+    let mut at_result = Vec::new();
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let mut refused = |a: &mut CodeAssembler,
+                           c: &mut Calls,
+                           what: &'static str,
+                           index: usize,
+                           args: &[Arg]|
+         -> Result<(), IcedError> {
+            gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+            gl(a, l, index, args)?;
+            gl(a, l, END, &[])?;
+            c.api(a, l, GET_ERROR, &[])?;
+            at_result.push((what, c.next - 1));
+            Ok(())
+        };
+        let c = &mut c;
+        refused(a, c, "glEnable", ENABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+        refused(a, c, "glDepthFunc", DEPTH_FUNC, &[Arg::I(GL_GREATER)])?;
+        let projection = [Arg::I(GL_PROJECTION)];
+        refused(a, c, "glMatrixMode", MATRIX_MODE, &projection)?;
+        let by = [Arg::F(1.0), Arg::F(2.0), Arg::F(3.0)];
+        refused(a, c, "glTranslatef", TRANSLATEF, &by)?;
+        let image = [
+            Arg::I(GL_TEXTURE_2D),
+            Arg::I(0),
+            Arg::I(GL_RGBA),
+            Arg::I(2),
+            Arg::I(2),
+            Arg::I(0),
+            Arg::I(GL_RGBA),
+            Arg::I(GL_UNSIGNED_BYTE),
+            Arg::At(TEXELS),
+        ];
+        refused(a, c, "glTexImage2D", TEX_IMAGE_2D, &image)?;
+        let env = [GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE].map(Arg::I);
+        refused(a, c, "glTexEnvi", TEX_ENVI, &env)?;
+        let store = [Arg::I(GL_UNPACK_ALIGNMENT), Arg::I(1)];
+        refused(a, c, "glPixelStorei", PIXEL_STOREI, &store)?;
+        let mut read = [0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE].map(Arg::I).to_vec();
+        read.push(Arg::At(INSIDE));
+        refused(a, c, "glReadPixels", READ_PIXELS, &read)?;
+        let depth_func = [Arg::I(GL_DEPTH_FUNC), Arg::At(INSIDE + 4)];
+        refused(a, c, "glGetIntegerv", GET_INTEGERV, &depth_func)?;
+        let width = [GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH].map(Arg::I);
+        let mut level = width.to_vec();
+        level.push(Arg::At(INSIDE + 8));
+        let what = "glGetTexLevelParameteriv";
+        refused(a, c, what, GET_TEX_LEVEL_PARAMETERIV, &level)?;
+        let arrays = [GL_TRIANGLES, 0, 3].map(Arg::I);
+        refused(a, c, "glDrawArrays", DRAW_ARRAYS, &arrays)?;
+        gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        at_result.push(("glGetError", c.next - 1));
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        at_result.push(("its own error", c.next - 1));
+        // After glEnd the state is as it was.
+        c.api(a, l, IS_ENABLED, &[Arg::I(GL_DEPTH_TEST)])?;
+        at_result.push(("the depth test", c.next - 1));
+        let after = [GL_DEPTH_FUNC, GL_MATRIX_MODE, GL_UNPACK_ALIGNMENT];
+        for (i, p) in after.into_iter().enumerate() {
+            let at = Arg::At(AFTER + 4 * i as u32);
+            gl(a, l, GET_INTEGERV, &[Arg::I(p), at])?;
+        }
+        let modelview = [Arg::I(GL_MODELVIEW_MATRIX), Arg::At(MATRIX)];
+        gl(a, l, GET_FLOATV, &modelview)?;
+        let mut level = width.to_vec();
+        level.push(Arg::At(AFTER + 12));
+        gl(a, l, GET_TEX_LEVEL_PARAMETERIV, &level)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        at_result.push(("no error at the end", c.next - 1));
+        finish(a, l)
+    });
+    let mut cpu = machine("begin_end_refused", true, exe);
+    run_until_done(&mut cpu, data);
+    let results: Vec<(&str, u32)> = at_result
+        .iter()
+        .map(|&(what, i)| (what, peek(&cpu, data + RESULTS + 4 * i)))
+        .collect();
+    let refused = GL_INVALID_OPERATION;
+    assert_eq!(
+        results,
+        [
+            ("glEnable", refused),
+            ("glDepthFunc", refused),
+            ("glMatrixMode", refused),
+            ("glTranslatef", refused),
+            ("glTexImage2D", refused),
+            ("glTexEnvi", refused),
+            ("glPixelStorei", refused),
+            ("glReadPixels", refused),
+            ("glGetIntegerv", refused),
+            ("glGetTexLevelParameteriv", refused),
+            ("glDrawArrays", refused),
+            ("glGetError", 0),
+            ("its own error", refused),
+            ("the depth test", 0),
+            ("no error at the end", 0),
+        ]
+    );
+    let words =
+        |at: u32, n: u32| -> Vec<u32> { (0..n).map(|i| peek(&cpu, data + at + 4 * i)).collect() };
+    assert_eq!(words(INSIDE, 3), [0xDEAD; 3], "the queries wrote nothing");
+    assert_eq!(
+        words(AFTER, 4),
+        [GL_LESS, GL_MODELVIEW, 4, 0],
+        "the depth function, the matrix mode, the unpack alignment and the texture's width"
+    );
+    let translation = floats(&cpu, data, MATRIX + 48);
+    assert_eq!(translation, [0.0, 0.0, 0.0, 1.0], "the modelview matrix");
+}
+
+/// The functions OpenGL allows between glBegin and glEnd run there:
+/// glColor, glTexCoord, glMaterial, glVertex, glArrayElement, and a
+/// list of glColor, glNormal and glVertex that glCallList runs. The
+/// flat triangle has the color of its third vertex, the list's, and
+/// there is no error.
+#[test]
+fn the_vertex_functions_and_a_list_of_them_run_between_begin_and_end() {
+    const GL_CURRENT_COLOR: u32 = 0x0B00;
+    const GL_CURRENT_NORMAL: u32 = 0x0B02;
+    const GL_CURRENT_TEXTURE_COORDS: u32 = 0x0B03;
+    const DIFFUSE: u32 = KEPT;
+    const CURRENT: u32 = KEPT + 0x10;
+    const MATERIAL: u32 = KEPT + 0x40;
+    let mut d = lists_data();
+    put_f32s(&mut d, DIFFUSE, &[0.25, 0.5, 0.75, 1.0]);
+    put_f32s(&mut d, VERTICES, &[3.0, -1.0]);
+    let mut at_error = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        gl(a, l, COLOR3F, &GREEN.map(Arg::F))?;
+        let up = [Arg::F(0.0), Arg::F(1.0), Arg::F(0.0)];
+        gl(a, l, NORMAL3F, &up)?;
+        gl(a, l, VERTEX2F, &[Arg::F(-1.0), Arg::F(3.0)])?;
+        gl(a, l, END_LIST, &[])?;
+        let pointer = [Arg::I(2), Arg::I(GL_FLOAT), Arg::I(0), Arg::At(VERTICES)];
+        gl(a, l, VERTEX_POINTER, &pointer)?;
+        gl(a, l, ENABLE_CLIENT_STATE, &[Arg::I(GL_VERTEX_ARRAY)])?;
+        clear_blue(a, l)?;
+        gl(a, l, SHADE_MODEL, &[Arg::I(GL_FLAT)])?;
+        gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        gl(a, l, COLOR3F, &RED.map(Arg::F))?;
+        gl(a, l, TEX_COORD2F, &[Arg::F(0.5), Arg::F(0.25)])?;
+        let diffuse = [Arg::I(GL_FRONT), Arg::I(GL_DIFFUSE), Arg::At(DIFFUSE)];
+        gl(a, l, MATERIALFV, &diffuse)?;
+        gl(a, l, VERTEX2F, &[Arg::F(-1.0), Arg::F(-1.0)])?;
+        gl(a, l, ARRAY_ELEMENT, &[Arg::I(0)])?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        at_error = c.next - 1;
+        let current = [
+            GL_CURRENT_COLOR,
+            GL_CURRENT_NORMAL,
+            GL_CURRENT_TEXTURE_COORDS,
+        ];
+        for (i, p) in current.into_iter().enumerate() {
+            let at = Arg::At(CURRENT + 16 * i as u32);
+            gl(a, l, GET_FLOATV, &[Arg::I(p), at])?;
+        }
+        let material = [Arg::I(GL_FRONT), Arg::I(GL_DIFFUSE), Arg::At(MATERIAL)];
+        gl(a, l, GET_MATERIALFV, &material)?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("begin_end_allowed", true, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * at_error), 0, "glGetError");
+    assert_eq!(pixel(&cpu, data, 32, 32), [0, 255, 0], "the triangle");
+    let color = floats(&cpu, data, CURRENT);
+    assert_eq!(color, [0.0, 1.0, 0.0, 1.0], "the current color");
+    let normal = floats(&cpu, data, CURRENT + 16);
+    assert_eq!(normal[..3], [0.0, 1.0, 0.0], "the current normal");
+    let tex = floats(&cpu, data, CURRENT + 32);
+    assert_eq!(tex, [0.5, 0.25, 0.0, 1.0], "the texture coordinates");
+    let material = floats(&cpu, data, MATERIAL);
+    assert_eq!(material, [0.25, 0.5, 0.75, 1.0], "the diffuse material");
 }

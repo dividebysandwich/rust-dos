@@ -454,14 +454,6 @@ fn bound(cpu: &mut Cpu) -> Option<&mut Texture> {
     texture_mut(s, index, name)
 }
 
-// None of the texture object functions is allowed between glBegin and
-// glEnd (OpenGL 1.1, 2.6.3): there each is GL_INVALID_OPERATION and
-// does nothing else, and glIsTexture and glAreTexturesResident answer
-// GL_FALSE. This comes before their other errors, as in SGI's sample
-// implementation. glBindTexture and glPrioritizeTextures are compiled
-// into display lists, so a list that calls them between glBegin and
-// glEnd has the error when it runs.
-
 /// glGenTextures(n, textures): the lowest names the group doesn't use,
 /// from 1 up, neither for a texture nor reserved, which they are from
 /// here on. A program may bind names it never asked for: Soldier of
@@ -473,9 +465,6 @@ pub fn gen_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [n, at] = args[..] else {
         return Some(0);
     };
-    let Some(index) = lists::outside_begin(cpu) else {
-        return Some(0);
-    };
     let n = n as i32;
     if n < 0 {
         error(cpu, GL_INVALID_VALUE);
@@ -484,6 +473,9 @@ pub fn gen_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if n == 0 || at == 0 || !cpu.bus.guest_probe(at, n as usize * 4, true) {
         return Some(0);
     }
+    let Some((index, _)) = current(cpu) else {
+        return Some(0);
+    };
     let s = state(cpu);
     if lists::reserved_mut(s, index).is_none() {
         return Some(0);
@@ -528,9 +520,6 @@ pub fn delete_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [n, at] = args[..] else {
         return Some(0);
     };
-    let Some(index) = lists::outside_begin(cpu) else {
-        return Some(0);
-    };
     let n = n as i32;
     if n < 0 {
         error(cpu, GL_INVALID_VALUE);
@@ -543,20 +532,22 @@ pub fn delete_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .map(|i| cpu.bus.guest_read_32(at + 4 * i))
         .collect();
     let mut gone = Vec::new();
-    let s = state(cpu);
-    let named = |name: u32| name != 0 && names.contains(&name);
-    if let Some(reserved) = lists::reserved_mut(s, index) {
-        reserved.retain(|&name| !named(name));
-    }
-    if let Some(textures) = lists::textures_mut(s, index) {
-        gone.extend(textures.extract_if(.., |t| named(t.name)));
-    }
-    let group = s.contexts.get(index).and_then(Option::as_ref);
-    let group = group.map(|c| c.lists.group);
-    let sharing = s.contexts.iter_mut().flatten();
-    for c in sharing.filter(|c| Some(c.lists.group) == group) {
-        for b in c.bound.iter_mut().filter(|b| named(**b)) {
-            *b = 0;
+    if let Some((index, _)) = current(cpu) {
+        let s = state(cpu);
+        let named = |name: u32| name != 0 && names.contains(&name);
+        if let Some(reserved) = lists::reserved_mut(s, index) {
+            reserved.retain(|&name| !named(name));
+        }
+        if let Some(textures) = lists::textures_mut(s, index) {
+            gone.extend(textures.extract_if(.., |t| named(t.name)));
+        }
+        let group = s.contexts.get(index).and_then(Option::as_ref);
+        let group = group.map(|c| c.lists.group);
+        let sharing = s.contexts.iter_mut().flatten();
+        for c in sharing.filter(|c| Some(c.lists.group) == group) {
+            for b in c.bound.iter_mut().filter(|b| named(**b)) {
+                *b = 0;
+            }
         }
     }
     release(cpu, &gone);
@@ -582,15 +573,15 @@ pub fn release_default(cpu: &mut Cpu, index: usize) {
 
 /// glBindTexture(target, texture).
 pub fn bind_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(index) = lists::outside_begin(cpu) else {
-        return Some(0);
-    };
     if args[0] != GL_TEXTURE_2D {
         if args[0] != 0x0DE0 {
             error(cpu, GL_INVALID_ENUM);
         }
         return Some(0);
     }
+    let Some((index, _)) = current(cpu) else {
+        return Some(0);
+    };
     let s = state(cpu);
     if let Some(Some(c)) = s.contexts.get_mut(index) {
         let unit = c.active_unit as usize;
@@ -608,7 +599,7 @@ pub fn bind_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// glIsTexture(texture): false for a name glGenTextures gave that
 /// glBindTexture didn't bind yet.
 pub fn is_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(index) = lists::outside_begin(cpu) else {
+    let Some((index, _)) = current(cpu) else {
         return Some(0);
     };
     Some((args[0] != 0 && exists(state(cpu), index, args[0])) as u32)
@@ -1420,14 +1411,14 @@ pub fn are_textures_resident(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [n, at, _] = args[..] else {
         return Some(0);
     };
-    let Some(index) = lists::outside_begin(cpu) else {
-        return Some(0);
-    };
     let n = n as i32;
     if n < 0 {
         error(cpu, GL_INVALID_VALUE);
         return Some(0);
     }
+    let Some((index, _)) = current(cpu) else {
+        return Some(0);
+    };
     if n > 0 && (at == 0 || !cpu.bus.guest_probe(at, n as usize * 4, false)) {
         return Some(0);
     }
@@ -1449,7 +1440,7 @@ pub fn are_textures_resident(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// priority, as the card keeps every texture. OpenGL ignores the names
 /// that aren't textures.
 pub fn prioritize_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if lists::outside_begin(cpu).is_some() && (args[0] as i32) < 0 {
+    if (args[0] as i32) < 0 {
         error(cpu, GL_INVALID_VALUE);
     }
     Some(0)

@@ -13,8 +13,8 @@ use super::{
     CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_LINE_SMOOTH, CAP_LINE_STIPPLE, CAP_LOGIC_OP,
     CAP_NORMALIZE, CAP_POINT_SMOOTH, CAP_POLYGON_OFFSET_FILL, CAP_POLYGON_OFFSET_LINE,
     CAP_POLYGON_OFFSET_POINT, CAP_POLYGON_SMOOTH, CAP_POLYGON_STIPPLE, CAP_SCISSOR_TEST,
-    CAP_STENCIL_TEST, CAP_TEXTURE_GEN, Context, GL_INVALID_OPERATION, GL_STACK_OVERFLOW,
-    GL_STACK_UNDERFLOW, Texture, UNITS, ctx, current, error, state,
+    CAP_STENCIL_TEST, CAP_TEXTURE_GEN, Context, GL_STACK_OVERFLOW, GL_STACK_UNDERFLOW, Texture,
+    UNITS, ctx, current, error, state,
 };
 use crate::cpu::Cpu;
 
@@ -266,9 +266,7 @@ pub fn push_attrib(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(Some(c)) = s.contexts.get_mut(index) else {
         return Some(0);
     };
-    let e = if c.begin.is_some() {
-        GL_INVALID_OPERATION
-    } else if c.attribs.len() >= ATTRIB_DEPTH {
+    let e = if c.attribs.len() >= ATTRIB_DEPTH {
         GL_STACK_OVERFLOW
     } else {
         let a = save(c, s.lists.textures(c.lists.group), args[0]);
@@ -284,10 +282,6 @@ pub fn pop_attrib(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let Some(c) = ctx(cpu) else {
         return Some(0);
     };
-    if c.begin.is_some() {
-        error(cpu, GL_INVALID_OPERATION);
-        return Some(0);
-    }
     match c.attribs.pop() {
         Some(a) => {
             restore(c, &a);
