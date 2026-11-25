@@ -29,7 +29,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 100;
+const WIN32_VERSION: u16 = 103;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -68,10 +68,15 @@ const WIN32_VERSION: u16 = 100;
 /// (`user32::palette::PALETTE_SAVED`), 71's to 97's no OpenGL texture
 /// coordinate generation or clip planes
 /// (`opengl32::texgen::TEXGEN_SAVED`), 71's to 98's no MCI elements a
-/// program's I/O procedure read (`winmm::mci::PROCEDURE_SAVED`), and
-/// 71's to 99's no OpenGL raster position
-/// (`opengl32::raster::RASTER_SAVED`).
-const WIN32_LOADS: [u16; 30] = [
+/// program's I/O procedure read (`winmm::mci::PROCEDURE_SAVED`), 71's
+/// to 99's the ranges LockFile locked on each file object
+/// (`object::Kind::File`), which they load without: LockFile's locks
+/// are DOS's since 100, 71's to 100's no step of the cascade of
+/// CW_USEDEFAULT windows (`user32::window::CASCADE_SAVED`), 71's to
+/// 101's not the modules the outermost FreeLibrary frees
+/// (`kernel32::module::UNLOADING_SAVED`), and 71's to 102's no OpenGL
+/// raster position (`opengl32::raster::RASTER_SAVED`).
+const WIN32_LOADS: [u16; 33] = [
     71,
     72,
     73,
@@ -101,6 +106,9 @@ const WIN32_LOADS: [u16; 30] = [
     97,
     98,
     99,
+    100,
+    101,
+    102,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1215,7 +1223,10 @@ mod tests {
         (97, 0x71EC_E4F5_0D5E_1F97), // the threads that selected a palette
         (98, 0x890A_6080_1C80_4995), // OpenGL's texture coordinate generation and clip planes
         (99, 0x4565_36E9_4B9A_18FF), // MCI elements a program's I/O procedure read
-        (100, 0xA2DF_BF05_E492_25C5), // OpenGL's raster position
+        (100, 0xC44D_7093_8B77_FE65), // LockFile's locks moved to DOS's table (disk/locks.rs)
+        (101, 0x019A_DFC6_DCCE_473B), // the step of the CW_USEDEFAULT cascade
+        (102, 0x8818_BE2A_4B7B_59B6), // the modules the outermost FreeLibrary frees
+        (103, 0x71A7_50FA_4BC4_2EA0), // OpenGL's raster position
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
@@ -1274,7 +1285,8 @@ mod tests {
     /// a type to another file doesn't change it. It doesn't see a field
     /// that changes its type, `dinput::poll::MouseSeen`'s hand-written
     /// `State`, or what the section saves from elsewhere, such as
-    /// `dpmi::Context`.
+    /// `dpmi::Context`. `tools/win32_layout.py` computes the same without
+    /// a build, for merges that move the version: change both together.
     fn win32_layout() -> u64 {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut lists = Vec::new();

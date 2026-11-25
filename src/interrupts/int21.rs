@@ -84,18 +84,22 @@ fn file_of(cpu: &mut Cpu, handle: u16) -> Option<u16> {
     dos_files::sft_of(&mut cpu.bus, psp, handle)
 }
 
-/// Who the running code is to the locks of AH=5Ch: the running process,
-/// or in the built-in Windows the Win16 task's current PDB, its own or
-/// one it switched to with AH=50h, as SHARE sees the PSP KERNEL made
-/// current (disk/locks.rs).
+/// Who the running code is to the locks of AH=5Ch and kernel32's
+/// LockFile: the running process, or in the built-in Windows the Win16
+/// task's current PDB, its own or one it switched to with AH=50h, as
+/// SHARE sees the PSP KERNEL made current, or the running Win32 process
+/// by its id, as VSHARE tells Windows 95's processes apart
+/// (disk/locks.rs). A DOS program a Windows program started runs in a
+/// PSP of its own.
 pub(crate) fn lock_owner(cpu: &Cpu) -> u32 {
-    match crate::win16::current_task(cpu) {
-        Some(task) => {
-            let own = cpu.bus.win32.win16.tasks[task].psp;
-            let pdb = crate::win16::dos::current_pdb(cpu).unwrap_or(own);
-            crate::disk::TASK_OWNER | pdb as u32
-        }
-        None => cpu.current_psp as u32,
+    if let Some(task) = crate::win16::current_task(cpu) {
+        let own = cpu.bus.win32.win16.tasks[task].psp;
+        let pdb = crate::win16::dos::current_pdb(cpu).unwrap_or(own);
+        return crate::disk::TASK_OWNER | pdb as u32;
+    }
+    match crate::win32::running(cpu) {
+        Some(process) if cpu.current_psp == cpu.bus.win32.psp => process.id,
+        _ => cpu.current_psp as u32,
     }
 }
 

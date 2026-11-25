@@ -5,9 +5,10 @@
 //! through the network redirector's, AX=1100h, see `mscdex.rs`), the DOS
 //! internal calls that find DOS's data segment and file tables (AX=1203h,
 //! 1216h, 1220h), DOS's interface for Windows' DOSMGR (AX=1607h BX=0015h)
-//! the expanded memory manager's part of Windows' exit (AX=1606h), and
+//! the expanded memory manager's part of Windows' exit (AX=1606h),
 //! Windows' installation and version checks (AX=1600h, 160Ah) from a DOS
-//! program the built-in Windows started are there.
+//! program the built-in Windows started, and SHARE's installation check
+//! (AX=1000h) while the built-in Windows runs, are there.
 //! Every other function leaves the registers untouched, which callers read
 //! as "not installed" (AL stays 00h for the usual install checks, AX stays
 //! 1687h for the DPMI check with the host off, ...).
@@ -44,6 +45,11 @@ pub fn handle(cpu: &mut Cpu) {
         // console takes its sequences (`ansi_sys`, video/ansi.rs), as
         // DOSBox answers; else AL=00h, as with no ANSI.SYS loaded.
         0x1A00 if cpu.bus.ansi_sys => cpu.set_ax(0x1AFF),
+        // SHARE's installation check: installed (AL=FFh) while the
+        // built-in Windows runs, whose VSHARE keeps the locks of AH=5Ch
+        // (disk/locks.rs), as a DOS box of Windows 98 SE answers. Plain
+        // DOS has no SHARE loaded, and AL stays 00h.
+        0x1000 if cpu.bus.win32.active() => cpu.set_ax(0x10FF),
         // Windows' DOS manager asking about DOS's data, which the DOS 5
         // kernel answers itself.
         0x1607 if cpu.bx() == 0x0015 => dosmgr(cpu),
