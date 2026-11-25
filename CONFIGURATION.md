@@ -200,7 +200,7 @@ limit, so without a connection it goes on as it would with one:
   waiting for a retrace or two a frame takes: it waits for something else,
   as a Windows game that draws only when something changes does. It then
   tries lower speeds, down to where they cost more than 3% of the frame
-  rate, or make a program that polls for the vertical retrace miss one. A
+  rate, or make a program that waits for the vertical retrace miss one. A
   speed at which more than one frame in 300 would be shown a retrace late
   (flipped after the retrace it was due at, as when a game's drawing runs
   long) goes up to where fewer would be, if the host has room for it: the
