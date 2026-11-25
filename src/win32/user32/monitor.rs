@@ -106,9 +106,11 @@ fn monitor_info(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
     }
     let r = screen(cpu);
     let rect = [r.left, r.top, r.right, r.bottom].map(|v| v as u32);
+    let r = super::sysparams::work_area(cpu);
+    let work = [r.left, r.top, r.right, r.bottom].map(|v| v as u32);
     let mut words = vec![size];
     words.extend(rect);
-    words.extend(rect);
+    words.extend(work);
     words.push(MONITORINFOF_PRIMARY);
     write_words(cpu, info, &words);
     if size == ex {

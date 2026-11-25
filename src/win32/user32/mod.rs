@@ -163,6 +163,9 @@ pub struct State {
     /// The foreground window as threads with a palette ended, for
     /// `palette::task_ended`; None when none of them had one.
     pub palette_exit: Option<u32>,
+    /// The step of the cascade the last overlapped window of
+    /// CW_USEDEFAULT took (`window::next_default_place`).
+    pub cascade: crate::savestate::Since<{ window::CASCADE_SAVED }, u32>,
 }
 
 impl State {
@@ -1487,7 +1490,8 @@ crate::state_fields!(State {
     in_hooks,
     last_hook,
     saved_bits,
-    palette_threads
+    palette_threads,
+    cascade
 } skip {
     help,
     palette_exit
