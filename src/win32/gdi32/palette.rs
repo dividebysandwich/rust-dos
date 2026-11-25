@@ -11,20 +11,33 @@
 //! SYSPAL_NOSTATIC), and realizing a logical palette maps each of its
 //! entries to an entry of the system palette:
 //!
-//! - In the foreground (the primary palette, the one GDISelectPalette
-//!   last selected with wBkg FALSE, as USER's SelectPalette does on a
-//!   palette device for a DC of the foreground window without
-//!   bForceBackground), every entry but the static ones is freed first.
-//!   In the background, only the entries the same palette took last
-//!   time that no other palette maps to.
 //! - An entry with PC_EXPLICIT is the system palette's entry its low
 //!   word names.
-//! - One with PC_RESERVED takes a free entry of its own, which no other
-//!   palette's entry maps to and AnimatePalette changes.
-//! - One with PC_NOCOLLAPSE takes a free entry.
-//! - The others take an entry of the same color if there is one, else a
-//!   free entry.
-//! - When no entry is free, the nearest color of those taken.
+//! - One without PC_RESERVED or PC_NOCOLLAPSE takes an entry of the same
+//!   color if there is one: a static one, one another palette took, or
+//!   a free one, which keeps the color it last had. Another palette's
+//!   PC_RESERVED entry isn't shared.
+//! - The others take entries from the bottom up, skipping those this
+//!   realization already gave a color. In the foreground (the primary
+//!   palette, the one GDISelectPalette last selected with wBkg FALSE,
+//!   as USER's SelectPalette does on a palette device for a DC of the
+//!   foreground window without bForceBackground), first the free
+//!   entries, then those other palettes took, and each gets the
+//!   palette's color; the entries it doesn't use are then free. In the
+//!   background, every entry but the static ones and other palettes'
+//!   PC_RESERVED ones, in order, whether free or not, and only a free
+//!   one gets the palette's color: the others show their own until the
+//!   palette is realized in the foreground. So a palette maps to the
+//!   same entries in the background as it will in the foreground, and a
+//!   DDB made from it in the background shows its colors then. Windows
+//!   95 does this (checked on Windows 95 OSR2.5 with a Voodoo 3's
+//!   driver); it doesn't map a background palette to the nearest
+//!   colors.
+//! - In the background, the entries the palette took last time that no
+//!   other palette maps to are freed first.
+//! - A PC_RESERVED entry is its palette's alone, and AnimatePalette
+//!   changes it.
+//! - When no entry is left, the nearest color of those taken.
 //!
 //! RealizePalette returns how many entries' mappings changed, and when
 //! the primary palette changed any in a window's DC, USER sends
@@ -47,6 +60,7 @@ use super::{
     add, dc, gdi, init, set_error, static_colors,
 };
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 use crate::win32::user32::{read_words, write_words};
 
 pub const PC_RESERVED: u8 = 1;
@@ -134,6 +148,79 @@ fn show_system_entries(cpu: &mut Cpu, first: usize, last: usize) {
     crate::win32::screen::set_colors(cpu, first, &colors[first..=last.min(255)]);
 }
 
+/// The W32 section's version that added the colors a bitmap's values
+/// stood for (`Meaning`): a state saved by an older rust-dos has none.
+pub const MEANING_SAVED: u16 = 97;
+
+/// The color each value of an 8-bit bitmap of GDI's on a palette device
+/// stood for when it was drawn, 256 of them, or none where the values
+/// stand for the system palette's colors.
+///
+/// Drawn through a logical palette, a value is the system palette's
+/// entry of a logical entry, and stands for that entry's color, which
+/// the system palette may not hold there: a palette realized in the
+/// background maps to entries other palettes' colors fill. A blit of
+/// the bitmap to the screen then puts, for each value whose color the
+/// entry no longer holds, the entry of the nearest color the system
+/// palette has (`draw::Translate`). Windows 95 OSR2.5 does this with a
+/// Voodoo 3's driver: a DIB drawn with StretchDIBits into a bitmap from
+/// CreateCompatibleBitmap, its palette in the background, holds the
+/// entries the palette mapped to (GetBitmapBits reads them), and a
+/// BitBlt of it to a window shows the nearest colors of the system
+/// palette to the DIB's, with the palette selected in the window's DC or
+/// not. Memphis Math draws its toolbar's buttons so.
+pub type Meaning = Since<MEANING_SAVED, Vec<u32>>;
+
+/// Note in the bitmap `handle` the colors its values stand for after a
+/// DIB was drawn into it through `map`: each of the logical palette's
+/// entries' colors at the system palette's entry it maps to.
+pub fn note_meaning(cpu: &mut Cpu, handle: u32, map: &DeviceMap) {
+    if map.default || map.logical.is_empty() {
+        return;
+    }
+    let system = system_colors(cpu);
+    let Some(b) = gdi(cpu).bitmap_mut(handle) else {
+        return;
+    };
+    let mut meaning = if b.meaning.is_empty() {
+        system.clone()
+    } else {
+        b.meaning.0.clone()
+    };
+    for (&c, &m) in map.logical.iter().zip(&map.map) {
+        meaning[m as usize] = c;
+    }
+    b.meaning.0 = if meaning == system {
+        Vec::new()
+    } else {
+        meaning
+    };
+}
+
+/// Note in the bitmap `handle` the colors of a bitmap's values copied
+/// into it, `colors` (its `Meaning`, or the system palette's), where
+/// they aren't the system palette's.
+pub fn carry_meaning(cpu: &mut Cpu, handle: u32, colors: &[u32]) {
+    let system = system_colors(cpu);
+    if colors.len() != 256 || colors == system.as_slice() {
+        return;
+    }
+    let Some(b) = gdi(cpu).bitmap_mut(handle) else {
+        return;
+    };
+    let mut meaning = if b.meaning.is_empty() {
+        system.clone()
+    } else {
+        b.meaning.0.clone()
+    };
+    for (i, &c) in colors.iter().enumerate() {
+        if c != system[i] {
+            meaning[i] = c;
+        }
+    }
+    b.meaning.0 = meaning;
+}
+
 /// How colors become the pixels of a palette device (`Surface::device`)
 /// in a DC: through its logical palette's entries, mapped to the system
 /// palette, and the static colors.
@@ -147,6 +234,10 @@ pub struct DeviceMap {
     pub statics: Vec<(u32, u8)>,
     /// Whether the logical palette is the stock DEFAULT_PALETTE.
     pub default: bool,
+    /// The system palette's colors and indices, when the blit's colors go
+    /// to the nearest of them (`on_screen`).
+    pub shown: Option<Vec<(u32, u8)>>,
+    hpal: u32,
 }
 
 impl DeviceMap {
@@ -181,7 +272,28 @@ impl DeviceMap {
             logical,
             statics,
             default,
+            shown: None,
+            hpal,
         }
+    }
+
+    /// The map of a blit to the screen. With a logical palette in the
+    /// background its entries map to the system palette's entries a
+    /// realization in the foreground would give them, which may hold
+    /// other colors for now (see the module's comment). A DIB's color
+    /// whose entry shows another color takes the nearest of the colors
+    /// the system palette has, whatever entries hold them. Windows 95
+    /// OSR2.5 draws so with StretchDIBits of DIB_RGB_COLORS, in a
+    /// window's DC and in GetDC(NULL)'s, with bForceBackground or
+    /// without; a DDB made with CreateDIBitmap, and PALETTERGB, go
+    /// through the entries' mapping.
+    pub fn on_screen(mut self, cpu: &mut Cpu) -> DeviceMap {
+        let state = gdi(cpu);
+        if !self.default && self.hpal != state.primary_palette && !self.logical.is_empty() {
+            let system = &state.system_palette;
+            self.shown = Some((0..256).map(|i| (rgb(system[i]), i as u8)).collect());
+        }
+        self
     }
 
     /// PALETTEINDEX(`i`): the logical palette's entry, wrapping around
@@ -226,11 +338,16 @@ impl DeviceMap {
     /// pixel's index in its color table: where the logical palette has
     /// the same color at the same index, that entry, so a DIB whose
     /// table is the palette keeps its indices even where colors repeat.
+    /// On the screen with the palette in the background (`on_screen`),
+    /// the other colors take the nearest of the system palette's colors.
     pub fn blit_color(&self, color: u32, hint: Option<u32>) -> u32 {
         if let Some(i) = hint
             && self.logical.get(i as usize) == Some(&color)
         {
-            return self.map[i as usize] as u32;
+            return self.through_screen(color, self.map[i as usize], color);
+        }
+        if let Some(shown) = &self.shown {
+            return nearest_of(shown, color) as u32;
         }
         let mut best = (u32::MAX, 0);
         let candidates = self
@@ -249,6 +366,17 @@ impl DeviceMap {
             }
         }
         best.1
+    }
+
+    /// The system palette's entry `index` of the logical color `chosen`,
+    /// picked for the color `color`; on the screen with the palette in
+    /// the background (`on_screen`), where the entry shows another
+    /// color, the nearest of the colors shown instead.
+    fn through_screen(&self, chosen: u32, index: u8, color: u32) -> u32 {
+        match &self.shown {
+            Some(shown) if shown[index as usize].0 != chosen => nearest_of(shown, color) as u32,
+            _ => index as u32,
+        }
     }
 
     /// A pixel of a DIB or bitmap of more than 8 bits a pixel, of the
@@ -310,6 +438,12 @@ impl DeviceMap {
             if d < best.0 {
                 best = (d, i);
             }
+        }
+        // Not measured for deep DIBs on the screen in the background: the
+        // cell's middle takes the nearest color shown, as `blit_color`
+        // takes a color.
+        if let Some(shown) = &self.shown {
+            return nearest_of(shown, middle) as u32;
         }
         self.map[best.1] as u32
     }
@@ -733,65 +867,99 @@ fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
     owners.resize(256, 0);
     let mut system = std::mem::take(&mut state.system_palette);
     let before = system.clone();
-    for i in 0..256 {
-        // In the foreground every entry but the static ones is freed; in
-        // the background, those the palette's last realization took
-        // that no other palette maps to.
-        let free = if primary {
-            uses[i] != USE_STATIC
-        } else {
-            owners[i] == hpal && shared[i] == 0
-        };
-        if free {
-            uses[i] = USE_FREE;
-            owners[i] = 0;
+    if !primary {
+        // In the background, the entries the palette's last realization
+        // took that no other palette maps to are freed.
+        for i in 0..256 {
+            if owners[i] == hpal && shared[i] == 0 && uses[i] != USE_STATIC {
+                uses[i] = USE_FREE;
+                owners[i] = 0;
+            }
         }
     }
-    // Free entries are taken from the bottom up.
-    let mut next_free = 0usize;
-    let mut take = |uses: &mut [u8], system: &mut [[u8; 4]], e: [u8; 4], how: u8| {
-        while next_free < 256 && uses[next_free] != USE_FREE {
-            next_free += 1;
+    let mut mapping = vec![0u8; palette.entries.len()];
+    // Which entries this realization gave one of the palette's colors.
+    let mut assigned = [false; 256];
+    // The entries that take an entry of their own, in order.
+    let mut pending = Vec::new();
+    for (k, &e) in palette.entries.iter().enumerate() {
+        if e[3] & PC_EXPLICIT != 0 {
+            mapping[k] = e[0];
+            continue;
         }
-        if next_free == 256 {
-            return None;
+        if e[3] & (PC_RESERVED | PC_NOCOLLAPSE) != 0 {
+            pending.push(k);
+            continue;
         }
-        uses[next_free] = how;
-        owners[next_free] = hpal;
-        system[next_free] = [e[0], e[1], e[2], 0];
-        Some(next_free as u8)
-    };
-    let nearest_taken = |uses: &[u8], system: &[[u8; 4]], color: u32| {
-        let taken: Vec<(u32, u8)> = (0..256)
-            .filter(|&i| uses[i] == USE_STATIC || uses[i] == USE_SHARED)
-            .map(|i| (rgb(system[i]), i as u8))
-            .collect();
-        nearest_of(&taken, color)
-    };
-    let mut mapping = Vec::with_capacity(palette.entries.len());
-    for &e in &palette.entries {
+        // An entry of the same color, static, taken or free (a free
+        // entry keeps the color it last had), but not another palette's
+        // PC_RESERVED one.
         let color = rgb(e);
-        let index = if e[3] & PC_EXPLICIT != 0 {
-            e[0]
-        } else if e[3] & (PC_RESERVED | PC_NOCOLLAPSE) != 0 {
-            let how = if e[3] & PC_RESERVED != 0 {
-                USE_RESERVED
-            } else {
-                USE_SHARED
-            };
-            take(&mut uses, &mut system, e, how)
-                .unwrap_or_else(|| nearest_taken(&uses, &system, color))
-        } else {
-            let same = (0..256).find(|&i| {
-                (uses[i] == USE_STATIC || uses[i] == USE_SHARED) && rgb(system[i]) == color
-            });
-            match same {
-                Some(i) => i as u8,
-                None => take(&mut uses, &mut system, e, USE_SHARED)
-                    .unwrap_or_else(|| nearest_taken(&uses, &system, color)),
-            }
+        let same = (0..256)
+            .find(|&i| (uses[i] != USE_RESERVED || owners[i] == hpal) && rgb(system[i]) == color);
+        let Some(i) = same else {
+            pending.push(k);
+            continue;
         };
-        mapping.push(index);
+        mapping[k] = i as u8;
+        if uses[i] != USE_STATIC {
+            assigned[i] = true;
+            if primary || uses[i] == USE_FREE {
+                uses[i] = USE_SHARED;
+                owners[i] = hpal;
+            }
+        }
+    }
+    // The order in which the other entries take entries of the system
+    // palette, from the bottom up: in the foreground the free ones first,
+    // then those other palettes took; in the background all but the
+    // static ones and other palettes' PC_RESERVED ones, free or not.
+    let open = |i: usize| uses[i] != USE_STATIC && !assigned[i];
+    let order: Vec<usize> = if primary {
+        let free = (0..256).filter(|&i| open(i) && uses[i] == USE_FREE);
+        free.chain((0..256).filter(|&i| open(i) && uses[i] != USE_FREE))
+            .collect()
+    } else {
+        (0..256)
+            .filter(|&i| open(i) && (uses[i] != USE_RESERVED || owners[i] == hpal))
+            .collect()
+    };
+    let mut order = order.into_iter();
+    for k in pending {
+        let e = palette.entries[k];
+        let how = if e[3] & PC_RESERVED != 0 {
+            USE_RESERVED
+        } else {
+            USE_SHARED
+        };
+        let Some(i) = order.next() else {
+            // None left: the nearest color of those taken.
+            let taken: Vec<(u32, u8)> = (0..256)
+                .filter(|&i| uses[i] == USE_STATIC || uses[i] == USE_SHARED)
+                .map(|i| (rgb(system[i]), i as u8))
+                .collect();
+            mapping[k] = nearest_of(&taken, rgb(e));
+            continue;
+        };
+        mapping[k] = i as u8;
+        assigned[i] = true;
+        // A palette in the background puts its color only in a free
+        // entry; in the others it shows the color they hold.
+        if primary || uses[i] == USE_FREE {
+            uses[i] = how;
+            owners[i] = hpal;
+            system[i] = [e[0], e[1], e[2], 0];
+        }
+    }
+    if primary {
+        // The entries the primary palette doesn't use are free, and keep
+        // their colors.
+        for i in 0..256 {
+            if uses[i] != USE_STATIC && !assigned[i] {
+                uses[i] = USE_FREE;
+                owners[i] = 0;
+            }
+        }
     }
     let changed = mapping
         .iter()
@@ -1064,28 +1232,123 @@ mod tests {
         }
     }
 
+    /// A's colors: 236 of them, none static. The probes below ran with
+    /// these on Windows 95 OSR2.5 at 256 colours.
+    fn a_color(i: u32) -> u32 {
+        (i + 10) | (245 - i) << 8 | 100 << 16
+    }
+
+    /// B's colors: 236 others, none of them A's.
+    fn b_color(i: u32) -> u32 {
+        (245 - i) | 37 << 8 | (i + 10) << 16
+    }
+
+    /// Realize a palette of `colors` in the foreground or the
+    /// background: its mapping.
+    fn realize_colors(cpu: &mut Cpu, hdc: u32, colors: &[u32], primary: bool) -> Vec<u8> {
+        let hpal = add(cpu, palette_of(colors));
+        if primary {
+            gdi(cpu).primary_palette = hpal;
+        }
+        select(cpu, hdc, hpal);
+        realize(cpu, hdc);
+        gdi(cpu).palette(hpal).unwrap().mapping.clone()
+    }
+
+    fn colors(f: fn(u32) -> u32, range: std::ops::Range<u32>) -> Vec<u32> {
+        range.map(f).collect()
+    }
+
+    /// With A in the foreground holding every free entry, B in the
+    /// background takes the entries from the bottom up, as it will in
+    /// the foreground, and they keep A's colors until then.
+    #[test]
+    fn a_background_palette_maps_as_it_will_in_the_foreground() {
+        let (mut cpu, hdc) = palette_machine();
+        let cpu = &mut cpu;
+        let a = realize_colors(cpu, hdc, &colors(a_color, 0..236), true);
+        assert_eq!(a, (10..246).collect::<Vec<u8>>());
+        let b = colors(b_color, 0..236);
+        let back = realize_colors(cpu, hdc, &b, false);
+        assert_eq!(back, a);
+        assert_eq!(system_colors(cpu)[10], a_color(0));
+        let front = realize_colors(cpu, hdc, &b, true);
+        assert_eq!(front, back);
+        assert_eq!(system_colors(cpu)[10], b_color(0));
+    }
+
+    /// An entry of a color the system palette has takes that entry, in
+    /// the background too, and the others skip it.
+    #[test]
+    fn a_background_palette_shares_the_colors_there_are() {
+        let (mut cpu, hdc) = palette_machine();
+        let cpu = &mut cpu;
+        realize_colors(cpu, hdc, &colors(a_color, 0..236), true);
+        let mut d = colors(a_color, 100..103);
+        d.extend(colors(b_color, 3..236));
+        let back = realize_colors(cpu, hdc, &d, false);
+        assert_eq!(back[..5], [110, 111, 112, 10, 11]);
+        // Entries 3 to 102 take 10 to 109; 103 on skip 110 to 112.
+        assert_eq!(back[130], 140);
+    }
+
+    /// In the foreground the free entries go first (those the palette
+    /// before left), then the others; an entry of a free entry's old
+    /// color takes it.
+    #[test]
+    fn a_foreground_palette_takes_the_free_entries_first() {
+        let (mut cpu, hdc) = palette_machine();
+        let cpu = &mut cpu;
+        realize_colors(cpu, hdc, &colors(a_color, 0..236), true);
+        // A2, A's first 100 colors: 110 to 245 are free, with A's colors.
+        realize_colors(cpu, hdc, &colors(a_color, 0..100), true);
+        let mut g = colors(a_color, 150..153);
+        g.extend(colors(b_color, 3..236));
+        let front = realize_colors(cpu, hdc, &g, true);
+        assert_eq!(front[..5], [160, 161, 162, 110, 111]);
+        assert_eq!(front[130], 240);
+        assert_eq!(front[136], 10);
+    }
+
+    /// In the background a free entry gets the palette's color; the
+    /// others it maps to keep theirs.
+    #[test]
+    fn a_background_palette_fills_the_free_entries_it_maps_to() {
+        let (mut cpu, hdc) = palette_machine();
+        let cpu = &mut cpu;
+        realize_colors(cpu, hdc, &colors(a_color, 0..236), true);
+        // A4, A's last 136 colors: 10 to 109 are free.
+        realize_colors(cpu, hdc, &colors(a_color, 100..236), true);
+        let back = realize_colors(cpu, hdc, &colors(b_color, 0..236), false);
+        assert_eq!(back, (10..246).collect::<Vec<u8>>());
+        let system = system_colors(cpu);
+        assert_eq!(system[10], b_color(0));
+        assert_eq!(system[109], b_color(99));
+        assert_eq!(system[110], a_color(100));
+    }
+
     /// AnimatePalette changes the system entries a palette took only
     /// while they are still its own.
     #[test]
     fn animate_palette_leaves_another_palettes_entries() {
         let (mut cpu, hdc) = palette_machine();
         let a = reserved_palette(&mut cpu, [0x010101, 0x020202].into_iter());
-        let b = reserved_palette(&mut cpu, [0x030303, 0x040404].into_iter());
+        let b = reserved_palette(&mut cpu, (0..236).map(|i| 0x030303 + i));
         select(&mut cpu, hdc, a);
         realize(&mut cpu, hdc);
         let taken = gdi(&mut cpu).palette(a).unwrap().mapping.clone();
-        // B becomes primary: every entry is freed, and B takes A's.
+        // B becomes primary: it takes the 234 free entries, then A's.
         gdi(&mut cpu).primary_palette = b;
         select(&mut cpu, hdc, b);
         realize(&mut cpu, hdc);
-        assert_eq!(gdi(&mut cpu).palette(b).unwrap().mapping, taken);
+        assert_eq!(gdi(&mut cpu).palette(b).unwrap().mapping[234..], taken);
         let at = 0x10000;
         write_words(&mut cpu, at, &[0x0105_0505, 0x0106_0606]);
         assert_eq!(animate_palette(&mut cpu, &[a, 0, 2, at]), Some(TRUE));
         let colors = system_colors(&mut cpu);
         let shown: Vec<u32> = taken.iter().map(|&m| colors[m as usize]).collect();
-        assert_eq!(shown, [0x030303, 0x040404]);
-        assert_eq!(animate_palette(&mut cpu, &[b, 0, 2, at]), Some(TRUE));
+        assert_eq!(shown, [0x030303 + 234, 0x030303 + 235]);
+        assert_eq!(animate_palette(&mut cpu, &[b, 234, 2, at]), Some(TRUE));
         let colors = system_colors(&mut cpu);
         let shown: Vec<u32> = taken.iter().map(|&m| colors[m as usize]).collect();
         assert_eq!(shown, [0x050505, 0x060606]);

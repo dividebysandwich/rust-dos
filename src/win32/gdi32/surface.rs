@@ -53,9 +53,11 @@ pub struct Surface {
     /// A monochrome bitmap of GDI's: its pixels are 0 and 1, which blits
     /// from and to color take as the DCs' colors.
     pub mono: bool,
-    /// Its pixels are indices into the system palette, which `colors`
-    /// is: the screen at 8 bits a pixel, or an 8-bit bitmap of GDI's.
-    /// Colors are matched to them through the DC's logical palette.
+    /// Its pixels are indices into the system palette: the screen at 8
+    /// bits a pixel, or an 8-bit bitmap of GDI's. `colors` is the system
+    /// palette, or for a bitmap the colors its values stand for
+    /// (`palette::Meaning`). Colors are matched to them through the DC's
+    /// logical palette.
     pub device: bool,
     /// A DIB given with DIB_PAL_COLORS: the logical palette's index each
     /// entry of its color table was, which `colors` has the colors of.
@@ -249,6 +251,7 @@ impl Surface {
             }
             Target::Bitmap(handle) => {
                 let b = gdi(cpu).bitmap(handle)?;
+                let meaning = (!b.meaning.is_empty()).then(|| b.meaning.0.clone());
                 let pitch = b.stride as usize;
                 let dib = b.dib.as_ref().map(|d| (d.bits, d.top_down));
                 let table = b.dib.as_ref().map(|d| {
@@ -262,7 +265,12 @@ impl Surface {
                 let (colors, masks, mono) = match table {
                     Some(t) => t,
                     None if bpp == 1 => (vec![0x000000, 0xFFFFFF], MASKS_32, true),
-                    None if bpp == 8 => (super::palette::system_colors(cpu), MASKS_32, false),
+                    // The colors its values stand for (`palette::Meaning`).
+                    None if bpp == 8 => (
+                        meaning.unwrap_or_else(|| super::palette::system_colors(cpu)),
+                        MASKS_32,
+                        false,
+                    ),
                     None => (Vec::new(), ddb_masks(cpu, bpp), false),
                 };
                 let device = dib.is_none() && bpp == 8;
@@ -695,6 +703,7 @@ impl super::Bitmap {
             dib: self.dib.clone(),
             dc: self.dc,
             dimension: self.dimension,
+            meaning: Default::default(),
         }
     }
 }

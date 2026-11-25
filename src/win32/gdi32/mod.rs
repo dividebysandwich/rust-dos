@@ -186,6 +186,10 @@ pub struct Bitmap {
     pub dc: u32,
     /// SetBitmapDimensionEx's size.
     pub dimension: (i32, i32),
+    /// An 8-bit bitmap of GDI's on a palette device: the color each of
+    /// its values stood for when it was drawn (`palette::Meaning`), or
+    /// empty where they stand for the system palette's colors.
+    pub meaning: palette::Meaning,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1722,7 +1726,8 @@ crate::state_fields!(Bitmap {
     bits,
     dib,
     dc,
-    dimension
+    dimension,
+    meaning
 });
 crate::state_fields!(Palette { entries, mapping });
 crate::state_fields!(Object {

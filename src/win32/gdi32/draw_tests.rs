@@ -67,6 +67,7 @@ fn dib_dc(
         }),
         dc: 0,
         dimension: (0, 0),
+        meaning: Default::default(),
     };
     let dib = add(cpu, Kind::Bitmap { bitmap });
     for y in 0..h {
@@ -137,6 +138,53 @@ fn a_blit_of_the_palettes_colors_puts_their_system_entries() {
     }
 }
 
+/// A palette of 63 colors realized in the background, while the
+/// screen's palette holds every free entry, maps them to entries 10 to
+/// 72, which keep the screen palette's colors. A DIB of its colors
+/// drawn into a bitmap compatible with the screen through it holds
+/// those entries, and a blit of the bitmap to the screen puts the
+/// entries of the nearest colors the system palette has. Windows 95
+/// OSR2.5 does so: Memphis Math draws its toolbar's buttons this way.
+#[test]
+fn a_bitmap_drawn_through_a_background_palette_shows_its_colors() {
+    // The screen's palette: 236 colors, which take entries 10 to 245.
+    let screen_color = |i: u32| (i + 10) | (245 - i) << 8 | 100 << 16;
+    let screen_colors: Vec<u32> = (0..236).map(screen_color).collect();
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &screen_colors);
+    let cpu = &mut cpu;
+    // The toolbar's: each next to one of the screen palette's last 63.
+    let colors: Vec<u32> = (0..63).map(|i| screen_color(235 - i) + 1).collect();
+    cpu.bus.guest_write_32(SCRATCH, 0x300 | 63 << 16);
+    for (i, &c) in colors.iter().enumerate() {
+        cpu.bus.guest_write_32(SCRATCH + 4 + 4 * i as u32, c);
+    }
+    let hpal = palette::create_palette(cpu, &[SCRATCH]).unwrap();
+    let ddb = bitmap::create_compatible_bitmap(cpu, &[screen, 63, 1]).unwrap();
+    let mem = dc::create_compatible_dc(cpu, &[screen]).unwrap();
+    dc::select_object(cpu, &[mem, ddb]);
+    palette::select_palette(cpu, &[mem, hpal, 1]);
+    palette::realize_palette(cpu, &[mem]);
+    let dib = dib_dc(cpu, BITS, &colors, false, |x, _| (x % 63) as u8);
+    bit_blt(cpu, mem, (0, 0, 63, 1), dib, 0, 0);
+    let held = match gdi(cpu).bitmap(ddb) {
+        Some(b) => b.bits[..63].to_vec(),
+        None => Vec::new(),
+    };
+    assert_eq!(
+        held,
+        (10..73).collect::<Vec<u8>>(),
+        "the entries the palette maps to"
+    );
+    bit_blt(cpu, screen, (0, 0, 63, 1), mem, 0, 0);
+    let pixels = screen_pixels(cpu);
+    let want: Vec<u8> = (0..63).map(|i| 245 - i).collect();
+    assert_eq!(
+        pixels[..63],
+        want[..],
+        "the screen palette's nearest colors"
+    );
+}
+
 /// Blits of every kind a fast path could take or has to leave to the
 /// one that works a pixel at a time: tiles, the whole screen, ones cut
 /// by the screen's and the DIB's edges, through a clip region of several
@@ -204,10 +252,13 @@ fn fnv(data: &[u8]) -> u64 {
     })
 }
 
+/// The palette is realized in GetDC(NULL)'s DC, in the background, so
+/// the colors of the gray DIB take the nearest of the system palette's
+/// colors (`DeviceMap::on_screen`).
 #[test]
 fn blits_to_the_palette_screen_leave_the_same_pixels() {
     let hash = blit_everything(DesktopDepth::Palette);
-    assert_eq!(hash, 0xb63f_3df0_a605_f819, "{hash:#018x}");
+    assert_eq!(hash, 0x6214_5df4_5c22_a965, "{hash:#018x}");
 }
 
 /// The Voodoo3's own desktop is 16 bits a pixel.
@@ -525,6 +576,7 @@ fn dib_dc_16(cpu: &mut Cpu, bits: u32, width: i32, height: i32) -> u32 {
         }),
         dc: 0,
         dimension: (0, 0),
+        meaning: Default::default(),
     };
     let dib = add(cpu, Kind::Bitmap { bitmap });
     let mem = dc::create_compatible_dc(cpu, &[0]).unwrap();

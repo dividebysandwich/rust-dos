@@ -1602,10 +1602,14 @@ pub fn blit_from(
         take_call_time(cpu, &ddc);
         return true;
     };
-    let map = c
-        .surface
-        .device
-        .then(|| super::palette::DeviceMap::new(cpu, ddc.attrs.palette));
+    let map = c.surface.device.then(|| {
+        let map = super::palette::DeviceMap::new(cpu, ddc.attrs.palette);
+        if ddc.kind == super::dc::MEMORY {
+            map
+        } else {
+            map.on_screen(cpu)
+        }
+    });
     let fill = if uses_pattern(rop3) {
         brush_fill_through(cpu, &c, ddc.attrs.brush, map.as_ref())
     } else {
@@ -1626,6 +1630,21 @@ pub fn blit_from(
         // WHITENESS sets every bit of a pixel without a color table, as
         // the other operations do: a 32-bit pixel's top byte too.
         white: if c.surface.bpp > 8 { mask } else { white },
+    };
+    // Into a bitmap of GDI's on a palette device: what its values stand
+    // for after the blit (`palette::Meaning`), from the colors of a DIB's
+    // pixels through the palette, or those of a bitmap's values.
+    let meaning = match (&source, c.surface.target) {
+        (Some((src, _)), Target::Bitmap(handle))
+            if ddc.kind == super::dc::MEMORY && c.surface.device && !src.surface.mono =>
+        {
+            if src.surface.device {
+                Some((handle, None, Some(src.surface.colors.clone())))
+            } else {
+                Some((handle, map.clone(), None))
+            }
+        }
+        _ => None,
     };
     let mut xlat = source
         .as_ref()
@@ -1703,6 +1722,11 @@ pub fn blit_from(
     }
     if let Some(t) = xlat {
         t.keep(cpu);
+    }
+    match meaning {
+        Some((handle, Some(map), _)) => super::palette::note_meaning(cpu, handle, &map),
+        Some((handle, None, Some(colors))) => super::palette::carry_meaning(cpu, handle, &colors),
+        _ => {}
     }
     // On the screen, a fill and a copy within it are the card's
     // blitter's work.
@@ -1815,10 +1839,24 @@ impl Translate {
             && !src.mono
         {
             if let Some(indices) = &src.pal_indices {
-                return indices.get(v as usize).map_or(0, |&i| map.index(i as usize));
+                return indices
+                    .get(v as usize)
+                    .map_or(0, |&i| map.index(i as usize));
             }
             if src.device {
-                return v;
+                // To the screen, a bitmap's value whose color the system
+                // palette no longer holds there takes the entry of the
+                // nearest color it has (`palette::Meaning`).
+                let color = src.colors.get(v as usize);
+                return match color {
+                    Some(&c)
+                        if dst.target == Target::Screen
+                            && dst.colors.get(v as usize) != Some(&c) =>
+                    {
+                        super::surface::nearest(&dst.colors, c)
+                    }
+                    _ => v,
+                };
             }
             // Deeper pixels go through Windows' inverse color table
             // (`DeviceMap::deep_color`), those of a color table to the
@@ -1862,7 +1900,9 @@ impl Translate {
 /// (`Translate::one`).
 fn table_key(src: &Surface, map: Option<&super::palette::DeviceMap>) -> Option<TableKey> {
     let map = map?;
-    (!src.mono && src.bpp <= 8).then(|| TableKey {
+    // A bitmap's values onto the screen depend on the system palette as
+    // well (`Translate::one`), which the key doesn't hold.
+    (!src.mono && src.bpp <= 8 && !src.device).then(|| TableKey {
         bpp: src.bpp,
         colors: src.colors.clone(),
         pal_indices: src.pal_indices.clone(),
