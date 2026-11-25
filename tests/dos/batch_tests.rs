@@ -270,6 +270,77 @@ fn call_comes_back_and_shift_moves_the_parameters() {
     assert!(screen.contains("sub one\nsub two\nback in main"), "{}", screen);
 }
 
+/// The screen after typing `line` at the prompt of a new machine whose C:
+/// holds `files`, and whether ECHO is on after it.
+fn screen_of(name: &str, files: &[(&str, &[u8])], line: &str) -> (String, bool) {
+    let dir = scratch(name, files);
+    let mut cpu = machine(&dir);
+    type_line(&mut cpu, format!("{}\r", line).as_bytes());
+    let idle = run_until(&mut cpu, 2000, |cpu| !cpu.batch.is_active() && cpu.shell_idle());
+    assert!(idle, "{}", line);
+    (screen(&cpu), cpu.batch.echo)
+}
+
+// COMMAND.COM keeps the ECHO a batch file began with in its batch
+// segment and puts it back when the file ends (BatCom and BatchOff in
+// MS-DOS 4.0's TBATCH.ASM), so ECHO OFF in a CALLed file lasts until it
+// ends (#1940).
+
+#[test]
+fn echo_comes_back_when_a_called_batch_file_with_echo_off_ends() {
+    let (screen, echo) = screen_of(
+        "call_echo",
+        &[
+            ("T1.BAT", b"call t2\r\necho back in t1\r\n"),
+            ("T2.BAT", b"@echo off\r\necho in t2\r\n"),
+        ],
+        "t1",
+    );
+    assert_eq!(
+        screen,
+        "C:\\>t1\n\nC:\\>call t2\nin t2\nC:\\>echo back in t1\nback in t1\n\nC:\\>\nC:\\>"
+    );
+    assert!(echo);
+}
+
+#[test]
+fn nested_called_batch_files_each_give_back_their_caller_s_echo() {
+    let (screen, echo) = screen_of(
+        "call_echo_nested",
+        &[
+            ("T1.BAT", b"call t2\r\necho back in t1\r\n"),
+            ("T2.BAT", b"@echo off\r\ncall t3\r\necho back in t2\r\n"),
+            ("T3.BAT", b"echo on\r\necho in t3\r\n"),
+        ],
+        "t1",
+    );
+    // T3's last line, the empty one, is unechoed: ECHO is off in T2.
+    assert_eq!(
+        screen,
+        "C:\\>t1\n\nC:\\>call t2\n\nC:\\>echo in t3\nin t3\nback in t2\n\
+         C:\\>echo back in t1\nback in t1\n\nC:\\>\nC:\\>"
+    );
+    assert!(echo);
+}
+
+#[test]
+fn a_batch_file_chained_from_a_called_one_gives_back_the_caller_s_echo() {
+    let (screen, echo) = screen_of(
+        "call_echo_chain",
+        &[
+            ("T1.BAT", b"call t2\r\necho back in t1\r\n"),
+            ("T2.BAT", b"@echo off\r\nt3\r\n"),
+            ("T3.BAT", b"echo in t3\r\n"),
+        ],
+        "t1",
+    );
+    assert_eq!(
+        screen,
+        "C:\\>t1\n\nC:\\>call t2\nin t3\nC:\\>echo back in t1\nback in t1\n\nC:\\>\nC:\\>"
+    );
+    assert!(echo);
+}
+
 #[test]
 fn for_runs_a_command_for_every_member_and_every_matching_file() {
     let dir = scratch(
