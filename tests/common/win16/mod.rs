@@ -115,6 +115,11 @@ pub fn program_named(name: &str, code: &Code, flags: u16) -> Vec<u8> {
     build(name, code, flags, ne::MULTIPLEDATA, &[], &[])
 }
 
+/// `program_named`, with the module flags `module_flags`.
+pub fn program_named_flags(name: &str, code: &Code, flags: u16, module_flags: u16) -> Vec<u8> {
+    build(name, code, flags, module_flags, &[], &[])
+}
+
 /// `program`, with the resources `resources` (type, name, data),
 /// moveable and discardable.
 pub fn program_with_resources(
