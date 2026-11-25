@@ -26,7 +26,7 @@ use super::super::sysparams::{
     self, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWFRAME,
     COLOR_WINDOWTEXT,
 };
-use super::super::window::{WS_BORDER, WS_DISABLED, WS_HSCROLL, WS_VSCROLL, expects_win3};
+use super::super::window::{WS_BORDER, WS_DISABLED, WS_HSCROLL, WS_VSCROLL, thread_expects_win3};
 use super::super::{
     State, address_of, bytes_at, copy_out, input, make_long, paint, point_of, read_words, user,
     write_words,
@@ -2682,7 +2682,7 @@ fn ctl_color(cpu: &mut Cpu, c: &Ctx) -> (u32, u32) {
         parent
     };
     let static_ = (c.e.flags & EF_DISABLED != 0 || c.e.style & ES_READONLY != 0)
-        && !expects_win3(cpu, c.hwnd);
+        && !thread_expects_win3(cpu, c.hwnd);
     let ctl = if static_ {
         WM_CTLCOLORSTATIC
     } else {
@@ -2766,7 +2766,7 @@ fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32, brush: u32, print: bool) {
     // color, as Windows 98's USER.EXE paints it. A multi-line edit of a
     // program made for a Windows before 4.0 keeps the WM_CTLCOLOR text
     // color there.
-    if !enabled && (!e.ml() || !expects_win3(cpu, hwnd)) {
+    if !enabled && (!e.ml() || !thread_expects_win3(cpu, hwnd)) {
         let gray = user(cpu).color(COLOR_GRAYTEXT);
         if dc::get_bk_color(cpu, &[hdc]) != Some(gray) {
             dc::set_text_color(cpu, &[hdc, gray]);

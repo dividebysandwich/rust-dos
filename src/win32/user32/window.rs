@@ -564,7 +564,7 @@ fn keep_above_owners(state: &mut State, hwnd: u32, left_topmost: bool) {
 /// as the window's thread runs their procedure, whatever instance the
 /// window was made with. A process loaded from a save state made before
 /// the version was kept has 0, and counts as a 4.0 program.
-pub(crate) fn expects_win3(cpu: &mut Cpu, hwnd: u32) -> bool {
+pub(crate) fn thread_expects_win3(cpu: &mut Cpu, hwnd: u32) -> bool {
     let Some((pid, tid, instance)) = user(cpu).window(hwnd).map(|w| (w.pid, w.tid, w.instance))
     else {
         return false;
