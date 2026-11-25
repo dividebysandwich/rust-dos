@@ -335,6 +335,14 @@ impl State {
         Some(handle(i))
     }
 
+    /// The objects there are, with their handles.
+    pub fn handles(&self) -> impl Iterator<Item = (u32, &Object)> {
+        self.objects
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| Some((handle(i), o.as_ref()?)))
+    }
+
     pub fn stock(&self, index: u32) -> u32 {
         handle(index as usize)
     }

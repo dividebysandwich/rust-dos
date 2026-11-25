@@ -378,6 +378,18 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 Win32Locale::ALL.map(Win32Locale::name).join(", ")
                             )),
                         },
+                        "win32_shims" => match crate::win32::shims::by_name(value) {
+                            Some(set) => config.win32_shims = Some(set),
+                            None => warn(format!(
+                                "invalid win32_shims '{}' (one of {})",
+                                value,
+                                crate::win32::shims::SETS
+                                    .iter()
+                                    .map(|(name, _)| *name)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )),
+                        },
                         "win32_depth" => match DesktopDepth::parse(value) {
                             Some(depth) => config.win32_depth = Some(depth),
                             None => warn(format!(

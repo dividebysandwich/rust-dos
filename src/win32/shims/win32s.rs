@@ -19,7 +19,14 @@
 //!   use count" when it is odd. LocalFlags is a 32-bit function of
 //!   W32SCOMB's own and isn't changed.
 
+//!
+//! A Win32s program runs on Windows 3.1 and can call its 16-bit DLLs,
+//! which see Windows 3.1 itself, so Win32s's set has Windows 3.1's
+//! ([`super::win31`]) too.
+
 use super::{Shim, Shims};
 
-/// The shims of Win32s, for programs made for it.
-pub const WIN32S: Shims = Shims::of(&[Shim::GlobalFlagsWithoutLockCount]);
+/// The shims of Win32s, for programs made for it: its own and Windows
+/// 3.1's.
+pub const WIN32S: Shims =
+    Shims::of(&[Shim::GlobalFlagsWithoutLockCount]).union(super::win31::WIN31);

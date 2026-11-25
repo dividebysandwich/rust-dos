@@ -648,7 +648,8 @@ pub const FIXES: &[Fix] = &[
     Fix {
         name: "lunicus-win32s",
         game: "Lunicus",
-        reason: "it stops with \"bad lock use count\" unless GlobalFlags is Win32s's",
+        reason: "it stops with \"bad lock use count\" unless GlobalFlags is Win32s's, and \
+                 draws its frames with a bitmap it finds in Windows 3.1's GDI heap",
         kind: Kind::Win32Shims {
             program: "LUNICUS.EXE",
             size: 206_336,
