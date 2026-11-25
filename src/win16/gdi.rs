@@ -403,6 +403,7 @@ static APIS: &[Api16] = &[
         "GetAspectRatioFilterEx",
         b'b',
     ),
+    rust("IsDCCurrentPalette", 412, "w", is_dc_current_palette),
 ];
 
 fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -925,6 +926,16 @@ fn reset_dc(_: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn get_cur_log_font(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // OBJ_FONT.
     go(cpu, "GetCurrentObject", &[args[0], 6])
+}
+
+/// IsDCCurrentPalette(hdc), undocumented: TRUE when the DC's palette is
+/// the one last selected in the foreground. Video for Windows 1.1's
+/// DrawDib (MSVIDEO.DLL) asks it on a 256-colour display: when TRUE it
+/// takes the palette's indices as the system palette's, else it maps
+/// each index through GetSystemPaletteEntries and GetNearestColor.
+fn is_dc_current_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let current = crate::win32::gdi32::palette::is_dc_current_palette(cpu, args[0]);
+    Some(current as u32)
 }
 
 /// CreateDIBPatternBrush(global block, usage): the packed DIB in the
