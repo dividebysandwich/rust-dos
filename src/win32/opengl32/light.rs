@@ -10,8 +10,8 @@
 
 use super::state::{GL_BACK, GL_FRONT, GL_FRONT_AND_BACK};
 use super::{
-    CAP_COLOR_MATERIAL, Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ctx,
-    error, matrix, pname, signed_unit,
+    CAP_COLOR_MATERIAL, Context, GL_INVALID_ENUM, GL_INVALID_VALUE, ctx, error, matrix, pname,
+    signed_unit,
 };
 use crate::cpu::Cpu;
 
@@ -303,21 +303,8 @@ impl Values {
     }
 }
 
-/// Whether the current context is between glBegin and glEnd, where
-/// glLight, glLightModel and glColorMaterial are errors.
-fn inside_begin(cpu: &mut Cpu) -> bool {
-    if ctx(cpu).is_some_and(|c| c.begin.is_some()) {
-        error(cpu, GL_INVALID_OPERATION);
-        return true;
-    }
-    false
-}
-
 /// glLight: set the parameter `p` of `light`.
 fn light(cpu: &mut Cpu, light: u32, p: u32, v: Values) {
-    if inside_begin(cpu) {
-        return;
-    }
     let (Some(i), Some(n)) = (index(light), light_values(p)) else {
         error(cpu, GL_INVALID_ENUM);
         return;
@@ -389,9 +376,6 @@ pub fn lightiv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// glLightModel: set the lighting model's parameter `p`.
 fn light_model(cpu: &mut Cpu, p: u32, v: Values) {
-    if inside_begin(cpu) {
-        return;
-    }
     let Some(n) = model_values(p) else {
         error(cpu, GL_INVALID_ENUM);
         return;
@@ -519,9 +503,6 @@ pub fn color_material(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         error(cpu, GL_INVALID_ENUM);
         return Some(0);
     }
-    if inside_begin(cpu) {
-        return Some(0);
-    }
     if let Some(c) = ctx(cpu) {
         c.lighting.color_face = face;
         c.lighting.color_mode = mode;
@@ -586,9 +567,6 @@ fn get_light(cpu: &mut Cpu, args: &[u32], ints: bool) {
     let Some(c) = ctx(cpu) else {
         return;
     };
-    if c.begin.is_some() {
-        return error(cpu, GL_INVALID_OPERATION);
-    }
     let v = index(light).and_then(|i| light_get(&c.lighting.lights[i], p));
     match v {
         Some(v) => write(cpu, at, &v, ints, is_color(p)),
@@ -615,9 +593,6 @@ fn get_material(cpu: &mut Cpu, args: &[u32], ints: bool) {
     let Some(c) = ctx(cpu) else {
         return;
     };
-    if c.begin.is_some() {
-        return error(cpu, GL_INVALID_OPERATION);
-    }
     let side = match face {
         GL_FRONT => Some(0),
         GL_BACK => Some(1),

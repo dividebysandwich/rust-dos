@@ -35,6 +35,11 @@
 //! A list is three flat arrays (`List`): its calls, their argument
 //! words and the bytes copied for them.
 //!
+//! The functions OpenGL doesn't allow between glBegin and glEnd are
+//! refused there where their handler would run, for the program, a
+//! list or GLU32 (`refused`): one table of the exports, in place of a
+//! check in each function.
+//!
 //! A run of calls from a glBegin to its glEnd that only give vertices
 //! (glVertex, glColor, glNormal, glTexCoord and glMultiTexCoordARB) is
 //! also kept as those vertices (`Batch`), made once when the list is
@@ -789,7 +794,9 @@ fn push_element(cpu: &mut Cpu, open: &mut Open, e: &Elements, i: u32) {
 /// Record glDrawArrays or glDrawElements with `args` as glBegin, the
 /// elements and glEnd, or glArrayElement as its element. A call whose
 /// arguments are an error is recorded as it is: its handler reads no
-/// array before it gives the error, so a replay gives the same.
+/// array before it gives the error, so a replay gives the same. So is
+/// one between the list's glBegin and its glEnd, which the replay
+/// refuses as the program's call is (`refused`).
 fn push_arrays(cpu: &mut Cpu, open: &mut Open, at: usize, when: When, args: &[u32]) {
     if when == When::Element {
         if let Some(e) = elements(cpu) {
@@ -812,9 +819,12 @@ fn push_arrays(cpu: &mut Cpu, open: &mut Open, at: usize, when: When, args: &[u3
         push(cpu, open, at, args, None, false);
         return;
     };
-    // As the handlers have it: nothing between glBegin and glEnd, and
-    // nothing without vertices.
-    if count == 0 || open.begun {
+    if open.begun {
+        push(cpu, open, at, args, None, false);
+        return;
+    }
+    // Without vertices it draws nothing.
+    if count == 0 {
         return;
     }
     let Some(e) = elements(cpu) else {
@@ -865,14 +875,89 @@ fn put_back(cpu: &mut Cpu, open: Open) {
     }
 }
 
+// Between glBegin and glEnd.
+
+/// Whether OpenGL 1.1 allows the function `name` between glBegin and
+/// glEnd (section 2.6.3): those that give a vertex and its values
+/// (glVertex, glColor, glIndex, glNormal, glTexCoord and
+/// GL_ARB_multitexture's glMultiTexCoordARB, glEdgeFlag), glMaterial,
+/// glEvalCoord and glEvalPoint, glCallList and glCallLists,
+/// glArrayElement (section 2.8), and glEnd. Every other function of
+/// OpenGL is GL_INVALID_OPERATION there, glBegin, glGetError and the
+/// other queries included. So are the client's state (the arrays'
+/// pointers, glEnableClientState) and the pixel store, which OpenGL
+/// 1.2's specification lets refuse with that error or not. The WGL
+/// functions aren't OpenGL's.
+fn allowed_in_begin(name: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "glEnd",
+        "glArrayElement",
+        "glCallList",
+        "glCallLists",
+        "glEdgeFlag",
+        "glEdgeFlagv",
+        "glMaterialf",
+        "glMaterialfv",
+        "glMateriali",
+        "glMaterialiv",
+    ];
+    // glIndex's types, and not glIndexMask or glIndexPointer.
+    const INDEX: &[&str] = &["d", "f", "i", "s", "ub"];
+    let index = name
+        .strip_prefix("glIndex")
+        .map(|t| t.strip_suffix('v').unwrap_or(t));
+    name.starts_with("wgl")
+        || name.starts_with("glEvalCoord")
+        || name.starts_with("glEvalPoint")
+        || imm::spec(name).is_some()
+        || index.is_some_and(|t| INDEX.contains(&t))
+        || NAMES.contains(&name)
+}
+
+/// `allowed_in_begin` of every export, by its place.
+fn allowed() -> &'static [bool] {
+    static ALLOWED: OnceLock<Vec<bool>> = OnceLock::new();
+    ALLOWED.get_or_init(|| APIS.iter().map(|api| allowed_in_begin(api.name)).collect())
+}
+
+/// Whether the call of the export at `at` is refused: the current
+/// context is between glBegin and glEnd, and the function isn't one
+/// OpenGL allows there. It is GL_INVALID_OPERATION and does nothing
+/// else, ahead of the function's other errors, as SGI's sample
+/// implementation checks it first. Every call that would run a
+/// handler asks: the program's (`call`), a list's (`issue`) and
+/// GLU32's (`intercepted`), so no handler but those allowed runs
+/// between glBegin and glEnd.
+fn refused(cpu: &mut Cpu, at: usize) -> bool {
+    if allowed().get(at).copied().unwrap_or(true) {
+        return false;
+    }
+    if !ctx(cpu).is_some_and(|c| c.begin.is_some()) {
+        return false;
+    }
+    error(cpu, GL_INVALID_OPERATION);
+    true
+}
+
+/// Run the handler of the export at `at`, unless it is `refused`,
+/// which gives 0: GL_FALSE, no name and no string.
+fn execute_call(cpu: &mut Cpu, at: usize, api: &Api, args: &[u32]) -> Option<u32> {
+    if refused(cpu, at) {
+        return Some(0);
+    }
+    (api.handler)(cpu, args)
+}
+
 /// A call of the export at `at` by the program, with the arguments its
-/// stub read: the handler runs, unless the current context has a list
-/// open and the function is one OpenGL compiles. That call is added
-/// to the list, and its handler runs only with
-/// GL_COMPILE_AND_EXECUTE.
+/// stub read: the handler runs (`execute_call`), unless the current
+/// context has a list open and the function is one OpenGL compiles.
+/// That call is added to the list, and its handler runs only with
+/// GL_COMPILE_AND_EXECUTE. Whether a compiled function is allowed
+/// between glBegin and glEnd is asked when it runs, so GL_COMPILE adds
+/// it to the list without an error.
 pub fn call(cpu: &mut Cpu, at: usize, api: &Api, args: &[u32]) -> Option<u32> {
     if state(cpu).lists.compiling == 0 {
-        return (api.handler)(cpu, args);
+        return execute_call(cpu, at, api, args);
     }
     let when = descs().get(at).map_or(When::Now, |d| d.when);
     let open = if when == When::Now {
@@ -881,7 +966,7 @@ pub fn call(cpu: &mut Cpu, at: usize, api: &Api, args: &[u32]) -> Option<u32> {
         take_open(cpu)
     };
     let Some(mut open) = open else {
-        return (api.handler)(cpu, args);
+        return execute_call(cpu, at, api, args);
     };
     match when {
         When::Compiled => {
@@ -892,7 +977,7 @@ pub fn call(cpu: &mut Cpu, at: usize, api: &Api, args: &[u32]) -> Option<u32> {
     let execute = open.mode == GL_COMPILE_AND_EXECUTE;
     put_back(cpu, open);
     if execute {
-        (api.handler)(cpu, args)
+        execute_call(cpu, at, api, args)
     } else {
         Some(0)
     }
@@ -902,35 +987,37 @@ pub fn call(cpu: &mut Cpu, at: usize, api: &Api, args: &[u32]) -> Option<u32> {
 /// program, as GLU32 makes OpenGL's: with a list open it is added to
 /// the list, `data` being what its pointer points at. Whether that is
 /// all there is to do: false when the caller has to do the call
-/// itself, with no list open or with GL_COMPILE_AND_EXECUTE.
-fn compiles(cpu: &mut Cpu, name: &str, args: &[u32], data: Option<&[u8]>) -> bool {
-    if state(cpu).lists.compiling == 0 {
-        return false;
-    }
+/// itself, with no list open or with GL_COMPILE_AND_EXECUTE, unless
+/// the call is `refused` between glBegin and glEnd.
+fn intercepted(cpu: &mut Cpu, name: &str, args: &[u32], data: Option<&[u8]>) -> bool {
     let Some(at) = place_of(name) else {
         return false;
     };
-    let Some(mut open) = take_open(cpu) else {
-        return false;
-    };
-    push(cpu, &mut open, at, args, data, false);
-    let only = open.mode != GL_COMPILE_AND_EXECUTE;
-    put_back(cpu, open);
-    only
+    if state(cpu).lists.compiling != 0
+        && let Some(mut open) = take_open(cpu)
+    {
+        push(cpu, &mut open, at, args, data, false);
+        let only = open.mode != GL_COMPILE_AND_EXECUTE;
+        put_back(cpu, open);
+        if only {
+            return true;
+        }
+    }
+    refused(cpu, at)
 }
 
 /// Multiply the current matrix by `m` on its right, as glMultMatrixf
 /// does, for GLU32's matrices.
 pub fn mult_matrix(cpu: &mut Cpu, m: &[f32; 16]) {
     let bytes: Vec<u8> = m.iter().flat_map(|v| v.to_le_bytes()).collect();
-    if !compiles(cpu, "glMultMatrixf", &[0], Some(&bytes)) {
+    if !intercepted(cpu, "glMultMatrixf", &[0], Some(&bytes)) {
         matrix::mult(cpu, m);
     }
 }
 
 /// glOrtho with the arguments `args`, for gluOrtho2D.
 pub fn ortho(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if compiles(cpu, "glOrtho", args, None) {
+    if intercepted(cpu, "glOrtho", args, None) {
         return Some(0);
     }
     matrix::ortho(cpu, args)
@@ -957,7 +1044,7 @@ pub fn tex_image_rgba(
         GL_UNSIGNED_BYTE,
         0,
     ];
-    if !compiles(cpu, "glTexImage2D", &args, Some(texels.as_flattened())) {
+    if !intercepted(cpu, "glTexImage2D", &args, Some(texels.as_flattened())) {
         texture::tex_image_rgba(cpu, level, internal, width, height, texels);
     }
 }
@@ -1143,6 +1230,8 @@ fn place(cpu: &mut Cpu, list: &List, call: &Call, args: &mut [u32]) -> bool {
 /// Call the handler of the export at `at` as the program's stub would:
 /// the draws that wait are drawn before a function they can't wait
 /// through, and a ToadForce's queue before one that reads the frame.
+/// A list run between glBegin and glEnd has each of its calls refused
+/// there that the program's own would be (`execute_call`).
 /// With `tight`, the call's image is the list's copy, which has the
 /// rows the unpack state picked when it was compiled: the handler
 /// reads it with the unpack state at its defaults of one byte's
@@ -1159,7 +1248,7 @@ fn issue(cpu: &mut Cpu, at: usize, api: &Api, args: &[u32], tight: bool) {
         None
     };
     let outer = state(cpu).lists.replaying.replace(at as u16);
-    let result = (api.handler)(cpu, args);
+    let result = execute_call(cpu, at, api, args);
     state(cpu).lists.replaying = outer;
     if let (Some(unpack), Some(c)) = (unpack, ctx(cpu)) {
         c.unpack = unpack;
@@ -1355,23 +1444,11 @@ pub fn share(cpu: &mut Cpu, from: usize, to: usize) -> bool {
 
 // The functions.
 
-/// The current context's place, for a function that isn't allowed
-/// between glBegin and glEnd: None there, with GL_INVALID_OPERATION,
-/// and without a context.
-pub(super) fn outside_begin(cpu: &mut Cpu) -> Option<usize> {
-    let (index, _) = current(cpu)?;
-    if ctx(cpu)?.begin.is_some() {
-        error(cpu, GL_INVALID_OPERATION);
-        return None;
-    }
-    Some(index)
-}
-
 /// glNewList(list, mode): the calls from here to glEndList are the
 /// list's.
 pub fn new_list(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [name, mode] = [args[0], args[1]];
-    let Some(index) = outside_begin(cpu) else {
+    let Some((index, _)) = current(cpu) else {
         return Some(0);
     };
     let open = ctx(cpu).is_some_and(|c| c.lists.open.is_some());
@@ -1404,7 +1481,7 @@ pub fn new_list(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// glEndList there is GL_INVALID_OPERATION and leaves the list open,
 /// as any function OpenGL 1.1 doesn't allow between glBegin and glEnd.
 pub fn end_list(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let Some(index) = outside_begin(cpu) else {
+    let Some((index, _)) = current(cpu) else {
         return Some(0);
     };
     let Some(mut open) = take_open(cpu) else {
@@ -1451,7 +1528,7 @@ fn free_names(names: &Names, n: u32) -> Option<u32> {
 /// list, each now an empty list's; 0 for none.
 pub fn gen_lists(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let n = args[0];
-    let Some(index) = outside_begin(cpu) else {
+    let Some((index, _)) = current(cpu) else {
         return Some(0);
     };
     if (n as i32) < 0 {
@@ -1477,7 +1554,7 @@ pub fn gen_lists(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// `list` go; a name without one is passed over.
 pub fn delete_lists(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [first, n] = [args[0], args[1]];
-    let Some(index) = outside_begin(cpu) else {
+    let Some((index, _)) = current(cpu) else {
         return Some(0);
     };
     if (n as i32) < 0 {
@@ -1502,7 +1579,7 @@ pub fn delete_lists(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// glIsList(list): whether the name has a list, an empty one of
 /// glGenLists' included.
 pub fn is_list(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(index) = outside_begin(cpu) else {
+    let Some((index, _)) = current(cpu) else {
         return Some(0);
     };
     let found = names(state(cpu), index).is_some_and(|n| n.contains_key(&args[0]));
@@ -1511,9 +1588,7 @@ pub fn is_list(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// glListBase(base): what glCallLists adds to its names.
 pub fn list_base(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if outside_begin(cpu).is_some()
-        && let Some(c) = ctx(cpu)
-    {
+    if let Some(c) = ctx(cpu) {
         c.lists.base = args[0];
     }
     Some(0)
@@ -1621,6 +1696,55 @@ mod tests {
         );
         assert_eq!(pointer("glVertex3f"), [None, None]);
         assert_eq!(pointer("glBindTexture"), [None, None]);
+    }
+
+    /// Between glBegin and glEnd OpenGL 1.1 allows glVertex, glColor,
+    /// glNormal, glTexCoord and glMultiTexCoordARB (`imm`'s), and of
+    /// the other exports these alone (2.6.3); the WGL functions aren't
+    /// OpenGL's. Those named like them that set state or arrays aren't
+    /// allowed.
+    #[test]
+    fn only_the_vertex_functions_are_allowed_between_begin_and_end() {
+        let mut others: Vec<String> = APIS
+            .iter()
+            .zip(allowed())
+            .filter(|&(api, &allowed)| allowed && imm::spec(api.name).is_none())
+            .map(|(api, _)| api.name.to_string())
+            .filter(|name| !name.starts_with("wgl"))
+            .collect();
+        let named = |start: &str, types: &[&str]| -> Vec<String> {
+            types.iter().map(|t| format!("{start}{t}")).collect()
+        };
+        let mut want = named("gl", &["ArrayElement", "CallList", "CallLists", "End"]);
+        want.extend(named("glEdgeFlag", &["", "v"]));
+        want.extend(named("glEvalCoord", &["1d", "1dv", "1f", "1fv"]));
+        want.extend(named("glEvalCoord", &["2d", "2dv", "2f", "2fv"]));
+        want.extend(named("glEvalPoint", &["1", "2"]));
+        let index = ["d", "dv", "f", "fv", "i", "iv", "s", "sv", "ub", "ubv"];
+        want.extend(named("glIndex", &index));
+        want.extend(named("glMaterial", &["f", "fv", "i", "iv"]));
+        others.sort();
+        want.sort();
+        assert_eq!(others, want);
+        let refused = [
+            "glBegin",
+            "glGetError",
+            "glIndexMask",
+            "glIndexPointer",
+            "glColorMaterial",
+            "glColorPointer",
+            "glNormalPointer",
+            "glTexCoordPointer",
+            "glEdgeFlagPointer",
+            "glEvalMesh1",
+            "glActiveTextureARB",
+            "glClientActiveTextureARB",
+            "glLockArraysEXT",
+        ];
+        for name in refused {
+            let at = place_of(name).expect(name);
+            assert!(!allowed()[at], "{name}");
+        }
     }
 
     /// A list of the calls `calls`: each an export's name, its argument
