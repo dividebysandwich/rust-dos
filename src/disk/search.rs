@@ -358,6 +358,7 @@ impl DiskController {
         let created = hostfs::create_dir(&target);
         self.host_dirs.changed();
         self.host_dirs.touched(&target);
+        self.host_aliases.touched(&target);
         created.map_err(|_| 0x05)
     }
 
@@ -396,19 +397,30 @@ impl DiskController {
         let removed = hostfs::remove_dir(&host_path);
         self.host_dirs.changed();
         self.host_dirs.touched(&host_path);
+        if removed.is_ok() {
+            self.host_aliases.removed(&host_path);
+            self.host_aliases.touched(&host_path);
+        }
         removed.map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => 0x03,
             _ => 0x05, // Access denied (e.g. not empty)
         })
     }
 
-    /// Case-insensitive lookup of a child by name in a host directory: by
-    /// its host name, or else by the name the call running now packs it
-    /// to (`dos_component`), as opens find it (`find_host_entry`). So
-    /// MKDIR "SAVES.DIR" and a rename to "DUNE.BAT" meet the "saves   .dir"
-    /// and "dune    .bat" that builds which kept the padding made, rather
-    /// than make a second entry beside it that hides it from opens.
+    /// Case-insensitive lookup of a child by name in a host directory, by
+    /// its long name or its alias (`find_host_entry`), or else by the name
+    /// the call running now packs it to (`dos_component`). The folder's
+    /// entries are read first, so the names the guest made in it since
+    /// the last read get their aliases before the change about to be made
+    /// (`HostAliases`): two folders made one after the other get ~1 and
+    /// ~2 in that order, as on Windows 9x. MKDIR "SAVES.DIR" and a rename
+    /// to "DUNE.BAT" meet the "saves   .dir" and "dune    .bat" that
+    /// builds which kept the padding made, rather than make a second
+    /// entry beside it that hides it from opens.
     pub(super) fn find_existing_child(&self, parent: &Path, name: &str) -> Option<std::ffi::OsString> {
+        if let (_, Some((host, _))) = self.find_host_entry(parent, name) {
+            return Some(host.into());
+        }
         let upper = name.to_uppercase();
         let names: Vec<std::ffi::OsString> = hostfs::read_dir(parent)
             .into_iter()
@@ -873,7 +885,7 @@ impl DiskController {
         } else if pattern.contains(['*', '?']) {
             let (entries, kept) = self.host_entries(&host_dir);
             if kept {
-                self.host_dirs.reread(&host_dir, || Self::read_host_entries(&host_dir))
+                self.host_dirs.reread(&host_dir, || self.read_host_entries(&host_dir))
             } else {
                 entries
             }

@@ -1498,6 +1498,7 @@ const ABSENT_SECTIONS: &[(&str, &str)] = &[
     ("W32", "the built-in Windows runs Win32 programs, which the run doesn't start"),
     ("RTCA", "the clock's alarm, which the run's program never enables"),
     ("LOCK", "file region locks (INT 21h AH=5Ch), which the run's program never takes"),
+    ("ALIA", "host folders' aliases other than those made afresh: the run makes no long names"),
 ];
 
 /// Parts of the save state that the run doesn't change, and why.

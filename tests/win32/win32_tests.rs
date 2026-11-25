@@ -7204,6 +7204,94 @@ fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_disk_image() {
     check_long_name_and_alias_are_one_file("one_file_image", "D:", true);
 }
 
+/// Folders keep their 8.3 aliases as on Windows 98 SE (checked in 86Box):
+/// on drive `drive` the program makes "Parent zeta" (PARENT~1) and
+/// "Parent alpha" (PARENT~2), renames "Parent zeta" to "Parent moved",
+/// which gets PARENT~3 (its own alias is held during the rename), and
+/// makes "Parent again", which takes the freed PARENT~1, while "Parent
+/// alpha" keeps PARENT~2. GetShortPathNameA gives the aliases. Each check
+/// sets a bit of the exit code.
+fn check_folders_keep_their_aliases(test: &str, drive: &str, image: bool) {
+    use Arg::I;
+    let names: &[&str] = &["CreateDirectoryA", "MoveFileA", "GetShortPathNameA", "lstrcmpA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x200];
+    for (at, name) in [
+        (0x00, "Parent zeta"),
+        (0x20, "Parent alpha"),
+        (0x40, "Parent moved"),
+        (0x60, "Parent again"),
+        (0x80, "PARENT~3"),
+        (0x90, "PARENT~2"),
+        (0xA0, "PARENT~1"),
+    ] {
+        put(&mut data, at, format!("{drive}\\{name}\0").as_bytes());
+    }
+    // GetShortPathNameA's answer.
+    let buf = 0x100;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let alias_is = |a: &mut CodeAssembler, long, short, bit| {
+            call_with(a, f("GetShortPathNameA"), &[at(long), at(buf), I(0x100)])?;
+            call_with(a, f("lstrcmpA"), &[at(short), at(buf)])?;
+            a.test(eax, eax)?;
+            check(a, false, bit)
+        };
+        a.xor(ebx, ebx)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0x00), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0x20), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        call_with(a, f("MoveFileA"), &[at(0x00), at(0x40)])?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
+        alias_is(a, 0x40, 0x80, 3)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0x60), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 4)?;
+        alias_is(a, 0x60, 0xA0, 5)?;
+        alias_is(a, 0x20, 0x90, 6)?;
+        a.mov(eax, ebx)?;
+        a.or(eax, 0x80)?;
+        a.ret()
+    });
+    let mut cpu = machine(test, exe);
+    if image {
+        let image_dir = PathBuf::from("target/test_win32").join(format!("{test}_d"));
+        let _ = fs::remove_dir_all(&image_dir);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image = image_dir.join("d.img");
+        rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.disk.mount(3, &image, options, true).unwrap();
+    }
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+}
+
+#[test]
+fn folders_keep_their_aliases_on_a_host_drive() {
+    check_folders_keep_their_aliases("aliases_host", "C:", false);
+}
+
+#[test]
+fn folders_keep_their_aliases_on_a_disk_image() {
+    check_folders_keep_their_aliases("aliases_image", "D:", true);
+}
+
 /// SetFileTime on a file in a host folder, as Windows 98 SE does it on
 /// FAT: the time of the last write is rounded up to an even second
 /// (2001-10-08 19:20:01.5 is kept as 19:20:02), a time before 1980 fails
