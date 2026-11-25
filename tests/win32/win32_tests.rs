@@ -20060,6 +20060,192 @@ fn a_font_file_a_program_adds_is_listed_and_drawn() {
     assert_eq!(cpu.errorlevel, 2 << 6 | 2 << 4 | 11);
 }
 
+/// Windows 95 and 98 load the installed fonts as they start: the files
+/// the registry's `CurrentVersion\Fonts` key lists and those of WIN.INI's
+/// `[Fonts]`. A setup that installed one added it with AddFontResourceA,
+/// which lasts until Windows ends, so a later start finds the font only
+/// this way (Encarta 97's "MS Reference 1", issue #1989). The registry
+/// names a TrueType file in the system folder by its full path, as
+/// Encarta's setup does, and WIN.INI a raster font by a bare name, which
+/// is looked for in the fonts, Windows and system folders, and the
+/// TrueType file again by a bare name. A file that isn't there is left
+/// out. A program that never added a font then gets the faces it asks
+/// for. It then adds the TrueType file itself by a name relative to its
+/// folder, which is the same file, and EnumFontFamiliesA lists the
+/// TrueType face once. Its exit code: the TrueType face matched in bit
+/// 0, the raster face in bit 1, AddFontResourceA's success in bit 2, and
+/// the count of fonts listed of the TrueType face above them.
+#[test]
+fn installed_fonts_are_loaded_as_windows_starts() {
+    let names: &[&str] = &[
+        "AddFontResourceA",
+        "CreateCompatibleDC",
+        "CreateFontIndirectA",
+        "SelectObject",
+        "GetTextFaceA",
+        "EnumFontFamiliesA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names), ("KERNEL32.DLL", &["lstrcmpA"])];
+    // LOGFONTAs at 0 and 0x40, GetTextFaceA's buffer at 0x80, the faces
+    // asked for at 0xA0 and 0xB0, the count of fonts listed at 0xC0 and
+    // the TrueType file's name relative to the program's folder at 0xD0.
+    let mut data = vec![0u8; 0xF0];
+    data[0..4].copy_from_slice(&(-16i32).to_le_bytes());
+    data[28..36].copy_from_slice(b"Reg Face");
+    data[0x40..0x44].copy_from_slice(&12i32.to_le_bytes());
+    data[0x40 + 28..0x40 + 36].copy_from_slice(b"Ini Face");
+    data[0xA0..0xA8].copy_from_slice(b"Reg Face");
+    data[0xB0..0xB8].copy_from_slice(b"Ini Face");
+    data[0xD0..0xEA].copy_from_slice(b"WINDOWS\\SYSTEM\\REGFACE.TTF");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut proc = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(esi, eax)?;
+        for (bit, log, face) in [(0, 0, 0xA0), (1, 0x40, 0xB0)] {
+            a.push(l.at(log) as i32)?;
+            a.call(f("CreateFontIndirectA"))?;
+            a.push(eax)?;
+            a.push(esi)?;
+            a.call(f("SelectObject"))?;
+            a.push(l.at(0x80) as i32)?;
+            a.push(32)?;
+            a.push(esi)?;
+            a.call(f("GetTextFaceA"))?;
+            a.push(l.at(face) as i32)?;
+            a.push(l.at(0x80) as i32)?;
+            a.call(l.import(names.len()))?;
+            a.test(eax, eax)?;
+            check(a, false, bit)?;
+        }
+        a.push(l.at(0xD0) as i32)?;
+        a.call(f("AddFontResourceA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
+        a.push(0)?;
+        push_label(a, proc)?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(esi)?;
+        a.call(f("EnumFontFamiliesA"))?;
+        a.mov(eax, dword_ptr(l.at(0xC0)))?;
+        a.shl(eax, 3)?;
+        a.or(eax, ebx)?;
+        a.ret()?;
+        // The callback: count the font, go on.
+        a.set_label(&mut proc)?;
+        a.inc(dword_ptr(l.at(0xC0)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)
+    });
+    let test = "installed_fonts";
+    let mut cpu = machine_with(test, &[("T.EXE", exe)]);
+    let base = PathBuf::from("target/test_win32").join(test);
+    let system = base.join("WINDOWS").join("SYSTEM");
+    fs::create_dir_all(&system).unwrap();
+    let ttf = rust_dos::win32::gdi32::sample_truetype("Reg Face");
+    fs::write(system.join("REGFACE.TTF"), ttf).unwrap();
+    fs::write(system.join("INIFACE.FON"), fon(&[fnt("Ini Face", 12)])).unwrap();
+    let registry = "REGEDIT4\r\n\r\n\
+        [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Fonts]\r\n\
+        \"Reg Face (TrueType)\"=\"C:\\\\WINDOWS\\\\SYSTEM\\\\REGFACE.TTF\"\r\n\
+        \"Gone (TrueType)\"=\"GONE.TTF\"\r\n";
+    fs::write(base.join("REGISTRY.REG"), registry).unwrap();
+    let win_ini = "[Fonts]\r\nIni Face 12=INIFACE.FON\r\n\
+                   Reg Face (TrueType)=REGFACE.TTF\r\nGone=GONE.FON\r\n";
+    fs::write(base.join("WINDOWS").join("WIN.INI"), win_ini).unwrap();
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 1 << 3 | 0b111);
+}
+
+/// A Windows 3.1 WIN.INI lists in `[Fonts]` files of faces GDI has
+/// built in: `SSERIFE.FON` for MS Sans Serif, and Arial's TrueType file
+/// through its `ARIAL.FOT`, which the registry lists again as
+/// `ARIAL.TTF`, as a setup such as Encarta 97's writes it. Windows has
+/// each face once, from the file, so EnumFontFamiliesA lists MS Sans
+/// Serif's one size once and Arial once: the built-in face is left out
+/// where a file has it, and the .FOT and the TrueType file it names are
+/// one font. A line that starts with ';' is a comment, whose file isn't
+/// loaded. EnumFontFamiliesExA lists Arial in the one character set the
+/// file has, Latin 1, and not the built-in face in the others, as a font
+/// asking for Arial in any of them is realized from the file. The exit
+/// code is the count of fonts listed for each face, two bits each: MS
+/// Sans Serif's, Arial's above, the comment's face's above, and
+/// EnumFontFamiliesExA's of Arial at the top.
+#[test]
+fn installed_fonts_list_each_face_once() {
+    let names: &[&str] = &[
+        "CreateCompatibleDC",
+        "EnumFontFamiliesA",
+        "EnumFontFamiliesExA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names)];
+    // The faces at 0, 0x20 and 0x40, their counts at 0x60, 0x64, 0x68,
+    // EnumFontFamiliesExA's LOGFONTA (Arial, DEFAULT_CHARSET) at 0x70
+    // and its count at 0xAC.
+    let mut data = vec![0u8; 0xB0];
+    data[0..13].copy_from_slice(b"MS Sans Serif");
+    data[0x20..0x25].copy_from_slice(b"Arial");
+    data[0x40..0x4C].copy_from_slice(b"Comment Face");
+    data[0x70 + 23] = 1;
+    data[0x70 + 28..0x70 + 33].copy_from_slice(b"Arial");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut proc = a.create_label();
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.mov(esi, eax)?;
+        for (face, count) in [(0, 0x60), (0x20, 0x64), (0x40, 0x68)] {
+            a.push(l.at(count) as i32)?;
+            push_label(a, proc)?;
+            a.push(l.at(face) as i32)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+        }
+        a.push(0)?;
+        a.push(l.at(0xAC) as i32)?;
+        push_label(a, proc)?;
+        a.push(l.at(0x70) as i32)?;
+        a.push(esi)?;
+        a.call(l.import(2))?;
+        a.mov(eax, dword_ptr(l.at(0xAC)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x68)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x64)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x60)))?;
+        a.ret()?;
+        // The callback: count the font in the dword its lParam points
+        // at, go on.
+        a.set_label(&mut proc)?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        a.inc(dword_ptr(eax))?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)
+    });
+    let test = "installed_fonts_once";
+    let mut cpu = machine_with(test, &[("T.EXE", exe)]);
+    let base = PathBuf::from("target/test_win32").join(test);
+    let system = base.join("WINDOWS").join("SYSTEM");
+    fs::create_dir_all(&system).unwrap();
+    let ttf = rust_dos::win32::gdi32::sample_truetype("Arial");
+    let fot = rust_dos::win32::gdi32::sample_fot("ARIAL.TTF", &ttf);
+    fs::write(system.join("ARIAL.TTF"), ttf).unwrap();
+    fs::write(system.join("ARIAL.FOT"), fot).unwrap();
+    fs::write(system.join("SSERIFE.FON"), fon(&[fnt("MS Sans Serif", 13)])).unwrap();
+    fs::write(system.join("COMMENT.FON"), fon(&[fnt("Comment Face", 12)])).unwrap();
+    let registry = "REGEDIT4\r\n\r\n\
+        [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Fonts]\r\n\
+        \"Arial (TrueType)\"=\"ARIAL.TTF\"\r\n";
+    fs::write(base.join("REGISTRY.REG"), registry).unwrap();
+    let win_ini = "[Fonts]\r\nMS Sans Serif 8,10,12,14,18,24 (VGA res)=SSERIFE.FON\r\n\
+                   Arial (TrueType)=ARIAL.FOT\r\n;Comment Face=COMMENT.FON\r\n";
+    fs::write(base.join("WINDOWS").join("WIN.INI"), win_ini).unwrap();
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 1 << 6 | 1 << 2 | 1);
+}
+
 /// A program asks CreateScalableFontResourceA for a .FOT of `ttf`, with
 /// the last error set to 55h before, and ends with the result in bit 7
 /// and the last error after it below that.
