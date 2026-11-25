@@ -1065,9 +1065,10 @@ pub struct Started {
 
 /// WinExec and EXEC from the running task: the program at `path`, or
 /// found where LoadModule looks for it (`module::find_program`), as a new
-/// task. What it started, or the error below 32 Windows gives (2 when no
-/// file is found). The caller then lets a new task run first
-/// (`after_exec`).
+/// task, unless it is loaded already and not MULTIPLEDATA
+/// (`module::loaded_single_instance`). What it started, or the error
+/// below 32 Windows gives (2 when no file is found). The caller then
+/// lets a new task run first (`after_exec`).
 pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<Started, u16> {
     let parent = super::current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].handle);
     let environment = super::win16_ref(cpu).map_or(Vec::new(), |p| p.environment.clone());
@@ -1080,6 +1081,18 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<Sta
     // one (win32/dosvm.rs).
     if pe::is_pe(&file) || crate::win32::dosvm::is_program(&path, &file) {
         let instance = exec_win32(cpu, &path, arguments, show, environment)?;
+        return Ok(Started {
+            instance,
+            thread: None,
+        });
+    }
+    // A program that is loaded already and isn't MULTIPLEDATA gets no
+    // second task: LoadModule gives the loaded copy's instance.
+    if let Some(instance) = module::loaded_single_instance(cpu, &path) {
+        cpu.bus.log_string(&format!(
+            "[W16] {} is loaded and not MULTIPLEDATA: its instance {:04X}, no new task",
+            path, instance
+        ));
         return Ok(Started {
             instance,
             thread: None,

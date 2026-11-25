@@ -517,7 +517,8 @@ impl DiskController {
             if to_drive != drive {
                 return Err(0x11); // Not same device
             }
-            let to_parts = Self::logical_components(self.drive(drive).ok_or(0x03u8)?, rest);
+            let to_parts = self.logical_components(self.drive(drive).ok_or(0x03u8)?, rest);
+            let to_parts = refs(&to_parts);
             let (leaf, to_dir) = to_parts.split_last().ok_or(0x03u8)?;
             // A long-name call (MoveFileA, msvcrt's rename) names the entry
             // as VFAT does on Windows 9x: a long name gets its long name
@@ -568,7 +569,8 @@ impl DiskController {
             None => (".", rest),
         };
         // Renamed to "NEW.", the file is NEW, as opens name it.
-        let leaf = Self::dos_component(leaf);
+        let leaf = self.dos_component(leaf);
+        let leaf = &*leaf;
         let parent = self.resolve_on(to_drive, parent_dos).ok_or(0x03)?;
         if leaf.is_empty() || !hostfs::is_dir(&parent) {
             return Err(0x03);
@@ -576,10 +578,14 @@ impl DiskController {
         // Destination exists, or is a name the host keeps for its own
         // files (`host_private`). A long-name call may give a name another
         // case, as MoveFileA does on Windows 9x: the destination is then
-        // the source itself.
+        // the source itself. DOS's rename cuts the name to 8.3, and a
+        // file of that name is the destination too (`cut_name_taken`).
         let existing = self.find_existing_child(&parent, leaf);
         let recased = self.long_call && existing.as_ref().is_some_and(|e| parent.join(e) == source);
-        if super::host_private(leaf) || (existing.is_some() && !recased) {
+        if super::host_private(leaf)
+            || (existing.is_some() && !recased)
+            || self.cut_name_taken(&parent, leaf)
+        {
             return Err(0x05);
         }
         let target = parent.join(self.entry_name(leaf));
@@ -589,8 +595,8 @@ impl DiskController {
         self.host_dirs.changed();
         if renamed.is_ok() {
             let from_leaf = from.rsplit(['\\', '/', ':']).next().unwrap_or(from);
-            let from_leaf = Self::dos_component(from_leaf);
-            self.host_dirs.renamed(&source, &target, from_leaf, leaf);
+            let from_leaf = self.dos_component(from_leaf);
+            self.host_dirs.renamed(&source, &target, &from_leaf, leaf);
             // The files open there, or in the directory renamed, are
             // there under the new name now.
             if let (FileId::Host(old), FileId::Host(new)) = (source_id, self.file_id(to)) {

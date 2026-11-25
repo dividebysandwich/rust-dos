@@ -1,5 +1,6 @@
 //! Free space, attributes, directory creation and removal, and directory search.
 
+use super::layout::HARD_DISK_CLUSTERS;
 use super::*;
 
 impl DiskController {
@@ -52,7 +53,7 @@ impl DiskController {
 
     /// The free space of `drive` (0 the current one, 1 A:) as the built-in
     /// Windows tells it, in the numbers of `get_disk_free_space32`. A
-    /// folder hard disk has more room here than DOS's fake 320 MB
+    /// folder hard disk has more room here than DOS's fake 1 GB
     /// (`windows_hard_disk_free`): Windows 95 and 98 report a real disk's
     /// space, up to 2 GB through GetDiskFreeSpaceA and all of it through
     /// GetDiskFreeSpaceExA, and their setup programs check whole installs
@@ -90,12 +91,13 @@ impl DiskController {
             DriveKind::Floppy => (spc, total - used(spc, total as u64) as u32, bps, total),
             // A hard disk counts it too, so the free space drops as files
             // are written: Sierra's installer takes a disk whose free space
-            // doesn't for a compressed one. DOS sees a fake disk of 16 KB
-            // clusters (`DriveKind::geometry`) with 160 to 480 MB free, in
-            // no more clusters than AH=36h holds, so that it doesn't count
-            // in larger clusters (`old_space`) and every 16 KB written
-            // shows. The built-in Windows sees between 1.75 and 3.75 GB
-            // free in 4 KB clusters (`windows_hard_disk_free`).
+            // doesn't for a compressed one. DOS sees a fake 1 GB disk of
+            // 16 KB clusters (`DriveKind::geometry`) with 512 MB to 1 GB
+            // free (`hard_disk_free`), in no more clusters than AH=36h
+            // holds, so that it doesn't count in larger clusters
+            // (`old_space`) and every 16 KB written shows. The built-in
+            // Windows sees between 1.75 and 3.75 GB free in 4 KB clusters
+            // (`windows_hard_disk_free`).
             DriveKind::HardDisk if windows => {
                 let spc = WINDOWS_SECTORS_PER_CLUSTER;
                 let used = used(spc, u64::MAX);
@@ -103,12 +105,7 @@ impl DiskController {
                 let total = (used + free as u64).min(u32::MAX as u64) as u32;
                 (spc, free, bps, total)
             }
-            DriveKind::HardDisk => {
-                let used = used(spc, u64::MAX);
-                let free = hard_disk_free(total, used);
-                let total = (used + free as u64).min(0xFFFF) as u32;
-                (spc, free, bps, total)
-            }
+            DriveKind::HardDisk => (spc, hard_disk_free(used(spc, u64::MAX)), bps, total),
             // Windows 95 and 98's CDFS counts a disc in 32 KB clusters of
             // 16 sectors, as many as fill the volume space its primary
             // descriptor gives, and Drakan's CD check wants just that: 16
@@ -332,7 +329,8 @@ impl DiskController {
             None => (".", rest), // current directory of that drive
         };
         // MKDIR "SAVES." makes SAVES, as the paths into it name it.
-        let leaf = Self::dos_component(leaf);
+        let leaf = self.dos_component(leaf);
+        let leaf = &*leaf;
         if leaf.is_empty() {
             return Err(0x03); // Path not found / invalid
         }
@@ -350,6 +348,11 @@ impl DiskController {
             if hostfs::exists(&full) {
                 return Err(0x05); // Access denied / already exists
             }
+        }
+        // DOS's MKDIR cuts the name to 8.3: MKDIR "SAVEGAMES" beside
+        // SAVEGAME finds it there.
+        if self.cut_name_taken(&parent_path, leaf) {
+            return Err(0x05);
         }
         let target = parent_path.join(self.entry_name(leaf));
         let created = hostfs::create_dir(&target);
@@ -399,18 +402,27 @@ impl DiskController {
         })
     }
 
-    /// Case-insensitive lookup of a child by name in a host directory.
+    /// Case-insensitive lookup of a child by name in a host directory: by
+    /// its host name, or else by the name the call running now packs it
+    /// to (`dos_component`), as opens find it (`find_host_entry`). So
+    /// MKDIR "SAVES.DIR" and a rename to "DUNE.BAT" meet the "saves   .dir"
+    /// and "dune    .bat" that builds which kept the padding made, rather
+    /// than make a second entry beside it that hides it from opens.
     pub(super) fn find_existing_child(&self, parent: &Path, name: &str) -> Option<std::ffi::OsString> {
         let upper = name.to_uppercase();
-        if let Ok(entries) = hostfs::read_dir(parent) {
-            for e in entries {
-                let fname = e.file_name();
-                if fname.to_string_lossy().to_uppercase() == upper {
-                    return Some(fname);
-                }
-            }
-        }
-        None
+        let names: Vec<std::ffi::OsString> = hostfs::read_dir(parent)
+            .into_iter()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        let packed = |fname: &std::ffi::OsString| {
+            self.dos_component(&fname.to_string_lossy()).to_uppercase()
+        };
+        names
+            .iter()
+            .find(|fname| fname.to_string_lossy().to_uppercase() == upper)
+            .or_else(|| names.iter().find(|fname| packed(fname) == upper))
+            .cloned()
     }
 
     /// The name and the extension a search pattern looks for. DOS packs
@@ -620,9 +632,10 @@ impl DiskController {
         let drive = self.drive(drive_num)?;
         let volume = drive.fat()?;
         let (dir, pattern) = Self::dir_and_pattern(rest);
-        let dir: Vec<String> = Self::logical_components(drive, dir)
+        let dir: Vec<String> = self
+            .logical_components(drive, dir)
             .into_iter()
-            .map(str::to_string)
+            .map(Cow::into_owned)
             .collect();
         let dir = self.fat_dos_path(volume, &dir).ok()?;
         let (slots, entries): (Vec<usize>, Vec<DosDirEntry>) = volume
@@ -770,14 +783,15 @@ impl DiskController {
         // Windows 98 Setup's 0Eh for "is this name taken?") find it as
         // the entry of the root directory it is, by its name, and the
         // files besides. In a subdirectory there is no label to find.
-        if search_attr & 0x08 != 0 && Self::logical_components(drive, search_dir_str).is_empty() {
+        if search_attr & 0x08 != 0 && self.logical_components(drive, search_dir_str).is_empty() {
             valid_entries.extend(label().filter(|e| Self::matches_pattern(&e.filename, pattern)));
         }
 
         if let Some(volume) = drive.fat() {
-            let dir: Vec<String> = Self::logical_components(drive, search_dir_str)
+            let dir: Vec<String> = self
+                .logical_components(drive, search_dir_str)
                 .into_iter()
-                .map(str::to_string)
+                .map(Cow::into_owned)
                 .collect();
             let dir = self.fat_dos_path(volume, &dir).map_err(|_| 0x03u8)?;
             let entries = volume.list(&refs(&dir)).map_err(|_| 0x03u8)?;
@@ -790,7 +804,7 @@ impl DiskController {
         }
 
         if let Some(files) = drive.tree() {
-            let dir = Self::memory_path(drive, search_dir_str);
+            let dir = self.memory_path(drive, search_dir_str);
             if !files.is_dir(&dir) {
                 return Err(0x03);
             }
@@ -921,18 +935,41 @@ pub struct NameFilter<'a> {
     pub name: Option<&'a str>,
 }
 
-/// The free clusters of a hard disk made of a host folder, `used` of them
-/// in use: what is left of the fake size `step`, or of as many times that
-/// as leaves more than half of it free. Free space then drops cluster by
-/// cluster as files are written, and a folder holding more than the fake
-/// size still has room for a save. Free clusters stay between half a step
-/// and one and a half: 10,001 to 30,000 of DOS's 20,000, which signed
-/// 16-bit numbers hold, and with 16 KB clusters 160 to 480 MB, room for
-/// an install of over 100 MB (Shannara's Optimum one takes 107 MB).
-fn hard_disk_free(step: u32, used: u64) -> u32 {
-    let step = step as u64;
-    (((used + step / 2) / step + 1) * step - used) as u32
+/// The free 16 KB clusters of a hard disk made of a host folder as DOS
+/// sees it, `used` of them in use: all of its fake 1 GB when the folder
+/// is empty, and otherwise what is left after the clusters written since
+/// free space last went back up. Free space drops cluster by cluster as
+/// files are written, from 65,517 to 32,768 clusters (512 MB), then goes
+/// back up to 65,517, so it never falls below 512 MB whatever the folder
+/// holds, and only an empty folder shows all of the disk free. An empty
+/// folder has room for a whole CD, and any folder for Perfect Assassin's
+/// LARGE install (361 MB), as the 1 to 2 GB disk of a PC of 1996 or 1997
+/// had. A real FAT16 disk of that size gave counts past 32,767 as soon as
+/// it was half empty. The count leaves the host's own free space out, so
+/// a run doesn't depend on the host.
+///
+/// DOS sees the clusters written since free space last went back up as
+/// the disk's used space (total less free), not all of the folder: a
+/// fixed 1 GB total can't hold both the folder and 512 MB free. And the
+/// one write that crosses a step makes free space go up by 512 MB
+/// instead of down, which Sierra's installer would take for a compressed
+/// disk if its test file landed just there.
+pub(super) fn hard_disk_free(used: u64) -> u32 {
+    match used.checked_sub(1) {
+        None => HARD_DISK_CLUSTERS as u32,
+        Some(past_first) => {
+            (HARD_DISK_CLUSTERS as u64 - 1 - past_first % HARD_DISK_FREE_DROP) as u32
+        }
+    }
 }
+
+/// The least free space of a folder hard disk under DOS, 512 MB in 16 KB
+/// clusters (`hard_disk_free`).
+const HARD_DISK_MIN_FREE: u64 = 0x8000;
+
+/// How many clusters a folder hard disk's free space under DOS drops by
+/// before it goes back up: from 65,517 down to `HARD_DISK_MIN_FREE`.
+const HARD_DISK_FREE_DROP: u64 = HARD_DISK_CLUSTERS as u64 - HARD_DISK_MIN_FREE;
 
 /// The sectors in a cluster of a folder hard disk as the built-in Windows
 /// sees it: 4 KB, as FAT32 has on the disks of up to 8 GB of the time.

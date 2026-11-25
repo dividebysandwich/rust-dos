@@ -63,13 +63,13 @@ pub enum Kind {
     /// was opened for (GENERIC_READ, GENERIC_WRITE) and the sharing it
     /// allows (FILE_SHARE_READ, FILE_SHARE_WRITE). LockFile's locks are
     /// DOS's, by the entry and the process (disk/locks.rs); a state saved
-    /// before W32 version 98 has the ranges it locked here, as (offset,
+    /// before W32 version 99 has the ranges it locked here, as (offset,
     /// length), which its load drops.
     File {
         sft: u16,
         access: u32,
         share: u32,
-        old_locks: Until<98, Vec<(u32, u32)>>,
+        old_locks: Until<99, Vec<(u32, u32)>>,
     },
     /// A search of FindFirstFileA: the entries it has still to give.
     Find {
