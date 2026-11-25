@@ -875,6 +875,56 @@ fn a_draw_on_a_toadforce_has_its_texture_as_it_was_when_it_was_given() {
     assert_eq!(pixel(&cpu, data, 48, 32), [0, 255, 0]);
 }
 
+/// On a ToadForce a texture's surfaces are in system memory, as a
+/// driver keeps a copy of each texture there, and the card's memory
+/// holds copies of those drawn with, the least recently used going when
+/// it needs room. In video memory, the textures a program made first
+/// would keep it, and a scene drawn with ones made later would copy
+/// them into what is left again every frame (Soldier of Fortune II's
+/// streets).
+#[test]
+fn textures_on_a_toadforce_are_in_system_memory_and_draw_from_the_card() {
+    const DDSCAPS_TEXTURE: u32 = 0x1000;
+    let mut d = data();
+    for i in 0..4 {
+        put(&mut d, TEXELS + 4 * i, &[0, 0, 255, 255]);
+    }
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
+        texture_2x2(a, l, &mut c, TEXTURE, TEXELS)?;
+        let replace = [
+            Arg::I(GL_TEXTURE_ENV),
+            Arg::I(GL_TEXTURE_ENV_MODE),
+            Arg::I(GL_REPLACE),
+        ];
+        c.api(a, l, TEX_ENVI, &replace)?;
+        c.api(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let st = [Arg::F((x + 1.0) / 2.0), Arg::F((y + 1.0) / 2.0)];
+            c.api(a, l, TEX_COORD2F, &st)?;
+            c.api(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        c.api(a, l, END, &[])?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine_on("texture_memory", Draws::ToadForce, exe);
+    run_until_done(&mut cpu, data);
+    card_drew(&cpu, Draws::ToadForce);
+    assert_eq!(pixel(&cpu, data, 16, 32), [0, 0, 255]);
+    let dd = rust_dos::win32::snapshot::ddraw(&cpu);
+    let textures: Vec<_> = dd
+        .surfaces
+        .iter()
+        .filter(|s| s.caps[0] & DDSCAPS_TEXTURE != 0)
+        .map(|s| s.memory)
+        .collect();
+    assert!(!textures.is_empty(), "no texture surfaces");
+    assert!(textures.iter().all(|&m| m == "system"), "{textures:?}");
+}
+
 /// Draw a triangle of color `rgb` with the corners `corners`.
 fn triangle(
     a: &mut CodeAssembler,
