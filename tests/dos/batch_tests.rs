@@ -103,6 +103,24 @@ fn lines_are_echoed_at_the_prompt_unless_echo_is_off() {
 }
 
 #[test]
+fn echo_comes_back_after_a_batch_file_with_echo_off_chains_to_another() {
+    // Maelstrom's MAEL.BAT turns ECHO off and chains to MAEL1.BAT (#1839).
+    let dir = scratch(
+        "chain_echo",
+        &[
+            ("T2.BAT", b"echo off\r\necho chain\r\nT3\r\n"),
+            ("T3.BAT", b"echo three\r\n"),
+        ],
+    );
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T2".into());
+    run_batch_files(&mut cpu);
+    assert!(cpu.batch.echo, "ECHO is on again after the batch files");
+    let screen = screen(&cpu);
+    assert!(screen.ends_with("chain\nthree\nC:\\>"), "{}", screen);
+}
+
+#[test]
 fn a_program_runs_before_the_next_line() {
     let dir = scratch("program", &[("RUN.BAT", b"@echo off\r\nEXIT3\r\necho after\r\n"), ("EXIT3.COM", &exits_with(3))]);
     let mut cpu = machine(&dir);
