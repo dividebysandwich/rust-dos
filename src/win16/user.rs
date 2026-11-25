@@ -635,14 +635,9 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
                 let mut resume = *ctx;
                 thunk::set_ax(&mut resume, 0);
                 resume.gpr[thunk::EDX] &= 0xFFFF_0000;
-                if !super::kernel::yield_and_receive(cpu, resume) {
-                    // With no other task ready and nothing sent, the same
-                    // one goes on, its turn started over: an idle proof
-                    // follows that.
-                    crate::idle::pure_call(cpu, None);
-                    crate::idle::reads_arguments(cpu);
-                    crate::idle::turn_started(cpu);
-                }
+                // With no other task ready and nothing sent, an idle
+                // proof follows (`yield_turn`).
+                super::kernel::yield_turn(cpu, resume);
                 return None;
             } else {
                 // Nothing found, and no yield: only DX:AX changes. (A
