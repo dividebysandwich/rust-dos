@@ -389,3 +389,45 @@ crate::state_fields!(FindEntry {
 crate::state_fields!(Object { kind, name, refs });
 crate::state_fields!(Objects { objects, closed });
 crate::state_fields!(Handles { handles });
+
+#[cfg(test)]
+mod tests {
+    use super::Kind;
+    use crate::savestate::{Reader, State, Writer};
+
+    /// A file object saved in W32 version 98 or older has LockFile's
+    /// ranges after its sharing, which a load reads past; one saved in
+    /// 99 has none.
+    #[test]
+    fn a_file_object_of_an_older_state_drops_its_lock_ranges() {
+        let mut w = Writer::new();
+        w.section(b"W32 ", 98, |w| {
+            7u8.save(w); // Kind::File
+            5u16.save(w);
+            3u32.save(w);
+            1u32.save(w);
+            vec![(10u32, 20u32)].save(w);
+            0xABu8.save(w);
+        });
+        let file = Kind::File {
+            sft: 5,
+            access: 3,
+            share: 1,
+            old_locks: Default::default(),
+        };
+        w.section(b"W32 ", 99, |w| {
+            file.save(w);
+            0xABu8.save(w);
+        });
+        let mut r = Reader::new(&w.buf);
+        for version in [98, 99] {
+            let mut section = r.section_of(b"W32 ", &[98, 99]).unwrap();
+            assert_eq!(section.version(), Some(version));
+            let (mut kind, mut marker) = (Kind::Dos { handle: 0 }, 0u8);
+            kind.load(&mut section).unwrap();
+            marker.load(&mut section).unwrap();
+            assert_eq!((kind, marker), (file.clone(), 0xAB), "version {version}");
+            assert!(section.is_empty());
+        }
+    }
+}
