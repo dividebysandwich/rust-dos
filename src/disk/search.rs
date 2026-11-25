@@ -1,7 +1,7 @@
 //! Free space, attributes, directory creation and removal, and directory search.
 
-use super::*;
 use super::layout::HARD_DISK_CLUSTERS;
+use super::*;
 
 impl DiskController {
     // ========================================================================
@@ -919,21 +919,40 @@ pub struct NameFilter<'a> {
 }
 
 /// The free 16 KB clusters of a hard disk made of a host folder as DOS
-/// sees it, `used` of them in use: all of its fake 1 GB less what was
-/// written since the last 512 MB, so that free space drops cluster by
-/// cluster as files are written and stays above 512 MB, whatever the
-/// folder holds. An empty folder has room for a whole CD, and any folder
-/// for Perfect Assassin's LARGE install (361 MB), as the 1 to 2 GB disk
-/// of a PC of 1996 or 1997 had. A real FAT16 disk of that size gave
-/// counts past 32,767 as soon as it was half empty. The count leaves the
-/// host's own free space out, so a run doesn't depend on the host.
+/// sees it, `used` of them in use: all of its fake 1 GB when the folder
+/// is empty, and otherwise what is left after the clusters written since
+/// free space last went back up. Free space drops cluster by cluster as
+/// files are written, from 65,517 to 32,768 clusters (512 MB), then goes
+/// back up to 65,517, so it never falls below 512 MB whatever the folder
+/// holds, and only an empty folder shows all of the disk free. An empty
+/// folder has room for a whole CD, and any folder for Perfect Assassin's
+/// LARGE install (361 MB), as the 1 to 2 GB disk of a PC of 1996 or 1997
+/// had. A real FAT16 disk of that size gave counts past 32,767 as soon as
+/// it was half empty. The count leaves the host's own free space out, so
+/// a run doesn't depend on the host.
+///
+/// DOS sees the clusters written since free space last went back up as
+/// the disk's used space (total less free), not all of the folder: a
+/// fixed 1 GB total can't hold both the folder and 512 MB free. And the
+/// one write that crosses a step makes free space go up by 512 MB
+/// instead of down, which Sierra's installer would take for a compressed
+/// disk if its test file landed just there.
 pub(super) fn hard_disk_free(used: u64) -> u32 {
-    (HARD_DISK_CLUSTERS as u64 - used % HARD_DISK_FREE_DROP) as u32
+    match used.checked_sub(1) {
+        None => HARD_DISK_CLUSTERS as u32,
+        Some(past_first) => {
+            (HARD_DISK_CLUSTERS as u64 - 1 - past_first % HARD_DISK_FREE_DROP) as u32
+        }
+    }
 }
 
-/// How far the free space of a folder hard disk under DOS drops before it
-/// goes back up, 512 MB in 16 KB clusters (`hard_disk_free`).
-const HARD_DISK_FREE_DROP: u64 = 0x8000;
+/// The least free space of a folder hard disk under DOS, 512 MB in 16 KB
+/// clusters (`hard_disk_free`).
+const HARD_DISK_MIN_FREE: u64 = 0x8000;
+
+/// How many clusters a folder hard disk's free space under DOS drops by
+/// before it goes back up: from 65,517 down to `HARD_DISK_MIN_FREE`.
+const HARD_DISK_FREE_DROP: u64 = HARD_DISK_CLUSTERS as u64 - HARD_DISK_MIN_FREE;
 
 /// The sectors in a cluster of a folder hard disk as the built-in Windows
 /// sees it: 4 KB, as FAT32 has on the disks of up to 8 GB of the time.

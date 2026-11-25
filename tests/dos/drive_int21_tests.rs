@@ -279,18 +279,19 @@ fn an_empty_hard_disk_takes_a_large_cd_install() {
 }
 
 /// A folder holding more than 512 MB still has 512 MB or more free: the
-/// free space goes back up every 512 MB written, and AX=7303h tells the
-/// same.
+/// free space goes back up each time it would fall below 512 MB, and
+/// AX=7303h tells the same.
 #[test]
-fn hard_disk_grows_past_what_its_folder_holds() {
+fn a_folder_past_512_mb_keeps_512_mb_free() {
     let base = scratch("hd_grow", &["c"]);
     // 640 MB, 40,000 clusters of 16 KB; sparse where the host allows.
     let file = fs::File::create(base.join("c/BIG.DAT")).unwrap();
     file.set_len(40_000 * 16384).unwrap();
     drop(file);
     let mut cpu = Cpu::new(base.join("c"));
-    // 65,518 clusters less the 7,232 written past the first 512 MB.
-    assert_eq!(disk_free(&mut cpu, 3), (32, 58_286, 512, 65_518));
+    // 65,517 clusters less the 7,249 written past the first 32,751, the
+    // most that are written before free space goes back up.
+    assert_eq!(disk_free(&mut cpu, 3), (32, 58_268, 512, 65_518));
 
     rust_dos::dos_data::set_version(&mut cpu.bus, rust_dos::config::DosVersion::new(7, 10));
     set_dsdx_string(&mut cpu, "C:\\");
@@ -302,7 +303,7 @@ fn hard_disk_grows_past_what_its_folder_holds() {
     assert!(!cf(&cpu));
     let dword = |i: usize| cpu.bus.read_32(0x30000 + 4 + 4 * i);
     // Sectors per cluster, bytes per sector, free and total clusters.
-    assert_eq!((dword(0), dword(1), dword(2), dword(3)), (32, 512, 58_286, 65_518));
+    assert_eq!((dword(0), dword(1), dword(2), dword(3)), (32, 512, 58_268, 65_518));
 }
 
 /// Past 65,535 clusters AH=36h would count clusters of 32 KB, where a
@@ -316,9 +317,9 @@ fn a_full_folder_still_shows_each_cluster_written() {
     file.set_len(60_000 * 16384).unwrap();
     drop(file);
     let mut cpu = Cpu::new(base.join("c"));
-    // 65,518 clusters less the 27,233 of the 60,001 used (the file and its
-    // folder) written past the first 512 MB.
-    assert_eq!(disk_free(&mut cpu, 3), (32, 38_285, 512, 65_518));
+    // 65,517 clusters less the 27,250 of the 60,001 used (the file and its
+    // folder) written past the first 32,751.
+    assert_eq!(disk_free(&mut cpu, 3), (32, 38_267, 512, 65_518));
 
     set_dsdx_string(&mut cpu, "C:\\GAMES\\SAVE.DAT");
     cpu.set_cx(0);
@@ -331,7 +332,7 @@ fn a_full_folder_still_shows_each_cluster_written() {
     assert_eq!((cf(&cpu), cpu.ax()), (false, 0x4000));
     cpu.set_bx(handle);
     int21(&mut cpu, 0x3E);
-    assert_eq!(disk_free(&mut cpu, 3), (32, 38_284, 512, 65_518));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 38_266, 512, 65_518));
 }
 
 #[test]

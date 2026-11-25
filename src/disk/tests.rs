@@ -889,9 +889,6 @@ fn a_cd_image_file_denies_new_attributes() {
     assert_eq!(disk.get_file_attribute("D:\\NODIR\\A.TXT"), Err(0x03));
 }
 
-/// The built-in Windows's free space of a folder hard disk stays between
-/// 1.75 GB and 3.75 GB in 4 KB clusters, below 4 GB, however much the
-/// folder holds, and drops by each cluster written.
 /// DOS sees a folder hard disk as 1 GB of 16 KB clusters, all free when
 /// empty, and never less than 512 MB free however much the folder holds:
 /// more than Perfect Assassin's LARGE install (360,857,188 bytes) needs.
@@ -899,17 +896,23 @@ fn a_cd_image_file_denies_new_attributes() {
 fn dos_free_space_stays_between_512_mb_and_1_gb() {
     use super::search::hard_disk_free as free;
     const MB_512: u64 = 0x8000;
+    const DROP: u64 = 65_518 - MB_512;
     assert_eq!(free(0), 65_518);
     assert_eq!(free(1), 65_517);
-    assert_eq!(free(MB_512 - 1), 65_518 - 0x7FFF);
-    assert_eq!(free(MB_512), 65_518);
-    for used in (0..40 * MB_512).step_by(1_234) {
+    // The lowest it gets, exactly 512 MB, and back up on the next cluster
+    // to all but one cluster: only an empty folder shows the whole disk.
+    assert_eq!(free(DROP), MB_512 as u32);
+    assert_eq!(free(DROP + 1), 65_517);
+    for used in (1..40 * MB_512).step_by(1_234) {
         let f = free(used) as u64;
-        assert!((32_751..=65_518).contains(&f), "{used}: {f}");
+        assert!((MB_512..65_518).contains(&f), "{used}: {f}");
         assert!(f * 16384 > 360_857_188, "{used}: {f}");
     }
 }
 
+/// The built-in Windows's free space of a folder hard disk stays between
+/// 1.75 GB and 3.75 GB in 4 KB clusters, below 4 GB, however much the
+/// folder holds, and drops by each cluster written.
 #[test]
 fn windows_free_space_stays_between_1_75_and_3_75_gb() {
     use super::search::windows_hard_disk_free as free;
