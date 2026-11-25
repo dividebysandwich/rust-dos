@@ -1040,18 +1040,25 @@ impl VgaCard {
         }
         if let Some(regs) = super::modes::text_lines_regs(mode, lines) {
             self.load_mode_regs(regs);
+            // Like the 200-line graphics modes, the 200-line text modes
+            // take a CGA monitor's colors.
+            if lines == 200 {
+                DacTable::Cga.load(&mut self.palette);
+            }
         }
     }
 
     /// The scanlines a text mode's rows go over, as a VGA BIOS reads them
     /// from the CRTC: Vertical Display End and its overflow bits, plus
     /// one, halved when Maximum Scan Line (09h bit 7) scans each line
-    /// twice. 400, 350 or 200 after a text mode set.
+    /// twice. 400, 350 or 200 after a text mode set. The EGA's Maximum
+    /// Scan Line has no bit 7, so a program that sets it there changes
+    /// nothing.
     pub fn text_scanlines(&self) -> u16 {
         let crtc = &self.crtc_regs;
         let overflow = crtc[0x07] as u16;
         let lines = (crtc[0x12] as u16 | (overflow & 0x02) << 7 | (overflow & 0x40) << 3) + 1;
-        if crtc[0x09] & 0x80 != 0 {
+        if self.adapter.vga_bios() && crtc[0x09] & 0x80 != 0 {
             lines / 2
         } else {
             lines

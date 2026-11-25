@@ -5,6 +5,8 @@ use iced_x86::Register;
 use rust_dos::cpu::Cpu;
 use rust_dos::interrupts::int10;
 use rust_dos::video;
+use rust_dos::video::adapter::{Adapter, VideoSetup};
+use rust_dos::video::bios;
 use std::path::PathBuf;
 
 /// INT 10h with the given registers.
@@ -148,4 +150,75 @@ fn a_font_taller_than_the_lines_shown_leaves_one_row() {
     cpu.bus.vga.crtc_regs[0x12] = 7;
     int10(&mut cpu, 0x1114, 0);
     assert_eq!(rows_and_height(&cpu), (1, 16));
+}
+
+#[test]
+fn the_200_line_text_modes_take_the_cga_monitors_colors() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x1200, 0x0030);
+    int10(&mut cpu, 0x0003, 0);
+    // Like the other 200-line modes: brown is palette register 06h and the
+    // bright colors 10h-17h, in the DAC as a CGA monitor shows them.
+    let attr = &cpu.bus.vga.attribute_regs;
+    assert_eq!(
+        (attr[0x06], attr[0x08], attr[0x0F], attr[0x10]),
+        (0x06, 0x10, 0x17, 0x08)
+    );
+    let dac = |index: usize| cpu.bus.vga.palette[index * 3..index * 3 + 3].to_vec();
+    assert_eq!(dac(0x06), [0x2A, 0x15, 0x00]);
+    assert_eq!(dac(0x17), [0x3F, 0x3F, 0x3F]);
+    // 350 lines keep the EGA's 64 colors, brown at 14h.
+    int10(&mut cpu, 0x1201, 0x0030);
+    int10(&mut cpu, 0x0003, 0);
+    assert_eq!(cpu.bus.vga.attribute_regs[0x06], 0x14);
+    assert_eq!(
+        cpu.bus.vga.palette[0x14 * 3..0x14 * 3 + 3],
+        [0x2A, 0x15, 0x00]
+    );
+}
+
+#[test]
+fn the_state_information_tells_the_rows_and_scanlines() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    let state = |cpu: &mut Cpu| {
+        cpu.set_es(0x3000);
+        cpu.set_reg16(Register::DI, 0);
+        int10(cpu, 0x1B00, 0);
+        assert_eq!(cpu.get_al(), 0x1B);
+        let at = |offset: usize| cpu.bus.read_8(0x30000 + offset);
+        (at(0x04), at(0x05), at(0x22), at(0x23), at(0x2A))
+    };
+    // MODE CON LINES=43: 43 rows of the 8x8 font on 350 lines.
+    int10(&mut cpu, 0x1201, 0x0030);
+    int10(&mut cpu, 0x0003, 0);
+    int10(&mut cpu, 0x1112, 0);
+    assert_eq!(state(&mut cpu), (0x03, 80, 43, 8, 1));
+    int10(&mut cpu, 0x1200, 0x0030);
+    int10(&mut cpu, 0x0001, 0);
+    assert_eq!(state(&mut cpu), (0x01, 40, 25, 8, 0));
+    int10(&mut cpu, 0x1202, 0x0030);
+    int10(&mut cpu, 0x0003, 0);
+    assert_eq!(state(&mut cpu), (0x03, 80, 25, 16, 2));
+    int10(&mut cpu, 0x0012, 0);
+    assert_eq!(state(&mut cpu).4, 3);
+    int10(&mut cpu, 0x0013, 0);
+    assert_eq!(state(&mut cpu).4, 0);
+}
+
+#[test]
+fn the_ega_has_no_double_scan_bit() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    bios::install(
+        &mut cpu.bus,
+        VideoSetup {
+            adapter: Adapter::Ega,
+            ..Default::default()
+        },
+    );
+    int10::set_mode(&mut cpu, 0x03);
+    assert_eq!(cpu.bus.vga.text_scanlines(), 350);
+    // Maximum Scan Line bit 7, set by a program written for a VGA, scans
+    // nothing twice on an EGA.
+    cpu.bus.vga.crtc_regs[0x09] |= 0x80;
+    assert_eq!(cpu.bus.vga.text_scanlines(), 350);
 }

@@ -1574,44 +1574,20 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.bus.guest_write_16((addr) as u32, 0xE000);
             cpu.bus.guest_write_16((addr + 2) as u32, 0xF000);
 
-            // 04: Video Mode
-            let mode = match cpu.bus.video_mode {
-                VideoMode::Text80x25 => 3,
-                VideoMode::Graphics320x200 => 0x13,
-                _ => 3,
-            };
-            cpu.bus.guest_write_8((addr + 4) as u32, mode);
+            // 04h-21h: the BIOS data area's video fields, 0449h-0466h,
+            // copied as the IBM VGA BIOS does: the mode, columns, page size
+            // and offset, the 8 pages' cursors, the cursor type, active
+            // page, CRTC port and the 3x8h and 3x9h settings.
+            for i in 0..0x1E {
+                let byte = cpu.bus.guest_read_8(0x0449 + i);
+                cpu.bus.guest_write_8(addr as u32 + 4 + i, byte);
+            }
 
-            // 05: Columns (80)
-            cpu.bus.guest_write_16((addr + 5) as u32, 80);
-
-            // 07: Regen Buffer Length (32KB for VGA Text? B8000-BFFFF)
-            // In Mode 13h, this should technically be 64KB?
-            // The caller is likely in Text Mode when querying.
-            cpu.bus.guest_write_16((addr + 7) as u32, 0x8000);
-
-            // 09: Regen Buffer Start Offset (0)
-            cpu.bus.guest_write_16((addr + 9) as u32, 0);
-
-            // 0B: Cursor Pos (Page 0)
-            let (col, row) = get_cursor(cpu, 0);
-            cpu.bus
-                .write_16(addr + 0x0B, (row as u16) << 8 | (col as u16));
-
-            // 1B: Cursor Type
-            cpu.bus.guest_write_16((addr + 0x1B) as u32, 0x0607);
-
-            // 1D: Active Page
-            cpu.bus.guest_write_8((addr + 0x1D) as u32, 0);
-
-            // 1E: CRT Port
-            cpu.bus.guest_write_16((addr + 0x1E) as u32, 0x3D4);
-
-            // 22: Rows on Screen (25)
-            cpu.bus.guest_write_8((addr + 0x22) as u32, 25);
-
-            // 23: Char Height (16)
-            cpu.bus.guest_write_16((addr + 0x23) as u32, 16);
+            // 22h: rows on screen; 23h: character height.
+            let rows = cpu.bus.guest_read_8(0x0484).wrapping_add(1);
+            cpu.bus.guest_write_8((addr + 0x22) as u32, rows);
+            let height = cpu.bus.guest_read_16(0x0485);
+            cpu.bus.guest_write_16((addr + 0x23) as u32, height);
 
             // 25: Active Display Combination Code (DCC)
             cpu.bus.guest_write_8((addr + 0x25) as u32, display_combination(cpu));
@@ -1625,9 +1601,21 @@ pub fn handle(cpu: &mut Cpu) {
             // 29: Max Pages
             cpu.bus.guest_write_8((addr + 0x29) as u32, 8);
 
-            // 2A: Scan Lines (0=200, 1=350, 2=400, 3=480)
-            // VGA Text is 400. Mode 13h is 200.
-            let scan_code = if mode == 0x13 { 0 } else { 2 };
+            // 2A: Scan Lines (0=200, 1=350, 2=400, 3=480). A text mode's
+            // are the ones AH=12h BL=30h selected, or a program set in the
+            // CRTC; a graphics mode's are fixed.
+            let scan_code = match cpu.bus.guest_read_8(0x0449) & 0x7F {
+                0x00..=0x03 | 0x07 => match cpu.bus.vga.text_scanlines() {
+                    200 => 0,
+                    350 => 1,
+                    480 => 3,
+                    _ => 2,
+                },
+                0x04..=0x06 | 0x0D | 0x0E | 0x13 => 0,
+                0x0F | 0x10 => 1,
+                0x11 | 0x12 => 3,
+                _ => 2,
+            };
             cpu.bus.guest_write_8((addr + 0x2A) as u32, scan_code);
 
             // 31: Video Mem (3=256K)
