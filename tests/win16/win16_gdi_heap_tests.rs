@@ -233,15 +233,22 @@ fn blit_shows_pixels(code: &mut Code, fail: u8) {
     code.push(0).push(0).push(0x00CC).push(0x0020);
     code.call("GDI", BIT_BLT);
     expect_ax(code, 1, fail);
-    push_word(code, TARGET);
+    bits_are_pixels(code, TARGET, fail + 1);
+}
+
+/// GetBitmapBits(bitmap, 16, got), with the bitmap's handle at `bitmap`:
+/// all 8 by 2 of its bits, which must be the pixels the device BITMAP
+/// points at. Ends with `fail`, or the next numbers for the pixels.
+fn bits_are_pixels(code: &mut Code, bitmap: u16, fail: u8) {
+    push_word(code, bitmap);
     code.push(0).push(WIDTH * HEIGHT);
     push_data(code, GOT);
     code.call("GDI", GET_BITMAP_BITS);
-    expect_ax(code, WIDTH * HEIGHT, fail + 1);
+    expect_ax(code, WIDTH * HEIGHT, fail);
     for i in 0..(WIDTH * HEIGHT / 2) {
         code.emit(&[0xA1, lo(GOT + 2 * i), hi(GOT + 2 * i)]) // mov ax,[GOT+i]
             .emit(&[0x3B, 0x06, lo(PIXELS + 2 * i), hi(PIXELS + 2 * i)]); // cmp ax,[PIXELS+i]
-        or_fail(code, fail + 2 + i as u8);
+        or_fail(code, fail + 1 + i as u8);
     }
 }
 
@@ -265,14 +272,17 @@ fn reads_gdis_heap() -> Code {
     code
 }
 
-/// A program that changes the device BITMAP as LUNIFX.DLL does, copies
-/// the pixels into the bitmap of 8 by 2, and then draws into the changed
-/// bitmap through its memory DC: PatBlt BLACKNESS over the first two
-/// pixels, TextOut at (4, 0), and a BitBlt of the other bitmap's first
-/// two pixels to (2, 1). Each must show in its pixels, and a BitBlt from
-/// the bitmap then copies them as they are.
+/// A program that changes the device BITMAP as LUNIFX.DLL does, reads
+/// the changed bitmap's bits with GetBitmapBits before GDI has drawn on
+/// it or read it (all 8 by 2 of them, the size the BITMAP now says),
+/// copies the pixels into the bitmap of 8 by 2, and then draws into the
+/// changed bitmap through its memory DC: PatBlt BLACKNESS over the first
+/// two pixels, TextOut at (4, 0), and a BitBlt of the other bitmap's
+/// first two pixels to (2, 1). Each must show in its pixels, and a BitBlt
+/// from the bitmap then copies them as they are.
 fn draws_into_the_changed_bitmap() -> Code {
     let mut code = change_device_bitmap();
+    bits_are_pixels(&mut code, BITMAP, 60);
     blit_shows_pixels(&mut code, 12);
     set(&mut code, TEXT, u16::from(b'x'));
 

@@ -30,11 +30,12 @@
 //!
 //! A bitmap of the Win16 process can be in the views of several
 //! processes. Windows 3.1 had one heap, and a bitmap one place for its
-//! bits; here they live in the first view the bitmap joins (`live`), and
-//! another view's block has a copy of them as they were when it joined.
-//! Its device BITMAP becomes where they live if the program changes it
-//! while no view has them. When a view goes with its task, the bits of
-//! its bitmaps go back to GDI32 (`task_ended`).
+//! bits; here they live in the first view the bitmap joins
+//! (`Viewed::live`), and another view's block has a copy of them as they
+//! were when it joined. Another view's device BITMAP becomes where they
+//! live if the program changes it while it hasn't changed the BITMAP of
+//! the view that has them (`device`). When a view goes with its task,
+//! the bits of its bitmaps go back to GDI32 (`task_ended`).
 //!
 //! Windows 3.1's GDI heap was GDI's, there as long as Windows ran. The
 //! Win16 process's view, which every 16-bit program shares, has blocks
@@ -296,13 +297,17 @@ fn add(cpu: &mut Cpu, view: &mut GdiHeapView, handle: u32) {
     if view.bitmaps.iter().any(|b| b.handle == handle) {
         return;
     }
-    let Some(bitmap) = cpu.bus.win32.gdi.bitmap(handle as u32).cloned() else {
-        return;
-    };
     // Its rows as GDI32 has them: in another view, if they live there.
+    // Loading them gives the bitmap the size that view's device BITMAP
+    // says (`refresh`), so its header is read after, for the size this
+    // view's BITMAP gets to match its rows.
     let target = crate::win32::gdi32::surface::Target::Bitmap(handle as u32);
     let rows = crate::win32::gdi32::surface::Surface::load_all(cpu, target);
     let (rows, stride) = rows.map_or((Vec::new(), 0), |r| (r.data, r.stride));
+    let bitmap = cpu.bus.win32.gdi.bitmap(handle as u32);
+    let Some(bitmap) = bitmap.map(|b| b.clone_header()) else {
+        return;
+    };
     let live = !cpu.bus.win32.processes.iter().any(|p| {
         let bitmaps = &p.gdi_heap.bitmaps;
         bitmaps.iter().any(|b| b.handle == handle && b.live)
@@ -476,11 +481,21 @@ fn row_address(cpu: &Cpu, s: &[u8], r: u32, len: u32) -> Option<u32> {
     (off + len as u64 <= limit as u64 + 1).then(|| base.wrapping_add(off as u32))
 }
 
-/// The process and the entry of the view the bitmap `handle`'s bits
-/// live in: the entry that has them, or else the first whose device
-/// BITMAP the program changed, which they then live in.
-fn live(cpu: &mut Cpu, handle: u32) -> Option<(usize, usize)> {
-    let mut changed = None;
+/// The device BITMAP of the view's bitmap `b`, as its block has it now.
+fn device_of(cpu: &Cpu, b: &Viewed) -> Option<Vec<u8>> {
+    let base = crate::win16::lin(cpu, global::handle_to_sel(b.block), 0);
+    crate::win16::peek(cpu, base, DEVICE_BITMAP as usize)
+}
+
+/// The device BITMAP of the bitmap `handle`, if its bits live in a view:
+/// that of the entry that has them, unless the program changed another
+/// view's and not that one's. Windows 3.1 had one heap, so the BITMAP
+/// the program changed is the one its display driver went by: the bits
+/// then live in the first view whose BITMAP the program changed.
+fn device(cpu: &mut Cpu, handle: u32) -> Option<Vec<u8>> {
+    // The entry they live in, its BITMAP and whether the program changed
+    // it, and the first other entry whose BITMAP it changed.
+    let (mut live, mut changed) = (None, None);
     for (p, process) in cpu.bus.win32.processes.iter().enumerate() {
         let view = &*process.gdi_heap;
         if view.segment == 0 || !process.shims.has(Shim::Win31GdiHeap) {
@@ -490,28 +505,27 @@ fn live(cpu: &mut Cpu, handle: u32) -> Option<(usize, usize)> {
             continue;
         };
         let b = &view.bitmaps[i];
-        if b.live {
-            return Some((p, i));
-        }
-        if changed.is_none() && device_of(cpu, b).is_some_and(|s| s != b.written) {
-            changed = Some((p, i));
+        let Some(s) = device_of(cpu, b) else {
+            continue;
+        };
+        let moved = s != b.written;
+        if b.live && live.is_none() {
+            live = Some((p, i, s, moved));
+        } else if !b.live && moved && changed.is_none() {
+            changed = Some((p, i, s));
         }
     }
-    let (p, i) = changed?;
-    cpu.bus.win32.processes[p].gdi_heap.bitmaps[i].live = true;
-    Some((p, i))
-}
-
-/// The device BITMAP of the view's bitmap `b`, as its block has it now.
-fn device_of(cpu: &Cpu, b: &Viewed) -> Option<Vec<u8>> {
-    let base = crate::win16::lin(cpu, global::handle_to_sel(b.block), 0);
-    crate::win16::peek(cpu, base, DEVICE_BITMAP as usize)
-}
-
-/// The device BITMAP of the bitmap `handle`, if its bits live in a view.
-fn device(cpu: &mut Cpu, handle: u32) -> Option<Vec<u8>> {
-    let (p, i) = live(cpu, handle)?;
-    device_of(cpu, &cpu.bus.win32.processes[p].gdi_heap.bitmaps[i])
+    match (live, changed) {
+        (Some((_, _, s, true)), _) | (Some((_, _, s, false)), None) => Some(s),
+        (live, Some((p, i, s))) => {
+            if let Some((lp, li, _, _)) = live {
+                cpu.bus.win32.processes[lp].gdi_heap.bitmaps[li].live = false;
+            }
+            cpu.bus.win32.processes[p].gdi_heap.bitmaps[i].live = true;
+            Some(s)
+        }
+        (None, None) => None,
+    }
 }
 
 /// The width, height and GDI32's bytes a row that the device BITMAP `s`

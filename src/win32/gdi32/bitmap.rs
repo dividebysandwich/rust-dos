@@ -550,11 +550,20 @@ fn bitmap_surface(cpu: &mut Cpu, handle: u32) -> Option<Surface> {
     Surface::load_all(cpu, Target::Bitmap(handle))
 }
 
+/// The bitmap `handle`'s header, with the size its surface loads with:
+/// in Windows 3.1's GDI heap, the size its device BITMAP says, which the
+/// program may have changed since (`gdi_heap::refresh`). A size taken
+/// before the surface is loaded would index rows it doesn't have.
+fn header(cpu: &mut Cpu, handle: u32) -> Option<Bitmap> {
+    crate::win32::shims::win31::gdi_heap::refresh(cpu, handle);
+    gdi(cpu).bitmap(handle).map(|b| b.clone_header())
+}
+
 /// GetBitmapBits(bitmap, count, bits): its rows, top first, each a whole
 /// number of words.
 pub fn get_bitmap_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (handle, count, out) = (args[0], args[1] as usize, args[2]);
-    let Some(b) = gdi(cpu).bitmap(handle).map(|b| b.clone_header()) else {
+    let Some(b) = header(cpu, handle) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
     };
@@ -579,7 +588,7 @@ pub fn get_bitmap_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// SetBitmapBits(bitmap, count, bits).
 pub fn set_bitmap_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (handle, count, at) = (args[0], args[1] as usize, args[2]);
-    let Some(b) = gdi(cpu).bitmap(handle).map(|b| b.clone_header()) else {
+    let Some(b) = header(cpu, handle) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
     };
@@ -646,7 +655,7 @@ pub fn get_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         );
         return Some(0);
     }
-    let Some(b) = gdi(cpu).bitmap(handle).map(|b| b.clone_header()) else {
+    let Some(b) = header(cpu, handle) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
     };
@@ -1220,7 +1229,7 @@ pub fn set_bitmap_dimension_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// A pattern brush's pattern from the bitmap `handle`: at most 8x8 on
 /// Windows 95, which uses the bitmap's top-left corner.
 pub fn pattern_of(cpu: &mut Cpu, handle: u32) -> Option<Pattern> {
-    let b = gdi(cpu).bitmap(handle)?.clone_header();
+    let b = header(cpu, handle)?;
     let s = bitmap_surface(cpu, handle)?;
     let (w, h) = (b.width.min(8), b.height.min(8));
     let mono = s.mono;
