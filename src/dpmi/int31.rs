@@ -196,7 +196,8 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
             let at = offset(ctx, EDI, bits32);
             let mut bytes = [0u8; 8];
             for (i, byte) in bytes.iter_mut().enumerate() {
-                *byte = cpu.read_u8(Seg::ES, at.wrapping_add(i as u32)).map_err(|_| INVALID_VALUE)?;
+                *byte = read_paged(cpu, Seg::ES, at.wrapping_add(i as u32))
+                    .map_err(|_| INVALID_VALUE)?;
             }
             let desc = at_client_level(u64::from_le_bytes(bytes)).ok_or(INVALID_VALUE)?;
             let ldt = client(cpu).block;
@@ -381,12 +382,12 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
             let base = resize_memory(cpu, i, size)?;
             if base != old && ctx.gpr[EDX] & 0x02 != 0 {
                 let list = ctx.gpr[EBX];
-                let count = ctx.gpr[EDI] & 0xFFFF;
-                if let Some(es) = selector_base(cpu, ctx.sel(Seg::ES)) {
-                    vm::touch(cpu, es.wrapping_add(list), count * 2);
-                }
-                for n in 0..count {
-                    let selector = cpu.read_u16(Seg::ES, list.wrapping_add(n * 2)).map_err(|_| INVALID_VALUE)?;
+                for n in 0..ctx.gpr[EDI] & 0xFFFF {
+                    let at = list.wrapping_add(n * 2);
+                    let low = read_paged(cpu, Seg::ES, at).map_err(|_| INVALID_VALUE)?;
+                    let high =
+                        read_paged(cpu, Seg::ES, at.wrapping_add(1)).map_err(|_| INVALID_VALUE)?;
+                    let selector = u16::from_le_bytes([low, high]);
                     let Some(at) = selector_base(cpu, selector) else { continue };
                     if (old..old + old_len).contains(&at) {
                         let moved = at - old + base;
@@ -414,12 +415,15 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
                 return Err(INVALID_HANDLE);
             }
         }
-        // Locking and unlocking BX:CX linear bytes from SI:DI on: locked
-        // pages of virtual memory stay in memory; without it the memory
-        // is always there. Real-mode memory (0602h-0603h) always is.
+        // Locking and unlocking SI:DI linear bytes from BX:CX on: locked
+        // pages of virtual memory stay in memory, and a lock of more than
+        // fits at once fails; without it the memory is always there.
+        // Real-mode memory (0602h-0603h) always is.
         0x0600 | 0x0601 => {
             let (at, len) = (pair(ctx, EBX, ECX), pair(ctx, ESI, EDI));
-            vm::lock(cpu, at, len, function == 0x0600);
+            if !vm::lock(cpu, at, len, function == 0x0600) {
+                return Err(PHYSICAL_MEMORY_UNAVAILABLE);
+            }
         }
         // Demand paging hints: the pages go when they must anyway.
         0x0602 | 0x0603 | 0x0702 | 0x0703 => {}
@@ -482,11 +486,34 @@ pub(super) fn resize_memory(cpu: &mut Cpu, i: usize, size: u32) -> std::result::
 
 /// Write `bytes` at ES:`at`, through the client's ES.
 fn write_buffer(cpu: &mut Cpu, at: u32, bytes: &[u8]) -> CpuResult {
-    touch_segment(cpu, Seg::ES, at, bytes.len() as u32);
     for (i, &byte) in bytes.iter().enumerate() {
-        cpu.write_u8(Seg::ES, at.wrapping_add(i as u32), byte)?;
+        let at = at.wrapping_add(i as u32);
+        paged(cpu, Seg::ES, at, |cpu| cpu.write_u8(Seg::ES, at, byte))?;
     }
     Ok(())
+}
+
+/// Read the byte at `seg`:`at` of a client's buffer through the
+/// processor's segment register (`paged`).
+fn read_paged(cpu: &mut Cpu, seg: Seg, at: u32) -> CpuResult<u8> {
+    paged(cpu, seg, at, |cpu| cpu.read_u8(seg, at))
+}
+
+/// Read or write (`access`) the byte at `seg`:`at` through the
+/// processor's segment register, as the host reaches a client's
+/// buffers: if its page is a page of virtual memory that is out (vm.rs),
+/// once more after bringing it in. A byte at a time, so that bringing in
+/// a page can't send out one that the same access needs.
+fn paged<T>(
+    cpu: &mut Cpu,
+    seg: Seg,
+    at: u32,
+    access: impl Fn(&mut Cpu) -> CpuResult<T>,
+) -> CpuResult<T> {
+    access(cpu).or_else(|_| {
+        touch_segment(cpu, seg, at, 1);
+        access(cpu)
+    })
 }
 
 /// Allocate BX paragraphs of DOS memory: its segment in AX and a selector
@@ -600,10 +627,9 @@ pub(super) fn retile(cpu: &mut Cpu, first: usize, count: usize, base: u32, bytes
 /// `seg`:`at` through the processor's segment register: the real-mode
 /// registers it holds.
 pub(super) fn read_call_structure(cpu: &mut Cpu, seg: Seg, at: u32) -> CpuResult<Context> {
-    touch_segment(cpu, seg, at, realcall::SIZE as u32);
     let mut bytes = [0u8; realcall::SIZE];
     for (i, byte) in bytes.iter_mut().enumerate() {
-        *byte = cpu.read_u8(seg, at.wrapping_add(i as u32))?;
+        *byte = read_paged(cpu, seg, at.wrapping_add(i as u32))?;
     }
     Ok(realcall::decode(&bytes))
 }

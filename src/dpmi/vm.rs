@@ -57,6 +57,10 @@ const CHUNK: u32 = 0x1_0000;
 /// The extended memory the pages leave free, for what wants it besides
 /// them: a nested client's LDT, a DOS call's block (INT 21h AH=48h), XMS.
 const RESERVE: u32 = 0x8_0000;
+/// The physical pages that locks (INT 31h AX=0600h) leave unlocked, as
+/// the VMM limits what may be locked: there is always a page to send out
+/// for one that comes in, and for a page table.
+const UNLOCKED: u32 = 16;
 /// The highest the linear space may reach: below the addresses where
 /// cards map their memory.
 const SPACE_END: u32 = 0xC000_0000;
@@ -109,9 +113,14 @@ impl Vm {
         if limit == 0 {
             return None;
         }
-        let mut vm = Vm { limit, base, ..Vm::default() };
+        let mut vm = Vm {
+            limit,
+            base,
+            ..Vm::default()
+        };
         vm.dir = vm.frame(cpu)?;
-        cpu.bus.fill_ram(vm.dir as usize..(vm.dir + PAGE) as usize, 0);
+        cpu.bus
+            .fill_ram(vm.dir as usize..(vm.dir + PAGE) as usize, 0);
         for table in 0..base / TABLE_SPAN {
             let at = vm.table(cpu, table * TABLE_SPAN)?;
             let entries: Vec<u8> = (0..1024u32)
@@ -141,12 +150,17 @@ impl Vm {
         }
         let end = cpu.bus.ram().len() as u32;
         let (largest, _) = cpu.bus.xms.dpmi_free(end);
-        let size = if largest >= CHUNK + RESERVE { CHUNK } else { PAGE };
+        let size = if largest >= CHUNK + RESERVE {
+            CHUNK
+        } else {
+            PAGE
+        };
         if largest >= size + RESERVE
             && let Some(chunk) = cpu.bus.xms.take_dpmi(size, end)
         {
             self.chunks.push((chunk, size));
-            self.free.extend((PAGE..size).step_by(PAGE as usize).rev().map(|o| chunk + o));
+            self.free
+                .extend((PAGE..size).step_by(PAGE as usize).rev().map(|o| chunk + o));
             return Some(chunk);
         }
         self.page_out(cpu)
@@ -186,7 +200,11 @@ impl Vm {
                 return None;
             }
             left -= 1;
-            let next = self.present.range(hand + 1..).next().or_else(|| self.present.iter().next());
+            let next = self
+                .present
+                .range(hand + 1..)
+                .next()
+                .or_else(|| self.present.iter().next());
             let (&lin, &phys) = next?;
             hand = lin;
             if self.locks.contains_key(&lin) {
@@ -205,7 +223,11 @@ impl Vm {
         self.hand = hand;
         let mut data = vec![0; PAGE as usize];
         cpu.bus.read_into(phys as usize, &mut data);
-        let slot = if data.iter().all(|&b| b == 0) { 0 } else { self.store(data) };
+        let slot = if data.iter().all(|&b| b == 0) {
+            0
+        } else {
+            self.store(data)
+        };
         cpu.bus.write_32(at, 0);
         cpu.tlb.flush_page(lin);
         self.present.remove(&lin);
@@ -307,6 +329,18 @@ impl Vm {
         }
     }
 
+    /// Take a lock off each of `pages` that has one.
+    fn unlock(&mut self, pages: &[u32]) {
+        for page in pages {
+            if let Some(count) = self.locks.get_mut(page) {
+                *count -= 1;
+                if *count == 0 {
+                    self.locks.remove(page);
+                }
+            }
+        }
+    }
+
     /// Move the page at `from` of a block to `to`, where no page is.
     fn move_page(&mut self, cpu: &mut Cpu, from: u32, to: u32) {
         if let Some(slot) = self.out.remove(&from) {
@@ -384,8 +418,10 @@ impl Vm {
         self.blocks.insert(new, len);
         let kept = old.min(len);
         // The page tables of the new place first: making one may send a
-        // page out, which then moves as a page in the page file.
-        for table in (new..new + kept).step_by(TABLE_SPAN as usize) {
+        // page out, which then moves as a page in the page file. They
+        // start at 4 MB boundaries, and the new place need not.
+        let first = new & !(TABLE_SPAN - 1);
+        for table in (first..new + kept).step_by(TABLE_SPAN as usize) {
             self.table(cpu, table);
         }
         for offset in (0..kept).step_by(PAGE as usize) {
@@ -416,7 +452,11 @@ impl Vm {
     fn physical_pages(&self, cpu: &Cpu) -> u32 {
         let end = cpu.bus.ram().len() as u32;
         let (_, free) = cpu.bus.xms.dpmi_free(end);
-        let unlocked = self.present.keys().filter(|lin| !self.locks.contains_key(lin)).count();
+        let unlocked = self
+            .present
+            .keys()
+            .filter(|lin| !self.locks.contains_key(lin))
+            .count();
         self.free.len() as u32 + free.saturating_sub(RESERVE) / PAGE + unlocked as u32
     }
 }
@@ -437,14 +477,18 @@ pub(super) fn start(cpu: &mut Cpu) {
             ));
             cpu.bus.dpmi.vm = Some(vm);
         }
-        None => cpu.bus.log_string("[DPMI] No memory for the page tables: no virtual memory"),
+        None => cpu
+            .bus
+            .log_string("[DPMI] No memory for the page tables: no virtual memory"),
     }
 }
 
 /// The last client ended: the page tables and pages go back to the XMS
 /// pool, and the page file is emptied.
 pub(super) fn stop(cpu: &mut Cpu) {
-    let Some(vm) = cpu.bus.dpmi.vm.take() else { return };
+    let Some(vm) = cpu.bus.dpmi.vm.take() else {
+        return;
+    };
     leave(cpu);
     for (chunk, _) in vm.chunks {
         cpu.bus.xms.release_dpmi(chunk);
@@ -467,7 +511,9 @@ pub(super) fn active(cpu: &Cpu) -> bool {
 /// Paging on, with the host's tables, as the processor goes to protected
 /// mode for a client.
 pub(super) fn enter(cpu: &mut Cpu) {
-    let Some(dir) = cpu.bus.dpmi.vm.as_ref().map(|vm| vm.dir) else { return };
+    let Some(dir) = cpu.bus.dpmi.vm.as_ref().map(|vm| vm.dir) else {
+        return;
+    };
     if cpu.cr0 & CR0_PG == 0 || cpu.cr3 != dir {
         cpu.cr3 = dir;
         cpu.cr0 |= CR0_PG;
@@ -504,10 +550,14 @@ pub(super) fn phys(cpu: &mut Cpu, lin: u32) -> u32 {
             vm.bring_in(cpu, page);
         }
         vm.present.get(&page).map(|&phys| {
-            // The host's access counts as a touch.
+            // The host's access counts as a touch. The entry is written
+            // only when that changes it: a write to RAM is what a loop
+            // that waits (`idle`) can't be proven idle with.
             if let Some(at) = vm.entry(cpu, page) {
                 let entry = cpu.bus.read_32(at as usize);
-                cpu.bus.write_32(at as usize, entry | ACCESSED);
+                if entry & ACCESSED == 0 {
+                    cpu.bus.write_32(at as usize, entry | ACCESSED);
+                }
             }
             phys | (lin & (PAGE - 1))
         })
@@ -594,13 +644,15 @@ pub(super) fn resize(cpu: &mut Cpu, base: u32, old: u32, bytes: u32) -> Option<u
     let len = bytes.div_ceil(PAGE) * PAGE;
     if cpu.bus.xms.resize_dpmi(base, len, end) {
         if len > old {
-            cpu.bus.fill_ram((base + old) as usize..(base + len) as usize, 0);
+            cpu.bus
+                .fill_ram((base + old) as usize..(base + len) as usize, 0);
         }
         return Some(base);
     }
     let new = cpu.bus.xms.take_dpmi(len, end)?;
     cpu.bus.fill_ram(new as usize..(new + len) as usize, 0);
-    cpu.bus.copy_ram(base as usize, new as usize, old.min(len) as usize);
+    cpu.bus
+        .copy_ram(base as usize, new as usize, old.min(len) as usize);
     cpu.bus.xms.release_dpmi(base);
     Some(new)
 }
@@ -625,7 +677,10 @@ pub(super) fn info(cpu: &Cpu) -> [u32; 12] {
     let (largest, total) = free(cpu);
     match &cpu.bus.dpmi.vm {
         Some(vm) => {
-            let locked = vm.physical_pages(cpu).min(largest / PAGE);
+            let locked = vm
+                .physical_pages(cpu)
+                .saturating_sub(UNLOCKED)
+                .min(largest / PAGE);
             [
                 largest,
                 largest / PAGE,
@@ -659,46 +714,66 @@ pub(super) fn info(cpu: &Cpu) -> [u32; 12] {
 }
 
 /// Lock (or unlock) the pages of `len` bytes at `lin`: locked pages of a
-/// block are brought in and stay in memory. With no virtual memory every
+/// block are brought in and stay in memory. False, with no page locked,
+/// if they can't all be in memory at once with `UNLOCKED` pages left
+/// over (INT 31h AX=0600h's error 8013h). With no virtual memory every
 /// page is always there.
-pub(super) fn lock(cpu: &mut Cpu, lin: u32, len: u32, on: bool) {
-    if len == 0 || !active(cpu) {
-        return;
+pub(super) fn lock(cpu: &mut Cpu, lin: u32, len: u32, on: bool) -> bool {
+    if len == 0 {
+        return true;
     }
-    if on {
-        touch(cpu, lin, len);
-    }
-    with(cpu, |vm, _| {
-        let last = lin.saturating_add(len - 1) & !(PAGE - 1);
-        for page in ((lin & !(PAGE - 1))..=last).step_by(PAGE as usize) {
-            if !vm.present.contains_key(&page) && !vm.out.contains_key(&page) {
-                continue;
-            }
-            if on {
-                *vm.locks.entry(page).or_default() += 1;
-            } else if let Some(count) = vm.locks.get_mut(&page) {
-                *count -= 1;
-                if *count == 0 {
-                    vm.locks.remove(&page);
-                }
-            }
+    let first = lin & !(PAGE - 1);
+    let last = lin.saturating_add(len - 1) & !(PAGE - 1);
+    let locked = with(cpu, |vm, cpu| {
+        let pages: Vec<u32> = vm
+            .present
+            .range(first..=last)
+            .chain(vm.out.range(first..=last))
+            .map(|(&page, _)| page)
+            .collect();
+        if !on {
+            vm.unlock(&pages);
+            return true;
         }
+        // No more than leaves `UNLOCKED` pages to page through.
+        let new = pages
+            .iter()
+            .filter(|page| !vm.locks.contains_key(page))
+            .count() as u32;
+        if new + UNLOCKED > vm.physical_pages(cpu) {
+            return false;
+        }
+        // Locked before they come in, so that bringing in one doesn't
+        // send another of them out.
+        for &page in &pages {
+            *vm.locks.entry(page).or_default() += 1;
+        }
+        let all_in = pages
+            .iter()
+            .all(|page| vm.present.contains_key(page) || vm.bring_in(cpu, *page));
+        if !all_in {
+            vm.unlock(&pages);
+        }
+        all_in
     });
+    locked.unwrap_or(true)
 }
 
 /// Map `len` bytes of physical memory at `phys` (INT 31h AX=0800h): its
 /// linear address, the same. With virtual memory the page tables get
 /// entries for it where it lies past the machine's memory; None where it
-/// would cover the linear space of memory blocks, or there is no room for
-/// the tables.
+/// would cover the linear space of memory blocks, runs past 4 GB, or
+/// there is no room for the tables. Without, any range is its own linear
+/// address, as before there was virtual memory.
 pub(super) fn map_physical(cpu: &mut Cpu, phys: u32, len: u32) -> Option<u32> {
-    let end = phys.checked_add(len)?;
+    let end = phys as u64 + len as u64;
     let mapped = with(cpu, |vm, cpu| {
-        if end > vm.base && phys < vm.end() {
+        if end > 1 << 32 || (end > vm.base as u64 && phys < vm.end()) {
             return None;
         }
-        let first = phys & !(PAGE - 1);
+        let first = (phys & !(PAGE - 1)) as u64;
         for page in (first..end).step_by(PAGE as usize) {
+            let page = page as u32;
             if page < vm.base {
                 continue;
             }
@@ -724,7 +799,20 @@ pub(super) fn is_virtual(vm: Option<&Vm>, base: u32) -> bool {
 }
 
 crate::state_fields!(Vm {
-    limit, base, dir, chunks, free, blocks, present, out, slots, free_slots, locks, hand, ins, outs,
+    limit,
+    base,
+    dir,
+    chunks,
+    free,
+    blocks,
+    present,
+    out,
+    slots,
+    free_slots,
+    locks,
+    hand,
+    ins,
+    outs,
 });
 
 #[cfg(test)]
@@ -741,7 +829,10 @@ mod tests {
         let vm = Vm::new(&mut cpu, limit).expect("room for the page tables");
         let end = cpu.bus.ram().len() as u32;
         let (largest, _) = cpu.bus.xms.dpmi_free(end);
-        cpu.bus.xms.take_dpmi(largest - free - RESERVE, end).unwrap();
+        cpu.bus
+            .xms
+            .take_dpmi(largest - free - RESERVE, end)
+            .unwrap();
         cpu.bus.dpmi.vm = Some(vm);
         enter(&mut cpu);
         cpu
@@ -799,7 +890,10 @@ mod tests {
         assert_eq!(cpu.lin_to_phys(0x12_3450, false, true), Ok(0x12_3450));
         assert_eq!(read_32(&mut cpu, 0x12_3450), 0xDEAD_BEEF);
         // A card's memory past the machine's.
-        assert_eq!(map_physical(&mut cpu, 0xE000_0000, 0x10_0000), Some(0xE000_0000));
+        assert_eq!(
+            map_physical(&mut cpu, 0xE000_0000, 0x10_0000),
+            Some(0xE000_0000)
+        );
         assert_eq!(cpu.lin_to_phys(0xE00F_F000, true, true), Ok(0xE00F_F000));
         // Not over the blocks' space.
         let base = vm(&cpu).base;
@@ -833,15 +927,61 @@ mod tests {
     fn locked_pages_stay_in_memory() {
         let mut cpu = machine(1 << 20, 8 << 20);
         let a = allocate(&mut cpu, PAGE, None).unwrap();
-        lock(&mut cpu, a, PAGE, true);
+        assert!(lock(&mut cpu, a, PAGE, true));
         let b = allocate(&mut cpu, 4 << 20, None).unwrap();
         fill(&mut cpu, b, 4 << 20, |p| p);
         fill(&mut cpu, b, 4 << 20, |p| p + 1);
         assert!(vm(&cpu).present.contains_key(&a));
-        lock(&mut cpu, a, PAGE, false);
+        assert!(lock(&mut cpu, a, PAGE, false));
         fill(&mut cpu, b, 4 << 20, |p| p + 2);
         fill(&mut cpu, b, 4 << 20, |p| p + 3);
         assert!(!vm(&cpu).present.contains_key(&a));
+    }
+
+    /// A lock of more than fits in memory at once fails and locks
+    /// nothing; one of less brings every page of it in, though some were
+    /// in the page file, and keeps them there.
+    #[test]
+    fn a_lock_takes_all_its_pages_or_none() {
+        let mut cpu = machine(1 << 20, 8 << 20);
+        let a = allocate(&mut cpu, 2 << 20, None).unwrap();
+        fill(&mut cpu, a, 2 << 20, |p| p);
+        assert!(!lock(&mut cpu, a, 2 << 20, true));
+        assert!(vm(&cpu).locks.is_empty());
+        let half = 512 << 10;
+        assert!(lock(&mut cpu, a, half, true));
+        let held = vm(&cpu);
+        assert!(
+            (a..a + half)
+                .step_by(PAGE as usize)
+                .all(|p| held.present.contains_key(&p))
+        );
+        fill(&mut cpu, a + half, (2 << 20) - half, |p| p + 1);
+        for page in (a..a + half).step_by(PAGE as usize) {
+            assert!(
+                cpu.lin_to_phys(page, false, true).is_ok(),
+                "{page:08X} stayed"
+            );
+            assert_eq!(read_32(&mut cpu, page), page);
+        }
+    }
+
+    /// Without virtual memory any physical range maps to itself, up to the
+    /// end of the 4 GB; with it, one past 4 GB doesn't.
+    #[test]
+    fn physical_memory_maps_up_to_4_gb() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        assert_eq!(
+            map_physical(&mut cpu, 0xFFF0_0000, 0x10_0000),
+            Some(0xFFF0_0000)
+        );
+        let mut cpu = machine(1 << 20, 8 << 20);
+        assert_eq!(
+            map_physical(&mut cpu, 0xFFF0_0000, 0x10_0000),
+            Some(0xFFF0_0000)
+        );
+        assert_eq!(cpu.lin_to_phys(0xFFFF_F000, false, true), Ok(0xFFFF_F000));
+        assert_eq!(map_physical(&mut cpu, 0xFFF0_0000, 0x10_1000), None);
     }
 
     #[test]

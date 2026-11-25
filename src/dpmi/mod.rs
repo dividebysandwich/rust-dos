@@ -43,7 +43,10 @@ mod video;
 mod vm;
 
 use crate::bus::Bus;
-use crate::cpu::{CR0_PE, CR4_OSFXSR, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Seg, SegCache};
+use crate::cpu::{
+    ATTR_DB, CR0_PE, CR4_OSFXSR, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Seg,
+    SegCache,
+};
 use crate::savestate::{Reader, State, StateError, Writer};
 
 /// The host's code in the BIOS ROM: segment F000, which its protected-mode
@@ -508,7 +511,11 @@ impl Dpmi {
 
     /// The virtual memory `save_vm` saved. A state of an older version
     /// has none: the rust-dos that saved it had no virtual memory.
-    pub fn load_vm(&mut self, r: &mut Reader, version: Option<u16>) -> crate::savestate::Result<()> {
+    pub fn load_vm(
+        &mut self,
+        r: &mut Reader,
+        version: Option<u16>,
+    ) -> crate::savestate::Result<()> {
         self.vm = None;
         if version >= Some(4) {
             self.vm.load(r)?;
@@ -1223,7 +1230,7 @@ fn call_handler(cpu: &mut Cpu, ctx: Context, (sel, off): (u16, u32)) {
     // The frame's stack pages in memory first: a page fault while the
     // host pushes it would lose the interrupt.
     let frame = 3 * size as u32;
-    int31::touch_segment(cpu, Seg::SS, esp.wrapping_sub(frame), frame);
+    touch_stack(cpu, esp.wrapping_sub(frame), frame);
     let entered = (|| -> CpuResult {
         cpu.push_sized(size, flags)?;
         cpu.push_sized(size, cs as u32)?;
@@ -1249,6 +1256,7 @@ fn call_handler(cpu: &mut Cpu, ctx: Context, (sel, off): (u16, u32)) {
 fn default_handler(cpu: &mut Cpu, vector: u8) {
     let size = frame_size(cpu) as u8;
     let mut ctx = Context::of(cpu);
+    touch_stack(cpu, cpu.esp(), 3 * size as u32);
     let popped = (|| -> CpuResult<(u32, u32, u32)> {
         let eip = cpu.pop_sized(size)?;
         let cs = cpu.pop_sized(size)?;
@@ -1263,7 +1271,25 @@ fn default_handler(cpu: &mut Cpu, vector: u8) {
             ctx.gpr[ESP] = cpu.esp();
             default_interrupt(cpu, vector, ctx);
         }
-        Err(fault) => cpu.raise(fault),
+        // The jump to the default handler runs again after the fault, with
+        // the stack as it was.
+        Err(fault) => {
+            cpu.set_esp(ctx.gpr[ESP]);
+            cpu.raise(fault);
+        }
+    }
+}
+
+/// Bring in the pages of the client's stack that the `len` bytes from
+/// SS:`from` on are in, before the host pushes or pops them (vm.rs). In a
+/// 16-bit stack segment the offsets wrap at 64 KB, as SP does.
+fn touch_stack(cpu: &mut Cpu, from: u32, len: u32) {
+    if cpu.seg_cache(Seg::SS).attr & ATTR_DB != 0 {
+        int31::touch_segment(cpu, Seg::SS, from, len);
+    } else {
+        for i in 0..len {
+            int31::touch_segment(cpu, Seg::SS, from.wrapping_add(i) & 0xFFFF, 1);
+        }
     }
 }
 
@@ -1877,7 +1903,9 @@ crate::state_fields!(Client {
 } skip { ldt_limit });
 crate::state_fields!(Callback { client, proc_sel, proc_off, struct_sel, struct_off });
 crate::state_fields!(Frame { kind, client, ctx, vector, sel, off, rm_sp, lpms, base });
-crate::state_fields!(Dpmi { host, clients, frames, callbacks, hooks, a20, next_id, next_handle } skip { enabled, passed_over, vm });
+crate::state_fields!(Dpmi {
+    host, clients, frames, callbacks, hooks, a20, next_id, next_handle
+} skip { enabled, passed_over, vm });
 
 #[cfg(test)]
 mod tests {

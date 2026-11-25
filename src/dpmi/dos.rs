@@ -116,11 +116,26 @@ fn dta(cpu: &mut Cpu) -> (u16, u32) {
 }
 
 /// Copy `len` bytes from the linear address `from` to `to`, through the
-/// host's virtual memory where it has any (vm.rs).
+/// host's virtual memory where it has any (vm.rs): a run that stays in
+/// one page of each at a time, found once for the run. The run is read
+/// before the page it goes to is found, which may send the page it came
+/// from out.
 pub(super) fn copy(cpu: &mut Cpu, from: u32, to: u32, len: u32) {
-    for i in 0..len {
-        let byte = vm::read_8(cpu, from.wrapping_add(i));
-        vm::write_8(cpu, to.wrapping_add(i), byte);
+    let mut run = [0u8; 0x1000];
+    let mut done = 0;
+    while done < len {
+        let (from, to) = (from.wrapping_add(done), to.wrapping_add(done));
+        let n = (0x1000 - (from & 0xFFF)).min(0x1000 - (to & 0xFFF)).min(len - done);
+        let run = &mut run[..n as usize];
+        let at = vm::phys(cpu, from) as usize;
+        for (i, byte) in run.iter_mut().enumerate() {
+            *byte = cpu.bus.read_8(at + i);
+        }
+        let at = vm::phys(cpu, to) as usize;
+        for (i, &byte) in run.iter().enumerate() {
+            cpu.bus.write_8(at + i, byte);
+        }
+        done += n;
     }
 }
 
