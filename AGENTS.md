@@ -131,10 +131,14 @@ that it improves on main. Steps, in this order:
 
    A resolution that keeps both sides' lines as they were, or moves a
    save-state version, is pushed without a local build: CI builds and
-   tests it, and a build of the crate's tests takes many minutes. Build
-   and run the tests the conflict touches only where the resolution
-   writes code that neither side had, such as a call changed to fit the
-   other side's new signature.
+   tests it, and a build of the crate's tests takes many minutes. Lines
+   that compile on each side can still clash once both are kept: two
+   imports of one name, two items or match arms for the same thing, or
+   one side's call to what the other renamed. Read the merged code
+   around each conflict for these before pushing, and fix the branch if
+   CI fails. Build and run the tests the conflict touches only where the
+   resolution writes code that neither side had, such as a call changed
+   to fit the other side's new signature.
 
    A save-state version both sides raised (`WIN32_VERSION` and the
    like): the branch takes the next free number, and main's joins the
@@ -143,7 +147,8 @@ that it improves on main. Steps, in this order:
    branch added, so the branch's own gates that named it move to the new
    number too: a `Since<N, _>`, an `Until<N, _>`, a `*_SAVED` constant.
    `python -I tools/win32_layout.py` prints the new `WIN32_LAYOUTS`
-   hash without a build, and says whether the last line has it.
+   hash without a build, and exits with 1, saying what to change, while
+   the table's last line isn't `WIN32_VERSION` with that hash.
 
 If the evidence isn't there yet, improve the change and go through the
 steps again. A pull request stays a draft only when the next step needs
