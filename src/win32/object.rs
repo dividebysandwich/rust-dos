@@ -10,6 +10,7 @@
 //! for all kinds and processes.
 
 use crate::cpu::Cpu;
+use crate::savestate::Until;
 
 /// The pseudo-handles of the current process and thread, which only mean
 /// something to the thread that uses them. Windows 95's process one is
@@ -60,13 +61,15 @@ pub enum Kind {
     /// A file or device CreateFileA opened through DOS: its entry in DOS's
     /// file table, which it holds until the object goes, and the access it
     /// was opened for (GENERIC_READ, GENERIC_WRITE) and the sharing it
-    /// allows (FILE_SHARE_READ, FILE_SHARE_WRITE); the ranges LockFile
-    /// locked, as (offset, length).
+    /// allows (FILE_SHARE_READ, FILE_SHARE_WRITE). LockFile's locks are
+    /// DOS's, by the entry and the process (disk/locks.rs); a state saved
+    /// before W32 version 100 has the ranges it locked here, as (offset,
+    /// length), which its load drops.
     File {
         sft: u16,
         access: u32,
         share: u32,
-        locks: Vec<(u32, u32)>,
+        old_locks: Until<100, Vec<(u32, u32)>>,
     },
     /// A search of FindFirstFileA: the entries it has still to give.
     Find {
@@ -362,7 +365,7 @@ crate::win32::state_variants!(Kind {
         sft,
         access,
         share,
-        locks
+        old_locks
     },
     Find { entries },
     Change {
@@ -386,3 +389,45 @@ crate::state_fields!(FindEntry {
 crate::state_fields!(Object { kind, name, refs });
 crate::state_fields!(Objects { objects, closed });
 crate::state_fields!(Handles { handles });
+
+#[cfg(test)]
+mod tests {
+    use super::Kind;
+    use crate::savestate::{Reader, State, Writer};
+
+    /// A file object saved in W32 version 99 or older has LockFile's
+    /// ranges after its sharing, which a load reads past; one saved in
+    /// 100 has none.
+    #[test]
+    fn a_file_object_of_an_older_state_drops_its_lock_ranges() {
+        let mut w = Writer::new();
+        w.section(b"W32 ", 99, |w| {
+            7u8.save(w); // Kind::File
+            5u16.save(w);
+            3u32.save(w);
+            1u32.save(w);
+            vec![(10u32, 20u32)].save(w);
+            0xABu8.save(w);
+        });
+        let file = Kind::File {
+            sft: 5,
+            access: 3,
+            share: 1,
+            old_locks: Default::default(),
+        };
+        w.section(b"W32 ", 100, |w| {
+            file.save(w);
+            0xABu8.save(w);
+        });
+        let mut r = Reader::new(&w.buf);
+        for version in [99, 100] {
+            let mut section = r.section_of(b"W32 ", &[99, 100]).unwrap();
+            assert_eq!(section.version(), Some(version));
+            let (mut kind, mut marker) = (Kind::Dos { handle: 0 }, 0u8);
+            kind.load(&mut section).unwrap();
+            marker.load(&mut section).unwrap();
+            assert_eq!((kind, marker), (file.clone(), 0xAB), "version {version}");
+            assert!(section.is_empty());
+        }
+    }
+}

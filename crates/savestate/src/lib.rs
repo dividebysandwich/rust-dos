@@ -476,6 +476,49 @@ impl<const V: u16, T: State + Default> State for Since<V, T> {
     }
 }
 
+/// A field a section's layout lost in its version `V`: a section saved in
+/// an older version has a `T` there, which loads and is thrown away, and
+/// a newer one has nothing. It holds nothing either.
+pub struct Until<const V: u16, T>(std::marker::PhantomData<fn() -> T>);
+
+impl<const V: u16, T> Default for Until<V, T> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<const V: u16, T> Clone for Until<V, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<const V: u16, T> Copy for Until<V, T> {}
+
+impl<const V: u16, T> std::fmt::Debug for Until<V, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Until<{V}>")
+    }
+}
+
+impl<const V: u16, T> PartialEq for Until<V, T> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<const V: u16, T> Eq for Until<V, T> {}
+
+impl<const V: u16, T: State + Default> State for Until<V, T> {
+    fn save(&self, _: &mut Writer) {}
+    fn load(&mut self, r: &mut Reader) -> Result<()> {
+        if r.version().is_some_and(|v| v < V) {
+            T::default().load(r)?;
+        }
+        Ok(())
+    }
+}
+
 impl<A: State, B: State> State for (A, B) {
     fn save(&self, w: &mut Writer) {
         self.0.save(w);
@@ -678,6 +721,31 @@ mod tests {
         a.load(&mut new).unwrap();
         b.load(&mut new).unwrap();
         assert_eq!((a, b.0), (7, 9));
+    }
+
+    #[test]
+    fn a_field_until_a_version_is_read_past_in_an_older_section_only() {
+        let mut w = Writer::new();
+        w.section(b"OLD ", 1, |w| {
+            vec![1u32, 2].save(w);
+            7u32.save(w);
+        });
+        w.section(b"NEW ", 2, |w| {
+            Until::<2, Vec<u32>>::default().save(w);
+            9u32.save(w);
+        });
+        let mut r = Reader::new(&w.buf);
+        let (mut gone, mut a) = (Until::<2, Vec<u32>>::default(), 0u32);
+        let mut old = r.section_of(b"OLD ", &[1, 2]).unwrap();
+        gone.load(&mut old).unwrap();
+        a.load(&mut old).unwrap();
+        assert_eq!(a, 7);
+        assert!(old.is_empty());
+        let mut new = r.section_of(b"NEW ", &[1, 2]).unwrap();
+        gone.load(&mut new).unwrap();
+        a.load(&mut new).unwrap();
+        assert_eq!(a, 9);
+        assert!(new.is_empty());
     }
 
     #[test]
