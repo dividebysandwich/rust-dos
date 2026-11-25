@@ -1160,20 +1160,39 @@ pub fn dde_query_conv_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// The class of Explorer's folder windows, which group windows are.
 pub const FOLDER_CLASS: &str = "CabinetWClass";
 
-/// Open a window titled with each of `titles`, through CreateWindowExA
-/// called as the program would call it, and return TRUE. A group whose
-/// window is open already keeps that one, as Explorer's does.
+/// The size of a new folder window, which Explorer gives a folder
+/// without a saved place: three fifths of the screen and 32 pixels
+/// across, three fifths and 101 pixels down. Windows 98 SE makes them
+/// 416x389 at 640x480 and 512x461 at 800x600.
+fn folder_size(cpu: &Cpu) -> (i32, i32) {
+    let (w, h) = super::sysparams::screen_size(cpu);
+    (w * 3 / 5 + 32, h * 3 / 5 + 101)
+}
+
+/// The open folder window titled `title`, if there is one.
+fn folder_window(cpu: &Cpu, title: &[u8]) -> Option<u32> {
+    let state = &cpu.bus.win32.user;
+    state.top_levels().into_iter().find(|&h| {
+        super::class::is_class(state, h, FOLDER_CLASS)
+            && state
+                .window(h)
+                .is_some_and(|w| w.text.eq_ignore_ascii_case(title))
+    })
+}
+
+/// Open the folder window of each group in `titles`, as Explorer does
+/// for CreateGroup and ShowGroup, and return TRUE. A group without an
+/// open window gets a new one, through CreateWindowExA called as the
+/// program would call it, at the next place of the cascade of
+/// CW_USEDEFAULT windows and of `folder_size`, its bottom kept 4 pixels
+/// above the work area's. A group whose window is open has that one
+/// brought to the foreground. ShowGroup's show command changes
+/// nothing: Windows 98's Explorer shows the window as it is, or a new
+/// one normally, whatever the command.
 pub fn open_windows(cpu: &mut Cpu, titles: Vec<String>) -> Option<u32> {
+    // A group named twice in one execute string gets one window.
     let mut titles = titles;
     let mut seen: Vec<Vec<u8>> = Vec::new();
-    let state = &cpu.bus.win32.user;
-    for h in state.top_levels() {
-        if super::class::is_class(state, h, FOLDER_CLASS)
-            && let Some(w) = state.window(h)
-        {
-            seen.push(w.text.clone());
-        }
-    }
     titles.retain(|t| {
         let text = crate::dosstr::to_bytes(t);
         if seen.iter().any(|s| s.eq_ignore_ascii_case(&text)) {
@@ -1223,23 +1242,30 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     for _ in 0..n {
         at += cpu.bus.guest_read_asciiz(at, 0x1000).len() as u32 + 1;
     }
+    let title = cpu.bus.guest_read_asciiz(at, 0x1000);
+    if let Some(hwnd) = folder_window(cpu, &title) {
+        let foreground = super::address_of(cpu, "SetForegroundWindow");
+        return Next::call(foreground, &[hwnd], t.step + 1);
+    }
     let mut class = t.scratch;
     for _ in 0..count {
         class += cpu.bus.guest_read_asciiz(class, 0x1000).len() as u32 + 1;
     }
+    let (x, y) = super::window::next_default_place(cpu);
+    let (cx, cy) = folder_size(cpu);
+    let cy = cy.min(super::sysparams::work_area(cpu).bottom - 4 - y);
     const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
     const WS_VISIBLE: u32 = 0x1000_0000;
-    const CW_USEDEFAULT: u32 = 0x8000_0000;
     let create = super::address_of(cpu, "CreateWindowExA");
     let args = [
         0,
         class,
         at,
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
+        x as u32,
+        y as u32,
+        cx as u32,
+        cy as u32,
         0,
         0,
         0,

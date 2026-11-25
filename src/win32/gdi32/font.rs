@@ -2281,6 +2281,80 @@ pub fn get_character_placement(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(w | h << 16)
 }
 
+/// A glyph as GetGlyphOutline's GGO_BITMAP gives it: the pixels of its
+/// black box, the box's top left from the pen on the baseline (x right,
+/// y up), and how far the pen moves on.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GlyphBitmap {
+    pub width: u32,
+    pub height: u32,
+    pub origin: (i32, i32),
+    pub advance: i32,
+    /// The rows from the top, each `width.div_ceil(8)` bytes, the
+    /// leftmost pixel in a byte's top bit. Empty for a glyph without
+    /// pixels, such as the space's.
+    pub bits: Vec<u8>,
+}
+
+impl Realized {
+    /// The glyph of the character `c`, as TextOut draws it (italic
+    /// leaned, bold widened): `c` is a byte of the font's, or with
+    /// `wide` a Unicode character in its code page. One the font has no
+    /// byte for gets its default character's glyph. For
+    /// wglUseFontBitmaps, which Windows 98's OPENGL32 makes of GDI's
+    /// glyphs.
+    pub fn glyph_bitmap(&self, c: u32, wide: bool) -> GlyphBitmap {
+        let b = match (wide, u16::try_from(c)) {
+            (true, Ok(c)) => self.page.byte(c),
+            (false, Ok(c)) => u8::try_from(c).ok(),
+            (_, Err(_)) => None,
+        };
+        glyph_bitmap(self, b.unwrap_or(self.chars[2]))
+    }
+}
+
+/// The glyph of the byte `b` of the font `f`, as `draw_text` plots it.
+fn glyph_bitmap(f: &Realized, b: u8) -> GlyphBitmap {
+    let g = f.glyph(b);
+    let lean = |row: i32| if f.lean { (f.ascent - row) / 3 } else { 0 };
+    // The lit pixels' columns from the pen, by row from the top.
+    let mut pixels = Vec::new();
+    for (row, &bits) in g.rows.iter().enumerate() {
+        let mut m = bits;
+        while m != 0 {
+            let bit = m.trailing_zeros() as i32;
+            m &= m - 1;
+            pixels.push((g.offset + bit + lean(row as i32), row as i32));
+        }
+    }
+    let advance = g.advance;
+    let Some(left) = pixels.iter().map(|p| p.0).min() else {
+        return GlyphBitmap {
+            advance,
+            ..GlyphBitmap::default()
+        };
+    };
+    let right = pixels.iter().map(|p| p.0).max().unwrap_or(left);
+    let top = pixels.iter().map(|p| p.1).min().unwrap_or(0);
+    let bottom = pixels.iter().map(|p| p.1).max().unwrap_or(top);
+    let (width, height) = ((right - left + 1) as u32, (bottom - top + 1) as u32);
+    let row = width.div_ceil(8) as usize;
+    let mut bits = vec![0u8; row * height as usize];
+    for (x, y) in pixels {
+        let (x, y) = ((x - left) as usize, (y - top) as usize);
+        bits[y * row + x / 8] |= 0x80 >> (x % 8);
+    }
+    GlyphBitmap {
+        width,
+        height,
+        // Row `ascent` is the baseline's: the box's top is that many
+        // rows above it less its first row.
+        origin: (left, f.ascent - top),
+        advance,
+        bits,
+    }
+}
+
 /// GetFontData and GetGlyphOutlineA: TrueType fonts' only.
 pub fn get_font_data(_cpu: &mut Cpu, _args: &[u32]) -> Option<u32> {
     Some(GDI_ERROR)
@@ -2370,7 +2444,8 @@ fn scalable_file(cpu: &mut Cpu, name: &str) -> Option<Vec<u8>> {
 /// ERROR_FILE_NOT_FOUND, and one that isn't TrueType, or a `fot` that is
 /// there already, fails without setting an error. QuickTime 5 installs
 /// its font this way, with a full path and no `path`, each time it
-/// starts.
+/// starts. An empty `path` is no path, as for NULL: the documentation
+/// asks for either with a full path in `ttf`.
 pub fn create_scalable_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     use crate::win32::kernel32;
     use crate::win32::user32::string_at;
@@ -2383,13 +2458,18 @@ pub fn create_scalable_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32>
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     };
-    let full = if path == 0 {
-        ttf.clone()
+    let path = if path == 0 {
+        String::new()
     } else {
         let Some(path) = string_at(cpu, path) else {
             set_error(cpu, ERROR_INVALID_PARAMETER);
             return Some(FALSE);
         };
+        path
+    };
+    let full = if path.is_empty() {
+        ttf.clone()
+    } else {
         format!("{}\\{}", path.trim_end_matches('\\'), ttf)
     };
     let Some(bytes) = crate::win32::winmm::mci::media::read_file(cpu, &full) else {

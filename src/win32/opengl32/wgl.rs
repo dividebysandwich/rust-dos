@@ -919,7 +919,68 @@ pub fn get_default_proc_address(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// What the ICD doesn't have: layer planes, fonts, copying contexts.
+/// wglUseFontBitmapsA(hdc, first, count, list_base).
+pub fn use_font_bitmaps_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(use_font_bitmaps(cpu, args, false) as u32)
+}
+
+/// wglUseFontBitmapsW(hdc, first, count, list_base): the characters
+/// are Unicode's.
+pub fn use_font_bitmaps_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(use_font_bitmaps(cpu, args, true) as u32)
+}
+
+/// wglUseFontBitmaps: the display lists `list_base` on, one for each of
+/// the `count` characters from `first`, of the font selected into the
+/// DC, each a glBitmap of the character's glyph that moves the raster
+/// position on by its advance. As Windows' OPENGL32 makes them (Wine's
+/// wglUseFontBitmaps_common is the reference): the glyph's black box
+/// as GetGlyphOutline's GGO_BITMAP gives it, from GDI's own glyphs
+/// (`gdi32::font::Realized::glyph_bitmap`, which TextOut draws), its
+/// origin the box's top left from the pen, and a glyph without pixels a
+/// bitmap of none. A list of one of those names is replaced. It fails
+/// without a current context, for a DC that isn't one, and while the
+/// context compiles a list or is between glBegin and glEnd, where
+/// glNewList can't run.
+fn use_font_bitmaps(cpu: &mut Cpu, args: &[u32], wide: bool) -> bool {
+    let [hdc, first, count, base] = [args[0], args[1], args[2], args[3]];
+    if super::ctx(cpu).is_none() {
+        return false;
+    }
+    let Some((_, font)) = super::super::gdi32::font::font_of(cpu, hdc) else {
+        return false;
+    };
+    for i in 0..count {
+        let g = font.glyph_bitmap(first.wrapping_add(i), wide);
+        // OpenGL's bitmaps go from the bottom row up.
+        let row = g.width.div_ceil(8) as usize;
+        let bits: Vec<u8> = g
+            .bits
+            .chunks_exact(row.max(1))
+            .rev()
+            .flatten()
+            .copied()
+            .collect();
+        let yorig = g.height as i32 - g.origin.1;
+        let args = [
+            g.width,
+            g.height,
+            (-g.origin.0 as f32).to_bits(),
+            (yorig as f32).to_bits(),
+            (g.advance as f32).to_bits(),
+            0f32.to_bits(),
+            0,
+        ];
+        let name = base.wrapping_add(i);
+        if !super::lists::compile_bitmap(cpu, name, &args, &bits) {
+            return false;
+        }
+    }
+    true
+}
+
+/// What the ICD doesn't have: layer planes, font outlines, copying
+/// contexts.
 pub fn fail(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(FALSE)
 }

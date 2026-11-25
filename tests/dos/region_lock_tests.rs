@@ -142,6 +142,17 @@ fn errors_as_ms_dos_gives_them() {
     assert_eq!(lock(&mut cpu, nul, 0, 1), Err(0x21));
 }
 
+/// Plain DOS has no SHARE loaded: its installation check (INT 2Fh
+/// AX=1000h) leaves AL 00h. Inside the built-in Windows, VSHARE answers
+/// (tests/win32).
+#[test]
+fn plain_dos_answers_that_share_is_not_installed() {
+    let mut cpu = machine("share_check");
+    cpu.set_ax(0x1000);
+    handle_hle(&mut cpu, 0x2F);
+    assert_eq!(cpu.ax(), 0x1000);
+}
+
 #[test]
 fn locks_past_the_end_leave_the_files_bytes_free() {
     // As Btrieve for Windows tells other programs it has a file open: two

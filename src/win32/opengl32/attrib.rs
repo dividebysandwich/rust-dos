@@ -7,16 +7,18 @@
 //! the pixel transfer modes, are pushed and popped with nothing in
 //! them.
 
+use super::clip::Clip;
 use super::light::Lighting;
+use super::texgen::{TEXGEN_SAVED, TexGen};
 use super::{
-    CAP_ALPHA_TEST, CAP_BLEND, CAP_CLIP_PLANES, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST,
-    CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_LINE_SMOOTH, CAP_LINE_STIPPLE, CAP_LOGIC_OP,
-    CAP_NORMALIZE, CAP_POINT_SMOOTH, CAP_POLYGON_OFFSET_FILL, CAP_POLYGON_OFFSET_LINE,
-    CAP_POLYGON_OFFSET_POINT, CAP_POLYGON_SMOOTH, CAP_POLYGON_STIPPLE, CAP_SCISSOR_TEST,
-    CAP_STENCIL_TEST, CAP_TEXTURE_GEN, Context, GL_STACK_OVERFLOW, GL_STACK_UNDERFLOW, Texture,
-    UNITS, ctx, current, error, state,
+    CAP_ALPHA_TEST, CAP_BLEND, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST, CAP_DITHER,
+    CAP_FOG, CAP_LIGHTING, CAP_LINE_SMOOTH, CAP_LINE_STIPPLE, CAP_LOGIC_OP, CAP_NORMALIZE,
+    CAP_POINT_SMOOTH, CAP_POLYGON_OFFSET_FILL, CAP_POLYGON_OFFSET_LINE, CAP_POLYGON_OFFSET_POINT,
+    CAP_POLYGON_SMOOTH, CAP_POLYGON_STIPPLE, CAP_SCISSOR_TEST, CAP_STENCIL_TEST, Context,
+    GL_STACK_OVERFLOW, GL_STACK_UNDERFLOW, Texture, UNITS, ctx, current, error, state,
 };
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 
 /// How deep the stack is (GL_MAX_ATTRIB_STACK_DEPTH).
 pub const ATTRIB_DEPTH: usize = 16;
@@ -53,6 +55,7 @@ pub struct Attrib {
     pub color: [f32; 4],
     pub tex_coord: [[f32; 4]; UNITS],
     pub normal: [f32; 3],
+    pub raster: crate::savestate::Since<{ super::raster::RASTER_SAVED }, super::raster::Raster>,
     pub lighting: Lighting,
     pub shade_model: u32,
     pub matrix_mode: u32,
@@ -85,13 +88,16 @@ pub struct Attrib {
     pub bound: [u32; UNITS],
     pub tex_params: [TexParams; UNITS],
     pub list_base: u32,
+    /// Each unit's coordinate generation, and the clip planes.
+    pub texgen: Since<TEXGEN_SAVED, [TexGen; UNITS]>,
+    pub clip: Since<TEXGEN_SAVED, Clip>,
 }
 
 /// The capabilities each group keeps the enables of; the enable group
 /// keeps all of them.
 const GROUP_CAPS: &[(u32, u32)] = &[
     (GL_LIGHTING_BIT, CAP_LIGHTING | CAP_COLOR_MATERIAL),
-    (GL_TRANSFORM_BIT, CAP_NORMALIZE | CAP_CLIP_PLANES),
+    (GL_TRANSFORM_BIT, CAP_NORMALIZE),
     (GL_FOG_BIT, CAP_FOG),
     (GL_DEPTH_BUFFER_BIT, CAP_DEPTH_TEST),
     (GL_STENCIL_BUFFER_BIT, CAP_STENCIL_TEST),
@@ -111,7 +117,6 @@ const GROUP_CAPS: &[(u32, u32)] = &[
     (GL_SCISSOR_BIT, CAP_SCISSOR_TEST),
     (GL_POINT_BIT, CAP_POINT_SMOOTH),
     (GL_LINE_BIT, CAP_LINE_SMOOTH | CAP_LINE_STIPPLE),
-    (GL_TEXTURE_BIT, CAP_TEXTURE_GEN),
 ];
 
 /// The parameters of the texture `name`, if there is one: the
@@ -133,6 +138,7 @@ fn save(c: &Context, shared: &[Texture], mask: u32) -> Attrib {
         color: c.color,
         tex_coord: c.tex_coord,
         normal: c.normal,
+        raster: c.raster,
         lighting: *c.lighting,
         shade_model: c.shade_model,
         matrix_mode: c.matrix_mode,
@@ -165,6 +171,8 @@ fn save(c: &Context, shared: &[Texture], mask: u32) -> Attrib {
         bound: c.bound,
         tex_params: std::array::from_fn(|u| tex_params(c, shared, c.bound[u])),
         list_base: c.lists.base,
+        texgen: c.texgen,
+        clip: c.clip,
     }
 }
 
@@ -191,10 +199,26 @@ fn restore(c: &mut Context, a: &Attrib) {
     if on(GL_ENABLE_BIT) || on(GL_LIGHTING_BIT) {
         c.lighting.enabled = a.lighting.enabled;
     }
+    // The texture group keeps each unit's generation with its enables
+    // (table 6.14), the transform group the clip planes with theirs
+    // (table 6.7).
+    if on(GL_TEXTURE_BIT) {
+        c.texgen = a.texgen;
+    } else if on(GL_ENABLE_BIT) {
+        for (now, then) in c.texgen.iter_mut().zip(a.texgen.iter()) {
+            now.enabled = then.enabled;
+        }
+    }
+    if on(GL_TRANSFORM_BIT) {
+        c.clip = a.clip;
+    } else if on(GL_ENABLE_BIT) {
+        c.clip.enabled = a.clip.enabled;
+    }
     if on(GL_CURRENT_BIT) {
         c.color = a.color;
         c.tex_coord = a.tex_coord;
         c.normal = a.normal;
+        c.raster = a.raster;
     }
     if on(GL_LIGHTING_BIT) {
         *c.lighting = a.lighting;
@@ -301,6 +325,7 @@ crate::state_fields!(Attrib {
     color,
     tex_coord,
     normal,
+    raster,
     lighting,
     shade_model,
     matrix_mode,
@@ -332,7 +357,9 @@ crate::state_fields!(Attrib {
     env_color,
     bound,
     tex_params,
-    list_base
+    list_base,
+    texgen,
+    clip
 });
 
 #[cfg(test)]
@@ -372,6 +399,36 @@ mod tests {
         assert!(!c.texture_2d[0]);
         // A lighting parameter isn't an enable.
         assert!(c.lighting.local_viewer);
+    }
+
+    /// The texture group keeps each unit's generation and its enables,
+    /// the transform group the clip planes and theirs, and the enable
+    /// group the enables of both alone (tables 6.7, 6.14 and 6.13).
+    #[test]
+    fn generation_and_clip_planes_come_back_with_their_groups() {
+        use super::super::texgen::GL_SPHERE_MAP;
+        let mut c = super::super::new_context(0, 0, 1);
+        c.texgen[1].enabled = 0b0011;
+        c.clip.enabled = 0b10;
+        c.clip.planes[1] = [1.0, 0.0, 0.0, 0.0];
+        let pushed = (*c.texgen, *c.clip);
+        let change = |c: &mut Context| {
+            c.texgen[1].enabled = 0;
+            c.texgen[1].mode[0] = GL_SPHERE_MAP;
+            c.clip.enabled = 0;
+            c.clip.planes[1] = [0.0, 1.0, 0.0, 0.0];
+        };
+        let a = save(&c, &[], GL_TEXTURE_BIT | GL_TRANSFORM_BIT);
+        change(&mut c);
+        restore(&mut c, &a);
+        assert_eq!((*c.texgen, *c.clip), pushed);
+
+        let a = save(&c, &[], GL_ENABLE_BIT);
+        change(&mut c);
+        restore(&mut c, &a);
+        assert_eq!((c.texgen[1].enabled, c.clip.enabled), (0b0011, 0b10));
+        assert_eq!(c.texgen[1].mode[0], GL_SPHERE_MAP, "a mode isn't an enable");
+        assert_eq!(c.clip.planes[1], [0.0, 1.0, 0.0, 0.0], "nor is a plane");
     }
 
     /// A texture deleted between the push and the pop comes back under

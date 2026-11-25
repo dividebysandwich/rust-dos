@@ -27,13 +27,18 @@
 //! a command that makes one returns `NEEDS_CALL`; the function that ran
 //! it makes the call (`call_step`) and runs again, and the command then
 //! finds what the call returned (`made`). Each thread keeps its own
-//! calls. Closing posts the window WM_CLOSE, which destroys it.
+//! calls. The open of a device that reads its file with mmio makes calls
+//! into WINMM the same way, to read it through the program's I/O
+//! procedure (`read_element`). Closing posts the window WM_CLOSE, which
+//! destroys it.
 //!
 //! A save state keeps where the device is, not the file: it is read
-//! again when it is next wanted.
+//! again when it is next wanted. A file the program's I/O procedure read
+//! is kept with the device instead (`Device::procedure_data`).
 
 use super::media::{Kind as MediaKind, Media, Pictures};
 use super::*;
+use crate::savestate::Since;
 use crate::win32::gdi32::draw::{self, Source};
 use crate::win32::gdi32::palette;
 use crate::win32::gdi32::surface::{Surface, default_masks, dib_stride};
@@ -174,8 +179,9 @@ pub struct Video {
     pub by_two: bool,
 }
 
-/// A call into USER32: the function, its arguments, and the strings it
-/// passes, each with the place of the argument that points to it.
+/// A call into USER32, or into WINMM's mmio (`super::read_element`): the
+/// function, its arguments, and the strings it passes, each with the
+/// place of the argument that points to it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Call {
     pub target: u32,
@@ -183,10 +189,10 @@ pub struct Call {
     pub strings: Vec<(u32, String)>,
 }
 
-/// A thread's command's calls into USER32, which the thread makes before
-/// the command runs again: those made, with what they returned, and the
-/// one it asks for next. Each thread has its own, so that commands two
-/// threads send at once don't take each other's calls.
+/// A thread's command's calls, which the thread makes before the command
+/// runs again: those made, with what they returned, and the one it asks
+/// for next. Each thread has its own, so that commands two threads send
+/// at once don't take each other's calls.
 #[derive(Clone, Debug, Default)]
 pub struct Calls {
     pub tid: u32,
@@ -194,6 +200,10 @@ pub struct Calls {
     pub next: Option<Call>,
     /// The file the command read, so that it isn't read again.
     pub media: Option<(String, Arc<Media>)>,
+    /// The element the command read through the program's I/O procedure,
+    /// and its bytes, kept from when mmioOpenA read them until the
+    /// command runs again after its mmioClose (`super::read_element`).
+    pub element: Since<{ super::PROCEDURE_SAVED }, Option<(String, Arc<Vec<u8>>)>>,
 }
 
 /// The bytes of a call's scratch space for its strings.
@@ -204,7 +214,7 @@ fn video(cpu: &mut Cpu, i: usize) -> &mut Video {
 }
 
 /// The running thread's calls, made empty if it has none.
-fn calls(cpu: &mut Cpu) -> &mut Calls {
+pub(super) fn calls(cpu: &mut Cpu) -> &mut Calls {
     let tid = user32::current_tid(cpu);
     let list = &mut mci(cpu).calls;
     let k = match list.iter().position(|c| c.tid == tid) {
@@ -220,12 +230,19 @@ fn calls(cpu: &mut Cpu) -> &mut Calls {
     &mut list[k]
 }
 
-/// What the call `api(args)` returned, if the command made it; else it
-/// asks for the call, and the command returns NEEDS_CALL. `strings` are
-/// the strings the call passes, each with the place of its argument.
+/// What the call of USER32's `api(args)` returned, if the command made
+/// it; else it asks for the call, and the command returns NEEDS_CALL.
+/// `strings` are the strings the call passes, each with the place of its
+/// argument.
 pub fn made(cpu: &mut Cpu, api: &str, args: &[u32], strings: &[(u32, &str)]) -> Option<u32> {
+    let target = user32::address_of(cpu, api);
+    made_at(cpu, target, args, strings)
+}
+
+/// `made` for the function at `target`.
+pub fn made_at(cpu: &mut Cpu, target: u32, args: &[u32], strings: &[(u32, &str)]) -> Option<u32> {
     let call = Call {
-        target: user32::address_of(cpu, api),
+        target,
         args: args.to_vec(),
         strings: strings.iter().map(|&(k, s)| (k, s.to_string())).collect(),
     };
@@ -295,14 +312,14 @@ pub fn media(cpu: &mut Cpu, i: usize) -> Option<Arc<Media>> {
     if element.is_empty() {
         return None;
     }
-    let m = Arc::new(read(cpu, i, &element).ok()?);
+    let m = Arc::new(read(cpu, i).ok()?);
     video(cpu, i).media = Some(m.clone());
     Some(m)
 }
 
-/// Reads the file `path`, for the device `i`.
-fn read(cpu: &mut Cpu, i: usize, path: &str) -> Result<Media, u32> {
-    let bytes = super::media::read_file(cpu, path).ok_or(MCIERR_FILE_NOT_FOUND)?;
+/// Reads the device `i`'s element (`element_bytes`).
+fn read(cpu: &mut Cpu, i: usize) -> Result<Media, u32> {
+    let bytes = element_bytes(cpu, i)?;
     Media::parse(&bytes, is_mpeg(cpu, i)).ok_or(MCIERR_INVALID_FILE)
 }
 
@@ -396,7 +413,7 @@ fn open(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
             .map(|(_, m)| m.clone());
         let m = match cached {
             Some(m) => m,
-            None => match read(cpu, i, &element) {
+            None => match read(cpu, i) {
                 Ok(m) => Arc::new(m),
                 Err(e) => return e,
             },
@@ -1345,7 +1362,8 @@ crate::state_fields!(Call {
 crate::state_fields!(Calls {
     tid,
     made,
-    next
+    next,
+    element
 } skip {
     media
 });

@@ -3163,6 +3163,24 @@ fn a_program_starts_a_dos_program_and_waits_for_it() {
     assert_eq!(code, 0x71);
 }
 
+/// SHARE's installation check (INT 2Fh AX=1000h) from a DOS program
+/// Windows started: installed, AL=FFh, as in a DOS box of Windows 98 SE,
+/// whose VSHARE keeps the locks. The child ends with 7 for FFh, else 9.
+#[test]
+fn a_dos_program_windows_started_finds_share() {
+    let child = vec![
+        0xB8, 0x00, 0x10, // mov ax,1000h
+        0xCD, 0x2F, // int 2Fh
+        0x3C, 0xFF, // cmp al,0FFh
+        0xB0, 0x07, // mov al,7
+        0x74, 0x02, // je end
+        0xB0, 0x09, // mov al,9
+        0xB4, 0x4C, 0xCD, 0x21, // end: mov ah,4Ch; int 21h
+    ];
+    let code = start_program("child_dos_share", "C.COM", "C.COM", child, &[]);
+    assert_eq!(code, 0x71);
+}
+
 /// CreateProcessA of a batch file: Windows 98 runs it with COMMAND.COM
 /// /C in a DOS box, and the programs it starts see its arguments. The
 /// batch file starts the DOS program D.COM with its first argument,
@@ -7075,6 +7093,117 @@ fn win32_calls_name_files_by_long_names_on_a_disk_image() {
     );
 }
 
+/// A file opened by its long name and by its 8.3 alias is one file, as
+/// on Windows 98, where VFAT finds the same directory entry through both
+/// names: on drive `drive` the program writes "Saved game one.dat",
+/// asks GetShortPathNameA for its alias, and checks that a CREATE_ALWAYS
+/// by the long name empties the file that an open by the alias then reads
+/// (GetFileSize 0), and that a handle opened by either name with no
+/// sharing makes an open by the other fail with ERROR_SHARING_VIOLATION.
+/// Each check sets a bit of the exit code.
+fn check_long_name_and_alias_are_one_file(test: &str, drive: &str, image: bool) {
+    use Arg::{Esi, I};
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const CREATE_ALWAYS: u32 = 2;
+    const OPEN_EXISTING: u32 = 3;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    let names: &[&str] = &[
+        "CreateFileA",
+        "WriteFile",
+        "CloseHandle",
+        "GetShortPathNameA",
+        "GetFileSize",
+        "GetLastError",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x200];
+    put(&mut data, 0, format!("{drive}\\Saved game one.dat\0").as_bytes());
+    // The alias, at 40h; the bytes to write and the count written.
+    let (alias, old, written) = (0x40, 0x180, 0x190);
+    put(&mut data, old, b"old data");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: usize| I(l.at(offset as u32) as u32);
+        let open = |a: &mut CodeAssembler, name, access, share, disposition| {
+            let args = [at(name), I(access), I(share), I(0), I(disposition), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &args)
+        };
+        a.xor(ebx, ebx)?;
+        open(a, 0, GENERIC_WRITE, 0, CREATE_ALWAYS)?;
+        a.mov(esi, eax)?;
+        call_with(a, f("WriteFile"), &[Esi, at(old), I(8), at(written), I(0)])?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        a.cmp(dword_ptr(l.at(written as u32)), 8)?;
+        check(a, false, 0)?;
+        call_with(a, f("GetShortPathNameA"), &[at(0), at(alias), I(0x100)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        // Emptied at the create, for whatever name the file is opened by
+        // next.
+        open(a, 0, GENERIC_WRITE, 3, CREATE_ALWAYS)?;
+        a.mov(esi, eax)?;
+        open(a, alias, GENERIC_READ, 3, OPEN_EXISTING)?;
+        a.mov(edi, eax)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("GetFileSize"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        // Opened by one name with no sharing, the file can't be opened
+        // by the other.
+        for (bit, (first, second)) in [(3, (0, alias)), (5, (alias, 0))] {
+            open(a, first, GENERIC_READ, 0, OPEN_EXISTING)?;
+            a.mov(esi, eax)?;
+            open(a, second, GENERIC_READ, 1, OPEN_EXISTING)?;
+            a.cmp(eax, -1)?;
+            check(a, false, bit)?;
+            a.call(f("GetLastError"))?;
+            a.cmp(eax, ERROR_SHARING_VIOLATION)?;
+            check(a, false, bit + 1)?;
+            call_with(a, f("CloseHandle"), &[Esi])?;
+        }
+        a.mov(eax, ebx)?;
+        a.or(eax, 0x80)?;
+        a.ret()
+    });
+    let mut cpu = machine(test, exe);
+    if image {
+        let image_dir = PathBuf::from("target/test_win32").join(format!("{test}_d"));
+        let _ = fs::remove_dir_all(&image_dir);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image = image_dir.join("d.img");
+        rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.disk.mount(3, &image, options, true).unwrap();
+    }
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+}
+
+#[test]
+fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_host_drive() {
+    check_long_name_and_alias_are_one_file("one_file_host", "C:", false);
+}
+
+#[test]
+fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_disk_image() {
+    check_long_name_and_alias_are_one_file("one_file_image", "D:", true);
+}
+
 /// SetFileTime on a file in a host folder, as Windows 98 SE does it on
 /// FAT: the time of the last write is rounded up to an even second
 /// (2001-10-08 19:20:01.5 is kept as 19:20:02), a time before 1980 fails
@@ -9986,6 +10115,453 @@ fn a_dll_freeing_a_dll_as_the_process_ends_stays_mapped() {
     assert_eq!(text.matches("E detached\r\n").count(), 1, "{text}");
     assert_eq!(text.matches("D freed E\r\n").count(), 1, "{text}");
     assert_eq!(text.matches("D null\r\n").count(), 1, "{text}");
+}
+
+/// Write the `len` bytes at `at` in a test module's data to standard
+/// output, with GetStdHandle and WriteFile at its import slots `get` and
+/// `write`, the count going to `written` in its data.
+fn say_from(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    (get, write): (usize, usize),
+    at: u32,
+    len: i32,
+    written: u32,
+) -> Result<(), IcedError> {
+    a.push(STD_OUTPUT_HANDLE)?;
+    a.call(l.import(get))?;
+    a.push(0)?;
+    a.push(l.at(written) as i32)?;
+    a.push(len)?;
+    a.push(l.at(at) as i32)?;
+    a.push(eax)?;
+    a.call(l.import(write))
+}
+
+/// D.DLL for the nested FreeLibrary tests: an entry point that does
+/// nothing, and Seven, which X.DLL imports.
+fn seven_dll() -> Vec<u8> {
+    let entry = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let seven = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 7)?;
+        a.ret()
+    };
+    let data = [0u8; 0x10];
+    module_image(
+        DLL_BASE,
+        Some("D.DLL"),
+        &[],
+        &data,
+        &[("", &entry), ("Seven", &seven)],
+        &[],
+    )
+}
+
+/// The program of the nested FreeLibrary tests: it loads D.DLL, then
+/// `first`, and frees `first`. Then `first` and `gone` are gone, and
+/// D.DLL is there with its export, under the handle the load gave.
+fn nested_free_program(first: &str, gone: &str) -> Vec<u8> {
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "FreeLibrary",
+        "GetModuleHandleA",
+        "GetProcAddress",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"D.DLL\0Seven\0".to_vec();
+    data.resize(0x10, 0);
+    data.extend_from_slice(first.as_bytes());
+    data.resize(0x20, 0);
+    data.extend_from_slice(gone.as_bytes());
+    data.resize(0x40, 0);
+    const D: u32 = 0;
+    const SEVEN: u32 = 6;
+    const FIRST: u32 = 0x10;
+    const GONE: u32 = 0x20;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.push(l.at(D) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.push(l.at(FIRST) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(edi, eax)?;
+        a.test(edi, edi)?;
+        check(a, true, 0)?;
+        a.push(edi)?;
+        a.call(f("FreeLibrary"))?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        a.push(l.at(FIRST) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.push(l.at(GONE) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 3)?;
+        a.push(l.at(D) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 4)?;
+        a.push(l.at(SEVEN) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.test(eax, eax)?;
+        check(a, true, 5)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    module_image(BASE, None, imports, &data, &[("", &main)], &[])
+}
+
+/// X.DLL's DLL_PROCESS_DETACH loads X.DLL and frees it again (#1893).
+/// The load finds it still there and the FreeLibrary inside DllMain only
+/// takes that reference away, as Wine's LdrUnloadDll does: X.DLL's code
+/// is there when it returns, and it goes when the program's FreeLibrary
+/// does. D.DLL, which X.DLL imports from and the program loaded as well,
+/// loses X.DLL's reference once and stays. X.DLL learns once that it is
+/// detached because the load doesn't attach it again; Wine's LdrLoadDll
+/// would, and what Windows 9x does is open in #2014.
+#[test]
+fn a_dll_freeing_itself_as_it_detaches_goes_after_the_outer_free() {
+    let x_imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+        ),
+        ("D.DLL", &["Seven"]),
+    ];
+    let mut x_data = b"X.DLL\0\0\0X detached\r\nX back\r\n".to_vec();
+    x_data.resize(0x40, 0);
+    const NAME: u32 = 0;
+    const DETACHED: u32 = 8;
+    const BACK: u32 = 20;
+    const WRITTEN: u32 = 0x30;
+    let x_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        say_from(a, l, (2, 3), DETACHED, 12, WRITTEN)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(l.import(0))?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        // Back in X.DLL's code, which is still there.
+        say_from(a, l, (2, 3), BACK, 8, WRITTEN)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let x = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        x_imports,
+        &x_data,
+        &[("", &x_main)],
+        &[],
+    );
+    let exe = nested_free_program("X.DLL", "X.DLL");
+    let (code, text) = run_files(
+        "nested_free_self",
+        &[("T.EXE", exe), ("X.DLL", x), ("D.DLL", seven_dll())],
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text.matches("X detached\r\n").count(), 1, "{text}");
+    assert_eq!(text.matches("X back\r\n").count(), 1, "{text}");
+}
+
+/// Y.DLL imports from X.DLL, which imports from D.DLL. The program frees
+/// Y.DLL, the last reference to both, and Y.DLL's DLL_PROCESS_DETACH
+/// loads X.DLL and frees it again (#1893). That inner FreeLibrary only
+/// lowers X.DLL's count: X.DLL learns that it is detached after Y.DLL's
+/// DllMain has returned, as Wine's process_detach tells it when the
+/// outermost FreeLibrary ends, and D.DLL, which the program loaded as
+/// well, loses X.DLL's reference once and stays.
+#[test]
+fn a_free_inside_a_dllmain_leaves_the_detach_to_the_outer_free() {
+    let x_imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetStdHandle", "WriteFile"]),
+        ("D.DLL", &["Seven"]),
+    ];
+    let mut x_data = b"X detached\r\n".to_vec();
+    x_data.resize(0x40, 0);
+    let x_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        say_from(a, l, (0, 1), 0, 12, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let six = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 6)?;
+        a.ret()
+    };
+    let x = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        x_imports,
+        &x_data,
+        &[("", &x_main), ("Six", &six)],
+        &[],
+    );
+
+    let y_imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+        ),
+        ("X.DLL", &["Six"]),
+    ];
+    let mut y_data = b"X.DLL\0\0\0Y freed X\r\n".to_vec();
+    y_data.resize(0x40, 0);
+    let y_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        say_from(a, l, (2, 3), 8, 11, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let y = module_image(
+        DLL_BASE,
+        Some("Y.DLL"),
+        y_imports,
+        &y_data,
+        &[("", &y_main)],
+        &[],
+    );
+
+    let exe = nested_free_program("Y.DLL", "X.DLL");
+    let (code, text) = run_files(
+        "nested_free_other",
+        &[
+            ("T.EXE", exe),
+            ("Y.DLL", y),
+            ("X.DLL", x),
+            ("D.DLL", seven_dll()),
+        ],
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text.matches("X detached\r\n").count(), 1, "{text}");
+    let freed = text.find("Y freed X\r\n");
+    let detached = text.find("X detached\r\n");
+    assert!(
+        freed.is_some() && freed < detached,
+        "X.DLL learned that it is detached before Y.DLL's FreeLibrary returned: {text}"
+    );
+}
+
+/// A DLL named `name` whose DLL_PROCESS_DETACH writes `says` (shorter
+/// than 30h bytes) to standard output.
+fn telling_dll(name: &str, says: &'static [u8]) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetStdHandle", "WriteFile"])];
+    let mut data = says.to_vec();
+    data.resize(0x40, 0);
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        say_from(a, l, (0, 1), 0, says.len() as i32, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    module_image(DLL_BASE, Some(name), imports, &data, &[("", &main)], &[])
+}
+
+/// Y.DLL loads Z.DLL as it attaches and frees it as it detaches, which
+/// lets go of Z.DLL's last reference while the program's FreeLibrary of
+/// Y.DLL runs (#1893). Z.DLL isn't among the modules that FreeLibrary
+/// let go of, and the inner FreeLibrary only lowers its count: Z.DLL
+/// learns that it is detached once Y.DLL's DllMain has returned, and
+/// goes with Y.DLL.
+#[test]
+fn a_dll_a_dllmain_frees_is_detached_after_the_dllmain_returns() {
+    let y_imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+    )];
+    let mut y_data = b"Z.DLL\0\0\0Y freed Z\r\n".to_vec();
+    y_data.resize(0x40, 0);
+    const HANDLE: u32 = 0x20;
+    let y_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut detach = a.create_label();
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 1)?;
+        a.jne(detach)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(dword_ptr(l.at(HANDLE)), eax)?;
+        a.jmp(done)?;
+        a.set_label(&mut detach)?;
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(dword_ptr(l.at(HANDLE)))?;
+        a.call(l.import(1))?;
+        say_from(a, l, (2, 3), 8, 11, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let y = module_image(
+        DLL_BASE,
+        Some("Y.DLL"),
+        y_imports,
+        &y_data,
+        &[("", &y_main)],
+        &[],
+    );
+    let exe = nested_free_program("Y.DLL", "Z.DLL");
+    let (code, text) = run_files(
+        "nested_free_loaded",
+        &[
+            ("T.EXE", exe),
+            ("Y.DLL", y),
+            ("Z.DLL", telling_dll("Z.DLL", b"Z detached\r\n")),
+            ("D.DLL", seven_dll()),
+        ],
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text.matches("Z detached\r\n").count(), 1, "{text}");
+    let freed = text.find("Y freed Z\r\n");
+    let detached = text.find("Z detached\r\n");
+    assert!(
+        freed.is_some() && freed < detached,
+        "Z.DLL learned that it is detached before Y.DLL's FreeLibrary returned: {text}"
+    );
+}
+
+/// A second thread frees X.DLL, whose DLL_PROCESS_DETACH calls
+/// ExitThread, so that FreeLibrary's chain of DllMain calls ends with
+/// the thread and never finishes. The main thread's FreeLibrary of
+/// W.DLL after it is the outermost one, not one nested in a chain that
+/// is gone: W.DLL learns that it is detached and goes, and X.DLL, which
+/// the ended chain let go of, goes with it.
+#[test]
+fn a_free_after_a_chain_ended_with_its_thread_detaches_and_unmaps() {
+    let names: &[&str] = &[
+        "CreateThread",
+        "WaitForSingleObject",
+        "LoadLibraryA",
+        "FreeLibrary",
+        "GetModuleHandleA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"X.DLL\0\0\0W.DLL\0".to_vec();
+    data.resize(0x10, 0);
+    const X: u32 = 0;
+    const W: u32 = 8;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        a.xor(ebx, ebx)?;
+        // CreateThread's flags, parameter and thread ID, then the
+        // thread's address as the call's return address.
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: load X.DLL and free it.
+        a.push(l.at(X) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(eax)?;
+        a.call(f("FreeLibrary"))?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.push(-1)?;
+        a.push(eax)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.push(l.at(W) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        check(a, true, 0)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        a.push(l.at(W) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.push(l.at(X) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 3)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+
+    let x_imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitThread"])];
+    let x_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let x = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        x_imports,
+        &[0; 0x10],
+        &[("", &x_main)],
+        &[],
+    );
+    let (code, text) = run_files(
+        "nested_free_ended",
+        &[
+            ("T.EXE", exe),
+            ("X.DLL", x),
+            ("W.DLL", telling_dll("W.DLL", b"W detached\r\n")),
+        ],
+    );
+    assert_eq!(
+        code,
+        0xF,
+        "the checks that failed: {:04b}, {}",
+        !code & 0xF,
+        text
+    );
+    assert_eq!(text.matches("W detached\r\n").count(), 1, "{text}");
 }
 
 /// A state saved after the last free of a built-in DLL has its mapping and
@@ -21021,4 +21597,106 @@ fn direct3drm_create_makes_an_object_that_counts_its_references() {
     });
     let (code, out) = run("direct3drm_create", exe);
     assert_eq!(code, 0, "check {code} went wrong {out}");
+}
+
+/// A GUI program made for the Windows `major`.`minor` (its subsystem
+/// version) with a visible edit control of the style `style` in a popup
+/// of its own class. The popup's procedure notes the WM_CTLCOLOR*
+/// messages it gets, 1 for WM_CTLCOLOREDIT and 2 for WM_CTLCOLORSTATIC,
+/// and passes them on to DefWindowProcA. The program paints the edit
+/// with UpdateWindow and ends with what was noted.
+fn edit_colors_program(style: i32, (major, minor): (u16, u16)) -> Vec<u8> {
+    const WM_CTLCOLOREDIT: i32 = 0x0133;
+    const WM_CTLCOLORSTATIC: i32 = 0x0138;
+    const WS_CHILD_VISIBLE: i32 = 0x5000_0000;
+    let names: &[&str] = &[
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "UpdateWindow",
+    ];
+    let kernel: &[&str] = &["ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("USER32.dll", names), ("KERNEL32.dll", kernel)];
+    let mut d = Data::default();
+    let name = d.text("EditColors");
+    let edit = d.text("Edit");
+    let text = d.text("WWWW");
+    let asked = d.add(&[0; 4]);
+    let mut wndclass = [0; 40];
+    wndclass[16..20].copy_from_slice(&BASE.to_le_bytes());
+    let class = d.add(&wndclass);
+    let mut b = Builder::exe(BASE);
+    b.subsystem(pe::SUBSYSTEM_GUI)
+        .subsystem_version(major, minor);
+    program_with(b, false, imports, &d.0, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut not_edit = a.create_label();
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_CTLCOLOREDIT)?;
+        a.jne(not_edit)?;
+        a.or(dword_ptr(l.at(asked)), 1)?;
+        a.set_label(&mut not_edit)?;
+        a.cmp(dword_ptr(esp + 8), WM_CTLCOLORSTATIC)?;
+        a.jne(other)?;
+        a.or(dword_ptr(l.at(asked)), 2)?;
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(class + 4)), eax)?;
+        a.mov(dword_ptr(l.at(class + 36)), l.at(name) as i32)?;
+        a.push(l.at(class) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        for value in [0, BASE as i32, 0, 0, 100, 200, 0, 0, POPUP] {
+            a.push(value)?;
+        }
+        a.push(l.at(name) as i32)?;
+        a.push(l.at(name) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.push(0)?;
+        a.push(BASE as i32)?;
+        a.push(5)?;
+        a.push(eax)?;
+        for value in [40, 100, 0, 0, WS_CHILD_VISIBLE | style] {
+            a.push(value)?;
+        }
+        a.push(l.at(text) as i32)?;
+        a.push(l.at(edit) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.push(eax)?;
+        a.call(f("UpdateWindow"))?;
+        a.push(dword_ptr(l.at(asked)))?;
+        a.call(l.import(names.len()))
+    })
+}
+
+#[test]
+fn a_win32_program_for_windows_3_gets_edit_colors_for_a_read_only_edit() {
+    // Windows 98's USER checks the version the program was made for,
+    // which for a Win32 program is its header's subsystem version: one
+    // made for 3.10 gets WM_CTLCOLOREDIT for a read-only edit, one made
+    // for 4.0 WM_CTLCOLORSTATIC.
+    const ES_MULTILINE: i32 = 0x0004;
+    const ES_READONLY: i32 = 0x0800;
+    const WS_DISABLED: i32 = 0x0800_0000;
+    for (style, what) in [
+        (ES_MULTILINE | ES_READONLY, "read-only"),
+        (ES_MULTILINE | WS_DISABLED, "disabled"),
+        (WS_DISABLED, "disabled single-line"),
+    ] {
+        let exe = edit_colors_program(style, (3, 10));
+        let (code, out) = run("edit_colors_win32_3", exe);
+        assert_eq!(code, 1, "a {what} edit of a 3.10 program: {out}");
+        let exe = edit_colors_program(style, (4, 0));
+        let (code, out) = run("edit_colors_win32_4", exe);
+        assert_eq!(code, 2, "a {what} edit of a 4.0 program: {out}");
+    }
+    let exe = edit_colors_program(ES_MULTILINE, (4, 0));
+    let (code, out) = run("edit_colors_win32_plain", exe);
+    assert_eq!(code, 1, "an edit that takes input: {out}");
 }

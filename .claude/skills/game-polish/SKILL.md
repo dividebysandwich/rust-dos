@@ -1,6 +1,6 @@
 ---
 name: game-polish
-description: Play a DOS game in the rust-dos emulator for a set time (30 minutes by default), file a GitHub issue for every emulation glitch, bug, performance problem and bottleneck found, then fix each one in its own git worktree and check the fix against the same game. Use when asked to polish, play-test or shake out bugs in a game, or to find and fix what goes wrong when a game runs in rust-dos.
+description: Play a DOS game in the rust-dos emulator for a set time (30 minutes by default), file a GitHub issue for every emulation glitch, bug, performance problem and bottleneck found, then fix each one a player sees in its own git worktree and check the fix against the same game. Use when asked to polish, play-test or shake out bugs in a game, or to find and fix what goes wrong when a game runs in rust-dos.
 argument-hint: <game> [minutes] [--no-fix] [--no-issues]
 ---
 
@@ -8,8 +8,8 @@ argument-hint: <game> [minutes] [--no-fix] [--no-issues]
 
 A play session, then a fix session. Play the game the way a player would,
 watch the emulator while doing it, and write down everything that is
-wrong. Then file each finding as an issue and fix it in its own worktree,
-validated against the game it was found in.
+wrong. Then file each finding as an issue, and fix each one a player
+sees in its own worktree, validated against the game it was found in.
 
 Read `docs/llm-debugging.md` before you start the emulator, and follow it
 and the `debug-emulator` skill for launching, input and stopping. This
@@ -220,8 +220,11 @@ didn't record while playing, such as a speed drop in one video mode.
 4. **File one issue for each.** Skip this with `--no-issues`. Find the
    repository from `git remote get-url origin`, and look at its labels
    first, using the ones that fit (such as `bug`, `performance`,
-   `emulation`) and inventing none. Title: what goes wrong and where,
-   such as "Doom: music stops after loading a saved game (SB16)". Body:
+   `emulation`) and inventing none. Give each issue one priority label:
+   `low-priority` for a finding that waits for a game to show it (the
+   end of Phase 3 says which), and for the others the one whose
+   description fits. Title: what goes wrong and where, such as "Doom:
+   music stops after loading a saved game (SB16)". Body:
 
    ```markdown
    ## What happens
@@ -259,7 +262,8 @@ Skip this with `--no-fix`. If your environment limits you to one branch,
 or forbids opening pull requests, ask before going on: put every fix on
 that branch as its own commit only if the user agrees.
 
-Fix the issues in rank order. For each one:
+Fix the issues a player sees, in rank order. The others wait, as the
+paragraphs after this list say. For each one:
 
 1. **Make a worktree** from the latest default branch, with a branch named
    after the issue:
@@ -292,25 +296,29 @@ Fix the issues in rank order. For each one:
    the branch, and open the pull request as a draft. It follows
    `.github/pull_request_template.md`, with `Fixes #<N>` under related
    issues; leave manual testing to be filled in after step 7.
-6. **Review it, and push the review's fixes.** In the worktree, run the
-   code review skill (`/review`, named `code-review` in some setups) on
-   the branch's changes:
+6. **Review it, and push the review's fixes.** Have a reviewer that
+   doesn't share your view of the change run the review: a fresh
+   subagent, never a fork of your own context, which would inherit your
+   reading of the bug and its blind spots. Give it only the pull
+   request's number, its worktree and target directory, and the
+   machine's rules, not your explanation of the change or why you think
+   it is right. It runs, in the worktree, the code review skill
+   (`/code-review`) with the prompt in step 2 of `AGENTS.md`'s pull
+   request lifecycle, which treats the description's claims as
+   unverified and checks each against the code.
 
-   ```
-   /review high --fix do not skip optional improvements, make judgement
-   calls prioritizing long-term quality and architecture over simplest
-   solution / smallest scope
-   ```
-
-   Apply each finding that is a net improvement, optional ones included,
-   choosing the change that is better for the code in the long run over
-   the smallest one. Leave out a finding that the review or you judge not
-   actually useful (a false positive, or a change that costs more than it
-   gives), and say in the pull request which ones were left out and why.
-   Check the result again as in step 4, commit, and push to the pull
-   request's branch. Validation in step 7 runs on this pushed head, never
-   on the code from before the review: if validation leads to more
-   changes, push them, and run the review again on what changed.
+   Then check each finding yourself, as `AGENTS.md` asks: keep the fixes
+   of those a test, a trace or a read of the code path confirms, and
+   revert a fix only with evidence that rules its finding out (the code
+   path, a test that would fail if the bug were real, or what the real
+   hardware or Windows does). List each rejected finding and its
+   evidence, and the judgement calls, in a comment on the pull request.
+   A confirmed finding the pull request doesn't fix gets an issue, linked
+   from that comment. Check the result again as in step 4, commit, and
+   push to the pull request's branch. Validation in step 7 runs on this
+   pushed head, never on the code from before the review: if validation
+   leads to more changes, push them, and run the review again on what
+   changed.
 7. **Validate against the game.** Build the worktree's release binary
    from the pushed head, then run the game as in Phase 0 with that
    binary, and with the shared build of the commit the branch starts
@@ -335,22 +343,39 @@ Fix the issues in rank order. For each one:
 8. **Mark the pull request ready for review** once validation succeeds:
    write what step 7 did and found under manual testing, then take it out
    of draft. If validation fails, go back to step 2; the pull request
-   stays a draft until a pushed head passes.
+   stays a draft until a pushed head passes. When a session runs as one
+   of several under a coordinator, don't mark it ready yourself: send the
+   coordinator a note that review, validation and evidence are done, and
+   it marks the pull request ready.
 9. **If it can't be fixed** in reasonable time, comment on the issue with
    what you found, and go on to the next one. Leave the draft pull
    request, if there is one, and the worktree for whoever goes on with
    it, and say where they are in the report.
 
-A finding that isn't fixed in this session is follow-up work, not a
-finding to leave behind: a missing DLL or API, a missing device, a
-performance cost, a gap the game only touches in its setup. Don't ask
-the user whether to take it on. List it in the report's follow-ups
-(Phase 4) with what the fix needs, so that it is queued as a fix task
-of its own: by you, if you go on working, or by whoever runs the
-session. Only two kinds stay out of the follow-ups, each with its reason
-in the report: the game's own behaviour, which the real PC shows too,
-and a fix that needs a decision with no clearly better option, which
-the report puts to the user.
+A finding that isn't fixed in this session, and that a player of the
+game sees, is follow-up work: a picture or a sound that is wrong, a
+crash or a hang, input that is lost, a feature the game or its setup
+uses that doesn't work, a scene measured in the game that runs below
+full speed or keeps `cpu_use` near 100 (a slower host plays it below
+full speed). Don't ask the user whether to take it on. List it in the
+report's follow-ups (Phase 4) with what the fix needs, so that it is
+queued as a fix task of its own: by you, if you go on working, or by
+whoever runs the session.
+
+A finding no game or program shows isn't fixed in this session and
+isn't queued: a gap in the log that nothing a player sees, hears or
+does depends on, a case the specification or Windows has that no
+program reaches, an edge a review found by reading the code. Step 2 of
+`AGENTS.md`'s pull request lifecycle says which programs count. The
+finding's issue (from Phase 2, or from the review in step 6) says what
+the real system does and carries the `low-priority` label; list it in
+the report apart from the follow-ups. With `--no-issues`, the report
+alone lists it. It is picked up when a game shows it: that game is
+added to the issue, and the label is raised to the priority the game's
+problem calls for. Two more kinds stay out of the follow-ups, each with
+its reason in the report: the game's own behaviour, which the real PC
+shows too, and a fix that needs a decision with no clearly better
+option, which the report puts to the user.
 
 Remove each worktree (`git worktree remove`) once its pull request is
 ready for review and nothing in it is still needed.
@@ -363,9 +388,10 @@ Finish with a short report to the user:
 - what you covered, and what you didn't reach;
 - a table: finding, kind, issue, pull request (draft or ready),
   validated (yes, no, or how), and what is left;
-- the follow-ups: each finding not fixed, with its issue, what the fix
-  needs and the save states for it, to be queued as fix tasks without
-  asking; and the findings left out of them, with the reason;
+- the follow-ups: each finding not fixed that a player sees, with its
+  issue, what the fix needs and the save states for it, to be queued as
+  fix tasks without asking; the issues no game shows yet, which wait
+  for one; and the findings left out of both, with the reason;
 - the speed figures from `stats.jsonl`: the slowest scenes and their
   `emulated_speed`, `fps` and `cpu_use`;
 - where `$W` is, with the save states and screenshots, since they aren't

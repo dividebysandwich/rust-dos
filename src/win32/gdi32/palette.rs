@@ -150,7 +150,7 @@ fn show_system_entries(cpu: &mut Cpu, first: usize, last: usize) {
 
 /// The W32 section's version that added the colors a bitmap's values
 /// stood for (`Meaning`): a state saved by an older rust-dos has none.
-pub const MEANING_SAVED: u16 = 97;
+pub const MEANING_SAVED: u16 = 104;
 
 /// The color each value of an 8-bit bitmap of GDI's on a palette device
 /// stood for when it was drawn: 256 of them, None for a value that
@@ -788,13 +788,17 @@ pub fn is_dc_current_palette(cpu: &mut Cpu, hdc: u32) -> bool {
 /// with TRUE. So on a desktop of more than 256 colours a palette never
 /// becomes the primary one, and after a switch to an 8-bit mode the
 /// palettes selected before it realize in the background until one is
-/// selected again.
+/// selected again. On a palette device, any palette but DEFAULT_PALETTE
+/// selected into a window's DC, in the foreground or not, marks the
+/// window's top-level window as one with a palette
+/// (`user32::palette::selected`).
 pub fn select_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hdc, handle, force_background) = (args[0], args[1], args[2] & 0xFFFF != 0);
-    let foreground = !force_background
-        && palette_device(cpu)
-        && handle != gdi(cpu).stock(DEFAULT_PALETTE)
-        && in_foreground_window(cpu, hdc);
+    let own = palette_device(cpu) && handle != gdi(cpu).stock(DEFAULT_PALETTE);
+    if own && let Some(hwnd) = gdi(cpu).dc(hdc).map(|d| d.hwnd) {
+        crate::win32::user32::palette::selected(cpu, hwnd);
+    }
+    let foreground = own && !force_background && in_foreground_window(cpu, hdc);
     gdi_select_palette(cpu, hdc, handle, !foreground)
 }
 
@@ -834,6 +838,50 @@ pub fn gdi_select_palette(cpu: &mut Cpu, hdc: u32, handle: u32, background: bool
     }
     dc::free_if_deleted(cpu, old);
     Some(old)
+}
+
+/// RealizeDefaultPalette(hdc), GDI.365: `realize_default` for a DC. It
+/// returns 0 on a palette device. On another one Windows 98's returns
+/// what AX happens to hold (GDI's data segment), and this returns 0.
+pub fn realize_default_palette(cpu: &mut Cpu, hdc: u32) -> u32 {
+    if gdi(cpu).dc(hdc).is_some() {
+        realize_default(cpu);
+    }
+    0
+}
+
+/// Make DEFAULT_PALETTE the primary palette and realize it, on a palette
+/// device, as USER does on the screen's DC when no window is left to keep
+/// a palette in the foreground (`user32::palette`).
+///
+/// Windows 98 SE's RealizeDefaultPalette (GDI.EXE segment 2 at 1942h)
+/// does nothing on a device without RC_PALETTE. On a palette device it
+/// marks every entry of the system palette between the static colors as
+/// no palette's (bit 20h of its flags), counts a change of the palettes
+/// (PDEVICE+A0h, so that each maps again when it is next realized),
+/// makes DEFAULT_PALETTE the last realized palette (+A2h) and the
+/// foreground one (+A4h), and realizes it (2:15FEh), which for
+/// DEFAULT_PALETTE only sets the driver's translation to none. No color
+/// of the system palette changes, nor any in the DAC: the entries keep
+/// the colors other palettes put there until a palette takes them again.
+pub fn realize_default(cpu: &mut Cpu) {
+    if !palette_device(cpu) {
+        return;
+    }
+    init(cpu);
+    let state = gdi(cpu);
+    for i in 0..state.system_use.len() {
+        if state.system_use[i] != USE_STATIC {
+            state.system_use[i] = USE_FREE;
+            if let Some(o) = state.system_owner.get_mut(i) {
+                *o = 0;
+            }
+        }
+    }
+    let default = state.stock(DEFAULT_PALETTE);
+    state.primary_palette = default;
+    // No other palette is the one realized last: each maps again.
+    state.last_realized = default;
 }
 
 /// Realize the palette of the DC `hdc` on a palette device: how many of

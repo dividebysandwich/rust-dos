@@ -625,6 +625,13 @@ pub fn static_colors() -> &'static [u32; 20] {
     &STATIC_COLORS
 }
 
+/// A small TrueType font file of the family `family`, for the tests of
+/// the functions that take one (`ttf::sample` says what it has).
+#[doc(hidden)]
+pub fn sample_truetype(family: &str) -> Vec<u8> {
+    ttf::sample(family, false)
+}
+
 /// The region of the region object `handle`, if it is one.
 pub fn region_of(cpu: &mut Cpu, handle: u32) -> Option<Region> {
     gdi(cpu).region(handle).cloned()
