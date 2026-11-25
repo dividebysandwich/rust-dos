@@ -220,8 +220,11 @@ didn't record while playing, such as a speed drop in one video mode.
 4. **File one issue for each.** Skip this with `--no-issues`. Find the
    repository from `git remote get-url origin`, and look at its labels
    first, using the ones that fit (such as `bug`, `performance`,
-   `emulation`) and inventing none. Title: what goes wrong and where,
-   such as "Doom: music stops after loading a saved game (SB16)". Body:
+   `emulation`) and inventing none. Give each issue one priority label:
+   `low-priority` for a finding that waits for a game to show it (the
+   end of Phase 3 says which), and for the others the one whose
+   description fits. Title: what goes wrong and where, such as "Doom:
+   music stops after loading a saved game (SB16)". Body:
 
    ```markdown
    ## What happens
@@ -357,17 +360,19 @@ List it in the report's follow-ups (Phase 4) with what the fix needs,
 so that it is queued as a fix task of its own: by you, if you go on
 working, or by whoever runs the session.
 
-A finding no game or program at hand shows stays an issue and isn't
-queued: a gap in the log that nothing on screen or in the sound
-depends on, a case the specification or Windows has that no program
-reaches, an edge a review found by reading the code. File it as low
-priority with what the real system does, and list it in the report
-apart from the follow-ups. It is picked up when a game shows it, and
-the issue is where that game is added. Two more kinds stay out of the
-follow-ups, each with its reason in the report: the game's own
-behaviour, which the real PC shows too, and a fix that needs a
-decision with no clearly better option, which the report puts to the
-user.
+A finding no game or program at hand shows isn't fixed in this session
+and isn't queued: a gap in the log that nothing on screen or in the
+sound depends on, a case the specification or Windows has that no
+program reaches, an edge a review found by reading the code. Its issue
+(from Phase 2, or from the review in step 6) says what the real system
+does and carries the `low-priority` label; list it in the report apart
+from the follow-ups. With `--no-issues`, the report alone lists it. It
+is picked up when a game shows it: that game is added to the issue,
+and the label is raised to the priority the game's problem calls for.
+Two more kinds stay out of the follow-ups, each with its reason in the
+report: the game's own behaviour, which the real PC shows too, and a
+fix that needs a decision with no clearly better option, which the
+report puts to the user.
 
 Remove each worktree (`git worktree remove`) once its pull request is
 ready for review and nothing in it is still needed.
