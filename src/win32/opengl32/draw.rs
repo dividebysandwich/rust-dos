@@ -1344,7 +1344,8 @@ fn fragment_layout() -> Layout {
 /// tests, blending, dithering and the color mask, the card's as for
 /// any draw, on a 3dfx card and on a ToadForce. None of a polygon's
 /// own state applies (culling, the polygon mode, polygon offset), nor
-/// the viewport, which only placed the raster position.
+/// the viewport, which only placed the raster position, nor the clip
+/// planes, which only decided whether it is valid.
 ///
 /// Each rectangle, cut to the buffers, is two triangles of vertices on
 /// the screen, which cover its pixels' centres and none other
