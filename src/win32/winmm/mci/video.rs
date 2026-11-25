@@ -27,9 +27,10 @@
 //! a command that makes one returns `NEEDS_CALL`; the function that ran
 //! it makes the call (`call_step`) and runs again, and the command then
 //! finds what the call returned (`made`). Each thread keeps its own
-//! calls. Every device's open makes calls into WINMM the same way to
-//! read a file through the program's I/O procedure (`read_element`).
-//! Closing posts the window WM_CLOSE, which destroys it.
+//! calls. The open of a device that reads its file with mmio makes calls
+//! into WINMM the same way, to read it through the program's I/O
+//! procedure (`read_element`). Closing posts the window WM_CLOSE, which
+//! destroys it.
 //!
 //! A save state keeps where the device is, not the file: it is read
 //! again when it is next wanted. A file the program's I/O procedure read
@@ -37,12 +38,12 @@
 
 use super::media::{Kind as MediaKind, Media, Pictures};
 use super::*;
+use crate::savestate::Since;
 use crate::win32::gdi32::draw::{self, Source};
 use crate::win32::gdi32::palette;
 use crate::win32::gdi32::surface::{Surface, default_masks, dib_stride};
 use crate::win32::task::{self, Next, Task};
 use crate::win32::user32::{self, window};
-use crate::savestate::Since;
 use crate::win32::winmm::{wave, write_text};
 use std::sync::Arc;
 
@@ -239,12 +240,7 @@ pub fn made(cpu: &mut Cpu, api: &str, args: &[u32], strings: &[(u32, &str)]) -> 
 }
 
 /// `made` for the function at `target`.
-pub fn made_at(
-    cpu: &mut Cpu,
-    target: u32,
-    args: &[u32],
-    strings: &[(u32, &str)],
-) -> Option<u32> {
+pub fn made_at(cpu: &mut Cpu, target: u32, args: &[u32], strings: &[(u32, &str)]) -> Option<u32> {
     let call = Call {
         target,
         args: args.to_vec(),

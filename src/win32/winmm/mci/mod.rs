@@ -248,10 +248,6 @@ pub struct Parms {
     /// of a DirectShow graph whose pictures go to the program's own
     /// renderer (dshow/filter.rs), which plays only the sound.
     pub windowless: bool,
-    /// Whether the element is read as the file it names, never through
-    /// the program's I/O procedures: a DirectShow graph's, which its
-    /// file source reads itself on Windows, not with mmio.
-    pub file_as_is: bool,
     /// What it returns: a number, how it reads, or text.
     pub ret: u32,
     pub ret_kind: Ret,
@@ -674,9 +670,14 @@ fn open_kind(
             MCIERR_DEVICE_OPEN
         };
     }
+    // MCIWAVE, MCISEQ and MCIAVI open their element with mmioOpen, so a
+    // procedure of the program's reads it. MPEGVideo is ActiveMovie's
+    // MCIQTZ, which renders the file with DirectShow, and DirectShow's
+    // file source opens it with CreateFile. The program's procedures
+    // never see an MPEGVideo device's file, whether the program opened
+    // the device or a DirectShow graph did (dshow/graph.rs).
     let procedure_data = match kind {
-        _ if p.file_as_is => None,
-        MCI_DEVTYPE_CD_AUDIO => None,
+        MCI_DEVTYPE_CD_AUDIO | video::MCI_DEVTYPE_DIGITAL_VIDEO => None,
         _ => match read_element(cpu, &element) {
             Ok(data) => data,
             Err(e) => return e,
@@ -760,8 +761,10 @@ fn read_element(cpu: &mut Cpu, element: &str) -> Result<Option<Arc<Vec<u8>>>, u3
     let data = match kept {
         Some(data) => data,
         None => {
-            // mmioOpenA read it whole, as it was opened to read; it has
-            // no bytes only if it was empty.
+            // mmioOpenA read it whole through the procedure, as it was
+            // opened to read (`finish_slurp`): mmio_open picks the
+            // procedure as `program_procedure` did above, so the file
+            // always has the bytes it read, none if it was empty.
             let data = Arc::new(mmio::contents(cpu, hmmio).unwrap_or_default());
             *video::calls(cpu).element = Some((element.to_string(), data.clone()));
             data

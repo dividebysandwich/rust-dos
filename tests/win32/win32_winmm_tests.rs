@@ -2419,11 +2419,11 @@ fn sound_names_that_are_not_strings_fail_without_a_fault() {
 }
 
 /// A program that installs an I/O procedure for 'PAK ', which serves
-/// `short_wav` from the program's data for any name, as Encarta 97's
-/// does for its archives (#1991), and opens "SND.PAK+CLIP.WAV" with
-/// waveaudio. Bit 0 of the exit code is set if the open worked, bit 1 if
-/// the device's length in bytes is the clip's, 1102.
-fn mci_procedure_program() -> Vec<u8> {
+/// `file` from the program's data for any name, as Encarta 97's does
+/// for its archives (#1991), and sends the MCI command `open`, then
+/// `format` and "status c length". The exit code is the open's error if
+/// it fails; else bit 0 is set, and bit 1 if the length reads `length`.
+fn mci_procedure_program(file: &[u8], open: &str, format: &str, length: &str) -> Vec<u8> {
     const MMIO_INSTALLPROC: i32 = 0x10000;
     const MMIOM_READ: i32 = 0;
     const MMIOM_SEEK: i32 = 2;
@@ -2433,22 +2433,22 @@ fn mci_procedure_program() -> Vec<u8> {
     const FORMAT: u32 = 0x40;
     const STATUS: u32 = 0x60;
     const REPLY: u32 = 0x80;
-    const WAV: u32 = 0x100;
-    let wav = short_wav();
-    let len = wav.len() as i32;
+    const LENGTH: u32 = 0xC0;
+    const FILE: u32 = 0x100;
+    let len = file.len() as i32;
     let fourcc = |s: &[u8; 4]| u32::from_le_bytes(*s) as i32;
-    let mut data = vec![0u8; WAV as usize + wav.len()];
-    put(
-        &mut data,
-        OPEN as usize,
-        b"open SND.PAK+CLIP.WAV type waveaudio alias c",
-    );
-    put(&mut data, FORMAT as usize, b"set c time format bytes");
+    let mut data = vec![0u8; FILE as usize + file.len()];
+    put(&mut data, OPEN as usize, open.as_bytes());
+    put(&mut data, FORMAT as usize, format.as_bytes());
     put(&mut data, STATUS as usize, b"status c length");
-    put(&mut data, WAV as usize, &wav);
+    put(&mut data, LENGTH as usize, length.as_bytes());
+    put(&mut data, FILE as usize, file);
+    // USER32 is loaded, as it is with WINMM on Windows: AVIVideo makes
+    // its window with it.
     let imports: &[(&str, &[&str])] = &[
         ("KERNEL32.dll", &["ExitProcess"]),
         ("WINMM.dll", &["mmioInstallIOProcA", "mciSendStringA"]),
+        ("USER32.dll", &["GetDesktopWindow"]),
     ];
     program(imports, &data, |a, l| {
         let at = |offset: u32| l.at(offset) as i32;
@@ -2478,7 +2478,7 @@ fn mci_procedure_program() -> Vec<u8> {
         a.jbe(short)?;
         a.mov(ecx, eax)?;
         a.set_label(&mut short)?;
-        a.mov(esi, at(WAV))?;
+        a.mov(esi, at(FILE))?;
         a.add(esi, dword_ptr(edx + DISK_OFFSET))?;
         a.mov(edi, dword_ptr(esp + 20))?;
         a.mov(eax, ecx)?;
@@ -2502,11 +2502,8 @@ fn mci_procedure_program() -> Vec<u8> {
         a.push(fourcc(b"PAK "))?;
         a.call(l.import(1))?;
         let mut done = a.create_label();
-        a.push(0)?;
-        a.push(0)?;
-        a.push(0)?;
-        a.push(at(OPEN))?;
-        a.call(l.import(2))?;
+        call(a, l.import(2), &[at(OPEN), 0, 0, 0])?;
+        a.mov(ebx, eax)?;
         a.test(eax, eax)?;
         a.jnz(done)?;
         a.or(ebx, 1)?;
@@ -2514,9 +2511,11 @@ fn mci_procedure_program() -> Vec<u8> {
         call(a, l.import(2), &[at(STATUS), at(REPLY), 32, 0])?;
         a.test(eax, eax)?;
         a.jnz(done)?;
-        a.cmp(dword_ptr(l.at(REPLY)), fourcc(b"1102"))?;
-        a.jne(done)?;
-        a.cmp(byte_ptr(l.at(REPLY + 4)), 0)?;
+        a.mov(esi, at(REPLY))?;
+        a.mov(edi, at(LENGTH))?;
+        a.mov(ecx, length.len() as i32 + 1)?;
+        a.cld()?;
+        a.repe().cmpsb()?;
         a.jne(done)?;
         a.or(ebx, 2)?;
         a.set_label(&mut done)?;
@@ -2526,12 +2525,51 @@ fn mci_procedure_program() -> Vec<u8> {
     })
 }
 
+/// MCIWAVE and MCIAVI open their files with mmioOpen, so a name of an
+/// archive reads through the procedure the program installed for it.
+/// MPEGVideo, ActiveMovie's MCIQTZ, opens its file with DirectShow,
+/// whose file source doesn't use mmio, so the same name isn't found:
+/// the exit code is MCIERR_FILE_NOT_FOUND (275) in its low byte.
 #[test]
 fn mci_opens_a_file_through_the_programs_io_procedure() {
-    for core in CORES {
-        let files = [("T.EXE", mci_procedure_program())];
-        let mut cpu = machine("mci_procedure", core, &files, |_| {});
-        run_to_exit(&mut cpu, 20_000, |_| {});
-        assert_eq!(cpu.errorlevel, 0x03, "{core:?}: {:?}", printed(&cpu));
+    let wav = short_wav();
+    let avi = avi_clip();
+    // The device, its file, the open, the time format, the length the
+    // status reads, and the exit code.
+    type Case<'a> = (&'a str, &'a [u8], &'a str, &'a str, &'a str, u8);
+    let cases: [Case; 3] = [
+        (
+            "waveaudio",
+            &wav,
+            "open SND.PAK+CLIP.WAV type waveaudio alias c",
+            "set c time format bytes",
+            "1102",
+            0x03,
+        ),
+        (
+            "AVIVideo",
+            &avi,
+            "open SND.PAK+CLIP.AVI type AVIVideo alias c",
+            "set c time format frames",
+            "12",
+            0x03,
+        ),
+        (
+            "MPEGVideo",
+            &avi,
+            "open SND.PAK+CLIP.AVI type MPEGVideo alias c",
+            "set c time format frames",
+            "12",
+            (275 & 0xFF) as u8,
+        ),
+    ];
+    for (name, file, open, format, length, want) in cases {
+        for core in CORES {
+            let files = [("T.EXE", mci_procedure_program(file, open, format, length))];
+            let mut cpu = machine("mci_procedure", core, &files, |_| {});
+            run_to_exit(&mut cpu, 20_000, |_| {});
+            assert_eq!(cpu.errorlevel, want, "{name} {core:?}: {:?}", printed(&cpu));
+        }
     }
 }
+
