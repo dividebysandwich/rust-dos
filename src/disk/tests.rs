@@ -2508,6 +2508,28 @@ fn an_open_file_is_the_file_its_new_name_names_after_a_rename() {
     disk.close_file(handle);
 }
 
+/// A file open on one disk of a list stays open when the next goes in, and
+/// a file in the same directory slot of the other disk is another file.
+#[test]
+fn files_in_one_slot_of_two_disks_of_a_list_are_two_files() {
+    let base = scratch("one_file_swap");
+    fs::create_dir_all(base.join("c")).unwrap();
+    for name in ["one.img", "two.img"] {
+        let blank = DiskImage::blank_hard_disk(name, 8 << 20, None).unwrap();
+        blank.copy_to(&base.join(name)).unwrap();
+    }
+    let mut disk = DiskController::new(base.join("c"));
+    let list = MountOptions { more_images: vec![base.join("two.img")], ..MountOptions::default() };
+    disk.mount(3, &base.join("one.img"), list, true).unwrap();
+
+    let first = disk.create_file(r"D:\FIRST.DAT", PSP).unwrap();
+    disk.swap_image(3).unwrap().unwrap();
+    let second = disk.create_file(r"D:\SECOND.DAT", PSP).unwrap();
+    assert_ne!(disk.handle_key(first), disk.handle_key(second));
+    disk.close_file(second);
+    disk.close_file(first);
+}
+
 /// Where the host's own file pointer of the host file open at `sft` is,
 /// asked of the host.
 fn host_pointer(disk: &DiskController, sft: u16) -> u64 {

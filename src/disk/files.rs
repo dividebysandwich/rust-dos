@@ -165,8 +165,9 @@ impl DiskController {
                 return Err(0x05);
             }
             let at = entry.at.ok_or(0x05u8)?;
+            let id = FileId::fat(drive, &volume, at);
             let data = OpenData::Fat { volume, at, pos: Rc::new(Cell::new(0)), write };
-            let file = self.opened(data, drive, owner, FileId::Fat(drive, at), filename, mode);
+            let file = self.opened(data, drive, owner, id, filename, mode);
             self.insert(handle, file);
             return Ok(handle);
         }
@@ -220,9 +221,12 @@ impl DiskController {
         }
         match opened {
             Ok(file) => {
-                // A file this call made, in a folder the walk found, is
-                // at the path it was made under, in the host's names.
-                let id = if create && existing.is_none() && walk.dirs_matched {
+                // A path each of whose names the walk found has the
+                // host's names already (`host_file_id`), and so has a file
+                // this call made in a folder the walk found: no second
+                // walk. Others are asked of the host (`file_id`).
+                let made = create && existing.is_none() && walk.dirs_matched;
+                let id = if walk.matched || made {
                     FileId::Host(path.clone())
                 } else {
                     self.file_id(filename)
@@ -528,7 +532,8 @@ impl DiskController {
                     }
                 }
                 // So do their ids, which name the entry by its slot.
-                let (old, new) = (FileId::Fat(drive, old), FileId::Fat(drive, new));
+                let old = FileId::fat(drive, &volume, old);
+                let new = FileId::fat(drive, &volume, new);
                 self.moved_files(|id| (*id == old).then(|| new.clone()));
             }
             return Ok(());
