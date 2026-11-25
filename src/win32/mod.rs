@@ -990,6 +990,10 @@ fn start_program(cpu: &mut Cpu, program: boot::Program) -> Result<u32, String> {
         crate::win16::task::start(cpu, &path, &line, environment)?;
         return Ok(cpu.bus.win32.win16.pid);
     }
+    // Windows' loader finds the program's DLLs by their long names, as
+    // LoadLibraryA does (a long-name call, `stubs::call`): on a disk image
+    // too, where DOS would cut a name to 8.3.
+    let was = cpu.bus.disk.set_long_name_call(true);
     let created = create_process(
         cpu,
         &path,
@@ -999,8 +1003,9 @@ fn start_program(cpu: &mut Cpu, program: boot::Program) -> Result<u32, String> {
         None,
         Vec::new(),
         false,
-    )?;
-    Ok(created.process.1)
+    );
+    cpu.bus.disk.set_long_name_call(was);
+    Ok(created?.process.1)
 }
 
 /// What `create_process` made: the process's object and id, and its main
