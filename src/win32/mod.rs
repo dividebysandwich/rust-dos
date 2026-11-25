@@ -889,6 +889,13 @@ pub fn accepts(cpu: &Cpu, phys_ip: usize, id: u16) -> bool {
             _ => id & 0xFF00 == ID_IDT && cpu.pm() && cpu.cpl == 0 && win32.active(),
         };
     }
+    in_stub_page(cpu, phys_ip)
+}
+
+/// Whether `phys_ip` is in one of the running process's pages of stubs,
+/// where its program calls the built-in DLLs' functions, at privilege
+/// level 3 in protected mode.
+pub(crate) fn in_stub_page(cpu: &Cpu, phys_ip: usize) -> bool {
     let Some(process) = running(cpu) else {
         return false;
     };

@@ -24,12 +24,13 @@ const DOS_VERSION: u16 = 6;
 const CD_HEAD_VERSION: u16 = 1;
 const VCPI_VERSION: u16 = 1;
 const LOCK_VERSION: u16 = 1;
+const ALIAS_VERSION: u16 = 1;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 103;
+const WIN32_VERSION: u16 = 105;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -74,9 +75,12 @@ const WIN32_VERSION: u16 = 103;
 /// are DOS's since 100, 71's to 100's no step of the cascade of
 /// CW_USEDEFAULT windows (`user32::window::CASCADE_SAVED`), 71's to
 /// 101's not the modules the outermost FreeLibrary frees
-/// (`kernel32::module::UNLOADING_SAVED`), and 71's to 102's no OpenGL
-/// raster position (`opengl32::raster::RASTER_SAVED`).
-const WIN32_LOADS: [u16; 33] = [
+/// (`kernel32::module::UNLOADING_SAVED`), 71's to 102's no OpenGL
+/// raster position (`opengl32::raster::RASTER_SAVED`), 71's to 103's
+/// not the format GDI's bitmaps were made in (`gdi32::DDB_FORMAT_SAVED`),
+/// and 71's to 104's not which entries of a palette share their nearest
+/// color's entry (`gdi32::palette::NEAREST_SAVED`).
+const WIN32_LOADS: [u16; 35] = [
     71,
     72,
     73,
@@ -109,6 +113,8 @@ const WIN32_LOADS: [u16; 33] = [
     100,
     101,
     102,
+    103,
+    104,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -417,6 +423,13 @@ impl Bus {
                     manifest.save(w);
                 }
             });
+        }
+        // The aliases host folders keep where they differ from those made
+        // afresh, only with any, so other states are as they were. Before
+        // the drives: the open files are found again by their names.
+        let aliases = disk.saved_aliases();
+        if !aliases.is_empty() {
+            w.section(b"ALIA", ALIAS_VERSION, |w| aliases.save(w));
         }
         w.section(b"DOS ", DOS_VERSION, |w| {
             save_all!(w; xms, mouse, mscdex, disk_io);
@@ -859,6 +872,12 @@ impl Bus {
             }
             disk.shared_from_state = Some(shared);
         }
+        disk.aliases_from_state = None;
+        if r.next_is(b"ALIA") {
+            let mut aliases = Vec::new();
+            aliases.load(&mut r.section(b"ALIA", ALIAS_VERSION)?)?;
+            disk.aliases_from_state = Some(aliases);
+        }
         // The drives before the sound: the CD playing is in one.
         let mut section = r.section(b"DOS ", DOS_VERSION)?;
         load_all!(&mut section; xms, mouse, mscdex, disk_io);
@@ -1227,6 +1246,8 @@ mod tests {
         (101, 0x019A_DFC6_DCCE_473B), // the step of the CW_USEDEFAULT cascade
         (102, 0x8818_BE2A_4B7B_59B6), // the modules the outermost FreeLibrary frees
         (103, 0x71A7_50FA_4BC4_2EA0), // OpenGL's raster position
+        (104, 0x3F37_6484_BDFC_4AF1), // the format GDI's bitmaps were made in
+        (105, 0xA544_B486_2D04_DB0B), // palette entries sharing their nearest color's entry
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

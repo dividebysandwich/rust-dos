@@ -7272,6 +7272,226 @@ fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_disk_image() {
     check_long_name_and_alias_are_one_file("one_file_image", "D:", true);
 }
 
+/// MoveFileA renames a file to its own 8.3 alias, as on Windows 98 SE
+/// (checked in 86Box): "Third file.txt" becomes THIRDF~1.TXT, where the
+/// call had found the name taken by the file itself (183). The program
+/// also makes MADE~1.TXT and then MADE.TXT, and renames "Fourth file.txt"
+/// to FOURTH~1.TXT with msvcrt's rename, which calls MoveFileA on Windows
+/// 98. Each check sets a bit of the exit code. Returns the machine, for
+/// its drive's names.
+fn rename_to_own_alias(test: &str, drive: &str, image: bool) -> Box<Cpu> {
+    use Arg::{Esi, I};
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CloseHandle",
+        "MoveFileA",
+        "GetShortPathNameA",
+        "lstrcmpA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names), ("MSVCRT.DLL", &["rename"])];
+    let mut data = vec![0; 0x200];
+    for (at, name) in [
+        (0x00, "Third file.txt"),
+        (0x20, "THIRDF~1.TXT"),
+        (0x40, "MADE~1.TXT"),
+        (0x60, "MADE.TXT"),
+        (0x80, "Fourth file.txt"),
+        (0xA0, "FOURTH~1.TXT"),
+    ] {
+        put(&mut data, at, format!("{drive}\\{name}\0").as_bytes());
+    }
+    let buf = 0x100;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let make = |a: &mut CodeAssembler, name, bit| {
+            // GENERIC_WRITE, CREATE_NEW.
+            let args = [at(name), I(0x4000_0000), I(0), I(0), I(1), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &args)?;
+            a.mov(esi, eax)?;
+            a.cmp(eax, -1)?;
+            check(a, true, bit)?;
+            call_with(a, f("CloseHandle"), &[Esi])
+        };
+        a.xor(ebx, ebx)?;
+        make(a, 0x00, 0)?;
+        call_with(a, f("MoveFileA"), &[at(0x00), at(0x20)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        call_with(a, f("GetShortPathNameA"), &[at(0x20), at(buf), I(0x100)])?;
+        call_with(a, f("lstrcmpA"), &[at(0x20), at(buf)])?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        make(a, 0x40, 3)?;
+        make(a, 0x60, 4)?;
+        make(a, 0x80, 5)?;
+        // rename(old, new) is cdecl, and returns 0 when it renames.
+        call_with(a, l.import(names.len()), &[at(0x80), at(0xA0)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 6)?;
+        a.mov(eax, ebx)?;
+        a.or(eax, 0x80)?;
+        a.ret()
+    });
+    let mut cpu = machine(test, exe);
+    if image {
+        let image_dir = PathBuf::from("target/test_win32").join(format!("{test}_d"));
+        let _ = fs::remove_dir_all(&image_dir);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image = image_dir.join("d.img");
+        rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.disk.mount(3, &image, options, true).unwrap();
+    }
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+    cpu
+}
+
+/// On a FAT image the renamed file keeps the DOS name THIRDF~1.TXT and
+/// gets long name entries holding it, as Windows 98 SE writes them for
+/// an 8.3 name beside a numeric tail made from its start: its own old
+/// alias. So does MADE.TXT, made beside MADE~1.TXT, which has none.
+#[test]
+fn move_file_renames_a_file_to_its_own_alias_on_a_disk_image() {
+    let cpu = rename_to_own_alias("own_alias_image", "D:", true);
+    let volume = cpu.bus.disk.fat_volume(3).unwrap();
+    let mut listed: Vec<(String, Option<String>)> = volume
+        .list(&[])
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.name, e.long_name))
+        .collect();
+    listed.sort();
+    let named = |name: &str, long: Option<&str>| (name.to_string(), long.map(str::to_string));
+    assert_eq!(
+        listed,
+        [
+            named("FOURTH~1.TXT", Some("FOURTH~1.TXT")),
+            named("MADE.TXT", Some("MADE.TXT")),
+            named("MADE~1.TXT", None),
+            named("THIRDF~1.TXT", Some("THIRDF~1.TXT")),
+        ]
+    );
+}
+
+/// On a host folder the files are named THIRDF~1.TXT and FOURTH~1.TXT on
+/// the host.
+#[test]
+fn move_file_renames_a_file_to_its_own_alias_on_a_host_drive() {
+    rename_to_own_alias("own_alias_host", "C:", false);
+    let dir = PathBuf::from("target/test_win32/own_alias_host");
+    let mut names: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".TXT") || n.ends_with(".txt"))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["FOURTH~1.TXT", "MADE.TXT", "MADE~1.TXT", "THIRDF~1.TXT"]
+    );
+}
+
+/// Folders keep their 8.3 aliases as on Windows 98 SE (checked in 86Box):
+/// on drive `drive` the program makes "Parent zeta" (PARENT~1) and
+/// "Parent alpha" (PARENT~2), renames "Parent zeta" to "Parent moved",
+/// which gets PARENT~3 (its own alias is held during the rename), and
+/// makes "Parent again", which takes the freed PARENT~1, while "Parent
+/// alpha" keeps PARENT~2. GetShortPathNameA gives the aliases. Each check
+/// sets a bit of the exit code.
+fn check_folders_keep_their_aliases(test: &str, drive: &str, image: bool) {
+    use Arg::I;
+    let names: &[&str] = &["CreateDirectoryA", "MoveFileA", "GetShortPathNameA", "lstrcmpA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x200];
+    for (at, name) in [
+        (0x00, "Parent zeta"),
+        (0x20, "Parent alpha"),
+        (0x40, "Parent moved"),
+        (0x60, "Parent again"),
+        (0x80, "PARENT~3"),
+        (0x90, "PARENT~2"),
+        (0xA0, "PARENT~1"),
+    ] {
+        put(&mut data, at, format!("{drive}\\{name}\0").as_bytes());
+    }
+    // GetShortPathNameA's answer.
+    let buf = 0x100;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let alias_is = |a: &mut CodeAssembler, long, short, bit| {
+            call_with(a, f("GetShortPathNameA"), &[at(long), at(buf), I(0x100)])?;
+            call_with(a, f("lstrcmpA"), &[at(short), at(buf)])?;
+            a.test(eax, eax)?;
+            check(a, false, bit)
+        };
+        a.xor(ebx, ebx)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0x00), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0x20), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        call_with(a, f("MoveFileA"), &[at(0x00), at(0x40)])?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
+        alias_is(a, 0x40, 0x80, 3)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0x60), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 4)?;
+        alias_is(a, 0x60, 0xA0, 5)?;
+        alias_is(a, 0x20, 0x90, 6)?;
+        a.mov(eax, ebx)?;
+        a.or(eax, 0x80)?;
+        a.ret()
+    });
+    let mut cpu = machine(test, exe);
+    if image {
+        let image_dir = PathBuf::from("target/test_win32").join(format!("{test}_d"));
+        let _ = fs::remove_dir_all(&image_dir);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image = image_dir.join("d.img");
+        rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.disk.mount(3, &image, options, true).unwrap();
+    }
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+}
+
+#[test]
+fn folders_keep_their_aliases_on_a_host_drive() {
+    check_folders_keep_their_aliases("aliases_host", "C:", false);
+}
+
+#[test]
+fn folders_keep_their_aliases_on_a_disk_image() {
+    check_folders_keep_their_aliases("aliases_image", "D:", true);
+}
+
 /// SetFileTime on a file in a host folder, as Windows 98 SE does it on
 /// FAT: the time of the last write is rounded up to an even second
 /// (2001-10-08 19:20:01.5 is kept as 19:20:02), a time before 1980 fails
@@ -15487,6 +15707,134 @@ fn a_keyboard_hook_that_peeks_with_the_programs_msg_doesnt_change_its_key() {
 }
 
 #[test]
+fn a_window_has_no_size_while_the_cbt_hook_sees_it_made() {
+    // T.EXE's CBT hook changes the frame of a captioned popup at
+    // HCBT_CREATEWND, as MFC's hook in Encarta 97 does, and then reads its
+    // rectangles: both are empty, as Wine's NtUserCreateWindowEx leaves
+    // them until after the hook, since the hook may still change the
+    // CREATESTRUCT's place and size. A frame change of a 0 by 0 window
+    // keeps its client area at 0 by 0, so the window's procedure gets its
+    // first WM_SIZE after WM_CREATE. The window has its 200 by 100 at
+    // (10, 20) once CreateWindowExA returns (#2006).
+    const WH_CBT: i32 = 5;
+    const HCBT_CREATEWND: i32 = 3;
+    const WM_CREATE: i32 = 0x0001;
+    const WM_SIZE: i32 = 0x0005;
+    const WS_CAPTION: i32 = 0x00C0_0000;
+    // SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+    // SWP_FRAMECHANGED.
+    const FRAME_CHANGED: i32 = 0x37;
+    let kernel32 = ["GetCurrentThreadId", "ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "RegisterClassA",
+        "SetWindowsHookExA",
+        "SetWindowPos",
+        "GetWindowRect",
+        "GetClientRect",
+    ];
+    // The hook's window RECT at 0xA0 and client RECT at 0xB0, the hook's
+    // calls at 0x9C; the window's RECT after it is made at 0xC0. The
+    // procedure counts WM_CREATE and the first WM_SIZE at 0x110 and keeps
+    // the count of each at 0x114 and 0x118.
+    let mut data = session_data(&[(0x10, "CbtRect")]);
+    data.resize(0x120, 0);
+    let exe = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        let mut cbt = a.create_label();
+        let mut pass = a.create_label();
+        a.jmp(start)?;
+
+        a.set_label(&mut cbt)?;
+        a.cmp(dword_ptr(esp + 4), HCBT_CREATEWND)?;
+        a.jne(pass)?;
+        a.inc(dword_ptr(l.at(0x9C)))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, 0, 0, 0, 0, 0, FRAME_CHANGED])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("SetWindowPos"))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, l.at(0xA0) as i32])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("GetWindowRect"))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, l.at(0xB0) as i32])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("GetClientRect"))?;
+        a.set_label(&mut pass)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+
+        a.set_label(&mut start)?;
+        a.xor(ebx, ebx)?;
+        // Rectangles the hook must overwrite.
+        for at in (0xA0..0xC0).step_by(4) {
+            a.mov(dword_ptr(l.at(at)), 7)?;
+        }
+        a.call(f("GetCurrentThreadId"))?;
+        a.push(eax)?;
+        a.push(0)?;
+        push_label(a, cbt)?;
+        a.push(WH_CBT)?;
+        a.call(f("SetWindowsHookExA"))?;
+        session_class(a, l, f, |a| {
+            let mut not_create = a.create_label();
+            let mut done = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_CREATE)?;
+            a.jne(not_create)?;
+            a.inc(dword_ptr(l.at(0x110)))?;
+            a.mov(eax, dword_ptr(l.at(0x110)))?;
+            a.mov(dword_ptr(l.at(0x114)), eax)?;
+            a.jmp(done)?;
+            a.set_label(&mut not_create)?;
+            a.cmp(dword_ptr(esp + 8), WM_SIZE)?;
+            a.jne(done)?;
+            a.cmp(dword_ptr(l.at(0x118)), 0)?;
+            a.jne(done)?;
+            a.inc(dword_ptr(l.at(0x110)))?;
+            a.mov(eax, dword_ptr(l.at(0x110)))?;
+            a.mov(dword_ptr(l.at(0x118)), eax)?;
+            a.set_label(&mut done)
+        })?;
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_CAPTION;
+        push_args(a, &[0, class, class, style, 10, 20, 200, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        push_args(a, &[0, l.at(0xC0) as i32])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("GetWindowRect"))?;
+        a.cmp(dword_ptr(l.at(0x9C)), 1)?;
+        bit_if(a, eq, 0)?;
+        // Both rectangles all zeros.
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        for at in (0xA4..0xC0).step_by(4) {
+            a.or(eax, dword_ptr(l.at(at)))?;
+        }
+        a.test(eax, eax)?;
+        bit_if(a, eq, 1)?;
+        a.cmp(dword_ptr(l.at(0xC8)), 210)?;
+        bit_if(a, eq, 2)?;
+        a.cmp(dword_ptr(l.at(0xCC)), 120)?;
+        bit_if(a, eq, 3)?;
+        a.cmp(dword_ptr(l.at(0xC0)), 10)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xC4)), 20)?;
+        bit_if(a, eq, 5)?;
+        // WM_CREATE came first, WM_SIZE second.
+        a.cmp(dword_ptr(l.at(0x114)), 1)?;
+        bit_if(a, eq, 6)?;
+        a.cmp(dword_ptr(l.at(0x118)), 2)?;
+        bit_if(a, eq, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("cbt_create_rect", &[("T.EXE", exe)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
 fn a_click_on_a_window_behind_activates_it_and_is_delivered() {
     // T.EXE's window, with a button, is behind C.EXE's, which it started.
     // A click on the button asks the window with WM_MOUSEACTIVATE, whose
@@ -19778,6 +20126,192 @@ fn a_font_file_a_program_adds_is_listed_and_drawn() {
     assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
     // Two fonts added, both sizes listed, and "!\"" 2 + 9 pixels wide.
     assert_eq!(cpu.errorlevel, 2 << 6 | 2 << 4 | 11);
+}
+
+/// Windows 95 and 98 load the installed fonts as they start: the files
+/// the registry's `CurrentVersion\Fonts` key lists and those of WIN.INI's
+/// `[Fonts]`. A setup that installed one added it with AddFontResourceA,
+/// which lasts until Windows ends, so a later start finds the font only
+/// this way (Encarta 97's "MS Reference 1", issue #1989). The registry
+/// names a TrueType file in the system folder by its full path, as
+/// Encarta's setup does, and WIN.INI a raster font by a bare name, which
+/// is looked for in the fonts, Windows and system folders, and the
+/// TrueType file again by a bare name. A file that isn't there is left
+/// out. A program that never added a font then gets the faces it asks
+/// for. It then adds the TrueType file itself by a name relative to its
+/// folder, which is the same file, and EnumFontFamiliesA lists the
+/// TrueType face once. Its exit code: the TrueType face matched in bit
+/// 0, the raster face in bit 1, AddFontResourceA's success in bit 2, and
+/// the count of fonts listed of the TrueType face above them.
+#[test]
+fn installed_fonts_are_loaded_as_windows_starts() {
+    let names: &[&str] = &[
+        "AddFontResourceA",
+        "CreateCompatibleDC",
+        "CreateFontIndirectA",
+        "SelectObject",
+        "GetTextFaceA",
+        "EnumFontFamiliesA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names), ("KERNEL32.DLL", &["lstrcmpA"])];
+    // LOGFONTAs at 0 and 0x40, GetTextFaceA's buffer at 0x80, the faces
+    // asked for at 0xA0 and 0xB0, the count of fonts listed at 0xC0 and
+    // the TrueType file's name relative to the program's folder at 0xD0.
+    let mut data = vec![0u8; 0xF0];
+    data[0..4].copy_from_slice(&(-16i32).to_le_bytes());
+    data[28..36].copy_from_slice(b"Reg Face");
+    data[0x40..0x44].copy_from_slice(&12i32.to_le_bytes());
+    data[0x40 + 28..0x40 + 36].copy_from_slice(b"Ini Face");
+    data[0xA0..0xA8].copy_from_slice(b"Reg Face");
+    data[0xB0..0xB8].copy_from_slice(b"Ini Face");
+    data[0xD0..0xEA].copy_from_slice(b"WINDOWS\\SYSTEM\\REGFACE.TTF");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut proc = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(esi, eax)?;
+        for (bit, log, face) in [(0, 0, 0xA0), (1, 0x40, 0xB0)] {
+            a.push(l.at(log) as i32)?;
+            a.call(f("CreateFontIndirectA"))?;
+            a.push(eax)?;
+            a.push(esi)?;
+            a.call(f("SelectObject"))?;
+            a.push(l.at(0x80) as i32)?;
+            a.push(32)?;
+            a.push(esi)?;
+            a.call(f("GetTextFaceA"))?;
+            a.push(l.at(face) as i32)?;
+            a.push(l.at(0x80) as i32)?;
+            a.call(l.import(names.len()))?;
+            a.test(eax, eax)?;
+            check(a, false, bit)?;
+        }
+        a.push(l.at(0xD0) as i32)?;
+        a.call(f("AddFontResourceA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
+        a.push(0)?;
+        push_label(a, proc)?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(esi)?;
+        a.call(f("EnumFontFamiliesA"))?;
+        a.mov(eax, dword_ptr(l.at(0xC0)))?;
+        a.shl(eax, 3)?;
+        a.or(eax, ebx)?;
+        a.ret()?;
+        // The callback: count the font, go on.
+        a.set_label(&mut proc)?;
+        a.inc(dword_ptr(l.at(0xC0)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)
+    });
+    let test = "installed_fonts";
+    let mut cpu = machine_with(test, &[("T.EXE", exe)]);
+    let base = PathBuf::from("target/test_win32").join(test);
+    let system = base.join("WINDOWS").join("SYSTEM");
+    fs::create_dir_all(&system).unwrap();
+    let ttf = rust_dos::win32::gdi32::sample_truetype("Reg Face");
+    fs::write(system.join("REGFACE.TTF"), ttf).unwrap();
+    fs::write(system.join("INIFACE.FON"), fon(&[fnt("Ini Face", 12)])).unwrap();
+    let registry = "REGEDIT4\r\n\r\n\
+        [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Fonts]\r\n\
+        \"Reg Face (TrueType)\"=\"C:\\\\WINDOWS\\\\SYSTEM\\\\REGFACE.TTF\"\r\n\
+        \"Gone (TrueType)\"=\"GONE.TTF\"\r\n";
+    fs::write(base.join("REGISTRY.REG"), registry).unwrap();
+    let win_ini = "[Fonts]\r\nIni Face 12=INIFACE.FON\r\n\
+                   Reg Face (TrueType)=REGFACE.TTF\r\nGone=GONE.FON\r\n";
+    fs::write(base.join("WINDOWS").join("WIN.INI"), win_ini).unwrap();
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 1 << 3 | 0b111);
+}
+
+/// A Windows 3.1 WIN.INI lists in `[Fonts]` files of faces GDI has
+/// built in: `SSERIFE.FON` for MS Sans Serif, and Arial's TrueType file
+/// through its `ARIAL.FOT`, which the registry lists again as
+/// `ARIAL.TTF`, as a setup such as Encarta 97's writes it. Windows has
+/// each face once, from the file, so EnumFontFamiliesA lists MS Sans
+/// Serif's one size once and Arial once: the built-in face is left out
+/// where a file has it, and the .FOT and the TrueType file it names are
+/// one font. A line that starts with ';' is a comment, whose file isn't
+/// loaded. EnumFontFamiliesExA lists Arial in the one character set the
+/// file has, Latin 1, and not the built-in face in the others, as a font
+/// asking for Arial in any of them is realized from the file. The exit
+/// code is the count of fonts listed for each face, two bits each: MS
+/// Sans Serif's, Arial's above, the comment's face's above, and
+/// EnumFontFamiliesExA's of Arial at the top.
+#[test]
+fn installed_fonts_list_each_face_once() {
+    let names: &[&str] = &[
+        "CreateCompatibleDC",
+        "EnumFontFamiliesA",
+        "EnumFontFamiliesExA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names)];
+    // The faces at 0, 0x20 and 0x40, their counts at 0x60, 0x64, 0x68,
+    // EnumFontFamiliesExA's LOGFONTA (Arial, DEFAULT_CHARSET) at 0x70
+    // and its count at 0xAC.
+    let mut data = vec![0u8; 0xB0];
+    data[0..13].copy_from_slice(b"MS Sans Serif");
+    data[0x20..0x25].copy_from_slice(b"Arial");
+    data[0x40..0x4C].copy_from_slice(b"Comment Face");
+    data[0x70 + 23] = 1;
+    data[0x70 + 28..0x70 + 33].copy_from_slice(b"Arial");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut proc = a.create_label();
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.mov(esi, eax)?;
+        for (face, count) in [(0, 0x60), (0x20, 0x64), (0x40, 0x68)] {
+            a.push(l.at(count) as i32)?;
+            push_label(a, proc)?;
+            a.push(l.at(face) as i32)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+        }
+        a.push(0)?;
+        a.push(l.at(0xAC) as i32)?;
+        push_label(a, proc)?;
+        a.push(l.at(0x70) as i32)?;
+        a.push(esi)?;
+        a.call(l.import(2))?;
+        a.mov(eax, dword_ptr(l.at(0xAC)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x68)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x64)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x60)))?;
+        a.ret()?;
+        // The callback: count the font in the dword its lParam points
+        // at, go on.
+        a.set_label(&mut proc)?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        a.inc(dword_ptr(eax))?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)
+    });
+    let test = "installed_fonts_once";
+    let mut cpu = machine_with(test, &[("T.EXE", exe)]);
+    let base = PathBuf::from("target/test_win32").join(test);
+    let system = base.join("WINDOWS").join("SYSTEM");
+    fs::create_dir_all(&system).unwrap();
+    let ttf = rust_dos::win32::gdi32::sample_truetype("Arial");
+    let fot = rust_dos::win32::gdi32::sample_fot("ARIAL.TTF", &ttf);
+    fs::write(system.join("ARIAL.TTF"), ttf).unwrap();
+    fs::write(system.join("ARIAL.FOT"), fot).unwrap();
+    fs::write(system.join("SSERIFE.FON"), fon(&[fnt("MS Sans Serif", 13)])).unwrap();
+    fs::write(system.join("COMMENT.FON"), fon(&[fnt("Comment Face", 12)])).unwrap();
+    let registry = "REGEDIT4\r\n\r\n\
+        [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Fonts]\r\n\
+        \"Arial (TrueType)\"=\"ARIAL.TTF\"\r\n";
+    fs::write(base.join("REGISTRY.REG"), registry).unwrap();
+    let win_ini = "[Fonts]\r\nMS Sans Serif 8,10,12,14,18,24 (VGA res)=SSERIFE.FON\r\n\
+                   Arial (TrueType)=ARIAL.FOT\r\n;Comment Face=COMMENT.FON\r\n";
+    fs::write(base.join("WINDOWS").join("WIN.INI"), win_ini).unwrap();
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 1 << 6 | 1 << 2 | 1);
 }
 
 /// A program asks CreateScalableFontResourceA for a .FOT of `ttf`, with

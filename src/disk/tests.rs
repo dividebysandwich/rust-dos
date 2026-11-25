@@ -2576,6 +2576,83 @@ fn a_long_name_call_renames_on_a_disk_image() {
     assert_eq!(listed(&disk), named("PLAIN.CFG", None));
 }
 
+/// A long-name call renames a file to its own alias, as Windows 98 SE
+/// does (checked in 86Box): on a disk image the entry keeps the DOS name
+/// THIRDF~1.TXT and gets long name entries holding it, and on a host
+/// drive the file is named THIRDF~1.TXT. Its bytes stay.
+#[test]
+fn a_long_name_call_renames_a_file_to_its_own_alias() {
+    let base = scratch("own_alias_rename");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    for drive in ["C:", "D:"] {
+        let long = format!(r"{drive}\Third file.txt");
+        let alias = format!(r"{drive}\THIRDF~1.TXT");
+        let handle = disk
+            .long_name_call(|disk| disk.create_file(&long, PSP))
+            .unwrap();
+        disk.write_file(handle, b"third").unwrap();
+        disk.close_file(handle);
+        disk.long_name_call(|disk| disk.rename_file(&long, &alias))
+            .unwrap();
+        let handle = disk.open_file(&alias, 0, PSP).unwrap();
+        assert_eq!(disk.read_file(handle, 16).unwrap(), b"third", "{drive}");
+        disk.close_file(handle);
+    }
+    let (_, volume, _) = disk.locate_fat(r"D:\").unwrap();
+    let listed: Vec<(String, Option<String>)> = volume
+        .list(&[])
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.name, e.long_name))
+        .collect();
+    assert_eq!(
+        listed,
+        [("THIRDF~1.TXT".to_string(), Some("THIRDF~1.TXT".to_string()))]
+    );
+    let names: Vec<String> = fs::read_dir(base.join("c"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["THIRDF~1.TXT"]);
+}
+
+/// DOS's rename (INT 21h AH=56h) of a file to its own alias finds the
+/// new name taken, by the file itself, and fails (05h), on a host folder
+/// as on a disk image, whose entry has the name. On a Windows host the
+/// alias is the host's own short name of the file too. The file keeps
+/// its long name.
+#[test]
+fn a_dos_rename_of_a_file_to_its_own_alias_is_refused() {
+    let base = scratch("own_alias_dos_rename");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    for drive in ["C:", "D:"] {
+        let long = format!(r"{drive}\Third file.txt");
+        let alias = format!(r"{drive}\THIRDF~1.TXT");
+        let handle = disk
+            .long_name_call(|disk| disk.create_file(&long, PSP))
+            .unwrap();
+        disk.close_file(handle);
+        assert_eq!(disk.rename_file(&alias, &alias), Err(0x05), "{drive}");
+        let kept = disk.long_name_call(|disk| disk.is_file(&long));
+        assert!(kept, "{drive}");
+    }
+    let names: Vec<String> = fs::read_dir(base.join("c"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["Third file.txt"]);
+}
+
 /// A handle open on a file of a disk image goes on writing to it after a
 /// long-name rename moves its entry to other slots, and the long name
 /// entries that took the slots it left stay as they are.
@@ -2748,24 +2825,42 @@ fn a_renamed_current_directory_names_nothing() {
         let found = disk.long_name_call(|disk| disk.is_file(&at(r"CWW\CASE DIR\SUB\HERE.TXT")));
         assert!(found, "{letter} after a rename of the case");
         assert!(disk.set_current_directory(&at("")));
+
+        // So does a rename to its alias: "Sixth folder" renamed to
+        // SIXTHF~1 keeps the DOS name SIXTHF~1 (MoveFileA on Windows 98
+        // SE, checked in 86Box).
+        disk.long_name_call(|disk| {
+            for dir in [r"CWW\Sixth folder", r"CWW\Sixth folder\Sub"] {
+                disk.create_directory(&at(dir)).unwrap();
+            }
+            assert!(disk.set_current_directory(&at(r"CWW\Sixth folder\Sub")));
+            disk.rename_file(&at(r"CWW\Sixth folder"), &at(r"CWW\SIXTHF~1"))
+                .unwrap();
+        });
+        assert_eq!(current(&disk), r"CWW\SIXTHF~1\SUB", "{letter}");
+        let here = disk.create_file(&format!("{letter}HERE.TXT"), PSP).unwrap();
+        disk.close_file(here);
+        let found = disk.is_file(&at(r"CWW\SIXTHF~1\SUB\HERE.TXT"));
+        assert!(found, "{letter} after a rename to the alias");
+        assert!(disk.set_current_directory(&at("")));
     }
 }
 
-/// A host folder's alias is made from the names its folder has, so a
-/// folder made next to the current directory may take its alias:
-/// "Parent a" takes PARENT~1 from "Parent two". On Windows 9x a folder
-/// keeps its alias until it is renamed, so the current directory names
-/// "Parent two" still, and nothing once it is renamed.
+/// A host folder keeps its alias when a folder is made next to it, as on
+/// Windows 98 SE (checked in 86Box): "Parent a" made beside "Parent two"
+/// (PARENT~1) gets PARENT~2, so the current directory, kept as
+/// CWW\PARENT~1, names "Parent two" still, and nothing once it is renamed.
 #[test]
-fn a_host_current_directory_keeps_its_folder_when_another_takes_its_alias() {
+fn a_new_host_folder_takes_a_free_alias() {
     let base = scratch("current_dir_alias_taken");
     fs::create_dir_all(base.join("CWW").join("Parent two")).unwrap();
     let mut disk = DiskController::new(base.clone());
     assert!(disk.set_current_directory(r"C:\CWW\PARENT~1"));
     disk.long_name_call(|disk| disk.create_directory(r"C:\CWW\Parent a"))
         .unwrap();
+    assert_eq!(alias_in(&disk, r"C:\CWW", "Parent a"), "PARENT~2");
     let alias = disk.resolve_path(r"C:\CWW\PARENT~1").unwrap();
-    assert_eq!(alias.file_name().unwrap(), "Parent a");
+    assert_eq!(alias.file_name().unwrap(), "Parent two");
     assert_eq!(disk.get_current_directory_of(2).unwrap(), r"CWW\PARENT~1");
     let here = disk.create_file("C:HERE.TXT", PSP).unwrap();
     disk.close_file(here);
@@ -2776,6 +2871,153 @@ fn a_host_current_directory_keeps_its_folder_when_another_takes_its_alias() {
     disk.long_name_call(|disk| disk.rename_file(r"C:\CWW\Parent two", r"C:\CWW\Parent moved"))
         .unwrap();
     assert_eq!(disk.create_file("C:THERE.TXT", PSP), Err(0x03));
+}
+
+/// The DOS name of the entry `long` of the directory `dir`.
+fn alias_in(disk: &DiskController, dir: &str, long: &str) -> String {
+    let names = disk.long_names(dir).unwrap();
+    let found = names.iter().find(|(name, _)| name == long);
+    found
+        .map(|(_, short)| short.clone())
+        .unwrap_or_else(|| panic!("{long} isn't in {dir}: {names:?}"))
+}
+
+/// Entries keep their aliases as on Windows 98 SE (checked in 86Box with
+/// MoveFileA, CreateDirectoryA and GetShortPathNameA), on a host folder
+/// (C:) as on a disk image (D:): the folder made first keeps ~1 when
+/// another that sorts before it is made; a renamed folder gets the first
+/// alias free, its own held, and the alias it had names nothing; a folder
+/// made then takes the freed one; a rename that changes only the case
+/// keeps the alias; a deleted file's alias is free for the next; and a
+/// renamed folder's entries keep theirs.
+#[test]
+fn entries_keep_their_aliases_until_renamed() {
+    let base = scratch("stable_aliases");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    for letter in ["C:", "D:"] {
+        let hst = format!(r"{letter}\HST");
+        let at = |path: &str| format!(r"{hst}\{path}");
+        let alias = |disk: &DiskController, dir: &str, long: &str| {
+            let dir = if dir.is_empty() { hst.clone() } else { at(dir) };
+            alias_in(disk, &dir, long)
+        };
+        disk.long_name_call(|disk| {
+            disk.create_directory(&hst).unwrap();
+            disk.create_directory(&at("Parent zeta")).unwrap();
+            disk.create_directory(&at("Parent alpha")).unwrap();
+        });
+        assert_eq!(alias(&disk, "", "Parent zeta"), "PARENT~1", "{letter}");
+        assert_eq!(alias(&disk, "", "Parent alpha"), "PARENT~2", "{letter}");
+
+        disk.long_name_call(|disk| disk.rename_file(&at("Parent zeta"), &at("Parent moved")))
+            .unwrap();
+        assert_eq!(alias(&disk, "", "Parent moved"), "PARENT~3", "{letter}");
+        assert_eq!(alias(&disk, "", "Parent alpha"), "PARENT~2", "{letter}");
+        assert!(!disk.is_directory(&at("PARENT~1")), "{letter}");
+
+        disk.long_name_call(|disk| disk.create_directory(&at("Parent again")))
+            .unwrap();
+        assert_eq!(alias(&disk, "", "Parent again"), "PARENT~1", "{letter}");
+        for name in ["PARENT ALPHA", "Parent alpha"] {
+            let from = disk.long_names(&hst).unwrap();
+            let (from, _) = from.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).unwrap();
+            disk.long_name_call(|disk| disk.rename_file(&at(from), &at(name)))
+                .unwrap();
+            assert_eq!(alias(&disk, "", name), "PARENT~2", "{letter} {name}");
+        }
+
+        disk.long_name_call(|disk| {
+            let made = disk.create_file(&at("Gone file.txt"), PSP).unwrap();
+            disk.close_file(made);
+            disk.delete_file(&at("Gone file.txt")).unwrap();
+            let made = disk.create_file(&at("Gone file two.txt"), PSP).unwrap();
+            disk.close_file(made);
+        });
+        assert_eq!(alias(&disk, "", "Gone file two.txt"), "GONEFI~1.TXT", "{letter}");
+
+        disk.long_name_call(|disk| {
+            disk.create_directory(&at("Box")).unwrap();
+            for name in [r"Box\Saved game b.dat", r"Box\Saved game a.dat"] {
+                let made = disk.create_file(&at(name), PSP).unwrap();
+                disk.close_file(made);
+            }
+            disk.rename_file(&at("Box"), &at("Crate")).unwrap();
+        });
+        assert_eq!(alias(&disk, "Crate", "Saved game a.dat"), "SAVEDG~2.DAT", "{letter}");
+        assert_eq!(alias(&disk, "Crate", "Saved game b.dat"), "SAVEDG~1.DAT", "{letter}");
+    }
+}
+
+/// A state keeps the aliases of host folders that differ from those made
+/// afresh from their names: "Parent moved", renamed from "Parent two",
+/// is PARENT~2 in the run from the state too, and PARENT~1 names nothing.
+#[test]
+fn a_loaded_state_keeps_the_aliases_of_host_folders() {
+    let base = scratch("aliases_state");
+    fs::create_dir_all(base.join("CWW").join("Parent two")).unwrap();
+    let mut disk = DiskController::new(base.clone());
+    disk.long_name_call(|disk| disk.rename_file(r"C:\CWW\Parent two", r"C:\CWW\Parent moved"))
+        .unwrap();
+    assert_eq!(alias_in(&disk, r"C:\CWW", "Parent moved"), "PARENT~2");
+    let mut w = crate::savestate::Writer::new();
+    disk.save_state(&mut w);
+    let mut loaded = DiskController::new(base.clone());
+    // The bus's ALIA section (bus/state.rs).
+    loaded.aliases_from_state = Some(disk.saved_aliases());
+    let lost = loaded
+        .load_state(&mut crate::savestate::Reader::new(&w.buf))
+        .unwrap();
+    assert!(lost.is_empty());
+    assert_eq!(alias_in(&loaded, r"C:\CWW", "Parent moved"), "PARENT~2");
+    assert!(!loaded.is_directory(r"C:\CWW\PARENT~1"));
+}
+
+/// A state saved after a folder is removed, before its parent is read
+/// again, keeps the parent's aliases: "Parent two" keeps PARENT~2 once
+/// "Parent alpha" (PARENT~1) is gone, in the run from the state as in the
+/// run that saved it, though aliases made afresh would give it PARENT~1.
+#[test]
+fn a_state_saved_before_the_folder_is_read_again_keeps_its_aliases() {
+    let base = scratch("aliases_state_unread");
+    for name in ["Parent alpha", "Parent two"] {
+        fs::create_dir_all(base.join("CWW").join(name)).unwrap();
+    }
+    let mut disk = DiskController::new(base.clone());
+    assert_eq!(alias_in(&disk, r"C:\CWW", "Parent two"), "PARENT~2");
+    disk.long_name_call(|disk| disk.remove_directory(r"C:\CWW\Parent alpha"))
+        .unwrap();
+    let saved = disk.saved_aliases();
+    let mut w = crate::savestate::Writer::new();
+    disk.save_state(&mut w);
+    assert_eq!(alias_in(&disk, r"C:\CWW", "Parent two"), "PARENT~2");
+    let mut loaded = DiskController::new(base.clone());
+    loaded.aliases_from_state = Some(saved);
+    let lost = loaded
+        .load_state(&mut crate::savestate::Reader::new(&w.buf))
+        .unwrap();
+    assert!(lost.is_empty());
+    assert_eq!(alias_in(&loaded, r"C:\CWW", "Parent two"), "PARENT~2");
+}
+
+/// An entry whose own name is an alias ("FOURTH~1.TXT") renamed to a long
+/// name holds that name as any alias is held, on a host folder as the FAT
+/// driver does it: the new name is FOURTH~2.TXT.
+#[test]
+fn a_tilde_name_renamed_holds_its_alias() {
+    let base = scratch("tilde_rename");
+    fs::create_dir_all(base.join("HST")).unwrap();
+    fs::write(base.join("HST").join("FOURTH~1.TXT"), b"x").unwrap();
+    let mut disk = DiskController::new(base.clone());
+    disk.long_name_call(|disk| {
+        disk.rename_file(r"C:\HST\FOURTH~1.TXT", r"C:\HST\Fourth file.txt")
+    })
+    .unwrap();
+    assert_eq!(alias_in(&disk, r"C:\HST", "Fourth file.txt"), "FOURTH~2.TXT");
 }
 
 /// A state loaded keeps the folder its current directory names, as the

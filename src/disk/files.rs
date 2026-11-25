@@ -229,6 +229,7 @@ impl DiskController {
         if create && existing.is_none() {
             self.host_dirs.changed();
             self.host_dirs.touched(&path);
+            self.host_aliases.touched(&path);
         }
         match opened {
             Ok(file) => {
@@ -435,6 +436,7 @@ impl DiskController {
         let written = hostfs::write(&path, data);
         self.host_dirs.changed();
         self.host_dirs.touched(&path);
+        self.host_aliases.touched(&path);
         written.map_err(|_| 0x05)?;
         if let Some(when) = stamp.and_then(|(time, date)| dos_to_system_time(time, date)) {
             let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_modified(when));
@@ -477,6 +479,7 @@ impl DiskController {
         let removed = hostfs::remove_file(&path);
         self.host_dirs.changed();
         self.host_dirs.touched(&path);
+        self.host_aliases.touched(&path);
         removed.map_err(|_| 0x05)
     }
 
@@ -577,13 +580,17 @@ impl DiskController {
         }
         // Destination exists, or is a name the host keeps for its own
         // files (`host_private`). A long-name call may give a name another
-        // case, as MoveFileA does on Windows 9x: the destination is then
-        // the source itself. DOS's rename cuts the name to 8.3, and a
-        // file of that name is the destination too (`cut_name_taken`).
+        // case, or the entry's alias, as MoveFileA does on Windows 9x: the
+        // destination is then the source itself (`itself`). DOS's rename
+        // finds the source there as it finds any other file, and fails,
+        // as it does on a disk image. It cuts the name to 8.3, and a file
+        // of that name is the destination too (`cut_name_taken`).
         let existing = self.find_existing_child(&parent, leaf);
         let recased = self.long_call && existing.as_ref().is_some_and(|e| parent.join(e) == source);
+        let itself = recased || self.file_id(to) == source_id;
         if super::host_private(leaf)
             || (existing.is_some() && !recased)
+            || (itself && !self.long_call)
             || self.cut_name_taken(&parent, leaf)
         {
             return Err(0x05);
@@ -591,7 +598,31 @@ impl DiskController {
         let target = parent.join(self.entry_name(leaf));
         self.host_dirs.closed.drop_under(&source);
         self.host_dirs.closed.drop_under(&target);
-        let renamed = hostfs::rename(&source, &target);
+        // A name no entry has may still be one the host knows: a Windows
+        // host's own short name of an entry. For another entry that is
+        // taken (05h), as the rename would replace that entry, and so it
+        // is for DOS's rename. For the file itself, renamed to its alias
+        // by a long-name call, the host would take the name for the file
+        // and leave it as it is: it goes by way of a name of rust-dos's
+        // own. A file left by that name, by a run that stopped between
+        // the two renames, is one of the program's, and isn't replaced.
+        let host_short = !same_name(&source, &target) && hostfs::exists(&target);
+        if host_short && !(self.long_call && same_file(&source, &target)) {
+            return Err(0x05);
+        }
+        let aside = parent.join(RENAMING_TO_ALIAS);
+        if host_short && hostfs::exists(&aside) {
+            return Err(0x05);
+        }
+        let renamed = if host_short {
+            hostfs::rename(&source, &aside).and_then(|()| {
+                hostfs::rename(&aside, &target).inspect_err(|_| {
+                    let _ = hostfs::rename(&aside, &source);
+                })
+            })
+        } else {
+            hostfs::rename(&source, &target)
+        };
         self.host_dirs.changed();
         if renamed.is_ok() {
             let from_leaf = from.rsplit(['\\', '/', ':']).next().unwrap_or(from);
@@ -602,21 +633,10 @@ impl DiskController {
             if let (FileId::Host(old), FileId::Host(new)) = (source_id, self.file_id(to)) {
                 self.moved_files(Self::host_files_moved(&old, &new));
             }
-            // A rename that changes only the case of a name keeps its
-            // alias on Windows 9x, so a current directory there or below
-            // names the folder still (`walk_host`). Other renames leave
-            // the current directory naming the folder that was there.
-            if recased {
-                for (_, folder) in self.current_folders.values_mut() {
-                    if let Ok(below) = folder.strip_prefix(&source) {
-                        *folder = if below.as_os_str().is_empty() {
-                            target.clone()
-                        } else {
-                            target.join(below)
-                        };
-                    }
-                }
-            }
+            // A folder's entries keep their aliases wherever it goes.
+            self.host_aliases.moved(&source, &target);
+            self.host_aliases.touched(&source);
+            self.host_aliases.touched(&target);
         } else {
             self.host_dirs.touched(&source);
             self.host_dirs.touched(&target);
@@ -951,4 +971,24 @@ fn dos_to_system_time(time: u16, date: u16) -> Option<std::time::SystemTime> {
             .earliest()
     })?;
     Some(t.into())
+}
+
+/// The name a file renamed to its alias has on the host between the two
+/// renames that give it the alias (`DiskController::rename_file`). It
+/// starts with ".rust-dos", so programs never see it (`host_private`).
+const RENAMING_TO_ALIAS: &str = ".rust-dos-renaming-to-alias";
+
+/// Whether `a` and `b` name one file on the host, by its long name and its
+/// short name on a Windows host.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (hostfs::canonicalize(a), hostfs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Whether the last components of `a` and `b` are one name in any case.
+fn same_name(a: &Path, b: &Path) -> bool {
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    name(a) == name(b)
 }
