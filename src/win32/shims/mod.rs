@@ -37,17 +37,26 @@ pub enum Shim {
     /// object leads to its device BITMAP, which BitBlt then draws from,
     /// as Windows 3.1's did ([`win31`]).
     Win31GdiHeap = 1,
+    /// UTLinearToSelectorOffset gives an address in a region of the
+    /// program's memory a selector of the region's own tiled ones, as
+    /// Win32s's did ([`win32s`]), not that of a 32 KB block.
+    UtRegionSelectors = 2,
 }
 
 impl Shim {
     /// Every shim, in the order of their bits.
-    pub const ALL: &[Shim] = &[Shim::GlobalFlagsWithoutLockCount, Shim::Win31GdiHeap];
+    pub const ALL: &[Shim] = &[
+        Shim::GlobalFlagsWithoutLockCount,
+        Shim::Win31GdiHeap,
+        Shim::UtRegionSelectors,
+    ];
 
     /// What the shim does, in a few words, for the log.
     pub fn describe(self) -> &'static str {
         match self {
             Shim::GlobalFlagsWithoutLockCount => "GlobalFlags without the lock count",
             Shim::Win31GdiHeap => "Windows 3.1's GDI heap",
+            Shim::UtRegionSelectors => "UTLinearToSelectorOffset with region selectors",
         }
     }
 
