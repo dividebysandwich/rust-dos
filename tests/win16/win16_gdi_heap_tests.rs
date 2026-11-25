@@ -25,6 +25,7 @@ const CREATE_COMPATIBLE_DC: u16 = 52;
 const DELETE_DC: u16 = 68;
 const DELETE_OBJECT: u16 = 69;
 const GET_BITMAP_BITS: u16 = 74;
+const GET_OBJECT: u16 = 82;
 const GLOBAL_HANDLE_TO_SEL: u16 = 50;
 const SYSTEM_HEAP_INFO: u16 = 71;
 const MEMORY_READ: u16 = 78;
@@ -273,15 +274,23 @@ fn reads_gdis_heap() -> Code {
 }
 
 /// A program that changes the device BITMAP as LUNIFX.DLL does, reads
-/// the changed bitmap's bits with GetBitmapBits before GDI has drawn on
-/// it or read it (all 8 by 2 of them, the size the BITMAP now says),
-/// copies the pixels into the bitmap of 8 by 2, and then draws into the
-/// changed bitmap through its memory DC: PatBlt BLACKNESS over the first
-/// two pixels, TextOut at (4, 0), and a BitBlt of the other bitmap's
-/// first two pixels to (2, 1). Each must show in its pixels, and a BitBlt
-/// from the bitmap then copies them as they are.
+/// the changed bitmap's size with GetObject and its bits with
+/// GetBitmapBits before GDI has drawn on it or read it (8 by 2, the size
+/// the BITMAP now says), copies the pixels into the bitmap of 8 by 2,
+/// and then draws into the changed bitmap through its memory DC: PatBlt
+/// BLACKNESS over the first two pixels, TextOut at (4, 0), and a BitBlt
+/// of the other bitmap's first two pixels to (2, 1). Each must show in
+/// its pixels, and a BitBlt from the bitmap then copies them as they are.
 fn draws_into_the_changed_bitmap() -> Code {
     let mut code = change_device_bitmap();
+    // GetObject(bitmap, 14, read): the size the BITMAP now says.
+    push_word(&mut code, BITMAP);
+    code.push(14);
+    push_data(&mut code, READ);
+    code.call("GDI", GET_OBJECT);
+    expect_ax(&mut code, 14, 70);
+    expect(&mut code, READ + 2, WIDTH, 71);
+    expect(&mut code, READ + 4, HEIGHT, 72);
     bits_are_pixels(&mut code, BITMAP, 60);
     blit_shows_pixels(&mut code, 12);
     set(&mut code, TEXT, u16::from(b'x'));
