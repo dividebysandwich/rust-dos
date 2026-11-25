@@ -807,16 +807,23 @@ fn yield16(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     if crate::win32::user32::message::has_sent(cpu) {
         let target = super::message::user32(cpu, "UserYield16");
         thunk::enter32(cpu, ctx, target, &[], thunk::POST_YIELD, vec![0]);
-    } else if !yield_and_receive(cpu, ctx) {
-        // No other task ran and nothing was sent: as with PeekMessage's
-        // yield that finds no message (user.rs), the call changed
-        // nothing but the start of the turn, and an idle proof follows
-        // it, so a lone Yield loop is skipped as idle.
+    } else {
+        yield_turn(cpu, ctx);
+    }
+    None
+}
+
+/// The yield of Yield, and of a PeekMessage that finds no message
+/// (user.rs), with nothing sent to the task: `yield_and_receive`, and
+/// `ctx` goes on. When no other task ran and nothing was sent, the call
+/// changed nothing but the start of the turn, and an idle proof follows
+/// it, so a lone Yield or PeekMessage loop is skipped as idle.
+pub(super) fn yield_turn(cpu: &mut Cpu, ctx: Context) {
+    if !yield_and_receive(cpu, ctx) {
         crate::idle::pure_call(cpu, None);
         crate::idle::reads_arguments(cpu);
         crate::idle::turn_started(cpu);
     }
-    None
 }
 
 /// The task gives up its turn, and when the turn comes back it handles
@@ -848,9 +855,9 @@ fn old_yield(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     None
 }
 
-/// UserYield16 returned to Yield: before the yield (`data` 0), the task
-/// gives up its turn; after it, the task goes on, its registers as they
-/// were.
+/// UserYield16 returned to Yield or to PeekMessage's yield: before the
+/// yield (`data` 0), the task gives up its turn; after it, the task goes
+/// on, its registers as they were.
 pub(super) fn post_yield(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     if data.first() == Some(&0) {
         yield_and_receive(cpu, *ctx);
