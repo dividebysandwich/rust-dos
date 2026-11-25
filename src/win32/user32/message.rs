@@ -1751,8 +1751,9 @@ pub fn in_send_message(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 /// ReplyMessage(result): the sender gets `result` now, and the window
 /// procedure's own result later goes nowhere. Between two Win16 tasks the
-/// sender goes on first, as with any reply (`finish_sent`): Windows 95
-/// runs it until it yields or waits before ReplyMessage returns.
+/// sender goes on first, as after a reply in GetMessage, PeekMessage or
+/// SendMessage's wait (`sender_goes_on`): Windows 95 runs it until it
+/// yields or waits before ReplyMessage returns.
 pub fn reply_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let tid = current_tid(cpu);
     let state = user(cpu);

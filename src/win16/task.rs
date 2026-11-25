@@ -828,8 +828,8 @@ pub fn may_run(win32: &crate::win32::Win32, p: usize, t: usize) -> bool {
 /// task that is ready doesn't run in between. Here the sender gives up
 /// the lock when it waits for the reply, so the receiver runs next; the
 /// receiver gives up its turn as it replies in GetMessage, PeekMessage or
-/// SendMessage's wait (USER32's `sender_goes_on`), so the sender runs
-/// next. Without this, a task that had just started ran between a message
+/// SendMessage's wait (USER32's `sender_goes_on`) or with ReplyMessage,
+/// so the sender runs next. Without this, a task that had just started ran between a message
 /// and its reply: the Metal Marines CD's launcher was still being
 /// activated, as the Video for Windows setup hid its window, when the
 /// setup's next task activated its dialog, and the rest of the
