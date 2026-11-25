@@ -240,7 +240,7 @@ const SPARE: f64 = 0.1;
 const WAITS: f64 = 0.5;
 /// A hold taken because the program waited (`AutoSpeed::waiting_hold`)
 /// goes on up after `CALM_MEASUREMENTS` measurements in a row halted
-/// `CALM` or more under the line `waits` draws (`WAITS`, or more for a
+/// more than `CALM` under the line `waits` draws (`WAITS`, or more for a
 /// program whose frames poll the retrace). Each of them takes
 /// `LONG_WINDOW_NS` or more at a movie's frame rate (2.5 s in Dark Omen's
 /// intro), so `JUDGED` of them held its first movie for 10 of its 16
@@ -251,14 +251,22 @@ const WAITS: f64 = 0.5;
 /// 19 to 24%, and the movie of its campaign at 340,000 13 to 26%.
 ///
 /// A scene between the two lines, one that doesn't wait but isn't calm,
-/// goes on up after `JUDGED` measurements in a row, as before. Held for
-/// good, a scene that reads 35% halted at the held speed because it
-/// waits on its data each frame would show a part of its frames until
-/// the hold ran out, and then hold where it is.
+/// goes on up after `JUDGED` measurements in a row more than `NEAR_WAITS`
+/// under the line. Held for good, a scene that reads 35% halted at the
+/// held speed because it waits on its data each frame would show a part
+/// of its frames until the hold ran out, and then hold where it is.
 const CALM: f64 = 0.2;
-/// Measurements in a row under the line by `CALM` that end a hold taken
-/// because the program waited.
+/// Measurements in a row more than `CALM` under the line that end a hold
+/// taken because the program waited.
 const CALM_MEASUREMENTS: u32 = 2;
+/// How far under the line `waits` draws a measurement is halted to count
+/// as one that worked, for the `JUDGED` in a row that end a hold taken
+/// because the program waited (`CALM`). Readings just under it are the
+/// noise of a scene that sits at the line, as Dark Omen's movie at its
+/// own rate does (49.5 and 49.9% between 50.5 and 50.8%): four of them in
+/// a row would take it up, and the measurements after that wait and
+/// bring it back down.
+const NEAR_WAITS: f64 = 0.05;
 /// Retraces a frame a program whose frames wait for the processor may
 /// wait for: a DOS game that waits for two after each frame, for 35
 /// frames a second on a 70 Hz display, and draws a frame in 1.2 retraces
@@ -1242,12 +1250,25 @@ fn kind(m: &Measurement) -> usize {
 }
 
 /// The measurements in a row since a hold was taken because the program
-/// waited (`AutoSpeed::waiting_hold`): those `CALM` or more under the
-/// line `waits` draws, and those under it at all.
+/// waited (`AutoSpeed::waiting_hold`): those more than `CALM` under the
+/// line `waits` draws, and those more than `NEAR_WAITS` under it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct WaitingHold {
     calm: u32,
     worked: u32,
+}
+
+impl WaitingHold {
+    /// The counts after a measurement halted `under` the line `waits`
+    /// draws by that much (less than nothing over it). One set aside
+    /// (`adds` false) breaks a run but doesn't add to one.
+    fn after(self, under: f64, adds: bool) -> Self {
+        let count = |n: u32, by: f64| if under > by { n + u32::from(adds) } else { 0 };
+        Self {
+            calm: count(self.calm, CALM),
+            worked: count(self.worked, NEAR_WAITS),
+        }
+    }
 }
 
 /// Where the search for the speed is.
@@ -1626,7 +1647,8 @@ pub struct AutoSpeed {
     /// for 30 measurements and then stepped down, showing 5 of its 15
     /// pictures a second with the host's estimate at 500,000 (#1889).
     /// After `CALM_MEASUREMENTS` in a row that are far from waiting
-    /// (`CALM`), or `JUDGED` that don't wait, the search goes on up.
+    /// (`CALM`), or `JUDGED` that don't come near it (`NEAR_WAITS`), the
+    /// search goes on up.
     waiting_hold: Option<WaitingHold>,
     /// The last measurement moved `LOADS` on its drives.
     loaded: bool,
@@ -3178,6 +3200,12 @@ impl AutoSpeed {
                 let seen = seen_before + 1;
                 let low = (recent + fps) / 2.0 < held * DROPPED;
                 if low && dipped == 0 {
+                    // Set aside for its frames, but the share it waited
+                    // breaks a run of a hold taken because the program
+                    // waited all the same: a dip that waits between two
+                    // calm measurements leaves none in a row.
+                    let under = wait_line - m.halted;
+                    self.waiting_hold = self.waiting_hold.map(|n| n.after(under, false));
                     self.step = Step::Hold {
                         fps: held,
                         left,
@@ -3211,14 +3239,7 @@ impl AutoSpeed {
                 // would raise no floor.
                 let mut left = left;
                 if let Some(counts) = self.waiting_hold {
-                    let counts = WaitingHold {
-                        calm: if m.halted < wait_line - CALM {
-                            counts.calm + 1
-                        } else {
-                            0
-                        },
-                        worked: if waits { 0 } else { counts.worked + 1 },
-                    };
+                    let counts = counts.after(wait_line - m.halted, true);
                     if counts.calm >= CALM_MEASUREMENTS || counts.worked >= JUDGED {
                         self.waiting_hold = None;
                         self.new_scene();
@@ -6817,8 +6838,9 @@ mod tests {
         assert!(speeds[2] > speeds[1], "{speeds:?}");
         // The same movie at its own rate, at 450,000, sat at the line:
         // 50.5, 49.5, 49.9 and 50.8% halted. Readings just under `WAITS`
-        // aren't calm, and the hold stays.
-        let speeds = held(&[0.505, 0.495, 0.499, 0.508, 0.495, 0.499]);
+        // aren't calm, nor do `JUDGED` of them in a row count as worked
+        // (`NEAR_WAITS`), and the hold stays.
+        let speeds = held(&[0.505, 0.495, 0.499, 0.497, 0.498, 0.508, 0.495]);
         assert!(speeds[1..].iter().all(|&s| s == speeds[1]), "{speeds:?}");
         // A movie that doesn't wait but isn't calm either goes on up after
         // `JUDGED`, as it did before the calm count.
@@ -6829,6 +6851,38 @@ mod tests {
             "{speeds:?}"
         );
         assert!(speeds[judged] > speeds[0], "{speeds:?}");
+    }
+
+    #[test]
+    fn a_dip_that_waits_breaks_the_calm_measurements_of_a_waiting_hold() {
+        // The movie stalls on its data for a measurement between two calm
+        // ones: its frames dip, which the hold sets aside, but it waited,
+        // and the two calm ones aren't in a row.
+        let load = Measurement {
+            fps: Some(2.0),
+            halted: 0.54,
+            io: 284_000.0,
+            refresh: 60.0,
+            ..STILL
+        };
+        let movie = |fps: f64, halted: f64| Measurement {
+            fps: Some(fps),
+            halted,
+            io: 300_000.0,
+            refresh: 60.0,
+            ..STILL
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(112_500);
+        auto.set_idles(true);
+        let held = auto.decide(54_630, &load, true, HOST);
+        let mut speeds = Vec::new();
+        for (fps, halted) in [(5.5, 0.2), (2.0, 0.6), (5.5, 0.2), (5.5, 0.2)] {
+            let speed = *speeds.last().unwrap_or(&held);
+            speeds.push(auto.decide(speed, &movie(fps, halted), true, HOST));
+        }
+        assert!(speeds[..3].iter().all(|&s| s == held), "{held} {speeds:?}");
+        assert!(speeds[3] > held, "{held} {speeds:?}");
     }
 
     #[test]
