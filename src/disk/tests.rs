@@ -2621,6 +2621,38 @@ fn a_long_name_call_renames_a_file_to_its_own_alias() {
     assert_eq!(names, ["THIRDF~1.TXT"]);
 }
 
+/// DOS's rename (INT 21h AH=56h) of a file to its own alias finds the
+/// new name taken, by the file itself, and fails (05h), on a host folder
+/// as on a disk image, whose entry has the name. On a Windows host the
+/// alias is the host's own short name of the file too. The file keeps
+/// its long name.
+#[test]
+fn a_dos_rename_of_a_file_to_its_own_alias_is_refused() {
+    let base = scratch("own_alias_dos_rename");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    for drive in ["C:", "D:"] {
+        let long = format!(r"{drive}\Third file.txt");
+        let alias = format!(r"{drive}\THIRDF~1.TXT");
+        let handle = disk
+            .long_name_call(|disk| disk.create_file(&long, PSP))
+            .unwrap();
+        disk.close_file(handle);
+        assert_eq!(disk.rename_file(&alias, &alias), Err(0x05), "{drive}");
+        let kept = disk.long_name_call(|disk| disk.is_file(&long));
+        assert!(kept, "{drive}");
+    }
+    let names: Vec<String> = fs::read_dir(base.join("c"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["Third file.txt"]);
+}
+
 /// A handle open on a file of a disk image goes on writing to it after a
 /// long-name rename moves its entry to other slots, and the long name
 /// entries that took the slots it left stay as they are.
@@ -2792,6 +2824,24 @@ fn a_renamed_current_directory_names_nothing() {
         disk.close_file(here);
         let found = disk.long_name_call(|disk| disk.is_file(&at(r"CWW\CASE DIR\SUB\HERE.TXT")));
         assert!(found, "{letter} after a rename of the case");
+        assert!(disk.set_current_directory(&at("")));
+
+        // So does a rename to its alias: "Sixth folder" renamed to
+        // SIXTHF~1 keeps the DOS name SIXTHF~1 (MoveFileA on Windows 98
+        // SE, checked in 86Box).
+        disk.long_name_call(|disk| {
+            for dir in [r"CWW\Sixth folder", r"CWW\Sixth folder\Sub"] {
+                disk.create_directory(&at(dir)).unwrap();
+            }
+            assert!(disk.set_current_directory(&at(r"CWW\Sixth folder\Sub")));
+            disk.rename_file(&at(r"CWW\Sixth folder"), &at(r"CWW\SIXTHF~1"))
+                .unwrap();
+        });
+        assert_eq!(current(&disk), r"CWW\SIXTHF~1\SUB", "{letter}");
+        let here = disk.create_file(&format!("{letter}HERE.TXT"), PSP).unwrap();
+        disk.close_file(here);
+        let found = disk.is_file(&at(r"CWW\SIXTHF~1\SUB\HERE.TXT"));
+        assert!(found, "{letter} after a rename to the alias");
         assert!(disk.set_current_directory(&at("")));
     }
 }

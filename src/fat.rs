@@ -2525,10 +2525,11 @@ pub(crate) mod tests {
     /// as on Windows 98 SE (checked in 86Box with CreateFileA,
     /// CreateDirectoryA and MoveFileA, and read back with mtools): a rename
     /// of a long name to its own alias, made names and renames beside a
-    /// tail name of the same start and extension, and a tail name beside
-    /// another. Others have none: another extension, a tail name longer
-    /// than the name's start, a plain name, a deleted tail name or one in
-    /// a subdirectory.
+    /// tail name of the same start and extension, a tail name beside
+    /// another, and a rename that changes only the case. Others have none:
+    /// another extension, a tail name longer than the name's start, a
+    /// plain name, a deleted tail name or one in a subdirectory, and the
+    /// tail names themselves.
     #[test]
     fn upper_case_names_beside_numeric_tails_get_long_names() {
         let volume = floppy("tail_like.img");
@@ -2580,6 +2581,17 @@ pub(crate) mod tests {
         volume.mkdir_long(&[], "SUB").unwrap();
         volume.create_long(&["SUB"], "KLMN~1.TXT", 0).unwrap();
         made("KLMN.TXT");
+        for name in [
+            "SHORT~1.TXT",
+            "SHORT3.TXT",
+            "OTHER~1.TXT",
+            "LONG~12.TXT",
+            "AB~C.TXT",
+        ] {
+            made(name);
+        }
+        made("seven.txt");
+        volume.rename_long(&["seven.txt"], &[], "SEVEN.TXT").unwrap();
 
         let listed = root_by_spec(&volume);
         let long_of = |name: &str| {
@@ -2599,6 +2611,8 @@ pub(crate) mod tests {
             "QQ~2.TXT",
             "UVWX2.TXT",
             "DDIR",
+            "SHORT3.TXT",
+            "SEVEN.TXT",
         ] {
             assert_eq!(long_of(name).as_deref(), Some(name), "{name}");
         }
@@ -2614,6 +2628,10 @@ pub(crate) mod tests {
             "YZAB.TXT",
             "KLMN.TXT",
             "SUB",
+            "SHORT~1.TXT",
+            "OTHER~1.TXT",
+            "LONG~12.TXT",
+            "AB~C.TXT",
         ] {
             assert_eq!(long_of(name), None, "{name}");
         }

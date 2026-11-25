@@ -578,13 +578,16 @@ impl DiskController {
         // Destination exists, or is a name the host keeps for its own
         // files (`host_private`). A long-name call may give a name another
         // case, or the entry's alias, as MoveFileA does on Windows 9x: the
-        // destination is then the source itself. DOS's rename cuts the
-        // name to 8.3, and a file of that name is the destination too
-        // (`cut_name_taken`).
+        // destination is then the source itself (`itself`). DOS's rename
+        // finds the source there as it finds any other file, and fails,
+        // as it does on a disk image. It cuts the name to 8.3, and a file
+        // of that name is the destination too (`cut_name_taken`).
         let existing = self.find_existing_child(&parent, leaf);
         let recased = self.long_call && existing.as_ref().is_some_and(|e| parent.join(e) == source);
+        let itself = recased || self.file_id(to) == source_id;
         if super::host_private(leaf)
             || (existing.is_some() && !recased)
+            || (itself && !self.long_call)
             || self.cut_name_taken(&parent, leaf)
         {
             return Err(0x05);
@@ -594,16 +597,21 @@ impl DiskController {
         self.host_dirs.closed.drop_under(&target);
         // A name no entry has may still be one the host knows: a Windows
         // host's own short name of an entry. For another entry that is
-        // taken (05h), as the rename would replace that entry. For the
-        // file itself, renamed to its alias, the host would take the
-        // name for the file and leave it as it is: it goes by way of a
-        // name of rust-dos's own.
+        // taken (05h), as the rename would replace that entry, and so it
+        // is for DOS's rename. For the file itself, renamed to its alias
+        // by a long-name call, the host would take the name for the file
+        // and leave it as it is: it goes by way of a name of rust-dos's
+        // own. A file left by that name, by a run that stopped between
+        // the two renames, is one of the program's, and isn't replaced.
         let host_short = !same_name(&source, &target) && hostfs::exists(&target);
-        if host_short && !same_file(&source, &target) {
+        if host_short && !(self.long_call && same_file(&source, &target)) {
+            return Err(0x05);
+        }
+        let aside = parent.join(RENAMING_TO_ALIAS);
+        if host_short && hostfs::exists(&aside) {
             return Err(0x05);
         }
         let renamed = if host_short {
-            let aside = parent.join(RENAMING_TO_ALIAS);
             hostfs::rename(&source, &aside).and_then(|()| {
                 hostfs::rename(&aside, &target).inspect_err(|_| {
                     let _ = hostfs::rename(&aside, &source);
@@ -623,10 +631,11 @@ impl DiskController {
                 self.moved_files(Self::host_files_moved(&old, &new));
             }
             // A rename that changes only the case of a name keeps its
-            // alias on Windows 9x, so a current directory there or below
-            // names the folder still (`walk_host`). Other renames leave
-            // the current directory naming the folder that was there.
-            if recased {
+            // alias on Windows 9x, and so does one to its alias, so a
+            // current directory there or below names the folder still
+            // (`walk_host`). Other renames leave the current directory
+            // naming the folder that was there.
+            if itself {
                 for (_, folder) in self.current_folders.values_mut() {
                     if let Ok(below) = folder.strip_prefix(&source) {
                         *folder = if below.as_os_str().is_empty() {

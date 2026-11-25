@@ -7207,8 +7207,10 @@ fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_disk_image() {
 /// MoveFileA renames a file to its own 8.3 alias, as on Windows 98 SE
 /// (checked in 86Box): "Third file.txt" becomes THIRDF~1.TXT, where the
 /// call had found the name taken by the file itself (183). The program
-/// also makes MADE~1.TXT and then MADE.TXT. Each check sets a bit of the
-/// exit code. Returns the machine, for its drive's names.
+/// also makes MADE~1.TXT and then MADE.TXT, and renames "Fourth file.txt"
+/// to FOURTH~1.TXT with msvcrt's rename, which calls MoveFileA on Windows
+/// 98. Each check sets a bit of the exit code. Returns the machine, for
+/// its drive's names.
 fn rename_to_own_alias(test: &str, drive: &str, image: bool) -> Box<Cpu> {
     use Arg::{Esi, I};
     let names: &[&str] = &[
@@ -7218,13 +7220,15 @@ fn rename_to_own_alias(test: &str, drive: &str, image: bool) -> Box<Cpu> {
         "GetShortPathNameA",
         "lstrcmpA",
     ];
-    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names), ("MSVCRT.DLL", &["rename"])];
     let mut data = vec![0; 0x200];
     for (at, name) in [
         (0x00, "Third file.txt"),
         (0x20, "THIRDF~1.TXT"),
         (0x40, "MADE~1.TXT"),
         (0x60, "MADE.TXT"),
+        (0x80, "Fourth file.txt"),
+        (0xA0, "FOURTH~1.TXT"),
     ] {
         put(&mut data, at, format!("{drive}\\{name}\0").as_bytes());
     }
@@ -7252,8 +7256,14 @@ fn rename_to_own_alias(test: &str, drive: &str, image: bool) -> Box<Cpu> {
         check(a, false, 2)?;
         make(a, 0x40, 3)?;
         make(a, 0x60, 4)?;
+        make(a, 0x80, 5)?;
+        // rename(old, new) is cdecl, and returns 0 when it renames.
+        call_with(a, l.import(names.len()), &[at(0x80), at(0xA0)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 6)?;
         a.mov(eax, ebx)?;
-        a.or(eax, 0xE0)?;
+        a.or(eax, 0x80)?;
         a.ret()
     });
     let mut cpu = machine(test, exe);
@@ -7300,6 +7310,7 @@ fn move_file_renames_a_file_to_its_own_alias_on_a_disk_image() {
     assert_eq!(
         listed,
         [
+            named("FOURTH~1.TXT", Some("FOURTH~1.TXT")),
             named("MADE.TXT", Some("MADE.TXT")),
             named("MADE~1.TXT", None),
             named("THIRDF~1.TXT", Some("THIRDF~1.TXT")),
@@ -7307,7 +7318,8 @@ fn move_file_renames_a_file_to_its_own_alias_on_a_disk_image() {
     );
 }
 
-/// On a host folder the file is named THIRDF~1.TXT on the host.
+/// On a host folder the files are named THIRDF~1.TXT and FOURTH~1.TXT on
+/// the host.
 #[test]
 fn move_file_renames_a_file_to_its_own_alias_on_a_host_drive() {
     rename_to_own_alias("own_alias_host", "C:", false);
@@ -7318,7 +7330,10 @@ fn move_file_renames_a_file_to_its_own_alias_on_a_host_drive() {
         .filter(|n| n.ends_with(".TXT") || n.ends_with(".txt"))
         .collect();
     names.sort();
-    assert_eq!(names, ["MADE.TXT", "MADE~1.TXT", "THIRDF~1.TXT"]);
+    assert_eq!(
+        names,
+        ["FOURTH~1.TXT", "MADE.TXT", "MADE~1.TXT", "THIRDF~1.TXT"]
+    );
 }
 
 /// SetFileTime on a file in a host folder, as Windows 98 SE does it on
