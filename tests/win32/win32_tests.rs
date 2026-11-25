@@ -21253,3 +21253,209 @@ fn a_win32_program_for_windows_3_gets_edit_colors_for_a_read_only_edit() {
     let (code, out) = run("edit_colors_win32_plain", exe);
     assert_eq!(code, 1, "an edit that takes input: {out}");
 }
+
+/// What `control_colors_program` ends with: a bit for each WM_CTLCOLOR*
+/// message its popup got (1 << (msg - WM_CTLCOLORMSGBOX)), and the bits
+/// below.
+const CTLCOLOR_EDIT_BIT: u32 = 1 << 1;
+const CTLCOLOR_LISTBOX_BIT: u32 = 1 << 2;
+const CTLCOLOR_BTN_BIT: u32 = 1 << 3;
+const CTLCOLOR_STATIC_BIT: u32 = 1 << 6;
+/// A WM_CTLCOLOR* message whose lParam was another window than the
+/// control: one of the control's own children.
+const FROM_CHILD: u32 = 1 << 7;
+/// DefWindowProcA gave the popup's WM_CTLCOLORDLG the COLOR_WINDOW
+/// brush, Windows 3.1's color, rather than COLOR_BTNFACE's.
+const WINDOW_BRUSH: u32 = 1 << 8;
+
+/// A GUI program made for the Windows `major`.`minor` (its subsystem
+/// version) with a popup of its own class and in it a visible control of
+/// the class `class` and the style `style`. Both are made with the
+/// program's instance, or with USER32's when `user32` is set. The
+/// popup's procedure notes the WM_CTLCOLOR* messages it gets and passes
+/// them on to DefWindowProcA. The program paints the popup and the
+/// control with UpdateWindow, asks DefWindowProcA for the popup's
+/// WM_CTLCOLORDLG, and ends with the bits above.
+fn control_colors_program(
+    class: &str,
+    style: i32,
+    (major, minor): (u16, u16),
+    user32: bool,
+) -> Vec<u8> {
+    const WM_CTLCOLORMSGBOX: i32 = 0x0132;
+    const WM_CTLCOLORDLG: i32 = 0x0136;
+    const WM_CTLCOLORSTATIC: i32 = 0x0138;
+    const WS_CHILD_VISIBLE: i32 = 0x5000_0000;
+    const COLOR_WINDOW: i32 = 5;
+    let names: &[&str] = &[
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "UpdateWindow",
+        "GetDC",
+        "GetSysColorBrush",
+    ];
+    let kernel: &[&str] = &["ExitProcess", "GetModuleHandleA"];
+    let imports: &[(&str, &[&str])] = &[("USER32.dll", names), ("KERNEL32.dll", kernel)];
+    let mut d = Data::default();
+    let name = d.text("ControlColors");
+    let class = d.text(class);
+    let user32_name = d.text("USER32");
+    let text = d.text("Item");
+    let asked = d.add(&[0; 4]);
+    let control = d.add(&[0; 4]);
+    let popup = d.add(&[0; 4]);
+    let instance = d.add(&[0; 4]);
+    let mut wndclass = [0; 40];
+    wndclass[16..20].copy_from_slice(&BASE.to_le_bytes());
+    let wc = d.add(&wndclass);
+    let mut b = Builder::exe(BASE);
+    b.subsystem(pe::SUBSYSTEM_GUI)
+        .subsystem_version(major, minor);
+    program_with(b, false, imports, &d.0, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let k =
+            |name: &str| l.import(names.len() + kernel.iter().position(|n| *n == name).unwrap());
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut other = a.create_label();
+        a.mov(ecx, dword_ptr(esp + 8))?;
+        a.sub(ecx, WM_CTLCOLORMSGBOX)?;
+        a.cmp(ecx, WM_CTLCOLORSTATIC - WM_CTLCOLORMSGBOX)?;
+        a.ja(other)?;
+        a.mov(eax, 1)?;
+        a.shl(eax, cl)?;
+        a.or(dword_ptr(l.at(asked)), eax)?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        a.cmp(eax, dword_ptr(l.at(control)))?;
+        a.je(other)?;
+        a.or(dword_ptr(l.at(asked)), FROM_CHILD as i32)?;
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(wc + 4)), eax)?;
+        a.mov(dword_ptr(l.at(wc + 36)), l.at(name) as i32)?;
+        if user32 {
+            a.push(l.at(user32_name) as i32)?;
+            a.call(k("GetModuleHandleA"))?;
+        } else {
+            a.mov(eax, BASE as i32)?;
+        }
+        a.mov(dword_ptr(l.at(instance)), eax)?;
+        a.push(l.at(wc) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        a.push(0)?;
+        a.push(dword_ptr(l.at(instance)))?;
+        for value in [0, 0, 100, 200, 0, 0, POPUP] {
+            a.push(value)?;
+        }
+        a.push(l.at(name) as i32)?;
+        a.push(l.at(name) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(dword_ptr(l.at(popup)), eax)?;
+        a.push(0)?;
+        a.push(dword_ptr(l.at(instance)))?;
+        a.push(5)?;
+        a.push(eax)?;
+        for value in [80, 150, 0, 0, WS_CHILD_VISIBLE | style] {
+            a.push(value)?;
+        }
+        a.push(l.at(text) as i32)?;
+        a.push(l.at(class) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(dword_ptr(l.at(control)), eax)?;
+        a.push(dword_ptr(l.at(popup)))?;
+        a.call(f("UpdateWindow"))?;
+        // DefWindowProcA's brush for the popup's WM_CTLCOLORDLG.
+        a.push(dword_ptr(l.at(popup)))?;
+        a.call(f("GetDC"))?;
+        a.push(dword_ptr(l.at(popup)))?;
+        a.push(eax)?;
+        a.push(WM_CTLCOLORDLG)?;
+        a.push(dword_ptr(l.at(popup)))?;
+        a.call(f("DefWindowProcA"))?;
+        a.mov(esi, eax)?;
+        a.push(COLOR_WINDOW)?;
+        a.call(f("GetSysColorBrush"))?;
+        let mut done = a.create_label();
+        a.cmp(eax, esi)?;
+        a.jne(done)?;
+        a.or(dword_ptr(l.at(asked)), WINDOW_BRUSH as i32)?;
+        a.set_label(&mut done)?;
+        a.push(dword_ptr(l.at(asked)))?;
+        a.call(k("ExitProcess"))
+    })
+}
+
+const CBS_DROPDOWN: i32 = 0x0002;
+const CBS_DROPDOWNLIST: i32 = 0x0003;
+const BS_CHECKBOX: i32 = 0x0002;
+const BS_GROUPBOX: i32 = 0x0007;
+const WS_DISABLED_STYLE: i32 = 0x0800_0000;
+
+/// Run `control_colors_program` and give its exit code.
+fn control_colors(class: &str, style: i32, version: (u16, u16), user32: bool) -> (u32, String) {
+    let exe = control_colors_program(class, style, version, user32);
+    let (code, out) = run("control_colors", exe);
+    (code as u32, out)
+}
+
+#[test]
+fn a_win32_program_for_windows_3_gets_windows_3_default_control_colors() {
+    // Windows 98 SE, measured: DefWindowProc gives the window of a
+    // Win32 program made for 3.10 Windows 3.1's colors, COLOR_WINDOW for
+    // a dialog, as it does a Windows 3.x program's. It goes by the
+    // module the window was made with: a window that program makes with
+    // USER32's instance gets Windows 95's COLOR_BTNFACE, and so does a
+    // 4.0 program's.
+    let (code, out) = control_colors("Static", 0, (3, 10), false);
+    assert_eq!(code & WINDOW_BRUSH, WINDOW_BRUSH, "3.10: {out}");
+    let (code, out) = control_colors("Static", 0, (3, 10), true);
+    assert_eq!(code & WINDOW_BRUSH, 0, "3.10, USER32's instance: {out}");
+    let (code, out) = control_colors("Static", 0, (4, 0), false);
+    assert_eq!(code & WINDOW_BRUSH, 0, "4.0: {out}");
+}
+
+#[test]
+fn a_windows_3_combo_box_asks_for_list_box_colors() {
+    // Windows 98 SE, measured: a combo box made for a Windows before 4.0
+    // paints with CTLCOLOR_LISTBOX, enabled or not, and keeps its
+    // children's WM_CTLCOLOR* to itself (DefWindowProc answers them). A
+    // 4.0 one asks for CTLCOLOR_EDIT, or CTLCOLOR_STATIC when disabled,
+    // and passes its edit's on to its parent. The window's module
+    // decides, so a 3.10 program's combo box made with USER32's
+    // instance behaves as a 4.0 one.
+    let check = |style: i32, version: (u16, u16), user32, want: u32| {
+        let (code, out) = control_colors("ComboBox", style, version, user32);
+        let what = format!("style {style:#x}, {version:?}, USER32's instance {user32}");
+        assert_eq!(code & 0xFF, want, "{what}: {out}");
+    };
+    let (list, disabled) = (CBS_DROPDOWNLIST, CBS_DROPDOWNLIST | WS_DISABLED_STYLE);
+    check(list, (3, 10), false, CTLCOLOR_LISTBOX_BIT);
+    check(disabled, (3, 10), false, CTLCOLOR_LISTBOX_BIT);
+    check(CBS_DROPDOWN, (3, 10), false, CTLCOLOR_LISTBOX_BIT);
+    check(list, (4, 0), false, CTLCOLOR_EDIT_BIT);
+    check(disabled, (4, 0), false, CTLCOLOR_STATIC_BIT);
+    check(CBS_DROPDOWN, (4, 0), false, CTLCOLOR_EDIT_BIT | FROM_CHILD);
+    check(list, (3, 10), true, CTLCOLOR_EDIT_BIT);
+}
+
+#[test]
+fn a_windows_3_check_box_or_group_box_asks_for_button_colors() {
+    // Windows 98 SE, measured: every button made for a Windows before
+    // 4.0 asks for CTLCOLOR_BTN, as Windows 3.1's did. A 4.0 check box,
+    // radio button or group box asks for CTLCOLOR_STATIC.
+    for (style, version, want, what) in [
+        (BS_CHECKBOX, (3, 10), CTLCOLOR_BTN_BIT, "3.10 check box"),
+        (BS_GROUPBOX, (3, 10), CTLCOLOR_BTN_BIT, "3.10 group box"),
+        (BS_CHECKBOX, (4, 0), CTLCOLOR_STATIC_BIT, "4.0 check box"),
+        (BS_GROUPBOX, (4, 0), CTLCOLOR_STATIC_BIT, "4.0 group box"),
+    ] {
+        let (code, out) = control_colors("Button", style, version, false);
+        assert_eq!(code & 0xFF, want, "{what}: {out}");
+    }
+}

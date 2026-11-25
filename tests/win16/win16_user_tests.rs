@@ -76,6 +76,20 @@ impl Program {
         parent: bool,
         id: u16,
     ) {
+        self.create_window_in(class, style, rect, parent, id, None);
+    }
+
+    /// `create_window` with the instance in the word at `instance` of
+    /// the data segment, or 0 for none.
+    fn create_window_in(
+        &mut self,
+        class: &'static [u8],
+        style: u32,
+        rect: [u16; 4],
+        parent: bool,
+        id: u16,
+        instance: Option<u8>,
+    ) {
         self.push_string(class);
         self.push_string(b"\0");
         let code = &mut self.code;
@@ -88,9 +102,12 @@ impl Program {
         } else {
             code.push(0);
         }
-        code.push(id)
-            .push(0) // instance
-            .push(0)
+        code.push(id);
+        match instance {
+            Some(at) => code.emit(&[0xFF, 0x36, at, 0x00]), // push word [at]
+            None => code.push(0),
+        };
+        code.push(0)
             .push(0) // no parameter
             .call("USER", CREATE_WINDOW);
     }
@@ -1556,14 +1573,20 @@ const ASKED_STATIC: u8 = 1 << 6;
 const BLACK_TEXT: u8 = 1 << 0;
 const GRAY_TEXT: u8 = 1 << 7;
 
-/// A program for the Windows `version` (0x030A, 0x0400) with an edit
-/// control of the style `style` showing "WWWW", in a popup of its own
-/// class whose procedure notes the type (lParam's high word) of each
-/// WM_CTLCOLOR it gets and passes it on to DefWindowProc. The program
-/// paints the edit with UpdateWindow, looks for black and gray pixels
-/// through GetDC and GetPixel, and ends with the code ASKED_* and *_TEXT
-/// say.
+/// `colors_program` with an edit control made with instance 0.
 fn edit_colors_program(style: u32, version: u16) -> Vec<u8> {
+    colors_program(b"EDIT\0", style, version, false)
+}
+
+/// A program for the Windows `version` (0x030A, 0x0400) with a control
+/// of the class `class` and the style `style` showing "WWWW", made with
+/// the program's instance when `instance` is set and with 0 when not, in
+/// a popup of its own class whose procedure notes the type (lParam's
+/// high word) of each WM_CTLCOLOR it gets and passes it on to
+/// DefWindowProc. The program paints the control with UpdateWindow,
+/// looks for black and gray pixels through GetDC and GetPixel, and ends
+/// with the code ASKED_* and *_TEXT say.
+fn colors_program(class: &'static [u8], style: u32, version: u16, instance: bool) -> Vec<u8> {
     const SET_WINDOW_TEXT: u16 = 37;
     const GET_DC: u16 = 66;
     const UPDATE_WINDOW: u16 = 124;
@@ -1594,7 +1617,8 @@ fn edit_colors_program(style: u32, version: u16) -> Vec<u8> {
     p.create_window(b"COLORS\0", POPUP, [0, 0, 200, 100], false, 0);
     p.code.emit(&[0x8B, 0xF0]); // mov si,ax
     exit_if_ax_zero(&mut p.code, 3);
-    p.create_window(b"EDIT\0", CHILD | style, [0, 0, 100, 40], true, 5);
+    let instance = instance.then_some(WC + 10);
+    p.create_window_in(class, CHILD | style, [0, 0, 100, 40], true, 5, instance);
     exit_if_ax_zero(&mut p.code, 4);
     p.code.emit(&[0x8B, 0xF0]); // mov si,ax
     p.code.emit(&[0x56]); // push si
@@ -1712,4 +1736,37 @@ fn a_windows_4_programs_read_only_or_disabled_edit_asks_for_static_colors() {
     let program = edit_colors_program(ES_MULTILINE | ES_READONLY, 0x0400);
     let (exit, log) = run("edit_colors_read_only_4", program);
     assert_eq!(exit, ASKED_STATIC | BLACK_TEXT, "{log}");
+}
+
+/// The WM_CTLCOLOR types `colors_program` notes: bit 2 for
+/// CTLCOLOR_LISTBOX, bit 3 for CTLCOLOR_BTN.
+const ASKED_TYPES: u8 = 0x7E;
+const ASKED_LISTBOX: u8 = 1 << 2;
+const ASKED_BTN: u8 = 1 << 3;
+const CBS_DROPDOWNLIST: u32 = 0x0003;
+const BS_CHECKBOX: u32 = 0x0002;
+
+#[test]
+fn a_windows_3_programs_combo_box_and_check_box_ask_for_windows_3_colors() {
+    // Windows 98 SE, measured: a combo box made with the instance of a
+    // program for a Windows before 4.0 paints with CTLCOLOR_LISTBOX,
+    // enabled or not, and a check box asks for CTLCOLOR_BTN, as on
+    // Windows 3.1. A 4.0 program's ask for CTLCOLOR_EDIT, CTLCOLOR_STATIC
+    // when disabled, and CTLCOLOR_STATIC.
+    let combo: &'static [u8] = b"COMBOBOX\0";
+    let button: &'static [u8] = b"BUTTON\0";
+    let disabled = CBS_DROPDOWNLIST | WS_DISABLED;
+    for (class, style, version, want) in [
+        (combo, CBS_DROPDOWNLIST, 0x030A, ASKED_LISTBOX),
+        (combo, disabled, 0x030A, ASKED_LISTBOX),
+        (button, BS_CHECKBOX, 0x030A, ASKED_BTN),
+        (combo, CBS_DROPDOWNLIST, 0x0400, ASKED_EDIT),
+        (combo, disabled, 0x0400, ASKED_STATIC),
+        (button, BS_CHECKBOX, 0x0400, ASKED_STATIC),
+    ] {
+        let (exit, log) = run("control_colors", colors_program(class, style, version, true));
+        let name = String::from_utf8_lossy(class);
+        let what = format!("{name} {style:#x} for {version:#x}");
+        assert_eq!(exit & ASKED_TYPES, want, "{what}: {log}");
+    }
 }
