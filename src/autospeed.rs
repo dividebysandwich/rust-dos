@@ -340,20 +340,22 @@ const TWO_STEPS: f64 = FINE_STEP * FINE_STEP;
 /// time goes to each frame rather than each instruction, the estimate reads
 /// low once the host falls behind and high while it keeps up (Omikron's
 /// software-rendered dialogue). A faster CPU model's least speed keeps under
-/// that limit too. It rises by `FINE_STEP` each time the host has kept up
-/// for `LAG_WAIT` measurements in a row at it. A fall behind at a speed the
-/// limit rose to doubles that wait for the limit it sets, up to
-/// `LAGGED_WINDOWS`, and a rise that held halves it again, so a host that
-/// can't run a speed meets it again only that often, and one that stalls
-/// now and then climbs back a step every `LAG_WAIT`. A wait of
-/// `LAGGED_WINDOWS` for every step kept American McGee's Alice at 68,000
-/// and 9 frames a second for a minute after the frames that followed a
-/// save state's load fell behind twice, and took seven minutes to climb
-/// back to the 180,000 it had run at (#827). A scene that takes more work
-/// says nothing of a limit a lighter one found (Unreal's 60 frame a second
-/// fly-through at 100,000 and the 10 frame a second one after it, which the
-/// host runs at 250,000), so a frame rate that falls by `DROPPED` at the
-/// limit multiplies it by `HEAVIER`. Too much meets the limit again at once.
+/// that limit too. It rises by `FINE_STEP` each time `LAG_WAIT`
+/// measurements go by without the host falling behind, at whatever speed
+/// the search holds. A fall behind after the limit rose doubles that wait
+/// for the limit it sets, up to `LAGGED_WINDOWS`, and a rise that held
+/// halves it again (one past what the host has, once the host keeps up
+/// for the wait), so a host that can't run a speed meets it again only
+/// that often, and one that stalls now and then climbs back a step every
+/// `LAG_WAIT`. A wait of `LAGGED_WINDOWS` for every step kept American
+/// McGee's Alice at 68,000 and 9 frames a second for a minute after the
+/// frames that followed a save state's load fell behind twice, and took
+/// seven minutes to climb back to the 180,000 it had run at (#827). A
+/// scene that takes more work says nothing of a limit a lighter one found
+/// (Unreal's 60 frame a second fly-through at 100,000 and the 10 frame a
+/// second one after it, which the host runs at 250,000), so a frame rate
+/// that falls by `DROPPED` at the limit multiplies it by `HEAVIER`, a rise
+/// like the others. Too much meets the limit again at once.
 const KEPT_UP: f64 = 0.95;
 const HEAVIER: f64 = 2.0;
 const LAG_WAIT: u32 = JUDGED;
@@ -1589,12 +1591,14 @@ pub struct AutoSpeed {
     /// goes to, and the measurements left before that rises; the pace,
     /// smoothed; and whether the last measurement fell behind.
     lagged: Option<(u32, u32)>,
-    /// The measurements kept up that `lagged` waits before each rise
-    /// (`LAG_WAIT`), and whether it rose since the host last fell behind.
-    lag_wait: u32,
-    lag_rose: bool,
     pace: f64,
     behind: bool,
+    /// The measurements kept up that `lagged` waits before each rise
+    /// (`LAG_WAIT`), whether it rose since the host last fell behind, and
+    /// the measurements in a row the host has kept up without a limit.
+    lag_wait: u32,
+    lag_rose: bool,
+    lag_kept: u32,
     /// A measurement fell behind at this speed without the smoothed pace
     /// saying the host lagged, and the measurements left in which another
     /// one behind there says it does (`AGAIN_WINDOWS`).
@@ -1754,10 +1758,11 @@ impl AutoSpeed {
             unsure: false,
             loaded: false,
             lagged: None,
-            lag_wait: LAG_WAIT,
-            lag_rose: false,
             pace: 1.0,
             behind: false,
+            lag_wait: LAG_WAIT,
+            lag_rose: false,
+            lag_kept: 0,
             slipped: None,
             trying: None,
             try_behind: 0,
@@ -1894,7 +1899,7 @@ impl AutoSpeed {
         (self.even_done, self.free_running) = ([false; 2], [false; 2]);
         self.pool.clear();
         self.lagged = None;
-        (self.lag_wait, self.lag_rose) = (LAG_WAIT, false);
+        (self.lag_wait, self.lag_rose, self.lag_kept) = (LAG_WAIT, false, 0);
         self.pace = 1.0;
         self.behind = false;
         self.slipped = None;
@@ -2672,6 +2677,19 @@ impl AutoSpeed {
             self.far_more = 0;
             self.slow_host = None;
         }
+        // A rise past what the host has holds as one under it does
+        // (`lag_wait_after_rise`) once the host keeps up for the wait with
+        // no limit: the wait halves, and a fall after that, in a scene
+        // that may have nothing to do with it, doesn't double it. Kept, a
+        // wait grown to `LAGGED_WINDOWS` would make the next load that
+        // falls behind climb back a step per `LAGGED_WINDOWS` (#827).
+        let kept = self.lagged.is_none() && !lagged && m.pace >= KEPT_UP;
+        self.lag_kept = if kept { self.lag_kept + 1 } else { 0 };
+        if self.lag_kept >= self.lag_wait {
+            self.lag_kept = 0;
+            self.lag_rose = false;
+            self.lag_wait = (self.lag_wait / 2).max(LAG_WAIT);
+        }
         // A faster CPU model's least speed is only up to what the host has,
         // the cap included: an estimate that reads high where the host keeps
         // up would otherwise take the speed back past the cap at once.
@@ -3165,7 +3183,8 @@ impl AutoSpeed {
                     self.unsure = false;
                     if !lagged && self.lagged.is_some() && current >= top && top < host_top {
                         let most = (top as f64 * HEAVIER) as u32;
-                        self.lagged = (most < host_top).then_some((most, LAGGED_WINDOWS));
+                        let wait = self.lag_wait_after_rise();
+                        self.lagged = (most < host_top).then_some((most, wait));
                         self.step = Step::Raised { from: current, fps, below: here };
                         let more = c * (m.refresh / fps).clamp(FINE_STEP, FIRST_STEP);
                         return (more.round() as u32).clamp(base, most.min(host_top));
@@ -5164,7 +5183,7 @@ mod tests {
         // it can run that.
         assert_eq!(auto.decide(80_000, &scene(10.0), true, HOST), 80_000);
         assert_eq!(auto.decide(80_000, &scene(10.0), true, HOST), 160_000);
-        assert_eq!(auto.lagged, Some((160_000, LAGGED_WINDOWS)));
+        assert_eq!(auto.lagged, Some((160_000, LAG_WAIT)));
     }
 
     #[test]
@@ -8427,8 +8446,32 @@ mod tests {
         // from 68,000 to the estimate: with a step each `LAGGED_WINDOWS`,
         // that took 211 measurements.
         let back = speeds.iter().position(|&s| s >= 160_000);
-        assert!(back.is_some_and(|i| i <= 7 * LAG_WAIT as usize), "{speeds:?}");
+        assert!(
+            back.is_some_and(|i| i <= 7 * LAG_WAIT as usize),
+            "{speeds:?}"
+        );
         assert!(speeds[40..].iter().all(|&s| s >= 135_000), "{speeds:?}");
+    }
+
+    #[test]
+    fn a_wait_grown_at_a_limit_shrinks_once_the_host_keeps_up_without_one() {
+        // The limit rose past what the host has after falls had doubled
+        // its wait to `LAGGED_WINDOWS`, and the host keeps up from there:
+        // each wait kept up halves it, and a load that falls behind later
+        // climbs back a step every `LAG_WAIT` again.
+        let mut auto = AutoSpeed::new(3000, None);
+        (auto.lag_wait, auto.lag_rose) = (LAGGED_WINDOWS, true);
+        let mut speed = 60_000;
+        for _ in 0..LAGGED_WINDOWS + 16 + 8 {
+            speed = auto.decide(speed, &myth(speed), true, HOST);
+        }
+        assert_eq!((auto.lag_wait, auto.lag_rose), (LAG_WAIT, false));
+        let behind = Measurement {
+            pace: 0.5,
+            ..myth(speed)
+        };
+        auto.decide(speed, &behind, true, speed);
+        assert_eq!(auto.lagged.map(|(_, left)| left), Some(LAG_WAIT));
     }
 
     #[test]
@@ -8451,9 +8494,15 @@ mod tests {
             speed = auto.decide(speed, &m, true, 160_000);
         }
         let gaps: Vec<usize> = falls.windows(2).map(|w| w[1] - w[0]).collect();
-        assert!(falls.len() <= 400 / LAGGED_WINDOWS as usize + 4, "{falls:?}");
+        assert!(
+            falls.len() <= 400 / LAGGED_WINDOWS as usize + 4,
+            "{falls:?}"
+        );
         let later = gaps.iter().skip(4);
         assert!(later.clone().count() > 0, "{falls:?}");
-        assert!(later.into_iter().all(|&g| g > LAGGED_WINDOWS as usize), "{falls:?}");
+        assert!(
+            later.into_iter().all(|&g| g > LAGGED_WINDOWS as usize),
+            "{falls:?}"
+        );
     }
 }
