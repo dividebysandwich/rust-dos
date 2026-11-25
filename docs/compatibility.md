@@ -101,25 +101,43 @@ that names the game, its settings and what happened.
   colours need `machine=cga`; `composite` and `composite_era` keep their
   defaults, `auto` and `old`
   ([`[emulator]`](../CONFIGURATION.md#emulator)).
-* **Screamer 2** (GOG): import GOG's folder as a
-  [game profile](../CONFIGURATION.md#game-profiles). It mounts the
-  folder as C: and `GAME.DAT`, the CUE sheet of the disc image
-  `GAME.GOG`, as a CD-ROM on D: (by hand, `D=.../GAME.DAT cdrom`; see
-  [CD images](../CONFIGURATION.md#cd-images)), and runs `S2.BAT`, which
-  starts the SVGA version, `START65H.EXE`, and closes rust-dos when the
-  game ends. The 3dfx version, `S2_3DFX.EXE`, needs `voodoo=true`,
-  `cpu=pentium` and 3dfx's `GLIDE2X.OVL`, which the settings window
-  downloads onto Z:
+* **Screamer 2** (GOG): a
+  [game profile](../CONFIGURATION.md#game-profiles) for the 3dfx
+  version, `S2_3DFX.EXE`, as a file in the `games` folder (such as
+  `games/screamer2-3dfx.conf`), with C: and the CUE sheet's path
+  changed to where GOG installed the game:
+
+  ```ini
+  [game]
+  name=Screamer 2 (3dfx)
+  overlay=true
+
+  [emulator]
+  cpu=pentium
+  voodoo=true
+
+  [drives]
+  C="C:\GOG Games\Screamer 2"
+  D="C:\GOG Games\Screamer 2\GAME.DAT" cdrom
+
+  [autoexec]
+  C:
+  DEL GLIDE2X.OVL
+  S2_3DFX
+  ```
+
+  `GAME.DAT` is the CUE sheet of the disc image `GAME.GOG`, with the CD
+  music ([CD images](../CONFIGURATION.md#cd-images)). The memory (16 MB
+  on a Pentium) and the Sound Blaster 16 at 220h, IRQ 7, DMA 1 and 5,
+  which the game's setup has, are rust-dos's defaults and left out. The
+  game draws with 3dfx's `GLIDE2X.OVL`, which the settings window's
+  Emulator page downloads onto Z: once
   ([3dfx Voodoo Graphics](../CONFIGURATION.md#3dfx-voodoo-graphics)).
-  The game finds the `glide2x.ovl` in GOG's folder first and can't use
-  it: it is the Glide of GOG's DOSBox, which hands each call to DOSBox
-  through an I/O port, and without DOSBox's Glide pass-through it prints
-  "Cannot determine glide port" and "3DFX chip not found!" and the game
-  ends. Delete it from inside rust-dos, with `DEL GLIDE2X.OVL` at the
-  prompt or before `S2_3DFX` in the profile's `[autoexec]`. With the
-  profile's `overlay=true`, which imported profiles have, that hides the
-  file from the game and leaves it in GOG's folder, where GOG's own 3dfx
-  launch needs it. Without `overlay=true` it deletes the file there.
+  `DEL` hides the `glide2x.ovl` in GOG's folder, the Glide of GOG's
+  DOSBox, which works only there and would be found first: with
+  `overlay=true` the file stays in GOG's folder untouched. The SVGA
+  version's profile is the same without `voodoo=true` and `DEL`, and
+  runs `START65H`.
 * **Tomb Raider's 3D patches** (in `3DPATCH` on the Tomb Raider Gold
   CD), each copied into the game's folder:
   * 3dfx (`3DFX\TOMB.EXE`): `voodoo=true`, `cpu=pentium`
