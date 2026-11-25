@@ -2312,6 +2312,7 @@ fn a_palette_selected_on_a_deep_desktop_realizes_in_the_background_in_an_8_bit_m
     // RealizePalette on the desktop of 32 bits maps nothing.
     assert_eq!(r[4], 0);
     assert_eq!(r[5..8], [0; 3]);
+    // In the 8-bit mode B's realization and A's each map one entry.
     assert_eq!(r[11..13], [1, 1]);
     let (dac, b) = dac_entry(&cpu, 10, D_COLOR);
     assert_eq!(dac, b, "B's entry");
