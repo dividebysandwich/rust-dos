@@ -123,14 +123,29 @@ impl MemFs {
     /// nothing is kept uppercased, so that a path that isn't there stays
     /// one.
     pub fn resolve(&self, components: &[&str]) -> String {
+        self.resolve_cut(components, false)
+    }
+
+    /// `resolve`, and with `cut`, a component that names nothing is
+    /// looked for again cut to 8.3, as DOS's calls name a file: DOS cuts
+    /// "MM_SLIDER.GXA" to MM_SLIDE.GXA (`fat::canonical_name`).
+    pub fn resolve_cut(&self, components: &[&str], cut: bool) -> String {
         let mut path = String::new();
         for component in components {
             let upper = Self::join(&path, &component.to_ascii_uppercase());
-            let known = self.files.contains_key(&upper) || self.is_dir(&upper);
-            path = if known || self.long.is_empty() {
+            let known = |p: &String| self.files.contains_key(p) || self.is_dir(p);
+            let long = || match self.long.is_empty() {
+                true => None,
+                false => self.find_long(&path, component),
+            };
+            let short = || {
+                let name = crate::fat::canonical_name(component).filter(|_| cut)?;
+                Some(Self::join(&path, &name)).filter(|p| *p != upper && known(p))
+            };
+            path = if known(&upper) {
                 upper
             } else {
-                self.find_long(&path, component).unwrap_or(upper)
+                long().or_else(short).unwrap_or(upper)
             };
         }
         path

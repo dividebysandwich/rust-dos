@@ -251,6 +251,40 @@ fn a_dot_that_ends_a_name_leaves_its_extension_empty() {
     assert_eq!(disk.qualify_path(r"GAME\. \INIT").as_deref(), Some(r"C:\GAME\INIT"));
 }
 
+/// DOS's calls cut each part of a path to 8.3, as DOS packs a name into
+/// a directory entry's 8 and 3 characters. Redguard opens
+/// "SYSTEM\MM_SLIDER.GXA", which is MM_SLIDE.GXA on its disc and in the
+/// folder its setup makes. A Win32 call takes the name as it is.
+#[test]
+fn dos_calls_cut_long_names_to_8_3() {
+    let base = scratch("cut_8_3");
+    fs::create_dir_all(base.join("SAVEGAME")).unwrap();
+    fs::write(base.join("MM_SLIDE.GXA"), b"slider").unwrap();
+    fs::write(base.join("SAVEGAME/SAVE.DAT"), b"save").unwrap();
+    fs::write(base.join("level0_Final.dat"), b"long").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    let h = disk.open_file("MM_SLIDER.GXA", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"slider");
+    disk.close_file(h);
+    // The extension is cut to three characters, and a directory on the
+    // way is cut as well.
+    assert!(disk.is_file("mm_slide.gxa1"));
+    assert!(disk.is_file(r"C:\SAVEGAMES\SAVE.DAT"));
+    assert!(disk.is_directory(r"C:\SAVEGAMES"));
+    // A host entry of the whole name is found by it first, as DOS's calls
+    // make a file by its long name (`new_entry_name`).
+    let h = disk.open_file("level0_Final.dat", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"long");
+    disk.close_file(h);
+    // A long-name call doesn't cut.
+    assert_eq!(
+        disk.long_name_call(|d| d.open_file("MM_SLIDER.GXA", 0, PSP)),
+        Err(0x02)
+    );
+    assert!(!disk.long_name_call(|d| d.is_file(r"C:\SAVEGAMES\SAVE.DAT")));
+}
+
 /// A host file whose name ends in a dot, as builds that kept the dot
 /// made for "SAVE.", is still found by that name.
 #[test]
@@ -1370,7 +1404,10 @@ fn a_joliet_cd_has_long_names() {
     assert!(disk.is_file("D:\\nsenglishres.dll"));
     assert!(disk.is_file("d:\\program files\\Setup.ini"));
     assert!(disk.is_directory("D:\\Program Files"));
-    assert!(!disk.is_file("D:\\nsenglish.dll"));
+    // A name that is neither: a Win32 call doesn't find it, and DOS's
+    // calls cut it to the 8.3 name NSENGLIS.DLL, which is there.
+    assert!(!disk.long_name_call(|d| d.is_file("D:\\nsenglish.dll")));
+    assert!(disk.is_file("D:\\nsenglish.dll"));
     let h = disk.open_file("D:\\NSEnglishRes.dll", 0, PSP).unwrap();
     assert_eq!(disk.read_file(h, 8).unwrap(), [30; 5]);
     assert!(disk.set_current_directory("D:\\Program Files"));

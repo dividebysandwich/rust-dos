@@ -790,7 +790,7 @@ impl DiskController {
         }
 
         if let Some(files) = drive.tree() {
-            let dir = Self::memory_path(drive, search_dir_str);
+            let dir = self.memory_path(drive, search_dir_str);
             if !files.is_dir(&dir) {
                 return Err(0x03);
             }
