@@ -19819,18 +19819,29 @@ fn installed_fonts_are_loaded_as_windows_starts() {
 /// Serif's one size once and Arial once: the built-in face is left out
 /// where a file has it, and the .FOT and the TrueType file it names are
 /// one font. A line that starts with ';' is a comment, whose file isn't
-/// loaded. The exit code is the count of fonts listed for each face, two
-/// bits each: MS Sans Serif's, Arial's above, the comment's face's at
-/// the top.
+/// loaded. EnumFontFamiliesExA lists Arial in the one character set the
+/// file has, Latin 1, and not the built-in face in the others, as a font
+/// asking for Arial in any of them is realized from the file. The exit
+/// code is the count of fonts listed for each face, two bits each: MS
+/// Sans Serif's, Arial's above, the comment's face's above, and
+/// EnumFontFamiliesExA's of Arial at the top.
 #[test]
 fn installed_fonts_list_each_face_once() {
-    let names: &[&str] = &["CreateCompatibleDC", "EnumFontFamiliesA"];
+    let names: &[&str] = &[
+        "CreateCompatibleDC",
+        "EnumFontFamiliesA",
+        "EnumFontFamiliesExA",
+    ];
     let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names)];
-    // The faces at 0, 0x20 and 0x40, their counts at 0x60, 0x64, 0x68.
-    let mut data = vec![0u8; 0x70];
+    // The faces at 0, 0x20 and 0x40, their counts at 0x60, 0x64, 0x68,
+    // EnumFontFamiliesExA's LOGFONTA (Arial, DEFAULT_CHARSET) at 0x70
+    // and its count at 0xAC.
+    let mut data = vec![0u8; 0xB0];
     data[0..13].copy_from_slice(b"MS Sans Serif");
     data[0x20..0x25].copy_from_slice(b"Arial");
     data[0x40..0x4C].copy_from_slice(b"Comment Face");
+    data[0x70 + 23] = 1;
+    data[0x70 + 28..0x70 + 33].copy_from_slice(b"Arial");
     let exe = program(BASE, false, imports, &data, |a, l| {
         let mut proc = a.create_label();
         a.push(0)?;
@@ -19843,7 +19854,15 @@ fn installed_fonts_list_each_face_once() {
             a.push(esi)?;
             a.call(l.import(1))?;
         }
-        a.mov(eax, dword_ptr(l.at(0x68)))?;
+        a.push(0)?;
+        a.push(l.at(0xAC) as i32)?;
+        push_label(a, proc)?;
+        a.push(l.at(0x70) as i32)?;
+        a.push(esi)?;
+        a.call(l.import(2))?;
+        a.mov(eax, dword_ptr(l.at(0xAC)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x68)))?;
         a.shl(eax, 2)?;
         a.or(eax, dword_ptr(l.at(0x64)))?;
         a.shl(eax, 2)?;
@@ -19876,7 +19895,7 @@ fn installed_fonts_list_each_face_once() {
                    Arial (TrueType)=ARIAL.FOT\r\n;Comment Face=COMMENT.FON\r\n";
     fs::write(base.join("WINDOWS").join("WIN.INI"), win_ini).unwrap();
     assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
-    assert_eq!(cpu.errorlevel, 1 << 2 | 1);
+    assert_eq!(cpu.errorlevel, 1 << 6 | 1 << 2 | 1);
 }
 
 /// A program asks CreateScalableFontResourceA for a .FOT of `ttf`, with

@@ -2710,21 +2710,24 @@ fn start_enum(cpu: &mut Cpu, items: Vec<u32>, proc: u32, param: u32) -> Option<u
     crate::win32::task::start(cpu, super::TASK_CALLBACK, vars, ENUM_SCRATCH)
 }
 
-/// The character sets in which the fonts of the files added have the
-/// face `name`: a raster font's own, a TrueType font's each
-/// (`truetype_charsets`). A built-in face of that name isn't listed in
-/// them: Windows has the face from the file, and realization picks the
-/// file's font before it (`realized_of`). That is how a WIN.INI of
-/// Windows 3.1 lists `SSERIFE.FON` and `ARIAL.FOT`, and how Encarta 97
-/// lists its own ARIAL.TTF in the registry.
-fn added_face_sets(files: &[AddedFile], name: &str) -> Vec<u8> {
-    let raster = added_fonts(files)
-        .filter(|f| f.face.eq_ignore_ascii_case(name))
-        .map(|f| f.charset);
-    let truetype = added_fonts_truetype(files)
-        .filter(|t| t.face.eq_ignore_ascii_case(name))
-        .flat_map(|t| truetype_charsets(t));
-    raster.chain(truetype).collect()
+/// Whether a file added has the face `name` in the character set
+/// `charset`, or in any with None, where a font of the face is realized
+/// from the file (`realized_of`): a built-in face of that name isn't
+/// listed there, as Windows has the face from the file only. That is how
+/// a WIN.INI of Windows 3.1 lists `SSERIFE.FON` and `ARIAL.FOT`, and how
+/// Encarta 97 lists its own ARIAL.TTF in the registry. A TrueType font
+/// has the face in every character set, as `added_truetype` picks it
+/// whatever the logical font asks for; a raster font in its own, as
+/// `file_sizes` picks it.
+fn added_face_has(files: &[AddedFile], name: &str, charset: Option<u8>) -> bool {
+    let named = |face: &str| face.eq_ignore_ascii_case(name);
+    files.iter().any(|file| {
+        file.truetype.iter().any(|t| named(&t.face))
+            || file
+                .fonts
+                .iter()
+                .any(|f| named(&f.face) && charset.is_none_or(|c| c == f.charset))
+    })
 }
 
 /// The faces whose name is `family`, or all of them with none.
@@ -2756,7 +2759,7 @@ pub fn enum_font_families(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let files = &gdi(cpu).font_files;
     let mut items: Vec<u32> = faces_named(family.as_deref())
         .into_iter()
-        .filter(|&i| added_face_sets(files, FACES[i].name).is_empty())
+        .filter(|&i| !added_face_has(files, FACES[i].name, None))
         .map(|i| enum_item(i, sys.sets(i)[0]))
         .collect();
     items.extend(added_items(cpu, family.as_deref(), DEFAULT_CHARSET));
@@ -2792,10 +2795,9 @@ pub fn enum_font_families_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut items: Vec<u32> = faces_named(family)
         .into_iter()
         .flat_map(|i| {
-            let added = added_face_sets(files, FACES[i].name);
             sys.sets(i)
                 .into_iter()
-                .filter(move |c| !added.contains(c))
+                .filter(move |&c| !added_face_has(files, FACES[i].name, Some(c)))
                 .map(move |c| (i, c))
         })
         .filter(|&(_, c)| log.charset == DEFAULT_CHARSET || c == log.charset)
