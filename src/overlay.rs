@@ -11,7 +11,8 @@
 //! `hostfs::layer_path` has them, `A/B.TXT`; "" is the root.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -72,19 +73,32 @@ pub struct Overlay {
     /// Where the changes go; None keeps the drive as it is below, and
     /// refuses writes.
     upper: Option<PathBuf>,
-    /// The paths below that were deleted, and everything in them.
-    deleted: RefCell<BTreeSet<String>>,
+    /// The paths below that were deleted, and everything in them, by
+    /// `fold`, each with the spelling it was deleted by (`below`), which
+    /// the list keeps.
+    deleted: RefCell<BTreeMap<String, String>>,
+}
+
+/// The key a deleted path is kept and looked up by. Windows 9x matches
+/// names without regard to case, so a name made again in another case is
+/// the deleted one, and so is the name below that answers to it: below
+/// matches in any case (an archive, a Windows or macOS folder), and a
+/// deleted path must hide whatever it answers with. The fold is the one
+/// an archive keys its entries by and `names` merges the two sides by.
+fn fold(path: &str) -> String {
+    path.to_lowercase()
 }
 
 impl Overlay {
     /// The overlay of `lower` with the changes in `upper`, which is made
     /// if it isn't there.
     pub fn new(lower: Box<dyn Lower>, upper: Option<PathBuf>) -> io::Result<Overlay> {
-        let mut deleted = BTreeSet::new();
+        let mut deleted = BTreeMap::new();
         if let Some(dir) = &upper {
             hostfs::create_dir_all(dir)?;
             if let Ok(text) = hostfs::read_to_string(dir.join(DELETED)) {
-                deleted.extend(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string));
+                let paths = text.lines().map(str::trim).filter(|l| !l.is_empty());
+                deleted.extend(paths.map(|p| (fold(p), p.to_string())));
             }
         }
         Ok(Overlay { lower, upper, deleted: RefCell::new(deleted) })
@@ -101,12 +115,17 @@ impl Overlay {
             .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "the drive is read-only"))
     }
 
-    /// Whether `path` below is hidden: it, or a folder it's in, was deleted.
+    /// Whether `path` below is hidden: it, or a folder it's in, was
+    /// deleted, in any case.
     fn hidden(&self, path: &str) -> bool {
         let deleted = self.deleted.borrow();
-        let mut at = path;
+        if deleted.is_empty() {
+            return false;
+        }
+        let folded = fold(path);
+        let mut at = folded.as_str();
         loop {
-            if deleted.contains(at) {
+            if deleted.contains_key(at) {
                 return true;
             }
             if at.is_empty() {
@@ -142,29 +161,68 @@ impl Overlay {
                 _ => Ok(()),
             };
         }
-        let text: String = deleted.iter().map(|p| format!("{}\n", p)).collect();
+        let text: String = deleted.values().map(|p| format!("{}\n", p)).collect();
         let partial = file.with_extension("partial");
         hostfs::write(&partial, text)?;
         hostfs::rename(&partial, &file)
     }
 
-    fn hide(&self, path: &str) -> io::Result<()> {
-        if self.lower.metadata(path).is_ok() && self.deleted.borrow_mut().insert(path.to_string()) {
-            self.save_deleted()?;
+    /// The path below that `path` names in any case, None if below has
+    /// none: `path` itself when below answers to it (an archive, or a
+    /// Windows or macOS folder, answers in any case), else the spelling
+    /// below has. A folder below that matches case (on Linux) knows a
+    /// folder deleted and made again in another case only by its own
+    /// spelling, which is what the list must hold to hide it.
+    fn below(&self, path: &str) -> Option<String> {
+        if self.lower.metadata(path).is_ok() {
+            return Some(path.to_string());
         }
-        Ok(())
+        if path.is_empty() {
+            return None;
+        }
+        let dir = self.below(parent(path))?;
+        let leaf = fold(path.rsplit('/').next().unwrap_or(path));
+        let names = self.lower.read_dir(&dir).ok()?;
+        let (name, _) = names
+            .into_iter()
+            .find(|(name, _)| fold(&name.to_string_lossy()) == leaf)?;
+        Some(child(&dir, &name.to_string_lossy()))
+    }
+
+    fn hide(&self, path: &str) -> io::Result<()> {
+        let Some(below) = self.below(path) else {
+            return Ok(());
+        };
+        // An entry already there keeps its spelling, which `unhide`
+        // compares with.
+        if let Entry::Vacant(entry) = self.deleted.borrow_mut().entry(fold(&below)) {
+            entry.insert(below);
+        } else {
+            return Ok(());
+        }
+        self.save_deleted()
     }
 
     /// `path`, made again after it was deleted: what was below it stays
-    /// hidden.
+    /// hidden. Made again in the spelling it was deleted by, the entry
+    /// above hides the one below by that path, and what was in a folder
+    /// stays hidden by name. Made again in another spelling, the path
+    /// stays in the list: on a host whose folders match case (Linux) the
+    /// entry above hides nothing below by its own path, and the old
+    /// spelling would reach the deleted entry.
     fn unhide(&self, path: &str) -> io::Result<()> {
-        if !self.deleted.borrow_mut().remove(path) {
+        let key = fold(path);
+        if self.deleted.borrow().get(&key).is_none_or(|was| was != path) {
             return Ok(());
         }
+        self.deleted.borrow_mut().remove(&key);
         if self.lower.metadata(path).is_ok_and(|m| m.is_dir) {
             let names = self.lower.read_dir(path).unwrap_or_default();
             let mut deleted = self.deleted.borrow_mut();
-            deleted.extend(names.iter().map(|(name, _)| child(path, &name.to_string_lossy())));
+            for (name, _) in names {
+                let below = child(path, &name.to_string_lossy());
+                deleted.insert(fold(&below), below);
+            }
         }
         self.save_deleted()
     }
@@ -195,11 +253,15 @@ impl Overlay {
         let mut names: Vec<(OsString, bool)> = Vec::new();
         if self.lower_meta(path).is_some_and(|m| m.is_dir) {
             let deleted = self.deleted.borrow();
+            let shown = |name: &OsString| {
+                deleted.is_empty()
+                    || !deleted.contains_key(&fold(&child(path, &name.to_string_lossy())))
+            };
             names.extend(
                 self.lower
                     .read_dir(path)?
                     .into_iter()
-                    .filter(|(name, _)| !deleted.contains(&child(path, &name.to_string_lossy()))),
+                    .filter(|(name, _)| shown(name)),
             );
         }
         if let Some(dir) = self.upper_path(path).filter(|p| hostfs::is_dir(p)) {
@@ -447,6 +509,86 @@ mod tests {
         assert!(!hostfs::is_dir(root.join("SAVES")));
         hostfs::create_dir(root.join("SAVES")).unwrap();
         assert!(names(root.join("SAVES")).is_empty());
+        assert!(!hostfs::exists(root.join("SAVES/SLOT1.SAV")));
+    }
+
+    /// Windows 9x matches names without regard to case: a folder deleted
+    /// and made again in another case is the folder deleted, and empty.
+    /// Deleted again, it stays deleted.
+    #[test]
+    fn a_folder_made_again_in_another_case_is_empty() {
+        let dir = scratch("folder_case");
+        {
+            let layer = layer(&dir);
+            let root = layer.root().to_path_buf();
+            hostfs::remove_file(root.join("SAVES/SLOT1.SAV")).unwrap();
+            hostfs::remove_dir(root.join("SAVES")).unwrap();
+            hostfs::create_dir(root.join("saves")).unwrap();
+            assert_eq!(names(root.clone()), ["GAME.EXE", "saves"]);
+            assert!(names(root.join("saves")).is_empty());
+            assert!(!hostfs::exists(root.join("saves/SLOT1.SAV")));
+            hostfs::remove_dir(root.join("saves")).unwrap();
+            assert_eq!(names(root.clone()), ["GAME.EXE"]);
+        }
+        // Again, from the upper folder's list.
+        let layer = layer(&dir);
+        assert_eq!(names(layer.root().to_path_buf()), ["GAME.EXE"]);
+    }
+
+    /// A file deleted and opened again in another case, to be made if it
+    /// isn't there, is a new, empty file.
+    #[test]
+    fn a_file_made_again_in_another_case_is_new() {
+        let dir = scratch("file_case");
+        let layer = layer(&dir);
+        let root = layer.root().to_path_buf();
+        hostfs::remove_file(root.join("GAME.EXE")).unwrap();
+        let mut open = OpenOptions::new();
+        drop(
+            open.read(true)
+                .write(true)
+                .create(true)
+                .open(root.join("game.exe"))
+                .unwrap(),
+        );
+        assert_eq!(hostfs::read(root.join("game.exe")).unwrap(), b"");
+        assert_eq!(names(root.clone()), ["SAVES", "game.exe"]);
+        // The old spelling reaches the new file, or nothing (a host
+        // whose folders match case), never the deleted one.
+        assert!(hostfs::read(root.join("GAME.EXE")).unwrap_or_default().is_empty());
+        assert_eq!(std::fs::read(dir.join("lower/GAME.EXE")).unwrap(), b"game");
+    }
+
+    /// An archive below matches names in any case on every host, as a
+    /// folder does only on Windows and macOS.
+    #[test]
+    fn a_folder_made_again_in_another_case_over_an_archive_is_empty() {
+        let dir = scratch("archive_case");
+        let zip = crate::archive::zip::tests::zip(&[
+            ("GAME.EXE", b"game", false),
+            ("SAVES/SLOT1.SAV", b"one", false),
+        ]);
+        std::fs::write(dir.join("game.zip"), zip).unwrap();
+        let archive = crate::archive::Archive::open(&dir.join("game.zip"), true).unwrap();
+        let overlay = Overlay::new(Box::new(archive), Some(dir.join("upper"))).unwrap();
+        let layer = hostfs::add_layer(Arc::new(overlay));
+        let root = layer.root().to_path_buf();
+        hostfs::remove_file(root.join("SAVES/SLOT1.SAV")).unwrap();
+        hostfs::remove_dir(root.join("SAVES")).unwrap();
+        hostfs::create_dir(root.join("saves")).unwrap();
+        assert!(names(root.join("saves")).is_empty());
+        assert!(!hostfs::exists(root.join("saves/SLOT1.SAV")));
+        hostfs::remove_file(root.join("GAME.EXE")).unwrap();
+        let mut open = OpenOptions::new();
+        drop(
+            open.read(true)
+                .write(true)
+                .create(true)
+                .open(root.join("game.exe"))
+                .unwrap(),
+        );
+        assert_eq!(hostfs::read(root.join("game.exe")).unwrap(), b"");
+        assert!(hostfs::read(root.join("GAME.EXE")).unwrap_or_default().is_empty());
         assert!(!hostfs::exists(root.join("SAVES/SLOT1.SAV")));
     }
 
