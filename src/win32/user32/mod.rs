@@ -23,6 +23,7 @@ pub mod message;
 pub mod monitor;
 pub mod notepad;
 pub mod paint;
+pub mod palette;
 pub mod progman;
 pub mod rect;
 pub mod resource;
@@ -156,6 +157,12 @@ pub struct State {
     pub saved_bits: Vec<paint::SavedBits>,
     /// The help viewer (winhelp), which save states leave out.
     pub help: winhelp::Help,
+    /// The threads that selected a palette into a DC of a window on a
+    /// palette device (`palette::selected`).
+    pub palette_threads: crate::savestate::Since<{ palette::PALETTE_SAVED }, Vec<u32>>,
+    /// The foreground window as threads with a palette ended, for
+    /// `palette::task_ended`; None when none of them had one.
+    pub palette_exit: Option<u32>,
 }
 
 impl State {
@@ -544,6 +551,7 @@ pub fn destroy_thread_windows(cpu: &mut Cpu, tid: u32) {
         return;
     }
     let shown = forget_windows(cpu, |w| w.tid == tid, &[tid]);
+    palette::task_ended(cpu);
     redraw_after(cpu, &shown);
 }
 
@@ -604,6 +612,7 @@ fn forget_windows(cpu: &mut Cpu, gone: impl Fn(&Window) -> bool, tids: &[u32]) -
     if state.clipboard.owner != 0 && !alive(state.clipboard.owner) {
         state.clipboard.owner = 0;
     }
+    palette::threads_ending(state, tids);
     // The foreground window went with them: the next one comes there.
     if had_foreground && state.foreground_window() == 0 {
         input::foreground_gone(cpu);
@@ -1452,6 +1461,7 @@ static APIS: &[Api] = &[
     // Yield that receives what other tasks sent (message.rs).
     stdcall("SendMessage16", 0, 4, message::send_message16),
     stdcall("UserYield16", 0, 0, message::user_yield16),
+    stdcall("RestoreDefaultPalette", 0, 2, palette::restore_default_palette),
 ];
 
 crate::state_fields!(State {
@@ -1476,7 +1486,9 @@ crate::state_fields!(State {
     registered,
     in_hooks,
     last_hook,
-    saved_bits
+    saved_bits,
+    palette_threads
 } skip {
-    help
+    help,
+    palette_exit
 });
