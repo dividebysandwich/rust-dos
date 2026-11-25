@@ -2,8 +2,9 @@
 //! DSP, the patched Sound Blaster drivers mix around the centre line, and
 //! Jukebox Adventure's music player gets past effect Bxx, and Lands of
 //! Lore 2's launchers, patched as they load, start the game with 32 MB
-//! of virtual memory. The fixes that skip a program at EXEC are tested in
-//! exec_tests.rs.
+//! of virtual memory, and Whale's Voyage's CD intro, patched as it
+//! loads, keeps its code through its VESA mode query. The fixes that
+//! skip a program at EXEC are tested in exec_tests.rs.
 
 use rust_dos::cpu::Cpu;
 use rust_dos::game_fixes::{CodePatch, Kind, by_name};

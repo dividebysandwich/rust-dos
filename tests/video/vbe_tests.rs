@@ -128,25 +128,29 @@ fn info_blocks_are_written_whole_and_no_further() {
             cpu.bus.write_8(BUF + i, 0xAA);
         }
     };
+    // The last byte of the buffer that changed, if any did.
     let changed = |cpu: &Cpu| {
         (0..0x300)
             .filter(|&i| cpu.bus.read_8(BUF + i) != 0xAA)
             .max()
-            .unwrap()
     };
     fill(&mut cpu);
     assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x100, 0), 0x004F);
-    assert_eq!(changed(&cpu), 0xFF);
+    assert_eq!(changed(&cpu), Some(0xFF));
     // Reserved from OffScreenMemSize's end (32h) on: zero.
     assert!((0x32..0x100).all(|i| cpu.bus.read_8(BUF + i) == 0));
 
     fill(&mut cpu);
     assert_eq!(int10(&mut cpu, 0x4F00, 0, 0, 0), 0x004F);
-    assert_eq!(changed(&cpu), 0xFF, "a VBE 1.x block, reserved part zeroed");
+    assert_eq!(
+        changed(&cpu),
+        Some(0xFF),
+        "a VBE 1.x block, reserved part zeroed"
+    );
 
     fill(&mut cpu);
     controller_info(&mut cpu, true);
-    assert_eq!(changed(&cpu), 0x1FF, "VBE 2.0's, OemData zeroed");
+    assert_eq!(changed(&cpu), Some(0x1FF), "VBE 2.0's, OemData zeroed");
 }
 
 /// 640x400 in truecolour, mode 213h as S3 cards such as Diamond's

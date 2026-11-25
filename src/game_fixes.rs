@@ -557,16 +557,18 @@ const TD4_INTRO_CAMERA: CodePatch = CodePatch {
 /// colours) into 1CA8h. Only 35 bytes are free there: the routine itself
 /// starts at 1CCBh, and the 4F01h call returns to 1D04h. A VBE 1.1 or
 /// later BIOS writes all 256 bytes of the block, zeros after the fields
-/// it defines (`interrupts::vbe`'s `mode_info`), so the intro's code up
-/// to 1DA7h turns to zeros. The intro then runs them, reaches code that
-/// finds its SVGA flag (1BA3h) unset and plays in 320x200. A real PC
-/// with VBE in its video BIOS does the same.
+/// it defines (`interrupts::vbe`'s `mode_info`): the block's fields from
+/// 23h on land on the routine's first bytes, and zeros on the rest of
+/// the intro's code up to 1DA7h, 1D04h among it. The intro then runs
+/// the zeros, reaches code that finds its SVGA flag (1BA3h) unset and
+/// plays in 320x200. A real PC with VBE in its video BIOS does the same.
 ///
 /// The patch gives 4F01h the 4F00h buffer at 1BA8h instead, 256 bytes
 /// up to 1CA7h. The intro is done with the VbeInfoBlock by then: it
 /// reads only its signature, before the 4F01h call, and nothing else of
 /// its code reads or writes 1BA8h-1CA7h, which 4F00h fills with 256
-/// bytes anyway. Of the ModeInfoBlock it reads only WinGranularity (at
+/// bytes anyway (the file has zeros there, not the "VBE2" that would
+/// ask for 512). Of the ModeInfoBlock it reads only WinGranularity (at
 /// 4), which the patch reads from 1BACh instead of 1CACh. Its own
 /// variables at 1CC5h and 1CC9h, inside the old buffer, are left alone.
 /// For the 1993 CD release: INTRO.EXE of 10446 bytes, SHA-256
