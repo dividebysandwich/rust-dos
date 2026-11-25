@@ -961,14 +961,32 @@ fn create_probe(code: &mut Code, probe: &mut Probe) {
 /// `create_probe`, the window shown at once (WS_VISIBLE) if `visible`,
 /// at `place`: x, y, width and height on the screen.
 fn create_probe_at(code: &mut Code, probe: &mut Probe, visible: bool, place: [u16; 4]) {
+    create_probe_owned(code, probe, visible, place, false);
+}
+
+/// `create_probe_at`, the window owned by the one whose handle is in SI
+/// if `owned`.
+fn create_probe_owned(
+    code: &mut Code,
+    probe: &mut Probe,
+    visible: bool,
+    place: [u16; 4],
+    owned: bool,
+) {
     probe.names_at.push(code.here() + 2);
     code.push_far(0); // the class
     probe.names_at.push(code.here() + 2);
     code.push_far(0); // the title: the class's name too
     code.push(if visible { 0x9000 } else { 0x8000 }).push(0); // WS_POPUP
-    for v in place.into_iter().chain([0, 0]) {
-        code.push(v); // the place, the size, no parent, no menu
+    for v in place {
+        code.push(v); // the place and the size
     }
+    if owned {
+        code.emit(&[0x56]); // push si: the owner
+    } else {
+        code.push(0); // no parent
+    }
+    code.push(0); // no menu
     code.emit(&[0x57]); // push di: the instance
     code.push(0).push(0).call("USER", CREATE_WINDOW);
 }
@@ -1290,14 +1308,18 @@ enum Change {
     /// SetWindowPos(HWND_BOTTOM) takes it under the window at (100, 100)
     /// from above it, in place.
     Lower,
+    /// SetWindowPos(HWND_BOTTOM) takes its owner, at (0, 0), 30 by 30,
+    /// to the bottom, and it goes with it, under the window at
+    /// (100, 100) from above it, in place.
+    LowerOwner,
 }
 
 /// A program shows a window at (80, 80) and one at (100, 100), the
-/// second above the first, or under it for `Change::Lower`, validates
-/// the one at (100, 100), changes the one at (80, 80) as `change` says,
-/// and ends with 10 if the window at (100, 100) has nothing to paint
-/// then (GetUpdateRect), 11 if it has; 3 if RegisterClass failed, 4 if
-/// CreateWindow did.
+/// second above the first, or under it for `Change::Lower` and
+/// `Change::LowerOwner`, validates the one at (100, 100), changes the
+/// one at (80, 80) as `change` says, and ends with 10 if the window at
+/// (100, 100) has nothing to paint then (GetUpdateRect), 11 if it has;
+/// 3 if RegisterClass failed, 4 if CreateWindow did.
 fn update_after_change(test: &str, change: Change) -> (u8, String) {
     let mut code = Code::new();
     let mut probe = Probe::default();
@@ -1310,20 +1332,28 @@ fn update_after_change(test: &str, change: Change) -> (u8, String) {
         exit_if_zero(code, 4);
         code.emit(&[0x8B, 0xF0]); // mov si,ax
     };
-    if change != Change::Lower {
+    if matches!(change, Change::Hide | Change::Move) {
         create_other(&mut code, &mut probe);
     }
     create_probe_at(&mut code, &mut probe, true, [100, 100, 50, 50]);
     exit_if_zero(&mut code, 4);
     code.emit(&[0xA3, a, b]); // mov [HWND],ax
-    if change == Change::Lower {
-        create_other(&mut code, &mut probe);
+    match change {
+        Change::Lower => create_other(&mut code, &mut probe),
+        Change::LowerOwner => {
+            create_probe_at(&mut code, &mut probe, true, [0, 0, 30, 30]);
+            exit_if_zero(&mut code, 4);
+            code.emit(&[0x8B, 0xF0]); // mov si,ax: the owner
+            create_probe_owned(&mut code, &mut probe, true, [80, 80, 50, 50], true);
+            exit_if_zero(&mut code, 4);
+        }
+        Change::Hide | Change::Move => {}
     }
     code.emit(&[0xFF, 0x36, a, b]) // push word [HWND]
         .push(0)
         .push(0) // the whole window
         .call("USER", VALIDATE_RECT);
-    code.emit(&[0x56]); // push si: the window at (80, 80)
+    code.emit(&[0x56]); // push si: the window at (80, 80), or its owner
     match change {
         Change::Hide => {
             code.push(0).call("USER", SHOW_WINDOW); // SW_HIDE
@@ -1338,7 +1368,7 @@ fn update_after_change(test: &str, change: Change) -> (u8, String) {
                 .push(0x15)
                 .call("USER", SET_WINDOW_POS);
         }
-        Change::Lower => {
+        Change::Lower | Change::LowerOwner => {
             // HWND_BOTTOM; SWP_NOSIZE, SWP_NOMOVE and SWP_NOACTIVATE.
             code.push(1)
                 .push(0)
@@ -1380,6 +1410,15 @@ fn a_moved_window_leaves_the_one_over_it_painted() {
 #[test]
 fn a_lowered_window_uncovers_the_one_it_went_under() {
     let (exit, log) = update_after_change("lower_over", Change::Lower);
+    assert_eq!(exit, 11, "{log}");
+}
+
+/// The same for a window that goes down with its owner: HWND_BOTTOM
+/// takes the windows a window owns down with it, just above it, and
+/// those that come above them show where they showed.
+#[test]
+fn a_window_lowered_with_its_owner_uncovers_the_one_it_went_under() {
+    let (exit, log) = update_after_change("lower_owned_over", Change::LowerOwner);
     assert_eq!(exit, 11, "{log}");
 }
 

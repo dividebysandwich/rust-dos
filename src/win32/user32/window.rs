@@ -2069,6 +2069,18 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 } else {
                     Vec::new()
                 };
+                // What they show: when they go down with it (HWND_BOTTOM
+                // takes its owned windows along), the windows that come
+                // above them show the part they cover then.
+                let group_shown: Vec<(u32, Region)> = if restacked {
+                    owner_group(state, hwnd)
+                        .into_iter()
+                        .filter(|&h| h != hwnd && state.is_visible(h))
+                        .map(|h| (h, super::paint::shown_region(state, h)))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let Some(w) = state.window_mut(hwnd) else {
                     return Next::Done(FALSE);
                 };
@@ -2134,6 +2146,11 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 for (h, before) in group_covered {
                     if user(cpu).is_visible(h) {
                         super::paint::raised_but(cpu, h, &before, hwnd);
+                    }
+                }
+                for (h, before) in group_shown {
+                    if user(cpu).is_visible(h) {
+                        super::paint::lowered(cpu, h, &before);
                     }
                 }
                 if flags & SWP_HIDEWINDOW != 0 {
