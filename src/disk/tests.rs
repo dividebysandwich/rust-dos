@@ -304,7 +304,10 @@ fn dos_rename_and_mkdir_find_the_cut_name_taken() {
     assert!(!base.join("MM_SLIDER.GXA").exists());
     assert!(!base.join("SAVEGAMES").exists());
 
-    assert_eq!(disk.long_name_call(|d| d.rename_file("NEW.TMP", "MM_SLIDER.GXA")), Ok(()));
+    assert_eq!(
+        disk.long_name_call(|d| d.rename_file("NEW.TMP", "MM_SLIDER.GXA")),
+        Ok(())
+    );
     assert_eq!(disk.long_name_call(|d| d.create_directory("SAVEGAMES")), Ok(()));
 }
 
