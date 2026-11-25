@@ -101,6 +101,16 @@ that names the game, its settings and what happened.
   colours need `machine=cga`; `composite` and `composite_era` keep their
   defaults, `auto` and `old`
   ([`[emulator]`](../CONFIGURATION.md#emulator)).
+* **Screamer 2** (GOG): mount the game's folder as C: and `GAME.DAT`,
+  the CUE sheet of the disc image `GAME.GOG`, as a CD-ROM on D:
+  (`D=.../GAME.DAT cdrom`). `S2.BAT` starts the SVGA version,
+  `START65H.EXE`. The 3dfx version, `S2_3DFX.EXE`, needs
+  `voodoo=true`, `cpu=pentium` and 3dfx's `GLIDE2X.OVL`, which the
+  settings window downloads onto Z:. Delete or rename the
+  `glide2x.ovl` in GOG's folder first: it is the Glide of GOG's
+  DOSBox, which hands each call to DOSBox through an I/O port, and on
+  any other machine it prints "Cannot determine glide port" and "3DFX
+  chip not found!" and the game ends.
 * **Tomb Raider's 3D patches** (in `3DPATCH` on the Tomb Raider Gold
   CD), each copied into the game's folder:
   * 3dfx (`3DFX\TOMB.EXE`): `voodoo=true`, `cpu=pentium`
