@@ -551,8 +551,7 @@ section covers names that section.
   every pixel, so what a program masks with the stencil buffer is drawn
   unmasked.
 - **Functions that do nothing.** `glDrawPixels`, `glBitmap` and the
-  raster position, `glCopyPixels`, texture coordinate generation
-  (`glTexGen`), user clip planes, 1D textures, stipples, `glLogicOp`,
+  raster position, `glCopyPixels`, 1D textures, stipples, `glLogicOp`,
   colour index mode, the accumulation buffer, evaluators, selection and
   feedback log their first call and do nothing else. A display list
   records calls of these with the rest and does nothing for them when

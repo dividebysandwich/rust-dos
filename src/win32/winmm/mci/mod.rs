@@ -304,8 +304,10 @@ pub struct Device {
 }
 
 /// The W32 version whose states keep the elements the program's I/O
-/// procedures read (`Device::procedure_data`, `video::Calls::element`).
-pub const PROCEDURE_SAVED: u16 = 98;
+/// procedures read (`Device::procedure_data`, `video::Calls::element`)
+/// and the format of a WAV file waveaudio decoded
+/// (`waveaudio::Wav::file_format`).
+pub const PROCEDURE_SAVED: u16 = 99;
 
 /// MCI's state.
 #[derive(Clone, Debug, Default)]
