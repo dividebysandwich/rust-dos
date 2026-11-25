@@ -239,7 +239,7 @@ static APIS: &[Api16] = &[
         "SetPaletteEntries",
         b'w',
     ),
-    rust("RealizeDefaultPalette", 365, "w", zero),
+    rust("RealizeDefaultPalette", 365, "w", realize_default_palette),
     win32("UpdateColors", 366, "w", G, "UpdateColors", b'b'),
     win32("AnimatePalette", 367, "wwwp", G, "AnimatePalette", b'b'),
     win32("ResizePalette", 368, "ww", G, "ResizePalette", b'b'),
@@ -968,6 +968,14 @@ fn is_dc_current_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn gdi_select_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let background = args[2] & 0xFFFF != 0;
     crate::win32::gdi32::palette::gdi_select_palette(cpu, args[0], args[1], background)
+}
+
+/// RealizeDefaultPalette(hdc), GDI.365, which USER calls when no window
+/// keeps a palette in the foreground: on a palette device DEFAULT_PALETTE
+/// becomes the foreground palette (`palette::realize_default`).
+fn realize_default_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    use crate::win32::gdi32::palette;
+    Some(palette::realize_default_palette(cpu, args[0]))
 }
 
 /// CreateDIBPatternBrush(global block, usage): the packed DIB in the

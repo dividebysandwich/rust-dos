@@ -49,7 +49,7 @@ pub const GL_TEXTURE_GEN_Q: u32 = 0x0C63;
 /// off as well: the older build kept a glEnable of any of them as one
 /// bit of `caps`, which glIsEnabled gave back, and that bit doesn't
 /// say which coordinate, unit or plane it was for.
-pub const TEXGEN_SAVED: u16 = 97;
+pub const TEXGEN_SAVED: u16 = 98;
 
 /// One texture unit's coordinate generation.
 #[derive(Clone, Copy, Debug, PartialEq)]

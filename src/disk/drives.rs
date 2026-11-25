@@ -381,7 +381,7 @@ impl DiskController {
     /// What tells an open file apart from others, for telling sequential
     /// disk access from random (the disk noises).
     pub fn handle_key(&self, handle: u16) -> Option<u64> {
-        self.open_files.get(&handle).map(|f| f.key)
+        self.open_files.get(&handle).map(OpenFile::key)
     }
 
     /// Which drive a DOS path is on.
@@ -389,12 +389,10 @@ impl DiskController {
         self.split_drive(&dos_path.replace('/', "\\")).map(|(drive, _)| drive)
     }
 
-    /// A number that tells the file a DOS path names apart from others.
+    /// A number that tells the file a DOS path names apart from others,
+    /// whatever name the path gives it (`file_id`).
     pub fn file_key(&self, dos_path: &str) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.qualify_path(dos_path).unwrap_or_else(|| dos_path.to_ascii_uppercase()).hash(&mut hasher);
-        hasher.finish()
+        self.file_id(dos_path).key()
     }
 
     /// The character device an open handle refers to, if any.

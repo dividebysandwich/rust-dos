@@ -1448,6 +1448,8 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     msacm32::process_ended(cpu, process.id);
     d3d8::process_ended(cpu, process.id);
     ddraw::process_ended(cpu, process.id, &tids);
+    // With the desktop's mode back, the palette its threads kept goes.
+    user32::palette::task_ended(cpu);
     dsound::process_ended(cpu, process.id, &tids);
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);
