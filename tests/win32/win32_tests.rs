@@ -3186,7 +3186,9 @@ fn a_trap_at_the_end_of_a_page_reads_on_from_the_next_page_it_maps() {
     let code = start_programs_using(test, "T.EXE", "C.EXE", None, 0x10_0000, files, &[]);
     assert_ne!(
         code, 0x21,
-        "InitializeCriticalSection's trap ends in its own page now"
+        "KERNEL32's layout changed: InitializeCriticalSection no longer starts with a trap in a \
+         page's last 3 bytes, so this test covers nothing. Point it at a function whose trap \
+         does, or drop it (tests/cpu/pm_tests.rs covers the reading)"
     );
     assert_eq!(code, 0x71);
 }
