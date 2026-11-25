@@ -7075,6 +7075,117 @@ fn win32_calls_name_files_by_long_names_on_a_disk_image() {
     );
 }
 
+/// A file opened by its long name and by its 8.3 alias is one file, as
+/// on Windows 98, where VFAT finds the same directory entry through both
+/// names: on drive `drive` the program writes "Saved game one.dat",
+/// asks GetShortPathNameA for its alias, and checks that a CREATE_ALWAYS
+/// by the long name empties the file that an open by the alias then reads
+/// (GetFileSize 0), and that a handle opened by either name with no
+/// sharing makes an open by the other fail with ERROR_SHARING_VIOLATION.
+/// Each check sets a bit of the exit code.
+fn check_long_name_and_alias_are_one_file(test: &str, drive: &str, image: bool) {
+    use Arg::{Esi, I};
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const CREATE_ALWAYS: u32 = 2;
+    const OPEN_EXISTING: u32 = 3;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    let names: &[&str] = &[
+        "CreateFileA",
+        "WriteFile",
+        "CloseHandle",
+        "GetShortPathNameA",
+        "GetFileSize",
+        "GetLastError",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x200];
+    put(&mut data, 0, format!("{drive}\\Saved game one.dat\0").as_bytes());
+    // The alias, at 40h; the bytes to write and the count written.
+    let (alias, old, written) = (0x40, 0x180, 0x190);
+    put(&mut data, old, b"old data");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: usize| I(l.at(offset as u32) as u32);
+        let open = |a: &mut CodeAssembler, name, access, share, disposition| {
+            let args = [at(name), I(access), I(share), I(0), I(disposition), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &args)
+        };
+        a.xor(ebx, ebx)?;
+        open(a, 0, GENERIC_WRITE, 0, CREATE_ALWAYS)?;
+        a.mov(esi, eax)?;
+        call_with(a, f("WriteFile"), &[Esi, at(old), I(8), at(written), I(0)])?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        a.cmp(dword_ptr(l.at(written as u32)), 8)?;
+        check(a, false, 0)?;
+        call_with(a, f("GetShortPathNameA"), &[at(0), at(alias), I(0x100)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        // Emptied at the create, for whatever name the file is opened by
+        // next.
+        open(a, 0, GENERIC_WRITE, 3, CREATE_ALWAYS)?;
+        a.mov(esi, eax)?;
+        open(a, alias, GENERIC_READ, 3, OPEN_EXISTING)?;
+        a.mov(edi, eax)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("GetFileSize"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        // Opened by one name with no sharing, the file can't be opened
+        // by the other.
+        for (bit, (first, second)) in [(3, (0, alias)), (5, (alias, 0))] {
+            open(a, first, GENERIC_READ, 0, OPEN_EXISTING)?;
+            a.mov(esi, eax)?;
+            open(a, second, GENERIC_READ, 1, OPEN_EXISTING)?;
+            a.cmp(eax, -1)?;
+            check(a, false, bit)?;
+            a.call(f("GetLastError"))?;
+            a.cmp(eax, ERROR_SHARING_VIOLATION)?;
+            check(a, false, bit + 1)?;
+            call_with(a, f("CloseHandle"), &[Esi])?;
+        }
+        a.mov(eax, ebx)?;
+        a.or(eax, 0x80)?;
+        a.ret()
+    });
+    let mut cpu = machine(test, exe);
+    if image {
+        let image_dir = PathBuf::from("target/test_win32").join(format!("{test}_d"));
+        let _ = fs::remove_dir_all(&image_dir);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image = image_dir.join("d.img");
+        rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.disk.mount(3, &image, options, true).unwrap();
+    }
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+}
+
+#[test]
+fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_host_drive() {
+    check_long_name_and_alias_are_one_file("one_file_host", "C:", false);
+}
+
+#[test]
+fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_disk_image() {
+    check_long_name_and_alias_are_one_file("one_file_image", "D:", true);
+}
+
 /// SetFileTime on a file in a host folder, as Windows 98 SE does it on
 /// FAT: the time of the last write is rounded up to an even second
 /// (2001-10-08 19:20:01.5 is kept as 19:20:02), a time before 1980 fails

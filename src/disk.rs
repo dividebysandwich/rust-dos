@@ -17,6 +17,7 @@ mod closed_files;
 mod drives;
 mod files;
 mod host_dir;
+mod identity;
 mod layout;
 mod locks;
 mod mount;
@@ -27,6 +28,7 @@ mod system_files;
 
 use closed_files::ClosedFiles;
 use host_dir::{DirCount, HostDirCache, SearchKey};
+use identity::FileId;
 pub use layout::{DriveKind, Fat32Layout, FatLayout, old_space};
 pub use locks::{LOCK_VIOLATION, Lock, TASK_OWNER};
 pub use search::NameFilter;
@@ -566,8 +568,8 @@ struct OpenFile {
     /// PSP of the process that opened the file. DOS closes a process's files
     /// when it terminates.
     owner: u16,
-    /// Tells the file apart from others (`DiskController::file_key`).
-    key: u64,
+    /// The file, whatever name opened it (`DiskController::file_id`).
+    id: FileId,
     /// The file as it was opened, for a save state to open it again: its
     /// full DOS path and access mode.
     path: String,
@@ -583,6 +585,13 @@ struct OpenFile {
     /// A device a program put in raw (binary) mode with IOCTL 4401h:
     /// its output goes out as it is, a tab without being expanded.
     raw: bool,
+}
+
+impl OpenFile {
+    /// The number for the file (`FileId::key`).
+    fn key(&self) -> u64 {
+        self.id.key()
+    }
 }
 
 /// Empty a file a create call opened, which nothing has used yet.
@@ -986,7 +995,7 @@ impl DiskController {
                 data: OpenData::Device(device),
                 drive: DRIVE_C,
                 owner: 0,
-                key: 0,
+                id: FileId::Device,
                 path: name.to_string(),
                 mode: 0x02,
                 refs: 0,
