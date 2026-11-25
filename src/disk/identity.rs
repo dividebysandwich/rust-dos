@@ -11,10 +11,13 @@ use super::*;
 /// entry.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum FileId {
-    /// A file on a drive mounted from a disk image: the drive and the
-    /// file's directory entry. A rename that moves the entry moves the
-    /// open files' ids with it (`DiskController::moved_files`).
-    Fat(u8, EntryRef),
+    /// A file on a drive mounted from a disk image: the drive, the image
+    /// and the file's directory entry. A file open on one disk of a list
+    /// stays open when another goes in (`swap_image`), and the image tells
+    /// it from the file in the same slot of the other disk. A rename that
+    /// moves the entry moves the open files' ids with it
+    /// (`DiskController::moved_files`).
+    Fat(u8, PathBuf, EntryRef),
     /// A file in a host folder: its host path, in the names the host's
     /// entries have. The drive's root is canonical, so two drives over one
     /// host folder see the same files.
@@ -27,6 +30,11 @@ pub(super) enum FileId {
 }
 
 impl FileId {
+    /// The file whose directory entry is at `at` on `volume`, in `drive`.
+    pub(super) fn fat(drive: u8, volume: &FatVolume, at: EntryRef) -> Self {
+        FileId::Fat(drive, volume.disk().path().to_path_buf(), at)
+    }
+
     /// A number for the id, for the disk noises and for record locks,
     /// which save states keep.
     pub(super) fn key(&self) -> u64 {
@@ -54,7 +62,7 @@ impl DiskController {
         };
         if let Some((drive, volume, parts)) = self.locate_fat(dos_path) {
             return match self.fat_find(&volume, &parts) {
-                Ok(fat::Entry { at: Some(at), .. }) => FileId::Fat(drive, at),
+                Ok(fat::Entry { at: Some(at), .. }) => FileId::fat(drive, &volume, at),
                 _ => named(),
             };
         }

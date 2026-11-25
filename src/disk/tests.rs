@@ -2625,6 +2625,28 @@ fn a_loaded_state_keeps_the_folder_of_its_current_directory() {
     assert_eq!(loaded.create_file("C:HERE.TXT", PSP), Err(0x03));
 }
 
+/// A file open on one disk of a list stays open when the next goes in, and
+/// a file in the same directory slot of the other disk is another file.
+#[test]
+fn files_in_one_slot_of_two_disks_of_a_list_are_two_files() {
+    let base = scratch("one_file_swap");
+    fs::create_dir_all(base.join("c")).unwrap();
+    for name in ["one.img", "two.img"] {
+        let blank = DiskImage::blank_hard_disk(name, 8 << 20, None).unwrap();
+        blank.copy_to(&base.join(name)).unwrap();
+    }
+    let mut disk = DiskController::new(base.join("c"));
+    let list = MountOptions { more_images: vec![base.join("two.img")], ..MountOptions::default() };
+    disk.mount(3, &base.join("one.img"), list, true).unwrap();
+
+    let first = disk.create_file(r"D:\FIRST.DAT", PSP).unwrap();
+    disk.swap_image(3).unwrap().unwrap();
+    let second = disk.create_file(r"D:\SECOND.DAT", PSP).unwrap();
+    assert_ne!(disk.handle_key(first), disk.handle_key(second));
+    disk.close_file(second);
+    disk.close_file(first);
+}
+
 /// The bytes of the file `name`.
 fn read_all(disk: &mut DiskController, name: &str) -> Vec<u8> {
     let h = disk.open_file(name, 0, PSP).unwrap();
