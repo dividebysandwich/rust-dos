@@ -91,6 +91,7 @@ pub fn install_rom(bus: &mut Bus) {
     tss[TSS_LIMIT as usize] = 0xFF;
     bus.write_rom(TSS as usize, &tss);
     crate::vcpi::install_entry(bus);
+    install_switch(bus);
 }
 
 /// Whether DOS runs under the monitor, from the prompt on: with expanded
@@ -146,7 +147,8 @@ pub fn enter_with(cpu: &mut Cpu, segs: [u16; 6]) {
 }
 
 /// Back to real mode, the segment registers' selectors as segments: for
-/// expanded memory turned off at the prompt.
+/// expanded memory turned off at the prompt, and for Windows' switch
+/// (`windows_switch`).
 pub fn leave(cpu: &mut Cpu) {
     cpu.cr0 &= !(CR0_PE | CR0_PG);
     cpu.gdtr = DescTable {
@@ -190,18 +192,26 @@ pub fn sync(cpu: &mut Cpu) {
 /// gets the monitor's switch to real mode and back (`windows_switch`), as
 /// EMM386 hands it out. Windows, and programs that check for it the same
 /// way (HWiNFO), call it to leave virtual-8086 mode. DS:SI that a manager
-/// further down the chain already set stays as it is.
+/// further down the chain already set stays as it is. While the built-in
+/// Windows runs, a DOS program it started gets none: on Windows 98 its
+/// VMM owns the processor, and no program in a DOS box leaves
+/// virtual-8086 mode.
 pub fn windows_init(cpu: &mut Cpu) {
-    if !owns(cpu) || cpu.ds() != 0 || cpu.si() != 0 {
+    if !owns(cpu) || cpu.bus.win32.active() || cpu.ds() != 0 || cpu.si() != 0 {
         return;
     }
-    // Written here as well: the ROM of a state saved before the switch
-    // was there lacks it.
-    let at = (ROM + SWITCH_ENTRY as u32) as usize;
-    cpu.bus
-        .write_rom(at, &[0xFE, 0x3A, crate::bios::FAR_V86_SWITCH, 0xCB]);
+    // Written here as well as in `install_rom`: the ROM of a state saved
+    // in a program, before the switch was there, lacks it until DOS
+    // starts again.
+    install_switch(&mut cpu.bus);
     cpu.set_ds((ROM >> 4) as u16);
     cpu.set_si(SWITCH_ENTRY);
+}
+
+/// The far service of the switch `windows_init` hands out.
+fn install_switch(bus: &mut Bus) {
+    let at = (ROM + SWITCH_ENTRY as u32) as usize;
+    bus.write_rom(at, &[0xFE, 0x3A, crate::bios::FAR_V86_SWITCH, 0xCB]);
 }
 
 /// The switch `windows_init` hands out, called far with interrupts off:

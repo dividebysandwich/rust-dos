@@ -509,7 +509,7 @@ fn windows_init_broadcast_gets_the_switch_to_real_mode() {
     });
     assert_ne!(cpu.state, CpuState::RebootShell);
     assert_eq!(read16(&cpu, 0), 0, "CX 0: Windows may start");
-    assert_ne!(read32(&cpu, 2), 0, "DS:SI points at the switch");
+    assert_eq!(read32(&cpu, 2), 0xF000_4050, "DS:SI points at the switch");
     assert_eq!(cpu.bus.read_8(0x20006), 0, "AX=0000h: CF clear");
     assert_eq!(read16(&cpu, 8) & 1, 0, "real mode: PE clear");
     assert_eq!(read32(&cpu, 0x18), 0x1234_5678, "EBP as it was");
@@ -543,4 +543,51 @@ fn windows_init_broadcast_gets_no_switch_without_ems() {
     });
     assert_eq!(read32(&cpu, 0), 0, "DS:SI stays 0000h:0000h");
     assert_eq!(read16(&cpu, 4), 0);
+}
+
+/// Under the monitor, Windows' standard mode (DX bit 0 set) gets no
+/// switch, and neither does a broadcast whose DS:SI a handler further
+/// down the chain set. The switch, which is in the ROM from DOS's start,
+/// sets CF for an AX it doesn't know and leaves the mode as it is.
+#[test]
+fn windows_init_broadcast_switch_only_for_enhanced_mode() {
+    let mut cpu = machine(true);
+    run(&mut cpu, |a| {
+        a.push(ds)?;
+        a.xor(bx, bx)?;
+        a.mov(es, bx)?;
+        // Standard mode.
+        a.mov(ax, 0x1605)?;
+        a.mov(ds, bx)?;
+        a.xor(si, si)?;
+        a.mov(dx, 1)?;
+        a.int(0x2F)?;
+        a.mov(bp, ds)?;
+        a.pop(ds)?;
+        a.mov(word_ptr(0), si)?;
+        a.mov(word_ptr(2), bp)?;
+        // DS:SI already set.
+        a.push(ds)?;
+        a.mov(ax, 0x1605)?;
+        a.mov(si, 0x1234)?;
+        a.xor(dx, dx)?;
+        a.int(0x2F)?;
+        a.mov(bp, ds)?;
+        a.pop(ds)?;
+        a.mov(word_ptr(4), si)?;
+        a.mov(word_ptr(6), bp)?;
+        // A function the switch doesn't know.
+        a.cli()?;
+        a.mov(word_ptr(8), 0x4050)?;
+        a.mov(word_ptr(10), 0xF000)?;
+        a.mov(ax, 2)?;
+        a.call(dword_ptr(8))?;
+        a.setc(byte_ptr(12))?;
+        a.hlt()
+    });
+    assert_eq!(read32(&cpu, 0), 0, "standard mode: DS:SI stays 0000h:0000h");
+    assert_eq!(read16(&cpu, 4), 0x1234, "SI as the chain set it");
+    assert_eq!(read16(&cpu, 6), 0x2000, "DS as the chain set it");
+    assert_eq!(cpu.bus.read_8(0x2000C), 1, "AX=0002h: CF set");
+    assert!(cpu.v86(), "still under the monitor");
 }
