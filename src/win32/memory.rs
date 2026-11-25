@@ -1531,6 +1531,17 @@ pub fn unpin(bus: &mut Bus, cr3: u32, lin: u32) {
     }
 }
 
+/// Whether the page at `lin` of the page tables at `cr3` can go out to
+/// the page file: one of a program's own pages that no `pin` holds.
+pub fn is_pageable(bus: &Bus, cr3: u32, lin: u32) -> bool {
+    present_page(bus, cr3, lin).is_some_and(|phys| {
+        bus.win32
+            .pool
+            .as_ref()
+            .is_some_and(|p| p.page_file.pageable.contains_key(&phys))
+    })
+}
+
 crate::state_fields!(Pool {
     base,
     len,

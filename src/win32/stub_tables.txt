@@ -508,6 +508,9 @@ Module32First
 Module32Next
 Toolhelp32ReadProcessMemory
 DebugBreak
+UTRegister
+UTUnRegister
+UTGlue32
 
 DLL ADVAPI32.DLL
 InitializeSecurityDescriptor
@@ -5935,6 +5938,7 @@ GetArcDirection
 SetArcDirection
 GetAspectRatioFilter
 GetAspectRatioFilterEx
+IsDCCurrentPalette
 
 MODULE KEYBOARD
 ToAscii
@@ -6642,6 +6646,10 @@ ITypeInfo_GetContainingTypeLib
 ITypeInfo_ReleaseTypeAttr
 ITypeInfo_ReleaseFuncDesc
 ITypeInfo_ReleaseVarDesc
+
+MODULE WIN32S16
+UTSelectorOffsetToLinear
+UTLinearToSelectorOffset
 
 VARS MSVCRT.DLL
 _iob 640

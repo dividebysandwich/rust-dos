@@ -52,6 +52,7 @@ pub const RETRO_PIXEL_FORMAT_XRGB8888: u32 = 1;
 // takes for a picture drawn into the frontend's framebuffer.
 pub const RETRO_HW_CONTEXT_OPENGL: u32 = 1;
 pub const RETRO_HW_CONTEXT_OPENGL_CORE: u32 = 3;
+pub const RETRO_HW_CONTEXT_OPENGLES3: u32 = 4;
 pub const RETRO_HW_FRAME_BUFFER_VALID: *const c_void = usize::MAX as *const c_void;
 
 pub type retro_hw_context_reset_t = unsafe extern "C" fn();
