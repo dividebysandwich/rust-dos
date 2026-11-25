@@ -136,6 +136,13 @@ pub struct Clock {
     /// Only differences between two points count, so a save state leaves
     /// it out.
     pub disk_wait: u64,
+    /// Of `idle`, the counts the idle skip skipped in a busy-wait loop of
+    /// a Win32 thread while another thread could run
+    /// (`win32::thread::others_can_run`). Windows runs such a loop out to
+    /// the end of its thread's turn, so the processor didn't wait: more
+    /// speed gives the other thread more done. Only differences between
+    /// two points count, so a save state leaves it out.
+    pub handed_over: u64,
     batch_end: u64,
     cycles_per_ms: u32,
     base_icount: u64,
@@ -170,6 +177,7 @@ impl Clock {
             idle: 0,
             offloaded: 0,
             disk_wait: 0,
+            handed_over: 0,
             batch_end: u64::MAX,
             cycles_per_ms: cycles_per_ms.clamp(MIN_CYCLES, MAX_CYCLES),
             base_icount: 0,
@@ -2019,7 +2027,7 @@ crate::state_fields!(PitPort {
     latched,
     status
 });
-crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded, disk_wait });
+crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded, disk_wait, handed_over });
 crate::state_fields!(Tsc { base, icount, hz });
 
 #[cfg(test)]
