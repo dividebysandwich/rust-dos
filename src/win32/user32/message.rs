@@ -1750,7 +1750,9 @@ pub fn in_send_message(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// ReplyMessage(result): the sender gets `result` now, and the window
-/// procedure's own result later goes nowhere.
+/// procedure's own result later goes nowhere. Between two Win16 tasks the
+/// sender goes on first, as with any reply (`finish_sent`): Windows 95
+/// runs it until it yields or waits before ReplyMessage returns.
 pub fn reply_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let tid = current_tid(cpu);
     let state = user(cpu);
@@ -1764,9 +1766,17 @@ pub fn reply_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     sent.kind = 1;
     let (from, id) = (sent.from, sent.id);
     state.queue_mut(from).replies.push((id, args[0]));
-    crate::win16::task::hand_turn(&mut cpu.bus.win32, tid, from);
+    let win32 = &mut cpu.bus.win32;
+    crate::win16::task::hand_turn(win32, tid, from);
+    let switch = tid != from && crate::win16::task::both_tasks(win32, tid, from);
     thread::wake(cpu);
-    Some(TRUE)
+    if !switch {
+        return Some(TRUE);
+    }
+    // ReplyMessage returns TRUE when this task's turn comes back.
+    cpu.set_eax(TRUE);
+    crate::win16::task::give_up_turn(cpu);
+    None
 }
 
 /// CallWindowProcA(proc, hwnd, message, wParam, lParam).
