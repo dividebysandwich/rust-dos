@@ -212,13 +212,13 @@ disk.
   takes no `-j` only when no other agent works on the machine, since it
   keeps the jobs it started with when other builds start after it.
   Otherwise each takes about the processors divided by the number of
-  builds, fewer while emulators run. Memory sets a limit too, since
-  rustc's grows with its jobs: with many builds at once, `-j 2`. Past
-  these limits the machine thrashes, and on Windows rustc and the linker
-  can run out of memory (`os error 1455`, the paging file is too small).
-  A fixed `-j 2` for every build leaves a build that runs alone with two
-  of the processors for the rust-dos crate, which is most of what a
-  build in a reused target directory compiles.
+  builds, fewer while emulators run, and `-j 2` once the builds' memory
+  nears what the machine has free, since rustc's grows with its jobs.
+  Past these limits the machine thrashes, and on Windows rustc and the
+  linker can run out of memory (`os error 1455`, the paging file is too
+  small). A fixed `-j 2` for every build leaves a build that runs alone
+  with two of the processors for the rust-dos crate, which is most of
+  what a build in a reused target directory compiles.
 - Stop the emulators you start, by their process ID, before you finish:
   one left running holds its files, its debug server's port and a
   processor.
