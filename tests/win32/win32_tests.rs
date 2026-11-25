@@ -6959,6 +6959,122 @@ fn win32_calls_make_names_in_the_case_they_are_given() {
     assert_eq!(listed("Program Files/Base"), ["Old.cfg", "Save.dat"]);
 }
 
+/// Win32 calls name files on a FAT disk image (D:) by their long names,
+/// as Windows 98's VFAT does: CreateDirectoryA and CreateFileA make "My
+/// Saves" and "Saved game.dat" with long name entries, CreateFileA and
+/// GetFileAttributesA find the file by its long name in another case,
+/// FindFirstFileA gives the long name in cFileName and the alias
+/// SAVEDG~1.DAT in cAlternateFileName, and MoveFileA finds the source by
+/// its long name. Each check sets a bit of the exit code.
+#[test]
+fn win32_calls_name_files_by_long_names_on_a_disk_image() {
+    use Arg::{Esi, I};
+    let names: &[&str] = &[
+        "CreateDirectoryA",
+        "CreateFileA",
+        "CloseHandle",
+        "GetFileAttributesA",
+        "FindFirstFileA",
+        "FindClose",
+        "lstrcmpA",
+        "MoveFileA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x300];
+    put(&mut data, 0, b"D:\\My Saves\0");
+    put(&mut data, 0x20, b"D:\\My Saves\\Saved game.dat\0");
+    put(&mut data, 0x40, b"D:\\my saves\\SAVED GAME.DAT\0");
+    put(&mut data, 0x60, b"D:\\My Saves\\Saved*\0");
+    put(&mut data, 0x80, b"Saved game.dat\0");
+    put(&mut data, 0x90, b"SAVEDG~1.DAT\0");
+    put(&mut data, 0xA0, b"D:\\My Saves\\Slot one.sav\0");
+    // WIN32_FIND_DATAA at 100h: cFileName at 44, cAlternateFileName
+    // after its 260 bytes.
+    let find = 0x100;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        a.xor(ebx, ebx)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        // GENERIC_WRITE, CREATE_NEW.
+        let new = [at(0x20), I(0x4000_0000), I(0), I(0), I(1), I(0x80), I(0)];
+        call_with(a, f("CreateFileA"), &new)?;
+        a.mov(esi, eax)?;
+        a.cmp(eax, -1)?;
+        check(a, true, 1)?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING.
+        let open = [at(0x40), I(0x8000_0000), I(1), I(0), I(3), I(0x80), I(0)];
+        call_with(a, f("CreateFileA"), &open)?;
+        a.mov(esi, eax)?;
+        a.cmp(eax, -1)?;
+        check(a, true, 2)?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        call_with(a, f("GetFileAttributesA"), &[at(0x40)])?;
+        a.cmp(eax, -1)?;
+        check(a, true, 3)?;
+        call_with(a, f("FindFirstFileA"), &[at(0x60), at(find)])?;
+        a.mov(esi, eax)?;
+        a.cmp(eax, -1)?;
+        check(a, true, 4)?;
+        call_with(a, f("lstrcmpA"), &[at(0x80), at(find + 44)])?;
+        a.test(eax, eax)?;
+        check(a, false, 5)?;
+        call_with(a, f("lstrcmpA"), &[at(0x90), at(find + 44 + 260)])?;
+        a.test(eax, eax)?;
+        check(a, false, 6)?;
+        call_with(a, f("FindClose"), &[Esi])?;
+        call_with(a, f("MoveFileA"), &[at(0x40), at(0xA0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 7)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let image_dir = PathBuf::from("target/test_win32/long_names_image_d");
+    let _ = fs::remove_dir_all(&image_dir);
+    fs::create_dir_all(&image_dir).unwrap();
+    let image = image_dir.join("d.img");
+    rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+        .unwrap()
+        .copy_to(&image)
+        .unwrap();
+    let mut cpu = machine("long_names_image", exe);
+    cpu.bus
+        .disk
+        .mount(3, &image, rust_dos::disk::MountOptions::default(), true)
+        .unwrap();
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+    let volume = cpu.bus.disk.fat_volume(3).unwrap();
+    let listed = |path: &[&str]| -> Vec<(String, Option<String>)> {
+        volume
+            .list(path)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.long_name))
+            .collect()
+    };
+    let named = |name: &str, long: Option<&str>| (name.to_string(), long.map(str::to_string));
+    assert_eq!(listed(&[]), [named("MYSAVE~1", Some("My Saves"))]);
+    assert_eq!(
+        listed(&["MYSAVE~1"]),
+        [
+            named(".", None),
+            named("..", None),
+            named("SLOTON~1.SAV", Some("Slot one.sav")),
+        ]
+    );
+}
+
 /// SetFileTime on a file in a host folder, as Windows 98 SE does it on
 /// FAT: the time of the last write is rounded up to an even second
 /// (2001-10-08 19:20:01.5 is kept as 19:20:02), a time before 1980 fails
@@ -9722,6 +9838,154 @@ fn a_built_in_dll_loaded_as_it_goes_stays() {
         !code & 7,
         text
     );
+}
+
+/// The DirectX 5 redistributable's DSETUP.DLL at ExitProcess (#1803): D.DLL
+/// loads E.DLL in its DLL_PROCESS_ATTACH, E.DLL imports from D.DLL, and
+/// D.DLL's DLL_PROCESS_DETACH frees E.DLL. The program has let go of
+/// D.DLL, so E.DLL's import holds the last reference to it. At process
+/// exit the FreeLibrary succeeds and does nothing, as Wine's LdrUnloadDll
+/// does while the process detaches: each DLL learns once that the process
+/// ends, and D.DLL's code is still there when its FreeLibrary returns. A
+/// FreeLibrary of NULL still fails.
+#[test]
+fn a_dll_freeing_a_dll_as_the_process_ends_stays_mapped() {
+    let d_imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+    )];
+    let mut d_data = b"E.DLL\0\0\0D detached\r\n".to_vec();
+    d_data.resize(0x28, 0);
+    d_data.extend_from_slice(b"D freed E\r\n\0D null\r\n");
+    d_data.resize(0x40, 0);
+    const D_TEXT: u32 = 8;
+    const D_HANDLE: u32 = 0x20;
+    const D_WRITTEN: u32 = 0x24;
+    const D_FREED: u32 = 0x28;
+    const D_NULL: u32 = 0x34;
+    let d_main = |a: &mut CodeAssembler, l: &Layout| {
+        let say = |a: &mut CodeAssembler, at: u32, len: i32| -> Result<(), IcedError> {
+            a.push(STD_OUTPUT_HANDLE)?;
+            a.call(l.import(2))?;
+            a.push(0)?;
+            a.push(l.at(D_WRITTEN) as i32)?;
+            a.push(len)?;
+            a.push(l.at(at) as i32)?;
+            a.push(eax)?;
+            a.call(l.import(3))
+        };
+        let (mut detach, mut null, mut done) =
+            (a.create_label(), a.create_label(), a.create_label());
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.cmp(eax, 1)?;
+        a.jne(detach)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(dword_ptr(l.at(D_HANDLE)), eax)?;
+        a.jmp(done)?;
+        a.set_label(&mut detach)?;
+        a.test(eax, eax)?;
+        a.jne(done)?;
+        say(a, D_TEXT, 12)?;
+        // As DSETUP.DLL does: the handle stays where it was.
+        a.push(dword_ptr(l.at(D_HANDLE)))?;
+        a.call(l.import(1))?;
+        // Back in D.DLL's code, with the free a success.
+        a.test(eax, eax)?;
+        a.je(null)?;
+        say(a, D_FREED, 11)?;
+        a.set_label(&mut null)?;
+        a.push(0)?;
+        a.call(l.import(1))?;
+        a.test(eax, eax)?;
+        a.jne(done)?;
+        say(a, D_NULL, 8)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let seven = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 7)?;
+        a.ret()
+    };
+    let d = module_image(
+        DLL_BASE,
+        Some("D.DLL"),
+        d_imports,
+        &d_data,
+        &[("", &d_main), ("Seven", &seven)],
+        &[],
+    );
+
+    let e_imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetStdHandle", "WriteFile"]),
+        ("D.DLL", &["Seven"]),
+    ];
+    let mut e_data = b"E detached\r\n".to_vec();
+    e_data.resize(0x40, 0);
+    let e_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(l.import(0))?;
+        a.push(0)?;
+        a.push(l.at(0x20) as i32)?;
+        a.push(12)?;
+        a.push(l.at(0) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let e = module_image(
+        DLL_BASE,
+        Some("E.DLL"),
+        e_imports,
+        &e_data,
+        &[("", &e_main)],
+        &[],
+    );
+
+    let names: &[&str] = &["LoadLibraryA", "FreeLibrary", "GetModuleHandleA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"D.DLL\0".to_vec();
+    data.resize(0x200, 0);
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.push(l.at(0) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        check(a, true, 0)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        // E.DLL's import keeps it.
+        a.push(l.at(0) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 1)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run_files(
+        "dll_exit_free",
+        &[("T.EXE", exe), ("D.DLL", d), ("E.DLL", e)],
+    );
+    assert_eq!(
+        code,
+        3,
+        "the checks that failed: {:02b}, {}",
+        !code & 3,
+        text
+    );
+    assert_eq!(text.matches("D detached\r\n").count(), 1, "{text}");
+    assert_eq!(text.matches("E detached\r\n").count(), 1, "{text}");
+    assert_eq!(text.matches("D freed E\r\n").count(), 1, "{text}");
+    assert_eq!(text.matches("D null\r\n").count(), 1, "{text}");
 }
 
 /// A state saved after the last free of a built-in DLL has its mapping and

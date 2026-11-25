@@ -2348,6 +2348,232 @@ fn a_long_name_call_renames_a_name_to_another_case() {
     assert!(disk.is_file(r"C:\CONFIG.CFG"));
 }
 
+/// On a FAT disk image, a long-name call renames a file to a long name
+/// and to its own name in another case, writing the long name entries as
+/// VFAT does on Windows 9x. DOS's rename still finds a name taken in
+/// another case (05h), and drops a long name.
+#[test]
+fn a_long_name_call_renames_on_a_disk_image() {
+    let base = scratch("image_long_rename");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    let handle = disk.create_file(r"D:\CONFIG.CFG", PSP).unwrap();
+    disk.write_file(handle, b"cfg").unwrap();
+    disk.close_file(handle);
+    let listed = |disk: &DiskController| -> Vec<(String, Option<String>)> {
+        let (_, volume, _) = disk.locate_fat(r"D:\").unwrap();
+        volume
+            .list(&[])
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.long_name))
+            .collect()
+    };
+    let named = |name: &str, long: Option<&str>| vec![(name.to_string(), long.map(str::to_string))];
+
+    assert_eq!(
+        disk.rename_file(r"D:\CONFIG.CFG", r"D:\config.cfg"),
+        Err(0x05)
+    );
+    disk.long_name_call(|disk| disk.rename_file(r"D:\CONFIG.CFG", r"D:\config.cfg"))
+        .unwrap();
+    assert_eq!(listed(&disk), named("CONFIG.CFG", Some("config.cfg")));
+    disk.long_name_call(|disk| disk.rename_file(r"D:\config.cfg", r"D:\Saved Config.cfg"))
+        .unwrap();
+    assert_eq!(
+        listed(&disk),
+        named("SAVEDC~1.CFG", Some("Saved Config.cfg"))
+    );
+    let handle = disk.open_file(r"D:\SAVEDC~1.CFG", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(handle, 16).unwrap(), b"cfg");
+    disk.close_file(handle);
+
+    disk.rename_file(r"D:\SAVEDC~1.CFG", r"D:\PLAIN.CFG")
+        .unwrap();
+    assert_eq!(listed(&disk), named("PLAIN.CFG", None));
+}
+
+/// A handle open on a file of a disk image goes on writing to it after a
+/// long-name rename moves its entry to other slots, and the long name
+/// entries that took the slots it left stay as they are.
+#[test]
+fn a_handle_follows_a_file_a_long_name_rename_moves() {
+    let base = scratch("image_long_rename_open");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    let handle = disk.create_file(r"D:\SLOT.SAV", PSP).unwrap();
+    disk.write_file(handle, b"first ").unwrap();
+    // The volume label is in front of the entry, so the long name can't
+    // go there: the entry moves.
+    disk.long_name_call(|disk| disk.rename_file(r"D:\SLOT.SAV", r"D:\A saved game slot.sav"))
+        .unwrap();
+    disk.write_file(handle, b"second").unwrap();
+    disk.close_file(handle);
+
+    let (_, volume, _) = disk.locate_fat(r"D:\").unwrap();
+    let listed: Vec<(String, Option<String>)> = volume
+        .list(&[])
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.name, e.long_name))
+        .collect();
+    assert_eq!(
+        listed,
+        [(
+            "ASAVED~1.SAV".to_string(),
+            Some("A saved game slot.sav".to_string())
+        )]
+    );
+    let handle = disk.open_file(r"D:\ASAVED~1.SAV", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(handle, 32).unwrap(), b"first second");
+    disk.close_file(handle);
+}
+
+/// The bytes of the file `name`.
+fn read_all(disk: &mut DiskController, name: &str) -> Vec<u8> {
+    let h = disk.open_file(name, 0, PSP).unwrap();
+    let data = disk.read_file(h, 4096).unwrap();
+    disk.close_file(h);
+    data
+}
+
+/// The long names in the folder `dir`, sorted.
+fn long_listed(disk: &DiskController, dir: &str) -> Vec<String> {
+    let names = disk.long_names(dir).unwrap();
+    let mut names: Vec<String> = names.iter().map(|(long, _)| long.clone()).collect();
+    names.sort();
+    names
+}
+
+/// Drive D: of `base`, with `Config.cfg` ("cfg") and `Saves\Slot1.sav`
+/// ("one") at its root, renames `Config.cfg` and `Saves` to their own
+/// names in another case by long-name calls, as MoveFileA and msvcrt's
+/// rename make them. Windows 9x renames the entry in place: the file
+/// keeps what is in it, and the folder what it holds. DOS's own rename
+/// (INT 21h 56h) finds the name taken and answers 05h.
+fn recase_on(disk: &mut DiskController) {
+    assert_eq!(
+        disk.rename_file(r"D:\Config.cfg", r"D:\CONFIG.CFG"),
+        Err(0x05)
+    );
+    disk.long_name_call(|d| d.rename_file(r"D:\Config.cfg", r"D:\config.CFG"))
+        .unwrap();
+    disk.long_name_call(|d| d.rename_file(r"D:\Saves", r"D:\SAVES"))
+        .unwrap();
+    recased(disk);
+}
+
+/// What `recase_on` leaves.
+fn recased(disk: &mut DiskController) {
+    assert_eq!(long_listed(disk, r"D:\"), ["SAVES", "config.CFG"]);
+    assert_eq!(read_all(disk, r"D:\config.cfg"), b"cfg");
+    assert_eq!(read_all(disk, r"D:\Saves\Slot1.sav"), b"one");
+    assert_eq!(long_listed(disk, r"D:\SAVES")[0], "Slot1.sav");
+}
+
+/// The files `recase_on` renames, in the host folder `dir`.
+fn recase_files(dir: &Path) {
+    fs::create_dir_all(dir.join("Saves")).unwrap();
+    fs::write(dir.join("Config.cfg"), b"cfg").unwrap();
+    fs::write(dir.join("Saves/Slot1.sav"), b"one").unwrap();
+}
+
+#[test]
+fn a_host_folder_renames_a_name_to_another_case_in_place() {
+    let base = scratch("recase_host");
+    fs::create_dir_all(base.join("c")).unwrap();
+    recase_files(&base.join("game"));
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("game"), MountOptions::default(), false)
+        .unwrap();
+    recase_on(&mut disk);
+    let mut names: Vec<String> = fs::read_dir(base.join("game"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["SAVES", "config.CFG"]);
+}
+
+/// On an overlay drive, the entries are renamed above, whether they were
+/// only below (`Config.cfg`) or partly above (`Saves`, which has a file
+/// of its own above), and what is below stays as it was.
+#[test]
+fn an_overlay_renames_a_name_to_another_case_in_place() {
+    let base = scratch("recase_overlay");
+    fs::create_dir_all(base.join("c")).unwrap();
+    recase_files(&base.join("game"));
+    let opts = || MountOptions {
+        overlay: Some(base.join("upper")),
+        ..MountOptions::default()
+    };
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("game"), opts(), false).unwrap();
+    let h = disk
+        .long_name_call(|d| d.create_file(r"D:\Saves\Slot2.sav", PSP))
+        .unwrap();
+    disk.write_file(h, b"two").unwrap();
+    disk.close_file(h);
+    recase_on(&mut disk);
+    assert_eq!(long_listed(&disk, r"D:\SAVES"), ["Slot1.sav", "Slot2.sav"]);
+    assert_eq!(read_all(&mut disk, r"D:\SAVES\SLOT2.SAV"), b"two");
+    assert_eq!(fs::read(base.join("game/Config.cfg")).unwrap(), b"cfg");
+    assert_eq!(fs::read(base.join("game/Saves/Slot1.sav")).unwrap(), b"one");
+
+    // Renamed back, the names are the ones below again.
+    disk.long_name_call(|d| d.rename_file(r"D:\config.CFG", r"D:\Config.cfg"))
+        .unwrap();
+    assert_eq!(long_listed(&disk, r"D:\"), ["Config.cfg", "SAVES"]);
+    assert_eq!(read_all(&mut disk, r"D:\CONFIG.CFG"), b"cfg");
+    disk.long_name_call(|d| d.rename_file(r"D:\Config.cfg", r"D:\config.CFG"))
+        .unwrap();
+
+    // Again, from the upper folder and its list of deleted names.
+    drop(disk);
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("game"), opts(), false).unwrap();
+    recased(&mut disk);
+}
+
+/// An archive below matches names in any case on every host, as a folder
+/// does only on Windows and macOS.
+#[test]
+fn an_archive_drive_renames_a_name_to_another_case_in_place() {
+    let base = scratch("recase_archive");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let zip = crate::archive::zip::tests::zip(&[
+        ("Config.cfg", b"cfg", false),
+        ("Saves/Slot1.sav", b"one", false),
+    ]);
+    fs::write(base.join("game.zip"), &zip).unwrap();
+    let opts = || MountOptions {
+        overlay: Some(base.join("saves")),
+        ..MountOptions::default()
+    };
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("game.zip"), opts(), false)
+        .unwrap();
+    recase_on(&mut disk);
+    drop(disk);
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("game.zip"), opts(), false)
+        .unwrap();
+    recased(&mut disk);
+    assert_eq!(
+        fs::read(base.join("game.zip")).unwrap(),
+        zip,
+        "the archive as it was"
+    );
+}
+
 /// Where the host's own file pointer of the host file open at `sft` is,
 /// asked of the host.
 fn host_pointer(disk: &DiskController, sft: u16) -> u64 {
@@ -2397,4 +2623,144 @@ fn a_host_file_position_kept_without_asking_the_host_follows_its_pointer() {
     assert_eq!(disk.seek_file(h, 1, 0), Ok(1));
     assert_eq!(disk.read_file(h, 4).unwrap(), b"12");
     check(&disk, h, 3);
+}
+
+/// On a disk image, a long-name call (a Win32 call) creates, opens,
+/// lists, stats, changes and deletes files and directories by their long
+/// names, as Windows 9x's VFAT does, and makes names with the long name
+/// entries they need. It doesn't cut a name to 8.3. DOS's own calls keep
+/// to 8.3 names.
+#[test]
+fn a_long_name_call_finds_and_makes_long_names_on_a_disk_image() {
+    use crate::fat::tests::{dir_by_spec, root_by_spec};
+    let base = scratch("image_long_names");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    let volume = disk.fat_volume(DRIVE_D).unwrap();
+    let named = |name: &str, long: Option<&str>| (name.to_string(), long.map(str::to_string));
+
+    // A name with spaces isn't an 8.3 name.
+    assert_eq!(disk.create_file(r"D:\Saved game.dat", PSP), Err(0x03));
+    assert_eq!(disk.create_directory(r"D:\My Saves"), Err(0x03));
+    disk.long_name_call(|disk| disk.create_directory(r"D:\My Saves"))
+        .unwrap();
+    let handle = disk
+        .long_name_call(|disk| disk.create_file(r"D:\my saves\Saved game.dat", PSP))
+        .unwrap();
+    disk.write_file(handle, b"one").unwrap();
+    disk.close_file(handle);
+
+    disk.long_name_call(|disk| {
+        assert!(disk.is_directory(r"D:\MY SAVES"));
+        assert!(disk.exists(r"D:\My Saves\saved GAME.dat"));
+        let handle = disk
+            .open_file(r"D:\My Saves\saved GAME.dat", 0, PSP)
+            .unwrap();
+        assert_eq!(disk.read_file(handle, 16).unwrap(), b"one");
+        disk.close_file(handle);
+        // By the alias too.
+        assert!(disk.is_file(r"D:\MYSAVE~1\SAVEDG~1.DAT"));
+    });
+    let handle = disk.open_file(r"D:\MYSAVE~1\SAVEDG~1.DAT", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(handle, 16).unwrap(), b"one");
+    disk.close_file(handle);
+    assert!(!disk.exists(r"D:\My Saves"));
+
+    // DOS cuts LongFilename.txt to LONGFILE.TXT; a long-name call names
+    // another file by it.
+    let handle = disk.create_file(r"D:\LONGFILE.TXT", PSP).unwrap();
+    disk.close_file(handle);
+    assert!(disk.exists(r"D:\LongFilename.txt"));
+    assert!(!disk.long_name_call(|disk| disk.exists(r"D:\LongFilename.txt")));
+    let handle = disk
+        .long_name_call(|disk| disk.create_new_file(r"D:\LongFilename.txt", PSP))
+        .unwrap();
+    disk.close_file(handle);
+
+    let names = |dir: &str| -> Vec<(String, String)> {
+        disk.long_names(dir).unwrap().iter().cloned().collect()
+    };
+    let pair = |long: &str, short: &str| (long.to_string(), short.to_string());
+    assert_eq!(
+        names(r"D:\"),
+        [
+            pair("My Saves", "MYSAVE~1"),
+            pair("LONGFILE.TXT", "LONGFILE.TXT"),
+            pair("LongFilename.txt", "LONGFI~1.TXT"),
+        ]
+    );
+    assert_eq!(
+        names(r"D:\My Saves"),
+        [
+            pair(".", "."),
+            pair("..", ".."),
+            pair("Saved game.dat", "SAVEDG~1.DAT")
+        ]
+    );
+    assert_eq!(
+        root_by_spec(&volume),
+        [
+            named("MYSAVE~1", Some("My Saves")),
+            named("LONGFILE.TXT", None),
+            named("LONGFI~1.TXT", Some("LongFilename.txt")),
+        ]
+    );
+    let saves = volume.find_long(&["My Saves"]).unwrap();
+    assert_eq!(
+        dir_by_spec(&volume, saves.cluster),
+        [
+            named(".", None),
+            named("..", None),
+            named("SAVEDG~1.DAT", Some("Saved game.dat")),
+        ]
+    );
+
+    let file = r"D:\My Saves\Saved game.dat";
+    disk.long_name_call(|disk| {
+        disk.set_file_attribute(file, 0x21).unwrap();
+        assert_eq!(disk.get_file_attribute(file), Ok(0x21));
+        let listed: Vec<String> = disk
+            .list_directory(r"D:\My Saves\*.*", 0x16)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.filename)
+            .collect();
+        assert_eq!(listed, [".", "..", "SAVEDG~1.DAT"]);
+        assert!(disk.set_current_directory(r"D:\My Saves"));
+    });
+    assert_eq!(
+        disk.get_current_directory_of(DRIVE_D).as_deref(),
+        Some("MYSAVE~1")
+    );
+    disk.long_name_call(|disk| {
+        assert_eq!(disk.delete_file(file), Err(0x05));
+        disk.set_file_attribute(file, 0x20).unwrap();
+        disk.delete_file(file).unwrap();
+        assert_eq!(disk.remove_directory(r"D:\My Saves"), Err(0x10));
+        assert!(disk.set_current_directory(r"D:\"));
+        disk.remove_directory(r"D:\My Saves").unwrap();
+        assert!(!disk.exists(r"D:\My Saves"));
+    });
+
+    // A whole-file write, as CopyFileA's, makes long names on its way.
+    disk.long_name_call(|disk| {
+        disk.write_whole_file(r"D:\New Folder\Copied file.txt", b"copy", None)
+            .unwrap();
+        let data = disk.file_data(r"D:\new folder\copied FILE.TXT").unwrap();
+        assert_eq!(&*data.read().unwrap(), b"copy");
+    });
+    let mut root = root_by_spec(&volume);
+    root.sort();
+    assert_eq!(
+        root,
+        [
+            named("LONGFILE.TXT", None),
+            named("LONGFI~1.TXT", Some("LongFilename.txt")),
+            named("NEWFOL~1", Some("New Folder")),
+        ]
+    );
 }

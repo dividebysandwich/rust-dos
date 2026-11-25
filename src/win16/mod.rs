@@ -22,11 +22,11 @@ pub mod dos;
 pub(crate) mod dpmi;
 pub(crate) mod flat;
 mod gdi;
-mod global;
+pub(crate) mod global;
 mod handles;
 mod hook;
 mod kernel;
-mod ldt;
+pub(crate) mod ldt;
 mod local;
 mod lz;
 mod message;
@@ -398,6 +398,7 @@ pub fn is_task(win32: &crate::win32::Win32, tid: u32) -> bool {
 
 pub use ddeml::free_dde_copy;
 pub use kernel::{atom_name, atom_of};
+pub use message::send_message_slot;
 
 /// The bytes of the global block `handle`, as a 16-bit program passes
 /// one in a DDE message: None if it isn't a block that is there.

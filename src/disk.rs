@@ -189,9 +189,9 @@ fn is_short_name(name: &str) -> bool {
 
 /// The name a new file or directory gets on a host drive when a program
 /// asks for `name`. DOS's own calls uppercase an 8.3 name. A long-name
-/// call (`keep_case`: Win32's CreateFileA, CreateDirectoryA, MoveFileA
-/// and CopyFileA) keeps the case it was given, as Windows 9x does, whose
-/// VFAT gives a name that isn't all uppercase a long-name entry:
+/// call (`keep_case`: a Win32 call, `long_name_call`) keeps the case it
+/// was given, as Windows 9x does, whose VFAT gives a name that isn't all
+/// uppercase a long-name entry:
 /// Alice's installer makes "Program Files\EA Games" and the game writes
 /// "config.cfg". A longer name keeps its case from DOS's calls too: on
 /// DOS they would cut it to 8.3, but the name is made as asked, and what
@@ -876,9 +876,9 @@ pub struct DiskController {
     /// The files shown in directories that the drive doesn't have: the
     /// built-in Windows's DLLs and its NOTEPAD.EXE (system_files.rs).
     system_files: system_files::SystemFiles,
-    /// Whether the call running now is a long-name call, which keeps the
-    /// case of the names it makes (`long_name_call`, `new_entry_name`).
-    keep_case: bool,
+    /// Whether the call running now is a long-name call
+    /// (`long_name_call`).
+    long_call: bool,
 }
 
 impl DiskController {
@@ -933,27 +933,38 @@ impl DiskController {
             media: Cell::new(None),
             host_dirs: HostDirCache::default(),
             system_files: Default::default(),
-            keep_case: false,
+            long_call: false,
         };
         disk.open_standard_devices();
         disk
     }
 
-    /// Run `call` as a long-name call: the files and directories it makes
-    /// on host drives keep the case of their names (`new_entry_name`).
-    /// The built-in Windows's file functions make names this way, and
-    /// DOS's INT 21h calls don't.
+    /// Run `call` as a long-name call, as Windows 9x's VFAT runs a Win32
+    /// call: the files and directories it makes on host drives keep the
+    /// case of their names (`new_entry_name`), and on disk images it
+    /// finds entries by their long names or their DOS names and makes
+    /// names with the long name entries they need (`FatVolume::find_long`,
+    /// `create_long`). Every function of the built-in Windows's DLLs runs
+    /// as one (`win32::stubs::call`); DOS's INT 21h calls keep to 8.3
+    /// names.
     pub fn long_name_call<R>(&mut self, call: impl FnOnce(&mut Self) -> R) -> R {
-        let was = std::mem::replace(&mut self.keep_case, true);
+        let was = self.set_long_name_call(true);
         let result = call(self);
-        self.keep_case = was;
+        self.set_long_name_call(was);
         result
+    }
+
+    /// Start (`on`) or end a long-name call, for a caller that can't run
+    /// it as a closure (`long_name_call`): whether one ran before, to put
+    /// back after it.
+    pub fn set_long_name_call(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.long_call, on)
     }
 
     /// The name a new entry `name` gets on a host drive, for the call
     /// running now (`new_entry_name`).
     fn entry_name(&self, name: &str) -> String {
-        new_entry_name(name, self.keep_case)
+        new_entry_name(name, self.long_call)
     }
 
     /// AUX, CON and PRN in the first entries of the file table, where DOS
