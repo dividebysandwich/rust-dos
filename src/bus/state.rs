@@ -29,7 +29,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 94;
+const WIN32_VERSION: u16 = 95;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -57,11 +57,13 @@ const WIN32_VERSION: u16 = 94;
 /// cursors (`user32::resource::ANI_CURSORS`), 71's to 90's Win16
 /// modules counted once for each import of them
 /// (`win16::module::USERS_COUNTED`), 71's to 91's no Universal Thunks
-/// (`win16::universal::UT_SAVED`), 71's to 92's no compatibility shims
-/// of a process (`win32::shims::SHIMS_SAVED`), and 92's and 93's no
-/// tiled selectors of UTLinearToSelectorOffset
+/// (`win16::universal::UT_SAVED`), 71's to 92's no compatibility
+/// shims of a process (`win32::shims::SHIMS_SAVED`), 71's to 93's
+/// no view of Windows 3.1's GDI heap
+/// (`win31::gdi_heap::GDI_HEAP_SAVED`), and 92's to 94's no tiled
+/// selectors of UTLinearToSelectorOffset
 /// (`win16::universal::TILES_SAVED`).
-const WIN32_LOADS: [u16; 24] = [
+const WIN32_LOADS: [u16; 25] = [
     71,
     72,
     73,
@@ -85,6 +87,7 @@ const WIN32_LOADS: [u16; 24] = [
     91,
     92,
     93,
+    94,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1193,7 +1196,8 @@ mod tests {
         (91, 0x73E4_9EC8_9162_D561), // Win16 modules counting their users, not imports
         (92, 0xF14F_686E_F110_2495), // Universal Thunks
         (93, 0x9568_9B5A_F977_006F), // each process's compatibility shims
-        (94, 0x0315_C951_F416_8FE6), // UTLinearToSelectorOffset's tiled selectors
+        (94, 0xEC01_69EA_3820_D56B), // each process's view of Windows 3.1's GDI heap
+        (95, 0x61C6_45FE_9AE1_A896), // UTLinearToSelectorOffset's tiled selectors
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

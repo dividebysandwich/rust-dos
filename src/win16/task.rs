@@ -616,6 +616,7 @@ pub(super) fn end_client_task(cpu: &mut Cpu, tid: u32) {
     super::comm::task_ended(cpu, task.handle);
     super::ole2::task_ended(cpu, task.handle);
     super::misc::task_ended(cpu, task.tid);
+    crate::win32::shims::win31::gdi_heap::task_ended(cpu, task.handle);
     // Its locks (INT 21h AH=5Ch) go before its PDB's selector is free
     // for another task to have, and them with it.
     cpu.bus
@@ -1196,6 +1197,7 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     super::comm::task_ended(cpu, task.handle);
     super::ole2::task_ended(cpu, task.handle);
     super::misc::task_ended(cpu, task.tid);
+    crate::win32::shims::win31::gdi_heap::task_ended(cpu, task.handle);
     // The process object its starters wait on.
     let objects = &mut cpu.bus.win32.objects;
     if let Some(object) = objects.get_mut(task.process_object)

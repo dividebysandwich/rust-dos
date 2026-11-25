@@ -37,11 +37,14 @@
 //!   32 KB block's selector a band's rows run past the 64 KB the selector
 //!   has. The thunk's translation list keeps the 32 KB blocks: which
 //!   path Win32s takes for it isn't read out.
+//!
+//! A Win32s program runs on Windows 3.1 and can call its 16-bit DLLs,
+//! which see Windows 3.1 itself, so Win32s's set has Windows 3.1's
+//! ([`super::win31`]) too.
 
 use super::{Shim, Shims};
 
-/// The shims of Win32s, for programs made for it.
-pub const WIN32S: Shims = Shims::of(&[
-    Shim::GlobalFlagsWithoutLockCount,
-    Shim::UtRegionSelectors,
-]);
+/// The shims of Win32s, for programs made for it: its own and Windows
+/// 3.1's.
+pub const WIN32S: Shims = Shims::of(&[Shim::GlobalFlagsWithoutLockCount, Shim::UtRegionSelectors])
+    .union(super::win31::WIN31);

@@ -34,7 +34,7 @@ pub const UT_SAVED: u16 = 92;
 
 /// The W32 state version that first saves the tiled selectors of a
 /// process's memory (`Selector::len`).
-pub const TILES_SAVED: u16 = 94;
+pub const TILES_SAVED: u16 = 95;
 
 /// The thunks a process can have, as WIN32S16.DLL's table has room for.
 const MAX_THUNKS: usize = 10;

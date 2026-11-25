@@ -690,6 +690,19 @@ limit, so without a connection it goes on as it would with one:
   comes later. The calls of passes `idle_skip` skips aren't logged or
   counted. `all` writes every call, and `off` none. The debug server's
   `POST /api/win32 {"trace":"all"}` changes it while a program runs.
+* `win32_shims` gives every program the built-in Windows starts the
+  compatibility shims of an older Windows, the behaviours it had that
+  Windows 98 doesn't: `none` (the default), `win31` or `win32s`.
+  `win31` has Windows 3.1's GDI heap, which TOOLHELP's SystemHeapInfo
+  gives as hGDISegment, with each bitmap's object and device BITMAP in
+  it as Windows 3.1's GDI kept them, and 16-bit BitBlt drawing what a
+  program wrote there. `win32s` has those and Win32s's GlobalFlags,
+  which leaves out the lock count. The [game fixes](#game-fixes) give
+  them to the programs known to need them; the setting is for others. A
+  16-bit program that asks for GDI's heap without the shim gets a line
+  in the [log file](REFERENCE.md#log-file) that names it. A change
+  takes effect for the next Win32 program that starts, and for 16-bit
+  programs, which share one process, once none of them runs.
 * `win32_depth` is the depth of the built-in Windows' desktop: `auto`
   (the default) is the display adapter's own, 32 bits a pixel (24 on an
   S3 ViRGE, 16 on a 3dfx Banshee or Voodoo3); `8` is 640x480 with 256
@@ -2050,7 +2063,7 @@ programs don't change.
 | `microprose-dswap` | F-117A, F-19, Gunship 2000, Covert Action | DSWAP.EXE wants the original install disk and waits for it | Skips DSWAP.EXE with exit code 1, as if the disk was there |
 | `microprose-player` | The same games | Their PLAYER.EXE, the title and cutscene player, loops forever without the copy protection's data | Skips PLAYER.EXE, when DSWAP.EXE is beside it, with exit code 0 |
 | `td4-intro-camera` | Test Drive 4 (version 1.2 only, on the built-in Windows) | At 60 frames a second the race is seen from just above the car, or at lower rates from too close or too far, for the whole race | Patches 3.EXE as it loads to move the intro's last camera shot by the game's ticks instead of its frames |
-| `lunicus-win32s` | Lunicus (the CD's version, on the built-in Windows) | The game stops at once with "bad lock use count", on Windows 98 too, which lists it as incompatible | Runs LUNICUS.EXE with Win32s's GlobalFlags, which leaves out the lock count |
+| `lunicus-win32s` | Lunicus (the CD's version, on the built-in Windows) | The game stops at once with "bad lock use count", on Windows 98 too, which lists it as incompatible | Runs LUNICUS.EXE with Win32s's behaviours: GlobalFlags without the lock count, and Windows 3.1's GDI heap, where its LUNIFX.DLL finds the bitmap it draws its frames with |
 | `cyberflix-demo-win32s` | Lunicus's CD: the demo player of Cyberflix's games | The demos stop with "bad lock use count" in the same way | The same for PREVIEWS\JDEMO.EXE |
 
 The two Titus games share a sound engine that turns each signed sample

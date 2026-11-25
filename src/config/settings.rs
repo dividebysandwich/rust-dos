@@ -105,6 +105,9 @@ pub struct Settings {
     pub win32_locale: Win32Locale,
     /// Which calls of its functions the log gets a line for.
     pub win32_trace: Win32Trace,
+    /// The compatibility shims every program it starts gets: a set of
+    /// an older Windows' (`win32::shims::SETS`), none by default.
+    pub win32_shims: crate::win32::shims::Shims,
     /// DOS's tables packed below the first MCB, as DOS=HIGH leaves
     /// conventional memory, rather than spread out up to 64 KB.
     pub dos_high: bool,
@@ -219,6 +222,7 @@ impl Default for Settings {
             win32_desktop: DesktopSize::Vga,
             win32_locale: Win32Locale::EnUs,
             win32_trace: Win32Trace::Collapsed,
+            win32_shims: crate::win32::shims::Shims::NONE,
             dos_high: true,
             dos_version: DosVersion::default(),
             ansi_sys: true,
@@ -379,6 +383,7 @@ impl Settings {
             win32_desktop: config.win32_desktop.unwrap_or(default.win32_desktop),
             win32_locale: config.win32_locale.unwrap_or(default.win32_locale),
             win32_trace: config.win32_trace.unwrap_or(default.win32_trace),
+            win32_shims: config.win32_shims.unwrap_or(default.win32_shims),
             dos_high: config.dos_high.unwrap_or(default.dos_high),
             dos_version: config.dos_version.unwrap_or(default.dos_version),
             ansi_sys: config.ansi_sys.unwrap_or(default.ansi_sys),
@@ -641,6 +646,11 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "win32_desktop", Some(settings.win32_desktop.name().to_string())),
         (Emulator, "win32_locale", Some(settings.win32_locale.name().to_string())),
         (Emulator, "win32_trace", Some(settings.win32_trace.name().to_string())),
+        (
+            Emulator,
+            "win32_shims",
+            crate::win32::shims::name_of(settings.win32_shims).map(str::to_string),
+        ),
         (Emulator, "dos_high", yes_no(settings.dos_high)),
         (Emulator, "dos_version", Some(settings.dos_version.name())),
         (Emulator, "ansi_sys", yes_no(settings.ansi_sys)),
