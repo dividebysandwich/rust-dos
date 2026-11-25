@@ -1580,7 +1580,7 @@ fn def_frame_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// CallWindowProc(proc, hwnd, msg, wParam, lParam): a 32-bit procedure
 /// (a slot standing for one) gets the message translated; a 16-bit one
 /// is called as it is, by jumping to it with the caller's frame in place
-/// of this call's.
+/// of this call's and AX the data segment of the window's instance.
 fn call_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let proc = args[0];
     if let Some(t) = thunk::thunk16_of(cpu, proc) {
@@ -1601,7 +1601,23 @@ fn call_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     thunk::set_sp(&mut ctx, sp.wrapping_add(4));
     ctx.eip = proc & 0xFFFF;
     ctx.seg[Seg::CS as usize] = (proc >> 16) as u16;
-    let ds = ctx.seg[Seg::DS as usize];
+    // AX the data segment of the window's instance, as Windows'
+    // CallWindowProc loads it and as USER calls a procedure for a
+    // message (`message::call_wndproc16`). A program's exported
+    // procedure, whose prologue the loader made "nop; nop", sets DS from
+    // AX, so when a DLL's subclass procedure passes a message on to it,
+    // it runs on the window's instance's data. The caller's DS for a
+    // window without an instance.
+    let instance = cpu
+        .bus
+        .win32
+        .user
+        .window(args[1])
+        .map_or(0, |w| instance16(cpu, w.instance));
+    let ds = match message::instance_ds(cpu, instance) {
+        0 => ctx.seg[Seg::DS as usize],
+        ds => ds,
+    };
     thunk::set_ax(&mut ctx, ds);
     crate::win32::system::load_context(cpu, &ctx);
     None
