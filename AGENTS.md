@@ -119,6 +119,16 @@ that it improves on main. Steps, in this order:
    behaviour closer to the real hardware or the real Windows, shown by a
    test or a comparison with it. Put the evidence in the description.
 
+   When you mark it ready, check that it still merges with main, which
+   moves on while a pull request is in draft. If it doesn't, merge main
+   into the branch (no rebase, no force-push), keep what both sides
+   meant, run the tests the conflict touches, and push. A save-state
+   version both sides raised (`WIN32_VERSION` and the like): the
+   branch takes the next free number, and main's joins the versions the
+   branch loads. GitHub can show the old head for minutes after a push:
+   compare its head with the commit you pushed before trusting
+   "conflicting".
+
 If the evidence isn't there yet, improve the change and go through the
 steps again. A pull request stays a draft only when the next step needs
 a decision with no clearly better option, or is far beyond the change's
@@ -189,10 +199,16 @@ disk.
   such as sccache doesn't do this across directories: its cache keys
   include the target directory's path, so a new directory gets no hits.
 - Cargo starts as many jobs as there are processors, and every agent's
-  build does. With more than two or three builds at once, pass `-j 2`
-  or so. Otherwise the machine thrashes, and on Windows rustc and the
-  linker can run out of memory (`os error 1455`, the paging file is too
-  small).
+  build does. Share the processors among the builds that run at once,
+  which `rust-dos-lock status` lists: a build that runs alone takes no
+  `-j`, and each of several takes about the processors divided by their
+  number, fewer while emulators run. Memory sets a limit too, since
+  rustc's grows with its jobs: with many builds at once, `-j 2`.
+  Otherwise the machine thrashes, and on Windows rustc and the linker
+  can run out of memory (`os error 1455`, the paging file is too
+  small). A fixed `-j 2` for every build leaves a build that runs alone
+  with two of the processors for the rust-dos crate, which is most of
+  what a build in a reused target directory compiles.
 - Stop the emulators you start, by their process ID, before you finish:
   one left running holds its files, its debug server's port and a
   processor.
