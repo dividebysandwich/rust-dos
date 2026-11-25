@@ -1098,18 +1098,16 @@ impl Mark {
 
     /// Since `from`: the share of the instructions run that the processor
     /// sat halted, leaving out its waits for the host's disk and the turns
-    /// of Win32 threads skipped while another could run, and the bytes a
-    /// second moved on drives.
+    /// of Win32 threads skipped while another could run and had work
+    /// (`timer::waited`), and the bytes a second moved on drives.
     fn since(&self, from: &Mark) -> (f64, f64) {
         let ran = self.icount.saturating_sub(from.icount).max(1) as f64;
-        let waited = self.disk_wait.saturating_sub(from.disk_wait);
-        let handed = self.handed_over.saturating_sub(from.handed_over);
-        let halted = self
-            .idle
-            .saturating_sub(from.idle)
-            .saturating_sub(waited + handed);
+        let idle = self.idle.saturating_sub(from.idle) as f64;
+        let disk = self.disk_wait.saturating_sub(from.disk_wait) as f64;
+        let handed = self.handed_over.saturating_sub(from.handed_over) as f64;
+        let halted = (crate::timer::waited(ran, idle, handed) - disk).max(0.0);
         let seconds = self.ns.saturating_sub(from.ns) as f64 / 1e9;
-        (halted as f64 / ran, (self.io - from.io) as f64 / seconds)
+        (halted / ran, (self.io - from.io) as f64 / seconds)
     }
 }
 
@@ -6509,6 +6507,49 @@ mod tests {
         // showed fewer than two thirds of the pictures.
         let held = machine.run(60, decoding(7_800_000, false));
         assert!(held.shown < 10.0, "{}: {:?}", held.shown, held.speeds);
+    }
+
+    /// A movie that keeps up: a decoder thread takes `work` instructions a
+    /// picture and shows 15 a second, and between pictures it spins on the
+    /// clock as the main thread does. Both loops are skipped to the end of
+    /// their turns, and each thread could take the processor from the
+    /// other, so with `handed` the skipped turns are handed over
+    /// (`Clock::handed_over`), though neither thread has work.
+    fn spinning(work: u64, handed: bool) -> impl FnMut(&mut Bus) -> u32 {
+        let (mut start, mut shown) = (None, 0);
+        move |bus| {
+            let now = bus.clock.now_ns();
+            let start = *start.get_or_insert(now);
+            let due = (now - start) * 15 / 1_000_000_000 + 1;
+            if shown >= due {
+                let idle = bus.clock.idle;
+                idle_until(bus, start + (due * 1_000_000_000).div_ceil(15));
+                if handed {
+                    bus.clock.handed_over += bus.clock.idle - idle;
+                }
+                return 0;
+            }
+            bus.clock.icount += work;
+            shown += 1;
+            1
+        }
+    }
+
+    #[test]
+    fn threads_that_all_spin_wait() {
+        // The turns handed over count as work only as far as a thread
+        // worked: two threads that spin while there is nothing to do wait
+        // as a halted program does, and more speed brings nothing.
+        let machine = Machine {
+            start: 112_500,
+            ..Machine::default()
+        };
+        let spun = machine.run(60, spinning(1_000_000, true));
+        let halted = machine.run(60, spinning(1_000_000, false));
+        let (_, _, most) = spun.from(0);
+        let (_, _, halted_most) = halted.from(0);
+        assert!(most <= halted_most, "{:?} {:?}", spun.speeds, halted.speeds);
+        assert!(spun.shown >= 14.0, "{}", spun.shown);
     }
 
     /// A machine that starts at 20,000.
