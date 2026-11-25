@@ -401,9 +401,16 @@ impl Cpu {
     /// Whether the shell's code runs: at SHELL_SEGMENT, in real mode. In
     /// protected mode the same number is a selector of a DOS extender's
     /// (DOS/4GW's code is 0070h), whose program is anything but idle. On a
-    /// booted system there is no shell (and IO.SYS runs at 0070h).
+    /// booted system there is no shell (and IO.SYS runs at 0070h). The
+    /// IRET that INT 01h, 03h and 04h point at (`shell::dos_iret`) is in
+    /// the shell's code too, but whatever raised the interrupt runs it: a
+    /// program, or a resident program's handler while the shell waits at
+    /// its prompt. A command line taken there would run inside the handler.
     pub fn in_shell_code(&self) -> bool {
-        self.dos_mode() && self.cs() == SHELL_SEGMENT && self.bus.boot.is_none()
+        self.dos_mode()
+            && self.cs() == SHELL_SEGMENT
+            && self.bus.boot.is_none()
+            && self.ip() != crate::shell::labels().int_iret
     }
 
     /// True while no program runs: the shell is at its prompt, or in the
@@ -419,7 +426,8 @@ impl Cpu {
             let frame = self.get_physical_addr(self.ss(), self.sp().wrapping_add(if waiting { 12 } else { 2 }));
             self.bus.read_16(frame)
         };
-        self.dos_mode() && (self.cs() == SHELL_SEGMENT || (self.cs() == 0xF000 && caller_cs() == SHELL_SEGMENT))
+        self.in_shell_code()
+            || (self.dos_mode() && self.cs() == 0xF000 && caller_cs() == SHELL_SEGMENT)
     }
 }
 

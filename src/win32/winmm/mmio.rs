@@ -1367,7 +1367,9 @@ pub fn mmio_rename(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     use crate::win32::kernel32;
     let from = kernel32::dos_path(&kernel32::full_path(cpu, &from));
     let to = kernel32::dos_path(&kernel32::full_path(cpu, &to));
-    Some(match cpu.bus.disk.rename_file(&from, &to) {
+    let disk = &mut cpu.bus.disk;
+    let renamed = disk.long_name_call(|disk| disk.rename_file(&from, &to));
+    Some(match renamed {
         Ok(()) => MMSYSERR_NOERROR,
         Err(_) => MMIOERR_FILENOTFOUND,
     })

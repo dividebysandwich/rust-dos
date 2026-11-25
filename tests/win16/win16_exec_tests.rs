@@ -8,7 +8,7 @@ use rust_dos::disk::MountOptions;
 use rust_dos_ne as ne;
 use rust_dos_pe as pe;
 use std::fs;
-use win16::{CODE, Code, dos_marker, program, program_named, run_command, run_with};
+use win16::{CODE, Code, dos_marker, program, program_named, run, run_command, run_with};
 
 /// KERNEL's ordinals.
 const GET_MODULE_FILE_NAME: u16 = 49;
@@ -739,6 +739,71 @@ fn a_known_dll_moved_away_is_looked_for_in_the_windows_directory_next() {
     assert_eq!(exit, IN_WINDOWS, "{log}");
 }
 
+/// A program, started as C:\APP\T.EXE with C:\ the current directory,
+/// that runs WinExec("CHILD") and ends with 10h when it gave an
+/// instance, or with its error. `places` (directories under C:\) get a
+/// CHILD.EXE each, which ends with the place's number in `places` plus
+/// 1. The log tells which one ran.
+fn exec_search(test: &str, places: &[&str]) -> (u8, String) {
+    let mut code = Code::new();
+    let name_at = code.here() + 2;
+    code.push_far(0)
+        .push(1) // SW_SHOWNORMAL
+        .call("KERNEL", WIN_EXEC)
+        .emit(&[
+            0x3D, 0x20, 0x00, // cmp ax,20h
+            0x72, 0x02, // jb over the next
+            0xB0, 0x10, // mov al,10h
+        ])
+        .exit_al();
+    let name = code.here();
+    code.emit(b"CHILD\0");
+    code.patch(name_at, name);
+    let exe = program(&code, CODE);
+    let copy = exe.clone();
+    let places: Vec<String> = places.iter().map(|p| p.to_string()).collect();
+    run_command(test, exe, "APP\\T.EXE", "", move |_, base| {
+        fs::create_dir_all(base.join("APP")).unwrap();
+        fs::write(base.join("APP").join("T.EXE"), copy).unwrap();
+        for (i, place) in places.iter().enumerate() {
+            let dir = base.join(place);
+            fs::create_dir_all(&dir).unwrap();
+            let mut child = Code::new();
+            child.emit(&[0xB0, i as u8 + 1]).exit_al(); // mov al,place
+            fs::write(dir.join("CHILD.EXE"), program_named("CHILD", &child, CODE)).unwrap();
+        }
+    })
+}
+
+/// WinExec looks for a program named without a directory where
+/// LoadLibrary looks for a DLL (Windows 3.1's LoadModule does both),
+/// so a program finds one beside itself in its task's directory.
+/// Microsoft Setup's bootstrapper starts `_MSTEST` from the CD that way
+/// (#1851).
+#[test]
+fn win_exec_looks_for_a_program_in_the_tasks_directory() {
+    let (exit, log) = exec_search("exec_search_app", &["APP"]);
+    assert_eq!(exit, 0x10, "{log}");
+    assert!(ended_with(&log, 1), "{log}");
+}
+
+/// The system directory comes before the task's directory for programs
+/// too.
+#[test]
+fn win_exec_looks_in_the_system_directory_before_the_tasks_directory() {
+    let (exit, log) = exec_search("exec_search_system", &["APP", "WINDOWS/SYSTEM"]);
+    assert_eq!(exit, 0x10, "{log}");
+    assert!(ended_with(&log, 2), "{log}");
+    assert!(!ended_with(&log, 1), "{log}");
+}
+
+/// A program found nowhere gives error 2, file not found.
+#[test]
+fn win_exec_of_a_program_found_nowhere_gives_file_not_found() {
+    let (exit, log) = exec_search("exec_search_none", &[]);
+    assert_eq!(exit, 2, "{log}");
+}
+
 /// A DLL that imports another is in C:\LIBS, with a copy of the other
 /// beside it and one in C:\APP, the program's directory. Windows looks
 /// for the import in the current task's directory, not in that of the
@@ -921,7 +986,11 @@ struct Probe {
 /// is then RegisterClass's atom, or 0. `finish_probe` writes the name
 /// and the procedure.
 fn register_probe(code: &mut Code, probe: &mut Probe, global: bool) {
-    let style: u16 = if global { 0x4000 } else { 0 };
+    register_probe_styled(code, probe, if global { 0x4000 } else { 0 });
+}
+
+/// `register_probe`, with the class style `style`.
+fn register_probe_styled(code: &mut Code, probe: &mut Probe, style: u16) {
     let [lo, hi] = style.to_le_bytes();
     code.emit(&[
         0x83, 0xEC, 0x1A, // sub sp,26
@@ -951,14 +1020,38 @@ fn register_probe(code: &mut Code, probe: &mut Probe, global: bool) {
 /// Code that makes a popup window of the class "Probe" with the
 /// instance in DI, and leaves it there: AX is then its handle, or 0.
 fn create_probe(code: &mut Code, probe: &mut Probe) {
+    create_probe_at(code, probe, false, [0, 0, 10, 10]);
+}
+
+/// `create_probe`, the window shown at once (WS_VISIBLE) if `visible`,
+/// at `place`: x, y, width and height on the screen.
+fn create_probe_at(code: &mut Code, probe: &mut Probe, visible: bool, place: [u16; 4]) {
+    create_probe_owned(code, probe, visible, place, false);
+}
+
+/// `create_probe_at`, the window owned by the one whose handle is in SI
+/// if `owned`.
+fn create_probe_owned(
+    code: &mut Code,
+    probe: &mut Probe,
+    visible: bool,
+    place: [u16; 4],
+    owned: bool,
+) {
     probe.names_at.push(code.here() + 2);
     code.push_far(0); // the class
     probe.names_at.push(code.here() + 2);
     code.push_far(0); // the title: the class's name too
-    code.push(0x8000).push(0); // WS_POPUP
-    for v in [0, 0, 10, 10, 0, 0] {
-        code.push(v); // the place, the size, no parent, no menu
+    code.push(if visible { 0x9000 } else { 0x8000 }).push(0); // WS_POPUP
+    for v in place {
+        code.push(v); // the place and the size
     }
+    if owned {
+        code.emit(&[0x56]); // push si: the owner
+    } else {
+        code.push(0); // no parent
+    }
+    code.push(0); // no menu
     code.emit(&[0x57]); // push di: the instance
     code.push(0).push(0).call("USER", CREATE_WINDOW);
 }
@@ -1109,6 +1202,289 @@ fn an_ended_programs_classes_go_with_the_windows_it_left() {
     let (exit, log) = after_global_child("ended_program_window_classes", true);
     assert_eq!(exit, 1, "{log}");
     assert!(log.contains("ended with exit code 5"), "{log}");
+}
+
+/// USER's ShowWindow, ValidateRect, GetUpdateRect and SetWindowPos,
+/// SW_SHOWNA, and SetWindowPos's flags SWP_NOSIZE, SWP_NOMOVE,
+/// SWP_NOACTIVATE and SWP_SHOWWINDOW together.
+const SHOW_WINDOW: u16 = 42;
+const VALIDATE_RECT: u16 = 127;
+const GET_UPDATE_RECT: u16 = 190;
+const SET_WINDOW_POS: u16 = 232;
+const SW_SHOWNA: u16 = 8;
+const SWP_SHOW_IN_PLACE: u16 = 0x53;
+
+/// Where the window C:\CHILD.EXE leaves is, against the program's at
+/// (100, 100), 50 by 50.
+#[derive(Clone, Copy, PartialEq)]
+enum ChildWindow {
+    /// No window.
+    None,
+    /// Over the program's, in the same place.
+    Over,
+    /// Over it, in the same place, of a class with CS_SAVEBITS.
+    OverSavingBits,
+    /// Beside it, at (200, 100): they don't overlap.
+    Beside,
+    /// Under it, at (80, 80), at the bottom of the windows: the
+    /// program's covers part of it.
+    Under,
+}
+
+/// A program shows a window at (100, 100) and validates it, runs
+/// C:\CHILD.EXE to its end, and ends with 10 if its window has nothing
+/// to paint then (GetUpdateRect), 11 if it has; 3 if RegisterClass
+/// failed, 4 if CreateWindow did. The child registers "Probe", shows a
+/// window of it where `window` says and leaves it there, and ends with
+/// 5.
+fn update_after_child(test: &str, window: ChildWindow) -> (u8, String) {
+    let mut code = Code::new();
+    let mut probe = Probe::default();
+    let mut paths_at = Vec::new();
+    code.emit(&[0x8B, 0xC7]); // mov ax,di: the program's instance
+    register_probe(&mut code, &mut probe, false);
+    exit_if_zero(&mut code, 3);
+    create_probe_at(&mut code, &mut probe, true, [100, 100, 50, 50]);
+    exit_if_zero(&mut code, 4);
+    let [a, b] = HWND.to_le_bytes();
+    code.emit(&[0xA3, a, b]); // mov [HWND],ax
+    code.emit(&[0xFF, 0x36, a, b]) // push word [HWND]
+        .push(0)
+        .push(0) // the whole window
+        .call("USER", VALIDATE_RECT);
+    run_child(&mut code, &mut paths_at);
+    code.emit(&[0xFF, 0x36, a, b]) // push word [HWND]
+        .push(0)
+        .push(0) // no rectangle
+        .push(0) // no erasing
+        .call("USER", GET_UPDATE_RECT);
+    code.emit(&[0x04, 0x0A]).exit_al(); // add al,10
+    let path = code.here();
+    for at in paths_at {
+        code.patch(at, path);
+    }
+    code.emit(b"C:\\CHILD.EXE\0");
+    finish_probe(&mut code, probe);
+    let mut child = Code::new();
+    let mut probe = Probe::default();
+    child.emit(&[0x8B, 0xC7]); // mov ax,di: its instance
+    let style = if window == ChildWindow::OverSavingBits {
+        0x0800 // CS_SAVEBITS
+    } else {
+        0
+    };
+    register_probe_styled(&mut child, &mut probe, style);
+    exit_if_zero(&mut child, 6);
+    let place = match window {
+        ChildWindow::None => None,
+        ChildWindow::Over | ChildWindow::OverSavingBits => Some([100, 100, 50, 50]),
+        ChildWindow::Beside => Some([200, 100, 50, 50]),
+        ChildWindow::Under => Some([80, 80, 50, 50]),
+    };
+    if let Some(place) = place {
+        // Shown without taking the activation, which would wait for the
+        // program, busy in its loop, to answer.
+        create_probe_at(&mut child, &mut probe, false, place);
+        exit_if_zero(&mut child, 7);
+        child.emit(&[0x50]); // push ax: the window
+        if window == ChildWindow::Under {
+            child
+                .push(1) // HWND_BOTTOM
+                .push(0)
+                .push(0)
+                .push(0)
+                .push(0)
+                .push(SWP_SHOW_IN_PLACE)
+                .call("USER", SET_WINDOW_POS);
+        } else {
+            child.push(SW_SHOWNA).call("USER", SHOW_WINDOW);
+        }
+    }
+    child.emit(&[0xB0, 0x05]).exit_al();
+    finish_probe(&mut child, probe);
+    let child = program(&child, CODE);
+    run_with(test, program(&code, CODE), |_, base| {
+        fs::write(base.join("CHILD.EXE"), child).unwrap();
+    })
+}
+
+/// A program that ends without windows changes nothing on the screen,
+/// as on Windows 3.1 and 95: the other programs' windows have nothing
+/// new to paint. The emulator painted the whole screen again whenever a
+/// task ended, and a window painted then with a palette realized in the
+/// background kept those colors once its palette came to the
+/// foreground (MS Setup's background in Video for Windows' setup, after
+/// its display profiler ended).
+#[test]
+fn an_ended_program_without_windows_leaves_the_others_painted() {
+    let (exit, log) = update_after_child("ended_program_no_repaint", ChildWindow::None);
+    assert_eq!(exit, 10, "{log}");
+    assert!(log.contains("ended with exit code 5"), "{log}");
+}
+
+/// The window a program leaves when it ends goes with it, and what was
+/// under it paints again: the window under it needs painting.
+#[test]
+fn an_ended_programs_window_uncovers_the_one_under_it() {
+    let (exit, log) = update_after_child("ended_program_uncovers", ChildWindow::Over);
+    assert_eq!(exit, 11, "{log}");
+    assert!(log.contains("ended with exit code 5"), "{log}");
+}
+
+/// Only what an ended program's windows showed paints again: a window
+/// beside them has nothing to paint.
+#[test]
+fn an_ended_programs_window_leaves_one_beside_it_painted() {
+    let (exit, log) = update_after_child("ended_program_beside", ChildWindow::Beside);
+    assert_eq!(exit, 10, "{log}");
+    assert!(log.contains("ended with exit code 5"), "{log}");
+}
+
+/// A window of a CS_SAVEBITS class that an ended program leaves gives
+/// back the screen it kept as it goes, as DestroyWindow's hide does on
+/// Windows: the window under it, which changed nothing while it was
+/// covered, has nothing to paint.
+#[test]
+fn an_ended_programs_window_that_saves_bits_gives_them_back() {
+    let (exit, log) = update_after_child("ended_program_saves_bits", ChildWindow::OverSavingBits);
+    assert_eq!(exit, 10, "{log}");
+    assert!(log.contains("ended with exit code 5"), "{log}");
+}
+
+/// A window over an ended program's window covered that part of it, so
+/// nothing changes there as it goes, as when DestroyWindow hides a
+/// window on Windows: the window above has nothing to paint.
+#[test]
+fn an_ended_programs_window_leaves_the_one_over_it_painted() {
+    let (exit, log) = update_after_child("ended_program_under", ChildWindow::Under);
+    assert_eq!(exit, 10, "{log}");
+    assert!(log.contains("ended with exit code 5"), "{log}");
+}
+
+/// What a program does to its window at (80, 80), 50 by 50, which its
+/// window at (100, 100) overlaps: `update_after_change`.
+#[derive(Clone, Copy, PartialEq)]
+enum Change {
+    /// ShowWindow(SW_HIDE), with the window at (100, 100) above it.
+    Hide,
+    /// SetWindowPos moves it to (0, 0), with the window at (100, 100)
+    /// above it.
+    Move,
+    /// SetWindowPos(HWND_BOTTOM) takes it under the window at (100, 100)
+    /// from above it, in place.
+    Lower,
+    /// SetWindowPos(HWND_BOTTOM) takes its owner, at (0, 0), 30 by 30,
+    /// to the bottom, and it goes with it, under the window at
+    /// (100, 100) from above it, in place.
+    LowerOwner,
+}
+
+/// A program shows a window at (80, 80) and one at (100, 100), the
+/// second above the first, or under it for `Change::Lower` and
+/// `Change::LowerOwner`, validates the one at (100, 100), changes the
+/// one at (80, 80) as `change` says, and ends with 10 if the window at
+/// (100, 100) has nothing to paint then (GetUpdateRect), 11 if it has;
+/// 3 if RegisterClass failed, 4 if CreateWindow did.
+fn update_after_change(test: &str, change: Change) -> (u8, String) {
+    let mut code = Code::new();
+    let mut probe = Probe::default();
+    code.emit(&[0x8B, 0xC7]); // mov ax,di: the program's instance
+    register_probe(&mut code, &mut probe, false);
+    exit_if_zero(&mut code, 3);
+    let [a, b] = HWND.to_le_bytes();
+    let create_other = |code: &mut Code, probe: &mut Probe| {
+        create_probe_at(code, probe, true, [80, 80, 50, 50]);
+        exit_if_zero(code, 4);
+        code.emit(&[0x8B, 0xF0]); // mov si,ax
+    };
+    if matches!(change, Change::Hide | Change::Move) {
+        create_other(&mut code, &mut probe);
+    }
+    create_probe_at(&mut code, &mut probe, true, [100, 100, 50, 50]);
+    exit_if_zero(&mut code, 4);
+    code.emit(&[0xA3, a, b]); // mov [HWND],ax
+    match change {
+        Change::Lower => create_other(&mut code, &mut probe),
+        Change::LowerOwner => {
+            create_probe_at(&mut code, &mut probe, true, [0, 0, 30, 30]);
+            exit_if_zero(&mut code, 4);
+            code.emit(&[0x8B, 0xF0]); // mov si,ax: the owner
+            create_probe_owned(&mut code, &mut probe, true, [80, 80, 50, 50], true);
+            exit_if_zero(&mut code, 4);
+        }
+        Change::Hide | Change::Move => {}
+    }
+    code.emit(&[0xFF, 0x36, a, b]) // push word [HWND]
+        .push(0)
+        .push(0) // the whole window
+        .call("USER", VALIDATE_RECT);
+    code.emit(&[0x56]); // push si: the window at (80, 80), or its owner
+    match change {
+        Change::Hide => {
+            code.push(0).call("USER", SHOW_WINDOW); // SW_HIDE
+        }
+        Change::Move => {
+            // SWP_NOSIZE, SWP_NOZORDER and SWP_NOACTIVATE.
+            code.push(0)
+                .push(0)
+                .push(0)
+                .push(0)
+                .push(0)
+                .push(0x15)
+                .call("USER", SET_WINDOW_POS);
+        }
+        Change::Lower | Change::LowerOwner => {
+            // HWND_BOTTOM; SWP_NOSIZE, SWP_NOMOVE and SWP_NOACTIVATE.
+            code.push(1)
+                .push(0)
+                .push(0)
+                .push(0)
+                .push(0)
+                .push(0x13)
+                .call("USER", SET_WINDOW_POS);
+        }
+    }
+    code.emit(&[0xFF, 0x36, a, b]) // push word [HWND]
+        .push(0)
+        .push(0) // no rectangle
+        .push(0) // no erasing
+        .call("USER", GET_UPDATE_RECT);
+    code.emit(&[0x04, 0x0A]).exit_al(); // add al,10
+    finish_probe(&mut code, probe);
+    run(test, program(&code, CODE))
+}
+
+/// A window that hides uncovers only what showed of it: the window
+/// above it, which covered the rest, has nothing to paint, as on
+/// Windows.
+#[test]
+fn a_hidden_window_leaves_the_one_over_it_painted() {
+    let (exit, log) = update_after_change("hide_under", Change::Hide);
+    assert_eq!(exit, 10, "{log}");
+}
+
+/// The same for a window that moves away from under another.
+#[test]
+fn a_moved_window_leaves_the_one_over_it_painted() {
+    let (exit, log) = update_after_change("move_under", Change::Move);
+    assert_eq!(exit, 10, "{log}");
+}
+
+/// A window that goes down under another in place uncovers it where it
+/// showed over it: that one has that part to paint.
+#[test]
+fn a_lowered_window_uncovers_the_one_it_went_under() {
+    let (exit, log) = update_after_change("lower_over", Change::Lower);
+    assert_eq!(exit, 11, "{log}");
+}
+
+/// The same for a window that goes down with its owner: HWND_BOTTOM
+/// takes the windows a window owns down with it, just above it, and
+/// those that come above them show where they showed.
+#[test]
+fn a_window_lowered_with_its_owner_uncovers_the_one_it_went_under() {
+    let (exit, log) = update_after_change("lower_owned_over", Change::LowerOwner);
+    assert_eq!(exit, 11, "{log}");
 }
 
 /// Where the class test keeps the library's instance and its WNDCLASS.
