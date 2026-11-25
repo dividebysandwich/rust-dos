@@ -861,10 +861,14 @@ pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         owner,
         // Its rectangles are empty until the CBT hook has seen the
         // CREATESTRUCT, which may change the place and size. Wine's
-        // create_window does the same; win.c's check of both rectangles
-        // at HCBT_CREATEWND is there but turned off. A hook that changes
-        // the frame then finds a client area of 0 by 0, so the window
-        // gets no WM_SIZE before WM_CREATE (Encarta 97's timeline, #2006).
+        // NtUserCreateWindowEx does the same; win.c's check of both
+        // rectangles at HCBT_CREATEWND is there but turned off. A hook
+        // that changes the frame then finds a client area of 0 by 0, so
+        // the window gets no WM_SIZE before WM_CREATE (Encarta 97's
+        // timeline, #2006). Its normal place is the one asked for, as
+        // Wine sets it before the hook: GetWindowPlacement returns it for
+        // a window made minimized or maximized.
+        normal: Rect::sized(x, y, cx, cy),
         id: menu_handle,
         instance,
         proc: class_info.proc,
