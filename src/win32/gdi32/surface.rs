@@ -123,9 +123,14 @@ pub fn default_masks(bpp: u32) -> [u32; 3] {
 }
 
 /// The masks of a bitmap of GDI's of a depth: the display's format for
-/// its own depth (5-6-5 on a 16-bit desktop), else the depth's default.
+/// its own depth (5-6-5 on a 16-bit desktop or in a 16-bit mode
+/// DirectDraw set), else the depth's default.
 pub fn ddb_masks(cpu: &Cpu, bpp: u32) -> [u32; 3] {
-    if bpp == 16 && crate::win32::screen::desktop(cpu).bpp == 16 {
+    let display = [
+        super::dc::device_depth(cpu),
+        crate::win32::screen::desktop(cpu).bpp,
+    ];
+    if bpp == 16 && display.contains(&16) {
         [0xF800, 0x07E0, 0x001F]
     } else {
         default_masks(bpp)

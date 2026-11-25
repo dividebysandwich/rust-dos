@@ -593,9 +593,17 @@ const COLORRES: u32 = 108;
 const RC_PALETTE: u32 = 0x0100;
 
 /// The depth of the display's bitmaps (compatible bitmaps, and those a
-/// display DC's memory DCs take): the desktop's.
+/// display DC's memory DCs take): that of the mode GDI draws on, the
+/// desktop's or the one DirectDraw set, as GetDeviceCaps reports it. On
+/// Windows 98 a mode DirectDraw sets is the display's for GDI too: the
+/// DirectShow base classes' CImageDisplay reads the display's format
+/// from a compatible bitmap's GetDIBits, and a video renderer then
+/// takes only pictures no deeper than the display. Omikron's renderer
+/// copies 16-bit pictures into its 16-bit mode; told the display had
+/// the 32-bit desktop's depth, it took RGB24 from the MPEG decoder and
+/// showed its bytes as 16-bit pixels.
 pub fn device_depth(cpu: &Cpu) -> u32 {
-    crate::win32::screen::desktop(cpu).bpp
+    super::surface::screen_mode(cpu).bpp
 }
 
 /// The display's capability `index`, the depth that of the pixels GDI
@@ -943,9 +951,12 @@ pub fn select_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 return Some(0);
             }
             // A bitmap of GDI's must be monochrome or the display's
-            // depth; a DIB section may be any.
+            // depth; a DIB section may be any. One made for the desktop
+            // before DirectDraw set another mode stays usable in it:
+            // programs load their bitmaps before they set their mode.
             let depth = bitmap.bpp as u32 * bitmap.planes as u32;
-            if bitmap.dib.is_none() && depth != 1 && depth != device_depth(cpu) {
+            let display = [device_depth(cpu), crate::win32::screen::desktop(cpu).bpp];
+            if bitmap.dib.is_none() && depth != 1 && !display.contains(&depth) {
                 return Some(0);
             }
             let old = dc.attrs.bitmap;

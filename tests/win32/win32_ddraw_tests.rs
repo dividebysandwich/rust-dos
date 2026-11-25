@@ -3950,3 +3950,119 @@ fn is_lost_forgets_a_released_surface() {
         [0, 0, SURFACE_LOST, 0, INVALID_OBJECT]
     );
 }
+
+// GDI's display bitmaps in a mode DirectDraw set.
+
+const BITMAP_GDI32: (&str, &[&str]) = (
+    "GDI32.DLL",
+    &[
+        "CreateDCA",
+        "CreateCompatibleBitmap",
+        "GetDIBits",
+        "CreateCompatibleDC",
+        "SelectObject",
+    ],
+);
+const B_CREATE_WINDOW: usize = 0;
+const B_DIRECT_DRAW_CREATE: usize = 1;
+const B_CREATE_DC: usize = 2;
+const B_CREATE_COMPATIBLE_BITMAP: usize = 3;
+const B_GET_DI_BITS: usize = 4;
+const B_CREATE_COMPATIBLE_DC: usize = 5;
+const B_SELECT_OBJECT: usize = 6;
+
+// The bitmap program's data, after the screen programs'.
+const B_DISPLAY: u32 = 0xA40;
+const B_DESKTOP_BITMAP: u32 = 0xA48;
+const B_HDC: u32 = 0xA4C;
+const B_BITMAP: u32 = 0xA50;
+const B_MEMORY_DC: u32 = 0xA54;
+/// The BITMAPINFOHEADER GetDIBits fills, and the masks after it.
+const B_INFO: u32 = 0xA60;
+const B_DATA_SIZE: usize = 0xAC0;
+
+/// On the 32-bit desktop, a bitmap compatible with the display. Then
+/// full screen at 640x480x16: another such bitmap, whose format
+/// GetDIBits gives as the DirectShow base classes' CImageDisplay asks
+/// for it (twice, the second time for the masks), and both bitmaps
+/// selected into a memory DC.
+fn display_bitmap_program() -> (Vec<u8>, u32) {
+    let mut d = screen_data();
+    d.resize(B_DATA_SIZE, 0);
+    put(&mut d, B_DISPLAY, b"DISPLAY\0");
+    put32(&mut d, B_INFO, 40);
+    let dlls = [
+        ("USER32.DLL", &["CreateWindowExA"][..]),
+        ("DDRAW.DLL", &["DirectDrawCreate"][..]),
+        BITMAP_GDI32,
+    ];
+    program(&dlls, &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let window = [
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(640),
+            Arg::I(480),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(BASE),
+            Arg::I(0),
+        ];
+        c.api(a, l, B_CREATE_WINDOW, &window)?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        let display = [Arg::At(B_DISPLAY), Arg::I(0), Arg::I(0), Arg::I(0)];
+        c.api(a, l, B_CREATE_DC, &display)?;
+        a.mov(dword_ptr(l.at(B_HDC)), eax)?;
+        let bitmap = [Arg::Val(B_HDC), Arg::I(1), Arg::I(1)];
+        c.api(a, l, B_CREATE_COMPATIBLE_BITMAP, &bitmap)?;
+        a.mov(dword_ptr(l.at(B_DESKTOP_BITMAP)), eax)?;
+        let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+        c.api(a, l, B_DIRECT_DRAW_CREATE, &create)?;
+        let level = Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), level])?;
+        let mode = [Arg::I(640), Arg::I(480), Arg::I(16)];
+        c.com(a, l, DD, DD_SET_DISPLAY_MODE, &mode)?;
+        c.api(a, l, B_CREATE_DC, &display)?;
+        a.mov(dword_ptr(l.at(B_HDC)), eax)?;
+        c.api(a, l, B_CREATE_COMPATIBLE_BITMAP, &bitmap)?;
+        a.mov(dword_ptr(l.at(B_BITMAP)), eax)?;
+        let query = [
+            Arg::Val(B_HDC),
+            Arg::Val(B_BITMAP),
+            Arg::I(0),
+            Arg::I(1),
+            Arg::I(0),
+            Arg::At(B_INFO),
+            Arg::I(0),
+        ];
+        c.api(a, l, B_GET_DI_BITS, &query)?;
+        c.api(a, l, B_GET_DI_BITS, &query)?;
+        c.api(a, l, B_CREATE_COMPATIBLE_DC, &[Arg::Val(B_HDC)])?;
+        a.mov(dword_ptr(l.at(B_MEMORY_DC)), eax)?;
+        let select = [Arg::Val(B_MEMORY_DC), Arg::Val(B_BITMAP)];
+        c.api(a, l, B_SELECT_OBJECT, &select)?;
+        let select = [Arg::Val(B_MEMORY_DC), Arg::Val(B_DESKTOP_BITMAP)];
+        c.api(a, l, B_SELECT_OBJECT, &select)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn display_bitmaps_take_the_mode_directdraw_set() {
+    let (program, data) = display_bitmap_program();
+    let mut cpu = machine("display_bitmap", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 13);
+    assert_eq!(r[4..6], [0, 0], "SetCooperativeLevel, SetDisplayMode");
+    assert_eq!(r[8..10], [1, 1], "GetDIBits");
+    let info: Vec<u32> = (0..13).map(|i| peek(&cpu, data + B_INFO + 4 * i)).collect();
+    assert_eq!(info[3] >> 16, 16, "biBitCount: the mode's depth");
+    assert_eq!(info[4], 3, "BI_BITFIELDS");
+    assert_eq!(info[10..13], [0xF800, 0x07E0, 0x001F], "5-6-5, as the mode is");
+    assert_ne!(r[11], 0, "the mode's bitmap goes into a memory DC");
+    assert_ne!(r[12], 0, "and so does the one made on the desktop");
+}
