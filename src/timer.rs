@@ -52,6 +52,16 @@ pub(crate) const LOAD_SETTLE: Duration = Duration::from_secs(2);
 /// clock's: a state loaded from the settings window or by the debugger
 /// while paused settles once the machine runs.
 pub(crate) const LOAD_SETTLE_HOST: Duration = Duration::from_secs(5);
+/// Frames in a row on time, after a load, that end the settling sooner
+/// than `LOAD_SETTLE`: half a second at 60 Hz. A frame is on time when its
+/// batch started less than one and a half of its periods behind the wall
+/// clock, as each batch of a host that keeps up starts one period behind.
+/// Myth III's frames after a load of the Defense of Yursgrad were back at
+/// 17 ms within a second, and with the full two seconds the search climbed
+/// a second later than main's and took its second step up into a hitch of
+/// the game's own, which the frame watch then held it under (a speed of
+/// 446,852 against main's 586,534, for 40 s).
+pub(crate) const LOAD_CALM_FRAMES: u32 = 30;
 /// A backlog of this much is one gap: running frames, it is dropped at
 /// `MAX_LAG`. The frontend stopped (a page in the background, a window
 /// being dragged, the host asleep), which says nothing of whether the host
@@ -848,6 +858,10 @@ pub struct Pacer {
     /// (`LOAD_SETTLE_HOST`).
     settle_until_ns: u64,
     settle_host_left: Duration,
+    /// Frames on time in a row while a load settles (`LOAD_CALM_FRAMES`),
+    /// and how far behind the wall clock the last batch started.
+    settle_calm: u32,
+    batch_behind: Duration,
 }
 
 impl Pacer {
@@ -879,6 +893,8 @@ impl Pacer {
             real_most_hinted: false,
             settle_until_ns: 0,
             settle_host_left: Duration::ZERO,
+            settle_calm: 0,
+            batch_behind: Duration::ZERO,
         }
     }
 
@@ -900,8 +916,9 @@ impl Pacer {
     /// would stand still until the wall clock caught up, and time behind it
     /// would race to catch up. `Auto` starts over, and the bus forgets the
     /// speed it had to go back to (`Bus::end_work_boost`). For
-    /// `LOAD_SETTLE` of emulated time after, and no longer than
-    /// `LOAD_SETTLE_HOST` of the host's time on frames, `Auto` neither
+    /// `LOAD_SETTLE` of emulated time after, no longer than
+    /// `LOAD_SETTLE_HOST` of the host's time on frames, and only until
+    /// `LOAD_CALM_FRAMES` frames in a row are on time, `Auto` neither
     /// measures nor samples the host: the frames are the load's. The
     /// counts the next frame's work is taken from start at the loaded
     /// clock's, as the state's counts since its machine started are no
@@ -910,6 +927,7 @@ impl Pacer {
         self.rebase_unsettled(bus, now);
         self.settle_until_ns = bus.clock.now_ns() + LOAD_SETTLE.as_nanos() as u64;
         self.settle_host_left = LOAD_SETTLE_HOST;
+        self.settle_calm = 0;
     }
 
     /// `rebase`, with `Auto` measuring and sampling the host again from
@@ -1095,6 +1113,7 @@ impl Pacer {
         }
         let wall =
             self.anchor_ticks + duration_to_ticks(now.saturating_duration_since(self.anchor_wall));
+        self.batch_behind = ticks_to_duration(wall.saturating_sub(emulated));
         let target = if wall > emulated + duration_to_ticks(MAX_LAG) {
             self.anchor_wall = now;
             self.anchor_ticks = emulated + duration_to_ticks(FRAME);
@@ -1125,6 +1144,7 @@ impl Pacer {
         let emulated = clock.now_ticks();
         let mut wall =
             self.anchor_ticks + duration_to_ticks(now.saturating_duration_since(self.anchor_wall));
+        self.batch_behind = ticks_to_duration(wall.saturating_sub(emulated));
         if wall > emulated + duration_to_ticks(MAX_LAG) {
             self.lose(wall - emulated);
             self.anchor_wall = now;
@@ -1203,10 +1223,15 @@ impl Pacer {
         };
         // At auto, a frame of a stall stays out of the samples
         // (`HostEstimate::outlier`), and so do the frames of a state's load
-        // (`LOAD_SETTLE`, `LOAD_SETTLE_HOST`).
+        // (`LOAD_SETTLE`, `LOAD_SETTLE_HOST`, `LOAD_CALM_FRAMES`).
         let auto = matches!(self.speed, CpuSpeed::Auto(_));
-        if self.ran {
+        if self.ran && ns < self.settle_until_ns {
             self.settle_host_left = self.settle_host_left.saturating_sub(exec + overhead);
+            let on_time = self.batch_behind < self.period + self.period / 2;
+            self.settle_calm = if on_time { self.settle_calm + 1 } else { 0 };
+            if self.settle_calm >= LOAD_CALM_FRAMES {
+                self.settle_until_ns = 0;
+            }
         }
         let settling = auto && ns < self.settle_until_ns && !self.settle_host_left.is_zero();
         let frame_ideal = (executed >= SAMPLE_INSTRUCTIONS && !settling).then(|| {
@@ -2973,6 +2998,18 @@ mod tests {
         let (before, after) = after_a_paused_load(4.0, 1000, 10_000);
         let least = *after.iter().min().unwrap();
         assert!(least as f64 >= before as f64 * 0.9, "{before}: {after:?}");
+    }
+
+    /// A load whose frames are back on time at once, after its first: the
+    /// settling ends after `LOAD_CALM_FRAMES` of them, and the search
+    /// measures again well before `LOAD_SETTLE` is over.
+    #[test]
+    fn a_load_whose_frames_are_on_time_settles_early() {
+        let (_, after) = after_a_load(1.0, 0);
+        let reset = after[1];
+        let first = after.iter().position(|&s| s != reset).unwrap();
+        let at = FRAME * first as u32;
+        assert!(at < LOAD_SETTLE, "{at:?}: {after:?}");
     }
 
     /// The host slower for longer than the load settles: that is the host,
