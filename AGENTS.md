@@ -122,6 +122,11 @@ that it improves on main. Steps, in this order:
    of its own unless the user asks for that issue. Once a program shows
    it, the issue names that program and its label is raised to the
    priority the program's problem calls for.
+
+   This rule decides which issues are taken up. A pull request already
+   open, whatever started it, is marked ready on the evidence step 4
+   asks for, and a test of the real system's behaviour is such
+   evidence.
 3. Validate it, after the review and with its fixes: run the real game
    or program the change is for, where there is one, on the build of the
    branch, and compare with main.
