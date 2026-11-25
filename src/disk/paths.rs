@@ -197,16 +197,29 @@ impl DiskController {
     }
 
     /// The names of the entries of the directory `dos_dir`, as (long
-    /// name, DOS name), on a host drive and on a drive held in memory: the
-    /// host's names are the long names Windows has, and so are a CD's
-    /// Joliet names. None on disk images, where names are 8.3 alone, and
-    /// for a directory that isn't there. A host folder's are its kept
-    /// entries (`HostDirCache`), shared rather than copied: FindFirstFileA
-    /// asks for them on each call.
+    /// name, DOS name): the host's names are the long names Windows has,
+    /// and so are a CD's Joliet names; a disk image's are the long names
+    /// its long name entries hold, or the DOS name of an entry without
+    /// them. `dos_dir` may have long names, as a Win32 call gives them.
+    /// None for a directory that isn't there. A host folder's are its
+    /// kept entries (`HostDirCache`), shared rather than copied:
+    /// FindFirstFileA asks for them on each call.
     pub fn long_names(&self, dos_dir: &str) -> Option<Rc<[(String, String)]>> {
         let normalized = dos_dir.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized)?;
         let drive = self.drive(drive_num)?;
+        if let Some(volume) = drive.fat() {
+            let dir = volume
+                .dos_path(&Self::logical_components(drive, rest))
+                .ok()?;
+            let entries = volume.list(&refs(&dir)).ok()?;
+            return Some(
+                entries
+                    .into_iter()
+                    .map(|e| (e.long_name.unwrap_or_else(|| e.name.clone()), e.name))
+                    .collect(),
+            );
+        }
         if let Some(files) = drive.tree() {
             let dir = Self::memory_path(drive, rest);
             return files.is_dir(&dir).then(|| files.long_names(&dir).into());
@@ -288,10 +301,39 @@ impl DiskController {
     }
 
     /// The file or directory a DOS path names on a drive mounted from a
-    /// disk image: None if the path is on another drive.
+    /// disk image (`fat_find`): None if the path is on another drive.
     pub(super) fn find_fat(&self, dos_path: &str) -> Option<Result<fat::Entry, u8>> {
         let (_, volume, parts) = self.locate_fat(dos_path)?;
-        Some(volume.find(&refs(&parts)))
+        Some(self.fat_find(&volume, &parts))
+    }
+
+    /// The file or directory `parts` names on `volume`, for the call
+    /// running now: a long-name call finds entries by their long names or
+    /// their whole DOS names (`FatVolume::find_long`), DOS's calls by the
+    /// 8.3 names they cut names to (`FatVolume::find`).
+    pub(super) fn fat_find(&self, volume: &FatVolume, parts: &[String]) -> Result<fat::Entry, u8> {
+        if self.long_call {
+            volume.find_long(&refs(parts))
+        } else {
+            volume.find(&refs(parts))
+        }
+    }
+
+    /// The path `parts` names on `volume` in DOS names, as the volume's
+    /// DOS functions take it, for the call running now: a long-name
+    /// call's components are found as `fat_find` finds them, and must be
+    /// there (02h, or 03h for a directory on the way); DOS's calls name
+    /// entries by their DOS names already.
+    pub(super) fn fat_dos_path(
+        &self,
+        volume: &FatVolume,
+        parts: &[String],
+    ) -> Result<Vec<String>, u8> {
+        if self.long_call {
+            volume.dos_path(&refs(parts))
+        } else {
+            Ok(parts.to_vec())
+        }
     }
 
     /// A file on a drive held in memory.
@@ -349,7 +391,10 @@ impl DiskController {
             return Some(FileData::Memory(data));
         }
         if let Some((_, volume, parts)) = self.locate_fat(dos_path) {
-            let entry = volume.find(&refs(&parts)).ok().filter(|e| !e.is_dir())?;
+            let entry = self
+                .fat_find(&volume, &parts)
+                .ok()
+                .filter(|e| !e.is_dir())?;
             return Some(FileData::Fat(volume, entry));
         }
         match self.locate_in_memory(dos_path) {
@@ -462,11 +507,18 @@ impl DiskController {
             return false;
         };
         if let Some(volume) = drive.fat() {
-            let parts = Self::logical_components(drive, rest);
-            if !volume.find(&parts).is_ok_and(|e| e.is_dir()) {
+            let parts: Vec<String> = Self::logical_components(drive, rest)
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            if !self.fat_find(volume, &parts).is_ok_and(|e| e.is_dir()) {
                 return false;
             }
-            let dir = canonical_path(&parts);
+            // DOS keeps the directory in DOS names.
+            let Ok(parts) = self.fat_dos_path(volume, &parts) else {
+                return false;
+            };
+            let dir = canonical_path(&refs(&parts));
             if let Some(d) = self.drives[drive_num as usize].as_mut() {
                 d.current_dir = dir;
             }

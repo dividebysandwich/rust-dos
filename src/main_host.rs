@@ -561,6 +561,7 @@ impl Host for MainHost<'_, '_> {
         self.cpu.bus.win32.depth = new.win32_depth;
         self.cpu.bus.win32.desktop = new.win32_desktop;
         self.cpu.bus.win32.locale = new.win32_locale;
+        self.cpu.bus.win32.shims = new.win32_shims;
         if new.win32_trace != old.win32_trace {
             rust_dos::win32::trace::set_level(self.cpu, new.win32_trace);
         }

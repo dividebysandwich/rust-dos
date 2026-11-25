@@ -642,13 +642,19 @@ pub const FIXES: &[Fix] = &[
     // GlobalLock (LUNICUS.EXE 414A39 and 414A85, JDEMO.EXE 4066D6 and
     // 40672B) stop the program when GlobalFlags says a block is locked,
     // which Win32s never did, and Windows 98 does after every lock:
-    // Windows 98 lists the game as incompatible. The CD's demo player,
+    // Windows 98 lists the game as incompatible. Its LUNIFX.DLL blits
+    // each frame in bands that start where UTLinearToSelectorOffset's
+    // pointers say, and sizes them for Win32s's tiled selectors of the
+    // frame's region (`Shim::UtRegionSelectors`): with Windows 98's 32 KB
+    // blocks the 3D view's last rows are noise. The CD's demo player,
     // PREVIEWS\JDEMO.EXE, plays the demos of Cyberflix's games with the
     // same engine.
     Fix {
         name: "lunicus-win32s",
         game: "Lunicus",
-        reason: "it stops with \"bad lock use count\" unless GlobalFlags is Win32s's",
+        reason: "it stops with \"bad lock use count\" unless GlobalFlags is Win32s's, and \
+                 draws its frames with a bitmap it finds in Windows 3.1's GDI heap, in bands \
+                 sized for Win32s's UTLinearToSelectorOffset",
         kind: Kind::Win32Shims {
             program: "LUNICUS.EXE",
             size: 206_336,
