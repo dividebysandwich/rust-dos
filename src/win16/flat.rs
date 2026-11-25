@@ -430,6 +430,37 @@ pub(super) fn map_ls_from(cpu: &mut Cpu, pid: u32, ptr: u32) -> u32 {
     (sel as u32) << 16
 }
 
+/// Tiled selectors, as Windows gives a huge block, for the `len` bytes at
+/// `start` of the process `pid`: the first of `ldt::tiles(len)`
+/// selectors `AHINCR` apart, each for the rest of the bytes from its
+/// 64 KB, or None when the LDT has no run of them free. One alias maps
+/// them all and has the first selector; the others are the caller's to
+/// free (`free_tiles`) when the alias goes.
+pub(super) fn map_tiles_from(cpu: &mut Cpu, pid: u32, start: u32, len: u32) -> Option<u16> {
+    let win16 = ensure_win16(cpu)?;
+    let sel = cpu.bus.win32.win16.ldt.alloc(ldt::tiles(len))?;
+    let base = if pid == win16 {
+        Some(start)
+    } else {
+        alias(cpu, pid, start, len, win16, sel)
+    };
+    let Some(base) = base else {
+        cpu.bus.win32.win16.ldt.free(sel, ldt::tiles(len));
+        return None;
+    };
+    let system = super::win16(cpu).system;
+    ldt::set_block(cpu, system, sel, base, len, ldt::ACCESS_DATA, false);
+    Some(sel)
+}
+
+/// Free the selectors after the first of the tiles `map_tiles_from`
+/// made from `sel` for `len` bytes; the first goes with its alias.
+pub(super) fn free_tiles(cpu: &mut Cpu, sel: u16, len: u32) {
+    for i in 1..ldt::tiles(len) {
+        free_selector(cpu, sel + i * ldt::AHINCR);
+    }
+}
+
 /// UnMapLS: the selector of a 16:16 pointer MapLS made is free again.
 pub fn unmap_ls(cpu: &mut Cpu, segptr: u32) {
     let sel = (segptr >> 16) as u16;
@@ -1171,7 +1202,7 @@ pub(super) fn client_of(cpu: &Cpu, tid: u32) -> Option<usize> {
 /// Win32 process a client task runs a call for, as Windows 95 runs a
 /// thunk's 16-bit code in the calling process's context, or else the
 /// Win16 process's own.
-pub(super) fn served_pid(cpu: &Cpu) -> u32 {
+pub(crate) fn served_pid(cpu: &Cpu) -> u32 {
     let tid = crate::win32::running(cpu)
         .and_then(|p| p.current_thread())
         .map_or(0, |t| t.id);

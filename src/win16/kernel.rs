@@ -136,7 +136,7 @@ static APIS: &[Api16] = &[
     value("__AHSHIFT", 113, |_| ldt::AHSHIFT),
     value("__AHINCR", 114, |_| ldt::AHINCR),
     rust("OutputDebugString", 115, "p", output_debug_string),
-    rust("OldYield", 117, "", yield16),
+    rust("OldYield", 117, "", old_yield),
     rust("GetTaskQueueDS", 118, "", zero),
     rust("GetTaskQueueES", 119, "", zero),
     rust("UndefDynLink", 120, "", zero),
@@ -789,9 +789,74 @@ fn hmemcpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // Tasks.
 
+/// Yield: USER's UserYield handles the messages other tasks sent to
+/// this one, gives up the turn, and handles those sent meanwhile when
+/// the turn comes back (Wine's Yield16 calls UserYield16 for a task with
+/// a queue). Windows 95 does the same: a message sent before the Yield,
+/// or while the task waits in it, is handled before Yield returns
+/// (#1913's measurements in 86Box). A task that polls with Yield would
+/// otherwise hold up a task that sends to its windows for good.
+///
+/// With messages waiting, the task gives up its turn twice: the reply in
+/// UserYield16 hands it to the sender, and then the yield itself. That is
+/// deliberate: in #1913's QPEND run on Windows 95, B's message waiting at
+/// A's Yield is handled, B runs to its end, and C, which A posted to
+/// before the Yield, runs to its end too before A's Yield returns.
 fn yield16(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let ctx = Context::of(cpu);
+    if crate::win32::user32::message::has_sent(cpu) {
+        let target = super::message::user32(cpu, "UserYield16");
+        thunk::enter32(cpu, ctx, target, &[], thunk::POST_YIELD, vec![0]);
+    } else if !yield_and_receive(cpu, ctx) {
+        // No other task ran and nothing was sent: as with PeekMessage's
+        // yield that finds no message (user.rs), the call changed
+        // nothing but the start of the turn, and an idle proof follows
+        // it, so a lone Yield loop is skipped as idle.
+        crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
+        crate::idle::turn_started(cpu);
+    }
+    None
+}
+
+/// The task gives up its turn, and when the turn comes back it handles
+/// the messages sent to it meanwhile (UserYield16) before `ctx` goes on.
+/// False when the same task goes on at once with nothing sent to it: it
+/// goes on at `ctx` straight away, without the call of UserYield16.
+fn yield_and_receive(cpu: &mut Cpu, ctx: Context) -> bool {
+    let me = running_thread(cpu);
+    let target = super::message::user32(cpu, "UserYield16");
+    thunk::enter32(cpu, ctx, target, &[], thunk::POST_YIELD, vec![1]);
+    task::give_up_turn(cpu);
+    if running_thread(cpu) != me || crate::win32::user32::message::has_sent(cpu) {
+        return true;
+    }
+    thunk::drop32(cpu);
+    crate::win32::system::load_context(cpu, &ctx);
+    false
+}
+
+/// The thread that runs, if any.
+fn running_thread(cpu: &mut Cpu) -> Option<u32> {
+    crate::win32::process(cpu).current_thread().map(|t| t.id)
+}
+
+/// OldYield: the task gives its turn up, and nothing else.
+fn old_yield(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let ctx = Context::of(cpu);
     task::yield_now(cpu, ctx);
+    None
+}
+
+/// UserYield16 returned to Yield: before the yield (`data` 0), the task
+/// gives up its turn; after it, the task goes on, its registers as they
+/// were.
+pub(super) fn post_yield(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
+    if data.first() == Some(&0) {
+        yield_and_receive(cpu, *ctx);
+    } else {
+        crate::win32::system::load_context(cpu, ctx);
+    }
     None
 }
 
