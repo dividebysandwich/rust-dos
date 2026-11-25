@@ -893,9 +893,12 @@ fn global_entry_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 fn system_heap_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // SYSHEAPINFO: dwSize, wUserFreePercent, wGDIFreePercent,
-    // hUserSegment, hGDISegment.
+    // hUserSegment, hGDISegment. GDI's segment is there only for a
+    // program with Windows 3.1's GDI heap (`Shim::Win31GdiHeap`, which
+    // shims/win31/gdi_heap.rs keeps).
     let at = args[0];
-    for (i, v) in [80u16, 80, 0, 0].into_iter().enumerate() {
+    let gdi = crate::win32::shims::win31::gdi_heap::system_heap_info(cpu);
+    for (i, v) in [80u16, 80, 0, gdi].into_iter().enumerate() {
         super::write_16(cpu, at + 4 + 2 * i as u32, v);
     }
     Some(1)
