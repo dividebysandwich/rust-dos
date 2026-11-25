@@ -877,6 +877,45 @@ fn a_windows_3_1_peek_message_loop_is_skipped() {
 }
 
 #[test]
+fn a_windows_3_1_yield_loop_is_skipped() {
+    // GetCurrentTime and Yield until 300 ms passed, then the exit code 1.
+    // With no other task and nothing sent to it, Yield gives the turn
+    // back at once and changes nothing but when the turn started, as a
+    // PeekMessage that finds nothing does: its passes are skipped too.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("USER", 15).emit(&[0x8B, 0xF0]); // GetCurrentTime; mov si,ax
+    let top = code.here();
+    code.call("KERNEL", 29) // Yield
+        .call("USER", 15)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_yield";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}
+  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+#[test]
 fn a_windows_3_1_timegettime_loop_is_skipped() {
     // A loop that waits 300 ms with timeGetTime, which reads the same
     // clock as GetTickCount and changes nothing else: its passes are

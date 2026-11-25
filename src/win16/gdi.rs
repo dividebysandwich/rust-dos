@@ -9,6 +9,7 @@ use super::thunk::{self, KIND_FONTENUM, KIND_PLAIN};
 use super::user::{P_GDI, P_POINTS, P_WORDS};
 use crate::cpu::Cpu;
 use crate::dpmi::Context;
+use crate::win32::shims::win31::gdi_heap;
 
 pub static MODULE: Def = Def {
     name: "GDI",
@@ -68,8 +69,8 @@ static APIS: &[Api16] = &[
     win32("SetPixel", 31, "wssl", G, "SetPixel", b'w'),
     win32("OffsetClipRgn", 32, "wss", G, "OffsetClipRgn", b'w'),
     win32("TextOut", 33, "wsspw", G, "TextOutA", b'b'),
-    win32("BitBlt", 34, "wsssswssl", G, "BitBlt", b'b'),
-    win32("StretchBlt", 35, "wsssswssssl", G, "StretchBlt", b'b'),
+    rust("BitBlt", 34, "wsssswssl", bit_blt),
+    rust("StretchBlt", 35, "wsssswssssl", stretch_blt),
     rust("Polygon", 36, "wpw", polygon),
     rust("Polyline", 37, "wpw", polyline),
     rust("Escape", 38, "wwwpp", escape),
@@ -220,7 +221,7 @@ static APIS: &[Api16] = &[
     rust("GetCharWidth", 350, "wwwp", get_char_width),
     rust("ExtTextOut", 351, "wsswpSwp", ext_text_out),
     win32("CreatePalette", 360, "p", G, "CreatePalette", b'w'),
-    win32("GDISelectPalette", 361, "www", G, "SelectPalette", b'w'),
+    rust("GDISelectPalette", 361, "www", gdi_select_palette),
     win32("GDIRealizePalette", 362, "w", G, "RealizePalette", b'w'),
     win32(
         "GetPaletteEntries",
@@ -447,6 +448,7 @@ fn go(cpu: &mut Cpu, name: &str, args: &[u32]) -> Option<u32> {
 const P_POINT_DWORD: u32 = P_GDI;
 const P_OBJECT: u32 = P_GDI + 1;
 const P_TEXTMETRIC: u32 = P_GDI + 2;
+const P_BOOL: u32 = P_GDI + 3;
 
 /// A GDI32 function returned `value`: what 16-bit code gets.
 pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
@@ -469,6 +471,7 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
             }
             Some((value != 0) as u32)
         }
+        P_BOOL => Some((value != 0) as u32),
         _ => Some(value),
     }
 }
@@ -699,6 +702,27 @@ fn create_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         "CreateBitmap",
         &[args[0], args[1], planes, bpp, args[4]],
     )
+}
+
+/// BitBlt and StretchBlt from a bitmap whose device BITMAP a program
+/// with Windows 3.1's GDI heap changed draw from what it says
+/// (`Shim::Win31GdiHeap`).
+fn bit_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (src, y, h) = (args[5], args[7] as i32, args[4] as i32);
+    gdi_heap::before_blit(cpu, src, y, y.saturating_add(h));
+    go_blit(cpu, "BitBlt", args)
+}
+
+fn stretch_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (src, y, h) = (args[5], args[7] as i32, args[9] as i32);
+    gdi_heap::before_blit(cpu, src, y, y.saturating_add(h));
+    go_blit(cpu, "StretchBlt", args)
+}
+
+/// Go on to a blit of GDI32's, which 16-bit code gets TRUE or FALSE of.
+fn go_blit(cpu: &mut Cpu, name: &str, args: &[u32]) -> Option<u32> {
+    let top = thunk::scratch32(cpu, 0);
+    go_at(cpu, top, name, args, vec![P_BOOL])
 }
 
 fn create_bitmap_indirect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -936,6 +960,14 @@ fn get_cur_log_font(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn is_dc_current_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let current = crate::win32::gdi32::palette::is_dc_current_palette(cpu, args[0]);
     Some(current as u32)
+}
+
+/// GDISelectPalette(hdc, hpal, wBkg), which USER's SelectPalette calls:
+/// with wBkg FALSE the palette becomes the foreground one, whatever the
+/// display and the DC's window (`palette::gdi_select_palette`).
+fn gdi_select_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let background = args[2] & 0xFFFF != 0;
+    crate::win32::gdi32::palette::gdi_select_palette(cpu, args[0], args[1], background)
 }
 
 /// CreateDIBPatternBrush(global block, usage): the packed DIB in the
