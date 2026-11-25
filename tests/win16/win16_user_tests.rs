@@ -835,3 +835,74 @@ fn exit_windows_ends_the_program() {
     let (exit, log) = run("exit_windows", program(&code, CODE));
     assert_eq!(exit, 0, "{log}");
 }
+
+#[test]
+fn a_multi_line_edit_keeps_what_was_drawn_on_it_below_its_lines() {
+    // A multi-line edit control erases its background in WM_ERASEBKGND,
+    // and its WM_PAINT draws only its lines: each one's band, out to the
+    // right edge, in the background color, an empty first line too.
+    // Windows 98's USER.EXE does that, and a program that draws on the
+    // control between the erase and the WM_PAINT keeps what it drew below
+    // the lines, as Memphis Math does with an objective's sample. Here
+    // RedrawWindow erases the empty control and leaves WM_PAINT to come,
+    // the program blackens it through GetDC, and UpdateWindow paints it.
+    // Exit code 1, or which check failed.
+    const GET_DC: u16 = 66;
+    const RELEASE_DC: u16 = 68;
+    const UPDATE_WINDOW: u16 = 124;
+    const REDRAW_WINDOW: u16 = 290;
+    const PAT_BLT: u16 = 29;
+    const GET_PIXEL: u16 = 83;
+    const ES_MULTILINE: u32 = 0x0004;
+    const RDW_INVALIDATE_ERASE_ERASENOW: u16 = 0x0205;
+    const BLACKNESS: u16 = 0x0042;
+    let mut p = Program::default();
+    p.create_window(b"EDIT\0", POPUP | ES_MULTILINE, [0, 0, 200, 100], false, 0);
+    p.code.emit(&[0x8B, 0xF0]); // mov si,ax
+    p.code.emit(&[0x56]).call("USER", UPDATE_WINDOW); // push si
+    p.code
+        .emit(&[0x56])
+        .push(0) // no rectangle
+        .push(0)
+        .push(0) // no region
+        .push(RDW_INVALIDATE_ERASE_ERASENOW)
+        .call("USER", REDRAW_WINDOW);
+    p.code.emit(&[0x56]).call("USER", GET_DC);
+    p.code
+        .emit(&[0x8B, 0xF8]) // mov di,ax
+        .emit(&[0x57]) // push di
+        .push(0)
+        .push(0)
+        .push(200)
+        .push(100)
+        .push(0) // the raster operation's high word
+        .push(BLACKNESS)
+        .call("GDI", PAT_BLT);
+    p.code
+        .emit(&[0x56, 0x57]) // push si, push di
+        .call("USER", RELEASE_DC);
+    p.code.emit(&[0x56]).call("USER", UPDATE_WINDOW);
+    p.code.emit(&[0x56]).call("USER", GET_DC);
+    p.code.emit(&[0x8B, 0xF8]); // mov di,ax
+    // Below the first line: still black.
+    p.code
+        .emit(&[0x57])
+        .push(100)
+        .push(60)
+        .call("GDI", GET_PIXEL);
+    expect_ax(&mut p.code, 0, 2);
+    p.code.emit(&[0x8B, 0xC2]); // mov ax,dx
+    expect_ax(&mut p.code, 0, 3);
+    // The empty first line: the window's color, white.
+    p.code
+        .emit(&[0x57])
+        .push(100)
+        .push(3)
+        .call("GDI", GET_PIXEL);
+    expect_ax(&mut p.code, 0xFFFF, 4);
+    p.code.emit(&[0x8B, 0xC2]); // mov ax,dx
+    expect_ax(&mut p.code, 0x00FF, 5);
+    p.code.emit(&[0xB0, 0x01]).exit_al();
+    let (exit, log) = run("edit_keeps_drawing", p.build());
+    assert_eq!(exit, 1, "{log}");
+}
