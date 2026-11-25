@@ -209,14 +209,16 @@ disk.
   build does. Share the processors among the builds that run at once.
   `rust-dos-lock status` (below) lists every job under the lock: count
   the builds and tests among them by their names, and your own. A build
-  that runs alone takes no `-j`, and each of several takes about the
-  processors divided by their number, fewer while emulators run. Memory
-  sets a limit too, since rustc's grows with its jobs: with many builds
-  at once, `-j 2`. Otherwise the machine thrashes, and on Windows rustc
-  and the linker can run out of memory (`os error 1455`, the paging file
-  is too small). A fixed `-j 2` for every build leaves a build that runs
-  alone with two of the processors for the rust-dos crate, which is most
-  of what a build in a reused target directory compiles.
+  takes no `-j` only when no other agent works on the machine, since it
+  keeps the jobs it started with when other builds start after it.
+  Otherwise each takes about the processors divided by the number of
+  builds, fewer while emulators run. Memory sets a limit too, since
+  rustc's grows with its jobs: with many builds at once, `-j 2`. Past
+  these limits the machine thrashes, and on Windows rustc and the linker
+  can run out of memory (`os error 1455`, the paging file is too small).
+  A fixed `-j 2` for every build leaves a build that runs alone with two
+  of the processors for the rust-dos crate, which is most of what a
+  build in a reused target directory compiles.
 - Stop the emulators you start, by their process ID, before you finish:
   one left running holds its files, its debug server's port and a
   processor.
