@@ -348,16 +348,25 @@ Fix the issues in rank order. For each one:
    request, if there is one, and the worktree for whoever goes on with
    it, and say where they are in the report.
 
-A finding that isn't fixed in this session is follow-up work, not a
-finding to leave behind: a missing DLL or API, a missing device, a
-performance cost, a gap the game only touches in its setup. Don't ask
-the user whether to take it on. List it in the report's follow-ups
-(Phase 4) with what the fix needs, so that it is queued as a fix task
-of its own: by you, if you go on working, or by whoever runs the
-session. Only two kinds stay out of the follow-ups, each with its reason
-in the report: the game's own behaviour, which the real PC shows too,
-and a fix that needs a decision with no clearly better option, which
-the report puts to the user.
+A finding that isn't fixed in this session, and that a player of the
+game sees, is follow-up work: a picture or a sound that is wrong, a
+crash or a hang, a feature the game uses that doesn't work, a slow
+scene measured in the game. Don't ask the user whether to take it on.
+List it in the report's follow-ups (Phase 4) with what the fix needs,
+so that it is queued as a fix task of its own: by you, if you go on
+working, or by whoever runs the session.
+
+A finding no game or program at hand shows stays an issue and isn't
+queued: a gap in the log that nothing on screen or in the sound
+depends on, a case the specification or Windows has that no program
+reaches, an edge a review found by reading the code. File it as low
+priority with what the real system does, and list it in the report
+apart from the follow-ups. It is picked up when a game shows it, and
+the issue is where that game is added. Two more kinds stay out of the
+follow-ups, each with its reason in the report: the game's own
+behaviour, which the real PC shows too, and a fix that needs a
+decision with no clearly better option, which the report puts to the
+user.
 
 Remove each worktree (`git worktree remove`) once its pull request is
 ready for review and nothing in it is still needed.
@@ -370,9 +379,10 @@ Finish with a short report to the user:
 - what you covered, and what you didn't reach;
 - a table: finding, kind, issue, pull request (draft or ready),
   validated (yes, no, or how), and what is left;
-- the follow-ups: each finding not fixed, with its issue, what the fix
-  needs and the save states for it, to be queued as fix tasks without
-  asking; and the findings left out of them, with the reason;
+- the follow-ups: each finding not fixed that a player sees, with its
+  issue, what the fix needs and the save states for it, to be queued as
+  fix tasks without asking; the issues no game shows yet, which wait
+  for one; and the findings left out of both, with the reason;
 - the speed figures from `stats.jsonl`: the slowest scenes and their
   `emulated_speed`, `fps` and `cpu_use`;
 - where `$W` is, with the save states and screenshots, since they aren't

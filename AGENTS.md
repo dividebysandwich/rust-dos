@@ -110,6 +110,13 @@ that it improves on main. Steps, in this order:
    that says what the real system does, what the emulator does, and why
    it waits, and the comment links it. "Left as is" or "out of scope"
    with neither is a decision put off with no record of it.
+
+   An issue filed this way, or from reading the specification or the
+   code, is worked on when a game or program shows the problem: a wrong
+   picture or sound, a crash, a feature it uses that fails, a cost
+   measured in it. Until then it waits, labelled low priority, and
+   isn't queued as a task of its own. The issue says which program
+   shows it once one does.
 3. Validate it, after the review and with its fixes: run the real game
    or program the change is for, where there is one, on the build of the
    branch, and compare with main.
