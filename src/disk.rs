@@ -629,6 +629,9 @@ enum OpenData {
 /// itself.
 struct HostFile {
     file: File,
+    /// Whether anything was written or cut through it: only such a
+    /// handle is kept after the guest closes it (`ClosedFiles`).
+    wrote: Cell<bool>,
     /// None until it is asked for, and after a call that failed, which
     /// may have left the pointer anywhere.
     pos: Cell<Option<u64>>,
@@ -638,6 +641,7 @@ impl HostFile {
     fn new(file: File) -> Self {
         HostFile {
             file,
+            wrote: Cell::new(false),
             pos: Cell::new(None),
         }
     }
@@ -673,6 +677,7 @@ impl HostFile {
     /// seldom cut a file, so that costs nothing that matters.
     fn set_len(&self, len: u64) -> std::io::Result<()> {
         self.pos.set(None);
+        self.wrote.set(true);
         self.file.set_len(len)
     }
 
@@ -693,6 +698,7 @@ impl Read for HostFile {
 
 impl Write for HostFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.wrote.set(true);
         self.moved((&self.file).write(buf))
     }
 

@@ -18,22 +18,23 @@ use web_time::Instant;
 /// time in those opens. Opening the file through the handle that wrote it
 /// asks the host nothing.
 ///
-/// `MAX` handles are kept at most. A handle serves an open for `KEEP` at
-/// most, and only an open of the same host path with the same access
-/// (`take`), while the file there is still the one it wrote: the same size
-/// and time, and not read-only. The disk layer has no timer, so a handle
-/// older than `KEEP` is closed by the next `keep` or `take`, and one a
-/// guest leaves as it goes quiet stays open until then. A call that
-/// deletes or renames a file or a folder drops the handles kept under it
-/// first (`drop_under`), so the host never sees a file still open that the
-/// guest has closed and goes on to delete, rename or replace; so does
-/// anything that changes host folders behind the guest's back
-/// (`HostDirCache::forget`), and closing every file before a boot or a
-/// reload of the shell. Handles are opened sharing reading, writing and
-/// deleting (`std::fs` on Windows), so another program on the host can
-/// open, replace or delete the file meanwhile, and then the size or time
-/// differs and the handle isn't used. A program that opens the file
-/// without sharing writing can't, while the handle is kept.
+/// Only a handle that wrote is kept: a file opened for writing and only
+/// read has nothing for a scanner to look at again. `MAX` handles are
+/// kept at most, each for `KEEP`: the frame loop closes the older ones
+/// (`DiskController::close_idle_files`), as do `keep` and `take`. A
+/// handle serves only an open of the same host path with the same access
+/// (`take`), while the file there is still the one it wrote
+/// (`hostfs::File::is_at`: the same size and time, and on Unix the same
+/// inode) and isn't read-only. A call that deletes or renames a file or a
+/// folder drops the handles kept under it first (`drop_under`), so the
+/// host never sees a file still open that the guest has closed and goes
+/// on to delete, rename or replace; so does anything that changes host
+/// folders behind the guest's back (`HostDirCache::forget`), and closing
+/// every file before a boot or a reload of the shell. Handles are opened
+/// sharing reading, writing and deleting (`std::fs` on Windows), so
+/// another program on the host can open, replace or delete the file
+/// meanwhile, and then the handle isn't used. A program that opens the
+/// file without sharing writing can't, for the second it is kept.
 #[derive(Default)]
 pub(super) struct ClosedFiles {
     /// The oldest first.
@@ -98,9 +99,7 @@ impl ClosedFiles {
             && write
             && !meta.is_dir
             && !meta.readonly
-            && closed.file.len().is_ok_and(|len| len == meta.len)
-            && meta.modified.is_some()
-            && closed.file.modified() == meta.modified;
+            && closed.file.is_at(path, meta);
         let file = closed.file;
         if !same || (&file).seek(SeekFrom::Start(0)).is_err() {
             return None;
@@ -124,11 +123,20 @@ impl ClosedFiles {
         self.kept.borrow().iter().map(|c| c.path.clone()).collect()
     }
 
-    /// Close the handles kept longer than `KEEP`.
-    fn expire(&self) {
+    /// Close the handles kept longer than `KEEP`: on every `keep` and
+    /// `take`, and once a frame (`DiskController::close_idle_files`).
+    pub(super) fn expire(&self) {
         let mut kept = self.kept.borrow_mut();
         while kept.front().is_some_and(|c| c.at.elapsed() >= Self::KEEP) {
             kept.pop_front();
+        }
+    }
+
+    /// Make every handle kept look `KEEP` old, for tests.
+    #[cfg(test)]
+    pub(super) fn age(&self) {
+        for closed in self.kept.borrow_mut().iter_mut() {
+            closed.at = closed.at.checked_sub(Self::KEEP).unwrap_or(closed.at);
         }
     }
 

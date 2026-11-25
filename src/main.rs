@@ -1864,6 +1864,7 @@ fn main() -> Result<ExitCode, String> {
         for notice in std::mem::take(&mut cpu.bus.disk_notices) {
             osd.show(notice);
         }
+        cpu.bus.disk.close_idle_files();
 
         // Del during the POST asks for the BIOS setup.
         if std::mem::take(&mut cpu.bus.setup_requested) && !ui.is_open() {

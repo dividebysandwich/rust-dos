@@ -271,6 +271,38 @@ impl File {
         }
     }
 
+    /// Whether this is the file at `path`, which `meta` describes: one
+    /// host call (two on Unix) tells its size and time, which must be
+    /// those, and on Unix its device and inode. Windows keeps times in
+    /// 100 ns, so a file another program put at the path since has
+    /// another time there. False for a backend's file, whose times aren't
+    /// known.
+    pub fn is_at(&self, path: &Path, meta: &Meta) -> bool {
+        let File::Std(file) = self else {
+            return false;
+        };
+        let Ok(mine) = file.metadata() else {
+            return false;
+        };
+        if mine.len() != meta.len
+            || meta.modified.is_none()
+            || mine.modified().ok() != meta.modified
+        {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(path)
+                .is_ok_and(|there| there.dev() == mine.dev() && there.ino() == mine.ino())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            true
+        }
+    }
+
     pub fn set_modified(&self, time: SystemTime) -> io::Result<()> {
         match self {
             File::Std(file) => file.set_modified(time),

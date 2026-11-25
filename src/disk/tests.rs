@@ -2449,6 +2449,29 @@ fn a_kept_handle_serves_only_the_access_it_has() {
     assert_eq!(disk.host_dirs.closed.len(), 0);
     assert_eq!(disk.read_file(h, 8).unwrap(), b"dbc");
     disk.close_file(h);
+    // Opened read/write and only read, it isn't kept: there is nothing
+    // new in the file for the host to look at.
+    assert_eq!(disk.host_dirs.closed.len(), 0);
+}
+
+/// A kept handle is closed a second after the guest closed the file,
+/// once a frame, though the guest makes no more file calls.
+#[test]
+fn a_kept_handle_closes_when_the_guest_goes_quiet() {
+    let base = scratch("closed_idle");
+    let mut disk = DiskController::new(base.clone());
+    let h = disk.create_file(r"C:\LOG.TXT", PSP).unwrap();
+    assert_eq!(disk.write_file(h, b"done"), Ok(4));
+    disk.close_file(h);
+    disk.close_idle_files();
+    assert_eq!(disk.host_dirs.closed.len(), 1);
+    disk.host_dirs.closed.age();
+    disk.close_idle_files();
+    assert_eq!(disk.host_dirs.closed.len(), 0);
+    // The open then asks the host, and finds the file as written.
+    let h = disk.open_file(r"C:\LOG.TXT", 0x02, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 8).unwrap(), b"done");
+    disk.close_file(h);
 }
 
 /// A file another program changed after the guest closed it isn't opened
@@ -2469,6 +2492,7 @@ fn a_kept_handle_isnt_used_for_a_file_changed_since() {
     disk.close_file(h);
 
     let h = disk.open_file(r"C:\A.DAT", 0x02, PSP).unwrap();
+    assert_eq!(disk.write_file(h, b"A"), Ok(1));
     disk.close_file(h);
     assert_eq!(disk.host_dirs.closed.len(), 1);
     disk.set_file_attribute(r"C:\A.DAT", 0x01).unwrap();

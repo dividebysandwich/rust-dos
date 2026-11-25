@@ -596,11 +596,20 @@ impl DiskController {
                 self.open_files.remove(&sft)
             {
                 self.host_dirs.touched(&path);
-                self.host_dirs.closed.keep(path, file.file, mode & 0x03 != 1);
+                if file.wrote.get() {
+                    self.host_dirs.closed.keep(path, file.file, mode & 0x03 != 1);
+                }
             }
         }
         self.mark_dirty(sft);
         true
+    }
+
+    /// Close the host handles kept of files the guest closed a while ago
+    /// (`ClosedFiles`). The frame loop calls this, so that a guest that
+    /// goes quiet after writing a file doesn't leave it open on the host.
+    pub fn close_idle_files(&self) {
+        self.host_dirs.closed.expire();
     }
 
     /// Whether a process started now gets a handle for the open file
