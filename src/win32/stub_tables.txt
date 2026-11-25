@@ -5415,6 +5415,12 @@ EntryAddrProc
 PatchCodeHandle
 _DebugOutput
 DirectedYield
+LoadLibraryEx32W
+FreeLibrary32W
+GetProcAddress32W
+GetVDMPointer32W
+CallProc32W
+_CallProcEx32W
 
 MODULE USER
 MessageBox
