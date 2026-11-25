@@ -882,6 +882,10 @@ pub struct DiskController {
     pub(crate) media: Cell<Option<crate::savestate::media::Kept>>,
     /// The entries of host folders as last read (`host_entries`).
     host_dirs: HostDirCache,
+    /// The host folder each host drive's current directory named when
+    /// CHDIR made it current, with the current directory it was for
+    /// (`walk_host`).
+    current_folders: HashMap<u8, (String, PathBuf)>,
     /// The files shown in directories that the drive doesn't have: the
     /// built-in Windows's DLLs and its NOTEPAD.EXE (system_files.rs).
     system_files: system_files::SystemFiles,
@@ -941,6 +945,7 @@ impl DiskController {
             notes: Vec::new(),
             media: Cell::new(None),
             host_dirs: HostDirCache::default(),
+            current_folders: HashMap::new(),
             system_files: Default::default(),
             long_call: false,
         };

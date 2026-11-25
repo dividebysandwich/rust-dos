@@ -70,6 +70,9 @@ impl DiskController {
             media: _,
             // Read again from the host folders.
             host_dirs: _,
+            // Found again at the next CHDIR; until then a current
+            // directory is taken by its name alone.
+            current_folders: _,
             // The built-in Windows's, which shows them as configured.
             system_files: _,
             // Set only while a call runs (`long_name_call`).
