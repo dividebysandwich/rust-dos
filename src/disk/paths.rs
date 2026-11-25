@@ -138,8 +138,8 @@ impl DiskController {
                     sure = false;
                 }
             }
-            let (host_name, dos_name) = found
-                .unwrap_or_else(|| (super::new_entry_name(part), part.to_ascii_uppercase()));
+            let (host_name, dos_name) =
+                found.unwrap_or_else(|| (self.entry_name(part), part.to_ascii_uppercase()));
             full_path.push(host_name);
             dos_path.push(dos_name);
         }

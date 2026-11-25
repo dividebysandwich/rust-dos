@@ -35,10 +35,18 @@
 // themselves with its fractions. With anisotropy (u_gl_sampling) OpenGL
 // filters them instead, at the card's level.
 
-noperspective in vec4 v_color;
-noperspective in vec2 v_zw;
-noperspective in vec3 v_tex0;
-noperspective in vec3 v_tex1;
+// As in triangle.vert: OpenGL ES has no noperspective, and with a W of 1
+// at every vertex its interpolation is the same.
+#ifdef GL_ES
+#define SCREEN_LINEAR
+#else
+#define SCREEN_LINEAR noperspective
+#endif
+
+SCREEN_LINEAR in vec4 v_color;
+SCREEN_LINEAR in vec2 v_zw;
+SCREEN_LINEAR in vec3 v_tex0;
+SCREEN_LINEAR in vec3 v_tex1;
 flat in vec2 v_lod;
 flat in vec3 v_dx0;
 flat in vec3 v_dy0;

@@ -353,6 +353,24 @@ impl Process {
             .find(|m| m.name.eq_ignore_ascii_case(&file) && m.flags & loader::DATAFILE == 0)
             .map(|m| m.base)
     }
+
+    /// `size` bytes of the system's heap (`system_heap`), made the first
+    /// time one is needed: where Windows 98 keeps what KERNEL32 makes for
+    /// the process, such as the objects of critical sections and the code
+    /// of Universal Thunks. None when it is full.
+    pub(crate) fn system_alloc(&mut self, bus: &mut crate::bus::Bus, size: u32) -> Option<u32> {
+        if self.system_heap.is_none() {
+            *self.system_heap = heap::Heap::create_shared(&mut self.memory, heap::SYSTEM_HEAP_SIZE);
+        }
+        self.system_heap.as_mut()?.alloc(&mut self.memory, bus, size)
+    }
+
+    /// The block `system_alloc` gave at `at` is free again.
+    pub(crate) fn system_free(&mut self, at: u32) {
+        if let Some(heap) = self.system_heap.as_mut() {
+            heap.free(at);
+        }
+    }
 }
 
 /// The built-in Windows's state.
