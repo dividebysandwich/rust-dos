@@ -658,16 +658,11 @@ pub fn is_dc_current_palette(cpu: &mut Cpu, hdc: u32) -> bool {
 pub fn select_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hdc, handle, force_background) = (args[0], args[1], args[2] & 0xFFFF != 0);
     let own = palette_device(cpu) && handle != gdi(cpu).stock(DEFAULT_PALETTE);
-    let foreground = own && !force_background && in_foreground_window(cpu, hdc);
-    let old = gdi_select_palette(cpu, hdc, handle, !foreground);
-    // A call that selected nothing (no such palette or DC) marks nothing.
-    if own
-        && old != Some(0)
-        && let Some(hwnd) = gdi(cpu).dc(hdc).map(|d| d.hwnd)
-    {
+    if own && let Some(hwnd) = gdi(cpu).dc(hdc).map(|d| d.hwnd) {
         crate::win32::user32::palette::selected(cpu, hwnd);
     }
-    old
+    let foreground = own && !force_background && in_foreground_window(cpu, hdc);
+    gdi_select_palette(cpu, hdc, handle, !foreground)
 }
 
 /// Whether the DC `hdc` belongs to the foreground window or one of its
