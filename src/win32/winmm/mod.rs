@@ -280,6 +280,17 @@ pub fn mm_thread_address() -> u32 {
     super::stubs::stub_address(dll_index(), index)
 }
 
+/// The address of WINMM's function `name`, for a task to call: in the
+/// running process's image of WINMM, which a state from an older table
+/// has in that table's order (stub_tables.rs).
+pub fn address_of(cpu: &Cpu, name: &str) -> u32 {
+    let index = APIS
+        .iter()
+        .position(|a| a.name == name)
+        .unwrap_or_else(|| panic!("WINMM has no {}", name));
+    super::stub_tables::address(cpu, dll_index(), index)
+}
+
 fn dll_index() -> usize {
     super::stubs::DLLS
         .iter()

@@ -7,7 +7,9 @@
 //! are their places (see `stubs`).
 
 use super::super::stubs::Api;
-use super::{attrib, draw, imm, light, lists, matrix, missing, state, stdcall, texture, wgl};
+use super::{
+    attrib, clip, draw, imm, light, lists, matrix, missing, state, stdcall, texgen, texture, wgl,
+};
 
 /// The functions: OPENGL32.DLL's exports in the order of their
 /// ordinals, then the extensions' functions, which wglGetProcAddress
@@ -34,7 +36,7 @@ pub static APIS: &[Api] = &[
     stdcall("glClearDepth", 21, 2, state::clear_depth),
     stdcall("glClearIndex", 22, 1, missing),
     stdcall("glClearStencil", 23, 1, state::clear_stencil),
-    stdcall("glClipPlane", 24, 2, missing),
+    stdcall("glClipPlane", 24, 2, clip::clip_plane),
     stdcall("glColor3b", 25, 3, imm::color3b),
     stdcall("glColor3bv", 26, 1, imm::color3bv),
     stdcall("glColor3d", 27, 6, imm::color3d),
@@ -118,7 +120,7 @@ pub static APIS: &[Api] = &[
     stdcall("glGenLists", 106, 1, lists::gen_lists),
     stdcall("glGenTextures", 107, 2, texture::gen_textures),
     stdcall("glGetBooleanv", 108, 2, state::get_booleanv),
-    stdcall("glGetClipPlane", 109, 2, missing),
+    stdcall("glGetClipPlane", 109, 2, clip::get_clip_plane),
     stdcall("glGetDoublev", 110, 2, state::get_doublev),
     stdcall("glGetError", 111, 0, state::get_error),
     stdcall("glGetFloatv", 112, 2, state::get_floatv),
@@ -138,9 +140,9 @@ pub static APIS: &[Api] = &[
     stdcall("glGetString", 126, 1, state::get_string),
     stdcall("glGetTexEnvfv", 127, 3, texture::get_tex_envfv),
     stdcall("glGetTexEnviv", 128, 3, texture::get_tex_enviv),
-    stdcall("glGetTexGendv", 129, 3, missing),
-    stdcall("glGetTexGenfv", 130, 3, missing),
-    stdcall("glGetTexGeniv", 131, 3, missing),
+    stdcall("glGetTexGendv", 129, 3, texgen::get_tex_gendv),
+    stdcall("glGetTexGenfv", 130, 3, texgen::get_tex_genfv),
+    stdcall("glGetTexGeniv", 131, 3, texgen::get_tex_geniv),
     stdcall("glGetTexImage", 132, 5, missing),
     stdcall(
         "glGetTexLevelParameterfv",
@@ -322,12 +324,12 @@ pub static APIS: &[Api] = &[
     stdcall("glTexEnvfv", 300, 3, texture::tex_envfv),
     stdcall("glTexEnvi", 301, 3, texture::tex_envi),
     stdcall("glTexEnviv", 302, 3, texture::tex_enviv),
-    stdcall("glTexGend", 303, 4, missing),
-    stdcall("glTexGendv", 304, 3, missing),
-    stdcall("glTexGenf", 305, 3, missing),
-    stdcall("glTexGenfv", 306, 3, missing),
-    stdcall("glTexGeni", 307, 3, missing),
-    stdcall("glTexGeniv", 308, 3, missing),
+    stdcall("glTexGend", 303, 4, texgen::tex_gend),
+    stdcall("glTexGendv", 304, 3, texgen::tex_gendv),
+    stdcall("glTexGenf", 305, 3, texgen::tex_genf),
+    stdcall("glTexGenfv", 306, 3, texgen::tex_genfv),
+    stdcall("glTexGeni", 307, 3, texgen::tex_geni),
+    stdcall("glTexGeniv", 308, 3, texgen::tex_geniv),
     stdcall("glTexImage1D", 309, 8, missing),
     stdcall("glTexImage2D", 310, 9, texture::tex_image_2d),
     stdcall("glTexParameterf", 311, 3, texture::tex_parameterf),
