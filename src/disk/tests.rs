@@ -828,7 +828,7 @@ fn floppy_free_space_tracks_usage() {
 
 /// The built-in Windows sees 3.75 GB free on an empty folder hard disk,
 /// in 4 KB clusters, which drops as files are written, while DOS keeps
-/// its 320 MB disk of 16 KB clusters.
+/// its 1 GB disk of 16 KB clusters.
 #[test]
 fn windows_sees_a_larger_hard_disk() {
     let base = scratch("windows_hd");
@@ -842,7 +842,7 @@ fn windows_sees_a_larger_hard_disk() {
         disk.windows_free_space(3),
         Ok((8, 0xF_0000 - 4, 512, 0xF_0000))
     );
-    assert_eq!(disk.get_disk_free_space32(3), Ok((32, 19999, 512, 20000)));
+    assert_eq!(disk.get_disk_free_space32(3), Ok((32, 65_517, 512, 65_518)));
     assert_eq!(disk.windows_free_space(5), Err(0x0F));
 }
 
@@ -892,6 +892,24 @@ fn a_cd_image_file_denies_new_attributes() {
 /// The built-in Windows's free space of a folder hard disk stays between
 /// 1.75 GB and 3.75 GB in 4 KB clusters, below 4 GB, however much the
 /// folder holds, and drops by each cluster written.
+/// DOS sees a folder hard disk as 1 GB of 16 KB clusters, all free when
+/// empty, and never less than 512 MB free however much the folder holds:
+/// more than Perfect Assassin's LARGE install (360,857,188 bytes) needs.
+#[test]
+fn dos_free_space_stays_between_512_mb_and_1_gb() {
+    use super::search::hard_disk_free as free;
+    const MB_512: u64 = 0x8000;
+    assert_eq!(free(0), 65_518);
+    assert_eq!(free(1), 65_517);
+    assert_eq!(free(MB_512 - 1), 65_518 - 0x7FFF);
+    assert_eq!(free(MB_512), 65_518);
+    for used in (0..40 * MB_512).step_by(1_234) {
+        let f = free(used) as u64;
+        assert!((32_751..=65_518).contains(&f), "{used}: {f}");
+        assert!(f * 16384 > 360_857_188, "{used}: {f}");
+    }
+}
+
 #[test]
 fn windows_free_space_stays_between_1_75_and_3_75_gb() {
     use super::search::windows_hard_disk_free as free;
@@ -950,9 +968,14 @@ fn floppies_have_a_1_44_mb_diskette_layout() {
     );
     assert_eq!(floppy.bpb()[0x15..], [0; 10]);
 
+    // A hard disk is a 1 GB FAT16 partition, as FORMAT makes one, on a
+    // BIOS that translates it to 64 heads.
     let hdd = DriveKind::HardDisk.layout();
-    assert_eq!((hdd.sectors_per_fat, hdd.fs_type()), (79, b"FAT16   "));
-    assert_eq!(hdd.total_sectors(), 191 + 32 * 20000);
+    assert_eq!((hdd.sectors_per_fat, hdd.fs_type()), (256, b"FAT16   "));
+    assert_eq!(hdd.first_data_sector(), 1 + 2 * 256 + 32);
+    assert_eq!(hdd.total_sectors(), 545 + 32 * 65_518);
+    assert!(hdd.total_sectors() <= 2 * 1024 * 1024);
+    assert_eq!((hdd.heads, hdd.cylinders()), (64, 521));
     let bpb = hdd.bpb();
     assert_eq!((bpb[0x08], bpb[0x09], bpb[0x0A]), (0, 0, 0xF8));
     assert_eq!(u32::from_le_bytes(bpb[0x15..0x19].try_into().unwrap()), hdd.total_sectors());
