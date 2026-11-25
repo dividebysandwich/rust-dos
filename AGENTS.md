@@ -120,12 +120,14 @@ that it improves on main. Steps, in this order:
    test or a comparison with it. Put the evidence in the description.
 
    Before it is marked ready, check that it still merges with main,
-   which moves on while a pull request is in draft. If it doesn't, the
-   agent that has the branch's worktree merges main into the branch (no
-   rebase, no force-push), keeps what both sides meant, runs the tests
-   the conflict touches, and pushes. GitHub can show the old head for
-   minutes after a push: compare its head with the commit you pushed
-   before trusting "conflicting".
+   which moves on while a pull request is in draft. Fetch both and run
+   `git merge-tree --write-tree origin/main origin/<branch>`: it exits
+   with 1 and names the files when the two conflict. Don't go by
+   GitHub's `mergeable`, which reads `UNKNOWN` while GitHub computes it
+   and can describe the old head for minutes after a push. If it
+   doesn't merge, the agent that has the branch's worktree merges main
+   into the branch (no rebase, no force-push), keeps what both sides
+   meant, runs the tests the conflict touches, and pushes.
 
    A save-state version both sides raised (`WIN32_VERSION` and the
    like): the branch takes the next free number, and main's joins the
