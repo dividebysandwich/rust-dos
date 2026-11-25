@@ -17,7 +17,8 @@
 //! render target's format converted by tables (`Codec`). Each step
 //! gives the same pixels as testing every pixel of the triangle's
 //! bounding box and working out all of its values, as the rasterizer
-//! did before; a test draws random batches both ways.
+//! did before (dividebysandwich/rust-dos#1801); a test draws random
+//! batches both ways.
 //!
 //! What it draws: triangles with the top-left fill rule and pixel
 //! centres on integer coordinates, lines and points; the depth test,
@@ -450,16 +451,6 @@ impl Pixels {
         ((y - self.y0) * self.width + (x - self.x0)) as usize * self.bpp
     }
 
-    #[cfg(test)]
-    fn get(&self, x: i32, y: i32) -> u32 {
-        self.get_at(self.offset(x, y))
-    }
-
-    #[cfg(test)]
-    fn set(&mut self, x: i32, y: i32, raw: u32) {
-        self.set_at(self.offset(x, y), raw);
-    }
-
     /// The pixel at the byte `at` of the rectangle (`offset`).
     #[inline]
     fn get_at(&self, at: usize) -> u32 {
@@ -618,6 +609,13 @@ impl Codec {
             (_, None) => default,
         };
         channel(3, 255) << 24 | channel(0, 0) << 16 | channel(1, 0) << 8 | channel(2, 0)
+    }
+
+    /// The pixel `raw` drawn over with `argb`: the format's channels
+    /// from `encode`, and the bits it has no channel for kept.
+    #[inline]
+    fn merge(&self, argb: u32, raw: u32) -> u32 {
+        self.encode(argb) & self.mask | raw & self.keep
     }
 }
 
@@ -835,10 +833,8 @@ impl Plan {
             (h[0] == TOP_SELECTARG1 && h[1] & 0xF == TA_TEXTURE)
                 || (h[0] == TOP_SELECTARG2 && h[2] & 0xF == TA_TEXTURE)
         };
-        let diffuse = !(textured
-            && stage
-            && !card.diffuse_alpha
-            && halves.iter().all(selects_texture));
+        let diffuse =
+            !(textured && stage && !card.diffuse_alpha && halves.iter().all(selects_texture));
         // Both halves select the texture without a modifier.
         let plain = |a: u32| a & (0xF | TA_COMPLEMENT | TA_ALPHAREPLICATE) == TA_TEXTURE;
         let plain_texture = |h: &[u32; 3]| {
@@ -1033,10 +1029,55 @@ fn lod_at(texture: Option<&Texture>, card: &Card, planes: &[[f32; 3]; VALUES], f
 /// screen, and so are the texture's coordinates times rhw where they are
 /// drawn in perspective (`Frag::uv`).
 fn triangle(t: &mut Target, v: &[ScreenVertex; 3]) {
+    let Some(Prepared {
+        edges,
+        planes,
+        rows,
+        columns: (lo, hi),
+    }) = prepare(t, v)
+    else {
+        return;
+    };
+    for y in rows {
+        let fy = y as f32;
+        // The pixels of the row inside all three edges.
+        let (mut first, mut last) = (lo, hi);
+        for (e, top_left) in &edges {
+            let (a, b) = edge_span(e, *top_left, fy, lo, hi);
+            first = first.max(a);
+            last = last.min(b);
+        }
+        if first > last {
+            continue;
+        }
+        match t.plan.texel_only {
+            true => texel_row(t, y, (first, last), &planes),
+            false => shade_row(t, y, (first, last), &planes),
+        }
+    }
+}
+
+/// A triangle made ready to draw (`prepare`).
+struct Prepared {
+    /// The edges opposite each vertex as functions of the pixel that
+    /// are positive inside (x and y factors and a constant), each with
+    /// whether it is a top or left edge.
+    edges: [([f32; 3], bool); 3],
+    /// Each value as a plane over the screen (`Frag`).
+    planes: [[f32; 3]; VALUES],
+    /// The rows and the first and last columns of the triangle's
+    /// bounding box inside the clip rectangle.
+    rows: std::ops::RangeInclusive<i32>,
+    columns: (i32, i32),
+}
+
+/// The triangle `v` made ready to draw: None if it has no area or its
+/// bounding box no column inside the clip rectangle.
+fn prepare(t: &Target, v: &[ScreenVertex; 3]) -> Option<Prepared> {
     let mut v = *v;
     let area = (v[1].x - v[0].x) * (v[2].y - v[0].y) - (v[2].x - v[0].x) * (v[1].y - v[0].y);
     if !area.is_finite() || area == 0.0 {
-        return;
+        return None;
     }
     if area < 0.0 {
         v.swap(1, 2);
@@ -1065,25 +1106,14 @@ fn triangle(t: &mut Target, v: &[ScreenVertex; 3]) {
     let [cl, ct, cr, cb] = t.clip;
     let (lo, hi) = (min_x.max(cl), max_x.min(cr - 1));
     if lo > hi {
-        return;
+        return None;
     }
-    for y in min_y.max(ct)..=max_y.min(cb - 1) {
-        let fy = y as f32;
-        // The pixels of the row inside all three edges.
-        let (mut first, mut last) = (lo, hi);
-        for (e, top_left) in &edges {
-            let (a, b) = edge_span(e, *top_left, fy, lo, hi);
-            first = first.max(a);
-            last = last.min(b);
-        }
-        if first > last {
-            continue;
-        }
-        match t.plan.texel_only {
-            true => texel_row(t, y, (first, last), &planes),
-            false => shade_row(t, y, (first, last), &planes),
-        }
-    }
+    Some(Prepared {
+        edges,
+        planes,
+        rows: min_y.max(ct)..=max_y.min(cb - 1),
+        columns: (lo, hi),
+    })
 }
 
 /// Draw the pixels `first` to `last` of the row `y` of a triangle whose
@@ -1147,7 +1177,7 @@ fn texel_row(t: &mut Target, y: i32, (first, last): (i32, i32), planes: &[[f32; 
         None => (0, 0),
     };
     let (s, color, depth) = t.split();
-    let (card, codec) = (s.card, s.codec);
+    let card = s.card;
     let Some(level) = s.texture.map(|t| &t.levels[0]) else {
         return;
     };
@@ -1156,16 +1186,12 @@ fn texel_row(t: &mut Target, y: i32, (first, last): (i32, i32), planes: &[[f32; 
         let (here, z_here) = (at, z_at);
         at += color.bpp;
         z_at += z_step;
-        // The depth test, as `pixel` has it.
         let mut z_value = None;
-        if let Some((z, mask)) = depth.as_ref() {
-            let value = depth_raw(plane(Z, fx), *mask);
-            let value = value.saturating_sub(s.plan.z_bias) & *mask;
-            let raw = z.get_at(z_here);
-            if !compare(card.z_func, value, raw & *mask) {
+        if let Some(d) = depth.as_ref() {
+            let Some(value) = depth_test(&s, d, z_here, plane(Z, fx)) else {
                 continue;
-            }
-            z_value = Some(value | raw & !*mask);
+            };
+            z_value = Some(value);
         }
         // `Frag::uv`.
         let q = plane(UVQ + 2, fx);
@@ -1177,12 +1203,8 @@ fn texel_row(t: &mut Target, y: i32, (first, last): (i32, i32), planes: &[[f32; 
             continue;
         };
         let raw = color.get_at(here);
-        color.set_at(here, codec.encode(argb) & codec.mask | raw & codec.keep);
-        if let (Some(value), Some((z, _))) = (z_value, depth.as_mut())
-            && card.z_write
-        {
-            z.set_at(z_here, value);
-        }
+        color.set_at(here, s.codec.merge(argb, raw));
+        write_depth(&s, depth, z_here, z_value);
     }
 }
 
@@ -1504,17 +1526,12 @@ fn pixel(
     f: &Frag,
     lod: f32,
 ) {
-    let card = s.card;
-    // The depth test, with the bias taken off the pixel's depth.
     let mut z_value = None;
-    if let Some((z, mask)) = depth.as_ref() {
-        let value = depth_raw(f.z(), *mask);
-        let value = value.saturating_sub(s.plan.z_bias) & *mask;
-        let raw = z.get_at(z_at);
-        if !compare(card.z_func, value, raw & *mask) {
+    if let Some(d) = depth.as_ref() {
+        let Some(value) = depth_test(s, d, z_at, f.z()) else {
             return;
-        }
-        z_value = Some(value | raw & !*mask);
+        };
+        z_value = Some(value);
     }
     let raw = color.get_at(at);
     let argb = match s.plan.texel_only {
@@ -1524,10 +1541,28 @@ fn pixel(
     let Some(argb) = argb else {
         return;
     };
-    let codec = s.codec;
-    color.set_at(at, codec.encode(argb) & codec.mask | raw & codec.keep);
+    color.set_at(at, s.codec.merge(argb, raw));
+    write_depth(s, depth, z_at, z_value);
+}
+
+/// The depth test of a pixel of depth `z` at the byte `z_at` of the
+/// depth buffer `(buffer, mask)`, with the bias taken off the pixel's
+/// depth: the raw value the pixel writes there if it passes, None if it
+/// doesn't.
+#[inline]
+fn depth_test(s: &Shader, (buffer, mask): &(Pixels, u32), z_at: usize, z: f32) -> Option<u32> {
+    let value = depth_raw(z, *mask);
+    let value = value.saturating_sub(s.plan.z_bias) & *mask;
+    let raw = buffer.get_at(z_at);
+    compare(s.card.z_func, value, raw & *mask).then_some(value | raw & !*mask)
+}
+
+/// Write the depth `z_value` of a pixel drawn (`depth_test`) at the
+/// byte `z_at` of the depth buffer, if the states write depths.
+#[inline]
+fn write_depth(s: &Shader, depth: &mut Option<(Pixels, u32)>, z_at: usize, z_value: Option<u32>) {
     if let (Some(value), Some((z, _))) = (z_value, depth.as_mut())
-        && card.z_write
+        && s.card.z_write
     {
         z.set_at(z_at, value);
     }
@@ -1767,159 +1802,55 @@ mod tests {
         assert_eq!(sample_lod(&texture, 0.75, &none, 0.5, 0.5), red);
     }
 
-    /// The rasterizer as it was before it skipped the work a batch's
-    /// states don't need (dividebysandwich/rust-dos#1801): every pixel
-    /// of a triangle's bounding box tested against its edges, every
-    /// value and the level of detail worked out at each pixel inside,
-    /// and the pixel formats converted by `decode` and `encode`. The
-    /// test below draws the same batches with both.
-    mod before {
-        use super::super::*;
-
-        fn color_of(argb: u32) -> Color {
-            let [b, g, r, a] = argb.to_le_bytes();
-            [r, g, b, a].map(|c| c as f32 / 255.0)
-        }
-
-        pub fn triangle(t: &mut Target, v: &[ScreenVertex; 3]) {
-            let mut v = *v;
-            let area =
-                (v[1].x - v[0].x) * (v[2].y - v[0].y) - (v[2].x - v[0].x) * (v[1].y - v[0].y);
-            if !area.is_finite() || area == 0.0 {
-                return;
-            }
-            if area < 0.0 {
-                v.swap(1, 2);
-            }
-            let area = area.abs();
-            let perspective = t.card.perspective;
-            let frags = v.map(|v| Frag::of(&v, perspective));
-            let edges = [(1, 2), (2, 0), (0, 1)].map(|(a, b)| {
-                let (a, b) = (&v[a], &v[b]);
-                let (dx, dy) = (b.x - a.x, b.y - a.y);
-                let top_left = dy < 0.0 || (dy == 0.0 && dx > 0.0);
-                ([-dy, dx, dy * a.x - dx * a.y], top_left)
-            });
-            let planes: [[f32; 3]; VALUES] = std::array::from_fn(|k| {
-                std::array::from_fn(|c| {
-                    (0..3).map(|i| edges[i].0[c] * frags[i].0[k]).sum::<f32>() / area
-                })
-            });
-            let min_x = v.iter().map(|v| v.x).fold(f32::MAX, f32::min).ceil() as i32;
-            let max_x = v.iter().map(|v| v.x).fold(f32::MIN, f32::max).floor() as i32;
-            let min_y = v.iter().map(|v| v.y).fold(f32::MAX, f32::min).ceil() as i32;
-            let max_y = v.iter().map(|v| v.y).fold(f32::MIN, f32::max).floor() as i32;
-            let [cl, ct, cr, cb] = t.clip;
-            for y in min_y.max(ct)..=max_y.min(cb - 1) {
-                let fy = y as f32;
-                for x in min_x.max(cl)..=max_x.min(cr - 1) {
-                    let fx = x as f32;
-                    let inside = edges.iter().all(|(e, top_left)| {
-                        let d = e[0] * fx + e[1] * fy + e[2];
-                        d > 0.0 || (d == 0.0 && *top_left)
-                    });
-                    if !inside {
-                        continue;
-                    }
-                    let f = Frag(std::array::from_fn(|k| {
-                        planes[k][0] * fx + planes[k][1] * fy + planes[k][2]
-                    }));
-                    let lod = lod_at(t.texture.as_deref(), t.card, &planes, &f);
-                    shade(t, x, y, &f, lod);
+    /// A triangle as the rasterizer draws it without skipping any work:
+    /// every pixel of its bounding box tested against its edges, and at
+    /// each pixel inside every value and the level of detail worked out
+    /// and the pixel drawn by `shade`. Its target's `Plan` has to read
+    /// every value (`full_plan`). The test below draws the same batches
+    /// with it and with `triangle`, which skips the pixels outside the
+    /// edges (`edge_span`), the values the states don't read (`Plan`)
+    /// and the stage of a batch whose pixels are their texels
+    /// (`texel_row`), so a change to the shading needs no change here.
+    fn every_pixel(t: &mut Target, v: &[ScreenVertex; 3]) {
+        let Some(Prepared {
+            edges,
+            planes,
+            rows,
+            columns: (lo, hi),
+        }) = prepare(t, v)
+        else {
+            return;
+        };
+        for y in rows {
+            let fy = y as f32;
+            for x in lo..=hi {
+                let fx = x as f32;
+                let inside = edges.iter().all(|(e, top_left)| {
+                    let d = e[0] * fx + e[1] * fy + e[2];
+                    d > 0.0 || (d == 0.0 && *top_left)
+                });
+                if !inside {
+                    continue;
                 }
+                let f = Frag(std::array::from_fn(|k| {
+                    planes[k][0] * fx + planes[k][1] * fy + planes[k][2]
+                }));
+                let lod = lod_at(t.texture.as_deref(), t.card, &planes, &f);
+                shade(t, x, y, &f, lod);
             }
         }
+    }
 
-        fn shade(t: &mut Target, x: i32, y: i32, f: &Frag, lod: f32) {
-            let [cl, ct, cr, cb] = t.clip;
-            if x < cl || x >= cr || y < ct || y >= cb {
-                return;
-            }
-            let card = t.card;
-            let mut depth = None;
-            if let Some((z, mask)) = &t.depth {
-                let value = depth_raw(f.z(), *mask);
-                let value = value.saturating_sub(depth_bias(card.z_bias, *mask)) & *mask;
-                let stored = z.get(x, y) & *mask;
-                if !compare(card.z_func, value, stored) {
-                    return;
-                }
-                depth = Some(value | z.get(x, y) & !*mask);
-            }
-            let diffuse = f.diffuse();
-            let mut out = diffuse;
-            let tex = match &t.texture {
-                Some(texture) => {
-                    let (u, v) = f.uv();
-                    let Some(tex) = sample_lod(texture, lod, card, u, v) else {
-                        return;
-                    };
-                    Some(tex)
-                }
-                None => None,
-            };
-            if card.color[0] != TOP_DISABLE {
-                let factor = color_of(card.factor);
-                let spec = f.specular();
-                for (half, channels) in [(card.color, 0..3), (card.alpha, 3..4)] {
-                    let args = [half[1], half[2]];
-                    if tex.is_none() && reads_texture(half[0], args) {
-                        continue;
-                    }
-                    let tex = tex.unwrap_or([0.0; 4]);
-                    operate(half[0], args, tex, diffuse, spec, factor, channels, &mut out);
-                }
-                if card.diffuse_alpha {
-                    out[3] = diffuse[3];
-                }
-            }
-            if card.specular {
-                for (o, s) in out.iter_mut().zip(f.specular()).take(3) {
-                    *o = (*o + s).min(1.0);
-                }
-            }
-            if let Some((func, reference)) = card.alpha_test
-                && !compare(func, (out[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u32, reference)
-            {
-                return;
-            }
-            let fog = match card.fog {
-                Fog::Off => None,
-                Fog::Vertex => Some(f.specular()[3]),
-                Fog::Table(mode, start, end, density) => {
-                    Some(pipeline::fog_factor(mode, start, end, density, f.z()))
-                }
-            };
-            if let Some(k) = fog {
-                let c = color_of(card.fog_color);
-                for (o, c) in out.iter_mut().zip(c).take(3) {
-                    *o = k * *o + (1.0 - k) * c;
-                }
-            }
-            let format = t.color.surface.format;
-            let raw = t.color.get(x, y);
-            if let Some((src, dst)) = card.blend {
-                let d = color_of(decode(raw, &format));
-                let (sf, df) = match src {
-                    12 => (blend_factor(5, out, d), blend_factor(6, out, d)),
-                    13 => (blend_factor(6, out, d), blend_factor(5, out, d)),
-                    _ => (blend_factor(src, out, d), blend_factor(dst, out, d)),
-                };
-                out = std::array::from_fn(|i| out[i] * sf[i] + d[i] * df[i]);
-            }
-            let bits = (1u64 << format.bits.min(32)) - 1;
-            let mask = (format.r | format.g | format.b | format.a) as u64 & bits;
-            let written = encode(argb_of(out), &format);
-            t.color.set(
-                x,
-                y,
-                (written as u64 & mask | raw as u64 & !mask & bits) as u32,
-            );
-            if let (Some(value), Some((z, _))) = (depth, &mut t.depth)
-                && card.z_write
-            {
-                z.set(x, y, value);
-            }
+    /// `Plan::new` with every value worked out and the stage always run.
+    fn full_plan(card: &Card, depth: Option<u32>, textured: bool) -> Plan {
+        Plan {
+            z: true,
+            diffuse: true,
+            specular: true,
+            uvq: true,
+            lod: true,
+            texel_only: false,
+            ..Plan::new(card, depth, textured)
         }
     }
 
@@ -2070,7 +2001,12 @@ mod tests {
 
     fn random_vertex(r: &mut Random) -> ScreenVertex {
         let mut tex = [[0.0; 4]; pipeline::SCREEN_STAGES];
-        tex[0] = [r.float(-2.0, 3.0), r.float(-2.0, 3.0), 0.0, r.float(0.5, 2.0)];
+        tex[0] = [
+            r.float(-2.0, 3.0),
+            r.float(-2.0, 3.0),
+            0.0,
+            r.float(0.5, 2.0),
+        ];
         ScreenVertex {
             x: coordinate(r),
             y: coordinate(r),
@@ -2101,7 +2037,7 @@ mod tests {
     }
 
     #[test]
-    fn triangles_draw_as_they_did_before_the_rasterizer_skipped_work() {
+    fn triangles_draw_the_same_without_the_work_they_skip() {
         let targets = [
             rgb_format(16, 0, 0xF800, 0x07E0, 0x001F),
             rgb_format(16, 0, 0x7C00, 0x03E0, 0x001F),
@@ -2147,16 +2083,14 @@ mod tests {
             let triangles: Vec<[ScreenVertex; 3]> = (0..1 + r.below(4))
                 .map(|_| std::array::from_fn(|_| random_vertex(&mut r)))
                 .collect();
-            let target = |card: &Card| -> (Pixels, Option<(Pixels, u32)>, Plan) {
+            type Draw = fn(&mut Target, &[ScreenVertex; 3]);
+            type PlanOf = fn(&Card, Option<u32>, bool) -> Plan;
+            let drawn_by = |draw: Draw, plan_of: PlanOf| {
                 let depth = depth.map(|(f, mask)| (pixels(f, depth_bytes.clone()), mask));
-                let plan = Plan::new(card, depth.as_ref().map(|d| d.1), texture.is_some());
-                (pixels(format, color.clone()), depth, plan)
-            };
-            let drawn_by = |draw: fn(&mut Target, &[ScreenVertex; 3])| {
-                let (color, depth, plan) = target(&card);
+                let plan = plan_of(&card, depth.as_ref().map(|d| d.1), texture.is_some());
                 let mut t = Target {
                     card: &card,
-                    color,
+                    color: pixels(format, color.clone()),
                     depth,
                     texture: texture.clone(),
                     clip,
@@ -2168,8 +2102,8 @@ mod tests {
                 }
                 (t.color.bytes, t.depth.map(|d| d.0.bytes))
             };
-            let now = drawn_by(triangle);
-            let then = drawn_by(before::triangle);
+            let now = drawn_by(triangle, Plan::new);
+            let then = drawn_by(every_pixel, full_plan);
             assert!(
                 now.0 == then.0,
                 "scene {scene}: the target's pixels differ, {card:?}, {format:?}, {triangles:?}"
@@ -2246,7 +2180,10 @@ mod tests {
         // What `Plan::texel_only` rests on: a texel's ARGB as the stage
         // has it, from 0 to 1, comes back as it was.
         let mut r = Random(11);
-        for argb in (0..=255u32).map(|c| c * 0x0101_0101).chain((0..10000).map(|_| r.next())) {
+        for argb in (0..=255u32)
+            .map(|c| c * 0x0101_0101)
+            .chain((0..10000).map(|_| r.next()))
+        {
             let tex = color_of(argb);
             let mut out = [0.0; 4];
             operate(2, [TA_TEXTURE, 0], tex, out, out, out, 0..4, &mut out);
