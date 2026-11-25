@@ -330,6 +330,93 @@ fn a_host_name_that_ends_in_a_dot_is_found_without_it() {
     assert!(disk.is_file("save"));
 }
 
+/// Spaces that end the name before its dot pad its 8 characters, as DOS
+/// packs it: Dune CD's installer makes its launcher as "dune    .bat",
+/// and the launcher opens it as "dune.bat". A long-name call keeps them,
+/// as Windows does.
+#[test]
+fn spaces_before_the_extension_pad_the_name() {
+    let base = scratch("padded_name");
+    let mut disk = DiskController::new(base.clone());
+
+    disk.create_directory("DUNECD").unwrap();
+    let h = disk.create_file(r"C:\DUNECD\dune    .bat", PSP).unwrap();
+    disk.write_file(h, b"@echo off").unwrap();
+    disk.close_file(h);
+    assert!(base.join("DUNECD/DUNE.BAT").is_file());
+    assert!(!base.join("DUNECD/dune    .bat").exists());
+
+    let h = disk.open_file(r"C:\DUNECD\dune.bat", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"@echo off");
+    disk.close_file(h);
+    assert!(disk.is_file(r"DUNECD\DUNE .BAT"));
+    assert_eq!(
+        disk.qualify_path(r"C:\DUNECD\dune    .bat").as_deref(),
+        Some(r"C:\DUNECD\DUNE.BAT")
+    );
+    // A search pattern is packed the same way (`pattern_fields`).
+    let found = disk.list_directory(r"C:\DUNECD\dune    .*", 0).unwrap();
+    assert!(found.iter().any(|e| e.filename == "DUNE.BAT"));
+
+    // So do a directory made and a file renamed by such a name.
+    disk.create_directory("SAVES   .DIR").unwrap();
+    assert!(base.join("SAVES.DIR").is_dir());
+    disk.rename_file(r"DUNECD\DUNE.BAT", r"SAVES.DIR\GAME  .SAV")
+        .unwrap();
+    assert!(base.join("SAVES.DIR/GAME.SAV").is_file());
+
+    // Spaces inside the name stay, and a name of spaces is no name.
+    assert_eq!(
+        disk.qualify_path("A B .TXT").as_deref(),
+        Some(r"C:\A B.TXT")
+    );
+    assert_eq!(disk.qualify_path("   .TXT").as_deref(), Some(r"C:\   .TXT"));
+
+    // A long name keeps them.
+    let h = disk
+        .long_name_call(|d| d.create_file(r"C:\read me .txt", PSP))
+        .unwrap();
+    disk.close_file(h);
+    assert!(base.join("read me .txt").is_file());
+    // Nor does a long-name call find it by "read me.txt": that is
+    // another name on Windows.
+    assert!(!disk.long_name_call(|d| d.is_file(r"C:\read me.txt")));
+}
+
+/// A host file whose name has spaces before its extension, as builds that
+/// kept them made for "dune    .bat", is still found by its DOS name.
+#[test]
+fn a_host_name_padded_before_its_extension_is_found_without_the_spaces() {
+    let base = scratch("host_padded_name");
+    fs::write(base.join("dune    .bat"), b"launcher").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    let h = disk.open_file("DUNE.BAT", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"launcher");
+    disk.close_file(h);
+    assert!(disk.is_file("dune    .bat"));
+}
+
+/// MKDIR and a rename meet such a host entry as opens do: the name is
+/// taken, and no second entry is made beside it to hide it.
+#[test]
+fn a_host_name_padded_before_its_extension_is_taken() {
+    let base = scratch("host_padded_taken");
+    fs::create_dir(base.join("saves   .dir")).unwrap();
+    fs::write(base.join("saves   .dir/game.sav"), b"save").unwrap();
+    fs::write(base.join("dune    .bat"), b"launcher").unwrap();
+    fs::write(base.join("OTHER.BAT"), b"other").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    assert_eq!(disk.create_directory("SAVES.DIR"), Err(0x05));
+    assert!(!base.join("SAVES.DIR").exists());
+    assert!(disk.is_file(r"SAVES.DIR\GAME.SAV"));
+
+    assert_eq!(disk.rename_file("OTHER.BAT", "DUNE.BAT"), Err(0x05));
+    assert!(base.join("OTHER.BAT").is_file());
+    assert!(!base.join("DUNE.BAT").exists());
+}
+
 #[test]
 fn each_drive_has_its_own_current_directory() {
     let base = scratch("cwd");

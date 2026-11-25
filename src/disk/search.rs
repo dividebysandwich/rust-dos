@@ -332,7 +332,8 @@ impl DiskController {
             None => (".", rest), // current directory of that drive
         };
         // MKDIR "SAVES." makes SAVES, as the paths into it name it.
-        let leaf = Self::dos_component(leaf);
+        let leaf = self.dos_component(leaf);
+        let leaf = &*leaf;
         if leaf.is_empty() {
             return Err(0x03); // Path not found / invalid
         }
@@ -404,18 +405,27 @@ impl DiskController {
         })
     }
 
-    /// Case-insensitive lookup of a child by name in a host directory.
+    /// Case-insensitive lookup of a child by name in a host directory: by
+    /// its host name, or else by the name the call running now packs it
+    /// to (`dos_component`), as opens find it (`find_host_entry`). So
+    /// MKDIR "SAVES.DIR" and a rename to "DUNE.BAT" meet the "saves   .dir"
+    /// and "dune    .bat" that builds which kept the padding made, rather
+    /// than make a second entry beside it that hides it from opens.
     pub(super) fn find_existing_child(&self, parent: &Path, name: &str) -> Option<std::ffi::OsString> {
         let upper = name.to_uppercase();
-        if let Ok(entries) = hostfs::read_dir(parent) {
-            for e in entries {
-                let fname = e.file_name();
-                if fname.to_string_lossy().to_uppercase() == upper {
-                    return Some(fname);
-                }
-            }
-        }
-        None
+        let names: Vec<std::ffi::OsString> = hostfs::read_dir(parent)
+            .into_iter()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        let packed = |fname: &std::ffi::OsString| {
+            self.dos_component(&fname.to_string_lossy()).to_uppercase()
+        };
+        names
+            .iter()
+            .find(|fname| fname.to_string_lossy().to_uppercase() == upper)
+            .or_else(|| names.iter().find(|fname| packed(fname) == upper))
+            .cloned()
     }
 
     /// The name and the extension a search pattern looks for. DOS packs
@@ -625,9 +635,10 @@ impl DiskController {
         let drive = self.drive(drive_num)?;
         let volume = drive.fat()?;
         let (dir, pattern) = Self::dir_and_pattern(rest);
-        let dir: Vec<String> = Self::logical_components(drive, dir)
+        let dir: Vec<String> = self
+            .logical_components(drive, dir)
             .into_iter()
-            .map(str::to_string)
+            .map(Cow::into_owned)
             .collect();
         let dir = self.fat_dos_path(volume, &dir).ok()?;
         let (slots, entries): (Vec<usize>, Vec<DosDirEntry>) = volume
@@ -775,14 +786,15 @@ impl DiskController {
         // Windows 98 Setup's 0Eh for "is this name taken?") find it as
         // the entry of the root directory it is, by its name, and the
         // files besides. In a subdirectory there is no label to find.
-        if search_attr & 0x08 != 0 && Self::logical_components(drive, search_dir_str).is_empty() {
+        if search_attr & 0x08 != 0 && self.logical_components(drive, search_dir_str).is_empty() {
             valid_entries.extend(label().filter(|e| Self::matches_pattern(&e.filename, pattern)));
         }
 
         if let Some(volume) = drive.fat() {
-            let dir: Vec<String> = Self::logical_components(drive, search_dir_str)
+            let dir: Vec<String> = self
+                .logical_components(drive, search_dir_str)
                 .into_iter()
-                .map(str::to_string)
+                .map(Cow::into_owned)
                 .collect();
             let dir = self.fat_dos_path(volume, &dir).map_err(|_| 0x03u8)?;
             let entries = volume.list(&refs(&dir)).map_err(|_| 0x03u8)?;
