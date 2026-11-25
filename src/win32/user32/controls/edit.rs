@@ -26,7 +26,7 @@ use super::super::sysparams::{
     self, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWFRAME,
     COLOR_WINDOWTEXT,
 };
-use super::super::window::{WS_BORDER, WS_DISABLED, WS_HSCROLL, WS_VSCROLL};
+use super::super::window::{WS_BORDER, WS_DISABLED, WS_HSCROLL, WS_VSCROLL, expects_win3};
 use super::super::{
     State, address_of, bytes_at, copy_out, input, make_long, paint, point_of, read_words, user,
     write_words,
@@ -2669,7 +2669,11 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 
 /// The WM_CTLCOLOR* message an edit's painting sends and the window it
 /// goes to (0 for a control on the desktop, which takes
-/// DefWindowProcA's).
+/// DefWindowProcA's). A read-only or disabled edit asks for
+/// WM_CTLCOLORSTATIC, but only in a program made for Windows 4.0 or
+/// later: Windows 98's USER.EXE sends a program made for an older
+/// version CTLCOLOR_EDIT for every edit, in WM_ERASEBKGND and WM_PAINT
+/// alike, as Windows 3.1 did.
 fn ctl_color(cpu: &mut Cpu, c: &Ctx) -> (u32, u32) {
     let parent = user(cpu).window(c.hwnd).map_or(0, |w| w.parent);
     let to = if parent == super::super::DESKTOP {
@@ -2677,7 +2681,8 @@ fn ctl_color(cpu: &mut Cpu, c: &Ctx) -> (u32, u32) {
     } else {
         parent
     };
-    let static_ = c.e.flags & EF_DISABLED != 0 || c.e.style & ES_READONLY != 0;
+    let static_ = (c.e.flags & EF_DISABLED != 0 || c.e.style & ES_READONLY != 0)
+        && !expects_win3(cpu, c.hwnd);
     let ctl = if static_ {
         WM_CTLCOLORSTATIC
     } else {
@@ -2757,9 +2762,15 @@ fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32, brush: u32, print: bool) {
     }
     clip(cpu, hdc, e.format);
     select_font(cpu, hdc, e.font);
-    if !enabled {
+    // A disabled edit's text is gray, unless that is the background's
+    // color, as Windows 98's USER.EXE paints it. A multi-line edit of a
+    // program made for a Windows before 4.0 keeps the WM_CTLCOLOR text
+    // color there.
+    if !enabled && (!e.ml() || !expects_win3(cpu, hwnd)) {
         let gray = user(cpu).color(COLOR_GRAYTEXT);
-        dc::set_text_color(cpu, &[hdc, gray]);
+        if dc::get_bk_color(cpu, &[hdc]) != Some(gray) {
+            dc::set_text_color(cpu, &[hdc, gray]);
+        }
     }
     let lines = e.lines();
     let (first, last) = if e.ml() {

@@ -52,6 +52,9 @@ pub struct Builder {
     /// A DLL's name, which its export directory has.
     dll: Option<String>,
     subsystem: u16,
+    /// The subsystem's version, major and minor: the Windows the program
+    /// was made for.
+    subsystem_version: (u16, u16),
     entry: u32,
     stack: (u32, u32),
     sections: Vec<Built>,
@@ -89,6 +92,7 @@ impl Builder {
             image_base,
             dll: None,
             subsystem: SUBSYSTEM_CONSOLE,
+            subsystem_version: (4, 0),
             entry: 0,
             stack: (0x10_0000, 0x1000),
             sections: Vec::new(),
@@ -110,6 +114,13 @@ impl Builder {
 
     pub fn subsystem(&mut self, subsystem: u16) -> &mut Self {
         self.subsystem = subsystem;
+        self
+    }
+
+    /// The version of Windows the program says it was made for (4.0
+    /// unless this says otherwise).
+    pub fn subsystem_version(&mut self, major: u16, minor: u16) -> &mut Self {
+        self.subsystem_version = (major, minor);
         self
     }
 
@@ -556,7 +567,8 @@ impl Builder {
         put32(out, opt + 32, ALIGN);
         put32(out, opt + 36, ALIGN);
         put16(out, opt + 40, 4);
-        put16(out, opt + 48, 4);
+        put16(out, opt + 48, self.subsystem_version.0);
+        put16(out, opt + 50, self.subsystem_version.1);
         put32(out, opt + 56, size_of_image);
         put32(out, opt + 60, ALIGN);
         put16(out, opt + 68, self.subsystem);

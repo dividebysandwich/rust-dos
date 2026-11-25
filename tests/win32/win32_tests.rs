@@ -21022,3 +21022,105 @@ fn direct3drm_create_makes_an_object_that_counts_its_references() {
     let (code, out) = run("direct3drm_create", exe);
     assert_eq!(code, 0, "check {code} went wrong {out}");
 }
+
+/// A GUI program made for the Windows `major`.`minor` (its subsystem
+/// version) with a visible edit control of the style `style` in a popup
+/// of its own class. The popup's procedure notes the WM_CTLCOLOR*
+/// messages it gets, 1 for WM_CTLCOLOREDIT and 2 for WM_CTLCOLORSTATIC,
+/// and passes them on to DefWindowProcA. The program paints the edit
+/// with UpdateWindow and ends with what was noted.
+fn edit_colors_program(style: i32, (major, minor): (u16, u16)) -> Vec<u8> {
+    const WM_CTLCOLOREDIT: i32 = 0x0133;
+    const WM_CTLCOLORSTATIC: i32 = 0x0138;
+    const WS_CHILD_VISIBLE: i32 = 0x5000_0000;
+    let names: &[&str] = &[
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "UpdateWindow",
+    ];
+    let kernel: &[&str] = &["ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("USER32.dll", names), ("KERNEL32.dll", kernel)];
+    let mut d = Data::default();
+    let name = d.text("EditColors");
+    let edit = d.text("Edit");
+    let text = d.text("WWWW");
+    let asked = d.add(&[0; 4]);
+    let mut wndclass = [0; 40];
+    wndclass[16..20].copy_from_slice(&BASE.to_le_bytes());
+    let class = d.add(&wndclass);
+    let mut b = Builder::exe(BASE);
+    b.subsystem(pe::SUBSYSTEM_GUI)
+        .subsystem_version(major, minor);
+    program_with(b, false, imports, &d.0, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut not_edit = a.create_label();
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_CTLCOLOREDIT)?;
+        a.jne(not_edit)?;
+        a.or(dword_ptr(l.at(asked)), 1)?;
+        a.set_label(&mut not_edit)?;
+        a.cmp(dword_ptr(esp + 8), WM_CTLCOLORSTATIC)?;
+        a.jne(other)?;
+        a.or(dword_ptr(l.at(asked)), 2)?;
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(class + 4)), eax)?;
+        a.mov(dword_ptr(l.at(class + 36)), l.at(name) as i32)?;
+        a.push(l.at(class) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        for value in [0, BASE as i32, 0, 0, 100, 200, 0, 0, POPUP] {
+            a.push(value)?;
+        }
+        a.push(l.at(name) as i32)?;
+        a.push(l.at(name) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.push(0)?;
+        a.push(BASE as i32)?;
+        a.push(5)?;
+        a.push(eax)?;
+        for value in [40, 100, 0, 0, WS_CHILD_VISIBLE | style] {
+            a.push(value)?;
+        }
+        a.push(l.at(text) as i32)?;
+        a.push(l.at(edit) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.push(eax)?;
+        a.call(f("UpdateWindow"))?;
+        a.push(dword_ptr(l.at(asked)))?;
+        a.call(l.import(names.len()))
+    })
+}
+
+#[test]
+fn a_win32_program_for_windows_3_gets_edit_colors_for_a_read_only_edit() {
+    // Windows 98's USER checks the version the program was made for,
+    // which for a Win32 program is its header's subsystem version: one
+    // made for 3.10 gets WM_CTLCOLOREDIT for a read-only edit, one made
+    // for 4.0 WM_CTLCOLORSTATIC.
+    const ES_MULTILINE: i32 = 0x0004;
+    const ES_READONLY: i32 = 0x0800;
+    const WS_DISABLED: i32 = 0x0800_0000;
+    for (style, what) in [
+        (ES_MULTILINE | ES_READONLY, "read-only"),
+        (ES_MULTILINE | WS_DISABLED, "disabled"),
+        (WS_DISABLED, "disabled single-line"),
+    ] {
+        let exe = edit_colors_program(style, (3, 10));
+        let (code, out) = run("edit_colors_win32_3", exe);
+        assert_eq!(code, 1, "a {what} edit of a 3.10 program: {out}");
+        let exe = edit_colors_program(style, (4, 0));
+        let (code, out) = run("edit_colors_win32_4", exe);
+        assert_eq!(code, 2, "a {what} edit of a 4.0 program: {out}");
+    }
+    let exe = edit_colors_program(ES_MULTILINE, (4, 0));
+    let (code, out) = run("edit_colors_win32_plain", exe);
+    assert_eq!(code, 1, "an edit that takes input: {out}");
+}
