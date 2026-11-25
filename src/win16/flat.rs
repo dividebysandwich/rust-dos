@@ -1171,7 +1171,7 @@ pub(super) fn client_of(cpu: &Cpu, tid: u32) -> Option<usize> {
 /// Win32 process a client task runs a call for, as Windows 95 runs a
 /// thunk's 16-bit code in the calling process's context, or else the
 /// Win16 process's own.
-pub(super) fn served_pid(cpu: &Cpu) -> u32 {
+pub(crate) fn served_pid(cpu: &Cpu) -> u32 {
     let tid = crate::win32::running(cpu)
         .and_then(|p| p.current_thread())
         .map_or(0, |t| t.id);
