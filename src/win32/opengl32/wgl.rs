@@ -936,12 +936,12 @@ pub fn use_font_bitmaps_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// position on by its advance. As Windows' OPENGL32 makes them (Wine's
 /// wglUseFontBitmaps_common is the reference): the glyph's black box
 /// as GetGlyphOutline's GGO_BITMAP gives it, from GDI's own glyphs
-/// (`gdi32::font::glyph_bitmaps`, which TextOut draws), its origin the
-/// box's top left from the pen, and a glyph without pixels a bitmap of
-/// none. A list of one of those names is replaced. It fails without a
-/// current context, for a DC that isn't one, and while the context
-/// compiles a list or is between glBegin and glEnd, where glNewList
-/// can't run.
+/// (`gdi32::font::Realized::glyph_bitmap`, which TextOut draws), its
+/// origin the box's top left from the pen, and a glyph without pixels a
+/// bitmap of none. A list of one of those names is replaced. It fails
+/// without a current context, for a DC that isn't one, and while the
+/// context compiles a list or is between glBegin and glEnd, where
+/// glNewList can't run.
 fn use_font_bitmaps(cpu: &mut Cpu, args: &[u32], wide: bool) -> bool {
     let [hdc, first, count, base] = [args[0], args[1], args[2], args[3]];
     if super::ctx(cpu).is_none() {
