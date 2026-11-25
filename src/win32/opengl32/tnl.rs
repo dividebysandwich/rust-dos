@@ -59,8 +59,8 @@ pub enum Why {
     NoCard,
     /// `RUST_DOS_TOADFORCE_TNL=pipeline` asks for it.
     Asked,
-    /// A matrix or a light's or material's number that is no number,
-    /// or a depth range the card's viewport doesn't take.
+    /// A matrix, a clip plane or a light's or material's number that is
+    /// no number, or a depth range the card's viewport doesn't take.
     Numbers,
     /// Lit through a modelview matrix that has no inverse, where
     /// OpenGL leaves normals as they are and the card has none, or
@@ -326,7 +326,10 @@ fn state(c: &Context) -> State {
     // (`hal::toadforce::can_transform`).
     let (near, depth) = (c.depth_range[0], c.depth_range[1] - c.depth_range[0]);
     let depths = (0.0..=1.0).contains(&near) && (0.0..=1.0).contains(&(near + depth));
-    if !finite(&modelview) || !finite(&projection) || !depths || depth < 0.0 {
+    // The card takes no clip plane that isn't numbers
+    // (`hal::toadforce::can_transform`).
+    let planes = c.clip.on().iter().all(|p| finite(p));
+    if !finite(&modelview) || !finite(&projection) || !depths || depth < 0.0 || !planes {
         return Err(Why::Numbers);
     }
     if c.caps & CAP_LIGHTING == 0 {

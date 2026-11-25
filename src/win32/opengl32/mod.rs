@@ -78,6 +78,7 @@
 //! 2005 Raphael Junqueira.
 
 mod attrib;
+mod clip;
 mod draw;
 mod exports;
 mod imm;
@@ -87,6 +88,7 @@ mod matrix;
 mod pname;
 mod shade;
 mod state;
+mod texgen;
 mod texture;
 pub mod tnl;
 pub mod wgl;
@@ -99,6 +101,7 @@ use super::ddraw::d3d::pipeline::{IDENTITY, Matrix};
 use super::ddraw::stamp::Stamped;
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 
 pub static DLL: Dll = Dll {
     name: "OPENGL32.DLL",
@@ -365,6 +368,10 @@ pub struct Settings {
     /// named ones are its group's, which wglShareLists gives another
     /// context too (`lists::Shared`).
     pub default_texture: Texture,
+    /// Each unit's texture coordinate generation (`texgen.rs`).
+    pub texgen: Since<{ texgen::TEXGEN_SAVED }, [texgen::TexGen; UNITS]>,
+    /// The user's clip planes and their enables (`clip.rs`).
+    pub clip: Since<{ texgen::TEXGEN_SAVED }, clip::Clip>,
 }
 
 /// OpenGL's state: the system's.
@@ -550,8 +557,9 @@ pub const CAP_NORMALIZE: u32 = 0x800;
 pub const CAP_LINE_SMOOTH: u32 = 0x1000;
 pub const CAP_POLYGON_OFFSET_LINE: u32 = 0x2000;
 pub const CAP_POLYGON_OFFSET_POINT: u32 = 0x4000;
-pub const CAP_CLIP_PLANES: u32 = 0x8000;
-pub const CAP_TEXTURE_GEN: u32 = 0x1_0000;
+// 0x8000 and 0x1_0000 were the clip planes' and texture generation's,
+// which have enables of their own now (`clip::Clip`, `texgen::TexGen`):
+// a state saved before has them set or not, and nothing reads them.
 pub const CAP_POLYGON_SMOOTH: u32 = 0x2_0000;
 pub const CAP_POINT_SMOOTH: u32 = 0x4_0000;
 pub const CAP_LINE_STIPPLE: u32 = 0x8_0000;
@@ -684,7 +692,9 @@ crate::state_fields!(Settings {
     env_mode,
     env_color,
     bound,
-    default_texture
+    default_texture,
+    texgen,
+    clip
 });
 crate::state_fields!(Context {
     settings,
@@ -751,6 +761,7 @@ pub fn keeps_waiting(id: u16) -> bool {
         "glLoadMatrix",
         "glMultMatrix",
         "glStencil",
+        "glTexGen",
     ];
     const NAMES: &[&str] = &[
         "glBegin",
@@ -792,6 +803,7 @@ pub fn keeps_waiting(id: u16) -> bool {
         "glFrustum",
         "glViewport",
         "glScissor",
+        "glClipPlane",
         "glPushAttrib",
         "glPopAttrib",
         "glGetError",

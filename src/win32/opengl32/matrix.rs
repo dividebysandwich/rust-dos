@@ -32,6 +32,54 @@ pub fn apply(m: &Matrix, v: [f32; 4]) -> [f32; 4] {
     std::array::from_fn(|row| (0..4).map(|k| m[k * 4 + row] * v[k]).sum())
 }
 
+/// The inverse of `m`, None for a matrix that has none: Gauss-Jordan
+/// elimination with partial pivoting, in doubles.
+pub fn invert(m: &Matrix) -> Option<Matrix> {
+    // Rows of the matrix with the identity beside them; element (r, c)
+    // of a column-major matrix is m[c * 4 + r].
+    let mut a = [[0.0f64; 8]; 4];
+    for (r, row) in a.iter_mut().enumerate() {
+        for c in 0..4 {
+            row[c] = m[c * 4 + r] as f64;
+        }
+        row[4 + r] = 1.0;
+    }
+    for col in 0..4 {
+        let pivot = (col..4).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
+        if a[pivot][col] == 0.0 || !a[pivot][col].is_finite() {
+            return None;
+        }
+        a.swap(col, pivot);
+        let p = a[col][col];
+        for v in a[col].iter_mut() {
+            *v /= p;
+        }
+        for r in 0..4 {
+            let f = a[r][col];
+            if r != col && f != 0.0 {
+                let pivot_row = a[col];
+                for (v, p) in a[r].iter_mut().zip(pivot_row) {
+                    *v -= f * p;
+                }
+            }
+        }
+    }
+    Some(std::array::from_fn(|i| a[i % 4][4 + i / 4] as f32))
+}
+
+/// The plane `p`, given while `m` is the modelview matrix, in eye
+/// coordinates: the row vector p M^-1, as glClipPlane and glTexGen's
+/// GL_EYE_PLANE keep it (sections 2.11 and 2.10.4). A matrix with no
+/// inverse leaves the plane as it is, as in Mesa, whose inverse of such
+/// a matrix is the identity.
+pub fn eye_plane(m: &Matrix, p: [f32; 4]) -> [f32; 4] {
+    let Some(inv) = invert(m) else {
+        return p;
+    };
+    // Element (r, c) of the inverse is inv[c * 4 + r].
+    std::array::from_fn(|c| (0..4).map(|r| p[r] * inv[c * 4 + r]).sum())
+}
+
 /// The stack glMatrixMode chose, and its greatest depth.
 fn stack(c: &mut Context) -> (&mut Vec<Matrix>, usize) {
     match c.matrix_mode {
