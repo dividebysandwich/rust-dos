@@ -224,12 +224,21 @@ fn round_depth(bpp: u32) -> Option<u16> {
 
 /// A new bitmap of GDI's, its pixels 0.
 pub fn new_ddb(cpu: &mut Cpu, width: i32, height: i32, bpp: u16) -> u32 {
+    new_ddb_with(cpu, width, height, bpp, &[])
+}
+
+/// A new bitmap of GDI's, its rows `init` (those it hasn't 0). It has
+/// them when it joins Windows 3.1's GDI heap, which copies them.
+pub fn new_ddb_with(cpu: &mut Cpu, width: i32, height: i32, bpp: u16, init: &[u8]) -> u32 {
     let stride = surface::ddb_stride(width, bpp as u32) as u32;
     let size = stride as usize * height as usize;
     if size > MAX_BITS {
         set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
         return 0;
     }
+    let mut bits = vec![0; size];
+    let n = size.min(init.len());
+    bits[..n].copy_from_slice(&init[..n]);
     add(
         cpu,
         Kind::Bitmap {
@@ -239,7 +248,7 @@ pub fn new_ddb(cpu: &mut Cpu, width: i32, height: i32, bpp: u16) -> u32 {
                 bpp,
                 planes: 1,
                 stride,
-                bits: vec![0; size],
+                bits,
                 ..Bitmap::default()
             },
         },
@@ -266,16 +275,13 @@ pub fn create_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     };
-    let handle = new_ddb(cpu, w, h, depth);
-    if handle != 0 && bits != 0 {
-        let size = gdi(cpu).bitmap(handle).map_or(0, |b| b.bits.len());
-        let mut data = vec![0u8; size];
+    let size = surface::ddb_stride(w, depth as u32) * h as usize;
+    let mut data = Vec::new();
+    if bits != 0 && size <= MAX_BITS {
+        data.resize(size, 0);
         cpu.bus.guest_read_bytes(bits, &mut data);
-        if let Some(b) = gdi(cpu).bitmap_mut(handle) {
-            b.bits = data;
-        }
     }
-    Some(handle)
+    Some(new_ddb_with(cpu, w, h, depth, &data))
 }
 
 /// CreateBitmapIndirect(bitmap).

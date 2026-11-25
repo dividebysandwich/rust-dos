@@ -1,10 +1,12 @@
 //! Windows 3.1's GDI heap (`Shim::Win31GdiHeap`, src/win32/shims/win31):
 //! a program with the shim finds its bitmaps through TOOLHELP as it did
 //! on Windows 3.1, and BitBlt draws from the device BITMAP it changed, as
-//! Lunicus's LUNIFX.DLL does. A program without it finds no GDI heap,
-//! and the log says once which shim it may need. The programs are made
-//! byte by byte (tests/common/win16) and end with the number of the
-//! first check that failed, 0 when all held.
+//! Lunicus's LUNIFX.DLL does. GDI's drawing into that bitmap goes where
+//! the BITMAP's bmBits points, as Windows 3.1's display driver put it. A
+//! program without the shim finds no GDI heap, and the log says once
+//! which shim it may need. The programs are made byte by byte
+//! (tests/common/win16) and end with the number of the first check that
+//! failed, 0 when all held.
 
 use crate::win16;
 
@@ -14,6 +16,8 @@ use win16::{CODE, Code, program, run, run_with};
 
 /// KERNEL's, GDI's and TOOLHELP's ordinals the programs call.
 const GLOBAL_LOCK: u16 = 18;
+const PAT_BLT: u16 = 29;
+const TEXT_OUT: u16 = 33;
 const BIT_BLT: u16 = 34;
 const SELECT_OBJECT: u16 = 45;
 const CREATE_BITMAP: u16 = 48;
@@ -28,7 +32,8 @@ const MEMORY_READ: u16 = 78;
 /// Where the programs keep things in their data segment: the bitmap and
 /// DC read from and drawn into, GDI's selector, the first hGDISegment,
 /// the offset MemoryRead reads at and what it read, a SYSHEAPINFO, the
-/// pixels the device BITMAP is pointed at and those GetBitmapBits gave.
+/// pixels the device BITMAP is pointed at and those GetBitmapBits gave,
+/// and a string TextOut draws.
 const BITMAP: u16 = 0x10;
 const DC: u16 = 0x12;
 const TARGET: u16 = 0x14;
@@ -41,6 +46,7 @@ const INFO: u16 = 0x30;
 const H_GDI_SEGMENT: u16 = INFO + 0x0A;
 const PIXELS: u16 = 0x40;
 const GOT: u16 = 0x60;
+const TEXT: u16 = 0x70;
 
 /// The device BITMAP's fields LUNIFX.DLL writes.
 const BM_WIDTH: u8 = 0x02;
@@ -83,6 +89,13 @@ fn push_data(code: &mut Code, at: u16) {
 /// End with `fail` unless the last comparison found them equal.
 fn or_fail(code: &mut Code, fail: u8) {
     code.emit(&[0x74, 0x06]) // je over the exit
+        .emit(&[0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21]);
+}
+
+/// End with `fail` if the word at `at` is `value`.
+fn expect_not(code: &mut Code, at: u16, value: u16, fail: u8) {
+    code.emit(&[0x81, 0x3E, lo(at), hi(at), lo(value), hi(value)])
+        .emit(&[0x75, 0x06]) // jne over the exit
         .emit(&[0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21]);
 }
 
@@ -153,14 +166,13 @@ fn bitmap_in_dc(code: &mut Code, width: u16, height: u16, at: u16, dc: u16) {
     code.call("GDI", SELECT_OBJECT);
 }
 
-/// A program that does what LUNIFX.DLL does: it makes a bitmap of 4 by 1
-/// and selects it, finds its device BITMAP through GDI's heap (the
-/// handle table entry at the handle's offset, the object's global handle
-/// at +0Ah of the object), sets its size to 8 by 2 and points bmBits at
-/// pixels of its own, and BitBlts it into a bitmap of 8 by 2, whose bits
-/// must then be those pixels. Then it deletes the bitmap, whose handle
-/// table entry is then 0. Without GDI's heap it ends with 20h.
-fn reads_gdis_heap() -> Code {
+/// What LUNIFX.DLL does first: make a bitmap of 4 by 1 and select it,
+/// find its device BITMAP through GDI's heap (the handle table entry at
+/// the handle's offset, the object's global handle at +0Ah of the
+/// object), set its size to 8 by 2 and point bmBits at pixels of its
+/// own. It makes a bitmap of 8 by 2 to blit into too. Without GDI's heap
+/// the program ends with 20h.
+fn change_device_bitmap() -> Code {
     let mut code = Code::new();
     for i in 0..(WIDTH * HEIGHT / 2) {
         set(&mut code, PIXELS + 2 * i, 0x0201 + 0x0202 * i);
@@ -208,24 +220,38 @@ fn reads_gdis_heap() -> Code {
     set_field(&mut code, BM_WIDTH_BYTES, WIDTH);
     set_field(&mut code, BM_BITS, PIXELS);
     code.emit(&[0x26, 0x8C, 0x5F, BM_BITS + 2]); // mov es:[bx+0Ch],ds
+    code
+}
 
-    // BitBlt(target, 0, 0, 8, 2, dc, 0, 0, SRCCOPY).
-    push_word(&mut code, TARGET_DC);
+/// BitBlt(target, 0, 0, 8, 2, dc, 0, 0, SRCCOPY), and the target's bits
+/// must then be the pixels the device BITMAP points at: ends with
+/// `fail`, or the next numbers for the pixels.
+fn blit_shows_pixels(code: &mut Code, fail: u8) {
+    push_word(code, TARGET_DC);
     code.push(0).push(0).push(WIDTH).push(HEIGHT);
-    push_word(&mut code, DC);
+    push_word(code, DC);
     code.push(0).push(0).push(0x00CC).push(0x0020);
     code.call("GDI", BIT_BLT);
-    expect_ax(&mut code, 1, 12);
-    push_word(&mut code, TARGET);
+    expect_ax(code, 1, fail);
+    push_word(code, TARGET);
     code.push(0).push(WIDTH * HEIGHT);
-    push_data(&mut code, GOT);
+    push_data(code, GOT);
     code.call("GDI", GET_BITMAP_BITS);
-    expect_ax(&mut code, WIDTH * HEIGHT, 13);
+    expect_ax(code, WIDTH * HEIGHT, fail + 1);
     for i in 0..(WIDTH * HEIGHT / 2) {
         code.emit(&[0xA1, lo(GOT + 2 * i), hi(GOT + 2 * i)]) // mov ax,[GOT+i]
             .emit(&[0x3B, 0x06, lo(PIXELS + 2 * i), hi(PIXELS + 2 * i)]); // cmp ax,[PIXELS+i]
-        or_fail(&mut code, 14 + i as u8);
+        or_fail(code, fail + 2 + i as u8);
     }
+}
+
+/// A program that does what LUNIFX.DLL does (`change_device_bitmap`) and
+/// BitBlts the bitmap into one of 8 by 2, whose bits must then be the
+/// pixels. Then it deletes the bitmap, whose handle table entry is then
+/// 0.
+fn reads_gdis_heap() -> Code {
+    let mut code = change_device_bitmap();
+    blit_shows_pixels(&mut code, 12);
 
     // Deleted, the bitmap leaves GDI's heap.
     push_word(&mut code, DC);
@@ -235,6 +261,48 @@ fn reads_gdis_heap() -> Code {
     expect_ax(&mut code, 1, 30);
     read_gdi(&mut code, BITMAP, 0, 4);
     expect(&mut code, READ, 0, 31);
+    code.emit(&[0xB0, 0x00]).exit_al();
+    code
+}
+
+/// A program that changes the device BITMAP as LUNIFX.DLL does, copies
+/// the pixels into the bitmap of 8 by 2, and then draws into the changed
+/// bitmap through its memory DC: PatBlt BLACKNESS over the first two
+/// pixels, TextOut at (4, 0), and a BitBlt of the other bitmap's first
+/// two pixels to (2, 1). Each must show in its pixels, and a BitBlt from
+/// the bitmap then copies them as they are.
+fn draws_into_the_changed_bitmap() -> Code {
+    let mut code = change_device_bitmap();
+    blit_shows_pixels(&mut code, 12);
+    set(&mut code, TEXT, u16::from(b'x'));
+
+    // PatBlt(dc, 0, 0, 2, 1, BLACKNESS): the system palette's black, 0.
+    push_word(&mut code, DC);
+    code.push(0).push(0).push(2).push(1);
+    code.push(0x0000).push(0x0042);
+    code.call("GDI", PAT_BLT);
+    expect_ax(&mut code, 1, 40);
+    expect(&mut code, PIXELS, 0x0000, 41);
+
+    // TextOut(dc, 4, 0, "x", 1): its opaque cell covers pixels 4 and 5.
+    push_word(&mut code, DC);
+    code.push(4).push(0);
+    push_data(&mut code, TEXT);
+    code.push(1).call("GDI", TEXT_OUT);
+    expect_ax(&mut code, 1, 42);
+    expect_not(&mut code, PIXELS + 4, 0x0605, 43);
+
+    // BitBlt(dc, 2, 1, 2, 1, target, 0, 0, SRCCOPY): pixels 1 and 2.
+    push_word(&mut code, DC);
+    code.push(2).push(1).push(2).push(1);
+    push_word(&mut code, TARGET_DC);
+    code.push(0).push(0).push(0x00CC).push(0x0020);
+    code.call("GDI", BIT_BLT);
+    expect_ax(&mut code, 1, 44);
+    expect(&mut code, PIXELS + WIDTH + 2, 0x0201, 45);
+
+    // And what GDI drew shows in the next blit from the bitmap.
+    blit_shows_pixels(&mut code, 50);
     code.emit(&[0xB0, 0x00]).exit_al();
     code
 }
@@ -259,6 +327,23 @@ fn a_program_with_the_shim_reads_and_changes_gdis_heap() {
     );
     assert_eq!(code, 0, "{log}");
     assert!(!log.contains(HINT), "{log}");
+}
+
+/// GDI's drawing into a bitmap whose device BITMAP the program changed
+/// goes where its bmBits points, as Windows 3.1's display driver drew
+/// there: the program sees it in its pixels, and the next BitBlt from the
+/// bitmap copies it (#1900).
+#[test]
+fn gdi_draws_into_the_pixels_a_changed_device_bitmap_points_at() {
+    let (code, log) = run_with(
+        "gdi_heap_draws",
+        program(&draws_into_the_changed_bitmap(), CODE),
+        |cpu, _| {
+            cpu.bus.win32.shims = shims::win31::WIN31;
+            cpu.bus.win32.depth = DesktopDepth::Palette;
+        },
+    );
+    assert_eq!(code, 0, "{log}");
 }
 
 /// Without the shim there is no GDI heap, as on Windows 98's GDI32, and

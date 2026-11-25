@@ -339,6 +339,8 @@ pub fn place(cpu: &mut Cpu, hdc: u32) -> Option<Place> {
         }
         MEMORY => {
             gdi(cpu).bitmap(dc.attrs.bitmap)?;
+            // The size its device BITMAP says, in Windows 3.1's GDI heap.
+            crate::win32::shims::win31::gdi_heap::refresh(cpu, dc.attrs.bitmap);
             Target::Bitmap(dc.attrs.bitmap)
         }
         _ => return None,
