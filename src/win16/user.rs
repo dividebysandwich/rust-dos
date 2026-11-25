@@ -576,11 +576,6 @@ fn go_at(cpu: &mut Cpu, top: u32, name: &str, args: &[u32], data: Vec<u32>) -> O
     None
 }
 
-/// The thread that runs, if any.
-fn running_thread(cpu: &mut Cpu) -> Option<u32> {
-    crate::win32::process(cpu).current_thread().map(|t| t.id)
-}
-
 /// What `post` does with what a USER32 function returned: `data[0]`.
 const P_MSG: u32 = 1;
 const P_PAINT: u32 = 2;
@@ -632,14 +627,18 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
                 // With no message, Windows 3.1's PeekMessage lets the
                 // other tasks run before it returns, so a task that waits
                 // in a PeekMessage loop for another to end lets it run.
+                // It yields through UserYield, as Yield does: a message
+                // another task sends meanwhile is handled, the sender runs
+                // on to its end, and PeekMessage then returns FALSE
+                // without looking at the queue again, even when the
+                // sender posted to it (Windows 95 in 86Box, #1914).
                 let mut resume = *ctx;
                 thunk::set_ax(&mut resume, 0);
                 resume.gpr[thunk::EDX] &= 0xFFFF_0000;
-                let running = cpu.bus.observe.on.then(|| running_thread(cpu)).flatten();
-                super::task::yield_now(cpu, resume);
-                // With no other task ready, the same one goes on, its
-                // turn started over: an idle proof follows that.
-                if running.is_some() && running_thread(cpu) == running {
+                if !super::kernel::yield_and_receive(cpu, resume) {
+                    // With no other task ready and nothing sent, the same
+                    // one goes on, its turn started over: an idle proof
+                    // follows that.
                     crate::idle::pure_call(cpu, None);
                     crate::idle::reads_arguments(cpu);
                     crate::idle::turn_started(cpu);

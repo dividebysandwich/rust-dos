@@ -823,7 +823,8 @@ fn yield16(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// the messages sent to it meanwhile (UserYield16) before `ctx` goes on.
 /// False when the same task goes on at once with nothing sent to it: it
 /// goes on at `ctx` straight away, without the call of UserYield16.
-fn yield_and_receive(cpu: &mut Cpu, ctx: Context) -> bool {
+/// Yield and PeekMessage's yield (user.rs) go through it.
+pub(super) fn yield_and_receive(cpu: &mut Cpu, ctx: Context) -> bool {
     let me = running_thread(cpu);
     let target = super::message::user32(cpu, "UserYield16");
     thunk::enter32(cpu, ctx, target, &[], thunk::POST_YIELD, vec![1]);

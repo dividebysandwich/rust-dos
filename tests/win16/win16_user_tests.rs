@@ -1198,6 +1198,12 @@ enum Waits {
     /// then calls WaitMessage until its procedure got WM_SETTEXT, and ends
     /// with 34h.
     WaitMessage,
+    /// In one PeekMessage without PM_NOYIELD for WM_CLOSE only, which
+    /// finds nothing and yields. The client posts WM_CLOSE during that
+    /// yield, after its sends. Then it ends with 34h if PeekMessage
+    /// returned FALSE and its procedure got WM_SETTEXT by then, 35h if
+    /// it hadn't, 36h if PeekMessage returned TRUE.
+    Peek,
 }
 
 /// SRV.EXE: the DIGITS windows of `digits_windows`, whose procedure
@@ -1212,6 +1218,21 @@ fn intertask_server(waits: Waits) -> Vec<u8> {
             .call("KERNEL", YIELD)
             .emit(&[0x83, 0x3E, DIGITS_SET, 0x00, 0x00]) // cmp word [DIGITS_SET],0
             .emit(&[0xB0, 0x34, 0x75, 0x02, 0xB0, 0x35]) // mov al,34h; jne; mov al,35h
+            .exit_al();
+    }
+    if waits == Waits::Peek {
+        const WM_CLOSE: u16 = 0x10;
+        p.code
+            .emit(&[0x1E])
+            .push(MSG)
+            .push(0)
+            .push(WM_CLOSE)
+            .push(WM_CLOSE)
+            .push(1) // PM_REMOVE
+            .call("USER", PEEK_MESSAGE)
+            .emit(&[0x0B, 0xC0, 0xB0, 0x36, 0x75, 0x0B]) // or ax,ax; mov al,36h; jnz end
+            .emit(&[0x83, 0x3E, DIGITS_SET, 0x00, 0x00]) // cmp word [DIGITS_SET],0
+            .emit(&[0xB0, 0x34, 0x75, 0x02, 0xB0, 0x35]) // mov al,34h; jne end; mov al,35h
             .exit_al();
     }
     if waits == Waits::WaitMessage {
@@ -1297,6 +1318,24 @@ fn a_task_that_yields_receives_what_another_task_sends() {
     // Yield, and the client ends first.
     let (_, log) = run_with("intertask_yield", intertask_client(), |_, base| {
         std::fs::write(base.join("SRV.EXE"), intertask_server(Waits::Yield)).unwrap();
+    });
+    assert!(ended_with(&log, 1), "{log}");
+    assert!(ended_with(&log, 0x34), "{log}");
+    assert!(ended_at(&log, 1) < ended_at(&log, 0x34), "{log}");
+}
+
+#[test]
+fn a_task_that_peeks_receives_what_another_task_sends_while_it_yields() {
+    // A PeekMessage without PM_NOYIELD that finds no message yields
+    // through UserYield, as Yield does. On Windows 95 a message another
+    // task sends meanwhile is handled, the reply lets the sender run on
+    // to its end, and PeekMessage then returns FALSE without looking at
+    // the queue again (QPEEK's measurements in 86Box, #1914): the
+    // client's sends all reach the server's procedure during its one
+    // PeekMessage, the client ends first, and the WM_CLOSE it posted
+    // meanwhile isn't returned.
+    let (_, log) = run_with("intertask_peek", intertask_client(), |_, base| {
+        std::fs::write(base.join("SRV.EXE"), intertask_server(Waits::Peek)).unwrap();
     });
     assert!(ended_with(&log, 1), "{log}");
     assert!(ended_with(&log, 0x34), "{log}");
