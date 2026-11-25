@@ -301,6 +301,10 @@ impl Overlay {
     /// `path`, a file or a folder and what's in it, all above: what is
     /// only below is copied up, by the spelling the folder lists it by.
     fn copy_up_whole(&self, path: &str) -> io::Result<()> {
+        // Nothing of it below, or hidden: it is all above already.
+        if self.lower_meta(path).is_none() {
+            return Ok(());
+        }
         let target = self.writable(path)?;
         if self.is_dir(path) {
             self.upper_dir(path)?;
