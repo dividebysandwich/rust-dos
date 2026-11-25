@@ -1458,3 +1458,107 @@ fn mci_send_command_plays_an_avi_file_with_rects_of_words() {
     });
     assert_eq!(exit, 1, "{log}");
 }
+
+const MCI_SEND_STRING: u16 = 702;
+const MCI_GET_DEVICE_ID: u16 = 703;
+const GET_PALETTE_ENTRIES: u16 = 363;
+const MCI_DGV_STATUS_HPAL: u16 = 0x4004;
+
+/// mciSendString(the string at the code's `text`, DS:BUFFER, 32, 0);
+/// end with `fail` unless it returns 0 in DX:AX. Returns the place of
+/// the string's offset, which is patched in.
+fn mci_string(code: &mut Code, fail: u8) -> u16 {
+    code.emit(&[0x0E]); // push cs
+    let place = code.here() + 1;
+    code.push(0)
+        .emit(&[0x1E]) // push ds
+        .push(BUFFER)
+        .push(32)
+        .push(0)
+        .call("MMSYSTEM", MCI_SEND_STRING);
+    expect_ax(code, 0, fail);
+    code.emit(&[0x0B, 0xD2]) // or dx,dx
+        .emit(&[0x74, 0x06]) // jz over the next
+        .emit(&[0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21]); // mov al,fail; exit
+    place
+}
+
+#[test]
+fn mci_status_palette_handle_is_the_avi_devices_palette() {
+    // `status c palette handle`, as Memphis Math's animations send it
+    // through mciSendString, and MCI_STATUS of MCI_DGV_STATUS_HPAL
+    // through mciSendCommand, before a frame is drawn. On a desktop of
+    // 256 colours both give the palette MCIAVI draws the movie with:
+    // the string's decimal number is the DWORD's, and GetPaletteEntries
+    // counts the halftone palette's 256 colours of a 24-bit movie. On a
+    // desktop of more colours there is no palette, and both give 0.
+    // Exit code 1, or the check that failed.
+    for palette in [true, false] {
+        let mut code = Code::new();
+        let open = mci_string(&mut code, 2);
+        code.emit(&[0x0E]); // push cs
+        let alias = code.here() + 1;
+        code.push(0).call("MMSYSTEM", MCI_GET_DEVICE_ID);
+        expect_nonzero(&mut code, 3);
+        code.emit(&[0xA3, lo(DEVICE), hi(DEVICE)]); // mov [DEVICE],ax
+        let status = mci_string(&mut code, 4);
+        // The reply's decimal number into AX.
+        code.emit(&[0x33, 0xC0]) // xor ax,ax
+            .emit(&[0xBE, lo(BUFFER), hi(BUFFER)]) // mov si,BUFFER
+            .emit(&[0xB9, 10, 0]); // mov cx,10
+        let top = code.here();
+        code.emit(&[0x8A, 0x1C]) // mov bl,[si]
+            .emit(&[0x0A, 0xDB]) // or bl,bl
+            .emit(&[0x74, 0x0C]) // jz done
+            .emit(&[0x80, 0xEB, b'0']) // sub bl,'0'
+            .emit(&[0x32, 0xFF]) // xor bh,bh
+            .emit(&[0xF7, 0xE1]) // mul cx
+            .emit(&[0x03, 0xC3]) // add ax,bx
+            .emit(&[0x46]); // inc si
+        let back = top.wrapping_sub(code.here() + 2) as u8;
+        code.emit(&[0xEB, back]); // jmp top
+        code.emit(&[0xA3, lo(HWND), hi(HWND)]); // done: mov [HWND],ax
+        // MCI_STATUS_PARMS of MCI_DGV_STATUS_HPAL.
+        set(&mut code, STATUS, 0);
+        set(&mut code, STATUS + 2, 0);
+        set(&mut code, STATUS + 4, 0xEEEE);
+        set(&mut code, STATUS + 6, 0xEEEE);
+        set(&mut code, STATUS + 8, MCI_DGV_STATUS_HPAL);
+        set(&mut code, STATUS + 10, 0);
+        mci(&mut code, MCI_STATUS, MCI_STATUS_ITEM, STATUS, 0, 5);
+        expect(&mut code, STATUS + 6, 0, true, 6);
+        code.emit(&[0xA1, lo(HWND), hi(HWND)]); // mov ax,[HWND]
+        code.emit(&[0x3B, 0x06, lo(STATUS + 4), hi(STATUS + 4)]); // cmp ax,[STATUS+4]
+        code.emit(&[0x74, 0x06]) // je over the next
+            .emit(&[0xB0, 7, 0xB4, 0x4C, 0xCD, 0x21]);
+        if palette {
+            // GetPaletteEntries(hpal, 0, 0, NULL): how many it has.
+            push_word(&mut code, STATUS + 4);
+            code.push(0).push(0).push(0).push(0);
+            code.call("GDI", GET_PALETTE_ENTRIES);
+            expect_ax(&mut code, 256, 8);
+        } else {
+            expect(&mut code, STATUS + 4, 0, true, 8);
+            expect(&mut code, BUFFER, u16::from_le_bytes(*b"0\0"), true, 9);
+        }
+        mci(&mut code, MCI_CLOSE, 0, 0, 0, 10);
+        code.emit(&[0xB0, 0x01]).exit_al();
+        for (place, text) in [
+            (open, &b"open CLIP.AVI alias c\0"[..]),
+            (alias, b"c\0"),
+            (status, b"status c palette handle\0"),
+        ] {
+            let at = code.here();
+            code.emit(text);
+            code.patch(place, at);
+        }
+        let test = if palette { "mci_hpal_8" } else { "mci_hpal_24" };
+        let (exit, log) = run_with(test, program(&code, CODE), |cpu, dir| {
+            if palette {
+                cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+            }
+            std::fs::write(dir.join("CLIP.AVI"), avi_clip()).unwrap();
+        });
+        assert_eq!(exit, 1, "{test}: {log}");
+    }
+}
