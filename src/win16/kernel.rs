@@ -294,6 +294,35 @@ static APIS: &[Api16] = &[
     // the others (src/win32/stub_tables.rs).
     cdecl("_DebugOutput", 328, "wS", debug_output),
     rust("DirectedYield", 150, "w", directed_yield),
+    // The generic thunks: 16-bit code loads a Win32 DLL into its process
+    // and calls its functions.
+    win32(
+        "LoadLibraryEx32W",
+        513,
+        "pll",
+        "KERNEL32.DLL",
+        "LoadLibraryExA",
+        b'l',
+    ),
+    win32(
+        "FreeLibrary32W",
+        514,
+        "l",
+        "KERNEL32.DLL",
+        "FreeLibrary",
+        b'b',
+    ),
+    win32(
+        "GetProcAddress32W",
+        515,
+        "lr",
+        "KERNEL32.DLL",
+        "GetProcAddress",
+        b'l',
+    ),
+    rust("GetVDMPointer32W", 516, "lw", get_vdm_pointer32w),
+    register("CallProc32W", 517, call_proc32w),
+    cdecl("_CallProcEx32W", 518, "lll", call_proc_ex32w),
 ];
 
 /// GetWinFlags': protected mode, 386 enhanced mode, a 486 with a
@@ -1912,6 +1941,78 @@ fn lstrcat(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     text.push(0);
     super::poke(cpu, to + len, &text);
     Some(args[0])
+}
+
+/// GetVDMPointer32W(address, protected): the flat address of a 16:16
+/// address (`protected` not 0) or of a real mode segment:offset one.
+fn get_vdm_pointer32w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let address = args[0];
+    Some(if args[1] as u16 != 0 {
+        super::linear(cpu, address)
+    } else {
+        ((address >> 16) << 4) + (address & 0xFFFF)
+    })
+}
+
+/// The parameters a generic thunk passes on, from the 16-bit stack at
+/// `at`, where the caller pushed `count` of them: as `order` says which
+/// one each is (Pascal's last first, C's first first), the 16:16
+/// addresses whose bits are set in `mask` made flat (bit n for the nth
+/// one on the stack). As many as there are on the stack's segment at
+/// most.
+fn generic_parameters(cpu: &mut Cpu, at: u16, count: u32, mask: u32, pascal: bool) -> Vec<u32> {
+    let base = cpu.seg_cache(Seg::SS).base;
+    let count = count.min((0x1_0000 - at as u32) / 4) as usize;
+    let mut params = vec![0; count];
+    for i in 0..count {
+        let value = cpu
+            .bus
+            .guest_read_32(base.wrapping_add(at as u32 + 4 * i as u32));
+        let value = if i < 32 && mask & 1 << i != 0 {
+            super::linear(cpu, value)
+        } else {
+            value
+        };
+        params[if pascal { count - 1 - i } else { i }] = value;
+    }
+    params
+}
+
+/// CallProc32W(p1, ..., pn, proc, mask, n), Pascal's with as many
+/// parameters as the caller says: call the 32-bit `proc` with p1 to pn,
+/// those that `mask` names made flat (bit 0 for pn, the last), as
+/// Windows 95's KERNEL does for the generic thunks. It takes them all
+/// off the stack, so the 32-bit function returns straight to the caller,
+/// with what it returned in DX:AX.
+fn call_proc32w(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let mut ctx = Context::of(cpu);
+    let base = cpu.seg_cache(Seg::SS).base;
+    let sp = cpu.sp();
+    let word = |cpu: &mut Cpu, at: u16| cpu.bus.guest_read_32(base.wrapping_add(at as u32));
+    let back = word(cpu, sp);
+    let count = word(cpu, sp.wrapping_add(4));
+    let mask = word(cpu, sp.wrapping_add(8));
+    let proc = word(cpu, sp.wrapping_add(12));
+    let params = generic_parameters(cpu, sp.wrapping_add(16), count, mask, true);
+    let popped = 16 + 4 * params.len() as u32;
+    ctx.gpr[ESP] = ctx.gpr[ESP] & 0xFFFF_0000 | (sp as u32 + popped) & 0xFFFF;
+    ctx.seg[Seg::CS as usize] = (back >> 16) as u16;
+    ctx.eip = back & 0xFFFF;
+    thunk::enter32(cpu, ctx, proc, &params, thunk::POST_PLAIN, Vec::new());
+    None
+}
+
+/// _CallProcEx32W(n, mask, proc, p1, ..., pn), C's: CallProc32W's call
+/// with the parameters in the order C pushes them, bit 0 of `mask` for
+/// p1, and left on the stack for the caller to take off.
+fn call_proc_ex32w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[count, mask, proc] = args else {
+        unreachable!()
+    };
+    let at = cpu.sp().wrapping_add(16);
+    let params = generic_parameters(cpu, at, count, mask, false);
+    thunk::call32(cpu, proc, &params, thunk::POST_PLAIN, Vec::new());
+    None
 }
 
 #[cfg(test)]
