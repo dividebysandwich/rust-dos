@@ -362,19 +362,20 @@ report's follow-ups (Phase 4) with what the fix needs, so that it is
 queued as a fix task of its own: by you, if you go on working, or by
 whoever runs the session.
 
-A finding no game or program at hand shows isn't fixed in this session
-and isn't queued: a gap in the log that nothing on screen or in the
-sound depends on, a case the specification or Windows has that no
-program reaches, an edge a review found by reading the code. Its issue
-(from Phase 2, or from the review in step 6) says what the real system
-does and carries the `low-priority` label; list it in the report apart
-from the follow-ups. With `--no-issues`, the report alone lists it. It
-is picked up when a game shows it: that game is added to the issue,
-and the label is raised to the priority the game's problem calls for.
-Two more kinds stay out of the follow-ups, each with its reason in the
-report: the game's own behaviour, which the real PC shows too, and a
-fix that needs a decision with no clearly better option, which the
-report puts to the user.
+A finding no game or program shows isn't fixed in this session and
+isn't queued: a gap in the log that nothing a player sees, hears or
+does depends on, a case the specification or Windows has that no
+program reaches, an edge a review found by reading the code. Step 2 of
+`AGENTS.md`'s pull request lifecycle says which programs count. The
+finding's issue (from Phase 2, or from the review in step 6) says what
+the real system does and carries the `low-priority` label; list it in
+the report apart from the follow-ups. With `--no-issues`, the report
+alone lists it. It is picked up when a game shows it: that game is
+added to the issue, and the label is raised to the priority the game's
+problem calls for. Two more kinds stay out of the follow-ups, each with
+its reason in the report: the game's own behaviour, which the real PC
+shows too, and a fix that needs a decision with no clearly better
+option, which the report puts to the user.
 
 Remove each worktree (`git worktree remove`) once its pull request is
 ready for review and nothing in it is still needed.

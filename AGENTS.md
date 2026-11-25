@@ -113,11 +113,15 @@ that it improves on main. Steps, in this order:
 
    An issue filed this way, or from reading the specification or the
    code, is worked on when a game or program shows the problem: a wrong
-   picture or sound, a crash, a feature it uses that fails, a cost
-   measured in it. Until then it waits with the `low-priority` label,
-   and isn't queued as a task of its own. Once a program shows it, the
-   issue names that program and its label is raised to the priority the
-   program's problem calls for.
+   picture or sound, a crash or a hang, lost input, a feature it uses
+   that fails, a cost measured in it. A program shows it when running
+   that program brings the problem up: the one the work is for, another
+   on the machine, or one an issue or a user's report names. A test, or
+   a program written to reach the case, doesn't count. Until then the
+   issue waits with the `low-priority` label, and isn't queued as a task
+   of its own unless the user asks for that issue. Once a program shows
+   it, the issue names that program and its label is raised to the
+   priority the program's problem calls for.
 3. Validate it, after the review and with its fixes: run the real game
    or program the change is for, where there is one, on the build of the
    branch, and compare with main.
