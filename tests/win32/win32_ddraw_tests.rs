@@ -2222,9 +2222,11 @@ const DEEP_GDI32: (&str, &[&str]) = (
         "SelectPalette",
         "RealizePalette",
         "CreateCompatibleDC",
+        "CreateSolidBrush",
     ],
 );
 const D_CREATE_DC: usize = 7;
+const D_CREATE_SOLID_BRUSH: usize = 8;
 
 // The palette selected before the mode: B's LOGPALETTE, the memory DC
 // and B.
@@ -2238,9 +2240,14 @@ const D_COLOR: [u8; 3] = [0x20, 0x60, 0xA0];
 /// On the desktop, of 32 bits: palette A selected into the window's DC
 /// without bForceBackground and realized. Then full screen at 640x480x8,
 /// palette B selected into a memory DC with bForceBackground and
-/// realized, and A realized again in the window's DC.
+/// realized, and A realized again in the window's DC, which then fills
+/// a rectangle from 10,10 to 20,20 with A's entry.
 fn palette_before_mode_program() -> (Vec<u8>, u32) {
     let mut d = screen_data();
+    put32(&mut d, G_RECT, 10);
+    put32(&mut d, G_RECT + 4, 10);
+    put32(&mut d, G_RECT + 8, 20);
+    put32(&mut d, G_RECT + 12, 20);
     // LOGPALETTEs: version 0x300, one entry, PC_NOCOLLAPSE.
     let entry = |c: [u8; 3]| [c[0], c[1], c[2], 4];
     put32(&mut d, G_LOGPAL, 0x0001_0300);
@@ -2291,6 +2298,11 @@ fn palette_before_mode_program() -> (Vec<u8>, u32) {
         c.api(a, l, G_SELECT_PALETTE, &select)?;
         c.api(a, l, G_REALIZE_PALETTE, &[Arg::Val(D_MEMORY_DC)])?;
         c.api(a, l, G_REALIZE_PALETTE, &[Arg::Val(G_HDC)])?;
+        // PALETTEINDEX(0).
+        c.api(a, l, D_CREATE_SOLID_BRUSH, &[Arg::I(0x0100_0000)])?;
+        a.mov(dword_ptr(l.at(G_BRUSH)), eax)?;
+        let fill = [Arg::Val(G_HDC), Arg::At(G_RECT), Arg::Val(G_BRUSH)];
+        c.api(a, l, G_FILL_RECT, &fill)?;
         finish(a, l)
     })
 }
@@ -2299,13 +2311,16 @@ fn palette_before_mode_program() -> (Vec<u8>, u32) {
 fn a_palette_selected_on_a_deep_desktop_realizes_in_the_background_in_an_8_bit_mode() {
     // Windows 98's USER selects a palette in the foreground only on a
     // palette device, so A, selected on the desktop of 32 bits, isn't
-    // the foreground palette in the 8-bit mode, and B's entry keeps B's
-    // color. In the foreground A would free every entry that isn't
-    // static and put its own color in entry 10.
+    // the foreground palette in the 8-bit mode. Realized there in the
+    // background, it maps to the first entry after the static ones, as
+    // B did, and puts its color in no entry, since that one isn't free
+    // (Windows 95 OSR2.5's rule, `gdi32::palette`). In the foreground
+    // it would take the next entry, which is free, and put its color
+    // there.
     let (program, data) = palette_before_mode_program();
     let mut cpu = machine("palette_before_mode", program);
     run_until_done(&mut cpu, data);
-    let r = results(&mut cpu, data, 13);
+    let r = results(&mut cpu, data, 15);
     // RealizePalette on the desktop of 32 bits maps nothing.
     assert_eq!(r[4], 0);
     assert_eq!(r[5..8], [0; 3]);
@@ -2314,10 +2329,16 @@ fn a_palette_selected_on_a_deep_desktop_realizes_in_the_background_in_an_8_bit_m
     // does (`realize`): it maps to B's entry and leaves its color, so
     // entry 11 keeps the black it had.
     assert_eq!(r[11..13], [1, 1]);
+    assert_ne!(r[13], 0, "CreateSolidBrush");
+    assert_eq!(r[14], 1, "FillRect");
     let (dac, b) = dac_entry(&cpu, 10, D_COLOR);
     assert_eq!(dac, b, "B's entry");
     let (dac, _) = dac_entry(&cpu, 11, G_COLOR);
     assert_eq!(dac, [0; 3], "the entry after B's");
+    // A's entry maps to B's: the rectangle is entry 10.
+    let vram = &cpu.bus.vbe.vram;
+    assert_eq!(vram[10 * 640 + 10..10 * 640 + 20], [10; 10]);
+    assert_eq!(vram[19 * 640 + 19], 10);
 }
 
 const DD_QUERY_INTERFACE: u32 = 0;
