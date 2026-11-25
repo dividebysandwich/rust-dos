@@ -9404,9 +9404,10 @@ fn a_built_in_dll_loaded_as_it_goes_stays() {
 /// loads E.DLL in its DLL_PROCESS_ATTACH, E.DLL imports from D.DLL, and
 /// D.DLL's DLL_PROCESS_DETACH frees E.DLL. The program has let go of
 /// D.DLL, so E.DLL's import holds the last reference to it. At process
-/// exit the FreeLibrary does nothing, as Wine's LdrUnloadDll does while
-/// the process detaches: each DLL learns once that the process ends, and
-/// D.DLL's code is still there when its FreeLibrary returns.
+/// exit the FreeLibrary succeeds and does nothing, as Wine's LdrUnloadDll
+/// does while the process detaches: each DLL learns once that the process
+/// ends, and D.DLL's code is still there when its FreeLibrary returns. A
+/// FreeLibrary of NULL still fails.
 #[test]
 fn a_dll_freeing_a_dll_as_the_process_ends_stays_mapped() {
     let d_imports: &[(&str, &[&str])] = &[(
@@ -9414,12 +9415,27 @@ fn a_dll_freeing_a_dll_as_the_process_ends_stays_mapped() {
         &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
     )];
     let mut d_data = b"E.DLL\0\0\0D detached\r\n".to_vec();
+    d_data.resize(0x28, 0);
+    d_data.extend_from_slice(b"D freed E\r\n\0D null\r\n");
     d_data.resize(0x40, 0);
     const D_TEXT: u32 = 8;
     const D_HANDLE: u32 = 0x20;
     const D_WRITTEN: u32 = 0x24;
+    const D_FREED: u32 = 0x28;
+    const D_NULL: u32 = 0x34;
     let d_main = |a: &mut CodeAssembler, l: &Layout| {
-        let (mut detach, mut done) = (a.create_label(), a.create_label());
+        let say = |a: &mut CodeAssembler, at: u32, len: i32| -> Result<(), IcedError> {
+            a.push(STD_OUTPUT_HANDLE)?;
+            a.call(l.import(2))?;
+            a.push(0)?;
+            a.push(l.at(D_WRITTEN) as i32)?;
+            a.push(len)?;
+            a.push(l.at(at) as i32)?;
+            a.push(eax)?;
+            a.call(l.import(3))
+        };
+        let (mut detach, mut null, mut done) =
+            (a.create_label(), a.create_label(), a.create_label());
         a.mov(eax, dword_ptr(esp + 8))?;
         a.cmp(eax, 1)?;
         a.jne(detach)?;
@@ -9430,17 +9446,20 @@ fn a_dll_freeing_a_dll_as_the_process_ends_stays_mapped() {
         a.set_label(&mut detach)?;
         a.test(eax, eax)?;
         a.jne(done)?;
-        a.push(STD_OUTPUT_HANDLE)?;
-        a.call(l.import(2))?;
-        a.push(0)?;
-        a.push(l.at(D_WRITTEN) as i32)?;
-        a.push(12)?;
-        a.push(l.at(D_TEXT) as i32)?;
-        a.push(eax)?;
-        a.call(l.import(3))?;
+        say(a, D_TEXT, 12)?;
         // As DSETUP.DLL does: the handle stays where it was.
         a.push(dword_ptr(l.at(D_HANDLE)))?;
         a.call(l.import(1))?;
+        // Back in D.DLL's code, with the free a success.
+        a.test(eax, eax)?;
+        a.je(null)?;
+        say(a, D_FREED, 11)?;
+        a.set_label(&mut null)?;
+        a.push(0)?;
+        a.call(l.import(1))?;
+        a.test(eax, eax)?;
+        a.jne(done)?;
+        say(a, D_NULL, 8)?;
         a.set_label(&mut done)?;
         a.mov(eax, 1)?;
         a.ret_1(12)
@@ -9525,6 +9544,8 @@ fn a_dll_freeing_a_dll_as_the_process_ends_stays_mapped() {
     );
     assert_eq!(text.matches("D detached\r\n").count(), 1, "{text}");
     assert_eq!(text.matches("E detached\r\n").count(), 1, "{text}");
+    assert_eq!(text.matches("D freed E\r\n").count(), 1, "{text}");
+    assert_eq!(text.matches("D null\r\n").count(), 1, "{text}");
 }
 
 /// A state saved after the last free of a built-in DLL has its mapping and
