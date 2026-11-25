@@ -105,6 +105,13 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
         Some((rows, _)) => rows,
         None => bus.text_rows(),
     };
+    // A VGA's 200-line text modes scan each line twice (Maximum Scan Line
+    // bit 7), for the 400 lines of the picture. The EGA has no such bit.
+    let y_scale = if bus.vga.adapter.vga_bios() && bus.vga.crtc_regs[0x09] & 0x80 != 0 {
+        2
+    } else {
+        1
+    };
     match bus.video_mode {
         VideoMode::Text80x25 | VideoMode::Text80x25Color => {
             let (font, stride) = font_of_height(bus);
@@ -116,7 +123,7 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
                 stride,
                 font_h: cell_height(bus, stride),
                 x_scale: 1,
-                y_scale: 1,
+                y_scale,
                 dots: 8,
                 alternate: &[],
                 mono: false,
@@ -166,7 +173,7 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
                 stride: font_h,
                 font_h,
                 x_scale: 2,
-                y_scale: 1,
+                y_scale,
                 dots: 8,
                 alternate: &[],
                 mono: false,

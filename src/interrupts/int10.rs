@@ -101,12 +101,21 @@ fn get_vector(cpu: &mut Cpu, vector: usize) -> (u16, u16) {
     (cpu.bus.guest_read_16((vector * 4 + 2) as u32), cpu.bus.guest_read_16((vector * 4) as u32))
 }
 
-/// The scanlines the text modes have, over which a font's rows go: the
-/// VGA's 400, the EGA's 350.
+/// The scanlines the text mode has, over which a font's rows go: the
+/// EGA's 350, and on a VGA those its CRTC shows, as its BIOS reads them:
+/// Vertical Display End, halved when Maximum Scan Line scans each line
+/// twice. 400, 350 or 200 after a mode set, as AH=12h BL=30h selected.
 fn text_scanlines(cpu: &Cpu) -> u16 {
-    match cpu.bus.vga.adapter {
-        Adapter::Ega => 350,
-        _ => 400,
+    if cpu.bus.vga.adapter == Adapter::Ega {
+        return 350;
+    }
+    let crtc = &cpu.bus.vga.crtc_regs;
+    let overflow = crtc[0x07] as u16;
+    let lines = (crtc[0x12] as u16 | (overflow & 0x02) << 7 | (overflow & 0x40) << 3) + 1;
+    if crtc[0x09] & 0x80 != 0 {
+        lines / 2
+    } else {
+        lines
     }
 }
 
@@ -488,12 +497,14 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         return set_tseng_mode(cpu, tseng, keep, None);
     }
 
+    // A VGA's text modes at the scanlines AH=12h BL=30h selected.
+    let lines = video_bios::text_lines(&cpu.bus, mode);
     let new_mode = standard_mode(mode);
     match new_mode {
         Some((new_mode, name)) => {
             cpu.bus.log_string(&format!("[BIOS] Switch to {}", name));
             cpu.bus.video_mode = new_mode;
-            cpu.bus.vga.set_video_mode(new_mode);
+            cpu.bus.vga.set_video_mode_lines(new_mode, lines);
         }
         None => {
             cpu.bus.log_string(&format!("[BIOS] Unsupported Video Mode {:02X}", mode));
@@ -573,9 +584,10 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
     // Update BDA 0x0484 (Rows on Screen minus 1) and 0x0485 (char height).
     // Mode set always resets the cell size to the mode's default.
     let (rows, char_height): (u8, u16) = match mode {
-        // Text modes: 25 rows of the 8x14 font on an EGA, 8x16 on a VGA.
+        // Text modes: 25 rows of the 8x14 font on an EGA; on a VGA of
+        // the font of its scanlines, 8x16 at 400.
         0x00..=0x03 | 0x07 if cpu.bus.vga.adapter == Adapter::Ega => (24, 14),
-        0x00..=0x03 | 0x07 => (24, 16),
+        0x00..=0x03 | 0x07 => (24, video_bios::text_lines_font(lines)),
         // CGA 40-col graphics counts as 25 rows.
         0x04 | 0x05 => (24, 8),
         // CGA 640x200 2-color.
@@ -1374,9 +1386,16 @@ pub fn handle(cpu: &mut Cpu) {
                     set_vector(cpu, 0x05, 0xF000_0000 | crate::bios::IRET_HANDLER as u32);
                 }
                 0x30 => {
-                    // Select Scan Lines (AL = 0, 1, 2)
-                    // We just acknowledge it
-                    cpu.set_reg8(Register::AL, 0x12);
+                    // Select Scan Lines for the text modes' next mode set:
+                    // AL 0 200, 1 350, 2 400, kept in BDA 0489h bits 7
+                    // and 4 (10, 00, 01), which `set_mode` reads.
+                    let al = cpu.get_al();
+                    if al <= 2 {
+                        let bits = [0x80, 0x00, 0x10][al as usize];
+                        let flags = cpu.bus.guest_read_8(0x0489) & !0x90 | bits;
+                        cpu.bus.guest_write_8(0x0489, flags);
+                        cpu.set_reg8(Register::AL, 0x12);
+                    }
                 }
                 0x33 => {
                     // Gray-Scale Summing: AL 0 on, 1 off, for the palettes

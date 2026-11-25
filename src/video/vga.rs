@@ -1005,14 +1005,8 @@ impl VgaCard {
             super::adapter::Adapter::Ega => super::modes::ega_mode_regs(mode),
             _ => super::modes::mode_regs(mode),
         };
-        self.misc_output_reg = regs.misc;
-        self.sequencer_regs[0] = 0x03;
-        self.sequencer_regs[1..].copy_from_slice(&regs.seq);
-        self.crtc_regs = regs.crtc;
-        self.graphics_regs = regs.gc;
-        self.attribute_regs = regs.attr;
+        self.load_mode_regs(regs);
         self.fixed_timing = None;
-        self.timing_cache = None;
         self.mode12_rows = mode == super::VideoMode::Vga640x480
             && self.adapter.supports_mode(0x12)
             && self.plane_size() == 0x10000;
@@ -1022,6 +1016,31 @@ impl VgaCard {
         // the 256 are mode 13h's, which programs customizing part of the
         // palette rely on.
         DacTable::for_mode(mode).load(&mut self.palette);
+    }
+
+    /// Load a mode's registers from the BIOS's table.
+    fn load_mode_regs(&mut self, regs: &super::modes::VgaModeRegs) {
+        self.misc_output_reg = regs.misc;
+        self.sequencer_regs[0] = 0x03;
+        self.sequencer_regs[1..].copy_from_slice(&regs.seq);
+        self.crtc_regs = regs.crtc;
+        self.graphics_regs = regs.gc;
+        self.attribute_regs = regs.attr;
+        self.timing_cache = None;
+    }
+
+    /// Program the text mode `mode` the way a VGA BIOS does at `lines`
+    /// scanlines (200, 350 or 400; see `bios::text_lines`): the mode's
+    /// registers, then for 200 or 350 lines the table of those. Other
+    /// adapters and the graphics modes keep the registers of `mode`.
+    pub fn set_video_mode_lines(&mut self, mode: super::VideoMode, lines: u16) {
+        self.set_video_mode(mode);
+        if !self.adapter.vga_bios() {
+            return;
+        }
+        if let Some(regs) = super::modes::text_lines_regs(mode, lines) {
+            self.load_mode_regs(regs);
+        }
     }
 
     /// The timing given the display instead of the registers', if any.
