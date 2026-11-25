@@ -232,16 +232,35 @@ fn alias(
 
 /// Take the alias `i` away: its window's pages go out of its owner's page
 /// tables, the pages staying their source's, and its selector, if it
-/// has one, is free again.
+/// has one, is free again. The pin it took (`alias`, `refresh`) goes
+/// from each page the window maps and its source still has there; a page
+/// the source committed after the window last looked has no pin of its,
+/// and may have another alias's.
 fn unalias(cpu: &mut Cpu, i: usize) {
     let a = cpu.bus.win32.win16.aliases.remove(i);
-    with_memory(cpu, a.owner, |m, bus| {
+    let mapped: Vec<(u32, u32)> = with_memory(cpu, a.owner, |m, bus| {
+        let mut mapped = Vec::new();
         for page in 0..a.pages {
-            m.set_entry(bus, a.window + page * PAGE, 0);
+            let at = a.window + page * PAGE;
+            if let Some(e) = m.entry(bus, at).filter(|e| e & PRESENT != 0) {
+                mapped.push((page, e & !(PAGE - 1)));
+            }
+            m.set_entry(bus, at, 0);
         }
         m.unreserve(a.window);
+        mapped
+    })
+    .unwrap_or_default();
+    let first = a.address & !(PAGE - 1);
+    with_memory(cpu, a.source, |m, bus| {
+        for (page, frame) in mapped {
+            let lin = first.wrapping_add(page * PAGE);
+            let now = m.entry(bus, lin);
+            if now.is_some_and(|e| e & PRESENT != 0 && e & !(PAGE - 1) == frame) {
+                crate::win32::memory::unpin(bus, m.cr3, lin);
+            }
+        }
     });
-    unpin_pages(cpu, a.source, a.address & !(PAGE - 1), a.pages);
     cpu.tlb.flush();
     if a.selector != 0 {
         free_selector(cpu, a.selector);
@@ -285,53 +304,91 @@ fn aliased(cpu: &Cpu, owner: u32, source: u32, address: u32, len: u32) -> Option
     })
 }
 
-/// The window of the alias whose selector is `sel` maps the pages its
-/// source has now where it had none when it was made, as a selector of
-/// Windows 95's one address space sees memory committed after it was
-/// made. For a selector that lives on (universal.rs); the pages already
-/// in the window stay.
-pub(super) fn refresh(cpu: &mut Cpu, sel: u16) {
-    let Some(a) = cpu
+/// The windows of the aliases of the process `source`'s memory whose
+/// selectors are `sels` map what it has now, as a selector of Windows
+/// 95's one address space sees the memory as it is: a page committed
+/// since a window was made comes in, one decommitted since goes out, and
+/// one committed again at another physical page is mapped anew. For
+/// selectors that live on (universal.rs), whose windows would otherwise
+/// keep a physical page the pool gave back and handed to someone else.
+/// Each process's memory is taken out once for all of them.
+pub(super) fn refresh(cpu: &mut Cpu, source: u32, sels: &[u16]) {
+    use crate::win32::memory::{is_pageable, pin};
+    let owner = cpu.bus.win32.win16.pid;
+    let aliases: Vec<Alias> = cpu
         .bus
         .win32
         .win16
         .aliases
         .iter()
-        .find(|a| a.selector != 0 && a.selector | 3 == sel | 3)
+        .filter(|a| {
+            a.owner == owner
+                && a.source == source
+                && a.selector != 0
+                && sels.iter().any(|&s| s | 3 == a.selector | 3)
+        })
         .cloned()
-    else {
+        .collect();
+    if aliases.is_empty() {
         return;
-    };
-    let missing: Vec<u32> = with_memory(cpu, a.owner, |m, bus| {
-        (0..a.pages)
-            .filter(|&i| {
-                m.entry(bus, a.window + i * PAGE)
-                    .is_none_or(|e| e & PRESENT == 0)
+    }
+    let windows: Vec<Vec<u32>> = with_memory(cpu, owner, |m, bus| {
+        aliases
+            .iter()
+            .map(|a| {
+                (0..a.pages)
+                    .map(|i| m.entry(bus, a.window + i * PAGE).unwrap_or(0))
+                    .collect()
             })
             .collect()
     })
     .unwrap_or_default();
-    if missing.is_empty() {
-        return;
-    }
-    let first = a.address & !(PAGE - 1);
-    let entries = with_memory(cpu, a.source, |m, bus| {
-        missing
-            .iter()
-            .filter_map(|&i| {
+    // Each window page whose entry changes: the source's entry it maps
+    // now, or None for a page the source no longer has. A decommitted
+    // page lost its pin with its physical page, so a page the window maps
+    // anew, or one committed again at the same physical page, is pinned
+    // again; a page the window still maps keeps the pin it has.
+    let changes: Vec<(u32, Option<u32>)> = with_memory(cpu, source, |m, bus| {
+        let mut changes = Vec::new();
+        for (a, window) in aliases.iter().zip(&windows) {
+            let first = a.address & !(PAGE - 1);
+            for (i, &old) in (0u32..).zip(window) {
                 let lin = first.wrapping_add(i * PAGE);
-                crate::win32::memory::pin(bus, m.cr3, lin);
-                Some((i, m.entry(bus, lin).filter(|e| e & PRESENT != 0)?))
-            })
-            .collect::<Vec<_>>()
+                let at = a.window + i * PAGE;
+                let mapped = old & PRESENT != 0;
+                if mapped {
+                    continue;
+                }
+                let now = m.entry(bus, lin).filter(|e| e & PRESENT != 0);
+                if let Some(e) = now.filter(|e| mapped && (e ^ old) & !(PAGE - 1) == 0) {
+                    if is_pageable(bus, m.cr3, lin) {
+                        pin(bus, m.cr3, lin);
+                    }
+                    if (e ^ old) & WRITABLE != 0 {
+                        changes.push((at, Some(e)));
+                    }
+                    continue;
+                }
+                pin(bus, m.cr3, lin);
+                match m.entry(bus, lin).filter(|e| e & PRESENT != 0) {
+                    Some(e) => changes.push((at, Some(e))),
+                    None if mapped => changes.push((at, None)),
+                    None => {}
+                }
+            }
+        }
+        changes
     })
     .unwrap_or_default();
-    if entries.is_empty() {
+    if changes.is_empty() {
         return;
     }
-    with_memory(cpu, a.owner, |m, bus| {
-        for (i, e) in entries {
-            m.map(bus, a.window + i * PAGE, e, e & WRITABLE | USER);
+    with_memory(cpu, owner, |m, bus| {
+        for (at, e) in changes {
+            match e {
+                Some(e) => m.map(bus, at, e, e & WRITABLE | USER),
+                None => m.set_entry(bus, at, 0),
+            };
         }
     });
     cpu.tlb.flush();

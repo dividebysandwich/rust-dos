@@ -7,15 +7,16 @@
 //! As on Windows 98, where WIN32S16.DLL does the 16-bit half, UTRegister
 //! fails for a DLL that asks for a 32-bit callback, which only Win32s
 //! itself has. Otherwise it loads the 16-bit DLL with the Win16
-//! LoadLibrary, calls its UTInit, if it names one, with no callback and
-//! the buffer, and writes the thunk's code into the system heap. A call
-//! of the thunk turns the pointers its translation list points to into
-//! 16:16 ones in place, and the buffer's address, with
-//! UTLinearToSelectorOffset. That gives each 32 KB of a process's memory
-//! one selector for 64 KB from there, which it keeps until the process
-//! ends, so that an object of up to 32 KB fits under it wherever it
-//! starts. The 16-bit code runs on the process's client (flat.rs), and
-//! the thread gets UTProc's DX:AX. A process has ten at most.
+//! LoadLibrary, calls its UTInit, if it names one, with no callback and the
+//! buffer, and writes the thunk's code into the system heap; only then does
+//! it look for a thunk the Win32 DLL has already, or the ten a process can
+//! have, as WIN32S16 does. A call of the thunk turns the pointers its
+//! translation list points to into 16:16 ones in place, and the buffer's
+//! address, with UTLinearToSelectorOffset. That gives each 32 KB of a
+//! process's memory one selector for 64 KB from there, which it keeps until
+//! the process ends, so that an object of up to 32 KB fits under it
+//! wherever it starts. The 16-bit code runs on the process's client
+//! (flat.rs), and the thread gets UTProc's DX:AX.
 
 use super::builtin::{Def, rust};
 use super::flat::{self, Request, UT_REGISTER};
@@ -74,9 +75,9 @@ pub struct Selector {
 /// the thunk goes, 32-bit callback, buffer): register the 16-bit DLL's
 /// UTProc as the Win32 DLL's Universal Thunk. The calling thread waits
 /// while its client loads the DLL and runs its UTInit, and gets TRUE, or
-/// FALSE when the DLL has a thunk already, the process ten, the 16-bit
-/// DLL doesn't load or lacks a function, UTInit returns 0, or there is a
-/// callback.
+/// FALSE when there is a callback, the 16-bit DLL doesn't load or lacks a
+/// function, UTInit returns 0, or the DLL has a thunk already or the
+/// process ten (`register`).
 pub fn ut_register(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (module32, dll_at, init_at, proc_at) = (args[0], args[1], args[2], args[3]);
     let (thunk_at, callback, buffer) = (args[4], args[5], args[6]);
@@ -88,11 +89,6 @@ pub fn ut_register(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let pid = flat::running_pid(cpu);
-    let thunks = &cpu.bus.win32.win16.universal.thunks;
-    let mine = || thunks.iter().filter(|t| t.pid == pid);
-    if mine().any(|t| t.module32 == module32) || mine().count() >= MAX_THUNKS {
-        return Some(0);
-    }
     let dll = flat::guest_string(cpu, dll_at);
     let init = function_name(cpu, init_at);
     let proc = function_name(cpu, proc_at);
@@ -181,9 +177,26 @@ pub fn ut_glue32(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         cpu.bus.guest_write_32(at, segptr);
     }
     let buffer16 = linear_to_segptr(cpu, pid, buffer);
+    refresh_selectors(cpu, pid);
     let mut bytes = value.to_le_bytes().to_vec();
     bytes.extend_from_slice(&buffer16.to_le_bytes());
     flat::callback16(cpu, flat::CALLBACK, proc16, bytes, 0)
+}
+
+/// Why the process `pid` can't register a thunk for the Win32 DLL
+/// `module32`: the DLL has one already, or the process has ten. Asked on
+/// the client, where requests run one after another, once the thunk is
+/// made (`register`).
+fn refused(cpu: &Cpu, pid: u32, module32: u32) -> Option<&'static str> {
+    let thunks = &cpu.bus.win32.win16.universal.thunks;
+    let mine = || thunks.iter().filter(|t| t.pid == pid);
+    if mine().any(|t| t.module32 == module32) {
+        Some("its Win32 DLL has a thunk already")
+    } else if mine().count() >= MAX_THUNKS {
+        Some("the process has ten thunks already")
+    } else {
+        None
+    }
 }
 
 /// A function's name in UTRegister's arguments: empty for none, "#n" for
@@ -235,6 +248,7 @@ pub(super) fn loaded(cpu: &mut Cpu, c: usize, ctx: &mut Context) -> Option<u32> 
         } else if buffer != 0 && buffer16 == 0 {
             "its buffer has no selector".to_string()
         } else {
+            refresh_selectors(cpu, pid);
             // UTInit(callback, buffer), PASCAL: the buffer at the top of
             // the stack, and no callback, as Windows 98 has none.
             let mut args = buffer16.to_le_bytes().to_vec();
@@ -266,17 +280,27 @@ pub(super) fn initialized(cpu: &mut Cpu, c: usize, request: Request, value: u32)
     flat::finish(cpu, request.tid, registered as u32, |_| ());
 }
 
-/// Make the thunk of the process `pid`'s UTRegister `request`, whose
-/// 16-bit DLL is loaded and initialized: its code in the system heap, its
-/// address where the program asked. False, the 16-bit DLL let go, when
-/// the heap is full.
+/// Make the thunk of the process `pid`'s UTRegister `request`, whose 16-bit
+/// DLL is loaded and initialized: its code in the system heap, its address
+/// where the program asked. False, the 16-bit DLL let go, when the heap is
+/// full, or when the Win32 DLL has a thunk already or the process ten.
+/// WIN32S16.DLL looks at its table of thunks only after it made the thunk
+/// and wrote its address (2:04E4h-053Ah), and on that failure lets the DLL
+/// go but not the thunk: the program keeps a thunk that works while the DLL
+/// stays loaded.
 fn register(cpu: &mut Cpu, pid: u32, request: &Request) -> bool {
     let module16 = request.module;
     let proc16 = entry(cpu, module16, &request.names[4]);
     let glue = crate::win32::kernel32::address_of(cpu, "UTGlue32");
     let code = super::with_win16(cpu, pid, |p, bus| {
         let at = p.system_alloc(bus, THUNK_SIZE)?;
-        p.memory.write(bus, at, &thunk_code(at, proc16, glue))?;
+        if p.memory
+            .write(bus, at, &thunk_code(at, proc16, glue))
+            .is_none()
+        {
+            p.system_free(at);
+            return None;
+        }
         Some(at)
     })
     .flatten();
@@ -284,10 +308,18 @@ fn register(cpu: &mut Cpu, pid: u32, request: &Request) -> bool {
         unregistered(cpu, pid, request, "there is no room for its thunk");
         return false;
     };
-    if request.data32 != 0 {
-        flat::write(cpu, pid, request.data32, &code.to_le_bytes());
+    // UTRegister probed the place, but another thread may have taken
+    // its page away while the 16-bit DLL loaded.
+    if request.data32 != 0 && !flat::write(cpu, pid, request.data32, &code.to_le_bytes()) {
+        super::with_win16(cpu, pid, |p, _| p.system_free(code));
+        unregistered(cpu, pid, request, "the place for its thunk isn't there");
+        return false;
     }
     let module32 = request.held.first().copied().unwrap_or(0);
+    if let Some(why) = refused(cpu, pid, module32) {
+        unregistered(cpu, pid, request, why);
+        return false;
+    }
     cpu.bus.win32.win16.universal.thunks.push(Thunk {
         pid,
         module32,
@@ -331,6 +363,25 @@ pub(super) fn process_ending(cpu: &mut Cpu, pid: u32) {
     universal.selectors.retain(|s| !all && s.source != pid);
 }
 
+/// Every selector UTLinearToSelectorOffset made for the process `pid`
+/// maps the process's memory as it is now (`flat::refresh`), before
+/// 16-bit code that may keep them from earlier calls runs: a selector
+/// covers 64 KB, and an object under it can reach pages committed after
+/// the last translation of an address in its first 32 KB.
+fn refresh_selectors(cpu: &mut Cpu, pid: u32) {
+    let selectors: Vec<u16> = cpu
+        .bus
+        .win32
+        .win16
+        .universal
+        .selectors
+        .iter()
+        .filter(|s| s.source == pid)
+        .map(|s| s.selector)
+        .collect();
+    flat::refresh(cpu, pid, &selectors);
+}
+
 // WIN32S16's functions.
 
 /// UTLinearToSelectorOffset for the process `pid`: a 16:16 pointer to
@@ -350,7 +401,7 @@ pub(super) fn linear_to_segptr(cpu: &mut Cpu, pid: u32, lin: u32) -> u32 {
         .map(|s| s.selector);
     let selector = match cached {
         Some(selector) => {
-            flat::refresh(cpu, selector);
+            flat::refresh(cpu, pid, &[selector]);
             selector
         }
         None => {

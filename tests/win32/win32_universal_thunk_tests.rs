@@ -218,9 +218,9 @@ fn ut_dll16() -> Vec<u8> {
 }
 
 /// The program's data: the names UTRegister takes, where the thunks'
-/// addresses go (30h, 34h), the second block's address (38h), the
-/// buffer (40h), the value UTPROC adds to (80h) and the translation list
-/// (90h).
+/// addresses go (30h, 34h), the second block's address (38h), the third
+/// block's (3Ch), the buffer (40h), the value UTPROC adds to (80h) and
+/// the translation list (90h).
 fn ut_data() -> Vec<u8> {
     let mut data = vec![0u8; 0x100];
     data[..9].copy_from_slice(b"UT16.DLL\0");
@@ -232,13 +232,20 @@ fn ut_data() -> Vec<u8> {
 
 const MEM_COMMIT: i32 = 0x1000;
 const MEM_RESERVE: i32 = 0x2000;
+const MEM_DECOMMIT: i32 = 0x4000;
 const PAGE_READWRITE: i32 = 4;
 
 #[test]
 fn a_universal_thunk_calls_its_16_bit_dll_with_the_pointers_translated() {
     let imports: &[(&str, &[&str])] = &[(
         "KERNEL32.DLL",
-        &["UTRegister", "UTUnRegister", "VirtualAlloc", "ExitProcess"],
+        &[
+            "UTRegister",
+            "UTUnRegister",
+            "VirtualAlloc",
+            "ExitProcess",
+            "VirtualFree",
+        ],
     )];
     let exe = program(imports, &ut_data(), |a, l| {
         let mut fail = a.create_label();
@@ -254,10 +261,11 @@ fn a_universal_thunk_calls_its_16_bit_dll_with_the_pointers_translated() {
             a.push(module)?;
             a.call(l.import(0))
         };
-        // A call of the thunk, with the value `value`: its pointer to the
-        // value is to be turned through the list, the flat address of the
-        // second block's byte `at` is for UTLinearToSelectorOffset.
-        let call = |a: &mut CodeAssembler, value: i32, at: i32| {
+        // A call of the thunk whose address is at `thunk`, with the value
+        // `value`: its pointer to the value is to be turned through the
+        // list, the flat address of the second block's byte `at` is for
+        // UTLinearToSelectorOffset.
+        let call = |a: &mut CodeAssembler, thunk: u32, value: i32, at: i32| {
             a.mov(l.dword(0x40), l.at(0x80))?;
             a.mov(eax, l.dword(0x38))?;
             a.add(eax, at)?;
@@ -267,7 +275,7 @@ fn a_universal_thunk_calls_its_16_bit_dll_with_the_pointers_translated() {
             a.push(l.at(0x90))?;
             a.push(value)?;
             a.push(l.at(0x40))?;
-            a.call(l.dword(0x30))
+            a.call(l.dword(thunk))
         };
         // A second block of 64 KB, its first page committed.
         a.push(PAGE_READWRITE)?;
@@ -298,7 +306,7 @@ fn a_universal_thunk_calls_its_16_bit_dll_with_the_pointers_translated() {
         // UTProc gets the value, reaches the value through the list's
         // pointer and the second block through its own selector, and
         // returns the buffer's flat address.
-        call(a, 5, 0x10)?;
+        call(a, 0x30, 5, 0x10)?;
         a.mov(ebx, 5)?;
         a.cmp(eax, l.at(0x40))?;
         a.jne(fail)?;
@@ -327,7 +335,7 @@ fn a_universal_thunk_calls_its_16_bit_dll_with_the_pointers_translated() {
         a.mov(ebx, 9)?;
         a.test(eax, eax)?;
         a.jz(fail)?;
-        call(a, 7, 0x1010)?;
+        call(a, 0x30, 7, 0x1010)?;
         a.mov(ebx, 10)?;
         a.cmp(l.dword(0x80), 0x100C)?;
         a.jne(fail)?;
@@ -335,25 +343,91 @@ fn a_universal_thunk_calls_its_16_bit_dll_with_the_pointers_translated() {
         a.mov(ebx, 11)?;
         a.cmp(word_ptr(eax + 0x1010), 0x5678)?;
         a.jne(fail)?;
-        // A DLL registers once, and a callback, which Windows 98 doesn't
-        // have, fails.
-        register(a, BASE, 0, 0x34)?;
+        // That page decommitted, its physical page taken by a new block,
+        // and committed again: the selector has the page that is there
+        // now, and the new block keeps its own.
+        a.mov(eax, l.dword(0x38))?;
+        a.add(eax, 0x1000)?;
+        a.push(MEM_DECOMMIT)?;
+        a.push(0x1000)?;
+        a.push(eax)?;
+        a.call(l.import(4))?;
         a.mov(ebx, 12)?;
         a.test(eax, eax)?;
-        a.jnz(fail)?;
-        register(a, BASE + 1, BASE, 0x34)?;
+        a.jz(fail)?;
+        a.push(PAGE_READWRITE)?;
+        a.push(MEM_COMMIT | MEM_RESERVE)?;
+        a.push(0x1000)?;
+        a.push(0)?;
+        a.call(l.import(2))?;
+        a.mov(l.dword(0x3C), eax)?;
         a.mov(ebx, 13)?;
         a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.mov(dword_ptr(eax + 0x10), 0x1111)?;
+        a.mov(eax, l.dword(0x38))?;
+        a.add(eax, 0x1000)?;
+        a.push(PAGE_READWRITE)?;
+        a.push(MEM_COMMIT)?;
+        a.push(0x1000)?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        a.mov(ebx, 14)?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.mov(dword_ptr(eax + 0x10), 0)?;
+        call(a, 0x30, 9, 0x1010)?;
+        a.mov(ebx, 15)?;
+        a.cmp(l.dword(0x80), 0x1015)?;
+        a.jne(fail)?;
+        a.mov(eax, l.dword(0x38))?;
+        a.mov(ebx, 16)?;
+        a.cmp(word_ptr(eax + 0x1010), 0x5678)?;
+        a.jne(fail)?;
+        a.mov(eax, l.dword(0x3C))?;
+        a.mov(ebx, 17)?;
+        a.cmp(dword_ptr(eax + 0x10), 0x1111)?;
+        a.jne(fail)?;
+        // A DLL registers once. As on Windows 98, a second UTRegister runs
+        // UTInit and writes the address of a thunk before it fails, and
+        // that thunk works while the DLL stays loaded.
+        a.mov(word_ptr(l.at(0x48) as u64), 0)?;
+        a.mov(l.dword(0x34), 0)?;
+        register(a, BASE, 0, 0x34)?;
+        a.mov(ebx, 18)?;
+        a.test(eax, eax)?;
         a.jnz(fail)?;
+        a.mov(ebx, 19)?;
+        a.cmp(word_ptr(l.at(0x48) as u64), 0x1616)?;
+        a.jne(fail)?;
+        a.mov(ebx, 20)?;
+        a.cmp(l.dword(0x34), 0)?;
+        a.je(fail)?;
+        call(a, 0x34, 1, 0x10)?;
+        a.mov(ebx, 21)?;
+        a.cmp(l.dword(0x80), 0x1016)?;
+        a.jne(fail)?;
+        // A callback, which Windows 98 doesn't have, fails before the DLL
+        // is loaded.
+        a.mov(word_ptr(l.at(0x48) as u64), 0)?;
+        a.mov(l.dword(0x34), 0)?;
+        register(a, BASE + 1, BASE, 0x34)?;
+        a.mov(ebx, 22)?;
+        a.test(eax, eax)?;
+        a.jnz(fail)?;
+        a.cmp(word_ptr(l.at(0x48) as u64), 0)?;
+        a.jne(fail)?;
+        a.cmp(l.dword(0x34), 0)?;
+        a.jne(fail)?;
         // Once unregistered, it registers again, UTInit run again.
         a.push(BASE)?;
         a.call(l.import(1))?;
         a.mov(word_ptr(l.at(0x48) as u64), 0)?;
         register(a, BASE, 0, 0x30)?;
-        a.mov(ebx, 14)?;
+        a.mov(ebx, 23)?;
         a.cmp(eax, 1)?;
         a.jne(fail)?;
-        a.mov(ebx, 15)?;
+        a.mov(ebx, 24)?;
         a.cmp(word_ptr(l.at(0x48) as u64), 0x1616)?;
         a.jne(fail)?;
         a.xor(ebx, ebx)?;
