@@ -119,6 +119,37 @@ that it improves on main. Steps, in this order:
    behaviour closer to the real hardware or the real Windows, shown by a
    test or a comparison with it. Put the evidence in the description.
 
+   Before it is marked ready, check that it still merges with main,
+   which moves on while a pull request is in draft. Fetch both and run
+   `git merge-tree --write-tree origin/main origin/<branch>`: it exits
+   with 1 and names the files when the two conflict. Don't go by
+   GitHub's `mergeable`, which reads `UNKNOWN` while GitHub computes it
+   and can describe the old head for minutes after a push. If it
+   doesn't merge, the agent that has the branch's worktree merges main
+   into the branch (no rebase, no force-push), keeps what both sides
+   meant, and pushes.
+
+   A resolution that keeps both sides' lines as they were, or moves a
+   save-state version, is pushed without a local build: CI builds and
+   tests it, and a build of the crate's tests takes many minutes. Lines
+   that compile on each side can still clash once both are kept: two
+   imports of one name, two items or match arms for the same thing, or
+   one side's call to what the other renamed. Read the merged code
+   around each conflict for these before pushing, and fix the branch if
+   CI fails. Build and run the tests the conflict touches only where the
+   resolution writes code that neither side had, such as a call changed
+   to fit the other side's new signature.
+
+   A save-state version both sides raised (`WIN32_VERSION` and the
+   like): the branch takes the next free number, and main's joins the
+   versions the branch loads (`WIN32_LOADS`, its comment, and a line in
+   `WIN32_LAYOUTS`). Main's saves of that number don't hold what the
+   branch added, so the branch's own gates that named it move to the new
+   number too: a `Since<N, _>`, an `Until<N, _>`, a `*_SAVED` constant.
+   `python -I tools/win32_layout.py` prints the new `WIN32_LAYOUTS`
+   hash without a build, and exits with 1, saying what to change, while
+   the table's last line isn't `WIN32_VERSION` with that hash.
+
 If the evidence isn't there yet, improve the change and go through the
 steps again. A pull request stays a draft only when the next step needs
 a decision with no clearly better option, or is far beyond the change's
@@ -189,10 +220,19 @@ disk.
   such as sccache doesn't do this across directories: its cache keys
   include the target directory's path, so a new directory gets no hits.
 - Cargo starts as many jobs as there are processors, and every agent's
-  build does. With more than two or three builds at once, pass `-j 2`
-  or so. Otherwise the machine thrashes, and on Windows rustc and the
+  build does. Share the processors among the builds that run at once.
+  `rust-dos-lock status` (below) lists every job under the lock: count
+  the builds and tests among them by their names, and your own. A build
+  takes no `-j` only when no other agent works on the machine, since it
+  keeps the jobs it started with when other builds start after it.
+  Otherwise each takes about the processors divided by the number of
+  builds, fewer while emulators run, and `-j 2` once the builds' memory
+  nears what the machine has free, since rustc's grows with its jobs.
+  Past these limits the machine thrashes, and on Windows rustc and the
   linker can run out of memory (`os error 1455`, the paging file is too
-  small).
+  small). A fixed `-j 2` for every build leaves a build that runs alone
+  with two of the processors for the rust-dos crate, which is most of
+  what a build in a reused target directory compiles.
 - Stop the emulators you start, by their process ID, before you finish:
   one left running holds its files, its debug server's port and a
   processor.

@@ -1442,6 +1442,8 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
     cpu.programs.processes_ended += 1;
+    // Its locks go, those of a file another process still has open too.
+    cpu.bus.disk.release_locks(process.id);
     registry::process_ended(cpu, process.id);
     user32::process_ended(cpu, process.id, &tids);
     gdi32::process_ended(cpu, process.id);
@@ -1722,6 +1724,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         for process in std::mem::take(&mut win32.processes) {
             process.memory.release(&mut cpu.bus);
             cpu.programs.processes_ended += 1;
+            cpu.bus.disk.release_locks(process.id);
             registry::process_ended(cpu, process.id);
         }
         // DirectPlay's objects leave their sessions, which the room would

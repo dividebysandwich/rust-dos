@@ -51,7 +51,7 @@ const THEN_DRIVER: u32 = 6;
 /// FreeLibrary frees (`Process::unloading`). A state saved before it
 /// during a FreeLibrary's chain finishes it with the modules the chain
 /// names.
-pub(in crate::win32) const UNLOADING_SAVED: u16 = 99;
+pub(in crate::win32) const UNLOADING_SAVED: u16 = 101;
 
 /// The places in a chain's data.
 const THEN: usize = 0;
