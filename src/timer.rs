@@ -1260,7 +1260,10 @@ impl Pacer {
             // the one after it, whose batch drops the backlog (`lose`).
             let falls = behind.is_some_and(|behind| behind > MAX_LAG && behind < GAP);
             let dropped = falls || self.lost_ns > self.settle_lost_ns;
-            let on_time = self.batch_late < self.period / 2;
+            // A fast-forwarded batch isn't paced, and `batch_late` is still
+            // the last paced batch's: its frame says nothing of whether the
+            // load's frames are over.
+            let on_time = !self.fast_forward && self.batch_late < self.period / 2;
             let calm = self.settle_calm >= LOAD_CALM_FRAMES;
             self.settle_calm = if dropped || !(on_time || calm) {
                 0
@@ -3135,6 +3138,37 @@ mod tests {
                 .end_cpu_frame(&mut game.cpu, executed, FRAME, Duration::ZERO);
             assert_eq!(game.pacer.settle_calm, after, "from {calm}");
             assert_eq!(game.pacer.lost(), Duration::ZERO);
+        }
+    }
+
+    /// Fast-forwarded frames while a load settles don't count as on time,
+    /// though the last paced batch was: they aren't paced, and the frames
+    /// after the fast forward are the ones that tell whether the load's
+    /// frames are over.
+    #[test]
+    fn fast_forwarded_frames_while_a_load_settles_are_not_on_time() {
+        let mut game = Game::new();
+        // Ahead of the host's clock, so that nothing of the test's own
+        // time falls behind.
+        let now = Instant::now() + Duration::from_secs(10);
+        game.pacer.rebase(&mut game.cpu.bus, now);
+        let bus = &mut game.cpu.bus;
+        let target = game.pacer.batch_end(&bus.clock, now + FRAME);
+        let executed = target - bus.clock.icount;
+        bus.clock.icount = target;
+        game.pacer
+            .end_cpu_frame(&mut game.cpu, executed, FRAME, Duration::ZERO);
+        assert_eq!(game.pacer.settle_calm, 1);
+        game.pacer
+            .set_fast_forward(true, &game.cpu.bus.clock, now + FRAME);
+        for _ in 0..5 {
+            let bus = &mut game.cpu.bus;
+            let target = game.pacer.batch_end(&bus.clock, now + FRAME);
+            let executed = target - bus.clock.icount;
+            bus.clock.icount = target;
+            game.pacer
+                .end_cpu_frame(&mut game.cpu, executed, FRAME, Duration::ZERO);
+            assert_eq!(game.pacer.settle_calm, 0);
         }
     }
 
