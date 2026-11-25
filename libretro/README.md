@@ -82,17 +82,37 @@ start it (pick with the D-pad, A to start). A game's gamepad mapping plays on
 the first port set to **Gamepad as keyboard** in *Controls → Port 1 Controls*,
 its action wheel included.
 
-**OS images.** Hard disk images of installed operating systems go in
-`system/rust-dos/os/`. The core
-option **Boot OS** (*System*) lists them: with one chosen, a zip, `.dosz` or
-folder without a configuration of its own starts that system from its image
-(`BOOT -l C`), with the game as its second disk, D:. The game gets a profile
-as any package does, with the drives of its
-[`automount` folder](../GAME-PACKAGES.md#the-automount-folder). Each game keeps the
-image's changes in its own delta file in `saves/rust-dos/saves/<name>`, so the
-image stays as it was installed and one install serves every game. At the
-prompt, `REMOUNT WIN98SE C` (or `IMGMOUNT C WIN98SE`) mounts an image by its
-name.
+**OS images.** An OS image is a hard disk image with an operating system
+already installed on it, such as Windows 98 SE. The core can start a game
+inside that system instead of on its own DOS. Windows games usually don't
+need one (see [Windows games](#windows-games)). Making an image means
+installing the system on it first, as
+[win9x-howto.md](../docs/win9x-howto.md) describes.
+
+* Put the image in the `rust-dos/os` folder inside the frontend's system
+  folder (in RetroArch, *Settings → Directory → System/BIOS*), for
+  example `system/rust-dos/os/win98se.img`. `.img`, `.vhd` and `.ima`
+  files are found there.
+* The core option **Boot OS** (*System*) lists the images there by file
+  name, without the extension: `win98se.img` shows as `WIN98SE`. The
+  list is read when the core loads, so reload the core after adding an
+  image.
+* With an image chosen, loading a game's zip, `.dosz` or folder boots
+  that system from the image as C: (`BOOT -l C`) and puts the game on
+  D:. The game gets a profile as any package does, with the drives of
+  its [`automount` folder](../GAME-PACKAGES.md#the-automount-folder).
+* A game with a configuration of its own (a `rust-dos.conf` or
+  `dosbox.conf` in it, or a DOSBox `GAME.conf` beside `GAME.zip`)
+  ignores **Boot OS** and runs as its configuration says. So do an `.exe` loaded directly and disk images
+  loaded as content.
+* The image file itself is never written. What the system and the game
+  change on C: (a game installed from D: to C:, saved settings) goes to
+  a delta file for that game in `saves/rust-dos/saves/<name>`. One
+  installed image serves every game, and each game sees only its own
+  changes.
+
+At the prompt, `REMOUNT WIN98SE C` (or `IMGMOUNT C WIN98SE`) mounts an
+image from that folder by its name.
 
 ## Windows games
 
