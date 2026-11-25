@@ -277,6 +277,53 @@ fn a_bitmap_made_in_free_entries_shows_through_a_background_palette() {
     assert_eq!(screen_pixels(cpu)[..63], want[..], "through the palette");
 }
 
+/// A bitmap compatible with `screen`, 63 pixels by 1, of the values 10
+/// to 72, in a memory DC: the DC.
+fn raw_bitmap(cpu: &mut Cpu, screen: u32) -> u32 {
+    let plain = bitmap::create_compatible_bitmap(cpu, &[screen, 63, 1]).unwrap();
+    if let Some(b) = gdi(cpu).bitmap_mut(plain) {
+        b.bits[..63].copy_from_slice(&(10..73).collect::<Vec<u8>>());
+    }
+    let plain_dc = dc::create_compatible_dc(cpu, &[screen]).unwrap();
+    dc::select_object(cpu, &[plain_dc, plain]);
+    plain_dc
+}
+
+/// A copy within the screen through a palette in the background keeps
+/// the entries it copies: they are what the screen shows, which no
+/// palette drew them through.
+#[test]
+fn a_copy_within_the_screen_keeps_its_values_through_a_background_palette() {
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &screen_colors());
+    let cpu = &mut cpu;
+    let raw = raw_bitmap(cpu, screen);
+    bit_blt(cpu, screen, (0, 0, 63, 1), raw, 0, 0);
+    let hpal = logical_palette(cpu, &toolbar_colors());
+    select_in_background(cpu, screen, hpal);
+    bit_blt(cpu, screen, (0, 1, 63, 1), screen, 0, 0);
+    let width = surface::screen(cpu).0 as usize;
+    let entries: Vec<u8> = (10..73).collect();
+    assert_eq!(screen_pixels(cpu)[width..width + 63], entries[..]);
+}
+
+/// A bitmap's value that a PC_EXPLICIT entry of a palette in the
+/// background names is the system palette's entry itself: the entry's
+/// color in the palette is only the index.
+#[test]
+fn a_bitmap_shows_its_values_through_explicit_entries() {
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &screen_colors());
+    let cpu = &mut cpu;
+    let raw = raw_bitmap(cpu, screen);
+    let explicit: Vec<u32> = (10..73)
+        .map(|i| i | (palette::PC_EXPLICIT as u32) << 24)
+        .collect();
+    let hpal = logical_palette(cpu, &explicit);
+    select_in_background(cpu, screen, hpal);
+    bit_blt(cpu, screen, (0, 0, 63, 1), raw, 0, 0);
+    let entries: Vec<u8> = (10..73).collect();
+    assert_eq!(screen_pixels(cpu)[..63], entries[..]);
+}
+
 /// Blits of every kind a fast path could take or has to leave to the
 /// one that works a pixel at a time: tiles, the whole screen, ones cut
 /// by the screen's and the DIB's edges, through a clip region of several

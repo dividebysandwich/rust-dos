@@ -163,6 +163,9 @@ pub struct DeviceMap {
     /// The system palette's colors and indices, when the blit's colors go
     /// to the nearest of them (`on_screen`).
     pub shown: Option<Vec<(u32, u8)>>,
+    /// Which of the logical palette's entries have PC_EXPLICIT: their
+    /// `logical` color is the index they name.
+    explicit: Vec<bool>,
     hpal: u32,
 }
 
@@ -179,12 +182,13 @@ impl DeviceMap {
             .map(|i| (rgb(system[i]), i as u8))
             .collect();
         let default = hpal == state.stock(DEFAULT_PALETTE);
-        let (logical, mut map) = match state.palette(hpal) {
+        let (logical, explicit, mut map) = match state.palette(hpal) {
             Some(p) => (
                 p.entries.iter().map(|&e| rgb(e)).collect::<Vec<u32>>(),
+                p.entries.iter().map(|e| e[3] & PC_EXPLICIT != 0).collect(),
                 p.mapping.clone(),
             ),
-            None => (Vec::new(), Vec::new()),
+            None => (Vec::new(), Vec::new(), Vec::new()),
         };
         if map.len() != logical.len() {
             let taken: Vec<(u32, u8)> = (0..256)
@@ -199,6 +203,7 @@ impl DeviceMap {
             statics,
             default,
             shown: None,
+            explicit,
             hpal,
         }
     }
@@ -209,7 +214,11 @@ impl DeviceMap {
     /// system palette shows another color there it takes the entry of
     /// the nearest color shown. Other values, and all of them through a
     /// palette in the foreground or none, are the system palette's
-    /// entries as they are.
+    /// entries as they are. So is a value a PC_EXPLICIT entry names,
+    /// whose `logical` color is that index and which stands for the
+    /// system palette's entry itself, and one that several entries map
+    /// to where one of them has the color shown there (neither case was
+    /// measured).
     ///
     /// Windows 95 OSR2.5 does so with a Voodoo 3's driver: a bitmap from
     /// CreateCompatibleBitmap that a DIB was drawn into through a
@@ -222,18 +231,22 @@ impl DeviceMap {
     /// Math draws its toolbar's buttons so, from bitmaps CreateBitmap
     /// made. The bitmap keeps nothing of the palette it was drawn
     /// through.
-    pub fn device_value(&self, v: u32) -> u32 {
+    pub fn bitmap_value(&self, v: u32) -> u32 {
         let Some(shown) = &self.shown else {
             return v;
         };
-        let Some(k) = self.map.iter().position(|&m| m as u32 == v) else {
-            return v;
-        };
-        let color = self.logical[k];
-        if shown.get(v as usize).is_some_and(|&(c, _)| c == color) {
-            return v;
+        let here = shown.get(v as usize).map(|&(c, _)| c);
+        let mut first = None;
+        for (k, &m) in self.map.iter().enumerate() {
+            if m as u32 != v {
+                continue;
+            }
+            if self.explicit.get(k) == Some(&true) || here == Some(self.logical[k]) {
+                return v;
+            }
+            first.get_or_insert(k);
         }
-        nearest_of(shown, color) as u32
+        first.map_or(v, |k| nearest_of(shown, self.logical[k]) as u32)
     }
 
     /// The map of a blit to the screen. With a logical palette in the
