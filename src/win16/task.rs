@@ -295,9 +295,9 @@ fn create_task(
         return Err(format!("There isn't enough memory to run {}.", m.name));
     }
 
-    // The task database, and the PDB in conventional memory, with a
-    // selector of its own (dos.rs).
-    let Some((tdb, psp)) = new_tdb(cpu, 0x200) else {
+    // The task database in conventional memory, with the PDB at 100h,
+    // which has a selector of its own (dos.rs).
+    let Some((tdb, psp)) = new_tdb(cpu) else {
         module::release(cpu, m.handle);
         return Err(format!("There isn't enough memory to run {}.", m.name));
     };
@@ -511,7 +511,7 @@ pub(super) fn client_task(
         return Err(full());
     }
     let memory = || format!("There isn't enough memory for {}'s 16-bit calls.", name);
-    let Some((tdb, psp)) = new_tdb(cpu, 0x200) else {
+    let Some((tdb, psp)) = new_tdb(cpu) else {
         return Err(memory());
     };
     let stack = global::alloc(cpu, global::GMEM_ZEROINIT, CLIENT_STACK, tdb, false);
@@ -554,8 +554,6 @@ pub(super) fn client_task(
         new_thread(cpu, ctx)
     };
     let Some((tid, stack32)) = made else {
-        // Its stack and environment block are the TDB's.
-        global::free_owned(cpu, tdb);
         free_tdb(cpu, tdb, psp);
         return Err(memory());
     };
@@ -623,25 +621,26 @@ pub(super) fn end_client_task(cpu: &mut Cpu, tid: u32) {
     cpu.bus
         .disk
         .release_locks(crate::disk::TASK_OWNER | task.psp as u32);
-    global::free_owned(cpu, task.handle);
     free_tdb(cpu, task.handle, task.psp);
 }
 
-/// A task database of `size` bytes, and a PDB for it (`dos::alloc_pdb`)
-/// with a selector: their handle and selector, or None without the
-/// memory.
-fn new_tdb(cpu: &mut Cpu, size: u32) -> Option<(u16, u16)> {
-    let tdb = global::alloc(cpu, global::GMEM_ZEROINIT, size, 0, false);
-    if tdb == 0 {
-        return None;
-    }
-    let Some(psp) = cpu.bus.win32.win16.ldt.alloc(1) else {
-        global::free(cpu, tdb);
-        return None;
-    };
-    let Some(segment) = super::dos::alloc_pdb(cpu) else {
-        cpu.bus.win32.win16.ldt.free(psp, 1);
-        global::free(cpu, tdb);
+/// A task database in conventional memory, with its PDB at 100h
+/// (`dos::alloc_task_database`), and a selector for the PDB: the task
+/// database's handle and the PDB's selector, or None without the memory.
+fn new_tdb(cpu: &mut Cpu) -> Option<(u16, u16)> {
+    use super::dos::{PDB_OFFSET, TDB_SIZE};
+    let segment = super::dos::alloc_task_database(cpu)?;
+    let base = segment as u32 * 16;
+    let tdb = global::create_block(cpu, global::GMEM_ZEROINIT, base, TDB_SIZE, 0, false, true);
+    let psp = cpu.bus.win32.win16.ldt.alloc(1);
+    let (Some(tdb), Some(psp)) = (tdb, psp) else {
+        if let Some(tdb) = tdb {
+            global::free(cpu, tdb);
+        }
+        if let Some(psp) = psp {
+            cpu.bus.win32.win16.ldt.free(psp, 1);
+        }
+        super::dos::free_task_database(cpu, segment);
         return None;
     };
     let system = super::win16(cpu).system;
@@ -649,17 +648,20 @@ fn new_tdb(cpu: &mut Cpu, size: u32) -> Option<(u16, u16)> {
         cpu,
         system,
         psp,
-        ldt::segment(segment as u32 * 16, 0xFF, ldt::ACCESS_DATA),
+        ldt::segment(base + PDB_OFFSET, 0xFF, ldt::ACCESS_DATA),
     );
     Some((tdb, psp))
 }
 
-/// The task database `tdb` and its PDB `psp` go, and the files the PDB's
-/// handles refer to close (`dos::free_pdb`).
+/// The task database `tdb` and its PDB `psp` go, with the blocks the task
+/// database owns (its environment, a client's stack): the files the PDB's
+/// handles refer to close, and the task database's DOS memory is free
+/// again (`dos::free_pdb`).
 fn free_tdb(cpu: &mut Cpu, tdb: u16, psp: u16) {
+    global::free_owned(cpu, tdb);
+    global::free(cpu, tdb);
     super::dos::free_pdb(cpu, psp);
     cpu.bus.win32.win16.ldt.free(psp, 1);
-    global::free(cpu, tdb);
 }
 
 /// The task's environment block: the Win16 process's environment, then
@@ -684,7 +686,8 @@ fn environment_block(cpu: &mut Cpu, path: &str, owner: u16) -> u16 {
 }
 
 /// Fill the task database at `base`, and its PDB `psp` past what
-/// `dos::alloc_pdb` wrote: the environment and the command tail.
+/// `dos::alloc_task_database` wrote: the environment and the command
+/// tail.
 #[allow(clippy::too_many_arguments)]
 fn write_tdb(
     cpu: &mut Cpu,
@@ -1199,15 +1202,15 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
         *exit_code = Some(code as u32);
     }
     objects.release(task.process_object);
-    // The byte ranges it locked (INT 21h AH=5Ch) are free again, and the
-    // files its PDB's handles refer to close, as Windows closes an ending
-    // task's files. The files of other tasks stay open, those with the
-    // same handle numbers too: a C runtime's exit closes all the handles
-    // its table could have, the others' numbers among them.
+    // The byte ranges it locked (INT 21h AH=5Ch) are free again. The
+    // files its PDB's handles refer to close with its task database
+    // (`dos::free_pdb`), as Windows closes an ending task's files. The
+    // files of other tasks stay open, those with the same handle numbers
+    // too: a C runtime's exit closes all the handles its table could
+    // have, the others' numbers among them.
     cpu.bus
         .disk
         .release_locks(crate::disk::TASK_OWNER | task.psp as u32);
-    super::dos::free_pdb(cpu, task.psp);
     let others = cpu
         .bus
         .win32
@@ -1217,11 +1220,13 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
         .any(|k| k.exit_code.is_none());
     if !others {
         // The last task: the Win16 process ends.
+        super::dos::free_pdb(cpu, task.psp);
         crate::win32::exit(cpu, code as u32);
         return;
     }
     crate::win32::user32::destroy_thread_windows(cpu, task.tid);
     crate::win32::user32::ddeml::thread_ended(cpu, task.tid);
+    super::dos::free_pdb(cpu, task.psp);
     global::free_owned(cpu, task.handle);
     let shared = cpu
         .bus

@@ -11,10 +11,12 @@
 //! with error 21h (lock violation). A lock goes when its entry closes (the
 //! last handle referring to it) and when its process ends.
 //!
-//! Inside the built-in Windows every Win16 task makes its DOS calls in the
-//! one DOS process Windows runs in, so a task holds its locks by its PDB
-//! (`TASK_OWNER`), as in Windows 3.1, where KERNEL makes each task's PDB
-//! the running process when it switches tasks.
+//! Inside the built-in Windows a Win16 task holds its locks by its current
+//! PDB's selector (`TASK_OWNER`), as in Windows 3.1, where KERNEL makes
+//! each task's PDB the running process when it switches tasks, and a task
+//! can switch to another PDB with AH=50h. The selector keeps the tasks
+//! apart also in a save state from before the PDBs were in DOS's memory,
+//! where every task makes its DOS calls in the process Windows runs in.
 
 use super::DiskController;
 

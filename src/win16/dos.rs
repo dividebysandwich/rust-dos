@@ -109,18 +109,24 @@ pub fn release(cpu: &mut Cpu) {
 }
 
 // Each task has a PDB (a PSP) of its own, as in Windows 3.1, and with it
-// a table of file handles (JFT). KERNEL takes the PDBs from conventional
-// memory and makes the running task's the current DOS process at every
-// task switch, so DOS finds a task's handles in its PDB, and a handle
-// number means a file only within the PDB that opened it. Here the PDB is
-// a block of DOS's memory too, and its JFT the one DOS keeps in it at
-// 18h, with the pointer at 34h and the size at 32h: DOS itself (the
-// handle functions of dos_files.rs) allocates, duplicates and closes the
-// handles there, and programs that read their PDB's table find it. Every
-// handle call a task makes, an INT 21h, DOS3Call, or KERNEL's own file
-// functions, goes through `call_real`, which makes the task's current PDB
-// DOS's current process for the call (`current_pdb`): the one place
-// where a task's handle is told apart from another's.
+// a table of file handles (JFT). KERNEL keeps the PDB at 100h in the
+// task database, which it takes from conventional memory so that DOS
+// reaches the PDB, and makes the running task's PDB the current DOS
+// process at every task switch, so DOS finds a task's handles in its
+// PDB, and a handle number means a file only within the PDB that opened
+// it. Here the task database is a block of DOS's memory too, and the
+// PDB's JFT the one DOS keeps in it at 18h, with the pointer at 34h and
+// the size at 32h: DOS itself (the handle functions of dos_files.rs)
+// allocates, duplicates and closes the handles there, and programs that
+// read their PDB's table find it.
+//
+// A task's DOS calls run in its current PDB. Those it makes in protected
+// mode (an INT 21h, DOS3Call, KERNEL's own file functions) go through
+// `call_real`, which makes the PDB DOS's current process for the call
+// (`in_task_pdb`). The real-mode code it calls (DPMI's INT 31h AX=0300h
+// to 0302h, an INT that goes down to the real-mode vector table) runs
+// with the PDB current until it returns (`enter_task_pdb`, and
+// `realmode::returned`, which gives DOS the Windows process's PSP back).
 //
 // A task's current PDB is in its task database at 60h, as KERNEL keeps
 // it (TDB_PDB): its own, or another a library switched to with INT 21h
@@ -128,20 +134,27 @@ pub fn release(cpu: &mut Cpu) {
 // of its own. The task's own PDB is `Task16::psp`, whose files close
 // when the task ends (`free_pdb`).
 
-/// A PDB's paragraphs: the 256 bytes of a PSP.
-const PDB_PARAS: u16 = 0x10;
+/// A task database's bytes, the PDB the second half.
+pub const TDB_SIZE: u32 = 0x200;
+const TDB_PARAS: u16 = (TDB_SIZE / 16) as u16;
+
+/// Where the PDB is in a task database.
+pub const PDB_OFFSET: u32 = 0x100;
+const PDB_IN_TDB: u16 = (PDB_OFFSET / 16) as u16;
 
 /// Where a task database keeps the task's current PDB.
 const TDB_PDB: u32 = 0x60;
 
 /// The DOS segment of the PDB whose selector is `pdb`: the paragraph its
-/// base is, if that is in conventional memory, where DOS can reach it.
-/// None for a PDB a save state made before the PDBs were there, in the
-/// task database: such a task makes its DOS calls in the Windows
-/// process's PSP, with the handles every task of that state shares.
+/// base is, if that is in the first megabyte, where DOS can reach it (in
+/// conventional memory, or in an upper memory block linked into DOS's
+/// chain). None for a PDB a save state made before the task databases
+/// were in DOS's memory, in the global heap: such a task makes its DOS
+/// calls in the Windows process's PSP, with the handles every task of
+/// that state shares.
 pub fn pdb_segment(cpu: &Cpu, pdb: u16) -> Option<u16> {
     let (base, _, _) = super::selector_base(cpu, pdb)?;
-    (base % 16 == 0 && (0x600..0xA0000).contains(&base)).then_some((base / 16) as u16)
+    (base % 16 == 0 && (0x600..0x10_0000).contains(&base)).then_some((base / 16) as u16)
 }
 
 /// The current PDB of the running task (INT 21h AH=51h), as a selector:
@@ -164,10 +177,16 @@ fn set_current_pdb(cpu: &mut Cpu, pdb: u16) {
     }
 }
 
+/// The DOS segment of the running task's current PDB, if DOS can reach
+/// it (`pdb_segment`).
+fn task_segment(cpu: &Cpu) -> Option<u16> {
+    current_pdb(cpu).and_then(|pdb| pdb_segment(cpu, pdb))
+}
+
 /// Run `f` with the running task's current PDB as DOS's current process,
 /// if it is one DOS can reach; DOS's own afterwards.
 fn in_task_pdb<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
-    let segment = current_pdb(cpu).and_then(|pdb| pdb_segment(cpu, pdb));
+    let segment = task_segment(cpu);
     let saved = cpu.current_psp;
     if let Some(segment) = segment {
         cpu.current_psp = segment;
@@ -177,47 +196,65 @@ fn in_task_pdb<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
     result
 }
 
-/// A PDB for a new task, in conventional memory, with the fields DOS
-/// reads and a JFT of standard handles (`dos_files::init_task_psp`). The
-/// Windows process owns its block, so that it goes with the process if a
-/// task's end never frees it. Its segment, or None without the memory.
-pub fn alloc_pdb(cpu: &mut Cpu) -> Option<u16> {
+/// Make the running task's current PDB DOS's current process for the
+/// real-mode code the task calls next, if DOS can reach it. It stays
+/// current while that code runs, and `realmode::returned` gives DOS the
+/// Windows process's PSP back when the task's last real-mode call
+/// returns.
+pub fn enter_task_pdb(cpu: &mut Cpu) {
+    if let Some(segment) = task_segment(cpu) {
+        cpu.current_psp = segment;
+    }
+}
+
+/// A task database for a new task, in conventional memory, with its PDB
+/// at 100h: the fields DOS reads and a JFT of standard handles
+/// (`dos_files::init_task_psp`), and zeros elsewhere. The Windows process
+/// owns its block, so that it goes with the process if a task's end never
+/// frees it. Its segment, or None without the memory.
+pub fn alloc_task_database(cpu: &mut Cpu) -> Option<u16> {
     crate::win32::dos(cpu, |cpu| {
         let process = cpu.bus.win32.psp;
-        let segment = crate::mcb::alloc(&mut cpu.bus, process, PDB_PARAS)
+        let segment = crate::mcb::alloc(&mut cpu.bus, process, TDB_PARAS)
             .or_else(|_| {
                 crate::win32::dosvm::shrink_dos_process(cpu);
-                crate::mcb::alloc(&mut cpu.bus, process, PDB_PARAS)
+                crate::mcb::alloc(&mut cpu.bus, process, TDB_PARAS)
             })
             .ok()?;
-        for i in 0..PDB_PARAS as u32 * 16 {
+        for i in 0..TDB_PARAS as u32 * 16 {
             cpu.bus.guest_write_8(segment as u32 * 16 + i, 0);
         }
-        crate::dos_files::init_task_psp(&mut cpu.bus, segment, process);
+        crate::dos_files::init_task_psp(&mut cpu.bus, segment + PDB_IN_TDB, process);
         Some(segment)
     })
 }
 
-/// A task's PDB `pdb` (a selector) goes: the files its handles refer to
-/// close, as KERNEL closes those an ending task left open, and its block
-/// and a larger JFT it got from INT 21h AH=67h are DOS's free memory
-/// again. Other tasks' files stay open, also where their handles have
-/// the same numbers.
-pub fn free_pdb(cpu: &mut Cpu, pdb: u16) {
-    let Some(segment) = pdb_segment(cpu, pdb) else {
-        return;
-    };
+/// The task database at `segment` (`alloc_task_database`) goes: the files
+/// its PDB's handles refer to close, as KERNEL closes those an ending
+/// task left open, and its block and a larger JFT the PDB got from INT
+/// 21h AH=67h are DOS's free memory again. Other tasks' files stay open,
+/// also where their handles have the same numbers.
+pub fn free_task_database(cpu: &mut Cpu, segment: u16) {
+    let pdb = segment + PDB_IN_TDB;
     crate::win32::dos(cpu, |cpu| {
-        crate::dos_files::close_all(&mut cpu.bus, segment);
+        crate::dos_files::close_all(&mut cpu.bus, pdb);
         let owned: Vec<u16> = crate::mcb::walk_all(&mut cpu.bus)
             .into_iter()
-            .filter(|(_, mcb)| mcb.owner == segment)
+            .filter(|(_, mcb)| mcb.owner == pdb)
             .map(|(at, _)| at + 1)
             .collect();
         for block in owned.into_iter().chain([segment]) {
             let _ = crate::mcb::free(&mut cpu.bus, block);
         }
     });
+}
+
+/// A task's own PDB `pdb` (a selector) goes with its task database
+/// (`free_task_database`), whose second half it is.
+pub fn free_pdb(cpu: &mut Cpu, pdb: u16) {
+    if let Some(segment) = pdb_segment(cpu, pdb) {
+        free_task_database(cpu, segment - PDB_IN_TDB);
+    }
 }
 
 /// The Win16 process ends: the PDBs of the tasks that haven't ended go
@@ -295,6 +332,7 @@ pub fn interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
         // real mode.
         _ if hooked_in_real_mode(cpu, vector) => {
             let (tb_seg, _) = tb(cpu);
+            enter_task_pdb(cpu);
             crate::win32::realmode::reflect_int(cpu, vector, ctx, tb_seg);
             return;
         }
