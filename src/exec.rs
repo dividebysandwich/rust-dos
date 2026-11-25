@@ -1409,17 +1409,22 @@ pub(crate) fn is_service_trap(ram: &[u8], phys_ip: usize) -> bool {
 ///   functions, and its system's traps in the ROM, the function's id the
 ///   word after it.
 fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
-    if phys_ip + 3 > ram.len() || ram[phys_ip] != 0xFE {
+    if ram.get(phys_ip) != Some(&0xFE) {
         return false;
     }
-    let vector = ram[phys_ip + 2];
-    if ram[phys_ip + 1] == crate::win32::TRAP {
-        return win32_trap(cpu, ram, phys_ip);
+    let byte = |cpu: &mut Cpu, i| trap_byte(cpu, ram, phys_ip, i);
+    let Some((kind, vector)) = byte(cpu, 1).zip(byte(cpu, 2)) else {
+        return false;
+    };
+    if kind == crate::win32::TRAP {
+        let Some(hi) = byte(cpu, 3) else {
+            return false;
+        };
+        return win32_trap(cpu, phys_ip, u16::from_le_bytes([vector, hi]));
     }
     // The far-call services work in any mode, from the ROM (the Plug and
     // Play BIOS's and APM's protected-mode entry points); the others in
     // real and virtual-8086 mode.
-    let kind = ram[phys_ip + 1];
     let allowed = match kind {
         0x38 | 0x39 => !cpu.pm(),
         0x3A => crate::bus::Bus::is_rom(phys_ip),
@@ -1544,12 +1549,32 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     true
 }
 
-/// A trap of the built-in Windows (`service_trap`).
-fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
-    let Some(&[lo, hi]) = ram.get(phys_ip + 2..phys_ip + 4) else {
-        return false;
-    };
-    let id = u16::from_le_bytes([lo, hi]);
+/// Byte `i` of the service trap at `phys_ip` (`service_trap`), the
+/// instruction at CS:EIP. With paging on, a byte past the end of the
+/// trap's page is on the page after it in linear memory, which needn't
+/// be the page after it in RAM: the built-in Windows's functions given
+/// as code (`win32::stubs`) have traps anywhere in them, and one in a
+/// page's last three bytes took its id from whatever RAM came next
+/// (Encarta 97 started by its setup's Run button, #1990). None where
+/// that page isn't there; looking for it doesn't change CR2.
+fn trap_byte(cpu: &mut Cpu, ram: &[u8], phys_ip: usize, i: usize) -> Option<u8> {
+    let lin_ip = cpu.seg_cache(Seg::CS).base.wrapping_add(cpu.eip());
+    let crosses = (phys_ip & 0xFFF) + i >= 0x1000;
+    if cpu.cr0 & CR0_PG == 0 || !crosses || lin_ip & 0xFFF != phys_ip as u32 & 0xFFF {
+        return ram.get(phys_ip + i).copied();
+    }
+    let cr2 = cpu.cr2;
+    match cpu.lin_to_phys(lin_ip.wrapping_add(i as u32), false, cpu.cpl == 3) {
+        Ok(phys) => ram.get(phys as usize).copied(),
+        Err(_) => {
+            cpu.cr2 = cr2;
+            None
+        }
+    }
+}
+
+/// The trap of the built-in Windows with the id `id` (`service_trap`).
+fn win32_trap(cpu: &mut Cpu, phys_ip: usize, id: u16) -> bool {
     if !crate::win32::accepts(cpu, phys_ip, id) {
         return false;
     }

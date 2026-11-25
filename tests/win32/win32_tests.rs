@@ -3123,6 +3123,48 @@ fn a_program_starts_another_and_waits_for_its_exit_code() {
     assert_eq!(code, 0x71);
 }
 
+/// A program that makes a critical section, enters it, leaves it and
+/// deletes it, and ends with 7. KERNEL32 has those functions as code
+/// (kernel32/sync.rs), each with a trap of the system in it, and not one
+/// in each stub's 8 bytes.
+fn critical_section_program() -> Vec<u8> {
+    let names: &[&str] = &[
+        "InitializeCriticalSection",
+        "EnterCriticalSection",
+        "LeaveCriticalSection",
+        "DeleteCriticalSection",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    program(BASE, false, imports, &[0; 32], |a, l| {
+        for i in 0..4 {
+            a.push(l.at(0) as i32)?;
+            a.call(l.import(i))?;
+        }
+        a.push(7)?;
+        a.call(l.import(4))?;
+        a.int3()
+    })
+}
+
+#[test]
+fn a_trap_at_the_end_of_a_page_reads_on_from_the_next_page_it_maps() {
+    // A program starts another once it used and released 1 MB, as
+    // Encarta 97's setup does before its Run button starts Encarta
+    // (#1990). The pages the child gets come from the pool in the order
+    // the parent's went back, the last first, so no page of its images
+    // is followed in RAM by the page after it. A trap of a function
+    // KERNEL32 has as code can end on the next page: its id is read from
+    // there, not from the RAM after its own page, which held another page
+    // of the image, and the child ended at InitializeCriticalSection, a
+    // call of an unknown function (its trap's id starts 3 bytes before a
+    // page's end). 71h: the child ran on and ended with 7.
+    let files = vec![("C.EXE", critical_section_program())];
+    let test = "trap_at_page_end";
+    let code = start_programs_using(test, "T.EXE", "C.EXE", None, 0x10_0000, files, &[]);
+    assert_eq!(code, 0x71);
+}
+
 /// CreateProcessA of a Windows 3.1 program, which Windows 98 runs as a
 /// task of its 16-bit system: it succeeds, the process handle is
 /// signaled when the task ends, and GetExitCodeProcess gives the task's

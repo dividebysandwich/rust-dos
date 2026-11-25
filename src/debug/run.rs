@@ -274,10 +274,7 @@ impl DebugHub {
         }
 
         if self.tracing_now {
-            let mut bytes = [0u8; 15];
-            let end = (phys_ip + 15).min(ram.len());
-            let len = end.saturating_sub(phys_ip);
-            bytes[..len].copy_from_slice(&ram[phys_ip..end]);
+            let (bytes, len) = instruction_bytes(cpu, phys_ip, ram);
             self.trace.push(TraceEntry {
                 t_us: self.batch_t_us,
                 icount: cpu.executed,
@@ -790,4 +787,37 @@ impl crate::exec::ExecHook for DebugHub {
         }
         false
     }
+}
+
+/// The 15 bytes from the instruction at `phys_ip`, CS:EIP, for the
+/// trace, and how many of them there are. Those past the end of its page
+/// are from the page after it in linear memory, which needn't follow it
+/// in RAM.
+fn instruction_bytes(cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> ([u8; 15], usize) {
+    let mut bytes = [0u8; 15];
+    let in_page = (0x1000 - (phys_ip & 0xFFF)).min(bytes.len());
+    let mut len = 0;
+    for (i, byte) in bytes[..in_page].iter_mut().enumerate() {
+        let Some(&b) = ram.get(phys_ip + i) else {
+            return (bytes, len);
+        };
+        *byte = b;
+        len += 1;
+    }
+    let cs = cpu.seg_cache(crate::cpu::Seg::CS).base;
+    let next = cs.wrapping_add(cpu.eip()).wrapping_add(in_page as u32);
+    if len == bytes.len() || next & 0xFFF != 0 {
+        return (bytes, len);
+    }
+    let Some(phys) = cpu.peek_translate(next) else {
+        return (bytes, len);
+    };
+    for byte in bytes[in_page..].iter_mut() {
+        let Some(&b) = ram.get(phys as usize + len - in_page) else {
+            break;
+        };
+        *byte = b;
+        len += 1;
+    }
+    (bytes, len)
 }
