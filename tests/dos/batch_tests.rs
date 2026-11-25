@@ -276,7 +276,9 @@ fn screen_of(name: &str, files: &[(&str, &[u8])], line: &str) -> (String, bool) 
     let dir = scratch(name, files);
     let mut cpu = machine(&dir);
     type_line(&mut cpu, format!("{}\r", line).as_bytes());
-    let idle = run_until(&mut cpu, 2000, |cpu| !cpu.batch.is_active() && cpu.shell_idle());
+    let idle = run_until(&mut cpu, 2000, |cpu| {
+        !cpu.batch.is_active() && cpu.shell_idle()
+    });
     assert!(idle, "{}", line);
     (screen(&cpu), cpu.batch.echo)
 }

@@ -57,14 +57,23 @@ struct Frame {
     /// COMMAND.COM keeps it in the file's batch segment (`BatEchoFlag`,
     /// which BatCom sets and BatchOff restores in MS-DOS 4.0's
     /// TBATCH.ASM). A file chained to takes the one it replaces. None for
-    /// the frames at the bottom, whose ECHO is `Batch::echo_before`, and
-    /// for frames that aren't batch files.
+    /// a file started with no frame below it or queued (`append_file`),
+    /// whose ECHO at the bottom is `Batch::echo_before`, and for frames
+    /// that aren't batch files.
     echo_before: Option<bool>,
 }
 
 impl Frame {
     fn new(kind: FrameKind, lines: Vec<Vec<u8>>, params: Vec<String>) -> Self {
-        Self { kind, lines, pc: 0, params, shift: 0, mark: None, echo_before: None }
+        Self {
+            kind,
+            lines,
+            pc: 0,
+            params,
+            shift: 0,
+            mark: None,
+            echo_before: None,
+        }
     }
 }
 
@@ -550,10 +559,23 @@ fn label_key(label: &[u8]) -> Vec<u8> {
 }
 
 crate::state_enum!(FrameKind { FrameKind::File, FrameKind::Lines, FrameKind::For, FrameKind::Pipe });
+
+/// The CPU section's version that first keeps `Frame::echo_before`
+/// (savestate/machine.rs).
+const ECHO_SAVED: u16 = 4;
+
 // The debugger's marks are the session's: a frame loaded has none.
 impl State for Frame {
     fn save(&self, w: &mut Writer) {
-        let Self { kind, lines, pc, params, shift, mark: _, echo_before } = self;
+        let Self {
+            kind,
+            lines,
+            pc,
+            params,
+            shift,
+            mark: _,
+            echo_before,
+        } = self;
         kind.save(w);
         lines.save(w);
         pc.save(w);
@@ -562,18 +584,27 @@ impl State for Frame {
         echo_before.save(w);
     }
     fn load(&mut self, r: &mut Reader) -> Result<()> {
-        let Self { kind, lines, pc, params, shift, mark, echo_before } = self;
+        let Self {
+            kind,
+            lines,
+            pc,
+            params,
+            shift,
+            mark,
+            echo_before,
+        } = self;
         kind.load(r)?;
         lines.load(r)?;
         pc.load(r)?;
         params.load(r)?;
         shift.load(r)?;
         *mark = None;
-        // The CPU section before version 4 has no ECHO in the frames: a
-        // batch file CALLed in such a state leaves ECHO as it is when it
-        // ends, as rust-dos did then.
+        // An older CPU section has no ECHO in the frames: a batch file
+        // CALLed in such a state leaves ECHO as it is when it ends, as
+        // rust-dos did then. Bytes outside a section are in this
+        // rust-dos's own layout.
         *echo_before = None;
-        if r.version().is_none_or(|v| v >= 4) {
+        if r.version().is_none_or(|v| v >= ECHO_SAVED) {
             echo_before.load(r)?;
         }
         Ok(())
@@ -754,7 +785,12 @@ mod tests {
         let mut batch = Batch::default();
         batch.append_file("T1", b"call t2\r\necho t1\r\n", "");
         assert_eq!(step(&mut batch), ("call t2".into(), true));
-        start(&mut batch, "T2", b"echo off\r\ncall t3\r\necho t2\r\n", true);
+        start(
+            &mut batch,
+            "T2",
+            b"echo off\r\ncall t3\r\necho t2\r\n",
+            true,
+        );
         assert_eq!(step(&mut batch), ("echo off".into(), true));
         assert_eq!(step(&mut batch), ("call t3".into(), false));
         start(&mut batch, "T3", b"echo on\r\necho t3\r\n", true);
@@ -822,7 +858,9 @@ mod tests {
         w.section(b"CPU ", 4, |w| frame.save(w));
         let mut loaded = Frame::default();
         let mut r = Reader::new(&w.buf);
-        loaded.load(&mut r.section_of(b"CPU ", &[3, 4]).unwrap()).unwrap();
+        loaded
+            .load(&mut r.section_of(b"CPU ", &[3, 4]).unwrap())
+            .unwrap();
         assert_eq!(loaded.echo_before, Some(false));
         assert_eq!(loaded.lines, frame.lines);
         // Version 3 has the frame without it.
