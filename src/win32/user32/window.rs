@@ -558,6 +558,31 @@ fn keep_above_owners(state: &mut State, hwnd: u32, left_topmost: bool) {
     }
 }
 
+/// Whether the window `hwnd` belongs to a thread of a program made for
+/// a version of Windows before 4.0: a Windows 3.x program's task
+/// (`win16::task_expects_win3`), or a Win32 program whose header gives a
+/// subsystem version below 4.0. Windows 98's USER keeps this version in
+/// each thread's message queue, from KERNEL's GetExeVersion (the task's
+/// expected version) when it makes the queue, and the controls check it
+/// as the window's thread runs their procedure, whatever instance the
+/// window was made with. A process loaded from a save state made before
+/// the version was kept has 0, and counts as a 4.0 program.
+pub(crate) fn thread_expects_win3(cpu: &mut Cpu, hwnd: u32) -> bool {
+    let Some((pid, tid, instance)) = user(cpu).window(hwnd).map(|w| (w.pid, w.tid, w.instance))
+    else {
+        return false;
+    };
+    if pid == cpu.bus.win32.win16.pid {
+        return crate::win16::task_expects_win3(cpu, tid)
+            .unwrap_or_else(|| crate::win16::expects_win3(cpu, pid, instance));
+    }
+    let processes = &cpu.bus.win32.processes;
+    processes
+        .iter()
+        .find(|p| p.id == pid)
+        .is_some_and(|p| p.subsystem_version != 0 && p.subsystem_version < 0x4_0000)
+}
+
 /// Put `hwnd` in its parent's list of children, after `after` (HWND_TOP,
 /// HWND_BOTTOM or a sibling). Topmost windows stay above the others.
 pub fn link(state: &mut State, hwnd: u32, after: u32) {

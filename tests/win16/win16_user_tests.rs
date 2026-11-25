@@ -1507,3 +1507,170 @@ fn a_multi_line_edit_keeps_what_was_drawn_on_it_below_its_lines() {
     let (exit, log) = run("edit_keeps_drawing", p.build());
     assert_eq!(exit, 1, "{log}");
 }
+
+/// The exit code `edit_colors_program` gives: the WM_CTLCOLOR types its
+/// parent was asked for, bit 1 for CTLCOLOR_EDIT and bit 6 for
+/// CTLCOLOR_STATIC; bit 0 if some of the text is black, bit 7 if some
+/// is gray (COLOR_GRAYTEXT).
+const ASKED_EDIT: u8 = 1 << 1;
+const ASKED_STATIC: u8 = 1 << 6;
+const BLACK_TEXT: u8 = 1 << 0;
+const GRAY_TEXT: u8 = 1 << 7;
+
+/// A program for the Windows `version` (0x030A, 0x0400) with an edit
+/// control of the style `style` showing "WWWW", in a popup of its own
+/// class whose procedure notes the type (lParam's high word) of each
+/// WM_CTLCOLOR it gets and passes it on to DefWindowProc. The program
+/// paints the edit with UpdateWindow, looks for black and gray pixels
+/// through GetDC and GetPixel, and ends with the code ASKED_* and *_TEXT
+/// say.
+fn edit_colors_program(style: u32, version: u16) -> Vec<u8> {
+    const SET_WINDOW_TEXT: u16 = 37;
+    const GET_DC: u16 = 66;
+    const UPDATE_WINDOW: u16 = 124;
+    const GET_PIXEL: u16 = 83;
+    const WM_CTLCOLOR: u8 = 0x19;
+    // The WNDCLASS at 40h; the types asked for, the gray and black
+    // pixels' counts, and where GetPixel looks.
+    const WC: u8 = 0x40;
+    const ASKED: u8 = 0x60;
+    const GRAY: u8 = 0x62;
+    const X: u8 = 0x64;
+    const Y: u8 = 0x66;
+    const BLACK: u8 = 0x68;
+    let mut p = Program::default();
+    p.code.emit(&[0x89, 0x3E, WC + 10, 0x00]); // mov [WC+10],di: the instance
+    let proc_at = p.code.here() + 4;
+    p.code
+        .emit(&[0xC7, 0x06, WC + 2, 0x00, 0x00, 0x00]) // its procedure
+        .emit(&[0x8C, 0x0E, WC + 4, 0x00]); // mov [WC+4],cs
+    p.strings.push((p.code.here() + 4, b"COLORS\0"));
+    p.code
+        .emit(&[0xC7, 0x06, WC + 22, 0x00, 0x00, 0x00]) // its name
+        .emit(&[0x8C, 0x0E, WC + 24, 0x00])
+        .emit(&[0x1E])
+        .push(WC as u16)
+        .call("USER", REGISTER_CLASS);
+    exit_if_ax_zero(&mut p.code, 2);
+    p.create_window(b"COLORS\0", POPUP, [0, 0, 200, 100], false, 0);
+    p.code.emit(&[0x8B, 0xF0]); // mov si,ax
+    exit_if_ax_zero(&mut p.code, 3);
+    p.create_window(b"EDIT\0", CHILD | style, [0, 0, 100, 40], true, 5);
+    exit_if_ax_zero(&mut p.code, 4);
+    p.code.emit(&[0x8B, 0xF0]); // mov si,ax
+    p.code.emit(&[0x56]); // push si
+    p.push_string(b"WWWW\0");
+    p.code.call("USER", SET_WINDOW_TEXT);
+    p.code.emit(&[0x56]).call("USER", UPDATE_WINDOW);
+    p.code.emit(&[0x56]).call("USER", GET_DC);
+    p.code.emit(&[0x8B, 0xF8]); // mov di,ax
+    // Every pixel of the first 20 rows and 60 columns.
+    p.code.emit(&[0xC7, 0x06, Y, 0x00, 0x00, 0x00]); // mov word [Y],0
+    let rows = p.code.here();
+    p.code.emit(&[0xC7, 0x06, X, 0x00, 0x00, 0x00]); // mov word [X],0
+    let columns = p.code.here();
+    p.code
+        .emit(&[0x57]) // push di
+        .emit(&[0xFF, 0x36, X, 0x00]) // push word [X]
+        .emit(&[0xFF, 0x36, Y, 0x00]) // push word [Y]
+        .call("GDI", GET_PIXEL)
+        .emit(&[0x8B, 0xC8, 0x0B, 0xCA]) // mov cx,ax; or cx,dx
+        .emit(&[0x75, 0x06]) // jnz not black
+        .emit(&[0xFF, 0x06, BLACK, 0x00]) // inc word [BLACK]
+        .emit(&[0xEB, 0x0F]) // jmp next
+        .emit(&[0x3D, 0x80, 0x80]) // not black: cmp ax,8080h
+        .emit(&[0x75, 0x0A]) // jne next
+        .emit(&[0x81, 0xFA, 0x80, 0x00]) // cmp dx,80h
+        .emit(&[0x75, 0x04]) // jne next
+        .emit(&[0xFF, 0x06, GRAY, 0x00]) // inc word [GRAY]
+        .emit(&[0xFF, 0x06, X, 0x00]) // next: inc word [X]
+        .emit(&[0x83, 0x3E, X, 0x00, 60]) // cmp word [X],60
+        .emit(&[0x72, 0x00]); // jb columns
+    let here = p.code.here();
+    jump_here(&mut p.code, here - 1, columns);
+    p.code
+        .emit(&[0xFF, 0x06, Y, 0x00]) // inc word [Y]
+        .emit(&[0x83, 0x3E, Y, 0x00, 20]) // cmp word [Y],20
+        .emit(&[0x72, 0x00]); // jb rows
+    let here = p.code.here();
+    jump_here(&mut p.code, here - 1, rows);
+    // AL: the types asked for, and the text's colors.
+    p.code
+        .emit(&[0xA0, ASKED, 0x00]) // mov al,[ASKED]
+        .emit(&[0x83, 0x3E, BLACK, 0x00, 0x00]) // cmp word [BLACK],0
+        .emit(&[0x74, 0x02, 0x0C, BLACK_TEXT]) // je over; or al,BLACK_TEXT
+        .emit(&[0x83, 0x3E, GRAY, 0x00, 0x00]) // cmp word [GRAY],0
+        .emit(&[0x74, 0x02, 0x0C, GRAY_TEXT]) // je over; or al,GRAY_TEXT
+        .exit_al();
+    // The window procedure: WM_CTLCOLOR's type noted as a bit at
+    // SS:ASKED (the task's data segment), then DefWindowProc for every
+    // message.
+    let proc = p.code.here();
+    p.code
+        .emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+        .emit(&[0x83, 0x7E, 0x0C, WM_CTLCOLOR]) // cmp word [bp+0Ch] (msg)
+        .emit(&[0x75, 0x0D]) // jne other
+        .emit(&[0x8A, 0x4E, 0x08]) // mov cl,[bp+8] (lParam's high word)
+        .emit(&[0xB8, 0x01, 0x00, 0xD3, 0xE0]) // mov ax,1; shl ax,cl
+        .emit(&[0x36, 0x09, 0x06, ASKED, 0x00]) // or ss:[ASKED],ax
+        .emit(&[
+            0xFF, 0x76, 0x0E, // other: push [bp+0Eh] (hwnd)
+            0xFF, 0x76, 0x0C, // push [bp+0Ch] (msg)
+            0xFF, 0x76, 0x0A, // push [bp+0Ah] (wParam)
+            0xFF, 0x76, 0x08, // push [bp+8] (lParam)
+            0xFF, 0x76, 0x06, // push [bp+6]
+        ])
+        .call("USER", DEF_WINDOW_PROC)
+        .emit(&[0x5D, 0xCA, 0x0A, 0x00]); // pop bp; retf 0Ah
+    p.code.patch(proc_at, proc);
+    let mut file = p.build();
+    let ne = u32::from_le_bytes(file[0x3C..0x40].try_into().unwrap()) as usize;
+    file[ne + 0x3E..ne + 0x40].copy_from_slice(&version.to_le_bytes());
+    file
+}
+
+const ES_MULTILINE: u32 = 0x0004;
+const ES_READONLY: u32 = 0x0800;
+const WS_DISABLED: u32 = 0x0800_0000;
+
+#[test]
+fn a_windows_3_programs_read_only_edit_asks_for_edit_colors() {
+    // Windows 98's USER.EXE sends a program made for a Windows before
+    // 4.0 WM_CTLCOLOR with CTLCOLOR_EDIT for a read-only edit, in the
+    // multi-line edit's WM_ERASEBKGND and in WM_PAINT, as Windows 3.1
+    // did. Memphis Math's CTL3D answers its read-only boxes that way.
+    let program = edit_colors_program(ES_MULTILINE | ES_READONLY, 0x030A);
+    let (exit, log) = run("edit_colors_read_only_3", program);
+    assert_eq!(exit, ASKED_EDIT | BLACK_TEXT, "{log}");
+}
+
+#[test]
+fn a_windows_3_programs_disabled_multi_line_edit_keeps_black_text() {
+    // A disabled multi-line edit of a Windows 3.x program asks for
+    // CTLCOLOR_EDIT too, and Windows 98 draws its text in the color
+    // WM_CTLCOLOR set, black here.
+    let program = edit_colors_program(ES_MULTILINE | WS_DISABLED, 0x030A);
+    let (exit, log) = run("edit_colors_disabled_3", program);
+    assert_eq!(exit, ASKED_EDIT | BLACK_TEXT, "{log}");
+}
+
+#[test]
+fn a_windows_3_programs_disabled_single_line_edit_has_gray_text() {
+    // A disabled single-line edit asks for CTLCOLOR_EDIT, and its text
+    // is gray whatever version the program was made for.
+    let program = edit_colors_program(WS_DISABLED, 0x030A);
+    let (exit, log) = run("edit_colors_disabled_single_3", program);
+    assert_eq!(exit, ASKED_EDIT | GRAY_TEXT, "{log}");
+}
+
+#[test]
+fn a_windows_4_programs_read_only_or_disabled_edit_asks_for_static_colors() {
+    // A program made for Windows 4.0 gets CTLCOLOR_STATIC for a
+    // read-only or disabled edit, and a disabled one's text is gray.
+    let program = edit_colors_program(ES_MULTILINE | WS_DISABLED, 0x0400);
+    let (exit, log) = run("edit_colors_disabled_4", program);
+    assert_eq!(exit, ASKED_STATIC | GRAY_TEXT, "{log}");
+    let program = edit_colors_program(ES_MULTILINE | ES_READONLY, 0x0400);
+    let (exit, log) = run("edit_colors_read_only_4", program);
+    assert_eq!(exit, ASKED_STATIC | BLACK_TEXT, "{log}");
+}

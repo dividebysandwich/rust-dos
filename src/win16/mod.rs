@@ -636,6 +636,18 @@ pub fn expects_win3(cpu: &Cpu, pid: u32, instance: u32) -> bool {
     })
 }
 
+/// Whether the Win16 task whose thread is `tid` runs a Windows 3.x
+/// program: its module's header expects a version of Windows before
+/// 4.0, the version KERNEL's GetExeVersion gives the task. None when
+/// no task has that thread. The system's modules don't count, as in
+/// `expects_win3`.
+pub fn task_expects_win3(cpu: &Cpu, tid: u32) -> Option<bool> {
+    let win16 = &cpu.bus.win32.win16;
+    let task = win16.tasks.iter().find(|t| t.tid == tid)?;
+    let m = win16.modules.iter().find(|m| m.handle == task.module)?;
+    Some(m.builtin.is_none() && m.expected_version < 0x0400)
+}
+
 crate::state_fields!(State {
     pid,
     lock,
