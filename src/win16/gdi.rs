@@ -220,7 +220,7 @@ static APIS: &[Api16] = &[
     rust("GetCharWidth", 350, "wwwp", get_char_width),
     rust("ExtTextOut", 351, "wsswpSwp", ext_text_out),
     win32("CreatePalette", 360, "p", G, "CreatePalette", b'w'),
-    win32("GDISelectPalette", 361, "www", G, "SelectPalette", b'w'),
+    rust("GDISelectPalette", 361, "www", gdi_select_palette),
     win32("GDIRealizePalette", 362, "w", G, "RealizePalette", b'w'),
     win32(
         "GetPaletteEntries",
@@ -936,6 +936,14 @@ fn get_cur_log_font(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn is_dc_current_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let current = crate::win32::gdi32::palette::is_dc_current_palette(cpu, args[0]);
     Some(current as u32)
+}
+
+/// GDISelectPalette(hdc, hpal, wBkg), which USER's SelectPalette calls:
+/// with wBkg FALSE the palette becomes the foreground one, whatever the
+/// display and the DC's window (`palette::gdi_select_palette`).
+fn gdi_select_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let background = args[2] & 0xFFFF != 0;
+    crate::win32::gdi32::palette::gdi_select_palette(cpu, args[0], args[1], background)
 }
 
 /// CreateDIBPatternBrush(global block, usage): the packed DIB in the
