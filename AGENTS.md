@@ -89,6 +89,11 @@ that it improves on main. Steps, in this order:
    /code-review high --fix Make judgement calls based on long-term quality and robust architecture rather than small scope or simplicity, do not postpone decisions to later unless there is no clearly better option (in which case create a GitHub issue to address this later), explain judgement calls made in comments to the reviewed PR. Commit and push review fixes to the PR branch. Treat claims in the PR description as unverified: check each one against the code, and report any the code doesn't support.
    ```
 
+   The review runs in a fresh agent, not in the context that wrote the
+   change or in a fork of it: one that knows the author's reading of the
+   bug inherits its blind spots. Give the reviewer the pull request and
+   its worktree, not the author's explanation of the change.
+
    Then check each finding against the code before keeping its fix: a
    review at this effort doesn't verify its own findings, and `--fix`
    applies them all. Confirm a finding with a test, a trace or a read of

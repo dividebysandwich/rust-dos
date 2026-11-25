@@ -1671,6 +1671,7 @@ NotepadMain
 NotepadWndProc
 SendMessage16
 UserYield16
+RestoreDefaultPalette
 
 DLL GDI32.DLL
 GetStockObject
