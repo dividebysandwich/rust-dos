@@ -119,6 +119,11 @@ const OPENGL32: &[&str] = &[
     "glGetTexGenfv",
     "glClipPlane",
     "glGetClipPlane",
+    "glBitmap",
+    "glCopyPixels",
+    "wglUseFontBitmapsA",
+    "glRasterPos3f",
+    "glPassThrough",
 ];
 const GLU32: &[&str] = &[
     "gluBuild2DMipmaps",
@@ -129,6 +134,16 @@ const GLU32: &[&str] = &[
 const KERNEL32: &[&str] = &["CreateThread"];
 /// USER32's imports after the others', so that the places above stay.
 const USER32_MORE: &[&str] = &["ChangeDisplaySettingsA", "SendMessageA"];
+/// GDI32's imports after the others', so that the places above stay.
+const GDI32_MORE: &[&str] = &[
+    "CreateCompatibleDC",
+    "CreateDIBSection",
+    "SelectObject",
+    "TextOutA",
+    "SetBkMode",
+    "SetTextColor",
+    "GetTextMetricsA",
+];
 const DDRAW: &[&str] = &["DirectDrawCreate"];
 const CREATE_WINDOW: usize = 0;
 const GET_DC: usize = 1;
@@ -215,6 +230,11 @@ const TEX_GENFV: usize = GL + 75;
 const GET_TEX_GENFV: usize = GL + 76;
 const CLIP_PLANE: usize = GL + 77;
 const GET_CLIP_PLANE: usize = GL + 78;
+const BITMAP: usize = GL + 79;
+const COPY_PIXELS: usize = GL + 80;
+const WGL_USE_FONT_BITMAPS: usize = GL + 81;
+const RASTER_POS3F: usize = GL + 82;
+const PASS_THROUGH: usize = GL + 83;
 const GLU: usize = GL + OPENGL32.len();
 const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
@@ -223,7 +243,15 @@ const GLU_GET_STRING: usize = GLU + 3;
 const CREATE_THREAD: usize = GLU + GLU32.len();
 const CHANGE_DISPLAY_SETTINGS: usize = CREATE_THREAD + KERNEL32.len();
 const SEND_MESSAGE: usize = CHANGE_DISPLAY_SETTINGS + 1;
-const DIRECT_DRAW_CREATE: usize = CHANGE_DISPLAY_SETTINGS + USER32_MORE.len();
+const GDI_MORE: usize = CHANGE_DISPLAY_SETTINGS + USER32_MORE.len();
+const CREATE_COMPATIBLE_DC: usize = GDI_MORE;
+const CREATE_DIB_SECTION: usize = GDI_MORE + 1;
+const SELECT_OBJECT: usize = GDI_MORE + 2;
+const TEXT_OUT: usize = GDI_MORE + 3;
+const SET_BK_MODE: usize = GDI_MORE + 4;
+const SET_TEXT_COLOR: usize = GDI_MORE + 5;
+const GET_TEXT_METRICS: usize = GDI_MORE + 6;
+const DIRECT_DRAW_CREATE: usize = GDI_MORE + GDI32_MORE.len();
 
 /// A program importing the functions above, with `data` and the code
 /// `f` makes, and where its data is.
@@ -246,6 +274,7 @@ fn program_importing(
         |names: &[&'static str]| -> Vec<Imp> { names.iter().map(|n| Imp::Name(n)).collect() };
     let (user, gdi, gl, glu) = (list(USER32), list(GDI32), list(OPENGL32), list(GLU32));
     let (kernel, user_more) = (list(KERNEL32), list(USER32_MORE));
+    let gdi_more = list(GDI32_MORE);
     let ddraw_imports = list(DDRAW);
     let mut dlls: Vec<(&str, &[Imp])> = vec![
         ("USER32.DLL", &user),
@@ -254,6 +283,7 @@ fn program_importing(
         ("GLU32.DLL", &glu),
         ("KERNEL32.DLL", &kernel),
         ("USER32.DLL", &user_more),
+        ("GDI32.DLL", &gdi_more),
     ];
     if ddraw {
         dlls.push(("DDRAW.DLL", &ddraw_imports));
@@ -382,6 +412,11 @@ fn peek(cpu: &Cpu, lin: u32) -> u32 {
     let pte = cpu
         .bus
         .read_32((pde & !0xFFF) as usize + 4 * ((lin >> 12) & 0x3FF) as usize);
+    // A committed page the program hasn't touched is in the page file,
+    // all zeros: not present, bit 7 set and no place there.
+    if pte & 1 == 0 && pte & 0x80 != 0 && pte >> 12 == 0 {
+        return 0;
+    }
     assert!(pte & 1 != 0, "no page at {lin:X}");
     cpu.bus
         .read_32((pte & !0xFFF) as usize + (lin & 0xFFF) as usize)
@@ -510,6 +545,8 @@ enum Arg {
     At(u32),
     /// The value in the data at an offset.
     Val(u32),
+    /// A double, in two words.
+    D(f64),
 }
 
 /// The program's calls, their results one after another in RESULTS.
@@ -541,6 +578,11 @@ fn gl(a: &mut CodeAssembler, l: &Layout, index: usize, args: &[Arg]) -> Result<(
             Arg::F(v) => a.push(v.to_bits() as i32)?,
             Arg::At(o) => a.push(l.at(o) as i32)?,
             Arg::Val(o) => a.push(dword_ptr(l.at(o)))?,
+            // The high word first, so that the low one is below it.
+            Arg::D(v) => {
+                a.push((v.to_bits() >> 32) as u32 as i32)?;
+                a.push(v.to_bits() as u32 as i32)?;
+            }
         }
     }
     a.call(dword_ptr(l.iat[index] as u64))
@@ -3673,7 +3715,7 @@ fn a_display_list_replays_a_function_that_is_not_there_yet() {
         let mut c = Calls { next: 0 };
         start(a, l, &mut c)?;
         gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
-        gl(a, l, RASTER_POS2I, &[Arg::I(1), Arg::I(2)])?;
+        gl(a, l, PASS_THROUGH, &[Arg::F(1.0)])?;
         gl(a, l, END_LIST, &[])?;
         gl(a, l, CALL_LIST, &[Arg::I(1)])?;
         gl(a, l, CALL_LIST, &[Arg::I(1)])?;
@@ -3687,7 +3729,7 @@ fn a_display_list_replays_a_function_that_is_not_there_yet() {
     let (events, counts) = super::win32_d3d_tests::read_trace(&path);
     let event = |start: &str| super::win32_d3d_tests::event(&events, &counts, start);
     // Not when it was compiled, and twice by the two calls of the list.
-    assert_eq!(event("OPENGL32 not implemented: glRasterPos2i").1, 2);
+    assert_eq!(event("OPENGL32 not implemented: glPassThrough").1, 2);
     assert_eq!(event("OPENGL32.glCallList").1, 2);
 }
 
@@ -4818,6 +4860,462 @@ fn a_list_draw_of_the_arrays_between_begin_and_end_is_refused() {
             ("glDrawElements", refused),
         ]
     );
+}
+
+// The raster position, glBitmap, glCopyPixels and wglUseFontBitmaps.
+
+const GL_CURRENT_BIT: u32 = 0x1;
+const GL_CURRENT_RASTER_COLOR: u32 = 0x0B04;
+const GL_CURRENT_RASTER_TEXTURE_COORDS: u32 = 0x0B06;
+const GL_CURRENT_RASTER_POSITION: u32 = 0x0B07;
+const GL_CURRENT_RASTER_POSITION_VALID: u32 = 0x0B08;
+const GL_CURRENT_RASTER_DISTANCE: u32 = 0x0B09;
+const GL_COLOR: u32 = 0x1800;
+const GL_STENCIL: u32 = 0x1802;
+const YELLOW: [f32; 3] = [1.0, 1.0, 0.0];
+
+/// glRasterPos puts its point through the modelview and projection
+/// matrices and the viewport (OpenGL 1.1, section 2.12), and keeps the
+/// current color and texture coordinates and the distance from the
+/// eye, which glGet gives back. A point outside the view volume makes
+/// the position invalid; glPushAttrib's current group keeps the
+/// position, and a display list replays glRasterPos.
+#[test]
+fn the_raster_position_is_a_transformed_point() {
+    const POSITION: u32 = KEPT;
+    const VALID: u32 = KEPT + 0x10;
+    const COLOR: u32 = KEPT + 0x20;
+    const DISTANCE: u32 = KEPT + 0x30;
+    const TEX: u32 = KEPT + 0x40;
+    const INVALID: u32 = KEPT + 0x50;
+    const POPPED: u32 = KEPT + 0x54;
+    const POPPED_AT: u32 = KEPT + 0x60;
+    const LISTED: u32 = KEPT + 0x70;
+    const LISTED_VALID: u32 = KEPT + 0x80;
+    let mut error_at = 0;
+    let (exe, data) = program(&lists_data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let get_floats = |a: &mut CodeAssembler, p: u32, to: u32| {
+            gl(a, l, GET_FLOATV, &[Arg::I(p), Arg::At(to)])
+        };
+        let get_valid = |a: &mut CodeAssembler, to: u32| {
+            let p = GL_CURRENT_RASTER_POSITION_VALID;
+            gl(a, l, GET_INTEGERV, &[Arg::I(p), Arg::At(to)])
+        };
+        gl(a, l, COLOR3F, &RED.map(Arg::F))?;
+        gl(a, l, TEX_COORD2F, &[Arg::F(0.5), Arg::F(0.25)])?;
+        gl(a, l, TRANSLATEF, &[Arg::F(0.25), Arg::F(0.0), Arg::F(0.0)])?;
+        let point = [Arg::F(0.5), Arg::F(-0.5), Arg::F(0.5)];
+        gl(a, l, RASTER_POS3F, &point)?;
+        // What glRasterPos took stays: a later color isn't the raster's.
+        gl(a, l, COLOR3F, &GREEN.map(Arg::F))?;
+        get_floats(a, GL_CURRENT_RASTER_POSITION, POSITION)?;
+        get_valid(a, VALID)?;
+        get_floats(a, GL_CURRENT_RASTER_COLOR, COLOR)?;
+        get_floats(a, GL_CURRENT_RASTER_DISTANCE, DISTANCE)?;
+        get_floats(a, GL_CURRENT_RASTER_TEXTURE_COORDS, TEX)?;
+        gl(a, l, PUSH_ATTRIB, &[Arg::I(GL_CURRENT_BIT)])?;
+        gl(a, l, RASTER_POS3F, &[Arg::F(2.0), Arg::F(0.0), Arg::F(0.0)])?;
+        get_valid(a, INVALID)?;
+        gl(a, l, POP_ATTRIB, &[])?;
+        get_valid(a, POPPED)?;
+        get_floats(a, GL_CURRENT_RASTER_POSITION, POPPED_AT)?;
+        gl(a, l, LOAD_IDENTITY, &[])?;
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        gl(a, l, RASTER_POS2I, &[Arg::I(0), Arg::I(0)])?;
+        gl(a, l, END_LIST, &[])?;
+        gl(
+            a,
+            l,
+            RASTER_POS3F,
+            &[Arg::F(0.0), Arg::F(0.0), Arg::F(-3.0)],
+        )?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        get_floats(a, GL_CURRENT_RASTER_POSITION, LISTED)?;
+        get_valid(a, LISTED_VALID)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine("raster_position", true, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    // (0.75, -0.5, 0.5) in the 64x64 viewport, depth from 0 to 1.
+    assert_eq!(floats(&cpu, data, POSITION), [56.0, 16.0, 0.75, 1.0]);
+    assert_eq!(peek(&cpu, data + VALID), 1);
+    assert_eq!(floats(&cpu, data, COLOR), [1.0, 0.0, 0.0, 1.0]);
+    let distance = floats(&cpu, data, DISTANCE)[0];
+    assert!((distance - 1.0625f32.sqrt()).abs() < 1e-5, "{distance}");
+    assert_eq!(floats(&cpu, data, TEX), [0.5, 0.25, 0.0, 1.0]);
+    assert_eq!(peek(&cpu, data + INVALID), 0);
+    assert_eq!(peek(&cpu, data + POPPED), 1);
+    assert_eq!(floats(&cpu, data, POPPED_AT), [56.0, 16.0, 0.75, 1.0]);
+    assert_eq!(floats(&cpu, data, LISTED), [32.0, 32.0, 0.5, 1.0]);
+    assert_eq!(peek(&cpu, data + LISTED_VALID), 1);
+}
+
+/// glRasterPos's point is a vertex to the clip planes and to texture
+/// coordinate generation as well (section 2.12): a point inside the
+/// view volume but outside a clip plane that is on makes the position
+/// invalid, and the raster position's texture coordinates are the ones
+/// glTexGen gives the point.
+#[test]
+fn the_raster_position_takes_clip_planes_and_texgen() {
+    const CLIP: u32 = LIST_DATA;
+    const S_PLANE: u32 = LIST_DATA + 0x40;
+    const KEPT_VALID: u32 = KEPT;
+    const CUT_VALID: u32 = KEPT + 4;
+    const TEX: u32 = KEPT + 0x10;
+    let mut d = lists_data();
+    for (i, v) in [1.0f64, 0.0, 0.0, 0.0].iter().enumerate() {
+        put(&mut d, CLIP + 8 * i as u32, &v.to_le_bytes());
+    }
+    for (i, v) in [2.0f32, 0.0, 0.0, 0.5].iter().enumerate() {
+        put(&mut d, S_PLANE + 4 * i as u32, &v.to_le_bytes());
+    }
+    let mut error_at = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let valid = |a: &mut CodeAssembler, to: u32| {
+            let p = GL_CURRENT_RASTER_POSITION_VALID;
+            gl(a, l, GET_INTEGERV, &[Arg::I(p), Arg::At(to)])
+        };
+        // Keeps eye x >= 0. The modelview matrix then moves the points
+        // by -1, so that x 0.5 is on the kept side of the plane in object
+        // coordinates and on the cut side in eye coordinates, where the
+        // plane is.
+        let plane0 = Arg::I(GL_CLIP_PLANE0);
+        gl(a, l, CLIP_PLANE, &[plane0, Arg::At(CLIP)])?;
+        gl(a, l, ENABLE, &[plane0])?;
+        gl(a, l, TRANSLATEF, &[Arg::F(-1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        gl(a, l, RASTER_POS3F, &[Arg::F(1.5), Arg::F(0.0), Arg::F(0.0)])?;
+        valid(a, KEPT_VALID)?;
+        gl(a, l, RASTER_POS3F, &[Arg::F(0.5), Arg::F(0.0), Arg::F(0.0)])?;
+        valid(a, CUT_VALID)?;
+        gl(a, l, DISABLE, &[plane0])?;
+        // s = 2x + 1/2.
+        let mode = [GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR].map(Arg::I);
+        gl(a, l, TEX_GENI, &mode)?;
+        let plane = [Arg::I(GL_S), Arg::I(GL_OBJECT_PLANE), Arg::At(S_PLANE)];
+        gl(a, l, TEX_GENFV, &plane)?;
+        gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_GEN_S)])?;
+        gl(a, l, TEX_COORD2F, &[Arg::F(0.0), Arg::F(0.25)])?;
+        gl(
+            a,
+            l,
+            RASTER_POS3F,
+            &[Arg::F(0.25), Arg::F(0.0), Arg::F(0.0)],
+        )?;
+        gl(
+            a,
+            l,
+            GET_FLOATV,
+            &[Arg::I(GL_CURRENT_RASTER_TEXTURE_COORDS), Arg::At(TEX)],
+        )?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine("raster_clip_texgen", true, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    assert_eq!(peek(&cpu, data + KEPT_VALID), 1, "inside the plane");
+    assert_eq!(peek(&cpu, data + CUT_VALID), 0, "outside the plane");
+    assert_eq!(floats(&cpu, data, TEX), [1.0, 0.25, 0.0, 1.0]);
+}
+
+#[test]
+fn a_bitmap_draws_at_the_raster_position() {
+    bitmap_draws(Draws::Voodoo3);
+}
+
+#[test]
+fn a_bitmap_on_a_toadforce_draws_at_the_raster_position() {
+    bitmap_draws(Draws::ToadForce);
+}
+
+/// glBitmap (section 3.6.4) draws the raster color at each lit bit, the
+/// lower left corner at the raster position less the origin, and moves
+/// the position by (xmove, ymove). Its fragments go through the depth
+/// test. With the raster position invalid it draws nothing.
+fn bitmap_draws(card: Draws) {
+    const BITS: u32 = LIST_DATA;
+    const MOVED: u32 = KEPT;
+    // Window coordinates as the identity matrices give them in the 64x64
+    // viewport: x = (ox + 1) * 32.
+    let object = |w: f32| w / 32.0 - 1.0;
+    let mut d = lists_data();
+    // Two rows of 8 bits, each in 4 bytes (the unpack alignment), the
+    // bottom one first.
+    put(&mut d, BITS, &[0b1010_0000, 0, 0, 0, 0b1111_0000]);
+    let mut error_at = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let bitmap = |a: &mut CodeAssembler, orig: [f32; 2], step: f32| {
+            let [x, y] = orig.map(Arg::F);
+            let args = [Arg::I(8), Arg::I(2), x, y, Arg::F(step), Arg::F(0.0)];
+            gl(a, l, BITMAP, &[&args[..], &[Arg::At(BITS)]].concat())
+        };
+        let raster_at = |a: &mut CodeAssembler, x: f32, y: f32| {
+            gl(a, l, COLOR3F, &YELLOW.map(Arg::F))?;
+            gl(
+                a,
+                l,
+                RASTER_POS3F,
+                &[Arg::F(object(x)), Arg::F(object(y)), Arg::F(0.0)],
+            )?;
+            gl(a, l, COLOR3F, &GREEN.map(Arg::F))
+        };
+        clear_blue(a, l)?;
+        raster_at(a, 10.0, 20.0)?;
+        bitmap(a, [0.0, 0.0], 12.0)?;
+        bitmap(a, [0.0, 0.0], 12.0)?;
+        // At (34, 20), from an origin of (2, 1).
+        bitmap(a, [2.0, 1.0], 0.0)?;
+        gl(
+            a,
+            l,
+            GET_FLOATV,
+            &[Arg::I(GL_CURRENT_RASTER_POSITION), Arg::At(MOVED)],
+        )?;
+        // A red quad nearer than the raster position's depth of 1/2 on
+        // the window's right quarter hides what is drawn behind it.
+        gl(a, l, ENABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        gl(a, l, COLOR3F, &RED.map(Arg::F))?;
+        for [x, y] in corners([0.25, -1.0, 1.0, 1.0]) {
+            gl(a, l, VERTEX3F, &[Arg::F(x), Arg::F(y), Arg::F(-0.5)])?;
+        }
+        gl(a, l, END, &[])?;
+        raster_at(a, 44.0, 40.0)?;
+        bitmap(a, [0.0, 0.0], 0.0)?;
+        raster_at(a, 8.0, 40.0)?;
+        bitmap(a, [0.0, 0.0], 0.0)?;
+        gl(a, l, DISABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+        // A move far past the window keeps the position valid, and the
+        // next bitmap, its pixels' columns past what an i32 holds, is
+        // all off the window.
+        raster_at(a, 8.0, 40.0)?;
+        bitmap(a, [0.0, 0.0], 3e9)?;
+        bitmap(a, [0.0, 0.0], 0.0)?;
+        // Outside the view volume: nothing is drawn.
+        gl(a, l, RASTER_POS3F, &[Arg::F(2.0), Arg::F(0.0), Arg::F(0.0)])?;
+        bitmap(a, [-20.0, 0.0], 0.0)?;
+        read_into(a, l, PIXELS)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine_on("bitmap", card, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    card_drew(&cpu, card);
+    let s = shot(&cpu, data, PIXELS);
+    const Y: [u8; 3] = [255, 255, 0];
+    const B: [u8; 3] = [0, 0, 255];
+    // The bottom row is 1010, the top one 1111, in yellow.
+    for left in [10, 22] {
+        let row0: Vec<[u8; 3]> = (left..left + 5).map(|x| at(&s, x, 20)).collect();
+        let row1: Vec<[u8; 3]> = (left..left + 5).map(|x| at(&s, x, 21)).collect();
+        assert_eq!(row0, [Y, B, Y, B, B], "at {left}");
+        assert_eq!(row1, [Y, Y, Y, Y, B], "at {left}");
+        assert_eq!(at(&s, left, 22), B);
+    }
+    assert_eq!(at(&s, 32, 19), Y);
+    assert_eq!(at(&s, 33, 19), B);
+    assert_eq!(at(&s, 35, 20), Y);
+    assert_eq!(at(&s, 32, 18), B);
+    assert_eq!(floats(&cpu, data, MOVED), [34.0, 20.0, 0.5, 1.0]);
+    // Behind the quad, and in front of the clear depth.
+    assert_eq!(at(&s, 44, 40), [255, 0, 0]);
+    assert_eq!(at(&s, 8, 40), Y);
+    assert_eq!(at(&s, 9, 40), B);
+    // The invalid position drew nothing on the window's left.
+    assert!((0..64).all(|y| at(&s, 0, y) == B));
+}
+
+#[test]
+fn glcopypixels_draws_a_rectangle_again_at_the_raster_position() {
+    copy_pixels_draws(Draws::Voodoo3);
+}
+
+#[test]
+fn glcopypixels_on_a_toadforce_draws_a_rectangle_again() {
+    copy_pixels_draws(Draws::ToadForce);
+}
+
+/// glCopyPixels (section 4.3.3) of GL_COLOR draws the rectangle's
+/// pixels with the lower left at the raster position. GL_STENCIL is
+/// GL_INVALID_OPERATION without a stencil buffer, a negative width
+/// GL_INVALID_VALUE.
+fn copy_pixels_draws(card: Draws) {
+    let mut errors = Vec::new();
+    let (exe, data) = program(&lists_data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        clear_blue(a, l)?;
+        // Red at 0 to 16 across, green at 16 to 24, 16 high.
+        quad(a, l, RED, [-1.0, -1.0, -0.5, -0.5])?;
+        quad(a, l, GREEN, [-0.5, -1.0, -0.25, -0.5])?;
+        gl(a, l, RASTER_POS3F, &[Arg::F(0.0), Arg::F(0.0), Arg::F(0.0)])?;
+        let copy = |w: u32, kind: u32| [Arg::I(0), Arg::I(0), Arg::I(w), Arg::I(16), Arg::I(kind)];
+        gl(a, l, COPY_PIXELS, &copy(24, GL_COLOR))?;
+        error(a, l, &mut c, &mut errors)?;
+        gl(a, l, COPY_PIXELS, &copy(24, GL_STENCIL))?;
+        error(a, l, &mut c, &mut errors)?;
+        gl(a, l, COPY_PIXELS, &copy(u32::MAX, GL_COLOR))?;
+        error(a, l, &mut c, &mut errors)?;
+        read_into(a, l, PIXELS)?;
+        finish(a, l)
+    });
+    let mut cpu = machine_on("copy_pixels", card, exe);
+    run_until_done(&mut cpu, data);
+    let errors: Vec<u32> = errors
+        .iter()
+        .map(|&i| peek(&cpu, data + RESULTS + 4 * i))
+        .collect();
+    assert_eq!(errors, [0, GL_INVALID_OPERATION, GL_INVALID_VALUE]);
+    card_drew(&cpu, card);
+    let s = shot(&cpu, data, PIXELS);
+    const R: [u8; 3] = [255, 0, 0];
+    const G: [u8; 3] = [0, 255, 0];
+    const B: [u8; 3] = [0, 0, 255];
+    for (x, y, want) in [
+        (32, 32, R),
+        (47, 47, R),
+        (48, 32, G),
+        (55, 47, G),
+        (56, 40, B),
+        (40, 48, B),
+        (31, 40, B),
+        (40, 31, B),
+        // The source stays.
+        (0, 0, R),
+        (20, 8, G),
+    ] {
+        assert_eq!(at(&s, x, y), want, "at ({x}, {y})");
+    }
+}
+
+#[test]
+fn font_bitmaps_draw_the_text_textout_draws() {
+    font_bitmaps_draw(Draws::Voodoo3);
+}
+
+#[test]
+fn font_bitmaps_on_a_toadforce_draw_the_text_textout_draws() {
+    font_bitmaps_draw(Draws::ToadForce);
+}
+
+/// wglUseFontBitmaps makes a list of each glyph of the DC's font, and
+/// glCallLists of a string's characters draws it at the raster
+/// position, each glyph moving the position on: the same pixels as
+/// GDI's TextOut of the string with the same font, in a DIB section,
+/// with the raster position on the baseline where TextOut's top left
+/// puts it.
+fn font_bitmaps_draw(card: Draws) {
+    const TEXT: u32 = LIST_DATA;
+    const BMI: u32 = LIST_DATA + 0x100;
+    const TM: u32 = LIST_DATA + 0x180;
+    const MEMORY_DC: u32 = KEPT;
+    const BITS: u32 = KEPT + 4;
+    const STRING: &[u8] = b"Hg!";
+    let mut d = lists_data();
+    put(&mut d, TEXT, STRING);
+    // BITMAPINFOHEADER: 64 by 64 from the top, 32 bits.
+    put32(&mut d, BMI, 40);
+    put32(&mut d, BMI + 4, 64);
+    put32(&mut d, BMI + 8, (-64i32) as u32);
+    put(&mut d, BMI + 12, &[1, 0, 32, 0]);
+    let mut results = (0, 0);
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, CREATE_COMPATIBLE_DC, &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(MEMORY_DC)), eax)?;
+        let dib = [
+            Arg::Val(MEMORY_DC),
+            Arg::At(BMI),
+            Arg::I(0),
+            Arg::At(BITS),
+            Arg::I(0),
+            Arg::I(0),
+        ];
+        c.api(a, l, CREATE_DIB_SECTION, &dib)?;
+        a.push(eax)?;
+        a.push(dword_ptr(l.at(MEMORY_DC)))?;
+        a.call(dword_ptr(l.iat[SELECT_OBJECT] as u64))?;
+        gl(a, l, SET_BK_MODE, &[Arg::Val(MEMORY_DC), Arg::I(1)])?;
+        gl(
+            a,
+            l,
+            SET_TEXT_COLOR,
+            &[Arg::Val(MEMORY_DC), Arg::I(0xFF_FFFF)],
+        )?;
+        let text = [
+            Arg::Val(MEMORY_DC),
+            Arg::I(4),
+            Arg::I(20),
+            Arg::At(TEXT),
+            Arg::I(3),
+        ];
+        gl(a, l, TEXT_OUT, &text)?;
+        gl(a, l, GET_TEXT_METRICS, &[Arg::Val(HDC), Arg::At(TM)])?;
+        gl(a, l, MATRIX_MODE, &[Arg::I(GL_PROJECTION)])?;
+        let window = [0.0, 64.0, 0.0, 64.0, -1.0, 1.0].map(Arg::D);
+        gl(a, l, ORTHO, &window)?;
+        gl(a, l, MATRIX_MODE, &[Arg::I(GL_MODELVIEW)])?;
+        let black = [Arg::F(0.0), Arg::F(0.0), Arg::F(0.0), Arg::F(1.0)];
+        gl(a, l, CLEAR_COLOR, &black)?;
+        gl(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        let lists = [Arg::Val(HDC), Arg::I(0), Arg::I(256), Arg::I(1000)];
+        c.api(a, l, WGL_USE_FONT_BITMAPS, &lists)?;
+        results.0 = c.next - 1;
+        gl(a, l, LIST_BASE, &[Arg::I(1000)])?;
+        gl(a, l, COLOR3F, &[Arg::F(1.0), Arg::F(1.0), Arg::F(1.0)])?;
+        // TextOut's top is row 20 from the top: the baseline is the
+        // ascent below it, 64 - 20 - ascent from the bottom.
+        a.mov(eax, 44)?;
+        a.sub(eax, dword_ptr(l.at(TM + 4)))?;
+        a.push(eax)?;
+        a.push(4)?;
+        a.call(dword_ptr(l.iat[RASTER_POS2I] as u64))?;
+        gl(
+            a,
+            l,
+            CALL_LISTS,
+            &[Arg::I(3), Arg::I(GL_UNSIGNED_BYTE), Arg::At(TEXT)],
+        )?;
+        read_into(a, l, PIXELS)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        results.1 = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine_on("font_bitmaps", card, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(
+        peek(&cpu, data + RESULTS + 4 * results.0),
+        1,
+        "wglUseFontBitmapsA"
+    );
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * results.1), 0, "glGetError");
+    card_drew(&cpu, card);
+    let s = shot(&cpu, data, PIXELS);
+    let bits = peek(&cpu, data + BITS);
+    assert_ne!(bits, 0, "the DIB section's bits");
+    let mut lit = 0;
+    for y in 0..64 {
+        for x in 0..64 {
+            let gdi = peek(&cpu, bits + 4 * (64 * (63 - y) + x) as u32) & 0xFF_FFFF != 0;
+            let gl = at(&s, x, y) != [0, 0, 0];
+            assert_eq!(gl, gdi, "at ({x}, {y}) from the bottom");
+            lit += gl as u32;
+        }
+    }
+    assert!(lit > 20, "{lit} pixels");
 }
 
 // Texture coordinate generation and the user's clip planes.

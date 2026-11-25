@@ -29,7 +29,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 102;
+const WIN32_VERSION: u16 = 103;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -72,10 +72,11 @@ const WIN32_VERSION: u16 = 102;
 /// to 99's the ranges LockFile locked on each file object
 /// (`object::Kind::File`), which they load without: LockFile's locks
 /// are DOS's since 100, 71's to 100's no step of the cascade of
-/// CW_USEDEFAULT windows (`user32::window::CASCADE_SAVED`), and 71's to
+/// CW_USEDEFAULT windows (`user32::window::CASCADE_SAVED`), 71's to
 /// 101's not the modules the outermost FreeLibrary frees
-/// (`kernel32::module::UNLOADING_SAVED`).
-const WIN32_LOADS: [u16; 32] = [
+/// (`kernel32::module::UNLOADING_SAVED`), and 71's to 102's no OpenGL
+/// raster position (`opengl32::raster::RASTER_SAVED`).
+const WIN32_LOADS: [u16; 33] = [
     71,
     72,
     73,
@@ -107,6 +108,7 @@ const WIN32_LOADS: [u16; 32] = [
     99,
     100,
     101,
+    102,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1224,6 +1226,7 @@ mod tests {
         (100, 0xC44D_7093_8B77_FE65), // LockFile's locks moved to DOS's table (disk/locks.rs)
         (101, 0x019A_DFC6_DCCE_473B), // the step of the CW_USEDEFAULT cascade
         (102, 0x8818_BE2A_4B7B_59B6), // the modules the outermost FreeLibrary frees
+        (103, 0x71A7_50FA_4BC4_2EA0), // OpenGL's raster position
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

@@ -55,6 +55,7 @@ pub struct Attrib {
     pub color: [f32; 4],
     pub tex_coord: [[f32; 4]; UNITS],
     pub normal: [f32; 3],
+    pub raster: crate::savestate::Since<{ super::raster::RASTER_SAVED }, super::raster::Raster>,
     pub lighting: Lighting,
     pub shade_model: u32,
     pub matrix_mode: u32,
@@ -137,6 +138,7 @@ fn save(c: &Context, shared: &[Texture], mask: u32) -> Attrib {
         color: c.color,
         tex_coord: c.tex_coord,
         normal: c.normal,
+        raster: c.raster,
         lighting: *c.lighting,
         shade_model: c.shade_model,
         matrix_mode: c.matrix_mode,
@@ -216,6 +218,7 @@ fn restore(c: &mut Context, a: &Attrib) {
         c.color = a.color;
         c.tex_coord = a.tex_coord;
         c.normal = a.normal;
+        c.raster = a.raster;
     }
     if on(GL_LIGHTING_BIT) {
         *c.lighting = a.lighting;
@@ -322,6 +325,7 @@ crate::state_fields!(Attrib {
     color,
     tex_coord,
     normal,
+    raster,
     lighting,
     shade_model,
     matrix_mode,
