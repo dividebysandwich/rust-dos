@@ -33,8 +33,10 @@ const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
 pub(crate) const WINDOWS: &str = "C:\\WINDOWS";
 pub(crate) const SYSTEM: &str = "C:\\WINDOWS\\SYSTEM";
 
-/// WIN32_FIND_DATAA's size, and where its names are.
-const FIND_DATA: usize = 320;
+/// WIN32_FIND_DATAA's fields' bytes, and where its names are. The
+/// struct is 320 bytes with its padding, which Windows 95 leaves alone:
+/// Encarta 97's Wise setup keeps a string right after 318 bytes (#1965).
+const FIND_DATA: usize = 318;
 const FIND_NAME: u32 = 44;
 const FIND_SHORT_NAME: u32 = 304;
 

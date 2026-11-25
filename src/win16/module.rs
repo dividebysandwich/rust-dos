@@ -106,6 +106,40 @@ fn find_or_load(
     inits: &mut Vec<usize>,
 ) -> Result<usize, LoadError> {
     let file_name = name.rsplit(['\\', '/', ':']).next().unwrap_or(name);
+    let (loaded, builtin) = find_loaded(cpu, name);
+    if let Some(i) = loaded {
+        return Ok(i);
+    }
+    if let Some(index) = builtin {
+        let image = builtin::image(cpu, index);
+        let path = format!(
+            "{}\\{}",
+            crate::win32::loader::SYSTEM_DIR,
+            builtin::MODULES[index].file
+        );
+        return load_file(cpu, image, &path, Some(index as u16), dir, inits);
+    }
+    let Some((path, file)) = find_file(cpu, name, dir) else {
+        return Err(LoadError::new(
+            ERROR_FILE_NOT_FOUND,
+            format!("{} can't be found.", file_name),
+        ));
+    };
+    // A copy of a system module's file, under any name, is that module:
+    // its code is stubs of the built-in functions, which only the
+    // built-in module may run.
+    if let Some(index) = builtin::of_file(&file) {
+        return load(cpu, builtin::MODULES[index].file, dir, inits);
+    }
+    let loaded = load_file(cpu, file, &path, None, dir, inits)?;
+    remember_known(cpu, loaded);
+    Ok(loaded)
+}
+
+/// The loaded module that `name` (a module name, or a file's name or
+/// path) names, and the system module it names, if it names one.
+fn find_loaded(cpu: &Cpu, name: &str) -> (Option<usize>, Option<usize>) {
+    let file_name = name.rsplit(['\\', '/', ':']).next().unwrap_or(name);
     let module_name = file_name
         .split('.')
         .next()
@@ -136,40 +170,48 @@ fn find_or_load(
     // Sierra's setup copies itself to _SETUP.EXE and its resources to
     // SETUPL.DLL, whose modules are all named SETUP, and runs the copy
     // while it waits for it to end.
-    if let Some(i) = cpu
+    let loaded = cpu
         .bus
         .win32
         .win16
         .modules
         .iter()
-        .position(|m| m.name == module_name || by_file(m))
-    {
-        return Ok(i);
+        .position(|m| m.name == module_name || by_file(m));
+    (loaded, builtin)
+}
+
+/// What LoadModule gives for the program `path` when its module is
+/// loaded already without a data segment for each instance (the module
+/// flags have no MULTIPLEDATA): the module counts one user more
+/// (`add_user`), and its instance is given, with no task started.
+/// KRNL386's LoadModule starts a task of a loaded program only when the
+/// program is MULTIPLEDATA, so a SINGLEDATA program, which has one
+/// automatic data segment, runs once at most; a second WinExec of it
+/// gets the running copy's instance. (Windows 98 SE's KRNL386.EXE: its
+/// code for a module that is loaded already tests bit 1 of ne_flags, and
+/// without it calls IncExeUsage and returns MyGetInstance, which is the
+/// segment table's DGROUP entry for a SINGLEDATA module and the module's
+/// handle for one without automatic data.) None when the module isn't
+/// loaded, is a library or a system module, or is MULTIPLEDATA, which
+/// `task::create_task` loads, refuses or starts as a new task.
+pub fn loaded_single_instance(cpu: &mut Cpu, path: &str) -> Option<u16> {
+    let index = find_loaded(cpu, path).0?;
+    let m = &cpu.bus.win32.win16.modules[index];
+    // The built-in KERNEL, USER and GDI are programs by their flags, but
+    // Windows 98's KRNL386.EXE, USER.EXE and GDI.EXE are libraries (flags
+    // 8301h), which this path doesn't take: `task::create_task` refuses
+    // them, as it does a library (#1987).
+    if m.flags & (ne::LIBMODULE | ne::MULTIPLEDATA) != 0 || m.builtin.is_some() {
+        return None;
     }
-    if let Some(index) = builtin {
-        let image = builtin::image(cpu, index);
-        let path = format!(
-            "{}\\{}",
-            crate::win32::loader::SYSTEM_DIR,
-            builtin::MODULES[index].file
-        );
-        return load_file(cpu, image, &path, Some(index as u16), dir, inits);
-    }
-    let Some((path, file)) = find_file(cpu, name, dir) else {
-        return Err(LoadError::new(
-            ERROR_FILE_NOT_FOUND,
-            format!("{} can't be found.", file_name),
-        ));
+    let handle = m.handle;
+    let instance = if m.flags & ne::SINGLEDATA != 0 {
+        instance_of(cpu, index)
+    } else {
+        handle
     };
-    // A copy of a system module's file, under any name, is that module:
-    // its code is stubs of the built-in functions, which only the
-    // built-in module may run.
-    if let Some(index) = builtin::of_file(&file) {
-        return load(cpu, builtin::MODULES[index].file, dir, inits);
-    }
-    let loaded = load_file(cpu, file, &path, None, dir, inits)?;
-    remember_known(cpu, loaded);
-    Ok(loaded)
+    add_user(cpu, handle);
+    Some(instance)
 }
 
 /// Where Windows 95 and 98 keep the 16-bit DLLs they look for in the
