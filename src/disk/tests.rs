@@ -262,6 +262,7 @@ fn dos_calls_cut_long_names_to_8_3() {
     fs::write(base.join("MM_SLIDE.GXA"), b"slider").unwrap();
     fs::write(base.join("SAVEGAME/SAVE.DAT"), b"save").unwrap();
     fs::write(base.join("level0_Final.dat"), b"long").unwrap();
+    fs::write(base.join("LEVEL0_F.DAT"), b"cut").unwrap();
     let mut disk = DiskController::new(base.clone());
 
     let h = disk.open_file("MM_SLIDER.GXA", 0, PSP).unwrap();
@@ -272,8 +273,9 @@ fn dos_calls_cut_long_names_to_8_3() {
     assert!(disk.is_file("mm_slide.gxa1"));
     assert!(disk.is_file(r"C:\SAVEGAMES\SAVE.DAT"));
     assert!(disk.is_directory(r"C:\SAVEGAMES"));
-    // A host entry of the whole name is found by it first, as DOS's calls
-    // make a file by its long name (`new_entry_name`).
+    // A host entry of the whole name is found by it first, before the
+    // one of the name it cuts to, as DOS's calls make a file by its long
+    // name (`new_entry_name`).
     let h = disk.open_file("level0_Final.dat", 0, PSP).unwrap();
     assert_eq!(disk.read_file(h, 16).unwrap(), b"long");
     disk.close_file(h);
@@ -283,6 +285,27 @@ fn dos_calls_cut_long_names_to_8_3() {
         Err(0x02)
     );
     assert!(!disk.long_name_call(|d| d.is_file(r"C:\SAVEGAMES\SAVE.DAT")));
+}
+
+/// DOS's rename and MKDIR cut the new name to 8.3 too: a file or
+/// directory of the cut name is there already (05h), as on DOS, rather
+/// than a second entry being made beside it, which the opens that cut
+/// names would then miss. A long-name call makes the whole name.
+#[test]
+fn dos_rename_and_mkdir_find_the_cut_name_taken() {
+    let base = scratch("cut_8_3_taken");
+    fs::create_dir_all(base.join("SAVEGAME")).unwrap();
+    fs::write(base.join("MM_SLIDE.GXA"), b"slider").unwrap();
+    fs::write(base.join("NEW.TMP"), b"new").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    assert_eq!(disk.rename_file("NEW.TMP", "MM_SLIDER.GXA"), Err(0x05));
+    assert_eq!(disk.create_directory("SAVEGAMES"), Err(0x05));
+    assert!(!base.join("MM_SLIDER.GXA").exists());
+    assert!(!base.join("SAVEGAMES").exists());
+
+    assert_eq!(disk.long_name_call(|d| d.rename_file("NEW.TMP", "MM_SLIDER.GXA")), Ok(()));
+    assert_eq!(disk.long_name_call(|d| d.create_directory("SAVEGAMES")), Ok(()));
 }
 
 /// A host file whose name ends in a dot, as builds that kept the dot

@@ -128,16 +128,19 @@ impl DiskController {
             if super::host_private(part) {
                 return None;
             }
-            let (entries, mut found) = self.find_host_entry(&full_path, part);
             // DOS's calls cut a name to 8.3: Redguard opens
             // "MM_SLIDER.GXA", which is MM_SLIDE.GXA on its disc. A host
             // entry of the whole name comes first, as DOS's calls make a
-            // long name as asked (`new_entry_name`).
-            if found.is_none()
-                && let Some(cut) = self.cut_name(part)
-            {
-                found = self.find_host_entry(&full_path, &cut).1;
-            }
+            // long name as asked (`new_entry_name`). Both are looked for
+            // in the same entries, so that a miss reads the folder again
+            // once and notes one name missing (`find_host_where`).
+            let find = |entries: &[(String, String)]| {
+                Self::host_entry_named(entries, part).or_else(|| {
+                    let cut = self.cut_name(part)?;
+                    Self::host_entry_named(entries, &cut)
+                })
+            };
+            let (entries, found) = self.find_host_where(&full_path, part, find);
             if found.is_none() && Self::host_alias_of_private(&full_path, part) {
                 return None;
             }
@@ -446,34 +449,45 @@ impl DiskController {
         names.into_iter().zip(short).collect()
     }
 
-    /// The entries of the host folder `dir`, and the one named `name`: by
-    /// its long name in any case, or by its short name. A name the kept
-    /// entries lack is looked for in a fresh read, unless a recent read
-    /// lacked it too (`HostDirCache`).
-    ///
-    /// Last comes a host name that is `name` with dots or spaces after
-    /// it, which DOS and Windows drop (`dos_component`): builds before
-    /// they were dropped made "SAVE." on the host for a program's
-    /// "SAVE.", and the program opens it as that name still.
+    /// The entries of the host folder `dir`, and the one named `name`
+    /// (`host_entry_named`). A name the kept entries lack is looked for in
+    /// a fresh read, unless a recent read lacked it too (`HostDirCache`).
     pub(super) fn find_host_entry(
         &self,
         dir: &Path,
         name: &str,
     ) -> (HostEntries, Option<(String, String)>) {
+        self.find_host_where(dir, name, |entries| Self::host_entry_named(entries, name))
+    }
+
+    /// The entry of a host folder's `entries` named `name`: by its long
+    /// name in any case, or by its short name.
+    ///
+    /// Last comes a host name that is `name` with dots or spaces after
+    /// it, which DOS and Windows drop (`dos_component`): builds before
+    /// they were dropped made "SAVE." on the host for a program's
+    /// "SAVE.", and the program opens it as that name still.
+    fn host_entry_named(entries: &[(String, String)], name: &str) -> Option<(String, String)> {
         let upper = name.to_ascii_uppercase();
-        let find = |entries: &[(String, String)]| {
-            entries
-                .iter()
-                .find(|(long, _)| long.eq_ignore_ascii_case(name))
-                .or_else(|| entries.iter().find(|(_, short)| *short == upper))
-                .or_else(|| {
-                    entries.iter().find(|(long, _)| {
-                        long.trim_end_matches([' ', '.']).eq_ignore_ascii_case(name)
-                    })
-                })
-                .cloned()
-        };
-        self.find_host_where(dir, name, find)
+        entries
+            .iter()
+            .find(|(long, _)| long.eq_ignore_ascii_case(name))
+            .or_else(|| entries.iter().find(|(_, short)| *short == upper))
+            .or_else(|| {
+                entries
+                    .iter()
+                    .find(|(long, _)| long.trim_end_matches([' ', '.']).eq_ignore_ascii_case(name))
+            })
+            .cloned()
+    }
+
+    /// Whether DOS's calls find a host entry of `dir` by the name they cut
+    /// `name` to (`cut_name`) where none has the whole name: a rename or
+    /// MKDIR to "MM_SLIDER.GXA" finds MM_SLIDE.GXA there, as DOS does,
+    /// and fails, where a create opens it (`walk_host`).
+    pub(super) fn cut_name_taken(&self, dir: &Path, name: &str) -> bool {
+        self.cut_name(name)
+            .is_some_and(|cut| self.find_host_entry(dir, &cut).1.is_some())
     }
 
     /// The entries of the host folder `dir`, and what `find` finds among
