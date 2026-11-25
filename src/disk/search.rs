@@ -351,6 +351,11 @@ impl DiskController {
                 return Err(0x05); // Access denied / already exists
             }
         }
+        // DOS's MKDIR cuts the name to 8.3: MKDIR "SAVEGAMES" beside
+        // SAVEGAME finds it there.
+        if self.cut_name_taken(&parent_path, leaf) {
+            return Err(0x05);
+        }
         let target = parent_path.join(self.entry_name(leaf));
         let created = hostfs::create_dir(&target);
         self.host_dirs.changed();
@@ -790,7 +795,7 @@ impl DiskController {
         }
 
         if let Some(files) = drive.tree() {
-            let dir = Self::memory_path(drive, search_dir_str);
+            let dir = self.memory_path(drive, search_dir_str);
             if !files.is_dir(&dir) {
                 return Err(0x03);
             }
