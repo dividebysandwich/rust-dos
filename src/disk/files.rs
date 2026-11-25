@@ -229,6 +229,7 @@ impl DiskController {
         if create && existing.is_none() {
             self.host_dirs.changed();
             self.host_dirs.touched(&path);
+            self.host_aliases.touched(&path);
         }
         match opened {
             Ok(file) => {
@@ -435,6 +436,7 @@ impl DiskController {
         let written = hostfs::write(&path, data);
         self.host_dirs.changed();
         self.host_dirs.touched(&path);
+        self.host_aliases.touched(&path);
         written.map_err(|_| 0x05)?;
         if let Some(when) = stamp.and_then(|(time, date)| dos_to_system_time(time, date)) {
             let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_modified(when));
@@ -477,6 +479,7 @@ impl DiskController {
         let removed = hostfs::remove_file(&path);
         self.host_dirs.changed();
         self.host_dirs.touched(&path);
+        self.host_aliases.touched(&path);
         removed.map_err(|_| 0x05)
     }
 
@@ -598,6 +601,8 @@ impl DiskController {
             }
             // A folder's entries keep their aliases wherever it goes.
             self.host_aliases.moved(&source, &target);
+            self.host_aliases.touched(&source);
+            self.host_aliases.touched(&target);
         } else {
             self.host_dirs.touched(&source);
             self.host_dirs.touched(&target);

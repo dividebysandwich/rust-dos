@@ -34,7 +34,15 @@
 //!
 //! A folder whose entries all have their own names in upper case as their
 //! aliases, as most DOS programs' do, keeps nothing: `short_names` makes
-//! the same aliases for it afresh.
+//! the same aliases for it afresh. One whose entries' own names have a
+//! "~" is kept all the same: renamed, such an entry holds its name as
+//! any alias is held, so "FOURTH~1.TXT" renamed to "Fourth file.txt" is
+//! FOURTH~2.TXT, as the FAT driver makes it (`FatVolume::rename_long`).
+//!
+//! A save state keeps the folders whose next read gives aliases other
+//! than those made afresh (`saved`): those whose aliases differ already,
+//! and those the guest changed since their last read (`touched`), where
+//! that read is still to come.
 
 use super::*;
 use std::collections::HashSet;
@@ -46,6 +54,10 @@ struct Folder {
     /// The aliases differ from those `short_names` makes for the names
     /// afresh, so a save state has to keep them (`saved`).
     moved: bool,
+    /// The guest made, removed or renamed an entry since the folder was
+    /// last read (`touched`), so its next read may give the new names
+    /// aliases other than those made afresh.
+    touched: bool,
 }
 
 /// A host folder's aliases as a save state keeps them: the drive, the
@@ -70,11 +82,13 @@ impl HostAliases {
                 let folder = Folder {
                     aliases: names.iter().cloned().zip(aliases.iter().cloned()).collect(),
                     moved: false,
+                    touched: false,
                 };
                 folders.insert(dir.to_path_buf(), folder);
             }
             return aliases;
         };
+        folder.touched = false;
         let unchanged = names.len() == folder.aliases.len()
             && names.iter().all(|name| folder.aliases.contains_key(name));
         if unchanged {
@@ -94,12 +108,13 @@ impl HostAliases {
     }
 
     /// Whether each of `names` has its own name in upper case as its
-    /// alias.
+    /// alias, and none of them has a "~", whose alias a rename holds
+    /// (see the module's comment).
     fn all_own(names: &[String], aliases: &[String]) -> bool {
         names
             .iter()
             .zip(aliases)
-            .all(|(name, alias)| name.to_ascii_uppercase() == *alias)
+            .all(|(name, alias)| !alias.contains('~') && name.to_ascii_uppercase() == *alias)
     }
 
     /// The aliases of `names` in a folder whose entries had `kept`.
@@ -183,13 +198,41 @@ impl HostAliases {
             .retain(|kept, _| !kept.starts_with(dir));
     }
 
+    /// The guest made, wrote, removed or renamed the host file or folder
+    /// `path`: its folder's next read may give it an alias other than the
+    /// one made afresh (`saved`).
+    pub(super) fn touched(&self, path: &Path) {
+        let mut folders = self.folders.borrow_mut();
+        if let Some(folder) = path.parent().and_then(|dir| folders.get_mut(dir)) {
+            folder.touched = true;
+        }
+    }
+
     /// The kept aliases a save state needs, for the host drives `roots`
     /// (drive, root): those of the folders under a root whose aliases
-    /// differ from what `short_names` makes for them afresh, sorted.
-    pub(super) fn saved(&self, roots: &[(u8, PathBuf)]) -> Vec<SavedFolder> {
+    /// differ from what `short_names` makes for them afresh, sorted. A
+    /// folder the guest changed since its last read is kept too where its
+    /// names now, `names_of` it, would get other aliases than those made
+    /// afresh: "Parent two" (PARENT~1) renamed to "Parent moved" is
+    /// PARENT~2 on the next read, in the run from the state as well.
+    pub(super) fn saved(
+        &self,
+        roots: &[(u8, PathBuf)],
+        names_of: impl Fn(&Path) -> Vec<String>,
+    ) -> Vec<SavedFolder> {
         let folders = self.folders.borrow();
         let mut saved = Vec::new();
-        for (dir, folder) in folders.iter().filter(|(_, f)| f.moved) {
+        let needed = |dir: &Path, folder: &Folder| {
+            if folder.moved {
+                return true;
+            }
+            if !folder.touched {
+                return false;
+            }
+            let names = names_of(dir);
+            Self::reconcile(&folder.aliases, &names) != short_names(&names)
+        };
+        for (dir, folder) in folders.iter().filter(|(dir, f)| needed(dir, f)) {
             let Some((drive, below)) = roots
                 .iter()
                 .find_map(|(drive, root)| Some((*drive, dir.strip_prefix(root).ok()?)))
@@ -227,6 +270,7 @@ impl HostAliases {
             let folder = Folder {
                 aliases: aliases.iter().cloned().collect(),
                 moved: true,
+                touched: false,
             };
             folders.insert(dir, folder);
         }

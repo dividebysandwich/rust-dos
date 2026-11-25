@@ -460,6 +460,14 @@ impl DiskController {
     /// The entries of the host folder `dir` as they are now, with the
     /// aliases they keep (`HostAliases`).
     pub(super) fn read_host_entries(&self, dir: &Path) -> Vec<(String, String)> {
+        let names = Self::host_names(dir);
+        let short = self.host_aliases.assign(dir, &names);
+        names.into_iter().zip(short).collect()
+    }
+
+    /// The names of the entries the host folder `dir` has now, without the
+    /// host's own files (`host_private`), sorted as they are numbered.
+    pub(super) fn host_names(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = hostfs::read_dir(dir)
             .into_iter()
             .flatten()
@@ -467,8 +475,7 @@ impl DiskController {
             .filter(|name| !host_private(name))
             .collect();
         names.sort_by_key(|name| name.to_ascii_uppercase());
-        let short = self.host_aliases.assign(dir, &names);
-        names.into_iter().zip(short).collect()
+        names
     }
 
     /// The entries of the host folder `dir`, and the one named `name`: by

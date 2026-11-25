@@ -2703,6 +2703,49 @@ fn a_loaded_state_keeps_the_aliases_of_host_folders() {
     assert!(!loaded.is_directory(r"C:\CWW\PARENT~1"));
 }
 
+/// A state saved after a folder is removed, before its parent is read
+/// again, keeps the parent's aliases: "Parent two" keeps PARENT~2 once
+/// "Parent alpha" (PARENT~1) is gone, in the run from the state as in the
+/// run that saved it, though aliases made afresh would give it PARENT~1.
+#[test]
+fn a_state_saved_before_the_folder_is_read_again_keeps_its_aliases() {
+    let base = scratch("aliases_state_unread");
+    for name in ["Parent alpha", "Parent two"] {
+        fs::create_dir_all(base.join("CWW").join(name)).unwrap();
+    }
+    let mut disk = DiskController::new(base.clone());
+    assert_eq!(alias_in(&disk, r"C:\CWW", "Parent two"), "PARENT~2");
+    disk.long_name_call(|disk| disk.remove_directory(r"C:\CWW\Parent alpha"))
+        .unwrap();
+    let saved = disk.saved_aliases();
+    let mut w = crate::savestate::Writer::new();
+    disk.save_state(&mut w);
+    assert_eq!(alias_in(&disk, r"C:\CWW", "Parent two"), "PARENT~2");
+    let mut loaded = DiskController::new(base.clone());
+    loaded.aliases_from_state = Some(saved);
+    let lost = loaded
+        .load_state(&mut crate::savestate::Reader::new(&w.buf))
+        .unwrap();
+    assert!(lost.is_empty());
+    assert_eq!(alias_in(&loaded, r"C:\CWW", "Parent two"), "PARENT~2");
+}
+
+/// An entry whose own name is an alias ("FOURTH~1.TXT") renamed to a long
+/// name holds that name as any alias is held, on a host folder as the FAT
+/// driver does it: the new name is FOURTH~2.TXT.
+#[test]
+fn a_tilde_name_renamed_holds_its_alias() {
+    let base = scratch("tilde_rename");
+    fs::create_dir_all(base.join("HST")).unwrap();
+    fs::write(base.join("HST").join("FOURTH~1.TXT"), b"x").unwrap();
+    let mut disk = DiskController::new(base.clone());
+    disk.long_name_call(|disk| {
+        disk.rename_file(r"C:\HST\FOURTH~1.TXT", r"C:\HST\Fourth file.txt")
+    })
+    .unwrap();
+    assert_eq!(alias_in(&disk, r"C:\HST", "Fourth file.txt"), "FOURTH~2.TXT");
+}
+
 /// A state loaded keeps the folder its current directory names, as the
 /// run that saved it kept it: a rename of the folder then leaves the
 /// current directory naming nothing in both.

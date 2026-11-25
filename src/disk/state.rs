@@ -131,7 +131,7 @@ impl DiskController {
     /// The aliases of host folders a save state keeps, in a section of
     /// their own (`HostAliases::saved`).
     pub(crate) fn saved_aliases(&self) -> Vec<super::SavedFolder> {
-        self.host_aliases.saved(&self.host_roots())
+        self.host_aliases.saved(&self.host_roots(), Self::host_names)
     }
 
     /// The host drives, by number, and their roots.

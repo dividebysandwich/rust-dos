@@ -355,6 +355,7 @@ impl DiskController {
         let created = hostfs::create_dir(&target);
         self.host_dirs.changed();
         self.host_dirs.touched(&target);
+        self.host_aliases.touched(&target);
         created.map_err(|_| 0x05)
     }
 
@@ -395,6 +396,7 @@ impl DiskController {
         self.host_dirs.touched(&host_path);
         if removed.is_ok() {
             self.host_aliases.removed(&host_path);
+            self.host_aliases.touched(&host_path);
         }
         removed.map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => 0x03,
