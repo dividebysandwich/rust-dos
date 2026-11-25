@@ -289,6 +289,11 @@ impl NewName {
     }
 }
 
+/// A path of owned components as the volume's functions take it.
+fn as_strs(parts: &[String]) -> Vec<&str> {
+    parts.iter().map(String::as_str).collect()
+}
+
 /// Whether two long names are the same name: Windows compares them
 /// without regard to case.
 fn same_long(a: &str, b: &str) -> bool {
@@ -906,6 +911,17 @@ impl FatVolume {
     /// `find_in` for a long-name call, whose path may have long names
     /// (`named`). The entry has its long name.
     fn find_long_in(&self, state: &State, path: &[&str]) -> Result<Entry, u8> {
+        self.walk_long(state, path, &mut Vec::new())
+    }
+
+    /// `find_long_in`, with the DOS name of each entry on the way put in
+    /// `names`.
+    fn walk_long(
+        &self,
+        state: &State,
+        path: &[&str],
+        names: &mut Vec<String>,
+    ) -> Result<Entry, u8> {
         let mut current = Entry::root();
         for (i, part) in path.iter().enumerate() {
             let missing = if i + 1 == path.len() {
@@ -921,6 +937,7 @@ impl FatVolume {
                 .into_iter()
                 .find(|e| named(e, part))
                 .ok_or(missing)?;
+            names.push(current.name.clone());
             if current.is_dir()
                 && (current.cluster == 0 || current.cluster == state.params.root_cluster)
             {
@@ -980,14 +997,25 @@ impl FatVolume {
         self.list_slots_in(&state, &dir)
     }
 
-    /// Create the empty file `long` in the directory at `dir` (a path of
-    /// DOS names), with a long file name entry as Windows 95 writes it
-    /// where `long` isn't a DOS name already. Returns the entry, whose
-    /// `name` is the DOS name made for it. 05h if the name is taken.
+    /// The path `path` of a long-name call (`find_long`) in DOS names: each
+    /// component the DOS name of the entry it names, as DOS's calls find
+    /// it. 02h if the last is missing, 03h if one before it is.
+    pub fn dos_path(&self, path: &[&str]) -> Result<Vec<String>, u8> {
+        let state = self.state();
+        let mut names = Vec::new();
+        self.walk_long(&state, path, &mut names)?;
+        Ok(names)
+    }
+
+    /// Create the empty file `long` in the directory at `dir`, with a long
+    /// file name entry as Windows 95 writes it where `long` isn't a DOS
+    /// name already. `dir` is a path of a long-name call: its components
+    /// may be long names or DOS names (`find_long`). Returns the entry,
+    /// whose `name` is the DOS name made for it. 05h if the name is taken.
     pub fn create_long(&self, dir: &[&str], long: &str, attr: u8) -> Result<Entry, u8> {
         let mut state = self.state();
         let result = (|| {
-            let dir = self.dir_in(&state, dir)?;
+            let dir = self.dir_long_in(&state, dir)?;
             self.add_long_entry(&mut state, &dir, long, (attr & ATTR_CHANGEABLE) | ATTR_ARCHIVE, 0)
         })();
         let finished = self.finish(&mut state);
@@ -1000,7 +1028,7 @@ impl FatVolume {
     pub fn mkdir_long(&self, dir: &[&str], long: &str) -> Result<Entry, u8> {
         let mut state = self.state();
         let result = (|| {
-            let parent = self.dir_in(&state, dir)?;
+            let parent = self.dir_long_in(&state, dir)?;
             let cluster = state.allocate().ok_or(DISK_FULL)?;
             let entry = match self.add_long_entry(&mut state, &parent, long, ATTR_DIRECTORY, cluster) {
                 Ok(entry) => entry,
@@ -1370,6 +1398,53 @@ impl FatVolume {
         let at = self.create(path, 0)?.at.ok_or(ACCESS_DENIED)?;
         if self.write(at, 0, data)? < data.len() {
             let _ = self.remove(path);
+            return Err(DISK_FULL);
+        }
+        self.set_time(at, time, date)
+    }
+
+    /// `put_file` for a long-name call, as Windows 9x's CopyFileA writes
+    /// a file: the components of `path` may be long names (`find_long`),
+    /// and the directories and the file it makes get the long name
+    /// entries their names need (`mkdir_long`, `create_long`). A file that
+    /// is there keeps its entry, and with it its names and attributes; 05h
+    /// if it is read-only. 27h if the data doesn't fit, which leaves no
+    /// file.
+    pub fn put_file_long(
+        &self,
+        path: &[&str],
+        data: &[u8],
+        time: u16,
+        date: u16,
+    ) -> Result<(), u8> {
+        let (leaf, dirs) = path.split_last().ok_or(ACCESS_DENIED)?;
+        // The DOS names of the directories on the way.
+        let mut dir: Vec<String> = Vec::new();
+        let with = |dir: &[String], name: &str| -> Vec<String> {
+            dir.iter().cloned().chain([name.to_string()]).collect()
+        };
+        for name in dirs {
+            let next = with(&dir, name);
+            let found = match self.find_long(&as_strs(&next)) {
+                Ok(entry) if entry.is_dir() => entry,
+                Ok(_) => return Err(ACCESS_DENIED),
+                Err(_) => self.mkdir_long(&as_strs(&dir), name)?,
+            };
+            dir.push(found.name);
+        }
+        let entry = match self.find_long(&as_strs(&with(&dir, leaf))) {
+            Ok(entry) if entry.is_dir() || entry.attr & ATTR_READ_ONLY != 0 => {
+                return Err(ACCESS_DENIED);
+            }
+            Ok(entry) => {
+                self.truncate(entry.at.ok_or(ACCESS_DENIED)?, 0)?;
+                entry
+            }
+            Err(_) => self.create_long(&as_strs(&dir), leaf, 0)?,
+        };
+        let at = entry.at.ok_or(ACCESS_DENIED)?;
+        if self.write(at, 0, data)? < data.len() {
+            let _ = self.remove(&as_strs(&with(&dir, &entry.name)));
             return Err(DISK_FULL);
         }
         self.set_time(at, time, date)
@@ -1813,7 +1888,7 @@ pub fn format(disk: &DiskImage, start: u64, sectors: u64, label: Option<&str>) -
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
 
@@ -2085,17 +2160,41 @@ mod tests {
     /// its order byte, numbered down to 1, each with the checksum of the
     /// entry's DOS name, the name ended by a 0000h and padded with FFFFh.
     /// Panics at long name entries that belong to no entry.
-    fn root_by_spec(volume: &FatVolume) -> Vec<(String, Option<String>)> {
+    pub(crate) fn root_by_spec(volume: &FatVolume) -> Vec<(String, Option<String>)> {
         let layout = volume.layout();
-        let start =
-            layout.reserved_sectors as u64 + layout.fats as u64 * layout.sectors_per_fat as u64;
+        let start = volume.start()
+            + layout.reserved_sectors as u64
+            + layout.fats as u64 * layout.sectors_per_fat as u64;
         let mut root = vec![0u8; layout.root_entries as usize * 32];
         for (i, sector) in root.chunks_mut(512).enumerate() {
             volume.disk().read(start + i as u64, sector).unwrap();
         }
+        entries_by_spec(&root)
+    }
+
+    /// `root_by_spec` for the first cluster of the FAT12 or FAT16
+    /// subdirectory that starts at `cluster`, "." and ".." included.
+    pub(crate) fn dir_by_spec(volume: &FatVolume, cluster: u32) -> Vec<(String, Option<String>)> {
+        let layout = volume.layout();
+        let root = volume.start()
+            + layout.reserved_sectors as u64
+            + layout.fats as u64 * layout.sectors_per_fat as u64;
+        let spc = layout.sectors_per_cluster as u64;
+        let first =
+            root + (layout.root_entries as u64 * 32).div_ceil(512) + (cluster as u64 - 2) * spc;
+        let mut dir = vec![0u8; spc as usize * 512];
+        for (i, sector) in dir.chunks_mut(512).enumerate() {
+            volume.disk().read(first + i as u64, sector).unwrap();
+        }
+        entries_by_spec(&dir)
+    }
+
+    /// The (DOS name, long name) of the entries of the directory `dir`, as
+    /// `root_by_spec` reads them.
+    fn entries_by_spec(dir: &[u8]) -> Vec<(String, Option<String>)> {
         let mut found = Vec::new();
         let mut pending: Vec<&[u8]> = Vec::new();
-        for raw in root.chunks(32) {
+        for raw in dir.chunks(32) {
             match raw[0] {
                 0 => break,
                 0xE5 => {
@@ -2351,6 +2450,127 @@ mod tests {
         assert_eq!(
             volume.rename_long(&["My Saves"], &["Nowhere"], "Loop"),
             Err(PATH_NOT_FOUND)
+        );
+    }
+
+    /// A long-name call makes files and directories with long name
+    /// entries and DOS names by the numeric-tail rules, in directories it
+    /// names by their long names in any case or by their DOS names, and
+    /// `dos_path` gives the DOS names of a path of long names.
+    #[test]
+    fn long_name_calls_make_names_in_long_named_directories() {
+        let volume = floppy("long_create.img");
+        let dir = volume.mkdir_long(&[], "My Saves").unwrap();
+        assert_eq!(dir.name, "MYSAVE~1");
+        let file = volume
+            .create_long(&["my saves"], "Slot one.sav", 0)
+            .unwrap();
+        assert_eq!(file.name, "SLOTON~1.SAV");
+        volume.write(file.at.unwrap(), 0, b"one").unwrap();
+        let cfg = volume.create_long(&["MYSAVE~1"], "config.cfg", 0).unwrap();
+        assert_eq!(
+            (cfg.name.as_str(), cfg.long_name.as_deref()),
+            ("CONFIG.CFG", Some("config.cfg"))
+        );
+        assert_eq!(
+            volume.create_long(&["My Saves"], "SLOT ONE.SAV", 0).err(),
+            Some(ACCESS_DENIED)
+        );
+        assert_eq!(
+            volume.create_long(&["Saves"], "Slot one.sav", 0).err(),
+            Some(PATH_NOT_FOUND)
+        );
+
+        assert_eq!(
+            volume.dos_path(&["My Saves", "SLOT ONE.SAV"]).unwrap(),
+            ["MYSAVE~1", "SLOTON~1.SAV"]
+        );
+        assert_eq!(volume.dos_path(&[]).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            volume.dos_path(&["My Saves", "Slot two.sav"]),
+            Err(FILE_NOT_FOUND)
+        );
+        assert_eq!(
+            volume.dos_path(&["Saves", "Slot one.sav"]),
+            Err(PATH_NOT_FOUND)
+        );
+        // Long names aren't cut to 8.3 as DOS cuts them.
+        assert_eq!(
+            volume.dos_path(&["MYSAVE~1", "CONFIG.CFGX"]),
+            Err(FILE_NOT_FOUND)
+        );
+        assert_eq!(contents(&volume, &["MYSAVE~1", "SLOTON~1.SAV"]), b"one");
+
+        assert_eq!(
+            root_by_spec(&volume),
+            [named_as("MYSAVE~1", Some("My Saves"))]
+        );
+        assert_eq!(
+            dir_by_spec(&volume, dir.cluster),
+            [
+                named_as(".", None),
+                named_as("..", None),
+                named_as("SLOTON~1.SAV", Some("Slot one.sav")),
+                named_as("CONFIG.CFG", Some("config.cfg")),
+            ]
+        );
+    }
+
+    /// A long-name call's whole-file write (CopyFileA) makes the
+    /// directories on the way and the file with long names, and writes
+    /// over a file that is there in its own entry, which keeps its names:
+    /// not over a read-only file or a directory.
+    #[test]
+    fn a_long_name_whole_file_write_makes_long_names() {
+        let volume = floppy("put_long.img");
+        let path = ["My Saves", "Deep Folder", "Saved game.dat"];
+        volume.put_file_long(&path, b"first", 0, 0x5021).unwrap();
+        assert_eq!(
+            root_by_spec(&volume),
+            [named_as("MYSAVE~1", Some("My Saves"))]
+        );
+        let saves = volume.find_long(&path[..1]).unwrap();
+        assert_eq!(
+            dir_by_spec(&volume, saves.cluster),
+            [
+                named_as(".", None),
+                named_as("..", None),
+                named_as("DEEPFO~1", Some("Deep Folder")),
+            ]
+        );
+        let deep = volume.find_long(&path[..2]).unwrap();
+        assert_eq!(
+            dir_by_spec(&volume, deep.cluster),
+            [
+                named_as(".", None),
+                named_as("..", None),
+                named_as("SAVEDG~1.DAT", Some("Saved game.dat")),
+            ]
+        );
+        let first = volume.find_long(&path).unwrap();
+        assert_eq!(first.date, 0x5021);
+
+        let again = ["my saves", "DEEPFO~1", "SAVED GAME.DAT"];
+        volume
+            .put_file_long(&again, b"second, longer", 0, 0x5022)
+            .unwrap();
+        let second = volume.find_long(&path).unwrap();
+        assert_eq!(second.at, first.at);
+        assert_eq!(second.long_name.as_deref(), Some("Saved game.dat"));
+        assert_eq!(second.date, 0x5022);
+        let short = ["MYSAVE~1", "DEEPFO~1", "SAVEDG~1.DAT"];
+        assert_eq!(contents(&volume, &short), b"second, longer");
+        assert_eq!(dir_by_spec(&volume, deep.cluster).len(), 3);
+
+        volume.set_attr(&short, ATTR_READ_ONLY).unwrap();
+        assert_eq!(
+            volume.put_file_long(&path, b"third", 0, 0),
+            Err(ACCESS_DENIED)
+        );
+        assert_eq!(contents(&volume, &short), b"second, longer");
+        assert_eq!(
+            volume.put_file_long(&path[..2], b"x", 0, 0),
+            Err(ACCESS_DENIED)
         );
     }
 

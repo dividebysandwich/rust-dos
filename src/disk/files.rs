@@ -129,12 +129,11 @@ impl DiskController {
                 1 if !writable => return Err(0x05),
                 _ => {}
             }
-            let parts = refs(&parts);
             let handle = self.free_handle()?;
-            let entry = match volume.find(&parts) {
+            let entry = match self.fat_find(&volume, &parts) {
                 Ok(entry) if entry.is_dir() => return Err(0x05),
                 Ok(entry) => entry,
-                Err(0x02) if create && writable => volume.create(&parts, 0)?,
+                Err(0x02) if create && writable => self.fat_create(&volume, &parts)?,
                 Err(0x02) if create => return Err(0x05),
                 Err(e) => return Err(e),
             };
@@ -220,6 +219,19 @@ impl DiskController {
             // in use by another program) is access denied, as DOS has it.
             Err(_) => Err(0x05),
         }
+    }
+
+    /// Create the empty file `parts` on `volume`, for the call running
+    /// now: a long-name call gives it the long name entries its name
+    /// needs and finds its directory by long names
+    /// (`FatVolume::create_long`); DOS's calls give it the 8.3 name they
+    /// cut its name to.
+    fn fat_create(&self, volume: &FatVolume, parts: &[String]) -> Result<fat::Entry, u8> {
+        if !self.long_call {
+            return volume.create(&refs(parts), 0);
+        }
+        let (leaf, dir) = parts.split_last().ok_or(0x05u8)?;
+        volume.create_long(&refs(dir), leaf, 0)
     }
 
     /// INT 21h, AH=3Ch: Create File. Opens read/write, creating the file
@@ -355,7 +367,11 @@ impl DiskController {
         if let Some((drive, volume, parts)) = self.locate_fat(dos_path) {
             self.check_writable(drive)?;
             let (time, date) = stamp.unwrap_or_else(fat::dos_now);
-            return volume.put_file(&refs(&parts), data, time, date);
+            return if self.long_call {
+                volume.put_file_long(&refs(&parts), data, time, date)
+            } else {
+                volume.put_file(&refs(&parts), data, time, date)
+            };
         }
         if self.locate_in_memory(dos_path).is_some() {
             return Err(0x05);
@@ -399,8 +415,7 @@ impl DiskController {
             return Err(0x02);
         }
         if let Some((drive, volume, parts)) = self.locate_fat(filename) {
-            let parts = refs(&parts);
-            let entry = volume.find(&parts)?;
+            let entry = self.fat_find(&volume, &parts)?;
             if entry.is_dir() {
                 return Err(0x02);
             }
@@ -408,7 +423,7 @@ impl DiskController {
             if entry.attr & fat::ATTR_READ_ONLY != 0 {
                 return Err(0x05);
             }
-            return volume.remove(&parts);
+            return volume.remove(&refs(&self.fat_dos_path(&volume, &parts)?));
         }
         let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?;
         if missing || !hostfs::is_file(&path) {
@@ -448,15 +463,10 @@ impl DiskController {
         // file is gone as far as the program can tell (`delete_file`).
         self.make_system_dirs(to);
         if let Some((drive, volume, from_parts)) = self.locate_fat(from) {
-            let from_parts = refs(&from_parts);
             if from_parts.is_empty() {
                 return Err(0x05);
             }
-            let found = if self.keep_case {
-                volume.find_long(&from_parts)?
-            } else {
-                volume.find(&from_parts)?
-            };
+            let found = self.fat_find(&volume, &from_parts)?;
             self.check_writable(drive)?;
             let normalized = to.replace('/', "\\");
             let (to_drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
@@ -469,10 +479,10 @@ impl DiskController {
             // as VFAT does on Windows 9x: a long name gets its long name
             // entries, and the name may be the entry's own in another
             // case. DOS's rename keeps to 8.3 names and drops a long one.
-            let moved_to = if self.keep_case {
-                volume.rename_long(&from_parts, to_dir, leaf)?.at
+            let moved_to = if self.long_call {
+                volume.rename_long(&refs(&from_parts), to_dir, leaf)?.at
             } else {
-                volume.rename(&from_parts, &to_parts)?;
+                volume.rename(&refs(&from_parts), &to_parts)?;
                 volume.find(&to_parts).ok().and_then(|e| e.at)
             };
             // The entry may have moved to other slots: the handles open on
@@ -519,7 +529,7 @@ impl DiskController {
         // case, as MoveFileA does on Windows 9x: the destination is then
         // the source itself.
         let existing = self.find_existing_child(&parent, leaf);
-        let recased = self.keep_case && existing.as_ref().is_some_and(|e| parent.join(e) == source);
+        let recased = self.long_call && existing.as_ref().is_some_and(|e| parent.join(e) == source);
         if super::host_private(leaf) || (existing.is_some() && !recased) {
             return Err(0x05);
         }
