@@ -1193,7 +1193,7 @@ mod tests {
         (91, 0x73E4_9EC8_9162_D561), // Win16 modules counting their users, not imports
         (92, 0xF14F_686E_F110_2495), // Universal Thunks
         (93, 0x9568_9B5A_F977_006F), // each process's compatibility shims
-        (94, 0x1F00_FC2D_38B4_4963), // each process's view of Windows 3.1's GDI heap
+        (94, 0xEC01_69EA_3820_D56B), // each process's view of Windows 3.1's GDI heap
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

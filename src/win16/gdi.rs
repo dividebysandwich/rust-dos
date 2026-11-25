@@ -130,7 +130,7 @@ static APIS: &[Api16] = &[
     win32("CreateSolidBrush", 66, "l", G, "CreateSolidBrush", b'w'),
     rust("DPtoLP", 67, "wps", dp_to_lp),
     win32("DeleteDC", 68, "w", G, "DeleteDC", b'b'),
-    rust("DeleteObject", 69, "w", delete_object),
+    win32("DeleteObject", 69, "w", G, "DeleteObject", b'b'),
     rust("EnumFonts", 70, "wpSl", enum_fonts),
     rust("EnumObjects", 71, "wwSl", enum_objects),
     win32("EqualRgn", 72, "ww", G, "EqualRgn", b'b'),
@@ -448,9 +448,7 @@ fn go(cpu: &mut Cpu, name: &str, args: &[u32]) -> Option<u32> {
 const P_POINT_DWORD: u32 = P_GDI;
 const P_OBJECT: u32 = P_GDI + 1;
 const P_TEXTMETRIC: u32 = P_GDI + 2;
-const P_BITMAP: u32 = P_GDI + 3;
-const P_DELETED: u32 = P_GDI + 4;
-const P_BOOL: u32 = P_GDI + 5;
+const P_BOOL: u32 = P_GDI + 3;
 
 /// A GDI32 function returned `value`: what 16-bit code gets.
 pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
@@ -470,20 +468,6 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
         P_TEXTMETRIC => {
             if value != 0 {
                 text_metric16(cpu, d(1), d(2));
-            }
-            Some((value != 0) as u32)
-        }
-        // A bitmap was made, or the object d(1) deleted: Windows 3.1's
-        // GDI heap of a process with the shim follows.
-        P_BITMAP => {
-            if value != 0 {
-                gdi_heap::created(cpu, value);
-            }
-            Some(value)
-        }
-        P_DELETED => {
-            if value != 0 {
-                gdi_heap::deleted(cpu, d(1));
             }
             Some((value != 0) as u32)
         }
@@ -710,21 +694,14 @@ fn create_poly_polygon_rgn(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 // Structures.
 
 /// CreateBitmap: the planes and the bits per pixel are bytes, which
-/// programs push with whatever the word's high byte has. The bitmap
-/// joins Windows 3.1's GDI heap of a process with the shim
-/// (`Shim::Win31GdiHeap`).
+/// programs push with whatever the word's high byte has.
 fn create_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (planes, bpp) = (args[2] & 0xFF, args[3] & 0xFF);
-    let top = thunk::scratch32(cpu, 0);
-    let args = [args[0], args[1], planes, bpp, args[4]];
-    go_at(cpu, top, "CreateBitmap", &args, vec![P_BITMAP])
-}
-
-/// DeleteObject: a bitmap leaves Windows 3.1's GDI heap of a process
-/// with the shim (`Shim::Win31GdiHeap`).
-fn delete_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let top = thunk::scratch32(cpu, 0);
-    go_at(cpu, top, "DeleteObject", &[args[0]], vec![P_DELETED, args[0]])
+    go(
+        cpu,
+        "CreateBitmap",
+        &[args[0], args[1], planes, bpp, args[4]],
+    )
 }
 
 /// BitBlt and StretchBlt from a bitmap whose device BITMAP a program
@@ -756,9 +733,11 @@ fn create_bitmap_indirect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let height = r16(cpu, b + 4);
     let planes = super::peek(cpu, b + 8, 2).unwrap_or(vec![1, 1]);
     let bits = super::linear(cpu, r32(cpu, b + 10));
-    let top = thunk::scratch32(cpu, 0);
-    let args = [width, height, planes[0] as u32, planes[1] as u32, bits];
-    go_at(cpu, top, "CreateBitmap", &args, vec![P_BITMAP])
+    go(
+        cpu,
+        "CreateBitmap",
+        &[width, height, planes[0] as u32, planes[1] as u32, bits],
+    )
 }
 
 fn create_brush_indirect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {

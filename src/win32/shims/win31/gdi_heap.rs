@@ -10,8 +10,10 @@
 //! the offset its handle is (the handles are GDI32's, the same in 16-bit
 //! code), an object somewhere free in the segment, and a global block
 //! with the device's BITMAP and a copy of the bits. A bitmap gets them
-//! when the view is built and when 16-bit code creates it, and loses
-//! them when 16-bit code deletes it.
+//! when the view is built and when GDI32 makes it, for 16-bit or 32-bit
+//! code, and loses them when GDI32 frees it (`bitmap_added`,
+//! `bitmap_freed`): a handle GDI32 gives again never finds the device
+//! BITMAP of the bitmap that had it before.
 //!
 //! GDI32 keeps a bitmap's bits in the emulator, not in the guest's
 //! memory, so the block can't share them: it has a copy of the bits as
@@ -23,8 +25,12 @@
 //! from where bmBits points, as Windows 3.1's display driver did. Until
 //! then, GDI32's bits are the bitmap's.
 //!
-//! The view's blocks belong to the task that built it, and the view goes
-//! when that task ends.
+//! Windows 3.1's GDI heap was GDI's, there as long as Windows ran. The
+//! Win16 process's view, which every 16-bit program shares, has blocks
+//! of the system's (owner 0), which stay while 16-bit programs come and
+//! go. A Win32 process's view, for the 16-bit code a client task runs
+//! for it (Win32s's 16-bit DLLs), has blocks of that task, and goes with
+//! it.
 //!
 //! [`Shim::Win31GdiHeap`]: crate::win32::shims::Shim::Win31GdiHeap
 
@@ -50,15 +56,17 @@ const HUGE: u16 = 1;
 /// A process's view of GDI's heap.
 #[derive(Clone, Debug, Default)]
 pub struct GdiHeapView {
-    /// The task whose blocks the view's are, 0 while there is no view.
-    pub task: u16,
-    /// The segment's global handle: hGDISegment.
+    /// The task whose blocks the view's are, 0 for the system's.
+    pub owner: u16,
+    /// The segment's global handle, hGDISegment: 0 while there is no
+    /// view.
     pub segment: u16,
     /// The serial number the next object gets (+04h).
     pub serial: u32,
     pub bitmaps: Vec<Viewed>,
-    /// Whether the log has its hint for a program without the shim.
-    pub hinted: bool,
+    /// The tasks the log has its hint for, each a program without the
+    /// shim: a 16-bit program's, or a Win32 process's client task.
+    pub hinted: Vec<u16>,
 }
 
 /// A bitmap in the view.
@@ -79,7 +87,7 @@ pub struct Viewed {
 }
 
 crate::state_fields!(GdiHeapView {
-    task,
+    owner,
     segment,
     serial,
     bitmaps,
@@ -120,7 +128,7 @@ fn put(cpu: &mut Cpu, p: usize, view: GdiHeapView) {
 
 /// TOOLHELP's SystemHeapInfo: hGDISegment, the view's segment, built
 /// now if the process has none yet (or brought up to date with the
-/// bitmaps it has), or 0 for a process without the shim, which gets a
+/// bitmaps it has), or 0 for a program without the shim, which gets a
 /// hint in the log the first time.
 pub fn system_heap_info(cpu: &mut Cpu) -> u16 {
     let Some((p, shimmed)) = served(cpu) else {
@@ -133,10 +141,10 @@ pub fn system_heap_info(cpu: &mut Cpu) -> u16 {
     let Some((p, mut view)) = take(cpu) else {
         return 0;
     };
-    if view.task == 0 {
-        build(cpu, &mut view);
+    if view.segment == 0 {
+        build(cpu, p, &mut view);
     }
-    if view.task != 0 {
+    if view.segment != 0 {
         for handle in bitmaps_of(cpu) {
             add(cpu, &mut view, handle);
         }
@@ -147,40 +155,60 @@ pub fn system_heap_info(cpu: &mut Cpu) -> u16 {
 }
 
 /// The log's hint for a program without the shim that asks where GDI's
-/// heap is, once a process.
+/// heap is, once a task.
 fn hint(cpu: &mut Cpu, p: usize) {
-    let process = &mut cpu.bus.win32.processes[p];
-    if process.gdi_heap.hinted {
+    let (task, path) = running_program(cpu, p);
+    let hinted = &mut cpu.bus.win32.processes[p].gdi_heap.hinted;
+    if hinted.contains(&task) {
         return;
     }
-    process.gdi_heap.hinted = true;
+    hinted.push(task);
     let line = format!(
         "[W16] {} asked TOOLHELP for GDI's heap (SystemHeapInfo), which \
          Windows 98 doesn't have: a program that reads GDI's objects there \
          needs the shim \"{}\" (the win31 and win32s sets, win32_shims=win31)",
-        process.path,
+        path,
         Shim::Win31GdiHeap.describe()
     );
     cpu.bus.log_string(&line);
 }
 
-/// Make the view's segment, for the running task.
-fn build(cpu: &mut Cpu, view: &mut GdiHeapView) {
-    let Some(t) = crate::win16::current_task(cpu) else {
-        return;
+/// The running task's handle (0 without one) and the program it runs:
+/// in the Win16 process, whose own path is KRNL386.EXE's, the 16-bit
+/// program's module file, and else the Win32 process `p`'s.
+fn running_program(cpu: &Cpu, p: usize) -> (u16, String) {
+    let win16 = &cpu.bus.win32.win16;
+    let task = crate::win16::current_task(cpu).map(|t| &win16.tasks[t]);
+    let process = &cpu.bus.win32.processes[p];
+    let module = task
+        .filter(|_| process.id == win16.pid)
+        .and_then(|t| win16.modules.iter().find(|m| m.handle == t.module));
+    let path = module.map_or_else(|| process.path.clone(), |m| m.path.clone());
+    (task.map_or(0, |t| t.handle), path)
+}
+
+/// Make the view's segment for the process `p`: of the system's in the
+/// Win16 process, of the running client task's in a Win32 process.
+fn build(cpu: &mut Cpu, p: usize, view: &mut GdiHeapView) {
+    let owner = if cpu.bus.win32.processes[p].id == cpu.bus.win32.win16.pid {
+        0
+    } else {
+        let Some(t) = crate::win16::current_task(cpu) else {
+            return;
+        };
+        cpu.bus.win32.win16.tasks[t].handle
     };
-    let task = cpu.bus.win32.win16.tasks[t].handle;
     let flags = global::GMEM_MOVEABLE | global::GMEM_ZEROINIT;
-    let segment = global::alloc(cpu, flags, SEGMENT_SIZE, task, false);
+    let segment = global::alloc(cpu, flags, SEGMENT_SIZE, owner, false);
     if segment == 0 {
         return;
     }
     *view = GdiHeapView {
-        task,
+        owner,
         segment,
         serial: 1,
         bitmaps: Vec::new(),
-        hinted: view.hinted,
+        hinted: std::mem::take(&mut view.hinted),
     };
 }
 
@@ -282,7 +310,7 @@ fn add(cpu: &mut Cpu, view: &mut GdiHeapView, handle: u32) {
         return;
     };
     let device = device_bitmap(&bitmap);
-    let Some((block, bits)) = alloc_blocks(cpu, view.task, &device) else {
+    let Some((block, bits)) = alloc_blocks(cpu, view.owner, &device) else {
         view.bitmaps.pop();
         return;
     };
@@ -340,16 +368,16 @@ fn device_bitmap(bitmap: &crate::win32::gdi32::Bitmap) -> Device {
 }
 
 /// The blocks of a bitmap's device BITMAP and of its bits, when they
-/// cross 64K (0 otherwise), for `task`.
-fn alloc_blocks(cpu: &mut Cpu, task: u16, d: &Device) -> Option<(u16, u16)> {
+/// cross 64K (0 otherwise), for `owner`.
+fn alloc_blocks(cpu: &mut Cpu, owner: u16, d: &Device) -> Option<(u16, u16)> {
     let flags = global::GMEM_MOVEABLE | global::GMEM_ZEROINIT | global::GMEM_DDESHARE;
     if !d.huge {
-        let block = global::alloc(cpu, flags, d.size + BLOCK_EXTRA, task, false);
+        let block = global::alloc(cpu, flags, d.size + BLOCK_EXTRA, owner, false);
         return (block != 0).then_some((block, 0));
     }
     let segments = (d.height as u32).div_ceil(d.scan_segment.max(1) as u32);
-    let block = global::alloc(cpu, flags, DEVICE_BITMAP, task, false);
-    let bits = global::alloc(cpu, flags, segments * 0x1_0000, task, false);
+    let block = global::alloc(cpu, flags, DEVICE_BITMAP, owner, false);
+    let bits = global::alloc(cpu, flags, segments * 0x1_0000, owner, false);
     if block == 0 || bits == 0 {
         global::free(cpu, block);
         global::free(cpu, bits);
@@ -423,36 +451,51 @@ fn row_address(cpu: &Cpu, s: &[u8], r: u32) -> Option<u32> {
     (sel != 0).then(|| crate::win16::linear(cpu, (sel as u32) << 16) + off)
 }
 
-/// 16-bit code deleted the GDI object `handle`: its bitmap, if it is
-/// one in the view, leaves it.
-pub fn deleted(cpu: &mut Cpu, handle: u32) {
-    let Some((p, mut view)) = take(cpu) else {
-        return;
-    };
-    if let Some(i) = view.bitmaps.iter().position(|b| b.handle as u32 == handle) {
-        let b = view.bitmaps.remove(i);
-        let entry = at(cpu, &view, b.handle as u32);
-        crate::win16::write_32(cpu, entry, 0);
-        let object = at(cpu, &view, b.object as u32);
-        crate::win16::poke(cpu, object, &[0; OBJECT_SIZE as usize]);
+/// The processes whose views the GDI32 bitmap of the process `pid`
+/// belongs in, as `bitmaps_of` has them: its own, and every process's
+/// for a bitmap of the Win16 process, which 16-bit code makes.
+fn views_for(cpu: &Cpu, pid: u32) -> Vec<usize> {
+    let win16 = cpu.bus.win32.win16.pid;
+    let processes = &cpu.bus.win32.processes;
+    (0..processes.len())
+        .filter(|&p| {
+            let process = &processes[p];
+            let ours = process.id == pid || (win16 != 0 && pid == win16);
+            ours && process.gdi_heap.segment != 0 && process.shims.has(Shim::Win31GdiHeap)
+        })
+        .collect()
+}
+
+/// GDI32 made the bitmap `handle` for the process `pid`, for 16-bit or
+/// 32-bit code (`gdi32::add`): it joins the views it belongs in.
+pub fn bitmap_added(cpu: &mut Cpu, handle: u32, pid: u32) {
+    for p in views_for(cpu, pid) {
+        let mut view = std::mem::take(&mut *cpu.bus.win32.processes[p].gdi_heap);
+        add(cpu, &mut view, handle);
+        put(cpu, p, view);
+    }
+}
+
+/// GDI32 freed the bitmap `handle` (`gdi32::free`), whichever code
+/// deleted it, or deselected it once deleted: it leaves every view, and
+/// its handle table entry is 0 until GDI32 gives the handle again.
+pub fn bitmap_freed(cpu: &mut Cpu, handle: u32) {
+    for p in 0..cpu.bus.win32.processes.len() {
+        let view = &mut cpu.bus.win32.processes[p].gdi_heap;
+        let Some(i) = view.bitmaps.iter().position(|b| b.handle as u32 == handle) else {
+            continue;
+        };
+        let (b, segment) = (view.bitmaps.remove(i), view.segment);
+        if let Some(segment) = global::get(cpu, segment) {
+            crate::win16::write_32(cpu, segment.base + b.handle as u32, 0);
+            let object = segment.base + b.object as u32;
+            crate::win16::poke(cpu, object, &[0; OBJECT_SIZE as usize]);
+        }
         global::free(cpu, b.block);
         if b.bits != 0 {
             global::free(cpu, b.bits);
         }
     }
-    put(cpu, p, view);
-}
-
-/// 16-bit code created the bitmap `handle`: it joins the view, if the
-/// process has one.
-pub fn created(cpu: &mut Cpu, handle: u32) {
-    let Some((p, mut view)) = take(cpu) else {
-        return;
-    };
-    if view.task != 0 {
-        add(cpu, &mut view, handle);
-    }
-    put(cpu, p, view);
 }
 
 /// A 16-bit BitBlt or StretchBlt is about to read rows `top` to
@@ -463,7 +506,7 @@ pub fn before_blit(cpu: &mut Cpu, dc: u32, top: i32, bottom: i32) {
     let Some((p, mut view)) = take(cpu) else {
         return;
     };
-    if view.task != 0 {
+    if view.segment != 0 {
         sync(cpu, &mut view, dc, top.min(bottom), top.max(bottom));
     }
     put(cpu, p, view);
@@ -518,13 +561,18 @@ fn sync(cpu: &mut Cpu, view: &mut GdiHeapView, dc: u32, from: i32, to: i32) {
     }
 }
 
-/// The task `task` ended, and its blocks with it: a view they were goes.
+/// The task `task` ended, and its blocks with it: a view they were goes,
+/// and the task's hint with it.
 pub fn task_ended(cpu: &mut Cpu, task: u16) {
+    if task == 0 {
+        return;
+    }
     for p in cpu.bus.win32.processes.iter_mut() {
-        if task != 0 && p.gdi_heap.task == task {
-            let hinted = p.gdi_heap.hinted;
-            *p.gdi_heap = GdiHeapView {
-                hinted,
+        let view = &mut *p.gdi_heap;
+        view.hinted.retain(|&t| t != task);
+        if view.owner == task && view.segment != 0 {
+            *view = GdiHeapView {
+                hinted: std::mem::take(&mut view.hinted),
                 ..GdiHeapView::default()
             };
         }

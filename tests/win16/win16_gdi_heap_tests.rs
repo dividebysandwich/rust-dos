@@ -262,11 +262,13 @@ fn a_program_with_the_shim_reads_and_changes_gdis_heap() {
 }
 
 /// Without the shim there is no GDI heap, as on Windows 98's GDI32, and
-/// the log has a hint naming the shim, once.
+/// the log has a hint naming the program and the shim, once.
 #[test]
 fn a_program_without_the_shim_gets_no_gdi_heap_and_a_hint() {
     let (code, log) = run("gdi_heap_none", program(&reads_gdis_heap(), CODE));
     assert_eq!(code, 0x20, "{log}");
     assert_eq!(log.matches(HINT).count(), 1, "{log}");
-    assert!(log.contains("win32_shims=win31"), "{log}");
+    let line = log.lines().find(|l| l.contains(HINT)).unwrap_or_default();
+    assert!(line.contains("T.EXE asked"), "{line}");
+    assert!(line.contains("win32_shims=win31"), "{line}");
 }

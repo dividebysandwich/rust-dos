@@ -18,7 +18,6 @@
 //!   Raven) checks the count before each lock and stops with "bad lock
 //!   use count" when it is odd. LocalFlags is a 32-bit function of
 //!   W32SCOMB's own and isn't changed.
-
 //!
 //! A Win32s program runs on Windows 3.1 and can call its 16-bit DLLs,
 //! which see Windows 3.1 itself, so Win32s's set has Windows 3.1's
