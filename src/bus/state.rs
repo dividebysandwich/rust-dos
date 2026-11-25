@@ -1275,7 +1275,8 @@ mod tests {
     /// a type to another file doesn't change it. It doesn't see a field
     /// that changes its type, `dinput::poll::MouseSeen`'s hand-written
     /// `State`, or what the section saves from elsewhere, such as
-    /// `dpmi::Context`.
+    /// `dpmi::Context`. `tools/win32_layout.py` computes the same without
+    /// a build, for merges that move the version: change both together.
     fn win32_layout() -> u64 {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut lists = Vec::new();
