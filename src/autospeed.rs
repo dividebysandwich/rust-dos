@@ -1420,6 +1420,14 @@ impl Backlog {
         };
     }
 
+    /// What the pacer dropped up to `lost_ns` (`Pacer::lost`) counts as
+    /// neither lag nor a stall, and the frames before say nothing of
+    /// those after: a state's load settles (`LOAD_SETTLE` in `timer.rs`).
+    pub fn skip(&mut self, lost_ns: u64) {
+        self.start_over();
+        self.seen_ns = lost_ns;
+    }
+
     /// What the pacer dropped for lag so far.
     pub fn lag_ns(&self) -> u64 {
         self.lag_ns

@@ -23,6 +23,21 @@ const FRAME: Duration = Duration::from_micros(16_667);
 /// How far emulated time may fall behind the wall clock before the backlog
 /// is dropped rather than caught up.
 pub(crate) const MAX_LAG: Duration = Duration::from_millis(50);
+/// After a save state loads (`Pacer::rebase`), the emulated time `Auto`
+/// leaves out of its measurements and of the host's estimate. The load's
+/// own work goes on in the host's time after it: the first frame takes the
+/// file and the rebuilt machine (300 to 600 ms), and those after it fill
+/// caches and draw the scene's textures afresh. In American McGee's Alice,
+/// loading a state of the Fortress of Doors from the main menu, frames ran
+/// up to 25 to 79 ms within the first second of emulated time after the
+/// load and were back at 17 ms by 1.5 s, in six runs, three of them with
+/// the host's cores busy with other work. Measured with them, the frames
+/// fell behind and cut the speed as a slow host's would: on a busy host,
+/// twice, from 180,000 to 68,000, where the game drew 9 frames a second
+/// for a minute while the limit that the cut set climbed back (#827). The
+/// host's estimate read 11,973 over them. Two seconds is that 1.5 with a
+/// measurement window (`WINDOW_NS`) to spare.
+pub(crate) const LOAD_SETTLE: Duration = Duration::from_secs(2);
 /// A backlog of this much is one gap: running frames, it is dropped at
 /// `MAX_LAG`. The frontend stopped (a page in the background, a window
 /// being dragged, the host asleep), which says nothing of whether the host
@@ -813,6 +828,9 @@ pub struct Pacer {
     /// the CPU model ran in real mode (`hint_real_most`), once for each
     /// speed set.
     real_most_hinted: bool,
+    /// The emulated time, in ns, up to which `Auto` neither measures nor
+    /// samples the host after a save state loaded (`LOAD_SETTLE`).
+    settle_until_ns: u64,
 }
 
 impl Pacer {
@@ -842,6 +860,7 @@ impl Pacer {
             presented: false,
             period: FRAME,
             real_most_hinted: false,
+            settle_until_ns: 0,
         }
     }
 
@@ -862,10 +881,13 @@ impl Pacer {
     /// state loaded): without this, emulated time ahead of the wall clock
     /// would stand still until the wall clock caught up, and time behind it
     /// would race to catch up. `Auto` starts over, and the bus forgets the
-    /// speed it had to go back to (`Bus::end_work_boost`).
+    /// speed it had to go back to (`Bus::end_work_boost`). For `LOAD_SETTLE`
+    /// of emulated time after, `Auto` neither measures nor samples the
+    /// host: the frames are the load's.
     pub fn rebase(&mut self, bus: &mut Bus, now: Instant) {
         self.auto.reset();
         self.backlog.start_over();
+        self.settle_until_ns = bus.clock.now_ns() + LOAD_SETTLE.as_nanos() as u64;
         bus.activity.work_return = None;
         self.anchor_to(&bus.clock, now);
     }
@@ -1144,16 +1166,18 @@ impl Pacer {
             budget_ns / ns_per_instr / (frame_ns / 1_000_000.0)
         };
         // At auto, a frame of a stall stays out of the samples
-        // (`HostEstimate::outlier`).
-        let frame_ideal = (executed >= SAMPLE_INSTRUCTIONS).then(|| {
+        // (`HostEstimate::outlier`), and so do the frames of a state's load
+        // (`LOAD_SETTLE`).
+        let auto = matches!(self.speed, CpuSpeed::Auto(_));
+        let settling = auto && ns < self.settle_until_ns;
+        let frame_ideal = (executed >= SAMPLE_INSTRUCTIONS && !settling).then(|| {
             ideal_of(
                 exec.as_nanos() as f64 / executed as f64,
                 overhead.as_nanos() as f64,
             )
         });
-        let outlier = matches!(self.speed, CpuSpeed::Auto(_))
-            && frame_ideal.is_some_and(|ideal| self.host.outlier(ideal));
-        let ideal = if outlier {
+        let outlier = auto && frame_ideal.is_some_and(|ideal| self.host.outlier(ideal));
+        let ideal = if outlier || settling {
             None
         } else {
             self.sample
@@ -1214,6 +1238,12 @@ impl Pacer {
                 // Fast forwarding, the host's time says nothing of the
                 // program's needs.
                 if self.fast_forward {
+                    return None;
+                }
+                // Nor while a state's load settles: what the pacer drops
+                // then is the load's, neither lag nor a stall.
+                if settling {
+                    self.backlog.skip(self.lost_ns);
                     return None;
                 }
                 if self.wall_paced {
@@ -2776,6 +2806,115 @@ mod tests {
         pit.set_mode(0x36, 1000);
         pit.write_count(3, 1000);
         assert_eq!(pit.high_ticks(1000.0, 1300.0), 200.0);
+    }
+
+    /// A protected-mode game at `Auto` that draws a frame for each 10
+    /// million instructions, paced by a wall clock that moves by the
+    /// host's time for each frame, a frame's at least.
+    struct Game {
+        cpu: Box<crate::cpu::Cpu>,
+        pacer: Pacer,
+        start: Instant,
+        wall: Duration,
+        drawn: f64,
+    }
+
+    impl Game {
+        fn new() -> Self {
+            let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+            cpu.pm_latched = true;
+            let start = Instant::now();
+            let pacer = Pacer::new(CpuSpeed::Auto(3000), None, start);
+            Game {
+                cpu,
+                pacer,
+                start,
+                wall: Duration::ZERO,
+                drawn: 0.0,
+            }
+        }
+
+        /// Runs `ms` of emulated time on a host that takes `ns(since)`
+        /// nanoseconds an instruction at `since` ms into it, and `first`
+        /// more for the first frame. Returns the speed of each frame.
+        fn run(&mut self, ms: u64, first: Duration, ns: impl Fn(u64) -> f64) -> Vec<u32> {
+            let from = self.cpu.bus.clock.now_ns();
+            let mut speeds = Vec::new();
+            let mut extra = first;
+            while self.cpu.bus.clock.now_ns() < from + ms * 1_000_000 {
+                let since_ms = (self.cpu.bus.clock.now_ns() - from) / 1_000_000;
+                let bus = &mut self.cpu.bus;
+                let target = self.pacer.batch_end(&bus.clock, self.start + self.wall);
+                let executed = target.saturating_sub(bus.clock.icount);
+                bus.clock.icount = target;
+                self.drawn += executed as f64 / 10e6;
+                bus.activity.presents = self.drawn as u64;
+                let exec = Duration::from_nanos((executed as f64 * ns(since_ms)) as u64);
+                let took = exec + std::mem::take(&mut extra);
+                speeds.push(bus.clock.cycles_per_ms());
+                let next = self
+                    .pacer
+                    .end_cpu_frame(&mut self.cpu, executed, took, Duration::ZERO);
+                if let Some(next) = next {
+                    self.cpu.bus.clock.set_cycles_per_ms(next);
+                }
+                self.wall += took.max(FRAME);
+            }
+            speeds
+        }
+
+        /// A save state of the same scene loads (`Pacer::rebase`).
+        fn load(&mut self) {
+            let now = self.start + self.wall;
+            self.pacer.rebase(&mut self.cpu.bus, now);
+        }
+    }
+
+    /// The host's time an instruction at which it keeps up with 300,000
+    /// instructions per ms, with `MAX_BUSY_SHARE` of each frame.
+    const KEEPS_UP_NS: f64 = MAX_BUSY_SHARE * 1e6 / 300_000.0;
+
+    /// The game, settled on a host that keeps up with 300,000, then a
+    /// state of it loaded, whose frames run `slow` times as long for `for_ms`
+    /// of emulated time after a first frame of 400 ms. Returns the speed
+    /// before the load and those of each frame after it.
+    fn after_a_load(slow: f64, for_ms: u64) -> (u32, Vec<u32>) {
+        let mut game = Game::new();
+        game.run(30_000, Duration::ZERO, |_| KEEPS_UP_NS);
+        let before = game.cpu.bus.clock.cycles_per_ms();
+        game.load();
+        let first = Duration::from_millis(400);
+        let after = game.run(30_000, first, |ms| {
+            if ms < for_ms {
+                KEEPS_UP_NS * slow
+            } else {
+                KEEPS_UP_NS
+            }
+        });
+        (before, after)
+    }
+
+    /// American McGee's Alice after a state of the Fortress of Doors loads
+    /// (#827): a first frame of 300 to 600 ms, and frames up to four times
+    /// as long as the others for a second of emulated time after it. They
+    /// are the load's, and the speed stays where it was: on main the two
+    /// measurements behind took it from 180,000 to 68,000.
+    #[test]
+    fn the_frames_of_a_state_load_leave_the_speed() {
+        let (before, after) = after_a_load(4.0, 1000);
+        assert!(before > 200_000, "{before}");
+        let least = *after.iter().min().unwrap();
+        assert!(least as f64 >= before as f64 * 0.9, "{before}: {after:?}");
+    }
+
+    /// The host slower for longer than the load settles: that is the host,
+    /// and the measurements after the settling cut the speed as they would
+    /// without a load.
+    #[test]
+    fn a_host_slower_past_the_loads_settling_still_cuts_the_speed() {
+        let (before, after) = after_a_load(4.0, 30_000);
+        let last = *after.last().unwrap();
+        assert!((last as f64) < before as f64 * 0.5, "{before}: {after:?}");
     }
 }
 
