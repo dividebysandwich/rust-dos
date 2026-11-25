@@ -9,6 +9,7 @@ use iced_x86::code_asm::*;
 use rust_dos::config::WindowsVersion;
 use rust_dos::cpu::{Cpu, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
+use rust_dos::game_fixes::{FIXES, Kind};
 use rust_dos_ne as ne;
 use rust_dos_pe::{self as pe, Builder, Imp};
 use std::fs;
@@ -84,19 +85,32 @@ fn program(
 /// Run `program` as T.EXE, with `more` files beside it, on the built-in
 /// Windows 98 SE to its end: its exit code and what it printed.
 fn run(test: &str, program: Vec<u8>, more: &[(&str, Vec<u8>)]) -> (u8, String) {
+    run_as(test, "T.EXE", program, more, false)
+}
+
+/// Run `program` as `name`, as `run` does, with the game fixes on if
+/// `fixes` is.
+fn run_as(
+    test: &str,
+    name: &str,
+    program: Vec<u8>,
+    more: &[(&str, Vec<u8>)],
+    fixes: bool,
+) -> (u8, String) {
     let base = PathBuf::from("target/test_win32_universal").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
-    fs::write(base.join("T.EXE"), program).unwrap();
+    fs::write(base.join(name), program).unwrap();
     for (file, bytes) in more {
         fs::write(base.join(file), bytes).unwrap();
     }
     let mut cpu = Cpu::new(base);
     cpu.bus.win32.enabled = true;
     cpu.bus.win32.version = WindowsVersion::Win98Se;
+    cpu.bus.game_fixes = fixes;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
-    assert!(cpu.load_executable("T.EXE", None));
+    assert!(cpu.load_executable(name, None));
     let mut ended = false;
     for _ in 0..400 {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
@@ -438,4 +452,187 @@ fn a_universal_thunk_calls_its_16_bit_dll_with_the_pointers_translated() {
     });
     let (code, text) = run("thunk", exe, &[("UT16.DLL", ut_dll16())]);
     assert_eq!(code, 0, "{}", text);
+}
+
+/// UT16.DLL for the selectors' test: UTINIT returns 1, and UTPROC(buffer,
+/// value) writes the 16:16 pointer UTLinearToSelectorOffset makes of the
+/// flat address at the buffer's byte 4 at its byte 8, and 5678h through
+/// that pointer.
+fn ut_dll16_pointer() -> Vec<u8> {
+    let mut b = ne::Builder::new("UT16", ne::LIBMODULE | ne::SINGLEDATA | ne::PROTMODE);
+    b.expected_version(0x0400);
+    let win32s16 = b.import_module("WIN32S16");
+    let by_name = b.imported_name("UTLINEARTOSELECTOROFFSET");
+    let mut code = vec![
+        0xB8, 0x01, 0x00, // mov ax, 1
+        0x31, 0xD2, // xor dx, dx
+        0xCA, 0x08, 0x00, // retf 8
+    ];
+    code.resize(0x40, 0x90);
+    code.extend_from_slice(&[
+        0x55, // push bp
+        0x8B, 0xEC, // mov bp, sp
+        0xC4, 0x5E, 0x0A, // les bx, [bp+0Ah] (the buffer)
+        0x66, 0x26, 0xFF, 0x77, 0x04, // push dword es:[bx+4]
+    ]);
+    let linear_to_segptr = code.len() as u16 + 1;
+    code.extend_from_slice(&[
+        0x9A, 0xFF, 0xFF, 0x00, 0x00, // call far UTLinearToSelectorOffset
+        0xC4, 0x5E, 0x0A, // les bx, [bp+0Ah]
+        0x26, 0x89, 0x47, 0x08, // mov es:[bx+8], ax
+        0x26, 0x89, 0x57, 0x0A, // mov es:[bx+0Ah], dx
+        0x8E, 0xC2, // mov es, dx
+        0x8B, 0xD8, // mov bx, ax
+        0x26, 0xC7, 0x07, 0x78, 0x56, // mov word es:[bx], 5678h
+        0x5D, // pop bp
+        0xCA, 0x08, 0x00, // retf 8
+    ]);
+    let text = b.segment(ne::SegmentSpec {
+        data: code,
+        flags: 0,
+        alloc: 0,
+        relocations: vec![ne::Relocation {
+            source: ne::ADDR_FARPTR,
+            additive: false,
+            offset: linear_to_segptr,
+            target: ne::Target::Name {
+                module: win32s16,
+                name_offset: by_name,
+            },
+        }],
+    });
+    let data = b.segment(ne::SegmentSpec {
+        data: vec![0; 0x10],
+        flags: ne::SEG_DATA,
+        alloc: 0x100,
+        relocations: Vec::new(),
+    });
+    b.auto_data(data, 0, 0);
+    for (ordinal, name, offset) in [(1, "UTINIT", 0), (2, "UTPROC", 0x40)] {
+        b.entry(
+            ordinal,
+            ne::Entry::Code {
+                segment: text as u8,
+                offset,
+                flags: ne::ENTRY_EXPORTED,
+                moveable: false,
+            },
+        );
+        b.export(name, ordinal, true);
+    }
+    b.build()
+}
+
+/// A program of `size` bytes that reserves and commits 192 KB, has
+/// UTPROC translate the addresses of its bytes 18010h and 8010h, and
+/// checks that 5678h got there. It ends with 10h when the two pointers
+/// have the offset 8010h from the region's start and selectors one tile
+/// (8) apart, as Win32s gives them; 20h when they have the offset 10h in
+/// their 32 KB blocks, as Windows 98 does; and otherwise with the step
+/// that failed.
+fn region_selectors_program(size: usize) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["UTRegister", "VirtualAlloc", "ExitProcess"],
+    )];
+    let mut exe = program(imports, &ut_data(), |a, l| {
+        let mut fail = a.create_label();
+        let mut blocks = a.create_label();
+        // The pointer UTPROC makes of the region's byte `at`, in ESI.
+        let call = |a: &mut CodeAssembler, at: i32| {
+            a.mov(eax, l.dword(0x38))?;
+            a.add(eax, at)?;
+            a.mov(l.dword(0x44), eax)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(l.at(0x40))?;
+            a.call(l.dword(0x30))?;
+            a.mov(esi, l.dword(0x48))
+        };
+        a.push(PAGE_READWRITE)?;
+        a.push(MEM_COMMIT | MEM_RESERVE)?;
+        a.push(0x3_0000)?;
+        a.push(0)?;
+        a.call(l.import(1))?;
+        a.mov(l.dword(0x38), eax)?;
+        a.mov(ebx, 1)?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        // UTRegister(BASE, "UT16.DLL", "UTInit", "UTProc", where, no
+        // callback, buffer).
+        a.push(l.at(0x40))?;
+        a.push(0)?;
+        a.push(l.at(0x30))?;
+        for name in [0x20, 0x10, 0] {
+            a.push(l.at(name))?;
+        }
+        a.push(BASE)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 2)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        call(a, 0x1_8010)?;
+        a.mov(edi, esi)?;
+        a.mov(eax, l.dword(0x38))?;
+        a.mov(ebx, 3)?;
+        a.cmp(word_ptr(eax + 0x1_8010), 0x5678)?;
+        a.jne(fail)?;
+        call(a, 0x8010)?;
+        a.mov(eax, l.dword(0x38))?;
+        a.mov(ebx, 4)?;
+        a.cmp(word_ptr(eax + 0x8010), 0x5678)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(di, si)?;
+        a.jne(fail)?;
+        a.cmp(si, 0x10)?;
+        a.je(blocks)?;
+        a.cmp(si, 0x8010)?;
+        a.jne(fail)?;
+        // Win32s's: the tile of the region's 10000h to 1FFFFh is the
+        // next one.
+        a.shr(esi, 16)?;
+        a.shr(edi, 16)?;
+        a.sub(edi, esi)?;
+        a.mov(ebx, 6)?;
+        a.cmp(edi, 8)?;
+        a.jne(fail)?;
+        a.mov(ebx, 0x10)?;
+        a.jmp(fail)?;
+        a.set_label(&mut blocks)?;
+        a.mov(ebx, 0x20)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    assert!(exe.len() <= size);
+    exe.resize(size, 0);
+    exe
+}
+
+/// The program file the game fix `lunicus-win32s` gives Win32s's shims,
+/// and its size.
+fn win32s_program() -> (&'static str, usize) {
+    FIXES
+        .iter()
+        .find_map(|fix| match fix.kind {
+            Kind::Win32Shims { program, size, .. } if fix.name == "lunicus-win32s" => {
+                Some((program, size))
+            }
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_win32s_program_gets_its_region_s_tiled_selectors() {
+    let (name, size) = win32s_program();
+    let more = [("UT16.DLL", ut_dll16_pointer())];
+    let exe = region_selectors_program(size);
+    let (code, text) = run_as("region_tiles", name, exe.clone(), &more, true);
+    assert_eq!(code, 0x10, "{}", text);
+    // Windows 98's 32 KB blocks for the program without the shims.
+    let (code, text) = run_as("region_blocks", name, exe, &more, false);
+    assert_eq!(code, 0x20, "{}", text);
 }

@@ -28,16 +28,21 @@ pub enum Shim {
     /// GlobalFlags gives every block a lock count of 0, as Win32s's did
     /// ([`win32s`]); GlobalLock and GlobalUnlock still count.
     GlobalFlagsWithoutLockCount = 0,
+    /// UTLinearToSelectorOffset gives an address in a region of the
+    /// program's memory a selector of the region's own tiled ones, as
+    /// Win32s's did ([`win32s`]), not that of a 32 KB block.
+    UtRegionSelectors = 1,
 }
 
 impl Shim {
     /// Every shim, in the order of their bits.
-    pub const ALL: &[Shim] = &[Shim::GlobalFlagsWithoutLockCount];
+    pub const ALL: &[Shim] = &[Shim::GlobalFlagsWithoutLockCount, Shim::UtRegionSelectors];
 
     /// What the shim does, in a few words, for the log.
     pub fn describe(self) -> &'static str {
         match self {
             Shim::GlobalFlagsWithoutLockCount => "GlobalFlags without the lock count",
+            Shim::UtRegionSelectors => "UTLinearToSelectorOffset with region selectors",
         }
     }
 

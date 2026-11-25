@@ -20,15 +20,21 @@
 
 use super::builtin::{Def, rust};
 use super::flat::{self, Request, UT_REGISTER};
+use super::ldt;
 use super::module;
 use super::thunk::EAX;
 use crate::cpu::Cpu;
 use crate::dpmi::Context;
 use crate::savestate::Since;
+use crate::win32::shims::Shim;
 
 /// The W32 state version that first saves the Universal Thunks
 /// (`State::universal` and `Request::held`).
 pub const UT_SAVED: u16 = 92;
+
+/// The W32 state version that first saves the tiled selectors of a
+/// process's memory (`Selector::len`).
+pub const TILES_SAVED: u16 = 94;
 
 /// The thunks a process can have, as WIN32S16.DLL's table has room for.
 const MAX_THUNKS: usize = 10;
@@ -38,6 +44,9 @@ const BLOCK: u32 = 0x8000;
 /// The translation list's entries read at most: Windows 98 reads until
 /// the 0 that ends it, and faults at the end of the memory without one.
 const MAX_LIST: u32 = 0x1000;
+/// The tiled selectors a region gets at most (`region_segptr`), for 16 MB:
+/// a bigger one gets 32 KB blocks' selectors.
+const MAX_TILES: u16 = 256;
 /// The bytes of a thunk's code (`thunk_code`): pop, push, push and jmp.
 const THUNK_SIZE: u32 = 12;
 
@@ -61,12 +70,14 @@ pub struct Thunk {
 }
 
 /// The selector of the 32 KB block at `base` of the process `source`'s
-/// memory.
+/// memory, or, with a `len`, the first of the tiled selectors of the
+/// `len` bytes of its memory at `base` (`Shim::UtRegionSelectors`).
 #[derive(Clone, Debug, Default)]
 pub struct Selector {
     pub source: u32,
     pub base: u32,
     pub selector: u16,
+    pub len: Since<TILES_SAVED, u32>,
 }
 
 // KERNEL32's functions.
@@ -360,7 +371,13 @@ pub(super) fn process_ending(cpu: &mut Cpu, pid: u32) {
     let all = pid == cpu.bus.win32.win16.pid;
     let universal = &mut cpu.bus.win32.win16.universal;
     universal.thunks.retain(|t| !all && t.pid != pid);
-    universal.selectors.retain(|s| !all && s.source != pid);
+    let (gone, kept) = std::mem::take(&mut universal.selectors)
+        .into_iter()
+        .partition(|s| all || s.source == pid);
+    universal.selectors = kept;
+    for s in gone.iter().filter(|s| *s.len != 0) {
+        flat::free_tiles(cpu, s.selector, *s.len);
+    }
 }
 
 /// Every selector UTLinearToSelectorOffset made for the process `pid`
@@ -397,7 +414,7 @@ pub(super) fn linear_to_segptr(cpu: &mut Cpu, pid: u32, lin: u32) -> u32 {
         .universal
         .selectors
         .iter()
-        .find(|s| s.source == pid && s.base == base)
+        .find(|s| s.source == pid && s.base == base && *s.len == 0)
         .map(|s| s.selector);
     let selector = match cached {
         Some(selector) => {
@@ -413,6 +430,7 @@ pub(super) fn linear_to_segptr(cpu: &mut Cpu, pid: u32, lin: u32) -> u32 {
                 source: pid,
                 base,
                 selector,
+                len: Since(0),
             });
             selector
         }
@@ -432,10 +450,73 @@ fn selector_offset_to_linear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// UTLinearToSelectorOffset(address): a 16:16 pointer to the flat
-/// address of the process the 16-bit code runs for.
+/// address of the process the 16-bit code runs for. With the shim
+/// `UtRegionSelectors`, an address in its memory outside the threads'
+/// stacks gets one of its region's tiled selectors (`region_segptr`).
 fn linear_to_selector_offset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let pid = flat::served_pid(cpu);
+    if let Some(segptr) = region_segptr(cpu, pid, args[0]) {
+        return Some(segptr);
+    }
     Some(linear_to_segptr(cpu, pid, args[0]))
+}
+
+/// The region of the process `pid`'s memory that `lin` is in, as its
+/// start and length, for a process with the shim `UtRegionSelectors`:
+/// None for one without it, for an address below 64 KB or in a thread's
+/// stack, which Win32s gives 32 KB blocks' selectors, for one in no
+/// region, and for a region of more than `MAX_TILES` tiles.
+fn tiled_region(cpu: &Cpu, pid: u32, lin: u32) -> Option<(u32, u32)> {
+    if lin >> 16 == 0 {
+        return None;
+    }
+    let process = cpu.bus.win32.processes.iter().find(|p| p.id == pid)?;
+    if !process.shims.has(Shim::UtRegionSelectors)
+        || process
+            .threads
+            .iter()
+            .any(|t| (t.stack.0..t.stack.1).contains(&lin))
+    {
+        return None;
+    }
+    let region = process.memory.region(lin)?;
+    (ldt::tiles(region.len) <= MAX_TILES).then_some((region.start, region.len))
+}
+
+/// UTLinearToSelectorOffset as Win32s gives it (`Shim::UtRegionSelectors`)
+/// for `lin` of the process `pid`: the tiled selectors of the region it
+/// is in, made the first time, `AHINCR` apart for each 64 KB from the
+/// region's start, and the pointer of the tile `lin` is in.
+fn region_segptr(cpu: &mut Cpu, pid: u32, lin: u32) -> Option<u32> {
+    let (start, len) = tiled_region(cpu, pid, lin)?;
+    let cached = cpu
+        .bus
+        .win32
+        .win16
+        .universal
+        .selectors
+        .iter()
+        .find(|s| s.source == pid && s.base == start && *s.len == len)
+        .map(|s| s.selector);
+    let selector = match cached {
+        Some(selector) => {
+            flat::refresh(cpu, pid, &[selector]);
+            selector
+        }
+        None => {
+            let selector = flat::map_tiles_from(cpu, pid, start, len)?;
+            cpu.bus.win32.win16.universal.selectors.push(Selector {
+                source: pid,
+                base: start,
+                selector,
+                len: Since(len),
+            });
+            selector
+        }
+    };
+    let offset = lin - start;
+    let tile = selector + (offset >> 16) as u16 * ldt::AHINCR;
+    Some((tile as u32) << 16 | (offset & 0xFFFF))
 }
 
 /// Windows 98's WIN32S16.DLL, the 16-bit half of the Universal Thunks.
@@ -469,5 +550,6 @@ crate::state_fields!(Thunk {
 crate::state_fields!(Selector {
     source,
     base,
-    selector
+    selector,
+    len
 });
