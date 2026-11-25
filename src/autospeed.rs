@@ -1588,6 +1588,15 @@ pub struct AutoSpeed {
     /// search held under them, short of what the host has now. Cleared by
     /// a new search and by a heavier scene, which searches again.
     unsure: bool,
+    /// The hold was taken because the program waited (`WAITS`), and the
+    /// measurements since that didn't wait: Some(n). A hold is no place to
+    /// wait for that to change, as it measures only the frame rate. A
+    /// program waits while it loads, and the busy scene after the load
+    /// was held where the load left it: Dark Omen's movie was held at
+    /// 112,500 for 30 measurements and then stepped down, showing 5 of its
+    /// 15 pictures a second with the host's estimate at 500,000 (#1889).
+    /// After `JUDGED` measurements that don't wait, the search goes on up.
+    waiting_hold: Option<u32>,
     /// The last measurement moved `LOADS` on its drives.
     loaded: bool,
     /// Since the host last fell behind (`KEPT_UP`): the most the speed
@@ -1753,6 +1762,7 @@ impl AutoSpeed {
             probe_wait: 0,
             probe_misses: 0,
             unsure: false,
+            waiting_hold: None,
             loaded: false,
             lagged: None,
             pace: 1.0,
@@ -2043,10 +2053,24 @@ impl AutoSpeed {
         self.probe_wait = 0;
         self.probe_misses = 0;
         self.unsure = false;
+        self.waiting_hold = None;
         self.paced = Paced::default();
         if self.even_at.is_none() {
             self.even_done = [false; 2];
         }
+    }
+
+    /// A scene other than the one held (a heavier one, or one that works
+    /// after a wait): what the speed held at in the last one says nothing
+    /// of it.
+    fn new_scene(&mut self) {
+        self.held = None;
+        self.backoffs = 0;
+        self.fell = None;
+        self.least_held = None;
+        self.probe_misses = 0;
+        self.even_done = [false; 2];
+        self.unsure = false;
     }
 
     /// `speed` lost frames: raises the floor to `over` times it, no higher
@@ -2438,6 +2462,7 @@ impl AutoSpeed {
             }
             self.trying = None;
             self.lagged = Some((from, LAGGED_WINDOWS));
+            self.waiting_hold = None;
             self.step = Step::Hold {
                 fps: f64::NAN,
                 left: HOLD_WINDOWS,
@@ -2797,6 +2822,7 @@ impl AutoSpeed {
             if let Some(kind) = evened {
                 self.even_done[kind] = true;
             }
+            self.waiting_hold = None;
             self.step = Step::Hold {
                 fps: m.refresh,
                 left: HOLD_WINDOWS,
@@ -2809,6 +2835,7 @@ impl AutoSpeed {
         }
         // Hold at `speed`, which is known to draw `fps`.
         let hold_drawing = |this: &mut Self, fps: f64, speed: u32, left: u32, more: bool| {
+            this.waiting_hold = None;
             this.step = Step::Hold {
                 fps,
                 left,
@@ -2840,9 +2867,19 @@ impl AutoSpeed {
         // (`WAITS`): it waits for something else, and more speed draws no
         // more frames.
         let waits = m.halted >= WAITS.max(RETRACES * fps / m.refresh);
+        // A hold here, short of the display's frames and of what the host
+        // has, is held only because the program waits: it goes on up once
+        // the program works (`waiting_hold`).
+        let waiting_hold = |this: &mut Self, speed: u32| {
+            if waits && fps < m.refresh * AT_REFRESH && current < top {
+                this.waiting_hold = Some(0);
+            }
+            speed
+        };
         let up = |this: &mut Self, most: f64, below: (u32, f64)| {
             if fps >= m.refresh * AT_REFRESH || current >= top || waits {
-                return hold(this, c, HOLD_WINDOWS, false);
+                let speed = hold(this, c, HOLD_WINDOWS, false);
+                return waiting_hold(this, speed);
             }
             this.step = Step::Raised { from: current, fps, below };
             // A program that keeps an idling system from halting has no
@@ -2866,16 +2903,21 @@ impl AutoSpeed {
         };
         let down = |this: &mut Self, fps: f64| {
             // Staying, it goes on from the frame rate judged, not from the
-            // last reading: one that ran low would read as frames lost.
+            // last reading: one that ran low would read as frames lost. A
+            // program that still waits here holds as for a wait: a load
+            // that outlasts the hold it took steps down to here, and the
+            // scene after it would be held where the load left it.
             if current <= base {
-                return hold_drawing(this, fps, clamp(c), HOLD_WINDOWS, true);
+                let speed = hold_drawing(this, fps, clamp(c), HOLD_WINDOWS, true);
+                return waiting_hold(this, speed);
             }
             // A step that would pass the floor stops at it. At the floor,
             // trying more instead, the only way left to go, would climb.
             let to = match this.floor {
                 Some((floor, _)) if c / FINE_STEP < floor as f64 => {
                     if floor as f64 * 1.01 >= c {
-                        return hold_drawing(this, fps, clamp(c), HOLD_WINDOWS, false);
+                        let speed = hold_drawing(this, fps, clamp(c), HOLD_WINDOWS, false);
+                        return waiting_hold(this, speed);
                     }
                     floor as f64
                 }
@@ -3118,13 +3160,7 @@ impl AutoSpeed {
                 if low {
                     // A heavier scene: what the last one held at says
                     // nothing of it.
-                    self.held = None;
-                    self.backoffs = 0;
-                    self.fell = None;
-                    self.least_held = None;
-                    self.probe_misses = 0;
-                    self.even_done = [false; 2];
-                    self.unsure = false;
+                    self.new_scene();
                     if !lagged && self.lagged.is_some() && current >= top && top < host_top {
                         let most = (top as f64 * HEAVIER) as u32;
                         self.lagged = (most < host_top).then_some((most, LAGGED_WINDOWS));
@@ -3134,8 +3170,29 @@ impl AutoSpeed {
                     }
                     return up(self, FIRST_STEP, here);
                 }
+                // Held because it waited, and it no longer does: the search
+                // goes on up, as it would have without the wait. The scene
+                // that waited (a load) is over, and what it held at says
+                // nothing of the one that works, as for a heavier scene:
+                // kept, the speed it waited at would be the least that drew
+                // the record (`least_held`), and frames lost far above it
+                // would raise no floor.
+                if let Some(calm) = self.waiting_hold {
+                    let calm = if waits { 0 } else { calm + 1 };
+                    if calm >= JUDGED {
+                        self.waiting_hold = None;
+                        self.new_scene();
+                        return up(self, FIRST_STEP, here);
+                    }
+                    self.waiting_hold = Some(calm);
+                }
+                // Up to the floor, the same hold: one taken because the
+                // program waited stays one.
                 if c < least {
-                    return hold_drawing(self, held, clamp(least), left, more);
+                    let waiting = self.waiting_hold;
+                    let speed = hold_drawing(self, held, clamp(least), left, more);
+                    self.waiting_hold = waiting;
+                    return speed;
                 }
                 let record = Record {
                     fps: recent,
@@ -6533,6 +6590,133 @@ mod tests {
             shown += 1;
             1
         }
+    }
+
+    #[test]
+    fn a_hold_taken_while_loading_goes_on_up_once_the_program_works() {
+        // Dark Omen (#1889): the measurement over the end of the load reads
+        // 52% halted and 2 frames a second, and the speed holds at the
+        // Pentium II's least. The movie after it reads 20% halted, its
+        // decoder's pictures following the speed, while it streams from
+        // the CD.
+        let load = Measurement {
+            fps: Some(2.0),
+            halted: 0.52,
+            io: 284_000.0,
+            refresh: 60.0,
+            ..STILL
+        };
+        let movie = |speed: u32, halted: f64| Measurement {
+            fps: Some((speed as f64 * 5.45 / 112_500.0).min(15.0)),
+            halted,
+            io: 260_000.0,
+            refresh: 60.0,
+            ..STILL
+        };
+        let run = |halted: f64| {
+            let mut auto = AutoSpeed::new(3000, None);
+            auto.set_protected_least(112_500);
+            auto.set_idles(true);
+            let mut speeds = vec![auto.decide(53_281, &load, true, HOST)];
+            for _ in 0..40 {
+                let speed = *speeds.last().unwrap();
+                speeds.push(auto.decide(speed, &movie(speed, halted), true, HOST));
+            }
+            speeds
+        };
+        let works = run(0.2);
+        assert_eq!(works[0], 112_500, "{works:?}");
+        assert!(works.last().is_some_and(|&s| s >= 300_000), "{works:?}");
+        // One that goes on waiting stays held.
+        let waits = run(0.6);
+        assert!(waits.iter().all(|&s| s <= 112_500), "{waits:?}");
+    }
+
+    /// Dark Omen's load and intro movie, as in the test above: the load
+    /// for `loads` measurements, then the movie at 20% halted with a
+    /// retrace missed in the measurements `missed` picks. The speeds the
+    /// movie's measurements asked for.
+    fn load_then_movie(loads: usize, missed: impl Fn(usize) -> u64) -> (AutoSpeed, Vec<u32>) {
+        let load = Measurement {
+            fps: Some(2.0),
+            halted: 0.52,
+            io: 284_000.0,
+            refresh: 60.0,
+            ..STILL
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(112_500);
+        auto.set_idles(true);
+        let mut speed = 53_281;
+        for _ in 0..loads {
+            speed = auto.decide(speed, &load, true, HOST);
+        }
+        let mut speeds = Vec::new();
+        for i in 0..12 {
+            let m = Measurement {
+                fps: Some((speed as f64 * 5.45 / 112_500.0).min(15.0)),
+                halted: 0.2,
+                io: 260_000.0,
+                refresh: 60.0,
+                missed: missed(i),
+                ..STILL
+            };
+            speed = auto.decide(speed, &m, true, HOST);
+            speeds.push(speed);
+        }
+        (auto, speeds)
+    }
+
+    #[test]
+    fn a_load_that_outlasts_its_hold_still_goes_on_up_once_the_program_works() {
+        // The hold the load took runs out while it still loads, and steps
+        // down to the least speed hold again: the movie after it climbs as
+        // soon as it would after a short load.
+        let (_, speeds) = load_then_movie(45, |_| 0);
+        assert!(speeds.iter().any(|&s| s >= 300_000), "{speeds:?}");
+    }
+
+    #[test]
+    fn a_retrace_missed_in_a_hold_taken_while_loading_keeps_it_one() {
+        // The retrace missed raises the hold a step, which stays the hold
+        // the load took.
+        let (_, speeds) = load_then_movie(1, |i| u64::from(i == 0));
+        assert!(speeds.iter().any(|&s| s >= 300_000), "{speeds:?}");
+    }
+
+    #[test]
+    fn a_hold_taken_while_loading_forgets_the_load_once_the_program_works() {
+        // The load went on for a few measurements of the hold, enough for
+        // a record of its frames: the movie is another scene, and the
+        // record says nothing of it.
+        let load = Measurement {
+            fps: Some(2.0),
+            halted: 0.52,
+            io: 284_000.0,
+            refresh: 60.0,
+            ..STILL
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(112_500);
+        auto.set_idles(true);
+        let mut speed = 53_281;
+        for _ in 0..6 {
+            speed = auto.decide(speed, &load, true, HOST);
+        }
+        assert!(auto.least_held.is_some(), "{:?}", auto.step);
+        let movie = Measurement {
+            fps: Some(5.45),
+            halted: 0.2,
+            io: 260_000.0,
+            refresh: 60.0,
+            ..STILL
+        };
+        for _ in 0..JUDGED {
+            speed = auto.decide(speed, &movie, true, HOST);
+        }
+        assert!(speed > 112_500, "{speed}");
+        assert!(auto.held.is_none(), "{:?}", auto.held);
+        assert!(auto.least_held.is_none(), "{:?}", auto.least_held);
     }
 
     #[test]
