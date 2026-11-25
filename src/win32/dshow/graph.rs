@@ -333,6 +333,7 @@ fn render(cpu: &mut Cpu, this: u32, file: u32) -> Result<u32, u32> {
         element: path.clone(),
         alias: format!("DirectShow graph {id}"),
         windowless: filter::linked(cpu, id),
+        file_as_is: true,
         ..Parms::default()
     };
     let flags = MCI_OPEN_TYPE | MCI_OPEN_ELEMENT | MCI_OPEN_ALIAS;

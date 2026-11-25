@@ -150,19 +150,12 @@ fn open(cpu: &mut Cpu, i: usize) -> u32 {
     if element.is_empty() {
         return 0;
     }
-    use crate::win32::kernel32;
-    let handle = match kernel32::open_handle(cpu, &element, 0x8000_0000, 1, 3) {
-        Ok(h) => h,
-        Err(_) => return MCIERR_FILE_NOT_FOUND,
+    let bytes = match element_bytes(cpu, i) {
+        Ok(bytes) => bytes,
+        Err(e) => return e,
     };
-    let mut bytes = Vec::new();
-    loop {
-        match kernel32::read_file(cpu, handle, 65536) {
-            Ok(chunk) if !chunk.is_empty() => bytes.extend_from_slice(&chunk),
-            _ => break,
-        }
-    }
-    crate::win32::object::close(cpu, handle);
+    // The samples are kept (`Wav::data`), not the file.
+    *device(cpu, i).procedure_data = None;
     let Some((format, mut data)) = wave::parse_wav(&bytes) else {
         return MCIERR_INVALID_FILE;
     };

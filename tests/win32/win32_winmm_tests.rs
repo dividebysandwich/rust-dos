@@ -2417,3 +2417,121 @@ fn sound_names_that_are_not_strings_fail_without_a_fault() {
         assert_eq!(cpu.errorlevel, 0x3F, "{core:?}: {:?}", printed(&cpu));
     }
 }
+
+/// A program that installs an I/O procedure for 'PAK ', which serves
+/// `short_wav` from the program's data for any name, as Encarta 97's
+/// does for its archives (#1991), and opens "SND.PAK+CLIP.WAV" with
+/// waveaudio. Bit 0 of the exit code is set if the open worked, bit 1 if
+/// the device's length in bytes is the clip's, 1102.
+fn mci_procedure_program() -> Vec<u8> {
+    const MMIO_INSTALLPROC: i32 = 0x10000;
+    const MMIOM_READ: i32 = 0;
+    const MMIOM_SEEK: i32 = 2;
+    // MMIOINFO's lDiskOffset, where the procedure keeps its place.
+    const DISK_OFFSET: i32 = 44;
+    const OPEN: u32 = 0x00;
+    const FORMAT: u32 = 0x40;
+    const STATUS: u32 = 0x60;
+    const REPLY: u32 = 0x80;
+    const WAV: u32 = 0x100;
+    let wav = short_wav();
+    let len = wav.len() as i32;
+    let fourcc = |s: &[u8; 4]| u32::from_le_bytes(*s) as i32;
+    let mut data = vec![0u8; WAV as usize + wav.len()];
+    put(
+        &mut data,
+        OPEN as usize,
+        b"open SND.PAK+CLIP.WAV type waveaudio alias c",
+    );
+    put(&mut data, FORMAT as usize, b"set c time format bytes");
+    put(&mut data, STATUS as usize, b"status c length");
+    put(&mut data, WAV as usize, &wav);
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        ("WINMM.dll", &["mmioInstallIOProcA", "mciSendStringA"]),
+    ];
+    program(imports, &data, |a, l| {
+        let at = |offset: u32| l.at(offset) as i32;
+        let mut start = a.create_label();
+        a.call(start)?;
+        // LRESULT CALLBACK IOProc(LPSTR info, UINT msg, LPARAM l1,
+        // LPARAM l2): MMIOM_OPEN and MMIOM_CLOSE do nothing.
+        let mut read = a.create_label();
+        let mut seek = a.create_label();
+        let mut short = a.create_label();
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.cmp(eax, MMIOM_READ)?;
+        a.je(read)?;
+        a.cmp(eax, MMIOM_SEEK)?;
+        a.je(seek)?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        // As many bytes as are asked for and left, from the offset on.
+        a.set_label(&mut read)?;
+        a.push(esi)?;
+        a.push(edi)?;
+        a.mov(edx, dword_ptr(esp + 12))?;
+        a.mov(eax, len)?;
+        a.sub(eax, dword_ptr(edx + DISK_OFFSET))?;
+        a.mov(ecx, dword_ptr(esp + 24))?;
+        a.cmp(ecx, eax)?;
+        a.jbe(short)?;
+        a.mov(ecx, eax)?;
+        a.set_label(&mut short)?;
+        a.mov(esi, at(WAV))?;
+        a.add(esi, dword_ptr(edx + DISK_OFFSET))?;
+        a.mov(edi, dword_ptr(esp + 20))?;
+        a.mov(eax, ecx)?;
+        a.add(dword_ptr(edx + DISK_OFFSET), ecx)?;
+        a.cld()?;
+        a.rep().movsb()?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.ret_1(16)?;
+        a.set_label(&mut seek)?;
+        a.mov(ecx, dword_ptr(esp + 4))?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(ecx + DISK_OFFSET), eax)?;
+        a.ret_1(16)?;
+
+        a.set_label(&mut start)?;
+        a.pop(ebp)?;
+        a.xor(ebx, ebx)?;
+        a.push(MMIO_INSTALLPROC)?;
+        a.push(ebp)?;
+        a.push(fourcc(b"PAK "))?;
+        a.call(l.import(1))?;
+        let mut done = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(at(OPEN))?;
+        a.call(l.import(2))?;
+        a.test(eax, eax)?;
+        a.jnz(done)?;
+        a.or(ebx, 1)?;
+        call(a, l.import(2), &[at(FORMAT), 0, 0, 0])?;
+        call(a, l.import(2), &[at(STATUS), at(REPLY), 32, 0])?;
+        a.test(eax, eax)?;
+        a.jnz(done)?;
+        a.cmp(dword_ptr(l.at(REPLY)), fourcc(b"1102"))?;
+        a.jne(done)?;
+        a.cmp(byte_ptr(l.at(REPLY + 4)), 0)?;
+        a.jne(done)?;
+        a.or(ebx, 2)?;
+        a.set_label(&mut done)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    })
+}
+
+#[test]
+fn mci_opens_a_file_through_the_programs_io_procedure() {
+    for core in CORES {
+        let files = [("T.EXE", mci_procedure_program())];
+        let mut cpu = machine("mci_procedure", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 0x03, "{core:?}: {:?}", printed(&cpu));
+    }
+}
