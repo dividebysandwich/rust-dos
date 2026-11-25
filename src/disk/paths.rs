@@ -51,35 +51,22 @@ impl DiskController {
         drive: &'a Drive,
         rest: &'a str,
     ) -> Vec<Cow<'a, str>> {
-        self.components_from_current(drive, rest).0
-    }
-
-    /// `logical_components`, and how many of the first ones are the
-    /// current directory's that the path keeps: none for a path from the
-    /// root, fewer than it has for a path that climbs out of it.
-    fn components_from_current<'a>(
-        &self,
-        drive: &'a Drive,
-        rest: &'a str,
-    ) -> (Vec<Cow<'a, str>>, usize) {
         let mut components: Vec<Cow<'a, str>> = Vec::new();
         if !rest.starts_with('\\') {
             let current = drive.current_dir.split('\\').filter(|p| !p.is_empty());
             components.extend(current.map(Cow::Borrowed));
         }
-        let mut kept = components.len();
         for part in rest.split('\\') {
             let part = self.dos_component(part);
             match &*part {
                 "" | "." => {}
                 ".." => {
                     components.pop();
-                    kept = kept.min(components.len());
                 }
                 _ => components.push(part),
             }
         }
-        (components, kept)
+        components
     }
 
     /// The name a path component `part` stands for, as DOS packs it into
@@ -173,9 +160,7 @@ impl DiskController {
         let mut sure = true;
         let mut matched = true;
         let mut dirs_matched = true;
-        let (components, kept) = self.components_from_current(drive, rest);
-        let current = self.current_folder(drive_num, kept);
-        for (i, part) in components.into_iter().enumerate() {
+        for part in self.logical_components(drive, rest) {
             let part = &*part;
             // The host's own files aren't the drive's (`host_private`):
             // no call reaches them, to open, make, rename or delete.
@@ -195,7 +180,7 @@ impl DiskController {
                 })
             };
             let (entries, found) = self.find_host_where(&full_path, part, find);
-            if found.is_none() && Self::host_alias_of_private(&full_path, part) {
+            if found.is_none() && Self::host_alias_hidden(&full_path, part, &entries) {
                 return None;
             }
             dirs_matched = matched;
@@ -211,26 +196,6 @@ impl DiskController {
                 found.unwrap_or_else(|| (self.entry_name(part), part.to_ascii_uppercase()));
             full_path.push(host_name);
             dos_path.push(dos_name);
-            // DOS keeps the current directory by its names, which find
-            // what they name now. On a VFAT disk a folder keeps its alias
-            // until it is renamed, and a renamed one gets a new alias, so
-            // its old one names nothing. Here aliases are made from the
-            // names a folder has: a folder made next to the current one
-            // may take its alias, and the renamed folder may get its old
-            // one. So where the current directory's names find another
-            // folder than CHDIR found, they name that folder while it is
-            // there under the name it had, as its alias would on Windows
-            // 9x, and nothing once it is gone or renamed.
-            if i + 1 == kept
-                && matched
-                && let Some(folder) = current
-                && folder != full_path
-            {
-                if !hostfs::is_dir(folder) {
-                    return None;
-                }
-                full_path = folder.to_path_buf();
-            }
         }
 
         // Final Security Check
@@ -258,58 +223,28 @@ impl DiskController {
         fat::canonical_name(part).filter(|cut| !cut.eq_ignore_ascii_case(part))
     }
 
-    /// The host folder the first `kept` names of drive `drive`'s current
-    /// directory named when CHDIR made it current (`current_folders`):
-    /// None for no names, or where CHDIR didn't find the folder by
-    /// matching each name, or another call set another current directory.
-    fn current_folder(&self, drive: u8, kept: usize) -> Option<&Path> {
-        if kept == 0 {
-            return None;
-        }
-        let d = self.drive(drive)?;
-        let (dir, folder) = self.current_folders.get(&drive)?;
-        if *dir != d.current_dir || !folder.starts_with(d.host_root()?) {
-            return None;
-        }
-        let names = dir.split('\\').filter(|p| !p.is_empty()).count();
-        folder.ancestors().nth(names.checked_sub(kept)?)
-    }
-
-    /// Keep the host folder each host drive's current directory names
-    /// now (`current_folders`), as a CHDIR to it does: a state loaded sets
-    /// the current directories by their names, and a run from the state
-    /// goes on as the run that saved it did.
-    pub(super) fn find_current_folders(&mut self) {
-        self.current_folders.clear();
-        for drive in 0..DRIVE_SLOTS {
-            let Some(d) = self.drive(drive) else {
-                continue;
-            };
-            if d.host_root().is_none() || d.current_dir.is_empty() {
-                continue;
-            }
-            let dir = d.current_dir.clone();
-            if let Some(walk) = self.walk_host(drive, &format!("\\{dir}"))
-                && walk.matched
-                && hostfs::is_dir(&walk.path)
-            {
-                self.current_folders.insert(drive, (dir, walk.path));
-            }
-        }
-    }
-
     /// Whether `part`, which no entry of the folder `dir` matches, is a
-    /// short name the Windows host has for one of its own files
-    /// (`host_private`): "RUST-D~1" for an overlay's ".rust-dos-deleted"
-    /// on a volume that makes 8.3 names. Only such names ("~") can be
-    /// one, and only a name the host finds is asked for its long name.
-    fn host_alias_of_private(dir: &Path, part: &str) -> bool {
+    /// short name the Windows host has for a file the drive doesn't show
+    /// by that name, so that it names nothing:
+    /// - one of the host's own files (`host_private`): "RUST-D~1" for an
+    ///   overlay's ".rust-dos-deleted" on a volume that makes 8.3 names;
+    /// - one of the folder's `entries`, which has an alias of its own
+    ///   (`HostAliases`): on Windows 9x an entry is found by its alias
+    ///   only, so after "Parent two" (PARENT~1) is renamed to "Parent
+    ///   moved" (PARENT~2), PARENT~1 names nothing, whatever short name
+    ///   the host gave the folder.
+    ///
+    /// Only such names ("~") can be one, and only a name the host finds
+    /// is asked for its long name.
+    fn host_alias_hidden(dir: &Path, part: &str, entries: &[(String, String)]) -> bool {
         if !cfg!(windows) || !part.contains('~') {
             return false;
         }
         std::fs::canonicalize(dir.join(part)).is_ok_and(|long| {
-            long.file_name()
-                .is_some_and(|name| super::host_private(&name.to_string_lossy()))
+            long.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                super::host_private(&name) || entries.iter().any(|(long, _)| *long == name)
+            })
         })
     }
 
@@ -566,10 +501,20 @@ impl DiskController {
     /// kept while the folder doesn't change (`HostDirCache`).
     /// The flag says whether they are the kept ones.
     pub(super) fn host_entries(&self, dir: &Path) -> (Rc<[(String, String)]>, bool) {
-        self.host_dirs.entries(dir, || Self::read_host_entries(dir))
+        self.host_dirs.entries(dir, || self.read_host_entries(dir))
     }
 
-    pub(super) fn read_host_entries(dir: &Path) -> Vec<(String, String)> {
+    /// The entries of the host folder `dir` as they are now, with the
+    /// aliases they keep (`HostAliases`).
+    pub(super) fn read_host_entries(&self, dir: &Path) -> Vec<(String, String)> {
+        let names = Self::host_names(dir);
+        let short = self.host_aliases.assign(dir, &names);
+        names.into_iter().zip(short).collect()
+    }
+
+    /// The names of the entries the host folder `dir` has now, without the
+    /// host's own files (`host_private`), sorted as they are numbered.
+    pub(super) fn host_names(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = hostfs::read_dir(dir)
             .into_iter()
             .flatten()
@@ -577,8 +522,7 @@ impl DiskController {
             .filter(|name| !host_private(name))
             .collect();
         names.sort_by_key(|name| name.to_ascii_uppercase());
-        let short = short_names(&names);
-        names.into_iter().zip(short).collect()
+        names
     }
 
     /// The entries of the host folder `dir`, and the one named `name`
@@ -648,7 +592,7 @@ impl DiskController {
             if self.host_dirs.known_missing(dir, &upper) {
                 return (entries, None);
             }
-            entries = self.host_dirs.reread(dir, || Self::read_host_entries(dir));
+            entries = self.host_dirs.reread(dir, || self.read_host_entries(dir));
             if let Some(found) = find(&entries) {
                 return (entries, Some(found));
             }
@@ -714,12 +658,6 @@ impl DiskController {
         // names, as programs see it.
         match self.walk_host(drive_num, rest) {
             Some(walk) if hostfs::is_dir(&walk.path) => {
-                if walk.matched {
-                    let folder = (walk.dos.clone(), walk.path);
-                    self.current_folders.insert(drive_num, folder);
-                } else {
-                    self.current_folders.remove(&drive_num);
-                }
                 if let Some(d) = self.drives[drive_num as usize].as_mut() {
                     d.current_dir = walk.dos;
                 }

@@ -17,6 +17,7 @@ use crate::mount::MountSpec;
 mod closed_files;
 mod drives;
 mod files;
+mod host_alias;
 mod host_dir;
 mod identity;
 mod layout;
@@ -28,6 +29,8 @@ mod state;
 mod system_files;
 
 use closed_files::ClosedFiles;
+use host_alias::HostAliases;
+pub(crate) use host_alias::SavedFolder;
 use host_dir::{DirCount, HostDirCache, SearchKey};
 use identity::FileId;
 pub use layout::{DriveKind, Fat32Layout, FatLayout, old_space};
@@ -262,7 +265,21 @@ pub(crate) fn host_private(name: &str) -> bool {
 /// number, `~N`, counted per prefix: "Day Of The Tentacle.BIN" and ".cue"
 /// are DAYOFT~1.BIN and DAYOFT~2.CUE.
 pub fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
-    let mut used = std::collections::HashSet::new();
+    let none = std::collections::HashSet::new();
+    short_names_beside(names, &none, &none)
+}
+
+/// `short_names` for names new to a folder whose other entries keep their
+/// aliases (`HostAliases`): a name that is 8.3 already is its own alias
+/// unless it is in `live`, the aliases those entries have, and the others
+/// get the first numbers free that are in neither `live` nor `held`, the
+/// aliases of entries just gone.
+fn short_names_beside<S: AsRef<str>>(
+    names: &[S],
+    live: &std::collections::HashSet<String>,
+    held: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut used = live.clone();
     let mut result = vec![String::new(); names.len()];
     // 8.3 names come first, so that no generated name takes one.
     let mut long = Vec::new();
@@ -303,7 +320,7 @@ pub fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
             if !ext.is_empty() {
                 name = format!("{}.{}", name, ext);
             }
-            if used.insert(name.clone()) {
+            if !held.contains(&name) && used.insert(name.clone()) {
                 result[i] = name;
                 break;
             }
@@ -891,10 +908,11 @@ pub struct DiskController {
     pub(crate) media: Cell<Option<crate::savestate::media::Kept>>,
     /// The entries of host folders as last read (`host_entries`).
     host_dirs: HostDirCache,
-    /// The host folder each host drive's current directory named when
-    /// CHDIR made it current or a state was loaded, with the current
-    /// directory it was for (`walk_host`).
-    current_folders: HashMap<u8, (String, PathBuf)>,
+    /// The aliases the entries of host folders keep (`read_host_entries`).
+    host_aliases: HostAliases,
+    /// The aliases a state being loaded keeps, for once its drives are
+    /// mounted (`load_state`).
+    pub(crate) aliases_from_state: Option<Vec<SavedFolder>>,
     /// The files shown in directories that the drive doesn't have: the
     /// built-in Windows's DLLs and its NOTEPAD.EXE (system_files.rs).
     system_files: system_files::SystemFiles,
@@ -954,7 +972,8 @@ impl DiskController {
             notes: Vec::new(),
             media: Cell::new(None),
             host_dirs: HostDirCache::default(),
-            current_folders: HashMap::new(),
+            host_aliases: HostAliases::default(),
+            aliases_from_state: None,
             system_files: Default::default(),
             long_call: false,
         };

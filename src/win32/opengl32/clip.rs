@@ -10,6 +10,9 @@
 //! is the device's world matrix, so its world space is OpenGL's eye
 //! space, on the card and in Direct3D's pipeline on the processor
 //! alike. Both cut primitives at them as they cut at the view volume.
+//! glRasterPos tests its point against them on the processor
+//! (`raster::raster_pos`), and the fragments glBitmap and glCopyPixels
+//! draw are drawn with them off.
 
 use super::{GL_INVALID_ENUM, ctx, error, matrix, read_doubles, write_doubles};
 use crate::cpu::Cpu;

@@ -5,7 +5,11 @@ use super::{Reader, Result, State, Writer};
 use crate::cpu::Cpu;
 use std::sync::OnceLock;
 
-const CPU_VERSION: u16 = 3;
+const CPU_VERSION: u16 = 4;
+/// The CPU versions this rust-dos loads: its own, and 3, whose batch
+/// frames don't keep the ECHO a CALLed file began with
+/// (`batch::Frame::echo_before`).
+const CPU_LOADS: [u16; 2] = [3, CPU_VERSION];
 const ENV_VERSION: u16 = 1;
 const SEP_VERSION: u16 = 1;
 const SSE_VERSION: u16 = 1;
@@ -96,7 +100,7 @@ pub fn roll_back(cpu: &mut Cpu, hardware: &mut crate::hardware::Hardware, old: &
 fn load_sections(cpu: &mut Cpu, data: &[u8]) -> Result<Vec<String>> {
     let mut r = Reader::new(data);
     let lost = cpu.bus.load_state(&mut r)?;
-    cpu.load(&mut r.section(b"CPU ", CPU_VERSION)?)?;
+    cpu.load(&mut r.section_of(b"CPU ", &CPU_LOADS)?)?;
     // A state from before the record was saved has none: its variables count as the guest's.
     if r.next_is(b"ENV ") {
         cpu.env_injector.load(&mut r.section(b"ENV ", ENV_VERSION)?)?;

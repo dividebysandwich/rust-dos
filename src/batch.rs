@@ -18,6 +18,7 @@
 //! strings of one char per byte (`dosstr`).
 
 use crate::dosstr;
+use crate::savestate::{Reader, Result, State, Writer};
 
 /// Where a frame's lines come from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,11 +52,28 @@ struct Frame {
     /// The debugger's mark on the lines it queued (`append_marked`), which
     /// `Batch::reached` takes once one of them is handed out.
     mark: Option<u64>,
+    /// ECHO as it was when a batch file started on top of another frame
+    /// (CALLed, or run by a pipe), which comes back when it ends.
+    /// COMMAND.COM keeps it in the file's batch segment (`BatEchoFlag`,
+    /// which BatCom sets and BatchOff restores in MS-DOS 4.0's
+    /// TBATCH.ASM). A file chained to takes the one it replaces. None for
+    /// a file started with no frame below it or queued (`append_file`),
+    /// whose ECHO at the bottom is `Batch::echo_before`, and for frames
+    /// that aren't batch files.
+    echo_before: Option<bool>,
 }
 
 impl Frame {
     fn new(kind: FrameKind, lines: Vec<Vec<u8>>, params: Vec<String>) -> Self {
-        Self { kind, lines, pc: 0, params, shift: 0, mark: None }
+        Self {
+            kind,
+            lines,
+            pc: 0,
+            params,
+            shift: 0,
+            mark: None,
+            echo_before: None,
+        }
     }
 }
 
@@ -81,7 +99,8 @@ pub struct Batch {
     /// ECHO ON or OFF: whether batch lines are shown before they run.
     pub echo: bool,
     /// ECHO as it was before the batch files began, which comes back
-    /// when they have all ended.
+    /// when they have all ended. A batch file started on top of others
+    /// keeps the ECHO it began with in its frame (`Frame::echo_before`).
     echo_before: bool,
     /// Set while a batch line runs: a batch file it starts takes the
     /// place of the one running.
@@ -203,15 +222,24 @@ impl Batch {
     pub fn start_file(&mut self, name: &str, bytes: &[u8], args: &str, call: bool) {
         // One a pipe runs is CALLed, and the pipe goes on after it.
         let piped = self.frames.last().is_some_and(|f| f.kind == FrameKind::Pipe);
-        let frame = Frame::new(FrameKind::File, file_lines(bytes), params(name, args));
+        let mut frame = Frame::new(FrameKind::File, file_lines(bytes), params(name, args));
         if self.dispatching && !call && !piped && !self.frames.is_empty() {
             // The chained file takes the place of the one running, and the
-            // ECHO the batch files began with stays what comes back when
-            // they end, not the ECHO OFF the first one may have set.
+            // ECHO that one began with stays what comes back when it ends,
+            // not the ECHO OFF it may have set. It starts with the ECHO
+            // the one running has now (BatCom ends the old batch segment,
+            // which restores its ECHO, keeps that in the new one and puts
+            // the ECHO from before back).
             self.drop_for_frames();
+            let echo = self.echo;
+            frame.echo_before = self.frames.last().and_then(|f| f.echo_before);
             self.pop();
+            self.echo = echo;
             self.frames.push(frame);
         } else {
+            if !self.frames.is_empty() {
+                frame.echo_before = Some(self.echo);
+            }
             self.push(frame);
         }
     }
@@ -274,10 +302,19 @@ impl Batch {
                 continue;
             };
             frame.pc += 1;
-            // The batch files end as COMMAND.COM reads their last line: it
-            // echoes it only if ECHO is on at the prompt it goes back to
-            // as well (BatchOff and Found_EOL in TBATCH.ASM).
-            let last = depth == 1 && frame.pc == frame.lines.len();
+            // A batch file ends as COMMAND.COM reads its last line: it
+            // echoes it only if ECHO is on in the file and also where it
+            // goes back to, the prompt or the file that CALLed it
+            // (BatchOff, which sets `suppress` when ECHO is off and then
+            // restores the ECHO from before the file, and Found_EOL in
+            // TBATCH.ASM).
+            let echo_after = match frame.echo_before {
+                Some(echo) => Some(echo),
+                None if depth == 1 => Some(self.echo_before),
+                None => None,
+            };
+            let last = frame.pc == frame.lines.len() && echo_after.is_some();
+            let echo_after = echo_after.unwrap_or(true);
             let mark = frame.mark;
             let text = match frame.kind {
                 FrameKind::For | FrameKind::Pipe => dosstr::from_bytes(raw),
@@ -304,7 +341,7 @@ impl Batch {
             }
             let (text, echo) = match text.strip_prefix('@') {
                 Some(rest) => (rest.trim_start(), false),
-                None => (text, self.echo && (!last || self.echo_before)),
+                None => (text, self.echo && (!last || echo_after)),
             };
             if echo && !std::mem::take(&mut self.crlf.null_line) {
                 breaks += 1;
@@ -384,11 +421,16 @@ impl Batch {
         self.frames.push(frame);
     }
 
-    /// Take the top frame off, and a pipe's files to delete.
+    /// Take the top frame off, with the ECHO it began with back if it has
+    /// one, and a pipe's files to delete.
     fn pop(&mut self) {
-        if let Some(frame) = self.frames.pop()
-            && frame.kind == FrameKind::Pipe
-        {
+        let Some(frame) = self.frames.pop() else {
+            return;
+        };
+        if let Some(echo) = frame.echo_before {
+            self.echo = echo;
+        }
+        if frame.kind == FrameKind::Pipe {
             self.expired.extend(frame.params);
         }
     }
@@ -517,8 +559,57 @@ fn label_key(label: &[u8]) -> Vec<u8> {
 }
 
 crate::state_enum!(FrameKind { FrameKind::File, FrameKind::Lines, FrameKind::For, FrameKind::Pipe });
+
+/// The CPU section's version that first keeps `Frame::echo_before`
+/// (savestate/machine.rs).
+const ECHO_SAVED: u16 = 4;
+
 // The debugger's marks are the session's: a frame loaded has none.
-crate::state_fields!(Frame { kind, lines, pc, params, shift } skip { mark });
+impl State for Frame {
+    fn save(&self, w: &mut Writer) {
+        let Self {
+            kind,
+            lines,
+            pc,
+            params,
+            shift,
+            mark: _,
+            echo_before,
+        } = self;
+        kind.save(w);
+        lines.save(w);
+        pc.save(w);
+        params.save(w);
+        shift.save(w);
+        echo_before.save(w);
+    }
+    fn load(&mut self, r: &mut Reader) -> Result<()> {
+        let Self {
+            kind,
+            lines,
+            pc,
+            params,
+            shift,
+            mark,
+            echo_before,
+        } = self;
+        kind.load(r)?;
+        lines.load(r)?;
+        pc.load(r)?;
+        params.load(r)?;
+        shift.load(r)?;
+        *mark = None;
+        // An older CPU section has no ECHO in the frames: a batch file
+        // CALLed in such a state leaves ECHO as it is when it ends, as
+        // rust-dos did then. Bytes outside a section are in this
+        // rust-dos's own layout.
+        *echo_before = None;
+        if r.version().is_none_or(|v| v >= ECHO_SAVED) {
+            echo_before.load(r)?;
+        }
+        Ok(())
+    }
+}
 // `dispatching` is only set while a line runs, never between; a state
 // loaded leaves the files of the pipes that ended before it.
 crate::state_fields!(Batch { frames, echo, echo_before } skip { dispatching, expired, reached, crlf });
@@ -654,6 +745,139 @@ mod tests {
         batch.dispatching = false;
         assert_eq!(run_all(&mut batch), ["echo three", ""]);
         assert!(batch.echo, "ECHO is on again at the prompt");
+    }
+
+    /// Start the batch file `name` from the line running, as COMMAND.COM
+    /// does for `name` (`call` false) or `CALL name`.
+    fn start(batch: &mut Batch, name: &str, bytes: &[u8], call: bool) {
+        batch.dispatching = true;
+        batch.start_file(name, bytes, "", call);
+        batch.dispatching = false;
+    }
+
+    /// The next line, and whether it is echoed, running ECHO OFF and ECHO
+    /// ON as the shell does.
+    fn step(batch: &mut Batch) -> (String, bool) {
+        let line = batch.next_line(&[]).unwrap();
+        match line.text.to_ascii_lowercase().as_str() {
+            "echo off" => batch.echo = false,
+            "echo on" => batch.echo = true,
+            _ => {}
+        }
+        (line.text, line.echo)
+    }
+
+    #[test]
+    fn echo_comes_back_when_a_called_batch_file_with_echo_off_ends() {
+        let mut batch = Batch::default();
+        batch.append_file("T1", b"call t2\r\necho back in t1\r\n", "");
+        assert_eq!(step(&mut batch), ("call t2".into(), true));
+        start(&mut batch, "T2", b"@echo off\r\necho in t2\r\n", true);
+        assert_eq!(step(&mut batch), ("echo off".into(), false));
+        assert_eq!(step(&mut batch), ("echo in t2".into(), false));
+        assert_eq!(step(&mut batch), ("".into(), false));
+        assert_eq!(step(&mut batch), ("echo back in t1".into(), true));
+        assert!(batch.echo);
+    }
+
+    #[test]
+    fn each_called_batch_file_gives_back_the_echo_it_began_with() {
+        let mut batch = Batch::default();
+        batch.append_file("T1", b"call t2\r\necho t1\r\n", "");
+        assert_eq!(step(&mut batch), ("call t2".into(), true));
+        start(
+            &mut batch,
+            "T2",
+            b"echo off\r\ncall t3\r\necho t2\r\n",
+            true,
+        );
+        assert_eq!(step(&mut batch), ("echo off".into(), true));
+        assert_eq!(step(&mut batch), ("call t3".into(), false));
+        start(&mut batch, "T3", b"echo on\r\necho t3\r\n", true);
+        assert_eq!(step(&mut batch), ("echo on".into(), false));
+        assert_eq!(step(&mut batch), ("echo t3".into(), true));
+        // The end of T3, echoed only if ECHO is on where it goes back to.
+        assert_eq!(step(&mut batch), ("".into(), false));
+        assert_eq!(step(&mut batch), ("echo t2".into(), false));
+        assert_eq!(step(&mut batch), ("".into(), false));
+        assert_eq!(step(&mut batch), ("echo t1".into(), true));
+        assert_eq!(step(&mut batch), ("".into(), true));
+        assert_eq!(batch.next_line(&[]), None);
+        assert!(batch.echo);
+    }
+
+    #[test]
+    fn a_batch_file_chained_from_a_called_one_gives_back_the_caller_s_echo() {
+        let mut batch = Batch::default();
+        let t1 = b"@echo off\r\ncall t2\r\necho t1\r\necho on\r\ncall t2\r\necho t1\r\n";
+        batch.append_file("T1", t1, "");
+        assert_eq!(step(&mut batch), ("echo off".into(), false));
+        assert_eq!(step(&mut batch), ("call t2".into(), false));
+        // T2 turns ECHO on and chains to T3, which starts with it on.
+        start(&mut batch, "T2", b"echo on\r\nt3\r\n", true);
+        assert_eq!(step(&mut batch), ("echo on".into(), false));
+        assert_eq!(step(&mut batch), ("t3".into(), true));
+        start(&mut batch, "T3", b"echo t3\r\n", false);
+        assert_eq!(step(&mut batch), ("echo t3".into(), true));
+        assert_eq!(step(&mut batch), ("".into(), false));
+        assert_eq!(step(&mut batch), ("echo t1".into(), false));
+        assert_eq!(step(&mut batch), ("echo on".into(), false));
+        assert_eq!(step(&mut batch), ("call t2".into(), true));
+        // Called with ECHO on, T2 turns it off and chains to T3.
+        start(&mut batch, "T2", b"@echo off\r\nt3\r\n", true);
+        assert_eq!(step(&mut batch), ("echo off".into(), false));
+        assert_eq!(step(&mut batch), ("t3".into(), false));
+        start(&mut batch, "T3", b"echo t3\r\n", false);
+        assert_eq!(step(&mut batch), ("echo t3".into(), false));
+        assert_eq!(step(&mut batch), ("".into(), false));
+        assert_eq!(step(&mut batch), ("echo t1".into(), true));
+    }
+
+    #[test]
+    fn the_last_line_of_a_called_batch_file_is_echoed_only_with_echo_on_in_the_caller() {
+        let mut batch = Batch::default();
+        batch.append_file("T1", b"@echo off\r\ncall t2\r\necho t1\r\n", "");
+        assert_eq!(step(&mut batch), ("echo off".into(), false));
+        assert_eq!(step(&mut batch), ("call t2".into(), false));
+        // Its last line has no CR LF: BatchOff puts the caller's ECHO OFF
+        // back before COMMAND.COM decides whether to echo it.
+        start(&mut batch, "T2", b"echo on\r\necho t2\r\necho last", true);
+        assert_eq!(step(&mut batch), ("echo on".into(), false));
+        assert_eq!(step(&mut batch), ("echo t2".into(), true));
+        assert_eq!(step(&mut batch), ("echo last".into(), false));
+        assert_eq!(step(&mut batch), ("echo t1".into(), false));
+        assert!(!batch.echo);
+    }
+
+    #[test]
+    fn a_frame_keeps_the_echo_it_began_with_in_a_state() {
+        let lines = vec![b"echo".to_vec()];
+        let mut frame = Frame::new(FrameKind::File, lines, vec!["T2".into()]);
+        frame.echo_before = Some(false);
+        let mut w = Writer::new();
+        w.section(b"CPU ", 4, |w| frame.save(w));
+        let mut loaded = Frame::default();
+        let mut r = Reader::new(&w.buf);
+        loaded
+            .load(&mut r.section_of(b"CPU ", &[3, 4]).unwrap())
+            .unwrap();
+        assert_eq!(loaded.echo_before, Some(false));
+        assert_eq!(loaded.lines, frame.lines);
+        // Version 3 has the frame without it.
+        let mut w = Writer::new();
+        w.section(b"CPU ", 3, |w| {
+            frame.kind.save(w);
+            frame.lines.save(w);
+            frame.pc.save(w);
+            frame.params.save(w);
+            frame.shift.save(w);
+        });
+        let mut r = Reader::new(&w.buf);
+        let mut section = r.section_of(b"CPU ", &[3, 4]).unwrap();
+        loaded.load(&mut section).unwrap();
+        assert!(section.is_empty());
+        assert_eq!(loaded.echo_before, None);
+        assert_eq!(loaded.params, frame.params);
     }
 
     #[test]

@@ -110,6 +110,23 @@ that it improves on main. Steps, in this order:
    that says what the real system does, what the emulator does, and why
    it waits, and the comment links it. "Left as is" or "out of scope"
    with neither is a decision put off with no record of it.
+
+   An issue filed this way, or from reading the specification or the
+   code, is worked on when a game or program shows the problem: a wrong
+   picture or sound, a crash or a hang, lost input, a feature it uses
+   that fails, a cost measured in it. A program shows it when running
+   that program brings the problem up: the one the work is for, another
+   on the machine, or one an issue or a user's report names. A test, or
+   a program written to reach the case, doesn't count. Until then the
+   issue waits with the `low-priority` label, and isn't queued as a task
+   of its own unless the user asks for that issue. Once a program shows
+   it, the issue names that program and its label is raised to the
+   priority the program's problem calls for.
+
+   This rule decides which issues are taken up. A pull request already
+   open, whatever started it, is marked ready on the evidence step 4
+   asks for, and a test of the real system's behaviour is such
+   evidence.
 3. Validate it, after the review and with its fixes: run the real game
    or program the change is for, where there is one, on the build of the
    branch, and compare with main.
@@ -127,7 +144,18 @@ that it improves on main. Steps, in this order:
    and can describe the old head for minutes after a push. If it
    doesn't merge, the agent that has the branch's worktree merges main
    into the branch (no rebase, no force-push), keeps what both sides
-   meant, runs the tests the conflict touches, and pushes.
+   meant, and pushes.
+
+   A resolution that keeps both sides' lines as they were, or moves a
+   save-state version, is pushed without a local build: CI builds and
+   tests it, and a build of the crate's tests takes many minutes. Lines
+   that compile on each side can still clash once both are kept: two
+   imports of one name, two items or match arms for the same thing, or
+   one side's call to what the other renamed. Read the merged code
+   around each conflict for these before pushing, and fix the branch if
+   CI fails. Build and run the tests the conflict touches only where the
+   resolution writes code that neither side had, such as a call changed
+   to fit the other side's new signature.
 
    A save-state version both sides raised (`WIN32_VERSION` and the
    like): the branch takes the next free number, and main's joins the
@@ -135,6 +163,9 @@ that it improves on main. Steps, in this order:
    `WIN32_LAYOUTS`). Main's saves of that number don't hold what the
    branch added, so the branch's own gates that named it move to the new
    number too: a `Since<N, _>`, an `Until<N, _>`, a `*_SAVED` constant.
+   `python -I tools/win32_layout.py` prints the new `WIN32_LAYOUTS`
+   hash without a build, and exits with 1, saying what to change, while
+   the table's last line isn't `WIN32_VERSION` with that hash.
 
 If the evidence isn't there yet, improve the change and go through the
 steps again. A pull request stays a draft only when the next step needs

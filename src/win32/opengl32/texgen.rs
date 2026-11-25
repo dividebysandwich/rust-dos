@@ -11,7 +11,8 @@
 //! vertex's eye position and normal. The coordinates are made on the
 //! processor when the draw has its vertices (`draw::draw`), before
 //! they go to the card or to Direct3D's pipeline, which take them as
-//! the program's.
+//! the program's, and for glRasterPos's point as for a vertex
+//! (`raster::raster_pos`).
 //!
 //! The arithmetic of the sphere map follows Mesa
 //! (src/mesa/tnl/t_vb_texgen.c, under the MIT license: Copyright (C)
