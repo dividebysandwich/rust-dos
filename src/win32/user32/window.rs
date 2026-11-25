@@ -103,9 +103,12 @@ pub const CASCADE_SAVED: u16 = 98;
 /// 98 has it: the work area less a row of minimized windows
 /// (SM_CYMINSPACING) at its bottom. On a 640x480 Windows 98 with its
 /// taskbar, 640x428: such a window is 480x321, 800x600 gives 600x411.
+/// The built-in Windows has no taskbar and its work area is the screen
+/// (SPI_GETWORKAREA), so at 640x480 the area here is 640x456 and the
+/// window 480x342.
 pub fn tiled_area(cpu: &Cpu) -> (i32, i32) {
-    let (w, h) = super::sysparams::screen_size(cpu);
-    (w, h - super::sysparams::metric(48))
+    let work = super::sysparams::work_area(cpu);
+    (work.width(), work.height() - super::sysparams::metric(48))
 }
 
 /// The place of the next overlapped window of CW_USEDEFAULT, which
@@ -118,6 +121,7 @@ pub fn tiled_area(cpu: &Cpu) -> (i32, i32) {
 /// folder windows taking turns.
 pub fn next_default_place(cpu: &mut Cpu) -> (i32, i32) {
     let (w, h) = tiled_area(cpu);
+    let work = super::sysparams::work_area(cpu);
     let step_x = super::sysparams::metric(30) + super::sysparams::metric(32);
     let step_y = super::sysparams::metric(31) + super::sysparams::metric(33);
     let state = user(cpu);
@@ -127,7 +131,7 @@ pub fn next_default_place(cpu: &mut Cpu) -> (i32, i32) {
         (x, y, n) = (0, 0, 0);
     }
     *state.cascade = n;
-    (x, y)
+    (work.left + x, work.top + y)
 }
 
 /// GetWindowLongA's indices.

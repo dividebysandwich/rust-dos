@@ -1190,6 +1190,7 @@ fn folder_window(cpu: &Cpu, title: &[u8]) -> Option<u32> {
 /// nothing: Windows 98's Explorer shows the window as it is, or a new
 /// one normally, whatever the command.
 pub fn open_windows(cpu: &mut Cpu, titles: Vec<String>) -> Option<u32> {
+    // A group named twice in one execute string gets one window.
     let mut titles = titles;
     let mut seen: Vec<Vec<u8>> = Vec::new();
     titles.retain(|t| {
@@ -1252,8 +1253,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     }
     let (x, y) = super::window::next_default_place(cpu);
     let (cx, cy) = folder_size(cpu);
-    let (_, bottom) = super::sysparams::screen_size(cpu);
-    let cy = cy.min(bottom - 4 - y);
+    let cy = cy.min(super::sysparams::work_area(cpu).bottom - 4 - y);
     const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
     const WS_VISIBLE: u32 = 0x1000_0000;
     let create = super::address_of(cpu, "CreateWindowExA");
