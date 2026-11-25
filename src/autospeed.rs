@@ -249,7 +249,15 @@ const WAITS: f64 = 0.5;
 /// rate, read 50.5, 49.5, 49.9 and 50.8% halted, and two readings under
 /// `WAITS` in a row would have counted. Its movie at the held speed reads
 /// 19 to 24%, and the movie of its campaign at 340,000 13 to 26%.
+///
+/// A scene between the two lines, one that doesn't wait but isn't calm,
+/// goes on up after `JUDGED` measurements in a row, as before. Held for
+/// good, a scene that reads 35% halted at the held speed because it
+/// waits on its data each frame would show a part of its frames until
+/// the hold ran out, and then hold where it is.
 const CALM: f64 = 0.2;
+/// Measurements in a row under the line by `CALM` that end a hold taken
+/// because the program waited.
 const CALM_MEASUREMENTS: u32 = 2;
 /// Retraces a frame a program whose frames wait for the processor may
 /// wait for: a DOS game that waits for two after each frame, for 35
@@ -1233,6 +1241,15 @@ fn kind(m: &Measurement) -> usize {
     usize::from(m.polling > 0.0)
 }
 
+/// The measurements in a row since a hold was taken because the program
+/// waited (`AutoSpeed::waiting_hold`): those `CALM` or more under the
+/// line `waits` draws, and those under it at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct WaitingHold {
+    calm: u32,
+    worked: u32,
+}
+
 /// Where the search for the speed is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Step {
@@ -1602,15 +1619,15 @@ pub struct AutoSpeed {
     /// a new search and by a heavier scene, which searches again.
     unsure: bool,
     /// The hold was taken because the program waited (`WAITS`), and the
-    /// measurements in a row since that were calm (`CALM`): Some(n). A
-    /// hold is no place to wait for that to change, as it measures only
-    /// the frame rate. A program waits while it loads, and the busy scene
-    /// after the load was held where the load left it: Dark Omen's movie
-    /// was held at 112,500 for 30 measurements and then stepped down,
-    /// showing 5 of its 15 pictures a second with the host's estimate at
-    /// 500,000 (#1889). After `CALM_MEASUREMENTS` in a row that are far
-    /// from waiting, the search goes on up.
-    waiting_hold: Option<u32>,
+    /// measurements in a row since that didn't wait. A hold is no place
+    /// to wait for that to change, as it measures only the frame rate. A
+    /// program waits while it loads, and the busy scene after the load was
+    /// held where the load left it: Dark Omen's movie was held at 112,500
+    /// for 30 measurements and then stepped down, showing 5 of its 15
+    /// pictures a second with the host's estimate at 500,000 (#1889).
+    /// After `CALM_MEASUREMENTS` in a row that are far from waiting
+    /// (`CALM`), or `JUDGED` that don't wait, the search goes on up.
+    waiting_hold: Option<WaitingHold>,
     /// The last measurement moved `LOADS` on its drives.
     loaded: bool,
     /// Since the host last fell behind (`KEPT_UP`): the most the speed
@@ -2887,7 +2904,7 @@ impl AutoSpeed {
         // the program works (`waiting_hold`).
         let waiting_hold = |this: &mut Self, speed: u32| {
             if waits && fps < m.refresh * AT_REFRESH && current < top {
-                this.waiting_hold = Some(0);
+                this.waiting_hold = Some(WaitingHold::default());
             }
             speed
         };
@@ -3193,26 +3210,31 @@ impl AutoSpeed {
                 // the record (`least_held`), and frames lost far above it
                 // would raise no floor.
                 let mut left = left;
-                if let Some(calm) = self.waiting_hold {
-                    let calm = if m.halted < wait_line - CALM {
-                        calm + 1
-                    } else {
-                        0
+                if let Some(counts) = self.waiting_hold {
+                    let counts = WaitingHold {
+                        calm: if m.halted < wait_line - CALM {
+                            counts.calm + 1
+                        } else {
+                            0
+                        },
+                        worked: if waits { 0 } else { counts.worked + 1 },
                     };
-                    if calm >= CALM_MEASUREMENTS {
+                    if counts.calm >= CALM_MEASUREMENTS || counts.worked >= JUDGED {
                         self.waiting_hold = None;
                         self.new_scene();
                         return up(self, FIRST_STEP, here);
                     }
-                    self.waiting_hold = Some(calm);
+                    self.waiting_hold = Some(counts);
                     // A count under way outlasts the hold. Run out first,
                     // the hold would step down to where it is, as a hold
                     // for the frames it draws, or a fine step up that
                     // keeps what the load held at: a load that ended in
                     // the hold's last measurement held the scene after it
-                    // for `HOLD_WINDOWS` more.
-                    if calm > 0 {
-                        left = left.max(CALM_MEASUREMENTS - calm + 1);
+                    // for `HOLD_WINDOWS` more. A calm measurement is one
+                    // that worked too, so the count of those that worked
+                    // is the longer one to wait for.
+                    if counts.worked > 0 {
+                        left = left.max(JUDGED - counts.worked + 1);
                     }
                 }
                 // Up to the floor, the same hold: one taken because the
@@ -6798,6 +6820,15 @@ mod tests {
         // aren't calm, and the hold stays.
         let speeds = held(&[0.505, 0.495, 0.499, 0.508, 0.495, 0.499]);
         assert!(speeds[1..].iter().all(|&s| s == speeds[1]), "{speeds:?}");
+        // A movie that doesn't wait but isn't calm either goes on up after
+        // `JUDGED`, as it did before the calm count.
+        let speeds = held(&[0.35, 0.4, 0.38, 0.42]);
+        let judged = JUDGED as usize;
+        assert!(
+            speeds[..judged].iter().all(|&s| s == speeds[0]),
+            "{speeds:?}"
+        );
+        assert!(speeds[judged] > speeds[0], "{speeds:?}");
     }
 
     #[test]
