@@ -29,7 +29,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 92;
+const WIN32_VERSION: u16 = 96;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -56,9 +56,16 @@ const WIN32_VERSION: u16 = 92;
 /// (`directories::DIRECTORIES_SAVED`), 71's to 89's no animated
 /// cursors (`user32::resource::ANI_CURSORS`), 71's to 90's Win16
 /// modules counted once for each import of them
-/// (`win16::module::USERS_COUNTED`), and 71's to 91's no Universal
-/// Thunks (`win16::universal::UT_SAVED`).
-const WIN32_LOADS: [u16; 22] = [
+/// (`win16::module::USERS_COUNTED`), 71's to 91's no Universal Thunks
+/// (`win16::universal::UT_SAVED`), 71's to 92's no compatibility
+/// shims of a process (`win32::shims::SHIMS_SAVED`), 71's to 93's
+/// no view of Windows 3.1's GDI heap
+/// (`win31::gdi_heap::GDI_HEAP_SAVED`), 92's to 94's no tiled
+/// selectors of UTLinearToSelectorOffset
+/// (`win16::universal::TILES_SAVED`), and 71's to 95's no OpenGL
+/// texture names that are only reserved
+/// (`opengl32::texture::RESERVED_SAVED`).
+const WIN32_LOADS: [u16; 26] = [
     71,
     72,
     73,
@@ -80,6 +87,10 @@ const WIN32_LOADS: [u16; 22] = [
     89,
     90,
     91,
+    92,
+    93,
+    94,
+    95,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1089,13 +1100,16 @@ impl Bus {
         // The system's time starts from the machine's clock again, which
         // isn't in the state (`kernel32::time::now`).
         self.win32.system_clock = None;
-        // When the first of the state's threads' timeouts ends, which
-        // isn't in the state either. The clock's deadline is in the state,
-        // so it is worked out again only when a thread has such a wait:
-        // a machine without one saves the same bytes it was loaded from.
+        // When the first of the state's threads' timeouts ends, and when
+        // the running thread's turn does, which aren't in the state
+        // either. The clock's deadline is in the state, so it is worked
+        // out again only when a thread has such a wait or a turn to end:
+        // a machine without either saves the same bytes it was loaded
+        // from.
         let now = self.clock.now_micros();
         self.win32.wait_due = crate::win32::thread::wait_due(&self.win32, now);
-        if self.win32.wait_due.is_some() {
+        self.win32.turn_due = crate::win32::thread::turn_due(&self.win32, now);
+        if self.win32.wait_due.is_some() || self.win32.turn_due.is_some() {
             self.reschedule_timers();
         }
     }
@@ -1184,6 +1198,10 @@ mod tests {
         (90, 0x73E4_9EC8_9162_D561), // animated cursors
         (91, 0x73E4_9EC8_9162_D561), // Win16 modules counting their users, not imports
         (92, 0xF14F_686E_F110_2495), // Universal Thunks
+        (93, 0x9568_9B5A_F977_006F), // each process's compatibility shims
+        (94, 0xEC01_69EA_3820_D56B), // each process's view of Windows 3.1's GDI heap
+        (95, 0x61C6_45FE_9AE1_A896), // UTLinearToSelectorOffset's tiled selectors
+        (96, 0xAEBE_28D7_7C2C_F660), // OpenGL texture names glGenTextures only reserved
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

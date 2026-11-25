@@ -2215,6 +2215,107 @@ fn gdi_draws_on_the_screen_in_the_mode_directdraw_set() {
     assert_eq!(vram[20 * 640 + 20], 0);
 }
 
+const DEEP_GDI32: (&str, &[&str]) = (
+    "GDI32.DLL",
+    &[
+        "CreatePalette",
+        "SelectPalette",
+        "RealizePalette",
+        "CreateCompatibleDC",
+    ],
+);
+const D_CREATE_DC: usize = 7;
+
+// The palette selected before the mode: B's LOGPALETTE, the memory DC
+// and B.
+const D_LOGPAL: u32 = 0xA28;
+const D_MEMORY_DC: u32 = 0xA30;
+const D_HPAL: u32 = 0xA34;
+
+/// The color of B, the palette realized in the background.
+const D_COLOR: [u8; 3] = [0x20, 0x60, 0xA0];
+
+/// On the desktop, of 32 bits: palette A selected into the window's DC
+/// without bForceBackground and realized. Then full screen at 640x480x8,
+/// palette B selected into a memory DC with bForceBackground and
+/// realized, and A realized again in the window's DC.
+fn palette_before_mode_program() -> (Vec<u8>, u32) {
+    let mut d = screen_data();
+    // LOGPALETTEs: version 0x300, one entry, PC_NOCOLLAPSE.
+    let entry = |c: [u8; 3]| [c[0], c[1], c[2], 4];
+    put32(&mut d, G_LOGPAL, 0x0001_0300);
+    put(&mut d, G_LOGPAL + 4, &entry(G_COLOR));
+    put32(&mut d, D_LOGPAL, 0x0001_0300);
+    put(&mut d, D_LOGPAL + 4, &entry(D_COLOR));
+    let dlls = [
+        GDI_USER32,
+        ("DDRAW.DLL", &["DirectDrawCreate"][..]),
+        DEEP_GDI32,
+    ];
+    program(&dlls, &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let window = [
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(640),
+            Arg::I(480),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(BASE),
+            Arg::I(0),
+        ];
+        c.api(a, l, G_CREATE_WINDOW, &window)?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        c.api(a, l, G_GET_DC, &[Arg::Val(HWND)])?;
+        a.mov(dword_ptr(l.at(G_HDC)), eax)?;
+        c.api(a, l, G_CREATE_PALETTE, &[Arg::At(G_LOGPAL)])?;
+        a.mov(dword_ptr(l.at(G_HPAL)), eax)?;
+        let select = [Arg::Val(G_HDC), Arg::Val(G_HPAL), Arg::I(0)];
+        c.api(a, l, G_SELECT_PALETTE, &select)?;
+        c.api(a, l, G_REALIZE_PALETTE, &[Arg::Val(G_HDC)])?;
+        let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+        c.api(a, l, G_DIRECT_DRAW_CREATE, &create)?;
+        let level = Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), level])?;
+        let mode = [Arg::I(640), Arg::I(480), Arg::I(8)];
+        c.com(a, l, DD, DD_SET_DISPLAY_MODE, &mode)?;
+        c.api(a, l, D_CREATE_DC, &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(D_MEMORY_DC)), eax)?;
+        c.api(a, l, G_CREATE_PALETTE, &[Arg::At(D_LOGPAL)])?;
+        a.mov(dword_ptr(l.at(D_HPAL)), eax)?;
+        let select = [Arg::Val(D_MEMORY_DC), Arg::Val(D_HPAL), Arg::I(1)];
+        c.api(a, l, G_SELECT_PALETTE, &select)?;
+        c.api(a, l, G_REALIZE_PALETTE, &[Arg::Val(D_MEMORY_DC)])?;
+        c.api(a, l, G_REALIZE_PALETTE, &[Arg::Val(G_HDC)])?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_palette_selected_on_a_deep_desktop_realizes_in_the_background_in_an_8_bit_mode() {
+    // Windows 98's USER selects a palette in the foreground only on a
+    // palette device, so A, selected on the desktop of 32 bits, isn't
+    // the foreground palette in the 8-bit mode: realized there, it
+    // takes a free entry and leaves B's.
+    let (program, data) = palette_before_mode_program();
+    let mut cpu = machine("palette_before_mode", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 13);
+    // RealizePalette on the desktop of 32 bits maps nothing.
+    assert_eq!(r[4], 0);
+    assert_eq!(r[5..8], [0; 3]);
+    // B takes the first entry after the static ones, A the next.
+    assert_eq!(r[11..13], [1, 1]);
+    let (dac, b) = dac_entry(&cpu, 10, D_COLOR);
+    assert_eq!(dac, b, "B's entry");
+    let (dac, a) = dac_entry(&cpu, 11, G_COLOR);
+    assert_eq!(dac, a, "A's entry");
+}
+
 const DD_QUERY_INTERFACE: u32 = 0;
 /// Where the program that leaves exclusive mode keeps the IDirectDraw2
 /// it asks for, and IID_IDirectDraw2.

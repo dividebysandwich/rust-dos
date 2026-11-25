@@ -959,6 +959,7 @@ fn changed_settings() -> Settings {
         win32_desktop: DesktopSize::Svga,
         win32_locale: Win32Locale::RuRu,
         win32_trace: Win32Trace::Off,
+        win32_shims: crate::win32::shims::win32s::WIN32S,
         dos_high: false,
         dos_version: DosVersion::new(7, 10),
         ansi_sys: false,
@@ -1398,6 +1399,26 @@ fn the_desktop_size_is_read() {
     assert_eq!(Settings::from_config(&config).win32_desktop, DesktopSize::Vga);
     let config = parse("[emulator]\nwin32_desktop=1280x1024\n", Path::new("/cfg"), None);
     assert_eq!(config.warnings.len(), 1);
+}
+
+#[test]
+fn the_win32_shims_set_is_read_and_written_back() {
+    assert!(Settings::default().win32_shims.is_empty());
+    for &(name, set) in crate::win32::shims::SETS {
+        let text = format!("[emulator]\nwin32_shims={}\n", name.to_uppercase());
+        let config = parse(&text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.win32_shims, set);
+        let written = entries(&settings, None)
+            .into_iter()
+            .find(|(_, key, _)| *key == "win32_shims")
+            .and_then(|(_, _, value)| value);
+        assert_eq!(written.as_deref(), Some(name));
+    }
+    let config = parse("[emulator]\nwin32_shims=win95\n", Path::new("/cfg"), None);
+    assert_eq!(config.warnings.len(), 1);
+    assert!(config.warnings[0].contains("win31"), "{:?}", config.warnings);
 }
 
 #[test]

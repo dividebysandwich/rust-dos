@@ -65,6 +65,7 @@ use super::{
     GL_OUT_OF_MEMORY, State, Texture, UNITS, ctx, current, draw, error, imm, matrix, pname, state,
 };
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock};
 
@@ -184,13 +185,15 @@ impl Own {
 type Names = BTreeMap<u32, Arc<List>>;
 
 /// What the contexts of a group share: its number, the display lists
-/// by their names, and the texture objects but the one named 0, which
-/// is each context's own.
+/// by their names, the texture objects but the one named 0, which is
+/// each context's own, and the names glGenTextures gave that no
+/// glBindTexture made a texture of yet (`texture::gen_textures`).
 #[derive(Clone, Debug, Default)]
 struct Group {
     id: u32,
     lists: Names,
     textures: Vec<Texture>,
+    reserved: Since<{ texture::RESERVED_SAVED }, Vec<u32>>,
 }
 
 /// The lists and textures of every context: the groups, the last
@@ -221,6 +224,13 @@ impl Shared {
         found.map_or(&[], |g| &g.textures)
     }
 
+    /// The names glGenTextures gave in the group `group` that aren't
+    /// textures yet.
+    pub fn reserved(&self, group: u32) -> &[u32] {
+        let found = self.groups.iter().find(|g| g.id == group);
+        found.map_or(&[], |g| &g.reserved)
+    }
+
     /// The surfaces of the levels of every group's textures.
     pub fn texture_surfaces(&self) -> impl Iterator<Item = u32> + '_ {
         let textures = self.groups.iter().flat_map(|g| &g.textures);
@@ -246,7 +256,8 @@ crate::state_fields!(Own {
 crate::state_fields!(Group {
     id,
     lists,
-    textures
+    textures,
+    reserved
 });
 crate::state_fields!(Shared {
     groups,
@@ -1266,6 +1277,13 @@ pub fn textures_mut(s: &mut State, index: usize) -> Option<&mut Vec<Texture>> {
     Some(&mut group.textures)
 }
 
+/// The names glGenTextures gave in the group of the context at `index`
+/// that aren't textures yet, to change, in a new group of its own if
+/// it has none. They draw nothing, so no context gets a new stamp.
+pub fn reserved_mut(s: &mut State, index: usize) -> Option<&mut Vec<u32>> {
+    Some(&mut group_mut(s, index)?.reserved)
+}
+
 /// Count the contexts that have a list open again.
 fn count_open(s: &mut State) {
     let open = s
@@ -1304,8 +1322,10 @@ pub fn context_gone(cpu: &mut Cpu, c: &Context) {
 }
 
 /// wglShareLists: the context at `to` takes the lists and textures of
-/// the one at `from`. As Windows has it, it fails when `to` has lists
-/// or textures of its own; contexts of two processes share nothing.
+/// the one at `from`, and the texture names glGenTextures gave there.
+/// As Windows has it, it fails when `to` has lists or textures of its
+/// own, names it was given among them; contexts of two processes share
+/// nothing.
 pub fn share(cpu: &mut Cpu, from: usize, to: usize) -> bool {
     let s = state(cpu);
     let pid = |s: &State, i: usize| s.contexts.get(i).and_then(Option::as_ref).map(|c| c.pid);
@@ -1315,7 +1335,8 @@ pub fn share(cpu: &mut Cpu, from: usize, to: usize) -> bool {
     if from == to {
         return true;
     }
-    if group(s, to).is_some_and(|g| !g.lists.is_empty() || !g.textures.is_empty()) {
+    let own = |g: &Group| !g.lists.is_empty() || !g.textures.is_empty() || !g.reserved.is_empty();
+    if group(s, to).is_some_and(own) {
         return false;
     }
     if group_mut(s, from).is_none() {
@@ -1337,7 +1358,7 @@ pub fn share(cpu: &mut Cpu, from: usize, to: usize) -> bool {
 /// The current context's place, for a function that isn't allowed
 /// between glBegin and glEnd: None there, with GL_INVALID_OPERATION,
 /// and without a context.
-fn outside_begin(cpu: &mut Cpu) -> Option<usize> {
+pub(super) fn outside_begin(cpu: &mut Cpu) -> Option<usize> {
     let (index, _) = current(cpu)?;
     if ctx(cpu)?.begin.is_some() {
         error(cpu, GL_INVALID_OPERATION);

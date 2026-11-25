@@ -335,6 +335,14 @@ impl State {
         Some(handle(i))
     }
 
+    /// The objects there are, with their handles.
+    pub fn handles(&self) -> impl Iterator<Item = (u32, &Object)> {
+        self.objects
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| Some((handle(i), o.as_ref()?)))
+    }
+
     pub fn stock(&self, index: u32) -> u32 {
         handle(index as usize)
     }
@@ -435,10 +443,13 @@ fn current_pid(cpu: &Cpu) -> u32 {
 }
 
 /// Add `kind` as an object of the running process: its handle, or 0
-/// with ERROR_NOT_ENOUGH_MEMORY when GDI's table is full.
+/// with ERROR_NOT_ENOUGH_MEMORY when GDI's table is full. A bitmap joins
+/// the views of Windows 3.1's GDI heap it belongs in (`Shim::Win31GdiHeap`,
+/// shims/win31/gdi_heap.rs).
 pub fn add(cpu: &mut Cpu, kind: Kind) -> u32 {
     init(cpu);
     let pid = current_pid(cpu);
+    let is_bitmap = matches!(kind, Kind::Bitmap { .. });
     let object = Object {
         kind,
         stock: false,
@@ -446,7 +457,12 @@ pub fn add(cpu: &mut Cpu, kind: Kind) -> u32 {
         deleted: false,
     };
     match gdi(cpu).add(object) {
-        Some(h) => h,
+        Some(h) => {
+            if is_bitmap {
+                crate::win32::shims::win31::gdi_heap::bitmap_added(cpu, h, pid);
+            }
+            h
+        }
         None => {
             set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
             0
@@ -688,7 +704,9 @@ pub fn delete_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// Free the object `handle` and what it holds: a DIB section's memory.
+/// Free the object `handle` and what it holds: a DIB section's memory,
+/// and a bitmap's place in Windows 3.1's GDI heap (`Shim::Win31GdiHeap`,
+/// shims/win31/gdi_heap.rs).
 pub fn free(cpu: &mut Cpu, handle: u32) {
     let Some(i) = slot(handle) else {
         return;
@@ -696,6 +714,9 @@ pub fn free(cpu: &mut Cpu, handle: u32) {
     let Some(Some(object)) = gdi(cpu).objects.get_mut(i).map(|o| o.take()) else {
         return;
     };
+    if let Kind::Bitmap { .. } = object.kind {
+        crate::win32::shims::win31::gdi_heap::bitmap_freed(cpu, handle);
+    }
     if let Kind::Palette { .. } = object.kind {
         palette::palette_deleted(cpu, handle);
     }

@@ -616,6 +616,7 @@ pub(super) fn end_client_task(cpu: &mut Cpu, tid: u32) {
     super::comm::task_ended(cpu, task.handle);
     super::ole2::task_ended(cpu, task.handle);
     super::misc::task_ended(cpu, task.tid);
+    crate::win32::shims::win31::gdi_heap::task_ended(cpu, task.handle);
     // Its locks (INT 21h AH=5Ch) go before its PDB's selector is free
     // for another task to have, and them with it.
     cpu.bus
@@ -786,6 +787,8 @@ fn new_thread(cpu: &mut Cpu, ctx: Context) -> Option<(u32, u32)> {
         ctx,
         ..Thread::default()
     });
+    // A task that ran alone has a turn to end now, as after CreateThread.
+    crate::win32::thread::arm_turn(cpu);
     Some((id, top))
 }
 
@@ -825,11 +828,12 @@ pub fn may_run(win32: &crate::win32::Win32, p: usize, t: usize) -> bool {
 /// task, which handles the message, and the reply switches back: a third
 /// task that is ready doesn't run in between. Here the sender gives up
 /// the lock when it waits for the reply, so the receiver runs next; the
-/// receiver keeps the lock after it replies until it waits, and then the
-/// sender runs. Without this, a task that had just started ran between a
-/// message and its reply: the Metal Marines CD's launcher was still
-/// being activated, as the Video for Windows setup hid its window, when
-/// the setup's next task activated its dialog, and the rest of the
+/// receiver gives up its turn as it replies in GetMessage, PeekMessage or
+/// SendMessage's wait (USER32's `sender_goes_on`) or with ReplyMessage,
+/// so the sender runs next. Without this, a task that had just started ran between a message
+/// and its reply: the Metal Marines CD's launcher was still being
+/// activated, as the Video for Windows setup hid its window, when the
+/// setup's next task activated its dialog, and the rest of the
 /// launcher's activation then brought it back over the dialog.
 pub fn hand_turn(win32: &mut crate::win32::Win32, from: u32, to: u32) {
     if from != to && both_tasks(win32, from, to) {
@@ -857,6 +861,12 @@ pub fn entered(win32: &mut crate::win32::Win32, tid: u32) {
 /// and this one when its turn comes again. It goes on at `ctx`.
 pub fn yield_now(cpu: &mut Cpu, ctx: Context) {
     crate::win32::system::load_context(cpu, &ctx);
+    give_up_turn(cpu);
+}
+
+/// The running task gives up its turn where the processor is: another
+/// task that is ready runs, the one `hand_turn` named first.
+pub fn give_up_turn(cpu: &mut Cpu) {
     cpu.bus.win32.win16.lock = 0;
     crate::win32::thread::reschedule(cpu);
 }
@@ -1194,6 +1204,7 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     super::comm::task_ended(cpu, task.handle);
     super::ole2::task_ended(cpu, task.handle);
     super::misc::task_ended(cpu, task.tid);
+    crate::win32::shims::win31::gdi_heap::task_ended(cpu, task.handle);
     // The process object its starters wait on.
     let objects = &mut cpu.bus.win32.objects;
     if let Some(object) = objects.get_mut(task.process_object)

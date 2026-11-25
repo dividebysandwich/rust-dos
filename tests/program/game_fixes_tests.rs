@@ -66,7 +66,10 @@ const LAYOUTS: [Layout; 2] = [
 fn code(name: &str) -> &'static CodePatch {
     match by_name(name).unwrap().kind {
         Kind::Code(code) => code,
-        Kind::SkipAtExec { .. } | Kind::AtLoad { .. } | Kind::Win32 { .. } => {
+        Kind::SkipAtExec { .. }
+        | Kind::AtLoad { .. }
+        | Kind::Win32 { .. }
+        | Kind::Win32Shims { .. } => {
             panic!("{name} isn't a code fix")
         }
     }
