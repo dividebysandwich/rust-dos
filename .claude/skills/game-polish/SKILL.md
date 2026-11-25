@@ -354,11 +354,13 @@ paragraphs after this list say. For each one:
 
 A finding that isn't fixed in this session, and that a player of the
 game sees, is follow-up work: a picture or a sound that is wrong, a
-crash or a hang, a feature the game uses that doesn't work, a slow
-scene measured in the game. Don't ask the user whether to take it on.
-List it in the report's follow-ups (Phase 4) with what the fix needs,
-so that it is queued as a fix task of its own: by you, if you go on
-working, or by whoever runs the session.
+crash or a hang, input that is lost, a feature the game or its setup
+uses that doesn't work, a scene measured in the game that runs below
+full speed or keeps `cpu_use` near 100 (a slower host plays it below
+full speed). Don't ask the user whether to take it on. List it in the
+report's follow-ups (Phase 4) with what the fix needs, so that it is
+queued as a fix task of its own: by you, if you go on working, or by
+whoever runs the session.
 
 A finding no game or program at hand shows isn't fixed in this session
 and isn't queued: a gap in the log that nothing on screen or in the
