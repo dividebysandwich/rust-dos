@@ -6563,6 +6563,78 @@ fn a_program_makes_reads_finds_moves_and_deletes_files() {
     assert!(!dir.join("D").exists() && !dir.join("G.TXT").exists());
 }
 
+/// The names a Win32 program makes keep the case it gives them, as
+/// Windows 98's VFAT keeps them: CreateDirectoryA's "Program Files" and
+/// "Base", CreateFileA's "config.cfg" (an 8.3 name, which DOS's own calls
+/// uppercase), MoveFileA's "Old.cfg" and CopyFileA's "save.dat". MoveFileA
+/// gives "save.dat" another case, as Windows 9x lets it. American McGee's
+/// Alice's installer makes its folders so, and the game its files.
+#[test]
+fn win32_calls_make_names_in_the_case_they_are_given() {
+    use Arg::{Esi, I};
+    let names: &[&str] = &[
+        "CreateDirectoryA",
+        "CreateFileA",
+        "CloseHandle",
+        "MoveFileA",
+        "CopyFileA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, b"C:\\Program Files\0");
+    put(&mut data, 0x20, b"C:\\Program Files\\Base\0");
+    put(&mut data, 0x40, b"C:\\Program Files\\Base\\config.cfg\0");
+    put(&mut data, 0x80, b"C:\\Program Files\\Base\\Old.cfg\0");
+    put(&mut data, 0xC0, b"C:\\Program Files\\Base\\save.dat\0");
+    put(&mut data, 0xE0, b"C:\\Program Files\\Base\\Save.dat\0");
+    let (code, text) = run(
+        "name_case",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let at = |offset: u32| I(l.at(offset) as u32);
+            a.xor(ebx, ebx)?;
+            call_with(a, f("CreateDirectoryA"), &[at(0), I(0)])?;
+            a.test(eax, eax)?;
+            check(a, true, 0)?;
+            call_with(a, f("CreateDirectoryA"), &[at(0x20), I(0)])?;
+            a.test(eax, eax)?;
+            check(a, true, 1)?;
+            // CREATE_ALWAYS.
+            let new = [at(0x40), I(0x4000_0000), I(0), I(0), I(2), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &new)?;
+            a.mov(esi, eax)?;
+            a.cmp(eax, -1)?;
+            check(a, true, 2)?;
+            call_with(a, f("CloseHandle"), &[Esi])?;
+            call_with(a, f("MoveFileA"), &[at(0x40), at(0x80)])?;
+            a.test(eax, eax)?;
+            check(a, true, 3)?;
+            call_with(a, f("CopyFileA"), &[at(0x80), at(0xC0), I(1)])?;
+            a.test(eax, eax)?;
+            check(a, true, 4)?;
+            call_with(a, f("MoveFileA"), &[at(0xC0), at(0xE0)])?;
+            a.test(eax, eax)?;
+            check(a, true, 5)?;
+            a.mov(eax, ebx)?;
+            a.or(eax, 0xC0)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {}", !code, text);
+    let listed = |dir: &str| {
+        let mut names: Vec<String> =
+            fs::read_dir(PathBuf::from("target/test_win32/name_case").join(dir))
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+        names.sort();
+        names
+    };
+    assert!(listed("").contains(&"Program Files".to_string()));
+    assert_eq!(listed("Program Files"), ["Base"]);
+    assert_eq!(listed("Program Files/Base"), ["Old.cfg", "Save.dat"]);
+}
+
 /// SetFileTime on a file in a host folder, as Windows 98 SE does it on
 /// FAT: the time of the last write is rounded up to an even second
 /// (2001-10-08 19:20:01.5 is kept as 19:20:02), a time before 1980 fails

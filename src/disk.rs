@@ -188,16 +188,18 @@ fn is_short_name(name: &str) -> bool {
 }
 
 /// The name a new file or directory gets on a host drive when a program
-/// asks for `name`. DOS uppercases an 8.3 name. A longer name keeps the
-/// case it was given, as Windows 9x keeps a name from a long-name call
-/// (Win32's CreateFileA, CreateDirectoryA and MoveFileA, or INT 21h's
-/// 71xxh): Oni's setup makes "level0_Final.dat", and Oni reads the
-/// "Final" in the name back, case and all. The host path doesn't know
-/// which call asked, so DOS's own calls, which on DOS would cut such a
-/// name to 8.3, make it under the same name; what DOS programs see of it
-/// is its generated 8.3 name either way.
-pub(crate) fn new_entry_name(name: &str) -> String {
-    if is_short_name(name) {
+/// asks for `name`. DOS's own calls uppercase an 8.3 name. A long-name
+/// call (`keep_case`: Win32's CreateFileA, CreateDirectoryA, MoveFileA
+/// and CopyFileA) keeps the case it was given, as Windows 9x does, whose
+/// VFAT gives a name that isn't all uppercase a long-name entry:
+/// Alice's installer makes "Program Files\EA Games" and the game writes
+/// "config.cfg". A longer name keeps its case from DOS's calls too: on
+/// DOS they would cut it to 8.3, but the name is made as asked, and what
+/// DOS programs see of it is its generated 8.3 name either way. Oni's
+/// setup makes "level0_Final.dat", and Oni reads the "Final" in the
+/// name back, case and all.
+pub(crate) fn new_entry_name(name: &str, keep_case: bool) -> String {
+    if !keep_case && is_short_name(name) {
         name.to_ascii_uppercase()
     } else {
         name.to_string()
@@ -874,6 +876,9 @@ pub struct DiskController {
     /// The files shown in directories that the drive doesn't have: the
     /// built-in Windows's DLLs and its NOTEPAD.EXE (system_files.rs).
     system_files: system_files::SystemFiles,
+    /// Whether the call running now is a long-name call, which keeps the
+    /// case of the names it makes (`long_name_call`, `new_entry_name`).
+    keep_case: bool,
 }
 
 impl DiskController {
@@ -928,9 +933,27 @@ impl DiskController {
             media: Cell::new(None),
             host_dirs: HostDirCache::default(),
             system_files: Default::default(),
+            keep_case: false,
         };
         disk.open_standard_devices();
         disk
+    }
+
+    /// Run `call` as a long-name call: the files and directories it makes
+    /// on host drives keep the case of their names (`new_entry_name`).
+    /// The built-in Windows's file functions make names this way, and
+    /// DOS's INT 21h calls don't.
+    pub fn long_name_call<R>(&mut self, call: impl FnOnce(&mut Self) -> R) -> R {
+        let was = std::mem::replace(&mut self.keep_case, true);
+        let result = call(self);
+        self.keep_case = was;
+        result
+    }
+
+    /// The name a new entry `name` gets on a host drive, for the call
+    /// running now (`new_entry_name`).
+    fn entry_name(&self, name: &str) -> String {
+        new_entry_name(name, self.keep_case)
     }
 
     /// AUX, CON and PRN in the first entries of the file table, where DOS
