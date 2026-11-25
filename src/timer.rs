@@ -55,12 +55,13 @@ pub(crate) const LOAD_SETTLE_HOST: Duration = Duration::from_secs(5);
 /// Frames in a row on time, after a load, that end the settling sooner
 /// than `LOAD_SETTLE`: half a second at 60 Hz. A frame is on time when its
 /// batch started less than half a period later than a host that keeps up
-/// starts it (`Pacer::batch_late`). Myth III's frames after a load of the
-/// Defense of Yursgrad were back at 17 ms within a second, and with the
-/// full two seconds the search climbed a second and a half later than
-/// without the settling and took its second step up into a hitch of the
-/// game's own, which the frame watch then held it under (a speed of
-/// 446,852 against 586,534 without the settling, for 40 s).
+/// starts it (`Pacer::batch_late`); a fast-forwarded frame, which isn't
+/// paced, never is. Myth III's frames after a load of the Defense of
+/// Yursgrad were back at 17 ms within a second, and with the full two
+/// seconds the search climbed a second and a half later than without the
+/// settling and took its second step up into a hitch of the game's own,
+/// which the frame watch then held it under (a speed of 446,852 against
+/// 586,534 without the settling, for 40 s).
 ///
 /// Until `LOAD_SETTLE` is over, a frame that leaves emulated time more
 /// than `MAX_LAG` behind the wall clock, which the next batch then drops,
