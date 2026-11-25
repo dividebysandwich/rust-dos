@@ -112,6 +112,7 @@ const OPENGL32: &[&str] = &[
     "glTexSubImage2D",
     "glCopyTexSubImage2D",
     "glAreTexturesResident",
+    "glPrioritizeTextures",
 ];
 const GLU32: &[&str] = &[
     "gluBuild2DMipmaps",
@@ -201,6 +202,7 @@ const DELETE_TEXTURES: usize = GL + 68;
 const TEX_SUB_IMAGE_2D: usize = GL + 69;
 const COPY_TEX_SUB_IMAGE_2D: usize = GL + 70;
 const ARE_TEXTURES_RESIDENT: usize = GL + 71;
+const PRIORITIZE_TEXTURES: usize = GL + 72;
 const GLU: usize = GL + OPENGL32.len();
 const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
@@ -4216,7 +4218,10 @@ fn generated_texture_names_stay_clear_of_the_names_a_program_counts_itself() {
 /// Once bound it is a texture, and glDeleteTextures frees it, bound
 /// or not. The program binds 2 itself, takes two names (1 and 3, the
 /// lowest free ones), and a context sharing its textures takes a
-/// fourth and binds 1.
+/// fourth and binds 1. A third context, which has only a reserved
+/// name, can't take the first's textures through wglShareLists, as one
+/// with textures can't. glPrioritizeTextures of a negative count is
+/// GL_INVALID_VALUE.
 #[test]
 fn generated_texture_names_are_reserved_until_they_are_bound() {
     const SECOND: u32 = KEPT;
@@ -4225,6 +4230,8 @@ fn generated_texture_names_are_reserved_until_they_are_bound() {
     const FOURTH: u32 = KEPT + 16;
     const AGAIN: u32 = KEPT + 20;
     const RESIDENCES: u32 = KEPT + 32;
+    const THIRD: u32 = KEPT + 40;
+    const THIRD_NAME: u32 = KEPT + 44;
     const GL_INVALID_VALUE: u32 = 0x501;
     let mut d = lists_data();
     put32(&mut d, OWN, 2);
@@ -4279,6 +4286,18 @@ fn generated_texture_names_are_reserved_until_they_are_bound() {
         gl(a, l, GEN_TEXTURES, &[Arg::I(3), Arg::At(AGAIN)])?;
         c.api(a, l, GET_ERROR, &[])?;
         note(&c, "glGetError at the end");
+        // A context whose names are only reserved has names of its
+        // own all the same, so it can't take another's.
+        c.api(a, l, WGL_CREATE_CONTEXT, &[Arg::Val(HDC)])?;
+        a.mov(dword_ptr(l.at(THIRD)), eax)?;
+        current(a, &mut c, THIRD)?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(THIRD_NAME)])?;
+        c.api(a, l, WGL_SHARE_LISTS, &[Arg::Val(HGLRC), Arg::Val(THIRD)])?;
+        note(&c, "sharing into a context with a reserved name");
+        let negative = [Arg::I(u32::MAX), Arg::At(NAMES), Arg::At(RESIDENCES)];
+        gl(a, l, PRIORITIZE_TEXTURES, &negative)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "glPrioritizeTextures of a negative count");
         finish(a, l)
     });
     let mut cpu = machine("texture_reserved", true, exe);
@@ -4302,12 +4321,15 @@ fn generated_texture_names_are_reserved_until_they_are_bound() {
             ("no error", 0),
             ("the first name deleted", 0),
             ("glGetError at the end", 0),
+            ("sharing into a context with a reserved name", 0),
+            ("glPrioritizeTextures of a negative count", GL_INVALID_VALUE),
         ]
     );
     let names =
         |at: u32, n: u32| -> Vec<u32> { (0..n).map(|i| peek(&cpu, data + at + 4 * i)).collect() };
     assert_eq!(names(NAMES, 2), [1, 3], "the lowest names not in use");
     assert_eq!(names(FOURTH, 1), [4], "the next one in the second context");
+    assert_eq!(names(THIRD_NAME, 1), [1], "the third context's own group");
     assert_eq!(
         names(AGAIN, 3),
         [1, 3, 5],
