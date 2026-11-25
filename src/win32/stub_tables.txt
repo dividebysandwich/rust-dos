@@ -1669,6 +1669,7 @@ SetDebugErrorLevel
 SetSystemCursor
 NotepadMain
 NotepadWndProc
+RestoreDefaultPalette
 
 DLL GDI32.DLL
 GetStockObject

@@ -1912,21 +1912,8 @@ fn can_activate(state: &State, h: u32) -> bool {
 pub fn activate_other_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let hwnd = args[0];
     let queue = current_queue(cpu);
+    let next = other_window(cpu, hwnd);
     let state = user(cpu);
-    let foreground = state.input.foreground == queue;
-    let usable = |h: u32| {
-        h != hwnd && can_activate(state, h) && (foreground || state.window_queue(h) == queue)
-    };
-    let owner = state.window(hwnd).map_or(0, |w| w.owner);
-    let next = if owner != 0 && usable(owner) {
-        owner
-    } else {
-        state
-            .top_levels()
-            .into_iter()
-            .find(|&h| usable(h))
-            .unwrap_or(0)
-    };
     let target = state.window_queue(next);
     if next == 0 || target == queue {
         return start_switch(cpu, 0, None, Some([next, 0, 0]));
@@ -1936,6 +1923,27 @@ pub fn activate_other_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let tid = current_tid(cpu);
     post_activation(cpu, target, EV_ACTIVATE, next, tid);
     start_switch(cpu, 0, Some(to_tid), None)
+}
+
+/// The window ActivateOtherWindow activates when `hwnd`, the running
+/// thread's active window, goes, or 0 for none.
+pub fn other_window(cpu: &Cpu, hwnd: u32) -> u32 {
+    let queue = current_queue(cpu);
+    let state = &cpu.bus.win32.user;
+    let foreground = state.input.foreground == queue;
+    let usable = |h: u32| {
+        h != hwnd && can_activate(state, h) && (foreground || state.window_queue(h) == queue)
+    };
+    let owner = state.window(hwnd).map_or(0, |w| w.owner);
+    if owner != 0 && usable(owner) {
+        owner
+    } else {
+        state
+            .top_levels()
+            .into_iter()
+            .find(|&h| usable(h))
+            .unwrap_or(0)
+    }
 }
 
 /// The foreground window went without its thread activating another,
