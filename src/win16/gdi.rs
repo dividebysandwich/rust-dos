@@ -405,6 +405,14 @@ static APIS: &[Api16] = &[
         b'b',
     ),
     rust("IsDCCurrentPalette", 412, "w", is_dc_current_palette),
+    win32(
+        "CreateScalableFontResource",
+        310,
+        "wppp",
+        G,
+        "CreateScalableFontResourceA",
+        b'b',
+    ),
 ];
 
 fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {

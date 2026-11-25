@@ -15,6 +15,7 @@ const SELECT_PALETTE: u16 = 282;
 /// GDI's ordinals.
 const CREATE_PALETTE: u16 = 360;
 const GDI_SELECT_PALETTE: u16 = 361;
+const CREATE_SCALABLE_FONT_RESOURCE: u16 = 310;
 const IS_DC_CURRENT_PALETTE: u16 = 412;
 
 /// WS_POPUP | WS_VISIBLE.
@@ -190,4 +191,54 @@ fn gdi_select_palette_selects_in_the_foreground_on_any_display() {
     assert_eq!(exit, 1, "{log}");
     let (exit, log) = run("gdi_select_palette_deep", gdi_select_palette_program(false));
     assert_eq!(exit, 1, "{log}");
+}
+
+/// CreateScalableFontResource(0, fot, ttf, NULL), AX checked against
+/// `value`: where to patch the offsets of `fot` and `ttf`.
+fn create_scalable(code: &mut Code, value: u16, fail: u8) -> [u16; 2] {
+    code.push(0);
+    let fot_at = code.here() + 2;
+    code.push_far(0);
+    let ttf_at = code.here() + 2;
+    code.push_far(0)
+        .push(0)
+        .push(0)
+        .call("GDI", CREATE_SCALABLE_FONT_RESOURCE);
+    expect_ax(code, value, fail);
+    [fot_at, ttf_at]
+}
+
+#[test]
+fn create_scalable_font_resource_fails_for_a_file_that_isnt_truetype() {
+    // GDI.310, which Encarta 97's setup (a 16-bit Wise installer) calls
+    // for the font it copies. Windows 98 SE's GDI.EXE hands it to
+    // GDI32's CreateScalableFontResourceA, which fails for a TrueType
+    // file that isn't there and for one that isn't TrueType, and writes
+    // no .FOT either way. Exit code 1 when both fail and the program
+    // goes on.
+    let mut code = Code::new();
+    let missing = create_scalable(&mut code, 0, 2);
+    let not_truetype = create_scalable(&mut code, 0, 3);
+    code.emit(&[0xB0, 0x01]).exit_al(); // mov al,1
+    let fot = code.here();
+    code.emit(b"Q.FOT\0");
+    let none = code.here();
+    code.emit(b"NONE.TTF\0");
+    let text = code.here();
+    code.emit(b"F.TTF\0");
+    for (at, ttf) in [(missing, none), (not_truetype, text)] {
+        code.patch(at[0], fot);
+        code.patch(at[1], ttf);
+    }
+    let mut folder = None;
+    let (exit, log) = run_with(
+        "create_scalable_font_resource",
+        program(&code, CODE),
+        |_, dir| {
+            std::fs::write(dir.join("F.TTF"), b"not a font").unwrap();
+            folder = Some(dir.to_path_buf());
+        },
+    );
+    assert_eq!(exit, 1, "{log}");
+    assert!(!folder.unwrap().join("Q.FOT").exists());
 }
