@@ -111,6 +111,7 @@ const OPENGL32: &[&str] = &[
     "glDeleteTextures",
     "glTexSubImage2D",
     "glCopyTexSubImage2D",
+    "glAreTexturesResident",
 ];
 const GLU32: &[&str] = &[
     "gluBuild2DMipmaps",
@@ -199,6 +200,7 @@ const IS_TEXTURE: usize = GL + 67;
 const DELETE_TEXTURES: usize = GL + 68;
 const TEX_SUB_IMAGE_2D: usize = GL + 69;
 const COPY_TEX_SUB_IMAGE_2D: usize = GL + 70;
+const ARE_TEXTURES_RESIDENT: usize = GL + 71;
 const GLU: usize = GL + OPENGL32.len();
 const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
@@ -4204,5 +4206,116 @@ fn generated_texture_names_stay_clear_of_the_names_a_program_counts_itself() {
         drawn.iter().all(|&p| p == 0xFF_FF00),
         "the generated texture draws cyan: {:06X}",
         drawn[0]
+    );
+}
+
+/// A name glGenTextures gives is reserved and names no texture until
+/// glBindTexture first binds it (OpenGL 1.1, 3.8.8): glIsTexture says
+/// GL_FALSE for it, glAreTexturesResident gives GL_INVALID_VALUE, and
+/// glGenTextures doesn't give it again, in any context of the group.
+/// Once bound it is a texture, and glDeleteTextures frees it, bound
+/// or not. The program binds 2 itself, takes two names (1 and 3, the
+/// lowest free ones), and a context sharing its textures takes a
+/// fourth and binds 1.
+#[test]
+fn generated_texture_names_are_reserved_until_they_are_bound() {
+    const SECOND: u32 = KEPT;
+    const OWN: u32 = KEPT + 4;
+    const NAMES: u32 = KEPT + 8;
+    const FOURTH: u32 = KEPT + 16;
+    const AGAIN: u32 = KEPT + 20;
+    const RESIDENCES: u32 = KEPT + 32;
+    const GL_INVALID_VALUE: u32 = 0x501;
+    let mut d = lists_data();
+    put32(&mut d, OWN, 2);
+    put(&mut d, RESIDENCES, &[0xFF; 8]);
+    let mut at_result = Vec::new();
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let mut note = |c: &Calls, what: &'static str| at_result.push((what, c.next - 1));
+        let current = |a: &mut CodeAssembler, c: &mut Calls, context: u32| {
+            c.api(a, l, WGL_MAKE_CURRENT, &[Arg::Val(HDC), Arg::Val(context)])
+        };
+        let first = Arg::Val(NAMES);
+        let second = Arg::Val(NAMES + 4);
+        c.api(a, l, WGL_CREATE_CONTEXT, &[Arg::Val(HDC)])?;
+        a.mov(dword_ptr(l.at(SECOND)), eax)?;
+        c.api(a, l, WGL_SHARE_LISTS, &[Arg::Val(HGLRC), Arg::Val(SECOND)])?;
+        note(&c, "shared");
+        c.api(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(OWN)])?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(2), Arg::At(NAMES)])?;
+        c.api(a, l, IS_TEXTURE, &[first])?;
+        note(&c, "the first name generated");
+        c.api(a, l, IS_TEXTURE, &[second])?;
+        note(&c, "the second name generated");
+        c.api(a, l, IS_TEXTURE, &[Arg::Val(OWN)])?;
+        note(&c, "the program's own name, bound");
+        let names = [Arg::I(2), Arg::At(NAMES), Arg::At(RESIDENCES)];
+        c.api(a, l, ARE_TEXTURES_RESIDENT, &names)?;
+        note(&c, "glAreTexturesResident of the generated names");
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "its error");
+        // The other context of the group.
+        current(a, &mut c, SECOND)?;
+        c.api(a, l, IS_TEXTURE, &[first])?;
+        note(&c, "the first name in the second context");
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(FOURTH)])?;
+        c.api(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), first])?;
+        current(a, &mut c, HGLRC)?;
+        c.api(a, l, IS_TEXTURE, &[first])?;
+        note(&c, "the first name bound in the second context");
+        let one = [Arg::I(1), Arg::At(NAMES), Arg::At(RESIDENCES)];
+        c.api(a, l, ARE_TEXTURES_RESIDENT, &one)?;
+        note(&c, "glAreTexturesResident of the bound one");
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "no error");
+        // Deleting a name that is only reserved frees it, as deleting
+        // a texture does.
+        gl(a, l, DELETE_TEXTURES, &[Arg::I(1), Arg::At(NAMES + 4)])?;
+        gl(a, l, DELETE_TEXTURES, &[Arg::I(1), Arg::At(NAMES)])?;
+        c.api(a, l, IS_TEXTURE, &[first])?;
+        note(&c, "the first name deleted");
+        gl(a, l, GEN_TEXTURES, &[Arg::I(3), Arg::At(AGAIN)])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "glGetError at the end");
+        finish(a, l)
+    });
+    let mut cpu = machine("texture_reserved", true, exe);
+    run_until_done(&mut cpu, data);
+    let results: Vec<(&str, u32)> = at_result
+        .iter()
+        .map(|&(what, i)| (what, peek(&cpu, data + RESULTS + 4 * i)))
+        .collect();
+    assert_eq!(
+        results,
+        [
+            ("shared", 1),
+            ("the first name generated", 0),
+            ("the second name generated", 0),
+            ("the program's own name, bound", 1),
+            ("glAreTexturesResident of the generated names", 0),
+            ("its error", GL_INVALID_VALUE),
+            ("the first name in the second context", 0),
+            ("the first name bound in the second context", 1),
+            ("glAreTexturesResident of the bound one", 1),
+            ("no error", 0),
+            ("the first name deleted", 0),
+            ("glGetError at the end", 0),
+        ]
+    );
+    let names =
+        |at: u32, n: u32| -> Vec<u32> { (0..n).map(|i| peek(&cpu, data + at + 4 * i)).collect() };
+    assert_eq!(names(NAMES, 2), [1, 3], "the lowest names not in use");
+    assert_eq!(names(FOURTH, 1), [4], "the next one in the second context");
+    assert_eq!(
+        names(AGAIN, 3),
+        [1, 3, 5],
+        "the deleted names again, and none still reserved"
+    );
+    assert_eq!(
+        names(RESIDENCES, 2),
+        [u32::MAX; 2],
+        "glAreTexturesResident leaves the residences"
     );
 }
