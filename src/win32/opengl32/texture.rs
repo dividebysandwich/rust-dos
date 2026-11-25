@@ -7,12 +7,14 @@
 //! for the card. On a Banshee or Voodoo3 it is in video memory while
 //! there is room past what the HAL's texture heap needs, where the card
 //! samples it in place, or in system memory, which the HAL copies into
-//! its heap as it draws. On a ToadForce it is always in system memory,
-//! and the HAL keeps copies of the textures drawn with in the card's
-//! free memory, letting the least recently used go when it needs room:
-//! the card's memory is a cache of the textures, as a driver's texture
-//! manager keeps it, whatever order the program made them in. The
-//! program's texels are converted as they are given.
+//! its heap as it draws. On a Voodoo2 it is always in system memory,
+//! which the HAL copies into the texture units' memory as it draws. On
+//! a ToadForce it is always in system memory too, and the HAL keeps
+//! copies of the textures drawn with in the card's free memory, letting
+//! the least recently used go when it needs room: the card's memory is
+//! a cache of the textures, as a driver's texture manager keeps it,
+//! whatever order the program made them in. The program's texels are
+//! converted as they are given.
 
 use super::super::ddraw::d3d::hal;
 use super::super::ddraw::directdraw;
