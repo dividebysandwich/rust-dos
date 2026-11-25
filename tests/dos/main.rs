@@ -31,6 +31,7 @@ mod load_exe_test;
 mod makeimg_tests;
 mod mcb_tests;
 mod mem_tests;
+mod mode_tests;
 mod mscdex_tests;
 mod rc_tests;
 mod region_lock_tests;

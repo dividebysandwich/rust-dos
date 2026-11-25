@@ -88,6 +88,7 @@ pub mod memfs;
 pub mod menu_hold;
 pub mod mixer;
 pub mod mixer_command;
+pub mod mode_command;
 pub mod modem_sound;
 pub mod monitor_noise;
 pub mod mount;

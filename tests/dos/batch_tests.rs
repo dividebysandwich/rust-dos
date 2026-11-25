@@ -1065,3 +1065,45 @@ fn config_comes_before_a_program_of_its_name_on_the_path() {
     assert_eq!(cpu.errorlevel, 0);
     assert!(screen(&cpu).contains("after"), "{}", screen(&cpu));
 }
+
+/// MODE stands for MS-DOS's MODE.COM: Ultimate Domain's ULTIMATE.BAT runs
+/// `mode co80` after the game, which prints nothing (#1825).
+#[test]
+fn mode_co80_in_a_batch_file_prints_nothing() {
+    let bat = b"@echo off\r\nmode co80\r\necho after\r\n";
+    let dir = scratch("mode_co80", &[("ULTIMATE.BAT", bat)]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("ULTIMATE".into());
+    run_batch_files(&mut cpu);
+    let text = screen(&cpu);
+    assert!(!text.contains("Bad command"), "{}", text);
+    assert!(
+        text.starts_with("after"),
+        "MODE CO80 clears the screen: {}",
+        text
+    );
+}
+
+/// MS-DOS has MODE in C:\DOS, so a MODE.COM on the PATH runs instead of
+/// the command, as one in the current directory does.
+#[test]
+fn a_program_called_mode_on_the_path_runs_instead_of_the_command() {
+    let bat = b"@echo off\r\nset PATH=C:\\BIN\r\nmode co80\r\n";
+    let dir = scratch("mode_on_path", &[("T.BAT", bat)]);
+    fs::create_dir_all(dir.join("BIN")).unwrap();
+    fs::write(dir.join("BIN").join("MODE.COM"), exits_with(7)).unwrap();
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 7);
+
+    let files: &[(&str, &[u8])] = &[
+        ("T.BAT", b"@echo off\r\nmode co80\r\n"),
+        ("MODE.COM", &exits_with(5)),
+    ];
+    let dir = scratch("mode_here", files);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 5);
+}
