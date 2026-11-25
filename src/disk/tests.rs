@@ -2397,6 +2397,46 @@ fn a_long_name_call_renames_on_a_disk_image() {
     assert_eq!(listed(&disk), named("PLAIN.CFG", None));
 }
 
+/// A handle open on a file of a disk image goes on writing to it after a
+/// long-name rename moves its entry to other slots, and the long name
+/// entries that took the slots it left stay as they are.
+#[test]
+fn a_handle_follows_a_file_a_long_name_rename_moves() {
+    let base = scratch("image_long_rename_open");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    let handle = disk.create_file(r"D:\SLOT.SAV", PSP).unwrap();
+    disk.write_file(handle, b"first ").unwrap();
+    // The volume label is in front of the entry, so the long name can't
+    // go there: the entry moves.
+    disk.long_name_call(|disk| disk.rename_file(r"D:\SLOT.SAV", r"D:\A saved game slot.sav"))
+        .unwrap();
+    disk.write_file(handle, b"second").unwrap();
+    disk.close_file(handle);
+
+    let (_, volume, _) = disk.locate_fat(r"D:\").unwrap();
+    let listed: Vec<(String, Option<String>)> = volume
+        .list(&[])
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.name, e.long_name))
+        .collect();
+    assert_eq!(
+        listed,
+        [(
+            "ASAVED~1.SAV".to_string(),
+            Some("A saved game slot.sav".to_string())
+        )]
+    );
+    let handle = disk.open_file(r"D:\ASAVED~1.SAV", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(handle, 32).unwrap(), b"first second");
+    disk.close_file(handle);
+}
+
 /// Where the host's own file pointer of the host file open at `sft` is,
 /// asked of the host.
 fn host_pointer(disk: &DiskController, sft: u16) -> u64 {

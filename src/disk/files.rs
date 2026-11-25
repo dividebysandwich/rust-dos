@@ -452,11 +452,11 @@ impl DiskController {
             if from_parts.is_empty() {
                 return Err(0x05);
             }
-            if self.keep_case {
-                volume.find_long(&from_parts)?;
+            let found = if self.keep_case {
+                volume.find_long(&from_parts)?
             } else {
-                volume.find(&from_parts)?;
-            }
+                volume.find(&from_parts)?
+            };
             self.check_writable(drive)?;
             let normalized = to.replace('/', "\\");
             let (to_drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
@@ -469,10 +469,29 @@ impl DiskController {
             // as VFAT does on Windows 9x: a long name gets its long name
             // entries, and the name may be the entry's own in another
             // case. DOS's rename keeps to 8.3 names and drops a long one.
-            if self.keep_case {
-                return volume.rename_long(&from_parts, to_dir, leaf).map(|_| ());
+            let moved_to = if self.keep_case {
+                volume.rename_long(&from_parts, to_dir, leaf)?.at
+            } else {
+                volume.rename(&from_parts, &to_parts)?;
+                volume.find(&to_parts).ok().and_then(|e| e.at)
+            };
+            // The entry may have moved to other slots: the handles open on
+            // it (which msvcrt's rename and mmioRename don't refuse) follow
+            // it, or their writes would land in the slots it left, which
+            // may now hold its long name entries.
+            if let (Some(old), Some(new)) = (found.at, moved_to)
+                && old != new
+            {
+                for open in self.open_files.values_mut() {
+                    if let OpenData::Fat { volume: v, at, .. } = &mut open.data
+                        && Rc::ptr_eq(v, &volume)
+                        && *at == old
+                    {
+                        *at = new;
+                    }
+                }
             }
-            return volume.rename(&from_parts, &to_parts);
+            return Ok(());
         }
         let (drive, source) = self.locate(from).ok_or(0x03)?;
         if !hostfs::exists(&source) {

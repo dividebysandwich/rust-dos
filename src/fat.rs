@@ -298,12 +298,15 @@ fn same_long(a: &str, b: &str) -> bool {
 /// Whether `entry` is the one a long-name call means by `part`: its long
 /// name in any case, or its DOS name written out in full. DOS cuts a
 /// longer name to 8.3 to find it (`short_name`); Win32's calls don't.
+/// The DOS name matches in any case, as DOS's `same_name` matches it: a
+/// disk written by another system may hold one in lower case.
 fn named(entry: &Entry, part: &str) -> bool {
     entry
         .long_name
         .as_deref()
         .is_some_and(|l| same_long(l, part))
-        || canonical_name(part).is_some_and(|c| c == entry.name && c.eq_ignore_ascii_case(part))
+        || canonical_name(part)
+            .is_some_and(|c| c.eq_ignore_ascii_case(&entry.name) && c.eq_ignore_ascii_case(part))
 }
 
 /// The width of a volume's FAT entries, which its cluster count decides.
