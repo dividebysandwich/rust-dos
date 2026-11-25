@@ -8,7 +8,9 @@ use rust_dos::disk::MountOptions;
 use rust_dos_ne as ne;
 use rust_dos_pe as pe;
 use std::fs;
-use win16::{CODE, Code, dos_marker, program, program_named, run, run_command, run_with};
+use win16::{
+    CODE, Code, dos_marker, program, program_named, program_named_flags, run, run_command, run_with,
+};
 
 /// KERNEL's ordinals.
 const GET_MODULE_FILE_NAME: u16 = 49;
@@ -211,6 +213,89 @@ fn a_program_loaded_again_after_its_task_ended_runs_in_its_own_data_segment() {
     assert_eq!(ends.len(), 3, "{log}");
     assert_eq!(ends[1], "7", "{log}");
     assert_eq!(exit, 1, "{log}");
+}
+
+/// The program runs C:\CHILD.EXE twice while the first CHILD runs:
+/// CHILD, a program with the module flags `module_flags`, yields three
+/// times and ends with 7. The program waits (Yield) until
+/// GetModuleUsage of the first instance is `left` or less, and ends
+/// with 1 when both WinExecs gave the same instance, 2 when they gave
+/// two, and 3 when the first failed. Its exit code and the log.
+fn run_child_twice(test: &str, module_flags: u16, left: u8) -> (u8, String) {
+    let mut code = Code::new();
+    let first_at = code.here() + 2;
+    code.push_far(0).push(1).call("KERNEL", WIN_EXEC);
+    code.emit(&[0x8B, 0xF0]); // mov si,ax
+    let second_at = code.here() + 2;
+    code.push_far(0).push(1).call("KERNEL", WIN_EXEC);
+    code.emit(&[0x8B, 0xF8]); // mov di,ax
+    let wait = code.here();
+    code.emit(&[0x56]) // push si
+        .call("KERNEL", GET_MODULE_USAGE)
+        .emit(&[0x3D, left, 0x00, 0x76, 0x07]) // cmp ax,left; jbe done
+        .call("KERNEL", YIELD);
+    let back = wait as i32 - (code.here() as i32 + 2);
+    code.emit(&[0xEB, back as i8 as u8]); // jmp wait
+    code.emit(&[
+        0xB0, 0x03, // done: mov al,3
+        0x83, 0xFE, 0x20, // cmp si,20h
+        0x72, 0x08, // jb end
+        0xB0, 0x01, // mov al,1
+        0x3B, 0xF7, // cmp si,di
+        0x74, 0x02, // je end
+        0xB0, 0x02, // mov al,2
+    ])
+    .exit_al();
+    let path = code.here();
+    code.emit(b"C:\\CHILD.EXE\0");
+    code.patch(first_at, path);
+    code.patch(second_at, path);
+
+    let mut child = Code::new();
+    child.emit(&[0xBE, 0x03, 0x00]); // mov si,3
+    let again = child.here();
+    child.call("KERNEL", YIELD).emit(&[0x4E]); // dec si
+    let back = again as i32 - (child.here() as i32 + 2);
+    child.emit(&[0x75, back as i8 as u8, 0xB0, 0x07]); // jnz again; mov al,7
+    child.exit_al();
+    let child = program_named_flags("CHILD", &child, CODE, module_flags);
+    run_with(test, program(&code, CODE), |_, base| {
+        fs::write(base.join("CHILD.EXE"), child).unwrap();
+    })
+}
+
+/// The tasks that ended with the exit code `code`, as the log says.
+fn ended_count(log: &str, code: u8) -> usize {
+    let line = format!(" ended with exit code {:X}", code);
+    log.lines()
+        .filter(|l| l.starts_with("[W16] Task ") && l.ends_with(&line))
+        .count()
+}
+
+#[test]
+fn a_singledata_program_started_again_gives_the_running_copys_instance() {
+    // A program with one automatic data segment for all its instances
+    // (SINGLEDATA, as Borland's linker marks Memphis Math's MMAP.EXE)
+    // starts once. KRNL386's LoadModule starts a second task of a loaded
+    // program only when it is MULTIPLEDATA; for another it counts one
+    // more user of the module and gives the loaded copy's instance. So
+    // the second WinExec gives the first one's instance and one CHILD
+    // runs. The module then stays loaded, with the user the second
+    // WinExec counted, which the program waits for.
+    let (exit, log) = run_child_twice("singledata_twice", ne::SINGLEDATA, 1);
+    assert_eq!(ended_count(&log, 7), 1, "{log}");
+    assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn a_multipledata_program_started_again_runs_as_a_second_task() {
+    // The same with a MULTIPLEDATA CHILD: the second WinExec starts a
+    // second task, with an automatic data segment of its own, whose
+    // instance differs from the first's. The module goes when both
+    // have ended.
+    let (exit, log) = run_child_twice("multipledata_twice", ne::MULTIPLEDATA, 0);
+    assert_eq!(ended_count(&log, 7), 2, "{log}");
+    assert_eq!(exit, 2, "{log}");
 }
 
 /// A Win32 program whose entry point returns `code`, its exit code.
