@@ -13,6 +13,7 @@ use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_erro
 use crate::cpu::Cpu;
 use crate::win32::heap::Moveable;
 use crate::win32::process;
+use crate::win32::shims::Shim;
 
 /// GlobalAlloc's flags (LocalAlloc's LMEM_ ones have the same values;
 /// its LMEM_DISCARDABLE, F00h, has GMEM_DISCARDABLE's bit in it).
@@ -23,6 +24,8 @@ const GMEM_DISCARDABLE: u32 = 0x0100;
 /// GlobalFlags' answers besides the lock count.
 const GMEM_DISCARDED: u32 = 0x4000;
 const GMEM_INVALID_HANDLE: u32 = 0x8000;
+/// The lock count's bits in GlobalFlags' answer.
+const GMEM_LOCKCOUNT: u32 = 0x00FF;
 /// A moveable block's lock count stops here, as Windows' byte does.
 const MAX_LOCKS: u32 = 0xFF;
 
@@ -289,9 +292,20 @@ pub(super) fn global_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// GlobalFlags(handle) and LocalFlags: a moveable block's lock count,
-/// GMEM_DISCARDABLE and GMEM_DISCARDED; 0 for a fixed block.
+/// GlobalFlags(handle): `local_flags`, without the lock count for a
+/// program with the shim `GlobalFlagsWithoutLockCount`.
 pub(super) fn global_flags(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let flags = local_flags(cpu, args)?;
+    // Win32s's GlobalFlags cleared the lock count (shims::win32s).
+    if process(cpu).shims.has(Shim::GlobalFlagsWithoutLockCount) {
+        return Some(flags & !GMEM_LOCKCOUNT);
+    }
+    Some(flags)
+}
+
+/// LocalFlags(handle), and GlobalFlags: a moveable block's lock count,
+/// GMEM_DISCARDABLE and GMEM_DISCARDED; 0 for a fixed block.
+pub(super) fn local_flags(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let handle = args[0];
     if !is_moveable(handle) {
         return Some(0);

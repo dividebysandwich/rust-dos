@@ -32,6 +32,7 @@ mod win32_locale_tests;
 mod win32_opengl_tests;
 mod win32_screen_tests;
 mod win32_shell_tests;
+mod win32_shims_tests;
 mod win32_tests;
 mod win32_universal_thunk_tests;
 mod win32_win98_tests;
