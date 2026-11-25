@@ -251,6 +251,69 @@ fn a_dot_that_ends_a_name_leaves_its_extension_empty() {
     assert_eq!(disk.qualify_path(r"GAME\. \INIT").as_deref(), Some(r"C:\GAME\INIT"));
 }
 
+/// DOS's calls cut each part of a path to 8.3, as DOS packs a name into
+/// a directory entry's 8 and 3 characters. Redguard opens
+/// "SYSTEM\MM_SLIDER.GXA", which is MM_SLIDE.GXA on its disc and in the
+/// folder its setup makes. A Win32 call takes the name as it is.
+#[test]
+fn dos_calls_cut_long_names_to_8_3() {
+    let base = scratch("cut_8_3");
+    fs::create_dir_all(base.join("SAVEGAME")).unwrap();
+    fs::write(base.join("MM_SLIDE.GXA"), b"slider").unwrap();
+    fs::write(base.join("SAVEGAME/SAVE.DAT"), b"save").unwrap();
+    fs::write(base.join("level0_Final.dat"), b"long").unwrap();
+    fs::write(base.join("LEVEL0_F.DAT"), b"cut").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    let h = disk.open_file("MM_SLIDER.GXA", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"slider");
+    disk.close_file(h);
+    // The extension is cut to three characters, and a directory on the
+    // way is cut as well.
+    assert!(disk.is_file("mm_slide.gxa1"));
+    assert!(disk.is_file(r"C:\SAVEGAMES\SAVE.DAT"));
+    assert!(disk.is_directory(r"C:\SAVEGAMES"));
+    // A host entry of the whole name is found by it first, before the
+    // one of the name it cuts to, as DOS's calls make a file by its long
+    // name (`new_entry_name`).
+    let h = disk.open_file("level0_Final.dat", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"long");
+    disk.close_file(h);
+    // A long-name call doesn't cut.
+    assert_eq!(
+        disk.long_name_call(|d| d.open_file("MM_SLIDER.GXA", 0, PSP)),
+        Err(0x02)
+    );
+    assert!(!disk.long_name_call(|d| d.is_file(r"C:\SAVEGAMES\SAVE.DAT")));
+}
+
+/// DOS's rename and MKDIR cut the new name to 8.3 too: a file or
+/// directory of the cut name is there already (05h), as on DOS, rather
+/// than a second entry being made beside it, which the opens that cut
+/// names would then miss. A long-name call makes the whole name.
+#[test]
+fn dos_rename_and_mkdir_find_the_cut_name_taken() {
+    let base = scratch("cut_8_3_taken");
+    fs::create_dir_all(base.join("SAVEGAME")).unwrap();
+    fs::write(base.join("MM_SLIDE.GXA"), b"slider").unwrap();
+    fs::write(base.join("NEW.TMP"), b"new").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    assert_eq!(disk.rename_file("NEW.TMP", "MM_SLIDER.GXA"), Err(0x05));
+    assert_eq!(disk.create_directory("SAVEGAMES"), Err(0x05));
+    assert!(!base.join("MM_SLIDER.GXA").exists());
+    assert!(!base.join("SAVEGAMES").exists());
+
+    assert_eq!(
+        disk.long_name_call(|d| d.rename_file("NEW.TMP", "MM_SLIDER.GXA")),
+        Ok(())
+    );
+    assert_eq!(
+        disk.long_name_call(|d| d.create_directory("SAVEGAMES")),
+        Ok(())
+    );
+}
+
 /// A host file whose name ends in a dot, as builds that kept the dot
 /// made for "SAVE.", is still found by that name.
 #[test]
@@ -265,6 +328,93 @@ fn a_host_name_that_ends_in_a_dot_is_found_without_it() {
     assert_eq!(disk.read_file(h, 16).unwrap(), b"save");
     disk.close_file(h);
     assert!(disk.is_file("save"));
+}
+
+/// Spaces that end the name before its dot pad its 8 characters, as DOS
+/// packs it: Dune CD's installer makes its launcher as "dune    .bat",
+/// and the launcher opens it as "dune.bat". A long-name call keeps them,
+/// as Windows does.
+#[test]
+fn spaces_before_the_extension_pad_the_name() {
+    let base = scratch("padded_name");
+    let mut disk = DiskController::new(base.clone());
+
+    disk.create_directory("DUNECD").unwrap();
+    let h = disk.create_file(r"C:\DUNECD\dune    .bat", PSP).unwrap();
+    disk.write_file(h, b"@echo off").unwrap();
+    disk.close_file(h);
+    assert!(base.join("DUNECD/DUNE.BAT").is_file());
+    assert!(!base.join("DUNECD/dune    .bat").exists());
+
+    let h = disk.open_file(r"C:\DUNECD\dune.bat", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"@echo off");
+    disk.close_file(h);
+    assert!(disk.is_file(r"DUNECD\DUNE .BAT"));
+    assert_eq!(
+        disk.qualify_path(r"C:\DUNECD\dune    .bat").as_deref(),
+        Some(r"C:\DUNECD\DUNE.BAT")
+    );
+    // A search pattern is packed the same way (`pattern_fields`).
+    let found = disk.list_directory(r"C:\DUNECD\dune    .*", 0).unwrap();
+    assert!(found.iter().any(|e| e.filename == "DUNE.BAT"));
+
+    // So do a directory made and a file renamed by such a name.
+    disk.create_directory("SAVES   .DIR").unwrap();
+    assert!(base.join("SAVES.DIR").is_dir());
+    disk.rename_file(r"DUNECD\DUNE.BAT", r"SAVES.DIR\GAME  .SAV")
+        .unwrap();
+    assert!(base.join("SAVES.DIR/GAME.SAV").is_file());
+
+    // Spaces inside the name stay, and a name of spaces is no name.
+    assert_eq!(
+        disk.qualify_path("A B .TXT").as_deref(),
+        Some(r"C:\A B.TXT")
+    );
+    assert_eq!(disk.qualify_path("   .TXT").as_deref(), Some(r"C:\   .TXT"));
+
+    // A long name keeps them.
+    let h = disk
+        .long_name_call(|d| d.create_file(r"C:\read me .txt", PSP))
+        .unwrap();
+    disk.close_file(h);
+    assert!(base.join("read me .txt").is_file());
+    // Nor does a long-name call find it by "read me.txt": that is
+    // another name on Windows.
+    assert!(!disk.long_name_call(|d| d.is_file(r"C:\read me.txt")));
+}
+
+/// A host file whose name has spaces before its extension, as builds that
+/// kept them made for "dune    .bat", is still found by its DOS name.
+#[test]
+fn a_host_name_padded_before_its_extension_is_found_without_the_spaces() {
+    let base = scratch("host_padded_name");
+    fs::write(base.join("dune    .bat"), b"launcher").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    let h = disk.open_file("DUNE.BAT", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"launcher");
+    disk.close_file(h);
+    assert!(disk.is_file("dune    .bat"));
+}
+
+/// MKDIR and a rename meet such a host entry as opens do: the name is
+/// taken, and no second entry is made beside it to hide it.
+#[test]
+fn a_host_name_padded_before_its_extension_is_taken() {
+    let base = scratch("host_padded_taken");
+    fs::create_dir(base.join("saves   .dir")).unwrap();
+    fs::write(base.join("saves   .dir/game.sav"), b"save").unwrap();
+    fs::write(base.join("dune    .bat"), b"launcher").unwrap();
+    fs::write(base.join("OTHER.BAT"), b"other").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    assert_eq!(disk.create_directory("SAVES.DIR"), Err(0x05));
+    assert!(!base.join("SAVES.DIR").exists());
+    assert!(disk.is_file(r"SAVES.DIR\GAME.SAV"));
+
+    assert_eq!(disk.rename_file("OTHER.BAT", "DUNE.BAT"), Err(0x05));
+    assert!(base.join("OTHER.BAT").is_file());
+    assert!(!base.join("DUNE.BAT").exists());
 }
 
 #[test]
@@ -828,7 +978,7 @@ fn floppy_free_space_tracks_usage() {
 
 /// The built-in Windows sees 3.75 GB free on an empty folder hard disk,
 /// in 4 KB clusters, which drops as files are written, while DOS keeps
-/// its 320 MB disk of 16 KB clusters.
+/// its 1 GB disk of 16 KB clusters.
 #[test]
 fn windows_sees_a_larger_hard_disk() {
     let base = scratch("windows_hd");
@@ -842,7 +992,7 @@ fn windows_sees_a_larger_hard_disk() {
         disk.windows_free_space(3),
         Ok((8, 0xF_0000 - 4, 512, 0xF_0000))
     );
-    assert_eq!(disk.get_disk_free_space32(3), Ok((32, 19999, 512, 20000)));
+    assert_eq!(disk.get_disk_free_space32(3), Ok((32, 65_517, 512, 65_518)));
     assert_eq!(disk.windows_free_space(5), Err(0x0F));
 }
 
@@ -887,6 +1037,27 @@ fn a_cd_image_file_denies_new_attributes() {
     assert_eq!(disk.set_file_attribute("D:\\NODIR\\A.TXT", 0), Err(0x03));
     assert_eq!(disk.get_file_attribute("D:\\NONE.TXT"), Err(0x02));
     assert_eq!(disk.get_file_attribute("D:\\NODIR\\A.TXT"), Err(0x03));
+}
+
+/// DOS sees a folder hard disk as 1 GB of 16 KB clusters, all free when
+/// empty, and never less than 512 MB free however much the folder holds:
+/// more than Perfect Assassin's LARGE install (360,857,188 bytes) needs.
+#[test]
+fn dos_free_space_stays_between_512_mb_and_1_gb() {
+    use super::search::hard_disk_free as free;
+    const MB_512: u64 = 0x8000;
+    const DROP: u64 = 65_518 - MB_512;
+    assert_eq!(free(0), 65_518);
+    assert_eq!(free(1), 65_517);
+    // The lowest it gets, exactly 512 MB, and back up on the next cluster
+    // to all but one cluster: only an empty folder shows the whole disk.
+    assert_eq!(free(DROP), MB_512 as u32);
+    assert_eq!(free(DROP + 1), 65_517);
+    for used in (1..40 * MB_512).step_by(1_234) {
+        let f = free(used) as u64;
+        assert!((MB_512..65_518).contains(&f), "{used}: {f}");
+        assert!(f * 16384 > 360_857_188, "{used}: {f}");
+    }
 }
 
 /// The built-in Windows's free space of a folder hard disk stays between
@@ -950,9 +1121,14 @@ fn floppies_have_a_1_44_mb_diskette_layout() {
     );
     assert_eq!(floppy.bpb()[0x15..], [0; 10]);
 
+    // A hard disk is a 1 GB FAT16 partition, as FORMAT makes one, on a
+    // BIOS that translates it to 64 heads.
     let hdd = DriveKind::HardDisk.layout();
-    assert_eq!((hdd.sectors_per_fat, hdd.fs_type()), (79, b"FAT16   "));
-    assert_eq!(hdd.total_sectors(), 191 + 32 * 20000);
+    assert_eq!((hdd.sectors_per_fat, hdd.fs_type()), (256, b"FAT16   "));
+    assert_eq!(hdd.first_data_sector(), 1 + 2 * 256 + 32);
+    assert_eq!(hdd.total_sectors(), 545 + 32 * 65_518);
+    assert!(hdd.total_sectors() <= 2 * 1024 * 1024);
+    assert_eq!((hdd.heads, hdd.cylinders()), (64, 521));
     let bpb = hdd.bpb();
     assert_eq!((bpb[0x08], bpb[0x09], bpb[0x0A]), (0, 0, 0xF8));
     assert_eq!(u32::from_le_bytes(bpb[0x15..0x19].try_into().unwrap()), hdd.total_sectors());
@@ -1370,7 +1546,10 @@ fn a_joliet_cd_has_long_names() {
     assert!(disk.is_file("D:\\nsenglishres.dll"));
     assert!(disk.is_file("d:\\program files\\Setup.ini"));
     assert!(disk.is_directory("D:\\Program Files"));
-    assert!(!disk.is_file("D:\\nsenglish.dll"));
+    // A name that is neither: a Win32 call doesn't find it, and DOS's
+    // calls cut it to the 8.3 name NSENGLIS.DLL, which is there.
+    assert!(!disk.long_name_call(|d| d.is_file("D:\\nsenglish.dll")));
+    assert!(disk.is_file("D:\\nsenglish.dll"));
     let h = disk.open_file("D:\\NSEnglishRes.dll", 0, PSP).unwrap();
     assert_eq!(disk.read_file(h, 8).unwrap(), [30; 5]);
     assert!(disk.set_current_directory("D:\\Program Files"));

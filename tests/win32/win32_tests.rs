@@ -3163,6 +3163,24 @@ fn a_program_starts_a_dos_program_and_waits_for_it() {
     assert_eq!(code, 0x71);
 }
 
+/// SHARE's installation check (INT 2Fh AX=1000h) from a DOS program
+/// Windows started: installed, AL=FFh, as in a DOS box of Windows 98 SE,
+/// whose VSHARE keeps the locks. The child ends with 7 for FFh, else 9.
+#[test]
+fn a_dos_program_windows_started_finds_share() {
+    let child = vec![
+        0xB8, 0x00, 0x10, // mov ax,1000h
+        0xCD, 0x2F, // int 2Fh
+        0x3C, 0xFF, // cmp al,0FFh
+        0xB0, 0x07, // mov al,7
+        0x74, 0x02, // je end
+        0xB0, 0x09, // mov al,9
+        0xB4, 0x4C, 0xCD, 0x21, // end: mov ah,4Ch; int 21h
+    ];
+    let code = start_program("child_dos_share", "C.COM", "C.COM", child, &[]);
+    assert_eq!(code, 0x71);
+}
+
 /// CreateProcessA of a batch file: Windows 98 runs it with COMMAND.COM
 /// /C in a DOS box, and the programs it starts see its arguments. The
 /// batch file starts the DOS program D.COM with its first argument,

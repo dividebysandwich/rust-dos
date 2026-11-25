@@ -7,14 +7,14 @@ use super::attrib::ATTRIB_DEPTH;
 use super::light::{self, LIGHTS};
 use super::wgl::{EXTENSIONS_AT, RENDERER_AT, VENDOR_AT, VERSION_AT};
 use super::{
-    CAP_ALPHA_TEST, CAP_BLEND, CAP_CLIP_PLANES, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST,
-    CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_LINE_SMOOTH, CAP_LINE_STIPPLE, CAP_LOGIC_OP,
-    CAP_NORMALIZE, CAP_POINT_SMOOTH, CAP_POLYGON_OFFSET_FILL, CAP_POLYGON_OFFSET_LINE,
-    CAP_POLYGON_OFFSET_POINT, CAP_POLYGON_SMOOTH, CAP_POLYGON_STIPPLE, CAP_SCISSOR_TEST,
-    CAP_STENCIL_TEST, CAP_TEXTURE_GEN, Context, GL_INVALID_ENUM, GL_INVALID_VALUE, GL_NO_ERROR,
-    MODELVIEW_DEPTH, PROJECTION_DEPTH, TEXTURE_DEPTH, ctx, d, error, f, max_texture_size,
-    read_floats,
+    CAP_ALPHA_TEST, CAP_BLEND, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST, CAP_DITHER,
+    CAP_FOG, CAP_LIGHTING, CAP_LINE_SMOOTH, CAP_LINE_STIPPLE, CAP_LOGIC_OP, CAP_NORMALIZE,
+    CAP_POINT_SMOOTH, CAP_POLYGON_OFFSET_FILL, CAP_POLYGON_OFFSET_LINE, CAP_POLYGON_OFFSET_POINT,
+    CAP_POLYGON_SMOOTH, CAP_POLYGON_STIPPLE, CAP_SCISSOR_TEST, CAP_STENCIL_TEST, Context,
+    GL_INVALID_ENUM, GL_INVALID_VALUE, GL_NO_ERROR, MODELVIEW_DEPTH, PROJECTION_DEPTH,
+    TEXTURE_DEPTH, ctx, d, error, f, max_texture_size, read_floats, write_doubles,
 };
+use super::{clip, texgen};
 use crate::cpu::Cpu;
 
 // Comparisons.
@@ -110,8 +110,6 @@ fn cap_bit(cap: u32) -> Option<u32> {
         GL_LINE_STIPPLE => CAP_LINE_STIPPLE,
         GL_POLYGON_STIPPLE => CAP_POLYGON_STIPPLE,
         GL_LOGIC_OP | GL_COLOR_LOGIC_OP => CAP_LOGIC_OP,
-        0x3000..=0x3005 => CAP_CLIP_PLANES,
-        0x0C60..=0x0C63 => CAP_TEXTURE_GEN,
         // Evaluators' maps, GL_TEXTURE_1D: kept nowhere.
         0x0D90..=0x0DB8 | GL_AUTO_NORMAL | GL_TEXTURE_1D => 0,
         _ => return None,
@@ -133,6 +131,21 @@ fn set_cap(cpu: &mut Cpu, cap: u32, on: bool) {
             c.lighting.enabled |= bit;
         } else {
             c.lighting.enabled &= !bit;
+        }
+        return;
+    }
+    // The active unit's coordinate generation, and the clip planes.
+    let enables = if let Some(bit) = texgen::enable_bit(cap) {
+        let unit = c.active_unit as usize;
+        Some((&mut c.texgen[unit].enabled, bit))
+    } else {
+        clip::index(cap).map(|i| (&mut c.clip.enabled, 1u8 << i))
+    };
+    if let Some((enabled, bit)) = enables {
+        if on {
+            *enabled |= bit;
+        } else {
+            *enabled &= !bit;
         }
         return;
     }
@@ -164,6 +177,12 @@ pub fn disable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn enabled(c: &Context, cap: u32) -> Option<bool> {
     if let Some(i) = light::index(cap) {
         return Some(c.lighting.enabled & 1 << i != 0);
+    }
+    if let Some(bit) = texgen::enable_bit(cap) {
+        return Some(c.texgen[c.active_unit as usize].enabled & bit != 0);
+    }
+    if let Some(i) = clip::index(cap) {
+        return Some(c.clip.enabled & 1 << i != 0);
     }
     let unit = c.client_unit as usize;
     Some(match cap {
@@ -811,16 +830,7 @@ pub fn get_doublev(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((v, _)) = get(cpu, args[0]) else {
         return Some(0);
     };
-    let at = args[1];
-    if at == 0 || !cpu.bus.guest_probe(at, v.len() * 8, true) {
-        return Some(0);
-    }
-    for (i, x) in v.iter().enumerate() {
-        let bits = x.to_bits();
-        cpu.bus.guest_write_32(at + 8 * i as u32, bits as u32);
-        cpu.bus
-            .guest_write_32(at + 8 * i as u32 + 4, (bits >> 32) as u32);
-    }
+    write_doubles(cpu, args[1], &v);
     Some(0)
 }
 
