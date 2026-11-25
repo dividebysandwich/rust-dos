@@ -107,7 +107,10 @@ fn echo_comes_back_after_a_batch_file_with_echo_off_chains_to_another() {
     // Maelstrom's MAEL.BAT turns ECHO off and chains to MAEL1.BAT (#1839).
     let dir = scratch(
         "chain_echo",
-        &[("T2.BAT", b"echo off\r\necho chain\r\nT3\r\n"), ("T3.BAT", b"echo three\r\n")],
+        &[
+            ("T2.BAT", b"echo off\r\necho chain\r\nT3\r\n"),
+            ("T3.BAT", b"echo three\r\n"),
+        ],
     );
     let mut cpu = machine(&dir);
     cpu.pending_command = Some("T2".into());
