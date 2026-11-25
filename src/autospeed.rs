@@ -238,6 +238,18 @@ const SPARE: f64 = 0.1;
 /// The time a program waits in a loop the idle skip skips counts as
 /// halted, as a DOS game's poll for the retrace does (`idle`).
 const WAITS: f64 = 0.5;
+/// A hold taken because the program waited (`AutoSpeed::waiting_hold`)
+/// goes on up after `CALM_MEASUREMENTS` measurements in a row halted less
+/// than `CALM`, well clear of `WAITS`. Each of them takes `LONG_WINDOW_NS`
+/// or more at a movie's frame rate (2.5 s in Dark Omen's intro), so
+/// `JUDGED` of them held its first movie for 10 of its 16 seconds
+/// (#1889). The margin is what keeps a scene that sits at `WAITS` from
+/// going up and back: Dark Omen's movie at 450,000, at its own rate,
+/// read 50.5, 49.5, 49.9 and 50.8% halted, and two readings under
+/// `WAITS` in a row would have counted. Its movie at the held speed reads
+/// 19 to 24%, and the movie of its campaign at 340,000 13 to 26%.
+const CALM: f64 = 0.3;
+const CALM_MEASUREMENTS: u32 = 2;
 /// Retraces a frame a program whose frames wait for the processor may
 /// wait for: a DOS game that waits for two after each frame, for 35
 /// frames a second on a 70 Hz display, and draws a frame in 1.2 retraces
@@ -1595,7 +1607,8 @@ pub struct AutoSpeed {
     /// was held where the load left it: Dark Omen's movie was held at
     /// 112,500 for 30 measurements and then stepped down, showing 5 of its
     /// 15 pictures a second with the host's estimate at 500,000 (#1889).
-    /// After `JUDGED` measurements that don't wait, the search goes on up.
+    /// After `CALM_MEASUREMENTS` in a row that are far from waiting
+    /// (`CALM`), the search goes on up.
     waiting_hold: Option<u32>,
     /// The last measurement moved `LOADS` on its drives.
     loaded: bool,
@@ -3178,8 +3191,8 @@ impl AutoSpeed {
                 // the record (`least_held`), and frames lost far above it
                 // would raise no floor.
                 if let Some(calm) = self.waiting_hold {
-                    let calm = if waits { 0 } else { calm + 1 };
-                    if calm >= JUDGED {
+                    let calm = if m.halted < CALM { calm + 1 } else { 0 };
+                    if calm >= CALM_MEASUREMENTS {
                         self.waiting_hold = None;
                         self.new_scene();
                         return up(self, FIRST_STEP, here);
@@ -6711,12 +6724,51 @@ mod tests {
             refresh: 60.0,
             ..STILL
         };
-        for _ in 0..JUDGED {
+        for _ in 0..CALM_MEASUREMENTS {
             speed = auto.decide(speed, &movie, true, HOST);
         }
         assert!(speed > 112_500, "{speed}");
         assert!(auto.held.is_none(), "{:?}", auto.held);
         assert!(auto.least_held.is_none(), "{:?}", auto.least_held);
+    }
+
+    #[test]
+    fn a_waiting_hold_goes_on_up_after_two_calm_measurements_not_near_waits() {
+        // Dark Omen's intro: the load's measurement takes the hold, and the
+        // movie at the held speed reads 21, 20, 19 and 20% halted. The
+        // search goes on up after the second.
+        let load = Measurement {
+            fps: Some(2.0),
+            halted: 0.54,
+            io: 284_000.0,
+            refresh: 60.0,
+            ..STILL
+        };
+        let movie = |halted: f64| Measurement {
+            fps: Some(5.5),
+            halted,
+            io: 300_000.0,
+            refresh: 60.0,
+            ..STILL
+        };
+        let held = |halts: &[f64]| {
+            let mut auto = AutoSpeed::new(3000, None);
+            auto.set_protected_least(112_500);
+            auto.set_idles(true);
+            let mut speeds = vec![auto.decide(54_630, &load, true, HOST)];
+            for &halted in halts {
+                let speed = *speeds.last().unwrap();
+                speeds.push(auto.decide(speed, &movie(halted), true, HOST));
+            }
+            speeds
+        };
+        let speeds = held(&[0.21, 0.20]);
+        assert!(speeds[2] > speeds[1], "{speeds:?}");
+        // The same movie at its own rate, at 450,000, sat at the line:
+        // 50.5, 49.5, 49.9 and 50.8% halted. Readings just under `WAITS`
+        // aren't calm, and the hold stays.
+        let speeds = held(&[0.505, 0.495, 0.499, 0.508, 0.495, 0.499]);
+        assert!(speeds[1..].iter().all(|&s| s == speeds[1]), "{speeds:?}");
     }
 
     #[test]
