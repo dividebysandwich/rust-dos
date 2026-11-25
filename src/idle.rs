@@ -2139,6 +2139,9 @@ fn skip(cpu: &mut Cpu, period: u64, executed: u64, limit: u64, most: u64) -> u64
     }
     clock.icount += passes * period;
     clock.idle += passes * period;
+    if crate::win32::thread::others_can_run(&cpu.bus.win32) {
+        cpu.bus.clock.handed_over += passes * period;
+    }
     cpu.executed += passes * executed;
     cpu.bus.observe.stats.proofs += 1;
     cpu.bus.observe.stats.skipped += passes * period;

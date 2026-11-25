@@ -189,6 +189,20 @@ fn current(win32: &Win32) -> Option<At> {
     Some((win32.running, process.current?))
 }
 
+/// Whether a thread runs and another can take the processor from it when
+/// its turn ends: the idle skip then skips a busy-wait loop of the
+/// running one only as far as Windows would have spun it, to the end of
+/// its turn (`Clock::handed_over`).
+pub fn others_can_run(win32: &Win32) -> bool {
+    let Some(running) = current(win32) else {
+        return false;
+    };
+    next_where(win32, Some(running), |at| {
+        at != running && can_run(win32, at)
+    })
+    .is_some()
+}
+
 /// The thread with the id `id`.
 pub fn find(win32: &Win32, id: u32) -> Option<At> {
     win32.processes.iter().enumerate().find_map(|(p, process)| {

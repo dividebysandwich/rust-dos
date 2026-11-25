@@ -136,6 +136,14 @@ pub struct Clock {
     /// Only differences between two points count, so a save state leaves
     /// it out.
     pub disk_wait: u64,
+    /// Of `idle`, the counts the idle skip skipped in a busy-wait loop of
+    /// a Win32 thread while another thread could run
+    /// (`win32::thread::others_can_run`). Windows runs such a loop out to
+    /// the end of its thread's turn, so the processor didn't wait: more
+    /// speed gives the other thread more done, as far as it has work
+    /// (`waited`). Only differences between two points count, so a save
+    /// state leaves it out.
+    pub handed_over: u64,
     batch_end: u64,
     cycles_per_ms: u32,
     base_icount: u64,
@@ -161,6 +169,19 @@ pub struct Tsc {
     pub hz: Option<u64>,
 }
 
+/// Of the `idle` counts skipped while `ran` counts passed, those the
+/// processor waited: less those `handed` over (`Clock::handed_over`), but
+/// no more of them than the counts that weren't skipped, the threads'
+/// work. A spin handed over is time another thread works in, and at a
+/// higher speed it gets more done. Where every thread that can run spins,
+/// each hands its turns to the next and none has work: the program waits
+/// for something else, as a halted one does, and more speed brings
+/// nothing.
+pub fn waited(ran: f64, idle: f64, handed: f64) -> f64 {
+    let worked = (ran - idle).max(0.0);
+    (idle - handed.min(worked)).max(0.0)
+}
+
 impl Clock {
     pub fn new(cycles_per_ms: u32) -> Self {
         Self {
@@ -170,6 +191,7 @@ impl Clock {
             idle: 0,
             offloaded: 0,
             disk_wait: 0,
+            handed_over: 0,
             batch_end: u64::MAX,
             cycles_per_ms: cycles_per_ms.clamp(MIN_CYCLES, MAX_CYCLES),
             base_icount: 0,
@@ -772,15 +794,18 @@ pub struct Pacer {
     /// The frames measured for the host's speed so far: the instructions
     /// they ran, the time those took and the rest of their work.
     sample: HostSample,
-    /// `Clock::offloaded`, `Clock::idle` and `Clock::icount` as the last
-    /// frame left them.
+    /// `Clock::offloaded`, `Clock::idle`, `Clock::handed_over` and
+    /// `Clock::icount` as the last frame left them.
     offloaded: u64,
     idle: u64,
+    handed_over: u64,
     icount: u64,
-    /// The counts of the recent frames and those of them the processor
-    /// halted, each frame's weighing `BUSY_DECAY` times the next one's.
+    /// The counts of the recent frames, those of them the processor
+    /// halted, and of those the ones handed over, each frame's weighing
+    /// `BUSY_DECAY` times the next one's.
     recent_ran: f64,
     recent_idle: f64,
+    recent_handed: f64,
     /// The emulated time dropped behind the wall clock so far
     /// (`MAX_LAG`), stalls and lag alike (`backlog` sorts them for `Auto`).
     /// And the emulated time the last frame ended at, and whether it ran
@@ -826,9 +851,11 @@ impl Pacer {
             sample: HostSample::default(),
             offloaded: 0,
             idle: 0,
+            handed_over: 0,
             icount: 0,
             recent_ran: 0.0,
             recent_idle: 0.0,
+            recent_handed: 0.0,
             lost_ns: 0,
             last_ns: 0,
             ran: false,
@@ -967,16 +994,21 @@ impl Pacer {
         // recent frames (about half a second's, as a single frame's would
         // give a movie's frame that decodes and blits) halted none of
         // their counts, not at all once they halted `BLITS_UNTIL_HALTED`
-        // of them, and in proportion between.
+        // of them, and in proportion between. A Win32 thread's spin handed
+        // over to one that works isn't halted (`waited`): the blits of a
+        // movie decoder whose main thread spins meanwhile follow the speed.
         let clock = &cpu.bus.clock;
         let offloaded = clock.offloaded.saturating_sub(self.offloaded);
         let ran = clock.icount.saturating_sub(self.icount);
         let idle = clock.idle.saturating_sub(self.idle).min(ran);
-        (self.offloaded, self.idle, self.icount) = (clock.offloaded, clock.idle, clock.icount);
+        let handed = clock.handed_over.saturating_sub(self.handed_over).min(idle);
+        (self.offloaded, self.idle, self.handed_over, self.icount) =
+            (clock.offloaded, clock.idle, clock.handed_over, clock.icount);
         self.recent_ran = self.recent_ran * BUSY_DECAY + ran as f64;
         self.recent_idle = self.recent_idle * BUSY_DECAY + idle as f64;
+        self.recent_handed = self.recent_handed * BUSY_DECAY + handed as f64;
         let halted = if self.recent_ran > 0.0 {
-            self.recent_idle / self.recent_ran
+            waited(self.recent_ran, self.recent_idle, self.recent_handed) / self.recent_ran
         } else {
             1.0
         };
@@ -2019,7 +2051,7 @@ crate::state_fields!(PitPort {
     latched,
     status
 });
-crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded, disk_wait });
+crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded, disk_wait, handed_over });
 crate::state_fields!(Tsc { base, icount, hz });
 
 #[cfg(test)]
