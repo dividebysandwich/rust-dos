@@ -5938,6 +5938,7 @@ GetArcDirection
 SetArcDirection
 GetAspectRatioFilter
 GetAspectRatioFilterEx
+IsDCCurrentPalette
 
 MODULE KEYBOARD
 ToAscii
