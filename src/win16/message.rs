@@ -1293,9 +1293,10 @@ pub(super) fn window_proc16(cpu: &Cpu, hwnd: u32) -> Option<Thunk> {
 /// A window whose procedure is 32-bit code gets the message through
 /// SendMessageA, translated, as before; so does another task's window,
 /// which SendMessageA queues for its thread. A WH_CALLWNDPROC hook runs
-/// before the procedure, as SendMessageA runs it, with the message
-/// translated for it, and then the procedure gets the caller's message
-/// (`post_send16_hooks`).
+/// before the procedure and a WH_CALLWNDPROCRET hook after it, as
+/// SendMessageA runs them, with the message translated for them; the
+/// procedure gets the caller's message (`post_send16_hooks`,
+/// `then_send16`).
 pub fn send16(cpu: &mut Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32) {
     let ctx = Context::of(cpu);
     let Some(proc) = window_proc16(cpu, hwnd) else {
@@ -1335,12 +1336,7 @@ pub fn send16(cpu: &mut Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32) {
 /// The WH_CALLWNDPROC hooks of a message 16-bit code sent (`send16`)
 /// returned: the window procedure gets the message. The hooks may have
 /// given the window another procedure, or destroyed it.
-pub fn post_send16_hooks(
-    cpu: &mut Cpu,
-    _: u32,
-    data: &[u32],
-    ctx: &mut Context,
-) -> Option<u32> {
+pub fn post_send16_hooks(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     let [hwnd, msg, wp, lp] = *data else {
         return Some(0);
     };
@@ -1361,15 +1357,7 @@ pub fn post_send16_hooks(
 /// procedure returned (`then_send16`). The registers as
 /// `call_wndproc16` gives them: DS and ES the stack, AX the window's
 /// instance's data segment.
-fn call_proc16(
-    cpu: &mut Cpu,
-    ctx: Context,
-    proc: &Thunk,
-    hwnd: u32,
-    msg: u32,
-    wp: u32,
-    lp: u32,
-) {
+fn call_proc16(cpu: &mut Cpu, ctx: Context, proc: &Thunk, hwnd: u32, msg: u32, wp: u32, lp: u32) {
     let at = thunk::stack16_for(cpu, &ctx);
     let mut regs = Context::default();
     regs.gpr[EAX] = window_ds(cpu, hwnd, proc) as u32;
@@ -1386,16 +1374,53 @@ fn call_proc16(
         regs,
         ctx,
         thunk::THEN_SEND16,
-        Vec::new(),
+        vec![hwnd, msg, wp, lp],
         at,
     );
 }
 
 /// A 16-bit window procedure `call_proc16` called returned: DX:AX as it
-/// gave them to the 16-bit code that sent the message.
-pub fn then_send16(_: &mut Cpu, value: u32, _: &[u32], ctx: &mut Context) -> Option<u32> {
+/// gave them to the 16-bit code that sent the message. A WH_CALLWNDPROCRET
+/// hook runs first, as SendMessageA runs it after the procedure, with
+/// the message translated for it (`post_send16_ret`).
+pub fn then_send16(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
+    let hook = crate::win32::user32::hook::WH_CALLWNDPROCRET as u32;
+    if let [hwnd, msg, wp, lp] = *data
+        && crate::win32::user32::hook::has(cpu, hook)
+    {
+        // CallHooks(WH_CALLWNDPROCRET, 0, sent by this thread, the
+        // CWPRETSTRUCT: lResult, lParam, wParam, message, hwnd). The
+        // 16-bit context goes on, so the 32-bit stack's top is the one
+        // its calls use.
+        let mut stack = Stack32 {
+            top: thunk::scratch32(cpu, 0x400),
+        };
+        let mut fixes = Vec::new();
+        let (msg32, wp32, lp32) = to32(cpu, hwnd, msg, wp, lp, 0, &mut stack, &mut fixes);
+        let cwp = stack.alloc(20);
+        for (i, v) in [value, lp32, wp32, msg32, hwnd].into_iter().enumerate() {
+            w32(cpu, cwp + 4 * i as u32, v);
+        }
+        let target = user32(cpu, "CallHooks");
+        thunk::enter32_at(
+            cpu,
+            *ctx,
+            stack.top,
+            target,
+            &[hook, 0, 1, cwp],
+            thunk::POST_SEND16_RET,
+            vec![value],
+        );
+        return None;
+    }
     ctx.gpr[EDX] = ctx.gpr[EDX] & 0xFFFF_0000 | value >> 16;
     Some(ctx.gpr[EAX] & 0xFFFF_0000 | value & 0xFFFF)
+}
+
+/// The WH_CALLWNDPROCRET hooks of a message `then_send16` saw returned:
+/// DX:AX what the window procedure returned.
+pub fn post_send16_ret(_: &mut Cpu, _: u32, data: &[u32], _: &mut Context) -> Option<u32> {
+    Some(data.first().copied().unwrap_or(0))
 }
 
 /// DefWindowProc, DefDlgProc and the others that take a message.
