@@ -871,7 +871,7 @@ pub fn get_current_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn unrealize_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     match gdi(cpu).get(args[0]).map(Object::type_of) {
         Some(OBJ_PAL) => {
-            palette::unrealize(cpu, args[0]);
+            palette::forget_mapping(cpu, args[0]);
             Some(TRUE)
         }
         Some(_) => Some(TRUE),
