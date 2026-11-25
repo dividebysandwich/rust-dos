@@ -30,6 +30,7 @@ mod win32_imagehlp_tests;
 mod win32_keyboard_tests;
 mod win32_locale_tests;
 mod win32_opengl_tests;
+mod win32_palette_tests;
 mod win32_screen_tests;
 mod win32_shell_tests;
 mod win32_shims_tests;

@@ -444,186 +444,188 @@ impl Path {
     }
 }
 
+/// A TrueType font of the family `family`: an em of 1000 units, an
+/// ascent of 800 and a descent of 200, a .notdef, a space 250 wide,
+/// "A" as a square 500 units a side 600 wide, and in a symbol font
+/// (cmap 3,0) the square at F041h instead. Its outlines have no
+/// instructions. For the tests, which have no TrueType file of their
+/// own (`super::sample_truetype` for those outside the crate).
+pub(super) fn sample(family: &str, symbol: bool) -> Vec<u8> {
+    // glyf: .notdef and space empty, the square a contour of four
+    // on-curve points.
+    let mut glyf = Vec::new();
+    be16(&mut glyf, 1); // contours
+    for v in [100i16, 0, 600, 500] {
+        be16(&mut glyf, v as u16);
+    }
+    be16(&mut glyf, 3); // end of contour 0
+    be16(&mut glyf, 0); // instructions
+    glyf.extend_from_slice(&[1, 1, 1, 1]); // on curve, long coordinates
+    for x in [100i16, 500, 0, -500] {
+        be16(&mut glyf, x as u16);
+    }
+    for y in [0i16, 0, 500, 0] {
+        be16(&mut glyf, y as u16);
+    }
+    // The fourth point is (100, 500): x -500 from (600, 500).
+    let square = glyf.len() as u16;
+    let mut loca = Vec::new();
+    for off in [0u16, 0, 0, square / 2] {
+        be16(&mut loca, off);
+    }
+    let mut hmtx = Vec::new();
+    for (adv, lsb) in [(500u16, 0i16), (250, 0), (600, 100)] {
+        be16(&mut hmtx, adv);
+        be16(&mut hmtx, lsb as u16);
+    }
+    let mut head = Vec::new();
+    be32(&mut head, 0x0001_0000);
+    be32(&mut head, 0x0001_0000);
+    be32(&mut head, 0); // checksum adjustment
+    be32(&mut head, 0x5F0F_3CF5);
+    be16(&mut head, 0);
+    be16(&mut head, 1000);
+    head.extend_from_slice(&[0; 16]);
+    for v in [0i16, -200, 600, 800] {
+        be16(&mut head, v as u16);
+    }
+    be16(&mut head, 0); // macStyle
+    be16(&mut head, 8);
+    be16(&mut head, 2);
+    be16(&mut head, 0); // short loca
+    be16(&mut head, 0);
+    let mut hhea = Vec::new();
+    be32(&mut hhea, 0x0001_0000);
+    for v in [800i16, -200, 0] {
+        be16(&mut hhea, v as u16);
+    }
+    be16(&mut hhea, 600);
+    hhea.extend_from_slice(&[0; 22]);
+    be16(&mut hhea, 3);
+    let mut maxp = Vec::new();
+    be32(&mut maxp, 0x0001_0000);
+    be16(&mut maxp, 3);
+    maxp.extend_from_slice(&[0; 26]);
+    // cmap format 4 with one segment for the square and the end one.
+    let (first, space) = if symbol {
+        (0xF041u16, 0xF020u16)
+    } else {
+        (0x41, 0x20)
+    };
+    let mut sub = Vec::new();
+    be16(&mut sub, 4);
+    be16(&mut sub, 0); // length, set below
+    be16(&mut sub, 0);
+    be16(&mut sub, 6); // 3 segments
+    for v in [4u16, 1, 2] {
+        be16(&mut sub, v);
+    }
+    for v in [space, first, 0xFFFF] {
+        be16(&mut sub, v);
+    }
+    be16(&mut sub, 0);
+    for v in [space, first, 0xFFFF] {
+        be16(&mut sub, v);
+    }
+    for v in [1u16.wrapping_sub(space), 2u16.wrapping_sub(first), 1] {
+        be16(&mut sub, v);
+    }
+    for _ in 0..3 {
+        be16(&mut sub, 0);
+    }
+    let len = sub.len() as u16;
+    sub[2..4].copy_from_slice(&len.to_be_bytes());
+    let mut cmap = Vec::new();
+    be16(&mut cmap, 0);
+    be16(&mut cmap, 1);
+    be16(&mut cmap, 3);
+    be16(&mut cmap, if symbol { 0 } else { 1 });
+    be32(&mut cmap, 12);
+    cmap.extend(sub);
+    // name: the family (1) in UTF-16BE for Windows.
+    let utf16: Vec<u8> = family
+        .encode_utf16()
+        .flat_map(|c| c.to_be_bytes())
+        .collect();
+    let mut name = Vec::new();
+    be16(&mut name, 0);
+    be16(&mut name, 1);
+    be16(&mut name, 18);
+    for v in [
+        3u16,
+        if symbol { 0 } else { 1 },
+        0x409,
+        1,
+        utf16.len() as u16,
+        0,
+    ] {
+        be16(&mut name, v);
+    }
+    name.extend(utf16);
+    let mut os2 = Vec::new();
+    be16(&mut os2, 1);
+    be16(&mut os2, 500); // xAvgCharWidth
+    be16(&mut os2, 400); // weight
+    os2.extend_from_slice(&[0; 26]);
+    os2.extend_from_slice(&[2, 11, 0, 0, 0, 0, 0, 0, 0, 0]); // PANOSE: sans
+    os2.extend_from_slice(&[0; 16]);
+    os2.extend_from_slice(b"TEST");
+    be16(&mut os2, 0x40); // fsSelection: regular
+    os2.extend_from_slice(&[0; 4]);
+    for v in [800i16, -200, 0, 800, 200] {
+        be16(&mut os2, v as u16);
+    }
+    be32(&mut os2, 1); // ulCodePageRange1: Latin 1
+    be32(&mut os2, 0);
+    let mut post = Vec::new();
+    be32(&mut post, 0x0003_0000);
+    post.extend_from_slice(&[0; 28]);
+    let mut tables: Vec<(&[u8; 4], Vec<u8>)> = vec![
+        (b"OS/2", os2),
+        (b"cmap", cmap),
+        (b"glyf", glyf),
+        (b"head", head),
+        (b"hhea", hhea),
+        (b"hmtx", hmtx),
+        (b"loca", loca),
+        (b"maxp", maxp),
+        (b"name", name),
+        (b"post", post),
+    ];
+    let mut out = Vec::new();
+    be32(&mut out, 0x0001_0000);
+    be16(&mut out, tables.len() as u16);
+    out.extend_from_slice(&[0; 6]);
+    let mut at = 12 + 16 * tables.len();
+    let mut body = Vec::new();
+    for (tag, data) in &mut tables {
+        out.extend_from_slice(*tag);
+        be32(&mut out, 0);
+        be32(&mut out, at as u32);
+        be32(&mut out, data.len() as u32);
+        data.resize(data.len().next_multiple_of(4), 0);
+        at += data.len();
+        body.extend_from_slice(data);
+    }
+    out.extend(body);
+    out
+}
+
+fn be16(v: &mut Vec<u8>, x: u16) {
+    v.extend_from_slice(&x.to_be_bytes());
+}
+
+fn be32(v: &mut Vec<u8>, x: u32) {
+    v.extend_from_slice(&x.to_be_bytes());
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
 
-    /// A TrueType font of the family `family`: an em of 1000 units, an
-    /// ascent of 800 and a descent of 200, a .notdef, a space 250 wide,
-    /// "A" as a square 500 units a side 600 wide, and in a symbol font
-    /// (cmap 3,0) the square at F041h instead. Its outlines have no
-    /// instructions.
+    /// The font `sample` makes.
     pub(in super::super) fn ttf(family: &str, symbol: bool) -> Vec<u8> {
-        build(family, symbol)
-    }
-
-    fn be16(v: &mut Vec<u8>, x: u16) {
-        v.extend_from_slice(&x.to_be_bytes());
-    }
-
-    fn be32(v: &mut Vec<u8>, x: u32) {
-        v.extend_from_slice(&x.to_be_bytes());
-    }
-
-    fn build(family: &str, symbol: bool) -> Vec<u8> {
-        // glyf: .notdef and space empty, the square a contour of four
-        // on-curve points.
-        let mut glyf = Vec::new();
-        be16(&mut glyf, 1); // contours
-        for v in [100i16, 0, 600, 500] {
-            be16(&mut glyf, v as u16);
-        }
-        be16(&mut glyf, 3); // end of contour 0
-        be16(&mut glyf, 0); // instructions
-        glyf.extend_from_slice(&[1, 1, 1, 1]); // on curve, long coordinates
-        for x in [100i16, 500, 0, -500] {
-            be16(&mut glyf, x as u16);
-        }
-        for y in [0i16, 0, 500, 0] {
-            be16(&mut glyf, y as u16);
-        }
-        // The fourth point is (100, 500): x -500 from (600, 500).
-        let square = glyf.len() as u16;
-        let mut loca = Vec::new();
-        for off in [0u16, 0, 0, square / 2] {
-            be16(&mut loca, off);
-        }
-        let mut hmtx = Vec::new();
-        for (adv, lsb) in [(500u16, 0i16), (250, 0), (600, 100)] {
-            be16(&mut hmtx, adv);
-            be16(&mut hmtx, lsb as u16);
-        }
-        let mut head = Vec::new();
-        be32(&mut head, 0x0001_0000);
-        be32(&mut head, 0x0001_0000);
-        be32(&mut head, 0); // checksum adjustment
-        be32(&mut head, 0x5F0F_3CF5);
-        be16(&mut head, 0);
-        be16(&mut head, 1000);
-        head.extend_from_slice(&[0; 16]);
-        for v in [0i16, -200, 600, 800] {
-            be16(&mut head, v as u16);
-        }
-        be16(&mut head, 0); // macStyle
-        be16(&mut head, 8);
-        be16(&mut head, 2);
-        be16(&mut head, 0); // short loca
-        be16(&mut head, 0);
-        let mut hhea = Vec::new();
-        be32(&mut hhea, 0x0001_0000);
-        for v in [800i16, -200, 0] {
-            be16(&mut hhea, v as u16);
-        }
-        be16(&mut hhea, 600);
-        hhea.extend_from_slice(&[0; 22]);
-        be16(&mut hhea, 3);
-        let mut maxp = Vec::new();
-        be32(&mut maxp, 0x0001_0000);
-        be16(&mut maxp, 3);
-        maxp.extend_from_slice(&[0; 26]);
-        // cmap format 4 with one segment for the square and the end one.
-        let (first, space) = if symbol {
-            (0xF041u16, 0xF020u16)
-        } else {
-            (0x41, 0x20)
-        };
-        let mut sub = Vec::new();
-        be16(&mut sub, 4);
-        be16(&mut sub, 0); // length, set below
-        be16(&mut sub, 0);
-        be16(&mut sub, 6); // 3 segments
-        for v in [4u16, 1, 2] {
-            be16(&mut sub, v);
-        }
-        for v in [space, first, 0xFFFF] {
-            be16(&mut sub, v);
-        }
-        be16(&mut sub, 0);
-        for v in [space, first, 0xFFFF] {
-            be16(&mut sub, v);
-        }
-        for v in [1u16.wrapping_sub(space), 2u16.wrapping_sub(first), 1] {
-            be16(&mut sub, v);
-        }
-        for _ in 0..3 {
-            be16(&mut sub, 0);
-        }
-        let len = sub.len() as u16;
-        sub[2..4].copy_from_slice(&len.to_be_bytes());
-        let mut cmap = Vec::new();
-        be16(&mut cmap, 0);
-        be16(&mut cmap, 1);
-        be16(&mut cmap, 3);
-        be16(&mut cmap, if symbol { 0 } else { 1 });
-        be32(&mut cmap, 12);
-        cmap.extend(sub);
-        // name: the family (1) in UTF-16BE for Windows.
-        let utf16: Vec<u8> = family
-            .encode_utf16()
-            .flat_map(|c| c.to_be_bytes())
-            .collect();
-        let mut name = Vec::new();
-        be16(&mut name, 0);
-        be16(&mut name, 1);
-        be16(&mut name, 18);
-        for v in [
-            3u16,
-            if symbol { 0 } else { 1 },
-            0x409,
-            1,
-            utf16.len() as u16,
-            0,
-        ] {
-            be16(&mut name, v);
-        }
-        name.extend(utf16);
-        let mut os2 = Vec::new();
-        be16(&mut os2, 1);
-        be16(&mut os2, 500); // xAvgCharWidth
-        be16(&mut os2, 400); // weight
-        os2.extend_from_slice(&[0; 26]);
-        os2.extend_from_slice(&[2, 11, 0, 0, 0, 0, 0, 0, 0, 0]); // PANOSE: sans
-        os2.extend_from_slice(&[0; 16]);
-        os2.extend_from_slice(b"TEST");
-        be16(&mut os2, 0x40); // fsSelection: regular
-        os2.extend_from_slice(&[0; 4]);
-        for v in [800i16, -200, 0, 800, 200] {
-            be16(&mut os2, v as u16);
-        }
-        be32(&mut os2, 1); // ulCodePageRange1: Latin 1
-        be32(&mut os2, 0);
-        let mut post = Vec::new();
-        be32(&mut post, 0x0003_0000);
-        post.extend_from_slice(&[0; 28]);
-        let mut tables: Vec<(&[u8; 4], Vec<u8>)> = vec![
-            (b"OS/2", os2),
-            (b"cmap", cmap),
-            (b"glyf", glyf),
-            (b"head", head),
-            (b"hhea", hhea),
-            (b"hmtx", hmtx),
-            (b"loca", loca),
-            (b"maxp", maxp),
-            (b"name", name),
-            (b"post", post),
-        ];
-        let mut out = Vec::new();
-        be32(&mut out, 0x0001_0000);
-        be16(&mut out, tables.len() as u16);
-        out.extend_from_slice(&[0; 6]);
-        let mut at = 12 + 16 * tables.len();
-        let mut body = Vec::new();
-        for (tag, data) in &mut tables {
-            out.extend_from_slice(*tag);
-            be32(&mut out, 0);
-            be32(&mut out, at as u32);
-            be32(&mut out, data.len() as u32);
-            data.resize(data.len().next_multiple_of(4), 0);
-            at += data.len();
-            body.extend_from_slice(data);
-        }
-        out.extend(body);
-        out
+        sample(family, symbol)
     }
 
     #[test]
