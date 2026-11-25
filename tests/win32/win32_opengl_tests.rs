@@ -4484,3 +4484,61 @@ fn texture_object_functions_are_refused_between_begin_and_end() {
     assert_eq!(bound, [5, 5, 7], "the binding");
     assert_eq!(word(RESIDENCES), 0xFF, "glAreTexturesResident wrote nothing");
 }
+
+/// glPopAttrib(GL_TEXTURE_BIT) binds the pushed names again as
+/// glBindTexture does, as Mesa and SGI's sample implementation do: a
+/// texture deleted since the push comes back as a new texture under
+/// its name, so the name is bound to a texture and glGenTextures
+/// doesn't give it out again.
+#[test]
+fn pop_attrib_makes_a_texture_of_a_name_deleted_since_the_push() {
+    const NAME: u32 = KEPT;
+    const GEN: u32 = KEPT + 4;
+    const BINDING: u32 = KEPT + 8;
+    const GL_TEXTURE_BIT: u32 = 0x4_0000;
+    const GL_TEXTURE_BINDING_2D: u32 = 0x8069;
+    let mut d = lists_data();
+    put32(&mut d, NAME, 1);
+    let mut at_result = Vec::new();
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let mut note = |c: &Calls, what: &'static str| at_result.push((what, c.next - 1));
+        let binding = |a: &mut CodeAssembler, i: u32| {
+            let at = [Arg::I(GL_TEXTURE_BINDING_2D), Arg::At(BINDING + 4 * i)];
+            gl(a, l, GET_INTEGERV, &at)
+        };
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(NAME)])?;
+        gl(a, l, PUSH_ATTRIB, &[Arg::I(GL_TEXTURE_BIT)])?;
+        gl(a, l, DELETE_TEXTURES, &[Arg::I(1), Arg::At(NAME)])?;
+        c.api(a, l, IS_TEXTURE, &[Arg::Val(NAME)])?;
+        note(&c, "the name deleted");
+        binding(a, 0)?;
+        gl(a, l, POP_ATTRIB, &[])?;
+        binding(a, 1)?;
+        c.api(a, l, IS_TEXTURE, &[Arg::Val(NAME)])?;
+        note(&c, "the name after the pop");
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(GEN)])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "glGetError at the end");
+        finish(a, l)
+    });
+    let mut cpu = machine("texture_pop_deleted", true, exe);
+    run_until_done(&mut cpu, data);
+    let results: Vec<(&str, u32)> = at_result
+        .iter()
+        .map(|&(what, i)| (what, peek(&cpu, data + RESULTS + 4 * i)))
+        .collect();
+    assert_eq!(
+        results,
+        [
+            ("the name deleted", 0),
+            ("the name after the pop", 1),
+            ("glGetError at the end", 0),
+        ]
+    );
+    let word = |at: u32| peek(&cpu, data + at);
+    let bound = [word(BINDING), word(BINDING + 4)];
+    assert_eq!(bound, [0, 1], "the binding after the delete and the pop");
+    assert_eq!(word(GEN), 2, "glGenTextures passes over the popped name");
+}

@@ -1175,19 +1175,30 @@ pub fn tex_parameteriv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// glPopAttrib's textures: each of `params` is a texture's name and
-/// the filters and wrap modes it had at the push, which the texture
-/// of that name has again if it is still there.
+/// glPopAttrib's textures: each of `params` is the name of a texture a
+/// unit had bound at the push, and the filters and wrap modes the
+/// texture had then, which the texture of that name has again. The pop
+/// binds the names again as glBindTexture does, so a name whose texture
+/// was deleted since the push is a new texture's, with no image, and
+/// takes the pushed parameters too. Mesa and SGI's sample
+/// implementation, which Microsoft's software OPENGL32 was ported from,
+/// both pop this way: they bind each pushed name and copy the pushed
+/// parameters to the texture bound. A name left bound without a
+/// texture would be one glGenTextures could give out again.
 pub fn restore_params(cpu: &mut Cpu, params: &[[u32; 5]]) {
     let Some((index, _)) = current(cpu) else {
         return;
     };
     let s = state(cpu);
     for &[name, min, mag, wrap_s, wrap_t] in params {
-        if !exists(s, index, name) {
+        let Some(t) = texture_mut(s, index, name) else {
             continue;
-        }
-        if let Some(t) = texture_mut(s, index, name) {
+        };
+        // A name bound without a texture at the push has zeros
+        // (`attrib::tex_params`) and keeps a new texture's parameters.
+        // Older builds' pops left such bindings, which a saved state
+        // may still have.
+        if min != 0 {
             t.min_filter = min;
             t.mag_filter = mag;
             t.wrap_s = wrap_s;

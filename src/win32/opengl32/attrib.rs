@@ -379,4 +379,34 @@ mod tests {
         // A lighting parameter isn't an enable.
         assert!(c.lighting.local_viewer);
     }
+
+    /// A texture deleted between the push and the pop comes back under
+    /// its name with the filters and wrap modes it had at the push.
+    #[test]
+    fn a_texture_a_pop_makes_has_the_pushed_parameters() {
+        use super::super::texture::{self, GL_CLAMP, GL_NEAREST, GL_TEXTURE_2D};
+        const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
+        const GL_TEXTURE_WRAP_S: u32 = 0x2802;
+        let mut cpu = Cpu::new(".".into());
+        let tid = super::super::super::user32::current_tid(&cpu);
+        let s = state(&mut cpu);
+        s.contexts.push(Some(super::super::new_context(1, 2, 3)));
+        s.current.push((tid, super::super::hglrc(0), 0));
+        let names = 0x1000;
+        assert!(cpu.bus.guest_probe(names, 4, true));
+        cpu.bus.guest_write_32(names, 1);
+        texture::bind_texture(&mut cpu, &[GL_TEXTURE_2D, 1]);
+        let mag = [GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST];
+        texture::tex_parameteri(&mut cpu, &mag);
+        texture::tex_parameteri(&mut cpu, &[GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP]);
+        push_attrib(&mut cpu, &[GL_TEXTURE_BIT]);
+        texture::delete_textures(&mut cpu, &[1, names]);
+        pop_attrib(&mut cpu, &[]);
+        let s = state(&mut cpu);
+        let c = s.contexts[0].as_ref().unwrap();
+        assert_eq!(c.bound[0], 1);
+        let t = texture::find(c, s.lists.textures(c.lists.group), 1).unwrap();
+        assert_eq!((t.mag_filter, t.wrap_s), (GL_NEAREST, GL_CLAMP));
+        assert_eq!(t.width, 0, "the new texture has no image");
+    }
 }
