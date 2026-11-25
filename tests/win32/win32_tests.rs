@@ -6959,6 +6959,122 @@ fn win32_calls_make_names_in_the_case_they_are_given() {
     assert_eq!(listed("Program Files/Base"), ["Old.cfg", "Save.dat"]);
 }
 
+/// Win32 calls name files on a FAT disk image (D:) by their long names,
+/// as Windows 98's VFAT does: CreateDirectoryA and CreateFileA make "My
+/// Saves" and "Saved game.dat" with long name entries, CreateFileA and
+/// GetFileAttributesA find the file by its long name in another case,
+/// FindFirstFileA gives the long name in cFileName and the alias
+/// SAVEDG~1.DAT in cAlternateFileName, and MoveFileA finds the source by
+/// its long name. Each check sets a bit of the exit code.
+#[test]
+fn win32_calls_name_files_by_long_names_on_a_disk_image() {
+    use Arg::{Esi, I};
+    let names: &[&str] = &[
+        "CreateDirectoryA",
+        "CreateFileA",
+        "CloseHandle",
+        "GetFileAttributesA",
+        "FindFirstFileA",
+        "FindClose",
+        "lstrcmpA",
+        "MoveFileA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x300];
+    put(&mut data, 0, b"D:\\My Saves\0");
+    put(&mut data, 0x20, b"D:\\My Saves\\Saved game.dat\0");
+    put(&mut data, 0x40, b"D:\\my saves\\SAVED GAME.DAT\0");
+    put(&mut data, 0x60, b"D:\\My Saves\\Saved*\0");
+    put(&mut data, 0x80, b"Saved game.dat\0");
+    put(&mut data, 0x90, b"SAVEDG~1.DAT\0");
+    put(&mut data, 0xA0, b"D:\\My Saves\\Slot one.sav\0");
+    // WIN32_FIND_DATAA at 100h: cFileName at 44, cAlternateFileName
+    // after its 260 bytes.
+    let find = 0x100;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        a.xor(ebx, ebx)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        // GENERIC_WRITE, CREATE_NEW.
+        let new = [at(0x20), I(0x4000_0000), I(0), I(0), I(1), I(0x80), I(0)];
+        call_with(a, f("CreateFileA"), &new)?;
+        a.mov(esi, eax)?;
+        a.cmp(eax, -1)?;
+        check(a, true, 1)?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING.
+        let open = [at(0x40), I(0x8000_0000), I(1), I(0), I(3), I(0x80), I(0)];
+        call_with(a, f("CreateFileA"), &open)?;
+        a.mov(esi, eax)?;
+        a.cmp(eax, -1)?;
+        check(a, true, 2)?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        call_with(a, f("GetFileAttributesA"), &[at(0x40)])?;
+        a.cmp(eax, -1)?;
+        check(a, true, 3)?;
+        call_with(a, f("FindFirstFileA"), &[at(0x60), at(find)])?;
+        a.mov(esi, eax)?;
+        a.cmp(eax, -1)?;
+        check(a, true, 4)?;
+        call_with(a, f("lstrcmpA"), &[at(0x80), at(find + 44)])?;
+        a.test(eax, eax)?;
+        check(a, false, 5)?;
+        call_with(a, f("lstrcmpA"), &[at(0x90), at(find + 44 + 260)])?;
+        a.test(eax, eax)?;
+        check(a, false, 6)?;
+        call_with(a, f("FindClose"), &[Esi])?;
+        call_with(a, f("MoveFileA"), &[at(0x40), at(0xA0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 7)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let image_dir = PathBuf::from("target/test_win32/long_names_image_d");
+    let _ = fs::remove_dir_all(&image_dir);
+    fs::create_dir_all(&image_dir).unwrap();
+    let image = image_dir.join("d.img");
+    rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+        .unwrap()
+        .copy_to(&image)
+        .unwrap();
+    let mut cpu = machine("long_names_image", exe);
+    cpu.bus
+        .disk
+        .mount(3, &image, rust_dos::disk::MountOptions::default(), true)
+        .unwrap();
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+    let volume = cpu.bus.disk.fat_volume(3).unwrap();
+    let listed = |path: &[&str]| -> Vec<(String, Option<String>)> {
+        volume
+            .list(path)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.long_name))
+            .collect()
+    };
+    let named = |name: &str, long: Option<&str>| (name.to_string(), long.map(str::to_string));
+    assert_eq!(listed(&[]), [named("MYSAVE~1", Some("My Saves"))]);
+    assert_eq!(
+        listed(&["MYSAVE~1"]),
+        [
+            named(".", None),
+            named("..", None),
+            named("SLOTON~1.SAV", Some("Slot one.sav")),
+        ]
+    );
+}
+
 /// SetFileTime on a file in a host folder, as Windows 98 SE does it on
 /// FAT: the time of the last write is rounded up to an even second
 /// (2001-10-08 19:20:01.5 is kept as 19:20:02), a time before 1980 fails
