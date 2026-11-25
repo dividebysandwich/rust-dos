@@ -9,6 +9,7 @@ use win16::{CODE, Code, program, run};
 
 /// KERNEL's ordinals.
 const LOAD_LIBRARY_EX32W: u16 = 513;
+const FREE_LIBRARY32W: u16 = 514;
 const GET_PROC_ADDRESS32W: u16 = 515;
 const GET_VDM_POINTER32W: u16 = 516;
 const CALL_PROC32W: u16 = 517;
@@ -54,6 +55,8 @@ fn generic_thunks_call_a_win32_function_with_flat_pointers() {
         .push(0)
         .push(0)
         .call("KERNEL", LOAD_LIBRARY_EX32W)
+        // The module stays on the stack for FreeLibrary32W at the end.
+        .emit(&[0x52, 0x50]) // push dx; push ax
         // GetProcAddress32W(the module, "lstrcmpA") into SI:DI.
         .emit(&[0x52, 0x50]); // push dx; push ax
     strings.push(push_strings(&mut code, 1));
@@ -111,12 +114,32 @@ fn generic_thunks_call_a_win32_function_with_flat_pointers() {
     ])
     .exit_al();
     expect_dx_ax(&mut code, 0xFFFF_FFFF, 7);
+    // The same with the count's CPEX_DEST_CDECL bit set, which says the
+    // 32-bit function is C's: two parameters still, not 80000002h.
+    strings.push(push_strings(&mut code, 2));
+    code.emit(&[0x56, 0x57]) // push si; push di
+        .push(0)
+        .push(3)
+        .push(0x8000)
+        .push(2)
+        .call("KERNEL", CALL_PROC_EX32W)
+        .emit(&[0x83, 0xC4, 0x14]); // add sp,20
+    code.emit(&[
+        0x3B, 0xE5, // cmp sp,bp
+        0x74, 0x06, // je over the exit
+        0xB0, 0x09, // mov al,9
+    ])
+    .exit_al();
+    expect_dx_ax(&mut code, 0xFFFF_FFFF, 10);
     // GetVDMPointer32W(1234h:0005h, real mode) is 12345h.
     code.push(0x1234)
         .push(0x0005)
         .push(0)
         .call("KERNEL", GET_VDM_POINTER32W);
     expect_dx_ax(&mut code, 0x12345, 8);
+    // FreeLibrary32W(the module) is TRUE.
+    code.call("KERNEL", FREE_LIBRARY32W);
+    expect_dx_ax(&mut code, 1, 11);
     code.emit(&[0xB0, 0x01]).exit_al(); // mov al,1
     fn text(code: &mut Code, s: &[u8]) -> u16 {
         let at = code.here();
@@ -137,6 +160,8 @@ fn generic_thunks_call_a_win32_function_with_flat_pointers() {
     code.patch(strings[3][1], b);
     code.patch(strings[4][0], b);
     code.patch(strings[4][1], a);
+    code.patch(strings[5][0], b);
+    code.patch(strings[5][1], a);
     let (exit, log) = run("generic_thunks", program(&code, CODE));
     assert_eq!(exit, 1, "{log}");
 }

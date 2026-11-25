@@ -1959,10 +1959,13 @@ fn get_vdm_pointer32w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// one each is (Pascal's last first, C's first first), the 16:16
 /// addresses whose bits are set in `mask` made flat (bit n for the nth
 /// one on the stack). As many as there are on the stack's segment at
-/// most.
+/// most, so that a wrong count doesn't read past it.
 fn generic_parameters(cpu: &mut Cpu, at: u16, count: u32, mask: u32, pascal: bool) -> Vec<u32> {
-    let base = cpu.seg_cache(Seg::SS).base;
-    let count = count.min((0x1_0000 - at as u32) / 4) as usize;
+    let ss = cpu.seg_cache(Seg::SS);
+    let base = ss.base;
+    let room = (ss.limit.min(0xFFFF) + 1).saturating_sub(at as u32);
+    let count = count.min(room / 4) as usize;
+    crate::idle::reads_also(cpu, base.wrapping_add(at as u32), 4 * count as u32);
     let mut params = vec![0; count];
     for i in 0..count {
         let value = cpu
@@ -1977,6 +1980,9 @@ fn generic_parameters(cpu: &mut Cpu, at: u16, count: u32, mask: u32, pascal: boo
     }
     params
 }
+
+/// _CallProcEx32W's flag in the count: the 32-bit function is C's.
+const CPEX_DEST_CDECL: u32 = 0x8000_0000;
 
 /// CallProc32W(p1, ..., pn, proc, mask, n), Pascal's with as many
 /// parameters as the caller says: call the 32-bit `proc` with p1 to pn,
@@ -1993,6 +1999,8 @@ fn call_proc32w(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let count = word(cpu, sp.wrapping_add(4));
     let mask = word(cpu, sp.wrapping_add(8));
     let proc = word(cpu, sp.wrapping_add(12));
+    // Its arguments are read here, not by builtin::call.
+    crate::idle::reads_also(cpu, base.wrapping_add(sp as u32 + 4), 12);
     let params = generic_parameters(cpu, sp.wrapping_add(16), count, mask, true);
     let popped = 16 + 4 * params.len() as u32;
     ctx.gpr[ESP] = ctx.gpr[ESP] & 0xFFFF_0000 | (sp as u32 + popped) & 0xFFFF;
@@ -2004,11 +2012,15 @@ fn call_proc32w(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 /// _CallProcEx32W(n, mask, proc, p1, ..., pn), C's: CallProc32W's call
 /// with the parameters in the order C pushes them, bit 0 of `mask` for
-/// p1, and left on the stack for the caller to take off.
+/// p1, and left on the stack for the caller to take off. The count's
+/// top bit, CPEX_DEST_CDECL in wownt16.h, says the 32-bit function is
+/// C's rather than stdcall: either way the 16-bit stack is restored
+/// after it, so only the count below it matters here.
 fn call_proc_ex32w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[count, mask, proc] = args else {
         unreachable!()
     };
+    let count = count & !CPEX_DEST_CDECL;
     let at = cpu.sp().wrapping_add(16);
     let params = generic_parameters(cpu, at, count, mask, false);
     thunk::call32(cpu, proc, &params, thunk::POST_PLAIN, Vec::new());
