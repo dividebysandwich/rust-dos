@@ -481,6 +481,49 @@ fn the_system_directory_shows_the_built_in_dlls_as_files() {
     assert_eq!(run("find", None, &[], finds_ddraw()), 0xFF);
 }
 
+#[test]
+fn find_data_leaves_the_padding_after_its_last_field() {
+    // WIN32_FIND_DATAA's fields end with cAlternateFileName, at 318;
+    // Windows 95 writes them and leaves the 2 bytes of padding after
+    // them alone. Encarta 97's Wise setup keeps a string right after a
+    // struct of 318 bytes (#1965).
+    assert_eq!(run("find_tail", None, &[], keeps_find_tail()), 3);
+}
+
+/// Searches C:\WINDOWS\SYSTEM with FindFirstFileA and FindNextFileA,
+/// checking each time that the word after the struct's fields is as it
+/// was.
+fn keeps_find_tail() -> Vec<u8> {
+    let mut data = vec![0; 0x800];
+    put(&mut data, 0x60, b"C:\\WINDOWS\\SYSTEM\\*.DLL\0");
+    program(&[("KERNEL32.DLL", KERNEL32)], &data, |a, l| {
+        let at = |offset: u32| l.at(offset);
+        let tail = at(0x200 + 318) as u64;
+        a.xor(ebx, ebx)?;
+        a.mov(word_ptr(tail), 0x5AA5)?;
+        call(a, l.import("FindFirstFileA"), &[at(0x60), at(0x200)])?;
+        a.mov(esi, eax)?;
+        a.cmp(word_ptr(tail), 0x5AA5)?;
+        check(a, false, 0)?;
+        a.mov(word_ptr(tail), 0x5AA5)?;
+        a.push(at(0x200) as i32)?;
+        a.push(esi)?;
+        a.call(l.import("FindNextFileA"))?;
+        a.test(eax, eax)?;
+        a.setne(cl)?;
+        a.cmp(word_ptr(tail), 0x5AA5)?;
+        a.sete(al)?;
+        a.and(al, cl)?;
+        a.movzx(eax, al)?;
+        a.shl(eax, 1)?;
+        a.or(ebx, eax)?;
+        a.push(esi)?;
+        a.call(l.import("FindClose"))?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
 /// Opens GLIDE2X.DLL as MPROFILE.EXE does, with CreateFileA and with
 /// MSVCRT's fopen "rb", and loads it.
 fn finds_glide() -> Vec<u8> {
