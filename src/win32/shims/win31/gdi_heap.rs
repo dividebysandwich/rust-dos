@@ -28,6 +28,13 @@
 //! next blit from the bitmap shows it. GDI32's bitmap takes the size the
 //! BITMAP says, if it is one GDI32 can draw on (`size_of`).
 //!
+//! Two things don't follow the BITMAP the program changed, as real WfW
+//! 3.11 shows (#2007). A memory DC keeps the size its bitmap had when
+//! SelectObject put it there (`dc::Attrs::bitmap_size`), which clips
+//! what is drawn into it. GetBitmapBits, SetBitmapBits and GetDIBits
+//! point bmBits back at the bitmap's own bits, where the view put them
+//! (`own`), and GDI reads and draws there from then on.
+//!
 //! A bitmap of the Win16 process can be in the views of several
 //! processes. Windows 3.1 had one heap, and a bitmap one place for its
 //! bits; here they live in the first view the bitmap joins
