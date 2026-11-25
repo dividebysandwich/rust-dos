@@ -865,7 +865,7 @@ fn set_bits(
     }
     dst.store(cpu);
     if let Some(map) = meaning {
-        super::palette::note_meaning(cpu, handle, &map);
+        super::palette::note_meaning(cpu, handle, &map, &xlat.written());
     }
     set
 }

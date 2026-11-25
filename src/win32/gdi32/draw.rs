@@ -1602,14 +1602,10 @@ pub fn blit_from(
         take_call_time(cpu, &ddc);
         return true;
     };
-    let map = c.surface.device.then(|| {
-        let map = super::palette::DeviceMap::new(cpu, ddc.attrs.palette);
-        if ddc.kind == super::dc::MEMORY {
-            map
-        } else {
-            map.on_screen(cpu)
-        }
-    });
+    let map = c
+        .surface
+        .device
+        .then(|| super::palette::DeviceMap::new(cpu, ddc.attrs.palette));
     let fill = if uses_pattern(rop3) {
         brush_fill_through(cpu, &c, ddc.attrs.brush, map.as_ref())
     } else {
@@ -1617,6 +1613,13 @@ pub fn blit_from(
     };
     let text = value_through(cpu, &ddc, &c.surface, ddc.attrs.text_color, map.as_ref());
     let bk = value_through(cpu, &ddc, &c.surface, ddc.attrs.bk_color, map.as_ref());
+    // The source's colors on the screen (`DeviceMap::on_screen`). The
+    // brush's go through the palette's entries above, as FillRect's do:
+    // only DIBs were measured going to the nearest color shown.
+    let map = match map {
+        Some(map) if ddc.kind != super::dc::MEMORY => Some(map.on_screen(cpu)),
+        map => map,
+    };
     let mask = c.surface.value_mask();
     let (black, white) = match rop3 {
         0x00 | 0xFF => black_white(&c.surface),
@@ -1720,12 +1723,17 @@ pub fn blit_from(
             }
         }
     }
+    let written = meaning.as_ref().and(xlat.as_ref()).map(Translate::written);
     if let Some(t) = xlat {
         t.keep(cpu);
     }
-    match meaning {
-        Some((handle, Some(map), _)) => super::palette::note_meaning(cpu, handle, &map),
-        Some((handle, None, Some(colors))) => super::palette::carry_meaning(cpu, handle, &colors),
+    match (meaning, written) {
+        (Some((handle, Some(map), _)), Some(w)) => {
+            super::palette::note_meaning(cpu, handle, &map, &w)
+        }
+        (Some((handle, None, Some(colors))), Some(w)) => {
+            super::palette::carry_meaning(cpu, handle, &colors, &w)
+        }
         _ => {}
     }
     // On the screen, a fill and a copy within it are the card's
@@ -1824,6 +1832,21 @@ impl Translate {
         t
     }
 
+    /// The destination's values below 256 that the translation gave,
+    /// `written[v]` for the value v: those of the blit's pixels, and of
+    /// a table kept from an earlier blit of the same translation
+    /// (`kept`).
+    pub fn written(&self) -> Vec<bool> {
+        let mut written = vec![false; 256];
+        let cached = self.cache.iter().flat_map(|c| c.values());
+        for &v in self.table.iter().flatten().chain(cached) {
+            if let Some(w) = written.get_mut(v as usize) {
+                *w = true;
+            }
+        }
+        written
+    }
+
     /// Keep the table for the next blit, as `kept` takes it.
     pub fn keep(self, cpu: &mut Cpu) {
         if let Some(key) = self.key {
@@ -1839,9 +1862,7 @@ impl Translate {
             && !src.mono
         {
             if let Some(indices) = &src.pal_indices {
-                return indices
-                    .get(v as usize)
-                    .map_or(0, |&i| map.index(i as usize));
+                return indices.get(v as usize).map_or(0, |&i| map.index(i as usize));
             }
             if src.device {
                 // To the screen, a bitmap's value whose color the system

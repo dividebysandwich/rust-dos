@@ -147,25 +147,9 @@ fn a_blit_of_the_palettes_colors_puts_their_system_entries() {
 /// OSR2.5 does so: Memphis Math draws its toolbar's buttons this way.
 #[test]
 fn a_bitmap_drawn_through_a_background_palette_shows_its_colors() {
-    // The screen's palette: 236 colors, which take entries 10 to 245.
-    let screen_color = |i: u32| (i + 10) | (245 - i) << 8 | 100 << 16;
-    let screen_colors: Vec<u32> = (0..236).map(screen_color).collect();
-    let (mut cpu, screen) = machine(DesktopDepth::Palette, &screen_colors);
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &screen_colors());
     let cpu = &mut cpu;
-    // The toolbar's: each next to one of the screen palette's last 63.
-    let colors: Vec<u32> = (0..63).map(|i| screen_color(235 - i) + 1).collect();
-    cpu.bus.guest_write_32(SCRATCH, 0x300 | 63 << 16);
-    for (i, &c) in colors.iter().enumerate() {
-        cpu.bus.guest_write_32(SCRATCH + 4 + 4 * i as u32, c);
-    }
-    let hpal = palette::create_palette(cpu, &[SCRATCH]).unwrap();
-    let ddb = bitmap::create_compatible_bitmap(cpu, &[screen, 63, 1]).unwrap();
-    let mem = dc::create_compatible_dc(cpu, &[screen]).unwrap();
-    dc::select_object(cpu, &[mem, ddb]);
-    palette::select_palette(cpu, &[mem, hpal, 1]);
-    palette::realize_palette(cpu, &[mem]);
-    let dib = dib_dc(cpu, BITS, &colors, false, |x, _| (x % 63) as u8);
-    bit_blt(cpu, mem, (0, 0, 63, 1), dib, 0, 0);
+    let (ddb, mem) = toolbar_bitmap(cpu, screen);
     let held = match gdi(cpu).bitmap(ddb) {
         Some(b) => b.bits[..63].to_vec(),
         None => Vec::new(),
@@ -183,6 +167,86 @@ fn a_bitmap_drawn_through_a_background_palette_shows_its_colors() {
         want[..],
         "the screen palette's nearest colors"
     );
+}
+
+/// The screen's palette in the toolbar tests: 236 colors, which take
+/// entries 10 to 245.
+fn screen_color(i: u32) -> u32 {
+    (i + 10) | (245 - i) << 8 | 100 << 16
+}
+
+fn screen_colors() -> Vec<u32> {
+    (0..236).map(screen_color).collect()
+}
+
+/// A logical palette of `colors`, made with CreatePalette.
+fn logical_palette(cpu: &mut Cpu, colors: &[u32]) -> u32 {
+    cpu.bus
+        .guest_write_32(SCRATCH, 0x300 | (colors.len() as u32) << 16);
+    for (i, &c) in colors.iter().enumerate() {
+        cpu.bus.guest_write_32(SCRATCH + 4 + 4 * i as u32, c);
+    }
+    palette::create_palette(cpu, &[SCRATCH]).unwrap()
+}
+
+/// A bitmap compatible with `screen`, 64 pixels by 1, in a memory DC
+/// with a palette of 63 colors realized in the background, each next
+/// to one of the screen palette's last 63; its first 63 pixels a DIB of
+/// those colors drawn through it, the last one 0. The bitmap and the
+/// DC.
+fn toolbar_bitmap(cpu: &mut Cpu, screen: u32) -> (u32, u32) {
+    let colors: Vec<u32> = (0..63).map(|i| screen_color(235 - i) + 1).collect();
+    let hpal = logical_palette(cpu, &colors);
+    let ddb = bitmap::create_compatible_bitmap(cpu, &[screen, 64, 1]).unwrap();
+    let mem = dc::create_compatible_dc(cpu, &[screen]).unwrap();
+    dc::select_object(cpu, &[mem, ddb]);
+    palette::select_palette(cpu, &[mem, hpal, 1]);
+    palette::realize_palette(cpu, &[mem]);
+    let dib = dib_dc(cpu, BITS, &colors, false, |x, _| (x % 63) as u8);
+    bit_blt(cpu, mem, (0, 0, 63, 1), dib, 0, 0);
+    (ddb, mem)
+}
+
+/// A value of the bitmap that no palette drew stands for the color the
+/// system palette shows at its entry when the bitmap is blitted, as in
+/// a bitmap with no such values: a palette realized in the foreground
+/// after the toolbar was drawn changes it.
+#[test]
+fn a_bitmaps_other_values_show_the_system_palettes_colors() {
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &screen_colors());
+    let cpu = &mut cpu;
+    let (ddb, mem) = toolbar_bitmap(cpu, screen);
+    if let Some(b) = gdi(cpu).bitmap_mut(ddb) {
+        b.bits[63] = 100;
+    }
+    let other: Vec<u32> = (0..236).map(|i| (i + 10) | (245 - i) << 16).collect();
+    let hpal = logical_palette(cpu, &other);
+    // The foreground palette, whose colors replace the screen palette's
+    // (realized without USER's WM_PALETTECHANGED, which needs a process).
+    palette::gdi_select_palette(cpu, screen, hpal, false);
+    palette::realize(cpu, screen);
+    assert_eq!(palette::system_colors(cpu)[100], other[90]);
+    bit_blt(cpu, screen, (0, 0, 64, 1), mem, 0, 0);
+    assert_eq!(screen_pixels(cpu)[63], 100);
+}
+
+/// A bitmap's values copied over the toolbar's from a bitmap whose
+/// values stand for the system palette's colors stand for those too,
+/// and show as they are.
+#[test]
+fn a_bitmap_copied_over_the_toolbar_shows_its_values() {
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &screen_colors());
+    let cpu = &mut cpu;
+    let (_, mem) = toolbar_bitmap(cpu, screen);
+    let plain = bitmap::create_compatible_bitmap(cpu, &[screen, 63, 1]).unwrap();
+    if let Some(b) = gdi(cpu).bitmap_mut(plain) {
+        b.bits[..63].copy_from_slice(&(10..73).collect::<Vec<u8>>());
+    }
+    let plain_dc = dc::create_compatible_dc(cpu, &[screen]).unwrap();
+    dc::select_object(cpu, &[plain_dc, plain]);
+    bit_blt(cpu, mem, (0, 0, 63, 1), plain_dc, 0, 0);
+    bit_blt(cpu, screen, (0, 0, 63, 1), mem, 0, 0);
+    assert_eq!(screen_pixels(cpu)[..63], (10..73).collect::<Vec<u8>>()[..]);
 }
 
 /// Blits of every kind a fast path could take or has to leave to the

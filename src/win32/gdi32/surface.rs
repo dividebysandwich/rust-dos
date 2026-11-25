@@ -251,7 +251,7 @@ impl Surface {
             }
             Target::Bitmap(handle) => {
                 let b = gdi(cpu).bitmap(handle)?;
-                let meaning = (!b.meaning.is_empty()).then(|| b.meaning.0.clone());
+                let meaning = b.meaning.0.clone();
                 let pitch = b.stride as usize;
                 let dib = b.dib.as_ref().map(|d| (d.bits, d.top_down));
                 let table = b.dib.as_ref().map(|d| {
@@ -267,7 +267,7 @@ impl Surface {
                     None if bpp == 1 => (vec![0x000000, 0xFFFFFF], MASKS_32, true),
                     // The colors its values stand for (`palette::Meaning`).
                     None if bpp == 8 => (
-                        meaning.unwrap_or_else(|| super::palette::system_colors(cpu)),
+                        super::palette::meaning_colors(cpu, &meaning),
                         MASKS_32,
                         false,
                     ),

@@ -187,8 +187,8 @@ pub struct Bitmap {
     /// SetBitmapDimensionEx's size.
     pub dimension: (i32, i32),
     /// An 8-bit bitmap of GDI's on a palette device: the color each of
-    /// its values stood for when it was drawn (`palette::Meaning`), or
-    /// empty where they stand for the system palette's colors.
+    /// its values stood for when it was drawn (`palette::Meaning`), None
+    /// for one that stands for the system palette's color.
     pub meaning: palette::Meaning,
 }
 
