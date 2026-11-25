@@ -530,7 +530,10 @@ pub fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
 }
 
 /// Rename a file or folder. Where the backend can't (Android's SAF
-/// can't), a file is copied to the new name and the old one deleted.
+/// can't), a file is copied to the new name and the old one deleted,
+/// unless the new name is the old one in another case: where names
+/// match in any case that is the file itself, which the copy would empty
+/// and the delete would then remove.
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     let (from, to) = (from.as_ref(), to.as_ref());
     let Some(backend) = backend(from).or_else(|| backend(to)) else { return fs::rename(from, to) };
@@ -538,7 +541,8 @@ pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
-    if !is_file(from) {
+    let recased = from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
+    if !is_file(from) || recased {
         return Err(error);
     }
     copy(from, to)?;
@@ -788,6 +792,22 @@ pub mod tests {
         assert_eq!(fs::read_to_string(dir.join("NEW.TXT")).unwrap(), "data");
         create_dir("mem://SUB").unwrap();
         assert!(rename("mem://SUB", "mem://SUB2").is_err(), "folders aren't copied");
+    }
+
+    /// A new name that is the old one in another case is, where names
+    /// match in any case, the file itself: copying it there would empty
+    /// it, and the delete would remove it.
+    #[test]
+    fn a_rename_to_another_case_is_never_a_copy() {
+        let dir = mapped("recase");
+        write("mem://GAME.EXE", "data").unwrap();
+        assert!(rename("mem://GAME.EXE", "mem://game.exe").is_err());
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["GAME.EXE"]);
+        assert_eq!(fs::read_to_string(dir.join("GAME.EXE")).unwrap(), "data");
     }
 
     #[test]

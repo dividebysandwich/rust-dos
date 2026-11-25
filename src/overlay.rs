@@ -298,6 +298,37 @@ impl Overlay {
         self.unhide(to)
     }
 
+    /// `path`, a file or a folder and what's in it, all above: what is
+    /// only below is copied up, by the spelling the folder lists it by.
+    fn copy_up_whole(&self, path: &str) -> io::Result<()> {
+        let target = self.writable(path)?;
+        if self.is_dir(path) {
+            self.upper_dir(path)?;
+            for (name, _) in self.names(path)? {
+                self.copy_up_whole(&child(path, &name.to_string_lossy()))?;
+            }
+        } else if !hostfs::is_file(&target) {
+            self.upper_dir(parent(path))?;
+            self.copy_up(path, &target)?;
+        }
+        Ok(())
+    }
+
+    /// `from` renamed to `to`, its own name in another case. Windows 9x
+    /// renames the entry in place, and so does this: the entry is made
+    /// whole above, the upper folder's own rename changes its case there,
+    /// and what is below stays hidden by its old spelling. The general
+    /// rename can't do it: on a host whose folders ignore case, and over
+    /// an archive, `to` is `from`, so a copy to `to` would write over the
+    /// source and removing `from` would delete the copy.
+    fn recase(&self, from: &str, to: &str) -> io::Result<()> {
+        let target = self.writable(to)?;
+        self.copy_up_whole(from)?;
+        hostfs::rename(self.writable(from)?, &target)?;
+        self.hide(from)?;
+        self.unhide(to)
+    }
+
     /// `path`, a file or a folder and what's in it, deleted.
     fn remove_tree(&self, path: &str) -> io::Result<()> {
         if self.is_dir(path) {
@@ -402,6 +433,12 @@ impl Backend for Overlay {
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let (from, to) = (hostfs::layer_path(from), hostfs::layer_path(to));
         self.meta(&from)?;
+        if from == to {
+            return Ok(());
+        }
+        if !from.is_empty() && fold(&from) == fold(&to) {
+            return self.recase(&from, &to);
+        }
         if self.meta(&to).is_ok() {
             return Err(io::Error::from(io::ErrorKind::AlreadyExists));
         }
