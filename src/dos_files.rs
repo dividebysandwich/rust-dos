@@ -211,6 +211,31 @@ pub fn init_psp(bus: &mut Bus, psp: u16, parent: Option<u16>) {
     psp_fields(bus, psp);
 }
 
+/// The handles a Windows task starts with: standard input, output, error,
+/// AUX and PRN.
+const TASK_HANDLES: u16 = 5;
+
+/// Give the PDB of a Windows task at `psp` the fields DOS reads and a JFT
+/// of its own, in the PDB, as KERNEL makes one for each task: handles 0
+/// to 4 refer to the files of those of the Windows process `parent`,
+/// with a reference each, and the others are free. A task inherits no
+/// other files, neither its parent task's nor Windows' own.
+pub fn init_task_psp(bus: &mut Bus, psp: u16, parent: u16) {
+    let base = psp as u32 * 16;
+    for h in 0..PSP_HANDLES {
+        let slot = match sft_of(bus, parent, h).filter(|_| h < TASK_HANDLES) {
+            Some(sft) => {
+                bus.disk.add_ref(sft);
+                sft as u8
+            }
+            None => UNUSED,
+        };
+        bus.guest_write_8(base + 0x18 + h as u32, slot);
+    }
+    bus.guest_write_16(base + 0x16, parent);
+    psp_fields(bus, psp);
+}
+
 /// The fields of a PSP that say where its JFT is, and the ones DOS fills
 /// in the same for every process.
 fn psp_fields(bus: &mut Bus, psp: u16) {

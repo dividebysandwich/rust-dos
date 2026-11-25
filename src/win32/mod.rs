@@ -1334,6 +1334,9 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     // task there ends (flat thunks).
     let pid = cpu.bus.win32.processes[index].id;
     crate::win16::flat::process_ending(cpu, pid);
+    if pid == cpu.bus.win32.win16.pid {
+        crate::win16::dos::free_pdbs(cpu);
+    }
     let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
     cpu.programs.processes_ended += 1;

@@ -108,6 +108,135 @@ pub fn release(cpu: &mut Cpu) {
     }
 }
 
+// Each task has a PDB (a PSP) of its own, as in Windows 3.1, and with it
+// a table of file handles (JFT). KERNEL takes the PDBs from conventional
+// memory and makes the running task's the current DOS process at every
+// task switch, so DOS finds a task's handles in its PDB, and a handle
+// number means a file only within the PDB that opened it. Here the PDB is
+// a block of DOS's memory too, and its JFT the one DOS keeps in it at
+// 18h, with the pointer at 34h and the size at 32h: DOS itself (the
+// handle functions of dos_files.rs) allocates, duplicates and closes the
+// handles there, and programs that read their PDB's table find it. Every
+// handle call a task makes, an INT 21h, DOS3Call, or KERNEL's own file
+// functions, goes through `call_real`, which makes the task's current PDB
+// DOS's current process for the call (`current_pdb`): the one place
+// where a task's handle is told apart from another's.
+//
+// A task's current PDB is in its task database at 60h, as KERNEL keeps
+// it (TDB_PDB): its own, or another a library switched to with INT 21h
+// AH=50h, which Btrieve's WBTRCALL.DLL does to keep its files in a PDB
+// of its own. The task's own PDB is `Task16::psp`, whose files close
+// when the task ends (`free_pdb`).
+
+/// A PDB's paragraphs: the 256 bytes of a PSP.
+const PDB_PARAS: u16 = 0x10;
+
+/// Where a task database keeps the task's current PDB.
+const TDB_PDB: u32 = 0x60;
+
+/// The DOS segment of the PDB whose selector is `pdb`: the paragraph its
+/// base is, if that is in conventional memory, where DOS can reach it.
+/// None for a PDB a save state made before the PDBs were there, in the
+/// task database: such a task makes its DOS calls in the Windows
+/// process's PSP, with the handles every task of that state shares.
+pub fn pdb_segment(cpu: &Cpu, pdb: u16) -> Option<u16> {
+    let (base, _, _) = super::selector_base(cpu, pdb)?;
+    (base % 16 == 0 && (0x600..0xA0000).contains(&base)).then_some((base / 16) as u16)
+}
+
+/// The current PDB of the running task (INT 21h AH=51h), as a selector:
+/// its own unless it switched to another (AH=50h). None outside a task.
+pub fn current_pdb(cpu: &Cpu) -> Option<u16> {
+    let t = super::current_task(cpu)?;
+    let task = &cpu.bus.win32.win16.tasks[t];
+    let tdb = global::get(cpu, task.handle)?.base;
+    Some(super::read_16(cpu, tdb + TDB_PDB))
+}
+
+/// Make `pdb` the running task's current PDB (INT 21h AH=50h).
+fn set_current_pdb(cpu: &mut Cpu, pdb: u16) {
+    let Some(t) = super::current_task(cpu) else {
+        return;
+    };
+    let handle = cpu.bus.win32.win16.tasks[t].handle;
+    if let Some(a) = global::get(cpu, handle) {
+        super::write_16(cpu, a.base + TDB_PDB, pdb);
+    }
+}
+
+/// Run `f` with the running task's current PDB as DOS's current process,
+/// if it is one DOS can reach; DOS's own afterwards.
+fn in_task_pdb<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
+    let segment = current_pdb(cpu).and_then(|pdb| pdb_segment(cpu, pdb));
+    let saved = cpu.current_psp;
+    if let Some(segment) = segment {
+        cpu.current_psp = segment;
+    }
+    let result = f(cpu);
+    cpu.current_psp = saved;
+    result
+}
+
+/// A PDB for a new task, in conventional memory, with the fields DOS
+/// reads and a JFT of standard handles (`dos_files::init_task_psp`). The
+/// Windows process owns its block, so that it goes with the process if a
+/// task's end never frees it. Its segment, or None without the memory.
+pub fn alloc_pdb(cpu: &mut Cpu) -> Option<u16> {
+    crate::win32::dos(cpu, |cpu| {
+        let process = cpu.bus.win32.psp;
+        let segment = crate::mcb::alloc(&mut cpu.bus, process, PDB_PARAS)
+            .or_else(|_| {
+                crate::win32::dosvm::shrink_dos_process(cpu);
+                crate::mcb::alloc(&mut cpu.bus, process, PDB_PARAS)
+            })
+            .ok()?;
+        for i in 0..PDB_PARAS as u32 * 16 {
+            cpu.bus.guest_write_8(segment as u32 * 16 + i, 0);
+        }
+        crate::dos_files::init_task_psp(&mut cpu.bus, segment, process);
+        Some(segment)
+    })
+}
+
+/// A task's PDB `pdb` (a selector) goes: the files its handles refer to
+/// close, as KERNEL closes those an ending task left open, and its block
+/// and a larger JFT it got from INT 21h AH=67h are DOS's free memory
+/// again. Other tasks' files stay open, also where their handles have
+/// the same numbers.
+pub fn free_pdb(cpu: &mut Cpu, pdb: u16) {
+    let Some(segment) = pdb_segment(cpu, pdb) else {
+        return;
+    };
+    crate::win32::dos(cpu, |cpu| {
+        crate::dos_files::close_all(&mut cpu.bus, segment);
+        let owned: Vec<u16> = crate::mcb::walk_all(&mut cpu.bus)
+            .into_iter()
+            .filter(|(_, mcb)| mcb.owner == segment)
+            .map(|(at, _)| at + 1)
+            .collect();
+        for block in owned.into_iter().chain([segment]) {
+            let _ = crate::mcb::free(&mut cpu.bus, block);
+        }
+    });
+}
+
+/// The Win16 process ends: the PDBs of the tasks that haven't ended go
+/// (`free_pdb`), their files closing.
+pub fn free_pdbs(cpu: &mut Cpu) {
+    let live: Vec<u16> = cpu
+        .bus
+        .win32
+        .win16
+        .tasks
+        .iter()
+        .filter(|t| t.exit_code.is_none())
+        .map(|t| t.psp)
+        .collect();
+    for pdb in live {
+        free_pdb(cpu, pdb);
+    }
+}
+
 /// The selector of the real-mode segment `seg`, a 64 KB data segment
 /// there, made the first time one is asked for.
 pub fn segment_selector(cpu: &mut Cpu, seg: u16) -> u16 {
@@ -258,8 +387,9 @@ pub fn default_vector(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 /// Call the built-in DOS (or the BIOS's `vector`) with the registers of
 /// `ctx` and the real-mode segments `ds` and `es`, on the host's real-mode
-/// stack (realmode.rs). The registers it returns, the segments too, in a
-/// context whose stack and segments are otherwise `ctx`'s.
+/// stack (realmode.rs), in the running task's current PDB. The registers
+/// it returns, the segments too, in a context whose stack and segments
+/// are otherwise `ctx`'s.
 fn call_real(cpu: &mut Cpu, vector: u8, ctx: &Context, ds: u16, es: u16) -> (Context, u16, u16) {
     let saved = Context::of(cpu);
     let (ss, sp) = crate::win32::realmode::host_stack(cpu);
@@ -271,7 +401,9 @@ fn call_real(cpu: &mut Cpu, vector: u8, ctx: &Context, ds: u16, es: u16) -> (Con
     cpu.set_ds(ds);
     cpu.set_es(es);
     cpu.set_cpu_flag(CpuFlags::CF, false);
-    crate::win32::dos(cpu, |cpu| crate::interrupts::handle_hle(cpu, vector));
+    in_task_pdb(cpu, |cpu| {
+        crate::win32::dos(cpu, |cpu| crate::interrupts::handle_hle(cpu, vector))
+    });
     let mut out = *ctx;
     out.gpr = cpu.snapshot().gpr;
     out.gpr[ESP] = ctx.gpr[ESP];
@@ -347,7 +479,11 @@ pub fn full_name(cpu: &mut Cpu, name: &[u8]) -> Option<Vec<u8>> {
 /// none move and the call fails with error 21h, where the pieces alone
 /// would move those before the lock.
 pub fn transfer(cpu: &mut Cpu, handle: u16, at: u32, len: u32, write: bool) -> Result<u32, u16> {
-    if len <= 0xFFFF && crate::interrupts::int21::handle_locked(cpu, handle, len, write) {
+    if len <= 0xFFFF
+        && in_task_pdb(cpu, |cpu| {
+            crate::interrupts::int21::handle_locked(cpu, handle, len, write)
+        })
+    {
         return Err(crate::disk::LOCK_VIOLATION as u16);
     }
     let (tb_seg, _) = tb(cpu);
@@ -466,12 +602,13 @@ fn int21(cpu: &mut Cpu, ctx: &mut Context) -> bool {
             ctx.seg[Seg::ES as usize] = (handler >> 16) as u16;
             set_w(ctx, EBX, handler as u16);
         }
-        // The PSP.
+        // The current PDB: the task's, or the one it switched to, which
+        // its later DOS calls run in.
         0x51 | 0x62 => {
-            let psp = super::task(cpu).psp;
-            set_w(ctx, EBX, psp);
+            let pdb = current_pdb(cpu).unwrap_or(0);
+            set_w(ctx, EBX, pdb);
         }
-        0x50 => {}
+        0x50 => set_current_pdb(cpu, w(ctx, EBX)),
         // Memory: blocks of the global heap.
         0x48 => {
             let paras = w(ctx, EBX) as u32;
