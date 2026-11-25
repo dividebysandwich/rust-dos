@@ -10,6 +10,7 @@
 //! for all kinds and processes.
 
 use crate::cpu::Cpu;
+use crate::savestate::Until;
 
 /// The pseudo-handles of the current process and thread, which only mean
 /// something to the thread that uses them. Windows 95's process one is
@@ -60,13 +61,15 @@ pub enum Kind {
     /// A file or device CreateFileA opened through DOS: its entry in DOS's
     /// file table, which it holds until the object goes, and the access it
     /// was opened for (GENERIC_READ, GENERIC_WRITE) and the sharing it
-    /// allows (FILE_SHARE_READ, FILE_SHARE_WRITE); the ranges LockFile
-    /// locked, as (offset, length).
+    /// allows (FILE_SHARE_READ, FILE_SHARE_WRITE). LockFile's locks are
+    /// DOS's, by the entry and the process (disk/locks.rs); a state saved
+    /// before W32 version 98 has the ranges it locked here, as (offset,
+    /// length), which its load drops.
     File {
         sft: u16,
         access: u32,
         share: u32,
-        locks: Vec<(u32, u32)>,
+        old_locks: Until<98, Vec<(u32, u32)>>,
     },
     /// A search of FindFirstFileA: the entries it has still to give.
     Find {
@@ -362,7 +365,7 @@ crate::win32::state_variants!(Kind {
         sft,
         access,
         share,
-        locks
+        old_locks
     },
     Find { entries },
     Change {

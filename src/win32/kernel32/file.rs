@@ -43,7 +43,6 @@ pub(super) const ERROR_SHARING_VIOLATION: u32 = 32;
 const FILE_SHARE_DELETE: u32 = 4;
 const ERROR_LOCK_VIOLATION: u32 = 33;
 const ERROR_NEGATIVE_SEEK: u32 = 131;
-const ERROR_NOT_LOCKED: u32 = 158;
 const ERROR_BAD_NETPATH: u32 = 53;
 const ERROR_IO_INCOMPLETE: u32 = 996;
 pub(super) const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -208,7 +207,7 @@ pub(crate) fn new_file(cpu: &mut Cpu, sft: u16, access: u32, share: u32) -> u32 
         sft,
         access: access & (GENERIC_READ | GENERIC_WRITE),
         share: share & (FILE_SHARE_READ | FILE_SHARE_WRITE),
-        locks: Vec::new(),
+        old_locks: Default::default(),
     };
     object::create(cpu, kind, None)
 }
@@ -438,6 +437,9 @@ fn read_open(cpu: &mut Cpu, open: Open, buffer: u32, n: u32) -> Option<(u32, Opt
         cpu.bus.guest_write_bytes(buffer, &line);
         return Some((line.len() as u32, None));
     }
+    if io_locked(cpu, open, n, false) {
+        return Some((0, Some(ERROR_LOCK_VIOLATION)));
+    }
     let mut count = 0u32;
     while count < n {
         let len = (n - count).min(CHUNK);
@@ -507,6 +509,9 @@ fn write_open(cpu: &mut Cpu, open: Open, buffer: u32, n: u32) -> Option<(u32, Op
     }
     if let Some(i) = super::comm::port_of_file(cpu, open.sft) {
         return super::comm::write(cpu, i, buffer, n);
+    }
+    if io_locked(cpu, open, n, true) {
+        return Some((0, Some(ERROR_LOCK_VIOLATION)));
     }
     let mut count = 0u32;
     let mut error = None;
@@ -768,30 +773,6 @@ pub(super) fn set_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
-/// The locks of the file object `handle` names, changed by `f`, which
-/// says what the function returns.
-fn with_locks(
-    cpu: &mut Cpu,
-    handle: u32,
-    f: impl FnOnce(&mut Vec<(u32, u32)>) -> Result<(), u32>,
-) -> u32 {
-    let id = object::resolve(cpu, handle);
-    let object = id.and_then(|id| object::objects(cpu).get_mut(id));
-    let result = match object.map(|o| &mut o.kind) {
-        Some(Kind::File { locks, .. }) => f(locks),
-        // The standard handles' files aren't locked.
-        Some(Kind::Dos { .. }) => Ok(()),
-        _ => Err(ERROR_INVALID_HANDLE),
-    };
-    match result {
-        Ok(()) => TRUE,
-        Err(code) => {
-            set_error(cpu, code);
-            FALSE
-        }
-    }
-}
-
 /// The range of a lock: Windows 95 locks only below 4 GB, and takes a
 /// lock of no bytes and does nothing.
 fn lock_range(args: &[u32]) -> Result<Option<(u32, u32)>, u32> {
@@ -804,36 +785,63 @@ fn lock_range(args: &[u32]) -> Result<Option<(u32, u32)>, u32> {
     Ok((len != 0).then_some((low, len)))
 }
 
-/// LockFile(handle, offset, offset high, length, length high): no other
-/// lock may have any of the bytes.
+/// LockFile and UnlockFile (with `lock` false): lock or unlock the bytes
+/// `args` give of the file `args[0]` is a handle of. The locks are DOS's
+/// (disk/locks.rs), as on Windows 95 and 98, where VSHARE keeps one set
+/// for each file whoever opened it: DOS programs, Win16 tasks and Win32
+/// processes. A lock is the process's, through the handle's object: no
+/// other lock may have any of its bytes, and other processes, and the
+/// process's own other opens of the file, neither read nor write them
+/// (ERROR_LOCK_VIOLATION). It goes with UnlockFile of the same range
+/// through the same object, when the object closes, and when the process
+/// ends.
+fn lock_or_unlock(cpu: &mut Cpu, args: &[u32], lock: bool) -> u32 {
+    let Some(open) = open_or_fail(cpu, args[0]) else {
+        return FALSE;
+    };
+    let range = match lock_range(args) {
+        Ok(range) => range,
+        Err(code) => return result(cpu, Some(code)),
+    };
+    let Some((offset, len)) = range else {
+        return TRUE;
+    };
+    // The standard handles' files aren't locked.
+    if open.dos != 0xFFFF {
+        return TRUE;
+    }
+    let owner = crate::interrupts::int21::lock_owner(cpu);
+    let disk = &mut cpu.bus.disk;
+    // Either fails with DOS's error: an UnlockFile of bytes the process
+    // didn't lock so through this object too, with ERROR_LOCK_VIOLATION,
+    // as on Windows 98 SE (tests/win32/win32_file_lock_tests.rs).
+    let done = if lock {
+        disk.lock_region(open.sft, owner, offset, len)
+    } else {
+        disk.unlock_region(open.sft, owner, offset, len)
+    };
+    result(cpu, done.err().map(u32::from))
+}
+
+/// LockFile(handle, offset, offset high, length, length high).
 pub(super) fn lock_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let range = lock_range(args);
-    Some(with_locks(cpu, args[0], |locks| {
-        let Some((at, len)) = range? else {
-            return Ok(());
-        };
-        if locks.iter().any(|&(a, l)| at < a + l && a < at + len) {
-            return Err(ERROR_LOCK_VIOLATION);
-        }
-        locks.push((at, len));
-        Ok(())
-    }))
+    Some(lock_or_unlock(cpu, args, true))
 }
 
 /// UnlockFile: a lock of just these bytes goes.
 pub(super) fn unlock_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let range = lock_range(args);
-    Some(with_locks(cpu, args[0], |locks| {
-        let Some(range) = range? else {
-            return Ok(());
-        };
-        let i = locks
-            .iter()
-            .position(|&l| l == range)
-            .ok_or(ERROR_NOT_LOCKED)?;
-        locks.remove(i);
-        Ok(())
-    }))
+    Some(lock_or_unlock(cpu, args, false))
+}
+
+/// Whether a read (`write` false) or a write of `n` bytes at the pointer
+/// of `open` by the running process reaches bytes another holder's lock
+/// has: Windows 95 and 98 then fail the whole call with
+/// ERROR_LOCK_VIOLATION and move no bytes.
+pub(crate) fn io_locked(cpu: &Cpu, open: Open, n: u32, write: bool) -> bool {
+    cpu.bus.disk.has_locks() && {
+        let owner = crate::interrupts::int21::lock_owner(cpu);
+        cpu.bus.disk.io_locked(open.sft, owner, n, write)
+    }
 }
 
 /// GetOverlappedResult(handle, overlapped, transferred, wait): Windows
