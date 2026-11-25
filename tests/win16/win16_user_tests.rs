@@ -4,7 +4,7 @@
 
 use crate::win16;
 
-use win16::{CODE, Code, program, run, run_with_prompts};
+use win16::{CODE, Code, program, program_named, run, run_with, run_with_prompts};
 
 /// ExitWindows's code for restarting Windows.
 const EW_RESTARTWINDOWS: u16 = 0x42;
@@ -27,10 +27,17 @@ const REGISTER_CLASS: u16 = 57;
 const GET_CLASS_INFO: u16 = 404;
 const DEF_WINDOW_PROC: u16 = 107;
 const SET_WINDOWS_HOOK_EX: u16 = 291;
+const POST_QUIT_MESSAGE: u16 = 6;
+const GET_DLG_ITEM_INT: u16 = 95;
+const GET_MESSAGE: u16 = 108;
+const POST_MESSAGE: u16 = 110;
+const DISPATCH_MESSAGE: u16 = 114;
 
 /// KERNEL's ordinals.
 const GLOBAL_ALLOC: u16 = 15;
 const GLOBAL_LOCK: u16 = 18;
+const YIELD: u16 = 29;
+const WIN_EXEC: u16 = 166;
 
 /// Window styles.
 const POPUP: u32 = 0x9000_0000; // WS_POPUP | WS_VISIBLE
@@ -88,12 +95,23 @@ impl Program {
 
     /// The program's file: the code, then the strings.
     fn build(mut self) -> Vec<u8> {
-        for (at, text) in self.strings {
+        self.place_strings();
+        program(&self.code, CODE)
+    }
+
+    /// `build`, with the module name `name`.
+    fn build_named(mut self, name: &str) -> Vec<u8> {
+        self.place_strings();
+        program_named(name, &self.code, CODE)
+    }
+
+    /// Put the strings after the code.
+    fn place_strings(&mut self) {
+        for (at, text) in std::mem::take(&mut self.strings) {
             let offset = self.code.here();
             self.code.emit(text);
             self.code.patch(at, offset);
         }
-        program(&self.code, CODE)
     }
 }
 
@@ -863,6 +881,349 @@ fn a_call_window_proc_hook_sees_a_message_sent_to_a_16_bit_procedure() {
     // procedure still gets the caller's buffer.
     let (exit, log) = run("own_buffer_hook", own_buffer_program(true));
     assert_eq!(exit, 1, "{log}");
+}
+
+/// Point the short jump whose displacement is at `at` to `target`.
+fn jump_here(code: &mut Code, at: u16, target: u16) {
+    code.bytes[at as usize] = target.wrapping_sub(at + 1) as u8;
+}
+
+/// Register the class DIGITS (at DS:40h), whose window procedure
+/// `digits_procedure` writes, and make a popup of it, in SI, and a
+/// child of the popup with the id 5. End with 2, 3 or 4 if one fails.
+/// Returns where the procedure's offset is to be patched in.
+fn digits_windows(p: &mut Program) -> u16 {
+    const WC: u8 = 0x40;
+    p.code.emit(&[0x89, 0x3E, WC + 10, 0x00]); // mov [WC+10],di: the instance
+    let proc_at = p.code.here() + 4;
+    p.code
+        .emit(&[0xC7, 0x06, WC + 2, 0x00, 0x00, 0x00]) // its procedure
+        .emit(&[0x8C, 0x0E, WC + 4, 0x00]); // mov [WC+4],cs
+    p.strings.push((p.code.here() + 4, b"DIGITS\0"));
+    p.code
+        .emit(&[0xC7, 0x06, WC + 22, 0x00, 0x00, 0x00]) // its name
+        .emit(&[0x8C, 0x0E, WC + 24, 0x00])
+        .emit(&[0x1E])
+        .push(WC as u16)
+        .call("USER", REGISTER_CLASS);
+    exit_if_ax_zero(&mut p.code, 2);
+    p.create_window(b"DIGITS\0", POPUP, [0, 0, 100, 60], false, 0);
+    p.code.emit(&[0x8B, 0xF0]); // mov si,ax
+    exit_if_ax_zero(&mut p.code, 3);
+    p.create_window(b"DIGITS\0", CHILD, [0, 0, 50, 20], true, 5);
+    exit_if_ax_zero(&mut p.code, 4);
+    proc_at
+}
+
+/// The window procedure of DIGITS: WM_GETTEXT writes "1234" into
+/// lParam's buffer and returns the word at SS:DIGITS_RETURN (in the
+/// task's data segment), or 2 with `long`. With `long`, a WM_GETTEXT for more
+/// than 255 characters fills the buffer with wParam - 1 B's instead and
+/// returns their count, and WM_SETTEXT returns its string's length.
+/// WM_DESTROY quits; the rest goes to DefWindowProc.
+fn digits_procedure(p: &mut Program, long: bool) -> u16 {
+    const WM_SETTEXT: u8 = 0x0C;
+    const WM_GETTEXT: u8 = 0x0D;
+    const WM_DESTROY: u8 = 0x02;
+    let proc = p.code.here();
+    p.code
+        .emit(&[0x55, 0x8B, 0xEC, 0x57]) // push bp; mov bp,sp; push di
+        .emit(&[0x8B, 0x46, 0x0C]) // mov ax,[bp+0Ch] (msg)
+        .emit(&[0x3D, WM_GETTEXT, 0x00, 0x74, 0x00]); // cmp ax; je gettext
+    let to_get = p.code.here() - 1;
+    p.code.emit(&[0x3D, WM_SETTEXT, 0x00, 0x74, 0x00]); // je settext
+    let to_set = p.code.here() - 1;
+    p.code.emit(&[0x3D, WM_DESTROY, 0x00, 0x74, 0x00]); // je destroy
+    let to_destroy = p.code.here() - 1;
+    // Other messages, and WM_SETTEXT without `long`.
+    let other = p.code.here();
+    p.code
+        .emit(&[
+            0xFF, 0x76, 0x0E, // push [bp+0Eh] (hwnd)
+            0xFF, 0x76, 0x0C, // push [bp+0Ch] (msg)
+            0xFF, 0x76, 0x0A, // push [bp+0Ah] (wParam)
+            0xFF, 0x76, 0x08, // push [bp+8] (lParam)
+            0xFF, 0x76, 0x06, // push [bp+6]
+        ])
+        .call("USER", DEF_WINDOW_PROC)
+        .emit(&[0xEB, 0x00]); // jmp done
+    let mut to_done = vec![p.code.here() - 1];
+    let here = p.code.here();
+    jump_here(&mut p.code, to_destroy, here);
+    p.code
+        .push(0)
+        .call("USER", POST_QUIT_MESSAGE)
+        .emit(&[0x31, 0xC0, 0x31, 0xD2]) // xor ax,ax; xor dx,dx
+        .emit(&[0xEB, 0x00]);
+    to_done.push(p.code.here() - 1);
+    let here = p.code.here();
+    jump_here(&mut p.code, to_get, here);
+    p.code.emit(&[0xC4, 0x7E, 0x06]); // les di,[bp+6] (lParam)
+    if long {
+        p.code
+            .emit(&[0x8B, 0x4E, 0x0A]) // mov cx,[bp+0Ah] (wParam)
+            .emit(&[0x81, 0xF9, 0x00, 0x01, 0x72, 0x00]); // cmp cx,100h; jb short
+        let to_short = p.code.here() - 1;
+        p.code
+            .emit(&[0x49, 0x51]) // dec cx; push cx
+            .emit(&[0xB0, b'B', 0xFC, 0xF3, 0xAA]) // mov al,'B'; cld; rep stosb
+            .emit(&[0x26, 0xC6, 0x05, 0x00]) // mov byte es:[di],0
+            .emit(&[0x58, 0x31, 0xD2]) // pop ax; xor dx,dx
+            .emit(&[0xEB, 0x00]);
+        to_done.push(p.code.here() - 1);
+        let here = p.code.here();
+        jump_here(&mut p.code, to_short, here);
+    }
+    p.code
+        .emit(&[0x26, 0xC7, 0x05, b'1', b'2']) // mov word es:[di],'12'
+        .emit(&[0x26, 0xC7, 0x45, 0x02, b'3', b'4']) // mov word es:[di+2],'34'
+        .emit(&[0x26, 0xC6, 0x45, 0x04, 0x00]); // mov byte es:[di+4],0
+    if long {
+        p.code.emit(&[0xB8, 0x02, 0x00]); // mov ax,2
+    } else {
+        p.code.emit(&[0x36, 0xA1, DIGITS_RETURN, 0x00]); // mov ax,ss:[DIGITS_RETURN]
+    }
+    p.code.emit(&[0x31, 0xD2, 0xEB, 0x00]); // xor dx,dx; jmp done
+    to_done.push(p.code.here() - 1);
+    let here = p.code.here();
+    jump_here(&mut p.code, to_set, here);
+    if long {
+        p.code
+            .emit(&[0xC4, 0x7E, 0x06]) // les di,[bp+6]
+            .emit(&[0x31, 0xC0, 0xB9, 0xFF, 0xFF]) // xor ax,ax; mov cx,0FFFFh
+            .emit(&[0xFC, 0xF2, 0xAE]) // cld; repne scasb
+            .emit(&[0xF7, 0xD1, 0x49]) // not cx; dec cx: the length
+            .emit(&[0x8B, 0xC1, 0x31, 0xD2]) // mov ax,cx; xor dx,dx
+            .emit(&[0xEB, 0x00]);
+        to_done.push(p.code.here() - 1);
+    } else {
+        let back = other.wrapping_sub(p.code.here() + 2) as u8;
+        p.code.emit(&[0xEB, back]); // jmp other
+    }
+    let done = p.code.here();
+    p.code.emit(&[0x5F, 0x5D, 0xCA, 0x0A, 0x00]); // pop di; pop bp; retf 0Ah
+    for at in to_done {
+        jump_here(&mut p.code, at, done);
+    }
+    proc
+}
+
+/// Where the DIGITS procedure of `digits_procedure` without `long`
+/// finds what it returns for WM_GETTEXT.
+const DIGITS_RETURN: u8 = 0x60;
+
+#[test]
+fn get_dlg_item_int_reads_what_a_16_bit_control_writes() {
+    // Windows 98's 16-bit GetDlgItemInt sends WM_GETTEXT as SendMessage
+    // does, and takes the number from its buffer when the procedure
+    // returns a length other than 0: "1234" with a length of 2 is 1234,
+    // with a length of 0 no number. Exit code 1, or which check failed.
+    const TRANSLATED: u8 = 0x62;
+    let mut p = Program::default();
+    let proc_at = digits_windows(&mut p);
+    for (ret, value, translated, fail) in [(2u16, 1234u16, 1u8, 5u8), (0, 0, 0, 7)] {
+        let [ret_lo, ret_hi] = ret.to_le_bytes();
+        p.code
+            .emit(&[0xC7, 0x06, DIGITS_RETURN, 0x00, ret_lo, ret_hi])
+            .emit(&[0xC7, 0x06, TRANSLATED, 0x00, 0xEF, 0xBE]) // 0BEEFh
+            .emit(&[0x56]) // push si
+            .push(5)
+            .emit(&[0x1E]) // push ds
+            .push(TRANSLATED as u16)
+            .push(0) // unsigned
+            .call("USER", GET_DLG_ITEM_INT);
+        expect_ax(&mut p.code, value, fail);
+        p.code
+            .emit(&[0x83, 0x3E, TRANSLATED, 0x00, translated]) // cmp word [TRANSLATED]
+            .emit(&[0x74, 0x06])
+            .emit(&[0xB0, fail + 1, 0xB4, 0x4C, 0xCD, 0x21]);
+    }
+    p.code.emit(&[0xB0, 0x01]).exit_al();
+    let proc = digits_procedure(&mut p, false);
+    p.code.patch(proc_at, proc);
+    let (exit, log) = run("get_dlg_item_int_16", p.build());
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// A program that starts SRV.EXE (`intertask_server`), finds its DIGITS
+/// window and sends it messages: WM_GETTEXT with its buffer, which gets
+/// "1234" and 2; GetWindowText; GetDlgItemInt of the window's child;
+/// WM_GETTEXT for 3000 bytes in a global block, which gets 2999 B's;
+/// and WM_SETTEXT with those, whose length comes back. Then it closes
+/// the window and ends with 1, or with which check failed.
+fn intertask_client() -> Vec<u8> {
+    const WM_SETTEXT: u16 = 0x0C;
+    const WM_GETTEXT: u16 = 0x0D;
+    const WM_CLOSE: u16 = 0x10;
+    const TRANSLATED: u8 = 0x40;
+    const BIG: u8 = 0x44;
+    let [buf_lo, buf_hi] = BUFFER.to_le_bytes();
+    let [buf2_lo, buf2_hi] = (BUFFER + 2).to_le_bytes();
+    let mut p = Program::default();
+    let mut fails = Vec::new();
+    // Go on if the short jump `jcc` is taken, else end with `fail`.
+    let check = |p: &mut Program, fails: &mut Vec<u16>, jcc: u8, fail: u8| {
+        p.code.emit(&[jcc, 0x05, 0xB3, fail, 0xE9]); // jcc; mov bl,fail; jmp
+        fails.push(p.code.here());
+        p.code.emit(&[0x00, 0x00]);
+    };
+    p.code
+        .push(0x40) // GMEM_ZEROINIT
+        .push(0)
+        .push(0x1000)
+        .call("KERNEL", GLOBAL_ALLOC);
+    exit_if_ax_zero(&mut p.code, 2);
+    p.code
+        .emit(&[0x50]) // push ax
+        .call("KERNEL", GLOBAL_LOCK)
+        .emit(&[0xA3, BIG, 0x00]) // mov [BIG],ax
+        .emit(&[0x89, 0x16, BIG + 2, 0x00]); // mov [BIG+2],dx
+    p.push_string(b"C:\\SRV.EXE\0");
+    p.code
+        .push(1)
+        .call("KERNEL", WIN_EXEC)
+        .emit(&[0x3D, 0x20, 0x00, 0x73, 0x06]) // cmp ax,20h; jae over
+        .emit(&[0xB0, 0x03, 0xB4, 0x4C, 0xCD, 0x21]);
+    // Until SRV's window is there: FindWindow("DIGITS", NULL), Yield.
+    let find = p.code.here();
+    p.push_string(b"DIGITS\0");
+    p.code
+        .push(0)
+        .push(0)
+        .call("USER", FIND_WINDOW)
+        .emit(&[0x0B, 0xC0, 0x75, 0x08]) // or ax,ax; jnz found
+        .call("KERNEL", YIELD);
+    let back = find.wrapping_sub(p.code.here() + 3);
+    p.code.emit(&[0xE9]).emit(&back.to_le_bytes());
+    p.code.emit(&[0x8B, 0xF0]); // found: mov si,ax
+
+    // SendMessage(SI, WM_GETTEXT, 14h, DS:BUFFER).
+    send_buffer(&mut p, WM_GETTEXT, 0x14);
+    p.code.emit(&[0x3D, 0x02, 0x00]); // cmp ax,2
+    check(&mut p, &mut fails, 0x74, 4);
+    p.code.emit(&[0x81, 0x3E, buf_lo, buf_hi, b'1', b'2']);
+    check(&mut p, &mut fails, 0x74, 5);
+    p.code.emit(&[0x81, 0x3E, buf2_lo, buf2_hi, b'3', b'4']);
+    check(&mut p, &mut fails, 0x74, 6);
+
+    // GetWindowText(SI, DS:BUFFER, 14h).
+    p.code
+        .emit(&[0xC7, 0x06, buf_lo, buf_hi, 0x00, 0x00])
+        .emit(&[0xC7, 0x06, buf2_lo, buf2_hi, 0x00, 0x00])
+        .emit(&[0x56, 0x1E])
+        .push(BUFFER)
+        .push(0x14)
+        .call("USER", GET_WINDOW_TEXT)
+        .emit(&[0x3D, 0x02, 0x00]);
+    check(&mut p, &mut fails, 0x74, 7);
+    p.code.emit(&[0x81, 0x3E, buf_lo, buf_hi, b'1', b'2']);
+    check(&mut p, &mut fails, 0x74, 8);
+    p.code.emit(&[0x81, 0x3E, buf2_lo, buf2_hi, b'3', b'4']);
+    check(&mut p, &mut fails, 0x74, 9);
+
+    // GetDlgItemInt(SI, 5, DS:TRANSLATED, FALSE).
+    p.code
+        .emit(&[0x56])
+        .push(5)
+        .emit(&[0x1E])
+        .push(TRANSLATED as u16)
+        .push(0)
+        .call("USER", GET_DLG_ITEM_INT)
+        .emit(&[0x3D, 0xD2, 0x04]); // cmp ax,1234
+    check(&mut p, &mut fails, 0x74, 10);
+    p.code.emit(&[0x83, 0x3E, TRANSLATED, 0x00, 0x01]);
+    check(&mut p, &mut fails, 0x74, 11);
+
+    // SendMessage(SI, WM_GETTEXT, 3000, the block).
+    p.code
+        .emit(&[0x56])
+        .push(WM_GETTEXT)
+        .push(3000)
+        .emit(&[0xFF, 0x36, BIG + 2, 0x00, 0xFF, 0x36, BIG, 0x00])
+        .call("USER", SEND_MESSAGE)
+        .emit(&[0x3D, 0xB7, 0x0B]); // cmp ax,2999
+    check(&mut p, &mut fails, 0x74, 12);
+    p.code
+        .emit(&[0xC4, 0x1E, BIG, 0x00]) // les bx,[BIG]
+        .emit(&[0x26, 0x80, 0xBF, 0xB6, 0x0B, b'B']); // cmp byte es:[bx+2998]
+    check(&mut p, &mut fails, 0x74, 13);
+    p.code.emit(&[0x26, 0x80, 0xBF, 0xB7, 0x0B, 0x00]); // es:[bx+2999]
+    check(&mut p, &mut fails, 0x74, 14);
+
+    // SendMessage(SI, WM_SETTEXT, 0, the block's 2999 B's).
+    p.code
+        .emit(&[0x56])
+        .push(WM_SETTEXT)
+        .push(0)
+        .emit(&[0xFF, 0x36, BIG + 2, 0x00, 0xFF, 0x36, BIG, 0x00])
+        .call("USER", SEND_MESSAGE)
+        .emit(&[0x3D, 0xB7, 0x0B]);
+    check(&mut p, &mut fails, 0x74, 15);
+    p.code.emit(&[0xB3, 0x01]); // mov bl,1
+
+    // The end: PostMessage(SI, WM_CLOSE, 0, 0), and BL the exit code.
+    let end = p.code.here();
+    for at in fails {
+        p.code.patch(at, end.wrapping_sub(at + 2));
+    }
+    p.code
+        .emit(&[0x53, 0x56]) // push bx; push si
+        .push(WM_CLOSE)
+        .push(0)
+        .push(0)
+        .push(0)
+        .call("USER", POST_MESSAGE)
+        .emit(&[0x5B, 0x8A, 0xC3]) // pop bx; mov al,bl
+        .exit_al();
+    p.build()
+}
+
+/// SRV.EXE: the DIGITS windows of `digits_windows`, whose procedure
+/// answers long texts too (`digits_procedure`), and a message loop. It
+/// ends with 33h when its window is destroyed.
+fn intertask_server() -> Vec<u8> {
+    const MSG: u16 = 0x70;
+    let mut p = Program::default();
+    let proc_at = digits_windows(&mut p);
+    let get = p.code.here();
+    p.code
+        .emit(&[0x1E])
+        .push(MSG)
+        .push(0)
+        .push(0)
+        .push(0)
+        .call("USER", GET_MESSAGE)
+        .emit(&[0x0B, 0xC0, 0x74, 0x0C]) // or ax,ax; jz quit
+        .emit(&[0x1E])
+        .push(MSG)
+        .call("USER", DISPATCH_MESSAGE);
+    let back = get.wrapping_sub(p.code.here() + 3);
+    p.code.emit(&[0xE9]).emit(&back.to_le_bytes());
+    p.code.emit(&[0xB0, 0x33]).exit_al(); // quit
+    let proc = digits_procedure(&mut p, true);
+    p.code.patch(proc_at, proc);
+    p.build_named("SRV")
+}
+
+/// Whether a task ended with the exit code `code`, as the log says.
+fn ended_with(log: &str, code: u8) -> bool {
+    let line = format!(" ended with exit code {:X}", code);
+    log.lines()
+        .any(|l| l.starts_with("[W16] Task ") && l.ends_with(&line))
+}
+
+#[test]
+fn a_message_to_another_tasks_window_reaches_its_procedure_as_it_is() {
+    // Windows 3.1 switches to the task whose window it is and calls its
+    // procedure with the sender's wParam and lParam, and Windows 98's
+    // 16-bit USER queues the message for that task untranslated: the
+    // procedure writes into the sender's own buffer, all of it, whatever
+    // length it returns, and gets the sender's string whole.
+    let (_, log) = run_with("intertask", intertask_client(), |_, base| {
+        std::fs::write(base.join("SRV.EXE"), intertask_server()).unwrap();
+    });
+    assert!(ended_with(&log, 1), "{log}");
+    assert!(ended_with(&log, 0x33), "{log}");
 }
 
 #[test]

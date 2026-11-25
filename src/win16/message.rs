@@ -1260,7 +1260,7 @@ pub fn send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// code (USER32 keeps the 32-bit slot standing for it) and the window
 /// is the running thread's. None for a window whose procedure is 32-bit
 /// code (USER32's controls, DefDlgProc for a dialog), and for another
-/// task's window.
+/// task's window (`other_task`).
 pub(super) fn window_proc16(cpu: &Cpu, hwnd: u32) -> Option<Thunk> {
     let w = cpu.bus.win32.user.window(hwnd)?;
     let me = crate::win32::user32::current_tid(cpu);
@@ -1268,6 +1268,39 @@ pub(super) fn window_proc16(cpu: &Cpu, hwnd: u32) -> Option<Thunk> {
         return None;
     }
     thunk::thunk32_of(cpu, w.proc).filter(|t| t.kind == thunk::KIND_WNDPROC)
+}
+
+/// Whether `hwnd` is a window of another Win16 task than the running
+/// one, which a message 16-bit code sends goes to as it is (`send16`).
+pub(super) fn other_task(cpu: &Cpu, hwnd: u32) -> bool {
+    let Some(w) = cpu.bus.win32.user.window(hwnd) else {
+        return false;
+    };
+    let me = crate::win32::user32::current_tid(cpu);
+    hwnd != crate::win32::user32::DESKTOP && w.tid != me && super::is_task(&cpu.bus.win32, w.tid)
+}
+
+/// USER's ordinal of SendMessage.
+const SEND_MESSAGE: u16 = 111;
+
+/// The 16:16 address of USER's SendMessage, 0 without USER.
+pub(super) fn send_message_entry(cpu: &Cpu) -> u32 {
+    let win16 = &cpu.bus.win32.win16;
+    let Some(user) = win16.modules.iter().find(|m| m.name == "USER") else {
+        return 0;
+    };
+    super::module::entry_point(cpu, user.handle, SEND_MESSAGE)
+}
+
+/// The 32-bit slot of USER's SendMessage (`thunk::proc32`), through
+/// which a task's thread sends a message another task sent it in
+/// Win16's form (USER32's `handle_sent`): (hwnd, msg, wParam, lParam),
+/// stdcall, EAX the window procedure's DX:AX. 0 when there is no room
+/// for the slot.
+pub fn send_message_slot(cpu: &mut Cpu) -> u32 {
+    let target = send_message_entry(cpu);
+    // Four arguments, the fourth (lParam) a long.
+    thunk::proc32(cpu, target, thunk::KIND_PLAIN, 4 | 1 << 3 << 8)
 }
 
 /// Send a message of 16-bit code: SendMessage, SendDlgItemMessage, and
@@ -1290,15 +1323,34 @@ pub(super) fn window_proc16(cpu: &Cpu, hwnd: u32) -> Option<Thunk> {
 /// string is cut at the copy's size, and the procedure sees another
 /// pointer than the one the caller passed.
 ///
+/// To a window of another Win16 task (`other_task`), Windows 3.1
+/// switches to that task and calls the procedure there, with the same
+/// wParam and lParam: every task has the one address space. Windows
+/// 98's 16-bit USER queues the message for the other task as it is too,
+/// and translates it only for a 32-bit thread. So USER32's
+/// `send_message16` queues it for the task's thread untranslated, and
+/// that thread sends it with this function, as a message of its own
+/// (`send_message_slot`), while this one waits for the reply.
+///
 /// A window whose procedure is 32-bit code gets the message through
-/// SendMessageA, translated, as before; so does another task's window,
-/// which SendMessageA queues for its thread. A WH_CALLWNDPROC hook runs
-/// before the procedure and a WH_CALLWNDPROCRET hook after it, as
-/// SendMessageA runs them, with the message translated for them; the
-/// procedure gets the caller's message (`post_send16_hooks`,
-/// `then_send16`).
+/// SendMessageA, translated. A WH_CALLWNDPROC hook runs before the
+/// procedure and a WH_CALLWNDPROCRET hook after it, as SendMessageA runs
+/// them, with the message translated for them; the procedure gets the
+/// caller's message (`post_send16_hooks`, `then_send16`).
 pub fn send16(cpu: &mut Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32) {
     let ctx = Context::of(cpu);
+    if other_task(cpu, hwnd) && send_message_slot(cpu) != 0 {
+        let target = user32(cpu, "SendMessage16");
+        thunk::enter32(
+            cpu,
+            ctx,
+            target,
+            &[hwnd, msg, wp, lp],
+            thunk::POST_MESSAGE,
+            Vec::new(),
+        );
+        return;
+    }
     let Some(proc) = window_proc16(cpu, hwnd) else {
         let target = user32(cpu, "SendMessageA");
         send32_from(cpu, ctx, target, hwnd, &[], msg, wp, lp);

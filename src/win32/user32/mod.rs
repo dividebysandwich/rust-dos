@@ -1345,6 +1345,7 @@ static APIS: &[Api] = &[
     ),
     stdcall("CallMsgFilter", 19, 2, hook::call_msg_filter),
     stdcall("CallHooks", 0, 4, hook::call_hooks),
+    stdcall("SendMessage16", 0, 4, message::send_message16),
     stdcall("DefSysCommand", 0, 3, defwnd::def_sys_command),
     stdcall("ActivateOtherWindow", 0, 1, input::activate_other_window),
     stdcall("IsHungAppWindow", 653, 1, nothing),
