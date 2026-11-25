@@ -395,7 +395,7 @@ fn encode(rgba: [u8; 4], base: Base) -> u16 {
 /// The W32 version whose saved groups first have the reserved names.
 /// An older state's groups have a texture for each name glGenTextures
 /// gave, as glGenTextures made them then, and none reserved.
-pub const RESERVED_SAVED: u16 = 94;
+pub const RESERVED_SAVED: u16 = 96;
 
 /// A texture named `name` as a new one is: no image, and OpenGL's
 /// filters and wrap modes.
