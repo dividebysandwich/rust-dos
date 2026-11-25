@@ -735,12 +735,14 @@ pub(super) fn lock(cpu: &mut Cpu, lin: u32, len: u32, on: bool) -> bool {
             vm.unlock(&pages);
             return true;
         }
-        // No more than leaves `UNLOCKED` pages to page through.
+        // No more than leaves `UNLOCKED` pages to page through. A lock
+        // that adds no page (memory outside the blocks, or pages locked
+        // already) takes none, and always succeeds.
         let new = pages
             .iter()
             .filter(|page| !vm.locks.contains_key(page))
             .count() as u32;
-        if new + UNLOCKED > vm.physical_pages(cpu) {
+        if new > 0 && new + UNLOCKED > vm.physical_pages(cpu) {
             return false;
         }
         // Locked before they come in, so that bringing in one doesn't
@@ -964,6 +966,19 @@ mod tests {
             );
             assert_eq!(read_32(&mut cpu, page), page);
         }
+    }
+
+    /// A lock of memory below the blocks' space adds no locked page, so it
+    /// succeeds however few physical pages are left; one of a block's page
+    /// then fails.
+    #[test]
+    fn a_lock_outside_the_blocks_needs_no_physical_page() {
+        let mut cpu = machine(0, 8 << 20);
+        let a = allocate(&mut cpu, PAGE, None).unwrap();
+        cpu.bus.dpmi.vm.as_mut().unwrap().free.clear();
+        assert!(vm(&cpu).physical_pages(&cpu) < UNLOCKED);
+        assert!(lock(&mut cpu, 0x1_0000, PAGE, true));
+        assert!(!lock(&mut cpu, a, PAGE, true));
     }
 
     /// Without virtual memory any physical range maps to itself, up to the
