@@ -1352,6 +1352,9 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     // task there ends (flat thunks).
     let pid = cpu.bus.win32.processes[index].id;
     crate::win16::flat::process_ending(cpu, pid);
+    if pid == cpu.bus.win32.win16.pid {
+        crate::win16::dos::free_pdbs(cpu);
+    }
     let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
     cpu.programs.processes_ended += 1;
@@ -1626,6 +1629,10 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
     let win32 = &mut cpu.bus.win32;
     if win32.active() && win32.psp == psp {
         let a20 = win32.a20;
+        // The files of the Win16 tasks still running close, which DOS's
+        // end of the process doesn't reach: they are in the tasks' PDBs.
+        crate::win16::dos::free_pdbs(cpu);
+        let win32 = &mut cpu.bus.win32;
         for process in std::mem::take(&mut win32.processes) {
             process.memory.release(&mut cpu.bus);
             cpu.programs.processes_ended += 1;

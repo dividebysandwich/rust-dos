@@ -210,6 +210,9 @@ pub fn returned(cpu: &mut Cpu) {
         .expect("real-mode code called");
     let rm = Context::of(cpu);
     let mut ctx = frame.ctx;
+    if is_task_call(frame.kind) {
+        end_task_calls(cpu);
+    }
     match frame.kind {
         Kind::Irq if cpu.bus.win32.real_mode.is_empty() => {
             super::thread::after_interrupt(cpu, ctx);
@@ -266,6 +269,26 @@ pub fn abandon(cpu: &mut Cpu) {
             "[W32] A task ended in a real-mode callback: {} real-mode calls dropped",
             frames.len()
         ));
+    }
+    if frames.iter().any(|f| is_task_call(f.kind)) {
+        end_task_calls(cpu);
+    }
+}
+
+/// Whether a frame waits for real-mode code a Win16 task called (an INT
+/// that went down to the vector table, a DPMI call), which runs with the
+/// task's current PDB as DOS's current process (win16/dos.rs).
+fn is_task_call(kind: Kind) -> bool {
+    matches!(kind, Kind::Int | Kind::Call)
+}
+
+/// A task's real-mode call returned or went: when no other is waiting,
+/// DOS's current process is the Windows process's PSP again, as it is
+/// while protected-mode code runs.
+fn end_task_calls(cpu: &mut Cpu) {
+    let win32 = &cpu.bus.win32;
+    if !win32.real_mode.iter().any(|f| is_task_call(f.kind)) {
+        cpu.current_psp = win32.psp;
     }
 }
 

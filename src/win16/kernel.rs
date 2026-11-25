@@ -859,7 +859,7 @@ fn get_current_task(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 fn get_current_pdb(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(super::current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].psp) as u32)
+    Some(dos::current_pdb(cpu).unwrap_or(0) as u32)
 }
 
 fn get_num_tasks(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {

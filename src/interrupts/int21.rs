@@ -85,11 +85,16 @@ fn file_of(cpu: &mut Cpu, handle: u16) -> Option<u16> {
 }
 
 /// Who the running code is to the locks of AH=5Ch: the running process,
-/// or in the built-in Windows the Win16 task, whose DOS calls all run in
-/// the process Windows runs in (disk/locks.rs).
+/// or in the built-in Windows the Win16 task's current PDB, its own or
+/// one it switched to with AH=50h, as SHARE sees the PSP KERNEL made
+/// current (disk/locks.rs).
 pub(crate) fn lock_owner(cpu: &Cpu) -> u32 {
     match crate::win16::current_task(cpu) {
-        Some(task) => crate::disk::TASK_OWNER | cpu.bus.win32.win16.tasks[task].psp as u32,
+        Some(task) => {
+            let own = cpu.bus.win32.win16.tasks[task].psp;
+            let pdb = crate::win16::dos::current_pdb(cpu).unwrap_or(own);
+            crate::disk::TASK_OWNER | pdb as u32
+        }
         None => cpu.current_psp as u32,
     }
 }
