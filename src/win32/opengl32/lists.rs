@@ -1358,7 +1358,7 @@ pub fn share(cpu: &mut Cpu, from: usize, to: usize) -> bool {
 /// The current context's place, for a function that isn't allowed
 /// between glBegin and glEnd: None there, with GL_INVALID_OPERATION,
 /// and without a context.
-fn outside_begin(cpu: &mut Cpu) -> Option<usize> {
+pub(super) fn outside_begin(cpu: &mut Cpu) -> Option<usize> {
     let (index, _) = current(cpu)?;
     if ctx(cpu)?.begin.is_some() {
         error(cpu, GL_INVALID_OPERATION);

@@ -4341,3 +4341,146 @@ fn generated_texture_names_are_reserved_until_they_are_bound() {
         "glAreTexturesResident leaves the residences"
     );
 }
+
+/// None of the texture object functions runs between glBegin and glEnd
+/// (OpenGL 1.1, 2.6.3): each is GL_INVALID_OPERATION there, ahead of
+/// its other errors, and does nothing else. glGenTextures gives and
+/// reserves no name, glDeleteTextures leaves the texture and its
+/// binding, glBindTexture leaves the binding, and glIsTexture and
+/// glAreTexturesResident answer GL_FALSE. glBindTexture and
+/// glPrioritizeTextures are compiled into a list without the error,
+/// and the list has it when it runs between glBegin and glEnd; outside
+/// them it binds.
+#[test]
+fn texture_object_functions_are_refused_between_begin_and_end() {
+    const OWN: u32 = KEPT;
+    const NAMES: u32 = KEPT + 4;
+    const AFTER: u32 = KEPT + 8;
+    const OTHER: u32 = KEPT + 12;
+    const RESIDENCES: u32 = KEPT + 16;
+    const PRIORITIES: u32 = KEPT + 20;
+    const BINDING: u32 = KEPT + 24;
+    const GL_TEXTURE_BINDING_2D: u32 = 0x8069;
+    let mut d = lists_data();
+    put32(&mut d, OWN, 5);
+    put32(&mut d, NAMES, 0xDEAD);
+    put32(&mut d, OTHER, 7);
+    put32(&mut d, RESIDENCES, 0xFF);
+    put(&mut d, PRIORITIES, &0.5f32.to_le_bytes());
+    let mut at_result = Vec::new();
+    let mut bindings = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let mut note = |c: &Calls, what: &'static str| at_result.push((what, c.next - 1));
+        let begin = |a: &mut CodeAssembler| gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)]);
+        let mut binding = |a: &mut CodeAssembler| {
+            let at = Arg::At(BINDING + 4 * bindings);
+            bindings += 1;
+            gl(a, l, GET_INTEGERV, &[Arg::I(GL_TEXTURE_BINDING_2D), at])
+        };
+        let own = [Arg::I(1), Arg::At(OWN)];
+        let other = [Arg::I(GL_TEXTURE_2D), Arg::Val(OTHER)];
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(OWN)])?;
+        // A list that binds 7 and sets its priority.
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        gl(a, l, BIND_TEXTURE, &other)?;
+        let priority = [Arg::I(1), Arg::At(OTHER), Arg::At(PRIORITIES)];
+        gl(a, l, PRIORITIZE_TEXTURES, &priority)?;
+        gl(a, l, END_LIST, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "compiling the list");
+        begin(a)?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(NAMES)])?;
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "glGenTextures");
+        begin(a)?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(u32::MAX), Arg::At(NAMES)])?;
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "glGenTextures of a negative count");
+        begin(a)?;
+        gl(a, l, DELETE_TEXTURES, &own)?;
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "glDeleteTextures");
+        begin(a)?;
+        gl(a, l, BIND_TEXTURE, &other)?;
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "glBindTexture");
+        begin(a)?;
+        gl(a, l, BIND_TEXTURE, &[Arg::I(0x1234), Arg::Val(OTHER)])?;
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "glBindTexture of a target there isn't");
+        binding(a)?;
+        begin(a)?;
+        c.api(a, l, IS_TEXTURE, &[Arg::Val(OWN)])?;
+        note(&c, "glIsTexture");
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "its error");
+        begin(a)?;
+        let resident = [Arg::I(1), Arg::At(OWN), Arg::At(RESIDENCES)];
+        c.api(a, l, ARE_TEXTURES_RESIDENT, &resident)?;
+        note(&c, "glAreTexturesResident");
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "its error");
+        begin(a)?;
+        gl(a, l, PRIORITIZE_TEXTURES, &priority)?;
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "glPrioritizeTextures");
+        begin(a)?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "the list between glBegin and glEnd");
+        binding(a)?;
+        // Outside them the same calls do their work.
+        c.api(a, l, IS_TEXTURE, &[Arg::Val(OWN)])?;
+        note(&c, "glIsTexture after glEnd");
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(AFTER)])?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        binding(a)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "no error at the end");
+        finish(a, l)
+    });
+    let mut cpu = machine("texture_begin_end", true, exe);
+    run_until_done(&mut cpu, data);
+    let results: Vec<(&str, u32)> = at_result
+        .iter()
+        .map(|&(what, i)| (what, peek(&cpu, data + RESULTS + 4 * i)))
+        .collect();
+    let refused = GL_INVALID_OPERATION;
+    assert_eq!(
+        results,
+        [
+            ("compiling the list", 0),
+            ("glGenTextures", refused),
+            ("glGenTextures of a negative count", refused),
+            ("glDeleteTextures", refused),
+            ("glBindTexture", refused),
+            ("glBindTexture of a target there isn't", refused),
+            ("glIsTexture", 0),
+            ("its error", refused),
+            ("glAreTexturesResident", 0),
+            ("its error", refused),
+            ("glPrioritizeTextures", refused),
+            ("the list between glBegin and glEnd", refused),
+            ("glIsTexture after glEnd", 1),
+            ("no error at the end", 0),
+        ]
+    );
+    let word = |at: u32| peek(&cpu, data + at);
+    assert_eq!(word(NAMES), 0xDEAD, "glGenTextures wrote no name");
+    // Name 1 wasn't reserved in glBegin, so it is the lowest free one.
+    assert_eq!(word(AFTER), 1, "the name glGenTextures gives after");
+    let bound: Vec<u32> = (0..3).map(|i| word(BINDING + 4 * i)).collect();
+    assert_eq!(bound, [5, 5, 7], "the binding");
+    assert_eq!(word(RESIDENCES), 0xFF, "glAreTexturesResident wrote nothing");
+}
