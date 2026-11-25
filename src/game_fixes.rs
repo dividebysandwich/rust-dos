@@ -562,6 +562,91 @@ const TD4_INTRO_CAMERA: CodePatch = CodePatch {
     data: &[],
 };
 
+/// What the player sees: the CD edition's intro (the title, the story
+/// screens with the crew's portraits) was drawn twice, in 320x200 and in
+/// 640x400 Super VGA. Without the fix it always plays the 320x200
+/// version, blocky and with blurred small print, though the video card
+/// has the 640x400 mode; with it, the sharp 640x400 one, without the
+/// VESA driver the CD has for cards whose BIOS lacks VESA. The game
+/// after the intro is 320x200 either way.
+///
+/// The VESA check of Whale's Voyage's CD intro (INTRO.EXE in \WV, which
+/// WV.EXE starts). Addresses here are offsets in its code segment, which
+/// starts 10h bytes into the file's load module, at 210h in the file; the
+/// pieces below are at offsets in the file. The routine at 1CCBh asks
+/// INT 10h AX=4F00h for the VbeInfoBlock into 1BA8h, and if that says
+/// "VESA", AX=4F01h for the ModeInfoBlock of mode 100h (640x400 in 256
+/// colours) into 1CA8h. Only 35 bytes are free there: the routine itself
+/// starts at 1CCBh, and the 4F01h call returns to 1D04h. A VBE 1.1 or
+/// later BIOS writes all 256 bytes of the block, zeros after the fields
+/// it defines (`interrupts::vbe`'s `mode_info`): the block's fields from
+/// 23h on land on the routine's first bytes, and zeros on the rest of
+/// the intro's code up to 1DA7h, 1D04h among it. The intro then runs
+/// the zeros, reaches code that finds its SVGA flag (1BA3h) unset and
+/// plays in 320x200. A real PC with VBE in its video BIOS does the same.
+///
+/// The patch gives 4F01h the 4F00h buffer at 1BA8h instead, 256 bytes
+/// up to 1CA7h. The intro is done with the VbeInfoBlock by then: it
+/// reads only its signature, before the 4F01h call, and nothing else of
+/// its code reads or writes 1BA8h-1CA7h, which 4F00h fills with 256
+/// bytes anyway (the file has zeros there, not the "VBE2" that would
+/// ask for 512). Of the ModeInfoBlock it reads only WinGranularity (at
+/// 4), which the patch reads from 1BACh instead of 1CACh. Its own
+/// variables at 1CC5h and 1CC9h, inside the old buffer, are left alone.
+/// For the 1993 CD release: INTRO.EXE of 10446 bytes, SHA-256
+/// 95a687dc9105903a96d430524963467e339efcefc20ccf78077ce8da18795d5c.
+const WHALES_VOYAGE_VESA_INTRO: CodePatch = CodePatch {
+    checks: &[
+        // mov byte cs:[1BA3h],0 / 4F00h into ES:1BA8h / the "VESA"
+        // checks / mov ax,4F01h / mov bx,cs / mov es,bx.
+        Bytes {
+            at: 0x1EDB,
+            bytes: &[
+                0x2E, 0xC6, 0x06, 0xA3, 0x1B, 0x00, 0xB8, 0x00, 0x4F, 0x8C, 0xCB, 0x8E, 0xC3, 0xBF,
+                0xA8, 0x1B, 0xCD, 0x10, 0x2E, 0x81, 0x3E, 0xA8, 0x1B, 0x56, 0x45, 0x75, 0x56, 0x90,
+                0x90, 0x2E, 0x81, 0x3E, 0xAA, 0x1B, 0x53, 0x41, 0x75, 0x4B, 0x90, 0x90, 0xB8, 0x01,
+                0x4F, 0x8C, 0xCB, 0x8E, 0xC3,
+            ],
+        },
+        // mov cx,cs:[1BA4h] / int 10h / xor eax,eax.
+        Bytes {
+            at: 0x1F0D,
+            bytes: &[0x2E, 0x8B, 0x0E, 0xA4, 0x1B, 0xCD, 0x10, 0x66, 0x33, 0xC0],
+        },
+        // The rest: the granularity in bytes to 1CC5h, the mode sets
+        // (4F02h with 1BA4h, then 1BA6h), the flag, ret.
+        Bytes {
+            at: 0x1F1B,
+            bytes: &[
+                0x66, 0xC1, 0xE0, 0x0A, 0x66, 0x2E, 0xA3, 0xC5, 0x1C, 0xB8, 0x02, 0x4F, 0x2E, 0x8B,
+                0x1E, 0xA4, 0x1B, 0xCD, 0x10, 0x80, 0xFC, 0x00, 0x74, 0x13, 0x90, 0x90, 0xB8, 0x02,
+                0x4F, 0x2E, 0x8B, 0x1E, 0xA6, 0x1B, 0xCD, 0x10, 0x80, 0xFC, 0x00, 0x75, 0x08, 0x90,
+                0x90, 0x2E, 0xC6, 0x06, 0xA3, 0x1B, 0xFF, 0xC3,
+            ],
+        },
+    ],
+    irq_handler: None,
+    patches: &[
+        // mov di,1CA8h becomes mov di,1BA8h.
+        (
+            Bytes {
+                at: 0x1F0A,
+                bytes: &[0xBF, 0xA8, 0x1C],
+            },
+            &[0xBF, 0xA8, 0x1B],
+        ),
+        // mov ax,cs:[1CACh] becomes mov ax,cs:[1BACh].
+        (
+            Bytes {
+                at: 0x1F17,
+                bytes: &[0x2E, 0xA1, 0xAC, 0x1C],
+            },
+            &[0x2E, 0xA1, 0xAC, 0x1B],
+        ),
+    ],
+    data: &[],
+};
+
 /// The fixes rust-dos knows.
 pub const FIXES: &[Fix] = &[
     Fix {
@@ -669,6 +754,15 @@ pub const FIXES: &[Fix] = &[
             program: "JDEMO.EXE",
             size: 83_456,
             shims: WIN32S,
+        },
+    },
+    Fix {
+        name: "whales-voyage-vesa-intro",
+        game: "Whale's Voyage",
+        reason: "the CD intro plays in 320x200 instead of its 640x400 Super VGA version",
+        kind: Kind::AtLoad {
+            programs: &[("INTRO.EXE", &WHALES_VOYAGE_VESA_INTRO)],
+            beside: Some("WVD.EXE"),
         },
     },
 ];
