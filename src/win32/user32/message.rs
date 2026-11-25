@@ -809,10 +809,8 @@ fn reply_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             1 => {
                 // A message sent to this thread was handled: reply.
-                finish_sent(cpu, value);
-                let q = user(cpu).queue_mut(me);
-                if q.waiting.last() == Some(&(0, 0)) {
-                    q.waiting.pop();
+                if reply_sent(cpu, value) {
+                    return sender_goes_on(cpu, t);
                 }
                 t.step = 0;
             }
@@ -860,18 +858,51 @@ fn handle_sent(cpu: &mut Cpu, step: u16) -> Option<Next> {
 }
 
 /// The message `handle_sent` started handling returned `result`: the
-/// sender gets the reply.
-fn finish_sent(cpu: &mut Cpu, result: u32) {
+/// sender gets the reply, and the thread's wait that the handling put on
+/// its list goes. True when this task must give the sender its turn at
+/// once (`finish_sent`).
+fn reply_sent(cpu: &mut Cpu, result: u32) -> bool {
+    let switch = finish_sent(cpu, result);
+    let me = current_tid(cpu);
+    let q = user(cpu).queue_mut(me);
+    if q.waiting.last() == Some(&(0, 0)) {
+        q.waiting.pop();
+    }
+    switch
+}
+
+/// The running task replied to a message another task sent it, and gives
+/// up its turn: the sender goes on first, and the function the reply was
+/// made in (GetMessage, PeekMessage, SendMessage) runs again from its
+/// start when this task's turn comes back.
+fn sender_goes_on(cpu: &mut Cpu, t: &Task) -> Next {
+    t.retry(cpu);
+    crate::win16::task::give_up_turn(cpu);
+    Next::Stop
+}
+
+/// The message `handle_sent` started handling returned `result`: the
+/// sender gets the reply. True when both are Win16 tasks: Windows 95's
+/// USER switches to the sender as it replies, and the sender runs until
+/// it yields or waits before the receiver's GetMessage or PeekMessage
+/// returns. Memphis Math's shell replies, in the GetMessage that gets its
+/// WM_QUIT, to a message its log-in task sent while it closed its files;
+/// it then tells every task still there to close them again, and the
+/// log-in task, which hadn't ended, closed them twice.
+fn finish_sent(cpu: &mut Cpu, result: u32) -> bool {
     let me = current_tid(cpu);
     let state = user(cpu);
     // A callback ran when it is None.
     let Some(Some(sent)) = state.queue_mut(me).in_send.pop() else {
-        return;
+        return false;
     };
+    let mut switch = false;
     match sent.kind {
         0 | SENT_WIN16 => {
             state.queue_mut(sent.from).replies.push((sent.id, result));
-            crate::win16::task::hand_turn(&mut cpu.bus.win32, me, sent.from);
+            let win32 = &mut cpu.bus.win32;
+            crate::win16::task::hand_turn(win32, me, sent.from);
+            switch = me != sent.from && crate::win16::task::both_tasks(win32, me, sent.from);
         }
         2 => {
             // As in Wine, the result comes to the sender as a sent
@@ -890,6 +921,7 @@ fn finish_sent(cpu: &mut Cpu, result: u32) {
         _ => {}
     }
     thread::wake(cpu);
+    switch
 }
 
 /// SendMessageTimeoutA(hwnd, message, wParam, lParam, flags, timeout,
@@ -1435,10 +1467,8 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return Next::Stop;
             }
             1 => {
-                finish_sent(cpu, value);
-                let q = user(cpu).queue_mut(tid);
-                if q.waiting.last() == Some(&(0, 0)) {
-                    q.waiting.pop();
+                if reply_sent(cpu, value) {
+                    return sender_goes_on(cpu, t);
                 }
                 t.step = 0;
             }
@@ -1772,7 +1802,10 @@ pub fn in_send_message(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// ReplyMessage(result): the sender gets `result` now, and the window
-/// procedure's own result later goes nowhere.
+/// procedure's own result later goes nowhere. Between two Win16 tasks the
+/// sender goes on first, as after a reply in GetMessage, PeekMessage or
+/// SendMessage's wait (`sender_goes_on`): Windows 95 runs it until it
+/// yields or waits before ReplyMessage returns.
 pub fn reply_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let tid = current_tid(cpu);
     let state = user(cpu);
@@ -1786,9 +1819,17 @@ pub fn reply_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     sent.kind = 1;
     let (from, id) = (sent.from, sent.id);
     state.queue_mut(from).replies.push((id, args[0]));
-    crate::win16::task::hand_turn(&mut cpu.bus.win32, tid, from);
+    let win32 = &mut cpu.bus.win32;
+    crate::win16::task::hand_turn(win32, tid, from);
+    let switch = tid != from && crate::win16::task::both_tasks(win32, tid, from);
     thread::wake(cpu);
-    Some(TRUE)
+    if !switch {
+        return Some(TRUE);
+    }
+    // ReplyMessage returns TRUE when this task's turn comes back.
+    cpu.set_eax(TRUE);
+    crate::win16::task::give_up_turn(cpu);
+    None
 }
 
 /// CallWindowProcA(proc, hwnd, message, wParam, lParam).
@@ -1978,12 +2019,11 @@ pub fn idle_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 _ => return idle_done(cpu, t, 0),
             },
             2 => {
-                finish_sent(cpu, value);
-                let tid = current_tid(cpu);
-                let q = user(cpu).queue_mut(tid);
-                if q.waiting.last() == Some(&(0, 0)) {
-                    q.waiting.pop();
-                }
+                // No task calls WaitForInputIdle (16-bit USER has none),
+                // so no reply here goes from one task to another. Running
+                // it again from its start would also open a second handle
+                // of the idle event and start the time-out over.
+                reply_sent(cpu, value);
                 t.step = 0;
             }
             _ => return idle_done(cpu, t, 0),
