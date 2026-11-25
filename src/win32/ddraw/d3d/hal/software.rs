@@ -542,9 +542,10 @@ struct Codec {
     encode: [[u32; 256]; 4],
     /// Red, green, blue and alpha: the mask, and the 8 bits of each of
     /// its values, or None for a channel `decode` gives its default.
-    decode: [(u32, Option<Vec<u8>>); 4],
-    /// A channel is wider than 12 bits: `decode` works pixels out.
-    wide: bool,
+    /// None for a batch that reads no pixels (no blend), and for a
+    /// format with a channel wider than 12 bits: `decode` works those
+    /// pixels out.
+    decode: Option<[(u32, Option<Vec<u8>>); 4]>,
     /// The bits of a pixel the format's channels have, which a pixel
     /// drawn takes from `encode`, and the others, which it keeps.
     mask: u32,
@@ -552,7 +553,9 @@ struct Codec {
 }
 
 impl Codec {
-    fn new(f: &Format) -> Codec {
+    /// The tables of the format `f`, those for reading pixels only if
+    /// the batch `reads` them.
+    fn new(f: &Format, reads: bool) -> Codec {
         let masks = [f.r, f.g, f.b, f.a];
         // As `encode`'s channels.
         let encode = masks.map(|mask| {
@@ -566,19 +569,20 @@ impl Codec {
             t
         });
         // As `decode`'s: alpha only with DDPF_ALPHAPIXELS.
-        let mut wide = false;
-        let decode = std::array::from_fn(|i| {
+        let channel = |i: usize| {
             let mask = masks[i];
-            if mask == 0 || i == 3 && f.flags & DDPF_ALPHAPIXELS == 0 {
-                return (mask, None);
-            }
-            let max = mask >> mask.trailing_zeros();
-            if max > 0xFFF {
-                wide = true;
-                return (mask, None);
-            }
-            let values = (0..=max).map(|v| (v as u64 * 255 / max as u64) as u8);
-            (mask, Some(values.collect()))
+            let max = mask.checked_shr(mask.trailing_zeros()).unwrap_or(0);
+            (max, mask == 0 || i == 3 && f.flags & DDPF_ALPHAPIXELS == 0)
+        };
+        let narrow = (0..4).all(|i| matches!(channel(i), (max, none) if none || max <= 0xFFF));
+        let decode = (reads && narrow).then(|| {
+            std::array::from_fn(|i| match channel(i) {
+                (_, true) => (masks[i], None),
+                (max, false) => {
+                    let values = (0..=max).map(|v| (v as u64 * 255 / max as u64) as u8);
+                    (masks[i], Some(values.collect()))
+                }
+            })
         });
         let bits = (1u64 << f.bits.min(32)) - 1;
         let mask = (f.r | f.g | f.b | f.a) as u64 & bits;
@@ -586,7 +590,6 @@ impl Codec {
             format: *f,
             encode,
             decode,
-            wide,
             mask: mask as u32,
             keep: (!mask & bits) as u32,
         }
@@ -601,10 +604,10 @@ impl Codec {
 
     /// `decode(raw, format)`.
     fn decode(&self, raw: u32) -> u32 {
-        if self.wide {
+        let Some(tables) = &self.decode else {
             return decode(raw, &self.format);
-        }
-        let channel = |i: usize, default: u32| match &self.decode[i] {
+        };
+        let channel = |i: usize, default: u32| match &tables[i] {
             (mask, Some(t)) => t[((raw & mask) >> mask.trailing_zeros()) as usize] as u32,
             (_, None) => default,
         };
@@ -964,7 +967,7 @@ fn draw(cpu: &mut Cpu, card: &Card, prims: &[Prim]) {
         0 => None,
         id => texture(cpu, id, card.keyed),
     };
-    let codec = Codec::new(&color.surface.format);
+    let codec = Codec::new(&color.surface.format, card.blend.is_some());
     let plan = Plan::new(card, depth.as_ref().map(|d| d.1), texture.is_some());
     let mut t = Target {
         card,
@@ -2094,7 +2097,7 @@ mod tests {
                     depth,
                     texture: texture.clone(),
                     clip,
-                    codec: Codec::new(&format),
+                    codec: Codec::new(&format, card.blend.is_some()),
                     plan,
                 };
                 for v in &triangles {
@@ -2166,7 +2169,7 @@ mod tests {
         ];
         let mut r = Random(7);
         for f in &formats {
-            let codec = Codec::new(f);
+            let codec = Codec::new(f, true);
             for _ in 0..20000 {
                 let v = r.next();
                 assert_eq!(codec.encode(v), encode(v, f), "{f:?} {v:08X}");
