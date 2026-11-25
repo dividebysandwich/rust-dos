@@ -132,6 +132,51 @@ fn text_font(cpu: &mut Cpu, height: u16) {
     cpu.bus.vga.mark_dirty_full();
 }
 
+/// INT 10h AH=11h AL=00h-04h, and the glyphs of AL=10h-14h: load glyphs
+/// into character map BL in plane 2, as an EGA's or VGA's BIOS does, which
+/// the text modes draw with. AL=00h: CX of a program's own from ES:BP, BH
+/// bytes each, from character DX on; AL=01h the ROM's 8x14 font, 02h its
+/// 8x8, 04h its 8x16. AL=03h selects the maps (Character Map Select,
+/// SR03) from BL. Under the V86 monitor of a booted Windows the planes are
+/// Windows' (see `mode_font`), and the text stays in the ROM's fonts.
+fn load_glyphs(cpu: &mut Cpu, function: u8) {
+    if !cpu.bus.vga.adapter.ega_bios() || cpu.guest_v86() {
+        return;
+    }
+    let bl = cpu.get_reg8(Register::BL);
+    let map = bl & if cpu.bus.vga.adapter.vga_bios() { 7 } else { 3 };
+    match function {
+        0x00 => {
+            let height = cpu.get_reg8(Register::BH) as usize;
+            let count = (cpu.cx() as usize).min(256);
+            let base = cpu.seg_cache(crate::cpu::Seg::ES).base;
+            let bp = cpu.bp() as u32;
+            let glyphs: Vec<u8> = (0..(count * height) as u32)
+                .map(|i| {
+                    cpu.bus
+                        .guest_read_8(base.wrapping_add(bp.wrapping_add(i) & 0xFFFF))
+                })
+                .collect();
+            cpu.bus
+                .vga
+                .load_font(map, cpu.dx() as usize, height, &glyphs);
+        }
+        0x01 | 0x02 | 0x04 => {
+            let (font, height) = video_bios::rom_font(match function {
+                0x01 => 14,
+                0x02 => 8,
+                _ => 16,
+            });
+            cpu.bus.vga.load_font(map, 0, height, font);
+        }
+        0x03 => {
+            cpu.bus.vga.sequencer_regs[0x03] = bl & 0x3F;
+            cpu.bus.vga.mark_dirty_full();
+        }
+        _ => {}
+    }
+}
+
 /// Take a graphics font (INT 43h) of `height`, with the rows BL says: 0
 /// DL of them, 1 14, 2 25, 3 43.
 fn graphics_font(cpu: &mut Cpu, pointer: u32, height: u16) {
@@ -231,6 +276,20 @@ pub fn set_tseng_mode(cpu: &mut Cpu, mode: &et4000::TsengMode, keep: bool, hicol
         cpu.bus.guest_write_16(0x044C, ((cols * rows * 2).next_multiple_of(256)) as u16);
         let cursor = video_bios::cursor_shape(Adapter::Et4000, mode.char_height as u16);
         cpu.bus.guest_write_16(0x0460, cursor);
+        mode_font(cpu);
+    }
+}
+
+/// The text mode's font into plane 2 at a mode set, as an EGA's or VGA's
+/// BIOS loads it (`video_bios::load_mode_font`). Under the V86 monitor of
+/// a booted Windows the planes are the ones Windows keeps for the
+/// machine, which the BIOS doesn't write here: that machine's text is
+/// drawn with the ROM's fonts.
+fn mode_font(cpu: &mut Cpu) {
+    if cpu.guest_v86() {
+        cpu.bus.vga.font_loaded = false;
+    } else {
+        video_bios::load_mode_font(&mut cpu.bus);
     }
 }
 
@@ -615,6 +674,7 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         let (font, _) = video_bios::graphics_font(mode);
         set_vector(cpu, 0x43, rom_pointer(font));
     }
+    mode_font(cpu);
     // A ToadForce counts the retraces of the mode's timing from here.
     cpu.bus.toadforce_retime();
 }
@@ -1275,11 +1335,9 @@ pub fn handle(cpu: &mut Cpu) {
             // CuteMouse treats it as a mode set: 80x50 gets 0-399.
             let before = (0x10..=0x1F).contains(&al).then(|| mouse_screen(cpu));
             match al {
-                // AL=10h/11h/12h/14h: load a font and take its height: as
-                // many rows as fit in the text mode's scanlines (on a VGA's
-                // 400: 25 of 16, 28 of 14, 50 of 8). The text renderer draws
-                // with the ROM font of that height; there is no font RAM
-                // for a program's own glyphs (AL=10h: BH bytes a glyph).
+                // AL=10h/11h/12h/14h: load a font (`load_glyphs`) and take
+                // its height: as many rows as fit in the text mode's
+                // scanlines (on a VGA's 400: 25 of 16, 28 of 14, 50 of 8).
                 0x10 | 0x11 | 0x12 | 0x14 => {
                     let height = match al {
                         0x10 => (cpu.get_reg8(Register::BH) as u16).clamp(1, 32),
@@ -1288,11 +1346,13 @@ pub fn handle(cpu: &mut Cpu) {
                         _ => 16,
                     };
                     if text_mode(cpu) {
+                        load_glyphs(cpu, al & 0x0F);
                         text_font(cpu, height);
                     }
                 }
                 // AL=00h-04h load glyphs into the character generator
                 // without changing the rows, and set its block specifier.
+                0x00..=0x04 if text_mode(cpu) => load_glyphs(cpu, al),
                 0x00..=0x04 => {}
                 // AL=20h: the second half of the 8x8 font for the CGA
                 // graphics modes (INT 1Fh) is at ES:BP.

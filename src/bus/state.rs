@@ -126,6 +126,7 @@ const CMS_VERSION: u16 = 2;
 const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 3;
 const ET4000_VERSION: u16 = 1;
+const FONT_VERSION: u16 = 1;
 const MACH64_VERSION: u16 = 1;
 const TOADFORCE_VERSION: u16 = crate::toadforce::STATE_VERSION;
 const SHARED_VERSION: u16 = 1;
@@ -387,6 +388,11 @@ impl Bus {
             }
             save_all!(w; s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         });
+        // That plane 2 holds the text modes' font, in a section only when
+        // it does, so states saved before it load with the ROM's fonts.
+        if vga.font_loaded {
+            w.section(b"FONT", FONT_VERSION, |_| {});
+        }
         // An S3 ViRGE's engines, only on one, so other states load as they
         // did.
         if vga.adapter.is_virge() {
@@ -822,6 +828,10 @@ impl Bus {
         }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+        vga.font_loaded = r.next_is(b"FONT");
+        if vga.font_loaded {
+            r.section(b"FONT", FONT_VERSION)?;
+        }
         *last_present = None;
         *virge = Default::default();
         if r.next_is(b"VIRG") {

@@ -132,6 +132,14 @@ pub struct VgaCard {
 
     /// A monochrome monitor on the adapter (see `VideoSetup`).
     pub mono_monitor: bool,
+
+    /// Whether plane 2 holds the font the text modes draw with, as on an
+    /// EGA or VGA: the BIOS loaded one there (a mode set, INT 10h AH=11h),
+    /// so the characters' glyphs are what the planes have, a program's own
+    /// included. Without, the text modes draw with the ROM's fonts: a state
+    /// saved before rust-dos kept the font there, or a mode set the BIOS
+    /// made under Windows, which keeps the planes itself.
+    pub font_loaded: bool,
 }
 
 /// The memory text and CGA modes show: 32 KB at B8000h (or B0000h for a
@@ -215,6 +223,7 @@ impl VgaCard {
             herc_mode: 0x29,
             herc_config: 0,
             mono_monitor: false,
+            font_loaded: false,
         };
         // The BIOS starts in 80x25 color text mode.
         vga.set_video_mode(super::VideoMode::Text80x25Color);
@@ -228,6 +237,60 @@ impl VgaCard {
         self.vram_graphics.len() / 4
     }
 
+    /// Where character map `map` (0-7) starts in plane 2: maps 0-3 at
+    /// 16 KB apart, and on a VGA maps 4-7 8 KB after each of them.
+    fn font_map_offset(&self, map: u8) -> usize {
+        let low = (map & 3) as usize * 0x4000;
+        if self.adapter.vga_bios() {
+            low + (map >> 2 & 1) as usize * 0x2000
+        } else {
+            low
+        }
+    }
+
+    /// Where in plane 2 the fonts of the characters with attribute bit 3
+    /// clear and set start, as Character Map Select (SR03) picks them:
+    /// map B in bits 0, 1 and 4, map A in bits 2, 3 and 5. The two are
+    /// the same font unless a program asks for 512 characters.
+    pub fn char_maps(&self) -> [usize; 2] {
+        let select = self.sequencer_regs[0x03];
+        let b = (select & 3) | (select >> 2 & 4);
+        let a = (select >> 2 & 3) | (select >> 3 & 4);
+        [self.font_map_offset(b), self.font_map_offset(a)]
+    }
+
+    /// Row `row` (0-31) of character `ch`'s glyph in the font at `map` in
+    /// plane 2 (see `char_maps`): 32 bytes a character.
+    #[inline]
+    pub fn font_row(&self, map: usize, ch: u8, row: usize) -> u8 {
+        let size = self.plane_size();
+        self.vram_graphics[2 * size + ((map + ch as usize * 32 + row) & (size - 1))]
+    }
+
+    /// Load `glyphs`, `height` bytes each, into character map `map` from
+    /// character `first` on, as the BIOS does through the planes: the
+    /// rows of each character past `height` stay as they are. The text
+    /// modes draw with plane 2's font from then on.
+    pub fn load_font(&mut self, map: u8, first: usize, height: usize, glyphs: &[u8]) {
+        if height == 0 {
+            return;
+        }
+        let (start, size) = (self.font_map_offset(map), self.plane_size());
+        let plane = &mut self.vram_graphics[2 * size..3 * size];
+        for (i, glyph) in glyphs
+            .chunks_exact(height)
+            .enumerate()
+            .take(256usize.saturating_sub(first))
+        {
+            let at = start + (first + i) * 32;
+            for (row, &bits) in glyph.iter().take(32).enumerate() {
+                plane[(at + row) & (size - 1)] = bits;
+            }
+        }
+        self.font_loaded = true;
+        self.mark_dirty_full();
+    }
+
     /// The registers were set from outside the ports (a DOS box's display
     /// put back): mode 12h's rows no longer follow from the last mode set.
     pub(crate) fn forget_layout(&mut self) {
@@ -239,6 +302,7 @@ impl VgaCard {
     pub fn set_memory(&mut self, plane_size: usize) {
         self.mode12_rows = false;
         self.vram_graphics = vec![0; plane_size * 4];
+        self.font_loaded = false;
     }
 
     /// Whether a VGA's picture is turned off: the sequencer's Clocking Mode
@@ -1468,6 +1532,9 @@ crate::state_fields!(VgaCard {
     blink_on,
     // Counted at the next retrace, as the frame counter isn't saved.
     presented, gdi_changed,
+    // In a section of its own (`bus::state`), so states saved before it
+    // load with the ROM's fonts.
+    font_loaded,
 });
 
 impl VgaCard {
