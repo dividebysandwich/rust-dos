@@ -1866,6 +1866,119 @@ fn a_thread_that_sleeps_zero_gets_the_processor_back_after_a_turn() {
     }
 }
 
+/// A loop that waits for the time by GetTickCount, acquiring the
+/// keyboard again and reading its buffered data with DirectInput in each
+/// pass, and peeking at its messages, as Dark Omen's main thread does
+/// while a movie plays (#1802). Acquire finds the keyboard acquired and
+/// GetDeviceData finds no keys, so neither changes anything, and the
+/// passes are skipped to the time, coming out the same as when they all
+/// run.
+#[test]
+fn a_loop_that_polls_directinput_while_it_waits_is_skipped() {
+    // IDirectInputA's CreateDevice, IDirectInputDeviceA's methods.
+    const CREATE_DEVICE: u32 = 3;
+    const SET_PROPERTY: u32 = 6;
+    const ACQUIRE: u32 = 7;
+    const GET_DEVICE_DATA: u32 = 10;
+    const SET_DATA_FORMAT: u32 = 11;
+    const SET_COOPERATIVE_LEVEL: u32 = 13;
+    const DIPROP_BUFFERSIZE: i32 = 1;
+    const DISCL_NONEXCLUSIVE_BACKGROUND: i32 = 2 | 8;
+    const DI_NOEFFECT: i32 = 1;
+    let k32: &[&str] = &["GetModuleHandleA", "GetTickCount", "ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", k32),
+        ("DINPUT.DLL", &["DirectInputCreateA"]),
+        ("USER32.DLL", &["PeekMessageA"]),
+    ];
+    // The interfaces at 0 and 4, the start at 8, the count at 0xC,
+    // GUID_SysKeyboard at 0x10, the buffer's size as a DIPROPDWORD at
+    // 0x20, the data format at 0x40 with its keys at 0x200, the MSG at
+    // 0x60, the events read at 0x80.
+    let mut data = vec![0u8; 0x1200];
+    let mut put = |at: usize, words: &[u32]| {
+        for (i, w) in words.iter().enumerate() {
+            data[at + 4 * i..at + 4 * i + 4].copy_from_slice(&w.to_le_bytes());
+        }
+    };
+    put(0x10, &[0x6F1D_2B61, 0x11CF_D5A0, 0x4544_C7BF, 0x0000_5453]);
+    put(0x20, &[20, 16, 0, 0, 16]);
+    put(0x40, &[24, 16, 0, 256, 256, 0]);
+    for key in 0..256 {
+        // DIDFT_OPTIONAL | DIDFT_BUTTON, a key a byte, as c_dfDIKeyboard.
+        put(0x200 + 16 * key as usize, &[0, key, 0x8000_000C | key << 8, 0]);
+    }
+    let image = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(k32.iter().position(|n| *n == name).unwrap());
+        let mut fail = a.create_label();
+        let mut spin = a.create_label();
+        let method = |a: &mut CodeAssembler, object: u32, index: u32, args: &[i32]| {
+            push_args(a, args)?;
+            a.mov(eax, dword_ptr(l.at(object)))?;
+            a.push(eax)?;
+            a.mov(ecx, dword_ptr(eax))?;
+            a.call(dword_ptr(ecx + 4 * index))
+        };
+        let at = |offset: u32| l.at(offset) as i32;
+        a.mov(dword_ptr(l.at(0x54)), at(0x200))?;
+        a.push(0)?;
+        a.call(f("GetModuleHandleA"))?;
+        push_args(a, &[0, 0x500, at(0), 0])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(l.import(k32.len()))?;
+        a.mov(ebx, 1)?;
+        a.test(eax, eax)?;
+        a.jnz(fail)?;
+        let setup: [(u32, Vec<i32>); 4] = [
+            (SET_DATA_FORMAT, vec![at(0x40)]),
+            (SET_COOPERATIVE_LEVEL, vec![0, DISCL_NONEXCLUSIVE_BACKGROUND]),
+            (SET_PROPERTY, vec![DIPROP_BUFFERSIZE, at(0x20)]),
+            (ACQUIRE, vec![]),
+        ];
+        method(a, 0, CREATE_DEVICE, &[at(0x10), at(4), 0])?;
+        a.inc(ebx)?;
+        a.test(eax, eax)?;
+        a.jnz(fail)?;
+        for (index, args) in &setup {
+            method(a, 4, *index, args)?;
+            a.inc(ebx)?;
+            a.test(eax, eax)?;
+            a.jnz(fail)?;
+        }
+        a.call(f("GetTickCount"))?;
+        a.mov(dword_ptr(l.at(8)), eax)?;
+        // The loop: Acquire, which has nothing to do, GetDeviceData,
+        // which finds nothing, and PeekMessageA, for 30 ms.
+        a.set_label(&mut spin)?;
+        a.mov(ebx, 10)?;
+        method(a, 4, ACQUIRE, &[])?;
+        a.cmp(eax, DI_NOEFFECT)?;
+        a.jne(fail)?;
+        a.mov(dword_ptr(l.at(0xC)), 16)?;
+        method(a, 4, GET_DEVICE_DATA, &[16, at(0x80), at(0xC), 0])?;
+        a.inc(ebx)?;
+        a.test(eax, eax)?;
+        a.jnz(fail)?;
+        a.inc(ebx)?;
+        a.cmp(dword_ptr(l.at(0xC)), 0)?;
+        a.jne(fail)?;
+        push_args(a, &[at(0x60), 0, 0, 0, 1])?;
+        a.call(l.import(k32.len() + 1))?;
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, dword_ptr(l.at(8)))?;
+        a.cmp(eax, 30)?;
+        a.jb(spin)?;
+        a.mov(ebx, 0x2A)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let stats = idle_lockstep("poll_directinput", image);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
 /// The number of proofs that failed for `why`.
 fn failed_by(stats: &rust_dos::idle::IdleStats, why: &str) -> u64 {
     stats
