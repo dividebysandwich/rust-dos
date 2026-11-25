@@ -64,15 +64,15 @@ impl DiskController {
             copies_from: _,
             folders_from_state: _,
             shared_from_state: _,
+            // In a section of their own, before this one (bus/state.rs).
+            host_aliases: _,
+            aliases_from_state: _,
             // Told as the drive was mounted.
             notes: _,
             // Made again from the drives as they are mounted.
             media: _,
             // Read again from the host folders.
             host_dirs: _,
-            // Found again from the current directories as the state is
-            // loaded (`find_current_folders`).
-            current_folders: _,
             // The built-in Windows's, which shows them as configured.
             system_files: _,
             // Set only while a call runs (`long_name_call`).
@@ -128,6 +128,19 @@ impl DiskController {
         }
     }
 
+    /// The aliases of host folders a save state keeps, in a section of
+    /// their own (`HostAliases::saved`).
+    pub(crate) fn saved_aliases(&self) -> Vec<super::SavedFolder> {
+        self.host_aliases.saved(&self.host_roots())
+    }
+
+    /// The host drives, by number, and their roots.
+    fn host_roots(&self) -> Vec<(u8, PathBuf)> {
+        (0..DRIVE_SLOTS)
+            .filter_map(|drive| Some((drive, self.drive(drive)?.host_root()?.to_path_buf())))
+            .collect()
+    }
+
     /// The disks of `drives` that keep journals as they are now: a
     /// checkpoint each.
     fn save_checkpoints(&self, drives: std::ops::Range<u8>, w: &mut Writer) {
@@ -140,9 +153,6 @@ impl DiskController {
     /// its files again. Returns the files that couldn't be opened.
     pub(crate) fn load_state(&mut self, r: &mut Reader) -> Result<Vec<String>> {
         self.host_dirs.forget();
-        // The folders the current directories named before the load
-        // aren't the state's (`find_current_folders`).
-        self.current_folders.clear();
         // Taken by this load alone: a failed load's roll back to the
         // machine from before mounts its drives where they were.
         let folders = std::mem::take(&mut self.folders_from_state);
@@ -153,6 +163,10 @@ impl DiskController {
         }
         self.current_drive = if self.is_mounted(current) { current } else { DRIVE_C };
         self.restore_shared().map_err(StateError::Mismatch)?;
+        // The aliases the state's host folders kept, before its files
+        // are opened again by their names.
+        let aliases = self.aliases_from_state.take().unwrap_or_default();
+        self.host_aliases.load(&aliases, &self.host_roots());
         self.reverts.clear();
         self.load_checkpoints(0..LASTDRIVE, r)?;
 
@@ -220,7 +234,6 @@ impl DiskController {
         if !r.is_empty() {
             self.load_checkpoints(LASTDRIVE..DRIVE_SLOTS, r)?;
         }
-        self.find_current_folders();
         Ok(lost)
     }
 

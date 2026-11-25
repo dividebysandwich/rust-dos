@@ -24,6 +24,7 @@ const DOS_VERSION: u16 = 6;
 const CD_HEAD_VERSION: u16 = 1;
 const VCPI_VERSION: u16 = 1;
 const LOCK_VERSION: u16 = 1;
+const ALIAS_VERSION: u16 = 1;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
@@ -401,6 +402,13 @@ impl Bus {
                     manifest.save(w);
                 }
             });
+        }
+        // The aliases host folders keep where they differ from those made
+        // afresh, only with any, so other states are as they were. Before
+        // the drives: the open files are found again by their names.
+        let aliases = disk.saved_aliases();
+        if !aliases.is_empty() {
+            w.section(b"ALIA", ALIAS_VERSION, |w| aliases.save(w));
         }
         w.section(b"DOS ", DOS_VERSION, |w| {
             save_all!(w; xms, mouse, mscdex, disk_io);
@@ -842,6 +850,12 @@ impl Bus {
                 shared.push((drive, manifest));
             }
             disk.shared_from_state = Some(shared);
+        }
+        disk.aliases_from_state = None;
+        if r.next_is(b"ALIA") {
+            let mut aliases = Vec::new();
+            aliases.load(&mut r.section(b"ALIA", ALIAS_VERSION)?)?;
+            disk.aliases_from_state = Some(aliases);
         }
         // The drives before the sound: the CD playing is in one.
         let mut section = r.section(b"DOS ", DOS_VERSION)?;
