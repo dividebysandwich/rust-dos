@@ -464,3 +464,83 @@ fn ems_at_the_prompt_switches_the_mode() {
     cpu.set_upper_memory(true, true).unwrap();
     assert!(cpu.v86());
 }
+
+/// Windows' 386 enhanced mode startup broadcast (INT 2Fh AX=1605h, DX 0,
+/// DI 030Bh) as HWiNFO for DOS sends it, finding SMSW's PE set: under the
+/// monitor CX stays 0 and DS:SI points at the switch EMM386 hands out,
+/// which AX=0000h turns to real mode and AX=0001h back to virtual-8086
+/// mode, CF clear each time. The registers come back.
+#[test]
+fn windows_init_broadcast_gets_the_switch_to_real_mode() {
+    let mut cpu = machine(true);
+    run(&mut cpu, |a| {
+        a.push(ds)?;
+        a.mov(ax, 0x1605)?;
+        a.xor(bx, bx)?;
+        a.xor(cx, cx)?;
+        a.mov(ds, bx)?;
+        a.mov(es, bx)?;
+        a.xor(dx, dx)?;
+        a.xor(si, si)?;
+        a.mov(di, 0x030B)?;
+        a.int(0x2F)?;
+        a.mov(ax, ds)?;
+        a.pop(ds)?;
+        a.mov(word_ptr(0), cx)?;
+        a.mov(word_ptr(2), si)?;
+        a.mov(word_ptr(4), ax)?;
+        // Off: real mode.
+        a.cli()?;
+        a.mov(ebp, 0x1234_5678)?;
+        a.xor(ax, ax)?;
+        a.call(dword_ptr(2))?;
+        a.setc(byte_ptr(6))?;
+        a.smsw(word_ptr(8))?;
+        a.mov(dword_ptr(0x18), ebp)?;
+        // And on again.
+        a.mov(ax, 1)?;
+        a.call(dword_ptr(2))?;
+        a.setc(byte_ptr(10))?;
+        a.smsw(word_ptr(12))?;
+        a.mov(ax, 0x1606)?;
+        a.xor(dx, dx)?;
+        a.int(0x2F)?;
+        a.hlt()
+    });
+    assert_ne!(cpu.state, CpuState::RebootShell);
+    assert_eq!(read16(&cpu, 0), 0, "CX 0: Windows may start");
+    assert_ne!(read32(&cpu, 2), 0, "DS:SI points at the switch");
+    assert_eq!(cpu.bus.read_8(0x20006), 0, "AX=0000h: CF clear");
+    assert_eq!(read16(&cpu, 8) & 1, 0, "real mode: PE clear");
+    assert_eq!(read32(&cpu, 0x18), 0x1234_5678, "EBP as it was");
+    assert_eq!(cpu.bus.read_8(0x2000A), 0, "AX=0001h: CF clear");
+    assert_eq!(read16(&cpu, 12) & 1, 1, "virtual-8086 mode: PE set");
+    assert!(cpu.v86(), "under the monitor again");
+}
+
+/// Without EMS DOS runs in real mode with no memory manager, and the
+/// broadcast leaves DS:SI 0000h:0000h, as plain DOS does.
+#[test]
+fn windows_init_broadcast_gets_no_switch_without_ems() {
+    let mut cpu = machine(false);
+    run(&mut cpu, |a| {
+        a.push(ds)?;
+        a.mov(ax, 0x1605)?;
+        a.xor(bx, bx)?;
+        a.xor(cx, cx)?;
+        a.mov(ds, bx)?;
+        a.mov(es, bx)?;
+        a.xor(dx, dx)?;
+        a.xor(si, si)?;
+        a.mov(di, 0x030B)?;
+        a.int(0x2F)?;
+        a.mov(ax, ds)?;
+        a.pop(ds)?;
+        a.mov(word_ptr(0), si)?;
+        a.mov(word_ptr(2), ax)?;
+        a.mov(word_ptr(4), cx)?;
+        a.hlt()
+    });
+    assert_eq!(read32(&cpu, 0), 0, "DS:SI stays 0000h:0000h");
+    assert_eq!(read16(&cpu, 4), 0);
+}

@@ -28,7 +28,9 @@
 //! The DPMI host (dpmi/) and the built-in Windows (win32/, win16/) leave
 //! virtual-8086 mode for their protected mode as they leave real mode,
 //! and come back to it under the monitor (`enter`) where they went back
-//! to real mode.
+//! to real mode. Windows' startup broadcast (INT 2Fh AX=1605h) gets the
+//! switch EMM386 hands out, which takes the processor to real mode and
+//! back (`windows_init`).
 
 use crate::bus::Bus;
 use crate::cpu::{
@@ -44,6 +46,9 @@ pub const VCPI_ENTRY: u16 = 0x4040;
 /// Where the IDT's gates lead: an IRETD the processor never reaches, as
 /// the monitor takes every event before it reads a gate.
 const GATE: u16 = 0x4048;
+/// The switch to real mode and back that Windows' startup broadcast gets
+/// (`windows_init`).
+const SWITCH_ENTRY: u16 = 0x4050;
 const IDT: u32 = 0xF4100;
 const TSS: u32 = 0xF4900;
 /// The TSS, its I/O permission bitmap of 64K ports and the byte of 1s
@@ -178,6 +183,48 @@ pub fn sync(cpu: &mut Cpu) {
     } else if !installed(&cpu.bus) && owns(cpu) {
         leave(cpu);
     }
+}
+
+/// Windows' 386 enhanced mode is about to start (INT 2Fh AX=1605h, DX bit
+/// 0 clear), and asks the memory managers how: under the monitor, DS:SI
+/// gets the monitor's switch to real mode and back (`windows_switch`), as
+/// EMM386 hands it out. Windows, and programs that check for it the same
+/// way (HWiNFO), call it to leave virtual-8086 mode. DS:SI that a manager
+/// further down the chain already set stays as it is.
+pub fn windows_init(cpu: &mut Cpu) {
+    if !owns(cpu) || cpu.ds() != 0 || cpu.si() != 0 {
+        return;
+    }
+    // Written here as well: the ROM of a state saved before the switch
+    // was there lacks it.
+    let at = (ROM + SWITCH_ENTRY as u32) as usize;
+    cpu.bus
+        .write_rom(at, &[0xFE, 0x3A, crate::bios::FAR_V86_SWITCH, 0xCB]);
+    cpu.set_ds((ROM >> 4) as u16);
+    cpu.set_si(SWITCH_ENTRY);
+}
+
+/// The switch `windows_init` hands out, called far with interrupts off:
+/// AX=0000h goes on in real mode, AX=0001h back in virtual-8086 mode
+/// under the monitor. CF clear when the processor is in the mode asked
+/// for, set for another AX or for a switch with the monitor gone (EMS
+/// turned off). The other registers stay as they are.
+pub fn windows_switch(cpu: &mut Cpu) {
+    let done = match cpu.ax() {
+        0x0000 if owns(cpu) => {
+            leave(cpu);
+            cpu.note_mode_switch(false);
+            true
+        }
+        0x0000 => !cpu.pe(),
+        0x0001 if installed(&cpu.bus) && !cpu.pe() => {
+            enter(cpu);
+            true
+        }
+        0x0001 => owns(cpu),
+        _ => false,
+    };
+    cpu.set_cpu_flag(CpuFlags::CF, !done);
 }
 
 /// An interrupt or exception in virtual-8086 mode under the monitor, which

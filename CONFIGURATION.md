@@ -529,13 +529,16 @@ limit, so without a connection it goes on as it would with one:
   As with EMM386, 16 KB pages of extended memory show through a page
   frame at E000h, and EMS and XMS share the same memory. With EMS, DOS
   runs in virtual-8086 mode under a built-in monitor, as under EMM386:
-  installers that look for a memory manager by reading CR0 find one, and
+  installers that look for a memory manager by reading CR0 find one,
   DOS extenders that find no DPMI host switch to protected mode through
-  VCPI (INT 67h AX=DE00h-DE0Ch). Programs that switch the processor
-  themselves (to "unreal" mode, or with a DOS extender that only knows
-  plain DOS) stop with a message, as they do under EMM386, and need
-  `ems=false`, which runs DOS in real mode. A change takes effect at the
-  DOS prompt.
+  VCPI (INT 67h AX=DE00h-DE0Ch), and programs that announce Windows'
+  start (INT 2Fh AX=1605h) get EMM386's switch to real mode and back.
+  Programs that switch the processor themselves (to "unreal" mode, or
+  with a DOS extender that only knows plain DOS) stop with a message, as
+  they do under EMM386, and need `ems=false`, which runs DOS in real
+  mode. Diagnostic tools such as HWiNFO find EMM386 and virtual-8086
+  mode and warn about them; with `ems=false` they find neither. A change
+  takes effect at the DOS prompt.
 * `umb` gives DOS upper memory blocks between 640 KB and 1 MB, from
   D000h to EFFFh (to DFFFh with EMS), as DOS 5 with EMM386 has them:
   `true` (the default) or `false`. `LOADHIGH` (or `LH`) at the prompt
