@@ -34,7 +34,9 @@ pub mod waveaudio;
 use super::callback;
 use super::*;
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 use crate::win32::thread::{self, Wait};
+use std::sync::Arc;
 
 /// The commands.
 pub const MCI_OPEN: u32 = 0x0803;
@@ -295,7 +297,17 @@ pub struct Device {
     /// The DirectShow filter graph that plays through it, by its object
     /// id (dshow/), or 0 for a device of the program's.
     pub graph: u32,
+    /// The element's bytes, when the program's I/O procedure read them
+    /// (`read_element`): kept, and saved, because reading them again
+    /// takes calls into the program.
+    pub procedure_data: Since<PROCEDURE_SAVED, Option<Arc<Vec<u8>>>>,
 }
+
+/// The W32 version whose states keep the elements the program's I/O
+/// procedures read (`Device::procedure_data`, `video::Calls::element`)
+/// and the format of a WAV file waveaudio decoded
+/// (`waveaudio::Wav::file_format`).
+pub const PROCEDURE_SAVED: u16 = 99;
 
 /// MCI's state.
 #[derive(Clone, Debug, Default)]
@@ -503,6 +515,10 @@ pub fn device_command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Par
     }
     let kind = device(cpu, i).kind;
     let error = match kind {
+        // WINMM keeps the break key itself (mciSendCommand's MCI_BREAK,
+        // as Wine's MCI_Break does) and never passes it to the driver,
+        // so every device takes it, MCIWAVE's and MCIAVI's included.
+        _ if msg == MCI_BREAK => 0,
         MCI_DEVTYPE_CD_AUDIO => cdaudio::command(cpu, i, msg, flags, p),
         MCI_DEVTYPE_SEQUENCER => sequencer::command(cpu, i, msg, flags, p),
         video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO => {
@@ -660,6 +676,19 @@ fn open_kind(
             MCIERR_DEVICE_OPEN
         };
     }
+    // MCIWAVE, MCISEQ and MCIAVI open their element with mmioOpen, so a
+    // procedure of the program's reads it. MPEGVideo is ActiveMovie's
+    // MCIQTZ, which renders the file with DirectShow, and DirectShow's
+    // file source opens it with CreateFile. The program's procedures
+    // never see an MPEGVideo device's file, whether the program opened
+    // the device or a DirectShow graph did (dshow/graph.rs).
+    let procedure_data = match kind {
+        MCI_DEVTYPE_CD_AUDIO | video::MCI_DEVTYPE_DIGITAL_VIDEO => None,
+        _ => match read_element(cpu, &element) {
+            Ok(data) => data,
+            Err(e) => return e,
+        },
+    };
     let pid = crate::win32::user32::current_pid(cpu);
     let mut id = 1;
     while cpu.bus.win32.winmm.mci.devices.iter().any(|d| d.id == id) {
@@ -677,6 +706,7 @@ fn open_kind(
         element,
         auto,
         time_format,
+        procedure_data: Since(procedure_data),
         ..Device::default()
     });
     let i = mci(cpu).devices.len() - 1;
@@ -705,6 +735,63 @@ fn open_kind(
         post(cpu, p.callback, MCI_NOTIFY_SUCCESSFUL, id);
     }
     0
+}
+
+/// The bytes of the element `element` as mmioOpenA reads them, when a
+/// procedure the program installed reads it: a file of an archive
+/// ("AUDIO1.M20+T041671A.WAV"), or any file when the program installed
+/// one for 'DOS '. Windows' MCI devices open their files with mmioOpen,
+/// so they read such files as the program does. None when the file is
+/// a plain one, which the device reads itself (`element_bytes`).
+///
+/// Reading takes calls into WINMM, made as a command's calls into USER32
+/// are (video.rs `made_at`): mmioOpenA, which reads the file whole
+/// through the procedure, and mmioClose. The command returns NEEDS_CALL
+/// until both are made, and runs again each time.
+fn read_element(cpu: &mut Cpu, element: &str) -> Result<Option<Arc<Vec<u8>>>, u32> {
+    let pid = crate::win32::user32::current_pid(cpu);
+    if element.is_empty() || mmio::program_procedure(cpu, pid, element).is_none() {
+        return Ok(None);
+    }
+    let open = address_of(cpu, "mmioOpenA");
+    let args = [0, 0, mmio::OPEN_TO_READ];
+    let hmmio = video::made_at(cpu, open, &args, &[(0, element)]).ok_or(video::NEEDS_CALL)?;
+    if hmmio == 0 {
+        return Err(MCIERR_FILE_NOT_FOUND);
+    }
+    let kept = video::calls(cpu)
+        .element
+        .as_ref()
+        .filter(|(e, _)| e == element)
+        .map(|(_, data)| data.clone());
+    let data = match kept {
+        Some(data) => data,
+        None => {
+            // mmioOpenA read it whole through the procedure, as it was
+            // opened to read (`finish_slurp`): mmio_open picks the
+            // procedure as `program_procedure` did above, so the file
+            // always has the bytes it read, none if it was empty.
+            let data = Arc::new(mmio::contents(cpu, hmmio).unwrap_or_default());
+            *video::calls(cpu).element = Some((element.to_string(), data.clone()));
+            data
+        }
+    };
+    let close = address_of(cpu, "mmioClose");
+    video::made_at(cpu, close, &[hmmio, 0], &[]).ok_or(video::NEEDS_CALL)?;
+    Ok(Some(data))
+}
+
+/// The bytes of the device `i`'s element: those the program's procedure
+/// read when it opened (`read_element`), or the file's.
+pub fn element_bytes(cpu: &mut Cpu, i: usize) -> Result<Arc<Vec<u8>>, u32> {
+    let d = device(cpu, i);
+    if let Some(data) = d.procedure_data.as_ref() {
+        return Ok(data.clone());
+    }
+    let element = d.element.clone();
+    media::read_file(cpu, &element)
+        .map(Arc::new)
+        .ok_or(MCIERR_FILE_NOT_FOUND)
 }
 
 /// MCI_SYSINFO, of all devices (`kind` None) or those of a type: how
@@ -1098,6 +1185,7 @@ crate::state_fields!(Device {
     seq,
     wave,
     video,
-    graph
+    graph,
+    procedure_data
 });
 crate::state_fields!(Mci { devices, calls });

@@ -24,7 +24,7 @@ use crate::cpu::Cpu;
 /// The W32 section's version that has the raster position, in the
 /// contexts and in what glPushAttrib keeps. An older state's contexts
 /// load with the initial one, as no glRasterPos had set one there.
-pub const RASTER_SAVED: u16 = 99;
+pub const RASTER_SAVED: u16 = 100;
 
 // glCopyPixels' types.
 const GL_COLOR: u32 = 0x1800;
