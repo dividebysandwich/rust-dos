@@ -2503,3 +2503,19 @@ fn a_closed_file_deletes_and_renames_with_its_folder() {
     assert!(!base.join("DIR").exists());
     assert_eq!(disk.host_dirs.closed.len(), 0);
 }
+
+/// Closing every file, as before a boot or a reload of the shell, closes
+/// the handles kept of the files the guest closed too: a booted system
+/// writes its disks without the file calls that would close them.
+#[test]
+fn closing_every_file_closes_the_kept_handles() {
+    let base = scratch("closed_all");
+    let mut disk = DiskController::new(base.clone());
+    let h = disk.create_file(r"C:\KEPT.DAT", PSP).unwrap();
+    assert_eq!(disk.write_file(h, b"kept"), Ok(4));
+    disk.close_file(h);
+    assert_eq!(disk.host_dirs.closed.len(), 1);
+    disk.close_all_files();
+    assert_eq!(disk.host_dirs.closed.len(), 0);
+    assert_eq!(fs::read(base.join("KEPT.DAT")).unwrap(), b"kept");
+}

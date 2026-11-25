@@ -637,9 +637,13 @@ impl DiskController {
 
     /// Close every open file, for when the shell is reloaded. A file a
     /// create call left for its first use keeps its bytes: the program
-    /// was aborted or the machine reset before it wrote its save.
+    /// was aborted or the machine reset before it wrote its save. The
+    /// host handles kept of closed files go too (`ClosedFiles`): a system
+    /// booted next writes its disks without the guest's file calls, which
+    /// would otherwise close them.
     pub fn close_all_files(&mut self) {
         self.open_files.clear();
+        self.host_dirs.closed.clear();
         self.locks.clear();
         self.open_standard_devices();
     }

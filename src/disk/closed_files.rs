@@ -18,17 +18,22 @@ use web_time::Instant;
 /// time in those opens. Opening the file through the handle that wrote it
 /// asks the host nothing.
 ///
-/// A handle is kept for `KEEP` at most, and `MAX` of them, and is given to
-/// an open only of the same host path with the same access (`take`), while
-/// the file there is still the one it wrote: the same size and time, and
-/// not read-only. A call that deletes or renames a file or a folder drops
-/// the handles kept under it first (`drop_under`), so the host never sees
-/// a file still open that the guest has closed and goes on to delete,
-/// rename or replace; so does anything that changes host folders behind
-/// the guest's back (`HostDirCache::forget`). Handles are opened sharing
-/// reading, writing and deleting (`std::fs` on Windows), so another
-/// program on the host can open, replace or delete the file meanwhile, and
-/// then the size or time differs and the handle isn't used.
+/// `MAX` handles are kept at most. A handle serves an open for `KEEP` at
+/// most, and only an open of the same host path with the same access
+/// (`take`), while the file there is still the one it wrote: the same size
+/// and time, and not read-only. The disk layer has no timer, so a handle
+/// older than `KEEP` is closed by the next `keep` or `take`, and one a
+/// guest leaves as it goes quiet stays open until then. A call that
+/// deletes or renames a file or a folder drops the handles kept under it
+/// first (`drop_under`), so the host never sees a file still open that the
+/// guest has closed and goes on to delete, rename or replace; so does
+/// anything that changes host folders behind the guest's back
+/// (`HostDirCache::forget`), and closing every file before a boot or a
+/// reload of the shell. Handles are opened sharing reading, writing and
+/// deleting (`std::fs` on Windows), so another program on the host can
+/// open, replace or delete the file meanwhile, and then the size or time
+/// differs and the handle isn't used. A program that opens the file
+/// without sharing writing can't, while the handle is kept.
 #[derive(Default)]
 pub(super) struct ClosedFiles {
     /// The oldest first.
@@ -112,6 +117,11 @@ impl ClosedFiles {
     /// Close every handle kept.
     pub(super) fn clear(&self) {
         self.kept.borrow_mut().clear();
+    }
+
+    /// The host paths whose handles are kept.
+    pub(super) fn paths(&self) -> Vec<PathBuf> {
+        self.kept.borrow().iter().map(|c| c.path.clone()).collect()
     }
 
     /// Close the handles kept longer than `KEEP`.

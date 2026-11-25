@@ -132,6 +132,9 @@ impl DiskController {
     /// mounting a huge directory as a floppy stays cheap. Symlinks are not
     /// followed.
     fn used_clusters(&self, root: &Path, cluster_bytes: u64, cap: u64) -> u64 {
+        // A file whose handle is kept after the guest closed it
+        // (`ClosedFiles`) is still open for writing on the host.
+        let kept = self.host_dirs.closed.paths();
         let writing: Vec<&Path> = self
             .open_files
             .values()
@@ -139,6 +142,7 @@ impl DiskController {
                 OpenData::Host(_, Some(path)) => Some(path.as_path()),
                 _ => None,
             })
+            .chain(kept.iter().map(PathBuf::as_path))
             .collect();
         let mut used = 0u64;
         let mut pending = vec![root.to_path_buf()];
@@ -158,10 +162,11 @@ impl DiskController {
     /// The clusters the files in the host folder `dir` take, up to `cap`,
     /// and the folders in it. A file's size comes with the listing where
     /// the host gives it (`hostfs::DirEntry::len`), or from a stat. The
-    /// files in `writing`, which the guest holds open for writing, are
-    /// statted: NTFS may leave what a handle still open wrote out of the
-    /// size its listing gives, and the count would then depend on when it
-    /// was taken.
+    /// files in `writing`, which have a host handle open for writing (the
+    /// guest's, or one kept after the guest closed it), are statted: NTFS
+    /// may leave what a handle still open wrote out of the size its
+    /// listing gives, and the count would then depend on when it was
+    /// taken.
     fn dir_usage(dir: &Path, cluster_bytes: u64, cap: u64, writing: &[&Path]) -> DirCount {
         let mut clusters = 0u64;
         let mut dirs = Vec::new();
