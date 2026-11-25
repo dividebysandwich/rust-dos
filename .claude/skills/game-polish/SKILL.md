@@ -1,6 +1,6 @@
 ---
 name: game-polish
-description: Play a DOS game in the rust-dos emulator for a set time (30 minutes by default), file a GitHub issue for every emulation glitch, bug, performance problem and bottleneck found, then fix each one in its own git worktree and check the fix against the same game. Use when asked to polish, play-test or shake out bugs in a game, or to find and fix what goes wrong when a game runs in rust-dos.
+description: Play a DOS game in the rust-dos emulator for a set time (30 minutes by default), file a GitHub issue for every emulation glitch, bug, performance problem and bottleneck found, then fix each one a player sees in its own git worktree and check the fix against the same game. Use when asked to polish, play-test or shake out bugs in a game, or to find and fix what goes wrong when a game runs in rust-dos.
 argument-hint: <game> [minutes] [--no-fix] [--no-issues]
 ---
 
@@ -8,8 +8,8 @@ argument-hint: <game> [minutes] [--no-fix] [--no-issues]
 
 A play session, then a fix session. Play the game the way a player would,
 watch the emulator while doing it, and write down everything that is
-wrong. Then file each finding as an issue and fix it in its own worktree,
-validated against the game it was found in.
+wrong. Then file each finding as an issue, and fix each one a player
+sees in its own worktree, validated against the game it was found in.
 
 Read `docs/llm-debugging.md` before you start the emulator, and follow it
 and the `debug-emulator` skill for launching, input and stopping. This
@@ -259,7 +259,8 @@ Skip this with `--no-fix`. If your environment limits you to one branch,
 or forbids opening pull requests, ask before going on: put every fix on
 that branch as its own commit only if the user agrees.
 
-Fix the issues in rank order. For each one:
+Fix the issues a player sees, in rank order. The others wait, as the
+paragraphs after this list say. For each one:
 
 1. **Make a worktree** from the latest default branch, with a branch named
    after the issue:
