@@ -8,7 +8,9 @@
 //! The surfaces after the first, its root, have no references until the
 //! program asks for them, and their counts don't make them go: they go
 //! with the root. Flip swaps the pixels of the chain's surfaces around,
-//! and shows the front buffer's.
+//! and shows the front buffer's; a primary surface whose back buffers
+//! are in system memory, which the display can't show, takes a copy of
+//! the back buffer's pixels instead.
 //!
 //! The primary surface is the picture on the screen, at the start of
 //! video memory: the desktop in a window, the mode's picture in full
@@ -2139,12 +2141,13 @@ fn chain(cpu: &mut Cpu, front: u32) -> Vec<u32> {
 /// Flip(this, target, flags): the front buffer takes the pixels of the
 /// back buffer (or of `target`), the back buffers the next ones', and
 /// the last the front buffer's. A primary front buffer is shown from
-/// the next frame. With a flip still to show, it waits for that frame
-/// when it waits (`flip_waits`), and fails otherwise; a thread that
-/// calls it again and again with nothing else in between waits too
-/// (`display::Polls`). On the 3D-only card the card swaps its buffers at
-/// a retrace, and a flip that doesn't wait fails the same way while a
-/// swap waits.
+/// the next frame; a back buffer in system memory is copied to it instead
+/// (`copy_flip`), and shows at once. With a flip still to show, it waits
+/// for that frame when it waits (`flip_waits`), and fails otherwise; a
+/// thread that calls it again and again with nothing else in between
+/// waits too (`display::Polls`). On the 3D-only card the card swaps its
+/// buffers at a retrace, and a flip that doesn't wait fails the same way
+/// while a swap waits.
 pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, target, flags] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -2235,29 +2238,101 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         crate::win32::pace::shown(cpu, at);
     }
     shown(cpu, id);
-    // The pixels go round.
+    // The pixels go round: each surface takes the next one's, and the
+    // last the front buffer's.
     let order: Vec<u32> = match target_id {
         Some(t) => vec![id, t],
         None => list.clone(),
     };
+    // A buffer in system memory that the flip brings to the front of the
+    // primary surface's chain, which the display can't show, is copied
+    // there instead (`copy_flip`): the front buffer stays the screen,
+    // and only the others go round. A buffer in video memory is shown
+    // where it is, and the front buffer takes its memory.
+    let copies = primary
+        && order.get(1).is_some_and(|&m| {
+            state(cpu)
+                .surface(m)
+                .is_some_and(|s| s.memory == MEM_SYSTEM)
+        });
+    // An older build left the front buffer in system memory after some
+    // flips of such a chain (a save state of G-Police made before #1830
+    // was fixed), and the screen with one of the back buffers. A page
+    // flip puts that right by itself. Before a copy, the front buffer
+    // first trades memory with the buffer that has the screen, so that
+    // the copy lands on what the display shows; with two back buffers
+    // or more, the one brought to the front can be in system memory
+    // while the front buffer still is.
+    let front = state(cpu)
+        .surface(id)
+        .map_or((MEM_NONE, 0), |f| (f.memory, f.bits));
+    if copies && front.0 != MEM_VIDEO {
+        let screen = list.iter().find_map(|&m| {
+            let b = state(cpu).surface(m)?;
+            (b.memory == MEM_VIDEO).then_some((m, b.bits))
+        });
+        if let Some((m, bits)) = screen {
+            if let Some(b) = surface(cpu, m) {
+                (b.memory, b.bits) = front;
+            }
+            if let Some(f) = surface(cpu, id) {
+                (f.memory, f.bits) = (MEM_VIDEO, bits);
+            }
+            changed(cpu, m);
+        }
+    }
     let memory: Vec<(u32, u32)> = order
         .iter()
         .filter_map(|&m| state(cpu).surface(m).map(|s| (s.memory, s.bits)))
         .collect();
-    let n = order.len();
-    for (i, &m) in order.iter().enumerate() {
-        let (memory, bits) = memory[(i + 1) % n];
+    let first = if copies {
+        copy_flip(cpu, id, order[1]);
+        1
+    } else {
+        0
+    };
+    let (ring, memory) = (&order[first..], &memory[first..]);
+    for (i, &m) in ring.iter().enumerate() {
+        let (memory, bits) = memory[(i + 1) % ring.len()];
         if let Some(s) = surface(cpu, m) {
             s.memory = memory;
             s.bits = bits;
         }
+    }
+    for &m in &order {
         changed(cpu, m);
     }
     if primary {
-        let (_, bits) = memory[1 % n];
+        let bits = state(cpu).surface(id).map_or(0, |s| s.bits);
         display::show(cpu, bits);
     }
     Some(DD_OK)
+}
+
+/// A flip of the primary surface's chain that brings `next`, a buffer in
+/// system memory, to the front (G-Police's software renderer asks for its
+/// back buffer there): the front buffer, the screen at the start of video
+/// memory, takes a copy of `next`'s pixels. The display shows video
+/// memory only, so the front buffer can't take `next`'s memory as a page
+/// flip does; it stays the screen, and the primary surface's Lock and DC
+/// still draw on what is shown after the flip. DirectDraw emulates a flip
+/// it can't make on the card with copies too: Wine's tests (`test_flip`)
+/// accept, as `broken()`, Windows machines with their primary surface in
+/// system memory that copy pixels between the chain's surfaces instead
+/// of swapping them. What those machines leave in the back buffers
+/// differs from a page flip and isn't copied here. The back buffers
+/// still go round among themselves (`flip`): the last one takes `next`'s
+/// memory, with the frame now on the screen, where a page flip would
+/// leave it the frame shown before.
+fn copy_flip(cpu: &mut Cpu, front: u32, next: u32) {
+    let st = &*state(cpu);
+    let (Some(to), Some(from)) = (st.surface(front).cloned(), st.surface(next).cloned()) else {
+        return;
+    };
+    let len = (from.width.min(to.width) * from.bytes_per_pixel()) as usize;
+    let mut pixels = vec![0u8; len * from.height.min(to.height) as usize];
+    read_rows(cpu, &from, 0, len, &mut pixels);
+    write_rows(cpu, &to, 0, len, &pixels);
 }
 
 /// FlipToGDISurface(this): the picture at the start of video memory,

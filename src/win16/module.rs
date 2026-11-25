@@ -226,57 +226,92 @@ fn file_name_of(path: &str) -> &str {
     path.rsplit(['\\', '/', ':']).next().unwrap_or(path)
 }
 
-/// The file `name` and its path: as it is if it has a directory, else
-/// where Windows 3.1's LoadLibrary and LoadModule look for it, with
-/// ".DLL" added to a name without an extension. Windows 3.1's order is:
+/// The directory of the running task's program: where the libraries it
+/// loads and the programs it starts are looked for after the system
+/// directory.
+pub(super) fn task_dir(cpu: &Cpu) -> String {
+    let Some(t) = super::current_task(cpu) else {
+        return String::new();
+    };
+    let handle = cpu.bus.win32.win16.tasks[t].module;
+    super::module_index(cpu, handle)
+        .map(|i| crate::win32::loader::directory_of(&cpu.bus.win32.win16.modules[i].path))
+        .unwrap_or_default()
+}
+
+/// The paths where Windows 3.1's LoadLibrary and LoadModule look for the
+/// file `name`, in order: the name itself if it has a directory, else
 /// the current directory, the Windows directory, the system directory,
 /// the directory of the current task's executable (`dir`), then the
 /// directories of PATH. For a file of Known16DLLs, Windows 95 and 98
 /// look in the system directory, the Windows directory, the current
 /// directory, the task's directory and PATH (Q141969).
-fn find_file(cpu: &mut Cpu, name: &str, dir: &str) -> Option<(String, Vec<u8>)> {
-    let name = if name.contains('.') {
+fn search_paths(cpu: &mut Cpu, name: &str, dir: &str) -> Vec<String> {
+    if name.contains(['\\', '/', ':']) {
+        return vec![name.to_string()];
+    }
+    let (windows, system) = (
+        crate::win32::loader::WINDOWS_DIR,
+        crate::win32::loader::SYSTEM_DIR,
+    );
+    let cwd = crate::win32::kernel32::current_directory(cpu, cpu.bus.disk.get_current_drive());
+    let order = if is_known(cpu, name) {
+        [system, windows, cwd.as_str(), dir]
+    } else {
+        [cwd.as_str(), windows, system, dir]
+    };
+    let mut paths: Vec<String> = order
+        .into_iter()
+        .filter(|d| !d.is_empty())
+        .map(|d| join(d, name))
+        .collect();
+    if let Some(path) = crate::win32::running(cpu).and_then(|p| {
+        p.environment
+            .iter()
+            .find_map(|v| v.strip_prefix("PATH=").map(str::to_string))
+    }) {
+        for d in path.split(';').filter(|d| !d.is_empty()) {
+            paths.push(join(d, name));
+        }
+    }
+    paths
+}
+
+/// `name` with the extension `ext` added if its file name has none, as
+/// LoadLibrary adds ".DLL" and LoadModule ".EXE".
+fn with_extension(name: &str, ext: &str) -> String {
+    if file_name_of(name).contains('.') {
         name.to_string()
     } else {
-        format!("{}.DLL", name)
-    };
-    let mut candidates = Vec::new();
-    if name.contains(['\\', '/', ':']) {
-        candidates.push(name.clone());
-    } else {
-        let (windows, system) = (
-            crate::win32::loader::WINDOWS_DIR,
-            crate::win32::loader::SYSTEM_DIR,
-        );
-        let cwd = crate::win32::kernel32::current_directory(cpu, cpu.bus.disk.get_current_drive());
-        let order = if is_known(cpu, &name) {
-            [system, windows, cwd.as_str(), dir]
-        } else {
-            [cwd.as_str(), windows, system, dir]
-        };
-        for d in order {
-            if !d.is_empty() {
-                candidates.push(join(d, &name));
-            }
-        }
-        if let Some(path) = crate::win32::running(cpu).and_then(|p| {
-            p.environment
-                .iter()
-                .find_map(|v| v.strip_prefix("PATH=").map(str::to_string))
-        }) {
-            for d in path.split(';').filter(|d| !d.is_empty()) {
-                candidates.push(join(d, &name));
-            }
-        }
+        format!("{}.{}", name, ext)
     }
-    for path in candidates {
-        if let Some(file) = cpu.read_program_file(&path)
-            && ne::is_ne(&file)
-        {
-            return Some((path, file.to_vec()));
-        }
-    }
-    None
+}
+
+/// The library `name` and its path, found where LoadLibrary looks for it
+/// (`search_paths`), with ".DLL" added to a name without an extension.
+/// Only an NE file is taken.
+fn find_file(cpu: &mut Cpu, name: &str, dir: &str) -> Option<(String, Vec<u8>)> {
+    let name = with_extension(name, "DLL");
+    search_paths(cpu, &name, dir).into_iter().find_map(|path| {
+        let file = cpu.read_program_file(&path)?;
+        ne::is_ne(&file).then(|| (path, file.to_vec()))
+    })
+}
+
+/// The program `name` that LoadModule, WinExec or DOS's EXEC starts, and
+/// its path: the first file found where LoadModule looks for it
+/// (`search_paths`, with the running task's directory), with ".EXE"
+/// added to a name without an extension. It can be a Windows 3.1
+/// program, a Win32 one or a DOS one. Microsoft Setup's bootstrapper
+/// starts `_MSTEST` by that name alone, and finds it beside itself on the
+/// CD through the task's directory.
+pub(super) fn find_program(cpu: &mut Cpu, name: &str) -> Option<(String, crate::memfs::Bytes)> {
+    let name = with_extension(name, "EXE");
+    let dir = task_dir(cpu);
+    search_paths(cpu, &name, &dir).into_iter().find_map(|path| {
+        let file = cpu.read_program_file(&path)?;
+        Some((path, file))
+    })
 }
 
 fn join(dir: &str, file: &str) -> String {

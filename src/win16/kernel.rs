@@ -1091,23 +1091,11 @@ fn patch_code_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(module::patch_code_handle(cpu, args[0] as u16))
 }
 
-/// The directory of the running task's program, for the libraries it
-/// loads.
-fn task_dir(cpu: &Cpu) -> String {
-    let Some(t) = super::current_task(cpu) else {
-        return String::new();
-    };
-    let handle = cpu.bus.win32.win16.tasks[t].module;
-    super::module_index(cpu, handle)
-        .map(|i| crate::win32::loader::directory_of(&cpu.bus.win32.win16.modules[i].path))
-        .unwrap_or_default()
-}
-
 /// LoadLibrary: the library and those it imports from loaded, their
 /// entry points run; its instance, or an error below 32.
 fn load_library(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let name = super::string(cpu, args[0]);
-    let dir = task_dir(cpu);
+    let dir = module::task_dir(cpu);
     let mut inits = Vec::new();
     let index = match module::load(cpu, &name, &dir, &mut inits) {
         Ok(index) => index,
@@ -1644,7 +1632,7 @@ pub(super) fn open_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             path.extend_from_slice(&name);
             candidates.push(path);
         }
-        let dir = task_dir(cpu);
+        let dir = module::task_dir(cpu);
         if !dir.is_empty() {
             let mut path = crate::dosstr::to_bytes(&dir);
             path.push(b'\\');
