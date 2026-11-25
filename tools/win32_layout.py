@@ -20,6 +20,13 @@ import os
 import re
 import sys
 
+# What Rust's `char::is_whitespace` takes for a space: Unicode's
+# White_Space. `str.isspace` takes U+001C to U+001F as well.
+WHITESPACE = set(map(chr, [
+    *range(0x09, 0x0E), 0x20, 0x85, 0xA0, 0x1680, *range(0x2000, 0x200B),
+    0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
+]))
+
 
 def macro_body(code, at):
     """The text between the parentheses of the macro call at `at`."""
@@ -47,7 +54,7 @@ def saved_lists(source):
         while at >= 0:
             body = macro_body(code, at)
             if body is not None:
-                body = ''.join(c for c in body if not c.isspace())
+                body = ''.join(c for c in body if c not in WHITESPACE)
                 end = body.find('}skip{')
                 lists.append(body if end < 0 else body[:end + 1])
             at = code.find(name, at + len(name))
@@ -59,7 +66,8 @@ def collect(folder, lists):
         path = os.path.join(folder, entry)
         if os.path.isdir(path):
             collect(path, lists)
-        elif entry.endswith('.rs'):
+        # As Rust's `Path::extension`, which gives a file named ".rs" none.
+        elif os.path.splitext(entry)[1] == '.rs':
             with open(path, encoding='utf-8', newline='') as f:
                 lists.extend(saved_lists(f.read()))
 
