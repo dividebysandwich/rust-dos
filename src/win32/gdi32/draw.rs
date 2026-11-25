@@ -1642,7 +1642,11 @@ pub fn blit_from(
             if ddc.kind == super::dc::MEMORY && c.surface.device && !src.surface.mono =>
         {
             if src.surface.device {
-                Some((handle, None, Some(src.surface.colors.clone())))
+                let carried = match src.surface.target {
+                    Target::Bitmap(from) => super::palette::meaning_of(cpu, from),
+                    _ => Vec::new(),
+                };
+                Some((handle, None, Some(carried)))
             } else {
                 Some((handle, map.clone(), None))
             }

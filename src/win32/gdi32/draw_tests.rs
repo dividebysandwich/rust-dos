@@ -249,6 +249,37 @@ fn a_bitmap_copied_over_the_toolbar_shows_its_values() {
     assert_eq!(screen_pixels(cpu)[..63], (10..73).collect::<Vec<u8>>()[..]);
 }
 
+/// A bitmap drawn through a palette in the background while the
+/// palette fills free entries with its colors keeps them when another
+/// palette takes those entries later. Memphis Math draws its toolbar's
+/// buttons so, before the path screen's palette comes to the
+/// foreground.
+#[test]
+fn a_bitmap_keeps_the_colors_of_the_free_entries_it_was_drawn_in() {
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &[0x0012_3456]);
+    let cpu = &mut cpu;
+    let other: Vec<u32> = (0..236).map(|i| (i + 10) | (245 - i) << 16).collect();
+    // Each next to one of the other palette's, which has no green.
+    let colors: Vec<u32> = (0..63).map(|k| other[200 - k] | 0x100).collect();
+    let hpal = logical_palette(cpu, &colors);
+    let ddb = bitmap::create_compatible_bitmap(cpu, &[screen, 63, 1]).unwrap();
+    let mem = dc::create_compatible_dc(cpu, &[screen]).unwrap();
+    dc::select_object(cpu, &[mem, ddb]);
+    palette::select_palette(cpu, &[mem, hpal, 1]);
+    palette::realize_palette(cpu, &[mem]);
+    let dib = dib_dc(cpu, BITS, &colors, false, |x, _| (x % 63) as u8);
+    bit_blt(cpu, mem, (0, 0, 63, 1), dib, 0, 0);
+    // The palette's colors fill the free entries it maps to.
+    assert_eq!(palette::system_colors(cpu)[11], colors[1]);
+    let front = logical_palette(cpu, &other);
+    palette::gdi_select_palette(cpu, screen, front, false);
+    palette::realize(cpu, screen);
+    let mapping = gdi(cpu).palette(front).unwrap().mapping.clone();
+    bit_blt(cpu, screen, (0, 0, 63, 1), mem, 0, 0);
+    let want: Vec<u8> = (0..63).map(|k| mapping[200 - k]).collect();
+    assert_eq!(screen_pixels(cpu)[..63], want[..]);
+}
+
 /// Blits of every kind a fast path could take or has to leave to the
 /// one that works a pixel at a time: tiles, the whole screen, ones cut
 /// by the screen's and the DIB's edges, through a clip region of several

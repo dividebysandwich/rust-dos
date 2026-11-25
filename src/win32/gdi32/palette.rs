@@ -155,7 +155,11 @@ pub const MEANING_SAVED: u16 = 104;
 /// The color each value of an 8-bit bitmap of GDI's on a palette device
 /// stood for when it was drawn: 256 of them, None for a value that
 /// stands for the color the system palette shows at its entry, at the
-/// time of each blit, and no list at all when every value does.
+/// time of each blit, and no list at all when every value does. A value
+/// drawn through a logical palette keeps its entry's color even when
+/// the system palette shows that color at the time: Memphis Math draws
+/// its toolbar's buttons while the toolbar's palette fills free
+/// entries, and a later palette takes those entries.
 ///
 /// Drawn through a logical palette, a value is the system palette's
 /// entry of a logical entry, and stands for that entry's color, which
@@ -187,36 +191,44 @@ pub fn meaning_colors(cpu: &mut Cpu, meaning: &[Option<u32>]) -> Vec<u32> {
 /// Note in the bitmap `handle` what its values `written` (`written[v]`
 /// for the value v) stand for after a DIB was drawn into it through
 /// `map`: a value a logical entry maps to, that entry's color; the
-/// others, the system palette's. Values the blit didn't write keep
-/// what they stood for, so a DIB drawn into part of the bitmap leaves
-/// the rest as it was.
+/// others, and all of them through DEFAULT_PALETTE, the system
+/// palette's. Values the blit didn't write keep what they stood for, so
+/// a DIB drawn into part of the bitmap leaves the rest as it was.
 pub fn note_meaning(cpu: &mut Cpu, handle: u32, map: &DeviceMap, written: &[bool]) {
     let mut colors = vec![None; 256];
-    for (&c, &m) in map.logical.iter().zip(&map.map) {
-        colors[m as usize] = Some(c);
+    if !map.default {
+        for (&c, &m) in map.logical.iter().zip(&map.map) {
+            colors[m as usize] = Some(c);
+        }
     }
     set_meaning(cpu, handle, written, |i| colors[i]);
 }
 
+/// The `Meaning` of the bitmap `handle`, empty if it isn't one.
+pub fn meaning_of(cpu: &mut Cpu, handle: u32) -> Vec<Option<u32>> {
+    gdi(cpu)
+        .bitmap(handle)
+        .map_or(Vec::new(), |b| b.meaning.0.clone())
+}
+
 /// Note in the bitmap `handle` what its values `written` stand for
-/// after a bitmap's values were copied into it: `colors`, the colors
-/// the source's values stand for (`meaning_colors`).
-pub fn carry_meaning(cpu: &mut Cpu, handle: u32, colors: &[u32], written: &[bool]) {
-    set_meaning(cpu, handle, written, |i| colors.get(i).copied());
+/// after a bitmap's values were copied into it: what the source's
+/// values stand for, `source` (its `Meaning`, empty for a bitmap whose
+/// values all stand for the system palette's colors, or the screen).
+pub fn carry_meaning(cpu: &mut Cpu, handle: u32, source: &[Option<u32>], written: &[bool]) {
+    set_meaning(cpu, handle, written, |i| source.get(i).copied().flatten());
 }
 
 /// Set what the values `written` of the bitmap `handle` stand for to
-/// `stood(v)`: None, or a color the system palette shows at the entry
-/// at the time, is the system palette's color from then on.
+/// `stood(v)`.
 fn set_meaning(cpu: &mut Cpu, handle: u32, written: &[bool], stood: impl Fn(usize) -> Option<u32>) {
-    let system = system_colors(cpu);
     let Some(b) = gdi(cpu).bitmap_mut(handle) else {
         return;
     };
     let mut meaning = std::mem::take(&mut b.meaning.0);
     meaning.resize(256, None);
     for (v, _) in written.iter().enumerate().take(256).filter(|&(_, &w)| w) {
-        meaning[v] = stood(v).filter(|&c| c != system[v]);
+        meaning[v] = stood(v);
     }
     if meaning.iter().all(Option::is_none) {
         meaning.clear();
