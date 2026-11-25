@@ -203,11 +203,17 @@ impl Batch {
     pub fn start_file(&mut self, name: &str, bytes: &[u8], args: &str, call: bool) {
         // One a pipe runs is CALLed, and the pipe goes on after it.
         let piped = self.frames.last().is_some_and(|f| f.kind == FrameKind::Pipe);
-        if self.dispatching && !call && !piped {
+        let frame = Frame::new(FrameKind::File, file_lines(bytes), params(name, args));
+        if self.dispatching && !call && !piped && !self.frames.is_empty() {
+            // The chained file takes the place of the one running, and the
+            // ECHO the batch files began with stays what comes back when
+            // they end, not the ECHO OFF the first one may have set.
             self.drop_for_frames();
             self.pop();
+            self.frames.push(frame);
+        } else {
+            self.push(frame);
         }
-        self.push(Frame::new(FrameKind::File, file_lines(bytes), params(name, args)));
     }
 
     /// Run these lines next, before the rest of what is queued.
@@ -630,6 +636,24 @@ mod tests {
             run_all(&mut batch),
             ["in sub x", "", "after sub", "", "later"]
         );
+    }
+
+    #[test]
+    fn echo_comes_back_after_a_batch_file_with_echo_off_chains_to_another() {
+        let mut batch = Batch::default();
+        batch.append_lines(["T2"]);
+        assert_eq!(batch.next_line(&[]).unwrap().text, "T2");
+        batch.dispatching = true;
+        batch.start_file("T2", b"echo off\r\nT3\r\n", "", false);
+        batch.dispatching = false;
+        assert_eq!(batch.next_line(&[]).unwrap().text, "echo off");
+        batch.echo = false;
+        assert_eq!(batch.next_line(&[]).unwrap().text, "T3");
+        batch.dispatching = true;
+        batch.start_file("T3", b"echo three\r\n", "", false);
+        batch.dispatching = false;
+        assert_eq!(run_all(&mut batch), ["echo three", ""]);
+        assert!(batch.echo, "ECHO is on again at the prompt");
     }
 
     #[test]
