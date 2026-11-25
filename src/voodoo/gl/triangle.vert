@@ -19,10 +19,19 @@ in vec3 a_dy1;
 // The buffer's size in the card's pixels.
 uniform vec2 u_size;
 
-noperspective out vec4 v_color;
-noperspective out vec2 v_zw;
-noperspective out vec3 v_tex0;
-noperspective out vec3 v_tex1;
+// The values the card iterates are linear across the screen. OpenGL ES
+// has no noperspective, and needs none here: every vertex has a W of 1,
+// so perspective-correct interpolation is the same linear interpolation.
+#ifdef GL_ES
+#define SCREEN_LINEAR
+#else
+#define SCREEN_LINEAR noperspective
+#endif
+
+SCREEN_LINEAR out vec4 v_color;
+SCREEN_LINEAR out vec2 v_zw;
+SCREEN_LINEAR out vec3 v_tex0;
+SCREEN_LINEAR out vec3 v_tex1;
 flat out vec2 v_lod;
 flat out vec3 v_dx0;
 flat out vec3 v_dy0;
