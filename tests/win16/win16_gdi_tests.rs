@@ -13,9 +13,9 @@ const GET_DC: u16 = 66;
 const SELECT_PALETTE: u16 = 282;
 
 /// GDI's ordinals.
+const CREATE_SCALABLE_FONT_RESOURCE: u16 = 310;
 const CREATE_PALETTE: u16 = 360;
 const GDI_SELECT_PALETTE: u16 = 361;
-const CREATE_SCALABLE_FONT_RESOURCE: u16 = 310;
 const IS_DC_CURRENT_PALETTE: u16 = 412;
 
 /// WS_POPUP | WS_VISIBLE.
@@ -193,32 +193,35 @@ fn gdi_select_palette_selects_in_the_foreground_on_any_display() {
     assert_eq!(exit, 1, "{log}");
 }
 
-/// CreateScalableFontResource(0, fot, ttf, NULL), AX checked against
-/// `value`: where to patch the offsets of `fot` and `ttf`.
-fn create_scalable(code: &mut Code, value: u16, fail: u8) -> [u16; 2] {
+/// CreateScalableFontResource(0, fot, ttf, path), with a NULL `path`
+/// unless `path`, AX checked against `value`: where to patch the offsets
+/// of `fot`, `ttf` and `path`.
+fn create_scalable(code: &mut Code, path: bool, value: u16, fail: u8) -> Vec<u16> {
+    let mut at = Vec::new();
     code.push(0);
-    let fot_at = code.here() + 2;
-    code.push_far(0);
-    let ttf_at = code.here() + 2;
-    code.push_far(0)
-        .push(0)
-        .push(0)
-        .call("GDI", CREATE_SCALABLE_FONT_RESOURCE);
+    for _ in 0..2 + path as usize {
+        at.push(code.here() + 2);
+        code.push_far(0);
+    }
+    if !path {
+        code.push(0).push(0);
+    }
+    code.call("GDI", CREATE_SCALABLE_FONT_RESOURCE);
     expect_ax(code, value, fail);
-    [fot_at, ttf_at]
+    at
 }
 
 #[test]
 fn create_scalable_font_resource_fails_for_a_file_that_isnt_truetype() {
     // GDI.310, which Encarta 97's setup (a 16-bit Wise installer) calls
-    // for the font it copies. Windows 98 SE's GDI.EXE hands it to
-    // GDI32's CreateScalableFontResourceA, which fails for a TrueType
-    // file that isn't there and for one that isn't TrueType, and writes
-    // no .FOT either way. Exit code 1 when both fail and the program
-    // goes on.
+    // for the font it copies. The built-in GDI hands it to GDI32's
+    // CreateScalableFontResourceA, which, as Windows 98 SE's does, fails
+    // for a TrueType file that isn't there and for one that isn't
+    // TrueType, and writes no .FOT either way. Exit code 1 when both fail
+    // and the program goes on.
     let mut code = Code::new();
-    let missing = create_scalable(&mut code, 0, 2);
-    let not_truetype = create_scalable(&mut code, 0, 3);
+    let missing = create_scalable(&mut code, false, 0, 2);
+    let not_truetype = create_scalable(&mut code, false, 0, 3);
     code.emit(&[0xB0, 0x01]).exit_al(); // mov al,1
     let fot = code.here();
     code.emit(b"Q.FOT\0");
@@ -241,4 +244,55 @@ fn create_scalable_font_resource_fails_for_a_file_that_isnt_truetype() {
     );
     assert_eq!(exit, 1, "{log}");
     assert!(!folder.unwrap().join("Q.FOT").exists());
+}
+
+/// A program that calls CreateScalableFontResource(0, "Q.FOT", ttf, path)
+/// twice for SUB\F.TTF, a TrueType file of the family "Quick Face": the
+/// first call must return TRUE and the second FALSE, as the .FOT is
+/// there already. Exit code 1 when both answer so, and the .FOT must
+/// name the file as `ttf` gives it.
+fn scalable_truetype(test: &str, ttf: &[u8], path: &[u8]) {
+    let mut code = Code::new();
+    let first = create_scalable(&mut code, true, 1, 2);
+    let again = create_scalable(&mut code, true, 0, 3);
+    code.emit(&[0xB0, 0x01]).exit_al(); // mov al,1
+    let fot_at = code.here();
+    code.emit(b"Q.FOT\0");
+    let ttf_at = code.here();
+    code.emit(ttf).emit(b"\0");
+    let path_at = code.here();
+    code.emit(path).emit(b"\0");
+    for at in [first, again] {
+        for (at, to) in at.into_iter().zip([fot_at, ttf_at, path_at]) {
+            code.patch(at, to);
+        }
+    }
+    let mut folder = None;
+    let (exit, log) = run_with(test, program(&code, CODE), |_, dir| {
+        let sub = dir.join("SUB");
+        std::fs::create_dir(&sub).unwrap();
+        let font = rust_dos::win32::gdi32::sample_truetype("Quick Face");
+        std::fs::write(sub.join("F.TTF"), font).unwrap();
+        folder = Some(dir.to_path_buf());
+    });
+    assert_eq!(exit, 1, "{log}");
+    let fot = std::fs::read(folder.unwrap().join("Q.FOT")).unwrap();
+    assert_eq!(&fot[..2], b"MZ");
+    let has = |s: &[u8]| fot.windows(s.len()).any(|w| w == s);
+    assert!(has(&[ttf, b"\0"].concat()), "the .FOT names the file");
+    assert!(has(b"Quick Face\0"), "the .FOT has the font's family");
+}
+
+#[test]
+fn create_scalable_font_resource_writes_the_fot_of_a_truetype_file() {
+    // The file named bare, in the folder the fourth argument gives, as
+    // Encarta 97's setup has it.
+    scalable_truetype("create_scalable_truetype", b"F.TTF", b"SUB");
+}
+
+#[test]
+fn create_scalable_font_resource_takes_an_empty_path_as_none() {
+    // The documentation asks for a NULL path or an empty one when the
+    // file is named with its full path.
+    scalable_truetype("create_scalable_empty_path", b"C:\\SUB\\F.TTF", b"");
 }
