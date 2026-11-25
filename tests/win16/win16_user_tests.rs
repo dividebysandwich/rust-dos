@@ -13,6 +13,7 @@ const EW_RESTARTWINDOWS: u16 = 0x42;
 const EXIT_WINDOWS: u16 = 7;
 const EXIT_WINDOWS_EXEC: u16 = 246;
 const WINDOW_FROM_POINT: u16 = 30;
+const GET_WINDOW_TEXT: u16 = 36;
 const CREATE_WINDOW: u16 = 41;
 const FIND_WINDOW: u16 = 50;
 const GET_ACTIVE_WINDOW: u16 = 60;
@@ -25,6 +26,7 @@ const SET_WINDOW_LONG: u16 = 136;
 const REGISTER_CLASS: u16 = 57;
 const GET_CLASS_INFO: u16 = 404;
 const DEF_WINDOW_PROC: u16 = 107;
+const SET_WINDOWS_HOOK_EX: u16 = 291;
 
 /// KERNEL's ordinals.
 const GLOBAL_ALLOC: u16 = 15;
@@ -475,9 +477,9 @@ fn expect_buffer(code: &mut Code, text: &[u8], fail: u8) {
 #[test]
 fn a_subclassed_list_box_takes_and_gives_back_its_strings() {
     // LB_ADDSTRING, LB_FINDSTRING and LB_GETTEXT sent to a list box with
-    // a 16-bit window procedure: Windows 95's thunks give the procedure
-    // a 16:16 copy of each string, and copy the text it writes back into
-    // the caller's buffer. Exit code 1, or which check failed.
+    // a 16-bit window procedure, which gets the caller's strings and
+    // buffer and passes them on to the list box's 32-bit procedure with
+    // CallWindowProc. Exit code 1, or which check failed.
     const LB_ADDSTRING16: u16 = 0x0401;
     const LB_GETTEXT16: u16 = 0x040A;
     const LB_FINDSTRING16: u16 = 0x0410;
@@ -712,6 +714,154 @@ fn a_window_procedure_gets_the_stack_in_ds_and_its_instance_in_ax() {
     p.code.emit(b"DSCHK\0");
     p.code.patch(name_at, name);
     let (exit, log) = run("wndproc_ds", p.build());
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// A program with a window of its own class, whose 16-bit procedure
+/// answers WM_GETTEXT as Memphis Math's answer field does: it writes
+/// "42" into lParam's buffer, notes the lParam it got at `GOT`, and
+/// returns 0. The program sends WM_GETTEXT with its buffer, then calls
+/// GetWindowText. With `hook`, a WH_CALLWNDPROC hook counts the
+/// WM_GETTEXTs it sees at `HOOKED` first. Exit code 1, or which check
+/// failed.
+fn own_buffer_program(hook: bool) -> Vec<u8> {
+    const WM_GETTEXT: u16 = 0x000D;
+    const WH_CALLWNDPROC: u16 = 4;
+    // The WNDCLASS at 40h; the lParam the procedure got, and the hook's
+    // count.
+    const WC: u8 = 0x40;
+    const GOT: u8 = 0x60;
+    const HOOKED: u8 = 0x64;
+    let [buf_lo, buf_hi] = BUFFER.to_le_bytes();
+    let mut p = Program::default();
+    let mut hook_at = None;
+    if hook {
+        p.code.push(WH_CALLWNDPROC);
+        hook_at = Some(p.code.here() + 2);
+        p.code
+            .push_far(0)
+            .emit(&[0x57]) // push di (the instance)
+            .push(0) // every task
+            .call("USER", SET_WINDOWS_HOOK_EX)
+            .emit(&[0x0B, 0xC2]); // or ax,dx
+        exit_if_ax_zero(&mut p.code, 2);
+    }
+    p.code.emit(&[0x89, 0x3E, WC + 10, 0x00]); // mov [WC+10],di: the instance
+    let proc_at = p.code.here() + 4;
+    p.code
+        .emit(&[0xC7, 0x06, WC + 2, 0x00, 0x00, 0x00]) // its procedure
+        .emit(&[0x8C, 0x0E, WC + 4, 0x00]); // mov [WC+4],cs
+    let name_at = p.code.here() + 4;
+    p.code
+        .emit(&[0xC7, 0x06, WC + 22, 0x00, 0x00, 0x00]) // its name
+        .emit(&[0x8C, 0x0E, WC + 24, 0x00])
+        .emit(&[0x1E])
+        .push(WC as u16)
+        .call("USER", REGISTER_CLASS);
+    exit_if_ax_zero(&mut p.code, 3);
+    p.create_window(b"ANSWER\0", POPUP, [0, 0, 100, 60], false, 0);
+    p.code.emit(&[0x8B, 0xF0]); // mov si,ax
+    exit_if_ax_zero(&mut p.code, 4);
+    send_buffer(&mut p, WM_GETTEXT, 0x14);
+    expect_ax(&mut p.code, 0, 5);
+    expect_buffer(&mut p.code, b"42", 6);
+    // The procedure got the caller's own buffer: DS:BUFFER.
+    p.code
+        .emit(&[0x81, 0x3E, GOT, 0x00, buf_lo, buf_hi]) // cmp [GOT],BUFFER
+        .emit(&[0x74, 0x06])
+        .emit(&[0xB0, 7, 0xB4, 0x4C, 0xCD, 0x21])
+        .emit(&[0x8C, 0xD8]) // mov ax,ds
+        .emit(&[0x3B, 0x06, GOT + 2, 0x00]) // cmp ax,[GOT+2]
+        .emit(&[0x74, 0x06])
+        .emit(&[0xB0, 8, 0xB4, 0x4C, 0xCD, 0x21]);
+    if hook {
+        p.code
+            .emit(&[0x80, 0x3E, HOOKED, 0x00, 0x01]) // cmp byte [HOOKED],1
+            .emit(&[0x74, 0x06])
+            .emit(&[0xB0, 9, 0xB4, 0x4C, 0xCD, 0x21]);
+    }
+    // GetWindowText(SI, DS:BUFFER, 14h) sends WM_GETTEXT the same way.
+    p.code
+        .emit(&[0xC7, 0x06, buf_lo, buf_hi, 0x00, 0x00]) // mov word [BUFFER],0
+        .emit(&[0xC7, 0x06, GOT, 0x00, 0x00, 0x00]) // mov word [GOT],0
+        .emit(&[0x56]) // push si
+        .emit(&[0x1E]) // push ds
+        .push(BUFFER)
+        .push(0x14)
+        .call("USER", GET_WINDOW_TEXT);
+    expect_ax(&mut p.code, 0, 10);
+    expect_buffer(&mut p.code, b"42", 11);
+    p.code
+        .emit(&[0x81, 0x3E, GOT, 0x00, buf_lo, buf_hi]) // cmp [GOT],BUFFER
+        .emit(&[0x74, 0x06])
+        .emit(&[0xB0, 12, 0xB4, 0x4C, 0xCD, 0x21])
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    // The window procedure: WM_GETTEXT answered, the rest to
+    // DefWindowProc. DS and SS are the program's data segment.
+    let proc = p.code.here();
+    p.code
+        .emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+        .emit(&[0x83, 0x7E, 0x0C, WM_GETTEXT as u8]) // cmp [bp+0Ch] (msg)
+        .emit(&[0x75, 0x1F]) // jne other
+        .emit(&[0xC4, 0x5E, 0x06]) // les bx,[bp+6] (lParam)
+        .emit(&[0x36, 0x89, 0x1E, GOT, 0x00]) // mov ss:[GOT],bx
+        .emit(&[0x36, 0x8C, 0x06, GOT + 2, 0x00]) // mov ss:[GOT+2],es
+        .emit(&[0x26, 0xC7, 0x07, b'4', b'2']) // mov word es:[bx],'42'
+        .emit(&[0x26, 0xC6, 0x47, 0x02, 0x00]) // mov byte es:[bx+2],0
+        .emit(&[0x31, 0xC0, 0x31, 0xD2]) // xor ax,ax; xor dx,dx
+        .emit(&[0x5D, 0xCA, 0x0A, 0x00]) // pop bp; retf 0Ah
+        .emit(&[
+            0xFF, 0x76, 0x0E, // other: push [bp+0Eh] (hwnd)
+            0xFF, 0x76, 0x0C, // push [bp+0Ch] (msg)
+            0xFF, 0x76, 0x0A, // push [bp+0Ah] (wParam)
+            0xFF, 0x76, 0x08, // push [bp+8] (lParam)
+            0xFF, 0x76, 0x06, // push [bp+6]
+        ])
+        .call("USER", DEF_WINDOW_PROC)
+        .emit(&[0x5D, 0xCA, 0x0A, 0x00]); // pop bp; retf 0Ah
+    p.code.patch(proc_at, proc);
+    if let Some(at) = hook_at {
+        // The hook (code, wParam, lParam): counts the WM_GETTEXTs in
+        // the CWPSTRUCT16 (lParam, wParam, message, hwnd) it gets.
+        let hook = p.code.here();
+        p.code
+            .emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+            .emit(&[0xC4, 0x5E, 0x06]) // les bx,[bp+6]
+            .emit(&[0x26, 0x83, 0x7F, 0x06, WM_GETTEXT as u8]) // cmp es:[bx+6]
+            .emit(&[0x75, 0x05]) // jne done
+            .emit(&[0x36, 0xFE, 0x06, HOOKED, 0x00]) // inc byte ss:[HOOKED]
+            .emit(&[0x31, 0xC0, 0x31, 0xD2]) // done: xor ax,ax; xor dx,dx
+            .emit(&[0x5D, 0xCA, 0x08, 0x00]); // pop bp; retf 8
+        p.code.patch(at, hook);
+    }
+    let name = p.code.here();
+    p.code.emit(b"ANSWER\0");
+    p.code.patch(name_at, name);
+    p.build()
+}
+
+/// End with `fail` if AX is 0.
+fn exit_if_ax_zero(code: &mut Code, fail: u8) {
+    code.emit(&[0x0B, 0xC0, 0x75, 0x06]) // or ax,ax; jnz over the next
+        .emit(&[0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21]);
+}
+
+#[test]
+fn send_message_gives_a_16_bit_window_procedure_the_callers_buffer() {
+    // Windows 3.1's USER calls a 16-bit window procedure with the
+    // message 16-bit code sends as it is, and Windows 95 does the same
+    // between 16-bit code and a 16-bit procedure: the procedure writes
+    // into the caller's own buffer, whatever it returns.
+    let (exit, log) = run("own_buffer", own_buffer_program(false));
+    assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn a_call_window_proc_hook_sees_a_message_sent_to_a_16_bit_procedure() {
+    // The WH_CALLWNDPROC hook runs before the procedure, once, and the
+    // procedure still gets the caller's buffer.
+    let (exit, log) = run("own_buffer_hook", own_buffer_program(true));
     assert_eq!(exit, 1, "{log}");
 }
 
