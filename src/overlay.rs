@@ -433,10 +433,14 @@ impl Backend for Overlay {
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let (from, to) = (hostfs::layer_path(from), hostfs::layer_path(to));
         self.meta(&from)?;
-        if from == to {
-            return Ok(());
-        }
-        if !from.is_empty() && fold(&from) == fold(&to) {
+        if fold(&from) == fold(&to) {
+            // The entry itself, in its own folder: a folder on the way
+            // spelled another way is the same folder, and keeps its case.
+            let leaf = to.rsplit('/').next().unwrap_or(&to);
+            let to = child(parent(&from), leaf);
+            if from == to {
+                return Ok(());
+            }
             return self.recase(&from, &to);
         }
         if self.meta(&to).is_ok() {
