@@ -82,12 +82,17 @@ start it (pick with the D-pad, A to start). A game's gamepad mapping plays on
 the first port set to **Gamepad as keyboard** in *Controls → Port 1 Controls*,
 its action wheel included.
 
-**OS images.** An OS image is a hard disk image with an operating system
-already installed on it, such as Windows 98 SE. The core can start a game
-inside that system instead of on its own DOS. Windows games usually don't
-need one (see [Windows games](#windows-games)). Making an image means
-installing the system on it first, as
-[win9x-howto.md](../docs/win9x-howto.md) describes.
+**OS images (optional).** You usually don't need one. DOS games run on
+the core's own DOS, and Windows 95, 98 and 3.1 games run on the built-in
+Windows (see [Windows games](#windows-games)), with no operating system
+installed anywhere. Skip this part unless a game doesn't run that way,
+or you know it has to run under the real system.
+
+If you do need one: an OS image is a hard disk image with an operating
+system already installed on it, such as Windows 98 SE, and the core can
+start a game inside that system instead of on its own DOS. Making the
+image means installing the system on it first, as
+[win9x-howto.md](../docs/win9x-howto.md) describes. Then:
 
 * Put the image in the `rust-dos/os` folder inside the frontend's system
   folder (in RetroArch, *Settings → Directory → System/BIOS*), for
