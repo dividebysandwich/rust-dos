@@ -389,6 +389,7 @@ impl Core {
         let m = &mut self.m;
         self.memmap.refresh(&mut m.cpu.bus, cb.env);
         m.notices.extend(m.cpu.bus.printer_notices());
+        m.cpu.bus.disk.close_idle_files();
         for notice in m.notices.drain(..) {
             cb.message(&notice);
         }

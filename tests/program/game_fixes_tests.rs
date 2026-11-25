@@ -2,8 +2,9 @@
 //! DSP, the patched Sound Blaster drivers mix around the centre line, and
 //! Jukebox Adventure's music player gets past effect Bxx, and Lands of
 //! Lore 2's launchers, patched as they load, start the game with 32 MB
-//! of virtual memory. The fixes that skip a program at EXEC are tested in
-//! exec_tests.rs.
+//! of virtual memory, and Whale's Voyage's CD intro, patched as it
+//! loads, keeps its code through its VESA mode query. The fixes that
+//! skip a program at EXEC are tested in exec_tests.rs.
 
 use rust_dos::cpu::Cpu;
 use rust_dos::game_fixes::{CodePatch, Kind, by_name};
@@ -490,4 +491,117 @@ fn a_launcher_without_lolg_dat_beside_it_isnt_patched() {
         let got = run_lol2_launcher(launcher, "lol2_alone", false, |_| {});
         assert_eq!(got, SETTINGS.replace("XX", "24"), "{}", launcher.name);
     }
+}
+
+/// The code `whales-voyage-vesa-intro` patches INTRO.EXE with.
+fn whales_voyage_code() -> &'static CodePatch {
+    let Kind::AtLoad { programs, .. } = by_name("whales-voyage-vesa-intro").unwrap().kind else {
+        panic!("whales-voyage-vesa-intro patches INTRO.EXE as it loads");
+    };
+    programs[0].1
+}
+
+/// Where Whale's Voyage's INTRO.EXE has its code segment in the file, and
+/// its VESA routine, its SVGA flag and the 4F01h call's return in it.
+const WV_CODE: usize = 0x210;
+const WV_VESA: u16 = 0x1CCB;
+const WV_FLAG: usize = 0x1BA3;
+const WV_RETURN: u16 = 0x1D04;
+
+/// A program with the pieces of Whale's Voyage's intro that
+/// `whales-voyage-vesa-intro` checks at their offsets in the file, as the
+/// intro has them, with the intro's data that the routine uses: it calls
+/// the intro's VESA routine and halts.
+fn whales_voyage_intro() -> Vec<u8> {
+    let code = whales_voyage_code();
+    let mut file = vec![0u8; 0x28CE];
+    for b in code
+        .checks
+        .iter()
+        .chain(code.patches.iter().map(|(old, _)| old))
+    {
+        file[b.at..b.at + b.bytes.len()].copy_from_slice(b.bytes);
+    }
+    // The modes it asks for: 100h, then 101h.
+    file[WV_CODE + 0x1BA4..WV_CODE + 0x1BA8].copy_from_slice(&[0x00, 0x01, 0x01, 0x01]);
+    let header: [u16; 14] = [
+        0x5A4D,
+        (file.len() % 512) as u16,
+        file.len().div_ceil(512) as u16,
+        0,                                               // no relocations
+        0x20,                                            // header paragraphs
+        0x40,                                            // MINALLOC
+        0xFFFF,                                          // MAXALLOC
+        (file.len() - 0x200).div_ceil(16) as u16 + 0x10, // SS: after the load module
+        0x100,                                           // SP
+        0,
+        0,    // IP
+        0x01, // CS: the intro's code segment, 10h bytes in
+        0x1C,
+        0,
+    ];
+    for (i, word) in header.iter().enumerate() {
+        file[i * 2..i * 2 + 2].copy_from_slice(&word.to_le_bytes());
+    }
+    let [lo, hi] = (WV_VESA - 3).to_le_bytes();
+    // CALL the VESA routine / HLT.
+    file[WV_CODE..WV_CODE + 4].copy_from_slice(&[0xE8, lo, hi, 0xF4]);
+    file
+}
+
+/// Run the intro's VESA routine on the generic Super VGA, from a
+/// directory with WVD.EXE beside INTRO.EXE when `game`: whether the
+/// intro's code survived the 4F01h call (the routine returned to the HLT)
+/// and its SVGA flag.
+fn run_whales_voyage_intro(name: &str, game: bool, setup: impl Fn(&mut Cpu)) -> (bool, u8) {
+    let dir = PathBuf::from("target/test_game_fixes").join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("INTRO.EXE"), whales_voyage_intro()).unwrap();
+    if game {
+        std::fs::write(dir.join("WVD.EXE"), [0xF4]).unwrap();
+    }
+    let mut cpu = Cpu::new(dir);
+    setup(&mut cpu);
+    assert!(cpu.load_executable("INTRO.EXE", None));
+    let cs = cpu.cs();
+    let mut steps = 0;
+    let survived = loop {
+        let at = cpu.get_physical_addr(cpu.cs(), cpu.ip());
+        if cpu.cs() == cs && cpu.ip() == 3 {
+            break true;
+        }
+        // The 4F01h call returns to zeros where its code was.
+        if cpu.cs() == cs && cpu.ip() == WV_RETURN && cpu.bus.read_8(at) == 0 {
+            break false;
+        }
+        cpu.step();
+        steps += 1;
+        assert!(
+            steps < 100_000,
+            "stuck at {:04X}:{:04X}",
+            cpu.cs(),
+            cpu.ip()
+        );
+    };
+    let flag = cpu.bus.read_8(((cs as usize) << 4) + WV_FLAG);
+    (survived, flag)
+}
+
+#[test]
+fn whales_voyages_intro_keeps_its_code_and_sets_its_vesa_mode() {
+    assert_eq!(run_whales_voyage_intro("wv", true, |_| {}), (true, 0xFF));
+}
+
+#[test]
+fn whales_voyages_intro_loses_its_code_without_the_fix() {
+    let off = run_whales_voyage_intro("wv_fixes_off", true, |cpu| {
+        cpu.bus.game_fixes_off = vec!["whales-voyage-vesa-intro".to_string()];
+    });
+    assert_eq!(off, (false, 0));
+    // Another program called INTRO.EXE isn't patched.
+    assert_eq!(
+        run_whales_voyage_intro("wv_alone", false, |_| {}),
+        (false, 0)
+    );
 }
