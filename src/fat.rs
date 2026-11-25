@@ -230,6 +230,85 @@ fn alias(long: &str, taken: &[[u8; 11]]) -> Option<[u8; 11]> {
     })
 }
 
+/// The names an entry named `long` gets in a directory, as Windows 95
+/// makes them: the DOS name, and the long name entries it needs.
+struct NewName {
+    long: String,
+    /// `long` in UTF-16, as its long name entries hold it.
+    units: Vec<u16>,
+    short: [u8; 11],
+    /// False for a DOS name in upper case, which has no long name entries.
+    needs_long: bool,
+}
+
+impl NewName {
+    /// The names for `long` among the entries `names` of its directory:
+    /// 03h for a name Windows doesn't allow, 05h if an entry has it, as
+    /// its long name or its DOS name, in any case.
+    fn new(names: &[Entry], long: &str) -> Result<Self, u8> {
+        let long = long.trim_end_matches(['.', ' ']);
+        let units: Vec<u16> = long.encode_utf16().collect();
+        if units.is_empty()
+            || units.len() > 255
+            || long.chars().any(|c| c < ' ' || "\\/:*?\"<>|".contains(c))
+        {
+            return Err(PATH_NOT_FOUND);
+        }
+        let clash = |e: &Entry| {
+            e.name.eq_ignore_ascii_case(long)
+                || e.long_name.as_deref().is_some_and(|l| same_long(l, long))
+        };
+        if names.iter().any(clash) {
+            return Err(ACCESS_DENIED);
+        }
+        let taken: Vec<[u8; 11]> = names.iter().filter_map(|e| short_name(&e.name)).collect();
+        // A DOS name as it is needs no long name; one in lower case keeps
+        // its case in one.
+        let exact = short_name(long)
+            .filter(|raw| display_name(raw).eq_ignore_ascii_case(long) && raw[0] != b'.');
+        let (short, needs_long) = match exact {
+            Some(raw) if display_name(&raw) == long => (raw, false),
+            Some(raw) => (raw, true),
+            None => (alias(long, &taken).ok_or(ACCESS_DENIED)?, true),
+        };
+        Ok(NewName {
+            long: long.to_string(),
+            units,
+            short,
+            needs_long,
+        })
+    }
+
+    /// The directory slots the entry takes, its long name entries counted.
+    fn slots(&self) -> usize {
+        if self.needs_long {
+            self.units.len().div_ceil(13) + 1
+        } else {
+            1
+        }
+    }
+}
+
+/// Whether two long names are the same name: Windows compares them
+/// without regard to case.
+fn same_long(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+/// Whether `entry` is the one a long-name call means by `part`: its long
+/// name in any case, or its DOS name written out in full. DOS cuts a
+/// longer name to 8.3 to find it (`short_name`); Win32's calls don't.
+/// The DOS name matches in any case, as DOS's `same_name` matches it: a
+/// disk written by another system may hold one in lower case.
+fn named(entry: &Entry, part: &str) -> bool {
+    entry
+        .long_name
+        .as_deref()
+        .is_some_and(|l| same_long(l, part))
+        || canonical_name(part)
+            .is_some_and(|c| c.eq_ignore_ascii_case(&entry.name) && c.eq_ignore_ascii_case(part))
+}
+
 /// The width of a volume's FAT entries, which its cluster count decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FatType {
@@ -824,6 +903,49 @@ impl FatVolume {
         Ok(current)
     }
 
+    /// `find_in` for a long-name call, whose path may have long names
+    /// (`named`). The entry has its long name.
+    fn find_long_in(&self, state: &State, path: &[&str]) -> Result<Entry, u8> {
+        let mut current = Entry::root();
+        for (i, part) in path.iter().enumerate() {
+            let missing = if i + 1 == path.len() {
+                FILE_NOT_FOUND
+            } else {
+                PATH_NOT_FOUND
+            };
+            if !current.is_dir() {
+                return Err(PATH_NOT_FOUND);
+            }
+            current = self
+                .list_in(state, &current)?
+                .into_iter()
+                .find(|e| named(e, part))
+                .ok_or(missing)?;
+            if current.is_dir()
+                && (current.cluster == 0 || current.cluster == state.params.root_cluster)
+            {
+                current = Entry::root();
+            }
+        }
+        Ok(current)
+    }
+
+    /// The directory `path` names in a long-name call: 03h if it isn't
+    /// one.
+    fn dir_long_in(&self, state: &State, path: &[&str]) -> Result<Entry, u8> {
+        match self.find_long_in(state, path) {
+            Ok(dir) if dir.is_dir() => Ok(dir),
+            _ => Err(PATH_NOT_FOUND),
+        }
+    }
+
+    /// `find` for a long-name call: the components of `path` may be long
+    /// names, as Win32's calls give them, matched without regard to case.
+    pub fn find_long(&self, path: &[&str]) -> Result<Entry, u8> {
+        let state = self.state();
+        self.find_long_in(&state, path)
+    }
+
     /// The directory `path` names: 03h if it isn't one.
     fn dir_in(&self, state: &State, path: &[&str]) -> Result<Entry, u8> {
         match self.find_in(state, path) {
@@ -902,53 +1024,58 @@ impl FatVolume {
 
     /// Put an entry named `long` in `dir`: the long name entries, if it
     /// needs them, and the entry with its DOS name.
-    fn add_long_entry(&self, state: &mut State, dir: &Entry, long: &str, attr: u8, cluster: u32) -> Result<Entry, u8> {
-        let long = long.trim_end_matches(['.', ' ']);
-        let units: Vec<u16> = long.encode_utf16().collect();
-        if units.is_empty() || units.len() > 255 || long.chars().any(|c| c < ' ' || "\\/:*?\"<>|".contains(c)) {
-            return Err(PATH_NOT_FOUND);
-        }
+    fn add_long_entry(
+        &self,
+        state: &mut State,
+        dir: &Entry,
+        long: &str,
+        attr: u8,
+        cluster: u32,
+    ) -> Result<Entry, u8> {
         let names = self.list_in(state, dir)?;
-        let taken: Vec<[u8; 11]> = names.iter().filter_map(|e| short_name(&e.name)).collect();
-        let clash = |name: &str| {
-            names.iter().any(|e| e.name.eq_ignore_ascii_case(name) || e.long_name.as_deref().is_some_and(|l| l.to_lowercase() == name.to_lowercase()))
-        };
-        if clash(long) {
-            return Err(ACCESS_DENIED);
-        }
-        // A DOS name as it is needs no long name; one in lower case keeps
-        // its case in one.
-        let exact = short_name(long).filter(|raw| display_name(raw).eq_ignore_ascii_case(long) && raw[0] != b'.');
-        let (name, needs_long) = match exact {
-            Some(raw) if display_name(&raw) == long => (raw, false),
-            Some(raw) => (raw, true),
-            None => (alias(long, &taken).ok_or(ACCESS_DENIED)?, true),
-        };
-        let pieces = if needs_long { units.len().div_ceil(13) } else { 0 };
-        let run = self.free_run(state, dir, pieces + 1)?;
-        let sum = checksum(&name);
+        let name = NewName::new(&names, long)?;
+        let run = self.free_run(state, dir, name.slots(), &[])?;
+        self.write_named(
+            state,
+            &run,
+            &name,
+            Self::new_entry(&name.short, attr, cluster),
+        )
+    }
+
+    /// Write the entry `raw`, named `name`, into the slots `run`: the long
+    /// name entries first, the last part first, then the entry.
+    fn write_named(
+        &self,
+        state: &State,
+        run: &[EntryRef],
+        name: &NewName,
+        mut raw: [u8; ENTRY_SIZE],
+    ) -> Result<Entry, u8> {
+        let pieces = run.len() - 1;
+        let sum = checksum(&name.short);
         for (i, &at) in run[..pieces].iter().enumerate() {
             let seq = pieces - i;
-            let mut raw = [0u8; ENTRY_SIZE];
-            raw[0] = seq as u8 | if i == 0 { 0x40 } else { 0 };
-            raw[11] = ATTR_LONG_NAME;
-            raw[13] = sum;
+            let mut lfn = [0u8; ENTRY_SIZE];
+            lfn[0] = seq as u8 | if i == 0 { 0x40 } else { 0 };
+            lfn[11] = ATTR_LONG_NAME;
+            lfn[13] = sum;
             let part = (seq - 1) * 13;
             for (k, &offset) in LFN_OFFSETS.iter().enumerate() {
-                let unit = match (part + k).cmp(&units.len()) {
-                    std::cmp::Ordering::Less => units[part + k],
+                let unit = match (part + k).cmp(&name.units.len()) {
+                    std::cmp::Ordering::Less => name.units[part + k],
                     std::cmp::Ordering::Equal => 0,
                     std::cmp::Ordering::Greater => 0xFFFF,
                 };
-                raw[offset..offset + 2].copy_from_slice(&unit.to_le_bytes());
+                lfn[offset..offset + 2].copy_from_slice(&unit.to_le_bytes());
             }
-            self.write_raw(at, &raw)?;
+            self.write_raw(at, &lfn)?;
         }
-        let raw = Self::new_entry(&name, attr, cluster);
+        raw[..11].copy_from_slice(&name.short);
         let at = run[pieces];
         self.write_raw(at, &raw)?;
         let mut entry = state.params.entry(&raw, at);
-        entry.long_name = needs_long.then(|| long.to_string());
+        entry.long_name = name.needs_long.then(|| name.long.clone());
         Ok(entry)
     }
 
@@ -983,8 +1110,15 @@ impl FatVolume {
 
     /// `count` free entry slots in a row in `dir`, growing a subdirectory
     /// (or FAT32's root directory) by clusters until there are. A FAT12 or
-    /// FAT16 root directory can't grow: 05h.
-    fn free_run(&self, state: &mut State, dir: &Entry, count: usize) -> Result<Vec<EntryRef>, u8> {
+    /// FAT16 root directory can't grow: 05h. The slots `reused` count as
+    /// free: those of an entry being renamed, which its new name can take.
+    fn free_run(
+        &self,
+        state: &mut State,
+        dir: &Entry,
+        count: usize,
+        reused: &[EntryRef],
+    ) -> Result<Vec<EntryRef>, u8> {
         let mut buf = [0u8; SECTOR_SIZE];
         let mut run: Vec<EntryRef> = Vec::new();
         let mut ended = false;
@@ -994,7 +1128,7 @@ impl FatVolume {
                 let first = buf[index * ENTRY_SIZE];
                 // Everything after the end marker is free.
                 ended |= first == 0;
-                if ended || first == DELETED {
+                if ended || first == DELETED || reused.contains(&EntryRef { sector, index }) {
                     run.push(EntryRef { sector, index });
                     if run.len() == count {
                         return Ok(run);
@@ -1055,6 +1189,15 @@ impl FatVolume {
     /// Mark the entry at `at` in `dir` deleted, with the long name entries
     /// in front of it.
     fn delete_entry(&self, state: &State, dir: &Entry, at: EntryRef) -> Result<(), u8> {
+        for target in self.entry_slots(state, dir, at)? {
+            self.update_entry(target, |slot| slot[0] = DELETED)?;
+        }
+        Ok(())
+    }
+
+    /// The slots the entry at `at` in `dir` takes: its own and those of
+    /// the long name entries in front of it.
+    fn entry_slots(&self, state: &State, dir: &Entry, at: EntryRef) -> Result<Vec<EntryRef>, u8> {
         let slots = self.slots(state, dir)?;
         let mut targets = vec![at];
         if let Some(i) = slots.iter().position(|(r, _)| *r == at) {
@@ -1066,10 +1209,7 @@ impl FatVolume {
                     .map(|(r, _)| *r),
             );
         }
-        for target in targets {
-            self.update_entry(target, |slot| slot[0] = DELETED)?;
-        }
-        Ok(())
+        Ok(targets)
     }
 
     /// Read from `offset` of `file` into `buf`: the number of bytes read,
@@ -1362,6 +1502,110 @@ impl FatVolume {
             self.delete_entry(&state, &from_dir, at)
         })();
         self.finish(&mut state).and(result)
+    }
+
+    /// Rename or move the file or directory at `from` to the name `long`
+    /// in the directory at `to_dir`, as Windows 9x's long-name calls do:
+    /// both paths may have long names (`find_long`). The entry gets the
+    /// DOS name and long name entries `long` needs, as `create_long`
+    /// makes them, and its old long name entries are deleted; its
+    /// clusters, size, dates and attributes stay. `long` may be the
+    /// entry's own name in another case. A directory may move to another
+    /// directory, but not into itself (05h). Returns the renamed entry.
+    pub fn rename_long(&self, from: &[&str], to_dir: &[&str], long: &str) -> Result<Entry, u8> {
+        let mut state = self.state();
+        let result = (|| {
+            let (_, from_parent) = from.split_last().ok_or(FILE_NOT_FOUND)?;
+            let from_dir = self.dir_long_in(&state, from_parent)?;
+            let entry = self.find_long_in(&state, from)?;
+            let at = entry.at.ok_or(ACCESS_DENIED)?;
+            let dir = self.dir_long_in(&state, to_dir)?;
+            let same_dir = dir.cluster == from_dir.cluster;
+            if entry.is_dir() && !same_dir {
+                for depth in 0..=to_dir.len() {
+                    if self.find_long_in(&state, &to_dir[..depth])?.cluster == entry.cluster {
+                        return Err(ACCESS_DENIED);
+                    }
+                }
+            }
+            // The entry's own names are free for it to take again.
+            let names: Vec<Entry> = self
+                .list_in(&state, &dir)?
+                .into_iter()
+                .filter(|e| e.at != Some(at))
+                .collect();
+            let name = NewName::new(&names, long)?;
+            let old = self.entry_slots(&state, &from_dir, at)?;
+            let raw: [u8; ENTRY_SIZE] = self.raw_entry(at)?
+                [at.index * ENTRY_SIZE..(at.index + 1) * ENTRY_SIZE]
+                .try_into()
+                .unwrap();
+            // The entry stays where it is when its new long name fits in
+            // front of it, so open files still find it; otherwise it goes
+            // to the first free slots, its own old ones counted.
+            let in_place = if same_dir {
+                self.run_ending_at(&state, &dir, at, name.slots(), &old)?
+            } else {
+                None
+            };
+            let run = match in_place {
+                Some(run) => run,
+                None => self.free_run(
+                    &mut state,
+                    &dir,
+                    name.slots(),
+                    if same_dir { &old } else { &[] },
+                )?,
+            };
+            let renamed = self.write_named(&state, &run, &name, raw)?;
+            for &slot in old.iter().filter(|slot| !run.contains(slot)) {
+                self.update_entry(slot, |raw| raw[0] = DELETED)?;
+            }
+            if entry.is_dir() && !same_dir {
+                // ".." of a directory in the root is 0, FAT32's too.
+                let first = state.params.cluster_sector(entry.cluster);
+                let parent = dir.cluster;
+                self.update_entry(
+                    EntryRef {
+                        sector: first,
+                        index: 1,
+                    },
+                    |raw| {
+                        if raw[..11] == *b"..         " {
+                            state.params.set_cluster(raw, parent);
+                        }
+                    },
+                )?;
+            }
+            Ok(renamed)
+        })();
+        let finished = self.finish(&mut state);
+        let entry = result?;
+        finished.map(|()| entry)
+    }
+
+    /// The `count` slots of `dir` that end with the entry at `at`, if
+    /// those in front of it are free or among `reused`.
+    fn run_ending_at(
+        &self,
+        state: &State,
+        dir: &Entry,
+        at: EntryRef,
+        count: usize,
+        reused: &[EntryRef],
+    ) -> Result<Option<Vec<EntryRef>>, u8> {
+        let slots = self.slots(state, dir)?;
+        let Some(end) = slots.iter().position(|(r, _)| *r == at) else {
+            return Ok(None);
+        };
+        let Some(start) = (end + 1).checked_sub(count) else {
+            return Ok(None);
+        };
+        let run = &slots[start..=end];
+        let free = run
+            .iter()
+            .all(|(r, raw)| raw[0] == DELETED || reused.contains(r));
+        Ok(free.then(|| run.iter().map(|(r, _)| *r).collect()))
     }
 
     /// Create the directory `path`.
@@ -1833,6 +2077,281 @@ mod tests {
         volume.remove(&["LONGNA~1.TXT"]).unwrap();
         volume.disk().read(root, &mut buf).unwrap();
         assert_eq!((buf[ENTRY_SIZE], buf[2 * ENTRY_SIZE]), (DELETED, DELETED));
+    }
+
+    /// The root directory's files as a reader other than this module sees
+    /// them: (DOS name, long name), the long name entries checked against
+    /// the FAT specification (fatgen103): the last part first with 40h in
+    /// its order byte, numbered down to 1, each with the checksum of the
+    /// entry's DOS name, the name ended by a 0000h and padded with FFFFh.
+    /// Panics at long name entries that belong to no entry.
+    fn root_by_spec(volume: &FatVolume) -> Vec<(String, Option<String>)> {
+        let layout = volume.layout();
+        let start =
+            layout.reserved_sectors as u64 + layout.fats as u64 * layout.sectors_per_fat as u64;
+        let mut root = vec![0u8; layout.root_entries as usize * 32];
+        for (i, sector) in root.chunks_mut(512).enumerate() {
+            volume.disk().read(start + i as u64, sector).unwrap();
+        }
+        let mut found = Vec::new();
+        let mut pending: Vec<&[u8]> = Vec::new();
+        for raw in root.chunks(32) {
+            match raw[0] {
+                0 => break,
+                0xE5 => {
+                    assert!(
+                        pending.is_empty(),
+                        "long name entries in front of a deleted entry"
+                    );
+                    continue;
+                }
+                _ => {}
+            }
+            if raw[11] == 0x0F {
+                pending.push(raw);
+                continue;
+            }
+            let mut sum = 0u8;
+            for &b in &raw[..11] {
+                sum = ((sum & 1) << 7).wrapping_add(sum >> 1).wrapping_add(b);
+            }
+            let long = (!pending.is_empty()).then(|| {
+                assert_eq!(
+                    pending[0][0],
+                    0x40 | pending.len() as u8,
+                    "the last part first"
+                );
+                let mut units = Vec::new();
+                for (n, lfn) in pending.iter().rev().enumerate() {
+                    assert_eq!(lfn[0] & 0x3F, n as u8 + 1, "order");
+                    assert_eq!(lfn[13], sum, "checksum");
+                    assert_eq!((lfn[12], lfn[26], lfn[27]), (0, 0, 0));
+                    for range in [1..11, 14..26, 28..32] {
+                        units.extend(
+                            lfn[range]
+                                .chunks(2)
+                                .map(|c| u16::from_le_bytes([c[0], c[1]])),
+                        );
+                    }
+                }
+                let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+                assert!(units.iter().skip(end + 1).all(|&u| u == 0xFFFF), "padding");
+                String::from_utf16(&units[..end]).unwrap()
+            });
+            pending.clear();
+            if raw[11] & ATTR_VOLUME != 0 {
+                continue;
+            }
+            let text = |b: &[u8]| String::from_utf8_lossy(b).trim_end().to_string();
+            let (stem, ext) = (text(&raw[..8]), text(&raw[8..11]));
+            found.push((
+                if ext.is_empty() {
+                    stem
+                } else {
+                    format!("{stem}.{ext}")
+                },
+                long,
+            ));
+        }
+        assert!(pending.is_empty(), "long name entries at the end");
+        found
+    }
+
+    fn named_as(name: &str, long: Option<&str>) -> (String, Option<String>) {
+        (name.to_string(), long.map(str::to_string))
+    }
+
+    /// A long-name rename names the entry as Windows 95's VFAT does: long
+    /// name entries in front of it and a DOS name made from the long one;
+    /// the old long name entries are deleted, and the file keeps its
+    /// clusters and contents.
+    #[test]
+    fn a_long_name_rename_writes_long_name_entries() {
+        let volume = floppy("rename_long.img");
+        let file = volume.create(&["PLAIN.TXT"], 0).unwrap();
+        volume.write(file.at.unwrap(), 0, b"contents").unwrap();
+        let cluster = volume.find(&["PLAIN.TXT"]).unwrap().cluster;
+
+        let long = "A long file name for a save.txt";
+        let renamed = volume.rename_long(&["PLAIN.TXT"], &[], long).unwrap();
+        assert_eq!(
+            (renamed.name.as_str(), renamed.long_name.as_deref()),
+            ("ALONGF~1.TXT", Some(long))
+        );
+        assert_eq!(volume.find(&["PLAIN.TXT"]), Err(FILE_NOT_FOUND));
+        let found = volume
+            .find_long(&["a LONG file name for a save.TXT"])
+            .unwrap();
+        assert_eq!((found.cluster, found.size), (cluster, 8));
+        assert_eq!(contents(&volume, &["ALONGF~1.TXT"]), b"contents");
+        assert_eq!(
+            root_by_spec(&volume),
+            [named_as("ALONGF~1.TXT", Some(long))]
+        );
+        let listed = volume.list(&[]).unwrap();
+        assert_eq!(listed[0].long_name.as_deref(), Some(long));
+
+        // Renamed again, the old long name's entries go.
+        volume.rename_long(&[long], &[], "Short one.txt").unwrap();
+        assert_eq!(
+            root_by_spec(&volume),
+            [named_as("SHORTO~1.TXT", Some("Short one.txt"))]
+        );
+        // A DOS name in upper case has no long name entries.
+        volume
+            .rename_long(&["short ONE.txt"], &[], "NOTES.TXT")
+            .unwrap();
+        assert_eq!(root_by_spec(&volume), [named_as("NOTES.TXT", None)]);
+        assert_eq!(contents(&volume, &["NOTES.TXT"]), b"contents");
+        assert_eq!(
+            volume.free_clusters(),
+            floppy("rename_long_empty.img").free_clusters() - 1
+        );
+        // Names that can't be: 03h, and a missing file 02h.
+        assert_eq!(
+            volume.rename_long(&["NOTES.TXT"], &[], "bad:name"),
+            Err(PATH_NOT_FOUND)
+        );
+        assert_eq!(
+            volume.rename_long(&["Short one.txt"], &[], "x"),
+            Err(FILE_NOT_FOUND)
+        );
+    }
+
+    /// A long-name rename to the entry's own name in another case renames
+    /// it, as on Windows 9x, where DOS's rename finds the name taken. The
+    /// entry keeps its DOS name, which is free for it to take again.
+    #[test]
+    fn a_long_name_rename_changes_only_the_case() {
+        let volume = floppy("rename_case.img");
+        let file = volume.create(&["CONFIG.CFG"], 0).unwrap();
+        volume.write(file.at.unwrap(), 0, b"cfg").unwrap();
+        let cluster = volume.find(&["CONFIG.CFG"]).unwrap().cluster;
+        assert_eq!(
+            volume.rename(&["CONFIG.CFG"], &["config.cfg"]),
+            Err(ACCESS_DENIED)
+        );
+
+        volume
+            .rename_long(&["CONFIG.CFG"], &[], "config.cfg")
+            .unwrap();
+        assert_eq!(
+            root_by_spec(&volume),
+            [named_as("CONFIG.CFG", Some("config.cfg"))]
+        );
+        volume
+            .rename_long(&["config.cfg"], &[], "Config.Cfg")
+            .unwrap();
+        assert_eq!(
+            root_by_spec(&volume),
+            [named_as("CONFIG.CFG", Some("Config.Cfg"))]
+        );
+        assert_eq!(volume.find(&["CONFIG.CFG"]).unwrap().cluster, cluster);
+        assert_eq!(contents(&volume, &["CONFIG.CFG"]), b"cfg");
+        volume
+            .rename_long(&["config.cfg"], &[], "CONFIG.CFG")
+            .unwrap();
+        assert_eq!(root_by_spec(&volume), [named_as("CONFIG.CFG", None)]);
+
+        // A long name in another case keeps its alias.
+        volume.create_long(&[], "Read Me.txt", 0).unwrap();
+        volume
+            .rename_long(&["read me.txt"], &[], "READ ME.TXT")
+            .unwrap();
+        assert_eq!(
+            root_by_spec(&volume)[1],
+            named_as("README~1.TXT", Some("READ ME.TXT"))
+        );
+        // Another entry's long name or DOS name is taken, in any case.
+        assert_eq!(
+            volume.rename_long(&["CONFIG.CFG"], &[], "read me.txt"),
+            Err(ACCESS_DENIED)
+        );
+        assert_eq!(
+            volume.rename_long(&["CONFIG.CFG"], &[], "readme~1.txt"),
+            Err(ACCESS_DENIED)
+        );
+    }
+
+    /// The DOS name a long-name rename makes takes the first numeric tail
+    /// no other entry has, and a name that is 8.3 in another case none.
+    #[test]
+    fn a_long_name_rename_takes_the_first_free_numeric_tail() {
+        let volume = floppy("rename_tail.img");
+        for n in 1..=9 {
+            volume
+                .create_long(&[], &format!("Saved game {n}.sav"), 0)
+                .unwrap();
+        }
+        volume.create(&["SLOT.SAV"], 0).unwrap();
+        let tenth = volume
+            .rename_long(&["SLOT.SAV"], &[], "Saved game 10.sav")
+            .unwrap();
+        assert_eq!(tenth.name, "SAVED~10.SAV");
+        volume.remove(&["SAVEDG~3.SAV"]).unwrap();
+        volume.create(&["SLOT.SAV"], 0).unwrap();
+        let again = volume
+            .rename_long(&["SLOT.SAV"], &[], "Saved game 11.sav")
+            .unwrap();
+        assert_eq!(again.name, "SAVEDG~3.SAV");
+        volume.create(&["SLOT.SAV"], 0).unwrap();
+        let fits = volume
+            .rename_long(&["SLOT.SAV"], &[], "readme.txt")
+            .unwrap();
+        assert_eq!(
+            (fits.name.as_str(), fits.long_name.as_deref()),
+            ("README.TXT", Some("readme.txt"))
+        );
+        let listed = root_by_spec(&volume);
+        assert!(listed.contains(&named_as("SAVED~10.SAV", Some("Saved game 10.sav"))));
+        assert!(listed.contains(&named_as("SAVEDG~3.SAV", Some("Saved game 11.sav"))));
+        assert!(listed.contains(&named_as("README.TXT", Some("readme.txt"))));
+        assert_eq!(listed.len(), 11);
+    }
+
+    /// A long-name rename moves a file, or a directory with its files, to
+    /// another directory; the directory's ".." then names its new parent.
+    /// A directory can't move into itself.
+    #[test]
+    fn a_long_name_rename_moves_between_directories() {
+        let volume = floppy("rename_move.img");
+        let saves = volume.mkdir_long(&[], "My Saves").unwrap();
+        let file = volume.create(&["PLAIN.TXT"], 0).unwrap();
+        volume.write(file.at.unwrap(), 0, b"slot").unwrap();
+        volume
+            .rename_long(&["PLAIN.TXT"], &["my saves"], "Slot One.sav")
+            .unwrap();
+        assert_eq!(volume.find(&["PLAIN.TXT"]), Err(FILE_NOT_FOUND));
+        assert_eq!(contents(&volume, &["MYSAVE~1", "SLOTON~1.SAV"]), b"slot");
+        let inside = volume.list(&["MYSAVE~1"]).unwrap();
+        assert_eq!(inside[2].long_name.as_deref(), Some("Slot One.sav"));
+
+        volume.mkdir_long(&[], "Old Folder").unwrap();
+        volume
+            .create_long(&["OLDFOL~1"], "inner file.txt", 0)
+            .unwrap();
+        volume
+            .rename_long(&["Old Folder"], &["My Saves"], "Moved Folder")
+            .unwrap();
+        assert!(
+            volume
+                .find_long(&["My Saves", "Moved Folder", "Inner File.txt"])
+                .is_ok()
+        );
+        let up = volume.find(&["MYSAVE~1", "MOVEDF~1", ".."]).unwrap();
+        assert_eq!(up.cluster, saves.cluster);
+        assert_eq!(
+            root_by_spec(&volume),
+            [named_as("MYSAVE~1", Some("My Saves"))]
+        );
+        assert_eq!(
+            volume.rename_long(&["My Saves"], &["My Saves", "Moved Folder"], "Loop"),
+            Err(ACCESS_DENIED)
+        );
+        assert_eq!(
+            volume.rename_long(&["My Saves"], &["Nowhere"], "Loop"),
+            Err(PATH_NOT_FOUND)
+        );
     }
 
     #[test]

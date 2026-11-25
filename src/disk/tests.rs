@@ -2348,6 +2348,95 @@ fn a_long_name_call_renames_a_name_to_another_case() {
     assert!(disk.is_file(r"C:\CONFIG.CFG"));
 }
 
+/// On a FAT disk image, a long-name call renames a file to a long name
+/// and to its own name in another case, writing the long name entries as
+/// VFAT does on Windows 9x. DOS's rename still finds a name taken in
+/// another case (05h), and drops a long name.
+#[test]
+fn a_long_name_call_renames_on_a_disk_image() {
+    let base = scratch("image_long_rename");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    let handle = disk.create_file(r"D:\CONFIG.CFG", PSP).unwrap();
+    disk.write_file(handle, b"cfg").unwrap();
+    disk.close_file(handle);
+    let listed = |disk: &DiskController| -> Vec<(String, Option<String>)> {
+        let (_, volume, _) = disk.locate_fat(r"D:\").unwrap();
+        volume
+            .list(&[])
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.long_name))
+            .collect()
+    };
+    let named = |name: &str, long: Option<&str>| vec![(name.to_string(), long.map(str::to_string))];
+
+    assert_eq!(
+        disk.rename_file(r"D:\CONFIG.CFG", r"D:\config.cfg"),
+        Err(0x05)
+    );
+    disk.long_name_call(|disk| disk.rename_file(r"D:\CONFIG.CFG", r"D:\config.cfg"))
+        .unwrap();
+    assert_eq!(listed(&disk), named("CONFIG.CFG", Some("config.cfg")));
+    disk.long_name_call(|disk| disk.rename_file(r"D:\config.cfg", r"D:\Saved Config.cfg"))
+        .unwrap();
+    assert_eq!(
+        listed(&disk),
+        named("SAVEDC~1.CFG", Some("Saved Config.cfg"))
+    );
+    let handle = disk.open_file(r"D:\SAVEDC~1.CFG", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(handle, 16).unwrap(), b"cfg");
+    disk.close_file(handle);
+
+    disk.rename_file(r"D:\SAVEDC~1.CFG", r"D:\PLAIN.CFG")
+        .unwrap();
+    assert_eq!(listed(&disk), named("PLAIN.CFG", None));
+}
+
+/// A handle open on a file of a disk image goes on writing to it after a
+/// long-name rename moves its entry to other slots, and the long name
+/// entries that took the slots it left stay as they are.
+#[test]
+fn a_handle_follows_a_file_a_long_name_rename_moves() {
+    let base = scratch("image_long_rename_open");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    let handle = disk.create_file(r"D:\SLOT.SAV", PSP).unwrap();
+    disk.write_file(handle, b"first ").unwrap();
+    // The volume label is in front of the entry, so the long name can't
+    // go there: the entry moves.
+    disk.long_name_call(|disk| disk.rename_file(r"D:\SLOT.SAV", r"D:\A saved game slot.sav"))
+        .unwrap();
+    disk.write_file(handle, b"second").unwrap();
+    disk.close_file(handle);
+
+    let (_, volume, _) = disk.locate_fat(r"D:\").unwrap();
+    let listed: Vec<(String, Option<String>)> = volume
+        .list(&[])
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.name, e.long_name))
+        .collect();
+    assert_eq!(
+        listed,
+        [(
+            "ASAVED~1.SAV".to_string(),
+            Some("A saved game slot.sav".to_string())
+        )]
+    );
+    let handle = disk.open_file(r"D:\ASAVED~1.SAV", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(handle, 32).unwrap(), b"first second");
+    disk.close_file(handle);
+}
+
 /// The bytes of the file `name`.
 fn read_all(disk: &mut DiskController, name: &str) -> Vec<u8> {
     let h = disk.open_file(name, 0, PSP).unwrap();
