@@ -239,16 +239,17 @@ const SPARE: f64 = 0.1;
 /// halted, as a DOS game's poll for the retrace does (`idle`).
 const WAITS: f64 = 0.5;
 /// A hold taken because the program waited (`AutoSpeed::waiting_hold`)
-/// goes on up after `CALM_MEASUREMENTS` measurements in a row halted less
-/// than `CALM`, well clear of `WAITS`. Each of them takes `LONG_WINDOW_NS`
-/// or more at a movie's frame rate (2.5 s in Dark Omen's intro), so
-/// `JUDGED` of them held its first movie for 10 of its 16 seconds
-/// (#1889). The margin is what keeps a scene that sits at `WAITS` from
-/// going up and back: Dark Omen's movie at 450,000, at its own rate,
-/// read 50.5, 49.5, 49.9 and 50.8% halted, and two readings under
+/// goes on up after `CALM_MEASUREMENTS` measurements in a row halted
+/// `CALM` or more under the line `waits` draws (`WAITS`, or more for a
+/// program whose frames poll the retrace). Each of them takes
+/// `LONG_WINDOW_NS` or more at a movie's frame rate (2.5 s in Dark Omen's
+/// intro), so `JUDGED` of them held its first movie for 10 of its 16
+/// seconds (#1889). The margin is what keeps a scene that sits at the
+/// line from going up and back: Dark Omen's movie at 450,000, at its own
+/// rate, read 50.5, 49.5, 49.9 and 50.8% halted, and two readings under
 /// `WAITS` in a row would have counted. Its movie at the held speed reads
 /// 19 to 24%, and the movie of its campaign at 340,000 13 to 26%.
-const CALM: f64 = 0.3;
+const CALM: f64 = 0.2;
 const CALM_MEASUREMENTS: u32 = 2;
 /// Retraces a frame a program whose frames wait for the processor may
 /// wait for: a DOS game that waits for two after each frame, for 35
@@ -2879,7 +2880,8 @@ impl AutoSpeed {
         // Halted for longer than frames that wait for the processor are
         // (`WAITS`): it waits for something else, and more speed draws no
         // more frames.
-        let waits = m.halted >= WAITS.max(RETRACES * fps / m.refresh);
+        let wait_line = WAITS.max(RETRACES * fps / m.refresh);
+        let waits = m.halted >= wait_line;
         // A hold here, short of the display's frames and of what the host
         // has, is held only because the program waits: it goes on up once
         // the program works (`waiting_hold`).
@@ -3192,7 +3194,11 @@ impl AutoSpeed {
                 // would raise no floor.
                 let mut left = left;
                 if let Some(calm) = self.waiting_hold {
-                    let calm = if m.halted < CALM { calm + 1 } else { 0 };
+                    let calm = if m.halted < wait_line - CALM {
+                        calm + 1
+                    } else {
+                        0
+                    };
                     if calm >= CALM_MEASUREMENTS {
                         self.waiting_hold = None;
                         self.new_scene();
@@ -6792,6 +6798,35 @@ mod tests {
         // aren't calm, and the hold stays.
         let speeds = held(&[0.505, 0.495, 0.499, 0.508, 0.495, 0.499]);
         assert!(speeds[1..].iter().all(|&s| s == speeds[1]), "{speeds:?}");
+    }
+
+    #[test]
+    fn a_waiting_hold_counts_calm_under_the_line_of_a_game_that_polls() {
+        // A game drawing 25 frames a second on a 60 Hz display polls the
+        // retrace for up to 83% of the time and still works (`RETRACES`):
+        // at 40% halted it is as far from waiting as a movie at 20%.
+        let load = Measurement {
+            fps: Some(2.0),
+            halted: 0.54,
+            io: 284_000.0,
+            refresh: 60.0,
+            ..STILL
+        };
+        let game = Measurement {
+            fps: Some(25.0),
+            halted: 0.4,
+            refresh: 60.0,
+            ..STILL
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(112_500);
+        auto.set_idles(true);
+        let held = auto.decide(54_630, &load, true, HOST);
+        let mut speed = held;
+        for _ in 0..CALM_MEASUREMENTS {
+            speed = auto.decide(speed, &game, true, HOST);
+        }
+        assert!(speed > held, "{held} {speed}");
     }
 
     #[test]
