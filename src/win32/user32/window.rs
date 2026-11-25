@@ -96,6 +96,40 @@ pub const SW_FORCEMINIMIZE: u32 = 11;
 
 pub const CW_USEDEFAULT: u32 = 0x8000_0000;
 
+/// The W32 version whose sections have `State::cascade`.
+pub const CASCADE_SAVED: u16 = 98;
+
+/// The area overlapped windows of CW_USEDEFAULT share out, as Windows
+/// 98 has it: the work area less a row of minimized windows
+/// (SM_CYMINSPACING) at its bottom. On a 640x480 Windows 98 with its
+/// taskbar, 640x428: such a window is 480x321, 800x600 gives 600x411.
+pub fn tiled_area(cpu: &Cpu) -> (i32, i32) {
+    let (w, h) = super::sysparams::screen_size(cpu);
+    (w, h - super::sysparams::metric(48))
+}
+
+/// The place of the next overlapped window of CW_USEDEFAULT, which
+/// Windows 98 cascades for all programs alike: each one a step of
+/// SM_CXSIZE + SM_CXFRAME (and SM_CYSIZE + SM_CYFRAME) further right
+/// and down, 22 pixels, and back at the top-left corner when the place
+/// would be past a quarter of the tiled area's width or height. The
+/// first window after startup is one step in. Measured on Windows 98
+/// SE at 640x480 and 800x600, with windows of programs and Explorer's
+/// folder windows taking turns.
+pub fn next_default_place(cpu: &mut Cpu) -> (i32, i32) {
+    let (w, h) = tiled_area(cpu);
+    let step_x = super::sysparams::metric(30) + super::sysparams::metric(32);
+    let step_y = super::sysparams::metric(31) + super::sysparams::metric(33);
+    let state = user(cpu);
+    let mut n = *state.cascade + 1;
+    let (mut x, mut y) = (n as i32 * step_x, n as i32 * step_y);
+    if x > w / 4 || y > h / 4 {
+        (x, y, n) = (0, 0, 0);
+    }
+    *state.cascade = n;
+    (x, y)
+}
+
 /// GetWindowLongA's indices.
 pub const GWL_WNDPROC: i32 = -4;
 pub const GWL_HINSTANCE: i32 = -6;
@@ -821,17 +855,22 @@ pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, super::ERROR_NOT_ENOUGH_MEMORY);
         return Some(0);
     }
-    // CW_USEDEFAULT: an overlapped window gets a place and three
-    // quarters of the screen; a popup or child window none.
+    // CW_USEDEFAULT: an overlapped window gets the next place of the
+    // cascade and three quarters of the tiled area, or with a place of
+    // its own, three quarters of the screen less that place; a popup or
+    // child window none.
     let (sw, sh) = super::sysparams::screen_size(cpu);
     let (mut x, mut y, mut cx, mut cy) = (x as i32, y as i32, cx as i32, cy as i32);
     let default = CW_USEDEFAULT as i32;
     if style & (WS_CHILD | WS_POPUP) == 0 {
         if x == default {
-            x = 0;
-            y = 0;
-        }
-        if cx == default {
+            (x, y) = next_default_place(cpu);
+            if cx == default {
+                let (area_w, area_h) = tiled_area(cpu);
+                cx = area_w * 3 / 4;
+                cy = area_h * 3 / 4;
+            }
+        } else if cx == default {
             cx = sw * 3 / 4 - x;
             cy = sh * 3 / 4 - y;
         }
