@@ -62,6 +62,10 @@ const BITMAP_MAGIC: u16 = 0x4F4B;
 /// block has.
 const DEVICE_BITMAP: u32 = 0x20;
 const BLOCK_EXTRA: u32 = 0x24;
+/// Where the device BITMAP has bmBits, a far pointer.
+const BM_BITS: u32 = 0x0A;
+/// A free handle table entry: no next free handle, and LHE_FREEHANDLE.
+const FREE_HANDLE: u32 = 0xFFFF_0000;
 /// The object's flags (+1Ah): its bits cross 64K.
 const HUGE: u16 = 1;
 
@@ -584,6 +588,80 @@ pub fn rows(cpu: &mut Cpu, handle: u32, from: i32, to: i32) -> Option<Vec<Option
     Some(rows)
 }
 
+/// The view's entry the bits of the bitmap `handle` live in, after
+/// pointing its device BITMAP's bmBits back at the bitmap's own bits,
+/// where the view put them when the bitmap joined it. The size the
+/// program gave the BITMAP stays, so GDI reads and draws there from then
+/// on, not where the program had pointed bmBits. Windows 3.1's GDI does
+/// this in GetBitmapBits, SetBitmapBits and GetDIBits, which real WfW
+/// 3.11 shows (#2007). None if no view has the bits.
+fn own(cpu: &mut Cpu, handle: u32) -> Option<Viewed> {
+    device(cpu, handle)?;
+    let b = cpu.bus.win32.processes.iter().find_map(|p| {
+        let view = &*p.gdi_heap;
+        let shimmed = view.segment != 0 && p.shims.has(Shim::Win31GdiHeap);
+        let b = view
+            .bitmaps
+            .iter()
+            .find(|b| b.handle as u32 == handle && b.live);
+        b.filter(|_| shimmed).cloned()
+    })?;
+    let bits = &b.written[BM_BITS as usize..BM_BITS as usize + 4];
+    let base = crate::win16::lin(cpu, global::handle_to_sel(b.block), 0);
+    crate::win16::poke(cpu, base + BM_BITS, bits);
+    Some(b)
+}
+
+/// GetDIBits of the bitmap `handle` is about to read it: if its bits
+/// live in a view, bmBits points at its own bits again (`own`). GetDIBits
+/// then reads them at the size the BITMAP says, as real WfW 3.11 does.
+pub fn repoint(cpu: &mut Cpu, handle: u32) {
+    own(cpu, handle);
+}
+
+/// Where the rows of the bitmap's own bits are, as the device BITMAP
+/// `written` laid them out when the bitmap joined the view, and how many
+/// bytes each has.
+fn own_rows(cpu: &Cpu, written: &[u8]) -> (Vec<Option<u32>>, usize) {
+    let r16 = |at: usize| u16::from_le_bytes([written[at], written[at + 1]]) as u32;
+    let (height, scan) = (r16(0x04), r16(0x06) * written[0x08].max(1) as u32);
+    let rows = (0..height)
+        .map(|r| row_address(cpu, written, r, scan))
+        .collect();
+    (rows, scan as usize)
+}
+
+/// GetBitmapBits and SetBitmapBits of the bitmap `handle`, if its bits
+/// live in a view, go to its own bits (`own`), as many as it had when it
+/// was made, whatever size the program gave the BITMAP since: real WfW
+/// 3.11 gives and takes 4 bytes for a bitmap made 4 by 1 that the
+/// program made 8 by 2. Gives the bits and the bytes a row has. None if
+/// no view has the bits.
+pub fn own_bits(cpu: &mut Cpu, handle: u32) -> Option<(Vec<u8>, usize)> {
+    let b = own(cpu, handle)?;
+    let (rows, scan) = own_rows(cpu, &b.written);
+    let mut bits = Vec::with_capacity(rows.len() * scan);
+    for at in rows {
+        let row = at.and_then(|at| crate::win16::peek(cpu, at, scan));
+        bits.extend(row.unwrap_or_else(|| vec![0; scan]));
+    }
+    Some((bits, scan))
+}
+
+/// SetBitmapBits' rows `bits` into the own bits of the bitmap `handle`,
+/// which `own_bits` gave.
+pub fn set_own_bits(cpu: &mut Cpu, handle: u32, bits: &[u8]) {
+    let Some(b) = own(cpu, handle) else {
+        return;
+    };
+    let (rows, scan) = own_rows(cpu, &b.written);
+    for (at, row) in rows.into_iter().zip(bits.chunks(scan.max(1))) {
+        if let Some(at) = at {
+            crate::win16::poke(cpu, at, row);
+        }
+    }
+}
+
 /// The processes whose views the GDI32 bitmap of the process `pid`
 /// belongs in, as `bitmaps_of` has them: its own, and every process's
 /// for a bitmap of the Win16 process, which 16-bit code makes.
@@ -611,7 +689,8 @@ pub fn bitmap_added(cpu: &mut Cpu, handle: u32, pid: u32) {
 
 /// GDI32 freed the bitmap `handle` (`gdi32::free`), whichever code
 /// deleted it, or deselected it once deleted: it leaves every view, and
-/// its handle table entry is 0 until GDI32 gives the handle again.
+/// its handle table entry is a free one, as on real WfW 3.11, until
+/// GDI32 gives the handle again.
 pub fn bitmap_freed(cpu: &mut Cpu, handle: u32) {
     for p in 0..cpu.bus.win32.processes.len() {
         let view = &mut cpu.bus.win32.processes[p].gdi_heap;
@@ -620,7 +699,9 @@ pub fn bitmap_freed(cpu: &mut Cpu, handle: u32) {
         };
         let (b, segment) = (view.bitmaps.remove(i), view.segment);
         if let Some(segment) = global::get(cpu, segment) {
-            crate::win16::write_32(cpu, segment.base + b.handle as u32, 0);
+            // A free handle of Windows 3.1's local heap: the next free
+            // one (none here), and FFFFh.
+            crate::win16::write_32(cpu, segment.base + b.handle as u32, FREE_HANDLE);
             let object = segment.base + b.object as u32;
             crate::win16::poke(cpu, object, &[0; OBJECT_SIZE as usize]);
         }

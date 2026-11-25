@@ -9,6 +9,7 @@ use super::{
     Kind, Pattern, TRUE, add, gdi, init, set_error,
 };
 use crate::cpu::Cpu;
+use crate::win32::shims::win31::gdi_heap;
 use crate::win32::user32::{read_words, write_words};
 
 const BI_RGB: u32 = 0;
@@ -555,7 +556,7 @@ fn bitmap_surface(cpu: &mut Cpu, handle: u32) -> Option<Surface> {
 /// program may have changed since (`gdi_heap::refresh`). A size taken
 /// before the surface is loaded would index rows it doesn't have.
 fn header(cpu: &mut Cpu, handle: u32) -> Option<Bitmap> {
-    crate::win32::shims::win31::gdi_heap::refresh(cpu, handle);
+    gdi_heap::refresh(cpu, handle);
     gdi(cpu).bitmap(handle).map(|b| b.clone_header())
 }
 
@@ -563,7 +564,17 @@ fn header(cpu: &mut Cpu, handle: u32) -> Option<Bitmap> {
 /// number of words.
 pub fn get_bitmap_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (handle, count, out) = (args[0], args[1] as usize, args[2]);
-    let Some(b) = header(cpu, handle) else {
+    // In Windows 3.1's GDI heap, the bitmap's own bits, at the size it was
+    // made with (`gdi_heap::own_bits`).
+    if let Some((bits, scan)) = gdi_heap::own_bits(cpu, handle) {
+        if out == 0 {
+            return Some(bits.len() as u32);
+        }
+        let n = (count / scan.max(1) * scan).min(bits.len());
+        cpu.bus.guest_write_bytes(out, &bits[..n]);
+        return Some(n as u32);
+    }
+    let Some(b) = gdi(cpu).bitmap(handle).map(|b| b.clone_header()) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
     };
@@ -588,7 +599,19 @@ pub fn get_bitmap_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// SetBitmapBits(bitmap, count, bits).
 pub fn set_bitmap_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (handle, count, at) = (args[0], args[1] as usize, args[2]);
-    let Some(b) = header(cpu, handle) else {
+    // In Windows 3.1's GDI heap, the bitmap's own bits, at the size it was
+    // made with, as GetBitmapBits.
+    if let Some((bits, scan)) = gdi_heap::own_bits(cpu, handle) {
+        let n = (count / scan.max(1) * scan).min(bits.len());
+        let mut data = vec![0u8; n];
+        cpu.bus.guest_read_bytes(at, &mut data);
+        if cpu.bus.guest_faulted() {
+            return None;
+        }
+        gdi_heap::set_own_bits(cpu, handle, &data);
+        return Some(n as u32);
+    }
+    let Some(b) = gdi(cpu).bitmap(handle).map(|b| b.clone_header()) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
     };
@@ -655,6 +678,9 @@ pub fn get_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         );
         return Some(0);
     }
+    // In Windows 3.1's GDI heap, bmBits points at the bitmap's own bits
+    // again, which it reads at the size the device BITMAP says.
+    gdi_heap::repoint(cpu, handle);
     let Some(b) = header(cpu, handle) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);

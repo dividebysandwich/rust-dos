@@ -30,7 +30,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 103;
+const WIN32_VERSION: u16 = 104;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -1241,6 +1241,7 @@ mod tests {
         (101, 0x019A_DFC6_DCCE_473B), // the step of the CW_USEDEFAULT cascade
         (102, 0x8818_BE2A_4B7B_59B6), // the modules the outermost FreeLibrary frees
         (103, 0x71A7_50FA_4BC4_2EA0), // OpenGL's raster position
+        (104, 0xE7E4_932C_55E7_F2E2), // a memory DC's bitmap size, and gdi_heap's Viewed::live
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
