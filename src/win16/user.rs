@@ -152,7 +152,7 @@ static APIS: &[Api16] = &[
     rust("PeekMessage", 109, "pwwww", peek_message),
     rust("PostMessage", 110, "wwwl", message::post_message),
     rust("SendMessage", 111, "wwwl", message::send_message),
-    win32("WaitMessage", 112, "", U, "WaitMessage", b'b'),
+    rust("WaitMessage", 112, "", wait_message),
     rust("TranslateMessage", 113, "p", translate_message),
     rust("DispatchMessage", 114, "p", dispatch_message),
     win32("ReplyMessage", 115, "l", U, "ReplyMessage", b'b'),
@@ -598,6 +598,7 @@ const P_MODULE: u32 = 13;
 // 14 was GetDlgItemInt's, which `then_dlg_int` took over.
 const P_CLASS_MENU: u32 = 15;
 const P_EX_STYLE: u32 = 16;
+const P_WAIT_MESSAGE: u32 = 17;
 
 /// The extended style USER32 gives captioned windows, which Windows 95
 /// doesn't show programs for Windows 3.1.
@@ -676,6 +677,11 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
             }
         }
         P_EX_STYLE => return Some(value & !WS_EX_WINDOWEDGE),
+        // The sent messages were handled: WaitMessage waits on.
+        P_WAIT_MESSAGE => {
+            wait_on(cpu, *ctx);
+            return None;
+        }
         // A class registered (d(1) its name, d(2) its menu's name) or, with
         // d(3), unregistered: what GetClassInfo gives as its menu's name.
         P_CLASS_MENU => {
@@ -1722,6 +1728,27 @@ fn post_app_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 // The message loop: MSG16s.
+
+/// WaitMessage: the messages other tasks sent to this one are handled
+/// first (UserYield16), and the task then waits for one to come. Windows
+/// handles them in WaitMessage, as in GetMessage and PeekMessage, and
+/// waits on; USER32's WaitMessage would return at once while any is
+/// left, so a task that waits in a WaitMessage loop for what another
+/// sends it would never get it.
+fn wait_message(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    if crate::win32::user32::message::has_sent(cpu) {
+        return go_post(cpu, "UserYield16", &[], vec![P_WAIT_MESSAGE]);
+    }
+    wait_on(cpu, Context::of(cpu));
+    None
+}
+
+/// Go on to USER32's WaitMessage, as the automatic thunk of a BOOL
+/// does, and then with the context `ctx`.
+fn wait_on(cpu: &mut Cpu, ctx: Context) {
+    let target = api(cpu, "WaitMessage");
+    thunk::enter32(cpu, ctx, target, &[], thunk::POST_AUTO, vec![b'b' as u32]);
+}
 
 fn get_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if super::call_queued16(cpu) {

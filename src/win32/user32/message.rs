@@ -1991,6 +1991,53 @@ pub fn idle_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     }
 }
 
+/// UserYield16, which KERNEL's Yield and USER's WaitMessage call for a
+/// Win16 task: the messages other threads sent to this one, and the
+/// callbacks of SendMessageCallbackA due, are handled, so that their
+/// senders get the reply. Windows 3.1's USER does it in UserYield
+/// (Wine's UserYield16 peeks with PM_QS_SENDMESSAGE). Returns 0 when
+/// none is left.
+pub fn user_yield16(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    task::start(cpu, task::RECEIVE, Vec::new(), 0)
+}
+
+/// UserYield16's steps: `handle_sent` until none is left. A reply to
+/// another task gives that task the turn at once, and UserYield16 runs
+/// again from its start when the turn comes back: on Windows 95 the
+/// sender runs on, to its end if it doesn't wait, before the Yield that
+/// replied returns (#1913's measurements in 86Box).
+pub fn receive_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    if t.step == 1 {
+        let tid = current_tid(cpu);
+        let from = match user(cpu).queue_mut(tid).in_send.last() {
+            Some(Some(sent)) if sent.awaited() => sent.from,
+            _ => tid,
+        };
+        finish_sent(cpu, value);
+        let win32 = &mut cpu.bus.win32;
+        let q = win32.user.queue_mut(tid);
+        if q.waiting.last() == Some(&(0, 0)) {
+            q.waiting.pop();
+        }
+        if from != tid && crate::win16::task::both_tasks(win32, tid, from) {
+            t.retry(cpu);
+            crate::win16::task::give_up_turn(cpu);
+            return Next::Stop;
+        }
+    }
+    t.step = 0;
+    handle_sent(cpu, 1).unwrap_or(Next::Done(0))
+}
+
+/// Whether the running thread has messages sent to it, or callbacks of
+/// SendMessageCallbackA, to handle.
+pub fn has_sent(cpu: &mut Cpu) -> bool {
+    let tid = current_tid(cpu);
+    user(cpu)
+        .queue(tid)
+        .is_some_and(|q| !q.sent.is_empty() || !q.callbacks.is_empty())
+}
+
 /// WaitForInputIdle is done: it returns `result`, having closed its
 /// handle of the idle event.
 fn idle_done(cpu: &mut Cpu, t: &Task, result: u32) -> Next {

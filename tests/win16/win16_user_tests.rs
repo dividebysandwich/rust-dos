@@ -30,7 +30,9 @@ const SET_WINDOWS_HOOK_EX: u16 = 291;
 const POST_QUIT_MESSAGE: u16 = 6;
 const GET_DLG_ITEM_INT: u16 = 95;
 const GET_MESSAGE: u16 = 108;
+const PEEK_MESSAGE: u16 = 109;
 const POST_MESSAGE: u16 = 110;
+const WAIT_MESSAGE: u16 = 112;
 const DISPATCH_MESSAGE: u16 = 114;
 
 /// KERNEL's ordinals.
@@ -919,8 +921,9 @@ fn digits_windows(p: &mut Program) -> u16 {
 /// lParam's buffer and returns the word at SS:DIGITS_RETURN (in the
 /// task's data segment), or 2 with `long`. With `long`, a WM_GETTEXT
 /// for more than 255 characters fills the buffer with wParam - 1 B's
-/// instead and returns their count, and WM_SETTEXT returns its string's
-/// length. WM_DESTROY quits; the rest goes to DefWindowProc.
+/// instead and returns their count, and WM_SETTEXT sets the word at
+/// SS:DIGITS_SET and returns its string's length. WM_DESTROY quits; the
+/// rest goes to DefWindowProc.
 fn digits_procedure(p: &mut Program, long: bool) -> u16 {
     const WM_SETTEXT: u8 = 0x0C;
     const WM_GETTEXT: u8 = 0x0D;
@@ -989,6 +992,7 @@ fn digits_procedure(p: &mut Program, long: bool) -> u16 {
     jump_here(&mut p.code, to_set, here);
     if long {
         p.code
+            .emit(&[0x36, 0xC7, 0x06, DIGITS_SET, 0x00, 0x01, 0x00]) // mov word ss:[DIGITS_SET],1
             .emit(&[0xC4, 0x7E, 0x06]) // les di,[bp+6]
             .emit(&[0x31, 0xC0, 0xB9, 0xFF, 0xFF]) // xor ax,ax; mov cx,0FFFFh
             .emit(&[0xFC, 0xF2, 0xAE]) // cld; repne scasb
@@ -1011,6 +1015,10 @@ fn digits_procedure(p: &mut Program, long: bool) -> u16 {
 /// Where the DIGITS procedure of `digits_procedure` without `long`
 /// finds what it returns for WM_GETTEXT.
 const DIGITS_RETURN: u8 = 0x60;
+
+/// The word the DIGITS procedure of `digits_procedure` with `long` sets
+/// to 1 when it gets WM_SETTEXT.
+const DIGITS_SET: u8 = 0x66;
 
 #[test]
 fn get_dlg_item_int_reads_what_a_16_bit_control_writes() {
@@ -1178,13 +1186,60 @@ fn intertask_client() -> Vec<u8> {
     p.build()
 }
 
+/// How SRV.EXE (`intertask_server`) waits for the client's messages.
+#[derive(Clone, Copy, PartialEq)]
+enum Waits {
+    /// In GetMessage, dispatching what it gets.
+    GetMessage,
+    /// In one Yield, then it ends with 34h if its procedure got
+    /// WM_SETTEXT by then, else with 35h.
+    Yield,
+    /// It takes and dispatches what its queue holds with PeekMessage, and
+    /// then calls WaitMessage until its procedure got WM_SETTEXT, and ends
+    /// with 34h.
+    WaitMessage,
+}
+
 /// SRV.EXE: the DIGITS windows of `digits_windows`, whose procedure
-/// answers long texts too (`digits_procedure`), and a message loop. It
-/// ends with 33h when its window is destroyed.
-fn intertask_server() -> Vec<u8> {
+/// answers long texts too (`digits_procedure`), waiting as `waits` says.
+/// With a message loop it ends with 33h when its window is destroyed.
+fn intertask_server(waits: Waits) -> Vec<u8> {
     const MSG: u16 = 0x70;
     let mut p = Program::default();
     let proc_at = digits_windows(&mut p);
+    if waits == Waits::Yield {
+        p.code
+            .call("KERNEL", YIELD)
+            .emit(&[0x83, 0x3E, DIGITS_SET, 0x00, 0x00]) // cmp word [DIGITS_SET],0
+            .emit(&[0xB0, 0x34, 0x75, 0x02, 0xB0, 0x35]) // mov al,34h; jne; mov al,35h
+            .exit_al();
+    }
+    if waits == Waits::WaitMessage {
+        // WaitMessage returns at once while messages wait, as the
+        // window's first WM_PAINT does.
+        let peek = p.code.here();
+        p.code
+            .emit(&[0x1E])
+            .push(MSG)
+            .push(0)
+            .push(0)
+            .push(0)
+            .push(1) // PM_REMOVE
+            .call("USER", PEEK_MESSAGE)
+            .emit(&[0x0B, 0xC0, 0x74, 0x0B]) // or ax,ax; jz waits
+            .emit(&[0x1E])
+            .push(MSG)
+            .call("USER", DISPATCH_MESSAGE);
+        let back = peek.wrapping_sub(p.code.here() + 2) as u8;
+        p.code.emit(&[0xEB, back]); // jmp peek
+        let again = p.code.here();
+        p.code
+            .call("USER", WAIT_MESSAGE)
+            .emit(&[0x83, 0x3E, DIGITS_SET, 0x00, 0x00]); // cmp word [DIGITS_SET],0
+        let back = again.wrapping_sub(p.code.here() + 2) as u8;
+        p.code.emit(&[0x74, back]); // je again
+        p.code.emit(&[0xB0, 0x34]).exit_al();
+    }
     let get = p.code.here();
     p.code
         .emit(&[0x1E])
@@ -1207,9 +1262,14 @@ fn intertask_server() -> Vec<u8> {
 
 /// Whether a task ended with the exit code `code`, as the log says.
 fn ended_with(log: &str, code: u8) -> bool {
+    ended_at(log, code).is_some()
+}
+
+/// The line of the log that says a task ended with the exit code `code`.
+fn ended_at(log: &str, code: u8) -> Option<usize> {
     let line = format!(" ended with exit code {:X}", code);
     log.lines()
-        .any(|l| l.starts_with("[W16] Task ") && l.ends_with(&line))
+        .position(|l| l.starts_with("[W16] Task ") && l.ends_with(&line))
 }
 
 #[test]
@@ -1220,10 +1280,40 @@ fn a_message_to_another_tasks_window_reaches_its_procedure_as_it_is() {
     // procedure writes into the sender's own buffer, all of it, whatever
     // length it returns, and gets the sender's string whole.
     let (_, log) = run_with("intertask", intertask_client(), |_, base| {
-        std::fs::write(base.join("SRV.EXE"), intertask_server()).unwrap();
+        std::fs::write(base.join("SRV.EXE"), intertask_server(Waits::GetMessage)).unwrap();
     });
     assert!(ended_with(&log, 1), "{log}");
     assert!(ended_with(&log, 0x33), "{log}");
+}
+
+#[test]
+fn a_task_that_yields_receives_what_another_task_sends() {
+    // Windows 3.1's Yield goes through USER's UserYield, which handles
+    // the messages other tasks sent to the task (Wine's Yield16 calls
+    // UserYield16). On Windows 95 a message sent while the task is in
+    // Yield is handled there, and the reply lets the sender run on to its
+    // end before Yield returns (#1913's measurements in 86Box): the
+    // client's sends all reach the server's procedure during its one
+    // Yield, and the client ends first.
+    let (_, log) = run_with("intertask_yield", intertask_client(), |_, base| {
+        std::fs::write(base.join("SRV.EXE"), intertask_server(Waits::Yield)).unwrap();
+    });
+    assert!(ended_with(&log, 1), "{log}");
+    assert!(ended_with(&log, 0x34), "{log}");
+    assert!(ended_at(&log, 1) < ended_at(&log, 0x34), "{log}");
+}
+
+#[test]
+fn a_task_that_waits_for_a_message_receives_what_another_task_sends() {
+    // Windows' WaitMessage handles the messages other tasks sent to the
+    // task while it waits, as GetMessage does, and waits on: a server
+    // that only calls WaitMessage answers the client's sends.
+    let (_, log) = run_with("intertask_wait", intertask_client(), |_, base| {
+        let server = intertask_server(Waits::WaitMessage);
+        std::fs::write(base.join("SRV.EXE"), server).unwrap();
+    });
+    assert!(ended_with(&log, 1), "{log}");
+    assert!(ended_with(&log, 0x34), "{log}");
 }
 
 #[test]

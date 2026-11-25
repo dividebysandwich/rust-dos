@@ -1245,7 +1245,7 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Option<
 }
 
 /// The address of USER32's function `name`.
-fn user32(cpu: &Cpu, name: &str) -> u32 {
+pub(super) fn user32(cpu: &Cpu, name: &str) -> u32 {
     crate::win32::user32::address_of(cpu, name)
 }
 
