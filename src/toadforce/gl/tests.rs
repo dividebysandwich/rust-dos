@@ -2712,6 +2712,35 @@ fn flat_fog_wrapping_and_the_ends_of_the_ranges_agree() {
             rig.draw(&q);
         });
     }
+    // And one vertex's alpha, which blends the whole triangle by it
+    // (D3DPSHADECAPS_ALPHAFLATBLEND): the host gets it from
+    // `gpu::Vertex::flat`, the card's own rasterizer from `setup`.
+    // Nothing else draws a flat, blended triangle through the former.
+    for last in [0, 1] {
+        bench.close(&format!("flat shading with alpha blending, vertex {last}"), |rig| {
+            rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+            let mut q = quad(2.0, 2.0, 60.0, WHITE, 1.0);
+            let colours = [
+                0x20FF_0000,
+                0xE000_FF00,
+                0x8000_00FF,
+                0xFFFF_FF00,
+                0x4000_FFFF,
+                0xC0FF_00FF,
+            ];
+            for (v, colour) in q.iter_mut().zip(colours) {
+                v.diffuse = colour;
+            }
+            rig.states(&[
+                (RS_SHADEMODE, 1),
+                (RS_FLAT_VERTEX, last),
+                (RS_ALPHABLENDENABLE, 1),
+                (RS_SRCBLEND, 5),
+                (RS_DESTBLEND, 6),
+            ]);
+            rig.draw(&q);
+        });
+    }
     // Coordinates that go the shorter way round, over the texture's
     // seam, in u, in v and in both.
     for wrap in [1, 2, 3] {

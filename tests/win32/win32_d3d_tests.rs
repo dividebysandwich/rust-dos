@@ -2932,8 +2932,11 @@ fn a_flat_shaded_triangle_blends_by_its_first_vertex_alpha() {
             Step::Draw(tri),
         ],
     };
-    // The Voodoo3's HAL, and a ToadForce's, which flat-shades on the
-    // card (`gpu::Vertex::flat`).
+    // The Voodoo3's HAL and a ToadForce's. Both give transformed
+    // vertices the first one's colors on the processor
+    // (`Processed::take_flat_colors`); a ToadForce flat-shades on the
+    // card only the vertices it transforms itself (`raster::setup`, and
+    // `gpu::Vertex::flat` on the host's GPU).
     let voodoo = draw_scene("flat-alpha", &scene);
     let toadforce = draw_scene_toadforce("toadforce_flat_alpha", &scene);
     for p in [voodoo, toadforce] {

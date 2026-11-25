@@ -92,7 +92,8 @@ fn prim_caps(d: &Description) -> [u32; 13] {
     // Voodoo3 driver (3dfx32v3.dll 4.12.01.0666) reports for lines and
     // triangles. Flat shading gives the face the first vertex's colors,
     // alpha among them, and leaves its fog interpolated
-    // (`Processed::take_flat_colors`, a ToadForce's `Vertex::flat`): the
+    // (`Processed::take_flat_colors`, and for the vertices a ToadForce
+    // transforms itself `raster::setup` and `gpu::Vertex::flat`): the
     // flat alpha and fog that ALPHAFLATBLEND and FOGFLAT say it does.
     let shade = 0x2 | 0x8 | 0x40 | 0x80 | 0x100 | 0x200 | 0x1000 | 0x4000 | 0x4_0000 | 0x8_0000;
     // D3DPTEXTURECAPS_: perspective, powers of 2, alpha, transparency,
