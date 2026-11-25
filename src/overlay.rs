@@ -299,12 +299,13 @@ impl Overlay {
     }
 
     /// `path`, a file or a folder and what's in it, all above: what is
-    /// only below is copied up, by the spelling the folder lists it by.
+    /// only below is copied up, by the spelling the folder lists it by,
+    /// and a file read-only below stays read-only.
     fn copy_up_whole(&self, path: &str) -> io::Result<()> {
         // Nothing of it below, or hidden: it is all above already.
-        if self.lower_meta(path).is_none() {
+        let Some(below) = self.lower_meta(path) else {
             return Ok(());
-        }
+        };
         let target = self.writable(path)?;
         if self.is_dir(path) {
             self.upper_dir(path)?;
@@ -314,6 +315,9 @@ impl Overlay {
         } else if !hostfs::is_file(&target) {
             self.upper_dir(parent(path))?;
             self.copy_up(path, &target)?;
+            if below.readonly {
+                hostfs::set_readonly(&target, true)?;
+            }
         }
         Ok(())
     }
@@ -649,6 +653,30 @@ mod tests {
         hostfs::write(root.join("NEW.TXT"), b"x").unwrap();
         hostfs::rename(root.join("NEW.TXT"), root.join("OLD/NEW.TXT")).unwrap();
         assert_eq!(names(root.join("OLD")), ["NEW.TXT", "SLOT1.SAV"]);
+    }
+
+    /// A rename to the name in another case renames the entry in its own
+    /// folder, whatever case `to` spells the folders on the way in, and a
+    /// file read-only below is read-only above.
+    #[test]
+    fn a_rename_to_another_case_keeps_the_folder_and_the_read_only_flag() {
+        let dir = scratch("recase");
+        let lower = dir.join("lower/SAVES/SLOT1.SAV");
+        let set_readonly = |path: &Path, readonly: bool| {
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_readonly(readonly);
+            std::fs::set_permissions(path, perms).unwrap();
+        };
+        set_readonly(&lower, true);
+        let layer = layer(&dir);
+        let root = layer.root().to_path_buf();
+        hostfs::rename(root.join("SAVES/SLOT1.SAV"), root.join("saves/Slot1.sav")).unwrap();
+        assert_eq!(names(root.clone()), ["GAME.EXE", "SAVES"]);
+        assert_eq!(names(root.join("SAVES")), ["Slot1.sav"]);
+        assert_eq!(hostfs::read(root.join("SAVES/Slot1.sav")).unwrap(), b"one");
+        assert!(hostfs::metadata(root.join("SAVES/Slot1.sav")).unwrap().readonly);
+        set_readonly(&lower, false);
+        set_readonly(&dir.join("upper/SAVES/Slot1.sav"), false);
     }
 
     #[test]
