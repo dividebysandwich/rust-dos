@@ -244,8 +244,10 @@ struct NewName {
 impl NewName {
     /// The names for `long` among the entries `names` of its directory:
     /// 03h for a name Windows doesn't allow, 05h if an entry has it, as
-    /// its long name or its DOS name, in any case.
-    fn new(names: &[Entry], long: &str) -> Result<Self, u8> {
+    /// its long name or its DOS name, in any case. An alias isn't `held`
+    /// either, a DOS name no entry of `names` has that is taken all the
+    /// same (`FatVolume::rename_long`).
+    fn new(names: &[Entry], long: &str, held: Option<[u8; 11]>) -> Result<Self, u8> {
         let long = long.trim_end_matches(['.', ' ']);
         let units: Vec<u16> = long.encode_utf16().collect();
         if units.is_empty()
@@ -261,7 +263,11 @@ impl NewName {
         if names.iter().any(clash) {
             return Err(ACCESS_DENIED);
         }
-        let taken: Vec<[u8; 11]> = names.iter().filter_map(|e| short_name(&e.name)).collect();
+        let taken: Vec<[u8; 11]> = names
+            .iter()
+            .filter_map(|e| short_name(&e.name))
+            .chain(held)
+            .collect();
         // A DOS name as it is needs no long name; one in lower case keeps
         // its case in one.
         let exact = short_name(long)
@@ -1061,7 +1067,7 @@ impl FatVolume {
         cluster: u32,
     ) -> Result<Entry, u8> {
         let names = self.list_in(state, dir)?;
-        let name = NewName::new(&names, long)?;
+        let name = NewName::new(&names, long, None)?;
         let run = self.free_run(state, dir, name.slots(), &[])?;
         self.write_named(
             state,
@@ -1603,13 +1609,22 @@ impl FatVolume {
                     }
                 }
             }
-            // The entry's own names are free for it to take again.
+            // The entry's own names are free for it to take again. In its
+            // own directory its alias is kept by a rename that changes
+            // only the case of its name, and is taken for any other, as
+            // Windows 98's VFAT does: "Parent two" (PARENT~1) renamed to
+            // "Parent moved" becomes PARENT~2, so a current directory
+            // that named it as PARENT~1 names nothing now.
             let names: Vec<Entry> = self
                 .list_in(&state, &dir)?
                 .into_iter()
                 .filter(|e| e.at != Some(at))
                 .collect();
-            let name = NewName::new(&names, long)?;
+            let current = entry.long_name.as_deref().unwrap_or(&entry.name);
+            let held = (same_dir && !same_long(current, long.trim_end_matches(['.', ' '])))
+                .then(|| short_name(&entry.name))
+                .flatten();
+            let name = NewName::new(&names, long, held)?;
             let old = self.entry_slots(&state, &from_dir, at)?;
             let raw: [u8; ENTRY_SIZE] = self.raw_entry(at)?
                 [at.index * ENTRY_SIZE..(at.index + 1) * ENTRY_SIZE]
@@ -2406,6 +2421,52 @@ pub(crate) mod tests {
         assert!(listed.contains(&named_as("SAVEDG~3.SAV", Some("Saved game 11.sav"))));
         assert!(listed.contains(&named_as("README.TXT", Some("readme.txt"))));
         assert_eq!(listed.len(), 11);
+    }
+
+    /// A long-name rename in an entry's own directory keeps its alias
+    /// when it changes only the case of its name, and otherwise doesn't
+    /// take the alias again, as Windows 98's VFAT does (checked with
+    /// MoveFileA and GetShortPathNameA in Windows 98 SE in 86Box): "Parent
+    /// two" (PARENT~1) renamed to "Parent moved" is PARENT~2, "Fourth
+    /// file.txt" (FOURTH~1) to "Fourth files.txt" FOURTH~2 and back
+    /// FOURTH~1, "Read Me.txt" to "READ ME.TXT" README~1 still. Moved to
+    /// another directory, the entry may take the alias there.
+    #[test]
+    fn a_long_name_rename_takes_a_new_alias_unless_only_the_case_changes() {
+        let volume = floppy("rename_alias.img");
+        let alias = |path: &[&str]| volume.find_long(path).unwrap().name;
+        volume.mkdir_long(&[], "Parent two").unwrap();
+        assert_eq!(alias(&["Parent two"]), "PARENT~1");
+        let moved = volume
+            .rename_long(&["Parent two"], &[], "Parent moved")
+            .unwrap();
+        assert_eq!(moved.name, "PARENT~2");
+        assert_eq!(volume.find(&["PARENT~1"]), Err(FILE_NOT_FOUND));
+        volume.create_long(&[], "Fourth file.txt", 0).unwrap();
+        let more = volume
+            .rename_long(&["Fourth file.txt"], &[], "Fourth files.txt")
+            .unwrap();
+        assert_eq!(more.name, "FOURTH~2.TXT");
+        let back = volume
+            .rename_long(&["Fourth files.txt"], &[], "Fourth file.txt")
+            .unwrap();
+        assert_eq!(back.name, "FOURTH~1.TXT");
+        volume.create_long(&[], "Read Me.txt", 0).unwrap();
+        for name in ["READ ME.TXT", "Read me.txt"] {
+            let recased = volume.rename_long(&["read me.txt"], &[], name).unwrap();
+            assert_eq!(
+                (recased.name.as_str(), recased.long_name.as_deref()),
+                ("README~1.TXT", Some(name))
+            );
+        }
+        volume.mkdir_long(&[], "Saves").unwrap();
+        let elsewhere = volume
+            .rename_long(&["Read me.txt"], &["Saves"], "Read me now.txt")
+            .unwrap();
+        assert_eq!(elsewhere.name, "README~1.TXT");
+        let listed = root_by_spec(&volume);
+        assert!(listed.contains(&named_as("PARENT~2", Some("Parent moved"))));
+        assert!(listed.contains(&named_as("FOURTH~1.TXT", Some("Fourth file.txt"))));
     }
 
     /// A long-name rename moves a file, or a directory with its files, to

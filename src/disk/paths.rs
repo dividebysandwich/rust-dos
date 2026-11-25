@@ -47,20 +47,29 @@ impl DiskController {
     /// current directory for relative paths and folding "." / "..". Each
     /// component is the name DOS packs it into (`dos_component`).
     pub(super) fn logical_components<'a>(drive: &'a Drive, rest: &'a str) -> Vec<&'a str> {
+        Self::components_from_current(drive, rest).0
+    }
+
+    /// `logical_components`, and how many of the first ones are the
+    /// current directory's that the path keeps: none for a path from the
+    /// root, fewer than it has for a path that climbs out of it.
+    fn components_from_current<'a>(drive: &'a Drive, rest: &'a str) -> (Vec<&'a str>, usize) {
         let mut components: Vec<&str> = Vec::new();
         if !rest.starts_with('\\') {
             components.extend(drive.current_dir.split('\\').filter(|p| !p.is_empty()));
         }
+        let mut kept = components.len();
         for part in rest.split('\\') {
             match Self::dos_component(part) {
                 "" | "." => {}
                 ".." => {
                     components.pop();
+                    kept = kept.min(components.len());
                 }
                 part => components.push(part),
             }
         }
-        components
+        (components, kept)
     }
 
     /// The name a path component `part` stands for, as DOS packs it into
@@ -141,7 +150,9 @@ impl DiskController {
         let mut sure = true;
         let mut matched = true;
         let mut dirs_matched = true;
-        for part in Self::logical_components(drive, rest) {
+        let (components, kept) = Self::components_from_current(drive, rest);
+        let current = self.current_folder(drive_num, kept);
+        for (i, part) in components.into_iter().enumerate() {
             // The host's own files aren't the drive's (`host_private`):
             // no call reaches them, to open, make, rename or delete.
             if super::host_private(part) {
@@ -164,6 +175,26 @@ impl DiskController {
                 found.unwrap_or_else(|| (self.entry_name(part), part.to_ascii_uppercase()));
             full_path.push(host_name);
             dos_path.push(dos_name);
+            // DOS keeps the current directory by its names, which find
+            // what they name now. On a VFAT disk a folder keeps its alias
+            // until it is renamed, and a renamed one gets a new alias, so
+            // its old one names nothing. Here aliases are made from the
+            // names a folder has: a folder made next to the current one
+            // may take its alias, and the renamed folder may get its old
+            // one. So where the current directory's names find another
+            // folder than CHDIR found, they name that folder while it is
+            // there under the name it had, as its alias would on Windows
+            // 9x, and nothing once it is gone or renamed.
+            if i + 1 == kept
+                && matched
+                && let Some(folder) = current
+                && folder != full_path
+            {
+                if !hostfs::is_dir(folder) {
+                    return None;
+                }
+                full_path = folder.to_path_buf();
+            }
         }
 
         // Final Security Check
@@ -177,6 +208,46 @@ impl DiskController {
             })
         } else {
             None
+        }
+    }
+
+    /// The host folder the first `kept` names of drive `drive`'s current
+    /// directory named when CHDIR made it current (`current_folders`):
+    /// None for no names, or where CHDIR didn't find the folder by
+    /// matching each name, or another call set another current directory.
+    fn current_folder(&self, drive: u8, kept: usize) -> Option<&Path> {
+        if kept == 0 {
+            return None;
+        }
+        let d = self.drive(drive)?;
+        let (dir, folder) = self.current_folders.get(&drive)?;
+        if *dir != d.current_dir || !folder.starts_with(d.host_root()?) {
+            return None;
+        }
+        let names = dir.split('\\').filter(|p| !p.is_empty()).count();
+        folder.ancestors().nth(names.checked_sub(kept)?)
+    }
+
+    /// Keep the host folder each host drive's current directory names
+    /// now (`current_folders`), as a CHDIR to it does: a state loaded sets
+    /// the current directories by their names, and a run from the state
+    /// goes on as the run that saved it did.
+    pub(super) fn find_current_folders(&mut self) {
+        self.current_folders.clear();
+        for drive in 0..DRIVE_SLOTS {
+            let Some(d) = self.drive(drive) else {
+                continue;
+            };
+            if d.host_root().is_none() || d.current_dir.is_empty() {
+                continue;
+            }
+            let dir = d.current_dir.clone();
+            if let Some(walk) = self.walk_host(drive, &format!("\\{dir}"))
+                && walk.matched
+                && hostfs::is_dir(&walk.path)
+            {
+                self.current_folders.insert(drive, (dir, walk.path));
+            }
         }
     }
 
@@ -571,10 +642,16 @@ impl DiskController {
 
         // Resolve the new path to check existence, and keep it in short
         // names, as programs see it.
-        match self.resolve_names_on(drive_num, rest) {
-            Some((host_path, dos_dir)) if hostfs::is_dir(&host_path) => {
+        match self.walk_host(drive_num, rest) {
+            Some(walk) if hostfs::is_dir(&walk.path) => {
+                if walk.matched {
+                    let folder = (walk.dos.clone(), walk.path);
+                    self.current_folders.insert(drive_num, folder);
+                } else {
+                    self.current_folders.remove(&drive_num);
+                }
                 if let Some(d) = self.drives[drive_num as usize].as_mut() {
-                    d.current_dir = dos_dir;
+                    d.current_dir = walk.dos;
                 }
                 true
             }

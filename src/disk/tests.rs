@@ -2508,6 +2508,123 @@ fn an_open_file_is_the_file_its_new_name_names_after_a_rename() {
     disk.close_file(handle);
 }
 
+/// A drive's current directory renamed, or a directory above it, as
+/// Windows 98 SE does it (checked in 86Box with INT 21h AH=56h and
+/// AX=7156h in a DOS box and MoveFileA): the rename succeeds, the current
+/// directory keeps its names (AH=47h gives them), and a name relative to
+/// it then names nothing (03h). A long-name rename gives the renamed
+/// folder a new alias, so a current directory that named it by its old
+/// one names nothing either; a rename that changes only the case of a
+/// name keeps its alias, and the current directory names the folder
+/// still. On a host folder (C:) and a disk image (D:).
+#[test]
+fn a_renamed_current_directory_names_nothing() {
+    let base = scratch("rename_current_dir");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    for (drive, letter) in [(2u8, "C:"), (3, "D:")] {
+        let at = |path: &str| format!("{letter}\\{path}");
+        let current = |disk: &DiskController| disk.get_current_directory_of(drive).unwrap();
+        let renamed = |disk: &mut DiskController, dir: &str, from: &str, to: &str| {
+            assert!(disk.set_current_directory(&at(dir)), "{letter} {dir}");
+            disk.rename_file(&at(from), &at(to)).unwrap();
+            assert_eq!(current(disk), dir.to_ascii_uppercase(), "{letter} {from}");
+            let made = disk.create_file(&format!("{letter}HERE.TXT"), PSP);
+            assert_eq!(made, Err(0x03), "{letter} {from}");
+            assert!(disk.set_current_directory(&at("")));
+        };
+        for dir in ["CWT", r"CWT\D1", r"CWT\D1\SUB", r"CWT\D2", r"CWT\D2\SUB"] {
+            disk.create_directory(&at(dir)).unwrap();
+        }
+        renamed(&mut disk, r"CWT\D1\SUB", r"CWT\D1\SUB", r"CWT\D1\SUBX");
+        renamed(&mut disk, r"CWT\D2\SUB", r"CWT\D2", r"CWT\D3");
+
+        // By long names: DOS keeps the current directory by its aliases.
+        disk.long_name_call(|disk| {
+            for dir in ["CWW", r"CWW\Parent two", r"CWW\Parent two\Sub"] {
+                disk.create_directory(&at(dir)).unwrap();
+            }
+            assert!(disk.set_current_directory(&at(r"CWW\Parent two\Sub")));
+            disk.rename_file(&at(r"CWW\Parent two"), &at(r"CWW\Parent moved"))
+                .unwrap();
+        });
+        assert_eq!(current(&disk), r"CWW\PARENT~1\SUB", "{letter}");
+        let made = disk.create_file(&format!("{letter}HERE.TXT"), PSP);
+        assert_eq!(made, Err(0x03), "{letter} after a long-name rename");
+
+        disk.long_name_call(|disk| {
+            for dir in [r"CWW\Case dir", r"CWW\Case dir\Sub"] {
+                disk.create_directory(&at(dir)).unwrap();
+            }
+            assert!(disk.set_current_directory(&at(r"CWW\Case dir\Sub")));
+            disk.rename_file(&at(r"CWW\Case dir"), &at(r"CWW\CASE DIR"))
+                .unwrap();
+        });
+        let here = disk.create_file(&format!("{letter}HERE.TXT"), PSP).unwrap();
+        disk.close_file(here);
+        let found = disk.long_name_call(|disk| disk.is_file(&at(r"CWW\CASE DIR\SUB\HERE.TXT")));
+        assert!(found, "{letter} after a rename of the case");
+        assert!(disk.set_current_directory(&at("")));
+    }
+}
+
+/// A host folder's alias is made from the names its folder has, so a
+/// folder made next to the current directory may take its alias:
+/// "Parent a" takes PARENT~1 from "Parent two". On Windows 9x a folder
+/// keeps its alias until it is renamed, so the current directory names
+/// "Parent two" still, and nothing once it is renamed.
+#[test]
+fn a_host_current_directory_keeps_its_folder_when_another_takes_its_alias() {
+    let base = scratch("current_dir_alias_taken");
+    fs::create_dir_all(base.join("CWW").join("Parent two")).unwrap();
+    let mut disk = DiskController::new(base.clone());
+    assert!(disk.set_current_directory(r"C:\CWW\PARENT~1"));
+    disk.long_name_call(|disk| disk.create_directory(r"C:\CWW\Parent a"))
+        .unwrap();
+    let alias = disk.resolve_path(r"C:\CWW\PARENT~1").unwrap();
+    assert_eq!(alias.file_name().unwrap(), "Parent a");
+    assert_eq!(disk.get_current_directory_of(2).unwrap(), r"CWW\PARENT~1");
+    let here = disk.create_file("C:HERE.TXT", PSP).unwrap();
+    disk.close_file(here);
+    let cww = base.join("CWW");
+    assert!(cww.join("Parent two").join("HERE.TXT").is_file());
+    assert!(!cww.join("Parent a").join("HERE.TXT").exists());
+
+    disk.long_name_call(|disk| disk.rename_file(r"C:\CWW\Parent two", r"C:\CWW\Parent moved"))
+        .unwrap();
+    assert_eq!(disk.create_file("C:THERE.TXT", PSP), Err(0x03));
+}
+
+/// A state loaded keeps the folder its current directory names, as the
+/// run that saved it kept it: a rename of the folder then leaves the
+/// current directory naming nothing in both.
+#[test]
+fn a_loaded_state_keeps_the_folder_of_its_current_directory() {
+    let base = scratch("current_dir_state");
+    fs::create_dir_all(base.join("CWW").join("Parent two").join("Sub")).unwrap();
+    let mut disk = DiskController::new(base.clone());
+    assert!(disk.set_current_directory(r"C:\CWW\PARENT~1\SUB"));
+    let mut w = crate::savestate::Writer::new();
+    disk.save_state(&mut w);
+    let mut loaded = DiskController::new(base.clone());
+    let lost = loaded
+        .load_state(&mut crate::savestate::Reader::new(&w.buf))
+        .unwrap();
+    assert!(lost.is_empty());
+    loaded
+        .long_name_call(|disk| disk.rename_file(r"C:\CWW\Parent two", r"C:\CWW\Parent moved"))
+        .unwrap();
+    assert_eq!(
+        loaded.get_current_directory_of(2).unwrap(),
+        r"CWW\PARENT~1\SUB"
+    );
+    assert_eq!(loaded.create_file("C:HERE.TXT", PSP), Err(0x03));
+}
+
 /// A file open on one disk of a list stays open when the next goes in, and
 /// a file in the same directory slot of the other disk is another file.
 #[test]

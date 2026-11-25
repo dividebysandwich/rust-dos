@@ -596,6 +596,21 @@ impl DiskController {
             if let (FileId::Host(old), FileId::Host(new)) = (source_id, self.file_id(to)) {
                 self.moved_files(Self::host_files_moved(&old, &new));
             }
+            // A rename that changes only the case of a name keeps its
+            // alias on Windows 9x, so a current directory there or below
+            // names the folder still (`walk_host`). Other renames leave
+            // the current directory naming the folder that was there.
+            if recased {
+                for (_, folder) in self.current_folders.values_mut() {
+                    if let Ok(below) = folder.strip_prefix(&source) {
+                        *folder = if below.as_os_str().is_empty() {
+                            target.clone()
+                        } else {
+                            target.join(below)
+                        };
+                    }
+                }
+            }
         } else {
             self.host_dirs.touched(&source);
             self.host_dirs.touched(&target);
