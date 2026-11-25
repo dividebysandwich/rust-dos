@@ -672,6 +672,11 @@ pub fn chsize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_errno(cpu, EBADF);
         return Some(EOF);
     };
+    // SetEndOfFile's check of the locks (kernel32/file.rs).
+    if kernel32::resize_locked(cpu, sft, args[1]) {
+        set_dos_error(cpu, crate::disk::LOCK_VIOLATION as u32);
+        return Some(EOF);
+    }
     match cpu.bus.disk.set_file_size(sft, args[1] as u64) {
         Ok(()) => Some(0),
         Err(code) => {

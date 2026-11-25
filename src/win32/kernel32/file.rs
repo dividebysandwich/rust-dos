@@ -661,11 +661,15 @@ pub(super) fn set_end_of_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_ACCESS_DENIED);
         return Some(FALSE);
     }
-    let disk = &mut cpu.bus.disk;
-    if disk.handle_device(open.sft).is_some() {
+    if cpu.bus.disk.handle_device(open.sft).is_some() {
         return Some(TRUE);
     }
-    let at = disk.position(open.sft).unwrap_or(0);
+    let at = cpu.bus.disk.position(open.sft).unwrap_or(0);
+    if resize_locked(cpu, open.sft, at.min(u32::MAX as u64) as u32) {
+        set_error(cpu, ERROR_LOCK_VIOLATION);
+        return Some(FALSE);
+    }
+    let disk = &mut cpu.bus.disk;
     match disk.set_file_size(open.sft, at) {
         Ok(()) => Some(TRUE),
         Err(code) => Some(dos_error(cpu, code)),
@@ -841,6 +845,22 @@ pub(crate) fn io_locked(cpu: &Cpu, open: Open, n: u32, write: bool) -> bool {
     cpu.bus.disk.has_locks() && {
         let owner = crate::interrupts::int21::lock_owner(cpu);
         cpu.bus.disk.io_locked(open.sft, owner, n, write)
+    }
+}
+
+/// Whether making the file open at `sft` end at `size` (SetEndOfFile,
+/// MSVCRT's `_chsize`) reaches bytes another holder's lock has. A cut
+/// is checked as WriteFile of no bytes at `size` is, and growing as a
+/// write of the zeros from the old end up to `size`.
+pub(crate) fn resize_locked(cpu: &Cpu, sft: u16, size: u32) -> bool {
+    let disk = &cpu.bus.disk;
+    disk.has_locks() && {
+        let owner = crate::interrupts::int21::lock_owner(cpu);
+        let end = disk.sft_entry(sft).map_or(0, |e| e.size);
+        match size.checked_sub(end) {
+            Some(grow) if grow > 0 => disk.io_locked_at(sft, owner, end as u64, grow, true),
+            _ => disk.io_locked_at(sft, owner, size as u64, 0, true),
+        }
     }
 }
 

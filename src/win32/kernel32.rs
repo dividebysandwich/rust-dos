@@ -40,6 +40,7 @@ pub(super) use process::{STARTUPINFO_SIZE, win_exec_step};
 pub(super) use file::{
     CREATE_ALWAYS, CREATE_NEW, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,
     OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING, io_locked, new_file, open_file, open_of,
+    resize_locked,
 };
 
 use super::stubs::{Api, Conv, Dll};

@@ -45,6 +45,8 @@ const KERNEL32: &[&str] = &[
     "CloseHandle",
     "ExitProcess",
     "GetLastError",
+    "GetStdHandle",
+    "SetEndOfFile",
 ];
 
 /// Where the program's data is, and its imports' slots, for its code.
@@ -97,9 +99,9 @@ fn program(
 }
 
 /// The programs' data: the file's name at 0, a command line at 10h,
-/// RESULT.BIN at 30h, a STARTUPINFO at 40h, a PROCESS_INFORMATION at 90h, an exit code at
-/// 0A0h, a count at 0A4h, two handles at 0A8h and 0ACh, and a buffer at
-/// 100h.
+/// RESULT.BIN at 30h, a STARTUPINFO at 40h, a PROCESS_INFORMATION at
+/// 90h, an exit code at 0A0h, a count at 0A4h, two handles at 0A8h and
+/// 0ACh, and a buffer at 100h.
 fn data(line: &str) -> Vec<u8> {
     let mut data = vec![0u8; 0x180];
     data[..DATA.len()].copy_from_slice(DATA.as_bytes());
@@ -435,6 +437,132 @@ fn a_dos_programs_lock_keeps_a_win32_process_from_the_bytes() {
     cpu.bus.disk.lock_region(sft, shell as u32, 10, 20).unwrap();
     let code = run(&mut cpu);
     assert_eq!(code, 0x0F, "the checks that failed: {:04b}", !code & 0x0F);
+}
+
+/// A Win32 child that locks bytes 40 to 49 through its standard input,
+/// the parent's handle of DATA.BIN, and ends without unlocking them: its
+/// exit code is LockFile's result.
+fn win32_std_input_locker() -> Vec<u8> {
+    program(&data(""), |a, l| {
+        a.push(-10)?;
+        a.call(l.f("GetStdHandle"))?;
+        a.mov(dword_ptr(l.at(0xA8) as u64), eax)?;
+        lock(a, l, "LockFile", 0xA8, 40, 10)?;
+        a.push(eax)?;
+        a.call(l.f("ExitProcess"))?;
+        a.int3()
+    })
+}
+
+/// T.EXE: it makes DATA.BIN and starts C.EXE with its handle of the file
+/// as the child's standard input, so that the file object, and DOS's
+/// entry, outlive the child. It ends with the child's exit code in bit 0
+/// and, in bit 1, whether its own LockFile of the bytes the child locked
+/// succeeds once the child ended.
+fn parent_sharing_the_file() -> Vec<u8> {
+    program(&data("C.EXE"), |a, l| {
+        open(a, l, 0, CREATE_ALWAYS)?;
+        a.mov(dword_ptr(l.at(0xA8) as u64), eax)?;
+        // STARTF_USESTDHANDLES, and the file as hStdInput.
+        a.mov(dword_ptr(l.at(0x6C) as u64), 0x100)?;
+        a.mov(dword_ptr(l.at(0x78) as u64), eax)?;
+        a.push(0)?;
+        a.push(l.at(0xA4))?;
+        a.push(DATA_SIZE as i32)?;
+        a.push(l.at(0x100))?;
+        a.push(dword_ptr(l.at(0xA8) as u64))?;
+        a.call(l.f("WriteFile"))?;
+        a.push(l.at(0x90))?;
+        a.push(l.at(0x40))?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(1)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(l.at(0x10))?;
+        a.push(0)?;
+        a.call(l.f("CreateProcessA"))?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90) as u64))?;
+        a.call(l.f("WaitForSingleObject"))?;
+        a.push(l.at(0xA0))?;
+        a.push(dword_ptr(l.at(0x90) as u64))?;
+        a.call(l.f("GetExitCodeProcess"))?;
+        a.mov(ebx, dword_ptr(l.at(0xA0) as u64))?;
+        a.and(ebx, 1)?;
+        lock(a, l, "LockFile", 0xA8, 40, 10)?;
+        succeeded(a, 1)?;
+        a.push(ebx)?;
+        a.call(l.f("ExitProcess"))?;
+        a.int3()
+    })
+}
+
+/// A process's locks go when it ends, also those made through a file
+/// object another process still holds, whose entry in DOS's table stays
+/// open (`remove_process`).
+#[test]
+fn a_processs_locks_go_when_it_ends_with_the_file_still_open() {
+    let mut cpu = machine(
+        "std_input_child",
+        &[
+            ("T.EXE", parent_sharing_the_file()),
+            ("C.EXE", win32_std_input_locker()),
+        ],
+    );
+    let code = run(&mut cpu);
+    assert_eq!(code, 3, "the checks that failed: {:02b}", !code & 3);
+}
+
+/// A Win32 program that opens DATA.BIN, which bytes 10 to 29 of are
+/// another holder's, and ends with a bit for each check that held:
+/// SetEndOfFile at byte 5 fails with ERROR_LOCK_VIOLATION (1), as
+/// WriteFile of no bytes there does, and at byte 50, past the lock, it
+/// succeeds (2).
+fn win32_cuts_the_file() -> Vec<u8> {
+    program(&data(""), |a, l| {
+        a.xor(ebx, ebx)?;
+        open(a, l, 0, OPEN_EXISTING)?;
+        a.mov(dword_ptr(l.at(0xA8) as u64), eax)?;
+        for (at, check) in [(5, 0), (50, 1)] {
+            a.push(0)?;
+            a.push(0)?;
+            a.push(at)?;
+            a.push(dword_ptr(l.at(0xA8) as u64))?;
+            a.call(l.f("SetFilePointer"))?;
+            a.push(dword_ptr(l.at(0xA8) as u64))?;
+            a.call(l.f("SetEndOfFile"))?;
+            if check == 0 {
+                failed_with(a, l, ERROR_LOCK_VIOLATION, check)?;
+            } else {
+                succeeded(a, check)?;
+            }
+        }
+        a.push(ebx)?;
+        a.call(l.f("ExitProcess"))?;
+        a.int3()
+    })
+}
+
+/// A DOS program, the shell, holds bytes 10 to 29 of DATA.BIN with
+/// AH=5Ch, and a Win32 program it starts can't cut the file into them.
+#[test]
+fn a_lock_keeps_set_end_of_file_from_the_bytes() {
+    let mut cpu = machine(
+        "set_end_of_file",
+        &[
+            ("T.EXE", win32_cuts_the_file()),
+            (DATA, vec![0x55; DATA_SIZE]),
+        ],
+    );
+    let shell = cpu.current_psp;
+    let sft = cpu.bus.disk.open_file(DATA, 0x42, shell).unwrap();
+    cpu.bus.disk.lock_region(sft, shell as u32, 10, 20).unwrap();
+    let code = run(&mut cpu);
+    assert_eq!(code, 3, "the checks that failed: {:02b}", !code & 3);
+    let file = PathBuf::from("target/test_win32_locks/set_end_of_file").join(DATA);
+    assert_eq!(fs::metadata(file).unwrap().len(), 50);
 }
 
 /// Writes the programs to the folder RUST_DOS_LOCK_PROBE names, to be run
