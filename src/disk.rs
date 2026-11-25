@@ -1,4 +1,5 @@
 use chrono::{DateTime, Datelike, Local, Timelike};
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -75,9 +76,9 @@ const FLOPPY_CLUSTERS: u16 = 2847;
 const MEMORY_TIME: u16 = 0x0000;
 const MEMORY_DATE: u16 = 0x5021;
 
-/// A list of owned path components as the FAT driver takes them.
-fn refs(parts: &[String]) -> Vec<&str> {
-    parts.iter().map(String::as_str).collect()
+/// A list of path components as the FAT driver takes them.
+fn refs<S: AsRef<str>>(parts: &[S]) -> Vec<&str> {
+    parts.iter().map(AsRef::as_ref).collect()
 }
 
 /// A path on a disk image the way DOS shows it: its components as they are

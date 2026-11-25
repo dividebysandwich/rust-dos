@@ -2226,7 +2226,7 @@ the prompt:
 
 | Type | Behaves like |
 |---|---|
-| `hdd` or `dir` (default) | A fixed disk. BIOS unit 80h and up. |
+| `hdd` or `dir` (default) | A fixed disk. BIOS unit 80h and up. A host folder shows DOS a 1 GB disk of 16 KB clusters with 512 MB to 1 GB free, which drops as files are written; the built-in Windows sees more (see [docs/builtin-windows.md](docs/builtin-windows.md)). |
 | `floppy` or `fdd` | A removable 1.44 MB disk whose free space reflects its files. |
 | `cdrom` or `iso` | A read-only drive that programs detect through MSCDEX (INT 2Fh AX=15xxh) and as a remote drive. From a CD image it is a whole disc: raw and cooked sector reads, the volume descriptors, the table of contents, and audio tracks that play through the Sound Blaster mixer's CD volume. From a directory, only its files are available. |
 
