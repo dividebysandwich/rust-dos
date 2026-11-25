@@ -78,8 +78,9 @@ impl DiskController {
         }
         let mut changed = Vec::new();
         for (&sft, open) in self.open_files.iter_mut() {
+            let key = open.key();
             if let OpenData::Memory(data, _) = &mut open.data
-                && let Some((_, new)) = keys.iter().find(|(key, _)| *key == open.key)
+                && let Some((_, new)) = keys.iter().find(|(k, _)| *k == key)
                 && data[..] != new[..]
             {
                 *data = new.clone();
@@ -205,12 +206,12 @@ impl DiskController {
         }
         let drive = self.drive_of(filename).ok_or(0x03u8)?;
         let handle = self.free_handle()?;
-        let key = self.file_key(filename);
+        let id = self.file_id(filename);
         let file = self.opened(
             OpenData::Memory(data, Rc::new(Cell::new(0))),
             drive,
             owner,
-            key,
+            id,
             filename,
             mode,
         );

@@ -5,6 +5,24 @@ use super::*;
 /// The entries of a host folder, as (host name, DOS name).
 type HostEntries = Rc<[(String, String)]>;
 
+/// A DOS path on a host drive, as `DiskController::walk_host` finds it.
+pub(super) struct HostWalk {
+    /// The host path: each component the entry's long name, or the name
+    /// to create it under where it matches none.
+    pub path: PathBuf,
+    /// The DOS path from the root in short names.
+    pub dos: String,
+    /// A component isn't among its folder's entries, so the path names
+    /// nothing on the host.
+    pub missing: bool,
+    /// Each component matched an entry of its folder, so `path` has the
+    /// names the host has.
+    pub matched: bool,
+    /// Each component but the last matched one: the folder `path` is in
+    /// has the names the host has.
+    pub dirs_matched: bool,
+}
+
 impl DiskController {
     // ========================================================================
     // PATH RESOLUTION
@@ -93,7 +111,7 @@ impl DiskController {
     /// The host path of `rest` on a host drive, and its DOS path from the
     /// root in short names (e.g. "GAMES\DAYOFT~1").
     pub(super) fn resolve_names_on(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String)> {
-        self.walk_host(drive_num, rest).map(|(path, dos, _)| (path, dos))
+        self.walk_host(drive_num, rest).map(|walk| (walk.path, walk.dos))
     }
 
     /// `resolve_names_on`, and whether a component of the path isn't
@@ -104,7 +122,7 @@ impl DiskController {
     /// can't rule out (`entries_settle`) is never missing. None for a path
     /// through one of the host's own files (`host_private`), by its name
     /// or by the host's short name for it.
-    fn walk_host(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String, bool)> {
+    pub(super) fn walk_host(&self, drive_num: u8, rest: &str) -> Option<HostWalk> {
         let drive = self.drive(drive_num)?;
         // Drives held in memory have no host paths; callers look there
         // first (`locate_in_memory`).
@@ -121,6 +139,8 @@ impl DiskController {
         // reads so too (`read_host_entries`), though it may open names in
         // it.
         let mut sure = true;
+        let mut matched = true;
+        let mut dirs_matched = true;
         for part in Self::logical_components(drive, rest) {
             // The host's own files aren't the drive's (`host_private`):
             // no call reaches them, to open, make, rename or delete.
@@ -131,6 +151,8 @@ impl DiskController {
             if found.is_none() && Self::host_alias_of_private(&full_path, part) {
                 return None;
             }
+            dirs_matched = matched;
+            matched &= found.is_some();
             if found.is_none() && sure {
                 if Self::entries_settle(part) && !entries.is_empty() {
                     missing = true;
@@ -146,7 +168,13 @@ impl DiskController {
 
         // Final Security Check
         if full_path.starts_with(root) {
-            Some((full_path, dos_path.join("\\"), missing))
+            Some(HostWalk {
+                path: full_path,
+                dos: dos_path.join("\\"),
+                missing,
+                matched,
+                dirs_matched,
+            })
         } else {
             None
         }
@@ -184,10 +212,16 @@ impl DiskController {
     /// the host. Where each is, a stat tells whether the path names a file
     /// or a folder.
     pub(super) fn locate_found(&self, dos_path: &str) -> Option<(u8, PathBuf, bool)> {
+        self.locate_walk(dos_path)
+            .map(|(drive, walk)| (drive, walk.path, walk.missing))
+    }
+
+    /// The drive a DOS path is on, and the path as `walk_host` finds it
+    /// there.
+    pub(super) fn locate_walk(&self, dos_path: &str) -> Option<(u8, HostWalk)> {
         let path_str = dos_path.replace('/', "\\");
         let (drive, rest) = self.split_drive(&path_str)?;
-        let (path, _, missing) = self.walk_host(drive, rest)?;
-        Some((drive, path, missing))
+        Some((drive, self.walk_host(drive, rest)?))
     }
 
     /// The host path of a DOS path, None where it names nothing on the

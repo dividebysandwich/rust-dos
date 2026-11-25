@@ -11,6 +11,7 @@
 use super::{
     CharDevice, DRIVE_C, DRIVE_SLOTS, DiskController, Drive, LASTDRIVE, MountOptions, OpenData, OpenFile, drive_name,
 };
+use super::FileId;
 use crate::diskimage::SavedDisk;
 use crate::mount::{MountSpec, mount_spec_value, parse_mount_spec, tokenize};
 use crate::savestate::{Reader, Result, State, StateError, Writer};
@@ -83,8 +84,19 @@ impl DiskController {
         entries.sort_unstable();
         entries.len().save(w);
         for sft in entries {
-            let OpenFile { data, drive, owner, key, path, mode, refs, fcb, empty_on_use, raw } =
-                &open_files[&sft];
+            let open = &open_files[&sft];
+            let OpenFile {
+                data,
+                drive,
+                owner,
+                path,
+                mode,
+                refs,
+                fcb,
+                empty_on_use,
+                raw,
+                ..
+            } = open;
             let (device, position) = match data {
                 OpenData::Host(file, _) => (None, file.position().unwrap_or(0)),
                 OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => (None, pos.get()),
@@ -97,7 +109,7 @@ impl DiskController {
                 fcb: *fcb,
                 drive: *drive,
                 owner: *owner,
-                key: *key,
+                key: open.key(),
                 path: path.clone(),
                 mode: *mode,
                 device,
@@ -154,7 +166,9 @@ impl DiskController {
         for file in files {
             let reopened = match file.device {
                 Some(device) => {
-                    Some(self.opened(OpenData::Device(device), file.drive, file.owner, 0, &file.path, file.mode))
+                    let data = OpenData::Device(device);
+                    let (drive, owner) = (file.drive, file.owner);
+                    Some(self.opened(data, drive, owner, FileId::Device, &file.path, file.mode))
                 }
                 None => match self.open_or_create(&file.path, file.mode, file.owner, false) {
                     Ok(at) => self.open_files.remove(&at),
@@ -167,7 +181,6 @@ impl DiskController {
             };
             open.drive = file.drive;
             open.owner = file.owner;
-            open.key = file.key;
             open.path = file.path;
             open.mode = file.mode;
             open.refs = file.refs & !(EMPTY_ON_USE | RAW);

@@ -2437,6 +2437,77 @@ fn a_handle_follows_a_file_a_long_name_rename_moves() {
     disk.close_file(handle);
 }
 
+/// A file a long-name call creates over its bytes, by its long name, is
+/// emptied for a DOS open by its alias, as on Windows 9x, where both
+/// names find one directory entry: on a disk image and on a host drive.
+#[test]
+fn a_create_by_long_name_empties_the_file_its_alias_opens() {
+    let base = scratch("one_file_settle");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    for drive in ["C:", "D:"] {
+        let long = format!(r"{drive}\Saved game one.dat");
+        let handle = disk
+            .long_name_call(|disk| disk.create_file(&long, PSP))
+            .unwrap();
+        disk.write_file(handle, b"old data").unwrap();
+        disk.close_file(handle);
+        let names = disk.long_names(&format!(r"{drive}\")).unwrap();
+        let (_, short) = names.iter().find(|(name, _)| name == "Saved game one.dat").unwrap();
+        let alias = format!(r"{drive}\{short}");
+        assert_eq!(short, "SAVEDG~1.DAT");
+
+        let created = disk
+            .long_name_call(|disk| disk.create_file(&long, PSP))
+            .unwrap();
+        let opened = disk.open_file(&alias, 0, PSP).unwrap();
+        assert_eq!(disk.read_file(opened, 16).unwrap(), b"", "{drive}");
+        assert_eq!(disk.handle_key(opened), disk.handle_key(created));
+        disk.close_file(opened);
+        disk.close_file(created);
+    }
+}
+
+/// An open file keeps telling itself apart by the file after a rename
+/// moves it: on a disk image a long name that moves the entry to other
+/// slots, on a host drive a rename to another folder (Windows hosts
+/// don't rename a folder with a file open in it). The new names find
+/// it.
+#[test]
+fn an_open_file_is_the_file_its_new_name_names_after_a_rename() {
+    let base = scratch("one_file_rename");
+    fs::create_dir_all(base.join("c").join("SAVES")).unwrap();
+    fs::write(base.join("c").join("SAVES").join("SLOT.SAV"), b"slot").unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+
+    let handle = disk.create_file(r"D:\SLOT.SAV", PSP).unwrap();
+    disk.write_file(handle, b"slot").unwrap();
+    let before = disk.handle_key(handle);
+    // The volume label is in front of the entry, so the long name can't
+    // go there: the entry moves.
+    disk.long_name_call(|disk| disk.rename_file(r"D:\SLOT.SAV", r"D:\A saved game slot.sav"))
+        .unwrap();
+    assert_ne!(disk.handle_key(handle), before);
+    assert_eq!(disk.handle_key(handle), Some(disk.file_key(r"D:\ASAVED~1.SAV")));
+    let long = disk.long_name_call(|disk| disk.file_key(r"D:\a saved game slot.sav"));
+    assert_eq!(disk.handle_key(handle), Some(long));
+    disk.close_file(handle);
+
+    let handle = disk.open_file(r"C:\SAVES\SLOT.SAV", 0, PSP).unwrap();
+    disk.rename_file(r"C:\SAVES\SLOT.SAV", r"C:\OLD.SAV").unwrap();
+    assert_eq!(disk.handle_key(handle), Some(disk.file_key(r"C:\OLD.SAV")));
+    assert_ne!(disk.handle_key(handle), Some(disk.file_key(r"C:\SAVES\SLOT.SAV")));
+    disk.close_file(handle);
+}
+
 /// Where the host's own file pointer of the host file open at `sft` is,
 /// asked of the host.
 fn host_pointer(disk: &DiskController, sft: u16) -> u64 {
