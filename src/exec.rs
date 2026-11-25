@@ -1409,17 +1409,15 @@ pub(crate) fn is_service_trap(ram: &[u8], phys_ip: usize) -> bool {
 ///   functions, and its system's traps in the ROM, the function's id the
 ///   word after it.
 fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
-    if phys_ip + 3 > ram.len() || ram[phys_ip] != 0xFE {
+    let Some([0xFE, kind, vector]) = trap_bytes(cpu, ram, phys_ip) else {
         return false;
-    }
-    let vector = ram[phys_ip + 2];
-    if ram[phys_ip + 1] == crate::win32::TRAP {
+    };
+    if kind == crate::win32::TRAP {
         return win32_trap(cpu, ram, phys_ip);
     }
     // The far-call services work in any mode, from the ROM (the Plug and
     // Play BIOS's and APM's protected-mode entry points); the others in
     // real and virtual-8086 mode.
-    let kind = ram[phys_ip + 1];
     let allowed = match kind {
         0x38 | 0x39 => !cpu.pm(),
         0x3A => crate::bus::Bus::is_rom(phys_ip),
@@ -1544,9 +1542,38 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     true
 }
 
+/// The first `N` bytes of the trap at `phys_ip`, at CS:EIP, as the
+/// processor fetches them: a trap that begins near the end of a page goes
+/// on in the page its linear address goes on in, which with paging needn't
+/// be the next physical page. Each process has the built-in DLLs in pages
+/// of its own, taken from the pool wherever one is free, so a trap at the
+/// end of one of KERNEL32's pages can have its id anywhere in RAM. None
+/// when that page isn't there, or the bytes aren't in RAM.
+fn trap_bytes<const N: usize>(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> Option<[u8; N]> {
+    let mut bytes = [0; N];
+    let lin_ip = cpu.seg_cache(Seg::CS).base.wrapping_add(cpu.eip());
+    let paging = cpu.cr0 & CR0_PG != 0;
+    let in_page = if paging {
+        (0x1000 - (lin_ip & 0xFFF) as usize).min(N)
+    } else {
+        N
+    };
+    bytes[..in_page].copy_from_slice(ram.get(phys_ip..phys_ip + in_page)?);
+    if in_page < N {
+        // Looking doesn't change CR2, as for the fetch (`fetch_slow`).
+        let cr2 = cpu.cr2;
+        let user = cpu.cpl == 3;
+        let next = cpu.lin_to_phys(lin_ip.wrapping_add(in_page as u32), false, user);
+        cpu.cr2 = cr2;
+        let next = next.ok()? as usize;
+        bytes[in_page..].copy_from_slice(ram.get(next..next + N - in_page)?);
+    }
+    Some(bytes)
+}
+
 /// A trap of the built-in Windows (`service_trap`).
 fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
-    let Some(&[lo, hi]) = ram.get(phys_ip + 2..phys_ip + 4) else {
+    let Some([_, _, lo, hi]) = trap_bytes::<4>(cpu, ram, phys_ip) else {
         return false;
     };
     let id = u16::from_le_bytes([lo, hi]);

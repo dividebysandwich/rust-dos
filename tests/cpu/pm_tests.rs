@@ -1419,6 +1419,43 @@ fn fpu_operands_across_a_page_boundary_follow_the_page_tables() {
 }
 
 #[test]
+fn a_service_trap_across_a_page_boundary_follows_the_page_tables() {
+    // An inline service trap (FE 39 vv) in V86 code at 3000:0FFE, whose
+    // last byte is on linear page 31h, mapped to physical 93000h: the
+    // number of the service comes from there, not from the physical page
+    // after the first, as the built-in Windows's traps at the end of a
+    // process's own page of KERNEL32 have their ids on another page.
+    let mut rig = Rig::new();
+    user_page_tables(&mut rig);
+    rig.write32(0x81000 + 0x31 * 4, 0x93000 | 0x7);
+    let v86 = asm16(0x30000, |a| {
+        a.db(&[0xE9, 0xFB, 0x0F]) // JMP 0FFEh
+    });
+    rig.load(0x30000, &v86);
+    rig.load(0x30FFE, &[0xFE, 0x39]);
+    // No service has these numbers: the log names the one that ran.
+    rig.load(0x93000, &[0xEE, 0xCD, 0x40]); // the number, then INT 40h
+    rig.load(0x31000, &[0xED]);
+    rig.handler(0x40, 3, |a| record_code(a, 0x40));
+    let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = lines.clone();
+    rig.cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        log.borrow_mut().push(line.to_string())
+    }));
+    rig.run(enter_v86_with_paging);
+    rig.cpu.bus.log_hook = None;
+    let lines = lines.take();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("Unknown inline emulator service EE")),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("service ED")), "{lines:?}");
+    assert_eq!(rig.recorded().0, 0x40, "on after the trap, at 93001h");
+}
+
+#[test]
 fn a_segment_loaded_again_sees_its_descriptor_as_it_is_now() {
     // DS loaded with the same selector again and again, while its
     // descriptor changes: a new base, the accessed bit cleared, the
