@@ -47,17 +47,19 @@
 //! or has made its entries PC_RESERVED: in the foreground its colors go
 //! back into its entries, in the background those still free get them.
 //! UnrealizeObject, SetPaletteEntries and ResizePalette make the next
-//! realization map it from scratch. So a bitmap drawn through a palette
-//! keeps meaning the same entries of it. Windows 95 OSR2.5 does all
-//! this (#2038's probes), apart from SetPaletteEntries followed by a
-//! realization in the foreground, which kept the entries (#2041).
+//! realization map it from scratch, and SetSystemPaletteUse does so for
+//! every palette, since it changes which entries are static. So a
+//! bitmap drawn through a palette keeps meaning the same entries of it.
+//! Windows 95 OSR2.5 does all this (#2038's probes), apart from
+//! SetPaletteEntries followed by a realization in the foreground, which
+//! kept the entries (#2041); SetSystemPaletteUse wasn't probed.
 //!
 //! RealizePalette returns how many entries' mappings changed, or for a
-//! palette that kept its mapping how many of its entries showed another
-//! color before, and when the primary palette changed any in a window's
-//! DC, USER sends WM_PALETTECHANGED to the top-level windows (as Wine's
-//! UserRealizePalette does). Realizing the palette realized last again
-//! does nothing until its entries change.
+//! palette that kept its mapping how many of its entries now show
+//! another color than before, and when the primary palette changed any
+//! in a window's DC, USER sends WM_PALETTECHANGED to the top-level
+//! windows (as Wine's UserRealizePalette does). Realizing the palette
+//! realized last again does nothing until its entries change.
 //!
 //! On such a device an RGB color takes the nearest static color, with
 //! one exception: a solid brush of a color that isn't one of the 20
@@ -1048,16 +1050,20 @@ pub(super) fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
             }
         }
     }
-    // A palette that kept its entries counts those that showed another
-    // color before (Windows 95 counts differently, in a way that wasn't
-    // worked out), so that taking the foreground again tells the other
-    // windows.
+    // A palette that kept its entries counts those whose entry of the
+    // system palette now shows another color than before (Windows 95
+    // counts differently, in a way that wasn't worked out), so that
+    // taking the foreground again tells the other windows. An entry that
+    // shares another's, or whose entry a palette in front holds, shows
+    // what it showed before and doesn't count each time.
     let changed = if kept {
         palette
             .entries
             .iter()
             .zip(&mapping)
-            .filter(|&(e, &m)| e[3] & PC_EXPLICIT == 0 && rgb(before[m as usize]) != rgb(*e))
+            .filter(|&(e, &m)| {
+                e[3] & PC_EXPLICIT == 0 && rgb(before[m as usize]) != rgb(system[m as usize])
+            })
             .count() as u32
     } else {
         mapping
@@ -1184,6 +1190,16 @@ pub fn set_system_palette_use(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             state.system_palette[i] = entry_of(c);
             state.system_use[i] = USE_STATIC;
             state.system_owner[i] = 0;
+        }
+    }
+    // A palette's mapping may point at entries that are static now, or
+    // leave out those that came free: each maps from scratch when it is
+    // next realized.
+    for o in state.objects.iter_mut().flatten() {
+        if let Kind::Palette { palette } = &mut o.kind
+            && !o.stock
+        {
+            palette.mapping.clear();
         }
     }
     state.last_realized = 0;
@@ -1521,6 +1537,42 @@ mod tests {
         want.extend(10..60);
         want.extend(63..73);
         assert_eq!(again, want);
+    }
+
+    /// A palette that kept its mapping counts the entries whose color on
+    /// the screen changed: in the background behind B, none, where it
+    /// counted the 60 that B holds every time; in the foreground, those
+    /// 60.
+    #[test]
+    fn a_kept_mapping_counts_the_entries_shown_anew() {
+        let (mut cpu, hdc) = palette_machine();
+        let cpu = &mut cpu;
+        let t = t_with_b_in_front(cpu, hdc);
+        realize_colors(cpu, hdc, &colors(b_color, 0..10), false);
+        select(cpu, hdc, t);
+        assert_eq!(realize(cpu, hdc), (0, false), "in the background");
+        gdi(cpu).primary_palette = t;
+        unrealize(cpu, t);
+        assert_eq!(realize(cpu, hdc), (60, true), "in the foreground");
+    }
+
+    /// SetSystemPaletteUse changes which entries are static, so a palette
+    /// maps from scratch: with SYSPAL_NOSTATIC the colors that had no
+    /// entry left get entries of their own.
+    #[test]
+    fn set_system_palette_use_maps_palettes_again() {
+        let (mut cpu, hdc) = palette_machine();
+        let cpu = &mut cpu;
+        let mut p = colors(a_color, 0..236);
+        p.extend(colors(t_color, 0..10));
+        let p = add(cpu, palette_of(&p));
+        let first = realize_handle(cpu, hdc, p, true);
+        assert!(first[236..].iter().all(|m| (10..246).contains(m)));
+        set_system_palette_use(cpu, &[hdc, SYSPAL_NOSTATIC]);
+        let mut again = realize_handle(cpu, hdc, p, true);
+        again.sort_unstable();
+        again.dedup();
+        assert_eq!(again.len(), 246, "an entry each");
     }
 
     /// AnimatePalette changes the system entries a palette took only
