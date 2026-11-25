@@ -114,6 +114,11 @@ const OPENGL32: &[&str] = &[
     "glAreTexturesResident",
     "glPrioritizeTextures",
     "glGetTexLevelParameteriv",
+    "glTexGeni",
+    "glTexGenfv",
+    "glGetTexGenfv",
+    "glClipPlane",
+    "glGetClipPlane",
     "glBitmap",
     "glCopyPixels",
     "wglUseFontBitmapsA",
@@ -220,11 +225,16 @@ const COPY_TEX_SUB_IMAGE_2D: usize = GL + 70;
 const ARE_TEXTURES_RESIDENT: usize = GL + 71;
 const PRIORITIZE_TEXTURES: usize = GL + 72;
 const GET_TEX_LEVEL_PARAMETERIV: usize = GL + 73;
-const BITMAP: usize = GL + 74;
-const COPY_PIXELS: usize = GL + 75;
-const WGL_USE_FONT_BITMAPS: usize = GL + 76;
-const RASTER_POS3F: usize = GL + 77;
-const PASS_THROUGH: usize = GL + 78;
+const TEX_GENI: usize = GL + 74;
+const TEX_GENFV: usize = GL + 75;
+const GET_TEX_GENFV: usize = GL + 76;
+const CLIP_PLANE: usize = GL + 77;
+const GET_CLIP_PLANE: usize = GL + 78;
+const BITMAP: usize = GL + 79;
+const COPY_PIXELS: usize = GL + 80;
+const WGL_USE_FONT_BITMAPS: usize = GL + 81;
+const RASTER_POS3F: usize = GL + 82;
+const PASS_THROUGH: usize = GL + 83;
 const GLU: usize = GL + OPENGL32.len();
 const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
@@ -5235,4 +5245,287 @@ fn font_bitmaps_draw(card: Draws) {
         }
     }
     assert!(lit > 20, "{lit} pixels");
+}
+
+// Texture coordinate generation and the user's clip planes.
+
+const GL_S: u32 = 0x2000;
+const GL_T: u32 = 0x2001;
+const GL_TEXTURE_GEN_MODE: u32 = 0x2500;
+const GL_OBJECT_PLANE: u32 = 0x2501;
+const GL_EYE_PLANE: u32 = 0x2502;
+const GL_OBJECT_LINEAR: u32 = 0x2401;
+const GL_SPHERE_MAP: u32 = 0x2402;
+const GL_TEXTURE_GEN_S: u32 = 0x0C60;
+const GL_TEXTURE_GEN_T: u32 = 0x0C61;
+const GL_CLIP_PLANE0: u32 = 0x3000;
+const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
+const GL_ENABLE_BIT: u32 = 0x2000;
+const GL_TRANSFORM_BIT: u32 = 0x1000;
+/// Two planes for glTexGenfv, s's and t's, and four values glGet
+/// writes; or a plane of doubles for glClipPlane, and the one
+/// glGetClipPlane writes.
+const PLANES: u32 = 0x380;
+const GOT: u32 = 0x3A0;
+
+/// The texels of `texgen_quad`'s texture, from the bottom left: red,
+/// green, blue and white.
+const QUADRANTS: [[u8; 3]; 4] = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]];
+
+/// How `texgen_quad` makes s and t.
+#[derive(Clone, Copy, PartialEq)]
+enum Gen {
+    /// GL_OBJECT_LINEAR, set by a display list, drawn mirrored.
+    Object,
+    /// GL_EYE_LINEAR (the initial mode), drawn mirrored.
+    Eye,
+    /// GL_SPHERE_MAP, of a quad that faces the eye.
+    Sphere,
+}
+
+/// Draw the window's quad at z = -0.5, with the texture coordinates
+/// (0, 0) and the normal (0, 0, 1) at every vertex, with s and t made
+/// as `how` says, of a 2x2 texture whose texels are `QUADRANTS`. The
+/// planes are s = x / 2 + 1/2 and t = y / 2 + 1/2, which put a texel in
+/// each quarter of the window. The generation's enables are on inside
+/// a glPushAttrib(GL_ENABLE_BIT). The results: the error after the
+/// draw and glIsEnabled(GL_TEXTURE_GEN_S) after the pop; s's plane as
+/// glGetTexGenfv gives it is at GOT.
+fn texgen_quad(card: Draws, how: Gen) -> (Box<Cpu>, u32, [u32; 2]) {
+    let mut d = data();
+    for (i, texel) in QUADRANTS.iter().enumerate() {
+        put(
+            &mut d,
+            TEXELS + 4 * i as u32,
+            &[texel[0], texel[1], texel[2], 255],
+        );
+    }
+    put_f32s(&mut d, PLANES, &[0.5, 0.0, 0.0, 0.5, 0.0, 0.5, 0.0, 0.5]);
+    let mut results = [0; 2];
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
+        texture_2x2(a, l, &mut c, TEXTURE, TEXELS)?;
+        let replace = [GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE].map(Arg::I);
+        c.api(a, l, TEX_ENVI, &replace)?;
+        // The sphere map spreads s and t from 0.3 to 0.7 over the
+        // window: each texel is drawn as it is, unfiltered.
+        let nearest = [GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST].map(Arg::I);
+        c.api(a, l, TEX_PARAMETERI, &nearest)?;
+        let (mode, plane) = match how {
+            Gen::Object => (Some(GL_OBJECT_LINEAR), GL_OBJECT_PLANE),
+            Gen::Eye => (None, GL_EYE_PLANE),
+            Gen::Sphere => (Some(GL_SPHERE_MAP), GL_EYE_PLANE),
+        };
+        if how == Gen::Object {
+            gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        }
+        for (coord, at) in [(GL_S, PLANES), (GL_T, PLANES + 16)] {
+            if let Some(mode) = mode {
+                let args = [coord, GL_TEXTURE_GEN_MODE, mode].map(Arg::I);
+                gl(a, l, TEX_GENI, &args)?;
+            }
+            gl(
+                a,
+                l,
+                TEX_GENFV,
+                &[Arg::I(coord), Arg::I(plane), Arg::At(at)],
+            )?;
+        }
+        if how == Gen::Object {
+            gl(a, l, END_LIST, &[])?;
+            gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        }
+        // Mirrored, the eye's x is the object's turned round.
+        if how != Gen::Sphere {
+            gl(a, l, SCALEF, &[Arg::F(-1.0), Arg::F(1.0), Arg::F(1.0)])?;
+        }
+        gl(a, l, PUSH_ATTRIB, &[Arg::I(GL_ENABLE_BIT)])?;
+        gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_GEN_S)])?;
+        gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_GEN_T)])?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        gl(a, l, TEX_COORD2F, &[Arg::F(0.0), Arg::F(0.0)])?;
+        gl(a, l, NORMAL3F, &[Arg::F(0.0), Arg::F(0.0), Arg::F(1.0)])?;
+        for [x, y] in corners([-1.0, -1.0, 1.0, 1.0]) {
+            gl(a, l, VERTEX3F, &[Arg::F(x), Arg::F(y), Arg::F(-0.5)])?;
+        }
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        results[0] = c.next - 1;
+        gl(a, l, POP_ATTRIB, &[])?;
+        c.api(a, l, IS_ENABLED, &[Arg::I(GL_TEXTURE_GEN_S)])?;
+        results[1] = c.next - 1;
+        gl(
+            a,
+            l,
+            GET_TEX_GENFV,
+            &[Arg::I(GL_S), Arg::I(plane), Arg::At(GOT)],
+        )?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let name = match how {
+        Gen::Object => "texgen_object",
+        Gen::Eye => "texgen_eye",
+        Gen::Sphere => "texgen_sphere",
+    };
+    let mut cpu = machine_on(name, card, exe);
+    run_until_done(&mut cpu, data);
+    card_drew(&cpu, card);
+    (cpu, data, results)
+}
+
+/// The window's quarters, from the bottom left: the pixel in the
+/// middle of each, as the texel of `QUADRANTS` it is within 16 of in
+/// each channel (the texture is 5-6-5, and dithered), or its color.
+fn quarters(cpu: &Cpu, data: u32) -> [[u8; 3]; 4] {
+    [(16, 16), (48, 16), (16, 48), (48, 48)].map(|(x, y)| {
+        let p = pixel(cpu, data, x, y);
+        let near = |t: &&[u8; 3]| (0..3).all(|k| p[k].abs_diff(t[k]) <= 16);
+        QUADRANTS.iter().find(near).copied().unwrap_or(p)
+    })
+}
+
+fn texgen_object_linear(card: Draws) {
+    let (cpu, data, [error, enabled]) = texgen_quad(card, Gen::Object);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error), 0, "glGetError");
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * enabled), 0, "the pop");
+    // The object's coordinates make s and t, whatever the modelview
+    // matrix does: mirrored, the texel of the object's right is on the
+    // window's left.
+    let [red, green, blue, white] = QUADRANTS;
+    assert_eq!(quarters(&cpu, data), [green, red, white, blue]);
+    let plane = floats(&cpu, data, GOT);
+    assert_eq!(plane, [0.5, 0.0, 0.0, 0.5], "the object plane as given");
+}
+
+#[test]
+fn texgen_object_linear_makes_coordinates_from_the_objects_place() {
+    texgen_object_linear(Draws::Voodoo3);
+}
+
+#[test]
+fn texgen_object_linear_on_a_toadforce() {
+    texgen_object_linear(Draws::ToadForce);
+}
+
+fn texgen_eye_linear(card: Draws) {
+    let (cpu, data, [error, enabled]) = texgen_quad(card, Gen::Eye);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error), 0, "glGetError");
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * enabled), 0, "the pop");
+    // The eye's coordinates make them: mirrored or not, the texel of
+    // the window's left is on its left.
+    assert_eq!(quarters(&cpu, data), QUADRANTS);
+    // Given under the identity, the eye plane is as given.
+    assert_eq!(floats(&cpu, data, GOT), [0.5, 0.0, 0.0, 0.5]);
+}
+
+#[test]
+fn texgen_eye_linear_makes_coordinates_from_the_eyes_place() {
+    texgen_eye_linear(Draws::Voodoo3);
+}
+
+#[test]
+fn texgen_eye_linear_on_a_toadforce() {
+    texgen_eye_linear(Draws::ToadForce);
+}
+
+fn texgen_sphere_map(card: Draws) {
+    let (cpu, data, [error, _]) = texgen_quad(card, Gen::Sphere);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error), 0, "glGetError");
+    // A quad facing the eye throws the lines of sight back turned
+    // toward its edges: s and t are below a half on its left and bottom
+    // (0.30 at the corner, by section 2.10.4's formula) and above on
+    // its right and top.
+    assert_eq!(quarters(&cpu, data), QUADRANTS);
+}
+
+#[test]
+fn texgen_sphere_map_makes_coordinates_from_the_reflection() {
+    texgen_sphere_map(Draws::Voodoo3);
+}
+
+#[test]
+fn texgen_sphere_map_on_a_toadforce() {
+    texgen_sphere_map(Draws::ToadForce);
+}
+
+fn clip_plane_cuts(card: Draws) {
+    let mut d = data();
+    for (i, x) in [1.0f64, 0.0, 0.0, 0.0].iter().enumerate() {
+        put(&mut d, PLANES + 8 * i as u32, &x.to_le_bytes());
+    }
+    let mut results = [0; 3];
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let blue = [Arg::F(0.0), Arg::F(0.0), Arg::F(1.0), Arg::F(1.0)];
+        gl(a, l, CLEAR_COLOR, &blue)?;
+        gl(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        // x >= 0, given with the modelview matrix half the window to the
+        // right: x >= 1/2 of the eye.
+        gl(a, l, TRANSLATEF, &[Arg::F(0.5), Arg::F(0.0), Arg::F(0.0)])?;
+        let plane0 = Arg::I(GL_CLIP_PLANE0);
+        gl(a, l, CLIP_PLANE, &[plane0, Arg::At(PLANES)])?;
+        gl(a, l, LOAD_IDENTITY, &[])?;
+        gl(a, l, ENABLE, &[plane0])?;
+        // A red triangle over the bottom right half.
+        gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        gl(a, l, COLOR3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        gl(a, l, VERTEX2F, &[Arg::F(-1.0), Arg::F(-1.0)])?;
+        gl(a, l, VERTEX2F, &[Arg::F(1.0), Arg::F(-1.0)])?;
+        gl(a, l, VERTEX2F, &[Arg::F(1.0), Arg::F(1.0)])?;
+        gl(a, l, END, &[])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        results[0] = c.next - 1;
+        gl(a, l, GET_CLIP_PLANE, &[plane0, Arg::At(GOT)])?;
+        // The transform group keeps the enable.
+        gl(a, l, PUSH_ATTRIB, &[Arg::I(GL_TRANSFORM_BIT)])?;
+        gl(a, l, DISABLE, &[plane0])?;
+        c.api(a, l, IS_ENABLED, &[plane0])?;
+        results[1] = c.next - 1;
+        gl(a, l, POP_ATTRIB, &[])?;
+        c.api(a, l, IS_ENABLED, &[plane0])?;
+        results[2] = c.next - 1;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine_on("clip_plane", card, exe);
+    run_until_done(&mut cpu, data);
+    card_drew(&cpu, card);
+    let [error, off, on] = results.map(|i| peek(&cpu, data + RESULTS + 4 * i));
+    assert_eq!(
+        (error, off, on),
+        (0, 0, 1),
+        "glGetError, the enable, popped"
+    );
+    let got: Vec<f64> = (0..4)
+        .map(|i| {
+            let lo = peek(&cpu, data + GOT + 8 * i) as u64;
+            let hi = peek(&cpu, data + GOT + 8 * i + 4) as u64;
+            f64::from_bits(hi << 32 | lo)
+        })
+        .collect();
+    assert_eq!(got, [1.0, 0.0, 0.0, -0.5], "the plane in eye coordinates");
+    let (red, blue) = ([255, 0, 0], [0, 0, 255]);
+    // The triangle is there right of x = 1/2 (pixel 48) and cut away
+    // left of it.
+    assert_eq!(pixel(&cpu, data, 56, 8), red);
+    assert_eq!(pixel(&cpu, data, 56, 40), red);
+    assert_eq!(pixel(&cpu, data, 50, 8), red);
+    assert_eq!(pixel(&cpu, data, 45, 8), blue);
+    assert_eq!(pixel(&cpu, data, 20, 8), blue);
+    // Above the triangle's diagonal it was never drawn.
+    assert_eq!(pixel(&cpu, data, 52, 60), blue);
+}
+
+#[test]
+fn a_clip_plane_cuts_a_triangle_where_the_eye_has_it() {
+    clip_plane_cuts(Draws::Voodoo3);
+}
+
+#[test]
+fn a_clip_plane_on_a_toadforce_cuts_a_triangle() {
+    clip_plane_cuts(Draws::ToadForce);
 }

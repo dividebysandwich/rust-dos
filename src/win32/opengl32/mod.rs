@@ -78,6 +78,7 @@
 //! 2005 Raphael Junqueira.
 
 mod attrib;
+mod clip;
 mod draw;
 mod exports;
 mod imm;
@@ -88,11 +89,13 @@ mod pname;
 mod raster;
 mod shade;
 mod state;
+mod texgen;
 mod texture;
 pub mod tnl;
 pub mod wgl;
 
 pub use lists::{call, mult_matrix, ortho, tex_image_rgba};
+pub use matrix::invert_doubles;
 pub use state::get_string;
 pub use texture::{GL_TEXTURE_2D, rgba_of};
 
@@ -100,6 +103,7 @@ use super::ddraw::d3d::pipeline::{IDENTITY, Matrix};
 use super::ddraw::stamp::Stamped;
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 
 pub static DLL: Dll = Dll {
     name: "OPENGL32.DLL",
@@ -368,6 +372,10 @@ pub struct Settings {
     /// named ones are its group's, which wglShareLists gives another
     /// context too (`lists::Shared`).
     pub default_texture: Texture,
+    /// Each unit's texture coordinate generation (`texgen.rs`).
+    pub texgen: Since<{ texgen::TEXGEN_SAVED }, [texgen::TexGen; UNITS]>,
+    /// The user's clip planes and their enables (`clip.rs`).
+    pub clip: Since<{ texgen::TEXGEN_SAVED }, clip::Clip>,
 }
 
 /// OpenGL's state: the system's.
@@ -489,6 +497,19 @@ pub fn read_doubles(cpu: &mut Cpu, at: u32, n: usize) -> Option<Vec<f64>> {
     )
 }
 
+/// Write the doubles `values` at `at`, as the functions that give
+/// doubles back do: nothing where they can't all be written.
+pub fn write_doubles(cpu: &mut Cpu, at: u32, values: &[f64]) {
+    if at == 0 || !cpu.bus.guest_probe(at, values.len() * 8, true) {
+        return;
+    }
+    for (i, x) in values.iter().enumerate() {
+        let (to, bits) = (at + 8 * i as u32, x.to_bits());
+        cpu.bus.guest_write_32(to, bits as u32);
+        cpu.bus.guest_write_32(to + 4, (bits >> 32) as u32);
+    }
+}
+
 /// A context's state as a new one has it, for the window `window` of
 /// the pixel format `format`.
 fn new_context(pid: u32, window: u32, format: u32) -> Context {
@@ -553,8 +574,9 @@ pub const CAP_NORMALIZE: u32 = 0x800;
 pub const CAP_LINE_SMOOTH: u32 = 0x1000;
 pub const CAP_POLYGON_OFFSET_LINE: u32 = 0x2000;
 pub const CAP_POLYGON_OFFSET_POINT: u32 = 0x4000;
-pub const CAP_CLIP_PLANES: u32 = 0x8000;
-pub const CAP_TEXTURE_GEN: u32 = 0x1_0000;
+// 0x8000 and 0x1_0000 were the clip planes' and texture generation's,
+// which have enables of their own now (`clip::Clip`, `texgen::TexGen`):
+// a state saved before has them set or not, and nothing reads them.
 pub const CAP_POLYGON_SMOOTH: u32 = 0x2_0000;
 pub const CAP_POINT_SMOOTH: u32 = 0x4_0000;
 pub const CAP_LINE_STIPPLE: u32 = 0x8_0000;
@@ -687,7 +709,9 @@ crate::state_fields!(Settings {
     env_mode,
     env_color,
     bound,
-    default_texture
+    default_texture,
+    texgen,
+    clip
 });
 crate::state_fields!(Context {
     settings,
@@ -756,6 +780,7 @@ pub fn keeps_waiting(id: u16) -> bool {
         "glLoadMatrix",
         "glMultMatrix",
         "glStencil",
+        "glTexGen",
     ];
     const NAMES: &[&str] = &[
         "glBegin",
@@ -797,6 +822,7 @@ pub fn keeps_waiting(id: u16) -> bool {
         "glFrustum",
         "glViewport",
         "glScissor",
+        "glClipPlane",
         "glPushAttrib",
         "glPopAttrib",
         "glGetError",

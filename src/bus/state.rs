@@ -29,7 +29,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 98;
+const WIN32_VERSION: u16 = 99;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -65,9 +65,11 @@ const WIN32_VERSION: u16 = 98;
 /// (`win16::universal::TILES_SAVED`), 71's to 95's no OpenGL texture
 /// names that are only reserved (`opengl32::texture::RESERVED_SAVED`),
 /// 71's to 96's no threads that selected a palette
-/// (`user32::palette::PALETTE_SAVED`), and 71's to 97's no OpenGL
+/// (`user32::palette::PALETTE_SAVED`), 71's to 97's no OpenGL
+/// texture coordinate generation or clip planes
+/// (`opengl32::texgen::TEXGEN_SAVED`), and 71's to 98's no OpenGL
 /// raster position (`opengl32::raster::RASTER_SAVED`).
-const WIN32_LOADS: [u16; 28] = [
+const WIN32_LOADS: [u16; 29] = [
     71,
     72,
     73,
@@ -95,6 +97,7 @@ const WIN32_LOADS: [u16; 28] = [
     95,
     96,
     97,
+    98,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1207,6 +1210,8 @@ mod tests {
         (95, 0x61C6_45FE_9AE1_A896), // UTLinearToSelectorOffset's tiled selectors
         (96, 0xAEBE_28D7_7C2C_F660), // OpenGL texture names glGenTextures only reserved
         (97, 0x71EC_E4F5_0D5E_1F97), // the threads that selected a palette
+        (98, 0x890A_6080_1C80_4995), // OpenGL's texture coordinate generation and clip planes
+        (99, 0x4681_784C_0BA7_4ECB), // OpenGL's raster position
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

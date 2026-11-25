@@ -21,13 +21,14 @@
 //! ones of the side it shows (`back_faces`).
 
 use super::super::ddraw::d3d::device::{
-    self as inner_device, RS_ALPHAFUNC, RS_BLENDOP, RS_CLIPPING, RS_COLORWRITEENABLE, RS_CULLMODE,
-    RS_DESTBLEND, RS_FILLMODE, RS_FOGDENSITY, RS_FOGENABLE, RS_FOGEND, RS_FOGSTART,
-    RS_FOGTABLEMODE, RS_FOGVERTEXMODE, RS_LIGHTING, RS_SHADEMODE, RS_SPECULARENABLE, RS_SRCBLEND,
-    RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_CURRENT, TA_DIFFUSE, TA_TEXTURE, TOP_ADD,
-    TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU,
-    TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2,
-    TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER, TSS_TEXCOORDINDEX,
+    self as inner_device, RS_ALPHAFUNC, RS_BLENDOP, RS_CLIPPING, RS_CLIPPLANEENABLE,
+    RS_COLORWRITEENABLE, RS_CULLMODE, RS_DESTBLEND, RS_FILLMODE, RS_FOGDENSITY, RS_FOGENABLE,
+    RS_FOGEND, RS_FOGSTART, RS_FOGTABLEMODE, RS_FOGVERTEXMODE, RS_LIGHTING, RS_SHADEMODE,
+    RS_SPECULARENABLE, RS_SRCBLEND, RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_CURRENT, TA_DIFFUSE,
+    TA_TEXTURE, TOP_ADD, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1,
+    TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP,
+    TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER,
+    TSS_TEXCOORDINDEX,
 };
 use super::super::ddraw::d3d::hal::{
     RS_ALPHABLENDENABLE, RS_ALPHAREF, RS_ALPHATESTENABLE, RS_COLORKEYENABLE, RS_DITHERENABLE,
@@ -44,6 +45,7 @@ use super::shade::{self, Input};
 use super::state::{
     GL_BACK, GL_CW, GL_EXP, GL_EXP2, GL_FLAT, GL_FRONT_AND_BACK, GL_LINE, GL_POINT,
 };
+use super::texgen::{self, TEXGEN_SAVED};
 use super::texture::{self, GL_ADD, GL_CLAMP, GL_DECAL, GL_LINEAR, GL_REPLACE};
 use super::tnl::{self, Why};
 use super::{
@@ -53,6 +55,7 @@ use super::{
     UNITS, ctx, current, error, signed_unit, state,
 };
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 
 // Primitives.
 const GL_POINTS: u32 = 0;
@@ -360,6 +363,10 @@ pub struct Applied {
     scissor: Option<[u32; 4]>,
     depth_bias: i16,
     color_off: bool,
+    /// The clip planes that are on, in eye coordinates, which are the
+    /// device's world space: its planes from the first, as many as
+    /// RS_CLIPPLANEENABLE in `render` has bits.
+    planes: Since<TEXGEN_SAVED, Vec<[f32; 4]>>,
 }
 
 crate::state_fields!(Applied {
@@ -372,7 +379,8 @@ crate::state_fields!(Applied {
     viewport,
     scissor,
     depth_bias,
-    color_off
+    color_off,
+    planes
 });
 
 impl Applied {
@@ -390,6 +398,9 @@ impl Applied {
             && self.scissor == other.scissor
             && self.depth_bias == other.depth_bias
             && self.color_off == other.color_off
+            && self.planes.len() == other.planes.len()
+            && (self.planes.iter().zip(other.planes.iter()))
+                .all(|(a, b)| a.map(f32::to_bits) == b.map(f32::to_bits))
     }
 }
 
@@ -441,6 +452,7 @@ fn applied_in(
         GL_LINE => 2,
         _ => 3,
     };
+    let planes = c.clip.on();
     let render = vec![
         (RS_ZENABLE, depth as u32),
         (RS_ZWRITEENABLE, (depth && c.depth_mask) as u32),
@@ -469,6 +481,7 @@ fn applied_in(
         (RS_SHADEMODE, if c.shade_model == GL_FLAT { 1 } else { 2 }),
         (RS_LIGHTING, 0),
         (RS_CLIPPING, 1),
+        (RS_CLIPPLANEENABLE, (1 << planes.len()) - 1),
         // A card that writes some channels of a color and not others
         // takes the color mask from here (`color_off` below is the
         // mask of one that writes all of them or none).
@@ -533,6 +546,7 @@ fn applied_in(
         scissor: on(CAP_SCISSOR_TEST).then(|| scissor_rect(c)),
         depth_bias,
         color_off: !c.color_mask[..3].iter().any(|&m| m),
+        planes: Since(planes),
     }
 }
 
@@ -585,6 +599,14 @@ fn put(cpu: &mut Cpu, a: &Applied, card: bool) -> bool {
     }
     if d.color_off != a.color_off {
         d.color_off = a.color_off;
+    }
+    for (i, p) in a.planes.iter().enumerate() {
+        if d.planes
+            .get(i)
+            .is_some_and(|q| q.map(f32::to_bits) != p.map(f32::to_bits))
+        {
+            d.planes[i] = *p;
+        }
     }
     if !d.gl_pixel_centres {
         d.gl_pixel_centres = true;
@@ -1176,6 +1198,11 @@ fn draw(
     if prims.is_empty() || applied_of(c, &st.lists).is_none() {
         return;
     }
+    // The texture coordinates the context generates take the place of
+    // the vertices' own from here, on the card's way and the
+    // processor's, for a draw that draws something.
+    let generated = texgen::generate(c, raw);
+    let raw = generated.as_deref().unwrap_or(raw);
     let per = polygon_triangles(kind);
     let path = match transforms {
         Ok(()) => match tnl::state_of(c) {
