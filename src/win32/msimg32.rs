@@ -351,6 +351,12 @@ pub(crate) fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .then(|| super::gdi32::palette::DeviceMap::new(cpu, ddc.attrs.palette));
     let text = draw::value_through(cpu, &ddc, &c.surface, ddc.attrs.text_color, map.as_ref());
     let bk = draw::value_through(cpu, &ddc, &c.surface, ddc.attrs.bk_color, map.as_ref());
+    // On the screen, the source's colors map as BitBlt's do
+    // (`DeviceMap::on_screen`).
+    let map = match map {
+        Some(map) if ddc.kind != dc::MEMORY => Some(map.on_screen(cpu)),
+        map => map,
+    };
     let mut xlat = Translate::kept(cpu, &src.surface, map, src.bk_color, text, bk);
     let (ox, oy) = c.origin;
     let (sx0, sy0, sx1, sy1) = src.rect;

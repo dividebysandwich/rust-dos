@@ -3358,6 +3358,166 @@ fn a_256_colour_desktop_has_a_system_palette() {
     assert_eq!(dac[10 * 3..11 * 3], [10 >> shift, 20 >> shift, 30 >> shift]);
 }
 
+// The background palette program's data: two palettes of 236 entries.
+const PALETTE_A: u32 = 0x400;
+const PALETTE_B: u32 = 0x800;
+const SYSTEM_10: u32 = 0xC00;
+const SCREEN_DC: u32 = 0x18;
+const HPAL_B: u32 = 0x1C;
+const ONE_PIXEL_BMI: u32 = 0xD00;
+const ONE_PIXEL: u32 = 0xE00;
+
+/// A palette of 236 colors that the static ones don't have, for one
+/// whose colors are `color(i)`.
+fn put_palette(d: &mut [u8], at: u32, color: impl Fn(u32) -> u32) {
+    put32(d, at, 0x300 | 236 << 16);
+    for i in 0..236 {
+        put32(d, at + 4 + 4 * i, color(i));
+    }
+}
+
+fn a_color(i: u32) -> u32 {
+    (i + 10) | (245 - i) << 8 | 100 << 16
+}
+
+fn b_color(i: u32) -> u32 {
+    (245 - i) | 37 << 8 | (i + 10) << 16
+}
+
+/// A window's palette A realized, taking every free entry; then B
+/// realized in GetDC(NULL)'s DC, in the background, and two of its
+/// entries set as pixels of the screen, and system palette entry 10
+/// read back; then a DIB_RGB_COLORS pixel of one of A's colors set.
+fn background_palette_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    put_palette(&mut d, PALETTE_A, a_color);
+    put_palette(&mut d, PALETTE_B, b_color);
+    // A DIB of one pixel, of A's color 100, in its color table.
+    put32(&mut d, ONE_PIXEL_BMI, 40);
+    put32(&mut d, ONE_PIXEL_BMI + 4, 1);
+    put32(&mut d, ONE_PIXEL_BMI + 8, 1);
+    put32(&mut d, ONE_PIXEL_BMI + 12, 1 | 8 << 16);
+    put32(&mut d, ONE_PIXEL_BMI + 32, 1);
+    let c = a_color(100);
+    put32(
+        &mut d,
+        ONE_PIXEL_BMI + 40,
+        (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16) & 0xFF,
+    );
+    program(&[USER32_PAL, GDI32_PAL], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(64),
+                Arg::I(64),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        c.api(a, l, GET_DC, &[Arg::Val(HWND)])?;
+        a.mov(dword_ptr(l.at(HDC)), eax)?;
+        c.api(a, l, CREATE_PALETTE, &[Arg::At(PALETTE_A)])?;
+        a.mov(dword_ptr(l.at(PALETTE)), eax)?;
+        c.api(
+            a,
+            l,
+            SELECT_PALETTE,
+            &[Arg::Val(HDC), Arg::Val(PALETTE), Arg::I(0)],
+        )?;
+        c.api(a, l, REALIZE_PALETTE, &[Arg::Val(HDC)])?;
+        c.api(a, l, GET_DC, &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(SCREEN_DC)), eax)?;
+        c.api(a, l, CREATE_PALETTE, &[Arg::At(PALETTE_B)])?;
+        a.mov(dword_ptr(l.at(HPAL_B)), eax)?;
+        c.api(
+            a,
+            l,
+            SELECT_PALETTE,
+            &[Arg::Val(SCREEN_DC), Arg::Val(HPAL_B), Arg::I(0)],
+        )?;
+        c.api(a, l, REALIZE_PALETTE, &[Arg::Val(SCREEN_DC)])?;
+        // PALETTEINDEX(0) and PALETTEINDEX(235), outside the window.
+        for (x, color) in [(100, 0x0100_0000), (101, 0x0100_00EB)] {
+            c.api(
+                a,
+                l,
+                P_SET_PIXEL,
+                &[Arg::Val(SCREEN_DC), Arg::I(x), Arg::I(100), Arg::I(color)],
+            )?;
+        }
+        c.api(
+            a,
+            l,
+            GET_SYSTEM_PALETTE_ENTRIES,
+            &[
+                Arg::Val(SCREEN_DC),
+                Arg::I(10),
+                Arg::I(1),
+                Arg::At(SYSTEM_10),
+            ],
+        )?;
+        c.api(
+            a,
+            l,
+            SET_DI_BITS_TO_DEVICE,
+            &[
+                Arg::Val(SCREEN_DC),
+                Arg::I(102),
+                Arg::I(100),
+                Arg::I(1),
+                Arg::I(1),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(1),
+                Arg::At(ONE_PIXEL),
+                Arg::At(ONE_PIXEL_BMI),
+                Arg::I(0),
+            ],
+        )?;
+        finish(a, l, 1)
+    })
+}
+
+/// A palette realized in the background, with no free entry left, maps
+/// its entries to the system palette's entries from 10 up, those a
+/// realization in the foreground will give it, and leaves their colors
+/// as they are: Windows 95 OSR2.5 at 256 colours does, and a DDB or a
+/// pixel drawn through it then shows the palette's colors once it is
+/// realized in the foreground. Memphis Math makes its pictures so. A
+/// DIB's color drawn on the screen then takes the system palette's entry
+/// of the nearest color, not B's entry nearest to it: Memphis Math's
+/// toolbar draws so.
+#[test]
+fn a_background_palette_maps_to_its_foreground_entries() {
+    let (program, data) = background_palette_program();
+    let mut cpu = card_machine("background_palette", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 13);
+    assert_eq!(r[4], 236, "A's RealizePalette");
+    assert_eq!(r[8], 236, "B's RealizePalette");
+    assert_eq!(r[11], 1, "GetSystemPaletteEntries");
+    let pixel = |x: usize, y: usize| cpu.bus.vbe.vram[y * 640 + x];
+    assert_eq!((pixel(100, 100), pixel(101, 100)), (10, 245));
+    let system = peek(&cpu, data + SYSTEM_10) & 0xFF_FFFF;
+    assert_eq!(system, a_color(0), "entry 10 keeps A's color");
+    assert_eq!(r[12], 1, "SetDIBitsToDevice's lines");
+    assert_eq!(pixel(102, 100), 110, "A's color 100 is entry 110");
+}
+
 const USER32_DITHER: (&str, &[&str]) = ("USER32.DLL", &["CreateWindowExA", "GetDC", "FillRect"]);
 const GDI32_DITHER: (&str, &[&str]) = ("GDI32.DLL", &["CreateSolidBrush"]);
 const FILL_RECT: usize = 2;

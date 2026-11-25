@@ -122,10 +122,12 @@ pub fn default_masks(bpp: u32) -> [u32; 3] {
     if bpp == 16 { MASKS_16 } else { MASKS_32 }
 }
 
-/// The masks of a bitmap of GDI's of a depth: the display's format for
-/// its own depth (5-6-5 on a 16-bit desktop), else the depth's default.
+/// The masks a bitmap of GDI's of a depth is made with: the display's
+/// format for its own depth (5-6-5 on a 16-bit desktop or in a 16-bit
+/// mode DirectDraw set), else the depth's default. The bitmap keeps
+/// them (`Bitmap::masks`) when the mode changes.
 pub fn ddb_masks(cpu: &Cpu, bpp: u32) -> [u32; 3] {
-    if bpp == 16 && crate::win32::screen::desktop(cpu).bpp == 16 {
+    if bpp == 16 && super::dc::device_depth(cpu) == 16 {
         [0xF800, 0x07E0, 0x001F]
     } else {
         default_masks(bpp)
@@ -250,6 +252,7 @@ impl Surface {
             Target::Bitmap(handle) => {
                 let b = gdi(cpu).bitmap(handle)?;
                 let pitch = b.stride as usize;
+                let kept_masks = b.pixel_masks();
                 let dib = b.dib.as_ref().map(|d| (d.bits, d.top_down));
                 let table = b.dib.as_ref().map(|d| {
                     let masks = if d.compression == 3 {
@@ -263,7 +266,10 @@ impl Surface {
                     Some(t) => t,
                     None if bpp == 1 => (vec![0x000000, 0xFFFFFF], MASKS_32, true),
                     None if bpp == 8 => (super::palette::system_colors(cpu), MASKS_32, false),
-                    None => (Vec::new(), ddb_masks(cpu, bpp), false),
+                    None => {
+                        let masks = kept_masks.unwrap_or_else(|| ddb_masks(cpu, bpp));
+                        (Vec::new(), masks, false)
+                    }
                 };
                 let device = dib.is_none() && bpp == 8;
                 let stride = if cols == width { pitch } else { span };
@@ -692,10 +698,19 @@ impl super::Bitmap {
             planes: self.planes,
             stride: self.stride,
             bits: Vec::new(),
+            masks: self.masks,
+            display: self.display,
             dib: self.dib.clone(),
             dc: self.dc,
             dimension: self.dimension,
         }
+    }
+
+    /// The masks of a bitmap of GDI's pixels, those it was made with
+    /// (`masks`). None for one from a state saved before bitmaps kept
+    /// them, whose pixels have the display's format now (`ddb_masks`).
+    pub fn pixel_masks(&self) -> Option<[u32; 3]> {
+        (*self.masks != [0; 3]).then_some(*self.masks)
     }
 }
 

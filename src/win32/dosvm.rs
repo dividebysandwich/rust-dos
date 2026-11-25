@@ -83,7 +83,7 @@ pub const DOSVM_SAVED: u16 = 85;
 /// The W32 section's version that added the folder it starts in.
 pub const DOSVM_DIRECTORY: u16 = 86;
 /// The W32 section's version that added its PIF's DPMI memory.
-pub const DOSVM_DPMI: u16 = 104;
+pub const DOSVM_DPMI: u16 = 106;
 
 /// A DOS program a Windows program started.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
