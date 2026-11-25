@@ -917,10 +917,10 @@ fn digits_windows(p: &mut Program) -> u16 {
 
 /// The window procedure of DIGITS: WM_GETTEXT writes "1234" into
 /// lParam's buffer and returns the word at SS:DIGITS_RETURN (in the
-/// task's data segment), or 2 with `long`. With `long`, a WM_GETTEXT for more
-/// than 255 characters fills the buffer with wParam - 1 B's instead and
-/// returns their count, and WM_SETTEXT returns its string's length.
-/// WM_DESTROY quits; the rest goes to DefWindowProc.
+/// task's data segment), or 2 with `long`. With `long`, a WM_GETTEXT
+/// for more than 255 characters fills the buffer with wParam - 1 B's
+/// instead and returns their count, and WM_SETTEXT returns its string's
+/// length. WM_DESTROY quits; the rest goes to DefWindowProc.
 fn digits_procedure(p: &mut Program, long: bool) -> u16 {
     const WM_SETTEXT: u8 = 0x0C;
     const WM_GETTEXT: u8 = 0x0D;

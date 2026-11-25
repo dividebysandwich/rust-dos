@@ -1592,9 +1592,10 @@ fn sent_as_is(cpu: &Cpu, hwnd: u32) -> bool {
 
 /// GetWindowText(hwnd, buffer, size). Windows 3.1's sends WM_GETTEXT
 /// and returns what the window procedure does: a window with a 16-bit
-/// procedure, and another task's window, get the message as SendMessage
-/// gives it (`sent_as_is`), with the caller's buffer. The others,
-/// USER32's controls of the running task, go to GetWindowTextA.
+/// procedure, and another Win16 task's window, get the message as
+/// SendMessage gives it (`sent_as_is`), with the caller's buffer. The
+/// others, USER32's controls of the running task and the windows of
+/// Win32 threads, go to GetWindowTextA.
 fn get_window_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hwnd, buffer, size) = (args[0], args[1], args[2]);
     if sent_as_is(cpu, hwnd) {
