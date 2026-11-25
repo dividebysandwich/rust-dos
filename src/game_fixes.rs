@@ -4,7 +4,7 @@
 //! changes for a program that isn't recognised, and `game_fixes = false`
 //! or `game_fixes_off = <names>` turns them off.
 //!
-//! There are four kinds:
+//! There are five kinds:
 //!
 //! - [`Kind::Code`]: code bytes in conventional memory, patched in place.
 //!   The check runs when a program starts a reset of the Sound Blaster's
@@ -27,6 +27,10 @@
 //!   patched as the built-in Windows loads it, such as Test Drive 4's.
 //!   Windows booted from a disk image loads its programs itself, and
 //!   they run as they are.
+//! - [`Kind::Win32Shims`]: a Win32 program by name and size that the
+//!   built-in Windows runs with some behaviours of an older Windows
+//!   (`win32::shims`), such as Win32s's for Lunicus. Its file isn't
+//!   changed, and other programs keep Windows 98's behaviour.
 //!
 //! The Sound Blaster fixes are for the driver of two Titus games of 1993
 //! with the same sound engine: Prehistorik 2 and Blues Brothers: Jukebox
@@ -53,10 +57,12 @@
 //!
 //! To add a fix: an entry in [`FIXES`] with a name of its own, a test that
 //! runs it (`tests/program/game_fixes_tests.rs`,
-//! `tests/dos/exec_tests.rs` for a program skipped at EXEC, or
-//! `tests/win32/win32_tests.rs` for a Win32 program), and a line in
-//! CONFIGURATION.md's list of game fixes.
+//! `tests/dos/exec_tests.rs` for a program skipped at EXEC,
+//! `tests/win32/win32_tests.rs` for a Win32 program, or
+//! `tests/win32/win32_shims_tests.rs` for one given shims), and a line
+//! in CONFIGURATION.md's list of game fixes.
 
+use crate::win32::shims::{Shims, win32s::WIN32S};
 use memchr::memmem::Finder;
 use std::sync::OnceLock;
 
@@ -117,6 +123,14 @@ pub enum Kind {
         program: &'static str,
         size: usize,
         code: &'static CodePatch,
+    },
+    /// A Win32 program that the built-in Windows runs with `shims`: its
+    /// file name and the file's size. Matched as [`Kind::Win32`] is, by
+    /// name and size alone, since the shims don't touch its code.
+    Win32Shims {
+        program: &'static str,
+        size: usize,
+        shims: Shims,
     },
 }
 
@@ -624,6 +638,33 @@ pub const FIXES: &[Fix] = &[
             code: &TD4_INTRO_CAMERA,
         },
     },
+    // Cyberflix's engine of 1994 was made for Win32s. Its wrappers of
+    // GlobalLock (LUNICUS.EXE 414A39 and 414A85, JDEMO.EXE 4066D6 and
+    // 40672B) stop the program when GlobalFlags says a block is locked,
+    // which Win32s never did, and Windows 98 does after every lock:
+    // Windows 98 lists the game as incompatible. The CD's demo player,
+    // PREVIEWS\JDEMO.EXE, plays the demos of Cyberflix's games with the
+    // same engine.
+    Fix {
+        name: "lunicus-win32s",
+        game: "Lunicus",
+        reason: "it stops with \"bad lock use count\" unless GlobalFlags is Win32s's",
+        kind: Kind::Win32Shims {
+            program: "LUNICUS.EXE",
+            size: 206_336,
+            shims: WIN32S,
+        },
+    },
+    Fix {
+        name: "cyberflix-demo-win32s",
+        game: "Lunicus (the CD's demo player)",
+        reason: "it stops with \"bad lock use count\" unless GlobalFlags is Win32s's",
+        kind: Kind::Win32Shims {
+            program: "JDEMO.EXE",
+            size: 83_456,
+            shims: WIN32S,
+        },
+    },
 ];
 
 /// The fix called `name`.
@@ -664,7 +705,10 @@ pub fn find_code(
             .iter()
             .map(|fix| match fix.kind {
                 Kind::Code(code) => Some(Finder::new(code.patches[0].0.bytes)),
-                Kind::SkipAtExec { .. } | Kind::AtLoad { .. } | Kind::Win32 { .. } => None,
+                Kind::SkipAtExec { .. }
+                | Kind::AtLoad { .. }
+                | Kind::Win32 { .. }
+                | Kind::Win32Shims { .. } => None,
             })
             .collect()
     });
@@ -813,6 +857,30 @@ pub fn patch_win32(
     })
 }
 
+/// The fixes that give the Win32 program file of `size` bytes, which the
+/// built-in Windows loads from `path`, shims, each with its shims:
+/// `enabled` says whether a fix applies.
+pub fn win32_shims(
+    path: &str,
+    size: usize,
+    enabled: impl Fn(&Fix) -> bool,
+) -> Vec<(&'static Fix, Shims)> {
+    FIXES
+        .iter()
+        .filter(|fix| enabled(fix))
+        .filter_map(|fix| match fix.kind {
+            Kind::Win32Shims {
+                program,
+                size: wanted,
+                shims,
+            } if size == wanted && is_program(path, program, None, &|_| false) => {
+                Some((fix, shims))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whether `path` names the file `program` and, with `beside`, a file of
 /// that name is in the same directory: `is_file` says whether a path
 /// names a file.
@@ -836,7 +904,10 @@ mod tests {
     fn codes() -> impl Iterator<Item = (&'static Fix, &'static CodePatch)> {
         FIXES.iter().filter_map(|fix| match fix.kind {
             Kind::Code(code) => Some((fix, code)),
-            Kind::SkipAtExec { .. } | Kind::AtLoad { .. } | Kind::Win32 { .. } => None,
+            Kind::SkipAtExec { .. }
+            | Kind::AtLoad { .. }
+            | Kind::Win32 { .. }
+            | Kind::Win32Shims { .. } => None,
         })
     }
 
@@ -849,7 +920,7 @@ mod tests {
                 programs.iter().map(|&(_, code)| (fix, code)).collect()
             }
             Kind::Win32 { code, .. } => vec![(fix, code)],
-            Kind::SkipAtExec { .. } => vec![],
+            Kind::SkipAtExec { .. } | Kind::Win32Shims { .. } => vec![],
         })
     }
 
@@ -1027,7 +1098,7 @@ mod tests {
             let files: Vec<&CodePatch> = match fix.kind {
                 Kind::AtLoad { programs, .. } => programs.iter().map(|&(_, c)| c).collect(),
                 Kind::Win32 { code, .. } => vec![code],
-                Kind::Code(_) | Kind::SkipAtExec { .. } => vec![],
+                Kind::Code(_) | Kind::SkipAtExec { .. } | Kind::Win32Shims { .. } => vec![],
             };
             for code in files {
                 assert!(code.data.is_empty(), "{} has data it never writes", fix.name);
@@ -1212,6 +1283,36 @@ mod tests {
                 changed[offset(b.at)] ^= 1;
                 assert!(patch_win32(&path, &changed, |_| true).is_none());
             }
+        }
+    }
+
+    #[test]
+    fn gives_win32_shims_to_a_program_of_its_name_and_size() {
+        let shimmed: Vec<_> = FIXES
+            .iter()
+            .filter_map(|fix| match fix.kind {
+                Kind::Win32Shims {
+                    program,
+                    size,
+                    shims,
+                } => Some((fix, program, size, shims)),
+                _ => None,
+            })
+            .collect();
+        assert!(!shimmed.is_empty());
+        for (fix, program, size, shims) in shimmed {
+            assert!(!shims.is_empty(), "{}", fix.name);
+            let path = format!("C:\\GAME\\{}", program.to_ascii_lowercase());
+            let found = win32_shims(&path, size, |_| true);
+            let names: Vec<_> = found.iter().map(|(f, _)| f.name).collect();
+            assert_eq!(names, [fix.name]);
+            assert_eq!(found[0].1, shims);
+            // Not with the fix off, under another name, or of another
+            // size.
+            let off = vec![fix.name.to_string()];
+            assert!(win32_shims(&path, size, |f| enabled(f, true, &off)).is_empty());
+            assert!(win32_shims("C:\\GAME\\OTHER.EXE", size, |_| true).is_empty());
+            assert!(win32_shims(&path, size + 1, |_| true).is_empty());
         }
     }
 }

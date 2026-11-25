@@ -2036,7 +2036,10 @@ the shell or by EXEC, or as the built-in Windows loads a Win32 program,
 when every piece the fix checks is as the game shipped it; the file on
 the disk doesn't change. A Windows booted from a disk image loads its
 programs itself, so the Win32 fixes don't reach it. Others skip a
-program the game starts, with the exit code it would have given.
+program the game starts, with the exit code it would have given, or run
+a Win32 program on the built-in Windows with a few behaviours of the
+older Windows it was made for, such as Win32s's; its file and other
+programs don't change.
 
 | Name | Game | What goes wrong | What the fix does |
 |------|------|-----------------|-------------------|
@@ -2047,6 +2050,8 @@ program the game starts, with the exit code it would have given.
 | `microprose-dswap` | F-117A, F-19, Gunship 2000, Covert Action | DSWAP.EXE wants the original install disk and waits for it | Skips DSWAP.EXE with exit code 1, as if the disk was there |
 | `microprose-player` | The same games | Their PLAYER.EXE, the title and cutscene player, loops forever without the copy protection's data | Skips PLAYER.EXE, when DSWAP.EXE is beside it, with exit code 0 |
 | `td4-intro-camera` | Test Drive 4 (version 1.2 only, on the built-in Windows) | At 60 frames a second the race is seen from just above the car, or at lower rates from too close or too far, for the whole race | Patches 3.EXE as it loads to move the intro's last camera shot by the game's ticks instead of its frames |
+| `lunicus-win32s` | Lunicus (the CD's version, on the built-in Windows) | The game stops at once with "bad lock use count", on Windows 98 too, which lists it as incompatible | Runs LUNICUS.EXE with Win32s's GlobalFlags, which leaves out the lock count |
+| `cyberflix-demo-win32s` | Lunicus's CD: the demo player of Cyberflix's games | The demos stop with "bad lock use count" in the same way | The same for PREVIEWS\JDEMO.EXE |
 
 The two Titus games share a sound engine that turns each signed sample
 into an unsigned 0 to 63 and scales it by the note's volume without

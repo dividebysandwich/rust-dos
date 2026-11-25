@@ -363,7 +363,7 @@ static APIS: &[Api] = &[
     stdcall("LocalLock", 567, 1, global::global_lock),
     stdcall("LocalUnlock", 571, 1, global::global_unlock),
     stdcall("LocalHandle", 566, 1, global::global_handle),
-    stdcall("LocalFlags", 564, 1, global::global_flags),
+    stdcall("LocalFlags", 564, 1, global::local_flags),
     stdcall("LocalCompact", 562, 1, global::global_compact),
     stdcall("LocalShrink", 569, 2, global::local_shrink),
     stdcall("IsBadReadPtr", 533, 2, virtual_memory::is_bad_read_ptr),

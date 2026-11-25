@@ -71,6 +71,7 @@ mod rpcrt4;
 mod screen;
 pub(crate) mod seh;
 mod shell32;
+pub mod shims;
 pub mod snapshot;
 pub(crate) mod stub_tables;
 pub(crate) mod stubs;
@@ -321,6 +322,9 @@ pub struct Process {
     /// its order, and which the addresses Rust works out for it follow. A
     /// load works them out again (`stub_tables::mend`).
     pub(crate) older_images: Vec<stub_tables::OlderImage>,
+    /// The behaviours of an older Windows it gets instead of Windows
+    /// 98's, which a game fix gives it as it starts (shims).
+    pub(crate) shims: crate::savestate::Since<{ shims::SHIMS_SAVED }, shims::Shims>,
 }
 
 impl Process {
@@ -1046,6 +1050,30 @@ fn patch_at_load(cpu: &mut Cpu, path: &str, file: &[u8]) -> Option<Vec<u8>> {
     Some(patched)
 }
 
+/// The shims the game fixes give the program file `file`, read from
+/// `path`: none when no fix is for it.
+fn shims_at_load(cpu: &mut Cpu, path: &str, file: &[u8]) -> shims::Shims {
+    if !cpu.bus.game_fixes {
+        return shims::Shims::NONE;
+    }
+    let bus = &cpu.bus;
+    let found = crate::game_fixes::win32_shims(path, file.len(), |fix| bus.game_fix_enabled(fix));
+    let mut all = shims::Shims::NONE;
+    for (fix, set) in found {
+        let names: Vec<_> = set.iter().map(|s| s.describe()).collect();
+        cpu.bus.log_string(&format!(
+            "[game fix] {}: {} ({}): {} gets {}",
+            fix.name,
+            fix.game,
+            fix.reason,
+            path,
+            names.join(", ")
+        ));
+        all = all.union(set);
+    }
+    all
+}
+
 /// `create_process` with the program's file `file`, read already (or
 /// made, as the Win16 process's is).
 #[allow(clippy::too_many_arguments)]
@@ -1069,6 +1097,9 @@ pub(crate) fn create_process_from(
     let file = patched.as_deref().unwrap_or(file);
     let loaded = loader::load(cpu, path, line, file, environment)?;
     let mut process = loaded.process;
+    // A program that a game fix gives an older Windows's behaviours
+    // (Lunicus's, Win32s's).
+    *process.shims = shims_at_load(cpu, path, file);
     // It starts in the current directories of the program that starts
     // it, which DOS has.
     process.directories.0 = Some(directories::Directories::now(cpu));
@@ -1770,6 +1801,7 @@ crate::state_fields!(Process {
     vfw,
     system_heap,
     directories,
+    shims,
 } skip {
     file_apis_oem,
     older_images,

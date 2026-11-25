@@ -29,7 +29,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 92;
+const WIN32_VERSION: u16 = 93;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -56,9 +56,10 @@ const WIN32_VERSION: u16 = 92;
 /// (`directories::DIRECTORIES_SAVED`), 71's to 89's no animated
 /// cursors (`user32::resource::ANI_CURSORS`), 71's to 90's Win16
 /// modules counted once for each import of them
-/// (`win16::module::USERS_COUNTED`), and 71's to 91's no Universal
-/// Thunks (`win16::universal::UT_SAVED`).
-const WIN32_LOADS: [u16; 22] = [
+/// (`win16::module::USERS_COUNTED`), 71's to 91's no Universal Thunks
+/// (`win16::universal::UT_SAVED`), and 71's to 92's no compatibility
+/// shims of a process (`win32::shims::SHIMS_SAVED`).
+const WIN32_LOADS: [u16; 23] = [
     71,
     72,
     73,
@@ -80,6 +81,7 @@ const WIN32_LOADS: [u16; 22] = [
     89,
     90,
     91,
+    92,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1187,6 +1189,7 @@ mod tests {
         (90, 0x73E4_9EC8_9162_D561), // animated cursors
         (91, 0x73E4_9EC8_9162_D561), // Win16 modules counting their users, not imports
         (92, 0xF14F_686E_F110_2495), // Universal Thunks
+        (93, 0x9568_9B5A_F977_006F), // each process's compatibility shims
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
