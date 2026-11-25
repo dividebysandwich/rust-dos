@@ -119,12 +119,13 @@ that it improves on main. Steps, in this order:
    behaviour closer to the real hardware or the real Windows, shown by a
    test or a comparison with it. Put the evidence in the description.
 
-   When you mark it ready, check that it still merges with main, which
-   moves on while a pull request is in draft. If it doesn't, merge main
-   into the branch (no rebase, no force-push), keep what both sides
-   meant, run the tests the conflict touches, and push. GitHub can show
-   the old head for minutes after a push: compare its head with the
-   commit you pushed before trusting "conflicting".
+   Before it is marked ready, check that it still merges with main,
+   which moves on while a pull request is in draft. If it doesn't, the
+   agent that has the branch's worktree merges main into the branch (no
+   rebase, no force-push), keeps what both sides meant, runs the tests
+   the conflict touches, and pushes. GitHub can show the old head for
+   minutes after a push: compare its head with the commit you pushed
+   before trusting "conflicting".
 
    A save-state version both sides raised (`WIN32_VERSION` and the
    like): the branch takes the next free number, and main's joins the
