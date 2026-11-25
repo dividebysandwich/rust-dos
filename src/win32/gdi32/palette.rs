@@ -11,8 +11,9 @@
 //! SYSPAL_NOSTATIC), and realizing a logical palette maps each of its
 //! entries to an entry of the system palette:
 //!
-//! - In the foreground (the palette USER's SelectPalette made the
-//!   primary one, selected into a DC of the foreground window without
+//! - In the foreground (the primary palette, the one GDISelectPalette
+//!   last selected with wBkg FALSE, as USER's SelectPalette does on a
+//!   palette device for a DC of the foreground window without
 //!   bForceBackground), every entry but the static ones is freed first.
 //!   In the background, only the entries the same palette took last
 //!   time that no other palette maps to.
@@ -624,29 +625,59 @@ pub fn animate_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// Whether the DC `hdc` holds the primary palette, the one selected last
-/// into a DC of the foreground window without bForceBackground: Windows
-/// 3.1's and 98's IsDCCurrentPalette (GDI.412), which compares the DC's
-/// palette with the one GDISelectPalette last selected in the
-/// foreground. False for a handle that isn't a DC, and on a display
-/// that isn't a palette device: USER's SelectPalette selects a palette
-/// in the foreground only on one, where `select_palette` makes it the
-/// primary palette on any display.
+/// Whether the DC `hdc` holds the primary palette, the one
+/// GDISelectPalette last selected in the foreground: Windows 3.1's and
+/// 98's IsDCCurrentPalette (GDI.412), which compares the DC's palette
+/// with that one. False for a handle that isn't a DC. Windows 98's
+/// doesn't ask what the display is: on one that isn't a palette device
+/// USER's SelectPalette selects no palette in the foreground
+/// (`select_palette`), so there only GDISelectPalette called with wBkg
+/// FALSE, or a palette selected in an 8-bit mode before, makes it TRUE.
 pub fn is_dc_current_palette(cpu: &mut Cpu, hdc: u32) -> bool {
-    if !palette_device(cpu) {
-        return false;
-    }
     let state = gdi(cpu);
     let primary = state.primary_palette;
     primary != 0 && state.dc(hdc).is_some_and(|d| d.attrs.palette == primary)
 }
 
-/// SelectPalette(hdc, hpal, background): the palette it had. As USER's
-/// SelectPalette, it makes the palette the primary one when it isn't
-/// selected as a background palette into a DC of the foreground window
-/// or one of its children.
+/// SelectPalette(hdc, hpal, bForceBackground): the palette it had.
+/// Windows 98 SE's GDI32 jumps through a pointer that is set at run time
+/// (Wine's calls USER32's function the same way, pfnSelectPalette), and
+/// USER's SelectPalette (USER.EXE segment 13 at 1EAEh) calls
+/// GDISelectPalette (`gdi_select_palette`) with wBkg FALSE only when the
+/// display is a palette device (the RC_PALETTE bit of
+/// GetDeviceCaps(RASTERCAPS), which USER keeps for each display), the
+/// palette isn't DEFAULT_PALETTE, bForceBackground is FALSE, and the DC
+/// belongs to the foreground window or one of its children; otherwise
+/// with TRUE. So on a desktop of more than 256 colours a palette never
+/// becomes the primary one, and after a switch to an 8-bit mode the
+/// palettes selected before it realize in the background until one is
+/// selected again.
 pub fn select_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (hdc, handle, background) = (args[0], args[1], args[2] & 0xFFFF != 0);
+    let (hdc, handle, force_background) = (args[0], args[1], args[2] & 0xFFFF != 0);
+    let foreground = !force_background
+        && palette_device(cpu)
+        && handle != gdi(cpu).stock(DEFAULT_PALETTE)
+        && in_foreground_window(cpu, hdc);
+    gdi_select_palette(cpu, hdc, handle, !foreground)
+}
+
+/// Whether the DC `hdc` belongs to the foreground window or one of its
+/// children.
+fn in_foreground_window(cpu: &mut Cpu, hdc: u32) -> bool {
+    let hwnd = gdi(cpu).dc(hdc).map_or(0, |d| d.hwnd);
+    let user = &cpu.bus.win32.user;
+    let foreground = user.foreground_window();
+    hwnd != 0 && foreground != 0 && (foreground == hwnd || user.is_descendant(foreground, hwnd))
+}
+
+/// GDISelectPalette(hdc, hpal, wBkg), GDI.361, which USER's SelectPalette
+/// calls: select the palette into the DC, and return the one it had, or
+/// 0 for a handle that isn't a palette or a DC. With wBkg FALSE the
+/// palette becomes the primary one, whatever the display and the DC's
+/// window: Windows 98 SE's (GDI.EXE segment 2 at 50Ch) then keeps it as
+/// its device's foreground palette (PDEVICE+A4h), which RealizePalette
+/// realizes in the foreground.
+pub fn gdi_select_palette(cpu: &mut Cpu, hdc: u32, handle: u32, background: bool) -> Option<u32> {
     if gdi(cpu).palette(handle).is_none() {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
@@ -658,19 +689,11 @@ pub fn select_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
     };
-    let hwnd = gdi(cpu).dc(hdc).map_or(0, |d| d.hwnd);
-    if !background && handle != gdi(cpu).stock(DEFAULT_PALETTE) && hwnd != 0 {
-        let user = &cpu.bus.win32.user;
-        let foreground = user.foreground_window();
-        if foreground != 0
-            && (foreground == hwnd || user.is_descendant(foreground, hwnd))
-            && gdi(cpu).primary_palette != handle
-        {
-            // A palette realized last in the background is realized
-            // again, in the foreground.
-            gdi(cpu).primary_palette = handle;
-            unrealize(cpu, handle);
-        }
+    if !background && gdi(cpu).primary_palette != handle {
+        // A palette realized last in the background is realized again,
+        // in the foreground.
+        gdi(cpu).primary_palette = handle;
+        unrealize(cpu, handle);
     }
     dc::free_if_deleted(cpu, old);
     Some(old)

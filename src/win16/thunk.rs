@@ -77,6 +77,9 @@ pub static POSTS: &[Post] = &[
     super::message::post,
     super::hook::post,
     super::hook::post_msg_filter,
+    super::message::post_send16_hooks,
+    super::message::post_send16_ret,
+    super::kernel::post_yield,
 ];
 
 pub const POST_PLAIN: u16 = 0;
@@ -85,6 +88,9 @@ pub const POST_USER: u16 = 2;
 pub const POST_MESSAGE: u16 = 3;
 pub const POST_HOOK: u16 = 4;
 pub const POST_MSG_FILTER: u16 = 5;
+pub const POST_SEND16_HOOKS: u16 = 6;
+pub const POST_SEND16_RET: u16 = 7;
+pub const POST_YIELD: u16 = 8;
 
 /// The thens, by their place. Append only.
 pub static THENS: &[Then] = &[
@@ -104,6 +110,8 @@ pub static THENS: &[Then] = &[
     super::ole2::then_block,
     super::ole2disp::then,
     super::typelib_invoke::then,
+    super::message::then_send16,
+    super::user::then_dlg_int,
 ];
 
 // Place 0 is then_keep, which no call names now.
@@ -122,6 +130,8 @@ pub const THEN_OLE_METHOD: u16 = 12;
 pub const THEN_OLE_BLOCK: u16 = 13;
 pub const THEN_OLE2DISP: u16 = 14;
 pub const THEN_TYPELIB_INVOKE: u16 = 15;
+pub const THEN_SEND16: u16 = 16;
+pub const THEN_DLG_INT: u16 = 17;
 
 fn post_plain(_: &mut Cpu, value: u32, _: &[u32], _: &mut Context) -> Option<u32> {
     Some(value)
@@ -157,6 +167,12 @@ pub fn set_sp(ctx: &mut Context, value: u16) {
 /// The running task's frames.
 fn frames(cpu: &mut Cpu) -> &mut Vec<Frame> {
     &mut super::task(cpu).frames
+}
+
+/// Take back the call of 32-bit code `enter32` set up last, before it
+/// ran: its frame goes, and its `post` doesn't run.
+pub fn drop32(cpu: &mut Cpu) {
+    frames(cpu).pop();
 }
 
 /// The top of the 32-bit stack the running task's next call of 32-bit

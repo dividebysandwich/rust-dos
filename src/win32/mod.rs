@@ -323,8 +323,15 @@ pub struct Process {
     /// load works them out again (`stub_tables::mend`).
     pub(crate) older_images: Vec<stub_tables::OlderImage>,
     /// The behaviours of an older Windows it gets instead of Windows
-    /// 98's, which a game fix gives it as it starts (shims).
+    /// 98's, which a game fix or the `win32_shims` setting gives it as it
+    /// starts (shims).
     pub(crate) shims: crate::savestate::Since<{ shims::SHIMS_SAVED }, shims::Shims>,
+    /// Its view of Windows 3.1's GDI heap, with the shim that keeps one
+    /// (shims/win31/gdi_heap.rs).
+    pub(crate) gdi_heap: crate::savestate::Since<
+        { shims::win31::gdi_heap::GDI_HEAP_SAVED },
+        shims::win31::gdi_heap::GdiHeapView,
+    >,
 }
 
 impl Process {
@@ -407,6 +414,9 @@ pub struct Win32 {
     /// the running processes see, the setting's when the first of them
     /// started (nls.rs).
     pub locale: nls::Win32Locale,
+    /// The shims every program gets as it starts (the `win32_shims`
+    /// setting).
+    pub shims: shims::Shims,
     pub(crate) os_locale: nls::Win32Locale,
     /// The desktop's size as ChangeDisplaySettings set it, and the
     /// process that set it: None while it is its own (screen.rs).
@@ -566,6 +576,7 @@ impl Win32 {
             depth: self.depth,
             desktop: self.desktop,
             locale: self.locale,
+            shims: self.shims,
             dll_files: self.dll_files.take(),
             trace: trace::Trace::new(self.trace.level()),
             trace3d: self.trace3d.take(),
@@ -1050,15 +1061,25 @@ fn patch_at_load(cpu: &mut Cpu, path: &str, file: &[u8]) -> Option<Vec<u8>> {
     Some(patched)
 }
 
-/// The shims the game fixes give the program file `file`, read from
-/// `path`: none when no fix is for it.
+/// The shims the program file `file`, read from `path`, gets: those of
+/// the `win32_shims` setting and of the game fixes for it.
 fn shims_at_load(cpu: &mut Cpu, path: &str, file: &[u8]) -> shims::Shims {
+    let mut all = cpu.bus.win32.shims;
+    if !all.is_empty() {
+        let names: Vec<_> = all.iter().map(|s| s.describe()).collect();
+        let set = shims::name_of(all).unwrap_or("?");
+        cpu.bus.log_string(&format!(
+            "[W32] win32_shims={}: {} gets {}",
+            set,
+            path,
+            names.join(", ")
+        ));
+    }
     if !cpu.bus.game_fixes {
-        return shims::Shims::NONE;
+        return all;
     }
     let bus = &cpu.bus;
     let found = crate::game_fixes::win32_shims(path, file.len(), |fix| bus.game_fix_enabled(fix));
-    let mut all = shims::Shims::NONE;
     for (fix, set) in found {
         let names: Vec<_> = set.iter().map(|s| s.describe()).collect();
         cpu.bus.log_string(&format!(
@@ -1802,6 +1823,7 @@ crate::state_fields!(Process {
     system_heap,
     directories,
     shims,
+    gdi_heap,
 } skip {
     file_apis_oem,
     older_images,
@@ -1871,6 +1893,7 @@ crate::state_fields!(Win32 {
     depth,
     desktop,
     locale,
+    shims,
     dll_files,
     trace,
     trace3d,

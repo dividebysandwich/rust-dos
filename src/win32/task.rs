@@ -150,6 +150,7 @@ pub static TASKS: &[Step] = &[
     super::user32::dlgdir::step,
     super::user32::ddeml::xact_step,
     super::oleaut32::invoke_step,
+    super::user32::message::receive_step,
 ];
 
 /// The `TASKS` places of the tasks other DLLs than USER32 start.
@@ -179,6 +180,7 @@ pub const NOTEPAD: u16 = 43;
 pub const DLG_DIR: u16 = 44;
 pub const DDEML_XACT: u16 = 45;
 pub const OLEAUT32_INVOKE: u16 = 46;
+pub const RECEIVE: u16 = 47;
 
 /// Start the task `kind` with the variables `vars` and, if `scratch` is
 /// more than 0, that many bytes of scratch space: for a function's
