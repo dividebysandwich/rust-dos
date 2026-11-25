@@ -90,17 +90,42 @@ fn the_display_types_and_widths_set_their_modes() {
         assert_eq!(mode(&mut cpu, line), "", "{}", line);
         assert_eq!(bios_mode(&mut cpu), want, "{}", line);
     }
-    // A width keeps the colours of the mode there is (HANDLE_40_OR_80).
-    for (from, line, want) in [
-        (0x03, "mode 40", 0x01),
-        (0x01, "mode 80", 0x03),
-        (0x00, "mode 80", 0x02),
-        (0x13, "mode 80", 0x03),
-    ] {
-        set_mode(&mut cpu, from);
-        assert_eq!(mode(&mut cpu, line), "", "{}", line);
-        assert_eq!(bios_mode(&mut cpu), want, "{} from {:02X}h", line, from);
+    // A width keeps the colours of the mode there is: without ANSI.SYS
+    // as HANDLE_40_OR_80 does, which leaves a mode it doesn't list as it
+    // is, and with it through ANSI.SYS, which goes back to text.
+    for ansi_sys in [false, true] {
+        cpu.bus.ansi_sys = ansi_sys;
+        for (from, line, want, with_ansi) in [
+            (0x03, "mode 40", 0x01, 0x01),
+            (0x01, "mode 80", 0x03, 0x03),
+            (0x00, "mode 80", 0x02, 0x02),
+            (0x13, "mode 80", 0x03, 0x03),
+            (0x11, "mode 40", 0x00, 0x01),
+            (0x06, "mode 80", 0x02, 0x03),
+            (0x0D, "mode 80", 0x0D, 0x03),
+        ] {
+            set_mode(&mut cpu, from);
+            assert_eq!(mode(&mut cpu, line), "", "{}", line);
+            let want = if ansi_sys { with_ansi } else { want };
+            let mode = bios_mode(&mut cpu);
+            assert_eq!(
+                mode, want,
+                "{} from {:02X}h, ANSI.SYS {}",
+                line, from, ansi_sys
+            );
+        }
     }
+}
+
+#[test]
+fn commas_and_semicolons_part_the_parameters() {
+    let mut cpu = machine("commas");
+    assert_eq!(mode(&mut cpu, "mode con cols=80,lines=50"), "");
+    assert_eq!(rows(&mut cpu), 50);
+    assert_eq!(mode(&mut cpu, "mode con;lines=25"), "");
+    assert_eq!(rows(&mut cpu), 25);
+    // Nothing but delimiters is MODE alone: the status.
+    assert!(mode(&mut cpu, "mode ,").starts_with("Status for device CON:"));
 }
 
 #[test]
@@ -112,6 +137,18 @@ fn mono_needs_a_monochrome_display() {
         "Function not supported on this computer - MONO"
     );
     assert_eq!(bios_mode(&mut cpu), 0x13, "the mode stays");
+
+    // A VGA on a monochrome monitor is one (INT 10h AH=1Bh says 07h).
+    let mut cpu = machine("mono_monitor");
+    cpu.bus.vga.mono_monitor = true;
+    assert_eq!(mode(&mut cpu, "mode mono"), "");
+    assert_eq!(bios_mode(&mut cpu), 0x07);
+    assert_eq!(cpu.bus.guest_read_16(0x0410) & 0x30, 0x30);
+    assert_eq!(
+        mode(&mut cpu, "mode co80"),
+        "Function not supported on this computer - CO80"
+    );
+    assert_eq!(bios_mode(&mut cpu), 0x07);
 }
 
 #[test]
@@ -181,6 +218,15 @@ fn wrong_parameters_get_ms_dos_messages() {
         "Illegal device name"
     );
     assert_eq!(mode(&mut cpu, "mode lpt1:=com1"), "Illegal device name");
+    // Code pages take DISPLAY.SYS (MODECP.ASM).
+    assert_eq!(
+        mode(&mut cpu, "mode con cp prepare=((850) ega.cpi)"),
+        "Code page operation not supported on this device"
+    );
+    assert_eq!(
+        mode(&mut cpu, "mode con cp select=850"),
+        "Device error during select"
+    );
 }
 
 #[test]

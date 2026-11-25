@@ -118,9 +118,11 @@ fn z_program(cpu: &Cpu, command: &str) -> Option<&'static (dyn ShellCommand + Sy
     (!found).then_some(program)
 }
 
-/// The names of the built-in commands.
+/// The names of the built-in commands, and of those that stand for
+/// programs (`Z_PROGRAMS`).
 pub(crate) fn names() -> impl Iterator<Item = &'static str> {
-    COMMANDS.iter().map(|&(name, _)| name)
+    let programs = Z_PROGRAMS.iter().map(|&(name, _, _)| name);
+    COMMANDS.iter().map(|&(name, _)| name).chain(programs)
 }
 
 /// The built-in command called `name`, in any case.

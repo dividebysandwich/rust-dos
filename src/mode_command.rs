@@ -10,8 +10,8 @@
 //! TYPAMAT.ASM and INVOKE.ASM in Microsoft's published source), through
 //! the BIOS, and prints its messages (MODE.SKL). The serial and printer
 //! forms (`MODE COM1:9600,N,8,1`, `MODE LPT1:=COM1`) aren't here: they say
-//! the device name is illegal. Code pages, which MODE leaves to
-//! DISPLAY.SYS, aren't either.
+//! the device name is illegal. The code page forms say what MODE says
+//! without DISPLAY.SYS.
 //!
 //! DOSBox has MODE as a program on Z:; MS-DOS has it in C:\DOS, on the
 //! PATH. A game's own MODE.COM in the current directory or on the PATH
@@ -30,12 +30,17 @@ impl ShellCommand for ModeCommand {
         if line == "/?" {
             return print_string(cpu, HELP);
         }
+        // The DOS parser's delimiters, and the semicolon MODE adds
+        // (MODEPARS.ASM): `MODE CO80,50` and `MODE CON COLS=80,LINES=25`.
         let upper = line.to_ascii_uppercase();
-        let words: Vec<&str> = upper.split([' ', '\t']).filter(|w| !w.is_empty()).collect();
+        let words: Vec<&str> = upper
+            .split([' ', '\t', ',', ';'])
+            .filter(|w| !w.is_empty())
+            .collect();
         let Some(&first) = words.first() else {
             return con_status(cpu);
         };
-        let device = first.split([':', '=', ',']).next().unwrap_or(first);
+        let device = first.split([':', '=']).next().unwrap_or(first);
         if device == "CON" {
             if words.len() == 1 {
                 return con_status(cpu);
@@ -45,14 +50,7 @@ impl ShellCommand for ModeCommand {
         if is_port(device) {
             return print_string(cpu, "\r\nIllegal device name\r\n");
         }
-        // The display forms: a type or a width, then the rows or the
-        // direction to shift the screen, all one parameter apart (by
-        // commas or spaces).
-        let parts: Vec<&str> = upper
-            .split([' ', '\t', ','])
-            .filter(|w| !w.is_empty())
-            .collect();
-        display(cpu, &parts);
+        display(cpu, &words);
     }
 }
 
@@ -100,7 +98,8 @@ fn not_supported(cpu: &mut Cpu, parameter: &str) {
 
 const ANSI_NOT_LOADED: &str = "\r\nANSI.SYS must be installed to perform requested function\r\n";
 
-/// MODE type[,rows] or MODE type[,R|L[,T]].
+/// MODE type[,rows] or MODE type[,R|L[,T]]: a display type or a width,
+/// then the rows or the direction to shift the screen.
 fn display(cpu: &mut Cpu, parts: &[&str]) {
     let first = parts[0];
     let known = DISPLAY_TYPES.iter().find(|(name, ..)| *name == first);
@@ -136,8 +135,9 @@ fn display(cpu: &mut Cpu, parts: &[&str]) {
         Some(&(name, equipment, mode, mono)) => {
             // MODE asks the BIOS which displays there are (INT 10h
             // AH=1Bh): a colour type needs a colour one, MONO a
-            // monochrome one.
-            if mono != cpu.bus.vga.adapter.mono_only() {
+            // monochrome one (a Hercules card, or an EGA or VGA on a
+            // monochrome monitor).
+            if mono != cpu.bus.vga.setup().mono() {
                 return not_supported(cpu, name);
             }
             let flags = cpu.bus.guest_read_16(0x0410);
@@ -260,7 +260,7 @@ fn set_text(cpu: &mut Cpu, cols: u16, rows: u16) -> Result<(), ()> {
         return Err(());
     }
     let mode = cpu.bus.guest_read_8(0x0449);
-    let new = if adapter.mono_only() || mode == 0x07 {
+    let new = if cpu.bus.vga.setup().mono() || mode == 0x07 {
         0x07
     } else {
         let bw = matches!(mode, 0x00 | 0x02);
@@ -287,6 +287,17 @@ fn set_text(cpu: &mut Cpu, cols: u16, rows: u16) -> Result<(), ()> {
 /// MODE CON with keywords: COLS= (or COLUMNS=), LINES=, RATE= and DELAY=
 /// (or DEL=).
 fn con_features(cpu: &mut Cpu, words: &[&str]) {
+    // The code page forms take DISPLAY.SYS, which isn't there: CON
+    // refuses its IOCTL, and MODECP.ASM says so for PREPARE, REFRESH and
+    // the status, and calls it a device error for SELECT.
+    if words[0] == "CP" || words[0] == "CODEPAGE" {
+        let message = if words[1..].iter().any(|w| w.starts_with("SEL")) {
+            "Device error during select\r\n"
+        } else {
+            "Code page operation not supported on this device\r\n"
+        };
+        return print_string(cpu, message);
+    }
     let (mut cols, mut lines, mut rate, mut delay) = (None, None, None, None);
     for &word in words {
         let Some((key, value)) = word.split_once('=') else {
