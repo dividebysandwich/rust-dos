@@ -199,8 +199,8 @@ pub fn bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 runs(line, width)
                     .into_iter()
                     .map(move |(first, len)| Fragments {
-                        x: x + first,
-                        y: y + row as i32,
+                        x: x.saturating_add(first),
+                        y: y.saturating_add(row as i32),
                         width: len,
                         height: 1,
                         color,
@@ -279,15 +279,17 @@ pub fn copy_pixels(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let (w, h) = ((right - left) as u32, (top - bottom) as u32);
-    // Where the rectangle's first pixel goes.
-    let to_x = first_pixel(r.window[0]) + (left - x);
-    let to_y = first_pixel(r.window[1]) + (bottom - y);
+    // Where the rectangle's first pixel goes. glBitmap's moves can take
+    // the raster position past what an i32 holds: `draw_fragments`
+    // leaves out what is off the buffers.
+    let to_x = first_pixel(r.window[0]).saturating_add(left - x);
+    let to_y = first_pixel(r.window[1]).saturating_add(bottom - y);
     draw::flush_waiting(cpu);
     let mut rects = Vec::new();
     let mut add = |row: u32, first: i32, len: i32, color: u32, z: f32| {
         rects.push(Fragments {
-            x: to_x + first,
-            y: to_y + row as i32,
+            x: to_x.saturating_add(first),
+            y: to_y.saturating_add(row as i32),
             width: len,
             height: 1,
             color,

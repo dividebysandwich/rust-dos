@@ -5014,6 +5014,12 @@ fn bitmap_draws(card: Draws) {
         raster_at(a, 8.0, 40.0)?;
         bitmap(a, [0.0, 0.0], 0.0)?;
         gl(a, l, DISABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+        // A move far past the window keeps the position valid, and the
+        // next bitmap, its pixels' columns past what an i32 holds, is
+        // all off the window.
+        raster_at(a, 8.0, 40.0)?;
+        bitmap(a, [0.0, 0.0], 3e9)?;
+        bitmap(a, [0.0, 0.0], 0.0)?;
         // Outside the view volume: nothing is drawn.
         gl(a, l, RASTER_POS3F, &[Arg::F(2.0), Arg::F(0.0), Arg::F(0.0)])?;
         bitmap(a, [-20.0, 0.0], 0.0)?;

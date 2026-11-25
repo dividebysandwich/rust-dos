@@ -1319,10 +1319,10 @@ fn fragment_layout() -> Layout {
 /// own state applies (culling, the polygon mode, polygon offset), nor
 /// the viewport, which only placed the raster position.
 ///
-/// Each rectangle is two triangles of vertices on the screen, which
-/// cover its pixels' centres and none other (`gl_pixel_centres`), drawn
-/// through Direct3D's pipeline as the processor's vertices are. The
-/// draws that wait are drawn first.
+/// Each rectangle, cut to the buffers, is two triangles of vertices on
+/// the screen, which cover its pixels' centres and none other
+/// (`gl_pixel_centres`), drawn through Direct3D's pipeline as the
+/// processor's vertices are. The draws that wait are drawn first.
 pub(super) fn draw_fragments(
     cpu: &mut Cpu,
     rects: &[Fragments],
@@ -1341,6 +1341,28 @@ pub(super) fn draw_fragments(
         return;
     };
     if c.target == 0 || c.width == 0 || c.height == 0 {
+        return;
+    }
+    // The part of each rectangle on the buffers, worked out in 64 bits:
+    // glBitmap's moves can take the raster position anywhere, and a
+    // rectangle far off the buffers has none.
+    let (buffer_w, buffer_h) = (i64::from(c.width), i64::from(c.height));
+    let rects: Vec<Fragments> = rects
+        .iter()
+        .filter_map(|r| {
+            let (x, y) = (i64::from(r.x), i64::from(r.y));
+            let (left, right) = (x.max(0), (x + i64::from(r.width)).min(buffer_w));
+            let (bottom, top) = (y.max(0), (y + i64::from(r.height)).min(buffer_h));
+            (left < right && bottom < top).then(|| Fragments {
+                x: left as i32,
+                y: bottom as i32,
+                width: (right - left) as i32,
+                height: (top - bottom) as i32,
+                ..*r
+            })
+        })
+        .collect();
+    if rects.is_empty() {
         return;
     }
     let whole = inner_device::Viewport7 {
