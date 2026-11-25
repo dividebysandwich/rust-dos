@@ -37,13 +37,29 @@
 //!   other palette maps to are freed first.
 //! - A PC_RESERVED entry is its palette's alone, and AnimatePalette
 //!   changes it.
-//! - When no entry is left, the nearest color of those taken.
+//! - When no entry is left, the entry of the nearest color of the static
+//!   ones and those the realization gave the palette's colors, in the
+//!   background as in the foreground.
 //!
-//! RealizePalette returns how many entries' mappings changed, and when
-//! the primary palette changed any in a window's DC, USER sends
-//! WM_PALETTECHANGED to the top-level windows (as Wine's
-//! UserRealizePalette does). Realizing the palette realized last again
-//! does nothing until its entries change.
+//! These rules map a palette the first time it is realized. Later
+//! realizations keep that mapping, in the foreground and in the
+//! background, even where another palette now holds some of its colors
+//! or has made its entries PC_RESERVED: in the foreground its colors go
+//! back into its entries, in the background those still free get them.
+//! UnrealizeObject, SetPaletteEntries and ResizePalette make the next
+//! realization map it from scratch, and SetSystemPaletteUse does so for
+//! every palette, since it changes which entries are static. So a
+//! bitmap drawn through a palette keeps meaning the same entries of it.
+//! Windows 95 OSR2.5 does all this (#2038's probes), apart from
+//! SetPaletteEntries followed by a realization in the foreground, which
+//! kept the entries (#2041); SetSystemPaletteUse wasn't probed.
+//!
+//! RealizePalette returns how many entries' mappings changed, or for a
+//! palette that kept its mapping how many of its entries now show
+//! another color than before, and when the primary palette changed any
+//! in a window's DC, USER sends WM_PALETTECHANGED to the top-level
+//! windows (as Wine's UserRealizePalette does). Realizing the palette
+//! realized last again does nothing until its entries change.
 //!
 //! On such a device an RGB color takes the nearest static color, with
 //! one exception: a solid brush of a color that isn't one of the 20
@@ -69,6 +85,12 @@ pub const SYSPAL_ERROR: u32 = 0;
 pub const SYSPAL_STATIC: u32 = 1;
 pub const SYSPAL_NOSTATIC: u32 = 2;
 const CLR_INVALID: u32 = 0xFFFF_FFFF;
+
+/// The W32 section's version that saves which entries of a palette
+/// share the entry of their nearest color (`Palette::nearest`). An older
+/// state's palettes load without, and the first of the entries sharing
+/// one gives it its color.
+pub const NEAREST_SAVED: u16 = 105;
 
 /// What an entry of the system palette is.
 pub const USE_FREE: u8 = 0;
@@ -554,6 +576,7 @@ pub fn create_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let palette = Palette {
         entries: entries.into_iter().map(entry_of).collect(),
         mapping: Vec::new(),
+        ..Palette::default()
     };
     Some(add(cpu, Kind::Palette { palette }))
 }
@@ -571,6 +594,7 @@ fn palette_of(colors: &[u32]) -> Kind {
             .map(|&c| [c as u8, (c >> 8) as u8, (c >> 16) as u8, 0])
             .collect(),
         mapping: Vec::new(),
+        ..Palette::default()
     };
     Kind::Palette { palette }
 }
@@ -611,6 +635,22 @@ pub fn unrealize(cpu: &mut Cpu, handle: u32) {
     }
 }
 
+/// The palette `handle` gives up its mapping: its next realization maps
+/// it from scratch, as its first did. UnrealizeObject does so on Windows
+/// 95 OSR2.5, and so does SetPaletteEntries for a realization in the
+/// background. One in the foreground after SetPaletteEntries kept the
+/// entries the palette had there, which this doesn't model (#2041).
+pub fn forget_mapping(cpu: &mut Cpu, handle: u32) {
+    if let Some(super::Object {
+        kind: Kind::Palette { palette },
+        ..
+    }) = gdi(cpu).get_mut(handle)
+    {
+        palette.clear_mapping();
+    }
+    unrealize(cpu, handle);
+}
+
 /// SetPaletteEntries(hpal, start, count, entries).
 pub fn set_palette_entries(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (handle, start, count, at) = (args[0], args[1] as usize, args[2] as usize, args[3]);
@@ -639,7 +679,7 @@ pub fn set_palette_entries(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             palette.entries[start + i] = entry_of(*w);
         }
     }
-    unrealize(cpu, handle);
+    forget_mapping(cpu, handle);
     Some(words.len() as u32)
 }
 
@@ -655,7 +695,7 @@ pub fn resize_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             ..
         }) => {
             palette.entries.resize(n, [0; 4]);
-            palette.mapping.clear();
+            palette.clear_mapping();
             unrealize(cpu, args[0]);
             Some(TRUE)
         }
@@ -833,6 +873,11 @@ pub fn realize_default_palette(cpu: &mut Cpu, hdc: u32) -> u32 {
 /// DEFAULT_PALETTE only sets the driver's translation to none. No color
 /// of the system palette changes, nor any in the DAC: the entries keep
 /// the colors other palettes put there until a palette takes them again.
+///
+/// Here each palette is realized again at its next RealizePalette, and
+/// keeps the mapping it had, as the realizations #2038 probed do.
+/// Whether Windows 95 maps it from scratch after this instead wasn't
+/// probed (#2048).
 pub fn realize_default(cpu: &mut Cpu) {
     if !palette_device(cpu) {
         return;
@@ -849,7 +894,7 @@ pub fn realize_default(cpu: &mut Cpu) {
     }
     let default = state.stock(DEFAULT_PALETTE);
     state.primary_palette = default;
-    // No other palette is the one realized last: each maps again.
+    // No other palette is the one realized last: each is realized again.
     state.last_realized = default;
 }
 
@@ -897,12 +942,62 @@ pub(super) fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
             }
         }
     }
-    let mut mapping = vec![0u8; palette.entries.len()];
+    // A palette keeps the entries its first realization gave it, in the
+    // foreground and in the background, until UnrealizeObject or new
+    // colors make it map again (see the module's comment).
+    let kept = palette.mapping.len() == palette.entries.len();
+    let mut mapping = if kept {
+        palette.mapping.clone()
+    } else {
+        vec![0u8; palette.entries.len()]
+    };
     // Which entries this realization gave one of the palette's colors.
     let mut assigned = [false; 256];
+    // The color this realization gives each entry, shown or not.
+    let mut given: Vec<u32> = system.iter().map(|&e| rgb(e)).collect();
     // The entries that take an entry of their own, in order.
     let mut pending = Vec::new();
-    for (k, &e) in palette.entries.iter().enumerate() {
+    // Which entries share the entry of their nearest color.
+    let mut nearest = if kept {
+        palette.nearest.0.clone()
+    } else {
+        vec![false; palette.entries.len()]
+    };
+    // A mapping kept goes through the entries that took an entry of the
+    // system palette first, and those that share one after them.
+    let shares = |k: &usize| nearest.get(*k) == Some(&true);
+    let order: Vec<usize> = if kept {
+        let all = 0..palette.entries.len();
+        let takers = all.clone().filter(|k| !shares(k));
+        takers.chain(all.filter(shares)).collect()
+    } else {
+        (0..palette.entries.len()).collect()
+    };
+    for k in order {
+        let e = palette.entries[k];
+        if kept {
+            // An entry that shares another's shows the taker's color (the
+            // first sharer's in a state saved before W32 105). In the
+            // background another palette's PC_RESERVED entry keeps its own.
+            let i = mapping[k] as usize;
+            if e[3] & PC_EXPLICIT != 0 || uses[i] == USE_STATIC || assigned[i] {
+                continue;
+            }
+            if !primary && uses[i] == USE_RESERVED && owners[i] != hpal {
+                continue;
+            }
+            assigned[i] = true;
+            if primary || uses[i] == USE_FREE {
+                uses[i] = if e[3] & PC_RESERVED != 0 {
+                    USE_RESERVED
+                } else {
+                    USE_SHARED
+                };
+                owners[i] = hpal;
+                system[i] = [e[0], e[1], e[2], 0];
+            }
+            continue;
+        }
         if e[3] & PC_EXPLICIT != 0 {
             mapping[k] = e[0];
             continue;
@@ -953,16 +1048,21 @@ pub(super) fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
             USE_SHARED
         };
         let Some(i) = order.next() else {
-            // None left: the nearest color of those taken.
+            // None left: the entry of the nearest color of the static ones
+            // and those this realization gave the palette's colors, in the
+            // background as in the foreground, whatever color the entry
+            // shows for now.
             let taken: Vec<(u32, u8)> = (0..256)
-                .filter(|&i| uses[i] == USE_STATIC || uses[i] == USE_SHARED)
-                .map(|i| (rgb(system[i]), i as u8))
+                .filter(|&i| uses[i] == USE_STATIC || assigned[i])
+                .map(|i| (given[i], i as u8))
                 .collect();
             mapping[k] = nearest_of(&taken, rgb(e));
+            nearest[k] = true;
             continue;
         };
         mapping[k] = i as u8;
         assigned[i] = true;
+        given[i] = rgb(e);
         // A palette in the background puts its color only in a free
         // entry; in the others it shows the color they hold.
         if primary || uses[i] == USE_FREE {
@@ -981,11 +1081,28 @@ pub(super) fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
             }
         }
     }
-    let changed = mapping
-        .iter()
-        .enumerate()
-        .filter(|&(i, m)| palette.mapping.get(i) != Some(m))
-        .count() as u32;
+    // A palette that kept its entries counts those whose entry of the
+    // system palette now shows another color than before (Windows 95
+    // counts differently, in a way that wasn't worked out), so that
+    // taking the foreground again tells the other windows. An entry that
+    // shares another's, or whose entry a palette in front holds, shows
+    // what it showed before and doesn't count each time.
+    let changed = if kept {
+        palette
+            .entries
+            .iter()
+            .zip(&mapping)
+            .filter(|&(e, &m)| {
+                e[3] & PC_EXPLICIT == 0 && rgb(before[m as usize]) != rgb(system[m as usize])
+            })
+            .count() as u32
+    } else {
+        mapping
+            .iter()
+            .enumerate()
+            .filter(|&(i, m)| palette.mapping.get(i) != Some(m))
+            .count() as u32
+    };
     // In a mode DirectDraw set, its palette may have put other colors in
     // the DAC: all of the system palette goes there.
     let differs = |i: &usize| system[*i] != before[*i];
@@ -1004,6 +1121,7 @@ pub(super) fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
     }) = state.get_mut(hpal)
     {
         palette.mapping = mapping;
+        palette.nearest.0 = nearest;
     }
     if let Some((first, last)) = shown {
         show_system_entries(cpu, first, last);
@@ -1104,6 +1222,16 @@ pub fn set_system_palette_use(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             state.system_palette[i] = entry_of(c);
             state.system_use[i] = USE_STATIC;
             state.system_owner[i] = 0;
+        }
+    }
+    // A palette's mapping may point at entries that are static now, or
+    // leave out those that came free: each maps from scratch when it is
+    // next realized.
+    for o in state.objects.iter_mut().flatten() {
+        if let Kind::Palette { palette } = &mut o.kind
+            && !o.stock
+        {
+            palette.clear_mapping();
         }
     }
     state.last_realized = 0;
@@ -1212,6 +1340,7 @@ mod tests {
         let palette = Palette {
             entries: entries.collect(),
             mapping: Vec::new(),
+            ..Palette::default()
         };
         add(cpu, Kind::Palette { palette })
     }
@@ -1239,7 +1368,7 @@ mod tests {
                     e[1] = i as u8;
                 }
             }
-            unrealize(&mut cpu, hpal);
+            forget_mapping(&mut cpu, hpal);
             let (_, primary) = realize(&mut cpu, hdc);
             assert!(!primary);
             let state = gdi(&mut cpu);
@@ -1345,6 +1474,160 @@ mod tests {
         assert_eq!(system[10], b_color(0));
         assert_eq!(system[109], b_color(99));
         assert_eq!(system[110], a_color(100));
+    }
+
+    /// T's colors, a toolbar's 63, none static, A's or B's.
+    fn t_color(i: u32) -> u32 {
+        200 | (4 * i) << 8 | 50 << 16
+    }
+
+    /// Realize the palette `hpal` in the foreground or the background, as
+    /// GDISelectPalette and RealizePalette do: its mapping.
+    fn realize_handle(cpu: &mut Cpu, hdc: u32, hpal: u32, primary: bool) -> Vec<u8> {
+        if primary {
+            gdi(cpu).primary_palette = hpal;
+            unrealize(cpu, hpal);
+        }
+        select(cpu, hdc, hpal);
+        realize(cpu, hdc);
+        gdi(cpu).palette(hpal).unwrap().mapping.clone()
+    }
+
+    /// A palette of T's colors with B in front, B holding T's 5 to 7 at
+    /// its entries 30 to 32 (40 to 42): it shares those.
+    fn t_with_b_in_front(cpu: &mut Cpu, hdc: u32) -> u32 {
+        realize_colors(cpu, hdc, &colors(a_color, 0..236), true);
+        let mut b = colors(b_color, 0..236);
+        b[30..33].copy_from_slice(&colors(t_color, 5..8));
+        realize_colors(cpu, hdc, &b, true);
+        let t = add(cpu, palette_of(&colors(t_color, 0..63)));
+        let shared = [10, 11, 12, 13, 14, 40, 41, 42, 15, 16];
+        assert_eq!(realize_handle(cpu, hdc, t, false)[..10], shared);
+        t
+    }
+
+    /// A palette realized again keeps the entries its first realization
+    /// gave it, in the background and in the foreground, where its colors
+    /// then go; UnrealizeObject makes it map from scratch. Windows 95
+    /// OSR2.5 does so (probes X6a, X6b and X6d of #2038).
+    #[test]
+    fn a_palette_keeps_its_entries_until_unrealized() {
+        let (mut cpu, hdc) = palette_machine();
+        let cpu = &mut cpu;
+        let t = t_with_b_in_front(cpu, hdc);
+        let first = gdi(cpu).palette(t).unwrap().mapping.clone();
+        realize_colors(cpu, hdc, &colors(a_color, 0..236), true);
+        assert_eq!(
+            realize_handle(cpu, hdc, t, false),
+            first,
+            "in the background"
+        );
+        assert_eq!(
+            realize_handle(cpu, hdc, t, true),
+            first,
+            "in the foreground"
+        );
+        let system = system_colors(cpu);
+        assert_eq!((system[10], system[40]), (t_color(0), t_color(5)));
+        realize_colors(cpu, hdc, &colors(a_color, 0..236), true);
+        super::super::unrealize_object(cpu, &[t]);
+        let again = realize_handle(cpu, hdc, t, false);
+        assert_eq!(again, (10..73).collect::<Vec<u8>>(), "unrealized");
+    }
+
+    /// Realized again in the background, a palette keeps entries another
+    /// palette has made PC_RESERVED since, which keep that one's colors
+    /// (probe X6f of #2038).
+    #[test]
+    fn a_palette_keeps_entries_another_reserved() {
+        let (mut cpu, hdc) = palette_machine();
+        let cpu = &mut cpu;
+        realize_colors(cpu, hdc, &colors(a_color, 0..236), true);
+        let t = add(cpu, palette_of(&colors(t_color, 0..63)));
+        let first = realize_handle(cpu, hdc, t, false);
+        let reserved = reserved_palette(cpu, (0..40).map(|i| 7 | i << 8 | 9 << 16));
+        realize_handle(cpu, hdc, reserved, true);
+        assert_eq!(realize_handle(cpu, hdc, t, false), first);
+        assert_eq!(system_colors(cpu)[10], 7 | 9 << 16);
+    }
+
+    /// After SetPaletteEntries a palette realized in the background maps
+    /// from scratch: its new colors take the entries that hold them, and
+    /// the others move down (probe X7a of #2038).
+    #[test]
+    fn new_colors_map_a_background_palette_again() {
+        let (mut cpu, hdc) = palette_machine();
+        let cpu = &mut cpu;
+        realize_colors(cpu, hdc, &colors(a_color, 0..236), true);
+        let t = add(cpu, palette_of(&colors(t_color, 0..63)));
+        realize_handle(cpu, hdc, t, false);
+        for (i, c) in colors(a_color, 50..53).into_iter().enumerate() {
+            cpu.bus.guest_write_32(0x8_0000 + 4 * i as u32, c);
+        }
+        assert_eq!(set_palette_entries(cpu, &[t, 0, 3, 0x8_0000]), Some(3));
+        let again = realize_handle(cpu, hdc, t, false);
+        let mut want = vec![60, 61, 62];
+        want.extend(10..60);
+        want.extend(63..73);
+        assert_eq!(again, want);
+    }
+
+    /// A palette that kept its mapping counts the entries whose color on
+    /// the screen changed: in the background behind B, none, where it
+    /// counted the 60 that B holds every time; in the foreground, those
+    /// 60.
+    #[test]
+    fn a_kept_mapping_counts_the_entries_shown_anew() {
+        let (mut cpu, hdc) = palette_machine();
+        let cpu = &mut cpu;
+        let t = t_with_b_in_front(cpu, hdc);
+        realize_colors(cpu, hdc, &colors(b_color, 0..10), false);
+        select(cpu, hdc, t);
+        assert_eq!(realize(cpu, hdc), (0, false), "in the background");
+        gdi(cpu).primary_palette = t;
+        unrealize(cpu, t);
+        assert_eq!(realize(cpu, hdc), (60, true), "in the foreground");
+    }
+
+    /// SetSystemPaletteUse changes which entries are static, so a palette
+    /// maps from scratch: with SYSPAL_NOSTATIC the colors that had no
+    /// entry left get entries of their own.
+    #[test]
+    fn set_system_palette_use_maps_palettes_again() {
+        let (mut cpu, hdc) = palette_machine();
+        let cpu = &mut cpu;
+        let mut p = colors(a_color, 0..236);
+        p.extend(colors(t_color, 0..10));
+        let p = add(cpu, palette_of(&p));
+        let first = realize_handle(cpu, hdc, p, true);
+        assert!(first[236..].iter().all(|m| (10..246).contains(m)));
+        set_system_palette_use(cpu, &[hdc, SYSPAL_NOSTATIC]);
+        let mut again = realize_handle(cpu, hdc, p, true);
+        again.sort_unstable();
+        again.dedup();
+        assert_eq!(again.len(), 246, "an entry each");
+    }
+
+    /// An entry that had none left shares the entry of its nearest color,
+    /// and the palette realized again in the foreground puts the color of
+    /// the entry that took it there, though the sharer comes first.
+    #[test]
+    fn a_kept_mapping_gives_a_shared_entry_its_takers_color() {
+        let (mut cpu, hdc) = palette_machine();
+        let cpu = &mut cpu;
+        realize_colors(cpu, hdc, &colors(a_color, 0..236), true);
+        // 249 colors that take entries of their own while there are any,
+        // then one next to A's 30th, which entry 250 matches at entry 40.
+        let mut p = colors(|k| k | (k / 2) << 8 | 220 << 16, 0..249);
+        p.push(a_color(30) + 1);
+        p.push(a_color(30));
+        let p = add(cpu, palette_of(&p));
+        let first = realize_handle(cpu, hdc, p, true);
+        assert_eq!((first[249], first[250]), (40, 40));
+        assert!(gdi(cpu).palette(p).unwrap().nearest[249]);
+        realize_colors(cpu, hdc, &colors(b_color, 0..236), true);
+        assert_eq!(realize_handle(cpu, hdc, p, true), first);
+        assert_eq!(system_colors(cpu)[40], a_color(30));
     }
 
     /// AnimatePalette changes the system entries a palette took only

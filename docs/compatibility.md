@@ -101,6 +101,43 @@ that names the game, its settings and what happened.
   colours need `machine=cga`; `composite` and `composite_era` keep their
   defaults, `auto` and `old`
   ([`[emulator]`](../CONFIGURATION.md#emulator)).
+* **Screamer 2** (GOG): a
+  [game profile](../CONFIGURATION.md#game-profiles) for the 3dfx
+  version, `S2_3DFX.EXE`, as a file in the `games` folder (such as
+  `games/screamer2-3dfx.conf`), with C: and the CUE sheet's path
+  changed to where GOG installed the game:
+
+  ```ini
+  [game]
+  name=Screamer 2 (3dfx)
+  overlay=true
+
+  [emulator]
+  cpu=pentium
+  voodoo=true
+
+  [drives]
+  C="C:\GOG Games\Screamer 2"
+  D="C:\GOG Games\Screamer 2\GAME.DAT" cdrom
+
+  [autoexec]
+  C:
+  DEL GLIDE2X.OVL
+  S2_3DFX
+  ```
+
+  `GAME.DAT` is the CUE sheet of the disc image `GAME.GOG`, with the CD
+  music ([CD images](../CONFIGURATION.md#cd-images)). The memory (16 MB
+  on a Pentium) and the Sound Blaster 16 at 220h, IRQ 7, DMA 1 and 5,
+  which the game's setup has, are rust-dos's defaults and left out. The
+  game draws with 3dfx's `GLIDE2X.OVL`, which the settings window's
+  Emulator page downloads onto Z: once
+  ([3dfx Voodoo Graphics](../CONFIGURATION.md#3dfx-voodoo-graphics)).
+  `DEL` hides the `glide2x.ovl` in GOG's folder, the Glide of GOG's
+  DOSBox, which works only there and would be found first: with
+  `overlay=true` the file stays in GOG's folder untouched. The SVGA
+  version's profile is the same without `voodoo=true` and `DEL`, and
+  runs `START65H`.
 * **Tomb Raider's 3D patches** (in `3DPATCH` on the Tomb Raider Gold
   CD), each copied into the game's folder:
   * 3dfx (`3DFX\TOMB.EXE`): `voodoo=true`, `cpu=pentium`

@@ -26,6 +26,7 @@ mod mono_tests;
 mod powervr_tests;
 mod render_dirty_tests;
 mod tandy_tests;
+mod text_scanlines_tests;
 mod test_vga_integration;
 mod toadforce_tests;
 mod vbe_tests;
