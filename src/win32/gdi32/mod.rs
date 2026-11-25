@@ -195,6 +195,22 @@ pub struct Palette {
     /// On a desktop of 256 colours, the system palette's index of each
     /// entry, from when it was last realized; empty before.
     pub mapping: Vec<u8>,
+    /// Which entries had no entry of the system palette left when the
+    /// palette was mapped, and share the entry of their nearest color
+    /// with the entry that took it. A realization that keeps the mapping
+    /// gives such an entry of the system palette the taker's color. Empty
+    /// with `mapping`, and in a state saved before W32 104, where the
+    /// first of the entries sharing one gives it its color.
+    pub nearest: crate::savestate::Since<{ palette::NEAREST_SAVED }, Vec<bool>>,
+}
+
+impl Palette {
+    /// Forget the mapping: the next realization maps the palette from
+    /// scratch.
+    pub fn clear_mapping(&mut self) {
+        self.mapping.clear();
+        self.nearest.clear();
+    }
 }
 
 /// What an object is.
@@ -587,6 +603,7 @@ pub fn init(cpu: &mut Cpu) {
                 .map(|&c| [c as u8, (c >> 8) as u8, (c >> 16) as u8, 0])
                 .collect(),
             mapping: (0..10).chain(246..=255).collect(),
+            ..Palette::default()
         },
     });
     let state = gdi(cpu);
@@ -1731,7 +1748,11 @@ crate::state_fields!(Bitmap {
     dc,
     dimension
 });
-crate::state_fields!(Palette { entries, mapping });
+crate::state_fields!(Palette {
+    entries,
+    mapping,
+    nearest
+});
 crate::state_fields!(Object {
     kind,
     stock,
