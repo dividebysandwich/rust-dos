@@ -85,6 +85,7 @@ mod light;
 mod lists;
 mod matrix;
 mod pname;
+mod raster;
 mod shade;
 mod state;
 mod texture;
@@ -249,6 +250,8 @@ pub struct Context {
     pub color: [f32; 4],
     pub tex_coord: [[f32; 4]; UNITS],
     pub normal: [f32; 3],
+    /// The current raster position (`raster.rs`).
+    pub raster: crate::savestate::Since<{ raster::RASTER_SAVED }, raster::Raster>,
     /// The vertex, color, normal and texture coordinate arrays.
     pub vertex_array: Array,
     pub color_array: Array,
@@ -704,6 +707,7 @@ crate::state_fields!(Context {
     color,
     tex_coord,
     normal,
+    raster,
     vertex_array,
     color_array,
     normal_array,
@@ -739,6 +743,7 @@ pub fn keeps_waiting(id: u16) -> bool {
         "glTexCoord",
         "glMultiTexCoord",
         "glNormal",
+        "glRasterPos",
         "glRect",
         "glTexEnv",
         "glTexParameter",

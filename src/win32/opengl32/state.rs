@@ -643,6 +643,9 @@ fn values(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
     if let Some(v) = light::get(c, p) {
         return Some(v);
     }
+    if let Some(v) = super::raster::get(&c.raster, p, unit) {
+        return Some(v);
+    }
     // GL_LIST_BASE, GL_LIST_INDEX, GL_LIST_MODE, GL_MAX_LIST_NESTING.
     if let Some(v) = c.lists.get(p) {
         return one(v);

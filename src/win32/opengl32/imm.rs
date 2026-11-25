@@ -20,6 +20,8 @@ enum Kind {
     TexCoord,
     MultiTexCoord,
     Normal,
+    /// glRasterPos, which `spec` doesn't name: it gives no vertex.
+    RasterPos,
 }
 
 /// The types of the values: signed and unsigned bytes, shorts and
@@ -145,6 +147,7 @@ fn set(cpu: &mut Cpu, kind: Kind, n: usize, t: Type, array: bool, args: &[u32]) 
     };
     match kind {
         Kind::Vertex => super::draw::vertex(cpu, position(n, v)),
+        Kind::RasterPos => super::raster::raster_pos(cpu, position(n, v)),
         Kind::Color => {
             if let Some(c) = ctx(cpu) {
                 c.color = color(n, v);
@@ -297,7 +300,7 @@ pub fn given(spec: &Spec, args: &[u32], array: Option<&[u8]>) -> Option<Given> {
     let skip = (kind == Kind::MultiTexCoord) as usize;
     let v = decode(args, skip, n, t, array, kind)?;
     Some(match kind {
-        Kind::Vertex => Given::Vertex(position(n, v)),
+        Kind::Vertex | Kind::RasterPos => Given::Vertex(position(n, v)),
         Kind::Color => Given::Color(color(n, v)),
         Kind::Normal => Given::Normal([v[0], v[1], v[2]]),
         Kind::TexCoord | Kind::MultiTexCoord => Given::TexCoord(unit(kind, args)?, tex_coord(n, v)),
@@ -443,3 +446,27 @@ attribute!(multi_tex_coord4i, MultiTexCoord, 4, I, false);
 attribute!(multi_tex_coord4iv, MultiTexCoord, 4, I, true);
 attribute!(multi_tex_coord4s, MultiTexCoord, 4, S, false);
 attribute!(multi_tex_coord4sv, MultiTexCoord, 4, S, true);
+attribute!(raster_pos2d, RasterPos, 2, D, false);
+attribute!(raster_pos2dv, RasterPos, 2, D, true);
+attribute!(raster_pos2f, RasterPos, 2, F, false);
+attribute!(raster_pos2fv, RasterPos, 2, F, true);
+attribute!(raster_pos2i, RasterPos, 2, I, false);
+attribute!(raster_pos2iv, RasterPos, 2, I, true);
+attribute!(raster_pos2s, RasterPos, 2, S, false);
+attribute!(raster_pos2sv, RasterPos, 2, S, true);
+attribute!(raster_pos3d, RasterPos, 3, D, false);
+attribute!(raster_pos3dv, RasterPos, 3, D, true);
+attribute!(raster_pos3f, RasterPos, 3, F, false);
+attribute!(raster_pos3fv, RasterPos, 3, F, true);
+attribute!(raster_pos3i, RasterPos, 3, I, false);
+attribute!(raster_pos3iv, RasterPos, 3, I, true);
+attribute!(raster_pos3s, RasterPos, 3, S, false);
+attribute!(raster_pos3sv, RasterPos, 3, S, true);
+attribute!(raster_pos4d, RasterPos, 4, D, false);
+attribute!(raster_pos4dv, RasterPos, 4, D, true);
+attribute!(raster_pos4f, RasterPos, 4, F, false);
+attribute!(raster_pos4fv, RasterPos, 4, F, true);
+attribute!(raster_pos4i, RasterPos, 4, I, false);
+attribute!(raster_pos4iv, RasterPos, 4, I, true);
+attribute!(raster_pos4s, RasterPos, 4, S, false);
+attribute!(raster_pos4sv, RasterPos, 4, S, true);
