@@ -19722,12 +19722,15 @@ fn a_font_file_a_program_adds_is_listed_and_drawn() {
 /// is looked for in the fonts, Windows and system folders, and the
 /// TrueType file again by a bare name. A file that isn't there is left
 /// out. A program that never added a font then gets the faces it asks
-/// for, and EnumFontFamiliesA lists the TrueType face once. Its exit
-/// code: the TrueType face matched in bit 0, the raster face in bit 1,
-/// and the count of fonts listed of the TrueType face above them.
+/// for. It then adds the TrueType file itself by a name relative to its
+/// folder, which is the same file, and EnumFontFamiliesA lists the
+/// TrueType face once. Its exit code: the TrueType face matched in bit
+/// 0, the raster face in bit 1, AddFontResourceA's success in bit 2, and
+/// the count of fonts listed of the TrueType face above them.
 #[test]
 fn installed_fonts_are_loaded_as_windows_starts() {
     let names: &[&str] = &[
+        "AddFontResourceA",
         "CreateCompatibleDC",
         "CreateFontIndirectA",
         "SelectObject",
@@ -19736,14 +19739,16 @@ fn installed_fonts_are_loaded_as_windows_starts() {
     ];
     let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names), ("KERNEL32.DLL", &["lstrcmpA"])];
     // LOGFONTAs at 0 and 0x40, GetTextFaceA's buffer at 0x80, the faces
-    // asked for at 0xA0 and 0xB0, and the count of fonts listed at 0xC0.
-    let mut data = vec![0u8; 0xD0];
+    // asked for at 0xA0 and 0xB0, the count of fonts listed at 0xC0 and
+    // the TrueType file's name relative to the program's folder at 0xD0.
+    let mut data = vec![0u8; 0xF0];
     data[0..4].copy_from_slice(&(-16i32).to_le_bytes());
     data[28..36].copy_from_slice(b"Reg Face");
     data[0x40..0x44].copy_from_slice(&12i32.to_le_bytes());
     data[0x40 + 28..0x40 + 36].copy_from_slice(b"Ini Face");
     data[0xA0..0xA8].copy_from_slice(b"Reg Face");
     data[0xB0..0xB8].copy_from_slice(b"Ini Face");
+    data[0xD0..0xEA].copy_from_slice(b"WINDOWS\\SYSTEM\\REGFACE.TTF");
     let exe = program(BASE, false, imports, &data, |a, l| {
         let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
         let mut proc = a.create_label();
@@ -19767,13 +19772,17 @@ fn installed_fonts_are_loaded_as_windows_starts() {
             a.test(eax, eax)?;
             check(a, false, bit)?;
         }
+        a.push(l.at(0xD0) as i32)?;
+        a.call(f("AddFontResourceA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
         a.push(0)?;
         push_label(a, proc)?;
         a.push(l.at(0xA0) as i32)?;
         a.push(esi)?;
         a.call(f("EnumFontFamiliesA"))?;
         a.mov(eax, dword_ptr(l.at(0xC0)))?;
-        a.shl(eax, 2)?;
+        a.shl(eax, 3)?;
         a.or(eax, ebx)?;
         a.ret()?;
         // The callback: count the font, go on.
@@ -19799,7 +19808,7 @@ fn installed_fonts_are_loaded_as_windows_starts() {
                    Reg Face (TrueType)=REGFACE.TTF\r\nGone=GONE.FON\r\n";
     fs::write(base.join("WINDOWS").join("WIN.INI"), win_ini).unwrap();
     assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
-    assert_eq!(cpu.errorlevel, 1 << 2 | 0b11);
+    assert_eq!(cpu.errorlevel, 1 << 3 | 0b111);
 }
 
 /// A program asks CreateScalableFontResourceA for a .FOT of `ttf`, with

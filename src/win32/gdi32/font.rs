@@ -2381,6 +2381,10 @@ const ERROR_FILE_NOT_FOUND: u32 = 2;
 /// whose faces is drawn: a font that asks for its face gets one GDI has.
 /// So does a .FOT whose TrueType file isn't found, which Windows 98 SE
 /// adds all the same.
+///
+/// The file is kept by its full path, which tells it is a file added
+/// already, by the program or as an installed font (`load_installed`),
+/// however it was named (`added_fonts`).
 pub fn add_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     use crate::win32::winmm::mci::media::read_file;
     let Some(name) = crate::win32::user32::string_at(cpu, args[0]) else {
@@ -2391,6 +2395,7 @@ pub fn add_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_FILE_NOT_FOUND);
         return Some(0);
     };
+    let name = crate::win32::kernel32::path::full_path(cpu, &name);
     let file = added_file(cpu, name, bytes, read_file);
     let count = (file.fonts.len() + file.truetype.len()).max(1) as u32;
     init(cpu);
@@ -2478,9 +2483,10 @@ pub(super) fn load_installed(cpu: &mut Cpu) {
 /// with a folder as it is, a bare one from the first of the fonts,
 /// Windows and system folders that has it.
 fn installed_file(cpu: &mut Cpu, name: &str) -> Option<(String, Vec<u8>)> {
-    use crate::win32::kernel32::path::{SYSTEM, WINDOWS};
+    use crate::win32::kernel32::path::{SYSTEM, WINDOWS, full_path};
     if name.contains(['\\', '/', ':']) {
-        return disk_file(cpu, name).map(|bytes| (name.to_string(), bytes));
+        let path = full_path(cpu, name);
+        return disk_file(cpu, &path).map(|bytes| (path, bytes));
     }
     let fonts = format!("{WINDOWS}\\FONTS");
     [fonts.as_str(), WINDOWS, SYSTEM].iter().find_map(|dir| {
@@ -2576,11 +2582,13 @@ pub fn create_scalable_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32>
     }
 }
 
-/// RemoveFontResourceA(file).
+/// RemoveFontResourceA(file): the file is found by its full path, as
+/// AddFontResourceA keeps it.
 pub fn remove_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(name) = crate::win32::user32::string_at(cpu, args[0]) else {
         return Some(FALSE);
     };
+    let name = crate::win32::kernel32::path::full_path(cpu, &name);
     let files = &mut gdi(cpu).font_files;
     match files.iter().position(|f| f.name.eq_ignore_ascii_case(&name)) {
         Some(i) => {
