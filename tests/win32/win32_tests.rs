@@ -14955,16 +14955,25 @@ fn a_keyboard_hook_that_peeks_with_the_programs_msg_doesnt_change_its_key() {
 
 #[test]
 fn a_window_has_no_size_while_the_cbt_hook_sees_it_made() {
-    // T.EXE's CBT hook reads the window's rectangles at HCBT_CREATEWND:
-    // both are empty, as Wine's win.c checks on Windows, since the hook
-    // may still change the CREATESTRUCT's place and size. The window has
-    // its 200 by 100 once CreateWindowExA returns (#2006).
+    // T.EXE's CBT hook changes the frame of a captioned popup at
+    // HCBT_CREATEWND, as MFC's hook in Encarta 97 does, and then reads its
+    // rectangles: both are empty, as Wine's create_window leaves them until
+    // after the hook, since the hook may still change the CREATESTRUCT's
+    // place and size. A frame change of a 0 by 0 window keeps its client
+    // area at 0 by 0, so the window gets no WM_SIZE before WM_CREATE. The
+    // window has its 200 by 100 at (10, 20) once CreateWindowExA returns
+    // (#2006).
     const WH_CBT: i32 = 5;
     const HCBT_CREATEWND: i32 = 3;
+    const WS_CAPTION: i32 = 0x00C0_0000;
+    // SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+    // SWP_FRAMECHANGED.
+    const FRAME_CHANGED: i32 = 0x37;
     let kernel32 = ["GetCurrentThreadId", "ExitProcess"];
     let user32 = [
         "CreateWindowExA",
         "SetWindowsHookExA",
+        "SetWindowPos",
         "GetWindowRect",
         "GetClientRect",
     ];
@@ -14981,6 +14990,10 @@ fn a_window_has_no_size_while_the_cbt_hook_sees_it_made() {
         a.cmp(dword_ptr(esp + 4), HCBT_CREATEWND)?;
         a.jne(pass)?;
         a.inc(dword_ptr(l.at(0x9C)))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, 0, 0, 0, 0, 0, FRAME_CHANGED])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("SetWindowPos"))?;
         a.mov(eax, dword_ptr(esp + 8))?;
         push_args(a, &[0, l.at(0xA0) as i32])?;
         a.mov(dword_ptr(esp), eax)?;
@@ -15006,7 +15019,8 @@ fn a_window_has_no_size_while_the_cbt_hook_sees_it_made() {
         a.push(WH_CBT)?;
         a.call(f("SetWindowsHookExA"))?;
         let class = l.at(0x10) as i32;
-        push_args(a, &[0, class, class, WS_POPUP, 10, 20, 200, 100, 0, 0, 0, 0])?;
+        let style = WS_POPUP | WS_CAPTION;
+        push_args(a, &[0, class, class, style, 10, 20, 200, 100, 0, 0, 0, 0])?;
         a.call(f("CreateWindowExA"))?;
         push_args(a, &[0, l.at(0xC0) as i32])?;
         a.mov(dword_ptr(esp), eax)?;
@@ -15024,12 +15038,16 @@ fn a_window_has_no_size_while_the_cbt_hook_sees_it_made() {
         bit_if(a, eq, 2)?;
         a.cmp(dword_ptr(l.at(0xCC)), 120)?;
         bit_if(a, eq, 3)?;
+        a.cmp(dword_ptr(l.at(0xC0)), 10)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xC4)), 20)?;
+        bit_if(a, eq, 5)?;
         a.push(ebx)?;
         a.call(f("ExitProcess"))?;
         a.int3()
     });
     let code = run_family("cbt_create_rect", &[("T.EXE", exe)]);
-    assert_eq!(code, 0x0F, "the checks that failed: {:04b}", !code & 0xF);
+    assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
 
 #[test]

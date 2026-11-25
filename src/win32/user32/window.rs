@@ -860,11 +860,11 @@ pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         parent,
         owner,
         // Its rectangles are empty until the CBT hook has seen the
-        // CREATESTRUCT, which may change the place and size, as on
-        // Windows (Wine's win.c checks both at HCBT_CREATEWND). A hook
-        // that changes the frame then finds a client area of 0 by 0, so
-        // the window gets no WM_SIZE before WM_CREATE (Encarta 97's
-        // timeline, #2006).
+        // CREATESTRUCT, which may change the place and size. Wine's
+        // create_window does the same; win.c's check of both rectangles
+        // at HCBT_CREATEWND is there but turned off. A hook that changes
+        // the frame then finds a client area of 0 by 0, so the window
+        // gets no WM_SIZE before WM_CREATE (Encarta 97's timeline, #2006).
         id: menu_handle,
         instance,
         proc: class_info.proc,
