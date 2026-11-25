@@ -28,10 +28,15 @@ thread_local! {
     static SCREEN: RefCell<Option<Screen>> = const { RefCell::new(None) };
 }
 
-/// Ask the frontend for an OpenGL 3.2 core context, or a compatibility one
-/// (of 3.0 or later, as the shaders need): whether it has one to give.
+/// Ask the frontend for an OpenGL 3.2 core context, a compatibility one
+/// (of 3.0 or later, as the shaders need), or an OpenGL ES 3.0 one, which
+/// is what RetroArch has on Android: whether it has one to give.
 pub fn request(cb: &Callbacks) -> bool {
-    let contexts = [(RETRO_HW_CONTEXT_OPENGL_CORE, 3, 2), (RETRO_HW_CONTEXT_OPENGL, 3, 0)];
+    let contexts = [
+        (RETRO_HW_CONTEXT_OPENGL_CORE, 3, 2),
+        (RETRO_HW_CONTEXT_OPENGL, 3, 0),
+        (RETRO_HW_CONTEXT_OPENGLES3, 3, 0),
+    ];
     for (context_type, version_major, version_minor) in contexts {
         let mut hw = retro_hw_render_callback {
             context_type,

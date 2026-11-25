@@ -27,6 +27,9 @@ pub const SYSTEM_HEAP_SAVED: u16 = 79;
 /// A process's system heap, once it has one (`Heap::create_shared`).
 pub type SystemHeap = crate::savestate::Since<SYSTEM_HEAP_SAVED, Option<Heap>>;
 
+/// The system heap's size: room for 32768 critical sections' objects.
+pub const SYSTEM_HEAP_SIZE: u32 = 0x10_0000;
+
 /// A range of address space a heap has its blocks in.
 #[derive(Clone, Debug, Default)]
 pub struct Segment {

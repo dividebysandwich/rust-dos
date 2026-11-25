@@ -199,7 +199,7 @@ jobs:
               exit 0
             }
           fi
-          if git diff --name-only "$base" HEAD | grep -Eq '^(src/(video/|display\.rs$|display/(gl(\.rs|/)|nogl\.rs$)|config_ui/|clipboard\.rs$|main\.rs$|debug/)|web/(src/|www/)|tests/program/debug_journal_tests\.rs$|Cargo\.(toml|lock)$|\.github/workflows/rust\.yml$)'; then
+          if git diff --name-only "$base" HEAD | grep -Eq '^(src/(video/|voodoo/gl(\.rs$|/)|display\.rs$|display/(gl(\.rs|/)|nogl\.rs$)|config_ui/|clipboard\.rs$|main\.rs$|debug/)|web/(src/|www/)|tests/program/debug_journal_tests\.rs$|Cargo\.(toml|lock)$|\.github/workflows/rust\.yml$)'; then
             echo 'needed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'needed=false' >> "$GITHUB_OUTPUT"
@@ -286,10 +286,12 @@ jobs:
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
-          # GLSL ES 3.00's rules for WebGL 2, which desktop Mesa doesn't
-          # apply, through Khronos's reference compiler.
-          RUST_DOS_REQUIRE_GLSLANG=1 cargo test --locked --lib \
-            video::shader::tests::sources_compile
+          # GLSL ES 3.00's rules for WebGL 2 and the 3dfx renderer on
+          # RetroArch for Android, which desktop Mesa doesn't apply,
+          # through Khronos's reference compiler.
+          RUST_DOS_REQUIRE_GLSLANG=1 cargo test --locked --lib -- \
+            video::shader::tests::sources_compile \
+            voodoo::gl::tests::sources_compile
           xvfb-run -a cargo test --locked --bin rust-dos \
             display::gl:: -- --ignored --test-threads=1
           # SDL's renderer (OpenGL on Mesa here) in its pixel-art mode.
