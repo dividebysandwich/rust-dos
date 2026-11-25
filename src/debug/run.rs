@@ -821,3 +821,56 @@ fn instruction_bytes(cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> ([u8; 15], usize)
     }
     (bytes, len)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::{CR0_PE, CR0_PG, Seg};
+    use rust_dos::win32::TRAP;
+
+    /// The physical pages of the code page at 400000h and of the page
+    /// after it in linear memory, which aren't next to each other.
+    const FIRST: usize = 0x2_0000;
+    const SECOND: usize = 0x3_0000;
+
+    /// A CPU with paging on and CS:EIP at 400FFDh, 3 bytes before the end
+    /// of its page, where a trap of the built-in Windows, `FE 3E 34`,
+    /// runs on into the next page: 12h there, or no page without
+    /// `present`. The RAM after `FIRST` holds 99h.
+    fn split_code(present: bool) -> Box<Cpu> {
+        const CODE: u32 = 0x40_0000;
+        const DIRECTORY: usize = 0x1_0000;
+        const TABLE: usize = 0x1_1000;
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let entry = |phys: usize| phys as u32 | 7;
+        cpu.bus
+            .write_32(DIRECTORY + (CODE as usize >> 22) * 4, entry(TABLE));
+        cpu.bus.write_32(TABLE, entry(FIRST));
+        cpu.bus
+            .write_32(TABLE + 4, if present { entry(SECOND) } else { 0 });
+        for (i, b) in [0xFE, TRAP, 0x34, 0x99].into_iter().enumerate() {
+            cpu.bus.write_8(FIRST + 0xFFD + i, b);
+        }
+        cpu.bus.write_8(SECOND, 0x12);
+        cpu.cr3 = DIRECTORY as u32;
+        cpu.cr0 |= CR0_PE | CR0_PG;
+        let cs = cpu.seg_cache(Seg::CS).base;
+        cpu.set_eip((CODE + 0xFFD).wrapping_sub(cs));
+        cpu
+    }
+
+    #[test]
+    fn an_instruction_running_on_into_another_page_traces_its_bytes_from_there() {
+        let cpu = split_code(true);
+        let (bytes, len) = instruction_bytes(&cpu, FIRST + 0xFFD, cpu.bus.ram());
+        assert_eq!(len, 15);
+        assert_eq!(bytes[..4], [0xFE, TRAP, 0x34, 0x12]);
+    }
+
+    #[test]
+    fn an_instruction_running_into_a_missing_page_traces_the_bytes_of_its_own() {
+        let cpu = split_code(false);
+        let (bytes, len) = instruction_bytes(&cpu, FIRST + 0xFFD, cpu.bus.ram());
+        assert_eq!(bytes[..len], [0xFE, TRAP, 0x34]);
+    }
+}

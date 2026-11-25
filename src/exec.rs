@@ -1762,3 +1762,67 @@ fn report_tripwire(cpu: &mut Cpu) {
     ));
     cpu.bus.flush_log();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where `split_code` puts the code: its two linear pages, and the
+    /// physical pages they are on, which aren't next to each other.
+    const CODE: u32 = 0x40_0000;
+    const FIRST: usize = 0x2_0000;
+    const SECOND: usize = 0x3_0000;
+
+    /// A CPU with paging on and CS:EIP at `CODE + 0xFFD`, 3 bytes before
+    /// the end of the page at `CODE`, which is on the physical page
+    /// `FIRST`. The page after it in linear memory is on `SECOND`, or
+    /// isn't there without `present`. Its bytes there are `FE 3E 34`, a
+    /// trap of the built-in Windows, then 12h on the next page it maps
+    /// and 99h in the RAM after `FIRST`.
+    fn split_code(present: bool) -> Box<Cpu> {
+        const DIRECTORY: usize = 0x1_0000;
+        const TABLE: usize = 0x1_1000;
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let entry = |phys: usize| phys as u32 | 7;
+        cpu.bus
+            .write_32(DIRECTORY + (CODE as usize >> 22) * 4, entry(TABLE));
+        cpu.bus.write_32(TABLE, entry(FIRST));
+        cpu.bus
+            .write_32(TABLE + 4, if present { entry(SECOND) } else { 0 });
+        for (i, b) in [0xFE, crate::win32::TRAP, 0x34, 0x99]
+            .into_iter()
+            .enumerate()
+        {
+            cpu.bus.write_8(FIRST + 0xFFD + i, b);
+        }
+        cpu.bus.write_8(SECOND, 0x12);
+        cpu.cr3 = DIRECTORY as u32;
+        cpu.cr0 |= crate::cpu::CR0_PE | CR0_PG;
+        let cs = cpu.seg_cache(Seg::CS).base;
+        cpu.set_eip((CODE + 0xFFD).wrapping_sub(cs));
+        cpu
+    }
+
+    #[test]
+    fn a_trap_reads_its_bytes_past_its_page_from_the_page_mapped_after_it() {
+        let mut cpu = split_code(true);
+        let ram = cpu.bus.ram().to_vec();
+        let bytes: Vec<_> = (0..4)
+            .map(|i| trap_byte(&mut cpu, &ram, FIRST + 0xFFD, i))
+            .collect();
+        assert_eq!(
+            bytes,
+            [Some(0xFE), Some(crate::win32::TRAP), Some(0x34), Some(0x12)]
+        );
+    }
+
+    #[test]
+    fn a_trap_running_into_a_missing_page_has_no_byte_there_and_keeps_cr2() {
+        let mut cpu = split_code(false);
+        cpu.cr2 = 0x1234_5678;
+        let ram = cpu.bus.ram().to_vec();
+        assert_eq!(trap_byte(&mut cpu, &ram, FIRST + 0xFFD, 2), Some(0x34));
+        assert_eq!(trap_byte(&mut cpu, &ram, FIRST + 0xFFD, 3), None);
+        assert_eq!(cpu.cr2, 0x1234_5678);
+    }
+}
