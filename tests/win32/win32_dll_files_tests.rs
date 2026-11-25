@@ -490,28 +490,34 @@ fn find_data_leaves_the_padding_after_its_last_field() {
     assert_eq!(run("find_tail", None, &[], keeps_find_tail()), 3);
 }
 
-/// Searches C:\WINDOWS\SYSTEM with FindFirstFileA and FindNextFileA,
-/// checking each time that the word after the struct's fields is as it
-/// was.
+/// Searches C:\WINDOWS\SYSTEM with FindFirstFileA and FindNextFileA.
+/// Before each call the dword at 316 holds 0x5AA5FFFF: the call must
+/// succeed, clear the end of cAlternateFileName (316-317, past the
+/// short names of the DLLs there) and leave the padding (318-319).
 fn keeps_find_tail() -> Vec<u8> {
     let mut data = vec![0; 0x800];
     put(&mut data, 0x60, b"C:\\WINDOWS\\SYSTEM\\*.DLL\0");
     program(&[("KERNEL32.DLL", KERNEL32)], &data, |a, l| {
         let at = |offset: u32| l.at(offset);
-        let tail = at(0x200 + 318) as u64;
+        let tail = at(0x200 + 316) as u64;
         a.xor(ebx, ebx)?;
-        a.mov(word_ptr(tail), 0x5AA5)?;
+        a.mov(dword_ptr(tail), 0x5AA5_FFFFu32 as i32)?;
         call(a, l.import("FindFirstFileA"), &[at(0x60), at(0x200)])?;
         a.mov(esi, eax)?;
-        a.cmp(word_ptr(tail), 0x5AA5)?;
-        check(a, false, 0)?;
-        a.mov(word_ptr(tail), 0x5AA5)?;
+        a.cmp(eax, -1)?;
+        a.setne(cl)?;
+        a.cmp(dword_ptr(tail), 0x5AA5_0000)?;
+        a.sete(al)?;
+        a.and(al, cl)?;
+        a.movzx(eax, al)?;
+        a.or(ebx, eax)?;
+        a.mov(dword_ptr(tail), 0x5AA5_FFFFu32 as i32)?;
         a.push(at(0x200) as i32)?;
         a.push(esi)?;
         a.call(l.import("FindNextFileA"))?;
         a.test(eax, eax)?;
         a.setne(cl)?;
-        a.cmp(word_ptr(tail), 0x5AA5)?;
+        a.cmp(dword_ptr(tail), 0x5AA5_0000)?;
         a.sete(al)?;
         a.and(al, cl)?;
         a.movzx(eax, al)?;
