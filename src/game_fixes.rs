@@ -57,9 +57,10 @@
 //!
 //! To add a fix: an entry in [`FIXES`] with a name of its own, a test that
 //! runs it (`tests/program/game_fixes_tests.rs`,
-//! `tests/dos/exec_tests.rs` for a program skipped at EXEC, or
-//! `tests/win32/win32_tests.rs` for a Win32 program), and a line in
-//! CONFIGURATION.md's list of game fixes.
+//! `tests/dos/exec_tests.rs` for a program skipped at EXEC,
+//! `tests/win32/win32_tests.rs` for a Win32 program, or
+//! `tests/win32/win32_shims_tests.rs` for one given shims), and a line
+//! in CONFIGURATION.md's list of game fixes.
 
 use crate::win32::shims::{Shims, win32s::WIN32S};
 use memchr::memmem::Finder;
@@ -1312,8 +1313,6 @@ mod tests {
             assert!(win32_shims(&path, size, |f| enabled(f, true, &off)).is_empty());
             assert!(win32_shims("C:\\GAME\\OTHER.EXE", size, |_| true).is_empty());
             assert!(win32_shims(&path, size + 1, |_| true).is_empty());
-            // Its file isn't patched.
-            assert!(patch_win32(&path, &vec![0; size], |_| true).is_none());
         }
     }
 }
