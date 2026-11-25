@@ -122,12 +122,16 @@ that it improves on main. Steps, in this order:
    When you mark it ready, check that it still merges with main, which
    moves on while a pull request is in draft. If it doesn't, merge main
    into the branch (no rebase, no force-push), keep what both sides
-   meant, run the tests the conflict touches, and push. A save-state
-   version both sides raised (`WIN32_VERSION` and the like): the
-   branch takes the next free number, and main's joins the versions the
-   branch loads. GitHub can show the old head for minutes after a push:
-   compare its head with the commit you pushed before trusting
-   "conflicting".
+   meant, run the tests the conflict touches, and push. GitHub can show
+   the old head for minutes after a push: compare its head with the
+   commit you pushed before trusting "conflicting".
+
+   A save-state version both sides raised (`WIN32_VERSION` and the
+   like): the branch takes the next free number, and main's joins the
+   versions the branch loads (`WIN32_LOADS`, its comment, and a line in
+   `WIN32_LAYOUTS`). Main's saves of that number don't hold what the
+   branch added, so the branch's own gates that named it move to the new
+   number too: a `Since<N, _>`, an `Until<N, _>`, a `*_SAVED` constant.
 
 If the evidence isn't there yet, improve the change and go through the
 steps again. A pull request stays a draft only when the next step needs
