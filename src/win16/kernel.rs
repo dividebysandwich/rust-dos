@@ -796,23 +796,49 @@ fn hmemcpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// or while the task waits in it, is handled before Yield returns
 /// (#1913's measurements in 86Box). A task that polls with Yield would
 /// otherwise hold up a task that sends to its windows for good.
+///
+/// With messages waiting, the task gives up its turn twice: the reply in
+/// UserYield16 hands it to the sender, and then the yield itself. That is
+/// deliberate: in #1913's QPEND run on Windows 95, B's message waiting at
+/// A's Yield is handled, B runs to its end, and C, which A posted to
+/// before the Yield, runs to its end too before A's Yield returns.
 fn yield16(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let ctx = Context::of(cpu);
     if crate::win32::user32::message::has_sent(cpu) {
         let target = super::message::user32(cpu, "UserYield16");
         thunk::enter32(cpu, ctx, target, &[], thunk::POST_YIELD, vec![0]);
-    } else {
-        yield_and_receive(cpu, ctx);
+    } else if !yield_and_receive(cpu, ctx) {
+        // No other task ran and nothing was sent: as with PeekMessage's
+        // yield that finds no message (user.rs), the call changed
+        // nothing but the start of the turn, and an idle proof follows
+        // it, so a lone Yield loop is skipped as idle.
+        crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
+        crate::idle::turn_started(cpu);
     }
     None
 }
 
 /// The task gives up its turn, and when the turn comes back it handles
 /// the messages sent to it meanwhile (UserYield16) before `ctx` goes on.
-fn yield_and_receive(cpu: &mut Cpu, ctx: Context) {
+/// False when the same task goes on at once with nothing sent to it: it
+/// goes on at `ctx` straight away, without the call of UserYield16.
+fn yield_and_receive(cpu: &mut Cpu, ctx: Context) -> bool {
+    let me = running_thread(cpu);
     let target = super::message::user32(cpu, "UserYield16");
     thunk::enter32(cpu, ctx, target, &[], thunk::POST_YIELD, vec![1]);
     task::give_up_turn(cpu);
+    if running_thread(cpu) != me || crate::win32::user32::message::has_sent(cpu) {
+        return true;
+    }
+    thunk::drop32(cpu);
+    crate::win32::system::load_context(cpu, &ctx);
+    false
+}
+
+/// The thread that runs, if any.
+fn running_thread(cpu: &mut Cpu) -> Option<u32> {
+    crate::win32::process(cpu).current_thread().map(|t| t.id)
 }
 
 /// OldYield: the task gives its turn up, and nothing else.
