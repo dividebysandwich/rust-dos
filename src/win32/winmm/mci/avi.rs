@@ -157,23 +157,11 @@ fn audio(d: &[u8], s: &avi::Stream) -> Option<(Format, Vec<u8>)> {
         return plays.then(|| (format, data()));
     }
     let (adpcm, rate) = adpcm::Format::from_wave_format(f)?;
-    // ACM decodes it to 16-bit PCM of its rate and channels, block by
-    // block here. msadp32.acm writes nothing for a conversion that meets
-    // a block it can't decode, and MCIAVI converts the sound a buffer at
-    // a time as it plays: such a block is silence, which keeps the sound
-    // after it in step with the pictures, where decoding the file in one
-    // conversion would silence the whole of it.
-    let block = adpcm.block_align as usize;
-    // A block's 16-bit samples, all channels'.
-    let silence = adpcm.samples_per_block as usize * adpcm.channels as usize * 2;
-    let mut pcm = Vec::new();
-    for b in data().chunks(block) {
-        let samples = adpcm.decode_buffer(b);
-        if samples.is_empty() && b.len() == block {
-            pcm.resize(pcm.len() + silence, 0);
-        }
-        pcm.extend(samples.iter().flat_map(|v| v.to_le_bytes()));
-    }
+    // ACM decodes it to 16-bit PCM of its rate and channels. MCIAVI
+    // converts the sound a buffer at a time as it plays, so a block that
+    // doesn't decode is silence and keeps the sound after it in step with
+    // the pictures (`to_pcm`).
+    let pcm = adpcm.to_pcm(&data());
     Some((Format::pcm(rate, 16, adpcm.channels), pcm))
 }
 
