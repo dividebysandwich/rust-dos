@@ -323,9 +323,14 @@ pub(in crate::win32) fn free_then(cpu: &mut Cpu, module: u32, resume: (u32, u32)
 /// that chain runs adds the modules it lets go of to the chain's and
 /// goes on at once, as Wine's LdrUnloadDll detaches and unmaps modules
 /// only when `free_lib_count` says it is the outermost.
+///
+/// A chain that no thread runs any more, because its thread ended in a
+/// DllMain or an exception unwound past the call, leaves its modules in
+/// `Process::unloading`. The next free is then the outermost again and
+/// takes them over, rather than every later free only lowering counts.
 fn free_module(cpu: &mut Cpu, module: u32, then: u32, arg: u32, resume: (u32, u32)) {
     let p = process(cpu);
-    let outermost = p.unloading.is_none();
+    let outermost = p.unloading.is_none() || !free_chain_runs(p);
     let mut bases = p.unloading.take().unwrap_or_default();
     loader::release(p, module, &mut bases);
     *p.unloading = Some(bases.clone());
@@ -335,6 +340,16 @@ fn free_module(cpu: &mut Cpu, module: u32, then: u32, arg: u32, resume: (u32, u3
     } else {
         freed(cpu, resume, then, arg);
     }
+}
+
+/// Whether a FreeLibrary's chain of DllMain calls is under way: one of
+/// the process's threads waits for an entry point the chain called to
+/// return. An ended thread's calls are gone (`thread::end`), and so are
+/// those an exception unwound past (`call::unwound_to`).
+fn free_chain_runs(p: &crate::win32::Process) -> bool {
+    p.threads.iter().flat_map(|t| &t.calls).any(|c| {
+        c.then == DLL_NOTIFIED && matches!(c.data.get(THEN), Some(&(THEN_FREE | THEN_FREE_EXIT)))
+    })
 }
 
 /// What a free does once its modules have gone, or at once for one made
