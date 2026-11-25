@@ -529,8 +529,17 @@ pub fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
     }
 }
 
+/// The name a file is kept by in the middle of a rename to its own name
+/// in another case, where the backend can't rename (`rename`). It starts
+/// with ".rust-dos", so programs never see it (`disk::host_private`).
+const RENAMING: &str = ".rust-dos-renaming";
+
 /// Rename a file or folder. Where the backend can't (Android's SAF
-/// can't), a file is copied to the new name and the old one deleted.
+/// can't), a file is copied to the new name and the old one deleted. A
+/// new name that is the old one in another case is, where names match
+/// in any case, the file itself: copied there, the file would be emptied
+/// and then deleted. It goes through a name of its own instead
+/// (`RENAMING`): copied there, deleted, and copied back by the new name.
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     let (from, to) = (from.as_ref(), to.as_ref());
     let Some(backend) = backend(from).or_else(|| backend(to)) else { return fs::rename(from, to) };
@@ -541,10 +550,34 @@ pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     if !is_file(from) {
         return Err(error);
     }
+    let recased = from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
+    if recased {
+        return rename_through(from, &to.with_file_name(RENAMING), to);
+    }
     copy(from, to)?;
     remove_file(from).inspect_err(|_| {
         let _ = remove_file(to);
     })
+}
+
+/// The file `from` copied to `to` by way of `aside`, for a backend that
+/// can't rename and a `to` that may be `from` itself. When a step fails,
+/// the file is left whole by its old name, or by `aside` when even the
+/// copy back fails.
+fn rename_through(from: &Path, aside: &Path, to: &Path) -> io::Result<()> {
+    if let Err(e) = copy(from, aside).and_then(|_| remove_file(from)) {
+        let _ = remove_file(aside);
+        return Err(e);
+    }
+    if let Err(e) = copy(aside, to) {
+        let _ = remove_file(to);
+        if copy(aside, from).is_ok() {
+            let _ = remove_file(aside);
+        }
+        return Err(e);
+    }
+    let _ = remove_file(aside);
+    Ok(())
 }
 
 /// Copy a file, returning the bytes copied.
@@ -788,6 +821,23 @@ pub mod tests {
         assert_eq!(fs::read_to_string(dir.join("NEW.TXT")).unwrap(), "data");
         create_dir("mem://SUB").unwrap();
         assert!(rename("mem://SUB", "mem://SUB2").is_err(), "folders aren't copied");
+    }
+
+    /// A new name that is the old one in another case is, where names
+    /// match in any case, the file itself: copying it there would empty
+    /// it, and the delete would remove it. The file goes through a name
+    /// of its own, and nothing else is left.
+    #[test]
+    fn a_rename_to_another_case_is_never_a_copy_onto_itself() {
+        let dir = mapped("recase");
+        write("mem://GAME.EXE", "data").unwrap();
+        rename("mem://GAME.EXE", "mem://game.exe").unwrap();
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["game.exe"]);
+        assert_eq!(fs::read_to_string(dir.join("game.exe")).unwrap(), "data");
     }
 
     #[test]

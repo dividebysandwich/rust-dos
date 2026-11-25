@@ -2625,6 +2625,143 @@ fn a_loaded_state_keeps_the_folder_of_its_current_directory() {
     assert_eq!(loaded.create_file("C:HERE.TXT", PSP), Err(0x03));
 }
 
+/// The bytes of the file `name`.
+fn read_all(disk: &mut DiskController, name: &str) -> Vec<u8> {
+    let h = disk.open_file(name, 0, PSP).unwrap();
+    let data = disk.read_file(h, 4096).unwrap();
+    disk.close_file(h);
+    data
+}
+
+/// The long names in the folder `dir`, sorted.
+fn long_listed(disk: &DiskController, dir: &str) -> Vec<String> {
+    let names = disk.long_names(dir).unwrap();
+    let mut names: Vec<String> = names.iter().map(|(long, _)| long.clone()).collect();
+    names.sort();
+    names
+}
+
+/// Drive D: of `base`, with `Config.cfg` ("cfg") and `Saves\Slot1.sav`
+/// ("one") at its root, renames `Config.cfg` and `Saves` to their own
+/// names in another case by long-name calls, as MoveFileA and msvcrt's
+/// rename make them. Windows 9x renames the entry in place: the file
+/// keeps what is in it, and the folder what it holds. DOS's own rename
+/// (INT 21h 56h) finds the name taken and answers 05h.
+fn recase_on(disk: &mut DiskController) {
+    assert_eq!(
+        disk.rename_file(r"D:\Config.cfg", r"D:\CONFIG.CFG"),
+        Err(0x05)
+    );
+    disk.long_name_call(|d| d.rename_file(r"D:\Config.cfg", r"D:\config.CFG"))
+        .unwrap();
+    disk.long_name_call(|d| d.rename_file(r"D:\Saves", r"D:\SAVES"))
+        .unwrap();
+    recased(disk);
+}
+
+/// What `recase_on` leaves.
+fn recased(disk: &mut DiskController) {
+    assert_eq!(long_listed(disk, r"D:\"), ["SAVES", "config.CFG"]);
+    assert_eq!(read_all(disk, r"D:\config.cfg"), b"cfg");
+    assert_eq!(read_all(disk, r"D:\Saves\Slot1.sav"), b"one");
+    assert_eq!(long_listed(disk, r"D:\SAVES")[0], "Slot1.sav");
+}
+
+/// The files `recase_on` renames, in the host folder `dir`.
+fn recase_files(dir: &Path) {
+    fs::create_dir_all(dir.join("Saves")).unwrap();
+    fs::write(dir.join("Config.cfg"), b"cfg").unwrap();
+    fs::write(dir.join("Saves/Slot1.sav"), b"one").unwrap();
+}
+
+#[test]
+fn a_host_folder_renames_a_name_to_another_case_in_place() {
+    let base = scratch("recase_host");
+    fs::create_dir_all(base.join("c")).unwrap();
+    recase_files(&base.join("game"));
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("game"), MountOptions::default(), false)
+        .unwrap();
+    recase_on(&mut disk);
+    let mut names: Vec<String> = fs::read_dir(base.join("game"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["SAVES", "config.CFG"]);
+}
+
+/// On an overlay drive, the entries are renamed above, whether they were
+/// only below (`Config.cfg`) or partly above (`Saves`, which has a file
+/// of its own above), and what is below stays as it was.
+#[test]
+fn an_overlay_renames_a_name_to_another_case_in_place() {
+    let base = scratch("recase_overlay");
+    fs::create_dir_all(base.join("c")).unwrap();
+    recase_files(&base.join("game"));
+    let opts = || MountOptions {
+        overlay: Some(base.join("upper")),
+        ..MountOptions::default()
+    };
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("game"), opts(), false).unwrap();
+    let h = disk
+        .long_name_call(|d| d.create_file(r"D:\Saves\Slot2.sav", PSP))
+        .unwrap();
+    disk.write_file(h, b"two").unwrap();
+    disk.close_file(h);
+    recase_on(&mut disk);
+    assert_eq!(long_listed(&disk, r"D:\SAVES"), ["Slot1.sav", "Slot2.sav"]);
+    assert_eq!(read_all(&mut disk, r"D:\SAVES\SLOT2.SAV"), b"two");
+    assert_eq!(fs::read(base.join("game/Config.cfg")).unwrap(), b"cfg");
+    assert_eq!(fs::read(base.join("game/Saves/Slot1.sav")).unwrap(), b"one");
+
+    // Renamed back, the names are the ones below again.
+    disk.long_name_call(|d| d.rename_file(r"D:\config.CFG", r"D:\Config.cfg"))
+        .unwrap();
+    assert_eq!(long_listed(&disk, r"D:\"), ["Config.cfg", "SAVES"]);
+    assert_eq!(read_all(&mut disk, r"D:\CONFIG.CFG"), b"cfg");
+    disk.long_name_call(|d| d.rename_file(r"D:\Config.cfg", r"D:\config.CFG"))
+        .unwrap();
+
+    // Again, from the upper folder and its list of deleted names.
+    drop(disk);
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("game"), opts(), false).unwrap();
+    recased(&mut disk);
+}
+
+/// An archive below matches names in any case on every host, as a folder
+/// does only on Windows and macOS.
+#[test]
+fn an_archive_drive_renames_a_name_to_another_case_in_place() {
+    let base = scratch("recase_archive");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let zip = crate::archive::zip::tests::zip(&[
+        ("Config.cfg", b"cfg", false),
+        ("Saves/Slot1.sav", b"one", false),
+    ]);
+    fs::write(base.join("game.zip"), &zip).unwrap();
+    let opts = || MountOptions {
+        overlay: Some(base.join("saves")),
+        ..MountOptions::default()
+    };
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("game.zip"), opts(), false)
+        .unwrap();
+    recase_on(&mut disk);
+    drop(disk);
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("game.zip"), opts(), false)
+        .unwrap();
+    recased(&mut disk);
+    assert_eq!(
+        fs::read(base.join("game.zip")).unwrap(),
+        zip,
+        "the archive as it was"
+    );
+}
+
 /// Where the host's own file pointer of the host file open at `sft` is,
 /// asked of the host.
 fn host_pointer(disk: &DiskController, sft: u16) -> u64 {

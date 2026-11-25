@@ -235,6 +235,8 @@ pub struct Config {
     pub win32_locale: Option<Win32Locale>,
     /// Which of its functions' calls the log gets (`win32_trace`).
     pub win32_trace: Option<Win32Trace>,
+    /// The compatibility shims every program gets (`win32_shims`).
+    pub win32_shims: Option<crate::win32::shims::Shims>,
     /// DOS's tables packed low, as DOS=HIGH has them (`dos_high`).
     pub dos_high: Option<bool>,
     /// The DOS version programs are told (`dos_version`).
