@@ -64,7 +64,7 @@ fn run_chain(cpu: &mut Cpu, resume: (u32, u32), mut data: Vec<u32>) {
     while data[NEXT] as usize + LIST < data.len() {
         let base = data[LIST + data[NEXT] as usize];
         data[NEXT] += 1;
-        let Some(module) = process(cpu).modules.iter().find(|m| m.base == base) else {
+        let Some(module) = process(cpu).modules.iter_mut().find(|m| m.base == base) else {
             continue;
         };
         let attached = module.flags & ATTACHED != 0;
@@ -75,6 +75,12 @@ fn run_chain(cpu: &mut Cpu, resume: (u32, u32), mut data: Vec<u32>) {
         };
         if module.entry == 0 || !wanted {
             continue;
+        }
+        // A DLL counts as detached once its DLL_PROCESS_DETACH starts, as
+        // in Wine's process_detach, so a FreeLibrary it makes that frees
+        // it again doesn't tell it a second time.
+        if reason == DLL_PROCESS_DETACH {
+            module.flags &= !ATTACHED;
         }
         let (entry, reserved) = (module.entry, data[RESERVED]);
         if !call::call(
@@ -273,8 +279,13 @@ pub(in crate::win32) fn load_driver(cpu: &mut Cpu, name: &str) {
 
 /// FreeLibrary for the system, from a call's continuation: the module at
 /// `module` loses a reference, and when the DLLs' entry points have run
-/// `value` returns to `resume`.
+/// `value` returns to `resume`. While the process ends, nothing is freed
+/// (`free`).
 pub(in crate::win32) fn free_then(cpu: &mut Cpu, module: u32, resume: (u32, u32), value: u32) {
+    if process(cpu).exiting {
+        call::finish(cpu, resume, value);
+        return;
+    }
     let mut freed = Vec::new();
     loader::release(process(cpu), module, &mut freed);
     let data = chain(THEN_FREE, value, DLL_PROCESS_DETACH, 0, &freed);
@@ -352,6 +363,21 @@ pub(super) fn free_library_and_exit_thread(cpu: &mut Cpu, args: &[u32]) -> Optio
 }
 
 fn free(cpu: &mut Cpu, module: u32, then: u32, arg: u32) -> Option<u32> {
+    // While ExitProcess tells the DLLs that the process ends, a FreeLibrary
+    // succeeds and does nothing: no DLL is told again or unmapped, and the
+    // whole address space goes when the process does. Wine's LdrUnloadDll
+    // returns at once while `process_detaching` is set. A DLL's
+    // DLL_PROCESS_DETACH that frees a DLL importing from it, as DirectX 5's
+    // DSETUP.DLL does with DSETUP32.DLL (#1803), would otherwise free and
+    // unmap itself and return into pages that are gone; Windows 95 and 98
+    // end such a process cleanly.
+    if process(cpu).exiting {
+        if then == THEN_FREE_EXIT {
+            exit_thread(cpu, arg);
+            return None;
+        }
+        return Some(TRUE);
+    }
     if !is_module(cpu, module) {
         set_error(cpu, ERROR_INVALID_HANDLE);
         if then == THEN_FREE_EXIT {
