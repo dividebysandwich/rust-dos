@@ -2299,8 +2299,9 @@ fn palette_before_mode_program() -> (Vec<u8>, u32) {
 fn a_palette_selected_on_a_deep_desktop_realizes_in_the_background_in_an_8_bit_mode() {
     // Windows 98's USER selects a palette in the foreground only on a
     // palette device, so A, selected on the desktop of 32 bits, isn't
-    // the foreground palette in the 8-bit mode: realized there, it
-    // takes a free entry and leaves B's.
+    // the foreground palette in the 8-bit mode, and B's entry keeps B's
+    // color. In the foreground A would free every entry that isn't
+    // static and put its own color in entry 10.
     let (program, data) = palette_before_mode_program();
     let mut cpu = machine("palette_before_mode", program);
     run_until_done(&mut cpu, data);
@@ -2308,12 +2309,15 @@ fn a_palette_selected_on_a_deep_desktop_realizes_in_the_background_in_an_8_bit_m
     // RealizePalette on the desktop of 32 bits maps nothing.
     assert_eq!(r[4], 0);
     assert_eq!(r[5..8], [0; 3]);
-    // B takes the first entry after the static ones, A the next.
+    // B takes the first entry after the static ones. A, in the
+    // background, maps from entry 10 up, free or not, as Windows 95
+    // does (`realize`): it maps to B's entry and leaves its color, so
+    // entry 11 keeps the black it had.
     assert_eq!(r[11..13], [1, 1]);
     let (dac, b) = dac_entry(&cpu, 10, D_COLOR);
     assert_eq!(dac, b, "B's entry");
-    let (dac, a) = dac_entry(&cpu, 11, G_COLOR);
-    assert_eq!(dac, a, "A's entry");
+    let (dac, _) = dac_entry(&cpu, 11, G_COLOR);
+    assert_eq!(dac, [0; 3], "the entry after B's");
 }
 
 const DD_QUERY_INTERFACE: u32 = 0;
