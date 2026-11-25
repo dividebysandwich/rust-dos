@@ -1655,6 +1655,217 @@ fn a_sleep_zero_loop_waits_for_a_multimedia_timer() {
     assert!(stats.skipped > 0, "{stats:?}");
 }
 
+/// A program whose main thread spins for `ms` milliseconds by
+/// GetTickCount, once for each of `peeks`, with a PeekMessageA of those
+/// flags in each pass when there are some. Meanwhile a second thread of
+/// the same priority runs a short loop and calls Sleep(0), again and
+/// again, and counts how long each Sleep(0) took by
+/// QueryPerformanceCounter, in half milliseconds up to 63. For each spin
+/// it prints a line: the spin's number, the second thread's passes, the
+/// main thread's, and each length that came with its count.
+fn turns_program(peeks: &[Option<u32>], ms: i32) -> Vec<u8> {
+    let k32: &[&str] = &[
+        "GetTickCount",
+        "CreateThread",
+        "Sleep",
+        "WaitForSingleObject",
+        "CloseHandle",
+        "GetStdHandle",
+        "WriteFile",
+        "ExitProcess",
+        "QueryPerformanceCounter",
+        "QueryPerformanceFrequency",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", k32), ("USER32.DLL", &["PeekMessageA"])];
+    // The stop flag at 0, the second thread's passes at 4, the main
+    // thread's at 8, the spin's start at 0xC, the MSG at 0x10, the digits
+    // up to 0x40, the count written at 0x40, the output's handle at 0x44,
+    // the second thread's start at 0x48 and its id at 0x4C (which Windows
+    // 98's CreateThread fails without), the line's end at 0x50, the
+    // counter before and after a Sleep at 0x60 and 0x68, its counts in
+    // half a millisecond at 0x70 and in a second at 0x78, the counts of
+    // the lengths from 0x100.
+    let mut data = vec![0; 0x200];
+    data[0x50..0x52].copy_from_slice(b"\r\n");
+    program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(k32.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut print = a.create_label();
+        let mut pass = a.create_label();
+        let mut work = a.create_label();
+        a.call(over)?;
+        // The second thread: a short loop and Sleep(0), until stopped.
+        a.set_label(&mut pass)?;
+        a.mov(ecx, 100)?;
+        a.set_label(&mut work)?;
+        a.dec(ecx)?;
+        a.jnz(work)?;
+        a.push(l.at(0x60) as i32)?;
+        a.call(f("QueryPerformanceCounter"))?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.push(l.at(0x68) as i32)?;
+        a.call(f("QueryPerformanceCounter"))?;
+        a.mov(eax, dword_ptr(l.at(0x68)))?;
+        a.sub(eax, dword_ptr(l.at(0x60)))?;
+        a.xor(edx, edx)?;
+        a.div(dword_ptr(l.at(0x70)))?;
+        let mut small = a.create_label();
+        a.cmp(eax, 63)?;
+        a.jbe(small)?;
+        a.mov(eax, 63)?;
+        a.set_label(&mut small)?;
+        a.inc(dword_ptr(eax * 4 + l.at(0x100)))?;
+        a.inc(dword_ptr(l.at(4)))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(pass)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        // Print eax in decimal and a space.
+        a.set_label(&mut print)?;
+        a.mov(edi, l.at(0x3F) as i32)?;
+        a.mov(byte_ptr(edi), b' ' as i32)?;
+        a.mov(ecx, 10)?;
+        let mut digit = a.create_label();
+        a.set_label(&mut digit)?;
+        a.dec(edi)?;
+        a.xor(edx, edx)?;
+        a.div(ecx)?;
+        a.add(dl, b'0' as i32)?;
+        a.mov(byte_ptr(edi), dl)?;
+        a.test(eax, eax)?;
+        a.jnz(digit)?;
+        a.mov(edx, l.at(0x40) as i32)?;
+        a.sub(edx, edi)?;
+        a.push(0)?;
+        a.push(l.at(0x40) as i32)?;
+        a.push(edx)?;
+        a.push(edi)?;
+        a.push(dword_ptr(l.at(0x44)))?;
+        a.call(f("WriteFile"))?;
+        a.ret()?;
+        a.set_label(&mut over)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0x48)), eax)?;
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(f("GetStdHandle"))?;
+        a.mov(dword_ptr(l.at(0x44)), eax)?;
+        a.push(l.at(0x78) as i32)?;
+        a.call(f("QueryPerformanceFrequency"))?;
+        a.mov(eax, dword_ptr(l.at(0x78)))?;
+        a.xor(edx, edx)?;
+        a.mov(ecx, 2000)?;
+        a.div(ecx)?;
+        a.mov(dword_ptr(l.at(0x70)), eax)?;
+        for (n, peek) in peeks.iter().enumerate() {
+            a.mov(dword_ptr(l.data), 0)?;
+            a.mov(dword_ptr(l.at(4)), 0)?;
+            a.mov(dword_ptr(l.at(8)), 0)?;
+            a.push(l.at(0x4C) as i32)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(0x48)))?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateThread"))?;
+            a.mov(esi, eax)?;
+            a.call(f("GetTickCount"))?;
+            a.mov(dword_ptr(l.at(0xC)), eax)?;
+            let mut spin = a.create_label();
+            a.set_label(&mut spin)?;
+            if let Some(flags) = *peek {
+                a.push(flags as i32)?;
+                a.push(0)?;
+                a.push(0)?;
+                a.push(0)?;
+                a.push(l.at(0x10) as i32)?;
+                a.call(l.import(k32.len()))?;
+            }
+            a.inc(dword_ptr(l.at(8)))?;
+            a.call(f("GetTickCount"))?;
+            a.sub(eax, dword_ptr(l.at(0xC)))?;
+            a.cmp(eax, ms)?;
+            a.jb(spin)?;
+            a.mov(dword_ptr(l.data), 1)?;
+            a.push(-1)?;
+            a.push(esi)?;
+            a.call(f("WaitForSingleObject"))?;
+            a.push(esi)?;
+            a.call(f("CloseHandle"))?;
+            a.mov(eax, n as u32)?;
+            a.call(print)?;
+            a.mov(eax, dword_ptr(l.at(4)))?;
+            a.call(print)?;
+            a.mov(eax, dword_ptr(l.at(8)))?;
+            a.call(print)?;
+            a.xor(ebx, ebx)?;
+            let mut bucket = a.create_label();
+            let mut empty = a.create_label();
+            a.set_label(&mut bucket)?;
+            a.mov(eax, dword_ptr(ebx * 4 + l.at(0x100)))?;
+            a.test(eax, eax)?;
+            a.jz(empty)?;
+            a.mov(eax, ebx)?;
+            a.call(print)?;
+            a.mov(eax, dword_ptr(ebx * 4 + l.at(0x100)))?;
+            a.call(print)?;
+            a.mov(dword_ptr(ebx * 4 + l.at(0x100)), 0)?;
+            a.set_label(&mut empty)?;
+            a.inc(ebx)?;
+            a.cmp(ebx, 64)?;
+            a.jb(bucket)?;
+            a.push(0)?;
+            a.push(l.at(0x40) as i32)?;
+            a.push(2)?;
+            a.push(l.at(0x50) as i32)?;
+            a.push(dword_ptr(l.at(0x44)))?;
+            a.call(f("WriteFile"))?;
+        }
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    })
+}
+
+/// A thread that gives up its turn with Sleep(0) while another of the
+/// same priority spins gets the processor back when the spinning one's
+/// turn ends, 20 ms later, at the fourth of Windows 98's 5 ms ticks. The
+/// spinning thread reads GetTickCount, and then PeekMessageA too, as Dark
+/// Omen's main thread does while its movie decoder gives up its turn once
+/// a picture (#1802). Turns that ended at the BIOS's 55 ms interrupt left
+/// the decoder 2 pictures a second. The same program with spins of two
+/// seconds, run on Windows 98 SE, gave the second thread 109 and 137
+/// passes, its Sleeps taking 5 to 20 ms in steps of 5 ms, 20 ms most
+/// often, and a few longer ones as the system's own threads ran.
+#[test]
+fn a_thread_that_sleeps_zero_gets_the_processor_back_after_a_turn() {
+    const PM_REMOVE: u32 = 1;
+    let mut cpu = machine("turns", turns_program(&[None, Some(PM_REMOVE)], 1000));
+    assert!(run_to_exit(&mut cpu, 1000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0);
+    let out = printed(&cpu);
+    let lines: Vec<Vec<u32>> = out
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .map(|n| n.parse().unwrap())
+                .collect()
+        })
+        .collect();
+    assert_eq!(lines.len(), 2, "{out}");
+    for line in &lines {
+        let (passes, lengths) = (line[1], line[3..].chunks(2));
+        // A pass for each turn of 20 ms, and the first, whose Sleep(0) can
+        // come before the spin begins.
+        assert!((49..=50).contains(&passes), "{out}");
+        // A turn is 39 or 40 half milliseconds by the counter read on both
+        // sides of the Sleep, and never more.
+        let turns: u32 = lengths.clone().filter(|c| c[0] >= 39).map(|c| c[1]).sum();
+        assert!(turns + 1 >= passes, "{out}");
+        assert!(lengths.into_iter().all(|c| c[0] <= 40), "{out}");
+    }
+}
+
 /// The number of proofs that failed for `why`.
 fn failed_by(stats: &rust_dos::idle::IdleStats, why: &str) -> u64 {
     stats
