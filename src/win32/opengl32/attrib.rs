@@ -384,9 +384,8 @@ mod tests {
     /// its name with the filters and wrap modes it had at the push.
     #[test]
     fn a_texture_a_pop_makes_has_the_pushed_parameters() {
-        use super::super::texture::{self, GL_NEAREST, GL_TEXTURE_2D};
+        use super::super::texture::{self, GL_CLAMP, GL_NEAREST, GL_TEXTURE_2D};
         const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
-        const GL_CLAMP: u32 = 0x2900;
         const GL_TEXTURE_WRAP_S: u32 = 0x2802;
         let mut cpu = Cpu::new(".".into());
         let tid = super::super::super::user32::current_tid(&cpu);
