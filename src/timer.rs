@@ -54,13 +54,13 @@ pub(crate) const LOAD_SETTLE: Duration = Duration::from_secs(2);
 pub(crate) const LOAD_SETTLE_HOST: Duration = Duration::from_secs(5);
 /// Frames in a row on time, after a load, that end the settling sooner
 /// than `LOAD_SETTLE`: half a second at 60 Hz. A frame is on time when its
-/// batch started less than one and a half of its periods behind the wall
-/// clock, as each batch of a host that keeps up starts one period behind.
-/// Myth III's frames after a load of the Defense of Yursgrad were back at
-/// 17 ms within a second, and with the full two seconds the search climbed
-/// a second later than main's and took its second step up into a hitch of
-/// the game's own, which the frame watch then held it under (a speed of
-/// 446,852 against main's 586,534, for 40 s).
+/// batch started less than half a period later than a host that keeps up
+/// starts it (`Pacer::batch_late`). Myth III's frames after a load of the
+/// Defense of Yursgrad were back at 17 ms within a second, and with the
+/// full two seconds the search climbed a second and a half later than
+/// without the settling and took its second step up into a hitch of the
+/// game's own, which the frame watch then held it under (a speed of
+/// 446,852 against 586,534 without the settling, for 40 s).
 pub(crate) const LOAD_CALM_FRAMES: u32 = 30;
 /// A backlog of this much is one gap: running frames, it is dropped at
 /// `MAX_LAG`. The frontend stopped (a page in the background, a window
@@ -859,9 +859,13 @@ pub struct Pacer {
     settle_until_ns: u64,
     settle_host_left: Duration,
     /// Frames on time in a row while a load settles (`LOAD_CALM_FRAMES`),
-    /// and how far behind the wall clock the last batch started.
+    /// and how much later the last batch started than one of a host that
+    /// keeps up. `batch_end`'s batches of such a host start a frame behind
+    /// the wall clock, as the frontend sleeps out the rest of each frame
+    /// (`wait_for_next_frame`); `retrace_batch_end`'s start at the last
+    /// one's deadline, once its frame is shown (`wait_to_present`).
     settle_calm: u32,
-    batch_behind: Duration,
+    batch_late: Duration,
 }
 
 impl Pacer {
@@ -894,7 +898,7 @@ impl Pacer {
             settle_until_ns: 0,
             settle_host_left: Duration::ZERO,
             settle_calm: 0,
-            batch_behind: Duration::ZERO,
+            batch_late: Duration::ZERO,
         }
     }
 
@@ -1113,7 +1117,7 @@ impl Pacer {
         }
         let wall =
             self.anchor_ticks + duration_to_ticks(now.saturating_duration_since(self.anchor_wall));
-        self.batch_behind = ticks_to_duration(wall.saturating_sub(emulated));
+        self.batch_late = ticks_to_duration(wall.saturating_sub(emulated)).saturating_sub(FRAME);
         let target = if wall > emulated + duration_to_ticks(MAX_LAG) {
             self.anchor_wall = now;
             self.anchor_ticks = emulated + duration_to_ticks(FRAME);
@@ -1144,7 +1148,7 @@ impl Pacer {
         let emulated = clock.now_ticks();
         let mut wall =
             self.anchor_ticks + duration_to_ticks(now.saturating_duration_since(self.anchor_wall));
-        self.batch_behind = ticks_to_duration(wall.saturating_sub(emulated));
+        self.batch_late = ticks_to_duration(wall.saturating_sub(emulated));
         if wall > emulated + duration_to_ticks(MAX_LAG) {
             self.lose(wall - emulated);
             self.anchor_wall = now;
@@ -1227,7 +1231,7 @@ impl Pacer {
         let auto = matches!(self.speed, CpuSpeed::Auto(_));
         if self.ran && ns < self.settle_until_ns {
             self.settle_host_left = self.settle_host_left.saturating_sub(exec + overhead);
-            let on_time = self.batch_behind < self.period + self.period / 2;
+            let on_time = self.batch_late < self.period / 2;
             self.settle_calm = if on_time { self.settle_calm + 1 } else { 0 };
             if self.settle_calm >= LOAD_CALM_FRAMES {
                 self.settle_until_ns = 0;
@@ -2746,6 +2750,36 @@ mod tests {
         assert_eq!(refresh.retraces(clock.now_ns()), first + 3);
         let (next, _) = pacer.deadline.unwrap();
         assert!(next >= late);
+    }
+
+    /// A batch is late (`Pacer::batch_late`) by how much later it starts
+    /// than a host that keeps up starts it, which is a frame behind the
+    /// wall clock with `batch_end` and at the last deadline with
+    /// `retrace_batch_end`.
+    #[test]
+    fn a_batch_is_late_by_what_it_starts_past_a_host_that_keeps_up() {
+        let start = Instant::now();
+        let mut clock = Clock::new(1000);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
+        let ms = Duration::from_millis;
+        clock.icount = pacer.batch_end(&clock, start + FRAME);
+        assert!(pacer.batch_late < ms(1), "{:?}", pacer.batch_late);
+        pacer.batch_end(&clock, start + FRAME * 2 + ms(10));
+        assert!(pacer.batch_late.abs_diff(ms(10)) < ms(1), "{:?}", pacer.batch_late);
+
+        let mut clock = Clock::new(1000);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
+        let refresh = CrtTiming::VGA_400;
+        clock.icount = pacer.retrace_batch_end(&clock, &refresh, start);
+        let (at, _) = pacer.deadline.unwrap();
+        // Shown at its deadline: the next batch is on time.
+        clock.icount = pacer.retrace_batch_end(&clock, &refresh, at + Duration::from_micros(300));
+        assert!(pacer.batch_late < pacer.period / 2, "{:?}", pacer.batch_late);
+        let (at, _) = pacer.deadline.unwrap();
+        // Done most of a period past its deadline: late, though less than
+        // one and a half periods behind the wall clock.
+        pacer.retrace_batch_end(&clock, &refresh, at + pacer.period * 9 / 10);
+        assert!(pacer.batch_late >= pacer.period / 2, "{:?}", pacer.batch_late);
     }
 
     #[test]
