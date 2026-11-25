@@ -1232,12 +1232,13 @@ pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
     // but showed nothing, and uncovers nothing.
     if state.is_visible(hwnd) {
         let old = state.screen_rect(hwnd);
+        let old_shown = super::paint::shown_region(state, hwnd);
         if let Some(w) = state.window_mut(hwnd) {
             w.style &= !WS_VISIBLE;
         }
         super::paint::tree_changed(cpu);
         let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW;
-        super::paint::moved(cpu, hwnd, old, true, false, flags);
+        super::paint::moved(cpu, hwnd, old, &old_shown, true, false, flags);
     }
     let state = user(cpu);
     for &child in &w.children {
@@ -2046,6 +2047,7 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let old_screen = user(cpu).screen_rect(hwnd);
                 let was_visible = user(cpu).is_visible(hwnd);
                 let state = user(cpu);
+                let old_shown = super::paint::shown_region(state, hwnd);
                 let under = super::input::under_cursor(state);
                 // What siblings above it cover, which a raise shows.
                 let restacked = flags & (SWP_NOZORDER | SWP_NOREDRAW) == 0;
@@ -2063,6 +2065,18 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                         .filter(|&h| h != hwnd && state.is_visible(h))
                         .map(|h| (h, super::paint::covered_but(state, h, hwnd)))
                         .filter(|(_, r)| !r.is_empty())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                // What they show: when they go down with it (HWND_BOTTOM
+                // takes its owned windows along), the windows that come
+                // above them show the part they cover then.
+                let group_shown: Vec<(u32, Region)> = if restacked {
+                    owner_group(state, hwnd)
+                        .into_iter()
+                        .filter(|&h| h != hwnd && state.is_visible(h))
+                        .map(|h| (h, super::paint::shown_region(state, h)))
                         .collect()
                 } else {
                     Vec::new()
@@ -2110,7 +2124,15 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 // What it uncovered and what it shows now need painting.
                 let now_visible = user(cpu).is_visible(hwnd);
                 if flags & SWP_NOREDRAW == 0 || flags & (SWP_SHOWWINDOW | SWP_HIDEWINDOW) != 0 {
-                    super::paint::moved(cpu, hwnd, old_screen, was_visible, now_visible, flags);
+                    super::paint::moved(
+                        cpu,
+                        hwnd,
+                        old_screen,
+                        &old_shown,
+                        was_visible,
+                        now_visible,
+                        flags,
+                    );
                 }
                 // Moved or shown, it is painted whole; raised in place,
                 // where the windows above it were.
@@ -2124,6 +2146,11 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 for (h, before) in group_covered {
                     if user(cpu).is_visible(h) {
                         super::paint::raised_but(cpu, h, &before, hwnd);
+                    }
+                }
+                for (h, before) in group_shown {
+                    if user(cpu).is_visible(h) {
+                        super::paint::lowered(cpu, h, &before);
                     }
                 }
                 if flags & SWP_HIDEWINDOW != 0 {
