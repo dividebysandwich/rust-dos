@@ -1005,14 +1005,8 @@ impl VgaCard {
             super::adapter::Adapter::Ega => super::modes::ega_mode_regs(mode),
             _ => super::modes::mode_regs(mode),
         };
-        self.misc_output_reg = regs.misc;
-        self.sequencer_regs[0] = 0x03;
-        self.sequencer_regs[1..].copy_from_slice(&regs.seq);
-        self.crtc_regs = regs.crtc;
-        self.graphics_regs = regs.gc;
-        self.attribute_regs = regs.attr;
+        self.load_mode_regs(regs);
         self.fixed_timing = None;
-        self.timing_cache = None;
         self.mode12_rows = mode == super::VideoMode::Vga640x480
             && self.adapter.supports_mode(0x12)
             && self.plane_size() == 0x10000;
@@ -1022,6 +1016,53 @@ impl VgaCard {
         // the 256 are mode 13h's, which programs customizing part of the
         // palette rely on.
         DacTable::for_mode(mode).load(&mut self.palette);
+    }
+
+    /// Load a mode's registers from the BIOS's table.
+    fn load_mode_regs(&mut self, regs: &super::modes::VgaModeRegs) {
+        self.misc_output_reg = regs.misc;
+        self.sequencer_regs[0] = 0x03;
+        self.sequencer_regs[1..].copy_from_slice(&regs.seq);
+        self.crtc_regs = regs.crtc;
+        self.graphics_regs = regs.gc;
+        self.attribute_regs = regs.attr;
+        self.timing_cache = None;
+    }
+
+    /// Program the text mode `mode` the way a VGA BIOS does at `lines`
+    /// scanlines (200, 350 or 400; see `bios::text_lines`): the mode's
+    /// registers, then for 200 or 350 lines the table of those. Other
+    /// adapters and the graphics modes keep the registers of `mode`.
+    pub fn set_video_mode_lines(&mut self, mode: super::VideoMode, lines: u16) {
+        self.set_video_mode(mode);
+        if !self.adapter.vga_bios() {
+            return;
+        }
+        if let Some(regs) = super::modes::text_lines_regs(mode, lines) {
+            self.load_mode_regs(regs);
+            // Like the 200-line graphics modes, the 200-line text modes
+            // take a CGA monitor's colors.
+            if lines == 200 {
+                DacTable::Cga.load(&mut self.palette);
+            }
+        }
+    }
+
+    /// The scanlines a text mode's rows go over, as a VGA BIOS reads them
+    /// from the CRTC: Vertical Display End and its overflow bits, plus
+    /// one, halved when Maximum Scan Line (09h bit 7) scans each line
+    /// twice. 400, 350 or 200 after a text mode set. The EGA's Maximum
+    /// Scan Line has no bit 7, so a program that sets it there changes
+    /// nothing.
+    pub fn text_scanlines(&self) -> u16 {
+        let crtc = &self.crtc_regs;
+        let overflow = crtc[0x07] as u16;
+        let lines = (crtc[0x12] as u16 | (overflow & 0x02) << 7 | (overflow & 0x40) << 3) + 1;
+        if self.adapter.vga_bios() && crtc[0x09] & 0x80 != 0 {
+            lines / 2
+        } else {
+            lines
+        }
     }
 
     /// The timing given the display instead of the registers', if any.
