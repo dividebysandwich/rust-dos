@@ -131,13 +131,12 @@ OpenGL ES 3 as RetroArch has on Android. The renderer is picked when content
 is loaded; without such a driver, the software renderer draws the card, as
 it does by default. With OpenGL ES, antialiasing takes the pixels' resolved
 colours where a draw blends, as on a desktop driver without
-`GL_ARB_sample_shading`. A Voodoo3 or Banshee is always drawn in software:
-its picture is the whole desktop, with the video overlay and the hardware
-cursor, which the OpenGL renderer doesn't draw. Save states and the settings
-window work as with the software renderer; while the settings window or the
-performance overlay is open, the card's picture is the software one. A
-Voodoo3 or Banshee (`machine=svga_voodoo3` or `svga_banshee`) is always
-drawn in software in the core.
+`GL_ARB_sample_shading`. A Voodoo3 or Banshee (`machine=svga_voodoo3` or
+`svga_banshee`) is always drawn in software in the core: its picture is the
+whole desktop, with the video overlay and the hardware cursor, which the
+OpenGL renderer doesn't draw. Save states and the settings window work as
+with the software renderer; while the settings window or the performance
+overlay is open, the card's picture is the software one.
 
 ## Controls
 

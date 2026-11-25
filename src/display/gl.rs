@@ -391,9 +391,12 @@ impl GlScreen {
             toadforce: HostCell::default(),
             toadforce_failed: None,
             voodoo: Rc::new(RefCell::new(None)),
-            // The window's renderer is also the card's GPU link
-            // (`voodoo_link`), which reads depth and the card's memory
-            // back in formats OpenGL ES 3.0 doesn't read.
+            // The window asks for desktop OpenGL, so this is a driver that
+            // gave ES anyway. With `gpu_2d` the window's renderer becomes
+            // the card's GPU link (`voodoo_link`), which reads depth and
+            // the card's memory back in formats OpenGL ES 3.0 doesn't
+            // read. The libretro core, which never makes that link, draws
+            // the card on ES.
             voodoo_failed: (glsl == Glsl::Es300)
                 .then(|| "OpenGL ES can't read the card's buffers back".to_string()),
             texture_barrier,

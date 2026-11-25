@@ -2888,6 +2888,18 @@ fn target(gl: &glow::Context, (w, h): (i32, i32), samples: u32, depth: Option<De
     }
 }
 
+/// The first lines of a shader `compile` makes: the version's
+/// (`Glsl::preamble`), and on OpenGL ES samplers of high precision. A
+/// fragment shader's samplers are of low precision there by default, whose
+/// values need only reach from -2 to 2, and the shaders scale what they
+/// read by 255.
+fn preamble(glsl: Glsl) -> String {
+    match glsl {
+        Glsl::Es300 => format!("{}precision highp sampler2D;\n", glsl.preamble()),
+        Glsl::Gl130 | Glsl::Gl150 => glsl.preamble().to_string(),
+    }
+}
+
 /// Compile and link a program with its attributes at their locations, and
 /// find its uniforms. The ToadForce's renderer makes its programs with it
 /// too (`toadforce::gl`).
@@ -2905,7 +2917,7 @@ pub(crate) fn compile<U: Locations>(
         let mut problem = None;
         for (kind, source) in [(glow::VERTEX_SHADER, vertex), (glow::FRAGMENT_SHADER, fragment)] {
             let stage = gl.create_shader(kind)?;
-            gl.shader_source(stage, &format!("{}{}", glsl.preamble(), source));
+            gl.shader_source(stage, &format!("{}{}", preamble(glsl), source));
             gl.compile_shader(stage);
             gl.attach_shader(program, stage);
             stages.push(stage);
@@ -2943,6 +2955,67 @@ pub(crate) fn compile<U: Locations>(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{Catch, RUN_TRIANGLES, Unread, Vertex, buffer_rect, sampling_filters};
+
+    /// Every 3dfx shader compiles in every dialect a context may take (the
+    /// per-sample program in GLSL 1.50 only, the one `VoodooGl` makes it
+    /// in), where glslang's validator is installed. OpenGL ES is what
+    /// RetroArch has on Android, and no OpenGL test runs it. CI sets
+    /// `RUST_DOS_REQUIRE_GLSLANG`, so that there a missing validator fails
+    /// the test instead of skipping it.
+    #[test]
+    fn sources_compile() {
+        use super::*;
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        if Command::new("glslangValidator").arg("--version").output().is_err() {
+            assert!(
+                std::env::var_os("RUST_DOS_REQUIRE_GLSLANG").is_none(),
+                "RUST_DOS_REQUIRE_GLSLANG is set, but glslangValidator isn't installed"
+            );
+            eprintln!("glslangValidator isn't installed, not compiling the 3dfx shaders");
+            return;
+        }
+        // As `VoodooGl::with_limits` makes the per-sample program.
+        let per_sample = format!(
+            "#extension GL_ARB_sample_shading : require\n#define PER_SAMPLE\n{TRIANGLE_FRAG}"
+        );
+        let quads = [
+            ("fill", FILL_FRAG),
+            ("pixels", PIXELS_FRAG),
+            ("depth", DEPTH_FRAG),
+            ("clut", CLUT_FRAG),
+            ("copy", COPY_FRAG),
+            ("banshee", BANSHEE_FRAG),
+            ("blit", BLIT_FRAG),
+        ];
+        for glsl in [Glsl::Gl130, Glsl::Gl150, Glsl::Es300] {
+            let mut programs = vec![("triangle", TRIANGLE_VERT, TRIANGLE_FRAG)];
+            programs.extend(quads.map(|(name, fragment)| (name, QUAD_VERT, fragment)));
+            if glsl == Glsl::Gl150 {
+                programs.push(("per-sample triangle", TRIANGLE_VERT, per_sample.as_str()));
+            }
+            for (name, vertex, fragment) in programs {
+                for (stage, source) in [("vert", vertex), ("frag", fragment)] {
+                    let mut child = Command::new("glslangValidator")
+                        .args(["--stdin", "-S", stage])
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .spawn()
+                        .unwrap();
+                    // As `compile` puts them together.
+                    let source = format!("{}{}", preamble(glsl), source);
+                    child.stdin.take().unwrap().write_all(source.as_bytes()).unwrap();
+                    let output = child.wait_with_output().unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{name} {glsl:?} {stage}: {}",
+                        String::from_utf8_lossy(&output.stdout)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     #[ignore = "requires a desktop OpenGL context"]

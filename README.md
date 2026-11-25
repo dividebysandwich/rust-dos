@@ -78,10 +78,12 @@ phones and tablets), copy `rust_dos_libretro_android.so` to the device and
 install it in RetroArch with *Load Core → Install or Restore a Core*. The
 same core runs in RetroArch on Windows, macOS and Linux. It starts games
 from folders, zips, CD and floppy images and game profiles, and its
-settings are RetroArch's core options. With RetroArch's `gl` or `glcore`
-video driver, OpenGL ES 3 on Android included, it draws the 3dfx card with
-OpenGL. [libretro/README.md](libretro/README.md) has the details: which
-content it takes, its options, the keyboard and gamepad, and save states.
+settings are RetroArch's core options. With the core option *3dfx
+renderer* set to OpenGL and RetroArch's `gl` or `glcore` video driver
+(`gl` is OpenGL ES 3 on Android), it draws the 3dfx card with OpenGL;
+otherwise the software renderer draws it.
+[libretro/README.md](libretro/README.md) has the details: which content it
+takes, its options, the keyboard and gamepad, and save states.
 
 ### First DOS game
 
