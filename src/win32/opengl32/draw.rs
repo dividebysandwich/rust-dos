@@ -1148,10 +1148,6 @@ fn draw(
     let Some(Some(c)) = st.contexts.get_mut(index) else {
         return;
     };
-    // The texture coordinates the context generates take the place of
-    // the vertices' own here, on the card's way and the processor's.
-    let generated = texgen::generate(c, raw);
-    let raw = generated.as_deref().unwrap_or(raw);
     let faces = !(c.caps & CAP_CULL_FACE != 0 && c.cull_face == GL_FRONT_AND_BACK);
     let all: Vec<u32>;
     let order = match order {
@@ -1173,6 +1169,11 @@ fn draw(
     if prims.is_empty() || applied_of(c, &st.lists).is_none() {
         return;
     }
+    // The texture coordinates the context generates take the place of
+    // the vertices' own from here, on the card's way and the
+    // processor's, for a draw that draws something.
+    let generated = texgen::generate(c, raw);
+    let raw = generated.as_deref().unwrap_or(raw);
     let per = polygon_triangles(kind);
     let path = match transforms {
         Ok(()) => match tnl::state_of(c) {

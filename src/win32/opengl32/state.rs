@@ -12,7 +12,7 @@ use super::{
     CAP_POINT_SMOOTH, CAP_POLYGON_OFFSET_FILL, CAP_POLYGON_OFFSET_LINE, CAP_POLYGON_OFFSET_POINT,
     CAP_POLYGON_SMOOTH, CAP_POLYGON_STIPPLE, CAP_SCISSOR_TEST, CAP_STENCIL_TEST, Context,
     GL_INVALID_ENUM, GL_INVALID_VALUE, GL_NO_ERROR, MODELVIEW_DEPTH, PROJECTION_DEPTH,
-    TEXTURE_DEPTH, ctx, d, error, f, max_texture_size, read_floats,
+    TEXTURE_DEPTH, ctx, d, error, f, max_texture_size, read_floats, write_doubles,
 };
 use super::{clip, texgen};
 use crate::cpu::Cpu;
@@ -830,16 +830,7 @@ pub fn get_doublev(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((v, _)) = get(cpu, args[0]) else {
         return Some(0);
     };
-    let at = args[1];
-    if at == 0 || !cpu.bus.guest_probe(at, v.len() * 8, true) {
-        return Some(0);
-    }
-    for (i, x) in v.iter().enumerate() {
-        let bits = x.to_bits();
-        cpu.bus.guest_write_32(at + 8 * i as u32, bits as u32);
-        cpu.bus
-            .guest_write_32(at + 8 * i as u32 + 4, (bits >> 32) as u32);
-    }
+    write_doubles(cpu, args[1], &v);
     Some(0)
 }
 

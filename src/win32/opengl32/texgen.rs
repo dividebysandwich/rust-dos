@@ -21,7 +21,7 @@
 
 use super::{
     CAP_NORMALIZE, Context, GL_INVALID_ENUM, ImmVertex, UNITS, ctx, d, error, f, read_doubles,
-    read_floats,
+    read_floats, write_doubles,
 };
 use super::{matrix, shade};
 use crate::cpu::Cpu;
@@ -45,7 +45,10 @@ pub const GL_TEXTURE_GEN_Q: u32 = 0x0C63;
 /// The W32 version whose saved contexts first have each unit's
 /// generation and the clip planes (`clip::Clip`). An older state's
 /// contexts load with OpenGL's initial values, which are what its
-/// glTexGen and glClipPlane, that did nothing, left.
+/// glTexGen and glClipPlane, that did nothing, left. Their enables load
+/// off as well: the older build kept a glEnable of any of them as one
+/// bit of `caps`, which glIsEnabled gave back, and that bit doesn't
+/// say which coordinate, unit or plane it was for.
 pub const TEXGEN_SAVED: u16 = 97;
 
 /// One texture unit's coordinate generation.
@@ -249,21 +252,19 @@ fn get_tex_gen(cpu: &mut Cpu, args: &[u32], out: Out) {
             return;
         }
     };
-    let size = if out == Out::Doubles { 8 } else { 4 };
-    if at == 0 || !cpu.bus.guest_probe(at, v.len() * size, true) {
+    if out == Out::Doubles {
+        write_doubles(cpu, at, &v);
+        return;
+    }
+    if at == 0 || !cpu.bus.guest_probe(at, v.len() * 4, true) {
         return;
     }
     for (i, &x) in v.iter().enumerate() {
-        let to = at + (i * size) as u32;
-        match out {
-            Out::Ints => cpu.bus.guest_write_32(to, x.round() as i32 as u32),
-            Out::Floats => cpu.bus.guest_write_32(to, (x as f32).to_bits()),
-            Out::Doubles => {
-                let bits = x.to_bits();
-                cpu.bus.guest_write_32(to, bits as u32);
-                cpu.bus.guest_write_32(to + 4, (bits >> 32) as u32);
-            }
-        }
+        let word = match out {
+            Out::Ints => x.round() as i32 as u32,
+            _ => (x as f32).to_bits(),
+        };
+        cpu.bus.guest_write_32(at + 4 * i as u32, word);
     }
 }
 

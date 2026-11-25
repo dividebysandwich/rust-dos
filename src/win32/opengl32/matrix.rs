@@ -32,21 +32,31 @@ pub fn apply(m: &Matrix, v: [f32; 4]) -> [f32; 4] {
     std::array::from_fn(|row| (0..4).map(|k| m[k * 4 + row] * v[k]).sum())
 }
 
-/// The inverse of `m`, None for a matrix that has none: Gauss-Jordan
-/// elimination with partial pivoting, in doubles.
+/// The inverse of `m`, None for a matrix that has none or that has a
+/// value that isn't a number: `invert_doubles`, in doubles.
 pub fn invert(m: &Matrix) -> Option<Matrix> {
+    if !m.iter().all(|x| x.is_finite()) {
+        return None;
+    }
+    invert_doubles(&m.map(f64::from)).map(|inv| inv.map(|x| x as f32))
+}
+
+/// The inverse of the column-major matrix `m`, None for one that has
+/// none: Gauss-Jordan elimination with partial pivoting. GLU's
+/// gluUnProject takes it too (`glu32::matrix`).
+pub fn invert_doubles(m: &[f64; 16]) -> Option<[f64; 16]> {
     // Rows of the matrix with the identity beside them; element (r, c)
     // of a column-major matrix is m[c * 4 + r].
     let mut a = [[0.0f64; 8]; 4];
     for (r, row) in a.iter_mut().enumerate() {
         for c in 0..4 {
-            row[c] = m[c * 4 + r] as f64;
+            row[c] = m[c * 4 + r];
         }
         row[4 + r] = 1.0;
     }
     for col in 0..4 {
         let pivot = (col..4).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
-        if a[pivot][col] == 0.0 || !a[pivot][col].is_finite() {
+        if a[pivot][col] == 0.0 {
             return None;
         }
         a.swap(col, pivot);
@@ -64,7 +74,7 @@ pub fn invert(m: &Matrix) -> Option<Matrix> {
             }
         }
     }
-    Some(std::array::from_fn(|i| a[i % 4][4 + i / 4] as f32))
+    Some(std::array::from_fn(|i| a[i % 4][4 + i / 4]))
 }
 
 /// The plane `p`, given while `m` is the modelview matrix, in eye

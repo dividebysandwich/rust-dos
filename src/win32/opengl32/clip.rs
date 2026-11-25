@@ -11,7 +11,7 @@
 //! space, on the card and in Direct3D's pipeline on the processor
 //! alike. Both cut primitives at them as they cut at the view volume.
 
-use super::{GL_INVALID_ENUM, ctx, error, matrix, read_doubles};
+use super::{GL_INVALID_ENUM, ctx, error, matrix, read_doubles, write_doubles};
 use crate::cpu::Cpu;
 
 /// GL_CLIP_PLANE0, the first of the six planes and their enables.
@@ -74,16 +74,7 @@ pub fn get_clip_plane(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(c) = ctx(cpu) else {
         return Some(0);
     };
-    let p = c.clip.planes[i];
-    let at = args[1];
-    if at == 0 || !cpu.bus.guest_probe(at, 32, true) {
-        return Some(0);
-    }
-    for (k, x) in p.iter().enumerate() {
-        let bits = (*x as f64).to_bits();
-        cpu.bus.guest_write_32(at + 8 * k as u32, bits as u32);
-        cpu.bus
-            .guest_write_32(at + 8 * k as u32 + 4, (bits >> 32) as u32);
-    }
+    let p = c.clip.planes[i].map(f64::from);
+    write_doubles(cpu, args[1], &p);
     Some(0)
 }

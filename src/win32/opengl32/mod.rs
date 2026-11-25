@@ -94,6 +94,7 @@ pub mod tnl;
 pub mod wgl;
 
 pub use lists::{call, mult_matrix, ortho, tex_image_rgba};
+pub use matrix::invert_doubles;
 pub use state::get_string;
 pub use texture::{GL_TEXTURE_2D, rgba_of};
 
@@ -491,6 +492,19 @@ pub fn read_doubles(cpu: &mut Cpu, at: u32, n: usize) -> Option<Vec<f64>> {
             })
             .collect(),
     )
+}
+
+/// Write the doubles `values` at `at`, as the functions that give
+/// doubles back do: nothing where they can't all be written.
+pub fn write_doubles(cpu: &mut Cpu, at: u32, values: &[f64]) {
+    if at == 0 || !cpu.bus.guest_probe(at, values.len() * 8, true) {
+        return;
+    }
+    for (i, x) in values.iter().enumerate() {
+        let (to, bits) = (at + 8 * i as u32, x.to_bits());
+        cpu.bus.guest_write_32(to, bits as u32);
+        cpu.bus.guest_write_32(to + 4, (bits >> 32) as u32);
+    }
 }
 
 /// A context's state as a new one has it, for the window `window` of
