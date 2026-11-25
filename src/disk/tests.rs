@@ -2397,6 +2397,51 @@ fn a_long_name_call_renames_on_a_disk_image() {
     assert_eq!(listed(&disk), named("PLAIN.CFG", None));
 }
 
+/// A long-name call renames a file to its own alias, as Windows 98 SE
+/// does (checked in 86Box): on a disk image the entry keeps the DOS name
+/// THIRDF~1.TXT and gets long name entries holding it, and on a host
+/// drive the file is named THIRDF~1.TXT. Its bytes stay.
+#[test]
+fn a_long_name_call_renames_a_file_to_its_own_alias() {
+    let base = scratch("own_alias_rename");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    blank.copy_to(&base.join("base.img")).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &base.join("base.img"), MountOptions::default(), true)
+        .unwrap();
+    for drive in ["C:", "D:"] {
+        let long = format!(r"{drive}\Third file.txt");
+        let alias = format!(r"{drive}\THIRDF~1.TXT");
+        let handle = disk
+            .long_name_call(|disk| disk.create_file(&long, PSP))
+            .unwrap();
+        disk.write_file(handle, b"third").unwrap();
+        disk.close_file(handle);
+        disk.long_name_call(|disk| disk.rename_file(&long, &alias))
+            .unwrap();
+        let handle = disk.open_file(&alias, 0, PSP).unwrap();
+        assert_eq!(disk.read_file(handle, 16).unwrap(), b"third", "{drive}");
+        disk.close_file(handle);
+    }
+    let (_, volume, _) = disk.locate_fat(r"D:\").unwrap();
+    let listed: Vec<(String, Option<String>)> = volume
+        .list(&[])
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.name, e.long_name))
+        .collect();
+    assert_eq!(
+        listed,
+        [("THIRDF~1.TXT".to_string(), Some("THIRDF~1.TXT".to_string()))]
+    );
+    let names: Vec<String> = fs::read_dir(base.join("c"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["THIRDF~1.TXT"]);
+}
+
 /// A handle open on a file of a disk image goes on writing to it after a
 /// long-name rename moves its entry to other slots, and the long name
 /// entries that took the slots it left stay as they are.

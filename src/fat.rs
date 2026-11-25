@@ -237,17 +237,45 @@ struct NewName {
     /// `long` in UTF-16, as its long name entries hold it.
     units: Vec<u16>,
     short: [u8; 11],
-    /// False for a DOS name in upper case, which has no long name entries.
+    /// False for a DOS name in upper case, which has no long name entries
+    /// unless it could be taken for a numeric tail's (`tail_like`).
     needs_long: bool,
+}
+
+/// Whether the DOS name `raw` is one of the names numeric tails make from
+/// the start of `name`'s: `name`'s extension, and a name before it that
+/// is a start of `name`'s with "~" and digits after it. Windows 98 SE
+/// writes long name entries for an 8.3 name in upper case that some entry
+/// of its directory has such a name for, checked in 86Box with
+/// CreateFileA, CreateDirectoryA and MoveFileA: "MADE.TXT" made beside
+/// MADE~1.TXT, "ABCDEF.TXT" beside ABCD~1.TXT, "MNOPQ" beside MNOP~1,
+/// "QQ~2.TXT" beside QQ~1.TXT, and a rename of "Third file.txt" to its
+/// own alias THIRDF~1.TXT all get them. "EFGH.TXT" beside EFGH~1.DAT,
+/// "IJK.TXT" beside IJKL~1.TXT, "BASEX.TXT" beside BASE.TXT, "KLMN.TXT"
+/// with KLMN~1.TXT in a subdirectory, and one beside a deleted tail name
+/// get none.
+fn tail_like(raw: &[u8; 11], name: &[u8; 11]) -> bool {
+    if raw[8..] != name[8..] {
+        return false;
+    }
+    let stem = raw[..8].trim_ascii_end();
+    let Some(tilde) = stem.iter().rposition(|&b| b == b'~') else {
+        return false;
+    };
+    let digits = &stem[tilde + 1..];
+    !digits.is_empty()
+        && digits.iter().all(u8::is_ascii_digit)
+        && name[..8].starts_with(&stem[..tilde])
 }
 
 impl NewName {
     /// The names for `long` among the entries `names` of its directory:
     /// 03h for a name Windows doesn't allow, 05h if an entry has it, as
-    /// its long name or its DOS name, in any case. An alias isn't `held`
-    /// either, a DOS name no entry of `names` has that is taken all the
-    /// same (`FatVolume::rename_long`).
-    fn new(names: &[Entry], long: &str, held: Option<[u8; 11]>) -> Result<Self, u8> {
+    /// its long name or its DOS name, in any case. `renamed` is for a
+    /// rename in the entry's own directory (`FatVolume::rename_long`),
+    /// which `names` leaves out: the entry's DOS name, and whether the
+    /// rename changes only the case of its name.
+    fn new(names: &[Entry], long: &str, renamed: Option<([u8; 11], bool)>) -> Result<Self, u8> {
         let long = long.trim_end_matches(['.', ' ']);
         let units: Vec<u16> = long.encode_utf16().collect();
         if units.is_empty()
@@ -263,6 +291,9 @@ impl NewName {
         if names.iter().any(clash) {
             return Err(ACCESS_DENIED);
         }
+        // A rename that changes more than the case doesn't take the
+        // entry's alias again.
+        let held = renamed.filter(|&(_, recased)| !recased).map(|(own, _)| own);
         let taken: Vec<[u8; 11]> = names
             .iter()
             .filter_map(|e| short_name(&e.name))
@@ -272,8 +303,22 @@ impl NewName {
         // its case in one.
         let exact = short_name(long)
             .filter(|raw| display_name(raw).eq_ignore_ascii_case(long) && raw[0] != b'.');
+        // On Windows 98 a rename that changes only the case writes the
+        // new name in long name entries, in upper case too: "config.cfg"
+        // renamed to "CONFIG.CFG" keeps them, as does "Third file.txt"
+        // renamed to its alias, which is also a numeric tail of its own
+        // DOS name (`tail_like`). The entry being renamed counts among
+        // the names beside it.
+        let recased = renamed.is_some_and(|(_, recased)| recased);
+        let beside = |raw: &[u8; 11]| {
+            names
+                .iter()
+                .filter_map(|e| short_name(&e.name))
+                .chain(renamed.map(|(own, _)| own))
+                .any(|other| tail_like(&other, raw))
+        };
         let (short, needs_long) = match exact {
-            Some(raw) if display_name(&raw) == long => (raw, false),
+            Some(raw) if display_name(&raw) == long => (raw, recased || beside(&raw)),
             Some(raw) => (raw, true),
             None => (alias(long, &taken).ok_or(ACCESS_DENIED)?, true),
         };
@@ -1621,10 +1666,11 @@ impl FatVolume {
                 .filter(|e| e.at != Some(at))
                 .collect();
             let current = entry.long_name.as_deref().unwrap_or(&entry.name);
-            let held = (same_dir && !same_long(current, long.trim_end_matches(['.', ' '])))
-                .then(|| short_name(&entry.name))
-                .flatten();
-            let name = NewName::new(&names, long, held)?;
+            let recased = same_long(current, long.trim_end_matches(['.', ' ']));
+            let renamed = short_name(&entry.name)
+                .filter(|_| same_dir)
+                .map(|own| (own, recased));
+            let name = NewName::new(&names, long, renamed)?;
             let old = self.entry_slots(&state, &from_dir, at)?;
             let raw: [u8; ENTRY_SIZE] = self.raw_entry(at)?
                 [at.index * ENTRY_SIZE..(at.index + 1) * ENTRY_SIZE]
@@ -2362,10 +2408,15 @@ pub(crate) mod tests {
         );
         assert_eq!(volume.find(&["CONFIG.CFG"]).unwrap().cluster, cluster);
         assert_eq!(contents(&volume, &["CONFIG.CFG"]), b"cfg");
+        // Back in upper case it keeps long name entries, as on Windows 98
+        // SE (checked in 86Box): a rename of the case writes them.
         volume
             .rename_long(&["config.cfg"], &[], "CONFIG.CFG")
             .unwrap();
-        assert_eq!(root_by_spec(&volume), [named_as("CONFIG.CFG", None)]);
+        assert_eq!(
+            root_by_spec(&volume),
+            [named_as("CONFIG.CFG", Some("CONFIG.CFG"))]
+        );
 
         // A long name in another case keeps its alias.
         volume.create_long(&[], "Read Me.txt", 0).unwrap();
@@ -2467,6 +2518,105 @@ pub(crate) mod tests {
         let listed = root_by_spec(&volume);
         assert!(listed.contains(&named_as("PARENT~2", Some("Parent moved"))));
         assert!(listed.contains(&named_as("FOURTH~1.TXT", Some("Fourth file.txt"))));
+    }
+
+    /// An 8.3 name in upper case gets long name entries holding it where
+    /// an entry of its directory has a numeric tail made from its start,
+    /// as on Windows 98 SE (checked in 86Box with CreateFileA,
+    /// CreateDirectoryA and MoveFileA, and read back with mtools): a rename
+    /// of a long name to its own alias, made names and renames beside a
+    /// tail name of the same start and extension, and a tail name beside
+    /// another. Others have none: another extension, a tail name longer
+    /// than the name's start, a plain name, a deleted tail name or one in
+    /// a subdirectory.
+    #[test]
+    fn upper_case_names_beside_numeric_tails_get_long_names() {
+        let volume = floppy("tail_like.img");
+        let made = |name: &str| volume.create_long(&[], name, 0).unwrap();
+        made("Third file.txt");
+        let own = volume
+            .rename_long(&["Third file.txt"], &[], "THIRDF~1.TXT")
+            .unwrap();
+        assert_eq!(
+            (own.name.as_str(), own.long_name.as_deref()),
+            ("THIRDF~1.TXT", Some("THIRDF~1.TXT"))
+        );
+        volume.mkdir_long(&[], "Sixth folder").unwrap();
+        volume
+            .rename_long(&["Sixth folder"], &[], "SIXTHF~1")
+            .unwrap();
+        made("Long name one.txt");
+        volume
+            .rename_long(&["Long name one.txt"], &[], "PLAIN.TXT")
+            .unwrap();
+        made("Long name three.txt");
+        volume
+            .rename_long(&["Long name three.txt"], &[], "LONGNA~2.TXT")
+            .unwrap();
+        for name in ["MADE~1.TXT", "MADE.TXT", "ABCD~1.TXT", "ABCDEF.TXT"] {
+            made(name);
+        }
+        for name in ["EFGH~1.DAT", "EFGH.TXT", "IJKL~1.TXT", "IJK.TXT"] {
+            made(name);
+        }
+        for name in [
+            "MNOP~1",
+            "MNOPQ",
+            "QQ~1.TXT",
+            "QQ~2.TXT",
+            "BASE.TXT",
+            "BASEX.TXT",
+        ] {
+            made(name);
+        }
+        made("UVWX~1.TXT");
+        made("UVWX.TXT");
+        volume.rename_long(&["UVWX.TXT"], &[], "UVWX2.TXT").unwrap();
+        made("YZAB~1.TXT");
+        volume.remove(&["YZAB~1.TXT"]).unwrap();
+        made("YZAB.TXT");
+        volume.mkdir_long(&[], "DDIR~1").unwrap();
+        volume.mkdir_long(&[], "DDIR").unwrap();
+        volume.mkdir_long(&[], "SUB").unwrap();
+        volume.create_long(&["SUB"], "KLMN~1.TXT", 0).unwrap();
+        made("KLMN.TXT");
+
+        let listed = root_by_spec(&volume);
+        let long_of = |name: &str| {
+            let found = listed.iter().find(|(n, _)| n == name);
+            found
+                .unwrap_or_else(|| panic!("{name}: {listed:?}"))
+                .1
+                .clone()
+        };
+        for name in [
+            "THIRDF~1.TXT",
+            "SIXTHF~1",
+            "LONGNA~2.TXT",
+            "MADE.TXT",
+            "ABCDEF.TXT",
+            "MNOPQ",
+            "QQ~2.TXT",
+            "UVWX2.TXT",
+            "DDIR",
+        ] {
+            assert_eq!(long_of(name).as_deref(), Some(name), "{name}");
+        }
+        for name in [
+            "PLAIN.TXT",
+            "MADE~1.TXT",
+            "ABCD~1.TXT",
+            "EFGH.TXT",
+            "IJK.TXT",
+            "QQ~1.TXT",
+            "BASEX.TXT",
+            "UVWX~1.TXT",
+            "YZAB.TXT",
+            "KLMN.TXT",
+            "SUB",
+        ] {
+            assert_eq!(long_of(name), None, "{name}");
+        }
     }
 
     /// A long-name rename moves a file, or a directory with its files, to

@@ -575,8 +575,8 @@ impl DiskController {
         }
         // Destination exists, or is a name the host keeps for its own
         // files (`host_private`). A long-name call may give a name another
-        // case, as MoveFileA does on Windows 9x: the destination is then
-        // the source itself.
+        // case, or the entry's alias, as MoveFileA does on Windows 9x: the
+        // destination is then the source itself.
         let existing = self.find_existing_child(&parent, leaf);
         let recased = self.long_call && existing.as_ref().is_some_and(|e| parent.join(e) == source);
         if super::host_private(leaf) || (existing.is_some() && !recased) {
@@ -585,7 +585,26 @@ impl DiskController {
         let target = parent.join(self.entry_name(leaf));
         self.host_dirs.closed.drop_under(&source);
         self.host_dirs.closed.drop_under(&target);
-        let renamed = hostfs::rename(&source, &target);
+        // A name no entry has may still be one the host knows: a Windows
+        // host's own short name of an entry. For another entry that is
+        // taken (05h), as the rename would replace that entry. For the
+        // file itself, renamed to its alias, the host would take the
+        // name for the file and leave it as it is: it goes by way of a
+        // name of rust-dos's own.
+        let host_short = !same_name(&source, &target) && hostfs::exists(&target);
+        if host_short && !same_file(&source, &target) {
+            return Err(0x05);
+        }
+        let renamed = if host_short {
+            let aside = parent.join(RENAMING_TO_ALIAS);
+            hostfs::rename(&source, &aside).and_then(|()| {
+                hostfs::rename(&aside, &target).inspect_err(|_| {
+                    let _ = hostfs::rename(&aside, &source);
+                })
+            })
+        } else {
+            hostfs::rename(&source, &target)
+        };
         self.host_dirs.changed();
         if renamed.is_ok() {
             let from_leaf = from.rsplit(['\\', '/', ':']).next().unwrap_or(from);
@@ -945,4 +964,24 @@ fn dos_to_system_time(time: u16, date: u16) -> Option<std::time::SystemTime> {
             .earliest()
     })?;
     Some(t.into())
+}
+
+/// The name a file renamed to its alias has on the host between the two
+/// renames that give it the alias (`DiskController::rename_file`). It
+/// starts with ".rust-dos", so programs never see it (`host_private`).
+const RENAMING_TO_ALIAS: &str = ".rust-dos-renaming-to-alias";
+
+/// Whether `a` and `b` name one file on the host, by its long name and its
+/// short name on a Windows host.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (hostfs::canonicalize(a), hostfs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Whether the last components of `a` and `b` are one name in any case.
+fn same_name(a: &Path, b: &Path) -> bool {
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    name(a) == name(b)
 }

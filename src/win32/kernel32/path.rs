@@ -758,7 +758,10 @@ pub(super) fn move_path(cpu: &mut Cpu, from: &str, to: &str) -> Result<(), u32> 
         return Err(ERROR_ACCESS_DENIED);
     }
     let disk = &mut cpu.bus.disk;
-    if disk.exists(to) && !recased {
+    // So does another of the file's own names: Windows 98 renames "Third
+    // file.txt" to its alias "THIRDF~1.TXT" (`rename_file`).
+    let itself = recased || disk.file_key(to) == disk.file_key(from);
+    if disk.exists(to) && !itself {
         return Err(ERROR_ALREADY_EXISTS);
     }
     if drive_of(&from_full) == drive_of(&to_full) {
