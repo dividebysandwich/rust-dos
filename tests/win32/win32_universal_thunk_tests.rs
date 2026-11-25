@@ -636,3 +636,102 @@ fn a_win32s_program_gets_its_region_s_tiled_selectors() {
     let (code, text) = run_as("region_blocks", name, exe, &more, false);
     assert_eq!(code, 0x20, "{}", text);
 }
+
+/// A program of `size` bytes that 48 times reserves a region, from 13 MB
+/// to 64 KB less than 16 MB, 64 KB more each time, commits its first
+/// 128 KB, has UTPROC translate the address of its byte 18010h, checks
+/// that 5678h got there, and releases it. It ends with 0 when every
+/// pointer has the offset 8010h of the region's second tile, and
+/// otherwise with the step that failed: 6 when a pointer has another
+/// offset, as a 32 KB block's selector has when the LDT has no run of
+/// the tiles left.
+fn released_regions_program(size: usize) -> Vec<u8> {
+    const MEM_RELEASE: i32 = 0x8000;
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["UTRegister", "VirtualAlloc", "VirtualFree", "ExitProcess"],
+    )];
+    let mut exe = program(imports, &ut_data(), |a, l| {
+        let mut fail = a.create_label();
+        let mut again = a.create_label();
+        // UTRegister(BASE, "UT16.DLL", "UTInit", "UTProc", where, no
+        // callback, buffer).
+        a.push(l.at(0x40))?;
+        a.push(0)?;
+        a.push(l.at(0x30))?;
+        for name in [0x20, 0x10, 0] {
+            a.push(l.at(name))?;
+        }
+        a.push(BASE)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 2)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.mov(ebp, 48)?;
+        a.set_label(&mut again)?;
+        // 16 MB less EBP times 64 KB: from 208 tiles to 255.
+        a.mov(eax, ebp)?;
+        a.shl(eax, 16)?;
+        a.neg(eax)?;
+        a.add(eax, 0x100_0000)?;
+        a.push(PAGE_READWRITE)?;
+        a.push(MEM_RESERVE)?;
+        a.push(eax)?;
+        a.push(0)?;
+        a.call(l.import(1))?;
+        a.mov(l.dword(0x38), eax)?;
+        a.mov(ebx, 3)?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.push(PAGE_READWRITE)?;
+        a.push(MEM_COMMIT)?;
+        a.push(0x2_0000)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.mov(ebx, 4)?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.add(eax, 0x1_8010)?;
+        a.mov(l.dword(0x44), eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(l.at(0x40))?;
+        a.call(l.dword(0x30))?;
+        a.mov(eax, l.dword(0x38))?;
+        a.mov(ebx, 5)?;
+        a.cmp(word_ptr(eax + 0x1_8010), 0x5678)?;
+        a.jne(fail)?;
+        a.mov(ebx, 6)?;
+        a.cmp(word_ptr(l.at(0x48) as u64), 0x8010)?;
+        a.jne(fail)?;
+        a.push(MEM_RELEASE)?;
+        a.push(0)?;
+        a.push(l.dword(0x38))?;
+        a.call(l.import(2))?;
+        a.mov(ebx, 7)?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.dec(ebp)?;
+        a.jnz(again)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(3))?;
+        a.int3()
+    });
+    assert!(exe.len() <= size);
+    exe.resize(size, 0);
+    exe
+}
+
+/// The tiled selectors of a region VirtualFree released are free again
+/// once the program asks for another region's: 48 regions of 208 to 255
+/// tiles need more of them than the LDT's 8192 entries.
+#[test]
+fn a_released_region_s_tiled_selectors_are_freed() {
+    let (name, size) = win32s_program();
+    let more = [("UT16.DLL", ut_dll16_pointer())];
+    let exe = released_regions_program(size);
+    let (code, text) = run_as("region_released", name, exe, &more, true);
+    assert_eq!(code, 0, "{}", text);
+}

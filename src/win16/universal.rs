@@ -504,6 +504,7 @@ fn region_segptr(cpu: &mut Cpu, pid: u32, lin: u32) -> Option<u32> {
             selector
         }
         None => {
+            drop_released_tiles(cpu, pid);
             let selector = flat::map_tiles_from(cpu, pid, start, len)?;
             cpu.bus.win32.win16.universal.selectors.push(Selector {
                 source: pid,
@@ -517,6 +518,45 @@ fn region_segptr(cpu: &mut Cpu, pid: u32, lin: u32) -> Option<u32> {
     let offset = lin - start;
     let tile = selector + (offset >> 16) as u16 * ldt::AHINCR;
     Some((tile as u32) << 16 | (offset & 0xFFFF))
+}
+
+/// The tiled selectors of the process `pid`'s regions that are gone, as
+/// VirtualFree releases them, are free again, and their aliases go: a
+/// region reserved anew at the same place, or over part of one, is
+/// another region with tiles of its own. Without this, each region the
+/// program releases keeps up to `MAX_TILES` of the LDT's entries until
+/// the process ends.
+fn drop_released_tiles(cpu: &mut Cpu, pid: u32) {
+    let Some(process) = cpu.bus.win32.processes.iter().find(|p| p.id == pid) else {
+        return;
+    };
+    let gone: Vec<(u16, u32)> = cpu
+        .bus
+        .win32
+        .win16
+        .universal
+        .selectors
+        .iter()
+        .filter(|s| s.source == pid && *s.len != 0)
+        .filter(|s| {
+            process
+                .memory
+                .region(s.base)
+                .is_none_or(|r| r.start != s.base || r.len != *s.len)
+        })
+        .map(|s| (s.selector, *s.len))
+        .collect();
+    if gone.is_empty() {
+        return;
+    }
+    let universal = &mut cpu.bus.win32.win16.universal;
+    universal.selectors.retain(|s| {
+        s.source != pid || *s.len == 0 || !gone.iter().any(|&(sel, _)| sel == s.selector)
+    });
+    for (selector, len) in gone {
+        flat::free_tiles(cpu, selector, len);
+        flat::unmap_ls(cpu, (selector as u32) << 16);
+    }
 }
 
 /// Windows 98's WIN32S16.DLL, the 16-bit half of the Universal Thunks.
