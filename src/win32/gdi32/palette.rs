@@ -11,11 +11,12 @@
 //! SYSPAL_NOSTATIC), and realizing a logical palette maps each of its
 //! entries to an entry of the system palette:
 //!
-//! - In the foreground (the palette USER's SelectPalette made the
-//!   primary one, selected on a palette device into a DC of the
-//!   foreground window without bForceBackground), every entry but the
-//!   static ones is freed first. In the background, only the entries the
-//!   same palette took last time that no other palette maps to.
+//! - In the foreground (the primary palette, the one GDISelectPalette
+//!   last selected with wBkg FALSE, as USER's SelectPalette does on a
+//!   palette device for a DC of the foreground window without
+//!   bForceBackground), every entry but the static ones is freed first.
+//!   In the background, only the entries the same palette took last
+//!   time that no other palette maps to.
 //! - An entry with PC_EXPLICIT is the system palette's entry its low
 //!   word names.
 //! - One with PC_RESERVED takes a free entry of its own, which no other
