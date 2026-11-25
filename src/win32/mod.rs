@@ -296,6 +296,11 @@ pub struct Process {
     dll_tls: Vec<(u32, Vec<u8>)>,
     /// Whether ExitProcess is ending it, telling the DLLs.
     exiting: bool,
+    /// While the outermost FreeLibrary's chain of DllMain calls runs, the
+    /// modules whose last reference went, which it detaches and unmaps
+    /// (kernel32/module.rs): Wine's `free_lib_count` above 0. A chain
+    /// that stopped in a DllMain leaves them to the next FreeLibrary.
+    unloading: crate::savestate::Since<{ kernel32::module::UNLOADING_SAVED }, Option<Vec<u32>>>,
     /// The compressed files LZInit opened (kernel32/lz.rs).
     lz_files: Vec<kernel32::lz::LzFile>,
     /// The object of its input idle event, which a program that isn't a
@@ -1825,6 +1830,7 @@ crate::state_fields!(Process {
 
     dll_tls,
     exiting,
+    unloading,
     lz_files,
     idle_event,
     imagehlp,
