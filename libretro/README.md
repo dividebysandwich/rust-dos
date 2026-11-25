@@ -94,6 +94,33 @@ image stays as it was installed and one install serves every game. At the
 prompt, `REMOUNT WIN98SE C` (or `IMGMOUNT C WIN98SE`) mounts an image by its
 name.
 
+## Windows games
+
+Windows 95 and 98 games, and Windows 3.1 programs, usually need no
+operating system image. The core has the built-in Windows: KERNEL32,
+USER32, GDI32, DirectX and the other system DLLs are written into the
+emulator, as its DOS is, so a Windows game starts from the DOS prompt
+like a DOS game, with no Windows files. It is off by default: turn it on
+with `win32=true` in the `[emulator]` section of `rust-dos.conf`, or
+with `windows=builtin` in a game profile's `[game]`, then load the
+game's `.exe`, folder or archive as content. A GOG install whose
+launcher starts a Windows program gets such a profile when it is
+imported. [builtin-windows.md](../docs/builtin-windows.md) says how to
+use it and install a game from its CD,
+[compatibility.md](../docs/compatibility.md#windows-games-on-the-built-in-windows)
+lists the games known to run, and
+[Windows games](../CONFIGURATION.md#windows-games) in CONFIGURATION.md
+has a profile to start from.
+
+Booting an installed Windows 95 or 98 from an OS image with **Boot OS**
+(see [Content](#content)) is the fallback. Use it for a game the
+built-in Windows doesn't run yet (it stops with a message naming the
+function it lacks), or when the game has to behave exactly as on real
+Windows: the built-in DLLs cover what the tested games call, and
+[What differs from Windows 98](../docs/builtin-windows.md#what-differs-from-windows-98)
+lists where they behave differently. The image needs Windows installed
+in it first, as [win9x-howto.md](../docs/win9x-howto.md) describes.
+
 ## Settings
 
 Settings come in layers, each over the one before:
