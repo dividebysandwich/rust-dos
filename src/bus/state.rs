@@ -29,7 +29,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 95;
+const WIN32_VERSION: u16 = 96;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -60,10 +60,12 @@ const WIN32_VERSION: u16 = 95;
 /// (`win16::universal::UT_SAVED`), 71's to 92's no compatibility
 /// shims of a process (`win32::shims::SHIMS_SAVED`), 71's to 93's
 /// no view of Windows 3.1's GDI heap
-/// (`win31::gdi_heap::GDI_HEAP_SAVED`), and 92's to 94's no tiled
+/// (`win31::gdi_heap::GDI_HEAP_SAVED`), 92's to 94's no tiled
 /// selectors of UTLinearToSelectorOffset
-/// (`win16::universal::TILES_SAVED`).
-const WIN32_LOADS: [u16; 25] = [
+/// (`win16::universal::TILES_SAVED`), and 71's to 95's no OpenGL
+/// texture names that are only reserved
+/// (`opengl32::texture::RESERVED_SAVED`).
+const WIN32_LOADS: [u16; 26] = [
     71,
     72,
     73,
@@ -88,6 +90,7 @@ const WIN32_LOADS: [u16; 25] = [
     92,
     93,
     94,
+    95,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1198,6 +1201,7 @@ mod tests {
         (93, 0x9568_9B5A_F977_006F), // each process's compatibility shims
         (94, 0xEC01_69EA_3820_D56B), // each process's view of Windows 3.1's GDI heap
         (95, 0x61C6_45FE_9AE1_A896), // UTLinearToSelectorOffset's tiled selectors
+        (96, 0xAEBE_28D7_7C2C_F660), // OpenGL texture names glGenTextures only reserved
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
