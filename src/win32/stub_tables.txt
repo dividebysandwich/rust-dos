@@ -5942,6 +5942,7 @@ SetArcDirection
 GetAspectRatioFilter
 GetAspectRatioFilterEx
 IsDCCurrentPalette
+CreateScalableFontResource
 
 MODULE KEYBOARD
 ToAscii
