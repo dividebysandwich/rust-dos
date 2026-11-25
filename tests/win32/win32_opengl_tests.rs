@@ -4982,18 +4982,17 @@ fn the_raster_position_takes_clip_planes_and_texgen() {
             let p = GL_CURRENT_RASTER_POSITION_VALID;
             gl(a, l, GET_INTEGERV, &[Arg::I(p), Arg::At(to)])
         };
-        // Keeps x >= 0.
+        // Keeps eye x >= 0. The modelview matrix then moves the points
+        // by -1, so that x 0.5 is on the kept side of the plane in object
+        // coordinates and on the cut side in eye coordinates, where the
+        // plane is.
         let plane0 = Arg::I(GL_CLIP_PLANE0);
         gl(a, l, CLIP_PLANE, &[plane0, Arg::At(CLIP)])?;
         gl(a, l, ENABLE, &[plane0])?;
-        gl(a, l, RASTER_POS3F, &[Arg::F(0.5), Arg::F(0.0), Arg::F(0.0)])?;
+        gl(a, l, TRANSLATEF, &[Arg::F(-1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        gl(a, l, RASTER_POS3F, &[Arg::F(1.5), Arg::F(0.0), Arg::F(0.0)])?;
         valid(a, KEPT_VALID)?;
-        gl(
-            a,
-            l,
-            RASTER_POS3F,
-            &[Arg::F(-0.5), Arg::F(0.0), Arg::F(0.0)],
-        )?;
+        gl(a, l, RASTER_POS3F, &[Arg::F(0.5), Arg::F(0.0), Arg::F(0.0)])?;
         valid(a, CUT_VALID)?;
         gl(a, l, DISABLE, &[plane0])?;
         // s = 2x + 1/2.
