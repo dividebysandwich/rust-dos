@@ -276,7 +276,8 @@ pub struct State {
     /// and the one realized last.
     pub primary_palette: u32,
     pub last_realized: u32,
-    /// The files AddFontResourceA added and their fonts.
+    /// The installed font files GDI loaded as it started, then those
+    /// AddFontResourceA added, and their fonts.
     pub font_files: Vec<fnt::AddedFile>,
     /// The last blit's translation table from a color table onto a
     /// palette device (`draw::Translate::kept`). Not saved: a blit
@@ -505,7 +506,8 @@ const STATIC_COLORS: [u32; 20] = [
     0xFFFF00, 0xFFFFFF,
 ];
 
-/// The stock objects and the system palette, made on GDI's first use.
+/// The stock objects and the system palette, made on GDI's first use,
+/// and the installed fonts loaded (`font::load_installed`).
 pub fn init(cpu: &mut Cpu) {
     // The stock fonts are in the system locale's character set, Terminal
     // in its OEM one.
@@ -613,6 +615,7 @@ pub fn init(cpu: &mut Cpu) {
     state.static_use = palette::SYSPAL_STATIC;
     state.system_use = palette::static_uses(palette::SYSPAL_STATIC);
     state.system_owner = vec![0; 256];
+    font::load_installed(cpu);
 }
 
 /// The static colors of the system palette as COLORREFs, for the

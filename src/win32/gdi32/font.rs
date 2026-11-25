@@ -2386,13 +2386,29 @@ pub fn add_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(name) = crate::win32::user32::string_at(cpu, args[0]) else {
         return Some(0);
     };
-    let Some(mut bytes) = read_file(cpu, &name) else {
+    let Some(bytes) = read_file(cpu, &name) else {
         // As Windows 98 SE sets it for a file that isn't there.
         set_error(cpu, ERROR_FILE_NOT_FOUND);
         return Some(0);
     };
+    let file = added_file(cpu, name, bytes, read_file);
+    let count = (file.fonts.len() + file.truetype.len()).max(1) as u32;
+    init(cpu);
+    gdi(cpu).font_files.push(file);
+    Some(count)
+}
+
+/// The fonts of the file `name`, whose bytes are `bytes`, as
+/// AddFontResourceA adds them. `read` reads the TrueType file a .FOT
+/// names (`scalable_file`).
+fn added_file(
+    cpu: &mut Cpu,
+    name: String,
+    mut bytes: Vec<u8>,
+    read: fn(&mut Cpu, &str) -> Option<Vec<u8>>,
+) -> AddedFile {
     if let Some(target) = super::fot::target(&bytes) {
-        bytes = scalable_file(cpu, &target).unwrap_or_default();
+        bytes = scalable_file(cpu, &target, read).unwrap_or_default();
     }
     let fonts: Vec<Rc<Fnt>> = super::fnt::fonts_of_file(&bytes)
         .into_iter()
@@ -2406,24 +2422,91 @@ pub fn add_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         Vec::new()
     };
-    let count = (fonts.len() + truetype.len()).max(1) as u32;
-    init(cpu);
-    gdi(cpu).font_files.push(AddedFile {
+    AddedFile {
         name,
         fonts,
         truetype,
-    });
-    Some(count)
+    }
 }
 
-/// The TrueType file `name` a .FOT names: as it is, which finds a full
-/// path, or a name relative to the current folder. Windows 98 SE then
-/// looks for a bare file name in the fonts, Windows and system folders,
-/// and not in the .FOT's own folder.
-fn scalable_file(cpu: &mut Cpu, name: &str) -> Option<Vec<u8>> {
+/// The key of HKEY_LOCAL_MACHINE that lists the installed fonts, as
+/// "Face (TrueType)"="FILE.TTF".
+const FONTS_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Fonts";
+
+/// Load the installed fonts, as Windows 95 and 98 do as they start: the
+/// files the registry's Fonts key lists, then those of WIN.INI's
+/// `[Fonts]`, where Windows 3.1 setups put theirs. A setup that installs
+/// a font copies its file, records it there and adds it with
+/// AddFontResourceA, which lasts until Windows ends; this is how the
+/// next start of Windows has it. For the built-in Windows that start is
+/// GDI's first use in each session (`super::init`).
+///
+/// A name without a folder is in the fonts folder, the Windows folder or
+/// the system folder, looked for in that order (`installed_file`). A file
+/// that isn't there is left out, as Windows leaves it, and a file listed
+/// twice is loaded once. The fonts go with the files AddFontResourceA
+/// adds, so a state saved in the session keeps them.
+pub(super) fn load_installed(cpu: &mut Cpu) {
+    use crate::win32::registry::{HKEY_LOCAL_MACHINE, string_values};
+    let mut names: Vec<String> = string_values(cpu, &[(HKEY_LOCAL_MACHINE, FONTS_KEY)])
+        .into_iter()
+        .flatten()
+        .map(|(_, file)| file)
+        .collect();
+    let ini = crate::win32::kernel32::profile_values(cpu, b"WIN.INI", b"Fonts");
+    names.extend(ini.iter().map(|v| crate::dosstr::from_bytes(v)));
+    for name in names {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let Some((path, bytes)) = installed_file(cpu, name) else {
+            let text = format!("[W32] GDI: the installed font {name} isn't there");
+            cpu.bus.log_string(&text);
+            continue;
+        };
+        let files = &gdi(cpu).font_files;
+        if files.iter().any(|f| f.name.eq_ignore_ascii_case(&path)) {
+            continue;
+        }
+        let file = added_file(cpu, path, bytes, disk_file);
+        gdi(cpu).font_files.push(file);
+    }
+}
+
+/// The path and the bytes of the installed font file `name`: a name
+/// with a folder as it is, a bare one from the first of the fonts,
+/// Windows and system folders that has it.
+fn installed_file(cpu: &mut Cpu, name: &str) -> Option<(String, Vec<u8>)> {
     use crate::win32::kernel32::path::{SYSTEM, WINDOWS};
-    use crate::win32::winmm::mci::media::read_file;
-    if let Some(bytes) = read_file(cpu, name) {
+    if name.contains(['\\', '/', ':']) {
+        return disk_file(cpu, name).map(|bytes| (name.to_string(), bytes));
+    }
+    let fonts = format!("{WINDOWS}\\FONTS");
+    [fonts.as_str(), WINDOWS, SYSTEM].iter().find_map(|dir| {
+        let path = format!("{dir}\\{name}");
+        disk_file(cpu, &path).map(|bytes| (path, bytes))
+    })
+}
+
+/// The bytes of the file at the DOS path `path`, read from the disk
+/// itself: the system reads the installed fonts before a program runs,
+/// with no file handle of a process's.
+fn disk_file(cpu: &mut Cpu, path: &str) -> Option<Vec<u8>> {
+    Some(cpu.bus.disk.file_data(path)?.read().ok()?.into_owned())
+}
+
+/// The TrueType file `name` a .FOT names, read with `read`: as it is,
+/// which finds a full path, or a name relative to the current folder.
+/// Windows 98 SE then looks for a bare file name in the fonts, Windows
+/// and system folders, and not in the .FOT's own folder.
+fn scalable_file(
+    cpu: &mut Cpu,
+    name: &str,
+    read: fn(&mut Cpu, &str) -> Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    use crate::win32::kernel32::path::{SYSTEM, WINDOWS};
+    if let Some(bytes) = read(cpu, name) {
         return Some(bytes);
     }
     if name.contains(['\\', '/', ':']) {
@@ -2432,7 +2515,7 @@ fn scalable_file(cpu: &mut Cpu, name: &str) -> Option<Vec<u8>> {
     let fonts = format!("{WINDOWS}\\FONTS");
     [fonts.as_str(), WINDOWS, SYSTEM]
         .iter()
-        .find_map(|dir| read_file(cpu, &format!("{dir}\\{name}")))
+        .find_map(|dir| read(cpu, &format!("{dir}\\{name}")))
 }
 
 /// CreateScalableFontResourceA(hidden, fot, ttf, path): write the .FOT

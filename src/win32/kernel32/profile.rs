@@ -109,14 +109,19 @@ fn value_of<'a>(section: &'a Section, key: &[u8]) -> Option<&'a [u8]> {
         .find(|e| same(&e.key, key))?
         .value
         .as_deref()?;
+    Some(unquoted(value))
+}
+
+/// A value with the quotes around it taken off.
+fn unquoted(value: &[u8]) -> &[u8] {
     let quoted = value.len() >= 2
         && (value[0] == b'"' || value[0] == b'\'')
         && value[value.len() - 1] == value[0];
-    Some(if quoted {
+    if quoted {
         &value[1..value.len() - 1]
     } else {
         value
-    })
+    }
 }
 
 /// The DOS path of the profile `name`: WIN.INI for NULL, and in the
@@ -467,6 +472,20 @@ pub(crate) fn profile_value(
     find(&sections, section)
         .and_then(|s| value_of(s, key))
         .map(<[u8]>::to_vec)
+}
+
+/// The values of the lines of `section` in the profile `file`, in their
+/// order, the quotes around each taken off, for the system's own use:
+/// WIN.INI's `[Fonts]`, which GDI loads as it starts. A line without '='
+/// has no value.
+pub(in crate::win32) fn profile_values(cpu: &mut Cpu, file: &[u8], section: &[u8]) -> Vec<Vec<u8>> {
+    let sections = load(cpu, Some(file));
+    find(&sections, section).map_or(Vec::new(), |s| {
+        s.entries
+            .iter()
+            .filter_map(|e| Some(unquoted(e.value.as_deref()?).to_vec()))
+            .collect()
+    })
 }
 
 /// `profile_value` as a number, as GetPrivateProfileIntA reads it:
