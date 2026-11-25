@@ -15507,6 +15507,134 @@ fn a_keyboard_hook_that_peeks_with_the_programs_msg_doesnt_change_its_key() {
 }
 
 #[test]
+fn a_window_has_no_size_while_the_cbt_hook_sees_it_made() {
+    // T.EXE's CBT hook changes the frame of a captioned popup at
+    // HCBT_CREATEWND, as MFC's hook in Encarta 97 does, and then reads its
+    // rectangles: both are empty, as Wine's NtUserCreateWindowEx leaves
+    // them until after the hook, since the hook may still change the
+    // CREATESTRUCT's place and size. A frame change of a 0 by 0 window
+    // keeps its client area at 0 by 0, so the window's procedure gets its
+    // first WM_SIZE after WM_CREATE. The window has its 200 by 100 at
+    // (10, 20) once CreateWindowExA returns (#2006).
+    const WH_CBT: i32 = 5;
+    const HCBT_CREATEWND: i32 = 3;
+    const WM_CREATE: i32 = 0x0001;
+    const WM_SIZE: i32 = 0x0005;
+    const WS_CAPTION: i32 = 0x00C0_0000;
+    // SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+    // SWP_FRAMECHANGED.
+    const FRAME_CHANGED: i32 = 0x37;
+    let kernel32 = ["GetCurrentThreadId", "ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "RegisterClassA",
+        "SetWindowsHookExA",
+        "SetWindowPos",
+        "GetWindowRect",
+        "GetClientRect",
+    ];
+    // The hook's window RECT at 0xA0 and client RECT at 0xB0, the hook's
+    // calls at 0x9C; the window's RECT after it is made at 0xC0. The
+    // procedure counts WM_CREATE and the first WM_SIZE at 0x110 and keeps
+    // the count of each at 0x114 and 0x118.
+    let mut data = session_data(&[(0x10, "CbtRect")]);
+    data.resize(0x120, 0);
+    let exe = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        let mut cbt = a.create_label();
+        let mut pass = a.create_label();
+        a.jmp(start)?;
+
+        a.set_label(&mut cbt)?;
+        a.cmp(dword_ptr(esp + 4), HCBT_CREATEWND)?;
+        a.jne(pass)?;
+        a.inc(dword_ptr(l.at(0x9C)))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, 0, 0, 0, 0, 0, FRAME_CHANGED])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("SetWindowPos"))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, l.at(0xA0) as i32])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("GetWindowRect"))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, l.at(0xB0) as i32])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("GetClientRect"))?;
+        a.set_label(&mut pass)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+
+        a.set_label(&mut start)?;
+        a.xor(ebx, ebx)?;
+        // Rectangles the hook must overwrite.
+        for at in (0xA0..0xC0).step_by(4) {
+            a.mov(dword_ptr(l.at(at)), 7)?;
+        }
+        a.call(f("GetCurrentThreadId"))?;
+        a.push(eax)?;
+        a.push(0)?;
+        push_label(a, cbt)?;
+        a.push(WH_CBT)?;
+        a.call(f("SetWindowsHookExA"))?;
+        session_class(a, l, f, |a| {
+            let mut not_create = a.create_label();
+            let mut done = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_CREATE)?;
+            a.jne(not_create)?;
+            a.inc(dword_ptr(l.at(0x110)))?;
+            a.mov(eax, dword_ptr(l.at(0x110)))?;
+            a.mov(dword_ptr(l.at(0x114)), eax)?;
+            a.jmp(done)?;
+            a.set_label(&mut not_create)?;
+            a.cmp(dword_ptr(esp + 8), WM_SIZE)?;
+            a.jne(done)?;
+            a.cmp(dword_ptr(l.at(0x118)), 0)?;
+            a.jne(done)?;
+            a.inc(dword_ptr(l.at(0x110)))?;
+            a.mov(eax, dword_ptr(l.at(0x110)))?;
+            a.mov(dword_ptr(l.at(0x118)), eax)?;
+            a.set_label(&mut done)
+        })?;
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_CAPTION;
+        push_args(a, &[0, class, class, style, 10, 20, 200, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        push_args(a, &[0, l.at(0xC0) as i32])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("GetWindowRect"))?;
+        a.cmp(dword_ptr(l.at(0x9C)), 1)?;
+        bit_if(a, eq, 0)?;
+        // Both rectangles all zeros.
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        for at in (0xA4..0xC0).step_by(4) {
+            a.or(eax, dword_ptr(l.at(at)))?;
+        }
+        a.test(eax, eax)?;
+        bit_if(a, eq, 1)?;
+        a.cmp(dword_ptr(l.at(0xC8)), 210)?;
+        bit_if(a, eq, 2)?;
+        a.cmp(dword_ptr(l.at(0xCC)), 120)?;
+        bit_if(a, eq, 3)?;
+        a.cmp(dword_ptr(l.at(0xC0)), 10)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xC4)), 20)?;
+        bit_if(a, eq, 5)?;
+        // WM_CREATE came first, WM_SIZE second.
+        a.cmp(dword_ptr(l.at(0x114)), 1)?;
+        bit_if(a, eq, 6)?;
+        a.cmp(dword_ptr(l.at(0x118)), 2)?;
+        bit_if(a, eq, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("cbt_create_rect", &[("T.EXE", exe)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
 fn a_click_on_a_window_behind_activates_it_and_is_delivered() {
     // T.EXE's window, with a button, is behind C.EXE's, which it started.
     // A click on the button asks the window with WM_MOUSEACTIVATE, whose
