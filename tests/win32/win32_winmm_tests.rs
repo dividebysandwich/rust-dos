@@ -2421,8 +2421,9 @@ fn sound_names_that_are_not_strings_fail_without_a_fault() {
 /// A program that installs an I/O procedure for 'PAK ', which serves
 /// `file` from the program's data for any name, as Encarta 97's does
 /// for its archives (#1991), and sends the MCI command `open`, then
-/// `format` and "status c length". The exit code is the open's error if
-/// it fails; else bit 0 is set, and bit 1 if the length reads `length`.
+/// `format` and "status c length". The exit code is the error of `open`
+/// or `format` if one fails; else bit 0 is set, and bit 1 if the length
+/// reads `length`.
 fn mci_procedure_program(file: &[u8], open: &str, format: &str, length: &str) -> Vec<u8> {
     const MMIO_INSTALLPROC: i32 = 0x10000;
     const MMIOM_READ: i32 = 0;
@@ -2508,6 +2509,12 @@ fn mci_procedure_program(file: &[u8], open: &str, format: &str, length: &str) ->
         a.jnz(done)?;
         a.or(ebx, 1)?;
         call(a, l.import(2), &[at(FORMAT), 0, 0, 0])?;
+        let mut formatted = a.create_label();
+        a.test(eax, eax)?;
+        a.jz(formatted)?;
+        a.mov(ebx, eax)?;
+        a.jmp(done)?;
+        a.set_label(&mut formatted)?;
         call(a, l.import(2), &[at(STATUS), at(REPLY), 32, 0])?;
         a.test(eax, eax)?;
         a.jnz(done)?;
@@ -2573,3 +2580,79 @@ fn mci_opens_a_file_through_the_programs_io_procedure() {
     }
 }
 
+
+/// A mono MS ADPCM WAV at 22050 Hz of two 16-byte blocks, 20 samples
+/// each: a 7-byte header and 9 bytes of codes.
+fn ms_adpcm_wav() -> Vec<u8> {
+    const COEFFICIENTS: [(i16, i16); 7] = [
+        (256, 0),
+        (512, -256),
+        (0, 0),
+        (192, 64),
+        (240, 0),
+        (460, -208),
+        (392, -232),
+    ];
+    let mut fmt = vec![2, 0, 1, 0];
+    fmt.extend(22050u32.to_le_bytes());
+    // nAvgBytesPerSec: 22050 samples a second in 16-byte blocks of 20.
+    fmt.extend((22050u32 * 16 / 20).to_le_bytes());
+    for v in [16u16, 4, 32, 20, 7] {
+        fmt.extend(v.to_le_bytes());
+    }
+    for (a, b) in COEFFICIENTS {
+        fmt.extend(a.to_le_bytes());
+        fmt.extend(b.to_le_bytes());
+    }
+    let mut block = vec![0, 16, 0];
+    block.extend(1000i16.to_le_bytes());
+    block.extend(500i16.to_le_bytes());
+    block.extend([0; 9]);
+    let data = [block.clone(), block].concat();
+    let mut wav = b"RIFF".to_vec();
+    wav.extend((4 + 8 + fmt.len() as u32 + 8 + data.len() as u32).to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    wav.extend((fmt.len() as u32).to_le_bytes());
+    wav.extend(fmt);
+    wav.extend(b"data");
+    wav.extend((data.len() as u32).to_le_bytes());
+    wav.extend(data);
+    wav
+}
+
+/// Encarta 97's sounds are MS ADPCM WAVs in its archives (#1991). MCIWAVE
+/// plays them through the wave mapper's ACM conversion, and counts their
+/// length in the file's own bytes (32) and in samples (40), not in the
+/// bytes of the 16-bit PCM it plays (80).
+#[test]
+fn mci_waveaudio_plays_ms_adpcm_and_counts_the_files_bytes() {
+    let wav = ms_adpcm_wav();
+    let open = "open SND.PAK+CLIP.WAV type waveaudio alias c";
+    let cases = [
+        ("set c time format bytes", "32"),
+        ("set c time format samples", "40"),
+    ];
+    for (format, length) in cases {
+        for core in CORES {
+            let files = [("T.EXE", mci_procedure_program(&wav, open, format, length))];
+            let mut cpu = machine("mci_adpcm", core, &files, |_| {});
+            run_to_exit(&mut cpu, 20_000, |_| {});
+            assert_eq!(cpu.errorlevel, 0x03, "{format} {core:?}: {:?}", printed(&cpu));
+        }
+    }
+}
+
+/// WINMM keeps the break key itself and doesn't pass MCI_BREAK to the
+/// driver (Wine's MCI_Break), so MCIWAVE's device takes it too. Encarta
+/// 97 sends it after every open. The clip is 1102 bytes at 11025 bytes a
+/// second, 99 milliseconds.
+#[test]
+fn mci_break_works_for_every_device() {
+    let open = "open SND.PAK+CLIP.WAV type waveaudio alias c";
+    for core in CORES {
+        let files = [("T.EXE", mci_procedure_program(&short_wav(), open, "break c", "99"))];
+        let mut cpu = machine("mci_break", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 0x03, "{core:?}: {:?}", printed(&cpu));
+    }
+}

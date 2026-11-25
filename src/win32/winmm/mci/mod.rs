@@ -513,6 +513,10 @@ pub fn device_command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Par
     }
     let kind = device(cpu, i).kind;
     let error = match kind {
+        // WINMM keeps the break key itself (mciSendCommand's MCI_BREAK,
+        // as Wine's MCI_Break does) and never passes it to the driver,
+        // so every device takes it, MCIWAVE's and MCIAVI's included.
+        _ if msg == MCI_BREAK => 0,
         MCI_DEVTYPE_CD_AUDIO => cdaudio::command(cpu, i, msg, flags, p),
         MCI_DEVTYPE_SEQUENCER => sequencer::command(cpu, i, msg, flags, p),
         video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO => {

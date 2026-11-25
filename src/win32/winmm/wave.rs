@@ -971,6 +971,16 @@ const SYSTEM_SOUNDS: &[&str] = &[
 /// and PlaySound open the wave mapper with the file's format, and the
 /// mapper converts it through ACM's codecs (msacm32/adpcm.rs).
 pub fn parse_wav(bytes: &[u8]) -> Option<(Format, Vec<u8>)> {
+    read_wav(bytes).map(|(format, data, _)| (format, data))
+}
+
+/// A WAV file's own format when its samples were decoded: its fields,
+/// nAvgBytesPerSec and nBlockAlign. MCIWAVE answers status and counts
+/// bytes in the file's format, not the one it plays.
+pub type FileFormat = (Format, u32, u16);
+
+/// `parse_wav`, and the file's own format if the samples were decoded.
+pub fn read_wav(bytes: &[u8]) -> Option<(Format, Vec<u8>, Option<FileFormat>)> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return None;
     }
@@ -986,7 +996,8 @@ pub fn parse_wav(bytes: &[u8]) -> Option<(Format, Vec<u8>)> {
                 Some((adpcm, rate)) => {
                     let pcm = Format::pcm(rate, 16, adpcm.channels);
                     check_format(&pcm, pcm.block() as u16).ok()?;
-                    (pcm, Some(adpcm))
+                    let avg = u32::from_le_bytes(body[8..12].try_into().ok()?);
+                    (pcm, Some((adpcm, (f, avg, align))))
                 }
                 None => {
                     check_format(&f, align).ok()?;
@@ -994,12 +1005,11 @@ pub fn parse_wav(bytes: &[u8]) -> Option<(Format, Vec<u8>)> {
                 }
             });
         } else if id == b"data" {
-            let (f, adpcm) = format?;
-            let data = match adpcm {
-                Some(adpcm) => adpcm.to_pcm(body),
-                None => body.to_vec(),
-            };
-            return Some((f, data));
+            let (f, decoded) = format?;
+            return Some(match decoded {
+                Some((adpcm, file)) => (f, adpcm.to_pcm(body), Some(file)),
+                None => (f, body.to_vec(), None),
+            });
         }
         at += 8 + size + (size & 1);
     }
