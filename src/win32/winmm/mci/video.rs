@@ -1267,17 +1267,20 @@ fn select_movie_palette(cpu: &mut Cpu, i: usize, m: &Media, hdc: u32) -> Option<
         hpal = palette::system_palette_of(cpu, &colors);
         video(cpu, i).palette = hpal;
     }
-    let background = video(cpu, i).background as u32;
-    let old = palette::select_palette(cpu, &[hdc, hpal, background]).filter(|&o| o != 0)?;
     // A full-screen play has the screen to itself, as in MCIAVI's display
     // mode of its own: its palette is the foreground one, though the
-    // window that covers the screen is never the foreground window.
+    // window that covers the screen is never the foreground window, so
+    // it goes to GDISelectPalette with wBkg FALSE past USER's rules.
     let cover = video(cpu, i).cover;
     let gdi = crate::win32::gdi32::gdi(cpu);
-    if cover != 0 && gdi.dc(hdc).is_some_and(|d| d.hwnd == cover) && gdi.primary_palette != hpal {
-        gdi.primary_palette = hpal;
-        palette::unrealize(cpu, hpal);
-    }
+    let covers = cover != 0 && gdi.dc(hdc).is_some_and(|d| d.hwnd == cover);
+    let old = if covers {
+        palette::gdi_select_palette(cpu, hdc, hpal, false)
+    } else {
+        let background = video(cpu, i).background as u32;
+        palette::select_palette(cpu, &[hdc, hpal, background])
+    };
+    let old = old.filter(|&o| o != 0)?;
     palette::realize_posted(cpu, hdc);
     Some(old)
 }
