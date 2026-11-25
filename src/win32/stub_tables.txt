@@ -1669,6 +1669,8 @@ SetDebugErrorLevel
 SetSystemCursor
 NotepadMain
 NotepadWndProc
+SendMessage16
+UserYield16
 
 DLL GDI32.DLL
 GetStockObject

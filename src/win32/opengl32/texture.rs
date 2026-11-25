@@ -385,6 +385,17 @@ fn encode(rgba: [u8; 4], base: Base) -> u16 {
 // contexts have the same textures under the same names, as contexts
 // of OpenGL 1.1 that share their lists do. A texture's surfaces are of
 // the DirectDraw object of the context that gave it its image.
+//
+// A name glGenTextures gives is only reserved in the group
+// (`lists::reserved_mut`): OpenGL 1.1 (3.8.8) has it name no texture
+// until glBindTexture first binds it, which makes the texture. Until
+// then glIsTexture says it isn't one and glGenTextures doesn't give it
+// again. glDeleteTextures frees it either way.
+
+/// The W32 version whose saved groups first have the reserved names.
+/// An older state's groups have a texture for each name glGenTextures
+/// gave, as glGenTextures made them then, and none reserved.
+pub const RESERVED_SAVED: u16 = 96;
 
 /// A texture named `name` as a new one is: no image, and OpenGL's
 /// filters and wrap modes.
@@ -419,21 +430,19 @@ fn exists(s: &State, index: usize, name: u32) -> bool {
 }
 
 /// The texture named `name` of the context at `index`, to change, made
-/// if it isn't there (names glGenTextures gave or not). Every context
-/// that has the texture draws with it as it is after the change.
+/// if it isn't there (names glGenTextures gave or not: a name it gave
+/// isn't reserved any more once it is a texture). Every context that
+/// has the texture draws with it as it is after the change.
 fn texture_mut(s: &mut State, index: usize, name: u32) -> Option<&mut Texture> {
     if name == 0 {
         return Some(&mut s.contexts.get_mut(index)?.as_mut()?.default_texture);
     }
+    if !exists(s, index, name) {
+        lists::reserved_mut(s, index)?.retain(|&n| n != name);
+        lists::textures_mut(s, index)?.push(new(name));
+    }
     let textures = lists::textures_mut(s, index)?;
-    let at = match textures.iter().position(|t| t.name == name) {
-        Some(at) => at,
-        None => {
-            textures.push(new(name));
-            textures.len() - 1
-        }
-    };
-    textures.get_mut(at)
+    textures.iter_mut().find(|t| t.name == name)
 }
 
 /// The texture bound to the active unit of the current context.
@@ -445,14 +454,26 @@ fn bound(cpu: &mut Cpu) -> Option<&mut Texture> {
     texture_mut(s, index, name)
 }
 
-/// glGenTextures(n, textures): the lowest names no texture of the
-/// group has, from 1 up. A program may bind names it never asked for:
-/// Soldier of Fortune counts its images' names up from 0x481 itself and
-/// takes others from glGenTextures between them. A name past the
-/// highest in use would be the one it gives its next image, and the
-/// two textures would be one.
+// None of the texture object functions is allowed between glBegin and
+// glEnd (OpenGL 1.1, 2.6.3): there each is GL_INVALID_OPERATION and
+// does nothing else, and glIsTexture and glAreTexturesResident answer
+// GL_FALSE. This comes before their other errors, as in SGI's sample
+// implementation. glBindTexture and glPrioritizeTextures are compiled
+// into display lists, so a list that calls them between glBegin and
+// glEnd has the error when it runs.
+
+/// glGenTextures(n, textures): the lowest names the group doesn't use,
+/// from 1 up, neither for a texture nor reserved, which they are from
+/// here on. A program may bind names it never asked for: Soldier of
+/// Fortune counts its images' names up from 0x481 itself and takes
+/// others from glGenTextures between them. A name past the highest in
+/// use would be the one it gives its next image, and the two textures
+/// would be one.
 pub fn gen_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [n, at] = args[..] else {
+        return Some(0);
+    };
+    let Some(index) = lists::outside_begin(cpu) else {
         return Some(0);
     };
     let n = n as i32;
@@ -463,18 +484,25 @@ pub fn gen_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if n == 0 || at == 0 || !cpu.bus.guest_probe(at, n as usize * 4, true) {
         return Some(0);
     }
-    let Some((index, _)) = current(cpu) else {
+    let s = state(cpu);
+    if lists::reserved_mut(s, index).is_none() {
+        return Some(0);
+    }
+    let Some(Some(c)) = s.contexts.get(index) else {
         return Some(0);
     };
-    let Some(textures) = lists::textures_mut(state(cpu), index) else {
-        return Some(0);
-    };
-    let used: std::collections::HashSet<u32> = textures.iter().map(|t| t.name).collect();
+    let group = c.lists.group;
+    let textures = s.lists.textures(group).iter().map(|t| t.name);
+    let used: std::collections::HashSet<u32> = textures
+        .chain(s.lists.reserved(group).iter().copied())
+        .collect();
     let names: Vec<u32> = (1..=u32::MAX)
         .filter(|name| !used.contains(name))
         .take(n as usize)
         .collect();
-    textures.extend(names.iter().map(|&name| new(name)));
+    if let Some(reserved) = lists::reserved_mut(s, index) {
+        reserved.extend(&names);
+    }
     for (i, name) in names.into_iter().enumerate() {
         cpu.bus.guest_write_32(at + 4 * i as u32, name);
     }
@@ -489,7 +517,8 @@ fn release_surface(cpu: &mut Cpu, t: &Texture) {
 }
 
 /// glDeleteTextures(n, textures): the textures are gone for every
-/// context that had them, and each unit they were bound to has the
+/// context that had them, the names that were only reserved are free
+/// again, and each unit the textures were bound to has the
 /// default texture again, in all the contexts of the group. OpenGL
 /// says so for the context that deletes and leaves the others'
 /// bindings undefined. A name left bound there would be the next
@@ -497,6 +526,9 @@ fn release_surface(cpu: &mut Cpu, t: &Texture) {
 /// it would make the deleted name a texture again.
 pub fn delete_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [n, at] = args[..] else {
+        return Some(0);
+    };
+    let Some(index) = lists::outside_begin(cpu) else {
         return Some(0);
     };
     let n = n as i32;
@@ -511,19 +543,20 @@ pub fn delete_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .map(|i| cpu.bus.guest_read_32(at + 4 * i))
         .collect();
     let mut gone = Vec::new();
-    if let Some((index, _)) = current(cpu) {
-        let s = state(cpu);
-        let named = |name: u32| name != 0 && names.contains(&name);
-        if let Some(textures) = lists::textures_mut(s, index) {
-            gone.extend(textures.extract_if(.., |t| named(t.name)));
-        }
-        let group = s.contexts.get(index).and_then(Option::as_ref);
-        let group = group.map(|c| c.lists.group);
-        let sharing = s.contexts.iter_mut().flatten();
-        for c in sharing.filter(|c| Some(c.lists.group) == group) {
-            for b in c.bound.iter_mut().filter(|b| named(**b)) {
-                *b = 0;
-            }
+    let s = state(cpu);
+    let named = |name: u32| name != 0 && names.contains(&name);
+    if let Some(reserved) = lists::reserved_mut(s, index) {
+        reserved.retain(|&name| !named(name));
+    }
+    if let Some(textures) = lists::textures_mut(s, index) {
+        gone.extend(textures.extract_if(.., |t| named(t.name)));
+    }
+    let group = s.contexts.get(index).and_then(Option::as_ref);
+    let group = group.map(|c| c.lists.group);
+    let sharing = s.contexts.iter_mut().flatten();
+    for c in sharing.filter(|c| Some(c.lists.group) == group) {
+        for b in c.bound.iter_mut().filter(|b| named(**b)) {
+            *b = 0;
         }
     }
     release(cpu, &gone);
@@ -549,31 +582,33 @@ pub fn release_default(cpu: &mut Cpu, index: usize) {
 
 /// glBindTexture(target, texture).
 pub fn bind_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let Some(index) = lists::outside_begin(cpu) else {
+        return Some(0);
+    };
     if args[0] != GL_TEXTURE_2D {
         if args[0] != 0x0DE0 {
             error(cpu, GL_INVALID_ENUM);
         }
         return Some(0);
     }
-    let Some((index, _)) = current(cpu) else {
-        return Some(0);
-    };
     let s = state(cpu);
     if let Some(Some(c)) = s.contexts.get_mut(index) {
         let unit = c.active_unit as usize;
         c.bound[unit] = args[1];
     }
-    // A name that has no texture yet gets one. One that has is left
-    // as it is, and so are the contexts that share it.
+    // A name that has no texture yet gets one, glGenTextures's or not.
+    // One that has is left as it is, and so are the contexts that
+    // share it.
     if !exists(s, index, args[1]) {
         texture_mut(s, index, args[1]);
     }
     Some(0)
 }
 
-/// glIsTexture(texture).
+/// glIsTexture(texture): false for a name glGenTextures gave that
+/// glBindTexture didn't bind yet.
 pub fn is_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some((index, _)) = current(cpu) else {
+    let Some(index) = lists::outside_begin(cpu) else {
         return Some(0);
     };
     Some((args[0] != 0 && exists(state(cpu), index, args[0])) as u32)
@@ -1140,19 +1175,30 @@ pub fn tex_parameteriv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// glPopAttrib's textures: each of `params` is a texture's name and
-/// the filters and wrap modes it had at the push, which the texture
-/// of that name has again if it is still there.
+/// glPopAttrib's textures: each of `params` is the name of a texture a
+/// unit had bound at the push, and the filters and wrap modes the
+/// texture had then, which the texture of that name has again. The pop
+/// binds the names again as glBindTexture does, so a name whose texture
+/// was deleted since the push is a new texture's, with no image, and
+/// takes the pushed parameters too. Mesa and SGI's sample
+/// implementation, which Microsoft's software OPENGL32 was ported from,
+/// both pop this way: they bind each pushed name and copy the pushed
+/// parameters to the texture bound. A name left bound without a
+/// texture would be one glGenTextures could give out again.
 pub fn restore_params(cpu: &mut Cpu, params: &[[u32; 5]]) {
     let Some((index, _)) = current(cpu) else {
         return;
     };
     let s = state(cpu);
     for &[name, min, mag, wrap_s, wrap_t] in params {
-        if !exists(s, index, name) {
+        let Some(t) = texture_mut(s, index, name) else {
             continue;
-        }
-        if let Some(t) = texture_mut(s, index, name) {
+        };
+        // A name bound without a texture at the push has zeros
+        // (`attrib::tex_params`) and keeps a new texture's parameters.
+        // Older builds' pops left such bindings, which a saved state
+        // may still have.
+        if min != 0 {
             t.min_filter = min;
             t.mag_filter = mag;
             t.wrap_s = wrap_s;
@@ -1377,13 +1423,46 @@ pub fn get_tex_enviv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// glAreTexturesResident(n, textures, residences): all of them are.
-pub fn are_textures_resident(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+/// glAreTexturesResident(n, textures, residences): all of them are,
+/// and `residences` is left as it is, as OpenGL has it when they are.
+/// A name that isn't a texture, 0 or one glGenTextures only reserved,
+/// is GL_INVALID_VALUE and the answer GL_FALSE (OpenGL 1.1, 3.8.8).
+pub fn are_textures_resident(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [n, at, _] = args[..] else {
+        return Some(0);
+    };
+    let Some(index) = lists::outside_begin(cpu) else {
+        return Some(0);
+    };
+    let n = n as i32;
+    if n < 0 {
+        error(cpu, GL_INVALID_VALUE);
+        return Some(0);
+    }
+    if n > 0 && (at == 0 || !cpu.bus.guest_probe(at, n as usize * 4, false)) {
+        return Some(0);
+    }
+    let names: Vec<u32> = (0..n as u32)
+        .map(|i| cpu.bus.guest_read_32(at + 4 * i))
+        .collect();
+    let s = state(cpu);
+    if names
+        .iter()
+        .any(|&name| name == 0 || !exists(s, index, name))
+    {
+        error(cpu, GL_INVALID_VALUE);
+        return Some(0);
+    }
     Some(1)
 }
 
-/// glPrioritizeTextures(n, textures, priorities).
-pub fn prioritize_textures(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+/// glPrioritizeTextures(n, textures, priorities): a texture keeps no
+/// priority, as the card keeps every texture. OpenGL ignores the names
+/// that aren't textures.
+pub fn prioritize_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if lists::outside_begin(cpu).is_some() && (args[0] as i32) < 0 {
+        error(cpu, GL_INVALID_VALUE);
+    }
     Some(0)
 }
 

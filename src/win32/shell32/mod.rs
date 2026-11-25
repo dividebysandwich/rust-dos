@@ -234,12 +234,24 @@ crate::state_fields!(State { links, group });
 /// Program Manager's execute string `text` (progman.rs): the titles of
 /// the windows to open, or None if it failed.
 pub fn progman_execute(cpu: &mut Cpu, text: &str) -> Option<Vec<String>> {
-    progman::execute(cpu, text)
+    as_shell(cpu, |cpu| progman::execute(cpu, text))
 }
 
 /// Program Manager's answer to a request for `item` (progman.rs).
 pub fn progman_request(cpu: &mut Cpu, item: &str) -> Option<String> {
-    progman::request(cpu, item)
+    as_shell(cpu, |cpu| progman::request(cpu, item))
+}
+
+/// Run `work` of Program Manager's DDE server as a long-name call
+/// (`DiskController::long_name_call`). On Windows 9x the 32-bit shell
+/// serves it, which names files by their long names, also for a 16-bit
+/// setup's DDE, which comes from no Win32 function: its group folders
+/// under "Start Menu" are found by their long names on a disk image too.
+fn as_shell<R>(cpu: &mut Cpu, work: impl FnOnce(&mut Cpu) -> R) -> R {
+    let was = cpu.bus.disk.set_long_name_call(true);
+    let result = work(cpu);
+    cpu.bus.disk.set_long_name_call(was);
+    result
 }
 
 /// Make the directory `path` and those it is in, where they aren't
@@ -331,4 +343,43 @@ fn sh_get_malloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_OUTOFMEMORY);
     }
     super::ole32::co_get_malloc(cpu, &[1, args[0]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Program Manager's DDE server finds the group folders it makes by
+    /// their long names on a disk image C:, also when no Win32 function
+    /// runs, as for a 16-bit setup's DDE: to DOS, "Start Menu" is
+    /// STARTM~1, and ShowGroup and the request for a group's items found
+    /// no folder.
+    #[test]
+    fn program_managers_groups_have_long_names_on_a_disk_image() {
+        let dir = crate::test_dir::path("progman_image");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("c.img");
+        crate::diskimage::DiskImage::blank_hard_disk("c.img", 8 << 20, Some("WIN"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let mut cpu = Cpu::new(dir.clone());
+        cpu.bus
+            .disk
+            .mount(2, &image, crate::disk::MountOptions::default(), true)
+            .unwrap();
+        let shown = progman_execute(
+            &mut cpu,
+            "[CreateGroup(My Game)][ShowGroup(My Game,1)][AddItem(C:\\GAME.EXE,Play)]",
+        );
+        assert!(shown.is_some());
+        assert_eq!(
+            progman_request(&mut cpu, "My Game").as_deref(),
+            Some("Play\r\n")
+        );
+        let volume = cpu.bus.disk.fat_volume(2).unwrap();
+        let link = ["WINDOWS", "STARTM~1", "PROGRAMS", "MYGAME~1", "PLAY.LNK"];
+        assert!(volume.find(&link).is_ok());
+    }
 }

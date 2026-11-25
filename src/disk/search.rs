@@ -265,10 +265,10 @@ impl DiskController {
             return Err(0x02);
         }
         if let Some((drive, volume, parts)) = self.locate_fat(filename) {
-            let parts = refs(&parts);
-            volume.find(&parts)?;
+            let parts = self.fat_dos_path(&volume, &parts)?;
+            volume.find(&refs(&parts))?;
             self.check_writable(drive)?;
-            return volume.set_attr(&parts, attr as u8);
+            return volume.set_attr(&refs(&parts), attr as u8);
         }
         // A file on a CD image is there and can't be changed: access
         // denied (05h), as MSCDEX and Windows 98's CDFS answer, which
@@ -313,10 +313,15 @@ impl DiskController {
         let (drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
         if let Some((_, volume, parts)) = self.locate_fat(path) {
-            if parts.is_empty() {
-                return Err(0x05);
-            }
-            return volume.mkdir(&refs(&parts));
+            // A long-name call gives the directory the long name entries
+            // its name needs, in a directory found by long names.
+            return match parts.split_last() {
+                None => Err(0x05),
+                Some((leaf, dir)) if self.long_call => {
+                    volume.mkdir_long(&refs(dir), leaf).map(|_| ())
+                }
+                Some(_) => volume.mkdir(&refs(&parts)),
+            };
         }
 
         // resolve_path walks any existing leaf, but MKDIR needs to create a new
@@ -362,6 +367,9 @@ impl DiskController {
         let normalized = path.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized).ok_or(0x03)?;
         if let Some((_, volume, parts)) = self.locate_fat(path) {
+            let Ok(parts) = self.fat_dos_path(&volume, &parts) else {
+                return Err(0x03);
+            };
             let parts = refs(&parts);
             if parts.is_empty() || !volume.find(&parts).is_ok_and(|e| e.is_dir()) {
                 return Err(0x03);
@@ -612,9 +620,13 @@ impl DiskController {
         let drive = self.drive(drive_num)?;
         let volume = drive.fat()?;
         let (dir, pattern) = Self::dir_and_pattern(rest);
-        let dir = Self::logical_components(drive, dir);
+        let dir: Vec<String> = Self::logical_components(drive, dir)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let dir = self.fat_dos_path(volume, &dir).ok()?;
         let (slots, entries): (Vec<usize>, Vec<DosDirEntry>) = volume
-            .list_slots(&dir)
+            .list_slots(&refs(&dir))
             .ok()?
             .into_iter()
             .filter_map(|(slot, entry)| {
@@ -763,8 +775,12 @@ impl DiskController {
         }
 
         if let Some(volume) = drive.fat() {
-            let dir = Self::logical_components(drive, search_dir_str);
-            let entries = volume.list(&dir).map_err(|_| 0x03u8)?;
+            let dir: Vec<String> = Self::logical_components(drive, search_dir_str)
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            let dir = self.fat_dos_path(volume, &dir).map_err(|_| 0x03u8)?;
+            let entries = volume.list(&refs(&dir)).map_err(|_| 0x03u8)?;
             valid_entries.extend(
                 entries
                     .into_iter()
