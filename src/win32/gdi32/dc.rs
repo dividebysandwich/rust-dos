@@ -567,7 +567,7 @@ pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if get(cpu, args[0]).is_none() {
         return Some(0);
     }
-    let bpp = super::surface::screen_mode(cpu).bpp;
+    let bpp = device_depth(cpu);
     match args[1] {
         BITSPIXEL => return Some(bpp),
         // COLORRES: the bits of a color the display shows.
@@ -951,12 +951,19 @@ pub fn select_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 return Some(0);
             }
             // A bitmap of GDI's must be monochrome or the display's
-            // depth; a DIB section may be any. One made for the desktop
-            // before DirectDraw set another mode stays usable in it:
-            // programs load their bitmaps before they set their mode.
+            // depth; a DIB section may be any. One made at the display's
+            // depth stays usable when DirectDraw sets or restores a mode
+            // (`Bitmap::display`): programs load their bitmaps before
+            // they set their mode, and keep those made in it after. One
+            // from a state saved before bitmaps kept that was made at
+            // the desktop's depth.
             let depth = bitmap.bpp as u32 * bitmap.planes as u32;
-            let display = [device_depth(cpu), crate::win32::screen::desktop(cpu).bpp];
-            if bitmap.dib.is_none() && depth != 1 && !display.contains(&depth) {
+            let made_for_display = match bitmap.pixel_masks() {
+                Some(_) => *bitmap.display,
+                None => depth == crate::win32::screen::desktop(cpu).bpp,
+            };
+            let display = made_for_display || depth == device_depth(cpu);
+            if bitmap.dib.is_none() && depth != 1 && !display {
                 return Some(0);
             }
             let old = dc.attrs.bitmap;

@@ -67,6 +67,7 @@ fn dib_dc(
         }),
         dc: 0,
         dimension: (0, 0),
+        ..Bitmap::default()
     };
     let dib = add(cpu, Kind::Bitmap { bitmap });
     for y in 0..h {
@@ -525,6 +526,7 @@ fn dib_dc_16(cpu: &mut Cpu, bits: u32, width: i32, height: i32) -> u32 {
         }),
         dc: 0,
         dimension: (0, 0),
+        ..Bitmap::default()
     };
     let dib = add(cpu, Kind::Bitmap { bitmap });
     let mem = dc::create_compatible_dc(cpu, &[0]).unwrap();

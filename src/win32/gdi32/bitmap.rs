@@ -9,6 +9,7 @@ use super::{
     Kind, Pattern, TRUE, add, gdi, init, set_error,
 };
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 use crate::win32::user32::{read_words, write_words};
 
 const BI_RGB: u32 = 0;
@@ -222,8 +223,24 @@ fn round_depth(bpp: u32) -> Option<u16> {
     })
 }
 
-/// A new bitmap of GDI's, its pixels 0.
+/// A new bitmap of GDI's, its pixels 0, in the display's format for its
+/// depth.
 pub fn new_ddb(cpu: &mut Cpu, width: i32, height: i32, bpp: u16) -> u32 {
+    let masks = surface::ddb_masks(cpu, bpp as u32);
+    let display = bpp as u32 == super::dc::device_depth(cpu);
+    new_ddb_in(cpu, width, height, bpp, masks, display)
+}
+
+/// A new bitmap of GDI's, its pixels 0, of `masks`, and of the display
+/// if `display` (`Bitmap::display`).
+fn new_ddb_in(
+    cpu: &mut Cpu,
+    width: i32,
+    height: i32,
+    bpp: u16,
+    masks: [u32; 3],
+    display: bool,
+) -> u32 {
     let stride = surface::ddb_stride(width, bpp as u32) as u32;
     let size = stride as usize * height as usize;
     if size > MAX_BITS {
@@ -240,6 +257,8 @@ pub fn new_ddb(cpu: &mut Cpu, width: i32, height: i32, bpp: u16) -> u32 {
                 planes: 1,
                 stride,
                 bits: vec![0; size],
+                masks: Since(masks),
+                display: Since(display),
                 ..Bitmap::default()
             },
         },
@@ -306,7 +325,7 @@ pub fn create_compatible_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(default_bitmap(cpu));
     }
     if dc.kind == super::dc::MEMORY
-        && let Some(b) = gdi(cpu).bitmap(dc.attrs.bitmap).cloned()
+        && let Some(b) = gdi(cpu).bitmap(dc.attrs.bitmap).map(|b| b.clone_header())
     {
         if let Some(dib) = &b.dib {
             let info = DibInfo {
@@ -325,6 +344,9 @@ pub fn create_compatible_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if b.bpp == 1 {
             return Some(new_ddb(cpu, w, h, 1));
         }
+        // A bitmap of GDI's in the format of the one selected, which
+        // may be the desktop's in a mode DirectDraw set.
+        return Some(new_ddb_in(cpu, w, h, b.bpp, *b.masks, *b.display));
     }
     let depth = super::dc::device_depth(cpu) as u16;
     Some(new_ddb(cpu, w, h, depth))
@@ -724,9 +746,9 @@ pub fn get_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // The masks are the bitmap's at its own depth, else the depth's.
     info.masks = match &b.dib {
         Some(d) if bitmap_bpp == bpp && d.compression == BI_BITFIELDS => d.masks,
-        None if bitmap_bpp == bpp && info.compression == BI_BITFIELDS => {
-            surface::ddb_masks(cpu, bpp)
-        }
+        None if bitmap_bpp == bpp && info.compression == BI_BITFIELDS => b
+            .pixel_masks()
+            .unwrap_or_else(|| surface::ddb_masks(cpu, bpp)),
         _ => surface::default_masks(bpp),
     };
     if !core {
