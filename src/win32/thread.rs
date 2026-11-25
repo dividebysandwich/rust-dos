@@ -1,18 +1,18 @@
-//! Threads: saved processor contexts, switched on the one host thread.
-//! The running thread's context is in the processor; the others' are in
-//! their entries. Threads of all processes take turns: a thread that waits
+//! Threads: saved processor contexts, switched on the one host thread. The
+//! running thread's context is in the processor; the others' are in their
+//! entries. Threads of all processes take turns: a thread that waits
 //! (`block`) is switched out at once, and one that runs gives way to
-//! another that is ready after `SLICE`, switched when the timer's
-//! interrupt comes (`after_interrupt`), since programs spin on flags that
-//! another thread sets. A wait that times out, such as a Sleep, ends when
-//! its time comes (`schedule_waits`), and its thread runs at once, as the
-//! boost Windows gives a thread whose wait ends lets it: a game that
-//! sleeps out the rest of its frame while another of its threads spins
-//! gets its next frame on time, not at the next interrupt. A thread that
-//! one of a higher priority took the processor from goes on with the rest
-//! of its turn when that one stops or its turn ends (`take_preempted`).
-//! When no thread can run, the processor runs the idle loop, a trap in
-//! KERNEL32 that lets time pass to the next interrupt or timeout.
+//! another that is ready when its turn ends, at the fourth of Windows 98's
+//! timer ticks after it began (`turn_over`), since programs spin on flags
+//! that another thread sets. A wait that times out, such as a Sleep, ends
+//! when its time comes (`schedule_waits`), and its thread runs at once, as
+//! the boost Windows gives a thread whose wait ends lets it: a game that
+//! sleeps out the rest of its frame while another of its threads spins gets
+//! its next frame on time, not at the next interrupt. A thread that one of
+//! a higher priority took the processor from goes on with the rest of its
+//! turn when that one stops or its turn ends (`take_preempted`). When no
+//! thread can run, the processor runs the idle loop, a trap in KERNEL32
+//! that lets time pass to the next interrupt or timeout.
 //!
 //! Waits are kept with the threads (`Wait`). An object signaled ends the
 //! waits for it at once (`object_changed`): SetEvent, ReleaseMutex and
@@ -34,8 +34,20 @@ use crate::instructions::fpu::control;
 use crate::instructions::sse::float::MXCSR_DEFAULT;
 
 /// How long a thread runs before another that is ready gets its turn, in
-/// microseconds. The timer's interrupt, which switches, comes every 55 ms.
+/// microseconds: four of Windows 98's ticks (`TICK`).
 const SLICE: u64 = 20_000;
+
+/// Windows 98's timer tick, in microseconds: its VTD runs the PIT at
+/// 200 Hz (a count of 5965), and a thread's turn ends at a tick, the
+/// fourth after it began (`turn_end`). On Windows 98 a thread that gives
+/// up its turn with Sleep(0) while another spins gets the processor back
+/// 5 to 20 ms later, in steps of 5 ms. The built-in Windows leaves the
+/// PIT at the BIOS's 18.2 Hz, so a turn's end is an event of its own
+/// (`turn_due`). Ending turns at the BIOS's interrupt instead kept such
+/// a thread waiting 55 ms: Dark Omen's movie decoder gives up its turn
+/// once a picture, and showed two pictures a second of fifteen while its
+/// main thread polled DirectInput (#1802).
+const TICK: u64 = 5_000;
 
 /// What wait functions return.
 pub const WAIT_OBJECT_0: u32 = 0;
@@ -205,15 +217,22 @@ fn save(cpu: &mut Cpu, ctx: Context) {
     }
 }
 
-/// Run the thread `at`, from its saved state.
-fn enter(cpu: &mut Cpu, (p, t): At) {
+/// Run the thread `at`, from its saved state, with a new turn.
+fn enter(cpu: &mut Cpu, at: At) {
+    run(cpu, at, 0);
+}
+
+/// Run the thread `at`, from its saved state, with a turn of which it
+/// has used `used` microseconds: a preempted thread goes on with the rest
+/// of its turn.
+fn run(cpu: &mut Cpu, (p, t): At, used: u64) {
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     if let Some(process) = win32.processes.get_mut(win32.running) {
         process.current = None;
     }
     win32.running = p;
-    win32.slice_start = now;
+    win32.slice_start = now.saturating_sub(used);
     let tid = win32.processes[p].threads[t].id;
     win32.preempted.retain(|&(id, _)| id != tid);
     crate::win16::task::entered(win32, tid);
@@ -241,6 +260,103 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
     seh::set_debug_registers(cpu, &dr);
     super::directories::switch(cpu, owner);
     super::system::enter_user(cpu, &ctx);
+    arm_turn(cpu);
+}
+
+/// When the turn that began at `start` ends, by the clock's microseconds:
+/// at the fourth tick after it began, `SLICE` after the one before it (or
+/// at its start).
+fn turn_end(start: u64) -> u64 {
+    start - start % TICK + SLICE
+}
+
+/// The start of the running thread's turn at `now`, of a turn that began
+/// at `start`: one that ended with no other thread ready to take over was
+/// followed by another from its end, as Windows gives the thread a new
+/// turn then.
+fn renewed(start: u64, now: u64) -> u64 {
+    let end = turn_end(start);
+    if now < end {
+        start
+    } else {
+        end + (now - end) / SLICE * SLICE
+    }
+}
+
+// A renewed turn starts at a tick, so it ends `SLICE` later.
+const _: () = assert!(SLICE.is_multiple_of(TICK));
+
+/// When the running thread's turn ends (`turn_end` of its renewed turn at
+/// `now`), for the timer event that ends it (`Win32::next_event`). None
+/// while no thread runs or every other thread has ended: no other could
+/// take the processor, and a program with one thread gets no event of
+/// its own. It depends only on what a save state keeps and on `now`, so
+/// a loaded state works it out again (`Bus::after_reload`).
+pub(crate) fn turn_due(win32: &Win32, now: u64) -> Option<u64> {
+    let running = current(win32)?;
+    let others = win32.processes.iter().enumerate().any(|(p, process)| {
+        let mut threads = process.threads.iter().enumerate();
+        threads.any(|(t, thread)| (p, t) != running && thread.exit_code.is_none())
+    });
+    others.then(|| turn_end(renewed(win32.slice_start, now)))
+}
+
+/// Make the end of the running thread's turn a timer event (`turn_due`):
+/// after a thread runs, its turn was renewed, or another thread or
+/// process was made.
+pub fn arm_turn(cpu: &mut Cpu) {
+    let due = turn_due(&cpu.bus.win32, cpu.bus.clock.now_micros());
+    if due != cpu.bus.win32.turn_due {
+        cpu.bus.win32.turn_due = due;
+        cpu.bus.reschedule_timers();
+    }
+}
+
+/// The running thread's turn ended (`turn_due`) while it ran the program's
+/// code (`in_program`): the thread a higher one preempted goes on, or else
+/// the next one in turn that can run, or with none the running thread
+/// starts a new turn. In the system's code or real-mode code it can't be
+/// switched, and changes nothing: its turn ends at the next interrupt
+/// back in the program (`after_interrupt`) or the next event. A thread
+/// that ended since the event was armed leaves the event behind, which
+/// changes nothing either, as a loaded state has no such event.
+pub fn turn_over(cpu: &mut Cpu, in_program: bool) {
+    let now = cpu.bus.clock.now_micros();
+    if turn_due(&cpu.bus.win32, now).is_none() {
+        cpu.bus.win32.turn_due = None;
+        return;
+    }
+    let win32 = &cpu.bus.win32;
+    if let Some(running) = current(win32).filter(|_| in_program)
+        && now >= turn_end(win32.slice_start)
+    {
+        if next_turn(cpu, running, Context::of(cpu)) {
+            return;
+        }
+        let win32 = &mut cpu.bus.win32;
+        win32.slice_start = renewed(win32.slice_start, now);
+    }
+    arm_turn(cpu);
+}
+
+/// The running thread `running`, with the context `ctx`, has had its
+/// turn: the thread a higher one preempted goes on, or else the next one
+/// in turn that can run, and true; false when none can.
+fn next_turn(cpu: &mut Cpu, running: At, ctx: Context) -> bool {
+    let win32 = &mut cpu.bus.win32;
+    // A thread preempted while another ran is at the head of the queue:
+    // it goes on before the next one in turn.
+    if let Some((at, used)) = take_preempted(win32, |_, _| true) {
+        save(cpu, ctx);
+        run(cpu, at, used);
+        return true;
+    }
+    if let Some(next) = next_ready(win32, Some(running)).filter(|&n| n != running) {
+        save(cpu, ctx);
+        enter(cpu, next);
+        return true;
+    }
+    false
 }
 
 /// The next thread after `after` in turn that can run, if one can: the
@@ -278,7 +394,7 @@ pub fn reschedule(cpu: &mut Cpu) {
     let ctx = Context::of(cpu);
     save(cpu, ctx);
     if let Some((at, used)) = take_preempted(&mut cpu.bus.win32, |_, _| true) {
-        resume(cpu, at, used);
+        run(cpu, at, used);
         return;
     }
     let win32 = &cpu.bus.win32;
@@ -316,7 +432,7 @@ pub fn yield_turn(cpu: &mut Cpu) -> bool {
     // of its priority's queue, with the rest of its turn.
     if let Some((at, used)) = take_preempted(win32, takes) {
         save(cpu, Context::of(cpu));
-        resume(cpu, at, used);
+        run(cpu, at, used);
         return true;
     }
     let win32 = &cpu.bus.win32;
@@ -342,7 +458,7 @@ pub fn yield_turn(cpu: &mut Cpu) -> bool {
 /// running to save (its process ended).
 pub fn run_next(cpu: &mut Cpu) {
     if let Some((at, used)) = take_preempted(&mut cpu.bus.win32, |_, _| true) {
-        resume(cpu, at, used);
+        run(cpu, at, used);
         return;
     }
     match next_ready(&cpu.bus.win32, None) {
@@ -384,14 +500,6 @@ fn take_preempted(win32: &mut Win32, pick: impl Fn(&Win32, At) -> bool) -> Optio
     None
 }
 
-/// Run the thread `at`, a preempted one, with the rest of its turn, of
-/// which it had used `used` microseconds.
-fn resume(cpu: &mut Cpu, at: At, used: u64) {
-    enter(cpu, at);
-    let now = cpu.bus.clock.now_micros();
-    cpu.bus.win32.slice_start = now.saturating_sub(used);
-}
-
 /// Run the idle loop, in the running process: no thread runs.
 fn idle(cpu: &mut Cpu) {
     let process = process(cpu);
@@ -411,6 +519,8 @@ fn idle(cpu: &mut Cpu) {
     };
     ctx.gpr[ESP] = process.idle_stack;
     super::system::enter_user(cpu, &ctx);
+    // No turn to end: the event left behind changes nothing.
+    cpu.bus.win32.turn_due = None;
 }
 
 /// The idle loop's trap: a thread that can run does, or time passes to
@@ -443,20 +553,16 @@ pub fn after_interrupt(cpu: &mut Cpu, ctx: Context) {
             None => super::system::enter_user(cpu, &ctx),
         },
         Some(running) => {
-            if now.saturating_sub(win32.slice_start) >= SLICE {
-                // A thread preempted while another ran is at the head of
-                // the queue: it goes on before the next one in turn.
-                if let Some((at, used)) = take_preempted(win32, |_, _| true) {
-                    save(cpu, ctx);
-                    resume(cpu, at, used);
+            // The turn ended while the thread ran the system's code or
+            // real-mode code (`turn_over`), or, with no other thread, at
+            // no event.
+            if now >= turn_end(win32.slice_start) {
+                if next_turn(cpu, running, ctx) {
                     return;
                 }
-                if let Some(next) = next_ready(win32, Some(running)).filter(|&n| n != running) {
-                    save(cpu, ctx);
-                    enter(cpu, next);
-                    return;
-                }
-                win32.slice_start = now;
+                let win32 = &mut cpu.bus.win32;
+                win32.slice_start = renewed(win32.slice_start, now);
+                arm_turn(cpu);
             }
             super::system::enter_user(cpu, &ctx);
         }

@@ -859,7 +859,7 @@ fn get_current_task(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 fn get_current_pdb(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(super::current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].psp) as u32)
+    Some(dos::current_pdb(cpu).unwrap_or(0) as u32)
 }
 
 fn get_num_tasks(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -1307,7 +1307,10 @@ fn get_instance_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// MakeProcInstance(function, instance): a thunk that loads AX with the
 /// instance's data segment, for an exported function whose prologue
-/// takes DS from AX, and jumps to it.
+/// takes DS from AX, and jumps to it. With no instance the thunk loads
+/// the caller's DS, as Wine's MakeProcInstance does: a program's
+/// exported function has the prologue "nop; nop", and called without a
+/// thunk it would run on whatever AX its caller left.
 fn make_proc_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (function, instance) = (args[0], args[1] as u16);
     if function == 0 {
@@ -1316,14 +1319,14 @@ fn make_proc_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // A library's functions load their own data segment.
     let library = super::module_index(cpu, (function >> 16) as u16)
         .is_some_and(|i| cpu.bus.win32.win16.modules[i].flags & rust_dos_ne::LIBMODULE != 0);
-    if instance == 0 || library {
+    let sel = match instance {
+        0 => Context::of(cpu).seg[Seg::DS as usize],
+        instance => global::handle_to_sel(instance),
+    };
+    if sel == 0 || library {
         return Some(function);
     }
-    Some(thunk::instance_thunk(
-        cpu,
-        function,
-        global::handle_to_sel(instance),
-    ))
+    Some(thunk::instance_thunk(cpu, function, sel))
 }
 
 /// WinExec(command line, show): the program as a new task; its instance,

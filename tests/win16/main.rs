@@ -22,6 +22,7 @@ mod win16_ole2_tests;
 mod win16_registry_tests;
 mod win16_resource_tests;
 mod win16_system_files_tests;
+mod win16_task_files_tests;
 mod win16_tests;
 mod win16_toolhelp_tests;
 mod win16_typelib_tests;

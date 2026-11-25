@@ -171,6 +171,8 @@ pub(super) fn create_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Some(place) => *place = thread,
         None => threads.push(thread),
     }
+    // A thread that ran alone has a turn to end now.
+    thread::arm_turn(cpu);
     if id_at != 0 {
         cpu.bus.guest_write_32(id_at, id);
     }

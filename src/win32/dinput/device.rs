@@ -754,42 +754,51 @@ fn held_exclusively(cpu: &mut Cpu, id: u32, kind: u32) -> bool {
     })
 }
 
-/// Acquire.
+/// Acquire. Of a device acquired already, it changes nothing, and an
+/// idle proof goes through it (`poll::quietly`): Dark Omen acquires its
+/// keyboard again before every read of it, in the loop its main thread
+/// spins in while a movie plays (#1802).
 pub fn acquire(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let r = (|| {
-        let id = ready(cpu, args[0])?;
-        let d = dev(cpu, id);
-        if d.acquired {
-            return Ok(DI_NOEFFECT);
-        }
-        if d.format.is_none() {
-            return Err(DIERR_INVALIDPARAM);
-        }
-        let (coop, hwnd, kind) = (d.coop, d.hwnd, d.kind);
-        if coop & DISCL_FOREGROUND != 0 && !poll::is_foreground(cpu, hwnd) {
-            return Err(DIERR_OTHERAPPHASPRIO);
-        }
-        if coop & DISCL_EXCLUSIVE != 0 && held_exclusively(cpu, id, kind) {
-            return Err(DIERR_OTHERAPPHASPRIO);
-        }
-        let joystick = (kind >= JOYSTICK).then(|| poll::joystick_raw(cpu, kind - JOYSTICK));
-        let d = dev(cpu, id);
-        d.acquired = true;
-        d.lost = false;
-        d.queue.clear();
-        d.overflow = false;
-        d.moved = [0; 2];
-        if let Some((counts, buttons)) = joystick {
-            let values = d.joystick_values(&counts);
-            for (a, v) in d.axes.iter_mut().zip(values) {
-                a.last = v;
-                a.base = v;
-            }
-            d.buttons = buttons;
-        }
-        Ok(DI_OK)
-    })();
+    let r = poll::quietly(cpu, |cpu| {
+        let r = acquire_device(cpu, args[0]);
+        let kept = r == Ok(DI_NOEFFECT);
+        (r, kept)
+    });
     result(r)
+}
+
+fn acquire_device(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
+    let id = ready(cpu, this)?;
+    let d = dev(cpu, id);
+    if d.acquired {
+        return Ok(DI_NOEFFECT);
+    }
+    if d.format.is_none() {
+        return Err(DIERR_INVALIDPARAM);
+    }
+    let (coop, hwnd, kind) = (d.coop, d.hwnd, d.kind);
+    if coop & DISCL_FOREGROUND != 0 && !poll::is_foreground(cpu, hwnd) {
+        return Err(DIERR_OTHERAPPHASPRIO);
+    }
+    if coop & DISCL_EXCLUSIVE != 0 && held_exclusively(cpu, id, kind) {
+        return Err(DIERR_OTHERAPPHASPRIO);
+    }
+    let joystick = (kind >= JOYSTICK).then(|| poll::joystick_raw(cpu, kind - JOYSTICK));
+    let d = dev(cpu, id);
+    d.acquired = true;
+    d.lost = false;
+    d.queue.clear();
+    d.overflow = false;
+    d.moved = [0; 2];
+    if let Some((counts, buttons)) = joystick {
+        let values = d.joystick_values(&counts);
+        for (a, v) in d.axes.iter_mut().zip(values) {
+            a.last = v;
+            a.base = v;
+        }
+        d.buttons = buttons;
+    }
+    Ok(DI_OK)
 }
 
 /// Unacquire.
@@ -909,60 +918,71 @@ fn state_values(cpu: &mut Cpu, id: u32) -> Vec<(u32, bool)> {
 
 /// GetDeviceData(object size, data, count, flags): the buffered events,
 /// as many as fit, taken from the buffer unless DIGDD_PEEK. No buffer
-/// (`data` 0) takes them without returning them.
+/// (`data` 0) takes them without returning them. A call that found no
+/// events changed nothing but the count, and an idle proof goes through
+/// it (`poll::quietly`), as through Acquire.
 pub fn get_device_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (this, object_size, at, count_at, flags) = (args[0], args[1], args[2], args[3], args[4]);
-    let r = (|| {
-        let id = ready(cpu, this)?;
-        // DIDEVICEOBJECTDATA, with DirectX 8's uAppData (the object's
-        // DIPROP_APPDATA) or without.
-        if object_size != 16 && object_size != 20 {
-            return Err(DIERR_INVALIDPARAM);
-        }
-        if flags & !DIGDD_PEEK != 0 {
-            return Err(DIERR_INVALIDPARAM);
-        }
-        poll::refresh(cpu);
-        let d = dev(cpu, id);
-        if !d.acquired {
-            return Err(not_acquired(d));
-        }
-        if d.buffer_size == 0 {
-            return Err(DIERR_NOTBUFFERED);
-        }
-        if count_at == 0 || !cpu.bus.guest_probe(count_at, 4, true) {
-            return Err(DIERR_INVALIDPARAM);
-        }
-        let wanted = cpu.bus.guest_read_32(count_at);
-        let d = dev(cpu, id);
-        let n = (wanted as usize).min(d.queue.len());
-        let events: Vec<Event> = d.queue[..n].to_vec();
-        if at != 0 {
-            if !cpu.bus.guest_probe(at, n * object_size as usize, true) {
-                return Err(DIERR_INVALIDPARAM);
-            }
-            for (i, e) in events.iter().enumerate() {
-                let base = at + i as u32 * object_size;
-                let mut words = vec![e.ofs, e.data, e.time, e.sequence];
-                if object_size == 20 {
-                    words.push(e.app_data);
-                }
-                for (k, w) in words.iter().enumerate() {
-                    cpu.bus.guest_write_32(base + 4 * k as u32, *w);
-                }
-            }
-        }
-        let d = dev(cpu, id);
-        let overflow = d.overflow;
-        if flags & DIGDD_PEEK == 0 {
-            d.queue.drain(..n);
-            d.overflow = false;
-        }
-        cpu.bus.guest_write_32(count_at, n as u32);
-        // DI_BUFFEROVERFLOW.
-        Ok(if overflow { DI_NOEFFECT } else { DI_OK })
-    })();
+    let count_at = args[3];
+    let r = poll::quietly(cpu, |cpu| {
+        crate::idle::reads_also(cpu, count_at, 4);
+        let r = device_data(cpu, args);
+        let kept = r == Ok((DI_OK, 0));
+        (r.map(|(code, _)| code), kept)
+    });
     result(r)
+}
+
+/// GetDeviceData's work: what it returns, and how many events it gave.
+fn device_data(cpu: &mut Cpu, args: &[u32]) -> Result<(u32, usize), u32> {
+    let (this, object_size, at, count_at, flags) = (args[0], args[1], args[2], args[3], args[4]);
+    let id = ready(cpu, this)?;
+    // DIDEVICEOBJECTDATA, with DirectX 8's uAppData (the object's
+    // DIPROP_APPDATA) or without.
+    if object_size != 16 && object_size != 20 {
+        return Err(DIERR_INVALIDPARAM);
+    }
+    if flags & !DIGDD_PEEK != 0 {
+        return Err(DIERR_INVALIDPARAM);
+    }
+    poll::refresh(cpu);
+    let d = dev(cpu, id);
+    if !d.acquired {
+        return Err(not_acquired(d));
+    }
+    if d.buffer_size == 0 {
+        return Err(DIERR_NOTBUFFERED);
+    }
+    if count_at == 0 || !cpu.bus.guest_probe(count_at, 4, true) {
+        return Err(DIERR_INVALIDPARAM);
+    }
+    let wanted = cpu.bus.guest_read_32(count_at);
+    let d = dev(cpu, id);
+    let n = (wanted as usize).min(d.queue.len());
+    let events: Vec<Event> = d.queue[..n].to_vec();
+    if at != 0 {
+        if !cpu.bus.guest_probe(at, n * object_size as usize, true) {
+            return Err(DIERR_INVALIDPARAM);
+        }
+        for (i, e) in events.iter().enumerate() {
+            let base = at + i as u32 * object_size;
+            let mut words = vec![e.ofs, e.data, e.time, e.sequence];
+            if object_size == 20 {
+                words.push(e.app_data);
+            }
+            for (k, w) in words.iter().enumerate() {
+                cpu.bus.guest_write_32(base + 4 * k as u32, *w);
+            }
+        }
+    }
+    let d = dev(cpu, id);
+    let overflow = d.overflow;
+    if flags & DIGDD_PEEK == 0 {
+        d.queue.drain(..n);
+        d.overflow = false;
+    }
+    cpu.bus.guest_write_32(count_at, n as u32);
+    // DI_BUFFEROVERFLOW.
+    Ok((if overflow { DI_NOEFFECT } else { DI_OK }, n))
 }
 
 /// SetDataFormat(format).

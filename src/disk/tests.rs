@@ -415,6 +415,49 @@ fn an_overlay_keeps_the_directory_as_it_was() {
     assert_eq!(fs::read(base.join("upper/NEW/SLOT2.SAV")).unwrap(), b"two");
 }
 
+/// Windows 9x matches names without regard to case, so a folder or a
+/// file deleted on an overlay drive and made again by a long-name call in
+/// another case is the one deleted, made new: the folder is empty and the
+/// file has nothing in it.
+#[test]
+fn an_overlay_name_made_again_in_another_case_is_new() {
+    let base = scratch("overlay_case");
+    fs::create_dir_all(base.join("c")).unwrap();
+    fs::create_dir_all(base.join("game/Data Files")).unwrap();
+    fs::write(base.join("game/Data Files/X.BIN"), b"old").unwrap();
+    fs::write(base.join("game/Read Me.txt"), b"old").unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    let opts = MountOptions {
+        overlay: Some(base.join("upper")),
+        ..MountOptions::default()
+    };
+    disk.mount(3, &base.join("game"), opts, false).unwrap();
+
+    disk.delete_file(r"D:\DATA FILES\X.BIN").unwrap();
+    disk.remove_directory(r"D:\DATA FILES").unwrap();
+    disk.long_name_call(|d| d.create_directory(r"D:\data files"))
+        .unwrap();
+    let listed = disk.list_directory(r"D:\DATAFI~1\*.*", 0x10).unwrap();
+    let names: Vec<String> = listed.into_iter().map(|e| e.filename).collect();
+    assert_eq!(names, ["..", "."]);
+    assert!(!disk.is_file(r"D:\data files\X.BIN"));
+
+    disk.delete_file(r"D:\READ ME.TXT").unwrap();
+    let h = disk
+        .long_name_call(|d| d.open_or_create(r"D:\read me.txt", 2, PSP, true))
+        .unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"");
+    disk.close_file(h);
+    let longs = disk.long_names(r"D:\").unwrap();
+    let longs: Vec<&str> = longs.iter().map(|(long, _)| long.as_str()).collect();
+    assert_eq!(longs, ["data files", "read me.txt"]);
+    assert_eq!(
+        fs::read(base.join("game/Data Files/X.BIN")).unwrap(),
+        b"old"
+    );
+    assert_eq!(fs::read(base.join("game/Read Me.txt")).unwrap(), b"old");
+}
+
 #[test]
 fn an_archive_is_a_drive_with_its_changes_beside_it() {
     let base = scratch("archive");
