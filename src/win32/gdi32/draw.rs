@@ -1634,25 +1634,6 @@ pub fn blit_from(
         // the other operations do: a 32-bit pixel's top byte too.
         white: if c.surface.bpp > 8 { mask } else { white },
     };
-    // Into a bitmap of GDI's on a palette device: what its values stand
-    // for after the blit (`palette::Meaning`), from the colors of a DIB's
-    // pixels through the palette, or those of a bitmap's values.
-    let meaning = match (&source, c.surface.target) {
-        (Some((src, _)), Target::Bitmap(handle))
-            if ddc.kind == super::dc::MEMORY && c.surface.device && !src.surface.mono =>
-        {
-            if src.surface.device {
-                let carried = match src.surface.target {
-                    Target::Bitmap(from) => super::palette::meaning_of(cpu, from),
-                    _ => Vec::new(),
-                };
-                Some((handle, None, Some(carried)))
-            } else {
-                Some((handle, map.clone(), None))
-            }
-        }
-        _ => None,
-    };
     let mut xlat = source
         .as_ref()
         .map(|(src, _)| Translate::kept(cpu, &src.surface, map, src.bk_color, text, bk));
@@ -1727,18 +1708,8 @@ pub fn blit_from(
             }
         }
     }
-    let written = meaning.as_ref().and(xlat.as_ref()).map(Translate::written);
     if let Some(t) = xlat {
         t.keep(cpu);
-    }
-    match (meaning, written) {
-        (Some((handle, Some(map), _)), Some(w)) => {
-            super::palette::note_meaning(cpu, handle, &map, &w)
-        }
-        (Some((handle, None, Some(colors))), Some(w)) => {
-            super::palette::carry_meaning(cpu, handle, &colors, &w)
-        }
-        _ => {}
     }
     // On the screen, a fill and a copy within it are the card's
     // blitter's work.
@@ -1836,21 +1807,6 @@ impl Translate {
         t
     }
 
-    /// The destination's values below 256 that the translation gave,
-    /// `written[v]` for the value v: those of the blit's pixels, and of
-    /// a table kept from an earlier blit of the same translation
-    /// (`kept`).
-    pub fn written(&self) -> Vec<bool> {
-        let mut written = vec![false; 256];
-        let cached = self.cache.iter().flat_map(|c| c.values());
-        for &v in self.table.iter().flatten().chain(cached) {
-            if let Some(w) = written.get_mut(v as usize) {
-                *w = true;
-            }
-        }
-        written
-    }
-
     /// Keep the table for the next blit, as `kept` takes it.
     pub fn keep(self, cpu: &mut Cpu) {
         if let Some(key) = self.key {
@@ -1869,19 +1825,9 @@ impl Translate {
                 return indices.get(v as usize).map_or(0, |&i| map.index(i as usize));
             }
             if src.device {
-                // To the screen, a bitmap's value whose color the system
-                // palette no longer holds there takes the entry of the
-                // nearest color it has (`palette::Meaning`).
-                let color = src.colors.get(v as usize);
-                return match color {
-                    Some(&c)
-                        if dst.target == Target::Screen
-                            && dst.colors.get(v as usize) != Some(&c) =>
-                    {
-                        super::surface::nearest(&dst.colors, c)
-                    }
-                    _ => v,
-                };
+                // Through a palette in the background on the screen
+                // (`DeviceMap::device_value`).
+                return map.device_value(v);
             }
             // Deeper pixels go through Windows' inverse color table
             // (`DeviceMap::deep_color`), those of a color table to the
@@ -1925,9 +1871,7 @@ impl Translate {
 /// (`Translate::one`).
 fn table_key(src: &Surface, map: Option<&super::palette::DeviceMap>) -> Option<TableKey> {
     let map = map?;
-    // A bitmap's values onto the screen depend on the system palette as
-    // well (`Translate::one`), which the key doesn't hold.
-    (!src.mono && src.bpp <= 8 && !src.device).then(|| TableKey {
+    (!src.mono && src.bpp <= 8).then(|| TableKey {
         bpp: src.bpp,
         colors: src.colors.clone(),
         pal_indices: src.pal_indices.clone(),

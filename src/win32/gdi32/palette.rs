@@ -60,7 +60,6 @@ use super::{
     add, dc, gdi, init, set_error, static_colors,
 };
 use crate::cpu::Cpu;
-use crate::savestate::Since;
 use crate::win32::user32::{read_words, write_words};
 
 pub const PC_RESERVED: u8 = 1;
@@ -148,94 +147,6 @@ fn show_system_entries(cpu: &mut Cpu, first: usize, last: usize) {
     crate::win32::screen::set_colors(cpu, first, &colors[first..=last.min(255)]);
 }
 
-/// The W32 section's version that added the colors a bitmap's values
-/// stood for (`Meaning`): a state saved by an older rust-dos has none.
-pub const MEANING_SAVED: u16 = 104;
-
-/// The color each value of an 8-bit bitmap of GDI's on a palette device
-/// stood for when it was drawn: 256 of them, None for a value that
-/// stands for the color the system palette shows at its entry, at the
-/// time of each blit, and no list at all when every value does. A value
-/// drawn through a logical palette keeps its entry's color even when
-/// the system palette shows that color at the time: Memphis Math draws
-/// its toolbar's buttons while the toolbar's palette fills free
-/// entries, and a later palette takes those entries.
-///
-/// Drawn through a logical palette, a value is the system palette's
-/// entry of a logical entry, and stands for that entry's color, which
-/// the system palette may not hold there: a palette realized in the
-/// background maps to entries other palettes' colors fill. A blit of
-/// the bitmap to the screen then puts, for each value whose color the
-/// entry no longer holds, the entry of the nearest color the system
-/// palette has (`draw::Translate`). Windows 95 OSR2.5 does this with a
-/// Voodoo 3's driver: a DIB drawn with StretchDIBits into a bitmap from
-/// CreateCompatibleBitmap, its palette in the background, holds the
-/// entries the palette mapped to (GetBitmapBits reads them), and a
-/// BitBlt of it to a window shows the nearest colors of the system
-/// palette to the DIB's, with the palette selected in the window's DC or
-/// not. Memphis Math draws its toolbar's buttons so.
-pub type Meaning = Since<MEANING_SAVED, Vec<Option<u32>>>;
-
-/// The colors the values of an 8-bit bitmap of GDI's stand for: those
-/// of its `meaning`, and the system palette's for the others.
-pub fn meaning_colors(cpu: &mut Cpu, meaning: &[Option<u32>]) -> Vec<u32> {
-    let mut colors = system_colors(cpu);
-    for (c, m) in colors.iter_mut().zip(meaning) {
-        if let Some(m) = m {
-            *c = *m;
-        }
-    }
-    colors
-}
-
-/// Note in the bitmap `handle` what its values `written` (`written[v]`
-/// for the value v) stand for after a DIB was drawn into it through
-/// `map`: a value a logical entry maps to, that entry's color; the
-/// others, and all of them through DEFAULT_PALETTE, the system
-/// palette's. Values the blit didn't write keep what they stood for, so
-/// a DIB drawn into part of the bitmap leaves the rest as it was.
-pub fn note_meaning(cpu: &mut Cpu, handle: u32, map: &DeviceMap, written: &[bool]) {
-    let mut colors = vec![None; 256];
-    if !map.default {
-        for (&c, &m) in map.logical.iter().zip(&map.map) {
-            colors[m as usize] = Some(c);
-        }
-    }
-    set_meaning(cpu, handle, written, |i| colors[i]);
-}
-
-/// The `Meaning` of the bitmap `handle`, empty if it isn't one.
-pub fn meaning_of(cpu: &mut Cpu, handle: u32) -> Vec<Option<u32>> {
-    gdi(cpu)
-        .bitmap(handle)
-        .map_or(Vec::new(), |b| b.meaning.0.clone())
-}
-
-/// Note in the bitmap `handle` what its values `written` stand for
-/// after a bitmap's values were copied into it: what the source's
-/// values stand for, `source` (its `Meaning`, empty for a bitmap whose
-/// values all stand for the system palette's colors, or the screen).
-pub fn carry_meaning(cpu: &mut Cpu, handle: u32, source: &[Option<u32>], written: &[bool]) {
-    set_meaning(cpu, handle, written, |i| source.get(i).copied().flatten());
-}
-
-/// Set what the values `written` of the bitmap `handle` stand for to
-/// `stood(v)`.
-fn set_meaning(cpu: &mut Cpu, handle: u32, written: &[bool], stood: impl Fn(usize) -> Option<u32>) {
-    let Some(b) = gdi(cpu).bitmap_mut(handle) else {
-        return;
-    };
-    let mut meaning = std::mem::take(&mut b.meaning.0);
-    meaning.resize(256, None);
-    for (v, _) in written.iter().enumerate().take(256).filter(|&(_, &w)| w) {
-        meaning[v] = stood(v);
-    }
-    if meaning.iter().all(Option::is_none) {
-        meaning.clear();
-    }
-    b.meaning.0 = meaning;
-}
-
 /// How colors become the pixels of a palette device (`Surface::device`)
 /// in a DC: through its logical palette's entries, mapped to the system
 /// palette, and the static colors.
@@ -290,6 +201,39 @@ impl DeviceMap {
             shown: None,
             hpal,
         }
+    }
+
+    /// A value of an 8-bit bitmap of GDI's blitted to the screen. With
+    /// a logical palette in the background (`on_screen`), a value one of
+    /// its entries maps to stands for that entry's color, and where the
+    /// system palette shows another color there it takes the entry of
+    /// the nearest color shown. Other values, and all of them through a
+    /// palette in the foreground or none, are the system palette's
+    /// entries as they are.
+    ///
+    /// Windows 95 OSR2.5 does so with a Voodoo 3's driver: a bitmap from
+    /// CreateCompatibleBitmap that a DIB was drawn into through a
+    /// palette in the background, one CreateBitmap made from its
+    /// GetBitmapBits, and one SetBitmapBits filled with them all show
+    /// the same pixels. BitBlt to a window whose DC has that palette
+    /// selected with bForceBackground and realized shows the nearest
+    /// colors to the palette's; with no palette selected it shows the
+    /// colors the system palette holds at the values' entries. Memphis
+    /// Math draws its toolbar's buttons so, from bitmaps CreateBitmap
+    /// made. The bitmap keeps nothing of the palette it was drawn
+    /// through.
+    pub fn device_value(&self, v: u32) -> u32 {
+        let Some(shown) = &self.shown else {
+            return v;
+        };
+        let Some(k) = self.map.iter().position(|&m| m as u32 == v) else {
+            return v;
+        };
+        let color = self.logical[k];
+        if shown.get(v as usize).is_some_and(|&(c, _)| c == color) {
+            return v;
+        }
+        nearest_of(shown, color) as u32
     }
 
     /// The map of a blit to the screen. With a logical palette in the
