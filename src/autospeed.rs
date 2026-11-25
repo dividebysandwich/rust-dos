@@ -340,16 +340,23 @@ const TWO_STEPS: f64 = FINE_STEP * FINE_STEP;
 /// time goes to each frame rather than each instruction, the estimate reads
 /// low once the host falls behind and high while it keeps up (Omikron's
 /// software-rendered dialogue). A faster CPU model's least speed keeps under
-/// that limit too. It rises by `FINE_STEP` for each `LAGGED_WINDOWS`
-/// measurements the host keeps up, so a host that stalls now and then
-/// loses a step for a while and no more, and one that can't run a speed
-/// meets it again only that often. A scene that takes more work says
-/// nothing of a limit a lighter one found (Unreal's 60 frame a second
+/// that limit too. It rises by `FINE_STEP` each time the host has kept up
+/// for `LAG_WAIT` measurements in a row at it. A fall behind at a speed the
+/// limit rose to doubles that wait for the limit it sets, up to
+/// `LAGGED_WINDOWS`, and a rise that held halves it again, so a host that
+/// can't run a speed meets it again only that often, and one that stalls
+/// now and then climbs back a step every `LAG_WAIT`. A wait of
+/// `LAGGED_WINDOWS` for every step kept American McGee's Alice at 68,000
+/// and 9 frames a second for a minute after the frames that followed a
+/// save state's load fell behind twice, and took seven minutes to climb
+/// back to the 180,000 it had run at (#827). A scene that takes more work
+/// says nothing of a limit a lighter one found (Unreal's 60 frame a second
 /// fly-through at 100,000 and the 10 frame a second one after it, which the
 /// host runs at 250,000), so a frame rate that falls by `DROPPED` at the
 /// limit multiplies it by `HEAVIER`. Too much meets the limit again at once.
 const KEPT_UP: f64 = 0.95;
 const HEAVIER: f64 = 2.0;
+const LAG_WAIT: u32 = JUDGED;
 const LAGGED_WINDOWS: u32 = HOLD_WINDOWS;
 /// Falling behind once at less than the host estimate over this is a stall.
 const STALLED: f64 = 2.0;
@@ -373,7 +380,7 @@ const STALLED: f64 = 2.0;
 /// step of more than `FINE_STEP` goes on as one of `FINE_STEP` from where
 /// it came, with a step under the speed it fell behind at the most it may
 /// go to, and one of `FINE_STEP` goes back there, the most the speed may go
-/// to until the host has kept up for a while (`LAGGED_WINDOWS`). There, the
+/// to until the host has kept up for a while (`LAG_WAIT`). There, the
 /// dialogue's frames fall behind less than once in 45 seconds at 23,000,
 /// about once in three seconds at 26,000, and more than once a second at
 /// 29,000. A hold isn't watched this way: at a speed the host keeps up
@@ -1582,6 +1589,10 @@ pub struct AutoSpeed {
     /// goes to, and the measurements left before that rises; the pace,
     /// smoothed; and whether the last measurement fell behind.
     lagged: Option<(u32, u32)>,
+    /// The measurements kept up that `lagged` waits before each rise
+    /// (`LAG_WAIT`), and whether it rose since the host last fell behind.
+    lag_wait: u32,
+    lag_rose: bool,
     pace: f64,
     behind: bool,
     /// A measurement fell behind at this speed without the smoothed pace
@@ -1743,6 +1754,8 @@ impl AutoSpeed {
             unsure: false,
             loaded: false,
             lagged: None,
+            lag_wait: LAG_WAIT,
+            lag_rose: false,
             pace: 1.0,
             behind: false,
             slipped: None,
@@ -1881,6 +1894,7 @@ impl AutoSpeed {
         (self.even_done, self.free_running) = ([false; 2], [false; 2]);
         self.pool.clear();
         self.lagged = None;
+        (self.lag_wait, self.lag_rose) = (LAG_WAIT, false);
         self.pace = 1.0;
         self.behind = false;
         self.slipped = None;
@@ -2376,6 +2390,25 @@ impl AutoSpeed {
         self.probe_misses = (self.probe_misses + 1).min(MOST_PROBE_BACKOFFS);
     }
 
+    /// The wait of a limit that a fall behind sets (`LAG_WAIT`): twice
+    /// the last, up to `LAGGED_WINDOWS`, if the fall came at a speed the
+    /// limit had risen to.
+    fn lag_wait_after_fall(&mut self) -> u32 {
+        if std::mem::take(&mut self.lag_rose) {
+            self.lag_wait = (self.lag_wait * 2).min(LAGGED_WINDOWS);
+        }
+        self.lag_wait
+    }
+
+    /// The wait of a limit that rose (`LAG_WAIT`): half the last, down to
+    /// `LAG_WAIT`, if the rise before it held without a fall.
+    fn lag_wait_after_rise(&mut self) -> u32 {
+        if std::mem::replace(&mut self.lag_rose, true) {
+            self.lag_wait = (self.lag_wait / 2).max(LAG_WAIT);
+        }
+        self.lag_wait
+    }
+
     /// The host fell behind at `speed` (`fell_at`).
     fn fell_behind_at(&mut self, speed: u32) {
         self.fell_at = Some(self.fell_at.map_or(speed, |at| at.min(speed)));
@@ -2415,9 +2448,10 @@ impl AutoSpeed {
             // the same way. The search may climb from there to a step under
             // the speed that fell behind: one that jumped to the host's
             // estimate from far below it (as one does after a load) would
-            // otherwise wait a step per `LAGGED_WINDOWS` to get back.
+            // otherwise wait a step per `LAG_WAIT` to get back.
             let most = (current as f64 / FINE_STEP).round() as u32;
-            self.lagged = Some((most.max(fine), LAGGED_WINDOWS));
+            let wait = self.lag_wait_after_fall();
+            self.lagged = Some((most.max(fine), wait));
             self.watch(from);
             fine
         } else {
@@ -2425,11 +2459,13 @@ impl AutoSpeed {
                 self.probe_missed();
             }
             self.trying = None;
-            self.lagged = Some((from, LAGGED_WINDOWS));
+            let wait = self.lag_wait_after_fall();
+            self.lagged = Some((from, wait));
+            // Held at the limit until it rises, then more (see `decide`).
             self.step = Step::Hold {
                 fps: f64::NAN,
-                left: HOLD_WINDOWS,
-                more: false,
+                left: wait,
+                more: true,
                 recent: f64::NAN,
                 seen: 0,
                 dipped: 0,
@@ -2597,7 +2633,8 @@ impl AutoSpeed {
             // them, and new ones start from this one's: a heavier scene can
             // end limits after the check below has cleared `slow_host`.
             let slow = self.slow_host.filter(|_| self.lagged.is_some());
-            self.lagged = (most > least).then_some((most, LAGGED_WINDOWS));
+            let wait = self.lag_wait_after_fall();
+            self.lagged = (most > least).then_some((most, wait));
             self.far_more = 0;
             self.slow_host = Some(slow.map_or(host_max, |h| h.min(host_max)));
         } else if let (false, Some((most, left))) = (lagged, self.lagged) {
@@ -2607,7 +2644,8 @@ impl AutoSpeed {
                 Some((most, left - 1))
             } else {
                 let most = (most as f64 * FINE_STEP) as u32;
-                (most < top).then_some((most, LAGGED_WINDOWS))
+                let wait = self.lag_wait_after_rise();
+                (most < top).then_some((most, wait))
             };
         }
         // The limits end once the host has shown far more (`far_more`).
@@ -2620,6 +2658,7 @@ impl AutoSpeed {
             self.far_more = if more { self.far_more + 1 } else { 0 };
             if self.far_more >= JUDGED {
                 self.lagged = None;
+                (self.lag_wait, self.lag_rose) = (LAG_WAIT, false);
                 self.fell_at = None;
                 self.unsure = true;
             }
@@ -2814,13 +2853,21 @@ impl AutoSpeed {
             let fps = if speed == current { fps } else { f64::NAN };
             hold_drawing(this, fps, speed, left, more)
         };
+        // A hold at the limit from a host that fell behind (`KEPT_UP`)
+        // lasts until the limit rises, and then tries more: one of
+        // `HOLD_WINDOWS` would keep the speed under a limit that rose
+        // after `LAG_WAIT`, and then try less.
+        let at_limit = self
+            .lagged
+            .filter(|&(most, _)| most == top)
+            .map_or((HOLD_WINDOWS, false), |(_, left)| (left, true));
         // Whatever the search was doing, it holds there, and measures the
         // frame rate it draws.
         if lagged && current > top {
             if let Some(kind) = evened {
                 self.even_done[kind] = true;
             }
-            return hold(self, top as f64, HOLD_WINDOWS, false);
+            return hold(self, top as f64, at_limit.0, at_limit.1);
         }
         // More, by as much as would take the frame rate to the display's.
         let busy = self.busy(protected, m.halted, m.io);
@@ -2829,8 +2876,11 @@ impl AutoSpeed {
         // more frames.
         let waits = m.halted >= WAITS.max(RETRACES * fps / m.refresh);
         let up = |this: &mut Self, most: f64, below: (u32, f64)| {
-            if fps >= m.refresh * AT_REFRESH || current >= top || waits {
+            if fps >= m.refresh * AT_REFRESH || waits {
                 return hold(this, c, HOLD_WINDOWS, false);
+            }
+            if current >= top {
+                return hold(this, c, at_limit.0, at_limit.1);
             }
             this.step = Step::Raised { from: current, fps, below };
             // A program that keeps an idling system from halting has no
@@ -3751,21 +3801,27 @@ mod tests {
         assert_eq!(auto.decide(60_000, &behind, true, 60_000), 52_174);
         // The estimate rises to 70000 and holds the least speed there no
         // more than the cap does: it goes up with the cap, a step for each
-        // `LAGGED_WINDOWS` the host keeps up, and to the estimate once the
-        // cap rises past it.
+        // `LAG_WAIT` the host keeps up, and to the estimate once the cap
+        // rises past it. The step to 60,000 gains Myth too few frames to go
+        // on, so the speed holds there, and goes to the least speed under
+        // the cap when the hold ends.
         let mut speed = 52_174;
-        for _ in 0..HOLD_WINDOWS {
+        for _ in 0..LAG_WAIT {
             speed = auto.decide(speed, &myth(speed), true, 70_000);
         }
-        assert_eq!(speed, 60_000);
+        assert_eq!((speed, auto.lagged), (60_000, Some((60_000, LAG_WAIT))));
+        for _ in 0..LAG_WAIT {
+            speed = auto.decide(speed, &myth(speed), true, 70_000);
+        }
+        assert_eq!(auto.lagged, Some((69_000, LAG_WAIT)));
+        for _ in 0..LAG_WAIT {
+            speed = auto.decide(speed, &myth(speed), true, 70_000);
+        }
+        assert_eq!(auto.lagged, None);
         for _ in 0..HOLD_WINDOWS {
             speed = auto.decide(speed, &myth(speed), true, 70_000);
         }
         assert_eq!(speed, 69_000);
-        for _ in 0..HOLD_WINDOWS {
-            speed = auto.decide(speed, &myth(speed), true, 70_000);
-        }
-        assert_eq!(auto.lagged, None);
         // The hold at 69000 goes on until it ends.
         for _ in 0..HOLD_WINDOWS {
             speed = auto.decide(speed, &myth(speed), true, 70_000);
@@ -5077,13 +5133,13 @@ mod tests {
             ..game(0.0005, 60.0)(114_817)
         };
         assert_eq!(auto.decide(114_817, &behind, true, 78_135), 87_261);
-        assert_eq!(auto.lagged, Some((87_261, LAGGED_WINDOWS)));
+        assert_eq!(auto.lagged, Some((87_261, LAG_WAIT)));
         // An estimate above what it ran is the limit, and the cap a step
         // less than the speed.
         let mut auto = AutoSpeed::new(3000, None);
         auto.pace = 0.9;
         assert_eq!(auto.decide(114_817, &behind, true, 95_000), 95_000);
-        assert_eq!(auto.lagged, Some((99_841, LAGGED_WINDOWS)));
+        assert_eq!(auto.lagged, Some((99_841, LAG_WAIT)));
     }
 
     #[test]
@@ -5482,7 +5538,7 @@ mod tests {
         // little more than the host keeps up with. Cut back to a step above
         // 278,000, the search goes on to a step under 610,000 with its next
         // measurement, where the host keeps up, rather than a step per
-        // `LAGGED_WINDOWS` from there.
+        // `LAG_WAIT` from there.
         let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
         let bus = &mut cpu.bus;
         let mut auto = AutoSpeed::new(3000, None);
@@ -5921,7 +5977,7 @@ mod tests {
             assert_eq!(auto.falling_behind(bus, unsorted(behind, 0)), None);
         }
         assert_eq!(auto.falling_behind(bus, unsorted(behind, 0)), Some(37_090));
-        assert_eq!(auto.lagged, Some((37_090, LAGGED_WINDOWS)));
+        assert_eq!(auto.lagged, Some((37_090, LAG_WAIT)));
         // The limits end after `JUDGED` measurements with the estimate at
         // four times the cap or more, and the load gets all the host has.
         let work = Measurement {
@@ -8329,5 +8385,75 @@ mod tests {
             let r = reads(first);
             assert!(r < FREE_RUNNING && (r - own).abs() < 0.01, "{r} {own}");
         }
+    }
+
+    /// American McGee's Alice in the Fortress of Doors (#827): its frames
+    /// follow the speed, 8.9 a second at 68,000, and the host keeps up
+    /// with 180,000 while its estimate reads 160,000. The frames after a
+    /// save state's load fall behind in the first two measurements, with
+    /// the estimate down to 91,111 and then 11,973.
+    fn alice_after_a_load() -> (AutoSpeed, Vec<u32>, impl Fn(u32) -> Measurement) {
+        let alice = |speed: u32| Measurement {
+            fps: Some((speed as f64 * 8.9 / 68_000.0).min(60.0)),
+            refresh: 60.0,
+            pace: (180_000.0 / speed as f64).min(1.0),
+            ..STILL
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(crate::cpu::CpuModel::PentiumII.auto_least());
+        let mut speed = 180_086;
+        for (pace, fps, host) in [(0.61, 39.0, 91_111), (0.68, 20.5, 11_973)] {
+            let m = Measurement {
+                fps: Some(fps),
+                pace,
+                ..alice(speed)
+            };
+            speed = auto.decide(speed, &m, true, host);
+        }
+        (auto, vec![speed], alice)
+    }
+
+    #[test]
+    fn the_lag_after_a_load_costs_a_bounded_climb_back() {
+        let (mut auto, mut speeds, alice) = alice_after_a_load();
+        assert!(speeds[0] < 70_000, "{speeds:?}");
+        assert!(auto.lagged.is_some());
+        let mut speed = speeds[0];
+        for _ in 0..100 {
+            speed = auto.decide(speed, &alice(speed), true, 160_000);
+            speeds.push(speed);
+        }
+        // A step of `FINE_STEP` each `LAG_WAIT` measurements, seven of them
+        // from 68,000 to the estimate: with a step each `LAGGED_WINDOWS`,
+        // that took 211 measurements.
+        let back = speeds.iter().position(|&s| s >= 160_000);
+        assert!(back.is_some_and(|i| i <= 7 * LAG_WAIT as usize), "{speeds:?}");
+        assert!(speeds[40..].iter().all(|&s| s >= 135_000), "{speeds:?}");
+    }
+
+    #[test]
+    fn a_limit_a_host_cannot_run_past_is_met_less_and_less_often() {
+        // As above, but the host keeps up with no more than 100,000 from
+        // here on, while its estimate still reads 160,000. Each rise of the
+        // limit past that falls behind, and doubles the wait for the next,
+        // until a rise comes no more often than `LAGGED_WINDOWS`.
+        let (mut auto, speeds, alice) = alice_after_a_load();
+        let mut speed = speeds[0];
+        let mut falls = Vec::new();
+        for i in 0..400 {
+            let m = Measurement {
+                pace: (100_000.0 / speed as f64).min(1.0),
+                ..alice(speed)
+            };
+            if m.pace < KEPT_UP {
+                falls.push(i);
+            }
+            speed = auto.decide(speed, &m, true, 160_000);
+        }
+        let gaps: Vec<usize> = falls.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(falls.len() <= 400 / LAGGED_WINDOWS as usize + 4, "{falls:?}");
+        let later = gaps.iter().skip(4);
+        assert!(later.clone().count() > 0, "{falls:?}");
+        assert!(later.into_iter().all(|&g| g > LAGGED_WINDOWS as usize), "{falls:?}");
     }
 }
