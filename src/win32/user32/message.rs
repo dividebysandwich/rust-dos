@@ -1956,9 +1956,11 @@ pub fn idle_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 _ => return idle_done(cpu, t, 0),
             },
             2 => {
-                if reply_sent(cpu, value) {
-                    return sender_goes_on(cpu, t);
-                }
+                // No task calls WaitForInputIdle (16-bit USER has none),
+                // so no reply here goes from one task to another. Running
+                // it again from its start would also open a second handle
+                // of the idle event and start the time-out over.
+                reply_sent(cpu, value);
                 t.step = 0;
             }
             _ => return idle_done(cpu, t, 0),
