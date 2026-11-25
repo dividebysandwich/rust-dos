@@ -2398,3 +2398,108 @@ fn a_host_file_position_kept_without_asking_the_host_follows_its_pointer() {
     assert_eq!(disk.read_file(h, 4).unwrap(), b"12");
     check(&disk, h, 3);
 }
+
+/// A file the guest wrote and closed opens again through the handle that
+/// wrote it (`ClosedFiles`): Dark Omen's setup opens each file it copies
+/// again at once to set its time, and a new host open of a file just
+/// written costs milliseconds where a virus scanner looks at it (#1804).
+/// The open sees the file as written, from its start.
+#[test]
+fn a_file_just_written_opens_again_through_its_handle() {
+    let base = scratch("closed_reopen");
+    let mut disk = DiskController::new(base.clone());
+    let h = disk.create_file(r"C:\GAME.DAT", PSP).unwrap();
+    assert_eq!(disk.write_file(h, b"written"), Ok(7));
+    disk.close_file(h);
+    assert_eq!(disk.host_dirs.closed.len(), 1);
+    let h = disk.open_file(r"C:\game.dat", 0x02, PSP).unwrap();
+    assert_eq!(disk.host_dirs.closed.len(), 0);
+    assert_eq!(disk.position(h), Some(0));
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"written");
+    assert_eq!(disk.write_file(h, b"!"), Ok(1));
+    disk.close_file(h);
+    assert_eq!(fs::read(base.join("GAME.DAT")).unwrap(), b"written!");
+    // Opened again by a create, whose emptying shows on the host.
+    let h = disk.create_file(r"C:\GAME.DAT", PSP).unwrap();
+    assert_eq!(disk.write_file(h, b"new"), Ok(3));
+    disk.close_file(h);
+    assert_eq!(fs::read(base.join("GAME.DAT")).unwrap(), b"new");
+}
+
+/// A kept handle serves only an open with the same access: a read-only
+/// open can't write through it, and a write-only one can't read.
+#[test]
+fn a_kept_handle_serves_only_the_access_it_has() {
+    let base = scratch("closed_access");
+    let mut disk = DiskController::new(base.clone());
+    let h = disk.create_file(r"C:\SAVE.DAT", PSP).unwrap();
+    assert_eq!(disk.write_file(h, b"abc"), Ok(3));
+    disk.close_file(h);
+    let h = disk.open_file(r"C:\SAVE.DAT", 0x00, PSP).unwrap();
+    assert_eq!(disk.host_dirs.closed.len(), 0);
+    assert_eq!(disk.write_file(h, b"x"), Err(0x05));
+    assert_eq!(disk.read_file(h, 8).unwrap(), b"abc");
+    disk.close_file(h);
+    // Write-only, closed, and opened read/write: a new host handle.
+    let h = disk.open_file(r"C:\SAVE.DAT", 0x01, PSP).unwrap();
+    assert_eq!(disk.write_file(h, b"d"), Ok(1));
+    disk.close_file(h);
+    assert_eq!(disk.host_dirs.closed.len(), 1);
+    let h = disk.open_file(r"C:\SAVE.DAT", 0x02, PSP).unwrap();
+    assert_eq!(disk.host_dirs.closed.len(), 0);
+    assert_eq!(disk.read_file(h, 8).unwrap(), b"dbc");
+    disk.close_file(h);
+}
+
+/// A file another program changed after the guest closed it isn't opened
+/// through the kept handle, and a file made read-only isn't opened for
+/// writing through it.
+#[test]
+fn a_kept_handle_isnt_used_for_a_file_changed_since() {
+    let base = scratch("closed_changed");
+    let mut disk = DiskController::new(base.clone());
+    let h = disk.create_file(r"C:\A.DAT", PSP).unwrap();
+    assert_eq!(disk.write_file(h, b"guest"), Ok(5));
+    disk.close_file(h);
+    fs::remove_file(base.join("A.DAT")).unwrap();
+    fs::write(base.join("A.DAT"), b"another program").unwrap();
+    disk.host_dirs.expire();
+    let h = disk.open_file(r"C:\A.DAT", 0x02, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 32).unwrap(), b"another program");
+    disk.close_file(h);
+
+    let h = disk.open_file(r"C:\A.DAT", 0x02, PSP).unwrap();
+    disk.close_file(h);
+    assert_eq!(disk.host_dirs.closed.len(), 1);
+    disk.set_file_attribute(r"C:\A.DAT", 0x01).unwrap();
+    assert_eq!(disk.open_file(r"C:\A.DAT", 0x02, PSP), Err(0x05));
+    assert_eq!(disk.host_dirs.closed.len(), 0);
+    disk.set_file_attribute(r"C:\A.DAT", 0x00).unwrap();
+}
+
+/// A file the guest closed and then deletes or renames goes on the host
+/// at once, as does its folder: the handle kept is closed first, so the
+/// name is free again for the next create.
+#[test]
+fn a_closed_file_deletes_and_renames_with_its_folder() {
+    let base = scratch("closed_delete");
+    let mut disk = DiskController::new(base.clone());
+    disk.create_directory(r"C:\DIR").unwrap();
+    let h = disk.create_file(r"C:\DIR\F.TMP", PSP).unwrap();
+    assert_eq!(disk.write_file(h, b"1"), Ok(1));
+    disk.close_file(h);
+    disk.delete_file(r"C:\DIR\F.TMP").unwrap();
+    assert!(!base.join("DIR").join("F.TMP").exists());
+    let h = disk.create_file(r"C:\DIR\F.TMP", PSP).unwrap();
+    assert_eq!(disk.write_file(h, b"2"), Ok(1));
+    disk.close_file(h);
+    disk.rename_file(r"C:\DIR\F.TMP", r"C:\DIR\G.TMP").unwrap();
+    let h = disk.create_file(r"C:\DIR\F.TMP", PSP).unwrap();
+    disk.close_file(h);
+    assert_eq!(fs::read(base.join("DIR").join("G.TMP")).unwrap(), b"2");
+    disk.delete_file(r"C:\DIR\F.TMP").unwrap();
+    disk.delete_file(r"C:\DIR\G.TMP").unwrap();
+    disk.remove_directory(r"C:\DIR").unwrap();
+    assert!(!base.join("DIR").exists());
+    assert_eq!(disk.host_dirs.closed.len(), 0);
+}

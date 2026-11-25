@@ -13,6 +13,7 @@ use crate::hostfs::{self, File, OpenOptions};
 use crate::memfs::{Bytes, MemFs, Node};
 use crate::mount::MountSpec;
 
+mod closed_files;
 mod drives;
 mod files;
 mod host_dir;
@@ -24,6 +25,7 @@ mod search;
 mod state;
 mod system_files;
 
+use closed_files::ClosedFiles;
 use host_dir::{DirCount, HostDirCache, SearchKey};
 pub use layout::{DriveKind, Fat32Layout, FatLayout, old_space};
 pub use locks::{LOCK_VIOLATION, Lock, TASK_OWNER};

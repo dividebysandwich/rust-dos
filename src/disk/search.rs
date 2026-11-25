@@ -376,6 +376,7 @@ impl DiskController {
         if self.drive(drive_num).is_some_and(|d| dos_form.eq_ignore_ascii_case(&d.current_dir)) {
             return Err(0x10);
         }
+        self.host_dirs.closed.drop_under(&host_path);
         let removed = hostfs::remove_dir(&host_path);
         self.host_dirs.changed();
         self.host_dirs.touched(&host_path);

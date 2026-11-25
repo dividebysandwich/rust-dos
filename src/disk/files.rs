@@ -162,6 +162,12 @@ impl DiskController {
             return Err(0x05);
         }
         let writable = self.is_writable(drive);
+        // The access the host's handle has.
+        let (read, write) = match mode & 0x03 {
+            0 => (true, false),
+            1 => (false, true),
+            _ => (true, writable),
+        };
 
         let mut options = OpenOptions::new();
         match mode & 0x03 {
@@ -188,10 +194,15 @@ impl DiskController {
         }
 
         let handle = self.free_handle()?;
-        let opened = if missing && !create {
-            Err(std::io::ErrorKind::NotFound.into())
-        } else {
-            options.open(&path)
+        // A file the guest just wrote and closed opens through the handle
+        // that wrote it, which costs the host nothing (`ClosedFiles`).
+        let reused = existing
+            .as_ref()
+            .and_then(|meta| self.host_dirs.closed.take(&path, read, write, meta));
+        let opened = match reused {
+            Some(file) => Ok(file),
+            None if missing && !create => Err(std::io::ErrorKind::NotFound.into()),
+            None => options.open(&path),
         };
         // Opening a file that is there already adds no name to its folder.
         if create && existing.is_none() {
@@ -373,6 +384,7 @@ impl DiskController {
         if hostfs::metadata(&path).is_ok_and(|m| m.readonly) {
             return Err(0x05);
         }
+        self.host_dirs.closed.drop_under(&path);
         let written = hostfs::write(&path, data);
         self.host_dirs.changed();
         self.host_dirs.touched(&path);
@@ -415,6 +427,7 @@ impl DiskController {
             return Err(0x02); // File not found
         }
         self.check_writable(drive)?;
+        self.host_dirs.closed.drop_under(&path);
         let removed = hostfs::remove_file(&path);
         self.host_dirs.changed();
         self.host_dirs.touched(&path);
@@ -496,6 +509,8 @@ impl DiskController {
             return Err(0x05);
         }
         let target = parent.join(self.entry_name(leaf));
+        self.host_dirs.closed.drop_under(&source);
+        self.host_dirs.closed.drop_under(&target);
         let renamed = hostfs::rename(&source, &target);
         self.host_dirs.changed();
         if renamed.is_ok() {
@@ -575,8 +590,13 @@ impl DiskController {
         if open.refs == 0 && sft >= FIRST_FILE {
             self.forget_locks(sft);
             // The host may set a written file's time when it is closed.
-            if let Some(OpenFile { data: OpenData::Host(_, Some(path)), .. }) = self.open_files.remove(&sft) {
+            // Its handle stays open a moment for an open that follows
+            // (`ClosedFiles`).
+            if let Some(OpenFile { data: OpenData::Host(file, Some(path)), mode, .. }) =
+                self.open_files.remove(&sft)
+            {
                 self.host_dirs.touched(&path);
+                self.host_dirs.closed.keep(path, file.file, mode & 0x03 != 1);
             }
         }
         self.mark_dirty(sft);

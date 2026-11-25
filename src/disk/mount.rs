@@ -610,6 +610,9 @@ impl DiskController {
             ));
         }
         self.close_drive_files(drive);
+        if let Some(root) = self.drive(drive).and_then(|d| d.host_root()) {
+            self.host_dirs.closed.drop_under(root);
+        }
         self.drives[drive as usize] = None;
         if self.current_drive == drive {
             self.current_drive = DRIVE_C;

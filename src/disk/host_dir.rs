@@ -73,6 +73,9 @@ pub(super) struct HostDirCache {
     /// counted again, as a change by the guest in it does once the count
     /// is `TRUST` old.
     pub(super) usage: RefCell<HashMap<(PathBuf, u64, u64), DirUsage>>,
+    /// The host handles of files the guest wrote and closed, kept for an
+    /// open that follows (`ClosedFiles`).
+    pub(super) closed: ClosedFiles,
     /// The time `TRUST` is measured by in tests: it stands still from the
     /// first look and moves on only by `expire`, so how long a test takes
     /// doesn't change what it sees.
@@ -253,6 +256,7 @@ impl HostDirCache {
         self.changed();
         self.searches.borrow_mut().clear();
         self.usage.borrow_mut().clear();
+        self.closed.clear();
     }
 
     /// The guest created, wrote, resized, deleted or renamed the host file
