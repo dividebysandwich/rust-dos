@@ -14,10 +14,15 @@ fn hex(v: u32) -> String {
 }
 
 /// The built-in Windows as it is now.
-pub fn win32_json(cpu: &Cpu) -> Value {
+pub fn win32_json(cpu: &mut Cpu) -> Value {
+    let times: Vec<Value> = rust_dos::win32::thread_times(cpu)
+        .into_iter()
+        .map(|(id, us, n)| json!({"id": hex(id), "us": us, "instructions": n}))
+        .collect();
     let mut json = snapshot_json(&rust_dos::win32::snapshot(cpu));
     json["trace"] = json!(rust_dos::win32::trace::level(cpu).name());
     json["page_file"] = page_file_json(cpu);
+    json["thread_times"] = json!(times);
     json
 }
 

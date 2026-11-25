@@ -183,6 +183,38 @@ pub const INITIAL_FPU: [u8; 108] = {
 /// A thread by its process's place and its own in that process's list.
 type At = (usize, usize);
 
+/// The emulated time and the instructions each thread has had
+/// (`Win32::times`).
+#[derive(Clone, Debug, Default)]
+pub struct Times {
+    /// The clock's microseconds and `Cpu::executed` when the running
+    /// thread's (or the idle loop's) share began.
+    mark: (u64, u64),
+    /// Microseconds and instructions by thread id, 0 for the idle loop.
+    by_thread: std::collections::BTreeMap<u32, (u64, u64)>,
+}
+
+/// Charge the time and instructions since the mark to the running thread
+/// (or the idle loop), and start a new mark.
+fn charge(cpu: &mut Cpu) {
+    let now = (cpu.bus.clock.now_micros(), cpu.executed);
+    let win32 = &mut cpu.bus.win32;
+    let id = current(win32).map_or(0, |(p, t)| win32.processes[p].threads[t].id);
+    let (t0, i0) = win32.times.mark;
+    let e = win32.times.by_thread.entry(id).or_default();
+    e.0 += now.0.saturating_sub(t0);
+    e.1 += now.1.saturating_sub(i0);
+    win32.times.mark = now;
+}
+
+/// The emulated microseconds and instructions each thread has had so far,
+/// by thread id, 0 for the idle loop.
+pub fn times(cpu: &mut Cpu) -> Vec<(u32, u64, u64)> {
+    charge(cpu);
+    let t = &cpu.bus.win32.times.by_thread;
+    t.iter().map(|(&id, &(us, n))| (id, us, n)).collect()
+}
+
 /// The running thread, if one runs.
 fn current(win32: &Win32) -> Option<At> {
     let process = win32.processes.get(win32.running)?;
@@ -226,6 +258,7 @@ fn enter(cpu: &mut Cpu, at: At) {
 /// has used `used` microseconds: a preempted thread goes on with the rest
 /// of its turn.
 fn run(cpu: &mut Cpu, (p, t): At, used: u64) {
+    charge(cpu);
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     if let Some(process) = win32.processes.get_mut(win32.running) {
@@ -502,6 +535,7 @@ fn take_preempted(win32: &mut Win32, pick: impl Fn(&Win32, At) -> bool) -> Optio
 
 /// Run the idle loop, in the running process: no thread runs.
 fn idle(cpu: &mut Cpu) {
+    charge(cpu);
     let process = process(cpu);
     process.current = None;
     let mut ctx = Context {
