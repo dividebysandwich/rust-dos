@@ -400,18 +400,27 @@ impl DiskController {
         })
     }
 
-    /// Case-insensitive lookup of a child by name in a host directory.
+    /// Case-insensitive lookup of a child by name in a host directory: by
+    /// its host name, or else by the name the call running now packs it
+    /// to (`dos_component`), as opens find it (`find_host_entry`). So
+    /// MKDIR "SAVES.DIR" and a rename to "DUNE.BAT" meet the "saves   .dir"
+    /// and "dune    .bat" that builds which kept the padding made, rather
+    /// than make a second entry beside it that hides it from opens.
     pub(super) fn find_existing_child(&self, parent: &Path, name: &str) -> Option<std::ffi::OsString> {
         let upper = name.to_uppercase();
-        if let Ok(entries) = hostfs::read_dir(parent) {
-            for e in entries {
-                let fname = e.file_name();
-                if fname.to_string_lossy().to_uppercase() == upper {
-                    return Some(fname);
-                }
-            }
-        }
-        None
+        let names: Vec<std::ffi::OsString> = hostfs::read_dir(parent)
+            .into_iter()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        let packed = |fname: &std::ffi::OsString| {
+            self.dos_component(&fname.to_string_lossy()).to_uppercase()
+        };
+        names
+            .iter()
+            .find(|fname| fname.to_string_lossy().to_uppercase() == upper)
+            .or_else(|| names.iter().find(|fname| packed(fname) == upper))
+            .cloned()
     }
 
     /// The name and the extension a search pattern looks for. DOS packs

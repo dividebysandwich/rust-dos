@@ -291,6 +291,9 @@ fn spaces_before_the_extension_pad_the_name() {
         disk.qualify_path(r"C:\DUNECD\dune    .bat").as_deref(),
         Some(r"C:\DUNECD\DUNE.BAT")
     );
+    // A search pattern is packed the same way (`pattern_fields`).
+    let found = disk.list_directory(r"C:\DUNECD\dune    .*", 0).unwrap();
+    assert!(found.iter().any(|e| e.filename == "DUNE.BAT"));
 
     // So do a directory made and a file renamed by such a name.
     disk.create_directory("SAVES   .DIR").unwrap();
@@ -329,6 +332,26 @@ fn a_host_name_padded_before_its_extension_is_found_without_the_spaces() {
     assert_eq!(disk.read_file(h, 16).unwrap(), b"launcher");
     disk.close_file(h);
     assert!(disk.is_file("dune    .bat"));
+}
+
+/// MKDIR and a rename meet such a host entry as opens do: the name is
+/// taken, and no second entry is made beside it to hide it.
+#[test]
+fn a_host_name_padded_before_its_extension_is_taken() {
+    let base = scratch("host_padded_taken");
+    fs::create_dir(base.join("saves   .dir")).unwrap();
+    fs::write(base.join("saves   .dir/game.sav"), b"save").unwrap();
+    fs::write(base.join("dune    .bat"), b"launcher").unwrap();
+    fs::write(base.join("OTHER.BAT"), b"other").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    assert_eq!(disk.create_directory("SAVES.DIR"), Err(0x05));
+    assert!(!base.join("SAVES.DIR").exists());
+    assert!(disk.is_file(r"SAVES.DIR\GAME.SAV"));
+
+    assert_eq!(disk.rename_file("OTHER.BAT", "DUNE.BAT"), Err(0x05));
+    assert!(base.join("OTHER.BAT").is_file());
+    assert!(!base.join("DUNE.BAT").exists());
 }
 
 #[test]
