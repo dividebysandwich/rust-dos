@@ -8,6 +8,13 @@
 //! reserved argument DllMain gets, the next module, and the modules'
 //! bases. `run_chain` makes the next call, or when none is left, does
 //! what the chain was for (`done`).
+//!
+//! FreeLibrary works as Wine's LdrUnloadDll does. One made while another
+//! one's chain runs, as from a DllMain, only takes references away, and
+//! the modules whose last one went join those the outermost FreeLibrary
+//! frees (`Process::unloading`). Its chain tells each of them that it is
+//! detached, after the DllMain that freed it has returned, and only then
+//! are they unmapped.
 
 use super::{
     ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_PROC_NOT_FOUND, FALSE, TRUE, set_error,
@@ -40,6 +47,12 @@ const THEN_EXIT_PROCESS: u32 = 4;
 const THEN_FREE_EXIT: u32 = 5;
 const THEN_DRIVER: u32 = 6;
 
+/// The W32 version whose processes first keep the modules the outermost
+/// FreeLibrary frees (`Process::unloading`). A state saved before it
+/// during a FreeLibrary's chain finishes it with the modules the chain
+/// names.
+pub(in crate::win32) const UNLOADING_SAVED: u16 = 99;
+
 /// The places in a chain's data.
 const THEN: usize = 0;
 const ARG: usize = 1;
@@ -61,6 +74,7 @@ fn chain(then: u32, arg: u32, reason: u32, reserved: u32, bases: &[u32]) -> Vec<
 /// started it returns to.
 fn run_chain(cpu: &mut Cpu, resume: (u32, u32), mut data: Vec<u32>) {
     let reason = data[REASON];
+    let freeing = matches!(data[THEN], THEN_FREE | THEN_FREE_EXIT);
     while data[NEXT] as usize + LIST < data.len() {
         let base = data[LIST + data[NEXT] as usize];
         data[NEXT] += 1;
@@ -70,7 +84,9 @@ fn run_chain(cpu: &mut Cpu, resume: (u32, u32), mut data: Vec<u32>) {
         let attached = module.flags & ATTACHED != 0;
         let wanted = match reason {
             DLL_PROCESS_ATTACH => !attached,
-            DLL_PROCESS_DETACH => attached,
+            // A FreeLibrary's chain passes over a module that a load
+            // took again while it ran, as Wine's process_detach does.
+            DLL_PROCESS_DETACH => attached && !(freeing && module.refs > 0),
             _ => attached && module.flags & NO_THREAD_CALLS == 0,
         };
         if module.entry == 0 || !wanted {
@@ -139,10 +155,7 @@ fn attach_failed(cpu: &mut Cpu, resume: (u32, u32), data: &[u32], base: u32) {
         crate::win32::exit(cpu, crate::win32::FAILED);
         return;
     }
-    let mut freed = Vec::new();
-    loader::release(process(cpu), data[ARG], &mut freed);
-    let data = chain(THEN_FREE, 0, DLL_PROCESS_DETACH, 0, &freed);
-    run_chain(cpu, resume, data);
+    free_module(cpu, data[ARG], THEN_FREE, 0, resume);
 }
 
 /// What a chain was for, now that the entry points have run.
@@ -153,7 +166,28 @@ fn done(cpu: &mut Cpu, resume: (u32, u32), data: Vec<u32>) {
         THEN_LOAD => call::finish(cpu, resume, arg),
         THEN_DRIVER => crate::win32::winmm::driver::loaded(cpu, resume, arg),
         THEN_FREE | THEN_FREE_EXIT => {
-            let bases = data[LIST..].to_vec();
+            let p = process(cpu);
+            let bases = p
+                .unloading
+                .get_or_insert_with(|| data[LIST..].to_vec())
+                .clone();
+            // The modules that a FreeLibrary made by an entry point let
+            // go of and that haven't learned yet that they are detached.
+            let left: Vec<u32> = bases
+                .iter()
+                .copied()
+                .filter(|&base| {
+                    p.modules.iter().any(|m| {
+                        m.base == base && m.refs == 0 && m.entry != 0 && m.flags & ATTACHED != 0
+                    })
+                })
+                .collect();
+            if !left.is_empty() {
+                let data = chain(data[THEN], arg, DLL_PROCESS_DETACH, 0, &left);
+                run_chain(cpu, resume, data);
+                return;
+            }
+            *p.unloading = None;
             with_process(cpu, |p, bus| {
                 let mut memory = std::mem::take(&mut p.memory);
                 // An entry point that ran may have loaded one again.
@@ -165,14 +199,7 @@ fn done(cpu: &mut Cpu, resume: (u32, u32), data: Vec<u32>) {
                 p.memory = memory;
             });
             cpu.tlb.flush();
-            if data[THEN] == THEN_FREE_EXIT {
-                exit_thread(cpu, arg);
-                return;
-            }
-            if arg == 0 {
-                set_error(cpu, ERROR_DLL_INIT_FAILED);
-            }
-            call::finish(cpu, resume, arg);
+            freed(cpu, resume, data[THEN], arg);
         }
         THEN_EXIT_THREAD => thread::exit_current(cpu, arg),
         _ => crate::win32::exit(cpu, arg),
@@ -286,10 +313,43 @@ pub(in crate::win32) fn free_then(cpu: &mut Cpu, module: u32, resume: (u32, u32)
         call::finish(cpu, resume, value);
         return;
     }
-    let mut freed = Vec::new();
-    loader::release(process(cpu), module, &mut freed);
-    let data = chain(THEN_FREE, value, DLL_PROCESS_DETACH, 0, &freed);
-    run_chain(cpu, resume, data);
+    free_module(cpu, module, THEN_FREE, value, resume);
+}
+
+/// The module at `module` loses a reference, and `then` (THEN_FREE or
+/// THEN_FREE_EXIT) goes on with `arg` from `resume`. The outermost free
+/// starts a chain that tells the modules whose last reference went that
+/// they are detached, and then unmaps them (`done`). A free made while
+/// that chain runs adds the modules it lets go of to the chain's and
+/// goes on at once, as Wine's LdrUnloadDll detaches and unmaps modules
+/// only when `free_lib_count` says it is the outermost.
+fn free_module(cpu: &mut Cpu, module: u32, then: u32, arg: u32, resume: (u32, u32)) {
+    let p = process(cpu);
+    let outermost = p.unloading.is_none();
+    let mut bases = p.unloading.take().unwrap_or_default();
+    loader::release(p, module, &mut bases);
+    *p.unloading = Some(bases.clone());
+    if outermost {
+        let data = chain(then, arg, DLL_PROCESS_DETACH, 0, &bases);
+        run_chain(cpu, resume, data);
+    } else {
+        freed(cpu, resume, then, arg);
+    }
+}
+
+/// What a free does once its modules have gone, or at once for one made
+/// while another one's chain runs: end the thread with `arg`
+/// (FreeLibraryAndExitThread), or return `arg` (TRUE, or 0 for a load
+/// that failed).
+fn freed(cpu: &mut Cpu, resume: (u32, u32), then: u32, arg: u32) {
+    if then == THEN_FREE_EXIT {
+        exit_thread(cpu, arg);
+        return;
+    }
+    if arg == 0 {
+        set_error(cpu, ERROR_DLL_INIT_FAILED);
+    }
+    call::finish(cpu, resume, arg);
 }
 
 /// `load` of the name `name`, the chain doing `then` when it is done. The
@@ -384,10 +444,7 @@ fn free(cpu: &mut Cpu, module: u32, then: u32, arg: u32) -> Option<u32> {
         }
         return Some(if valid { TRUE } else { FALSE });
     }
-    let mut freed = Vec::new();
-    loader::release(process(cpu), module, &mut freed);
-    let data = chain(then, arg, DLL_PROCESS_DETACH, 0, &freed);
-    run_chain(cpu, call::here(cpu), data);
+    free_module(cpu, module, then, arg, call::here(cpu));
     None
 }
 

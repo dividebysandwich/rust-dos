@@ -10099,6 +10099,263 @@ fn a_dll_freeing_a_dll_as_the_process_ends_stays_mapped() {
     assert_eq!(text.matches("D null\r\n").count(), 1, "{text}");
 }
 
+/// Write the `len` bytes at `at` in a test module's data to standard
+/// output, with GetStdHandle and WriteFile at its import slots `get` and
+/// `write`, the count going to `written` in its data.
+fn say_from(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    (get, write): (usize, usize),
+    at: u32,
+    len: i32,
+    written: u32,
+) -> Result<(), IcedError> {
+    a.push(STD_OUTPUT_HANDLE)?;
+    a.call(l.import(get))?;
+    a.push(0)?;
+    a.push(l.at(written) as i32)?;
+    a.push(len)?;
+    a.push(l.at(at) as i32)?;
+    a.push(eax)?;
+    a.call(l.import(write))
+}
+
+/// D.DLL for the nested FreeLibrary tests: an entry point that does
+/// nothing, and Seven, which X.DLL imports.
+fn seven_dll() -> Vec<u8> {
+    let entry = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let seven = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 7)?;
+        a.ret()
+    };
+    let data = [0u8; 0x10];
+    module_image(
+        DLL_BASE,
+        Some("D.DLL"),
+        &[],
+        &data,
+        &[("", &entry), ("Seven", &seven)],
+        &[],
+    )
+}
+
+/// The program of the nested FreeLibrary tests: it loads D.DLL, then
+/// `first`, and frees `first`. Then `first` and `gone` are gone, and
+/// D.DLL is there with its export, under the handle the load gave.
+fn nested_free_program(first: &str, gone: &str) -> Vec<u8> {
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "FreeLibrary",
+        "GetModuleHandleA",
+        "GetProcAddress",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"D.DLL\0Seven\0".to_vec();
+    data.resize(0x10, 0);
+    data.extend_from_slice(first.as_bytes());
+    data.resize(0x20, 0);
+    data.extend_from_slice(gone.as_bytes());
+    data.resize(0x40, 0);
+    const D: u32 = 0;
+    const SEVEN: u32 = 6;
+    const FIRST: u32 = 0x10;
+    const GONE: u32 = 0x20;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.push(l.at(D) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.push(l.at(FIRST) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(edi, eax)?;
+        a.test(edi, edi)?;
+        check(a, true, 0)?;
+        a.push(edi)?;
+        a.call(f("FreeLibrary"))?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        a.push(l.at(FIRST) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.push(l.at(GONE) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 3)?;
+        a.push(l.at(D) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 4)?;
+        a.push(l.at(SEVEN) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.test(eax, eax)?;
+        check(a, true, 5)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    module_image(BASE, None, imports, &data, &[("", &main)], &[])
+}
+
+/// X.DLL's DLL_PROCESS_DETACH loads X.DLL and frees it again (#1893).
+/// The load finds it still there and the FreeLibrary inside DllMain only
+/// takes that reference away, as Wine's LdrUnloadDll does: X.DLL's code
+/// is there when it returns, X.DLL learns once that it is detached, and
+/// it goes when the program's FreeLibrary does. D.DLL, which X.DLL
+/// imports from and the program loaded as well, loses X.DLL's reference
+/// once and stays.
+#[test]
+fn a_dll_freeing_itself_as_it_detaches_goes_after_the_outer_free() {
+    let x_imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+        ),
+        ("D.DLL", &["Seven"]),
+    ];
+    let mut x_data = b"X.DLL\0\0\0X detached\r\nX back\r\n".to_vec();
+    x_data.resize(0x40, 0);
+    const NAME: u32 = 0;
+    const DETACHED: u32 = 8;
+    const BACK: u32 = 20;
+    const WRITTEN: u32 = 0x30;
+    let x_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        say_from(a, l, (2, 3), DETACHED, 12, WRITTEN)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(l.import(0))?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        // Back in X.DLL's code, which is still there.
+        say_from(a, l, (2, 3), BACK, 8, WRITTEN)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let x = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        x_imports,
+        &x_data,
+        &[("", &x_main)],
+        &[],
+    );
+    let exe = nested_free_program("X.DLL", "X.DLL");
+    let (code, text) = run_files(
+        "nested_free_self",
+        &[("T.EXE", exe), ("X.DLL", x), ("D.DLL", seven_dll())],
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text.matches("X detached\r\n").count(), 1, "{text}");
+    assert_eq!(text.matches("X back\r\n").count(), 1, "{text}");
+}
+
+/// Y.DLL imports from X.DLL, which imports from D.DLL. The program frees
+/// Y.DLL, the last reference to both, and Y.DLL's DLL_PROCESS_DETACH
+/// loads X.DLL and frees it again (#1893). That inner FreeLibrary only
+/// lowers X.DLL's count: X.DLL learns that it is detached after Y.DLL's
+/// DllMain has returned, as Wine's process_detach tells it when the
+/// outermost FreeLibrary ends, and D.DLL, which the program loaded as
+/// well, loses X.DLL's reference once and stays.
+#[test]
+fn a_free_inside_a_dllmain_leaves_the_detach_to_the_outer_free() {
+    let x_imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetStdHandle", "WriteFile"]),
+        ("D.DLL", &["Seven"]),
+    ];
+    let mut x_data = b"X detached\r\n".to_vec();
+    x_data.resize(0x40, 0);
+    let x_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        say_from(a, l, (0, 1), 0, 12, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let six = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 6)?;
+        a.ret()
+    };
+    let x = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        x_imports,
+        &x_data,
+        &[("", &x_main), ("Six", &six)],
+        &[],
+    );
+
+    let y_imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+        ),
+        ("X.DLL", &["Six"]),
+    ];
+    let mut y_data = b"X.DLL\0\0\0Y freed X\r\n".to_vec();
+    y_data.resize(0x40, 0);
+    let y_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        say_from(a, l, (2, 3), 8, 11, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let y = module_image(
+        DLL_BASE,
+        Some("Y.DLL"),
+        y_imports,
+        &y_data,
+        &[("", &y_main)],
+        &[],
+    );
+
+    let exe = nested_free_program("Y.DLL", "X.DLL");
+    let (code, text) = run_files(
+        "nested_free_other",
+        &[
+            ("T.EXE", exe),
+            ("Y.DLL", y),
+            ("X.DLL", x),
+            ("D.DLL", seven_dll()),
+        ],
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text.matches("X detached\r\n").count(), 1, "{text}");
+    let freed = text.find("Y freed X\r\n");
+    let detached = text.find("X detached\r\n");
+    assert!(
+        freed.is_some() && freed < detached,
+        "X.DLL learned that it is detached before Y.DLL's FreeLibrary returned: {text}"
+    );
+}
+
 /// A state saved after the last free of a built-in DLL has its mapping and
 /// stub pages: after a load the DLL isn't there, and it loads again where
 /// it was, with a new runtime.
