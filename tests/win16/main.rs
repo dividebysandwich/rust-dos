@@ -13,6 +13,7 @@ mod win16_conformance_tests;
 mod win16_ddeml_tests;
 mod win16_drive_tests;
 mod win16_exec_tests;
+mod win16_gdi_tests;
 mod win16_hook_tests;
 mod win16_kernel_debug_tests;
 mod win16_lock_tests;

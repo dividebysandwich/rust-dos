@@ -1201,10 +1201,13 @@ fn ver_install_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         kernel32::full_path(cpu, &tmp_path),
         kernel32::full_path(cpu, &dest),
     );
+    // The installed file's name keeps the case it is given, as MoveFileA
+    // keeps it.
+    let (from, to) = (kernel32::dos_path(&from), kernel32::dos_path(&to));
     if let Err(code) = cpu
         .bus
         .disk
-        .rename_file(&kernel32::dos_path(&from), &kernel32::dos_path(&to))
+        .long_name_call(|disk| disk.rename_file(&from, &to))
     {
         result |= vif_error(code as u32) | VIF_CANNOTRENAME;
         let _ = cpu.bus.disk.delete_file(&tmp_dos);

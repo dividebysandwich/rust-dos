@@ -1114,7 +1114,7 @@ pub mod files {
         let full = full_path(cpu, name);
         cpu.bus
             .disk
-            .write_whole_file(&full, data, None)
+            .long_name_call(|disk| disk.write_whole_file(&full, data, None))
             .map_err(|e| e as u32)
     }
 

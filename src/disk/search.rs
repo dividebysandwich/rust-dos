@@ -341,7 +341,7 @@ impl DiskController {
                 return Err(0x05); // Access denied / already exists
             }
         }
-        let target = parent_path.join(leaf.to_uppercase());
+        let target = parent_path.join(self.entry_name(leaf));
         let created = hostfs::create_dir(&target);
         self.host_dirs.changed();
         self.host_dirs.touched(&target);

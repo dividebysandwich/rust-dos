@@ -487,11 +487,15 @@ impl DiskController {
             return Err(0x03);
         }
         // Destination exists, or is a name the host keeps for its own
-        // files (`host_private`).
-        if super::host_private(leaf) || self.find_existing_child(&parent, leaf).is_some() {
+        // files (`host_private`). A long-name call may give a name another
+        // case, as MoveFileA does on Windows 9x: the destination is then
+        // the source itself.
+        let existing = self.find_existing_child(&parent, leaf);
+        let recased = self.keep_case && existing.as_ref().is_some_and(|e| parent.join(e) == source);
+        if super::host_private(leaf) || (existing.is_some() && !recased) {
             return Err(0x05);
         }
-        let target = parent.join(super::new_entry_name(leaf));
+        let target = parent.join(self.entry_name(leaf));
         let renamed = hostfs::rename(&source, &target);
         self.host_dirs.changed();
         if renamed.is_ok() {
