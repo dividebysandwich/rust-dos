@@ -300,7 +300,9 @@ pub fn given(spec: &Spec, args: &[u32], array: Option<&[u8]>) -> Option<Given> {
     let skip = (kind == Kind::MultiTexCoord) as usize;
     let v = decode(args, skip, n, t, array, kind)?;
     Some(match kind {
-        Kind::Vertex | Kind::RasterPos => Given::Vertex(position(n, v)),
+        Kind::Vertex => Given::Vertex(position(n, v)),
+        // No vertex: a run of vertices ends at it (`spec` names none).
+        Kind::RasterPos => return None,
         Kind::Color => Given::Color(color(n, v)),
         Kind::Normal => Given::Normal([v[0], v[1], v[2]]),
         Kind::TexCoord | Kind::MultiTexCoord => Given::TexCoord(unit(kind, args)?, tex_coord(n, v)),
