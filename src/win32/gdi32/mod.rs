@@ -631,6 +631,14 @@ pub fn sample_truetype(family: &str) -> Vec<u8> {
     ttf::sample(family, false)
 }
 
+/// The .FOT file of the TrueType file `ttf` named `ttf_name`, as
+/// CreateScalableFontResourceA writes it, for the tests of the fonts
+/// that name one.
+#[doc(hidden)]
+pub fn sample_fot(ttf_name: &str, ttf: &[u8]) -> Vec<u8> {
+    fot::for_truetype(ttf_name, ttf, false).expect("a TrueType font")
+}
+
 /// The region of the region object `handle`, if it is one.
 pub fn region_of(cpu: &mut Cpu, handle: u32) -> Option<Region> {
     gdi(cpu).region(handle).cloned()

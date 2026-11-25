@@ -40,7 +40,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::dc::{self, Dc, OPAQUE};
@@ -2396,31 +2396,40 @@ pub fn add_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     let name = crate::win32::kernel32::path::full_path(cpu, &name);
-    let file = added_file(cpu, name, bytes, read_file);
+    let (_, bytes) = font_data(cpu, &name, bytes, read_file);
+    let file = added_file(name, &bytes);
     let count = (file.fonts.len() + file.truetype.len()).max(1) as u32;
     init(cpu);
     gdi(cpu).font_files.push(file);
     Some(count)
 }
 
-/// The fonts of the file `name`, whose bytes are `bytes`, as
-/// AddFontResourceA adds them. `read` reads the TrueType file a .FOT
-/// names (`scalable_file`).
-fn added_file(
+/// The path and the bytes of the fonts of the file at `path`, whose
+/// bytes are `bytes`: the TrueType file's for a .FOT, which `read`
+/// reads (`scalable_file`), else the file's own. A .FOT whose TrueType
+/// file isn't there has no fonts.
+fn font_data(
     cpu: &mut Cpu,
-    name: String,
-    mut bytes: Vec<u8>,
+    path: &str,
+    bytes: Vec<u8>,
     read: fn(&mut Cpu, &str) -> Option<Vec<u8>>,
-) -> AddedFile {
-    if let Some(target) = super::fot::target(&bytes) {
-        bytes = scalable_file(cpu, &target, read).unwrap_or_default();
+) -> (String, Vec<u8>) {
+    match super::fot::target(&bytes) {
+        Some(target) => scalable_file(cpu, &target, read)
+            .unwrap_or_else(|| (path.to_string(), Vec::new())),
+        None => (path.to_string(), bytes),
     }
-    let fonts: Vec<Rc<Fnt>> = super::fnt::fonts_of_file(&bytes)
+}
+
+/// The fonts of the file `name`, whose fonts are in `bytes`
+/// (`font_data`), as AddFontResourceA adds them.
+fn added_file(name: String, bytes: &[u8]) -> AddedFile {
+    let fonts: Vec<Rc<Fnt>> = super::fnt::fonts_of_file(bytes)
         .into_iter()
         .map(Rc::new)
         .collect();
     let truetype: Vec<Rc<Ttf>> = if fonts.is_empty() {
-        Ttf::fonts_of_file(&bytes)
+        Ttf::fonts_of_file(bytes)
             .into_iter()
             .map(Rc::new)
             .collect()
@@ -2448,9 +2457,11 @@ const FONTS_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Fonts";
 ///
 /// A name without a folder is in the fonts folder, the Windows folder or
 /// the system folder, looked for in that order (`installed_file`). A file
-/// that isn't there is left out, as Windows leaves it, and a file listed
-/// twice is loaded once. The fonts go with the files AddFontResourceA
-/// adds, so a state saved in the session keeps them.
+/// that isn't there is left out, as Windows leaves it. A file listed
+/// twice is loaded once, and so is a TrueType file listed both as it is
+/// and through a .FOT that names it, as a Windows 3.1 setup's WIN.INI
+/// line and the registry may have it. The fonts go with the files
+/// AddFontResourceA adds, so a state saved in the session keeps them.
 pub(super) fn load_installed(cpu: &mut Cpu) {
     use crate::win32::registry::{HKEY_LOCAL_MACHINE, string_values};
     let mut names: Vec<String> = string_values(cpu, &[(HKEY_LOCAL_MACHINE, FONTS_KEY)])
@@ -2460,6 +2471,8 @@ pub(super) fn load_installed(cpu: &mut Cpu) {
         .collect();
     let ini = crate::win32::kernel32::profile_values(cpu, b"WIN.INI", b"Fonts");
     names.extend(ini.iter().map(|v| crate::dosstr::from_bytes(v)));
+    // The paths of the font data loaded (`font_data`), in capitals.
+    let mut loaded: HashSet<String> = HashSet::new();
     for name in names {
         let name = name.trim();
         if name.is_empty() {
@@ -2470,11 +2483,11 @@ pub(super) fn load_installed(cpu: &mut Cpu) {
             cpu.bus.log_string(&text);
             continue;
         };
-        let files = &gdi(cpu).font_files;
-        if files.iter().any(|f| f.name.eq_ignore_ascii_case(&path)) {
+        let (data_path, bytes) = font_data(cpu, &path, bytes, disk_file);
+        if !loaded.insert(data_path.to_ascii_uppercase()) {
             continue;
         }
-        let file = added_file(cpu, path, bytes, disk_file);
+        let file = added_file(path, &bytes);
         gdi(cpu).font_files.push(file);
     }
 }
@@ -2502,26 +2515,28 @@ fn disk_file(cpu: &mut Cpu, path: &str) -> Option<Vec<u8>> {
     Some(cpu.bus.disk.file_data(path)?.read().ok()?.into_owned())
 }
 
-/// The TrueType file `name` a .FOT names, read with `read`: as it is,
-/// which finds a full path, or a name relative to the current folder.
-/// Windows 98 SE then looks for a bare file name in the fonts, Windows
-/// and system folders, and not in the .FOT's own folder.
+/// The full path and the bytes of the TrueType file `name` a .FOT
+/// names, read with `read`: as it is, which finds a full path, or a name
+/// relative to the current folder. Windows 98 SE then looks for a bare
+/// file name in the fonts, Windows and system folders, and not in the
+/// .FOT's own folder.
 fn scalable_file(
     cpu: &mut Cpu,
     name: &str,
     read: fn(&mut Cpu, &str) -> Option<Vec<u8>>,
-) -> Option<Vec<u8>> {
-    use crate::win32::kernel32::path::{SYSTEM, WINDOWS};
+) -> Option<(String, Vec<u8>)> {
+    use crate::win32::kernel32::path::{SYSTEM, WINDOWS, full_path};
     if let Some(bytes) = read(cpu, name) {
-        return Some(bytes);
+        return Some((full_path(cpu, name), bytes));
     }
     if name.contains(['\\', '/', ':']) {
         return None;
     }
     let fonts = format!("{WINDOWS}\\FONTS");
-    [fonts.as_str(), WINDOWS, SYSTEM]
-        .iter()
-        .find_map(|dir| read(cpu, &format!("{dir}\\{name}")))
+    [fonts.as_str(), WINDOWS, SYSTEM].iter().find_map(|dir| {
+        let path = format!("{dir}\\{name}");
+        read(cpu, &path).map(|bytes| (path, bytes))
+    })
 }
 
 /// CreateScalableFontResourceA(hidden, fot, ttf, path): write the .FOT
@@ -2695,6 +2710,23 @@ fn start_enum(cpu: &mut Cpu, items: Vec<u32>, proc: u32, param: u32) -> Option<u
     crate::win32::task::start(cpu, super::TASK_CALLBACK, vars, ENUM_SCRATCH)
 }
 
+/// The character sets in which the fonts of the files added have the
+/// face `name`: a raster font's own, a TrueType font's each
+/// (`truetype_charsets`). A built-in face of that name isn't listed in
+/// them: Windows has the face from the file, and realization picks the
+/// file's font before it (`realized_of`). That is how a WIN.INI of
+/// Windows 3.1 lists `SSERIFE.FON` and `ARIAL.FOT`, and how Encarta 97
+/// lists its own ARIAL.TTF in the registry.
+fn added_face_sets(files: &[AddedFile], name: &str) -> Vec<u8> {
+    let raster = added_fonts(files)
+        .filter(|f| f.face.eq_ignore_ascii_case(name))
+        .map(|f| f.charset);
+    let truetype = added_fonts_truetype(files)
+        .filter(|t| t.face.eq_ignore_ascii_case(name))
+        .flat_map(|t| truetype_charsets(t));
+    raster.chain(truetype).collect()
+}
+
 /// The faces whose name is `family`, or all of them with none.
 fn faces_named(family: Option<&str>) -> Vec<usize> {
     (0..FACES.len())
@@ -2719,10 +2751,12 @@ pub fn enum_font_families(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         crate::win32::user32::string_at(cpu, args[1])
     };
     // Each face once, in its first character set: the system's where it
-    // has it.
+    // has it. A face a file added has is listed from the file.
     let sys = System::of(cpu);
+    let files = &gdi(cpu).font_files;
     let mut items: Vec<u32> = faces_named(family.as_deref())
         .into_iter()
+        .filter(|&i| added_face_sets(files, FACES[i].name).is_empty())
         .map(|i| enum_item(i, sys.sets(i)[0]))
         .collect();
     items.extend(added_items(cpu, family.as_deref(), DEFAULT_CHARSET));
@@ -2750,11 +2784,20 @@ pub fn enum_font_families_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let log = Log::of(&b);
     let family = (!log.face.is_empty()).then_some(log.face.as_str());
-    // A face in each of its character sets, or in the one asked for.
+    // A face in each of its character sets, or in the one asked for,
+    // but those a file added has the face in, which are listed from
+    // the file.
     let sys = System::of(cpu);
+    let files = &gdi(cpu).font_files;
     let mut items: Vec<u32> = faces_named(family)
         .into_iter()
-        .flat_map(|i| sys.sets(i).into_iter().map(move |c| (i, c)))
+        .flat_map(|i| {
+            let added = added_face_sets(files, FACES[i].name);
+            sys.sets(i)
+                .into_iter()
+                .filter(move |c| !added.contains(c))
+                .map(move |c| (i, c))
+        })
         .filter(|&(_, c)| log.charset == DEFAULT_CHARSET || c == log.charset)
         .map(|(i, c)| enum_item(i, c))
         .collect();

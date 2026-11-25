@@ -474,16 +474,27 @@ pub(crate) fn profile_value(
         .map(<[u8]>::to_vec)
 }
 
-/// The values of the lines of `section` in the profile `file`, in their
-/// order, the quotes around each taken off, for the system's own use:
-/// WIN.INI's `[Fonts]`, which GDI loads as it starts. A line without '='
-/// has no value.
+/// The values of the keys of `section` in the profile `file`, in their
+/// order, for the system's own use: WIN.INI's `[Fonts]`, which GDI
+/// loads as it starts. They are read as a program reads them, listing
+/// the keys (GetProfileStringA with no key) and then each key's value,
+/// so a comment line (';') and a line without '=' have none, and a key
+/// listed twice has its first value twice. The file is read from the
+/// disk, not through a process's file handle, which a program holding
+/// it open without sharing it could refuse.
 pub(in crate::win32) fn profile_values(cpu: &mut Cpu, file: &[u8], section: &[u8]) -> Vec<Vec<u8>> {
-    let sections = load(cpu, Some(file));
+    let path = path_of(Some(file));
+    let Some(data) = cpu.bus.disk.file_data(&path) else {
+        return Vec::new();
+    };
+    let Ok(text) = data.read() else {
+        return Vec::new();
+    };
+    let sections = parse(&text);
     find(&sections, section).map_or(Vec::new(), |s| {
-        s.entries
+        section_lines(s, false)
             .iter()
-            .filter_map(|e| Some(unquoted(e.value.as_deref()?).to_vec()))
+            .filter_map(|key| value_of(s, key).map(<[u8]>::to_vec))
             .collect()
     })
 }
