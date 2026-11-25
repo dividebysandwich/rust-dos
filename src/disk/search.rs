@@ -621,7 +621,8 @@ impl DiskController {
         let drive = self.drive(drive_num)?;
         let volume = drive.fat()?;
         let (dir, pattern) = Self::dir_and_pattern(rest);
-        let dir: Vec<String> = self.logical_components(drive, dir)
+        let dir: Vec<String> = self
+            .logical_components(drive, dir)
             .into_iter()
             .map(Cow::into_owned)
             .collect();
@@ -776,7 +777,8 @@ impl DiskController {
         }
 
         if let Some(volume) = drive.fat() {
-            let dir: Vec<String> = self.logical_components(drive, search_dir_str)
+            let dir: Vec<String> = self
+                .logical_components(drive, search_dir_str)
                 .into_iter()
                 .map(Cow::into_owned)
                 .collect();

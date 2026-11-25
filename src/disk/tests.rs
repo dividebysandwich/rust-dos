@@ -312,6 +312,9 @@ fn spaces_before_the_extension_pad_the_name() {
         .unwrap();
     disk.close_file(h);
     assert!(base.join("read me .txt").is_file());
+    // Nor does a long-name call find it by "read me.txt": that is
+    // another name on Windows.
+    assert!(!disk.long_name_call(|d| d.is_file(r"C:\read me.txt")));
 }
 
 /// A host file whose name has spaces before its extension, as builds that

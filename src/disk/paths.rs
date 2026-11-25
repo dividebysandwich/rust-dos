@@ -65,12 +65,6 @@ impl DiskController {
     /// makes its launcher as "dune    .bat", DUNE.BAT, which the launcher
     /// opens as "dune.bat". A long name keeps them, as Windows does.
     pub(super) fn dos_component<'a>(&self, part: &'a str) -> Cow<'a, str> {
-        Self::packed_component(part, self.long_call)
-    }
-
-    /// `dos_component` of `part` in a long-name call (`long`) or a DOS
-    /// call.
-    fn packed_component(part: &str, long: bool) -> Cow<'_, str> {
         let unpadded = part.trim_end_matches(' ');
         if unpadded == "." || unpadded == ".." {
             return Cow::Borrowed(unpadded);
@@ -79,7 +73,7 @@ impl DiskController {
             "" => return Cow::Borrowed(part),
             trimmed => trimmed,
         };
-        if !long && let Some((stem, ext)) = trimmed.split_once('.') {
+        if !self.long_call && let Some((stem, ext)) = trimmed.split_once('.') {
             let stem_unpadded = stem.trim_end_matches(' ');
             if stem_unpadded.len() < stem.len() && !stem_unpadded.is_empty() {
                 return Cow::Owned(format!("{stem_unpadded}.{ext}"));
@@ -459,11 +453,13 @@ impl DiskController {
     /// entries lack is looked for in a fresh read, unless a recent read
     /// lacked it too (`HostDirCache`).
     ///
-    /// Last comes a host name that is `name` with the padding DOS drops
-    /// (`dos_component`): dots or spaces after it, or spaces before its
-    /// extension. Builds before they were dropped made "SAVE." on the host
-    /// for a program's "SAVE.", and "dune    .bat" for Dune's
-    /// "dune    .bat", and the program opens it as that name still.
+    /// Last comes a host name that is `name` with the padding the call
+    /// running now drops (`dos_component`): dots or spaces after it, or,
+    /// in a DOS call, spaces before its extension. Builds before they were
+    /// dropped made "SAVE." on the host for a program's "SAVE.", and
+    /// "dune    .bat" for Dune's "dune    .bat", and the program opens it
+    /// as that name still. A long-name call keeps those spaces, so to it
+    /// "read me .txt" is another file than "read me.txt", as on Windows.
     pub(super) fn find_host_entry(
         &self,
         dir: &Path,
@@ -477,7 +473,7 @@ impl DiskController {
                 .or_else(|| entries.iter().find(|(_, short)| *short == upper))
                 .or_else(|| {
                     entries.iter().find(|(long, _)| {
-                        Self::packed_component(long, false).eq_ignore_ascii_case(name)
+                        self.dos_component(long).eq_ignore_ascii_case(name)
                     })
                 })
                 .cloned()
@@ -537,7 +533,8 @@ impl DiskController {
             return false;
         };
         if let Some(volume) = drive.fat() {
-            let parts: Vec<String> = self.logical_components(drive, rest)
+            let parts: Vec<String> = self
+                .logical_components(drive, rest)
                 .into_iter()
                 .map(Cow::into_owned)
                 .collect();
