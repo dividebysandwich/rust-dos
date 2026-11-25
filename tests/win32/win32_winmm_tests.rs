@@ -2417,3 +2417,242 @@ fn sound_names_that_are_not_strings_fail_without_a_fault() {
         assert_eq!(cpu.errorlevel, 0x3F, "{core:?}: {:?}", printed(&cpu));
     }
 }
+
+/// A program that installs an I/O procedure for 'PAK ', which serves
+/// `file` from the program's data for any name, as Encarta 97's does
+/// for its archives (#1991), and sends the MCI command `open`, then
+/// `format` and "status c length". The exit code is the error of `open`
+/// or `format` if one fails; else bit 0 is set, and bit 1 if the length
+/// reads `length`.
+fn mci_procedure_program(file: &[u8], open: &str, format: &str, length: &str) -> Vec<u8> {
+    const MMIO_INSTALLPROC: i32 = 0x10000;
+    const MMIOM_READ: i32 = 0;
+    const MMIOM_SEEK: i32 = 2;
+    // MMIOINFO's lDiskOffset, where the procedure keeps its place.
+    const DISK_OFFSET: i32 = 44;
+    const OPEN: u32 = 0x00;
+    const FORMAT: u32 = 0x40;
+    const STATUS: u32 = 0x60;
+    const REPLY: u32 = 0x80;
+    const LENGTH: u32 = 0xC0;
+    const FILE: u32 = 0x100;
+    let len = file.len() as i32;
+    let fourcc = |s: &[u8; 4]| u32::from_le_bytes(*s) as i32;
+    let mut data = vec![0u8; FILE as usize + file.len()];
+    put(&mut data, OPEN as usize, open.as_bytes());
+    put(&mut data, FORMAT as usize, format.as_bytes());
+    put(&mut data, STATUS as usize, b"status c length");
+    put(&mut data, LENGTH as usize, length.as_bytes());
+    put(&mut data, FILE as usize, file);
+    // USER32 is loaded, as it is with WINMM on Windows: AVIVideo makes
+    // its window with it.
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        ("WINMM.dll", &["mmioInstallIOProcA", "mciSendStringA"]),
+        ("USER32.dll", &["GetDesktopWindow"]),
+    ];
+    program(imports, &data, |a, l| {
+        let at = |offset: u32| l.at(offset) as i32;
+        let mut start = a.create_label();
+        a.call(start)?;
+        // LRESULT CALLBACK IOProc(LPSTR info, UINT msg, LPARAM l1,
+        // LPARAM l2): MMIOM_OPEN and MMIOM_CLOSE do nothing.
+        let mut read = a.create_label();
+        let mut seek = a.create_label();
+        let mut short = a.create_label();
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.cmp(eax, MMIOM_READ)?;
+        a.je(read)?;
+        a.cmp(eax, MMIOM_SEEK)?;
+        a.je(seek)?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        // As many bytes as are asked for and left, from the offset on.
+        a.set_label(&mut read)?;
+        a.push(esi)?;
+        a.push(edi)?;
+        a.mov(edx, dword_ptr(esp + 12))?;
+        a.mov(eax, len)?;
+        a.sub(eax, dword_ptr(edx + DISK_OFFSET))?;
+        a.mov(ecx, dword_ptr(esp + 24))?;
+        a.cmp(ecx, eax)?;
+        a.jbe(short)?;
+        a.mov(ecx, eax)?;
+        a.set_label(&mut short)?;
+        a.mov(esi, at(FILE))?;
+        a.add(esi, dword_ptr(edx + DISK_OFFSET))?;
+        a.mov(edi, dword_ptr(esp + 20))?;
+        a.mov(eax, ecx)?;
+        a.add(dword_ptr(edx + DISK_OFFSET), ecx)?;
+        a.cld()?;
+        a.rep().movsb()?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.ret_1(16)?;
+        a.set_label(&mut seek)?;
+        a.mov(ecx, dword_ptr(esp + 4))?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(ecx + DISK_OFFSET), eax)?;
+        a.ret_1(16)?;
+
+        a.set_label(&mut start)?;
+        a.pop(ebp)?;
+        a.xor(ebx, ebx)?;
+        a.push(MMIO_INSTALLPROC)?;
+        a.push(ebp)?;
+        a.push(fourcc(b"PAK "))?;
+        a.call(l.import(1))?;
+        let mut done = a.create_label();
+        call(a, l.import(2), &[at(OPEN), 0, 0, 0])?;
+        a.mov(ebx, eax)?;
+        a.test(eax, eax)?;
+        a.jnz(done)?;
+        a.or(ebx, 1)?;
+        call(a, l.import(2), &[at(FORMAT), 0, 0, 0])?;
+        let mut formatted = a.create_label();
+        a.test(eax, eax)?;
+        a.jz(formatted)?;
+        a.mov(ebx, eax)?;
+        a.jmp(done)?;
+        a.set_label(&mut formatted)?;
+        call(a, l.import(2), &[at(STATUS), at(REPLY), 32, 0])?;
+        a.test(eax, eax)?;
+        a.jnz(done)?;
+        a.mov(esi, at(REPLY))?;
+        a.mov(edi, at(LENGTH))?;
+        a.mov(ecx, length.len() as i32 + 1)?;
+        a.cld()?;
+        a.repe().cmpsb()?;
+        a.jne(done)?;
+        a.or(ebx, 2)?;
+        a.set_label(&mut done)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    })
+}
+
+/// MCIWAVE and MCIAVI open their files with mmioOpen, so a name of an
+/// archive reads through the procedure the program installed for it.
+/// MPEGVideo, ActiveMovie's MCIQTZ, opens its file with DirectShow,
+/// whose file source doesn't use mmio, so the same name isn't found:
+/// the exit code is MCIERR_FILE_NOT_FOUND (275) in its low byte.
+#[test]
+fn mci_opens_a_file_through_the_programs_io_procedure() {
+    let wav = short_wav();
+    let avi = avi_clip();
+    // The device, its file, the open, the time format, the length the
+    // status reads, and the exit code.
+    type Case<'a> = (&'a str, &'a [u8], &'a str, &'a str, &'a str, u8);
+    let cases: [Case; 3] = [
+        (
+            "waveaudio",
+            &wav,
+            "open SND.PAK+CLIP.WAV type waveaudio alias c",
+            "set c time format bytes",
+            "1102",
+            0x03,
+        ),
+        (
+            "AVIVideo",
+            &avi,
+            "open SND.PAK+CLIP.AVI type AVIVideo alias c",
+            "set c time format frames",
+            "12",
+            0x03,
+        ),
+        (
+            "MPEGVideo",
+            &avi,
+            "open SND.PAK+CLIP.AVI type MPEGVideo alias c",
+            "set c time format frames",
+            "12",
+            (275 & 0xFF) as u8,
+        ),
+    ];
+    for (name, file, open, format, length, want) in cases {
+        for core in CORES {
+            let files = [("T.EXE", mci_procedure_program(file, open, format, length))];
+            let mut cpu = machine("mci_procedure", core, &files, |_| {});
+            run_to_exit(&mut cpu, 20_000, |_| {});
+            assert_eq!(cpu.errorlevel, want, "{name} {core:?}: {:?}", printed(&cpu));
+        }
+    }
+}
+
+
+/// A mono MS ADPCM WAV at 22050 Hz of two 16-byte blocks, 20 samples
+/// each: a 7-byte header and 9 bytes of codes.
+fn ms_adpcm_wav() -> Vec<u8> {
+    const COEFFICIENTS: [(i16, i16); 7] = [
+        (256, 0),
+        (512, -256),
+        (0, 0),
+        (192, 64),
+        (240, 0),
+        (460, -208),
+        (392, -232),
+    ];
+    let mut fmt = vec![2, 0, 1, 0];
+    fmt.extend(22050u32.to_le_bytes());
+    // nAvgBytesPerSec: 22050 samples a second in 16-byte blocks of 20.
+    fmt.extend((22050u32 * 16 / 20).to_le_bytes());
+    for v in [16u16, 4, 32, 20, 7] {
+        fmt.extend(v.to_le_bytes());
+    }
+    for (a, b) in COEFFICIENTS {
+        fmt.extend(a.to_le_bytes());
+        fmt.extend(b.to_le_bytes());
+    }
+    let mut block = vec![0, 16, 0];
+    block.extend(1000i16.to_le_bytes());
+    block.extend(500i16.to_le_bytes());
+    block.extend([0; 9]);
+    let data = [block.clone(), block].concat();
+    let mut wav = b"RIFF".to_vec();
+    wav.extend((4 + 8 + fmt.len() as u32 + 8 + data.len() as u32).to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    wav.extend((fmt.len() as u32).to_le_bytes());
+    wav.extend(fmt);
+    wav.extend(b"data");
+    wav.extend((data.len() as u32).to_le_bytes());
+    wav.extend(data);
+    wav
+}
+
+/// Encarta 97's sounds are MS ADPCM WAVs in its archives (#1991). MCIWAVE
+/// plays them through the wave mapper's ACM conversion, and counts their
+/// length in the file's own bytes (32) and in samples (40), not in the
+/// bytes of the 16-bit PCM it plays (80).
+#[test]
+fn mci_waveaudio_plays_ms_adpcm_and_counts_the_files_bytes() {
+    let wav = ms_adpcm_wav();
+    let open = "open SND.PAK+CLIP.WAV type waveaudio alias c";
+    let cases = [
+        ("set c time format bytes", "32"),
+        ("set c time format samples", "40"),
+    ];
+    for (format, length) in cases {
+        for core in CORES {
+            let files = [("T.EXE", mci_procedure_program(&wav, open, format, length))];
+            let mut cpu = machine("mci_adpcm", core, &files, |_| {});
+            run_to_exit(&mut cpu, 20_000, |_| {});
+            assert_eq!(cpu.errorlevel, 0x03, "{format} {core:?}: {:?}", printed(&cpu));
+        }
+    }
+}
+
+/// WINMM keeps the break key itself and doesn't pass MCI_BREAK to the
+/// driver (Wine's MCI_Break), so MCIWAVE's device takes it too. Encarta
+/// 97 sends it after every open. The clip is 1102 bytes at 11025 bytes a
+/// second, 99 milliseconds.
+#[test]
+fn mci_break_works_for_every_device() {
+    let open = "open SND.PAK+CLIP.WAV type waveaudio alias c";
+    for core in CORES {
+        let files = [("T.EXE", mci_procedure_program(&short_wav(), open, "break c", "99"))];
+        let mut cpu = machine("mci_break", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 0x03, "{core:?}: {:?}", printed(&cpu));
+    }
+}

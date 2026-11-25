@@ -17,12 +17,19 @@
 //! can switch to another PDB with AH=50h. The selector keeps the tasks
 //! apart also in a save state from before the PDBs were in DOS's memory,
 //! where every task makes its DOS calls in the process Windows runs in.
+//!
+//! A Win32 process holds its locks, kernel32's LockFile's as well as
+//! those of its DOS calls, by its process id. Windows 95 and 98 keep one
+//! set of locks for each file in VSHARE, which DOS programs, Win16 tasks
+//! and Win32 processes all go through, so a lock of any of them keeps the
+//! others from the bytes.
 
 use super::DiskController;
 
-/// What a lock is held by: a DOS process's PSP segment, or with this bit
-/// set, a Win16 task's PDB selector. A selector can have the value of a
-/// segment, and the bit keeps the two apart.
+/// What a lock is held by: a DOS process's PSP segment, with this bit
+/// set a Win16 task's PDB selector, or a Win32 process's id, which is
+/// 0FFF00000h or more (`Win32::new_id`). A selector can have the value of
+/// a segment, and the bit keeps the two apart.
 pub const TASK_OWNER: u32 = 0x1_0000;
 
 /// The most locks there are at once. SHARE keeps as many as its /L

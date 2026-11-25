@@ -173,9 +173,9 @@ fn free_space_allocation_info_and_dpb() {
     int21(&mut cpu, 0x36);
     assert_eq!((cpu.bx(), cpu.cx()), (0, 2048));
 
-    cpu.set_reg8(Register::DL, 3); // C: empty, the fake 320 MB
+    cpu.set_reg8(Register::DL, 3); // C: empty, the fake 1 GB
     int21(&mut cpu, 0x36);
-    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (32, 20000, 512, 20000));
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (32, 65_518, 512, 65_518));
 
     cpu.set_reg8(Register::DL, 7); // G: not mounted
     int21(&mut cpu, 0x36);
@@ -223,7 +223,7 @@ fn disk_free(cpu: &mut Cpu, dl: u8) -> (u16, u16, u16, u16) {
 fn hard_disk_free_space_drops_as_files_are_written() {
     let base = scratch("hd_space", &["c"]);
     let mut cpu = Cpu::new(base.join("c"));
-    assert_eq!(disk_free(&mut cpu, 3), (32, 20000, 512, 20000));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 65_518, 512, 65_518));
 
     set_dsdx_string(&mut cpu, "C:\\ISCMPRSD.$$$");
     cpu.set_cx(0);
@@ -239,25 +239,59 @@ fn hard_disk_free_space_drops_as_files_are_written() {
     cpu.set_bx(handle);
     int21(&mut cpu, 0x3E);
     assert!(!cf(&cpu));
-    assert_eq!(disk_free(&mut cpu, 3), (32, 19999, 512, 20000));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 65_517, 512, 65_518));
 
     set_dsdx_string(&mut cpu, "C:\\ISCMPRSD.$$$");
     int21(&mut cpu, 0x41);
     assert!(!cf(&cpu));
-    assert_eq!(disk_free(&mut cpu, 3), (32, 20000, 512, 20000));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 65_518, 512, 65_518));
 }
 
-/// A folder holding more than half the fake 320 MB still has room: the
-/// disk grows in steps of 320 MB, and AX=7303h tells the same.
+/// Perfect Assassin's installer multiplies AH=36h's AX, BX and CX and
+/// refuses its LARGE install, 360,857,188 bytes, on a drive with less
+/// free. An empty folder C: has room for it, and AH=1Ch and the DPB
+/// count the same 1 GB disk.
 #[test]
-fn hard_disk_grows_past_what_its_folder_holds() {
+fn an_empty_hard_disk_takes_a_large_cd_install() {
+    let base = scratch("hd_large", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    let (spc, free, bps, total) = disk_free(&mut cpu, 3);
+    assert!(spc as u64 * free as u64 * bps as u64 >= 360_857_188);
+    // A cluster of 16 KB, whose size 16-bit arithmetic holds.
+    assert_eq!((spc, bps, total), (32, 512, 65_518));
+
+    cpu.set_reg8(Register::DL, 3);
+    int21(&mut cpu, 0x1C);
+    assert_eq!((cpu.get_reg8(Register::AL), cpu.cx(), cpu.dx()), (32, 512, 65_518));
+
+    rust_dos::dos_data::set_version(&mut cpu.bus, rust_dos::config::DosVersion::new(7, 10));
+    cpu.set_es(0x3000);
+    cpu.set_di(0);
+    cpu.set_cx(0x3F);
+    cpu.set_dx(3);
+    cpu.set_ax(0x7302);
+    int21::handle(&mut cpu);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    // The DPB's free clusters (+1Fh) and highest cluster (+2Dh), past
+    // its size word.
+    let dword = |at: usize| cpu.bus.read_32(0x30000 + 2 + at);
+    assert_eq!((dword(0x1F), dword(0x2D)), (65_518, 65_519));
+}
+
+/// A folder holding more than 512 MB still has 512 MB or more free: the
+/// free space goes back up each time it would fall below 512 MB, and
+/// AX=7303h tells the same.
+#[test]
+fn a_folder_past_512_mb_keeps_512_mb_free() {
     let base = scratch("hd_grow", &["c"]);
-    // 240 MB, 15,000 clusters of 16 KB; sparse where the host allows.
+    // 640 MB, 40,000 clusters of 16 KB; sparse where the host allows.
     let file = fs::File::create(base.join("c/BIG.DAT")).unwrap();
-    file.set_len(15_000 * 16384).unwrap();
+    file.set_len(40_000 * 16384).unwrap();
     drop(file);
     let mut cpu = Cpu::new(base.join("c"));
-    assert_eq!(disk_free(&mut cpu, 3), (32, 25000, 512, 40000));
+    // 65,517 clusters less the 7,249 written past the first 32,751, the
+    // most that are written before free space goes back up.
+    assert_eq!(disk_free(&mut cpu, 3), (32, 58_268, 512, 65_518));
 
     rust_dos::dos_data::set_version(&mut cpu.bus, rust_dos::config::DosVersion::new(7, 10));
     set_dsdx_string(&mut cpu, "C:\\");
@@ -269,11 +303,12 @@ fn hard_disk_grows_past_what_its_folder_holds() {
     assert!(!cf(&cpu));
     let dword = |i: usize| cpu.bus.read_32(0x30000 + 4 + 4 * i);
     // Sectors per cluster, bytes per sector, free and total clusters.
-    assert_eq!((dword(0), dword(1), dword(2), dword(3)), (32, 512, 25000, 40000));
+    assert_eq!((dword(0), dword(1), dword(2), dword(3)), (32, 512, 58_268, 65_518));
 }
 
 /// Past 65,535 clusters AH=36h would count clusters of 32 KB, where a
-/// 16 KB write may not show: the total stops there instead.
+/// 16 KB write may not show: the total stays at the 1 GB disk's 65,518
+/// however much the folder holds.
 #[test]
 fn a_full_folder_still_shows_each_cluster_written() {
     let base = scratch("hd_full", &["c/GAMES"]);
@@ -282,8 +317,9 @@ fn a_full_folder_still_shows_each_cluster_written() {
     file.set_len(60_000 * 16384).unwrap();
     drop(file);
     let mut cpu = Cpu::new(base.join("c"));
-    // 80,000 clusters less 60,001 used (the file and its folder).
-    assert_eq!(disk_free(&mut cpu, 3), (32, 19999, 512, 0xFFFF));
+    // 65,517 clusters less the 27,250 of the 60,001 used (the file and its
+    // folder) written past the first 32,751.
+    assert_eq!(disk_free(&mut cpu, 3), (32, 38_267, 512, 65_518));
 
     set_dsdx_string(&mut cpu, "C:\\GAMES\\SAVE.DAT");
     cpu.set_cx(0);
@@ -296,7 +332,7 @@ fn a_full_folder_still_shows_each_cluster_written() {
     assert_eq!((cf(&cpu), cpu.ax()), (false, 0x4000));
     cpu.set_bx(handle);
     int21(&mut cpu, 0x3E);
-    assert_eq!(disk_free(&mut cpu, 3), (32, 19998, 512, 0xFFFF));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 38_266, 512, 65_518));
 }
 
 #[test]

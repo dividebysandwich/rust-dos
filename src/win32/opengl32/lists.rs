@@ -1006,6 +1006,38 @@ fn intercepted(cpu: &mut Cpu, name: &str, args: &[u32], data: Option<&[u8]>) -> 
     refused(cpu, at)
 }
 
+/// The bitmap at `at`, `width` by `height`, under the unpack state in
+/// force, as rows of `width.div_ceil(8)` bytes from the bottom, a row's
+/// first pixel in its first byte's top bit: what glBitmap draws. None
+/// when it can't all be read.
+pub(super) fn bitmap_rows(cpu: &mut Cpu, at: u32, width: u32, height: u32) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    copy_image(cpu, at, (width, height), None, &mut out).then_some(out)
+}
+
+/// Make the list `name` of the current context's group one glBitmap
+/// with `args`, whose bitmap is `bits` (as `bitmap_rows` gives them;
+/// none for a bitmap without pixels, whose pointer is kept as it is),
+/// as wglUseFontBitmaps makes a glyph's: glNewList with GL_COMPILE, the
+/// call and glEndList. False, with nothing made, while the context has
+/// a list open or is between glBegin and glEnd.
+pub(super) fn compile_bitmap(cpu: &mut Cpu, name: u32, args: &[u32; 7], bits: &[u8]) -> bool {
+    if ctx(cpu).is_none_or(|c| c.lists.open.is_some() || c.begin.is_some()) {
+        return false;
+    }
+    new_list(cpu, &[name, GL_COMPILE]);
+    let Some(mut open) = take_open(cpu) else {
+        // A name glNewList refused.
+        return false;
+    };
+    let at = place_of("glBitmap").expect("an export of OPENGL32");
+    let data = (!bits.is_empty()).then_some(bits);
+    push(cpu, &mut open, at, args, data, false);
+    put_back(cpu, open);
+    end_list(cpu, &[]);
+    true
+}
+
 /// Multiply the current matrix by `m` on its right, as glMultMatrixf
 /// does, for GLU32's matrices.
 pub fn mult_matrix(cpu: &mut Cpu, m: &[f32; 16]) {
