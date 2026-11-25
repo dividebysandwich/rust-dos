@@ -90,7 +90,7 @@ const CLR_INVALID: u32 = 0xFFFF_FFFF;
 /// share the entry of their nearest color (`Palette::nearest`). An older
 /// state's palettes load without, and the first of the entries sharing
 /// one gives it its color.
-pub const NEAREST_SAVED: u16 = 104;
+pub const NEAREST_SAVED: u16 = 105;
 
 /// What an entry of the system palette is.
 pub const USE_FREE: u8 = 0;
@@ -977,7 +977,7 @@ pub(super) fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
         let e = palette.entries[k];
         if kept {
             // An entry that shares another's shows the taker's color (the
-            // first sharer's in a state saved before W32 104). In the
+            // first sharer's in a state saved before W32 105). In the
             // background another palette's PC_RESERVED entry keeps its own.
             let i = mapping[k] as usize;
             if e[3] & PC_EXPLICIT != 0 || uses[i] == USE_STATIC || assigned[i] {

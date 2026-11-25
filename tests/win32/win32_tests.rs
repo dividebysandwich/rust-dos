@@ -7204,6 +7204,138 @@ fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_disk_image() {
     check_long_name_and_alias_are_one_file("one_file_image", "D:", true);
 }
 
+/// MoveFileA renames a file to its own 8.3 alias, as on Windows 98 SE
+/// (checked in 86Box): "Third file.txt" becomes THIRDF~1.TXT, where the
+/// call had found the name taken by the file itself (183). The program
+/// also makes MADE~1.TXT and then MADE.TXT, and renames "Fourth file.txt"
+/// to FOURTH~1.TXT with msvcrt's rename, which calls MoveFileA on Windows
+/// 98. Each check sets a bit of the exit code. Returns the machine, for
+/// its drive's names.
+fn rename_to_own_alias(test: &str, drive: &str, image: bool) -> Box<Cpu> {
+    use Arg::{Esi, I};
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CloseHandle",
+        "MoveFileA",
+        "GetShortPathNameA",
+        "lstrcmpA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names), ("MSVCRT.DLL", &["rename"])];
+    let mut data = vec![0; 0x200];
+    for (at, name) in [
+        (0x00, "Third file.txt"),
+        (0x20, "THIRDF~1.TXT"),
+        (0x40, "MADE~1.TXT"),
+        (0x60, "MADE.TXT"),
+        (0x80, "Fourth file.txt"),
+        (0xA0, "FOURTH~1.TXT"),
+    ] {
+        put(&mut data, at, format!("{drive}\\{name}\0").as_bytes());
+    }
+    let buf = 0x100;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let make = |a: &mut CodeAssembler, name, bit| {
+            // GENERIC_WRITE, CREATE_NEW.
+            let args = [at(name), I(0x4000_0000), I(0), I(0), I(1), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &args)?;
+            a.mov(esi, eax)?;
+            a.cmp(eax, -1)?;
+            check(a, true, bit)?;
+            call_with(a, f("CloseHandle"), &[Esi])
+        };
+        a.xor(ebx, ebx)?;
+        make(a, 0x00, 0)?;
+        call_with(a, f("MoveFileA"), &[at(0x00), at(0x20)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        call_with(a, f("GetShortPathNameA"), &[at(0x20), at(buf), I(0x100)])?;
+        call_with(a, f("lstrcmpA"), &[at(0x20), at(buf)])?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        make(a, 0x40, 3)?;
+        make(a, 0x60, 4)?;
+        make(a, 0x80, 5)?;
+        // rename(old, new) is cdecl, and returns 0 when it renames.
+        call_with(a, l.import(names.len()), &[at(0x80), at(0xA0)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 6)?;
+        a.mov(eax, ebx)?;
+        a.or(eax, 0x80)?;
+        a.ret()
+    });
+    let mut cpu = machine(test, exe);
+    if image {
+        let image_dir = PathBuf::from("target/test_win32").join(format!("{test}_d"));
+        let _ = fs::remove_dir_all(&image_dir);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image = image_dir.join("d.img");
+        rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.disk.mount(3, &image, options, true).unwrap();
+    }
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+    cpu
+}
+
+/// On a FAT image the renamed file keeps the DOS name THIRDF~1.TXT and
+/// gets long name entries holding it, as Windows 98 SE writes them for
+/// an 8.3 name beside a numeric tail made from its start: its own old
+/// alias. So does MADE.TXT, made beside MADE~1.TXT, which has none.
+#[test]
+fn move_file_renames_a_file_to_its_own_alias_on_a_disk_image() {
+    let cpu = rename_to_own_alias("own_alias_image", "D:", true);
+    let volume = cpu.bus.disk.fat_volume(3).unwrap();
+    let mut listed: Vec<(String, Option<String>)> = volume
+        .list(&[])
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.name, e.long_name))
+        .collect();
+    listed.sort();
+    let named = |name: &str, long: Option<&str>| (name.to_string(), long.map(str::to_string));
+    assert_eq!(
+        listed,
+        [
+            named("FOURTH~1.TXT", Some("FOURTH~1.TXT")),
+            named("MADE.TXT", Some("MADE.TXT")),
+            named("MADE~1.TXT", None),
+            named("THIRDF~1.TXT", Some("THIRDF~1.TXT")),
+        ]
+    );
+}
+
+/// On a host folder the files are named THIRDF~1.TXT and FOURTH~1.TXT on
+/// the host.
+#[test]
+fn move_file_renames_a_file_to_its_own_alias_on_a_host_drive() {
+    rename_to_own_alias("own_alias_host", "C:", false);
+    let dir = PathBuf::from("target/test_win32/own_alias_host");
+    let mut names: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".TXT") || n.ends_with(".txt"))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["FOURTH~1.TXT", "MADE.TXT", "MADE~1.TXT", "THIRDF~1.TXT"]
+    );
+}
+
 /// Folders keep their 8.3 aliases as on Windows 98 SE (checked in 86Box):
 /// on drive `drive` the program makes "Parent zeta" (PARENT~1) and
 /// "Parent alpha" (PARENT~2), renames "Parent zeta" to "Parent moved",
