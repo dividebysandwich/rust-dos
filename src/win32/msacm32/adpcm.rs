@@ -143,6 +143,28 @@ impl Format {
         (first..=self.samples_in_block()).contains(&(self.samples_per_block as u32))
     }
 
+    /// Decode a sound's blocks to 16-bit PCM, as a player converts them
+    /// through ACM a buffer at a time while it plays (MCIAVI, and the
+    /// wave mapper under MCIWAVE and PlaySound). msadp32.acm writes
+    /// nothing for a conversion that meets a block it can't decode: such
+    /// a block is silence here, which keeps the sound after it where it
+    /// was, where decoding the whole sound in one conversion would
+    /// silence all of it.
+    pub fn to_pcm(&self, data: &[u8]) -> Vec<u8> {
+        let block = self.block_align as usize;
+        // A block's 16-bit samples, all channels'.
+        let silence = self.samples_per_block as usize * self.channels as usize * 2;
+        let mut pcm = Vec::new();
+        for b in data.chunks(block) {
+            let samples = self.decode_buffer(b);
+            if samples.is_empty() && b.len() == block {
+                pcm.resize(pcm.len() + silence, 0);
+            }
+            pcm.extend(samples.iter().flat_map(|v| v.to_le_bytes()));
+        }
+        pcm
+    }
+
     /// Decode a buffer of blocks as Windows 98's codecs do, the samples
     /// of all channels interleaved. MS ADPCM decodes a partial block at
     /// the end as far as its bytes go, from its headers on; IMA ADPCM's

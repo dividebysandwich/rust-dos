@@ -63,13 +63,13 @@ pub enum Kind {
     /// was opened for (GENERIC_READ, GENERIC_WRITE) and the sharing it
     /// allows (FILE_SHARE_READ, FILE_SHARE_WRITE). LockFile's locks are
     /// DOS's, by the entry and the process (disk/locks.rs); a state saved
-    /// before W32 version 99 has the ranges it locked here, as (offset,
+    /// before W32 version 100 has the ranges it locked here, as (offset,
     /// length), which its load drops.
     File {
         sft: u16,
         access: u32,
         share: u32,
-        old_locks: Until<99, Vec<(u32, u32)>>,
+        old_locks: Until<100, Vec<(u32, u32)>>,
     },
     /// A search of FindFirstFileA: the entries it has still to give.
     Find {
@@ -395,13 +395,13 @@ mod tests {
     use super::Kind;
     use crate::savestate::{Reader, State, Writer};
 
-    /// A file object saved in W32 version 98 or older has LockFile's
+    /// A file object saved in W32 version 99 or older has LockFile's
     /// ranges after its sharing, which a load reads past; one saved in
-    /// 99 has none.
+    /// 100 has none.
     #[test]
     fn a_file_object_of_an_older_state_drops_its_lock_ranges() {
         let mut w = Writer::new();
-        w.section(b"W32 ", 98, |w| {
+        w.section(b"W32 ", 99, |w| {
             7u8.save(w); // Kind::File
             5u16.save(w);
             3u32.save(w);
@@ -415,13 +415,13 @@ mod tests {
             share: 1,
             old_locks: Default::default(),
         };
-        w.section(b"W32 ", 99, |w| {
+        w.section(b"W32 ", 100, |w| {
             file.save(w);
             0xABu8.save(w);
         });
         let mut r = Reader::new(&w.buf);
-        for version in [98, 99] {
-            let mut section = r.section_of(b"W32 ", &[98, 99]).unwrap();
+        for version in [99, 100] {
+            let mut section = r.section_of(b"W32 ", &[99, 100]).unwrap();
             assert_eq!(section.version(), Some(version));
             let (mut kind, mut marker) = (Kind::Dos { handle: 0 }, 0u8);
             kind.load(&mut section).unwrap();

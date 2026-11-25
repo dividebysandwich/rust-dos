@@ -29,7 +29,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 99;
+const WIN32_VERSION: u16 = 100;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -67,10 +67,12 @@ const WIN32_VERSION: u16 = 99;
 /// 71's to 96's no threads that selected a palette
 /// (`user32::palette::PALETTE_SAVED`), 71's to 97's no OpenGL texture
 /// coordinate generation or clip planes
-/// (`opengl32::texgen::TEXGEN_SAVED`), and 71's to 98's the ranges
-/// LockFile locked on each file object (`object::Kind::File`), which
-/// they load without: LockFile's locks are DOS's since 99.
-const WIN32_LOADS: [u16; 29] = [
+/// (`opengl32::texgen::TEXGEN_SAVED`), 71's to 98's no MCI elements a
+/// program's I/O procedure read (`winmm::mci::PROCEDURE_SAVED`), and
+/// 71's to 99's the ranges LockFile locked on each file object
+/// (`object::Kind::File`), which they load without: LockFile's locks
+/// are DOS's since 100.
+const WIN32_LOADS: [u16; 30] = [
     71,
     72,
     73,
@@ -99,6 +101,7 @@ const WIN32_LOADS: [u16; 29] = [
     96,
     97,
     98,
+    99,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1212,7 +1215,8 @@ mod tests {
         (96, 0xAEBE_28D7_7C2C_F660), // OpenGL texture names glGenTextures only reserved
         (97, 0x71EC_E4F5_0D5E_1F97), // the threads that selected a palette
         (98, 0x890A_6080_1C80_4995), // OpenGL's texture coordinate generation and clip planes
-        (99, 0x53B8_7D01_B413_290F), // LockFile's locks moved to DOS's table (disk/locks.rs)
+        (99, 0x4565_36E9_4B9A_18FF), // MCI elements a program's I/O procedure read
+        (100, 0xC44D_7093_8B77_FE65), // LockFile's locks moved to DOS's table (disk/locks.rs)
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
