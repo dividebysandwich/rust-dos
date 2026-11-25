@@ -648,10 +648,12 @@ impl Core {
     }
 
     /// Emulated time goes on from where it is: after a state was loaded.
+    /// `Auto` doesn't wait for the load to settle (`LOAD_SETTLE`): the
+    /// frontend may load a state every frame (run-ahead, rollback).
     pub fn rebase(&mut self) {
         self.target_ticks = self.m.cpu.bus.clock.now_ticks();
         self.tick_rem = 0;
-        self.m.pacer.rebase(&mut self.m.cpu.bus, Instant::now());
+        self.m.pacer.rebase_unsettled(&mut self.m.cpu.bus, Instant::now());
         self.m.cpu.bus.vga.mark_dirty_full();
         self.memmap.forget();
         self.release_input();

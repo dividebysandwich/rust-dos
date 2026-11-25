@@ -38,6 +38,20 @@ pub(crate) const MAX_LAG: Duration = Duration::from_millis(50);
 /// host's estimate read 11,973 over them. Two seconds is that 1.5 with a
 /// measurement window (`WINDOW_NS`) to spare.
 pub(crate) const LOAD_SETTLE: Duration = Duration::from_secs(2);
+/// The host's time on the frames that ran after a load (their `exec` and
+/// `overhead`) past which the settling (`LOAD_SETTLE`) ends, however
+/// little emulated time it covered. A host far behind runs about a frame
+/// of emulated time for each of its own (`MAX_LAG`), so on one too slow
+/// for the rate a state came back with (saved on a faster host, or loaded
+/// while the host is busy), two seconds of emulated time are 120 of its
+/// frames: at a fifth of the speed, 9.3 s at the state's rate before
+/// `Auto` measured the first. Frames four times as long as the others for
+/// a second of emulated time after a first frame of 400 ms, as Alice's at
+/// their longest, reach `LOAD_SETTLE` in 4.4 s. The host's time on the
+/// frames, which a paused machine's leave out, rather than the wall
+/// clock's: a state loaded from the settings window or by the debugger
+/// while paused settles once the machine runs.
+pub(crate) const LOAD_SETTLE_HOST: Duration = Duration::from_secs(5);
 /// A backlog of this much is one gap: running frames, it is dropped at
 /// `MAX_LAG`. The frontend stopped (a page in the background, a window
 /// being dragged, the host asleep), which says nothing of whether the host
@@ -829,8 +843,11 @@ pub struct Pacer {
     /// speed set.
     real_most_hinted: bool,
     /// The emulated time, in ns, up to which `Auto` neither measures nor
-    /// samples the host after a save state loaded (`LOAD_SETTLE`).
+    /// samples the host after a save state loaded (`LOAD_SETTLE`), and the
+    /// host's time on frames left before that ends sooner
+    /// (`LOAD_SETTLE_HOST`).
     settle_until_ns: u64,
+    settle_host_left: Duration,
 }
 
 impl Pacer {
@@ -861,6 +878,7 @@ impl Pacer {
             period: FRAME,
             real_most_hinted: false,
             settle_until_ns: 0,
+            settle_host_left: Duration::ZERO,
         }
     }
 
@@ -881,13 +899,31 @@ impl Pacer {
     /// state loaded): without this, emulated time ahead of the wall clock
     /// would stand still until the wall clock caught up, and time behind it
     /// would race to catch up. `Auto` starts over, and the bus forgets the
-    /// speed it had to go back to (`Bus::end_work_boost`). For `LOAD_SETTLE`
-    /// of emulated time after, `Auto` neither measures nor samples the
-    /// host: the frames are the load's.
+    /// speed it had to go back to (`Bus::end_work_boost`). For
+    /// `LOAD_SETTLE` of emulated time after, and no longer than
+    /// `LOAD_SETTLE_HOST` of the host's time on frames, `Auto` neither
+    /// measures nor samples the host: the frames are the load's. The
+    /// counts the next frame's work is taken from start at the loaded
+    /// clock's, as the state's counts since its machine started are no
+    /// frame's.
     pub fn rebase(&mut self, bus: &mut Bus, now: Instant) {
+        self.rebase_unsettled(bus, now);
+        self.settle_until_ns = bus.clock.now_ns() + LOAD_SETTLE.as_nanos() as u64;
+        self.settle_host_left = LOAD_SETTLE_HOST;
+    }
+
+    /// `rebase`, with `Auto` measuring and sampling the host again from
+    /// the next frame. For a frontend that loads a state as often as every
+    /// frame (libretro: a frontend's run-ahead and netplay rollback), where
+    /// a settle after each load would never end and `Auto` would never
+    /// sample the host again. Such a frontend runs the frames itself, so no
+    /// backlog is dropped there that a load's frames could count as lag.
+    pub fn rebase_unsettled(&mut self, bus: &mut Bus, now: Instant) {
         self.auto.reset();
         self.backlog.start_over();
-        self.settle_until_ns = bus.clock.now_ns() + LOAD_SETTLE.as_nanos() as u64;
+        self.settle_until_ns = 0;
+        let clock = &bus.clock;
+        (self.offloaded, self.idle, self.icount) = (clock.offloaded, clock.idle, clock.icount);
         bus.activity.work_return = None;
         self.anchor_to(&bus.clock, now);
     }
@@ -1167,9 +1203,12 @@ impl Pacer {
         };
         // At auto, a frame of a stall stays out of the samples
         // (`HostEstimate::outlier`), and so do the frames of a state's load
-        // (`LOAD_SETTLE`).
+        // (`LOAD_SETTLE`, `LOAD_SETTLE_HOST`).
         let auto = matches!(self.speed, CpuSpeed::Auto(_));
-        let settling = auto && ns < self.settle_until_ns;
+        if self.ran {
+            self.settle_host_left = self.settle_host_left.saturating_sub(exec + overhead);
+        }
+        let settling = auto && ns < self.settle_until_ns && !self.settle_host_left.is_zero();
         let frame_ideal = (executed >= SAMPLE_INSTRUCTIONS && !settling).then(|| {
             ideal_of(
                 exec.as_nanos() as f64 / executed as f64,
@@ -2868,6 +2907,18 @@ mod tests {
             let now = self.start + self.wall;
             self.pacer.rebase(&mut self.cpu.bus, now);
         }
+
+        /// `ms` of the wall clock with the machine paused, as in the
+        /// settings window: frames that run nothing, each a frame's work
+        /// of the frontend.
+        fn pause(&mut self, ms: u64) {
+            let until = self.wall + Duration::from_millis(ms);
+            while self.wall < until {
+                self.pacer
+                    .end_cpu_frame(&mut self.cpu, 0, Duration::ZERO, FRAME);
+                self.wall += FRAME;
+            }
+        }
     }
 
     /// The host's time an instruction at which it keeps up with 300,000
@@ -2879,10 +2930,17 @@ mod tests {
     /// of emulated time after a first frame of 400 ms. Returns the speed
     /// before the load and those of each frame after it.
     fn after_a_load(slow: f64, for_ms: u64) -> (u32, Vec<u32>) {
+        after_a_paused_load(slow, for_ms, 0)
+    }
+
+    /// `after_a_load`, with the state loaded while the machine is paused
+    /// for `paused_ms` of the wall clock.
+    fn after_a_paused_load(slow: f64, for_ms: u64, paused_ms: u64) -> (u32, Vec<u32>) {
         let mut game = Game::new();
         game.run(30_000, Duration::ZERO, |_| KEEPS_UP_NS);
         let before = game.cpu.bus.clock.cycles_per_ms();
         game.load();
+        game.pause(paused_ms);
         let first = Duration::from_millis(400);
         let after = game.run(30_000, first, |ms| {
             if ms < for_ms {
@@ -2907,6 +2965,16 @@ mod tests {
         assert!(least as f64 >= before as f64 * 0.9, "{before}: {after:?}");
     }
 
+    /// The same state loaded from the settings window, which keeps the
+    /// machine paused for ten seconds after it: the load's frames come
+    /// once the machine runs, and the settling waits for them.
+    #[test]
+    fn a_state_loaded_while_paused_settles_once_the_machine_runs() {
+        let (before, after) = after_a_paused_load(4.0, 1000, 10_000);
+        let least = *after.iter().min().unwrap();
+        assert!(least as f64 >= before as f64 * 0.9, "{before}: {after:?}");
+    }
+
     /// The host slower for longer than the load settles: that is the host,
     /// and the measurements after the settling cut the speed as they would
     /// without a load.
@@ -2915,6 +2983,42 @@ mod tests {
         let (before, after) = after_a_load(4.0, 30_000);
         let last = *after.last().unwrap();
         assert!((last as f64) < before as f64 * 0.5, "{before}: {after:?}");
+    }
+
+    /// A state that comes back at five times the speed the host keeps up
+    /// with: two seconds of emulated time are 9.3 s of the wall clock at
+    /// that speed, and the settling ends sooner, at `LOAD_SETTLE_HOST`.
+    #[test]
+    fn a_state_too_fast_for_the_host_is_cut_once_the_hosts_time_settles() {
+        const STATE: u32 = 1_500_000;
+        let mut game = Game::new();
+        game.run(30_000, Duration::ZERO, |_| KEEPS_UP_NS);
+        game.cpu.bus.clock.set_cycles_per_ms(STATE);
+        game.load();
+        let loaded = game.wall;
+        while game.cpu.bus.clock.cycles_per_ms() >= STATE && game.wall - loaded < FRAME * 2000 {
+            game.run(17, Duration::ZERO, |_| KEEPS_UP_NS);
+        }
+        let took = game.wall - loaded;
+        assert!(game.cpu.bus.clock.cycles_per_ms() < STATE, "{took:?}");
+        assert!(took < Duration::from_secs(7), "{took:?}");
+    }
+
+    /// A state of a machine that ran far longer, most of it halted: its
+    /// counts since it started are no frame's, and the frame after the
+    /// load weighs in the busy share as its own counts do.
+    #[test]
+    fn a_loaded_states_counts_stay_out_of_the_busy_share() {
+        let mut game = Game::new();
+        game.run(1000, Duration::ZERO, |_| KEEPS_UP_NS);
+        let clock = &mut game.cpu.bus.clock;
+        clock.icount += 1_000_000_000_000;
+        clock.idle += 900_000_000_000;
+        game.load();
+        game.run(17, Duration::ZERO, |_| KEEPS_UP_NS);
+        let pacer = &game.pacer;
+        assert!(pacer.recent_ran < 1e10, "{}", pacer.recent_ran);
+        assert!(pacer.recent_idle < 1.0, "{}", pacer.recent_idle);
     }
 }
 
