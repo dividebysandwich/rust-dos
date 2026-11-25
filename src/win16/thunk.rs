@@ -169,6 +169,12 @@ fn frames(cpu: &mut Cpu) -> &mut Vec<Frame> {
     &mut super::task(cpu).frames
 }
 
+/// Take back the call of 32-bit code `enter32` set up last, before it
+/// ran: its frame goes, and its `post` doesn't run.
+pub fn drop32(cpu: &mut Cpu) {
+    frames(cpu).pop();
+}
+
 /// The top of the 32-bit stack the running task's next call of 32-bit
 /// code uses: below the 32-bit code that is waiting for 16-bit code it
 /// called, if there is such, or else the stack's top.
