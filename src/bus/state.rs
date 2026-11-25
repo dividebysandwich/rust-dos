@@ -29,8 +29,8 @@ const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
-const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 103;
+const DPMI_VERSION: u16 = 4;
+const WIN32_VERSION: u16 = 104;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -75,9 +75,11 @@ const WIN32_VERSION: u16 = 103;
 /// are DOS's since 100, 71's to 100's no step of the cascade of
 /// CW_USEDEFAULT windows (`user32::window::CASCADE_SAVED`), 71's to
 /// 101's not the modules the outermost FreeLibrary frees
-/// (`kernel32::module::UNLOADING_SAVED`), and 71's to 102's no OpenGL
-/// raster position (`opengl32::raster::RASTER_SAVED`).
-const WIN32_LOADS: [u16; 33] = [
+/// (`kernel32::module::UNLOADING_SAVED`), 71's to 102's no OpenGL
+/// raster position (`opengl32::raster::RASTER_SAVED`), and 71's to
+/// 103's not the DPMI memory of a DOS program's PIF
+/// (`dosvm::DOSVM_DPMI`).
+const WIN32_LOADS: [u16; 34] = [
     71,
     72,
     73,
@@ -110,6 +112,7 @@ const WIN32_LOADS: [u16; 33] = [
     100,
     101,
     102,
+    103,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -512,6 +515,7 @@ impl Bus {
             w.section(b"DPMI", DPMI_VERSION, |w| {
                 dpmi.save(w);
                 dpmi.save_ldt_limits(w);
+                dpmi.save_vm(w);
             });
         }
         // The built-in Windows, while it runs a program or is about to.
@@ -975,11 +979,13 @@ impl Bus {
         }
         dpmi.reset();
         if r.next_is(b"DPMI") {
-            // Version 2 has no LDT limits (`Dpmi::load_ldt_limits`).
-            let mut section = r.section_of(b"DPMI", &[2, DPMI_VERSION])?;
+            // Version 2 has no LDT limits (`Dpmi::load_ldt_limits`), and 2
+            // and 3 no virtual memory (`Dpmi::load_vm`).
+            let mut section = r.section_of(b"DPMI", &[2, 3, DPMI_VERSION])?;
             dpmi.load(&mut section)?;
             let version = section.version();
             dpmi.load_ldt_limits(&mut section, version)?;
+            dpmi.load_vm(&mut section, version)?;
         }
         win32.reset();
         if r.next_is(b"W32 ") {

@@ -13,6 +13,7 @@ use super::{
     resume, selector_base, set_vector, write_desc,
 };
 use super::realcall::{self, Kind};
+use super::vm;
 use crate::cpu::{Cpu, CpuFlags, CpuResult, Descriptor, Seg};
 
 /// DPMI 1.0 error codes.
@@ -118,7 +119,6 @@ fn at_client_level(desc: u64) -> Option<u64> {
 
 fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
     let bits32 = client(cpu).bits32;
-    let end = cpu.bus.ram().len() as u32;
     match function {
         // Allocate CX descriptors: data segments at 0 with a limit of 0.
         0x0000 => {
@@ -306,23 +306,7 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
         }
         // Free memory, into the 30h bytes at ES:(E)DI.
         0x0500 => {
-            let (largest, total) = cpu.bus.xms.dpmi_free(end);
-            let pages = end / 0x1000;
-            let info = [
-                largest,
-                largest / 0x1000,
-                largest / 0x1000,
-                pages,
-                total / 0x1000,
-                total / 0x1000,
-                pages,
-                total / 0x1000,
-                u32::MAX,
-                u32::MAX,
-                u32::MAX,
-                u32::MAX,
-            ];
-            let bytes: Vec<u8> = info.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let bytes: Vec<u8> = vm::info(cpu).iter().flat_map(|v| v.to_le_bytes()).collect();
             write_buffer(cpu, offset(ctx, EDI, bits32), &bytes).map_err(|_| INVALID_VALUE)?;
         }
         // Allocate a memory block of BX:CX bytes: its address in BX:CX,
@@ -332,9 +316,8 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
             if size == 0 {
                 return Err(INVALID_VALUE);
             }
-            let base = cpu.bus.xms.take_dpmi(size, end).ok_or(PHYSICAL_MEMORY_UNAVAILABLE)?;
+            let base = vm::allocate(cpu, size, None).ok_or(PHYSICAL_MEMORY_UNAVAILABLE)?;
             let len = size.div_ceil(0x1000) * 0x1000;
-            cpu.bus.fill_ram(base as usize..(base + len) as usize, 0);
             let handle = cpu.bus.dpmi.next_handle;
             cpu.bus.dpmi.next_handle = handle.wrapping_add(1).max(1);
             client(cpu).memory.push((handle, base, len));
@@ -347,7 +330,7 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
             let c = client(cpu);
             let i = c.memory.iter().position(|&(h, _, _)| h == handle).ok_or(INVALID_HANDLE)?;
             let (_, base, _) = c.memory.remove(i);
-            cpu.bus.xms.release_dpmi(base);
+            vm::release(cpu, base);
         }
         // Resize the memory block SI:DI to BX:CX bytes, where it is or
         // elsewhere: its address in BX:CX, its handle in SI:DI.
@@ -374,14 +357,11 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
                 return Err(INVALID_LINEAR_ADDRESS);
             }
             let base = if at == 0 {
-                cpu.bus.xms.take_dpmi(size, end).ok_or(PHYSICAL_MEMORY_UNAVAILABLE)?
-            } else if cpu.bus.xms.take_dpmi_at(at, size, end) {
-                at
+                vm::allocate(cpu, size, None).ok_or(PHYSICAL_MEMORY_UNAVAILABLE)?
             } else {
-                return Err(LINEAR_MEMORY_UNAVAILABLE);
+                vm::allocate(cpu, size, Some(at)).ok_or(LINEAR_MEMORY_UNAVAILABLE)?
             };
             let len = size.div_ceil(0x1000) * 0x1000;
-            cpu.bus.fill_ram(base as usize..(base + len) as usize, 0);
             let handle = cpu.bus.dpmi.next_handle;
             cpu.bus.dpmi.next_handle = handle.wrapping_add(1).max(1);
             client(cpu).memory.push((handle, base, len));
@@ -401,7 +381,11 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
             let base = resize_memory(cpu, i, size)?;
             if base != old && ctx.gpr[EDX] & 0x02 != 0 {
                 let list = ctx.gpr[EBX];
-                for n in 0..ctx.gpr[EDI] & 0xFFFF {
+                let count = ctx.gpr[EDI] & 0xFFFF;
+                if let Some(es) = selector_base(cpu, ctx.sel(Seg::ES)) {
+                    vm::touch(cpu, es.wrapping_add(list), count * 2);
+                }
+                for n in 0..count {
                     let selector = cpu.read_u16(Seg::ES, list.wrapping_add(n * 2)).map_err(|_| INVALID_VALUE)?;
                     let Some(at) = selector_base(cpu, selector) else { continue };
                     if (old..old + old_len).contains(&at) {
@@ -430,17 +414,25 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
                 return Err(INVALID_HANDLE);
             }
         }
-        // Locking and unlocking memory, and demand paging: the memory is
-        // always there.
-        0x0600..=0x0603 | 0x0702 | 0x0703 => {}
+        // Locking and unlocking BX:CX linear bytes from SI:DI on: locked
+        // pages of virtual memory stay in memory; without it the memory
+        // is always there. Real-mode memory (0602h-0603h) always is.
+        0x0600 | 0x0601 => {
+            let (at, len) = (pair(ctx, EBX, ECX), pair(ctx, ESI, EDI));
+            vm::lock(cpu, at, len, function == 0x0600);
+        }
+        // Demand paging hints: the pages go when they must anyway.
+        0x0602 | 0x0603 | 0x0702 | 0x0703 => {}
         // The page size.
         0x0604 => set_pair(ctx, EBX, ECX, 0x1000),
-        // Map the physical address BX:CX (SI:DI bytes): without paging,
-        // it is its own linear address.
+        // Map the physical address BX:CX (SI:DI bytes): it is its own
+        // linear address, without paging and with it (vm.rs).
         0x0800 => {
-            if pair(ctx, ESI, EDI) == 0 {
+            let (phys, len) = (pair(ctx, EBX, ECX), pair(ctx, ESI, EDI));
+            if len == 0 {
                 return Err(INVALID_VALUE);
             }
+            vm::map_physical(cpu, phys, len).ok_or(INVALID_VALUE)?;
         }
         0x0801 => {}
         // The virtual interrupt flag: get it in AL, and clear or set it.
@@ -481,27 +473,16 @@ pub(super) fn segment_selector(cpu: &mut Cpu, segment: u16) -> Option<u16> {
 /// Resize the memory block `memory[i]` to `size` bytes, where it is or
 /// elsewhere, with what it held. Returns its address.
 pub(super) fn resize_memory(cpu: &mut Cpu, i: usize, size: u32) -> std::result::Result<u32, u16> {
-    let end = cpu.bus.ram().len() as u32;
     let (handle, base, old) = client(cpu).memory[i];
     let len = size.div_ceil(0x1000) * 0x1000;
-    let base = if cpu.bus.xms.resize_dpmi(base, len, end) {
-        if len > old {
-            cpu.bus.fill_ram((base + old) as usize..(base + len) as usize, 0);
-        }
-        base
-    } else {
-        let new = cpu.bus.xms.take_dpmi(len, end).ok_or(PHYSICAL_MEMORY_UNAVAILABLE)?;
-        cpu.bus.fill_ram(new as usize..(new + len) as usize, 0);
-        cpu.bus.copy_ram(base as usize, new as usize, old.min(len) as usize);
-        cpu.bus.xms.release_dpmi(base);
-        new
-    };
+    let base = vm::resize(cpu, base, old, size).ok_or(PHYSICAL_MEMORY_UNAVAILABLE)?;
     client(cpu).memory[i] = (handle, base, len);
     Ok(base)
 }
 
 /// Write `bytes` at ES:`at`, through the client's ES.
 fn write_buffer(cpu: &mut Cpu, at: u32, bytes: &[u8]) -> CpuResult {
+    touch_segment(cpu, Seg::ES, at, bytes.len() as u32);
     for (i, &byte) in bytes.iter().enumerate() {
         cpu.write_u8(Seg::ES, at.wrapping_add(i as u32), byte)?;
     }
@@ -619,6 +600,7 @@ pub(super) fn retile(cpu: &mut Cpu, first: usize, count: usize, base: u32, bytes
 /// `seg`:`at` through the processor's segment register: the real-mode
 /// registers it holds.
 pub(super) fn read_call_structure(cpu: &mut Cpu, seg: Seg, at: u32) -> CpuResult<Context> {
+    touch_segment(cpu, seg, at, realcall::SIZE as u32);
     let mut bytes = [0u8; realcall::SIZE];
     for (i, byte) in bytes.iter_mut().enumerate() {
         *byte = cpu.read_u8(seg, at.wrapping_add(i as u32))?;
@@ -631,15 +613,22 @@ pub(super) fn read_call_structure(cpu: &mut Cpu, seg: Seg, at: u32) -> CpuResult
 /// with `all` CS:IP and SS:SP.
 pub(super) fn write_call_structure(cpu: &mut Cpu, selector: u16, at: u32, rm: &Context, all: bool) {
     let Some(base) = selector_base(cpu, selector) else { return };
-    let at = base.wrapping_add(at) as usize;
+    let at = base.wrapping_add(at);
     let mut bytes = [0u8; realcall::SIZE];
     for (i, byte) in bytes.iter_mut().enumerate() {
-        *byte = cpu.bus.read_8(at + i);
+        *byte = vm::read_8(cpu, at.wrapping_add(i as u32));
     }
     realcall::encode(rm, &mut bytes, all);
     for (i, &byte) in bytes.iter().enumerate() {
-        cpu.bus.write_8(at + i, byte);
+        vm::write_8(cpu, at.wrapping_add(i as u32), byte);
     }
+}
+
+/// Bring in the pages of `len` bytes at `seg`:`at`, which the host reads
+/// or writes through the processor's segment register (vm.rs).
+pub(super) fn touch_segment(cpu: &mut Cpu, seg: Seg, at: u32, len: u32) {
+    let base = cpu.seg_cache(seg).base;
+    vm::touch(cpu, base.wrapping_add(at), len);
 }
 
 /// After a real-mode call: its registers back into the call structure.
@@ -689,7 +678,7 @@ fn call_real_mode(cpu: &mut Cpu, mut ctx: Context, kind: Kind) {
     // The parameters, from the client's stack.
     let stack = client_stack(cpu, &ctx);
     let params: Vec<u16> = (0..ctx.reg16(ECX) as u32)
-        .map(|i| cpu.bus.read_16(stack.wrapping_add(2 * i) as usize))
+        .map(|i| vm::read_16(cpu, stack.wrapping_add(2 * i)))
         .collect();
     let words = kind.frame(rm.eflags, &params, (ROM_SEG, RM_RETURN));
     let sp = push_real(cpu, ss, sp, &words);

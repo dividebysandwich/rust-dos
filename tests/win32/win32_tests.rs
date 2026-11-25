@@ -3686,6 +3686,193 @@ fn a_programs_pages_read_back_after_a_dos_program_got_the_memory_under_them() {
     assert!(total + 256 >= before, "{total} KB, {before} KB without");
 }
 
+/// A DPMI client (a 16-bit COM file) that asks the host for its free
+/// memory (INT 31h AX=0500h) and a block of `size` bytes (0501h), writes
+/// the block's offset XOR 5A5A5A5Ah into the first dword of each of its
+/// pages, reads them all back, and writes the 8 bytes at offset
+/// `size - 3000h` of the block to VM.BIN through DOS (INT 21h AH=40h,
+/// which the host translates). Exit code 5; 6 if it can't become a
+/// client, 7 if the largest free block is smaller than `size`, 8 if the
+/// block can't be had, 9 if a selector can't, 0Ah if a page reads back
+/// wrong, 0Bh if the file can't be written.
+fn dpmi_block_filler(size: u32) -> Vec<u8> {
+    const ENTRY: u32 = 0x1F00;
+    const INFO: u32 = 0x1F10;
+    const BLOCK: u32 = 0x1F40;
+    const NAME: u32 = 0x1F50;
+    const OFF: u32 = 0x3000;
+    let assemble = || -> Result<Vec<u8>, IcedError> {
+        let mut a = CodeAssembler::new(16)?;
+        let mut fails: Vec<CodeLabel> = (6..=0xB).map(|_| a.create_label()).collect();
+        a.push(cs)?;
+        a.pop(es)?;
+        a.mov(bx, 0x1000)?;
+        a.mov(ah, 0x4A)?;
+        a.int(0x21)?;
+        a.mov(ax, 0x1687)?;
+        a.int(0x2F)?;
+        a.test(ax, ax)?;
+        a.jnz(fails[0])?;
+        a.mov(word_ptr(ENTRY), di)?;
+        a.mov(word_ptr(ENTRY + 2), es)?;
+        a.mov(bx, si)?;
+        a.mov(ah, 0x48)?;
+        a.int(0x21)?;
+        a.jc(fails[0])?;
+        a.mov(es, ax)?;
+        a.xor(ax, ax)?;
+        // call far [ENTRY]: a 16-bit client.
+        a.db(&[0xFF, 0x1E])?;
+        a.dw(&[ENTRY as u16])?;
+        a.jc(fails[0])?;
+        // The free memory.
+        a.push(ds)?;
+        a.pop(es)?;
+        a.mov(di, INFO)?;
+        a.mov(ax, 0x0500)?;
+        a.int(0x31)?;
+        a.cmp(dword_ptr(INFO), size)?;
+        a.jb(fails[1])?;
+        // The block.
+        a.mov(bx, size >> 16)?;
+        a.mov(cx, size & 0xFFFF)?;
+        a.mov(ax, 0x0501)?;
+        a.int(0x31)?;
+        a.jc(fails[2])?;
+        a.mov(word_ptr(BLOCK), cx)?;
+        a.mov(word_ptr(BLOCK + 2), bx)?;
+        // A selector for all of it, in SI.
+        a.xor(ax, ax)?;
+        a.mov(cx, 1)?;
+        a.int(0x31)?;
+        a.jc(fails[3])?;
+        a.mov(si, ax)?;
+        a.mov(bx, si)?;
+        a.mov(cx, word_ptr(BLOCK + 2))?;
+        a.mov(dx, word_ptr(BLOCK))?;
+        a.mov(ax, 0x0007)?;
+        a.int(0x31)?;
+        a.jc(fails[3])?;
+        a.mov(bx, si)?;
+        a.mov(cx, 0xFFFF)?;
+        a.mov(dx, 0xFFFF)?;
+        a.mov(ax, 0x0008)?;
+        a.int(0x31)?;
+        a.jc(fails[3])?;
+        // Each page's first dword, then each read back.
+        a.push(ds)?;
+        a.mov(ds, si)?;
+        a.xor(edi, edi)?;
+        a.mov(ecx, size / 0x1000)?;
+        let mut fill = a.create_label();
+        a.set_label(&mut fill)?;
+        a.mov(eax, edi)?;
+        a.xor(eax, 0x5A5A_5A5A)?;
+        a.mov(dword_ptr(edi), eax)?;
+        a.add(edi, 0x1000)?;
+        a.dec(ecx)?;
+        a.jnz(fill)?;
+        a.xor(edi, edi)?;
+        a.mov(ecx, size / 0x1000)?;
+        let mut check = a.create_label();
+        let mut wrong = a.create_label();
+        a.set_label(&mut check)?;
+        a.mov(eax, edi)?;
+        a.xor(eax, 0x5A5A_5A5A)?;
+        a.cmp(dword_ptr(edi), eax)?;
+        a.jne(wrong)?;
+        a.add(edi, 0x1000)?;
+        a.dec(ecx)?;
+        a.jnz(check)?;
+        a.pop(ds)?;
+        // VM.BIN, its handle in BP.
+        a.mov(ah, 0x3C)?;
+        a.xor(cx, cx)?;
+        a.mov(dx, NAME)?;
+        a.int(0x21)?;
+        a.jc(fails[5])?;
+        a.mov(bp, ax)?;
+        // The selector's base at the bytes to write.
+        a.mov(eax, dword_ptr(BLOCK))?;
+        a.add(eax, size - OFF)?;
+        a.mov(dx, ax)?;
+        a.shr(eax, 16)?;
+        a.mov(cx, ax)?;
+        a.mov(bx, si)?;
+        a.mov(ax, 0x0007)?;
+        a.int(0x31)?;
+        a.push(ds)?;
+        a.mov(ds, si)?;
+        a.mov(bx, bp)?;
+        a.mov(cx, 8)?;
+        a.xor(dx, dx)?;
+        a.mov(ah, 0x40)?;
+        a.int(0x21)?;
+        a.pop(ds)?;
+        a.jc(fails[5])?;
+        a.mov(bx, bp)?;
+        a.mov(ah, 0x3E)?;
+        a.int(0x21)?;
+        a.mov(ax, 0x4C05)?;
+        a.int(0x21)?;
+        a.set_label(&mut wrong)?;
+        a.pop(ds)?;
+        a.mov(ax, 0x4C0A)?;
+        a.int(0x21)?;
+        for (code, label) in (6u32..=0xB).zip(fails.iter_mut()) {
+            a.set_label(label)?;
+            a.mov(ax, 0x4C00 | code)?;
+            a.int(0x21)?;
+        }
+        a.assemble(0x100)
+    };
+    let mut code = assemble().unwrap();
+    assert!(code.len() <= (ENTRY - 0x100) as usize);
+    code.resize((NAME - 0x100) as usize, 0);
+    code.extend_from_slice(b"VM.BIN\0");
+    code
+}
+
+/// Run `dpmi_block_filler` of `size` bytes from a PIF that gives its DOS
+/// machine `dpmi_kb` KB of DPMI memory (0 for Auto), started by a Windows
+/// program: T.EXE's exit code, and VM.BIN.
+fn run_dpmi_block_filler(test: &str, size: u32, dpmi_kb: u16) -> (u8, Option<Vec<u8>>) {
+    let mut pif = win16::pif("VM.COM", "C:\\GAME", "", "");
+    // The Windows 95 record's DPMI memory, at 1A8h in its data.
+    pif[0x21B + 0x1A8..0x21B + 0x1AA].copy_from_slice(&dpmi_kb.to_le_bytes());
+    let files = vec![("GAME\\VM.PIF", pif), ("GAME\\VM.COM", dpmi_block_filler(size))];
+    let code = start_programs(test, "T.EXE", "C:\\GAME\\VM.PIF", files, &[]);
+    let base = PathBuf::from("target/test_win32").join(test);
+    (code, fs::read(base.join("GAME/VM.BIN")).ok())
+}
+
+/// A DOS program started through a PIF that gives its DOS machine 32 MB
+/// of DPMI memory gets a 24 MB block on a 16 MB machine, as on Windows
+/// 98, whose VMM pages a DOS machine's DPMI memory to the swap file up
+/// to the PIF's limit: Redguard's launcher starts the game so, and the
+/// game asks for about 45 MB on a 32 MB machine. Every page holds what
+/// was written to it, though most went to the page file and came back,
+/// and DOS writes the bytes of a page near the end of the block.
+#[test]
+fn a_dos_program_gets_the_dpmi_memory_its_pif_allows_past_the_machines() {
+    const SIZE: u32 = 0x180_0000;
+    let (code, written) = run_dpmi_block_filler("dos_dpmi_virtual", SIZE, 0x8000);
+    // 5 from the program, WAIT_OBJECT_0 and TRUE.
+    assert_eq!(code, 0x51);
+    let mut expected = ((SIZE - 0x3000) ^ 0x5A5A_5A5A).to_le_bytes().to_vec();
+    expected.extend_from_slice(&[0; 4]);
+    assert_eq!(written.unwrap(), expected);
+}
+
+/// With its PIF's DPMI memory on Auto, a DOS program gets the memory
+/// that is free as it is: no 24 MB block on a 16 MB machine (7, the
+/// largest free block is smaller).
+#[test]
+fn a_dos_program_whose_pif_has_auto_dpmi_memory_gets_what_is_free() {
+    let (code, _) = run_dpmi_block_filler("dos_dpmi_auto", 0x180_0000, 0);
+    assert_eq!(code, 0x71);
+}
+
 #[test]
 fn win_exec_starts_a_program_or_says_why_not() {
     let child = {

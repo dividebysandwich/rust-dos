@@ -71,7 +71,7 @@ pub(super) fn int10(cpu: &mut Cpu, ctx: Context) {
             let Some(from) = pointer(cpu, &ctx, Seg::ES, b.reg, bits32) else {
                 return reflect(cpu, 0x10, ctx);
             };
-            copy(&mut cpu.bus, from, tlb, b.reads);
+            copy(cpu, from, tlb, b.reads);
             rm.gpr[b.reg] = 0;
         }
         // The address of a font, in ES:BP: a segment, which becomes a
@@ -99,7 +99,7 @@ pub(super) fn returned(cpu: &mut Cpu, frame: Frame, rm: &Context) {
     if let Some(b) = buffer(&caller, ah, al) {
         ctx.gpr[b.reg] = caller.gpr[b.reg];
         if let Some(to) = pointer(cpu, &caller, Seg::ES, b.reg, bits32) {
-            copy(&mut cpu.bus, tlb, to, b.writes);
+            copy(cpu, tlb, to, b.writes);
         }
     } else if ah == 0x11 && al == 0x30 {
         let sel = segment_selector(cpu, rm.sel(Seg::ES)).unwrap_or(0);
