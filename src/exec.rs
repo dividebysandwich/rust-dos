@@ -1018,7 +1018,7 @@ fn dynamic<const HOT: bool, const PROF: bool>(
     }
     // What the code window depends on, before the blocks run.
     let window = (cpu.tlb.epoch, cpu.cpl, cpu.bus.a20_mask());
-    match fetch.dynrec.run(cpu, &at, single) {
+    match fetch.dynrec.run(cpu, &at, single, !HOT) {
         // No block runs here (or none fits before the timer event, which
         // the interpreter then runs up to): the interpreter goes on through
         // the simple instructions after this one, as on its own.
@@ -1711,6 +1711,62 @@ fn win32_trap(cpu: &mut Cpu, phys_ip: usize, id: u16) -> bool {
         cpu.bus.clock.skip_to_deadline();
     }
     cpu.bus.refresh_irq();
+    true
+}
+
+/// Whether the execution loop, before the instruction at CS:EIP, would do
+/// nothing but run it with translated code (`run`, `dynamic`): no timer
+/// event due, no interrupt request to look at, no hold, nothing for the
+/// shell, no busy-wait loop watched, and nothing that has it interpret
+/// (an interrupt shadow, TF, instruction breakpoints). Where the
+/// recompiler isn't sure, the loop takes over, which only costs time.
+pub(crate) fn runs_translated(cpu: &Cpu) -> bool {
+    let clock = &cpu.bus.clock;
+    clock.icount < clock.deadline
+        && !(cpu.bus.irq_ready && cpu.get_cpu_flag(CpuFlags::IF))
+        && cpu.bus.hold.is_none()
+        && cpu.state == CpuState::Running
+        && !cpu.bus.observe.watching()
+        && !cpu.bus.observe.in_watch()
+        && !cpu.irq_shadow
+        && !cpu.get_cpu_flag(CpuFlags::TF)
+        && !cpu.code_breakpoints()
+        && cpu.dynamic_active()
+        && !cpu.in_shell_code()
+}
+
+/// A call of a built-in Windows function that translated code made: the
+/// block it was in left for the function's stub at CS:EIP, physical
+/// address `phys_ip`. Runs the stub's trap as the execution loop would
+/// run it next (`dynamic`, `execute_at` and `after_fault`), where the
+/// loop would do nothing else first (`runs_translated`), so the
+/// recompiler can go on after it without a trip through the loop and
+/// the interpreter. Whether it ran; nothing changed where it didn't.
+/// `prof`: a profile runs, which gets the trap's place.
+pub(crate) fn win32_call(cpu: &mut Cpu, phys_ip: usize, prof: bool) -> bool {
+    let eip = cpu.eip();
+    let cs = cpu.seg_cache(Seg::CS);
+    // The trap's 4 bytes are in its page and in the segment, as every
+    // stub's are: no fetch from another page, no #GP.
+    if phys_ip & 0xFFF > 0x1000 - 4 || eip as u64 + 3 > cs.limit as u64 || !runs_translated(cpu) {
+        return false;
+    }
+    let Some(&[0xFE, crate::win32::TRAP, lo, hi]) = cpu.bus.ram().get(phys_ip..phys_ip + 4) else {
+        return false;
+    };
+    let id = u16::from_le_bytes([lo, hi]);
+    if !crate::win32::is_call(id) || !crate::win32::in_stub_page(cpu, phys_ip) {
+        return false;
+    }
+    if prof {
+        note_instruction(cpu, eip, cs.attr & ATTR_DB != 0);
+    }
+    cpu.executed += 1;
+    // In a stub page, `accepts` takes every call's id.
+    let ran = win32_trap(cpu, phys_ip, id);
+    debug_assert!(ran);
+    cpu.bus.clock.icount += 1;
+    finish_instruction(cpu);
     true
 }
 

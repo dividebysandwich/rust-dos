@@ -575,6 +575,7 @@ fn dynrec_json(a: &Totals, b: &Totals, c: &rust_dos::profile::Counters, top: usi
         "smc": d(x.smc, y.smc),
         "watched": d(x.watched, y.watched),
         "return_misses": d(x.return_misses, y.return_misses),
+        "win32_calls": d(x.win32_calls, y.win32_calls),
         "exits": exits,
         "calls": calls,
         "pages": pages

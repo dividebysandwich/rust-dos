@@ -892,6 +892,13 @@ pub fn accepts(cpu: &Cpu, phys_ip: usize, id: u16) -> bool {
     in_stub_page(cpu, phys_ip)
 }
 
+/// Whether the trap with id `id` is a call of a function, of a built-in
+/// DLL or one it lacks: a stub's, which `accepts` takes in the running
+/// process's pages of stubs (`in_stub_page`).
+pub(crate) fn is_call(id: u16) -> bool {
+    id < FIRST_SYSTEM
+}
+
 /// Whether `phys_ip` is in one of the running process's pages of stubs,
 /// where its program calls the built-in DLLs' functions, at privilege
 /// level 3 in protected mode.

@@ -129,6 +129,9 @@ pub struct DynStats {
     /// had (`RETURN_MISS`).
     pub exits: [u64; 16],
     pub return_misses: u64,
+    /// Calls of the built-in Windows's functions that translated code
+    /// made and the recompiler ran itself (`exec::win32_call`).
+    pub win32_calls: u64,
 }
 
 /// What a block's code is translated for besides its instructions, which
@@ -316,9 +319,13 @@ impl DynState {
 
     /// Run translated code from the instruction at `at`, which is in the
     /// interpreter's code window, translating it first if need be. With
-    /// `single`, blocks hold one instruction (`Cpu::step`).
+    /// `single`, blocks hold one instruction (`Cpu::step`). With `calls`,
+    /// a call translated code makes of a built-in Windows function runs
+    /// here and the code goes on after it (`exec::win32_call`); without,
+    /// as with the debugger's hook, which looks at each place the
+    /// execution loop runs, the loop runs it.
     #[cfg(dynrec)]
-    pub(crate) fn run(&mut self, cpu: &mut Cpu, at: &At, single: bool) -> Run {
+    pub(crate) fn run(&mut self, cpu: &mut Cpu, at: &At, single: bool, calls: bool) -> Run {
         if self.engine.is_none() {
             if self.unavailable {
                 return Run::Interpret;
@@ -336,13 +343,13 @@ impl DynState {
         // The translated code counts its instructions as it returns, as
         // the interpreter counts each.
         let before = cpu.executed;
-        let run = engine.run(cpu, at, single, &mut self.stats);
+        let run = engine.run(cpu, at, single, calls, &mut self.stats);
         self.stats.executed += cpu.executed.wrapping_sub(before);
         run
     }
 
     #[cfg(not(dynrec))]
-    pub(crate) fn run(&mut self, _cpu: &mut Cpu, _at: &At, _single: bool) -> Run {
+    pub(crate) fn run(&mut self, _cpu: &mut Cpu, _at: &At, _single: bool, _calls: bool) -> Run {
         Run::Interpret
     }
 }
@@ -918,7 +925,7 @@ mod engine {
             stats.live_blocks -= 1;
         }
 
-        pub fn run(&mut self, cpu: &mut Cpu, at: &At, single: bool, stats: &mut DynStats) -> Run {
+        pub fn run(&mut self, cpu: &mut Cpu, at: &At, single: bool, calls: bool, stats: &mut DynStats) -> Run {
             if cpu.model != self.model || cpu.bus.ram().len() as u32 != self.ram_len {
                 // The handlers were chosen for the other model, or the code
                 // for another size of RAM.
@@ -1087,6 +1094,37 @@ mod engine {
                             None => Run::Interpret,
                         }
                     }
+                    EXIT_UNLINKED
+                        if calls
+                            && !single
+                            && (ix >= RETURN_LINK || !data.in_page(cpu.eip()))
+                            && Self::win32_call(cpu, profiling) =>
+                    {
+                        // A call of a built-in Windows function, which ran
+                        // as the execution loop would have run its stub's
+                        // trap. Then on in the block after the trap (the
+                        // stub's RET), where the loop would go next and
+                        // would find it without a page walk.
+                        stats.win32_calls += 1;
+                        // The function may have changed what the code
+                        // reaches of the cards' memory (a surface locked).
+                        vga_state(cpu, &mut self.ctx);
+                        card_state(cpu, &mut self.ctx);
+                        if !crate::exec::runs_translated(cpu) {
+                            return Run::Ran { page };
+                        }
+                        let Some(t_at) = Self::here(cpu) else { return Run::Ran { page } };
+                        let t_mode = t_at.code32 as u32 | (cpu.stack32() as u32) << 2 | env_bits(cpu);
+                        let t_key = Key { phys: t_at.phys_ip as u32, eip: t_at.eip, mode: t_mode };
+                        let Some((_, t_code)) = self.find(cpu, &t_at, t_key, stats) else { return Run::Ran { page } };
+                        mode = t_mode;
+                        self.ctx.flat = mode & ENV_FLAT_ALL;
+                        self.ctx.mode = mode;
+                        self.ctx.stack32 = mode & 4 != 0;
+                        self.ctx.far_block = std::ptr::null();
+                        code = t_code;
+                        continue;
+                    }
                     EXIT_UNLINKED if ix >= RETURN_LINK || !data.in_page(cpu.eip()) => {
                         // A block left for another page, or returned: the
                         // execution loop finds the block there, as its fetch
@@ -1231,6 +1269,16 @@ mod engine {
             return None;
         };
         (next != 0 && cpu.bus.is_plain_ram(next as usize, 0x1000)).then_some(next)
+    }
+
+    /// A call of a built-in Windows function at CS:EIP, where a block left
+    /// for: run it (`exec::win32_call`) where the TLB has its stub's page,
+    /// as the execution loop's fetch would find it then without a page
+    /// walk. Whether it ran.
+    fn win32_call(cpu: &mut Cpu, profiling: bool) -> bool {
+        let lin = cpu.seg_cache(Seg::CS).base.wrapping_add(cpu.eip());
+        let Some(phys) = cpu.translated(lin, cpu.cpl == 3) else { return false };
+        crate::exec::win32_call(cpu, phys as usize, profiling)
     }
 
     /// Where the instruction at CS:EIP is, as the execution loop would find

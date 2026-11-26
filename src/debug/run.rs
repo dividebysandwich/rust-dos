@@ -485,6 +485,7 @@ impl DebugHub {
                 // their handlers most (for profiling).
                 "exits": dynrec_exits(&d),
                 "return_misses": d.return_misses,
+                "win32_calls": d.win32_calls,
                 "calls": dynrec_calls(cpu.dynrec.calls()),
             },
             // Busy-wait loops proven to change nothing, proofs that failed,
