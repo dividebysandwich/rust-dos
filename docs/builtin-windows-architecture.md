@@ -524,9 +524,19 @@ what `ddraw/dxt_blt.rs` and `video/dxt.rs` do:
 - A blit to an 8-bit palette surface succeeds and draws nothing, a fill
   of a DXT surface fails with E_NOTIMPL, and so do a source colour key
   and DXT2 or DXT4 to a format with alpha.
-- Windows compresses what is blitted to a DXT surface. Here only blocks
-  of the same format are copied, between rectangles on block
-  boundaries; other blits to a DXT surface fail with E_NOTIMPL.
+- Windows compresses what is blitted to a DXT surface. Blocks of the
+  same format between rectangles on block boundaries are copied as they
+  are; anything else (an RGB source, another DXT format, a stretch, a
+  mirror, a rectangle within blocks) is compressed by `video::dxt`'s
+  encoder, which picks the end colours that decode nearest the pixels
+  and isn't Microsoft's block for block. The blocks the rectangle cuts
+  are decoded, given the new pixels and compressed again. DXT1 keeps a
+  pixel of alpha under 128 transparent. DXT2 and DXT4 take colours
+  multiplied by their alpha from a source that isn't premultiplied, and
+  a premultiplied source goes only to them. What Windows does with the
+  premultiplied formats here wasn't probed. Rage Rally loads its
+  textures this way, from A8R8G8B8 into DXT2 and DXT3, mirrored up and
+  down.
 
 ## Movies
 

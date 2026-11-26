@@ -3916,22 +3916,161 @@ fn blits_from_dxt_stretch_cut_blocks_and_mirror_as_windows() {
 }
 
 #[test]
-fn a_dxt_surface_takes_whole_blocks_of_its_format_and_nothing_else() {
+fn a_dxt_surface_copies_whole_blocks_and_compresses_the_rest() {
     let (program, data) = dxt_blits_program();
     let mut cpu = machine("dxt_to_dxt", program);
     run_until_done(&mut cpu, data);
     let r = results(&mut cpu, data, 26);
     assert_eq!(r[12], 0, "{r:X?}");
-    // Windows compresses these; the built-in DirectDraw doesn't.
-    assert_eq!(r[13..16], [E_NOTIMPL; 3], "{r:X?}");
+    // A rectangle within blocks, DXT1 to DXT3 and R5G6B5 to DXT1 are
+    // compressed, as on Windows.
+    assert_eq!(r[13..16], [0; 3], "{r:X?}");
     // A fill of a DXT surface fails on Windows too.
     assert_eq!(r[16], E_NOTIMPL);
     assert_eq!(r[22..26], [0; 4], "{r:X?}");
     let blocks = locked_pixels(&cpu, data, DESC3, (8, 1), 4);
     let green = [0x001F_07E0, 0];
-    assert_eq!(blocks[..4], [0; 4], "{blocks:X?}");
+    // The first block took the compressed pixels; the copied block is
+    // the third, and the second and fourth weren't written.
+    assert_ne!(blocks[..2], [0; 2], "{blocks:X?}");
+    assert_eq!(blocks[2..4], [0; 2], "{blocks:X?}");
     assert_eq!(blocks[4..6], green, "{blocks:X?}");
     assert_eq!(blocks[6..], [0; 2], "{blocks:X?}");
+}
+
+const DDBLTFX_MIRRORUPDOWN: u32 = 0x4;
+
+/// An 8x4 A8R8G8B8 surface: its left 4x4 a pattern of two 5-6-5
+/// colours (0xFFE0 and 0x0843), its right red with alpha 0 to 255 in
+/// steps of 17, row by row.
+fn compress_source() -> Vec<u32> {
+    let mut pixels = Vec::new();
+    for y in 0..4u32 {
+        for x in 0..8u32 {
+            pixels.push(if x < 4 {
+                if (x + y) % 2 == 0 {
+                    0xFFFF_FF00
+                } else {
+                    0xFF08_0818
+                }
+            } else {
+                ((y * 4 + x - 4) * 17) << 24 | 0xFF_0000
+            });
+        }
+    }
+    pixels
+}
+
+/// `compress_source` BltFast into an 8x4 DXT1 surface, Blt into an 8x4
+/// DXT3 one mirrored up and down, as Rage Rally loads its textures, and
+/// BltFast into an 8x4 DXT2 one.
+fn dxt_compress_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    d.resize(DXT_DATA_SIZE, 0);
+    rgb_desc(&mut d, DESC, A8R8G8B8, 8, 4);
+    dxt_desc(&mut d, DESC3, b"DXT1", 8, 4);
+    dxt_desc(&mut d, DESC4, b"DXT3", 8, 4);
+    dxt_desc(&mut d, LOCKED, b"DXT2", 8, 4);
+    let pixels: Vec<u8> = compress_source()
+        .iter()
+        .flat_map(|p| p.to_le_bytes())
+        .collect();
+    put(&mut d, BLOCKS, &pixels);
+    put32(&mut d, FX, 100);
+    put32(&mut d, FX + 4, DDBLTFX_MIRRORUPDOWN);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let others = [(DESC3, FRONT), (DESC4, BACK), (LOCKED, OFFSCREEN)];
+        dxt_start(a, l, &mut c, pixels.len() as u32, &others)?;
+        // 9: into DXT1; 10: into DXT3, mirrored; 11: into DXT2.
+        let fast = [
+            Arg::I(0),
+            Arg::I(0),
+            Arg::Val(SOURCE),
+            Arg::I(0),
+            Arg::I(DDBLTFAST_WAIT),
+        ];
+        c.com(a, l, FRONT, S_BLT_FAST, &fast)?;
+        let mirrored = [
+            Arg::I(0),
+            Arg::Val(SOURCE),
+            Arg::I(0),
+            Arg::I(DDBLT_WAIT | DDBLT_DDFX),
+            Arg::At(FX),
+        ];
+        c.com(a, l, BACK, S_BLT, &mirrored)?;
+        c.com(a, l, OFFSCREEN, S_BLT_FAST, &fast)?;
+        // 12 to 17.
+        find_pixels(a, l, &mut c, FRONT, DESC3)?;
+        find_pixels(a, l, &mut c, BACK, DESC4)?;
+        find_pixels(a, l, &mut c, OFFSCREEN, LOCKED)?;
+        finish(a, l)
+    })
+}
+
+/// The pixels of a row of DXT blocks `blocks` (dwords) of `format`, 4
+/// rows of 8, as a card decodes them.
+fn decode_blocks(format: rust_dos::video::dxt::Format, blocks: &[u32]) -> Vec<[u8; 4]> {
+    use rust_dos::video::dxt::{Rules, decode_block};
+    let bytes: Vec<u8> = blocks.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let decoded: Vec<[[u8; 4]; 16]> = bytes
+        .chunks(format.block_bytes())
+        .map(|b| decode_block(format, Rules::S3tc, b))
+        .collect();
+    (0..32)
+        .map(|i| {
+            let (x, y) = (i % 8, i / 8);
+            decoded[x / 4][y * 4 + x % 4]
+        })
+        .collect()
+}
+
+/// An A8R8G8B8 pixel as red, green, blue and alpha.
+fn rgba(p: u32) -> [u8; 4] {
+    let [b, g, r, a] = p.to_le_bytes();
+    [r, g, b, a]
+}
+
+#[test]
+fn blits_into_dxt_compress_the_pixels() {
+    use rust_dos::video::dxt::Format;
+    let (program, data) = dxt_compress_program();
+    let mut cpu = machine("dxt_compress", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 18);
+    assert_eq!(r[1..18], [0; 17], "{r:X?}");
+    let source = compress_source();
+    // DXT1: the two colours exactly, and the red with alpha under 128
+    // transparent black.
+    let blocks = locked_pixels(&cpu, data, DESC3, (4, 1), 4);
+    let dxt1 = decode_blocks(Format::Dxt1, &blocks);
+    for (i, (&p, q)) in source.iter().zip(&dxt1).enumerate() {
+        let expected = match rgba(p) {
+            [_, _, _, a] if a < 128 => [0, 0, 0, 0],
+            [r, g, b, _] => [r, g, b, 255],
+        };
+        assert_eq!(*q, expected, "pixel {i}");
+    }
+    // DXT3, mirrored: the rows the other way up, the alpha exact.
+    let blocks = locked_pixels(&cpu, data, DESC4, (8, 1), 4);
+    let dxt3 = decode_blocks(Format::Dxt3, &blocks);
+    for (i, q) in dxt3.iter().enumerate() {
+        let (x, y) = (i % 8, i / 8);
+        assert_eq!(*q, rgba(source[(3 - y) * 8 + x]), "pixel {i}");
+    }
+    // DXT2: the colours multiplied by their alpha, the red ramp's within
+    // half a step of its four codes.
+    let blocks = locked_pixels(&cpu, data, LOCKED, (8, 1), 4);
+    let dxt2 = decode_blocks(Format::Dxt2, &blocks);
+    for (i, (&p, q)) in source.iter().zip(&dxt2).enumerate() {
+        let [r, g, b, a] = rgba(p);
+        if i % 8 < 4 {
+            assert_eq!(*q, [r, g, b, a], "pixel {i}");
+        } else {
+            assert_eq!((q[1], q[2], q[3]), (0, 0, a), "pixel {i}");
+            assert!((q[0] as i32 - a as i32).abs() <= 43, "pixel {i}: {q:?}");
+        }
+    }
 }
 
 #[test]
