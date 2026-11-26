@@ -874,7 +874,12 @@ directly, at the points where the software renderer would draw them
   save state and the program's reads of it read nothing back into card
   memory, and the program's writes only where they write parts of
   pixels or more than 1024 rectangles (see "Between the card and the
-  host renderer").
+  host renderer"). The host keeps a framebuffer for each pair of a
+  target and its depth buffer, and asks the driver whether it is
+  complete once, when it makes it. A driver that runs the commands on
+  a thread of its own has to catch up with them before it answers:
+  asked at every batch, that wait was close to half of the host's time
+  on the emulator's thread in Unreal's Direct3D flyby.
 - **16-bit targets** are host framebuffers in the 565 format
   (`GL_RGB565`, renderable since OpenGL 4.1 and with
   `ARB_ES2_compatibility`), so the host's blend result is rounded to

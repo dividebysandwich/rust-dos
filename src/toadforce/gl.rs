@@ -432,10 +432,15 @@ pub struct ToadForceGl {
     /// The highest anisotropy the host filters with, or 0 where it
     /// has none.
     anisotropy: f32,
-    /// The framebuffer the draws go to, and the one a depth buffer is
-    /// read from, which has no colour.
+    /// The framebuffer the copies between textures and the conversions
+    /// of `texels` draw into, and the one a depth buffer is read from,
+    /// which has no colour.
     target: glow::Framebuffer,
     depth_only: glow::Framebuffer,
+    /// The framebuffers the draws and the clears go to (`attach`), by
+    /// the textures of the colour and the depth buffer, each made and
+    /// checked once.
+    framebuffers: HashMap<(glow::Texture, Option<glow::Texture>), glow::Framebuffer>,
     /// The framebuffers a copy between two textures reads from: one
     /// for colour, and one without colour for depth.
     from_colour: glow::Framebuffer,
@@ -494,6 +499,9 @@ pub struct ToadForceGl {
     writes: u64,
     /// The frames the window showed from a copy (`composite`).
     presents: u64,
+    /// The framebuffers made for the draws and the clears, each asked
+    /// once whether it is complete (`attach`).
+    framebuffers_made: u64,
     /// The host has no framebuffer the card's surfaces fit: nothing is
     /// taken.
     broken: bool,
@@ -566,6 +574,7 @@ impl ToadForceGl {
                 anisotropy,
                 target,
                 depth_only,
+                framebuffers: HashMap::new(),
                 from_colour,
                 from_depth,
                 array,
@@ -592,6 +601,7 @@ impl ToadForceGl {
                 decodes: 0,
                 converts: 0,
                 clears: 0,
+                framebuffers_made: 0,
                 blits: 0,
                 writes: 0,
                 presents: 0,
@@ -898,18 +908,45 @@ impl ToadForceGl {
     ///
     /// The context is current.
     unsafe fn drop_copies(&mut self, surfaces: &[Surface]) {
-        let gl = &*self.gl;
         let ranges: Vec<(u32, u32)> = surfaces.iter().map(gpu::range).collect();
         let shares = |r: (u32, u32)| ranges.iter().any(|&t| overlap(t, r));
+        let mut gone = Vec::new();
         self.copies.retain(|c| {
             let own = surfaces.iter().any(|s| gpu::related(s, &c.surface));
             let keep = own || !shares(gpu::range(&c.surface));
             if !keep {
-                // SAFETY: the texture is this context's.
-                unsafe { gl.delete_texture(c.texture) };
+                gone.push(c.texture);
             }
             keep
         });
+        // SAFETY: the caller's.
+        unsafe { self.delete_copies(&gone) };
+    }
+
+    /// Delete the textures of copies, and the framebuffers they are
+    /// attached to: a deleted texture's name may be given to another
+    /// texture, which such a framebuffer would then draw into.
+    ///
+    /// # Safety
+    ///
+    /// The context is current.
+    unsafe fn delete_copies(&mut self, textures: &[glow::Texture]) {
+        if textures.is_empty() {
+            return;
+        }
+        let gl = &*self.gl;
+        self.framebuffers.retain(|&(colour, depth), buffer| {
+            let keep = !textures.iter().any(|&t| t == colour || Some(t) == depth);
+            if !keep {
+                // SAFETY: the framebuffer is this context's.
+                unsafe { gl.delete_framebuffer(*buffer) };
+            }
+            keep
+        });
+        for &texture in textures {
+            // SAFETY: the texture is this context's.
+            unsafe { gl.delete_texture(texture) };
+        }
     }
 
     /// Drop the textures that share a byte with `surfaces`, copies the
@@ -1206,7 +1243,7 @@ impl ToadForceGl {
                     );
                     self.change(at);
                 }
-                self.gl.delete_texture(view.texture);
+                self.delete_copies(&[view.texture]);
             }
         }
         at
@@ -1223,29 +1260,56 @@ impl ToadForceGl {
         colour: glow::Texture,
         depth: Option<(glow::Texture, Format)>,
     ) -> bool {
+        if self.broken {
+            return false;
+        }
         let gl = &*self.gl;
+        let key = (colour, depth.map(|(texture, _)| texture));
+        // A framebuffer made for these textures before was complete, and
+        // stays so: a copy's texture keeps its size and format. Asking
+        // the driver again would have the program wait for it to run
+        // every command given so far, which a driver that runs them on
+        // a thread of its own does at the next query: at every batch,
+        // that was most of the host's time on the emulation thread.
+        if let Some(&buffer) = self.framebuffers.get(&key) {
+            // SAFETY: the caller's.
+            unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, Some(buffer)) };
+            return true;
+        }
         // SAFETY: the caller's.
         unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.target));
-            let attach = |point: u32, texture: Option<glow::Texture>| {
-                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, point, glow::TEXTURE_2D, texture, 0);
-            };
-            attach(glow::COLOR_ATTACHMENT0, Some(colour));
-            attach(glow::DEPTH_STENCIL_ATTACHMENT, None);
-            attach(glow::DEPTH_ATTACHMENT, None);
-            match depth {
-                Some((texture, Format::D16)) => attach(glow::DEPTH_ATTACHMENT, Some(texture)),
-                Some((texture, _)) => attach(glow::DEPTH_STENCIL_ATTACHMENT, Some(texture)),
-                None => {}
-            }
-            if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
-                if !self.broken {
-                    self.note(
-                        "[TOADFORCE] the host has no framebuffer for the card's target: \
-                         the software renderer draws"
-                            .to_string(),
-                    );
+            let complete = match gl.create_framebuffer() {
+                Ok(buffer) => {
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(buffer));
+                    let attach = |point: u32, texture: glow::Texture| {
+                        let kind = glow::TEXTURE_2D;
+                        gl.framebuffer_texture_2d(glow::FRAMEBUFFER, point, kind, Some(texture), 0);
+                    };
+                    attach(glow::COLOR_ATTACHMENT0, colour);
+                    match depth {
+                        Some((texture, Format::D16)) => attach(glow::DEPTH_ATTACHMENT, texture),
+                        Some((texture, _)) => attach(glow::DEPTH_STENCIL_ATTACHMENT, texture),
+                        None => {}
+                    }
+                    self.framebuffers_made += 1;
+                    let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+                    let complete = status == glow::FRAMEBUFFER_COMPLETE;
+                    if complete {
+                        self.framebuffers.insert(key, buffer);
+                    } else {
+                        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                        gl.delete_framebuffer(buffer);
+                    }
+                    complete
                 }
+                Err(_) => false,
+            };
+            if !complete {
+                self.note(
+                    "[TOADFORCE] the host has no framebuffer for the card's target: \
+                     the software renderer draws"
+                        .to_string(),
+                );
                 self.broken = true;
             }
         }
@@ -2290,6 +2354,8 @@ impl Host for ToadForceGl {
             "blits": self.blits,
             "writes": self.writes,
             "presents": self.presents,
+            "framebuffers_made": self.framebuffers_made,
+            "framebuffers": self.framebuffers.len(),
             "packed_565": self.packed,
         })
     }
@@ -2830,6 +2896,9 @@ impl Host for ToadForceGl {
                 gl.delete_framebuffer(buffer);
                 gl.delete_texture(picture);
                 gl.delete_texture(staging);
+            }
+            for (_, buffer) in self.framebuffers.drain() {
+                gl.delete_framebuffer(buffer);
             }
             for copy in self.copies.drain(..) {
                 gl.delete_texture(copy.texture);
