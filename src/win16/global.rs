@@ -272,7 +272,7 @@ pub fn realloc(cpu: &mut Cpu, handle: u16, size: u32, flags: u16) -> u16 {
     let in_place = a.base != 0
         && !a.fixed_memory
         && super::with_win16_heap(cpu, |heap, memory, bus| {
-            heap.resize_in_place(memory, bus, a.base, size)
+            heap.resize_in_place_keeping_bytes(memory, bus, a.base, size)
         });
     let base = if in_place {
         a.base

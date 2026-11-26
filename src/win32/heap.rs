@@ -345,13 +345,40 @@ impl Heap {
     }
 
     /// Change the size of the block at `at` to `size` where it is, if the
-    /// next block leaves room. False if it doesn't, or there is no block.
+    /// next block leaves room, the whole pages a block that shrinks gives
+    /// up zeroed as `free` zeroes them. False if it doesn't, or there is
+    /// no block.
     pub fn resize_in_place(
         &mut self,
         memory: &mut Memory,
         bus: &mut Bus,
         at: u32,
         size: u32,
+    ) -> bool {
+        self.resize(memory, bus, at, size, true)
+    }
+
+    /// `resize_in_place` leaving the bytes a block that shrinks gives up
+    /// as they are: for the 16-bit global heap, as `free_keeping_bytes`.
+    pub fn resize_in_place_keeping_bytes(
+        &mut self,
+        memory: &mut Memory,
+        bus: &mut Bus,
+        at: u32,
+        size: u32,
+    ) -> bool {
+        self.resize(memory, bus, at, size, false)
+    }
+
+    /// The block at `at` made `size` bytes long where it is, and with
+    /// `clear` the whole pages it gives up zeroed.
+    fn resize(
+        &mut self,
+        memory: &mut Memory,
+        bus: &mut Bus,
+        at: u32,
+        size: u32,
+        clear: bool,
     ) -> bool {
         let Some(i) = self.find(at) else {
             return false;
@@ -378,7 +405,7 @@ impl Heap {
         self.blocks[i].1 = size;
         // A block that shrank leaves a larger gap before the next one.
         self.widened(i + 1);
-        if end < old_end {
+        if clear && end < old_end {
             self.clear(memory, bus, i + 1, end, old_end);
         }
         true
@@ -641,6 +668,23 @@ mod tests {
         let after = bytes(&cpu, &memory, base, 0x3000);
         assert!(after[..0x1000].iter().all(|&x| x == 0xCD), "d's page");
         assert!(after[0x1000..].iter().all(|&x| x == 0), "its freed pages");
+    }
+
+    /// The 16-bit global heap's calls leave the bytes of what they give
+    /// up as they are.
+    #[test]
+    fn keeping_bytes_zeroes_nothing() {
+        let (mut cpu, mut memory, mut heap) = real_heap(0x10000);
+        let base = heap.base;
+        let a = heap.alloc(&mut memory, &mut cpu.bus, 0x3000).unwrap();
+        let b = heap.alloc(&mut memory, &mut cpu.bus, 0x100).unwrap();
+        assert_eq!((a, b), (base, base + 0x3000));
+        memory.write(&mut cpu.bus, base, &[0xAB; 0x3100]).unwrap();
+
+        assert!(heap.resize_in_place_keeping_bytes(&mut memory, &mut cpu.bus, a, 0x10));
+        assert!(heap.free_keeping_bytes(b));
+        let after = bytes(&cpu, &memory, base, 0x3100);
+        assert!(after.iter().all(|&x| x == 0xAB));
     }
 
     /// A walk of the pieces, as Heap32First and Heap32Next take them,
