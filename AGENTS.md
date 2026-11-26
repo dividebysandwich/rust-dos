@@ -178,6 +178,19 @@ scope; say which in a comment on it. When several agents work together,
 the one coordinating them marks pull requests ready, not the agents
 doing the work.
 
+## Comments on issues: other people's issues need approval
+
+An agent doesn't comment on an issue opened by anyone other than the
+maintainers, dividebysandwich and kibertoad, until a maintainer has
+approved the comment's text. Write the comment, show it to the
+maintainer the agent works for, and post it only once they approve it.
+An agent working under a coordinator sends the text to the coordinator,
+which asks. Look up the issue's author with `gh issue view <n> --json
+author` before commenting.
+
+On the maintainers' own issues, and on the pull requests and issues an
+agent opens itself, agents comment without asking.
+
 ## Checks in proportion to the change
 
 Check a change as much as what it can break calls for, and no more.
