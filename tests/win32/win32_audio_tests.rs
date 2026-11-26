@@ -868,6 +868,161 @@ fn msacm32_decodes_ms_adpcm_as_ffmpeg_does() {
     acm_decodes(CoreMode::Normal);
 }
 
+// The data of `acm_converts_pcm`.
+const PCM_STREAM: u32 = 0x00;
+const PCM_SIZE: u32 = 0x04;
+const PCM_TO: u32 = 0x08;
+const PCM_FROM: u32 = 0x20;
+const PCM_24_BITS: u32 = 0x40;
+const PCM_HEADER: u32 = 0x60;
+const PCM_SOUND: u32 = 0x100;
+const PCM_OUT: u32 = 0x200;
+const PCM_CONVERTED: u32 = 0x300;
+
+/// 16-bit stereo PCM at 22050 Hz: 8 frames.
+fn pcm_sound() -> Vec<[i16; 2]> {
+    (0..8i16)
+        .map(|i| [1000 * i, 500 * i - 2000 + 30000 * (i / 7)])
+        .collect()
+}
+
+/// A program converts 16-bit stereo PCM at 22050 Hz to 8-bit mono at
+/// 11025 Hz through MSACM32's PCM converter: acmFormatSuggest suggests
+/// the PCM the flags ask for, and refuses 3 channels, and acmStreamOpen
+/// refuses 24 bits as acmFormatSuggest does. The stream sizes and
+/// converts as Wine's converter does: every other frame is dropped, and
+/// the two channels' sum, clipped, becomes the sample's high byte.
+fn acm_converts_pcm(core: CoreMode) {
+    let sound = pcm_sound();
+    let source: Vec<u8> = sound.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
+    let converted: Vec<u8> = sound
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .map(|&[l, r]| {
+            let sum = (i32::from(l) + i32::from(r)).clamp(-32768, 32767);
+            ((sum >> 8) as u8) ^ 0x80
+        })
+        .collect();
+    let mut data = vec![0xFFu8; PCM_CONVERTED as usize + converted.len()];
+    let mut put = |at: u32, bytes: &[u8]| {
+        data[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    };
+    let wave_format = |channels: u16, rate: u32, bits: u16| {
+        let align = channels * bits / 8;
+        let mut f = Vec::new();
+        f.extend_from_slice(&1u16.to_le_bytes());
+        f.extend_from_slice(&channels.to_le_bytes());
+        f.extend_from_slice(&rate.to_le_bytes());
+        f.extend_from_slice(&(rate * u32::from(align)).to_le_bytes());
+        f.extend_from_slice(&align.to_le_bytes());
+        f.extend_from_slice(&bits.to_le_bytes());
+        f.extend_from_slice(&0u16.to_le_bytes());
+        f
+    };
+    put(PCM_FROM, &wave_format(2, 22050, 16));
+    put(PCM_TO, &wave_format(3, 11025, 8));
+    put(PCM_24_BITS, &wave_format(1, 11025, 24));
+    put(PCM_HEADER, &[0; 84]);
+    put(PCM_HEADER, &84u32.to_le_bytes());
+    put(PCM_SOUND, &source);
+    put(PCM_CONVERTED, &converted);
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.dll", KERNEL32), ("MSACM32.dll", MSACM32)];
+    let acm = |n: usize| OTHER + n;
+    let exe = program(imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        let at = |offset: u32| l.at(offset) as i32;
+        let field = |offset: u32| dword_ptr(l.at(PCM_HEADER + offset));
+        let stream = dword_ptr(l.at(PCM_STREAM));
+        // acmFormatSuggest(0, from, to, 18, ACM_FORMATSUGGESTF_NCHANNELS |
+        // NSAMPLESPERSEC | WBITSPERSAMPLE): 3 channels are refused with
+        // ACMERR_NOTPOSSIBLE, 1 is suggested.
+        for (step, channels, wanted) in [(1, 3, 512), (2, 1, 0)] {
+            a.mov(word_ptr(l.at(PCM_TO + 2)), channels)?;
+            for arg in [0xE_0000, 18, at(PCM_TO), at(PCM_FROM), 0] {
+                a.push(arg)?;
+            }
+            a.call(l.import(acm(0)))?;
+            a.mov(ebx, step)?;
+            a.cmp(eax, wanted)?;
+            a.jne(fail)?;
+        }
+        // 8-bit mono PCM at 11025 Hz.
+        let pcm: [(u32, u32); 4] = [(0, 0x0001_0001), (4, 11025), (8, 11025), (12, 0x0008_0001)];
+        for (n, (offset, value)) in pcm.into_iter().enumerate() {
+            a.mov(ebx, 20 + n as i32)?;
+            a.cmp(dword_ptr(l.at(PCM_TO + offset)), value as i32)?;
+            a.jne(fail)?;
+        }
+        // acmStreamOpen(0, 0, from, 24 bits, 0, 0, 0, ACM_STREAMOPENF_QUERY)
+        // fails as the suggestion would, and the stream to 8 bits opens.
+        for (step, out, to, flags, wanted) in [
+            (3, 0, at(PCM_24_BITS), 1, 512),
+            (4, at(PCM_STREAM), at(PCM_TO), 0, 0),
+        ] {
+            for arg in [flags, 0, 0, 0, to, at(PCM_FROM), 0, out] {
+                a.push(arg)?;
+            }
+            a.call(l.import(acm(1)))?;
+            a.mov(ebx, step)?;
+            a.cmp(eax, wanted)?;
+            a.jne(fail)?;
+        }
+        // The bytes the sound converts to, and back.
+        let bytes = source.len() as i32;
+        let out = converted.len() as i32;
+        for (step, size, flags, wanted) in [(5, bytes, 0, out), (6, out, 1, bytes)] {
+            a.push(flags)?;
+            a.push(at(PCM_SIZE))?;
+            a.push(size)?;
+            a.push(stream)?;
+            a.call(l.import(acm(2)))?;
+            check(a, fail, step)?;
+            a.mov(ebx, 30 + step)?;
+            a.cmp(dword_ptr(l.at(PCM_SIZE)), wanted)?;
+            a.jne(fail)?;
+        }
+        a.mov(field(0x0C), at(PCM_SOUND))?;
+        a.mov(field(0x10), bytes)?;
+        a.mov(field(0x1C), at(PCM_OUT))?;
+        a.mov(field(0x20), out)?;
+        // Prepare, convert and unprepare.
+        for (step, function) in [(7, 3), (8, 4), (9, 5)] {
+            a.push(0)?;
+            a.push(at(PCM_HEADER))?;
+            a.push(stream)?;
+            a.call(l.import(acm(function)))?;
+            check(a, fail, step)?;
+        }
+        // All of the sound used, and the PCM written.
+        a.mov(ebx, 40)?;
+        a.cmp(field(0x14), bytes)?;
+        a.jne(fail)?;
+        a.mov(ebx, 41)?;
+        a.cmp(field(0x24), out)?;
+        a.jne(fail)?;
+        a.mov(ebx, 42)?;
+        a.mov(esi, at(PCM_OUT))?;
+        a.mov(edi, at(PCM_CONVERTED))?;
+        a.mov(ecx, out)?;
+        a.repe().cmpsb()?;
+        a.jne(fail)?;
+        a.push(0)?;
+        a.push(stream)?;
+        a.call(l.import(acm(6)))?;
+        check(a, fail, 10)?;
+        exit(a, l, &mut fail)
+    });
+    let mut cpu = machine("acm_converts_pcm", exe, core, &[]);
+    let (code, _) = run(&mut cpu, 200);
+    assert_eq!(code, 0, "the program failed at step {code}");
+}
+
+#[test]
+fn msacm32_converts_pcm_as_wine_does() {
+    acm_converts_pcm(CoreMode::Normal);
+}
+
 /// The format tag of the test's codec: Windows Media Audio's.
 const TEST_TAG: u16 = 0x161;
 /// The id the test's codec gives its stream in ACMDRVSTREAMINSTANCE's

@@ -11,18 +11,20 @@
 //! (`drivers`): acmFormatSuggest and acmStreamOpen ask them for what the
 //! built-in codecs don't take, and acmDriverEnum, acmDriverOpen and the
 //! other functions of drivers reach them. The built-in codecs aren't
-//! drivers with handles of their own. Of the PCM converter built into
-//! Windows' MSACM32 there is its acmFormatSuggest from PCM to PCM; it
-//! converts nothing. The rest answers as the code of MSACM32 4.03.1998
-//! does with no drivers: there is no encoder and no other codec built in
-//! (issue 439). What it says of PCM without a driver and of bad
-//! arguments in other calls isn't here (issue 443).
+//! drivers with handles of their own. The PCM converter built into
+//! Windows' MSACM32 is here too (`pcm`): acmFormatSuggest suggests PCM
+//! for PCM, and a stream converts PCM to PCM of other channels, bits and
+//! rate. The rest answers as the code of MSACM32 4.03.1998 does with no
+//! drivers: there is no encoder and no other codec built in (issue
+//! 439). What it says of PCM without a driver and of bad arguments in
+//! other calls isn't here (issue 443).
 //!
 //! Wine's MSACM32.DLL and its codecs convert too, as guest code:
 //! `win32_dlls_replace=msacm32` puts them in place of this one.
 
 pub mod adpcm;
 pub mod drivers;
+pub mod pcm;
 
 use super::kernel32::virtual_memory::allows;
 use super::stubs::{Api, Conv, Dll, Handler};
@@ -34,6 +36,7 @@ use super::winmm::{
 use crate::cpu::Cpu;
 use crate::savestate::Since;
 use adpcm::MS_ADPCM;
+use pcm::Pcm;
 use std::collections::BTreeMap;
 
 pub static DLL: Dll = Dll {
@@ -145,7 +148,8 @@ crate::state_fields!(State {
 /// of the PCM it decodes to. A stream of an installable driver has the
 /// driver's handle (a HACMDRIVER) instead, its ACMDRVSTREAMINSTANCE in
 /// the system's heap, and whether it opened the driver itself, to close
-/// it with the stream.
+/// it with the stream. A stream of the PCM converter has the PCM it
+/// converts from and to instead (`from`, `to`).
 #[derive(Clone, Debug, Default)]
 struct Stream {
     pid: u32,
@@ -154,6 +158,8 @@ struct Stream {
     driver: Since<DRIVERS_SAVED, u32>,
     instance: Since<DRIVERS_SAVED, u32>,
     owns: Since<DRIVERS_SAVED, bool>,
+    from: Since<DRIVERS_SAVED, Pcm>,
+    to: Since<DRIVERS_SAVED, Pcm>,
 }
 
 crate::state_fields!(Stream {
@@ -162,10 +168,17 @@ crate::state_fields!(Stream {
     bits,
     driver,
     instance,
-    owns
+    owns,
+    from,
+    to
 });
 
 impl Stream {
+    /// Whether it is a stream of the PCM converter.
+    fn converts_pcm(&self) -> bool {
+        self.from.rate != 0
+    }
+
     /// The bytes of a frame of the PCM it writes.
     fn frame(&self) -> u32 {
         self.source.channels as u32 * self.bits as u32 / 8
@@ -434,17 +447,31 @@ fn builtin_suggest(cpu: &mut Cpu, args: &[u32]) -> u32 {
     MMSYSERR_NOERROR
 }
 
+/// The PCM format at `at`, if the PCM converter takes it (`Pcm::new`).
+fn pcm_format(cpu: &mut Cpu, at: u32) -> Option<Pcm> {
+    if cpu.bus.guest_read_16(at) != WAVE_FORMAT_PCM {
+        return None;
+    }
+    let channels = cpu.bus.guest_read_16(at + 2);
+    let rate = cpu.bus.guest_read_32(at + 4);
+    let align = cpu.bus.guest_read_16(at + 12);
+    Pcm::new(channels, rate, cpu.bus.guest_read_16(at + 14), align)
+}
+
 /// What the PCM converter built into Windows' MSACM32 suggests for a PCM
 /// source: PCM with the source's channels, rate and bits, but those the
-/// flags keep from the destination. ACMERR_NOTPOSSIBLE for a tag kept
-/// that isn't PCM's, or for PCM other than 8 or 16 bits, mono or
-/// stereo. Demolition Racer's wmaudsdk.dll asks this of the PCM the WMA
-/// codec suggested. Which rates Windows' converter takes isn't checked
-/// here: any but 0 is.
+/// flags keep from the destination. ACMERR_NOTPOSSIBLE for a source or
+/// a suggestion the converter's streams don't take (`Pcm::new`), or for
+/// a tag kept that isn't PCM's. Demolition Racer's wmaudsdk.dll asks
+/// this of the PCM the WMA codec suggested. Which rates Windows'
+/// converter takes isn't checked here: any but 0 is.
 fn pcm_suggest(cpu: &mut Cpu, args: &[u32]) -> u32 {
     let &[_, source, destination, size, flags] = args else {
         unreachable!()
     };
+    if pcm_format(cpu, source).is_none() {
+        return ACMERR_NOTPOSSIBLE;
+    }
     let field = |cpu: &mut Cpu, flag: u32, offset: u32, read: fn(&mut Cpu, u32) -> u32| {
         let from = if flags & flag != 0 {
             destination
@@ -477,12 +504,12 @@ fn stream(cpu: &mut Cpu, handle: u32) -> Option<Stream> {
 
 /// acmStreamOpen(out, driver, source, destination, filter, callback,
 /// instance, flags). A query needs no `out`. The stream decodes ADPCM to
-/// PCM of the same rate and channels, with no filter; what else is
-/// asked goes to the installed drivers (`drivers`), and a driver the
-/// program opened takes every stream asked of it. A stream that calls
-/// back as it converts (ACM_STREAMOPENF_ASYNC) isn't here: Windows'
-/// ADPCM codecs convert while the call waits, and the ACM's own queue
-/// for them isn't written.
+/// PCM of the same rate and channels, or converts PCM to PCM
+/// (`pcm_stream_open`), with no filter; what else is asked goes to the
+/// installed drivers (`drivers`), and a driver the program opened takes
+/// every stream asked of it. A stream that calls back as it converts
+/// (ACM_STREAMOPENF_ASYNC) isn't here: Windows' ADPCM codecs convert
+/// while the call waits, and the ACM's own queue for them isn't written.
 fn stream_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[out, driver, source, destination, filter, _, _, flags] = args else {
         unreachable!()
@@ -509,6 +536,9 @@ fn stream_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if driver != 0 {
         return drivers::stream_open(cpu, args);
     }
+    if cpu.bus.guest_read_16(source) == WAVE_FORMAT_PCM {
+        return pcm_stream_open(cpu, args);
+    }
     let Some((f, rate)) = adpcm_format(cpu, source) else {
         return drivers::stream_open(cpu, args);
     };
@@ -530,6 +560,35 @@ fn stream_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         pid,
         source: f,
         bits,
+        ..Stream::default()
+    };
+    state(cpu).streams.insert(handle, stream);
+    cpu.bus.guest_write_32(out, handle);
+    Some(MMSYSERR_NOERROR)
+}
+
+/// acmStreamOpen's checked arguments for a PCM source: a stream of the
+/// PCM converter if it takes both formats (`Pcm::new`) and there is no
+/// filter, else what the installed drivers say.
+fn pcm_stream_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[out, _, source, destination, filter, _, _, flags] = args else {
+        unreachable!()
+    };
+    let (Some(from), Some(to)) = (pcm_format(cpu, source), pcm_format(cpu, destination)) else {
+        return drivers::stream_open(cpu, args);
+    };
+    if filter != 0 {
+        return drivers::stream_open(cpu, args);
+    }
+    if flags & STREAM_OPEN_QUERY != 0 {
+        return Some(MMSYSERR_NOERROR);
+    }
+    let pid = current_pid(cpu);
+    let handle = drivers::new_handle(cpu, FIRST_STREAM);
+    let stream = Stream {
+        pid,
+        from: Since(from),
+        to: Since(to),
         ..Stream::default()
     };
     state(cpu).streams.insert(handle, stream);
@@ -577,7 +636,8 @@ fn stream_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// bytes of ADPCM decode to, a partial block at the end counted whole,
 /// or the ADPCM of the whole blocks whose PCM fits in `size`.
 /// ACMERR_NOTPOSSIBLE if there is no whole block, or if the PCM would
-/// pass 4 GB. A driver's stream asks its driver.
+/// pass 4 GB. The PCM converter sizes by bytes a second (`pcm::size`),
+/// and a driver's stream asks its driver.
 fn stream_size(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[handle, size, out, flags] = args else {
         unreachable!()
@@ -595,6 +655,8 @@ fn stream_size(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return drivers::stream_size(cpu, &s, size, out, flags);
     }
     let bytes = match flags {
+        SIZE_SOURCE if s.converts_pcm() => pcm::size(*s.from, *s.to, size),
+        SIZE_DESTINATION if s.converts_pcm() => pcm::size(*s.to, *s.from, size),
         SIZE_SOURCE => s.pcm_size(size),
         SIZE_DESTINATION => s.adpcm_size(size),
         _ => return Some(MMSYSERR_INVALFLAG),
@@ -687,8 +749,9 @@ fn unprepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// holds the PCM of all the source's blocks, a partial one counted
 /// whole, as acmStreamSize gives it. All of the source is used, or its
 /// whole blocks if the flags ask for those; a partial block at the end
-/// decodes as `adpcm::Format::decode_buffer` says. A driver's stream's
-/// driver converts.
+/// decodes as `adpcm::Format::decode_buffer` says. The PCM converter
+/// converts the whole frames that fit (`pcm::convert`), and a driver's
+/// stream's driver converts.
 fn stream_convert(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[handle, header, flags] = args else {
         unreachable!()
@@ -709,23 +772,30 @@ fn stream_convert(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if *s.driver != 0 {
         return drivers::stream_header(cpu, &s, drivers::CONVERT, header, flags);
     }
-    // The codecs size the destination's source first and refuse a
-    // source longer than that, so the PCM always fits.
-    if s.adpcm_size(room).unwrap_or(0) < length {
-        return Some(ACMERR_NOTPOSSIBLE);
-    }
-    let used = if flags & CONVERT_BLOCKALIGN != 0 {
-        length - length % s.source.block_align as u32
+    let (used, bytes) = if s.converts_pcm() {
+        let mut source = vec![0; length as usize];
+        cpu.bus.guest_read_bytes(at, &mut source);
+        pcm::convert(*s.from, *s.to, &source, room)
     } else {
-        length
-    };
-    let mut source = vec![0; used as usize];
-    cpu.bus.guest_read_bytes(at, &mut source);
-    let pcm = s.source.decode_buffer(&source);
-    let bytes: Vec<u8> = if s.bits == 8 {
-        pcm.iter().map(|&v| ((v >> 8) as u8) ^ 0x80).collect()
-    } else {
-        pcm.iter().flat_map(|v| v.to_le_bytes()).collect()
+        // The codecs size the destination's source first and refuse a
+        // source longer than that, so the PCM always fits.
+        if s.adpcm_size(room).unwrap_or(0) < length {
+            return Some(ACMERR_NOTPOSSIBLE);
+        }
+        let used = if flags & CONVERT_BLOCKALIGN != 0 {
+            length - length % s.source.block_align as u32
+        } else {
+            length
+        };
+        let mut source = vec![0; used as usize];
+        cpu.bus.guest_read_bytes(at, &mut source);
+        let pcm = s.source.decode_buffer(&source);
+        let bytes: Vec<u8> = if s.bits == 8 {
+            pcm.iter().map(|&v| ((v >> 8) as u8) ^ 0x80).collect()
+        } else {
+            pcm.iter().flat_map(|v| v.to_le_bytes()).collect()
+        };
+        (used, bytes)
     };
     cpu.bus.guest_write_bytes(destination, &bytes);
     cpu.bus.guest_write_32(header + HEADER_SOURCE_USED, used);

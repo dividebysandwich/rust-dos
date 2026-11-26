@@ -1283,7 +1283,7 @@ mod tests {
         (107, 0x191A_8E84_8667_48E1), // a memory DC's bitmap size, and gdi_heap's Viewed::live
         (108, 0xD583_DDB0_E20F_D89B), // the GDI palette a DirectDraw palette is realized through
         (109, 0x5FC6_2F5F_06D7_B415), // SETUPX's open INF files, LDIDs and copy queue
-        (110, 0x93E9_54D8_8043_C70A), // MSACM32's installable drivers and their streams
+        (110, 0xBE39_468F_FC39_810F), // MSACM32's installable drivers and their streams
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
