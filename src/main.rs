@@ -736,6 +736,17 @@ fn main() -> Result<ExitCode, String> {
                     let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
                     let alt = keymod.intersects(Mod::LALTMOD | Mod::RALTMOD);
                     let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                    // A rebind on the Hotkeys page takes the next key with
+                    // its modifiers before the hotkeys do, so a hotkey's
+                    // key can be bound to another action. Modifiers alone
+                    // name no key and wait for one.
+                    if ui.capturing_hotkey() {
+                        if !repeat && let Some(key) = sdl_keys::hotkey(keycode, scancode) {
+                            let combo = rust_dos::hotkeys::Combo { ctrl, alt, shift, key };
+                            ui.hotkey_pressed(combo, &mut host!());
+                        }
+                        continue;
+                    }
                     // With the settings window open, a key without Ctrl or
                     // Alt is the window's when its action does nothing
                     // there, or when the window has a use for the key (its

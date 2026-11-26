@@ -142,6 +142,20 @@ Esc closes it.
   `[autoexec]` (a game's profile's while it plays) in an editor, comments
   included; F2 writes it into the file, for the next start, and Esc leaves
   the file as it was.
+* **Hotkeys:** the [hotkeys](#hotkeys): the profile, and each action
+  with its keys, *changed* beside those that differ from the profile's.
+  Enter on an action waits for the keys to press for it, with any of
+  Ctrl, Alt and Shift; Esc gives up. Ins adds keys beside the ones it
+  has, Del leaves it without a key, and R gives it the profile's keys
+  again; *Reset every key to the profile's* does that for all of them.
+  Keys another action has are given over only after the window asks
+  (Enter gives them, Esc waits for other keys). The settings window's
+  key can't be one that moves or types in the window (the arrows,
+  Enter, a letter without Ctrl or Alt), and no change may leave the
+  window without a key while `mouse_menu_hold` is off. *Save as a custom
+  profile...* keeps the keys under a name, and *Profile* lists the custom
+  profiles after the built-in ones. The keys change at once, and F2
+  saves them as `[hotkeys]` lines.
 * **Sound:** everything in `[sound]`, and the disk noises. A card's port,
   IRQ and DMA channels share a row: Left and Right move between them, and
   Enter lists the values of the one marked.
@@ -2826,8 +2840,8 @@ uses takes that key from the game.
   [REFERENCE.md](REFERENCE.md#keyboard-shortcuts) lists), `pcsx2`,
   `duckstation`, `pcsx-redux`, `epsxe`, `retroarch`, `dosbox` or
   `86box`. [Hotkey profiles](REFERENCE.md#hotkey-profiles) has each
-  one's keys. The settings window's Emulator page sets it too
-  (*Hotkeys*).
+  one's keys. The settings window's Hotkeys page sets it too
+  (*Profile*), and keeps the actions' own lines when it does.
 * A line named after an action binds that action alone, over the
   profile: a key with any of `Ctrl+`, `Alt+` and `Shift+` before it,
   several such keys separated by commas, or `none` for no key.
@@ -2911,6 +2925,15 @@ The actions, with their keys in the `rust-dos` profile:
   (mouse capture), Ctrl+Shift with the mouse, Q and E in the 3D scene
   (its camera), and the right mouse button held still
   (`mouse_menu_hold`).
+* A custom profile, saved from the settings window's Hotkeys page, is
+  a file in the `hotkeys` folder of the per-user configuration directory
+  (`%APPDATA%\rust-dos\hotkeys` on Windows, `~/.config/rust-dos/hotkeys`
+  on Linux): `<name>.conf`, which holds the `profile` line and a line for
+  every action, as `[hotkeys]` has them. Loading one from *Profile* sets
+  `profile` to its line, and gives the actions whose keys differ from
+  that profile's lines of their own; the configuration file never names
+  the custom profile, so it works on a machine without the file. A line
+  left out of the file leaves its action the profile's keys.
 * The [libretro core](libretro/README.md) doesn't read `[hotkeys]`: the
   frontend has the hotkeys for save states, fast forward, rewind,
   pause and screenshots, set in the frontend, and the core keeps its

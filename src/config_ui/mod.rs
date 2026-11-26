@@ -18,6 +18,7 @@ mod games;
 mod glide;
 mod help;
 mod host;
+mod hotkeys_page;
 mod image;
 mod input;
 mod item;
@@ -128,6 +129,7 @@ enum Page {
     Drives,
     Display,
     Emulator,
+    Hotkeys,
     Sound,
     Mixer,
     Network,
@@ -138,12 +140,13 @@ enum Page {
     Stats,
 }
 
-const PAGES: [Page; 13] = [
+const PAGES: [Page; 14] = [
     Page::Games,
     Page::States,
     Page::Drives,
     Page::Display,
     Page::Emulator,
+    Page::Hotkeys,
     Page::Sound,
     Page::Mixer,
     Page::Network,
@@ -160,6 +163,7 @@ impl Page {
             Page::Drives => "Drives",
             Page::Display => "Display",
             Page::Emulator => "Emulator",
+            Page::Hotkeys => "Hotkeys",
             Page::Sound => "Sound",
             Page::Mixer => "Mixer",
             Page::Network => "Network",
@@ -176,7 +180,13 @@ impl Page {
     fn items(self) -> &'static [Item] {
         use Item::*;
         match self {
-            Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
+            Page::Drives
+            | Page::Games
+            | Page::States
+            | Page::Cheats
+            | Page::Achievements
+            | Page::Stats
+            | Page::Hotkeys => &[],
             Page::Vr => &[
                 VrMode, VrScene, VrScreenFit, VrQuality, VrAmbientOcclusion, VrMsaa, VrScreenGlow, VrControllers, VrSpatialAudio,
                 VrCenter, VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrKeyboard, VrMarkKeyboard, VrTime, VrTimeSpeed, VrLatitude,
@@ -194,7 +204,7 @@ impl Page {
                 VeriteRisc, VeriteMhz, VeriteRom, VeriteIrq, ToadForceMemory, ToadForceGamma,
                 Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, AnsiSys, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
-                Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, PauseInSettings, KeyboardLayout, HotkeyProfile, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
+                Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, PauseInSettings, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory, GameFixes,
                 VersionCheck, AlmanacAuto,
                 AlmanacFetch, AlmanacReport,
@@ -311,6 +321,9 @@ struct Popup {
     /// The settings with each value (`Item::choices`), the one selected,
     /// the first one shown and how many the last frame showed.
     choices: Vec<Settings>,
+    /// What the list says of each, where the setting's value doesn't say
+    /// it (the hotkeys' custom profiles).
+    labels: Option<Vec<String>>,
     selected: usize,
     scroll: usize,
     visible: usize,
@@ -474,6 +487,8 @@ pub struct ConfigUi {
     /// `rust-dos` profile's unless the front end says otherwise
     /// (`set_hotkeys`).
     hotkeys: crate::hotkeys::Hotkeys,
+    /// The Hotkeys page: custom profiles, and a rebind under way.
+    hotkeys_page: hotkeys_page::HotkeysPage,
     /// The settings as a BIOS setup, while it shows (setup.rs).
     setup: Option<setup::Setup>,
     scene_download: Option<scenes::SceneDownload>,
@@ -570,6 +585,7 @@ impl ConfigUi {
             almanac: None,
             sound_viz: None,
             hotkeys: crate::hotkeys::HotkeySettings::default().table(),
+            hotkeys_page: hotkeys_page::HotkeysPage::default(),
             setup: None,
             scene_download: None,
             help: None,
@@ -724,6 +740,9 @@ impl ConfigUi {
         self.confirm_glide = None;
         self.cheats.edit = None;
         self.achievements.edit = None;
+        self.hotkeys_page.cancel();
+        self.hotkeys_page.dir = crate::hotkeys::custom_dir();
+        self.hotkeys_page.refresh();
         self.cheats.refresh(host);
         self.achievements.edit = None;
         self.achievements.refresh(host);
@@ -739,6 +758,7 @@ impl ConfigUi {
 
     pub fn close(&mut self) {
         self.open = false;
+        self.hotkeys_page.cancel();
         self.setup = None;
         self.layout = None;
         self.hits.clear();
@@ -807,6 +827,7 @@ impl ConfigUi {
             Page::Cheats => self.cheats.rows().len(),
             Page::Achievements => self.achievements.rows(self.active_game.is_some()).len(),
             Page::Stats => 0,
+            Page::Hotkeys => self.hotkey_rows().len(),
             _ => self.items().len(),
         }
     }

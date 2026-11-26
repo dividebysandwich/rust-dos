@@ -139,6 +139,22 @@ even in games that don't let you.
 
 Each game profile has slots of its own.
 
+# Hotkeys {#hotkeys}
+
+The emulator's keys, such as the ones that save and load states. A
+hotkey's key doesn't reach the program.
+
+- *Profile* picks another emulator's keys, or a custom profile. Keys
+  marked *changed* stay when you pick another emulator's.
+- **Enter** binds the action to the next keys you press, **Ins** adds
+  them as another key, **Del** leaves it without one, **R** gives it
+  the profile's keys again. Keys another action has are moved only
+  once you say so.
+- *Save as a custom profile* keeps the keys under a name, to load from
+  *Profile* later.
+
+F2 saves the keys in the configuration file.
+
 # Cheats {#cheats}
 
 Finds a number in the game's memory, such as lives or money, and changes

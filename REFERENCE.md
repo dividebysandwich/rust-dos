@@ -119,8 +119,10 @@ from the history. The history is kept between sessions. The
 These are the keys of the `rust-dos` hotkey profile, the default.
 [`[hotkeys]`](CONFIGURATION.md#hotkeys) in the configuration file picks
 another emulator's keys ([hotkey profiles](#hotkey-profiles)) or changes
-single keys, and the settings window's Emulator page picks the profile.
-A hotkey's key isn't sent to the program running in the machine.
+single keys, as does the settings window's
+[Hotkeys page](CONFIGURATION.md#settings-window), which also keeps sets
+of keys as custom profiles. A hotkey's key isn't sent to the program
+running in the machine.
 
 | Key | Action |
 |---|---|
@@ -159,8 +161,8 @@ Rust-DOS started in).
 
 ## Hotkey profiles
 
-`profile` in [`[hotkeys]`](CONFIGURATION.md#hotkeys), or *Hotkeys* on
-the settings window's Emulator page, picks one of these sets of keys.
+`profile` in [`[hotkeys]`](CONFIGURATION.md#hotkeys), or *Profile* on
+the settings window's Hotkeys page, picks one of these sets of keys.
 Each takes its emulator's default key for an action Rust-DOS has too,
 and Rust-DOS's own key for the rest. A dash is an action without a key.
 
