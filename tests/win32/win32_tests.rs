@@ -1866,6 +1866,41 @@ fn a_thread_that_sleeps_zero_gets_the_processor_back_after_a_turn() {
     }
 }
 
+/// `thread_times` in the debug server's `/api/win32`: each thread's
+/// emulated time and instructions. In `turns_program` the main thread
+/// spins while a second thread gives up its turn with Sleep(0) as soon as
+/// it gets it, so the main thread has nearly all the time, and between
+/// two reads the two together have all the time that passed.
+#[test]
+fn each_threads_time_and_instructions_are_counted() {
+    let mut cpu = machine("thread_times", turns_program(&[None], 1000));
+    let mut start = None;
+    let times = loop {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        let stop = run_batch(&mut cpu, &mut NoHook, false);
+        assert_ne!(stop, StopReason::ShellReloaded, "{}", printed(&cpu));
+        let times = rust_dos::win32::thread_times(&mut cpu);
+        let now = cpu.bus.clock.now_micros();
+        let us: u64 = times.iter().map(|t| t.1).sum();
+        if times.is_empty() {
+            continue;
+        }
+        // The time counted at the first read, and when that was.
+        let (base, since) = *start.get_or_insert((us, now));
+        if times.len() == 2 && now - since >= 300_000 {
+            assert_eq!(us - base, now - since, "{times:?}");
+            break times;
+        }
+    };
+    let main = times.iter().max_by_key(|t| t.1).unwrap();
+    let other = times.iter().min_by_key(|t| t.1).unwrap();
+    assert!(other.1 > 0 && other.1 < main.1 / 10, "{times:?}");
+    assert!(main.2 > other.2 && other.2 > 0, "{times:?}");
+    // A read charges the time to the running thread and changes nothing
+    // else: another at once finds the same counts.
+    assert_eq!(rust_dos::win32::thread_times(&mut cpu), times);
+}
+
 /// A loop that waits for the time by GetTickCount, acquiring the
 /// keyboard again and reading its buffered data with DirectInput in each
 /// pass, and peeking at its messages, as Dark Omen's main thread does

@@ -1160,6 +1160,9 @@ impl Bus {
         // The system's time starts from the machine's clock again, which
         // isn't in the state (`kernel32::time::now`).
         self.win32.system_clock = None;
+        // Each thread's time counts from the load, as the state doesn't
+        // keep it (`thread::Times`).
+        self.win32.times = Default::default();
         // When the first of the state's threads' timeouts ends, and when
         // the running thread's turn does, which aren't in the state
         // either. The clock's deadline is in the state, so it is worked

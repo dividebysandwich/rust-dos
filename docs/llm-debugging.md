@@ -1583,6 +1583,16 @@ With `win32` on, a Win32 console program runs on the built-in Windows
   whether they found any or not; each gives back at most a batch, so
   many more searches than pages given back means the views have little
   left to give. Null until the built-in Windows has its memory.
+- `thread_times`: for each thread that has run (`id`, and `00000000`
+  for the idle loop, when no thread could run), the emulated
+  microseconds (`us`) and the instructions (`instructions`) it has had
+  while a Win32 program ran, since the first thread started or the
+  first switch after a load. Read it at two emulated times and take the
+  differences for each thread's share of the processor over that
+  window. `instructions` counts the passes of a busy-wait loop that the
+  idle skip skipped as if they had run, so a thread that spins shows
+  its whole turn there. The counts change at thread switches and when
+  this is read; nothing the machine does reads them.
 
 `GET /api/win32/page_file` lists the pages of the running address space
 (`cr3`) that are in the page file, as `ranges` of pages next to each
