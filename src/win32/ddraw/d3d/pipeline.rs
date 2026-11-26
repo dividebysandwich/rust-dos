@@ -1088,13 +1088,30 @@ impl<'a> Placer<'a> {
         } else {
             [0.0; 3]
         };
-        let w = if setup.planes.is_empty() {
+        let eye = point([p[0], p[1], p[2]], &self.world_view);
+        (self.world(p), transform(p, &self.all), eye, n)
+    }
+
+    /// Where the vertex `v`, tweened already, is in the world and its
+    /// clip coordinates: `place` without the camera space, which the
+    /// clip status doesn't need.
+    fn clip(&mut self, v: &Vertex) -> ([f32; 4], [f32; 4]) {
+        if let Some(b) = self.blended.as_mut() {
+            let (w, _) = b.place(v, false);
+            return (w, transform(w, &b.view_projection));
+        }
+        let p = [v.position[0], v.position[1], v.position[2], 1.0];
+        (self.world(p), transform(p, &self.all))
+    }
+
+    /// Where the unblended point `p` is in the world, for the user's
+    /// clip planes: left as it is when there are none.
+    fn world(&self, p: [f32; 4]) -> [f32; 4] {
+        if self.setup.planes.is_empty() {
             p
         } else {
-            transform(p, &setup.world)
-        };
-        let eye = point([p[0], p[1], p[2]], &self.world_view);
-        (w, transform(p, &self.all), eye, n)
+            transform(p, &self.setup.world)
+        }
     }
 }
 
@@ -1136,7 +1153,7 @@ pub fn clip_of(
             }
             None => v,
         };
-        let (world, clip, _, _) = placer.place(v, false);
+        let (world, clip) = placer.clip(v);
         let mut p = Processed {
             clip,
             planes: plane_distances(setup, world),
