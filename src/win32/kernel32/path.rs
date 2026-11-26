@@ -743,16 +743,19 @@ pub(super) fn move_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Move or rename `from` to `to` (as `dos_path` gives them) as MoveFileA
 /// does.
 pub(super) fn move_path(cpu: &mut Cpu, from: &str, to: &str) -> Result<(), u32> {
+    // A folder may be named with a slash at its end ("C:\SAVES\"), which
+    // DOS's rename refuses (`rename_file`).
     let (from_full, to_full) = (full_path(cpu, from), full_path(cpu, to));
+    let (from_full, to_full) = (trim_slash(&from_full), trim_slash(&to_full));
     let disk = &mut cpu.bus.disk;
     if !disk.exists(from) {
-        return Err(not_found(cpu, &from_full));
+        return Err(not_found(cpu, from_full));
     }
     if has_wildcards(to) {
         return Err(ERROR_INVALID_NAME);
     }
     // The same name in another case renames it (`rename_file`).
-    let recased = from_full.eq_ignore_ascii_case(&to_full);
+    let recased = from_full.eq_ignore_ascii_case(to_full);
     if from_full == to_full {
         return Ok(());
     }
@@ -766,14 +769,14 @@ pub(super) fn move_path(cpu: &mut Cpu, from: &str, to: &str) -> Result<(), u32> 
     if disk.exists(to) && !itself {
         return Err(ERROR_ALREADY_EXISTS);
     }
-    if drive_of(&from_full) == drive_of(&to_full) {
-        disk.long_name_call(|disk| disk.rename_file(&from_full, &to_full))
+    if drive_of(from_full) == drive_of(to_full) {
+        disk.long_name_call(|disk| disk.rename_file(from_full, to_full))
             .map_err(|e| e as u32)
     } else if disk.is_directory(from) {
         Err(ERROR_NOT_SAME_DEVICE)
     } else {
-        copy(cpu, &from_full, &to_full)
-            .and_then(|()| cpu.bus.disk.delete_file(&from_full).map_err(|e| e as u32))
+        copy(cpu, from_full, to_full)
+            .and_then(|()| cpu.bus.disk.delete_file(from_full).map_err(|e| e as u32))
     }
 }
 

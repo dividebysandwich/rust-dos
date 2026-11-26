@@ -388,6 +388,11 @@ impl DiskController {
             return Err(0x03);
         }
         self.host_dirs.creating();
+        // A folder (a root among them) is no file to make, as to 3Ch:
+        // access denied (05h), where a file there is file exists (50h).
+        if self.device(filename).is_none() && self.is_directory(filename) {
+            return Err(0x05);
+        }
         if self.device(filename).is_none() && self.exists(filename) {
             return Err(0x50); // File exists
         }
@@ -411,6 +416,10 @@ impl DiskController {
     /// replacing a file that is there, dated `stamp` (the packed DOS time
     /// and date) or now.
     pub fn write_whole_file(&mut self, dos_path: &str, data: &[u8], stamp: Option<(u16, u16)>) -> Result<(), u8> {
+        // As to a create: COMMAND's `ECHO X > C:\NEW\` makes nothing.
+        if ends_in_separator(dos_path) {
+            return Err(0x03);
+        }
         self.host_dirs.creating();
         // Before the file is replaced: a FAT image's entry may move.
         self.settle_named(dos_path);
@@ -459,6 +468,14 @@ impl DiskController {
 
     /// INT 21h, AH=41h: delete a file.
     pub fn delete_file(&mut self, filename: &str) -> Result<(), u8> {
+        // "C:\GAME.EXE\" names no file (`ends_in_separator`), and a root
+        // is access denied (05h), where another folder is not found.
+        if ends_in_separator(filename) {
+            return Err(0x03);
+        }
+        if self.is_root(filename) {
+            return Err(0x05);
+        }
         // A disk image's entry must not be emptied after it is freed.
         self.settle_named(filename);
         // The built-in Windows's own files can't go: deleting one changes
@@ -484,8 +501,11 @@ impl DiskController {
             return volume.remove(&refs(&self.fat_dos_path(&volume, &parts)?));
         }
         let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?;
+        if !missing && hostfs::is_dir(&path) {
+            return Err(0x02);
+        }
         if missing || !hostfs::is_file(&path) {
-            return Err(0x02); // File not found
+            return Err(self.missing_error(filename));
         }
         self.check_writable(drive)?;
         self.host_dirs.closed.drop_under(&path);
@@ -498,6 +518,14 @@ impl DiskController {
 
     /// INT 21h, AH=56h: rename or move a file within a drive.
     pub fn rename_file(&mut self, from: &str, to: &str) -> Result<(), u8> {
+        // Neither name may end in a slash (`ends_in_separator`), and a
+        // root is no name to take (05h).
+        if ends_in_separator(from) || ends_in_separator(to) {
+            return Err(0x03);
+        }
+        if self.is_root(to) {
+            return Err(0x05);
+        }
         // A disk image's entry may move: empty the file while it is where
         // the handle has it.
         self.settle_named(from);
@@ -570,7 +598,7 @@ impl DiskController {
         }
         let (drive, source) = self.locate(from).ok_or(0x03)?;
         if !hostfs::exists(&source) {
-            return Err(0x02);
+            return Err(self.missing_error(from));
         }
         let source_id = self.file_id(from);
         self.check_writable(drive)?;

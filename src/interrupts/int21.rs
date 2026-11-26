@@ -1829,8 +1829,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             }
             match al {
                 0x00 => match cpu.bus.disk.get_file_attribute(&filename) {
+                    // MS-DOS returns the attributes in AX as well.
                     Ok(attr) => {
                         cpu.set_reg16(Register::CX, attr);
+                        cpu.set_ax(attr);
                         cpu.set_cpu_flag(CpuFlags::CF, false);
                     }
                     Err(code) => {
@@ -2419,10 +2421,6 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x41 => {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let filename = read_asciiz_string(&mut cpu.bus, addr);
-            if ends_in_separator(&filename) {
-                set_result(cpu, Err(0x03));
-                return;
-            }
             let result = cpu.bus.disk.delete_file(&filename).map(|_| cpu.ax());
             set_result(cpu, result);
         }
@@ -2599,11 +2597,18 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.si());
             let name = read_asciiz_string(&mut cpu.bus, addr);
             match cpu.bus.disk.qualify_path(&name) {
-                Some(full) => {
+                Some(mut full) => {
+                    // A slash that ends the name stays, as MS-DOS keeps
+                    // it: "C:\GAMES\" is C:\GAMES\, "C:\GAMES\." C:\GAMES.
+                    if ends_in_separator(&name) && !full.ends_with('\\') {
+                        full.push('\\');
+                    }
                     let dest = cpu.get_physical_addr(cpu.es(), cpu.di()) as u32;
                     let full: Vec<u8> = full.bytes().take(127).chain(std::iter::once(0)).collect();
                     cpu.bus.guest_write_bytes(dest, &full);
-                    set_result(cpu, Ok(cpu.ax()));
+                    // MS-DOS 6.22 returns with AX=005Ch ('\'), whatever
+                    // the name.
+                    set_result(cpu, Ok(0x005C));
                 }
                 None => set_result(cpu, Err(0x03)),
             }

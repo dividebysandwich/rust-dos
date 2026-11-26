@@ -357,6 +357,33 @@ impl DiskController {
         ))
     }
 
+    /// Whether a DOS path names a drive's root: "C:\", "\" on drive C:,
+    /// "C:\." or "C:\GAMES\..". MS-DOS refuses to create, make, delete or
+    /// set the attributes of a root with access denied (05h).
+    pub fn is_root(&self, dos_path: &str) -> bool {
+        self.qualify_path(dos_path)
+            .is_some_and(|full| full.len() == 3)
+    }
+
+    /// The error for a name that isn't there, as MS-DOS gives it: file
+    /// not found (02h) when the folder it is in is there, path not found
+    /// (03h) when that folder isn't, or is a file.
+    pub(super) fn missing_error(&self, dos_path: &str) -> u8 {
+        let Some(full) = self.qualify_path(dos_path) else {
+            return 0x03;
+        };
+        let folder = match full.rsplit_once('\\') {
+            Some((folder, _)) if folder.len() == 2 => format!("{folder}\\"),
+            Some((folder, _)) => folder.to_string(),
+            None => return 0x03,
+        };
+        if self.is_directory(&folder) {
+            0x02
+        } else {
+            0x03
+        }
+    }
+
     /// The drive a DOS path is on and the path there, if that drive is
     /// held in memory: "X:MIDI\ACPIANO.PAT" in X:\ULTRASND is
     /// "ULTRASND\MIDI\ACPIANO.PAT" on X:.

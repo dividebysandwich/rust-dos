@@ -62,6 +62,21 @@ fn create_and_open_refuse_a_name_ending_in_a_slash() {
     assert_eq!(fs::read(base.join("EXF.TXT")).unwrap(), b"file");
 }
 
+/// COMMAND's `ECHO X > A:\NEWR\` makes no NEWR on MS-DOS 6.22, and
+/// `ECHO Y > A:\EXF.TXT\` leaves the file as it was; a redirection's
+/// file and COPY's are written whole (`write_whole_file`).
+#[test]
+fn a_whole_file_isnt_written_by_a_name_ending_in_a_slash() {
+    let base = scratch("trailing_slash_whole");
+    fs::write(base.join("EXF.TXT"), b"ORIG").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    assert_eq!(disk.write_whole_file(r"C:\NEWR\", b"X", None), Err(0x03));
+    assert_eq!(disk.write_whole_file(r"C:\EXF.TXT\", b"Y", None), Err(0x03));
+    assert!(!base.join("NEWR").exists());
+    assert_eq!(fs::read(base.join("EXF.TXT")).unwrap(), b"ORIG");
+}
+
 #[test]
 fn a_device_name_may_end_in_a_colon() {
     assert_eq!(char_device("NUL"), Some(CharDevice::Nul));
