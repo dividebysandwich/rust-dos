@@ -20,7 +20,7 @@ mod process;
 pub use process::ProgramInLine;
 mod profile;
 pub(in crate::win32) use profile::{parse_int, profile_int, profile_number, profile_values};
-pub(crate) use profile::profile_value;
+pub(crate) use profile::{profile_value, update_profile};
 mod sort;
 mod sync;
 mod text;

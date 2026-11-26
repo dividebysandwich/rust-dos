@@ -1042,6 +1042,20 @@ fn fixed_info(resource: &Resource) -> Option<(u64, u32, u32)> {
     Some((version, u32_at(v, 36)?, u32_at(v, 40)?))
 }
 
+/// The file version (MS, LS) of the file at the full path `path`, a file
+/// on disk or a built-in DLL the system folder shows; None for a file
+/// without a version resource.
+pub(super) fn file_version(cpu: &mut Cpu, path: &str) -> Option<u64> {
+    let resource = file_resource(cpu, path).ok()?;
+    fixed_info(&resource).map(|(version, _, _)| version)
+}
+
+/// The file version (MS, LS) of the executable file `bytes`.
+pub(super) fn bytes_version(bytes: &[u8]) -> Option<u64> {
+    let resource = find_resource(bytes).ok()?;
+    fixed_info(&resource).map(|(version, _, _)| version)
+}
+
 /// VerInstallFileA(flags, source name, dest name, source dir, dest dir,
 /// current dir, temp name, temp size): copy the source, expanded if
 /// COMPRESS.EXE packed it, over the file in the destination directory.

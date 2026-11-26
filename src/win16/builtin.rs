@@ -189,7 +189,7 @@ pub static MODULES: &[&Def] = &[
     &super::misc::WING,
     &super::ddeml::MODULE,
     &super::misc::DISPLAY,
-    &super::misc::SETUPX,
+    &super::setupx::MODULE,
     &super::ole2::COMPOBJ,
     &super::ole2::STORAGE,
     &super::ole2::OLE2,
