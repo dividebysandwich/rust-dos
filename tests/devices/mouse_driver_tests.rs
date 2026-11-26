@@ -676,17 +676,30 @@ fn a_crtc_showing_fewer_rows_maps_the_picture_row_for_row() {
     cpu.bus.io_write(0x3D5, 0x8F);
     assert_eq!(frame_size(&cpu.bus), (640, 400));
     let m = &cpu.bus.mouse;
-    assert_eq!((m.min_y, m.max_y), (0, 479), "the reset's range stays the mode's");
+    assert_eq!(
+        (m.min_y, m.max_y),
+        (0, 479),
+        "the reset's range stays the mode's"
+    );
     assert_eq!(m.virtual_screen(&cpu.bus), (640, 400));
     let frame = Frame::new(640, 400);
-    assert_eq!(overlay::frame_to_mouse(&cpu.bus, &frame, (320, 295)), (320, 295));
+    assert_eq!(
+        overlay::frame_to_mouse(&cpu.bus, &frame, (320, 295)),
+        (320, 295)
+    );
 
     // The game's range for its title menu.
     range(&mut cpu, 0x0007, 194, 445);
     range(&mut cpu, 0x0008, 286, 387);
     assert_eq!(cpu.bus.mouse.virtual_screen(&cpu.bus), (640, 400));
-    assert_eq!(overlay::frame_to_mouse(&cpu.bus, &frame, (320, 295)), (320, 295));
-    assert_eq!(overlay::frame_motion_to_mouse(&cpu.bus, &frame, (3.0, 3.0)), (3.0, 3.0));
+    assert_eq!(
+        overlay::frame_to_mouse(&cpu.bus, &frame, (320, 295)),
+        (320, 295)
+    );
+    assert_eq!(
+        overlay::frame_motion_to_mouse(&cpu.bus, &frame, (3.0, 3.0)),
+        (3.0, 3.0)
+    );
 
     // A range past the picture is still the program's screen.
     range(&mut cpu, 0x0008, 0, 799);
