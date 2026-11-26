@@ -1778,11 +1778,12 @@ fn psp_selector_program(bits32: bool) -> Vec<u8> {
         enter(a, bits32, fail)?;
         step(a, 4)?;
         a.mov(ax, es)?;
-        a.lar(eax, ax)?;
+        a.movzx(ecx, ax)?;
+        a.lar(eax, ecx)?;
         a.jnz(fail)?;
         a.mov(dword_ptr(R), eax)?;
-        a.mov(ax, word_ptr(0x2C).es())?;
-        a.lar(eax, ax)?;
+        a.movzx(ecx, word_ptr(0x2C).es())?;
+        a.lar(eax, ecx)?;
         a.jnz(fail)?;
         a.mov(dword_ptr(R + 4), eax)?;
         exit(a, 0x2A)?;
