@@ -11474,6 +11474,238 @@ fn a_program_reads_its_resources_and_file_name() {
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
 
+/// Set bit `bit` of EBX if each dword at the addresses holds its value.
+fn check_all(a: &mut CodeAssembler, values: &[(u32, u32)], bit: u32) -> Result<(), IcedError> {
+    let mut wrong = a.create_label();
+    for (i, &(at, value)) in values.iter().enumerate() {
+        a.cmp(dword_ptr(at as u64), value as i32)?;
+        if i + 1 < values.len() {
+            a.jne(wrong)?;
+        }
+    }
+    a.set_label(&mut wrong)?;
+    check(a, false, bit)
+}
+
+/// The W resource functions, which Windows 98's KERNEL32 has alongside
+/// the A ones (Windows Installer's MSIEXEC.EXE for 9x calls
+/// EnumResourceNamesW). They call back with the module as the program
+/// named it, a named type first as a UTF-16 string, and the type the
+/// program passed; FindResourceW looks for any language, and
+/// FindResourceExW for the language asked for, its primary language
+/// alone and the neutral ones, not for others of the same primary
+/// language. A "#number" past FFFFh is ERROR_INVALID_PARAMETER.
+#[test]
+fn the_wide_resource_functions_find_and_enumerate_resources() {
+    use Arg::I;
+    let names: &[&str] = &[
+        "FindResourceW",
+        "FindResourceExW",
+        "EnumResourceTypesW",
+        "EnumResourceNamesW",
+        "EnumResourceLanguagesW",
+        "GetLastError",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    const RT_RCDATA: u32 = 10;
+    // L"WAVE" at 0, L"#10" at 10h, L"#70000" at 20h; what the functions
+    // returned and their callbacks saw from 100h.
+    let wide = |text: &str| -> Vec<u8> {
+        let units = text.encode_utf16().chain([0]);
+        units.flat_map(|u| u.to_le_bytes()).collect()
+    };
+    let mut data = vec![0; 0x200];
+    put(&mut data, 0, &wide("WAVE"));
+    put(&mut data, 0x10, &wide("#10"));
+    put(&mut data, 0x20, &wide("#70000"));
+    const TYPES: u32 = 0x100;
+    const FIRST_TYPE: u32 = 0x104;
+    const ID_TYPE: u32 = 0x108;
+    const TYPES_MODULE: u32 = 0x10C;
+    const NAMES_TYPE: u32 = 0x110;
+    const NAME: u32 = 0x114;
+    const NAMES_MODULE: u32 = 0x118;
+    const LANGUAGE: u32 = 0x120;
+    const RETURNED: u32 = 0x130;
+    const ERROR: u32 = 0x140;
+    const TYPES_PROC: u32 = 0x150;
+    const NAMES_PROC: u32 = 0x154;
+    const LANGUAGES_PROC: u32 = 0x158;
+    let mut b = Builder::exe(BASE);
+    b.resource(RT_RCDATA as u16, 5, 0x409, b"hello");
+    b.named_resource("WAVE", 7, 0x409, b"wave");
+    let program = program_with(b, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| l.at(offset) as u32;
+        let keep = |a: &mut CodeAssembler, offset: u32| {
+            a.mov(dword_ptr(at(offset) as u64), eax)
+        };
+        // The callbacks, each one's address kept from the call over it.
+        let mut over = a.create_label();
+        a.call(over)?;
+        // EnumResTypeProcW(module, type, param): the first type's first
+        // two characters, then the second type.
+        let mut second = a.create_label();
+        let mut counted = a.create_label();
+        a.mov(eax, dword_ptr(esp + 4))?;
+        keep(a, TYPES_MODULE)?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.cmp(dword_ptr(at(TYPES) as u64), 0)?;
+        a.jne(second)?;
+        a.mov(eax, dword_ptr(eax))?;
+        keep(a, FIRST_TYPE)?;
+        a.jmp(counted)?;
+        a.set_label(&mut second)?;
+        keep(a, ID_TYPE)?;
+        a.set_label(&mut counted)?;
+        a.inc(dword_ptr(at(TYPES) as u64))?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)?;
+        a.set_label(&mut over)?;
+        a.pop(eax)?;
+        keep(a, TYPES_PROC)?;
+        let mut over = a.create_label();
+        a.call(over)?;
+        // EnumResNameProcW(module, type, name, param).
+        a.mov(eax, dword_ptr(esp + 4))?;
+        keep(a, NAMES_MODULE)?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        keep(a, NAMES_TYPE)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        keep(a, NAME)?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)?;
+        a.set_label(&mut over)?;
+        a.pop(eax)?;
+        keep(a, NAMES_PROC)?;
+        let mut over = a.create_label();
+        a.call(over)?;
+        // EnumResLangProcW(module, type, name, language, param).
+        a.mov(eax, dword_ptr(esp + 16))?;
+        keep(a, LANGUAGE)?;
+        a.mov(eax, 1)?;
+        a.ret_1(20)?;
+        a.set_label(&mut over)?;
+        a.pop(eax)?;
+        keep(a, LANGUAGES_PROC)?;
+
+        a.xor(ebx, ebx)?;
+        // Found in US English though no language is asked for.
+        call_with(a, f("FindResourceW"), &[I(0), I(5), I(at(0x10))])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        call_with(a, f("FindResourceExW"), &[I(0), I(at(0x10)), I(5), I(0x409)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        // UK English isn't US English.
+        call_with(a, f("FindResourceExW"), &[I(0), I(RT_RCDATA), I(5), I(0x809)])?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        call_with(a, f("FindResourceW"), &[I(0), I(5), I(at(0x20))])?;
+        keep(a, RETURNED)?;
+        a.call(f("GetLastError"))?;
+        keep(a, ERROR)?;
+        check_all(a, &[(at(RETURNED), 0), (at(ERROR), 87)], 3)?;
+        // The types, "WAVE" first, with NULL as the module.
+        a.push(0)?;
+        a.push(dword_ptr(at(TYPES_PROC) as u64))?;
+        a.push(0)?;
+        a.call(f("EnumResourceTypesW"))?;
+        keep(a, RETURNED)?;
+        let first = (at(FIRST_TYPE), 0x0041_0057);
+        let listed = [(at(RETURNED), 1), (at(TYPES), 2), first];
+        check_all(a, &listed, 4)?;
+        let rcdata = [(at(ID_TYPE), RT_RCDATA), (at(TYPES_MODULE), 0)];
+        check_all(a, &rcdata, 5)?;
+        // The names of the type "WAVE", with the type as the program
+        // passed it.
+        a.push(0)?;
+        a.push(dword_ptr(at(NAMES_PROC) as u64))?;
+        a.push(at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("EnumResourceNamesW"))?;
+        keep(a, RETURNED)?;
+        let named = [
+            (at(RETURNED), 1),
+            (at(NAME), 7),
+            (at(NAMES_TYPE), at(0)),
+            (at(NAMES_MODULE), 0),
+        ];
+        check_all(a, &named, 6)?;
+        // The languages of RT_RCDATA 5.
+        a.push(0)?;
+        a.push(dword_ptr(at(LANGUAGES_PROC) as u64))?;
+        a.push(5)?;
+        a.push(RT_RCDATA as i32)?;
+        a.push(0)?;
+        a.call(f("EnumResourceLanguagesW"))?;
+        keep(a, RETURNED)?;
+        check_all(a, &[(at(RETURNED), 1), (at(LANGUAGE), 0x409)], 7)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run_files("wide_resources", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {text}", !code);
+}
+
+/// MsgWaitForMultipleObjects returns the index of a signaled object
+/// before the input: the input is the last of the things waited for, and
+/// as in WaitForMultipleObjects the first one ready is the answer. Rage
+/// Rally's setup waits this way for INSTMSIA.EXE to end, peeking at its
+/// messages without taking them, and waited for ever when the message
+/// it left in the queue came first.
+#[test]
+fn msg_wait_gives_a_signaled_object_before_the_input() {
+    use Arg::I;
+    let names: &[&str] = &[
+        "CreateEventA",
+        "ResetEvent",
+        "GetCurrentThreadId",
+        "PeekMessageA",
+        "PostThreadMessageA",
+        "MsgWaitForMultipleObjects",
+    ];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &names[..3]),
+        ("USER32.DLL", &names[3..]),
+    ];
+    const WM_USER: u32 = 0x0400;
+    const QS_ALLINPUT: u32 = 0xFF;
+    // The event's handle at 0, a MSG at 10h.
+    let program = program(BASE, false, imports, &[0; 0x40], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| l.at(offset) as u32;
+        a.xor(ebx, ebx)?;
+        // A manual-reset event, signaled.
+        call_with(a, f("CreateEventA"), &[I(0), I(1), I(1), I(0)])?;
+        a.mov(dword_ptr(at(0) as u64), eax)?;
+        // The thread's queue, and a message in it, new since the peek.
+        call_with(a, f("PeekMessageA"), &[I(at(0x10)), I(0), I(0), I(0), I(0)])?;
+        call_with(a, f("GetCurrentThreadId"), &[])?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(WM_USER as i32)?;
+        a.push(eax)?;
+        a.call(f("PostThreadMessageA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        let wait = [I(1), I(at(0)), I(0), I(0), I(QS_ALLINPUT)];
+        call_with(a, f("MsgWaitForMultipleObjects"), &wait)?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        // With the event reset, the message ends the wait.
+        a.push(dword_ptr(at(0) as u64))?;
+        a.call(f("ResetEvent"))?;
+        call_with(a, f("MsgWaitForMultipleObjects"), &wait)?;
+        a.cmp(eax, 1)?;
+        check(a, false, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run_files("msg_wait_object_first", &[("T.EXE", program)]);
+    assert_eq!(code, 7, "the checks that failed: {:03b} {text}", !code & 7);
+}
+
 /// LoadImageA with LR_CREATEDIBSECTION of an RLE8 bitmap gives a DIB
 /// section with the codes unpacked into plain rows, as Windows 95 and 98
 /// do (CreateDIBSection itself refuses a compressed one). Beasts and

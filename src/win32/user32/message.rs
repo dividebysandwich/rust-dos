@@ -1883,17 +1883,6 @@ fn msg_wait(
         filter: Filter::default(),
         reply: 0,
     };
-    // Input that came since the queue was last looked at ends it at once,
-    // as do a window to paint and a timer due, which Windows counts as
-    // new whenever they are there.
-    let changed = user(cpu).queue(tid).map_or(0, |q| q.changed) & mask;
-    let standing = QueueWait {
-        mask: mask & (QS_SENDMESSAGE | QS_PAINT | QS_TIMER),
-        ..wait.clone()
-    };
-    if changed != 0 || (standing.mask != 0 && wait_ready(&cpu.bus.win32, tid, &standing, now)) {
-        return Some(count);
-    }
     let mut objects = Vec::new();
     for i in 0..count {
         let handle = cpu.bus.guest_read_32(handles + 4 * i);
@@ -1912,7 +1901,26 @@ fn msg_wait(
         timeout_result: thread::WAIT_TIMEOUT,
         ..Wait::default()
     };
-    if let Some(result) = thread::wait_now(cpu, &w) {
+    // The input is the last of the things waited for, so an object that
+    // is signaled comes before it, as in WaitForMultipleObjects: a
+    // program that waits for a process it started, and only peeks at
+    // its messages, sees the process end (Rage Rally's setup waiting for
+    // INSTMSIA.EXE). Waiting for all the objects, input still ends it.
+    if !all && let Some(result) = thread::wait_now(cpu, &w) {
+        return Some(result);
+    }
+    // Input that came since the queue was last looked at ends it at once,
+    // as do a window to paint and a timer due, which Windows counts as
+    // new whenever they are there.
+    let changed = user(cpu).queue(tid).map_or(0, |q| q.changed) & mask;
+    let standing = QueueWait {
+        mask: mask & (QS_SENDMESSAGE | QS_PAINT | QS_TIMER),
+        ..wait.clone()
+    };
+    if changed != 0 || (standing.mask != 0 && wait_ready(&cpu.bus.win32, tid, &standing, now)) {
+        return Some(count);
+    }
+    if all && let Some(result) = thread::wait_now(cpu, &w) {
         return Some(result);
     }
     if timeout == 0 {

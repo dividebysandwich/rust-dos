@@ -667,6 +667,53 @@ fn a_docfile_keeps_its_streams_and_classes() {
     }
 }
 
+/// A docfile opened twice for reading with STGM_SHARE_DENY_WRITE, as
+/// Windows Installer opens a package, and refused to an open for writing
+/// while those are open: each open lets the others do only what its
+/// share mode allows, as the file under it does.
+#[test]
+fn a_docfile_opens_again_as_its_share_modes_allow() {
+    const STGM_CREATE_RW: i32 = 0x1012;
+    const STGM_READ_DENY_WRITE: i32 = 0x20;
+    const STGM_RW_EXCLUSIVE: i32 = 0x12;
+    const STG_E_SHAREVIOLATION: u32 = 0x8003_0020;
+    // 0x00: the file, 0x70: the storage made, 0x74 and 0x78: the two
+    // opened, 0x7C: the one refused.
+    let mut data = vec![0u8; 0x100];
+    put(&mut data, 0x00, &wide("C:\\T.STG"));
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        ("OLE32.dll", &["StgCreateDocfile", "StgOpenStorage"]),
+    ];
+    let code = program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        call(a, l.import(1), &[l.at(0), STGM_CREATE_RW, 0, l.at(0x70)])?;
+        check_eax(a, 0, 0)?;
+        call_method(a, l.at(0x70), 2, &[])?;
+        for (bit, out) in [(1, 0x74), (2, 0x78)] {
+            let args = [l.at(0), 0, STGM_READ_DENY_WRITE, 0, 0, l.at(out)];
+            call(a, l.import(2), &args)?;
+            check_eax(a, 0, bit)?;
+        }
+        let args = [l.at(0), 0, STGM_RW_EXCLUSIVE, 0, 0, l.at(0x7C)];
+        call(a, l.import(2), &args)?;
+        check_eax(a, STG_E_SHAREVIOLATION as i32, 3)?;
+        call_method(a, l.at(0x74), 2, &[])?;
+        call_method(a, l.at(0x78), 2, &[])?;
+        // Closed, it opens for writing.
+        call(a, l.import(2), &args)?;
+        check_eax(a, 0, 4)?;
+        call_method(a, l.at(0x7C), 2, &[])?;
+        a.or(ebx, 0xE0)?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let mut cpu = machine("docfile_shared", core, &code);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {}", printed(&cpu));
+    }
+}
+
 /// ITypeInfo::Invoke of the IShape object at 0x50 with the DISPPARAMS at
 /// 0x90: `count` arguments at 0xB0, the first `named` of them named by
 /// the DISPIDs at 0xA0; the result at 0xE0, the EXCEPINFO at 0xF0.

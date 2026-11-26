@@ -88,6 +88,8 @@ static APIS: &[Api] = &[
     stdcall("OpenThreadToken", 204, 4, not_implemented),
     // The Registry Editor, C:\WINDOWS\REGEDIT.EXE: its work (regedit.rs).
     stdcall("RegeditMain", 0, 1, super::regedit::main),
+    // Windows Installer's MSIEXEC.EXE calls it; Windows 98 fails it.
+    stdcall("SetThreadToken", 296, 2, not_implemented),
 ];
 
 /// The address of ADVAPI32's function `name` in the image a process
