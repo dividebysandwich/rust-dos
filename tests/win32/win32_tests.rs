@@ -19886,14 +19886,20 @@ fn icopen_opens_installed_decompressors() {
 
 /// ICGetInfo describes an open codec, as Actua Soccer 2 asks for its
 /// film's Microsoft Video 1 decoder: ICINFO's size back, and the type,
-/// handler, name, description and driver's file in the ICINFO. A buffer
-/// smaller than an ICINFO gets 0, and a closed handle ICERR_BADHANDLE.
+/// handler, versions, name, description and driver's file in the
+/// ICINFO. A buffer smaller than an ICINFO gets 0, no ICINFO
+/// MMSYSERR_INVALPARAM, and a closed handle ICERR_BADHANDLE. The
+/// driver's own ICM_GETINFO, sent with ICSendMessage, answers the same
+/// but leaves szDriver as it was, and gives ICINFO's size for no ICINFO.
 /// The program ends with 0, or the number of the first check that
 /// failed.
 #[test]
 fn icgetinfo_describes_an_open_codec() {
     const ICINFO: i32 = 568;
-    let imports: &[(&str, &[&str])] = &[("MSVFW32.DLL", &["ICOpen", "ICGetInfo", "ICClose"])];
+    let imports: &[(&str, &[&str])] = &[(
+        "MSVFW32.DLL",
+        &["ICOpen", "ICGetInfo", "ICClose", "ICSendMessage"],
+    )];
     let exe = program(BASE, false, imports, &[0xCC; 0x300], |a, l| {
         let mut fail = a.create_label();
         let get_info = |a: &mut CodeAssembler, size: i32| {
@@ -19908,14 +19914,16 @@ fn icgetinfo_describes_an_open_codec() {
         a.call(l.import(0))?;
         a.mov(ebx, eax)?;
         get_info(a, ICINFO)?;
-        // The result, dwSize, fccType, fccHandler, dwVersionICM, and the
-        // first characters of szName ("MS-CRAM"), szDescription
-        // ("Microsoft Video 1") and szDriver ("msvidc32.dll").
-        let checks: [(Option<u32>, u32); 8] = [
+        // The result, dwSize, fccType, fccHandler, dwVersion,
+        // dwVersionICM, and the first characters of szName ("MS-CRAM"),
+        // szDescription ("Microsoft Video 1") and szDriver
+        // ("msvidc32.dll").
+        let checks: [(Option<u32>, u32); 9] = [
             (None, ICINFO as u32),
             (Some(0), ICINFO as u32),
             (Some(4), u32::from_le_bytes(*b"vidc")),
             (Some(8), u32::from_le_bytes(*b"msvc")),
+            (Some(16), 0x0104),
             (Some(20), 0x0104),
             (Some(24), u32::from(b'M') | u32::from(b'S') << 16),
             (Some(24 + 32), u32::from(b'M') | u32::from(b'i') << 16),
@@ -19930,13 +19938,45 @@ fn icgetinfo_describes_an_open_codec() {
             a.jne(fail)?;
         }
         get_info(a, ICINFO - 1)?;
-        a.mov(esi, 9)?;
+        a.mov(esi, 10)?;
         a.test(eax, eax)?;
+        a.jne(fail)?;
+        // ICM_GETINFO: the ICINFO filled but for szDriver.
+        let send_get_info = |a: &mut CodeAssembler, info: i32| {
+            a.push(ICINFO)?;
+            a.push(info)?;
+            a.push(0x5002)?; // ICM_GETINFO
+            a.push(ebx)?;
+            a.call(l.import(3))
+        };
+        a.mov(dword_ptr(l.at(8)), 0)?;
+        a.mov(dword_ptr(l.at(24 + 288)), 0)?;
+        send_get_info(a, l.at(0) as i32)?;
+        a.mov(esi, 11)?;
+        a.cmp(eax, ICINFO)?;
+        a.jne(fail)?;
+        a.mov(esi, 12)?;
+        a.cmp(dword_ptr(l.at(8)), u32::from_le_bytes(*b"msvc") as i32)?;
+        a.jne(fail)?;
+        a.mov(esi, 13)?;
+        a.cmp(dword_ptr(l.at(24 + 288)), 0)?;
+        a.jne(fail)?;
+        send_get_info(a, 0)?;
+        a.mov(esi, 14)?;
+        a.cmp(eax, ICINFO)?;
+        a.jne(fail)?;
+        // ICGetInfo with no ICINFO.
+        a.push(ICINFO)?;
+        a.push(0)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.mov(esi, 15)?;
+        a.cmp(eax, 11)?; // MMSYSERR_INVALPARAM
         a.jne(fail)?;
         a.push(ebx)?;
         a.call(l.import(2))?;
         get_info(a, ICINFO)?;
-        a.mov(esi, 10)?;
+        a.mov(esi, 16)?;
         a.cmp(eax, -8)?; // ICERR_BADHANDLE
         a.jne(fail)?;
         a.xor(esi, esi)?;

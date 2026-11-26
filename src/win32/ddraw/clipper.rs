@@ -9,8 +9,8 @@ use super::{
     DDERR_REGIONTOOSMALL, Object, V_CLIPPER, state,
 };
 use crate::cpu::Cpu;
-use crate::win32::gdi32::dc::DCX_CLIPSIBLINGS;
 use crate::win32::gdi32::{Rect, Region};
+use crate::win32::user32::{DESKTOP, paint};
 
 #[derive(Clone, Debug, Default)]
 pub struct Clipper {
@@ -128,12 +128,13 @@ pub fn initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The region the clipper at the interface `iface` clips to, if it has
 /// one: the visible part of its window's client area on the screen, or
-/// its list. The frame and the caption are left out, as on Windows,
-/// where the region is the one GetDC's DC of the window has: programs
-/// that copy their picture into the primary surface themselves take the
-/// clip list's rectangles to lie in the client area, and Actua Soccer 2
-/// reads its picture from before its buffer when one starts at the
-/// caption.
+/// its list. As on Windows, the window's region is the one GetDC's DC
+/// of the window has, cut to the screen: the frame and the caption are
+/// left out, and so are the children of a window with WS_CLIPCHILDREN.
+/// Programs that copy their picture into the primary surface themselves
+/// take the clip list's rectangles to lie in the client area and on the
+/// screen, and Actua Soccer 2 reads its picture from before its buffer
+/// when one starts at the caption.
 pub fn region(cpu: &mut Cpu, iface: u32) -> Option<Region> {
     let (_, id) = super::this(cpu, iface)?;
     let c = state(cpu).object(id)?.clipper.clone()?;
@@ -142,11 +143,8 @@ pub fn region(cpu: &mut Cpu, iface: u32) -> Option<Region> {
         if !user.is_window(c.hwnd) {
             return Some(Region::new());
         }
-        return Some(crate::win32::user32::paint::visible_region(
-            user,
-            c.hwnd,
-            DCX_CLIPSIBLINGS,
-        ));
+        let screen = user.screen_rect(DESKTOP);
+        return Some(paint::get_dc_visible_region(user, c.hwnd).and_rect(&screen));
     }
     let list = c.list?;
     let mut region = Region::new();
