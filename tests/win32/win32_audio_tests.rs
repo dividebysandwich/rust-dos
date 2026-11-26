@@ -73,7 +73,8 @@ fn program(
 }
 
 /// A machine with the built-in Windows on, on `core`, and `program`
-/// loaded from the shell as T.EXE, with `files` beside it.
+/// loaded from the shell as T.EXE, with `files` beside it (or in the
+/// folders their names give).
 fn machine(test: &str, program: Vec<u8>, core: CoreMode, files: &[(&str, Vec<u8>)]) -> Box<Cpu> {
     // Each core its own directory, as the tests run at once.
     let base = PathBuf::from("target/test_win32_audio").join(format!("{test}_{core:?}"));
@@ -81,7 +82,9 @@ fn machine(test: &str, program: Vec<u8>, core: CoreMode, files: &[(&str, Vec<u8>
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("T.EXE"), program).unwrap();
     for (name, bytes) in files {
-        fs::write(base.join(name), bytes).unwrap();
+        let path = base.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
     }
     let mut cpu = Cpu::new(base);
     cpu.core = core;
@@ -863,4 +866,376 @@ fn acm_decodes(core: CoreMode) {
 #[test]
 fn msacm32_decodes_ms_adpcm_as_ffmpeg_does() {
     acm_decodes(CoreMode::Normal);
+}
+
+/// The format tag of the test's codec: Windows Media Audio's.
+const TEST_TAG: u16 = 0x161;
+/// The id the test's codec gives its stream in ACMDRVSTREAMINSTANCE's
+/// dwDriver, which it checks when it converts.
+const TEST_STREAM_ID: i32 = 0x5678;
+
+/// The code of `acm_driver_dll`: DriverProc at its start, DllMain at
+/// `main`.
+fn acm_driver_code(a: &mut CodeAssembler, main: &mut CodeLabel) -> Result<(), IcedError> {
+    let mut one = a.create_label();
+    let mut zero = a.create_label();
+    let mut not_possible = a.create_label();
+    let mut not_supported = a.create_label();
+    let mut open = a.create_label();
+    let mut details = a.create_label();
+    let mut suggest = a.create_label();
+    let mut stream_open = a.create_label();
+    let mut size = a.create_label();
+    let mut convert = a.create_label();
+    // DriverProc(id, driver, message, p1, p2).
+    let p1 = dword_ptr(esp + 16);
+    let p2 = dword_ptr(esp + 20);
+    a.mov(eax, dword_ptr(esp + 12))?;
+    for (message, to) in [
+        (3, open),
+        (0x600A, details),
+        (0x601B, suggest),
+        (0x604C, stream_open),
+        (0x604D, zero),
+        (0x604E, size),
+        (0x604F, convert),
+    ] {
+        a.cmp(eax, message)?;
+        a.je(to)?;
+    }
+    // DRV_LOAD, DRV_ENABLE, DRV_CLOSE, DRV_DISABLE and DRV_FREE succeed;
+    // the rest, preparing headers among them, it leaves to the ACM.
+    a.cmp(eax, 6)?;
+    a.jbe(one)?;
+    a.jmp(not_supported)?;
+    a.set_label(&mut one)?;
+    a.mov(eax, 1)?;
+    a.ret_1(20)?;
+    a.set_label(&mut zero)?;
+    a.xor(eax, eax)?;
+    a.ret_1(20)?;
+    a.set_label(&mut not_possible)?;
+    a.mov(eax, 512)?;
+    a.ret_1(20)?;
+    a.set_label(&mut not_supported)?;
+    a.mov(eax, 8)?;
+    a.ret_1(20)?;
+    // DRV_OPEN: an audio codec's open, or one with no description.
+    a.set_label(&mut open)?;
+    a.mov(ecx, p2)?;
+    a.test(ecx, ecx)?;
+    a.jz(one)?;
+    a.cmp(dword_ptr(ecx + 4), u32::from_le_bytes(*b"audc") as i32)?;
+    a.jne(zero)?;
+    a.mov(eax, 0x1234)?;
+    a.ret_1(20)?;
+    // ACMDM_DRIVER_DETAILS: a codec with two format tags, "Test".
+    a.set_label(&mut details)?;
+    a.mov(ecx, p1)?;
+    a.mov(dword_ptr(ecx + 0x18), 1)?;
+    a.mov(dword_ptr(ecx + 0x1C), 2)?;
+    a.mov(dword_ptr(ecx + 40), 0x0065_0054)?;
+    a.mov(dword_ptr(ecx + 44), 0x0074_0073)?;
+    a.mov(word_ptr(ecx + 48), 0)?;
+    a.jmp(zero)?;
+    // ACMDM_FORMAT_SUGGEST: 16-bit mono PCM at the source's rate.
+    a.set_label(&mut suggest)?;
+    a.mov(ecx, p1)?;
+    a.mov(edx, dword_ptr(ecx + 8))?;
+    a.cmp(word_ptr(edx), TEST_TAG as i32)?;
+    a.jne(not_possible)?;
+    a.mov(ecx, dword_ptr(ecx + 16))?;
+    a.mov(dword_ptr(ecx), 0x0001_0001)?;
+    a.mov(eax, dword_ptr(edx + 4))?;
+    a.mov(dword_ptr(ecx + 4), eax)?;
+    a.add(eax, eax)?;
+    a.mov(dword_ptr(ecx + 8), eax)?;
+    a.mov(dword_ptr(ecx + 12), 0x0010_0002)?;
+    a.jmp(zero)?;
+    // ACMDM_STREAM_OPEN: from TEST_TAG to PCM.
+    a.set_label(&mut stream_open)?;
+    a.mov(ecx, p1)?;
+    a.mov(edx, dword_ptr(ecx + 4))?;
+    a.cmp(word_ptr(edx), TEST_TAG as i32)?;
+    a.jne(not_possible)?;
+    a.mov(edx, dword_ptr(ecx + 8))?;
+    a.cmp(word_ptr(edx), 1)?;
+    a.jne(not_possible)?;
+    a.mov(dword_ptr(ecx + 32), TEST_STREAM_ID)?;
+    a.jmp(zero)?;
+    // ACMDM_STREAM_SIZE: the other side of ACMDRVSTREAMSIZE.
+    a.set_label(&mut size)?;
+    a.mov(ecx, p2)?;
+    let mut destination = a.create_label();
+    a.test(dword_ptr(ecx + 4), 1)?;
+    a.jnz(destination)?;
+    a.mov(eax, dword_ptr(ecx + 8))?;
+    a.add(eax, eax)?;
+    a.mov(dword_ptr(ecx + 12), eax)?;
+    a.jmp(zero)?;
+    a.set_label(&mut destination)?;
+    a.mov(eax, dword_ptr(ecx + 12))?;
+    a.shr(eax, 1)?;
+    a.mov(dword_ptr(ecx + 8), eax)?;
+    a.jmp(zero)?;
+    // ACMDM_STREAM_CONVERT of the stream it opened: each byte of the
+    // source a sample of that byte twice.
+    a.set_label(&mut convert)?;
+    a.mov(eax, p1)?;
+    a.cmp(dword_ptr(eax + 32), TEST_STREAM_ID)?;
+    a.jne(not_possible)?;
+    a.push(esi)?;
+    a.push(edi)?;
+    a.push(ebx)?;
+    a.mov(ecx, dword_ptr(esp + 32))?;
+    a.mov(esi, dword_ptr(ecx + 0x0C))?;
+    a.mov(ebx, dword_ptr(ecx + 0x10))?;
+    a.mov(edi, dword_ptr(ecx + 0x1C))?;
+    a.mov(dword_ptr(ecx + 0x14), ebx)?;
+    a.lea(eax, ptr(ebx + ebx))?;
+    a.mov(dword_ptr(ecx + 0x24), eax)?;
+    let mut byte = a.create_label();
+    let mut converted = a.create_label();
+    a.test(ebx, ebx)?;
+    a.jz(converted)?;
+    a.set_label(&mut byte)?;
+    a.mov(al, byte_ptr(esi))?;
+    a.mov(ah, al)?;
+    a.mov(word_ptr(edi), ax)?;
+    a.inc(esi)?;
+    a.add(edi, 2)?;
+    a.dec(ebx)?;
+    a.jnz(byte)?;
+    a.set_label(&mut converted)?;
+    a.pop(ebx)?;
+    a.pop(edi)?;
+    a.pop(esi)?;
+    a.jmp(zero)?;
+    // DllMain.
+    a.set_label(main)?;
+    a.mov(eax, 1)?;
+    a.ret_1(12)
+}
+
+/// An installable ACM driver, TESTACM.ACM, as msaud32.acm is one: a DLL
+/// whose DriverProc opens for an audio codec's ACMDRVOPENDESC, says it
+/// is a codec named "Test", suggests 16-bit PCM of the rate of a source
+/// of TEST_TAG, opens a stream from it to PCM, sizes it at two bytes of
+/// PCM for each of the source, and converts each byte to a sample of
+/// that byte twice. It leaves preparing headers to the ACM.
+fn acm_driver_dll() -> Vec<u8> {
+    const DLL_BASE: u32 = 0x1000_0000;
+    let mut b = Builder::dll(DLL_BASE, "TESTACM.ACM");
+    let code_rva = b.next_rva();
+    let ip = (DLL_BASE + code_rva) as u64;
+    let mut a = CodeAssembler::new(32).unwrap();
+    let mut main = a.create_label();
+    acm_driver_code(&mut a, &mut main).unwrap();
+    let assembled = a
+        .assemble_options(ip, iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS)
+        .unwrap();
+    let main = (assembled.label_ip(&main).unwrap() - ip) as u32;
+    let code = assembled.inner.code_buffer;
+    let flags = pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ;
+    assert_eq!(b.section(".text", &code, flags), code_rva);
+    b.export(Some("DriverProc"), 1, code_rva);
+    b.entry(code_rva + main);
+    b.build()
+}
+
+const MSACM32_DRIVERS: &[&str] = &[
+    "acmFormatSuggest",
+    "acmStreamOpen",
+    "acmStreamSize",
+    "acmStreamPrepareHeader",
+    "acmStreamConvert",
+    "acmStreamUnprepareHeader",
+    "acmStreamClose",
+    "acmDriverEnum",
+    "acmDriverDetailsA",
+];
+
+// The data of `acm_driver`.
+const DRV_STREAM: u32 = 0x00;
+const DRV_SIZE: u32 = 0x04;
+const DRV_COUNT: u32 = 0x08;
+const DRV_ID: u32 = 0x0C;
+const DRV_SUPPORT: u32 = 0x10;
+const DRV_SOURCE: u32 = 0x20;
+const DRV_PCM: u32 = 0x40;
+const DRV_HEADER: u32 = 0x60;
+const DRV_SOUND: u32 = 0x100;
+const DRV_OUT: u32 = 0x140;
+const DRV_DECODED: u32 = 0x160;
+const DRV_DETAILS: u32 = 0x200;
+const DRV_END: u32 = DRV_DETAILS + 920;
+
+/// A program decodes a sound of TEST_TAG through MSACM32 with an
+/// installed driver, as Demolition Racer's wmaudsdk.dll decodes its
+/// music through msaud32.acm: acmFormatSuggest with no driver finds the
+/// PCM the driver suggests, acmStreamOpen with no driver opens a stream
+/// of the driver, which sizes and converts the sound. acmDriverEnum then
+/// lists the driver as a codec, and acmDriverDetailsA gives its name.
+/// The driver is in SYSTEM.INI's [drivers32], or with `registry` under
+/// the registry's MediaResources\ACM key.
+fn acm_driver(core: CoreMode, registry: bool) {
+    let sound: [u8; 8] = [0x00, 0x11, 0x22, 0x80, 0x7F, 0xFF, 0x01, 0x10];
+    let decoded: Vec<u8> = sound.iter().flat_map(|&b| [b, b]).collect();
+    let mut data = vec![0u8; DRV_END as usize];
+    let mut put = |at: u32, bytes: &[u8]| {
+        data[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    };
+    // Mono at 22050 Hz, 64-byte blocks, no extra bytes.
+    let mut source = Vec::new();
+    for word in [TEST_TAG as u32 | 1 << 16, 22050, 2000, 64] {
+        source.extend_from_slice(&word.to_le_bytes());
+    }
+    source.extend_from_slice(&[0, 0]);
+    put(DRV_SOURCE, &source);
+    put(DRV_HEADER, &84u32.to_le_bytes());
+    put(DRV_SOUND, &sound);
+    put(DRV_DECODED, &decoded);
+    put(DRV_DETAILS, &920u32.to_le_bytes());
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", KERNEL32),
+        ("MSACM32.dll", MSACM32_DRIVERS),
+    ];
+    let acm = |n: usize| OTHER + n;
+    let exe = program(imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        let at = |offset: u32| l.at(offset) as i32;
+        let field = |offset: u32| dword_ptr(l.at(DRV_HEADER + offset));
+        let stream = dword_ptr(l.at(DRV_STREAM));
+        // acmFormatSuggest(0, source, pcm, 18, ACM_FORMATSUGGESTF_WFORMATTAG)
+        // with the tag PCM.
+        a.mov(word_ptr(l.at(DRV_PCM)), 1)?;
+        for arg in [0x1_0000, 18, at(DRV_PCM), at(DRV_SOURCE), 0] {
+            a.push(arg)?;
+        }
+        a.call(l.import(acm(0)))?;
+        check(a, fail, 1)?;
+        // The driver's 16-bit mono PCM at the source's rate.
+        let pcm: [(u32, u32); 4] = [(0, 0x0001_0001), (4, 22050), (8, 44100), (12, 0x0010_0002)];
+        for (n, (offset, value)) in pcm.into_iter().enumerate() {
+            a.mov(ebx, 20 + n as i32)?;
+            a.cmp(dword_ptr(l.at(DRV_PCM + offset)), value as i32)?;
+            a.jne(fail)?;
+        }
+        // acmStreamOpen(&stream, 0, source, pcm, 0, 0, 0, 0).
+        for arg in [0, 0, 0, 0, at(DRV_PCM), at(DRV_SOURCE), 0, at(DRV_STREAM)] {
+            a.push(arg)?;
+        }
+        a.call(l.import(acm(1)))?;
+        check(a, fail, 2)?;
+        // The driver sizes the PCM of the sound.
+        a.push(0)?;
+        a.push(at(DRV_SIZE))?;
+        a.push(sound.len() as i32)?;
+        a.push(stream)?;
+        a.call(l.import(acm(2)))?;
+        check(a, fail, 3)?;
+        a.mov(ebx, 30)?;
+        a.cmp(dword_ptr(l.at(DRV_SIZE)), decoded.len() as i32)?;
+        a.jne(fail)?;
+        a.mov(field(0x0C), at(DRV_SOUND))?;
+        a.mov(field(0x10), sound.len() as i32)?;
+        a.mov(field(0x1C), at(DRV_OUT))?;
+        a.mov(field(0x20), decoded.len() as i32)?;
+        // Prepare, convert and unprepare.
+        for (step, function) in [(4, 3), (5, 4), (6, 5)] {
+            a.push(0)?;
+            a.push(at(DRV_HEADER))?;
+            a.push(stream)?;
+            a.call(l.import(acm(function)))?;
+            check(a, fail, step)?;
+        }
+        // All of the sound used and its PCM written; done, and no
+        // longer prepared.
+        a.mov(ebx, 40)?;
+        a.cmp(field(0x14), sound.len() as i32)?;
+        a.jne(fail)?;
+        a.mov(ebx, 41)?;
+        a.cmp(field(0x24), decoded.len() as i32)?;
+        a.jne(fail)?;
+        a.mov(ebx, 42)?;
+        a.cmp(field(4), 0x1_0000)?;
+        a.jne(fail)?;
+        a.mov(ebx, 43)?;
+        a.mov(esi, at(DRV_OUT))?;
+        a.mov(edi, at(DRV_DECODED))?;
+        a.mov(ecx, decoded.len() as i32)?;
+        a.repe().cmpsb()?;
+        a.jne(fail)?;
+        a.push(0)?;
+        a.push(stream)?;
+        a.call(l.import(acm(6)))?;
+        check(a, fail, 7)?;
+        // acmDriverEnum(callback, 0, 0), the callback's address pushed
+        // by the call over it. It counts the drivers and keeps the last
+        // one's handle and what it supports.
+        let mut after = a.create_label();
+        a.call(after)?;
+        a.inc(dword_ptr(l.at(DRV_COUNT)))?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(dword_ptr(l.at(DRV_ID)), eax)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(l.at(DRV_SUPPORT)), eax)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)?;
+        a.set_label(&mut after)?;
+        a.pop(eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.call(l.import(acm(7)))?;
+        check(a, fail, 8)?;
+        // One driver, a codec (ACMDRIVERDETAILS_SUPPORTF_CODEC).
+        a.mov(ebx, 50)?;
+        a.cmp(dword_ptr(l.at(DRV_COUNT)), 1)?;
+        a.jne(fail)?;
+        a.mov(ebx, 51)?;
+        a.cmp(dword_ptr(l.at(DRV_SUPPORT)), 1)?;
+        a.jne(fail)?;
+        // acmDriverDetailsA(driver, details, 0): its short name in ANSI.
+        a.push(0)?;
+        a.push(at(DRV_DETAILS))?;
+        a.push(dword_ptr(l.at(DRV_ID)))?;
+        a.call(l.import(acm(8)))?;
+        check(a, fail, 9)?;
+        a.mov(ebx, 60)?;
+        let name = u32::from_le_bytes(*b"Test") as i32;
+        a.cmp(dword_ptr(l.at(DRV_DETAILS + 40)), name)?;
+        a.jne(fail)?;
+        a.cmp(byte_ptr(l.at(DRV_DETAILS + 44)), 0)?;
+        a.jne(fail)?;
+        a.mov(ebx, 61)?;
+        a.cmp(dword_ptr(l.at(DRV_DETAILS + 0x18)), 1)?;
+        a.jne(fail)?;
+        exit(a, l, &mut fail)
+    });
+    let mut files = vec![("TESTACM.ACM", acm_driver_dll())];
+    if registry {
+        let key = r"HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\MediaResources\ACM";
+        let reg = format!(
+            "REGEDIT4\r\n\r\n[{key}\\msacm.test]\r\n\"Driver\"=\"testacm.acm\"\r\n"
+        );
+        files.push(("REGISTRY.REG", reg.into_bytes()));
+    } else {
+        let ini = "[drivers32]\r\nmsacm.test=testacm.acm\r\n";
+        files.push(("WINDOWS/SYSTEM.INI", ini.as_bytes().to_vec()));
+    }
+    let name = if registry { "acm_driver_reg" } else { "acm_driver_ini" };
+    let mut cpu = machine(name, exe, core, &files);
+    let (code, _) = run(&mut cpu, 400);
+    assert_eq!(code, 0, "the program failed at step {code}");
+}
+
+#[test]
+fn msacm32_decodes_through_a_driver_of_system_ini() {
+    acm_driver(CoreMode::Normal, false);
+}
+
+#[test]
+fn msacm32_decodes_through_a_driver_of_the_registry() {
+    acm_driver(CoreMode::Normal, true);
 }

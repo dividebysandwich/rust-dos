@@ -6,25 +6,33 @@
 //!
 //! A stream decodes MS ADPCM or IMA ADPCM to PCM of the same rate and
 //! channels, 8 or 16 bits, as the codecs do; acmFormatSuggest suggests
-//! that PCM. The rest answers as the code of MSACM32 4.03.1998 does with
-//! no drivers: there are no drivers to enumerate or open, no PCM
-//! converter, no encoders and no other codecs (issue 439). What it says
-//! of PCM without a driver and of bad arguments in other calls isn't
-//! here (issue 443).
+//! that PCM. The codecs a program installed, such as the Windows Media
+//! Audio codec, are drivers MSACM32 loads into the program and talks to
+//! (`drivers`): acmFormatSuggest and acmStreamOpen ask them for what the
+//! built-in codecs don't take, and acmDriverEnum, acmDriverOpen and the
+//! other functions of drivers reach them. The built-in codecs aren't
+//! drivers with handles of their own. Of the PCM converter built into
+//! Windows' MSACM32 there is its acmFormatSuggest from PCM to PCM; it
+//! converts nothing. The rest answers as the code of MSACM32 4.03.1998
+//! does with no drivers: there is no encoder and no other codec built in
+//! (issue 439). What it says of PCM without a driver and of bad
+//! arguments in other calls isn't here (issue 443).
 //!
 //! Wine's MSACM32.DLL and its codecs convert too, as guest code:
 //! `win32_dlls_replace=msacm32` puts them in place of this one.
 
 pub mod adpcm;
+pub mod drivers;
 
 use super::kernel32::virtual_memory::allows;
 use super::stubs::{Api, Conv, Dll, Handler};
 use super::user32::current_pid;
 use super::winmm::{
     MMSYSERR_INVALFLAG, MMSYSERR_INVALHANDLE, MMSYSERR_INVALPARAM, MMSYSERR_NODRIVER,
-    MMSYSERR_NOERROR, MMSYSERR_NOTSUPPORTED,
+    MMSYSERR_NOERROR, MMSYSERR_NOMEM, MMSYSERR_NOTSUPPORTED,
 };
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 use adpcm::MS_ADPCM;
 use std::collections::BTreeMap;
 
@@ -40,6 +48,7 @@ pub static DLL: Dll = Dll {
 };
 
 const ACMERR_NOTPOSSIBLE: u32 = 512;
+const ACMERR_BUSY: u32 = 513;
 const ACMERR_UNPREPARED: u32 = 514;
 
 /// The versions acmGetVersion gives, retail: the constants in Windows
@@ -66,8 +75,6 @@ const ACM_METRIC_DRIVER_PRIORITY: u32 = 101;
 /// and ACMERR_NOTPOSSIBLE, which that game takes for a fatal error.
 const MAX_SIZE_FORMAT: u32 = 50;
 
-/// acmDriverEnum's flags, the top four bits.
-const DRIVER_ENUM_FLAGS: u32 = 0xF000_0000;
 /// acmDriverPriority's flags.
 const PRIORITY_FLAGS: u32 = 0x0003_0003;
 const PRIORITY_DEFER_MASK: u32 = 0x0003_0000;
@@ -109,25 +116,54 @@ const STATUS_INQUEUE: u32 = 0x0010_0000;
 /// The first stream's handle; the others count up from it.
 const FIRST_STREAM: u32 = 0x0AC0_0000;
 
-/// The streams open, by handle.
+/// The W32 version whose states have the installable drivers: the
+/// processes that found theirs, the drivers, those open and the streams
+/// of drivers.
+pub const DRIVERS_SAVED: u16 = 109;
+
+/// The streams open, by handle, and the installable drivers (`drivers`):
+/// the processes that found theirs, the drivers each process has (by
+/// HACMDRIVERID) and those it opened (by HACMDRIVER).
 #[derive(Clone, Debug, Default)]
 pub struct State {
     next: u32,
     streams: BTreeMap<u32, Stream>,
+    registered: Since<DRIVERS_SAVED, Vec<u32>>,
+    ids: Since<DRIVERS_SAVED, Vec<drivers::DriverId>>,
+    drivers: Since<DRIVERS_SAVED, Vec<drivers::Driver>>,
 }
 
-crate::state_fields!(State { next, streams });
+crate::state_fields!(State {
+    next,
+    streams,
+    registered,
+    ids,
+    drivers
+});
 
 /// A stream: the process that opened it, what it decodes and the bits
-/// of the PCM it decodes to.
+/// of the PCM it decodes to. A stream of an installable driver has the
+/// driver's handle (a HACMDRIVER) instead, its ACMDRVSTREAMINSTANCE in
+/// the system's heap, and whether it opened the driver itself, to close
+/// it with the stream.
 #[derive(Clone, Debug, Default)]
 struct Stream {
     pid: u32,
     source: adpcm::Format,
     bits: u16,
+    driver: Since<DRIVERS_SAVED, u32>,
+    instance: Since<DRIVERS_SAVED, u32>,
+    owns: Since<DRIVERS_SAVED, bool>,
 }
 
-crate::state_fields!(Stream { pid, source, bits });
+crate::state_fields!(Stream {
+    pid,
+    source,
+    bits,
+    driver,
+    instance,
+    owns
+});
 
 impl Stream {
     /// The bytes of a frame of the PCM it writes.
@@ -168,9 +204,11 @@ fn state(cpu: &mut Cpu) -> &mut State {
     &mut cpu.bus.win32.msacm32
 }
 
-/// The process `pid` ended: Windows frees the streams it left open.
+/// The process `pid` ended: Windows frees the streams it left open, and
+/// its drivers went with its memory.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     state(cpu).streams.retain(|_, s| s.pid != pid);
+    drivers::process_ended(cpu, pid);
 }
 
 const fn stdcall(name: &'static str, ordinal: u16, args: u8, handler: Handler) -> Api {
@@ -189,13 +227,13 @@ const fn stdcall(name: &'static str, ordinal: u16, args: u8, handler: Handler) -
 static APIS: &[Api] = &[
     stdcall("acmDriverAddA", 1, 5, add_refused),
     stdcall("acmDriverAddW", 2, 5, add_refused),
-    stdcall("acmDriverClose", 3, 2, bad_handle),
-    stdcall("acmDriverDetailsA", 4, 3, bad_handle),
-    stdcall("acmDriverDetailsW", 5, 3, bad_handle),
-    stdcall("acmDriverEnum", 6, 3, driver_enum),
-    stdcall("acmDriverID", 7, 3, bad_handle),
-    stdcall("acmDriverMessage", 8, 4, bad_handle),
-    stdcall("acmDriverOpen", 9, 3, driver_open),
+    stdcall("acmDriverClose", 3, 2, drivers::driver_close),
+    stdcall("acmDriverDetailsA", 4, 3, driver_details_a),
+    stdcall("acmDriverDetailsW", 5, 3, driver_details_w),
+    stdcall("acmDriverEnum", 6, 3, drivers::driver_enum),
+    stdcall("acmDriverID", 7, 3, drivers::driver_id),
+    stdcall("acmDriverMessage", 8, 4, drivers::driver_message),
+    stdcall("acmDriverOpen", 9, 3, drivers::driver_open),
     stdcall("acmDriverPriority", 10, 3, driver_priority),
     stdcall("acmDriverRemove", 11, 2, bad_handle),
     stdcall("acmFilterChooseA", 12, 1, not_possible),
@@ -241,6 +279,14 @@ fn bad_handle(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(MMSYSERR_INVALHANDLE)
 }
 
+fn driver_details_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    drivers::driver_details(cpu, args, false)
+}
+
+fn driver_details_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    drivers::driver_details(cpu, args, true)
+}
+
 /// What no codec can do. acmFormatEnum is one of these: it asks the
 /// drivers for their largest format first, and without one ends there.
 fn not_possible(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -267,29 +313,6 @@ fn clear(cpu: &mut Cpu, out: u32) -> bool {
         cpu.bus.guest_write_32(out, 0);
     }
     writable
-}
-
-/// acmDriverEnum(callback, instance, flags): no drivers, so no calls.
-fn driver_enum(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[callback, _, flags] = args else {
-        unreachable!()
-    };
-    Some(if !allows(cpu, callback, 1, false) {
-        MMSYSERR_INVALPARAM
-    } else if flags & !DRIVER_ENUM_FLAGS != 0 {
-        MMSYSERR_INVALFLAG
-    } else {
-        MMSYSERR_NOERROR
-    })
-}
-
-/// acmDriverOpen(out, driver, flags).
-fn driver_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(if clear(cpu, args[0]) {
-        MMSYSERR_INVALHANDLE
-    } else {
-        MMSYSERR_INVALPARAM
-    })
 }
 
 /// acmDriverPriority(driver, priority, flags). With no driver, a program
@@ -351,7 +374,9 @@ fn write_pcm(cpu: &mut Cpu, at: u32, room: u32, channels: u16, rate: u32, bits: 
 /// acmFormatSuggest(driver, source, destination, size, flags): for an
 /// ADPCM source, PCM of its rate and channels in 16 bits, or in 8 if
 /// the flags keep the destination's 8. The flags keep the destination's
-/// tag, channels, rate or bits; the codecs decode to nothing else.
+/// tag, channels, rate or bits; the codecs decode to nothing else. What
+/// they don't suggest, the installed drivers may (`drivers`), and a
+/// driver the program opened suggests on its own.
 fn format_suggest(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[driver, source, destination, size, flags] = args else {
         unreachable!()
@@ -359,7 +384,7 @@ fn format_suggest(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if flags & !SUGGEST_FLAGS != 0 {
         return Some(MMSYSERR_INVALFLAG);
     }
-    if driver != 0 {
+    if driver != 0 && drivers::driver(cpu, driver).is_none() {
         return Some(MMSYSERR_INVALHANDLE);
     }
     if !allows(cpu, source, WAVE_FORMAT_SIZE, false)
@@ -368,8 +393,27 @@ fn format_suggest(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     {
         return Some(MMSYSERR_INVALPARAM);
     }
+    if driver != 0 {
+        return drivers::format_suggest(cpu, args);
+    }
+    match builtin_suggest(cpu, args) {
+        MMSYSERR_NOERROR => Some(MMSYSERR_NOERROR),
+        _ => drivers::format_suggest(cpu, args),
+    }
+}
+
+/// What the built-in codecs suggest for acmFormatSuggest's checked
+/// arguments: MMSYSERR_NOERROR with the destination written, or
+/// ACMERR_NOTPOSSIBLE.
+fn builtin_suggest(cpu: &mut Cpu, args: &[u32]) -> u32 {
+    let &[_, source, destination, size, flags] = args else {
+        unreachable!()
+    };
+    if cpu.bus.guest_read_16(source) == WAVE_FORMAT_PCM {
+        return pcm_suggest(cpu, args);
+    }
     let Some((f, rate)) = adpcm_format(cpu, source) else {
-        return Some(ACMERR_NOTPOSSIBLE);
+        return ACMERR_NOTPOSSIBLE;
     };
     let kept = |flag: u32, wanted: u32, ours: u32| flags & flag == 0 || wanted == ours;
     let bits = if flags & SUGGEST_BITS != 0 {
@@ -384,10 +428,46 @@ fn format_suggest(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         || !kept(SUGGEST_RATE, cpu.bus.guest_read_32(destination + 4), rate)
         || !matches!(bits, 8 | 16)
     {
-        return Some(ACMERR_NOTPOSSIBLE);
+        return ACMERR_NOTPOSSIBLE;
     }
     write_pcm(cpu, destination, size, f.channels, rate, bits);
-    Some(MMSYSERR_NOERROR)
+    MMSYSERR_NOERROR
+}
+
+/// What the PCM converter built into Windows' MSACM32 suggests for a PCM
+/// source: PCM with the source's channels, rate and bits, but those the
+/// flags keep from the destination. ACMERR_NOTPOSSIBLE for a tag kept
+/// that isn't PCM's, or for PCM other than 8 or 16 bits, mono or
+/// stereo. Demolition Racer's wmaudsdk.dll asks this of the PCM the WMA
+/// codec suggested. Which rates Windows' converter takes isn't checked
+/// here: any but 0 is.
+fn pcm_suggest(cpu: &mut Cpu, args: &[u32]) -> u32 {
+    let &[_, source, destination, size, flags] = args else {
+        unreachable!()
+    };
+    let field = |cpu: &mut Cpu, flag: u32, offset: u32, read: fn(&mut Cpu, u32) -> u32| {
+        let from = if flags & flag != 0 {
+            destination
+        } else {
+            source
+        };
+        read(cpu, from + offset)
+    };
+    let read_16 = |cpu: &mut Cpu, at| cpu.bus.guest_read_16(at) as u32;
+    let read_32 = |cpu: &mut Cpu, at| cpu.bus.guest_read_32(at);
+    let tag = field(cpu, SUGGEST_TAG, 0, read_16);
+    let channels = field(cpu, SUGGEST_CHANNELS, 2, read_16);
+    let rate = field(cpu, SUGGEST_RATE, 4, read_32);
+    let bits = field(cpu, SUGGEST_BITS, 14, read_16);
+    if tag != WAVE_FORMAT_PCM as u32
+        || !matches!(channels, 1 | 2)
+        || !matches!(bits, 8 | 16)
+        || rate == 0
+    {
+        return ACMERR_NOTPOSSIBLE;
+    }
+    write_pcm(cpu, destination, size, channels as u16, rate, bits as u16);
+    MMSYSERR_NOERROR
 }
 
 /// The stream whose handle is `handle`.
@@ -398,10 +478,11 @@ fn stream(cpu: &mut Cpu, handle: u32) -> Option<Stream> {
 /// acmStreamOpen(out, driver, source, destination, filter, callback,
 /// instance, flags). A query needs no `out`. The stream decodes ADPCM to
 /// PCM of the same rate and channels, with no filter; what else is
-/// asked has no codec here. A stream that calls back as it converts
-/// (ACM_STREAMOPENF_ASYNC) isn't here either: Windows' ADPCM codecs
-/// convert while the call waits, and the ACM's own queue for them isn't
-/// written.
+/// asked goes to the installed drivers (`drivers`), and a driver the
+/// program opened takes every stream asked of it. A stream that calls
+/// back as it converts (ACM_STREAMOPENF_ASYNC) isn't here: Windows'
+/// ADPCM codecs convert while the call waits, and the ACM's own queue
+/// for them isn't written.
 fn stream_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[out, driver, source, destination, filter, _, _, flags] = args else {
         unreachable!()
@@ -419,11 +500,17 @@ fn stream_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !readable(cpu, source) || !readable(cpu, destination) {
         return Some(MMSYSERR_INVALPARAM);
     }
-    if driver != 0 {
+    if driver != 0 && drivers::driver(cpu, driver).is_none() {
         return Some(MMSYSERR_INVALHANDLE);
     }
-    let Some((f, rate)) = adpcm_format(cpu, source) else {
+    if flags & STREAM_OPEN_ASYNC != 0 {
         return Some(ACMERR_NOTPOSSIBLE);
+    }
+    if driver != 0 {
+        return drivers::stream_open(cpu, args);
+    }
+    let Some((f, rate)) = adpcm_format(cpu, source) else {
+        return drivers::stream_open(cpu, args);
     };
     let bits = cpu.bus.guest_read_16(destination + 14);
     let pcm = cpu.bus.guest_read_16(destination) == WAVE_FORMAT_PCM
@@ -431,33 +518,35 @@ fn stream_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         && cpu.bus.guest_read_32(destination + 4) == rate
         && matches!(bits, 8 | 16)
         && cpu.bus.guest_read_16(destination + 12) == f.channels * bits / 8;
-    if !pcm || filter != 0 || flags & STREAM_OPEN_ASYNC != 0 {
-        return Some(ACMERR_NOTPOSSIBLE);
+    if !pcm || filter != 0 {
+        return drivers::stream_open(cpu, args);
     }
     if flags & STREAM_OPEN_QUERY != 0 {
         return Some(MMSYSERR_NOERROR);
     }
     let pid = current_pid(cpu);
-    let s = state(cpu);
-    let handle = FIRST_STREAM + s.next;
-    s.next += 1;
+    let handle = drivers::new_handle(cpu, FIRST_STREAM);
     let stream = Stream {
         pid,
         source: f,
         bits,
+        ..Stream::default()
     };
-    s.streams.insert(handle, stream);
+    state(cpu).streams.insert(handle, stream);
     cpu.bus.guest_write_32(out, handle);
     Some(MMSYSERR_NOERROR)
 }
 
 /// acmStreamClose(stream, flags).
 fn stream_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if !state(cpu).streams.contains_key(&args[0]) {
+    let Some(s) = stream(cpu, args[0]) else {
         return Some(MMSYSERR_INVALHANDLE);
-    }
+    };
     if args[1] != 0 {
         return Some(MMSYSERR_INVALFLAG);
+    }
+    if *s.driver != 0 {
+        return drivers::stream_close(cpu, args[0], &s);
     }
     state(cpu).streams.remove(&args[0]);
     Some(MMSYSERR_NOERROR)
@@ -488,7 +577,7 @@ fn stream_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// bytes of ADPCM decode to, a partial block at the end counted whole,
 /// or the ADPCM of the whole blocks whose PCM fits in `size`.
 /// ACMERR_NOTPOSSIBLE if there is no whole block, or if the PCM would
-/// pass 4 GB.
+/// pass 4 GB. A driver's stream asks its driver.
 fn stream_size(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[handle, size, out, flags] = args else {
         unreachable!()
@@ -499,6 +588,12 @@ fn stream_size(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(s) = stream(cpu, handle) else {
         return Some(MMSYSERR_INVALHANDLE);
     };
+    if *s.driver != 0 {
+        if !matches!(flags, SIZE_SOURCE | SIZE_DESTINATION) {
+            return Some(MMSYSERR_INVALFLAG);
+        }
+        return drivers::stream_size(cpu, &s, size, out, flags);
+    }
     let bytes = match flags {
         SIZE_SOURCE => s.pcm_size(size),
         SIZE_DESTINATION => s.adpcm_size(size),
@@ -539,13 +634,13 @@ fn buffers(cpu: &mut Cpu, header: u32) -> Option<(u32, u32, u32, u32)> {
 }
 
 /// acmStreamPrepareHeader(stream, header, flags). Preparing a prepared
-/// header does nothing.
+/// header does nothing. A driver's stream's driver prepares it too.
 fn prepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[handle, header, flags] = args else {
         unreachable!()
     };
-    let status = match header_of(cpu, handle, header) {
-        Ok((_, status)) => status,
+    let (s, status) = match header_of(cpu, handle, header) {
+        Ok(found) => found,
         Err(e) => return Some(e),
     };
     if flags != 0 {
@@ -554,22 +649,29 @@ fn prepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if buffers(cpu, header).is_none() {
         return Some(MMSYSERR_INVALPARAM);
     }
+    if *s.driver != 0 {
+        return drivers::stream_header(cpu, &s, drivers::PREPARE, header, flags);
+    }
     let status = status | STATUS_PREPARED;
     cpu.bus.guest_write_32(header + HEADER_STATUS, status);
     Some(MMSYSERR_NOERROR)
 }
 
-/// acmStreamUnprepareHeader(stream, header, flags).
+/// acmStreamUnprepareHeader(stream, header, flags). A driver's stream's
+/// driver unprepares it too.
 fn unprepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[handle, header, flags] = args else {
         unreachable!()
     };
-    let status = match header_of(cpu, handle, header) {
-        Ok((_, status)) => status,
+    let (s, status) = match header_of(cpu, handle, header) {
+        Ok(found) => found,
         Err(e) => return Some(e),
     };
     if flags != 0 {
         return Some(MMSYSERR_INVALFLAG);
+    }
+    if *s.driver != 0 {
+        return drivers::stream_header(cpu, &s, drivers::UNPREPARE, header, flags);
     }
     if status & STATUS_PREPARED == 0 {
         return Some(ACMERR_UNPREPARED);
@@ -585,7 +687,8 @@ fn unprepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// holds the PCM of all the source's blocks, a partial one counted
 /// whole, as acmStreamSize gives it. All of the source is used, or its
 /// whole blocks if the flags ask for those; a partial block at the end
-/// decodes as `adpcm::Format::decode_buffer` says.
+/// decodes as `adpcm::Format::decode_buffer` says. A driver's stream's
+/// driver converts.
 fn stream_convert(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[handle, header, flags] = args else {
         unreachable!()
@@ -603,6 +706,9 @@ fn stream_convert(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((at, length, destination, room)) = buffers(cpu, header) else {
         return Some(MMSYSERR_INVALPARAM);
     };
+    if *s.driver != 0 {
+        return drivers::stream_header(cpu, &s, drivers::CONVERT, header, flags);
+    }
     // The codecs size the destination's source first and refuse a
     // source longer than that, so the PCM always fits.
     if s.adpcm_size(room).unwrap_or(0) < length {
@@ -631,7 +737,7 @@ fn stream_convert(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(MMSYSERR_NOERROR)
 }
 
-fn acm_get_version(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn acm_get_version(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(if super::version::is_98(cpu) {
         VERSION_98
     } else {
