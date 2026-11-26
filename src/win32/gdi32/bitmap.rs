@@ -21,7 +21,7 @@ const DIB_RGB_COLORS: u32 = 0;
 const DIB_PAL_COLORS: u32 = 1;
 const CBM_INIT: u32 = 4;
 /// The most bytes a bitmap's pixels take.
-const MAX_BITS: usize = 64 << 20;
+pub const MAX_BITS: usize = 64 << 20;
 
 /// A DIB's header, as a BITMAPINFO at an address says it.
 #[derive(Clone, Debug, Default)]
@@ -589,11 +589,14 @@ fn header(cpu: &mut Cpu, handle: u32) -> Option<Bitmap> {
 pub fn get_bitmap_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (handle, count, out) = (args[0], args[1] as usize, args[2]);
     // In Windows 3.1's GDI heap, the bitmap's own bits, at the size it was
-    // made with (`gdi_heap::own_bits`).
+    // made with (`gdi_heap::own_bits`). Asking for the size alone leaves
+    // bmBits where the program put it.
+    if out == 0
+        && let Some(size) = gdi_heap::own_size(cpu, handle)
+    {
+        return Some(size as u32);
+    }
     if let Some((bits, scan)) = gdi_heap::own_bits(cpu, handle) {
-        if out == 0 {
-            return Some(bits.len() as u32);
-        }
         let n = (count / scan.max(1) * scan).min(bits.len());
         cpu.bus.guest_write_bytes(out, &bits[..n]);
         return Some(n as u32);
@@ -703,8 +706,11 @@ pub fn get_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     // In Windows 3.1's GDI heap, bmBits points at the bitmap's own bits
-    // again, which it reads at the size the device BITMAP says.
-    gdi_heap::repoint(cpu, handle);
+    // again, which it reads at the size the device BITMAP says. A call
+    // that asks only for the format reads no bits and leaves bmBits be.
+    if out != 0 {
+        gdi_heap::repoint(cpu, handle);
+    }
     let Some(b) = header(cpu, handle) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);

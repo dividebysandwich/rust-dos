@@ -695,8 +695,9 @@ limit, so without a connection it goes on as it would with one:
   Windows 98 doesn't: `none` (the default), `win31` or `win32s`.
   `win31` has Windows 3.1's GDI heap, which TOOLHELP's SystemHeapInfo
   gives as hGDISegment, with each bitmap's object and device BITMAP in
-  it as Windows 3.1's GDI kept them, and 16-bit BitBlt drawing what a
-  program wrote there. `win32s` has those and Win32s's GlobalFlags,
+  it as Windows 3.1's GDI kept them, and GDI reading and drawing the
+  bitmap's pixels where its device BITMAP says, which a program may
+  point at its own buffer. `win32s` has those and Win32s's GlobalFlags,
   which leaves out the lock count. The [game fixes](#game-fixes) give
   them to the programs known to need them; the setting is for others. A
   16-bit program that asks for GDI's heap without the shim gets a line

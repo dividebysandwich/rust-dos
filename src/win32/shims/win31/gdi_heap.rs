@@ -26,7 +26,9 @@
 //! from the bitmap shows the frame, and TextOut or a BitBlt into its
 //! memory DC draws into the buffer, where the program sees it and the
 //! next blit from the bitmap shows it. GDI32's bitmap takes the size the
-//! BITMAP says, if it is one GDI32 can draw on (`size_of`).
+//! BITMAP says, if it is one GDI32 can draw on (`size_of`); if it isn't,
+//! GDI32 goes by the BITMAP the view wrote, on the bitmap's own bits in
+//! the view (`layout`).
 //!
 //! Two things don't follow the BITMAP the program changed, as real WfW
 //! 3.11 shows (#2007). A memory DC keeps the size its bitmap had when
@@ -42,7 +44,8 @@
 //! were when it joined. Another view's device BITMAP becomes where they
 //! live if the program changes it while it hasn't changed the BITMAP of
 //! the view that has them (`device`). When a view goes with its task,
-//! the bits of its bitmaps go back to GDI32 (`task_ended`).
+//! the bits of its bitmaps go to the next view that has them, or back
+//! to GDI32 if none does (`task_ended`).
 //!
 //! Windows 3.1's GDI heap was GDI's, there as long as Windows ran. The
 //! Win16 process's view, which every 16-bit program shares, has blocks
@@ -502,8 +505,13 @@ fn device_of(cpu: &Cpu, b: &Viewed) -> Option<Vec<u8>> {
 /// that of the entry that has them, unless the program changed another
 /// view's and not that one's. Windows 3.1 had one heap, so the BITMAP
 /// the program changed is the one its display driver went by: the bits
-/// then live in the first view whose BITMAP the program changed.
+/// then live in the first view whose BITMAP the program changed. None
+/// for a DIB section, whose bits are in the program's memory already.
 fn device(cpu: &mut Cpu, handle: u32) -> Option<Vec<u8>> {
+    let bitmap = cpu.bus.win32.gdi.bitmap(handle)?;
+    if bitmap.dib.is_some() {
+        return None;
+    }
     // The entry they live in, its BITMAP and whether the program changed
     // it, and the first other entry whose BITMAP it changed.
     let (mut live, mut changed) = (None, None);
@@ -541,7 +549,8 @@ fn device(cpu: &mut Cpu, handle: u32) -> Option<Vec<u8>> {
 
 /// The width, height and GDI32's bytes a row that the device BITMAP `s`
 /// of the bitmap `handle` says: None unless GDI32 can draw on it, a
-/// bitmap of GDI's with its planes and bits per pixel.
+/// bitmap of GDI's with its planes and bits per pixel, no bigger than
+/// GDI32 makes one.
 fn size_of(cpu: &Cpu, handle: u32, s: &[u8]) -> Option<(i32, i32, usize)> {
     let r16 = |at: usize| u16::from_le_bytes([s[at], s[at + 1]]);
     let (width, height) = (r16(0x02) as i32, r16(0x04) as i32);
@@ -552,7 +561,37 @@ fn size_of(cpu: &Cpu, handle: u32, s: &[u8]) -> Option<(i32, i32, usize)> {
         return None;
     }
     let stride = crate::win32::gdi32::surface::ddb_stride(width, bpp as u32 * planes as u32);
-    Some((width, height, stride))
+    let big = stride * height as usize > crate::win32::gdi32::bitmap::MAX_BITS;
+    (!big).then_some((width, height, stride))
+}
+
+/// The entry of a view that the bits of the bitmap `handle` live in.
+fn live_entry(cpu: &Cpu, handle: u32) -> Option<Viewed> {
+    cpu.bus.win32.processes.iter().find_map(|p| {
+        let view = &*p.gdi_heap;
+        let shimmed = view.segment != 0 && p.shims.has(Shim::Win31GdiHeap);
+        let b = view
+            .bitmaps
+            .iter()
+            .find(|b| b.handle as u32 == handle && b.live);
+        b.filter(|_| shimmed).cloned()
+    })
+}
+
+/// The device BITMAP GDI32 goes by for the bitmap `handle`, and the size
+/// it says (`size_of`), if its bits live in a view: the one `device`
+/// gives, or, if the program made that one something GDI32 can't draw
+/// on, the one the view wrote, whose bits are the bitmap's own. Either
+/// way GDI32 draws on the bits in the view, never on `Bitmap::bits`,
+/// which went stale when the bitmap joined it.
+fn layout(cpu: &mut Cpu, handle: u32) -> Option<(Vec<u8>, (i32, i32, usize))> {
+    let s = device(cpu, handle)?;
+    if let Some(size) = size_of(cpu, handle, &s) {
+        return Some((s, size));
+    }
+    let written = live_entry(cpu, handle)?.written;
+    let size = size_of(cpu, handle, &written)?;
+    Some((written, size))
 }
 
 /// GDI32 is about to draw on or read the bitmap `handle`: if its bits
@@ -560,10 +599,7 @@ fn size_of(cpu: &Cpu, handle: u32, s: &[u8]) -> Option<(i32, i32, usize)> {
 /// program may have changed, as Windows 3.1's display driver went by
 /// the BITMAP.
 pub fn refresh(cpu: &mut Cpu, handle: u32) {
-    let Some(s) = device(cpu, handle) else {
-        return;
-    };
-    let Some((width, height, stride)) = size_of(cpu, handle, &s) else {
+    let Some((_, (width, height, stride))) = layout(cpu, handle) else {
         return;
     };
     let Some(bitmap) = cpu.bus.win32.gdi.bitmap_mut(handle) else {
@@ -582,8 +618,7 @@ pub fn refresh(cpu: &mut Cpu, handle: u32) {
 /// the size its device BITMAP says (`refresh`), each None if it isn't
 /// there. None if GDI32's bitmap has the bits.
 pub fn rows(cpu: &mut Cpu, handle: u32, from: i32, to: i32) -> Option<Vec<Option<u32>>> {
-    let s = device(cpu, handle)?;
-    let (width, height, stride) = size_of(cpu, handle, &s)?;
+    let (s, (width, height, stride)) = layout(cpu, handle)?;
     let bitmap = cpu.bus.win32.gdi.bitmap(handle)?;
     if (bitmap.width, bitmap.height, bitmap.stride as usize) != (width, height, stride) {
         return None;
@@ -604,15 +639,7 @@ pub fn rows(cpu: &mut Cpu, handle: u32, from: i32, to: i32) -> Option<Vec<Option
 /// 3.11 shows (#2007). None if no view has the bits.
 fn own(cpu: &mut Cpu, handle: u32) -> Option<Viewed> {
     device(cpu, handle)?;
-    let b = cpu.bus.win32.processes.iter().find_map(|p| {
-        let view = &*p.gdi_heap;
-        let shimmed = view.segment != 0 && p.shims.has(Shim::Win31GdiHeap);
-        let b = view
-            .bitmaps
-            .iter()
-            .find(|b| b.handle as u32 == handle && b.live);
-        b.filter(|_| shimmed).cloned()
-    })?;
+    let b = live_entry(cpu, handle)?;
     let bits = &b.written[BM_BITS as usize..BM_BITS as usize + 4];
     let base = crate::win16::lin(cpu, global::handle_to_sel(b.block), 0);
     crate::win16::poke(cpu, base + BM_BITS, bits);
@@ -653,6 +680,17 @@ pub fn own_bits(cpu: &mut Cpu, handle: u32) -> Option<(Vec<u8>, usize)> {
         bits.extend(row.unwrap_or_else(|| vec![0; scan]));
     }
     Some((bits, scan))
+}
+
+/// How many bytes GetBitmapBits gives of the bitmap `handle`, if its
+/// bits live in a view (`own_bits`), without pointing bmBits back: a
+/// call that asks only for the size reads no bits. None if no view has
+/// the bits.
+pub fn own_size(cpu: &mut Cpu, handle: u32) -> Option<usize> {
+    device(cpu, handle)?;
+    let written = live_entry(cpu, handle)?.written;
+    let r16 = |at: usize| u16::from_le_bytes([written[at], written[at + 1]]) as usize;
+    Some(r16(0x04) * r16(0x06) * written[0x08].max(1) as usize)
 }
 
 /// SetBitmapBits' rows `bits` into the own bits of the bitmap `handle`,
@@ -732,7 +770,7 @@ pub fn task_ended(cpu: &mut Cpu, task: u16) {
         .flat_map(|p| p.gdi_heap.bitmaps.iter().filter(|b| b.live))
         .map(|b| b.handle as u32)
         .collect();
-    for handle in live {
+    for &handle in &live {
         let target = crate::win32::gdi32::surface::Target::Bitmap(handle);
         let Some(rows) = crate::win32::gdi32::surface::Surface::load_all(cpu, target) else {
             continue;
@@ -749,6 +787,49 @@ pub fn task_ended(cpu: &mut Cpu, task: u16) {
                 hinted: std::mem::take(&mut view.hinted),
                 ..GdiHeapView::default()
             };
+        }
+    }
+    for handle in live {
+        hand_over(cpu, handle);
+    }
+}
+
+/// The view the bits of the bitmap `handle` lived in went: they live in
+/// the first other view that has the bitmap, if one does, whose block
+/// gets them from GDI32's bitmap, which `task_ended` put them in. Its
+/// copy from when the bitmap joined it would be stale otherwise, and the
+/// program reading bmBits there wouldn't see what GDI drew since.
+fn hand_over(cpu: &mut Cpu, handle: u32) {
+    let next = cpu.bus.win32.processes.iter().position(|p| {
+        let shimmed = p.gdi_heap.segment != 0 && p.shims.has(Shim::Win31GdiHeap);
+        shimmed && p.gdi_heap.bitmaps.iter().any(|b| b.handle as u32 == handle)
+    });
+    let Some(p) = next else {
+        return;
+    };
+    let Some(old) = cpu.bus.win32.gdi.bitmap(handle) else {
+        return;
+    };
+    let (old_stride, old_height) = (old.stride as usize, old.height);
+    let bits = old.bits.clone();
+    let view = &mut cpu.bus.win32.processes[p].gdi_heap;
+    if let Some(b) = view.bitmaps.iter_mut().find(|b| b.handle as u32 == handle) {
+        b.live = true;
+    }
+    // The size the new view's BITMAP says, which its rows have: GDI32's
+    // rows are copied as far as both have them.
+    refresh(cpu, handle);
+    let Some((_, (_, height, stride))) = layout(cpu, handle) else {
+        return;
+    };
+    let Some(rows) = rows(cpu, handle, 0, height) else {
+        return;
+    };
+    let len = stride.min(old_stride);
+    for (r, at) in rows.into_iter().enumerate().take(old_height.max(0) as usize) {
+        let from = bits.get(r * old_stride..r * old_stride + len);
+        if let (Some(at), Some(from)) = (at, from) {
+            crate::win16::poke(cpu, at, from);
         }
     }
 }
