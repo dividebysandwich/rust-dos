@@ -547,7 +547,7 @@ pub(super) fn critical_section_delete(cpu: &mut Cpu, args: &[u32]) -> Option<u32
     if kind != SECTION_TYPE {
         return super::super::seh::raise_from_call(cpu, 1, STATUS_ACCESS_VIOLATION, 0, &[]);
     }
-    process(cpu).system_free(object);
+    with_process(cpu, |p, bus| p.system_free(bus, object));
     Some(0)
 }
 

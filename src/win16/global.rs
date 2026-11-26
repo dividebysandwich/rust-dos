@@ -143,7 +143,7 @@ pub fn take_memory(cpu: &mut Cpu, size: u32) -> Option<u32> {
 /// Give back the memory `take_memory` gave at `base`. False when it
 /// didn't.
 pub fn give_memory(cpu: &mut Cpu, base: u32) -> bool {
-    base != 0 && cpu.bus.win32.win16.heap.free(base)
+    base != 0 && cpu.bus.win32.win16.heap.free_keeping_bytes(base)
 }
 
 fn zero(cpu: &mut Cpu, base: u32, len: u32) {

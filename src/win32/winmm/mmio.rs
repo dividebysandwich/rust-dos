@@ -188,7 +188,7 @@ fn heap_alloc(cpu: &mut Cpu, size: u32) -> u32 {
 }
 
 fn heap_free(cpu: &mut Cpu, at: u32) {
-    crate::win32::process(cpu).heap.free(at);
+    crate::win32::with_process(cpu, |p, bus| p.heap.free(&p.memory, bus, at));
 }
 
 /// The DOS file's error as an MMIOERR.

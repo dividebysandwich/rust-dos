@@ -585,7 +585,7 @@ fn heap_alloc(cpu: &mut Cpu, size: u32) -> Option<u32> {
 }
 
 fn heap_free(cpu: &mut Cpu, at: u32) -> bool {
-    with_heap(cpu, |heap, _, _| heap.free(at)).unwrap_or(false)
+    with_heap(cpu, |heap, memory, bus| heap.free(memory, bus, at)).unwrap_or(false)
 }
 
 fn heap_size(cpu: &mut Cpu, at: u32) -> Option<u32> {

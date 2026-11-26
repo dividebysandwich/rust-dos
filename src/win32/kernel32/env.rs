@@ -45,7 +45,7 @@ pub(super) fn get_environment_strings(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 /// FreeEnvironmentStringsA: the copy goes back to the heap.
 pub(super) fn free_environment_strings_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    process(cpu).heap.free(args[0]);
+    with_process(cpu, |p, bus| p.heap.free(&p.memory, bus, args[0]));
     Some(TRUE)
 }
 

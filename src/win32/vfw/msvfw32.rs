@@ -629,7 +629,7 @@ fn end(cpu: &mut Cpu, slot: usize) {
     let buffer = std::mem::take(&mut d.buffer);
     *d = DrawDib::default();
     if buffer != 0 {
-        crate::win32::with_process(cpu, |p, _| p.heap.free(buffer));
+        crate::win32::with_process(cpu, |p, bus| p.heap.free(&p.memory, bus, buffer));
     }
 }
 

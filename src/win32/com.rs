@@ -137,7 +137,7 @@ pub fn free_interface(cpu: &mut Cpu, this: u32) {
     if cpu.bus.guest_probe(this, 4, true) {
         cpu.bus.guest_write_32(this, 0);
     }
-    super::with_process(cpu, |p, _| p.heap.free(this));
+    super::with_process(cpu, |p, bus| p.heap.free(&p.memory, bus, this));
 }
 
 /// The interface `this` is, if it is one of the DLL `dll`'s: its vtable's
