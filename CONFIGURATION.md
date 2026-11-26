@@ -1,32 +1,61 @@
 # Configuring Rust-DOS
 
 Rust-DOS takes its settings from a configuration file, from the settings
-window while it runs, and from game profiles for games that need settings
-of their own. This page is the reference, to look settings up in. To get
-a game running, start with the [README](README.md#start-here) and the
+window while it runs (Ctrl+F12), and from game profiles for games that need
+settings of their own. This page is the reference, to look settings up in.
+To get a game running, start with the [README](README.md#start-here) and the
 [tutorials](TUTORIALS.md), which have whole configurations to copy.
 [REFERENCE.md](REFERENCE.md) describes the DOS prompt, the keys and save
 states.
 
-* [Configuration file](#configuration-file): where it is, and every setting in
+## Settings most often changed
+
+Most games need none of these. When one needs something, it is usually one
+of them:
+
+| Setting | Section | What it changes |
+|---|---|---|
+| `scale`, `fullscreen` | `[emulator]` | The window's size, or fullscreen ([the window and the picture](#the-window-and-the-picture)) |
+| `aspect`, `filter`, `shader` | `[emulator]` | How the picture is scaled up: its shape, how sharp its pixels are, and a CRT look ([the window and the picture](#the-window-and-the-picture), [CRT shaders](#crt-shaders)) |
+| `cycles` | `[emulator]` | The emulated CPU's speed: `auto` (the default), `max` or a number ([processor and speed](#processor-and-speed)) |
+| `cpu`, `memsize` | `[emulator]` | The processor and the memory. Windows games want `cpu=pentium_ii` ([processor and speed](#processor-and-speed), [memory](#memory)) |
+| `machine` | `[emulator]` | The video card the game finds ([choosing a video card](#choosing-a-video-card)) |
+| `voodoo` | `[emulator]` | Adds a 3dfx Voodoo for DOS games' 3dfx versions ([3dfx settings](#3dfx-settings)) |
+| `voodoo_renderer`, `voodoo_scale` | `[emulator]` | Whether your CPU or your graphics card draws the 3dfx card's picture, and how sharp ([choosing a renderer](#choosing-a-renderer)) |
+| `fps_cap` | `[emulator]` | The most frames a second a game shows ([frame rate cap](#frame-rate-cap)) |
+| `sbtype`, `midisynth`, `soundfont` | `[sound]` | The sound card and what plays MIDI music ([`[sound]`](#sound)) |
+| `master`, `sb`, `fm`, `midi` | `[mixer]` | Volumes ([`[mixer]`](#mixer)) |
+| `C=`, `D=` | `[drives]` | The folders and images the game's drives are ([`[drives]`](#drives), [mounting drives](#mounting-drives)) |
+
+## Contents
+
+* Basics: [the configuration file](#configuration-file), where it is and
+  what it looks like, and [the settings window](#settings-window).
+* The picture: [video and rendering](#video-and-rendering), which explains
+  the video card the game sees, what draws its picture on your computer and
+  how the window shows it; [video cards](#video-cards), each card in detail;
+  the [frame rate cap](#frame-rate-cap) and [CRT shaders](#crt-shaders).
+* [Settings reference](#settings-reference): every setting in
   [`[emulator]`](#emulator), [`[sound]`](#sound), [`[mixer]`](#mixer),
   [`[joystick]`](#joystick), [`[network]`](#network), [`[serial]`](#serial),
-  [`[achievements]`](#achievements), [`[drives]`](#drives) and
-  [`[autoexec]`](#autoexec)
-* [Settings window](#settings-window)
-* [Game profiles](#game-profiles), [game fixes](#game-fixes) and
-  [RetroAchievements](#retroachievements)
-* [Mounting drives](#mounting-drives), [CD images](#cd-images), [disk
-  images](#disk-images) and [disk speed and noises](#disk-speed-and-noises)
-* [Networking at a glance](#networking-at-a-glance): what the IPX driver,
-  rooms, relays and the network card each do
-* [Playing over a LAN](#playing-over-a-lan), [serial and modem
+  [`[phonebook]`](#phonebook), [`[printer]`](#printer),
+  [`[achievements]`](#achievements), [`[shell]`](#shell), [`[vr]`](#vr),
+  [`[vfx1]`](#vfx1), [`[drives]`](#drives) and [`[autoexec]`](#autoexec).
+* Games: [game profiles](#game-profiles), [Windows games](#windows-games),
+  [game fixes](#game-fixes) and [RetroAchievements](#retroachievements).
+* Drives: [mounting drives](#mounting-drives), [CD images](#cd-images),
+  [disk images](#disk-images), [disk speed and
+  noises](#disk-speed-and-noises), and [booting a disk
+  image](#booting-a-disk-image) such as Windows 95 or 98.
+* Network: [networking at a glance](#networking-at-a-glance), which says
+  what the IPX driver, rooms, relays and the network card each do; [playing
+  over a LAN](#playing-over-a-lan), [serial and modem
   games](#serial-and-modem-games) and [a relay on a
-  server](#a-relay-on-a-server)
-* [CRT shaders](#crt-shaders)
+  server](#a-relay-on-a-server).
 * [3D scene and VR](#3d-scene-and-vr): the picture on a screen in a Blender
-  scene, in the window or in a VR headset
-* [Command-line options](#command-line-options)
+  scene, in the window or in a VR headset.
+* [Command-line options](#command-line-options), and [shipping Rust-DOS with
+  a game](#shipping-rust-dos-with-a-game).
 
 ## Configuration file
 
@@ -71,42 +100,341 @@ D:
 
 Mistakes in the file are printed as warnings; the emulator still starts.
 
-### Shipping Rust-DOS with a game
+## Settings window
 
-A store or an installer that ships Rust-DOS with a game, and keeps it at
-the version it tested, sets it up like this:
+Press **Ctrl+F12**, type `DOSCONFIG` at the DOS prompt, or hold the right
+mouse button still for 1.5 seconds (`mouse_menu_hold`) to open the
+settings window over the running program. The program pauses while it is
+open, except on the Mixer page, where it plays on so you hear the volumes
+as you set them, and the Stats page, which shows it running; with
+`pause_in_settings` off, or in a LAN room, it never pauses. Ctrl+F12 or
+Esc closes it.
 
-* Ship one configuration file for the machine, `rust-dos.conf`, next to
-  the executable or passed with `--config FILE`. Put
-  `version_check=never` in its `[emulator]` section: Rust-DOS then never
-  asks rust-dos.com for a newer version or says there is one, and the
-  setting is left out of the settings window. It has to be in this file:
-  a game profile's settings apply only when the game launches, after the
-  check would have started.
-* Put each way of starting the game (the game, its setup program, a
-  network game) in a [game profile](#game-profiles) in the `games` folder
-  beside that file, and give each its own shortcut:
-  `rust-dos --config rust-dos.conf --game "Setup"`. This is what GOG's
-  pairs of DOSBox files (`dosboxGame.conf` and `dosboxGame_single.conf`)
-  become; `--import` turns them into profiles. An imported profile's
-  `[drives]` paths are absolute, to the folders the game was imported
-  from: make them relative, to the `games` folder, before shipping it.
+* **Drives:** mount a host directory, a zip or 7z archive, or a disk or
+  CD image (Ins), change or
+  swap the one a drive shows (Enter; this is how to change discs in the
+  middle of a game), or unmount it (Del). **Browse...** picks directories
+  and images, VHDs among them, from the host. **Create a disk image...**
+  makes a new, empty floppy or hard disk image, as
+  [MAKEIMG](#new-disk-images) does, and mounts it on the drive picked (a
+  floppy on A: or B:, where free); a hard disk's **Format** makes it a raw
+  image or a dynamic (growing) or fixed VHD. B (or
+  the mount dialog's **Boot**) [boots](#booting-a-disk-image) the disk
+  image of the selected drive now, and the dialog's **Auto-boot** has it
+  boot whenever Rust-DOS starts, once saved (F2). Its **Write to** is a
+  folder for the changes of a directory, an archive or a disk image
+  (`<image>.rdelta` there), which leave it as it is
+  ([`-overlay`](#mounting-drives)); such a drive is marked *ovl*. Its
+  **IDE slot** puts a hard disk or CD-ROM drive on the IDE channel a
+  booted system finds it on ([`-ide`](#booting-a-disk-image)); the first free one
+  otherwise. Past the letters, its **Drive** offers the BIOS disk numbers
+  0 to 3 (`[drives]` `2=win98.vhd`): an image only the BIOS has, for
+  booting, without a DOS drive. They are listed after the lettered drives
+  with their BIOS unit (*00h*, *01h*, *80h*, *81h*), and **Create a disk
+  image...** can mount a new image on one of its kind.
+* **Display:** the scale, fullscreen, fixed aspect ratio, variable
+  refresh rate (VRR), the scaling filter, the CRT shader and the monochrome monitor.
+* **Emulator:** the CPU speed, the processor, the video card, the memory
+  size, expanded and upper memory, the disk speeds, the joystick, rewind,
+  the capture folder and whether recordings show the settings window and
+  the performance overlay. *Edit the [autoexec] commands...* opens the configuration file's
+  `[autoexec]` (a game's profile's while it plays) in an editor, comments
+  included; F2 writes it into the file, for the next start, and Esc leaves
+  the file as it was.
+* **Sound:** everything in `[sound]`, and the disk noises. A card's port,
+  IRQ and DMA channels share a row: Left and Right move between them, and
+  Enter lists the values of the one marked.
+* **Mixer:** the volume of each sound source and the master volume
+  (`[mixer]`), with a meter of how loud each one plays, and the filters,
+  reverb and chorus with their dry/wet mixes.
+* **Network:** everything in [`[network]`](#network): the IPX driver, the
+  NE2000 network card, and the LAN to join or host at startup.
+* **Serial:** everything in [`[serial]`](#serial): what each serial port
+  has plugged in and its IRQ, the chip, the serial mouse and the modem's
+  TCP calls.
+* **Games:** the [game profiles](#game-profiles): Enter launches one, Ins
+  makes one from the settings as they are, Del deletes one.
+* **States:** the [save state](REFERENCE.md#save-states) slots of the
+  game playing, with when each was saved, in which program, and a picture
+  of the screen: Enter loads one, Ins saves to one, Del empties one.
+  Ctrl+F9 opens the window on this page.
+* **Cheats:** finds a game's values in memory, such as its lives or money,
+  and changes them. Search for the value the game shows (or for any value,
+  when the game shows none, such as an energy bar), close the window and
+  play on until it changes, then narrow the addresses down: by the new
+  value, or by whether it changed, went up or went down. Once few are
+  left, Enter sets one's value, and Ins freezes it: the machine puts the
+  value back before every frame until the program ends. Values are 8, 16
+  or 32 bits, typed in decimal or hex (`0x1F`, `$1F`, `1Fh`), and the
+  search covers conventional memory, or all of it for games with DOS
+  extenders.
+* **Achievements:** [RetroAchievements](#retroachievements): on or off,
+  hardcore mode, logging in, the game's archive, and the game's
+  achievements and leaderboards.
+* **Stats:** how the machine runs, in two big numbers: **FPS**, the
+  frames a second the program draws (a retrace after which the picture
+  changed, or for a game that flips pages, each flip), beside the
+  display's refresh rate, and **CPU**, how much of one host core the
+  emulator takes (yellow from 75%, red from 90%, where it is close to not
+  keeping up). Each has a graph of the last 30 seconds, with their
+  average, least and most. Below them: the emulated CPU's speed in cycles
+  and in millions of instructions a second, the share of them the dynamic
+  recompiler ran, the share of the time the CPU sat halted waiting for an
+  interrupt, how long drawing the picture takes, and the recompiler's
+  translated code. **Ctrl+Shift+F12** (here or while a program runs)
+  shows the two numbers and small graphs of them at the bottom right of
+  the picture while the window is closed, and hides them again.
 
-Rust-DOS needs no internet connection. Nothing it does online is needed
-to run a game, and each request runs on a thread of its own with a time
-limit, so without a connection it goes on as it would with one:
+Left and Right step a setting through its values, and move a slider (the
+volumes, the effects' mixes, the CRT's curvature and glow, the memory size
+and the joystick's deadzone) along its bar, as do their ◄ and ►. Enter (or
+a click on a setting's value) lists the values to pick from, or types or
+picks one: the list takes Up and Down, and a letter jumps to the next
+value starting with it. Tab switches pages, and the mouse works too.
+**F1** explains the setting under the cursor, or the page or dialog open,
+in a short help for getting games going; Up and Down scroll it, and Esc
+or F1 closes it. The
+display settings, the CPU speed, the disk speeds and noises, the joystick
+and the volumes take effect at once. The processor, the video card,
+expanded and upper memory and the sound hardware change once no program is
+running, so a game isn't left without the card it set up. The memory size
+takes effect the next time rust-dos starts.
 
-* The version check (off with `never`) waits at most a second at
-  startup, and a failure only goes to the console.
-* The sound ROM, Glide overlay and VR scene downloads, and the modem
-  phonebook's list of boards, are asked for only from the settings
-  window, and say there when they fail.
-* RetroAchievements asks the site only for a player who has logged in
-  (a saved login logs in again at startup), on its own thread.
-* `almanac_auto` is off by default. When it is on, a program started
-  from the prompt waits up to ten seconds for the almanac's answer.
+**F2** (or Ctrl+S) saves the settings of every page and the drives to the
+configuration file in use. Each setting gets a line: those you changed get
+their new values, and those the file has no line for yet are added with
+the value they had without one. Comments, `[autoexec]`, the lines of the
+settings you didn't touch (and their spelling of paths) and command-line
+options you didn't change stay as they are, and drives that the startup
+commands mount aren't copied into `[drives]`.
 
-### `[emulator]`
+## Video and rendering
+
+Three settings groups decide what a game's picture looks like and how fast
+it comes. They are independent of each other:
+
+1. The video card the game finds (`machine`, `voodoo`, `powervr`). This is
+   emulated hardware, and it decides which screen modes and which 3D
+   interfaces the game can use: VGA and VESA modes, Glide, Direct3D or
+   OpenGL.
+2. What draws that card's 3D on your computer (`voodoo_renderer`,
+   `toadforce_renderer`): Rust-DOS's own rasterizer on your CPU, or your
+   graphics card through OpenGL.
+3. How the window shows the finished picture (`scale`, `aspect`, `filter`,
+   `shader` and the others in [the window and the
+   picture](#the-window-and-the-picture)).
+
+A different renderer doesn't change what the game finds, and a different
+card doesn't change how the window scales the picture.
+
+### What the game sees and what your computer does
+
+A game only ever talks to the emulated card. Take GLQuake on the [built-in
+Windows](#windows-games) with `machine=svga_voodoo3`:
+
+* GLQuake draws with OpenGL. It calls the OpenGL of the Windows it runs on,
+  which turns its calls into triangles for the emulated Voodoo3, as 3dfx's
+  OpenGL driver did on a real card. As far as GLQuake can tell, it draws
+  with OpenGL on a 3dfx card.
+* Rust-DOS then makes the Voodoo3's picture from those triangles. With
+  `voodoo_renderer=software`, the default, its own rasterizer draws every
+  triangle on your CPU, pixel for pixel as the card would. Your graphics
+  card takes no part in the game's 3D: GLQuake's OpenGL picture is made
+  entirely by the CPU, and it runs on a computer whose graphics driver has
+  no OpenGL at all.
+* With `voodoo_renderer=opengl`, Rust-DOS draws the same triangles again
+  with your graphics card, through your computer's OpenGL, at `voodoo_scale`
+  times the card's resolution.
+
+"OpenGL" thus names two unrelated things here. One is the interface a game
+draws with, which the game and the emulated card decide: Glide, Direct3D or
+OpenGL. The other is one of the two renderers Rust-DOS can use on your
+computer. Either renderer draws any of the interfaces: a Glide game with
+`voodoo_renderer=opengl` uses your graphics card, and GLQuake with
+`voodoo_renderer=software` doesn't.
+
+The 2D picture, which is DOS's text and graphics modes, VESA modes,
+DirectDraw and the Windows desktop, is always drawn by the CPU into the
+emulated card's memory, as the real card's memory held it. The window then
+scales it up with OpenGL 3, which costs your graphics card little; without
+OpenGL 3, SDL's renderer scales it and the CRT shaders aren't there.
+
+### Choosing a video card
+
+`machine` is the display adapter. Leave it at `svga` for DOS games: nearly
+all of them run on it.
+
+| `machine` | What programs find | Use it for |
+|---|---|---|
+| `svga` (the default) | A VGA with VESA modes up to 1024x768, and 640x400 in truecolour as mode 213h (an OEM mode of S3 cards such as Diamond's Stealth64 Video) | DOS games |
+| `vga` | An IBM VGA, without VESA modes | Programs that misbehave when they find VESA modes |
+| `ega` | An IBM EGA with an Enhanced Color Display: 16 of 64 colours at 640x350, 60 Hz | Games that look better in their EGA version |
+| `cga` | An IBM CGA: 4 colours at 320x200, 2 at 640x200, 60 Hz | Games of the 1980s, with the composite monitor's colours (`composite`) |
+| `tandy`, `pcjr` | A Tandy 1000 or an IBM PCjr, with their video and sound chip ([Tandy 1000 and PCjr](#tandy-1000-and-pcjr)) | Games with Tandy or PCjr graphics, such as Sierra's |
+| `hercules` | A Hercules Graphics Card on a monochrome monitor: the MDA's text and 720x348 graphics, 50 Hz | Programs for the Hercules |
+| `svga_et4000` | A Tseng Labs ET4000AX with 1 MB and a Sierra HiColor DAC ([Tseng ET4000](#tseng-et4000)) | DOS games and Windows 3.x drivers made for it |
+| `svga_s3` | An S3 Trio64 on the PCI bus, with its VESA modes, 2D accelerator and hardware cursor | Windows 95 or 98 [booted from a disk image](#booting-a-disk-image) with S3's driver |
+| `svga_s3virge`, `svga_s3virgevx` | An S3 ViRGE or ViRGE/VX: the Trio64's registers with the ViRGE's 2D and 3D engines and streams processor ([Direct3D on an S3 ViRGE](#direct3d-on-an-s3-virge)) | Direct3D on a Windows 95 image with S3's driver |
+| `svga_voodoo3`, `svga_banshee` | A 3dfx Voodoo3 3000 or Voodoo Banshee with 16 MB: 2D and 3D on one card, with Glide, Direct3D and OpenGL ([3dfx Voodoo3 and Banshee](#3dfx-voodoo3-and-banshee)) | Windows 95 and 98 games, on the built-in Windows or a Windows image. The first card to try for a Windows game |
+| `svga_toadforce` | Rust-DOS's own card, of the GeForce's class: 32-bit colour, large textures, hardware transform and lighting, Direct3D 8 ([ToadForce](#toadforce)) | Windows games on the built-in Windows that ask for more than a Voodoo3 has |
+| `svga_verite` | A Rendition Vérité V1000 with 4 MB ([Rendition Vérité](#rendition-vérité)) | DOS games' Vérité versions, and the games for Creative's 3D Blaster PCI |
+| `svga_ati_3drage`, `svga_ati_3drage2` | An ATI 3D RAGE or 3D RAGE II with 4 MB ([ATI 3D RAGE](#ati-3d-rage)) | Windows images with ATI's drivers, and the games ATI bundled |
+
+Two 3D cards go beside the display adapter instead of replacing it:
+
+| Setting | What programs find | Use it for |
+|---|---|---|
+| `voodoo=true` | A 3dfx Voodoo Graphics, or with `voodoo_model=voodoo2` a Voodoo2. The display adapter keeps showing DOS and the desktop, and the Voodoo takes over the screen while a game draws on it, as the real card did through its pass-through cable ([3dfx Voodoo Graphics](#3dfx-voodoo-graphics)) | DOS games' 3dfx versions (1996 to 1998), and Windows games that bring their own Glide for these cards |
+| `powervr=pcx1` or `pcx2` | A PowerVR 3D card, which writes its finished picture into the display adapter's VESA frame buffer ([PowerVR PCX1 and PCX2](#powervr-pcx1-and-pcx2)) | DOS games' PowerVR versions |
+
+A game draws on a 3D card only once its own setup or command line picks the
+card's version, such as its 3dfx version or the card's Direct3D device.
+[docs/3dfx.md](docs/3dfx.md) says which 3dfx card a game needs, and
+[docs/compatibility.md](docs/compatibility.md) has the settings of the games
+tried.
+
+`machine` and the 3D cards take effect at the DOS prompt, so a game isn't
+left without the card it set up.
+
+### What each card can draw
+
+Games of the time drew 3D through one of a few interfaces, and a game only
+draws on a card that has the interface it was written for:
+
+* Glide is 3dfx's own interface, for 3dfx cards alone. Glide 2 is that of
+  the Voodoo Graphics and the Voodoo2, and most 3dfx games of 1996 to 1998
+  use it; Glide 3 came with the Voodoo2 and the Voodoo3. A DOS game brings
+  Glide with it, linked in or as `GLIDE2X.OVL`; a Windows game loads
+  `GLIDE2X.DLL` or `GLIDE3X.DLL`.
+* Direct3D is Windows' 3D interface, part of DirectX, and works on any card
+  whose driver offers it. Its versions differ in what they ask of the card:
+  Direct3D 5, 6 and 7 games run on a Voodoo-class card, Direct3D 7's
+  transform and lighting device and Direct3D 8's hardware vertex processing
+  need a card that transforms and lights vertices itself, which no 3dfx card
+  does.
+* OpenGL works through the display adapter's driver. 3dfx's add-on cards had
+  only partial drivers for it: a "MiniGL" with just what Quake's engine
+  uses, and for the Voodoo2 a full-screen OpenGL driver that Windows doesn't
+  pick by itself ([OpenGL games under
+  Windows](#opengl-games-under-windows)).
+* Some cards have interfaces of their own, which only games made for them
+  use: Rendition's RRedline (Speedy3D) and Creative's CGL on the Vérité,
+  ATI3DCIF on the 3D RAGE, and PowerVR's SGL on the PowerVR.
+
+What each card offers, by where the game runs. "Built-in Windows" is
+Rust-DOS's own Windows, which needs no driver; "Windows image" is Windows 95
+or 98 booted from a disk image, with the card's driver installed in it.
+
+| Card | DOS games | Built-in Windows | Windows image |
+|---|---|---|---|
+| `svga` and the other 2D adapters | VGA and VESA modes | GDI and DirectDraw; Direct3D's software devices only | As the image's driver has it; no 3D |
+| Voodoo Graphics (`voodoo=true`) | Glide 2 | Glide 2 and 3; Direct3D 5 to 7 in full screen | Glide from the game; Direct3D through Windows 98's own driver, as a second device beside the 2D card |
+| Voodoo2 (`voodoo_model=voodoo2`) | Glide 2 and 3 | Glide 2 and 3; Direct3D 5 to 7 and OpenGL in full screen | Glide; Direct3D and full-screen OpenGL through 3dfx's driver 3.03.00 |
+| Voodoo3, Banshee (`svga_voodoo3`, `svga_banshee`) | VGA and VESA modes | Glide 2 and 3; Direct3D 5 to 7 and Direct3D 8, OpenGL 1.1, all in a window too | Glide, Direct3D (with DirectX 7) and OpenGL through 3dfx's driver |
+| ToadForce (`svga_toadforce`) | VGA and VESA modes | Direct3D up to 8 with hardware transform and lighting, OpenGL 1.1, in a window too; no Glide | No driver: a plain VGA |
+| S3 ViRGE (`svga_s3virge`) | VGA and VESA modes | Direct3D's software devices only | Direct3D through S3's driver (DirectX 5 or later) |
+| Vérité (`svga_verite`) | RRedline (Speedy3D) and CGL | Direct3D's software devices only | The 2D desktop through Rendition's driver; its Direct3D and OpenGL haven't been tried |
+| ATI 3D RAGE (`svga_ati_3drage`, `svga_ati_3drage2`) | VGA and VESA modes | Direct3D's software devices only | Direct3D through Windows 98's or ATI's driver, and ATI3DCIF with ATI's |
+| PowerVR (`powervr=pcx1`, `pcx2`) | SGL, for the games' PowerVR versions | Not used | Not used |
+
+What sets the two Windows-era cards apart, for a game that runs on both:
+
+| | Voodoo3 | ToadForce |
+|---|---|---|
+| Colour depth of 3D | 16 bits | 16 or 32 bits |
+| Gamma of your own | `voodoo_gamma` only on the add-on cards | `toadforce_gamma` |
+| Largest texture | 256x256, in 16-bit formats | 2048x2048, in 16- and 32-bit, compressed (DXT1 to DXT5) and bump-map formats |
+| Textures at once | 2 (the Banshee: 1) | 4, and cube maps |
+| Depth buffer | 16 bits | 24 bits with stencil (Direct3D) |
+| Transform and lighting | On the CPU, as 3dfx's driver did | On the card: Direct3D 7's T&L HAL and Direct3D 8's hardware vertex processing |
+| Glide | Yes | No |
+| Windows image | 3dfx's driver | No driver |
+| Sharper than the game's resolution | Yes, with `voodoo_renderer=opengl` and `voodoo_scale` | No |
+
+Neither card, nor any other `machine`, has pixel shaders. A game that needs
+them doesn't draw its 3D in Rust-DOS.
+
+### Choosing a renderer
+
+Only two kinds of card let you choose what draws their 3D on your computer:
+the 3dfx cards, with `voodoo_renderer`, and the ToadForce, with
+`toadforce_renderer`. The S3 ViRGE, the Vérité, the ATI 3D RAGE and the
+PowerVR always draw on the CPU.
+
+| | CPU (`software`) | Graphics card (`opengl`) |
+|---|---|---|
+| Default for | The 3dfx cards (`voodoo_renderer=software`) | The ToadForce (`toadforce_renderer=auto` uses OpenGL where the window has it) |
+| Resolution | The card's own, such as 640x480 | 3dfx: `voodoo_scale` times the card's resolution, 2x by default, up to 4x. ToadForce: the resolution the game sets |
+| What it adds | Nothing: the card's picture as it was | 3dfx: antialiasing (`voodoo_msaa`), sharper textures at an angle (`voodoo_anisotropy`) and smooth colour without the card's dither pattern (`voodoo_dither=false`) |
+| Exactness | Pixel for pixel as the card drew | Within a step or two of a colour channel. What a game reads back from the card differs in small ways, unless `voodoo_readback=exact` |
+| Needs | Nothing | OpenGL 3.2 from your graphics driver. Without it the CPU draws, and the log says why |
+| Load on your computer | CPU time: the 3dfx cards draw on up to four threads of their own, beside the thread that runs the game | Graphics card time, and waits for it each time something reads the picture back |
+
+Start with the default. Then compare the two on the game you play: the
+settings window's **Stats** page, or the overlay **Ctrl+Shift+F12** shows,
+has the frames a second (**FPS**) and how much of a host core the emulator
+takes (**CPU**). Both renderers change at once, while the game runs.
+
+The graphics card is often the faster choice, but not always, because the
+OpenGL renderer does more work than the card it draws for:
+
+* At the default `voodoo_scale=2` it draws four times the card's pixels, at
+  4x sixteen times, and `voodoo_msaa` multiplies that by its samples.
+* Each time the game or Rust-DOS reads the card's memory, Rust-DOS waits for
+  the graphics card to finish and copies the pixels back. Games that read
+  back their frame buffer, a Voodoo3's 2D engine working on the 3D's
+  picture, screenshots and save states all do that.
+* A blended triangle in a game that dithers needs a barrier or a copy of the
+  picture before it is drawn ([the 3dfx OpenGL
+  renderer](#the-3dfx-opengl-renderer)).
+
+A weak integrated graphics chip, such as an older laptop's, can take longer
+for that than a modern CPU takes to draw the card's 640x480 itself. On such
+a computer try `voodoo_scale=1` first, and if the game is still slower than
+with `software`, keep `software`. On a dedicated graphics card, `opengl` at
+2x to 4x costs little and gives a much sharper picture. A computer with a
+slow CPU and a capable graphics card gains the most from `opengl`, since it
+leaves the CPU to the emulated machine.
+
+For many games neither renderer is what holds them back: the emulated CPU
+is. Oni, a Voodoo2 game, ran at the same frame rate whatever the 3dfx
+renderer did ([the 3dfx OpenGL renderer](#the-3dfx-opengl-renderer)). The
+**CPU** figure on the Stats page shows this case: near 100%, the emulator is
+busy running the game, and a different renderer won't help.
+
+The ToadForce's games draw more than the 3dfx cards' do, and the CPU is too
+slow for some of them at their usual resolutions: with
+`toadforce_renderer=software`, choose a lower resolution in the game. Keep
+`software` for a game whose picture looks wrong with OpenGL, and report the
+game.
+
+A run with `--deterministic` always draws on the CPU, whatever the settings,
+so that its pictures are the same on every computer. The libretro core draws
+a Banshee or Voodoo3 on the CPU whatever `voodoo_renderer` says, and a
+Voodoo Graphics or Voodoo2 with the frontend's OpenGL ([its
+README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
+
+### Settings for common cases
+
+| You want | Set in `[emulator]` |
+|---|---|
+| A DOS game | Nothing: `machine=svga` and `cycles=auto` are the defaults |
+| A DOS game's 3dfx version | `voodoo=true` and `cpu=pentium`, and `voodoo_model=voodoo2` for a game made for the Voodoo2 |
+| A Windows 95 or 98 game | `machine=svga_voodoo3` and `cpu=pentium_ii`, with the other settings in [Windows games](#a-profile-to-start-from) |
+| A Windows game that needs hardware transform and lighting or 32-bit colour | `machine=svga_toadforce` |
+| A sharper 3dfx picture | `voodoo_renderer=opengl`, with `voodoo_scale=3` or `4` and `voodoo_msaa=4` |
+| A 3dfx game that runs slowly on a laptop | `voodoo_renderer=software` (the default), or `opengl` with `voodoo_scale=1`; compare them on the Stats page |
+| Crisp, even pixels | `filter=sharp` (the default) and `aspect=4:3` |
+| The look of a monitor of the time | `shader=crt`, `aperture` or `scanlines`, at `scale=3` or more |
+| Smoothed pixel art | `shader=xbrz` |
+| An even frame rate without tearing | `vrr=true` on a G-Sync or FreeSync display |
+
+### The window and the picture
+
+These settings in `[emulator]` decide how the window shows the picture. They
+change nothing the game sees, apart from `monochrome` and `composite`, and
+they take effect at once. The settings window has them on its **Display**
+page.
 
 * `scale` is the window scale factor. `-s/--scale` overrides it.
 * `fullscreen=true` fills the screen instead of a window, keeping the
@@ -123,11 +451,6 @@ limit, so without a connection it goes on as it would with one:
   desktop (sway's `adaptive_sync on`, for example). Where the display
   is slower than the machine's rate, frames come at 60 Hz as without
   it. `--vrr` turns it on.
-* `fps_cap` is the most frames a second a program may show, on any card:
-  `auto` (the default: 60, and a frame that waits for the retrace at the
-  display's rate), `off`, or 10 to 240. See [Frame rate
-  cap](#frame-rate-cap). `--fps-cap` sets it for a run.
-  `voodoo_fps_cap` is its old name, still read.
 * `filter` is how the picture is scaled up: `sharp` (the default),
   `hard` or `linear` (smooth). It applies without a CRT shader. `sharp`
   gives every pixel of the picture the same size on the screen. At a
@@ -157,25 +480,6 @@ limit, so without a connection it goes on as it would with one:
   monochrome text mode 7; an EGA has IBM's Monochrome Display, and only
   modes 7 and 0Fh. On a CGA it is the look alone, and a Hercules card is
   always monochrome.
-* `monitor_effects` plays a CRT monitor's own effects: `off` (the
-  default), `picture`, `sound` or `on` (both). At power on, the picture
-  warms up, slightly too big at first, and wobbles with colour fringes as
-  the degaussing coil's field dies away, to its thump and hum and the
-  crackle of the high voltage; when the card changes to another line or
-  frame rate (640x480 at 60 Hz after the 70 Hz text mode, say) the
-  monitor's relay clicks and the picture blanks and comes back with a
-  jolt, as a multisync monitor did; and when rust-dos quits, the picture
-  collapses to a line and a fading dot. **Ctrl+Shift+D** degausses. The
-  sounds have their own volume, `monitor`, in [`[mixer]`](#mixer).
-* `post` shows a BIOS power-on self test before the built-in DOS starts,
-  and at each reboot: `off` (the default), `quick` (about a second) or
-  `full` (about three, the memory counted up as it is tested). It lists the
-  CPU, the memory, the drives and the sound cards. **Del** while it shows
-  opens the settings as a period CMOS setup utility, whose pages are
-  changed with PgUp/PgDn or +/-; nothing changes until *Save & Exit Setup*
-  (**F10**), which applies and saves the settings and restarts the
-  machine. **Esc** skips the memory test. A booted disk image has no POST
-  of rust-dos's.
 * `composite` shows a CGA's graphics (`machine=cga`) as a composite
   monitor or TV did: fine patterns of pixels come out as colours, the
   "artifact colours" that King's Quest, the Ultima games, Sierra's AGI
@@ -188,62 +492,1099 @@ limit, so without a connection it goes on as it would with one:
   CGA, which the classic games were drawn for) or `new`. The decoder is
   reenigne's model of the CGA's composite output, as DOSBox Staging has
   it. It applies at once.
-* `cycles` is the CPU speed in instructions per millisecond. `auto`, the
-  default, finds the speed the running program needs from the frames it
-  draws (its page flips, or the bursts of writes that copy a finished
-  picture to video memory): it goes up while the frame rate follows it,
-  stops where the frame rate stops following (a game that caps its own frame
-  rate) or reaches the display's refresh rate (frames nobody sees, and some
-  games, such as Descent, play badly at such rates), and goes down while the
-  program waits for a key or calls DOS's idle interrupt. It doesn't go up
-  for a program that sits halted for half the time or more, and longer than
-  waiting for a retrace or two a frame takes: it waits for something else,
-  as a Windows game that draws only when something changes does. It then
-  tries lower speeds, down to where they cost more than 3% of the frame
-  rate, or make a program that polls for the vertical retrace miss one. A
-  speed at which more than one frame in 300 would be shown a retrace late
-  (flipped after the retrace it was due at, as when a game's drawing runs
-  long) goes up to where fewer would be, if the host has room for it: the
-  intervals between the program's flips stray from their average less, the
-  more speed it has, and the last 1200 it showed, at whatever speed, tell
-  how many would run late at each. Frames shown while the program polls the
-  retrace and frames shown while it doesn't are counted apart, and a step
-  taken for one kind is judged on that kind alone: a game that doesn't poll
-  while it plays isn't judged on its death screens, which do. Where no speed
-  up to 3.5 times as much would do, it stays, and so it does past 3.5 times
-  the speed of the program's first such step, or for a program that draws as
-  fast as it can, whose intervals shrink with more speed and drift with what
-  it draws. A frame flipped within a tenth of a whole number of retraces, or
-  after the program read the status register, counts as shown for that
-  number. It keeps that speed if far fewer frames come late there, also when
-  the program polls for the retrace, or flips no pages for a while, before
-  the step is judged, and it is then the least for the program. A speed the
-  host falls behind at is left for a lower one, and the limit that sets
-  rises again while the host keeps up. A real-mode program's frames get no
-  more than its `cpu` ran: 52800 on a 486 (a 486DX2-66) and 16000 on a 386.
-  At more, a game that counts the timer ticks each pass of its main loop
-  takes can count none, and Ultimate Domain then divides by zero. The
-  Pentium and later models run more than hosts do, and have no such limit. A
-  fixed speed or `max` runs at what it says, past that too, and the log says
-  once when it does in real mode. A real-mode program with no frames to go
-  by (most games of the 1980s, which update the screen piecemeal) runs at
-  3000, about a 286, as in DOSBox's `cycles=auto`, and at max while it reads
-  or writes its drives (loading), unless it would sit halted for 30% of the
-  time or more at the real-mode speed, as a game playing speech from its CD
-  does. A protected-mode one runs at max while it reads and writes (loading,
-  computing), and otherwise goes down to 20000, a 486's speed, or a quarter
-  of a faster `cpu` model's clock (50000 on a Pentium, 112500 on a Pentium
-  II), no more than the host has. Either goes back to its speed 100 ms after
-  the work stops. Resetting the Sound Blaster, as a sound driver does before
-  it times the card with delay loops, ends the loading speed at once. `auto
-  10000` makes that real-mode speed, and the least `auto` goes down to,
-  10000. `max` runs everything as fast as the host keeps up with in real
-  time. Use a number such as `3000` for a fixed speed. `--cycles` overrides
-  it. Loading a [save state](REFERENCE.md#save-states) keeps the speed the
+* `monitor_effects` plays a CRT monitor's own effects: `off` (the
+  default), `picture`, `sound` or `on` (both). At power on, the picture
+  warms up, slightly too big at first, and wobbles with colour fringes as
+  the degaussing coil's field dies away, to its thump and hum and the
+  crackle of the high voltage; when the card changes to another line or
+  frame rate (640x480 at 60 Hz after the 70 Hz text mode, say) the
+  monitor's relay clicks and the picture blanks and comes back with a
+  jolt, as a multisync monitor did; and when rust-dos quits, the picture
+  collapses to a line and a fading dot. **Ctrl+Shift+D** degausses. The
+  sounds have their own volume, `monitor`, in [`[mixer]`](#mixer).
+* `fps_cap` is the most frames a second a program may show, on any card:
+  `auto` (the default: 60, and a frame that waits for the retrace at the
+  display's rate), `off`, or 10 to 240. See [Frame rate
+  cap](#frame-rate-cap). `--fps-cap` sets it for a run.
+  `voodoo_fps_cap` is its old name, still read.
+
+### 3dfx settings
+
+These go in `[emulator]`. The first three and `voodoo_gamma` set up the
+add-on card (`voodoo=true`) and do nothing on a Voodoo3 or Banshee, which
+always has 16 MB. The others work on every 3dfx card. The OpenGL ones matter
+only with `voodoo_renderer=opengl`.
+
+| Setting | Values (default first) | What it does |
+|---|---|---|
+| `voodoo` | `false`, `true` | Adds a Voodoo Graphics or Voodoo2 beside the display adapter, for games that draw with Glide ([3dfx Voodoo Graphics](#3dfx-voodoo-graphics)). With `machine=svga_voodoo3` or `svga_banshee` there is no room for it, and the machine has the Voodoo3 or Banshee alone |
+| `voodoo_model` | `voodoo1`, `voodoo2` | The add-on card: the Voodoo Graphics, or the Voodoo2 ([3dfx Voodoo2](#3dfx-voodoo2)) |
+| `voodoo_memory` | `12`, `8`, `4` | The add-on card's memory in MB. `12` is 4 MB of frame buffer and two texture units with 4 MB each, as DOSBox-X's card has. `8` is a Voodoo2 board, 4 MB and two texture units with 2 MB each; it picks `voodoo2` when `voodoo_model` is unset. `4` is a retail Voodoo Graphics, 2 MB and one texture unit with 2 MB; a Voodoo2 takes it as `8` |
+| `voodoo_renderer` | `software`, `opengl` | What draws the card's picture on your computer: Rust-DOS's own rasterizer on the CPU, or your graphics card through OpenGL ([choosing a renderer](#choosing-a-renderer)). `opengl` needs OpenGL 3.2 from the graphics driver; without it (a generic or old driver, the browser, SDL's dummy video driver) the software picture shows at the card's resolution, and a `[DISPLAY]` line at startup says why |
+| `voodoo_scale` | `2`, `1` to `4` | OpenGL: how many times the card's resolution it draws at |
+| `voodoo_msaa` | `off`, `2`, `4`, `8` | OpenGL: samples a pixel of multisampled antialiasing, which smooths the triangles' edges |
+| `voodoo_anisotropy` | `off`, `2`, `4`, `8`, `16` | OpenGL: anisotropic filtering, which sharpens textures seen at an angle |
+| `voodoo_dither` | `true`, `false` | OpenGL: whether it dithers to 16 bits a pixel as the card does where the game dithers. `false` gives a smoother picture, without the card's pattern of dots |
+| `voodoo_readback` | `gpu`, `exact` | OpenGL: what a game reads back from the card's memory. `gpu` gives OpenGL's picture; `exact` gives the card's own pixels, which the software rasterizer then draws as well |
+| `voodoo_scale_shader` | `true`, `false` | OpenGL: whether the CRT looks keep one scanline per line of the card's resolution. `false` gives a line per pixel of the bigger picture, finer lines; it matters only above 1x and with a CRT look |
+| `voodoo_texture_sampling` | `default`, `unfiltered` | `default` keeps the game's texture filtering; `unfiltered` takes the nearest texel |
+| `voodoo_gamma` | `off`, `0.1` to `2` | The gamma Glide gives the card's picture ([3dfx gamma](#3dfx-gamma)) |
+
+`voodoo`, `voodoo_model`, `voodoo_memory` and `voodoo_gamma` take effect at
+the DOS prompt, the others at once. The settings window's Emulator page has
+them as *3dfx Voodoo Graphics*, *3dfx card* (the chip and the memory
+together), *3dfx drawn by* and the *3dfx* settings after it. They show only
+while *3dfx Voodoo Graphics* is on; on a Voodoo3 or Banshee, set them in the
+configuration file
+([#821](https://github.com/dividebysandwich/rust-dos/issues/821)).
+
+With anisotropic filtering on, `voodoo_texture_sampling=unfiltered` also
+blends between mip levels and lets the anisotropic filter reduce shimmer,
+which may soften textures; magnification stays nearest-neighbour. With
+anisotropy off, or with the software renderer, sampling stays strictly
+nearest-neighbour. Mip levels, wrapping and clamping still follow the game.
+
+The card's frames are held to `fps_cap` with every other card's ([frame rate
+cap](#frame-rate-cap)). The ToadForce's settings are in [its
+section](#toadforce).
+
+### Frame rate cap
+
+`fps_cap` (`auto` by default, `off`, or 10 to 240) is the most frames
+a second a program may show, whichever card shows them, for an even
+pace without lowering `cycles`, and so the host doesn't draw frames
+nobody sees. Some games misbehave above 60 (Test Drive 4).
+`voodoo_fps_cap` is its old name: a file with that line still sets it,
+and the settings window writes the line back as `fps_cap`. `--fps-cap`
+sets it for one run, the settings window has it on its Display page,
+and the libretro core among its Video options.
+
+- `auto` holds a frame that doesn't wait for the display's retrace to
+  60 a second, and holds none that does: those show at the display's
+  rate, as on the real machine. A program that waits for the retrace
+  of a 72, 75 or 85 Hz mode shows a frame at each, and one that counts
+  its frames for its timing keeps its speed. A program synced to a 100
+  or 120 Hz mode shows 100 or 120 frames a second, and the host draws
+  each of them. A Glide game sets such a mode when its settings ask for
+  it, under DOS, the built-in Windows or a Windows booted from a disk
+  image with the card's own driver (see [3dfx Voodoo
+  Graphics](#3dfx-voodoo-graphics)).
+- A number holds every frame to that rate, also one that waits for the
+  retrace of a faster display: on a host too slow for a game's 100 or
+  120 Hz mode, `fps_cap=60` holds it to 60.
+- `off` holds none.
+
+A cap below the rate a game draws at by itself slows a game whose
+logic is tied to its frames: Glover's logo screens, drawn at 20 frames
+a second, last longer under `fps_cap=10`.
+
+Each frame has a turn, a frame time (1/60 s at 60) after the last
+one's, in emulated time:
+
+- A program faster than the cap waits for the turn, so its frames come
+  at the cap's rate, a frame time apart.
+- A program slower than the cap shows each frame as soon as it is
+  done, and keeps its own rate. The cap holds none of its frames,
+  uneven as they may be.
+- A frame that comes after its turn shows at once. If it is no more
+  than three frame times late (50 ms at 60), the turns keep their
+  schedule: the frames after it show sooner than a frame time apart
+  until they are back on it. The program gets the time back and shows
+  the cap's rate, and a game whose logic steps once a frame keeps its
+  speed.
+- From a frame later than that (a load, a menu that steps its
+  simulation for a tenth of a second between frames) the schedule
+  starts again: the next frame shows as soon as it is done, and the
+  ones after it wait a frame time each. A game that draws in bursts
+  between such steps therefore counts fewer frames under a cap than
+  the cap's number. Grom's menu at 150,000 cycles runs a step of its
+  menu script, 110 to 200 ms, once 33 ms have passed since the last
+  one ended, and draws frames in those 33 ms: twelve, 2.8 ms apart,
+  without a cap, 71 a second, of which a 60 Hz display shows two or
+  three a step. Under a cap of 60 four of them show, 25 a second, and
+  the steps come as often as without it. No rule of the cap shows
+  more of them a refresh apart: the cap's rate needs steps short
+  enough to leave room for it, which `cycles=max` gives the menu (60 a
+  second).
+- `cycles=auto` counts the frames a program shows through the cap, as
+  it counts those a display shows of a game that waits for its
+  retrace. A program held to the cap's rate settles where that game
+  does, coming down by steps that try less instead of at once. One
+  that shows fewer, as Grom's menu does between its steps, gets the
+  speed that shows the cap's rate. One that shows fewer because it
+  draws fewer, such as a game that draws 30 frames a second on the
+  clock or a movie, shows no more with more speed and settles where it
+  does without the cap.
+- A present that waits for the display's retrace (a flip, or a swap
+  with a swap interval) is already held to the display's rate. Under
+  `auto`, or with the cap at that rate or above it, the cap holds none
+  of its frames. With a number below it, the frame waits for its turn
+  and then for a retrace, and shows at the retrace nearest its turn,
+  which may be up to half a retrace before it, and counts at its turn:
+  a cap of 30 on a 60 Hz display shows every other retrace, though the
+  display's rate is never exactly 60.
+
+The cap counts in the machine's emulated time only: its turns, the time
+a frame comes and the time a held frame waits for. While a frame waits,
+emulated time runs on as it does for any wait, and with nothing else to
+run the machine idles to the turn. How fast the host runs the machine
+changes only how long that takes on the wall clock. So a run with
+`--deterministic` holds the same frames until the same emulated times
+each time, and a fixed `cycles` that runs slower than real time holds
+no frame that is late in emulated time.
+
+While a frame waits, the program waits with it, and nothing else does:
+
+- On a 3dfx card, the swap waits, and the program waits with it as at a
+  HLT, while interrupts and their handlers go on, so its clock, music
+  and sound keep time.
+- Under the built-in Windows, the thread that presents blocks as it
+  does for a retrace and calls again at its turn; the program's other
+  threads, its timers and its sound go on.
+
+What counts as a frame:
+
+- the 3dfx card's swaps (Glide under DOS and under the built-in
+  Windows, the Voodoo2's OpenGL and DirectDraw, and a Banshee's or
+  Voodoo3's);
+- DirectDraw's flips of the primary surface, and Direct3D 8's full
+  screen `Present`, which flips, on every display adapter (a ToadForce,
+  a Banshee or Voodoo3, the software SVGA);
+- `SwapBuffers` of an OpenGL context in a window, and of a
+  double-buffered one full screen, and Direct3D 8's `Present` in a
+  window, which copy the back buffer to the screen (on a ToadForce,
+  with the card's own copy).
+
+It doesn't apply to DOS programs on a VGA, an EGA or a VESA screen:
+they have no call that hands over a frame, and their frames come at the
+display's retraces, which they wait for themselves. Nor does it apply
+to blits to the primary surface, to GDI drawing, to locks and device
+contexts of the primary surface, or to a single-buffered OpenGL
+context's `glFlush`. A program may blit one frame in many parts (a
+sprite and what it covered, each changed rectangle), and the time
+between blits can't tell those parts from whole frames: holding each to
+the cap's rate would hold a game that blits ten parts a frame to 6
+frames a second.
+
+With `vrr=true`, while a program shows its frames through the cap (one
+in the last second) and the cap is below the display's rate, the window
+refreshes at the cap's rate, as it does at the display's otherwise.
+
+The debug server's `/api/stats` counts what the cap did since the
+machine started, in `fps_cap`:
+
+- `shown`: the frames that went through the cap. A present the cap
+  leaves to the display's retrace isn't among them.
+- `held`: those that waited for their turn.
+- `late`: those that came after it.
+- `reanchors`: those late enough for the schedule to start again.
+- `dropped_ms`: the time held frames waited because the schedule had
+  started again, which they wouldn't have waited on the turns before.
+
+A game whose logic is tied to its frames ran slow for the cap by at
+most `dropped_ms` out of the emulated time. Near zero, the cap cost it
+no time. If it grows by seconds a minute in a game that plays slow,
+raise the cap or turn it off. The settings window's Stats page shows
+the same counters a second (with `dropped_ms` as the share of the time
+lost) while a program shows its frames through the cap, and the
+performance overlay (Ctrl+Shift+F12) the frames held and the time lost
+under its graphs.
+
+Benchmarks and timedemos report at most the cap: turn it off
+(`fps_cap=off`, `--fps-cap off`) to measure how fast a game can draw.
+A display faster than 60 Hz with `vrr` shows more frames with a higher
+cap. `/api/status` has the cap in force as `video.fps_cap` (`"auto"`,
+a rate, or null for off), for a script to check before it quotes a
+frame rate, and the debug server's `POST /api/fps_cap` changes it for
+the rest of a run. The almanac may set the cap for a game, as it sets
+the machine's settings (`almanac_auto`), to `auto`, a rate or `off`.
+
+### CRT shaders
+
+`shader` in `[emulator]`, or the settings window's Display page, shows the
+picture as a monitor of the time would have:
+
+* `scanlines`: a flat screen with the scanlines of a VGA monitor. Bright
+  lines are wider than dark ones, and light glows a little around them.
+* `aperture`: a flat aperture grille monitor, with red, green and blue
+  phosphor stripes over the scanlines.
+* `crt`: a curved tube with a shadow mask, rounded corners and darker
+  edges. The mouse follows the curve. `crt_curvature` sets how far it
+  bends, in percent: `0` is flat, `100` the most, `30` the default; and
+  `crt_glow` how much light glows around its bright parts: `0` none,
+  `100` the most, `20` the default. The Display page has both below the
+  shader while the CRT look is chosen.
+
+For pixel art, `xbrz` scales the native picture 2x with xBRZ instead of
+giving it a CRT look. It recovers the original pixels of doubled VGA
+modes before scaling. The `scale` setting still controls the window's
+size independently. Cursors and settings overlays stay sharp, and the
+same native input is used in the browser and in shader captures.
+
+For magnified output, xBRZ reuses a filtered 2x base picture until the
+native pixels or monochrome tint change. Resizing and overlays reuse
+that base. Smaller outputs resolve directly from the native picture.
+If the extra render targets are unavailable, the direct shader is used.
+
+Choose `xbrz` when you want to magnify pixel art, such as DOS games,
+while smoothing jagged diagonal edges. It works well with Ultima VI,
+Dungeon Master II and Blood and Magic.
+
+With `monochrome`, the aperture grille and the shadow mask are left out, as
+a monochrome tube has a single phosphor; the scanlines, glow and curve stay.
+
+A VGA shows its 200-line modes double-scanned, so each of the 400 lines is a
+scanline. The looks need a few screen pixels per line: at scale 1 the
+scanlines and phosphors fade out, and they look best at scale 3 or more, or
+in fullscreen on a large screen. At exactly 2x or 3x with `aspect=none`
+the scanlines are sharpest.
+
+The shaders need OpenGL 3 (WebGL 2 in the browser). Without it, as with
+`SDL_VIDEO_DRIVER=dummy`, rust-dos draws the picture with SDL's renderer as
+before and says why at startup; the log names what draws the picture.
+Screenshots and video recordings show the shader with `record_shader=true`
+(see `capture_dir` in [`[emulator]`](#emulator)); animations and
+debug-server screenshots always show the plain picture.
+
+## Video cards
+
+Each emulated video card in detail: what programs find, which drivers a
+Windows image needs, and what was tried on it. [Video and
+rendering](#video-and-rendering) says which card to choose, and [what each
+card can draw](#what-each-card-can-draw) compares them.
+
+### 3dfx Voodoo Graphics
+
+[docs/3dfx.md](docs/3dfx.md) says which 3dfx card a game needs, and the
+settings and drivers for each. This section and the ones after it are the
+reference.
+
+`voodoo=true` in `[emulator]` puts a 3dfx Voodoo Graphics in the machine,
+the 3D card DOS and Windows 95 games of 1996-1998 draw with through Glide:
+
+```ini
+[emulator]
+voodoo=true
+cpu=pentium
+```
+
+The card is on the PCI bus as device 0, where DOSBox-X has it, with its
+16 MB of registers, frame buffer and texture memory at D0000000h (BAR0).
+Glide finds it through the PCI BIOS or ports CF8h/CFCh, programs it, and
+turns its output on: from then on the screen shows the card's picture
+instead of the VGA's, as a monitor on its pass-through cable does, until
+the game ends or turns the output off. The picture goes through the
+card's gamma table, which games set brighter than DOSBox-X shows them.
+
+* **DOS games** bring Glide with them (linked in, or `GLIDE2X.OVL` beside
+  the game) and run under a DOS extender such as DOS/4GW, which maps the
+  card's memory. Games made for the Voodoo Rush and later boards load
+  Glide from `GLIDE2X.OVL`, and the one of 3dfx's Voodoo Graphics driver
+  drives this card whatever board they were made for. It is 3dfx's and
+  doesn't come with rust-dos: the settings window's Emulator page
+  downloads it, after asking, from the driver (3.01.00) the Internet
+  Archive keeps, into rust-dos's configuration directory, and Z: has it
+  from then on, where they find it on the PATH (one beside the game
+  comes first). A game that looks for it while it is missing says so on
+  the screen. Such a game runs without rust-dos's DPMI host: the overlay
+  is a DOS/4G DLL whose start-up only works with DOS/4GW as its own
+  host, at level 0. Its accesses to the Pentium II's memory type range
+  registers, which it marks for 3dfx's Windows driver to catch, do
+  nothing.
+* **Windows 95** [booted from a disk image](#booting-a-disk-image) finds
+  the card as a "PCI Multimedia Video Device", which needs no driver:
+  games bring `glide2x.dll`, or install 3dfx's Glide runtime (and with it
+  `fxmemmap.vxd`).
+* **Windows 98 SE** finds the card at its next start as a "3Dfx Voodoo"
+  and installs its own driver for it from the Windows 98 CD, asking for the
+  CD's `WIN98` folder (give it the drive letter the CD has in this
+  machine), without a restart. The driver gives DirectDraw and Direct3D
+  the Voodoo as a second device beside the 2D card, and Direct3D games
+  that let you choose the 3D card draw on it. While a game draws on the
+  card, `video.voodoo.output` in the debug server's `/api/status` is
+  true.
+
+[docs/compatibility.md](docs/compatibility.md) has the settings of the
+games tried on the card: Tomb Raider's 3dfx and Rush patches under DOS,
+SubCulture on Windows 95 and Expendable on Windows 98 SE.
+
+The card swaps its buffers at the vertical retrace a game asks it to wait
+for, and reports the swaps still waiting and its busy state as the real
+one does, so games that pace themselves by it run at its refresh rate.
+The rate comes from the video timing Glide programs: the frame in the
+card's video registers at the pixel clock of its DAC's PLL, which Glide
+sets for the rate a game asks for (at 640x480, 60, 75, 85 or 120 Hz).
+Until a program sets that clock, the card runs its frame at 60 Hz. The
+built-in Windows' Glide does the same, and on a Voodoo3 sets the mode at
+the rate asked for. A rate the size doesn't have opens the size's own
+mode, as 3dfx's libraries do: 70 Hz at 640x400, 72 Hz at 512x384 on a
+Voodoo Graphics, and 60 Hz at the other sizes. The environment overrides
+the game's rate as they read it: `SST_SCREENREFRESH` on a Voodoo
+Graphics, `SSTV2_SCREENREFRESH` and `SSTV2_REFRESH_640x480` (by size) on
+a Voodoo2, and `FX_GLIDE_REFRESH` for Glide 3 on a Voodoo3. The
+triangles are drawn on up to four threads of their own: rust-dos keeps
+running the game meanwhile, and the picture is the same however many
+there are. Save states and rewind keep the card with everything in its
+memory.
+
+### 3dfx Voodoo2
+
+`voodoo_model=voodoo2` makes the card a Voodoo2 (device 0002h), with
+`voodoo_memory=8` or `12`:
+
+```ini
+[emulator]
+voodoo=true
+voodoo_model=voodoo2
+voodoo_memory=12
+```
+
+Besides what the Voodoo Graphics does, it has the Voodoo2's command FIFO
+(the packets its drivers send through memory instead of register writes),
+its triangle setup engine (vertices in, triangles drawn), its 2D blitter
+(screen to screen, CPU to screen, rectangle fills), the eight-bit
+palettes with alpha (texture format 6), a base address for each mipmap
+level, the wider video fields of its resolutions up to 1024x768, fog
+dithering and the clamping of iterated colours, depth and W (fbzColorPath
+bit 28). The board is SLI-less: one card, as Glide sees a single Voodoo2.
+
+DOS games that bring the Voodoo2's `GLIDE2X.OVL` or Glide 3 run as on the
+Voodoo Graphics.
+
+**Windows 98 SE** needs 3dfx's Voodoo2 driver, which neither Windows 98 nor
+rust-dos comes with: the Windows 98 CD has drivers for the Voodoo Graphics
+and the Banshee only. Unpack 3dfx's reference driver 3.03.00 (`rkv2dx6.exe`,
+which the [Internet Archive keeps](https://archive.org/details/rkv2dx6))
+into a folder Windows can read, such as a [host
+folder](#host-folders-in-a-booted-system). At its next start Windows finds
+the new PCI device and opens the Add New Hardware wizard: choose to search
+for the best driver, tick "Specify a location", give the folder that holds
+`voodoo2.inf`, and restart Windows when it is done. Device Manager then
+lists a "Voodoo2 3D Accelerator", and DirectDraw and Direct3D offer the card
+as "3dfxV2 (Voodoo2 DirectX 6 Driver)", which Direct3D games that let you
+choose the 3D card draw on.
+
+#### OpenGL games under Windows
+
+Windows' OpenGL never uses the Voodoo2 by itself, and a game that draws
+with OpenGL gets Microsoft's software renderer instead: it runs, but at a
+frame every few seconds, and the card draws nothing (the debug server's
+`/api/status` shows `video.voodoo.triangles` at 0). A real Voodoo2 had
+the same problem. `OPENGL32.DLL` asks the desktop's display driver which
+OpenGL driver to load and looks the name up under
+`HKLM\Software\Microsoft\Windows\CurrentVersion\OpenGLDrivers`. The
+Voodoo2 is a 3D card beside the display adapter, not one itself: the
+desktop runs on the S3 (or whichever card `machine` gives), whose driver
+names no OpenGL driver. 3dfx's driver copies its OpenGL driver to
+`C:\WINDOWS\SYSTEM\3DFXVGL.DLL` but can't make Windows pick it.
+
+Glide games and Direct3D games don't go through `OPENGL32.DLL` and need
+none of this. An OpenGL game reaches the card in one of three ways:
+
+- Games that let you name the OpenGL driver, such as Quake III Arena
+  (`r_glDriver 3dfxvgl`), load `3DFXVGL.DLL` themselves.
+- For a game without such a setting (Oni, for one), copy `3DFXVGL.DLL`
+  into the game's folder as `OPENGL32.DLL`. Windows loads a program's
+  DLLs from its own folder before `WINDOWS\SYSTEM`, so only that game
+  uses the card. This is what 3dfx's users did.
+- Copying it over `C:\WINDOWS\SYSTEM\OPENGL32.DLL` sends every OpenGL
+  program to the card, which only draws full screen: programs that draw
+  OpenGL in a window no longer can.
+
+The copy into the game's folder can be made by the game's configuration,
+which leaves the disk image as it is: the built-in DOS copies the file
+before the system boots, and the copy goes into the image's delta file,
+here in an [`-overlay`](#mounting-drives) folder for the game:
+
+```ini
+[drives]
+# Windows 98 with 3dfx's Voodoo2 driver and the game installed. The image
+# stays as it is: what is written to it goes into the folder overlays/oni
+# (made if it isn't there), as overlays/oni/win98.img.rdelta.
+C=~/images/win98.img -overlay overlays/oni -boot
+D=~/games/oni/disc.cue cdrom
+
+[autoexec]
+# Runs in the built-in DOS before the image boots.
+copy c:\windows\system\3dfxvgl.dll c:\progra~1\oni\opengl32.dll
+```
+
+The built-in DOS sees the disk's short names (`dir c:\progra~1` lists the
+folders under `Program Files`). The copy runs at every start and
+overwrites the one the last start made, so the setup needs nothing else,
+and the image under it can stay the base of other games' setups.
+
+### 3dfx Voodoo3 and Banshee
+
+`machine=svga_voodoo3` makes the display adapter a 3dfx Voodoo3 3000
+with 16 MB, and `machine=svga_banshee` a Voodoo Banshee:
+
+```ini
+[emulator]
+machine=svga_voodoo3
+cpu=pentium_iii
+```
+
+The Voodoo Graphics and the Voodoo2 are add-on cards next to the display
+adapter, so Windows' own OpenGL and its desktop never use them. The
+Voodoo3 and the Banshee are the display adapter themselves: a VGA, a 2D
+engine, the Voodoo2's 3D engine and a video processor around one memory.
+3dfx's driver for them runs the desktop, Direct3D on the primary display
+and an OpenGL ICD (`3dfxOGL.dll`) that Windows' `opengl32.dll` hands GL
+programs to. The card has no room for `voodoo=true` next to it.
+
+On the PCI bus it is device 1 (vendor 121Ah, device 0005h, subsystem
+003Ah, the Voodoo3 3000 PCI; the Banshee is device 0003h): its registers
+at D0000000h, its memory at D2000000h and its I/O registers at D000h,
+where the BIOS leaves them. The card's VGA is rust-dos's, and so is the
+BIOS: DOS programs get the Super VGA's VESA modes, in their own memory,
+and the card's extended modes start when its driver turns them on. The
+2D engine does what the driver asks of it: fills, copies with all 256
+raster operations and colour keys, stretched copies, images from the
+CPU (one bit to 32 bits a pixel, YUV), lines, polylines and polygons,
+on linear or tiled surfaces. The video processor shows the desktop in 8,
+16, 24 or 32 bits through the colour lookup table, with the overlay and
+the hardware cursor.
+
+**Windows 98 SE** needs 3dfx's Voodoo3 driver (version 1.07.00 was tried,
+the [reference driver
+1.07.00](https://archive.org/details/3dfx-voodoo-3-reference-driver-1.07.00)
+on the Internet Archive), which the Windows 98 CD doesn't have. Unpack its
+`driver9x` folder where Windows can read it. At the next start Windows finds
+a "Standard PCI Graphics Adapter (VGA)": choose to search for the best
+driver, tick "Specify a location", give the folder that holds `Voodoo3.inf`,
+and restart Windows when it is done. Windows then finds a "Plug and Play
+Monitor": the card answers on its DDC lines with an EDID for a CRT that
+takes up to 1600x1200 (DxDiag calls it "rust-dos CRT"), and the VESA BIOS
+hands the same EDID to programs that ask through 4F15h. The card's
+interrupt, the vertical retrace one, is IRQ 11. The desktop was tried at
+640x480 and 1024x768 in High Color.
+
+The 3D engine draws into the buffers the driver points it at, linear or
+tiled, and a swap shows the buffer through the video processor. These
+were tried on Windows 98 SE with the 1.07.00 driver:
+
+* OpenGL through the ICD: the "3D Flying Objects" screen saver, and
+  Oni (2001), which runs its menus and its first level. A game set up
+  for a Voodoo2 may have 3dfx's MiniGL as `opengl32.dll` in its own
+  folder; take that away, so the game gets Windows' `opengl32.dll` and
+  the ICD.
+* DxDiag's DirectDraw and Direct3D tests, windowed and full screen,
+  with software and hardware rendering, from a 640x480 and a 1024x768
+  desktop.
+* Direct3D: Incoming (the GOG release, run without GOG's wrapper DLLs),
+  its menus and the first level of its arcade game.
+
+The 1.07.00 driver's Direct3D needs DirectX 7, as its readme says;
+Windows 98 SE comes with 6.1. With 6.1 the driver takes the structure
+DirectDraw gives it when a program starts Direct3D for the one DirectX 7
+has, and faults: the program's window stays white and the card draws
+nothing. Install DirectX 7.0 (`dx70eng.exe`) or later first. Some games
+draw wrongly with 1.07.00 and need the earlier 4.11.01.1151, from 3dfx's
+[Voodoo3 driver CD 1.2](https://archive.org/details/voodoo3v12), which
+runs on 6.1 too; [docs/compatibility.md](docs/compatibility.md) names
+them.
+
+With `voodoo_renderer=opengl` the window's OpenGL draws the card's 3D at
+`voodoo_scale` times its resolution, as for the Voodoo Graphics (see [the
+3dfx OpenGL renderer](#the-3dfx-opengl-renderer)), and puts the picture
+together as the card's video processor does: the desktop, the overlay (the
+window or screen a game shows its 3D through, scaled and in YUV too) and the
+cursor. A desktop or overlay that is a 16-bit buffer the 3D draws into, laid
+out as the 3D draws it, comes from the bigger picture; anything else (the
+Windows desktop, 8, 24 and 32-bit modes, YUV video) comes from the card's
+memory at its own resolution, with the drawing still queued for it done
+first. With `voodoo_readback=gpu`, the default, OpenGL alone draws the 3D,
+and what reads the card's memory reads back OpenGL's picture, as on the
+Voodoo2; with `voodoo_readback=exact` the software rasterizer keeps the
+memory as well, so programs read back what they would on the card.
+Screenshots and recordings show the software picture, which reads everything
+back. The libretro core draws a Banshee or Voodoo3 in software whatever
+`voodoo_renderer` says.
+
+The card is a port of 86Box's Banshee and Voodoo3 emulation
+(`vid_voodoo_banshee.c` and its 2D engine, by Sarah Walker, GPLv2, and
+the I2C code in `i2c_gpio.c` and `i2c_eeprom.c` for the DDC), checked
+against 3dfx's Voodoo3 specification.
+
+### The 3dfx OpenGL renderer
+
+With `voodoo_renderer=opengl` the window shows the card's picture drawn
+again with OpenGL, at `voodoo_scale` times the card's resolution: the same
+triangles through the same pixel pipeline (textures, fog, blending, the
+depth buffer and the gamma table), with sharper edges and textures, and
+with the card's dithering unless `voodoo_dither=false` (see below).
+`voodoo_msaa` smooths the triangles' edges with multisampling (as many
+samples as the graphics card has, at most); antialiasing forced in the
+graphics driver's control panel doesn't reach the framebuffer objects it
+draws into. What games write into the frame buffer themselves (menus,
+movies) stays at the card's resolution. `voodoo_anisotropy` sharpens
+textures viewed at an angle, where the OpenGL driver supports
+anisotropic filtering.
+With `voodoo_readback=gpu`, the default, OpenGL's picture is the card's:
+the software rasterizer draws none of the triangles, and where something
+reads the card's memory (a game reading the frame buffer or blitting
+from it, a Banshee's or Voodoo3's 2D engine or GDI, a save state, a
+screenshot, the debugger) the rows it reads are read back from OpenGL,
+at the card's resolution and in its 16 bits a pixel. A read waits for
+the GPU, so the triangles into a buffer a game read back in the last
+second or so are drawn in software instead, where the next read waits
+only for the worker threads (on a Banshee or Voodoo3 the rows the 2D
+engine reads or draws into, and those the card shows from outside its
+3D buffers, count as read), and a triangle that takes its texture from
+a buffer the 3D drew reads that buffer back first, so that it draws
+with OpenGL's picture at the card's resolution. The pixels a game reads
+differ in small ways from the card's: OpenGL draws a triangle's edges by
+its own rules and keeps more depth precision, and where nothing dithers
+(see below) a blended triangle blends with 8 bits a colour. What a game
+writes itself, its frame buffer writes and the blitter's copies, reads
+back as it wrote it. A save state keeps OpenGL's pixels too, so states
+of the same scene saved on two GPUs differ slightly in the card's
+memory, and in what the game did with pixels it read back. Such a state
+loads on any machine. A game that needs the card's exact pixels, or
+states that match byte for byte, can have `voodoo_readback=exact`.
+Deterministic runs always get the exact pixels, as do the pixel
+counters: drawing left to OpenGL isn't counted, and once a game reads the
+counters everything after is drawn in software and counted. OpenGL keeps
+the alpha planes in the alpha of the colour buffer drawn into, so a game
+that blends by the alpha it wrote into the same buffer (Lands of Lore 2)
+stays on the GPU. Once a game blends by alpha written with another
+colour buffer, by the CPU or by the blitter, or tests depth against the
+alpha planes, everything after is drawn in software too.
+
+With `voodoo_readback=exact` the software rasterizer keeps the card's
+memory, which games read back and save states keep, but it only draws
+what can still be seen there:
+until something reads the memory, the drawing waits, and what a later
+fastfill covers before anything read it is never drawn, so the host's CPU
+only draws the frames something looks at. Frame buffer reads, save
+states, screenshots and recordings see the memory as if everything had
+been drawn; screenshots and recordings show the software picture, at the
+card's resolution (or through the CRT shader at the window's size, with
+`record_shader=true`). Drawing that is never drawn isn't counted by the
+card's pixel counters, until a game reads them: from then on everything
+is drawn and counted (`RUST_DOS_VOODOO_PRUNE=0` in the environment draws
+everything from the start). The CRT shaders draw their scanlines over the
+bigger picture. The libretro core draws it with the frontend's OpenGL (see
+[its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
+
+The textures' mipmap levels are the ones the card would take at
+`voodoo_scale` times its resolution: a pixel's level comes from how fast
+the triangle's S/W and T/W change and from its W, as the software
+rasterizer works it out, so at 1x they are the card's and at 2x one
+level sharper. A Banshee or Voodoo3 game whose screen shows none of the
+3D buffers (Giants copies its 3D into a desktop of another format) sees
+them only through the card's memory, at the card's resolution, and gets
+the card's levels at any scale: a game whose smaller levels are other
+pictures than its larger ones would otherwise change its look whenever
+what OpenGL drew is read back. The shader reads and filters the card's
+texels as the card does. With `voodoo_anisotropy` OpenGL filters them
+itself, from the card's level.
+
+The card stores 16 bits a pixel (5-6-5), and where a game turns
+dithering on (fbzMode bit 8, which Glide sets by default) it adds a 4x4
+or 2x2 ordered dither to each colour before it drops the low bits: a
+fine pattern of dots that hides most of the banding between its shades.
+The OpenGL buffers have 8 bits a component. With `voodoo_dither=true`,
+the default, the shader dithers each triangle's colour with the card's
+own matrix and rounding, and fastfills fill with the card's dithered
+colour, so at `voodoo_scale=1` an unblended triangle or a fastfill comes
+out pixel for pixel as the software rasterizer draws it. The matrix
+follows the card's pixels, so at 2x and above each dot of the pattern
+covers a block of 2x2 (or 3x3, 4x4) pixels of the bigger picture, as the
+card's picture looks enlarged. `voodoo_dither=false` keeps all 8 bits a
+colour: a cleaner, smoother picture, without the dot pattern or the
+banding the 16 bits leave. Games that don't dither look the same either
+way. It changes at once, in the settings window (*3dfx dithering*) too,
+from the next frame the game draws. When the OpenGL picture starts again
+from the card's memory (a new `voodoo_scale` or `voodoo_msaa`, a loaded
+state), it starts from the card's 16 bits, so with `voodoo_dither=false`
+the pattern shows until the game draws over it.
+
+The card blends a triangle with the 5-6-5 pixels under it before it
+dithers, and with fbzMode bit 19 it takes the dither back out of those
+pixels first. OpenGL blends after the shader, so for a triangle that
+blends and dithers the shader does the blend itself, the card's way,
+with the pixels under the triangle. Where the driver has a texture
+barrier (OpenGL 4.5, `GL_ARB_texture_barrier` or
+`GL_NV_texture_barrier`) the shader reads them from the buffer it draws
+into, behind a barrier. Otherwise, and with `voodoo_msaa`, they are
+copied out of the buffer before the triangle is drawn, and the shader
+reads them from the copy. With `voodoo_msaa` the copy keeps every
+sample, and the triangle is drawn once for each sample, which blends
+with what that sample holds, so two blended triangles that share an
+edge each blend with their own samples along it. That needs
+`GL_ARB_sample_shading` and multisample textures with as many samples
+as `voodoo_msaa`; without them each sample blends with its pixel's
+samples averaged, which leaves a dark line along such edges, and
+stderr says `blending pixels, not samples`. Drawing a blended triangle
+once a sample takes more of the GPU's time the more samples there are.
+At `voodoo_scale=1` such a triangle comes out as the software
+rasterizer draws it too. Triangles of one draw that overlap go after a
+barrier or over a copy each, so each blends with what the one before
+drew. The texture units' dithered level of detail (textureMode bit 4)
+follows the setting as well. Frame buffer writes and the Voodoo2's
+blitter show what the card's memory holds, dithered or not, whatever
+the setting. The Voodoo2's and Voodoo3's video output filter, which
+partly smooths the pattern on the card's own output, isn't modelled:
+with the setting on, the pattern shows as the card writes it.
+
+The dithering costs a few more instructions a pixel in the shader, and
+nothing on the host's CPU. On an Intel UHD Graphics 770 at the default
+2x, Oni (a Voodoo2 game that dithers every triangle) ran the same either
+way: 9.7 frames a second in a level and 38 in the menu, with the same
+CPU time and the same time in the 3dfx renderer's zones of the profile,
+as the emulated CPU, not the graphics card, holds it back there. Drawing
+nothing but dithered triangles, 200 screen-sized rectangles a frame at
+2x, the graphics card took 7% longer with dithering on (1083 against
+1010 ms a frame, about 0.3 ns more for each of the 246 million pixels):
+the most it costs, where filling pixels is all a frame does.
+
+A dithered draw that blends costs more: the CPU sorts its triangles into
+groups that don't overlap, and each group is a draw of its own after a
+barrier or a copy. On an RTX 4080 with the barrier, Unreal's flyby
+(which blends its lightmaps, coronas and particles with dithering on)
+and 3DMark 2000 ran as fast as with OpenGL's blending; through the copy,
+which a driver without a barrier takes, they lost about 3% of their
+frame rate where the host held them back.
+
+### 3dfx gamma
+
+`voodoo_gamma` sets Glide's gamma through the environment variables
+`SST_RGAMMA`, `SST_GGAMMA` and `SST_BGAMMA`, all three to the value. They
+are put into the guest's environment while the card is on and the guest
+hasn't set them; a variable the guest sets, changes or removes is the
+guest's from then on, and only the variables rust-dos put in are taken out
+again when the setting goes off or changes. Changes take effect at the DOS
+prompt. A save state keeps which variables rust-dos put in, and loading one
+puts in the variables the settings want.
+
+### ToadForce
+
+`machine=svga_toadforce` makes the display adapter a ToadForce, a card
+Rust-DOS defines itself: no such hardware existed. To DOS programs it is
+the `svga` adapter, with the same VESA modes. Windows programs that
+Rust-DOS runs without Windows get its video memory (`toadforce_memory`,
+64 MB by default) for the desktop and for DirectDraw's surfaces, and
+DirectDraw modes up to 1600x1200 at 8, 16 and 32 bits a pixel;
+DirectDraw's colour fills and its copies between surfaces in video
+memory are the card's own commands. Direct3D up to version 8 draws on
+it, in 16- and 32-bit modes, with textures up to 2048 pixels a side in
+16- and 32-bit, compressed (DXT1 to DXT5) and bump-map formats, four
+textures at once, cube maps, and a 24-bit depth buffer with stencil. The
+card transforms and lights vertices itself: Direct3D 7 lists its T&L HAL
+device, and Direct3D 8 offers hardware vertex processing. Games that
+need those, which a Voodoo3 lacks, run on this card
+([docs/compatibility.md](docs/compatibility.md) names them). OpenGL 1.1
+draws on it too, in a window or full screen, in the desktop's 16 or 32
+bits of color with a 16-bit depth buffer. Your graphics card draws its
+3D through OpenGL where the window has OpenGL 3.2, and the processor
+draws it elsewhere.
+
+What the card doesn't do, and what to choose instead:
+
+* Games that need pixel shaders: the card has none, and neither has
+  any other `machine`. Vertex shaders run on the processor, for a game
+  that asks Direct3D 8 for software or mixed vertex processing.
+* OpenGL games that need more than the built-in OpenGL 1.1 has: a
+  stencil buffer, more than two textures at once, compressed textures
+  or cube maps. Where the game also has a Direct3D renderer, pick that
+  in its options.
+* Glide games: `voodoo=true`, or `machine=svga_voodoo3` or
+  `svga_banshee` ([3dfx Voodoo Graphics](#3dfx-voodoo-graphics)).
+* Games on a Windows 95 or 98 disk image. No booted system has a driver
+  for the card, and Windows uses it as a plain VGA there: give the
+  image a card it has a driver for, such as `svga_voodoo3`
+  ([docs/win9x-howto.md](docs/win9x-howto.md)).
+* A game's brightness or gamma slider: the card has no gamma ramp, and
+  the picture stays as it is.
+* Sharper pictures than the game's own: the card draws at the
+  resolution the game sets, without anti-aliasing. Set a higher
+  resolution in the game.
+
+```ini
+[emulator]
+machine=svga_toadforce
+```
+
+The machine has 128 MB of memory with this card unless `memsize` says
+otherwise, which is what the games it is for recommend, and a Pentium
+III unless `cpu` says otherwise (see `cpu` in
+[`[emulator]`](#emulator)).
+
+| Setting | Values | What it does |
+|---|---|---|
+| `toadforce_memory` | 32, 64 (default), 128 | The megabytes of video memory the card has |
+| `toadforce_renderer` | `auto` (default), `opengl`, `software` | What draws the card's 3D: your graphics card through OpenGL, or Rust-DOS on the processor |
+| `toadforce_gamma` | `off` (default), 0.1 to 2 | A gamma the card's 16- and 32-bit pictures are shown with, after the game's own |
+
+A change of `toadforce_memory` takes effect at the DOS prompt, and one
+of `toadforce_renderer` or `toadforce_gamma` at once. The card's
+registers and commands are specified in
+[docs/toadforce-spec.md](docs/toadforce-spec.md).
+
+If Rust-DOS crashes while it sets up the OpenGL renderer, which happens
+inside your graphics driver, the next start with `auto` on the same
+driver and Rust-DOS version uses the software renderer and says so in
+the log. Updating the driver, or starting with
+`toadforce_renderer=opengl`, tries OpenGL again. The mark it keeps for
+that is the file `toadforce-opengl-setup` next to `rust-dos.log`.
+
+The card's 16- and 32-bit modes go through its gamma ramp, which games
+set for their brightness controls and fades through
+`SetDeviceGammaRamp`, DirectDraw's gamma control and Direct3D 8's
+`SetGammaRamp`. `toadforce_gamma` adds a gamma of your own after it, as
+Glide's gamma does on a 3dfx card: a value v from 0 to 1 is shown as
+v^(1 / gamma), so above 1 the dark colours come up. It changes the
+screen, screenshots and recordings, not what the program reads or a
+saved state.
+
+With `auto` and `opengl`, OpenGL draws the triangles and the card's
+memory gets the pixels when the program or the screen reads them. The
+pictures are those of `software` to within a step or two of a color
+channel where textures are filtered or a 16-bit screen is blended.
+`software` draws every pixel on the processor, the same on every
+computer: use it when a picture looks wrong with OpenGL, and report
+the game. The two differ only where OpenGL isn't there: `auto` then
+draws on the processor without a word, and `opengl` says so in the
+log first. A run with `--deterministic` draws on the processor whatever
+the setting. Drawing on the processor is too slow for some games at
+their usual resolutions: choose a lower one in the game there.
+
+### Direct3D on an S3 ViRGE
+
+With `machine=svga_s3virge` (or `svga_s3virgevx`) the PCI card is an S3
+ViRGE (PCI\VEN_5333&DEV_5631; the VX is DEV_883D), a 2D and 3D
+accelerator with 4 MB. S3's Windows 95 driver draws the desktop with its 2D
+engine and gives DirectDraw and Direct3D a hardware device, whose
+triangles the ViRGE's 3D engine draws: Gouraud shaded or textured
+(perspective corrected, filtered and mipmapped), Z buffered, fogged and
+alpha blended, at 16 or 24 bits per pixel. Its streams processor shows
+DirectDraw's overlays and S3D Toolkit games' page flips.
+
+Windows 95 finds the card at its next start. The first release of
+Windows 95 has no driver for it; S3's (version 4.03.00.2111, "S3 ViRGE,
+VX, DX & GX v3.12.01", on the VOGONS driver library) installs with **Have
+Disk** from a folder copied onto the disk image. DirectX's own runtime
+(DirectX 5 or later) is needed for Direct3D; DxDiag's **Test Direct3D**
+shows the ViRGE drawing. Direct3D needs the desktop at 16 or 24 bits per
+pixel ("High Color" or "True Color", which the ViRGE's driver has in
+place of 32 bits).
+
+`/api/status` of the debug server shows what the card's engines did under
+`video.s3.virge`.
+
+### Rendition Vérité
+
+`machine=svga_verite` makes the display adapter a Rendition Vérité V1000
+with 4 MB, for the DOS games that came in Vérité versions, and for the
+games Creative wrote for its 3D Blaster PCI, which is a Vérité:
+
+```ini
+[emulator]
+machine=svga_verite
+cpu=pentium
+memsize=32
+```
+
+The Vérité is a VGA with a RISC processor that runs microcode the game
+loads into its memory. The microcode takes drawing commands through the
+FIFO at the card's ports, or by DMA from lists in the PC's memory, and
+draws them with the card's pixel engine. Rust-DOS runs the RISC
+instruction by instruction, with its pixel engine, as Rendition's V2200
+Technical Specification describes the V1000's instruction set, so any
+microcode a program brings runs: Rendition's Speedy3D, the Windows
+drivers' 2D microcode, and the microcode of Creative's CGL modules.
+
+| Setting | Values | What it does |
+|---|---|---|
+| `verite_risc` | `lle` (default), `hle` | `lle` runs the RISC; `hle` carries out Speedy3D's and the Windows 2D microcode's commands without it |
+| `verite_mhz` | 1-1000 (25) | Million instructions a second the RISC runs: 25 as on the V1000 |
+| `verite_rom` | a file | A dump of a Vérité board's 128 KB ROM for the RISC; without one, Rust-DOS's own microcode loader |
+| `verite_irq` | 5, 7, 9, 10 (default), 11, 12, 15 | The card's interrupt line |
+
+They take effect at the DOS prompt. `hle` is the older way: faster, but
+only for Tomb Raider's and vQuake's kind of Speedy3D microcode and the
+Windows desktop. With `lle` the RISC is as fast as the card's, so games
+run at the frame rates they had on it.
+
+Games built on Rendition's DOS library (RRedline, "Speedy3D") find the
+card through the BIOS (INT 10h AX=158Dh describes the board), load
+`spd3d.uc`, and start the processor through the BIOS. Rust-DOS's BIOS
+has these functions; its VESA modes are the card's own, shown by its
+CRTC, with the memory's byte order set for the PC to see it linear.
+
+Tomb Raider's Vérité patch and vQuake run this way;
+[docs/compatibility.md](docs/compatibility.md) has their files and
+settings. vQuake needs the DPMI host it brings, CWSDPMI: its copy of
+Rendition's library finds the physical addresses for DMA by walking the
+processor's page tables, which the built-in host doesn't use.
+
+#### 3D Blaster PCI games (CGL)
+
+Games for Creative's 3D Blaster PCI draw through Creative's Graphics
+Library (CGL): a module beside the game, `VRITB170.CGL`, `VRITC170.CGL`,
+`VRITE170.CGL` or `VRITI170.CGL`, runs on the PC and drives the card. It
+starts the card on a microcode loader it copies from the board's ROM,
+and sends that loader its own microcode. A dump of a real board's ROM
+(`verite_rom`) can provide the loader; without one, the ROM Rust-DOS
+gives the card has a loader of its own, which takes the microcode as the
+board's would. Copy all four modules into the game's folder: each game
+loads the one it was built for.
+
+These ran on the module's own microcode, from the 3D Blaster PCI's bonus
+CD and patches:
+
+* **Battle Arena Toshinden** Special Edition (`TSD` on the bonus CD;
+  install with its `SETUP`, choose 3D Blaster under Misc Options): menus
+  and fights.
+* **Rebel Moon** (`REBMOON` on the bonus CD; `REB3D` or `REBMOON
+  -3DBLASTER`): menus, mission briefings and the game.
+* **Flight Unlimited** (installed from `INST\INITIAL.EXE` on the bonus
+  CD): the lobby in 3D and the menus.
+* **Hi-Octane** 1.2 with its CGL executable: menus and races. Its menus
+  read the keyboard once a frame: hold the keys a little.
+
+Other games for the card (Actua Soccer, Screamer 2 and Rally, Euro 96,
+Battle Race) haven't been tried.
+
+#### Windows 95 on the Vérité
+
+Windows 95 ran on the Vérité with `verite_risc=hle` and Rendition's
+V1000 reference driver (2.1 beta 2, `v1k_b2_1.zip`), installed with
+**Have Disk** under Display Properties, Settings, Advanced Properties,
+Change. The driver tests the card's processor and starts its 2D
+microcode (`v10002d.uc`) through the card's debug registers, sets the
+modes through the card's own CRTC, uses the Bt485 RAMDAC's palette and
+hardware cursor, and draws through the microcode: fills, copies on and
+between surfaces, one-bit images, text, brushes and clipping. The
+desktop, windows, MS-DOS Prompts (windowed and full screen) and Paint
+were tried at 800x600 in High Color and at 640x480 in 256 colours and in
+True Color. With `verite_risc=lle` the 2D microcode itself runs; Windows
+hasn't been tried that way yet, nor Direct3D and OpenGL, which load
+Rendition's 3D microcode the same way.
+
+The driver refuses True Color at 1024x768 at the refresh rate it picks
+(85 Hz), as it would on the card: a Windows that ran in that mode on
+another card shows a black screen after the driver is installed. Set
+another mode before restarting, or in Safe Mode. Windows 95's own
+Rendition driver, from the OSR2 CD, hasn't been tried.
+
+### ATI 3D RAGE
+
+`machine=svga_ati_3drage` makes the display adapter an ATI 3D RAGE
+(mach64 GT) with 4 MB on the PCI bus; `svga_ati_3drage2` makes it a 3D
+RAGE II (mach64 GT-B):
+
+```ini
+[emulator]
+machine=svga_ati_3drage
+cpu=pentium_ii
+memsize=128
+```
+
+The card is a VGA with ATI's accelerator CRTC, hardware cursor, video
+overlay, 2D draw engine and 3D engine. Its 16 MB aperture (BAR0) holds
+the VESA linear frame buffer, and the registers in its top 2 KB; the
+registers below 40h are also ports (256 of them at BAR1, or the
+"sparse" ones from 2ECh with PCI configuration register 40h). Its BIOS
+has ATI's signature and tables in the ROM and ATI's extended services
+(INT 10h AH=A0h, and the far entry at C000:0064h that ATI's Windows
+driver calls), whose mode tables list 640x480 to 1280x1024 and the low
+resolutions 320x200, 320x240, 400x300 and 512x384. VESA modes are set
+through the accelerator CRTC, as ATI's BIOS sets them.
+
+The 2D engine draws fills, copies, one-bit images from the host or the
+memory, patterns, lines, polygons and 24-bit pixels as ATI's drivers
+use them. The 3D engine draws the trapezoids ATI's Direct3D HAL and
+ATI3DCIF send: Gouraud shading, textures in all of the chip's formats
+with mipmaps, bilinear filtering and perspective, the Z buffer, alpha
+blending, fog and the texel colour key; the scaler stretches images
+into rectangles. Everything is drawn at once, so the engine never
+keeps the program waiting.
+
+Windows 98 SE finds the card and installs its own driver for it (ATI
+Rage/Rage II PCI, `ati_m64`, from the Windows CD): the desktop at up to
+1024x768 in High Color, MS-DOS Prompts in a window and full screen, and
+DxDiag's DirectDraw and Direct3D 7 tests pass on both chips. ATI's own
+driver 4.35 (the mach64 driver CD's `WIN95` folder, with ATI3DCIF) runs
+too, but its `MACXW4.INF` leaves the 3D RAGE (device 4754h) out of its
+models list: add the line
+
+```ini
+%PCI\VEN_1002&DEV_4754_ENU.DeviceDesc%=MACXW4_PCI_English, PCI\VEN_1002&DEV_4754
+```
+
+under `[Mfg]` in a copy of the folder, and install it with **Have Disk**.
+**Wipeout for 3D Rage** (the game ATI bundled with the card) runs with
+it through ATI3DCIF. Windows sees the 3D RAGE II as new hardware after
+a switch from the 3D RAGE, as it would after changing the card.
+
+`RUST_DOS_MACH64_TRACE=<dir>` writes every register access and BIOS
+call to `<dir>/trace.txt`.
+
+### PowerVR PCX1 and PCX2
+
+`powervr=pcx2` in `[emulator]` puts a PowerVR PCX2 in the machine, NEC's
+3D chip on the Matrox m3D and VideoLogic Apocalypse 3Dx boards, for the
+DOS games that came in PowerVR versions. `powervr=pcx1` puts in the chip
+before it instead, the PCX1 of the VideoLogic Apocalypse 3D and NEC's
+PC3D Engine:
+
+```ini
+[emulator]
+powervr=pcx2
+cpu=pentium
+memsize=32
+```
+
+Unlike a 3dfx card, the PCX2 has no picture of its own. Games give it the
+scene as planes and lists of the objects in each 32x32 tile, in the PC's
+own memory, and their textures in its 4 MB; it works out which surface
+each pixel shows (with hidden surfaces removed before anything is
+textured, and translucent surfaces sorted by the card), textures and
+shades the tile, and writes the finished pixels over the PCI bus into the
+VGA card's VESA linear frame buffer. So the picture comes through the
+display adapter: any `machine` with a VESA BIOS will do, screenshots and
+recordings show it, and nothing else in the window changes.
+
+The card is on the PCI bus as device 2 (vendor 1033h, device 0046h for
+the PCX2, 002Ah for the PCX1), its registers at D4000000h (BAR0) and its
+texture memory at D4400000h (BAR1), INTA# on IRQ 11, which it shares with
+a Banshee or Voodoo3 as PCI cards do: the line stays up while either card
+holds it. A render takes the time the chip's ISP and TSP would take (at
+66 MHz on the PCX2, 60 on the PCX1), then sets its
+end-of-render status (and interrupts, for games that unmask it); the
+tiles are drawn on as many threads as the host has, and the picture is
+the same however many there are. Save states and rewind keep the card
+with its texture memory.
+
+Tomb Raider's PowerVR patch, with a version for each chip, runs on both
+under its DOS/4GW; [docs/compatibility.md](docs/compatibility.md) has
+its settings, its keys and what to know about its saved games.
+
+The PCX1 does without some of what the PCX2 added. It has no bilinear
+filtering: where a texture's two mip map levels meet, it blends a texel
+of each instead, so textures look blockier than on a PCX2
+(`powervr_filter=bilinear` smooths them anyway). Games also hand it their
+scenes in fixed point rather than in floating point; the picture is the
+same.
+
+How the card draws follows Imagination's own driver sources and simulator
+of the chip, which they released under the MIT licence
+(github.com/powervr-graphics/PowerVR-Series1).
+
+### Tseng ET4000
+
+With `machine=svga_et4000` programs find a Tseng ET4000AX on the ISA bus, as
+DOS games and Windows 3.x drivers made for it detect it: its KEY
+(3BFh/3D8h), Segment Select (3CDh) with separate read and write banks, the
+extended CRTC registers (CR33 display start, CR35 and CR3F overflows, clock
+select) and the attribute controller's register 16h. Its 1 MB is the VGA's
+planes, so the VGA's write modes and latches work in every mode. Tseng's
+BIOS modes are there through INT 10h AH=00h: text at 132x44, 132x25 and
+132x28 (22h-24h), 80x60 (26h) and 100x40 (2Ah); 800x600 and 1024x768 in 16
+colours (29h, 37h); 640x350, 640x480, 640x400, 800x600 and 1024x768 in 256
+colours (2Dh, 2Eh, 2Fh, 30h, 38h). The Sierra SC11487 DAC adds 32K and 64K
+colours at 320x200, 640x350 to 640x480 and 800x600, through its command
+register (four reads of 3C6h) or Tseng's INT 10h AX=10F0h-10F2h. The BIOS
+has VBE 1.2 as Tseng's later ones do: modes 100h-105h and 15 and 16-bit
+10Dh, 10Eh, 110h, 111h, 113h and 114h, through a 64 KB window at A0000h,
+with no linear frame buffer, 24-bit colour or VBE 2.0 functions.
+
+### Tandy 1000 and PCjr
+
+With `machine=tandy` or `pcjr` programs find the machine they were made for
+(the model byte, and the Tandy's BIOS name) and its video: the CGA's modes
+and 16 colours at 160x200 and 320x200 (modes 08h and 09h), and 4 at 640x200
+(0Ah), from pages of system memory the page register picks (INT 10h AH=05h
+AL=80h-83h), with the palette registers (AH=10h), and the three-voice
+SN76489 sound chip (see `tandy` in [`[sound]`](#sound)). Their video memory
+is part of the 640 KB: DOS's memory ends at 624 KB on a Tandy, and starts
+above 144 KB on a PCjr, as DOSBox has it for Sierra's games. Not there: the
+Tandy 1000 SL/TL's DAC and 640x200 in 16 colours, and the PCjr's cartridges.
+
+## Settings reference
+
+Every setting, by the section of the configuration file it goes in. A
+setting the file doesn't have keeps its default, and mistakes are printed as
+warnings.
+
+### `[emulator]`
+
+The machine, the picture and the emulator itself. The settings are grouped
+here by what they change; in the file they all go in `[emulator]`, in any
+order.
+
+#### Processor and speed
+
+* `cycles` is the CPU speed in instructions per millisecond. `--cycles`
+  overrides it.
+  * `auto` (the default) finds the speed the running program needs, as
+    described below.
+  * `auto 10000` does the same with 10000 in place of 3000, the speed of a
+    real-mode program with no frames to go by, which is also the least
+    `auto` goes down to.
+  * `max` runs everything as fast as the host keeps up with in real time.
+  * A number such as `3000` is a fixed speed.
+
+  Loading a [save state](REFERENCE.md#save-states) keeps the speed the
   machine runs at (this setting, `--cycles`, or the last one the window, the
   speed keys or `/api/speed` set): a fixed speed and `max` go on at the rate
   they had, and `auto` starts its search from the rate the state was saved
   at. Only `--deterministic` runs at the state's speed.
+
+  How `auto` works: it finds the speed the running program needs from the
+  frames it draws (its page flips, or the bursts of writes that copy a
+  finished picture to video memory): it goes up while the frame rate follows
+  it, stops where the frame rate stops following (a game that caps its own
+  frame rate) or reaches the display's refresh rate (frames nobody sees, and
+  some games, such as Descent, play badly at such rates), and goes down
+  while the program waits for a key or calls DOS's idle interrupt. It
+  doesn't go up for a program that sits halted for half the time or more,
+  and longer than waiting for a retrace or two a frame takes: it waits for
+  something else, as a Windows game that draws only when something changes
+  does. It then tries lower speeds, down to where they cost more than 3% of
+  the frame rate, or make a program that polls for the vertical retrace miss
+  one. A speed at which more than one frame in 300 would be shown a retrace
+  late (flipped after the retrace it was due at, as when a game's drawing
+  runs long) goes up to where fewer would be, if the host has room for it:
+  the intervals between the program's flips stray from their average less,
+  the more speed it has, and the last 1200 it showed, at whatever speed,
+  tell how many would run late at each. Frames shown while the program polls
+  the retrace and frames shown while it doesn't are counted apart, and a
+  step taken for one kind is judged on that kind alone: a game that doesn't
+  poll while it plays isn't judged on its death screens, which do. Where no
+  speed up to 3.5 times as much would do, it stays, and so it does past 3.5
+  times the speed of the program's first such step, or for a program that
+  draws as fast as it can, whose intervals shrink with more speed and drift
+  with what it draws. A frame flipped within a tenth of a whole number of
+  retraces, or after the program read the status register, counts as shown
+  for that number. It keeps that speed if far fewer frames come late there,
+  also when the program polls for the retrace, or flips no pages for a
+  while, before the step is judged, and it is then the least for the
+  program.
+
+  A speed the host falls behind at is left for a lower one, and the limit
+  that sets rises again while the host keeps up. A real-mode program's
+  frames get no more than its `cpu` ran: 52800 on a 486 (a 486DX2-66) and
+  16000 on a 386. At more, a game that counts the timer ticks each pass of
+  its main loop takes can count none, and Ultimate Domain then divides by
+  zero. The Pentium and later models run more than hosts do, and have no
+  such limit. A fixed speed or `max` runs at what it says, past that too,
+  and the log says once when it does in real mode.
+
+  A real-mode program with no frames to go by (most games of the 1980s,
+  which update the screen piecemeal) runs at 3000, about a 286, as in
+  DOSBox's `cycles=auto`, and at max while it reads or writes its drives
+  (loading), unless it would sit halted for 30% of the time or more at the
+  real-mode speed, as a game playing speech from its CD does. A
+  protected-mode one runs at max while it reads and writes (loading,
+  computing), and otherwise goes down to 20000, a 486's speed, or a quarter
+  of a faster `cpu` model's clock (50000 on a Pentium, 112500 on a Pentium
+  II), no more than the host has. Either goes back to its speed 100 ms after
+  the work stops. Resetting the Sound Blaster, as a sound driver does before
+  it times the card with delay loops, ends the loading speed at once.
 * `auto_fps` is the frame rate `cycles=auto` aims for: `auto`, the
   default, is the display's refresh rate (the 3dfx card's while it
   shows), and a number from 10 to 240 takes its place. A lower one, such
@@ -269,61 +1610,67 @@ limit, so without a connection it goes on as it would with one:
   seen goes into save states, and is forgotten when the machine goes
   back to real mode (a reboot, a DOS program's end). It applies at
   once.
-* `cpu` is the emulated processor: `486` (a 486DX with FPU), `386`, or
-  `pentium`, a Pentium as DOSBox-X has one: CPUID (a GenuineIntel family 5),
-  the time stamp counter, which counts the instructions and so runs at a
-  fixed `cycles` speed (at `max` and `auto`, whose speed changes as they
-  run, it runs at a clock rate of the model's own: 200 MHz on a Pentium or
-  Pentium Pro, 233 on a Pentium MMX, 450 on a Pentium II, 550 on a K6-2 and
-  600 on a Pentium III, so that programs which time with it, such as 3DMark
-  2000, measure right), its MSRs, CMPXCHG8B and 4 MB pages, without the
-  virtual-8086 mode extensions; `pentium_mmx`, that Pentium with MMX (CPUID
-  family 5, model 4), whose eight MM registers are the FPU's; `k6_2`, an AMD
-  K6-2 (CPUID AuthenticAMD family 5, model 8, with AMD's extended leaves):
-  the Pentium MMX's with 3DNow!, SYSCALL/SYSRET and the K6's MSRs (EFER,
-  STAR, the write handling control and test register 12), without the P6
-  instructions. Its 3DNow! arithmetic follows AMD's manual: it rounds to
-  nearest, gives a zero below 2^-126 and the largest normal from 2^128, and
-  has no exceptions; PFRCP and PFRSQRT give the exact results rounded to a
-  single where the real one's tables give 14 and 15 bits. `pentium_pro`, a
-  Pentium Pro as DOSBox-X's `ppro_slow` (CPUID family 6, model 1): the
-  Pentium's with CMOVcc, FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and
-  the local APIC base and microcode revision MSRs Windows 98 and ME read,
-  without MMX; `pentium_ii`, a Pentium II as DOSBox-X's (family 6, model 3):
-  the Pentium Pro's with MMX and SYSENTER/SYSEXIT; or `pentium_iii`, a
-  Pentium III (Katmai, family 6, model 7): the Pentium II's with SSE,
-  FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT, the processor serial number
-  (CPUID leaf 3, until MSR 119h switches it off) and the cache descriptors
-  of CPUID leaf 2. Its SSE arithmetic rounds as MXCSR says, flushes to zero,
+* `cpu` is the emulated processor. Each model has what the one it builds on
+  has, and more:
+
+  | `cpu` | The processor | What it has |
+  |---|---|---|
+  | `386` | A 386 | |
+  | `486` | A 486DX with FPU | The default, except with a ToadForce (see below) |
+  | `pentium` | A Pentium as DOSBox-X has one: CPUID GenuineIntel family 5 | The 486's, with the time stamp counter, MSRs, CMPXCHG8B and 4 MB pages, without the virtual-8086 mode extensions |
+  | `pentium_mmx` | A Pentium MMX: family 5, model 4 | The Pentium's, with MMX, whose eight MM registers are the FPU's |
+  | `k6_2` | An AMD K6-2: CPUID AuthenticAMD family 5, model 8, with AMD's extended leaves | The Pentium MMX's, with 3DNow!, SYSCALL/SYSRET and the K6's MSRs (EFER, STAR, the write handling control and test register 12), without the P6 instructions |
+  | `pentium_pro` | A Pentium Pro as DOSBox-X's `ppro_slow`: family 6, model 1 | The Pentium's, with CMOVcc, FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and the local APIC base and microcode revision MSRs Windows 98 and ME read, without MMX |
+  | `pentium_ii` | A Pentium II as DOSBox-X's: family 6, model 3 | The Pentium Pro's, with MMX and SYSENTER/SYSEXIT |
+  | `pentium_iii` | A Pentium III (Katmai): family 6, model 7 | The Pentium II's, with SSE, FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT, the processor serial number (CPUID leaf 3, until MSR 119h switches it off) and the cache descriptors of CPUID leaf 2 |
+
+  None of them has RDPMC, a local APIC or memory type range registers, as in
+  DOSBox-X.
+
+  The time stamp counter counts the instructions, and so runs at a fixed
+  `cycles` speed. At `max` and `auto`, whose speed changes as they run, it
+  runs at a clock rate of the model's own: 200 MHz on a Pentium or Pentium
+  Pro, 233 on a Pentium MMX, 450 on a Pentium II, 550 on a K6-2 and 600 on a
+  Pentium III, so that programs which time with it, such as 3DMark 2000,
+  measure right.
+
+  The K6-2's 3DNow! arithmetic follows AMD's manual: it rounds to nearest,
+  gives a zero below 2^-126 and the largest normal from 2^128, and has no
+  exceptions; PFRCP and PFRSQRT give the exact results rounded to a single
+  where the real one's tables give 14 and 15 bits.
+
+  The Pentium III's SSE arithmetic rounds as MXCSR says, flushes to zero,
   and sets and masks the six exception flags as a Pentium III does: an
   unmasked one raises #XM, or #UD without OSXMMEXCPT. RCPPS and RSQRTPS give
   the exact reciprocal rounded to a single, within the precision Intel
   specifies for them. SSE needs CR4.OSFXSR, which a system that saves the
   SSE state sets; rust-dos's DPMI host sets it for its clients on a Pentium
-  III. None of them has RDPMC, a local APIC or memory type range registers,
-  as in DOSBox-X. A DOSBox configuration's `cputype` of a Pentium imports as
-  `pentium`, of a Pentium MMX as `pentium_mmx`, of a Pentium Pro as
-  `pentium_pro`, of a Pentium II as `pentium_ii`, and of a Pentium III or
-  DOSBox-X's `experimental` as `pentium_iii`. The `cpu` also gives the
-  memory of a machine without a `memsize` line: 16 MB up to a Pentium and 32
-  to 128 MB with the later ones (see `memsize`). Without a `cpu` line the
-  processor follows the display adapter: a `486`, or a `pentium_iii` with
-  `machine=svga_toadforce`, as the ToadForce's games were written for a
-  Pentium II or better and a card of its class was never sold for a 486.
-  That model isn't written to the configuration; the settings window shows
-  it with **(auto)**, `cycles=auto` takes its least speed from it, and save
-  states, `/api/status` and almanac reports carry the model the machine has.
-  A `cpu` line wins: with a ToadForce, a model older than the Pentium II
-  runs as set, with a line in the log that the card's games expect a Pentium
-  II or better. The settings window of an earlier rust-dos wrote `cpu=486`
-  into the configuration file it saved. When the video card is changed to
-  the ToadForce in the settings window, a processor older than the Pentium
-  II goes back to **(auto)**, and saving comments out the `cpu` line; a
-  processor picked after that stays. In a file edited by hand, remove the
-  `cpu` line, or press Delete on the processor in the settings window, to
-  have the card's default. A save state keeps the processor it was saved
-  with, so one saved with a ToadForce by an earlier rust-dos loads as a
-  486.
+  III.
+
+  A DOSBox configuration's `cputype` of a Pentium imports as `pentium`, of a
+  Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, of a
+  Pentium II as `pentium_ii`, and of a Pentium III or DOSBox-X's
+  `experimental` as `pentium_iii`.
+
+  The `cpu` also gives the memory of a machine without a `memsize` line: 16
+  MB up to a Pentium and 32 to 128 MB with the later ones (see `memsize`).
+  Without a `cpu` line the processor follows the display adapter: a `486`,
+  or a `pentium_iii` with `machine=svga_toadforce`, as the ToadForce's games
+  were written for a Pentium II or better and a card of its class was never
+  sold for a 486. That model isn't written to the configuration; the
+  settings window shows it with **(auto)**, `cycles=auto` takes its least
+  speed from it, and save states, `/api/status` and almanac reports carry
+  the model the machine has. A `cpu` line wins: with a ToadForce, a model
+  older than the Pentium II runs as set, with a line in the log that the
+  card's games expect a Pentium II or better. The settings window of an
+  earlier rust-dos wrote `cpu=486` into the configuration file it saved.
+  When the video card is changed to the ToadForce in the settings window, a
+  processor older than the Pentium II goes back to **(auto)**, and saving
+  comments out the `cpu` line; a processor picked after that stays. In a
+  file edited by hand, remove the `cpu` line, or press Delete on the
+  processor in the settings window, to have the card's default. A save state
+  keeps the processor it was saved with, so one saved with a ToadForce by an
+  earlier rust-dos loads as a 486.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
@@ -358,141 +1705,34 @@ limit, so without a connection it goes on as it would with one:
   program that sets it to 53 bits, as Win32 programs built with MSVC do,
   gets close to what a 387 gives). Loads, stores, integer conversions,
   compares and FRNDINT use all 80 bits.
-* `machine` is the display adapter programs find when they look for one, and
-  so the graphics they choose: `svga` (the default, a VGA with VESA modes up
-  to 1024x768, and 640x400 in truecolour as mode 213h, an OEM mode of S3
-  cards such as Diamond's Stealth64 Video), `svga_s3` (an S3 Trio64 on the
-  PCI bus, with its VESA modes, 2D accelerator and hardware cursor, for
-  systems [booted from disk images](#booting-a-disk-image) whose drivers
-  program it), `svga_s3virge` and `svga_s3virgevx` (an S3 ViRGE or ViRGE/VX
-  on the PCI bus: the Trio64's registers with the ViRGE's own 2D engine, 3D
-  engine and streams processor, which Windows 95's Direct3D uses through
-  S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `svga_verite` (a
-  Rendition Vérité V1000 with 4 MB on the PCI bus, for DOS games' Vérité
-  versions; see [Rendition Vérité](#rendition-vérité)), `svga_ati_3drage`
-  and `svga_ati_3drage2` (an ATI 3D RAGE or 3D RAGE II with 4 MB on the PCI
-  bus, whose 2D and 3D engines ATI's Windows drivers use; see [ATI 3D
-  RAGE](#ati-3d-rage)), `svga_voodoo3` and `svga_banshee` (a 3dfx Voodoo3
-  3000 or Voodoo Banshee with 16 MB on the PCI bus, which 3dfx's Windows
-  drivers use for the desktop, Direct3D and OpenGL; see [3dfx
-  Voodoo3](#3dfx-voodoo3-and-banshee)), `svga_toadforce` (Rust-DOS's own
-  card, for Windows programs run without Windows; see
-  [ToadForce](#toadforce)), `svga_et4000` (a Tseng Labs ET4000AX with 1 MB
-  and a Sierra HiColor DAC, see below), `vga` (an IBM VGA, without
-  VESA modes), `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64
-  colours at 640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
-  640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
-  `hercules` (a Hercules Graphics Card on a monochrome monitor: the MDA's
-  text and 720x348 graphics, 50 Hz). A change takes effect at the DOS
-  prompt. A DOSBox configuration's `svga_s3`, DOSBox's default, imports as
-  `svga`, which is what DOS games get from it there; one that boots a hard
-  disk, or runs in a Windows of files (a package's `os=win311`), keeps
-  `svga_s3`, as that Windows was installed with the S3's driver (unless the
-  package's `os` boots another system in its place). `machine=` in its
-  `[rust-dos]` or `[emulator]` section goes over the import's, as rust-dos's
-  other settings there do (see
-  [GAME-PACKAGES.md](GAME-PACKAGES.md#packages-made-for-dosbox)).
-* With `svga_et4000` programs find a Tseng ET4000AX on the ISA bus, as
-  DOS games and Windows 3.x drivers made for it detect it: its KEY
-  (3BFh/3D8h), Segment Select (3CDh) with separate read and write banks,
-  the extended CRTC registers (CR33 display start, CR35 and CR3F
-  overflows, clock select) and the attribute controller's register 16h.
-  Its 1 MB is the VGA's planes, so the VGA's write modes and latches work
-  in every mode. Tseng's BIOS modes are there through INT 10h AH=00h:
-  text at 132x44, 132x25 and 132x28 (22h-24h), 80x60 (26h) and 100x40
-  (2Ah); 800x600 and 1024x768 in 16 colours (29h, 37h); 640x350,
-  640x480, 640x400, 800x600 and 1024x768 in 256 colours (2Dh, 2Eh, 2Fh,
-  30h, 38h). The Sierra SC11487 DAC adds 32K and 64K colours at 320x200,
-  640x350 to 640x480 and 800x600, through its command register (four
-  reads of 3C6h) or Tseng's INT 10h AX=10F0h-10F2h. The BIOS has VBE 1.2
-  as Tseng's later ones do: modes 100h-105h and 15 and 16-bit 10Dh,
-  10Eh, 110h, 111h, 113h and 114h, through a 64 KB window at A0000h,
-  with no linear frame buffer, 24-bit colour or VBE 2.0 functions.
-* With `tandy` and `pcjr` programs find the machine they were made for
-  (the model byte, and the Tandy's BIOS name) and its video: the CGA's
-  modes and 16 colours at 160x200 and 320x200 (modes 08h and 09h), and 4
-  at 640x200 (0Ah), from pages of system memory the page register picks
-  (INT 10h AH=05h AL=80h-83h), with the palette registers (AH=10h), and
-  the three-voice SN76489 sound chip (see `tandy` below). Their video
-  memory is part of the 640 KB: DOS's memory ends at 624 KB on a Tandy,
-  and starts above 144 KB on a PCjr, as DOSBox has it for Sierra's
-  games. Not there: the Tandy 1000 SL/TL's DAC and 640x200 in 16
-  colours, and the PCjr's cartridges.
-* `voodoo=true` adds a 3dfx Voodoo Graphics card to any of the display
-  adapters, for games that draw with Glide (see [3dfx Voodoo
-  Graphics](#3dfx-voodoo-graphics)); `false` is the default. `voodoo_model`
-  is `voodoo1` (the Voodoo Graphics, the default) or `voodoo2` (see [3dfx
-  Voodoo2](#3dfx-voodoo2)). `voodoo_memory` is `12` (the default: 4 MB of
-  frame buffer and two texture units with 4 MB each, as DOSBox-X's card
-  has), `8` (a Voodoo2 board: 4 MB and two texture units with 2 MB each; it
-  picks `voodoo2` when `voodoo_model` is unset) or `4` (a retail Voodoo
-  Graphics: 2 MB and one texture unit with 2 MB; a Voodoo2 takes it as `8`).
-  All three take effect at the DOS prompt. `voodoo_texture_sampling` is
-  `default` (preserves the game's filtering) or `unfiltered`
-  (nearest-neighbour sampling). With supported OpenGL anisotropy enabled,
-  `unfiltered` also blends between mip levels and allows anisotropic
-  filtering to reduce shimmer, which may soften textures; magnification
-  stays nearest-neighbour. With anisotropy off, or with software rendering,
-  sampling stays strictly nearest-neighbour. It works with both renderers
-  and changes immediately; mip levels, wrapping and clamping still follow
-  the game. `voodoo_renderer` is what draws the card's picture in the
-  window: `software` (the default, rust-dos's own rasterizer) or `opengl`,
-  which draws it again at `voodoo_scale` (1 to 4, 2 by default) times the
-  card's resolution (see [the 3dfx OpenGL
-  renderer](#the-3dfx-opengl-renderer)), with `voodoo_scale_shader` (`true`,
-  the default, or `false`) whether the CRT looks keep one scanline per line
-  of the card's resolution (`false` gives a line per pixel of the bigger
-  picture, finer lines; it matters only above 1x and with a CRT look), with
-  `voodoo_dither` (`true`, the default, or `false`) whether it dithers to 16
-  bits a pixel as the card does where the game dithers (`false` gives a
-  smoother picture; see [the 3dfx OpenGL
-  renderer](#the-3dfx-opengl-renderer)), with `voodoo_readback` (`gpu`, the
-  default, or `exact`) whether what a game reads back from the card's memory
-  is OpenGL's picture or the card's own pixels, which the software
-  rasterizer then draws as well (see [the 3dfx OpenGL
-  renderer](#the-3dfx-opengl-renderer)), with `voodoo_msaa` (`off`, the
-  default, `2`, `4` or `8`) samples a pixel of multisampled antialiasing and
-  `voodoo_anisotropy` (`off`, the default, `2`, `4`, `8` or `16`) filters
-  textures at oblique angles; `voodoo_gamma` (`off`, the default, or 0.1 to
-  2) is the gamma Glide gives the card's picture (see [3dfx
-  gamma](#3dfx-gamma)); `voodoo_renderer=opengl` needs OpenGL 3.2 from the
-  host's graphics driver, and without it (a generic or old driver, the
-  browser, SDL's dummy video driver) the software rasterizer's picture shows
-  at the card's resolution and a `[DISPLAY]` line at startup says why. The
-  card's frames are held to `fps_cap` with every other card's (see [Frame
-  rate cap](#frame-rate-cap)). The settings from `voodoo_texture_sampling`
-  on change at once, `voodoo_gamma` at the DOS prompt. All of them but
-  `voodoo_gamma` also work on a Voodoo3 or Banshee display adapter
-  (`machine=svga_voodoo3` or `svga_banshee`; see [3dfx
-  Voodoo3](#3dfx-voodoo3-and-banshee)), whose card and memory don't depend
-  on `voodoo`, `voodoo_model` or `voodoo_memory`.
-* `powervr=pcx1` or `pcx2` adds a PowerVR 3D card beside the display
-  adapter, for games with a PowerVR version: the PCX1 (VideoLogic
-  Apocalypse 3D) or the PCX2 (Matrox m3D, VideoLogic Apocalypse 3Dx; see
-  [PowerVR PCX1 and PCX2](#powervr-pcx1-and-pcx2)). `off` is the default.
-  It takes effect at the DOS prompt. `powervr_filter` is how it filters
-  textures: `auto` (the default, as the game sets the card), `point` or
-  `bilinear`; it changes at once.
-* `capture_dir` is the folder screenshots and recordings go in:
-  `capture` (the default) in the directory rust-dos started in, or a
-  path of your own. Screenshots (Ctrl+F5, in the settings window too)
-  and recordings show the picture with the monochrome look but without
-  the messages at the top. With `record_ui=true` they show the settings
-  window and the performance overlay (Ctrl+Shift+F12) as well while they
-  are open; `false`, the default, shows the picture alone. A [manual's
-  page](#manuals-and-extras) shows either way, a screenshot of it as sharp
-  as the window shows it.
-  `record_shader=true` has screenshots and video recordings show the
-  picture through the CRT shader, as the window does and at the size it
-  shows it (without the black bars around it); `false`, the default,
-  shows it plain. Drawing the picture again for them and reading it back
-  takes the host some time a frame while a video records, and none
-  otherwise. Animations (GIF) stay plain, as their 256 colours can't
-  hold the shader's.
-  Video recordings are AVI files in DOSBox's lossless ZMBV codec, which
-  ffmpeg, VLC and mpv play, at 60 frames a second of the machine's time
-  with its sound, so they keep in step through pauses and fast forward;
-  a recording stops at 1 GB.
+* `idle_skip=true` (the default) lets the emulator skip the passes of a
+  program's busy-wait loops up to the next timer event, and sleep
+  instead of running them: a program polling the keyboard through the
+  BIOS, waiting for the vertical retrace, for the timer's tick count to
+  change, for a time it reads from the PIT's count, as Windows 98's
+  QueryPerformanceCounter does, or for the next millisecond of the
+  built-in Windows's GetTickCount, timeGetTime or Windows 3.1's
+  GetCurrentTime, or for the next timer event of a PeekMessage that
+  finds nothing, as Johnny Castaway's animation loop does. A loop is
+  skipped only after the emulator has seen one of its passes come back
+  with the registers and the memory it wrote as they were, or as the
+  same function of the PIT's count it read, and with nothing else to
+  tell the passes apart (it reads no device but the video card's status,
+  whose bits it looks at only through a mask, and the PIT's count, and
+  calls no service of the built-in Windows but the clocks, PeekMessage
+  and others that change nothing but the program's memory and registers,
+  such as GetActiveWindow, GetModuleUsage or KERNEL's Catch), so programs
+  see the same as without it. `false` runs every pass.
+* `idle_hint=true` lets Windows' own idle calls wait for the next timer
+  event, as a halted CPU does: Windows 3.1's idle loop in 386 enhanced
+  mode (its VMPOLL device calling out, and the kernel's idle call), which
+  reads the timer in every pass, so `idle_skip` can't skip it. Unlike
+  `idle_skip` this isn't exact: the loop runs fewer passes than on a real
+  machine, which Windows doesn't notice, but timing-sensitive programs
+  might. Off by default.
+
+#### Memory
+
 * `memsize` is the RAM in MB, from 2 to as much as motherboards took
   for the `cpu`: 64 MB for a 386, 128 MB for a 486, 256 MB for a Pentium
   and 512 MB for a Pentium MMX, K6-2, Pentium Pro, Pentium II or Pentium
@@ -567,6 +1807,48 @@ limit, so without a connection it goes on as it would with one:
   for their buffers. Off, they use VCPI with EMS on, as under EMM386, and
   run as they do on plain DOS with HIMEM with EMS off. A change takes
   effect for the programs started after it.
+
+#### Video card and picture
+
+* `machine` is the display adapter programs find when they look for one, and
+  so the graphics they choose: `svga` (the default), `vga`, `ega`, `cga`,
+  `tandy`, `pcjr`, `hercules`, `svga_et4000`, `svga_s3`, `svga_s3virge`,
+  `svga_s3virgevx`, `svga_voodoo3`, `svga_banshee`, `svga_toadforce`,
+  `svga_verite`, `svga_ati_3drage` or `svga_ati_3drage2`. [Choosing a video
+  card](#choosing-a-video-card) says what each is and what it is for, and
+  [video cards](#video-cards) describes each. A change takes effect at the
+  DOS prompt.
+
+  A DOSBox configuration's `svga_s3`, DOSBox's default, imports as `svga`,
+  which is what DOS games get from it there; one that boots a hard disk, or
+  runs in a Windows of files (a package's `os=win311`), keeps `svga_s3`, as
+  that Windows was installed with the S3's driver (unless the package's `os`
+  boots another system in its place). `machine=` in its `[rust-dos]` or
+  `[emulator]` section goes over the import's, as rust-dos's other settings
+  there do (see
+  [GAME-PACKAGES.md](GAME-PACKAGES.md#packages-made-for-dosbox)).
+* `scale`, `fullscreen`, `aspect`, `vrr`, `filter`, `shader`, `monochrome`,
+  `composite`, `composite_era`, `monitor_effects` and `fps_cap` decide how
+  the window shows the picture: see [the window and the
+  picture](#the-window-and-the-picture). `crt_curvature` and `crt_glow`
+  shape the `crt` look ([CRT shaders](#crt-shaders)).
+* `voodoo`, `voodoo_model`, `voodoo_memory`, `voodoo_renderer`,
+  `voodoo_scale`, `voodoo_msaa`, `voodoo_anisotropy`, `voodoo_dither`,
+  `voodoo_readback`, `voodoo_scale_shader`, `voodoo_texture_sampling` and
+  `voodoo_gamma` set up the 3dfx cards: see [3dfx settings](#3dfx-settings).
+* `powervr=pcx1` or `pcx2` adds a PowerVR 3D card beside the display
+  adapter, for games with a PowerVR version: the PCX1 (VideoLogic
+  Apocalypse 3D) or the PCX2 (Matrox m3D, VideoLogic Apocalypse 3Dx; see
+  [PowerVR PCX1 and PCX2](#powervr-pcx1-and-pcx2)). `off` is the default.
+  It takes effect at the DOS prompt. `powervr_filter` is how it filters
+  textures: `auto` (the default, as the game sets the card), `point` or
+  `bilinear`; it changes at once.
+* `toadforce_memory`, `toadforce_renderer` and `toadforce_gamma` set up the
+  [ToadForce](#toadforce), and `verite_risc`, `verite_mhz`, `verite_rom` and
+  `verite_irq` the [Rendition Vérité](#rendition-vérité).
+
+#### The built-in Windows
+
 * `win32` turns on the built-in Windows: `true` or `false` (the default). A
   Win32 program, a Windows 95 .EXE, then runs from the DOS prompt in
   protected mode with paging, as Windows 95 runs it, and ends back at the
@@ -725,6 +2007,9 @@ limit, so without a connection it goes on as it would with one:
   still change the size with ChangeDisplaySettings while it runs; its
   end gives this size back. Like `win32_depth`, a change takes effect
   for the next program that starts when none runs.
+
+#### DOS
+
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or `7.10`;
   `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS has the FAT32
@@ -758,6 +2043,24 @@ limit, so without a connection it goes on as it would with one:
   characters of the keys, and dead keys put their accents on the next
   letter. Characters code page 437 doesn't have (€, ø) type nothing.
   `KEYB` at the prompt changes it too.
+* `game_fixes` fixes a few games that go wrong on real PCs too, or that
+  can't work without their original disks, once Rust-DOS recognises
+  them: `true` (the default) or `false`, which runs them as a real PC
+  would. `game_fixes_off` leaves out the fixes it names, separated by
+  commas (`game_fixes_off=jukebox-mod-hang`). [Game fixes](#game-fixes)
+  lists them. A change takes effect at the DOS prompt.
+
+#### Disks
+
+* `hard_disk_speed` and `floppy_disk_speed` slow the disks down to those
+  of the time; see [Disk speed and noises](#disk-speed-and-noises).
+* `ide_hard_disks`, `floppy_controller` and `boot_cdrom` set up the disks of
+  a system booted from a disk image: see [booting a disk
+  image](#booting-a-disk-image) and [host folders in a booted
+  system](#host-folders-in-a-booted-system).
+
+#### Mouse
+
 * `mouse_sensitivity` multiplies captured mouse movement on both axes:
   `0.1` to `10.0`, default `1.0`. The settings slider adjusts in `0.1`
   steps. Uncaptured positioning is unchanged.
@@ -770,6 +2073,59 @@ limit, so without a connection it goes on as it would with one:
   program sees the press, and a release as the window opens; moving the
   mouse while holding the button keeps it an ordinary press. Turn it off
   for a game that has you hold the right button still.
+* `mouse_autocapture` captures the mouse as it moves over the focused
+  window while a program uses the mouse driver (INT 33h), and lets it go
+  as the program's cursor reaches the edge of the screen and the mouse
+  keeps going, with the host's pointer where that cursor was: `true` (the
+  default) or `false`. Where the program's cursor is decides it, not
+  where the host's pointer would be, since a game's cursor can move
+  slower or faster than the host's. A cursor kept inside a window of the
+  screen, and a game steering with the mouse's motion (AX=000Bh), keep
+  the mouse until **Ctrl+Alt** lets it go; it goes too once the program
+  stops using the mouse. Programs that read the PS/2 or a serial mouse
+  themselves, such as Windows, still take it with a click.
+
+#### Screenshots, recordings and rewind
+
+* `capture_dir` is the folder screenshots and recordings go in:
+  `capture` (the default) in the directory rust-dos started in, or a
+  path of your own. Screenshots (Ctrl+F5, in the settings window too)
+  and recordings show the picture with the monochrome look but without
+  the messages at the top. With `record_ui=true` they show the settings
+  window and the performance overlay (Ctrl+Shift+F12) as well while they
+  are open; `false`, the default, shows the picture alone. A [manual's
+  page](#manuals-and-extras) shows either way, a screenshot of it as sharp
+  as the window shows it.
+  `record_shader=true` has screenshots and video recordings show the
+  picture through the CRT shader, as the window does and at the size it
+  shows it (without the black bars around it); `false`, the default,
+  shows it plain. Drawing the picture again for them and reading it back
+  takes the host some time a frame while a video records, and none
+  otherwise. Animations (GIF) stay plain, as their 256 colours can't
+  hold the shader's.
+  Video recordings are AVI files in DOSBox's lossless ZMBV codec, which
+  ffmpeg, VLC and mpv play, at 60 frames a second of the machine's time
+  with its sound, so they keep in step through pauses and fast forward;
+  a recording stops at 1 GB.
+* `rewind=true` keeps the machine's states of the last minutes, a state
+  for every half second it runs, and holding **Alt+F11** goes back
+  through them. `rewind_memory` is the memory they may take in MB (256
+  by default; 16 to 4096): each state takes only what changed since the
+  one after it, so a game that changes little goes back a long way. The
+  states start over when a game starts or ends, the hardware changes or
+  a [save state](REFERENCE.md#save-states) is loaded. Off by default.
+
+#### Startup and the rest
+
+* `post` shows a BIOS power-on self test before the built-in DOS starts,
+  and at each reboot: `off` (the default), `quick` (about a second) or
+  `full` (about three, the memory counted up as it is tested). It lists the
+  CPU, the memory, the drives and the sound cards. **Del** while it shows
+  opens the settings as a period CMOS setup utility, whose pages are
+  changed with PgUp/PgDn or +/-; nothing changes until *Save & Exit Setup*
+  (**F10**), which applies and saves the settings and restarts the
+  machine. **Esc** skips the memory test. A booted disk image has no POST
+  of rust-dos's.
 * `pause_in_settings` pauses the program while the settings window is
   open (but for the Mixer and Stats pages): `true` (the default) or
   `false`, to let it run on behind the window. In a LAN room it always
@@ -798,57 +2154,6 @@ limit, so without a connection it goes on as it would with one:
   cap](#frame-rate-cap) come from it, never drives, commands or
   paths. A game launched from its profile and
   deterministic mode never ask. `true` or `false` (the default).
-* `mouse_autocapture` captures the mouse as it moves over the focused
-  window while a program uses the mouse driver (INT 33h), and lets it go
-  as the program's cursor reaches the edge of the screen and the mouse
-  keeps going, with the host's pointer where that cursor was: `true` (the
-  default) or `false`. Where the program's cursor is decides it, not
-  where the host's pointer would be, since a game's cursor can move
-  slower or faster than the host's. A cursor kept inside a window of the
-  screen, and a game steering with the mouse's motion (AX=000Bh), keep
-  the mouse until **Ctrl+Alt** lets it go; it goes too once the program
-  stops using the mouse. Programs that read the PS/2 or a serial mouse
-  themselves, such as Windows, still take it with a click.
-* `rewind=true` keeps the machine's states of the last minutes, a state
-  for every half second it runs, and holding **Alt+F11** goes back
-  through them. `rewind_memory` is the memory they may take in MB (256
-  by default; 16 to 4096): each state takes only what changed since the
-  one after it, so a game that changes little goes back a long way. The
-  states start over when a game starts or ends, the hardware changes or
-  a [save state](REFERENCE.md#save-states) is loaded. Off by default.
-* `idle_skip=true` (the default) lets the emulator skip the passes of a
-  program's busy-wait loops up to the next timer event, and sleep
-  instead of running them: a program polling the keyboard through the
-  BIOS, waiting for the vertical retrace, for the timer's tick count to
-  change, for a time it reads from the PIT's count, as Windows 98's
-  QueryPerformanceCounter does, or for the next millisecond of the
-  built-in Windows's GetTickCount, timeGetTime or Windows 3.1's
-  GetCurrentTime, or for the next timer event of a PeekMessage that
-  finds nothing, as Johnny Castaway's animation loop does. A loop is
-  skipped only after the emulator has seen one of its passes come back
-  with the registers and the memory it wrote as they were, or as the
-  same function of the PIT's count it read, and with nothing else to
-  tell the passes apart (it reads no device but the video card's status,
-  whose bits it looks at only through a mask, and the PIT's count, and
-  calls no service of the built-in Windows but the clocks, PeekMessage
-  and others that change nothing but the program's memory and registers,
-  such as GetActiveWindow, GetModuleUsage or KERNEL's Catch), so programs
-  see the same as without it. `false` runs every pass.
-* `idle_hint=true` lets Windows' own idle calls wait for the next timer
-  event, as a halted CPU does: Windows 3.1's idle loop in 386 enhanced
-  mode (its VMPOLL device calling out, and the kernel's idle call), which
-  reads the timer in every pass, so `idle_skip` can't skip it. Unlike
-  `idle_skip` this isn't exact: the loop runs fewer passes than on a real
-  machine, which Windows doesn't notice, but timing-sensitive programs
-  might. Off by default.
-* `game_fixes` fixes a few games that go wrong on real PCs too, or that
-  can't work without their original disks, once Rust-DOS recognises
-  them: `true` (the default) or `false`, which runs them as a real PC
-  would. `game_fixes_off` leaves out the fixes it names, separated by
-  commas (`game_fixes_off=jukebox-mod-hang`). [Game fixes](#game-fixes)
-  lists them. A change takes effect at the DOS prompt.
-* `hard_disk_speed` and `floppy_disk_speed` slow the disks down to those
-  of the time; see [Disk speed and noises](#disk-speed-and-noises).
 
 ### `[sound]`
 
@@ -1028,7 +2333,7 @@ audio), `fm` (the FM synthesizer), `gus`, `midi`, `cdaudio`, `disknoise`,
 `lptdac` (the Covox or Disney Sound Source), `tandy` (the Tandy's and
 PCjr's sound chip), `cms` (the Game Blaster's SAA1099s), `awe32` (the
 AWE32's wavetable synthesizer), `monitor` (the [monitor's
-effects](#emulator)), `modem` (the [modem's
+effects](#the-window-and-the-picture)), `modem` (the [modem's
 speaker](#serial-and-modem-games)), `windows` (the built-in Windows's
 sound: DirectSound and WinMM's wave audio), and `master` for all of them
 together. At 100, the default, a source plays as loud as its card makes
@@ -1452,114 +2757,6 @@ A reboot runs them again, with `C:\AUTOEXEC.BAT`. Ctrl+Alt+Del reboots, as
 does a program that resets the machine (through the keyboard controller,
 port 92h or CF9h, INT 19h or a jump to the reset vector). Memory, the
 devices and the resident programs start over, and the screen is cleared.
-
-## Settings window
-
-Press **Ctrl+F12**, type `DOSCONFIG` at the DOS prompt, or hold the right
-mouse button still for 1.5 seconds (`mouse_menu_hold`) to open the
-settings window over the running program. The program pauses while it is
-open, except on the Mixer page, where it plays on so you hear the volumes
-as you set them, and the Stats page, which shows it running; with
-`pause_in_settings` off, or in a LAN room, it never pauses. Ctrl+F12 or
-Esc closes it.
-
-* **Drives:** mount a host directory, a zip or 7z archive, or a disk or
-  CD image (Ins), change or
-  swap the one a drive shows (Enter; this is how to change discs in the
-  middle of a game), or unmount it (Del). **Browse...** picks directories
-  and images, VHDs among them, from the host. **Create a disk image...**
-  makes a new, empty floppy or hard disk image, as
-  [MAKEIMG](#new-disk-images) does, and mounts it on the drive picked (a
-  floppy on A: or B:, where free); a hard disk's **Format** makes it a raw
-  image or a dynamic (growing) or fixed VHD. B (or
-  the mount dialog's **Boot**) [boots](#booting-a-disk-image) the disk
-  image of the selected drive now, and the dialog's **Auto-boot** has it
-  boot whenever Rust-DOS starts, once saved (F2). Its **Write to** is a
-  folder for the changes of a directory, an archive or a disk image
-  (`<image>.rdelta` there), which leave it as it is
-  ([`-overlay`](#mounting-drives)); such a drive is marked *ovl*. Its
-  **IDE slot** puts a hard disk or CD-ROM drive on the IDE channel a
-  booted system finds it on ([`-ide`](#booting-a-disk-image)); the first free one
-  otherwise. Past the letters, its **Drive** offers the BIOS disk numbers
-  0 to 3 (`[drives]` `2=win98.vhd`): an image only the BIOS has, for
-  booting, without a DOS drive. They are listed after the lettered drives
-  with their BIOS unit (*00h*, *01h*, *80h*, *81h*), and **Create a disk
-  image...** can mount a new image on one of its kind.
-* **Display:** the scale, fullscreen, fixed aspect ratio, variable
-  refresh rate (VRR), the scaling filter, the CRT shader and the monochrome monitor.
-* **Emulator:** the CPU speed, the processor, the video card, the memory
-  size, expanded and upper memory, the disk speeds, the joystick, rewind,
-  the capture folder and whether recordings show the settings window and
-  the performance overlay. *Edit the [autoexec] commands...* opens the configuration file's
-  `[autoexec]` (a game's profile's while it plays) in an editor, comments
-  included; F2 writes it into the file, for the next start, and Esc leaves
-  the file as it was.
-* **Sound:** everything in `[sound]`, and the disk noises. A card's port,
-  IRQ and DMA channels share a row: Left and Right move between them, and
-  Enter lists the values of the one marked.
-* **Mixer:** the volume of each sound source and the master volume
-  (`[mixer]`), with a meter of how loud each one plays, and the filters,
-  reverb and chorus with their dry/wet mixes.
-* **Network:** everything in [`[network]`](#network): the IPX driver, the
-  NE2000 network card, and the LAN to join or host at startup.
-* **Serial:** everything in [`[serial]`](#serial): what each serial port
-  has plugged in and its IRQ, the chip, the serial mouse and the modem's
-  TCP calls.
-* **Games:** the [game profiles](#game-profiles): Enter launches one, Ins
-  makes one from the settings as they are, Del deletes one.
-* **States:** the [save state](REFERENCE.md#save-states) slots of the
-  game playing, with when each was saved, in which program, and a picture
-  of the screen: Enter loads one, Ins saves to one, Del empties one.
-  Ctrl+F9 opens the window on this page.
-* **Cheats:** finds a game's values in memory, such as its lives or money,
-  and changes them. Search for the value the game shows (or for any value,
-  when the game shows none, such as an energy bar), close the window and
-  play on until it changes, then narrow the addresses down: by the new
-  value, or by whether it changed, went up or went down. Once few are
-  left, Enter sets one's value, and Ins freezes it: the machine puts the
-  value back before every frame until the program ends. Values are 8, 16
-  or 32 bits, typed in decimal or hex (`0x1F`, `$1F`, `1Fh`), and the
-  search covers conventional memory, or all of it for games with DOS
-  extenders.
-* **Achievements:** [RetroAchievements](#retroachievements): on or off,
-  hardcore mode, logging in, the game's archive, and the game's
-  achievements and leaderboards.
-* **Stats:** how the machine runs, in two big numbers: **FPS**, the
-  frames a second the program draws (a retrace after which the picture
-  changed, or for a game that flips pages, each flip), beside the
-  display's refresh rate, and **CPU**, how much of one host core the
-  emulator takes (yellow from 75%, red from 90%, where it is close to not
-  keeping up). Each has a graph of the last 30 seconds, with their
-  average, least and most. Below them: the emulated CPU's speed in cycles
-  and in millions of instructions a second, the share of them the dynamic
-  recompiler ran, the share of the time the CPU sat halted waiting for an
-  interrupt, how long drawing the picture takes, and the recompiler's
-  translated code. **Ctrl+Shift+F12** (here or while a program runs)
-  shows the two numbers and small graphs of them at the bottom right of
-  the picture while the window is closed, and hides them again.
-
-Left and Right step a setting through its values, and move a slider (the
-volumes, the effects' mixes, the CRT's curvature and glow, the memory size
-and the joystick's deadzone) along its bar, as do their ◄ and ►. Enter (or
-a click on a setting's value) lists the values to pick from, or types or
-picks one: the list takes Up and Down, and a letter jumps to the next
-value starting with it. Tab switches pages, and the mouse works too.
-**F1** explains the setting under the cursor, or the page or dialog open,
-in a short help for getting games going; Up and Down scroll it, and Esc
-or F1 closes it. The
-display settings, the CPU speed, the disk speeds and noises, the joystick
-and the volumes take effect at once. The processor, the video card,
-expanded and upper memory and the sound hardware change once no program is
-running, so a game isn't left without the card it set up. The memory size
-takes effect the next time rust-dos starts.
-
-**F2** (or Ctrl+S) saves the settings of every page and the drives to the
-configuration file in use. Each setting gets a line: those you changed get
-their new values, and those the file has no line for yet are added with
-the value they had without one. Comments, `[autoexec]`, the lines of the
-settings you didn't touch (and their spelling of paths) and command-line
-options you didn't change stay as they are, and drives that the startup
-commands mount aren't copied into `[drives]`.
 
 ## Game profiles
 
@@ -2880,727 +4077,6 @@ restart and format it with FORMAT, then run Setup from the CD (`OEMSETUP`
 in `D:\WIN98` on an OEM CD). An OEM boot floppy lacks FORMAT.COM, which
 `A:\EXTRACT /L A:\ A:\EBD.CAB FORMAT.COM` puts on the floppy.
 
-### Direct3D on an S3 ViRGE
-
-With `machine=svga_s3virge` (or `svga_s3virgevx`) the PCI card is an S3
-ViRGE (PCI\VEN_5333&DEV_5631; the VX is DEV_883D), a 2D and 3D
-accelerator with 4 MB. S3's Windows 95 driver draws the desktop with its 2D
-engine and gives DirectDraw and Direct3D a hardware device, whose
-triangles the ViRGE's 3D engine draws: Gouraud shaded or textured
-(perspective corrected, filtered and mipmapped), Z buffered, fogged and
-alpha blended, at 16 or 24 bits per pixel. Its streams processor shows
-DirectDraw's overlays and S3D Toolkit games' page flips.
-
-Windows 95 finds the card at its next start. The first release of
-Windows 95 has no driver for it; S3's (version 4.03.00.2111, "S3 ViRGE,
-VX, DX & GX v3.12.01", on the VOGONS driver library) installs with **Have
-Disk** from a folder copied onto the disk image. DirectX's own runtime
-(DirectX 5 or later) is needed for Direct3D; DxDiag's **Test Direct3D**
-shows the ViRGE drawing. Direct3D needs the desktop at 16 or 24 bits per
-pixel ("High Color" or "True Color", which the ViRGE's driver has in
-place of 32 bits).
-
-`/api/status` of the debug server shows what the card's engines did under
-`video.s3.virge`.
-
-## 3dfx Voodoo Graphics
-
-[docs/3dfx.md](docs/3dfx.md) says which 3dfx card a game needs, and the
-settings and drivers for each. This section and the ones after it are the
-reference.
-
-`voodoo=true` in `[emulator]` puts a 3dfx Voodoo Graphics in the machine,
-the 3D card DOS and Windows 95 games of 1996-1998 draw with through Glide:
-
-```ini
-[emulator]
-voodoo=true
-cpu=pentium
-```
-
-The card is on the PCI bus as device 0, where DOSBox-X has it, with its
-16 MB of registers, frame buffer and texture memory at D0000000h (BAR0).
-Glide finds it through the PCI BIOS or ports CF8h/CFCh, programs it, and
-turns its output on: from then on the screen shows the card's picture
-instead of the VGA's, as a monitor on its pass-through cable does, until
-the game ends or turns the output off. The picture goes through the
-card's gamma table, which games set brighter than DOSBox-X shows them.
-
-* **DOS games** bring Glide with them (linked in, or `GLIDE2X.OVL` beside
-  the game) and run under a DOS extender such as DOS/4GW, which maps the
-  card's memory. Games made for the Voodoo Rush and later boards load
-  Glide from `GLIDE2X.OVL`, and the one of 3dfx's Voodoo Graphics driver
-  drives this card whatever board they were made for. It is 3dfx's and
-  doesn't come with rust-dos: the settings window's Emulator page
-  downloads it, after asking, from the driver (3.01.00) the Internet
-  Archive keeps, into rust-dos's configuration directory, and Z: has it
-  from then on, where they find it on the PATH (one beside the game
-  comes first). A game that looks for it while it is missing says so on
-  the screen. Such a game runs without rust-dos's DPMI host: the overlay
-  is a DOS/4G DLL whose start-up only works with DOS/4GW as its own
-  host, at level 0. Its accesses to the Pentium II's memory type range
-  registers, which it marks for 3dfx's Windows driver to catch, do
-  nothing.
-* **Windows 95** [booted from a disk image](#booting-a-disk-image) finds
-  the card as a "PCI Multimedia Video Device", which needs no driver:
-  games bring `glide2x.dll`, or install 3dfx's Glide runtime (and with it
-  `fxmemmap.vxd`).
-* **Windows 98 SE** finds the card at its next start as a "3Dfx Voodoo"
-  and installs its own driver for it from the Windows 98 CD, asking for the
-  CD's `WIN98` folder (give it the drive letter the CD has in this
-  machine), without a restart. The driver gives DirectDraw and Direct3D
-  the Voodoo as a second device beside the 2D card, and Direct3D games
-  that let you choose the 3D card draw on it. While a game draws on the
-  card, `video.voodoo.output` in the debug server's `/api/status` is
-  true.
-
-[docs/compatibility.md](docs/compatibility.md) has the settings of the
-games tried on the card: Tomb Raider's 3dfx and Rush patches under DOS,
-SubCulture on Windows 95 and Expendable on Windows 98 SE.
-
-The card swaps its buffers at the vertical retrace a game asks it to wait
-for, and reports the swaps still waiting and its busy state as the real
-one does, so games that pace themselves by it run at its refresh rate.
-The rate comes from the video timing Glide programs: the frame in the
-card's video registers at the pixel clock of its DAC's PLL, which Glide
-sets for the rate a game asks for (at 640x480, 60, 75, 85 or 120 Hz).
-Until a program sets that clock, the card runs its frame at 60 Hz. The
-built-in Windows' Glide does the same, and on a Voodoo3 sets the mode at
-the rate asked for. A rate the size doesn't have opens the size's own
-mode, as 3dfx's libraries do: 70 Hz at 640x400, 72 Hz at 512x384 on a
-Voodoo Graphics, and 60 Hz at the other sizes. The environment overrides
-the game's rate as they read it: `SST_SCREENREFRESH` on a Voodoo
-Graphics, `SSTV2_SCREENREFRESH` and `SSTV2_REFRESH_640x480` (by size) on
-a Voodoo2, and `FX_GLIDE_REFRESH` for Glide 3 on a Voodoo3. The
-triangles are drawn on up to four threads of their own: rust-dos keeps
-running the game meanwhile, and the picture is the same however many
-there are. Save states and rewind keep the card with everything in its
-memory.
-
-### 3dfx Voodoo2
-
-`voodoo_model=voodoo2` makes the card a Voodoo2 (device 0002h), with
-`voodoo_memory=8` or `12`:
-
-```ini
-[emulator]
-voodoo=true
-voodoo_model=voodoo2
-voodoo_memory=12
-```
-
-Besides what the Voodoo Graphics does, it has the Voodoo2's command FIFO
-(the packets its drivers send through memory instead of register writes),
-its triangle setup engine (vertices in, triangles drawn), its 2D blitter
-(screen to screen, CPU to screen, rectangle fills), the eight-bit
-palettes with alpha (texture format 6), a base address for each mipmap
-level, the wider video fields of its resolutions up to 1024x768, fog
-dithering and the clamping of iterated colours, depth and W (fbzColorPath
-bit 28). The board is SLI-less: one card, as Glide sees a single Voodoo2.
-
-DOS games that bring the Voodoo2's `GLIDE2X.OVL` or Glide 3 run as on the
-Voodoo Graphics.
-
-**Windows 98 SE** needs 3dfx's Voodoo2 driver, which neither Windows 98 nor
-rust-dos comes with: the Windows 98 CD has drivers for the Voodoo Graphics
-and the Banshee only. Unpack 3dfx's reference driver 3.03.00 (`rkv2dx6.exe`,
-which the [Internet Archive keeps](https://archive.org/details/rkv2dx6))
-into a folder Windows can read, such as a [host
-folder](#host-folders-in-a-booted-system). At its next start Windows finds
-the new PCI device and opens the Add New Hardware wizard: choose to search
-for the best driver, tick "Specify a location", give the folder that holds
-`voodoo2.inf`, and restart Windows when it is done. Device Manager then
-lists a "Voodoo2 3D Accelerator", and DirectDraw and Direct3D offer the card
-as "3dfxV2 (Voodoo2 DirectX 6 Driver)", which Direct3D games that let you
-choose the 3D card draw on.
-
-#### OpenGL games under Windows
-
-Windows' OpenGL never uses the Voodoo2 by itself, and a game that draws
-with OpenGL gets Microsoft's software renderer instead: it runs, but at a
-frame every few seconds, and the card draws nothing (the debug server's
-`/api/status` shows `video.voodoo.triangles` at 0). A real Voodoo2 had
-the same problem. `OPENGL32.DLL` asks the desktop's display driver which
-OpenGL driver to load and looks the name up under
-`HKLM\Software\Microsoft\Windows\CurrentVersion\OpenGLDrivers`. The
-Voodoo2 is a 3D card beside the display adapter, not one itself: the
-desktop runs on the S3 (or whichever card `machine` gives), whose driver
-names no OpenGL driver. 3dfx's driver copies its OpenGL driver to
-`C:\WINDOWS\SYSTEM\3DFXVGL.DLL` but can't make Windows pick it.
-
-Glide games and Direct3D games don't go through `OPENGL32.DLL` and need
-none of this. An OpenGL game reaches the card in one of three ways:
-
-- Games that let you name the OpenGL driver, such as Quake III Arena
-  (`r_glDriver 3dfxvgl`), load `3DFXVGL.DLL` themselves.
-- For a game without such a setting (Oni, for one), copy `3DFXVGL.DLL`
-  into the game's folder as `OPENGL32.DLL`. Windows loads a program's
-  DLLs from its own folder before `WINDOWS\SYSTEM`, so only that game
-  uses the card. This is what 3dfx's users did.
-- Copying it over `C:\WINDOWS\SYSTEM\OPENGL32.DLL` sends every OpenGL
-  program to the card, which only draws full screen: programs that draw
-  OpenGL in a window no longer can.
-
-The copy into the game's folder can be made by the game's configuration,
-which leaves the disk image as it is: the built-in DOS copies the file
-before the system boots, and the copy goes into the image's delta file,
-here in an [`-overlay`](#mounting-drives) folder for the game:
-
-```ini
-[drives]
-# Windows 98 with 3dfx's Voodoo2 driver and the game installed. The image
-# stays as it is: what is written to it goes into the folder overlays/oni
-# (made if it isn't there), as overlays/oni/win98.img.rdelta.
-C=~/images/win98.img -overlay overlays/oni -boot
-D=~/games/oni/disc.cue cdrom
-
-[autoexec]
-# Runs in the built-in DOS before the image boots.
-copy c:\windows\system\3dfxvgl.dll c:\progra~1\oni\opengl32.dll
-```
-
-The built-in DOS sees the disk's short names (`dir c:\progra~1` lists the
-folders under `Program Files`). The copy runs at every start and
-overwrites the one the last start made, so the setup needs nothing else,
-and the image under it can stay the base of other games' setups.
-
-### 3dfx gamma
-
-`voodoo_gamma` sets Glide's gamma through the environment variables
-`SST_RGAMMA`, `SST_GGAMMA` and `SST_BGAMMA`, all three to the value. They
-are put into the guest's environment while the card is on and the guest
-hasn't set them; a variable the guest sets, changes or removes is the
-guest's from then on, and only the variables rust-dos put in are taken out
-again when the setting goes off or changes. Changes take effect at the DOS
-prompt. A save state keeps which variables rust-dos put in, and loading one
-puts in the variables the settings want.
-
-### The 3dfx OpenGL renderer
-
-With `voodoo_renderer=opengl` the window shows the card's picture drawn
-again with OpenGL, at `voodoo_scale` times the card's resolution: the same
-triangles through the same pixel pipeline (textures, fog, blending, the
-depth buffer and the gamma table), with sharper edges and textures, and
-with the card's dithering unless `voodoo_dither=false` (see below).
-`voodoo_msaa` smooths the triangles' edges with multisampling (as many
-samples as the graphics card has, at most); antialiasing forced in the
-graphics driver's control panel doesn't reach the framebuffer objects it
-draws into. What games write into the frame buffer themselves (menus,
-movies) stays at the card's resolution. `voodoo_anisotropy` sharpens
-textures viewed at an angle, where the OpenGL driver supports
-anisotropic filtering.
-With `voodoo_readback=gpu`, the default, OpenGL's picture is the card's:
-the software rasterizer draws none of the triangles, and where something
-reads the card's memory (a game reading the frame buffer or blitting
-from it, a Banshee's or Voodoo3's 2D engine or GDI, a save state, a
-screenshot, the debugger) the rows it reads are read back from OpenGL,
-at the card's resolution and in its 16 bits a pixel. A read waits for
-the GPU, so the triangles into a buffer a game read back in the last
-second or so are drawn in software instead, where the next read waits
-only for the worker threads (on a Banshee or Voodoo3 the rows the 2D
-engine reads or draws into, and those the card shows from outside its
-3D buffers, count as read), and a triangle that takes its texture from
-a buffer the 3D drew reads that buffer back first, so that it draws
-with OpenGL's picture at the card's resolution. The pixels a game reads
-differ in small ways from the card's: OpenGL draws a triangle's edges by
-its own rules and keeps more depth precision, and where nothing dithers
-(see below) a blended triangle blends with 8 bits a colour. What a game
-writes itself, its frame buffer writes and the blitter's copies, reads
-back as it wrote it. A save state keeps OpenGL's pixels too, so states
-of the same scene saved on two GPUs differ slightly in the card's
-memory, and in what the game did with pixels it read back. Such a state
-loads on any machine. A game that needs the card's exact pixels, or
-states that match byte for byte, can have `voodoo_readback=exact`.
-Deterministic runs always get the exact pixels, as do the pixel
-counters: drawing left to OpenGL isn't counted, and once a game reads the
-counters everything after is drawn in software and counted. OpenGL keeps
-the alpha planes in the alpha of the colour buffer drawn into, so a game
-that blends by the alpha it wrote into the same buffer (Lands of Lore 2)
-stays on the GPU. Once a game blends by alpha written with another
-colour buffer, by the CPU or by the blitter, or tests depth against the
-alpha planes, everything after is drawn in software too.
-
-With `voodoo_readback=exact` the software rasterizer keeps the card's
-memory, which games read back and save states keep, but it only draws
-what can still be seen there:
-until something reads the memory, the drawing waits, and what a later
-fastfill covers before anything read it is never drawn, so the host's CPU
-only draws the frames something looks at. Frame buffer reads, save
-states, screenshots and recordings see the memory as if everything had
-been drawn; screenshots and recordings show the software picture, at the
-card's resolution (or through the CRT shader at the window's size, with
-`record_shader=true`). Drawing that is never drawn isn't counted by the
-card's pixel counters, until a game reads them: from then on everything
-is drawn and counted (`RUST_DOS_VOODOO_PRUNE=0` in the environment draws
-everything from the start). The CRT shaders draw their scanlines over the
-bigger picture. The libretro core draws it with the frontend's OpenGL (see
-[its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
-
-The textures' mipmap levels are the ones the card would take at
-`voodoo_scale` times its resolution: a pixel's level comes from how fast
-the triangle's S/W and T/W change and from its W, as the software
-rasterizer works it out, so at 1x they are the card's and at 2x one
-level sharper. A Banshee or Voodoo3 game whose screen shows none of the
-3D buffers (Giants copies its 3D into a desktop of another format) sees
-them only through the card's memory, at the card's resolution, and gets
-the card's levels at any scale: a game whose smaller levels are other
-pictures than its larger ones would otherwise change its look whenever
-what OpenGL drew is read back. The shader reads and filters the card's
-texels as the card does. With `voodoo_anisotropy` OpenGL filters them
-itself, from the card's level.
-
-The card stores 16 bits a pixel (5-6-5), and where a game turns
-dithering on (fbzMode bit 8, which Glide sets by default) it adds a 4x4
-or 2x2 ordered dither to each colour before it drops the low bits: a
-fine pattern of dots that hides most of the banding between its shades.
-The OpenGL buffers have 8 bits a component. With `voodoo_dither=true`,
-the default, the shader dithers each triangle's colour with the card's
-own matrix and rounding, and fastfills fill with the card's dithered
-colour, so at `voodoo_scale=1` an unblended triangle or a fastfill comes
-out pixel for pixel as the software rasterizer draws it. The matrix
-follows the card's pixels, so at 2x and above each dot of the pattern
-covers a block of 2x2 (or 3x3, 4x4) pixels of the bigger picture, as the
-card's picture looks enlarged. `voodoo_dither=false` keeps all 8 bits a
-colour: a cleaner, smoother picture, without the dot pattern or the
-banding the 16 bits leave. Games that don't dither look the same either
-way. It changes at once, in the settings window (*3dfx dithering*) too,
-from the next frame the game draws. When the OpenGL picture starts again
-from the card's memory (a new `voodoo_scale` or `voodoo_msaa`, a loaded
-state), it starts from the card's 16 bits, so with `voodoo_dither=false`
-the pattern shows until the game draws over it.
-
-The card blends a triangle with the 5-6-5 pixels under it before it
-dithers, and with fbzMode bit 19 it takes the dither back out of those
-pixels first. OpenGL blends after the shader, so for a triangle that
-blends and dithers the shader does the blend itself, the card's way,
-with the pixels under the triangle. Where the driver has a texture
-barrier (OpenGL 4.5, `GL_ARB_texture_barrier` or
-`GL_NV_texture_barrier`) the shader reads them from the buffer it draws
-into, behind a barrier. Otherwise, and with `voodoo_msaa`, they are
-copied out of the buffer before the triangle is drawn, and the shader
-reads them from the copy. With `voodoo_msaa` the copy keeps every
-sample, and the triangle is drawn once for each sample, which blends
-with what that sample holds, so two blended triangles that share an
-edge each blend with their own samples along it. That needs
-`GL_ARB_sample_shading` and multisample textures with as many samples
-as `voodoo_msaa`; without them each sample blends with its pixel's
-samples averaged, which leaves a dark line along such edges, and
-stderr says `blending pixels, not samples`. Drawing a blended triangle
-once a sample takes more of the GPU's time the more samples there are.
-At `voodoo_scale=1` such a triangle comes out as the software
-rasterizer draws it too. Triangles of one draw that overlap go after a
-barrier or over a copy each, so each blends with what the one before
-drew. The texture units' dithered level of detail (textureMode bit 4)
-follows the setting as well. Frame buffer writes and the Voodoo2's
-blitter show what the card's memory holds, dithered or not, whatever
-the setting. The Voodoo2's and Voodoo3's video output filter, which
-partly smooths the pattern on the card's own output, isn't modelled:
-with the setting on, the pattern shows as the card writes it.
-
-The dithering costs a few more instructions a pixel in the shader, and
-nothing on the host's CPU. On an Intel UHD Graphics 770 at the default
-2x, Oni (a Voodoo2 game that dithers every triangle) ran the same either
-way: 9.7 frames a second in a level and 38 in the menu, with the same
-CPU time and the same time in the 3dfx renderer's zones of the profile,
-as the emulated CPU, not the graphics card, holds it back there. Drawing
-nothing but dithered triangles, 200 screen-sized rectangles a frame at
-2x, the graphics card took 7% longer with dithering on (1083 against
-1010 ms a frame, about 0.3 ns more for each of the 246 million pixels):
-the most it costs, where filling pixels is all a frame does.
-
-A dithered draw that blends costs more: the CPU sorts its triangles into
-groups that don't overlap, and each group is a draw of its own after a
-barrier or a copy. On an RTX 4080 with the barrier, Unreal's flyby
-(which blends its lightmaps, coronas and particles with dithering on)
-and 3DMark 2000 ran as fast as with OpenGL's blending; through the copy,
-which a driver without a barrier takes, they lost about 3% of their
-frame rate where the host held them back.
-
-## 3dfx Voodoo3 and Banshee
-
-`machine=svga_voodoo3` makes the display adapter a 3dfx Voodoo3 3000
-with 16 MB, and `machine=svga_banshee` a Voodoo Banshee:
-
-```ini
-[emulator]
-machine=svga_voodoo3
-cpu=pentium_iii
-```
-
-The Voodoo Graphics and the Voodoo2 are add-on cards next to the display
-adapter, so Windows' own OpenGL and its desktop never use them. The
-Voodoo3 and the Banshee are the display adapter themselves: a VGA, a 2D
-engine, the Voodoo2's 3D engine and a video processor around one memory.
-3dfx's driver for them runs the desktop, Direct3D on the primary display
-and an OpenGL ICD (`3dfxOGL.dll`) that Windows' `opengl32.dll` hands GL
-programs to. The card has no room for `voodoo=true` next to it.
-
-On the PCI bus it is device 1 (vendor 121Ah, device 0005h, subsystem
-003Ah, the Voodoo3 3000 PCI; the Banshee is device 0003h): its registers
-at D0000000h, its memory at D2000000h and its I/O registers at D000h,
-where the BIOS leaves them. The card's VGA is rust-dos's, and so is the
-BIOS: DOS programs get the Super VGA's VESA modes, in their own memory,
-and the card's extended modes start when its driver turns them on. The
-2D engine does what the driver asks of it: fills, copies with all 256
-raster operations and colour keys, stretched copies, images from the
-CPU (one bit to 32 bits a pixel, YUV), lines, polylines and polygons,
-on linear or tiled surfaces. The video processor shows the desktop in 8,
-16, 24 or 32 bits through the colour lookup table, with the overlay and
-the hardware cursor.
-
-**Windows 98 SE** needs 3dfx's Voodoo3 driver (version 1.07.00 was tried,
-the [reference driver
-1.07.00](https://archive.org/details/3dfx-voodoo-3-reference-driver-1.07.00)
-on the Internet Archive), which the Windows 98 CD doesn't have. Unpack its
-`driver9x` folder where Windows can read it. At the next start Windows finds
-a "Standard PCI Graphics Adapter (VGA)": choose to search for the best
-driver, tick "Specify a location", give the folder that holds `Voodoo3.inf`,
-and restart Windows when it is done. Windows then finds a "Plug and Play
-Monitor": the card answers on its DDC lines with an EDID for a CRT that
-takes up to 1600x1200 (DxDiag calls it "rust-dos CRT"), and the VESA BIOS
-hands the same EDID to programs that ask through 4F15h. The card's
-interrupt, the vertical retrace one, is IRQ 11. The desktop was tried at
-640x480 and 1024x768 in High Color.
-
-The 3D engine draws into the buffers the driver points it at, linear or
-tiled, and a swap shows the buffer through the video processor. These
-were tried on Windows 98 SE with the 1.07.00 driver:
-
-* OpenGL through the ICD: the "3D Flying Objects" screen saver, and
-  Oni (2001), which runs its menus and its first level. A game set up
-  for a Voodoo2 may have 3dfx's MiniGL as `opengl32.dll` in its own
-  folder; take that away, so the game gets Windows' `opengl32.dll` and
-  the ICD.
-* DxDiag's DirectDraw and Direct3D tests, windowed and full screen,
-  with software and hardware rendering, from a 640x480 and a 1024x768
-  desktop.
-* Direct3D: Incoming (the GOG release, run without GOG's wrapper DLLs),
-  its menus and the first level of its arcade game.
-
-The 1.07.00 driver's Direct3D needs DirectX 7, as its readme says;
-Windows 98 SE comes with 6.1. With 6.1 the driver takes the structure
-DirectDraw gives it when a program starts Direct3D for the one DirectX 7
-has, and faults: the program's window stays white and the card draws
-nothing. Install DirectX 7.0 (`dx70eng.exe`) or later first. Some games
-draw wrongly with 1.07.00 and need the earlier 4.11.01.1151, from 3dfx's
-[Voodoo3 driver CD 1.2](https://archive.org/details/voodoo3v12), which
-runs on 6.1 too; [docs/compatibility.md](docs/compatibility.md) names
-them.
-
-With `voodoo_renderer=opengl` the window's OpenGL draws the card's 3D at
-`voodoo_scale` times its resolution, as for the Voodoo Graphics (see [the
-3dfx OpenGL renderer](#the-3dfx-opengl-renderer)), and puts the picture
-together as the card's video processor does: the desktop, the overlay (the
-window or screen a game shows its 3D through, scaled and in YUV too) and the
-cursor. A desktop or overlay that is a 16-bit buffer the 3D draws into, laid
-out as the 3D draws it, comes from the bigger picture; anything else (the
-Windows desktop, 8, 24 and 32-bit modes, YUV video) comes from the card's
-memory at its own resolution, with the drawing still queued for it done
-first. With `voodoo_readback=gpu`, the default, OpenGL alone draws the 3D,
-and what reads the card's memory reads back OpenGL's picture, as on the
-Voodoo2; with `voodoo_readback=exact` the software rasterizer keeps the
-memory as well, so programs read back what they would on the card.
-Screenshots and recordings show the software picture, which reads everything
-back. The libretro core draws a Banshee or Voodoo3 in software whatever
-`voodoo_renderer` says.
-
-The card is a port of 86Box's Banshee and Voodoo3 emulation
-(`vid_voodoo_banshee.c` and its 2D engine, by Sarah Walker, GPLv2, and
-the I2C code in `i2c_gpio.c` and `i2c_eeprom.c` for the DDC), checked
-against 3dfx's Voodoo3 specification.
-
-## Rendition Vérité
-
-`machine=svga_verite` makes the display adapter a Rendition Vérité V1000
-with 4 MB, for the DOS games that came in Vérité versions, and for the
-games Creative wrote for its 3D Blaster PCI, which is a Vérité:
-
-```ini
-[emulator]
-machine=svga_verite
-cpu=pentium
-memsize=32
-```
-
-The Vérité is a VGA with a RISC processor that runs microcode the game
-loads into its memory. The microcode takes drawing commands through the
-FIFO at the card's ports, or by DMA from lists in the PC's memory, and
-draws them with the card's pixel engine. Rust-DOS runs the RISC
-instruction by instruction, with its pixel engine, as Rendition's V2200
-Technical Specification describes the V1000's instruction set, so any
-microcode a program brings runs: Rendition's Speedy3D, the Windows
-drivers' 2D microcode, and the microcode of Creative's CGL modules.
-
-| Setting | Values | What it does |
-|---|---|---|
-| `verite_risc` | `lle` (default), `hle` | `lle` runs the RISC; `hle` carries out Speedy3D's and the Windows 2D microcode's commands without it |
-| `verite_mhz` | 1-1000 (25) | Million instructions a second the RISC runs: 25 as on the V1000 |
-| `verite_rom` | a file | A dump of a Vérité board's 128 KB ROM for the RISC; without one, Rust-DOS's own microcode loader |
-| `verite_irq` | 5, 7, 9, 10 (default), 11, 12, 15 | The card's interrupt line |
-
-They take effect at the DOS prompt. `hle` is the older way: faster, but
-only for Tomb Raider's and vQuake's kind of Speedy3D microcode and the
-Windows desktop. With `lle` the RISC is as fast as the card's, so games
-run at the frame rates they had on it.
-
-Games built on Rendition's DOS library (RRedline, "Speedy3D") find the
-card through the BIOS (INT 10h AX=158Dh describes the board), load
-`spd3d.uc`, and start the processor through the BIOS. Rust-DOS's BIOS
-has these functions; its VESA modes are the card's own, shown by its
-CRTC, with the memory's byte order set for the PC to see it linear.
-
-Tomb Raider's Vérité patch and vQuake run this way;
-[docs/compatibility.md](docs/compatibility.md) has their files and
-settings. vQuake needs the DPMI host it brings, CWSDPMI: its copy of
-Rendition's library finds the physical addresses for DMA by walking the
-processor's page tables, which the built-in host doesn't use.
-
-### 3D Blaster PCI games (CGL)
-
-Games for Creative's 3D Blaster PCI draw through Creative's Graphics
-Library (CGL): a module beside the game, `VRITB170.CGL`, `VRITC170.CGL`,
-`VRITE170.CGL` or `VRITI170.CGL`, runs on the PC and drives the card. It
-starts the card on a microcode loader it copies from the board's ROM,
-and sends that loader its own microcode. A dump of a real board's ROM
-(`verite_rom`) can provide the loader; without one, the ROM Rust-DOS
-gives the card has a loader of its own, which takes the microcode as the
-board's would. Copy all four modules into the game's folder: each game
-loads the one it was built for.
-
-These ran on the module's own microcode, from the 3D Blaster PCI's bonus
-CD and patches:
-
-* **Battle Arena Toshinden** Special Edition (`TSD` on the bonus CD;
-  install with its `SETUP`, choose 3D Blaster under Misc Options): menus
-  and fights.
-* **Rebel Moon** (`REBMOON` on the bonus CD; `REB3D` or `REBMOON
-  -3DBLASTER`): menus, mission briefings and the game.
-* **Flight Unlimited** (installed from `INST\INITIAL.EXE` on the bonus
-  CD): the lobby in 3D and the menus.
-* **Hi-Octane** 1.2 with its CGL executable: menus and races. Its menus
-  read the keyboard once a frame: hold the keys a little.
-
-Other games for the card (Actua Soccer, Screamer 2 and Rally, Euro 96,
-Battle Race) haven't been tried.
-
-### Windows 95 on the Vérité
-
-Windows 95 ran on the Vérité with `verite_risc=hle` and Rendition's
-V1000 reference driver (2.1 beta 2, `v1k_b2_1.zip`), installed with
-**Have Disk** under Display Properties, Settings, Advanced Properties,
-Change. The driver tests the card's processor and starts its 2D
-microcode (`v10002d.uc`) through the card's debug registers, sets the
-modes through the card's own CRTC, uses the Bt485 RAMDAC's palette and
-hardware cursor, and draws through the microcode: fills, copies on and
-between surfaces, one-bit images, text, brushes and clipping. The
-desktop, windows, MS-DOS Prompts (windowed and full screen) and Paint
-were tried at 800x600 in High Color and at 640x480 in 256 colours and in
-True Color. With `verite_risc=lle` the 2D microcode itself runs; Windows
-hasn't been tried that way yet, nor Direct3D and OpenGL, which load
-Rendition's 3D microcode the same way.
-
-The driver refuses True Color at 1024x768 at the refresh rate it picks
-(85 Hz), as it would on the card: a Windows that ran in that mode on
-another card shows a black screen after the driver is installed. Set
-another mode before restarting, or in Safe Mode. Windows 95's own
-Rendition driver, from the OSR2 CD, hasn't been tried.
-
-## ATI 3D RAGE
-
-`machine=svga_ati_3drage` makes the display adapter an ATI 3D RAGE
-(mach64 GT) with 4 MB on the PCI bus; `svga_ati_3drage2` makes it a 3D
-RAGE II (mach64 GT-B):
-
-```ini
-[emulator]
-machine=svga_ati_3drage
-cpu=pentium_ii
-memsize=128
-```
-
-The card is a VGA with ATI's accelerator CRTC, hardware cursor, video
-overlay, 2D draw engine and 3D engine. Its 16 MB aperture (BAR0) holds
-the VESA linear frame buffer, and the registers in its top 2 KB; the
-registers below 40h are also ports (256 of them at BAR1, or the
-"sparse" ones from 2ECh with PCI configuration register 40h). Its BIOS
-has ATI's signature and tables in the ROM and ATI's extended services
-(INT 10h AH=A0h, and the far entry at C000:0064h that ATI's Windows
-driver calls), whose mode tables list 640x480 to 1280x1024 and the low
-resolutions 320x200, 320x240, 400x300 and 512x384. VESA modes are set
-through the accelerator CRTC, as ATI's BIOS sets them.
-
-The 2D engine draws fills, copies, one-bit images from the host or the
-memory, patterns, lines, polygons and 24-bit pixels as ATI's drivers
-use them. The 3D engine draws the trapezoids ATI's Direct3D HAL and
-ATI3DCIF send: Gouraud shading, textures in all of the chip's formats
-with mipmaps, bilinear filtering and perspective, the Z buffer, alpha
-blending, fog and the texel colour key; the scaler stretches images
-into rectangles. Everything is drawn at once, so the engine never
-keeps the program waiting.
-
-Windows 98 SE finds the card and installs its own driver for it (ATI
-Rage/Rage II PCI, `ati_m64`, from the Windows CD): the desktop at up to
-1024x768 in High Color, MS-DOS Prompts in a window and full screen, and
-DxDiag's DirectDraw and Direct3D 7 tests pass on both chips. ATI's own
-driver 4.35 (the mach64 driver CD's `WIN95` folder, with ATI3DCIF) runs
-too, but its `MACXW4.INF` leaves the 3D RAGE (device 4754h) out of its
-models list: add the line
-
-```ini
-%PCI\VEN_1002&DEV_4754_ENU.DeviceDesc%=MACXW4_PCI_English, PCI\VEN_1002&DEV_4754
-```
-
-under `[Mfg]` in a copy of the folder, and install it with **Have Disk**.
-**Wipeout for 3D Rage** (the game ATI bundled with the card) runs with
-it through ATI3DCIF. Windows sees the 3D RAGE II as new hardware after
-a switch from the 3D RAGE, as it would after changing the card.
-
-`RUST_DOS_MACH64_TRACE=<dir>` writes every register access and BIOS
-call to `<dir>/trace.txt`.
-
-## ToadForce
-
-`machine=svga_toadforce` makes the display adapter a ToadForce, a card
-Rust-DOS defines itself: no such hardware existed. To DOS programs it is
-the `svga` adapter, with the same VESA modes. Windows programs that
-Rust-DOS runs without Windows get its video memory (`toadforce_memory`,
-64 MB by default) for the desktop and for DirectDraw's surfaces, and
-DirectDraw modes up to 1600x1200 at 8, 16 and 32 bits a pixel;
-DirectDraw's colour fills and its copies between surfaces in video
-memory are the card's own commands. Direct3D up to version 8 draws on
-it, in 16- and 32-bit modes, with textures up to 2048 pixels a side in
-16- and 32-bit, compressed (DXT1 to DXT5) and bump-map formats, four
-textures at once, cube maps, and a 24-bit depth buffer with stencil. The
-card transforms and lights vertices itself: Direct3D 7 lists its T&L HAL
-device, and Direct3D 8 offers hardware vertex processing. Games that
-need those, which a Voodoo3 lacks, run on this card
-([docs/compatibility.md](docs/compatibility.md) names them). OpenGL 1.1
-draws on it too, in a window or full screen, in the desktop's 16 or 32
-bits of color with a 16-bit depth buffer. Your graphics card draws its
-3D through OpenGL where the window has OpenGL 3.2, and the processor
-draws it elsewhere.
-
-What the card doesn't do, and what to choose instead:
-
-* Games that need pixel shaders: the card has none, and neither has
-  any other `machine`. Vertex shaders run on the processor, for a game
-  that asks Direct3D 8 for software or mixed vertex processing.
-* OpenGL games that need more than the built-in OpenGL 1.1 has: a
-  stencil buffer, more than two textures at once, compressed textures
-  or cube maps. Where the game also has a Direct3D renderer, pick that
-  in its options.
-* Glide games: `voodoo=true`, or `machine=svga_voodoo3` or
-  `svga_banshee` ([3dfx Voodoo Graphics](#3dfx-voodoo-graphics)).
-* Games on a Windows 95 or 98 disk image. No booted system has a driver
-  for the card, and Windows uses it as a plain VGA there: give the
-  image a card it has a driver for, such as `svga_voodoo3`
-  ([docs/win9x-howto.md](docs/win9x-howto.md)).
-* A game's brightness or gamma slider: the card has no gamma ramp, and
-  the picture stays as it is.
-* Sharper pictures than the game's own: the card draws at the
-  resolution the game sets, without anti-aliasing. Set a higher
-  resolution in the game.
-
-```ini
-[emulator]
-machine=svga_toadforce
-```
-
-The machine has 128 MB of memory with this card unless `memsize` says
-otherwise, which is what the games it is for recommend, and a Pentium
-III unless `cpu` says otherwise (see `cpu` in
-[`[emulator]`](#emulator)).
-
-| Setting | Values | What it does |
-|---|---|---|
-| `toadforce_memory` | 32, 64 (default), 128 | The megabytes of video memory the card has |
-| `toadforce_renderer` | `auto` (default), `opengl`, `software` | What draws the card's 3D: your graphics card through OpenGL, or Rust-DOS on the processor |
-| `toadforce_gamma` | `off` (default), 0.1 to 2 | A gamma the card's 16- and 32-bit pictures are shown with, after the game's own |
-
-A change of `toadforce_memory` takes effect at the DOS prompt, and one
-of `toadforce_renderer` or `toadforce_gamma` at once. The card's
-registers and commands are specified in
-[docs/toadforce-spec.md](docs/toadforce-spec.md).
-
-If Rust-DOS crashes while it sets up the OpenGL renderer, which happens
-inside your graphics driver, the next start with `auto` on the same
-driver and Rust-DOS version uses the software renderer and says so in
-the log. Updating the driver, or starting with
-`toadforce_renderer=opengl`, tries OpenGL again. The mark it keeps for
-that is the file `toadforce-opengl-setup` next to `rust-dos.log`.
-
-The card's 16- and 32-bit modes go through its gamma ramp, which games
-set for their brightness controls and fades through
-`SetDeviceGammaRamp`, DirectDraw's gamma control and Direct3D 8's
-`SetGammaRamp`. `toadforce_gamma` adds a gamma of your own after it, as
-Glide's gamma does on a 3dfx card: a value v from 0 to 1 is shown as
-v^(1 / gamma), so above 1 the dark colours come up. It changes the
-screen, screenshots and recordings, not what the program reads or a
-saved state.
-
-With `auto` and `opengl`, OpenGL draws the triangles and the card's
-memory gets the pixels when the program or the screen reads them. The
-pictures are those of `software` to within a step or two of a color
-channel where textures are filtered or a 16-bit screen is blended.
-`software` draws every pixel on the processor, the same on every
-computer: use it when a picture looks wrong with OpenGL, and report
-the game. The two differ only where OpenGL isn't there: `auto` then
-draws on the processor without a word, and `opengl` says so in the
-log first. A run with `--deterministic` draws on the processor whatever
-the setting. Drawing on the processor is too slow for some games at
-their usual resolutions: choose a lower one in the game there.
-
-## PowerVR PCX1 and PCX2
-
-`powervr=pcx2` in `[emulator]` puts a PowerVR PCX2 in the machine, NEC's
-3D chip on the Matrox m3D and VideoLogic Apocalypse 3Dx boards, for the
-DOS games that came in PowerVR versions. `powervr=pcx1` puts in the chip
-before it instead, the PCX1 of the VideoLogic Apocalypse 3D and NEC's
-PC3D Engine:
-
-```ini
-[emulator]
-powervr=pcx2
-cpu=pentium
-memsize=32
-```
-
-Unlike a 3dfx card, the PCX2 has no picture of its own. Games give it the
-scene as planes and lists of the objects in each 32x32 tile, in the PC's
-own memory, and their textures in its 4 MB; it works out which surface
-each pixel shows (with hidden surfaces removed before anything is
-textured, and translucent surfaces sorted by the card), textures and
-shades the tile, and writes the finished pixels over the PCI bus into the
-VGA card's VESA linear frame buffer. So the picture comes through the
-display adapter: any `machine` with a VESA BIOS will do, screenshots and
-recordings show it, and nothing else in the window changes.
-
-The card is on the PCI bus as device 2 (vendor 1033h, device 0046h for
-the PCX2, 002Ah for the PCX1), its registers at D4000000h (BAR0) and its
-texture memory at D4400000h (BAR1), INTA# on IRQ 11, which it shares with
-a Banshee or Voodoo3 as PCI cards do: the line stays up while either card
-holds it. A render takes the time the chip's ISP and TSP would take (at
-66 MHz on the PCX2, 60 on the PCX1), then sets its
-end-of-render status (and interrupts, for games that unmask it); the
-tiles are drawn on as many threads as the host has, and the picture is
-the same however many there are. Save states and rewind keep the card
-with its texture memory.
-
-Tomb Raider's PowerVR patch, with a version for each chip, runs on both
-under its DOS/4GW; [docs/compatibility.md](docs/compatibility.md) has
-its settings, its keys and what to know about its saved games.
-
-The PCX1 does without some of what the PCX2 added. It has no bilinear
-filtering: where a texture's two mip map levels meet, it blends a texel
-of each instead, so textures look blockier than on a PCX2
-(`powervr_filter=bilinear` smooths them anyway). Games also hand it their
-scenes in fixed point rather than in floating point; the picture is the
-same.
-
-How the card draws follows Imagination's own driver sources and simulator
-of the chip, which they released under the MIT licence
-(github.com/powervr-graphics/PowerVR-Series1).
-
 ## Networking at a glance
 
 Rust-DOS has two separate pieces of networking, and most people only ever
@@ -3978,204 +4454,6 @@ each other's frames, as cards on one Ethernet would.
 
 rust-dos's LAN is its own protocol: it doesn't reach DOSBox's IPX servers,
 and `IPXNET` lines in imported DOSBox configurations are left out.
-
-## Frame rate cap
-
-`fps_cap` (`auto` by default, `off`, or 10 to 240) is the most frames
-a second a program may show, whichever card shows them, for an even
-pace without lowering `cycles`, and so the host doesn't draw frames
-nobody sees. Some games misbehave above 60 (Test Drive 4).
-`voodoo_fps_cap` is its old name: a file with that line still sets it,
-and the settings window writes the line back as `fps_cap`. `--fps-cap`
-sets it for one run, the settings window has it on its Display page,
-and the libretro core among its Video options.
-
-- `auto` holds a frame that doesn't wait for the display's retrace to
-  60 a second, and holds none that does: those show at the display's
-  rate, as on the real machine. A program that waits for the retrace
-  of a 72, 75 or 85 Hz mode shows a frame at each, and one that counts
-  its frames for its timing keeps its speed. A program synced to a 100
-  or 120 Hz mode shows 100 or 120 frames a second, and the host draws
-  each of them. A Glide game sets such a mode when its settings ask for
-  it, under DOS, the built-in Windows or a Windows booted from a disk
-  image with the card's own driver (see [3dfx Voodoo
-  Graphics](#3dfx-voodoo-graphics)).
-- A number holds every frame to that rate, also one that waits for the
-  retrace of a faster display: on a host too slow for a game's 100 or
-  120 Hz mode, `fps_cap=60` holds it to 60.
-- `off` holds none.
-
-A cap below the rate a game draws at by itself slows a game whose
-logic is tied to its frames: Glover's logo screens, drawn at 20 frames
-a second, last longer under `fps_cap=10`.
-
-Each frame has a turn, a frame time (1/60 s at 60) after the last
-one's, in emulated time:
-
-- A program faster than the cap waits for the turn, so its frames come
-  at the cap's rate, a frame time apart.
-- A program slower than the cap shows each frame as soon as it is
-  done, and keeps its own rate. The cap holds none of its frames,
-  uneven as they may be.
-- A frame that comes after its turn shows at once. If it is no more
-  than three frame times late (50 ms at 60), the turns keep their
-  schedule: the frames after it show sooner than a frame time apart
-  until they are back on it. The program gets the time back and shows
-  the cap's rate, and a game whose logic steps once a frame keeps its
-  speed.
-- From a frame later than that (a load, a menu that steps its
-  simulation for a tenth of a second between frames) the schedule
-  starts again: the next frame shows as soon as it is done, and the
-  ones after it wait a frame time each. A game that draws in bursts
-  between such steps therefore counts fewer frames under a cap than
-  the cap's number. Grom's menu at 150,000 cycles runs a step of its
-  menu script, 110 to 200 ms, once 33 ms have passed since the last
-  one ended, and draws frames in those 33 ms: twelve, 2.8 ms apart,
-  without a cap, 71 a second, of which a 60 Hz display shows two or
-  three a step. Under a cap of 60 four of them show, 25 a second, and
-  the steps come as often as without it. No rule of the cap shows
-  more of them a refresh apart: the cap's rate needs steps short
-  enough to leave room for it, which `cycles=max` gives the menu (60 a
-  second).
-- `cycles=auto` counts the frames a program shows through the cap, as
-  it counts those a display shows of a game that waits for its
-  retrace. A program held to the cap's rate settles where that game
-  does, coming down by steps that try less instead of at once. One
-  that shows fewer, as Grom's menu does between its steps, gets the
-  speed that shows the cap's rate. One that shows fewer because it
-  draws fewer, such as a game that draws 30 frames a second on the
-  clock or a movie, shows no more with more speed and settles where it
-  does without the cap.
-- A present that waits for the display's retrace (a flip, or a swap
-  with a swap interval) is already held to the display's rate. Under
-  `auto`, or with the cap at that rate or above it, the cap holds none
-  of its frames. With a number below it, the frame waits for its turn
-  and then for a retrace, and shows at the retrace nearest its turn,
-  which may be up to half a retrace before it, and counts at its turn:
-  a cap of 30 on a 60 Hz display shows every other retrace, though the
-  display's rate is never exactly 60.
-
-The cap counts in the machine's emulated time only: its turns, the time
-a frame comes and the time a held frame waits for. While a frame waits,
-emulated time runs on as it does for any wait, and with nothing else to
-run the machine idles to the turn. How fast the host runs the machine
-changes only how long that takes on the wall clock. So a run with
-`--deterministic` holds the same frames until the same emulated times
-each time, and a fixed `cycles` that runs slower than real time holds
-no frame that is late in emulated time.
-
-While a frame waits, the program waits with it, and nothing else does:
-
-- On a 3dfx card, the swap waits, and the program waits with it as at a
-  HLT, while interrupts and their handlers go on, so its clock, music
-  and sound keep time.
-- Under the built-in Windows, the thread that presents blocks as it
-  does for a retrace and calls again at its turn; the program's other
-  threads, its timers and its sound go on.
-
-What counts as a frame:
-
-- the 3dfx card's swaps (Glide under DOS and under the built-in
-  Windows, the Voodoo2's OpenGL and DirectDraw, and a Banshee's or
-  Voodoo3's);
-- DirectDraw's flips of the primary surface, and Direct3D 8's full
-  screen `Present`, which flips, on every display adapter (a ToadForce,
-  a Banshee or Voodoo3, the software SVGA);
-- `SwapBuffers` of an OpenGL context in a window, and of a
-  double-buffered one full screen, and Direct3D 8's `Present` in a
-  window, which copy the back buffer to the screen (on a ToadForce,
-  with the card's own copy).
-
-It doesn't apply to DOS programs on a VGA, an EGA or a VESA screen:
-they have no call that hands over a frame, and their frames come at the
-display's retraces, which they wait for themselves. Nor does it apply
-to blits to the primary surface, to GDI drawing, to locks and device
-contexts of the primary surface, or to a single-buffered OpenGL
-context's `glFlush`. A program may blit one frame in many parts (a
-sprite and what it covered, each changed rectangle), and the time
-between blits can't tell those parts from whole frames: holding each to
-the cap's rate would hold a game that blits ten parts a frame to 6
-frames a second.
-
-With `vrr=true`, while a program shows its frames through the cap (one
-in the last second) and the cap is below the display's rate, the window
-refreshes at the cap's rate, as it does at the display's otherwise.
-
-The debug server's `/api/stats` counts what the cap did since the
-machine started, in `fps_cap`:
-
-- `shown`: the frames that went through the cap. A present the cap
-  leaves to the display's retrace isn't among them.
-- `held`: those that waited for their turn.
-- `late`: those that came after it.
-- `reanchors`: those late enough for the schedule to start again.
-- `dropped_ms`: the time held frames waited because the schedule had
-  started again, which they wouldn't have waited on the turns before.
-
-A game whose logic is tied to its frames ran slow for the cap by at
-most `dropped_ms` out of the emulated time. Near zero, the cap cost it
-no time. If it grows by seconds a minute in a game that plays slow,
-raise the cap or turn it off. The settings window's Stats page shows
-the same counters a second (with `dropped_ms` as the share of the time
-lost) while a program shows its frames through the cap, and the
-performance overlay (Ctrl+Shift+F12) the frames held and the time lost
-under its graphs.
-
-Benchmarks and timedemos report at most the cap: turn it off
-(`fps_cap=off`, `--fps-cap off`) to measure how fast a game can draw.
-A display faster than 60 Hz with `vrr` shows more frames with a higher
-cap. `/api/status` has the cap in force as `video.fps_cap` (`"auto"`,
-a rate, or null for off), for a script to check before it quotes a
-frame rate, and the debug server's `POST /api/fps_cap` changes it for
-the rest of a run. The almanac may set the cap for a game, as it sets
-the machine's settings (`almanac_auto`), to `auto`, a rate or `off`.
-
-## CRT shaders
-
-`shader` in `[emulator]`, or the settings window's Display page, shows the
-picture as a monitor of the time would have:
-
-* `scanlines`: a flat screen with the scanlines of a VGA monitor. Bright
-  lines are wider than dark ones, and light glows a little around them.
-* `aperture`: a flat aperture grille monitor, with red, green and blue
-  phosphor stripes over the scanlines.
-* `crt`: a curved tube with a shadow mask, rounded corners and darker
-  edges. The mouse follows the curve. `crt_curvature` sets how far it
-  bends, in percent: `0` is flat, `100` the most, `30` the default; and
-  `crt_glow` how much light glows around its bright parts: `0` none,
-  `100` the most, `20` the default. The Display page has both below the
-  shader while the CRT look is chosen.
-
-For pixel art, `xbrz` scales the native picture 2x with xBRZ instead of
-giving it a CRT look. It recovers the original pixels of doubled VGA
-modes before scaling. The `scale` setting still controls the window's
-size independently. Cursors and settings overlays stay sharp, and the
-same native input is used in the browser and in shader captures.
-
-For magnified output, xBRZ reuses a filtered 2x base picture until the
-native pixels or monochrome tint change. Resizing and overlays reuse
-that base. Smaller outputs resolve directly from the native picture.
-If the extra render targets are unavailable, the direct shader is used.
-
-Choose `xbrz` when you want to magnify pixel art, such as DOS games,
-while smoothing jagged diagonal edges. It works well with Ultima VI,
-Dungeon Master II and Blood and Magic.
-
-With `monochrome`, the aperture grille and the shadow mask are left out, as
-a monochrome tube has a single phosphor; the scanlines, glow and curve stay.
-
-A VGA shows its 200-line modes double-scanned, so each of the 400 lines is a
-scanline. The looks need a few screen pixels per line: at scale 1 the
-scanlines and phosphors fade out, and they look best at scale 3 or more, or
-in fullscreen on a large screen. At exactly 2x or 3x with `aspect=none`
-the scanlines are sharpest.
-
-The shaders need OpenGL 3 (WebGL 2 in the browser). Without it, as with
-`SDL_VIDEO_DRIVER=dummy`, rust-dos draws the picture with SDL's renderer as
-before and says why at startup; the log names what draws the picture.
-Screenshots and video recordings show the shader with `record_shader=true`
-(see `capture_dir` in [`[emulator]`](#emulator)); animations and
-debug-server screenshots always show the plain picture.
 
 ## 3D scene and VR
 
@@ -4559,3 +4837,38 @@ It exits with 1 when the archive doesn't open, a group isn't in it, or a
 file fails its check. A game profile's
 [`[install]`](#unpacking-the-installer) section unpacks the same
 archives from the game's drives.
+
+## Shipping Rust-DOS with a game
+
+A store or an installer that ships Rust-DOS with a game, and keeps it at
+the version it tested, sets it up like this:
+
+* Ship one configuration file for the machine, `rust-dos.conf`, next to
+  the executable or passed with `--config FILE`. Put
+  `version_check=never` in its `[emulator]` section: Rust-DOS then never
+  asks rust-dos.com for a newer version or says there is one, and the
+  setting is left out of the settings window. It has to be in this file:
+  a game profile's settings apply only when the game launches, after the
+  check would have started.
+* Put each way of starting the game (the game, its setup program, a
+  network game) in a [game profile](#game-profiles) in the `games` folder
+  beside that file, and give each its own shortcut:
+  `rust-dos --config rust-dos.conf --game "Setup"`. This is what GOG's
+  pairs of DOSBox files (`dosboxGame.conf` and `dosboxGame_single.conf`)
+  become; `--import` turns them into profiles. An imported profile's
+  `[drives]` paths are absolute, to the folders the game was imported
+  from: make them relative, to the `games` folder, before shipping it.
+
+Rust-DOS needs no internet connection. Nothing it does online is needed
+to run a game, and each request runs on a thread of its own with a time
+limit, so without a connection it goes on as it would with one:
+
+* The version check (off with `never`) waits at most a second at
+  startup, and a failure only goes to the console.
+* The sound ROM, Glide overlay and VR scene downloads, and the modem
+  phonebook's list of boards, are asked for only from the settings
+  window, and say there when they fail.
+* RetroAchievements asks the site only for a player who has logged in
+  (a saved login logs in again at startup), on its own thread.
+* `almanac_auto` is off by default. When it is on, a program started
+  from the prompt waits up to ten seconds for the almanac's answer.
