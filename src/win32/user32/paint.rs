@@ -1037,13 +1037,21 @@ pub fn ensure_desktop(cpu: &mut Cpu) {
         let (x, y) = user(cpu).input.cursor;
         cpu.bus.mouse.warp(x, y);
         // Windows 98 paints the desktop as it starts, before any program
-        // shows a window. The window whose showing brings the desktop up
-        // here is visible already, so the background goes under it too:
-        // a CS_SAVEBITS window (a message box) keeps the screen under it
-        // and gives it back as it hides, which would be the black of the
-        // new mode instead of the background.
-        let all = Region::from_rect(Rect::new(0, 0, w, h));
-        fill_background(cpu, &all, 0);
+        // shows a window. Here windows may be visible already: the one
+        // whose showing brings the desktop up, or those a DOS session
+        // that ends gives the screen back to. `redraw_screen` paints the
+        // background where no window covers it, and this paints it under
+        // them: a CS_SAVEBITS window (a message box) keeps the screen
+        // under it and gives it back as it hides, which would be the
+        // black of the new mode instead of the background.
+        let state = user(cpu);
+        let mut under = Region::new();
+        for top in state.top_levels() {
+            if state.window(top).is_some_and(|w| w.style & WS_VISIBLE != 0) {
+                under = under.or(&shape(state, top));
+            }
+        }
+        fill_background(cpu, &under, 0);
     }
     super::input::desktop_started(cpu);
     redraw_screen(cpu);
