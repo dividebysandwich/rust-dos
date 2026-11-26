@@ -23,10 +23,14 @@
 //!   up, in order, each getting the palette's color; the entries it
 //!   doesn't use are then free. A free entry that keeps another
 //!   palette's color, or one a palette in the background holds, isn't
-//!   shared. Windows 95 OSR2.5 and 98 SE do this (#2133's probes): a
+//!   shared. Windows 95 OSR2.5 and 98 SE do this (#2139's probes): a
 //!   palette realized in the foreground after another one, kept or
 //!   deleted, with free entries above it and a palette in the
-//!   background holding some, takes the entries from 10 up.
+//!   background holding some, takes the entries from 10 up. #2024's
+//!   probe on Windows 95 OSR2.5, which read the mapping from the DDBs
+//!   a 16-bit program made, saw the free entries taken first; the same
+//!   steps in a Win32 program that read the system palette gave 10 up
+//!   (#2136).
 //! - In the background, one without PC_RESERVED or PC_NOCOLLAPSE
 //!   takes an entry of the same color if there is one: a static one,
 //!   one another palette took, or a free one, which keeps the color it
@@ -1091,14 +1095,14 @@ fn realize_handle(cpu: &mut Cpu, hpal: u32) -> (u32, bool) {
         // one (which keeps the color it last had), but not another
         // palette's PC_RESERVED one.
         let color = rgb(e);
-        let shares = |i: usize| {
+        let matchable = |i: usize| {
             if primary {
                 uses[i] == USE_STATIC
             } else {
                 uses[i] != USE_RESERVED || owners[i] == hpal
             }
         };
-        let same = (0..256).find(|&i| shares(i) && rgb(system[i]) == color);
+        let same = (0..256).find(|&i| matchable(i) && rgb(system[i]) == color);
         let Some(i) = same else {
             pending.push(k);
             continue;
@@ -1529,7 +1533,7 @@ mod tests {
     /// In the foreground a palette takes the entries from 10 up, those
     /// the palette before it holds included, though others are free; an
     /// entry of a free entry's old color doesn't take it. Windows 95
-    /// OSR2.5 and 98 SE do so (#2133's probes palprob3 and palprob4).
+    /// OSR2.5 and 98 SE do so (#2139's probes palprob3 and palprob4).
     #[test]
     fn a_foreground_palette_takes_the_entries_from_the_bottom() {
         let (mut cpu, hdc) = palette_machine();
@@ -1577,7 +1581,8 @@ mod tests {
     }
 
     /// A palette realized in the foreground takes the entries a palette
-    /// in the background holds, as Windows 98 SE does.
+    /// in the background holds, as Windows 98 SE does, and puts its
+    /// colors there; the entries it doesn't take keep their colors.
     #[test]
     fn a_foreground_palette_takes_a_background_palettes_entries() {
         let (mut cpu, hdc) = palette_machine();
@@ -1594,6 +1599,9 @@ mod tests {
         let r3 = reserved_palette(cpu, shade(4).take(134));
         let front = realize_handle(cpu, hdc, r3, true);
         assert_eq!(front, (10..144).collect::<Vec<u8>>());
+        let system = system_colors(cpu);
+        assert_eq!((system[110], system[143]), (100 | 4 << 8, 133 | 4 << 8));
+        assert_eq!((system[144], system[159]), (34 | 3 << 8, 49 | 3 << 8));
     }
 
     /// In the background a free entry gets the palette's color; the
