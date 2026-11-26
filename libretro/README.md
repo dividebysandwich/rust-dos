@@ -174,8 +174,8 @@ again.
 ## The 3dfx Voodoo with OpenGL
 
 With the core options **3dfx Voodoo** on and **3dfx renderer** set to OpenGL
-(`renderer=opengl`), the frontend's OpenGL draws the card's picture, as the
-program's window does: at **3dfx OpenGL scale** times its resolution
+(`voodoo_renderer=opengl`), the frontend's OpenGL draws the card's picture,
+as the program's window does: at **3dfx OpenGL scale** times its resolution
 (`voodoo_scale`), with **3dfx OpenGL antialiasing** (`voodoo_msaa`) and
 **3dfx OpenGL dithering** (`voodoo_dither`, the card's dither pattern, on by
 default). That needs RetroArch's `glcore` or `gl` video driver: OpenGL 3, or
