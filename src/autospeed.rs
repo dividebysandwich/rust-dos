@@ -1299,14 +1299,14 @@ impl Mark {
 
     /// Since `from`: the share of the instructions run that the processor
     /// sat halted, leaving out its waits for the host's disk and the turns
-    /// of Win32 threads skipped while another could run and had work
+    /// of Win32 threads skipped while another that works could run
     /// (`timer::waited`), and the bytes a second moved on drives.
     fn since(&self, from: &Mark) -> (f64, f64) {
         let ran = self.icount.saturating_sub(from.icount).max(1) as f64;
         let idle = self.idle.saturating_sub(from.idle) as f64;
         let disk = self.disk_wait.saturating_sub(from.disk_wait) as f64;
         let handed = self.handed_over.saturating_sub(from.handed_over) as f64;
-        let halted = (crate::timer::waited(ran, idle, handed) - disk).max(0.0);
+        let halted = (crate::timer::waited(idle, handed) - disk).max(0.0);
         let seconds = self.ns.saturating_sub(from.ns) as f64 / 1e9;
         (halted / ran, (self.io - from.io) as f64 / seconds)
     }
@@ -1358,9 +1358,10 @@ pub struct Measurement {
     /// halted (waiting for an interrupt). A slow drive's time, which a
     /// disk service waits out (`Clock::disk_wait`), isn't halted: the
     /// program asked for the data, not to wait. Nor is a Win32 thread's
-    /// busy-wait loop that the idle skip skipped while another thread could
-    /// run (`Clock::handed_over`): on Windows the loop spins until its
-    /// turn ends, and the other thread's work is what more speed brings.
+    /// busy-wait loop that the idle skip skipped while another thread that
+    /// works could run (`Clock::handed_over`): on Windows the loop spins
+    /// until its turn ends, and the other thread's work is what more speed
+    /// brings.
     /// Dark Omen's main thread spins on GetTickCount, PeekMessageA and
     /// DirectInput while its movie decoder works, for 60% of the time at
     /// 150,000; counted as halted, the speed held at 112,500, where the
@@ -3195,9 +3196,20 @@ impl AutoSpeed {
                 up(self, FIRST_STEP, here)
             }
             Step::Raised { from, fps: before, below } if current > from => {
-                if fps / before >= (c / from as f64).powf(FOLLOWS) {
+                let follows = fps / before >= (c / from as f64).powf(FOLLOWS);
+                // A big step whose frames followed the speed but that left
+                // the program waiting for its own pace (`WAITS`) went past
+                // the point where they stop following: it is judged as a
+                // step that gained too little, by the knee. Held where it
+                // landed, a busy program's step all the way to what the
+                // host has (Dark Omen's movie, 15 pictures a second at
+                // 340,000, from 112,500 to 800,000) kept the host busy for
+                // `HOLD_WINDOWS` before the first step down. A small step
+                // holds where it is, as `up` does for a program that waits.
+                let small = c <= from as f64 * FINE_STEP * 1.01;
+                if follows && (small || !waits) {
                     up(self, FIRST_STEP, (from, before))
-                } else if c <= from as f64 * FINE_STEP * 1.01 {
+                } else if small {
                     // A small step that gained nothing: where it came
                     // from was enough. One that drew a fifth fewer frames
                     // (`DROPPED`), which more speed doesn't do, landed in a
@@ -3213,12 +3225,14 @@ impl AutoSpeed {
                 } else {
                     // A big step may have gone past the point already. This
                     // measurement is the first after a change of speed, so
-                    // it is the mean of two.
-                    self.step = Step::Overshot {
-                        below,
-                        sum: fps * 2.0,
-                        seen: 2,
-                    };
+                    // it is the mean of two. One whose frames followed the
+                    // speed counts for nothing: a program that waits for
+                    // its pace catches up on the frames the slower speed
+                    // owed it (Dark Omen's movie read 16.3 pictures a
+                    // second of its 15), and a knee reckoned with that
+                    // reading would draw fewer than it and climb back.
+                    let (sum, seen) = if follows { (0.0, 0) } else { (fps * 2.0, 2) };
+                    self.step = Step::Overshot { below, sum, seen };
                     current
                 }
             }
@@ -6713,13 +6727,14 @@ mod tests {
     }
 
     /// Dark Omen's movies (#1889): a decoder thread needs `work`
-    /// instructions a picture, gives up its turn with Sleep(0) after each,
-    /// and shows at most 15 a second, while the main thread spins on the
-    /// clock and input, which the idle skip skips to the end of each of
-    /// its 20 ms turns. While the decoder works, those turns are `handed`
-    /// over (`Clock::handed_over`); while it waits for its next picture,
-    /// they are plain waits. The first two seconds are the desktop, halted.
-    fn decoding(work: u64, handed: bool) -> impl FnMut(&mut Bus) -> u32 {
+    /// instructions a picture, works for `share` of a turn before it gives
+    /// up the rest with Sleep(0), and shows at most 15 a second, while the
+    /// main thread spins on the clock and input, which the idle skip skips
+    /// to the end of each of its 20 ms turns. While the decoder works,
+    /// those turns are `handed` over (`Clock::handed_over`); while it waits
+    /// for its next picture, they are plain waits. The first two seconds
+    /// are the desktop, halted.
+    fn decoding(work: u64, share: f64, handed: bool) -> impl FnMut(&mut Bus) -> u32 {
         const TURN_NS: u64 = 20_000_000;
         let (mut start, mut shown, mut done) = (None, 0, 0);
         move |bus| {
@@ -6735,7 +6750,7 @@ mod tests {
                 return 0;
             }
             let turn = TURN_NS * bus.clock.cycles_per_ms() as u64 / 1_000_000;
-            let ran = turn.min(work - done);
+            let ran = ((turn as f64 * share) as u64).min(work - done);
             bus.clock.icount += ran;
             done += ran;
             let picture = done == work;
@@ -6759,55 +6774,45 @@ mod tests {
             start: 112_500,
             ..Machine::default()
         };
-        let ran = machine.run(60, decoding(7_800_000, true));
+        let ran = machine.run(60, decoding(7_800_000, 1.0, true));
         assert!(ran.shown >= 14.0, "{}: {:?}", ran.shown, ran.speeds);
         // The turns counted as halted held the speed where the decoder
         // showed fewer than two thirds of the pictures.
-        let held = machine.run(60, decoding(7_800_000, false));
+        let held = machine.run(60, decoding(7_800_000, 1.0, false));
         assert!(held.shown < 10.0, "{}: {:?}", held.shown, held.speeds);
     }
 
-    /// A movie that keeps up: a decoder thread takes `work` instructions a
-    /// picture and shows 15 a second, and between pictures it spins on the
-    /// clock as the main thread does. Both loops are skipped to the end of
-    /// their turns, and each thread could take the processor from the
-    /// other, so with `handed` the skipped turns are handed over
-    /// (`Clock::handed_over`), though neither thread has work.
-    fn spinning(work: u64, handed: bool) -> impl FnMut(&mut Bus) -> u32 {
-        let (mut start, mut shown) = (None, 0);
-        move |bus| {
-            let now = bus.clock.now_ns();
-            let start = *start.get_or_insert(now);
-            let due = (now - start) * 15 / 1_000_000_000 + 1;
-            if shown >= due {
-                let idle = bus.clock.idle;
-                idle_until(bus, start + (due * 1_000_000_000).div_ceil(15));
-                if handed {
-                    bus.clock.handed_over += bus.clock.idle - idle;
-                }
-                return 0;
-            }
-            bus.clock.icount += work;
-            shown += 1;
-            1
-        }
-    }
-
     #[test]
-    fn threads_that_all_spin_wait() {
-        // The turns handed over count as work only as far as a thread
-        // worked: two threads that spin while there is nothing to do wait
-        // as a halted program does, and more speed brings nothing.
-        let machine = Machine {
+    fn a_spin_that_takes_more_turns_than_the_work_is_not_halted() {
+        // Dark Omen's decoder gives up its turn early, and the main thread
+        // spins for 55% to 61% of the time while the decoder has work: all
+        // of that is handed over, none of it waits.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(150_000);
+        let mut decode = decoding(7_800_000, 2.0 / 3.0, true);
+        while bus.clock.now_ns() < 2_000_000_000 {
+            decode(bus);
+        }
+        // 20 turns of each, 5 pictures, short of the movie's 15 a second.
+        let start = Mark::of(bus, 0);
+        for _ in 0..20 {
+            decode(bus);
+        }
+        let (halted, _) = Mark::of(bus, 0).since(&start);
+        assert!(halted < BUSY, "{halted}");
+        let ran = Machine {
             start: 112_500,
             ..Machine::default()
-        };
-        let spun = machine.run(60, spinning(1_000_000, true));
-        let halted = machine.run(60, spinning(1_000_000, false));
-        let (_, _, most) = spun.from(0);
-        let (_, _, halted_most) = halted.from(0);
-        assert!(most <= halted_most, "{:?} {:?}", spun.speeds, halted.speeds);
-        assert!(spun.shown >= 14.0, "{}", spun.shown);
+        }
+        .run(60, decoding(7_800_000, 2.0 / 3.0, true));
+        assert!(ran.shown >= 14.0, "{}: {:?}", ran.shown, ran.speeds);
+        // The decoder keeps up from about 290,000. The step that took it
+        // there went all the way to what the host has (800,000), and the
+        // speed comes back to the knee once the movie waits for its pace,
+        // and goes no more than a fine step past it from there.
+        let (mean, _, most) = ran.from(15);
+        assert!(mean < 400_000 && most < 450_000, "{:?}", ran.speeds);
     }
 
     /// A machine that starts at 20,000.

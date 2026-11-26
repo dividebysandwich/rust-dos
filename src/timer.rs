@@ -137,12 +137,11 @@ pub struct Clock {
     /// it out.
     pub disk_wait: u64,
     /// Of `idle`, the counts the idle skip skipped in a busy-wait loop of
-    /// a Win32 thread while another thread could run
-    /// (`win32::thread::others_can_run`). Windows runs such a loop out to
+    /// a Win32 thread while another thread that works could run
+    /// (`win32::thread::others_can_work`). Windows runs such a loop out to
     /// the end of its thread's turn, so the processor didn't wait: more
-    /// speed gives the other thread more done, as far as it has work
-    /// (`waited`). Only differences between two points count, so a save
-    /// state leaves it out.
+    /// speed gives the other thread more done (`waited`). Only differences
+    /// between two points count, so a save state leaves it out.
     pub handed_over: u64,
     batch_end: u64,
     cycles_per_ms: u32,
@@ -169,17 +168,22 @@ pub struct Tsc {
     pub hz: Option<u64>,
 }
 
-/// Of the `idle` counts skipped while `ran` counts passed, those the
-/// processor waited: less those `handed` over (`Clock::handed_over`), but
-/// no more of them than the counts that weren't skipped, the threads'
-/// work. A spin handed over is time another thread works in, and at a
-/// higher speed it gets more done. Where every thread that can run spins,
-/// each hands its turns to the next and none has work: the program waits
-/// for something else, as a halted one does, and more speed brings
-/// nothing.
-pub fn waited(ran: f64, idle: f64, handed: f64) -> f64 {
-    let worked = (ran - idle).max(0.0);
-    (idle - handed.min(worked)).max(0.0)
+/// Of the `idle` counts skipped, those the processor waited: less those
+/// `handed` over (`Clock::handed_over`). A spin handed over is time
+/// another thread works in, and at a higher speed it gets more done.
+/// Where every thread that can run spins, none is handed over
+/// (`win32::thread::others_can_work`): the program waits for something
+/// else, as a halted one does, and more speed brings nothing.
+///
+/// Until #1889's second round, the turns handed over counted only up to
+/// the counts that weren't skipped, the threads' work, as the skip didn't
+/// know whether the other thread worked or spun too. That left a fifth of
+/// Dark Omen's movies halted: its main thread spins for 55% to 61% of the
+/// processor and its decoder works for the rest, so a fifth of the
+/// spinner's turns were more than the decoder's, and the measurements
+/// read 15% to 27% halted while the decoder had work all the time.
+pub fn waited(idle: f64, handed: f64) -> f64 {
+    (idle - handed.min(idle)).max(0.0)
 }
 
 impl Clock {
@@ -1008,7 +1012,7 @@ impl Pacer {
         self.recent_idle = self.recent_idle * BUSY_DECAY + idle as f64;
         self.recent_handed = self.recent_handed * BUSY_DECAY + handed as f64;
         let halted = if self.recent_ran > 0.0 {
-            waited(self.recent_ran, self.recent_idle, self.recent_handed) / self.recent_ran
+            waited(self.recent_idle, self.recent_handed) / self.recent_ran
         } else {
             1.0
         };
