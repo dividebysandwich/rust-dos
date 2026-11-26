@@ -779,20 +779,21 @@ fn dev_thunk(ops: &mut Asm, tlb: Option<(i32, i32)>, memref: DynamicLabel) {
     );
 }
 
-/// ST(dst) = a + b, or a - b, rounded to the control word's precision
-/// where `narrow_addsub` does, else as `F80::add` and `F80::sub` add their
-/// 80 bits (`fpu::arithmetic::addsub_st` and `addsub_value`): where both
-/// are registers that aren't empty or doubles, not an infinity or a NaN
-/// held as a double, and the sum comes to a double's range; a routine of
-/// the trampoline's that translated code calls with the physical registers
-/// a and b in R8D and R9D (8 for the double in XMM15) and dst | sub << 8
-/// in R10D, which returns EAX = 0, or 1 with nothing changed for the
-/// handler's code. RCX, RDX, R8-R10 and XMM2-XMM5 are changed.
+/// ST(dst) = a + b, or a - b, rounded as the control word says: as a
+/// double where `narrow_addsub` has the sum, else as `F80::add` and
+/// `F80::sub` add their 80 bits (`fpu::arithmetic::addsub_st` and
+/// `addsub_value`), where both are registers that aren't empty or
+/// doubles, zeros or normal numbers, and the sum is a normal number in a
+/// double's range; a routine of the trampoline's that translated code
+/// calls with the physical registers a and b in R8D and R9D (8 for the
+/// double in XMM15) and dst | sub << 8 in R10D, which returns EAX = 0,
+/// or 1 with nothing changed for the handler's code. RCX, RDX, R8-R10
+/// and XMM2-XMM5 are changed.
 fn fpu_addsub(ops: &mut Asm) {
     let slow = ops.new_dynamic_label();
     let wide = ops.new_dynamic_label();
     narrow_addsub(ops, wide);
-    dynasm!(ops ; .arch x64 ; =>wide ; push r11 ; push rsi ; mov r11d, r10d);
+    dynasm!(ops ; .arch x64 ; =>wide ; push r11 ; push rsi ; push rdi ; mov r11d, r10d);
     // Operand into (sign << 15 | exponent) and the 64-bit mantissa.
     f80_operand(ops, 0, 8, slow);
     f80_operand(ops, 2, 9, slow);
@@ -802,72 +803,167 @@ fn fpu_addsub(ops: &mut Asm) {
         ; and ecx, 0x100
         ; shl ecx, 7
         ; xor edx, ecx
-        // Exponents aligned: the smaller operand's mantissa shifted
-        // right (to 0 by 64 or more); R10D the larger exponent.
-        ; movzx ecx, ax
-        ; and ecx, 0x7FFF
-        ; movzx esi, dx
-        ; and esi, 0x7FFF
-        ; mov r10d, esi
-        ; cmp ecx, esi
-        ; cmova r10d, ecx
-        ; neg ecx
-        ; add ecx, r10d
-        ; neg esi
-        ; add esi, r10d
-        ; shr r8, cl
-        ; cmp ecx, 64
-        ; sbb rcx, rcx
-        ; and r8, rcx
-        ; mov ecx, esi
-        ; shr r9, cl
-        ; cmp esi, 64
-        ; sbb rsi, rsi
-        ; and r9, rsi
-        // Same signs: the sum, a carry shifted in from the top.
+        // The larger in magnitude in EAX and R8, R10D its exponent and
+        // ECX how far below it the other's is.
         ; mov ecx, eax
-        ; xor ecx, edx
-        ; test ecx, 0x8000
-        ; jnz >differ
-        ; add r8, r9
-        ; setc cl
-        ; mov rsi, r8
-        ; rcr rsi, 1
-        ; test cl, cl
-        ; cmovnz r8, rsi
+        ; and ecx, 0x7FFF
+        ; mov esi, edx
+        ; and esi, 0x7FFF
+        ; cmp ecx, esi
+        ; ja >ordered
+        ; jb >swap
+        ; cmp r8, r9
+        ; jae >ordered
+        ; swap:
+        ; xchg eax, edx
+        ; xchg r8, r9
+        ; xchg ecx, esi
+        ; ordered:
+        ; mov r10d, ecx
+        ; sub ecx, esi
+        // The other's significand shifted down by that much as R9:RDI,
+        // 128 bits: exact below 64; further down, what falls out of RDI
+        // a sticky bit in its lowest (127 places down is as good as more,
+        // with the rounding at most 65 places down).
+        ; xor edi, edi
+        ; cmp ecx, 64
+        ; jae >far
+        ; shrd rdi, r9, cl
+        ; shr r9, cl
+        ; jmp >aligned
+        ; far:
+        ; mov esi, 127
+        ; cmp ecx, esi
+        ; cmova ecx, esi
+        ; sub ecx, 64
+        ; mov rdi, r9
+        ; shr rdi, cl
+        ; mov rsi, rdi
+        ; shl rsi, cl
+        ; cmp rsi, r9
+        ; setne cl
         ; movzx ecx, cl
-        ; add r10d, ecx
+        ; or rdi, rcx
+        ; xor r9d, r9d
+        ; aligned:
         ; and eax, 0x8000
-        ; jmp >result
-        // Different signs: the difference, normalized, with the larger
-        // one's sign; 0 for none.
-        ; differ:
-        ; mov rsi, r9
-        ; sub rsi, r8
-        ; mov rcx, r8
-        ; sub rcx, r9
-        ; cmovb rcx, rsi
-        ; cmovb eax, edx
-        ; mov r8, rcx
+        ; and edx, 0x8000
+        ; cmp eax, edx
+        ; jne >differ
+        // Same signs: the 128-bit sum, a carry shifted back in from the
+        // top with the bit it pushes out kept as a sticky bit; two zeros
+        // the zero of their sign.
+        ; add r8, r9
+        ; jc >carry
         ; test r8, r8
-        ; jz >nothing
-        ; normalize:
+        ; jnz >round
+        ; xor r10d, r10d
+        ; jmp >zero
+        ; carry:
+        ; mov ecx, edi
+        ; and ecx, 1
+        ; shrd rdi, r8, 1
+        ; or rdi, rcx
+        ; shr r8, 1
+        ; bts r8, 63
+        ; inc r10d
+        ; jmp >round
+        // Different signs: the difference, the larger's sign; brought up
+        // to the integer bit (a difference of operands more than a place
+        // apart moves one place at most, so the sticky bit stays below
+        // the rounding).
+        ; differ:
+        ; neg rdi
+        ; sbb r8, r9
+        ; mov rcx, r8
+        ; or rcx, rdi
+        ; jz >cancel
+        ; test r8, r8
+        ; jnz >up
+        ; mov r8, rdi
+        ; xor edi, edi
+        ; sub r10d, 64
+        ; up:
         ; bsr rcx, r8
         ; xor ecx, 63
-        ; shl r8, cl
+        ; shld r8, rdi, cl
+        ; shl rdi, cl
         ; sub r10d, ecx
-        ; and eax, 0x8000
-        ; jmp >result
-        ; nothing:
+        ; jmp >round
+        // A cancellation is +0, but -0 rounding down.
+        ; cancel:
+        ; mov ecx, 0xC00
+        ; and cx, WORD [rbx + FPU_CONTROL]
         ; xor eax, eax
+        ; cmp ecx, 0x400
+        ; jne >cancelled
+        ; mov eax, 0x8000
+        ; cancelled:
         ; xor r8d, r8d
         ; xor r10d, r10d
-        // The double `F80::get_f64` makes of it into R9: 0 for exponent
-        // 0; outside a double's range (or an exponent that wrapped) the
-        // handlers'.
-        ; result:
-        ; test r10d, r10d
-        ; jz >zero
+        ; jmp >zero
+        // Rounded to the precision (64 bits, or with the reserved setting;
+        // 53; 24), as the rounding says: the part kept in R8, the rest
+        // in RDX (the bits below it at its top, a sticky bit for any
+        // further down), ECX 1 where it goes up. A denormal is the
+        // handler's.
+        ; round:
+        ; cmp r10d, 0
+        ; jle =>slow
+        ; movzx esi, WORD [rbx + FPU_CONTROL]
+        ; mov ecx, esi
+        ; and ecx, 0x300
+        ; jz >p24
+        ; cmp ecx, 0x200
+        ; je >p53
+        ; mov rdx, rdi
+    );
+    round_away(ops);
+    dynasm!(ops
+        ; .arch x64
+        ; add r8, rcx
+        ; jnc >rounded
+        ; rcr r8, 1
+        ; inc r10d
+        ; jmp >rounded
+    );
+    for (label, bits) in [("p53", 53), ("p24", 24)] {
+        let cut = 64 - bits;
+        match label {
+            "p53" => dynasm!(ops ; .arch x64 ; p53:),
+            _ => dynasm!(ops ; .arch x64 ; p24:),
+        }
+        dynasm!(ops
+            ; .arch x64
+            ; mov rdx, r8
+            ; shl rdx, bits
+            ; xor ecx, ecx
+            ; test rdi, rdi
+            ; setnz cl
+            ; or rdx, rcx
+            ; shr r8, cut
+        );
+        round_away(ops);
+        dynasm!(ops
+            ; .arch x64
+            ; add r8, rcx
+            ; bt r8, bits
+            ; jnc >fits
+            ; shr r8, 1
+            ; inc r10d
+            ; fits:
+            ; shl r8, cut
+            ; jmp >rounded
+        );
+    }
+    dynasm!(ops
+        ; .arch x64
+        // Past the largest number: the handler's.
+        ; rounded:
+        ; cmp r10d, 0x7FFF
+        ; jae =>slow
+        // The double `F80::get_f64` makes of it into R9; outside a
+        // double's range the handler's.
         ; mov ecx, r10d
         ; sub ecx, 16383 - 1023
         ; lea edx, [rcx - 1]
@@ -909,34 +1005,69 @@ fn fpu_addsub(ops: &mut Asm) {
         ; mov QWORD [rbx + rcx * 8 + FPU_F64], r9
         ; mov BYTE [rbx + rcx + FPU_STALE], 0
         ; xor eax, eax
+        ; pop rdi
         ; pop rsi
         ; pop r11
         ; ret
         ; =>slow
         ; mov eax, 1
+        ; pop rdi
         ; pop rsi
         ; pop r11
         ; ret
     );
 }
 
-/// `fpu_addsub` where the control word has a sum rounded to nearest at 53
-/// or 24 bits and both operands are doubles: the sum
+/// ECX = 1 where `fpu_addsub`'s sum goes up from the part kept in R8, as
+/// the rounding in ESI (the control word) says, with the rest in RDX
+/// (the bits below the part kept, at its top) and the sign in EAX
+/// (0x8000 for a negative sum), else 0: to nearest above a half, or at a
+/// half with the part kept odd; down for a negative sum and up for a
+/// positive one where anything is left; never chopped. RDI is changed.
+fn round_away(ops: &mut Asm) {
+    dynasm!(ops
+        ; .arch x64
+        ; mov ecx, esi
+        ; and ecx, 0xC00
+        ; jnz >directed
+        ; mov ecx, r8d
+        ; and ecx, 1
+        ; mov rdi, QWORD 0x8000_0000_0000_0001u64 as i64
+        ; sub rdi, rcx
+        ; xor ecx, ecx
+        ; cmp rdx, rdi
+        ; setae cl
+        ; jmp >decided
+        ; directed:
+        ; shr ecx, 10
+        ; mov edi, eax
+        ; shr edi, 15
+        ; add ecx, edi
+        ; cmp ecx, 2
+        ; jne >keep
+        ; xor ecx, ecx
+        ; test rdx, rdx
+        ; setnz cl
+        ; jmp >decided
+        ; keep:
+        ; xor ecx, ecx
+        ; decided:
+    );
+}
+
+/// `fpu_addsub` where both operands are doubles: the sum
 /// `fpu::arithmetic::narrow_sum` gives, case for case, stored as ST(dst)'s
 /// double; to `wide` with nothing but RAX, RCX, RDX and XMM2 to XMM5
 /// changed where it gives none, for the 80 bits' sum.
 fn narrow_addsub(ops: &mut Asm, wide: DynamicLabel) {
-    let (narrow, store, single) =
-        (ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label());
-    dynasm!(ops
-        ; .arch x64
-        // The precision field 53 bits (2) or 24 (0), rounding to nearest.
-        ; movzx ecx, WORD [rbx + FPU_CONTROL]
-        ; and ecx, 0xF00
-        ; jz =>narrow
-        ; cmp ecx, 0x200
-        ; jne =>wide
-        ; =>narrow
+    let (store, zero, error, p53, p24, round24, check) = (
+        ops.new_dynamic_label(),
+        ops.new_dynamic_label(),
+        ops.new_dynamic_label(),
+        ops.new_dynamic_label(),
+        ops.new_dynamic_label(),
+        ops.new_dynamic_label(),
+        ops.new_dynamic_label(),
     );
     narrow_operand(ops, 8, 2, wide);
     narrow_operand(ops, 9, 3, wide);
@@ -955,59 +1086,115 @@ fn narrow_addsub(ops: &mut Asm, wide: DynamicLabel) {
         // Zero, or a normal double; any other sum is the 80 bits'.
         ; mov rax, rdx
         ; shl rax, 1
-        ; jz =>store
+        ; jz =>zero
         ; shr rax, 53
         ; dec eax
         ; cmp eax, 0x7FD
         ; ja =>wide
-        ; test WORD [rbx + FPU_CONTROL], 0x300
-        ; jnz =>store
-        // To 24 bits: the double as a single, unless it is halfway
-        // between two singles (the 29 bits a single leaves out are
-        // 1000...), where the sum's own rounding decides the way.
-        ; mov eax, edx
-        ; and eax, 0x1FFF_FFFF
-        ; cmp eax, 0x1000_0000
-        ; jne =>single
-        // What the sum left out, into XMM2: with
-        // part = sum - a, (a - (sum - part)) + (b - part).
+        // The precision: 24 bits (0), 53 (2), else 64 (3, and the
+        // reserved 1, which rounds the same).
+        ; movzx ecx, WORD [rbx + FPU_CONTROL]
+        ; and ecx, 0x300
+        ; jz =>p24
+        ; cmp ecx, 0x200
+        ; je =>p53
+        // 64 bits: the double sum where it is exact.
+        ; call =>error
+        ; jz =>store
+        ; jmp =>wide
+        // 53 bits: the double sum rounded to nearest; another rounding
+        // takes its neighbour on the exact sum's side where that is the
+        // way it goes.
+        ; =>p53
+        ; test WORD [rbx + FPU_CONTROL], 0xC00
+        ; jz =>store
+        ; call =>error
+        ; jz =>store
+        ; call >away
+        ; sar rax, 63
+        ; add rdx, rax
+        ; add rdx, rcx
+        ; jmp =>check
+        // 24 bits: a sum with its low 28 bits 0 (a single, or halfway
+        // between two) moved to its odd neighbour on the exact sum's side
+        // where it isn't exact, which rounds as the exact sum does.
+        ; =>p24
+        ; test edx, 0x0FFF_FFFF
+        ; jnz =>round24
+        ; call =>error
+        ; jz =>round24
+        ; sar rax, 63
+        ; lea rdx, [rdx + rax * 2 + 1]
+        ; =>round24
+        ; mov eax, 0x0FFF_FFFF
+        ; test WORD [rbx + FPU_CONTROL], 0xC00
+        ; jnz >directed
+        // To nearest: up from a half, or from a half when the single
+        // below is odd.
+        ; bt rdx, 29
+        ; adc rdx, rax
+        ; jmp >cut
+        ; directed:
+        ; call >away
+        ; add eax, eax
+        ; inc eax
+        ; neg rcx
+        ; and rax, rcx
+        ; add rdx, rax
+        ; cut:
+        ; and rdx, -0x2000_0000
+        // A normal double, or the 80 bits' sum.
+        ; =>check
+        ; mov rax, rdx
+        ; shl rax, 1
+        ; shr rax, 53
+        ; dec eax
+        ; cmp eax, 0x7FD
+        ; ja =>wide
+        ; jmp =>store
+        // ECX = 1 where the rounding goes away from 0 (down for a
+        // negative sum, up for a positive one), else 0. RAX is kept.
+        ; away:
+        ; push rax
+        ; movzx ecx, WORD [rbx + FPU_CONTROL]
+        ; shr ecx, 10
+        ; and ecx, 3
+        ; mov rax, rdx
+        ; shr rax, 63
+        ; add ecx, eax
+        ; cmp ecx, 2
+        ; sete cl
+        ; movzx ecx, cl
+        ; pop rax
+        ; ret
+        // What the sum left out, e, into RAX with part = sum - a:
+        // (a - (sum - part)) + (b - part); ZF set where it is 0, and RAX
+        // then e's sign xor the sum's in bit 63 (1 where the exact sum's
+        // magnitude is below the double's).
+        ; =>error
         ; movapd xmm5, xmm4
         ; subsd xmm5, xmm2
         ; subsd xmm3, xmm5
         ; subsd xmm5, xmm4
         ; addsd xmm2, xmm5
         ; addsd xmm2, xmm3
-        // A rounded sum that is even goes to its odd neighbour on the
-        // true sum's side: one up in its bits where what it left out has
-        // its sign, else one down.
         ; movq rax, xmm2
         ; lea rcx, [rax + rax]
-        ; test rcx, rcx
-        ; jz =>single
-        ; test dl, 1
-        ; jnz =>single
         ; xor rax, rdx
-        ; sar rax, 63
-        ; lea rdx, [rdx + rax * 2 + 1]
-        // Below the smallest normal single the 80 bits' sum: a single's
-        // denormals are coarser than the 24 bits a 387 keeps there.
-        ; =>single
-        ; mov rax, rdx
-        ; shl rax, 1
-        ; shr rax, 53
-        ; cmp eax, 1023 - 126
-        ; jb =>wide
-        ; movq xmm4, rdx
-        ; cvtsd2ss xmm4, xmm4
-        // A normal single, or the 80 bits' sum.
-        ; movd eax, xmm4
-        ; shr eax, 23
-        ; movzx eax, al
-        ; dec eax
-        ; cmp eax, 0xFD
-        ; ja =>wide
-        ; cvtss2sd xmm4, xmm4
-        ; movq rdx, xmm4
+        ; test rcx, rcx
+        ; ret
+        // A zero sum is exact: +0 from two signs (as the host gives it),
+        // but -0 rounding down.
+        ; =>zero
+        ; mov eax, 0xC00
+        ; and ax, WORD [rbx + FPU_CONTROL]
+        ; cmp eax, 0x400
+        ; jne =>store
+        ; movq rax, xmm2
+        ; movq rdx, xmm3
+        ; or rdx, rax
+        ; shr rdx, 63
+        ; shl rdx, 63
         // ST(dst): the double alone.
         ; =>store
         ; and r10d, 7
@@ -1060,8 +1247,8 @@ fn narrow_operand(ops: &mut Asm, idx: u8, x: u8, wide: DynamicLabel) {
 /// Operand `fpu_addsub` has in R`man`D (a physical register, or 8 for the
 /// double in XMM15) into `hi` (sign << 15 | exponent, of RAX or RDX) and
 /// R`man` (R8 or R9), as `FpuRegs::get` and `F80::set_f64` make its 80
-/// bits; to `slow` for an empty register or an infinity or a NaN. RCX is
-/// changed.
+/// bits; to `slow` for an empty register, an infinity or a NaN, a
+/// denormal, and a format the FPU doesn't take. RCX is changed.
 fn f80_operand(ops: &mut Asm, hi: u8, man: u8, slow: DynamicLabel) {
     let (value, stale, loaded, zero) =
         (ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label());
@@ -1082,6 +1269,18 @@ fn f80_operand(ops: &mut Asm, hi: u8, man: u8, slow: DynamicLabel) {
         ; not ecx
         ; test ecx, 0x7FFF
         ; jz =>slow
+        // The integer bit set with an exponent, or neither and no bits:
+        // a denormal, or a format the FPU doesn't take, is the handler's.
+        ; test Rd(hi), 0x7FFF
+        ; setnz cl
+        ; bt Rq(man), 63
+        ; setc ch
+        ; cmp cl, ch
+        ; jne =>slow
+        ; test cl, cl
+        ; jnz =>loaded
+        ; test Rq(man), Rq(man)
+        ; jnz =>slow
         ; jmp =>loaded
         ; =>stale
         ; mov rcx, QWORD [rbx + Rq(man) * 8 + FPU_F64]
