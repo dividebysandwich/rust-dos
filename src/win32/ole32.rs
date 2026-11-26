@@ -657,7 +657,7 @@ pub(super) fn task_alloc(cpu: &mut Cpu, size: u32) -> u32 {
 
 pub(super) fn task_free(cpu: &mut Cpu, at: u32) {
     if at != 0 {
-        super::with_process(cpu, |p, _| p.heap.free(at));
+        super::with_process(cpu, |p, bus| p.heap.free(&p.memory, bus, at));
     }
 }
 

@@ -151,7 +151,7 @@ pub fn ut_unregister(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     let thunk = thunks.remove(i);
-    super::with_win16(cpu, pid, |p, _| p.system_free(thunk.code));
+    super::with_win16(cpu, pid, |p, bus| p.system_free(bus, thunk.code));
     flat::release_module(cpu, pid, thunk.module16);
     Some(1)
 }
@@ -309,7 +309,7 @@ fn register(cpu: &mut Cpu, pid: u32, request: &Request) -> bool {
             .write(bus, at, &thunk_code(at, proc16, glue))
             .is_none()
         {
-            p.system_free(at);
+            p.system_free(bus, at);
             return None;
         }
         Some(at)
@@ -322,7 +322,7 @@ fn register(cpu: &mut Cpu, pid: u32, request: &Request) -> bool {
     // UTRegister probed the place, but another thread may have taken
     // its page away while the 16-bit DLL loaded.
     if request.data32 != 0 && !flat::write(cpu, pid, request.data32, &code.to_le_bytes()) {
-        super::with_win16(cpu, pid, |p, _| p.system_free(code));
+        super::with_win16(cpu, pid, |p, bus| p.system_free(bus, code));
         unregistered(cpu, pid, request, "the place for its thunk isn't there");
         return false;
     }

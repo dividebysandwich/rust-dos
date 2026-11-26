@@ -1061,7 +1061,7 @@ fn set_format(cpu: &mut Cpu, slot: usize, wanted: u32) -> bool {
     f.last = -1;
     f.codec = Codec::new(&source);
     if old != 0 {
-        crate::win32::with_process(cpu, |p, _| p.heap.free(old));
+        crate::win32::with_process(cpu, |p, bus| p.heap.free(&p.memory, bus, old));
     }
     true
 }
@@ -1111,7 +1111,7 @@ fn release_frame(cpu: &mut Cpu, this: u32) -> u32 {
     let file_open = frame_file(cpu, slot).is_some();
     let f = frames(cpu)[slot].take().expect("an open IGetFrame");
     if f.buffer != 0 {
-        crate::win32::with_process(cpu, |p, _| p.heap.free(f.buffer));
+        crate::win32::with_process(cpu, |p, bus| p.heap.free(&p.memory, bus, f.buffer));
     }
     com::free_interface(cpu, f.iface);
     // Its reference to the file, through the file's own interface.

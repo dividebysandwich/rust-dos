@@ -382,9 +382,9 @@ impl Process {
     }
 
     /// The block `system_alloc` gave at `at` is free again.
-    pub(crate) fn system_free(&mut self, at: u32) {
+    pub(crate) fn system_free(&mut self, bus: &mut crate::bus::Bus, at: u32) {
         if let Some(heap) = self.system_heap.as_mut() {
-            heap.free(at);
+            heap.free(&self.memory, bus, at);
         }
     }
 }

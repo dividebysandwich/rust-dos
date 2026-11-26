@@ -7,6 +7,14 @@
 //! here, not in the heap's memory, so a program that writes past a
 //! block's end spoils its neighbour's contents only, as with Windows 95's
 //! heaps.
+//!
+//! Windows 98 decommits the whole pages of a free piece of a heap, so a
+//! block given out in their place reads zeros there, and only the bytes
+//! on the pages it shares with blocks still in use keep what was there
+//! before. A free here zeroes those pages (`clear`). Programs read fields
+//! they never set in a new block: Project IGI's in-game menu draws its
+//! panel over the mission intros with an animation counter that is zero
+//! on Windows 98, and holds an earlier block's bytes without this.
 
 use super::memory::{
     GRANULARITY, MEM_PRIVATE, Memory, PAGE, PAGE_READWRITE, PRIVATE, SHARED, SYSTEM,
@@ -189,8 +197,9 @@ impl Heap {
     }
 
     /// A block of `size` bytes, or None when the heap is full or there is
-    /// no memory for its pages. Pages committed for it are zeroed; a block
-    /// in the place of one freed has what that one had.
+    /// no memory for its pages. Pages committed for it read zeros, and so
+    /// do the whole pages of the free piece it goes in (`clear`); its
+    /// bytes on pages a block in use shares have what was there before.
     pub fn alloc(&mut self, memory: &mut Memory, bus: &mut Bus, size: u32) -> Option<u32> {
         let len = extent(size)?;
         let found = (0..self.segments.len()).find_map(|s| Some((s, self.fit(s, len)?)));
@@ -270,16 +279,63 @@ impl Heap {
         self.find(at).is_some()
     }
 
-    /// Give back the block at `at`. False if there is none there.
-    pub fn free(&mut self, at: u32) -> bool {
-        match self.find(at) {
-            Some(i) => {
-                // The block after it now has the freed bytes in front of it.
-                self.blocks.remove(i);
-                self.widened(i);
-                true
+    /// Give back the block at `at`, its whole free pages zeroed as
+    /// Windows 98 decommits them (`clear`). False if there is none there.
+    pub fn free(&mut self, memory: &Memory, bus: &mut Bus, at: u32) -> bool {
+        let Some((i, size)) = self.remove(at) else {
+            return false;
+        };
+        let end = extent(size).map_or(at, |len| at.saturating_add(len));
+        self.clear(memory, bus, i, at, end);
+        true
+    }
+
+    /// Give back the block at `at` and leave its bytes as they are: for
+    /// the 16-bit global heap, which isn't a Win32 heap. False if there
+    /// is none there.
+    pub fn free_keeping_bytes(&mut self, at: u32) -> bool {
+        self.remove(at).is_some()
+    }
+
+    /// Take the block at `at` out of the list: its index and size.
+    fn remove(&mut self, at: u32) -> Option<(usize, u32)> {
+        let i = self.find(at)?;
+        // The block after it now has the freed bytes in front of it.
+        let (_, size) = self.blocks.remove(i);
+        self.widened(i);
+        Some((i, size))
+    }
+
+    /// The bytes `from..to` are free now, in the gap in front of
+    /// `blocks[index]` (or at the end of their range): zero the pages of
+    /// that gap that lie in it whole and hold some of those bytes, as
+    /// Windows 98 decommits them. Its other whole pages were zeroed when
+    /// they became free, and pages it shares with a block keep their
+    /// bytes. Only committed pages are written; the others read zeros
+    /// when they are committed.
+    fn clear(&self, memory: &Memory, bus: &mut Bus, index: usize, from: u32, to: u32) {
+        let Some(segment) = self
+            .segments
+            .iter()
+            .find(|s| (s.base as u64..s.base as u64 + s.reserved as u64).contains(&(from as u64)))
+        else {
+            return;
+        };
+        let gap_start = match index.checked_sub(1).map(|i| self.blocks[i]) {
+            Some((start, size)) if start >= segment.base => {
+                extent(size).map_or(start, |len| start.saturating_add(len))
             }
-            None => false,
+            _ => segment.base,
+        };
+        let committed_end = segment.base + segment.committed;
+        let gap_end = self
+            .blocks
+            .get(index)
+            .map_or(committed_end, |&(start, _)| start.min(committed_end));
+        let first = gap_start.max(from & !(PAGE - 1)).next_multiple_of(PAGE);
+        let end = gap_end.min(to.next_multiple_of(PAGE)) & !(PAGE - 1);
+        if first < end {
+            memory.zero(bus, first, end - first);
         }
     }
 
@@ -289,13 +345,40 @@ impl Heap {
     }
 
     /// Change the size of the block at `at` to `size` where it is, if the
-    /// next block leaves room. False if it doesn't, or there is no block.
+    /// next block leaves room, the whole pages a block that shrinks gives
+    /// up zeroed as `free` zeroes them. False if it doesn't, or there is
+    /// no block.
     pub fn resize_in_place(
         &mut self,
         memory: &mut Memory,
         bus: &mut Bus,
         at: u32,
         size: u32,
+    ) -> bool {
+        self.resize(memory, bus, at, size, true)
+    }
+
+    /// `resize_in_place` leaving the bytes a block that shrinks gives up
+    /// as they are: for the 16-bit global heap, as `free_keeping_bytes`.
+    pub fn resize_in_place_keeping_bytes(
+        &mut self,
+        memory: &mut Memory,
+        bus: &mut Bus,
+        at: u32,
+        size: u32,
+    ) -> bool {
+        self.resize(memory, bus, at, size, false)
+    }
+
+    /// The block at `at` made `size` bytes long where it is, and with
+    /// `clear` the whole pages it gives up zeroed.
+    fn resize(
+        &mut self,
+        memory: &mut Memory,
+        bus: &mut Bus,
+        at: u32,
+        size: u32,
+        clear: bool,
     ) -> bool {
         let Some(i) = self.find(at) else {
             return false;
@@ -318,9 +401,13 @@ impl Heap {
         if end > limit || !self.commit_to(s, memory, bus, end) {
             return false;
         }
+        let old_end = extent(self.blocks[i].1).map_or(end, |len| at.saturating_add(len));
         self.blocks[i].1 = size;
         // A block that shrank leaves a larger gap before the next one.
         self.widened(i + 1);
+        if clear && end < old_end {
+            self.clear(memory, bus, i + 1, end, old_end);
+        }
         true
     }
 
@@ -497,7 +584,7 @@ mod tests {
                 }
                 4..=6 if !live.is_empty() => {
                     let at = live.swap_remove(next() as usize % live.len());
-                    assert!(heap.free(at));
+                    assert!(heap.free(&memory, &mut cpu.bus, at));
                 }
                 7 if !live.is_empty() => {
                     let at = live[next() as usize % live.len()];
@@ -521,9 +608,83 @@ mod tests {
         }
         let at = heap.alloc(&mut memory, &mut cpu.bus, 48).unwrap();
         assert_eq!(heap.hint(48), 1001);
-        assert!(heap.free(at));
+        assert!(heap.free(&memory, &mut cpu.bus, at));
         assert_eq!(heap.hint(48), 1000);
         assert_eq!(heap.fit(0, 48), Some((0x10_0000 + 16_000, 1000)));
+    }
+
+    /// A growable heap with its pages behind it, on a machine with a
+    /// page pool, and its first range committed for `initial` bytes.
+    fn real_heap(initial: u32) -> (Box<Cpu>, Memory, Heap) {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.win32.pool = super::super::memory::Pool::take(&mut cpu.bus, 0x40_0000);
+        let mut memory = Memory::new(&mut cpu.bus).expect("a page directory");
+        let heap = Heap::create(&mut memory, &mut cpu.bus, initial, 0).expect("a heap");
+        (cpu, memory, heap)
+    }
+
+    /// The bytes `at..at + len` of the heap's memory.
+    fn bytes(cpu: &Cpu, memory: &Memory, at: u32, len: u32) -> Vec<u8> {
+        let mut data = vec![0; len as usize];
+        memory
+            .read(&cpu.bus, at, &mut data)
+            .expect("committed bytes");
+        data
+    }
+
+    /// A freed block's whole pages read zeros, as Windows 98 decommits
+    /// them; the bytes it had on pages a block in use shares stay. A
+    /// probe on Windows 98 SE: a 4 KB block at 00410078, filled, freed
+    /// and asked for again, came back at the same place with 3,968 of
+    /// its bytes on its first page still filled and the 124 on the next
+    /// page zero.
+    #[test]
+    fn free_zeroes_whole_pages() {
+        let (mut cpu, mut memory, mut heap) = real_heap(0x10000);
+        let base = heap.base;
+        let a = heap.alloc(&mut memory, &mut cpu.bus, 0x800).unwrap();
+        let b = heap.alloc(&mut memory, &mut cpu.bus, 0x3000).unwrap();
+        let c = heap.alloc(&mut memory, &mut cpu.bus, 0x100).unwrap();
+        assert_eq!((a, b, c), (base, base + 0x800, base + 0x3800));
+        memory.write(&mut cpu.bus, base, &[0xAB; 0x3900]).unwrap();
+
+        assert!(heap.free(&memory, &mut cpu.bus, b));
+        let after = bytes(&cpu, &memory, base, 0x3900);
+        assert!(after[..0x1000].iter().all(|&x| x == 0xAB), "a's page");
+        assert!(after[0x1000..0x3000].iter().all(|&x| x == 0), "b's pages");
+        assert!(after[0x3000..].iter().all(|&x| x == 0xAB), "c's page");
+
+        // Freeing a leaves the first page free as a whole.
+        assert!(heap.free(&memory, &mut cpu.bus, a));
+        let after = bytes(&cpu, &memory, base, 0x3900);
+        assert!(after[..0x3000].iter().all(|&x| x == 0));
+        assert!(after[0x3000..].iter().all(|&x| x == 0xAB));
+
+        // A block that shrinks in place frees the pages after its end.
+        let d = heap.alloc(&mut memory, &mut cpu.bus, 0x3000).unwrap();
+        assert_eq!(d, base);
+        memory.write(&mut cpu.bus, d, &[0xCD; 0x3000]).unwrap();
+        assert!(heap.resize_in_place(&mut memory, &mut cpu.bus, d, 0x10));
+        let after = bytes(&cpu, &memory, base, 0x3000);
+        assert!(after[..0x1000].iter().all(|&x| x == 0xCD), "d's page");
+        assert!(after[0x1000..].iter().all(|&x| x == 0), "its freed pages");
+    }
+
+    /// The 16-bit global heap's calls leave the bytes of what they give
+    /// up as they are.
+    #[test]
+    fn keeping_bytes_zeroes_nothing() {
+        let (mut cpu, mut memory, mut heap) = real_heap(0x10000);
+        let base = heap.base;
+        let a = heap.alloc(&mut memory, &mut cpu.bus, 0x3000).unwrap();
+        let b = heap.alloc(&mut memory, &mut cpu.bus, 0x100).unwrap();
+        assert_eq!((a, b), (base, base + 0x3000));
+        memory.write(&mut cpu.bus, base, &[0xAB; 0x3100]).unwrap();
+
+        assert!(heap.resize_in_place_keeping_bytes(&mut memory, &mut cpu.bus, a, 0x10));
+        assert!(heap.free_keeping_bytes(b));
+        let after = bytes(&cpu, &memory, base, 0x3100);
+        assert!(after.iter().all(|&x| x == 0xAB));
     }
 
     /// A walk of the pieces, as Heap32First and Heap32Next take them,
