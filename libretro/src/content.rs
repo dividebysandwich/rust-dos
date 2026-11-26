@@ -176,10 +176,15 @@ pub fn settings(
         );
         let layered = format!("{}{}", below, overlay.text);
         let parsed = config::parse(&layered, &overlay.dir, home.as_deref());
+        let file = overlay.dir.join("rust-dos.conf");
         if let Some(error) = parsed.renderer_conflict_over(&below) {
-            return Err(format!("{}: {}", overlay.dir.join("rust-dos.conf").display(), error));
+            return Err(format!("{}: {}", file.display(), error));
         }
-        warnings.extend(parsed.warnings.iter().map(|w| format!("{}: {}", overlay.dir.join("rust-dos.conf").display(), w)));
+        // The overlay's warnings by its own line numbers, as a game
+        // profile's are (`games::prepare`).
+        let own = config::parse(&overlay.text, &overlay.dir, home.as_deref());
+        let own = own.warnings_over(&parsed);
+        warnings.extend(own.iter().map(|w| format!("{}: {}", file.display(), w)));
         settings = Settings::from_config(&parsed);
     }
     Ok((frontend_settings(settings), warnings))
@@ -545,5 +550,19 @@ mod tests {
         };
         let error = settings(&Base::load(&dirs), &Values::default(), Some(&overlay)).unwrap_err();
         assert!(error.contains("its line 2 (toadforce_renderer=software)"), "{error}");
+
+        // One that agrees: the warning names the overlay's own line and
+        // the value it gives over rust-dos.conf's.
+        let overlay = Overlay {
+            text: "[emulator]\ntoadforce_renderer=auto\n".to_string(),
+            dir: dir.join("game"),
+        };
+        let (got, warnings) =
+            settings(&Base::load(&dirs), &Values::default(), Some(&overlay)).unwrap();
+        assert_eq!(got.renderer, rust_dos::config::Renderer::OpenGl);
+        let named = |w: &String| {
+            w.contains(": line 2 (toadforce_renderer=auto): ") && w.ends_with("renderer=opengl")
+        };
+        assert!(warnings.iter().any(named), "{warnings:?}");
     }
 }

@@ -463,6 +463,24 @@ impl Config {
             value.name()
         ))
     }
+
+    /// The warnings of a file's text parsed on its own (`self`), by its
+    /// own line numbers, for the file read over other settings
+    /// (`layered`, the same text after theirs): the deprecation warning
+    /// for its old renderer lines names the value they give over those
+    /// settings, which is what draws.
+    pub fn warnings_over(&self, layered: &Config) -> Vec<String> {
+        let mut warnings = self.warnings.clone();
+        let deprecation = |config: &Config| self.renderer_deprecation(config.renderer()?);
+        if let (Some(alone), Some(over)) = (deprecation(self), deprecation(layered)) {
+            for warning in &mut warnings {
+                if *warning == alone {
+                    *warning = over.clone();
+                }
+            }
+        }
+        warnings
+    }
 }
 
 /// The old settings `renderer` of `[emulator]` took the place of, one
