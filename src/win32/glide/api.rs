@@ -1264,6 +1264,29 @@ pub fn dither_mode(cpu: &mut Cpu, mode: u32) {
     set_fbz_mode(cpu, fbz);
 }
 
+/// grDitherMode as 3dfx's Glide 3 sets it. On a Voodoo Graphics or
+/// Voodoo2 that is Glide 2's (`dither_mode`). The Banshee's and
+/// Voodoo3's (h3/glide3/src/gglide.c) take the 2x2 matrix for either
+/// mode and leave the alpha blending dither subtraction off unless the
+/// control panel's "Alpha Blending Quality" is "Smoother"
+/// (SSTH3_ALPHADITHERMODE 3, read in gpci.c; it is 1, "Optimal",
+/// unless the user changes it, and this library keeps that). With the
+/// subtraction a blend reads the pixel back with the 4x4 matrix's
+/// error added, and blends of a low alpha over a dark picture drift
+/// towards red and blue, which 5 bits keep coarser than green (#2052).
+/// Their Glide 2 dithers 4x4 with the subtraction.
+pub fn glide3_dither_mode(cpu: &mut Cpu, mode: u32) {
+    if !hw::banshee(cpu) {
+        dither_mode(cpu, mode);
+        return;
+    }
+    let mut fbz = gc(cpu).fbz_mode & !(ENDITHER | DITHER2X2 | DITHERSUB);
+    if matches!(mode, DITHER_2X2 | DITHER_4X4) {
+        fbz |= ENDITHER | DITHER2X2;
+    }
+    set_fbz_mode(cpu, fbz);
+}
+
 pub fn fog_mode(cpu: &mut Cpu, mode: u32) {
     let mut fog =
         gc(cpu).fog_mode & !(ENFOGGING | FOGADD | FOGMULT | FOG_ALPHA | FOG_Z | FOG_CONSTANT);
