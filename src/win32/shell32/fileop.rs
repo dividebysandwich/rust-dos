@@ -479,7 +479,9 @@ fn rename_files(cpu: &mut Cpu, from: &List, to: &List) -> u32 {
     if !a.exists {
         return ERROR_SHELL_INTERNAL_FILE_NOT_FOUND;
     }
-    if b.exists {
+    // A shown system file, which a setup may have deleted, doesn't take
+    // the name, as for MoveFileA (`name_taken`).
+    if files::name_taken(cpu, &b.full) {
         return ERROR_ALREADY_EXISTS;
     }
     move_file(cpu, &a.full, &b.full)

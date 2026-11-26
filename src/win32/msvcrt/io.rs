@@ -1025,10 +1025,12 @@ pub fn rename(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let from = trim_folder_slash(dos_path(&cstr(cpu, args[0])?));
     let to = trim_folder_slash(dos_path(&cstr(cpu, args[1])?));
     // The same name in another case renames it, as MoveFileA does, and so
-    // does another name of the file itself, its alias.
+    // does another name of the file itself, its alias. A shown system file
+    // doesn't take the name (`name_taken`), as for MoveFileA, which
+    // msvcrt's rename calls on Windows 9x.
     let disk = &mut cpu.bus.disk;
     let itself = from.eq_ignore_ascii_case(&to) || disk.file_key(&to) == disk.file_key(&from);
-    if disk.exists(&to) && !itself {
+    if disk.name_taken(&to) && !itself {
         return dos_result(cpu, Err(5));
     }
     let result = disk.long_name_call(|disk| disk.rename_file(&from, &to));
