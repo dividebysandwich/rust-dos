@@ -95,7 +95,7 @@ pub struct Attrs {
 }
 
 /// The W32 section's version that added `Attrs::bitmap_size`.
-pub const BITMAP_SIZE_SAVED: u16 = 106;
+pub const BITMAP_SIZE_SAVED: u16 = 107;
 
 #[derive(Clone, Debug, Default)]
 pub struct Dc {
