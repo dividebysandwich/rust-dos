@@ -138,8 +138,9 @@ that it improves on main. Steps, in this order:
    behaviour closer to the real hardware or the real Windows, shown by
    a test or a comparison with it. Put the evidence in the description.
    How much checking that takes depends on what the change can break
-   ("Checks in proportion to the change", below); a change to shared
-   code also needs its "Regression check" section there.
+   ("Checks in proportion to the change", below), which also says which
+   changes need a "Regression check" section and how many programs it
+   lists.
 
    Before it is marked ready, check that it still merges with main,
    which moves on while a pull request is in draft. Fetch both and run
@@ -238,32 +239,58 @@ while it runs.
   card's memory, for one. Compare from states each build saved itself,
   or from a plan that replays from power-on.
 - Other programs are run when the change is in a path they share with
-  the program the work is for. A change one program reaches needs that
-  program's check and the tests. A change to shared code (GDI's palette
-  and bitmaps, DirectDraw's blits, USER, the heap, DOS's file calls,
-  the CPU, timers and the pacing of `cycles`, a card's setup or a
-  renderer's common path) needs every test file that covers it run
-  locally, and runs of two to four other programs that reach the path,
-  main against the branch: deterministic where the path allows, and in
-  the form for runs that can't be deterministic (end of "Comparing what
-  two builds draw") on an OpenGL path or at `cycles=max` or `auto`. The
-  description gets a "Regression check" section that lists the
-  programs, their settings, the builds and what each showed, and a
-  pull request that changes shared code isn't marked ready without it:
-  the program the work is for shows that the change fixes it, not what
-  it does to the others. Only CI's Linux jobs
-  run the whole suite: the Windows and macOS jobs run the recompiler's
-  and the deterministic mode's tests (and Windows a start of the debug
-  build) and none of `tests/win32`, so their passing says nothing about
-  it, and a pull request can be marked ready before the Linux jobs end
-  (#2024 merged with them red).
+  the program the work is for, and how many depends on whether a
+  program that works on main can take the changed path. The pull
+  request's description gets a "Regression check" section that names
+  the tier below and says why the change is in it, then lists the
+  programs, their settings, the builds and what each showed. The
+  program the work is for shows that the change fixes it, not what it
+  does to the others. The reviewer checks the tier like any other
+  claim in the description.
+
+  1. Two to four other programs, main against the branch, for a change
+     to what every program meets: the CPU, the recompiler and the FPU,
+     timers and the pacing of `cycles` (`auto`, `max` and their
+     tuning), the heap, DOS's file calls, a card's setup or a
+     renderer's common path, and any change made for speed. Runs are
+     deterministic where the path allows, and take the form for runs
+     that can't be deterministic (end of "Comparing what two builds
+     draw") on an OpenGL path or at `cycles=max` or `auto`. These
+     changes cost other programs quietly, and a timing claim isn't
+     settled by tests.
+  2. One other program that reaches the path, for a change to Win32 or
+     Win16 behaviour that working programs already rely on: USER's
+     messages, focus and activation, GDI's palette and bitmaps,
+     DirectDraw's blits and surfaces, the registry, resources. If none
+     is found within a short search (a quarter of an hour over the
+     fixtures), say so. The test of the real system's behaviour and the
+     conformance results (`tests/win32/conformance_tests.rs`) carry the
+     rest: they caught what game runs missed in #2160.
+  3. No other program, for a change that only adds what was missing or
+     failing: a function, interface or DLL that didn't exist, an error
+     path where main crashed, page-faulted or returned
+     "not implemented", or a flag or format no working program passes
+     (`DDSD_LPSURFACE` in #2152). No program that works on main can
+     reach the changed code, so a run of another program shows
+     nothing. The section says which call failed on main, and the
+     tests and the game check carry it.
+
+  A change in tier 3 that also changes a path working programs take
+  is in tier 2 for that part: an ACM that now loads installable
+  drivers (#2178) also changes what a program gets for a format no
+  driver took, which on main failed at once and let it fall back.
+  Every test file that covers the changed code is run locally whatever
+  the tier. Only CI's Linux jobs run the whole suite: the Windows and
+  macOS jobs run the recompiler's and the deterministic mode's tests
+  (and Windows a start of the debug build) and none of `tests/win32`,
+  so their passing says nothing about it, and a pull request can be
+  marked ready before the Linux jobs end (#2024 merged with them red).
 - A run of another program counts only if it reaches the changed code:
   check the counter or the log that shows it did. Of five games run for
   a change to the ToadForce's depth fills (#2066), one reached it; the
-  others showed only that nothing else moved, and don't count toward
-  the two to four. When two of them reach the code and draw the same,
-  stop: searching every program for more scenes that reach it adds
-  little.
+  others showed only that nothing else moved, and don't count. When the
+  programs the tier asks for reach the code and draw the same, stop:
+  searching every program for more scenes that reach it adds little.
 - A question of what the real system does is answered by the real
   system: a small probe program run on real Windows or on an emulated
   real PC (86Box) settles it sooner and more surely than reasoning

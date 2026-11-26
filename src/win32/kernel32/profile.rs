@@ -474,6 +474,52 @@ pub(crate) fn profile_value(
         .map(<[u8]>::to_vec)
 }
 
+/// Change the lines of `section` in the profile `file` with `change`, for
+/// the system's own use: SETUPX's UpdateInis (win32/inf.rs). A line is
+/// its key and its value, None for a line without '='. The section is
+/// made at the end of the file if it isn't there, and the file if it
+/// isn't. The file is written only if the lines changed; false if it
+/// couldn't be, also when a program has it open without sharing it for
+/// reading and writing, as WritePrivateProfileStringA refuses then: read
+/// as empty, the file would be written back with this section alone.
+pub(crate) fn update_profile(
+    cpu: &mut Cpu,
+    file: &[u8],
+    section: &[u8],
+    change: impl FnOnce(&mut Vec<(String, Option<String>)>),
+) -> bool {
+    let path = path_of(Some(file));
+    let both = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    if super::path::open_sharing(cpu, &path).is_some_and(|s| s & both != both) {
+        return false;
+    }
+    let mut sections = parse(&read_file(cpu, &path).unwrap_or_default());
+    let i = section_index(&mut sections, section);
+    let text = |b: &[u8]| crate::dosstr::from_bytes(b);
+    let before: Vec<(String, Option<String>)> = sections[i]
+        .entries
+        .iter()
+        .map(|e| (text(&e.key), e.value.as_deref().map(text)))
+        .collect();
+    let mut lines = before.clone();
+    change(&mut lines);
+    if lines == before {
+        return true;
+    }
+    sections[i].entries = lines
+        .into_iter()
+        .map(|(key, value)| Entry {
+            key: crate::dosstr::to_bytes(&key),
+            value: value.map(|v| crate::dosstr::to_bytes(&v)),
+        })
+        .collect();
+    let data = unparse(&sections);
+    cpu.bus
+        .disk
+        .long_name_call(|disk| disk.write_whole_file(&path, &data, None))
+        .is_ok()
+}
+
 /// The values of the keys of `section` in the profile `file`, in their
 /// order, for the system's own use: WIN.INI's `[Fonts]`, which GDI
 /// loads as it starts. They are read as a program reads them, listing

@@ -119,7 +119,7 @@ const FIRST_STREAM: u32 = 0x0AC0_0000;
 /// The W32 version whose states have the installable drivers: the
 /// processes that found theirs, the drivers, those open and the streams
 /// of drivers.
-pub const DRIVERS_SAVED: u16 = 109;
+pub const DRIVERS_SAVED: u16 = 110;
 
 /// The streams open, by handle, and the installable drivers (`drivers`):
 /// the processes that found theirs, the drivers each process has (by

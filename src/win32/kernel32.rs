@@ -22,7 +22,7 @@ mod profile;
 pub(in crate::win32) use profile::{
     parse_int, profile_entries, profile_int, profile_number, profile_values,
 };
-pub(crate) use profile::profile_value;
+pub(crate) use profile::{profile_value, update_profile};
 mod sort;
 mod sync;
 mod text;
@@ -828,6 +828,24 @@ static APIS: &[Api] = &[
     stdcall("UTRegister", 780, 7, crate::win16::universal::ut_register),
     stdcall("UTUnRegister", 781, 1, crate::win16::universal::ut_unregister),
     stdcall("UTGlue32", 0, 4, crate::win16::universal::ut_glue32),
+    // The resource functions' W versions, which Windows 95 and 98
+    // implement, and EnumResourceLanguagesA.
+    stdcall("FindResourceW", 294, 3, module::find_resource_w),
+    stdcall("FindResourceExW", 293, 4, module::find_resource_ex_w),
+    stdcall("EnumResourceTypesW", 239, 3, module::enum_resource_types_w),
+    stdcall("EnumResourceNamesW", 237, 4, module::enum_resource_names_w),
+    stdcall(
+        "EnumResourceLanguagesA",
+        234,
+        5,
+        module::enum_resource_languages,
+    ),
+    stdcall(
+        "EnumResourceLanguagesW",
+        235,
+        5,
+        module::enum_resource_languages_w,
+    ),
 ];
 
 /// DebugBreak: Windows 98's is an INT 3, whose breakpoint exception goes

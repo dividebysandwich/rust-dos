@@ -511,6 +511,12 @@ DebugBreak
 UTRegister
 UTUnRegister
 UTGlue32
+FindResourceW
+FindResourceExW
+EnumResourceTypesW
+EnumResourceNamesW
+EnumResourceLanguagesA
+EnumResourceLanguagesW
 
 DLL ADVAPI32.DLL
 InitializeSecurityDescriptor
@@ -561,6 +567,7 @@ EqualSid
 GetTokenInformation
 OpenThreadToken
 RegeditMain
+SetThreadToken
 
 DLL MSVCRT.DLL
 __getmainargs
@@ -6219,6 +6226,17 @@ DdeCmpStringHandles
 MODULE DISPLAY
 
 MODULE SETUPX
+IpOpen
+IpClose
+CtlGetLddPath
+suErrorToIds
+GenInstall
+GenFormStrWithoutPlaceHolders
+VcpOpen
+VcpClose
+IpGetProfileString
+vcpUICallbackProc
+CtlSetLddPath
 
 MODULE COMPOBJ
 CoBuildVersion
