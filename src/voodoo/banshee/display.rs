@@ -80,39 +80,68 @@ fn rgb(v: u32) -> [u8; 3] {
     [(v >> 16) as u8, (v >> 8) as u8, v as u8]
 }
 
-/// Each of the first `len` pixels of row `y` of a desktop of 16 bits a
-/// pixel, with its x.
+/// The first `out.len()` pixels of row `y` of a desktop of 16 bits a
+/// pixel, into `out`.
 #[inline]
-fn desktop_words(ram: &Vram, f: &Frame, y: usize, len: usize, each: impl FnMut(usize, u16)) {
+fn desktop_row(ram: &Vram, f: &Frame, y: usize, out: &mut [u16]) {
     let line = if f.half { y as u32 / 2 } else { y as u32 };
-    surface_words(ram, f.start, f.stride, f.tiled, line, len, each);
+    surface_row(ram, f.start, f.stride, f.tiled, line, out);
 }
 
-/// Each of the first `len` pixels of row `line` of a surface of 16 bits a
-/// pixel at `start`, with its x: the words of a run (a row, or a tile's
-/// 64 pixels) follow each other, so only its first needs the address.
-#[inline]
-fn surface_words(
-    ram: &Vram,
-    start: u32,
-    stride: u32,
-    tiled: bool,
-    line: u32,
-    len: usize,
-    mut each: impl FnMut(usize, u16),
-) {
+/// The first `out.len()` pixels of row `line` of a surface of 16 bits a
+/// pixel at `start`, into `out`: the words of a run (a row, or a tile's
+/// 64 pixels) follow each other, so only its first needs the address,
+/// and they are read together unless the run wraps around the memory.
+fn surface_row(ram: &Vram, start: u32, stride: u32, tiled: bool, line: u32, out: &mut [u16]) {
     let mask = (ram.bytes() - 1) as u32;
-    let words = mask >> 1;
+    let words = (mask >> 1) as usize;
     let mut x = 0;
-    while x < len {
-        let run = if tiled { 64 - (x & 63) } else { len - x };
-        let end = (x + run).min(len);
-        let mut w = (surface_addr(start, 2 * x as u32, line, stride, tiled) & mask) >> 1;
-        for x in x..end {
-            each(x, ram.get(w as usize));
-            w = (w + 1) & words;
+    while x < out.len() {
+        let run = if tiled { 64 - (x & 63) } else { out.len() - x };
+        let end = (x + run).min(out.len());
+        let w = ((surface_addr(start, 2 * x as u32, line, stride, tiled) & mask) >> 1) as usize;
+        let run = &mut out[x..end];
+        if w + run.len() <= words + 1 {
+            ram.read_words(w, run);
+        } else {
+            for (i, o) in run.iter_mut().enumerate() {
+                *o = ram.get((w + i) & words);
+            }
         }
         x = end;
+    }
+}
+
+/// The colours of 5-6-5 pixels, through a colour lookup table or not
+/// (`rgb565`): each field's part of the RGBA8 pixel, as the pixel's
+/// bytes read little-endian, so that a pixel is three lookups ORed.
+/// Built once for a picture, for its hundreds of thousands of pixels.
+struct Rgb565 {
+    r: [u32; 32],
+    /// With the alpha byte, opaque.
+    g: [u32; 64],
+    b: [u32; 32],
+}
+
+impl Rgb565 {
+    fn new(clut: Option<&[u32]>) -> Self {
+        // Each component of `rgb565` depends on its own field alone.
+        let part = |p: u16, i: usize| rgb565(p, clut)[i] as u32;
+        Self {
+            r: std::array::from_fn(|v| part((v as u16) << 11, 0)),
+            g: std::array::from_fn(|v| (part((v as u16) << 5, 1) << 8) | 0xFF00_0000),
+            b: std::array::from_fn(|v| part(v as u16, 2) << 16),
+        }
+    }
+
+    /// Each of `words`' pixels into `out`, RGBA8, as many as both have.
+    fn row(&self, words: &[u16], out: &mut [[u8; 4]]) {
+        for (px, &p) in out.iter_mut().zip(words) {
+            let rgba = self.r[(p >> 11) as usize & 31]
+                | self.g[(p >> 5) as usize & 63]
+                | self.b[p as usize & 31];
+            *px = rgba.to_le_bytes();
+        }
     }
 }
 
@@ -193,18 +222,15 @@ impl ShownWords {
     /// Draw the picture into `out` as `Banshee::render` does.
     pub fn render(&self, out: &mut [u8], pitch: usize) {
         let f = &self.frame;
-        let clut = self.desktop_clut.then_some(&self.cluts[0][..]);
+        let colours = Rgb565::new(self.desktop_clut.then_some(&self.cluts[0][..]));
         for (y, words) in self.words.chunks(f.width.max(1)).enumerate().take(f.height) {
             let Some(row) = out.get_mut(y * pitch * 4..(y * pitch + f.width.min(pitch)) * 4) else {
                 break;
             };
-            for (px, &p) in row.as_chunks_mut::<4>().0.iter_mut().zip(words) {
-                let [r, g, b] = rgb565(p, clut);
-                *px = [r, g, b, 255];
-            }
+            colours.row(words, row.as_chunks_mut::<4>().0);
         }
         if let Some(o) = self.overlay.as_ref().filter(|o| o.cols > 0 && o.x < pitch) {
-            let clut = o.clut.then_some(&self.cluts[1][..]);
+            let colours = Rgb565::new(o.clut.then_some(&self.cluts[1][..]));
             // The columns left of the output's right edge.
             let cols = o.cols.min(pitch - o.x);
             for (y, words) in (o.y..).zip(o.words.chunks(o.cols)) {
@@ -213,10 +239,7 @@ impl ShownWords {
                 let Some(row) = out.get_mut(at..(at + cols * 4).min(out.len())) else {
                     break;
                 };
-                for (px, &p) in row.as_chunks_mut::<4>().0.iter_mut().zip(words) {
-                    let [r, g, b] = rgb565(p, clut);
-                    *px = [r, g, b, 255];
-                }
+                colours.row(words, row.as_chunks_mut::<4>().0);
             }
         }
         if f.wide {
@@ -358,8 +381,10 @@ impl Banshee {
                 shown.cols = cols;
                 let words = &mut shown.words;
                 if dudx == 1 << 20 {
+                    let at = words.len();
+                    words.resize(at + cols, 0);
                     let start = self.overlay_addr;
-                    surface_words(ram, start, stride, tiled, sy, cols, |_, p| words.push(p));
+                    surface_row(ram, start, stride, tiled, sy, &mut words[at..]);
                 } else {
                     let mask = (ram.bytes() - 1) as u32;
                     let mut u = 0u64;
@@ -384,10 +409,9 @@ impl Banshee {
             (o.x, o.y, o.cols) == (0, 0, f.width) && o.words.len() == f.width * f.height
         });
         if !covered {
-            // `desktop_words` gives each row's pixels from left to right.
-            into.words.reserve(f.width * f.height);
-            for y in 0..f.height {
-                desktop_words(ram, &f, y, f.width, |_, p| into.words.push(p));
+            into.words.resize(f.width * f.height, 0);
+            for (y, row) in into.words.chunks_mut(f.width.max(1)).enumerate() {
+                desktop_row(ram, &f, y, row);
             }
         }
         true
@@ -404,21 +428,21 @@ impl Banshee {
         }..][..256];
         let bypass = f.cfg & VIDPROC_DESKTOP_CLUT_BYPASS != 0;
         let format = (f.cfg >> 18) & 7;
+        // 16 bits a pixel, the usual desktop and what the 3D engine shows:
+        // a row's words, then their colours.
+        let colours = (format == 1).then(|| Rgb565::new((!bypass).then_some(desktop_clut)));
+        let mut words = vec![0; if format == 1 { f.width.min(pitch) } else { 0 }];
         for y in 0..f.height {
             let Some(row) = out.get_mut(y * pitch * 4..(y * pitch + f.width.min(pitch)) * 4) else {
                 break;
             };
             let line = if f.half { y as u32 / 2 } else { y as u32 };
             let at = |x: u32| surface_addr(f.start, x, line, f.stride, f.tiled);
-            if format == 1 {
-                // 16 bits a pixel, the usual desktop and what the 3D engine
-                // shows.
-                let clut = (!bypass).then_some(desktop_clut);
+            if let Some(colours) = &colours {
                 let pixels = row.as_chunks_mut::<4>().0;
-                desktop_words(ram, f, y, pixels.len(), |x, p| {
-                    let [r, g, b] = rgb565(p, clut);
-                    pixels[x] = [r, g, b, 255];
-                });
+                let words = &mut words[..pixels.len()];
+                desktop_row(ram, f, y, words);
+                colours.row(words, pixels);
                 continue;
             }
             for (x, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -801,6 +825,37 @@ mod tests {
         let at = (2 * 1024 + 3) * 4;
         assert_eq!(&out[at..at + 3], &[0xFF, 0, 0]);
         assert_eq!(&out[at + 4..at + 7], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn the_colour_tables_give_each_pixels_colour() {
+        let clut: Vec<u32> = (0..256u32).map(|i| i.wrapping_mul(0x9E37_79B9)).collect();
+        for clut in [None, Some(&clut[..])] {
+            let colours = Rgb565::new(clut);
+            let words: Vec<u16> = (0..=u16::MAX).collect();
+            let mut out = vec![[0; 4]; words.len()];
+            colours.row(&words, &mut out);
+            for (&p, px) in words.iter().zip(&out) {
+                let [r, g, b] = rgb565(p, clut);
+                assert_eq!(*px, [r, g, b, 255], "{p:04X}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_desktop_row_that_wraps_around_the_memory() {
+        let ram = Vram::new(MEMORY);
+        let mut b = card_1024x768(1 << 18 | VIDPROC_DESKTOP_CLUT_BYPASS);
+        // Row 0 starts 4 bytes before the end: its third pixel is the
+        // memory's first word.
+        b.ext_write(VID_DESKTOP_START_ADDR, MEMORY as u32 - 4);
+        b.ext_write(VID_DESKTOP_OVERLAY_STRIDE, 2048);
+        ram.set(MEMORY / 2 - 1, 0x001F);
+        ram.set(0, 0xF800);
+        let mut out = vec![0; 1024 * 768 * 4];
+        b.render(&ram, &mut out, 1024);
+        assert_eq!(&out[4..8], &[0, 0, 0xFF, 255]);
+        assert_eq!(&out[8..12], &[0xFF, 0, 0, 255]);
     }
 
     #[test]
