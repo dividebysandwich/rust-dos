@@ -282,12 +282,36 @@ all of them run on it.
 | `svga_verite` | A Rendition Vérité V1000 with 4 MB ([Rendition Vérité](#rendition-vérité)) | DOS games' Vérité versions, and the games for Creative's 3D Blaster PCI |
 | `svga_ati_3drage`, `svga_ati_3drage2` | An ATI 3D RAGE or 3D RAGE II with 4 MB ([ATI 3D RAGE](#ati-3d-rage)) | Windows images with ATI's drivers, and the games ATI bundled |
 
-Two 3D cards go beside the display adapter instead of replacing it:
+`machine` picks the one card that draws the screen. Two more settings add
+a 3D card in a slot of its own beside it. These add-on cards draw 3D only
+and need the display adapter, as the real boards did:
 
-| Setting | What programs find | Use it for |
+| Setting | What it adds | Use it for |
 |---|---|---|
-| `voodoo=true` | A 3dfx Voodoo Graphics, or with `voodoo_model=voodoo2` a Voodoo2. The display adapter keeps showing DOS and the desktop, and the Voodoo takes over the screen while a game draws on it, as the real card did through its pass-through cable ([3dfx Voodoo Graphics](#3dfx-voodoo-graphics)) | DOS games' 3dfx versions (1996 to 1998), and Windows games that bring their own Glide for these cards |
-| `powervr=pcx1` or `pcx2` | A PowerVR 3D card, which writes its finished picture into the display adapter's VESA frame buffer ([PowerVR PCX1 and PCX2](#powervr-pcx1-and-pcx2)) | DOS games' PowerVR versions |
+| `voodoo=true` | A 3dfx Voodoo Graphics, or with `voodoo_model=voodoo2` a Voodoo2 ([3dfx Voodoo Graphics](#3dfx-voodoo-graphics)) | DOS games' 3dfx versions (1996 to 1998), and Windows games that bring their own Glide for these cards |
+| `powervr=pcx1` or `pcx2` | A PowerVR PCX1 or PCX2 ([PowerVR PCX1 and PCX2](#powervr-pcx1-and-pcx2)) | DOS games' PowerVR versions |
+
+Which `machine` each add-on card works with:
+
+| `machine` | `voodoo=true` | `powervr` |
+|---|---|---|
+| `svga`, `svga_s3`, `svga_s3virge`, `svga_s3virgevx`, `svga_verite`, `svga_ati_3drage`, `svga_ati_3drage2`, `svga_toadforce` | Yes | Yes |
+| `svga_et4000` | Yes | No: the ET4000 has no linear frame buffer |
+| `vga`, `ega`, `cga`, `tandy`, `pcjr`, `hercules` | Yes, though 3dfx games expect a VGA at least | No: these have no VESA modes |
+| `svga_voodoo3`, `svga_banshee` | No: the card is a 3dfx card itself, and with both set the machine has the Voodoo3 or Banshee alone | Yes |
+
+The two show their pictures in different ways, which is why they need
+different things of `machine`:
+
+* The Voodoo has a picture of its own. The display adapter shows DOS and
+  the desktop, and the Voodoo takes over the window while a game draws on
+  it, as the real card did through its pass-through cable. Any display
+  adapter will do.
+* The PowerVR has no picture of its own. It writes each finished frame into
+  the display adapter's VESA linear frame buffer, so the adapter needs one.
+
+`voodoo=true` and `powervr` can be set together: each card has its own
+slot.
 
 A game draws on a 3D card only once its own setup or command line picks the
 card's version, such as its 3dfx version or the card's Direct3D device.
@@ -1456,8 +1480,10 @@ each pixel shows (with hidden surfaces removed before anything is
 textured, and translucent surfaces sorted by the card), textures and
 shades the tile, and writes the finished pixels over the PCI bus into the
 VGA card's VESA linear frame buffer. So the picture comes through the
-display adapter: any `machine` with a VESA BIOS will do, screenshots and
-recordings show it, and nothing else in the window changes.
+display adapter: any `machine` with a linear frame buffer will do (every
+`svga` value but `svga_et4000`; see [Choosing a video
+card](#choosing-a-video-card)), screenshots and recordings show it, and
+nothing else in the window changes.
 
 The card is on the PCI bus as device 2 (vendor 1033h, device 0046h for
 the PCX2, 002Ah for the PCX1), its registers at D4000000h (BAR0) and its
