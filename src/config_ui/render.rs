@@ -879,7 +879,8 @@ impl ConfigUi {
             hints.extend([("Tab", "Page", Tab), ("F2", "Save", Save), ("Esc", "Close", Esc)]);
             hints
         };
-        if self.help.is_none() && self.help_topic().is_some() {
+        // A rebind takes F1 as the key to bind.
+        if self.help.is_none() && self.help_topic().is_some() && !self.capturing_hotkey() {
             hints.push(("F1", "Help", Help));
         }
         fit_hints(&mut hints, g.cols - 4);
