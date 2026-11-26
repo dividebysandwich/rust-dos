@@ -17,6 +17,7 @@ mod cursor_tests;
 mod ega_ril_tests;
 mod ega_tests;
 mod et4000_tests;
+mod font_ram_tests;
 mod frame_rate_tests;
 mod frame_tests;
 mod hercules_tests;
