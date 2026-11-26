@@ -219,7 +219,7 @@ impl Voodoo {
 
     /// Tell the recording about the pixels a blit of `size` from `(x, y)`
     /// wrote at `base`, `stride` bytes a row: each row from left to
-    /// right, which the recording keeps as one run (`Mirror::pixel`). A
+    /// right, which the recording keeps as one run (`Mirror::pixels`). A
     /// blit that runs from right to left would otherwise give it a run
     /// for every pixel: Prince of Persia 3D's menu copies its whole
     /// screen that way every frame.
@@ -233,18 +233,37 @@ impl Voodoo {
         if !self.recording() {
             return;
         }
-        let (x0, x1) = (x.min(x + size_x), x.max(x + size_x));
-        let (y0, y1) = (y.min(y + size_y), y.max(y + size_y));
+        let (mut x0, mut x1) = (x.min(x + size_x), x.max(x + size_x));
+        let (mut y0, mut y1) = (y.min(y + size_y), y.max(y + size_y));
+        // The pixels `blt_clipped` leaves out are a rectangle's.
+        if self.blt_command() & CLIPPING != 0 {
+            let (cx, cy) = (self.reg[BLT_CLIP_X], self.reg[BLT_CLIP_Y]);
+            x0 = x0.max(((cx >> 16) & 0xFFF) as i32);
+            x1 = x1.min((cx & 0xFFF) as i32 - 1);
+            y0 = y0.max(((cy >> 16) & 0xFFF) as i32);
+            y1 = y1.min((cy & 0xFFF) as i32 - 1);
+        }
+        if x0 > x1 {
+            return;
+        }
+        let len = (x1 - x0 + 1) as usize;
+        let mut values = Vec::with_capacity(len);
         for y in y0..=y1 {
-            for x in x0..=x1 {
-                if self.blt_clipped(x, y) {
-                    continue;
+            let first = (blt_addr(x0, y, base, stride) >> 1) as usize;
+            // A row that starts left of the memory or runs past its end
+            // goes a word at a time, as the blit wrote it.
+            if x0 < 0 || first + len > self.fbi.ram.len() {
+                for x in x0..=x1 {
+                    let at = (blt_addr(x, y, base, stride) >> 1) as usize;
+                    if at < self.fbi.ram.len() {
+                        self.blt_mirror(at, self.fbi.ram.get(at));
+                    }
                 }
-                let at = (blt_addr(x, y, base, stride) >> 1) as usize;
-                if at < self.fbi.ram.len() {
-                    self.blt_mirror(at, self.fbi.ram.get(at));
-                }
+                continue;
             }
+            values.clear();
+            values.extend((first..first + len).map(|at| self.fbi.ram.get(at)));
+            self.blt_mirror_run(first, &values);
         }
     }
 
@@ -265,7 +284,15 @@ impl Voodoo {
     /// Tell the OpenGL renderer's recording about a pixel the blitter
     /// wrote, if it is in a buffer's picture.
     fn blt_mirror(&mut self, at: usize, value: u16) {
-        if !self.recording() {
+        self.blt_mirror_run(at, &[value]);
+    }
+
+    /// Tell the recording about the pixels the blitter wrote from word
+    /// `at` on, `values` in a row of memory, where they are in a buffer's
+    /// picture. A run that goes on past a buffer's row goes a pixel at a
+    /// time.
+    fn blt_mirror_run(&mut self, at: usize, values: &[u16]) {
+        if !self.recording() || values.is_empty() {
             return;
         }
         let fbi = &self.fbi;
@@ -274,11 +301,18 @@ impl Voodoo {
         let aux = (fbi.auxoffs != NONE).then_some((None, fbi.auxoffs as usize / 2));
         let found = colour.chain(aux).filter(|&(_, base)| at >= base).min_by_key(|&(_, base)| at - base);
         let Some((dest, base)) = found else { return };
-        let (x, y) = (((at - base) % row) as u32, ((at - base) / row) as u32);
-        if x < fbi.width && y < fbi.height {
-            let width = fbi.width;
+        let (x, y) = ((at - base) % row, (at - base) / row);
+        if values.len() > 1 && x + values.len() > row {
+            for (i, &value) in values.iter().enumerate() {
+                self.blt_mirror_run(at + i, &[value]);
+            }
+            return;
+        }
+        let (width, height) = (fbi.width as usize, fbi.height as usize);
+        if x < width && y < height {
+            let shown = &values[..values.len().min(width - x)];
             if let Some(mirror) = self.mirror.get_mut() {
-                mirror.pixel(dest.map(|d| d as u32), x, y, value, width);
+                mirror.pixels(dest.map(|d| d as u32), x as u32, y as u32, shown, width as u32);
             }
         }
     }
