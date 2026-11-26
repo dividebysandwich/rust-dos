@@ -2808,10 +2808,10 @@ impl State for Voodoo {
             self.pll.load(r)?;
             self.pll_high.load(r)?;
         }
-        // A state from before the slots' order was kept loads them in the
-        // vertices' order: a fan saved in the middle may cull the rest of
-        // its triangles the other way, until the next one begins.
-        self.sslots_swapped = false;
+        // A state from before the slots' order was kept has it guessed
+        // from the setup mode and the vertex count: right for a strip or a
+        // fan that began as one (`Voodoo::guess_slots_swapped`).
+        self.sslots_swapped = self.guess_slots_swapped();
         if !r.is_empty() {
             self.sslots_swapped.load(r)?;
         }
