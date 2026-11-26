@@ -98,6 +98,13 @@ that names the game, its settings and what happened.
   (`adlibgold=true`, `adlibgoldbase=380`) and enter 384 in `INSTALL`
   (or `AGOLD 384 7 1` in `JUNGLE.CFG`). The game sends its music to the
   FM chip at 388h, which rust-dos keeps there with the card moved.
+* **Lands of Lore: Guardians of Destiny** (3dfx, `LOLG.EXE`):
+  `voodoo=true` and `cpu=pentium`, and acceleration on in the game's
+  options (`Acceleration_Toggle=On` in `OPTIONS.INI`). It loads 3dfx's
+  `GLIDE2X.OVL`, which the settings window's Emulator page downloads
+  onto Z: for the card picked. On a Voodoo2 (`voodoo_model=voodoo2`) it
+  takes the Voodoo2's overlay: a Voodoo Graphics `GLIDE2X.OVL` beside
+  the game finds no card, and the game stops with a page fault.
 * **King's Quest, Ultima and other early CGA games**: their composite
   colours need `machine=cga`; `composite` and `composite_era` keep their
   defaults, `auto` and `old`

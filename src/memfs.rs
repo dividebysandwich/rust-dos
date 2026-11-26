@@ -61,6 +61,13 @@ impl MemFs {
         self.files.insert(path, node);
     }
 
+    /// Take a file out; its directories stay.
+    pub fn remove(&mut self, path: &str) {
+        let path = path.trim_start_matches('\\').to_ascii_uppercase();
+        self.files.remove(&path);
+        self.long.remove(&path);
+    }
+
     /// Add a directory, which may stay empty.
     pub fn insert_dir(&mut self, path: &str) {
         self.insert_dir_with(path, None);

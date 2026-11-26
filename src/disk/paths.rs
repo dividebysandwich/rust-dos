@@ -460,6 +460,15 @@ impl DiskController {
         drive.tree()?.file(&path)
     }
 
+    /// The bytes of a file on a drive held in memory, if it holds them
+    /// itself (a CD image's files are on the disc).
+    pub fn virtual_file_bytes(&self, filename: &str) -> Option<&[u8]> {
+        match self.virtual_file(filename)? {
+            Node::Bytes(bytes) => Some(bytes),
+            Node::Extent(_) => None,
+        }
+    }
+
     /// Whether `filename` is a file on a drive held in memory.
     pub fn is_virtual_file(&self, filename: &str) -> bool {
         self.virtual_file(filename).is_some()

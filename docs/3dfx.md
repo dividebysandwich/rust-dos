@@ -46,10 +46,13 @@ Voodoo3's two, and Windows 98's CD has a driver for it.
    Voodoo Rush or a later board and expects 3dfx's DOS overlay, which
    doesn't come with rust-dos. Open the settings window (Ctrl+F12), go to
    the Emulator page and choose *Download Glide's DOS overlay...* (shown
-   while the card is on and the overlay isn't there yet). It downloads
-   3dfx's Voodoo Graphics driver 3.01.00 from the Internet Archive, after
-   asking, and puts its `GLIDE2X.OVL` on Z:, which is on the PATH. A copy
-   beside the game comes first.
+   while the card is on and its overlay isn't there yet). It downloads
+   3dfx's last driver for the card, Voodoo Graphics 3.01.00 or Voodoo2
+   3.02.02, from the Internet Archive, after asking, and puts its
+   `GLIDE2X.OVL` on Z:, which is on the PATH. A copy beside the game
+   comes first. Each board has its own overlay, as on a real PC: the
+   Voodoo Graphics one finds no Voodoo2, so with the Voodoo2 in, a game
+   that loads it runs as if there were no 3dfx card.
 
 On plain DOS the overlay loads with DOS/4GW as its own DPMI host, as on
 a real machine's DOS, which has no DPMI host. Rust-DOS recognises a

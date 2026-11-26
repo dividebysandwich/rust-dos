@@ -47,8 +47,12 @@ impl Bus {
         }
         self.vga.mark_dirty_full();
         self.clock.schedule(self.next_event());
-        // Glide's DLLs come and go with the card.
+        // Glide's DLLs come and go with the card, and so does Z:'s DOS
+        // overlay, which is each board's own: the settings window and a
+        // state's load swap the card after they have placed the overlay
+        // of the card that was in.
         crate::win32::dll_files::sync(self);
+        crate::voodoo::overlay::provide(self);
     }
 
     /// A PCI reset of the 3dfx card, as at power-on.

@@ -1053,6 +1053,15 @@ impl DiskController {
         }
     }
 
+    /// Take a file off Z: (`add_virtual_file`). A program that has it
+    /// open keeps reading what it opened.
+    pub fn remove_virtual_file(&mut self, name: &str) {
+        let drive = self.drives[DRIVE_Z as usize].as_mut();
+        if let Some(Storage::Tree { files, .. }) = drive.map(|d| &mut d.storage) {
+            files.remove(name);
+        }
+    }
+
     fn memory_drive(files: MemFs, label: &str) -> Drive {
         Drive {
             kind: DriveKind::Virtual,

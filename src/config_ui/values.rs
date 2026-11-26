@@ -162,6 +162,15 @@ pub(super) fn voodoo_add_on(s: &Settings) -> bool {
     s.voodoo.enabled && s.machine.voodoo_board().is_none()
 }
 
+/// The DOS Glide overlay of the add-on card the settings give, if they
+/// give one.
+pub(super) fn add_on_overlay(s: &Settings) -> Option<&'static crate::voodoo::overlay::Overlay> {
+    if !voodoo_add_on(s) {
+        return None;
+    }
+    crate::voodoo::overlay::Overlay::of(s.voodoo.board.model())
+}
+
 /// Whether the machine's 3dfx card, the add-on or the display adapter,
 /// is drawn again with OpenGL.
 pub(super) fn voodoo_opengl(s: &Settings) -> bool {
