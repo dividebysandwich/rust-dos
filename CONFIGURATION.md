@@ -419,12 +419,14 @@ help.
 > lights every vertex on the processor. Use `toadforce_renderer=auto`
 > or `opengl` for nearly everything. Keep `software` for a game whose
 > picture is wrong with OpenGL, and report that game.
+>
+> This doesn't apply to the 3dfx cards (the add-on Voodoo, a Voodoo3 or
+> a Banshee). Their software renderer draws on threads of its own, and
+> depending on the game, your CPU and your graphics card it can be
+> faster than their OpenGL renderer.
 
 The ToadForce's games draw more than the 3dfx cards' do. If you have to use
 `toadforce_renderer=software`, choose a lower resolution in the game.
-
-The advice above on weak graphics chips is about the 3dfx cards. It
-doesn't carry over to the ToadForce.
 
 A run with `--deterministic` always draws on the CPU, whatever the settings,
 so that its pictures are the same on every computer. The libretro core draws
@@ -1289,6 +1291,11 @@ III unless `cpu` says otherwise (see `cpu` in
 > lights every vertex on the processor. Use `toadforce_renderer=auto`
 > or `opengl` for nearly everything. Keep `software` for a game whose
 > picture is wrong with OpenGL, and report that game.
+>
+> This doesn't apply to the 3dfx cards (the add-on Voodoo, a Voodoo3 or
+> a Banshee). Their software renderer draws on threads of its own, and
+> depending on the game, your CPU and your graphics card it can be
+> faster than their OpenGL renderer.
 
 A change of `toadforce_memory` takes effect at the DOS prompt, and one
 of `toadforce_renderer` or `toadforce_gamma` at once. The card's
