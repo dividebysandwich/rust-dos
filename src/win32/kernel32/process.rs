@@ -412,8 +412,9 @@ fn spawn_windows(
     Ok(handles(cpu, created.process, created.thread))
 }
 
-/// Who started the process `pid`: a program the foreground one starts may
-/// bring its windows to the foreground (user32::input).
+/// Who started the process `pid`: a program the foreground one, or the
+/// one that took the last input, starts may bring its windows to the
+/// foreground (user32::input).
 fn set_parent(cpu: &mut Cpu, pid: u32, parent: u32) {
     if let Some(p) = cpu.bus.win32.processes.iter_mut().find(|p| p.id == pid) {
         p.parent = parent;

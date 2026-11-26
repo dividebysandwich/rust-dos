@@ -15135,6 +15135,137 @@ fn a_program_started_from_the_foreground_comes_to_it_and_stays() {
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
+#[test]
+fn a_program_started_by_the_one_that_took_the_last_input_comes_to_the_foreground() {
+    // T.EXE shows a window and starts M.EXE, which comes to the
+    // foreground and takes a key. M.EXE's window then goes, which gives
+    // the foreground back to T.EXE's, and M.EXE starts G.EXE. On Windows
+    // 98 a program started by the one that took the last input may take
+    // the foreground: G.EXE's SetForegroundWindow brings its window in
+    // front, and T.EXE, which waited for M.EXE without looking at its
+    // messages, doesn't raise its own over it when it looks. (Demolition
+    // Racer's setup covered DXSETUP's message box this way, and waited
+    // for it for ever, #2150.)
+    const VK_A: i32 = 0x41;
+    const KEYEVENTF_KEYUP: i32 = 2;
+    const WM_QUIT: i32 = 0x0012;
+    let style = WS_POPUP | WS_VISIBLE;
+    let kernel32 = ["CreateProcessA", "WaitForSingleObject", "ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "PeekMessageA",
+        "DispatchMessageA",
+        "GetForegroundWindow",
+        "GetTopWindow",
+        "FindWindowA",
+        "PostMessageA",
+    ];
+    // A MSG at 0xC0.
+    let texts = [(0, "M.EXE"), (0x10, "Static"), (0x20, "Setup"), (0x30, "Box")];
+    let data = child_data(&texts);
+    let setup = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        push_args(a, &[0, class, title, style, 0, 0, 640, 480, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.xor(ebx, ebx)?;
+        create_child(a, l, f, 0)?;
+        // M.EXE ends once G.EXE waits for messages.
+        a.push(INFINITE)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        pump(a, l, f, 0xC0)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.mov(edi, eax)?;
+        a.test(edi, edi)?;
+        bit_if(a, ne, 0)?;
+        a.cmp(edi, esi)?;
+        bit_if(a, ne, 1)?;
+        a.push(0)?;
+        a.call(f("GetTopWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 2)?;
+        push_args(a, &[class, l.at(0x30) as i32])?;
+        a.call(f("FindWindowA"))?;
+        a.mov(esi, eax)?;
+        a.cmp(esi, edi)?;
+        bit_if(a, eq, 3)?;
+        push_args(a, &[WM_QUIT, 0, 0])?;
+        a.push(esi)?;
+        a.call(f("PostMessageA"))?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let kernel32 = ["CreateProcessA", "ExitProcess"];
+    let user32 = [
+        "WaitForInputIdle",
+        "CreateWindowExA",
+        "SetForegroundWindow",
+        "PeekMessageA",
+        "DispatchMessageA",
+        "DestroyWindow",
+        "keybd_event",
+    ];
+    let data = child_data(&[(0, "G.EXE"), (0x10, "Static"), (0x20, "Package")]);
+    let package = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        push_args(a, &[0, class, title, style, 100, 100, 200, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.push(esi)?;
+        a.call(f("SetForegroundWindow"))?;
+        pump(a, l, f, 0xC0)?;
+        // The user presses a key in its window.
+        for flags in [0, KEYEVENTF_KEYUP] {
+            push_args(a, &[VK_A, 0, flags, 0])?;
+            a.call(f("keybd_event"))?;
+        }
+        pump(a, l, f, 0xC0)?;
+        a.push(esi)?;
+        a.call(f("DestroyWindow"))?;
+        create_child(a, l, f, 0)?;
+        idle(a, l, f, INFINITE)?;
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "SetForegroundWindow",
+        "GetMessageA",
+        "DispatchMessageA",
+    ];
+    let data = child_data(&[(0x10, "Static"), (0x20, "Box")]);
+    let message_box = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        push_args(a, &[0, class, title, style, 200, 200, 100, 50, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.push(eax)?;
+        a.call(f("SetForegroundWindow"))?;
+        let mut next = a.create_label();
+        let mut quit = a.create_label();
+        a.set_label(&mut next)?;
+        push_args(a, &[l.at(0xC0) as i32, 0, 0, 0])?;
+        a.call(f("GetMessageA"))?;
+        a.test(eax, eax)?;
+        a.je(quit)?;
+        a.push(l.at(0xC0) as i32)?;
+        a.call(f("DispatchMessageA"))?;
+        a.jmp(next)?;
+        a.set_label(&mut quit)?;
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family(
+        "foreground_from_last_input",
+        &[("T.EXE", setup), ("M.EXE", package), ("G.EXE", message_box)],
+    );
+    assert_eq!(code, 0xF, "the checks that failed: {:04b}", !code & 0xF);
+}
+
 /// SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE.
 const SWP_HIDE_ONLY: i32 = 0x0097;
 const SW_HIDE: i32 = 0;
