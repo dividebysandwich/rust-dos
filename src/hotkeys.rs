@@ -10,6 +10,11 @@
 //! the table the program looks keys up in (`Hotkeys`), and says which
 //! bindings clash.
 //!
+//! A custom profile (`CustomProfile`) is a set of these lines saved under
+//! a name of the user's, in a file of the per-user directory, which the
+//! settings window's Hotkeys page saves and loads. The configuration never
+//! names one: loading it writes its lines into `[hotkeys]`.
+//!
 //! The keys are named here, without SDL, so the configuration can be read
 //! and checked by the whole crate; the program maps SDL's key names to
 //! them (`Key::named`).
@@ -123,6 +128,39 @@ impl Action {
 
     fn index(self) -> usize {
         Action::ALL.iter().position(|&a| a == self).unwrap_or(0)
+    }
+
+    /// What the action does, as the settings window lists it.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Action::SettingsWindow => "Settings window",
+            Action::SaveStatesPage => "Save states page",
+            Action::PerformanceOverlay => "Performance overlay",
+            Action::SoundVisualizer => "Sound visualizer",
+            Action::Manuals => "Manuals",
+            Action::SaveState => "Save state",
+            Action::LoadState => "Load state",
+            Action::NextSlot => "Next slot",
+            Action::PreviousSlot => "Previous slot",
+            Action::Pause => "Pause",
+            Action::FastForward => "Fast forward (held)",
+            Action::Rewind => "Rewind (held)",
+            Action::Slower => "CPU slower",
+            Action::Faster => "CPU faster",
+            Action::Fullscreen => "Fullscreen",
+            Action::MouseCapture => "Capture the mouse",
+            Action::Mute => "Mute",
+            Action::Screenshot => "Screenshot",
+            Action::RecordSound => "Record sound",
+            Action::RecordVideo => "Record video",
+            Action::RecordAnimation => "Record a GIF",
+            Action::SwapDisk => "Next disk",
+            Action::CopyText => "Copy text",
+            Action::PasteText => "Paste text",
+            Action::PrinterEject => "Eject the printer's page",
+            Action::Degauss => "Degauss",
+            Action::RecenterView => "Recenter the 3D view",
+        }
     }
 
     /// Whether the action does something while the settings window is
@@ -705,6 +743,70 @@ impl HotkeySettings {
     pub fn table(&self) -> Hotkeys {
         self.resolve().0
     }
+
+    /// Whether `action` has a line of its own over the profile.
+    pub fn is_own(&self, action: Action) -> bool {
+        self.keys[action.index()].is_some()
+    }
+
+    /// The keys `action` is bound to: its own line's, else the profile's.
+    /// Where two actions are bound to one key, the table gives it to one
+    /// of them (`resolve`).
+    pub fn keys_of(&self, action: Action) -> Vec<Combo> {
+        match &self.keys[action.index()] {
+            Some(keys) => keys.clone(),
+            None => self.profile.keys(action),
+        }
+    }
+
+    /// Bind `action` to `keys`. Keys the profile gives it leave it without
+    /// a line of its own.
+    pub fn set_keys(&mut self, action: Action, keys: Vec<Combo>) {
+        self.keys[action.index()] = (keys != self.profile.keys(action)).then_some(keys);
+    }
+
+    /// Give `action` the profile's keys again.
+    pub fn reset(&mut self, action: Action) {
+        self.keys[action.index()] = None;
+    }
+
+    /// Give every action the profile's keys again.
+    pub fn reset_all(&mut self) {
+        self.keys = std::array::from_fn(|_| None);
+    }
+
+    /// How many actions have lines of their own.
+    pub fn own_count(&self) -> usize {
+        self.keys.iter().filter(|k| k.is_some()).count()
+    }
+
+    /// Bind `combo` to `action`, in place of its keys, or with `add` as
+    /// one more. Any other action bound to `combo` loses it, so that the
+    /// key does what it was bound for last.
+    pub fn bind(&mut self, action: Action, combo: Combo, add: bool) {
+        for other in Action::ALL.into_iter().filter(|&a| a != action) {
+            let keys = self.keys_of(other);
+            if keys.contains(&combo) {
+                self.set_keys(other, keys.into_iter().filter(|&c| c != combo).collect());
+            }
+        }
+        let mut keys = if add {
+            self.keys_of(action)
+        } else {
+            Vec::new()
+        };
+        if !keys.contains(&combo) {
+            keys.push(combo);
+        }
+        self.set_keys(action, keys);
+    }
+
+    /// Whether the settings window still opens with these keys: by a key
+    /// of its own, or by the right button held still (`menu_hold`, the
+    /// `mouse_menu_hold` setting).
+    pub fn window_reachable(&self, menu_hold: bool) -> bool {
+        menu_hold || self.table().keys(Action::SettingsWindow).next().is_some()
+    }
 }
 
 /// The keys of every action, for looking up the key pressed.
@@ -759,6 +861,199 @@ impl Hotkeys {
     pub fn is_key_of(&self, action: Action, key: Key) -> bool {
         self.keys(action).any(|c| c.key == key)
     }
+
+    /// The action `combo` is bound to, exactly: without the Shift that
+    /// `action` leaves out.
+    pub fn owner(&self, combo: Combo) -> Option<Action> {
+        self.table
+            .iter()
+            .find(|(c, _)| *c == combo)
+            .map(|&(_, a)| a)
+    }
+}
+
+impl Combo {
+    /// Whether the settings window has a use for the combination itself:
+    /// a key without Ctrl or Alt that moves in its lists or types in its
+    /// fields. The settings window's own key closes the window whatever
+    /// the key, so it can't be one of these.
+    pub fn window_uses(self) -> bool {
+        !self.has_ctrl_or_alt()
+            && (self.key.types()
+                || matches!(
+                    self.key.name(),
+                    "Escape"
+                        | "Up"
+                        | "Down"
+                        | "Left"
+                        | "Right"
+                        | "PageUp"
+                        | "PageDown"
+                        | "Home"
+                        | "End"
+                        | "Insert"
+                        | "Delete"
+                ))
+    }
+}
+
+/// The folder of the custom profiles, in rust-dos's per-user directory.
+pub fn custom_dir() -> Option<std::path::PathBuf> {
+    crate::config::user_dir().map(|dir| dir.join("hotkeys"))
+}
+
+/// The file name a custom profile is saved under, after its name.
+const CUSTOM_EXTENSION: &str = "conf";
+
+/// A set of keys saved under a name of the user's: the `[hotkeys]` lines
+/// of every action, and the profile they were made over. Loading one picks
+/// that profile, and the keys that differ from it become the actions' own
+/// lines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustomProfile {
+    pub name: String,
+    pub base: Profile,
+    /// Each action's keys, or None for the base profile's: a file edited
+    /// by hand may leave an action out.
+    keys: [Option<Vec<Combo>>; Action::ALL.len()],
+}
+
+impl CustomProfile {
+    /// The keys `settings` binds, under `name`.
+    pub fn of(name: &str, settings: &HotkeySettings) -> CustomProfile {
+        CustomProfile {
+            name: name.to_string(),
+            base: settings.profile,
+            keys: std::array::from_fn(|i| Some(settings.keys_of(Action::ALL[i]))),
+        }
+    }
+
+    pub fn keys_of(&self, action: Action) -> Vec<Combo> {
+        match &self.keys[action.index()] {
+            Some(keys) => keys.clone(),
+            None => self.base.keys(action),
+        }
+    }
+
+    /// Put the profile's keys in `settings`, in place of all they had.
+    pub fn load_into(&self, settings: &mut HotkeySettings) {
+        settings.profile = self.base;
+        for action in Action::ALL {
+            settings.set_keys(action, self.keys_of(action));
+        }
+    }
+
+    /// Whether `settings` bind the keys of this profile, over its base.
+    pub fn is_loaded_in(&self, settings: &HotkeySettings) -> bool {
+        settings.profile == self.base
+            && Action::ALL
+                .into_iter()
+                .all(|a| settings.keys_of(a) == self.keys_of(a))
+    }
+
+    /// The file's text: the lines `[hotkeys]` takes.
+    pub fn text(&self) -> String {
+        let mut text = format!(
+            "# Rust-DOS's hotkeys, the custom profile \"{}\": the lines of [hotkeys].\n\
+             [hotkeys]\nprofile={}\n",
+            self.name,
+            self.base.name()
+        );
+        for action in Action::ALL {
+            let keys = keys_text(&self.keys_of(action));
+            text.push_str(&format!("{}={}\n", action.name(), keys));
+        }
+        text
+    }
+
+    /// The profile `name` from its file's text. An action the file leaves
+    /// out has the base profile's keys.
+    pub fn parse(name: &str, text: &str) -> Result<CustomProfile, String> {
+        let mut settings = HotkeySettings::default();
+        for (n, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty()
+                || line.starts_with('#')
+                || line.starts_with(';')
+                || line.eq_ignore_ascii_case("[hotkeys]")
+            {
+                continue;
+            }
+            let (key, value) = line
+                .split_once('=')
+                .ok_or_else(|| format!("line {}: '{}' isn't a setting", n + 1, line))?;
+            settings
+                .set(key, value)
+                .map_err(|e| format!("line {}: {}", n + 1, e))?;
+        }
+        Ok(CustomProfile {
+            name: name.to_string(),
+            base: settings.profile,
+            keys: settings.keys,
+        })
+    }
+}
+
+/// `name` as a custom profile's, trimmed, or why it can't be one: it names
+/// a file, so it is letters, digits, spaces, '-' and '_', and it isn't a
+/// built-in profile's name.
+pub fn custom_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Type a name for the profile".to_string());
+    }
+    if name.chars().count() > 32 {
+        return Err("The name is longer than 32 characters".to_string());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+    {
+        return Err("A name has letters, digits, spaces, '-' and '_' only".to_string());
+    }
+    if Profile::ALL
+        .iter()
+        .any(|p| p.name().eq_ignore_ascii_case(name) || p.describe().eq_ignore_ascii_case(name))
+    {
+        return Err(format!("{} is a built-in profile's name", name));
+    }
+    Ok(name.to_string())
+}
+
+/// The custom profiles in `dir`, by name. Files that don't read as one
+/// are left out.
+pub fn custom_profiles(dir: &std::path::Path) -> Vec<CustomProfile> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut profiles: Vec<CustomProfile> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension()?.to_str()? != CUSTOM_EXTENSION {
+                return None;
+            }
+            let name = custom_name(path.file_stem()?.to_str()?).ok()?;
+            let text = std::fs::read_to_string(&path).ok()?;
+            CustomProfile::parse(&name, &text).ok()
+        })
+        .collect();
+    profiles.sort_by_key(|p| p.name.to_lowercase());
+    profiles
+}
+
+/// Write `profile` to its file in `dir`, in place of one of its name.
+pub fn save_custom(dir: &std::path::Path, profile: &CustomProfile) -> Result<(), String> {
+    let name = custom_name(&profile.name)?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
+    let path = dir.join(format!("{}.{}", name, CUSTOM_EXTENSION));
+    std::fs::write(&path, profile.text()).map_err(|e| format!("{}: {}", path.display(), e))
+}
+
+/// Delete the custom profile `name`'s file in `dir`.
+pub fn delete_custom(dir: &std::path::Path, name: &str) -> Result<(), String> {
+    let path = dir.join(format!("{}.{}", custom_name(name)?, CUSTOM_EXTENSION));
+    std::fs::remove_file(&path).map_err(|e| format!("{}: {}", path.display(), e))
 }
 
 #[cfg(test)]
@@ -1008,6 +1303,120 @@ mod tests {
             warnings,
             ["[hotkeys] pause is P, which programs can't type while it is a hotkey"]
         );
+    }
+
+    #[test]
+    fn binding_a_key_takes_it_from_the_action_that_had_it() {
+        let mut s = HotkeySettings::default();
+        // Ctrl+F5 is screenshot's in the profile.
+        s.bind(Action::SaveState, combo("Ctrl+F5"), false);
+        assert_eq!(s.keys_of(Action::SaveState), [combo("Ctrl+F5")]);
+        assert_eq!(s.keys_of(Action::Screenshot), Vec::new());
+        let (table, warnings) = s.resolve();
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(table.owner(combo("Ctrl+F5")), Some(Action::SaveState));
+        assert_eq!(table.owner(combo("Ctrl+F1")), None);
+        // Another key beside it, and the same key again, once.
+        s.bind(Action::SaveState, combo("F11"), true);
+        s.bind(Action::SaveState, combo("F11"), true);
+        assert_eq!(
+            s.keys_of(Action::SaveState),
+            [combo("Ctrl+F5"), combo("F11")]
+        );
+        // The profile's keys again leave no line of its own.
+        s.set_keys(Action::SaveState, vec![combo("Ctrl+F1")]);
+        assert!(!s.is_own(Action::SaveState));
+        assert_eq!(s.own_count(), 1);
+        s.reset_all();
+        assert_eq!(s, HotkeySettings::default());
+    }
+
+    #[test]
+    fn the_settings_window_keeps_a_way_to_open_it() {
+        let mut s = HotkeySettings::default();
+        assert!(s.window_reachable(false));
+        s.set_keys(Action::SettingsWindow, Vec::new());
+        assert!(!s.window_reachable(false));
+        assert!(s.window_reachable(true));
+        // Its key taken by another action is as good as none.
+        let mut s = HotkeySettings::default();
+        s.bind(Action::Pause, combo("Ctrl+F12"), false);
+        assert!(!s.window_reachable(false));
+        assert!(combo("Up").window_uses());
+        assert!(combo("Shift+A").window_uses());
+        assert!(combo("Escape").window_uses());
+        assert!(!combo("Ctrl+Up").window_uses());
+        assert!(!combo("F1").window_uses());
+        assert!(!combo("Alt+A").window_uses());
+    }
+
+    #[test]
+    fn a_custom_profile_reads_what_it_writes_and_loads_its_keys() {
+        let mut s = HotkeySettings {
+            profile: Profile::DosBox,
+            ..Default::default()
+        };
+        s.bind(Action::SaveState, combo("F5"), false);
+        s.set_keys(Action::Mute, Vec::new());
+        let custom = CustomProfile::of("My keys", &s);
+        let text = custom.text();
+        assert!(text.contains("\nprofile=dosbox\n"), "{}", text);
+        assert!(text.contains("\nsave_state=F5\n"), "{}", text);
+        assert!(text.contains("\nmute=none\n"), "{}", text);
+        assert_eq!(CustomProfile::parse("My keys", &text), Ok(custom.clone()));
+        assert!(custom.is_loaded_in(&s));
+
+        // Loading it over other keys gives its keys, with lines of their
+        // own only where they differ from its profile.
+        let mut other = HotkeySettings::default();
+        other.bind(Action::Pause, combo("Ctrl+P"), false);
+        assert!(!custom.is_loaded_in(&other));
+        custom.load_into(&mut other);
+        assert_eq!(other, s);
+        assert_eq!(other.own_count(), 2);
+
+        // A file without a line for an action leaves it the profile's.
+        let short =
+            CustomProfile::parse("short", "[hotkeys]\nprofile=pcsx2\npause=Ctrl+P\n").unwrap();
+        assert_eq!(short.keys_of(Action::SaveState), [combo("F1")]);
+        assert_eq!(short.keys_of(Action::Pause), [combo("Ctrl+P")]);
+        assert!(CustomProfile::parse("bad", "pause=Ctrl+Nope").is_err());
+        assert!(CustomProfile::parse("bad", "teleport=F1").is_err());
+        assert!(CustomProfile::parse("bad", "just words").is_err());
+    }
+
+    #[test]
+    fn custom_profiles_are_files_named_after_them() {
+        let dir = std::env::temp_dir().join(format!("rust-dos-hotkeys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(custom_profiles(&dir), Vec::new());
+        let mut s = HotkeySettings::default();
+        s.bind(Action::SaveState, combo("F5"), false);
+        save_custom(&dir, &CustomProfile::of("zed", &s)).unwrap();
+        save_custom(
+            &dir,
+            &CustomProfile::of("Alpha 2", &HotkeySettings::default()),
+        )
+        .unwrap();
+        std::fs::write(dir.join("broken.conf"), "pause=Ctrl+Nope").unwrap();
+        std::fs::write(dir.join("notes.txt"), "save_state=F1").unwrap();
+        let found = custom_profiles(&dir);
+        let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Alpha 2", "zed"]);
+        assert!(found[1].is_loaded_in(&s));
+        // Saved again under its name, it is replaced.
+        save_custom(&dir, &CustomProfile::of("zed", &HotkeySettings::default())).unwrap();
+        assert!(custom_profiles(&dir)[1].is_loaded_in(&HotkeySettings::default()));
+        delete_custom(&dir, "zed").unwrap();
+        assert_eq!(custom_profiles(&dir).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(custom_name("  my keys "), Ok("my keys".to_string()));
+        assert!(custom_name("").is_err());
+        assert!(custom_name("../up").is_err());
+        assert!(custom_name("DOSBox").is_err());
+        assert!(custom_name("pcsx-redux").is_err());
+        assert!(custom_name(&"x".repeat(33)).is_err());
     }
 
     #[test]

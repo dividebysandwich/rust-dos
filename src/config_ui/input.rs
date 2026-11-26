@@ -55,6 +55,8 @@ impl ConfigUi {
             self.cheats_edit_key(key, host);
         } else if self.achievements.edit.is_some() {
             self.achievements_edit_key(key, host);
+        } else if self.hotkeys_page.busy() {
+            self.hotkeys_busy_key(key, host);
         } else if self.popup.is_some() {
             self.popup_key(key, host);
         } else if self.edit.is_some() {
@@ -120,6 +122,7 @@ impl ConfigUi {
                     && self.scenes.is_none()
                     && self.phonebook.is_none()
                     && self.almanac.is_none()
+                    && !self.hotkeys_page.busy()
                 {
                     self.edit = None;
                     self.cheats.edit = None;
@@ -209,6 +212,7 @@ impl ConfigUi {
             self.confirm_delete = None;
             self.confirm_sc55 = None;
             self.confirm_glide = None;
+            self.hotkeys_page.cancel();
         }
     }
 
@@ -263,6 +267,7 @@ impl ConfigUi {
             _ if self.page == Page::Cheats => self.cheats_key(key, host),
             _ if self.page == Page::Achievements => self.achievements_key(key, host),
             _ if self.page == Page::Stats => {}
+            _ if self.page == Page::Hotkeys => self.hotkeys_key(key, host),
             _ => self.setting_key(key, host),
         }
     }
@@ -368,7 +373,14 @@ impl ConfigUi {
             _ => *c == self.settings,
         };
         let selected = choices.iter().position(current).unwrap_or(0);
-        self.popup = Some(Popup { item, choices, selected, scroll: 0, visible: self.visible });
+        self.popup = Some(Popup {
+            item,
+            choices,
+            labels: None,
+            selected,
+            scroll: 0,
+            visible: self.visible,
+        });
     }
 
     /// A setting's values listed: Enter picks the one selected, a letter
@@ -384,7 +396,20 @@ impl ConfigUi {
         match key {
             UiKey::Esc => self.popup = None,
             UiKey::Enter => {
-                let Some(Popup { item, mut choices, selected, .. }) = self.popup.take() else { return };
+                let Some(Popup {
+                    item,
+                    mut choices,
+                    selected,
+                    labels,
+                    ..
+                }) = self.popup.take()
+                else {
+                    return;
+                };
+                // The hotkeys' profiles, custom ones among them.
+                if item == Item::HotkeyProfile && labels.is_some() {
+                    return self.pick_hotkeys(selected, host);
+                }
                 let chosen = choices.swap_remove(selected);
                 if chosen != self.settings {
                     self.settings = chosen;
@@ -404,7 +429,11 @@ impl ConfigUi {
             UiKey::Char(c) => {
                 let c = c.to_lowercase().next().unwrap_or(c);
                 let n = popup.choices.len();
-                let starts = |i: &usize| popup.item.value(&popup.choices[*i], home).to_lowercase().starts_with(c);
+                let label = |i: usize| match &popup.labels {
+                    Some(labels) => labels[i].clone(),
+                    None => popup.item.value(&popup.choices[i], home),
+                };
+                let starts = |i: &usize| label(*i).to_lowercase().starts_with(c);
                 if let Some(i) = (1..=n).map(|k| (popup.selected + k) % n).find(starts) {
                     popup.selected = i;
                 }

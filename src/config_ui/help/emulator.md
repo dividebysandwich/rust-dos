@@ -461,18 +461,6 @@ When **on**, each mouse capture/release action will show a notification
 message on the top of the screen. While helpful for new users, turning it
 **off** can help reduce notification noise.
 
-# Hotkeys {#hotkeys}
-
-The emulator's keys, such as the ones that save and load states, as
-another emulator has them. **Rust-DOS** (the default) has Ctrl+F1 to
-save, Ctrl+F2 to load and Ctrl+F12 for this window. The others follow
-their emulator, keeping Rust-DOS's keys for what it has no key for.
-REFERENCE.md has each profile's keys.
-
-A hotkey's key doesn't reach the program. To change one key, add a line
-for its action to `[hotkeys]` in the configuration file, such as
-`save_state=F5`.
-
 # Hold right button for settings {#mouse-menu-hold}
 
 When **on** (the default), holding the right mouse button for **1.5

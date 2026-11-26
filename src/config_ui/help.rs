@@ -455,6 +455,7 @@ impl Page {
             Page::Achievements => "achievements",
             Page::Vr => "vr",
             Page::Stats => "stats",
+            Page::Hotkeys => "hotkeys",
             _ => return None,
         })
     }

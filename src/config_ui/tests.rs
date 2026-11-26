@@ -3117,3 +3117,219 @@ fn the_almanac_report_says_what_the_profile_says_of_the_game() {
     ui.text("93", &mut host);
     assert!(ui.almanac.as_ref().unwrap().about().is_err());
 }
+
+/// The window on its Hotkeys page, with custom profiles kept in a folder
+/// of this test's own.
+fn hotkeys_ui(host: &FakeHost, settings: &Settings, test: &str) -> (ConfigUi, PathBuf) {
+    let name = format!("rust-dos-hotkeys-page-{}-{}", test, std::process::id());
+    let dir = std::env::temp_dir().join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut ui = ConfigUi::new();
+    ui.open(settings, Some("/cfg/rust-dos.conf".into()), host);
+    ui.hotkeys_page.dir = Some(dir.clone());
+    ui.hotkeys_page.refresh();
+    ui.show_page(Page::Hotkeys);
+    (ui, dir)
+}
+
+fn combo(text: &str) -> crate::hotkeys::Combo {
+    crate::hotkeys::Combo::parse(text).unwrap()
+}
+
+fn action_row(ui: &ConfigUi, action: crate::hotkeys::Action) -> usize {
+    use hotkeys_page::HotkeyRow;
+    let rows = ui.hotkey_rows();
+    rows.iter().position(|&r| r == HotkeyRow::Action(action)).unwrap()
+}
+
+#[test]
+fn the_hotkeys_page_rebinds_an_action_to_the_keys_pressed() {
+    use crate::hotkeys::Action;
+    use UiKey::*;
+    let mut host = FakeHost::new();
+    let (mut ui, dir) = hotkeys_ui(&host, &Settings::default(), "rebind");
+    ui.select(action_row(&ui, Action::SaveState));
+    ui.key(Enter, &mut host);
+    assert!(ui.capturing_hotkey());
+    // Typed text is no key to bind, and Esc ends the rebind.
+    ui.text("x", &mut host);
+    assert!(ui.capturing_hotkey());
+    ui.hotkey_pressed(combo("Escape"), &mut host);
+    assert!(!ui.capturing_hotkey());
+    assert!(host.applied.is_empty());
+
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("Shift+F5"), &mut host);
+    assert!(!ui.capturing_hotkey());
+    let keys_of = |ui: &ConfigUi, action| ui.settings.hotkeys.keys_of(action);
+    assert_eq!(keys_of(&ui, Action::SaveState), [combo("Shift+F5")]);
+    assert_eq!(host.applied.last().unwrap().hotkeys, ui.settings.hotkeys, "at once");
+    assert_eq!(status(&ui), ("save_state is Shift+F5 now", false));
+    assert!(ui.settings.hotkeys.is_own(Action::SaveState));
+
+    // Ctrl+F5 is screenshot's: the window asks before taking it, and Esc
+    // asks for other keys.
+    ui.key(Insert, &mut host);
+    ui.hotkey_pressed(combo("Ctrl+F5"), &mut host);
+    assert!(ui.hotkeys_page.clash.is_some());
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    ui.key(Esc, &mut host);
+    assert!(ui.capturing_hotkey());
+    ui.hotkey_pressed(combo("Ctrl+F5"), &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(keys_of(&ui, Action::SaveState), [combo("Shift+F5"), combo("Ctrl+F5")]);
+    assert_eq!(keys_of(&ui, Action::Screenshot), []);
+    assert_eq!(ui.settings.hotkeys.resolve().1, Vec::<String>::new());
+
+    // Del leaves it without a key, R gives it the profile's again.
+    ui.key(Delete, &mut host);
+    assert_eq!(keys_of(&ui, Action::SaveState), []);
+    ui.key(Char('r'), &mut host);
+    assert!(!ui.settings.hotkeys.is_own(Action::SaveState));
+    assert_eq!(keys_of(&ui, Action::SaveState), [combo("Ctrl+F1")]);
+    // F2 saves the lines with the window's other settings.
+    ui.key(Save, &mut host);
+    let saved = &host.saved.last().unwrap().hotkeys;
+    assert_eq!(saved.keys_of(Action::Screenshot), []);
+    assert!(saved.is_own(Action::Screenshot));
+    // Reset every key.
+    ui.select(2);
+    ui.key(Enter, &mut host);
+    assert_eq!(ui.settings.hotkeys, crate::hotkeys::HotkeySettings::default());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_rebind_never_leaves_the_window_without_a_way_to_open_it() {
+    use crate::hotkeys::Action;
+    use UiKey::*;
+    let mut host = FakeHost::new();
+    let settings = Settings { mouse_menu_hold: false, ..Settings::default() };
+    let (mut ui, dir) = hotkeys_ui(&host, &settings, "lockout");
+    let window = action_row(&ui, Action::SettingsWindow);
+    let keys_of = |ui: &ConfigUi| ui.settings.hotkeys.keys_of(Action::SettingsWindow);
+    ui.select(window);
+    // A key the window moves or types with would close it instead.
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("Up"), &mut host);
+    assert!(ui.capturing_hotkey());
+    assert!(status(&ui).1);
+    ui.hotkey_pressed(combo("Ctrl+Shift+F10"), &mut host);
+    assert_eq!(keys_of(&ui), [combo("Ctrl+Shift+F10")]);
+    // Clearing its key, or giving it to another action, is refused.
+    ui.key(Delete, &mut host);
+    assert!(status(&ui).1);
+    assert_eq!(keys_of(&ui), [combo("Ctrl+Shift+F10")]);
+    ui.select(action_row(&ui, Action::Pause));
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("Ctrl+Shift+F10"), &mut host);
+    ui.key(Enter, &mut host);
+    assert!(status(&ui).1);
+    assert_eq!(keys_of(&ui), [combo("Ctrl+Shift+F10")]);
+    // With the right button's hold on, the window opens without a key.
+    ui.settings.mouse_menu_hold = true;
+    ui.select(window);
+    ui.key(Delete, &mut host);
+    assert_eq!(keys_of(&ui), []);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_hotkeys_page_saves_and_loads_custom_profiles() {
+    use crate::hotkeys::Action;
+    use UiKey::*;
+    use hotkeys_page::HotkeyRow;
+    let mut host = FakeHost::new();
+    let (mut ui, dir) = hotkeys_ui(&host, &Settings::default(), "custom");
+    let keys_of = |ui: &ConfigUi| ui.settings.hotkeys.keys_of(Action::SaveState);
+    ui.select(action_row(&ui, Action::SaveState));
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("Ctrl+Shift+F8"), &mut host);
+    let row = |ui: &ConfigUi, r| ui.hotkey_rows().iter().position(|&x| x == r).unwrap();
+    ui.select(row(&ui, HotkeyRow::SaveAs));
+    ui.key(Enter, &mut host);
+    ui.text("../up", &mut host);
+    ui.key(Enter, &mut host);
+    assert!(status(&ui).1, "not a name");
+    keys(&mut ui, &mut host, &[Backspace, Backspace, Backspace, Backspace, Backspace]);
+    ui.text("Mine", &mut host);
+    ui.key(Enter, &mut host);
+    assert!(dir.join("Mine.conf").is_file());
+    assert_eq!(ui.hotkey_profile_text(), "Mine (custom)");
+
+    // Back to the profile's keys, then the custom profile from the list.
+    ui.select(row(&ui, HotkeyRow::ResetAll));
+    ui.key(Enter, &mut host);
+    assert_eq!(ui.hotkey_profile_text(), "Rust-DOS");
+    ui.select(0);
+    ui.key(Enter, &mut host);
+    let popup = ui.popup.as_ref().unwrap();
+    assert_eq!(popup.labels.as_ref().unwrap().last().unwrap(), "Mine (custom)");
+    ui.key(End, &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(keys_of(&ui), [combo("Ctrl+Shift+F8")]);
+    assert_eq!(host.applied.last().unwrap().hotkeys, ui.settings.hotkeys);
+
+    // A window opened later finds it, and Left from the first profile
+    // goes round to it.
+    let (mut again, _) = hotkeys_ui(&host, &Settings::default(), "custom-again");
+    again.hotkeys_page.dir = Some(dir.clone());
+    again.hotkeys_page.refresh();
+    again.key(Left, &mut host);
+    assert_eq!(keys_of(&again), [combo("Ctrl+Shift+F8")]);
+    // A built-in profile picked keeps the changed keys.
+    again.key(Right, &mut host);
+    assert_eq!(again.hotkey_profile_text(), "Rust-DOS, 1 key changed");
+    again.key(Left, &mut host);
+    assert_eq!(again.hotkey_profile_text(), "Mine (custom)");
+    // Del on it deletes its file, once confirmed; the keys stay.
+    again.key(Delete, &mut host);
+    again.key(Enter, &mut host);
+    assert!(!dir.join("Mine.conf").exists());
+    assert!(again.hotkeys_page.custom.is_empty());
+    assert_eq!(keys_of(&again), [combo("Ctrl+Shift+F8")]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_hotkeys_page_draws_and_clicks() {
+    use crate::hotkeys::Action;
+    use UiKey::*;
+    let mut host = FakeHost::new();
+    let (mut ui, dir) = hotkeys_ui(&host, &Settings::default(), "click");
+    // The profile is picked here, and no longer on the Emulator page.
+    assert!(!Page::Emulator.items().contains(&Item::HotkeyProfile));
+    assert_eq!(ui.help_topic(), Some("hotkeys"));
+    let mut frame = Frame::new(640, 400);
+    let layout = Layout::for_frame(640, 400);
+    let mut click = |ui: &mut ConfigUi, host: &mut FakeHost, target: &dyn Fn(&Target) -> bool| {
+        ui.draw(&mut frame);
+        let h = ui.hits.iter().find(|h| target(&h.target)).expect("a target");
+        let x = (layout.x + h.col * 8 + 4) as i32;
+        let y = (layout.y + h.row * layout.cell_h + 4) as i32;
+        ui.click(x, y, host);
+    };
+    // A click on an action's keys rebinds it.
+    let row = action_row(&ui, Action::SaveState);
+    ui.select(row);
+    click(&mut ui, &mut host, &|t| matches!(t, Target::Button(i) if *i == row));
+    assert!(ui.capturing_hotkey());
+    // Tabs don't leave a rebind; the hint's Esc ends it.
+    click(&mut ui, &mut host, &|t| matches!(t, Target::Tab(Page::Sound)));
+    assert_eq!(ui.page, Page::Hotkeys);
+    click(&mut ui, &mut host, &|t| matches!(t, Target::Key(UiKey::Esc)));
+    assert!(!ui.capturing_hotkey());
+    // The profile's arrow steps to the next one.
+    ui.select(0);
+    click(&mut ui, &mut host, &|t| matches!(t, Target::Step(0, 1)));
+    assert_eq!(ui.settings.hotkeys.profile, crate::hotkeys::Profile::Pcsx2);
+    for (width, height) in [(640, 400), (400, 300), (320, 200)] {
+        let mut frame = Frame::new(width, height);
+        ui.draw(&mut frame);
+        ui.key(Enter, &mut host);
+        ui.draw(&mut frame);
+        ui.key(Esc, &mut host);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

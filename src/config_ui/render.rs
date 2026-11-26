@@ -94,6 +94,8 @@ impl ConfigUi {
             self.draw_achievements(&mut g, content.clone());
         } else if self.page == Page::Stats {
             self.draw_stats(&mut g, content.clone());
+        } else if self.page == Page::Hotkeys {
+            self.draw_hotkeys(&mut g, content.clone());
         } else {
             self.draw_settings(&mut g, content.clone());
         }
@@ -337,10 +339,18 @@ impl ConfigUi {
     /// picks is: below it, or above it where it doesn't fit below, else as
     /// low in the rows `content` as it fits, scrolled where it is longer
     /// than they are.
-    fn draw_popup(&mut self, g: &mut Grid, content: std::ops::Range<usize>, (col, row): (usize, usize)) {
+    pub(super) fn draw_popup(
+        &mut self,
+        g: &mut Grid,
+        content: std::ops::Range<usize>,
+        (col, row): (usize, usize),
+    ) {
         let home = self.home.as_deref();
         let Some(popup) = &mut self.popup else { return };
-        let labels: Vec<String> = popup.choices.iter().map(|s| popup.item.value(s, home)).collect();
+        let labels: Vec<String> = match &popup.labels {
+            Some(labels) => labels.clone(),
+            None => popup.choices.iter().map(|s| popup.item.value(s, home)).collect(),
+        };
         let height = (labels.len() + 2).min(content.len());
         let top = if row + 1 + height <= content.end {
             row + 1
@@ -633,7 +643,7 @@ impl ConfigUi {
 
     /// The help topic on what is under the cursor: the setting selected,
     /// or the page, or the dialog open over it.
-    fn help_topic(&self) -> Option<&'static str> {
+    pub(super) fn help_topic(&self) -> Option<&'static str> {
         if let Some((_, pick)) = &self.browser {
             return Some(pick.help());
         }
@@ -792,6 +802,8 @@ impl ConfigUi {
                 ("Tab", "Page", Tab),
                 ("Esc", "Close", Esc),
             ]
+        } else if self.page == Page::Hotkeys && self.popup.is_none() {
+            self.hotkeys_hints()
         } else if self.popup.is_some() {
             let mut hints = vec![("\u{2191}\u{2193}", "Select", Down), ("Enter", "OK", Enter), ("Esc", "Cancel", Esc)];
             if self.item().is_some_and(|item| !item.fields(&self.settings).is_empty()) {
