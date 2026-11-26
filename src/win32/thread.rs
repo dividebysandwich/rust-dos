@@ -184,17 +184,53 @@ pub const INITIAL_FPU: [u8; 108] = {
 type At = (usize, usize);
 
 /// The emulated time and the instructions each thread has had
-/// (`Win32::times`), for the debug server: nothing the machine does reads
-/// them.
+/// (`Win32::times`), for the debug server, and which threads spent their
+/// last share spinning (`spinning`), for the idle skip's count of turns
+/// handed over (`others_can_work`). Neither changes what the machine
+/// runs: the count of turns handed over only tells `cycles=auto` what the
+/// time was.
 #[derive(Clone, Debug, Default)]
 pub struct Times {
     /// The clock's microseconds and `Cpu::executed` when the running
-    /// thread's (or the idle loop's) share began; None until the first
-    /// thread runs, and again after a load.
-    mark: Option<(u64, u64)>,
+    /// thread's (or the idle loop's) share began, and the clock's
+    /// `icount` and `idle` then; None until the first thread runs, and
+    /// again after a load.
+    mark: Option<Mark>,
     /// Microseconds and instructions by thread id, 0 for the idle loop.
     by_thread: std::collections::BTreeMap<u32, (u64, u64)>,
+    /// The ids of the threads that spun in their last share: the idle
+    /// skip skipped more than half of it (`SPUN`), or they gave up their
+    /// turn after less than `WORKED_US` of work.
+    spinning: std::collections::BTreeSet<u32>,
 }
+
+/// Where a share of the processor began (`Times::mark`).
+#[derive(Clone, Copy, Debug)]
+struct Mark {
+    micros: u64,
+    executed: u64,
+    icount: u64,
+    idle: u64,
+}
+
+/// The share of its time on the processor that the idle skip skipped, over
+/// which a thread spun rather than worked (`Times::spinning`). A thread
+/// that waits in a loop the skip proves has the rest of its turn skipped
+/// at each pass's end: Dark Omen's main thread, which spins on
+/// GetTickCount, PeekMessageA and DirectInput, had 99.7% of its time
+/// skipped, and its movie decoder none.
+const SPUN: f64 = 0.5;
+
+/// The work, in microseconds, under which a thread that gave up the rest
+/// of its turn while it could go on running (Sleep(0)) spun
+/// (`Times::spinning`), however little of its share the idle skip
+/// skipped. A thread that polls a flag and gives up its turn at each look
+/// runs a few instructions a share, none of them in a loop the skip
+/// proves. Beside a thread that spins through whole turns, it gets one
+/// look a turn whatever the speed, so more speed brings it nothing, and a
+/// spin handed to it is a wait. A share a higher thread cut short
+/// (`preempted`), or that ran to its turn's end, wasn't given up.
+const WORKED_US: f64 = 1_000.0;
 
 /// Charge the time and instructions since the mark to the running thread,
 /// or to the idle loop when none can run, and start a new mark. It runs
@@ -205,26 +241,69 @@ pub struct Times {
 /// `Cpu::executed`'s, so a busy-wait loop the idle skip skips counts its
 /// skipped passes too.
 pub(super) fn charge(cpu: &mut Cpu) {
-    let now = (cpu.bus.clock.now_micros(), cpu.executed);
+    let clock = &cpu.bus.clock;
+    let now = Mark {
+        micros: clock.now_micros(),
+        executed: cpu.executed,
+        icount: clock.icount,
+        idle: clock.idle,
+    };
     let win32 = &mut cpu.bus.win32;
     let mark = if win32.active() { Some(now) } else { None };
-    if let Some((t0, i0)) = std::mem::replace(&mut win32.times.mark, mark)
+    if let Some(from) = std::mem::replace(&mut win32.times.mark, mark)
         && mark.is_some()
     {
-        let id = current(win32).map_or(0, |(p, t)| win32.processes[p].threads[t].id);
-        let e = win32.times.by_thread.entry(id).or_default();
-        e.0 += now.0.saturating_sub(t0);
-        e.1 += now.1.saturating_sub(i0);
+        let at = current(win32);
+        let id = at.map_or(0, |(p, t)| win32.processes[p].threads[t].id);
+        // The thread gave up the rest of its turn and could have gone on:
+        // it didn't block, end, or have a higher thread take over, and its
+        // turn hadn't ended.
+        let gave_up = at.is_some_and(|(p, t)| {
+            win32.processes[p].threads[t].ready()
+                && now.micros < turn_end(win32.slice_start)
+                && !win32.preempted.iter().any(|&(tid, _)| tid == id)
+        });
+        let times = &mut win32.times;
+        let spent = now.micros.saturating_sub(from.micros);
+        let e = times.by_thread.entry(id).or_default();
+        e.0 += spent;
+        e.1 += now.executed.saturating_sub(from.executed);
+        // A share with no instructions (a switch straight on) says nothing
+        // of what the thread does.
+        let ran = now.icount.saturating_sub(from.icount);
+        let skipped = now.idle.saturating_sub(from.idle);
+        if id != 0 && ran > 0 {
+            let worked_us = spent as f64 * ran.saturating_sub(skipped) as f64 / ran as f64;
+            if skipped as f64 > ran as f64 * SPUN || (gave_up && worked_us < WORKED_US) {
+                times.spinning.insert(id);
+            } else {
+                times.spinning.remove(&id);
+            }
+        }
     }
 }
 
 /// The emulated microseconds and instructions each thread has had since
 /// the first ran or the last load, by thread id, 0 for the idle loop:
-/// `thread_times` in the debug server's `/api/win32`.
-pub fn times(cpu: &mut Cpu) -> Vec<(u32, u64, u64)> {
-    charge(cpu);
-    let t = &cpu.bus.win32.times.by_thread;
-    t.iter().map(|(&id, &(us, n))| (id, us, n)).collect()
+/// `thread_times` in the debug server's `/api/win32`. The running share
+/// counts up to now without ending: where a share ends decides whether
+/// its thread spun (`charge`), which a look from the debug server mustn't
+/// change.
+pub fn times(cpu: &Cpu) -> Vec<(u32, u64, u64)> {
+    let win32 = &cpu.bus.win32;
+    let mut by_thread = win32.times.by_thread.clone();
+    if let Some(from) = win32.times.mark
+        && win32.active()
+    {
+        let id = current(win32).map_or(0, |(p, t)| win32.processes[p].threads[t].id);
+        let e = by_thread.entry(id).or_default();
+        e.0 += cpu.bus.clock.now_micros().saturating_sub(from.micros);
+        e.1 += cpu.executed.saturating_sub(from.executed);
+    }
+    by_thread
+        .into_iter()
+        .map(|(id, (us, n))| (id, us, n))
+        .collect()
 }
 
 /// The running thread, if one runs.
@@ -233,16 +312,27 @@ fn current(win32: &Win32) -> Option<At> {
     Some((win32.running, process.current?))
 }
 
-/// Whether a thread runs and another can take the processor from it when
-/// its turn ends: the idle skip then skips a busy-wait loop of the
-/// running one only as far as Windows would have spun it, to the end of
-/// its turn (`Clock::handed_over`).
-pub fn others_can_run(win32: &Win32) -> bool {
+/// Whether a thread runs and another that works can take the processor
+/// from it when its turn ends: the idle skip then skips a busy-wait loop
+/// of the running one only as far as Windows would have spun it, to the
+/// end of its turn, and the turn counts as handed over
+/// (`Clock::handed_over`), time the other thread gets more done in at
+/// more speed. A thread works unless it spun in its last share
+/// (`Times::spinning`): the idle skip skipped most of it, or it gave up
+/// its turn after little work. Where every thread that can run spins, as
+/// two that poll for each other's flag, or a movie's decoder that spins
+/// on the clock between pictures beside a main thread that spins too,
+/// each hands its turns to the next and none has work, and the turns
+/// count as waits. A thread that hasn't run since the first or the last
+/// load works, as it does once it runs and the skip skips none of it.
+pub fn others_can_work(win32: &Win32) -> bool {
     let Some(running) = current(win32) else {
         return false;
     };
+    let spinning = &win32.times.spinning;
     next_where(win32, Some(running), |at| {
-        at != running && can_run(win32, at)
+        let id = win32.processes[at.0].threads[at.1].id;
+        at != running && can_run(win32, at) && !spinning.contains(&id)
     })
     .is_some()
 }
@@ -1048,3 +1138,129 @@ crate::state_fields!(Thread {
     calls,
     fault
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A process with the threads `ids`, the first of them running, and
+    /// the threads' shares counted from here (`charge`).
+    fn threads(ids: &[u32]) -> Box<Cpu> {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let threads = ids.iter().map(|&id| Thread {
+            id,
+            ..Thread::default()
+        });
+        cpu.bus.win32.processes.push(crate::win32::Process {
+            threads: threads.collect(),
+            current: Some(0),
+            ..crate::win32::Process::default()
+        });
+        charge(&mut cpu);
+        cpu
+    }
+
+    /// The thread at `t` has the processor next, after the running one
+    /// ran `ran` instructions, `skipped` of them skipped by the idle skip.
+    fn share(cpu: &mut Cpu, ran: u64, skipped: u64, t: usize) {
+        cpu.bus.clock.icount += ran;
+        cpu.bus.clock.idle += skipped;
+        charge(cpu);
+        cpu.bus.win32.processes[0].current = Some(t);
+    }
+
+    #[test]
+    fn a_spin_is_handed_over_only_to_a_thread_that_works() {
+        // Dark Omen's movie: the main thread's turns are skipped to their
+        // end, and the decoder works through its own.
+        let mut cpu = threads(&[1, 2]);
+        // Neither has run a share yet: the other may work.
+        assert!(others_can_work(&cpu.bus.win32));
+        share(&mut cpu, 3_000_000, 2_990_000, 1);
+        share(&mut cpu, 2_000_000, 0, 0);
+        assert!(others_can_work(&cpu.bus.win32));
+        // The decoder is done with its picture and spins on the clock
+        // too: the main thread's spin now hands its turn to nobody that
+        // works, and the decoder's to nobody either.
+        share(&mut cpu, 3_000_000, 2_990_000, 1);
+        assert!(!others_can_work(&cpu.bus.win32));
+        share(&mut cpu, 3_000_000, 2_950_000, 0);
+        assert!(!others_can_work(&cpu.bus.win32));
+        // Once it works again, the main thread's turns are handed over
+        // again.
+        share(&mut cpu, 3_000_000, 2_990_000, 1);
+        share(&mut cpu, 2_000_000, 100_000, 0);
+        assert!(others_can_work(&cpu.bus.win32));
+    }
+
+    #[test]
+    fn a_thread_that_cannot_run_takes_no_turn() {
+        let mut cpu = threads(&[1, 2]);
+        share(&mut cpu, 3_000_000, 2_990_000, 1);
+        share(&mut cpu, 2_000_000, 0, 0);
+        // The decoder waits for its next picture's time (a Sleep).
+        cpu.bus.win32.processes[0].threads[1].wait = Some(Wait::default());
+        assert!(!others_can_work(&cpu.bus.win32));
+    }
+
+    #[test]
+    fn a_thread_that_gives_up_its_turn_after_little_work_spins() {
+        // The other thread polls a flag and gives up its turn with
+        // Sleep(0) at each look: a few instructions a share, none of them
+        // skipped. The main thread's spin hands its turn to nobody that
+        // works.
+        let mut cpu = threads(&[1, 2]);
+        // The main thread spins, and the other runs a share of `ran`
+        // instructions with its turn begun `used` microseconds before.
+        fn poll(cpu: &mut Cpu, ran: u64, used: u64) {
+            share(cpu, 3_000_000, 2_990_000, 1);
+            cpu.bus.win32.slice_start = cpu.bus.clock.now_micros() - used;
+            share(cpu, ran, 0, 0);
+        }
+        poll(&mut cpu, 40, 0);
+        assert!(!others_can_work(&cpu.bus.win32));
+        // The same few instructions at the end of the turn weren't given
+        // up, and say nothing of the thread.
+        poll(&mut cpu, 40, SLICE);
+        assert!(others_can_work(&cpu.bus.win32));
+        poll(&mut cpu, 40, 0);
+        assert!(!others_can_work(&cpu.bus.win32));
+        // Nor were those cut short by a higher thread.
+        cpu.bus.win32.preempted.push((2, 0));
+        poll(&mut cpu, 40, 0);
+        assert!(others_can_work(&cpu.bus.win32));
+        cpu.bus.win32.preempted.clear();
+        // One given up after 5 ms of work worked.
+        poll(&mut cpu, 40, 0);
+        poll(&mut cpu, 100_000, 0);
+        assert!(others_can_work(&cpu.bus.win32));
+    }
+
+    #[test]
+    fn a_decoder_that_polls_between_pictures_works_only_while_it_decodes() {
+        // Dark Omen's movie at 400,000: the main thread spins through
+        // whole turns. The decoder decodes for 2.5 ms or more and gives
+        // up its turn with Sleep(0); once ahead of the movie, it looks at
+        // the clock and gives up its turn after a few instructions.
+        let mut cpu = threads(&[1, 2]);
+        cpu.bus.set_cycles_per_ms(400_000);
+        // A 20 ms turn of the main thread, skipped to its end, and a share
+        // of the decoder's of `ran` instructions, given up early.
+        fn turns(cpu: &mut Cpu, ran: u64) {
+            share(cpu, 8_000_000, 7_990_000, 1);
+            cpu.bus.win32.slice_start = cpu.bus.clock.now_micros();
+            share(cpu, ran, 0, 0);
+        }
+        for _ in 0..3 {
+            // 2.5 ms of decoding: the main thread's next turn is handed
+            // over.
+            turns(&mut cpu, 1_000_000);
+            assert!(others_can_work(&cpu.bus.win32));
+            // A look at the clock, 0.1 us: its next turn is a wait.
+            turns(&mut cpu, 40);
+            assert!(!others_can_work(&cpu.bus.win32));
+            turns(&mut cpu, 40);
+            assert!(!others_can_work(&cpu.bus.win32));
+        }
+    }
+}
