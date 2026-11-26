@@ -864,7 +864,7 @@ pub fn destroyed(cpu: &mut Cpu, id: u32) {
 const PITCH_ALIGN: u32 = 4;
 
 /// The most bytes of pixels a surface can have in the program's memory
-/// (`SetSurfaceDesc`).
+/// (`SetSurfaceDesc`, and CreateSurface with `DDSD_LPSURFACE`).
 const MAX_GIVEN_BITS: u64 = 0x1000_0000;
 
 /// The pixels CreateSurface is given with `DDSD_LPSURFACE`: their
@@ -872,31 +872,36 @@ const MAX_GIVEN_BITS: u64 = 0x1000_0000;
 /// DirectX 7 makes a system memory surface over the program's memory
 /// from IDirectDraw4 on, when the program gives the pitch, or a
 /// compressed surface's linear size. The checks and their errors are
-/// those of Wine's `ddraw_surface_create`, which its tests hold to
-/// Windows'. Only a surface of its own (`single`: no primary surface,
-/// flipping chain, mipmap or cube map) is made over given memory here:
-/// one memory block for the levels of a chain is a case no program has
-/// shown, and it fails with DDERR_INVALIDPARAMS.
+/// those of Wine's `ddraw_surface_create` and `ddraw_texture_init`,
+/// which its tests hold to Windows'. A complex surface fails with
+/// DDERR_INVALIDCAPS: Wine's `test_user_memory` finds Windows turns
+/// down a mipmap with DDSCAPS_COMPLEX, even of one level, and a cube
+/// map; a flipping chain is complex too. The primary surface is the
+/// screen, with no memory to give: it fails with DDERR_INVALIDPARAMS, a
+/// case no program has shown.
 fn given_memory(
     cpu: &mut Cpu,
     version: u32,
     desc: &Desc,
     caps: &[u32; 4],
-    single: bool,
     format: &Format,
 ) -> Result<(u32, u32), u32> {
-    if caps[0] & DDSCAPS_SYSTEMMEMORY == 0 {
+    if caps[0] & DDSCAPS_SYSTEMMEMORY == 0 || caps[0] & DDSCAPS_COMPLEX != 0 {
         return Err(DDERR_INVALIDCAPS);
     }
-    if version < 4 || desc.surface == 0 || !single {
+    if version < 4 || desc.surface == 0 || caps[0] & DDSCAPS_PRIMARYSURFACE != 0 {
         return Err(DDERR_INVALIDPARAMS);
     }
     let (width, height) = (desc.width, desc.height);
     let pitch = if let Some(dxt) = dxt_format(format) {
-        // dwLinearSize shares lPitch's place.
+        // dwLinearSize shares lPitch's place, and is checked only when
+        // DDSD_LINEARSIZE names it. IDirectDraw4 takes DDSD_PITCH in its
+        // place with any value, 0 too, as Wine's
+        // `test_block_formats_creation` finds on Windows.
         let size = dxt.size(width, height) as u32;
         let sized = desc.flags & (DDSD_LINEARSIZE | DDSD_PITCH) != 0;
-        if !sized || version != 4 && desc.flags & DDSD_PITCH != 0 || desc.pitch < size {
+        let short = desc.flags & DDSD_LINEARSIZE != 0 && desc.pitch < size;
+        if !sized || version != 4 && desc.flags & DDSD_PITCH != 0 || short {
             return Err(DDERR_INVALIDPARAMS);
         }
         size
@@ -1279,8 +1284,7 @@ pub fn make(
     };
     // A surface over the program's own memory.
     let given = if desc.flags & DDSD_LPSURFACE != 0 {
-        let single = !primary && !flip && !cube && levels == 1;
-        let (bits, given_pitch) = given_memory(cpu, version, desc, &caps, single, &format)?;
+        let (bits, given_pitch) = given_memory(cpu, version, desc, &caps, &format)?;
         pitch = given_pitch;
         Some(bits)
     } else {

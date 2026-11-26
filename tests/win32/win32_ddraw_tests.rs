@@ -4616,6 +4616,10 @@ const U_NO_PITCH: u32 = ENTRIES;
 const U_NO_SYSTEM: u32 = ENTRIES + 0x80;
 /// A DDSURFACEDESC of IDirectDraw's, over the same memory.
 const U_OLD: u32 = ENTRIES + 0x100;
+/// A complex mipmap of one level over the program's memory, and an 8x8
+/// DXT1 texture there with DDSD_PITCH and a pitch of 0.
+const U_MIPMAP: u32 = ENTRIES + 0x180;
+const U_DXT: u32 = ENTRIES + 0x200;
 
 /// A DDSURFACEDESC2 (or, `size` 108, DDSURFACEDESC) at `offset` of a
 /// 4x2 32-bit surface, rows 32 bytes apart, with `flags` and `caps`.
@@ -4628,8 +4632,9 @@ fn user_memory_desc(d: &mut [u8], offset: u32, size: u32, flags: u32, caps: u32)
 
 /// IDirectDraw4: a system memory surface over the program's own pixels
 /// (DDSD_LPSURFACE), locked, and its second row filled; then the
-/// descriptions DirectX turns down: no pitch, no system memory, and
-/// IDirectDraw's CreateSurface.
+/// descriptions DirectX turns down: no pitch, no system memory,
+/// IDirectDraw's CreateSurface, and a complex mipmap; then a DXT1
+/// texture whose pitch IDirectDraw4 doesn't read.
 fn user_memory_program() -> (Vec<u8>, u32) {
     let given = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_LPSURFACE;
     let plain_system = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
@@ -4639,6 +4644,13 @@ fn user_memory_program() -> (Vec<u8>, u32) {
     let plain = DDSCAPS_OFFSCREENPLAIN;
     user_memory_desc(&mut d, U_NO_SYSTEM, 124, given | DDSD_PITCH, plain);
     user_memory_desc(&mut d, U_OLD, 108, given | DDSD_PITCH, plain_system);
+    let mipmap = DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX;
+    let counted = given | DDSD_PITCH | DDSD_MIPMAPCOUNT;
+    user_memory_desc(&mut d, U_MIPMAP, 124, counted, mipmap);
+    put32(&mut d, U_MIPMAP + 0x18, 1);
+    dxt_desc(&mut d, U_DXT, b"DXT1", 8, 8);
+    put32(&mut d, U_DXT, 124);
+    put32(&mut d, U_DXT + 0x04, given | DDSD_PITCH);
     put32(&mut d, LOCKED, 124);
     put(&mut d, KEY, &IID_IDIRECTDRAW4);
     // The pixels: two rows of four, and what lies between them.
@@ -4652,7 +4664,7 @@ fn user_memory_program() -> (Vec<u8>, u32) {
         put32(&mut d, RECT + 4 * i as u32, v);
     }
     program(&[USER32, DDRAW], &d, |a, l| {
-        for offset in [DESC, U_NO_PITCH, U_NO_SYSTEM, U_OLD] {
+        for offset in [DESC, U_NO_PITCH, U_NO_SYSTEM, U_OLD, U_MIPMAP, U_DXT] {
             a.mov(dword_ptr(l.at(offset + 0x24)), l.at(PIXELS) as u32)?;
         }
         let mut c = Calls { next: 0 };
@@ -4681,6 +4693,10 @@ fn user_memory_program() -> (Vec<u8>, u32) {
         }
         let create = [Arg::At(U_OLD), Arg::At(OFFSCREEN), Arg::I(0)];
         c.com(a, l, DD, DD_CREATE_SURFACE, &create)?;
+        for offset in [U_MIPMAP, U_DXT] {
+            let create = [Arg::At(offset), Arg::At(OFFSCREEN), Arg::I(0)];
+            c.com(a, l, QUERIED, DD_CREATE_SURFACE, &create)?;
+        }
         finish(a, l)
     })
 }
@@ -4690,7 +4706,7 @@ fn create_surface_makes_a_surface_over_the_programs_memory() {
     let (program, data) = user_memory_program();
     let mut cpu = machine("user_memory", program);
     run_until_done(&mut cpu, data);
-    let r = results(&mut cpu, data, 11);
+    let r = results(&mut cpu, data, 13);
     assert_eq!(r[2..8], [0; 6], "QueryInterface to Blt");
     // Lock gives the program's own pixels and pitch.
     assert_eq!(peek(&cpu, data + LOCKED + 0x24), data + PIXELS);
@@ -4709,4 +4725,10 @@ fn create_surface_makes_a_surface_over_the_programs_memory() {
     assert_eq!(r[8], DDERR_INVALIDPARAMS, "no pitch");
     assert_eq!(r[9], DDERR_INVALIDCAPS, "no system memory");
     assert_eq!(r[10], DDERR_INVALIDPARAMS, "IDirectDraw");
+    // Wine's test_user_memory and test_block_formats_creation find these
+    // on Windows: a complex mipmap fails even with one level, and
+    // IDirectDraw4 takes a compressed surface with DDSD_PITCH whatever
+    // the pitch.
+    assert_eq!(r[11], DDERR_INVALIDCAPS, "complex mipmap");
+    assert_eq!(r[12], 0, "DXT1 with DDSD_PITCH 0");
 }
