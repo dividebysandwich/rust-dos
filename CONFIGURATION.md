@@ -318,7 +318,7 @@ the card:
 | Card | What can draw its 3D | Setting |
 |---|---|---|
 | Voodoo Graphics, Voodoo2 (`voodoo=true`) | CPU or graphics card | `voodoo_renderer` |
-| Voodoo3, Banshee (`machine=svga_voodoo3`, `svga_banshee`) | CPU or graphics card. With the graphics card, the built-in Windows' blits and fills on the card go there too | `voodoo_renderer`, the same setting as the add-on cards' |
+| Voodoo3, Banshee (`machine=svga_voodoo3`, `svga_banshee`) | CPU or graphics card, with the built-in Windows' blits, fills and window updates in its memory, and its 2D engine's fills and copies on the 3D's picture | `voodoo_renderer`, the same setting as the add-on cards' |
 | ToadForce (`machine=svga_toadforce`) | CPU or graphics card, with its fills and copies | `toadforce_renderer` |
 | S3 ViRGE, Vérité, ATI 3D RAGE, PowerVR | CPU only | None |
 | `svga` and the other 2D adapters | No 3D; the CPU draws the 2D picture | None |
@@ -417,11 +417,12 @@ computer. Either renderer draws any of the interfaces: a Glide game with
 The 2D picture, which is DOS's text and graphics modes, VESA modes,
 DirectDraw and the Windows desktop, is drawn by the CPU into the emulated
 card's memory, as the real card's memory held it. Two cards drawn with
-OpenGL are the exception: a ToadForce's fills and copies into the surfaces
-its 3D draws into, and the blits, fills and window updates of the built-in
-Windows on a Voodoo3 or Banshee, run on your graphics card. The window then
-scales the picture up
-with OpenGL 3, which costs your graphics card little; without OpenGL 3, SDL's
+OpenGL are the exception, and draw some 2D on your graphics card: a
+ToadForce its fills and copies into the surfaces its 3D draws into, and a
+Voodoo3 or Banshee the built-in Windows' blits, fills and window updates
+in its memory, and under any Windows its 2D engine's fills and copies
+that touch the 3D's picture. The window then scales the picture up with
+OpenGL 3, which costs your graphics card little; without OpenGL 3, SDL's
 renderer scales it and the CRT shaders aren't there.
 
 ### What each card can draw
