@@ -1220,19 +1220,25 @@ fn narrow_operand(ops: &mut Asm, idx: u8, x: u8, wide: DynamicLabel) {
         ; movsd Rx(x), QWORD [rbx + Rq(idx) * 8 + FPU_F64]
         ; cmp BYTE [rbx + Rq(idx) + FPU_STALE], 0
         ; jne =>done
-        // The 80 bits count: a significand that ends at a double's 53
-        // bits, with the integer bit set where the double isn't 0 and
-        // nothing where it is.
+        // The 80 bits count: the double's significand (its 53 bits, the
+        // integer bit set) where the double is a normal number, and
+        // nothing where it is 0.
         ; mov eax, Rd(idx)
         ; shl eax, 4
         ; mov rdx, QWORD [rbx + rax + FPU_X80]
-        ; test edx, 0x7FF
-        ; jnz =>wide
         ; movq rax, Rx(x)
         ; shl rax, 1
         ; jz >zero
-        ; test rdx, rdx
-        ; js =>done
+        // A denormal double: the 80 bits may hold more than it.
+        ; shr rax, 53
+        ; jz =>wide
+        // Another significand: more bits, or a number just below the
+        // least normal double, which rounds up to it.
+        ; movq rax, Rx(x)
+        ; shl rax, 11
+        ; bts rax, 63
+        ; cmp rax, rdx
+        ; je =>done
         ; jmp =>wide
         ; zero:
         ; test rdx, rdx
@@ -1303,9 +1309,12 @@ fn f80_operand(ops: &mut Asm, hi: u8, man: u8, slow: DynamicLabel) {
         ; shl Rd(hi), 4
         ; lea Rd(hi), [Rq(hi) + rcx + 16383 - 1023]
         ; jmp =>loaded
+        // A zero; a denormal double, a normal number in 80 bits, is the
+        // handler's.
         ; =>zero
+        ; shl Rq(man), 1
+        ; jnz =>slow
         ; shl Rd(hi), 4
-        ; xor Rd(man), Rd(man)
         ; =>loaded
     );
 }
@@ -4157,29 +4166,20 @@ impl Gen<'_> {
     }
 
     /// Make the double in XMM register `x` what an FPU register holds
-    /// (`f80::canon_f64`): a denormal 0, a NaN quiet.
+    /// (`f80::canon_f64`): a NaN quiet.
     fn fpu_canon(&mut self, x: u8) {
         dynasm!(self.ops
             ; .arch x64
             ; movq rcx, Rx(x)
             ; mov rdx, rcx
             ; shr rdx, 52
-            ; and edx, 0x7FF
-            ; dec edx
-            ; cmp edx, 0x7FE
-            ; jb >canon_done
-            ; inc edx
-            ; jnz >canon_nan
-            // A zero or a denormal: the sign alone.
-            ; shr rcx, 63
-            ; shl rcx, 63
-            ; jmp >canon_fix
-            ; canon_nan:
+            ; not edx
+            ; test edx, 0x7FF
+            ; jnz >canon_done
             ; mov rdx, rcx
             ; shl rdx, 12
             ; jz >canon_done
             ; bts rcx, 51
-            ; canon_fix:
             ; movq Rx(x), rcx
             ; canon_done:
         );

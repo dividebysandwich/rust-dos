@@ -597,8 +597,8 @@ pub fn regs_json(cpu: &Cpu) -> Value {
 /// on a CPU that has them, MM0-MM7 (the physical registers' significands)
 /// and XMM0-XMM7 with MXCSR. A value is the register's double: one that
 /// JSON can't hold (a NaN, an infinity, or an extended number beyond a
-/// double's range) is null, and one below a double's normal range is 0;
-/// its bits and tag say which it is.
+/// double's range) is null, and one below a double's normal range is the
+/// nearest denormal double, or 0; its bits and tag say which it is.
 pub(super) fn fpu_json(cpu: &Cpu) -> Value {
     let number = |v: f64| if v.is_finite() { json!(v) } else { Value::Null };
     let tags = cpu.fpu_tag_word();

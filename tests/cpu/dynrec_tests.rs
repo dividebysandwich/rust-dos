@@ -7011,37 +7011,36 @@ fn an_fpu_store_past_its_segments_limit_changes_nothing() {
 }
 
 #[test]
-fn fpu_products_and_quotients_too_small_for_a_double_are_zero() {
-    // 1e-30 ten times over is 1e-300; times 2^-31, and divided by 2^31
-    // again, it is a denormal double, which a register doesn't hold: it
-    // is 0, and stays 0 when multiplied up again.
+fn fpu_products_and_quotients_below_a_doubles_normals_are_kept() {
+    // 2^-1000 times 2^-31 (FMUL with memory), divided by 2^31 (FDIV) and
+    // times a register of 2^-31 (FMULP) is 2^-1031, under a double's
+    // normals, which an x87 holds as a normal number in 80 bits and
+    // stores as the denormal double exactly. Multiplied up by 2^31 again
+    // it is 2^-1000.
     let (mut a, mut b) = twins(|rig| {
-        rig.write32(DATA, 0x0DA2_4260); // 1e-30
-        rig.write32(DATA + 4, 0x3000_0000); // 2^-31
-        rig.write32(DATA + 8, 0x4F00_0000); // 2^31
+        rig.write32(DATA, 0);
+        rig.write32(DATA + 4, (1023 - 1000) << 20); // 2^-1000
+        rig.write32(DATA + 8, 0x3000_0000); // 2^-31
+        rig.write32(DATA + 12, 0x4F00_0000); // 2^31
         rig.load(CODE, &asm32(CODE, |a| {
             a.fninit()?;
-            a.fld1()?;
-            for _ in 0..10 {
-                a.fmul(dword_ptr(DATA))?;
-            }
+            a.fld(qword_ptr(DATA))?;
             a.fld(st0)?;
             a.fld(st0)?;
             a.jmp(CODE as u64 + 0x100)
         }));
         rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
             // ST(0) by FMUL with memory, ST(1) by FDIV, ST(2) by FMULP.
-            a.fmul(dword_ptr(DATA + 4))?;
+            a.fmul(dword_ptr(DATA + 8))?;
             a.fxch(st0, st1)?;
-            a.fdiv(dword_ptr(DATA + 8))?;
-            a.fld(dword_ptr(DATA + 4))?;
+            a.fdiv(dword_ptr(DATA + 12))?;
+            a.fld(dword_ptr(DATA + 8))?;
             a.fmulp(st3, st0)?;
             for _ in 0..3 {
-                for _ in 0..4 {
-                    a.fmul(dword_ptr(DATA + 8))?;
-                }
-                a.fstp(dword_ptr(edi))?;
-                a.add(edi, 4)?;
+                a.fst(qword_ptr(edi))?;
+                a.fmul(dword_ptr(DATA + 12))?;
+                a.fstp(qword_ptr(edi + 8))?;
+                a.add(edi, 16)?;
             }
             a.hlt()
         }));
@@ -7049,9 +7048,132 @@ fn fpu_products_and_quotients_too_small_for_a_double_are_zero() {
     a.cpu.set_edi(DATA + 0x100);
     b.cpu.set_edi(DATA + 0x100);
     run_both(&mut a, &mut b);
+    let read64 = |at: u32| b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32;
     for i in 0..3 {
-        assert_eq!(b.read32(DATA + 0x100 + 4 * i), 0, "result {}", i);
+        let at = DATA + 0x100 + 16 * i;
+        assert_eq!(read64(at), 1 << (1074 - 1031), "result {}", i);
+        assert_eq!(read64(at + 8), ((1023 - 1000) as u64) << 52, "result {} times 2^31", i);
     }
+}
+
+/// Doubles of every kind, denormals among them, as programs copy memory
+/// a qword at a time with FLD and FSTP. Beetle Crazy Cup copies its 4x4
+/// float matrices so: a pair of singles 1.0 and 0.0 is the denormal
+/// double 3F800000h.
+const COPIED: [u64; 10] = [
+    0x0000_0000_3F80_0000, // 1.0f, 0.0f
+    0x8000_0000_3F80_0000, // the same with the sign
+    0x0000_0000_0000_0001, // the least denormal
+    0x000F_FFFF_FFFF_FFFF, // the largest denormal
+    0x0008_0000_0000_0000, // 2^-1023
+    0x0010_0000_0000_0000, // the least normal
+    0x3F80_0000_0000_0000, // 0.0f, 1.0f
+    0x3FF0_0000_0000_0000, // 1
+    0x8000_0000_0000_0000, // -0
+    0x7FF8_0000_0000_0000, // a quiet NaN
+];
+
+#[test]
+fn fpu_qword_copies_keep_denormals() {
+    // FLD and FSTP of each, and FLD, FST, FSTP through a second register
+    // (FLD ST(0)); on the recompiler, in one block.
+    let (input, output) = (DATA, DATA + 0x1000);
+    let (mut a, mut b) = twins(|rig| {
+        for (k, bits) in COPIED.iter().enumerate() {
+            rig.write32(input + 8 * k as u32, *bits as u32);
+            rig.write32(input + 8 * k as u32 + 4, (bits >> 32) as u32);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            for k in 0..COPIED.len() as u32 {
+                let (from, to) = (input + 8 * k, output + 24 * k);
+                a.fld(qword_ptr(from))?;
+                a.fld(st0)?;
+                a.fst(qword_ptr(to))?;
+                a.fstp(qword_ptr(to + 8))?;
+                a.fstp(qword_ptr(to + 16))?;
+            }
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    for rig in [&a, &b] {
+        for (k, bits) in COPIED.iter().enumerate() {
+            for copy in 0..3 {
+                let at = output + 24 * k as u32 + 8 * copy;
+                let got = rig.read32(at) as u64 | (rig.read32(at + 4) as u64) << 32;
+                assert_eq!(got, *bits, "{:016X}, copy {}", bits, copy);
+            }
+        }
+    }
+}
+
+#[test]
+fn fpu_sums_with_a_denormal_double_operand_use_all_of_it() {
+    // #2103: ST(0) = 1, plus the least denormal double 2^-1074 at 64 bits
+    // rounding up, is 1 + 2^-63: from FADD with memory, and from FADD of
+    // a register loaded with it. Stored as 80 bits.
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(DATA, 1);
+        rig.write32(DATA + 4, 0);
+        rig.write32(DATA + 8, 0x0B7F);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.fldcw(word_ptr(DATA + 8))?;
+            a.fld1()?;
+            a.fadd(qword_ptr(DATA))?;
+            a.fstp(tword_ptr(DATA + 0x10))?;
+            a.fld(qword_ptr(DATA))?;
+            a.fld1()?;
+            a.fadd_2(st0, st1)?;
+            a.fstp(tword_ptr(DATA + 0x20))?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    for at in [DATA + 0x10, DATA + 0x20] {
+        let man = b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32;
+        let se = b.read32(at + 8) & 0xFFFF;
+        assert_eq!((se, man), (0x3FFF, 0x8000_0000_0000_0001), "at {:X}", at);
+    }
+}
+
+#[test]
+fn fpu_sums_just_below_a_doubles_normals_use_all_80_bits() {
+    // 2^-1022 - 2^-1075 (80 bits) rounds up to the double 2^-1022, but
+    // isn't it: plus 2^-1022 at 64 bits it is 2^-1021 - 2^-1075, where
+    // the doubles would make 2^-1021. And #2103's last case: at 53 bits,
+    // 2^-1022 plus the least denormal double's negative from memory is
+    // the largest denormal double.
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(DATA, 0);
+        rig.write32(DATA + 4, 0x0010_0000); // 2^-1022
+        rig.write32(DATA + 8, 1);
+        rig.write32(DATA + 12, 0x8000_0000); // -2^-1074
+        rig.write32(DATA + 0x10, 0xFFFF_F800);
+        rig.write32(DATA + 0x14, 0xFFFF_FFFF);
+        rig.write32(DATA + 0x18, 0x3C00); // 2^-1022 - 2^-1075
+        rig.write32(DATA + 0x20, 0x027F);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.fld(tword_ptr(DATA + 0x10))?;
+            a.fld(qword_ptr(DATA))?;
+            a.fadd_2(st0, st1)?;
+            a.fstp(tword_ptr(DATA + 0x40))?;
+            a.fstp(st0)?;
+            a.fldcw(word_ptr(DATA + 0x20))?;
+            a.fld(qword_ptr(DATA))?;
+            a.fadd(qword_ptr(DATA + 8))?;
+            a.fstp(qword_ptr(DATA + 0x50))?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let man = b.read32(DATA + 0x40) as u64 | (b.read32(DATA + 0x44) as u64) << 32;
+    let se = b.read32(DATA + 0x48) & 0xFFFF;
+    assert_eq!((se, man), (0x3C01, 0xFFFF_FFFF_FFFF_FC00));
+    let sum = b.read32(DATA + 0x50) as u64 | (b.read32(DATA + 0x54) as u64) << 32;
+    assert_eq!(sum, 0x000F_FFFF_FFFF_FFFF);
 }
 
 /// Writes and reads of video memory, the ROMs and addresses past the end

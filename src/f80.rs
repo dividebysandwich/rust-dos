@@ -507,9 +507,15 @@ impl F80 {
         let exp = ((bits >> 52) & 0x7FF) as u16;
         let mantissa = bits & 0xFFFFFFFFFFFFF;
 
-        let st = if exp == 0 {
-            // Subnormal or zero in f64 → represent as 0.0 en FPU
+        let st = if exp == 0 && mantissa == 0 {
             (sign as u128) << 79
+        } else if exp == 0 {
+            // A denormal double is a normal number in 80 bits, exactly:
+            // mantissa * 2^-1074, with its top bit moved up to the
+            // integer bit (12 places or more).
+            let up = mantissa.leading_zeros();
+            let exponent = (F80_EXP_BIAS - 1074 + 63 - up as i32) as u128;
+            ((sign as u128) << 79) | (exponent << 64) | (mantissa << up) as u128
         } else if exp == 0x7FF {
             // An infinity or a NaN (made quiet), with the integer bit set:
             // without it, it is a pseudo-infinity or pseudo-NaN, which a
@@ -538,7 +544,8 @@ impl F80 {
         let mantissa = value & 0xFFFFFFFFFFFFFFFF;
 
         let f64_bits: u64 = if exp == 0 {
-            // Zero or denormal extended → 0.0
+            // A zero, or a denormal far under the least denormal double:
+            // 0 to nearest.
             sign << 63
         } else if exp == 0x7FFF {
             // Inf or NaN, by the fraction (not the integer bit)
@@ -550,8 +557,19 @@ impl F80 {
             let f64_exp = unbiased_exp + F64_EXP_BIAS;
 
             if f64_exp <= 0 {
-                // Subnormal in f64 → round to 0.0
-                sign << 63
+                // Below a double's normals: a denormal double, the
+                // significand in units of 2^-1074 rounded to nearest, even
+                // on a tie. Rounding up to 2^52 units makes the least
+                // normal double, whose bits are that number.
+                let shift = (12 - f64_exp) as u32;
+                let m = mantissa as u64 as u128;
+                let (kept, rest, half) = if shift >= 66 {
+                    (0, 1, 2)
+                } else {
+                    (m >> shift, m & ((1u128 << shift) - 1), 1u128 << (shift - 1))
+                };
+                let kept = kept + rounds_away(0, false, kept & 1 != 0, rest, half) as u128;
+                (sign << 63) | kept as u64
             } else if f64_exp >= 0x7FF {
                 // Exponent too large → ∞
                 (sign << 63) | (0x7FF << 52)
@@ -743,14 +761,12 @@ fn round_up(mantissa: u64) -> bool {
 }
 
 /// What a double is after it went into an FPU register and came back
-/// (`F80::set_f64`, then `get_f64`): a denormal is 0, and a NaN quiet.
+/// (`F80::set_f64`, then `get_f64`): a NaN quiet, and every other double
+/// as it was, a denormal too (the 80 bits hold it exactly).
 #[inline]
 pub fn canon_f64(value: f64) -> f64 {
     let bits = value.to_bits();
-    let exp = bits >> 52 & 0x7FF;
-    let canon = if exp == 0 {
-        bits & 1 << 63
-    } else if exp == 0x7FF && bits << 12 != 0 {
+    let canon = if bits >> 52 & 0x7FF == 0x7FF && bits << 12 != 0 {
         bits | 1 << 51
     } else {
         bits
@@ -835,19 +851,25 @@ impl FpuRegs {
     }
 
     /// Register `i`'s double where its 80 bits are that double and no
-    /// more: a register that is stale, or one whose significand ends at a
-    /// double's 53 bits and has the integer bit set where the double isn't
-    /// 0 and no bits where it is. That leaves out a number below a
-    /// double's range, which the double has as 0, and the formats a 387
-    /// doesn't take (an unnormal, a pseudo-zero or a pseudo-infinity),
-    /// whose double `F80::get_f64` makes as if the integer bit were set.
+    /// more: a register that is stale, or one whose significand is the
+    /// double's (its 53 bits, the integer bit set) where the double is a
+    /// normal number, and no bits where it is 0. That leaves out a number
+    /// below a double's normals, which the double has rounded to a
+    /// denormal, to 0 or up to the least normal double, with fewer bits
+    /// than 53 or other ones, and the formats a 387 doesn't take (an
+    /// unnormal, a pseudo-zero or a pseudo-infinity), whose double
+    /// `F80::get_f64` makes as if the integer bit were set.
     #[inline]
     pub fn only_double(&self, i: usize) -> Option<f64> {
         let value = self.f64s[i];
         if self.stale[i] == 0 {
-            let significand = self.x80[i].st as u64;
-            let whole = if value == 0.0 { significand == 0 } else { significand >> 63 == 1 };
-            if significand & 0x7FF != 0 || !whole {
+            let (bits, significand) = (value.to_bits(), self.x80[i].st as u64);
+            let whole = if bits << 1 >> 53 == 0 {
+                value == 0.0 && significand == 0
+            } else {
+                significand == (bits << 11 | 1 << 63)
+            };
+            if !whole {
                 return None;
             }
         }
@@ -1222,6 +1244,30 @@ mod tests {
     }
 
     #[test]
+    fn values_below_a_doubles_normals_round_to_denormals() {
+        // (Exponent, significand) of 80 bits, and the double's bits.
+        let cases: [(u16, u64, u64); 7] = [
+            // 2^-1074 and 2^-1023, exactly.
+            (16383 - 1074, 1 << 63, 1),
+            (16383 - 1023, 1 << 63, 1 << 51),
+            // 1.5 and 2.5 times 2^-1074: ties, to the even one.
+            (16383 - 1074, 3 << 62, 2),
+            (16383 - 1073, 5 << 61, 2),
+            // Half of 2^-1074 is a tie with 0; a little more is 2^-1074.
+            (16383 - 1075, 1 << 63, 0),
+            (16383 - 1075, 1 << 63 | 1, 1),
+            // Just under 2^-1022 rounds up to the least normal double.
+            (16383 - 1023, !0, 1 << 52),
+        ];
+        for (exp, significand, bits) in cases {
+            let f = F80 { st: (exp as u128) << 64 | significand as u128 };
+            assert_eq!(f.get_f64().to_bits(), bits, "{:04X} {:016X}", exp, significand);
+            let negative = F80 { st: f.st | 1 << 79 };
+            assert_eq!(negative.get_f64().to_bits(), bits | 1 << 63);
+        }
+    }
+
+    #[test]
     fn registers_keep_a_double_as_its_80_bits() {
         let mut regs = FpuRegs::default();
         for (i, v) in samples().into_iter().enumerate() {
@@ -1235,6 +1281,37 @@ mod tests {
             regs.set(i, got);
             assert_eq!(regs.get(i).st, f.st);
             assert_eq!(regs.get_f64(i).to_bits(), f.get_f64().to_bits());
+        }
+    }
+
+    #[test]
+    fn only_a_register_that_is_its_double_is_only_double() {
+        let mut regs = FpuRegs::default();
+        // (Exponent, significand) of 80 bits, and whether they are the
+        // double they round to.
+        let cases: [(u16, u64, bool); 7] = [
+            (0, 0, true),
+            (16383, 1 << 63, true),
+            (16383 - 1022, 1 << 63, true),
+            // One bit more than a double's 53.
+            (16383, 1 << 63 | 1 << 10, false),
+            // 2^-1023 is the denormal double 2^-1023, exactly.
+            (16383 - 1023, 1 << 63, false),
+            // 2^-1022 - 2^-1075 rounds up to the least normal double,
+            // 2^-1022, with the low 11 bits clear.
+            (16383 - 1023, !0 << 11, false),
+            // An unnormal.
+            (16383, 1 << 62, false),
+        ];
+        for (exp, significand, only) in cases {
+            regs.set(0, F80 { st: (exp as u128) << 64 | significand as u128 });
+            let double = regs.only_double(0);
+            assert_eq!(double.is_some(), only, "{:04X} {:016X}", exp, significand);
+            if let Some(v) = double {
+                let mut f = F80::new();
+                f.set_f64(v);
+                assert_eq!(f.st, regs.get(0).st);
+            }
         }
     }
 }
