@@ -1124,15 +1124,16 @@ fn plane_distances(setup: &Setup, world: [f32; 4]) -> [f32; 6] {
     out
 }
 
-/// What the untransformed vertices of `input` that `skip` doesn't name
-/// add to the clip status, worked out without keeping them: the
-/// intersection and the union of their clip codes and, with
-/// `want_extents`, their extents as `extents` gives them. None for no
-/// vertices.
+/// What the vertices `input` add to the clip status, worked out without
+/// keeping them: the intersection and the union of their clip codes
+/// and, with `want_extents`, their extents as `extents` gives them.
+/// With `rhw` they are transformed already: no codes, and their extents
+/// from where they are on the screen, as `process` makes them. None for
+/// no vertices.
 pub fn clip_of(
     setup: &Setup,
-    input: &[Vertex],
-    skip: impl Fn(usize) -> bool,
+    rhw: bool,
+    input: impl IntoIterator<Item = Vertex>,
     want_extents: bool,
 ) -> Option<(u32, u32, Option<[f32; 4]>)> {
     let mut placer = Placer::of(setup);
@@ -1141,23 +1142,25 @@ pub fn clip_of(
         _ => None,
     };
     let mut out: Option<(u32, u32, Option<[f32; 4]>)> = None;
-    for (i, v) in input.iter().enumerate() {
-        if skip(i) {
-            continue;
-        }
-        let tweened;
-        let v = match tween {
-            Some(f) => {
-                tweened = tween_vertex(v, f);
-                &tweened
+    for v in input {
+        let mut p = if rhw {
+            // Only where `transformed` puts it counts.
+            Processed {
+                clip: [v.position[0], v.position[1], v.position[2], 1.0],
+                tl: true,
+                ..Processed::default()
             }
-            None => v,
-        };
-        let (world, clip) = placer.clip(v);
-        let mut p = Processed {
-            clip,
-            planes: plane_distances(setup, world),
-            ..Processed::default()
+        } else {
+            let v = match tween {
+                Some(f) => tween_vertex(&v, f),
+                None => v,
+            };
+            let (world, clip) = placer.clip(&v);
+            Processed {
+                clip,
+                planes: plane_distances(setup, world),
+                ..Processed::default()
+            }
         };
         p.code = codes(setup, &p);
         let e = if want_extents {

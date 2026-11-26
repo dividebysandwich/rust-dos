@@ -27,6 +27,7 @@ use super::{
 };
 use crate::cpu::Cpu;
 use crate::win32::trace3d::Pass;
+use std::borrow::Cow;
 
 // DrawPrimitive's flags.
 pub const D3DDP_DONOTCLIP: u32 = 0x4;
@@ -354,10 +355,49 @@ pub fn account(
     account_with(cpu, id, setup, verts, None, drawn, flags);
 }
 
+/// A draw's range of vertices: read already, or still the bytes of the
+/// program's buffer, of which a draw that uses few (`Sparse`) reads
+/// only those.
+#[derive(Clone, Copy)]
+enum Range<'a> {
+    Read(&'a [Vertex]),
+    Bytes(&'a [u8], &'a Layout),
+}
+
+impl Range<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Range::Read(v) => v.len(),
+            Range::Bytes(b, layout) => b.len() / layout.size.max(1) as usize,
+        }
+    }
+
+    /// The vertex at `i`.
+    fn get(&self, i: usize) -> Vertex {
+        match self {
+            Range::Read(v) => v[i],
+            Range::Bytes(b, layout) => {
+                let size = layout.size.max(1) as usize;
+                layout.read(&b[i * size..(i + 1) * size])
+            }
+        }
+    }
+
+    /// All of them.
+    fn all(&self) -> Cow<'_, [Vertex]> {
+        match self {
+            Range::Read(v) => Cow::Borrowed(v),
+            Range::Bytes(..) => (0..self.len()).map(|i| self.get(i)).collect(),
+        }
+    }
+}
+
 /// The vertices of a draw's range that none of its primitives uses
 /// (`Sparse`), which count as the others do.
 struct Unused<'a> {
-    vertices: &'a [Vertex],
+    vertices: Range<'a>,
+    /// Whether they are transformed already.
+    rhw: bool,
     used: &'a [bool],
     count: usize,
 }
@@ -417,7 +457,10 @@ fn clip_codes(
     };
     let placed = unused.and_then(|u| {
         let _profile = crate::profile::zone(crate::profile::Zone::D3dVertices);
-        pipeline::clip_of(setup, u.vertices, |k| u.used[k], want_extents)
+        let vertices = (0..u.used.len())
+            .filter(|&k| !u.used[k])
+            .map(|k| u.vertices.get(k));
+        pipeline::clip_of(setup, u.rhw, vertices, want_extents)
     });
     if let Some((i, un, e)) = placed {
         codes = Some(match codes {
@@ -474,7 +517,8 @@ pub fn draw_blended(
         return Ok(());
     }
     let prims = primitives(kind, order, vertices.len())?;
-    draw_set_up(cpu, id, &setup, layout, vertices, None, &prims, flags);
+    let range = Range::Read(vertices);
+    draw_set_up(cpu, id, &setup, layout, range, None, &prims, flags);
     Ok(())
 }
 
@@ -533,9 +577,12 @@ fn draw_from(
         super::super::surface::changed(cpu, target);
         return Ok(());
     }
-    let (vertices, order) = read(cpu);
-    let prims = primitives(kind, order.as_deref(), vertices.len())?;
-    draw_set_up(cpu, id, &setup, layout, &vertices, None, &prims, flags);
+    // Read as bytes: a draw that uses few of them reads only those.
+    let bytes = read_bytes(cpu, from.at, layout.size * from.count);
+    let order = from.indices.map(|(at, count)| indices_at(cpu, at, count));
+    let range = Range::Bytes(&bytes, layout);
+    let prims = primitives(kind, order.as_deref(), range.len())?;
+    draw_set_up(cpu, id, &setup, layout, range, None, &prims, flags);
     Ok(())
 }
 
@@ -688,40 +735,44 @@ fn draw_clipped(
     if blend.is_some() {
         setup.blend = blend;
     }
+    let vertices = Range::Read(vertices);
     draw_set_up(cpu, id, &setup, layout, vertices, clip, prims, flags);
     Ok(())
 }
 
-/// `draw_clipped` with the pipeline's setup made already.
+/// `draw_clipped` with the pipeline's setup made already, of the
+/// vertices `range`.
 #[allow(clippy::too_many_arguments)]
 fn draw_set_up(
     cpu: &mut Cpu,
     id: u32,
     setup: &Setup,
     layout: &Layout,
-    vertices: &[Vertex],
+    range: Range,
     clip: Option<&[Option<Clipped>]>,
     prims: &[Prim],
     flags: u32,
 ) {
-    if !layout.rhw
-        && clip.is_none()
-        && let Some(sparse) = Sparse::of(prims, vertices.len())
+    if clip.is_none()
+        && let Some(sparse) = Sparse::of(prims, range.len())
     {
-        let kept: Vec<Vertex> = sparse.kept.iter().map(|&i| vertices[i]).collect();
+        let kept: Vec<Vertex> = sparse.kept.iter().map(|&i| range.get(i)).collect();
         let processed = {
             let _profile = crate::profile::zone(crate::profile::Zone::D3dVertices);
             pipeline::process(setup, &kept, layout)
         };
         let drawn = rasterize(cpu, id, setup, &processed, &sparse.prims);
         let unused = Unused {
-            vertices,
+            vertices: range,
+            rhw: layout.rhw,
             used: &sparse.used,
-            count: vertices.len() - kept.len(),
+            count: range.len() - kept.len(),
         };
         account_with(cpu, id, setup, &processed, Some(unused), drawn, flags);
         return;
     }
+    let vertices = range.all();
+    let vertices = &vertices[..];
     let mut processed = {
         let _profile = crate::profile::zone(crate::profile::Zone::D3dVertices);
         pipeline::process(setup, vertices, layout)
@@ -751,10 +802,11 @@ fn draw_set_up(
 /// The primitives of a draw that uses fewer than half of its vertices,
 /// over only those it uses. An indexed draw may name a range far larger
 /// than its indices use: Project IGI draws a few dozen triangles of
-/// ranges of 15,000 vertices. Only the vertices used go through the
-/// pipeline; the others are placed for the clip status alone
-/// (`account_with`), as Direct3D, which transforms the whole range,
-/// counts them.
+/// ranges of 15,000 transformed vertices. Only the vertices used are
+/// read from the program's buffer (`Range`) and go through the pipeline;
+/// the others are read and placed for the clip status alone, when the
+/// program asked for it (`account_with`), as Direct3D, which transforms
+/// the whole range, counts them.
 struct Sparse {
     /// The places of the vertices used, in order.
     kept: Vec<usize>,
@@ -1397,25 +1449,17 @@ mod tests {
     /// A draw over the vertices it uses draws the same as one over its
     /// whole range, and the vertices it doesn't use add the same clip
     /// codes and extents.
-    #[test]
-    fn the_vertices_a_draw_uses_draw_as_the_whole_range_does() {
+    fn a_sparse_draw_draws_as_the_whole_range(layout: &Layout, range: Range) {
         let setup = Setup {
             view_map: ViewMap::dx7(0, 0, 100, 100, 0.0, 1.0),
             ..Setup::default()
         };
-        let layout = Layout::of(pipeline::FVF_XYZ | pipeline::FVF_DIFFUSE).unwrap();
-        let input: Vec<Vertex> = (0..20)
-            .map(|i| Vertex {
-                position: [i as f32 * 0.2 - 2.0, (i % 3) as f32 * 0.4 - 0.4, 0.5, 1.0],
-                diffuse: Some(0xFF00_0000 | i * 0x0A_0B0C),
-                ..Vertex::default()
-            })
-            .collect();
+        let input = range.all();
         let prims = pipeline::assemble(pipeline::TRIANGLELIST, &[9, 10, 11, 11, 10, 12]).unwrap();
-        let sparse = Sparse::of(&prims, input.len()).unwrap();
-        let all = pipeline::process(&setup, &input, &layout);
-        let kept: Vec<Vertex> = sparse.kept.iter().map(|&i| input[i]).collect();
-        let some = pipeline::process(&setup, &kept, &layout);
+        let sparse = Sparse::of(&prims, range.len()).unwrap();
+        let all = pipeline::process(&setup, &input, layout);
+        let kept: Vec<Vertex> = sparse.kept.iter().map(|&i| range.get(i)).collect();
+        let some = pipeline::process(&setup, &kept, layout);
         let (mut a, mut b) = (Recorder::default(), Recorder::default());
         pipeline::draw(&setup, &all, &prims, &mut a);
         pipeline::draw(&setup, &some, &sparse.prims, &mut b);
@@ -1428,15 +1472,19 @@ mod tests {
             .map(|(_, p)| *p)
             .collect();
         let (intersection, union) = pipeline::clip_union(&unused);
-        assert_ne!(union, 0);
+        assert_eq!(union != 0, !layout.rhw);
+        let rest = (0..input.len())
+            .filter(|&i| !sparse.used[i])
+            .map(|i| input[i]);
         assert_eq!(
-            pipeline::clip_of(&setup, &input, |i| sparse.used[i], true),
+            pipeline::clip_of(&setup, layout.rhw, rest, true),
             Some((intersection, union, pipeline::extents(&setup, &unused)))
         );
         // The used and the unused together add to the clip status what
         // the whole range does.
         let rest = Unused {
-            vertices: &input,
+            vertices: range,
+            rhw: layout.rhw,
             used: &sparse.used,
             count: input.len() - kept.len(),
         };
@@ -1444,5 +1492,38 @@ mod tests {
             clip_codes(&setup, &some, Some(rest), true),
             (pipeline::clip_union(&all), pipeline::extents(&setup, &all))
         );
+    }
+
+    #[test]
+    fn the_vertices_a_draw_uses_draw_as_the_whole_range_does() {
+        let layout = Layout::of(pipeline::FVF_XYZ | pipeline::FVF_DIFFUSE).unwrap();
+        let input: Vec<Vertex> = (0..20)
+            .map(|i| Vertex {
+                position: [i as f32 * 0.2 - 2.0, (i % 3) as f32 * 0.4 - 0.4, 0.5, 1.0],
+                diffuse: Some(0xFF00_0000 | i * 0x0A_0B0C),
+                ..Vertex::default()
+            })
+            .collect();
+        a_sparse_draw_draws_as_the_whole_range(&layout, Range::Read(&input));
+    }
+
+    /// Transformed vertices read from the program's bytes: those used are
+    /// read alone, and those unused add no clip codes but their extents.
+    #[test]
+    fn the_transformed_vertices_a_draw_uses_draw_as_the_whole_range_does() {
+        let layout = Layout::of(pipeline::FVF_XYZRHW | pipeline::FVF_DIFFUSE).unwrap();
+        assert_eq!(layout.size, 20);
+        let mut bytes = Vec::new();
+        for i in 0..20u32 {
+            let p = [i as f32 * 7.0 - 30.0, (i % 3) as f32 * 30.0 + 5.0, 0.5, 2.0];
+            for f in p {
+                bytes.extend_from_slice(&f.to_le_bytes());
+            }
+            bytes.extend_from_slice(&(0xFF00_0000 | i * 0x0A_0B0C).to_le_bytes());
+        }
+        let range = Range::Bytes(&bytes, &layout);
+        assert_eq!(range.len(), 20);
+        assert_eq!(range.get(3).position, [-9.0, 5.0, 0.5, 2.0]);
+        a_sparse_draw_draws_as_the_whole_range(&layout, range);
     }
 }
