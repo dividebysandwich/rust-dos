@@ -1317,6 +1317,135 @@ fn a_primary_surface_cant_be_a_back_buffer() {
     assert_eq!(results(&mut cpu, data, 4)[1..], [0, 0, DDERR_INVALIDCAPS]);
 }
 
+/// Where caps_without_flag_program puts its descriptions, after the
+/// first at DESC: the palette's entries' place, which it doesn't use.
+const DESCS: [u32; 4] = [ENTRIES, ENTRIES + 0x70, ENTRIES + 0xE0, ENTRIES + 0x150];
+
+/// A program in a window that asks for surfaces with ddsCaps set and
+/// DDSD_CAPS left out of dwFlags, as Intel RDX's DMIX.DLL asks for its
+/// primary surface: the primary surface (no flags), a 64x32 surface in
+/// system memory, the primary surface with a size, nothing, and a
+/// surface in both memories.
+fn caps_without_flag_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    let sized = DDSD_WIDTH | DDSD_HEIGHT;
+    desc(&mut d, DESC, 0, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    desc(&mut d, DESCS[0], sized, DDSCAPS_SYSTEMMEMORY, 64, 32, 0);
+    desc(&mut d, DESCS[1], sized, DDSCAPS_PRIMARYSURFACE, 64, 32, 0);
+    desc(&mut d, DESCS[2], 0, 0, 0, 0, 0);
+    let both = DDSCAPS_SYSTEMMEMORY | DDSCAPS_VIDEOMEMORY;
+    desc(&mut d, DESCS[3], sized, both, 64, 32, 0);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_NORMAL)],
+        )?;
+        let create = |c: &mut Calls, a: &mut CodeAssembler, desc: u32, out: u32| {
+            c.com(
+                a,
+                l,
+                DD,
+                DD_CREATE_SURFACE,
+                &[Arg::At(desc), Arg::At(out), Arg::I(0)],
+            )
+        };
+        create(&mut c, a, DESC, FRONT)?;
+        c.com(a, l, FRONT, S_GET_CAPS, &[Arg::At(CAPS)])?;
+        create(&mut c, a, DESCS[0], OFFSCREEN)?;
+        c.com(a, l, OFFSCREEN, S_GET_CAPS, &[Arg::At(CAPS + 4)])?;
+        for at in &DESCS[1..] {
+            create(&mut c, a, *at, SOURCE)?;
+        }
+        finish(a, l)
+    })
+}
+
+/// DirectDraw on Windows 98 SE reads ddsCaps whether dwFlags has
+/// DDSD_CAPS or not. A probe on Windows 98 SE (DirectX 6.1, an S3 Trio64
+/// in 86Box) got these results through IDirectDraw and IDirectDraw4:
+/// flags 0 with DDSCAPS_PRIMARYSURFACE made the primary surface, a sized
+/// surface with DDSCAPS_SYSTEMMEMORY was in system memory, the primary
+/// surface with a size failed with DDERR_INVALIDPARAMS, as did flags 0
+/// and caps 0, and both memories failed with DDERR_INVALIDCAPS.
+#[test]
+fn surface_caps_count_without_ddsd_caps() {
+    let (program, data) = caps_without_flag_program();
+    let mut cpu = machine("caps_without_flag", program);
+    run_until_done(&mut cpu, data);
+    const DDERR_INVALIDCAPS: u32 = 0x8876_0064;
+    assert_eq!(
+        results(&mut cpu, data, 10)[1..],
+        [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            DDERR_INVALIDPARAMS,
+            DDERR_INVALIDPARAMS,
+            DDERR_INVALIDCAPS
+        ]
+    );
+    let primary = peek(&cpu, data + CAPS);
+    assert_ne!(primary & DDSCAPS_PRIMARYSURFACE, 0, "{primary:08X}");
+    let system = peek(&cpu, data + CAPS + 4);
+    assert_ne!(system & DDSCAPS_SYSTEMMEMORY, 0, "{system:08X}");
+}
+
+/// Where dx1_caps_program has GetCaps put the driver's caps and the
+/// emulation's, each a DDCAPS of DirectX 1's 172 bytes with a word
+/// after it that is left alone, and a DDCAPS of a size no DirectX has.
+const DX1_HAL: u32 = ENTRIES;
+const DX1_HEL: u32 = ENTRIES + 0xC0;
+const ODD_CAPS: u32 = ENTRIES + 0x180;
+const DX1_CAPS_SIZE: u32 = 172;
+const PAST_CAPS: u32 = 0x5AA5_C33C;
+
+/// A program that asks DirectDraw for its caps in DDCAPS of DirectX 1's
+/// size, as Intel RDX's DMIX.DLL does, then in one of 256 bytes.
+fn dx1_caps_program() -> (Vec<u8>, u32) {
+    const DD_GET_CAPS: u32 = 11;
+    let mut d = data();
+    for at in [DX1_HAL, DX1_HEL] {
+        put32(&mut d, at, DX1_CAPS_SIZE);
+        put32(&mut d, at + DX1_CAPS_SIZE, PAST_CAPS);
+    }
+    put32(&mut d, ODD_CAPS, 0x100);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        let caps = [Arg::At(DX1_HAL), Arg::At(DX1_HEL)];
+        c.com(a, l, DD, DD_GET_CAPS, &caps)?;
+        c.com(a, l, DD, DD_GET_CAPS, &[Arg::At(ODD_CAPS), Arg::I(0)])?;
+        finish(a, l)
+    })
+}
+
+/// DirectDraw on Windows 98 SE fills a DDCAPS of DirectX 1's 172 bytes,
+/// as it does DirectX 3's, 5's and 6's, and refuses one of 256 bytes
+/// with DDERR_INVALIDPARAMS: a probe there (DirectX 6.1, an S3 Trio64 in
+/// 86Box) got DD_OK and the same dwCaps for all four sizes.
+#[test]
+fn get_caps_fills_directx_1s_ddcaps() {
+    let (program, data) = dx1_caps_program();
+    let mut cpu = machine("dx1_caps", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 4)[1..], [0, 0, DDERR_INVALIDPARAMS]);
+    const DDCAPS_BLT: u32 = 0x40;
+    for at in [DX1_HAL, DX1_HEL] {
+        let caps = peek(&cpu, data + at + 4);
+        assert_ne!(caps & DDCAPS_BLT, 0, "{at:X}: {caps:08X}");
+        let past = peek(&cpu, data + at + DX1_CAPS_SIZE);
+        assert_eq!(past, PAST_CAPS, "{at:X}");
+    }
+}
+
 /// A program in a window: an offscreen surface filled with a color and
 /// blitted to the primary surface (the desktop), clipped to the window.
 fn windowed_program() -> (Vec<u8>, u32) {

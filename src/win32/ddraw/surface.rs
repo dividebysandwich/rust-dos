@@ -1036,11 +1036,13 @@ pub fn make(
     level: u32,
     desc: &Desc,
 ) -> Result<Vec<u32>, u32> {
-    let mut caps = if desc.flags & DDSD_CAPS != 0 {
-        desc.caps
-    } else {
-        [0; 4]
-    };
+    // DirectDraw on Windows 98 SE reads ddsCaps whether dwFlags has
+    // DDSD_CAPS or not: a description with no flags and
+    // DDSCAPS_PRIMARYSURFACE makes the primary surface, and one with
+    // DDSCAPS_SYSTEMMEMORY and no DDSD_CAPS puts the surface in system
+    // memory. Intel RDX's DMIX.DLL asks for its primary surface that
+    // way.
+    let mut caps = desc.caps;
     if caps[0] & DDSCAPS_SYSTEMMEMORY != 0 && caps[0] & DDSCAPS_VIDEOMEMORY != 0 {
         return Err(DDERR_INVALIDCAPS);
     }
