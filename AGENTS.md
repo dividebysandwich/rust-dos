@@ -60,8 +60,9 @@ around it.
 whole crate. A file in a folder is a module of the folder's `main.rs`, so
 its tests are named `<file>::<test>`. `cargo build --all-targets`,
 `cargo clippy --all-targets` and a plain `cargo test` build and link all
-seven. CI does that on every push, on Linux, Windows and macOS, so you
-don't need to before you push.
+seven. CI does that on every push, and runs the whole suite on Linux
+(Windows and macOS run a few tests of their own), so you don't need to
+before you push.
 
 - Build the library and the program with `cargo build`, and lint them
   with `cargo clippy`.
@@ -227,24 +228,28 @@ while it runs.
   needs every test file that covers it run locally, and deterministic
   runs of a few other programs that use the path. Only CI's Linux jobs
   run the whole suite: the Windows and macOS jobs run the recompiler's
-  and the deterministic mode's tests and none of `tests/win32`, so
-  their passing says nothing about it, and a pull request can be
-  marked ready before the Linux jobs end (#2024 merged with them red).
+  and the deterministic mode's tests (and Windows a start of the debug
+  build) and none of `tests/win32`, so their passing says nothing about
+  it, and a pull request can be marked ready before the Linux jobs end
+  (#2024 merged with them red).
 - A run of another program counts only if it reaches the changed code:
   check the counter or the log that shows it did. Of five games run for
-  a change to the ToadForce's depth fills, one reached it; the others
-  showed only that nothing else moved. When one of them reaches the
-  code and draws the same, stop: searching every program for more
+  a change to the ToadForce's depth fills (#2066), one reached it; the
+  others showed only that nothing else moved. When one of them reaches
+  the code and draws the same, stop: searching every program for more
   scenes that reach it adds little.
 - A question of what the real system does is answered by the real
   system: a small probe program run on real Windows or on an emulated
   real PC (86Box) settles it sooner and more surely than reasoning
-  from documentation, and its source and output go in the pull
-  request.
+  from documentation, as one did for #2046 in #2076. Its source and
+  output go in the pull request.
 - When the machine is busy (the user says so, or `rust-dos-lock status`
   shows others' emulators running for long), take no timing
   measurements. The deterministic evidence above doesn't depend on the
-  host's speed and goes on; the timing waits.
+  host's speed and goes on. For a change that removes work it is
+  enough for step 4, and the indicative figure joins the description
+  once the machine is quiet; a change whose claim is the timing itself
+  stays a draft until its series is run.
 
 ## Comparing what two builds draw: deterministic runs
 
