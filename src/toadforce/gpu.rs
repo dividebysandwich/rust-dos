@@ -1590,12 +1590,11 @@ impl Gpu {
         std::mem::take(&mut self.presents)
     }
 
-    /// Whether a surface that is ahead has the pixels of `surface`:
-    /// with `bits`, its bytes under any format's name of that pixel
-    /// size.
-    fn has_ahead(&self, surface: &Surface, bits: bool) -> bool {
+    /// Whether a surface that is ahead has the pixels of `surface`, or
+    /// its bytes under any format's name of that pixel size.
+    fn has_ahead(&self, surface: &Surface) -> bool {
         let mut ahead = self.ahead.iter().map(|a| &a.surface);
-        ahead.any(|s| related(s, surface) || bits && same_bytes(s, surface))
+        ahead.any(|s| related(s, surface) || same_bytes(s, surface))
     }
 
     /// Have the host do a `FILL`, when a surface it writes (`fills`) is
@@ -1633,7 +1632,7 @@ impl Gpu {
         key: Option<u32>,
         memory: &mut [u8],
     ) -> bool {
-        if !self.has_ahead(dst, true) && !self.has_ahead(src, true) {
+        if !self.has_ahead(dst) && !self.has_ahead(src) {
             return false;
         }
         self.push(memory);

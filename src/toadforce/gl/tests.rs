@@ -2972,9 +2972,12 @@ fn depth_fills(rig: &mut Rig) {
         },
         ..depth
     };
-    let wide = depth.format != Format::D16;
-    let between = if wide { 0x8000_0011 } else { 0x8011 };
-    let farthest = if wide { 0xFFFF_FFFF } else { 0xFFFF };
+    let between = between(depth.format);
+    let farthest = if depth.format != Format::D16 {
+        0xFFFF_FFFF
+    } else {
+        0xFFFF
+    };
     rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0, &[]);
     rig.states(&[(RS_ZENABLE, 1)]);
     rig.draw(&quad_z(2.0, 2.0, 40.0, 0xFFFF_0000, 0.5));
@@ -2984,6 +2987,16 @@ fn depth_fills(rig: &mut Rig) {
     rig.run(|w| fill(w, &as_colour, &rect(0, 0, SIZE, SIZE), farthest));
     rig.draw(&quad_z(4.0, 4.0, 30.0, 0xFF00_00FF, 0.25));
     rig.run(|w| fill(w, &as_colour, &rect(20, 20, 10, 10), between));
+}
+
+/// The depth between the nearest and the farthest that `depth_fills`
+/// writes, with every byte of a pixel of `depth` set some way.
+fn between(depth: Format) -> u32 {
+    if depth == Format::D16 {
+        0x8011
+    } else {
+        0x8000_0011
+    }
 }
 
 #[test]
@@ -3001,6 +3014,16 @@ fn depth_fills_have_the_bytes_the_processor_writes() {
         depth_fills(&mut hosted);
         let host = &hosted.card.describe(Rig::live())["host"];
         assert_eq!(host["read_backs"], 0, "{name}: read-backs");
+        // The last fill's bytes exactly, where `compare` allows the
+        // draws' depths a rounding.
+        hosted.card.settle(&mut hosted.memory, None);
+        let surface = hosted.target(COLOUR).depth_surface().unwrap();
+        let bytes = depth.bytes() as usize;
+        let want = &between(depth).to_le_bytes()[..bytes];
+        for (x, y) in (20..30).flat_map(|y| (20..30).map(move |x| (x, y))) {
+            let at = surface.at(x, y);
+            assert_eq!(&hosted.memory[at..at + bytes], want, "{name} at ({x}, {y})");
+        }
     }
 }
 

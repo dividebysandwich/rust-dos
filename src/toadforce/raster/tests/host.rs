@@ -373,8 +373,7 @@ impl Host for TestHost {
         let copy = self
             .copies
             .iter_mut()
-            .find(|c| gpu::fills(dst, &c.surface))
-            .filter(|c| c.ahead)?;
+            .find(|c| c.ahead && gpu::fills(dst, &c.surface))?;
         let surface = copy.surface;
         blit::fill(&mut copy.pixels, &packed(&surface), rect, value);
         self.drop_textures(&[surface]);
@@ -2409,8 +2408,9 @@ fn fills_and_copies_run_on_the_host_where_a_surface_is_ahead() {
 /// Triangles that write depth, then `FILL`s of the depth buffer named
 /// as colour of its pixel size, as DirectDraw's `DDBLT_DEPTHFILL`
 /// sends them: a part of it to the nearest depth and all of it to the
-/// farthest, each followed by a triangle the depth test lets through
-/// only where the fill left the farthest.
+/// farthest, each followed by a triangle the depth test keeps out of
+/// the part filled with the nearest, and lets through everywhere after
+/// the fill with the farthest.
 fn depth_fills(rig: &mut Rig) {
     triangles(rig);
     let depth = target(rig).depth_surface().unwrap();
