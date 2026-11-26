@@ -410,11 +410,23 @@ it counts the 2D picture only. Switch the renderer and watch **FPS**: when
 it stays the same, the machine is the limit, and a different renderer won't
 help.
 
-The ToadForce's games draw more than the 3dfx cards' do, and the CPU is too
-slow for some of them at their usual resolutions: with
-`toadforce_renderer=software`, choose a lower resolution in the game. Keep
-`software` for a game whose picture looks wrong with OpenGL, and report the
-game.
+> [!WARNING]
+> The ToadForce's software renderer is much slower than its OpenGL
+> renderer in almost every game: in Unreal's Direct3D intro it ran at
+> 20.7 frames a second, against 53 with OpenGL on the same computer
+> (with a dedicated graphics card). It draws on the thread that runs
+> the emulated machine, which waits for it, and it transforms and
+> lights every vertex on the processor. Use `toadforce_renderer=auto`
+> or `opengl` for nearly everything. Keep `software` for a game whose
+> picture is wrong with OpenGL, and report that game.
+>
+> This doesn't apply to the 3dfx cards (the add-on Voodoo, a Voodoo3 or
+> a Banshee). Their software renderer draws on threads of its own, and
+> depending on the game, your CPU and your graphics card it can be
+> faster than their OpenGL renderer.
+
+The ToadForce's games draw more than the 3dfx cards' do. If you have to use
+`toadforce_renderer=software`, choose a lower resolution in the game.
 
 A run with `--deterministic` always draws on the CPU, whatever the settings,
 so that its pictures are the same on every computer. The libretro core draws
@@ -1269,6 +1281,11 @@ III unless `cpu` says otherwise (see `cpu` in
 | `toadforce_memory` | 32, 64 (default), 128 | The megabytes of video memory the card has |
 | `toadforce_renderer` | `auto` (default), `opengl`, `software` | What draws the card's 3D: your graphics card through OpenGL, or Rust-DOS on the processor |
 | `toadforce_gamma` | `off` (default), 0.1 to 2 | A gamma the card's 16- and 32-bit pictures are shown with, after the game's own |
+
+> [!WARNING]
+> `toadforce_renderer=software` is much slower than OpenGL in almost
+> every game. Keep `auto` or `opengl` unless a game's picture is wrong
+> with OpenGL ([choosing a renderer](#choosing-a-renderer)).
 
 A change of `toadforce_memory` takes effect at the DOS prompt, and one
 of `toadforce_renderer` or `toadforce_gamma` at once. The card's
