@@ -772,10 +772,12 @@ impl Sparse {
                 }
             }
         }
-        let kept: Vec<usize> = (0..count).filter(|&i| used[i]).collect();
-        if kept.len() * 2 >= count {
+        // Counted first, so a draw that uses most of its vertices, as
+        // most do, leaves without the lists made.
+        if used.iter().filter(|&&u| u).count() * 2 >= count {
             return None;
         }
+        let kept: Vec<usize> = (0..count).filter(|&i| used[i]).collect();
         // A vertex past the range stays past it, and isn't drawn.
         let mut to = vec![u32::MAX; count];
         for (new, &old) in kept.iter().enumerate() {
