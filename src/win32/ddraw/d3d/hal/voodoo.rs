@@ -290,14 +290,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     api::depth_bias_level(cpu, d.depth_bias);
     api::chromakey_mode(cpu, api::CHROMAKEY_DISABLE);
     let dither = d.state(RS_DITHERENABLE) != 0;
-    api::dither_mode(
-        cpu,
-        if dither {
-            api::DITHER_4X4
-        } else {
-            api::DITHER_DISABLE
-        },
-    );
+    api::dither_mode(cpu, dither_mode(dither, banshee, d.gl_pixel_centres));
 
     // Fog: the table by W, or the vertices' through W, the card's W
     // being free while depth is by Z. With depth by W the vertices' fog
@@ -534,6 +527,30 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
 
 fn local() -> u32 {
     api::COMBINE_FUNCTION_LOCAL
+}
+
+/// Glide's dither mode for a draw that dithers or not (`on`), on a
+/// Banshee or Voodoo3 or not (`banshee`), for OpenGL or Direct3D
+/// (`opengl`, which OpenGL's device has as `gl_pixel_centres`).
+///
+/// 3dfx's OpenGL driver for the Banshee and Voodoo3 draws through
+/// their Glide 3, whose grDitherMode (h3/glide3/src/gglide.c) takes
+/// the 2x2 matrix for either mode and leaves the alpha blending dither
+/// subtraction off unless the control panel's "Alpha Blending Quality"
+/// is "Smoother" (SSTH3_ALPHADITHERMODE 3; it is 1, "Optimal", unless
+/// the user changes it). With the subtraction a blend reads the pixel
+/// back with the 4x4 matrix's error added, and blends of a low alpha
+/// over a dark picture drift towards red and blue, which 5 bits keep
+/// coarser than green: Soldier of Fortune II's car windows turned pink
+/// (#2052). The Voodoo2's Glide 3 dithers 4x4 with the subtraction,
+/// and so does Direct3D here: what 3dfx's Direct3D driver for these
+/// cards set isn't known (#2090).
+fn dither_mode(on: bool, banshee: bool, opengl: bool) -> u32 {
+    match (on, banshee && opengl) {
+        (false, _) => api::DITHER_DISABLE,
+        (true, true) => api::DITHER_2X2,
+        (true, false) => api::DITHER_4X4,
+    }
 }
 
 /// D3DCMP_ as Glide's comparisons: one less.

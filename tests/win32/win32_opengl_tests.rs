@@ -124,6 +124,8 @@ const OPENGL32: &[&str] = &[
     "wglUseFontBitmapsA",
     "glRasterPos3f",
     "glPassThrough",
+    "glBlendFunc",
+    "glColor4f",
 ];
 const GLU32: &[&str] = &[
     "gluBuild2DMipmaps",
@@ -235,6 +237,8 @@ const COPY_PIXELS: usize = GL + 80;
 const WGL_USE_FONT_BITMAPS: usize = GL + 81;
 const RASTER_POS3F: usize = GL + 82;
 const PASS_THROUGH: usize = GL + 83;
+const BLEND_FUNC: usize = GL + 84;
+const COLOR4F: usize = GL + 85;
 const GLU: usize = GL + OPENGL32.len();
 const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
@@ -501,6 +505,9 @@ const GL_NEAREST: u32 = 0x2600;
 const GL_TEXTURE_ENV: u32 = 0x2300;
 const GL_TEXTURE_ENV_MODE: u32 = 0x2200;
 const GL_REPLACE: u32 = 0x1E01;
+const GL_BLEND: u32 = 0x0BE2;
+const GL_SRC_ALPHA: u32 = 0x0302;
+const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
 const GL_VERTEX_ARRAY: u32 = 0x8074;
 const GL_TEXTURE_COORD_ARRAY: u32 = 0x8078;
 
@@ -5599,4 +5606,65 @@ fn a_clip_plane_cuts_a_triangle_where_the_eye_has_it() {
 #[test]
 fn a_clip_plane_on_a_toadforce_cuts_a_triangle() {
     clip_plane_cuts(Draws::ToadForce);
+}
+
+/// The average of each channel of the 64x64 pixels read back.
+fn average(cpu: &Cpu, data: u32) -> [f64; 3] {
+    let mut sum = [0.0; 3];
+    for y in 0..64 {
+        for x in 0..64 {
+            for (s, c) in sum.iter_mut().zip(pixel(cpu, data, x, y)) {
+                *s += f64::from(c);
+            }
+        }
+    }
+    sum.map(|s| s / 4096.0)
+}
+
+#[test]
+fn faint_blends_on_a_voodoo3_keep_the_colour_they_blend_over() {
+    // Soldier of Fortune II's car windows: a dark warm picture, then two
+    // layers of glass of low alpha over it, as 3dfx's Glide 3 for the
+    // Voodoo3 dithers them (2x2, without the dither subtraction). With
+    // the 4x4 matrix and the subtraction, red and blue came out a step
+    // brighter than green each time, and the windows pink (#2052).
+    let layers: [([f32; 3], f32); 2] = [([6.0, 5.0, 4.0], 44.0), ([71.0, 69.0, 62.0], 32.0)];
+    let under = [48.0f32, 36.0, 24.0];
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let [r, g, b] = under.map(|v| Arg::F(v / 255.0));
+        c.api(a, l, CLEAR_COLOR, &[r, g, b, Arg::F(1.0)])?;
+        c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        c.api(a, l, ENABLE, &[Arg::I(GL_BLEND)])?;
+        let factors = [Arg::I(GL_SRC_ALPHA), Arg::I(GL_ONE_MINUS_SRC_ALPHA)];
+        c.api(a, l, BLEND_FUNC, &factors)?;
+        for (rgb, alpha) in layers {
+            c.api(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+            let [r, g, b] = rgb.map(|v| Arg::F(v / 255.0));
+            c.api(a, l, COLOR4F, &[r, g, b, Arg::F(alpha / 255.0)])?;
+            for [x, y] in [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]] {
+                c.api(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+            }
+            c.api(a, l, END, &[])?;
+        }
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("faint_blends", true, exe);
+    run_until_done(&mut cpu, data);
+    let mut want = under.map(f64::from);
+    for (rgb, alpha) in layers {
+        let a = f64::from(alpha) / 255.0;
+        for (w, s) in want.iter_mut().zip(rgb) {
+            *w = *w * (1.0 - a) + f64::from(s) * a;
+        }
+    }
+    // Without the subtraction the card truncates a little at each
+    // write, so the picture comes out a little dark, as on the Voodoo3.
+    // With it, blue came out 7 above and red 4.5 (49, 35, 33).
+    let got = average(&cpu, data);
+    for (channel, (g, w)) in ["red", "green", "blue"].iter().zip(got.iter().zip(want)) {
+        assert!((g - w).abs() < 4.0, "{channel}: {got:.1?}, want {want:.1?}");
+    }
 }
