@@ -116,6 +116,12 @@ from the history. The history is kept between sessions. The
 
 ## Keyboard shortcuts
 
+These are the keys of the `rust-dos` hotkey profile, the default.
+[`[hotkeys]`](CONFIGURATION.md#hotkeys) in the configuration file picks
+another emulator's keys ([hotkey profiles](#hotkey-profiles)) or changes
+single keys, and the settings window's Emulator page picks the profile.
+A hotkey's key isn't sent to the program running in the machine.
+
 | Key | Action |
 |---|---|
 | Ctrl+F12 | Open or close the [settings window](CONFIGURATION.md#settings-window) |
@@ -150,6 +156,92 @@ from the history. The history is kept between sessions. The
 
 Screenshots and recordings go in `capture_dir` (`capture` in the directory
 Rust-DOS started in).
+
+## Hotkey profiles
+
+`profile` in [`[hotkeys]`](CONFIGURATION.md#hotkeys), or *Hotkeys* on
+the settings window's Emulator page, picks one of these sets of keys.
+Each takes its emulator's default key for an action Rust-DOS has too,
+and Rust-DOS's own key for the rest. A dash is an action without a key.
+
+| Action | `rust-dos` | `pcsx2` | `duckstation` | `pcsx-redux` | `epsxe` | `retroarch` | `dosbox` | `86box` |
+|---|---|---|---|---|---|---|---|---|
+| `settings_window` | Ctrl+F12 | Ctrl+F12 | Ctrl+F12 | Ctrl+F12 | Ctrl+F12 | F1, Ctrl+F12 | Ctrl+F1 | Ctrl+F12 |
+| `save_states_page` | Ctrl+F9 | Ctrl+F9 | Ctrl+F9 | Ctrl+F9 | Ctrl+F9 | Ctrl+F9 | Ctrl+F9 | Ctrl+F9 |
+| `performance_overlay` | Ctrl+Shift+F12 | Ctrl+Shift+F12 | Ctrl+Shift+F12 | Ctrl+Shift+F12 | Ctrl+Shift+F12 | Ctrl+Shift+F12 | Ctrl+Shift+F12 | Ctrl+Shift+F12 |
+| `sound_visualizer` | Ctrl+Shift+S | Ctrl+Shift+S | Ctrl+Shift+S | Ctrl+Shift+S | Ctrl+Shift+S | Ctrl+Shift+S | Ctrl+Shift+S | Ctrl+Shift+S |
+| `manuals` | Ctrl+Shift+M | Ctrl+Shift+M | Ctrl+Shift+M | Ctrl+Shift+M | Ctrl+Shift+M | Ctrl+Shift+M | Ctrl+Shift+M | Ctrl+Shift+M |
+| `save_state` | Ctrl+F1 | F1 | F2 | F1 | F1 | F2 | Ctrl+Shift+F1 | Ctrl+F1 |
+| `load_state` | Ctrl+F2 | F3 | F1 | F2 | F3 | F4 | Ctrl+F2 | Ctrl+F2 |
+| `next_slot` | Ctrl+F3 | F2 | F4 | Ctrl+F3 | F2 | F7 | Ctrl+F3 | Ctrl+F3 |
+| `previous_slot` | Ctrl+Shift+F3 | Shift+F2 | F3 | Ctrl+Shift+F3 | Ctrl+Shift+F3 | F6 | Ctrl+Shift+F3 | Ctrl+Shift+F3 |
+| `pause` | Alt+Pause | Alt+Pause | Alt+Pause | Pause | Alt+Pause | Alt+Pause | Alt+Pause | Ctrl+Alt+F1 |
+| `fast_forward` | Alt+F12 | Alt+F12 | Alt+F12 | Alt+F12 | Alt+F12 | Alt+F12 | Alt+F12 | Alt+F12 |
+| `rewind` | Alt+F11 | Alt+F11 | Alt+F11 | Alt+F11 | Alt+F11 | Alt+F11 | Alt+F11 | Alt+F11 |
+| `slower` | Ctrl+F11 | Ctrl+F11 | Ctrl+F11 | Ctrl+F11 | Ctrl+F11 | Ctrl+F11 | Ctrl+F11 | - |
+| `faster` | Ctrl+Shift+F11 | Ctrl+Shift+F11 | Ctrl+Shift+F11 | Ctrl+Shift+F11 | Ctrl+Shift+F11 | Ctrl+Shift+F11 | Ctrl+F12 | - |
+| `fullscreen` | Alt+Enter | Alt+Enter | F11 | Alt+Enter | Alt+Enter | Alt+Enter | Alt+Enter | Ctrl+Alt+PageUp |
+| `mouse_capture` | Ctrl+F10 | Ctrl+F10 | Ctrl+F10 | Ctrl+F10 | Ctrl+F10 | F11 | Ctrl+F10 | Ctrl+End |
+| `mute` | Ctrl+F8 | Ctrl+M | Ctrl+F8 | Ctrl+F8 | Ctrl+F8 | F9 | Ctrl+F8 | Ctrl+Alt+M |
+| `screenshot` | Ctrl+F5 | F8 | F10 | F12 | Ctrl+F5 | F8 | Ctrl+F5 | Ctrl+F11 |
+| `record_sound` | Ctrl+F6 | Ctrl+F6 | Ctrl+F6 | Ctrl+F6 | Ctrl+F6 | Ctrl+F6 | Ctrl+F6 | Ctrl+F6 |
+| `record_video` | Ctrl+F7 | Ctrl+F7 | Ctrl+F7 | Ctrl+F7 | Ctrl+F7 | Ctrl+F7 | Ctrl+F7, Ctrl+Alt+F5 | Ctrl+F7 |
+| `record_animation` | PrintScreen | PrintScreen | PrintScreen | PrintScreen | PrintScreen | PrintScreen | PrintScreen | PrintScreen |
+| `swap_disk` | Ctrl+F4 | Ctrl+F4 | Ctrl+F4 | Ctrl+F4 | Ctrl+F4 | Ctrl+F4 | Ctrl+F4 | Ctrl+F4 |
+| `copy_text` | Ctrl+Shift+C | Ctrl+Shift+C | Ctrl+Shift+C | Ctrl+Shift+C | Ctrl+Shift+C | Ctrl+Shift+C | Ctrl+Shift+C | Ctrl+Shift+C |
+| `paste_text` | Ctrl+Shift+V | Ctrl+Shift+V | Ctrl+Shift+V | Ctrl+Shift+V | Ctrl+Shift+V | Ctrl+Shift+V | Ctrl+Shift+V | Ctrl+Shift+V |
+| `printer_eject` | Ctrl+Shift+F5 | Ctrl+Shift+F5 | Ctrl+Shift+F5 | Ctrl+Shift+F5 | Ctrl+Shift+F5 | Ctrl+Shift+F5 | Ctrl+Shift+F5 | Ctrl+Shift+F5 |
+| `degauss` | Ctrl+Shift+D | Ctrl+Shift+D | Ctrl+Shift+D | Ctrl+Shift+D | Ctrl+Shift+D | Ctrl+Shift+D | Ctrl+Shift+D | Ctrl+Shift+D |
+| `recenter_view` | Ctrl+Shift+Home | Ctrl+Shift+Home | Ctrl+Shift+Home | Ctrl+Shift+Home | Ctrl+Shift+Home | Ctrl+Shift+Home | Ctrl+Shift+Home | Ctrl+Shift+Home |
+
+Keys of these emulators that type in DOS (Space, Tab, Backspace, a letter
+without Ctrl or Alt) aren't in the profiles, as a DOS program needs them:
+bind them yourself in `[hotkeys]` if you want them. What else each
+profile leaves out or changes:
+
+* `pcsx2`, from PCSX2's `Pad::SetDefaultHotkeyConfig`
+  (`pcsx2/SIO/Pad/Pad.cpp`). Not taken: Space (pause), Tab and Period
+  (turbo), Escape (pause menu), F4 (frame limiter), Shift+R (input
+  recording), Shift+F8 and Ctrl+Shift+F8 (GS dumps), F9 (software
+  renderer).
+* `duckstation`, from DuckStation's `Settings::SetDefaultHotkeyConfig`
+  (`src/core/hotkeys.cpp`). Not taken: Space (pause), Tab (fast forward
+  while held), Escape (pause menu).
+* `pcsx-redux`, from the keys PCSX-Redux checks in `src/gui/gui.cc`.
+  Pause pauses and resumes. It has one quick-save slot, so the slot keys
+  are Rust-DOS's. Not taken: F5 and F6 (resume, pause), Backspace
+  (rewind), Tab (turbo), Escape (menu), F8 and Shift+F8 (reset), F10,
+  F11 and Shift+F11 (debugger steps), Ctrl+PrintScreen (screenshot to
+  the clipboard).
+* `epsxe`, from ePSXe's FAQ (`www.epsxe.com/files/ePSXe_FAQ.txt`): F1,
+  F2 and F3. Not taken: F4 (SIO IRQ) and F6 (XA reading).
+* `retroarch`, from RetroArch's keyboard defaults
+  (`config.def.keybinds.h`). F1, its menu, opens the settings window, and
+  so does Ctrl+F12. Not taken: Space and L (fast forward), R (rewind), P
+  (pause), F (fullscreen), H (reset), K (frame advance), E (slow motion),
+  Escape (quit), Scroll Lock (game focus), the keypad's + and - (volume).
+  Running Rust-DOS as a libretro core, the frontend's own keys apply
+  instead (see [As a libretro core](#as-a-libretro-core)).
+* `dosbox`, from DOSBox 0.74's README and DOSBox Staging's key handlers
+  (its [shortcuts page](https://www.dosbox-staging.org/0.83/manual/appendices/shortcuts/)
+  agrees). Rust-DOS's own keys already follow DOSBox's, apart from
+  Ctrl+F12, which speeds the CPU up here as in DOSBox. Ctrl+F1, DOSBox's
+  keymapper, opens the settings window, and saving a state, which DOSBox
+  has no key for, moves to Ctrl+Shift+F1. Not taken: Ctrl+F7 and Ctrl+F8
+  of 0.74 (frame skip; here they record video and mute, as in DOSBox
+  Staging), Ctrl+F9 (quit), Ctrl+Alt+Home (restart), Alt+F5 (rendered
+  screenshot), Ctrl+Alt+F6, Ctrl+Alt+F7 and Ctrl+Alt+F8 (MIDI and OPL
+  recording), Ctrl+F2 (reload shader).
+* `86box`, from 86Box 6.0's `def_acc_keys` (`src/86box.c`). Its
+  screenshot key is Rust-DOS's Ctrl+F11, so the CPU speed has no key
+  here (the settings window's Emulator page has it). Not taken:
+  Ctrl+Alt+F (fast forward, a switch in 86Box, held in Rust-DOS),
+  Ctrl+F12 (Ctrl+Alt+Del to the machine; it opens the settings window
+  here), Ctrl+F10 (Ctrl+Alt+Esc), Ctrl+Alt+PageDown (the menus in
+  fullscreen), Ctrl+Alt+F12 (reset), Ctrl+Alt+I.
+
+DOSBox-X has no profile: its hotkeys are held with its host key (F11 on
+Windows, F12 elsewhere), which isn't a modifier Rust-DOS can bind.
 
 ## Save states
 

@@ -48,6 +48,7 @@ use rust_dos::achievements::{Achievements, http::HttpTransport};
 use rust_dos::games::ActiveGame;
 use rust_dos::hardware::Hardware;
 use rust_dos::hostframes::Phase;
+use rust_dos::hotkeys::{Action, Key as HotKey};
 use rust_dos::profile::{self, Zone};
 use rust_dos::savestate::{self, slots};
 
@@ -401,6 +402,10 @@ fn main() -> Result<ExitCode, String> {
     let states_root = saved.file.as_deref().and_then(std::path::Path::parent).map(|dir| dir.join("states"))
         .or_else(|| config::user_dir().map(|dir| dir.join("states")));
     let mut slot: u8 = 1;
+    // The emulator's keys, as `[hotkeys]` binds them, and the settings
+    // they were made from: the settings window may change them.
+    let mut hotkeys = settings.hotkeys.table();
+    let mut hotkeys_of = settings.hotkeys.clone();
     let mut state_loaded = false;
     // Rewind (held Alt+F11): the states of the last minutes, which a thread
     // packs, when the next is due (emulated and wall time), the rewinding
@@ -660,16 +665,12 @@ fn main() -> Result<ExitCode, String> {
                     let dy = if matches!(direction, MouseWheelDirection::Flipped) { -y } else { y };
                     display.camera_dolly(dy * 20.0);
                 }
-                Event::KeyDown { keycode: Some(keycode @ (Keycode::Home | Keycode::Q | Keycode::E)), keymod, repeat, .. }
+                // (Q and E fly it, and recenter_view, Ctrl+Shift+Home by
+                // default, takes it back: see the keys below.)
+                Event::KeyDown { keycode: Some(Keycode::Q | Keycode::E), keymod, .. }
                     if display.every_frame()
                         && keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD)
-                        && keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) =>
-                {
-                    if keycode == Keycode::Home && !repeat {
-                        display.recenter();
-                        osd.show(if display.has_headset() { "View centered" } else { "Camera back at the start" });
-                    }
-                }
+                        && keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) => {}
                 // Losing the keyboard lets go of what it held.
                 // Coming back, the host's keyboard may have another
                 // layout and other locks.
@@ -722,19 +723,37 @@ fn main() -> Result<ExitCode, String> {
                     repeat,
                     ..
                 } => {
-                    // Ctrl+F12 opens and closes the settings window. (Not
-                    // with Alt: AltGr can arrive as Ctrl+Alt.)
-                    // Ctrl+Shift+F12 shows and hides the performance
-                    // overlay.
+                    // The emulator's keys (`[hotkeys]`), with the modifiers
+                    // they were bound with: a key bound with Ctrl alone
+                    // isn't one with Ctrl+Alt, which AltGr can arrive as.
                     let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
                     let alt = keymod.intersects(Mod::LALTMOD | Mod::RALTMOD);
                     let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                    if settings.hotkeys != hotkeys_of {
+                        hotkeys = settings.hotkeys.table();
+                        hotkeys_of = settings.hotkeys.clone();
+                    }
+                    // A key without Ctrl or Alt whose action does nothing
+                    // in the settings window is the window's own (its F1,
+                    // F2 and the rest).
+                    let action = HotKey::named(&keycode.name())
+                        .and_then(|key| hotkeys.action(ctrl, alt, shift, key))
+                        .filter(|action| !ui.is_open() || ctrl || alt || action.in_settings_window());
                     if !repeat {
                         ctrl_alt.key_down(chord_key(scancode));
                         display.vr_key_pressed();
                     }
-                    // Ctrl+Shift+D degausses the monitor.
-                    if keycode == Keycode::D && ctrl && shift && !alt {
+                    // In the 3D scene, recenter_view takes the camera back
+                    // to the start, and centers a headset's view.
+                    if action == Some(Action::RecenterView) && display.every_frame() {
+                        if !repeat {
+                            display.recenter();
+                            osd.show(if display.has_headset() { "View centered" } else { "Camera back at the start" });
+                        }
+                        continue;
+                    }
+                    // Degauss the monitor.
+                    if action == Some(Action::Degauss) {
                         if !repeat {
                             power.trigger(video::power::Effect::Degauss, std::time::Instant::now());
                             cpu.bus.audio_catch_up();
@@ -742,29 +761,31 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    // Ctrl+Shift+S shows and hides the sound visualizer.
-                    if keycode == Keycode::S && ctrl && shift && !alt {
+                    // Show and hide the sound visualizer.
+                    if action == Some(Action::SoundVisualizer) {
                         if !repeat {
                             let message = ui.sound_viz_key(&mut cpu.bus);
                             osd.show(message);
                         }
                         continue;
                     }
-                    if keycode == Keycode::F12 && ctrl && shift && !alt {
+                    // Show and hide the performance overlay.
+                    if action == Some(Action::PerformanceOverlay) {
                         if !repeat && let Some(message) = ui.overlay_key() {
                             osd.show(message);
                         }
                         continue;
                     }
-                    if keycode == Keycode::F12 && ctrl && !alt {
+                    // Open and close the settings window.
+                    if action == Some(Action::SettingsWindow) {
                         if !repeat {
                             toggle_ui!();
                         }
                         continue;
                     }
-                    // Ctrl+Shift+M shows the running game's manuals over
-                    // the picture, and hides them again.
-                    if keycode == Keycode::M && ctrl && shift && !alt {
+                    // Show the running game's manuals over the picture,
+                    // and hide them again.
+                    if action == Some(Action::Manuals) {
                         if !repeat {
                             if ui.is_open() {
                                 ui.close();
@@ -778,11 +799,10 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    // Ctrl+Shift+C copies the selected text, or the whole
-                    // text screen, to the host's clipboard, and
-                    // Ctrl+Shift+V types the clipboard's text on the
-                    // machine (or into the settings window's field).
-                    if keycode == Keycode::C && ctrl && shift && !alt {
+                    // Copy the selected text, or the whole text screen, to
+                    // the host's clipboard, and type the clipboard's text
+                    // on the machine (or into the settings window's field).
+                    if action == Some(Action::CopyText) {
                         if !repeat && !ui.is_open() {
                             let selected = clipboard.text(&cpu.bus);
                             clipboard.clear();
@@ -796,7 +816,7 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    if keycode == Keycode::V && ctrl && shift && !alt {
+                    if action == Some(Action::PasteText) {
                         if !repeat {
                             match host_clipboard.clipboard_text() {
                                 Ok(text) if text.is_empty() => osd.show("The clipboard has no text"),
@@ -814,25 +834,27 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    // Ctrl+F1 saves the machine to the current slot,
-                    // Ctrl+F2 loads it, and Ctrl+F3 and Ctrl+Shift+F3 pick
-                    // the next and the previous slot.
-                    if matches!(keycode, Keycode::F1 | Keycode::F2 | Keycode::F3) && ctrl && !alt {
+                    // Save the machine to the current slot, load it, and
+                    // pick the next and the previous slot.
+                    if let Some(
+                        state @ (Action::SaveState | Action::LoadState | Action::NextSlot | Action::PreviousSlot),
+                    ) = action
+                    {
                         if repeat || ui.is_open() {
                             continue;
                         }
                         let current = slot;
-                        if keycode == Keycode::F1 {
+                        if state == Action::SaveState {
                             if let Err(e) = host!().save_slot(current) {
                                 osd.show(format!("Slot {} can't be saved: {}", current, e));
                             }
-                        } else if keycode == Keycode::F2 {
+                        } else if state == Action::LoadState {
                             match host!().load_slot(current) {
                                 Ok(header) => osd.show(format!("Loaded slot {}: {}", current, describe_state(&header))),
                                 Err(e) => osd.show(format!("Slot {} can't be loaded: {}", current, e)),
                             }
                         } else {
-                            let back = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                            let back = state == Action::PreviousSlot;
                             slot = if back { (slot + slots::SLOTS - 2) % slots::SLOTS + 1 } else { slot % slots::SLOTS + 1 };
                             let header = host!().slot_dir().ok().and_then(|dir| slots::read_file_header(&slots::slot_path(&dir, slot)));
                             osd.show(match header {
@@ -842,8 +864,8 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    // Ctrl+F9 opens the settings window on the save states.
-                    if keycode == Keycode::F9 && ctrl && !alt {
+                    // Open the settings window on the save states.
+                    if action == Some(Action::SaveStatesPage) {
                         if !repeat {
                             if !ui.is_open() {
                                 toggle_ui!();
@@ -852,9 +874,9 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    // Ctrl+F4 puts the next disk in the drives mounted
-                    // from lists of images, as in DOSBox.
-                    if keycode == Keycode::F4 && ctrl && !alt {
+                    // Put the next disk in the drives mounted from lists of
+                    // images, as Ctrl+F4 does in DOSBox.
+                    if action == Some(Action::SwapDisk) {
                         if !repeat {
                             let messages = cpu.bus.swap_images();
                             for message in &messages {
@@ -867,35 +889,36 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    // Alt+Pause pauses the machine and resumes it, as in
-                    // DOSBox.
-                    if keycode == Keycode::Pause && alt && !ctrl {
+                    // Pause the machine and resume it, as Alt+Pause does
+                    // in DOSBox.
+                    if action == Some(Action::Pause) {
                         if !repeat {
                             paused = !paused;
                             if paused {
                                 release_input(&mut cpu, &mut held);
                                 capture_mouse!(false);
-                                osd.show_lasting("Paused (Alt+Pause resumes)");
+                                let key = hotkeys.key_text(Action::Pause).unwrap_or_default();
+                                osd.show_lasting(format!("Paused ({} resumes)", key));
                             } else {
                                 osd.clear_lasting();
                             }
                         }
                         continue;
                     }
-                    // Ctrl+F11 slows the CPU down by a tenth and
-                    // Ctrl+Shift+F11 speeds it up, but for in the settings
-                    // window, which has the speed on its Emulator page.
-                    if keycode == Keycode::F11 && ctrl && !alt && !ui.is_open() {
-                        let faster = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                    // Slow the CPU down by a tenth and speed it up, but for
+                    // in the settings window, which has the speed on its
+                    // Emulator page.
+                    if matches!(action, Some(Action::Slower | Action::Faster)) && !ui.is_open() {
+                        let faster = action == Some(Action::Faster);
                         let mut new = settings.clone();
                         new.cycles = settings.cycles.stepped(cpu.bus.clock.cycles_per_ms(), faster);
                         let _ = host!().apply(&new);
                         osd.show(speed_message(new.cycles));
                         continue;
                     }
-                    // Holding Alt+F11 goes back in time, a step every
-                    // third frame, until F11 comes up.
-                    if keycode == Keycode::F11 && alt && !ctrl {
+                    // Holding rewind's key goes back in time, a step every
+                    // third frame, until the key comes up.
+                    if action == Some(Action::Rewind) {
                         if !repeat && !paused && !ui.is_open() && rewinding.is_none() {
                             if achievements.hardcore_active() {
                                 osd.show("Hardcore mode: no rewind while RetroAchievements plays");
@@ -911,9 +934,10 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    // Holding Alt+F12 runs the machine fast, as in DOSBox
-                    // Staging, until F12 comes up.
-                    if keycode == Keycode::F12 && alt && !ctrl {
+                    // Holding fast_forward's key runs the machine fast, as
+                    // Alt+F12 does in DOSBox Staging, until the key comes
+                    // up.
+                    if action == Some(Action::FastForward) {
                         if !repeat && !paused {
                             pacer.set_fast_forward(true, &cpu.bus.clock, std::time::Instant::now());
                             cpu.bus.mixer.fast_forward = true;
@@ -921,9 +945,9 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    // Ctrl+F10 captures the mouse and lets it go too, as in
+                    // Capture the mouse and let it go, as Ctrl+F10 does in
                     // DOSBox.
-                    if keycode == Keycode::F10 && ctrl && !alt {
+                    if action == Some(Action::MouseCapture) {
                         if !repeat && !ui.is_open() && !paused {
                             capture_mouse!(!mouse_captured);
                             if !mouse_captured {
@@ -933,8 +957,8 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    // Alt+Enter switches between the window and fullscreen.
-                    if keycode == Keycode::Return && alt && !ctrl {
+                    // Switch between the window and fullscreen.
+                    if action == Some(Action::Fullscreen) {
                         if !repeat && !ui.is_open() {
                             let mut new = settings.clone();
                             new.fullscreen = !new.fullscreen;
@@ -944,23 +968,22 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    // Ctrl+Shift+F5 ejects the printer's page and ends the
-                    // print job.
-                    if keycode == Keycode::F5 && ctrl && shift && !alt {
+                    // Eject the printer's page and end the print job.
+                    if action == Some(Action::PrinterEject) {
                         if !repeat {
                             osd.show(cpu.bus.printer_eject().unwrap_or_else(|| "There is no printer".to_string()));
                         }
                         continue;
                     }
-                    // Ctrl+F5 saves a screenshot, and Ctrl+F6 starts and stops
-                    // recording the sound, as in DOSBox.
-                    if keycode == Keycode::F5 && ctrl && !alt {
+                    // Save a screenshot, and start and stop recording the
+                    // sound, as Ctrl+F5 and Ctrl+F6 do in DOSBox.
+                    if action == Some(Action::Screenshot) {
                         if !repeat {
                             screenshot = true;
                         }
                         continue;
                     }
-                    if keycode == Keycode::F6 && ctrl && !alt {
+                    if action == Some(Action::RecordSound) {
                         if !repeat {
                             match sound_recording.take() {
                                 Some(wav) => match wav.finish() {
@@ -980,8 +1003,8 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    // Ctrl+F7 starts and stops recording video with sound.
-                    if keycode == Keycode::F7 && ctrl && !alt {
+                    // Start and stop recording video with sound.
+                    if action == Some(Action::RecordVideo) {
                         if !repeat {
                             match video_recording.take() {
                                 Some(video) => match video.stop() {
@@ -1011,11 +1034,15 @@ fn main() -> Result<ExitCode, String> {
                         }
                         continue;
                     }
-                    // Ctrl+F8 turns the sound off and on.
-                    if keycode == Keycode::F8 && ctrl && !alt {
+                    // Turn the sound off and on.
+                    if action == Some(Action::Mute) {
                         if !repeat {
                             cpu.bus.mixer.muted = !cpu.bus.mixer.muted;
-                            osd.show(if cpu.bus.mixer.muted { "Sound off (Ctrl+F8)" } else { "Sound on" });
+                            osd.show(match hotkeys.key_text(Action::Mute) {
+                                _ if !cpu.bus.mixer.muted => "Sound on".to_string(),
+                                Some(key) => format!("Sound off ({})", key),
+                                None => "Sound off".to_string(),
+                            });
                         }
                         continue;
                     }
@@ -1042,8 +1069,8 @@ fn main() -> Result<ExitCode, String> {
                         osd.show("Paste stopped");
                     }
 
-                    // Recorder Toggle
-                    if keycode == Keycode::PrintScreen {
+                    // Start and stop recording an animation.
+                    if action == Some(Action::RecordAnimation) {
                         match recorder.toggle(&settings.capture_dir) {
                             Ok(Some(path)) => osd.show(format!("Recording an animation to {}", path.display())),
                             Ok(None) => osd.show("Animation recording stopped"),
@@ -1079,14 +1106,16 @@ fn main() -> Result<ExitCode, String> {
                         }
                         capture_message!(if mouse_captured { CAPTURED } else { "Mouse released (Ctrl+Alt captures it)" });
                     }
-                    if keycode == Keycode::F12 && pacer.fast_forward() {
+                    let key = HotKey::named(&keycode.name());
+                    let ends = |action| key.is_some_and(|key| hotkeys.is_key_of(action, key));
+                    if pacer.fast_forward() && ends(Action::FastForward) {
                         pacer.set_fast_forward(false, &cpu.bus.clock, std::time::Instant::now());
                         cpu.bus.mixer.fast_forward = false;
                         osd.clear_lasting();
                         continue;
                     }
                     // The machine goes on from where rewinding got to.
-                    if keycode == Keycode::F11 && rewinding.take().is_some() {
+                    if ends(Action::Rewind) && rewinding.take().is_some() {
                         dbg.state_loaded_elsewhere(&cpu, "rewind");
                         // The game's achievements wait for their conditions
                         // to be false again.
@@ -1192,7 +1221,9 @@ fn main() -> Result<ExitCode, String> {
                 Event::MouseMotion { x, y, .. } if clipboard.dragging() => clipboard.drag(&cpu.bus, display.to_frame(x, y)),
                 Event::MouseButtonUp { mouse_btn: MouseButton::Right, x, y, .. } if clipboard.dragging() => {
                     if clipboard.finish(&cpu.bus, display.to_frame(x, y)) {
-                        osd.show("Ctrl+Shift+C copies the selected text");
+                        if let Some(key) = hotkeys.key_text(Action::CopyText) {
+                            osd.show(format!("{} copies the selected text", key));
+                        }
                     } else if !ui.is_open() && !paused {
                         if uses_mouse!() {
                             capture_mouse!(true);

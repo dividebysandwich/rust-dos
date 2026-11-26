@@ -121,7 +121,9 @@ InstallShield archives.
 | Ctrl+F11, Ctrl+Shift+F11 | Slow the machine down, and speed it up |
 | Ctrl+F5 | A screenshot |
 
-[REFERENCE.md](REFERENCE.md#keyboard-shortcuts) lists the others.
+[REFERENCE.md](REFERENCE.md#keyboard-shortcuts) lists the others, and
+[hotkey profiles](REFERENCE.md#hotkey-profiles) that give them the keys
+of PCSX2, DuckStation, RetroArch, DOSBox and other emulators.
 
 ### Your settings
 

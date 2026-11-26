@@ -1405,6 +1405,12 @@ fn changed_settings() -> Settings {
             steer: true,
             stereo_bios: false,
         },
+        hotkeys: {
+            let mut hotkeys = crate::hotkeys::HotkeySettings::default();
+            hotkeys.set("save_state", "Ctrl+Shift+F1, Ctrl+S").unwrap();
+            hotkeys.set("mute", "none").unwrap();
+            hotkeys
+        },
     }
 }
 
@@ -1628,7 +1634,9 @@ fn saving_all_fills_in_every_setting() {
         // printer paths and programs, Win32 DLL folder or game fixes left
         // out of its own, and no memsize or cpu, which stay the defaults
         // for the display adapter and the CPU.)
-        let wanted = !matches!(
+        // (Nor the hotkeys' actions, which follow the profile.)
+        let action = section == Section::Hotkeys && key != "profile";
+        let wanted = !action && !matches!(
             key,
             "memsize" | "cpu" | "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "sc55roms" | "midiport" | "password" | "username" | "token"
                 | "verite_rom"
@@ -1646,7 +1654,7 @@ fn saving_all_fills_in_every_setting() {
     assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
     assert!(saved.contains("\nmodemtelnet=off\n\n[printer]\noutput=pdf\n"), "{}", saved);
     assert!(saved.contains("\ntimeout=3000\n\n[achievements]\nenabled=false\nhardcore=false\n\n[shell]\nautosuggest=true\n"), "{}", saved);
-    assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=auto\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\ngraphics=auto\nresolution=auto\nambient_occlusion=auto\nmsaa=auto\nrefresh=auto\nfoveation=auto\nkeyboard=off\ntime=now\ntime_speed=1\nlatitude=48\nweather=clear\nweather_sound=70\nlightning=true\n\n[vfx1]\nenabled=false\nport=260\nstereo=auto\nswap_eyes=false\nview_size=36\nsteer=false\nstereo_bios=true\n\n[autoexec]\nDIR\n"), "{}", saved);
+    assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=auto\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\ngraphics=auto\nresolution=auto\nambient_occlusion=auto\nmsaa=auto\nrefresh=auto\nfoveation=auto\nkeyboard=off\ntime=now\ntime_speed=1\nlatitude=48\nweather=clear\nweather_sound=70\nlightning=true\n\n[vfx1]\nenabled=false\nport=260\nstereo=auto\nswap_eyes=false\nview_size=36\nsteer=false\nstereo_bios=true\n\n[hotkeys]\nprofile=rust-dos\n\n[autoexec]\nDIR\n"), "{}", saved);
     let config = parse(&saved, Path::new("/cfg"), Some(home));
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });

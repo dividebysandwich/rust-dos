@@ -325,6 +325,8 @@ pub struct Config {
     pub vr: crate::vr::VrSettings,
     /// `[vfx1]`: the Forte VFX1 headset.
     pub vfx1: crate::vfx1::Vfx1Settings,
+    /// `[hotkeys]`: the emulator's keys.
+    pub hotkeys: crate::hotkeys::HotkeySettings,
     /// `[drives]` entries in file order, at most one per drive.
     pub drives: Vec<MountSpec>,
     /// `[autoexec]` command lines in file order.
@@ -522,6 +524,7 @@ enum Section {
     Shell,
     Vr,
     Vfx1,
+    Hotkeys,
     Drives,
     Autoexec,
     /// A game profile's (games.rs).
@@ -548,6 +551,7 @@ impl Section {
             "shell" => Section::Shell,
             "vr" => Section::Vr,
             "vfx1" => Section::Vfx1,
+            "hotkeys" => Section::Hotkeys,
             "drives" => Section::Drives,
             "autoexec" => Section::Autoexec,
             "game" => Section::Game,
@@ -571,6 +575,7 @@ impl Section {
             Section::Shell => "shell",
             Section::Vr => "vr",
             Section::Vfx1 => "vfx1",
+            Section::Hotkeys => "hotkeys",
             Section::Drives => "drives",
             Section::Autoexec => "autoexec",
             Section::Game => "game",

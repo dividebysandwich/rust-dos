@@ -460,6 +460,18 @@ When **on**, each mouse capture/release action will show a notification
 message on the top of the screen. While helpful for new users, turning it
 **off** can help reduce notification noise.
 
+# Hotkeys {#hotkeys}
+
+The emulator's keys, such as the ones that save and load states, as
+another emulator has them. **Rust-DOS** (the default) has Ctrl+F1 to
+save, Ctrl+F2 to load and Ctrl+F12 for this window. The others follow
+their emulator, keeping Rust-DOS's keys for what it has no key for.
+REFERENCE.md has each profile's keys.
+
+A hotkey's key doesn't reach the program. To change one key, add a line
+for its action to `[hotkeys]` in the configuration file, such as
+`save_state=F5`.
+
 # Hold right button for settings {#mouse-menu-hold}
 
 When **on** (the default), holding the right mouse button for **1.5
@@ -488,10 +500,11 @@ window is open, except on the Mixer and Stats pages. Turn it **off** to
 let the program run on behind the window. In a LAN room it always runs
 on, whatever this says, as the other players' games would wait for it.
 
-# Rewind (Alt+F11) {#rewind}
+# Rewind {#rewind}
 
-When **on**, Rust-DOS keeps the last minutes of play: hold **Alt+F11** to
-go back in time, for instance right before you fell into that pit.
+When **on**, Rust-DOS keeps the last minutes of play: hold **Alt+F11**
+(rewind's key, if the hotkeys changed it) to go back in time, for
+instance right before you fell into that pit.
 
 # Rewind memory {#rewind-memory}
 

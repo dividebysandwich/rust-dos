@@ -359,6 +359,7 @@ impl Item {
             BootCdrom => "boot-cdrom",
             FloppyController => "floppy-controller",
             KeyboardLayout => "keyboard-layout",
+            HotkeyProfile => "hotkeys",
             MouseSensitivity => "mouse-sensitivity",
             MouseAutocapture => "mouse-autocapture",
             MouseCaptureMessages => "mouse-capture-messages",
