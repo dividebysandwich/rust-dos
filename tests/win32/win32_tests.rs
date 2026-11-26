@@ -16393,6 +16393,144 @@ fn a_click_on_a_window_behind_activates_it_and_is_delivered() {
 }
 
 #[test]
+fn a_click_while_a_window_has_the_capture_activates_nothing() {
+    // Window A has the capture and B, a popup shown after it, is active.
+    // A click on B and then a click on A both go to A as WM_LBUTTONDOWN,
+    // and B stays active: A gets no WM_ACTIVATE. Once A lets the capture
+    // go, the same click on A activates it. This is what Windows 98 SE
+    // does (a probe run there, #745); InstallShield 6's engine holds the
+    // capture on its background window while its "Setup Needs the Next
+    // Disk" box is up, and a click on the box mustn't activate the
+    // background window and take the keyboard from the box.
+    const WM_ACTIVATE: i32 = 0x0006;
+    const WM_LBUTTONDOWN: i32 = 0x0201;
+    const WM_TIMER: i32 = 0x0113;
+    const MOUSEEVENTF_LEFTDOWN: i32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: i32 = 0x0004;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "GetMessageA",
+        "DispatchMessageA",
+        "GetActiveWindow",
+        "SetCapture",
+        "ReleaseCapture",
+        "SetCursorPos",
+        "mouse_event",
+        "SetTimer",
+        "KillTimer",
+    ];
+    // What A's procedure saw: WM_LBUTTONDOWN's count at 0xA0 and the
+    // count of WM_ACTIVATE that activates it at 0xA4. The timer's id at
+    // 0xB4, a MSG at 0xC0 and a WNDCLASSA at 0xE0, its procedure put in
+    // by the code.
+    let mut data = child_data(&[(0x10, "Frame"), (0x20, "Static")]);
+    data.resize(0x110, 0);
+    data[0xF0..0xF4].copy_from_slice(&BASE.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_LBUTTONDOWN)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0xA0)))?;
+        a.set_label(&mut other)?;
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_ACTIVATE)?;
+        a.jne(other)?;
+        a.cmp(word_ptr(esp + 12), 0)?;
+        a.je(other)?;
+        a.inc(dword_ptr(l.at(0xA4)))?;
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0xE4)), eax)?;
+        a.mov(dword_ptr(l.at(0xE0 + 36)), l.at(0x10) as i32)?;
+        a.push(l.at(0xE0) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        let (class, stat) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        let style = WS_POPUP | WS_VISIBLE;
+        let instance = BASE as i32;
+        push_args(
+            a,
+            &[0, class, class, style, 0, 0, 200, 100, 0, 0, instance, 0],
+        )?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        push_args(a, &[0, 0, instance, 0])?;
+        push_args(a, &[0, stat, stat, style, 0, 150, 100, 50])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(edi, eax)?;
+        a.xor(ebx, ebx)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 0)?;
+        // A click at (x, y), then the messages until a timer's.
+        let click = |a: &mut CodeAssembler, x: i32, y: i32| -> Result<(), IcedError> {
+            push_args(a, &[x, y])?;
+            a.call(f("SetCursorPos"))?;
+            for flags in [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP] {
+                push_args(a, &[flags, 0, 0, 0, 0])?;
+                a.call(f("mouse_event"))?;
+            }
+            push_args(a, &[0, 0, 500, 0])?;
+            a.call(f("SetTimer"))?;
+            a.mov(dword_ptr(l.at(0xB4)), eax)?;
+            let mut next = a.create_label();
+            let mut done = a.create_label();
+            a.set_label(&mut next)?;
+            push_args(a, &[l.at(0xC0) as i32, 0, 0, 0])?;
+            a.call(f("GetMessageA"))?;
+            a.cmp(dword_ptr(l.at(0xC4)), WM_TIMER)?;
+            a.je(done)?;
+            a.push(l.at(0xC0) as i32)?;
+            a.call(f("DispatchMessageA"))?;
+            a.jmp(next)?;
+            a.set_label(&mut done)?;
+            a.push(dword_ptr(l.at(0xB4)))?;
+            a.push(0)?;
+            a.call(f("KillTimer"))
+        };
+        a.mov(dword_ptr(l.at(0xA4)), 0)?;
+        a.push(esi)?;
+        a.call(f("SetCapture"))?;
+        // A click on B: A gets it, B stays active.
+        click(a, 50, 175)?;
+        a.cmp(dword_ptr(l.at(0xA0)), 1)?;
+        bit_if(a, eq, 1)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 2)?;
+        // A click on A itself: the same.
+        click(a, 150, 50)?;
+        a.cmp(dword_ptr(l.at(0xA0)), 2)?;
+        bit_if(a, eq, 3)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xA4)), 0)?;
+        bit_if(a, eq, 5)?;
+        // Without the capture, a click on A activates it.
+        a.call(f("ReleaseCapture"))?;
+        click(a, 150, 50)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 6)?;
+        a.cmp(dword_ptr(l.at(0xA4)), 1)?;
+        bit_if(a, eq, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("click_with_capture", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
 fn a_window_made_active_behind_comes_to_the_foreground_when_shown() {
     // T.EXE shows a window, starts C.EXE and waits for it. C.EXE's first
     // window comes to the foreground; when C.EXE destroys it, the

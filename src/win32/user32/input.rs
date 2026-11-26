@@ -1974,6 +1974,16 @@ pub fn foreground_gone(cpu: &mut Cpu) {
 /// active window of the foreground queue. With it the window under the
 /// cursor (`msg`'s), the hit-test code and the client mouse message,
 /// for WM_MOUSEACTIVATE.
+///
+/// While a window has the capture, a click activates nothing. On Windows
+/// 98 SE a click with the capture on a window goes to that window and
+/// leaves the active window as it was, whether the click is on the
+/// capture window or on a dialog box in front of it; without the capture
+/// the same click on the same window activates it (#745). InstallShield
+/// 6's engine holds the capture on its background window while it copies
+/// files and keeps it while its "Setup Needs the Next Disk" dialog box
+/// asks for the next disc: a click on the box's OK reaches the background
+/// window, and the box keeps the keyboard, so Enter takes it.
 pub fn click_activates(cpu: &mut Cpu, msg: &Msg) -> Option<(u32, u32)> {
     let (down, hit, mouse) = match msg.message {
         m @ (WM_LBUTTONDOWN..=0x0209) => ((m - WM_LBUTTONDOWN).is_multiple_of(3), HTCLIENT, m),
@@ -1989,6 +1999,9 @@ pub fn click_activates(cpu: &mut Cpu, msg: &Msg) -> Option<(u32, u32)> {
     }
     let queue = current_queue(cpu);
     let state = user(cpu);
+    if state.input.capture != 0 && state.is_window(state.input.capture) {
+        return None;
+    }
     let top = state.top_level(msg.hwnd);
     let w = state.window(top)?;
     let front = state.input.foreground == queue && state.activation(queue).active == top;
