@@ -405,11 +405,13 @@ For many games neither renderer is what holds them back: the emulated CPU
 is. Oni, a Voodoo2 game, ran at the same frame rate with the OpenGL
 renderer's dithering on and off, as the emulated CPU held it back ([the
 3dfx OpenGL renderer](#the-3dfx-opengl-renderer)). The **CPU** figure on the
-Stats page is how busy the emulator's main thread is, running the machine
-and drawing the picture both, so near 100% alone doesn't say which of the
-two is the limit. The page also shows how long drawing the picture takes:
-when that is a small part of the time and **CPU** is near 100%, the machine
-is the limit, and a different renderer won't help.
+Stats page doesn't tell this case apart. It is how busy the emulator's main
+thread is, and that thread runs the machine and, with `opengl`, also draws
+the 3dfx card's picture and waits for what is read back from it, so near
+100% fits either limit. The page's **Render** time doesn't tell it either:
+it counts the 2D picture only. Switch the renderer and watch **FPS**: when
+it stays the same, the machine is the limit, and a different renderer won't
+help.
 
 The ToadForce's games draw more than the 3dfx cards' do, and the CPU is too
 slow for some of them at their usual resolutions: with
