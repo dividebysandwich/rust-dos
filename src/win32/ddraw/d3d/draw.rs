@@ -355,9 +355,9 @@ pub fn account(
     account_with(cpu, id, setup, verts, None, drawn, flags);
 }
 
-/// A draw's range of vertices: read already, or still the bytes of the
-/// program's buffer, of which a draw that uses few (`Sparse`) reads
-/// only those.
+/// A draw's range of vertices: decoded already, or still the bytes of
+/// the program's buffer, of which a draw that uses few (`Sparse`)
+/// decodes only those.
 #[derive(Clone, Copy)]
 enum Range<'a> {
     Read(&'a [Vertex]),
@@ -803,10 +803,10 @@ fn draw_set_up(
 /// over only those it uses. An indexed draw may name a range far larger
 /// than its indices use: Project IGI draws a few dozen triangles of
 /// ranges of 15,000 transformed vertices. Only the vertices used are
-/// read from the program's buffer (`Range`) and go through the pipeline;
-/// the others are read and placed for the clip status alone, when the
-/// program asked for it (`account_with`), as Direct3D, which transforms
-/// the whole range, counts them.
+/// decoded from the bytes of the program's buffer (`Range`) and go
+/// through the pipeline; the others are decoded and placed for the clip
+/// status alone, when the program asked for it (`account_with`), as
+/// Direct3D, which transforms the whole range, counts them.
 struct Sparse {
     /// The places of the vertices used, in order.
     kept: Vec<usize>,
@@ -1477,20 +1477,28 @@ mod tests {
             .filter(|&i| !sparse.used[i])
             .map(|i| input[i]);
         assert_eq!(
-            pipeline::clip_of(&setup, layout.rhw, rest, true),
+            pipeline::clip_of(&setup, layout.rhw, rest.clone(), true),
             Some((intersection, union, pipeline::extents(&setup, &unused)))
         );
+        assert_eq!(
+            pipeline::clip_of(&setup, layout.rhw, rest, false),
+            Some((intersection, union, None))
+        );
         // The used and the unused together add to the clip status what
-        // the whole range does.
-        let rest = Unused {
+        // the whole range does, with the extents and without.
+        let rest = || Unused {
             vertices: range,
             rhw: layout.rhw,
             used: &sparse.used,
             count: input.len() - kept.len(),
         };
         assert_eq!(
-            clip_codes(&setup, &some, Some(rest), true),
+            clip_codes(&setup, &some, Some(rest()), true),
             (pipeline::clip_union(&all), pipeline::extents(&setup, &all))
+        );
+        assert_eq!(
+            clip_codes(&setup, &some, Some(rest()), false),
+            (pipeline::clip_union(&all), None)
         );
     }
 
@@ -1507,12 +1515,16 @@ mod tests {
         a_sparse_draw_draws_as_the_whole_range(&layout, Range::Read(&input));
     }
 
-    /// Transformed vertices read from the program's bytes: those used are
-    /// read alone, and those unused add no clip codes but their extents.
+    /// Transformed vertices decoded from the program's bytes: those used
+    /// are decoded alone, each a whole vertex further on with its colors
+    /// and texture coordinates, and those unused add no clip codes but
+    /// their extents.
     #[test]
     fn the_transformed_vertices_a_draw_uses_draw_as_the_whole_range_does() {
-        let layout = Layout::of(pipeline::FVF_XYZRHW | pipeline::FVF_DIFFUSE).unwrap();
-        assert_eq!(layout.size, 20);
+        // D3DFVF_TLVERTEX: x, y, z, rhw, diffuse, specular, one set of
+        // two texture coordinates.
+        let layout = Layout::of(pipeline::FVF_TLVERTEX).unwrap();
+        assert_eq!(layout.size, 32);
         let mut bytes = Vec::new();
         for i in 0..20u32 {
             let p = [i as f32 * 7.0 - 30.0, (i % 3) as f32 * 30.0 + 5.0, 0.5, 2.0];
@@ -1520,10 +1532,18 @@ mod tests {
                 bytes.extend_from_slice(&f.to_le_bytes());
             }
             bytes.extend_from_slice(&(0xFF00_0000 | i * 0x0A_0B0C).to_le_bytes());
+            bytes.extend_from_slice(&(0xFF00_0000 | i).to_le_bytes());
+            for f in [i as f32 / 16.0, 1.0 - i as f32 / 16.0] {
+                bytes.extend_from_slice(&f.to_le_bytes());
+            }
         }
         let range = Range::Bytes(&bytes, &layout);
         assert_eq!(range.len(), 20);
-        assert_eq!(range.get(3).position, [-9.0, 5.0, 0.5, 2.0]);
+        let v = range.get(3);
+        assert_eq!(v.position, [-9.0, 5.0, 0.5, 2.0]);
+        assert_eq!(v.diffuse, Some(0xFF00_0000 | 3 * 0x0A_0B0C));
+        assert_eq!(v.specular, Some(0xFF00_0003));
+        assert_eq!(v.tex[0][..2], [0.1875, 0.8125]);
         a_sparse_draw_draws_as_the_whole_range(&layout, range);
     }
 }

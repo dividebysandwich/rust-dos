@@ -1136,6 +1136,12 @@ pub fn clip_of(
     input: impl IntoIterator<Item = Vertex>,
     want_extents: bool,
 ) -> Option<(u32, u32, Option<[f32; 4]>)> {
+    let mut input = input.into_iter();
+    // Without extents, transformed vertices add only their codes, which
+    // are none: the first one says all, and the others aren't decoded.
+    if rhw && !want_extents {
+        return input.next().map(|_| (0, 0, None));
+    }
     let mut placer = Placer::of(setup);
     let tween = match setup.blend {
         Some(Blend::Tween(f)) => Some(f),
