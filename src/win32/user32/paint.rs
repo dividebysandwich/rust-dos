@@ -392,6 +392,13 @@ pub fn visible_region(state: &State, hwnd: u32, flags: u32) -> Region {
     vis
 }
 
+/// What of the screen a DC from GetDC(`hwnd`) may draw on: the window's
+/// client area, clipped as its style and its class's ask (DCX_USESTYLE),
+/// less what covers it.
+pub fn get_dc_visible_region(state: &State, hwnd: u32) -> Region {
+    visible_region(state, hwnd, fix_flags(state, hwnd, DCX_USESTYLE))
+}
+
 /// A window DC's device origin on the screen and the region it may draw
 /// on there: for GDI.
 pub fn dc_region(

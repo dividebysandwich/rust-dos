@@ -1,9 +1,9 @@
 //! MSVFW32.DLL: the DrawDib functions, which draw a DIB to a DC and
-//! decompress it first when it is compressed; ICInfo, ICOpen, ICLocate
-//! and ICClose, which find and open the decompressors codec.rs has; and
-//! ICSendMessage and ICDecompress, through which a program decompresses
-//! Microsoft Video 1 frames itself. The DrawDib functions' behaviour
-//! follows Wine's drawdib.c (LGPL 2.1 or later):
+//! decompress it first when it is compressed; ICInfo, ICOpen, ICLocate,
+//! ICGetInfo and ICClose, which find, open and describe the decompressors
+//! codec.rs has; and ICSendMessage and ICDecompress, through which a
+//! program decompresses Microsoft Video 1 frames itself. The DrawDib
+//! functions' behaviour follows Wine's drawdib.c (LGPL 2.1 or later):
 //!
 //! Copyright 2000 Bradley Baetz
 //!
@@ -77,6 +77,7 @@ static APIS: &[Api] = &[
         conv: Conv::Cdecl,
         handler: ic_decompress,
     },
+    stdcall("ICGetInfo", 30, 3, ic_get_info),
 ];
 
 /// ICINFO's size: six DWORDs, then szName[16], szDescription[128] and
@@ -112,17 +113,48 @@ fn ic_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(&(fourcc, driver)) = found else {
         return Some(0);
     };
+    write_info(cpu, info, fourcc, 0, "", "", Some(driver));
+    Some(1)
+}
+
+/// An ICINFO at `at`: the codec `fourcc`'s type and handler, its flags
+/// and versions, and its name, description and driver's file in UTF-16.
+/// With no `driver`, szDriver is left as it is, as a driver answering
+/// ICM_GETINFO leaves it for MSVFW32 to fill.
+fn write_info(
+    cpu: &mut Cpu,
+    at: u32,
+    fourcc: &[u8; 4],
+    version: u32,
+    name: &str,
+    description: &str,
+    driver: Option<&str>,
+) {
     let mut bytes = Vec::with_capacity(ICINFO as usize);
-    for value in [ICINFO, ICTYPE_VIDEO, u32::from_le_bytes(*fourcc), 0, 0, ICVERSION] {
+    for value in [
+        ICINFO,
+        ICTYPE_VIDEO,
+        u32::from_le_bytes(*fourcc),
+        0,
+        version,
+        ICVERSION,
+    ] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
-    bytes.resize(24 + 2 * (16 + 128), 0);
-    for unit in driver.encode_utf16() {
-        bytes.extend_from_slice(&unit.to_le_bytes());
+    let texts = [
+        Some((name, 16)),
+        Some((description, 128)),
+        driver.map(|driver| (driver, 128)),
+    ];
+    for (text, chars) in texts.into_iter().flatten() {
+        let end = bytes.len() + 2 * chars;
+        // The last character stays the terminating 0.
+        for unit in text.encode_utf16().take(chars - 1) {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes.resize(end, 0);
     }
-    bytes.resize(ICINFO as usize, 0);
-    cpu.bus.guest_write_bytes(info, &bytes);
-    Some(1)
+    cpu.bus.guest_write_bytes(at, &bytes);
 }
 
 /// Whether `kind` is `vidc`, the type of the codecs here, in either case.
@@ -190,6 +222,63 @@ fn ic_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         ICERR_BADHANDLE
     })
+}
+
+/// ICGetInfo(hic, lpicinfo, cb): the ICINFO of the open codec, which on
+/// Windows its driver fills (ICM_GETINFO, `get_info`) with its name and
+/// description, and MSVFW32 with the driver's file. It answers what the
+/// driver does: ICINFO's size, or 0 when `cb` is smaller than an ICINFO.
+/// A handle that isn't open gets ICERR_BADHANDLE, and no ICINFO
+/// MMSYSERR_INVALPARAM, as Wine's ICGetInfo gives. Actua Soccer 2 asks
+/// for its intro film's Microsoft Video 1 decoder's after ICLocate,
+/// before it decompresses, and stops without it.
+fn ic_get_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[hic, info, size] = args else {
+        unreachable!()
+    };
+    let Some(open) = open_codec(cpu, hic) else {
+        return Some(ICERR_BADHANDLE);
+    };
+    if info == 0 {
+        return Some(MMSYSERR_INVALPARAM);
+    }
+    Some(get_info(cpu, open, info, size, true))
+}
+
+/// ICM_GETINFO(lpicinfo, cb) of the open codec `open`: with no ICINFO,
+/// its size; 0 when `cb` is smaller than an ICINFO; else the ICINFO
+/// filled and its size. dwFlags is 0, since the codecs here don't
+/// compress, and dwVersion is ICVERSION, as Wine's drivers give. The
+/// driver leaves szDriver alone; ICGetInfo (`with_driver`) fills it.
+fn get_info(cpu: &mut Cpu, open: u32, info: u32, size: u32, with_driver: bool) -> u32 {
+    if info == 0 {
+        return ICINFO;
+    }
+    if size < ICINFO || !allows(cpu, info, ICINFO, true) {
+        return 0;
+    }
+    let Some(&(fourcc, driver)) = installed(open) else {
+        return 0;
+    };
+    let (name, description) = describe(open);
+    let driver = with_driver.then_some(driver);
+    write_info(cpu, info, fourcc, ICVERSION, name, description, driver);
+    ICINFO
+}
+
+/// ICM_GETINFO, and MMSYSERR_INVALPARAM.
+const ICM_GETINFO: u32 = 0x5002;
+const MMSYSERR_INVALPARAM: u32 = 11;
+
+/// The name and description of the installed codec of FourCC `fourcc`
+/// (in capitals), as Windows 98's drivers give them. The Indeo drivers'
+/// aren't known here, and their ICINFO has none.
+fn describe(fourcc: u32) -> (&'static str, &'static str) {
+    match &fourcc.to_le_bytes() {
+        b"MSVC" => ("MS-CRAM", "Microsoft Video 1"),
+        b"CVID" => ("Cinepak", "Cinepak Codec by Radius"),
+        _ => ("", ""),
+    }
 }
 
 /// The BITMAPINFO at `at`, its header and colours: None if the header
@@ -336,10 +425,10 @@ fn ic_locate(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// ICSendMessage(hic, msg, dw1, dw2): the codec's answer. A codec here
-/// answers Microsoft Video 1's decompression messages, and
-/// ICERR_UNSUPPORTED to the others; a handle that isn't open gets
-/// ICERR_BADHANDLE.
+/// ICSendMessage(hic, msg, dw1, dw2): the codec's answer. Every codec
+/// here answers ICM_GETINFO, Microsoft Video 1 its decompression
+/// messages too, and ICERR_UNSUPPORTED to the others; a handle that
+/// isn't open gets ICERR_BADHANDLE.
 fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hic, msg, dw1, dw2] = args else {
         unreachable!()
@@ -347,6 +436,9 @@ fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(fourcc) = open_codec(cpu, hic) else {
         return Some(ICERR_BADHANDLE);
     };
+    if msg == ICM_GETINFO {
+        return Some(get_info(cpu, fourcc, dw1, dw2, false));
+    }
     if fourcc != MSVC {
         return Some(ICERR_UNSUPPORTED);
     }
