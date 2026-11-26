@@ -23,7 +23,7 @@ use super::{
     BIG, Client, Context, DATA3, EAX, EBX, ECX, EDI, EDX, ESI, ESP, F_DOS, Frame, LDT_FIXED, RESULT_FLAGS, allocate,
     call_real, client, descriptor, free_entry, real_mode_handler, reflect, resume, selector_base, set_vector, write_desc,
 };
-use crate::bus::Bus;
+use super::vm;
 use crate::cpu::{Cpu, Seg};
 
 /// The transfer buffer: the first 8 KB of the client's private data.
@@ -115,19 +115,36 @@ fn dta(cpu: &mut Cpu) -> (u16, u32) {
     (segment_selector(cpu, segment).unwrap_or(0), off as u32)
 }
 
-pub(super) fn copy(bus: &mut Bus, from: u32, to: u32, len: u32) {
-    for i in 0..len {
-        let byte = bus.read_8(from.wrapping_add(i) as usize);
-        bus.write_8(to.wrapping_add(i) as usize, byte);
+/// Copy `len` bytes from the linear address `from` to `to`, through the
+/// host's virtual memory where it has any (vm.rs): a run that stays in
+/// one page of each at a time, found once for the run. The run is read
+/// before the page it goes to is found, which may send the page it came
+/// from out.
+pub(super) fn copy(cpu: &mut Cpu, from: u32, to: u32, len: u32) {
+    let mut run = [0u8; 0x1000];
+    let mut done = 0;
+    while done < len {
+        let (from, to) = (from.wrapping_add(done), to.wrapping_add(done));
+        let n = (0x1000 - (from & 0xFFF)).min(0x1000 - (to & 0xFFF)).min(len - done);
+        let run = &mut run[..n as usize];
+        let at = vm::phys(cpu, from) as usize;
+        for (i, byte) in run.iter_mut().enumerate() {
+            *byte = cpu.bus.read_8(at + i);
+        }
+        let at = vm::phys(cpu, to) as usize;
+        for (i, &byte) in run.iter().enumerate() {
+            cpu.bus.write_8(at + i, byte);
+        }
+        done += n;
     }
 }
 
 /// Copy the bytes at `from` up to and with `end`, at most `max` of them
 /// (the last then `end`).
-fn copy_until(bus: &mut Bus, from: u32, to: u32, max: u32, end: u8) {
+fn copy_until(cpu: &mut Cpu, from: u32, to: u32, max: u32, end: u8) {
     for i in 0..max {
-        let byte = if i == max - 1 { end } else { bus.read_8(from.wrapping_add(i) as usize) };
-        bus.write_8(to.wrapping_add(i) as usize, byte);
+        let byte = if i == max - 1 { end } else { vm::read_8(cpu, from.wrapping_add(i)) };
+        vm::write_8(cpu, to.wrapping_add(i), byte);
         if byte == end {
             return;
         }
@@ -157,15 +174,15 @@ fn before(cpu: &mut Cpu, frame: &mut Frame) -> Option<Context> {
         // Write the string at DS:(E)DX, up to its '$'.
         0x09 => {
             let from = ptr(cpu, Seg::DS, EDX)?;
-            copy_until(&mut cpu.bus, from, tlb, TLB_SIZE, b'$');
+            copy_until(cpu, from, tlb, TLB_SIZE, b'$');
             rm.gpr[EDX] = 0;
         }
         // Buffered input into DS:(E)DX, alone or after flushing the
         // keyboard buffer.
         0x0A | 0x0C if ah == 0x0A || al == 0x0A => {
             let from = ptr(cpu, Seg::DS, EDX)?;
-            let len = cpu.bus.read_8(from as usize) as u32 + 2;
-            copy(&mut cpu.bus, from, tlb, len);
+            let len = vm::read_8(cpu, from) as u32 + 2;
+            copy(cpu, from, tlb, len);
             rm.gpr[EDX] = 0;
         }
         // Functions that return segments, which become selectors.
@@ -175,8 +192,8 @@ fn before(cpu: &mut Cpu, frame: &mut Frame) -> Option<Context> {
         // Parse the file name at DS:(E)SI into the FCB at ES:(E)DI.
         0x29 => {
             let (from, fcb) = (ptr(cpu, Seg::DS, ESI)?, ptr(cpu, Seg::ES, EDI)?);
-            copy(&mut cpu.bus, from, tlb, 0x80);
-            copy(&mut cpu.bus, fcb, tlb + SECOND, FCB_SIZE);
+            copy(cpu, from, tlb, 0x80);
+            copy(cpu, fcb, tlb + SECOND, FCB_SIZE);
             rm.gpr[ESI] = 0;
             rm.gpr[EDI] = SECOND;
         }
@@ -188,7 +205,7 @@ fn before(cpu: &mut Cpu, frame: &mut Frame) -> Option<Context> {
         // Functions with the name of a file or directory at DS:(E)DX.
         0x39..=0x3D | 0x41 | 0x43 | 0x4E | 0x5A | 0x5B => {
             let from = ptr(cpu, Seg::DS, EDX)?;
-            copy_until(&mut cpu.bus, from, tlb, NAME_MAX, 0);
+            copy_until(cpu, from, tlb, NAME_MAX, 0);
             rm.gpr[EDX] = 0;
             if ah == 0x4E {
                 swap_dta(cpu, frame, false);
@@ -198,7 +215,7 @@ fn before(cpu: &mut Cpu, frame: &mut Frame) -> Option<Context> {
         // Extended open, of the file named at DS:(E)SI.
         0x6C => {
             let from = ptr(cpu, Seg::DS, ESI)?;
-            copy_until(&mut cpu.bus, from, tlb, NAME_MAX, 0);
+            copy_until(cpu, from, tlb, NAME_MAX, 0);
             rm.gpr[ESI] = 0;
         }
         0x3F | 0x40 => {
@@ -215,7 +232,7 @@ fn before(cpu: &mut Cpu, frame: &mut Frame) -> Option<Context> {
             }
             let chunk = (count - done).min(TLB_SIZE);
             if ah == 0x40 {
-                copy(&mut cpu.bus, buffer.wrapping_add(done), tlb, chunk);
+                copy(cpu, buffer.wrapping_add(done), tlb, chunk);
             }
             rm.gpr[EDX] = 0;
             rm.gpr[ECX] = chunk;
@@ -229,7 +246,7 @@ fn before(cpu: &mut Cpu, frame: &mut Frame) -> Option<Context> {
                 return None;
             }
             if al & 1 != 0 {
-                copy(&mut cpu.bus, buffer, tlb, count);
+                copy(cpu, buffer, tlb, count);
             }
             rm.gpr[EDX] = 0;
         }
@@ -250,8 +267,8 @@ fn before(cpu: &mut Cpu, frame: &mut Frame) -> Option<Context> {
         // Rename the file named at DS:(E)DX to the name at ES:(E)DI.
         0x56 => {
             let (from, to) = (ptr(cpu, Seg::DS, EDX)?, ptr(cpu, Seg::ES, EDI)?);
-            copy_until(&mut cpu.bus, from, tlb, NAME_MAX, 0);
-            copy_until(&mut cpu.bus, to, tlb + SECOND, NAME_MAX, 0);
+            copy_until(cpu, from, tlb, NAME_MAX, 0);
+            copy_until(cpu, to, tlb + SECOND, NAME_MAX, 0);
             rm.gpr[EDX] = 0;
             rm.gpr[EDI] = SECOND;
         }
@@ -260,7 +277,7 @@ fn before(cpu: &mut Cpu, frame: &mut Frame) -> Option<Context> {
         0x60 => {
             let from = ptr(cpu, Seg::DS, ESI)?;
             ptr(cpu, Seg::ES, EDI)?;
-            copy_until(&mut cpu.bus, from, tlb, NAME_MAX, 0);
+            copy_until(cpu, from, tlb, NAME_MAX, 0);
             rm.gpr[ESI] = 0;
             rm.gpr[EDI] = SECOND;
         }
@@ -281,7 +298,7 @@ fn swap_dta(cpu: &mut Cpu, frame: &mut Frame, next: bool) {
     let Some(base) = selector_base(cpu, sel) else { return };
     let seg = client(cpu).rm_stack;
     if next {
-        copy(&mut cpu.bus, base.wrapping_add(off), ((seg as u32) << 4) + TLB_DTA, FIND_SIZE);
+        copy(cpu, base.wrapping_add(off), ((seg as u32) << 4) + TLB_DTA, FIND_SIZE);
     }
     frame.sel = SWAPPED_DTA;
     frame.base = (cpu.bus.dta_segment as u32) << 16 | cpu.bus.dta_offset as u32;
@@ -298,17 +315,17 @@ fn exec(cpu: &mut Cpu, ctx: &Context, rm: &mut Context, bits32: bool, seg: u16) 
     let tlb = (seg as u32) << 4;
     let name = pointer(cpu, ctx, Seg::DS, EDX, bits32)?;
     let block = pointer(cpu, ctx, Seg::ES, EBX, bits32)?;
-    copy_until(&mut cpu.bus, name, tlb, NAME_MAX, 0);
+    copy_until(cpu, name, tlb, NAME_MAX, 0);
     rm.gpr[EDX] = 0;
     rm.gpr[EBX] = EXEC_BLOCK;
     if ctx.gpr[EAX] as u8 == 0x03 {
-        copy(&mut cpu.bus, block, tlb + EXEC_BLOCK, 4);
+        copy(cpu, block, tlb + EXEC_BLOCK, 4);
         return Some(());
     }
-    let read16 = |cpu: &Cpu, at: u32| cpu.bus.read_16(block.wrapping_add(at) as usize);
-    let far = |cpu: &Cpu, at: u32| -> Option<u32> {
+    let read16 = |cpu: &mut Cpu, at: u32| vm::read_16(cpu, block.wrapping_add(at));
+    let far = |cpu: &mut Cpu, at: u32| -> Option<u32> {
         let (off, sel) = if bits32 {
-            (cpu.bus.read_32(block.wrapping_add(at) as usize), read16(cpu, at + 4))
+            (vm::read_32(cpu, block.wrapping_add(at)), read16(cpu, at + 4))
         } else {
             (read16(cpu, at) as u32, read16(cpu, at + 2))
         };
@@ -326,8 +343,8 @@ fn exec(cpu: &mut Cpu, ctx: &Context, rm: &mut Context, bits32: bool, seg: u16) 
     };
     match cmdline {
         Some(from) => {
-            let len = (cpu.bus.read_8(from as usize) as u32).min(0x7E);
-            copy(&mut cpu.bus, from, tlb + EXEC_CMDLINE, len + 2);
+            let len = (vm::read_8(cpu, from) as u32).min(0x7E);
+            copy(cpu, from, tlb + EXEC_CMDLINE, len + 2);
         }
         None => {
             cpu.bus.write_8((tlb + EXEC_CMDLINE) as usize, 0);
@@ -336,7 +353,7 @@ fn exec(cpu: &mut Cpu, ctx: &Context, rm: &mut Context, bits32: bool, seg: u16) 
     }
     for (fcb, at) in fcbs.into_iter().zip([EXEC_FCB1, EXEC_FCB2]) {
         match fcb {
-            Some(from) => copy(&mut cpu.bus, from, tlb + at, 0x14),
+            Some(from) => copy(cpu, from, tlb + at, 0x14),
             None => {
                 cpu.bus.write_8((tlb + at) as usize, 0);
                 for i in 1..12 {
@@ -379,7 +396,7 @@ pub(super) fn returned(cpu: &mut Cpu, frame: Frame, rm: &Context) {
             restore(&mut ctx, &[EDX]);
             if let Some(to) = ptr(cpu, Seg::DS, EDX) {
                 let len = cpu.bus.read_8(tlb as usize) as u32 + 2;
-                copy(&mut cpu.bus, tlb, to, len);
+                copy(cpu, tlb, to, len);
             }
         }
         0x1B | 0x1C | 0x1F | 0x32 | 0x5D | 0x63 => {
@@ -400,26 +417,26 @@ pub(super) fn returned(cpu: &mut Cpu, frame: Frame, rm: &Context) {
             restore(&mut ctx, &[ESI, EDI]);
             set_offset(&mut ctx, ESI, bits32, offset(&caller, ESI, bits32).wrapping_add(rm.reg16(ESI) as u32));
             if let Some(to) = ptr(cpu, Seg::ES, EDI) {
-                copy(&mut cpu.bus, tlb + SECOND, to, FCB_SIZE);
+                copy(cpu, tlb + SECOND, to, FCB_SIZE);
             }
         }
         0x38 => {
             restore(&mut ctx, &[EDX]);
             if let Some(to) = ptr(cpu, Seg::DS, EDX).filter(|_| !failed) {
-                copy(&mut cpu.bus, tlb, to, 0x22);
+                copy(cpu, tlb, to, 0x22);
             }
         }
         0x3F | 0x40 => return transferred(cpu, frame, rm, ctx),
         0x44 => {
             restore(&mut ctx, &[EDX]);
             if let Some(to) = ptr(cpu, Seg::DS, EDX).filter(|_| !failed && al & 1 == 0) {
-                copy(&mut cpu.bus, tlb, to, (rm.reg16(EAX) as u32).min(TLB_SIZE));
+                copy(cpu, tlb, to, (rm.reg16(EAX) as u32).min(TLB_SIZE));
             }
         }
         0x47 => {
             restore(&mut ctx, &[ESI]);
             if let Some(to) = ptr(cpu, Seg::DS, ESI).filter(|_| !failed) {
-                copy(&mut cpu.bus, tlb, to, 0x40);
+                copy(cpu, tlb, to, 0x40);
             }
         }
         0x4B => restore(&mut ctx, &[EDX, EBX]),
@@ -430,7 +447,7 @@ pub(super) fn returned(cpu: &mut Cpu, frame: Frame, rm: &Context) {
                 cpu.bus.dta_offset = frame.base as u16;
                 let dta = client(cpu).dta.and_then(|(sel, off)| Some(selector_base(cpu, sel)?.wrapping_add(off)));
                 if let Some(to) = dta {
-                    copy(&mut cpu.bus, tlb + TLB_DTA, to, FIND_SIZE);
+                    copy(cpu, tlb + TLB_DTA, to, FIND_SIZE);
                 }
             }
         }
@@ -439,26 +456,26 @@ pub(super) fn returned(cpu: &mut Cpu, frame: Frame, rm: &Context) {
         0x5A => {
             restore(&mut ctx, &[EDX]);
             if let Some(to) = ptr(cpu, Seg::DS, EDX).filter(|_| !failed) {
-                copy_until(&mut cpu.bus, tlb, to, NAME_MAX, 0);
+                copy_until(cpu, tlb, to, NAME_MAX, 0);
             }
         }
         0x60 => {
             restore(&mut ctx, &[ESI, EDI]);
             if let Some(to) = ptr(cpu, Seg::ES, EDI).filter(|_| !failed) {
-                copy(&mut cpu.bus, tlb + SECOND, to, 0x80);
+                copy(cpu, tlb + SECOND, to, 0x80);
             }
         }
         0x65 => {
             restore(&mut ctx, &[EDI]);
             if let Some(to) = ptr(cpu, Seg::ES, EDI).filter(|_| !failed) {
                 if al == 0x01 {
-                    copy(&mut cpu.bus, tlb, to, (rm.reg16(ECX) as u32).min(TLB_SIZE));
+                    copy(cpu, tlb, to, (rm.reg16(ECX) as u32).min(TLB_SIZE));
                 } else {
                     // An ID and a far pointer to a table of DOS's.
-                    copy(&mut cpu.bus, tlb, to, 3);
+                    copy(cpu, tlb, to, 3);
                     let segment = cpu.bus.read_16(tlb as usize + 3);
                     let sel = selector(cpu, segment);
-                    cpu.bus.write_16(to.wrapping_add(3) as usize, sel);
+                    vm::write_16(cpu, to.wrapping_add(3), sel);
                 }
             }
         }
@@ -489,7 +506,7 @@ fn transferred(cpu: &mut Cpu, mut frame: Frame, rm: &Context, mut ctx: Context) 
         if caller.gpr[EAX] >> 8 & 0xFF == 0x3F
             && let Some(buffer) = buffer
         {
-            copy(&mut cpu.bus, tlb, buffer.wrapping_add(earlier), moved.min(chunk));
+            copy(cpu, tlb, buffer.wrapping_add(earlier), moved.min(chunk));
         }
         done = earlier + moved.min(chunk);
         if moved == chunk && done < count {
@@ -528,8 +545,7 @@ fn memory(cpu: &mut Cpu, ctx: &mut Context, ah: u8) -> Result<(), u16> {
         _ => resize_block(cpu, selector, paras, bits32),
     };
     if result == Err(NO_MEMORY) {
-        let end = cpu.bus.ram().len() as u32;
-        let free = cpu.bus.xms.dpmi_free(end).0 / 16;
+        let free = vm::free(cpu).0 / 16;
         set_offset(ctx, EBX, bits32, if bits32 { free } else { free.min(0xFFFE) });
     }
     result
@@ -549,15 +565,13 @@ fn block_size(paras: u32, bits32: bool) -> Option<u32> {
 
 fn allocate_block(cpu: &mut Cpu, paras: u32, bits32: bool) -> Result<u16, u16> {
     let bytes = block_size(paras, bits32).ok_or(NO_MEMORY)?;
-    let end = cpu.bus.ram().len() as u32;
     let len = bytes.div_ceil(0x1000) * 0x1000;
-    let base = cpu.bus.xms.take_dpmi(len, end).ok_or(NO_MEMORY)?;
+    let base = vm::allocate(cpu, len, None).ok_or(NO_MEMORY)?;
     let count = if bits32 { 1 } else { tiles(bytes) };
     let Some(first) = allocate(cpu, count, 0, LDT_FIXED) else {
-        cpu.bus.xms.release_dpmi(base);
+        vm::release(cpu, base);
         return Err(NO_MEMORY);
     };
-    cpu.bus.fill_ram(base as usize..(base + len) as usize, 0);
     tile(cpu, first, base, bytes, bits32);
     let handle = cpu.bus.dpmi.next_handle;
     cpu.bus.dpmi.next_handle = handle.wrapping_add(1).max(1);
@@ -588,7 +602,7 @@ fn free_block(cpu: &mut Cpu, selector: u16) -> Result<(), u16> {
     let c = client(cpu);
     if let Some(m) = c.memory.iter().position(|&(h, _, _)| h == handle) {
         let (_, base, _) = c.memory.remove(m);
-        cpu.bus.xms.release_dpmi(base);
+        vm::release(cpu, base);
     }
     let first = (first >> 3) as usize;
     for index in first..first + count as usize {
