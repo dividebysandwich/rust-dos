@@ -82,6 +82,9 @@ struct TestHost {
     /// to the screen itself (`Host::transforms`).
     transforms: bool,
     log: Rc<RefCell<Log>>,
+    /// Copies a test puts before the host's own when the next `FILL`
+    /// comes, for states the host's commands don't leave behind.
+    planted: Rc<RefCell<Vec<Copy>>>,
 }
 
 /// Whether two ranges of card memory share a byte.
@@ -370,12 +373,17 @@ impl Host for TestHost {
         _: &[u8],
         _: &Pages,
     ) -> Option<Surface> {
+        let planted: Vec<Copy> = self.planted.borrow_mut().drain(..).collect();
+        self.copies.splice(0..0, planted);
         let copy = self
             .copies
             .iter_mut()
             .find(|c| c.ahead && gpu::fills(dst, &c.surface))?;
         let surface = copy.surface;
         blit::fill(&mut copy.pixels, &packed(&surface), rect, value);
+        // As `ToadForceGl::fill`'s clear does: the copies of these
+        // bytes under other formats are older.
+        self.drop_copies(&[surface]);
         self.drop_textures(&[surface]);
         self.log.borrow_mut().fills += 1;
         Some(surface)
@@ -585,6 +593,7 @@ fn hosted(declines: Declines) -> (Rig, Rc<RefCell<Log>>) {
         declines,
         transforms: false,
         log: log.clone(),
+        planted: Rc::default(),
     };
     rig.card.set_host(Some(Box::new(host)), &mut rig.memory);
     (rig, log)
@@ -601,6 +610,7 @@ fn transforming() -> (Rig, Rc<RefCell<Log>>) {
         declines: takes_all,
         transforms: true,
         log: log.clone(),
+        planted: Rc::default(),
     };
     rig.card.set_host(Some(Box::new(host)), &mut rig.memory);
     (rig, log)
@@ -2440,6 +2450,61 @@ fn a_depth_fill_runs_on_the_host_where_the_depth_buffer_is_ahead() {
     // triangle's corner and outside it.
     assert_eq!(rig.depth(SIZE - 1, SIZE - 1), 0xFFFF);
     assert_eq!(rig.px(5, 5) & 0xFF_FFFF, 0x00_00FF);
+}
+
+/// A part of the depth buffer filled with the nearest depth, named as
+/// colour, then a triangle behind it.
+fn depth_fill_and_draw(rig: &mut Rig) {
+    let depth = target(rig).depth_surface().unwrap();
+    let as_colour = Surface {
+        format: Format::R5G6B5,
+        ..depth
+    };
+    let r = rect(8, 8, 24, 16);
+    let error = rig.run(|w| command::encode::fill(w, &as_colour, &r, 0));
+    assert_eq!(error, 0);
+    assert_eq!(rig.draw(4, &corner(0.0, 0.0, 48.0, 0.75, 0xFF00_FF00)), 0);
+}
+
+#[test]
+fn a_depth_fill_passes_over_an_older_copy_of_the_bytes_under_another_format() {
+    let mut software = Rig::new(FORMAT, Some(DEPTH_FORMAT));
+    triangles(&mut software);
+    depth_fill_and_draw(&mut software);
+
+    let mut rig = Rig::new(FORMAT, Some(DEPTH_FORMAT));
+    let log = Rc::new(RefCell::new(Log::default()));
+    let planted = Rc::new(RefCell::new(Vec::new()));
+    let host = TestHost {
+        copies: Vec::new(),
+        textures: Vec::new(),
+        declines: takes_all,
+        transforms: false,
+        log: log.clone(),
+        planted: planted.clone(),
+    };
+    rig.card.set_host(Some(Box::new(host)), &mut rig.memory);
+    triangles(&mut rig);
+    // The depth buffer is ahead on the host. Before its copy, the host
+    // has one of the same bytes as `R5G6B5` that isn't, with pixels
+    // nothing drew: a fill through it, or from it, shows in the bytes.
+    let depth = target(&rig).depth_surface().unwrap();
+    let as_colour = Surface {
+        format: Format::R5G6B5,
+        ..depth
+    };
+    planted.borrow_mut().push(Copy {
+        surface: as_colour,
+        stamp: Stamp::default(),
+        pixels: vec![0xAB; (depth.width * depth.height * 2) as usize],
+        ahead: false,
+    });
+    depth_fill_and_draw(&mut rig);
+    // The fill was the host's, in the copy that is ahead, and nothing
+    // was read back for it.
+    assert_eq!((log.borrow().fills, log.borrow().read_backs), (1, 0));
+    rig.card.settle(&mut rig.memory, None);
+    assert!(rig.memory == software.memory);
 }
 
 #[test]

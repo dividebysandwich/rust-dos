@@ -3027,6 +3027,71 @@ fn depth_fills_have_the_bytes_the_processor_writes() {
     }
 }
 
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_depth_fill_passes_over_an_older_copy_of_the_bytes_under_another_format() {
+    use crate::toadforce::gpu::{Clear, Host, Pages};
+    bench!(bench, "toadforce depth fill past an older copy");
+    for (depth, named) in [
+        (Format::D16, Format::R5G6B5),
+        (Format::D24S8, Format::X8R8G8B8),
+    ] {
+        let mut host = bench.host();
+        let surface = Surface {
+            offset: 0,
+            pitch: SIZE * depth.bytes(),
+            width: SIZE,
+            height: SIZE,
+            format: depth,
+        };
+        let as_colour = Surface {
+            format: named,
+            ..surface
+        };
+        let bytes = depth.bytes() as usize;
+        let mut memory = vec![0xAB; (SIZE * SIZE) as usize * bytes];
+        let pages = Pages::default();
+        // The depth buffer cleared to the farthest on the host, so its
+        // copy is ahead of card memory.
+        let all = rect(0, 0, SIZE, SIZE);
+        let clear = Clear {
+            surface,
+            rects: std::slice::from_ref(&all),
+            value: 0xFFFF_FFFF,
+            mask: 0xFFFF_FFFF,
+        };
+        assert_eq!(host.clear(&clear, &memory, &pages), Some(surface));
+        // Before it, a copy of the same bytes under the colour format
+        // the fill names them with, made from card memory and not
+        // ahead: the host's commands drop such a copy as they write
+        // the bytes, so it is put there by hand.
+        // SAFETY: the bench's context is current.
+        unsafe {
+            host.enter();
+            let at = host.copy(&as_colour, &memory, &pages, false);
+            host.leave();
+            let older = host.copies.remove(at);
+            host.copies.insert(0, older);
+        }
+        assert!(!host.copies[0].ahead && host.copies[1].ahead);
+        // The fill goes into the copy that is ahead, with its bits.
+        let value = between(depth);
+        let part = rect(8, 8, 24, 16);
+        let filled = host.fill(&as_colour, &part, value, &memory, &pages);
+        assert_eq!(filled, Some(surface), "{depth:?}");
+        assert!(host.copies.iter().all(|c| c.surface.format != named));
+        assert!(host.read_back(&surface, &mut memory, Some(&pages)));
+        let far = &0xFFFF_FFFFu32.to_le_bytes()[..bytes];
+        let inner = &value.to_le_bytes()[..bytes];
+        for (x, y) in (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))) {
+            let inside = (8..32).contains(&x) && (8..24).contains(&y);
+            let at = surface.at(x, y);
+            let want = if inside { inner } else { far };
+            assert_eq!(&memory[at..at + bytes], want, "{depth:?} at ({x}, {y})");
+        }
+    }
+}
+
 /// A position, a colour and a coordinate set of two numbers, for the
 /// card to transform: 6 words.
 const FVF_UNLIT: u32 = 0x002 | 0x040 | 0x100;
