@@ -1234,7 +1234,16 @@ fn activation_pending(state: &State, queue: u32) -> bool {
 /// Windows 98's rules for SetForegroundWindow: no queue is in the
 /// foreground, or the thread's own is; the foreground queue has no
 /// active window and none on its way; its process took the last input;
-/// or its process is the foreground one, or was started by it.
+/// or its process is the foreground one, or was started by it or by the
+/// process that took the last input.
+///
+/// A program started by one that may take the foreground may take it
+/// too. DirectX 7's package (DX7AENG.EXE), whose licence the user had
+/// just accepted, closed its window, which gave the foreground back to
+/// the setup that started it, and then started DXSETUP.EXE. DXSETUP's
+/// message box comes in front of the setup's window on Windows 98;
+/// refused the foreground, it stayed behind it, and Demolition Racer's
+/// setup waited for it for ever (#2150).
 fn may_take_foreground(cpu: &Cpu) -> bool {
     let queue = current_queue(cpu);
     let pid = super::current_pid(cpu);
@@ -1251,7 +1260,8 @@ fn may_take_foreground(cpu: &Cpu) -> bool {
     }
     let owner = queue_pid(cpu, foreground);
     let running = crate::win32::running(cpu);
-    owner == 0 || running.is_some_and(|p| p.id == owner || p.parent == owner)
+    let started_by = |parent: u32| parent != 0 && (parent == owner || parent == input.last_input);
+    owner == 0 || running.is_some_and(|p| p.id == owner || started_by(p.parent))
 }
 
 /// The foreground moved to or from the queue `queue` while another
