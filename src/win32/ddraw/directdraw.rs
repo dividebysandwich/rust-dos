@@ -792,7 +792,10 @@ const DDFXCAPS: u32 =
 const DDPCAPS_8BIT: u32 = 0x4;
 const DDPCAPS_PRIMARYSURFACE: u32 = 0x10;
 
-/// The sizes of DDCAPS: DirectX 3's, 5's, and 6's and 7's.
+/// The sizes of DDCAPS: DirectX 1's and 2's, 3's, 5's, and 6's and 7's.
+/// DirectDraw on Windows 98 SE takes all of them, the first too: Intel
+/// RDX's DMIX.DLL asks for its caps in one of 172 bytes.
+const CAPS_DX1: u32 = 172;
 const CAPS_DX3: u32 = 316;
 const CAPS_DX5: u32 = 364;
 const CAPS_DX6: u32 = 380;
@@ -818,7 +821,7 @@ fn write_caps(
         return Err(DDERR_INVALIDPARAMS);
     }
     let size = cpu.bus.guest_read_32(at);
-    if ![CAPS_DX3, CAPS_DX5, CAPS_DX6].contains(&size)
+    if ![CAPS_DX1, CAPS_DX3, CAPS_DX5, CAPS_DX6].contains(&size)
         || !cpu.bus.guest_probe(at, size as usize, true)
     {
         return Err(DDERR_INVALIDPARAMS);
@@ -895,10 +898,16 @@ fn write_caps(
     // SRCCOPY's bit among the ROPs, for each kind of blit.
     let rop_word = 4 * (0xCC / 32);
     let rop_bit = 1 << (0xCC % 32);
-    for rops in [0x64, 0xB8, 0xE4, 0x110] {
+    w(cpu, 0x64 + rop_word, rop_bit);
+    w(cpu, 0x84, surface_caps);
+    if size == CAPS_DX1 {
+        // DirectX 1's ends before the caps of blits between system and
+        // video memory.
+        return Ok(());
+    }
+    for rops in [0xB8, 0xE4, 0x110] {
         w(cpu, rops + rop_word, rop_bit);
     }
-    w(cpu, 0x84, surface_caps);
     for (caps_at, ckey_at, fx_at) in [
         (0xAC, 0xB0, 0xB4),
         (0xD8, 0xDC, 0xE0),
