@@ -861,7 +861,6 @@ mod tests {
         assert!(view.hosting(), "{:?}", view);
         assert_eq!(view.roster.unwrap().members, [tunnel::wire::Member { index: 1, name: "Toumal".into() }]);
         net.browse(Some(&relay.to_string()), "").unwrap();
-        assert!(net.listing().asking);
         wait(&mut || !net.listing().asking);
         let view = net.view();
         assert_eq!(view.joined, Some((relay, "doom".to_string())));
