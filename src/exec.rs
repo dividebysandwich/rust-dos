@@ -1613,7 +1613,9 @@ fn bop(cpu: &mut Cpu, kind: u8, vector: u8) {
 /// of its own, taken from the pool wherever one is free, so a trap at the
 /// end of one of KERNEL32's pages can have its id anywhere in RAM. Err
 /// when the bytes aren't in RAM, with the fault and the linear address of
-/// the next page when that page isn't there (CR2 stays as it was).
+/// the next page when that page isn't there (CR2 stays as it was). The
+/// debugger's trace reads an instruction's bytes across a page the same
+/// way (`debug::run::instruction_bytes`).
 fn trap_bytes<const N: usize>(
     cpu: &mut Cpu,
     ram: &[u8],

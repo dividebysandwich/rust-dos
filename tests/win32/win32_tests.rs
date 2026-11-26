@@ -3123,6 +3123,78 @@ fn a_program_starts_another_and_waits_for_its_exit_code() {
     assert_eq!(code, 0x71);
 }
 
+/// A program that makes a critical section, enters it, leaves it and
+/// deletes it, and ends with 7. KERNEL32 has those functions as code
+/// (kernel32/sync.rs), each with a trap of the system in it, and not one
+/// in each stub's 8 bytes. It ends with 2 instead if
+/// InitializeCriticalSection's trap, which starts the function, doesn't
+/// start in a page's last 3 bytes, where its id ends on the next page.
+fn critical_section_program() -> Vec<u8> {
+    let names: &[&str] = &[
+        "InitializeCriticalSection",
+        "EnterCriticalSection",
+        "LeaveCriticalSection",
+        "DeleteCriticalSection",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    program(BASE, false, imports, &[0; 32], |a, l| {
+        let mut code = a.create_label();
+        let mut elsewhere = a.create_label();
+        // The function, or the code its stub jumps to.
+        a.mov(esi, l.import(0))?;
+        a.cmp(byte_ptr(esi), 0xE9)?;
+        a.jne(code)?;
+        a.add(esi, dword_ptr(esi + 1))?;
+        a.add(esi, 5)?;
+        a.set_label(&mut code)?;
+        let trap = u16::from_le_bytes([0xFE, rust_dos::win32::TRAP]);
+        a.cmp(word_ptr(esi), trap as i32)?;
+        a.jne(elsewhere)?;
+        a.mov(eax, esi)?;
+        a.and(eax, 0xFFF)?;
+        a.cmp(eax, 0xFFD)?;
+        a.jb(elsewhere)?;
+        for i in 0..4 {
+            a.push(l.at(0) as i32)?;
+            a.call(l.import(i))?;
+        }
+        a.push(7)?;
+        a.call(l.import(4))?;
+        a.set_label(&mut elsewhere)?;
+        a.push(2)?;
+        a.call(l.import(4))?;
+        a.int3()
+    })
+}
+
+#[test]
+fn a_trap_at_the_end_of_a_page_reads_on_from_the_next_page_it_maps() {
+    // A program starts another once it used and released 1 MB, as
+    // Encarta 97's setup does before its Run button starts Encarta
+    // (#1990). The pages the child gets come from the pool in the order
+    // the parent's went back, the last first, so no page of its images
+    // is followed in RAM by the page after it. A trap of a function
+    // KERNEL32 has as code can end on the next page: its id is read from
+    // there. InitializeCriticalSection's trap starts 3 bytes before a
+    // page's end, so its id's high byte is on the next page. Read from
+    // the RAM after its own page, which holds another page of the image,
+    // the id is another function's or none: Encarta ended on an unknown
+    // function, and this child, reading the id of a service that then
+    // faulted, ends with FFh there, so T.EXE ends with F1h. 71h: the
+    // child ran on and ended with 7.
+    let files = vec![("C.EXE", critical_section_program())];
+    let test = "trap_at_page_end";
+    let code = start_programs_using(test, "T.EXE", "C.EXE", None, 0x10_0000, files, &[]);
+    assert_ne!(
+        code, 0x21,
+        "KERNEL32's layout changed: InitializeCriticalSection no longer starts with a trap in a \
+         page's last 3 bytes, so this test covers nothing. Point it at a function whose trap \
+         does, or drop it (tests/cpu/pm_tests.rs covers the reading)"
+    );
+    assert_eq!(code, 0x71);
+}
+
 /// CreateProcessA of a Windows 3.1 program, which Windows 98 runs as a
 /// task of its 16-bit system: it succeeds, the process handle is
 /// signaled when the task ends, and GetExitCodeProcess gives the task's

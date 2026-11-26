@@ -60,8 +60,9 @@ around it.
 whole crate. A file in a folder is a module of the folder's `main.rs`, so
 its tests are named `<file>::<test>`. `cargo build --all-targets`,
 `cargo clippy --all-targets` and a plain `cargo test` build and link all
-seven. CI does that on every push, on Linux, Windows and macOS, so you
-don't need to before you push.
+seven. CI does that on every push, and runs the whole suite on Linux
+(Windows and macOS run a few tests of their own), so you don't need to
+before you push.
 
 - Build the library and the program with `cargo build`, and lint them
   with `cargo clippy`.
@@ -132,9 +133,12 @@ that it improves on main. Steps, in this order:
    branch, and compare with main.
 4. Mark it ready for review only when that shows a clear improvement on
    main: a speed-up you measured, against main on the same machine and
-   scene; a bug that main has and the branch fixes, seen in the game; or
-   behaviour closer to the real hardware or the real Windows, shown by a
-   test or a comparison with it. Put the evidence in the description.
+   scene; less work for the same output, counted in deterministic runs;
+   a bug that main has and the branch fixes, seen in the game; or
+   behaviour closer to the real hardware or the real Windows, shown by
+   a test or a comparison with it. Put the evidence in the description.
+   How much checking that takes depends on what the change can break
+   ("Checks in proportion to the change", below).
 
    Before it is marked ready, check that it still merges with main,
    which moves on while a pull request is in draft. Fetch both and run
@@ -173,6 +177,79 @@ a decision with no clearly better option, or is far beyond the change's
 scope; say which in a comment on it. When several agents work together,
 the one coordinating them marks pull requests ready, not the agents
 doing the work.
+
+## Checks in proportion to the change
+
+Check a change as much as what it can break calls for, and no more.
+Start from two questions: what could go wrong if the change is wrong,
+and where would it show? The answers pick the checks; a habit of
+running everything, many times, doesn't. A long check has a cost
+beyond its own time: an exclusive measurement keeps every other
+agent's new builds and emulators from starting while it waits and
+while it runs.
+
+- A change that removes work and keeps the output (a read-back, an
+  upload or a copy no longer made, fewer calls or hand-offs) is shown
+  by a deterministic comparison: identical frames at equal emulated
+  times, and the counter of the work removed lower on the branch
+  (`/api/stats`, or the card's and its renderer's counts under `video`
+  in `/api/status`). That is the evidence it is better. The comparison
+  has to run the changed code. `--deterministic` draws the cards in
+  software, so a change to the ToadForce's OpenGL renderer is compared
+  with `RUST_DOS_TOADFORCE_GL_DETERMINISTIC=1` and `renderer` checked
+  ("The ToadForce card" in `docs/llm-debugging.md`), and one to the
+  Voodoo cards' OpenGL path, which no deterministic run reaches, takes
+  the form for runs that can't be deterministic (end of "Comparing
+  what two builds draw", below). A timing run then only puts a number
+  on the gain: one run per build on one scene that shows it is enough,
+  main first and at a fixed `--cycles`, and the description calls the
+  figure indicative. Later runs in a session tend to read slower
+  whatever the build, so main first makes that drift count against
+  the branch.
+- A timing series (several runs per build, the order alternated, the
+  spread given) is for claims whose truth is the timing itself: a
+  change that does the same work faster with no counter to show it, a
+  change that trades one cost for another, a gain close to the spread
+  of the runs, a change to how `cycles=auto` picks its speed, or a
+  figure the description quotes as a size. Keep even a series short: a
+  fixed window of a minute or so after a fixed warm-up, the builds and
+  states prepared under the shared lock first, and the exclusive lock
+  asked for only when no emulator holds the lock, with `--wait` so a
+  long holder makes the run give up and retry instead of stalling
+  everyone behind it.
+- A save state made by main can carry main's state of the thing the
+  change moves into the branch's run: a texture's placement in the
+  card's memory, for one. Compare from states each build saved itself,
+  or from a plan that replays from power-on.
+- Other programs are run when the change is in a path they share with
+  the program the work is for. A change one program reaches needs that
+  program's check and the tests. A change to shared code (GDI's palette
+  and bitmaps, DirectDraw's blits, the CPU, a renderer's common path)
+  needs every test file that covers it run locally, and deterministic
+  runs of a few other programs that use the path. Only CI's Linux jobs
+  run the whole suite: the Windows and macOS jobs run the recompiler's
+  and the deterministic mode's tests (and Windows a start of the debug
+  build) and none of `tests/win32`, so their passing says nothing about
+  it, and a pull request can be marked ready before the Linux jobs end
+  (#2024 merged with them red).
+- A run of another program counts only if it reaches the changed code:
+  check the counter or the log that shows it did. Of five games run for
+  a change to the ToadForce's depth fills (#2066), one reached it; the
+  others showed only that nothing else moved. When one of them reaches
+  the code and draws the same, stop: searching every program for more
+  scenes that reach it adds little.
+- A question of what the real system does is answered by the real
+  system: a small probe program run on real Windows or on an emulated
+  real PC (86Box) settles it sooner and more surely than reasoning
+  from documentation, as one did for #2046 in #2076. Its source and
+  output go in the pull request.
+- When the machine is busy (the user says so, or `rust-dos-lock status`
+  shows others' emulators running for long), take no timing
+  measurements. The deterministic evidence above doesn't depend on the
+  host's speed and goes on. For a change that removes work it is
+  enough for step 4, and the indicative figure joins the description
+  once the machine is quiet; a change whose claim is the timing itself
+  stays a draft until its series is run.
 
 ## Comparing what two builds draw: deterministic runs
 

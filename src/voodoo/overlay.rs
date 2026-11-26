@@ -63,10 +63,23 @@ pub fn looked_for(cpu: &mut crate::cpu::Cpu, path: &str) {
     if cpu.bus.glide_hint.replace(psp) == Some(psp) {
         return;
     }
-    let (title, detail) = if cpu.bus.voodoo.is_none() {
-        ("This game wants a 3dfx card", "Turn on 3dfx Voodoo on the settings' Emulator page (Ctrl+F12)")
-    } else {
-        ("This game needs 3dfx's GLIDE2X.OVL", "Download it on the settings' Emulator page (Ctrl+F12)")
+    // The overlay drives a Voodoo Graphics, which a Voodoo3 or Banshee as
+    // the display adapter leaves no room for: the settings window offers
+    // neither the download nor the add-on card's switch then.
+    let (title, detail) = match cpu.bus.voodoo.as_ref().map(|v| v.board.banshee().is_some()) {
+        None => (
+            "This game wants a 3dfx card",
+            "Turn on 3dfx Voodoo Graphics on the settings' Emulator page (Ctrl+F12)",
+        ),
+        Some(true) => (
+            "This game wants a 3dfx Voodoo Graphics",
+            "Pick another Video card, then turn on 3dfx Voodoo Graphics, on the settings' \
+             Emulator page (Ctrl+F12)",
+        ),
+        Some(false) => (
+            "This game needs 3dfx's GLIDE2X.OVL",
+            "Download it on the settings' Emulator page (Ctrl+F12)",
+        ),
     };
     cpu.bus.log_string(&format!("[3DFX] {}: {}", title, detail));
     cpu.bus.notices.push((title.to_string(), detail.to_string()));

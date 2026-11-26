@@ -1,19 +1,22 @@
 //! What GDI draws on: the screen (the picture in video memory, the
 //! desktop's or that of the mode DirectDraw set), a bitmap of GDI's
-//! own, or a DIB section in the program's memory. A drawing function
-//! loads the rows it draws on into a `Surface` (a blit only the columns
-//! it works on), works on their pixels as the bitmap stores them, and
-//! stores them back. The screen's rows are 32 bits a pixel here whatever
-//! the mode's depth is (16 and 24 bits are converted as they are loaded
-//! and stored), but in a mode of 256 colours they are its 8-bit pixels,
-//! indices into the system palette, as are those of GDI's 8-bit bitmaps
-//! (`device`).
+//! own, or a DIB section in the program's memory. A bitmap of GDI's has
+//! its bits in the emulator, or, in Windows 3.1's GDI heap of a program
+//! with the shim, where its device BITMAP says in the program's memory
+//! (`gdi_heap`). A drawing function loads the rows it draws on into a
+//! `Surface` (a blit only the columns it works on), works on their
+//! pixels as the bitmap stores them, and stores them back. The screen's
+//! rows are 32 bits a pixel here whatever the mode's depth is (16 and 24
+//! bits are converted as they are loaded and stored), but in a mode of
+//! 256 colours they are its 8-bit pixels, indices into the system
+//! palette, as are those of GDI's 8-bit bitmaps (`device`).
 //!
 //! Colors are COLORREFs (0x00BBGGRR); a pixel's value is what its bits
 //! say, an index into the color table for 8 bits a pixel and fewer.
 
 use super::{Rect, gdi};
 use crate::cpu::Cpu;
+use crate::win32::shims::win31::gdi_heap;
 
 /// What a surface is the pixels of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +66,10 @@ pub struct Surface {
     /// Where a DIB section's bits are, and whether its rows run top
     /// down.
     dib: Option<(u32, bool)>,
+    /// Of a bitmap whose bits live in Windows 3.1's GDI heap
+    /// (`gdi_heap::rows`): where each row loaded starts in the Win16
+    /// process's memory, None for one that isn't there.
+    heap: Option<Vec<Option<u32>>>,
     changed: bool,
     /// Of a surface whose pixels weren't read (`area_to_write`): which of
     /// those loaded were put, a row of `cols` after another, the only
@@ -156,6 +163,7 @@ impl Surface {
             device: false,
             pal_indices: None,
             dib: None,
+            heap: None,
             changed: false,
             written: None,
         }
@@ -189,6 +197,9 @@ impl Surface {
     }
 
     fn load_area_as(cpu: &mut Cpu, target: Target, area: Rect, read: bool) -> Option<Surface> {
+        if let Target::Bitmap(handle) = target {
+            gdi_heap::refresh(cpu, handle);
+        }
         let (width, height, bpp) = dimensions(cpu, target)?;
         let y0 = area.top.clamp(0, height);
         let y1 = area.bottom.clamp(y0, height);
@@ -245,11 +256,13 @@ impl Surface {
                     device,
                     pal_indices: None,
                     dib: None,
+                    heap: None,
                     changed: false,
                     written: None,
                 })
             }
             Target::Bitmap(handle) => {
+                let heap = gdi_heap::rows(cpu, handle, y0, y1);
                 let b = gdi(cpu).bitmap(handle)?;
                 let pitch = b.stride as usize;
                 let kept_masks = b.pixel_masks();
@@ -304,6 +317,19 @@ impl Surface {
                             return None;
                         }
                     }
+                    None if heap.is_some() => {
+                        let rows = heap.iter().flatten();
+                        for (r, at) in rows.enumerate() {
+                            let Some(at) = at else {
+                                continue;
+                            };
+                            let row = &mut data[r * stride..(r + 1) * stride];
+                            let at = at.wrapping_add(skip as u32);
+                            if let Some(bytes) = crate::win16::peek(cpu, at, stride) {
+                                row.copy_from_slice(&bytes);
+                            }
+                        }
+                    }
                     None => {
                         let bits = &gdi(cpu).bitmap(handle)?.bits;
                         for r in 0..rows as usize {
@@ -333,6 +359,7 @@ impl Surface {
                     device,
                     pal_indices: None,
                     dib,
+                    heap,
                     changed: false,
                     written,
                 })
@@ -402,6 +429,15 @@ impl Surface {
                         }
                     }
                     cpu.bus.guest_write_runs(&runs, &data);
+                }
+                None if self.heap.is_some() => {
+                    let rows = self.heap.iter().flatten();
+                    for (r, at) in rows.enumerate() {
+                        if let Some(at) = at {
+                            let row = &self.data[r * self.stride..(r + 1) * self.stride];
+                            crate::win16::poke(cpu, at.wrapping_add(skip as u32), row);
+                        }
+                    }
                 }
                 None => {
                     if let Some(b) = gdi(cpu).bitmap_mut(handle) {

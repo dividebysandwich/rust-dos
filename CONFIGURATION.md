@@ -21,7 +21,7 @@ of them:
 | `cpu`, `memsize` | `[emulator]` | The processor and the memory. Windows games want `cpu=pentium_ii` ([processor and speed](#processor-and-speed), [memory](#memory)) |
 | `machine` | `[emulator]` | The video card the game finds ([choosing a video card](#choosing-a-video-card)) |
 | `voodoo` | `[emulator]` | Adds a 3dfx Voodoo for DOS games' 3dfx versions ([3dfx settings](#3dfx-settings)) |
-| `voodoo_renderer`, `voodoo_scale` | `[emulator]` | Whether your CPU or your graphics card draws the 3dfx card's picture, and how sharp ([choosing a renderer](#choosing-a-renderer)) |
+| `voodoo_renderer`, `toadforce_renderer`, `voodoo_scale` | `[emulator]` | Whether your CPU or your graphics card draws the 3D of a 3dfx card (the add-on Voodoo, a Voodoo3 or a Banshee) or of a ToadForce, and how sharp a 3dfx picture is ([choosing a renderer](#choosing-a-renderer)) |
 | `fps_cap` | `[emulator]` | The most frames a second a game shows ([frame rate cap](#frame-rate-cap)) |
 | `sbtype`, `midisynth`, `soundfont` | `[sound]` | The sound card and what plays MIDI music ([`[sound]`](#sound)) |
 | `master`, `sb`, `fm`, `midi` | `[mixer]` | Volumes ([`[mixer]`](#mixer)) |
@@ -225,41 +225,27 @@ it comes. They are independent of each other:
    picture](#the-window-and-the-picture)).
 
 A different renderer doesn't change what the game finds, and a different
-card doesn't change how the window scales the picture.
+card doesn't change how the window scales the picture. The first two are
+the settings changed most. After a table of common cases come [choosing a
+video card](#choosing-a-video-card), then [what the game sees and what your
+computer does](#what-the-game-sees-and-what-your-computer-does), which
+explains how the card and the renderer differ, then [choosing a
+renderer](#choosing-a-renderer).
 
-### What the game sees and what your computer does
+### Settings for common cases
 
-A game only ever talks to the emulated card. Take GLQuake on the [built-in
-Windows](#windows-games) with `machine=svga_voodoo3`:
-
-* GLQuake draws with OpenGL. It calls the OpenGL of the Windows it runs on,
-  which turns its calls into triangles for the emulated Voodoo3, as 3dfx's
-  OpenGL driver did on a real card. As far as GLQuake can tell, it draws
-  with OpenGL on a 3dfx card.
-* Rust-DOS then makes the Voodoo3's picture from those triangles. With
-  `voodoo_renderer=software`, the default, its own rasterizer draws every
-  triangle on your CPU, pixel for pixel as the card would. Your graphics
-  card takes no part in the game's 3D: GLQuake's OpenGL picture is made
-  entirely by the CPU, and it runs on a computer whose graphics driver has
-  no OpenGL at all.
-* With `voodoo_renderer=opengl`, Rust-DOS draws the same triangles again
-  with your graphics card, through your computer's OpenGL, at `voodoo_scale`
-  times the card's resolution.
-
-"OpenGL" thus names two unrelated things here. One is the interface a game
-draws with, which the game and the emulated card decide: Glide, Direct3D or
-OpenGL. The other is one of the two renderers Rust-DOS can use on your
-computer. Either renderer draws any of the interfaces: a Glide game with
-`voodoo_renderer=opengl` uses your graphics card, and GLQuake with
-`voodoo_renderer=software` doesn't.
-
-The 2D picture, which is DOS's text and graphics modes, VESA modes,
-DirectDraw and the Windows desktop, is drawn by the CPU into the emulated
-card's memory, as the real card's memory held it. A ToadForce drawn with
-OpenGL is the exception: its fills and copies into the surfaces its 3D
-draws into run on your graphics card. The window then scales the picture up
-with OpenGL 3, which costs your graphics card little; without OpenGL 3, SDL's
-renderer scales it and the CRT shaders aren't there.
+| You want | Set in `[emulator]` |
+|---|---|
+| A DOS game | Nothing: `machine=svga` and `cycles=auto` are the defaults |
+| A DOS game's 3dfx version | `voodoo=true` and `cpu=pentium`, and `voodoo_model=voodoo2` for a game made for the Voodoo2 |
+| A Windows 95 or 98 game | `machine=svga_voodoo3` and `cpu=pentium_ii`, with the other settings in [Windows games](#a-profile-to-start-from) |
+| A Windows game that needs hardware transform and lighting or 32-bit colour | `machine=svga_toadforce` |
+| A sharper 3dfx picture | `voodoo_renderer=opengl`, with `voodoo_scale=3` or `4` and `voodoo_msaa=4` |
+| A 3dfx game that runs slowly on a laptop | `voodoo_renderer=software` (the default), or `opengl` with `voodoo_scale=1`; compare them on the Stats page |
+| Crisp, even pixels | `filter=sharp` (the default) and `aspect=4:3` |
+| The look of a monitor of the time | `shader=crt`, `aperture` or `scanlines`, at `scale=3` or more |
+| Smoothed pixel art | `shader=xbrz` |
+| An even frame rate without tearing | `vrr=true` on a G-Sync or FreeSync display |
 
 ### Choosing a video card
 
@@ -322,6 +308,121 @@ tried.
 `machine` and the 3D cards take effect at the DOS prompt, so a game isn't
 left without the card it set up.
 
+### What the game sees and what your computer does
+
+A game only ever talks to the emulated card. Take GLQuake on the [built-in
+Windows](#windows-games) with `machine=svga_voodoo3`:
+
+* GLQuake draws with OpenGL. It calls the OpenGL of the Windows it runs on,
+  which turns its calls into triangles for the emulated Voodoo3, as 3dfx's
+  OpenGL driver did on a real card. As far as GLQuake can tell, it draws
+  with OpenGL on a 3dfx card.
+* Rust-DOS then makes the Voodoo3's picture from those triangles. With
+  `voodoo_renderer=software`, the default, its own rasterizer draws every
+  triangle on your CPU, pixel for pixel as the card would. Your graphics
+  card takes no part in the game's 3D: GLQuake's OpenGL picture is made
+  entirely by the CPU, and it runs on a computer whose graphics driver has
+  no OpenGL at all.
+* With `voodoo_renderer=opengl`, Rust-DOS draws the same triangles again
+  with your graphics card, through your computer's OpenGL, at `voodoo_scale`
+  times the card's resolution.
+
+"OpenGL" thus names two unrelated things here. One is the interface a game
+draws with, which the game and the emulated card decide: Glide, Direct3D or
+OpenGL. The other is one of the two renderers Rust-DOS can use on your
+computer. Either renderer draws any of the interfaces: a Glide game with
+`voodoo_renderer=opengl` uses your graphics card, and GLQuake with
+`voodoo_renderer=software` doesn't.
+
+The 2D picture, which is DOS's text and graphics modes, VESA modes,
+DirectDraw and the Windows desktop, is drawn by the CPU into the emulated
+card's memory, as the real card's memory held it. Two cards drawn with
+OpenGL are the exception, and draw some 2D on your graphics card: a
+ToadForce its fills and copies into the surfaces its 3D draws into, and a
+Voodoo3 or Banshee the built-in Windows' blits, fills and window updates
+in its memory, and under any Windows its 2D engine's fills and copies
+that touch the 3D's picture. The window then scales the picture up with
+OpenGL 3, which costs your graphics card little; without OpenGL 3, SDL's
+renderer scales it and the CRT shaders aren't there.
+
+### Choosing a renderer
+
+The renderer is what draws the emulated card's 3D on your computer: your
+CPU, or your graphics card through OpenGL. The game can't tell which, as
+[above](#what-the-game-sees-and-what-your-computer-does) explains. Beside
+`machine`, it is the setting to change when a game runs slowly or you want
+a sharper picture. Which setting chooses it depends on the card:
+
+| Card | What can draw its 3D | Setting |
+|---|---|---|
+| Voodoo Graphics, Voodoo2 (`voodoo=true`) | CPU or graphics card | `voodoo_renderer` |
+| Voodoo3, Banshee (`machine=svga_voodoo3`, `svga_banshee`) | CPU or graphics card, with the built-in Windows' blits, fills and window updates in its memory, and its 2D engine's fills and copies on the 3D's picture | `voodoo_renderer`, the same setting as the add-on cards' |
+| ToadForce (`machine=svga_toadforce`) | CPU or graphics card, with its fills and copies | `toadforce_renderer` |
+| S3 ViRGE, Vérité, ATI 3D RAGE, PowerVR | CPU only | None |
+| `svga` and the other 2D adapters | No 3D; the CPU draws the 2D picture | None |
+
+How the two renderers compare:
+
+| | CPU (`software`) | Graphics card (`opengl`) |
+|---|---|---|
+| Default for | The 3dfx cards (`voodoo_renderer=software`) | The ToadForce (`toadforce_renderer=auto` uses OpenGL where the window has it) |
+| Resolution | The card's own, such as 640x480 | 3dfx: `voodoo_scale` times the card's resolution, 2x by default, up to 4x. ToadForce: the resolution the game sets |
+| What it adds | Nothing: the card's picture as it was | 3dfx: antialiasing (`voodoo_msaa`), sharper textures at an angle (`voodoo_anisotropy`) and smooth colour without the card's dither pattern (`voodoo_dither=false`) |
+| Exactness | Pixel for pixel as the card drew | Within a step or two of a colour channel. What a game reads back from the card differs in small ways, unless `voodoo_readback=exact` |
+| Needs | Nothing | OpenGL 3.2 from your graphics driver. Without it the CPU draws, and the log says why |
+| Load on your computer | CPU time: the 3dfx cards draw on up to four threads of their own, beside the thread that runs the game | Graphics card time, and waits for it each time something reads the picture back |
+
+Start with the default. Then compare the two on the game you play: the
+settings window's **Stats** page, or the overlay **Ctrl+Shift+F12** shows,
+has the frames a second (**FPS**) and how much of a host core the emulator
+takes (**CPU**). Both renderers change at once, while the game runs.
+
+The graphics card is often the faster choice, but not always, because the
+OpenGL renderer does more work than the card it draws for:
+
+* At the default `voodoo_scale=2` it draws four times the card's pixels, at
+  4x sixteen times, and `voodoo_msaa` multiplies that by its samples.
+* Each time the game or Rust-DOS reads the card's memory, Rust-DOS waits for
+  the graphics card to finish and copies the pixels back. Games that read
+  back their frame buffer, a Voodoo3's 2D engine working on the 3D's
+  picture, screenshots and save states all do that.
+* A blended triangle in a game that dithers needs a barrier or a copy of the
+  picture before it is drawn ([the 3dfx OpenGL
+  renderer](#the-3dfx-opengl-renderer)).
+
+A weak integrated graphics chip, such as an older laptop's, can take longer
+for that than a modern CPU takes to draw the card's 640x480 itself. On such
+a computer try `voodoo_scale=1` first, and if the game is still slower than
+with `software`, keep `software`. On a dedicated graphics card, `opengl` at
+2x to 4x costs little and gives a much sharper picture. A computer with a
+slow CPU and a capable graphics card gains the most from `opengl`, since it
+leaves the CPU to the emulated machine.
+
+For many games neither renderer is what holds them back: the emulated CPU
+is. Oni, a Voodoo2 game, ran at the same frame rate with the OpenGL
+renderer's dithering on and off, as the emulated CPU held it back ([the
+3dfx OpenGL renderer](#the-3dfx-opengl-renderer)). The **CPU** figure on the
+Stats page doesn't tell this case apart. It is how busy the emulator's main
+thread is, and that thread runs the machine and, with `opengl`, also draws
+the 3dfx card's picture and waits for what is read back from it, so near
+100% fits either limit. The page's **Render** time doesn't tell it either:
+it counts the 2D picture only. Switch the renderer and watch **FPS**: when
+it stays the same, the machine is the limit, and a different renderer won't
+help.
+
+The ToadForce's games draw more than the 3dfx cards' do, and the CPU is too
+slow for some of them at their usual resolutions: with
+`toadforce_renderer=software`, choose a lower resolution in the game. Keep
+`software` for a game whose picture looks wrong with OpenGL, and report the
+game.
+
+A run with `--deterministic` always draws on the CPU, whatever the settings,
+so that its pictures are the same on every computer. The libretro core draws
+a Banshee or Voodoo3 on the CPU whatever `voodoo_renderer` says. It draws a
+Voodoo Graphics or Voodoo2 with the frontend's OpenGL when
+`voodoo_renderer=opengl` and the frontend has OpenGL 3, and on the CPU
+otherwise ([its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
+
 ### What each card can draw
 
 Games of the time drew 3D through one of a few interfaces, and a game only
@@ -379,91 +480,6 @@ What sets the two Windows-era cards apart, for a game that runs on both:
 
 Neither card, nor any other `machine`, has pixel shaders. A game that needs
 them doesn't draw its 3D in Rust-DOS.
-
-### Choosing a renderer
-
-Only two kinds of card let you choose what draws their 3D on your computer:
-the 3dfx cards, with `voodoo_renderer`, and the ToadForce, with
-`toadforce_renderer`. The S3 ViRGE, the Vérité, the ATI 3D RAGE and the
-PowerVR always draw on the CPU.
-
-| | CPU (`software`) | Graphics card (`opengl`) |
-|---|---|---|
-| Default for | The 3dfx cards (`voodoo_renderer=software`) | The ToadForce (`toadforce_renderer=auto` uses OpenGL where the window has it) |
-| Resolution | The card's own, such as 640x480 | 3dfx: `voodoo_scale` times the card's resolution, 2x by default, up to 4x. ToadForce: the resolution the game sets |
-| What it adds | Nothing: the card's picture as it was | 3dfx: antialiasing (`voodoo_msaa`), sharper textures at an angle (`voodoo_anisotropy`) and smooth colour without the card's dither pattern (`voodoo_dither=false`) |
-| Exactness | Pixel for pixel as the card drew | Within a step or two of a colour channel. What a game reads back from the card differs in small ways, unless `voodoo_readback=exact` |
-| Needs | Nothing | OpenGL 3.2 from your graphics driver. Without it the CPU draws, and the log says why |
-| Load on your computer | CPU time: the 3dfx cards draw on up to four threads of their own, beside the thread that runs the game | Graphics card time, and waits for it each time something reads the picture back |
-
-Start with the default. Then compare the two on the game you play: the
-settings window's **Stats** page, or the overlay **Ctrl+Shift+F12** shows,
-has the frames a second (**FPS**) and how much of a host core the emulator
-takes (**CPU**). Both renderers change at once, while the game runs. On a
-Voodoo3 or Banshee the settings window doesn't offer `voodoo_renderer` yet
-([#821](https://github.com/dividebysandwich/rust-dos/issues/821)): set it in
-the configuration file and start again.
-
-The graphics card is often the faster choice, but not always, because the
-OpenGL renderer does more work than the card it draws for:
-
-* At the default `voodoo_scale=2` it draws four times the card's pixels, at
-  4x sixteen times, and `voodoo_msaa` multiplies that by its samples.
-* Each time the game or Rust-DOS reads the card's memory, Rust-DOS waits for
-  the graphics card to finish and copies the pixels back. Games that read
-  back their frame buffer, a Voodoo3's 2D engine working on the 3D's
-  picture, screenshots and save states all do that.
-* A blended triangle in a game that dithers needs a barrier or a copy of the
-  picture before it is drawn ([the 3dfx OpenGL
-  renderer](#the-3dfx-opengl-renderer)).
-
-A weak integrated graphics chip, such as an older laptop's, can take longer
-for that than a modern CPU takes to draw the card's 640x480 itself. On such
-a computer try `voodoo_scale=1` first, and if the game is still slower than
-with `software`, keep `software`. On a dedicated graphics card, `opengl` at
-2x to 4x costs little and gives a much sharper picture. A computer with a
-slow CPU and a capable graphics card gains the most from `opengl`, since it
-leaves the CPU to the emulated machine.
-
-For many games neither renderer is what holds them back: the emulated CPU
-is. Oni, a Voodoo2 game, ran at the same frame rate with the OpenGL
-renderer's dithering on and off, as the emulated CPU held it back ([the
-3dfx OpenGL renderer](#the-3dfx-opengl-renderer)). The **CPU** figure on the
-Stats page doesn't tell this case apart. It is how busy the emulator's main
-thread is, and that thread runs the machine and, with `opengl`, also draws
-the 3dfx card's picture and waits for what is read back from it, so near
-100% fits either limit. The page's **Render** time doesn't tell it either:
-it counts the 2D picture only. Switch the renderer and watch **FPS**: when
-it stays the same, the machine is the limit, and a different renderer won't
-help.
-
-The ToadForce's games draw more than the 3dfx cards' do, and the CPU is too
-slow for some of them at their usual resolutions: with
-`toadforce_renderer=software`, choose a lower resolution in the game. Keep
-`software` for a game whose picture looks wrong with OpenGL, and report the
-game.
-
-A run with `--deterministic` always draws on the CPU, whatever the settings,
-so that its pictures are the same on every computer. The libretro core draws
-a Banshee or Voodoo3 on the CPU whatever `voodoo_renderer` says. It draws a
-Voodoo Graphics or Voodoo2 with the frontend's OpenGL when
-`voodoo_renderer=opengl` and the frontend has OpenGL 3, and on the CPU
-otherwise ([its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
-
-### Settings for common cases
-
-| You want | Set in `[emulator]` |
-|---|---|
-| A DOS game | Nothing: `machine=svga` and `cycles=auto` are the defaults |
-| A DOS game's 3dfx version | `voodoo=true` and `cpu=pentium`, and `voodoo_model=voodoo2` for a game made for the Voodoo2 |
-| A Windows 95 or 98 game | `machine=svga_voodoo3` and `cpu=pentium_ii`, with the other settings in [Windows games](#a-profile-to-start-from) |
-| A Windows game that needs hardware transform and lighting or 32-bit colour | `machine=svga_toadforce` |
-| A sharper 3dfx picture | `voodoo_renderer=opengl`, with `voodoo_scale=3` or `4` and `voodoo_msaa=4` |
-| A 3dfx game that runs slowly on a laptop | `voodoo_renderer=software` (the default), or `opengl` with `voodoo_scale=1`; compare them on the Stats page |
-| Crisp, even pixels | `filter=sharp` (the default) and `aspect=4:3` |
-| The look of a monitor of the time | `shader=crt`, `aperture` or `scanlines`, at `scale=3` or more |
-| Smoothed pixel art | `shader=xbrz` |
-| An even frame rate without tearing | `vrr=true` on a G-Sync or FreeSync display |
 
 ### The window and the picture
 
@@ -570,10 +586,11 @@ only with `voodoo_renderer=opengl`.
 `voodoo`, `voodoo_model`, `voodoo_memory` and `voodoo_gamma` take effect at
 the DOS prompt, the others at once. The settings window's Emulator page has
 them as *3dfx Voodoo Graphics*, *3dfx card* (the chip and the memory
-together), *3dfx drawn by* and the *3dfx* settings after it. They show only
-while *3dfx Voodoo Graphics* is on; on a Voodoo3 or Banshee, set them in the
-configuration file
-([#821](https://github.com/dividebysandwich/rust-dos/issues/821)).
+together), *3dfx drawn by* and the *3dfx* settings after it. The window
+shows the ones the machine's 3dfx card uses: with the add-on card, all of
+them; with a Voodoo3 or Banshee, *3dfx drawn by*, texture sampling and the
+OpenGL settings, but not the add-on card's switch, memory or gamma. The
+OpenGL settings show while *3dfx drawn by* is OpenGL.
 
 With anisotropic filtering on, `voodoo_texture_sampling=unfiltered` also
 blends between mip levels and lets the anisotropic filter reduce shimmer,
@@ -2017,8 +2034,9 @@ order.
   Windows 98 doesn't: `none` (the default), `win31` or `win32s`.
   `win31` has Windows 3.1's GDI heap, which TOOLHELP's SystemHeapInfo
   gives as hGDISegment, with each bitmap's object and device BITMAP in
-  it as Windows 3.1's GDI kept them, and 16-bit BitBlt drawing what a
-  program wrote there. `win32s` has those and Win32s's GlobalFlags,
+  it as Windows 3.1's GDI kept them, and GDI reading and drawing the
+  bitmap's pixels where its device BITMAP says, which a program may
+  point at its own buffer. `win32s` has those and Win32s's GlobalFlags,
   which leaves out the lock count. The [game fixes](#game-fixes) give
   them to the programs known to need them; the setting is for others. A
   16-bit program that asks for GDI's heap without the shim gets a line
@@ -2965,7 +2983,7 @@ profile:
 | `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both. With `svga_toadforce` the machine has a Pentium III without the line |
 | `memsize` | leave it out, or `128` for a 3D game from 1998 on | Without it a Pentium II has 64 MB, which most Windows 98 games asked for (the default 486 has 16 MB). The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
-| `win32_depth` | `8` only for a game that says it needs 256 colours, `16` for one that says it needs 16 bits | The default desktop has the card's own depth (16 bits on a Voodoo3, 32 on an S3 Trio, 24 on a ViRGE). A GDI game that draws with a palette needs `8`. A game that checks the desktop's depth before it sets its own mode, such as Moto Racer, needs `16` on a card whose desktop is deeper. Other DirectDraw games set their own mode and don't need it |
+| `win32_depth` | `8` only for a game that says it needs 256 colours, `16` for one that says it needs 16 bits | The default desktop has the card's own depth (16 bits on a Voodoo3, 32 on an S3 Trio, 24 on a ViRGE). A GDI game that draws with a palette needs `8`. A game that checks the desktop's depth before it sets its own mode, such as Moto Racer, needs `16` on a card whose desktop is deeper. Other DirectDraw games set their own mode and don't need it, except on a Voodoo2 add-on card: a game that sets its mode there leaves the 2D card's desktop as it was, and Omikron's movies, which take their format from that desktop, then need `16` ([docs/compatibility.md](docs/compatibility.md#windows-games-on-the-built-in-windows)) |
 | `win32_desktop` | `800x600` only for a game that says it needs that screen resolution | The desktop is 640x480 by default. A game that checks the desktop's size before it starts, such as Fields of Fire, needs `800x600` (or `1024x768`, if it asks for that). Games that set their own mode with DirectDraw don't need it |
 | `cycles` | leave it at `auto` | The game's timers follow the emulated clock, and `auto` finds the speed its frames need |
 

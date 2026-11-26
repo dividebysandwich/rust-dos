@@ -2194,8 +2194,11 @@ impl Cpu {
             crate::mcb::name_program(&mut self.bus, self.current_psp, filename);
         }
         // A program started by another keeps what that one has, unless it
-        // brings its own host.
-        let own = loaded && crate::dpmi::passes_over(bytes);
+        // brings its own host. In a DOS machine of the built-in Windows the
+        // host is Windows', which no DOS extender gets past.
+        let own = loaded
+            && !crate::win32::dosvm::running(&self.bus.win32)
+            && crate::dpmi::passes_over(bytes);
         if loaded && (own || !matches!(placement, Placement::Child(_))) {
             if own && self.bus.dpmi.enabled {
                 self.bus.log_string("[DPMI] The program loads Glide's DOS overlay: DOS/4GW is its own DPMI host");

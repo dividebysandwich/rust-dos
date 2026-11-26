@@ -4,11 +4,19 @@
 //! A texture's levels are a DirectDraw texture surface with its mipmap
 //! chain, made when level 0 is given: 5-6-5 for a texture without alpha
 //! and 4-4-4-4 for one with it, the formats 3dfx's ICD kept textures in
-//! for the card. It is in video memory while there is room past what
-//! the HAL's texture heap needs, where the card samples it in place, or
-//! in system memory, which the HAL copies into its heap as it draws.
-//! The program's texels are converted as they are given.
+//! for the card. On a Banshee or Voodoo3 it is in video memory while
+//! there is room past what the HAL's texture heap needs, where the card
+//! samples it in place, or in system memory, which the HAL copies into
+//! its heap as it draws. On a Voodoo2 it is always in system memory,
+//! which the HAL copies into the texture units' memory as it draws. On
+//! a ToadForce it is always in system memory too, and the HAL keeps
+//! copies of the textures drawn with in the card's free memory, letting
+//! the least recently used go when it needs room: the card's memory is
+//! a cache of the textures, as a driver's texture manager keeps it,
+//! whatever order the program made them in. The program's texels are
+//! converted as they are given.
 
+use super::super::ddraw::d3d::hal;
 use super::super::ddraw::directdraw;
 use super::super::ddraw::surface::{
     self as dd_surface, DDPF_ALPHAPIXELS, DDPF_RGB, DDSCAPS_COMPLEX, DDSCAPS_MIPMAP,
@@ -653,8 +661,13 @@ fn make_surface(
         .map(|l| (width >> l).max(1) * (height >> l).max(1) * 2)
         .sum();
     // On the Voodoo2 they are in system memory, and the HAL copies them
-    // into the texture units' memory as it draws with them.
-    let memory = if !directdraw::is_card(cpu, dd) && video_room(cpu, size) {
+    // into the texture units' memory as it draws with them. On a
+    // ToadForce too, where the HAL's copies may take all of the card's
+    // free memory: in video memory, the textures made first would keep
+    // it for good, and a scene drawn with ones made later would copy
+    // them through what is left again each frame.
+    let cached = directdraw::is_card(cpu, dd) || hal::toadforce::there(cpu);
+    let memory = if !cached && video_room(cpu, size) {
         DDSCAPS_VIDEOMEMORY
     } else {
         DDSCAPS_SYSTEMMEMORY
