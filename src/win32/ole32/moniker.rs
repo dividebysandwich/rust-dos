@@ -30,7 +30,7 @@
 //! Copyright 1999 Noomen Hamza
 //! Copyright 2007 Robert Shearman
 
-use super::compobj::{ADD_REF, call_each};
+use super::compobj::{ADD_REF, RELEASE, call_each};
 use super::{dll_index, rpc, state, task_alloc, vtable};
 use crate::cpu::Cpu;
 use crate::win32::com::{
@@ -596,7 +596,10 @@ pub fn rot_register(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(hr)
 }
 
-/// IRunningObjectTable::Revoke(this, cookie).
+/// IRunningObjectTable::Revoke(this, cookie). The table's reference to
+/// the object goes before Revoke returns, when it is the last and the
+/// object is of this thread, so a program that waits for the object to
+/// go after revoking it isn't kept waiting for its messages.
 pub fn rot_revoke(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[this, cookie] = args else {
         unreachable!()
@@ -609,8 +612,10 @@ pub fn rot_revoke(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_INVALIDARG);
     };
     let e = rot.entries.remove(i);
-    rpc::let_go(cpu, e.export);
-    Some(S_OK)
+    match rpc::let_go(cpu, e.export) {
+        Some(object) => call_each(cpu, S_OK, RELEASE, [object].into_iter()),
+        None => Some(S_OK),
+    }
 }
 
 /// IRunningObjectTable::IsRunning(this, moniker).

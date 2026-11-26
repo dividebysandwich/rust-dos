@@ -364,9 +364,21 @@ pub fn hold(cpu: &mut Cpu, object: u32) -> (u32, bool) {
     export_object(cpu, object, &com::IID_IUNKNOWN, true)
 }
 
-/// Let go of the reference `hold` took to the export `id`.
-pub fn let_go(cpu: &mut Cpu, id: u32) {
+/// Let go of the reference `hold` took to the export `id`. When it was
+/// the last and the object is of the running thread, the export goes
+/// and the object comes back for the caller to Release now, as Windows
+/// releases it within Revoke. Otherwise the object's thread is sent the
+/// Release as for any export.
+pub fn let_go(cpu: &mut Cpu, id: u32) -> Option<u32> {
+    let tid = current_tid(cpu);
+    let e = export(cpu, id)?;
+    if e.refs == 1 && e.owned && e.tid == tid {
+        let object = e.object;
+        rpc(cpu).exports.retain(|e| e.id != id);
+        return Some(object);
+    }
     release_export(cpu, id, 1);
+    None
 }
 
 /// A proxy in the running process of the export `id` a holder keeps,
