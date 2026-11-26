@@ -385,7 +385,6 @@ impl DiskController {
             let parts = refs(&parts);
             // A file is no folder to remove: access denied (05h).
             match volume.find(&parts) {
-                _ if parts.is_empty() => return Err(0x03),
                 Ok(entry) if !entry.is_dir() => return Err(0x05),
                 Ok(_) => {}
                 Err(_) => return Err(0x03),
@@ -393,6 +392,11 @@ impl DiskController {
             self.check_writable(drive_num)?;
             if self.drive(drive_num).is_some_and(|d| canonical_path(&parts) == d.current_dir) {
                 return Err(0x10);
+            }
+            // The root, when it isn't the current directory, stays as on
+            // a host drive, where removing it fails: access denied (05h).
+            if parts.is_empty() {
+                return Err(0x05);
             }
             return volume.rmdir(&parts);
         }

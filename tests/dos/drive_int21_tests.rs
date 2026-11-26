@@ -1073,7 +1073,11 @@ fn file_calls_answer_as_ms_dos_does() {
         cpu.set_cx(0x20);
         cpu.set_cpu_flag(CpuFlags::CF, false);
         int21::handle(&mut cpu);
-        let got = if cf(&cpu) { Err(cpu.ax()) } else { Ok(cpu.ax()) };
+        let got = if cf(&cpu) {
+            Err(cpu.ax())
+        } else {
+            Ok(cpu.ax())
+        };
         assert_eq!(got, want, "AX={call:04X} {name}");
         if call == 0x4300 && !cf(&cpu) {
             assert_eq!(cpu.cx(), cpu.ax(), "AX={call:04X} {name}");

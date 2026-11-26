@@ -1020,8 +1020,10 @@ pub fn unlink(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// rename(old, new).
 pub fn rename(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let from = dos_path(&cstr(cpu, args[0])?);
-    let to = dos_path(&cstr(cpu, args[1])?);
+    // A folder may be named with a slash at its end ("SAVES\"), as
+    // MoveFileA takes it, where DOS's rename refuses one (`rename_file`).
+    let from = trim_folder_slash(dos_path(&cstr(cpu, args[0])?));
+    let to = trim_folder_slash(dos_path(&cstr(cpu, args[1])?));
     // The same name in another case renames it, as MoveFileA does, and so
     // does another name of the file itself, its alias.
     let disk = &mut cpu.bus.disk;
@@ -1033,9 +1035,21 @@ pub fn rename(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     dos_result(cpu, result)
 }
 
+/// `path` without the one slash that ends a folder's name ("SAVES\"),
+/// which the Win32 calls take and DOS's refuse (`ends_in_separator`). A
+/// root ("C:\", "\") keeps it.
+fn trim_folder_slash(path: String) -> String {
+    match path.strip_suffix('\\') {
+        Some(dir) if !dir.is_empty() && !dir.ends_with([':', '\\']) => dir.to_string(),
+        _ => path,
+    }
+}
+
 /// _mkdir(path).
 pub fn mkdir(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let path = dos_path(&cstr(cpu, args[0])?);
+    // _mkdir is CreateDirectoryA's, which takes a name that ends in a
+    // slash, where DOS's MKDIR refuses it (`create_directory`).
+    let path = trim_folder_slash(dos_path(&cstr(cpu, args[0])?));
     if cpu.bus.disk.exists(&path) {
         set_errno(cpu, EEXIST);
         set_doserrno(cpu, 183);
