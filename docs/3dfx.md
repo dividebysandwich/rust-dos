@@ -51,9 +51,15 @@ Voodoo3's two, and Windows 98's CD has a driver for it.
    asking, and puts its `GLIDE2X.OVL` on Z:, which is on the PATH. A copy
    beside the game comes first.
 
-The overlay only loads with DOS/4GW as its own DPMI host. Rust-DOS
-recognises a program that loads it and lets the DOS/4GW the game brings
-run in place of rust-dos's DPMI host, with no setting to change.
+On plain DOS the overlay loads with DOS/4GW as its own DPMI host, as on
+a real machine's DOS, which has no DPMI host. Rust-DOS recognises a
+program that loads it and lets the DOS/4GW the game brings run in place
+of rust-dos's DPMI host, with no setting to change. A game started from
+a Windows program on the [built-in Windows](builtin-windows.md), such as
+Redguard's 3dfx version from its launcher, runs in a Windows DOS box
+with the built-in Windows' DPMI host, as on Windows 98. There the
+overlay loads only if the game passes it its PSP through INT E9h's
+vector, which Redguard does.
 
 ## Windows on a booted image
 
