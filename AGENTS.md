@@ -218,8 +218,7 @@ while it runs.
   long holder makes the run give up and retry instead of stalling
   everyone behind it. A waiting exclusive request already keeps new
   shared jobs out, so without `--wait` a measurement queued behind a
-  long run holds up every build and test that comes after it (on
-  2026-11-26 the Redguard fixes' builds and review waited this way).
+  long run holds up every build and test that comes after it.
 - A save state made by main can carry main's state of the thing the
   change moves into the branch's run: a texture's placement in the
   card's memory, for one. Compare from states each build saved itself,
