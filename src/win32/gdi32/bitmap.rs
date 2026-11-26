@@ -10,6 +10,7 @@ use super::{
 };
 use crate::cpu::Cpu;
 use crate::savestate::Since;
+use crate::win32::shims::win31::gdi_heap;
 use crate::win32::user32::{read_words, write_words};
 
 const BI_RGB: u32 = 0;
@@ -20,7 +21,7 @@ const DIB_RGB_COLORS: u32 = 0;
 const DIB_PAL_COLORS: u32 = 1;
 const CBM_INIT: u32 = 4;
 /// The most bytes a bitmap's pixels take.
-const MAX_BITS: usize = 64 << 20;
+pub const MAX_BITS: usize = 64 << 20;
 
 /// A DIB's header, as a BITMAPINFO at an address says it.
 #[derive(Clone, Debug, Default)]
@@ -226,13 +227,20 @@ fn round_depth(bpp: u32) -> Option<u16> {
 /// A new bitmap of GDI's, its pixels 0, in the display's format for its
 /// depth.
 pub fn new_ddb(cpu: &mut Cpu, width: i32, height: i32, bpp: u16) -> u32 {
-    let masks = surface::ddb_masks(cpu, bpp as u32);
-    let display = bpp as u32 == super::dc::device_depth(cpu);
-    new_ddb_in(cpu, width, height, bpp, masks, display)
+    new_ddb_with(cpu, width, height, bpp, &[])
 }
 
-/// A new bitmap of GDI's, its pixels 0, of `masks`, and of the display
-/// if `display` (`Bitmap::display`).
+/// A new bitmap of GDI's, its rows `init` (those it hasn't 0), in the
+/// display's format for its depth. It has them when it joins Windows
+/// 3.1's GDI heap, which copies them.
+pub fn new_ddb_with(cpu: &mut Cpu, width: i32, height: i32, bpp: u16, init: &[u8]) -> u32 {
+    let masks = surface::ddb_masks(cpu, bpp as u32);
+    let display = bpp as u32 == super::dc::device_depth(cpu);
+    new_ddb_in(cpu, width, height, bpp, masks, display, init)
+}
+
+/// A new bitmap of GDI's, its rows `init` (those it hasn't 0), of
+/// `masks`, and of the display if `display` (`Bitmap::display`).
 fn new_ddb_in(
     cpu: &mut Cpu,
     width: i32,
@@ -240,6 +248,7 @@ fn new_ddb_in(
     bpp: u16,
     masks: [u32; 3],
     display: bool,
+    init: &[u8],
 ) -> u32 {
     let stride = surface::ddb_stride(width, bpp as u32) as u32;
     let size = stride as usize * height as usize;
@@ -247,6 +256,9 @@ fn new_ddb_in(
         set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
         return 0;
     }
+    let mut bits = vec![0; size];
+    let n = size.min(init.len());
+    bits[..n].copy_from_slice(&init[..n]);
     add(
         cpu,
         Kind::Bitmap {
@@ -256,7 +268,7 @@ fn new_ddb_in(
                 bpp,
                 planes: 1,
                 stride,
-                bits: vec![0; size],
+                bits,
                 masks: Since(masks),
                 display: Since(display),
                 ..Bitmap::default()
@@ -285,16 +297,13 @@ pub fn create_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     };
-    let handle = new_ddb(cpu, w, h, depth);
-    if handle != 0 && bits != 0 {
-        let size = gdi(cpu).bitmap(handle).map_or(0, |b| b.bits.len());
-        let mut data = vec![0u8; size];
+    let size = surface::ddb_stride(w, depth as u32) * h as usize;
+    let mut data = Vec::new();
+    if bits != 0 && size <= MAX_BITS {
+        data.resize(size, 0);
         cpu.bus.guest_read_bytes(bits, &mut data);
-        if let Some(b) = gdi(cpu).bitmap_mut(handle) {
-            b.bits = data;
-        }
     }
-    Some(handle)
+    Some(new_ddb_with(cpu, w, h, depth, &data))
 }
 
 /// CreateBitmapIndirect(bitmap).
@@ -346,7 +355,7 @@ pub fn create_compatible_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         // A bitmap of GDI's in the format of the one selected, which
         // may be the desktop's in a mode DirectDraw set.
-        return Some(new_ddb_in(cpu, w, h, b.bpp, *b.masks, *b.display));
+        return Some(new_ddb_in(cpu, w, h, b.bpp, *b.masks, *b.display, &[]));
     }
     let depth = super::dc::device_depth(cpu) as u16;
     Some(new_ddb(cpu, w, h, depth))
@@ -566,10 +575,32 @@ fn bitmap_surface(cpu: &mut Cpu, handle: u32) -> Option<Surface> {
     Surface::load_all(cpu, Target::Bitmap(handle))
 }
 
+/// The bitmap `handle`'s header, with the size its surface loads with:
+/// in Windows 3.1's GDI heap, the size its device BITMAP says, which the
+/// program may have changed since (`gdi_heap::refresh`). A size taken
+/// before the surface is loaded would index rows it doesn't have.
+fn header(cpu: &mut Cpu, handle: u32) -> Option<Bitmap> {
+    gdi_heap::refresh(cpu, handle);
+    gdi(cpu).bitmap(handle).map(|b| b.clone_header())
+}
+
 /// GetBitmapBits(bitmap, count, bits): its rows, top first, each a whole
 /// number of words.
 pub fn get_bitmap_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (handle, count, out) = (args[0], args[1] as usize, args[2]);
+    // In Windows 3.1's GDI heap, the bitmap's own bits, at the size it was
+    // made with (`gdi_heap::own_bits`). Asking for the size alone leaves
+    // bmBits where the program put it.
+    if out == 0
+        && let Some(size) = gdi_heap::own_size(cpu, handle)
+    {
+        return Some(size as u32);
+    }
+    if let Some((bits, scan)) = gdi_heap::own_bits(cpu, handle) {
+        let n = (count / scan.max(1) * scan).min(bits.len());
+        cpu.bus.guest_write_bytes(out, &bits[..n]);
+        return Some(n as u32);
+    }
     let Some(b) = gdi(cpu).bitmap(handle).map(|b| b.clone_header()) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
@@ -595,6 +626,18 @@ pub fn get_bitmap_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// SetBitmapBits(bitmap, count, bits).
 pub fn set_bitmap_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (handle, count, at) = (args[0], args[1] as usize, args[2]);
+    // In Windows 3.1's GDI heap, the bitmap's own bits, at the size it was
+    // made with, as GetBitmapBits.
+    if let Some((bits, scan)) = gdi_heap::own_bits(cpu, handle) {
+        let n = (count / scan.max(1) * scan).min(bits.len());
+        let mut data = vec![0u8; n];
+        cpu.bus.guest_read_bytes(at, &mut data);
+        if cpu.bus.guest_faulted() {
+            return None;
+        }
+        gdi_heap::set_own_bits(cpu, handle, &data);
+        return Some(n as u32);
+    }
     let Some(b) = gdi(cpu).bitmap(handle).map(|b| b.clone_header()) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
@@ -662,7 +705,13 @@ pub fn get_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         );
         return Some(0);
     }
-    let Some(b) = gdi(cpu).bitmap(handle).map(|b| b.clone_header()) else {
+    // In Windows 3.1's GDI heap, bmBits points at the bitmap's own bits
+    // again, which it reads at the size the device BITMAP says. A call
+    // that asks only for the format reads no bits and leaves bmBits be.
+    if out != 0 {
+        gdi_heap::repoint(cpu, handle);
+    }
+    let Some(b) = header(cpu, handle) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
     };
@@ -1236,7 +1285,7 @@ pub fn set_bitmap_dimension_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// A pattern brush's pattern from the bitmap `handle`: at most 8x8 on
 /// Windows 95, which uses the bitmap's top-left corner.
 pub fn pattern_of(cpu: &mut Cpu, handle: u32) -> Option<Pattern> {
-    let b = gdi(cpu).bitmap(handle)?.clone_header();
+    let b = header(cpu, handle)?;
     let s = bitmap_surface(cpu, handle)?;
     let (w, h) = (b.width.min(8), b.height.min(8));
     let mono = s.mono;

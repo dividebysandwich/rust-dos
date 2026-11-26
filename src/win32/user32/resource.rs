@@ -1155,8 +1155,16 @@ pub fn copy_bitmap(cpu: &mut Cpu, handle: u32) -> u32 {
         return 0;
     };
     if b.dib.is_none() {
-        let mut copy = b;
+        // Its rows as they are, which are in the program's memory for a
+        // bitmap in Windows 3.1's GDI heap.
+        let rows = Surface::load_all(cpu, Target::Bitmap(handle));
+        let Some(mut copy) = gdi32::gdi(cpu).bitmap(handle).cloned() else {
+            return 0;
+        };
         copy.dc = 0;
+        if let Some(rows) = rows {
+            copy.bits = rows.data;
+        }
         return gdi32::add(cpu, gdi32::Kind::Bitmap { bitmap: copy });
     }
     let bpp = (b.bpp * b.planes).max(1);
@@ -1193,11 +1201,7 @@ pub fn create_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let mut bits = vec![0u8; 2 * stride];
         cpu.bus.guest_read_bytes(and, &mut bits[..stride]);
         cpu.bus.guest_read_bytes(xor, &mut bits[stride..]);
-        let mask = bitmap::new_ddb(cpu, w, 2 * h, 1);
-        if let Some(b) = gdi32::gdi(cpu).bitmap_mut(mask) {
-            let n = b.bits.len().min(bits.len());
-            b.bits[..n].copy_from_slice(&bits[..n]);
-        }
+        let mask = bitmap::new_ddb_with(cpu, w, 2 * h, 1, &bits);
         Icon {
             width: w,
             height: h,

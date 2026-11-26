@@ -818,6 +818,9 @@ pub fn get_object_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn get_object_as(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
     let (handle, size, at) = (args[0], args[1], args[2]);
     init(cpu);
+    // A bitmap in Windows 3.1's GDI heap: the size its device BITMAP
+    // says, which the program may have changed.
+    crate::win32::shims::win31::gdi_heap::refresh(cpu, handle);
     let Some(object) = gdi(cpu).get(handle).cloned() else {
         if handle != 0 {
             set_error(cpu, ERROR_INVALID_HANDLE);
