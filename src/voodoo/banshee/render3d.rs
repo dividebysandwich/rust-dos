@@ -1004,6 +1004,62 @@ pub(crate) mod tests {
         }
     }
 
+    /// A page flip of the desktop, as DirectDraw flips on this card
+    /// (Unreal's Direct3D renderer, G-Police): the picture waits for the
+    /// frame drawn before the flip, and the next frame's jobs, drawn into
+    /// the buffer the flip hid, go on beside the program. Without a mark
+    /// at the flip the picture waited for all of them, a quarter of the
+    /// emulation thread in Unreal's flyby.
+    #[test]
+    fn the_picture_waits_for_the_frame_a_page_flip_shows() {
+        use super::super::super::workers::{Job, Word};
+        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let (a, b) = (0x10_0000u32, 0x20_0000u32);
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
+        let write = |v: &mut Voodoo, reg, value| {
+            v.write(reg, value, u32::MAX, Now::default());
+        };
+        write(&mut v, VID_PROC_CFG, VIDPROC_ENABLE);
+        write(&mut v, VID_DESKTOP_START_ADDR, a);
+        // The frame in B, then the flip that shows it.
+        let fb = v.fbi.ram.clone();
+        let words = vec![Word {
+            row: 0,
+            at: b / 2,
+            value: 0x1234,
+        }];
+        v.submit_outside(Job::Pixels { fb, words }, None);
+        v.mark_drawn(b as usize / 2);
+        write(&mut v, VID_DESKTOP_START_ADDR, b);
+        // The next frame's jobs, into A, held.
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        v.mark_drawn(a as usize / 2);
+        picture_comes_before(&mut v, &gate, "page flip");
+        assert_eq!(v.fbi.ram.get(b as usize / 2), 0x1234, "B's frame is drawn");
+        // Drawn into B after the flip that showed it, behind the held
+        // job: the flip's mark doesn't cover it, and the picture waits
+        // for all (`drawn_shown`).
+        let fb = v.fbi.ram.clone();
+        let words = vec![Word {
+            row: 0,
+            at: b / 2 + 1,
+            value: 0x5678,
+        }];
+        v.submit_outside(Job::Pixels { fb, words }, None);
+        v.mark_drawn(b as usize / 2);
+        picture_waits_for_all(&mut v, &gate, "drawn into the frame shown");
+        assert_eq!(v.fbi.ram.get(b as usize / 2 + 1), 0x5678);
+        // Flipped back to A while its next frame is still drawing: that
+        // one waits for it.
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        v.mark_drawn(a as usize / 2);
+        write(&mut v, VID_DESKTOP_START_ADDR, a);
+        picture_waits_for_all(&mut v, &gate, "flip to the frame drawing");
+    }
+
     #[test]
     fn gl_display_leaves_jobs_until_a_software_picture_is_requested() {
         use super::super::{VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VID_PROC_CFG, VIDPROC_ENABLE};
