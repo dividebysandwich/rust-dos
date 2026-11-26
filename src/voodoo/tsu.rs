@@ -114,10 +114,11 @@ impl Voodoo {
     /// The engine keeps three slots, which the first three vertices fill
     /// in order. A later one takes the slot of the oldest in a strip, and
     /// of the second oldest in a fan (the oldest is the fan's centre). The
-    /// triangle winds the way the slots hold its vertices: a strip's new
-    /// vertex leaves them in the vertices' order, rotated, and a fan's
-    /// swaps two of them. `svert` keeps the vertices oldest first, and
-    /// `sslots_swapped` says whether the slots hold them with two swapped.
+    /// triangle winds the way the slots hold its vertices. `svert` keeps
+    /// the vertices oldest first, and `sslots_swapped` says whether the
+    /// slots hold them with two swapped: a strip's new vertex rotates the
+    /// slots against `svert`, which keeps that as it was, and a fan's
+    /// swaps two of them, which turns it round.
     /// A strip that goes on after a fan (Prince of Persia 3D through
     /// 3dfx's Voodoo3 Direct3D driver) is culled by that winding.
     ///
@@ -164,8 +165,11 @@ impl Voodoo {
             if mode & NO_PING_PONG == 0 {
                 sign ^= (self.sverts - 3) & 1 != 0;
             }
-            // The winding is the slots' (`add_vertex`).
-            if ((divisor < 0.0) != self.sslots_swapped) == sign {
+            // The winding is the slots' (`add_vertex`): with two of the
+            // vertices swapped there, the area turns negative. A triangle
+            // of no area stays at none, as in the slots, either way.
+            let area = if self.sslots_swapped { -divisor } else { divisor };
+            if (area < 0.0) == sign {
                 return;
             }
         }
@@ -341,6 +345,56 @@ mod tests {
             v.add_vertex(vertex(x, y, 0.0));
             assert_eq!(v.guess_slots_swapped(), v.sslots_swapped);
         }
+    }
+
+    #[test]
+    fn a_state_keeps_the_slots_order() {
+        use crate::savestate::{Reader, State, Writer};
+        // A fan of two triangles, which leaves two slots swapped, saved
+        // once the strip after it is set up: the vertex count and the
+        // setup mode alone would give the slots unswapped.
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+        v.reg[S_SETUP_MODE] = FAN | CULL;
+        v.start_vertices(vertex(0.0, 0.0, 0.0));
+        for (x, y) in &CONVEX_FAN[..3] {
+            v.add_vertex(vertex(*x, *y, 0.0));
+        }
+        v.reg[S_SETUP_MODE] = CULL;
+        assert!(v.sslots_swapped && !v.guess_slots_swapped());
+        let mut w = Writer::new();
+        v.save(&mut w);
+        let mut loaded = Voodoo::with_workers(Board::Voodoo2, 0);
+        loaded.load(&mut Reader::new(&w.buf)).unwrap();
+        assert!(loaded.sslots_swapped);
+        // A state from before the order was kept ends without it, and
+        // guesses it from the mode: in the fan, swapped.
+        v.reg[S_SETUP_MODE] = FAN | CULL;
+        let mut w = Writer::new();
+        v.save(&mut w);
+        let mut slots = Writer::new();
+        v.sslots_swapped.save(&mut slots);
+        let old = &w.buf[..w.buf.len() - slots.buf.len()];
+        let mut loaded = Voodoo::with_workers(Board::Voodoo2, 0);
+        loaded.load(&mut Reader::new(old)).unwrap();
+        assert!(loaded.sslots_swapped);
+    }
+
+    #[test]
+    fn a_triangle_of_no_area_is_culled_as_in_the_slots() {
+        // After a fan of two triangles the slots hold two vertices
+        // swapped. A strip's triangle along a line then has no area in
+        // either order, which is not negative: culled with the positive
+        // areas.
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+        v.reg[S_SETUP_MODE] = FAN | CULL;
+        v.start_vertices(vertex(0.0, 0.0, 0.0));
+        for (x, y) in &CONVEX_FAN[..3] {
+            v.add_vertex(vertex(*x, *y, 0.0));
+        }
+        assert_eq!(v.reg[FBI_TRIANGLES_OUT], 2);
+        v.reg[S_SETUP_MODE] = CULL;
+        v.add_vertex(vertex(30.0, 20.0, 0.0));
+        assert_eq!(v.reg[FBI_TRIANGLES_OUT], 2);
     }
 
     #[test]
