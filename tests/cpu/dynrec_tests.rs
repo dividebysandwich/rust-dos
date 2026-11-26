@@ -2624,7 +2624,8 @@ fn a_block_translated_again_takes_the_place_of_the_one_it_replaces() {
             a.hlt()
         }));
     });
-    b.cpu.dynrec.set_code_size(16 << 10);
+    // (The translations that live at once take up to about 16 KB.)
+    b.cpu.dynrec.set_code_size(24 << 10);
     let stats = run_both(&mut a, &mut b);
     assert_eq!(b.cpu.ebx(), replicated_sum(1000));
     if AVAILABLE {
@@ -7709,7 +7710,11 @@ fn host_bytes(paging: bool, instr: impl Fn(&mut CodeAssembler) -> Result<(), Ice
 #[test]
 fn memory_operands_take_little_host_code() {
     // Each memory operand's slow paths call the trampoline's routines
-    // (`x64::Thunk`) instead of carrying their own copies.
+    // (`x64::Thunk`) instead of carrying their own copies. One part is
+    // inline: with paging off, the handle of an operand at 1 MB or above
+    // that isn't RAM (`Thunk::Dev`'s answer), 36 bytes for a dword, which
+    // spares a software renderer's stores into the VESA frame buffer a
+    // call each.
     if !AVAILABLE || !cfg!(target_arch = "x86_64") {
         return;
     }
@@ -7717,7 +7722,7 @@ fn memory_operands_take_little_host_code() {
         let load = host_bytes(paging, |a| a.mov(eax, dword_ptr(esi + 4)));
         let store = host_bytes(paging, |a| a.mov(dword_ptr(edi + 4), eax));
         let both = host_bytes(paging, |a| a.add(dword_ptr(edi + 8), eax));
-        assert!(load < 220 && store < 280 && both < 450, "paging {paging}: {load}, {store}, {both} bytes");
+        assert!(load < 230 && store < 310 && both < 480, "paging {paging}: {load}, {store}, {both} bytes");
     }
 }
 
