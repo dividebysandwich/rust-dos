@@ -121,13 +121,13 @@ Banshee, which always has 16 MB. The others work for every 3dfx card.
 take effect at the DOS prompt, the others at once. The settings
 window's Emulator page has them as *Video card*, *3dfx Voodoo
 Graphics*, *3dfx card* (the chip and memory together), *3dfx drawn by*
-and the *3dfx* settings after it. They show only while *3dfx Voodoo
-Graphics* is on; on a Voodoo3 or Banshee, set the renderer, texture
-sampling in the configuration file
-([#821](https://github.com/dividebysandwich/rust-dos/issues/821)).
-The card's swaps are held to `fps_cap`, the frame rate cap of every
-card (`voodoo_fps_cap` is its old name; see [Frame rate
-cap](../CONFIGURATION.md#frame-rate-cap)).
+and the *3dfx* settings after it. The window shows the settings the
+machine's card uses: with the add-on card, all of them; with a Voodoo3
+or Banshee, *3dfx drawn by*, texture sampling and the OpenGL settings,
+but not the add-on's switch, memory or gamma. The OpenGL settings show
+while *3dfx drawn by* is OpenGL. The card's swaps are held to `fps_cap`,
+the frame rate cap of every card (`voodoo_fps_cap` is its old name; see
+[Frame rate cap](../CONFIGURATION.md#frame-rate-cap)).
 
 The Voodoo2 is a single board: SLI, two Voodoo2s drawing alternate
 lines, isn't emulated, so games see one card. The libretro core draws a

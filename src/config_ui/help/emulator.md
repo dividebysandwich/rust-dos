@@ -136,7 +136,9 @@ Adds a 3dfx Voodoo 3D card, for games with a 3dfx or Glide version, such
 as Tomb Raider's 3dfx patch. Games without such a version don't use it.
 
 Set *Processor* to **Pentium** too: 3dfx games expect one. Takes effect
-at the DOS prompt.
+at the DOS prompt. A Voodoo3 or Banshee as the *Video card* is a 3dfx
+card itself and leaves no room for this one, so the setting isn't shown
+then.
 
 # 3dfx memory {#voodoo-memory}
 
@@ -146,7 +148,8 @@ has trouble with it.
 
 # 3dfx drawn by {#voodoo-renderer}
 
-What draws the 3dfx picture in the window:
+What draws the 3dfx picture in the window, the add-on card's or a
+Voodoo3's or Banshee's:
 
 - **Rust-DOS**: the card's own resolution, exactly as the card drew it.
 - **OpenGL**: drawn again by your graphics card at a higher resolution
