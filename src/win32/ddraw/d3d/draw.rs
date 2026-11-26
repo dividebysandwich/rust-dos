@@ -390,9 +390,11 @@ fn account_with(
         true => pipeline::extents(setup, verts),
         false => None,
     };
-    if let Some(u) = unused
-        && let Some((i, un, e)) = pipeline::clip_of(setup, u.vertices, |k| u.used[k], want_extents)
-    {
+    let placed = unused.and_then(|u| {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dVertices);
+        pipeline::clip_of(setup, u.vertices, |k| u.used[k], want_extents)
+    });
+    if let Some((i, un, e)) = placed {
         codes = Some(match codes {
             None => (i, un),
             Some((ci, cu)) => (ci & i, cu | un),
