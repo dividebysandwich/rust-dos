@@ -113,8 +113,10 @@ that checks for Glide by its file sees none without one.
 
 A file of the same name that a game copies to C: takes the shown file's
 place, as a copy over Windows' own file does: setups that copy their own
-`COMMDLG.DLL` or `VER.DLL` there succeed. Deleting a shown file, or
-changing its attributes, changes nothing.
+`COMMDLG.DLL` or `VER.DLL` there succeed. So does a file moved to that
+name, as InstallShield 6 puts its `MSVCRT.DLL` in place: it deletes the
+old file and moves its own copy there. Deleting a shown file, or changing
+its attributes, changes nothing.
 
 `WING32.DLL`, WinG, is among them too. Games of 1995 that draw through
 WinG installed it from their CDs; on the built-in Windows they find it
