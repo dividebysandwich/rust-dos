@@ -134,6 +134,12 @@ fn chroma_constant(range: u32) -> Option<bool> {
     }
 }
 
+/// The byte address of pixel `(x, y)` of a blit's source or destination
+/// at `base`, `stride` bytes a row.
+fn blt_addr(x: i32, y: i32, base: u32, stride: u32) -> u32 {
+    base.wrapping_add((y as u32).wrapping_mul(stride)).wrapping_add(2 * x as u32)
+}
+
 /// The bytes of rows `y0` to `y1` (either way round) of a blit's side at
 /// byte `base` with `stride` bytes a row, to the last column the blitter
 /// reaches in the last, whatever the stride.
@@ -193,14 +199,53 @@ impl Voodoo {
     /// Write a pixel through the raster operations: the ROP the source
     /// and destination chroma range tests select.
     fn blt_put(&mut self, addr: u32, src: u16) {
+        if let Some((at, value)) = self.blt_write(addr, src) {
+            self.blt_mirror(at, value);
+        }
+    }
+
+    /// `blt_put` without telling the recording: the word written and its
+    /// value.
+    fn blt_write(&mut self, addr: u32, src: u16) -> Option<(usize, u16)> {
         let at = (addr >> 1) as usize;
         if at >= self.fbi.ram.len() {
-            return;
+            return None;
         }
         let dst = self.fbi.ram.get(at);
         let value = mix(self.blt_rop(src, dst), src, dst);
         self.fbi.ram.set(at, value);
-        self.blt_mirror(at, value);
+        Some((at, value))
+    }
+
+    /// Tell the recording about the pixels a blit of `size` from `(x, y)`
+    /// wrote at `base`, `stride` bytes a row: each row from left to
+    /// right, which the recording keeps as one run (`Mirror::pixel`). A
+    /// blit that runs from right to left would otherwise give it a run
+    /// for every pixel: Prince of Persia 3D's menu copies its whole
+    /// screen that way every frame.
+    fn blt_mirror_rect(
+        &mut self,
+        (x, y): (i32, i32),
+        (size_x, size_y): (i32, i32),
+        base: u32,
+        stride: u32,
+    ) {
+        if !self.recording() {
+            return;
+        }
+        let (x0, x1) = (x.min(x + size_x), x.max(x + size_x));
+        let (y0, y1) = (y.min(y + size_y), y.max(y + size_y));
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                if self.blt_clipped(x, y) {
+                    continue;
+                }
+                let at = (blt_addr(x, y, base, stride) >> 1) as usize;
+                if at < self.fbi.ram.len() {
+                    self.blt_mirror(at, self.fbi.ram.get(at));
+                }
+            }
+        }
     }
 
     /// The ROP the source and destination chroma range tests select for
@@ -297,7 +342,10 @@ impl Voodoo {
             _ => self.flush(),
         }
         self.mirror_sync();
-        let at = |x: i32, y: i32, base: u32, stride: u32| base.wrapping_add((y as u32).wrapping_mul(stride)).wrapping_add(2 * x as u32);
+        let at = blt_addr;
+        // The pixels go into the recording once the blit is done, row by
+        // row (`blt_mirror_rect`).
+        let rect = ((dst_x, dst_y), (size_x.abs() * dx, size_y.abs() * dy));
         match command & COMMAND {
             SCREEN_TO_SCREEN => {
                 let (src_base, src_stride) = self.blt_src();
@@ -309,9 +357,10 @@ impl Voodoo {
                             continue;
                         }
                         let src = self.blt_get(at(src_x + col * dx, src_y + row * dy, src_base, src_stride));
-                        self.blt_put(at(x, y, dst_base, dst_stride), src);
+                        self.blt_write(at(x, y, dst_base, dst_stride), src);
                     }
                 }
+                self.blt_mirror_rect(rect.0, rect.1, dst_base, dst_stride);
             }
             RECT_FILL => {
                 let color = self.reg[BLT_COLOR] as u16;
@@ -319,10 +368,11 @@ impl Voodoo {
                     for col in 0..=size_x.abs() {
                         let (x, y) = (dst_x + col * dx, dst_y + row * dy);
                         if !self.blt_clipped(x, y) {
-                            self.blt_put(at(x, y, dst_base, dst_stride), color);
+                            self.blt_write(at(x, y, dst_base, dst_stride), color);
                         }
                     }
                 }
+                self.blt_mirror_rect(rect.0, rect.1, dst_base, dst_stride);
             }
             SGRAM_FILL => self.sgram_fill(),
             _ => {}
@@ -1319,6 +1369,52 @@ mod tests {
                 "{flags:X}"
             );
         }
+    }
+
+    #[test]
+    fn copies_from_right_to_left_go_into_the_recording_a_row_at_a_time() {
+        // Prince of Persia 3D's menu copies its whole screen from the
+        // bottom right corner up (negative sizes) every frame. The
+        // recording gets each row of the copy as one run of pixels, from
+        // left to right, not a run for every pixel.
+        let mut v = glide_card(0);
+        v.set_mirror(true);
+        let front = v.fbi.rgboffs[v.fbi.frontbuf as usize];
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+        for y in 0..3 {
+            for x in 0..4 {
+                let at = front as usize / 2 + (10 + y) * 640 + 20 + x;
+                v.fbi.ram.set(at, (y * 16 + x + 1) as u16);
+            }
+        }
+        write(&mut v, BLT_ROP, 0xCCCC);
+        write(&mut v, BLT_SRC_BASE_ADDR, front);
+        write(&mut v, BLT_DST_BASE_ADDR, back);
+        write(&mut v, BLT_XY_STRIDES, 1280 << 16 | 1280);
+        write(&mut v, BLT_SRC_XY, 12 << 16 | 23);
+        write(&mut v, BLT_DST_XY, 32 << 16 | 33);
+        // 4 by 3 pixels: sizes of -3 and -2.
+        write(&mut v, BLT_SIZE, 0xFFE << 16 | 0xFFD);
+        write(&mut v, BLT_COMMAND, 1 << 31 | SCREEN_TO_SCREEN);
+        let back = back / 2;
+        let px = |x: u32, y: u32| v.fbi.ram.get((back + y * 640 + x) as usize);
+        assert_eq!([px(30, 30), px(33, 32), px(29, 30), px(30, 33)], [1, 36, 0, 0]);
+        let rows: Vec<_> = (v.take_mirror().unwrap().commands.iter())
+            .filter_map(|c| match c {
+                super::super::mirror::Command::Pixels(p) => {
+                    Some((p.dest, p.x, p.y, p.values.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some(back), 30, 30, vec![1, 2, 3, 4]),
+                (Some(back), 30, 31, vec![17, 18, 19, 20]),
+                (Some(back), 30, 32, vec![33, 34, 35, 36])
+            ]
+        );
     }
 
     #[test]
