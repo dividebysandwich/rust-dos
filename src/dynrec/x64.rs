@@ -1231,6 +1231,9 @@ fn narrow_operand(ops: &mut Asm, idx: u8, x: u8, wide: DynamicLabel) {
         ; movq rax, Rx(x)
         ; shl rax, 1
         ; jz >zero
+        // A denormal double: the 80 bits may hold more than it.
+        ; shr rax, 53
+        ; jz =>wide
         ; test rdx, rdx
         ; js =>done
         ; jmp =>wide
@@ -1303,9 +1306,12 @@ fn f80_operand(ops: &mut Asm, hi: u8, man: u8, slow: DynamicLabel) {
         ; shl Rd(hi), 4
         ; lea Rd(hi), [Rq(hi) + rcx + 16383 - 1023]
         ; jmp =>loaded
+        // A zero; a denormal double, a normal number in 80 bits, is the
+        // handler's.
         ; =>zero
+        ; shl Rq(man), 1
+        ; jnz =>slow
         ; shl Rd(hi), 4
-        ; xor Rd(man), Rd(man)
         ; =>loaded
     );
 }
@@ -4157,29 +4163,20 @@ impl Gen<'_> {
     }
 
     /// Make the double in XMM register `x` what an FPU register holds
-    /// (`f80::canon_f64`): a denormal 0, a NaN quiet.
+    /// (`f80::canon_f64`): a NaN quiet.
     fn fpu_canon(&mut self, x: u8) {
         dynasm!(self.ops
             ; .arch x64
             ; movq rcx, Rx(x)
             ; mov rdx, rcx
             ; shr rdx, 52
-            ; and edx, 0x7FF
-            ; dec edx
-            ; cmp edx, 0x7FE
-            ; jb >canon_done
-            ; inc edx
-            ; jnz >canon_nan
-            // A zero or a denormal: the sign alone.
-            ; shr rcx, 63
-            ; shl rcx, 63
-            ; jmp >canon_fix
-            ; canon_nan:
+            ; not edx
+            ; test edx, 0x7FF
+            ; jnz >canon_done
             ; mov rdx, rcx
             ; shl rdx, 12
             ; jz >canon_done
             ; bts rcx, 51
-            ; canon_fix:
             ; movq Rx(x), rcx
             ; canon_done:
         );

@@ -670,6 +670,9 @@ fn narrow_operand(ops: &mut Asm, idx: u8, x: u8, wide: DynamicLabel) {
         ; fmov x7, D(x)
         ; lsl x7, x7, 1
         ; cbz x7, >zero
+        // A denormal double: the 80 bits may hold more than it.
+        ; lsr x7, x7, 53
+        ; cbz x7, =>wide
         ; tbnz x6, 63, =>done
         ; b =>wide
         ; zero:
@@ -733,7 +736,11 @@ fn f80_operand(ops: &mut Asm, idx: u8, hi: u8, man: u8, slow: DynamicLabel) {
         ; lsl X(man), x7, 11
         ; orr XSP(man), X(man), 1 << 63
         ; b =>loaded
+        // A zero; a denormal double, a normal number in 80 bits, is the
+        // handler's.
         ; =>zero
+        ; lsl x6, x7, 1
+        ; cbnz x6, =>slow
         ; lsr X(hi), x7, 63
         ; lsl W(hi), W(hi), 15
         ; mov X(man), xzr
@@ -1404,7 +1411,7 @@ impl Gen<'_> {
     }
 
     /// Make the double in D`x` what an FPU register holds
-    /// (`f80::canon_f64`): a denormal 0, a NaN quiet.
+    /// (`f80::canon_f64`): a NaN quiet.
     /// IN or OUT of `size` bytes at port `port` through `jit_port`, as
     /// x86-64's: its value into (or from) t; a fault or panic leaves.
     fn port_io(&mut self, out: bool, size: u8, port: Src, t: T) {
@@ -1481,19 +1488,11 @@ impl Gen<'_> {
             ; .arch aarch64
             ; fmov x1, D(x)
             ; ubfx x2, x1, 52, 11
-            ; sub w2, w2, 1
-            ; cmp w2, 0x7FE
-            ; b.lo >canon_done
-            ; cmn w2, 1
-            ; b.ne >canon_nan
-            // A zero or a denormal: the sign alone.
-            ; and x1, x1, 0x8000_0000_0000_0000
-            ; b >canon_fix
-            ; canon_nan:
+            ; cmp w2, 0x7FF
+            ; b.ne >canon_done
             ; lsl x2, x1, 12
             ; cbz x2, >canon_done
             ; orr x1, x1, 1 << 51
-            ; canon_fix:
             ; fmov D(x), x1
             ; canon_done:
         );
