@@ -30,7 +30,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 4;
-const WIN32_VERSION: u16 = 107;
+const WIN32_VERSION: u16 = 108;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -80,10 +80,12 @@ const WIN32_VERSION: u16 = 107;
 /// not the format GDI's bitmaps were made in (`gdi32::DDB_FORMAT_SAVED`),
 /// 71's to 104's not which entries of a palette share their nearest
 /// color's entry (`gdi32::palette::NEAREST_SAVED`), 71's to 105's not
-/// the DPMI memory of a DOS program's PIF (`dosvm::DOSVM_DPMI`), and 71's
+/// the DPMI memory of a DOS program's PIF (`dosvm::DOSVM_DPMI`), 71's
 /// to 106's not the size a memory DC's bitmap had at SelectObject
-/// (`gdi32::dc::BITMAP_SIZE_SAVED`).
-const WIN32_LOADS: [u16; 37] = [
+/// (`gdi32::dc::BITMAP_SIZE_SAVED`), and 71's to 107's not the GDI
+/// palette a DirectDraw palette is realized through
+/// (`ddraw::palette::GDI_PALETTE_SAVED`).
+const WIN32_LOADS: [u16; 38] = [
     71,
     72,
     73,
@@ -120,6 +122,7 @@ const WIN32_LOADS: [u16; 37] = [
     104,
     105,
     106,
+    107,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1268,6 +1271,7 @@ mod tests {
         (105, 0xA544_B486_2D04_DB0B), // palette entries sharing their nearest color's entry
         (106, 0x4045_F07A_2E86_6065), // the DPMI memory of a DOS program's PIF
         (107, 0x191A_8E84_8667_48E1), // a memory DC's bitmap size, and gdi_heap's Viewed::live
+        (108, 0xD583_DDB0_E20F_D89B), // the GDI palette a DirectDraw palette is realized through
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

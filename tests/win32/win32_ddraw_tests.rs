@@ -2454,20 +2454,28 @@ const W_DIRECT_DRAW_CREATE: usize = 2;
 const W_SET_SYSTEM_PALETTE_USE: usize = 3;
 const SYSPAL_NOSTATIC: u32 = 2;
 const PC_RESERVED: u8 = 1;
+const PC_NOCOLLAPSE: u8 = 4;
+
+/// The entry `changed` sets: its index and its color and flags.
+type Changed = (u32, [u8; 4]);
 
 /// In a window with DDSCL_NORMAL on a desktop of 256 colours, a palette
 /// of all 256 entries (DDPCAPS_ALLOW256) on the primary surface, its
-/// entries' flags `flags`, and entry 7 changed after, to KEY's color
-/// without flags. With `nostatic`, SetSystemPaletteUse(SYSPAL_NOSTATIC)
+/// entries `entries`, and the entry `changed` names set after with
+/// SetEntries. With `nostatic`, SetSystemPaletteUse(SYSPAL_NOSTATIC)
 /// first. Bedlam's windowed mode does both, its entries PC_RESERVED
 /// (#2113).
-fn windowed_palette_program(nostatic: bool, flags: u8) -> (Vec<u8>, u32) {
+fn windowed_palette_program(
+    nostatic: bool,
+    entries: &[[u8; 4]; 256],
+    changed: Changed,
+) -> (Vec<u8>, u32) {
     let mut d = data();
     desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
-    for i in 0..256u32 {
-        put(&mut d, ENTRIES + 4 * i, &[i as u8, 0x40, 255 - i as u8, flags]);
+    for (i, e) in entries.iter().enumerate() {
+        put(&mut d, ENTRIES + 4 * i as u32, e);
     }
-    put(&mut d, KEY, &[0x80, 0xC0, 0x10, 0]);
+    put(&mut d, KEY, &changed.1);
     let dlls = [
         ("USER32.DLL", &["CreateWindowExA", "GetDC"][..]),
         ("DDRAW.DLL", &["DirectDrawCreate"][..]),
@@ -2507,7 +2515,7 @@ fn windowed_palette_program(nostatic: bool, flags: u8) -> (Vec<u8>, u32) {
         let palette = [caps, Arg::At(ENTRIES), Arg::At(PALETTE), Arg::I(0)];
         c.com(a, l, DD, DD_CREATE_PALETTE, &palette)?;
         c.com(a, l, FRONT, S_SET_PALETTE, &[Arg::Val(PALETTE)])?;
-        let entry = [Arg::I(0), Arg::I(7), Arg::I(1), Arg::At(KEY)];
+        let entry = [Arg::I(0), Arg::I(changed.0), Arg::I(1), Arg::At(KEY)];
         c.com(a, l, PALETTE, PAL_SET_ENTRIES, &entry)?;
         finish(a, l)
     })
@@ -2515,8 +2523,13 @@ fn windowed_palette_program(nostatic: bool, flags: u8) -> (Vec<u8>, u32) {
 
 /// Run `windowed_palette_program` on a desktop of 256 colours, and check
 /// that its DirectDraw calls succeeded.
-fn run_windowed_palette(test: &str, nostatic: bool, flags: u8) -> Box<Cpu> {
-    let (program, data) = windowed_palette_program(nostatic, flags);
+fn run_windowed_palette(
+    test: &str,
+    nostatic: bool,
+    entries: &[[u8; 4]; 256],
+    changed: Changed,
+) -> Box<Cpu> {
+    let (program, data) = windowed_palette_program(nostatic, entries, changed);
     let base = PathBuf::from("target/test_win32_ddraw").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -2540,9 +2553,46 @@ fn program_color(i: usize) -> [u8; 3] {
     [i as u8, 0x40, 255 - i as u8]
 }
 
+/// A palette of `program_color`s, each with the flags `flags`.
+fn program_entries(flags: u8) -> [[u8; 4]; 256] {
+    std::array::from_fn(|i| {
+        let [r, g, b] = program_color(i);
+        [r, g, b, flags]
+    })
+}
+
+/// Entry 7 changed to a color none of the others has, without flags.
+const CHANGED_7: Changed = (7, [0x80, 0xC0, 0x10, 0]);
+
+/// The system palette's static colors as red, green and blue: entries 0
+/// to 9, then 246 to 255.
+const STATIC_RGB: [[u8; 3]; 20] = [
+    [0, 0, 0],
+    [0x80, 0, 0],
+    [0, 0x80, 0],
+    [0x80, 0x80, 0],
+    [0, 0, 0x80],
+    [0x80, 0, 0x80],
+    [0, 0x80, 0x80],
+    [0xC0, 0xC0, 0xC0],
+    [0xC0, 0xDC, 0xC0],
+    [0xA6, 0xCA, 0xF0],
+    [0xFF, 0xFB, 0xF0],
+    [0xA0, 0xA0, 0xA4],
+    [0x80, 0x80, 0x80],
+    [0xFF, 0, 0],
+    [0, 0xFF, 0],
+    [0xFF, 0xFF, 0],
+    [0, 0, 0xFF],
+    [0xFF, 0, 0xFF],
+    [0, 0xFF, 0xFF],
+    [0xFF, 0xFF, 0xFF],
+];
+
 #[test]
 fn a_windowed_primary_surfaces_palette_is_realized_in_the_foreground() {
-    let cpu = run_windowed_palette("windowed_palette", false, 0);
+    let entries = program_entries(0);
+    let cpu = run_windowed_palette("windowed_palette", false, &entries, CHANGED_7);
     // Through GDI, as a logical palette realized in the foreground: the
     // 20 static colors stay, and the entries, of colors none of them
     // has, take the entries between them from the bottom up.
@@ -2554,8 +2604,8 @@ fn a_windowed_primary_surfaces_palette_is_realized_in_the_foreground() {
         let (dac, expected) = dac_entry(&cpu, 10 + k, program_color(k));
         assert_eq!(dac, expected, "entry {}", 10 + k);
     }
-    // SetEntries realizes it again: the others keep their entries, and
-    // entry 7 takes its own back with its new color.
+    // SetEntries realizes it again with the entries it mapped to: entry
+    // 7 keeps its own, with its new color.
     let (dac, expected) = dac_entry(&cpu, 17, [0x80, 0xC0, 0x10]);
     assert_eq!(dac, expected, "entry 17");
 }
@@ -2566,7 +2616,8 @@ fn a_windowed_palette_of_reserved_entries_starts_above_black_with_syspal_nostati
     // are static, and PC_RESERVED entries never share one, so entry k
     // takes the system palette's k + 1, as Bedlam's window shows on
     // Windows 98 SE.
-    let cpu = run_windowed_palette("windowed_palette_nostatic", true, PC_RESERVED);
+    let entries = program_entries(PC_RESERVED);
+    let cpu = run_windowed_palette("windowed_palette_nostatic", true, &entries, CHANGED_7);
     for (i, color) in [(0, [0, 0, 0]), (255, [0xFF; 3])] {
         let (dac, expected) = dac_entry(&cpu, i, color);
         assert_eq!(dac, expected, "entry {i}");
@@ -2577,6 +2628,27 @@ fn a_windowed_palette_of_reserved_entries_starts_above_black_with_syspal_nostati
     }
     let (dac, expected) = dac_entry(&cpu, 8, [0x80, 0xC0, 0x10]);
     assert_eq!(dac, expected, "entry 8");
+}
+
+#[test]
+fn a_windowed_identity_palette_keeps_its_indices_when_its_entries_change() {
+    // The static colors without flags at the ends, PC_NOCOLLAPSE colors
+    // between, one of them white. Each SetEntries realizes the palette
+    // with the entries it mapped to first, so the static white at the
+    // end doesn't move to the entry the white between them took.
+    let mut entries = program_entries(PC_NOCOLLAPSE);
+    for (n, &[r, g, b]) in STATIC_RGB.iter().enumerate() {
+        let i = if n < 10 { n } else { 236 + n };
+        entries[i] = [r, g, b, 0];
+    }
+    entries[100] = [0xFF, 0xFF, 0xFF, PC_NOCOLLAPSE];
+    let changed = (50, [0x80, 0xC0, 0x10, PC_NOCOLLAPSE]);
+    let cpu = run_windowed_palette("windowed_palette_identity", false, &entries, changed);
+    entries[50] = changed.1;
+    for (i, &[r, g, b, _]) in entries.iter().enumerate() {
+        let (dac, expected) = dac_entry(&cpu, i, [r, g, b]);
+        assert_eq!(dac, expected, "entry {i}");
+    }
 }
 
 const S_RESTORE: u32 = 27;
