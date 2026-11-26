@@ -29,6 +29,40 @@ fn parse_drive_prefix_handles_letters_and_non_ascii() {
 }
 
 #[test]
+fn a_name_ending_in_a_slash_is_told_from_a_root() {
+    assert!(ends_in_separator(r"C:\DOMINUS\DATA\"));
+    assert!(ends_in_separator("C:/DOMINUS/DATA/"));
+    assert!(ends_in_separator(r"DATA\"));
+    assert!(ends_in_separator(r"C:DATA\"));
+    assert!(!ends_in_separator(r"C:\"));
+    assert!(!ends_in_separator("/"));
+    assert!(!ends_in_separator("C:"));
+    assert!(!ends_in_separator(r"C:\DATA"));
+    assert!(!ends_in_separator(""));
+}
+
+/// The host folder is left as it was by a create or an open of a name
+/// that ends in a slash: path not found, and no file named after the
+/// folder (Dominus's installer, through PKUNZIP).
+#[test]
+fn create_and_open_refuse_a_name_ending_in_a_slash() {
+    let base = scratch("trailing_slash");
+    fs::create_dir_all(base.join("EXD")).unwrap();
+    fs::write(base.join("EXF.TXT"), b"file").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    assert_eq!(disk.create_file(r"C:\NEWD\", PSP), Err(0x03));
+    assert_eq!(disk.create_file("C:/DOMINUS/DATA/", PSP), Err(0x03));
+    assert_eq!(disk.create_new_file(r"C:\EXD\", PSP), Err(0x03));
+    assert_eq!(disk.create_file(r"C:\EXF.TXT\", PSP), Err(0x03));
+    assert_eq!(disk.open_file(r"C:\EXF.TXT\", 0, PSP), Err(0x03));
+    assert_eq!(disk.open_file(r"C:\NEWD\", 2, PSP), Err(0x03));
+    assert!(!base.join("NEWD").exists());
+    assert!(!base.join("DOMINUS").exists());
+    assert_eq!(fs::read(base.join("EXF.TXT")).unwrap(), b"file");
+}
+
+#[test]
 fn a_device_name_may_end_in_a_colon() {
     assert_eq!(char_device("NUL"), Some(CharDevice::Nul));
     assert_eq!(char_device("nul:"), Some(CharDevice::Nul));

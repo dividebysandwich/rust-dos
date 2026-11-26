@@ -98,6 +98,10 @@ impl DiskController {
             self.insert(handle, file);
             return Ok(handle);
         }
+        // "C:\GAMES\" names no file, nor does "C:\GAME.EXE\"; none is made.
+        if ends_in_separator(filename) {
+            return Err(0x03);
+        }
         // DOS empties the file at the create call, so opening it again while
         // the create's handle is still unused must find it empty.
         self.settle_named(filename);
@@ -287,6 +291,10 @@ impl DiskController {
         if self.device(filename).is_some() {
             return self.open_file(filename, 0x02, owner);
         }
+        // Before anything is made on the way (`ends_in_separator`).
+        if ends_in_separator(filename) {
+            return Err(0x03);
+        }
         let normalized = filename.replace('/', "\\");
         let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
@@ -374,6 +382,11 @@ impl DiskController {
 
     /// INT 21h, AH=5Bh: create a file that must not exist yet.
     pub fn create_new_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
+        // "C:\GAMES\" is no file that is there (`ends_in_separator`). No
+        // device's name ends in a slash: its last name is empty.
+        if ends_in_separator(filename) {
+            return Err(0x03);
+        }
         self.host_dirs.creating();
         if self.device(filename).is_none() && self.exists(filename) {
             return Err(0x50); // File exists

@@ -25,7 +25,7 @@ gdi/pen: pen: 190 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel/alloc: alloc: 200 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel/atom: atom: 328244 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel/dpmi: dpmi: 76 tests executed (0 marked as todo, 0 failures), 0 skipped.
-kernel/file: file: 487243 tests executed (0 marked as todo, 8 failures), 0 skipped.
+kernel/file: file: 487243 tests executed (0 marked as todo, 7 failures), 0 skipped.
 kernel/file: failed file.c:427
 kernel/file: failed file.c:429
 kernel/file: failed file.c:431
@@ -33,7 +33,6 @@ kernel/file: failed file.c:433
 kernel/file: failed file.c:447
 kernel/file: failed file.c:449
 kernel/file: failed file.c:466
-kernel/file: failed file.c:472
 kernel/module: module: 142 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel/profile: profile: 153 tests executed (0 marked as todo, 0 failures), 0 skipped.
 lzexpand/lzmain: lzmain: 41 tests executed (0 marked as todo, 0 failures), 0 skipped.

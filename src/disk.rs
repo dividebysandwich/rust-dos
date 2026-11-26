@@ -175,6 +175,19 @@ pub fn parse_drive_prefix(path: &str) -> (Option<u8>, &str) {
     }
 }
 
+/// Whether `path` ends in a slash or backslash after a name, which leaves
+/// its last name empty: "C:\GAMES\", "GAMES/". MS-DOS refuses such a
+/// path with path not found (03h) in the calls that create, open, find,
+/// delete or read the attributes of a file, whether a file, a folder or
+/// nothing has the name before the slash, and makes nothing. PKUNZIP
+/// creates a ZIP's folder entry ("DATA/") as a file, expects that error
+/// and makes the folder after it. A drive's root ("C:\", "\") is no
+/// such path.
+pub fn ends_in_separator(path: &str) -> bool {
+    let (_, rest) = parse_drive_prefix(path);
+    rest.ends_with(['\\', '/']) && !rest.trim_end_matches(['\\', '/']).is_empty()
+}
+
 /// DOS volume labels are at most 11 uppercase characters.
 pub fn normalize_label(label: &str) -> String {
     label.trim().to_ascii_uppercase().chars().take(11).collect()
