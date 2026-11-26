@@ -867,6 +867,62 @@ const PITCH_ALIGN: u32 = 4;
 /// (`SetSurfaceDesc`).
 const MAX_GIVEN_BITS: u64 = 0x1000_0000;
 
+/// The pixels CreateSurface is given with `DDSD_LPSURFACE`: their
+/// address and the surface's pitch (for a compressed format, its size).
+/// DirectX 7 makes a system memory surface over the program's memory
+/// from IDirectDraw4 on, when the program gives the pitch, or a
+/// compressed surface's linear size. The checks and their errors are
+/// those of Wine's `ddraw_surface_create`, which its tests hold to
+/// Windows'. Only a surface of its own (`single`: no primary surface,
+/// flipping chain, mipmap or cube map) is made over given memory here:
+/// one memory block for the levels of a chain is a case no program has
+/// shown, and it fails with DDERR_INVALIDPARAMS.
+fn given_memory(
+    cpu: &mut Cpu,
+    version: u32,
+    desc: &Desc,
+    caps: &[u32; 4],
+    single: bool,
+    format: &Format,
+) -> Result<(u32, u32), u32> {
+    if caps[0] & DDSCAPS_SYSTEMMEMORY == 0 {
+        return Err(DDERR_INVALIDCAPS);
+    }
+    if version < 4 || desc.surface == 0 || !single {
+        return Err(DDERR_INVALIDPARAMS);
+    }
+    let (width, height) = (desc.width, desc.height);
+    let pitch = if let Some(dxt) = dxt_format(format) {
+        // dwLinearSize shares lPitch's place.
+        let size = dxt.size(width, height) as u32;
+        let sized = desc.flags & (DDSD_LINEARSIZE | DDSD_PITCH) != 0;
+        if !sized || version != 4 && desc.flags & DDSD_PITCH != 0 || desc.pitch < size {
+            return Err(DDERR_INVALIDPARAMS);
+        }
+        size
+    } else {
+        let least = (width * format.bits).div_ceil(8);
+        if desc.flags & DDSD_PITCH == 0
+            || desc.pitch < least
+            || !desc.pitch.is_multiple_of(PITCH_ALIGN)
+        {
+            return Err(DDERR_INVALIDPARAMS);
+        }
+        desc.pitch
+    };
+    // The surface's pixels are read and written where the program put
+    // them, so they have to be there.
+    let size = if dxt_format(format).is_some() {
+        pitch as u64
+    } else {
+        pitch as u64 * height as u64
+    };
+    if size > MAX_GIVEN_BITS || !cpu.bus.guest_probe(desc.surface, size as usize, false) {
+        return Err(DDERR_INVALIDPARAMS);
+    }
+    Ok((desc.surface, pitch))
+}
+
 /// The pitch of `width` pixels of `bits` bits.
 fn pitch_of(width: u32, bits: u32) -> u32 {
     (width * bits).div_ceil(8).next_multiple_of(PITCH_ALIGN)
@@ -1111,7 +1167,7 @@ pub fn make(
         0
     };
     let primary = caps[0] & DDSCAPS_PRIMARYSURFACE != 0;
-    let (width, height, format, pitch);
+    let (width, height, format, mut pitch);
     if primary {
         if desc.flags & (DDSD_WIDTH | DDSD_HEIGHT) != 0 {
             return Err(DDERR_INVALIDPARAMS);
@@ -1220,6 +1276,15 @@ pub fn make(
         }
     } else {
         1
+    };
+    // A surface over the program's own memory.
+    let given = if desc.flags & DDSD_LPSURFACE != 0 {
+        let single = !primary && !flip && !cube && levels == 1;
+        let (bits, given_pitch) = given_memory(cpu, version, desc, &caps, single, &format)?;
+        pitch = given_pitch;
+        Some(bits)
+    } else {
+        None
     };
     let mut base = Surface {
         caps,
@@ -1361,6 +1426,18 @@ pub fn make(
     }
     let mut i = 0;
     while let Some(&id) = ids.get(i) {
+        if let Some(bits) = given {
+            // The only surface: `given_memory` turned down chains.
+            if let Some(s) = surface(cpu, id) {
+                s.memory = MEM_SYSTEM;
+                s.bits = bits;
+                s.owns_bits = false;
+            }
+            set_lost(cpu, id, false);
+            changed(cpu, id);
+            i += 1;
+            continue;
+        }
         let mut result = allocate(cpu, id);
         if result == Err(DDERR_OUTOFVIDEOMEMORY) && !wants_video && !primary {
             // The surfaces after it go with it: a mipmap whose block

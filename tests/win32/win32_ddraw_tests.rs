@@ -4603,3 +4603,110 @@ fn display_bitmaps_take_the_mode_directdraw_set() {
     assert_eq!(after[10..13], masks, "and its 5-6-5 pixels");
     assert_ne!(r[19], 0, "and still goes into a memory DC");
 }
+
+const IID_IDIRECTDRAW4: [u8; 16] = [
+    0x9A, 0x50, 0x59, 0x9C, 0xBD, 0x39, 0xD1, 0x11, 0x8C, 0x4A, 0x00, 0xC0, 0x4F, 0xD9, 0x30, 0xC5,
+];
+const DDSD_PITCH: u32 = 0x8;
+const DDSD_LPSURFACE: u32 = 0x800;
+const DDERR_INVALIDCAPS: u32 = 0x8876_0064;
+/// The DDSURFACEDESC2s of the program over its own memory: without a
+/// pitch, and without system memory.
+const U_NO_PITCH: u32 = ENTRIES;
+const U_NO_SYSTEM: u32 = ENTRIES + 0x80;
+/// A DDSURFACEDESC of IDirectDraw's, over the same memory.
+const U_OLD: u32 = ENTRIES + 0x100;
+
+/// A DDSURFACEDESC2 (or, `size` 108, DDSURFACEDESC) at `offset` of a
+/// 4x2 32-bit surface, rows 32 bytes apart, with `flags` and `caps`.
+fn user_memory_desc(d: &mut [u8], offset: u32, size: u32, flags: u32, caps: u32) {
+    desc(d, offset, flags, caps, 4, 2, 0);
+    put32(d, offset, size);
+    put32(d, offset + 0x10, 32);
+    rgb32(d, offset);
+}
+
+/// IDirectDraw4: a system memory surface over the program's own pixels
+/// (DDSD_LPSURFACE), locked, and its second row filled; then the
+/// descriptions DirectX turns down: no pitch, no system memory, and
+/// IDirectDraw's CreateSurface.
+fn user_memory_program() -> (Vec<u8>, u32) {
+    let given = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_LPSURFACE;
+    let plain_system = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    let mut d = data();
+    user_memory_desc(&mut d, DESC, 124, given | DDSD_PITCH, plain_system);
+    user_memory_desc(&mut d, U_NO_PITCH, 124, given, plain_system);
+    let plain = DDSCAPS_OFFSCREENPLAIN;
+    user_memory_desc(&mut d, U_NO_SYSTEM, 124, given | DDSD_PITCH, plain);
+    user_memory_desc(&mut d, U_OLD, 108, given | DDSD_PITCH, plain_system);
+    put32(&mut d, LOCKED, 124);
+    put(&mut d, KEY, &IID_IDIRECTDRAW4);
+    // The pixels: two rows of four, and what lies between them.
+    for i in 0..16 {
+        put32(&mut d, PIXELS + 4 * i, 0x0100_0000 + i);
+    }
+    put32(&mut d, FX, 100);
+    put32(&mut d, FX + 0x50, 0x00AB_CDEF);
+    // The second row.
+    for (i, v) in [0, 1, 4, 2].into_iter().enumerate() {
+        put32(&mut d, RECT + 4 * i as u32, v);
+    }
+    program(&[USER32, DDRAW], &d, |a, l| {
+        for offset in [DESC, U_NO_PITCH, U_NO_SYSTEM, U_OLD] {
+            a.mov(dword_ptr(l.at(offset + 0x24)), l.at(PIXELS) as u32)?;
+        }
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        let query = [Arg::At(KEY), Arg::At(QUERIED)];
+        c.com(a, l, DD, S_QUERY_INTERFACE, &query)?;
+        let level = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+        c.com(a, l, QUERIED, DD_SET_COOPERATIVE_LEVEL, &level)?;
+        let create = [Arg::At(DESC), Arg::At(SOURCE), Arg::I(0)];
+        c.com(a, l, QUERIED, DD_CREATE_SURFACE, &create)?;
+        let lock = [Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)];
+        c.com(a, l, SOURCE, S_LOCK, &lock)?;
+        c.com(a, l, SOURCE, S_UNLOCK, &[Arg::I(0)])?;
+        let flags = DDBLT_COLORFILL | DDBLT_WAIT;
+        let fill = [
+            Arg::At(RECT),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(flags),
+            Arg::At(FX),
+        ];
+        c.com(a, l, SOURCE, S_BLT, &fill)?;
+        for offset in [U_NO_PITCH, U_NO_SYSTEM] {
+            let create = [Arg::At(offset), Arg::At(OFFSCREEN), Arg::I(0)];
+            c.com(a, l, QUERIED, DD_CREATE_SURFACE, &create)?;
+        }
+        let create = [Arg::At(U_OLD), Arg::At(OFFSCREEN), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &create)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn create_surface_makes_a_surface_over_the_programs_memory() {
+    let (program, data) = user_memory_program();
+    let mut cpu = machine("user_memory", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 11);
+    assert_eq!(r[2..8], [0; 6], "QueryInterface to Blt");
+    // Lock gives the program's own pixels and pitch.
+    assert_eq!(peek(&cpu, data + LOCKED + 0x24), data + PIXELS);
+    assert_eq!(peek(&cpu, data + LOCKED + 0x10), 32);
+    // The fill went into the program's memory: the second row, 32 bytes
+    // on, and nothing between the rows.
+    let pixels: Vec<u32> = (0..16).map(|i| peek(&cpu, data + PIXELS + 4 * i)).collect();
+    let first: Vec<u32> = (0..8).map(|i| 0x0100_0000 + i).collect();
+    assert_eq!(pixels[..8], first);
+    assert_eq!(pixels[8..12], [0x00AB_CDEF; 4]);
+    let after: Vec<u32> = (12..16).map(|i| 0x0100_0000 + i).collect();
+    assert_eq!(pixels[12..], after);
+    // Wine's ddraw tests find these on Windows: a pitch has to be given,
+    // the surface has to be in system memory, and IDirectDraw has no
+    // surfaces over the program's memory.
+    assert_eq!(r[8], DDERR_INVALIDPARAMS, "no pitch");
+    assert_eq!(r[9], DDERR_INVALIDCAPS, "no system memory");
+    assert_eq!(r[10], DDERR_INVALIDPARAMS, "IDirectDraw");
+}
