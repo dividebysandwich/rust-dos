@@ -161,6 +161,7 @@ impl Bus {
             audio_peak: 0,
             audio_underruns: 0,
             host_frames: crate::hostframes::HostFrames::new(),
+            service_time: None,
             unhandled_writes: vec![0; 0x10000],
             limited_logs: std::collections::HashMap::new(),
             page_gen: vec![0; ram_len >> GEN_SHIFT],
