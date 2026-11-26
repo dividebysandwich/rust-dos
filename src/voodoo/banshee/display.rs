@@ -551,6 +551,36 @@ impl Banshee {
         }..][..256];
         let bypass = f.cfg & VIDPROC_OVERLAY_CLUT_BYPASS != 0;
         let format = (f.cfg >> 21) & 7;
+        if !matches!(format, 0 | 5 | 6) {
+            // 5-6-5, what Glide shows its buffers in: a row's words, then
+            // their colours, as the desktop's.
+            let colours = Rgb565::new((!bypass).then_some(clut));
+            let mut words = Vec::new();
+            self.overlay_rows(f, |y, xs, sy, dudx| {
+                let (x0, x1) = (*xs.start(), (*xs.end()).min(pitch.saturating_sub(1)));
+                if xs.is_empty() || x0 > x1 {
+                    return;
+                }
+                words.resize(x1 - x0 + 1, 0);
+                if dudx == 1 << 20 {
+                    surface_row(ram, self.overlay_addr, stride, tiled, sy, &mut words);
+                } else {
+                    let mut u = 0u64;
+                    for w in &mut words {
+                        let sx = (u >> 20) as u32;
+                        u += dudx as u64;
+                        let at = surface_addr(self.overlay_addr, sx * 2, sy, stride, tiled);
+                        *w = word(ram, at, mask);
+                    }
+                }
+                // Over pixels of the desktop, which are opaque.
+                let at = (y * pitch + x0) * 4;
+                if let Some(row) = out.get_mut(at..(at + words.len() * 4).min(out.len())) {
+                    colours.row(&words, row.as_chunks_mut::<4>().0);
+                }
+            });
+            return;
+        }
         self.overlay_walk(f, |x, y, sx, sy| {
             if x >= pitch {
                 return;
@@ -568,8 +598,7 @@ impl Banshee {
                     };
                     yuv(y_[(sx & 1) as usize], u_, v_)
                 }
-                0 => rgb(clut[byte(ram, at(sx), mask) as usize]),
-                _ => rgb565(word(ram, at(sx * 2), mask), (!bypass).then_some(clut)),
+                _ => rgb(clut[byte(ram, at(sx), mask) as usize]),
             };
             if let Some(o) = out.get_mut((y * pitch + x) * 4..(y * pitch + x) * 4 + 3) {
                 o.copy_from_slice(&px);
