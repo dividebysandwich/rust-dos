@@ -776,11 +776,19 @@ fn reply_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     .map_or(0, |&(_, d)| d);
                 if deadline != 0 && now >= deadline {
                     q.waiting.retain(|&(w, _)| w != id);
-                    // The reply, if it comes, goes nowhere, whether the
-                    // other thread has taken the message or not.
+                    // A message the other thread hasn't taken yet is
+                    // taken back, as Windows does: it never reaches the
+                    // window (Wine's msg.c test_SendMessageTimeout, whose
+                    // timed-out sends Windows 98 doesn't deliver later
+                    // either). One it is handling runs to its end, and
+                    // the reply goes nowhere.
                     for q in state.queues.iter_mut() {
-                        let handled = q.in_send.iter_mut().flatten();
-                        for s in q.sent.iter_mut().chain(handled) {
+                        let before = q.sent.len();
+                        q.sent.retain(|s| s.id != id);
+                        if q.sent.len() < before && q.sent.is_empty() && q.callbacks.is_empty() {
+                            q.changed &= !QS_SENDMESSAGE;
+                        }
+                        for s in q.in_send.iter_mut().flatten() {
                             if s.id == id {
                                 s.kind = 1;
                             }
