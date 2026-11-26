@@ -4697,12 +4697,18 @@ impl Gen<'_> {
 
     fn alu(&mut self, op: AluOp, size: u8, a: T, b: Src) {
         let a = r(a);
+        let carry = matches!(op, AluOp::Adc | AluOp::Sbb);
+        if carry {
+            self.carry_in();
+        }
         if self.record_now {
             let kind = Uop::Alu { op, size, a: T0, b }.lazy_kind().expect("a recorded operation");
+            // (The MOVs leave the host's CF, the carry in.)
             self.record_lazy(kind, size, a, b);
-        }
-        if matches!(op, AluOp::Adc | AluOp::Sbb) {
-            self.carry_in();
+            if carry {
+                const _: () = assert!(super::flags::LAZY_CARRY == 1 << 16);
+                dynasm!(self.ops ; .arch x64 ; setc BYTE [r12 + CTX_LAZY + 2]);
+            }
         }
         macro_rules! op {
             ($m:ident) => {

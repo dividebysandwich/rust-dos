@@ -170,8 +170,9 @@ pub struct JitCtx {
     /// `jit_smc_check`.
     pub smc_check: usize,
     /// `jit_lazy_flags`, and the operation it works the flags out from (see
-    /// `flags::Plan::record`): its kind and size (`kind | size << 8`), and
-    /// its operands. With the exit code a way out keeps there while it
+    /// `flags::Plan::record`): its kind and size (`kind | size << 8`, with
+    /// `flags::LAZY_CARRY` for an ADC's or SBB's carry in), and its
+    /// operands. With the exit code a way out keeps there while it
     /// calls it.
     pub lazy_fn: usize,
     pub lazy: [u32; 3],
@@ -1121,6 +1122,7 @@ jit_fn! {
         let size = (desc >> 8) as u8;
         let mask = crate::cpu::alu::size_mask(size);
         let (a, b) = (a & mask, b & mask);
+        let carry = desc & super::flags::LAZY_CARRY != 0;
         // (The operations change the arithmetic flags alone.)
         let saved = cpu.get_cpu_flags().bits() & crate::cpu::alu::ARITH;
         match desc & 0xFF {
@@ -1129,6 +1131,8 @@ jit_fn! {
             super::flags::LAZY_AND => _ = cpu.alu_logic(size, a & b),
             super::flags::LAZY_OR => _ = cpu.alu_logic(size, a | b),
             super::flags::LAZY_XOR => _ = cpu.alu_logic(size, a ^ b),
+            super::flags::LAZY_ADC => _ = cpu.alu_add(size, a, b, carry),
+            super::flags::LAZY_SBB => _ = cpu.alu_sub(size, a, b, carry),
             _ => _ = cpu.alu_neg(size, a),
         }
         let flags = cpu.get_cpu_flags().bits() & crate::cpu::alu::ARITH;

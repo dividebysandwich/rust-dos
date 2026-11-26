@@ -146,13 +146,20 @@ pub struct Plan {
     pub lazy_end: Vec<bool>,
 }
 
-/// What `jit_lazy_flags` works the flags out from: the operation.
+/// What `jit_lazy_flags` works the flags out from: the operation. ADC
+/// and SBB record their carry in as well (`LAZY_CARRY`).
 pub const LAZY_ADD: u32 = 0;
 pub const LAZY_SUB: u32 = 1;
 pub const LAZY_AND: u32 = 2;
 pub const LAZY_OR: u32 = 3;
 pub const LAZY_XOR: u32 = 4;
 pub const LAZY_NEG: u32 = 5;
+pub const LAZY_ADC: u32 = 6;
+pub const LAZY_SBB: u32 = 7;
+/// The bit of a record's kind and size (`JitCtx::lazy[0]`) that holds
+/// an ADC's or SBB's carry in: the third byte, which the code generators
+/// set on its own after the rest.
+pub const LAZY_CARRY: u32 = 1 << 16;
 
 impl Uop {
     /// The operation `jit_lazy_flags` can work the flags of out from its
@@ -165,7 +172,10 @@ impl Uop {
                 AluOp::And | AluOp::Test => Some(LAZY_AND),
                 AluOp::Or => Some(LAZY_OR),
                 AluOp::Xor => Some(LAZY_XOR),
-                AluOp::Adc | AluOp::Sbb => None,
+                // Quake's span loops step their textures with ADC and SBB,
+                // with a memory operand that may fault after each.
+                AluOp::Adc => Some(LAZY_ADC),
+                AluOp::Sbb => Some(LAZY_SBB),
             },
             Uop::Unary { op: UnOp::Neg, .. } => Some(LAZY_NEG),
             _ => None,
@@ -346,5 +356,28 @@ mod tests {
         // SAR leaves AF.
         let p = plan(&[Some(vec![alu(AluOp::Add)]), Some(vec![memref]), Some(vec![sar])], &[false; 3]);
         assert!(!p.record[0][0]);
+    }
+
+    #[test]
+    fn adc_and_sbb_live_only_for_a_fault_are_recorded() {
+        // A texture step as Quake's span loops take it: ADD's carry into
+        // SBB, whose flags only a fault of the load after it sees before
+        // the next ADD sets them all; then the same with ADC.
+        let memref = Uop::MemRef { t: T2, seg: Seg::DS, size: 4, write: false, slot: 0 };
+        for carry in [AluOp::Sbb, AluOp::Adc] {
+            let items = vec![
+                Some(vec![alu(AluOp::Add)]),
+                Some(vec![alu(carry)]),
+                Some(vec![memref]),
+                Some(vec![alu(AluOp::Add)]),
+            ];
+            let p = plan(&items, &[false; 4]);
+            // The ADD's CF goes into the ADC or SBB: computed.
+            assert!(!p.record[0][0]);
+            assert_eq!(p.live[0][0], CF);
+            assert!(p.record[1][0], "{carry:?}");
+            assert_eq!(p.live[1][0], 0);
+            assert!(p.lazy_start[2]);
+        }
     }
 }

@@ -299,6 +299,38 @@ fn flags_recorded_for_a_fault_reach_its_handler() {
 }
 
 #[test]
+fn flags_of_adc_and_sbb_recorded_for_a_fault_reach_its_handler() {
+    // As above with ADC and SBB, which record their carry in too: with
+    // CF set by STC, 90h + 6Fh + 1 and 90h - 8Fh - 1 both come to 0.
+    for (adc, eflags) in [(true, 0x55), (false, 0x54)] {
+        let (mut a, mut b) = twins(|rig| {
+            rig.record(GP);
+            rig.set_gdt(FREE, seg_desc(0x40000, 0xFF, DATA_R0, 0x4));
+            let code = asm32(CODE, |a| {
+                a.mov(ax, FREE as u32)?;
+                a.mov(ds, ax)?;
+                a.mov(ebx, 0x1234_5690u32)?;
+                a.stc()?;
+                if adc {
+                    a.adc(bl, 0x6F)?;
+                } else {
+                    a.sbb(bl, 0x8F)?;
+                }
+                a.mov(eax, dword_ptr(0x200))?;
+                a.sub(ecx, ecx)?;
+                a.hlt()
+            });
+            rig.load(CODE, &code);
+        });
+        run_both(&mut a, &mut b);
+        let (vector, stack) = b.recorded();
+        assert_eq!(vector, GP as u32);
+        // ZF, PF and AF; CF for the ADC's carry out.
+        assert_eq!(stack[3] & ARITH, eflags, "adc {adc}: EFLAGS {:08X}", stack[3]);
+    }
+}
+
+#[test]
 fn flags_recorded_before_a_shift_reach_a_faults_handler() {
     // As above, with a shift by a constant setting the flags again.
     let (mut a, mut b) = twins(|rig| {

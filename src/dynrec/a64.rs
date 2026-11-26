@@ -3470,6 +3470,12 @@ impl Gen<'_> {
         if self.record_now {
             let kind = Uop::Alu { op, size, a, b }.lazy_kind().expect("a recorded operation");
             self.record_lazy(kind, size);
+            if matches!(op, AluOp::Adc | AluOp::Sbb) {
+                // The carry in, into the third byte (`flags::LAZY_CARRY`).
+                const _: () = assert!(super::flags::LAZY_CARRY == 1 << 16);
+                self.carry_in();
+                dynasm!(self.ops ; .arch aarch64 ; strb w12, [x20, (CTX_LAZY + 2) as u32]);
+            }
         }
         match op {
             AluOp::Add => self.add_sub_flags(size, false, need),
