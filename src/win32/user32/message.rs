@@ -776,24 +776,7 @@ fn reply_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     .map_or(0, |&(_, d)| d);
                 if deadline != 0 && now >= deadline {
                     q.waiting.retain(|&(w, _)| w != id);
-                    // A message the other thread hasn't taken yet is
-                    // taken back, as Windows does: it never reaches the
-                    // window (Wine's msg.c test_SendMessageTimeout, whose
-                    // timed-out sends Windows 98 doesn't deliver later
-                    // either). One it is handling runs to its end, and
-                    // the reply goes nowhere.
-                    for q in state.queues.iter_mut() {
-                        let before = q.sent.len();
-                        q.sent.retain(|s| s.id != id);
-                        if q.sent.len() < before && q.sent.is_empty() && q.callbacks.is_empty() {
-                            q.changed &= !QS_SENDMESSAGE;
-                        }
-                        for s in q.in_send.iter_mut().flatten() {
-                            if s.id == id {
-                                s.kind = 1;
-                            }
-                        }
-                    }
+                    take_back_send(&mut state.queues, id);
                     set_error(cpu, ERROR_TIMEOUT);
                     return Next::Done(0);
                 }
@@ -823,6 +806,27 @@ fn reply_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.step = 0;
             }
             _ => return Next::Done(0),
+        }
+    }
+}
+
+/// The send `id` timed out. A message the other thread hasn't taken yet
+/// is taken back, as Windows does: it never reaches the window (Wine's
+/// msg.c test_SendMessageTimeout, whose timed-out sends Windows 98
+/// doesn't deliver later either), and with none left to handle,
+/// QS_SENDMESSAGE no longer counts as new there (`handle_sent`). One the
+/// thread is handling runs to its end, and the reply goes nowhere.
+fn take_back_send(queues: &mut [Queue], id: u32) {
+    for q in queues {
+        let before = q.sent.len();
+        q.sent.retain(|s| s.id != id);
+        if q.sent.len() < before && q.sent.is_empty() && q.callbacks.is_empty() {
+            q.changed &= !QS_SENDMESSAGE;
+        }
+        for s in q.in_send.iter_mut().flatten() {
+            if s.id == id {
+                s.kind = 1;
+            }
         }
     }
 }
@@ -2386,6 +2390,40 @@ pub(crate) mod tests {
         assert!(q.sent.is_empty() && q.in_send.is_empty());
         let replies = &user(&mut cpu).queue_mut(7).replies;
         assert_eq!(replies, &vec![(3, 0), (1, 5)]);
+    }
+
+    /// A send that timed out takes its message back from a thread that
+    /// hasn't taken it, so the window never gets it, and leaves the other
+    /// senders' messages queued. One the thread is handling runs on, and
+    /// its reply goes nowhere.
+    #[test]
+    fn a_timed_out_send_is_taken_back_unless_it_is_being_handled() {
+        let sent = |id| Sent {
+            id,
+            from: 7,
+            hwnd: 0x418,
+            message: 0x400,
+            ..Sent::default()
+        };
+        let mut queues = vec![Queue {
+            tid: 9,
+            sent: VecDeque::from([sent(1), sent(2)]),
+            in_send: vec![Some(sent(3))],
+            changed: QS_SENDMESSAGE,
+            ..Queue::default()
+        }];
+        take_back_send(&mut queues, 2);
+        let ids: Vec<u32> = queues[0].sent.iter().map(|s| s.id).collect();
+        assert_eq!(ids, [1]);
+        // One is still there to take: still new.
+        assert_eq!(queues[0].changed, QS_SENDMESSAGE);
+        take_back_send(&mut queues, 1);
+        assert!(queues[0].sent.is_empty());
+        assert_eq!(queues[0].changed, 0);
+        take_back_send(&mut queues, 3);
+        let handled = queues[0].in_send[0].as_ref().unwrap();
+        assert_eq!((handled.id, handled.kind), (3, 1));
+        assert!(!handled.awaited());
     }
 
     /// A Win16 process whose tasks run the threads `tids`, the first of
