@@ -78,7 +78,8 @@ pub struct Entry {
     /// The object, and its export that holds it.
     pub object: u32,
     pub export: u32,
-    /// The time NoteChangeTime gave, a FILETIME; 0 for none.
+    /// The time of its last change, a FILETIME: of Register, as on
+    /// Windows, or the one NoteChangeTime gave since.
     pub changed: u64,
 }
 
@@ -411,8 +412,8 @@ pub fn moniker_is_running(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     })
 }
 
-/// IMoniker::GetTimeOfLastChange(this, bc, left, out): the time
-/// NoteChangeTime gave the table for it.
+/// IMoniker::GetTimeOfLastChange(this, bc, left, out): the time of the
+/// last change the table has for it.
 pub fn moniker_get_time_of_last_change(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[this, _, _, out] = args else {
         unreachable!()
@@ -481,12 +482,12 @@ fn time_of_last_change(cpu: &mut Cpu, key: &(u32, String), out: u32) -> u32 {
         return E_POINTER;
     }
     match find(cpu, key) {
-        Some(e) if e.changed != 0 => {
+        Some(e) => {
             cpu.bus.guest_write_32(out, e.changed as u32);
             cpu.bus.guest_write_32(out + 4, (e.changed >> 32) as u32);
             S_OK
         }
-        _ => MK_E_UNAVAILABLE,
+        None => MK_E_UNAVAILABLE,
     }
 }
 
@@ -576,6 +577,7 @@ pub fn rot_register(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let already = find(cpu, &key).is_some();
     let (export, new) = rpc::hold(cpu, object);
     let pid = current_pid(cpu);
+    let changed = crate::win32::kernel32::time::file_time_now(cpu);
     let rot = rot(cpu);
     rot.next_cookie += 1;
     let cookie = rot.next_cookie;
@@ -586,7 +588,7 @@ pub fn rot_register(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         name: key.1,
         object,
         export,
-        changed: 0,
+        changed,
     });
     com::write_out(cpu, out, cookie);
     let hr = if already {
