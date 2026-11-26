@@ -1269,7 +1269,10 @@ mod tests {
         let default = Settings::default();
         let reported = report_settings(&default, default.memory_mb(), None);
         assert_eq!(reported["emulator"]["renderer"], "auto");
-        let base = Settings { renderer: Renderer::Software, ..Settings::default() };
+        let base = Settings {
+            renderer: Renderer::Software,
+            ..Settings::default()
+        };
         for r in Renderer::ALL {
             let layered = layer(&base, &[&setting(r.name())], None);
             assert_eq!(layered.renderer, r, "{}", r.name());
