@@ -200,6 +200,16 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 value
                             )),
                         },
+                        "renderer" => match super::Renderer::parse(value) {
+                            Some(renderer) => {
+                                config.renderer = Some(renderer);
+                                config.voodoo_renderer = None;
+                                config.toadforce_renderer = None;
+                            }
+                            None => warn(format!(
+                                "invalid renderer '{value}' (auto, opengl or software)"
+                            )),
+                        },
                         "toadforce_renderer" => match crate::toadforce::Renderer::parse(value) {
                             Some(renderer) => config.toadforce_renderer = Some(renderer),
                             None => warn(format!(
@@ -791,6 +801,15 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
     }
     if vr_before_auto {
         config.vr.from_before_auto();
+    }
+    // The old settings' one pair `renderer` has no value for.
+    if let Some((_, false)) = config.renderer() {
+        warnings.push(
+            "voodoo_renderer=opengl with toadforce_renderer=software has no renderer setting: \
+             both cards draw with OpenGL, as renderer=opengl has them; \
+             write renderer=opengl, or renderer=software for both in software"
+                .to_string(),
+        );
     }
     config.warnings = warnings;
     config

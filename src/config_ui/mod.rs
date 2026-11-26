@@ -188,11 +188,10 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Vrr, FpsCap, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, MonitorEffects, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, AutoFps, AutoBusyOs, Core, Fpu, Cpu, Post, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
+                Cycles, AutoFps, AutoBusyOs, Core, Fpu, Cpu, Post, Machine, Renderer, Voodoo, VoodooMemory, VoodooScale, VoodooScaleShader, VoodooMsaa,
                 VoodooDither,
                 VoodooAnisotropy, VoodooTextureSampling, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter,
-                VeriteRisc, VeriteMhz, VeriteRom, VeriteIrq, ToadForceMemory, ToadForceRenderer,
-                ToadForceGamma,
+                VeriteRisc, VeriteMhz, VeriteRom, VeriteIrq, ToadForceMemory, ToadForceGamma,
                 Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, AnsiSys, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, PauseInSettings, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,

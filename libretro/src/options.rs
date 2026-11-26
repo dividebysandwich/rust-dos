@@ -147,12 +147,14 @@ fn definitions() -> Vec<Definition> {
             target: config("emulator", "voodoo"),
             values: configured(&ON_OFF),
         },
+        // The key of the setting's old name, which frontends keep the
+        // option's value under.
         Definition {
             key: "voodoo_renderer",
             desc: "3dfx renderer",
             info: "Software draws the 3dfx card's picture as the card did. OpenGL draws it with the frontend's OpenGL 3 or OpenGL ES 3 video driver (gl or glcore), at the 3dfx scale; it takes effect when content is loaded, and without that driver the software renderer draws. A Voodoo3 or Banshee is always drawn in software.",
             category: "video",
-            target: config("emulator", "voodoo_renderer"),
+            target: config("emulator", "renderer"),
             values: configured(&[("software", "Software"), ("opengl", "OpenGL")]),
         },
         Definition {

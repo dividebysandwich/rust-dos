@@ -1615,10 +1615,10 @@ fn mouse_sensitivity_is_live_typed_and_resettable() {
 
 #[test]
 fn the_3dfx_rows_follow_the_card_the_machine_has() {
+    use crate::config::Renderer;
     use crate::video::adapter::Adapter;
-    use crate::voodoo::Renderer;
     let add_on_only = [Item::VoodooMemory, Item::VoodooGamma];
-    let every_card = [Item::VoodooRenderer, Item::VoodooTextureSampling];
+    let every_card = [Item::Renderer, Item::VoodooTextureSampling];
     let opengl = [
         Item::VoodooScale,
         Item::VoodooMsaa,
@@ -1639,8 +1639,13 @@ fn the_3dfx_rows_follow_the_card_the_machine_has() {
     assert_eq!(shown(&s, &add_on_only), [true; 2]);
     assert_eq!(shown(&s, &every_card), [true; 2]);
     assert_eq!(shown(&s, &opengl), [false; 4]);
-    s.voodoo.renderer = Renderer::OpenGl;
+    s.renderer = Renderer::OpenGl;
     assert_eq!(shown(&s, &opengl), [true; 4]);
+    // Auto and software draw the 3dfx cards on the processor.
+    for renderer in [Renderer::Auto, Renderer::Software] {
+        s.renderer = renderer;
+        assert_eq!(shown(&s, &opengl), [false; 4], "{renderer:?}");
+    }
 
     // A Voodoo3 or Banshee as the display adapter: the renderer and its
     // settings, whether `voodoo` is on or not, and none of the add-on's.
@@ -1656,11 +1661,50 @@ fn the_3dfx_rows_follow_the_card_the_machine_has() {
             assert!(!Item::VoodooOverlay.shown(&s), "{machine:?}");
             assert_eq!(shown(&s, &every_card), [true; 2], "{machine:?}");
             assert_eq!(shown(&s, &opengl), [false; 4], "{machine:?}");
-            s.voodoo.renderer = Renderer::OpenGl;
+            s.renderer = Renderer::OpenGl;
             assert_eq!(shown(&s, &opengl), [true; 4], "{machine:?}");
             assert_eq!(Item::VoodooScaleShader.shown(&s), s.voodoo.scale > 1);
         }
     }
+}
+
+#[test]
+fn one_renderer_row_draws_every_3d_card() {
+    use crate::config::Renderer;
+    use crate::video::adapter::Adapter;
+    // A ToadForce has the row too, and none of the 3dfx OpenGL rows.
+    let s = Settings {
+        machine: Adapter::ToadForce,
+        renderer: Renderer::OpenGl,
+        ..Settings::default()
+    };
+    assert!(Item::Renderer.shown(&s));
+    assert!(!Item::VoodooScale.shown(&s));
+    // A machine without a 3D card it draws has none.
+    assert!(!Item::Renderer.shown(&Settings::default()));
+    assert_eq!(Item::Renderer.applies(), Applies::Now);
+
+    // The row steps through the values and applies them at once, to both
+    // cards.
+    let mut host = FakeHost::new();
+    let mut ui = ConfigUi::new();
+    let settings = Settings {
+        machine: Adapter::ToadForce,
+        ..Settings::default()
+    };
+    ui.open(&settings, Some("/cfg/rust-dos.conf".into()), &host);
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Renderer).unwrap();
+    assert_eq!(Item::Renderer.value(&ui.settings, None), "Auto");
+    keys(&mut ui, &mut host, &[UiKey::Right]);
+    let applied = host.applied.last().unwrap();
+    assert_eq!(applied.renderer, Renderer::OpenGl);
+    assert_eq!(applied.voodoo_renderer(), crate::voodoo::Renderer::OpenGl);
+    assert_eq!(applied.toadforce_renderer(), crate::toadforce::Renderer::OpenGl);
+    assert_eq!(Item::Renderer.value(&ui.settings, None), "OpenGL");
+    keys(&mut ui, &mut host, &[UiKey::Right]);
+    assert_eq!(host.applied.last().unwrap().renderer, Renderer::Software);
+    assert_eq!(Item::Renderer.value(&ui.settings, None), "Software");
 }
 
 #[test]

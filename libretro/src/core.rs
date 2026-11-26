@@ -546,7 +546,9 @@ impl Core {
         // vertical retraces that passed.
         bus.sync_display();
         let voodoo_settings = self.m.settings.voodoo;
-        let voodoo_gl = crate::gl::with_screen(|s| s.run_voodoo(bus, &voodoo_settings)).unwrap_or(false);
+        let renderer = self.m.settings.voodoo_renderer();
+        let voodoo_gl = crate::gl::with_screen(|s| s.run_voodoo(bus, renderer, &voodoo_settings))
+            .unwrap_or(false);
         if !voodoo_gl
             && !voodoo_picture
             && let Some(v) = &mut bus.voodoo

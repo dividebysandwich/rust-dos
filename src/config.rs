@@ -44,8 +44,8 @@ pub use parse::{MAX_MEMSIZE, MIN_MEMSIZE, parse, parse_memsize};
 pub use settings::{Memory, default_cpu, default_memsize};
 pub use settings::{Settings, parse_mouse_sensitivity};
 pub use types::{
-    AspectRatio, DesktopDepth, DesktopSize, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig,
-    Win32Locale, Win32Trace, WindowsVersion,
+    AspectRatio, DesktopDepth, DesktopSize, DosVersion, Filter, MidiSynth, Mt32Model, Renderer,
+    SoundConfig, Win32Locale, Win32Trace, WindowsVersion,
 };
 
 /// Written to the default location on first start.
@@ -146,15 +146,22 @@ pub struct Config {
     pub composite_era: Option<CompositeEra>,
     /// The display adapter (`machine`).
     pub machine: Option<Adapter>,
+    /// What draws the 3D cards (`renderer`). A `renderer` line takes
+    /// back what the old lines before it asked for.
+    pub renderer: Option<Renderer>,
+    /// The old settings `renderer` stands for, read from the lines after
+    /// the last `renderer` line: what draws for a 3dfx card
+    /// (`voodoo_renderer`) and for a ToadForce (`toadforce_renderer`).
+    /// `renderer()` puts them together.
+    pub voodoo_renderer: Option<crate::voodoo::Renderer>,
+    pub toadforce_renderer: Option<crate::toadforce::Renderer>,
     /// The 3dfx card (`voodoo`), its chip (`voodoo_model`), its memory
-    /// (`voodoo_memory`), what draws
-    /// for it (`voodoo_renderer`), at what size (`voodoo_scale`) and with
-    /// how many samples a pixel (`voodoo_msaa`), texture anisotropy
-    /// (`voodoo_anisotropy`).
+    /// (`voodoo_memory`), at what size OpenGL draws for it
+    /// (`voodoo_scale`) and with how many samples a pixel
+    /// (`voodoo_msaa`), texture anisotropy (`voodoo_anisotropy`).
     pub voodoo: Option<bool>,
     pub voodoo_model: Option<crate::voodoo::Model>,
     pub voodoo_memory: Option<crate::voodoo::Board>,
-    pub voodoo_renderer: Option<crate::voodoo::Renderer>,
     pub voodoo_texture_sampling: Option<crate::voodoo::TextureSampling>,
     pub voodoo_scale: Option<u32>,
     /// Whether the CRT look's lines follow `voodoo_scale`
@@ -185,8 +192,6 @@ pub struct Config {
     pub verite_irq: Option<u8>,
     /// The megabytes of memory a ToadForce has (`toadforce_memory`).
     pub toadforce_memory: Option<u32>,
-    /// What draws a ToadForce's triangles (`toadforce_renderer`).
-    pub toadforce_renderer: Option<crate::toadforce::Renderer>,
     /// The gamma a ToadForce's picture is shown with (`toadforce_gamma`):
     /// Some(None) for off.
     pub toadforce_gamma: Option<Option<f32>>,
@@ -374,7 +379,26 @@ impl Config {
         let machine = self.machine.unwrap_or(Settings::default().machine);
         self.cpu.unwrap_or_else(|| default_cpu(machine))
     }
+
+    /// What `renderer` and the old lines after it ask for together
+    /// (`Renderer::of_cards`), and whether it draws each card as the old
+    /// lines ask; None when no line sets any of them.
+    pub fn renderer(&self) -> Option<(Renderer, bool)> {
+        if self.voodoo_renderer.is_none() && self.toadforce_renderer.is_none() {
+            return self.renderer.map(|renderer| (renderer, true));
+        }
+        let base = self.renderer.unwrap_or_default();
+        Some(Renderer::of_cards(
+            self.voodoo_renderer.unwrap_or(base.voodoo()),
+            self.toadforce_renderer.unwrap_or(base.toadforce()),
+        ))
+    }
 }
+
+/// The old settings `renderer` of `[emulator]` took the place of, one
+/// for each card. Their lines are still read; the settings window writes
+/// a `renderer` line in their place (`edit::set_key`).
+pub const RENDERER_OLD_NAMES: [&str; 2] = ["voodoo_renderer", "toadforce_renderer"];
 
 /// Settings that were renamed: section, old name and current name. A
 /// file's line under the old name still sets the setting, and the line

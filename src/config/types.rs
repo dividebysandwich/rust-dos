@@ -100,6 +100,78 @@ impl Filter {
     }
 }
 
+/// What draws the emulated 3D cards' pictures on the host (`renderer`):
+/// the 3dfx cards (`voodoo::Renderer`) and the ToadForce
+/// (`toadforce::Renderer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Renderer {
+    /// Each card's own default: the 3dfx cards draw on the processor,
+    /// and the ToadForce with OpenGL where the window has it.
+    #[default]
+    Auto,
+    /// The host's OpenGL draws for every card.
+    OpenGl,
+    /// Every card draws on the processor.
+    Software,
+}
+
+impl Renderer {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::OpenGl, Self::Software];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "opengl" => Some(Self::OpenGl),
+            "software" => Some(Self::Software),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::OpenGl => "opengl",
+            Self::Software => "software",
+        }
+    }
+
+    /// What draws for a 3dfx card.
+    pub fn voodoo(self) -> crate::voodoo::Renderer {
+        match self {
+            Self::OpenGl => crate::voodoo::Renderer::OpenGl,
+            Self::Auto | Self::Software => crate::voodoo::Renderer::Software,
+        }
+    }
+
+    /// What draws for a ToadForce.
+    pub fn toadforce(self) -> crate::toadforce::Renderer {
+        match self {
+            Self::Auto => crate::toadforce::Renderer::Auto,
+            Self::OpenGl => crate::toadforce::Renderer::OpenGl,
+            Self::Software => crate::toadforce::Renderer::Software,
+        }
+    }
+
+    /// The setting that stands for what the old settings
+    /// `voodoo_renderer` and `toadforce_renderer` ask for together, and
+    /// whether it draws each card as they ask. Only a 3dfx card on OpenGL
+    /// with a ToadForce in software has no setting of its own: it gets
+    /// `opengl`, so the ToadForce draws with OpenGL too.
+    pub fn of_cards(
+        voodoo: crate::voodoo::Renderer,
+        toadforce: crate::toadforce::Renderer,
+    ) -> (Self, bool) {
+        use crate::toadforce::Renderer as T;
+        use crate::voodoo::Renderer as V;
+        match (voodoo, toadforce) {
+            (V::Software, T::Auto | T::OpenGl) => (Self::Auto, true),
+            (V::Software, T::Software) => (Self::Software, true),
+            (V::OpenGl, T::Auto | T::OpenGl) => (Self::OpenGl, true),
+            (V::OpenGl, T::Software) => (Self::OpenGl, false),
+        }
+    }
+}
+
 /// The DOS version the built-in DOS reports (`dos_version`): INT 21h
 /// AH=30h, AX=3306h and the PSP's, and the version the FAT32 functions of
 /// MS-DOS 7 (AX=7302h to 7305h) need while no FAT32 drive is mounted.

@@ -290,7 +290,7 @@ voodoo=true
 cpu=pentium
 # Draw the card's picture again with OpenGL at twice its resolution;
 # leave these out to draw it as the card did
-voodoo_renderer=opengl
+renderer=opengl
 voodoo_scale=2
 
 [drives]
@@ -309,12 +309,12 @@ it can't find `GLIDE2X.OVL` wants 3dfx's DOS overlay, which doesn't come
 with Rust-DOS: open the settings window (Ctrl+F12), and on the Emulator
 page choose *Download Glide's DOS overlay...*.
 
-The `voodoo_renderer` and `voodoo_scale` lines are optional. Without
-them Rust-DOS draws the 3D picture itself at the card's resolution
-(640x480 for Tomb Raider), as the real card did. With them your graphics
-card draws it again at `voodoo_scale` times that resolution: 2 gives
-1280x960, 4 (the most) gives 2560x1920. Add `voodoo_msaa=4` to smooth the
-jagged edges of the 3D shapes as well.
+The `renderer` and `voodoo_scale` lines are optional. Without them Rust-DOS
+draws the 3D picture itself at the card's resolution (640x480 for Tomb
+Raider), as the real card did. With them your graphics card draws it again
+at `voodoo_scale` times that resolution: 2 gives 1280x960, 4 (the most)
+gives 2560x1920. Add `voodoo_msaa=4` to smooth the jagged edges of the 3D
+shapes as well.
 
 Your graphics card does this through OpenGL 3.2, which a graphics card or
 chip made in the last fifteen years has once its maker's driver is

@@ -581,8 +581,8 @@ section covers names that section.
 - **Between the two renderers.** The OpenGL renderer's pixels are those
   of the software renderer, which are the card's, within the bounds of
   "Where the OpenGL renderer may differ". Anisotropic filtering differs
-  the most. `toadforce_renderer=software` gives the card's own pixels
-  on every host.
+  the most. `renderer=software` gives the card's own pixels on every
+  host.
 - **No picture options.** The OpenGL renderer draws at the card's
   resolution, without multisampling, with the anisotropy the game sets.
   There is no counterpart of `voodoo_scale` or `voodoo_msaa`.
@@ -1209,10 +1209,10 @@ call on), through `Bus::toadforce_set_host`, which runs the queued
 commands and reads everything back before the renderer changes.
 `Display::run_toadforce` does this once a frame from the main loop:
 
-- A machine with a ToadForce and no link gets one when
-  `toadforce_renderer` is `auto` or `opengl`, the window has desktop
-  OpenGL 3.2 and the run isn't deterministic. A new machine's card
-  gets the same renderer, which first drops every copy it has.
+- A machine with a ToadForce and no link gets one when `renderer` is
+  `auto` or `opengl`, the window has desktop OpenGL 3.2 and the run
+  isn't deterministic. A new machine's card gets the same renderer,
+  which first drops every copy it has.
 - With `software`, in a deterministic run, or in a window drawn by
   SDL's renderer, a card that has a link loses it, and its memory
   holds every pixel from then on. `opengl` says once in the log why
@@ -1488,7 +1488,7 @@ users.
 |---|---|---|
 | `machine` | `svga_toadforce` | |
 | `toadforce_memory` | `32`, `64`, `128` | `64` |
-| `toadforce_renderer` | `auto`, `opengl`, `software` | `auto`: OpenGL where the window has a desktop OpenGL 3.2 context |
+| `renderer` | `auto`, `opengl`, `software` | `auto`: OpenGL where the window has a desktop OpenGL 3.2 context; the 3dfx cards' setting too |
 | `toadforce_gamma` | `off`, 0.1 to 2 | `off`: the picture through the card's ramp alone |
 
 The card has one level of 3D, so no key chooses one.

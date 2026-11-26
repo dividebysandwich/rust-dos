@@ -137,10 +137,11 @@ pub(super) enum Item {
     Cpu,
     /// The display adapter.
     Machine,
+    /// What draws the 3D cards: the 3dfx cards and the ToadForce.
+    Renderer,
     /// The 3dfx card, its memory, and how the host draws for it.
     Voodoo,
     VoodooMemory,
-    VoodooRenderer,
     VoodooScale,
     VoodooScaleShader,
     VoodooMsaa,
@@ -161,8 +162,6 @@ pub(super) enum Item {
     VeriteIrq,
     /// The megabytes of memory a ToadForce has.
     ToadForceMemory,
-    /// What draws a ToadForce's triangles.
-    ToadForceRenderer,
     /// The gamma a ToadForce's picture is shown with.
     ToadForceGamma,
     Memsize,
@@ -380,10 +379,10 @@ impl Item {
             Fpu => "FPU arithmetic",
             Cpu => "Processor",
             Machine => "Video card",
+            Renderer => "3D drawn by",
             Memsize => "Memory",
             Voodoo => "3dfx Voodoo Graphics",
             VoodooMemory => "3dfx card",
-            VoodooRenderer => "3dfx drawn by",
             VoodooScale => "3dfx OpenGL size",
             VoodooScaleShader => "  Sized for the CRT look",
             VoodooMsaa => "3dfx antialiasing",
@@ -399,7 +398,6 @@ impl Item {
             VeriteRom => "  Board ROM",
             VeriteIrq => "  Vérité IRQ",
             ToadForceMemory => "  ToadForce memory",
-            ToadForceRenderer => "  ToadForce drawn by",
             ToadForceGamma => "  ToadForce gamma",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
@@ -554,8 +552,7 @@ impl Item {
             Item::CaptureDir | Item::RecordUi | Item::RecordShader => frontend.host_files,
             Item::Core => crate::dynrec::AVAILABLE,
             // The browser draws with the emulator's own rasterizer only.
-            Item::VoodooRenderer
-            | Item::ToadForceRenderer
+            Item::Renderer
             | Item::VoodooScale
             | Item::VoodooScaleShader
             | Item::VoodooMsaa
@@ -635,13 +632,14 @@ impl Item {
             // these say.
             Item::Voodoo => s.machine.voodoo_board().is_none(),
             Item::VoodooMemory | Item::VoodooGamma => voodoo_add_on(s),
+            // Every 3D card's: a 3dfx card, the display adapter too, or a
+            // ToadForce.
+            Item::Renderer => s.voodoo_board().is_some() || s.machine.is_toadforce(),
             // Every 3dfx card's, the display adapter's too.
-            Item::VoodooRenderer | Item::VoodooTextureSampling => s.voodoo_board().is_some(),
+            Item::VoodooTextureSampling => s.voodoo_board().is_some(),
             Item::PowerVrFilter => s.powervr.is_some(),
             Item::VeriteRisc | Item::VeriteIrq => s.machine.is_verite(),
-            Item::ToadForceMemory | Item::ToadForceRenderer | Item::ToadForceGamma => {
-                s.machine.is_toadforce()
-            }
+            Item::ToadForceMemory | Item::ToadForceGamma => s.machine.is_toadforce(),
             Item::VeriteMhz | Item::VeriteRom => {
                 s.machine.is_verite() && s.verite.risc == crate::verite::Risc::Lle
             }
@@ -679,9 +677,9 @@ impl Item {
                 Applies::Now
             }
             Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | AnsiSys | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
-            | ToadForceRenderer
+            | Renderer
             | ToadForceGamma
-            | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooOverlay | PowerVrFilter => Applies::Now,
+            | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
             Post => Applies::NextStart,
@@ -843,13 +841,15 @@ impl Item {
                 None => format!("{} (auto)", s.cpu_model().describe()),
             },
             Machine => s.machine.describe().to_string(),
+            Renderer => match s.renderer {
+                crate::config::Renderer::Auto => "Auto",
+                crate::config::Renderer::OpenGl => "OpenGL",
+                crate::config::Renderer::Software => "Software",
+            }
+            .to_string(),
             Memsize => memsize_bar(s),
             Voodoo => on_off(s.voodoo.enabled),
             VoodooMemory => s.voodoo.board.describe().to_string(),
-            VoodooRenderer => match s.voodoo.renderer {
-                crate::voodoo::Renderer::Software => "Rust-DOS".to_string(),
-                crate::voodoo::Renderer::OpenGl => "OpenGL".to_string(),
-            },
             VoodooScale => format!("{}x", s.voodoo.scale),
             VoodooTextureSampling => match s.voodoo.texture_sampling {
                 crate::voodoo::TextureSampling::Default => "Default",
@@ -889,11 +889,6 @@ impl Item {
             },
             VeriteIrq => s.verite.irq.to_string(),
             ToadForceMemory => format!("{} MB", s.toadforce_memory),
-            ToadForceRenderer => match s.toadforce_renderer {
-                crate::toadforce::Renderer::Auto => "Automatic".to_string(),
-                crate::toadforce::Renderer::OpenGl => "OpenGL".to_string(),
-                crate::toadforce::Renderer::Software => "Rust-DOS".to_string(),
-            },
             ToadForceGamma => match s.toadforce_gamma {
                 None => "Off".to_string(),
                 Some(g) => format!("{}", g),

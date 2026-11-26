@@ -31,28 +31,178 @@ fn run_lock_is_off_on_or_a_directory() {
     assert!(get("\"\"").warnings.iter().any(|w| w.contains("invalid run_lock")));
 }
 
+/// The renderer setting of configuration text, and its warnings.
+fn renderer_of(text: &str) -> (Renderer, Vec<String>) {
+    let config = parse(text, Path::new("/cfg"), None);
+    (Settings::from_config(&config).renderer, config.warnings)
+}
+
 #[test]
-fn toadforce_renderer_is_auto_opengl_or_software() {
-    use crate::toadforce::Renderer;
-    let get = |value: &str| {
-        let text = format!("[emulator]\ntoadforce_renderer={}\n", value);
-        parse(&text, Path::new("/cfg"), None)
-    };
+fn renderer_is_auto_opengl_or_software() {
     for renderer in Renderer::ALL {
-        let config = get(renderer.name());
-        assert_eq!(config.toadforce_renderer, Some(renderer));
-        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let (got, warnings) = renderer_of(&format!("[emulator]\nrenderer={}\n", renderer.name()));
+        assert_eq!(got, renderer);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
-    assert_eq!(get(" OpenGL ").toadforce_renderer, Some(Renderer::OpenGl));
+    assert_eq!(renderer_of("[emulator]\nrenderer= OpenGL \n").0, Renderer::OpenGl);
     for value in ["", "gl", "on", "vulkan"] {
-        let config = get(value);
-        assert_eq!(config.toadforce_renderer, None, "{value}");
-        let warned = |w: &String| w.contains("invalid toadforce_renderer");
-        assert!(config.warnings.iter().any(warned), "{value}");
+        let (got, warnings) = renderer_of(&format!("[emulator]\nrenderer={value}\n"));
+        assert_eq!(got, Renderer::Auto, "{value}");
+        assert!(warnings.iter().any(|w| w.contains("invalid renderer")), "{value}");
     }
-    // Without the setting the card draws with OpenGL where it can.
+    // Without the setting each card draws as it did before there was
+    // one: the 3dfx cards in software, a ToadForce with OpenGL where it
+    // can.
+    use crate::toadforce::Renderer as T;
+    use crate::voodoo::Renderer as V;
     let settings = Settings::from_config(&parse("", Path::new("/cfg"), None));
-    assert_eq!(settings.toadforce_renderer, Renderer::Auto);
+    assert_eq!(settings.renderer, Renderer::Auto);
+    assert_eq!(settings.voodoo_renderer(), V::Software);
+    assert_eq!(settings.toadforce_renderer(), T::Auto);
+    let each = |r: Renderer| (r.voodoo(), r.toadforce());
+    assert_eq!(each(Renderer::OpenGl), (V::OpenGl, T::OpenGl));
+    assert_eq!(each(Renderer::Software), (V::Software, T::Software));
+}
+
+#[test]
+fn the_old_renderer_settings_are_read_as_renderer() {
+    use crate::toadforce::Renderer as T;
+    use crate::voodoo::Renderer as V;
+    let get = |voodoo: Option<V>, toadforce: Option<T>| {
+        let mut text = "[emulator]\n".to_string();
+        if let Some(v) = voodoo {
+            text += &format!("voodoo_renderer={}\n", v.name());
+        }
+        if let Some(t) = toadforce {
+            text += &format!("toadforce_renderer={}\n", t.name());
+        }
+        renderer_of(&text)
+    };
+    // Every pair the settings window of an earlier rust-dos saved, and
+    // the setting it is now.
+    let pairs = [
+        (V::Software, T::Auto, Renderer::Auto),
+        (V::OpenGl, T::Auto, Renderer::OpenGl),
+        (V::OpenGl, T::OpenGl, Renderer::OpenGl),
+        (V::Software, T::OpenGl, Renderer::Auto),
+        (V::Software, T::Software, Renderer::Software),
+    ];
+    for (v, t, renderer) in pairs {
+        let (got, warnings) = get(Some(v), Some(t));
+        assert_eq!(got, renderer, "{v:?} {t:?}");
+        assert!(warnings.is_empty(), "{v:?} {t:?}: {warnings:?}");
+    }
+    // The one pair no setting stands for: both cards draw with OpenGL,
+    // and the warning names the line to write.
+    let (got, warnings) = get(Some(V::OpenGl), Some(T::Software));
+    assert_eq!(got, Renderer::OpenGl);
+    let named = |w: &String| w.contains("write renderer=opengl");
+    assert!(warnings.iter().any(named), "{warnings:?}");
+    // One old line alone: the other card keeps its default.
+    assert_eq!(get(Some(V::OpenGl), None).0, Renderer::OpenGl);
+    assert_eq!(get(Some(V::Software), None).0, Renderer::Auto);
+    assert_eq!(get(None, Some(T::Software)).0, Renderer::Software);
+    assert_eq!(get(None, Some(T::OpenGl)).0, Renderer::Auto);
+    // The old values are checked as before.
+    let (_, warnings) = renderer_of("[emulator]\nvoodoo_renderer=auto\n");
+    let invalid = |w: &String| w.contains("invalid voodoo_renderer");
+    assert!(warnings.iter().any(invalid), "{warnings:?}");
+    let (_, warnings) = renderer_of("[emulator]\ntoadforce_renderer=gl\n");
+    let invalid = |w: &String| w.contains("invalid toadforce_renderer");
+    assert!(warnings.iter().any(invalid), "{warnings:?}");
+}
+
+#[test]
+fn a_later_renderer_line_wins_over_old_lines_and_the_other_way() {
+    // A `renderer` line takes back what the old lines before it said.
+    let text = "[emulator]\nvoodoo_renderer=opengl\ntoadforce_renderer=software\nrenderer=auto\n";
+    let (got, warnings) = renderer_of(text);
+    assert_eq!(got, Renderer::Auto);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    // An old line after it changes its card's part of it.
+    let get = |text: &str| renderer_of(&format!("[emulator]\n{text}")).0;
+    assert_eq!(get("renderer=software\nvoodoo_renderer=opengl\n"), Renderer::OpenGl);
+    assert_eq!(get("renderer=opengl\ntoadforce_renderer=auto\n"), Renderer::OpenGl);
+    assert_eq!(get("renderer=software\ntoadforce_renderer=auto\n"), Renderer::Auto);
+}
+
+#[test]
+fn a_game_profile_layers_its_old_renderer_lines_over_the_base_renderer() {
+    let dir = scratch("profile_renderer");
+    let base = |renderer| Settings { renderer, ..Settings::default() };
+    let prepare = |base: &Settings, own: &str| {
+        let text = format!("[emulator]\n{own}\n[autoexec]\nGAME.EXE\n");
+        crate::games::prepare("game", base, &text, &dir, None).unwrap().settings.renderer
+    };
+    // The profile's old line over the base's `renderer`.
+    let software = base(Renderer::Software);
+    assert_eq!(prepare(&software, "voodoo_renderer=opengl"), Renderer::OpenGl);
+    assert_eq!(prepare(&software, "toadforce_renderer=auto"), Renderer::Auto);
+    let opengl = base(Renderer::OpenGl);
+    assert_eq!(prepare(&opengl, "voodoo_renderer=software"), Renderer::Auto);
+    // The profile's `renderer` over the base's, and none: the base's.
+    assert_eq!(prepare(&opengl, "renderer=software"), Renderer::Software);
+    assert_eq!(prepare(&software, "scale=2"), Renderer::Software);
+}
+
+#[test]
+fn saving_a_file_with_the_old_renderer_lines_writes_renderer_in_their_place() {
+    let settings = |text: &str| Settings::from_config(&parse(text, Path::new("/cfg"), None));
+    let old_lines = |text: &str| text.lines().filter(|l| l.contains("_renderer")).count();
+    // What the settings window of an earlier rust-dos saved: every
+    // setting, both old lines among them.
+    let original = "[emulator]\nmachine=svga\nvoodoo_renderer=opengl\nvoodoo_scale=2\n\
+                    toadforce_renderer=auto\n";
+    let file = settings(original);
+    assert_eq!(file.renderer, Renderer::OpenGl);
+
+    // Every setting saved, with another one changed: one `renderer` line,
+    // where the last old line was, and the setting as it was.
+    let changed = Settings { scale: 3, ..file.clone() };
+    let all = complete_text(original, Path::new("/cfg"), &file, &changed, &[], None);
+    assert_eq!(old_lines(&all), 0, "{all}");
+    assert!(all.contains("voodoo_scale=2\nrenderer=opengl\n"), "{all}");
+    assert_eq!(settings(&all).renderer, Renderer::OpenGl);
+    assert_eq!(settings(&all).scale, 3);
+
+    // The renderer changed in the window, every setting saved or only
+    // what changed.
+    let changed = Settings { renderer: Renderer::Software, ..file.clone() };
+    for saved in [
+        complete_text(original, Path::new("/cfg"), &file, &changed, &[], None),
+        update_text(original, &file, &changed, &[], None),
+    ] {
+        assert_eq!(old_lines(&saved), 0, "{saved}");
+        assert_eq!(saved.matches("renderer=").count(), 1, "{saved}");
+        assert_eq!(settings(&saved).renderer, Renderer::Software, "{saved}");
+    }
+
+    // A game profile's own old line, with another change saved.
+    let profile = "[emulator]\nvoodoo_renderer=opengl\n";
+    let file = settings(profile);
+    let changed = Settings { scale: 3, ..file.clone() };
+    let saved = update_text(profile, &file, &changed, &[], None);
+    assert_eq!(old_lines(&saved), 0, "{saved}");
+    assert!(saved.contains("\nrenderer=opengl\n"), "{saved}");
+
+    // The pair no setting stands for is saved as what it draws.
+    let original = "[emulator]\nvoodoo_renderer=opengl\ntoadforce_renderer=software\n";
+    let file = settings(original);
+    let all = complete_text(original, Path::new("/cfg"), &file, &file, &[], None);
+    assert!(all.starts_with("[emulator]\nrenderer=opengl\n"), "{all}");
+    assert_eq!(old_lines(&all), 0, "{all}");
+    assert!(parse(&all, Path::new("/cfg"), None).warnings.is_empty());
+}
+
+#[test]
+fn settings_write_renderer_and_not_the_old_names() {
+    let settings = Settings { renderer: Renderer::OpenGl, ..Settings::default() };
+    let written = update_text("", &Settings::default(), &settings, &[], None);
+    assert!(written.contains("renderer=opengl"), "{written}");
+    assert_eq!(written.matches("renderer").count(), 1, "{written}");
+    let keys: Vec<_> = entries(&settings, None).into_iter().map(|(_, key, _)| key).collect();
+    assert!(keys.contains(&"renderer"));
+    assert!(!keys.iter().any(|k| RENDERER_OLD_NAMES.contains(k)));
 }
 
 #[test]
@@ -914,10 +1064,10 @@ fn changed_settings() -> Settings {
         post: crate::post::PostMode::Full,
         composite: CompositeSettings { mode: CompositeMode::On, era: CompositeEra::New },
         machine: Adapter::Vga,
+        renderer: Renderer::OpenGl,
         voodoo: crate::voodoo::VoodooSettings {
             enabled: true,
             board: crate::voodoo::Board::Standard,
-            renderer: crate::voodoo::Renderer::OpenGl,
             texture_sampling: crate::voodoo::TextureSampling::Unfiltered,
             scale: 3,
             scale_shader: false,
@@ -936,7 +1086,6 @@ fn changed_settings() -> Settings {
             irq: 5,
         },
         toadforce_memory: 128,
-        toadforce_renderer: crate::toadforce::Renderer::Software,
         toadforce_gamma: Some(1.5),
         capture_dir: PathBuf::from("/home/u/dos captures"),
         record_ui: true,

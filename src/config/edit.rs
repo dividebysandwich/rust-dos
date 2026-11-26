@@ -128,16 +128,53 @@ fn with_value(line: &str, value: &str) -> String {
     format!("{}={}{}", &line[..eq], &rest[..gap], value)
 }
 
+/// The old settings `key` of `section` took the place of, several
+/// settings in one (`RENDERER_OLD_NAMES`); the renamed ones of
+/// `OLD_NAMES` are `key`'s own lines.
+fn replaced_names(section: Section, key: &str) -> &'static [&'static str] {
+    match (section, key) {
+        (Section::Emulator, "renderer") => &super::RENDERER_OLD_NAMES,
+        _ => &[],
+    }
+}
+
+/// Whether `line` sets one of the settings `key` of `section` took the
+/// place of.
+fn is_replaced(section: Section, key: &str, line: &Line) -> bool {
+    matches!(line, Line::Setting(name) if replaced_names(section, key).contains(&name.as_str()))
+}
+
+/// Whether a line of `lines` sets one of the settings `key` of `section`
+/// took the place of.
+fn has_replaced(lines: &[String], section: Section, key: &str) -> bool {
+    classify(lines)
+        .into_iter()
+        .any(|(s, line)| s == section && is_replaced(section, key, &line))
+}
+
 /// Set `key` in `section` to `value`: the last line that sets it gets the
 /// new value, or a new line is added. With None, the lines that set it
-/// are commented out.
+/// are commented out. The lines of the settings `key` took the place of
+/// count as its own, and only the last line that sets any of them stays:
+/// an old line left after the new one would set its card again.
 fn set_key(lines: &mut Vec<String>, section: Section, key: &str, value: Option<&str>) {
     let layout = classify(lines);
     let setting = Line::Setting(key.to_string());
-    let existing: Vec<usize> =
-        (0..lines.len()).filter(|&i| layout[i].0 == section && layout[i].1 == setting).collect();
+    let existing: Vec<usize> = (0..lines.len())
+        .filter(|&i| {
+            layout[i].0 == section
+                && (layout[i].1 == setting || is_replaced(section, key, &layout[i].1))
+        })
+        .collect();
     match (existing.last(), value) {
-        (Some(&i), Some(value)) => lines[i] = with_value(&with_key(&lines[i], key), value),
+        (Some(&i), Some(value)) => {
+            lines[i] = with_value(&with_key(&lines[i], key), value);
+            for &old in existing.iter().rev() {
+                if old != i && is_replaced(section, key, &layout[old].1) {
+                    lines.remove(old);
+                }
+            }
+        }
         (Some(_), None) => {
             for i in existing {
                 lines[i] = format!("#{}", lines[i]);
@@ -268,7 +305,9 @@ pub fn update_text(
     edit_text(original, drives, home, |lines| {
         let before = entries(baseline, home);
         for ((section, key, value), (_, _, old)) in entries(settings, home).into_iter().zip(before) {
-            if value != old {
+            // Lines of the settings `key` took the place of get its line
+            // in their place, changed or not.
+            if value != old || has_replaced(lines, section, key) {
                 set_key(lines, section, key, value.as_deref());
             }
         }
@@ -295,7 +334,7 @@ pub fn complete_text(
         for ((section, key, value), ((_, _, old), (_, _, in_file))) in entries(settings, home).into_iter().zip(before) {
             if value != old {
                 set_key(lines, section, key, value.as_deref());
-            } else if !has_key(lines, section, key) {
+            } else if !has_key(lines, section, key) || has_replaced(lines, section, key) {
                 set_key(lines, section, key, in_file.as_deref());
             }
         }
