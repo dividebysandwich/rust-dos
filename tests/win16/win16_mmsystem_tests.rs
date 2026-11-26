@@ -1400,6 +1400,48 @@ fn avi_clip() -> Vec<u8> {
     out
 }
 
+/// An AVI file of sound only: one stream of 8-bit mono PCM at 11025 Hz,
+/// with 100 bytes of silence and an index.
+fn avi_sound() -> Vec<u8> {
+    fn chunk(out: &mut Vec<u8>, id: &[u8], data: &[u8]) {
+        out.extend_from_slice(id);
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+    }
+    let le = |v: u32| v.to_le_bytes();
+    let mut strh = vec![0; 56];
+    strh[..4].copy_from_slice(b"auds");
+    strh[20..24].copy_from_slice(&le(1));
+    strh[24..28].copy_from_slice(&le(11025));
+    strh[32..36].copy_from_slice(&le(100));
+    strh[44..48].copy_from_slice(&le(1));
+    // PCMWAVEFORMAT: PCM, mono, 11025 Hz, 11025 bytes a second, 1-byte
+    // blocks of 8 bits.
+    let mut wf = vec![1, 0, 1, 0];
+    wf.extend_from_slice(&le(11025));
+    wf.extend_from_slice(&le(11025));
+    wf.extend_from_slice(&[1, 0, 8, 0]);
+    let mut strl = b"strl".to_vec();
+    chunk(&mut strl, b"strh", &strh);
+    chunk(&mut strl, b"strf", &wf);
+    let mut hdrl = b"hdrl".to_vec();
+    chunk(&mut hdrl, b"avih", &[0; 56]);
+    chunk(&mut hdrl, b"LIST", &strl);
+    let mut movi = b"movi".to_vec();
+    let mut idx1 = b"00wb".to_vec();
+    idx1.extend_from_slice(&le(0x10));
+    idx1.extend_from_slice(&le(movi.len() as u32));
+    idx1.extend_from_slice(&le(100));
+    chunk(&mut movi, b"00wb", &[0x80; 100]);
+    let mut body = b"AVI ".to_vec();
+    chunk(&mut body, b"LIST", &hdrl);
+    chunk(&mut body, b"LIST", &movi);
+    chunk(&mut body, b"idx1", &idx1);
+    let mut out = Vec::new();
+    chunk(&mut out, b"RIFF", &body);
+    out
+}
+
 /// A RECT of words at `at` and a mark after it.
 fn set_rect(code: &mut Code, at: u16, rect: [u16; 4]) {
     for (i, v) in rect.into_iter().enumerate() {
@@ -1491,9 +1533,15 @@ fn mci_status_palette_handle_is_the_avi_devices_palette() {
     // 256 colours both give the palette MCIAVI draws the movie with:
     // the string's decimal number is the DWORD's, and GetPaletteEntries
     // counts the halftone palette's 256 colours of a 24-bit movie. On a
-    // desktop of more colours there is no palette, and both give 0.
+    // desktop of more colours there is no palette, and both give 0, as
+    // they do for a file of sound and no pictures, which is never drawn.
     // Exit code 1, or the check that failed.
-    for palette in [true, false] {
+    let cases = [
+        ("mci_hpal_8", true, avi_clip(), true),
+        ("mci_hpal_24", false, avi_clip(), false),
+        ("mci_hpal_sound", true, avi_sound(), false),
+    ];
+    for (test, desktop_palette, file, palette) in cases {
         let mut code = Code::new();
         let open = mci_string(&mut code, 2);
         code.emit(&[0x0E]); // push cs
@@ -1527,8 +1575,9 @@ fn mci_status_palette_handle_is_the_avi_devices_palette() {
         set(&mut code, STATUS + 10, 0);
         mci(&mut code, MCI_STATUS, MCI_STATUS_ITEM, STATUS, 0, 5);
         expect(&mut code, STATUS + 6, 0, true, 6);
-        code.emit(&[0xA1, lo(HWND), hi(HWND)]); // mov ax,[HWND]
-        code.emit(&[0x3B, 0x06, lo(STATUS + 4), hi(STATUS + 4)]); // cmp ax,[STATUS+4]
+        // mov ax,[HWND]; cmp ax,[STATUS+4]
+        code.emit(&[0xA1, lo(HWND), hi(HWND)]);
+        code.emit(&[0x3B, 0x06, lo(STATUS + 4), hi(STATUS + 4)]);
         code.emit(&[0x74, 0x06]) // je over the next
             .emit(&[0xB0, 7, 0xB4, 0x4C, 0xCD, 0x21]);
         if palette {
@@ -1552,12 +1601,11 @@ fn mci_status_palette_handle_is_the_avi_devices_palette() {
             code.emit(text);
             code.patch(place, at);
         }
-        let test = if palette { "mci_hpal_8" } else { "mci_hpal_24" };
         let (exit, log) = run_with(test, program(&code, CODE), |cpu, dir| {
-            if palette {
+            if desktop_palette {
                 cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
             }
-            std::fs::write(dir.join("CLIP.AVI"), avi_clip()).unwrap();
+            std::fs::write(dir.join("CLIP.AVI"), file).unwrap();
         });
         assert_eq!(exit, 1, "{test}: {log}");
     }

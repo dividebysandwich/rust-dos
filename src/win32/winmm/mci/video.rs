@@ -168,7 +168,8 @@ pub struct Video {
     pub media: Option<Arc<Media>>,
     pub pictures: Pictures,
     /// On a palette device, the palette the pictures are drawn with,
-    /// once one was drawn; 0 before.
+    /// once one was drawn, realized or asked for by MCI_STATUS
+    /// (`movie_palette`); 0 before.
     pub palette: u32,
     /// Whether the palette is realized as a background palette: the
     /// last MCI_REALIZE had MCI_DGV_REALIZE_BKGD.
@@ -1260,17 +1261,19 @@ fn realize(cpu: &mut Cpu, i: usize, flags: u32) -> u32 {
 }
 
 /// MCI_STATUS's MCI_DGV_STATUS_HPAL: the palette the device draws with
-/// (`movie_palette`), made now if no frame was drawn yet, as MCIAVI
-/// answers with DrawDib's palette, which it has from the open on. On a
-/// device of more than 256 colours DrawDib realizes no palette and the
-/// answer is 0, as it is for a device with no file.
+/// (`movie_palette`), as MCIAVI answers with DrawDib's palette. It is
+/// made now if no frame was drawn yet, so the handle is the one the
+/// frames are drawn and realized with. On a device of more than 256
+/// colours DrawDib realizes no palette and the answer is 0, as it is for
+/// a device with no file, or with a file of no pictures, which DrawDib
+/// never begins to draw (`draw`).
 fn status_palette(cpu: &mut Cpu, i: usize) -> u32 {
     if !palette::palette_device(cpu) {
         return 0;
     }
     match media(cpu, i) {
-        Some(m) => movie_palette(cpu, i, &m),
-        None => 0,
+        Some(m) if m.frames > 0 => movie_palette(cpu, i, &m),
+        _ => 0,
     }
 }
 
@@ -1299,10 +1302,11 @@ fn movie_palette(cpu: &mut Cpu, i: usize, m: &Media) -> u32 {
 
 /// On a palette device, select the movie's palette into `hdc` and
 /// realize it, as MCIAVI's DrawDib does before it draws
-/// (`movie_palette`). Unless MCI_REALIZE asked for the background, it is selected as
-/// a foreground palette, so in the foreground window or a child of it,
-/// its colours take the system palette's free entries. Returns the
-/// palette it replaced, which goes back in after the picture is drawn.
+/// (`movie_palette`). Unless MCI_REALIZE asked for the background, it
+/// is selected as a foreground palette, so in the foreground window or a
+/// child of it, its colours take the system palette's free entries.
+/// Returns the palette it replaced, which goes back in after the
+/// picture is drawn.
 fn select_movie_palette(cpu: &mut Cpu, i: usize, m: &Media, hdc: u32) -> Option<u32> {
     if !palette::palette_device(cpu) {
         return None;
