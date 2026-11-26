@@ -4,7 +4,7 @@
 use super::Frontend;
 use super::values::{
     DEADZONE_UNIT, SCREEN_GLOW_UNIT, awe32, bar, describe_blocksize, host_midi, memsize_bar, mt32, on_off, percent_bar,
-    ram_size, sc55_found, soundfonts, voodoo_add_on, voodoo_opengl,
+    add_on_overlay, ram_size, sc55_found, soundfonts, voodoo_add_on, voodoo_opengl,
 };
 use crate::config::{MidiSynth, Settings};
 use crate::cpu::CoreMode;
@@ -651,7 +651,7 @@ impl Item {
             // Until there are ROMs.
             Item::Sc55Download => s.sound.midisynth == MidiSynth::Sc55 && sc55_found(s).is_none(),
             // DOS games' Glide for the add-on card, until it is there.
-            Item::VoodooOverlay => voodoo_add_on(s) && crate::voodoo::overlay::find().is_none(),
+            Item::VoodooOverlay => add_on_overlay(s).is_some_and(|o| o.find().is_none()),
             Item::VoodooScale | Item::VoodooMsaa | Item::VoodooDither | Item::VoodooAnisotropy => voodoo_opengl(s),
             // At 1x the lines are the card's own, whatever the look.
             Item::VoodooScaleShader => voodoo_opengl(s) && s.voodoo.scale > 1,

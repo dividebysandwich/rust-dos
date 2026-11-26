@@ -844,19 +844,19 @@ card's gamma table, which games set brighter than DOSBox-X shows them.
 
 * **DOS games** bring Glide with them (linked in, or `GLIDE2X.OVL` beside
   the game) and run under a DOS extender such as DOS/4GW, which maps the
-  card's memory. Games made for the Voodoo Rush and later boards load
-  Glide from `GLIDE2X.OVL`, and the one of 3dfx's Voodoo Graphics driver
-  drives this card whatever board they were made for. It is 3dfx's and
-  doesn't come with rust-dos: the settings window's Emulator page
-  downloads it, after asking, from the driver (3.01.00) the Internet
-  Archive keeps, into rust-dos's configuration directory, and Z: has it
-  from then on, where they find it on the PATH (one beside the game
-  comes first). A game that looks for it while it is missing says so on
-  the screen. Such a game runs without rust-dos's DPMI host: the overlay
-  is a DOS/4G DLL whose start-up only works with DOS/4GW as its own
-  host, at level 0. Its accesses to the Pentium II's memory type range
-  registers, which it marks for 3dfx's Windows driver to catch, do
-  nothing.
+  card's memory. Games made for the Voodoo Rush and later boards load Glide
+  from `GLIDE2X.OVL`, and the one of 3dfx's Voodoo Graphics driver drives
+  this card whatever board they were made for. It is 3dfx's and doesn't come
+  with rust-dos: the settings window's Emulator page downloads it, after
+  asking, from the driver (3.01.00) the Internet Archive keeps, into
+  rust-dos's configuration directory, and Z: has it from then on while the
+  card is a Voodoo Graphics, where they find it on the PATH (one beside the
+  game comes first). The [Voodoo2](#3dfx-voodoo2) has an overlay of its own.
+  A game that looks for it while it is missing says so on the screen. Such a
+  game runs without rust-dos's DPMI host: the overlay is a DOS/4G DLL whose
+  start-up only works with DOS/4GW as its own host, at level 0. Its accesses
+  to the Pentium II's memory type range registers, which it marks for 3dfx's
+  Windows driver to catch, do nothing.
 * **Windows 95** [booted from a disk image](#booting-a-disk-image) finds
   the card as a "PCI Multimedia Video Device", which needs no driver:
   games bring `glide2x.dll`, or install 3dfx's Glide runtime (and with it
@@ -915,7 +915,13 @@ dithering and the clamping of iterated colours, depth and W (fbzColorPath
 bit 28). The board is SLI-less: one card, as Glide sees a single Voodoo2.
 
 DOS games that bring the Voodoo2's `GLIDE2X.OVL` or Glide 3 run as on the
-Voodoo Graphics.
+Voodoo Graphics. A game that loads `GLIDE2X.OVL` from the PATH, such as
+Lands of Lore: Guardians of Destiny, needs the Voodoo2's: the Voodoo
+Graphics driver's looks for a Voodoo Graphics and finds no card, as it
+did on a real PC. With the Voodoo2 in, the settings window's Emulator
+page downloads the overlay of 3dfx's last Voodoo2 driver (3.02.02,
+"DOS Glide for Voodoo2" in its readme) from the Internet Archive, after
+asking, and Z: has it while the card is a Voodoo2.
 
 **Windows 98 SE** needs 3dfx's Voodoo2 driver, which neither Windows 98 nor
 rust-dos comes with: the Windows 98 CD has drivers for the Voodoo Graphics

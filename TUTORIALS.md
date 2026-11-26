@@ -307,7 +307,9 @@ For a game made for the Voodoo2 (one that brings the Voodoo2's
 `GLIDE2X.OVL`, or Glide 3), add `voodoo_model=voodoo2`. A game that says
 it can't find `GLIDE2X.OVL` wants 3dfx's DOS overlay, which doesn't come
 with Rust-DOS: open the settings window (Ctrl+F12), and on the Emulator
-page choose *Download Glide's DOS overlay...*.
+page choose *Download Glide's DOS overlay...*. It fetches the overlay of
+the card you picked; the Voodoo Graphics and the Voodoo2 each have
+their own.
 
 The `voodoo_renderer` and `voodoo_scale` lines are optional. Without
 them Rust-DOS draws the 3D picture itself at the card's resolution

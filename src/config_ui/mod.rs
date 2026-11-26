@@ -389,9 +389,9 @@ pub struct ConfigUi {
     /// download once the user agreed to it.
     confirm_sc55: Option<&'static crate::sc55::rom::Romset>,
     sc55_download: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
-    /// The question before Glide's DOS overlay is downloaded, and the
-    /// download going on.
-    confirm_glide: bool,
+    /// The question before a board's Glide DOS overlay is downloaded,
+    /// and the download going on.
+    confirm_glide: Option<&'static crate::voodoo::overlay::Overlay>,
     glide_download: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     /// The selected setting's value being typed, or picked from a list.
     edit: Option<TextField>,
@@ -560,7 +560,7 @@ impl ConfigUi {
             awe32_download: None,
             confirm_sc55: None,
             sc55_download: None,
-            confirm_glide: false,
+            confirm_glide: None,
             glide_download: None,
         }
     }
@@ -705,7 +705,7 @@ impl ConfigUi {
         self.confirm_launch = None;
         self.confirm_delete = None;
         self.confirm_sc55 = None;
-        self.confirm_glide = false;
+        self.confirm_glide = None;
         self.cheats.edit = None;
         self.achievements.edit = None;
         self.cheats.refresh(host);

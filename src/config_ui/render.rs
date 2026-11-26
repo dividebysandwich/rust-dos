@@ -74,7 +74,7 @@ impl ConfigUi {
             self.draw_almanac(&mut g, content.clone());
         } else if self.confirm_sc55.is_some() {
             self.draw_sc55_question(&mut g, content.clone());
-        } else if self.confirm_glide {
+        } else if self.confirm_glide.is_some() {
             self.draw_glide_question(&mut g, content.clone());
         } else if self.confirm_launch.is_some() {
             if let Some(pending) = &self.confirm_launch {
@@ -780,7 +780,7 @@ impl ConfigUi {
             vec![("Enter", "Close and start", Enter), ("Esc", "Keep running", Esc)]
         } else if self.confirm_delete.is_some() {
             vec![("Enter", if self.confirm_reset { "Reset" } else { "Delete" }, Enter), ("Esc", "Keep", Esc)]
-        } else if self.confirm_sc55.is_some() || self.confirm_glide {
+        } else if self.confirm_sc55.is_some() || self.confirm_glide.is_some() {
             vec![("Enter", "Download", Enter), ("Esc", "Cancel", Esc)]
         } else if self.page == Page::States {
             vec![

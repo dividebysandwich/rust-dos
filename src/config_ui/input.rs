@@ -208,7 +208,7 @@ impl ConfigUi {
             self.scroll = 0;
             self.confirm_delete = None;
             self.confirm_sc55 = None;
-            self.confirm_glide = false;
+            self.confirm_glide = None;
         }
     }
 
@@ -244,7 +244,7 @@ impl ConfigUi {
         if self.confirm_sc55.is_some() {
             return self.sc55_confirm_key(key);
         }
-        if self.confirm_glide {
+        if self.confirm_glide.is_some() {
             return self.glide_confirm_key(key);
         }
         if let Some(row) = Self::navigate(key, self.row, self.row_count(), self.visible) {

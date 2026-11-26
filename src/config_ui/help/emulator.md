@@ -227,14 +227,17 @@ yours and stays as you set it. Takes effect at the DOS prompt.
 Games made for the Voodoo Rush and later 3dfx boards, such as Tomb
 Raider's Rush version (`3DPATCH\VOORUSH` on the Tomb Raider Gold CD),
 don't draw with Glide of their own: they load it from **GLIDE2X.OVL**,
-which came with 3dfx's drivers. The one of the Voodoo Graphics driver
-drives Rust-DOS's card, whichever board the game was made for.
+which came with 3dfx's drivers. Each board has its own: the Voodoo
+Graphics driver's finds no Voodoo2, as on a real PC. The card's own
+overlay drives it, whichever board the game was made for.
 
 It is 3dfx's and doesn't come with Rust-DOS. Enter downloads 3dfx's last
-Voodoo Graphics driver from the Internet Archive, after asking, and keeps
-its GLIDE2X.OVL in Rust-DOS's configuration directory. It is then on
-**Z:**, where games find it on the PATH. A GLIDE2X.OVL in the game's own
-folder comes first. A game that looks for it while it is missing says so.
+driver for the card you picked (Voodoo Graphics 3.01.00 or Voodoo2
+3.02.02) from the Internet Archive, after asking, and keeps its
+GLIDE2X.OVL in Rust-DOS's configuration directory. While that card is
+in, it is on **Z:**, where games find it on the PATH. A GLIDE2X.OVL in
+the game's own folder comes first. A game that looks for it while it is
+missing says so.
 
 # PowerVR card {#powervr}
 
