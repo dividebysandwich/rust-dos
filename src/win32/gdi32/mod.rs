@@ -727,7 +727,11 @@ pub fn get_object_type(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// DeleteObject(handle): an object selected into a DC goes when it is
-/// deselected; stock objects stay.
+/// deselected; stock objects stay. A DC goes as DeleteDC deletes it, its
+/// bitmap free to be selected into another, except a window's (GetDC's,
+/// GetWindowDC's, or a window's own), which stays until ReleaseDC; both
+/// return TRUE. Windows 98 SE does so (#2161), and Beetle Crazy Cup's CD
+/// launcher frees the memory DC of every paint with DeleteObject.
 pub fn delete_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let handle = args[0];
     let Some(object) = gdi(cpu).get(handle) else {
@@ -740,9 +744,10 @@ pub fn delete_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(TRUE);
     }
     if let Kind::Dc { .. } = object.kind {
-        // DeleteObject doesn't delete DCs.
-        set_error(cpu, ERROR_INVALID_HANDLE);
-        return Some(FALSE);
+        if gdi(cpu).dc(handle).is_some_and(|dc| dc.kind == dc::WINDOW) {
+            return Some(TRUE);
+        }
+        return dc::delete_dc(cpu, &[handle]);
     }
     if dc::selected_anywhere(gdi(cpu), handle) {
         if let Some(o) = gdi(cpu).get_mut(handle) {
