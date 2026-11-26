@@ -21,7 +21,8 @@
 //! Only monikers made here can be registered or looked up: Windows asks
 //! a program's own moniker for its comparison data (IROTData) or
 //! marshals it, which isn't done here. Binding (BindToObject,
-//! BindToStorage), composition and the persistence methods of the
+//! BindToStorage), composition (ComposeWith, Inverse, CommonPrefixWith,
+//! RelativePathTo), ParseDisplayName and the persistence methods of the
 //! monikers, and EnumRunning of the table, give E_NOTIMPL (#2175).
 //!
 //! The hash and the comparisons follow Wine's ole32/filemoniker.c,
