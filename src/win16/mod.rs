@@ -35,6 +35,7 @@ pub(crate) mod module;
 mod ole2;
 mod ole2disp;
 pub(crate) mod resource;
+mod setupx;
 pub mod task;
 pub(crate) mod thunk;
 mod typelib;
@@ -139,6 +140,8 @@ pub struct State {
     pub ole: crate::savestate::Since<{ ole2::OLE16 }, ole2::Ole16>,
     /// The Universal Thunks and their selectors (universal.rs).
     pub universal: crate::savestate::Since<{ universal::UT_SAVED }, universal::Universal>,
+    /// SETUPX's open INF files, LDIDs and copy queue (setupx.rs).
+    pub setupx: crate::savestate::Since<{ setupx::SETUPX_SAVED }, setupx::Setupx>,
     /// The exit code of the last task that ended other than a client's,
     /// which the Win16 process ends with when a client outlived it.
     pub exit_code: u16,
@@ -683,7 +686,8 @@ crate::state_fields!(State {
     exit_code,
     comm,
     ole,
-    universal
+    universal,
+    setupx
 });
 crate::state_fields!(Module16 {
     name,

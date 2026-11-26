@@ -128,6 +128,12 @@ programs and DLLs built with those compilers. Their functions are
 `MSVCRT.DLL`'s, so the three share one heap and one set of open files,
 where Windows' own keep one each.
 
+A setup that installs an INF file through SETUPX copies its files with
+Windows 98's version check: a file in place with a newer version stays.
+The shown files have the versions of the built-in Windows' own, so a
+package that brings an older `MSVCRT.DLL`, as the Windows Media Audio
+runtime does, leaves the built-in one in place.
+
 The 16-bit system modules are there too, as on Windows 95 and 98:
 `KRNL386.EXE`, `USER.EXE`, `GDI.EXE`, `MMSYSTEM.DLL`, `COMMDLG.DLL` and
 the others the built-in Windows has for Windows 3.1 programs. Each is an
@@ -289,6 +295,11 @@ which image each protection needs and how to make it.
   their functions only OleTranslateColor, DllCanUnloadNow,
   DllRegisterServer and DllUnregisterServer are written. Calling another
   ends the program with a message naming it.
+- **SETUPX's device installer.** The 16-bit SETUPX.DLL carries out an
+  INF file's install section for the IExpress packages of Internet
+  Explorer's time, such as the Windows Media Audio runtime: its files,
+  registry values and INI lines. Its device installer and GenInstallEx,
+  which DirectX's own setups call, aren't there.
 - **Functions not written yet.** A program that calls one stops with a
   message naming it. Please
   [open an issue](https://github.com/dividebysandwich/rust-dos/issues)
