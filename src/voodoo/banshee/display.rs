@@ -379,22 +379,9 @@ impl Banshee {
                 }
                 first.get_or_insert((*xs.start(), y));
                 shown.cols = cols;
-                let words = &mut shown.words;
-                if dudx == 1 << 20 {
-                    let at = words.len();
-                    words.resize(at + cols, 0);
-                    let start = self.overlay_addr;
-                    surface_row(ram, start, stride, tiled, sy, &mut words[at..]);
-                } else {
-                    let mask = (ram.bytes() - 1) as u32;
-                    let mut u = 0u64;
-                    for _ in xs {
-                        let sx = (u >> 20) as u32;
-                        u += dudx as u64;
-                        let at = surface_addr(self.overlay_addr, sx * 2, sy, stride, tiled);
-                        words.push(word(ram, at, mask));
-                    }
-                }
+                let at = shown.words.len();
+                shown.words.resize(at + cols, 0);
+                self.overlay_row(ram, stride, tiled, sy, dudx, &mut shown.words[at..]);
             });
             (shown.x, shown.y) = first.unwrap_or_default();
             shown.clut = clut(
@@ -526,6 +513,34 @@ impl Banshee {
         }
     }
 
+    /// The 16-bit words of row `sy` of the overlay's surface (`stride`,
+    /// `tiled`) shown on a row of the screen, into `out`: one for each of
+    /// its pixels from the left, `dudx` (`overlay_rows`) apart. Both the
+    /// live picture and the words taken read the rows here, so that the
+    /// two can't come to differ.
+    fn overlay_row(
+        &self,
+        ram: &Vram,
+        stride: u32,
+        tiled: bool,
+        sy: u32,
+        dudx: u32,
+        out: &mut [u16],
+    ) {
+        if dudx == 1 << 20 {
+            surface_row(ram, self.overlay_addr, stride, tiled, sy, out);
+            return;
+        }
+        let mask = (ram.bytes() - 1) as u32;
+        let mut u = 0u64;
+        for w in out {
+            let sx = (u >> 20) as u32;
+            u += dudx as u64;
+            let at = surface_addr(self.overlay_addr, sx * 2, sy, stride, tiled);
+            *w = word(ram, at, mask);
+        }
+    }
+
     /// Each pixel of the screen the overlay covers (`overlay_rows`): its x
     /// and y, and those of the overlay surface's pixel shown there.
     fn overlay_walk(&self, f: &Frame, mut each: impl FnMut(usize, usize, u32, u32)) {
@@ -557,22 +572,14 @@ impl Banshee {
             let colours = Rgb565::new((!bypass).then_some(clut));
             let mut words = Vec::new();
             self.overlay_rows(f, |y, xs, sy, dudx| {
-                let (x0, x1) = (*xs.start(), (*xs.end()).min(pitch.saturating_sub(1)));
-                if xs.is_empty() || x0 > x1 {
+                // The pixels left of the output's right edge.
+                let x0 = *xs.start();
+                if xs.is_empty() || x0 >= pitch {
                     return;
                 }
+                let x1 = (*xs.end()).min(pitch - 1);
                 words.resize(x1 - x0 + 1, 0);
-                if dudx == 1 << 20 {
-                    surface_row(ram, self.overlay_addr, stride, tiled, sy, &mut words);
-                } else {
-                    let mut u = 0u64;
-                    for w in &mut words {
-                        let sx = (u >> 20) as u32;
-                        u += dudx as u64;
-                        let at = surface_addr(self.overlay_addr, sx * 2, sy, stride, tiled);
-                        *w = word(ram, at, mask);
-                    }
-                }
+                self.overlay_row(ram, stride, tiled, sy, dudx, &mut words);
                 // Over pixels of the desktop, which are opaque.
                 let at = (y * pitch + x0) * 4;
                 if let Some(row) = out.get_mut(at..(at + words.len() * 4).min(out.len())) {
