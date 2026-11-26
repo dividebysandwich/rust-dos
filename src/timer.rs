@@ -183,7 +183,7 @@ pub struct Tsc {
 /// spinner's turns were more than the decoder's, and the measurements
 /// read 15% to 27% halted while the decoder had work all the time.
 pub fn waited(idle: f64, handed: f64) -> f64 {
-    (idle - handed.min(idle)).max(0.0)
+    idle - handed.min(idle)
 }
 
 impl Clock {

@@ -1879,7 +1879,7 @@ fn each_threads_time_and_instructions_are_counted() {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
         let stop = run_batch(&mut cpu, &mut NoHook, false);
         assert_ne!(stop, StopReason::ShellReloaded, "{}", printed(&cpu));
-        let times = rust_dos::win32::thread_times(&mut cpu);
+        let times = rust_dos::win32::thread_times(&cpu);
         let now = cpu.bus.clock.now_micros();
         let us: u64 = times.iter().map(|t| t.1).sum();
         if times.is_empty() {
@@ -1899,9 +1899,9 @@ fn each_threads_time_and_instructions_are_counted() {
     let other = times.iter().min_by_key(|t| t.1).unwrap();
     assert!(other.1 > 0 && other.1 < main.1 / 10, "{times:?}");
     assert!(main.2 > other.2 && other.2 > 0, "{times:?}");
-    // A read charges the time to the running thread and changes nothing
-    // else: another at once finds the same counts.
-    assert_eq!(rust_dos::win32::thread_times(&mut cpu), times);
+    // A read counts the running thread's share up to now and changes
+    // nothing: another at once finds the same counts.
+    assert_eq!(rust_dos::win32::thread_times(&cpu), times);
 }
 
 /// A thread that ends its process with ExitProcess keeps its time:
@@ -1973,7 +1973,7 @@ fn a_thread_that_ends_its_process_keeps_its_time() {
             break;
         }
         if cpu.bus.win32.active() {
-            last = rust_dos::win32::thread_times(&mut cpu);
+            last = rust_dos::win32::thread_times(&cpu);
         }
     }
     let threads: Vec<_> = last.iter().filter(|t| t.0 != 0).collect();
@@ -2075,7 +2075,7 @@ fn thread_times_leave_out_dos_between_programs() {
             ran += cpu.bus.clock.now_micros() - before;
         }
         if cpu.bus.win32.active() {
-            last = rust_dos::win32::thread_times(&mut cpu);
+            last = rust_dos::win32::thread_times(&cpu);
         }
     }
     let us: u64 = last.iter().map(|t| t.1).sum();

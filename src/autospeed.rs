@@ -3220,19 +3220,43 @@ impl AutoSpeed {
                         return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
                     }
                     hold(self, from as f64, HOLD_WINDOWS, false)
+                } else if follows {
+                    // The big step left the program waiting (`waits`, or
+                    // it would have gone on up). This measurement counts
+                    // for nothing: a program that waits for its pace
+                    // catches up on the frames the slower speed owed it
+                    // (Dark Omen's movie read 16.3 pictures a second of
+                    // its 15), and a knee and a record reckoned with that
+                    // reading would draw fewer than it and climb back.
+                    // Where the host fell behind or its estimate fell, the
+                    // next measurements are taken at what it runs, which
+                    // still finds the program waiting: the knee is reckoned
+                    // from the speed below either way.
+                    let to = if current > top || m.pace < KEPT_UP {
+                        clamp(c * m.pace.min(1.0))
+                    } else {
+                        current
+                    };
+                    if to <= below.0 {
+                        return overshot(self, below, fps);
+                    }
+                    self.step = Step::Overshot {
+                        below,
+                        sum: 0.0,
+                        seen: 0,
+                    };
+                    to
                 } else if current > top || m.pace < KEPT_UP {
                     overshot(self, below, fps)
                 } else {
                     // A big step may have gone past the point already. This
                     // measurement is the first after a change of speed, so
-                    // it is the mean of two. One whose frames followed the
-                    // speed counts for nothing: a program that waits for
-                    // its pace catches up on the frames the slower speed
-                    // owed it (Dark Omen's movie read 16.3 pictures a
-                    // second of its 15), and a knee reckoned with that
-                    // reading would draw fewer than it and climb back.
-                    let (sum, seen) = if follows { (0.0, 0) } else { (fps * 2.0, 2) };
-                    self.step = Step::Overshot { below, sum, seen };
+                    // it is the mean of two.
+                    self.step = Step::Overshot {
+                        below,
+                        sum: fps * 2.0,
+                        seen: 2,
+                    };
                     current
                 }
             }
@@ -4308,6 +4332,41 @@ mod tests {
         assert!(auto.decide(speed, &drawing(30.0), true, 800_000) < speed);
         assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
         assert_eq!(auto.held.expect("a record").at, speed);
+    }
+
+    #[test]
+    fn a_waiting_step_the_host_fell_behind_at_skips_the_catch_up() {
+        // Dark Omen's movie: 5 pictures a second at 112,500, and right
+        // after the step to 800,000, 16.3 of its 15 as it catches up, with
+        // the host at 90% of the speed. The catch-up reading sets neither
+        // the knee nor the record: the next measurements are taken at what
+        // the host ran.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Raised {
+            from: 112_500,
+            fps: 5.0,
+            below: (112_500, 5.0),
+        };
+        let movie = |fps: f64, pace: f64| Measurement {
+            fps: Some(fps),
+            halted: 0.6,
+            pace,
+            ..STILL
+        };
+        let mut speed = auto.decide(800_000, &movie(16.3, 0.9), true, 800_000);
+        assert!(
+            matches!(auto.step, Step::Overshot { seen: 0, .. }),
+            "{:?}",
+            auto.step
+        );
+        assert!((700_000..=760_000).contains(&speed), "{speed}");
+        for _ in 0..JUDGED {
+            speed = auto.decide(speed, &movie(15.0, 1.0), true, 800_000);
+        }
+        assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+        assert_eq!(auto.held.expect("a record").fps, 15.0);
+        // 112,500 for 5 a second makes 337,500 for 15.
+        assert!(speed < 400_000, "{speed}");
     }
 
     #[test]
