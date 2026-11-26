@@ -3222,6 +3222,20 @@ fn start_programs_in(
     files: Vec<(&str, Vec<u8>)>,
     dirs: &[&str],
 ) -> u8 {
+    start_programs_using(test, parent_at, line, directory, 0, files, dirs)
+}
+
+/// `start_programs_in`, with a parent that first commits `used` bytes
+/// (VirtualAlloc), writes to each of their pages and releases them.
+fn start_programs_using(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    directory: Option<&str>,
+    used: u32,
+    files: Vec<(&str, Vec<u8>)>,
+    dirs: &[&str],
+) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",
@@ -3229,6 +3243,8 @@ fn start_programs_in(
         "CloseHandle",
         "ExitProcess",
         "GetLastError",
+        "VirtualAlloc",
+        "VirtualFree",
     ];
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
     // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
@@ -3243,6 +3259,27 @@ fn start_programs_in(
     }
     let parent = program(BASE, false, imports, &data, |a, l| {
         let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        if used > 0 {
+            // MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE.
+            a.push(4)?;
+            a.push(0x3000)?;
+            a.push(used as i32)?;
+            a.push(0)?;
+            a.call(f("VirtualAlloc"))?;
+            a.mov(edi, eax)?;
+            a.mov(ecx, used / 0x1000)?;
+            let mut touch = a.create_label();
+            a.set_label(&mut touch)?;
+            a.mov(byte_ptr(eax), 1)?;
+            a.add(eax, 0x1000)?;
+            a.dec(ecx)?;
+            a.jnz(touch)?;
+            // MEM_RELEASE.
+            a.push(0x8000)?;
+            a.push(0)?;
+            a.push(edi)?;
+            a.call(f("VirtualFree"))?;
+        }
         a.push(l.at(0x90) as i32)?;
         a.push(l.at(0x40) as i32)?;
         a.push(directory.map_or(0, |_| l.at(0xB0) as i32))?;
