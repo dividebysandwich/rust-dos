@@ -197,7 +197,7 @@ fn place(bus: &mut crate::bus::Bus, wanted: Option<(&Overlay, Vec<u8>)>) {
         None => {
             bus.disk.remove_virtual_file(FILE_NAME);
             bus.log_string(&format!(
-                "[3DFX] {} is off Z:, as the card has changed",
+                "[3DFX] {} is off Z:, as there is none for the card in the machine",
                 FILE_NAME
             ));
         }
@@ -237,7 +237,10 @@ pub fn looked_for(cpu: &mut crate::cpu::Cpu, path: &str) {
                 .to_string(),
         ),
         Some(Some(overlay)) => (
-            format!("This game needs 3dfx's GLIDE2X.OVL for the {}", overlay.board()),
+            format!(
+                "This game needs 3dfx's GLIDE2X.OVL for the {}",
+                overlay.board()
+            ),
             "Download it on the settings' Emulator page (Ctrl+F12)".to_string(),
         ),
     };
@@ -317,5 +320,18 @@ mod tests {
         assert_eq!(of_card(&bus), Some(&VOODOO2));
         bus.configure_voodoo(Some(super::super::Board::Voodoo3));
         assert_eq!(of_card(&bus), None);
+    }
+
+    /// Swapping the card takes the old card's overlay off Z:, whoever
+    /// swaps it: `Hardware::apply` changes the card after the settings
+    /// window has placed the overlay of the card that was in.
+    #[test]
+    fn a_card_swap_takes_the_old_overlay_off() {
+        let mut bus = crate::bus::Bus::new(PathBuf::from("."));
+        let z = format!("Z:\\{}", FILE_NAME);
+        bus.configure_voodoo(Some(super::super::Board::Max));
+        place(&mut bus, Some((&VOODOO1, b"voodoo1".to_vec())));
+        bus.configure_voodoo(Some(super::super::Board::Voodoo3));
+        assert!(!bus.disk.exists(&z));
     }
 }
