@@ -399,10 +399,7 @@ PowerVR always draw on the CPU.
 Start with the default. Then compare the two on the game you play: the
 settings window's **Stats** page, or the overlay **Ctrl+Shift+F12** shows,
 has the frames a second (**FPS**) and how much of a host core the emulator
-takes (**CPU**). Both renderers change at once, while the game runs. On a
-Voodoo3 or Banshee the settings window doesn't offer `voodoo_renderer` yet
-([#821](https://github.com/dividebysandwich/rust-dos/issues/821)): set it in
-the configuration file and start again.
+takes (**CPU**). Both renderers change at once, while the game runs.
 
 The graphics card is often the faster choice, but not always, because the
 OpenGL renderer does more work than the card it draws for:
@@ -570,10 +567,11 @@ only with `voodoo_renderer=opengl`.
 `voodoo`, `voodoo_model`, `voodoo_memory` and `voodoo_gamma` take effect at
 the DOS prompt, the others at once. The settings window's Emulator page has
 them as *3dfx Voodoo Graphics*, *3dfx card* (the chip and the memory
-together), *3dfx drawn by* and the *3dfx* settings after it. They show only
-while *3dfx Voodoo Graphics* is on; on a Voodoo3 or Banshee, set them in the
-configuration file
-([#821](https://github.com/dividebysandwich/rust-dos/issues/821)).
+together), *3dfx drawn by* and the *3dfx* settings after it. The window
+shows the ones the machine's 3dfx card uses: with the add-on card, all of
+them; with a Voodoo3 or Banshee, *3dfx drawn by*, texture sampling and the
+OpenGL settings, but not the add-on card's switch, memory or gamma. The
+OpenGL settings show while *3dfx drawn by* is OpenGL.
 
 With anisotropic filtering on, `voodoo_texture_sampling=unfiltered` also
 blends between mip levels and lets the anisotropic filter reduce shimmer,
