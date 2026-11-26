@@ -226,9 +226,11 @@ it comes. They are independent of each other:
 
 A different renderer doesn't change what the game finds, and a different
 card doesn't change how the window scales the picture. The first two are
-the settings changed most: after a table of common cases, [choosing a video
-card](#choosing-a-video-card) and [choosing a
-renderer](#choosing-a-renderer) take them in turn.
+the settings changed most. After a table of common cases come [choosing a
+video card](#choosing-a-video-card), then [what the game sees and what your
+computer does](#what-the-game-sees-and-what-your-computer-does), which
+explains how the card and the renderer differ, then [choosing a
+renderer](#choosing-a-renderer).
 
 ### Settings for common cases
 
@@ -306,14 +308,50 @@ tried.
 `machine` and the 3D cards take effect at the DOS prompt, so a game isn't
 left without the card it set up.
 
+### What the game sees and what your computer does
+
+A game only ever talks to the emulated card. Take GLQuake on the [built-in
+Windows](#windows-games) with `machine=svga_voodoo3`:
+
+* GLQuake draws with OpenGL. It calls the OpenGL of the Windows it runs on,
+  which turns its calls into triangles for the emulated Voodoo3, as 3dfx's
+  OpenGL driver did on a real card. As far as GLQuake can tell, it draws
+  with OpenGL on a 3dfx card.
+* Rust-DOS then makes the Voodoo3's picture from those triangles. With
+  `voodoo_renderer=software`, the default, its own rasterizer draws every
+  triangle on your CPU, pixel for pixel as the card would. Your graphics
+  card takes no part in the game's 3D: GLQuake's OpenGL picture is made
+  entirely by the CPU, and it runs on a computer whose graphics driver has
+  no OpenGL at all.
+* With `voodoo_renderer=opengl`, Rust-DOS draws the same triangles again
+  with your graphics card, through your computer's OpenGL, at `voodoo_scale`
+  times the card's resolution.
+
+"OpenGL" thus names two unrelated things here. One is the interface a game
+draws with, which the game and the emulated card decide: Glide, Direct3D or
+OpenGL. The other is one of the two renderers Rust-DOS can use on your
+computer. Either renderer draws any of the interfaces: a Glide game with
+`voodoo_renderer=opengl` uses your graphics card, and GLQuake with
+`voodoo_renderer=software` doesn't.
+
+The 2D picture, which is DOS's text and graphics modes, VESA modes,
+DirectDraw and the Windows desktop, is drawn by the CPU into the emulated
+card's memory, as the real card's memory held it. Two cards drawn with
+OpenGL are the exception, and draw some 2D on your graphics card: a
+ToadForce its fills and copies into the surfaces its 3D draws into, and a
+Voodoo3 or Banshee the built-in Windows' blits, fills and window updates
+in its memory, and under any Windows its 2D engine's fills and copies
+that touch the 3D's picture. The window then scales the picture up with
+OpenGL 3, which costs your graphics card little; without OpenGL 3, SDL's
+renderer scales it and the CRT shaders aren't there.
+
 ### Choosing a renderer
 
 The renderer is what draws the emulated card's 3D on your computer: your
 CPU, or your graphics card through OpenGL. The game can't tell which, as
-[the next section](#what-the-game-sees-and-what-your-computer-does)
-explains. Beside `machine`, it is the setting to change when a game runs
-slowly or you want a sharper picture. Which setting chooses it depends on
-the card:
+[above](#what-the-game-sees-and-what-your-computer-does) explains. Beside
+`machine`, it is the setting to change when a game runs slowly or you want
+a sharper picture. Which setting chooses it depends on the card:
 
 | Card | What can draw its 3D | Setting |
 |---|---|---|
@@ -387,43 +425,6 @@ a Banshee or Voodoo3 on the CPU whatever `voodoo_renderer` says. It draws a
 Voodoo Graphics or Voodoo2 with the frontend's OpenGL when
 `voodoo_renderer=opengl` and the frontend has OpenGL 3, and on the CPU
 otherwise ([its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
-
-### What the game sees and what your computer does
-
-A game only ever talks to the emulated card. Take GLQuake on the [built-in
-Windows](#windows-games) with `machine=svga_voodoo3`:
-
-* GLQuake draws with OpenGL. It calls the OpenGL of the Windows it runs on,
-  which turns its calls into triangles for the emulated Voodoo3, as 3dfx's
-  OpenGL driver did on a real card. As far as GLQuake can tell, it draws
-  with OpenGL on a 3dfx card.
-* Rust-DOS then makes the Voodoo3's picture from those triangles. With
-  `voodoo_renderer=software`, the default, its own rasterizer draws every
-  triangle on your CPU, pixel for pixel as the card would. Your graphics
-  card takes no part in the game's 3D: GLQuake's OpenGL picture is made
-  entirely by the CPU, and it runs on a computer whose graphics driver has
-  no OpenGL at all.
-* With `voodoo_renderer=opengl`, Rust-DOS draws the same triangles again
-  with your graphics card, through your computer's OpenGL, at `voodoo_scale`
-  times the card's resolution.
-
-"OpenGL" thus names two unrelated things here. One is the interface a game
-draws with, which the game and the emulated card decide: Glide, Direct3D or
-OpenGL. The other is one of the two renderers Rust-DOS can use on your
-computer. Either renderer draws any of the interfaces: a Glide game with
-`voodoo_renderer=opengl` uses your graphics card, and GLQuake with
-`voodoo_renderer=software` doesn't.
-
-The 2D picture, which is DOS's text and graphics modes, VESA modes,
-DirectDraw and the Windows desktop, is drawn by the CPU into the emulated
-card's memory, as the real card's memory held it. Two cards drawn with
-OpenGL are the exception, and draw some 2D on your graphics card: a
-ToadForce its fills and copies into the surfaces its 3D draws into, and a
-Voodoo3 or Banshee the built-in Windows' blits, fills and window updates
-in its memory, and under any Windows its 2D engine's fills and copies
-that touch the 3D's picture. The window then scales the picture up with
-OpenGL 3, which costs your graphics card little; without OpenGL 3, SDL's
-renderer scales it and the CRT shaders aren't there.
 
 ### What each card can draw
 
