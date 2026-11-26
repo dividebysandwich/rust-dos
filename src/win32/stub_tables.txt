@@ -4621,6 +4621,10 @@ TypeEnum_Next
 TypeEnum_Skip
 TypeEnum_Reset
 TypeEnum_Clone
+Mapper_CreateCategory
+Mapper_UnregisterFilter
+Mapper_RegisterFilter
+Mapper_EnumMatchingFilters
 
 DLL AMSTREAM.DLL
 DllCanUnloadNow

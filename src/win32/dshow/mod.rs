@@ -33,6 +33,7 @@ macro_rules! hr {
 
 pub mod filter;
 pub mod graph;
+pub mod mapper;
 pub mod sample;
 pub mod stream;
 
@@ -158,6 +159,18 @@ pub const CLSID_SYSTEM_CLOCK: Guid = guid(
     0x524F,
     0x11CE,
     [0x9F, 0x53, 0x00, 0x20, 0xAF, 0x0B, 0xA7, 0x70],
+);
+pub const CLSID_FILTER_MAPPER2: Guid = guid(
+    0xCDA4_2200,
+    0xBD88,
+    0x11D0,
+    [0xBD, 0x4E, 0x00, 0xA0, 0xC9, 0x11, 0xCE, 0x86],
+);
+pub const IID_IFILTER_MAPPER2: Guid = guid(
+    0xB79B_B0B0,
+    0x33C1,
+    0x11D1,
+    [0xAB, 0xE1, 0x00, 0xA0, 0xC9, 0x05, 0xF3, 0x75],
 );
 pub const CLSID_MPEG_VIDEO_CODEC: Guid = guid(
     0xFEB5_0740,
@@ -595,6 +608,11 @@ static QUARTZ_APIS: &[Api] = &[
     method("TypeEnum_Skip", 2, filter::type_enum_skip),
     method("TypeEnum_Reset", 1, filter::type_enum_reset),
     method("TypeEnum_Clone", 2, filter::type_enum_clone),
+    // The filter mapper (CLSID_FilterMapper2).
+    method("Mapper_CreateCategory", 4, mapper::create_category),
+    method("Mapper_UnregisterFilter", 4, mapper::unregister_filter),
+    method("Mapper_RegisterFilter", 7, mapper::register_filter),
+    method("Mapper_EnumMatchingFilters", 16, e_notimpl),
 ];
 
 static QUARTZ_VTABLES: &[Vtable] = &[
@@ -871,6 +889,15 @@ static QUARTZ_VTABLES: &[Vtable] = &[
             "TypeEnum_Clone",
         ],
     },
+    Vtable {
+        name: "IFilterMapper2",
+        methods: unknown![
+            "Mapper_CreateCategory",
+            "Mapper_UnregisterFilter",
+            "Mapper_RegisterFilter",
+            "Mapper_EnumMatchingFilters",
+        ],
+    },
 ];
 
 /// AMSTREAM.DLL's functions. Append only (see `stubs`).
@@ -1061,6 +1088,7 @@ pub const ALLOCATOR: Iface = Iface(D_QUARTZ, 12);
 pub const MEDIA_SAMPLE: Iface = Iface(D_QUARTZ, 13);
 pub const CLOCK: Iface = Iface(D_QUARTZ, 14);
 pub const TYPE_ENUM: Iface = Iface(D_QUARTZ, 15);
+pub const MAPPER: Iface = Iface(D_QUARTZ, 16);
 pub const MULTI_STREAM: Iface = Iface(D_AMSTREAM, 0);
 pub const DD_STREAM: Iface = Iface(D_AMSTREAM, 1);
 pub const AUDIO_STREAM: Iface = Iface(D_AMSTREAM, 2);
@@ -1093,6 +1121,12 @@ pub static CLASSES: &[com::Class] = &[
         dll: "QUARTZ.DLL",
         name: "System Clock",
         create: sample::create_clock,
+    },
+    com::Class {
+        clsid: CLSID_FILTER_MAPPER2,
+        dll: "QUARTZ.DLL",
+        name: "Filter Mapper2",
+        create: mapper::create,
     },
     com::Class {
         clsid: CLSID_AM_MULTI_MEDIA_STREAM,
@@ -1135,6 +1169,7 @@ pub enum Kind {
     Decoder { d: filter::Decoder },
     Pin { p: filter::Pin },
     TypeEnum { e: filter::TypeEnum },
+    Mapper {},
     Allocator { a: sample::Allocator },
     MediaSample { s: sample::MediaSample },
     Clock { c: sample::Clock },
@@ -1199,6 +1234,7 @@ impl Kind {
                 (IID_ISTREAM_SAMPLE, AUDIO_SAMPLE),
                 (IID_IAUDIO_STREAM_SAMPLE, AUDIO_SAMPLE),
             ],
+            Kind::Mapper {} => &[(IID_IFILTER_MAPPER2, MAPPER)],
             Kind::AudioData { .. } => &[
                 (IID_IAUDIO_DATA, AUDIO_DATA),
                 (IID_IMEMORY_DATA, AUDIO_DATA),
@@ -1616,5 +1652,6 @@ super::state_variants!(Kind {
     MediaSample { s },
     Clock { c },
     TypeEnum { e },
+    Mapper {},
 });
 crate::state_fields!(State { objects, last_id });

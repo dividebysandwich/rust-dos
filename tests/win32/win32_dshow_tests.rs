@@ -1937,3 +1937,165 @@ fn a_file_rendered_again_starts_outside_full_screen_mode() {
     let code = run(&mut cpu);
     assert_eq!(code, 0, "{}", printed(&cpu));
 }
+
+const CLSID_FILTER_MAPPER2: [u8; 16] = guid(
+    0xCDA4_2200,
+    0xBD88,
+    0x11D0,
+    [0xBD, 0x4E, 0x00, 0xA0, 0xC9, 0x11, 0xCE, 0x86],
+);
+const IID_IFILTER_MAPPER2: [u8; 16] = guid(
+    0xB79B_B0B0,
+    0x33C1,
+    0x11D1,
+    [0xAB, 0xE1, 0x00, 0xA0, 0xC9, 0x05, 0xF3, 0x75],
+);
+
+// IFilterMapper2's methods, by their offsets in its vtable.
+const MAPPER_UNREGISTER_FILTER: i32 = 16;
+const MAPPER_REGISTER_FILTER: i32 = 20;
+
+/// HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND).
+const FILE_NOT_FOUND: u32 = 0x8007_0002;
+
+// The places in the filter mapper program's data.
+const M_CLSID: u32 = 0x00;
+const M_IID: u32 = 0x10;
+const M_FILTER: u32 = 0x20;
+const M_MAJOR: u32 = 0x30;
+const M_MINOR: u32 = 0x40;
+const M_OTHER: u32 = 0x50;
+const M_NAME: u32 = 0x60;
+const M_MAPPER: u32 = 0x100;
+const M_RF2: u32 = 0x110;
+const M_PIN: u32 = 0x120;
+const M_TYPES: u32 = 0x150;
+
+const FILTER: [u8; 16] = guid(
+    0x1234_5678,
+    0x9ABC,
+    0x11D0,
+    [1, 2, 3, 4, 5, 6, 7, 8],
+);
+const MAJOR: [u8; 16] = [0x11; 16];
+const MINOR: [u8; 16] = [0x22; 16];
+
+/// The value `name` of the key `key` in the registry file `text`, as
+/// it is written after its `=`, with the lines it is continued on
+/// joined.
+fn registry_value(text: &str, key: &str, name: &str) -> Option<String> {
+    let start = text.find(&format!("[{}]", key))?;
+    let body = &text[start..];
+    let body = &body[..body[1..].find("\n[").map_or(body.len(), |i| i + 1)];
+    let at = body.find(&format!("\"{}\"=", name))?;
+    let mut value = String::new();
+    for line in body[at + name.len() + 3..].lines() {
+        let line = line.trim();
+        match line.strip_suffix('\\') {
+            Some(part) => value.push_str(part),
+            None => {
+                value.push_str(line);
+                break;
+            }
+        }
+    }
+    Some(value)
+}
+
+/// DirectShow's base classes register a DLL's filters through the
+/// filter mapper from its DllRegisterServer, as the Indeo 5 codec
+/// IR50_32.DLL does when Leadfoot's setup self-registers it (#2182).
+/// Windows 98 SE's mapper writes the filter under its category, the
+/// DirectShow filters', with its name, CLSID and REGFILTER2.
+#[test]
+fn the_filter_mapper_registers_a_filter_in_its_category() {
+    let mut d = vec![0u8; 0x200];
+    let mut put = |at: u32, bytes: &[u8]| {
+        d[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    };
+    put(M_CLSID, &CLSID_FILTER_MAPPER2);
+    put(M_IID, &IID_IFILTER_MAPPER2);
+    put(M_FILTER, &FILTER);
+    put(M_MAJOR, &MAJOR);
+    put(M_MINOR, &MINOR);
+    put(M_OTHER, &[0x33; 16]);
+    let name: Vec<u8> = "Test Decoder\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    put(M_NAME, &name);
+    // REGFILTER2, version 1: one REGFILTERPINS, an input of one type.
+    put(M_RF2, &1u32.to_le_bytes());
+    put(M_RF2 + 4, &0x0060_0000u32.to_le_bytes());
+    put(M_RF2 + 8, &1u32.to_le_bytes());
+    put(M_PIN + 28, &1u32.to_le_bytes());
+    let exe = program(IMPORTS, &d, |a, l| {
+        let mut fail = a.create_label();
+        let pointers = [
+            (M_RF2 + 12, M_PIN),
+            (M_PIN, M_NAME),
+            (M_PIN + 32, M_TYPES),
+            (M_TYPES, M_MAJOR),
+            (M_TYPES + 4, M_MINOR),
+        ];
+        for (at, to) in pointers {
+            a.mov(dword_ptr(l.at(at)), l.at(to) as i32)?;
+        }
+        call(a, l, fail, 1, CO_INITIALIZE, &[Imm(0)], S_OK)?;
+        let args = [
+            Ptr(M_CLSID),
+            Imm(0),
+            Imm(1),
+            Ptr(M_IID),
+            Ptr(M_MAPPER),
+        ];
+        call(a, l, fail, 2, CO_CREATE, &args, S_OK)?;
+        let register = (M_MAPPER, MAPPER_REGISTER_FILTER);
+        let args = [
+            Ptr(M_FILTER),
+            Ptr(M_NAME),
+            Imm(0),
+            Imm(0),
+            Imm(0),
+            Ptr(M_RF2),
+        ];
+        method(a, l, fail, 3, register, &args, S_OK)?;
+        // A filter that isn't there can't go.
+        let unregister = (M_MAPPER, MAPPER_UNREGISTER_FILTER);
+        let args = [Imm(0), Imm(0), Ptr(M_OTHER)];
+        method(a, l, fail, 4, unregister, &args, FILE_NOT_FOUND)?;
+        exit(a, l, &mut fail, Imm(0))
+    });
+    let mut cpu = machine("filter-mapper", exe, &[]);
+    let code = run(&mut cpu);
+    assert_eq!(code, 0, "{}", printed(&cpu));
+
+    let text = fs::read_to_string("target/test_win32_dshow/filter-mapper/REGISTRY.REG").unwrap();
+    let key = "HKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID\\\
+        {083863F1-70DE-11D0-BD40-00A0C911CE86}\\Instance\\\
+        {12345678-9ABC-11D0-0102-030405060708}";
+    let value = |name: &str| registry_value(&text, key, name);
+    assert_eq!(value("FriendlyName").as_deref(), Some("\"Test Decoder\""));
+    assert_eq!(
+        value("CLSID").as_deref(),
+        Some("\"{12345678-9ABC-11D0-0102-030405060708}\"")
+    );
+    // The header, the pin, its type, then the two GUIDs.
+    let mut data: Vec<u8> = Vec::new();
+    for d in [2u32, 0x0060_0000, 1, 0] {
+        data.extend(d.to_le_bytes());
+    }
+    data.extend(b"0pi3");
+    for d in [0u32, 0, 1, 0, 0] {
+        data.extend(d.to_le_bytes());
+    }
+    data.extend(b"0ty3");
+    for d in [0u32, 56, 72] {
+        data.extend(d.to_le_bytes());
+    }
+    data.extend(MAJOR);
+    data.extend(MINOR);
+    let hex: Vec<String> = data.iter().map(|b| format!("{:02x}", b)).collect();
+    let want = format!("hex:{}", hex.join(","));
+    assert_eq!(value("FilterData"), Some(want));
+}

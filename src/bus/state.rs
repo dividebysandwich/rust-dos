@@ -30,7 +30,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 4;
-const WIN32_VERSION: u16 = 110;
+const WIN32_VERSION: u16 = 111;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -86,8 +86,10 @@ const WIN32_VERSION: u16 = 110;
 /// a DirectDraw palette is realized through
 /// (`ddraw::palette::GDI_PALETTE_SAVED`), 71's to 108's not SETUPX's
 /// open INF files, LDIDs and copy queue (`win16::setupx::SETUPX_SAVED`),
-/// and 71's to 109's no Running Object Table (`ole32::ROT_SAVED`).
-const WIN32_LOADS: [u16; 40] = [
+/// 71's to 109's no Running Object Table (`ole32::ROT_SAVED`), and
+/// 71's to 110's no filter mappers (`dshow::Kind::Mapper`, which they
+/// load without).
+const WIN32_LOADS: [u16; 41] = [
     71,
     72,
     73,
@@ -127,6 +129,7 @@ const WIN32_LOADS: [u16; 40] = [
     107,
     108,
     109,
+    110,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1283,6 +1286,7 @@ mod tests {
         (108, 0xD583_DDB0_E20F_D89B), // the GDI palette a DirectDraw palette is realized through
         (109, 0x5FC6_2F5F_06D7_B415), // SETUPX's open INF files, LDIDs and copy queue
         (110, 0x567C_F664_B7FC_E0F3), // OLE32's Running Object Table
+        (111, 0xDFCC_68BC_E45B_D512), // DirectShow's filter mapper
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
