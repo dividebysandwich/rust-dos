@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::win32::dsound::device::{Format, WAVE_FORMAT_PCM};
+use crate::savestate::Since;
 use crate::win32::winmm::wave;
 
 /// The device's state, in its `Device`.
@@ -32,6 +33,10 @@ pub struct Wav {
     pub paused: bool,
     /// Cue output put it in its pseudo-paused state.
     pub cued: bool,
+    /// The file's own format when its samples are decoded from ADPCM
+    /// (`wave::read_wav`). Status gives it, and positions in bytes count
+    /// the file's bytes, as MCIWAVE's do; the samples play as `format`.
+    pub file_format: Since<{ super::PROCEDURE_SAVED }, Option<wave::FileFormat>>,
 }
 
 /// MCI_WAVE_SET_PARMS's flags.
@@ -147,29 +152,24 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
 fn open(cpu: &mut Cpu, i: usize) -> u32 {
     let element = device(cpu, i).element.clone();
     wav(cpu, i).format = NEW_FORMAT;
+    *wav(cpu, i).file_format = None;
     if element.is_empty() {
         return 0;
     }
-    use crate::win32::kernel32;
-    let handle = match kernel32::open_handle(cpu, &element, 0x8000_0000, 1, 3) {
-        Ok(h) => h,
-        Err(_) => return MCIERR_FILE_NOT_FOUND,
+    let bytes = match element_bytes(cpu, i) {
+        Ok(bytes) => bytes,
+        Err(e) => return e,
     };
-    let mut bytes = Vec::new();
-    loop {
-        match kernel32::read_file(cpu, handle, 65536) {
-            Ok(chunk) if !chunk.is_empty() => bytes.extend_from_slice(&chunk),
-            _ => break,
-        }
-    }
-    crate::win32::object::close(cpu, handle);
-    let Some((format, mut data)) = wave::parse_wav(&bytes) else {
+    // The samples are kept (`Wav::data`), not the file.
+    *device(cpu, i).procedure_data = None;
+    let Some((format, mut data, file_format)) = wave::read_wav(&bytes) else {
         return MCIERR_INVALID_FILE;
     };
     data.truncate(data.len() / format.block() as usize * format.block() as usize);
     let w = wav(cpu, i);
     w.format = format;
     w.data = data;
+    *w.file_format = file_format;
     w.file = true;
     0
 }
@@ -180,7 +180,13 @@ fn to_bytes(cpu: &mut Cpu, i: usize, value: u32) -> u64 {
     let f = wav(cpu, i).format;
     let block = f.block() as u64;
     match tf {
-        MCI_FORMAT_BYTES => value as u64 / block * block,
+        MCI_FORMAT_BYTES => match *wav(cpu, i).file_format {
+            // The file's bytes, at its rate of bytes a second.
+            Some((_, avg, _)) => {
+                value as u64 * f.bytes_per_second() as u64 / avg.max(1) as u64 / block * block
+            }
+            None => value as u64 / block * block,
+        },
         MCI_FORMAT_SAMPLES => value as u64 * block,
         _ => value as u64 * f.bytes_per_second() as u64 / 1000 / block * block,
     }
@@ -191,7 +197,12 @@ fn from_bytes(cpu: &mut Cpu, i: usize, bytes: u32) -> u32 {
     let tf = device(cpu, i).time_format;
     let f = wav(cpu, i).format;
     match tf {
-        MCI_FORMAT_BYTES => bytes,
+        MCI_FORMAT_BYTES => match *wav(cpu, i).file_format {
+            Some((_, avg, _)) => {
+                (bytes as u64 * avg as u64 / f.bytes_per_second().max(1) as u64) as u32
+            }
+            None => bytes,
+        },
         MCI_FORMAT_SAMPLES => bytes / f.block(),
         _ => (bytes as u64 * 1000 / f.bytes_per_second().max(1) as u64) as u32,
     }
@@ -324,7 +335,12 @@ fn status(cpu: &mut Cpu, i: usize, flags: u32, p: &mut Parms) -> u32 {
     if flags & MCI_STATUS_ITEM == 0 {
         return MCIERR_MISSING_PARAMETER;
     }
-    let f = wav(cpu, i).format;
+    let w = wav(cpu, i);
+    // A decoded file's own format, as MCIWAVE gives it.
+    let (f, avg, align) = match *w.file_format {
+        Some(file) => file,
+        None => (w.format, w.format.bytes_per_second(), w.format.block() as u16),
+    };
     let (ret, kind) = match p.item {
         MCI_STATUS_LENGTH => {
             let length = wav(cpu, i).data.len() as u32;
@@ -355,8 +371,8 @@ fn status(cpu: &mut Cpu, i: usize, flags: u32, p: &mut Parms) -> u32 {
         MCI_WAVE_STATUS_FORMATTAG => (f.tag as u32, Ret::Int),
         MCI_WAVE_STATUS_CHANNELS => (f.channels as u32, Ret::Int),
         MCI_WAVE_STATUS_SAMPLESPERSEC => (f.rate, Ret::Int),
-        MCI_WAVE_STATUS_AVGBYTESPERSEC => (f.bytes_per_second(), Ret::Int),
-        MCI_WAVE_STATUS_BLOCKALIGN => (f.block(), Ret::Int),
+        MCI_WAVE_STATUS_AVGBYTESPERSEC => (avg, Ret::Int),
+        MCI_WAVE_STATUS_BLOCKALIGN => (align as u32, Ret::Int),
         MCI_WAVE_STATUS_BITSPERSAMPLE => (f.bits as u32, Ret::Int),
         // Nothing records, so there is no input level.
         MCI_WAVE_STATUS_LEVEL => (0, Ret::Int),
@@ -409,6 +425,7 @@ fn set(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
         }
         // The block alignment and bytes a second follow from the rest.
         wav(cpu, i).format = f;
+        *wav(cpu, i).file_format = None;
     }
     if flags & MCI_SET_TIME_FORMAT != 0 {
         device(cpu, i).time_format = p.time_format;
@@ -449,5 +466,6 @@ crate::state_fields!(Wav {
     started,
     sound,
     paused,
-    cued
+    cued,
+    file_format
 });

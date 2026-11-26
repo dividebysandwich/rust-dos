@@ -27,13 +27,18 @@
 //! a command that makes one returns `NEEDS_CALL`; the function that ran
 //! it makes the call (`call_step`) and runs again, and the command then
 //! finds what the call returned (`made`). Each thread keeps its own
-//! calls. Closing posts the window WM_CLOSE, which destroys it.
+//! calls. The open of a device that reads its file with mmio makes calls
+//! into WINMM the same way, to read it through the program's I/O
+//! procedure (`read_element`). Closing posts the window WM_CLOSE, which
+//! destroys it.
 //!
 //! A save state keeps where the device is, not the file: it is read
-//! again when it is next wanted.
+//! again when it is next wanted. A file the program's I/O procedure read
+//! is kept with the device instead (`Device::procedure_data`).
 
 use super::media::{Kind as MediaKind, Media, Pictures};
 use super::*;
+use crate::savestate::Since;
 use crate::win32::gdi32::draw::{self, Source};
 use crate::win32::gdi32::palette;
 use crate::win32::gdi32::surface::{Surface, default_masks, dib_stride};
@@ -89,9 +94,10 @@ pub const MCI_DGV_PUT_WINDOW: u32 = 0x0020_0000;
 const MCI_DGV_WHERE_MAX: u32 = 0x0040_0000;
 pub const MCI_DGV_UPDATE_HDC: u32 = 0x0002_0000;
 
-/// MCI_STATUS's items: the window; whether it shows, is minimized, is
-/// maximized.
+/// MCI_STATUS's items: the window; the palette; whether the window
+/// shows, is minimized, is maximized.
 pub const MCI_DGV_STATUS_HWND: u32 = 0x4001;
+pub const MCI_DGV_STATUS_HPAL: u32 = 0x4004;
 pub const MCI_DGV_STATUS_WINDOW_VISIBLE: u32 = 0x4021;
 pub const MCI_DGV_STATUS_WINDOW_MINIMIZED: u32 = 0x4022;
 pub const MCI_DGV_STATUS_WINDOW_MAXIMIZED: u32 = 0x4023;
@@ -162,7 +168,8 @@ pub struct Video {
     pub media: Option<Arc<Media>>,
     pub pictures: Pictures,
     /// On a palette device, the palette the pictures are drawn with,
-    /// once one was drawn; 0 before.
+    /// once one was drawn, realized or asked for by MCI_STATUS
+    /// (`movie_palette`); 0 before.
     pub palette: u32,
     /// Whether the palette is realized as a background palette: the
     /// last MCI_REALIZE had MCI_DGV_REALIZE_BKGD.
@@ -174,8 +181,9 @@ pub struct Video {
     pub by_two: bool,
 }
 
-/// A call into USER32: the function, its arguments, and the strings it
-/// passes, each with the place of the argument that points to it.
+/// A call into USER32, or into WINMM's mmio (`super::read_element`): the
+/// function, its arguments, and the strings it passes, each with the
+/// place of the argument that points to it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Call {
     pub target: u32,
@@ -183,10 +191,10 @@ pub struct Call {
     pub strings: Vec<(u32, String)>,
 }
 
-/// A thread's command's calls into USER32, which the thread makes before
-/// the command runs again: those made, with what they returned, and the
-/// one it asks for next. Each thread has its own, so that commands two
-/// threads send at once don't take each other's calls.
+/// A thread's command's calls, which the thread makes before the command
+/// runs again: those made, with what they returned, and the one it asks
+/// for next. Each thread has its own, so that commands two threads send
+/// at once don't take each other's calls.
 #[derive(Clone, Debug, Default)]
 pub struct Calls {
     pub tid: u32,
@@ -194,6 +202,10 @@ pub struct Calls {
     pub next: Option<Call>,
     /// The file the command read, so that it isn't read again.
     pub media: Option<(String, Arc<Media>)>,
+    /// The element the command read through the program's I/O procedure,
+    /// and its bytes, kept from when mmioOpenA read them until the
+    /// command runs again after its mmioClose (`super::read_element`).
+    pub element: Since<{ super::PROCEDURE_SAVED }, Option<(String, Arc<Vec<u8>>)>>,
 }
 
 /// The bytes of a call's scratch space for its strings.
@@ -204,7 +216,7 @@ fn video(cpu: &mut Cpu, i: usize) -> &mut Video {
 }
 
 /// The running thread's calls, made empty if it has none.
-fn calls(cpu: &mut Cpu) -> &mut Calls {
+pub(super) fn calls(cpu: &mut Cpu) -> &mut Calls {
     let tid = user32::current_tid(cpu);
     let list = &mut mci(cpu).calls;
     let k = match list.iter().position(|c| c.tid == tid) {
@@ -220,12 +232,19 @@ fn calls(cpu: &mut Cpu) -> &mut Calls {
     &mut list[k]
 }
 
-/// What the call `api(args)` returned, if the command made it; else it
-/// asks for the call, and the command returns NEEDS_CALL. `strings` are
-/// the strings the call passes, each with the place of its argument.
+/// What the call of USER32's `api(args)` returned, if the command made
+/// it; else it asks for the call, and the command returns NEEDS_CALL.
+/// `strings` are the strings the call passes, each with the place of its
+/// argument.
 pub fn made(cpu: &mut Cpu, api: &str, args: &[u32], strings: &[(u32, &str)]) -> Option<u32> {
+    let target = user32::address_of(cpu, api);
+    made_at(cpu, target, args, strings)
+}
+
+/// `made` for the function at `target`.
+pub fn made_at(cpu: &mut Cpu, target: u32, args: &[u32], strings: &[(u32, &str)]) -> Option<u32> {
     let call = Call {
-        target: user32::address_of(cpu, api),
+        target,
         args: args.to_vec(),
         strings: strings.iter().map(|&(k, s)| (k, s.to_string())).collect(),
     };
@@ -295,14 +314,14 @@ pub fn media(cpu: &mut Cpu, i: usize) -> Option<Arc<Media>> {
     if element.is_empty() {
         return None;
     }
-    let m = Arc::new(read(cpu, i, &element).ok()?);
+    let m = Arc::new(read(cpu, i).ok()?);
     video(cpu, i).media = Some(m.clone());
     Some(m)
 }
 
-/// Reads the file `path`, for the device `i`.
-fn read(cpu: &mut Cpu, i: usize, path: &str) -> Result<Media, u32> {
-    let bytes = super::media::read_file(cpu, path).ok_or(MCIERR_FILE_NOT_FOUND)?;
+/// Reads the device `i`'s element (`element_bytes`).
+fn read(cpu: &mut Cpu, i: usize) -> Result<Media, u32> {
+    let bytes = element_bytes(cpu, i)?;
     Media::parse(&bytes, is_mpeg(cpu, i)).ok_or(MCIERR_INVALID_FILE)
 }
 
@@ -396,7 +415,7 @@ fn open(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
             .map(|(_, m)| m.clone());
         let m = match cached {
             Some(m) => m,
-            None => match read(cpu, i, &element) {
+            None => match read(cpu, i) {
                 Ok(m) => Arc::new(m),
                 Err(e) => return e,
             },
@@ -912,6 +931,7 @@ fn status(cpu: &mut Cpu, i: usize, flags: u32, p: &mut Parms) -> u32 {
         MCI_STATUS_MEDIA_PRESENT | MCI_STATUS_READY => (TRUE, Ret::Bool),
         MCI_STATUS_TIME_FORMAT => (device(cpu, i).time_format, Ret::TimeFormat),
         MCI_DGV_STATUS_HWND => (video(cpu, i).hwnd, Ret::Int),
+        MCI_DGV_STATUS_HPAL => (status_palette(cpu, i), Ret::Int),
         MCI_DGV_STATUS_WINDOW_VISIBLE
         | MCI_DGV_STATUS_WINDOW_MINIMIZED
         | MCI_DGV_STATUS_WINDOW_MAXIMIZED => {
@@ -1240,33 +1260,58 @@ fn realize(cpu: &mut Cpu, i: usize, flags: u32) -> u32 {
     0
 }
 
+/// MCI_STATUS's MCI_DGV_STATUS_HPAL: the palette the device draws with
+/// (`movie_palette`), as MCIAVI answers with DrawDib's palette. It is
+/// made now if no frame was drawn yet, so the handle is the one the
+/// frames are drawn and realized with. On a device of more than 256
+/// colours DrawDib realizes no palette and the answer is 0, as it is for
+/// a device with no file, or with a file of no pictures, which DrawDib
+/// never begins to draw (`draw`).
+fn status_palette(cpu: &mut Cpu, i: usize) -> u32 {
+    if !palette::palette_device(cpu) {
+        return 0;
+    }
+    match media(cpu, i) {
+        Some(m) if m.frames > 0 => movie_palette(cpu, i, &m),
+        _ => 0,
+    }
+}
+
+/// The palette the device `i` draws `m` with on a palette device: the
+/// movie's own colours for an 8-bit movie, the palette of iccvid.dll's
+/// 8-bit output for a Cinepak movie, the halftone palette for one of
+/// more bits. It is made the first time it is asked for and kept in
+/// `Video::palette` until the device closes.
+fn movie_palette(cpu: &mut Cpu, i: usize, m: &Media) -> u32 {
+    let hpal = video(cpu, i).palette;
+    if crate::win32::gdi32::gdi(cpu).palette(hpal).is_some() {
+        return hpal;
+    }
+    let mut colors = match &m.video {
+        MediaKind::Avi(v) if v.cinepak() => v.cinepak_palette(crate::win32::gdi32::static_colors()),
+        MediaKind::Avi(v) => v.colors(),
+        _ => Vec::new(),
+    };
+    if colors.is_empty() {
+        colors = palette::halftone_colors();
+    }
+    let hpal = palette::system_palette_of(cpu, &colors);
+    video(cpu, i).palette = hpal;
+    hpal
+}
+
 /// On a palette device, select the movie's palette into `hdc` and
-/// realize it, as MCIAVI's DrawDib does before it draws: the movie's own
-/// colours for an 8-bit movie, the palette of iccvid.dll's 8-bit output
-/// for a Cinepak movie, the halftone palette for one of more bits.
-/// Unless MCI_REALIZE asked for the background, it is selected as
-/// a foreground palette, so in the foreground window or a child of it,
-/// its colours take the system palette's free entries. Returns the
-/// palette it replaced, which goes back in after the picture is drawn.
+/// realize it, as MCIAVI's DrawDib does before it draws
+/// (`movie_palette`). Unless MCI_REALIZE asked for the background, it
+/// is selected as a foreground palette, so in the foreground window or a
+/// child of it, its colours take the system palette's free entries.
+/// Returns the palette it replaced, which goes back in after the
+/// picture is drawn.
 fn select_movie_palette(cpu: &mut Cpu, i: usize, m: &Media, hdc: u32) -> Option<u32> {
     if !palette::palette_device(cpu) {
         return None;
     }
-    let mut hpal = video(cpu, i).palette;
-    if crate::win32::gdi32::gdi(cpu).palette(hpal).is_none() {
-        let mut colors = match &m.video {
-            MediaKind::Avi(v) if v.cinepak() => {
-                v.cinepak_palette(crate::win32::gdi32::static_colors())
-            }
-            MediaKind::Avi(v) => v.colors(),
-            _ => Vec::new(),
-        };
-        if colors.is_empty() {
-            colors = palette::halftone_colors();
-        }
-        hpal = palette::system_palette_of(cpu, &colors);
-        video(cpu, i).palette = hpal;
-    }
+    let hpal = movie_palette(cpu, i, m);
     // A full-screen play has the screen to itself, as in MCIAVI's display
     // mode of its own: its palette is the foreground one, though the
     // window that covers the screen is never the foreground window, so
@@ -1345,7 +1390,8 @@ crate::state_fields!(Call {
 crate::state_fields!(Calls {
     tid,
     made,
-    next
+    next,
+    element
 } skip {
     media
 });

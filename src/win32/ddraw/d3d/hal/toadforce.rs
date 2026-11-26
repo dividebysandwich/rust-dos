@@ -941,7 +941,7 @@ fn render_value(
         RS_COLORWRITEENABLE if d.version == 8 => d.state(def.id) & 0xF,
         RS_COLORWRITEENABLE => 0xF,
         RS_BLENDOP if d.version != 8 => 1,
-        RS_PIXEL_CENTRE => d.gl_pixel_centres as u32,
+        RS_PIXEL_CENTRE => d.opengl as u32,
         // Table fog goes by w when the projection gives a w that is
         // the distance from the eye, as Direct3D decides it.
         RS_FOG_BY_W => {
@@ -1774,6 +1774,16 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     if hal(cpu).pid == pid {
         forget(cpu, |_| true);
         hal(cpu).pid = 0;
+    }
+}
+
+/// The surface `id` goes: the blocks of its copies go back to video
+/// memory now. Kept until `room` let go of them, they would hold memory
+/// that the surfaces made next, such as an OpenGL context's buffers for
+/// a larger window, can't take from them.
+pub fn surface_destroyed(cpu: &mut Cpu, id: u32) {
+    if hal(cpu).textures.iter().any(|c| c.surface == id) {
+        forget(cpu, |c| c.surface == id);
     }
 }
 

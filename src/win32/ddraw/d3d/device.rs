@@ -193,11 +193,13 @@ pub struct Drawn {
     pub scissor: Option<[u32; 4]>,
     pub depth_bias: i16,
     pub color_off: bool,
-    /// Whether the vertices put a pixel's centre half a pixel right of
-    /// and below its integer coordinates, as OpenGL's window
-    /// coordinates do, where Direct3D's are on them. OpenGL sets it for
-    /// each draw, so a save state leaves it out.
-    pub gl_pixel_centres: bool,
+    /// Whether OpenGL draws through the device. Its vertices then put a
+    /// pixel's centre half a pixel right of and below its integer
+    /// coordinates, as OpenGL's window coordinates do, where Direct3D's
+    /// are on them, and a 3dfx card dithers as 3dfx's OpenGL driver
+    /// set it. OpenGL sets it for each draw, so a save state leaves it
+    /// out.
+    pub opengl: bool,
 }
 
 impl Drawn {
@@ -239,8 +241,8 @@ crate::state_fields!(Begin {
     indices
 });
 // The fields in the order a device had them as one struct, which is
-// the order a saved state has them in. `gl_pixel_centres` isn't saved
-// (see the field). A loaded device has a new stamp.
+// the order a saved state has them in. `opengl` isn't saved (see the
+// field). A loaded device has a new stamp.
 impl crate::savestate::State for Device {
     fn save(&self, w: &mut crate::savestate::Writer) {
         let d: &Drawn = self;

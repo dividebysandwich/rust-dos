@@ -44,8 +44,8 @@ pub use parse::{MAX_MEMSIZE, MIN_MEMSIZE, parse, parse_memsize};
 pub use settings::{Memory, default_cpu, default_memsize};
 pub use settings::{Settings, parse_mouse_sensitivity};
 pub use types::{
-    AspectRatio, DesktopDepth, DesktopSize, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig,
-    Win32Locale, Win32Trace, WindowsVersion,
+    AspectRatio, DesktopDepth, DesktopSize, DosVersion, Filter, MidiSynth, Mt32Model, Renderer,
+    SoundConfig, Win32Locale, Win32Trace, WindowsVersion,
 };
 
 /// Written to the default location on first start.
@@ -146,15 +146,30 @@ pub struct Config {
     pub composite_era: Option<CompositeEra>,
     /// The display adapter (`machine`).
     pub machine: Option<Adapter>,
+    /// What draws the 3D cards (`renderer`). A `renderer` line takes
+    /// back what the old lines before it asked for.
+    pub renderer: Option<Renderer>,
+    /// The old settings `renderer` stands for, read from the lines after
+    /// the last `renderer` line: what draws for a 3dfx card
+    /// (`voodoo_renderer`) and for a ToadForce (`toadforce_renderer`).
+    /// `renderer()` puts them together.
+    pub voodoo_renderer: Option<crate::voodoo::Renderer>,
+    pub toadforce_renderer: Option<crate::toadforce::Renderer>,
+    /// The lines that set what draws for a 3dfx card and for a ToadForce:
+    /// each one's number, from 1, and its text, a `renderer` line or the
+    /// card's old line (`renderer_conflict`).
+    pub renderer_lines: [Option<(usize, String)>; 2],
+    /// The old settings' lines, `voodoo_renderer` and
+    /// `toadforce_renderer`, each one's number and text
+    /// (`renderer_deprecation`).
+    pub renderer_old_lines: Vec<(usize, String)>,
     /// The 3dfx card (`voodoo`), its chip (`voodoo_model`), its memory
-    /// (`voodoo_memory`), what draws
-    /// for it (`voodoo_renderer`), at what size (`voodoo_scale`) and with
-    /// how many samples a pixel (`voodoo_msaa`), texture anisotropy
-    /// (`voodoo_anisotropy`).
+    /// (`voodoo_memory`), at what size OpenGL draws for it
+    /// (`voodoo_scale`) and with how many samples a pixel
+    /// (`voodoo_msaa`), texture anisotropy (`voodoo_anisotropy`).
     pub voodoo: Option<bool>,
     pub voodoo_model: Option<crate::voodoo::Model>,
     pub voodoo_memory: Option<crate::voodoo::Board>,
-    pub voodoo_renderer: Option<crate::voodoo::Renderer>,
     pub voodoo_texture_sampling: Option<crate::voodoo::TextureSampling>,
     pub voodoo_scale: Option<u32>,
     /// Whether the CRT look's lines follow `voodoo_scale`
@@ -185,8 +200,6 @@ pub struct Config {
     pub verite_irq: Option<u8>,
     /// The megabytes of memory a ToadForce has (`toadforce_memory`).
     pub toadforce_memory: Option<u32>,
-    /// What draws a ToadForce's triangles (`toadforce_renderer`).
-    pub toadforce_renderer: Option<crate::toadforce::Renderer>,
     /// The gamma a ToadForce's picture is shown with (`toadforce_gamma`):
     /// Some(None) for off.
     pub toadforce_gamma: Option<Option<f32>>,
@@ -361,6 +374,10 @@ pub struct Config {
     pub game_install: Vec<(String, String)>,
     /// Problems worth telling the user about; none of them are fatal.
     pub warnings: Vec<String>,
+    /// Problems that keep the configuration from being used: rust-dos
+    /// doesn't start with a configuration file that has one, nor launch a
+    /// game whose profile has one.
+    pub errors: Vec<String>,
 }
 
 impl Config {
@@ -374,7 +391,98 @@ impl Config {
         let machine = self.machine.unwrap_or(Settings::default().machine);
         self.cpu.unwrap_or_else(|| default_cpu(machine))
     }
+
+    /// What `renderer` and the old lines after it ask for together
+    /// (`Renderer::of_cards`), in this text alone; None when no line sets
+    /// any of them, or when they ask for two renderers
+    /// (`renderer_conflict`). A card without an old line after the last
+    /// `renderer` line takes that line's value, and one old line with no
+    /// `renderer` line before it, or `renderer=auto`, gives its own value:
+    /// `auto` asks for each card's default, as no line does.
+    ///
+    /// Text read over other settings, a game profile's or a CONFIG -SET's,
+    /// is a layer of its own: the value it gives replaces theirs for both
+    /// cards, and without a line it keeps theirs (`renderer_over`). Its
+    /// old lines are never put together with the lines below it.
+    pub fn renderer(&self) -> Option<Renderer> {
+        let base = self.renderer.filter(|&renderer| renderer != Renderer::Auto);
+        let voodoo = self.voodoo_renderer.map(Renderer::of_voodoo).or(base);
+        let toadforce = self.toadforce_renderer.map(Renderer::of_toadforce).or(base);
+        match (voodoo, toadforce) {
+            (Some(voodoo), Some(toadforce)) => Renderer::of_cards(voodoo, toadforce),
+            (one, other) => one.or(other).or(self.renderer),
+        }
+    }
+
+    /// The renderer of this text read as a layer over settings whose
+    /// renderer is `below`: its own value (`renderer`), or `below` when it
+    /// has no line for it.
+    pub fn renderer_over(&self, below: Renderer) -> Renderer {
+        self.renderer().unwrap_or(below)
+    }
+
+    /// The error for lines that ask for two renderers, the 3dfx cards on
+    /// OpenGL and the ToadForce in software, which no `renderer` value
+    /// stands for; None when they don't. `name` names a line by its
+    /// number (`renderer_lines`).
+    pub fn renderer_conflict(&self, name: impl Fn(usize) -> String) -> Option<String> {
+        let old = self.voodoo_renderer.is_some() || self.toadforce_renderer.is_some();
+        if !old || self.renderer().is_some() {
+            return None;
+        }
+        let line = |at: &Option<(usize, String)>| match at {
+            Some((number, text)) => format!("{} ({})", name(*number), text),
+            None => "the default".to_string(),
+        };
+        Some(format!(
+            "{} and {} ask for two renderers, the 3dfx cards on OpenGL and the ToadForce in \
+             software; write one renderer line in their place: renderer=opengl or \
+             renderer=software, for both cards",
+            line(&self.renderer_lines[0]),
+            line(&self.renderer_lines[1]),
+        ))
+    }
+
+    /// The warning for the old settings' lines (`renderer_old_lines`),
+    /// which name the value they ask for as `value`; None without any.
+    pub fn renderer_deprecation(&self, value: Renderer) -> Option<String> {
+        if self.renderer_old_lines.is_empty() {
+            return None;
+        }
+        let lines: Vec<String> = self
+            .renderer_old_lines
+            .iter()
+            .map(|(number, text)| format!("line {number} ({text})"))
+            .collect();
+        Some(format!(
+            "{}: voodoo_renderer and toadforce_renderer are deprecated and will stop working in \
+             a future version; replace them with one line renderer={}",
+            lines.join(", "),
+            value.name()
+        ))
+    }
+
+    /// The warnings of a file's text read over other settings: its own
+    /// (`self`, the text parsed alone) by its own line numbers, and those
+    /// about settings together, such as more memory than the processor
+    /// takes, from the text read after theirs (`layered`), unless the
+    /// settings below give them without it (`below`). A warning of the
+    /// text alone about settings together may not hold over the settings
+    /// below, and one of the layered text by a line number names a line
+    /// of no file.
+    pub fn warnings_over(&self, layered: &Config, below: &Config) -> Vec<String> {
+        let by_line = |w: &&String| w.starts_with("line ");
+        let mut warnings: Vec<String> = self.warnings.iter().filter(by_line).cloned().collect();
+        let together = layered.warnings.iter().filter(|w| !by_line(w));
+        warnings.extend(together.filter(|w| !below.warnings.contains(w)).cloned());
+        warnings
+    }
 }
+
+/// The old settings `renderer` of `[emulator]` took the place of, one
+/// for each card. Their lines are still read; the settings window writes
+/// a `renderer` line in their place (`edit::set_key`).
+pub const RENDERER_OLD_NAMES: [&str; 2] = ["voodoo_renderer", "toadforce_renderer"];
 
 /// Settings that were renamed: section, old name and current name. A
 /// file's line under the old name still sets the setting, and the line
@@ -496,8 +604,10 @@ pub fn write_template(path: &Path) -> std::io::Result<()> {
     file.write_all(TEMPLATE.as_bytes())
 }
 
-/// Locate, read and parse the configuration. Only a missing or unreadable
-/// `--config` file is an error; everything else degrades to warnings.
+/// Locate, read and parse the configuration. A missing or unreadable
+/// `--config` file is an error, and so is a file with lines that
+/// contradict each other (`Config::errors`); everything else degrades to
+/// warnings.
 pub fn load(
     cli: Option<&Path>,
     cwd: &Path,
@@ -543,6 +653,11 @@ pub fn load(
     let absolute = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
     let base_dir = absolute.parent().unwrap_or(cwd);
     let mut config = parse(&text, base_dir, home);
+    if !config.errors.is_empty() {
+        let errors: Vec<String> =
+            config.errors.iter().map(|e| format!("{}: {}", path.display(), e)).collect();
+        return Err(errors.join("\n"));
+    }
     config.warnings = config
         .warnings
         .into_iter()

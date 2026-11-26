@@ -45,10 +45,10 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   still mixed and streamed. A run on a machine with no sound device
   plays on the null output too, with a window or without.
 - **OpenGL without a window:** the dummy video driver has no OpenGL, so
-  `voodoo_renderer=opengl` falls back to the software rasterizer. To run
-  the OpenGL renderer on the host's GPU, leave `SDL_VIDEO_DRIVER` unset
-  and pass `--hidden`: the window is made with its OpenGL context but
-  never shown.
+  `renderer=opengl` falls back to the software rasterizer. To run the
+  OpenGL renderer on the host's GPU, leave `SDL_VIDEO_DRIVER` unset and
+  pass `--hidden`: the window is made with its OpenGL context but never
+  shown.
 - **A smaller OpenGL:** `RUST_DOS_GL_MAX_TEXTURE_SIZE=1024` makes the
   3dfx renderer lay out a Banshee's or Voodoo3's memory as if OpenGL
   allowed textures of no more than 1024 texels a side, and
@@ -1184,7 +1184,7 @@ since the GPU cuts and culls them. So one scene counts more
 `primitives` with the OpenGL renderer than with the software one.
 
 `renderer` is what draws the card's triangles: `software`, or `OpenGL`
-with `toadforce_renderer` `auto` or `opengl` in a window that has
+with the setting `renderer` `auto` or `opengl` in a window that has
 OpenGL 3.2 (`--hidden` has it, `SDL_VIDEO_DRIVER=dummy` hasn't). `host`
 counts what the OpenGL renderer costs and misses:
 
@@ -1229,13 +1229,16 @@ counts what the OpenGL renderer costs and misses:
   vertices the GPU's vertex shader took to the screen, where the card
   transforms the others on the processor) and `transforming_programs`
   (the shader programs made for them), `surface_uploads` and
-  `texture_uploads` from card memory, `texture_converts` (images of
-  textures filled from a surface the GPU has, with nothing read
-  back), `clears` and `blits` done on the GPU, `presents` (frames the
-  window showed from the GPU's surface), the shader `programs`
-  compiled and `failed_programs`, the `surfaces` and `textures` it
-  holds, and `packed_565` (whether 16-bit targets are the GPU's 5-6-5
-  format).
+  `texture_uploads` from card memory, with `texture_images` (the
+  images, levels and cube faces, decoded for those),
+  `texture_converts` (images of textures filled from a surface the
+  GPU has, with nothing read back), `clears` and `blits` done on the
+  GPU, `presents` (frames the window showed from the GPU's surface),
+  the shader `programs` compiled and `failed_programs`, the
+  `surfaces` and `textures` it holds, the `framebuffers` it keeps for
+  its draws, clears and read-backs, `framebuffers_made` (each asked
+  once whether it is complete), and `packed_565` (whether 16-bit
+  targets are the GPU's 5-6-5 format).
 
 A run with `--deterministic` draws the card in software, so that its
 pictures are the same on every host. To compare the two renderers at
@@ -1309,18 +1312,18 @@ of and what each adds.
 
 With `voodoo=true` (CONFIGURATION.md's "3dfx Voodoo Graphics"),
 `/api/status` → `video.voodoo` shows the card: `output` (true while its
-picture is on the screen instead of the VGA's; `/api/screenshot` then
-shows it), `clock` (the video clock Glide turns on first), `base` (BAR0),
+picture is on the screen instead of the VGA's; `/api/screenshot` then shows
+it), `clock` (the video clock Glide turns on first), `base` (BAR0),
 `width`/`height` and `hz`, the `front` and `back` buffers, `pending_swaps`
 (swaps waiting for the retrace), `fifo_writes` behind them, `triangles`
-drawn, the `fbiInit` registers and `init_enable`, and `opengl` (true
-while `voodoo_renderer=opengl` draws the window's picture again). While it
-shows, `fps` counts its buffer swaps. With OpenGL (and `--hidden` or a
-window), `/api/screenshot` and the screen stream are OpenGL's picture,
-read back at the card's resolution; with `--deterministic`, and without
-OpenGL, they are the software rasterizer's. A game that detects no card
-usually left `fbiInit` at their power-on values (`00000410 00201102
-80000040 001E4000 00000001`); one that drew nothing has `triangles` 0.
+drawn, the `fbiInit` registers and `init_enable`, and `opengl` (true while
+`renderer=opengl` draws the window's picture again). While it shows, `fps`
+counts its buffer swaps. With OpenGL (and `--hidden` or a window),
+`/api/screenshot` and the screen stream are OpenGL's picture, read back at
+the card's resolution; with `--deterministic`, and without OpenGL, they are
+the software rasterizer's. A game that detects no card usually left
+`fbiInit` at their power-on values (`00000410 00201102 80000040 001E4000
+00000001`); one that drew nothing has `triangles` 0.
 
 - **Read-backs:** with `voodoo_readback=gpu`, `gpu_read_backs` counts the
   times the card's memory was brought up to OpenGL's pictures, and
@@ -1433,18 +1436,24 @@ what the program does, and `/api/status` → `activity` has its counts since
 start: `bursts` (writes to video memory the size of a frame, the frames a
 program copies there), `copies` (smaller bursts that reach across at least
 half the screen, frames copied as what changed; counted as frames for
-protected-mode programs only), `flips` (display start changes), `presents`
+protected-mode programs only), `window_copies` (the copies that redraw the
+same window of a quarter of the screen or more), `windows` (smaller bursts
+still that redraw such a window, a movie's pictures; counted as frames for
+protected-mode programs, and with `window_copies` for real-mode ones while
+they read from their drives), `flips` (display start changes), `presents`
 (what the built-in Windows drew on the screen for the program, its blits to
-the primary surface and GDI's drawing, in bursts that are a frame or a copy
-by the same rules), `polls` (key checks that found nothing, idle calls),
+the primary surface and GDI's drawing, in bursts that are a frame, a copy or
+a window by the same rules), `shown_windows` (the presents that were only a
+window's), `polls` (key checks that found nothing, idle calls),
 `status_reads` (port 3DAh) and `missed_retraces` (vertical retraces that
 began and ended between two reads of 3DAh less than a quarter of a frame
 apart: the program polled for one and an interrupt covered it), with
 `emulated_ns` to make rates of them. Sample it twice and divide: a game's
-frame rate at a few fixed speeds shows where it stops growing. `presents` count only what lands in the picture shown, not
-the copies to surfaces out of sight, and where there are any, they are the
-frames instead of the program's own bursts and copies, which may be the same
-frames drawn in video memory before they were shown. Start the emulator with
+frame rate at a few fixed speeds shows where it stops growing. `presents`
+count only what lands in the picture shown, not the copies to surfaces out
+of sight, and where there are any, they are the frames instead of the
+program's own bursts and copies, which may be the same frames drawn in video
+memory before they were shown. Start the emulator with
 `RUST_DOS_AUTO_TRACE=1` to have every measurement and the speed it chose
 printed to stderr, with `longest_frame`, the longest host frame during the
 measurement (`none` in a frontend that doesn't time its frames).

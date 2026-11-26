@@ -315,7 +315,6 @@ impl TextureSampling {
 pub struct VoodooSettings {
     pub enabled: bool,
     pub board: Board,
-    pub renderer: Renderer,
     pub texture_sampling: TextureSampling,
     /// How many times the native size OpenGL draws at.
     pub scale: u32,
@@ -342,7 +341,6 @@ impl Default for VoodooSettings {
         Self {
             enabled: false,
             board: Board::Max,
-            renderer: Renderer::Software,
             texture_sampling: TextureSampling::Default,
             scale: 2,
             scale_shader: true,

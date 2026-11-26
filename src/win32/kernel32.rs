@@ -19,7 +19,7 @@ pub(crate) mod path;
 mod process;
 pub use process::ProgramInLine;
 mod profile;
-pub(in crate::win32) use profile::{parse_int, profile_int, profile_number};
+pub(in crate::win32) use profile::{parse_int, profile_int, profile_number, profile_values};
 pub(crate) use profile::profile_value;
 mod sort;
 mod sync;
@@ -39,7 +39,8 @@ pub(crate) use process::{spawn, startup_show, startup_showing};
 pub(super) use process::{STARTUPINFO_SIZE, win_exec_step};
 pub(super) use file::{
     CREATE_ALWAYS, CREATE_NEW, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,
-    OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING, new_file, open_file, open_of,
+    OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING, io_locked, new_file, open_file, open_of,
+    resize_locked,
 };
 
 use super::stubs::{Api, Conv, Dll};
@@ -909,6 +910,9 @@ pub fn read_file(cpu: &mut Cpu, handle: u32, n: u32) -> Result<Vec<u8>, u32> {
     if open.access & file::GENERIC_READ == 0 {
         return Err(ERROR_ACCESS_DENIED);
     }
+    if file::io_locked(cpu, open, n, false) {
+        return Err(crate::disk::LOCK_VIOLATION as u32);
+    }
     crate::interrupts::int21::read_open_file(cpu, open.sft, n as usize).map_err(|e| e as u32)
 }
 
@@ -918,6 +922,9 @@ pub fn write_file(cpu: &mut Cpu, handle: u32, data: &[u8]) -> Result<u32, u32> {
     let open = file::open_of(cpu, handle).ok_or(ERROR_INVALID_HANDLE)?;
     if open.access & file::GENERIC_WRITE == 0 {
         return Err(ERROR_ACCESS_DENIED);
+    }
+    if !data.is_empty() && file::io_locked(cpu, open, data.len() as u32, true) {
+        return Err(crate::disk::LOCK_VIOLATION as u32);
     }
     let (dos, sft) = (open.dos, open.sft);
     super::dos(cpu, |cpu| crate::interrupts::int21::write_open_file(cpu, dos, sft, data))

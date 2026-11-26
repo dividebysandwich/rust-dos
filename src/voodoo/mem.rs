@@ -100,6 +100,16 @@ impl Vram {
         }
     }
 
+    /// The words from index `i` on, into `out`. They must be within the
+    /// memory.
+    #[inline]
+    pub fn read_words(&self, i: usize, out: &mut [u16]) {
+        let words = &self.words[i..][..out.len()];
+        for (o, w) in out.iter_mut().zip(words) {
+            *o = w.load(Relaxed);
+        }
+    }
+
     /// `data` written from byte address `a` on, a word at a time where
     /// it covers one whole. It must be within the memory.
     pub fn write_bytes(&self, a: usize, data: &[u8]) {

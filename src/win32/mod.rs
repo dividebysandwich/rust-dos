@@ -296,6 +296,11 @@ pub struct Process {
     dll_tls: Vec<(u32, Vec<u8>)>,
     /// Whether ExitProcess is ending it, telling the DLLs.
     exiting: bool,
+    /// While the outermost FreeLibrary's chain of DllMain calls runs, the
+    /// modules whose last reference went, which it detaches and unmaps
+    /// (kernel32/module.rs): Wine's `free_lib_count` above 0. A chain
+    /// that stopped in a DllMain leaves them to the next FreeLibrary.
+    unloading: crate::savestate::Since<{ kernel32::module::UNLOADING_SAVED }, Option<Vec<u32>>>,
     /// The compressed files LZInit opened (kernel32/lz.rs).
     lz_files: Vec<kernel32::lz::LzFile>,
     /// The object of its input idle event, which a program that isn't a
@@ -884,6 +889,13 @@ pub fn accepts(cpu: &Cpu, phys_ip: usize, id: u16) -> bool {
             _ => id & 0xFF00 == ID_IDT && cpu.pm() && cpu.cpl == 0 && win32.active(),
         };
     }
+    in_stub_page(cpu, phys_ip)
+}
+
+/// Whether `phys_ip` is in one of the running process's pages of stubs,
+/// where its program calls the built-in DLLs' functions, at privilege
+/// level 3 in protected mode.
+pub(crate) fn in_stub_page(cpu: &Cpu, phys_ip: usize) -> bool {
     let Some(process) = running(cpu) else {
         return false;
     };
@@ -1437,6 +1449,8 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
     cpu.programs.processes_ended += 1;
+    // Its locks go, those of a file another process still has open too.
+    cpu.bus.disk.release_locks(process.id);
     registry::process_ended(cpu, process.id);
     user32::process_ended(cpu, process.id, &tids);
     gdi32::process_ended(cpu, process.id);
@@ -1717,6 +1731,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         for process in std::mem::take(&mut win32.processes) {
             process.memory.release(&mut cpu.bus);
             cpu.programs.processes_ended += 1;
+            cpu.bus.disk.release_locks(process.id);
             registry::process_ended(cpu, process.id);
         }
         // DirectPlay's objects leave their sessions, which the room would
@@ -1822,6 +1837,7 @@ crate::state_fields!(Process {
 
     dll_tls,
     exiting,
+    unloading,
     lz_files,
     idle_event,
     imagehlp,

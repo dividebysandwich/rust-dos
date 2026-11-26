@@ -431,6 +431,11 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     toadforce::process_ended(cpu, pid);
 }
 
+/// The surface `id` goes: the HALs drop their copies of it.
+pub fn surface_destroyed(cpu: &mut Cpu, id: u32) {
+    toadforce::surface_destroyed(cpu, id);
+}
+
 /// Video memory was lost (a mode was set): the blocks the HALs took
 /// from it are gone, and other surfaces may have them now.
 pub fn video_memory_lost(cpu: &mut Cpu) {

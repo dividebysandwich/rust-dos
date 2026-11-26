@@ -156,6 +156,7 @@ pub fn handle_far_service(cpu: &mut Cpu, service: u8) {
         crate::bios::FAR_APM => crate::apm::pm_entry(cpu),
         crate::bios::FAR_ATI => crate::mach64::bios::rom_entry(cpu),
         crate::bios::FAR_VCPI => crate::vcpi::pm_entry(cpu),
+        crate::bios::FAR_V86_SWITCH => crate::v86mon::windows_switch(cpu),
         _ => cpu.bus.log_string(&format!("[CPU] Unknown far emulator service {:02X}", service)),
     }
 }

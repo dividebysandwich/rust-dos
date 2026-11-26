@@ -134,7 +134,7 @@ const SETUP_MARK: &str = "toadforce-opengl-setup";
 /// graphics driver crashed while it set the renderer up.
 const SETUP_CRASHED: &str = "rust-dos ended while it set up the OpenGL renderer on this \
     graphics driver last time, so the software renderer draws. A new graphics driver or a \
-    new rust-dos tries OpenGL again, as does a start with toadforce_renderer=opengl";
+    new rust-dos tries OpenGL again, as does a start with renderer=opengl";
 
 /// What draws the picture.
 enum Output<'a> {
@@ -393,14 +393,21 @@ impl<'a> Display<'a> {
         Ok(())
     }
 
-    /// With `voodoo_renderer=opengl`, draw what the 3dfx card recorded
-    /// with OpenGL; true if its picture is the one to show
-    /// (`present`'s `voodoo`). Otherwise the card stops recording. With
-    /// `gpu_2d` the card does its 2D operations with the renderer too
-    /// (`voodoo::gpu`); a deterministic run leaves them on the CPU, as
-    /// the GPU's pixels depend on the host's GPU and the scale.
-    pub fn run_voodoo(&mut self, bus: &mut Bus, settings: &VoodooSettings, gpu_2d: bool) -> bool {
-        let want = settings.renderer == Renderer::OpenGl;
+    /// With `renderer` OpenGL (`Settings::voodoo_renderer`), draw what
+    /// the 3dfx card recorded with OpenGL; true if its picture is the one
+    /// to show (`present`'s `voodoo`). Otherwise the card stops
+    /// recording. With `gpu_2d` the card does its 2D operations with the
+    /// renderer too (`voodoo::gpu`); a deterministic run leaves them on
+    /// the CPU, as the GPU's pixels depend on the host's GPU and the
+    /// scale.
+    pub fn run_voodoo(
+        &mut self,
+        bus: &mut Bus,
+        renderer: Renderer,
+        settings: &VoodooSettings,
+        gpu_2d: bool,
+    ) -> bool {
+        let want = renderer == Renderer::OpenGl;
         let problem = match &mut self.out {
             Output::Gl(gl) => {
                 let Some(card) = bus.voodoo.as_mut() else {
@@ -462,17 +469,20 @@ impl<'a> Display<'a> {
         if let Some(problem) = problem
             && !std::mem::replace(&mut self.voodoo_said, true)
         {
-            bus.log_string(&format!("[3DFX] voodoo_renderer=opengl: {}; the software renderer draws", problem));
+            bus.log_string(&format!(
+                "[3DFX] renderer=opengl: {}; the software renderer draws",
+                problem
+            ));
         }
         false
     }
 
     /// Have the window's OpenGL draw a ToadForce's triangles
-    /// (`toadforce::gl`), with `toadforce_renderer` `auto` or `opengl`,
-    /// or the card's own rasteriser with `software`. A deterministic
-    /// run draws in software whatever the setting, as the GPU's pixels
-    /// depend on the host's GPU. Called every frame: a new machine's
-    /// card gets the renderer, and a changed setting takes effect.
+    /// (`toadforce::gl`), with `renderer` `auto` or `opengl`, or the
+    /// card's own rasteriser with `software`. A deterministic run draws
+    /// in software whatever the setting, as the GPU's pixels depend on
+    /// the host's GPU. Called every frame: a new machine's card gets the
+    /// renderer, and a changed setting takes effect.
     pub fn run_toadforce(&mut self, bus: &mut Bus, renderer: Renderer3d, deterministic: bool) {
         // A frame went by since the renderer was set up, whatever the
         // card and the setting are now.
@@ -540,7 +550,7 @@ impl<'a> Display<'a> {
             && !std::mem::replace(&mut self.toadforce_said, true)
         {
             bus.log_string(&format!(
-                "[TOADFORCE] toadforce_renderer=opengl: {problem}; the software renderer draws"
+                "[TOADFORCE] renderer=opengl: {problem}; the software renderer draws"
             ));
         }
     }

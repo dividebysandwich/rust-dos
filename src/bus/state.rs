@@ -24,12 +24,13 @@ const DOS_VERSION: u16 = 6;
 const CD_HEAD_VERSION: u16 = 1;
 const VCPI_VERSION: u16 = 1;
 const LOCK_VERSION: u16 = 1;
+const ALIAS_VERSION: u16 = 1;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
-const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 97;
+const DPMI_VERSION: u16 = 4;
+const WIN32_VERSION: u16 = 107;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -64,9 +65,25 @@ const WIN32_VERSION: u16 = 97;
 /// selectors of UTLinearToSelectorOffset
 /// (`win16::universal::TILES_SAVED`), 71's to 95's no OpenGL texture
 /// names that are only reserved (`opengl32::texture::RESERVED_SAVED`),
-/// and 71's to 96's no threads that selected a palette
-/// (`user32::palette::PALETTE_SAVED`).
-const WIN32_LOADS: [u16; 27] = [
+/// 71's to 96's no threads that selected a palette
+/// (`user32::palette::PALETTE_SAVED`), 71's to 97's no OpenGL texture
+/// coordinate generation or clip planes
+/// (`opengl32::texgen::TEXGEN_SAVED`), 71's to 98's no MCI elements a
+/// program's I/O procedure read (`winmm::mci::PROCEDURE_SAVED`), 71's
+/// to 99's the ranges LockFile locked on each file object
+/// (`object::Kind::File`), which they load without: LockFile's locks
+/// are DOS's since 100, 71's to 100's no step of the cascade of
+/// CW_USEDEFAULT windows (`user32::window::CASCADE_SAVED`), 71's to
+/// 101's not the modules the outermost FreeLibrary frees
+/// (`kernel32::module::UNLOADING_SAVED`), 71's to 102's no OpenGL
+/// raster position (`opengl32::raster::RASTER_SAVED`), 71's to 103's
+/// not the format GDI's bitmaps were made in (`gdi32::DDB_FORMAT_SAVED`),
+/// 71's to 104's not which entries of a palette share their nearest
+/// color's entry (`gdi32::palette::NEAREST_SAVED`), 71's to 105's not
+/// the DPMI memory of a DOS program's PIF (`dosvm::DOSVM_DPMI`), and 71's
+/// to 106's not the size a memory DC's bitmap had at SelectObject
+/// (`gdi32::dc::BITMAP_SIZE_SAVED`).
+const WIN32_LOADS: [u16; 37] = [
     71,
     72,
     73,
@@ -93,6 +110,16 @@ const WIN32_LOADS: [u16; 27] = [
     94,
     95,
     96,
+    97,
+    98,
+    99,
+    100,
+    101,
+    102,
+    103,
+    104,
+    105,
+    106,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -104,6 +131,7 @@ const CMS_VERSION: u16 = 2;
 const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 3;
 const ET4000_VERSION: u16 = 1;
+const FONT_VERSION: u16 = 1;
 const MACH64_VERSION: u16 = 1;
 const TOADFORCE_VERSION: u16 = crate::toadforce::STATE_VERSION;
 const SHARED_VERSION: u16 = 1;
@@ -365,6 +393,11 @@ impl Bus {
             }
             save_all!(w; s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         });
+        // That plane 2 holds the text modes' font, in a section only when
+        // it does, so states saved before it load with the ROM's fonts.
+        if vga.font_loaded {
+            w.section(b"FONT", FONT_VERSION, |_| {});
+        }
         // An S3 ViRGE's engines, only on one, so other states load as they
         // did.
         if vga.adapter.is_virge() {
@@ -401,6 +434,13 @@ impl Bus {
                     manifest.save(w);
                 }
             });
+        }
+        // The aliases host folders keep where they differ from those made
+        // afresh, only with any, so other states are as they were. Before
+        // the drives: the open files are found again by their names.
+        let aliases = disk.saved_aliases();
+        if !aliases.is_empty() {
+            w.section(b"ALIA", ALIAS_VERSION, |w| aliases.save(w));
         }
         w.section(b"DOS ", DOS_VERSION, |w| {
             save_all!(w; xms, mouse, mscdex, disk_io);
@@ -488,6 +528,7 @@ impl Bus {
             w.section(b"DPMI", DPMI_VERSION, |w| {
                 dpmi.save(w);
                 dpmi.save_ldt_limits(w);
+                dpmi.save_vm(w);
             });
         }
         // The built-in Windows, while it runs a program or is about to.
@@ -793,6 +834,10 @@ impl Bus {
         }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+        vga.font_loaded = r.next_is(b"FONT");
+        if vga.font_loaded {
+            r.section(b"FONT", FONT_VERSION)?;
+        }
         *last_present = None;
         *virge = Default::default();
         if r.next_is(b"VIRG") {
@@ -842,6 +887,12 @@ impl Bus {
                 shared.push((drive, manifest));
             }
             disk.shared_from_state = Some(shared);
+        }
+        disk.aliases_from_state = None;
+        if r.next_is(b"ALIA") {
+            let mut aliases = Vec::new();
+            aliases.load(&mut r.section(b"ALIA", ALIAS_VERSION)?)?;
+            disk.aliases_from_state = Some(aliases);
         }
         // The drives before the sound: the CD playing is in one.
         let mut section = r.section(b"DOS ", DOS_VERSION)?;
@@ -945,11 +996,13 @@ impl Bus {
         }
         dpmi.reset();
         if r.next_is(b"DPMI") {
-            // Version 2 has no LDT limits (`Dpmi::load_ldt_limits`).
-            let mut section = r.section_of(b"DPMI", &[2, DPMI_VERSION])?;
+            // Version 2 has no LDT limits (`Dpmi::load_ldt_limits`), and 2
+            // and 3 no virtual memory (`Dpmi::load_vm`).
+            let mut section = r.section_of(b"DPMI", &[2, 3, DPMI_VERSION])?;
             dpmi.load(&mut section)?;
             let version = section.version();
             dpmi.load_ldt_limits(&mut section, version)?;
+            dpmi.load_vm(&mut section, version)?;
         }
         win32.reset();
         if r.next_is(b"W32 ") {
@@ -1205,6 +1258,16 @@ mod tests {
         (95, 0x61C6_45FE_9AE1_A896), // UTLinearToSelectorOffset's tiled selectors
         (96, 0xAEBE_28D7_7C2C_F660), // OpenGL texture names glGenTextures only reserved
         (97, 0x71EC_E4F5_0D5E_1F97), // the threads that selected a palette
+        (98, 0x890A_6080_1C80_4995), // OpenGL's texture coordinate generation and clip planes
+        (99, 0x4565_36E9_4B9A_18FF), // MCI elements a program's I/O procedure read
+        (100, 0xC44D_7093_8B77_FE65), // LockFile's locks moved to DOS's table (disk/locks.rs)
+        (101, 0x019A_DFC6_DCCE_473B), // the step of the CW_USEDEFAULT cascade
+        (102, 0x8818_BE2A_4B7B_59B6), // the modules the outermost FreeLibrary frees
+        (103, 0x71A7_50FA_4BC4_2EA0), // OpenGL's raster position
+        (104, 0x3F37_6484_BDFC_4AF1), // the format GDI's bitmaps were made in
+        (105, 0xA544_B486_2D04_DB0B), // palette entries sharing their nearest color's entry
+        (106, 0x4045_F07A_2E86_6065), // the DPMI memory of a DOS program's PIF
+        (107, 0x191A_8E84_8667_48E1), // a memory DC's bitmap size, and gdi_heap's Viewed::live
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
@@ -1263,7 +1326,8 @@ mod tests {
     /// a type to another file doesn't change it. It doesn't see a field
     /// that changes its type, `dinput::poll::MouseSeen`'s hand-written
     /// `State`, or what the section saves from elsewhere, such as
-    /// `dpmi::Context`.
+    /// `dpmi::Context`. `tools/win32_layout.py` computes the same without
+    /// a build, for merges that move the version: change both together.
     fn win32_layout() -> u64 {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut lists = Vec::new();

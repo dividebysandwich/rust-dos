@@ -109,14 +109,19 @@ fn value_of<'a>(section: &'a Section, key: &[u8]) -> Option<&'a [u8]> {
         .find(|e| same(&e.key, key))?
         .value
         .as_deref()?;
+    Some(unquoted(value))
+}
+
+/// A value with the quotes around it taken off.
+fn unquoted(value: &[u8]) -> &[u8] {
     let quoted = value.len() >= 2
         && (value[0] == b'"' || value[0] == b'\'')
         && value[value.len() - 1] == value[0];
-    Some(if quoted {
+    if quoted {
         &value[1..value.len() - 1]
     } else {
         value
-    })
+    }
 }
 
 /// The DOS path of the profile `name`: WIN.INI for NULL, and in the
@@ -467,6 +472,31 @@ pub(crate) fn profile_value(
     find(&sections, section)
         .and_then(|s| value_of(s, key))
         .map(<[u8]>::to_vec)
+}
+
+/// The values of the keys of `section` in the profile `file`, in their
+/// order, for the system's own use: WIN.INI's `[Fonts]`, which GDI
+/// loads as it starts. They are read as a program reads them, listing
+/// the keys (GetProfileStringA with no key) and then each key's value,
+/// so a comment line (';') and a line without '=' have none, and a key
+/// listed twice has its first value twice. The file is read from the
+/// disk, not through a process's file handle, which a program holding
+/// it open without sharing it could refuse.
+pub(in crate::win32) fn profile_values(cpu: &mut Cpu, file: &[u8], section: &[u8]) -> Vec<Vec<u8>> {
+    let path = path_of(Some(file));
+    let Some(data) = cpu.bus.disk.file_data(&path) else {
+        return Vec::new();
+    };
+    let Ok(text) = data.read() else {
+        return Vec::new();
+    };
+    let sections = parse(&text);
+    find(&sections, section).map_or(Vec::new(), |s| {
+        section_lines(s, false)
+            .iter()
+            .filter_map(|key| value_of(s, key).map(<[u8]>::to_vec))
+            .collect()
+    })
 }
 
 /// `profile_value` as a number, as GetPrivateProfileIntA reads it:

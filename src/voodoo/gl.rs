@@ -1,17 +1,17 @@
 //! The 3dfx card drawn again with OpenGL at `voodoo_scale` times its
 //! resolution, for the window and the libretro core's hardware rendering
-//! (`voodoo_renderer=opengl`). The card records what it draws
-//! (`super::mirror`); here each of its colour buffers is the texture of a
-//! framebuffer object, all sharing one depth texture, the triangles go
-//! through the card's pixel pipeline in a shader (gl/triangle.frag) with
-//! OpenGL's depth test and blending, and the front buffer through the
-//! card's gamma table is the picture shown. With `voodoo_dither`, what the
-//! game draws dithered (triangles and fastfills) is dithered to 5-6-5 as
-//! the card does it (`set_dither`). With `voodoo_msaa`, the buffers are
-//! multisampled and resolved into their textures before they are shown.
-//! The software rasterizer's memory stays what screenshots, recordings and
-//! the debugger see, and what the game reads back; it only draws what those
-//! can still see (`super::backlog`).
+//! (`renderer=opengl`). The card records what it draws (`super::mirror`);
+//! here each of its colour buffers is the texture of a framebuffer object,
+//! all sharing one depth texture, the triangles go through the card's pixel
+//! pipeline in a shader (gl/triangle.frag) with OpenGL's depth test and
+//! blending, and the front buffer through the card's gamma table is the
+//! picture shown. With `voodoo_dither`, what the game draws dithered
+//! (triangles and fastfills) is dithered to 5-6-5 as the card does it
+//! (`set_dither`). With `voodoo_msaa`, the buffers are multisampled and
+//! resolved into their textures before they are shown. The software
+//! rasterizer's memory stays what screenshots, recordings and the debugger
+//! see, and what the game reads back; it only draws what those can still
+//! see (`super::backlog`).
 
 use glow::HasContext;
 use crate::video::Frame;

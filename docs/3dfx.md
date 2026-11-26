@@ -51,9 +51,15 @@ Voodoo3's two, and Windows 98's CD has a driver for it.
    asking, and puts its `GLIDE2X.OVL` on Z:, which is on the PATH. A copy
    beside the game comes first.
 
-The overlay only loads with DOS/4GW as its own DPMI host. Rust-DOS
-recognises a program that loads it and lets the DOS/4GW the game brings
-run in place of rust-dos's DPMI host, with no setting to change.
+On plain DOS the overlay loads with DOS/4GW as its own DPMI host, as on
+a real machine's DOS, which has no DPMI host. Rust-DOS recognises a
+program that loads it and lets the DOS/4GW the game brings run in place
+of rust-dos's DPMI host, with no setting to change. A game started from
+a Windows program on the [built-in Windows](builtin-windows.md), such as
+Redguard's 3dfx version from its launcher, runs in a Windows DOS box
+with the built-in Windows' DPMI host, as on Windows 98. There the
+overlay loads only if the game passes it its PSP through INT E9h's
+vector, which Redguard does.
 
 ## Windows on a booted image
 
@@ -93,8 +99,9 @@ there:
 
 `GLIDE2X.DLL` and `GLIDE3X.DLL` are in the system folder only with a
 3dfx card, so a game that checks for Glide by its file finds none
-without one. Without a 3dfx card, Direct3D finds no 3D device: there is
-no software Direct3D.
+without one. Without a 3dfx card or a ToadForce, Direct3D lists only its
+software devices, Ramp and RGB, which draw on the processor with one
+texture stage ([Direct3D's devices](builtin-windows.md#direct3ds-devices)).
 
 ## Settings
 
@@ -121,13 +128,13 @@ Banshee, which always has 16 MB. The others work for every 3dfx card.
 take effect at the DOS prompt, the others at once. The settings
 window's Emulator page has them as *Video card*, *3dfx Voodoo
 Graphics*, *3dfx card* (the chip and memory together), *3dfx drawn by*
-and the *3dfx* settings after it. They show only while *3dfx Voodoo
-Graphics* is on; on a Voodoo3 or Banshee, set the renderer, texture
-sampling in the configuration file
-([#821](https://github.com/dividebysandwich/rust-dos/issues/821)).
-The card's swaps are held to `fps_cap`, the frame rate cap of every
-card (`voodoo_fps_cap` is its old name; see [Frame rate
-cap](../CONFIGURATION.md#frame-rate-cap)).
+and the *3dfx* settings after it. The window shows the settings the
+machine's card uses: with the add-on card, all of them; with a Voodoo3
+or Banshee, *3dfx drawn by*, texture sampling and the OpenGL settings,
+but not the add-on's switch, memory or gamma. The OpenGL settings show
+while *3dfx drawn by* is OpenGL. The card's swaps are held to `fps_cap`,
+the frame rate cap of every card (`voodoo_fps_cap` is its old name; see
+[Frame rate cap](../CONFIGURATION.md#frame-rate-cap)).
 
 The Voodoo2 is a single board: SLI, two Voodoo2s drawing alternate
 lines, isn't emulated, so games see one card. The libretro core draws a
