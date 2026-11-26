@@ -79,6 +79,7 @@ pub(crate) mod system;
 mod tapi32;
 mod task;
 pub(crate) mod thread;
+pub use thread::times as thread_times;
 pub mod trace;
 pub mod trace3d;
 pub mod user32;
@@ -491,6 +492,10 @@ pub struct Win32 {
     /// over then rather than at the BIOS's next interrupt. Worked out
     /// again after a load.
     pub(crate) turn_due: Option<u64>,
+    /// The emulated time and the instructions each thread has had, by its
+    /// id (0 for the idle loop), and where the running one's share began
+    /// (`thread::charge`). Not kept in a save state.
+    pub(crate) times: thread::Times,
     /// Where the system's time was taken from the machine's clock
     /// (`kernel32::time::now`). Worked out again after a load.
     pub(crate) system_clock: Option<kernel32::time::Anchor>,
@@ -1334,6 +1339,9 @@ fn terminate(cpu: &mut Cpu, index: usize, code: u32) -> bool {
 }
 
 fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
+    // The running thread's time up to now is its own, before its process
+    // may go and the next thread or the idle loop takes over.
+    thread::charge(cpu);
     if !remove_process(cpu, index, code) {
         return;
     }
@@ -1366,7 +1374,10 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         thread::run_next(cpu);
         return;
     }
-    let code = win32.exit_code;
+    // With no process left, the time until the next program starts is
+    // DOS's: the threads' count stops here (`thread::charge`).
+    thread::charge(cpu);
+    let code = cpu.bus.win32.exit_code;
     // The last program's loops get their summaries.
     trace::flush(cpu);
     let (rm_stack, a20) = (cpu.bus.win32.rm_stack, cpu.bus.win32.a20);
@@ -1922,6 +1933,7 @@ crate::state_fields!(Win32 {
     trace3d,
     wait_due,
     turn_due,
+    times,
     system_clock,
     tlb_stale,
     paging,

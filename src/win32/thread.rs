@@ -183,6 +183,50 @@ pub const INITIAL_FPU: [u8; 108] = {
 /// A thread by its process's place and its own in that process's list.
 type At = (usize, usize);
 
+/// The emulated time and the instructions each thread has had
+/// (`Win32::times`), for the debug server: nothing the machine does reads
+/// them.
+#[derive(Clone, Debug, Default)]
+pub struct Times {
+    /// The clock's microseconds and `Cpu::executed` when the running
+    /// thread's (or the idle loop's) share began; None until the first
+    /// thread runs, and again after a load.
+    mark: Option<(u64, u64)>,
+    /// Microseconds and instructions by thread id, 0 for the idle loop.
+    by_thread: std::collections::BTreeMap<u32, (u64, u64)>,
+}
+
+/// Charge the time and instructions since the mark to the running thread,
+/// or to the idle loop when none can run, and start a new mark. It runs
+/// at every switch (`run`, `idle`) and as a process ends (`end_process`),
+/// so a thread's share is charged while it is still the running one.
+/// Time with no Win32 program running (DOS before and after it) goes to
+/// nobody: the last process's end drops the mark. The instructions are
+/// `Cpu::executed`'s, so a busy-wait loop the idle skip skips counts its
+/// skipped passes too.
+pub(super) fn charge(cpu: &mut Cpu) {
+    let now = (cpu.bus.clock.now_micros(), cpu.executed);
+    let win32 = &mut cpu.bus.win32;
+    let mark = if win32.active() { Some(now) } else { None };
+    if let Some((t0, i0)) = std::mem::replace(&mut win32.times.mark, mark)
+        && mark.is_some()
+    {
+        let id = current(win32).map_or(0, |(p, t)| win32.processes[p].threads[t].id);
+        let e = win32.times.by_thread.entry(id).or_default();
+        e.0 += now.0.saturating_sub(t0);
+        e.1 += now.1.saturating_sub(i0);
+    }
+}
+
+/// The emulated microseconds and instructions each thread has had since
+/// the first ran or the last load, by thread id, 0 for the idle loop:
+/// `thread_times` in the debug server's `/api/win32`.
+pub fn times(cpu: &mut Cpu) -> Vec<(u32, u64, u64)> {
+    charge(cpu);
+    let t = &cpu.bus.win32.times.by_thread;
+    t.iter().map(|(&id, &(us, n))| (id, us, n)).collect()
+}
+
 /// The running thread, if one runs.
 fn current(win32: &Win32) -> Option<At> {
     let process = win32.processes.get(win32.running)?;
@@ -240,6 +284,7 @@ fn enter(cpu: &mut Cpu, at: At) {
 /// has used `used` microseconds: a preempted thread goes on with the rest
 /// of its turn.
 fn run(cpu: &mut Cpu, (p, t): At, used: u64) {
+    charge(cpu);
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     if let Some(process) = win32.processes.get_mut(win32.running) {
@@ -516,6 +561,7 @@ fn take_preempted(win32: &mut Win32, pick: impl Fn(&Win32, At) -> bool) -> Optio
 
 /// Run the idle loop, in the running process: no thread runs.
 fn idle(cpu: &mut Cpu) {
+    charge(cpu);
     let process = process(cpu);
     process.current = None;
     let mut ctx = Context {
