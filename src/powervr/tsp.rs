@@ -6,9 +6,16 @@
 //!
 //! This follows Imagination's simulator of the PCX2's TSP (`simulat3/
 //! texas.c`: `Texas`, `TexturePixel`, `AddressCalc`, `ColourConvert`),
-//! its fixed-point arithmetic included. The PCX1's (`simulat/texas.c`)
-//! has no bilinear filter: between two mip map levels it blends a texel
-//! of each, and its maps' levels start a pixel further on.
+//! its fixed-point arithmetic included, where it agrees with the real
+//! chip. Two things the simulator leaves out were measured on a Matrox
+//! m3D (z2k-retro's PCX2 work for 86Box, `docs/appendix-c-textures.md`
+//! in powervr-pcx2-tools): a mip-mapped map's levels start a pixel
+//! further on than the simulator puts them, as on the PCX1
+//! (`simulat/texas.c`); and the BILINEAR register picks the filter for
+//! the frame, where the simulator always filters. With it at 3 (or 2)
+//! the PCX2 filters as the PCX1, which has no bilinear filter: between
+//! two mip map levels it blends a texel of each. At 1, adaptive, it
+//! filters only on the two largest levels a pixel can take.
 //!
 //! A record is at the TSP tag times two dwords from PREC_BASE. Its first
 //! dword is the control word: texturing (bit 31), smooth shading (30), no
@@ -25,10 +32,11 @@ use super::regs;
 /// Mip-mapped maps alternate between the halves of the memory.
 const BIG_BANK: u32 = 0x10_0000;
 
-/// Where a mip-mapped map's levels start, by level (256x256 down).
-const MIP_OFFSET: [u32; 9] = [0x5555, 0x1555, 0x0555, 0x0155, 0x0055, 0x0015, 0x0005, 0x0001, 0x0000];
-/// The PCX1's, which keep each level 2-pixel aligned.
-const MIP_OFFSET_PCX1: [u32; 9] = [
+/// Where a mip-mapped map's levels start, by level (256x256 down): the 1x1
+/// level is the second pixel of the map's first dword, and each larger
+/// level follows the one below it. The PCX2's simulator has every level a
+/// pixel earlier (5555h for 256x256), which a real PCX2 doesn't.
+const MIP_OFFSET: [u32; 9] = [
     0x5556, 0x1556, 0x0556, 0x0156, 0x0056, 0x0016, 0x0006, 0x0002, 0x0001,
 ];
 /// Where U and V wrap, by map size.
@@ -142,6 +150,21 @@ struct Map {
     flip_uv: u32,
 }
 
+/// How the TSP filters a frame's textures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// One texel, of the level the pixel takes.
+    Point,
+    /// Four texels of one level, blended (BILINEAR 0).
+    Bilinear,
+    /// Bilinear on a map's two largest levels, `TwoLevel` on the smaller
+    /// ones (BILINEAR 1).
+    Adaptive,
+    /// Between two levels, a texel of each, blended (BILINEAR 2 and 3, and
+    /// the PCX1).
+    TwoLevel,
+}
+
 pub struct Tsp<'a> {
     textures: &'a [u8],
     prec_base: u32,
@@ -149,10 +172,7 @@ pub struct Tsp<'a> {
     fog_shift: u32,
     fog_colour: (i32, i32, i32),
     fog_table: [i32; 128],
-    bilinear: bool,
-    /// Between mip map levels, blend a texel of each (the PCX1).
-    two_level: bool,
-    mip_offset: &'static [u32; 9],
+    mode: Mode,
 }
 
 impl<'a> Tsp<'a> {
@@ -162,11 +182,16 @@ impl<'a> Tsp<'a> {
         for (i, entry) in fog_table.iter_mut().enumerate() {
             *entry = (registers[regs::FOG_TABLE + i] & 0xFF) as i32;
         }
-        let pcx1 = chip == Chip::Pcx1;
-        let (bilinear, two_level) = match shader.filter {
-            Filter::Auto => (!pcx1 && registers[regs::BILINEAR] & 3 != 3, pcx1),
-            Filter::Point => (false, false),
-            Filter::Bilinear => (true, false),
+        let mode = match shader.filter {
+            Filter::Auto if chip == Chip::Pcx1 => Mode::TwoLevel,
+            // Bits 1-0; 2 is reserved, and filters as 3 does (measured).
+            Filter::Auto => match registers[regs::BILINEAR] & 3 {
+                0 => Mode::Bilinear,
+                1 => Mode::Adaptive,
+                _ => Mode::TwoLevel,
+            },
+            Filter::Point => Mode::Point,
+            Filter::Bilinear => Mode::Bilinear,
         };
         Self {
             textures,
@@ -175,9 +200,7 @@ impl<'a> Tsp<'a> {
             fog_shift: registers[regs::FOGAMOUNT] & 31,
             fog_colour: ((fogcol >> 16 & 0xFF) as i32, (fogcol >> 8 & 0xFF) as i32, (fogcol & 0xFF) as i32),
             fog_table,
-            bilinear,
-            two_level,
-            mip_offset: if pcx1 { &MIP_OFFSET_PCX1 } else { &MIP_OFFSET },
+            mode,
         }
     }
 
@@ -216,7 +239,7 @@ impl<'a> Tsp<'a> {
                 address ^= BIG_BANK;
             }
             address
-                .wrapping_add(self.mip_offset[(map.size + level).min(8)])
+                .wrapping_add(MIP_OFFSET[(map.size + level).min(8)])
                 .wrapping_add(twiddle(u >> level, v >> level))
         }
     }
@@ -313,8 +336,13 @@ impl<'a> Tsp<'a> {
             bot.m >>= 7;
         }
         let level = bot.e.clamp(0, 15);
+        let bilinear = match self.mode {
+            Mode::Bilinear => true,
+            Mode::Adaptive => !map.mip_mapped || level < 2,
+            Mode::Point | Mode::TwoLevel => false,
+        };
         let mut colour = if level < 1 || !map.mip_mapped || !map.sixteen_bit {
-            if self.bilinear {
+            if bilinear {
                 u_frac &= 31;
                 v_frac &= 31;
                 self.bilinear(map, u, v, 0, 1, u_frac, v_frac, (u & 1, (u + 1) & 1))
@@ -328,11 +356,11 @@ impl<'a> Tsp<'a> {
             Rgba { r: t.r << 3 | 4, g: t.g << 3 | 4, b: t.b << 3 | 4, a: t.a }
         } else {
             let compress = (level - 1) as usize;
-            if self.bilinear {
+            if bilinear {
                 u_frac = (u_frac >> compress) & 31;
                 v_frac = (v_frac >> compress) & 31;
                 self.bilinear(map, u, v, compress, 1 << compress, u_frac, v_frac, (u & 1, u & 1))
-            } else if self.two_level {
+            } else if self.mode != Mode::Point {
                 // The level's texel and the next smaller one's, mixed by
                 // the fraction of the level of detail (5 bits).
                 let high = self.fetch(map, u, v, compress, 0);
@@ -500,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pcx1_aligns_its_maps_and_blends_levels_unfiltered() {
+    fn mip_levels_start_a_pixel_on_and_unfiltered_frames_blend_levels() {
         let mut textures = vec![0u8; 4 << 20];
         let registers = vec![0; regs::COUNT];
         let map = Map {
@@ -511,14 +539,31 @@ mod tests {
             alpha: false,
             flip_uv: 0,
         };
+        let mut registers = registers;
         let pcx1 = Tsp::new(Chip::Pcx1, &registers, &textures, &Shader::default());
         let pcx2 = Tsp::new(Chip::Pcx2, &registers, &textures, &Shader::default());
         // A 32x32 map's first level: 0x156 on, in the other bank (size 3 +
-        // level 0 is odd).
+        // level 0 is odd), on both chips.
         assert_eq!(pcx1.address(&map, 0, 0, 0), BIG_BANK + 0x156);
-        assert_eq!(pcx2.address(&map, 0, 0, 0), BIG_BANK + 0x155);
-        assert!(pcx1.two_level && !pcx1.bilinear);
-        assert!(!pcx2.two_level && pcx2.bilinear);
+        assert_eq!(pcx2.address(&map, 0, 0, 0), BIG_BANK + 0x156);
+        // The 1x1 level is the second pixel of the map's first dword.
+        assert_eq!(pcx2.address(&map, 0, 0, 5), 1);
+        assert_eq!(pcx1.mode, Mode::TwoLevel);
+        assert_eq!(pcx2.mode, Mode::Bilinear);
+        let modes = [
+            (1, Mode::Adaptive),
+            (2, Mode::TwoLevel),
+            (3, Mode::TwoLevel),
+            (7, Mode::TwoLevel),
+        ];
+        for (value, mode) in modes {
+            registers[regs::BILINEAR] = value;
+            let shader = Shader::default();
+            let pcx1 = Tsp::new(Chip::Pcx1, &registers, &textures, &shader);
+            let pcx2 = Tsp::new(Chip::Pcx2, &registers, &textures, &shader);
+            assert_eq!((pcx1.mode, pcx2.mode), (Mode::TwoLevel, mode));
+        }
+        registers[regs::BILINEAR] = 0;
         // Its 16x16 level's first texel white, its 32x32's black.
         let at = |pixel: u32| (pixel as usize >> 1) * 4 + if pixel & 1 == 0 { 2 } else { 0 };
         let white = at(0x56);

@@ -1549,7 +1549,10 @@ same.
 
 How the card draws follows Imagination's own driver sources and simulator
 of the chip, which they released under the MIT licence
-(github.com/powervr-graphics/PowerVR-Series1).
+(github.com/powervr-graphics/PowerVR-Series1), and, where the simulator
+and a real PCX2 differ, the measurements z2k-retro made on a Matrox m3D
+for their PCX2 in 86Box: where a texture's mip map levels lie, and how
+each BILINEAR setting filters.
 
 ### Tseng ET4000
 
