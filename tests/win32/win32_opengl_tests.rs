@@ -5660,9 +5660,9 @@ fn faint_blends_on_a_voodoo3_keep_the_colour_they_blend_over() {
             *w = *w * (1.0 - a) + f64::from(s) * a;
         }
     }
-    // Without the subtraction the card truncates a little at each
-    // write, so the picture comes out a little dark, as on the Voodoo3.
-    // With it, blue came out 7 above and red 4.5 (49, 35, 33).
+    // Without the subtraction each write truncates, which leaves green
+    // and blue a little below the exact blend (45.0, 33.0, 22.2). With
+    // it, blue came out 7 above and red 4.5 (49, 35, 33).
     let got = average(&cpu, data);
     for (channel, (g, w)) in ["red", "green", "blue"].iter().zip(got.iter().zip(want)) {
         assert!((g - w).abs() < 4.0, "{channel}: {got:.1?}, want {want:.1?}");
