@@ -2955,6 +2955,55 @@ fn fills_and_copies_have_the_bytes_the_processor_writes() {
     }
 }
 
+/// `FILL`s of the depth buffer named as colour of its pixel size, as
+/// DirectDraw's `DDBLT_DEPTHFILL` sends them, while the host has it
+/// ahead: the nearest and the farthest depth, which the host clears,
+/// and values between them with every bit set some way, which it
+/// writes as they are. Quads the depth test lets through where the
+/// fills leave a depth behind them show the fills to the draws after.
+fn depth_fills(rig: &mut Rig) {
+    use crate::toadforce::command::encode::fill;
+    let depth = rig.target(COLOUR).depth_surface().unwrap();
+    let as_colour = Surface {
+        format: if depth.format == Format::D16 {
+            Format::R5G6B5
+        } else {
+            Format::X8R8G8B8
+        },
+        ..depth
+    };
+    let wide = depth.format != Format::D16;
+    let between = if wide { 0x8000_0011 } else { 0x8011 };
+    let farthest = if wide { 0xFFFF_FFFF } else { 0xFFFF };
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0, &[]);
+    rig.states(&[(RS_ZENABLE, 1)]);
+    rig.draw(&quad_z(2.0, 2.0, 40.0, 0xFFFF_0000, 0.5));
+    rig.run(|w| fill(w, &as_colour, &rect(8, 8, 24, 16), 0));
+    rig.run(|w| fill(w, &as_colour, &rect(40, 40, 20, 12), between));
+    rig.draw(&quad_z(0.0, 0.0, 60.0, 0xFF00_FF00, 0.75));
+    rig.run(|w| fill(w, &as_colour, &rect(0, 0, SIZE, SIZE), farthest));
+    rig.draw(&quad_z(4.0, 4.0, 30.0, 0xFF00_00FF, 0.25));
+    rig.run(|w| fill(w, &as_colour, &rect(20, 20, 10, 10), between));
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn depth_fills_have_the_bytes_the_processor_writes() {
+    bench!(bench, "toadforce depth fills");
+    for depth in [Format::D16, Format::D24X8, Format::D24S8] {
+        let name = format!("depth fills {depth:?}");
+        let bound = close(depth);
+        let declined = bench.compare(&name, Format::X8R8G8B8, Some(depth), bound, depth_fills);
+        assert_eq!(declined, 0);
+        // Every fill was the host's: nothing was read back for one.
+        let mut hosted = Rig::new(Format::X8R8G8B8, Some(depth));
+        hosted.card.set_host(Some(bench.host()), &mut hosted.memory);
+        depth_fills(&mut hosted);
+        let host = &hosted.card.describe(Rig::live())["host"];
+        assert_eq!(host["read_backs"], 0, "{name}: read-backs");
+    }
+}
+
 /// A position, a colour and a coordinate set of two numbers, for the
 /// card to transform: 6 words.
 const FVF_UNLIT: u32 = 0x002 | 0x040 | 0x100;

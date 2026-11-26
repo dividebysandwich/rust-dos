@@ -419,10 +419,11 @@ pub trait Host {
     fn clear(&mut self, clear: &Clear, memory: &[u8], pages: &Pages) -> Option<Surface>;
 
     /// `FILL`: write the low bytes of `value` to each pixel of `rect`
-    /// of `dst`, when the host's copy of `dst` is ahead and is of a
-    /// colour buffer. The surface of that copy, which is ahead after
-    /// it. None when the host leaves the fill to the processor, with
-    /// nothing changed.
+    /// of `dst`, when the host's copy that the fill writes (`fills`)
+    /// is ahead: a colour buffer, or a depth buffer, whose format says
+    /// what the bits are. The surface of that copy, which is ahead
+    /// after it. None when the host leaves the fill to the processor,
+    /// with nothing changed.
     fn fill(
         &mut self,
         dst: &Surface,
@@ -634,6 +635,15 @@ pub fn alias(named: &Surface, whole: &Surface) -> bool {
         && named.format.bytes() == whole.format.bytes()
         && named.width <= whole.width
         && named.height <= whole.height
+}
+
+/// Whether a `FILL` of `dst` writes the pixels of the host's copy
+/// `copy`: `dst` is a view of it, or names a depth buffer's bytes as
+/// colour. DirectDraw's depth fill (`DDBLT_DEPTHFILL`) comes to the
+/// card as a `FILL` of the depth buffer under a colour format of its
+/// pixel size, and writes the bits the depth buffer's format reads.
+pub fn fills(dst: &Surface, copy: &Surface) -> bool {
+    within(dst, copy) || copy.format.in_mask(super::caps::DEPTH_FORMATS) && alias(dst, copy)
 }
 
 /// The level and the face of `texture` that `surface` is, when it is
@@ -1588,15 +1598,16 @@ impl Gpu {
         ahead.any(|s| related(s, surface) || bits && same_bytes(s, surface))
     }
 
-    /// Have the host do a `FILL`, when the destination is ahead on it
-    /// and stays so. False when the processor is to write card memory.
+    /// Have the host do a `FILL`, when a surface it writes (`fills`) is
+    /// ahead on it and stays so. False when the processor is to write
+    /// card memory.
     pub fn fill(&mut self, dst: &Surface, rect: &Rect, value: u32, memory: &mut [u8]) -> bool {
-        if !self.has_ahead(dst, false) {
+        if !self.ahead.iter().any(|a| fills(dst, &a.surface)) {
             return false;
         }
         self.push(memory);
         self.fetched.get_mut().of.clear();
-        self.settle_others(dst, false, memory, Cause::Blit);
+        self.settle_others(dst, true, memory, Cause::Blit);
         let Some(host) = self.host.get_mut() else {
             return false;
         };

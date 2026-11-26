@@ -2574,12 +2574,13 @@ impl Host for ToadForceGl {
         memory: &[u8],
         pages: &Pages,
     ) -> Option<Surface> {
-        let copy = self.copies.iter().find(|c| gpu::within(dst, &c.surface))?;
-        if !copy.ahead || copy.surface.format.in_mask(super::caps::DEPTH_FORMATS) {
+        let copy = self.copies.iter().find(|c| gpu::fills(dst, &c.surface))?;
+        if !copy.ahead {
             return None;
         }
         // The copy's pixels are kept by its own format, and every bit
-        // of a pixel is written.
+        // of a pixel is written: a depth buffer's as `clear` writes
+        // one, its depth and its stencil or unused bits.
         let clear = Clear {
             surface: copy.surface,
             rects: std::slice::from_ref(rect),

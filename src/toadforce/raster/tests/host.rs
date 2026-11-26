@@ -373,8 +373,8 @@ impl Host for TestHost {
         let copy = self
             .copies
             .iter_mut()
-            .find(|c| gpu::within(dst, &c.surface))
-            .filter(|c| c.ahead && !depth(c.surface.format))?;
+            .find(|c| gpu::fills(dst, &c.surface))
+            .filter(|c| c.ahead)?;
         let surface = copy.surface;
         blit::fill(&mut copy.pixels, &packed(&surface), rect, value);
         self.drop_textures(&[surface]);
@@ -2404,6 +2404,42 @@ fn fills_and_copies_run_on_the_host_where_a_surface_is_ahead() {
     assert!(log.borrow().blits >= 3);
     let (rig, _) = same(takes_all, blits);
     assert_eq!(rig.px(5, 31), 0x1234_5678);
+}
+
+/// Triangles that write depth, then `FILL`s of the depth buffer named
+/// as colour of its pixel size, as DirectDraw's `DDBLT_DEPTHFILL`
+/// sends them: a part of it to the nearest depth and all of it to the
+/// farthest, each followed by a triangle the depth test lets through
+/// only where the fill left the farthest.
+fn depth_fills(rig: &mut Rig) {
+    triangles(rig);
+    let depth = target(rig).depth_surface().unwrap();
+    let as_colour = Surface {
+        format: Format::R5G6B5,
+        ..depth
+    };
+    let fill = |rig: &mut Rig, r: Rect, value: u32| {
+        let error = rig.run(|w| command::encode::fill(w, &as_colour, &r, value));
+        assert_eq!(error, 0);
+    };
+    fill(rig, rect(8, 8, 24, 16), 0);
+    assert_eq!(rig.draw(4, &corner(0.0, 0.0, 48.0, 0.75, 0xFF00_FF00)), 0);
+    fill(rig, rect(0, 0, SIZE, SIZE), 0xFFFF);
+    assert_eq!(rig.draw(4, &corner(4.0, 4.0, 30.0, 0.9, 0xFF00_00FF)), 0);
+}
+
+#[test]
+fn a_depth_fill_runs_on_the_host_where_the_depth_buffer_is_ahead() {
+    let (mut rig, log) = hosted(takes_all);
+    depth_fills(&mut rig);
+    // Both fills are the host's, and nothing was read back for them.
+    assert_eq!(log.borrow().fills, 2);
+    assert_eq!(log.borrow().read_backs, 0);
+    let (rig, _) = same(takes_all, depth_fills);
+    // The farthest depth the second fill wrote, under the last
+    // triangle's corner and outside it.
+    assert_eq!(rig.depth(SIZE - 1, SIZE - 1), 0xFFFF);
+    assert_eq!(rig.px(5, 5) & 0xFF_FFFF, 0x00_00FF);
 }
 
 #[test]
