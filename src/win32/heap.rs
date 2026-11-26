@@ -27,6 +27,14 @@ const ALIGN: u32 = 8;
 const GROWTH: u32 = 0x10_0000;
 /// How many block lengths a heap keeps a first-fit hint for.
 const HINTS: usize = 16;
+/// The bytes after a block's end that are committed with it. Windows 98
+/// keeps a header in front of every block, used or free, and an end
+/// marker after the last, so the bytes just past a block are the heap's
+/// own and a program reads them without a fault. Leadfoot reads two bytes
+/// past a 640x480 picture of 3-byte pixels, 4 bytes at a time. Here the
+/// headers are kept outside the heap's memory, so a block that ends on a
+/// page boundary would end at the edge of the committed pages.
+const TAIL: u32 = 16;
 
 /// The W32 section's version that added the processes' system heaps: a
 /// state saved by an older rust-dos has none.
@@ -179,10 +187,14 @@ impl Heap {
         (at as u64 + len as u64 <= end).then_some((at, index))
     }
 
-    /// Commit the segment `s` up to `end`. False when there is no memory.
+    /// Commit the segment `s` up to `end`, a block's end, and `TAIL` bytes
+    /// past it within the segment. False when there is no memory.
     fn commit_to(&mut self, s: usize, memory: &mut Memory, bus: &mut Bus, end: u32) -> bool {
         let segment = &mut self.segments[s];
-        let needed = (end - segment.base).next_multiple_of(PAGE);
+        let needed = (end - segment.base)
+            .saturating_add(TAIL)
+            .min(segment.reserved)
+            .next_multiple_of(PAGE);
         if needed > segment.committed {
             let from = segment.base + segment.committed;
             if memory
@@ -685,6 +697,25 @@ mod tests {
         assert!(heap.free_keeping_bytes(b));
         let after = bytes(&cpu, &memory, base, 0x3100);
         assert!(after.iter().all(|&x| x == 0xAB));
+    }
+
+    /// The bytes just past a block that ends on a page boundary can be
+    /// read, as on Windows, where the next block's header or the heap's
+    /// end marker is there. Leadfoot reads two bytes past a picture of
+    /// 0xE1000 bytes.
+    #[test]
+    fn bytes_past_a_block_are_committed() {
+        let (mut cpu, mut memory, mut heap) = real_heap(0);
+        let a = heap.alloc(&mut memory, &mut cpu.bus, 0xE1000).unwrap();
+        assert_eq!(a, heap.base);
+        assert_eq!(bytes(&cpu, &memory, a + 0xE1000, TAIL), vec![0; 16]);
+
+        // And so are the bytes past one that grows in place to a page's
+        // end.
+        let b = heap.alloc(&mut memory, &mut cpu.bus, 0x10).unwrap();
+        assert!(heap.resize_in_place(&mut memory, &mut cpu.bus, b, 0x2000 - (b & 0xFFF)));
+        let end = b + 0x2000 - (b & 0xFFF);
+        assert_eq!(bytes(&cpu, &memory, end, TAIL), vec![0; 16]);
     }
 
     /// A walk of the pieces, as Heap32First and Heap32Next take them,
