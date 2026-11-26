@@ -35,15 +35,16 @@ impl DriveKind {
     }
 
     /// (sectors per cluster, bytes per sector, total clusters) as reported by
-    /// INT 21h AH=1Ch/36h. Hard disks are a fake 320 MB in 16 KB clusters,
-    /// as FAT16 has on disks of 512 MB to 1 GB, the size of a CD-ROM
-    /// game's PC: the largest clusters whose size in bytes a signed 16-bit
-    /// number holds, and room for 160 MB or more (`hard_disk_free`).
-    /// CD-ROMs report what MSCDEX-style redirectors typically do.
+    /// INT 21h AH=1Ch/36h. Hard disks are a fake FAT16 partition of 1 GB,
+    /// the largest that FORMAT gives 16 KB clusters, as on the PCs that
+    /// ran CD-ROM games: the largest clusters whose size in bytes a signed
+    /// 16-bit number holds, 65,518 of them, and 512 MB or more free
+    /// (`hard_disk_free`). CD-ROMs report what MSCDEX-style redirectors
+    /// typically do.
     pub fn geometry(self) -> (u16, u16, u16) {
         match self {
             DriveKind::Floppy => (1, 512, FLOPPY_CLUSTERS),
-            DriveKind::HardDisk => (32, 512, 20000),
+            DriveKind::HardDisk => (32, 512, HARD_DISK_CLUSTERS),
             DriveKind::CdRom => (1, 2048, 0xFFFF),
             DriveKind::Virtual => (1, 512, 2000),
         }
@@ -55,6 +56,9 @@ impl DriveKind {
         let (sectors_per_cluster, bytes_per_sector, clusters) = self.geometry();
         let (root_entries, sectors_per_track, heads, hidden_sectors) = match self {
             DriveKind::Floppy => (224, 18, 2, 0),
+            // A BIOS translates a disk of 1 to 2 GB to 64 heads, so that
+            // its cylinders stay under 1024.
+            DriveKind::HardDisk => (512, 63, 64, 63),
             _ => (512, 63, 16, 63),
         };
         let fat_bytes = if clusters < FAT12_MAX_CLUSTERS {
@@ -98,6 +102,12 @@ pub fn old_space(spc: u32, free: u32, bps: u32, total: u32) -> (u16, u16, u16, u
     let fit = |n: u32| (n / factor).min(under_2gb).min(0xFFFF) as u16;
     (spc as u16, fit(free), bps as u16, fit(total))
 }
+
+/// The clusters of a folder hard disk (`DriveKind::geometry`): what FORMAT
+/// leaves of a 1 GB partition (2,097,152 sectors) after its boot sector,
+/// two FATs of 256 sectors and a root directory of 512 entries, in
+/// clusters of 32 sectors.
+pub(super) const HARD_DISK_CLUSTERS: u16 = 65_518;
 
 /// Volumes with fewer clusters than this have 12-bit FATs.
 const FAT12_MAX_CLUSTERS: u16 = 4085;

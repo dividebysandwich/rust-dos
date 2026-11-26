@@ -2624,7 +2624,10 @@ fn a_block_translated_again_takes_the_place_of_the_one_it_replaces() {
             a.hlt()
         }));
     });
-    b.cpu.dynrec.set_code_size(16 << 10);
+    // (The translations that live at once took nearly all of the 16 KB
+    // this test gave them, and outgrew it once memory operands got their
+    // device handle inline. 1000 of them still need far more than 24 KB.)
+    b.cpu.dynrec.set_code_size(24 << 10);
     let stats = run_both(&mut a, &mut b);
     assert_eq!(b.cpu.ebx(), replicated_sum(1000));
     if AVAILABLE {
@@ -7291,6 +7294,79 @@ fn stores_into_the_linear_frame_buffer_are_the_interpreters() {
 }
 
 #[test]
+fn a_software_renderers_back_page_counts_as_the_interpreters() {
+    // A software renderer drawing a frame out of sight in a 640x480
+    // 16-bit VESA mode's frame buffer (Quake's page flipping), with the
+    // picture `cycles=auto` counts known: bytes, words and dwords into
+    // pages it counts and doesn't show, which the code writes and counts
+    // itself within a burst (`x64::lean_card_store`), and a pause longer
+    // than a burst's gap after each half, after which the next store
+    // starts a burst through the full path. Then dwords into the picture
+    // shown, which go through the bus.
+    const LFB: u32 = 0xE000_0000;
+    const BACK: u32 = LFB + 0x10_0000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.set_ax(0x4F02);
+        rig.cpu.set_reg16(iced_x86::Register::BX, 0x4111);
+        rust_dos::interrupts::int10::handle(&mut rig.cpu);
+        assert_eq!(rig.cpu.ax(), 0x004F, "no VESA mode");
+        let picture = rust_dos::autospeed::picture(&rig.cpu.bus);
+        assert_eq!(picture, Some((0, 640 * 480 * 2)));
+        rig.cpu.bus.activity.set_picture(picture);
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut half = a.create_label();
+            let mut each = a.create_label();
+            let mut pause = a.create_label();
+            let mut shown = a.create_label();
+            a.mov(ebp, 2u32)?;
+            a.mov(edi, BACK)?;
+            a.set_label(&mut half)?;
+            a.mov(ecx, 0x800u32)?;
+            a.set_label(&mut each)?;
+            a.mov(eax, ecx)?;
+            a.imul_3(eax, eax, 0x0301_0507)?;
+            a.mov(byte_ptr(edi), al)?;
+            a.mov(word_ptr(edi + 1), ax)?;
+            a.mov(dword_ptr(edi + 3), eax)?;
+            a.add(edi, 7)?;
+            a.dec(ecx)?;
+            a.jnz(each)?;
+            a.mov(ecx, 8000u32)?;
+            a.set_label(&mut pause)?;
+            a.dec(ecx)?;
+            a.jnz(pause)?;
+            a.dec(ebp)?;
+            a.jnz(half)?;
+            a.mov(edi, LFB + 0x2_0000)?;
+            a.mov(ecx, 0x400u32)?;
+            a.set_label(&mut shown)?;
+            a.mov(dword_ptr(edi), ecx)?;
+            a.add(edi, 4)?;
+            a.dec(ecx)?;
+            a.jnz(shown)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let back = |rig: &Rig| rig.cpu.bus.vbe.vram[0x10_0000..0x10_8000].to_vec();
+    assert!(back(&b).iter().any(|&x| x != 0));
+    assert!(back(&a) == back(&b), "the back page differs");
+    let front = |rig: &Rig| rig.cpu.bus.vbe.vram[0x2_0000..0x2_1000].to_vec();
+    assert!(front(&a) == front(&b), "the picture differs");
+    // All of what `cycles=auto` counts: the bursts' bytes, the bursts
+    // and the last write's time.
+    let activity = |rig: &Rig| format!("{:?}", rig.cpu.bus.activity);
+    assert_eq!(activity(&a), activity(&b));
+    assert_ne!(a.cpu.bus.activity.video_bytes, 0);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        // The code wrote the back page itself: through the bus went the
+        // picture's 400h dwords, and a handful of others at most.
+        let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev + c.slow);
+        assert!(calls < 0x400 + 64, "{calls} calls");
+    }
+}
+
+#[test]
 fn mmx_and_sse_stores_into_the_linear_frame_buffer_are_translated() {
     // DirectDraw's MMX copy loop into a 640x480 16-bit VESA mode's frame
     // buffer, then the SSE stores of 16 and 8 bytes. The last two cross a
@@ -7709,7 +7785,11 @@ fn host_bytes(paging: bool, instr: impl Fn(&mut CodeAssembler) -> Result<(), Ice
 #[test]
 fn memory_operands_take_little_host_code() {
     // Each memory operand's slow paths call the trampoline's routines
-    // (`x64::Thunk`) instead of carrying their own copies.
+    // (`x64::Thunk`) instead of carrying their own copies. One part is
+    // inline where `Thunk::Dev` is the slow path (paging off, or the A20
+    // gate closed): the handle of an operand at 1 MB or above that isn't
+    // RAM, 36 bytes for a dword, which spares a software renderer's
+    // stores into the VESA frame buffer a call each.
     if !AVAILABLE || !cfg!(target_arch = "x86_64") {
         return;
     }
@@ -7717,7 +7797,10 @@ fn memory_operands_take_little_host_code() {
         let load = host_bytes(paging, |a| a.mov(eax, dword_ptr(esi + 4)));
         let store = host_bytes(paging, |a| a.mov(dword_ptr(edi + 4), eax));
         let both = host_bytes(paging, |a| a.add(dword_ptr(edi + 8), eax));
-        assert!(load < 220 && store < 280 && both < 450, "paging {paging}: {load}, {store}, {both} bytes");
+        assert!(
+            load < 230 && store < 310 && both < 480,
+            "paging {paging}: {load}, {store}, {both} bytes"
+        );
     }
 }
 

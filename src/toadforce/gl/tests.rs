@@ -884,6 +884,63 @@ fn address_modes_and_mip_levels_agree() {
     }
 }
 
+/// A program that writes one level of a texture with mip levels between
+/// two draws with it, as Unreal does with the textures it animates: the
+/// host decodes the images on the pages written again, and keeps the
+/// others as they were.
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_level_written_between_draws_is_sampled_as_written() {
+    bench!(bench, "toadforce levels");
+    // Squares of 32, 16, 8 and 4 pixels, which sample levels 0 to 3 of
+    // a texture of 32.
+    let squares = |rig: &mut Rig| {
+        rig.draw(&quad(0.0, 0.0, 32.0, WHITE, 1.0));
+        rig.draw(&quad(34.0, 0.0, 16.0, WHITE, 1.0));
+        rig.draw(&quad(34.0, 18.0, 8.0, WHITE, 1.0));
+        rig.draw(&quad(44.0, 18.0, 4.0, WHITE, 1.0));
+    };
+    let levels = |level: u32, _: u32, x: u32, y: u32| {
+        ramp(32)(level, 0, x, y) ^ 0x40 << (8 * (level % 3))
+    };
+    let scene = |rig: &mut Rig, written: usize| {
+        let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 6, false, levels);
+        rig.texture(0, 1, &t);
+        filter(rig, 0, 1, 1, 2);
+        rig.stage(0, &[(TSS_ADDRESSU, 3), (TSS_ADDRESSV, 3)]);
+        rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
+        squares(rig);
+        // The level again, in other colours, and the squares over the
+        // first ones.
+        let (at, pitch) = t.images[written];
+        let side = 32u32 >> written;
+        for y in 0..side {
+            let row: Vec<u8> = (0..side)
+                .flat_map(|x| (0xFF00_00FFu32 ^ (x * 8) << 8 ^ (y * 8) << 16).to_le_bytes())
+                .collect();
+            poke(rig, at + y * pitch, &row);
+        }
+        squares(rig);
+    };
+    // The six levels decoded for the first squares, and then those on
+    // the pages written: level 0 fills the texture's first page alone,
+    // and levels 1 to 5 share the next.
+    for (written, images) in [(0, 6 + 1), (2, 6 + 5)] {
+        bench.close(&format!("level {written} written"), |rig| {
+            scene(rig, written)
+        });
+        let mut rig = Rig::new(Format::A8R8G8B8, Some(Format::D16));
+        rig.card.set_host(Some(bench.host()), &mut rig.memory);
+        scene(&mut rig, written);
+        rig.card.settle(&mut rig.memory, None);
+        let counts = &rig.card.describe(Rig::live())["host"]["counts"];
+        assert_eq!(
+            counts["texture_images"], images,
+            "level {written}: {counts}"
+        );
+    }
+}
+
 /// A square with its corners on whole coordinates.
 fn whole_quad(x: f32, y: f32, size: f32, repeat: f32) -> Vec<V> {
     quad(x - 0.25, y - 0.25, size, WHITE, repeat)
@@ -2951,6 +3008,143 @@ fn fills_and_copies_have_the_bytes_the_processor_writes() {
             bench.wide.set(wide);
             let name = format!("fills and copies {format:?} wide {wide}");
             bench.compare(&name, format, None, exact, fills_and_copies);
+        }
+    }
+}
+
+/// `FILL`s of the depth buffer named as colour of its pixel size, as
+/// DirectDraw's `DDBLT_DEPTHFILL` sends them, while the host has it
+/// ahead: the nearest and the farthest depth, which the host clears,
+/// and values between them with every bit set some way, which it
+/// writes as they are. Quads the depth test lets through where the
+/// fills leave a depth behind them show the fills to the draws after.
+fn depth_fills(rig: &mut Rig) {
+    use crate::toadforce::command::encode::fill;
+    let depth = rig.target(COLOUR).depth_surface().unwrap();
+    let as_colour = Surface {
+        format: if depth.format == Format::D16 {
+            Format::R5G6B5
+        } else {
+            Format::X8R8G8B8
+        },
+        ..depth
+    };
+    let between = between(depth.format);
+    let farthest = if depth.format != Format::D16 {
+        0xFFFF_FFFF
+    } else {
+        0xFFFF
+    };
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0, &[]);
+    rig.states(&[(RS_ZENABLE, 1)]);
+    rig.draw(&quad_z(2.0, 2.0, 40.0, 0xFFFF_0000, 0.5));
+    rig.run(|w| fill(w, &as_colour, &rect(8, 8, 24, 16), 0));
+    rig.run(|w| fill(w, &as_colour, &rect(40, 40, 20, 12), between));
+    rig.draw(&quad_z(0.0, 0.0, 60.0, 0xFF00_FF00, 0.75));
+    rig.run(|w| fill(w, &as_colour, &rect(0, 0, SIZE, SIZE), farthest));
+    rig.draw(&quad_z(4.0, 4.0, 30.0, 0xFF00_00FF, 0.25));
+    rig.run(|w| fill(w, &as_colour, &rect(20, 20, 10, 10), between));
+}
+
+/// The depth between the nearest and the farthest that `depth_fills`
+/// writes, with every byte of a pixel of `depth` set some way.
+fn between(depth: Format) -> u32 {
+    if depth == Format::D16 {
+        0x8011
+    } else {
+        0x8000_0011
+    }
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn depth_fills_have_the_bytes_the_processor_writes() {
+    bench!(bench, "toadforce depth fills");
+    for depth in [Format::D16, Format::D24X8, Format::D24S8] {
+        let name = format!("depth fills {depth:?}");
+        let bound = close(depth);
+        let declined = bench.compare(&name, Format::X8R8G8B8, Some(depth), bound, depth_fills);
+        assert_eq!(declined, 0);
+        // Every fill was the host's: nothing was read back for one.
+        let mut hosted = Rig::new(Format::X8R8G8B8, Some(depth));
+        hosted.card.set_host(Some(bench.host()), &mut hosted.memory);
+        depth_fills(&mut hosted);
+        let host = &hosted.card.describe(Rig::live())["host"];
+        assert_eq!(host["read_backs"], 0, "{name}: read-backs");
+        // The last fill's bytes exactly, where `compare` allows the
+        // draws' depths a rounding.
+        hosted.card.settle(&mut hosted.memory, None);
+        let surface = hosted.target(COLOUR).depth_surface().unwrap();
+        let bytes = depth.bytes() as usize;
+        let want = &between(depth).to_le_bytes()[..bytes];
+        for (x, y) in (20..30).flat_map(|y| (20..30).map(move |x| (x, y))) {
+            let at = surface.at(x, y);
+            assert_eq!(&hosted.memory[at..at + bytes], want, "{name} at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_depth_fill_passes_over_an_older_copy_of_the_bytes_under_another_format() {
+    use crate::toadforce::gpu::{Clear, Host, Pages};
+    bench!(bench, "toadforce depth fill past an older copy");
+    for (depth, named) in [
+        (Format::D16, Format::R5G6B5),
+        (Format::D24S8, Format::X8R8G8B8),
+    ] {
+        let mut host = bench.host();
+        let surface = Surface {
+            offset: 0,
+            pitch: SIZE * depth.bytes(),
+            width: SIZE,
+            height: SIZE,
+            format: depth,
+        };
+        let as_colour = Surface {
+            format: named,
+            ..surface
+        };
+        let bytes = depth.bytes() as usize;
+        let mut memory = vec![0xAB; (SIZE * SIZE) as usize * bytes];
+        let pages = Pages::default();
+        // The depth buffer cleared to the farthest on the host, so its
+        // copy is ahead of card memory.
+        let all = rect(0, 0, SIZE, SIZE);
+        let clear = Clear {
+            surface,
+            rects: std::slice::from_ref(&all),
+            value: 0xFFFF_FFFF,
+            mask: 0xFFFF_FFFF,
+        };
+        assert_eq!(host.clear(&clear, &memory, &pages), Some(surface));
+        // Before it, a copy of the same bytes under the colour format
+        // the fill names them with, made from card memory and not
+        // ahead: the host's commands drop such a copy as they write
+        // the bytes, so it is put there by hand.
+        // SAFETY: the bench's context is current.
+        unsafe {
+            host.enter();
+            let at = host.copy(&as_colour, &memory, &pages, false);
+            host.leave();
+            let older = host.copies.remove(at);
+            host.copies.insert(0, older);
+        }
+        assert!(!host.copies[0].ahead && host.copies[1].ahead);
+        // The fill goes into the copy that is ahead, with its bits.
+        let value = between(depth);
+        let part = rect(8, 8, 24, 16);
+        let filled = host.fill(&as_colour, &part, value, &memory, &pages);
+        assert_eq!(filled, Some(surface), "{depth:?}");
+        assert!(host.copies.iter().all(|c| c.surface.format != named));
+        assert!(host.read_back(&surface, &mut memory, Some(&pages)));
+        let far = &0xFFFF_FFFFu32.to_le_bytes()[..bytes];
+        let inner = &value.to_le_bytes()[..bytes];
+        for (x, y) in (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))) {
+            let inside = (8..32).contains(&x) && (8..24).contains(&y);
+            let at = surface.at(x, y);
+            let want = if inside { inner } else { far };
+            assert_eq!(&memory[at..at + bytes], want, "{depth:?} at ({x}, {y})");
         }
     }
 }

@@ -1,4 +1,4 @@
-//! What the OpenGL renderer draws (`voodoo_renderer=opengl`). The software
+//! What the OpenGL renderer draws (`renderer=opengl`). The software
 //! rasterizer goes on keeping the card's memory, which games read back,
 //! save states keep and screenshots show (drawing only what they can still
 //! see, `backlog`); the mirror records the same drawing for the front end

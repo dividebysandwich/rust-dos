@@ -17,6 +17,11 @@ pub struct TextGeometry {
     pub font: &'static [u8],
     pub stride: usize,
     pub font_h: usize,
+    /// On an EGA or VGA whose BIOS loaded a font into plane 2: where in
+    /// the plane the fonts of the characters with attribute bit 3 clear
+    /// and set are (`VgaCard::char_maps`). The glyphs come from there,
+    /// 32 bytes a character, rather than from `font` and `alternate`.
+    pub font_maps: Option<[usize; 2]>,
     /// How many screen pixels a font pixel takes across and down: twice as
     /// wide in the 40-column modes, twice as high on the CGA.
     pub x_scale: usize,
@@ -105,6 +110,15 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
         Some((rows, _)) => rows,
         None => bus.text_rows(),
     };
+    // A VGA's 200-line text modes scan each line twice (Maximum Scan Line
+    // bit 7), for the 400 lines of the picture. The EGA has no such bit.
+    let font_maps =
+        (bus.vga.font_loaded && bus.vga.adapter.ega_bios()).then(|| bus.vga.char_maps());
+    let y_scale = if bus.vga.adapter.vga_bios() && bus.vga.crtc_regs[0x09] & 0x80 != 0 {
+        2
+    } else {
+        1
+    };
     match bus.video_mode {
         VideoMode::Text80x25 | VideoMode::Text80x25Color => {
             let (font, stride) = font_of_height(bus);
@@ -115,8 +129,9 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
                 font,
                 stride,
                 font_h: cell_height(bus, stride),
+                font_maps,
                 x_scale: 1,
-                y_scale: 1,
+                y_scale,
                 dots: 8,
                 alternate: &[],
                 mono: false,
@@ -145,6 +160,7 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
                 font,
                 stride: font_h,
                 font_h,
+                font_maps,
                 x_scale: 1,
                 y_scale: 1,
                 dots: 9,
@@ -165,8 +181,9 @@ pub fn geometry(bus: &Bus) -> Option<TextGeometry> {
                 font,
                 stride: font_h,
                 font_h,
+                font_maps,
                 x_scale: 2,
-                y_scale: 1,
+                y_scale,
                 dots: 8,
                 alternate: &[],
                 mono: false,
@@ -218,12 +235,8 @@ fn crtc_shape(bus: &Bus) -> Option<(usize, usize)> {
     if bus.boot.is_none() || !bus.vga.adapter.ega_bios() {
         return None;
     }
-    let crtc = &bus.vga.crtc_regs;
-    let height = (crtc[0x09] & 0x1F) as usize + 1;
-    let mut lines = (crtc[0x12] as usize | (crtc[0x07] as usize & 0x02) << 7 | (crtc[0x07] as usize & 0x40) << 3) + 1;
-    if crtc[0x09] & 0x80 != 0 {
-        lines /= 2;
-    }
+    let height = (bus.vga.crtc_regs[0x09] & 0x1F) as usize + 1;
+    let lines = bus.vga.text_scanlines() as usize;
     Some(((lines / height).clamp(1, 60), height))
 }
 
@@ -248,6 +261,7 @@ fn cga_geometry(bus: &Bus) -> Option<TextGeometry> {
         font: FONT_8X8,
         stride: 8,
         font_h: (regs[9] & 0x1F) as usize + 1,
+        font_maps: None,
         x_scale: if cols > 40 { 1 } else { 2 },
         y_scale: 2,
         dots: 8,
@@ -333,16 +347,22 @@ pub fn render(
             } else {
                 (colors[(attr & 0x0F) as usize], colors[(attr >> 4) as usize], false)
             };
-            let glyph = alternate_glyph(g.alternate, char_code, g.font_h);
+            let font_map = g.font_maps.map(|maps| maps[(attr >> 3 & 1) as usize]);
+            let glyph = match font_map {
+                Some(_) => None,
+                None => alternate_glyph(g.alternate, char_code, g.font_h),
+            };
             // The line-drawing characters reach into a 9-dot cell's ninth
             // column; the others leave it blank.
             let line_drawing = (0xC0..=0xDF).contains(&char_code);
 
             for y in 0..g.font_h {
-                let bits = match glyph {
-                    Some(glyph) => glyph[y],
-                    None if y < g.stride => g.font[char_code as usize * g.stride + y],
-                    None => 0,
+                let bits = match (font_map, glyph) {
+                    (Some(map), _) if y < 32 => vga.font_row(map, char_code, y),
+                    (Some(_), _) => 0,
+                    (None, Some(glyph)) => glyph[y],
+                    (None, None) if y < g.stride => g.font[char_code as usize * g.stride + y],
+                    (None, None) => 0,
                 };
                 let underlined = underline && y == g.underline;
                 for x in 0..g.dots {

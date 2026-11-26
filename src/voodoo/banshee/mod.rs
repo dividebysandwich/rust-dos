@@ -851,6 +851,15 @@ impl Voodoo {
                 if offset & 0xFC == PCI_INIT0 {
                     effect.settle = true;
                 }
+                // A new desktop start is a page flip, DirectDraw's on this
+                // card: the picture is what the jobs given out so far drew
+                // there, as a swap's is (`banshee_show`). The jobs after
+                // them draw the next frame beside the program, and the
+                // picture waits only for its own (`catch_up_shown`).
+                if offset & 0xFC == VID_DESKTOP_START_ADDR {
+                    let mark = self.swap_mark();
+                    self.shown_up_to(mark);
+                }
                 self.display_dirty = true;
             }
             0x000_0000 => self.banshee_cmd_write(offset, data, now, &mut effect),

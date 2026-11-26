@@ -15,6 +15,7 @@ mod win16_drive_tests;
 mod win16_exec_tests;
 mod win16_gdi_heap_tests;
 mod win16_gdi_tests;
+mod win16_generic_thunk_tests;
 mod win16_hook_tests;
 mod win16_kernel_debug_tests;
 mod win16_lock_tests;

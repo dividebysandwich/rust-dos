@@ -1614,6 +1614,146 @@ fn mouse_sensitivity_is_live_typed_and_resettable() {
 }
 
 #[test]
+fn the_3dfx_rows_follow_the_card_the_machine_has() {
+    use crate::config::Renderer;
+    use crate::video::adapter::Adapter;
+    let add_on_only = [Item::VoodooMemory, Item::VoodooGamma];
+    let every_card = [Item::Renderer, Item::VoodooTextureSampling];
+    let opengl = [
+        Item::VoodooScale,
+        Item::VoodooMsaa,
+        Item::VoodooDither,
+        Item::VoodooAnisotropy,
+    ];
+    let shown = |s: &Settings, items: &[Item]| items.iter().map(|i| i.shown(s)).collect::<Vec<_>>();
+
+    // No 3dfx card: only the switch that adds one.
+    let mut s = Settings::default();
+    assert!(Item::Voodoo.shown(&s));
+    assert_eq!(shown(&s, &add_on_only), [false; 2]);
+    assert_eq!(shown(&s, &every_card), [false; 2]);
+    assert_eq!(shown(&s, &opengl), [false; 4]);
+
+    // The add-on card: its own rows, and the OpenGL ones with OpenGL.
+    s.voodoo.enabled = true;
+    assert_eq!(shown(&s, &add_on_only), [true; 2]);
+    assert_eq!(shown(&s, &every_card), [true; 2]);
+    assert_eq!(shown(&s, &opengl), [false; 4]);
+    s.renderer = Renderer::OpenGl;
+    assert_eq!(shown(&s, &opengl), [true; 4]);
+    // Auto and software draw the 3dfx cards on the processor.
+    for renderer in [Renderer::Auto, Renderer::Software] {
+        s.renderer = renderer;
+        assert_eq!(shown(&s, &opengl), [false; 4], "{renderer:?}");
+    }
+
+    // A Voodoo3 or Banshee as the display adapter: the renderer and its
+    // settings, whether `voodoo` is on or not, and none of the add-on's.
+    for machine in [Adapter::Voodoo3, Adapter::Banshee] {
+        for enabled in [false, true] {
+            let mut s = Settings {
+                machine,
+                ..Settings::default()
+            };
+            s.voodoo.enabled = enabled;
+            assert!(!Item::Voodoo.shown(&s), "{machine:?}");
+            assert_eq!(shown(&s, &add_on_only), [false; 2], "{machine:?}");
+            assert!(!Item::VoodooOverlay.shown(&s), "{machine:?}");
+            assert_eq!(shown(&s, &every_card), [true; 2], "{machine:?}");
+            assert_eq!(shown(&s, &opengl), [false; 4], "{machine:?}");
+            s.renderer = Renderer::OpenGl;
+            assert_eq!(shown(&s, &opengl), [true; 4], "{machine:?}");
+            assert_eq!(Item::VoodooScaleShader.shown(&s), s.voodoo.scale > 1);
+        }
+    }
+}
+
+#[test]
+fn one_renderer_row_draws_every_3d_card() {
+    use crate::config::Renderer;
+    use crate::video::adapter::Adapter;
+    // A ToadForce has the row too, and none of the 3dfx OpenGL rows.
+    let s = Settings {
+        machine: Adapter::ToadForce,
+        renderer: Renderer::OpenGl,
+        ..Settings::default()
+    };
+    assert!(Item::Renderer.shown(&s));
+    assert!(!Item::VoodooScale.shown(&s));
+    // A machine without a 3D card it draws has none.
+    assert!(!Item::Renderer.shown(&Settings::default()));
+    assert_eq!(Item::Renderer.applies(), Applies::Now);
+
+    // The row steps through the values and applies them at once, to both
+    // cards.
+    let mut host = FakeHost::new();
+    let mut ui = ConfigUi::new();
+    let settings = Settings {
+        machine: Adapter::ToadForce,
+        ..Settings::default()
+    };
+    ui.open(&settings, Some("/cfg/rust-dos.conf".into()), &host);
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Renderer).unwrap();
+    assert_eq!(Item::Renderer.value(&ui.settings, None), "Auto");
+    keys(&mut ui, &mut host, &[UiKey::Right]);
+    let applied = host.applied.last().unwrap();
+    assert_eq!(applied.renderer, Renderer::OpenGl);
+    assert_eq!(applied.voodoo_renderer(), crate::voodoo::Renderer::OpenGl);
+    assert_eq!(applied.toadforce_renderer(), crate::toadforce::Renderer::OpenGl);
+    assert_eq!(Item::Renderer.value(&ui.settings, None), "OpenGL");
+    keys(&mut ui, &mut host, &[UiKey::Right]);
+    assert_eq!(host.applied.last().unwrap().renderer, Renderer::Software);
+    assert_eq!(Item::Renderer.value(&ui.settings, None), "Software");
+}
+
+#[test]
+fn a_voodoo3_or_banshee_picked_turns_the_add_on_card_off() {
+    use crate::video::adapter::Adapter;
+    for machine in [Adapter::Voodoo3, Adapter::Banshee] {
+        let mut host = FakeHost::new();
+        let mut ui = ConfigUi::new();
+        let mut settings = Settings::default();
+        settings.voodoo.enabled = true;
+        ui.open(&settings, Some("/cfg/rust-dos.conf".into()), &host);
+        ui.show_page(Page::Emulator);
+        ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+        pick(&mut ui, &mut host, machine.describe());
+        let applied = host.applied.last().unwrap();
+        assert_eq!((applied.machine, applied.voodoo.enabled), (machine, false));
+        assert!(!ui.items().contains(&Item::Voodoo));
+        // Another card brings the switch back, off, for the player to
+        // turn on again.
+        ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+        pick(&mut ui, &mut host, Adapter::Svga.describe());
+        let applied = host.applied.last().unwrap();
+        assert_eq!((applied.machine, applied.voodoo.enabled), (Adapter::Svga, false));
+        assert!(ui.items().contains(&Item::Voodoo));
+    }
+}
+
+#[test]
+fn a_voodoo3_with_voodoo_on_in_the_file_is_the_card_the_list_opens_on() {
+    use crate::video::adapter::Adapter;
+    let mut host = FakeHost::new();
+    let mut ui = ConfigUi::new();
+    let mut settings = Settings {
+        machine: Adapter::Voodoo3,
+        ..Settings::default()
+    };
+    settings.voodoo.enabled = true;
+    ui.open(&settings, Some("/cfg/rust-dos.conf".into()), &host);
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    keys(&mut ui, &mut host, &[UiKey::Enter]);
+    let popup = ui.popup.as_ref().unwrap();
+    assert_eq!(popup.choices[popup.selected], settings);
+    keys(&mut ui, &mut host, &[UiKey::Esc, UiKey::Right]);
+    let applied = host.applied.last().unwrap();
+    assert_eq!((applied.machine, applied.voodoo.enabled), (Adapter::Banshee, false));
+}
+
+#[test]
 fn version_check_never_leaves_the_window_and_the_switch_toggles_on_and_off() {
     use crate::version_check::Setting;
     let item = Item::VersionCheck;

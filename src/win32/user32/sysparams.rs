@@ -35,6 +35,15 @@ pub fn display_mode(cpu: &Cpu) -> (u32, u32, u32) {
     })
 }
 
+/// The work area: the part of the screen that maximized windows and
+/// the cascade of CW_USEDEFAULT windows use, as SPI_GETWORKAREA and
+/// GetMonitorInfo give it. The built-in Windows has no taskbar, so it is
+/// the whole screen.
+pub fn work_area(cpu: &Cpu) -> super::Rect {
+    let (w, h) = screen_size(cpu);
+    super::Rect::new(0, 0, w, h)
+}
+
 /// The screen's size, the display mode's (`display_mode`): what
 /// GetSystemMetrics(SM_CXSCREEN) and SM_CYSCREEN give, the desktop
 /// window's and the monitor's size, and where the cursor can go.
@@ -413,7 +422,6 @@ const SPIF_UPDATEINIFILE: u32 = 1;
 /// SystemParametersInfoA(action, ui, pv, flags).
 pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (action, ui, pv) = (args[0], args[1], args[2]);
-    let (w, h) = screen_size(cpu);
     let result = match action {
         // The GET actions whose value a SET action keeps: SPI_GETBEEP,
         // SPI_GETKEYBOARDSPEED, SPI_GETKEYBOARDDELAY,
@@ -578,7 +586,9 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if pv == 0 {
                 FALSE
             } else {
-                write_words(cpu, pv, &[0, 0, w as u32, h as u32]);
+                let r = work_area(cpu);
+                let rect = [r.left, r.top, r.right, r.bottom].map(|v| v as u32);
+                write_words(cpu, pv, &rect);
                 TRUE
             }
         }

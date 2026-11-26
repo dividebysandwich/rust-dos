@@ -66,8 +66,9 @@ impl Machine {
         self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", message));
     }
 
-    /// The settings the options and the files make now, below the game's.
-    pub fn base_settings(&self) -> (Settings, Vec<String>) {
+    /// The settings the options and the files make now, below the game's,
+    /// or the error of a file with lines that contradict each other.
+    pub fn base_settings(&self) -> Result<(Settings, Vec<String>), String> {
         content::settings(&self.base, &self.options, self.overlay.as_ref())
     }
 
@@ -96,7 +97,7 @@ impl Machine {
         if let Some(previous) = self.game.take() {
             self.end_game(previous);
         }
-        let (base, _) = self.base_settings();
+        let (base, _) = self.base_settings()?;
         let mut prepared = games::prepare(id, &base, text, dir, content::home().as_deref())?;
         for warning in &prepared.warnings {
             self.warn(&format!("{}.conf: {}", id, warning));
@@ -156,27 +157,41 @@ impl Machine {
     pub fn options_changed(&mut self, options: Values) {
         let memsize_before = self.options.get("memsize").map(str::to_string);
         self.options = options;
-        let (base, warnings) = self.base_settings();
-        for warning in warnings {
-            self.warn(&warning);
-        }
-        let new = match self.game.as_ref().map(|g| g.id.clone()) {
-            Some(id) => {
-                let file = self.profile_file(&id);
-                let text = fs::read_to_string(&file).unwrap_or_default();
-                let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
-                self.game.as_mut().unwrap().base = base.clone();
-                match games::prepare(&id, &base, &text, &dir, content::home().as_deref()) {
-                    Ok(prepared) => content::frontend_settings(prepared.settings),
-                    Err(_) => base,
+        // Each file's renderer replaces the one below it, so the options
+        // can't make an error, but a file can have one of its own: one
+        // edited since it was read, such as the game profile, read again
+        // here. The settings then stay as they are, and the error says
+        // which lines to change.
+        let new = match self.base_settings() {
+            Ok((base, warnings)) => {
+                for warning in warnings {
+                    self.warn(&warning);
+                }
+                match self.game.as_ref().map(|g| g.id.clone()) {
+                    Some(id) => {
+                        let file = self.profile_file(&id);
+                        let text = fs::read_to_string(&file).unwrap_or_default();
+                        let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
+                        self.game.as_mut().unwrap().base = base.clone();
+                        let home = content::home();
+                        games::prepare(&id, &base, &text, &dir, home.as_deref())
+                            .map(|prepared| content::frontend_settings(prepared.settings))
+                    }
+                    None => Ok(base),
                 }
             }
-            None => base,
+            Err(e) => Err(e),
         };
-        match self.apply(&new) {
-            Ok(Some(note)) => self.notices.push(note),
-            Ok(None) => {}
-            Err(e) => self.notices.push(e),
+        match new {
+            Ok(new) => match self.apply(&new) {
+                Ok(Some(note)) => self.notices.push(note),
+                Ok(None) => {}
+                Err(e) => self.notices.push(e),
+            },
+            Err(e) => {
+                self.warn(&e);
+                self.notices.push(e);
+            }
         }
         if self.options.get("memsize").map(str::to_string) != memsize_before {
             self.notices.push("The memory size changes when the content is started again".to_string());

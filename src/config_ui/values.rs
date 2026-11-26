@@ -156,6 +156,18 @@ pub(super) fn awe32(s: &Settings) -> bool {
     s.sound.sb_installed && s.sound.sb.model == SbModel::Awe32
 }
 
+/// Whether the machine has the 3dfx add-on card, a Voodoo Graphics or
+/// Voodoo2: `voodoo` on, and a display adapter that leaves room for it.
+pub(super) fn voodoo_add_on(s: &Settings) -> bool {
+    s.voodoo.enabled && s.machine.voodoo_board().is_none()
+}
+
+/// Whether the machine's 3dfx card, the add-on or the display adapter,
+/// is drawn again with OpenGL.
+pub(super) fn voodoo_opengl(s: &Settings) -> bool {
+    s.voodoo_board().is_some() && s.voodoo_renderer() == crate::voodoo::Renderer::OpenGl
+}
+
 /// A memory size in KB, as the settings show it.
 pub(super) fn ram_size(kb: u32) -> String {
     match kb {
@@ -266,22 +278,30 @@ impl Item {
             // card's default replaces it: the settings window of an earlier
             // rust-dos saved `cpu=486` into every configuration file. One
             // picked with the card in place stays. The memory is cut to
-            // what the processor takes, as for a picked one.
+            // what the processor takes, as for a picked one. A Voodoo3 or
+            // Banshee picked is a 3dfx card itself and leaves no room for
+            // the add-on card, so `voodoo` goes off: a file saved with both
+            // would say two things about the 3dfx card. The card the
+            // machine has stays as it is, so that its choice is the
+            // settings the window has, which the list opens on and Left
+            // and Right step from.
             Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| {
                 let suited = !s.cpu_below_card();
+                let picked = machine != s.machine;
                 s.machine = machine;
                 if suited && s.cpu_below_card() {
                     s.cpu = None;
                 }
+                if picked && machine.voodoo_board().is_some() {
+                    s.voodoo.enabled = false;
+                }
                 s.memsize = s.memsize.map(|mb| mb.min(s.cpu_model().max_memsize()));
             }),
+            Renderer => each(s, crate::config::Renderer::ALL, |s, renderer| s.renderer = renderer),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),
             VoodooMemory => {
                 each(s, crate::voodoo::Board::ALL, |s, board| s.voodoo.board = board)
             }
-            VoodooRenderer => each(s, [crate::voodoo::Renderer::Software, crate::voodoo::Renderer::OpenGl], |s, r| {
-                s.voodoo.renderer = r
-            }),
             VoodooScale => each(s, [1, 2, 3, 4], |s, scale| s.voodoo.scale = scale),
             VoodooTextureSampling => {
                 use crate::voodoo::TextureSampling;
@@ -308,9 +328,6 @@ impl Item {
                 let sizes = crate::toadforce::regs::MEMORY_SIZES.map(|bytes| bytes >> 20);
                 each(s, sizes, |s, megabytes| s.toadforce_memory = megabytes)
             }
-            ToadForceRenderer => each(s, crate::toadforce::Renderer::ALL, |s, renderer| {
-                s.toadforce_renderer = renderer
-            }),
             ToadForceGamma => each(s, gammas(), |s, gamma| s.toadforce_gamma = gamma),
             PowerVrFilter => {
                 use crate::powervr::tsp::Filter;

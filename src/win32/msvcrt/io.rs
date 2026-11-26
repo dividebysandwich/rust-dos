@@ -231,9 +231,10 @@ pub enum Read {
 
 /// Read up to `count` bytes from `handle`.
 fn dos_read(cpu: &mut Cpu, handle: u32, count: u32) -> Read {
-    let Some(sft) = sft_of(cpu, handle) else {
+    let Some(open) = kernel32::open_of(cpu, handle) else {
         return Read::Error(6);
     };
+    let sft = open.sft;
     match cpu.bus.disk.handle_device(sft) {
         Some(CharDevice::Con) => {
             // The key DOS keeps the line being typed under, as KERNEL32's
@@ -245,6 +246,10 @@ fn dos_read(cpu: &mut Cpu, handle: u32, count: u32) -> Read {
             }
         }
         Some(_) => Read::Data(Vec::new()),
+        // ReadFile's check of the locks (kernel32/file.rs).
+        None if kernel32::io_locked(cpu, open, count, false) => {
+            Read::Error(crate::disk::LOCK_VIOLATION as u32)
+        }
         None => match crate::interrupts::int21::read_open_file(cpu, sft, count as usize) {
             Ok(data) => Read::Data(data),
             Err(code) => Read::Error(code as u32),
@@ -257,6 +262,10 @@ fn dos_write(cpu: &mut Cpu, handle: u32, data: &[u8]) -> Result<u32, u32> {
     let open = kernel32::open_of(cpu, handle).ok_or(6u32)?;
     if open.access & kernel32::GENERIC_WRITE == 0 {
         return Err(5);
+    }
+    // WriteFile's check of the locks (kernel32/file.rs).
+    if !data.is_empty() && kernel32::io_locked(cpu, open, data.len() as u32, true) {
+        return Err(crate::disk::LOCK_VIOLATION as u32);
     }
     let mut done = 0;
     for chunk in data.chunks(0x8000) {
@@ -663,6 +672,11 @@ pub fn chsize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_errno(cpu, EBADF);
         return Some(EOF);
     };
+    // SetEndOfFile's check of the locks (kernel32/file.rs).
+    if kernel32::resize_locked(cpu, sft, args[1]) {
+        set_dos_error(cpu, crate::disk::LOCK_VIOLATION as u32);
+        return Some(EOF);
+    }
     match cpu.bus.disk.set_file_size(sft, args[1] as u64) {
         Ok(()) => Some(0),
         Err(code) => {
@@ -1008,11 +1022,13 @@ pub fn unlink(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn rename(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let from = dos_path(&cstr(cpu, args[0])?);
     let to = dos_path(&cstr(cpu, args[1])?);
-    // The same name in another case renames it, as MoveFileA does.
-    if cpu.bus.disk.exists(&to) && !from.eq_ignore_ascii_case(&to) {
+    // The same name in another case renames it, as MoveFileA does, and so
+    // does another name of the file itself, its alias.
+    let disk = &mut cpu.bus.disk;
+    let itself = from.eq_ignore_ascii_case(&to) || disk.file_key(&to) == disk.file_key(&from);
+    if disk.exists(&to) && !itself {
         return dos_result(cpu, Err(5));
     }
-    let disk = &mut cpu.bus.disk;
     let result = disk.long_name_call(|disk| disk.rename_file(&from, &to));
     dos_result(cpu, result)
 }

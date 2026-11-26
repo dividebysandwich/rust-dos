@@ -1944,6 +1944,27 @@ fn glide3_on_a_voodoo2_lists_the_rates_each_size_has() {
     assert_eq!(result(&cpu, data, 4), 0);
 }
 
+#[test]
+fn glide3_on_a_voodoo3_dithers_2x2_without_the_subtraction() {
+    // grSstWinOpen sets grDitherMode(GR_DITHER_4x4) (gsst.c). The
+    // Voodoo3's Glide 3 takes the 2x2 matrix for it and leaves the
+    // alpha blending dither subtraction off, as the control panel's
+    // "Alpha Blending Quality" has it unless the user picks "Smoother"
+    // (gglide.c, gpci.c). The Voodoo2's dithers 4x4 with the
+    // subtraction.
+    let (dither, dither_2x2, subtract) = (1 << 8, 1 << 11, 1 << 19);
+    for (board, want) in [
+        (Board::Voodoo3, dither | dither_2x2),
+        (Board::Voodoo2, dither | subtract),
+    ] {
+        let program = glide3_refresh_program(GR_REFRESH_60HZ, GR_REFRESH_60HZ);
+        let (cpu, data) = run_with(&format!("g3_dither_{board:?}"), board, program, &[]);
+        assert_ne!(result(&cpu, data, 2), 0, "grSstWinOpen");
+        let fbz = cpu.bus.voodoo.as_ref().unwrap().reg[0x110 / 4];
+        assert_eq!(fbz & (dither | dither_2x2 | subtract), want, "{board:?}");
+    }
+}
+
 /// Where `swapping_program` counts its swaps, and its second thread its
 /// passes.
 const FRAMES: u32 = 0xE00;

@@ -239,6 +239,11 @@ const STATUS: &[Keyword] = &[
         Arg::Item(video::MCI_DGV_STATUS_HWND),
     ),
     (
+        &["palette", "handle"],
+        MCI_STATUS_ITEM,
+        Arg::Item(video::MCI_DGV_STATUS_HPAL),
+    ),
+    (
         &["window", "visible"],
         MCI_STATUS_ITEM,
         Arg::Item(video::MCI_DGV_STATUS_WINDOW_VISIBLE),

@@ -152,23 +152,63 @@ pub fn home() -> Option<PathBuf> {
 
 /// The settings: rust-dos.conf's, the core options' over them, and the
 /// overlay's over those. A game profile goes over these as it is launched.
-pub fn settings(base: &Base, options: &Values, overlay: Option<&Overlay>) -> (Settings, Vec<String>) {
+/// A file with lines that contradict each other (`Config::errors`) is an
+/// error. Each one's renderer replaces the one below it
+/// (`Config::renderer_over`).
+pub fn settings(
+    base: &Base,
+    options: &Values,
+    overlay: Option<&Overlay>,
+) -> Result<(Settings, Vec<String>), String> {
     let home = home();
+    // rust-dos.conf's own errors: the options' `renderer` line after it
+    // would take back the old lines that make one.
+    let file = config::parse(&base.text, base.dir(), home.as_deref());
+    if !file.errors.is_empty() {
+        let name = base.file.display();
+        let errors: Vec<String> = file.errors.iter().map(|e| format!("{name}: {e}")).collect();
+        return Err(errors.join("\n"));
+    }
+    // The options write only a `renderer` line, whose value replaces the
+    // file's, as one layer over another would.
     let text = format!("{}\n{}", base.text, options.config_text());
     let parsed = config::parse(&text, base.dir(), home.as_deref());
-    let mut warnings: Vec<String> = parsed.warnings.iter().map(|w| format!("rust-dos.conf: {}", w)).collect();
+    // The warning for rust-dos.conf's old renderer lines names the line
+    // to write in their place: the file's own value, not the options'.
+    let deprecation = |c: &config::Config| c.renderer().and_then(|r| c.renderer_deprecation(r));
+    let (over, own) = (deprecation(&parsed), deprecation(&file));
+    let mut warnings: Vec<String> = parsed
+        .warnings
+        .iter()
+        .filter(|w| over.as_ref() != Some(*w))
+        .chain(own.iter())
+        .map(|w| format!("rust-dos.conf: {}", w))
+        .collect();
     let mut settings = Settings::from_config(&parsed);
     if let Some(overlay) = overlay {
-        let layered = format!(
-            "{}\n{}",
-            config::update_text("", &Settings::default(), &settings, &[], home.as_deref()),
-            overlay.text
+        let below = format!(
+            "{}\n",
+            config::update_text("", &Settings::default(), &settings, &[], home.as_deref())
         );
+        let layered = format!("{}{}", below, overlay.text);
         let parsed = config::parse(&layered, &overlay.dir, home.as_deref());
-        warnings.extend(parsed.warnings.iter().map(|w| format!("{}: {}", overlay.dir.join("rust-dos.conf").display(), w)));
+        let file = overlay.dir.join("rust-dos.conf");
+        let own = config::parse(&overlay.text, &overlay.dir, home.as_deref());
+        if !own.errors.is_empty() {
+            let errors: Vec<String> =
+                own.errors.iter().map(|e| format!("{}: {}", file.display(), e)).collect();
+            return Err(errors.join("\n"));
+        }
+        // The overlay's warnings by its own line numbers, as a game
+        // profile's are (`games::prepare`).
+        let below_config = config::parse(&below, &overlay.dir, home.as_deref());
+        let own_warnings = own.warnings_over(&parsed, &below_config);
+        warnings.extend(own_warnings.iter().map(|w| format!("{}: {}", file.display(), w)));
+        let renderer = own.renderer_over(settings.renderer);
         settings = Settings::from_config(&parsed);
+        settings.renderer = renderer;
     }
-    (frontend_settings(settings), warnings)
+    Ok((frontend_settings(settings), warnings))
 }
 
 /// What the frontend does in the core's place: it rewinds, and
@@ -390,7 +430,8 @@ mod tests {
         assert!(plan.profile.is_none());
         let overlay = plan.overlay.unwrap();
         assert!(!has_autoexec(&overlay.text));
-        let (settings, warnings) = settings(&Base::load(&dirs), &Values::default(), Some(&overlay));
+        let (settings, warnings) =
+            settings(&Base::load(&dirs), &Values::default(), Some(&overlay)).unwrap();
         assert!(warnings.is_empty(), "{:?}", warnings);
         assert_eq!(settings.cycles, rust_dos::timer::CpuSpeed::Fixed(5000));
     }
@@ -504,9 +545,82 @@ mod tests {
         let mut options = Values::default();
         options.set("cycles", "20000");
         options.set("ems", "default");
-        let (settings, _) = settings(&Base::load(&dirs), &options, None);
+        let (settings, _) = settings(&Base::load(&dirs), &options, None).unwrap();
         assert_eq!(settings.cycles, rust_dos::timer::CpuSpeed::Fixed(20000));
         assert!(!settings.ems);
         assert!(!settings.rewind, "the frontend rewinds");
+    }
+
+    #[test]
+    fn a_rust_dos_conf_that_asks_for_two_renderers_is_an_error() {
+        let dir = scratch("two_renderers");
+        let dirs = Dirs::new(dir.join("system"), dir.join("saves"));
+        fs::create_dir_all(&dirs.sys).unwrap();
+        let file = dirs.sys.join("rust-dos.conf");
+        let text = "[emulator]\nvoodoo_renderer=opengl\ntoadforce_renderer=software\n";
+        fs::write(&file, text).unwrap();
+        let error = settings(&Base::load(&dirs), &Values::default(), None).unwrap_err();
+        assert!(error.starts_with(&format!("{}: ", file.display())), "{error}");
+        assert!(error.contains("ask for two renderers"), "{error}");
+
+        // The overlay is a layer of its own: its old line's value replaces
+        // rust-dos.conf's `renderer`, and the warning names its own line
+        // and that value.
+        fs::write(&file, "[emulator]\nrenderer=opengl\n").unwrap();
+        let overlay = |text: &str| Overlay { text: text.to_string(), dir: dir.join("game") };
+        let over = |text: &str| {
+            settings(&Base::load(&dirs), &Values::default(), Some(&overlay(text))).unwrap()
+        };
+        let (got, warnings) = over("[emulator]\ntoadforce_renderer=software\n");
+        assert_eq!(got.renderer, rust_dos::config::Renderer::Software);
+        let named = |w: &String| {
+            w.contains(": line 2 (toadforce_renderer=software): ")
+                && w.ends_with("renderer=software")
+        };
+        assert!(warnings.iter().any(named), "{warnings:?}");
+        let (got, _) = over("[emulator]\ntoadforce_renderer=auto\n");
+        assert_eq!(got.renderer, rust_dos::config::Renderer::Auto);
+        // Without a line it keeps rust-dos.conf's.
+        let (got, _) = over("[emulator]\nscale=2\n");
+        assert_eq!(got.renderer, rust_dos::config::Renderer::OpenGl);
+        // The overlay's own lines asking for two renderers are an error.
+        let two = overlay("[emulator]\nvoodoo_renderer=opengl\ntoadforce_renderer=software\n");
+        let error = settings(&Base::load(&dirs), &Values::default(), Some(&two)).unwrap_err();
+        assert!(error.contains("line 2 (voodoo_renderer=opengl)"), "{error}");
+
+        // The core option's renderer goes over rust-dos.conf's old line,
+        // and the warning names the file's own value, the line to write
+        // into it.
+        fs::write(&file, "[emulator]\nvoodoo_renderer=opengl\n").unwrap();
+        let mut options = Values::default();
+        options.set("voodoo_renderer", "software");
+        let (got, warnings) = settings(&Base::load(&dirs), &options, None).unwrap();
+        assert_eq!(got.renderer, rust_dos::config::Renderer::Software);
+        let deprecated: Vec<_> = warnings.iter().filter(|w| w.contains("deprecated")).collect();
+        assert_eq!(deprecated.len(), 1, "{warnings:?}");
+        assert!(deprecated[0].ends_with("one line renderer=opengl"), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_overlay_warns_of_settings_together_as_they_are_over_rust_dos_conf() {
+        let dir = scratch("overlay_memsize");
+        let dirs = Dirs::new(dir.join("system"), dir.join("saves"));
+        fs::create_dir_all(&dirs.sys).unwrap();
+        // rust-dos.conf's Pentium II takes 256 MB, which the overlay's
+        // memsize alone, with the default processor, would warn of.
+        fs::write(dirs.sys.join("rust-dos.conf"), "[emulator]\ncpu=pentium_ii\n").unwrap();
+        let text = "[emulator]\nmemsize=256\n".to_string();
+        let overlay = Overlay { text, dir: dir.join("game") };
+        let alone = rust_dos::config::parse(&overlay.text, &overlay.dir, None);
+        assert!(alone.warnings.iter().any(|w| w.starts_with("memsize")), "{:?}", alone.warnings);
+        let (got, warnings) =
+            settings(&Base::load(&dirs), &Values::default(), Some(&overlay)).unwrap();
+        assert!(!warnings.iter().any(|w| w.contains("memsize")), "{warnings:?}");
+        assert_eq!(got.memsize, Some(256));
+        // Over a processor that doesn't take it, the warning is there.
+        fs::write(dirs.sys.join("rust-dos.conf"), "[emulator]\ncpu=486\n").unwrap();
+        let (_, warnings) =
+            settings(&Base::load(&dirs), &Values::default(), Some(&overlay)).unwrap();
+        assert!(warnings.iter().any(|w| w.contains("memsize 256 MB")), "{warnings:?}");
     }
 }

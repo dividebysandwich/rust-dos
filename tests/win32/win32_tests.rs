@@ -3123,6 +3123,78 @@ fn a_program_starts_another_and_waits_for_its_exit_code() {
     assert_eq!(code, 0x71);
 }
 
+/// A program that makes a critical section, enters it, leaves it and
+/// deletes it, and ends with 7. KERNEL32 has those functions as code
+/// (kernel32/sync.rs), each with a trap of the system in it, and not one
+/// in each stub's 8 bytes. It ends with 2 instead if
+/// InitializeCriticalSection's trap, which starts the function, doesn't
+/// start in a page's last 3 bytes, where its id ends on the next page.
+fn critical_section_program() -> Vec<u8> {
+    let names: &[&str] = &[
+        "InitializeCriticalSection",
+        "EnterCriticalSection",
+        "LeaveCriticalSection",
+        "DeleteCriticalSection",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    program(BASE, false, imports, &[0; 32], |a, l| {
+        let mut code = a.create_label();
+        let mut elsewhere = a.create_label();
+        // The function, or the code its stub jumps to.
+        a.mov(esi, l.import(0))?;
+        a.cmp(byte_ptr(esi), 0xE9)?;
+        a.jne(code)?;
+        a.add(esi, dword_ptr(esi + 1))?;
+        a.add(esi, 5)?;
+        a.set_label(&mut code)?;
+        let trap = u16::from_le_bytes([0xFE, rust_dos::win32::TRAP]);
+        a.cmp(word_ptr(esi), trap as i32)?;
+        a.jne(elsewhere)?;
+        a.mov(eax, esi)?;
+        a.and(eax, 0xFFF)?;
+        a.cmp(eax, 0xFFD)?;
+        a.jb(elsewhere)?;
+        for i in 0..4 {
+            a.push(l.at(0) as i32)?;
+            a.call(l.import(i))?;
+        }
+        a.push(7)?;
+        a.call(l.import(4))?;
+        a.set_label(&mut elsewhere)?;
+        a.push(2)?;
+        a.call(l.import(4))?;
+        a.int3()
+    })
+}
+
+#[test]
+fn a_trap_at_the_end_of_a_page_reads_on_from_the_next_page_it_maps() {
+    // A program starts another once it used and released 1 MB, as
+    // Encarta 97's setup does before its Run button starts Encarta
+    // (#1990). The pages the child gets come from the pool in the order
+    // the parent's went back, the last first, so no page of its images
+    // is followed in RAM by the page after it. A trap of a function
+    // KERNEL32 has as code can end on the next page: its id is read from
+    // there. InitializeCriticalSection's trap starts 3 bytes before a
+    // page's end, so its id's high byte is on the next page. Read from
+    // the RAM after its own page, which holds another page of the image,
+    // the id is another function's or none: Encarta ended on an unknown
+    // function, and this child, reading the id of a service that then
+    // faulted, ends with FFh there, so T.EXE ends with F1h. 71h: the
+    // child ran on and ended with 7.
+    let files = vec![("C.EXE", critical_section_program())];
+    let test = "trap_at_page_end";
+    let code = start_programs_using(test, "T.EXE", "C.EXE", None, 0x10_0000, files, &[]);
+    assert_ne!(
+        code, 0x21,
+        "KERNEL32's layout changed: InitializeCriticalSection no longer starts with a trap in a \
+         page's last 3 bytes, so this test covers nothing. Point it at a function whose trap \
+         does, or drop it (tests/cpu/pm_tests.rs covers the reading)"
+    );
+    assert_eq!(code, 0x71);
+}
+
 /// CreateProcessA of a Windows 3.1 program, which Windows 98 runs as a
 /// task of its 16-bit system: it succeeds, the process handle is
 /// signaled when the task ends, and GetExitCodeProcess gives the task's
@@ -3160,6 +3232,24 @@ fn a_program_starts_a_dos_program_and_waits_for_it() {
         0xB4, 0x4C, 0xCD, 0x21, // end: mov ah,4Ch; int 21h
     ];
     let code = start_program("child_dos", "C.COM an argument", "C.COM", child, &[]);
+    assert_eq!(code, 0x71);
+}
+
+/// SHARE's installation check (INT 2Fh AX=1000h) from a DOS program
+/// Windows started: installed, AL=FFh, as in a DOS box of Windows 98 SE,
+/// whose VSHARE keeps the locks. The child ends with 7 for FFh, else 9.
+#[test]
+fn a_dos_program_windows_started_finds_share() {
+    let child = vec![
+        0xB8, 0x00, 0x10, // mov ax,1000h
+        0xCD, 0x2F, // int 2Fh
+        0x3C, 0xFF, // cmp al,0FFh
+        0xB0, 0x07, // mov al,7
+        0x74, 0x02, // je end
+        0xB0, 0x09, // mov al,9
+        0xB4, 0x4C, 0xCD, 0x21, // end: mov ah,4Ch; int 21h
+    ];
+    let code = start_program("child_dos_share", "C.COM", "C.COM", child, &[]);
     assert_eq!(code, 0x71);
 }
 
@@ -3666,6 +3756,193 @@ fn a_programs_pages_read_back_after_a_dos_program_got_the_memory_under_them() {
     let (_, before) = xms_free_after("dos_xms_pages_kept_unused", 0);
     // The view, the block and a page table or two.
     assert!(total + 256 >= before, "{total} KB, {before} KB without");
+}
+
+/// A DPMI client (a 16-bit COM file) that asks the host for its free
+/// memory (INT 31h AX=0500h) and a block of `size` bytes (0501h), writes
+/// the block's offset XOR 5A5A5A5Ah into the first dword of each of its
+/// pages, reads them all back, and writes the 8 bytes at offset
+/// `size - 3000h` of the block to VM.BIN through DOS (INT 21h AH=40h,
+/// which the host translates). Exit code 5; 6 if it can't become a
+/// client, 7 if the largest free block is smaller than `size`, 8 if the
+/// block can't be had, 9 if a selector can't, 0Ah if a page reads back
+/// wrong, 0Bh if the file can't be written.
+fn dpmi_block_filler(size: u32) -> Vec<u8> {
+    const ENTRY: u32 = 0x1F00;
+    const INFO: u32 = 0x1F10;
+    const BLOCK: u32 = 0x1F40;
+    const NAME: u32 = 0x1F50;
+    const OFF: u32 = 0x3000;
+    let assemble = || -> Result<Vec<u8>, IcedError> {
+        let mut a = CodeAssembler::new(16)?;
+        let mut fails: Vec<CodeLabel> = (6..=0xB).map(|_| a.create_label()).collect();
+        a.push(cs)?;
+        a.pop(es)?;
+        a.mov(bx, 0x1000)?;
+        a.mov(ah, 0x4A)?;
+        a.int(0x21)?;
+        a.mov(ax, 0x1687)?;
+        a.int(0x2F)?;
+        a.test(ax, ax)?;
+        a.jnz(fails[0])?;
+        a.mov(word_ptr(ENTRY), di)?;
+        a.mov(word_ptr(ENTRY + 2), es)?;
+        a.mov(bx, si)?;
+        a.mov(ah, 0x48)?;
+        a.int(0x21)?;
+        a.jc(fails[0])?;
+        a.mov(es, ax)?;
+        a.xor(ax, ax)?;
+        // call far [ENTRY]: a 16-bit client.
+        a.db(&[0xFF, 0x1E])?;
+        a.dw(&[ENTRY as u16])?;
+        a.jc(fails[0])?;
+        // The free memory.
+        a.push(ds)?;
+        a.pop(es)?;
+        a.mov(di, INFO)?;
+        a.mov(ax, 0x0500)?;
+        a.int(0x31)?;
+        a.cmp(dword_ptr(INFO), size)?;
+        a.jb(fails[1])?;
+        // The block.
+        a.mov(bx, size >> 16)?;
+        a.mov(cx, size & 0xFFFF)?;
+        a.mov(ax, 0x0501)?;
+        a.int(0x31)?;
+        a.jc(fails[2])?;
+        a.mov(word_ptr(BLOCK), cx)?;
+        a.mov(word_ptr(BLOCK + 2), bx)?;
+        // A selector for all of it, in SI.
+        a.xor(ax, ax)?;
+        a.mov(cx, 1)?;
+        a.int(0x31)?;
+        a.jc(fails[3])?;
+        a.mov(si, ax)?;
+        a.mov(bx, si)?;
+        a.mov(cx, word_ptr(BLOCK + 2))?;
+        a.mov(dx, word_ptr(BLOCK))?;
+        a.mov(ax, 0x0007)?;
+        a.int(0x31)?;
+        a.jc(fails[3])?;
+        a.mov(bx, si)?;
+        a.mov(cx, 0xFFFF)?;
+        a.mov(dx, 0xFFFF)?;
+        a.mov(ax, 0x0008)?;
+        a.int(0x31)?;
+        a.jc(fails[3])?;
+        // Each page's first dword, then each read back.
+        a.push(ds)?;
+        a.mov(ds, si)?;
+        a.xor(edi, edi)?;
+        a.mov(ecx, size / 0x1000)?;
+        let mut fill = a.create_label();
+        a.set_label(&mut fill)?;
+        a.mov(eax, edi)?;
+        a.xor(eax, 0x5A5A_5A5A)?;
+        a.mov(dword_ptr(edi), eax)?;
+        a.add(edi, 0x1000)?;
+        a.dec(ecx)?;
+        a.jnz(fill)?;
+        a.xor(edi, edi)?;
+        a.mov(ecx, size / 0x1000)?;
+        let mut check = a.create_label();
+        let mut wrong = a.create_label();
+        a.set_label(&mut check)?;
+        a.mov(eax, edi)?;
+        a.xor(eax, 0x5A5A_5A5A)?;
+        a.cmp(dword_ptr(edi), eax)?;
+        a.jne(wrong)?;
+        a.add(edi, 0x1000)?;
+        a.dec(ecx)?;
+        a.jnz(check)?;
+        a.pop(ds)?;
+        // VM.BIN, its handle in BP.
+        a.mov(ah, 0x3C)?;
+        a.xor(cx, cx)?;
+        a.mov(dx, NAME)?;
+        a.int(0x21)?;
+        a.jc(fails[5])?;
+        a.mov(bp, ax)?;
+        // The selector's base at the bytes to write.
+        a.mov(eax, dword_ptr(BLOCK))?;
+        a.add(eax, size - OFF)?;
+        a.mov(dx, ax)?;
+        a.shr(eax, 16)?;
+        a.mov(cx, ax)?;
+        a.mov(bx, si)?;
+        a.mov(ax, 0x0007)?;
+        a.int(0x31)?;
+        a.push(ds)?;
+        a.mov(ds, si)?;
+        a.mov(bx, bp)?;
+        a.mov(cx, 8)?;
+        a.xor(dx, dx)?;
+        a.mov(ah, 0x40)?;
+        a.int(0x21)?;
+        a.pop(ds)?;
+        a.jc(fails[5])?;
+        a.mov(bx, bp)?;
+        a.mov(ah, 0x3E)?;
+        a.int(0x21)?;
+        a.mov(ax, 0x4C05)?;
+        a.int(0x21)?;
+        a.set_label(&mut wrong)?;
+        a.pop(ds)?;
+        a.mov(ax, 0x4C0A)?;
+        a.int(0x21)?;
+        for (code, label) in (6u32..=0xB).zip(fails.iter_mut()) {
+            a.set_label(label)?;
+            a.mov(ax, 0x4C00 | code)?;
+            a.int(0x21)?;
+        }
+        a.assemble(0x100)
+    };
+    let mut code = assemble().unwrap();
+    assert!(code.len() <= (ENTRY - 0x100) as usize);
+    code.resize((NAME - 0x100) as usize, 0);
+    code.extend_from_slice(b"VM.BIN\0");
+    code
+}
+
+/// Run `dpmi_block_filler` of `size` bytes from a PIF that gives its DOS
+/// machine `dpmi_kb` KB of DPMI memory (0 for Auto), started by a Windows
+/// program: T.EXE's exit code, and VM.BIN.
+fn run_dpmi_block_filler(test: &str, size: u32, dpmi_kb: u16) -> (u8, Option<Vec<u8>>) {
+    let mut pif = win16::pif("VM.COM", "C:\\GAME", "", "");
+    // The Windows 95 record's DPMI memory, at 1A8h in its data.
+    pif[0x21B + 0x1A8..0x21B + 0x1AA].copy_from_slice(&dpmi_kb.to_le_bytes());
+    let files = vec![("GAME\\VM.PIF", pif), ("GAME\\VM.COM", dpmi_block_filler(size))];
+    let code = start_programs(test, "T.EXE", "C:\\GAME\\VM.PIF", files, &[]);
+    let base = PathBuf::from("target/test_win32").join(test);
+    (code, fs::read(base.join("GAME/VM.BIN")).ok())
+}
+
+/// A DOS program started through a PIF that gives its DOS machine 32 MB
+/// of DPMI memory gets a 24 MB block on a 16 MB machine, as on Windows
+/// 98, whose VMM pages a DOS machine's DPMI memory to the swap file up
+/// to the PIF's limit: Redguard's launcher starts the game so, and the
+/// game asks for about 45 MB on a 32 MB machine. Every page holds what
+/// was written to it, though most went to the page file and came back,
+/// and DOS writes the bytes of a page near the end of the block.
+#[test]
+fn a_dos_program_gets_the_dpmi_memory_its_pif_allows_past_the_machines() {
+    const SIZE: u32 = 0x180_0000;
+    let (code, written) = run_dpmi_block_filler("dos_dpmi_virtual", SIZE, 0x8000);
+    // 5 from the program, WAIT_OBJECT_0 and TRUE.
+    assert_eq!(code, 0x51);
+    let mut expected = ((SIZE - 0x3000) ^ 0x5A5A_5A5A).to_le_bytes().to_vec();
+    expected.extend_from_slice(&[0; 4]);
+    assert_eq!(written.unwrap(), expected);
+}
+
+/// With its PIF's DPMI memory on Auto, a DOS program gets the memory
+/// that is free as it is: no 24 MB block on a 16 MB machine (7, the
+/// largest free block is smaller).
+#[test]
+fn a_dos_program_whose_pif_has_auto_dpmi_memory_gets_what_is_free() {
+    let (code, _) = run_dpmi_block_filler("dos_dpmi_auto", 0x180_0000, 0);
+    assert_eq!(code, 0x71);
 }
 
 #[test]
@@ -7186,6 +7463,226 @@ fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_disk_image() {
     check_long_name_and_alias_are_one_file("one_file_image", "D:", true);
 }
 
+/// MoveFileA renames a file to its own 8.3 alias, as on Windows 98 SE
+/// (checked in 86Box): "Third file.txt" becomes THIRDF~1.TXT, where the
+/// call had found the name taken by the file itself (183). The program
+/// also makes MADE~1.TXT and then MADE.TXT, and renames "Fourth file.txt"
+/// to FOURTH~1.TXT with msvcrt's rename, which calls MoveFileA on Windows
+/// 98. Each check sets a bit of the exit code. Returns the machine, for
+/// its drive's names.
+fn rename_to_own_alias(test: &str, drive: &str, image: bool) -> Box<Cpu> {
+    use Arg::{Esi, I};
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CloseHandle",
+        "MoveFileA",
+        "GetShortPathNameA",
+        "lstrcmpA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names), ("MSVCRT.DLL", &["rename"])];
+    let mut data = vec![0; 0x200];
+    for (at, name) in [
+        (0x00, "Third file.txt"),
+        (0x20, "THIRDF~1.TXT"),
+        (0x40, "MADE~1.TXT"),
+        (0x60, "MADE.TXT"),
+        (0x80, "Fourth file.txt"),
+        (0xA0, "FOURTH~1.TXT"),
+    ] {
+        put(&mut data, at, format!("{drive}\\{name}\0").as_bytes());
+    }
+    let buf = 0x100;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let make = |a: &mut CodeAssembler, name, bit| {
+            // GENERIC_WRITE, CREATE_NEW.
+            let args = [at(name), I(0x4000_0000), I(0), I(0), I(1), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &args)?;
+            a.mov(esi, eax)?;
+            a.cmp(eax, -1)?;
+            check(a, true, bit)?;
+            call_with(a, f("CloseHandle"), &[Esi])
+        };
+        a.xor(ebx, ebx)?;
+        make(a, 0x00, 0)?;
+        call_with(a, f("MoveFileA"), &[at(0x00), at(0x20)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        call_with(a, f("GetShortPathNameA"), &[at(0x20), at(buf), I(0x100)])?;
+        call_with(a, f("lstrcmpA"), &[at(0x20), at(buf)])?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        make(a, 0x40, 3)?;
+        make(a, 0x60, 4)?;
+        make(a, 0x80, 5)?;
+        // rename(old, new) is cdecl, and returns 0 when it renames.
+        call_with(a, l.import(names.len()), &[at(0x80), at(0xA0)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 6)?;
+        a.mov(eax, ebx)?;
+        a.or(eax, 0x80)?;
+        a.ret()
+    });
+    let mut cpu = machine(test, exe);
+    if image {
+        let image_dir = PathBuf::from("target/test_win32").join(format!("{test}_d"));
+        let _ = fs::remove_dir_all(&image_dir);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image = image_dir.join("d.img");
+        rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.disk.mount(3, &image, options, true).unwrap();
+    }
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+    cpu
+}
+
+/// On a FAT image the renamed file keeps the DOS name THIRDF~1.TXT and
+/// gets long name entries holding it, as Windows 98 SE writes them for
+/// an 8.3 name beside a numeric tail made from its start: its own old
+/// alias. So does MADE.TXT, made beside MADE~1.TXT, which has none.
+#[test]
+fn move_file_renames_a_file_to_its_own_alias_on_a_disk_image() {
+    let cpu = rename_to_own_alias("own_alias_image", "D:", true);
+    let volume = cpu.bus.disk.fat_volume(3).unwrap();
+    let mut listed: Vec<(String, Option<String>)> = volume
+        .list(&[])
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.name, e.long_name))
+        .collect();
+    listed.sort();
+    let named = |name: &str, long: Option<&str>| (name.to_string(), long.map(str::to_string));
+    assert_eq!(
+        listed,
+        [
+            named("FOURTH~1.TXT", Some("FOURTH~1.TXT")),
+            named("MADE.TXT", Some("MADE.TXT")),
+            named("MADE~1.TXT", None),
+            named("THIRDF~1.TXT", Some("THIRDF~1.TXT")),
+        ]
+    );
+}
+
+/// On a host folder the files are named THIRDF~1.TXT and FOURTH~1.TXT on
+/// the host.
+#[test]
+fn move_file_renames_a_file_to_its_own_alias_on_a_host_drive() {
+    rename_to_own_alias("own_alias_host", "C:", false);
+    let dir = PathBuf::from("target/test_win32/own_alias_host");
+    let mut names: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".TXT") || n.ends_with(".txt"))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["FOURTH~1.TXT", "MADE.TXT", "MADE~1.TXT", "THIRDF~1.TXT"]
+    );
+}
+
+/// Folders keep their 8.3 aliases as on Windows 98 SE (checked in 86Box):
+/// on drive `drive` the program makes "Parent zeta" (PARENT~1) and
+/// "Parent alpha" (PARENT~2), renames "Parent zeta" to "Parent moved",
+/// which gets PARENT~3 (its own alias is held during the rename), and
+/// makes "Parent again", which takes the freed PARENT~1, while "Parent
+/// alpha" keeps PARENT~2. GetShortPathNameA gives the aliases. Each check
+/// sets a bit of the exit code.
+fn check_folders_keep_their_aliases(test: &str, drive: &str, image: bool) {
+    use Arg::I;
+    let names: &[&str] = &["CreateDirectoryA", "MoveFileA", "GetShortPathNameA", "lstrcmpA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x200];
+    for (at, name) in [
+        (0x00, "Parent zeta"),
+        (0x20, "Parent alpha"),
+        (0x40, "Parent moved"),
+        (0x60, "Parent again"),
+        (0x80, "PARENT~3"),
+        (0x90, "PARENT~2"),
+        (0xA0, "PARENT~1"),
+    ] {
+        put(&mut data, at, format!("{drive}\\{name}\0").as_bytes());
+    }
+    // GetShortPathNameA's answer.
+    let buf = 0x100;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let alias_is = |a: &mut CodeAssembler, long, short, bit| {
+            call_with(a, f("GetShortPathNameA"), &[at(long), at(buf), I(0x100)])?;
+            call_with(a, f("lstrcmpA"), &[at(short), at(buf)])?;
+            a.test(eax, eax)?;
+            check(a, false, bit)
+        };
+        a.xor(ebx, ebx)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0x00), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0x20), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        call_with(a, f("MoveFileA"), &[at(0x00), at(0x40)])?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
+        alias_is(a, 0x40, 0x80, 3)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0x60), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 4)?;
+        alias_is(a, 0x60, 0xA0, 5)?;
+        alias_is(a, 0x20, 0x90, 6)?;
+        a.mov(eax, ebx)?;
+        a.or(eax, 0x80)?;
+        a.ret()
+    });
+    let mut cpu = machine(test, exe);
+    if image {
+        let image_dir = PathBuf::from("target/test_win32").join(format!("{test}_d"));
+        let _ = fs::remove_dir_all(&image_dir);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image = image_dir.join("d.img");
+        rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.disk.mount(3, &image, options, true).unwrap();
+    }
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+}
+
+#[test]
+fn folders_keep_their_aliases_on_a_host_drive() {
+    check_folders_keep_their_aliases("aliases_host", "C:", false);
+}
+
+#[test]
+fn folders_keep_their_aliases_on_a_disk_image() {
+    check_folders_keep_their_aliases("aliases_image", "D:", true);
+}
+
 /// SetFileTime on a file in a host folder, as Windows 98 SE does it on
 /// FAT: the time of the last write is rounded up to an even second
 /// (2001-10-08 19:20:01.5 is kept as 19:20:02), a time before 1980 fails
@@ -10097,6 +10594,453 @@ fn a_dll_freeing_a_dll_as_the_process_ends_stays_mapped() {
     assert_eq!(text.matches("E detached\r\n").count(), 1, "{text}");
     assert_eq!(text.matches("D freed E\r\n").count(), 1, "{text}");
     assert_eq!(text.matches("D null\r\n").count(), 1, "{text}");
+}
+
+/// Write the `len` bytes at `at` in a test module's data to standard
+/// output, with GetStdHandle and WriteFile at its import slots `get` and
+/// `write`, the count going to `written` in its data.
+fn say_from(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    (get, write): (usize, usize),
+    at: u32,
+    len: i32,
+    written: u32,
+) -> Result<(), IcedError> {
+    a.push(STD_OUTPUT_HANDLE)?;
+    a.call(l.import(get))?;
+    a.push(0)?;
+    a.push(l.at(written) as i32)?;
+    a.push(len)?;
+    a.push(l.at(at) as i32)?;
+    a.push(eax)?;
+    a.call(l.import(write))
+}
+
+/// D.DLL for the nested FreeLibrary tests: an entry point that does
+/// nothing, and Seven, which X.DLL imports.
+fn seven_dll() -> Vec<u8> {
+    let entry = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let seven = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 7)?;
+        a.ret()
+    };
+    let data = [0u8; 0x10];
+    module_image(
+        DLL_BASE,
+        Some("D.DLL"),
+        &[],
+        &data,
+        &[("", &entry), ("Seven", &seven)],
+        &[],
+    )
+}
+
+/// The program of the nested FreeLibrary tests: it loads D.DLL, then
+/// `first`, and frees `first`. Then `first` and `gone` are gone, and
+/// D.DLL is there with its export, under the handle the load gave.
+fn nested_free_program(first: &str, gone: &str) -> Vec<u8> {
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "FreeLibrary",
+        "GetModuleHandleA",
+        "GetProcAddress",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"D.DLL\0Seven\0".to_vec();
+    data.resize(0x10, 0);
+    data.extend_from_slice(first.as_bytes());
+    data.resize(0x20, 0);
+    data.extend_from_slice(gone.as_bytes());
+    data.resize(0x40, 0);
+    const D: u32 = 0;
+    const SEVEN: u32 = 6;
+    const FIRST: u32 = 0x10;
+    const GONE: u32 = 0x20;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.push(l.at(D) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.push(l.at(FIRST) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(edi, eax)?;
+        a.test(edi, edi)?;
+        check(a, true, 0)?;
+        a.push(edi)?;
+        a.call(f("FreeLibrary"))?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        a.push(l.at(FIRST) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.push(l.at(GONE) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 3)?;
+        a.push(l.at(D) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 4)?;
+        a.push(l.at(SEVEN) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.test(eax, eax)?;
+        check(a, true, 5)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    module_image(BASE, None, imports, &data, &[("", &main)], &[])
+}
+
+/// X.DLL's DLL_PROCESS_DETACH loads X.DLL and frees it again (#1893).
+/// The load finds it still there and the FreeLibrary inside DllMain only
+/// takes that reference away, as Wine's LdrUnloadDll does: X.DLL's code
+/// is there when it returns, and it goes when the program's FreeLibrary
+/// does. D.DLL, which X.DLL imports from and the program loaded as well,
+/// loses X.DLL's reference once and stays. X.DLL learns once that it is
+/// detached because the load doesn't attach it again; Wine's LdrLoadDll
+/// would, and what Windows 9x does is open in #2014.
+#[test]
+fn a_dll_freeing_itself_as_it_detaches_goes_after_the_outer_free() {
+    let x_imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+        ),
+        ("D.DLL", &["Seven"]),
+    ];
+    let mut x_data = b"X.DLL\0\0\0X detached\r\nX back\r\n".to_vec();
+    x_data.resize(0x40, 0);
+    const NAME: u32 = 0;
+    const DETACHED: u32 = 8;
+    const BACK: u32 = 20;
+    const WRITTEN: u32 = 0x30;
+    let x_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        say_from(a, l, (2, 3), DETACHED, 12, WRITTEN)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(l.import(0))?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        // Back in X.DLL's code, which is still there.
+        say_from(a, l, (2, 3), BACK, 8, WRITTEN)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let x = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        x_imports,
+        &x_data,
+        &[("", &x_main)],
+        &[],
+    );
+    let exe = nested_free_program("X.DLL", "X.DLL");
+    let (code, text) = run_files(
+        "nested_free_self",
+        &[("T.EXE", exe), ("X.DLL", x), ("D.DLL", seven_dll())],
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text.matches("X detached\r\n").count(), 1, "{text}");
+    assert_eq!(text.matches("X back\r\n").count(), 1, "{text}");
+}
+
+/// Y.DLL imports from X.DLL, which imports from D.DLL. The program frees
+/// Y.DLL, the last reference to both, and Y.DLL's DLL_PROCESS_DETACH
+/// loads X.DLL and frees it again (#1893). That inner FreeLibrary only
+/// lowers X.DLL's count: X.DLL learns that it is detached after Y.DLL's
+/// DllMain has returned, as Wine's process_detach tells it when the
+/// outermost FreeLibrary ends, and D.DLL, which the program loaded as
+/// well, loses X.DLL's reference once and stays.
+#[test]
+fn a_free_inside_a_dllmain_leaves_the_detach_to_the_outer_free() {
+    let x_imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetStdHandle", "WriteFile"]),
+        ("D.DLL", &["Seven"]),
+    ];
+    let mut x_data = b"X detached\r\n".to_vec();
+    x_data.resize(0x40, 0);
+    let x_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        say_from(a, l, (0, 1), 0, 12, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let six = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 6)?;
+        a.ret()
+    };
+    let x = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        x_imports,
+        &x_data,
+        &[("", &x_main), ("Six", &six)],
+        &[],
+    );
+
+    let y_imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+        ),
+        ("X.DLL", &["Six"]),
+    ];
+    let mut y_data = b"X.DLL\0\0\0Y freed X\r\n".to_vec();
+    y_data.resize(0x40, 0);
+    let y_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        say_from(a, l, (2, 3), 8, 11, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let y = module_image(
+        DLL_BASE,
+        Some("Y.DLL"),
+        y_imports,
+        &y_data,
+        &[("", &y_main)],
+        &[],
+    );
+
+    let exe = nested_free_program("Y.DLL", "X.DLL");
+    let (code, text) = run_files(
+        "nested_free_other",
+        &[
+            ("T.EXE", exe),
+            ("Y.DLL", y),
+            ("X.DLL", x),
+            ("D.DLL", seven_dll()),
+        ],
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text.matches("X detached\r\n").count(), 1, "{text}");
+    let freed = text.find("Y freed X\r\n");
+    let detached = text.find("X detached\r\n");
+    assert!(
+        freed.is_some() && freed < detached,
+        "X.DLL learned that it is detached before Y.DLL's FreeLibrary returned: {text}"
+    );
+}
+
+/// A DLL named `name` whose DLL_PROCESS_DETACH writes `says` (shorter
+/// than 30h bytes) to standard output.
+fn telling_dll(name: &str, says: &'static [u8]) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetStdHandle", "WriteFile"])];
+    let mut data = says.to_vec();
+    data.resize(0x40, 0);
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        say_from(a, l, (0, 1), 0, says.len() as i32, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    module_image(DLL_BASE, Some(name), imports, &data, &[("", &main)], &[])
+}
+
+/// Y.DLL loads Z.DLL as it attaches and frees it as it detaches, which
+/// lets go of Z.DLL's last reference while the program's FreeLibrary of
+/// Y.DLL runs (#1893). Z.DLL isn't among the modules that FreeLibrary
+/// let go of, and the inner FreeLibrary only lowers its count: Z.DLL
+/// learns that it is detached once Y.DLL's DllMain has returned, and
+/// goes with Y.DLL.
+#[test]
+fn a_dll_a_dllmain_frees_is_detached_after_the_dllmain_returns() {
+    let y_imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+    )];
+    let mut y_data = b"Z.DLL\0\0\0Y freed Z\r\n".to_vec();
+    y_data.resize(0x40, 0);
+    const HANDLE: u32 = 0x20;
+    let y_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut detach = a.create_label();
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 1)?;
+        a.jne(detach)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(dword_ptr(l.at(HANDLE)), eax)?;
+        a.jmp(done)?;
+        a.set_label(&mut detach)?;
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(dword_ptr(l.at(HANDLE)))?;
+        a.call(l.import(1))?;
+        say_from(a, l, (2, 3), 8, 11, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let y = module_image(
+        DLL_BASE,
+        Some("Y.DLL"),
+        y_imports,
+        &y_data,
+        &[("", &y_main)],
+        &[],
+    );
+    let exe = nested_free_program("Y.DLL", "Z.DLL");
+    let (code, text) = run_files(
+        "nested_free_loaded",
+        &[
+            ("T.EXE", exe),
+            ("Y.DLL", y),
+            ("Z.DLL", telling_dll("Z.DLL", b"Z detached\r\n")),
+            ("D.DLL", seven_dll()),
+        ],
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text.matches("Z detached\r\n").count(), 1, "{text}");
+    let freed = text.find("Y freed Z\r\n");
+    let detached = text.find("Z detached\r\n");
+    assert!(
+        freed.is_some() && freed < detached,
+        "Z.DLL learned that it is detached before Y.DLL's FreeLibrary returned: {text}"
+    );
+}
+
+/// A second thread frees X.DLL, whose DLL_PROCESS_DETACH calls
+/// ExitThread, so that FreeLibrary's chain of DllMain calls ends with
+/// the thread and never finishes. The main thread's FreeLibrary of
+/// W.DLL after it is the outermost one, not one nested in a chain that
+/// is gone: W.DLL learns that it is detached and goes, and X.DLL, which
+/// the ended chain let go of, goes with it.
+#[test]
+fn a_free_after_a_chain_ended_with_its_thread_detaches_and_unmaps() {
+    let names: &[&str] = &[
+        "CreateThread",
+        "WaitForSingleObject",
+        "LoadLibraryA",
+        "FreeLibrary",
+        "GetModuleHandleA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"X.DLL\0\0\0W.DLL\0".to_vec();
+    data.resize(0x10, 0);
+    const X: u32 = 0;
+    const W: u32 = 8;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        a.xor(ebx, ebx)?;
+        // CreateThread's flags, parameter and thread ID, then the
+        // thread's address as the call's return address.
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: load X.DLL and free it.
+        a.push(l.at(X) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(eax)?;
+        a.call(f("FreeLibrary"))?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.push(-1)?;
+        a.push(eax)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.push(l.at(W) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        check(a, true, 0)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        a.push(l.at(W) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.push(l.at(X) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 3)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+
+    let x_imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitThread"])];
+    let x_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let x = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        x_imports,
+        &[0; 0x10],
+        &[("", &x_main)],
+        &[],
+    );
+    let (code, text) = run_files(
+        "nested_free_ended",
+        &[
+            ("T.EXE", exe),
+            ("X.DLL", x),
+            ("W.DLL", telling_dll("W.DLL", b"W detached\r\n")),
+        ],
+    );
+    assert_eq!(
+        code,
+        0xF,
+        "the checks that failed: {:04b}, {}",
+        !code & 0xF,
+        text
+    );
+    assert_eq!(text.matches("W detached\r\n").count(), 1, "{text}");
 }
 
 /// A state saved after the last free of a built-in DLL has its mapping and
@@ -14954,6 +15898,134 @@ fn a_keyboard_hook_that_peeks_with_the_programs_msg_doesnt_change_its_key() {
 }
 
 #[test]
+fn a_window_has_no_size_while_the_cbt_hook_sees_it_made() {
+    // T.EXE's CBT hook changes the frame of a captioned popup at
+    // HCBT_CREATEWND, as MFC's hook in Encarta 97 does, and then reads its
+    // rectangles: both are empty, as Wine's NtUserCreateWindowEx leaves
+    // them until after the hook, since the hook may still change the
+    // CREATESTRUCT's place and size. A frame change of a 0 by 0 window
+    // keeps its client area at 0 by 0, so the window's procedure gets its
+    // first WM_SIZE after WM_CREATE. The window has its 200 by 100 at
+    // (10, 20) once CreateWindowExA returns (#2006).
+    const WH_CBT: i32 = 5;
+    const HCBT_CREATEWND: i32 = 3;
+    const WM_CREATE: i32 = 0x0001;
+    const WM_SIZE: i32 = 0x0005;
+    const WS_CAPTION: i32 = 0x00C0_0000;
+    // SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+    // SWP_FRAMECHANGED.
+    const FRAME_CHANGED: i32 = 0x37;
+    let kernel32 = ["GetCurrentThreadId", "ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "RegisterClassA",
+        "SetWindowsHookExA",
+        "SetWindowPos",
+        "GetWindowRect",
+        "GetClientRect",
+    ];
+    // The hook's window RECT at 0xA0 and client RECT at 0xB0, the hook's
+    // calls at 0x9C; the window's RECT after it is made at 0xC0. The
+    // procedure counts WM_CREATE and the first WM_SIZE at 0x110 and keeps
+    // the count of each at 0x114 and 0x118.
+    let mut data = session_data(&[(0x10, "CbtRect")]);
+    data.resize(0x120, 0);
+    let exe = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        let mut cbt = a.create_label();
+        let mut pass = a.create_label();
+        a.jmp(start)?;
+
+        a.set_label(&mut cbt)?;
+        a.cmp(dword_ptr(esp + 4), HCBT_CREATEWND)?;
+        a.jne(pass)?;
+        a.inc(dword_ptr(l.at(0x9C)))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, 0, 0, 0, 0, 0, FRAME_CHANGED])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("SetWindowPos"))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, l.at(0xA0) as i32])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("GetWindowRect"))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, l.at(0xB0) as i32])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("GetClientRect"))?;
+        a.set_label(&mut pass)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+
+        a.set_label(&mut start)?;
+        a.xor(ebx, ebx)?;
+        // Rectangles the hook must overwrite.
+        for at in (0xA0..0xC0).step_by(4) {
+            a.mov(dword_ptr(l.at(at)), 7)?;
+        }
+        a.call(f("GetCurrentThreadId"))?;
+        a.push(eax)?;
+        a.push(0)?;
+        push_label(a, cbt)?;
+        a.push(WH_CBT)?;
+        a.call(f("SetWindowsHookExA"))?;
+        session_class(a, l, f, |a| {
+            let mut not_create = a.create_label();
+            let mut done = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_CREATE)?;
+            a.jne(not_create)?;
+            a.inc(dword_ptr(l.at(0x110)))?;
+            a.mov(eax, dword_ptr(l.at(0x110)))?;
+            a.mov(dword_ptr(l.at(0x114)), eax)?;
+            a.jmp(done)?;
+            a.set_label(&mut not_create)?;
+            a.cmp(dword_ptr(esp + 8), WM_SIZE)?;
+            a.jne(done)?;
+            a.cmp(dword_ptr(l.at(0x118)), 0)?;
+            a.jne(done)?;
+            a.inc(dword_ptr(l.at(0x110)))?;
+            a.mov(eax, dword_ptr(l.at(0x110)))?;
+            a.mov(dword_ptr(l.at(0x118)), eax)?;
+            a.set_label(&mut done)
+        })?;
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_CAPTION;
+        push_args(a, &[0, class, class, style, 10, 20, 200, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        push_args(a, &[0, l.at(0xC0) as i32])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("GetWindowRect"))?;
+        a.cmp(dword_ptr(l.at(0x9C)), 1)?;
+        bit_if(a, eq, 0)?;
+        // Both rectangles all zeros.
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        for at in (0xA4..0xC0).step_by(4) {
+            a.or(eax, dword_ptr(l.at(at)))?;
+        }
+        a.test(eax, eax)?;
+        bit_if(a, eq, 1)?;
+        a.cmp(dword_ptr(l.at(0xC8)), 210)?;
+        bit_if(a, eq, 2)?;
+        a.cmp(dword_ptr(l.at(0xCC)), 120)?;
+        bit_if(a, eq, 3)?;
+        a.cmp(dword_ptr(l.at(0xC0)), 10)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xC4)), 20)?;
+        bit_if(a, eq, 5)?;
+        // WM_CREATE came first, WM_SIZE second.
+        a.cmp(dword_ptr(l.at(0x114)), 1)?;
+        bit_if(a, eq, 6)?;
+        a.cmp(dword_ptr(l.at(0x118)), 2)?;
+        bit_if(a, eq, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("cbt_create_rect", &[("T.EXE", exe)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
 fn a_click_on_a_window_behind_activates_it_and_is_delivered() {
     // T.EXE's window, with a button, is behind C.EXE's, which it started.
     // A click on the button asks the window with WM_MOUSEACTIVATE, whose
@@ -19245,6 +20317,192 @@ fn a_font_file_a_program_adds_is_listed_and_drawn() {
     assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
     // Two fonts added, both sizes listed, and "!\"" 2 + 9 pixels wide.
     assert_eq!(cpu.errorlevel, 2 << 6 | 2 << 4 | 11);
+}
+
+/// Windows 95 and 98 load the installed fonts as they start: the files
+/// the registry's `CurrentVersion\Fonts` key lists and those of WIN.INI's
+/// `[Fonts]`. A setup that installed one added it with AddFontResourceA,
+/// which lasts until Windows ends, so a later start finds the font only
+/// this way (Encarta 97's "MS Reference 1", issue #1989). The registry
+/// names a TrueType file in the system folder by its full path, as
+/// Encarta's setup does, and WIN.INI a raster font by a bare name, which
+/// is looked for in the fonts, Windows and system folders, and the
+/// TrueType file again by a bare name. A file that isn't there is left
+/// out. A program that never added a font then gets the faces it asks
+/// for. It then adds the TrueType file itself by a name relative to its
+/// folder, which is the same file, and EnumFontFamiliesA lists the
+/// TrueType face once. Its exit code: the TrueType face matched in bit
+/// 0, the raster face in bit 1, AddFontResourceA's success in bit 2, and
+/// the count of fonts listed of the TrueType face above them.
+#[test]
+fn installed_fonts_are_loaded_as_windows_starts() {
+    let names: &[&str] = &[
+        "AddFontResourceA",
+        "CreateCompatibleDC",
+        "CreateFontIndirectA",
+        "SelectObject",
+        "GetTextFaceA",
+        "EnumFontFamiliesA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names), ("KERNEL32.DLL", &["lstrcmpA"])];
+    // LOGFONTAs at 0 and 0x40, GetTextFaceA's buffer at 0x80, the faces
+    // asked for at 0xA0 and 0xB0, the count of fonts listed at 0xC0 and
+    // the TrueType file's name relative to the program's folder at 0xD0.
+    let mut data = vec![0u8; 0xF0];
+    data[0..4].copy_from_slice(&(-16i32).to_le_bytes());
+    data[28..36].copy_from_slice(b"Reg Face");
+    data[0x40..0x44].copy_from_slice(&12i32.to_le_bytes());
+    data[0x40 + 28..0x40 + 36].copy_from_slice(b"Ini Face");
+    data[0xA0..0xA8].copy_from_slice(b"Reg Face");
+    data[0xB0..0xB8].copy_from_slice(b"Ini Face");
+    data[0xD0..0xEA].copy_from_slice(b"WINDOWS\\SYSTEM\\REGFACE.TTF");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut proc = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(esi, eax)?;
+        for (bit, log, face) in [(0, 0, 0xA0), (1, 0x40, 0xB0)] {
+            a.push(l.at(log) as i32)?;
+            a.call(f("CreateFontIndirectA"))?;
+            a.push(eax)?;
+            a.push(esi)?;
+            a.call(f("SelectObject"))?;
+            a.push(l.at(0x80) as i32)?;
+            a.push(32)?;
+            a.push(esi)?;
+            a.call(f("GetTextFaceA"))?;
+            a.push(l.at(face) as i32)?;
+            a.push(l.at(0x80) as i32)?;
+            a.call(l.import(names.len()))?;
+            a.test(eax, eax)?;
+            check(a, false, bit)?;
+        }
+        a.push(l.at(0xD0) as i32)?;
+        a.call(f("AddFontResourceA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
+        a.push(0)?;
+        push_label(a, proc)?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(esi)?;
+        a.call(f("EnumFontFamiliesA"))?;
+        a.mov(eax, dword_ptr(l.at(0xC0)))?;
+        a.shl(eax, 3)?;
+        a.or(eax, ebx)?;
+        a.ret()?;
+        // The callback: count the font, go on.
+        a.set_label(&mut proc)?;
+        a.inc(dword_ptr(l.at(0xC0)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)
+    });
+    let test = "installed_fonts";
+    let mut cpu = machine_with(test, &[("T.EXE", exe)]);
+    let base = PathBuf::from("target/test_win32").join(test);
+    let system = base.join("WINDOWS").join("SYSTEM");
+    fs::create_dir_all(&system).unwrap();
+    let ttf = rust_dos::win32::gdi32::sample_truetype("Reg Face");
+    fs::write(system.join("REGFACE.TTF"), ttf).unwrap();
+    fs::write(system.join("INIFACE.FON"), fon(&[fnt("Ini Face", 12)])).unwrap();
+    let registry = "REGEDIT4\r\n\r\n\
+        [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Fonts]\r\n\
+        \"Reg Face (TrueType)\"=\"C:\\\\WINDOWS\\\\SYSTEM\\\\REGFACE.TTF\"\r\n\
+        \"Gone (TrueType)\"=\"GONE.TTF\"\r\n";
+    fs::write(base.join("REGISTRY.REG"), registry).unwrap();
+    let win_ini = "[Fonts]\r\nIni Face 12=INIFACE.FON\r\n\
+                   Reg Face (TrueType)=REGFACE.TTF\r\nGone=GONE.FON\r\n";
+    fs::write(base.join("WINDOWS").join("WIN.INI"), win_ini).unwrap();
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 1 << 3 | 0b111);
+}
+
+/// A Windows 3.1 WIN.INI lists in `[Fonts]` files of faces GDI has
+/// built in: `SSERIFE.FON` for MS Sans Serif, and Arial's TrueType file
+/// through its `ARIAL.FOT`, which the registry lists again as
+/// `ARIAL.TTF`, as a setup such as Encarta 97's writes it. Windows has
+/// each face once, from the file, so EnumFontFamiliesA lists MS Sans
+/// Serif's one size once and Arial once: the built-in face is left out
+/// where a file has it, and the .FOT and the TrueType file it names are
+/// one font. A line that starts with ';' is a comment, whose file isn't
+/// loaded. EnumFontFamiliesExA lists Arial in the one character set the
+/// file has, Latin 1, and not the built-in face in the others, as a font
+/// asking for Arial in any of them is realized from the file. The exit
+/// code is the count of fonts listed for each face, two bits each: MS
+/// Sans Serif's, Arial's above, the comment's face's above, and
+/// EnumFontFamiliesExA's of Arial at the top.
+#[test]
+fn installed_fonts_list_each_face_once() {
+    let names: &[&str] = &[
+        "CreateCompatibleDC",
+        "EnumFontFamiliesA",
+        "EnumFontFamiliesExA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names)];
+    // The faces at 0, 0x20 and 0x40, their counts at 0x60, 0x64, 0x68,
+    // EnumFontFamiliesExA's LOGFONTA (Arial, DEFAULT_CHARSET) at 0x70
+    // and its count at 0xAC.
+    let mut data = vec![0u8; 0xB0];
+    data[0..13].copy_from_slice(b"MS Sans Serif");
+    data[0x20..0x25].copy_from_slice(b"Arial");
+    data[0x40..0x4C].copy_from_slice(b"Comment Face");
+    data[0x70 + 23] = 1;
+    data[0x70 + 28..0x70 + 33].copy_from_slice(b"Arial");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut proc = a.create_label();
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.mov(esi, eax)?;
+        for (face, count) in [(0, 0x60), (0x20, 0x64), (0x40, 0x68)] {
+            a.push(l.at(count) as i32)?;
+            push_label(a, proc)?;
+            a.push(l.at(face) as i32)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+        }
+        a.push(0)?;
+        a.push(l.at(0xAC) as i32)?;
+        push_label(a, proc)?;
+        a.push(l.at(0x70) as i32)?;
+        a.push(esi)?;
+        a.call(l.import(2))?;
+        a.mov(eax, dword_ptr(l.at(0xAC)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x68)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x64)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x60)))?;
+        a.ret()?;
+        // The callback: count the font in the dword its lParam points
+        // at, go on.
+        a.set_label(&mut proc)?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        a.inc(dword_ptr(eax))?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)
+    });
+    let test = "installed_fonts_once";
+    let mut cpu = machine_with(test, &[("T.EXE", exe)]);
+    let base = PathBuf::from("target/test_win32").join(test);
+    let system = base.join("WINDOWS").join("SYSTEM");
+    fs::create_dir_all(&system).unwrap();
+    let ttf = rust_dos::win32::gdi32::sample_truetype("Arial");
+    let fot = rust_dos::win32::gdi32::sample_fot("ARIAL.TTF", &ttf);
+    fs::write(system.join("ARIAL.TTF"), ttf).unwrap();
+    fs::write(system.join("ARIAL.FOT"), fot).unwrap();
+    fs::write(system.join("SSERIFE.FON"), fon(&[fnt("MS Sans Serif", 13)])).unwrap();
+    fs::write(system.join("COMMENT.FON"), fon(&[fnt("Comment Face", 12)])).unwrap();
+    let registry = "REGEDIT4\r\n\r\n\
+        [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Fonts]\r\n\
+        \"Arial (TrueType)\"=\"ARIAL.TTF\"\r\n";
+    fs::write(base.join("REGISTRY.REG"), registry).unwrap();
+    let win_ini = "[Fonts]\r\nMS Sans Serif 8,10,12,14,18,24 (VGA res)=SSERIFE.FON\r\n\
+                   Arial (TrueType)=ARIAL.FOT\r\n;Comment Face=COMMENT.FON\r\n";
+    fs::write(base.join("WINDOWS").join("WIN.INI"), win_ini).unwrap();
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 1 << 6 | 1 << 2 | 1);
 }
 
 /// A program asks CreateScalableFontResourceA for a .FOT of `ttf`, with

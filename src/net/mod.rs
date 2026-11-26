@@ -842,9 +842,12 @@ mod tests {
     fn lists_the_rooms_of_a_relay_and_the_one_joined() {
         use tunnel::relay::{RelayConfig, RelayServer};
         use tunnel::wire::RoomInfo;
-        let wait = |f: &mut dyn FnMut() -> bool| {
+        // Fail here when the wait runs out, rather than at a later assert
+        // that would then read a stale listing or an empty one.
+        let wait = |what: &str, f: &mut dyn FnMut() -> bool| {
             let deadline = web_time::Instant::now() + std::time::Duration::from_secs(5);
-            while !f() && web_time::Instant::now() < deadline {
+            while !f() {
+                assert!(web_time::Instant::now() < deadline, "timed out waiting for {}", what);
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         };
@@ -855,14 +858,13 @@ mod tests {
         net.settings.player = "Toumal".into();
         assert_eq!(net.view().state, "not joined");
         net.join(Some(&relay.to_string()), "doom", "pw").unwrap();
-        wait(&mut || net.view().roster.is_some());
+        wait("the roster", &mut || net.view().roster.is_some());
         // Who made the room hosts it.
         let view = net.view();
         assert!(view.hosting(), "{:?}", view);
         assert_eq!(view.roster.unwrap().members, [tunnel::wire::Member { index: 1, name: "Toumal".into() }]);
         net.browse(Some(&relay.to_string()), "").unwrap();
-        assert!(net.listing().asking);
-        wait(&mut || !net.listing().asking);
+        wait("the listing", &mut || !net.listing().asking);
         let view = net.view();
         assert_eq!(view.joined, Some((relay, "doom".to_string())));
         assert!(view.state.contains("member 1 of 1"), "{}", view.state);
@@ -872,7 +874,7 @@ mod tests {
         // A relay that doesn't answer.
         drop(server);
         net.browse(Some(&relay.to_string()), "").unwrap();
-        wait(&mut || !net.listing().asking);
+        wait("the listing", &mut || !net.listing().asking);
         assert!(net.listing().result.unwrap().is_err());
     }
 }

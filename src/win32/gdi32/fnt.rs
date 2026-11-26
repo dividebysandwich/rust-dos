@@ -175,8 +175,8 @@ pub const FONTS_SAVED: u16 = 72;
 /// saved.
 pub const TRUETYPE_SAVED: u16 = 81;
 
-/// A file AddFontResourceA added: its name as the program gave it, and
-/// its raster fonts or its TrueType fonts.
+/// A file AddFontResourceA added or GDI loaded as installed: its full
+/// path, and its raster fonts or its TrueType fonts.
 #[derive(Debug, Default)]
 pub struct AddedFile {
     pub name: String,

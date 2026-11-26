@@ -26,8 +26,9 @@ settings of a game only when the checksums match, and asks only for programs
 started at the prompt. The almanac carries the machine's settings only: the
 graphics card, processor, speed, memory, DPMI, the DOS and Windows versions,
 the Windows desktop's colour depth (`win32_depth`), size (`win32_desktop`)
-and system locale (`win32_locale`), the 3D cards, the sound cards, the
-joystick and the disks' speeds.
+and system locale (`win32_locale`), the 3D cards and what draws them
+(OpenGL or software), the sound cards, the joystick and the disks'
+speeds.
 
 A version a report adds is filed under its program's platform: DOS, Windows
 3.1 (an NE file) or Windows 95/98 (a PE file). An installer (`SETUP.EXE`,
@@ -101,6 +102,43 @@ that names the game, its settings and what happened.
   colours need `machine=cga`; `composite` and `composite_era` keep their
   defaults, `auto` and `old`
   ([`[emulator]`](../CONFIGURATION.md#emulator)).
+* **Screamer 2** (GOG): a
+  [game profile](../CONFIGURATION.md#game-profiles) for the 3dfx
+  version, `S2_3DFX.EXE`, as a file in the `games` folder (such as
+  `games/screamer2-3dfx.conf`), with C: and the CUE sheet's path
+  changed to where GOG installed the game:
+
+  ```ini
+  [game]
+  name=Screamer 2 (3dfx)
+  overlay=true
+
+  [emulator]
+  cpu=pentium
+  voodoo=true
+
+  [drives]
+  C="C:\GOG Games\Screamer 2"
+  D="C:\GOG Games\Screamer 2\GAME.DAT" cdrom
+
+  [autoexec]
+  C:
+  DEL GLIDE2X.OVL
+  S2_3DFX
+  ```
+
+  `GAME.DAT` is the CUE sheet of the disc image `GAME.GOG`, with the CD
+  music ([CD images](../CONFIGURATION.md#cd-images)). The memory (16 MB
+  on a Pentium) and the Sound Blaster 16 at 220h, IRQ 7, DMA 1 and 5,
+  which the game's setup has, are rust-dos's defaults and left out. The
+  game draws with 3dfx's `GLIDE2X.OVL`, which the settings window's
+  Emulator page downloads onto Z: once
+  ([3dfx Voodoo Graphics](../CONFIGURATION.md#3dfx-voodoo-graphics)).
+  `DEL` hides the `glide2x.ovl` in GOG's folder, the Glide of GOG's
+  DOSBox, which works only there and would be found first: with
+  `overlay=true` the file stays in GOG's folder untouched. The SVGA
+  version's profile is the same without `voodoo=true` and `DEL`, and
+  runs `START65H`.
 * **Tomb Raider's 3D patches** (in `3DPATCH` on the Tomb Raider Gold
   CD), each copied into the game's folder:
   * 3dfx (`3DFX\TOMB.EXE`): `voodoo=true`, `cpu=pentium`
@@ -177,6 +215,16 @@ opcode, `win32_version=98se` when a message names the version, more
   room](../CONFIGURATION.md#directplay-games-on-the-built-in-windows)
   over the IPX connection, the only one the game takes; it lists the
   TCP/IP one but ignores it, on Windows too.
+* **Omikron: The Nomad Soul** on an S3 with a Voodoo2 (`machine=svga_s3`,
+  `voodoo=true`, `voodoo_model=voodoo2`): `win32_depth=16`. The game sets
+  640x480 in 16 bits on the Voodoo2 and plays its movies through
+  DirectShow, which takes its picture format from the S3's desktop. That
+  desktop stays at 32 bits, the S3's default, and the movies show as
+  stripes and colour noise. Windows 98 SE with an S3 Trio64 and a
+  Voodoo2 also reports the display at 32 bits while the Voodoo2's mode is
+  set. On `svga_voodoo3` and `svga_toadforce` the game sets its 16-bit
+  mode on the display card itself, which DirectShow then reads, so the
+  movies play without the setting.
 * **Rage of Mages** (GOG): `cpu=pentium_ii`. The game needs a Pentium; on
   the default 486 the map's unexplored areas show dark blue instead of
   black. Copy the game's folder into a folder of drive C:, such as

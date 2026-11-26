@@ -72,6 +72,9 @@ pub const FAR_APM: u8 = 0x02;
 pub const FAR_ATI: u8 = 0x03;
 /// The VCPI's protected-mode entry point (`vcpi::pm_entry`).
 pub const FAR_VCPI: u8 = 0x04;
+/// The virtual-8086 monitor's switch to real mode and back, which INT 2Fh
+/// AX=1605h hands Windows (`v86mon::windows_switch`).
+pub const FAR_V86_SWITCH: u8 = 0x05;
 
 /// Offsets in the F000 segment.
 const TIMER_HANDLER: u16 = 0x1100;

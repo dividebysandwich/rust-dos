@@ -1,6 +1,6 @@
 ---
 name: game-polish
-description: Play a DOS game in the rust-dos emulator for a set time (30 minutes by default), file a GitHub issue for every emulation glitch, bug, performance problem and bottleneck found, then fix each one in its own git worktree and check the fix against the same game. Use when asked to polish, play-test or shake out bugs in a game, or to find and fix what goes wrong when a game runs in rust-dos.
+description: Play a DOS game in the rust-dos emulator for a set time (30 minutes by default), file a GitHub issue for every emulation glitch, bug, performance problem and bottleneck found, then fix each one a player sees in its own git worktree and check the fix against the same game. Use when asked to polish, play-test or shake out bugs in a game, or to find and fix what goes wrong when a game runs in rust-dos.
 argument-hint: <game> [minutes] [--no-fix] [--no-issues]
 ---
 
@@ -8,8 +8,8 @@ argument-hint: <game> [minutes] [--no-fix] [--no-issues]
 
 A play session, then a fix session. Play the game the way a player would,
 watch the emulator while doing it, and write down everything that is
-wrong. Then file each finding as an issue and fix it in its own worktree,
-validated against the game it was found in.
+wrong. Then file each finding as an issue, and fix each one a player
+sees in its own worktree, validated against the game it was found in.
 
 Read `docs/llm-debugging.md` before you start the emulator, and follow it
 and the `debug-emulator` skill for launching, input and stopping. This
@@ -220,8 +220,11 @@ didn't record while playing, such as a speed drop in one video mode.
 4. **File one issue for each.** Skip this with `--no-issues`. Find the
    repository from `git remote get-url origin`, and look at its labels
    first, using the ones that fit (such as `bug`, `performance`,
-   `emulation`) and inventing none. Title: what goes wrong and where,
-   such as "Doom: music stops after loading a saved game (SB16)". Body:
+   `emulation`) and inventing none. Give each issue one priority label:
+   `low-priority` for a finding that waits for a game to show it (the
+   end of Phase 3 says which), and for the others the one whose
+   description fits. Title: what goes wrong and where, such as "Doom:
+   music stops after loading a saved game (SB16)". Body:
 
    ```markdown
    ## What happens
@@ -259,7 +262,8 @@ Skip this with `--no-fix`. If your environment limits you to one branch,
 or forbids opening pull requests, ask before going on: put every fix on
 that branch as its own commit only if the user agrees.
 
-Fix the issues in rank order. For each one:
+Fix the issues a player sees, in rank order. The others wait, as the
+paragraphs after this list say. For each one:
 
 1. **Make a worktree** from the latest default branch, with a branch named
    after the issue:
@@ -326,10 +330,19 @@ Fix the issues in rank order. For each one:
      prompt with the steps in the issue.
    - The finding is fixed only if it no longer happens, as often as it
      happened before (ten times for one that happened sometimes).
-   - For a performance finding, measure before and after on the same
-     state and input: `/api/stats` or a 30-second profile from each
-     build, and give both figures. Use `--deterministic --cycles N` for
-     both runs when the figure varies between runs.
+   - For a performance finding, show the work the fix removes first:
+     deterministic runs of both builds, from states each build saved
+     itself or from power-on, with identical frames and a lower count
+     of that work (`/api/stats`, or the card's and its renderer's
+     counts under `video` in `/api/status`). Then put a number on it:
+     one timing run per build, main first, at a fixed `--cycles` on the
+     same scene and input (`/api/stats` over a fixed window, or a
+     30-second profile), and give both figures. A series of runs is for
+     a fix that makes the same work faster with no counter to show it,
+     a gain close to the runs' spread, or a fix that trades one cost
+     for another. `AGENTS.md`'s "Checks in proportion to the change"
+     says how much checking each kind of change needs, and how to
+     reach a renderer's OpenGL path in the deterministic runs.
    - Play a few minutes around the place, to see the fix broke nothing
      nearby.
    - If the game is in the game suite, run its scenarios
@@ -348,16 +361,30 @@ Fix the issues in rank order. For each one:
    request, if there is one, and the worktree for whoever goes on with
    it, and say where they are in the report.
 
-A finding that isn't fixed in this session is follow-up work, not a
-finding to leave behind: a missing DLL or API, a missing device, a
-performance cost, a gap the game only touches in its setup. Don't ask
-the user whether to take it on. List it in the report's follow-ups
-(Phase 4) with what the fix needs, so that it is queued as a fix task
-of its own: by you, if you go on working, or by whoever runs the
-session. Only two kinds stay out of the follow-ups, each with its reason
-in the report: the game's own behaviour, which the real PC shows too,
-and a fix that needs a decision with no clearly better option, which
-the report puts to the user.
+A finding that isn't fixed in this session, and that a player of the
+game sees, is follow-up work: a picture or a sound that is wrong, a
+crash or a hang, input that is lost, a feature the game or its setup
+uses that doesn't work, a scene measured in the game that runs below
+full speed or keeps `cpu_use` near 100 (a slower host plays it below
+full speed). Don't ask the user whether to take it on. List it in the
+report's follow-ups (Phase 4) with what the fix needs, so that it is
+queued as a fix task of its own: by you, if you go on working, or by
+whoever runs the session.
+
+A finding no game or program shows isn't fixed in this session and
+isn't queued: a gap in the log that nothing a player sees, hears or
+does depends on, a case the specification or Windows has that no
+program reaches, an edge a review found by reading the code. Step 2 of
+`AGENTS.md`'s pull request lifecycle says which programs count. The
+finding's issue (from Phase 2, or from the review in step 6) says what
+the real system does and carries the `low-priority` label; list it in
+the report apart from the follow-ups. With `--no-issues`, the report
+alone lists it. It is picked up when a game shows it: that game is
+added to the issue, and the label is raised to the priority the game's
+problem calls for. Two more kinds stay out of the follow-ups, each with
+its reason in the report: the game's own behaviour, which the real PC
+shows too, and a fix that needs a decision with no clearly better
+option, which the report puts to the user.
 
 Remove each worktree (`git worktree remove`) once its pull request is
 ready for review and nothing in it is still needed.
@@ -370,9 +397,10 @@ Finish with a short report to the user:
 - what you covered, and what you didn't reach;
 - a table: finding, kind, issue, pull request (draft or ready),
   validated (yes, no, or how), and what is left;
-- the follow-ups: each finding not fixed, with its issue, what the fix
-  needs and the save states for it, to be queued as fix tasks without
-  asking; and the findings left out of them, with the reason;
+- the follow-ups: each finding not fixed that a player sees, with its
+  issue, what the fix needs and the save states for it, to be queued as
+  fix tasks without asking; the issues no game shows yet, which wait
+  for one; and the findings left out of both, with the reason;
 - the speed figures from `stats.jsonl`: the slowest scenes and their
   `emulated_speed`, `fps` and `cpu_use`;
 - where `$W` is, with the save states and screenshots, since they aren't

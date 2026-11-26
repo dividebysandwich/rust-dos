@@ -705,7 +705,7 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         ("voodoo", "voodoo_card") | ("pci", "voodoo") => match first {
             "software" | "opengl" => {
                 imported.set("emulator", "voodoo", "true");
-                imported.set("emulator", "voodoo_renderer", first);
+                imported.set("emulator", "renderer", first);
             }
             "auto" | "false" | "off" | "none" => {}
             _ => unknown(imported),
@@ -1247,9 +1247,9 @@ mod tests {
         };
         let x = "[voodoo]\nvoodoo_card=software\nvoodoo_maxmem=false\n";
         assert_eq!(get(x, "voodoo").as_deref(), Some("true"));
-        assert_eq!(get(x, "voodoo_renderer").as_deref(), Some("software"));
+        assert_eq!(get(x, "renderer").as_deref(), Some("software"));
         assert_eq!(get(x, "voodoo_memory").as_deref(), Some("4"));
-        assert_eq!(get("[pci]\nvoodoo=opengl\n", "voodoo_renderer").as_deref(), Some("opengl"));
+        assert_eq!(get("[pci]\nvoodoo=opengl\n", "renderer").as_deref(), Some("opengl"));
         // DOSBox-X's default, auto, doesn't.
         assert_eq!(get("[voodoo]\nvoodoo_card=auto\n", "voodoo"), None);
         let text = import(&[x], &[PathBuf::from("/")], "x", None).profile_text(None);

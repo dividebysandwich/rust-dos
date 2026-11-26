@@ -38,6 +38,9 @@ pub struct Settings {
     /// The CGA's composite monitor.
     pub composite: CompositeSettings,
     pub machine: Adapter,
+    /// What draws the 3D cards; `voodoo_renderer()` and
+    /// `toadforce_renderer()` give what draws each card.
+    pub renderer: super::Renderer,
     /// The 3dfx card.
     pub voodoo: crate::voodoo::VoodooSettings,
     /// The PowerVR card, if there is one, and how it filters textures.
@@ -47,8 +50,6 @@ pub struct Settings {
     pub verite: crate::verite::VeriteSettings,
     /// The megabytes of memory a ToadForce has.
     pub toadforce_memory: u32,
-    /// What draws a ToadForce's triangles.
-    pub toadforce_renderer: crate::toadforce::Renderer,
     /// The gamma a ToadForce's picture is shown with, after the card's
     /// own ramp, or None for none.
     pub toadforce_gamma: Option<f32>,
@@ -194,12 +195,12 @@ impl Default for Settings {
             post: crate::post::PostMode::Off,
             composite: CompositeSettings::default(),
             machine: Adapter::Svga,
+            renderer: Default::default(),
             voodoo: Default::default(),
             powervr: None,
             powervr_filter: Default::default(),
             verite: Default::default(),
             toadforce_memory: crate::toadforce::regs::DEFAULT_MEMORY >> 20,
-            toadforce_renderer: Default::default(),
             toadforce_gamma: None,
             capture_dir: PathBuf::from("capture"),
             record_ui: false,
@@ -292,6 +293,16 @@ impl Settings {
         self.machine.voodoo_board().or(self.voodoo.board())
     }
 
+    /// What draws for a 3dfx card (`renderer`).
+    pub fn voodoo_renderer(&self) -> crate::voodoo::Renderer {
+        self.renderer.voodoo()
+    }
+
+    /// What draws a ToadForce's triangles (`renderer`).
+    pub fn toadforce_renderer(&self) -> crate::toadforce::Renderer {
+        self.renderer.toadforce()
+    }
+
     /// The guest environment variables every setting asks for. A name two
     /// settings give takes the value of the later one.
     pub fn environment(&self) -> Vec<crate::env_inject::Rule> {
@@ -323,6 +334,7 @@ impl Settings {
                 era: config.composite_era.unwrap_or(default.composite.era),
             },
             machine: config.machine.unwrap_or(default.machine),
+            renderer: config.renderer().unwrap_or(default.renderer),
             voodoo: crate::voodoo::VoodooSettings {
                 enabled: config.voodoo.unwrap_or(default.voodoo.enabled),
                 board: {
@@ -332,7 +344,6 @@ impl Settings {
                     let model = config.voodoo_model.unwrap_or(memory.model());
                     crate::voodoo::Board::of(model, memory.megabytes())
                 },
-                renderer: config.voodoo_renderer.unwrap_or(default.voodoo.renderer),
                 texture_sampling: config.voodoo_texture_sampling.unwrap_or(default.voodoo.texture_sampling),
                 scale: config.voodoo_scale.unwrap_or(default.voodoo.scale),
                 scale_shader: config.voodoo_scale_shader.unwrap_or(default.voodoo.scale_shader),
@@ -353,9 +364,6 @@ impl Settings {
                 irq: config.verite_irq.unwrap_or(default.verite.irq),
             },
             toadforce_memory: config.toadforce_memory.unwrap_or(default.toadforce_memory),
-            toadforce_renderer: config
-                .toadforce_renderer
-                .unwrap_or(default.toadforce_renderer),
             toadforce_gamma: config.toadforce_gamma.unwrap_or(default.toadforce_gamma),
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             record_ui: config.record_ui.unwrap_or(default.record_ui),
@@ -558,10 +566,10 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "composite", Some(settings.composite.mode.name().to_string())),
         (Emulator, "composite_era", Some(settings.composite.era.name().to_string())),
         (Emulator, "machine", Some(settings.machine.name().to_string())),
+        (Emulator, "renderer", Some(settings.renderer.name().to_string())),
         (Emulator, "voodoo", yes_no(settings.voodoo.enabled)),
         (Emulator, "voodoo_model", Some(settings.voodoo.board.model().name().to_string())),
         (Emulator, "voodoo_memory", Some(settings.voodoo.board.megabytes().to_string())),
-        (Emulator, "voodoo_renderer", Some(settings.voodoo.renderer.name().to_string())),
         (Emulator, "voodoo_texture_sampling", Some(settings.voodoo.texture_sampling.name().to_string())),
         (Emulator, "voodoo_scale", Some(settings.voodoo.scale.to_string())),
         (Emulator, "voodoo_scale_shader", yes_no(settings.voodoo.scale_shader)),
@@ -587,11 +595,6 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "verite_rom", settings.verite.rom.as_deref().map(|p| contract_home(p, home))),
         (Emulator, "verite_irq", Some(settings.verite.irq.to_string())),
         (Emulator, "toadforce_memory", Some(settings.toadforce_memory.to_string())),
-        (
-            Emulator,
-            "toadforce_renderer",
-            Some(settings.toadforce_renderer.name().to_string()),
-        ),
         (
             Emulator,
             "toadforce_gamma",

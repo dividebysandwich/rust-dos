@@ -542,6 +542,30 @@ fn installed(cpu: &Cpu, pid: u32, fcc: u32) -> Option<u32> {
         .map(|p| p.proc)
 }
 
+/// The procedure of the process `pid`'s that mmioOpenA reads the file
+/// `name` with when it is given no procedure or FOURCC, as MCI's devices
+/// open their files: the one installed for the extension before a '+',
+/// or for 'DOS ' (`mmio_open`). None when the built-in DOS procedure
+/// reads it.
+pub fn program_procedure(cpu: &Cpu, pid: u32, name: &str) -> Option<u32> {
+    let fcc = parse_extension(name).unwrap_or(FOURCC_DOS);
+    installed(cpu, pid, fcc)
+}
+
+/// The flags MCI's devices open their files with, as Windows' MCIWAVE
+/// and MCIAVI do.
+pub const OPEN_TO_READ: u32 = MMIO_READ | MMIO_DENYWRITE;
+
+/// The bytes of the open file `hmmio` of a program's procedure, which
+/// were read whole when it opened for reading (`finish_slurp`).
+pub fn contents(cpu: &Cpu, hmmio: u32) -> Option<Vec<u8>> {
+    let i = find(cpu, hmmio)?;
+    match &cpu.bus.win32.winmm.mmio.files[i].proc {
+        Proc::Data { data, .. } => Some(data.clone()),
+        _ => None,
+    }
+}
+
 /// The FOURCC of the procedure a name such as "GAME.PAK+INTRO.WAV" asks
 /// for: the extension before the '+', in capitals.
 fn parse_extension(name: &str) -> Option<u32> {

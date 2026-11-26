@@ -1498,6 +1498,7 @@ const ABSENT_SECTIONS: &[(&str, &str)] = &[
     ("W32", "the built-in Windows runs Win32 programs, which the run doesn't start"),
     ("RTCA", "the clock's alarm, which the run's program never enables"),
     ("LOCK", "file region locks (INT 21h AH=5Ch), which the run's program never takes"),
+    ("ALIA", "host folders' aliases other than those made afresh: the run makes no long names"),
 ];
 
 /// Parts of the save state that the run doesn't change, and why.
@@ -1515,6 +1516,7 @@ const STILL: &[(&str, &str)] = &[
     ("8254.pit0_phase", "a mode 3 count loaded at a half-cycle, which the run's mode 2 has none of"),
     ("8254.pit1_phase", "a count loaded at a half-cycle, which the run never reads channel 1 after"),
     ("8254.pit2_phase", "a mode 3 count loaded at a half-cycle, which the run's mode 2 has none of"),
+    ("FONT", "that plane 2 holds the text font, which the mode set at the prompt loaded"),
     ("VIDE.gate_array_shadow", "the PCjr's and Tandy's gate array"),
     ("VIDE.gate_array_shadow_at", "the PCjr's and Tandy's gate array"),
     ("SOUN.tandy_sound", "the PCjr's and Tandy's sound chip"),

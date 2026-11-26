@@ -123,14 +123,35 @@ impl MemFs {
     /// nothing is kept uppercased, so that a path that isn't there stays
     /// one.
     pub fn resolve(&self, components: &[&str]) -> String {
+        self.resolve_cut(components, false)
+    }
+
+    /// `resolve`, and with `cut`, a component that names nothing is
+    /// looked for again cut to 8.3, as DOS's calls name a file: DOS cuts
+    /// "MM_SLIDER.GXA" to MM_SLIDE.GXA (`fat::canonical_name`).
+    pub fn resolve_cut(&self, components: &[&str], cut: bool) -> String {
         let mut path = String::new();
         for component in components {
             let upper = Self::join(&path, &component.to_ascii_uppercase());
-            let known = self.files.contains_key(&upper) || self.is_dir(&upper);
-            path = if known || self.long.is_empty() {
+            let known = |p: &String| self.files.contains_key(p) || self.is_dir(p);
+            let long = || {
+                if self.long.is_empty() {
+                    None
+                } else {
+                    self.find_long(&path, component)
+                }
+            };
+            let short = || {
+                if !cut {
+                    return None;
+                }
+                let name = crate::fat::canonical_name(component)?;
+                Some(Self::join(&path, &name)).filter(|p| *p != upper && known(p))
+            };
+            path = if known(&upper) {
                 upper
             } else {
-                self.find_long(&path, component).unwrap_or(upper)
+                long().or_else(short).unwrap_or(upper)
             };
         }
         path
@@ -234,5 +255,21 @@ mod tests {
         assert_eq!(fs.dir_record("DATA\\LEVELS\\ONE.LVL"), None);
         assert!(fs.is_dir("DATA") && fs.is_dir("SOUND"));
         assert_eq!(MemFs::new().dir_record(""), None);
+    }
+
+    /// A tree without long names, as a CD without Joliet's: DOS's calls
+    /// find a name longer than 8.3 by the name they cut it to, in a
+    /// directory on the way too, and other calls don't.
+    #[test]
+    fn dos_calls_find_names_cut_to_8_3() {
+        let mut fs = MemFs::new();
+        fs.insert("SAVEGAME\\MM_SLIDE.GXA", &b"slider"[..]);
+
+        let path = ["savegames", "mm_slider.gxa"];
+        assert_eq!(fs.resolve_cut(&path, true), "SAVEGAME\\MM_SLIDE.GXA");
+        assert_eq!(fs.resolve_cut(&path, false), "SAVEGAMES\\MM_SLIDER.GXA");
+        assert_eq!(fs.resolve(&path), "SAVEGAMES\\MM_SLIDER.GXA");
+        // A cut name that isn't there either stays the whole name.
+        assert_eq!(fs.resolve_cut(&["MISSING_NAME.DAT"], true), "MISSING_NAME.DAT");
     }
 }

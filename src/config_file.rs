@@ -148,9 +148,10 @@ pub(crate) fn banner_notes(config: &config::Config, no_config: bool) -> Vec<(Str
 }
 
 /// Find and parse the configuration file (see config.rs for the lookup
-/// order). Problems in the file are reported but never stop the emulator;
-/// only a missing `--config` file does. The file used goes to the log once
-/// there is one (see `create_cpu`).
+/// order). Problems in the file are reported, and only a missing
+/// `--config` file or lines that contradict each other
+/// (`config::Config::errors`) stop the emulator. The file used goes to the
+/// log once there is one (see `create_cpu`).
 pub(crate) fn load_config(args: &Args) -> Result<config::Config, String> {
     if args.no_config {
         return Ok(config::Config::default());
