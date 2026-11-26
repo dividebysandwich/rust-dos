@@ -1689,6 +1689,27 @@ fn a_voodoo3_or_banshee_picked_turns_the_add_on_card_off() {
 }
 
 #[test]
+fn a_voodoo3_with_voodoo_on_in_the_file_is_the_card_the_list_opens_on() {
+    use crate::video::adapter::Adapter;
+    let mut host = FakeHost::new();
+    let mut ui = ConfigUi::new();
+    let mut settings = Settings {
+        machine: Adapter::Voodoo3,
+        ..Settings::default()
+    };
+    settings.voodoo.enabled = true;
+    ui.open(&settings, Some("/cfg/rust-dos.conf".into()), &host);
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    keys(&mut ui, &mut host, &[UiKey::Enter]);
+    let popup = ui.popup.as_ref().unwrap();
+    assert_eq!(popup.choices[popup.selected], settings);
+    keys(&mut ui, &mut host, &[UiKey::Esc, UiKey::Right]);
+    let applied = host.applied.last().unwrap();
+    assert_eq!((applied.machine, applied.voodoo.enabled), (Adapter::Banshee, false));
+}
+
+#[test]
 fn version_check_never_leaves_the_window_and_the_switch_toggles_on_and_off() {
     use crate::version_check::Setting;
     let item = Item::VersionCheck;

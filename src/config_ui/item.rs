@@ -652,8 +652,7 @@ impl Item {
             Item::Sc55Roms | Item::Sc55Model => s.sound.midisynth == MidiSynth::Sc55,
             // Until there are ROMs.
             Item::Sc55Download => s.sound.midisynth == MidiSynth::Sc55 && sc55_found(s).is_none(),
-            // Until it is there.
-            // DOS games' Glide, for the add-on card.
+            // DOS games' Glide for the add-on card, until it is there.
             Item::VoodooOverlay => voodoo_add_on(s) && crate::voodoo::overlay::find().is_none(),
             Item::VoodooScale | Item::VoodooMsaa | Item::VoodooDither | Item::VoodooAnisotropy => voodoo_opengl(s),
             // At 1x the lines are the card's own, whatever the look.

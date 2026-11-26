@@ -279,16 +279,20 @@ impl Item {
             // rust-dos saved `cpu=486` into every configuration file. One
             // picked with the card in place stays. The memory is cut to
             // what the processor takes, as for a picked one. A Voodoo3 or
-            // Banshee is a 3dfx card itself and leaves no room for the
-            // add-on card, so `voodoo` goes off: a file saved with both
-            // would say two things about the 3dfx card.
+            // Banshee picked is a 3dfx card itself and leaves no room for
+            // the add-on card, so `voodoo` goes off: a file saved with both
+            // would say two things about the 3dfx card. The card the
+            // machine has stays as it is, so that its choice is the
+            // settings the window has, which the list opens on and Left
+            // and Right step from.
             Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| {
                 let suited = !s.cpu_below_card();
+                let picked = machine != s.machine;
                 s.machine = machine;
                 if suited && s.cpu_below_card() {
                     s.cpu = None;
                 }
-                if machine.voodoo_board().is_some() {
+                if picked && machine.voodoo_board().is_some() {
                     s.voodoo.enabled = false;
                 }
                 s.memsize = s.memsize.map(|mb| mb.min(s.cpu_model().max_memsize()));
