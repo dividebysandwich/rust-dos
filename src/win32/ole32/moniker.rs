@@ -579,7 +579,7 @@ pub fn rot_register(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let pid = current_pid(cpu);
     let changed = crate::win32::kernel32::time::file_time_now(cpu);
     let rot = rot(cpu);
-    rot.next_cookie += 1;
+    rot.next_cookie = rot.next_cookie.wrapping_add(1).max(1);
     let cookie = rot.next_cookie;
     rot.entries.push(Entry {
         cookie,
