@@ -83,6 +83,23 @@ fn a_glyph_a_program_loads_replaces_the_roms() {
     assert_eq!(cell(&cpu), rom);
 }
 
+/// Plane 2 without a font, as a state saved before rust-dos kept one
+/// there loads: AX=1100h puts the mode's ROM font in before the program's
+/// glyph, so the characters it didn't load still show.
+#[test]
+fn a_glyph_loaded_without_a_font_in_plane_2_keeps_the_others() {
+    let mut cpu = machine();
+    put(&mut cpu, b'B', 0x07);
+    let rom = cell(&cpu);
+    let size = cpu.bus.vga.plane_size();
+    cpu.bus.vga.vram_graphics[2 * size..3 * size].fill(0);
+    cpu.bus.vga.font_loaded = false;
+    load_box(&mut cpu, 0, b'A' as u16);
+    assert_eq!(cell(&cpu), rom);
+    put(&mut cpu, b'A', 0x07);
+    assert_eq!(cell(&cpu), BOX);
+}
+
 /// A font written into plane 2 through the sequencer and the graphics
 /// controller, as programs load one without the BIOS: map mask plane 2,
 /// sequential addressing, A0000h for 64 KB.

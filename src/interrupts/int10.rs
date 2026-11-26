@@ -137,11 +137,19 @@ fn text_font(cpu: &mut Cpu, height: u16) {
 /// the text modes draw with. AL=00h: CX of a program's own from ES:BP, BH
 /// bytes each, from character DX on; AL=01h the ROM's 8x14 font, 02h its
 /// 8x8, 04h its 8x16. AL=03h selects the maps (Character Map Select,
-/// SR03) from BL. Under the V86 monitor of a booted Windows the planes are
-/// Windows' (see `mode_font`), and the text stays in the ROM's fonts.
+/// SR03) from BL. Under a booted system's V86 monitor (EMM386 or Windows)
+/// the BIOS doesn't write the planes (see `mode_font`), and the text stays
+/// in the ROM's fonts.
 fn load_glyphs(cpu: &mut Cpu, function: u8) {
     if !cpu.bus.vga.adapter.ega_bios() || cpu.guest_v86() {
         return;
+    }
+    // Plane 2 holds no font yet: a state saved before rust-dos kept one
+    // there, or the last mode set ran under a V86 monitor. The mode's ROM
+    // font goes in first, as that mode set would have loaded it, so the
+    // characters the program leaves alone keep the glyphs they show now.
+    if function != 0x03 && !cpu.bus.vga.font_loaded {
+        video_bios::load_text_font(&mut cpu.bus);
     }
     let bl = cpu.get_reg8(Register::BL);
     let map = bl & if cpu.bus.vga.adapter.vga_bios() { 7 } else { 3 };

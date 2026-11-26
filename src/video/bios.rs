@@ -155,21 +155,21 @@ pub fn rom_font(height: u16) -> (&'static [u8], usize) {
 }
 
 /// The text mode's font into plane 2 as an EGA's or VGA's BIOS loads it
-/// at a mode set: the ROM font of the character height (BDA 0485h) in
-/// map 0, with the alternate glyphs of 9-dot cells in the monochrome
-/// mode, and map 0 selected for all characters. Nothing on other
-/// adapters, or in a graphics mode.
+/// at a mode set (`load_text_font`), and map 0 selected for all
+/// characters. Nothing on other adapters, or in a graphics mode.
 pub fn load_mode_font(bus: &mut Bus) {
-    let text = matches!(
-        bus.video_mode,
-        VideoMode::Text40x25
-            | VideoMode::Text40x25Color
-            | VideoMode::Text80x25
-            | VideoMode::Text80x25Color
-            | VideoMode::Mono80x25
-    );
-    if !bus.vga.adapter.ega_bios() || !text {
-        return;
+    if load_text_font(bus) {
+        bus.vga.sequencer_regs[0x03] = 0;
+    }
+}
+
+/// The ROM font of the text mode's character height (BDA 0485h) into map
+/// 0 of plane 2, with the alternate glyphs of 9-dot cells in the
+/// monochrome mode, leaving Character Map Select as it is. False, with
+/// nothing loaded, on other adapters or in a graphics mode.
+pub fn load_text_font(bus: &mut Bus) -> bool {
+    if !bus.vga.adapter.ega_bios() || !bus.video_mode.is_text() {
+        return false;
     }
     let (font, height) = rom_font(bus.read_16(0x0485));
     bus.vga.load_font(0, 0, height, font);
@@ -186,7 +186,7 @@ pub fn load_mode_font(bus: &mut Bus) {
             bus.vga.load_font(0, entry[0] as usize, height, &entry[1..]);
         }
     }
-    bus.vga.sequencer_regs[0x03] = 0;
+    true
 }
 
 /// Whether the VGA BIOS sums the palettes it loads to grey (BDA 0489h bit
