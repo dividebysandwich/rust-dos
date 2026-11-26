@@ -1037,6 +1037,14 @@ impl Mirror {
         }
     }
 
+    /// `values` from pixel `(x, y)` of `dest` to the right, as `pixel`
+    /// gives them one at a time.
+    pub(crate) fn pixels(&mut self, dest: Option<u32>, x: u32, y: u32, values: &[u16], width: u32) {
+        let Some((&first, rest)) = values.split_first() else { return };
+        self.pixel(dest, x, y, first, width);
+        self.open[self.last_open].values.extend_from_slice(rest);
+    }
+
     /// The texture unit `unit` draws with, decoded if it isn't yet or its
     /// RAM or colours changed since.
     fn texture(&mut self, unit: usize, t: &TmuRaster, tmu: &Tmu) -> TexUnit {

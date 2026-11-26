@@ -134,6 +134,14 @@ fn chroma_constant(range: u32) -> Option<bool> {
     }
 }
 
+/// The byte address of pixel `(x, y)` of a blit's source or destination
+/// at `base`, `stride` bytes a row. A blit with negative sizes can reach
+/// a negative `x` or `y`, whose address wraps round below `base`.
+fn blt_addr(x: i32, y: i32, base: u32, stride: u32) -> u32 {
+    base.wrapping_add((y as u32).wrapping_mul(stride))
+        .wrapping_add((x as u32).wrapping_mul(2))
+}
+
 /// The bytes of rows `y0` to `y1` (either way round) of a blit's side at
 /// byte `base` with `stride` bytes a row, to the last column the blitter
 /// reaches in the last, whatever the stride.
@@ -193,14 +201,72 @@ impl Voodoo {
     /// Write a pixel through the raster operations: the ROP the source
     /// and destination chroma range tests select.
     fn blt_put(&mut self, addr: u32, src: u16) {
+        if let Some((at, value)) = self.blt_write(addr, src) {
+            self.blt_mirror(at, value);
+        }
+    }
+
+    /// `blt_put` without telling the recording: the word written and its
+    /// value.
+    fn blt_write(&mut self, addr: u32, src: u16) -> Option<(usize, u16)> {
         let at = (addr >> 1) as usize;
         if at >= self.fbi.ram.len() {
-            return;
+            return None;
         }
         let dst = self.fbi.ram.get(at);
         let value = mix(self.blt_rop(src, dst), src, dst);
         self.fbi.ram.set(at, value);
-        self.blt_mirror(at, value);
+        Some((at, value))
+    }
+
+    /// Tell the recording about the pixels a blit of `size` from `(x, y)`
+    /// wrote at `base`, `stride` bytes a row: each row from left to
+    /// right, which the recording keeps as one run (`Mirror::pixels`). A
+    /// blit that runs from right to left would otherwise give it a run
+    /// for every pixel: Prince of Persia 3D's menu copies its whole
+    /// screen that way every frame.
+    fn blt_mirror_rect(
+        &mut self,
+        (x, y): (i32, i32),
+        (size_x, size_y): (i32, i32),
+        base: u32,
+        stride: u32,
+    ) {
+        if !self.recording() {
+            return;
+        }
+        let (mut x0, mut x1) = (x.min(x + size_x), x.max(x + size_x));
+        let (mut y0, mut y1) = (y.min(y + size_y), y.max(y + size_y));
+        // The pixels `blt_clipped` leaves out are a rectangle's.
+        if self.blt_command() & CLIPPING != 0 {
+            let (cx, cy) = (self.reg[BLT_CLIP_X], self.reg[BLT_CLIP_Y]);
+            x0 = x0.max(((cx >> 16) & 0xFFF) as i32);
+            x1 = x1.min((cx & 0xFFF) as i32 - 1);
+            y0 = y0.max(((cy >> 16) & 0xFFF) as i32);
+            y1 = y1.min((cy & 0xFFF) as i32 - 1);
+        }
+        if x0 > x1 {
+            return;
+        }
+        let len = (x1 - x0 + 1) as usize;
+        let mut values = Vec::with_capacity(len);
+        for y in y0..=y1 {
+            let first = (blt_addr(x0, y, base, stride) >> 1) as usize;
+            // A row that starts left of the memory or runs past its end
+            // goes a word at a time, as the blit wrote it.
+            if x0 < 0 || first + len > self.fbi.ram.len() {
+                for x in x0..=x1 {
+                    let at = (blt_addr(x, y, base, stride) >> 1) as usize;
+                    if at < self.fbi.ram.len() {
+                        self.blt_mirror(at, self.fbi.ram.get(at));
+                    }
+                }
+                continue;
+            }
+            values.clear();
+            values.extend((first..first + len).map(|at| self.fbi.ram.get(at)));
+            self.blt_mirror_run(first, &values);
+        }
     }
 
     /// The ROP the source and destination chroma range tests select for
@@ -220,7 +286,15 @@ impl Voodoo {
     /// Tell the OpenGL renderer's recording about a pixel the blitter
     /// wrote, if it is in a buffer's picture.
     fn blt_mirror(&mut self, at: usize, value: u16) {
-        if !self.recording() {
+        self.blt_mirror_run(at, &[value]);
+    }
+
+    /// Tell the recording about the pixels the blitter wrote from word
+    /// `at` on, `values` in a row of memory, where they are in a buffer's
+    /// picture. A run that goes on past a buffer's row goes a pixel at a
+    /// time.
+    fn blt_mirror_run(&mut self, at: usize, values: &[u16]) {
+        if !self.recording() || values.is_empty() {
             return;
         }
         let fbi = &self.fbi;
@@ -229,11 +303,18 @@ impl Voodoo {
         let aux = (fbi.auxoffs != NONE).then_some((None, fbi.auxoffs as usize / 2));
         let found = colour.chain(aux).filter(|&(_, base)| at >= base).min_by_key(|&(_, base)| at - base);
         let Some((dest, base)) = found else { return };
-        let (x, y) = (((at - base) % row) as u32, ((at - base) / row) as u32);
-        if x < fbi.width && y < fbi.height {
-            let width = fbi.width;
+        let (x, y) = ((at - base) % row, (at - base) / row);
+        if values.len() > 1 && x + values.len() > row {
+            for (i, &value) in values.iter().enumerate() {
+                self.blt_mirror_run(at + i, &[value]);
+            }
+            return;
+        }
+        let (width, height) = (fbi.width as usize, fbi.height as usize);
+        if x < width && y < height {
+            let shown = &values[..values.len().min(width - x)];
             if let Some(mirror) = self.mirror.get_mut() {
-                mirror.pixel(dest.map(|d| d as u32), x, y, value, width);
+                mirror.pixels(dest.map(|d| d as u32), x as u32, y as u32, shown, width as u32);
             }
         }
     }
@@ -297,7 +378,10 @@ impl Voodoo {
             _ => self.flush(),
         }
         self.mirror_sync();
-        let at = |x: i32, y: i32, base: u32, stride: u32| base.wrapping_add((y as u32).wrapping_mul(stride)).wrapping_add(2 * x as u32);
+        let at = blt_addr;
+        // The pixels go into the recording once the blit is done, row by
+        // row (`blt_mirror_rect`).
+        let rect = ((dst_x, dst_y), (size_x.abs() * dx, size_y.abs() * dy));
         match command & COMMAND {
             SCREEN_TO_SCREEN => {
                 let (src_base, src_stride) = self.blt_src();
@@ -309,9 +393,10 @@ impl Voodoo {
                             continue;
                         }
                         let src = self.blt_get(at(src_x + col * dx, src_y + row * dy, src_base, src_stride));
-                        self.blt_put(at(x, y, dst_base, dst_stride), src);
+                        self.blt_write(at(x, y, dst_base, dst_stride), src);
                     }
                 }
+                self.blt_mirror_rect(rect.0, rect.1, dst_base, dst_stride);
             }
             RECT_FILL => {
                 let color = self.reg[BLT_COLOR] as u16;
@@ -319,10 +404,11 @@ impl Voodoo {
                     for col in 0..=size_x.abs() {
                         let (x, y) = (dst_x + col * dx, dst_y + row * dy);
                         if !self.blt_clipped(x, y) {
-                            self.blt_put(at(x, y, dst_base, dst_stride), color);
+                            self.blt_write(at(x, y, dst_base, dst_stride), color);
                         }
                     }
                 }
+                self.blt_mirror_rect(rect.0, rect.1, dst_base, dst_stride);
             }
             SGRAM_FILL => self.sgram_fill(),
             _ => {}
@@ -747,7 +833,7 @@ impl Voodoo {
             if let Some(p) = pixel
                 && !self.blt_clipped(x, y)
             {
-                let addr = dst_base.wrapping_add((y as u32).wrapping_mul(dst_stride)).wrapping_add(2 * x as u32);
+                let addr = blt_addr(x, y, dst_base, dst_stride);
                 if queue.is_some() {
                     // The destination's test picks the same ROP for every
                     // pixel there (`blt_queue_dest`), so any value will
@@ -1319,6 +1405,102 @@ mod tests {
                 "{flags:X}"
             );
         }
+    }
+
+    #[test]
+    fn copies_from_right_to_left_go_into_the_recording_a_row_at_a_time() {
+        // Prince of Persia 3D's menu copies its whole screen from the
+        // bottom right corner up (negative sizes) every frame. The
+        // recording gets each row of the copy as one run of pixels, from
+        // left to right, not a run for every pixel.
+        let mut v = glide_card(0);
+        v.set_mirror(true);
+        let front = v.fbi.rgboffs[v.fbi.frontbuf as usize];
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+        for y in 0..3 {
+            for x in 0..4 {
+                let at = front as usize / 2 + (10 + y) * 640 + 20 + x;
+                v.fbi.ram.set(at, (y * 16 + x + 1) as u16);
+            }
+        }
+        write(&mut v, BLT_ROP, 0xCCCC);
+        write(&mut v, BLT_SRC_BASE_ADDR, front);
+        write(&mut v, BLT_DST_BASE_ADDR, back);
+        write(&mut v, BLT_XY_STRIDES, 1280 << 16 | 1280);
+        write(&mut v, BLT_SRC_XY, 12 << 16 | 23);
+        write(&mut v, BLT_DST_XY, 32 << 16 | 33);
+        // 4 by 3 pixels: sizes of -3 and -2.
+        write(&mut v, BLT_SIZE, 0xFFE << 16 | 0xFFD);
+        write(&mut v, BLT_COMMAND, 1 << 31 | SCREEN_TO_SCREEN);
+        let back = back / 2;
+        let px = |x: u32, y: u32| v.fbi.ram.get((back + y * 640 + x) as usize);
+        assert_eq!([px(30, 30), px(33, 32), px(29, 30), px(30, 33)], [1, 36, 0, 0]);
+        let rows: Vec<_> = (v.take_mirror().unwrap().commands.iter())
+            .filter_map(|c| match c {
+                super::super::mirror::Command::Pixels(p) => {
+                    Some((p.dest, p.x, p.y, p.values.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some(back), 30, 30, vec![1, 2, 3, 4]),
+                (Some(back), 30, 31, vec![17, 18, 19, 20]),
+                (Some(back), 30, 32, vec![33, 34, 35, 36])
+            ]
+        );
+    }
+
+    #[test]
+    fn fills_from_right_to_left_go_into_the_recording_a_row_at_a_time() {
+        // A fill with negative sizes, clipped to columns 31 and 32: each
+        // row's pixels left in the clip go into the recording as one run.
+        let mut v = glide_card(0);
+        v.set_mirror(true);
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+        write(&mut v, BLT_ROP, 0xCCCC);
+        write(&mut v, BLT_DST_BASE_ADDR, back);
+        write(&mut v, BLT_XY_STRIDES, 1280 << 16 | 1280);
+        write(&mut v, BLT_CLIP_X, 31 << 16 | 33);
+        write(&mut v, BLT_CLIP_Y, 480);
+        write(&mut v, BLT_COLOR, 0x1234);
+        write(&mut v, BLT_DST_XY, 32 << 16 | 33);
+        write(&mut v, BLT_SIZE, 0xFFE << 16 | 0xFFD);
+        write(&mut v, BLT_COMMAND, 1 << 31 | CLIPPING | RECT_FILL);
+        let back = back / 2;
+        let rows: Vec<_> = (v.take_mirror().unwrap().commands.iter())
+            .filter_map(|c| match c {
+                super::super::mirror::Command::Pixels(p) => {
+                    Some((p.dest, p.x, p.y, p.values.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [30, 31, 32].map(|y| (Some(back), 31, y, vec![0x1234; 2]))
+        );
+    }
+
+    #[test]
+    fn blits_that_run_left_of_column_0_dont_overflow_the_address() {
+        // Sizes of -3 from column 1 reach columns -1 and -2. Their
+        // addresses wrap round below the row (in a debug build the sum
+        // overflowed and panicked).
+        let mut v = glide_card(0);
+        v.set_mirror(true);
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+        write(&mut v, BLT_ROP, 0xCCCC);
+        write(&mut v, BLT_DST_BASE_ADDR, back);
+        write(&mut v, BLT_XY_STRIDES, 1280 << 16 | 1280);
+        write(&mut v, BLT_COLOR, 0x1234);
+        write(&mut v, BLT_DST_XY, 30 << 16 | 1);
+        write(&mut v, BLT_SIZE, 0xFFD);
+        write(&mut v, BLT_COMMAND, 1 << 31 | RECT_FILL);
+        let px = |x: u32| v.fbi.ram.get((back / 2 + 30 * 640 + x) as usize);
+        assert_eq!([px(0), px(1), px(2)], [0x1234, 0x1234, 0]);
     }
 
     #[test]
