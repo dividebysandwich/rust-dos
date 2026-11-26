@@ -742,13 +742,19 @@ fn clear_updates(state: &mut State, hwnd: u32) {
 /// Paint the desktop's background over `area` of the screen, where no
 /// window covers it.
 fn paint_background(cpu: &mut Cpu, area: &Region) {
+    fill_background(cpu, area, DCX_CLIPCHILDREN);
+}
+
+/// Paint the desktop's background over `area` of the screen, under the
+/// windows too unless `flags` has DCX_CLIPCHILDREN.
+fn fill_background(cpu: &mut Cpu, area: &Region, flags: u32) {
     if !user(cpu).desktop || area.is_empty() {
         return;
     }
     let hdc = gdi32::dc::new_window_dc(
         cpu,
         DESKTOP,
-        DCX_CLIPCHILDREN | DCX_INTERSECTRGN,
+        flags | DCX_INTERSECTRGN,
         Some(area.clone()),
         false,
     );
@@ -1030,6 +1036,14 @@ pub fn ensure_desktop(cpu: &mut Cpu) {
         (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w - 1, 0, h - 1);
         let (x, y) = user(cpu).input.cursor;
         cpu.bus.mouse.warp(x, y);
+        // Windows 98 paints the desktop as it starts, before any program
+        // shows a window. The window whose showing brings the desktop up
+        // here is visible already, so the background goes under it too:
+        // a CS_SAVEBITS window (a message box) keeps the screen under it
+        // and gives it back as it hides, which would be the black of the
+        // new mode instead of the background.
+        let all = Region::from_rect(Rect::new(0, 0, w, h));
+        fill_background(cpu, &all, 0);
     }
     super::input::desktop_started(cpu);
     redraw_screen(cpu);
