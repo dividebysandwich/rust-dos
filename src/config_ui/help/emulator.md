@@ -258,7 +258,8 @@ How the PowerVR card smooths textures:
 
 - **As the game sets it**: the card's own bilinear filtering, which most
   games turn on. The PCX1 has none; it blends between mip map levels.
-- **Point**: blocky texels, as with filtering off.
+- **Point**: blocky, one texel of one mip map level for each pixel. With
+  filtering off the card itself still blends two levels.
 - **Bilinear**: smoothed, even where the game turns filtering off.
 
 # Vérité RISC {#verite-risc}
