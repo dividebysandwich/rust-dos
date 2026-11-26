@@ -308,8 +308,9 @@ register keeps the double it comes to beside its 80 bits
 (`f80::FpuRegs`): an instruction that gives a register a double stores
 only that, and the 80 bits are made from it when something asks for them
 (a sum, FSTP of 10 bytes, FSAVE, a saved state). The double is always
-what the 80 bits would come to (`f80::canon_f64`: a denormal is 0 and a
-NaN quiet, as a double that went through 80 bits always was).
+what the 80 bits would come to (`f80::canon_f64`: a NaN quiet, as a
+double that went through 80 bits always was; a denormal double is a
+normal number in 80 bits, and comes back as it was).
 
 `dynrec/fpu.rs` translates these forms, which then run on the doubles
 with SSE2 on x86-64 hosts and the FP instructions on ARM64 hosts (which

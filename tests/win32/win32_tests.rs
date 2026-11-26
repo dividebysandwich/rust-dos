@@ -21017,6 +21017,81 @@ fn fon(fonts: &[Vec<u8>]) -> Vec<u8> {
     d
 }
 
+/// DeleteObject of a memory DC deletes it as DeleteDC does, and the
+/// bitmap selected into it can go into another DC; DeleteObject of
+/// GetDC's DC returns TRUE and leaves it until ReleaseDC. A probe on
+/// Windows 98 SE gives the same (#2161), and Beetle Crazy Cup's CD
+/// launcher frees the memory DC of every paint so. Its exit code: one
+/// bit each for DeleteObject's TRUE on the memory DC, the bitmap's
+/// SelectObject into a second DC, the first DC gone (GetObjectType 0),
+/// DeleteObject's TRUE on the screen DC, and that DC still a DC
+/// (GetObjectType OBJ_DC).
+#[test]
+fn deleteobject_deletes_a_memory_dc_and_keeps_a_window_dc() {
+    let names: &[&str] = &[
+        "CreateCompatibleDC",
+        "CreateCompatibleBitmap",
+        "SelectObject",
+        "DeleteObject",
+        "GetObjectType",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names), ("USER32.DLL", &["GetDC"])];
+    let exe = program(BASE, false, imports, &[0; 4], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let (object_type, get_dc) = (f("GetObjectType"), l.import(names.len()));
+        let bit = |a: &mut CodeAssembler, n: u32| -> Result<(), IcedError> {
+            a.neg(eax)?;
+            a.sbb(eax, eax)?;
+            a.and(eax, 1 << n)?;
+            a.or(ebx, eax)
+        };
+        a.xor(ebx, ebx)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(esi, eax)?;
+        a.push(8)?;
+        a.push(8)?;
+        a.push(esi)?;
+        a.call(f("CreateCompatibleBitmap"))?;
+        a.mov(edi, eax)?;
+        a.push(edi)?;
+        a.push(esi)?;
+        a.call(f("SelectObject"))?;
+        a.push(esi)?;
+        a.call(f("DeleteObject"))?;
+        bit(a, 0)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.push(edi)?;
+        a.push(eax)?;
+        a.call(f("SelectObject"))?;
+        bit(a, 1)?;
+        a.push(esi)?;
+        a.call(object_type)?;
+        a.cmp(eax, 0)?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        bit(a, 2)?;
+        a.push(0)?;
+        a.call(get_dc)?;
+        a.mov(esi, eax)?;
+        a.push(esi)?;
+        a.call(f("DeleteObject"))?;
+        bit(a, 3)?;
+        a.push(esi)?;
+        a.call(object_type)?;
+        a.cmp(eax, 3)?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        bit(a, 4)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let mut cpu = machine_with("deleteobject_dc", &[("T.EXE", exe)]);
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x1F);
+}
+
 /// A program adds F.FON, a file of two sizes of the face "Test Face",
 /// with AddFontResourceA, measures two characters in a font of the face
 /// 12 pixels high and counts the sizes EnumFontsA lists of the face. Its
