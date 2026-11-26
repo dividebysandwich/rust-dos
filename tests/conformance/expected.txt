@@ -376,7 +376,7 @@ user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/msg: msg: 11769 tests executed (0 marked as todo, 509 failures), 6 skipped.
+user32/msg: msg: 11767 tests executed (0 marked as todo, 507 failures), 6 skipped.
 user32/msg: skipped msg.c:12537
 user32/msg: failed msg.c:8462
 user32/msg: skipped msg.c:12177
@@ -532,8 +532,6 @@ user32/msg: skipped msg.c:8103
 user32/msg: failed msg.c:8928 (x10)
 user32/msg: failed msg.c:9028 (x3)
 user32/msg: failed msg.c:9066
-user32/msg: failed msg.c:9076
-user32/msg: failed msg.c:9086
 user32/msg: failed msg.c:9096
 user32/msg: failed msg.c:9107
 user32/msg: failed msg.c:9304 (x2)
