@@ -135,9 +135,11 @@ fn chroma_constant(range: u32) -> Option<bool> {
 }
 
 /// The byte address of pixel `(x, y)` of a blit's source or destination
-/// at `base`, `stride` bytes a row.
+/// at `base`, `stride` bytes a row. A blit with negative sizes can reach
+/// a negative `x` or `y`, whose address wraps round below `base`.
 fn blt_addr(x: i32, y: i32, base: u32, stride: u32) -> u32 {
-    base.wrapping_add((y as u32).wrapping_mul(stride)).wrapping_add(2 * x as u32)
+    base.wrapping_add((y as u32).wrapping_mul(stride))
+        .wrapping_add((x as u32).wrapping_mul(2))
 }
 
 /// The bytes of rows `y0` to `y1` (either way round) of a blit's side at
@@ -831,7 +833,7 @@ impl Voodoo {
             if let Some(p) = pixel
                 && !self.blt_clipped(x, y)
             {
-                let addr = dst_base.wrapping_add((y as u32).wrapping_mul(dst_stride)).wrapping_add(2 * x as u32);
+                let addr = blt_addr(x, y, dst_base, dst_stride);
                 if queue.is_some() {
                     // The destination's test picks the same ROP for every
                     // pixel there (`blt_queue_dest`), so any value will
@@ -1449,6 +1451,56 @@ mod tests {
                 (Some(back), 30, 32, vec![33, 34, 35, 36])
             ]
         );
+    }
+
+    #[test]
+    fn fills_from_right_to_left_go_into_the_recording_a_row_at_a_time() {
+        // A fill with negative sizes, clipped to columns 31 and 32: each
+        // row's pixels left in the clip go into the recording as one run.
+        let mut v = glide_card(0);
+        v.set_mirror(true);
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+        write(&mut v, BLT_ROP, 0xCCCC);
+        write(&mut v, BLT_DST_BASE_ADDR, back);
+        write(&mut v, BLT_XY_STRIDES, 1280 << 16 | 1280);
+        write(&mut v, BLT_CLIP_X, 31 << 16 | 33);
+        write(&mut v, BLT_CLIP_Y, 480);
+        write(&mut v, BLT_COLOR, 0x1234);
+        write(&mut v, BLT_DST_XY, 32 << 16 | 33);
+        write(&mut v, BLT_SIZE, 0xFFE << 16 | 0xFFD);
+        write(&mut v, BLT_COMMAND, 1 << 31 | CLIPPING | RECT_FILL);
+        let back = back / 2;
+        let rows: Vec<_> = (v.take_mirror().unwrap().commands.iter())
+            .filter_map(|c| match c {
+                super::super::mirror::Command::Pixels(p) => {
+                    Some((p.dest, p.x, p.y, p.values.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [30, 31, 32].map(|y| (Some(back), 31, y, vec![0x1234; 2]))
+        );
+    }
+
+    #[test]
+    fn blits_that_run_left_of_column_0_dont_overflow_the_address() {
+        // Sizes of -3 from column 1 reach columns -1 and -2. Their
+        // addresses wrap round below the row (in a debug build the sum
+        // overflowed and panicked).
+        let mut v = glide_card(0);
+        v.set_mirror(true);
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+        write(&mut v, BLT_ROP, 0xCCCC);
+        write(&mut v, BLT_DST_BASE_ADDR, back);
+        write(&mut v, BLT_XY_STRIDES, 1280 << 16 | 1280);
+        write(&mut v, BLT_COLOR, 0x1234);
+        write(&mut v, BLT_DST_XY, 30 << 16 | 1);
+        write(&mut v, BLT_SIZE, 0xFFD);
+        write(&mut v, BLT_COMMAND, 1 << 31 | RECT_FILL);
+        let px = |x: u32| v.fbi.ram.get((back / 2 + 30 * 640 + x) as usize);
+        assert_eq!([px(0), px(1), px(2)], [0x1234, 0x1234, 0]);
     }
 
     #[test]
