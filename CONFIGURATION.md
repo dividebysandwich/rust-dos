@@ -1542,10 +1542,10 @@ its settings, its keys and what to know about its saved games.
 
 The PCX1 does without some of what the PCX2 added. It has no bilinear
 filtering: where a texture's two mip map levels meet, it blends a texel
-of each instead, so textures look blockier than on a PCX2
-(`powervr_filter=bilinear` smooths them anyway). Games also hand it their
-scenes in fixed point rather than in floating point; the picture is the
-same.
+of each instead, so textures look blockier than on a PCX2 with its
+filter on (`powervr_filter=bilinear` smooths them anyway). Games also
+hand it their scenes in fixed point rather than in floating point; the
+picture is the same.
 
 How the card draws follows Imagination's own driver sources and simulator
 of the chip, which they released under the MIT licence

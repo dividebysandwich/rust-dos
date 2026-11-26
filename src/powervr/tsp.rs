@@ -7,15 +7,16 @@
 //! This follows Imagination's simulator of the PCX2's TSP (`simulat3/
 //! texas.c`: `Texas`, `TexturePixel`, `AddressCalc`, `ColourConvert`),
 //! its fixed-point arithmetic included, where it agrees with the real
-//! chip. Two things the simulator leaves out were measured on a Matrox
-//! m3D (z2k-retro's PCX2 work for 86Box, `docs/appendix-c-textures.md`
-//! in powervr-pcx2-tools): a mip-mapped map's levels start a pixel
-//! further on than the simulator puts them, as on the PCX1
-//! (`simulat/texas.c`); and the BILINEAR register picks the filter for
-//! the frame, where the simulator always filters. With it at 3 (or 2)
-//! the PCX2 filters as the PCX1, which has no bilinear filter: between
-//! two mip map levels it blends a texel of each. At 1, adaptive, it
-//! filters only on the two largest levels a pixel can take.
+//! chip. z2k-retro measured where it doesn't on a Matrox m3D (their PCX2
+//! work for 86Box, `docs/appendix-c-textures.md` in powervr-pcx2-tools).
+//! Two of those differences are followed here, and issue #2127 has the
+//! others: a mip-mapped map's levels start a pixel further on than the
+//! simulator puts them, as on the PCX1 (`simulat/texas.c`); and the
+//! BILINEAR register picks the filter for the frame, where the simulator
+//! always filters. With it at 3 (or 2) the PCX2 filters as the PCX1,
+//! which has no bilinear filter: between two mip map levels it blends a
+//! texel of each. At 1, adaptive, it filters bilinearly where a pixel
+//! reads a map's largest level, and blends two levels further away.
 //!
 //! A record is at the TSP tag times two dwords from PREC_BASE. Its first
 //! dword is the control word: texturing (bit 31), smooth shading (30), no
@@ -157,8 +158,8 @@ enum Mode {
     Point,
     /// Four texels of one level, blended (BILINEAR 0).
     Bilinear,
-    /// Bilinear on a map's two largest levels, `TwoLevel` on the smaller
-    /// ones (BILINEAR 1).
+    /// Bilinear where the level of detail is below 2, which reads a map's
+    /// largest level, and `TwoLevel` further away (BILINEAR 1).
     Adaptive,
     /// Between two levels, a texel of each, blended (BILINEAR 2 and 3, and
     /// the PCX1).
@@ -290,6 +291,18 @@ impl<'a> Tsp<'a> {
         Rgba { r: mix(ab.r, cd.r), g: mix(ab.g, cd.g), b: mix(ab.b, cd.b), a: mix(ab.a, cd.a) }
     }
 
+    /// Whether a pixel of `map` at level of detail `level` (0 magnified, 1
+    /// the largest level, each one more a level smaller) is filtered
+    /// bilinearly.
+    fn filters_bilinearly(&self, map: &Map, level: i32) -> bool {
+        match self.mode {
+            Mode::Bilinear => true,
+            // Below 2 the pixel reads the map's largest level (measured).
+            Mode::Adaptive => !map.mip_mapped || level < 2,
+            Mode::Point | Mode::TwoLevel => false,
+        }
+    }
+
     /// `TexturePixel`: the texture's colour at x, y, 8 bits a channel and
     /// 4-bit alpha (15 clear).
     #[allow(clippy::too_many_arguments)]
@@ -336,11 +349,7 @@ impl<'a> Tsp<'a> {
             bot.m >>= 7;
         }
         let level = bot.e.clamp(0, 15);
-        let bilinear = match self.mode {
-            Mode::Bilinear => true,
-            Mode::Adaptive => !map.mip_mapped || level < 2,
-            Mode::Point | Mode::TwoLevel => false,
-        };
+        let bilinear = self.filters_bilinearly(map, level);
         let mut colour = if level < 1 || !map.mip_mapped || !map.sixteen_bit {
             if bilinear {
                 u_frac &= 31;
@@ -530,7 +539,7 @@ mod tests {
     #[test]
     fn mip_levels_start_a_pixel_on_and_unfiltered_frames_blend_levels() {
         let mut textures = vec![0u8; 4 << 20];
-        let registers = vec![0; regs::COUNT];
+        let mut registers = vec![0; regs::COUNT];
         let map = Map {
             address: 0,
             size: 3,
@@ -539,7 +548,6 @@ mod tests {
             alpha: false,
             flip_uv: 0,
         };
-        let mut registers = registers;
         let pcx1 = Tsp::new(Chip::Pcx1, &registers, &textures, &Shader::default());
         let pcx2 = Tsp::new(Chip::Pcx2, &registers, &textures, &Shader::default());
         // A 32x32 map's first level: 0x156 on, in the other bank (size 3 +
@@ -572,5 +580,33 @@ mod tests {
         assert_eq!(pcx1.address(&map, 0, 0, 1), 0x56);
         let t = pcx1.fetch(&map, 0, 0, 1, 0);
         assert_eq!((t.r, t.g, t.b), (31, 31, 31));
+    }
+
+    #[test]
+    fn adaptive_filters_bilinearly_only_on_a_maps_largest_level() {
+        let textures = vec![0u8; 4 << 20];
+        let mut registers = vec![0; regs::COUNT];
+        registers[regs::BILINEAR] = 1;
+        let tsp = Tsp::new(Chip::Pcx2, &registers, &textures, &Shader::default());
+        let mut map = Map {
+            address: 0,
+            size: 0,
+            sixteen_bit: true,
+            mip_mapped: true,
+            alpha: false,
+            flip_uv: 0,
+        };
+        // Levels of detail 0 and 1 both read the 256x256 level; 2 reads
+        // the 128x128 one, which blends two levels instead.
+        assert!(tsp.filters_bilinearly(&map, 0));
+        assert!(tsp.filters_bilinearly(&map, 1));
+        assert!(!tsp.filters_bilinearly(&map, 2));
+        // A map without mip levels is always filtered.
+        map.mip_mapped = false;
+        assert!(tsp.filters_bilinearly(&map, 5));
+        // At 3 nothing is.
+        registers[regs::BILINEAR] = 3;
+        let tsp = Tsp::new(Chip::Pcx2, &registers, &textures, &Shader::default());
+        assert!(!tsp.filters_bilinearly(&map, 0));
     }
 }
