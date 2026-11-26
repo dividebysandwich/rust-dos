@@ -845,17 +845,22 @@ mod tests {
     #[test]
     fn a_desktop_row_that_wraps_around_the_memory() {
         let ram = Vram::new(MEMORY);
-        let mut b = card_1024x768(1 << 18 | VIDPROC_DESKTOP_CLUT_BYPASS);
-        // Row 0 starts 4 bytes before the end: its third pixel is the
-        // memory's first word.
-        b.ext_write(VID_DESKTOP_START_ADDR, MEMORY as u32 - 4);
-        b.ext_write(VID_DESKTOP_OVERLAY_STRIDE, 2048);
         ram.set(MEMORY / 2 - 1, 0x001F);
         ram.set(0, 0xF800);
-        let mut out = vec![0; 1024 * 768 * 4];
-        b.render(&ram, &mut out, 1024);
-        assert_eq!(&out[4..8], &[0, 0, 0xFF, 255]);
-        assert_eq!(&out[8..12], &[0xFF, 0, 0, 255]);
+        // Linear, a whole row a run, and tiled, a tile's 64 pixels a run
+        // (16 tiles a row of tiles): either way the run that row 0
+        // starts with crosses the end of the memory.
+        for (tiled, stride) in [(0, 2048), (VIDPROC_DESKTOP_TILED, 16)] {
+            let mut b = card_1024x768(1 << 18 | VIDPROC_DESKTOP_CLUT_BYPASS | tiled);
+            // Row 0 starts 4 bytes before the end: its third pixel is the
+            // memory's first word.
+            b.ext_write(VID_DESKTOP_START_ADDR, MEMORY as u32 - 4);
+            b.ext_write(VID_DESKTOP_OVERLAY_STRIDE, stride);
+            let mut out = vec![0; 1024 * 768 * 4];
+            b.render(&ram, &mut out, 1024);
+            assert_eq!(&out[4..8], &[0, 0, 0xFF, 255], "tiled {tiled:X}");
+            assert_eq!(&out[8..12], &[0xFF, 0, 0, 255], "tiled {tiled:X}");
+        }
     }
 
     #[test]
