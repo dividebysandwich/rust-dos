@@ -287,6 +287,7 @@ const S_SET_COLOR_KEY: u32 = 29;
 const S_SET_PALETTE: u32 = 31;
 const S_UNLOCK: u32 = 32;
 const PAL_SET_ENTRIES: u32 = 6;
+const CLIP_GET_CLIP_LIST: u32 = 3;
 const CLIP_SET_HWND: u32 = 8;
 
 const DDSD_CAPS: u32 = 0x1;
@@ -1419,6 +1420,73 @@ fn a_windowed_program_blits_to_the_desktop_inside_its_window() {
         assert_ne!(pixel(&cpu, 92, y), 0x00FF_0000);
     }
     assert_ne!(pixel(&cpu, 100, 66), 0x00FF_0000);
+}
+
+/// A window with a frame and a caption, as Actua Soccer 2's setup
+/// screen has, and the clip list of a clipper set to it.
+fn framed_clip_list_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    put32(&mut d, RECT, 0x100);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        // WS_CAPTION, WS_SYSMENU, WS_THICKFRAME and WS_MINIMIZEBOX, at
+        // the place and size the game gives its window.
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(0x00CE_0000 | WS_VISIBLE),
+                Arg::I(152),
+                Arg::I(94),
+                Arg::I(328),
+                Arg::I(227),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        c.api(
+            a,
+            l,
+            DIRECT_DRAW_CREATE_CLIPPER,
+            &[Arg::I(0), Arg::At(CLIPPER), Arg::I(0)],
+        )?;
+        c.com(a, l, CLIPPER, CLIP_SET_HWND, &[Arg::I(0), Arg::Val(HWND)])?;
+        c.com(
+            a,
+            l,
+            CLIPPER,
+            CLIP_GET_CLIP_LIST,
+            &[Arg::I(0), Arg::At(ENTRIES), Arg::At(RECT)],
+        )?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_windows_clip_list_is_its_client_area() {
+    let (program, data) = framed_clip_list_program();
+    let mut cpu = machine("framed_clip_list", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 4)[1..], [0; 3]);
+    let list: Vec<u32> = (0..12)
+        .map(|i| peek(&cpu, data + ENTRIES + 4 * i))
+        .collect();
+    // One rectangle: the window less its 4-pixel frame and its 19-pixel
+    // caption bar, the client area the game's AdjustWindowRectEx put at
+    // (156, 117) to (476, 317). The game copies its picture into the
+    // primary surface by these rectangles, from its 320x200 buffer at
+    // their place in the client area.
+    let client = [156, 117, 476, 317];
+    assert_eq!(list[..4], [32, 1, 1, 16]);
+    assert_eq!(list[4..8], client, "bounds");
+    assert_eq!(list[8..12], client, "rectangle");
 }
 
 /// A palette on the primary surface of an 8-bit mode, and an entry

@@ -1,6 +1,6 @@
 //! IDirectDrawClipper: where blits to a surface may draw. A clipper is a
-//! window's, which clips to what of the window shows on the screen, or
-//! has a list of rectangles of its own.
+//! window's, which clips to what of the window's client area shows on
+//! the screen, or has a list of rectangles of its own.
 
 use super::com::{self, CLASS_E_NOAGGREGATION, Guid};
 use super::{
@@ -9,7 +9,7 @@ use super::{
     DDERR_REGIONTOOSMALL, Object, V_CLIPPER, state,
 };
 use crate::cpu::Cpu;
-use crate::win32::gdi32::dc::{DCX_CLIPSIBLINGS, DCX_WINDOW};
+use crate::win32::gdi32::dc::DCX_CLIPSIBLINGS;
 use crate::win32::gdi32::{Rect, Region};
 
 #[derive(Clone, Debug, Default)]
@@ -127,7 +127,13 @@ pub fn initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The region the clipper at the interface `iface` clips to, if it has
-/// one: its window's visible part on the screen, or its list.
+/// one: the visible part of its window's client area on the screen, or
+/// its list. The frame and the caption are left out, as on Windows,
+/// where the region is the one GetDC's DC of the window has: programs
+/// that copy their picture into the primary surface themselves take the
+/// clip list's rectangles to lie in the client area, and Actua Soccer 2
+/// reads its picture from before its buffer when one starts at the
+/// caption.
 pub fn region(cpu: &mut Cpu, iface: u32) -> Option<Region> {
     let (_, id) = super::this(cpu, iface)?;
     let c = state(cpu).object(id)?.clipper.clone()?;
@@ -139,7 +145,7 @@ pub fn region(cpu: &mut Cpu, iface: u32) -> Option<Region> {
         return Some(crate::win32::user32::paint::visible_region(
             user,
             c.hwnd,
-            DCX_WINDOW | DCX_CLIPSIBLINGS,
+            DCX_CLIPSIBLINGS,
         ));
     }
     let list = c.list?;
