@@ -619,9 +619,8 @@ section covers names that section.
 - **Read-backs.** With the OpenGL renderer, card memory gets a
   surface's pixels from the GPU when the processor needs them: for a
   stretched, mirrored or destination-keyed blit of a surface the host
-  drew, a z-buffer filled with DirectDraw's `Blt` (`DDBLT_DEPTHFILL`),
-  a keyed copy of more than 4096 runs of pixels or from a source the
-  host drew, the picture of a 256-colour mode or of a mode shown
+  drew, a keyed copy of more than 4096 runs of pixels or from a source
+  the host drew, the picture of a 256-colour mode or of a mode shown
   doubled, once a frame, and a program's polls of port 3DAh between
   the host's draws into the surface shown. `/api/status` counts them
   by cause.
@@ -1180,14 +1179,16 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   command names (`gpu::alias`) and copies what they hold: colour to
   colour, or depth to depth of one layout. DirectDraw's `Blt` between
   two z-buffers names both as a colour format of their size and is such
-  a copy. A depth source card memory holds gets a host copy of its own,
-  made again only after a write to its pages, so a game that puts a kept
-  scene's depths back every frame (Nocturne, behind its drawn
-  backgrounds) has them copied on the GPU. A surface inside a larger
-  copy of the same bytes (one depth buffer under targets of several
-  sizes) uses that copy. Everything else is read back as before: a keyed
-  texture, a texture that overlaps a surface without being an image of
-  it, a stretch, a copy between colour and depth.
+  a copy. Its depth fill (`DDBLT_DEPTHFILL`) names a z-buffer the same
+  way, and the host writes the fill's bits into its depth copy
+  (`gpu::fills`). A depth source card memory holds gets a host copy of
+  its own, made again only after a write to its pages, so a game that
+  puts a kept scene's depths back every frame (Nocturne, behind its drawn
+  backgrounds) has them copied on the GPU. A surface inside a larger copy
+  of the same bytes (one depth buffer under targets of several sizes) uses
+  that copy. Everything else is read back as before: a keyed texture, a
+  texture that overlaps a surface without being an image of it, a stretch,
+  a copy between colour and depth.
 - **A window's back buffer.** The OpenGL front end's and Direct3D 8's
   windowed presents copy the back buffer to the screen with `BLT`
   when it has the screen's format and isn't stretched
