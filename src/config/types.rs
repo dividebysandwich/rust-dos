@@ -172,16 +172,18 @@ impl Renderer {
     /// The setting that stands for what is asked for the 3dfx cards and
     /// for the ToadForce, each by its old line (`of_voodoo`,
     /// `of_toadforce`) or by a `renderer` line before it. `auto` agrees
-    /// with either value, and the other value wins; the 3dfx cards in
-    /// software with the ToadForce on `auto`, the pair the settings window
-    /// of an earlier rust-dos wrote by default, gives `auto`, as both are
-    /// each card's default. `opengl` with `software`, either way round,
-    /// asks for two renderers: None, an error in the file
+    /// with either value, and the other value wins. The 3dfx cards in
+    /// software with the ToadForce on `auto` or `opengl` give `auto`: the
+    /// first is the pair the settings window of an earlier rust-dos wrote
+    /// by default, the second the one it wrote for OpenGL for the
+    /// ToadForce alone, and `auto` draws both cards as they ask. The 3dfx
+    /// cards on OpenGL with the ToadForce in software asks for two
+    /// renderers, which no value draws: None, an error in the file
     /// (`Config::errors`).
     pub fn of_cards(voodoo: Self, toadforce: Self) -> Option<Self> {
         match (voodoo, toadforce) {
-            (Self::OpenGl, Self::Software) | (Self::Software, Self::OpenGl) => None,
-            (Self::Software, Self::Auto) => Some(Self::Auto),
+            (Self::OpenGl, Self::Software) => None,
+            (Self::Software, Self::Auto | Self::OpenGl) => Some(Self::Auto),
             (Self::Auto, other) | (other, Self::Auto) => Some(other),
             (same, _) => Some(same),
         }

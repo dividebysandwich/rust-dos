@@ -393,14 +393,17 @@ impl Config {
     }
 
     /// What `renderer` and the old lines after it ask for together
-    /// (`Renderer::of_cards`); None when no line sets any of them, or
-    /// when they ask for two renderers (`renderer_conflict`). A card
-    /// without an old line after the last `renderer` line takes that
-    /// line's value, and one old line with no `renderer` line before it,
-    /// or `renderer=auto`, gives its own value: `auto` asks for each
-    /// card's default, as no line does, so that a game profile's old line
-    /// reads the same over a configuration file with `renderer=auto` as
-    /// over one without the line.
+    /// (`Renderer::of_cards`), in this text alone; None when no line sets
+    /// any of them, or when they ask for two renderers
+    /// (`renderer_conflict`). A card without an old line after the last
+    /// `renderer` line takes that line's value, and one old line with no
+    /// `renderer` line before it, or `renderer=auto`, gives its own value:
+    /// `auto` asks for each card's default, as no line does.
+    ///
+    /// Text read over other settings, a game profile's or a CONFIG -SET's,
+    /// is a layer of its own: the value it gives replaces theirs for both
+    /// cards, and without a line it keeps theirs (`renderer_over`). Its
+    /// old lines are never put together with the lines below it.
     pub fn renderer(&self) -> Option<Renderer> {
         let base = self.renderer.filter(|&renderer| renderer != Renderer::Auto);
         let voodoo = self.voodoo_renderer.map(Renderer::of_voodoo).or(base);
@@ -411,11 +414,17 @@ impl Config {
         }
     }
 
-    /// The error for lines that ask for two renderers, `opengl` for one
-    /// card and `software` for the other, which no `renderer` value stands
-    /// for; None when they don't. `name` names a line by its number
-    /// (`renderer_lines`): text made of several files' text names each
-    /// one's own lines.
+    /// The renderer of this text read as a layer over settings whose
+    /// renderer is `below`: its own value (`renderer`), or `below` when it
+    /// has no line for it.
+    pub fn renderer_over(&self, below: Renderer) -> Renderer {
+        self.renderer().unwrap_or(below)
+    }
+
+    /// The error for lines that ask for two renderers, the 3dfx cards on
+    /// OpenGL and the ToadForce in software, which no `renderer` value
+    /// stands for; None when they don't. `name` names a line by its
+    /// number (`renderer_lines`).
     pub fn renderer_conflict(&self, name: impl Fn(usize) -> String) -> Option<String> {
         let old = self.voodoo_renderer.is_some() || self.toadforce_renderer.is_some();
         if !old || self.renderer().is_some() {
@@ -426,23 +435,12 @@ impl Config {
             None => "the default".to_string(),
         };
         Some(format!(
-            "{} and {} ask for two renderers, OpenGL for one card and software for the other; \
-             write one renderer line in their place: renderer=opengl or renderer=software, \
-             for both cards",
+            "{} and {} ask for two renderers, the 3dfx cards on OpenGL and the ToadForce in \
+             software; write one renderer line in their place: renderer=opengl or \
+             renderer=software, for both cards",
             line(&self.renderer_lines[0]),
             line(&self.renderer_lines[1]),
         ))
-    }
-
-    /// `renderer_conflict` for the text of a file (`own`) after the text
-    /// `base`, the settings it goes over as a file would have them: the
-    /// lines of `own` by their own numbers.
-    pub fn renderer_conflict_over(&self, base: &str) -> Option<String> {
-        let base_lines = base.lines().count();
-        self.renderer_conflict(|number| match number.checked_sub(base_lines) {
-            Some(own) if own > 0 => format!("its line {}", own),
-            _ => "the settings it goes over".to_string(),
-        })
     }
 
     /// The warning for the old settings' lines (`renderer_old_lines`),
@@ -464,21 +462,19 @@ impl Config {
         ))
     }
 
-    /// The warnings of a file's text parsed on its own (`self`), by its
-    /// own line numbers, for the file read over other settings
-    /// (`layered`, the same text after theirs): the deprecation warning
-    /// for its old renderer lines names the value they give over those
-    /// settings, which is what draws.
-    pub fn warnings_over(&self, layered: &Config) -> Vec<String> {
-        let mut warnings = self.warnings.clone();
-        let deprecation = |config: &Config| self.renderer_deprecation(config.renderer()?);
-        if let (Some(alone), Some(over)) = (deprecation(self), deprecation(layered)) {
-            for warning in &mut warnings {
-                if *warning == alone {
-                    *warning = over.clone();
-                }
-            }
-        }
+    /// The warnings of a file's text read over other settings: its own
+    /// (`self`, the text parsed alone) by its own line numbers, and those
+    /// about settings together, such as more memory than the processor
+    /// takes, from the text read after theirs (`layered`), unless the
+    /// settings below give them without it (`below`). A warning of the
+    /// text alone about settings together may not hold over the settings
+    /// below, and one of the layered text by a line number names a line
+    /// of no file.
+    pub fn warnings_over(&self, layered: &Config, below: &Config) -> Vec<String> {
+        let by_line = |w: &&String| w.starts_with("line ");
+        let mut warnings: Vec<String> = self.warnings.iter().filter(by_line).cloned().collect();
+        let together = layered.warnings.iter().filter(|w| !by_line(w));
+        warnings.extend(together.filter(|w| !below.warnings.contains(w)).cloned());
         warnings
     }
 }

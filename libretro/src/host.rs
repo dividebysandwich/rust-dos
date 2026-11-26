@@ -157,10 +157,11 @@ impl Machine {
     pub fn options_changed(&mut self, options: Values) {
         let memsize_before = self.options.get("memsize").map(str::to_string);
         self.options = options;
-        // The options' `renderer` line goes over rust-dos.conf's old lines,
-        // but the overlay's or the game profile's old line after it can
-        // ask for the other renderer. The settings then stay as they are,
-        // and the error says which lines to change.
+        // Each file's renderer replaces the one below it, so the options
+        // can't make an error, but a file can have one of its own: one
+        // edited since it was read, such as the game profile, read again
+        // here. The settings then stay as they are, and the error says
+        // which lines to change.
         let new = match self.base_settings() {
             Ok((base, warnings)) => {
                 for warning in warnings {

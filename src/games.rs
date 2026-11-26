@@ -315,13 +315,12 @@ pub fn prepare(id: &str, base: &Settings, text: &str, dir: &Path, home: Option<&
     // profile's, which win.
     let base_text = format!("{}\n", config::update_text("", &Settings::default(), base, &[], home));
     let layered = config::parse(&format!("{}{}", base_text, text), dir, home);
-    // The profile's old renderer lines over the configuration's
-    // `renderer` can ask for two renderers too.
-    if let Some(error) = layered.renderer_conflict_over(&base_text) {
-        return Err(format!("The profile {}: {}", id, error));
-    }
     let mut settings = Settings::from_config(&layered);
-    let mut warnings = own.warnings_over(&layered);
+    // The profile's renderer is its own lines' alone, which replaces the
+    // configuration's (`Config::renderer`).
+    settings.renderer = own.renderer_over(base.renderer);
+    let below = config::parse(&base_text, dir, home);
+    let mut warnings = own.warnings_over(&layered, &below);
     let boots = own.autoexec.iter().any(|line| starts_with_word(line, "BOOT"));
     match own.game_windows.as_deref() {
         // Its .exe runs in the built-in Windows.

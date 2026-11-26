@@ -275,38 +275,32 @@ pub fn with_entries(
         .iter()
         .map(|(section, key, value)| format!("[{}]\n{}={}\n", section, key, value))
         .collect();
-    let below = format!("{}\n", base);
-    let config = parse(&format!("{}{}", below, own), base_dir, home);
+    let config = parse(&format!("{}\n{}", base, own), base_dir, home);
+    // The entries are a layer over the settings: their renderer is their
+    // own lines' alone, which replaces the settings' (`Config::renderer`).
+    let entries_alone = parse(&own, base_dir, home);
+    let layered_deprecation = config.renderer().and_then(|r| config.renderer_deprecation(r));
     // What the entries brought: the settings' own were taken before. The
     // line numbers are of no file.
     let before = parse(&base, base_dir, home).warnings;
     let mut warnings: Vec<String> = config
         .warnings
         .iter()
-        .filter(|w| !before.contains(w))
+        .filter(|w| !before.contains(w) && layered_deprecation.as_ref() != Some(*w))
+        .chain(entries_alone.renderer().and_then(|r| entries_alone.renderer_deprecation(r)).iter())
         .map(|w| {
             w.split_once(": ")
                 .filter(|(at, _)| at.starts_with("line "))
                 .map_or(w.as_str(), |(_, rest)| rest)
+                .to_string()
         })
-        .map(str::to_string)
         .collect();
     let mut new = Settings::from_config(&config);
-    // An old renderer line that asks for the other renderer than the
-    // settings' `renderer` has no value to give: it isn't taken, and the
+    new.renderer = entries_alone.renderer_over(settings.renderer);
+    // Entries that ask for two renderers together aren't taken, and the
     // renderer stays as it was.
-    let below_lines = below.lines().count();
-    let conflict = config.renderer_conflict(|number| {
-        let name = if number > below_lines {
-            "the setting"
-        } else {
-            "the current settings"
-        };
-        name.to_string()
-    });
-    if let Some(error) = conflict {
+    if let Some(error) = entries_alone.renderer_conflict(|_| "the setting".to_string()) {
         warnings.push(error);
-        new.renderer = settings.renderer;
     }
     (new, warnings)
 }
@@ -322,13 +316,28 @@ pub fn update_text(
     drives: &[DriveChange],
     home: Option<&Path>,
 ) -> String {
+    // What the file's own lines stand for, for the settings whose old
+    // lines it has: a game profile's are a layer over the configuration,
+    // and `settings` has the value the layers give together.
+    let file = || {
+        let own = Settings::from_config(&parse(original, Path::new("."), home));
+        entries(&own, home)
+    };
     edit_text(original, drives, home, |lines| {
         let before = entries(baseline, home);
-        for ((section, key, value), (_, _, old)) in entries(settings, home).into_iter().zip(before) {
-            // Lines of the settings `key` took the place of get its line
-            // in their place, changed or not.
-            if value != old || has_replaced(lines, section, key) {
+        let mut in_file = None;
+        for (i, ((section, key, value), (_, _, old))) in
+            entries(settings, home).into_iter().zip(before).enumerate()
+        {
+            if value != old {
                 set_key(lines, section, key, value.as_deref());
+            } else if has_replaced(lines, section, key) {
+                // Lines of the settings `key` took the place of get its
+                // line in their place, with the value they stood for in
+                // the file: the layers' value would pin the ones below
+                // into it.
+                let in_file = in_file.get_or_insert_with(file);
+                set_key(lines, section, key, in_file[i].2.as_deref());
             }
         }
     })

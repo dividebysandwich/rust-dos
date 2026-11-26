@@ -107,11 +107,12 @@ fn both_old_renderer_lines_agree_or_are_an_error() {
     let pair = |v: V, t: T| {
         emulator(&format!("voodoo_renderer={}\ntoadforce_renderer={}\n", v.name(), t.name()))
     };
-    // The pairs that agree, `auto` with either value; the one the
-    // settings window of an earlier rust-dos wrote by default gives
-    // `auto`.
+    // The pairs that agree, `auto` with either value. The ones the
+    // settings window of an earlier rust-dos wrote by default and for
+    // OpenGL for the ToadForce alone give `auto`.
     let agree = [
         (V::Software, T::Auto, Renderer::Auto),
+        (V::Software, T::OpenGl, Renderer::Auto),
         (V::OpenGl, T::Auto, Renderer::OpenGl),
         (V::Software, T::Software, Renderer::Software),
         (V::OpenGl, T::OpenGl, Renderer::OpenGl),
@@ -121,14 +122,16 @@ fn both_old_renderer_lines_agree_or_are_an_error() {
         assert!(config.errors.is_empty(), "{v:?} {t:?}: {:?}", config.errors);
         assert_eq!(Settings::from_config(&config).renderer, renderer, "{v:?} {t:?}");
     }
-    // OpenGL for one card and software for the other, either way round:
-    // an error that names both lines.
+    // The 3dfx cards on OpenGL with the ToadForce in software: an error
+    // that names both lines.
     let config = pair(V::OpenGl, T::Software);
     let lines = ["line 2 (voodoo_renderer=opengl)", "line 3 (toadforce_renderer=software)"];
     assert!(names_two_renderers(&config.errors, &lines), "{:?}", config.errors);
+    // The software 3dfx cards with an OpenGL ToadForce draw as `auto`
+    // does, with the warning that names it.
     let config = pair(V::Software, T::OpenGl);
-    let lines = ["line 2 (voodoo_renderer=software)", "line 3 (toadforce_renderer=opengl)"];
-    assert!(names_two_renderers(&config.errors, &lines), "{:?}", config.errors);
+    let deprecated = |w: &String| w.contains("deprecated") && w.ends_with("renderer=auto");
+    assert!(config.warnings.iter().any(deprecated), "{:?}", config.warnings);
     // The order of the lines doesn't matter.
     let config = emulator("toadforce_renderer=software\nvoodoo_renderer=opengl\n");
     assert_eq!(config.errors.len(), 1, "{:?}", config.errors);
@@ -199,7 +202,7 @@ fn a_configuration_file_that_asks_for_two_renderers_does_not_load() {
 }
 
 #[test]
-fn a_game_profile_layers_its_old_renderer_lines_over_the_base_renderer() {
+fn a_game_profile_s_renderer_replaces_the_base_one() {
     let dir = scratch("profile_renderer");
     let base = |renderer| Settings { renderer, ..Settings::default() };
     let prepare = |base: &Settings, own: &str| {
@@ -207,22 +210,31 @@ fn a_game_profile_layers_its_old_renderer_lines_over_the_base_renderer() {
         crate::games::prepare("game", base, &text, &dir, None)
     };
     let renderer = |base: &Settings, own: &str| prepare(base, own).unwrap().settings.renderer;
-    // The profile's old line over the base's `renderer`.
-    let auto = base(Renderer::Auto);
-    assert_eq!(renderer(&auto, "voodoo_renderer=opengl"), Renderer::OpenGl);
-    assert_eq!(renderer(&auto, "voodoo_renderer=software"), Renderer::Software);
-    assert_eq!(renderer(&auto, "toadforce_renderer=software"), Renderer::Software);
-    let software = base(Renderer::Software);
-    assert_eq!(renderer(&software, "toadforce_renderer=auto"), Renderer::Auto);
-    let opengl = base(Renderer::OpenGl);
-    assert_eq!(renderer(&opengl, "voodoo_renderer=opengl"), Renderer::OpenGl);
-    // The profile's `renderer` over the base's, and none: the base's.
-    assert_eq!(renderer(&opengl, "renderer=software"), Renderer::Software);
-    assert_eq!(renderer(&software, "scale=2"), Renderer::Software);
-    // The warning names the value the profile's lines give over the
-    // base's, the one the game draws with.
+    let (auto, software, opengl) =
+        (base(Renderer::Auto), base(Renderer::Software), base(Renderer::OpenGl));
+    // The profile's old lines give its own value, which replaces the
+    // base's for both cards, whatever the base's is: they are never put
+    // together with the base's.
+    for base in [&auto, &software, &opengl] {
+        let name = base.renderer;
+        assert_eq!(renderer(base, "voodoo_renderer=opengl"), Renderer::OpenGl, "{name:?}");
+        assert_eq!(renderer(base, "voodoo_renderer=software"), Renderer::Software, "{name:?}");
+        assert_eq!(renderer(base, "toadforce_renderer=software"), Renderer::Software, "{name:?}");
+        assert_eq!(renderer(base, "toadforce_renderer=auto"), Renderer::Auto, "{name:?}");
+        let pair = "voodoo_renderer=software\ntoadforce_renderer=opengl";
+        assert_eq!(renderer(base, pair), Renderer::Auto, "{name:?}");
+        // Its `renderer`, `auto` too, replaces the base's, and without a
+        // line the base's stays.
+        assert_eq!(renderer(base, "renderer=software"), Renderer::Software, "{name:?}");
+        assert_eq!(renderer(base, "renderer=auto"), Renderer::Auto, "{name:?}");
+        assert_eq!(renderer(base, "scale=2"), name);
+    }
+    // The warning names the profile's own value, the one the game draws
+    // with.
     let warnings = prepare(&opengl, "toadforce_renderer=auto").unwrap().warnings;
-    let named = |w: &String| w.contains("deprecated") && w.ends_with("renderer=opengl");
+    let named = |w: &String| {
+        w.contains("line 2 (toadforce_renderer=auto)") && w.ends_with("one line renderer=auto")
+    };
     assert!(warnings.iter().any(named), "{warnings:?}");
 
     // The profile's own lines asking for two renderers: the game doesn't
@@ -234,23 +246,40 @@ fn a_game_profile_layers_its_old_renderer_lines_over_the_base_renderer() {
     assert!(error.starts_with("The profile game: "), "{error}");
     let lines = ["line 2 (voodoo_renderer=opengl)", "line 3 (toadforce_renderer=software)"];
     assert!(names_two_renderers(&[error], &lines));
-    // Its old line asking for the other renderer than the base's
-    // `renderer`: an error too, which names the profile's line by its
-    // own number.
-    let against = [
-        (&opengl, "toadforce_renderer=software"),
-        (&software, "voodoo_renderer=opengl"),
-    ];
-    for (base, own) in against {
-        let error = match prepare(base, own) {
-            Err(error) => error,
-            Ok(_) => panic!("{own} over {:?}", base.renderer),
-        };
-        assert!(error.starts_with("The profile game: "), "{error}");
-        let lines = [format!("its line 2 ({own})"), "the settings it goes over".to_string()];
-        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
-        assert!(names_two_renderers(std::slice::from_ref(&error), &lines), "{error}");
-    }
+}
+
+#[test]
+fn a_profile_over_a_base_file_with_old_lines_launches_with_its_own() {
+    // A configuration file of an earlier rust-dos, the 3dfx cards on
+    // OpenGL, under a profile that has them in software: the profile's
+    // value, as main had it for the 3dfx cards.
+    let dir = scratch("profile_over_old_lines");
+    let path = dir.join("rust-dos.conf");
+    fs::write(&path, "[emulator]\nvoodoo_renderer=opengl\ntoadforce_renderer=auto\n").unwrap();
+    let base = Settings::from_config(&load(Some(&path), &dir, None, None, None).unwrap());
+    assert_eq!(base.renderer, Renderer::OpenGl);
+    let text = "[emulator]\nvoodoo_renderer=software\n[autoexec]\nGAME.EXE\n";
+    let prepared = crate::games::prepare("game", &base, text, &dir, None).unwrap();
+    assert_eq!(prepared.settings.renderer, Renderer::Software);
+    assert_eq!(prepared.settings.voodoo_renderer(), crate::voodoo::Renderer::Software);
+}
+
+#[test]
+fn a_profile_warns_of_settings_together_as_they_are_over_the_base() {
+    let dir = scratch("profile_memsize");
+    // The base's Pentium II takes 256 MB, which the profile's memsize
+    // alone, with the default processor, would warn of.
+    let base = Settings { cpu: Some(crate::cpu::CpuModel::PentiumII), ..Settings::default() };
+    let text = "[emulator]\nmemsize=256\n[autoexec]\nGAME.EXE\n";
+    let alone = parse(text, &dir, None);
+    assert!(alone.warnings.iter().any(|w| w.starts_with("memsize")), "{:?}", alone.warnings);
+    let prepared = crate::games::prepare("game", &base, text, &dir, None).unwrap();
+    assert!(!prepared.warnings.iter().any(|w| w.contains("memsize")), "{:?}", prepared.warnings);
+    // Over a processor that doesn't take it, the warning is there.
+    let base = Settings { cpu: Some(crate::cpu::CpuModel::I486), ..Settings::default() };
+    let prepared = crate::games::prepare("game", &base, text, &dir, None).unwrap();
+    let warned = |w: &String| w.contains("memsize 256 MB");
+    assert!(prepared.warnings.iter().any(warned), "{:?}", prepared.warnings);
 }
 
 #[test]
@@ -293,6 +322,24 @@ fn saving_a_file_with_the_old_renderer_lines_writes_renderer_in_their_place() {
     let saved = update_text(profile, &file, &changed, &[], None);
     assert_eq!(old_lines(&saved), 0, "{saved}");
     assert!(saved.contains("\nrenderer=opengl\n"), "{saved}");
+
+    // A profile's lone old line over a base with another renderer: the
+    // settings have the layers' value, and the line is saved with the
+    // profile's own, so the base's isn't pinned into it.
+    let profile = "[emulator]\ntoadforce_renderer=auto\n";
+    let layered = Settings { renderer: Renderer::Auto, ..Settings::default() };
+    let over_opengl = Settings { renderer: Renderer::OpenGl, ..layered.clone() };
+    for file in [&layered, &over_opengl] {
+        let changed = Settings { scale: 3, ..file.clone() };
+        let saved = update_text(profile, file, &changed, &[], None);
+        assert_eq!(old_lines(&saved), 0, "{saved}");
+        assert!(saved.contains("\nrenderer=auto\n"), "{saved}");
+    }
+    // Picked in the window: the value picked.
+    let changed = Settings { renderer: Renderer::Software, ..over_opengl.clone() };
+    let saved = update_text(profile, &over_opengl, &changed, &[], None);
+    assert_eq!(old_lines(&saved), 0, "{saved}");
+    assert!(saved.contains("\nrenderer=software\n"), "{saved}");
 }
 
 #[test]
@@ -307,27 +354,37 @@ fn settings_write_renderer_and_not_the_old_names() {
 }
 
 #[test]
-fn config_set_of_an_old_renderer_line_against_renderer_is_not_taken() {
-    let set = |settings: &Settings, key: &str, value: &str| {
-        let entry = ("emulator".to_string(), key.to_string(), value.to_string());
-        with_entries(settings, &[entry], Path::new("/cfg"), None)
+fn config_set_of_an_old_renderer_line_replaces_the_renderer() {
+    let set = |settings: &Settings, lines: &[(&str, &str)]| {
+        let entries: Vec<_> = lines
+            .iter()
+            .map(|(key, value)| ("emulator".to_string(), key.to_string(), value.to_string()))
+            .collect();
+        with_entries(settings, &entries, Path::new("/cfg"), None)
     };
-    // The other renderer than the settings' `renderer`: the renderer
-    // stays, and the warning names both and the setting to use.
+    let deprecated = |warnings: &[String], value: &str| {
+        let warning = format!("one line renderer={value}");
+        warnings.iter().any(|w| w.contains("deprecated") && w.ends_with(&warning))
+    };
+    // A set line is a layer over the settings: its value replaces
+    // theirs, with the deprecation warning that names it.
     let software = Settings { renderer: Renderer::Software, ..Settings::default() };
-    let (new, warnings) = set(&software, "voodoo_renderer", "opengl");
-    assert_eq!(new.renderer, Renderer::Software);
-    let lines = [
-        "the current settings (renderer=software)",
-        "the setting (voodoo_renderer=opengl)",
-    ];
-    assert!(names_two_renderers(&warnings, &lines), "{warnings:?}");
-    // One that agrees is taken, with the deprecation warning.
-    let (new, warnings) = set(&software, "toadforce_renderer", "software");
-    assert_eq!(new.renderer, Renderer::Software);
-    assert!(warnings.iter().any(|w| w.contains("deprecated")), "{warnings:?}");
-    let (new, _) = set(&Settings::default(), "voodoo_renderer", "opengl");
+    let (new, warnings) = set(&software, &[("voodoo_renderer", "opengl")]);
     assert_eq!(new.renderer, Renderer::OpenGl);
+    assert!(deprecated(&warnings, "opengl"), "{warnings:?}");
+    let opengl = Settings { renderer: Renderer::OpenGl, ..Settings::default() };
+    let (new, warnings) = set(&opengl, &[("toadforce_renderer", "software")]);
+    assert_eq!(new.renderer, Renderer::Software);
+    assert!(deprecated(&warnings, "software"), "{warnings:?}");
+    assert!(!warnings.iter().any(|w| w.contains("two renderers")), "{warnings:?}");
+    // Other settings leave the renderer.
+    let (new, _) = set(&opengl, &[("scale", "2")]);
+    assert_eq!(new.renderer, Renderer::OpenGl);
+    // Set lines that ask for two renderers together aren't taken.
+    let two = [("voodoo_renderer", "opengl"), ("toadforce_renderer", "software")];
+    let (new, warnings) = set(&software, &two);
+    assert_eq!(new.renderer, Renderer::Software);
+    assert!(warnings.iter().any(|w| w.contains("two renderers")), "{warnings:?}");
 }
 
 #[test]
