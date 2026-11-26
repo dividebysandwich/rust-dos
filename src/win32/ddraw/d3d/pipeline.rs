@@ -994,14 +994,11 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
             .map(|v| transformed(setup, v, layout))
             .collect();
     }
-    let world_view = multiply(&setup.world, &setup.view);
-    let all = multiply(&world_view, &setup.projection);
-    let normals = normal_matrix(&world_view);
+    let mut placer = Placer::of(setup);
     let lighting = setup
         .lighting
         .as_ref()
-        .map(|l| lighting(l, setup, &world_view));
-    let mut blended = Blended::of(setup);
+        .map(|l| lighting(l, setup, &placer.world_view));
     let tween = match setup.blend {
         Some(Blend::Tween(f)) => Some(f),
         _ => None,
@@ -1021,44 +1018,16 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
                 }
                 None => v,
             };
-            let p = [v.position[0], v.position[1], v.position[2], 1.0];
-            // Where the vertex is in the world, its clip coordinates,
-            // where it is in camera space and its normal there.
-            let (world, clip, eye, n) = match blended.as_mut() {
-                Some(b) => {
-                    let (w, n) = b.place(v, normal);
-                    let e = transform(w, &setup.view);
-                    (w, transform(w, &b.view_projection), [e[0], e[1], e[2]], n)
-                }
-                None => {
-                    let n = if normal {
-                        times(v.normal, &normals)
-                    } else {
-                        [0.0; 3]
-                    };
-                    let w = if setup.planes.is_empty() {
-                        p
-                    } else {
-                        transform(p, &setup.world)
-                    };
-                    let eye = point([p[0], p[1], p[2]], &world_view);
-                    (w, transform(p, &all), eye, n)
-                }
-            };
+            let (world, clip, eye, n) = placer.place(v, normal);
             let n = if setup.normalize { normalize(n) } else { n };
             let mut out = Processed {
                 clip,
                 tex: std::array::from_fn(|slot| {
                     setup.coords[slot].make(layout, v, eye, n, setup.local_viewer)
                 }),
+                planes: plane_distances(setup, world),
                 ..Processed::default()
             };
-            for (i, plane) in setup.planes.iter().take(6).enumerate() {
-                out.planes[i] = plane[0] * world[0]
-                    + plane[1] * world[1]
-                    + plane[2] * world[2]
-                    + plane[3] * world[3];
-            }
             match &lighting {
                 Some(l) => {
                     let (d, s) =
@@ -1079,6 +1048,130 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
             out
         })
         .collect()
+}
+
+/// Where a draw's vertices go, with the matrices made once for all of
+/// them.
+struct Placer<'a> {
+    setup: &'a Setup,
+    world_view: Matrix,
+    all: Matrix,
+    normals: [[f32; 3]; 3],
+    blended: Option<Blended<'a>>,
+}
+
+impl<'a> Placer<'a> {
+    fn of(setup: &'a Setup) -> Placer<'a> {
+        let world_view = multiply(&setup.world, &setup.view);
+        Placer {
+            setup,
+            world_view,
+            all: multiply(&world_view, &setup.projection),
+            normals: normal_matrix(&world_view),
+            blended: Blended::of(setup),
+        }
+    }
+
+    /// Where the vertex `v`, tweened already, is in the world, its clip
+    /// coordinates, where it is in camera space and, with `normal`, its
+    /// normal there.
+    fn place(&mut self, v: &Vertex, normal: bool) -> ([f32; 4], [f32; 4], [f32; 3], [f32; 3]) {
+        let setup = self.setup;
+        if let Some(b) = self.blended.as_mut() {
+            let (w, n) = b.place(v, normal);
+            let e = transform(w, &setup.view);
+            return (w, transform(w, &b.view_projection), [e[0], e[1], e[2]], n);
+        }
+        let p = [v.position[0], v.position[1], v.position[2], 1.0];
+        let n = if normal {
+            times(v.normal, &self.normals)
+        } else {
+            [0.0; 3]
+        };
+        let w = if setup.planes.is_empty() {
+            p
+        } else {
+            transform(p, &setup.world)
+        };
+        let eye = point([p[0], p[1], p[2]], &self.world_view);
+        (w, transform(p, &self.all), eye, n)
+    }
+}
+
+/// The distances of the point `world` from the user's clip planes.
+fn plane_distances(setup: &Setup, world: [f32; 4]) -> [f32; 6] {
+    let mut out = [0.0; 6];
+    for (d, plane) in out.iter_mut().zip(&setup.planes) {
+        *d = plane[0] * world[0] + plane[1] * world[1] + plane[2] * world[2] + plane[3] * world[3];
+    }
+    out
+}
+
+/// What the untransformed vertices of `input` that `skip` doesn't name
+/// add to the clip status, worked out without keeping them: the
+/// intersection and the union of their clip codes and, with
+/// `want_extents`, their extents as `extents` gives them. None for no
+/// vertices.
+pub fn clip_of(
+    setup: &Setup,
+    input: &[Vertex],
+    skip: impl Fn(usize) -> bool,
+    want_extents: bool,
+) -> Option<(u32, u32, Option<[f32; 4]>)> {
+    let mut placer = Placer::of(setup);
+    let tween = match setup.blend {
+        Some(Blend::Tween(f)) => Some(f),
+        _ => None,
+    };
+    let mut out: Option<(u32, u32, Option<[f32; 4]>)> = None;
+    for (i, v) in input.iter().enumerate() {
+        if skip(i) {
+            continue;
+        }
+        let tweened;
+        let v = match tween {
+            Some(f) => {
+                tweened = tween_vertex(v, f);
+                &tweened
+            }
+            None => v,
+        };
+        let (world, clip, _, _) = placer.place(v, false);
+        let mut p = Processed {
+            clip,
+            planes: plane_distances(setup, world),
+            ..Processed::default()
+        };
+        p.code = codes(setup, &p);
+        let e = if want_extents {
+            extents(setup, std::slice::from_ref(&p))
+        } else {
+            None
+        };
+        out = Some(match out {
+            None => (p.code, p.code, e),
+            Some((intersection, union, extents)) => (
+                intersection & p.code,
+                union | p.code,
+                merge_extents(extents, e),
+            ),
+        });
+    }
+    out
+}
+
+/// The rectangle that takes in both `a` and `b`.
+pub fn merge_extents(a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> Option<[f32; 4]> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some([
+            a[0].min(b[0]),
+            a[1].max(b[1]),
+            a[2].min(b[2]),
+            a[3].max(b[3]),
+        ]),
+        (a, None) => a,
+        (None, b) => b,
+    }
 }
 
 /// The vertex `v` tweened by `factor`: its position, and its normal,
@@ -1850,10 +1943,15 @@ pub fn extents(setup: &Setup, verts: &[Processed]) -> Option<[f32; 4]> {
         .iter()
         .filter(|v| finite(v) && (v.tl || v.clip[3] > 0.0))
     {
-        let s = screen(setup, v);
+        // Where `screen` puts it, without its colors and coordinates.
+        let [x, y, ..] = if v.tl {
+            v.clip
+        } else {
+            setup.view_map.screen(v.clip)
+        };
         e = Some(match e {
-            None => [s.x, s.x, s.y, s.y],
-            Some(e) => [e[0].min(s.x), e[1].max(s.x), e[2].min(s.y), e[3].max(s.y)],
+            None => [x, x, y, y],
+            Some(e) => [e[0].min(x), e[1].max(x), e[2].min(y), e[3].max(y)],
         });
     }
     e

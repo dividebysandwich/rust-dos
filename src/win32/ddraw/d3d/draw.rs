@@ -351,19 +351,58 @@ pub fn account(
     drawn: pipeline::Drawn,
     flags: u32,
 ) {
-    let (intersection, union) = pipeline::clip_union(verts);
-    let extents = if flags & D3DDP_DONOTUPDATEEXTENTS == 0 {
-        pipeline::extents(setup, verts)
-    } else {
-        None
-    };
+    account_with(cpu, id, setup, verts, None, drawn, flags);
+}
+
+/// The vertices of a draw's range that none of its primitives uses
+/// (`Sparse`), which count as the others do.
+struct Unused<'a> {
+    vertices: &'a [Vertex],
+    used: &'a [bool],
+    count: usize,
+}
+
+/// `account`, the clip codes and extents of `unused` taken in too.
+fn account_with(
+    cpu: &mut Cpu,
+    id: u32,
+    setup: &Setup,
+    verts: &[Processed],
+    unused: Option<Unused>,
+    drawn: pipeline::Drawn,
+    flags: u32,
+) {
     let Some(d) = get(cpu, id) else {
         return;
     };
+    let count = verts.len() + unused.as_ref().map_or(0, |u| u.count);
     d.stats[0] = d.stats[0].wrapping_add(drawn.triangles);
     d.stats[1] = d.stats[1].wrapping_add(drawn.lines);
     d.stats[2] = d.stats[2].wrapping_add(drawn.points);
-    d.stats[4] = d.stats[4].wrapping_add(verts.len() as u32);
+    d.stats[4] = d.stats[4].wrapping_add(count as u32);
+    let asked = d.clip_status[0];
+    if asked & 3 == 0 {
+        return;
+    }
+    let want_extents = asked & 2 != 0 && flags & D3DDP_DONOTUPDATEEXTENTS == 0;
+    let mut codes = (!verts.is_empty()).then(|| pipeline::clip_union(verts));
+    let mut extents = match want_extents {
+        true => pipeline::extents(setup, verts),
+        false => None,
+    };
+    if let Some(u) = unused
+        && let Some((i, un, e)) = pipeline::clip_of(setup, u.vertices, |k| u.used[k], want_extents)
+    {
+        codes = Some(match codes {
+            None => (i, un),
+            Some((ci, cu)) => (ci & i, cu | un),
+        });
+        extents = pipeline::merge_extents(extents, e);
+    }
+    let (intersection, union) = codes.unwrap_or((0, 0));
+    let Some(d) = get(cpu, id) else {
+        return;
+    };
     let cs = &mut d.clip_status;
     // D3DCLIPSTATUS_STATUS, and the union and intersection of the codes.
     if cs[0] & 1 != 0 {
@@ -654,6 +693,24 @@ fn draw_set_up(
     prims: &[Prim],
     flags: u32,
 ) {
+    if !layout.rhw
+        && clip.is_none()
+        && let Some(sparse) = Sparse::of(prims, vertices.len())
+    {
+        let kept: Vec<Vertex> = sparse.kept.iter().map(|&i| vertices[i]).collect();
+        let processed = {
+            let _profile = crate::profile::zone(crate::profile::Zone::D3dVertices);
+            pipeline::process(setup, &kept, layout)
+        };
+        let drawn = rasterize(cpu, id, setup, &processed, &sparse.prims);
+        let unused = Unused {
+            vertices,
+            used: &sparse.used,
+            count: vertices.len() - kept.len(),
+        };
+        account_with(cpu, id, setup, &processed, Some(unused), drawn, flags);
+        return;
+    }
     let mut processed = {
         let _profile = crate::profile::zone(crate::profile::Zone::D3dVertices);
         pipeline::process(setup, vertices, layout)
@@ -678,6 +735,63 @@ fn draw_set_up(
         }
     }
     account(cpu, id, setup, &processed, drawn, flags);
+}
+
+/// The primitives of a draw that uses fewer than half of its vertices,
+/// over only those it uses. An indexed draw may name a range far larger
+/// than its indices use: Project IGI draws a few dozen triangles of
+/// ranges of 15,000 vertices. Only the vertices used go through the
+/// pipeline; the others are placed for the clip status alone
+/// (`account_with`), as Direct3D, which transforms the whole range,
+/// counts them.
+struct Sparse {
+    /// The places of the vertices used, in order.
+    kept: Vec<usize>,
+    /// Which vertices are used.
+    used: Vec<bool>,
+    /// The primitives, with places in `kept`.
+    prims: Vec<Prim>,
+}
+
+impl Sparse {
+    fn of(prims: &[Prim], count: usize) -> Option<Sparse> {
+        let mut used = vec![false; count];
+        let mut mark = |i: u32| {
+            if let Some(u) = used.get_mut(i as usize) {
+                *u = true;
+            }
+        };
+        for prim in prims {
+            match *prim {
+                Prim::Point(i) => mark(i),
+                Prim::Line(a, b, provoking) => [a, b, provoking].into_iter().for_each(&mut mark),
+                Prim::Triangle(v, provoking, _) => {
+                    v.into_iter().chain([provoking]).for_each(&mut mark)
+                }
+            }
+        }
+        let kept: Vec<usize> = (0..count).filter(|&i| used[i]).collect();
+        if kept.len() * 2 >= count {
+            return None;
+        }
+        // A vertex past the range stays past it, and isn't drawn.
+        let mut to = vec![u32::MAX; count];
+        for (new, &old) in kept.iter().enumerate() {
+            to[old] = new as u32;
+        }
+        let at = |i: u32| to.get(i as usize).copied().unwrap_or(u32::MAX);
+        let prims = prims
+            .iter()
+            .map(|prim| match *prim {
+                Prim::Point(i) => Prim::Point(at(i)),
+                Prim::Line(a, b, provoking) => Prim::Line(at(a), at(b), at(provoking)),
+                Prim::Triangle(v, provoking, edges) => {
+                    Prim::Triangle(v.map(at), at(provoking), edges)
+                }
+            })
+            .collect();
+        Some(Sparse { kept, used, prims })
+    }
 }
 
 /// Draw `prims` of `verts` on the card, if the device can draw there,
@@ -1233,5 +1347,78 @@ mod tests {
         assert_eq!(loaded.wrap(6), [2, 0, 5, 0, 0, 0, 0, 0]);
         loaded.reset_states([(RS_WRAP0 + 1, 1)]);
         assert_eq!(loaded.wrap(6), [0, 1, 0, 0, 0, 0, 0, 0]);
+    }
+
+    /// What a rasterizer is given, in order.
+    #[derive(Default)]
+    struct Recorder(Vec<pipeline::ScreenVertex>);
+
+    impl pipeline::Rasterizer for Recorder {
+        fn triangle(&mut self, v: &[pipeline::ScreenVertex; 3]) {
+            self.0.extend(v);
+        }
+        fn line(&mut self, v: &[pipeline::ScreenVertex; 2]) {
+            self.0.extend(v);
+        }
+        fn point(&mut self, v: &pipeline::ScreenVertex) {
+            self.0.push(*v);
+        }
+    }
+
+    #[test]
+    fn a_draw_of_few_of_its_vertices_keeps_only_those() {
+        let prims = pipeline::assemble(pipeline::TRIANGLELIST, &[5, 6, 7, 6, 7, 12]).unwrap();
+        let sparse = Sparse::of(&prims, 10).unwrap();
+        assert_eq!(sparse.kept, [5, 6, 7]);
+        // The vertex past the range stays past it.
+        assert_eq!(
+            sparse.prims,
+            pipeline::assemble(pipeline::TRIANGLELIST, &[0, 1, 2, 1, 2, u32::MAX]).unwrap()
+        );
+        assert_eq!(sparse.used.iter().filter(|&&u| u).count(), 3);
+        // One that uses half or more of them goes through whole.
+        let dense = pipeline::assemble(pipeline::TRIANGLELIST, &[0, 1, 2]).unwrap();
+        assert!(Sparse::of(&dense, 6).is_none());
+    }
+
+    /// A draw over the vertices it uses draws the same as one over its
+    /// whole range, and the vertices it doesn't use add the same clip
+    /// codes and extents.
+    #[test]
+    fn the_vertices_a_draw_uses_draw_as_the_whole_range_does() {
+        let setup = Setup {
+            view_map: ViewMap::dx7(0, 0, 100, 100, 0.0, 1.0),
+            ..Setup::default()
+        };
+        let layout = Layout::of(pipeline::FVF_XYZ | pipeline::FVF_DIFFUSE).unwrap();
+        let input: Vec<Vertex> = (0..20)
+            .map(|i| Vertex {
+                position: [i as f32 * 0.2 - 2.0, (i % 3) as f32 * 0.4 - 0.4, 0.5, 1.0],
+                diffuse: Some(0xFF00_0000 | i * 0x0A_0B0C),
+                ..Vertex::default()
+            })
+            .collect();
+        let prims = pipeline::assemble(pipeline::TRIANGLELIST, &[9, 10, 11, 11, 10, 12]).unwrap();
+        let sparse = Sparse::of(&prims, input.len()).unwrap();
+        let all = pipeline::process(&setup, &input, &layout);
+        let kept: Vec<Vertex> = sparse.kept.iter().map(|&i| input[i]).collect();
+        let some = pipeline::process(&setup, &kept, &layout);
+        let (mut a, mut b) = (Recorder::default(), Recorder::default());
+        pipeline::draw(&setup, &all, &prims, &mut a);
+        pipeline::draw(&setup, &some, &sparse.prims, &mut b);
+        assert!(!a.0.is_empty());
+        assert_eq!(a.0, b.0);
+        let unused: Vec<Processed> = all
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| !sparse.used[i])
+            .map(|(_, p)| *p)
+            .collect();
+        let (intersection, union) = pipeline::clip_union(&unused);
+        assert_ne!(union, 0);
+        assert_eq!(
+            pipeline::clip_of(&setup, &input, |i| sparse.used[i], true),
+            Some((intersection, union, pipeline::extents(&setup, &unused)))
+        );
     }
 }
