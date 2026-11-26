@@ -134,8 +134,8 @@ that it improves on main. Steps, in this order:
    main: a speed-up you measured, against main on the same machine and
    scene; less work for the same output, counted in deterministic runs;
    a bug that main has and the branch fixes, seen in the game; or
-   behaviour closer to the real hardware or the real Windows, shown by a
-   test or a comparison with it. Put the evidence in the description.
+   behaviour closer to the real hardware or the real Windows, shown by
+   a test or a comparison with it. Put the evidence in the description.
    How much checking that takes depends on what the change can break
    ("Checks in proportion to the change", below).
 
@@ -183,19 +183,31 @@ Check a change as much as what it can break calls for, and no more.
 Start from two questions: what could go wrong if the change is wrong,
 and where would it show? The answers pick the checks; a habit of
 running everything, many times, doesn't. A long check has a cost
-beyond its own time: an exclusive measurement stops every other
-agent's builds and emulators while it waits and while it runs.
+beyond its own time: an exclusive measurement keeps every other
+agent's new builds and emulators from starting while it waits and
+while it runs.
 
 - A change that removes work and keeps the output (a read-back, an
   upload or a copy no longer made, fewer calls or hand-offs) is shown
   by a deterministic comparison: identical frames at equal emulated
-  times, and the counter of the work removed (`/api/stats`, the
-  renderer's counts) lower on the branch. That is the evidence it is
-  better. A timing run then only puts a number on the gain: one run
-  per build on one scene that shows it is enough, and the description
-  calls the figure indicative.
+  times, and the counter of the work removed lower on the branch
+  (`/api/stats`, or the card's and its renderer's counts under `video`
+  in `/api/status`). That is the evidence it is better. The comparison
+  has to run the changed code. `--deterministic` draws the cards in
+  software, so a change to the ToadForce's OpenGL renderer is compared
+  with `RUST_DOS_TOADFORCE_GL_DETERMINISTIC=1` and `renderer` checked
+  ("The ToadForce card" in `docs/llm-debugging.md`), and one to the
+  Voodoo cards' OpenGL path, which no deterministic run reaches, takes
+  the form for runs that can't be deterministic (end of "Comparing
+  what two builds draw", below). A timing run then only puts a number
+  on the gain: one run per build on one scene that shows it is enough,
+  main first and at a fixed `--cycles`, and the description calls the
+  figure indicative. Later runs in a session tend to read slower
+  whatever the build, so main first makes that drift count against
+  the branch.
 - A timing series (several runs per build, the order alternated, the
   spread given) is for claims whose truth is the timing itself: a
+  change that does the same work faster with no counter to show it, a
   change that trades one cost for another, a gain close to the spread
   of the runs, a change to how `cycles=auto` picks its speed, or a
   figure the description quotes as a size. Keep even a series short: a
@@ -212,14 +224,16 @@ agent's builds and emulators while it waits and while it runs.
   the program the work is for. A change one program reaches needs that
   program's check and the tests. A change to shared code (GDI's palette
   and bitmaps, DirectDraw's blits, the CPU, a renderer's common path)
-  needs every test file that covers it run locally, since the Windows
-  and macOS CI jobs don't run `tests/win32` (#2024 merged with a red
-  Linux job), and deterministic runs of a few other programs that use
-  the path.
+  needs every test file that covers it run locally, and deterministic
+  runs of a few other programs that use the path. Only CI's Linux jobs
+  run the whole suite: the Windows and macOS jobs run the recompiler's
+  and the deterministic mode's tests and none of `tests/win32`, so
+  their passing says nothing about it, and a pull request can be
+  marked ready before the Linux jobs end (#2024 merged with them red).
 - A run of another program counts only if it reaches the changed code:
   check the counter or the log that shows it did. Of five games run for
   a change to the ToadForce's depth fills, one reached it; the others
-  showed only that nothing else moved. When one program reaches the
+  showed only that nothing else moved. When one of them reaches the
   code and draws the same, stop: searching every program for more
   scenes that reach it adds little.
 - A question of what the real system does is answered by the real
