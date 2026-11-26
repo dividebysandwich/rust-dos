@@ -865,8 +865,12 @@ directly, at the points where the software renderer would draw them
   renderer draws, so the card transforms everything there.
 - **Textures** are host textures decoded once and kept by their
   description (format, size, levels and the offset of each image), with
-  the write counters of the pages their images cover. A write to any of
-  those pages decodes and uploads every image again.
+  the write counters of the pages each image covers. A write to a page
+  decodes and uploads again the images on it, and a write to the
+  palette every image. Unreal writes the two largest levels of a
+  texture it animates apart from the smaller ones, with a draw between
+  them, and so has each level uploaded once a frame rather than the
+  whole texture twice.
 - **Render targets** are host framebuffers. A target drawn on the GPU is
   marked newer there. The card's own work on it on the processor (a
   declined draw, a `BLT` or `FILL` the host doesn't take) and a switch to

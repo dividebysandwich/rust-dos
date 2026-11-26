@@ -884,6 +884,47 @@ fn address_modes_and_mip_levels_agree() {
     }
 }
 
+/// A program that writes one level of a texture with mip levels between
+/// two draws with it, as Unreal does with the textures it animates: the
+/// host decodes that level again, and keeps the others as they were.
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_level_written_between_draws_is_sampled_as_written() {
+    bench!(bench, "toadforce levels");
+    // Squares of 32, 16, 8 and 4 pixels, which sample levels 0 to 3 of
+    // a texture of 32.
+    let squares = |rig: &mut Rig| {
+        rig.draw(&quad(0.0, 0.0, 32.0, WHITE, 1.0));
+        rig.draw(&quad(34.0, 0.0, 16.0, WHITE, 1.0));
+        rig.draw(&quad(34.0, 18.0, 8.0, WHITE, 1.0));
+        rig.draw(&quad(44.0, 18.0, 4.0, WHITE, 1.0));
+    };
+    let levels = |level: u32, _: u32, x: u32, y: u32| {
+        ramp(32)(level, 0, x, y) ^ 0x40 << (8 * (level % 3))
+    };
+    for written in [0, 2] {
+        bench.close(&format!("level {written} written"), |rig| {
+            let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 6, false, levels);
+            rig.texture(0, 1, &t);
+            filter(rig, 0, 1, 1, 2);
+            rig.stage(0, &[(TSS_ADDRESSU, 3), (TSS_ADDRESSV, 3)]);
+            rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
+            squares(rig);
+            // The level again, in other colours, and the squares over
+            // the first ones.
+            let (at, pitch) = t.images[written];
+            let side = 32u32 >> written;
+            for y in 0..side {
+                let row: Vec<u8> = (0..side)
+                    .flat_map(|x| (0xFF00_00FFu32 ^ (x * 8) << 8 ^ (y * 8) << 16).to_le_bytes())
+                    .collect();
+                poke(rig, at + y * pitch, &row);
+            }
+            squares(rig);
+        });
+    }
+}
+
 /// A square with its corners on whole coordinates.
 fn whole_quad(x: f32, y: f32, size: f32, repeat: f32) -> Vec<V> {
     quad(x - 0.25, y - 0.25, size, WHITE, repeat)

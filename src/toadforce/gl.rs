@@ -490,6 +490,9 @@ pub struct ToadForceGl {
     transformed: u64,
     uploads: u64,
     decodes: u64,
+    /// The images of textures decoded: the levels, and the faces of a
+    /// cube map.
+    images_decoded: u64,
     /// The images of textures filled from a copy, and the clears,
     /// fills and copies done in the copies.
     converts: u64,
@@ -599,6 +602,7 @@ impl ToadForceGl {
                 transformed: 0,
                 uploads: 0,
                 decodes: 0,
+                images_decoded: 0,
                 converts: 0,
                 clears: 0,
                 framebuffers_made: 0,
@@ -1584,18 +1588,32 @@ impl ToadForceGl {
         let batch = self.batch;
         let changes = self.changes;
         let images = (texture.levels * texture.faces()) as usize;
-        // Every image, or the ones whose surface changed on the host.
+        // Every image, or the ones whose bytes were written (`stale`) or
+        // whose surface changed on the host.
         let mut all = false;
+        let mut stale = vec![false; images];
         match self.textures.get_mut(texture) {
             Some(t) => {
                 if t.used == batch {
                     return;
                 }
                 t.used = batch;
-                for (range, stamp) in &mut t.ranges {
-                    all |= pages.changed(*range, stamp);
+                // The palette's bytes come first where there is one, and
+                // the images' in their order after
+                // (`pipeline::texture_reads`). A program that writes some
+                // of a texture's levels, as Unreal writes the top two of
+                // a texture it animates apart from the others, has those
+                // decoded and nothing else.
+                let first = t.ranges.len().saturating_sub(images);
+                for (i, (range, stamp)) in t.ranges.iter_mut().enumerate() {
+                    if pages.changed(*range, stamp) {
+                        match i.checked_sub(first) {
+                            Some(image) => stale[image] = true,
+                            None => all = true,
+                        }
+                    }
                 }
-                if !all && t.seen == changes {
+                if !all && !stale.contains(&true) && t.seen == changes {
                     return;
                 }
             }
@@ -1662,7 +1680,7 @@ impl ToadForceGl {
                 for face in 0..texture.faces() {
                     let image = (level * texture.faces() + face) as usize;
                     let version = copies[image].map(|(version, _, _)| version);
-                    if !all && version == t.sources[image] {
+                    if !all && !stale[image] && version == t.sources[image] {
                         continue;
                     }
                     t.sources[image] = version;
@@ -1683,6 +1701,7 @@ impl ToadForceGl {
                         continue;
                     }
                     decoded = true;
+                    self.images_decoded += 1;
                     let image = texture::decode(texture, level as u32, face, memory);
                     let (w, h) = (image.width as i32, image.height as i32);
                     let data = glow::PixelUnpackData::Slice(Some(&image.texels));
@@ -1741,8 +1760,11 @@ impl ToadForceGl {
         t.seen = changes;
         self.decodes += decoded as u64;
         self.converts += converts.len() as u64;
-        if all {
-            for (range, stamp) in &mut t.ranges {
+        // The stamps of the bytes that changed. Those of the others were
+        // brought up to now by `changed`.
+        let first = t.ranges.len().saturating_sub(images);
+        for (i, (range, stamp)) in t.ranges.iter_mut().enumerate() {
+            if all || i.checked_sub(first).is_some_and(|image| stale[image]) {
                 *stamp = pages.stamp(*range);
             }
         }
@@ -2343,6 +2365,7 @@ impl Host for ToadForceGl {
             "runs": self.runs,
             "surface_uploads": self.uploads,
             "texture_uploads": self.decodes,
+            "texture_images": self.images_decoded,
             "programs": self.programs.borrow().len(),
             "transforming_programs": self.tnl.borrow().len(),
             "transformed_runs": self.transformed,
