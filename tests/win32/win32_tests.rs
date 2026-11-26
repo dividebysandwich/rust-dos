@@ -22493,3 +22493,160 @@ fn a_win32_program_for_windows_3_gets_edit_colors_for_a_read_only_edit() {
     let (code, out) = run("edit_colors_win32_plain", exe);
     assert_eq!(code, 1, "an edit that takes input: {out}");
 }
+
+/// Probe for #1889: a worker thread works in batches of 1000 loop passes
+/// and gives up its turn with Sleep(0) every `per_sleep` batches, while
+/// the main thread, of the same priority, waits in Sleep (spin 0), spins
+/// on GetTickCount (1), or on GetTickCount and PeekMessageA(PM_REMOVE)
+/// (2), for `ms` milliseconds each. Prints a line for each: the spin's
+/// number, the worker's batches, the main thread's passes.
+fn share_program(per_sleep: u32, ms: i32, gui: bool) -> Vec<u8> {
+    let k32: &[&str] = &[
+        "GetTickCount",
+        "CreateThread",
+        "Sleep",
+        "WaitForSingleObject",
+        "CloseHandle",
+        "GetStdHandle",
+        "WriteFile",
+        "ExitProcess",
+        "CreateFileA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", k32), ("USER32.DLL", &["PeekMessageA"])];
+    // Stop flag 0, batches 4, main passes 8, start 0xC, MSG 0x10, digits
+    // to 0x40, count 0x40, handle 0x44, worker start 0x48, id 0x4C, line
+    // end 0x50, batches to the next Sleep 0x54.
+    let mut data = vec![0; 0x100];
+    data[0x50..0x52].copy_from_slice(b"\r\n");
+    data[0x60..0x67].copy_from_slice(b"OUT.TXT");
+    let subsystem = if gui { pe::SUBSYSTEM_GUI } else { pe::SUBSYSTEM_CONSOLE };
+    program_for(subsystem, BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(k32.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut print = a.create_label();
+        let mut batch = a.create_label();
+        let mut work = a.create_label();
+        let mut nosleep = a.create_label();
+        a.call(over)?;
+        a.set_label(&mut batch)?;
+        a.mov(ecx, 1000)?;
+        a.set_label(&mut work)?;
+        a.dec(ecx)?;
+        a.jnz(work)?;
+        a.inc(dword_ptr(l.at(4)))?;
+        a.dec(dword_ptr(l.at(0x54)))?;
+        a.jnz(nosleep)?;
+        a.mov(dword_ptr(l.at(0x54)), per_sleep)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.set_label(&mut nosleep)?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(batch)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut print)?;
+        a.mov(edi, l.at(0x3F) as i32)?;
+        a.mov(byte_ptr(edi), b' ' as i32)?;
+        a.mov(ecx, 10)?;
+        let mut digit = a.create_label();
+        a.set_label(&mut digit)?;
+        a.dec(edi)?;
+        a.xor(edx, edx)?;
+        a.div(ecx)?;
+        a.add(dl, b'0' as i32)?;
+        a.mov(byte_ptr(edi), dl)?;
+        a.test(eax, eax)?;
+        a.jnz(digit)?;
+        a.mov(edx, l.at(0x40) as i32)?;
+        a.sub(edx, edi)?;
+        a.push(0)?;
+        a.push(l.at(0x40) as i32)?;
+        a.push(edx)?;
+        a.push(edi)?;
+        a.push(dword_ptr(l.at(0x44)))?;
+        a.call(f("WriteFile"))?;
+        a.ret()?;
+        a.set_label(&mut over)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0x48)), eax)?;
+        if gui {
+            // CreateFileA("OUT.TXT", GENERIC_WRITE, 0, 0, CREATE_ALWAYS).
+            a.push(0)?;
+            a.push(0x80)?;
+            a.push(2)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0x4000_0000)?;
+            a.push(l.at(0x60) as i32)?;
+            a.call(f("CreateFileA"))?;
+        } else {
+            a.push(STD_OUTPUT_HANDLE)?;
+            a.call(f("GetStdHandle"))?;
+        }
+        a.mov(dword_ptr(l.at(0x44)), eax)?;
+        for spin in 0..3 {
+            a.mov(dword_ptr(l.data), 0)?;
+            a.mov(dword_ptr(l.at(4)), 0)?;
+            a.mov(dword_ptr(l.at(8)), 0)?;
+            a.mov(dword_ptr(l.at(0x54)), per_sleep)?;
+            a.push(l.at(0x4C) as i32)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(0x48)))?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateThread"))?;
+            a.mov(esi, eax)?;
+            if spin == 0 {
+                a.push(ms)?;
+                a.call(f("Sleep"))?;
+            } else {
+                a.call(f("GetTickCount"))?;
+                a.mov(dword_ptr(l.at(0xC)), eax)?;
+                let mut lp = a.create_label();
+                a.set_label(&mut lp)?;
+                if spin == 2 {
+                    a.push(1)?;
+                    a.push(0)?;
+                    a.push(0)?;
+                    a.push(0)?;
+                    a.push(l.at(0x10) as i32)?;
+                    a.call(l.import(k32.len()))?;
+                }
+                a.inc(dword_ptr(l.at(8)))?;
+                a.call(f("GetTickCount"))?;
+                a.sub(eax, dword_ptr(l.at(0xC)))?;
+                a.cmp(eax, ms)?;
+                a.jb(lp)?;
+            }
+            a.mov(dword_ptr(l.data), 1)?;
+            a.push(-1)?;
+            a.push(esi)?;
+            a.call(f("WaitForSingleObject"))?;
+            a.push(esi)?;
+            a.call(f("CloseHandle"))?;
+            a.mov(eax, spin)?;
+            a.call(print)?;
+            a.mov(eax, dword_ptr(l.at(4)))?;
+            a.call(print)?;
+            a.mov(eax, dword_ptr(l.at(8)))?;
+            a.call(print)?;
+            a.push(0)?;
+            a.push(l.at(0x40) as i32)?;
+            a.push(2)?;
+            a.push(l.at(0x50) as i32)?;
+            a.push(dword_ptr(l.at(0x44)))?;
+            a.call(f("WriteFile"))?;
+        }
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    })
+}
+
+/// Writes the #1889 probe to target/test_win32/share_probe/T.EXE.
+#[test]
+#[ignore]
+fn share_probe() {
+    scratch("share_probe", &[("T.EXE", share_program(4000, 4000, false)), ("G.EXE", share_program(4000, 4000, true))]);
+}
