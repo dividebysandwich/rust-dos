@@ -1283,19 +1283,9 @@ III unless `cpu` says otherwise (see `cpu` in
 | `toadforce_gamma` | `off` (default), 0.1 to 2 | A gamma the card's 16- and 32-bit pictures are shown with, after the game's own |
 
 > [!WARNING]
-> The ToadForce's software renderer is much slower than its OpenGL
-> renderer in almost every game: in Unreal's Direct3D intro it ran at
-> 20.7 frames a second, against 53 with OpenGL on the same computer
-> (with a dedicated graphics card). It draws on the thread that runs
-> the emulated machine, which waits for it, and it transforms and
-> lights every vertex on the processor. Use `toadforce_renderer=auto`
-> or `opengl` for nearly everything. Keep `software` for a game whose
-> picture is wrong with OpenGL, and report that game.
->
-> This doesn't apply to the 3dfx cards (the add-on Voodoo, a Voodoo3 or
-> a Banshee). Their software renderer draws on threads of its own, and
-> depending on the game, your CPU and your graphics card it can be
-> faster than their OpenGL renderer.
+> `toadforce_renderer=software` is much slower than OpenGL in almost
+> every game. Keep `auto` or `opengl` unless a game's picture is wrong
+> with OpenGL ([choosing a renderer](#choosing-a-renderer)).
 
 A change of `toadforce_memory` takes effect at the DOS prompt, and one
 of `toadforce_renderer` or `toadforce_gamma` at once. The card's
