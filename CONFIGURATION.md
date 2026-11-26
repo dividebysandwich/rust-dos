@@ -21,7 +21,7 @@ of them:
 | `cpu`, `memsize` | `[emulator]` | The processor and the memory. Windows games want `cpu=pentium_ii` ([processor and speed](#processor-and-speed), [memory](#memory)) |
 | `machine` | `[emulator]` | The video card the game finds ([choosing a video card](#choosing-a-video-card)) |
 | `voodoo` | `[emulator]` | Adds a 3dfx Voodoo for DOS games' 3dfx versions ([3dfx settings](#3dfx-settings)) |
-| `voodoo_renderer`, `voodoo_scale` | `[emulator]` | Whether your CPU or your graphics card draws the 3dfx card's picture, and how sharp ([choosing a renderer](#choosing-a-renderer)) |
+| `voodoo_renderer`, `toadforce_renderer`, `voodoo_scale` | `[emulator]` | Whether your CPU or your graphics card draws the 3D of a 3dfx card (the add-on Voodoo, a Voodoo3 or a Banshee) or of a ToadForce, and how sharp a 3dfx picture is ([choosing a renderer](#choosing-a-renderer)) |
 | `fps_cap` | `[emulator]` | The most frames a second a game shows ([frame rate cap](#frame-rate-cap)) |
 | `sbtype`, `midisynth`, `soundfont` | `[sound]` | The sound card and what plays MIDI music ([`[sound]`](#sound)) |
 | `master`, `sb`, `fm`, `midi` | `[mixer]` | Volumes ([`[mixer]`](#mixer)) |
@@ -225,41 +225,27 @@ it comes. They are independent of each other:
    picture](#the-window-and-the-picture)).
 
 A different renderer doesn't change what the game finds, and a different
-card doesn't change how the window scales the picture.
+card doesn't change how the window scales the picture. The first two are
+the settings changed most. After a table of common cases come [choosing a
+video card](#choosing-a-video-card), then [what the game sees and what your
+computer does](#what-the-game-sees-and-what-your-computer-does), which
+explains how the card and the renderer differ, then [choosing a
+renderer](#choosing-a-renderer).
 
-### What the game sees and what your computer does
+### Settings for common cases
 
-A game only ever talks to the emulated card. Take GLQuake on the [built-in
-Windows](#windows-games) with `machine=svga_voodoo3`:
-
-* GLQuake draws with OpenGL. It calls the OpenGL of the Windows it runs on,
-  which turns its calls into triangles for the emulated Voodoo3, as 3dfx's
-  OpenGL driver did on a real card. As far as GLQuake can tell, it draws
-  with OpenGL on a 3dfx card.
-* Rust-DOS then makes the Voodoo3's picture from those triangles. With
-  `voodoo_renderer=software`, the default, its own rasterizer draws every
-  triangle on your CPU, pixel for pixel as the card would. Your graphics
-  card takes no part in the game's 3D: GLQuake's OpenGL picture is made
-  entirely by the CPU, and it runs on a computer whose graphics driver has
-  no OpenGL at all.
-* With `voodoo_renderer=opengl`, Rust-DOS draws the same triangles again
-  with your graphics card, through your computer's OpenGL, at `voodoo_scale`
-  times the card's resolution.
-
-"OpenGL" thus names two unrelated things here. One is the interface a game
-draws with, which the game and the emulated card decide: Glide, Direct3D or
-OpenGL. The other is one of the two renderers Rust-DOS can use on your
-computer. Either renderer draws any of the interfaces: a Glide game with
-`voodoo_renderer=opengl` uses your graphics card, and GLQuake with
-`voodoo_renderer=software` doesn't.
-
-The 2D picture, which is DOS's text and graphics modes, VESA modes,
-DirectDraw and the Windows desktop, is drawn by the CPU into the emulated
-card's memory, as the real card's memory held it. A ToadForce drawn with
-OpenGL is the exception: its fills and copies into the surfaces its 3D
-draws into run on your graphics card. The window then scales the picture up
-with OpenGL 3, which costs your graphics card little; without OpenGL 3, SDL's
-renderer scales it and the CRT shaders aren't there.
+| You want | Set in `[emulator]` |
+|---|---|
+| A DOS game | Nothing: `machine=svga` and `cycles=auto` are the defaults |
+| A DOS game's 3dfx version | `voodoo=true` and `cpu=pentium`, and `voodoo_model=voodoo2` for a game made for the Voodoo2 |
+| A Windows 95 or 98 game | `machine=svga_voodoo3` and `cpu=pentium_ii`, with the other settings in [Windows games](#a-profile-to-start-from) |
+| A Windows game that needs hardware transform and lighting or 32-bit colour | `machine=svga_toadforce` |
+| A sharper 3dfx picture | `voodoo_renderer=opengl`, with `voodoo_scale=3` or `4` and `voodoo_msaa=4` |
+| A 3dfx game that runs slowly on a laptop | `voodoo_renderer=software` (the default), or `opengl` with `voodoo_scale=1`; compare them on the Stats page |
+| Crisp, even pixels | `filter=sharp` (the default) and `aspect=4:3` |
+| The look of a monitor of the time | `shader=crt`, `aperture` or `scanlines`, at `scale=3` or more |
+| Smoothed pixel art | `shader=xbrz` |
+| An even frame rate without tearing | `vrr=true` on a G-Sync or FreeSync display |
 
 ### Choosing a video card
 
@@ -322,70 +308,60 @@ tried.
 `machine` and the 3D cards take effect at the DOS prompt, so a game isn't
 left without the card it set up.
 
-### What each card can draw
+### What the game sees and what your computer does
 
-Games of the time drew 3D through one of a few interfaces, and a game only
-draws on a card that has the interface it was written for:
+A game only ever talks to the emulated card. Take GLQuake on the [built-in
+Windows](#windows-games) with `machine=svga_voodoo3`:
 
-* Glide is 3dfx's own interface, for 3dfx cards alone. Glide 2 is that of
-  the Voodoo Graphics and the Voodoo2, and most 3dfx games of 1996 to 1998
-  use it; Glide 3 came with the Voodoo2 and the Voodoo3. A DOS game brings
-  Glide with it, linked in or as `GLIDE2X.OVL`; a Windows game loads
-  `GLIDE2X.DLL` or `GLIDE3X.DLL`.
-* Direct3D is Windows' 3D interface, part of DirectX, and works on any card
-  whose driver offers it. Its versions differ in what they ask of the card:
-  Direct3D 5, 6 and 7 games run on a Voodoo-class card, Direct3D 7's
-  transform and lighting device and Direct3D 8's hardware vertex processing
-  need a card that transforms and lights vertices itself, which no 3dfx card
-  does.
-* OpenGL works through the display adapter's driver. 3dfx's add-on cards had
-  only partial drivers for it: a "MiniGL" with just what Quake's engine
-  uses, and for the Voodoo2 a full-screen OpenGL driver that Windows doesn't
-  pick by itself ([OpenGL games under
-  Windows](#opengl-games-under-windows)).
-* Some cards have interfaces of their own, which only games made for them
-  use: Rendition's RRedline (Speedy3D) and Creative's CGL on the Vérité,
-  ATI3DCIF on the 3D RAGE, and PowerVR's SGL on the PowerVR.
+* GLQuake draws with OpenGL. It calls the OpenGL of the Windows it runs on,
+  which turns its calls into triangles for the emulated Voodoo3, as 3dfx's
+  OpenGL driver did on a real card. As far as GLQuake can tell, it draws
+  with OpenGL on a 3dfx card.
+* Rust-DOS then makes the Voodoo3's picture from those triangles. With
+  `voodoo_renderer=software`, the default, its own rasterizer draws every
+  triangle on your CPU, pixel for pixel as the card would. Your graphics
+  card takes no part in the game's 3D: GLQuake's OpenGL picture is made
+  entirely by the CPU, and it runs on a computer whose graphics driver has
+  no OpenGL at all.
+* With `voodoo_renderer=opengl`, Rust-DOS draws the same triangles again
+  with your graphics card, through your computer's OpenGL, at `voodoo_scale`
+  times the card's resolution.
 
-What each card offers, by where the game runs. "Built-in Windows" is
-Rust-DOS's own Windows, which needs no driver; "Windows image" is Windows 95
-or 98 booted from a disk image, with the card's driver installed in it.
+"OpenGL" thus names two unrelated things here. One is the interface a game
+draws with, which the game and the emulated card decide: Glide, Direct3D or
+OpenGL. The other is one of the two renderers Rust-DOS can use on your
+computer. Either renderer draws any of the interfaces: a Glide game with
+`voodoo_renderer=opengl` uses your graphics card, and GLQuake with
+`voodoo_renderer=software` doesn't.
 
-| Card | DOS games | Built-in Windows | Windows image |
-|---|---|---|---|
-| `svga` and the other 2D adapters | VGA and VESA modes | GDI and DirectDraw; Direct3D's software devices only | As the image's driver has it; no 3D |
-| Voodoo Graphics (`voodoo=true`) | Glide 2 | Glide 2 and 3; Direct3D 5 to 7 in full screen | Glide from the game; Direct3D through Windows 98's own driver, as a second device beside the 2D card |
-| Voodoo2 (`voodoo_model=voodoo2`) | Glide 2 and 3 | Glide 2 and 3; Direct3D 5 to 7 and OpenGL in full screen | Glide; Direct3D and full-screen OpenGL through 3dfx's driver 3.03.00 |
-| Voodoo3, Banshee (`svga_voodoo3`, `svga_banshee`) | VGA and VESA modes | Glide 2 and 3; Direct3D 5 to 7 and Direct3D 8, OpenGL 1.1, all in a window too | Glide, Direct3D (with DirectX 7) and OpenGL through 3dfx's driver |
-| ToadForce (`svga_toadforce`) | VGA and VESA modes | Direct3D up to 8 with hardware transform and lighting, OpenGL 1.1, in a window too; no Glide | No driver: a plain VGA |
-| S3 ViRGE (`svga_s3virge`) | VGA and VESA modes | Direct3D's software devices only | Direct3D through S3's driver (DirectX 5 or later) |
-| Vérité (`svga_verite`) | RRedline (Speedy3D) and CGL | Direct3D's software devices only | The 2D desktop through Rendition's driver; its Direct3D and OpenGL haven't been tried |
-| ATI 3D RAGE (`svga_ati_3drage`, `svga_ati_3drage2`) | VGA and VESA modes | Direct3D's software devices only | Direct3D through Windows 98's or ATI's driver, and ATI3DCIF with ATI's |
-| PowerVR (`powervr=pcx1`, `pcx2`) | SGL, for the games' PowerVR versions | Not used | Not used |
-
-What sets the two Windows-era cards apart, for a game that runs on both:
-
-| | Voodoo3 | ToadForce |
-|---|---|---|
-| Colour depth of 3D | 16 bits | 16 or 32 bits |
-| Gamma of your own | `voodoo_gamma` only on the add-on cards | `toadforce_gamma` |
-| Largest texture | 256x256, in 8-bit palettized and 16-bit formats | 2048x2048, in 16- and 32-bit, compressed (DXT1 to DXT5) and bump-map formats |
-| Textures at once | 2 (the Banshee: 1) | 4, and cube maps |
-| Depth buffer | 16 bits | 24 bits with stencil (Direct3D) |
-| Transform and lighting | On the CPU, as 3dfx's driver did | On the card: Direct3D 7's T&L HAL and Direct3D 8's hardware vertex processing |
-| Glide | Yes | No |
-| Windows image | 3dfx's driver | No driver |
-| Sharper than the game's resolution | Yes, with `voodoo_renderer=opengl` and `voodoo_scale` | No |
-
-Neither card, nor any other `machine`, has pixel shaders. A game that needs
-them doesn't draw its 3D in Rust-DOS.
+The 2D picture, which is DOS's text and graphics modes, VESA modes,
+DirectDraw and the Windows desktop, is drawn by the CPU into the emulated
+card's memory, as the real card's memory held it. Two cards drawn with
+OpenGL are the exception, and draw some 2D on your graphics card: a
+ToadForce its fills and copies into the surfaces its 3D draws into, and a
+Voodoo3 or Banshee the built-in Windows' blits, fills and window updates
+in its memory, and under any Windows its 2D engine's fills and copies
+that touch the 3D's picture. The window then scales the picture up with
+OpenGL 3, which costs your graphics card little; without OpenGL 3, SDL's
+renderer scales it and the CRT shaders aren't there.
 
 ### Choosing a renderer
 
-Only two kinds of card let you choose what draws their 3D on your computer:
-the 3dfx cards, with `voodoo_renderer`, and the ToadForce, with
-`toadforce_renderer`. The S3 ViRGE, the Vérité, the ATI 3D RAGE and the
-PowerVR always draw on the CPU.
+The renderer is what draws the emulated card's 3D on your computer: your
+CPU, or your graphics card through OpenGL. The game can't tell which, as
+[above](#what-the-game-sees-and-what-your-computer-does) explains. Beside
+`machine`, it is the setting to change when a game runs slowly or you want
+a sharper picture. Which setting chooses it depends on the card:
+
+| Card | What can draw its 3D | Setting |
+|---|---|---|
+| Voodoo Graphics, Voodoo2 (`voodoo=true`) | CPU or graphics card | `voodoo_renderer` |
+| Voodoo3, Banshee (`machine=svga_voodoo3`, `svga_banshee`) | CPU or graphics card, with the built-in Windows' blits, fills and window updates in its memory, and its 2D engine's fills and copies on the 3D's picture | `voodoo_renderer`, the same setting as the add-on cards' |
+| ToadForce (`machine=svga_toadforce`) | CPU or graphics card, with its fills and copies | `toadforce_renderer` |
+| S3 ViRGE, Vérité, ATI 3D RAGE, PowerVR | CPU only | None |
+| `svga` and the other 2D adapters | No 3D; the CPU draws the 2D picture | None |
+
+How the two renderers compare:
 
 | | CPU (`software`) | Graphics card (`opengl`) |
 |---|---|---|
@@ -450,20 +426,63 @@ Voodoo Graphics or Voodoo2 with the frontend's OpenGL when
 `voodoo_renderer=opengl` and the frontend has OpenGL 3, and on the CPU
 otherwise ([its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
 
-### Settings for common cases
+### What each card can draw
 
-| You want | Set in `[emulator]` |
-|---|---|
-| A DOS game | Nothing: `machine=svga` and `cycles=auto` are the defaults |
-| A DOS game's 3dfx version | `voodoo=true` and `cpu=pentium`, and `voodoo_model=voodoo2` for a game made for the Voodoo2 |
-| A Windows 95 or 98 game | `machine=svga_voodoo3` and `cpu=pentium_ii`, with the other settings in [Windows games](#a-profile-to-start-from) |
-| A Windows game that needs hardware transform and lighting or 32-bit colour | `machine=svga_toadforce` |
-| A sharper 3dfx picture | `voodoo_renderer=opengl`, with `voodoo_scale=3` or `4` and `voodoo_msaa=4` |
-| A 3dfx game that runs slowly on a laptop | `voodoo_renderer=software` (the default), or `opengl` with `voodoo_scale=1`; compare them on the Stats page |
-| Crisp, even pixels | `filter=sharp` (the default) and `aspect=4:3` |
-| The look of a monitor of the time | `shader=crt`, `aperture` or `scanlines`, at `scale=3` or more |
-| Smoothed pixel art | `shader=xbrz` |
-| An even frame rate without tearing | `vrr=true` on a G-Sync or FreeSync display |
+Games of the time drew 3D through one of a few interfaces, and a game only
+draws on a card that has the interface it was written for:
+
+* Glide is 3dfx's own interface, for 3dfx cards alone. Glide 2 is that of
+  the Voodoo Graphics and the Voodoo2, and most 3dfx games of 1996 to 1998
+  use it; Glide 3 came with the Voodoo2 and the Voodoo3. A DOS game brings
+  Glide with it, linked in or as `GLIDE2X.OVL`; a Windows game loads
+  `GLIDE2X.DLL` or `GLIDE3X.DLL`.
+* Direct3D is Windows' 3D interface, part of DirectX, and works on any card
+  whose driver offers it. Its versions differ in what they ask of the card:
+  Direct3D 5, 6 and 7 games run on a Voodoo-class card, Direct3D 7's
+  transform and lighting device and Direct3D 8's hardware vertex processing
+  need a card that transforms and lights vertices itself, which no 3dfx card
+  does.
+* OpenGL works through the display adapter's driver. 3dfx's add-on cards had
+  only partial drivers for it: a "MiniGL" with just what Quake's engine
+  uses, and for the Voodoo2 a full-screen OpenGL driver that Windows doesn't
+  pick by itself ([OpenGL games under
+  Windows](#opengl-games-under-windows)).
+* Some cards have interfaces of their own, which only games made for them
+  use: Rendition's RRedline (Speedy3D) and Creative's CGL on the Vérité,
+  ATI3DCIF on the 3D RAGE, and PowerVR's SGL on the PowerVR.
+
+What each card offers, by where the game runs. "Built-in Windows" is
+Rust-DOS's own Windows, which needs no driver; "Windows image" is Windows 95
+or 98 booted from a disk image, with the card's driver installed in it.
+
+| Card | DOS games | Built-in Windows | Windows image |
+|---|---|---|---|
+| `svga` and the other 2D adapters | VGA and VESA modes | GDI and DirectDraw; Direct3D's software devices only | As the image's driver has it; no 3D |
+| Voodoo Graphics (`voodoo=true`) | Glide 2 | Glide 2 and 3; Direct3D 5 to 7 in full screen | Glide from the game; Direct3D through Windows 98's own driver, as a second device beside the 2D card |
+| Voodoo2 (`voodoo_model=voodoo2`) | Glide 2 and 3 | Glide 2 and 3; Direct3D 5 to 7 and OpenGL in full screen | Glide; Direct3D and full-screen OpenGL through 3dfx's driver 3.03.00 |
+| Voodoo3, Banshee (`svga_voodoo3`, `svga_banshee`) | VGA and VESA modes | Glide 2 and 3; Direct3D 5 to 7 and Direct3D 8, OpenGL 1.1, all in a window too | Glide, Direct3D (with DirectX 7) and OpenGL through 3dfx's driver |
+| ToadForce (`svga_toadforce`) | VGA and VESA modes | Direct3D up to 8 with hardware transform and lighting, OpenGL 1.1, in a window too; no Glide | No driver: a plain VGA |
+| S3 ViRGE (`svga_s3virge`) | VGA and VESA modes | Direct3D's software devices only | Direct3D through S3's driver (DirectX 5 or later) |
+| Vérité (`svga_verite`) | RRedline (Speedy3D) and CGL | Direct3D's software devices only | The 2D desktop through Rendition's driver; its Direct3D and OpenGL haven't been tried |
+| ATI 3D RAGE (`svga_ati_3drage`, `svga_ati_3drage2`) | VGA and VESA modes | Direct3D's software devices only | Direct3D through Windows 98's or ATI's driver, and ATI3DCIF with ATI's |
+| PowerVR (`powervr=pcx1`, `pcx2`) | SGL, for the games' PowerVR versions | Not used | Not used |
+
+What sets the two Windows-era cards apart, for a game that runs on both:
+
+| | Voodoo3 | ToadForce |
+|---|---|---|
+| Colour depth of 3D | 16 bits | 16 or 32 bits |
+| Gamma of your own | `voodoo_gamma` only on the add-on cards | `toadforce_gamma` |
+| Largest texture | 256x256, in 8-bit palettized and 16-bit formats | 2048x2048, in 16- and 32-bit, compressed (DXT1 to DXT5) and bump-map formats |
+| Textures at once | 2 (the Banshee: 1) | 4, and cube maps |
+| Depth buffer | 16 bits | 24 bits with stencil (Direct3D) |
+| Transform and lighting | On the CPU, as 3dfx's driver did | On the card: Direct3D 7's T&L HAL and Direct3D 8's hardware vertex processing |
+| Glide | Yes | No |
+| Windows image | 3dfx's driver | No driver |
+| Sharper than the game's resolution | Yes, with `voodoo_renderer=opengl` and `voodoo_scale` | No |
+
+Neither card, nor any other `machine`, has pixel shaders. A game that needs
+them doesn't draw its 3D in Rust-DOS.
 
 ### The window and the picture
 
