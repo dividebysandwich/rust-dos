@@ -1237,13 +1237,19 @@ fn activation_pending(state: &State, queue: u32) -> bool {
 /// or its process is the foreground one, or was started by it or by the
 /// process that took the last input.
 ///
-/// A program started by one that may take the foreground may take it
-/// too. DirectX 7's package (DX7AENG.EXE), whose licence the user had
-/// just accepted, closed its window, which gave the foreground back to
-/// the setup that started it, and then started DXSETUP.EXE. DXSETUP's
-/// message box comes in front of the setup's window on Windows 98;
-/// refused the foreground, it stayed behind it, and Demolition Racer's
-/// setup waited for it for ever (#2150).
+/// A program started by the process that took the last input may take
+/// the foreground. DirectX 7's package (DX7AENG.EXE), whose licence the
+/// user had just accepted, closed its window, which gave the foreground
+/// back to the setup that started it, and then started DXSETUP.EXE.
+/// DXSETUP's message box comes in front of the setup's window on
+/// Windows 98; refused the foreground, it stayed behind it, and
+/// Demolition Racer's setup waited for it for ever (#2150).
+///
+/// Only the caller's parent counts, and as things are when it calls: a
+/// program that parent's child starts is refused, and one started before
+/// its parent took the input is let through. Whether Windows 98 passes
+/// the permission further down, and when it decides, waits for a probe
+/// (#2168).
 fn may_take_foreground(cpu: &Cpu) -> bool {
     let queue = current_queue(cpu);
     let pid = super::current_pid(cpu);

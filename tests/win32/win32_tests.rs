@@ -15187,8 +15187,11 @@ fn a_program_started_by_the_one_that_took_the_last_input_comes_to_the_foreground
         bit_if(a, eq, 2)?;
         push_args(a, &[class, l.at(0x30) as i32])?;
         a.call(f("FindWindowA"))?;
+        a.mov(esi, eax)?;
+        a.cmp(esi, edi)?;
+        bit_if(a, eq, 3)?;
         push_args(a, &[WM_QUIT, 0, 0])?;
-        a.push(eax)?;
+        a.push(esi)?;
         a.call(f("PostMessageA"))?;
         a.push(ebx)?;
         a.call(f("ExitProcess"))?;
@@ -15260,7 +15263,7 @@ fn a_program_started_by_the_one_that_took_the_last_input_comes_to_the_foreground
         "foreground_from_last_input",
         &[("T.EXE", setup), ("M.EXE", package), ("G.EXE", message_box)],
     );
-    assert_eq!(code, 7, "the checks that failed: {:03b}", !code & 7);
+    assert_eq!(code, 0xF, "the checks that failed: {:04b}", !code & 0xF);
 }
 
 /// SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE.
