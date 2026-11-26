@@ -1679,9 +1679,15 @@ fn win32_trap(cpu: &mut Cpu, phys_ip: usize, id: u16) -> bool {
     // long the drive's noise goes on, so it starts from none and is
     // dropped when the call is done.
     cpu.bus.disk_io.clear();
-    let started = web_time::Instant::now();
+    // Timed only for `cycles=max` (`Bus::service_time`). A call made while
+    // the execution loop watches is in the watching's time already, which
+    // counts as the frame's own work (`Observe::take_watched`).
+    let timed = cpu.bus.service_time.is_some() && !cpu.bus.observe.in_watch();
+    let started = timed.then(web_time::Instant::now);
     crate::win32::service(cpu, id);
-    cpu.bus.service_time += started.elapsed();
+    if let (Some(started), Some(total)) = (started, &mut cpu.bus.service_time) {
+        *total += started.elapsed();
+    }
     flush_stale_tlb(cpu);
     if observed {
         crate::idle::after_service(cpu);

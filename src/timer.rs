@@ -800,8 +800,6 @@ pub struct Pacer {
     idle: u64,
     handed_over: u64,
     icount: u64,
-    /// `Bus::service_time` as the last frame left it.
-    service_time: Duration,
     /// The counts of the recent frames, those of them the processor
     /// halted, and of those the ones handed over, each frame's weighing
     /// `BUSY_DECAY` times the next one's.
@@ -855,7 +853,6 @@ impl Pacer {
             idle: 0,
             handed_over: 0,
             icount: 0,
-            service_time: Duration::ZERO,
             recent_ran: 0.0,
             recent_idle: 0.0,
             recent_handed: 0.0,
@@ -1025,11 +1022,14 @@ impl Pacer {
         // own work (`overhead`), in the same proportion as the blits.
         // Charged to the few instructions a waiting program runs, the
         // decoding and the blits to the 3dfx card of Omikron's movies on a
-        // Voodoo2 machine took the speed to 3,300 cycles/ms, at which the
-        // game's copy of each picture took 12 ms of the 33 between them,
-        // and Escape freed the surface in the middle of one (#1052).
-        let service = cpu.bus.service_time.saturating_sub(self.service_time);
-        self.service_time = cpu.bus.service_time;
+        // Voodoo2 machine took the speed to 3,300 to 5,000 cycles/ms, at
+        // which the game's copy of each picture took about 10 ms of the 33
+        // between them, and Escape freed the surface in the middle of one.
+        // A busy program's loop of calls (#1052's) still counts per
+        // instruction. Only `max` has the functions timed, from the frame
+        // after it is set.
+        let timing = matches!(self.speed, CpuSpeed::Max).then_some(Duration::ZERO);
+        let service = std::mem::replace(&mut cpu.bus.service_time, timing).unwrap_or_default();
         let (exec, overhead) = match self.speed {
             CpuSpeed::Max => {
                 let own = service.min(exec).mul_f64(1.0 - share);
@@ -2571,7 +2571,10 @@ mod tests {
         for _ in 0..400 {
             cpu.bus.clock.icount += executed + halted;
             cpu.bus.clock.idle += halted;
-            cpu.bus.service_time += service;
+            // As `exec::win32_trap` adds it: once the pacer times them.
+            if let Some(total) = &mut cpu.bus.service_time {
+                *total += service;
+            }
             let overhead = Duration::from_millis(1);
             if let Some(next) = pacer.end_cpu_frame(&mut cpu, executed, exec, overhead) {
                 cpu.bus.clock.set_cycles_per_ms(next);
