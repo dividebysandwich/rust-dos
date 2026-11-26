@@ -138,7 +138,8 @@ that it improves on main. Steps, in this order:
    behaviour closer to the real hardware or the real Windows, shown by
    a test or a comparison with it. Put the evidence in the description.
    How much checking that takes depends on what the change can break
-   ("Checks in proportion to the change", below).
+   ("Checks in proportion to the change", below); a change to shared
+   code also needs its "Regression check" section there.
 
    Before it is marked ready, check that it still merges with main,
    which moves on while a pull request is in draft. Fetch both and run
@@ -239,9 +240,18 @@ while it runs.
 - Other programs are run when the change is in a path they share with
   the program the work is for. A change one program reaches needs that
   program's check and the tests. A change to shared code (GDI's palette
-  and bitmaps, DirectDraw's blits, the CPU, a renderer's common path)
-  needs every test file that covers it run locally, and deterministic
-  runs of a few other programs that use the path. Only CI's Linux jobs
+  and bitmaps, DirectDraw's blits, USER, the heap, DOS's file calls,
+  the CPU, timers and the pacing of `cycles`, a card's setup or a
+  renderer's common path) needs every test file that covers it run
+  locally, and runs of two to four other programs that reach the path,
+  main against the branch: deterministic where the path allows, and in
+  the form for runs that can't be deterministic (end of "Comparing what
+  two builds draw") on an OpenGL path or at `cycles=max` or `auto`. The
+  description gets a "Regression check" section that lists the
+  programs, their settings, the builds and what each showed, and a
+  pull request that changes shared code isn't marked ready without it:
+  the program the work is for shows that the change fixes it, not what
+  it does to the others. Only CI's Linux jobs
   run the whole suite: the Windows and macOS jobs run the recompiler's
   and the deterministic mode's tests (and Windows a start of the debug
   build) and none of `tests/win32`, so their passing says nothing about
@@ -250,9 +260,10 @@ while it runs.
 - A run of another program counts only if it reaches the changed code:
   check the counter or the log that shows it did. Of five games run for
   a change to the ToadForce's depth fills (#2066), one reached it; the
-  others showed only that nothing else moved. When one of them reaches
-  the code and draws the same, stop: searching every program for more
-  scenes that reach it adds little.
+  others showed only that nothing else moved, and don't count toward
+  the two to four. When two of them reach the code and draw the same,
+  stop: searching every program for more scenes that reach it adds
+  little.
 - A question of what the real system does is answered by the real
   system: a small probe program run on real Windows or on an emulated
   real PC (86Box) settles it sooner and more surely than reasoning
