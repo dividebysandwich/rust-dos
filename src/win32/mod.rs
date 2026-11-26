@@ -1339,6 +1339,9 @@ fn terminate(cpu: &mut Cpu, index: usize, code: u32) -> bool {
 }
 
 fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
+    // The running thread's time up to now is its own, before its process
+    // may go and the next thread or the idle loop takes over.
+    thread::charge(cpu);
     if !remove_process(cpu, index, code) {
         return;
     }
@@ -1371,7 +1374,10 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         thread::run_next(cpu);
         return;
     }
-    let code = win32.exit_code;
+    // With no process left, the time until the next program starts is
+    // DOS's: the threads' count stops here (`thread::charge`).
+    thread::charge(cpu);
+    let code = cpu.bus.win32.exit_code;
     // The last program's loops get their summaries.
     trace::flush(cpu);
     let (rm_stack, a20) = (cpu.bus.win32.rm_stack, cpu.bus.win32.a20);

@@ -1887,7 +1887,10 @@ fn each_threads_time_and_instructions_are_counted() {
         }
         // The time counted at the first read, and when that was.
         let (base, since) = *start.get_or_insert((us, now));
-        if times.len() == 2 && now - since >= 300_000 {
+        if now - since >= 300_000 {
+            // The two threads and no idle loop, as the main thread is
+            // always ready. Asserted here so that the loop can't run on.
+            assert_eq!(times.len(), 2, "{times:?}");
             assert_eq!(us - base, now - since, "{times:?}");
             break times;
         }
@@ -1899,6 +1902,188 @@ fn each_threads_time_and_instructions_are_counted() {
     // A read charges the time to the running thread and changes nothing
     // else: another at once finds the same counts.
     assert_eq!(rust_dos::win32::thread_times(&mut cpu), times);
+}
+
+/// A thread that ends its process with ExitProcess keeps its time:
+/// `end_process` charges it before the process goes and the next thread
+/// runs. T.EXE starts C.EXE and waits for it; C.EXE runs a loop of 4
+/// million instructions with no thread switch and calls ExitProcess;
+/// T.EXE then spins 200 ms and ends. Read while T.EXE spins, C.EXE's
+/// thread (the later id) has the loop's instructions. Without the
+/// charge they went to T.EXE's thread, and C.EXE's had none.
+#[test]
+fn a_thread_that_ends_its_process_keeps_its_time() {
+    let child = {
+        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            a.mov(ecx, 2_000_000)?;
+            let mut work = a.create_label();
+            a.set_label(&mut work)?;
+            a.dec(ecx)?;
+            a.jnz(work)?;
+            a.push(0)?;
+            a.call(l.import(0))?;
+            a.int3()
+        })
+    };
+    let names: &[&str] = &[
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetTickCount",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line at 0, STARTUPINFO at 0x40, PROCESS_INFORMATION at
+    // 0x90, the spin's start at 0xA0.
+    let mut data = b"C.EXE".to_vec();
+    data.resize(0xB0, 0);
+    data[0x40] = 68;
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.call(f("GetTickCount"))?;
+        a.mov(dword_ptr(l.at(0xA0)), eax)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, dword_ptr(l.at(0xA0)))?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let mut cpu = machine_with("thread_times_exit", &[("T.EXE", parent), ("C.EXE", child)]);
+    // The last counts read while a program ran: the shell's reload after
+    // T.EXE ends starts the built-in Windows over (`Win32::reset`).
+    let mut last = Vec::new();
+    for _ in 0..10_000 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        if run_batch(&mut cpu, &mut NoHook, false) == StopReason::ShellReloaded {
+            break;
+        }
+        if cpu.bus.win32.active() {
+            last = rust_dos::win32::thread_times(&mut cpu);
+        }
+    }
+    let threads: Vec<_> = last.iter().filter(|t| t.0 != 0).collect();
+    assert_eq!(threads.len(), 2, "{last:x?}");
+    let child = threads.iter().max_by_key(|t| t.0).unwrap();
+    assert!(child.2 >= 4_000_000, "{last:x?}");
+}
+
+/// A program that spins on GetTickCount for `ms` milliseconds and ends.
+fn spin_program(ms: i32) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetTickCount", "ExitProcess"])];
+    program(BASE, false, imports, &[0; 4], |a, l| {
+        a.call(l.import(0))?;
+        a.mov(ebx, eax)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        a.call(l.import(0))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, ms)?;
+        a.jb(spin)?;
+        a.push(0)?;
+        a.call(l.import(1))?;
+        a.int3()
+    })
+}
+
+/// The DOS time between two Win32 programs that a DOS program starts in
+/// turn, with no shell in between to start the built-in Windows over,
+/// goes to no thread: the last process's end drops the counts' mark.
+/// P.COM starts A.EXE, waits six timer ticks (about 330 ms) in DOS and
+/// starts B.EXE; each spins 100 ms. Read while B.EXE runs, the counts
+/// hold the two programs' time and no more. Before, B.EXE's first switch
+/// gave the DOS wait to the idle loop.
+#[test]
+fn thread_times_leave_out_dos_between_programs() {
+    // The names, the command tail and EXEC's block at fixed places after
+    // the code, as 16-bit code can't address a label.
+    let (a_exe, b_exe, tail, block) = (0x180, 0x186, 0x18C, 0x18E);
+    let mut a = CodeAssembler::new(16).unwrap();
+    let mut exec = a.create_label();
+    let mut wait = a.create_label();
+    // Give back the memory past 64 KB, for the programs.
+    a.mov(ah, 0x4A).unwrap();
+    a.mov(bx, 0x1000).unwrap();
+    a.int(0x21).unwrap();
+    a.mov(dx, a_exe).unwrap();
+    a.call(exec).unwrap();
+    // Six ticks of the BIOS's count at 0040:006C.
+    a.push(0x40).unwrap();
+    a.pop(es).unwrap();
+    a.mov(si, word_ptr(0x6C).es()).unwrap();
+    a.add(si, 6).unwrap();
+    a.set_label(&mut wait).unwrap();
+    a.cmp(si, word_ptr(0x6C).es()).unwrap();
+    a.jne(wait).unwrap();
+    a.mov(dx, b_exe).unwrap();
+    a.call(exec).unwrap();
+    a.mov(ax, 0x4C00).unwrap();
+    a.int(0x21).unwrap();
+    // EXEC of the name at DX, with the parameter block filled in.
+    a.set_label(&mut exec).unwrap();
+    a.push(cs).unwrap();
+    a.pop(es).unwrap();
+    a.mov(bx, block).unwrap();
+    a.mov(word_ptr(bx), 0).unwrap();
+    a.mov(word_ptr(bx + 2), tail).unwrap();
+    a.mov(word_ptr(bx + 4), cs).unwrap();
+    a.mov(ax, 0x4B00).unwrap();
+    a.int(0x21).unwrap();
+    a.push(cs).unwrap();
+    a.pop(ds).unwrap();
+    a.ret().unwrap();
+    let mut com = a.assemble(0x100).unwrap();
+    assert!(com.len() <= 0x80);
+    com.resize(0x80, 0);
+    com.extend_from_slice(b"A.EXE\0B.EXE\0\0\x0D");
+    com.resize(0x80 + 0x1C, 0);
+    let files = [
+        ("P.COM", com),
+        ("A.EXE", spin_program(100)),
+        ("B.EXE", spin_program(100)),
+    ];
+    let mut cpu = Cpu::new(scratch("thread_times_dos", &files));
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("P.COM", None));
+    // The emulated time each program ran, and the counts read last while
+    // one ran.
+    let (mut ran, mut last) = (0, Vec::new());
+    for _ in 0..20_000 {
+        let before = cpu.bus.clock.now_micros();
+        let active = cpu.bus.win32.active();
+        cpu.bus.start_batch(cpu.bus.clock.icount + 10_000);
+        if run_batch(&mut cpu, &mut NoHook, false) == StopReason::ShellReloaded {
+            break;
+        }
+        if active || cpu.bus.win32.active() {
+            ran += cpu.bus.clock.now_micros() - before;
+        }
+        if cpu.bus.win32.active() {
+            last = rust_dos::win32::thread_times(&mut cpu);
+        }
+    }
+    let us: u64 = last.iter().map(|t| t.1).sum();
+    assert_eq!(last.iter().filter(|t| t.0 != 0).count(), 2, "{last:x?}");
+    assert!(
+        (190_000..=ran).contains(&us),
+        "{us} us counted, {ran} us run: {last:x?}"
+    );
 }
 
 /// A loop that waits for the time by GetTickCount, acquiring the

@@ -197,11 +197,14 @@ pub struct Times {
 }
 
 /// Charge the time and instructions since the mark to the running thread,
-/// or to the idle loop when none can run, and start a new mark. Time with
-/// no Win32 program running (DOS before and after it) goes to nobody.
-/// The instructions are `Cpu::executed`'s, so a busy-wait loop the idle
-/// skip skips counts its skipped passes too.
-fn charge(cpu: &mut Cpu) {
+/// or to the idle loop when none can run, and start a new mark. It runs
+/// at every switch (`run`, `idle`) and as a process ends (`end_process`),
+/// so a thread's share is charged while it is still the running one.
+/// Time with no Win32 program running (DOS before and after it) goes to
+/// nobody: the last process's end drops the mark. The instructions are
+/// `Cpu::executed`'s, so a busy-wait loop the idle skip skips counts its
+/// skipped passes too.
+pub(super) fn charge(cpu: &mut Cpu) {
     let now = (cpu.bus.clock.now_micros(), cpu.executed);
     let win32 = &mut cpu.bus.win32;
     let mark = if win32.active() { Some(now) } else { None };
@@ -967,7 +970,6 @@ pub fn exit_current(cpu: &mut Cpu, code: u32) {
     let Some((p, t)) = current(&cpu.bus.win32) else {
         return;
     };
-    charge(cpu);
     let others = cpu.bus.win32.processes[p]
         .threads
         .iter()

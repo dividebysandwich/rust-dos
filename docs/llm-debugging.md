@@ -1591,8 +1591,11 @@ With `win32` on, a Win32 console program runs on the built-in Windows
   differences for each thread's share of the processor over that
   window. `instructions` counts the passes of a busy-wait loop that the
   idle skip skipped as if they had run, so a thread that spins shows
-  its whole turn there. The counts change at thread switches and when
-  this is read; nothing the machine does reads them.
+  its whole turn there. The counts change at thread switches, as a
+  process ends and when this is read; nothing the machine does reads
+  them. When the last program ends and DOS's shell comes back, the
+  built-in Windows starts over and the list is empty: read it while
+  the program runs.
 
 `GET /api/win32/page_file` lists the pages of the running address space
 (`cr3`) that are in the page file, as `ranges` of pages next to each
