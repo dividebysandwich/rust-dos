@@ -254,10 +254,12 @@ computer. Either renderer draws any of the interfaces: a Glide game with
 `voodoo_renderer=software` doesn't.
 
 The 2D picture, which is DOS's text and graphics modes, VESA modes,
-DirectDraw and the Windows desktop, is always drawn by the CPU into the
-emulated card's memory, as the real card's memory held it. The window then
-scales it up with OpenGL 3, which costs your graphics card little; without
-OpenGL 3, SDL's renderer scales it and the CRT shaders aren't there.
+DirectDraw and the Windows desktop, is drawn by the CPU into the emulated
+card's memory, as the real card's memory held it. A ToadForce drawn with
+OpenGL is the exception: its fills and copies into the surfaces its 3D
+draws into run on your graphics card. The window then scales the picture up
+with OpenGL 3, which costs your graphics card little; without OpenGL 3, SDL's
+renderer scales it and the CRT shaders aren't there.
 
 ### Choosing a video card
 
@@ -343,7 +345,7 @@ What sets the two Windows-era cards apart, for a game that runs on both:
 |---|---|---|
 | Colour depth of 3D | 16 bits | 16 or 32 bits |
 | Gamma of your own | `voodoo_gamma` only on the add-on cards | `toadforce_gamma` |
-| Largest texture | 256x256, in 16-bit formats | 2048x2048, in 16- and 32-bit, compressed (DXT1 to DXT5) and bump-map formats |
+| Largest texture | 256x256, in 8-bit palettized and 16-bit formats | 2048x2048, in 16- and 32-bit, compressed (DXT1 to DXT5) and bump-map formats |
 | Textures at once | 2 (the Banshee: 1) | 4, and cube maps |
 | Depth buffer | 16 bits | 24 bits with stencil (Direct3D) |
 | Transform and lighting | On the CPU, as 3dfx's driver did | On the card: Direct3D 7's T&L HAL and Direct3D 8's hardware vertex processing |
@@ -373,7 +375,10 @@ PowerVR always draw on the CPU.
 Start with the default. Then compare the two on the game you play: the
 settings window's **Stats** page, or the overlay **Ctrl+Shift+F12** shows,
 has the frames a second (**FPS**) and how much of a host core the emulator
-takes (**CPU**). Both renderers change at once, while the game runs.
+takes (**CPU**). Both renderers change at once, while the game runs. On a
+Voodoo3 or Banshee the settings window doesn't offer `voodoo_renderer` yet
+([#821](https://github.com/dividebysandwich/rust-dos/issues/821)): set it in
+the configuration file and start again.
 
 The graphics card is often the faster choice, but not always, because the
 OpenGL renderer does more work than the card it draws for:
@@ -397,10 +402,14 @@ slow CPU and a capable graphics card gains the most from `opengl`, since it
 leaves the CPU to the emulated machine.
 
 For many games neither renderer is what holds them back: the emulated CPU
-is. Oni, a Voodoo2 game, ran at the same frame rate whatever the 3dfx
-renderer did ([the 3dfx OpenGL renderer](#the-3dfx-opengl-renderer)). The
-**CPU** figure on the Stats page shows this case: near 100%, the emulator is
-busy running the game, and a different renderer won't help.
+is. Oni, a Voodoo2 game, ran at the same frame rate with the OpenGL
+renderer's dithering on and off, as the emulated CPU held it back ([the
+3dfx OpenGL renderer](#the-3dfx-opengl-renderer)). The **CPU** figure on the
+Stats page is how busy the emulator's main thread is, running the machine
+and drawing the picture both, so near 100% alone doesn't say which of the
+two is the limit. The page also shows how long drawing the picture takes:
+when that is a small part of the time and **CPU** is near 100%, the machine
+is the limit, and a different renderer won't help.
 
 The ToadForce's games draw more than the 3dfx cards' do, and the CPU is too
 slow for some of them at their usual resolutions: with
@@ -410,9 +419,10 @@ game.
 
 A run with `--deterministic` always draws on the CPU, whatever the settings,
 so that its pictures are the same on every computer. The libretro core draws
-a Banshee or Voodoo3 on the CPU whatever `voodoo_renderer` says, and a
-Voodoo Graphics or Voodoo2 with the frontend's OpenGL ([its
-README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
+a Banshee or Voodoo3 on the CPU whatever `voodoo_renderer` says. It draws a
+Voodoo Graphics or Voodoo2 with the frontend's OpenGL when
+`voodoo_renderer=opengl` and the frontend has OpenGL 3, and on the CPU
+otherwise ([its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
 
 ### Settings for common cases
 
@@ -431,10 +441,11 @@ README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
 
 ### The window and the picture
 
-These settings in `[emulator]` decide how the window shows the picture. They
-change nothing the game sees, apart from `monochrome` and `composite`, and
-they take effect at once. The settings window has them on its **Display**
-page.
+These settings in `[emulator]` decide how the window shows the picture, and
+they take effect at once. Two of them also change what the program finds:
+with `monochrome` a VGA or an EGA reports a monochrome monitor from the next
+DOS prompt on, and `fps_cap` holds the program's frames, and the program
+with them. The settings window has them on its **Display** page.
 
 * `scale` is the window scale factor. `-s/--scale` overrides it.
 * `fullscreen=true` fills the screen instead of a window, keeping the
@@ -1196,8 +1207,6 @@ What the card doesn't do, and what to choose instead:
   for the card, and Windows uses it as a plain VGA there: give the
   image a card it has a driver for, such as `svga_voodoo3`
   ([docs/win9x-howto.md](docs/win9x-howto.md)).
-* A game's brightness or gamma slider: the card has no gamma ramp, and
-  the picture stays as it is.
 * Sharper pictures than the game's own: the card draws at the
   resolution the game sets, without anti-aliasing. Set a higher
   resolution in the game.
