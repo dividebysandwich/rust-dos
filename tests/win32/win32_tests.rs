@@ -11537,9 +11537,7 @@ fn the_wide_resource_functions_find_and_enumerate_resources() {
     let program = program_with(b, false, imports, &data, |a, l| {
         let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
         let at = |offset: u32| l.at(offset) as u32;
-        let keep = |a: &mut CodeAssembler, offset: u32| {
-            a.mov(dword_ptr(at(offset) as u64), eax)
-        };
+        let keep = |a: &mut CodeAssembler, offset: u32| a.mov(dword_ptr(at(offset) as u64), eax);
         // The callbacks, each one's address kept from the call over it.
         let mut over = a.create_label();
         a.call(over)?;
@@ -11594,11 +11592,19 @@ fn the_wide_resource_functions_find_and_enumerate_resources() {
         call_with(a, f("FindResourceW"), &[I(0), I(5), I(at(0x10))])?;
         a.test(eax, eax)?;
         check(a, true, 0)?;
-        call_with(a, f("FindResourceExW"), &[I(0), I(at(0x10)), I(5), I(0x409)])?;
+        call_with(
+            a,
+            f("FindResourceExW"),
+            &[I(0), I(at(0x10)), I(5), I(0x409)],
+        )?;
         a.test(eax, eax)?;
         check(a, true, 1)?;
         // UK English isn't US English.
-        call_with(a, f("FindResourceExW"), &[I(0), I(RT_RCDATA), I(5), I(0x809)])?;
+        call_with(
+            a,
+            f("FindResourceExW"),
+            &[I(0), I(RT_RCDATA), I(5), I(0x809)],
+        )?;
         a.test(eax, eax)?;
         check(a, false, 2)?;
         call_with(a, f("FindResourceW"), &[I(0), I(5), I(at(0x20))])?;
@@ -11665,10 +11671,7 @@ fn msg_wait_gives_a_signaled_object_before_the_input() {
         "PostThreadMessageA",
         "MsgWaitForMultipleObjects",
     ];
-    let imports: &[(&str, &[&str])] = &[
-        ("KERNEL32.DLL", &names[..3]),
-        ("USER32.DLL", &names[3..]),
-    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &names[..3]), ("USER32.DLL", &names[3..])];
     const WM_USER: u32 = 0x0400;
     const QS_ALLINPUT: u32 = 0xFF;
     // The event's handle at 0, a MSG at 10h.

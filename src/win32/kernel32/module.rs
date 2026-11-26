@@ -894,49 +894,45 @@ fn enum_kind(data: &[u32]) -> (u32, Chars) {
 /// EnumResourceTypesA(module, function, param): the function is called
 /// with each type the module's resources have, until it returns FALSE.
 pub(super) fn enum_resource_types(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    enum_start(cpu, ENUM_TYPES, Chars::Ansi, args[0], 0, 0, args[1], args[2])
+    enum_start(cpu, ENUM_TYPES, Chars::Ansi, args)
 }
 
 /// EnumResourceTypesW(module, function, param).
 pub(super) fn enum_resource_types_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    enum_start(cpu, ENUM_TYPES, Chars::Wide, args[0], 0, 0, args[1], args[2])
+    enum_start(cpu, ENUM_TYPES, Chars::Wide, args)
 }
 
 /// EnumResourceNamesA(module, type, function, param): the function is
 /// called with the name of each resource of the type, until it returns
 /// FALSE.
 pub(super) fn enum_resource_names(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    enum_start(cpu, ENUM_NAMES, Chars::Ansi, args[0], args[1], 0, args[2], args[3])
+    enum_start(cpu, ENUM_NAMES, Chars::Ansi, args)
 }
 
 /// EnumResourceNamesW(module, type, function, param). Windows Installer's
 /// MSIEXEC.EXE for Windows 9x calls it.
 pub(super) fn enum_resource_names_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    enum_start(cpu, ENUM_NAMES, Chars::Wide, args[0], args[1], 0, args[2], args[3])
+    enum_start(cpu, ENUM_NAMES, Chars::Wide, args)
 }
 
 /// EnumResourceLanguagesA(module, type, name, function, param): the
 /// function is called with each language the resource is in, until it
 /// returns FALSE.
 pub(super) fn enum_resource_languages(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[module, kind, name, function, param] = args else {
-        unreachable!()
-    };
-    enum_start(cpu, ENUM_LANGUAGES, Chars::Ansi, module, kind, name, function, param)
+    enum_start(cpu, ENUM_LANGUAGES, Chars::Ansi, args)
 }
 
 /// EnumResourceLanguagesW(module, type, name, function, param).
 pub(super) fn enum_resource_languages_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[module, kind, name, function, param] = args else {
-        unreachable!()
-    };
-    enum_start(cpu, ENUM_LANGUAGES, Chars::Wide, module, kind, name, function, param)
+    enum_start(cpu, ENUM_LANGUAGES, Chars::Wide, args)
 }
 
-/// Start an enumeration of `what`, or fail with FALSE and the error set:
-/// ERROR_INVALID_PARAMETER for a "#number" past FFFFh, and the error
-/// FindResourceA would set when the module has no resources or no such
-/// type or name.
+/// Start an enumeration of `what` with the function's arguments `args`
+/// (the module, the type for names and languages, the name for
+/// languages, the callback and its argument), or fail with FALSE and the
+/// error set: ERROR_INVALID_PARAMETER for a "#number" past FFFFh, and
+/// the error FindResourceA would set when the module has no resources or
+/// no such type or name.
 ///
 /// Windows 98 calls the function with the module as the program named it
 /// (NULL stays NULL), and the type and name the program passed: the same
@@ -945,17 +941,13 @@ pub(super) fn enum_resource_languages_w(cpu: &mut Cpu, args: &[u32]) -> Option<u
 /// gives a name as a string of the function's kind. It lists no
 /// languages, and returns FALSE, when a resource has a language with a
 /// name.
-#[allow(clippy::too_many_arguments)]
-fn enum_start(
-    cpu: &mut Cpu,
-    what: u32,
-    chars: Chars,
-    module: u32,
-    kind: u32,
-    name: u32,
-    function: u32,
-    param: u32,
-) -> Option<u32> {
+fn enum_start(cpu: &mut Cpu, what: u32, chars: Chars, args: &[u32]) -> Option<u32> {
+    let (module, (kind, name), [function, param]) = match (what, args) {
+        (ENUM_TYPES, &[module, function, param]) => (module, (0, 0), [function, param]),
+        (ENUM_NAMES, &[module, kind, function, param]) => (module, (kind, 0), [function, param]),
+        (_, &[module, kind, name, function, param]) => (module, (kind, name), [function, param]),
+        _ => unreachable!(),
+    };
     let flag = if chars == Chars::Wide { ENUM_WIDE } else { 0 };
     let mut data = vec![what | flag, module, function, param, kind, 0];
     if what == ENUM_LANGUAGES {
