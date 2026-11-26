@@ -1433,16 +1433,18 @@ what the program does, and `/api/status` → `activity` has its counts since
 start: `bursts` (writes to video memory the size of a frame, the frames a
 program copies there), `copies` (smaller bursts that reach across at least
 half the screen, frames copied as what changed; counted as frames for
-protected-mode programs only), `windows` (smaller bursts still that redraw
-the same window of a quarter of the screen or more, a movie's pictures;
-counted as frames for protected-mode programs, and for real-mode ones while
+protected-mode programs only), `window_copies` (the copies that redraw the
+same window of a quarter of the screen or more), `windows` (smaller bursts
+still that redraw such a window, a movie's pictures; counted as frames for
+protected-mode programs, and with `window_copies` for real-mode ones while
 they read from their drives), `flips` (display start changes), `presents`
 (what the built-in Windows drew on the screen for the program, its blits to
 the primary surface and GDI's drawing, in bursts that are a frame, a copy or
-a window by the same rules), `polls` (key checks that found nothing, idle
-calls), `status_reads` (port 3DAh) and `missed_retraces` (vertical retraces
-that began and ended between two reads of 3DAh less than a quarter of a
-frame apart: the program polled for one and an interrupt covered it), with
+a window by the same rules), `shown_windows` (the presents that were only a
+window's), `polls` (key checks that found nothing, idle calls),
+`status_reads` (port 3DAh) and `missed_retraces` (vertical retraces that
+began and ended between two reads of 3DAh less than a quarter of a frame
+apart: the program polled for one and an interrupt covered it), with
 `emulated_ns` to make rates of them. Sample it twice and divide: a game's
 frame rate at a few fixed speeds shows where it stops growing. `presents`
 count only what lands in the picture shown, not the copies to surfaces out

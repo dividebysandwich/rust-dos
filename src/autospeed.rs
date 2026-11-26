@@ -483,6 +483,12 @@ const BUSY: f64 = 0.05;
 /// a program without frames is at work; a real-mode program's on drives
 /// only. Wolf moves 52 KB a second while it loads.
 const WORKING: f64 = 32768.0;
+/// How long a real-mode program's stream from its drives lasts after a
+/// measurement that found it moving `WORKING`, for its windows' pictures
+/// (`AutoSpeed::update`): a player that fills a buffer of a few hundred
+/// KB reads once every second or two, and a measurement in between may
+/// read nothing.
+const STREAM_NS: u64 = 4_000_000_000;
 /// A real-mode program that would sit halted for this share of a
 /// measurement or more at the real-mode speed isn't loading, whatever its
 /// drives move: it waits for the timer with time to spare, as a game
@@ -604,12 +610,20 @@ pub struct Activity {
     /// `AutoSpeed::update` counts them for protected-mode programs only.
     pub copies: u64,
     /// Bursts too small to be a frame or a copy that redrew a window big
-    /// enough to show a movie in (`Window`): the movie's pictures.
+    /// enough to show a movie in (`Windows`): the movie's pictures.
     pub windows: u64,
+    /// Copies that redrew such a window: a movie whose pictures reach
+    /// across half the screen, as Dune's CD videos do. They count among
+    /// `copies` too; `AutoSpeed::update` takes them as a window's pictures
+    /// where copies don't count, in real mode.
+    pub window_copies: u64,
     /// Frames the built-in Windows showed for the program: bursts of what
     /// it wrote into the picture shown (`shown_write`) that are a frame,
     /// a copy or a window's picture by the rules above.
     pub presents: u64,
+    /// The presents that were only a window's pictures: neither a frame
+    /// nor a copy.
+    pub shown_windows: u64,
     /// Checks for a keystroke that found none, and calls of DOS's and
     /// Windows' idle interrupts.
     pub polls: u64,
@@ -740,7 +754,9 @@ impl Default for Burst {
 /// the other if that one had bursts more than twice its size, but not of
 /// a window with such bursts: Ascendancy's captions, drawn under the
 /// movie between its pictures, take the second place, and a pointer
-/// takes none.
+/// takes none. A window not redrawn for `FORGET_RETRACES` is forgotten:
+/// once a movie ends, the program's menus or panels drawn where it
+/// played are no pictures of it.
 #[derive(Clone, Copy, Debug, Default)]
 struct Windows {
     windows: [Window; 2],
@@ -748,14 +764,21 @@ struct Windows {
     last: usize,
 }
 
-/// A window of `Windows`: from `low` to `high` in video memory, and the
-/// most bytes a burst wrote there.
+/// A window of `Windows`: from `low` to `high` in video memory, the most
+/// bytes a burst wrote there, and the retraces since it was last redrawn
+/// or found.
 #[derive(Clone, Copy, Debug, Default)]
 struct Window {
     low: u64,
     high: u64,
     peak: u64,
+    idle: u32,
 }
+
+/// The retraces a window lasts without a redraw (`Windows`): about two
+/// seconds at 70 Hz, many times the gap between a movie's pictures, and
+/// room for a still scene drawn as no change at all.
+const FORGET_RETRACES: u32 = 140;
 
 impl Windows {
     /// Whether a burst of `bytes` bytes from `low` to `high`, too small to
@@ -785,6 +808,7 @@ impl Windows {
             self.last = i;
             let w = &mut self.windows[i];
             (w.low, w.high, w.peak) = (w.low.min(low), w.high.max(high), w.peak.max(bytes));
+            w.idle = 0;
             return w.high - w.low >= span && w.peak >= least;
         }
         let older = 1 - self.last;
@@ -798,9 +822,21 @@ impl Windows {
             low,
             high,
             peak: bytes,
+            idle: 0,
         };
         self.last = i;
         false
+    }
+
+    /// A vertical retrace began: forget the windows not redrawn for
+    /// `FORGET_RETRACES`.
+    fn retrace(&mut self) {
+        for w in &mut self.windows {
+            w.idle += 1;
+            if w.idle > FORGET_RETRACES {
+                *w = Window::default();
+            }
+        }
     }
 }
 
@@ -842,15 +878,23 @@ impl Activity {
             // out of sight. Where the picture isn't known, all of a burst
             // counts, the recompiler's plane writes too.
             let shown = if self.picture_known { self.shown_bytes } else { self.burst };
-            // A window comes before a copy: a real-mode program's copies
-            // don't count, and Dune's videos reach across half the screen.
+            // Every burst too small for a frame keeps the windows up to
+            // date, copies too: Dune's videos reach across half the screen,
+            // and a real-mode program's copies don't count by themselves.
+            // A copy stays a copy, for the rules of copies in
+            // `AutoSpeed::update`: a protected-mode game that copies what
+            // changed redraws the same part of the screen too.
             let sizes = self.window_sizes();
             if shown >= self.burst_min {
                 self.bursts += 1;
-            } else if self.window.redrew(shown, self.low, self.high, sizes) {
-                self.windows += 1;
-            } else if self.is_copy(shown, self.low, self.high) {
-                self.copies += 1;
+            } else {
+                let redrew = self.window.redrew(shown, self.low, self.high, sizes);
+                if self.is_copy(shown, self.low, self.high) {
+                    self.copies += 1;
+                    self.window_copies += u64::from(redrew);
+                } else if redrew {
+                    self.windows += 1;
+                }
             }
             self.burst = 0;
             self.shown_bytes = 0;
@@ -898,11 +942,16 @@ impl Activity {
         let s = self.shown;
         if at.saturating_sub(s.last) > BURST_GAP {
             let sizes = self.window_sizes();
-            if s.bytes >= self.burst_min
-                || self.is_copy(s.bytes, s.low, s.high)
-                || self.shown_window.redrew(s.bytes, s.low, s.high, sizes)
-            {
+            if s.bytes >= self.burst_min {
                 self.presents += 1;
+            } else {
+                let redrew = self.shown_window.redrew(s.bytes, s.low, s.high, sizes);
+                if self.is_copy(s.bytes, s.low, s.high) {
+                    self.presents += 1;
+                } else if redrew {
+                    self.presents += 1;
+                    self.shown_windows += 1;
+                }
             }
             self.shown = Burst::default();
         }
@@ -1066,13 +1115,14 @@ impl Activity {
     /// program writes for a screen (`screen_bytes`). A smaller burst counts
     /// as a copy when it reaches across half of that and writes at least a
     /// 128th of it (500 bytes in mode 13h, more than a mouse pointer and a
-    /// clock). A burst too small for either is a window's picture when it
+    /// clock). A burst too small for a frame is a window's picture when it
     /// redraws a window that reaches across a quarter of the screen and
     /// had a sixteenth of its bytes written in one burst, give or take a
-    /// 64th of them (`Window`). Copies and windows only where the screen's
-    /// rows follow each other in video memory (`linear`): in the CGA's,
-    /// Tandy's and Hercules' graphics they are interleaved, and text pages
-    /// lie 4 KB apart.
+    /// 64th of them (`Windows`). Copies and windows only where the
+    /// screen's rows follow each other in video memory (`linear`): in the
+    /// CGA's, Tandy's and Hercules' graphics they are interleaved, and
+    /// text pages lie 4 KB apart. The bus calls this at every vertical
+    /// retrace, which ages the windows.
     pub fn set_screen(&mut self, bytes: u64, linear: bool) {
         self.burst_min = (bytes / 4).max(500);
         (self.span_min, self.copy_min) =
@@ -1088,6 +1138,8 @@ impl Activity {
             self.window = Windows::default();
             self.shown_window = Windows::default();
         }
+        self.window.retrace();
+        self.shown_window.retrace();
     }
 
     /// Where the picture shown lies among the offsets `video_write` gets,
@@ -1192,8 +1244,10 @@ struct Mark {
     bursts: u64,
     copies: u64,
     windows: u64,
+    window_copies: u64,
     flips: u64,
     presents: u64,
+    shown_windows: u64,
     polls: u64,
     status_reads: u64,
     missed: u64,
@@ -1226,8 +1280,10 @@ impl Mark {
             bursts: a.bursts,
             copies: a.copies,
             windows: a.windows,
+            window_copies: a.window_copies,
             flips: a.flips,
             presents: a.presents,
+            shown_windows: a.shown_windows,
             polls: a.polls,
             status_reads: a.status_reads,
             missed: a.missed_retraces,
@@ -1852,6 +1908,9 @@ pub struct AutoSpeed {
     /// the same of the bytes moved on drives.
     output: (u64, u64),
     io: (u64, u64),
+    /// When a measurement last found the program moving `WORKING` on its
+    /// drives (`STREAM_NS`).
+    streamed: Option<u64>,
     /// The last measurement found a real-mode program without frames
     /// moving `WORKING` on its drives, and not waiting for the timer
     /// (`LOADING_HALTED`). It loads once a second one does too:
@@ -1925,6 +1984,7 @@ impl AutoSpeed {
             boost_cap: None,
             output: (0, 0),
             io: (0, 0),
+            streamed: None,
             loading: false,
             protected_least: PROTECTED_LEAST,
             real_most: None,
@@ -2281,9 +2341,21 @@ impl AutoSpeed {
         // would load, at all the host has: Dune's CD videos are real-mode
         // code. Otherwise its windows, as its copies, may be what a game
         // of the 1980s draws as it goes, and it keeps the real-mode speed.
-        let streams = (now.io - mark.io) as f64 * 1e9 >= WORKING * ns as f64;
-        let windows = if protected || streams {
+        // A player that fills a big buffer reads in bursts seconds apart,
+        // and a measurement between two may read nothing: the stream goes
+        // on for `STREAM_NS` after a measurement that found it. There a
+        // copy that redraws a window is one of its pictures too, as
+        // Dune's are. In protected mode copies count already, and those
+        // that redraw a window stay copies: a game copying what changed
+        // (Alien Legacy) draws its own frames, not a movie's.
+        let streams = (now.io - mark.io) as f64 * 1e9 >= WORKING * ns as f64
+            || self
+                .streamed
+                .is_some_and(|at| now.ns.saturating_sub(at) <= STREAM_NS);
+        let windows = if protected {
             now.windows - mark.windows
+        } else if streams {
+            now.windows - mark.windows + now.window_copies - mark.window_copies
         } else {
             0
         };
@@ -2422,6 +2494,9 @@ impl AutoSpeed {
             follows: now.follows - mark.follows,
             spread: now.spread - mark.spread,
         };
+        if io >= WORKING {
+            self.streamed = Some(now.ns);
+        }
         // The step up's first measurement is in: the frames kept up with it.
         self.trying = None;
         let working = self.working.take();
@@ -2446,11 +2521,18 @@ impl AutoSpeed {
         // paces itself and needs a fraction of it: Ascendancy's intro plays
         // its 12 pictures a second at 1.6 million instructions per ms and
         // at 22,000. Only for a window's pictures: a game's own frames
-        // after its load are left as they were (#1223).
+        // after its load are left as they were (#1223). Under the built-in
+        // Windows, the presents are the frames, and a movie shown in a
+        // small window is most of them (#529).
+        let shown_windows = now.shown_windows - mark.shown_windows;
         let movie = working.is_some()
             && measured.fps.is_some()
-            && (flips, presents) == (0, 0)
-            && windows > bursts;
+            && flips == 0
+            && if presents == 0 {
+                windows > bursts
+            } else {
+                shown_windows > presents - shown_windows
+            };
         if self.working.is_some() || over || movie {
             self.working = working.or(self.working);
         }
@@ -7313,9 +7395,9 @@ mod tests {
             }
         }
         // The last one ends with the next write. The copies after the
-        // first redraw its window, and count as that window's pictures.
+        // first redraw its window, and stay copies.
         a.video_write(at + 100_000, 1932, 1);
-        assert_eq!((a.bursts, a.copies, a.windows), (0, 1, 4));
+        assert_eq!((a.bursts, a.copies, a.windows, a.window_copies), (0, 5, 0, 4));
     }
 
     #[test]
@@ -8637,9 +8719,10 @@ mod tests {
             dune_picture(&mut a, &mut at);
         }
         // The last one ends with the next write, and the first only finds
-        // the window.
+        // the window. They reach across half the screen: copies that
+        // redraw a window.
         a.video_write(at + 100_000, 0, 1);
-        assert_eq!((a.bursts, a.copies, a.windows), (0, 1, 4));
+        assert_eq!((a.bursts, a.copies, a.windows, a.window_copies), (0, 5, 0, 4));
         // Ascendancy's intro on a 640x480 VESA screen: each picture what
         // changed since the last, from its first row that changed to its
         // last, between rows 151 and 328, a few bytes of each row to all
@@ -8731,17 +8814,65 @@ mod tests {
             a.shown_write(at, low, high, 320 * 200 * 4);
         }
         a.shown_write(at + 100_000, 0, 4, 4);
-        assert_eq!(a.presents, 5);
+        assert_eq!((a.presents, a.shown_windows), (5, 5));
+    }
+
+    /// A picture of a movie in mode 13h that is neither a frame nor a
+    /// copy: 160 bytes on each row from 50 to 144, 15,200 bytes, reaching
+    /// across 30,480 of the 32,000 a copy needs.
+    fn window_picture(a: &mut Activity, at: &mut u64) {
+        for row in 50..145 {
+            *at += 10;
+            a.video_write(*at, row * 320 + 80, 160);
+        }
+    }
+
+    #[test]
+    fn a_window_not_redrawn_is_forgotten() {
+        // A movie, then a menu's panel drawn where it played: 4,000 bytes,
+        // over rows 60 to 109. Right after the movie the panel redraws its
+        // window; two seconds of retraces later it only finds one anew.
+        let panel = |a: &mut Activity, at: &mut u64| {
+            for row in 60..110 {
+                *at += 10;
+                a.video_write(*at, row * 320 + 100, 80);
+            }
+        };
+        for retraces in [0, FORGET_RETRACES + 1] {
+            let mut a = Activity::new();
+            a.set_screen(64_000, true);
+            let mut at = 0;
+            for _ in 0..3 {
+                at += 100_000;
+                window_picture(&mut a, &mut at);
+            }
+            at += 100_000;
+            a.video_write(at, 0, 1);
+            assert_eq!(a.windows, 2);
+            for _ in 0..retraces {
+                a.set_screen(64_000, true);
+            }
+            at += 100_000;
+            panel(&mut a, &mut at);
+            a.video_write(at + 100_000, 0, 1);
+            assert_eq!(a.windows, if retraces == 0 { 3 } else { 2 }, "{retraces}");
+        }
     }
 
     /// The speeds `auto` runs a movie player at for `seconds` of emulated
     /// time, from 3000 instructions per ms. It reads `load_ms` of data
     /// first, never halted and drawing nothing, then shows 12 pictures a
-    /// second in a window (`dune_picture`), each decoded in `work`
+    /// second in a window with `picture`, each decoded in `work`
     /// instructions, and halts until the next one is due, while its drive
     /// streams 160 KB a second into a buffer, however fast it decodes.
     /// Also the pictures it showed a second over the last 20 seconds.
-    fn play_movie(protected: bool, load_ms: u64, work: u64, seconds: u64) -> (Vec<u32>, f64) {
+    fn play_movie(
+        protected: bool,
+        picture: fn(&mut Activity, &mut u64),
+        load_ms: u64,
+        work: u64,
+        seconds: u64,
+    ) -> (Vec<u32>, f64) {
         let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
         crate::interrupts::int10::set_mode(&mut cpu, 0x13);
         let bus = &mut cpu.bus;
@@ -8777,7 +8908,7 @@ mod tests {
             }
             bus.clock.icount += work;
             let mut at = bus.clock.icount;
-            dune_picture(&mut bus.activity, &mut at);
+            picture(&mut bus.activity, &mut at);
             bus.clock.icount = at;
             let read = 160_000 * bus.clock.now_ns() / 1_000_000_000;
             bus.activity.io_bytes = bus.activity.io_bytes.max(read);
@@ -8798,12 +8929,19 @@ mod tests {
         // instructions per ms. Without its pictures, the reads were a load
         // for the whole movie, at all the host has (#1271). With them, the
         // speed comes down as a game's does, to where its steps down keep
-        // `KEPT` of the pictures.
-        for protected in [false, true] {
+        // `KEPT` of the pictures. Dune's pictures are copies, which count
+        // in protected mode as they did, with no early end of the load:
+        // there they are a game's own frames (#1223).
+        let cases: [(bool, fn(&mut Activity, &mut u64)); 3] = [
+            (false, dune_picture),
+            (false, window_picture),
+            (true, window_picture),
+        ];
+        for (protected, picture) in cases {
             for load_ms in [0, 1500] {
-                let (speeds, rate) = play_movie(protected, load_ms, 2_000_000, 90);
-                let settled = *speeds.last().unwrap();
+                let (speeds, rate) = play_movie(protected, picture, load_ms, 2_000_000, 90);
                 let case = format!("{protected} {load_ms}: {rate} {speeds:?}");
+                let settled = *speeds.last().unwrap_or_else(|| panic!("{case}"));
                 assert!(rate >= 12.0 * KEPT * KEPT, "{case}");
                 assert!((20_000..=40_000).contains(&settled), "{case}");
                 assert!(speeds.iter().rev().take(3).all(|&s| s < HOST / 8), "{case}");

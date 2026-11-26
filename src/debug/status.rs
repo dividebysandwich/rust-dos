@@ -81,24 +81,27 @@ impl DebugHub {
             // time, the frames the program drew (at most one a retrace),
             // its bursts of writes to video memory the size of a frame,
             // the smaller ones that reach across the screen (copies of
-            // what changed), the smaller ones that redraw one window (a
-            // movie's pictures), its page flips (the frames it draws,
-            // however many), the frames the built-in Windows showed for it
-            // (its blits to the screen, as bursts, copies and windows),
-            // its checks for keys that weren't there and idle calls, its
-            // reads of the input status register (retrace polling), the
-            // vertical retraces it let pass while it polled for them, and
-            // of the intervals between its page flips, how many were
-            // judged and how many frames they showed a retrace late (an
-            // estimate).
+            // what changed) and of those the ones that redraw one window,
+            // the smaller ones still that redraw one window (a movie's
+            // pictures), its page flips (the frames it draws, however
+            // many), the frames the built-in Windows showed for it (its
+            // blits to the screen, as bursts, copies and windows) and of
+            // those the ones that were only a window's, its checks for
+            // keys that weren't there and idle calls, its reads of the
+            // input status register (retrace polling), the vertical
+            // retraces it let pass while it polled for them, and of the
+            // intervals between its page flips, how many were judged and
+            // how many frames they showed a retrace late (an estimate).
             "activity": {
                 "emulated_ns": cpu.bus.clock.now_ns(),
                 "frames_drawn": cpu.bus.frames_drawn,
                 "bursts": cpu.bus.activity.bursts,
                 "copies": cpu.bus.activity.copies,
+                "window_copies": cpu.bus.activity.window_copies,
                 "windows": cpu.bus.activity.windows,
                 "flips": cpu.bus.activity.flips,
                 "presents": cpu.bus.activity.presents,
+                "shown_windows": cpu.bus.activity.shown_windows,
                 "polls": cpu.bus.activity.polls,
                 "status_reads": cpu.bus.activity.status_reads,
                 "missed_retraces": cpu.bus.activity.missed_retraces,
