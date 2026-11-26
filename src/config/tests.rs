@@ -124,6 +124,12 @@ fn a_later_renderer_line_wins_over_old_lines_and_the_other_way() {
     assert_eq!(get("renderer=software\nvoodoo_renderer=opengl\n"), Renderer::OpenGl);
     assert_eq!(get("renderer=opengl\ntoadforce_renderer=auto\n"), Renderer::OpenGl);
     assert_eq!(get("renderer=software\ntoadforce_renderer=auto\n"), Renderer::Auto);
+    // The pair with no setting of its own, its 3dfx part from `renderer`:
+    // the warning names the line that is there.
+    let (got, warnings) = renderer_of("[emulator]\nrenderer=opengl\ntoadforce_renderer=software\n");
+    assert_eq!(got, Renderer::OpenGl);
+    let named = |w: &String| w.contains("renderer=opengl)") && w.contains("toadforce_renderer");
+    assert!(warnings.iter().any(named), "{warnings:?}");
 }
 
 #[test]

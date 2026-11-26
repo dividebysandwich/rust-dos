@@ -154,9 +154,15 @@ impl Renderer {
 
     /// The setting that stands for what the old settings
     /// `voodoo_renderer` and `toadforce_renderer` ask for together, and
-    /// whether it draws each card as they ask. Only a 3dfx card on OpenGL
-    /// with a ToadForce in software has no setting of its own: it gets
-    /// `opengl`, so the ToadForce draws with OpenGL too.
+    /// whether each card still draws with the renderer they ask for,
+    /// OpenGL or software. Only a 3dfx card on OpenGL with a ToadForce in
+    /// software has no setting of its own: it gets `opengl`, so the
+    /// ToadForce draws with OpenGL too. A ToadForce's `auto` and `opengl`
+    /// both draw with OpenGL, and differ in the setup crash guard, which
+    /// only `auto` keeps: `toadforce_renderer=opengl` with a 3dfx card in
+    /// software reads as `auto`, which keeps the guard, and
+    /// `voodoo_renderer=opengl` with `toadforce_renderer=auto` reads as
+    /// `opengl`, which skips it.
     pub fn of_cards(
         voodoo: crate::voodoo::Renderer,
         toadforce: crate::toadforce::Renderer,

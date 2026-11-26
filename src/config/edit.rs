@@ -147,9 +147,11 @@ fn is_replaced(section: Section, key: &str, line: &Line) -> bool {
 /// Whether a line of `lines` sets one of the settings `key` of `section`
 /// took the place of.
 fn has_replaced(lines: &[String], section: Section, key: &str) -> bool {
-    classify(lines)
-        .into_iter()
-        .any(|(s, line)| s == section && is_replaced(section, key, &line))
+    // Most settings took the place of none, and need no look at the file.
+    !replaced_names(section, key).is_empty()
+        && classify(lines)
+            .into_iter()
+            .any(|(s, line)| s == section && is_replaced(section, key, &line))
 }
 
 /// Set `key` in `section` to `value`: the last line that sets it gets the

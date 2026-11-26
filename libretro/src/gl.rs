@@ -226,7 +226,10 @@ impl Screen {
                     self.voodoo_key = Some(key);
                 }
                 Err(e) => {
-                    bus.log_string(&format!("[3DFX] renderer=opengl: {}; the software renderer draws", e));
+                    bus.log_string(&format!(
+                        "[3DFX] renderer=opengl: {}; the software renderer draws",
+                        e
+                    ));
                     self.voodoo_failed = Some(e);
                     return false;
                 }

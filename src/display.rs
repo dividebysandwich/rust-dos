@@ -469,7 +469,10 @@ impl<'a> Display<'a> {
         if let Some(problem) = problem
             && !std::mem::replace(&mut self.voodoo_said, true)
         {
-            bus.log_string(&format!("[3DFX] renderer=opengl: {}; the software renderer draws", problem));
+            bus.log_string(&format!(
+                "[3DFX] renderer=opengl: {}; the software renderer draws",
+                problem
+            ));
         }
         false
     }

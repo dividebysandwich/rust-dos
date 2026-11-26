@@ -802,12 +802,15 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
     if vr_before_auto {
         config.vr.from_before_auto();
     }
-    // The old settings' one pair `renderer` has no value for.
+    // The old settings' one pair `renderer` has no value for. The 3dfx
+    // part may come from a `renderer=opengl` line before the old line,
+    // such as the base settings' under a game profile's own lines.
     if let Some((_, false)) = config.renderer() {
         warnings.push(
-            "voodoo_renderer=opengl with toadforce_renderer=software has no renderer setting: \
-             both cards draw with OpenGL, as renderer=opengl has them; \
-             write renderer=opengl, or renderer=software for both in software"
+            "toadforce_renderer=software with the 3dfx cards on OpenGL (voodoo_renderer=opengl \
+             or renderer=opengl) has no renderer setting: both cards draw with OpenGL, as \
+             renderer=opengl has them; write renderer=opengl, or renderer=software for both \
+             in software"
                 .to_string(),
         );
     }
