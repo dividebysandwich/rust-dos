@@ -185,65 +185,101 @@ impl F80 {
         (mantissa as u64) | (int_bit << 63)
     }
 
-    /// Add `b`, as 80-bit numbers: the smaller's significand shifted down
-    /// to the larger's exponent (its low bits dropped), the significands
-    /// added or subtracted, and the result brought back to 64 bits.
-    /// True for an invalid operation (IE): a signalling NaN, or infinities
-    /// of opposite signs, whose result is the real indefinite.
-    pub fn add(&mut self, b: F80) -> bool {
-        self.add_signed(b, b.get_sign())
+    /// Add `b` as a 387 does under control word `control`: the exact sum
+    /// rounded once to the precision field's significand (24, 53 or 64
+    /// bits; the reserved setting as 64) as the rounding field says, with
+    /// the 15-bit exponent whatever the precision. A sum that cancels to
+    /// 0 is +0, or -0 when rounding down. Past the largest number it is
+    /// the infinity, or the largest number where the rounding goes toward
+    /// zero; below the smallest normal one it is a denormal. An operand
+    /// in a format the 387 doesn't take (`is_unsupported`) makes the real
+    /// indefinite. True for an invalid operation (IE): that, a signalling
+    /// NaN, or infinities of opposite signs.
+    pub fn add(&mut self, b: F80, control: u16) -> bool {
+        self.add_signed(b, b.get_sign(), control)
     }
 
     /// Subtract `b`: add it with its sign turned.
-    pub fn sub(&mut self, b: F80) -> bool {
-        self.add_signed(b, !b.get_sign())
+    pub fn sub(&mut self, b: F80, control: u16) -> bool {
+        self.add_signed(b, !b.get_sign(), control)
     }
 
     #[inline]
-    fn add_signed(&mut self, b: F80, b_sign: bool) -> bool {
+    fn add_signed(&mut self, b: F80, b_sign: bool, control: u16) -> bool {
+        if self.is_unsupported() || b.is_unsupported() {
+            self.set_real_indefinite();
+            return true;
+        }
         if self.get_exponent() == 0x7FFF || b.get_exponent() == 0x7FFF {
             return self.add_special(b, b_sign);
         }
-        let a_sign = self.get_sign();
-        let (mut exp, b_exp) = (self.get_exponent(), b.get_exponent());
-        let (mut a_man, mut b_man) = (self.st as u64, b.st as u64);
-        let shifted = |man: u64, by: u16| if by >= 64 { 0 } else { man >> by };
-        if exp > b_exp {
-            b_man = shifted(b_man, exp - b_exp);
-        } else if b_exp > exp {
-            a_man = shifted(a_man, b_exp - exp);
-            exp = b_exp;
+        let rc = control >> 10 & 3;
+        // Sign, exponent (a denormal's counts as 1, as the least normal
+        // one's) and significand at the top of 128 bits.
+        let parts = |f: &F80, sign: bool| (sign, f.get_exponent().max(1) as i32, (f.st as u64 as u128) << 64);
+        let (mut big, mut small) = (parts(self, self.get_sign()), parts(&b, b_sign));
+        if (small.1, small.2) > (big.1, big.2) {
+            std::mem::swap(&mut big, &mut small);
         }
-        let (sign, mut man);
-        if a_sign == b_sign {
-            let (sum, carry) = a_man.overflowing_add(b_man);
+        let (sign, mut exp) = (big.0, big.1);
+        let low = sticky_shift(small.2, (big.1 - small.1) as u32);
+        let mut man = if big.0 == small.0 {
+            let (sum, carry) = big.2.overflowing_add(low);
             if carry {
-                man = sum >> 1 | INT_BIT_MASK64;
-                exp = exp.wrapping_add(1);
+                exp += 1;
+                sum >> 1 | sum & 1 | 1 << 127
             } else {
-                man = sum;
+                sum
             }
-            sign = a_sign;
         } else {
-            let difference = a_man.abs_diff(b_man);
-            if difference == 0 {
-                (sign, man, exp) = (false, 0, 0);
-            } else {
-                let up = difference.leading_zeros();
-                man = difference << up;
-                exp = exp.wrapping_sub(up as u16);
-                sign = if a_man >= b_man { a_sign } else { b_sign };
-            }
+            // Larger first, so never below 0.
+            big.2 - low
+        };
+        if man == 0 {
+            // Two zeros of one sign keep it; any other 0 is an exact
+            // cancellation.
+            let negative = if big.0 == small.0 { sign } else { rc == 1 };
+            self.st = (negative as u128) << SIGN_SHIFT;
+            return false;
         }
-        if exp >= 0x7FFF && a_sign == b_sign {
-            // Overflow, masked: the infinity.
-            (exp, man) = (0x7FFF, INT_BIT_MASK64);
+        // To the integer bit. (A difference whose operands were more than
+        // one place apart loses one place at most, so the sticky bit stays
+        // far below the rounding.)
+        let up = man.leading_zeros();
+        man <<= up;
+        exp -= up as i32;
+        if exp < 1 {
+            // A denormal: its bits above the least normal's last place.
+            man = sticky_shift(man, (1 - exp) as u32);
+            exp = 1;
         }
-        // (An exponent that wrapped around below 0 reaches into the sign,
-        // as it always did.)
-        let st = (self.st & !SIGN_MASK) | (sign as u128) << SIGN_SHIFT;
-        let st = (st & !EXP_MASK2) | (exp as u128) << EXP_SHIFT;
-        self.st = (st & !MANTISSA_MASK) | man as u128;
+        let bits = match control >> 8 & 3 {
+            0 => 24,
+            2 => 53,
+            _ => 64,
+        };
+        let mut kept = man >> (128 - bits);
+        kept += rounds_away(rc, sign, kept & 1 != 0, man << bits, 1 << 127) as u128;
+        if kept >> bits != 0 {
+            kept >>= 1;
+            exp += 1;
+        }
+        let mut significand = (kept << (64 - bits)) as u64;
+        if exp >= 0x7FFF {
+            // Overflow, masked: the infinity, or the largest number where
+            // the rounding goes toward zero.
+            let largest = match rc {
+                0 => false,
+                1 => !sign,
+                2 => sign,
+                _ => true,
+            };
+            (exp, significand) = if largest { (0x7FFE, !0 << (64 - bits)) } else { (0x7FFF, INT_BIT_MASK64) };
+        } else if significand >> 63 == 0 {
+            // A denormal (or 0): exponent 0.
+            exp = 0;
+        }
+        self.st = (sign as u128) << SIGN_SHIFT | (exp as u128) << EXP_SHIFT | significand as u128;
         false
     }
 
@@ -661,6 +697,19 @@ fn rounds_away(rc: u16, negative: bool, odd: bool, rest: u128, half: u128) -> bo
     }
 }
 
+/// `value` shifted right by `by`, with a 1 in its lowest bit where any
+/// bit that falls out was 1 (a sticky bit, for rounding).
+#[inline]
+fn sticky_shift(value: u128, by: u32) -> u128 {
+    if by == 0 {
+        value
+    } else if by >= 128 {
+        (value != 0) as u128
+    } else {
+        value >> by | (value << (128 - by) != 0) as u128
+    }
+}
+
 /// 2^k, for k from -1074 to 1023.
 fn pow2(k: i32) -> f64 {
     if k >= -1022 {
@@ -822,156 +871,95 @@ impl crate::savestate::State for FpuRegs {
 }
 
 
-/// `F80::add` and `F80::sub` as they were first written, a bit at a time,
-/// for the tests to compare with.
+/// The sum of two 80-bit numbers as `F80::add` should give it, worked out
+/// another way for the tests to compare with: the exact sum as a 256-bit
+/// integer (an operand more than 130 places below the other as one unit
+/// at the bottom, which rounds the same), rounded a bit at a time.
 #[cfg(test)]
 impl F80 {
-    fn normalize_add(&self, mantissa: u64, exponent: u16) -> (u64, u16) {
-        let mut man = mantissa;
-        let mut exp = exponent;
-        if man == 0 {
-            return (0, 0);
+    fn sum_reference(a: F80, b: F80, b_sign: bool, control: u16) -> u128 {
+        type U256 = [u64; 4];
+        fn bit(x: &U256, i: i32) -> bool {
+            (0..256).contains(&i) && x[(i / 64) as usize] >> (i % 64) & 1 != 0
         }
-        while (man & INT_BIT_MASK64) == 0 {
-            man <<= 1;
-            exp = exp.wrapping_sub(1);
+        fn shl(x: U256, by: i32) -> U256 {
+            let mut out = [0; 4];
+            for i in (0..256).filter(|&i| bit(&x, i - by)) {
+                out[(i / 64) as usize] |= 1 << (i % 64);
+            }
+            out
         }
-        (man, exp)
-    }
-
-    fn add_reference(&mut self, b: F80) {
-        let a_sign = self.get_sign();
-        let b_sign = b.get_sign();
-
-        let mut a_exp = self.get_exponent();
-        let b_exp = b.get_exponent();
-
-        let mut a_man = self.get_mantissa() as u128;
-        let mut b_man = b.get_mantissa() as u128;
-
-        // Clamp the shift amount. 
-        // Shifting a u128 by >= 128 causes a Rust panic.
-        if a_exp > b_exp {
-            let shift = (a_exp - b_exp) as u32;
-            if shift >= 128 {
-                b_man = 0; // Underflow: b is negligible compared to a
-            } else {
-                b_man >>= shift;
+        fn add(x: U256, y: U256) -> U256 {
+            let (mut out, mut carry) = ([0; 4], false);
+            for i in 0..4 {
+                let (s, c1) = x[i].overflowing_add(y[i]);
+                let (s, c2) = s.overflowing_add(carry as u64);
+                (out[i], carry) = (s, c1 || c2);
             }
-        } else if b_exp > a_exp {
-            let shift = (b_exp - a_exp) as u32;
-            if shift >= 128 {
-                a_man = 0; // Underflow: a is negligible compared to b
-            } else {
-                a_man >>= shift;
-            }
-            a_exp = b_exp;
+            out
         }
-
-        let mut result_sign;
-        let mut result_exp = a_exp;
-        let mut result_man: u128;
-
-        if a_sign == b_sign {
-            result_man = a_man + b_man;
-            if (result_man & (1u128 << 64)) != 0 {
-                result_man >>= 1;
-                result_exp = result_exp.wrapping_add(1);
-            }
-            result_sign = a_sign;
+        let rc = control >> 10 & 3;
+        let bits = match control >> 8 & 3 {
+            0 => 24,
+            2 => 53,
+            _ => 64,
+        };
+        let parts = |f: F80, sign: bool| (sign, f.get_exponent().max(1) as i32, f.st as u64);
+        let (mut x, mut y) = (parts(a, a.get_sign()), parts(b, b_sign));
+        if (y.1, y.2) > (x.1, x.2) {
+            std::mem::swap(&mut x, &mut y);
+        }
+        // In units of 2^(x's exponent - bias - 63 - 130).
+        let big = shl([x.2, 0, 0, 0], 130);
+        let d = x.1 - y.1;
+        let small = match y.2 {
+            0 => [0; 4],
+            _ if d > 130 => [1, 0, 0, 0],
+            m => shl([m, 0, 0, 0], 130 - d),
+        };
+        let total = if x.0 == y.0 { add(big, small) } else { add(big, add(small.map(|w| !w), [1, 0, 0, 0])) };
+        let sign = x.0;
+        // The biased exponent of the bit at place i.
+        let exponent = |i: i32| x.1 + i - 130 - 63;
+        let Some(top) = (0..256).rev().find(|&i| bit(&total, i)) else {
+            let negative = if x.0 == y.0 { sign } else { rc == 1 };
+            return (negative as u128) << 79;
+        };
+        // The last place kept: `bits` from the top, or from the place of
+        // the least normal number's integer bit below it (a denormal).
+        let last = top + (1 - exponent(top)).max(0) - (bits - 1);
+        let mut kept = (last..=top).rev().fold(0u128, |k, i| k << 1 | bit(&total, i) as u128);
+        let half = bit(&total, last - 1);
+        let rest = (0..last - 1).any(|i| bit(&total, i));
+        let up = match rc {
+            0 => half && (rest || kept & 1 != 0),
+            1 => sign && (half || rest),
+            2 => !sign && (half || rest),
+            _ => false,
+        };
+        kept += up as u128;
+        if kept == 0 {
+            return (sign as u128) << 79;
+        }
+        let length = 128 - kept.leading_zeros() as i32;
+        let exp = exponent(last + length - 1);
+        if exp >= 0x7FFF {
+            let largest = match rc {
+                0 => false,
+                1 => !sign,
+                2 => sign,
+                _ => true,
+            };
+            let st = if largest { 0x7FFE << 64 | (!0u64 << (64 - bits)) as u128 } else { 0x7FFF << 64 | 1 << 63 };
+            return (sign as u128) << 79 | st;
+        }
+        let (exp, significand) = if exp >= 1 {
+            (exp, if length > 64 { kept >> (length - 64) } else { kept << (64 - length) } as u64)
         } else {
-            if a_man >= b_man {
-                result_man = a_man - b_man;
-                result_sign = a_sign;
-            } else {
-                result_man = b_man - a_man;
-                result_sign = b_sign;
-            }
-            let (norm_man, norm_exp) = self.normalize_add(result_man as u64, result_exp);
-            result_man = norm_man as u128;
-            result_exp = norm_exp;
-
-            if result_man == 0 {
-                result_sign = false;
-                result_exp = 0;
-            }
-        }
-
-        self.set_sign(result_sign);
-        self.set_exponent(result_exp);
-        self.set_mantissa(result_man as u64);
+            (0, (kept << (64 - bits)) as u64)
+        };
+        (sign as u128) << 79 | (exp as u128) << 64 | significand as u128
     }
-
-    fn sub_reference(&mut self, b: F80) {
-        let a_sign = self.get_sign();
-        let b_sign = b.get_sign();
-
-        let mut a_exp = self.get_exponent();
-        let b_exp = b.get_exponent();
-
-        let mut a_man = self.get_mantissa() as u128;
-        let mut b_man = b.get_mantissa() as u128;
-
-        // Clamp the shift amount.
-        if a_exp > b_exp {
-            let shift = (a_exp - b_exp) as u32;
-            if shift >= 128 {
-                b_man = 0;
-            } else {
-                b_man >>= shift;
-            }
-        } else if b_exp > a_exp {
-            let shift = (b_exp - a_exp) as u32;
-            if shift >= 128 {
-                a_man = 0;
-            } else {
-                a_man >>= shift;
-            }
-            a_exp = b_exp;
-        }
-
-        let mut result_sign;
-        let mut result_exp = a_exp;
-        let mut result_man: u128;
-
-        if a_sign != b_sign {
-            result_man = a_man + b_man;
-            if (result_man & (1u128 << 64)) != 0 {
-                result_man >>= 1;
-                result_exp = result_exp.wrapping_add(1);
-            }
-            result_sign = a_sign;
-        } else {
-            if a_man >= b_man {
-                result_man = a_man - b_man;
-                result_sign = a_sign;
-            } else {
-                result_man = b_man - a_man;
-                result_sign = !a_sign;
-            }
-            let (norm_man, norm_exp) = self.normalize_sub(result_man as u64, result_exp);
-            result_man = norm_man as u128;
-            result_exp = norm_exp;
-
-            if result_man == 0 {
-                result_sign = false; // +0
-                result_exp = 0;
-            }
-        }
-
-        self.set_sign(result_sign);
-        self.set_exponent(result_exp);
-        self.set_mantissa(result_man as u64);
-    }
-
-    fn normalize_sub(&self, mut mant: u64, mut exp: u16) -> (u64, u16) {
-        while mant != 0 && (mant & (1 << 63)) == 0 {
-            mant <<= 1;
-            exp = exp.wrapping_sub(1);
-        }
-        (mant, exp)
-    }
-
 }
 
 #[cfg(test)]
@@ -1042,10 +1030,11 @@ mod tests {
     }
 
     #[test]
-    fn sums_and_differences_are_what_they_always_were() {
+    fn sums_and_differences_are_the_exact_ones_rounded_once() {
         // 80 bits of every kind: random ones, doubles in a register,
         // zeros, denormals, exponents at both ends, equal and near-equal
-        // pairs.
+        // pairs; at every precision and rounding, the reserved precision
+        // too.
         let mut x = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = move || {
             x ^= x << 13;
@@ -1063,7 +1052,7 @@ mod tests {
             let (hi, lo) = (next(), next());
             let exp = match i % 6 {
                 0 => 0,
-                1 => 0x7FFF,
+                1 => 0x7FFE - hi % 3,
                 2 => 0x7FFE,
                 3 => 1 + hi % 70,
                 4 => 0x3FFF + hi % 70,
@@ -1074,28 +1063,77 @@ mod tests {
                 1 => lo >> (hi % 64),
                 2 => 0,
                 3 => 1 << 63,
-                _ => lo,
+                _ => lo | (exp != 0) as u64 * (1 << 63),
             };
             values.push(F80 { st: (hi as u128 & 1) << 79 | (exp as u128) << 64 | man as u128 });
         }
+        // Formats the 387 takes, NaNs and infinities left out.
+        values.retain(|f| !f.is_unsupported() && f.get_exponent() != 0x7FFF);
+        let mut checked = 0;
         for (i, &a) in values.iter().enumerate() {
-            for &b in values.iter().skip(i % 7).step_by(7) {
-                for (a, b) in [(a, b), (b, a), (a, a), (a, F80 { st: a.st ^ SIGN_MASK }), (a, F80 { st: a.st ^ 1 })] {
-                    // The reference knows no NaNs, infinities or overflow.
-                    if a.get_exponent() >= 0x7FFE || b.get_exponent() >= 0x7FFE {
-                        continue;
+            for (j, &b) in values.iter().enumerate().skip(i % 41).step_by(41) {
+                let pairs = [(a, b), (b, a), (a, a), (a, F80 { st: a.st ^ SIGN_MASK }), (a, F80 { st: a.st ^ 1 })];
+                for (k, (a, b)) in pairs.into_iter().enumerate() {
+                    for n in 0..4 {
+                        let control = 0x7F | (((i + j + k + n * 4) % 16) as u16) << 8;
+                        let (mut sum, mut difference) = (a, a);
+                        assert!(!sum.add(b, control));
+                        let expected = F80::sum_reference(a, b, b.get_sign(), control);
+                        assert_eq!(sum.st, expected, "{:020X} + {:020X} at {control:04X}", a.st, b.st);
+                        assert!(!difference.sub(b, control));
+                        let expected = F80::sum_reference(a, b, !b.get_sign(), control);
+                        assert_eq!(difference.st, expected, "{:020X} - {:020X} at {control:04X}", a.st, b.st);
+                        checked += 1;
                     }
-                    let (mut sum, mut reference) = (a, a);
-                    sum.add(b);
-                    reference.add_reference(b);
-                    assert_eq!(sum.st, reference.st, "{:020X} + {:020X}", a.st, b.st);
-                    let (mut difference, mut reference) = (a, a);
-                    difference.sub(b);
-                    reference.sub_reference(b);
-                    assert_eq!(difference.st, reference.st, "{:020X} - {:020X}", a.st, b.st);
                 }
             }
         }
+        assert!(checked > 100_000, "{checked}");
+    }
+
+    #[test]
+    fn sums_round_as_the_control_word_says() {
+        let f = |v: f64| {
+            let mut x = F80::new();
+            x.set_f64(v);
+            x
+        };
+        let sum = |a: F80, b: F80, control: u16| {
+            let mut s = a;
+            s.add(b, control);
+            s
+        };
+        // 1 + 2^-64 + 2^-70: above a half of the 64th bit, and a tie.
+        let one = f(1.0);
+        let tiny = F80 { st: (0x3FFF - 64) << 64 | 1 << 63 | 1 << 57 };
+        let tie = F80 { st: (0x3FFF - 64) << 64 | 1 << 63 };
+        assert_eq!(sum(one, tiny, 0x037F).st, one.st | 1);
+        assert_eq!(sum(one, tie, 0x037F).st, one.st);
+        assert_eq!(sum(one, tie, 0x0B7F).st, one.st | 1);
+        assert_eq!(sum(f(-1.0), F80 { st: tie.st | SIGN_MASK }, 0x077F).st, f(-1.0).st | 1);
+        assert_eq!(sum(f(-1.0), F80 { st: tie.st | SIGN_MASK }, 0x0F7F).st, f(-1.0).st);
+        // 1 - 2^-80 chopped is the 64-bit number below 1.
+        let below = F80 { st: SIGN_MASK | (0x3FFF - 80) << 64 | 1 << 63 };
+        assert_eq!(sum(one, below, 0x0F7F).st, (0x3FFE << 64) | u64::MAX as u128);
+        assert_eq!(sum(one, below, 0x037F).st, one.st);
+        // At 24 bits, 1 + 0.1 keeps 24 bits: rounded to nearest, up;
+        // chopped, the single below.
+        let single = 1.1f32;
+        assert_eq!(sum(one, f(0.1), 0x007F).get_f64(), single as f64);
+        assert_eq!(sum(one, f(0.1), 0x0C7F).get_f64(), f32::from_bits(single.to_bits() - 1) as f64);
+        // A cancellation is -0 only rounding down.
+        assert_eq!(sum(one, f(-1.0), 0x037F).st, 0);
+        assert_eq!(sum(one, f(-1.0), 0x077F).st, SIGN_MASK);
+        assert_eq!(sum(f(-0.0), f(-0.0), 0x037F).st, SIGN_MASK);
+        // Past the largest number: the infinity, or the largest number.
+        let max = F80 { st: 0x7FFE << 64 | u64::MAX as u128 };
+        assert_eq!(sum(max, max, 0x037F).st, 0x7FFF << 64 | 1 << 63);
+        assert_eq!(sum(max, max, 0x0F7F).st, max.st);
+        assert_eq!(sum(max, max, 0x0C7F).st, 0x7FFE << 64 | 0xFFFF_FF00_0000_0000);
+        // A format the 387 doesn't take makes the real indefinite.
+        let mut unnormal = F80 { st: 0x3FFF << 64 | 1 << 62 };
+        assert!(unnormal.add(one, 0x037F));
+        assert_eq!(unnormal.st, REAL_INDEFINITE);
     }
 
     #[test]

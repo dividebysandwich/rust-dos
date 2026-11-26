@@ -9,72 +9,86 @@ pub fn get_pop_dst_index(instr: &Instruction) -> usize {
     if reg == Register::None || reg == Register::ST1 { 1 } else { reg.number() - Register::ST0.number() }
 }
 
-/// a + b as a 387 gives it where its control word `control` keeps 53 or
-/// 24 bits of a result's significand and rounds to nearest, which is how
-/// Win32 programs run it (the C runtime sets 53 bits, Direct3D 24): the
-/// sum of the two doubles rounded once to that many bits. None where the
-/// control word asks for 64 bits or another rounding, and where the sum
-/// isn't zero or a normal number of the result's size (an infinity or a
-/// NaN, or a number a 387 keeps with its 15 bits of exponent): the 80
-/// bits add those (`F80::add`). The dynamic recompiler's code does the same
-/// (`fpu_addsub` in `dynrec/x64.rs` and `dynrec/a64.rs`), case for case.
+/// a + b as a 387 gives it under control word `control`, where both are
+/// doubles and the result is one too: the exact sum rounded once to the
+/// precision field's 24, 53 or 64 bits as the rounding field says (what
+/// `F80::add` gives, case for case, without its 80 bits). None at 64 bits
+/// (and with the reserved precision, which `F80::add` takes as 64) where
+/// the sum needs more than a double's 53, and where the sum or its
+/// rounding isn't zero or a normal double: the 80 bits add those
+/// (`F80::add`). The dynamic recompiler's code does the same
+/// (`narrow_addsub` in `dynrec/x64.rs` and `dynrec/a64.rs`), case for
+/// case, which keeps the registers' bits (a double alone, or 80 bits) the
+/// same on both cores.
+///
+/// Why it is exact: the double sum `s` and what it left out, `e` (Knuth's
+/// two-sum, exact), add up to the exact sum, with |e| at most half of
+/// `s`'s last place. At 53 bits `s` is the sum rounded to nearest, and a
+/// directed rounding is `s` or its neighbour on `e`'s side. At 24 bits an
+/// odd `s` is no single and no halfway point between two, and none lies
+/// between it and the exact sum, so it rounds as the exact sum does. An
+/// even `s` that isn't exact, moved to its odd neighbour on `e`'s side,
+/// rounds the same for the same reason. Only an `s` with its low 28 bits
+/// 0 (a single, or halfway between two) can be even and not exact with
+/// that making a difference, so only it needs `e`.
 #[inline]
 pub fn narrow_sum(control: u16, a: f64, b: f64) -> Option<f64> {
-    let single = narrow_precision(control)?;
     // An infinity or a NaN among the operands makes the sum one.
     let sum = a + b;
+    let rc = control >> 10 & 3;
     if sum == 0.0 {
-        return Some(sum);
+        // Exact: two zeros, or a cancellation, which is +0 (as the host
+        // gives it) but -0 rounding down.
+        return Some(if rc == 1 { f64::from_bits((a.to_bits() | b.to_bits()) & 1 << 63) } else { sum });
     }
     if !sum.is_normal() {
         return None;
     }
-    if !single {
-        return Some(sum);
-    }
-    // To 24 bits, the double sum rounded again could come out a bit off
-    // where it was rounded already and is halfway between two singles.
-    // What the sum left out (`error`, exact: Knuth's two-sum) says
-    // whether it was rounded; a rounded sum is moved to its odd
-    // neighbour on the side of the true sum, which the second rounding
-    // takes the right way (53 bits are more than 24 and 2). Only a sum
-    // halfway between two singles comes out differently for it.
-    let part = sum - a;
-    let error = (a - (sum - part)) + (b - part);
+    let error = || {
+        let part = sum - a;
+        (a - (sum - part)) + (b - part)
+    };
+    // -1 where the exact sum's magnitude is below the double sum's, 0
+    // where above.
+    let below = |e: f64| ((e.to_bits() ^ sum.to_bits()) as i64 >> 63) as u64;
     let mut bits = sum.to_bits();
-    if error != 0.0 && bits & 1 == 0 {
-        if (error < 0.0) == (sum < 0.0) {
-            bits += 1;
-        } else {
-            bits -= 1;
+    // Rounding away from 0: down for a negative sum, up for a positive.
+    let away = rc as u64 + (bits >> 63) == 2;
+    match control >> 8 & 3 {
+        2 => {
+            if rc != 0 {
+                let e = error();
+                if e != 0.0 {
+                    let below = below(e);
+                    bits = bits.wrapping_add(if away { below.wrapping_add(1) } else { below });
+                }
+            }
         }
+        0 => {
+            const MASK: u64 = (1 << 29) - 1;
+            if bits & (MASK >> 1) == 0 {
+                let e = error();
+                if e != 0.0 {
+                    bits = bits.wrapping_add(below(e).wrapping_mul(2).wrapping_add(1));
+                }
+            }
+            bits = match rc {
+                0 => (bits + (MASK >> 1) + (bits >> 29 & 1)) & !MASK,
+                _ if away => (bits + MASK) & !MASK,
+                _ => bits & !MASK,
+            };
+        }
+        // 64 bits, and the reserved setting, which rounds the same.
+        _ => return (error() == 0.0).then_some(sum),
     }
-    // Below the smallest normal single, a single's denormals are coarser
-    // than the 24 bits a 387 keeps there with its 15 bits of exponent
-    // (2^-126 - 2^-150 would round up to 2^-126), so the 80 bits add it.
-    let wide = f64::from_bits(bits);
-    if wide.abs() < f32::MIN_POSITIVE as f64 {
-        return None;
-    }
-    let narrow = wide as f32;
-    narrow.is_finite().then_some(narrow as f64)
+    let result = f64::from_bits(bits);
+    result.is_normal().then_some(result)
 }
 
-/// Whether `narrow_sum` rounds with control word `control`: Some(true)
-/// at 24 bits, Some(false) at 53, to nearest both; None otherwise.
-#[inline]
-pub fn narrow_precision(control: u16) -> Option<bool> {
-    // The precision field (bits 8 and 9) and the rounding (10 and 11).
-    match control & 0x0F00 {
-        0x0200 => Some(false),
-        0x0000 => Some(true),
-        _ => None,
-    }
-}
-
-/// ST(dst) = ST(a) + ST(b), or - with `sub`: rounded to the control
-/// word's precision where `narrow_sum` has it, else as the registers' 80
-/// bits add (`F80::add`), or with `fpu_fast` as their doubles do (`sum`).
+/// ST(dst) = ST(a) + ST(b), or - with `sub`: rounded as the control word
+/// says, by `narrow_sum` where both are doubles and it has the result,
+/// else by the registers' 80 bits (`F80::add`), or with `fpu_fast` as
+/// their doubles add (`sum`).
 /// The dynamic recompiler's code calls it too.
 pub fn addsub_st(cpu: &mut Cpu, dst: usize, a: usize, b: usize, sub: bool) {
     if cpu.fpu_fast {
@@ -82,18 +96,16 @@ pub fn addsub_st(cpu: &mut Cpu, dst: usize, a: usize, b: usize, sub: bool) {
         cpu.fpu_set_f64(dst, sum);
         return;
     }
-    // The control word first, so that sums at 64 bits (DOS programs')
-    // don't look at the registers' bits for nothing.
-    if narrow_precision(cpu.fpu_control).is_some()
-        && let (Some(x), Some(y)) = (cpu.fpu_only_double(a), cpu.fpu_only_double(b))
-        && let Some(sum) = narrow_sum(cpu.fpu_control, x, if sub { -y } else { y })
+    let control = cpu.fpu_control;
+    if let (Some(x), Some(y)) = (cpu.fpu_only_double(a), cpu.fpu_only_double(b))
+        && let Some(sum) = narrow_sum(control, x, if sub { -y } else { y })
     {
         cpu.fpu_set_f64(dst, sum);
         return;
     }
     let mut x = cpu.fpu_get(a);
     let y = cpu.fpu_get(b);
-    let invalid = if sub { x.sub(y) } else { x.add(y) };
+    let invalid = if sub { x.sub(y, control) } else { x.add(y, control) };
     if invalid {
         cpu.set_fpu_flag(FpuFlags::IE, true);
     }
@@ -118,13 +130,12 @@ pub fn addsub_value(cpu: &mut Cpu, kind: u32, value: f64) {
         cpu.fpu_set_f64(0, sum);
         return;
     }
-    if narrow_precision(cpu.fpu_control).is_some()
-        && let Some(st0) = cpu.fpu_only_double(0)
-    {
+    let control = cpu.fpu_control;
+    if let Some(st0) = cpu.fpu_only_double(0) {
         let sum = match kind {
-            ADD_VALUE => narrow_sum(cpu.fpu_control, st0, value),
-            SUB_VALUE => narrow_sum(cpu.fpu_control, st0, -value),
-            _ => narrow_sum(cpu.fpu_control, value, -st0),
+            ADD_VALUE => narrow_sum(control, st0, value),
+            SUB_VALUE => narrow_sum(control, st0, -value),
+            _ => narrow_sum(control, value, -st0),
         };
         if let Some(sum) = sum {
             cpu.fpu_set_f64(0, sum);
@@ -135,10 +146,10 @@ pub fn addsub_value(cpu: &mut Cpu, kind: u32, value: f64) {
     val.set_f64(value);
     let mut st0 = cpu.fpu_get(0);
     let invalid = match kind {
-        ADD_VALUE => st0.add(val),
-        SUB_VALUE => st0.sub(val),
+        ADD_VALUE => st0.add(val, control),
+        SUB_VALUE => st0.sub(val, control),
         _ => {
-            let invalid = val.sub(st0);
+            let invalid = val.sub(st0, control);
             st0 = val;
             invalid
         }
