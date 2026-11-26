@@ -596,10 +596,13 @@ pub fn rot_register(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(hr)
 }
 
-/// IRunningObjectTable::Revoke(this, cookie). The table's reference to
-/// the object goes before Revoke returns, when it is the last and the
-/// object is of this thread, so a program that waits for the object to
-/// go after revoking it isn't kept waiting for its messages.
+/// IRunningObjectTable::Revoke(this, cookie): E_INVALIDARG for a cookie
+/// another process registered, whose registrations Windows keeps in
+/// that process's OLE32 (Wine's ole32/moniker.c does too). The table's
+/// reference to the object goes before Revoke returns, when it is the
+/// last and the object is of this thread, so a program that waits for
+/// the object to go after revoking it isn't kept waiting for its
+/// messages.
 pub fn rot_revoke(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[this, cookie] = args else {
         unreachable!()
@@ -607,8 +610,13 @@ pub fn rot_revoke(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !is_table(cpu, this) {
         return Some(E_INVALIDARG);
     }
+    let pid = current_pid(cpu);
     let rot = rot(cpu);
-    let Some(i) = rot.entries.iter().position(|e| e.cookie == cookie) else {
+    let Some(i) = rot
+        .entries
+        .iter()
+        .position(|e| e.cookie == cookie && e.pid == pid)
+    else {
         return Some(E_INVALIDARG);
     };
     let e = rot.entries.remove(i);
@@ -669,7 +677,8 @@ pub fn rot_get_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
-/// IRunningObjectTable::NoteChangeTime(this, cookie, time).
+/// IRunningObjectTable::NoteChangeTime(this, cookie, time). As Revoke,
+/// it takes only a cookie of the running process.
 pub fn rot_note_change_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[this, cookie, time] = args else {
         unreachable!()
@@ -681,7 +690,9 @@ pub fn rot_note_change_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_INVALIDARG);
     }
     let value = cpu.bus.guest_read_32(time) as u64 | (cpu.bus.guest_read_32(time + 4) as u64) << 32;
-    match rot(cpu).entries.iter_mut().find(|e| e.cookie == cookie) {
+    let pid = current_pid(cpu);
+    let entries = &mut rot(cpu).entries;
+    match entries.iter_mut().find(|e| e.cookie == cookie && e.pid == pid) {
         Some(e) => {
             e.changed = value;
             Some(S_OK)
