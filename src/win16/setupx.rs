@@ -185,7 +185,7 @@ fn ip_get_profile_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut bytes = crate::dosstr::to_bytes(&value);
     bytes.truncate((size as usize).saturating_sub(1));
     bytes.push(0);
-    if size > 0 {
+    if size > 0 && buffer != 0 {
         super::poke(cpu, buffer, &bytes);
     }
     Some(0)

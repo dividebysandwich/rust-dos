@@ -479,7 +479,9 @@ pub(crate) fn profile_value(
 /// its key and its value, None for a line without '='. The section is
 /// made at the end of the file if it isn't there, and the file if it
 /// isn't. The file is written only if the lines changed; false if it
-/// couldn't be.
+/// couldn't be, also when a program has it open without sharing it for
+/// reading and writing, as WritePrivateProfileStringA refuses then: read
+/// as empty, the file would be written back with this section alone.
 pub(crate) fn update_profile(
     cpu: &mut Cpu,
     file: &[u8],
@@ -487,6 +489,10 @@ pub(crate) fn update_profile(
     change: impl FnOnce(&mut Vec<(String, Option<String>)>),
 ) -> bool {
     let path = path_of(Some(file));
+    let both = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    if super::path::open_sharing(cpu, &path).is_some_and(|s| s & both != both) {
+        return false;
+    }
     let mut sections = parse(&read_file(cpu, &path).unwrap_or_default());
     let i = section_index(&mut sections, section);
     let text = |b: &[u8]| crate::dosstr::from_bytes(b);

@@ -78,9 +78,11 @@ const ADDREG_TYPE_EXPAND_SZ: u32 = 0x0002_0000;
 const ADDREG_TYPE_DWORD: u32 = 0x0001_0001;
 const ADDREG_TYPE_NONE: u32 = 0x0002_0001;
 
-/// UpdateInis' flag that matches the old entry's value as well as its
-/// key.
+/// UpdateInis' flags: match the old entry's value as well as its key,
+/// and put the new entry in only when the old one was there (the flags
+/// 2 and 3 of Microsoft's INF documentation).
 const INI_MATCH_VALUE: u32 = 0x01;
+const INI_ONLY_IF_FOUND: u32 = 0x02;
 
 /// A line of a section: its key, if it has one, and its fields, the
 /// quotes taken off.
@@ -291,7 +293,8 @@ impl Inf {
 
     /// `text` with its %name% strings and %number% directories put in,
     /// `dirs` giving the directory of an LDID. One that is neither stays
-    /// as it is.
+    /// as it is. A directory that ends with '\' (a drive's root, "C:\")
+    /// loses it before a '\' in the text, so "%30%\GAMES" is "C:\GAMES".
     pub fn expand(&self, text: &str, dirs: &dyn Fn(u16) -> Option<String>) -> String {
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
@@ -308,7 +311,13 @@ impl Inf {
             } else if let Some(s) = self.string(name) {
                 Some(s.to_string())
             } else {
-                name.parse::<u16>().ok().and_then(dirs)
+                let slash_after = after[end + 1..].starts_with('\\');
+                name.parse::<u16>().ok().and_then(dirs).map(|mut dir| {
+                    if slash_after && dir.ends_with('\\') {
+                        dir.pop();
+                    }
+                    dir
+                })
             };
             match value {
                 Some(v) => out.push_str(&v),
@@ -394,8 +403,10 @@ impl Install<'_> {
 
     /// The directory [DestinationDirs] gives the section of files
     /// `section`: its LDID and a subdirectory, else DefaultDestDir's,
-    /// else the system directory, as SETUPAPI has it.
-    fn dest_dir(&self, section: &str) -> Option<String> {
+    /// else the system directory, as SETUPAPI has it. None, written to
+    /// the log, when the LDID has no directory: the section's files are
+    /// then left out.
+    fn dest_dir(&self, cpu: &mut Cpu, section: &str) -> Option<String> {
         let line = self
             .inf
             .line("DestinationDirs", section)
@@ -404,7 +415,12 @@ impl Install<'_> {
             Some(l) => (number(&self.field(l, 0)) as u16, self.field(l, 1)),
             None => (11, String::new()),
         };
-        let dir = (self.dirs)(ldid)?;
+        let Some(dir) = (self.dirs)(ldid) else {
+            cpu.bus.log_string(&format!(
+                "[INF] [{section}] left out: LDID {ldid} has no directory"
+            ));
+            return None;
+        };
         Some(if sub.is_empty() {
             dir
         } else {
@@ -450,7 +466,7 @@ impl Install<'_> {
             }
         }
         if parts & DO_FILES != 0 {
-            self.queue_files(section, files);
+            self.queue_files(cpu, section, files);
         }
         if parts & DO_REG != 0 {
             for name in self.names(section, "DelReg") {
@@ -474,11 +490,11 @@ impl Install<'_> {
     }
 
     /// Queue the CopyFiles, RenFiles and DelFiles of `section`.
-    fn queue_files(&self, section: &str, files: &mut Vec<FileOp>) {
+    fn queue_files(&self, cpu: &mut Cpu, section: &str, files: &mut Vec<FileOp>) {
         let source_dir = (self.dirs)(LDID_SRCPATH).unwrap_or_default();
         for name in self.names(section, "CopyFiles") {
             if let Some(file) = name.strip_prefix('@') {
-                if let Some(dir) = self.dest_dir(section) {
+                if let Some(dir) = self.dest_dir(cpu, section) {
                     files.push(FileOp {
                         kind: COPY,
                         dest: join(&dir, file),
@@ -488,7 +504,7 @@ impl Install<'_> {
                 }
                 continue;
             }
-            let Some(dir) = self.dest_dir(&name) else {
+            let Some(dir) = self.dest_dir(cpu, &name) else {
                 continue;
             };
             for line in self.inf.lines(&name) {
@@ -506,7 +522,7 @@ impl Install<'_> {
             }
         }
         for name in self.names(section, "RenFiles") {
-            let Some(dir) = self.dest_dir(&name) else {
+            let Some(dir) = self.dest_dir(cpu, &name) else {
                 continue;
             };
             for line in self.inf.lines(&name) {
@@ -522,7 +538,7 @@ impl Install<'_> {
             }
         }
         for name in self.names(section, "DelFiles") {
-            let Some(dir) = self.dest_dir(&name) else {
+            let Some(dir) = self.dest_dir(cpu, &name) else {
                 continue;
             };
             for line in self.inf.lines(&name) {
@@ -633,7 +649,8 @@ impl Install<'_> {
     /// Change the INI files as the UpdateInis section `section` says. A
     /// line is the file (in the Windows directory if it names no
     /// directory), the section, the entry to take out ("key=value" or
-    /// "key", '*' matching anything), the entry to put in, and flags.
+    /// "key", '*' matching anything), the entry to put in, in the old
+    /// one's place, and flags.
     fn update_inis(&self, cpu: &mut Cpu, section: &str) {
         for line in self.inf.lines(section) {
             let file = self.field(line, 0);
@@ -648,31 +665,44 @@ impl Install<'_> {
             ));
             let file = crate::dosstr::to_bytes(&file);
             let ini_section = crate::dosstr::to_bytes(&ini_section);
-            if !old.is_empty() {
-                let (key, value) = split_entry(&old);
-                kernel32::update_profile(cpu, &file, &ini_section, |entries| {
-                    entries.retain(|(k, v)| {
-                        let key_matches = wildcard(&key, k);
-                        let value_matches = flags & INI_MATCH_VALUE == 0
+            let old = (!old.is_empty()).then(|| split_entry(&old));
+            let new = (!new.is_empty()).then(|| split_entry(&new));
+            if old.is_none() && new.is_none() {
+                continue;
+            }
+            kernel32::update_profile(cpu, &file, &ini_section, |entries| {
+                let matches = |(key, value): &(String, Option<String>),
+                               (k, v): &(String, Option<String>)| {
+                    wildcard(key, k)
+                        && (flags & INI_MATCH_VALUE == 0
                             || value
                                 .as_ref()
-                                .is_none_or(|value| wildcard(value, v.as_deref().unwrap_or("")));
-                        !(key_matches && value_matches)
-                    });
-                });
-            }
-            if !new.is_empty() {
-                let (key, value) = split_entry(&new);
-                kernel32::update_profile(cpu, &file, &ini_section, |entries| {
-                    match entries
+                                .is_none_or(|value| wildcard(value, v.as_deref().unwrap_or(""))))
+                };
+                // The new entry takes the place of the first old one.
+                let first = old
+                    .as_ref()
+                    .and_then(|old| entries.iter().position(|e| matches(old, e)));
+                if let Some(old) = &old {
+                    entries.retain(|e| !matches(old, e));
+                }
+                let Some((key, value)) = new else {
+                    return;
+                };
+                if old.is_some() && first.is_none() && flags & INI_ONLY_IF_FOUND != 0 {
+                    return;
+                }
+                match first {
+                    Some(at) => entries.insert(at, (key, value)),
+                    None => match entries
                         .iter_mut()
                         .find(|(k, _)| k.eq_ignore_ascii_case(&key))
                     {
-                        Some(entry) => entry.1 = value.clone(),
-                        None => entries.push((key.clone(), value.clone())),
-                    }
-                });
-            }
+                        Some(entry) => entry.1 = value,
+                        None => entries.push((key, value)),
+                    },
+                }
+            });
         }
     }
 }
@@ -709,7 +739,12 @@ fn reg_data(flags: u32, values: &[String]) -> (u32, Vec<u8>) {
         data
     };
     match flags & ADDREG_TYPE_MASK {
-        ADDREG_TYPE_DWORD => (registry::REG_DWORD, number(first).to_le_bytes().to_vec()),
+        // A DWORD is a number in one field, or its bytes in hexadecimal
+        // in several ("01,00,00,00"), as SETUPAPI reads them.
+        ADDREG_TYPE_DWORD if values.len() <= 1 => {
+            (registry::REG_DWORD, number(first).to_le_bytes().to_vec())
+        }
+        ADDREG_TYPE_DWORD => (registry::REG_DWORD, hex_bytes(values)),
         ADDREG_TYPE_EXPAND_SZ => (registry::REG_EXPAND_SZ, text(first)),
         ADDREG_TYPE_MULTI_SZ => {
             let mut data: Vec<u8> = values.iter().flat_map(|v| text(v)).collect();
@@ -813,6 +848,10 @@ fn copy(cpu: &mut Cpu, op: &FileOp) -> bool {
         return true;
     }
     if !exists && op.flags & COPY_REPLACE_ONLY != 0 {
+        cpu.bus.log_string(&format!(
+            "[INF] Left out {}: the flags copy it only over a file",
+            op.dest
+        ));
         return true;
     }
     if exists && op.flags & COPY_NO_VERSION_CHECK == 0 {
@@ -942,6 +981,7 @@ Product=\"Media\"\r\n\
             inf.expand("%11%\\%product%.dll 100%% %none% %", &dirs),
             "C:\\WINDOWS\\SYSTEM\\Media.dll 100% %none% %"
         );
+        assert_eq!(inf.expand("%30%\\GAMES %30%", &dirs), "C:\\GAMES C:\\");
     }
 
     #[test]
@@ -958,6 +998,10 @@ Product=\"Media\"\r\n\
         assert_eq!(
             reg_data(0x10001, &values(&["0x10"])),
             (registry::REG_DWORD, vec![0x10, 0, 0, 0])
+        );
+        assert_eq!(
+            reg_data(0x10001, &values(&["00", "10", "00", "00"])),
+            (registry::REG_DWORD, vec![0, 0x10, 0, 0])
         );
         assert_eq!(
             reg_data(0x10000, &values(&["a", "b"])),
