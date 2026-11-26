@@ -169,6 +169,40 @@ fn show_system_entries(cpu: &mut Cpu, first: usize, last: usize) {
     crate::win32::screen::set_colors(cpu, first, &colors[first..=last.min(255)]);
 }
 
+/// Realize the entries `entries` (red, green, blue and PALETTEENTRY
+/// flags) in the foreground, as a logical palette of their own, on a
+/// palette device: as Windows 98 SE's DirectDraw shows the palette of a
+/// primary surface below exclusive mode (#2113). The usual rules map
+/// them (see the module's comment): Bedlam's 255 PC_RESERVED entries
+/// with SYSPAL_NOSTATIC take entries 1 to 254, each one above its own
+/// index, and its window shows its colors that way on Windows 98 SE; an
+/// identity palette (the static colors without flags at the ends,
+/// PC_NOCOLLAPSE between) keeps its indices. Each realization maps them
+/// from scratch, and the palette that was the primary one stays so.
+/// Nothing tells the windows (no WM_PALETTECHANGED).
+pub fn realize_entries(cpu: &mut Cpu, entries: &[[u8; 4]]) {
+    if !palette_device(cpu) || entries.is_empty() {
+        return;
+    }
+    init(cpu);
+    let palette = Palette {
+        entries: entries.to_vec(),
+        ..Palette::default()
+    };
+    let hpal = super::add_system(cpu, Kind::Palette { palette });
+    if hpal == 0 {
+        return;
+    }
+    let primary = std::mem::replace(&mut gdi(cpu).primary_palette, hpal);
+    realize_handle(cpu, hpal);
+    // Deleting it leaves its entries taken, as no palette's.
+    super::free(cpu, hpal);
+    let state = gdi(cpu);
+    if state.primary_palette == 0 {
+        state.primary_palette = primary;
+    }
+}
+
 /// How colors become the pixels of a palette device (`Surface::device`)
 /// in a DC: through its logical palette's entries, mapped to the system
 /// palette, and the static colors.
@@ -902,6 +936,11 @@ pub fn realize_default(cpu: &mut Cpu) {
 /// its entries' mappings changed, and whether it is the primary palette.
 pub(super) fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
     let hpal = gdi(cpu).dc(hdc).map_or(0, |d| d.attrs.palette);
+    realize_handle(cpu, hpal)
+}
+
+/// Realize the palette `hpal`, as `realize` does a DC's.
+fn realize_handle(cpu: &mut Cpu, hpal: u32) -> (u32, bool) {
     let state = gdi(cpu);
     if hpal == state.stock(DEFAULT_PALETTE) {
         return (0, false);

@@ -2445,6 +2445,140 @@ fn back_in_exclusive_mode_the_primary_surfaces_palette_is_the_dacs_again() {
     }
 }
 
+// A palette on the primary surface in a window on a desktop of 256
+// colours.
+
+const W_CREATE_WINDOW: usize = 0;
+const W_GET_DC: usize = 1;
+const W_DIRECT_DRAW_CREATE: usize = 2;
+const W_SET_SYSTEM_PALETTE_USE: usize = 3;
+const SYSPAL_NOSTATIC: u32 = 2;
+const PC_RESERVED: u8 = 1;
+
+/// In a window with DDSCL_NORMAL on a desktop of 256 colours, a palette
+/// of all 256 entries (DDPCAPS_ALLOW256) on the primary surface, its
+/// entries' flags `flags`, and entry 7 changed after, to KEY's color
+/// without flags. With `nostatic`, SetSystemPaletteUse(SYSPAL_NOSTATIC)
+/// first. Bedlam's windowed mode does both, its entries PC_RESERVED
+/// (#2113).
+fn windowed_palette_program(nostatic: bool, flags: u8) -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    for i in 0..256u32 {
+        put(&mut d, ENTRIES + 4 * i, &[i as u8, 0x40, 255 - i as u8, flags]);
+    }
+    put(&mut d, KEY, &[0x80, 0xC0, 0x10, 0]);
+    let dlls = [
+        ("USER32.DLL", &["CreateWindowExA", "GetDC"][..]),
+        ("DDRAW.DLL", &["DirectDrawCreate"][..]),
+        ("GDI32.DLL", &["SetSystemPaletteUse"][..]),
+    ];
+    program(&dlls, &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let window = [
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(100),
+            Arg::I(50),
+            Arg::I(200),
+            Arg::I(100),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(BASE),
+            Arg::I(0),
+        ];
+        c.api(a, l, W_CREATE_WINDOW, &window)?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        if nostatic {
+            c.api(a, l, W_GET_DC, &[Arg::I(0)])?;
+            a.push(SYSPAL_NOSTATIC as i32)?;
+            a.push(eax)?;
+            a.call(l.import(W_SET_SYSTEM_PALETTE_USE))?;
+        }
+        let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+        c.api(a, l, W_DIRECT_DRAW_CREATE, &create)?;
+        let normal = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &normal)?;
+        let primary = [Arg::At(DESC), Arg::At(FRONT), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &primary)?;
+        let caps = Arg::I(DDPCAPS_8BIT | DDPCAPS_ALLOW256);
+        let palette = [caps, Arg::At(ENTRIES), Arg::At(PALETTE), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_PALETTE, &palette)?;
+        c.com(a, l, FRONT, S_SET_PALETTE, &[Arg::Val(PALETTE)])?;
+        let entry = [Arg::I(0), Arg::I(7), Arg::I(1), Arg::At(KEY)];
+        c.com(a, l, PALETTE, PAL_SET_ENTRIES, &entry)?;
+        finish(a, l)
+    })
+}
+
+/// Run `windowed_palette_program` on a desktop of 256 colours, and check
+/// that its DirectDraw calls succeeded.
+fn run_windowed_palette(test: &str, nostatic: bool, flags: u8) -> Box<Cpu> {
+    let (program, data) = windowed_palette_program(nostatic, flags);
+    let base = PathBuf::from("target/test_win32_ddraw").join(test);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    run_until_done(&mut cpu, data);
+    // The window, GetDC with `nostatic`, then DirectDraw's calls.
+    let first = if nostatic { 2 } else { 1 };
+    let r = results(&mut cpu, data, first + 6);
+    assert_eq!(r[first as usize..], [0; 6]);
+    cpu
+}
+
+/// The palette's entry `i`, as the test programs make it.
+fn program_color(i: usize) -> [u8; 3] {
+    [i as u8, 0x40, 255 - i as u8]
+}
+
+#[test]
+fn a_windowed_primary_surfaces_palette_is_realized_in_the_foreground() {
+    let cpu = run_windowed_palette("windowed_palette", false, 0);
+    // Through GDI, as a logical palette realized in the foreground: the
+    // 20 static colors stay, and the entries, of colors none of them
+    // has, take the entries between them from the bottom up.
+    for (i, color) in [(0, [0, 0, 0]), (9, [0xA6, 0xCA, 0xF0]), (255, [0xFF; 3])] {
+        let (dac, expected) = dac_entry(&cpu, i, color);
+        assert_eq!(dac, expected, "entry {i}");
+    }
+    for k in [0, 100, 235] {
+        let (dac, expected) = dac_entry(&cpu, 10 + k, program_color(k));
+        assert_eq!(dac, expected, "entry {}", 10 + k);
+    }
+    // SetEntries realizes it again: the others keep their entries, and
+    // entry 7 takes its own back with its new color.
+    let (dac, expected) = dac_entry(&cpu, 17, [0x80, 0xC0, 0x10]);
+    assert_eq!(dac, expected, "entry 17");
+}
+
+#[test]
+fn a_windowed_palette_of_reserved_entries_starts_above_black_with_syspal_nostatic() {
+    // Bedlam's case: with SYSPAL_NOSTATIC only black (0) and white (255)
+    // are static, and PC_RESERVED entries never share one, so entry k
+    // takes the system palette's k + 1, as Bedlam's window shows on
+    // Windows 98 SE.
+    let cpu = run_windowed_palette("windowed_palette_nostatic", true, PC_RESERVED);
+    for (i, color) in [(0, [0, 0, 0]), (255, [0xFF; 3])] {
+        let (dac, expected) = dac_entry(&cpu, i, color);
+        assert_eq!(dac, expected, "entry {i}");
+    }
+    for k in [0, 8, 199, 253] {
+        let (dac, expected) = dac_entry(&cpu, k + 1, program_color(k));
+        assert_eq!(dac, expected, "entry {}", k + 1);
+    }
+    let (dac, expected) = dac_entry(&cpu, 8, [0x80, 0xC0, 0x10]);
+    assert_eq!(dac, expected, "entry 8");
+}
+
 const S_RESTORE: u32 = 27;
 const DDSD_MIPMAPCOUNT: u32 = 0x2_0000;
 const DDSCAPS_TEXTURE: u32 = 0x1000;

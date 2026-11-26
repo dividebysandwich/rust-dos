@@ -1,6 +1,7 @@
 //! IDirectDrawPalette: a palette of 2, 4, 16 or 256 entries. Set on the
-//! primary surface of an 8-bit mode, its entries are the DAC's, and
-//! SetEntries changes the colors on the screen at once.
+//! primary surface of 8 bits, its entries are the screen's colors, and
+//! SetEntries changes them at once: all of the DAC's in exclusive mode,
+//! and below it the system palette's entries GDI maps them to (`show`).
 
 use super::com::CLASS_E_NOAGGREGATION;
 use super::{
@@ -8,6 +9,7 @@ use super::{
     DDERR_NOCOOPERATIVELEVELSET, Object, V_PALETTE, state,
 };
 use crate::cpu::Cpu;
+use crate::win32::gdi32::palette;
 
 const DDPCAPS_4BIT: u32 = 0x1;
 const DDPCAPS_8BITENTRIES: u32 = 0x2;
@@ -270,18 +272,48 @@ pub fn colors(cpu: &mut Cpu, pal: u32) -> Option<Vec<u32>> {
     state(cpu).object(id)?.palette.as_ref()?.colorrefs()
 }
 
-/// Put the palette at the interface `pal` in the DAC, if DirectDraw has
-/// the display. GDI's next RealizePalette puts the system palette back
-/// even for the palette it realized last.
+/// The entries of the palette at the interface `pal` with their flags;
+/// None for one of indexes into another palette (DDPCAPS_8BITENTRIES).
+fn entries(cpu: &mut Cpu, pal: u32) -> Option<Vec<[u8; 4]>> {
+    let (_, id) = super::this(cpu, pal)?;
+    let p = state(cpu).object(id)?.palette.as_ref()?;
+    if p.entry_size() != 4 {
+        return None;
+    }
+    Some(
+        p.entries
+            .chunks(4)
+            .map(|e| [e[0], e[1], e[2], e[3]])
+            .collect(),
+    )
+}
+
+/// Show the palette at the interface `pal`, the primary surface's. In
+/// exclusive mode, in an 8-bit mode DirectDraw set or on a desktop of
+/// 256 colours, all of it goes in the DAC, and GDI's next RealizePalette
+/// puts the system palette back even for the palette it realized last.
+/// Below exclusive mode on a palette device (a desktop of 256 colours,
+/// or a mode kept after exclusive mode ended) it shares the screen with
+/// GDI, which realizes its entries in the foreground
+/// (`gdi32::palette::realize_entries`).
 pub fn show(cpu: &mut Cpu, pal: u32) {
-    if !super::display::owns_display(cpu) {
+    let owner = super::this(cpu, pal)
+        .and_then(|(_, id)| state(cpu).object(id))
+        .map_or(0, |o| o.owner);
+    let exclusive = owner != 0 && state(cpu).display.exclusive == owner;
+    if !exclusive {
+        if let Some(entries) = entries(cpu, pal) {
+            palette::realize_entries(cpu, &entries);
+        }
         return;
     }
     let Some(colors) = colors(cpu, pal) else {
         return;
     };
-    crate::win32::screen::set_colors(cpu, 0, &colors);
-    crate::win32::gdi32::gdi(cpu).last_realized = 0;
+    if super::display::owns_display(cpu) || palette::palette_device(cpu) {
+        crate::win32::screen::set_colors(cpu, 0, &colors);
+        crate::win32::gdi32::gdi(cpu).last_realized = 0;
+    }
 }
 
 crate::state_fields!(Palette { caps, entries });
