@@ -216,7 +216,13 @@ impl F80 {
         let rc = control >> 10 & 3;
         // Sign, exponent (a denormal's counts as 1, as the least normal
         // one's) and significand at the top of 128 bits.
-        let parts = |f: &F80, sign: bool| (sign, f.get_exponent().max(1) as i32, (f.st as u64 as u128) << 64);
+        let parts = |f: &F80, sign: bool| {
+            (
+                sign,
+                f.get_exponent().max(1) as i32,
+                (f.st as u64 as u128) << 64,
+            )
+        };
         let (mut big, mut small) = (parts(self, self.get_sign()), parts(&b, b_sign));
         if (small.1, small.2) > (big.1, big.2) {
             std::mem::swap(&mut big, &mut small);
@@ -274,7 +280,11 @@ impl F80 {
                 2 => sign,
                 _ => true,
             };
-            (exp, significand) = if largest { (0x7FFE, !0 << (64 - bits)) } else { (0x7FFF, INT_BIT_MASK64) };
+            (exp, significand) = if largest {
+                (0x7FFE, !0 << (64 - bits))
+            } else {
+                (0x7FFF, INT_BIT_MASK64)
+            };
         } else if significand >> 63 == 0 {
             // A denormal (or 0): exponent 0.
             exp = 0;
@@ -917,7 +927,11 @@ impl F80 {
             _ if d > 130 => [1, 0, 0, 0],
             m => shl([m, 0, 0, 0], 130 - d),
         };
-        let total = if x.0 == y.0 { add(big, small) } else { add(big, add(small.map(|w| !w), [1, 0, 0, 0])) };
+        let total = if x.0 == y.0 {
+            add(big, small)
+        } else {
+            add(big, add(small.map(|w| !w), [1, 0, 0, 0]))
+        };
         let sign = x.0;
         // The biased exponent of the bit at place i.
         let exponent = |i: i32| x.1 + i - 130 - 63;
@@ -928,7 +942,9 @@ impl F80 {
         // The last place kept: `bits` from the top, or from the place of
         // the least normal number's integer bit below it (a denormal).
         let last = top + (1 - exponent(top)).max(0) - (bits - 1);
-        let mut kept = (last..=top).rev().fold(0u128, |k, i| k << 1 | bit(&total, i) as u128);
+        let mut kept = (last..=top)
+            .rev()
+            .fold(0u128, |k, i| k << 1 | bit(&total, i) as u128);
         let half = bit(&total, last - 1);
         let rest = (0..last - 1).any(|i| bit(&total, i));
         let up = match rc {
@@ -950,11 +966,22 @@ impl F80 {
                 2 => sign,
                 _ => true,
             };
-            let st = if largest { 0x7FFE << 64 | (!0u64 << (64 - bits)) as u128 } else { 0x7FFF << 64 | 1 << 63 };
+            let st = if largest {
+                0x7FFE << 64 | (!0u64 << (64 - bits)) as u128
+            } else {
+                0x7FFF << 64 | 1 << 63
+            };
             return (sign as u128) << 79 | st;
         }
         let (exp, significand) = if exp >= 1 {
-            (exp, if length > 64 { kept >> (length - 64) } else { kept << (64 - length) } as u64)
+            (
+                exp,
+                if length > 64 {
+                    kept >> (length - 64)
+                } else {
+                    kept << (64 - length)
+                } as u64,
+            )
         } else {
             (0, (kept << (64 - bits)) as u64)
         };
@@ -1072,17 +1099,36 @@ mod tests {
         let mut checked = 0;
         for (i, &a) in values.iter().enumerate() {
             for (j, &b) in values.iter().enumerate().skip(i % 41).step_by(41) {
-                let pairs = [(a, b), (b, a), (a, a), (a, F80 { st: a.st ^ SIGN_MASK }), (a, F80 { st: a.st ^ 1 })];
+                let pairs = [
+                    (a, b),
+                    (b, a),
+                    (a, a),
+                    (
+                        a,
+                        F80 {
+                            st: a.st ^ SIGN_MASK,
+                        },
+                    ),
+                    (a, F80 { st: a.st ^ 1 }),
+                ];
                 for (k, (a, b)) in pairs.into_iter().enumerate() {
                     for n in 0..4 {
                         let control = 0x7F | (((i + j + k + n * 4) % 16) as u16) << 8;
                         let (mut sum, mut difference) = (a, a);
                         assert!(!sum.add(b, control));
                         let expected = F80::sum_reference(a, b, b.get_sign(), control);
-                        assert_eq!(sum.st, expected, "{:020X} + {:020X} at {control:04X}", a.st, b.st);
+                        assert_eq!(
+                            sum.st, expected,
+                            "{:020X} + {:020X} at {control:04X}",
+                            a.st, b.st
+                        );
                         assert!(!difference.sub(b, control));
                         let expected = F80::sum_reference(a, b, !b.get_sign(), control);
-                        assert_eq!(difference.st, expected, "{:020X} - {:020X} at {control:04X}", a.st, b.st);
+                        assert_eq!(
+                            difference.st, expected,
+                            "{:020X} - {:020X} at {control:04X}",
+                            a.st, b.st
+                        );
                         checked += 1;
                     }
                 }
@@ -1105,33 +1151,72 @@ mod tests {
         };
         // 1 + 2^-64 + 2^-70: above a half of the 64th bit, and a tie.
         let one = f(1.0);
-        let tiny = F80 { st: (0x3FFF - 64) << 64 | 1 << 63 | 1 << 57 };
-        let tie = F80 { st: (0x3FFF - 64) << 64 | 1 << 63 };
+        let tiny = F80 {
+            st: (0x3FFF - 64) << 64 | 1 << 63 | 1 << 57,
+        };
+        let tie = F80 {
+            st: (0x3FFF - 64) << 64 | 1 << 63,
+        };
         assert_eq!(sum(one, tiny, 0x037F).st, one.st | 1);
         assert_eq!(sum(one, tie, 0x037F).st, one.st);
         assert_eq!(sum(one, tie, 0x0B7F).st, one.st | 1);
-        assert_eq!(sum(f(-1.0), F80 { st: tie.st | SIGN_MASK }, 0x077F).st, f(-1.0).st | 1);
-        assert_eq!(sum(f(-1.0), F80 { st: tie.st | SIGN_MASK }, 0x0F7F).st, f(-1.0).st);
+        assert_eq!(
+            sum(
+                f(-1.0),
+                F80 {
+                    st: tie.st | SIGN_MASK
+                },
+                0x077F
+            )
+            .st,
+            f(-1.0).st | 1
+        );
+        assert_eq!(
+            sum(
+                f(-1.0),
+                F80 {
+                    st: tie.st | SIGN_MASK
+                },
+                0x0F7F
+            )
+            .st,
+            f(-1.0).st
+        );
         // 1 - 2^-80 chopped is the 64-bit number below 1.
-        let below = F80 { st: SIGN_MASK | (0x3FFF - 80) << 64 | 1 << 63 };
-        assert_eq!(sum(one, below, 0x0F7F).st, (0x3FFE << 64) | u64::MAX as u128);
+        let below = F80 {
+            st: SIGN_MASK | (0x3FFF - 80) << 64 | 1 << 63,
+        };
+        assert_eq!(
+            sum(one, below, 0x0F7F).st,
+            (0x3FFE << 64) | u64::MAX as u128
+        );
         assert_eq!(sum(one, below, 0x037F).st, one.st);
         // At 24 bits, 1 + 0.1 keeps 24 bits: rounded to nearest, up;
         // chopped, the single below.
         let single = 1.1f32;
         assert_eq!(sum(one, f(0.1), 0x007F).get_f64(), single as f64);
-        assert_eq!(sum(one, f(0.1), 0x0C7F).get_f64(), f32::from_bits(single.to_bits() - 1) as f64);
+        assert_eq!(
+            sum(one, f(0.1), 0x0C7F).get_f64(),
+            f32::from_bits(single.to_bits() - 1) as f64
+        );
         // A cancellation is -0 only rounding down.
         assert_eq!(sum(one, f(-1.0), 0x037F).st, 0);
         assert_eq!(sum(one, f(-1.0), 0x077F).st, SIGN_MASK);
         assert_eq!(sum(f(-0.0), f(-0.0), 0x037F).st, SIGN_MASK);
         // Past the largest number: the infinity, or the largest number.
-        let max = F80 { st: 0x7FFE << 64 | u64::MAX as u128 };
+        let max = F80 {
+            st: 0x7FFE << 64 | u64::MAX as u128,
+        };
         assert_eq!(sum(max, max, 0x037F).st, 0x7FFF << 64 | 1 << 63);
         assert_eq!(sum(max, max, 0x0F7F).st, max.st);
-        assert_eq!(sum(max, max, 0x0C7F).st, 0x7FFE << 64 | 0xFFFF_FF00_0000_0000);
+        assert_eq!(
+            sum(max, max, 0x0C7F).st,
+            0x7FFE << 64 | 0xFFFF_FF00_0000_0000
+        );
         // A format the 387 doesn't take makes the real indefinite.
-        let mut unnormal = F80 { st: 0x3FFF << 64 | 1 << 62 };
+        let mut unnormal = F80 {
+            st: 0x3FFF << 64 | 1 << 62,
+        };
         assert!(unnormal.add(one, 0x037F));
         assert_eq!(unnormal.st, REAL_INDEFINITE);
     }

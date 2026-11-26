@@ -866,13 +866,23 @@ fn narrow_sums_are_the_exact_sum_rounded_once() {
         for control in (0..16).map(|c| 0x007F | c << 8) {
             let (wide, exact) = wide_sum(control, a, b);
             let narrow = narrow_sum(control, a, b);
-            assert_eq!(narrow.map(f64::to_bits), exact.filter(|_| narrow_takes(control, a, b)).map(f64::to_bits), "{a:e} + {b:e} at {control:04X}: {:020X}", wide.st);
+            assert_eq!(
+                narrow.map(f64::to_bits),
+                exact
+                    .filter(|_| narrow_takes(control, a, b))
+                    .map(f64::to_bits),
+                "{a:e} + {b:e} at {control:04X}: {:020X}",
+                wide.st
+            );
         }
         if (a + b).to_bits() & 0x0FFF_FFFF == 0 {
             halfway += 1;
         }
     }
-    assert!(halfway > 1000, "only {halfway} sums on a single or halfway between two");
+    assert!(
+        halfway > 1000,
+        "only {halfway} sums on a single or halfway between two"
+    );
 }
 
 #[test]
@@ -915,13 +925,21 @@ fn narrow_sums_take_every_rounding_at_the_edges() {
                 }
                 let (wide, exact) = wide_sum(control, a, b);
                 let exact = exact.filter(|_| narrow_takes(control, a, b));
-                assert_eq!(narrow.map(f64::to_bits), exact.map(f64::to_bits), "{a:e} + {b:e} at {control:04X}: {:020X}", wide.st);
+                assert_eq!(
+                    narrow.map(f64::to_bits),
+                    exact.map(f64::to_bits),
+                    "{a:e} + {b:e} at {control:04X}: {:020X}",
+                    wide.st
+                );
             }
         }
     }
     // Some by hand. A sum below the smallest normal single, which a 387
     // keeps with 24 bits and its 15 bits of exponent.
-    assert_eq!(narrow_sum(0x007F, min_single, -(2f64.powi(-150))), Some(min_single - 2f64.powi(-150)));
+    assert_eq!(
+        narrow_sum(0x007F, min_single, -(2f64.powi(-150))),
+        Some(min_single - 2f64.powi(-150))
+    );
     // Above a single's range, the same.
     assert!(narrow_sum(0x007F, 1e300, 1e300).is_some_and(|v| v.to_bits() & 0x1FFF_FFFF == 0));
     // 1 + 2^-24 at 24 bits: a tie, to even; chopped and down, 1; up, the
@@ -942,6 +960,12 @@ fn narrow_sums_take_every_rounding_at_the_edges() {
     assert_eq!(narrow_sum(0x037F, one, 2f64.powi(-80)), None);
     // A cancellation is -0 only rounding down.
     assert_eq!(narrow_sum(0x037F, 1.5, -1.5).map(f64::to_bits), Some(0));
-    assert_eq!(narrow_sum(0x077F, 1.5, -1.5).map(f64::to_bits), Some((-0.0f64).to_bits()));
-    assert_eq!(narrow_sum(0x0C7F, -0.0, -0.0).map(f64::to_bits), Some((-0.0f64).to_bits()));
+    assert_eq!(
+        narrow_sum(0x077F, 1.5, -1.5).map(f64::to_bits),
+        Some((-0.0f64).to_bits())
+    );
+    assert_eq!(
+        narrow_sum(0x0C7F, -0.0, -0.0).map(f64::to_bits),
+        Some((-0.0f64).to_bits())
+    );
 }

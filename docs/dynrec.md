@@ -303,7 +303,7 @@ Each instruction becomes one of two things:
 The interpreter computes products, quotients, loads, stores and
 comparisons with doubles, and sums and differences on the registers' 80
 bits (`F80::add`), or as doubles rounded to the control word's precision
-(see [Sums at 53 and 24 bits](#sums-at-53-and-24-bits)). So each FPU
+(see [Sums and the control word](#sums-and-the-control-word)). So each FPU
 register keeps the double it comes to beside its 80 bits
 (`f80::FpuRegs`): an instruction that gives a register a double stores
 only that, and the 80 bits are made from it when something asks for them

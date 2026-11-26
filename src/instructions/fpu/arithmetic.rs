@@ -39,7 +39,11 @@ pub fn narrow_sum(control: u16, a: f64, b: f64) -> Option<f64> {
     if sum == 0.0 {
         // Exact: two zeros, or a cancellation, which is +0 (as the host
         // gives it) but -0 rounding down.
-        return Some(if rc == 1 { f64::from_bits((a.to_bits() | b.to_bits()) & 1 << 63) } else { sum });
+        return Some(if rc == 1 {
+            f64::from_bits((a.to_bits() | b.to_bits()) & 1 << 63)
+        } else {
+            sum
+        });
     }
     if !sum.is_normal() {
         return None;
@@ -105,7 +109,11 @@ pub fn addsub_st(cpu: &mut Cpu, dst: usize, a: usize, b: usize, sub: bool) {
     }
     let mut x = cpu.fpu_get(a);
     let y = cpu.fpu_get(b);
-    let invalid = if sub { x.sub(y, control) } else { x.add(y, control) };
+    let invalid = if sub {
+        x.sub(y, control)
+    } else {
+        x.add(y, control)
+    };
     if invalid {
         cpu.set_fpu_flag(FpuFlags::IE, true);
     }

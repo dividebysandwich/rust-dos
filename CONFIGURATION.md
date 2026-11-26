@@ -1754,16 +1754,15 @@ order.
   to switch back for a game that misbehaves. The recompiler needs an
   x86-64 or ARM64 host; on others and in the browser the interpreter runs
   everything. `--core` overrides it. See [docs/dynrec.md](docs/dynrec.md).
-* `fpu` is how the FPU adds and subtracts: `exact` (the default) as a
-  real 387 does, or `fast` on the host's 64-bit doubles, as it
-  multiplies and divides anyway. `exact` rounds every sum once to the
-  precision the control word asks for (64, 53 or 24 bits of
-  significand) as its rounding field says (to nearest, down, up or
-  toward zero). DOS programs mostly run at 64 bits, Win32 programs at 53
-  (the C runtime sets it) or 24 (Direct3D), and Quake's rasterizer at 24
-  bits chopped. `fast` saves host CPU in programs that compute a lot
-  with the FPU at 64 bits of precision, on both cores, but isn't exact:
-  sums can differ from a real machine's in the last bits,
+* `fpu` is how the FPU adds and subtracts: `exact` (the default) as a real
+  387 does, or `fast` on the host's 64-bit doubles, as it multiplies and
+  divides anyway. `exact` rounds every sum once to the precision the control
+  word asks for (64, 53 or 24 bits of significand) as its rounding field
+  says (to nearest, down, up or toward zero). DOS programs mostly run at 64
+  bits, Win32 programs at 53 (the C runtime sets it) or 24 (Direct3D), and
+  Quake's rasterizer at 24 bits chopped. `fast` saves host CPU in programs
+  that compute a lot with the FPU at 64 bits of precision, on both cores,
+  but isn't exact: sums can differ from a real machine's in the last bits,
   they are always rounded to nearest at 53 bits whatever the control word
   says, and FXCH keeps only the doubles of the registers it exchanges (a
   value loaded as 80 bits loses its last bits there). Saved states load in
