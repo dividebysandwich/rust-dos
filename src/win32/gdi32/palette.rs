@@ -169,6 +169,72 @@ fn show_system_entries(cpu: &mut Cpu, first: usize, last: usize) {
     crate::win32::screen::set_colors(cpu, first, &colors[first..=last.min(255)]);
 }
 
+/// Realize the entries `entries` (red, green, blue and PALETTEENTRY
+/// flags) in the foreground, through the logical palette `hpal`, on a
+/// palette device: as Windows 98 SE's DirectDraw shows the palette of a
+/// primary surface below exclusive mode (#2113). The palette is made
+/// the first time (`hpal` 0), and its handle returned: the caller keeps
+/// it for the next realization, and lets it go with `entries_gone`.
+///
+/// The usual rules map the entries the first time (see the module's
+/// comment): Bedlam's 255 PC_RESERVED entries with SYSPAL_NOSTATIC take
+/// entries 1 to 254, each one above its own index, and its window shows
+/// its colors that way on Windows 98 SE; an identity palette (the
+/// static colors without flags at the ends, PC_NOCOLLAPSE between)
+/// keeps its indices. Later realizations keep that mapping and put the
+/// new colors in the same entries, as SetPaletteEntries and a
+/// realization in the foreground do on Windows 95 (#2041). Mapping from
+/// scratch each time would move entries: the static white at the end
+/// of an identity palette would take the entry a white between them got
+/// the time before. SetSystemPaletteUse makes it map again, as it does
+/// every palette. The palette that was the primary one stays so, and
+/// nothing tells the windows (no WM_PALETTECHANGED).
+pub fn realize_entries(cpu: &mut Cpu, hpal: u32, entries: &[[u8; 4]]) -> u32 {
+    if !palette_device(cpu) || entries.is_empty() {
+        return hpal;
+    }
+    init(cpu);
+    let kept = match gdi(cpu).get_mut(hpal) {
+        Some(super::Object {
+            kind: Kind::Palette { palette },
+            ..
+        }) => {
+            if palette.entries.len() != entries.len() {
+                palette.clear_mapping();
+            }
+            palette.entries = entries.to_vec();
+            true
+        }
+        _ => false,
+    };
+    let hpal = if kept {
+        hpal
+    } else {
+        let palette = Palette {
+            entries: entries.to_vec(),
+            ..Palette::default()
+        };
+        super::add(cpu, Kind::Palette { palette })
+    };
+    if hpal == 0 {
+        return 0;
+    }
+    // New colors are realized even where the mapping stays.
+    unrealize(cpu, hpal);
+    let primary = std::mem::replace(&mut gdi(cpu).primary_palette, hpal);
+    realize_handle(cpu, hpal);
+    gdi(cpu).primary_palette = primary;
+    hpal
+}
+
+/// The palette `hpal` `realize_entries` made goes, with what it was
+/// for. Its entries of the system palette stay taken, as no palette's.
+pub fn entries_gone(cpu: &mut Cpu, hpal: u32) {
+    if hpal != 0 && gdi(cpu).palette(hpal).is_some() {
+        super::free(cpu, hpal);
+    }
+}
+
 /// How colors become the pixels of a palette device (`Surface::device`)
 /// in a DC: through its logical palette's entries, mapped to the system
 /// palette, and the static colors.
@@ -902,6 +968,11 @@ pub fn realize_default(cpu: &mut Cpu) {
 /// its entries' mappings changed, and whether it is the primary palette.
 pub(super) fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
     let hpal = gdi(cpu).dc(hdc).map_or(0, |d| d.attrs.palette);
+    realize_handle(cpu, hpal)
+}
+
+/// Realize the palette `hpal`, as `realize` does a DC's.
+fn realize_handle(cpu: &mut Cpu, hpal: u32) -> (u32, bool) {
     let state = gdi(cpu);
     if hpal == state.stock(DEFAULT_PALETTE) {
         return (0, false);
