@@ -83,6 +83,7 @@ const DRV_QUERYCONFIGURE: u32 = 8;
 const ACMDM_USER: u32 = 0x4000;
 const ACMDM_BASE: u32 = 0x6000;
 const ACMDM_DRIVER_DETAILS: u32 = ACMDM_BASE + 10;
+const ACMDM_DRIVER_ABOUT: u32 = ACMDM_BASE + 11;
 const ACMDM_FORMAT_SUGGEST: u32 = ACMDM_BASE + 27;
 const ACMDM_STREAM_OPEN: u32 = ACMDM_BASE + 76;
 const ACMDM_STREAM_CLOSE: u32 = ACMDM_BASE + 77;
@@ -443,15 +444,19 @@ fn driver_close_step(cpu: &mut Cpu, t: &mut Task) -> Next {
 }
 
 /// acmDriverMessage(driver, message, first, second): the driver's own
-/// messages (from ACMDM_USER to the ACM's) and the two of its
-/// configuration go to it; the ACM's own messages may not be sent this
-/// way (issue 443 has what Windows 98's code checks).
+/// messages (from ACMDM_USER to the ACM's), ACMDM_DRIVER_ABOUT and the
+/// two of its configuration go to it, as the function's documentation
+/// lists them; the ACM's other messages may not be sent this way (issue
+/// 443 has what Windows 98's code checks).
 pub(super) fn driver_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[handle, message, p1, p2] = args else {
         unreachable!()
     };
     let allowed = (ACMDM_USER..ACMDM_BASE).contains(&message)
-        || matches!(message, DRV_QUERYCONFIGURE | DRV_CONFIGURE);
+        || matches!(
+            message,
+            ACMDM_DRIVER_ABOUT | DRV_QUERYCONFIGURE | DRV_CONFIGURE
+        );
     if !allowed {
         return Some(MMSYSERR_INVALPARAM);
     }
@@ -850,6 +855,10 @@ fn free_instance(cpu: &mut Cpu, at: u32) {
     crate::win32::with_process(cpu, |p, bus| p.system_free(bus, at));
 }
 
+/// A query (ACM_STREAMOPENF_QUERY) keeps no stream. As Wine's
+/// acmStreamOpen has it, a driver the program opened is sent only
+/// ACMDM_STREAM_OPEN, and one found by the search over the drivers is
+/// sent ACMDM_STREAM_CLOSE after it took the query, then closed.
 fn stream_open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let instance = t.var(V_C);
     let query = t.var(V_D) == 0;
@@ -857,17 +866,12 @@ fn stream_open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     if t.var(V_B) != 0 {
         return match t.step {
             0 => send(cpu, t.var(V_HDRVR), ACMDM_STREAM_OPEN, instance, 0, 1),
-            1 if value != MMSYSERR_NOERROR => {
+            _ if value != MMSYSERR_NOERROR || query => {
                 free_instance(cpu, instance);
                 Next::Done(value)
             }
-            1 if query => send(cpu, t.var(V_HDRVR), ACMDM_STREAM_CLOSE, instance, 0, 2),
-            1 => {
-                add_stream(cpu, t, t.var(V_B), false);
-                Next::Done(MMSYSERR_NOERROR)
-            }
             _ => {
-                free_instance(cpu, instance);
+                add_stream(cpu, t, t.var(V_B), false);
                 Next::Done(MMSYSERR_NOERROR)
             }
         };
@@ -878,9 +882,11 @@ fn stream_open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             t.set(V_HDRVR, value);
             send(cpu, value, ACMDM_STREAM_OPEN, instance, 0, 2)
         }
+        // A query it took: its stream and the driver are closed again.
         2 if value == MMSYSERR_NOERROR && query => {
             send(cpu, t.var(V_HDRVR), ACMDM_STREAM_CLOSE, instance, 0, 3)
         }
+        3 => close(cpu, t.var(V_HDRVR), 5),
         2 if value == MMSYSERR_NOERROR => {
             let handle = add_driver(cpu, t.var(V_ID), t.var(V_HDRVR));
             add_stream(cpu, t, handle, true);
@@ -888,8 +894,6 @@ fn stream_open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         }
         // It refused: the next one.
         2 => close(cpu, t.var(V_HDRVR), 4),
-        // A query it took: it is closed again.
-        3 => close(cpu, t.var(V_HDRVR), 5),
         5 => {
             free_instance(cpu, instance);
             Next::Done(MMSYSERR_NOERROR)
