@@ -173,7 +173,17 @@ pub fn settings(
     // file's, as one layer over another would.
     let text = format!("{}\n{}", base.text, options.config_text());
     let parsed = config::parse(&text, base.dir(), home.as_deref());
-    let mut warnings: Vec<String> = parsed.warnings.iter().map(|w| format!("rust-dos.conf: {}", w)).collect();
+    // The warning for rust-dos.conf's old renderer lines names the line
+    // to write in their place: the file's own value, not the options'.
+    let deprecation = |c: &config::Config| c.renderer().and_then(|r| c.renderer_deprecation(r));
+    let (over, own) = (deprecation(&parsed), deprecation(&file));
+    let mut warnings: Vec<String> = parsed
+        .warnings
+        .iter()
+        .filter(|w| over.as_ref() != Some(*w))
+        .chain(own.iter())
+        .map(|w| format!("rust-dos.conf: {}", w))
+        .collect();
     let mut settings = Settings::from_config(&parsed);
     if let Some(overlay) = overlay {
         let below = format!(
@@ -577,6 +587,18 @@ mod tests {
         let two = overlay("[emulator]\nvoodoo_renderer=opengl\ntoadforce_renderer=software\n");
         let error = settings(&Base::load(&dirs), &Values::default(), Some(&two)).unwrap_err();
         assert!(error.contains("line 2 (voodoo_renderer=opengl)"), "{error}");
+
+        // The core option's renderer goes over rust-dos.conf's old line,
+        // and the warning names the file's own value, the line to write
+        // into it.
+        fs::write(&file, "[emulator]\nvoodoo_renderer=opengl\n").unwrap();
+        let mut options = Values::default();
+        options.set("voodoo_renderer", "software");
+        let (got, warnings) = settings(&Base::load(&dirs), &options, None).unwrap();
+        assert_eq!(got.renderer, rust_dos::config::Renderer::Software);
+        let deprecated: Vec<_> = warnings.iter().filter(|w| w.contains("deprecated")).collect();
+        assert_eq!(deprecated.len(), 1, "{warnings:?}");
+        assert!(deprecated[0].ends_with("one line renderer=opengl"), "{warnings:?}");
     }
 
     #[test]
