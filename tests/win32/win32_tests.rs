@@ -19884,6 +19884,69 @@ fn icopen_opens_installed_decompressors() {
     assert_eq!(ic_open("icopen_draw", vidc, b"IV50", ICMODE_DRAW), 0xEE);
 }
 
+/// ICGetInfo describes an open codec, as Actua Soccer 2 asks for its
+/// film's Microsoft Video 1 decoder: ICINFO's size back, and the type,
+/// handler, name, description and driver's file in the ICINFO. A buffer
+/// smaller than an ICINFO gets 0, and a closed handle ICERR_BADHANDLE.
+/// The program ends with 0, or the number of the first check that
+/// failed.
+#[test]
+fn icgetinfo_describes_an_open_codec() {
+    const ICINFO: i32 = 568;
+    let imports: &[(&str, &[&str])] = &[("MSVFW32.DLL", &["ICOpen", "ICGetInfo", "ICClose"])];
+    let exe = program(BASE, false, imports, &[0xCC; 0x300], |a, l| {
+        let mut fail = a.create_label();
+        let get_info = |a: &mut CodeAssembler, size: i32| {
+            a.push(size)?;
+            a.push(l.at(0) as i32)?;
+            a.push(ebx)?;
+            a.call(l.import(1))
+        };
+        a.push(2)?; // ICMODE_DECOMPRESS
+        a.push(i32::from_le_bytes(*b"MSVC"))?;
+        a.push(i32::from_le_bytes(*b"vidc"))?;
+        a.call(l.import(0))?;
+        a.mov(ebx, eax)?;
+        get_info(a, ICINFO)?;
+        // The result, dwSize, fccType, fccHandler, dwVersionICM, and the
+        // first characters of szName ("MS-CRAM"), szDescription
+        // ("Microsoft Video 1") and szDriver ("msvidc32.dll").
+        let checks: [(Option<u32>, u32); 8] = [
+            (None, ICINFO as u32),
+            (Some(0), ICINFO as u32),
+            (Some(4), u32::from_le_bytes(*b"vidc")),
+            (Some(8), u32::from_le_bytes(*b"msvc")),
+            (Some(20), 0x0104),
+            (Some(24), u32::from(b'M') | u32::from(b'S') << 16),
+            (Some(24 + 32), u32::from(b'M') | u32::from(b'i') << 16),
+            (Some(24 + 288), u32::from(b'm') | u32::from(b's') << 16),
+        ];
+        for (n, (at, value)) in checks.into_iter().enumerate() {
+            a.mov(esi, n as u32 + 1)?;
+            match at {
+                None => a.cmp(eax, value as i32)?,
+                Some(at) => a.cmp(dword_ptr(l.at(at)), value as i32)?,
+            }
+            a.jne(fail)?;
+        }
+        get_info(a, ICINFO - 1)?;
+        a.mov(esi, 9)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        get_info(a, ICINFO)?;
+        a.mov(esi, 10)?;
+        a.cmp(eax, -8)?; // ICERR_BADHANDLE
+        a.jne(fail)?;
+        a.xor(esi, esi)?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, esi)?;
+        a.ret()
+    });
+    assert_eq!(run("icgetinfo", exe).0, 0);
+}
+
 /// A BITMAPINFOHEADER of a Microsoft Video 1 stream of 8 by 4 pixels and
 /// `bits` bits, with an 8-bit one's two colours: blue and red.
 fn cram_info(bits: u16) -> Vec<u8> {

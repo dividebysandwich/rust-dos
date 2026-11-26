@@ -1,6 +1,7 @@
 //! MSVFW32.DLL: the DrawDib functions, which draw a DIB to a DC and
-//! decompress it first when it is compressed; ICInfo, ICOpen, ICLocate
-//! and ICClose, which find and open the decompressors codec.rs has; and
+//! decompress it first when it is compressed; ICInfo, ICOpen, ICLocate,
+//! ICGetInfo and ICClose, which find, open and describe the
+//! decompressors codec.rs has; and
 //! ICSendMessage and ICDecompress, through which a program decompresses
 //! Microsoft Video 1 frames itself. The DrawDib functions' behaviour
 //! follows Wine's drawdib.c (LGPL 2.1 or later):
@@ -77,6 +78,7 @@ static APIS: &[Api] = &[
         conv: Conv::Cdecl,
         handler: ic_decompress,
     },
+    stdcall("ICGetInfo", 30, 3, ic_get_info),
 ];
 
 /// ICINFO's size: six DWORDs, then szName[16], szDescription[128] and
@@ -112,17 +114,41 @@ fn ic_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(&(fourcc, driver)) = found else {
         return Some(0);
     };
+    write_info(cpu, info, fourcc, 0, "", "", driver);
+    Some(1)
+}
+
+/// An ICINFO at `at`: the codec `fourcc`'s type and handler, its flags
+/// and versions, and its name, description and driver's file in UTF-16.
+fn write_info(
+    cpu: &mut Cpu,
+    at: u32,
+    fourcc: &[u8; 4],
+    version: u32,
+    name: &str,
+    description: &str,
+    driver: &str,
+) {
     let mut bytes = Vec::with_capacity(ICINFO as usize);
-    for value in [ICINFO, ICTYPE_VIDEO, u32::from_le_bytes(*fourcc), 0, 0, ICVERSION] {
+    for value in [
+        ICINFO,
+        ICTYPE_VIDEO,
+        u32::from_le_bytes(*fourcc),
+        0,
+        version,
+        ICVERSION,
+    ] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
-    bytes.resize(24 + 2 * (16 + 128), 0);
-    for unit in driver.encode_utf16() {
-        bytes.extend_from_slice(&unit.to_le_bytes());
+    for (text, chars) in [(name, 16), (description, 128), (driver, 128)] {
+        let end = bytes.len() + 2 * chars;
+        // The last character stays the terminating 0.
+        for unit in text.encode_utf16().take(chars - 1) {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes.resize(end, 0);
     }
-    bytes.resize(ICINFO as usize, 0);
-    cpu.bus.guest_write_bytes(info, &bytes);
-    Some(1)
+    cpu.bus.guest_write_bytes(at, &bytes);
 }
 
 /// Whether `kind` is `vidc`, the type of the codecs here, in either case.
@@ -190,6 +216,47 @@ fn ic_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         ICERR_BADHANDLE
     })
+}
+
+/// ICGetInfo(hic, lpicinfo, cb): the ICINFO of the open codec, which on
+/// Windows its driver fills (ICM_GETINFO) with its name and
+/// description, and MSVFW32 with the driver's file. It answers ICINFO's
+/// size, 0 when `cb` is smaller than an ICINFO, as the drivers do, and
+/// ICERR_BADHANDLE for a handle that isn't open. dwFlags is 0, since the
+/// codecs here don't compress, and dwVersion is ICVERSION, as Wine's
+/// drivers give. Actua Soccer 2 asks for its intro film's Microsoft
+/// Video 1 decoder's after ICLocate, before it decompresses, and stops
+/// without it.
+fn ic_get_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[hic, info, size] = args else {
+        unreachable!()
+    };
+    let Some(open) = open_codec(cpu, hic) else {
+        return Some(ICERR_BADHANDLE);
+    };
+    if info == 0 {
+        return Some(ICERR_BADPARAM);
+    }
+    if size < ICINFO || !allows(cpu, info, ICINFO, true) {
+        return Some(0);
+    }
+    let Some(&(fourcc, driver)) = installed(open) else {
+        return Some(ICERR_BADHANDLE);
+    };
+    let (name, description) = describe(open);
+    write_info(cpu, info, fourcc, ICVERSION, name, description, driver);
+    Some(ICINFO)
+}
+
+/// The name and description of the installed codec of FourCC `fourcc`
+/// (in capitals), as Windows 98's drivers give them. The Indeo drivers'
+/// aren't known here, and their ICINFO has none.
+fn describe(fourcc: u32) -> (&'static str, &'static str) {
+    match &fourcc.to_le_bytes() {
+        b"MSVC" => ("MS-CRAM", "Microsoft Video 1"),
+        b"CVID" => ("Cinepak", "Cinepak Codec by Radius"),
+        _ => ("", ""),
+    }
 }
 
 /// The BITMAPINFO at `at`, its header and colours: None if the header
