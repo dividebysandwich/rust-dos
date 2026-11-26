@@ -385,6 +385,31 @@ fn account_with(
         return;
     }
     let want_extents = asked & 2 != 0 && flags & D3DDP_DONOTUPDATEEXTENTS == 0;
+    let ((intersection, union), extents) = clip_codes(setup, verts, unused, want_extents);
+    let cs = &mut d.clip_status;
+    // D3DCLIPSTATUS_STATUS, and the union and intersection of the codes.
+    if cs[0] & 1 != 0 {
+        cs[1] |= union | intersection << 12;
+    }
+    // D3DCLIPSTATUS_EXTENTS2: the rectangle grows to take them in.
+    if let (true, Some(e)) = (cs[0] & 2 != 0, extents) {
+        let f = |w: u32| f32::from_bits(w);
+        cs[2] = f(cs[2]).min(e[0]).to_bits();
+        cs[3] = f(cs[3]).max(e[1]).to_bits();
+        cs[4] = f(cs[4]).min(e[2]).to_bits();
+        cs[5] = f(cs[5]).max(e[3]).to_bits();
+    }
+}
+
+/// The intersection and the union of the clip codes of `verts` and
+/// `unused`, and with `want_extents` their extents: what a draw adds to
+/// the clip status.
+fn clip_codes(
+    setup: &Setup,
+    verts: &[Processed],
+    unused: Option<Unused>,
+    want_extents: bool,
+) -> ((u32, u32), Option<[f32; 4]>) {
     let mut codes = (!verts.is_empty()).then(|| pipeline::clip_union(verts));
     let mut extents = match want_extents {
         true => pipeline::extents(setup, verts),
@@ -401,23 +426,7 @@ fn account_with(
         });
         extents = pipeline::merge_extents(extents, e);
     }
-    let (intersection, union) = codes.unwrap_or((0, 0));
-    let Some(d) = get(cpu, id) else {
-        return;
-    };
-    let cs = &mut d.clip_status;
-    // D3DCLIPSTATUS_STATUS, and the union and intersection of the codes.
-    if cs[0] & 1 != 0 {
-        cs[1] |= union | intersection << 12;
-    }
-    // D3DCLIPSTATUS_EXTENTS2: the rectangle grows to take them in.
-    if let (true, Some(e)) = (cs[0] & 2 != 0, extents) {
-        let f = |w: u32| f32::from_bits(w);
-        cs[2] = f(cs[2]).min(e[0]).to_bits();
-        cs[3] = f(cs[3]).max(e[1]).to_bits();
-        cs[4] = f(cs[4]).min(e[2]).to_bits();
-        cs[5] = f(cs[5]).max(e[3]).to_bits();
-    }
+    (codes.unwrap_or((0, 0)), extents)
 }
 
 /// Draw `kind` primitives of `vertices` (in the order `order`, or as
@@ -1423,6 +1432,17 @@ mod tests {
         assert_eq!(
             pipeline::clip_of(&setup, &input, |i| sparse.used[i], true),
             Some((intersection, union, pipeline::extents(&setup, &unused)))
+        );
+        // The used and the unused together add to the clip status what
+        // the whole range does.
+        let rest = Unused {
+            vertices: &input,
+            used: &sparse.used,
+            count: input.len() - kept.len(),
+        };
+        assert_eq!(
+            clip_codes(&setup, &some, Some(rest), true),
+            (pipeline::clip_union(&all), pipeline::extents(&setup, &all))
         );
     }
 }
