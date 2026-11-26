@@ -521,6 +521,10 @@ fn store_thunk(ops: &mut Asm, size: u8, code: DynamicLabel) {
         ; .arch x64
         ; cmp rdx, RAM_HANDLES
         ; jbe =>code
+    );
+    lean_card_store(ops, s);
+    dynasm!(ops
+        ; .arch x64
         ; mov QWORD [r12 + CTX_SMC_LO], rax
         ; push r8
         ; push r9
@@ -616,6 +620,66 @@ fn store_thunk(ops: &mut Asm, size: u8, code: DynamicLabel) {
         ; .arch x64
         ; or BYTE [r12 + CTX_SMC], al
         ; ret
+    );
+}
+
+/// The start of a store thunk's path into a display card's memory, for
+/// its common cases, with RAX alone besides the thunk's arguments: a page
+/// the code may write whose writes nothing counts, and a page whose
+/// writes count for `cycles=auto` (`card_count`) where the write needs
+/// nothing else: within a burst, on a page no ToadForce surface notes and
+/// out of the picture shown, with no ToadForce page counts. A software
+/// renderer drawing into the VESA frame buffer's page out of sight, as
+/// Quake does in its VESA modes, writes every pixel this way. Anything
+/// else falls through to the full path with RAX, RCX and RDX as they came.
+fn lean_card_store(ops: &mut Asm, s: i32) {
+    const KIND: u8 = PAGE_WRITE | PAGE_COUNT | PAGE_SHOWN | 7 << PAGE_NOTE_SHIFT;
+    dynasm!(ops
+        ; .arch x64
+        ; bt rdx, DEV_BIT as i8
+        ; jnc >full
+        ; mov QWORD [r12 + CTX_SMC_LO], rax
+        ; mov eax, edx
+        ; sub eax, DWORD [r12 + CTX_CARD_LO]
+        ; cmp eax, DWORD [r12 + CTX_CARD_LEN]
+        ; jae >back
+        ; shr eax, 12
+        ; add rax, QWORD [r12 + CTX_CARD_PAGES]
+        ; movzx eax, BYTE [rax]
+        ; and eax, KIND as i32
+        ; cmp eax, PAGE_WRITE as i32
+        ; je >write
+        ; cmp eax, (PAGE_WRITE | PAGE_COUNT) as i32
+        ; jne >back
+        ; cmp QWORD [r12 + CTX_CARD_GENERATION], 0
+        ; jne >back
+        ; mov rax, QWORD [rbx + layout::ICOUNT as i32]
+        ; sub rax, QWORD [rbx + layout::LAST_WRITE as i32]
+        ; cmp rax, layout::BURST_GAP as i32
+        ; ja >back
+        ; mov rax, QWORD [rbx + layout::ICOUNT as i32]
+        ; mov QWORD [rbx + layout::LAST_WRITE as i32], rax
+        ; add QWORD [rbx + layout::VIDEO_BYTES as i32], s
+        ; add QWORD [rbx + layout::BURST as i32], s
+        ; write:
+        ; mov eax, edx
+        ; sub eax, DWORD [r12 + CTX_CARD_LO]
+        ; add rax, QWORD [r12 + CTX_CARD_BASE]
+    );
+    match s {
+        1 => dynasm!(ops ; .arch x64 ; mov BYTE [rax], cl),
+        2 => dynasm!(ops ; .arch x64 ; mov WORD [rax], cx),
+        _ => dynasm!(ops ; .arch x64 ; mov DWORD [rax], ecx),
+    }
+    dynasm!(ops
+        ; .arch x64
+        ; mov BYTE [r12 + CTX_CARD_WROTE], 1
+        ; inc QWORD [r12 + CTX_CARD_WRITES]
+        ; ret
+        // The full path takes the block's bytes in RAX.
+        ; back:
+        ; mov rax, QWORD [r12 + CTX_SMC_LO]
+        ; full:
     );
 }
 
@@ -1817,6 +1881,35 @@ impl Gen<'_> {
                     );
                     if addr != RAX {
                         dynasm!(self.ops ; .arch x64 ; mov eax, Rd(addr));
+                    }
+                    if thunk == Thunk::Dev {
+                        // What `Thunk::Dev` answers for an operand at 1 MB
+                        // or above within one page, without the call: the
+                        // physical address with `DEV_BIT` (the upper
+                        // memory, which is RAM, is all below 1 MB).
+                        // Software renderers draw into the VESA frame
+                        // buffer a pixel at a time, and every pixel's
+                        // store comes here.
+                        const _: () = assert!(DEV_BIT == 32 && UPPER_RAM.end as u32 <= EXTENDED);
+                        let size = (desc >> 4 & 31) as i32;
+                        if size > 1 {
+                            dynasm!(self.ops
+                                ; .arch x64
+                                ; mov ecx, eax
+                                ; and ecx, 0xFFF
+                                ; cmp ecx, 0x1000 - size
+                                ; ja BYTE >call
+                            );
+                        }
+                        dynasm!(self.ops
+                            ; .arch x64
+                            ; cmp eax, EXTENDED as i32
+                            ; jb BYTE >call
+                            ; mov Rd(r(t)), eax
+                            ; bts Rq(r(t)), 32
+                            ; jmp =>back
+                            ; call:
+                        );
                     }
                     dynasm!(self.ops
                         ; .arch x64
