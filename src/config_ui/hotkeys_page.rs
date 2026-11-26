@@ -53,6 +53,11 @@ pub(super) struct HotkeysPage {
     pub naming: Option<TextField>,
     /// The custom profile asked to be deleted.
     pub confirm_delete: Option<String>,
+    /// The key a rebind just took without Ctrl or Alt. The front end
+    /// sends the text it types after the key itself, and that text isn't
+    /// the window's: an R would reset the action just bound, a Y or N
+    /// answer the question about a key another action has.
+    pub typed: Option<hotkeys::Key>,
     /// The profile last picked (of `hotkey_choices`) and the keys it gave,
     /// which the profile row shows while the keys are those: a built-in
     /// profile may give the keys of a custom one.
@@ -87,6 +92,19 @@ impl HotkeysPage {
         self.clash = None;
         self.naming = None;
         self.confirm_delete = None;
+        self.typed = None;
+    }
+
+    /// Whether `text` is what the key a rebind just took typed, which the
+    /// window drops. Only the text right after the key can be: a key that
+    /// typed nothing (a dead key, a keypad key without Num Lock) lets the
+    /// next text through.
+    pub fn typed_by_rebind(&mut self, text: &str) -> bool {
+        let Some(key) = self.typed.take() else {
+            return false;
+        };
+        let name = key.name();
+        name.chars().count() == 1 && text.eq_ignore_ascii_case(name)
     }
 }
 
@@ -122,6 +140,7 @@ impl ConfigUi {
         let Some(capture) = self.hotkeys_page.capture else {
             return;
         };
+        self.hotkeys_page.typed = (!combo.has_ctrl_or_alt()).then_some(combo.key);
         if is_escape(combo) {
             self.hotkeys_page.capture = None;
             self.status = None;
@@ -159,22 +178,40 @@ impl ConfigUi {
     }
 
     /// Put `new` in place of the keys, and in the running emulator, unless
-    /// they leave no way to open this window. Says `done`, or what the
-    /// keys clash on.
+    /// they leave no way to open this window, or give it a key it moves or
+    /// types with (a custom profile's file edited by hand can). Says
+    /// `done`, or what the change makes the keys clash on.
     pub(super) fn apply_hotkeys(&mut self, new: HotkeySettings, done: String, host: &mut dyn Host) {
         if !new.window_reachable(self.settings.mouse_menu_hold) {
             return self
                 .error("Nothing would open this window: give settings_window another key first");
         }
+        // A key the window had before stays, so that a configuration
+        // with one still lets the other keys change.
+        let window = Action::SettingsWindow;
+        let had: Vec<Combo> = self.settings.hotkeys.table().keys(window).collect();
+        if let Some(combo) = new
+            .table()
+            .keys(window)
+            .find(|c| c.window_uses() && !had.contains(c))
+        {
+            return self.error(format!(
+                "{} moves or types in this window: the window's key needs Ctrl or Alt",
+                combo
+            ));
+        }
         if new == self.settings.hotkeys {
             return self.info(done);
         }
+        // The warnings the keys had before aren't this change's.
+        let before = self.settings.hotkeys.resolve().1;
         self.settings.hotkeys = new;
         self.changed(Item::HotkeyProfile, host);
         if self.status.is_some() {
             return;
         }
-        match self.settings.hotkeys.resolve().1.into_iter().next() {
+        let warnings = self.settings.hotkeys.resolve().1;
+        match warnings.into_iter().find(|w| !before.contains(w)) {
             Some(warning) => self.error(warning.trim_start_matches("[hotkeys] ").to_string()),
             None => self.info(done),
         }
@@ -292,13 +329,28 @@ impl ConfigUi {
         let Some(row) = self.hotkey_row() else { return };
         match (row, key) {
             (HotkeyRow::Profile, UiKey::Left | UiKey::Right) => {
-                let count = Profile::ALL.len() + self.hotkeys_page.custom.len();
+                let choices = self.hotkey_choices();
+                let count = choices.len();
                 let at = self.hotkey_choice();
-                let next = if key == UiKey::Left {
-                    (at + count - 1) % count
-                } else {
-                    (at + 1) % count
+                let step = |i: usize| {
+                    if key == UiKey::Left {
+                        (i + count - 1) % count
+                    } else {
+                        (i + 1) % count
+                    }
                 };
+                // Past the profiles that would leave nothing to open this
+                // window with, which `apply_hotkeys` refuses: else the row
+                // stops at the first of them. Where every other one
+                // would, the next is picked to say why.
+                let menu_hold = self.settings.mouse_menu_hold;
+                let mut next = step(at);
+                while next != at && !choices[next].1.window_reachable(menu_hold) {
+                    next = step(next);
+                }
+                if next == at {
+                    next = step(at);
+                }
                 self.pick_hotkeys(next, host);
             }
             (HotkeyRow::Profile, UiKey::Enter) => self.open_hotkeys_popup(),
@@ -348,6 +400,7 @@ impl ConfigUi {
         if page.capture.is_some() {
             if key == UiKey::Esc {
                 page.capture = None;
+                self.status = None;
             }
         } else if let Some(clash) = page.clash {
             match key {
@@ -521,19 +574,25 @@ impl ConfigUi {
                     });
                 }
                 HotkeyRow::SaveAs => {
-                    g.text_to(
-                        2,
-                        row,
-                        "Save as a custom profile...",
-                        draw::KEY,
-                        value_col + 6,
-                    );
-                    if let Some(field) = &self.hotkeys_page.naming {
-                        let col = value_col + 8;
-                        let width = end.saturating_sub(col);
+                    // The name takes the value's column and the note's,
+                    // which this row has no use for, and the label gives
+                    // way to it: past the label, a 40-column window has
+                    // no room left for a name.
+                    let naming = self.hotkeys_page.naming.as_ref();
+                    let label_end = if naming.is_some() {
+                        value_col - 1
+                    } else {
+                        value_col + 6
+                    };
+                    let label = "Save as a custom profile...";
+                    g.text_to(2, row, label, draw::KEY, label_end);
+                    if let Some(field) = naming {
+                        let col = value_col;
+                        let field_end = cols - 3;
+                        let width = field_end.saturating_sub(col);
                         let (text, cursor) = field.view(width);
                         g.background(col, row, width, draw::FIELD);
-                        g.text_to(col, row, &text, draw::BRIGHT, end);
+                        g.text_to(col, row, &text, draw::BRIGHT, field_end);
                         g.background(col + cursor, row, 1, draw::SELECT);
                     }
                 }

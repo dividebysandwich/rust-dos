@@ -3182,6 +3182,38 @@ fn the_hotkeys_page_rebinds_an_action_to_the_keys_pressed() {
     assert_eq!(keys_of(&ui, Action::Screenshot), []);
     assert_eq!(ui.settings.hotkeys.resolve().1, Vec::<String>::new());
 
+    // The text a letter's key types after it isn't the window's: an R
+    // would reset the action, a Y answer the question for the user.
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("R"), &mut host);
+    ui.text("r", &mut host);
+    assert_eq!(keys_of(&ui, Action::SaveState), [combo("R")]);
+    ui.select(action_row(&ui, Action::Pause));
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("R"), &mut host);
+    assert!(ui.hotkeys_page.clash.is_some());
+    ui.text("r", &mut host);
+    assert!(ui.hotkeys_page.clash.is_some());
+    // Text after another key, or after the next text, is the window's.
+    ui.key(Esc, &mut host);
+    assert!(ui.capturing_hotkey());
+    ui.hotkey_pressed(combo("R"), &mut host);
+    ui.text("x", &mut host);
+    ui.text("y", &mut host);
+    assert!(ui.hotkeys_page.clash.is_none());
+    assert_eq!(keys_of(&ui, Action::Pause), [combo("R")]);
+    // The keys as they were.
+    ui.select(action_row(&ui, Action::SaveState));
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("Shift+F5"), &mut host);
+    ui.key(Insert, &mut host);
+    ui.hotkey_pressed(combo("Ctrl+F5"), &mut host);
+    ui.select(action_row(&ui, Action::Pause));
+    ui.key(Char('r'), &mut host);
+    assert!(!ui.settings.hotkeys.is_own(Action::Pause));
+    ui.select(action_row(&ui, Action::SaveState));
+    assert_eq!(keys_of(&ui, Action::SaveState), [combo("Shift+F5"), combo("Ctrl+F5")]);
+
     // Del leaves it without a key, R gives it the profile's again.
     ui.key(Delete, &mut host);
     assert_eq!(keys_of(&ui, Action::SaveState), []);
@@ -3231,6 +3263,27 @@ fn a_rebind_never_leaves_the_window_without_a_way_to_open_it() {
     ui.settings.mouse_menu_hold = true;
     ui.select(window);
     ui.key(Delete, &mut host);
+    assert_eq!(keys_of(&ui), []);
+    // Then the hold stays on.
+    ui.show_page(Page::Emulator);
+    let hold = ui.items().iter().position(|&i| i == Item::MouseMenuHold).unwrap();
+    ui.select(hold);
+    ui.key(Left, &mut host);
+    assert!(ui.settings.mouse_menu_hold);
+    assert!(status(&ui).1);
+    // A custom profile's file edited by hand can't give the window a key
+    // it moves with either.
+    let custom = crate::hotkeys::CustomProfile::parse(
+        "hand",
+        "profile=rust-dos\nsettings_window=Up\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("hand.conf"), custom.text()).unwrap();
+    ui.show_page(Page::Hotkeys);
+    ui.hotkeys_page.refresh();
+    ui.key(Left, &mut host);
+    assert!(status(&ui).1);
     assert_eq!(keys_of(&ui), []);
     let _ = std::fs::remove_dir_all(dir);
 }

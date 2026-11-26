@@ -9,6 +9,9 @@ use crate::mount::contract_home;
 impl ConfigUi {
     /// Typed text, from the keyboard's text input.
     pub fn text(&mut self, text: &str, host: &mut dyn Host) {
+        if self.hotkeys_page.typed_by_rebind(text) {
+            return;
+        }
         for c in text.chars().filter(|c| !c.is_control()) {
             self.key(UiKey::Char(c), host);
         }
@@ -17,6 +20,10 @@ impl ConfigUi {
     pub fn key(&mut self, key: UiKey, host: &mut dyn Host) {
         if !self.open {
             return;
+        }
+        // A key between a rebind's key and its text: that key typed none.
+        if !matches!(key, UiKey::Char(_)) {
+            self.hotkeys_page.typed = None;
         }
         if self.setup.is_some() {
             return self.setup_key(key, host);
@@ -444,6 +451,13 @@ impl ConfigUi {
 
     /// Hand changed settings to the emulator and say when they take effect.
     pub(super) fn changed(&mut self, item: Item, host: &mut dyn Host) {
+        // The right button's hold is the only way into this window once
+        // the Hotkeys page left settings_window without a key.
+        let hold = self.settings.mouse_menu_hold;
+        if item == Item::MouseMenuHold && !self.settings.hotkeys.window_reachable(hold) {
+            self.settings.mouse_menu_hold = true;
+            return self.error("Nothing else opens this window: give settings_window a key first");
+        }
         let result = host.apply(&self.settings);
         self.status = None;
         let memory_mb = self.settings.memory_mb();

@@ -1011,6 +1011,17 @@ pub fn custom_name(name: &str) -> Result<String, String> {
     {
         return Err("A name has letters, digits, spaces, '-' and '_' only".to_string());
     }
+    // Windows opens a device for these names, with any extension.
+    let upper = name.to_ascii_uppercase();
+    let numbered = |prefix: &str| {
+        upper
+            .strip_prefix(prefix)
+            .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
+    };
+    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT")
+    {
+        return Err(format!("{} is a device's name on Windows", name));
+    }
     if Profile::ALL
         .iter()
         .any(|p| p.name().eq_ignore_ascii_case(name) || p.describe().eq_ignore_ascii_case(name))
@@ -1046,6 +1057,20 @@ pub fn custom_profiles(dir: &std::path::Path) -> Vec<CustomProfile> {
 pub fn save_custom(dir: &std::path::Path, profile: &CustomProfile) -> Result<(), String> {
     let name = custom_name(&profile.name)?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
+    // The window takes a name in another case for the same profile. Its
+    // file goes first: Linux would keep both, and Windows would write
+    // into the old file and keep the old name.
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let other_case = path.extension().and_then(|e| e.to_str()) == Some(CUSTOM_EXTENSION)
+            && path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s != name && s.eq_ignore_ascii_case(&name));
+        if other_case {
+            std::fs::remove_file(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        }
+    }
     let path = dir.join(format!("{}.{}", name, CUSTOM_EXTENSION));
     std::fs::write(&path, profile.text()).map_err(|e| format!("{}: {}", path.display(), e))
 }
@@ -1407,7 +1432,11 @@ mod tests {
         // Saved again under its name, it is replaced.
         save_custom(&dir, &CustomProfile::of("zed", &HotkeySettings::default())).unwrap();
         assert!(custom_profiles(&dir)[1].is_loaded_in(&HotkeySettings::default()));
-        delete_custom(&dir, "zed").unwrap();
+        // In another case too, and then under the case typed.
+        save_custom(&dir, &CustomProfile::of("ZED", &s)).unwrap();
+        let names: Vec<String> = custom_profiles(&dir).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Alpha 2", "ZED"]);
+        delete_custom(&dir, "ZED").unwrap();
         assert_eq!(custom_profiles(&dir).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1417,6 +1446,11 @@ mod tests {
         assert!(custom_name("DOSBox").is_err());
         assert!(custom_name("pcsx-redux").is_err());
         assert!(custom_name(&"x".repeat(33)).is_err());
+        assert!(custom_name("con").is_err());
+        assert!(custom_name("Com1").is_err());
+        assert!(custom_name("lpt9").is_err());
+        assert_eq!(custom_name("console"), Ok("console".to_string()));
+        assert_eq!(custom_name("com10"), Ok("com10".to_string()));
     }
 
     #[test]
