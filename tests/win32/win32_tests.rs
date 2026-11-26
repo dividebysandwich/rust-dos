@@ -3176,10 +3176,12 @@ fn a_trap_at_the_end_of_a_page_reads_on_from_the_next_page_it_maps() {
     // the parent's went back, the last first, so no page of its images
     // is followed in RAM by the page after it. A trap of a function
     // KERNEL32 has as code can end on the next page: its id is read from
-    // there, not from the RAM after its own page, which held another page
-    // of the image, and the child ended at InitializeCriticalSection, a
-    // call of an unknown function (its trap starts 3 bytes before a
-    // page's end, so its id's high byte is on the next page). 71h: the
+    // there. InitializeCriticalSection's trap starts 3 bytes before a
+    // page's end, so its id's high byte is on the next page. Read from
+    // the RAM after its own page, which holds another page of the image,
+    // the id is another function's or none: Encarta ended on an unknown
+    // function, and this child, reading the id of a service that then
+    // faulted, ends with FFh there, so T.EXE ends with F1h. 71h: the
     // child ran on and ended with 7.
     let files = vec![("C.EXE", critical_section_program())];
     let test = "trap_at_page_end";

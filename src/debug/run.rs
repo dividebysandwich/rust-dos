@@ -792,7 +792,10 @@ impl crate::exec::ExecHook for DebugHub {
 /// The 15 bytes from the instruction at `phys_ip`, CS:EIP, for the
 /// trace, and how many of them there are. Those past the end of its page
 /// are from the page after it in linear memory, which needn't follow it
-/// in RAM.
+/// in RAM. `exec::trap_bytes` reads a service trap across a page the
+/// same way for the CPU, through the TLB with a fault where this walks
+/// the tables and stops: a change to how one crosses a page belongs in
+/// the other too.
 fn instruction_bytes(cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> ([u8; 15], usize) {
     let mut bytes = [0u8; 15];
     let in_page = (0x1000 - (phys_ip & 0xFFF)).min(bytes.len());
