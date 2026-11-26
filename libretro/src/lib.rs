@@ -487,7 +487,7 @@ pub unsafe extern "C" fn retro_load_game(game: *const retro_game_info) -> bool {
     };
     core.ports = PORTS.with(Cell::get);
     // The 3dfx card's OpenGL renderer draws with the frontend's OpenGL.
-    if core.m.settings.voodoo.renderer == rust_dos::voodoo::Renderer::OpenGl {
+    if core.m.settings.voodoo_renderer() == rust_dos::voodoo::Renderer::OpenGl {
         if gl::request(&cb) {
             core.hardware_rendering();
         } else {

@@ -144,6 +144,14 @@
 #         720x348 graphics
 # A change takes effect at the DOS prompt.
 #machine=svga
+# What draws the 3D cards' pictures in the window: the 3dfx cards (voodoo,
+# or machine=svga_voodoo3 or svga_banshee) and the ToadForce. auto: each
+# card's own default, the 3dfx cards in software (rust-dos) and the
+# ToadForce with OpenGL where the window has it; opengl: every card with
+# OpenGL, the 3dfx cards at voodoo_scale (1 to 4) times their resolution;
+# software: every card in software. Screenshots show a 3dfx card's
+# software picture either way. Changes take effect immediately.
+#renderer=auto
 # A 3dfx Voodoo Graphics for games that draw with Glide, in DOS or in a
 # booted Windows 95, with 12 MB (4 MB frame buffer, two texture units) or
 # 4 MB (2 MB, one texture unit). Changes take effect at the DOS prompt.
@@ -153,10 +161,6 @@
 # voodoo_memory 8 (4 MB frame buffer, two 2 MB texture units) or 12.
 # voodoo_memory=8 picks voodoo2 when voodoo_model is not set.
 #voodoo_model=voodoo1
-# What draws the card's picture in the window: software (rust-dos) or
-# opengl, which draws it again at voodoo_scale (1 to 4) times the card's
-# resolution. Screenshots show the software picture either way.
-#voodoo_renderer=software
 # Texture sampling for both renderers: default (as the game sets it) or
 # unfiltered (nearest-neighbour). With OpenGL anisotropy enabled, unfiltered
 # also blends mip levels and allows anisotropic filtering to reduce shimmer;

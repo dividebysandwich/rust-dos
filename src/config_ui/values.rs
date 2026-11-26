@@ -165,7 +165,7 @@ pub(super) fn voodoo_add_on(s: &Settings) -> bool {
 /// Whether the machine's 3dfx card, the add-on or the display adapter,
 /// is drawn again with OpenGL.
 pub(super) fn voodoo_opengl(s: &Settings) -> bool {
-    s.voodoo_board().is_some() && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl
+    s.voodoo_board().is_some() && s.voodoo_renderer() == crate::voodoo::Renderer::OpenGl
 }
 
 /// A memory size in KB, as the settings show it.
@@ -297,13 +297,11 @@ impl Item {
                 }
                 s.memsize = s.memsize.map(|mb| mb.min(s.cpu_model().max_memsize()));
             }),
+            Renderer => each(s, crate::config::Renderer::ALL, |s, renderer| s.renderer = renderer),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),
             VoodooMemory => {
                 each(s, crate::voodoo::Board::ALL, |s, board| s.voodoo.board = board)
             }
-            VoodooRenderer => each(s, [crate::voodoo::Renderer::Software, crate::voodoo::Renderer::OpenGl], |s, r| {
-                s.voodoo.renderer = r
-            }),
             VoodooScale => each(s, [1, 2, 3, 4], |s, scale| s.voodoo.scale = scale),
             VoodooTextureSampling => {
                 use crate::voodoo::TextureSampling;
@@ -330,9 +328,6 @@ impl Item {
                 let sizes = crate::toadforce::regs::MEMORY_SIZES.map(|bytes| bytes >> 20);
                 each(s, sizes, |s, megabytes| s.toadforce_memory = megabytes)
             }
-            ToadForceRenderer => each(s, crate::toadforce::Renderer::ALL, |s, renderer| {
-                s.toadforce_renderer = renderer
-            }),
             ToadForceGamma => each(s, gammas(), |s, gamma| s.toadforce_gamma = gamma),
             PowerVrFilter => {
                 use crate::powervr::tsp::Filter;

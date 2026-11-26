@@ -45,10 +45,10 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   still mixed and streamed. A run on a machine with no sound device
   plays on the null output too, with a window or without.
 - **OpenGL without a window:** the dummy video driver has no OpenGL, so
-  `voodoo_renderer=opengl` falls back to the software rasterizer. To run
-  the OpenGL renderer on the host's GPU, leave `SDL_VIDEO_DRIVER` unset
-  and pass `--hidden`: the window is made with its OpenGL context but
-  never shown.
+  `renderer=opengl` falls back to the software rasterizer. To run the
+  OpenGL renderer on the host's GPU, leave `SDL_VIDEO_DRIVER` unset and
+  pass `--hidden`: the window is made with its OpenGL context but never
+  shown.
 - **A smaller OpenGL:** `RUST_DOS_GL_MAX_TEXTURE_SIZE=1024` makes the
   3dfx renderer lay out a Banshee's or Voodoo3's memory as if OpenGL
   allowed textures of no more than 1024 texels a side, and
@@ -1184,7 +1184,7 @@ since the GPU cuts and culls them. So one scene counts more
 `primitives` with the OpenGL renderer than with the software one.
 
 `renderer` is what draws the card's triangles: `software`, or `OpenGL`
-with `toadforce_renderer` `auto` or `opengl` in a window that has
+with the setting `renderer` `auto` or `opengl` in a window that has
 OpenGL 3.2 (`--hidden` has it, `SDL_VIDEO_DRIVER=dummy` hasn't). `host`
 counts what the OpenGL renderer costs and misses:
 
@@ -1312,18 +1312,18 @@ of and what each adds.
 
 With `voodoo=true` (CONFIGURATION.md's "3dfx Voodoo Graphics"),
 `/api/status` → `video.voodoo` shows the card: `output` (true while its
-picture is on the screen instead of the VGA's; `/api/screenshot` then
-shows it), `clock` (the video clock Glide turns on first), `base` (BAR0),
+picture is on the screen instead of the VGA's; `/api/screenshot` then shows
+it), `clock` (the video clock Glide turns on first), `base` (BAR0),
 `width`/`height` and `hz`, the `front` and `back` buffers, `pending_swaps`
 (swaps waiting for the retrace), `fifo_writes` behind them, `triangles`
-drawn, the `fbiInit` registers and `init_enable`, and `opengl` (true
-while `voodoo_renderer=opengl` draws the window's picture again). While it
-shows, `fps` counts its buffer swaps. With OpenGL (and `--hidden` or a
-window), `/api/screenshot` and the screen stream are OpenGL's picture,
-read back at the card's resolution; with `--deterministic`, and without
-OpenGL, they are the software rasterizer's. A game that detects no card
-usually left `fbiInit` at their power-on values (`00000410 00201102
-80000040 001E4000 00000001`); one that drew nothing has `triangles` 0.
+drawn, the `fbiInit` registers and `init_enable`, and `opengl` (true while
+`renderer=opengl` draws the window's picture again). While it shows, `fps`
+counts its buffer swaps. With OpenGL (and `--hidden` or a window),
+`/api/screenshot` and the screen stream are OpenGL's picture, read back at
+the card's resolution; with `--deterministic`, and without OpenGL, they are
+the software rasterizer's. A game that detects no card usually left
+`fbiInit` at their power-on values (`00000410 00201102 80000040 001E4000
+00000001`); one that drew nothing has `triangles` 0.
 
 - **Read-backs:** with `voodoo_readback=gpu`, `gpu_read_backs` counts the
   times the card's memory was brought up to OpenGL's pictures, and

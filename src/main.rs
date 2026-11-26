@@ -2058,7 +2058,7 @@ fn main() -> Result<ExitCode, String> {
         // A deterministic run draws a ToadForce in software, so that its
         // pictures don't depend on the host's GPU.
         let toadforce_software = det.is_some() && !toadforce_gl_deterministic;
-        display.run_toadforce(&mut cpu.bus, settings.toadforce_renderer, toadforce_software);
+        display.run_toadforce(&mut cpu.bus, settings.toadforce_renderer(), toadforce_software);
         // A ToadForce's picture from the OpenGL renderer's own copy of
         // the surface shown, with nothing read back, unless something
         // looks at the frame in memory: screenshots, recordings,
@@ -2074,7 +2074,12 @@ fn main() -> Result<ExitCode, String> {
             || settings.monochrome.phosphor().is_some();
         let toadforce_gl = display.show_toadforce(&mut cpu.bus, !toadforce_memory);
         cpu.bus.sync_display();
-        let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo, det.is_none());
+        let voodoo_gl = display.run_voodoo(
+            &mut cpu.bus,
+            settings.voodoo_renderer(),
+            &settings.voodoo,
+            det.is_none(),
+        );
         if !voodoo_gl
             && !voodoo_picture
             && let Some(v) = &mut cpu.bus.voodoo

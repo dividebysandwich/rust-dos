@@ -44,7 +44,8 @@ pub use display::{Change, Live};
 use pci::Bar;
 use regs::Error;
 
-/// What draws the card's triangles (`toadforce_renderer`).
+/// What draws the card's triangles (`renderer`, `toadforce_renderer`
+/// before it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Renderer {
     /// The host's OpenGL where the window has it, and the card's own

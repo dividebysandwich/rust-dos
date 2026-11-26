@@ -130,6 +130,20 @@ The display card games find, which decides the graphics they choose:
 
 Takes effect at the DOS prompt.
 
+# 3D drawn by {#renderer}
+
+What draws the pictures of the 3D cards in the window: a 3dfx card (the
+add-on, or a Voodoo3 or Banshee as the *Video card*) and the ToadForce.
+
+- **Auto**: each card as it draws best by default. A 3dfx card is drawn
+  by Rust-DOS, the ToadForce by your graphics card, through OpenGL,
+  where the window has it.
+- **OpenGL**: your graphics card draws every card. A 3dfx card is drawn
+  at a higher resolution (*3dfx OpenGL size*), with sharper edges and
+  textures; the ToadForce is faster in most games.
+- **Software**: Rust-DOS draws every card on the processor, at the
+  card's own resolution, with the card's exact pixels.
+
 # 3dfx Voodoo Graphics {#voodoo}
 
 Adds a 3dfx Voodoo 3D card, for games with a 3dfx or Glide version, such
@@ -145,15 +159,6 @@ then.
 The Voodoo's memory: **12 MB** with two texture units (best) or **4 MB**
 with one, as on the cheapest boards. Leave it at 12 MB unless a game
 has trouble with it.
-
-# 3dfx drawn by {#voodoo-renderer}
-
-What draws the 3dfx picture in the window, the add-on card's or a
-Voodoo3's or Banshee's:
-
-- **Rust-DOS**: the card's own resolution, exactly as the card drew it.
-- **OpenGL**: drawn again by your graphics card at a higher resolution
-  (*3dfx OpenGL size*), with sharper edges and textures.
 
 # 3dfx OpenGL size {#voodoo-scale}
 
@@ -291,15 +296,6 @@ The video memory of the ToadForce, the card Rust-DOS defines for the
 Windows programs it runs without Windows. **64 MB** holds the screen and
 the surfaces of any game of the time. **128 MB** leaves more room at the
 largest modes; **32 MB** is what the cards of 1999 had.
-
-# ToadForce drawn by {#toadforce-renderer}
-
-What draws the ToadForce's 3D:
-
-- **Automatic**: your graphics card, through OpenGL, where the window
-  has it, and Rust-DOS itself elsewhere.
-- **OpenGL**: your graphics card. Faster in most games.
-- **Rust-DOS**: the processor, with the card's exact pixels.
 
 # ToadForce gamma {#toadforce-gamma}
 
