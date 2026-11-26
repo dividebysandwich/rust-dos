@@ -64,8 +64,9 @@ fn is_mapper(cpu: &mut Cpu, this: u32) -> bool {
         .is_some_and(|id| matches!(super::kind(cpu, id), Some(Kind::Mapper {})))
 }
 
-/// The NUL-terminated UTF-16 string at `at`, or None if it can't be
-/// read there.
+/// The NUL-terminated UTF-16 string at `at` in the system's ANSI code
+/// page, as the registry keeps its names and strings (a char for each
+/// byte), or None if it can't be read there.
 fn wide(cpu: &mut Cpu, at: u32) -> Option<String> {
     if at == 0 {
         return None;
@@ -81,7 +82,8 @@ fn wide(cpu: &mut Cpu, at: u32) -> Option<String> {
             c => units.push(c),
         }
     }
-    Some(String::from_utf16_lossy(&units))
+    let bytes = crate::win32::kernel32::wide_to_ansi(cpu, &units);
+    Some(crate::dosstr::from_bytes(&bytes))
 }
 
 /// The double-word at `at`, or None if it can't be read there.
@@ -109,7 +111,7 @@ fn pin_types(cpu: &mut Cpu, count: u32, at: u32) -> Option<Vec<(Guid, Guid)>> {
             let entry = at.wrapping_add(8 * i);
             let major = dword(cpu, entry)?;
             let major = Guid::read(cpu, major)?;
-            let minor = match dword(cpu, entry + 4)? {
+            let minor = match dword(cpu, entry.wrapping_add(4))? {
                 0 => MEDIASUBTYPE_NULL,
                 p => Guid::read(cpu, p)?,
             };
@@ -122,24 +124,30 @@ fn pin_types(cpu: &mut Cpu, count: u32, at: u32) -> Option<Vec<(Guid, Guid)>> {
 /// (REGFILTERPINS2), and its merit; None if it can't be read or has
 /// another version.
 fn read_filter(cpu: &mut Cpu, at: u32) -> Option<(u32, Vec<Pin>)> {
+    let field = |cpu: &mut Cpu, base: u32, offset: u32| dword(cpu, base.wrapping_add(offset));
     let version = dword(cpu, at)?;
-    let merit = dword(cpu, at + 4)?;
-    let count = dword(cpu, at + 8)?;
-    let pins = dword(cpu, at + 12)?;
+    // A filter of another version is refused even with no pins, which
+    // the pins' own match below would let through.
+    if version != 1 && version != 2 {
+        return None;
+    }
+    let merit = field(cpu, at, 4)?;
+    let count = field(cpu, at, 8)?;
+    let pins = field(cpu, at, 12)?;
     let pins = (0..count).map(|i| match version {
         // REGFILTERPINS: strName, bRendered, bOutput, bZero, bMany,
         // clsConnectsToFilter, strConnectsToPin, nMediaTypes,
         // lpMediaType.
         1 => {
-            let p = pins.wrapping_add(36 * i);
+            let p = pins.wrapping_add(36u32.wrapping_mul(i));
             let flag = |cpu: &mut Cpu, offset: u32, bit: u32| {
-                dword(cpu, p + offset).map(|b| if b != 0 { bit } else { 0 })
+                field(cpu, p, offset).map(|b| if b != 0 { bit } else { 0 })
             };
             let flags = flag(cpu, 4, REG_PINFLAG_B_RENDERER)?
                 | flag(cpu, 8, REG_PINFLAG_B_OUTPUT)?
                 | flag(cpu, 12, REG_PINFLAG_B_ZERO)?
                 | flag(cpu, 16, REG_PINFLAG_B_MANY)?;
-            let (n, types) = (dword(cpu, p + 28)?, dword(cpu, p + 32)?);
+            let (n, types) = (field(cpu, p, 28)?, field(cpu, p, 32)?);
             Some(Pin {
                 flags,
                 instances: 0,
@@ -151,12 +159,12 @@ fn read_filter(cpu: &mut Cpu, at: u32) -> Option<(u32, Vec<Pin>)> {
         // REGFILTERPINS2: dwFlags, cInstances, nMediaTypes, lpMediaType,
         // nMediums, lpMedium, clsPinCategory.
         2 => {
-            let p = pins.wrapping_add(28 * i);
-            let (n, types) = (dword(cpu, p + 8)?, dword(cpu, p + 12)?);
-            let (m, mediums) = (dword(cpu, p + 16)?, dword(cpu, p + 20)?);
+            let p = pins.wrapping_add(28u32.wrapping_mul(i));
+            let (n, types) = (field(cpu, p, 8)?, field(cpu, p, 12)?);
+            let (m, mediums) = (field(cpu, p, 16)?, field(cpu, p, 20)?);
             let mediums = (0..m)
                 .map(|j| {
-                    let at = mediums.wrapping_add(24 * j);
+                    let at = mediums.wrapping_add(24u32.wrapping_mul(j));
                     cpu.bus.guest_probe(at, 24, false).then(|| {
                         let mut medium = [0; 24];
                         cpu.bus.guest_read_bytes(at, &mut medium);
@@ -164,13 +172,13 @@ fn read_filter(cpu: &mut Cpu, at: u32) -> Option<(u32, Vec<Pin>)> {
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
-            let category = match dword(cpu, p + 24)? {
+            let category = match field(cpu, p, 24)? {
                 0 => None,
                 c => Some(Guid::read(cpu, c)?),
             };
             Some(Pin {
                 flags: dword(cpu, p)?,
-                instances: dword(cpu, p + 4)?,
+                instances: field(cpu, p, 4)?,
                 types: pin_types(cpu, n, types)?,
                 mediums,
                 category,
@@ -259,7 +267,8 @@ fn write_key(cpu: &mut Cpu, path: &str, values: Vec<(&str, u32, Vec<u8>)>) {
     }
 }
 
-/// A string value's data: the ANSI text with its NUL.
+/// A string value's data: the ANSI text (from `wide`, or a GUID's)
+/// with its NUL.
 fn sz(text: &str) -> Vec<u8> {
     let mut data = crate::dosstr::to_bytes(text);
     data.push(0);
@@ -372,6 +381,15 @@ pub fn register_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(S_OK)
 }
 
+/// IFilterMapper2::EnumMatchingFilters(this, ppEnum, ...): E_NOTIMPL,
+/// as no program seen asks for it, with `*ppEnum` cleared as a failed
+/// COM call leaves its out-pointer, so a caller that releases it
+/// regardless finds NULL.
+pub fn enum_matching_filters(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    crate::win32::com::write_out(cpu, args[1], 0);
+    Some(E_NOTIMPL)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,9 +397,10 @@ mod tests {
     const MAJOR: Guid = Guid([1; 16]);
     const MINOR: Guid = Guid([2; 16]);
 
-    /// One input pin of one media type, as the Indeo 5 decoder's base
-    /// classes register theirs (REGFILTERPINS, which the mapper writes
-    /// in the layout of version 2).
+    /// An input pin and an output pin of one media type each, as a
+    /// decoder's base classes register theirs (REGFILTERPINS, which the
+    /// mapper writes in the layout of version 2), the output's type
+    /// without a minor type.
     #[test]
     fn filter_data_lays_out_the_pins_then_their_guids() {
         let pins = [

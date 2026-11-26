@@ -612,7 +612,7 @@ static QUARTZ_APIS: &[Api] = &[
     method("Mapper_CreateCategory", 4, mapper::create_category),
     method("Mapper_UnregisterFilter", 4, mapper::unregister_filter),
     method("Mapper_RegisterFilter", 7, mapper::register_filter),
-    method("Mapper_EnumMatchingFilters", 16, e_notimpl),
+    method("Mapper_EnumMatchingFilters", 16, mapper::enum_matching_filters),
 ];
 
 static QUARTZ_VTABLES: &[Vtable] = &[
