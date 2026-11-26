@@ -1768,3 +1768,85 @@ fn a_client_runs_sse_on_a_pentium_iii() {
     assert!(run_to_exit(&mut cpu, 2000), "the program didn't end (step {})", word(&cpu, psp, STEP));
     assert_eq!(cpu.errorlevel, 0x2A);
 }
+
+/// Enter as a 32-bit or 16-bit client and keep the access rights (LAR)
+/// of ES, the PSP's selector, at R and of the environment's selector at
+/// PSP:2Ch at R+4.
+fn psp_selector_program(bits32: bool) -> Vec<u8> {
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, bits32, fail)?;
+        step(a, 4)?;
+        a.mov(ax, es)?;
+        a.lar(eax, ax)?;
+        a.jnz(fail)?;
+        a.mov(dword_ptr(R), eax)?;
+        a.mov(ax, word_ptr(0x2C).es())?;
+        a.lar(eax, ax)?;
+        a.jnz(fail)?;
+        a.mov(dword_ptr(R + 4), eax)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    com(&[(0x100, main)])
+}
+
+#[test]
+fn a_32_bit_client_gets_big_psp_and_environment_selectors() {
+    // Windows 98's DOS box gives a 32-bit client its PSP and environment
+    // as big (32-bit) data segments, and a 16-bit client 16-bit ones.
+    // DOS/4GW hands a vector back only to callers of its selector's size,
+    // and Glide's DOS overlay (Redguard's 3dfx version) finds its PSP
+    // through such a vector.
+    for (bits32, name) in [(true, "pspsel32"), (false, "pspsel16")] {
+        let (mut cpu, psp) = machine(name, &[("T.COM", psp_selector_program(bits32))], "T.COM");
+        assert!(run_to_exit(&mut cpu, 200), "the program didn't end (step {})", word(&cpu, psp, STEP));
+        assert_eq!(cpu.errorlevel, 0x2A, "failed at step {}", word(&cpu, psp, STEP));
+        let rights = |at: u16| (word(&cpu, psp, at + 2) as u32) << 16 | word(&cpu, psp, at) as u32;
+        for (at, what) in [(R, "PSP"), (R + 4, "environment")] {
+            let rights = rights(at);
+            assert_eq!(rights >> 8 & 0xFE, 0xF2, "the {what} is data at level 3");
+            assert_eq!(rights & 1 << 22 != 0, bits32, "the {what}'s B bit, {bits32}");
+        }
+    }
+}
+
+/// Read and write a model-specific register from level 3 with Glide's
+/// mark (DEADCAFEh) in EBX, keeping EDX:EAX after the read at R.
+fn glide_msr_program() -> Vec<u8> {
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, true, fail)?;
+        step(a, 4)?;
+        a.mov(eax, 0x1234_5678u32)?;
+        a.mov(edx, 0x9ABC_DEF0u32)?;
+        a.mov(ecx, 0x2FFu32)?;
+        a.mov(ebx, 0xDEAD_CAFEu32)?;
+        a.rdmsr()?;
+        a.mov(dword_ptr(R), eax)?;
+        a.mov(dword_ptr(R + 4), edx)?;
+        step(a, 5)?;
+        a.wrmsr()?;
+        step(a, 6)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    com(&[(0x100, main)])
+}
+
+#[test]
+fn the_host_skips_glides_marked_msr_accesses() {
+    // Glide's DOS overlay reads and writes the MTRRs from level 3 in a
+    // Windows DOS box, with DEADCAFEh in EBX for 3dfx's Windows driver to
+    // catch the #GP: the read gives 0, the write does nothing, and the
+    // program goes on (Redguard's 3dfx version from its launcher).
+    let (mut cpu, psp) = machine("glidemsr", &[("T.COM", glide_msr_program())], "T.COM");
+    cpu.model = rust_dos::cpu::CpuModel::Pentium;
+    assert!(run_to_exit(&mut cpu, 200), "the program didn't end (step {})", word(&cpu, psp, STEP));
+    assert_eq!(cpu.errorlevel, 0x2A, "failed at step {}", word(&cpu, psp, STEP));
+    for at in [R, R + 2, R + 4, R + 6] {
+        assert_eq!(word(&cpu, psp, at), 0, "EDX:EAX after the read");
+    }
+}

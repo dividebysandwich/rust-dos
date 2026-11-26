@@ -403,7 +403,7 @@ pub fn hint_nop(cpu: &Cpu) -> CpuResult {
 }
 
 /// What Glide puts in EBX for its model-specific register accesses.
-const GLIDE_MSR_MARK: u32 = 0xDEAD_CAFE;
+pub(crate) const GLIDE_MSR_MARK: u32 = 0xDEAD_CAFE;
 
 /// What a P6 reads from its microcode revision MSR (8Bh): DOSBox-X's
 /// value for its Pentium Pro and Pentium II, high enough that Windows 98

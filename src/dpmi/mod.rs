@@ -584,13 +584,19 @@ pub fn installation_check(cpu: &mut Cpu) -> bool {
     true
 }
 
-/// Whether the program in `bytes` is to run without the host: one that
-/// loads Glide's DOS overlay (GLIDE2X.OVL) as a DOS/4G DLL, with DOS/4GW's
-/// loader (`LINEXE_LOADMODULE`), as Tomb Raider's Voodoo Rush version
-/// does. The overlay's run-time library takes its selectors as DOS/4GW
-/// sets them up as its own host, at level 0, and aborts the load under
-/// another host, as under Windows; with none, DOS/4GW is its own. (Bound
-/// DOS/4GW has the loader too, so it takes the overlay's name as well.)
+/// Whether the program in `bytes` is to run without the host on plain
+/// DOS: one that loads Glide's DOS overlay (GLIDE2X.OVL) as a DOS/4G DLL,
+/// with DOS/4GW's loader (`LINEXE_LOADMODULE`), as Tomb Raider's Voodoo
+/// Rush version and Redguard's 3dfx version do. A real machine's DOS has
+/// no DPMI host, so DOS/4GW is its own, at level 0, and the overlay's
+/// run-time library takes DOS/4GW's own selectors (28h and 20h in its
+/// GDT). Under a DPMI host, as in a Windows DOS box, the library takes
+/// the PSP selector its program put in INT E9h's vector instead, and
+/// aborts the load if there is none ("DLL load aborted"); Redguard sets
+/// it, and the host gives it the big PSP selector that this needs
+/// (`enter`). The built-in Windows' DOS machines keep the host, as on
+/// Windows 98. (Bound DOS/4GW has the loader too, so it takes the
+/// overlay's name as well.)
 pub fn passes_over(bytes: &[u8]) -> bool {
     const LOADER: &[u8] = b"LINEXE_LOADMODULE";
     const OVERLAY: &[u8] = b"glide2x";
@@ -955,18 +961,27 @@ fn enter(cpu: &mut Cpu) {
     });
     let real = |segment: u16, access: u8, limit: u32| descriptor((segment as u32) << 4, limit, access, 0);
     let (ds, ss) = (cpu.ds(), cpu.ss());
-    let lpms = descriptor(block + LDT_SIZE, LPMS_SIZE - 1, DATA3, if bits32 { BIG } else { 0 });
+    let big = if bits32 { BIG } else { 0 };
+    let lpms = descriptor(block + LDT_SIZE, LPMS_SIZE - 1, DATA3, big);
     let lpms = allocate(cpu, 1, lpms, LDT_FIXED).unwrap();
     let cb = allocate(cpu, 1, real(0, DATA3, 0xFFFF), LDT_FIXED).unwrap();
     let code = allocate(cpu, 1, real(cs, CODE3, 0xFFFF), LDT_CLIENT).unwrap();
     let data = allocate(cpu, 1, real(ds, DATA3, 0xFFFF), LDT_CLIENT).unwrap();
     let stack = allocate(cpu, 1, real(ss, DATA3, 0xFFFF), LDT_CLIENT).unwrap();
-    let psp_sel = allocate(cpu, 1, real(psp, DATA3, 0xFF), LDT_CLIENT).unwrap();
+    // Windows 98 gives a 32-bit client its PSP and environment as big
+    // (32-bit) data segments, and its CS, DS and SS as 16-bit ones. DOS/4GW
+    // keeps the size of a handler's selector with the vector it sets, and
+    // gives the vector back only to callers of that size: Glide's DOS
+    // overlay finds the PSP selector its program puts in INT E9h's vector
+    // only when that selector is big (see `passes_over`).
+    let psp_desc = descriptor((psp as u32) << 4, 0xFF, DATA3, big);
+    let psp_sel = allocate(cpu, 1, psp_desc, LDT_CLIENT).unwrap();
     let env = cpu.bus.read_16(psp as usize * 16 + 0x2C);
     if env != 0 {
         let mcb = crate::mcb::read_mcb(&mut cpu.bus, env.wrapping_sub(1));
         let limit = if mcb.is_valid() { (mcb.size as u32 * 16).clamp(1, 0x10000) - 1 } else { 0xFFFF };
-        let env_sel = allocate(cpu, 1, real(env, DATA3, limit), LDT_CLIENT).unwrap();
+        let env_desc = descriptor((env as u32) << 4, limit, DATA3, big);
+        let env_sel = allocate(cpu, 1, env_desc, LDT_CLIENT).unwrap();
         cpu.bus.write_16(psp as usize * 16 + 0x2C, Client::selector(env_sel));
     }
     let c = client(cpu);
@@ -1146,7 +1161,10 @@ fn idt(cpu: &mut Cpu, vector: u8) {
         resume(cpu, &ctx);
         return;
     }
-    if vector == 13 && error == Some(0) && emulate_mov_system(cpu, &mut ctx) {
+    if vector == 13
+        && error == Some(0)
+        && (emulate_mov_system(cpu, &mut ctx) || skip_glide_msr(cpu, &mut ctx))
+    {
         resume(cpu, &ctx);
     } else if exception {
         exception_entry(cpu, vector, error.unwrap_or(0), ctx);
@@ -1194,6 +1212,32 @@ fn emulate_mov_system(cpu: &mut Cpu, ctx: &mut Context) -> bool {
         _ => cpu.dr[n] = ctx.gpr[reg],
     }
     ctx.eip = ctx.eip.wrapping_add(at + 3);
+    true
+}
+
+/// An RDMSR or WRMSR (0F 32h, 0F 30h) that Glide marked with DEADCAFEh in
+/// EBX, in the client's context `ctx`. Glide's DOS overlay reaches for the
+/// memory type range registers so from level 3 in a Windows DOS box, and
+/// 3dfx's Windows driver, which Windows has with a Voodoo, catches the
+/// #GP and goes on after the instruction: RDMSR reads 0 and WRMSR writes
+/// nothing, as the processor does at level 0 (instructions/system.rs).
+/// Returns whether the instruction was one.
+fn skip_glide_msr(cpu: &mut Cpu, ctx: &mut Context) -> bool {
+    if ctx.gpr[EBX] != crate::instructions::system::GLIDE_MSR_MARK {
+        return false;
+    }
+    let Some(base) = selector_base(cpu, ctx.sel(Seg::CS)) else { return false };
+    let at = base.wrapping_add(ctx.eip);
+    let (escape, opcode) = (vm::read_8(cpu, at), vm::read_8(cpu, at.wrapping_add(1)));
+    match (escape, opcode) {
+        (0x0F, 0x32) => {
+            ctx.gpr[EAX] = 0;
+            ctx.gpr[EDX] = 0;
+        }
+        (0x0F, 0x30) => {}
+        _ => return false,
+    }
+    ctx.eip = ctx.eip.wrapping_add(2);
     true
 }
 
