@@ -132,9 +132,12 @@ that it improves on main. Steps, in this order:
    branch, and compare with main.
 4. Mark it ready for review only when that shows a clear improvement on
    main: a speed-up you measured, against main on the same machine and
-   scene; a bug that main has and the branch fixes, seen in the game; or
+   scene; less work for the same output, counted in deterministic runs;
+   a bug that main has and the branch fixes, seen in the game; or
    behaviour closer to the real hardware or the real Windows, shown by a
    test or a comparison with it. Put the evidence in the description.
+   How much checking that takes depends on what the change can break
+   ("Checks in proportion to the change", below).
 
    Before it is marked ready, check that it still merges with main,
    which moves on while a pull request is in draft. Fetch both and run
@@ -173,6 +176,61 @@ a decision with no clearly better option, or is far beyond the change's
 scope; say which in a comment on it. When several agents work together,
 the one coordinating them marks pull requests ready, not the agents
 doing the work.
+
+## Checks in proportion to the change
+
+Check a change as much as what it can break calls for, and no more.
+Start from two questions: what could go wrong if the change is wrong,
+and where would it show? The answers pick the checks; a habit of
+running everything, many times, doesn't. A long check has a cost
+beyond its own time: an exclusive measurement stops every other
+agent's builds and emulators while it waits and while it runs.
+
+- A change that removes work and keeps the output (a read-back, an
+  upload or a copy no longer made, fewer calls or hand-offs) is shown
+  by a deterministic comparison: identical frames at equal emulated
+  times, and the counter of the work removed (`/api/stats`, the
+  renderer's counts) lower on the branch. That is the evidence it is
+  better. A timing run then only puts a number on the gain: one run
+  per build on one scene that shows it is enough, and the description
+  calls the figure indicative.
+- A timing series (several runs per build, the order alternated, the
+  spread given) is for claims whose truth is the timing itself: a
+  change that trades one cost for another, a gain close to the spread
+  of the runs, a change to how `cycles=auto` picks its speed, or a
+  figure the description quotes as a size. Keep even a series short: a
+  fixed window of a minute or so after a fixed warm-up, the builds and
+  states prepared under the shared lock first, and the exclusive lock
+  asked for only when no emulator holds the lock, with `--wait` so a
+  long holder makes the run give up and retry instead of stalling
+  everyone behind it.
+- A save state made by main can carry main's state of the thing the
+  change moves into the branch's run: a texture's placement in the
+  card's memory, for one. Compare from states each build saved itself,
+  or from a plan that replays from power-on.
+- Other programs are run when the change is in a path they share with
+  the program the work is for. A change one program reaches needs that
+  program's check and the tests. A change to shared code (GDI's palette
+  and bitmaps, DirectDraw's blits, the CPU, a renderer's common path)
+  needs every test file that covers it run locally, since the Windows
+  and macOS CI jobs don't run `tests/win32` (#2024 merged with a red
+  Linux job), and deterministic runs of a few other programs that use
+  the path.
+- A run of another program counts only if it reaches the changed code:
+  check the counter or the log that shows it did. Of five games run for
+  a change to the ToadForce's depth fills, one reached it; the others
+  showed only that nothing else moved. When one program reaches the
+  code and draws the same, stop: searching every program for more
+  scenes that reach it adds little.
+- A question of what the real system does is answered by the real
+  system: a small probe program run on real Windows or on an emulated
+  real PC (86Box) settles it sooner and more surely than reasoning
+  from documentation, and its source and output go in the pull
+  request.
+- When the machine is busy (the user says so, or `rust-dos-lock status`
+  shows others' emulators running for long), take no timing
+  measurements. The deterministic evidence above doesn't depend on the
+  host's speed and goes on; the timing waits.
 
 ## Comparing what two builds draw: deterministic runs
 

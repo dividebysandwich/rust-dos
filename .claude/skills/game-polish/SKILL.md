@@ -330,10 +330,15 @@ paragraphs after this list say. For each one:
      prompt with the steps in the issue.
    - The finding is fixed only if it no longer happens, as often as it
      happened before (ten times for one that happened sometimes).
-   - For a performance finding, measure before and after on the same
-     state and input: `/api/stats` or a 30-second profile from each
-     build, and give both figures. Use `--deterministic --cycles N` for
-     both runs when the figure varies between runs.
+   - For a performance finding, show the work the fix removes first:
+     deterministic runs of both builds with identical frames and a
+     lower count of that work (`/api/stats`, the renderer's counters).
+     Then put a number on it: one timing run per build on the same
+     state and input (`/api/stats` over a fixed window, or a 30-second
+     profile), and give both figures. A series of runs is for a gain
+     close to the runs' spread or a fix that trades one cost for
+     another; `AGENTS.md`'s "Checks in proportion to the change" says
+     how much checking each kind of change needs.
    - Play a few minutes around the place, to see the fix broke nothing
      nearby.
    - If the game is in the game suite, run its scenarios
