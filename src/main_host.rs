@@ -599,6 +599,12 @@ impl Host for MainHost<'_, '_> {
         if new.keyboard_layout != old.keyboard_layout {
             apply_keyboard_layout(self.cpu, new.keyboard_layout);
         }
+        // The settings window's key, which the box above the prompt and the
+        // machine's notices name.
+        if new.hotkeys != old.hotkeys {
+            let window = rust_dos::hotkeys::Action::SettingsWindow;
+            self.cpu.startup.settings_key = new.hotkeys.table().key_text(window);
+        }
         if new.achievements != old.achievements {
             self.achievements.apply(&new.achievements);
         }

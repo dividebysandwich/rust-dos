@@ -137,10 +137,11 @@ impl ConfigUi {
         self.overlay
     }
 
-    /// Ctrl+Shift+F12, or its hint on the Stats page: show or hide the
-    /// performance overlay. Returns what to tell the user over the
-    /// picture while the window is closed; open, its status line says it.
-    pub fn overlay_key(&mut self) -> Option<&'static str> {
+    /// performance_overlay's key (Ctrl+Shift+F12), or its hint on the
+    /// Stats page: show or hide the performance overlay. Returns what to
+    /// tell the user over the picture while the window is closed; open,
+    /// its status line says it.
+    pub fn overlay_key(&mut self) -> Option<String> {
         let on = self.toggle_overlay();
         if self.open {
             self.info(if on {
@@ -150,7 +151,11 @@ impl ConfigUi {
             });
             return None;
         }
-        Some(if on { "Performance overlay on (Ctrl+Shift+F12 hides it)" } else { "Performance overlay off" })
+        Some(match self.hotkey(crate::hotkeys::Action::PerformanceOverlay) {
+            _ if !on => "Performance overlay off".to_string(),
+            Some(key) => format!("Performance overlay on ({} hides it)", key),
+            None => "Performance overlay on".to_string(),
+        })
     }
 
     /// Draw the performance overlay over `frame`, if it is on and the
@@ -345,7 +350,7 @@ mod tests {
         ui.draw_overlay(&mut frame);
         assert!(!lit(&frame, 600, 380), "off");
 
-        assert_eq!(ui.overlay_key(), Some("Performance overlay on (Ctrl+Shift+F12 hides it)"));
+        assert_eq!(ui.overlay_key().as_deref(), Some("Performance overlay on (Ctrl+Shift+F12 hides it)"));
         assert!(ui.overlay_shown());
         ui.draw_overlay(&mut frame);
         assert!(lit(&frame, 600, 380) && !lit(&frame, 400, 380) && !lit(&frame, 600, 300));

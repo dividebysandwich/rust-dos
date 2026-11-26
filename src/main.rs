@@ -48,7 +48,7 @@ use rust_dos::achievements::{Achievements, http::HttpTransport};
 use rust_dos::games::ActiveGame;
 use rust_dos::hardware::Hardware;
 use rust_dos::hostframes::Phase;
-use rust_dos::hotkeys::{Action, Key as HotKey};
+use rust_dos::hotkeys::Action;
 use rust_dos::profile::{self, Zone};
 use rust_dos::savestate::{self, slots};
 
@@ -406,6 +406,7 @@ fn main() -> Result<ExitCode, String> {
     // they were made from: the settings window may change them.
     let mut hotkeys = settings.hotkeys.table();
     let mut hotkeys_of = settings.hotkeys.clone();
+    ui.set_hotkeys(hotkeys.clone());
     let mut state_loaded = false;
     // Rewind (held Alt+F11): the states of the last minutes, which a thread
     // packs, when the next is due (emulated and wall time), the rewinding
@@ -610,6 +611,12 @@ fn main() -> Result<ExitCode, String> {
         // frame, which the debug server's journal tells while it holds it.
         let mouse_before = (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons);
         let mut host_keys = false;
+        // The settings window may have picked another profile.
+        if settings.hotkeys != hotkeys_of {
+            hotkeys = settings.hotkeys.table();
+            hotkeys_of = settings.hotkeys.clone();
+            ui.set_hotkeys(hotkeys.clone());
+        }
         for mut event in event_pump.poll_iter() {
             // The sdl3 crate's Keycode is an enum of SDL's named keys, and
             // a key whose character has no name there (ü, ß, ù, ², a dead
@@ -729,16 +736,21 @@ fn main() -> Result<ExitCode, String> {
                     let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
                     let alt = keymod.intersects(Mod::LALTMOD | Mod::RALTMOD);
                     let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-                    if settings.hotkeys != hotkeys_of {
-                        hotkeys = settings.hotkeys.table();
-                        hotkeys_of = settings.hotkeys.clone();
-                    }
-                    // A key without Ctrl or Alt whose action does nothing
-                    // in the settings window is the window's own (its F1,
-                    // F2 and the rest).
-                    let action = HotKey::named(&keycode.name())
+                    // With the settings window open, a key without Ctrl or
+                    // Alt is the window's when its action does nothing
+                    // there, or when the window has a use for the key (its
+                    // F1 help, F2 save, F10 in the BIOS setup), unless the
+                    // key is the one that closes the window.
+                    let window_key = || ui_key(keycode, keymod).is_some();
+                    let action = sdl_keys::hotkey(keycode, scancode)
                         .and_then(|key| hotkeys.action(ctrl, alt, shift, key))
-                        .filter(|action| !ui.is_open() || ctrl || alt || action.in_settings_window());
+                        .filter(|&action| {
+                            !ui.is_open()
+                                || ctrl
+                                || alt
+                                || action == Action::SettingsWindow
+                                || (action.in_settings_window() && !window_key())
+                        });
                     if !repeat {
                         ctrl_alt.key_down(chord_key(scancode));
                         display.vr_key_pressed();
@@ -837,7 +849,10 @@ fn main() -> Result<ExitCode, String> {
                     // Save the machine to the current slot, load it, and
                     // pick the next and the previous slot.
                     if let Some(
-                        state @ (Action::SaveState | Action::LoadState | Action::NextSlot | Action::PreviousSlot),
+                        state @ (Action::SaveState
+                        | Action::LoadState
+                        | Action::NextSlot
+                        | Action::PreviousSlot),
                     ) = action
                     {
                         if repeat || ui.is_open() {
@@ -1106,7 +1121,7 @@ fn main() -> Result<ExitCode, String> {
                         }
                         capture_message!(if mouse_captured { CAPTURED } else { "Mouse released (Ctrl+Alt captures it)" });
                     }
-                    let key = HotKey::named(&keycode.name());
+                    let key = sdl_keys::hotkey(keycode, scancode);
                     let ends = |action| key.is_some_and(|key| hotkeys.is_key_of(action, key));
                     if pacer.fast_forward() && ends(Action::FastForward) {
                         pacer.set_fast_forward(false, &cpu.bus.clock, std::time::Instant::now());

@@ -297,7 +297,7 @@ pub fn reboot_dos(cpu: &mut Cpu) {
 /// How a session of the built-in DOS starts, and starts again after a
 /// reboot: the notes in the box above the first prompt, then the command
 /// lines and batch files to run.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Startup {
     /// (label, value) lines under the emulator's name; the value stands
     /// out.
@@ -305,6 +305,21 @@ pub struct Startup {
     /// A line under the box: a newer rust-dos (`version_check`).
     pub update: Option<String>,
     pub commands: Vec<StartupItem>,
+    /// The settings window's key, which the box and the machine's notices
+    /// name, or None if `[hotkeys]` leaves it without one. Ctrl+F12 unless
+    /// the front end says otherwise.
+    pub settings_key: Option<String>,
+}
+
+impl Default for Startup {
+    fn default() -> Self {
+        Startup {
+            notes: Vec::new(),
+            update: None,
+            commands: Vec::new(),
+            settings_key: Some("Ctrl+F12".to_string()),
+        }
+    }
 }
 
 /// What a session runs at its start.

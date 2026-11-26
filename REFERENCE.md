@@ -186,13 +186,13 @@ and Rust-DOS's own key for the rest. A dash is an action without a key.
 | `screenshot` | Ctrl+F5 | F8 | F10 | F12 | Ctrl+F5 | F8 | Ctrl+F5 | Ctrl+F11 |
 | `record_sound` | Ctrl+F6 | Ctrl+F6 | Ctrl+F6 | Ctrl+F6 | Ctrl+F6 | Ctrl+F6 | Ctrl+F6 | Ctrl+F6 |
 | `record_video` | Ctrl+F7 | Ctrl+F7 | Ctrl+F7 | Ctrl+F7 | Ctrl+F7 | Ctrl+F7 | Ctrl+F7, Ctrl+Alt+F5 | Ctrl+F7 |
-| `record_animation` | PrintScreen | PrintScreen | PrintScreen | PrintScreen | PrintScreen | PrintScreen | PrintScreen | PrintScreen |
+| `record_animation` | PrintScreen, Shift+PrintScreen, Ctrl+PrintScreen, Alt+PrintScreen, Ctrl+Alt+PrintScreen | PrintScreen, Shift+PrintScreen, Ctrl+PrintScreen, Alt+PrintScreen, Ctrl+Alt+PrintScreen | PrintScreen, Shift+PrintScreen, Ctrl+PrintScreen, Alt+PrintScreen, Ctrl+Alt+PrintScreen | PrintScreen, Shift+PrintScreen, Ctrl+PrintScreen, Alt+PrintScreen, Ctrl+Alt+PrintScreen | PrintScreen, Shift+PrintScreen, Ctrl+PrintScreen, Alt+PrintScreen, Ctrl+Alt+PrintScreen | PrintScreen, Shift+PrintScreen, Ctrl+PrintScreen, Alt+PrintScreen, Ctrl+Alt+PrintScreen | PrintScreen, Shift+PrintScreen, Ctrl+PrintScreen, Alt+PrintScreen, Ctrl+Alt+PrintScreen | PrintScreen, Shift+PrintScreen, Ctrl+PrintScreen, Alt+PrintScreen, Ctrl+Alt+PrintScreen |
 | `swap_disk` | Ctrl+F4 | Ctrl+F4 | Ctrl+F4 | Ctrl+F4 | Ctrl+F4 | Ctrl+F4 | Ctrl+F4 | Ctrl+F4 |
 | `copy_text` | Ctrl+Shift+C | Ctrl+Shift+C | Ctrl+Shift+C | Ctrl+Shift+C | Ctrl+Shift+C | Ctrl+Shift+C | Ctrl+Shift+C | Ctrl+Shift+C |
 | `paste_text` | Ctrl+Shift+V | Ctrl+Shift+V | Ctrl+Shift+V | Ctrl+Shift+V | Ctrl+Shift+V | Ctrl+Shift+V | Ctrl+Shift+V | Ctrl+Shift+V |
 | `printer_eject` | Ctrl+Shift+F5 | Ctrl+Shift+F5 | Ctrl+Shift+F5 | Ctrl+Shift+F5 | Ctrl+Shift+F5 | Ctrl+Shift+F5 | Ctrl+Shift+F5 | Ctrl+Shift+F5 |
 | `degauss` | Ctrl+Shift+D | Ctrl+Shift+D | Ctrl+Shift+D | Ctrl+Shift+D | Ctrl+Shift+D | Ctrl+Shift+D | Ctrl+Shift+D | Ctrl+Shift+D |
-| `recenter_view` | Ctrl+Shift+Home | Ctrl+Shift+Home | Ctrl+Shift+Home | Ctrl+Shift+Home | Ctrl+Shift+Home | Ctrl+Shift+Home | Ctrl+Shift+Home | Ctrl+Shift+Home |
+| `recenter_view` | Ctrl+Shift+Home, Ctrl+Alt+Shift+Home | Ctrl+Shift+Home, Ctrl+Alt+Shift+Home | Ctrl+Shift+Home, Ctrl+Alt+Shift+Home | Ctrl+Shift+Home, Ctrl+Alt+Shift+Home | Ctrl+Shift+Home, Ctrl+Alt+Shift+Home | Ctrl+Shift+Home, Ctrl+Alt+Shift+Home | Ctrl+Shift+Home, Ctrl+Alt+Shift+Home | Ctrl+Shift+Home, Ctrl+Alt+Shift+Home |
 
 Keys of these emulators that type in DOS (Space, Tab, Backspace, a letter
 without Ctrl or Alt) aren't in the profiles, as a DOS program needs them:

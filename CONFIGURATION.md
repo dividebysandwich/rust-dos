@@ -2870,13 +2870,13 @@ The actions, with their keys in the `rust-dos` profile:
 | `screenshot` | Save a screenshot | Ctrl+F5 |
 | `record_sound` | Start and stop recording the sound | Ctrl+F6 |
 | `record_video` | Start and stop recording video | Ctrl+F7 |
-| `record_animation` | Start and stop recording a GIF | PrintScreen |
+| `record_animation` | Start and stop recording a GIF | PrintScreen, with any modifiers |
 | `swap_disk` | Put the next disk in drives with lists of images | Ctrl+F4 |
 | `copy_text` | Copy the selected text or the text screen | Ctrl+Shift+C |
 | `paste_text` | Type the clipboard's text | Ctrl+Shift+V |
 | `printer_eject` | Eject the printer's page | Ctrl+Shift+F5 |
 | `degauss` | Degauss the monitor | Ctrl+Shift+D |
-| `recenter_view` | In the 3D scene, take the camera back to the start | Ctrl+Shift+Home |
+| `recenter_view` | In the 3D scene, take the camera back to the start | Ctrl+Shift+Home, with Alt too |
 
 * A key is an action's with the modifiers it was bound with, and no
   others: `Ctrl+F1` isn't pressed by Ctrl+Alt+F1, which AltGr can
@@ -2893,9 +2893,11 @@ The actions, with their keys in the `rust-dos` profile:
   key) can be bound, but programs can't type it then. Rust-DOS says
   each of these in a warning at start.
 * While the settings window is open, a key without Ctrl or Alt goes to
-  the window, which has its own F1, F2 and so on, unless its action does
-  something there (the settings window, the overlay, pause, the
-  recordings).
+  the window when its action does nothing there (the save states, the
+  speed, fullscreen) or the window has a use for the key (F1, F2, F10,
+  Enter, Escape, the arrows and the like). The settings window's own key
+  closes it whatever the key is, so `retroarch`'s F1 closes the window
+  as RetroArch's closes its menu.
 * A [game profile](#game-profiles) may have a `[hotkeys]` section too.
   Its lines are read after the configuration's, so its `profile` replaces
   the configuration's, and the configuration's own action lines still

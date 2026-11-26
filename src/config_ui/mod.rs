@@ -470,6 +470,10 @@ pub struct ConfigUi {
     almanac: Option<AlmanacView>,
     /// The sound visualizer while it shows (sound_viz.rs).
     sound_viz: Option<sound_viz::SoundViz>,
+    /// The front end's hotkeys, which the window's texts name: the
+    /// `rust-dos` profile's unless the front end says otherwise
+    /// (`set_hotkeys`).
+    hotkeys: crate::hotkeys::Hotkeys,
     /// The settings as a BIOS setup, while it shows (setup.rs).
     setup: Option<setup::Setup>,
     scene_download: Option<scenes::SceneDownload>,
@@ -495,6 +499,17 @@ impl ConfigUi {
     /// The rust-dos program's window.
     pub fn new() -> Self {
         Self::for_frontend(Frontend::DESKTOP)
+    }
+
+    /// The hotkeys the front end takes, as `[hotkeys]` binds them, for
+    /// the texts that name them.
+    pub fn set_hotkeys(&mut self, hotkeys: crate::hotkeys::Hotkeys) {
+        self.hotkeys = hotkeys;
+    }
+
+    /// The key of `action` as the texts name it, or None if it has none.
+    fn hotkey(&self, action: crate::hotkeys::Action) -> Option<String> {
+        self.hotkeys.key_text(action)
     }
 
     pub fn for_frontend(frontend: Frontend) -> Self {
@@ -554,6 +569,7 @@ impl ConfigUi {
             phone_catalog: phonebook::Catalog::default(),
             almanac: None,
             sound_viz: None,
+            hotkeys: crate::hotkeys::HotkeySettings::default().table(),
             setup: None,
             scene_download: None,
             help: None,

@@ -359,7 +359,9 @@ impl Item {
                 each(s, versions, |s, version| s.dos_version = version)
             }
             KeyboardLayout => each(s, crate::keylayout::LayoutSetting::all(), |s, layout| s.keyboard_layout = layout),
-            HotkeyProfile => each(s, crate::hotkeys::Profile::ALL, |s, profile| s.hotkeys.profile = profile),
+            HotkeyProfile => {
+                each(s, crate::hotkeys::Profile::ALL, |s, profile| s.hotkeys.profile = profile)
+            }
             MouseAutocapture => on_off(|s, on| s.mouse_autocapture = on),
             MouseCaptureMessages => on_off(|s, on| s.mouse_capture_messages = on),
             MouseMenuHold => on_off(|s, on| s.mouse_menu_hold = on),

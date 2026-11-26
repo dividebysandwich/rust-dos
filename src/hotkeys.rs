@@ -125,15 +125,10 @@ impl Action {
         Action::ALL.iter().position(|&a| a == self).unwrap_or(0)
     }
 
-    /// Whether the action lasts while its key is held, and ends as the key
-    /// comes up.
-    pub fn held(self) -> bool {
-        matches!(self, Action::FastForward | Action::Rewind)
-    }
-
     /// Whether the action does something while the settings window is
     /// open. A key without Ctrl or Alt bound to one that doesn't goes to
-    /// the window instead, which has its own F1, F2 and so on.
+    /// the window instead, as does one the window has a use for (its F1,
+    /// F2, F10 and so on) unless it is the window's own key.
     pub fn in_settings_window(self) -> bool {
         !matches!(
             self,
@@ -503,13 +498,18 @@ const RUST_DOS: &[(Action, &str)] = &[
     (Action::Screenshot, "Ctrl+F5"),
     (Action::RecordSound, "Ctrl+F6"),
     (Action::RecordVideo, "Ctrl+F7"),
-    (Action::RecordAnimation, "PrintScreen"),
+    // PrintScreen with any modifiers: Shift with Ctrl or Alt falls back
+    // to the key without it (`Hotkeys::action`).
+    (
+        Action::RecordAnimation,
+        "PrintScreen, Shift+PrintScreen, Ctrl+PrintScreen, Alt+PrintScreen, Ctrl+Alt+PrintScreen",
+    ),
     (Action::SwapDisk, "Ctrl+F4"),
     (Action::CopyText, "Ctrl+Shift+C"),
     (Action::PasteText, "Ctrl+Shift+V"),
     (Action::PrinterEject, "Ctrl+Shift+F5"),
     (Action::Degauss, "Ctrl+Shift+D"),
-    (Action::RecenterView, "Ctrl+Shift+Home"),
+    (Action::RecenterView, "Ctrl+Shift+Home, Ctrl+Alt+Shift+Home"),
 ];
 
 /// PCSX2's defaults, from `Pad::SetDefaultHotkeyConfig` in
@@ -666,14 +666,18 @@ impl HotkeySettings {
                         other.name()
                     )),
                     Some(_) => {}
-                    None => table.push((combo, action)),
-                }
-                if !combo.has_ctrl_or_alt() && combo.key.types() {
-                    warnings.push(format!(
-                        "[hotkeys] {} is {}, which programs can't type while it is a hotkey",
-                        action.name(),
-                        combo
-                    ));
+                    // A key that types is said only once it is a hotkey:
+                    // one another line kept isn't.
+                    None => {
+                        table.push((combo, action));
+                        if !combo.has_ctrl_or_alt() && combo.key.types() {
+                            warnings.push(format!(
+                                "[hotkeys] {} is {}, which programs can't type while it is a hotkey",
+                                action.name(),
+                                combo
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -792,64 +796,66 @@ mod tests {
 
     /// The keys rust-dos had before they could be changed, each with the
     /// modifiers its check in the event loop asked for.
+    /// What the event loop's checks did with a key before the keys could
+    /// be changed, in their order: each asked for its modifiers, and most
+    /// for Ctrl without Alt or Alt without Ctrl, and didn't look at Shift
+    /// unless it told two keys apart. PrintScreen took any modifiers, and
+    /// the 3D scene's Ctrl+Shift+Home any Alt.
+    fn old_check(ctrl: bool, alt: bool, shift: bool, key: &str) -> Option<Action> {
+        use Action::*;
+        let (c, a) = (ctrl && !alt, alt && !ctrl);
+        Some(match key {
+            "Home" if ctrl && shift => RecenterView,
+            "D" if c && shift => Degauss,
+            "S" if c && shift => SoundVisualizer,
+            "F12" if c && shift => PerformanceOverlay,
+            "F12" if c => SettingsWindow,
+            "M" if c && shift => Manuals,
+            "C" if c && shift => CopyText,
+            "V" if c && shift => PasteText,
+            "F1" if c => SaveState,
+            "F2" if c => LoadState,
+            "F3" if c && shift => PreviousSlot,
+            "F3" if c => NextSlot,
+            "F9" if c => SaveStatesPage,
+            "F4" if c => SwapDisk,
+            "Pause" if a => Pause,
+            "F11" if c && shift => Faster,
+            "F11" if c => Slower,
+            "F11" if a => Rewind,
+            "F12" if a => FastForward,
+            "F10" if c => MouseCapture,
+            "Enter" if a => Fullscreen,
+            "F5" if c && shift => PrinterEject,
+            "F5" if c => Screenshot,
+            "F6" if c => RecordSound,
+            "F7" if c => RecordVideo,
+            "F8" if c => Mute,
+            "PrintScreen" => RecordAnimation,
+            _ => return None,
+        })
+    }
+
+    /// Every key with every modifier does in the default profile what the
+    /// checks before it did.
     #[test]
     fn the_default_profile_has_the_keys_rust_dos_always_had() {
         let table = HotkeySettings::default().table();
-        let expected = [
-            ("Ctrl+F12", Action::SettingsWindow),
-            ("Ctrl+F9", Action::SaveStatesPage),
-            ("Ctrl+Shift+F12", Action::PerformanceOverlay),
-            ("Ctrl+Shift+S", Action::SoundVisualizer),
-            ("Ctrl+Shift+M", Action::Manuals),
-            ("Ctrl+F1", Action::SaveState),
-            ("Ctrl+F2", Action::LoadState),
-            ("Ctrl+F3", Action::NextSlot),
-            ("Ctrl+Shift+F3", Action::PreviousSlot),
-            ("Alt+Pause", Action::Pause),
-            ("Alt+F12", Action::FastForward),
-            ("Alt+F11", Action::Rewind),
-            ("Ctrl+F11", Action::Slower),
-            ("Ctrl+Shift+F11", Action::Faster),
-            ("Alt+Enter", Action::Fullscreen),
-            ("Ctrl+F10", Action::MouseCapture),
-            ("Ctrl+F8", Action::Mute),
-            ("Ctrl+F5", Action::Screenshot),
-            ("Ctrl+F6", Action::RecordSound),
-            ("Ctrl+F7", Action::RecordVideo),
-            ("PrintScreen", Action::RecordAnimation),
-            ("Ctrl+F4", Action::SwapDisk),
-            ("Ctrl+Shift+C", Action::CopyText),
-            ("Ctrl+Shift+V", Action::PasteText),
-            ("Ctrl+Shift+F5", Action::PrinterEject),
-            ("Ctrl+Shift+D", Action::Degauss),
-            ("Ctrl+Shift+Home", Action::RecenterView),
-        ];
-        for (text, action) in expected {
-            let c = combo(text);
-            assert_eq!(
-                table.action(c.ctrl, c.alt, c.shift, c.key),
-                Some(action),
-                "{}",
-                text
-            );
-            assert_eq!(
-                table.keys(action).collect::<Vec<_>>(),
-                vec![c],
-                "{}",
-                action.name()
-            );
+        for i in 0..KEYS.len() {
+            let key = Key(i as u8);
+            for mods in 0..8 {
+                let (ctrl, alt, shift) = (mods & 1 != 0, mods & 2 != 0, mods & 4 != 0);
+                assert_eq!(
+                    table.action(ctrl, alt, shift, key),
+                    old_check(ctrl, alt, shift, key.name()),
+                    "ctrl {} alt {} shift {} {}",
+                    ctrl,
+                    alt,
+                    shift,
+                    key.name()
+                );
+            }
         }
-        // Shift held too, as the checks didn't look at it: Ctrl+Shift+F1
-        // saved, and Ctrl+Alt+F1, which AltGr can be, didn't.
-        let f1 = Key::named("F1").unwrap();
-        assert_eq!(table.action(true, false, true, f1), Some(Action::SaveState));
-        assert_eq!(table.action(true, true, false, f1), None);
-        assert_eq!(table.action(false, false, false, f1), None);
-        let enter = Key::named("Enter").unwrap();
-        assert_eq!(
-            table.action(false, true, true, enter),
-            Some(Action::Fullscreen)
-        );
     }
 
     #[test]
@@ -974,6 +980,21 @@ mod tests {
         assert_eq!(
             warnings,
             ["[hotkeys] save_state and load_state are both Ctrl+S: save_state keeps it"]
+        );
+    }
+
+    #[test]
+    fn a_typing_key_that_lost_a_clash_is_not_warned_of() {
+        let mut s = HotkeySettings::default();
+        s.set("save_state", "P").unwrap();
+        s.set("pause", "P").unwrap();
+        let warnings = s.resolve().1;
+        assert_eq!(
+            warnings,
+            [
+                "[hotkeys] save_state is P, which programs can't type while it is a hotkey",
+                "[hotkeys] save_state and pause are both P: save_state keeps it",
+            ]
         );
     }
 

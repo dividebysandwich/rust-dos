@@ -353,6 +353,7 @@ impl Machine {
                 StartupItem::BatchFile("C:\\AUTOEXEC.BAT".to_string()),
                 StartupItem::Lines(commands),
             ],
+            ..Default::default()
         };
         self.cpu.start_dos();
         self.pacer = Pacer::for_settings(&self.settings, Instant::now());

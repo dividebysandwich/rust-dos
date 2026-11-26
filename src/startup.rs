@@ -367,7 +367,13 @@ pub(crate) fn start_dos(
         check.banner()
     });
     let update = update.as_deref().map(rust_dos::version_check::console_line);
-    cpu.startup = Startup { notes: banner_notes(config, args.no_config), update, commands };
+    let settings_key = config.hotkeys.table().key_text(rust_dos::hotkeys::Action::SettingsWindow);
+    cpu.startup = Startup {
+        notes: banner_notes(config, args.no_config),
+        update,
+        commands,
+        settings_key,
+    };
     cpu.start_dos();
 }
 
