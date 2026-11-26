@@ -871,8 +871,12 @@ directly, at the points where the software renderer would draw them
   renderer draws, so the card transforms everything there.
 - **Textures** are host textures decoded once and kept by their
   description (format, size, levels and the offset of each image), with
-  the write counters of the pages their images cover. A write to any of
-  those pages decodes and uploads every image again.
+  the write counters of the pages each image covers. A write to a page
+  decodes and uploads again the images on it, and a write to the
+  palette every image. Unreal writes the two largest levels of a
+  texture it animates apart from the smaller ones, with a draw between
+  them, and so has each level uploaded once a frame rather than the
+  whole texture twice.
 - **Render targets** are host framebuffers. A target drawn on the GPU is
   marked newer there. The card's own work on it on the processor (a
   declined draw, a `BLT` or `FILL` the host doesn't take) and a switch to
@@ -880,7 +884,14 @@ directly, at the points where the software renderer would draw them
   save state and the program's reads of it read nothing back into card
   memory, and the program's writes only where they write parts of
   pixels or more than 1024 rectangles (see "Between the card and the
-  host renderer").
+  host renderer"). The host keeps a framebuffer for each pair of a
+  target and its depth buffer, and asks the driver whether it is
+  complete once, when it makes it. A driver that runs the commands on
+  a thread of its own has to catch up with them before it answers.
+  Asked at every batch, that wait was the largest part of the
+  renderer's time on the emulator's thread in Unreal's Direct3D
+  flyby on an NVIDIA driver (8% of the thread's busy samples, against
+  5% for decoding textures).
 - **16-bit targets** are host framebuffers in the 565 format
   (`GL_RGB565`, renderable since OpenGL 4.1 and with
   `ARB_ES2_compatibility`), so the host's blend result is rounded to
