@@ -138,7 +138,8 @@ pub struct VgaCard {
     /// so the characters' glyphs are what the planes have, a program's own
     /// included. Without, the text modes draw with the ROM's fonts: a state
     /// saved before rust-dos kept the font there, or a mode set the BIOS
-    /// made under Windows, which keeps the planes itself.
+    /// made under a booted system's V86 monitor (Windows, which keeps the
+    /// planes itself, or EMM386).
     pub font_loaded: bool,
 }
 

@@ -289,10 +289,11 @@ pub fn set_tseng_mode(cpu: &mut Cpu, mode: &et4000::TsengMode, keep: bool, hicol
 }
 
 /// The text mode's font into plane 2 at a mode set, as an EGA's or VGA's
-/// BIOS loads it (`video_bios::load_mode_font`). Under the V86 monitor of
-/// a booted Windows the planes are the ones Windows keeps for the
-/// machine, which the BIOS doesn't write here: that machine's text is
-/// drawn with the ROM's fonts.
+/// BIOS loads it (`video_bios::load_mode_font`). Under a booted system's
+/// V86 monitor the BIOS doesn't write the planes: Windows keeps a DOS
+/// box's planes itself, and the BIOS can't tell it from EMM386, whose
+/// machine has the card's. That machine's text is drawn with the ROM's
+/// fonts (#2063).
 fn mode_font(cpu: &mut Cpu) {
     if cpu.guest_v86() {
         cpu.bus.vga.font_loaded = false;
