@@ -21,7 +21,7 @@ of them:
 | `cpu`, `memsize` | `[emulator]` | The processor and the memory. Windows games want `cpu=pentium_ii` ([processor and speed](#processor-and-speed), [memory](#memory)) |
 | `machine` | `[emulator]` | The video card the game finds ([choosing a video card](#choosing-a-video-card)) |
 | `voodoo` | `[emulator]` | Adds a 3dfx Voodoo for DOS games' 3dfx versions ([3dfx settings](#3dfx-settings)) |
-| `voodoo_renderer`, `toadforce_renderer`, `voodoo_scale` | `[emulator]` | Whether your CPU or your graphics card draws the 3D of a 3dfx card (the add-on Voodoo, a Voodoo3 or a Banshee) or of a ToadForce, and how sharp a 3dfx picture is ([choosing a renderer](#choosing-a-renderer)) |
+| `renderer`, `voodoo_scale` | `[emulator]` | Whether your CPU or your graphics card draws the 3D cards' pictures, and how sharp a 3dfx card's is ([choosing a renderer](#choosing-a-renderer)) |
 | `fps_cap` | `[emulator]` | The most frames a second a game shows ([frame rate cap](#frame-rate-cap)) |
 | `sbtype`, `midisynth`, `soundfont` | `[sound]` | The sound card and what plays MIDI music ([`[sound]`](#sound)) |
 | `master`, `sb`, `fm`, `midi` | `[mixer]` | Volumes ([`[mixer]`](#mixer)) |
@@ -217,9 +217,8 @@ it comes. They are independent of each other:
    emulated hardware, and it decides which screen modes and which 3D
    interfaces the game can use: VGA and VESA modes, Glide, Direct3D or
    OpenGL.
-2. What draws that card's 3D on your computer (`voodoo_renderer`,
-   `toadforce_renderer`): Rust-DOS's own rasterizer on your CPU, or your
-   graphics card through OpenGL.
+2. What draws that card's 3D on your computer (`renderer`): Rust-DOS's
+   own rasterizer on your CPU, or your graphics card through OpenGL.
 3. How the window shows the finished picture (`scale`, `aspect`, `filter`,
    `shader` and the others in [the window and the
    picture](#the-window-and-the-picture)).
@@ -240,8 +239,8 @@ renderer](#choosing-a-renderer).
 | A DOS game's 3dfx version | `voodoo=true` and `cpu=pentium`, and `voodoo_model=voodoo2` for a game made for the Voodoo2 |
 | A Windows 95 or 98 game | `machine=svga_voodoo3` and `cpu=pentium_ii`, with the other settings in [Windows games](#a-profile-to-start-from) |
 | A Windows game that needs hardware transform and lighting or 32-bit colour | `machine=svga_toadforce` |
-| A sharper 3dfx picture | `voodoo_renderer=opengl`, with `voodoo_scale=3` or `4` and `voodoo_msaa=4` |
-| A 3dfx game that runs slowly on a laptop | `voodoo_renderer=software` (the default), or `opengl` with `voodoo_scale=1`; compare them on the Stats page |
+| A sharper 3dfx picture | `renderer=opengl`, with `voodoo_scale=3` or `4` and `voodoo_msaa=4` |
+| A 3dfx game that runs slowly on a laptop | `renderer=auto` (the default), or `opengl` with `voodoo_scale=1`; compare them on the Stats page |
 | Crisp, even pixels | `filter=sharp` (the default) and `aspect=4:3` |
 | The look of a monitor of the time | `shader=crt`, `aperture` or `scanlines`, at `scale=3` or more |
 | Smoothed pixel art | `shader=xbrz` |
@@ -318,21 +317,21 @@ Windows](#windows-games) with `machine=svga_voodoo3`:
   OpenGL driver did on a real card. As far as GLQuake can tell, it draws
   with OpenGL on a 3dfx card.
 * Rust-DOS then makes the Voodoo3's picture from those triangles. With
-  `voodoo_renderer=software`, the default, its own rasterizer draws every
-  triangle on your CPU, pixel for pixel as the card would. Your graphics
-  card takes no part in the game's 3D: GLQuake's OpenGL picture is made
-  entirely by the CPU, and it runs on a computer whose graphics driver has
-  no OpenGL at all.
-* With `voodoo_renderer=opengl`, Rust-DOS draws the same triangles again
-  with your graphics card, through your computer's OpenGL, at `voodoo_scale`
+  `renderer=auto`, the default, or `software`, its own rasterizer draws
+  every triangle on your CPU, pixel for pixel as the card would. Your
+  graphics card takes no part in the game's 3D: GLQuake's OpenGL picture
+  is made entirely by the CPU, and it runs on a computer whose graphics
+  driver has no OpenGL at all.
+* With `renderer=opengl`, Rust-DOS draws the same triangles again with
+  your graphics card, through your computer's OpenGL, at `voodoo_scale`
   times the card's resolution.
 
 "OpenGL" thus names two unrelated things here. One is the interface a game
 draws with, which the game and the emulated card decide: Glide, Direct3D or
 OpenGL. The other is one of the two renderers Rust-DOS can use on your
 computer. Either renderer draws any of the interfaces: a Glide game with
-`voodoo_renderer=opengl` uses your graphics card, and GLQuake with
-`voodoo_renderer=software` doesn't.
+`renderer=opengl` uses your graphics card, and GLQuake with
+`renderer=software` doesn't.
 
 The 2D picture, which is DOS's text and graphics modes, VESA modes,
 DirectDraw and the Windows desktop, is drawn by the CPU into the emulated
@@ -351,13 +350,16 @@ The renderer is what draws the emulated card's 3D on your computer: your
 CPU, or your graphics card through OpenGL. The game can't tell which, as
 [above](#what-the-game-sees-and-what-your-computer-does) explains. Beside
 `machine`, it is the setting to change when a game runs slowly or you want
-a sharper picture. Which setting chooses it depends on the card:
+a sharper picture. `renderer` chooses it for every card that has the
+choice: `auto`, the default, draws each card its own way (the first row of
+the comparison below), `opengl` draws them all with your graphics card,
+and `software` all on the CPU. What each card can use:
 
 | Card | What can draw its 3D | Setting |
 |---|---|---|
-| Voodoo Graphics, Voodoo2 (`voodoo=true`) | CPU or graphics card | `voodoo_renderer` |
-| Voodoo3, Banshee (`machine=svga_voodoo3`, `svga_banshee`) | CPU or graphics card, with the built-in Windows' blits, fills and window updates in its memory, and its 2D engine's fills and copies on the 3D's picture | `voodoo_renderer`, the same setting as the add-on cards' |
-| ToadForce (`machine=svga_toadforce`) | CPU or graphics card, with its fills and copies | `toadforce_renderer` |
+| Voodoo Graphics, Voodoo2 (`voodoo=true`) | CPU or graphics card | `renderer` |
+| Voodoo3, Banshee (`machine=svga_voodoo3`, `svga_banshee`) | CPU or graphics card, with the built-in Windows' blits, fills and window updates in its memory, and its 2D engine's fills and copies on the 3D's picture | `renderer` |
+| ToadForce (`machine=svga_toadforce`) | CPU or graphics card, with its fills and copies | `renderer` |
 | S3 ViRGE, Vérité, ATI 3D RAGE, PowerVR | CPU only | None |
 | `svga` and the other 2D adapters | No 3D; the CPU draws the 2D picture | None |
 
@@ -365,7 +367,7 @@ How the two renderers compare:
 
 | | CPU (`software`) | Graphics card (`opengl`) |
 |---|---|---|
-| Default for | The 3dfx cards (`voodoo_renderer=software`) | The ToadForce (`toadforce_renderer=auto` uses OpenGL where the window has it) |
+| Default for (`auto`) | The 3dfx cards | The ToadForce, where the window has OpenGL |
 | Resolution | The card's own, such as 640x480 | 3dfx: `voodoo_scale` times the card's resolution, 2x by default, up to 4x. ToadForce: the resolution the game sets |
 | What it adds | Nothing: the card's picture as it was | 3dfx: antialiasing (`voodoo_msaa`), sharper textures at an angle (`voodoo_anisotropy`) and smooth colour without the card's dither pattern (`voodoo_dither=false`) |
 | Exactness | Pixel for pixel as the card drew | Within a step or two of a colour channel. What a game reads back from the card differs in small ways, unless `voodoo_readback=exact` |
@@ -412,16 +414,16 @@ help.
 
 The ToadForce's games draw more than the 3dfx cards' do, and the CPU is too
 slow for some of them at their usual resolutions: with
-`toadforce_renderer=software`, choose a lower resolution in the game. Keep
+`renderer=software`, choose a lower resolution in the game. Keep
 `software` for a game whose picture looks wrong with OpenGL, and report the
 game.
 
 A run with `--deterministic` always draws on the CPU, whatever the settings,
 so that its pictures are the same on every computer. The libretro core draws
-a Banshee or Voodoo3 on the CPU whatever `voodoo_renderer` says. It draws a
+a Banshee or Voodoo3 on the CPU whatever `renderer` says. It draws a
 Voodoo Graphics or Voodoo2 with the frontend's OpenGL when
-`voodoo_renderer=opengl` and the frontend has OpenGL 3, and on the CPU
-otherwise ([its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
+`renderer=opengl` and the frontend has OpenGL 3, and on the CPU otherwise
+([its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
 
 ### What each card can draw
 
@@ -476,7 +478,7 @@ What sets the two Windows-era cards apart, for a game that runs on both:
 | Transform and lighting | On the CPU, as 3dfx's driver did | On the card: Direct3D 7's T&L HAL and Direct3D 8's hardware vertex processing |
 | Glide | Yes | No |
 | Windows image | 3dfx's driver | No driver |
-| Sharper than the game's resolution | Yes, with `voodoo_renderer=opengl` and `voodoo_scale` | No |
+| Sharper than the game's resolution | Yes, with `renderer=opengl` and `voodoo_scale` | No |
 
 Neither card, nor any other `machine`, has pixel shaders. A game that needs
 them doesn't draw its 3D in Rust-DOS.
@@ -566,14 +568,17 @@ with them. The settings window has them on its **Display** page.
 These go in `[emulator]`. The first three and `voodoo_gamma` set up the
 add-on card (`voodoo=true`) and do nothing on a Voodoo3 or Banshee, which
 always has 16 MB. The others work on every 3dfx card. The OpenGL ones matter
-only with `voodoo_renderer=opengl`.
+only with `renderer=opengl`, which picks what draws the card ([choosing a
+renderer](#choosing-a-renderer)). `opengl` needs OpenGL 3.2 from the
+graphics driver; without it (a generic or old driver, the browser, SDL's
+dummy video driver) the software picture shows at the card's resolution, and
+a `[DISPLAY]` line at startup says why.
 
 | Setting | Values (default first) | What it does |
 |---|---|---|
 | `voodoo` | `false`, `true` | Adds a Voodoo Graphics or Voodoo2 beside the display adapter, for games that draw with Glide ([3dfx Voodoo Graphics](#3dfx-voodoo-graphics)). With `machine=svga_voodoo3` or `svga_banshee` there is no room for it, and the machine has the Voodoo3 or Banshee alone |
 | `voodoo_model` | `voodoo1`, `voodoo2` | The add-on card: the Voodoo Graphics, or the Voodoo2 ([3dfx Voodoo2](#3dfx-voodoo2)) |
 | `voodoo_memory` | `12`, `8`, `4` | The add-on card's memory in MB. `12` is 4 MB of frame buffer and two texture units with 4 MB each, as DOSBox-X's card has. `8` is a Voodoo2 board, 4 MB and two texture units with 2 MB each; it picks `voodoo2` when `voodoo_model` is unset. `4` is a retail Voodoo Graphics, 2 MB and one texture unit with 2 MB; a Voodoo2 takes it as `8` |
-| `voodoo_renderer` | `software`, `opengl` | What draws the card's picture on your computer: Rust-DOS's own rasterizer on the CPU, or your graphics card through OpenGL ([choosing a renderer](#choosing-a-renderer)). `opengl` needs OpenGL 3.2 from the graphics driver; without it (a generic or old driver, the browser, SDL's dummy video driver) the software picture shows at the card's resolution, and a `[DISPLAY]` line at startup says why |
 | `voodoo_scale` | `2`, `1` to `4` | OpenGL: how many times the card's resolution it draws at |
 | `voodoo_msaa` | `off`, `2`, `4`, `8` | OpenGL: samples a pixel of multisampled antialiasing, which smooths the triangles' edges |
 | `voodoo_anisotropy` | `off`, `2`, `4`, `8`, `16` | OpenGL: anisotropic filtering, which sharpens textures seen at an angle |
@@ -585,12 +590,12 @@ only with `voodoo_renderer=opengl`.
 
 `voodoo`, `voodoo_model`, `voodoo_memory` and `voodoo_gamma` take effect at
 the DOS prompt, the others at once. The settings window's Emulator page has
-them as *3dfx Voodoo Graphics*, *3dfx card* (the chip and the memory
-together), *3dfx drawn by* and the *3dfx* settings after it. The window
-shows the ones the machine's 3dfx card uses: with the add-on card, all of
-them; with a Voodoo3 or Banshee, *3dfx drawn by*, texture sampling and the
-OpenGL settings, but not the add-on card's switch, memory or gamma. The
-OpenGL settings show while *3dfx drawn by* is OpenGL.
+them as *3D drawn by* (`renderer`), *3dfx Voodoo Graphics*, *3dfx card*
+(the chip and the memory together) and the *3dfx* settings after it. The
+window shows the ones the machine's 3dfx card uses: with the add-on card,
+all of them; with a Voodoo3 or Banshee, *3D drawn by*, texture sampling and
+the OpenGL settings, but not the add-on card's switch, memory or gamma. The
+OpenGL settings show while *3D drawn by* is OpenGL.
 
 With anisotropic filtering on, `voodoo_texture_sampling=unfiltered` also
 blends between mip levels and lets the anisotropic filter reduce shimmer,
@@ -1039,7 +1044,7 @@ draw wrongly with 1.07.00 and need the earlier 4.11.01.1151, from 3dfx's
 runs on 6.1 too; [docs/compatibility.md](docs/compatibility.md) names
 them.
 
-With `voodoo_renderer=opengl` the window's OpenGL draws the card's 3D at
+With `renderer=opengl` the window's OpenGL draws the card's 3D at
 `voodoo_scale` times its resolution, as for the Voodoo Graphics (see [the
 3dfx OpenGL renderer](#the-3dfx-opengl-renderer)), and puts the picture
 together as the card's video processor does: the desktop, the overlay (the
@@ -1054,7 +1059,7 @@ Voodoo2; with `voodoo_readback=exact` the software rasterizer keeps the
 memory as well, so programs read back what they would on the card.
 Screenshots and recordings show the software picture, which reads everything
 back. The libretro core draws a Banshee or Voodoo3 in software whatever
-`voodoo_renderer` says.
+`renderer` says.
 
 The card is a port of 86Box's Banshee and Voodoo3 emulation
 (`vid_voodoo_banshee.c` and its 2D engine, by Sarah Walker, GPLv2, and
@@ -1063,7 +1068,7 @@ against 3dfx's Voodoo3 specification.
 
 ### The 3dfx OpenGL renderer
 
-With `voodoo_renderer=opengl` the window shows the card's picture drawn
+With `renderer=opengl` the window shows the card's picture drawn
 again with OpenGL, at `voodoo_scale` times the card's resolution: the same
 triangles through the same pixel pipeline (textures, fog, blending, the
 depth buffer and the gamma table), with sharper edges and textures, and
@@ -1267,20 +1272,22 @@ III unless `cpu` says otherwise (see `cpu` in
 | Setting | Values | What it does |
 |---|---|---|
 | `toadforce_memory` | 32, 64 (default), 128 | The megabytes of video memory the card has |
-| `toadforce_renderer` | `auto` (default), `opengl`, `software` | What draws the card's 3D: your graphics card through OpenGL, or Rust-DOS on the processor |
 | `toadforce_gamma` | `off` (default), 0.1 to 2 | A gamma the card's 16- and 32-bit pictures are shown with, after the game's own |
 
-A change of `toadforce_memory` takes effect at the DOS prompt, and one
-of `toadforce_renderer` or `toadforce_gamma` at once. The card's
-registers and commands are specified in
+What draws the card's 3D, your graphics card through OpenGL or Rust-DOS
+on the processor, is `renderer` ([choosing a
+renderer](#choosing-a-renderer)): `auto`, the default, draws it with
+OpenGL where the window has it. A change of `toadforce_memory` takes
+effect at the DOS prompt, and one of `renderer` or `toadforce_gamma` at
+once. The card's registers and commands are specified in
 [docs/toadforce-spec.md](docs/toadforce-spec.md).
 
 If Rust-DOS crashes while it sets up the OpenGL renderer, which happens
 inside your graphics driver, the next start with `auto` on the same
 driver and Rust-DOS version uses the software renderer and says so in
-the log. Updating the driver, or starting with
-`toadforce_renderer=opengl`, tries OpenGL again. The mark it keeps for
-that is the file `toadforce-opengl-setup` next to `rust-dos.log`.
+the log. Updating the driver, or starting with `renderer=opengl`, tries
+OpenGL again. The mark it keeps for that is the file
+`toadforce-opengl-setup` next to `rust-dos.log`.
 
 The card's 16- and 32-bit modes go through its gamma ramp, which games
 set for their brightness controls and fades through
@@ -1889,10 +1896,27 @@ order.
   the window shows the picture: see [the window and the
   picture](#the-window-and-the-picture). `crt_curvature` and `crt_glow`
   shape the `crt` look ([CRT shaders](#crt-shaders)).
-* `voodoo`, `voodoo_model`, `voodoo_memory`, `voodoo_renderer`,
-  `voodoo_scale`, `voodoo_msaa`, `voodoo_anisotropy`, `voodoo_dither`,
-  `voodoo_readback`, `voodoo_scale_shader`, `voodoo_texture_sampling` and
-  `voodoo_gamma` set up the 3dfx cards: see [3dfx settings](#3dfx-settings).
+* `renderer` is what draws the 3D cards' pictures on your computer, the
+  3dfx cards' and the ToadForce's: `auto` (the default: each card's own
+  default, the 3dfx cards on the CPU and the ToadForce with OpenGL where
+  the window has it), `opengl` (your graphics card draws both) or
+  `software` (the CPU draws both). See [choosing a
+  renderer](#choosing-a-renderer). It changes at once. The old settings
+  `voodoo_renderer` and `toadforce_renderer`, one for each card, are
+  deprecated and still read. One of them alone gives its value. The two
+  together, as the settings window of earlier versions wrote them, give
+  `software` when both say `software`, `opengl` when `voodoo_renderer` is
+  `opengl`, and `auto` otherwise, but `voodoo_renderer=opengl` with
+  `toadforce_renderer=software` in one file stops rust-dos with an error
+  that names the two lines. A `renderer` line after them goes over them,
+  and a game profile's renderer, in either form, goes over the
+  configuration's. The log warns that the old settings will stop working
+  in a future version, and the settings window writes `renderer` in their
+  place.
+* `voodoo`, `voodoo_model`, `voodoo_memory`, `voodoo_scale`,
+  `voodoo_msaa`, `voodoo_anisotropy`, `voodoo_dither`, `voodoo_readback`,
+  `voodoo_scale_shader`, `voodoo_texture_sampling` and `voodoo_gamma` set
+  up the 3dfx cards: see [3dfx settings](#3dfx-settings).
 * `powervr=pcx1` or `pcx2` adds a PowerVR 3D card beside the display
   adapter, for games with a PowerVR version: the PCX1 (VideoLogic
   Apocalypse 3D) or the PCX2 (Matrox m3D, VideoLogic Apocalypse 3Dx; see
@@ -1900,9 +1924,9 @@ order.
   It takes effect at the DOS prompt. `powervr_filter` is how it filters
   textures: `auto` (the default, as the game sets the card), `point` or
   `bilinear`; it changes at once.
-* `toadforce_memory`, `toadforce_renderer` and `toadforce_gamma` set up the
-  [ToadForce](#toadforce), and `verite_risc`, `verite_mhz`, `verite_rom` and
-  `verite_irq` the [Rendition Vérité](#rendition-vérité).
+* `toadforce_memory` and `toadforce_gamma` set up the
+  [ToadForce](#toadforce), and `verite_risc`, `verite_mhz`, `verite_rom`
+  and `verite_irq` the [Rendition Vérité](#rendition-vérité).
 
 #### The built-in Windows
 
@@ -4756,7 +4780,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `-s, --scale N` | The window scale factor, 1 to 16 |
 | `--vrr` | Show frames at the machine's refresh rate, for a VRR display (`vrr`) |
 | `--fps-cap FPS` | The most frames a second a program may show, `auto`, `off` or 10 to 240 (`fps_cap`, see [Frame rate cap](#frame-rate-cap)) |
-| `--hidden` | Keep the window hidden; the picture is still drawn with OpenGL, `voodoo_renderer=opengl` included, for runs driven through the debug server (on a host without OpenGL 3, SDL's renderer and the software rasterizer draw it, as with a visible window) |
+| `--hidden` | Keep the window hidden; the picture is still drawn with OpenGL, `renderer=opengl` included, for runs driven through the debug server (on a host without OpenGL 3, SDL's renderer and the software rasterizer draw it, as with a visible window) |
 | `--audio-output OUTPUT` | What plays the sound: `auto`, `sdl` or `null` (`audio_output` in [`[mixer]`](#mixer)) |
 | `--mute` | Start with the sound off, as Ctrl+F8 does: the sound device plays silence, and the debug server's stream and recordings keep the sound |
 | `--vr` | Show the picture in a 3D scene in a VR headset ([`[vr]`](#vr) `mode=headset`) |
