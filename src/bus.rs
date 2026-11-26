@@ -451,6 +451,11 @@ pub struct Bus {
     /// How long the host's frames took, and the underruns with what went
     /// before them. The host's, and left out of save states.
     pub host_frames: crate::hostframes::HostFrames,
+    /// The host's time in the built-in Windows' functions since start
+    /// (`exec::win32_trap`), which `cycles=max` tells from the time the
+    /// instructions took (`Pacer::end_cpu_frame`). The host's, and left
+    /// out of save states.
+    pub service_time: std::time::Duration,
     /// Writes logged so far to each port nothing emulates: a program
     /// polling for hardware that isn't there would flood the log.
     unhandled_writes: Vec<u8>,

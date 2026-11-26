@@ -1679,7 +1679,9 @@ fn win32_trap(cpu: &mut Cpu, phys_ip: usize, id: u16) -> bool {
     // long the drive's noise goes on, so it starts from none and is
     // dropped when the call is done.
     cpu.bus.disk_io.clear();
+    let started = web_time::Instant::now();
     crate::win32::service(cpu, id);
+    cpu.bus.service_time += started.elapsed();
     flush_stale_tlb(cpu);
     if observed {
         crate::idle::after_service(cpu);

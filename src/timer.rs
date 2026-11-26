@@ -800,6 +800,8 @@ pub struct Pacer {
     idle: u64,
     handed_over: u64,
     icount: u64,
+    /// `Bus::service_time` as the last frame left it.
+    service_time: Duration,
     /// The counts of the recent frames, those of them the processor
     /// halted, and of those the ones handed over, each frame's weighing
     /// `BUSY_DECAY` times the next one's.
@@ -853,6 +855,7 @@ impl Pacer {
             idle: 0,
             handed_over: 0,
             icount: 0,
+            service_time: Duration::ZERO,
             recent_ran: 0.0,
             recent_idle: 0.0,
             recent_handed: 0.0,
@@ -1014,6 +1017,26 @@ impl Pacer {
         };
         let share = (1.0 - halted / BLITS_UNTIL_HALTED).clamp(0.0, 1.0);
         let executed = executed + (offloaded as f64 * share) as u64;
+        // The host's time in the built-in Windows' functions is in `exec`
+        // too, and goes the same way at `max`: a program that keeps the
+        // processor busy calls them more often the faster it runs, so it
+        // counts as the instructions' time, but one that waits between its
+        // frames calls them as often at any speed, so it is the frame's
+        // own work (`overhead`), in the same proportion as the blits.
+        // Charged to the few instructions a waiting program runs, the
+        // decoding and the blits to the 3dfx card of Omikron's movies on a
+        // Voodoo2 machine took the speed to 3,300 cycles/ms, at which the
+        // game's copy of each picture took 12 ms of the 33 between them,
+        // and Escape freed the surface in the middle of one (#1052).
+        let service = cpu.bus.service_time.saturating_sub(self.service_time);
+        self.service_time = cpu.bus.service_time;
+        let (exec, overhead) = match self.speed {
+            CpuSpeed::Max => {
+                let own = service.min(exec).mul_f64(1.0 - share);
+                (exec - own, overhead + own)
+            }
+            _ => (exec, overhead),
+        };
         let next = self.end_frame(&cpu.bus, cpu.pm_latched, executed, exec, overhead);
         self.hint_real_most(cpu, next);
         cpu.os_idles = self.auto.idles();
@@ -2534,6 +2557,54 @@ mod tests {
         assert_eq!(overhead_ns, 800_000.0);
         // And starts over.
         assert_eq!(sample.add(50_000, ms(1), Duration::ZERO), None);
+    }
+
+    /// The speed `max` settles at from 20,000 after 400 frames that each
+    /// ran `executed` instructions and halted `halted` counts, in `exec`
+    /// of the host's time, `service` of it in the built-in Windows'
+    /// functions, with 1 ms of other work.
+    fn max_after(executed: u64, halted: u64, exec: Duration, service: Duration) -> u32 {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        cpu.pm_latched = true;
+        let mut pacer = Pacer::new(CpuSpeed::Max, None, Instant::now());
+        cpu.bus.clock.set_cycles_per_ms(20_000);
+        for _ in 0..400 {
+            cpu.bus.clock.icount += executed + halted;
+            cpu.bus.clock.idle += halted;
+            cpu.bus.service_time += service;
+            let overhead = Duration::from_millis(1);
+            if let Some(next) = pacer.end_cpu_frame(&mut cpu, executed, exec, overhead) {
+                cpu.bus.clock.set_cycles_per_ms(next);
+            }
+        }
+        cpu.bus.clock.cycles_per_ms()
+    }
+
+    /// A program that waits for most of each frame and spends the time it
+    /// runs in services (Omikron's movies: the decoder and the blits to
+    /// the 3dfx card) calls them as often at any speed. Their time is the
+    /// frame's own work, not its instructions': `max` goes up, where
+    /// counted per instruction it took the speed down.
+    #[test]
+    fn max_counts_a_waiting_programs_services_as_the_frames_work() {
+        let us = Duration::from_micros;
+        let waiting = max_after(15_000, 300_000, us(5_600), us(5_500));
+        assert!(waiting > 20_000, "{waiting}");
+        let unseen = max_after(15_000, 300_000, us(5_600), Duration::ZERO);
+        assert!(unseen < 20_000, "{unseen}");
+    }
+
+    /// A program that keeps the processor busy calls its services more
+    /// often the faster it runs: their time counts as its instructions',
+    /// and frames that overrun take the speed down.
+    #[test]
+    fn max_counts_a_busy_programs_services_as_its_instructions() {
+        let ms = Duration::from_millis;
+        // 333,340 instructions a frame at 20,000 in 33 ms, 30 of them in
+        // services.
+        let busy = 20_000 * 16_667 / 1000;
+        assert!(max_after(busy, 0, ms(33), ms(30)) < 20_000);
+        assert!(max_after(busy, 0, ms(3), ms(2)) > 20_000);
     }
 
     #[test]
