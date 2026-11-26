@@ -3,7 +3,9 @@
 //! registers or command FIFO packets), and it works out the start values
 //! and gradients the triangle registers take, culls back faces, and draws
 //! independent triangles, strips and fans. From MAME's `begin_triangle`,
-//! `draw_triangle` and `setup_and_draw_triangle` (voodoo_2.cpp).
+//! `draw_triangle` and `setup_and_draw_triangle` (voodoo_2.cpp), with
+//! the culling of 86Box's `voodoo_triangle_setup` and vertex slots
+//! (vid_voodoo_setup.c and vid_voodoo_reg.c).
 
 use super::regs::*;
 use super::Voodoo;
@@ -102,13 +104,34 @@ impl Voodoo {
     pub(crate) fn start_vertices(&mut self, v: Vertex) {
         self.svert = [v; 3];
         self.sverts = 1;
+        self.sslots_swapped = false;
     }
 
     /// `v` after the others: in a strip it and the last two make the
     /// triangle, in a fan it, the last and the first. From the third on,
     /// each draws.
+    ///
+    /// The engine keeps three slots, which the first three vertices fill
+    /// in order. A later one takes the slot of the oldest in a strip, and
+    /// of the second oldest in a fan (the oldest is the fan's centre). The
+    /// triangle winds the way the slots hold its vertices. `svert` keeps
+    /// the vertices oldest first, and `sslots_swapped` says whether the
+    /// slots hold them with two swapped: a strip's new vertex rotates the
+    /// slots against `svert`, which keeps that as it was, and a fan's
+    /// swaps two of them, which turns it round.
+    /// A strip that goes on after a fan (Prince of Persia 3D through
+    /// 3dfx's Voodoo3 Direct3D driver) is culled by that winding.
+    ///
+    /// The slots are 86Box's model, whose author isn't sure the chips
+    /// pick the slot this way, but found it right for games that switch
+    /// between strips and fans in the middle of a run (Black & White,
+    /// Viper Racing). No 3dfx document describes the slots.
     pub(crate) fn add_vertex(&mut self, v: Vertex) {
-        if self.reg[S_SETUP_MODE] & FAN == 0 {
+        let fan = self.reg[S_SETUP_MODE] & FAN != 0;
+        if self.sverts >= 3 && fan {
+            self.sslots_swapped = !self.sslots_swapped;
+        }
+        if !fan {
             self.svert[0] = self.svert[1];
         }
         self.svert[1] = self.svert[2];
@@ -119,6 +142,14 @@ impl Voodoo {
         }
     }
 
+    /// For a save state from before the slots' order was kept: the order
+    /// a strip or a fan that began as one leaves them in, which its later
+    /// vertices need to be culled right. One that switched between the
+    /// two may have them the other way.
+    pub(crate) fn guess_slots_swapped(&self) -> bool {
+        self.reg[S_SETUP_MODE] & FAN != 0 && self.sverts >= 4 && (self.sverts - 3) & 1 != 0
+    }
+
     /// The triangle of the three vertices: culled if it faces the way
     /// sSetupMode culls, otherwise its parameters into the triangle
     /// registers and drawn.
@@ -127,12 +158,18 @@ impl Voodoo {
         let mode = self.reg[S_SETUP_MODE];
         let divisor = (v0.x - v1.x) * (v0.y - v2.y) - (v0.x - v2.x) * (v0.y - v1.y);
         if mode & CULL != 0 {
-            let mut sign = (mode & CULL_NEGATIVE != 0) as u32;
-            // A strip's triangles turn the other way every other one.
-            if mode & FAN == 0 && mode & NO_PING_PONG == 0 {
-                sign ^= (self.sverts - 3) & 1;
+            let mut sign = mode & CULL_NEGATIVE != 0;
+            // The sign culled turns round with every triangle since the
+            // strip or fan began (ping-pong): a strip's triangles wind the
+            // other way every other one, and so do a fan's in the slots.
+            if mode & NO_PING_PONG == 0 {
+                sign ^= (self.sverts - 3) & 1 != 0;
             }
-            if (divisor < 0.0) as u32 == sign {
+            // The winding is the slots' (`add_vertex`): with two of the
+            // vertices swapped there, the area turns negative. A triangle
+            // of no area stays at none, as in the slots, either way.
+            let area = if self.sslots_swapped { -divisor } else { divisor };
+            if (area < 0.0) == sign {
                 return;
             }
         }
@@ -246,6 +283,140 @@ mod tests {
         v.reg[S_SETUP_MODE] = CULL | NO_PING_PONG;
         v.add_vertex(vertex(0.0, 20.0, 0.0));
         assert_eq!(v.reg[FBI_TRIANGLES_OUT], 2);
+    }
+
+    #[test]
+    fn culled_fans_draw_every_triangle_facing_the_viewer() {
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+        // Cull the triangles of positive area. A convex polygon's fan,
+        // each triangle of negative area: all of them drawn.
+        v.reg[S_SETUP_MODE] = FAN | CULL;
+        v.start_vertices(vertex(0.0, 0.0, 0.0));
+        for (x, y) in CONVEX_FAN {
+            v.add_vertex(vertex(x, y, 0.0));
+        }
+        assert_eq!(v.reg[FBI_TRIANGLES_OUT], 4);
+        // The same fan the other way round: none.
+        v.start_vertices(vertex(0.0, 0.0, 0.0));
+        for (x, y) in CONVEX_FAN.into_iter().rev() {
+            v.add_vertex(vertex(x, y, 0.0));
+        }
+        assert_eq!(v.reg[FBI_TRIANGLES_OUT], 4);
+    }
+
+    /// The vertices after the centre, 0/0, of a fan of four triangles
+    /// over a convex polygon, each of negative area.
+    const CONVEX_FAN: [(f32, f32); 5] = [
+        (0.0, 10.0),
+        (10.0, 20.0),
+        (20.0, 20.0),
+        (30.0, 10.0),
+        (30.0, 0.0),
+    ];
+
+    #[test]
+    fn fans_without_ping_pong_cull_every_other_triangle() {
+        // The slots wind a fan's triangles the other way every other one,
+        // and only the ping-pong turns the sign culled round to match: the
+        // same convex fan as above, its second and fourth culled.
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+        v.reg[S_SETUP_MODE] = FAN | CULL | NO_PING_PONG;
+        v.start_vertices(vertex(0.0, 0.0, 0.0));
+        let mut drawn = vec![];
+        for (x, y) in CONVEX_FAN {
+            v.add_vertex(vertex(x, y, 0.0));
+            drawn.push(v.reg[FBI_TRIANGLES_OUT]);
+        }
+        assert_eq!(drawn, [0, 1, 1, 2, 2]);
+    }
+
+    #[test]
+    fn an_old_state_guesses_the_slots_of_a_fan() {
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+        v.reg[S_SETUP_MODE] = FAN | CULL;
+        v.start_vertices(vertex(0.0, 0.0, 0.0));
+        for (x, y) in CONVEX_FAN {
+            v.add_vertex(vertex(x, y, 0.0));
+            assert_eq!(v.guess_slots_swapped(), v.sslots_swapped);
+        }
+        v.reg[S_SETUP_MODE] = CULL;
+        v.start_vertices(vertex(0.0, 0.0, 0.0));
+        for (x, y) in [(0.0, 10.0), (10.0, 0.0), (10.0, 10.0)] {
+            v.add_vertex(vertex(x, y, 0.0));
+            assert_eq!(v.guess_slots_swapped(), v.sslots_swapped);
+        }
+    }
+
+    #[test]
+    fn a_state_keeps_the_slots_order() {
+        use crate::savestate::{Reader, State, Writer};
+        // A fan of two triangles, which leaves two slots swapped, saved
+        // once the strip after it is set up: the vertex count and the
+        // setup mode alone would give the slots unswapped.
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+        v.reg[S_SETUP_MODE] = FAN | CULL;
+        v.start_vertices(vertex(0.0, 0.0, 0.0));
+        for (x, y) in &CONVEX_FAN[..3] {
+            v.add_vertex(vertex(*x, *y, 0.0));
+        }
+        v.reg[S_SETUP_MODE] = CULL;
+        assert!(v.sslots_swapped && !v.guess_slots_swapped());
+        let mut w = Writer::new();
+        v.save(&mut w);
+        let mut loaded = Voodoo::with_workers(Board::Voodoo2, 0);
+        loaded.load(&mut Reader::new(&w.buf)).unwrap();
+        assert!(loaded.sslots_swapped);
+        // A state from before the order was kept ends without it, and
+        // guesses it from the mode: in the fan, swapped.
+        v.reg[S_SETUP_MODE] = FAN | CULL;
+        let mut w = Writer::new();
+        v.save(&mut w);
+        let mut slots = Writer::new();
+        v.sslots_swapped.save(&mut slots);
+        let old = &w.buf[..w.buf.len() - slots.buf.len()];
+        let mut loaded = Voodoo::with_workers(Board::Voodoo2, 0);
+        loaded.load(&mut Reader::new(old)).unwrap();
+        assert!(loaded.sslots_swapped);
+    }
+
+    #[test]
+    fn a_triangle_of_no_area_is_culled_as_in_the_slots() {
+        // After a fan of two triangles the slots hold two vertices
+        // swapped. A strip's triangle along a line then has no area in
+        // either order, which is not negative: culled with the positive
+        // areas.
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+        v.reg[S_SETUP_MODE] = FAN | CULL;
+        v.start_vertices(vertex(0.0, 0.0, 0.0));
+        for (x, y) in &CONVEX_FAN[..3] {
+            v.add_vertex(vertex(*x, *y, 0.0));
+        }
+        assert_eq!(v.reg[FBI_TRIANGLES_OUT], 2);
+        v.reg[S_SETUP_MODE] = CULL;
+        v.add_vertex(vertex(30.0, 20.0, 0.0));
+        assert_eq!(v.reg[FBI_TRIANGLES_OUT], 2);
+    }
+
+    #[test]
+    fn a_strip_after_a_fan_is_culled_by_the_slots_winding() {
+        // The floor of Prince of Persia 3D's first cell, as 3dfx's Voodoo3
+        // Direct3D driver sends it: a fan of two triangles, then one
+        // vertex more as a strip, all facing the viewer (negative area
+        // in the slots' order) and positive areas culled.
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+        v.reg[S_SETUP_MODE] = FAN | CULL;
+        v.start_vertices(vertex(0.5, 480.5, 0.0));
+        v.add_vertex(vertex(315.0, 480.5, 0.0));
+        v.add_vertex(vertex(315.2, 477.9, 0.0));
+        v.add_vertex(vertex(0.5, 430.9, 0.0));
+        assert_eq!(v.reg[FBI_TRIANGLES_OUT], 2);
+        // The new vertex takes the slot of the fan's centre: 125/354,
+        // 0.5/431, 315/478, which faces the viewer, and is drawn. Oldest
+        // first, the order `svert` keeps, it faces away.
+        v.reg[S_SETUP_MODE] = CULL;
+        v.add_vertex(vertex(125.1, 353.6, 0.0));
+        assert_eq!(v.reg[FBI_TRIANGLES_OUT], 3);
+        assert_eq!((v.fbi.ax, v.fbi.bx, v.fbi.cx), (5043, 8, 2001));
     }
 
     #[test]

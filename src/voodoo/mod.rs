@@ -758,11 +758,15 @@ pub struct Voodoo {
     /// Lines for the log, which the bus writes out.
     pub log: Vec<String>,
     /// A Voodoo2's command FIFO, the setup engine's vertices (the last
-    /// three, and how many since the strip or fan began) and its
-    /// blitter's CPU-to-screen copy.
+    /// three, oldest first, and how many since the strip or fan began)
+    /// and its blitter's CPU-to-screen copy.
     pub(crate) cmdfifo: cmdfifo::CmdFifo,
     pub(crate) svert: [tsu::Vertex; 3],
     pub(crate) sverts: u32,
+    /// Whether the setup engine's three vertex slots hold `svert` with
+    /// two of them swapped, which turns the triangle's winding around
+    /// (`Voodoo::add_vertex`).
+    pub(crate) sslots_swapped: bool,
     pub(crate) blt: blit::Blit,
     /// `blt_queue_dest`'s answer for the copy under way, until a register
     /// write or a new layout drops it (`blt_queue_stale`), and what it was
@@ -864,6 +868,7 @@ impl Voodoo {
             cmdfifo: Default::default(),
             svert: Default::default(),
             sverts: 0,
+            sslots_swapped: false,
             blt: Default::default(),
             blt_queue: Cell::new(None),
             banshee: board.banshee().map(|kind| Box::new(banshee::Banshee::new(kind))),
@@ -938,6 +943,7 @@ impl Voodoo {
         self.cmdfifo = Default::default();
         self.svert = Default::default();
         self.sverts = 0;
+        self.sslots_swapped = false;
         self.blt = Default::default();
         self.fbi.yorigin = 0;
         self.recompute_video_memory();
@@ -2725,6 +2731,8 @@ impl State for Voodoo {
                 self.pll_high.save(w);
             }
         }
+        // Added later, at the end: the order of the setup engine's slots.
+        self.sslots_swapped.save(w);
     }
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
@@ -2799,6 +2807,13 @@ impl State for Voodoo {
         if self.banshee.is_none() && !r.is_empty() {
             self.pll.load(r)?;
             self.pll_high.load(r)?;
+        }
+        // A state from before the slots' order was kept has it guessed
+        // from the setup mode and the vertex count: right for a strip or a
+        // fan that began as one (`Voodoo::guess_slots_swapped`).
+        self.sslots_swapped = self.guess_slots_swapped();
+        if !r.is_empty() {
+            self.sslots_swapped.load(r)?;
         }
         self.after_load();
         Ok(())
