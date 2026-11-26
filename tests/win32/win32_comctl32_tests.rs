@@ -1960,6 +1960,53 @@ fn a_popup_that_saves_bits_gives_them_back_as_it_hides() {
     }
 }
 
+/// A program's first window that saves bits (a message box of a program
+/// with no window of its own) shows over the desktop's background,
+/// which Windows 98 painted as it started, and gives it back as it
+/// hides. Sub Culture's 1.16 patch shows its message boxes so.
+#[test]
+fn the_first_popup_that_saves_bits_gives_back_the_desktop() {
+    use Arg::*;
+    const S_DIALOG: u32 = 0x280;
+    const WS_POPUP: u32 = 0x8000_0000;
+    const SW_HIDE: u32 = 0;
+    let calls = [
+        call(
+            "CreateWindowExA",
+            &[
+                I(0),
+                At(S_DIALOG),
+                I(0),
+                I(WS_POPUP | WS_VISIBLE),
+                I(20),
+                I(20),
+                I(100),
+                I(80),
+                I(0),
+                I(0),
+                I(0),
+                I(0),
+            ],
+        ),
+        call("UpdateWindow", &[Res(0)]),
+        call("GetDC", &[I(0)]),
+        call("GetPixel", &[Res(2), I(300), I(300)]),
+        call("GetPixel", &[Res(2), I(50), I(50)]),
+        call("ShowWindow", &[Res(0), I(SW_HIDE)]),
+        call("GetPixel", &[Res(2), I(50), I(50)]),
+    ];
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, S_DIALOG, b"#32770\0");
+    let (cpu, at) = run("save_bits_first", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[0], 0, "the popup is made");
+    assert_ne!(r[3], 0, "the desktop isn't black");
+    assert_ne!(r[4], r[3], "the popup covers it");
+    assert_ne!(r[5], 0, "the popup was visible");
+    assert_eq!(r[6], r[3], "the desktop shows again where it was");
+}
+
 /// A popup of a class with CS_SAVEBITS gives back only what didn't
 /// change under it while it showed: the window under it paints the part
 /// it had yet to paint as the popup showed, and the part invalidated

@@ -628,15 +628,19 @@ fn a_full_screen_mode_flips_in_the_cards_memory_and_the_desktop_comes_back() {
     assert_eq!(results(&cpu, data, 11)[9..], [0; 2]);
     // The desktop's mode again, from the start of memory, repainted.
     // The window, which the mode changes made cover the screen, as
-    // DirectDraw does on Windows 98, is over all of it: its corner with
-    // its text as before, and its background where the desktop's was.
+    // DirectDraw does on Windows 98, is over all of it. The program
+    // takes no messages, so the window never paints: before, it showed
+    // the background the desktop painted as it came up, and now the
+    // background shows nowhere.
     assert_eq!(card_mode(&cpu), (640, 480, 1, 1280));
     assert_eq!(card_reg(&cpu, VID_DESKTOP_START_ADDR), 0);
     let after = desktop(&cpu);
     let at = |x: usize, y: usize| y * 640 + x;
-    assert!(after[..at(320, 0)] == before[..at(320, 0)], "its top");
-    assert!(before[at(639, 479)] != before[at(319, 239)]);
-    assert!(after[at(639, 479)] == before[at(319, 239)], "covered");
+    let background = before[at(639, 479)];
+    assert!(before[at(0, 0)] == background, "the window showed it");
+    for (x, y) in [(0, 0), (319, 239), (639, 479)] {
+        assert!(after[at(x, y)] != background, "covered at {x},{y}");
+    }
 }
 
 /// Let the next retrace come, as the frontend does before it draws.
@@ -5423,12 +5427,17 @@ fn a_full_screen_mode_flips_in_a_toadforces_memory_and_the_desktop_comes_back() 
     run_until(&mut cpu, data, 3);
     assert_eq!(results(&cpu, data, 11)[9..], [0; 2]);
     // The desktop's mode again, from the start of memory, repainted,
-    // the window over all of it (as on the other adapters).
+    // the window over all of it (as on the other adapters): the
+    // background it showed before, as it never paints, shows nowhere.
     assert_eq!(toad_mode(&cpu), (1, 640, 480, 3, 2560, 60));
     assert_eq!(toad(&cpu, toad_regs::MODE_START), 0);
     let after = &cpu.bus.vbe.vram[..640 * 480 * 4];
-    let at = |x: usize, y: usize| (y * 640 + x) * 4;
-    assert!(after[..at(320, 0)] == before[..at(320, 0)], "its top");
+    let pixel = |b: &[u8], x: usize, y: usize| b[(y * 640 + x) * 4..][..4].to_vec();
+    let background = pixel(&before, 639, 479);
+    assert_eq!(pixel(&before, 0, 0), background, "the window showed it");
+    for (x, y) in [(0, 0), (319, 239), (639, 479)] {
+        assert_ne!(pixel(after, x, y), background, "covered at {x},{y}");
+    }
     assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
 }
 
