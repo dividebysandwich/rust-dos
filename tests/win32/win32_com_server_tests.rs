@@ -670,12 +670,15 @@ fn a_docfile_keeps_its_streams_and_classes() {
 /// A docfile opened twice for reading with STGM_SHARE_DENY_WRITE, as
 /// Windows Installer opens a package, and refused to an open for writing
 /// while those are open: each open lets the others do only what its
-/// share mode allows, as the file under it does.
+/// share mode allows, as the file under it does. A second writer is
+/// refused even with STGM_SHARE_DENY_NONE, since each open writes back a
+/// copy of its own.
 #[test]
 fn a_docfile_opens_again_as_its_share_modes_allow() {
     const STGM_CREATE_RW: i32 = 0x1012;
     const STGM_READ_DENY_WRITE: i32 = 0x20;
     const STGM_RW_EXCLUSIVE: i32 = 0x12;
+    const STGM_RW_DENY_NONE: i32 = 0x42;
     const STG_E_SHAREVIOLATION: u32 = 0x8003_0020;
     // 0x00: the file, 0x70: the storage made, 0x74 and 0x78: the two
     // opened, 0x7C: the one refused.
@@ -704,7 +707,16 @@ fn a_docfile_opens_again_as_its_share_modes_allow() {
         call(a, l.import(2), &args)?;
         check_eax(a, 0, 4)?;
         call_method(a, l.at(0x7C), 2, &[])?;
-        a.or(ebx, 0xE0)?;
+        // Two writers are refused even when neither denies the other:
+        // each would write back its own copy of the file.
+        let args = [l.at(0), 0, STGM_RW_DENY_NONE, 0, 0, l.at(0x7C)];
+        call(a, l.import(2), &args)?;
+        check_eax(a, 0, 5)?;
+        let args = [l.at(0), 0, STGM_RW_DENY_NONE, 0, 0, l.at(0x74)];
+        call(a, l.import(2), &args)?;
+        check_eax(a, STG_E_SHAREVIOLATION as i32, 6)?;
+        call_method(a, l.at(0x7C), 2, &[])?;
+        a.or(ebx, 0x80)?;
         exit(a, l.import(0))
     });
     for core in CORES {

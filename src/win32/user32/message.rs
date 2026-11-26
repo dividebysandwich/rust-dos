@@ -1905,7 +1905,8 @@ fn msg_wait(
     // is signaled comes before it, as in WaitForMultipleObjects: a
     // program that waits for a process it started, and only peeks at
     // its messages, sees the process end (Rage Rally's setup waiting for
-    // INSTMSIA.EXE). Waiting for all the objects, input still ends it.
+    // INSTMSIA.EXE). Waiting for all the objects, input alone still ends
+    // it here, where Windows waits for both (#2164).
     if !all && let Some(result) = thread::wait_now(cpu, &w) {
         return Some(result);
     }

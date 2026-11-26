@@ -641,13 +641,20 @@ pub fn stg_create_docfile(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// gives, each open must let the other do what it asks to: read for
 /// STGM_READ, write for STGM_WRITE, both for STGM_READWRITE. Windows
 /// Installer opens a package twice with STGM_SHARE_DENY_WRITE.
+///
+/// Two opens that both write are refused whatever their share modes.
+/// Each open here keeps its own copy of the docfile's elements and
+/// writes the whole copy back to the file, so the one written last would
+/// drop what the other wrote, where Windows writes each one's changes
+/// into the one file.
 fn share_violation(cpu: &mut Cpu, path: &str, mode: u32) -> bool {
     let pid = current_pid(cpu);
     storages(cpu).docs.iter().flatten().any(|d| {
         d.pid == pid
             && !d.closed
             && d.path.eq_ignore_ascii_case(path)
-            && !(shares(d.mode, mode) && shares(mode, d.mode))
+            && (!(shares(d.mode, mode) && shares(mode, d.mode))
+                || (writable(d.mode) && writable(mode)))
     })
 }
 
