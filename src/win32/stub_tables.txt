@@ -4182,6 +4182,7 @@ ICClose
 ICLocate
 ICSendMessage
 ICDecompress
+ICGetInfo
 
 DLL AVIFIL32.DLL
 AVIFileInit
