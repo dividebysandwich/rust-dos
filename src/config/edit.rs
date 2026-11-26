@@ -46,6 +46,7 @@ fn classify(lines: &[String]) -> Vec<(Section, Line)> {
                 | Section::Shell
                 | Section::Vr
                 | Section::Vfx1
+                | Section::Hotkeys
                 | Section::Drives => {
                     if let Some(comment) = line.strip_prefix(['#', ';']) {
                         key_of(section, comment.trim_start_matches(['#', ';']).trim_start())

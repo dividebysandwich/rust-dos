@@ -330,6 +330,10 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   refuse unknown fields the same way.
 - **Stop pending input:** `DELETE /api/input` clears whatever is still
   queued.
+- **Hotkeys:** keys sent here don't go through `[hotkeys]`. Ctrl+F12
+  (the settings window) and Ctrl+Shift+S (the sound visualizer) act as
+  they do in the `rust-dos` profile whatever the profile is, and every
+  other key goes to the machine, Ctrl+F1 too.
 - **The settings window** opens with `DOSCONFIG` at the prompt or
   `key {"key":"f12","mods":["ctrl"]}`, and closes with the same key or
   `esc`. While it is open the machine is paused, `/api/status` shows

@@ -177,6 +177,8 @@ pub struct Settings {
     pub vr: crate::vr::VrSettings,
     /// `[vfx1]`: the Forte VFX1 headset.
     pub vfx1: crate::vfx1::Vfx1Settings,
+    /// `[hotkeys]`: the emulator's keys.
+    pub hotkeys: crate::hotkeys::HotkeySettings,
 }
 
 impl Default for Settings {
@@ -257,6 +259,7 @@ impl Default for Settings {
             shell: Default::default(),
             vr: Default::default(),
             vfx1: Default::default(),
+            hotkeys: Default::default(),
         }
     }
 }
@@ -425,6 +428,7 @@ impl Settings {
             shell: config.shell,
             vr: config.vr.clone(),
             vfx1: config.vfx1,
+            hotkeys: config.hotkeys.clone(),
         }
     }
 }
@@ -744,6 +748,8 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
     entries.extend(settings.vr.entries().into_iter().map(|(key, value)| (Section::Vr, key, value)));
     let vfx1 = settings.vfx1.entries().into_iter();
     entries.extend(vfx1.map(|(key, value)| (Section::Vfx1, key, value)));
+    let hotkeys = settings.hotkeys.entries().into_iter();
+    entries.extend(hotkeys.map(|(key, value)| (Section::Hotkeys, key, value)));
     entries
 }
 

@@ -39,6 +39,7 @@ fn machine(dir: &Path) -> Box<Cpu> {
             StartupItem::Lines(vec!["TSR".to_string()]),
             StartupItem::BatchFile("C:\\AUTOEXEC.BAT".to_string()),
         ],
+        ..Default::default()
     };
     cpu.start_dos();
     cpu

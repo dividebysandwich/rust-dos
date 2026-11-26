@@ -304,7 +304,7 @@ impl Core {
         if plan.profile.is_none() {
             commands.push(StartupItem::Lines(plan.commands.clone()));
         }
-        m.cpu.startup = Startup { notes, update: None, commands };
+        m.cpu.startup = Startup { notes, update: None, commands, ..Default::default() };
         m.cpu.start_dos();
         if let Some(profile) = &plan.profile {
             // One with launch configurations offers them first.

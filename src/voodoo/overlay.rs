@@ -225,23 +225,30 @@ pub fn looked_for(cpu: &mut crate::cpu::Cpu, path: &str) {
         .voodoo
         .as_ref()
         .map(|v| Overlay::of(v.board.model()));
+    // The settings window's key, as `[hotkeys]` has it.
+    let key = match &cpu.startup.settings_key {
+        Some(key) => format!(" ({})", key),
+        None => String::new(),
+    };
     let (title, detail) = match card {
         None => (
             "This game wants a 3dfx card".to_string(),
-            "Turn on 3dfx Voodoo Graphics on the settings' Emulator page (Ctrl+F12)".to_string(),
+            format!("Turn on 3dfx Voodoo Graphics on the settings' Emulator page{}", key),
         ),
         Some(None) => (
             "This game wants a 3dfx Voodoo Graphics".to_string(),
-            "Pick another Video card, then turn on 3dfx Voodoo Graphics, on the settings' \
-             Emulator page (Ctrl+F12)"
-                .to_string(),
+            format!(
+                "Pick another Video card, then turn on 3dfx Voodoo Graphics, on the settings' \
+                 Emulator page{}",
+                key
+            ),
         ),
         Some(Some(overlay)) => (
             format!(
                 "This game needs 3dfx's GLIDE2X.OVL for the {}",
                 overlay.board()
             ),
-            "Download it on the settings' Emulator page (Ctrl+F12)".to_string(),
+            format!("Download it on the settings' Emulator page{}", key),
         ),
     };
     cpu.bus.log_string(&format!("[3DFX] {}: {}", title, detail));

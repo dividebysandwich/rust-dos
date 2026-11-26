@@ -1455,13 +1455,21 @@ pub fn print_banner(cpu: &mut Cpu, notes: &[(String, String)], update: Option<&s
         };
         vec![(label.chars().take(MAX_WIDTH).collect(), TEXT), (value, HIGHLIGHT)]
     }));
-    lines.push(vec![
-        ("Press ".to_string(), TEXT),
-        ("Ctrl+F12".to_string(), HIGHLIGHT),
-        (" or type ".to_string(), TEXT),
-        ("DOSCONFIG".to_string(), HIGHLIGHT),
-        (" to open the settings.".to_string(), TEXT),
-    ]);
+    // The settings window's key, as `[hotkeys]` has it.
+    lines.push(match cpu.startup.settings_key.clone() {
+        Some(key) => vec![
+            ("Press ".to_string(), TEXT),
+            (key, HIGHLIGHT),
+            (" or type ".to_string(), TEXT),
+            ("DOSCONFIG".to_string(), HIGHLIGHT),
+            (" to open the settings.".to_string(), TEXT),
+        ],
+        None => vec![
+            ("Type ".to_string(), TEXT),
+            ("DOSCONFIG".to_string(), HIGHLIGHT),
+            (" to open the settings.".to_string(), TEXT),
+        ],
+    });
     lines.push(vec![
         ("Type ".to_string(), TEXT),
         ("RC".to_string(), HIGHLIGHT),

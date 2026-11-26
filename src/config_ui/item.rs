@@ -181,6 +181,8 @@ pub(super) enum Item {
     BootCdrom,
     FloppyController,
     KeyboardLayout,
+    /// The emulator's keys' profile (`[hotkeys]`).
+    HotkeyProfile,
     /// The captured mouse's motion multiplier.
     MouseSensitivity,
     /// The mouse captured and let go by itself.
@@ -409,6 +411,7 @@ impl Item {
             BootCdrom => "CD-ROM drive (BOOT)",
             FloppyController => "Floppy controller (BOOT)",
             KeyboardLayout => "Keyboard layout",
+            HotkeyProfile => "Hotkeys",
             MouseSensitivity => "Mouse sensitivity",
             MouseAutocapture => "Mouse auto capture",
             MouseCaptureMessages => "Mouse capture messages",
@@ -422,7 +425,7 @@ impl Item {
             GameFixes => "Game fixes",
             AlmanacFetch => "Fetch settings from Almanac...",
             AlmanacReport => "Report settings to Almanac...",
-            Rewind => "Rewind (Alt+F11)",
+            Rewind => "Rewind",
             RewindMemory => "  Rewind memory",
             SbType => "Sound Blaster",
             // The fields of a row of several go by their names, after
@@ -676,7 +679,7 @@ impl Item {
             Scale | Fullscreen | Aspect | Vrr | FpsCap | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | AnsiSys | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
+            Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | AnsiSys | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | HotkeyProfile | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | Renderer
             | ToadForceGamma
             | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooOverlay | PowerVrFilter => Applies::Now,
@@ -909,6 +912,7 @@ impl Item {
             BootCdrom => if s.boot_cdrom { "always" } else { "with a CD" }.to_string(),
             FloppyController => on_off(s.floppy_controller),
             KeyboardLayout => s.keyboard_layout.describe(),
+            HotkeyProfile => s.hotkeys.profile.describe().to_string(),
             MouseSensitivity => bar(format!("{:.2}x", s.mouse_sensitivity), (s.mouse_sensitivity * 100.0).round() as u16, 1000, 50),
             MouseAutocapture => on_off(s.mouse_autocapture),
             MouseCaptureMessages => on_off(s.mouse_capture_messages),

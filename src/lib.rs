@@ -56,6 +56,7 @@ pub mod games;
 pub mod hardware;
 pub use rust_dos_hostdirs as hostdirs;
 pub mod hostframes;
+pub mod hotkeys;
 pub mod hostfs;
 pub mod hosttime;
 pub mod ide;

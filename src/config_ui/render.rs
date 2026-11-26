@@ -744,6 +744,8 @@ impl ConfigUi {
     /// The key hints for what is showing, each clickable.
     fn draw_hints(&mut self, g: &mut Grid, row: usize) {
         use UiKey::*;
+        // The performance overlay's key, as `[hotkeys]` has it.
+        let overlay_key = self.hotkey(crate::hotkeys::Action::PerformanceOverlay);
         let mut hints: Vec<(&str, &str, UiKey)> = if self.help.is_some() {
             vec![("\u{2191}\u{2193}", "Scroll", Down), ("Esc", "Close", Esc)]
         } else if let Some(chooser) = &self.chooser {
@@ -804,7 +806,9 @@ impl ConfigUi {
             self.achievements_hints()
         } else if self.page == Page::Stats {
             let overlay = if self.overlay { "Hide overlay" } else { "Show overlay" };
-            vec![("Tab", "Page", Tab), ("Esc", "Close", Esc), ("Ctrl+Shift+F12", overlay, Overlay)]
+            let mut hints = vec![("Tab", "Page", Tab), ("Esc", "Close", Esc)];
+            hints.extend(overlay_key.as_deref().map(|key| (key, overlay, Overlay)));
+            hints
         } else if self.page == Page::Games {
             vec![
                 ("Enter", "Launch", Enter),

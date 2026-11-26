@@ -40,7 +40,8 @@ of them:
   [`[joystick]`](#joystick), [`[network]`](#network), [`[serial]`](#serial),
   [`[phonebook]`](#phonebook), [`[printer]`](#printer),
   [`[achievements]`](#achievements), [`[shell]`](#shell), [`[vr]`](#vr),
-  [`[vfx1]`](#vfx1), [`[drives]`](#drives) and [`[autoexec]`](#autoexec).
+  [`[vfx1]`](#vfx1), [`[hotkeys]`](#hotkeys), [`[drives]`](#drives) and
+  [`[autoexec]`](#autoexec).
 * Games: [game profiles](#game-profiles), [Windows games](#windows-games),
   [game fixes](#game-fixes) and [RetroAchievements](#retroachievements).
 * Drives: [mounting drives](#mounting-drives), [CD images](#cd-images),
@@ -2813,6 +2814,108 @@ headset.
   them without one.
 
 `enabled` and `port` take effect at the DOS prompt; the others at once.
+
+### `[hotkeys]`
+
+The emulator's keys: the ones that save and load states, open the
+settings window, pause, run fast and the rest. The program in the
+machine never gets a key that is a hotkey, so a hotkey on a key a game
+uses takes that key from the game.
+
+* `profile` picks a set of keys: `rust-dos` (the default, the keys
+  [REFERENCE.md](REFERENCE.md#keyboard-shortcuts) lists), `pcsx2`,
+  `duckstation`, `pcsx-redux`, `epsxe`, `retroarch`, `dosbox` or
+  `86box`. [Hotkey profiles](REFERENCE.md#hotkey-profiles) has each
+  one's keys. The settings window's Emulator page sets it too
+  (*Hotkeys*).
+* A line named after an action binds that action alone, over the
+  profile: a key with any of `Ctrl+`, `Alt+` and `Shift+` before it,
+  several such keys separated by commas, or `none` for no key.
+
+  ```ini
+  [hotkeys]
+  profile=pcsx2
+  save_state=F1, Ctrl+F1
+  pause=none
+  ```
+
+  The keys are the letters and digits, `F1` to `F24`, `Escape`,
+  `Enter`, `Tab`, `Space`, `Backspace`, `Insert`, `Delete`, `Home`,
+  `End`, `PageUp`, `PageDown`, `Up`, `Down`, `Left`, `Right`, `Pause`,
+  `PrintScreen`, `ScrollLock`, `Minus`, `Equals`, `LeftBracket`,
+  `RightBracket`, `Semicolon`, `Apostrophe`, `Grave`, `Comma`,
+  `Period`, `Slash`, `Backslash`, `Keypad0` to `Keypad9`, `KeypadPlus`,
+  `KeypadMinus`, `KeypadMultiply`, `KeypadDivide`, `KeypadEnter` and
+  `KeypadPeriod`. A letter is the key that types it in the host's
+  keyboard layout.
+
+The actions, with their keys in the `rust-dos` profile:
+
+| Action | What it does | `rust-dos` |
+|---|---|---|
+| `settings_window` | Open or close the settings window | Ctrl+F12 |
+| `save_states_page` | Open the settings window on the save states | Ctrl+F9 |
+| `performance_overlay` | Show or hide the performance overlay | Ctrl+Shift+F12 |
+| `sound_visualizer` | Show or hide the sound visualizer | Ctrl+Shift+S |
+| `manuals` | Show or hide the game's manuals | Ctrl+Shift+M |
+| `save_state` | Save to the current slot | Ctrl+F1 |
+| `load_state` | Load the current slot | Ctrl+F2 |
+| `next_slot` | Pick the next slot | Ctrl+F3 |
+| `previous_slot` | Pick the previous slot | Ctrl+Shift+F3 |
+| `pause` | Pause and resume | Alt+Pause |
+| `fast_forward` | Run fast while held | Alt+F12 |
+| `rewind` | Go back in time while held (`rewind=true`) | Alt+F11 |
+| `slower` | Slow the CPU down by a tenth | Ctrl+F11 |
+| `faster` | Speed the CPU up by a tenth | Ctrl+Shift+F11 |
+| `fullscreen` | Switch between the window and fullscreen | Alt+Enter |
+| `mouse_capture` | Capture the mouse and let it go | Ctrl+F10 |
+| `mute` | Turn the sound off and on | Ctrl+F8 |
+| `screenshot` | Save a screenshot | Ctrl+F5 |
+| `record_sound` | Start and stop recording the sound | Ctrl+F6 |
+| `record_video` | Start and stop recording video | Ctrl+F7 |
+| `record_animation` | Start and stop recording a GIF | PrintScreen, with any modifiers |
+| `swap_disk` | Put the next disk in drives with lists of images | Ctrl+F4 |
+| `copy_text` | Copy the selected text or the text screen | Ctrl+Shift+C |
+| `paste_text` | Type the clipboard's text | Ctrl+Shift+V |
+| `printer_eject` | Eject the printer's page | Ctrl+Shift+F5 |
+| `degauss` | Degauss the monitor | Ctrl+Shift+D |
+| `recenter_view` | In the 3D scene, take the camera back to the start | Ctrl+Shift+Home, with Alt too |
+
+* A key is an action's with the modifiers it was bound with, and no
+  others: `Ctrl+F1` isn't pressed by Ctrl+Alt+F1, which AltGr can
+  arrive as. Shift is the exception for keys bound with Ctrl or Alt: if
+  the key has no action of its own with Shift, it does what it does
+  without Shift, so Ctrl+Shift+F1 saves as Ctrl+F1 does. `F1` alone
+  isn't pressed by Shift+F1.
+* `fast_forward` and `rewind` end when their key comes up, whatever the
+  modifiers are by then.
+* One key does one thing. A line that binds a key the profile gives
+  another action takes it from that action. Of two lines that bind one
+  key, the action listed first above keeps it. A key without Ctrl or Alt
+  that types (a letter, a digit, Space, Enter, Tab, Backspace, a keypad
+  key) can be bound, but programs can't type it then. Rust-DOS says
+  each of these in a warning at start.
+* While the settings window is open, a key without Ctrl or Alt goes to
+  the window when its action does nothing there (the save states, the
+  speed, fullscreen) or the window has a use for the key (F1, F2, F10,
+  Enter, Escape, the arrows and the like). The settings window's own key
+  closes it whatever the key is, so `retroarch`'s F1 closes the window
+  as RetroArch's closes its menu.
+* A [game profile](#game-profiles) may have a `[hotkeys]` section too.
+  Its lines are read after the configuration's, so its `profile` replaces
+  the configuration's, and the configuration's own action lines still
+  apply over it unless the game's lines bind those actions again.
+  `CONFIG -SET` doesn't reach these settings: DOSBox keeps its keys in
+  its mapper file, not in its configuration.
+* These keys stay as they are: Ctrl+Alt pressed and released alone
+  (mouse capture), Ctrl+Shift with the mouse, Q and E in the 3D scene
+  (its camera), and the right mouse button held still
+  (`mouse_menu_hold`).
+* The [libretro core](libretro/README.md) doesn't read `[hotkeys]`: the
+  frontend has the hotkeys for save states, fast forward, rewind,
+  pause and screenshots, set in the frontend, and the core keeps its
+  Ctrl+F12, Ctrl+F4 and Ctrl+Shift+M. The browser version keeps its keys
+  too.
 
 ### `[drives]`
 

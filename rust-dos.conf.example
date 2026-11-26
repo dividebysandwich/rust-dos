@@ -726,6 +726,17 @@
 # interlaced stereo for them (Descent 2 in 800x600).
 #stereo_bios=true
 
+[hotkeys]
+# The emulator's keys, which the program doesn't get. profile picks a set
+# of them: rust-dos (the default), pcsx2, duckstation,
+# pcsx-redux, epsxe, retroarch, dosbox or 86box.
+#profile=rust-dos
+# A line named after an action binds it alone, over the profile: keys
+# such as Ctrl+Shift+F3 separated by commas, or none. CONFIGURATION.md
+# lists the actions.
+#save_state=Ctrl+F1
+#load_state=Ctrl+F2
+
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives
 # A: to Y:

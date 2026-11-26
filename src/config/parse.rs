@@ -103,6 +103,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Shell
             | Section::Vr
             | Section::Vfx1
+            | Section::Hotkeys
             | Section::Game
             | Section::Gamepad
             | Section::Install => {
@@ -742,6 +743,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     continue;
                 }
 
+                if section == Section::Hotkeys {
+                    if let Err(e) = config.hotkeys.set(key, value) {
+                        warn(e);
+                    }
+                    continue;
+                }
+
                 if section == Section::Vr {
                     vr_before_auto &= !key.eq_ignore_ascii_case("msaa");
                     if let Err(e) = config.vr.set(key, value, base_dir) {
@@ -812,6 +820,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
     if vr_before_auto {
         config.vr.from_before_auto();
     }
+    // Two actions on one key, of the lines and the profile together.
+    warnings.extend(config.hotkeys.resolve().1);
     // Lines that ask for the 3dfx cards on OpenGL and the ToadForce in
     // software, which `renderer` has no value for, are an error. One
     // card's part may come from a `renderer` line of this text before the
