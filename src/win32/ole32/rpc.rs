@@ -356,6 +356,31 @@ fn export_object(cpu: &mut Cpu, object: u32, iid: &Guid, owned: bool) -> (u32, b
     (id, true)
 }
 
+/// Hold the running process's `object` for other processes, as the
+/// Running Object Table does: its export as IUnknown with a reference
+/// more, and whether the export is new, when the caller adds COM's
+/// reference to the object.
+pub fn hold(cpu: &mut Cpu, object: u32) -> (u32, bool) {
+    export_object(cpu, object, &com::IID_IUNKNOWN, true)
+}
+
+/// Let go of the reference `hold` took to the export `id`.
+pub fn let_go(cpu: &mut Cpu, id: u32) {
+    release_export(cpu, id, 1);
+}
+
+/// A proxy in the running process of the export `id` a holder keeps,
+/// with a reference of the caller's: 0 when there can be none.
+pub fn proxy_of_held(cpu: &mut Cpu, id: u32) -> u32 {
+    let Some(e) = export(cpu, id) else {
+        return 0;
+    };
+    // proxy_of takes over a reference to the export, as data
+    // unmarshalled brings one.
+    e.refs += 1;
+    proxy_of(cpu, id)
+}
+
 /// The proxy at `this` of the running process.
 fn proxy_at(cpu: &mut Cpu, this: u32) -> Option<usize> {
     let pid = current_pid(cpu);

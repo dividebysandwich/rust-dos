@@ -24,6 +24,7 @@ mod calls;
 mod compobj;
 mod dragdrop;
 mod medium;
+mod moniker;
 mod propvariant;
 mod persist;
 mod rpc;
@@ -241,6 +242,42 @@ static APIS: &[Api] = &[
     stdcall("OleLoadFromStream", 197, 3, persist::ole_load_from_stream),
     stdcall("RegisterDragDrop", 227, 2, dragdrop::register_drag_drop),
     stdcall("RevokeDragDrop", 229, 1, dragdrop::revoke_drag_drop),
+    stdcall("CreateFileMoniker", 89, 2, moniker::create_file_moniker),
+    stdcall("CreateItemMoniker", 92, 3, moniker::create_item_moniker),
+    stdcall("GetRunningObjectTable", 111, 2, moniker::get_running_object_table),
+    stdcall("IMoniker_QueryInterface", 0, 3, moniker::moniker_query_interface),
+    stdcall("IMoniker_AddRef", 0, 1, moniker::moniker_add_ref),
+    stdcall("IMoniker_Release", 0, 1, moniker::moniker_release),
+    stdcall("IMoniker_GetClassID", 0, 2, moniker::moniker_get_class_id),
+    stdcall("IMoniker_IsDirty", 0, 1, moniker::moniker_is_dirty),
+    stdcall("IMoniker_Load", 0, 2, moniker::moniker_not_implemented),
+    stdcall("IMoniker_Save", 0, 3, moniker::moniker_not_implemented),
+    stdcall("IMoniker_GetSizeMax", 0, 2, moniker::moniker_not_implemented),
+    stdcall("IMoniker_BindToObject", 0, 5, moniker::moniker_bind),
+    stdcall("IMoniker_BindToStorage", 0, 5, moniker::moniker_bind),
+    stdcall("IMoniker_Reduce", 0, 5, moniker::moniker_reduce),
+    stdcall("IMoniker_ComposeWith", 0, 4, moniker::moniker_not_implemented),
+    stdcall("IMoniker_Enum", 0, 3, moniker::moniker_enum),
+    stdcall("IMoniker_IsEqual", 0, 2, moniker::moniker_is_equal),
+    stdcall("IMoniker_Hash", 0, 2, moniker::moniker_hash),
+    stdcall("IMoniker_IsRunning", 0, 4, moniker::moniker_is_running),
+    stdcall("IMoniker_GetTimeOfLastChange", 0, 4, moniker::moniker_get_time_of_last_change),
+    stdcall("IMoniker_Inverse", 0, 2, moniker::moniker_not_implemented),
+    stdcall("IMoniker_CommonPrefixWith", 0, 3, moniker::moniker_not_implemented),
+    stdcall("IMoniker_RelativePathTo", 0, 3, moniker::moniker_not_implemented),
+    stdcall("IMoniker_GetDisplayName", 0, 4, moniker::moniker_get_display_name),
+    stdcall("IMoniker_ParseDisplayName", 0, 6, moniker::moniker_not_implemented),
+    stdcall("IMoniker_IsSystemMoniker", 0, 2, moniker::moniker_is_system_moniker),
+    stdcall("IRunningObjectTable_QueryInterface", 0, 3, moniker::rot_query_interface),
+    stdcall("IRunningObjectTable_AddRef", 0, 1, moniker::rot_add_ref),
+    stdcall("IRunningObjectTable_Release", 0, 1, moniker::rot_add_ref),
+    stdcall("IRunningObjectTable_Register", 0, 5, moniker::rot_register),
+    stdcall("IRunningObjectTable_Revoke", 0, 2, moniker::rot_revoke),
+    stdcall("IRunningObjectTable_IsRunning", 0, 2, moniker::rot_is_running),
+    stdcall("IRunningObjectTable_GetObject", 0, 3, moniker::rot_get_object),
+    stdcall("IRunningObjectTable_NoteChangeTime", 0, 3, moniker::rot_note_change_time),
+    stdcall("IRunningObjectTable_GetTimeOfLastChange", 0, 3, moniker::rot_get_time_of_last_change),
+    stdcall("IRunningObjectTable_EnumRunning", 0, 2, moniker::rot_enum_running),
 ];
 
 /// The vtables, by their places in this list.
@@ -357,6 +394,49 @@ static VTABLES: &[Vtable] = &[
             "IEnumSTATSTG_Clone",
         ],
     },
+    Vtable {
+        name: "IMoniker",
+        methods: &[
+            "IMoniker_QueryInterface",
+            "IMoniker_AddRef",
+            "IMoniker_Release",
+            "IMoniker_GetClassID",
+            "IMoniker_IsDirty",
+            "IMoniker_Load",
+            "IMoniker_Save",
+            "IMoniker_GetSizeMax",
+            "IMoniker_BindToObject",
+            "IMoniker_BindToStorage",
+            "IMoniker_Reduce",
+            "IMoniker_ComposeWith",
+            "IMoniker_Enum",
+            "IMoniker_IsEqual",
+            "IMoniker_Hash",
+            "IMoniker_IsRunning",
+            "IMoniker_GetTimeOfLastChange",
+            "IMoniker_Inverse",
+            "IMoniker_CommonPrefixWith",
+            "IMoniker_RelativePathTo",
+            "IMoniker_GetDisplayName",
+            "IMoniker_ParseDisplayName",
+            "IMoniker_IsSystemMoniker",
+        ],
+    },
+    Vtable {
+        name: "IRunningObjectTable",
+        methods: &[
+            "IRunningObjectTable_QueryInterface",
+            "IRunningObjectTable_AddRef",
+            "IRunningObjectTable_Release",
+            "IRunningObjectTable_Register",
+            "IRunningObjectTable_Revoke",
+            "IRunningObjectTable_IsRunning",
+            "IRunningObjectTable_GetObject",
+            "IRunningObjectTable_NoteChangeTime",
+            "IRunningObjectTable_GetTimeOfLastChange",
+            "IRunningObjectTable_EnumRunning",
+        ],
+    },
 ];
 const CLASS_FACTORY: usize = 0;
 const MALLOC: usize = 1;
@@ -384,6 +464,8 @@ pub struct State {
     /// The processes that called OleInitialize and the drop targets
     /// registered.
     drag_drop: Since<DROP_TARGETS, dragdrop::DropTargets>,
+    /// The Running Object Table.
+    rot: Since<ROT_SAVED, moniker::Rot>,
 }
 
 /// The W32 section's version that added local servers' state: a state
@@ -395,6 +477,9 @@ pub type Added<T> = crate::savestate::Since<LOCAL_SERVERS, T>;
 
 /// The W32 section's version that added drag and drop's state.
 pub const DROP_TARGETS: u16 = 82;
+
+/// The W32 section's version that added the Running Object Table.
+pub const ROT_SAVED: u16 = 110;
 
 fn state(cpu: &mut Cpu) -> &mut State {
     &mut cpu.bus.win32.ole
@@ -424,6 +509,7 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
     rpc::process_ended(cpu, pid);
     storage::process_ended(cpu, pid);
     dragdrop::process_ended(cpu, pid);
+    moniker::process_ended(cpu, pid);
 }
 
 /// The address of OLE32's function `name`.
@@ -897,5 +983,6 @@ crate::state_fields!(State {
     globals,
     rpc,
     storage,
-    drag_drop
+    drag_drop,
+    rot
 });

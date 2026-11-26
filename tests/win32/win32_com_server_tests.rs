@@ -1009,3 +1009,271 @@ fn destroying_a_static_safearray_zeroes_its_data_in_place() {
         assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {}", printed(&cpu));
     }
 }
+
+const MK_E_UNAVAILABLE: i32 = 0x8004_01E3_u32 as i32;
+const MK_S_MONIKERALREADYREGISTERED: i32 = 0x0004_01E7;
+const ROTFLAGS_ALLOWANYCLIENT: i32 = 2;
+const MKSYS_ITEMMONIKER: i32 = 4;
+
+/// An argument of `call_with`: a number, or a dword of the data.
+enum Arg {
+    Imm(i32),
+    Var(AsmMemoryOperand),
+}
+
+/// `call_method` with arguments that may be the program's variables.
+fn call_with(a: &mut CodeAssembler, at: i32, index: i32, args: &[Arg]) -> Result<(), IcedError> {
+    for arg in args.iter().rev() {
+        match arg {
+            Arg::Imm(value) => a.push(*value)?,
+            Arg::Var(var) => a.push(*var)?,
+        }
+    }
+    call_method(a, at, index, &[])
+}
+
+/// Set bit `bit` of EBX when the dwords `x` and `y` are equal.
+fn check_same(
+    a: &mut CodeAssembler,
+    x: AsmMemoryOperand,
+    y: AsmMemoryOperand,
+    bit: u32,
+) -> Result<(), IcedError> {
+    let mut skip = a.create_label();
+    a.mov(eax, x)?;
+    a.cmp(eax, y)?;
+    a.jne(skip)?;
+    a.or(ebx, 1 << bit)?;
+    a.set_label(&mut skip)?;
+    a.nop()
+}
+
+#[test]
+fn monikers_compare_by_name_and_the_running_object_table_finds_them() {
+    // 0x00: a path, 0x40: the same in other case, 0x80: "!", 0x84:
+    // "Zed", 0xA0 and 0xA4: the two file monikers, 0xA8: the item
+    // moniker, 0xAC: the table, 0xB0 and 0xB4: the hashes, 0xB8: the
+    // display name, 0xBC: the kind, 0xC0 and 0xC4: the cookies, 0xC8:
+    // the object found.
+    let mut data = vec![0u8; 0x100];
+    put(&mut data, 0x00, &wide("C:\\Dir\\File.txt"));
+    put(&mut data, 0x40, &wide("c:\\dir\\FILE.TXT"));
+    put(&mut data, 0x80, &wide("!"));
+    put(&mut data, 0x84, &wide("Zed"));
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        (
+            "OLE32.dll",
+            &[
+                "CoInitialize",
+                "CreateFileMoniker",
+                "CreateItemMoniker",
+                "GetRunningObjectTable",
+            ],
+        ),
+    ];
+    let code = program(imports, &data, |a, l| {
+        use Arg::{Imm, Var};
+        a.xor(ebx, ebx)?;
+        call(a, l.import(1), &[0])?;
+        call(a, l.import(2), &[l.at(0), l.at(0xA0)])?;
+        call(a, l.import(2), &[l.at(0x40), l.at(0xA4)])?;
+        call(a, l.import(3), &[l.at(0x80), l.at(0x84), l.at(0xA8)])?;
+        check_eax(a, 0, 0)?;
+        // IsEqual(other), and Hash(&hash) alike: equal but for case.
+        call_with(a, l.at(0xA0), 13, &[Var(l.var(0xA4))])?;
+        check_eax(a, 0, 1)?;
+        call_method(a, l.at(0xA0), 14, &[l.at(0xB0)])?;
+        call_method(a, l.at(0xA4), 14, &[l.at(0xB4)])?;
+        check_same(a, l.var(0xB0), l.var(0xB4), 2)?;
+        // GetDisplayName(bc, left, &name): the delimiter, then the item.
+        call_method(a, l.at(0xA8), 20, &[0, 0, l.at(0xB8)])?;
+        a.mov(eax, l.var(0xB8))?;
+        a.mov(eax, dword_ptr(eax))?;
+        check_eax(a, 0x005A_0021, 3)?;
+        call_method(a, l.at(0xA8), 22, &[l.at(0xBC)])?;
+        check_var(a, l.var(0xBC), MKSYS_ITEMMONIKER, 4)?;
+        // Register(flags, object, moniker, &cookie), twice: a file
+        // moniker stands for the object.
+        call(a, l.import(4), &[0, l.at(0xAC)])?;
+        let register = |a: &mut CodeAssembler, cookie: u32| {
+            let args = [
+                Imm(ROTFLAGS_ALLOWANYCLIENT),
+                Var(l.var(0xA0)),
+                Var(l.var(0xA8)),
+                Imm(l.at(cookie)),
+            ];
+            call_with(a, l.at(0xAC), 3, &args)
+        };
+        register(a, 0xC0)?;
+        check_eax(a, 0, 5)?;
+        register(a, 0xC4)?;
+        check_eax(a, MK_S_MONIKERALREADYREGISTERED, 6)?;
+        // GetObject(moniker, &object): in this process, the object.
+        call_with(a, l.at(0xAC), 6, &[Var(l.var(0xA8)), Imm(l.at(0xC8))])?;
+        check_same(a, l.var(0xC8), l.var(0xA0), 7)?;
+        // Revoked twice, it is no longer found.
+        call_with(a, l.at(0xAC), 4, &[Var(l.var(0xC0))])?;
+        call_with(a, l.at(0xAC), 4, &[Var(l.var(0xC4))])?;
+        call_with(a, l.at(0xAC), 6, &[Var(l.var(0xA8)), Imm(l.at(0xC8))])?;
+        let mut gone = a.create_label();
+        a.cmp(eax, MK_E_UNAVAILABLE)?;
+        a.je(gone)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut gone)?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let mut cpu = machine("moniker_rot", core, &code);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {}", printed(&cpu));
+    }
+}
+
+#[test]
+fn another_process_finds_an_object_in_the_running_object_table() {
+    // As InstallShield's setup and its engine: the server registers an
+    // object under an item moniker, and the client asks the table for it
+    // until it is there, then gets a proxy of it. When the server ends,
+    // its entry goes.
+    //
+    // 0x00: "!", 0x04: "Zed", 0x10: the server's command line, 0x20: the
+    // event's name, 0x40: STARTUPINFO, 0x90: PROCESS_INFORMATION, 0xA0:
+    // the moniker, 0xA4: the table, 0xA8: the cookie, 0xAC: the object
+    // found, 0xB0: the event, 0xC0: a MSG.
+    let mut data = vec![0u8; 0x100];
+    put(&mut data, 0x00, &wide("!"));
+    put(&mut data, 0x04, &wide("Zed"));
+    put(&mut data, 0x10, b"C:\\T.EXE -s\0");
+    put(&mut data, 0x20, b"RotDone\0");
+    data[0x40] = 68;
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.dll",
+            &[
+                "ExitProcess",
+                "GetCommandLineA",
+                "CreateProcessA",
+                "WaitForSingleObject",
+                "Sleep",
+                "CreateEventA",
+                "SetEvent",
+            ],
+        ),
+        (
+            "OLE32.dll",
+            &["CoInitialize", "CreateItemMoniker", "GetRunningObjectTable"],
+        ),
+        (
+            "USER32.dll",
+            &[
+                "MsgWaitForMultipleObjects",
+                "PeekMessageA",
+                "DispatchMessageA",
+            ],
+        ),
+    ];
+    let code = program(imports, &data, |a, l| {
+        use Arg::{Imm, Var};
+        let mut server = a.create_label();
+        a.xor(ebx, ebx)?;
+        call(a, l.import(7), &[0])?;
+        call(a, l.import(5), &[0, 1, 0, l.at(0x20)])?;
+        a.mov(l.var(0xB0), eax)?;
+        call(a, l.import(8), &[l.at(0), l.at(4), l.at(0xA0)])?;
+        call(a, l.import(9), &[0, l.at(0xA4)])?;
+        call(a, l.import(1), &[])?;
+        let mut scan = a.create_label();
+        a.set_label(&mut scan)?;
+        a.mov(cl, byte_ptr(eax))?;
+        a.inc(eax)?;
+        a.cmp(cl, b'-' as i32)?;
+        a.je(server)?;
+        a.test(cl, cl)?;
+        a.jne(scan)?;
+
+        // The client.
+        let (startup, info) = (l.at(0x40), l.at(0x90));
+        call(
+            a,
+            l.import(2),
+            &[0, l.at(0x10), 0, 0, 0, 0, 0, 0, startup, info],
+        )?;
+        a.test(eax, eax)?;
+        let mut failed = a.create_label();
+        a.je(failed)?;
+        a.or(ebx, 1)?;
+        a.set_label(&mut failed)?;
+        // GetObject(moniker, &object) every 50 ms, up to 100 times.
+        a.mov(esi, 100)?;
+        let mut poll = a.create_label();
+        let mut found = a.create_label();
+        a.set_label(&mut poll)?;
+        call(a, l.import(4), &[50])?;
+        call_with(a, l.at(0xA4), 6, &[Var(l.var(0xA0)), Imm(l.at(0xAC))])?;
+        a.test(eax, eax)?;
+        a.je(found)?;
+        a.dec(esi)?;
+        a.jne(poll)?;
+        a.set_label(&mut found)?;
+        check_eax(a, 0, 1)?;
+        a.mov(eax, l.var(0xAC))?;
+        a.test(eax, eax)?;
+        let mut none = a.create_label();
+        a.je(none)?;
+        a.or(ebx, 1 << 2)?;
+        a.set_label(&mut none)?;
+        // IsRunning(moniker).
+        call_with(a, l.at(0xA4), 5, &[Var(l.var(0xA0))])?;
+        check_eax(a, 0, 3)?;
+        // The proxy goes, the server is told to end, and its entry goes
+        // with it.
+        call_method(a, l.at(0xAC), 2, &[])?;
+        a.push(l.var(0xB0))?;
+        a.call(l.import(6))?;
+        a.push(-1)?;
+        a.push(l.var(0x90))?;
+        a.call(l.import(3))?;
+        call_with(a, l.at(0xA4), 6, &[Var(l.var(0xA0)), Imm(l.at(0xAC))])?;
+        check_eax(a, MK_E_UNAVAILABLE, 4)?;
+        call_with(a, l.at(0xA4), 5, &[Var(l.var(0xA0))])?;
+        check_eax(a, 1, 5)?;
+        a.or(ebx, 0xC0)?;
+        exit(a, l.import(0))?;
+
+        // The server: the moniker stands for the object. It handles
+        // messages until the event is set, then ends without revoking.
+        a.set_label(&mut server)?;
+        let args = [
+            Imm(ROTFLAGS_ALLOWANYCLIENT),
+            Var(l.var(0xA0)),
+            Var(l.var(0xA0)),
+            Imm(l.at(0xA8)),
+        ];
+        call_with(a, l.at(0xA4), 3, &args)?;
+        let mut wait = a.create_label();
+        let mut peek = a.create_label();
+        let mut end = a.create_label();
+        a.set_label(&mut wait)?;
+        // MsgWaitForMultipleObjects(1, &event, FALSE, INFINITE,
+        // QS_ALLINPUT).
+        call(a, l.import(10), &[1, l.at(0xB0), 0, -1, 0x4FF])?;
+        a.test(eax, eax)?;
+        a.je(end)?;
+        a.set_label(&mut peek)?;
+        call(a, l.import(11), &[l.at(0xC0), 0, 0, 0, 1])?;
+        a.test(eax, eax)?;
+        a.je(wait)?;
+        call(a, l.import(12), &[l.at(0xC0)])?;
+        a.jmp(peek)?;
+        a.set_label(&mut end)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    for core in CORES {
+        let mut cpu = machine("rot_between_processes", core, &code);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {}", printed(&cpu));
+    }
+}
