@@ -157,36 +157,40 @@ impl Machine {
     pub fn options_changed(&mut self, options: Values) {
         let memsize_before = self.options.get("memsize").map(str::to_string);
         self.options = options;
-        // The files were read without an error as the core started, and
-        // the options write only a `renderer` line, which takes back the
-        // old lines before it: they can't make one now.
-        let (base, warnings) = match self.base_settings() {
-            Ok(base) => base,
-            Err(e) => {
-                self.warn(&e);
-                return;
-            }
-        };
-        for warning in warnings {
-            self.warn(&warning);
-        }
-        let new = match self.game.as_ref().map(|g| g.id.clone()) {
-            Some(id) => {
-                let file = self.profile_file(&id);
-                let text = fs::read_to_string(&file).unwrap_or_default();
-                let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
-                self.game.as_mut().unwrap().base = base.clone();
-                match games::prepare(&id, &base, &text, &dir, content::home().as_deref()) {
-                    Ok(prepared) => content::frontend_settings(prepared.settings),
-                    Err(_) => base,
+        // The options' `renderer` line goes over rust-dos.conf's old lines,
+        // but the overlay's or the game profile's old line after it can
+        // ask for the other renderer. The settings then stay as they are,
+        // and the error says which lines to change.
+        let new = match self.base_settings() {
+            Ok((base, warnings)) => {
+                for warning in warnings {
+                    self.warn(&warning);
+                }
+                match self.game.as_ref().map(|g| g.id.clone()) {
+                    Some(id) => {
+                        let file = self.profile_file(&id);
+                        let text = fs::read_to_string(&file).unwrap_or_default();
+                        let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
+                        self.game.as_mut().unwrap().base = base.clone();
+                        let home = content::home();
+                        games::prepare(&id, &base, &text, &dir, home.as_deref())
+                            .map(|prepared| content::frontend_settings(prepared.settings))
+                    }
+                    None => Ok(base),
                 }
             }
-            None => base,
+            Err(e) => Err(e),
         };
-        match self.apply(&new) {
-            Ok(Some(note)) => self.notices.push(note),
-            Ok(None) => {}
-            Err(e) => self.notices.push(e),
+        match new {
+            Ok(new) => match self.apply(&new) {
+                Ok(Some(note)) => self.notices.push(note),
+                Ok(None) => {}
+                Err(e) => self.notices.push(e),
+            },
+            Err(e) => {
+                self.warn(&e);
+                self.notices.push(e);
+            }
         }
         if self.options.get("memsize").map(str::to_string) != memsize_before {
             self.notices.push("The memory size changes when the content is started again".to_string());
