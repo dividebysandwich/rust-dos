@@ -1020,3 +1020,122 @@ fn a_name_ending_in_a_slash_is_path_not_found() {
     assert!(!cf(&cpu));
     assert!(base.join("c/DOMINUS/DATA/INTERTXT.COM").is_file());
 }
+
+/// What each call answers for a root, a folder, a file, a file used as a
+/// folder and a name in a missing folder, as MS-DOS 6.22 answers them in
+/// 86Box (A: there, C: here): `Ok(ax)` for CF clear, `Err(ax)` for CF
+/// set. The current directory is the root. Delete (41h) of a root and
+/// get attributes (4300h) of a name in a missing folder are 05h and 03h,
+/// where another folder and a name in a folder that is there are 02h.
+#[test]
+fn file_calls_answer_as_ms_dos_does() {
+    let base = scratch("ms_dos_codes", &["c/EXD"]);
+    fs::write(base.join("c/EXF.TXT"), b"file").unwrap();
+    fs::write(base.join("c/EXD/IN.TXT"), b"in").unwrap();
+    let mut cpu = Cpu::new(base.join("c"));
+    let roots = [r"C:\", r"\", "C:.", r"C:\.", r"C:\EXD\.."];
+    let folders = [r"C:\EXD", r"C:\EXD\.", "EXD"];
+    let elsewhere = [r"C:\EXF.TXT\X", r"C:\NEWD\X.TXT", r"C:\NEWD\SUB\X.TXT"];
+    let mut cases: Vec<(u16, &str, Result<u16, u16>)> = Vec::new();
+    for name in roots {
+        cases.push((0x5B00, name, Err(0x05)));
+        cases.push((0x4100, name, Err(0x05)));
+        cases.push((0x4300, name, Ok(0x10)));
+        cases.push((0x4301, name, Err(0x05)));
+    }
+    for name in [r"C:\", r"\", "C:.", r"C:\."] {
+        cases.push((0x3900, name, Err(0x05)));
+        cases.push((0x3A00, name, Err(0x10)));
+    }
+    for name in folders {
+        cases.push((0x5B00, name, Err(0x05)));
+        cases.push((0x3900, name, Err(0x05)));
+        cases.push((0x4100, name, Err(0x02)));
+        cases.push((0x4300, name, Ok(0x10)));
+    }
+    for name in elsewhere {
+        for call in [0x5B00, 0x3900, 0x3A00, 0x4100, 0x4300, 0x4301] {
+            cases.push((call, name, Err(0x03)));
+        }
+    }
+    for name in [r"C:\EXF.TXT", r"C:\EXD\IN.TXT"] {
+        cases.push((0x3900, name, Err(0x05)));
+        cases.push((0x3A00, name, Err(0x05)));
+        cases.push((0x5B00, name, Err(0x50)));
+        cases.push((0x4300, name, Ok(0x20)));
+    }
+    for call in [0x4100, 0x4300, 0x4301] {
+        cases.push((call, r"C:\NEWF.TXT", Err(0x02)));
+    }
+    for (call, name, want) in cases {
+        set_dsdx_string(&mut cpu, name);
+        cpu.set_ax(call);
+        cpu.set_cx(0x20);
+        cpu.set_cpu_flag(CpuFlags::CF, false);
+        int21::handle(&mut cpu);
+        let got = if cf(&cpu) { Err(cpu.ax()) } else { Ok(cpu.ax()) };
+        assert_eq!(got, want, "AX={call:04X} {name}");
+        if call == 0x4300 && !cf(&cpu) {
+            assert_eq!(cpu.cx(), cpu.ax(), "AX={call:04X} {name}");
+        }
+    }
+
+    // TRUENAME keeps a slash that ends the name and returns AX=005Ch.
+    for (name, want) in [
+        (r"C:\NEWD\", r"C:\NEWD\"),
+        (r"NEWD\", r"C:\NEWD\"),
+        ("C:/NEWD/", r"C:\NEWD\"),
+        (r"C:\EXF.TXT\", r"C:\EXF.TXT\"),
+        (r"C:\EXD\.", r"C:\EXD"),
+        (r"C:\EXD\..", r"C:\"),
+        (r"C:\", r"C:\"),
+    ] {
+        set_dsdx_string(&mut cpu, name);
+        cpu.set_si(0);
+        cpu.set_es(0x3000);
+        cpu.set_reg16(Register::DI, 0);
+        cpu.set_ax(0x6000);
+        int21::handle(&mut cpu);
+        assert!(!cf(&cpu), "{name}");
+        assert_eq!(cpu.ax(), 0x005C, "{name}");
+        let got: String = (0..128)
+            .map(|i| cpu.bus.read_8(0x30000 + i))
+            .take_while(|&b| b != 0)
+            .map(|b| b as char)
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    // Rename (56h), from DS:DX to ES:DI.
+    for (from, to, want) in [
+        (r"C:\EXF.TXT\", r"C:\NEW.TXT", 0x03),
+        (r"C:\EXF.TXT", r"C:\NEW.TXT\", 0x03),
+        (r"C:\EXF.TXT", r"C:\NEWD\", 0x03),
+        (r"C:\EXD\", r"C:\EXD2", 0x03),
+        (r"C:\EXD", r"C:\EXD2\", 0x03),
+        (r"C:\NEWD\X.TXT", r"C:\NEW.TXT", 0x03),
+        (r"C:\EXF.TXT", r"C:\NEWD\NEW.TXT", 0x03),
+        (r"C:\EXF.TXT", r"C:\", 0x05),
+        (r"C:\MISSING.TXT", r"C:\NEW.TXT", 0x02),
+        (r"C:\EXF.TXT", r"C:\EXD", 0x05),
+    ] {
+        set_dsdx_string(&mut cpu, from);
+        for (i, b) in to.bytes().chain(std::iter::once(0)).enumerate() {
+            cpu.bus.write_8(0x30000 + i, b);
+        }
+        cpu.set_es(0x3000);
+        cpu.set_reg16(Register::DI, 0);
+        cpu.set_ax(0x5600);
+        int21::handle(&mut cpu);
+        assert!(cf(&cpu), "{from} -> {to}");
+        assert_eq!(cpu.ax(), want, "{from} -> {to}");
+    }
+
+    let mut left: Vec<_> = fs::read_dir(base.join("c"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["EXD", "EXF.TXT"]);
+    assert_eq!(fs::read(base.join("c/EXF.TXT")).unwrap(), b"file");
+}

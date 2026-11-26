@@ -223,7 +223,7 @@ impl DiskController {
         // to `is_file` and opens.
         let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?;
         if missing || !hostfs::exists(&path) {
-            return Err(0x02); // File Not Found
+            return Err(self.missing_error(filename));
         }
 
         let mut attr: u16 = 0;
@@ -247,6 +247,10 @@ impl DiskController {
     /// Hidden/System bits. Directory and Volume Label bits cannot be set via
     /// this call on real DOS either.
     pub fn set_file_attribute(&self, filename: &str, attr: u16) -> Result<(), u8> {
+        // A root keeps its attributes: access denied (05h).
+        if self.is_root(filename) {
+            return Err(0x05);
+        }
         // A system file keeps its attributes, as it keeps its contents
         // until it is written to (system_files.rs); a setup that clears
         // the read-only bit before it copies over a file goes on.
@@ -280,7 +284,7 @@ impl DiskController {
         // to `is_file` and opens.
         let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?;
         if missing || !hostfs::exists(&path) {
-            return Err(0x02);
+            return Err(self.missing_error(filename));
         }
         self.check_writable(drive)?;
         if let Ok(meta) = hostfs::metadata(&path) {
@@ -296,8 +300,12 @@ impl DiskController {
 
     /// DOS AH=39h: Create a directory at the given DOS path.
     pub fn create_directory(&self, path: &str) -> Result<(), u8> {
-        // A system file or directory is there already.
-        if self.is_system_entry(path) {
+        // A system file or directory is there already, and so is a root
+        // (05h, where a name ending in a slash is 03h).
+        if ends_in_separator(path) {
+            return Err(0x03);
+        }
+        if self.is_system_entry(path) || self.is_root(path) {
             return Err(0x05);
         }
         self.make_system_dirs(path);
@@ -375,8 +383,12 @@ impl DiskController {
                 return Err(0x03);
             };
             let parts = refs(&parts);
-            if parts.is_empty() || !volume.find(&parts).is_ok_and(|e| e.is_dir()) {
-                return Err(0x03);
+            // A file is no folder to remove: access denied (05h).
+            match volume.find(&parts) {
+                _ if parts.is_empty() => return Err(0x03),
+                Ok(entry) if !entry.is_dir() => return Err(0x05),
+                Ok(_) => {}
+                Err(_) => return Err(0x03),
             }
             self.check_writable(drive_num)?;
             if self.drive(drive_num).is_some_and(|d| canonical_path(&parts) == d.current_dir) {
@@ -385,6 +397,9 @@ impl DiskController {
             return volume.rmdir(&parts);
         }
         let (host_path, dos_form) = self.resolve_names_on(drive_num, rest).ok_or(0x03)?;
+        if hostfs::is_file(&host_path) {
+            return Err(0x05);
+        }
         if !hostfs::is_dir(&host_path) {
             return Err(0x03);
         }
