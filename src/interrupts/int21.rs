@@ -2140,6 +2140,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 let mut pattern = read_asciiz_string(&mut cpu.bus, name_addr);
                 // "C:\GAMES\" finds nothing, not even the folder.
                 if ends_in_separator(&pattern) {
+                    cpu.bus.log_limited(("find", &pattern, 0x03u8), || {
+                        format!("[DOS] FindFirst Failed: Pattern='{pattern}' Error=03")
+                    });
                     set_result(cpu, Err(0x03));
                     return;
                 }
@@ -2701,12 +2704,16 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x6C => {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.si());
             let filename = read_asciiz_string(&mut cpu.bus, addr);
+            // Whatever the action, before the name is looked up.
+            if ends_in_separator(&filename) {
+                set_result(cpu, Err(0x03));
+                return;
+            }
             let mode = cpu.get_reg8(Register::BL);
             let action = cpu.get_dl();
             let exists = cpu.bus.disk.is_file(&filename);
             let psp = cpu.current_psp;
             let result = match (exists, action & 0x0F, action >> 4) {
-                _ if ends_in_separator(&filename) => Err(0x03),
                 (true, 1, _) => cpu.bus.disk.open_file(&filename, mode, psp).map(|h| (h, 1)),
                 (true, 2, _) => cpu.bus.disk.create_file(&filename, psp).map(|h| (h, 3)),
                 (true, _, _) => Err(0x50),

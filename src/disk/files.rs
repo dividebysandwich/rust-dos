@@ -382,11 +382,12 @@ impl DiskController {
 
     /// INT 21h, AH=5Bh: create a file that must not exist yet.
     pub fn create_new_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
-        self.host_dirs.creating();
-        // "C:\GAMES\" is no file that is there (`ends_in_separator`).
-        if self.device(filename).is_none() && ends_in_separator(filename) {
+        // "C:\GAMES\" is no file that is there (`ends_in_separator`). No
+        // device's name ends in a slash: its last name is empty.
+        if ends_in_separator(filename) {
             return Err(0x03);
         }
+        self.host_dirs.creating();
         if self.device(filename).is_none() && self.exists(filename) {
             return Err(0x50); // File exists
         }
