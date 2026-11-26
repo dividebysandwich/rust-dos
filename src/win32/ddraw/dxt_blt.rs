@@ -20,10 +20,13 @@
 //! - A DXT destination takes the blocks of a source of its format, when
 //!   the rectangles are the same size and on block boundaries. Windows
 //!   compresses whatever else is blitted to a DXT surface (another
-//!   format, a stretch, a rectangle within blocks): DXT1 to DXT3 or
-//!   DXT5, DXT3 to DXT1, and an RGB surface to DXT1 or DXT3 gave DD_OK
-//!   there. Here `compress` does it with `video::dxt`'s encoder, whose
-//!   blocks are a good S3TC encoder's rather than Microsoft's (#880).
+//!   format, a stretch, a rectangle within blocks). On Windows 98 SE a
+//!   whole DXT1 to DXT3 blit gave DD_OK. On Windows 11, DXT1 to DXT3 or
+//!   DXT5, DXT3 to DXT1, R5G6B5 and A8R8G8B8 to DXT1, and A8R8G8B8 to
+//!   DXT3 gave DD_OK whole, between rectangles within blocks and shrunk
+//!   (the same probe, #882). Here `compress` does it with
+//!   `video::dxt`'s encoder, whose blocks are a good S3TC encoder's
+//!   rather than Microsoft's (#880).
 //!   The blocks the destination's rectangle cuts are decoded, given the
 //!   new pixels, and compressed again. An RGB source is stretched as the
 //!   RGB blits stretch, a DXT source as a blit out of DXT does. Into
@@ -217,8 +220,13 @@ pub(super) fn decode(
 
 /// The 8-bit value of the channel `mask` of the pixel `value`: its bits
 /// repeated below themselves, so that the channel's largest value is
-/// 255, or of a channel of more than 8 bits, its top 8.
+/// 255, or of a channel of more than 8 bits, its top 8. 0 for a
+/// channel the format has no bits for: a program may create an RGB
+/// surface with a mask of 0.
 fn widen(value: u32, mask: u32) -> u8 {
+    if mask == 0 {
+        return 0;
+    }
     let bits = mask.count_ones();
     let v = (value & mask) >> mask.trailing_zeros();
     if bits >= 8 {
@@ -272,12 +280,17 @@ fn rgb_pixels(
     let columns: Vec<usize> = (area.left..area.right)
         .map(|x| under(x, dst.left, dw, sw, mirror[0]) as usize)
         .collect();
-    let mut row = vec![0u8; sw as usize * bytes];
+    // The source's rectangle, read once: a stretch up reads its rows
+    // more than once, and a ToadForce reads back the rows of a surface
+    // in its memory at once (`surface::read_rows`).
+    let len = sw as usize * bytes;
+    let mut data = vec![0u8; len * sh as usize];
+    let first = r.top as u32 * s.pitch + r.left as u32 * bytes as u32;
+    surface::read_rows(cpu, s, first, len, &mut data);
     let mut out = Vec::with_capacity(columns.len() * area.height() as usize);
     for y in area.top..area.bottom {
-        let v = under(y, dst.top, dh, sh, mirror[1]) as u32;
-        let from = (r.top as u32 + v) * s.pitch + r.left as u32 * bytes as u32;
-        surface::read_bytes(cpu, s, from, &mut row);
+        let v = under(y, dst.top, dh, sh, mirror[1]) as usize;
+        let row = &data[v * len..][..len];
         out.extend(columns.iter().map(|&u| {
             let mut v = [0u8; 4];
             v[..bytes].copy_from_slice(&row[u * bytes..][..bytes]);
@@ -346,6 +359,19 @@ pub(super) fn compress(
                 }
             }
             if touched {
+                // A mipmap level under 4 pixels a side is one block whose
+                // texels past its edge are never shown: they repeat the
+                // ones at the edge, so that the encoder fits its colours
+                // to the pixels shown only.
+                let (w, h) = (d.width as i32 - x, d.height as i32 - y);
+                if w < 4 || h < 4 {
+                    let shown = texels;
+                    for (i, t) in texels.iter_mut().enumerate() {
+                        let (tx, ty) = ((i % 4) as i32, (i / 4) as i32);
+                        let (sx, sy) = (tx.min(w - 1), ty.min(h - 1));
+                        *t = shown[(sy * 4 + sx) as usize];
+                    }
+                }
                 block.copy_from_slice(&dxt::encode_block(format, &texels));
             }
         }
@@ -498,5 +524,18 @@ mod tests {
             to_pixel([0xFF, 0x80, 0x01, 0xFF], &a2r10g10b10),
             0xC000_0000 | 0x3FC << 20 | 0x200 << 10 | 0x004
         );
+    }
+
+    /// A pixel read for compression has each channel's bits repeated
+    /// to 8, and a channel with a mask of 0 reads as 0.
+    #[test]
+    fn a_pixel_is_read_with_its_bits_repeated() {
+        let a1r5g5b5 = rgb(16, 0x7C00, 0x03E0, 0x001F, 0x8000);
+        assert_eq!(from_pixel(0xFC1F, &a1r5g5b5), [255, 0, 255, 255]);
+        assert_eq!(from_pixel(0x4210, &a1r5g5b5), [132, 132, 132, 0]);
+        let a4r4g4b4 = rgb(16, 0x0F00, 0x00F0, 0x000F, 0xF000);
+        assert_eq!(from_pixel(0x8A5F, &a4r4g4b4), [0xAA, 0x55, 0xFF, 0x88]);
+        let no_masks = rgb(16, 0, 0, 0, 0);
+        assert_eq!(from_pixel(0xFFFF, &no_masks), [0, 0, 0, 255]);
     }
 }

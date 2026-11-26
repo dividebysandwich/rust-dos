@@ -134,6 +134,11 @@ fn colour_block(format: Format, pixels: &[Rgba; 16], c0: u16, c1: u16) -> Option
 /// The main axis of the colours `cs` around their mean `mean`: the
 /// eigenvector of their covariance with the largest eigenvalue, found
 /// by repeated multiplication. Zero when they are all one colour.
+///
+/// The multiplication starts from the covariance's column of the
+/// channel that varies most. A fixed start such as grey (1, 1, 1) is
+/// at right angles to the axis of colours whose channels add up to the
+/// same sum, red and green for one, and would give no axis for them.
 fn main_axis(cs: &[Colour], mean: Colour) -> Colour {
     let mut cov = [[0f32; 3]; 3];
     for c in cs {
@@ -144,7 +149,8 @@ fn main_axis(cs: &[Colour], mean: Colour) -> Colour {
             }
         }
     }
-    let mut axis = [1.0, 1.0, 1.0];
+    let widest = (0..3).fold(0, |w, k| if cov[k][k] > cov[w][w] { k } else { w });
+    let mut axis = cov[widest];
     for _ in 0..8 {
         let next: Colour = std::array::from_fn(|i| {
             cov[i][0] * axis[0] + cov[i][1] * axis[1] + cov[i][2] * axis[2]
@@ -312,6 +318,18 @@ mod tests {
         }
     }
 
+    /// Two colours whose channels add up to the same sum, red and green
+    /// half the pixels each, come back exactly too.
+    #[test]
+    fn red_and_green_come_back_exactly() {
+        let (a, b) = ([255, 0, 0, 255], [0, 255, 0, 255]);
+        let pixels: [Rgba; 16] = std::array::from_fn(|i| if i % 2 == 0 { a } else { b });
+        for format in FORMATS {
+            let block = encode_block(format, &pixels);
+            assert_eq!(decoded(format, &block), pixels, "{format:?}");
+        }
+    }
+
     /// A ramp of 16 greys on four codes comes back within half the step
     /// between two codes (255 / 3 / 2) of each pixel.
     #[test]
@@ -381,8 +399,9 @@ mod tests {
         assert_eq!(out.map(|p| p[3]), ends.map(|p| p[3]));
     }
 
-    /// The colours of a DXT3 or DXT5 block made here decode the same
-    /// under DirectDraw's rules as under the specification's.
+    /// A DXT1 or DXT3 block made here decodes the same under
+    /// DirectDraw's rules as under the specification's: DXT3's colour
+    /// half is the one DXT2 to DXT5 share, and its alpha has one rule.
     #[test]
     fn colour_halves_decode_alike_under_both_rules() {
         let mut seed = 0x9E37_79B9u32;
