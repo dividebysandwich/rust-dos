@@ -155,6 +155,14 @@ pub struct Config {
     /// `renderer()` puts them together.
     pub voodoo_renderer: Option<crate::voodoo::Renderer>,
     pub toadforce_renderer: Option<crate::toadforce::Renderer>,
+    /// The lines that set what draws for a 3dfx card and for a ToadForce:
+    /// each one's number, from 1, and its text, a `renderer` line or the
+    /// card's old line (`renderer_conflict`).
+    pub renderer_lines: [Option<(usize, String)>; 2],
+    /// The old settings' lines, `voodoo_renderer` and
+    /// `toadforce_renderer`, each one's number and text
+    /// (`renderer_deprecation`).
+    pub renderer_old_lines: Vec<(usize, String)>,
     /// The 3dfx card (`voodoo`), its chip (`voodoo_model`), its memory
     /// (`voodoo_memory`), at what size OpenGL draws for it
     /// (`voodoo_scale`) and with how many samples a pixel
@@ -366,6 +374,10 @@ pub struct Config {
     pub game_install: Vec<(String, String)>,
     /// Problems worth telling the user about; none of them are fatal.
     pub warnings: Vec<String>,
+    /// Problems that keep the configuration from being used: rust-dos
+    /// doesn't start with a configuration file that has one, nor launch a
+    /// game whose profile has one.
+    pub errors: Vec<String>,
 }
 
 impl Config {
@@ -381,16 +393,74 @@ impl Config {
     }
 
     /// What `renderer` and the old lines after it ask for together
-    /// (`Renderer::of_cards`), and whether it draws each card as the old
-    /// lines ask; None when no line sets any of them.
-    pub fn renderer(&self) -> Option<(Renderer, bool)> {
-        if self.voodoo_renderer.is_none() && self.toadforce_renderer.is_none() {
-            return self.renderer.map(|renderer| (renderer, true));
+    /// (`Renderer::of_cards`); None when no line sets any of them, or
+    /// when they ask for two renderers (`renderer_conflict`). A card
+    /// without an old line after the last `renderer` line takes that
+    /// line's value, and one old line with no `renderer` line before it,
+    /// or `renderer=auto`, gives its own value: `auto` asks for each
+    /// card's default, as no line does, so that a game profile's old line
+    /// reads the same over a configuration file with `renderer=auto` as
+    /// over one without the line.
+    pub fn renderer(&self) -> Option<Renderer> {
+        let base = self.renderer.filter(|&renderer| renderer != Renderer::Auto);
+        let voodoo = self.voodoo_renderer.map(Renderer::of_voodoo).or(base);
+        let toadforce = self.toadforce_renderer.map(Renderer::of_toadforce).or(base);
+        match (voodoo, toadforce) {
+            (Some(voodoo), Some(toadforce)) => Renderer::of_cards(voodoo, toadforce),
+            (one, other) => one.or(other).or(self.renderer),
         }
-        let base = self.renderer.unwrap_or_default();
-        Some(Renderer::of_cards(
-            self.voodoo_renderer.unwrap_or(base.voodoo()),
-            self.toadforce_renderer.unwrap_or(base.toadforce()),
+    }
+
+    /// The error for lines that ask for two renderers, `opengl` for one
+    /// card and `software` for the other, which no `renderer` value stands
+    /// for; None when they don't. `name` names a line by its number
+    /// (`renderer_lines`): text made of several files' text names each
+    /// one's own lines.
+    pub fn renderer_conflict(&self, name: impl Fn(usize) -> String) -> Option<String> {
+        let old = self.voodoo_renderer.is_some() || self.toadforce_renderer.is_some();
+        if !old || self.renderer().is_some() {
+            return None;
+        }
+        let line = |at: &Option<(usize, String)>| match at {
+            Some((number, text)) => format!("{} ({})", name(*number), text),
+            None => "the default".to_string(),
+        };
+        Some(format!(
+            "{} and {} ask for two renderers, OpenGL for one card and software for the other; \
+             write one renderer line in their place: renderer=opengl or renderer=software, \
+             for both cards",
+            line(&self.renderer_lines[0]),
+            line(&self.renderer_lines[1]),
+        ))
+    }
+
+    /// `renderer_conflict` for the text of a file (`own`) after the text
+    /// `base`, the settings it goes over as a file would have them: the
+    /// lines of `own` by their own numbers.
+    pub fn renderer_conflict_over(&self, base: &str) -> Option<String> {
+        let base_lines = base.lines().count();
+        self.renderer_conflict(|number| match number.checked_sub(base_lines) {
+            Some(own) if own > 0 => format!("its line {}", own),
+            _ => "the settings it goes over".to_string(),
+        })
+    }
+
+    /// The warning for the old settings' lines (`renderer_old_lines`),
+    /// which name the value they ask for as `value`; None without any.
+    pub fn renderer_deprecation(&self, value: Renderer) -> Option<String> {
+        if self.renderer_old_lines.is_empty() {
+            return None;
+        }
+        let lines: Vec<String> = self
+            .renderer_old_lines
+            .iter()
+            .map(|(number, text)| format!("line {number} ({text})"))
+            .collect();
+        Some(format!(
+            "{}: voodoo_renderer and toadforce_renderer are deprecated and will stop working in \
+             a future version; replace them with one line renderer={}",
+            lines.join(", "),
+            value.name()
         ))
     }
 }
@@ -520,8 +590,10 @@ pub fn write_template(path: &Path) -> std::io::Result<()> {
     file.write_all(TEMPLATE.as_bytes())
 }
 
-/// Locate, read and parse the configuration. Only a missing or unreadable
-/// `--config` file is an error; everything else degrades to warnings.
+/// Locate, read and parse the configuration. A missing or unreadable
+/// `--config` file is an error, and so is a file with lines that
+/// contradict each other (`Config::errors`); everything else degrades to
+/// warnings.
 pub fn load(
     cli: Option<&Path>,
     cwd: &Path,
@@ -567,6 +639,11 @@ pub fn load(
     let absolute = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
     let base_dir = absolute.parent().unwrap_or(cwd);
     let mut config = parse(&text, base_dir, home);
+    if !config.errors.is_empty() {
+        let errors: Vec<String> =
+            config.errors.iter().map(|e| format!("{}: {}", path.display(), e)).collect();
+        return Err(errors.join("\n"));
+    }
     config.warnings = config
         .warnings
         .into_iter()

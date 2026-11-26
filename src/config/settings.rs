@@ -334,7 +334,7 @@ impl Settings {
                 era: config.composite_era.unwrap_or(default.composite.era),
             },
             machine: config.machine.unwrap_or(default.machine),
-            renderer: config.renderer().map_or(default.renderer, |(renderer, _)| renderer),
+            renderer: config.renderer().unwrap_or(default.renderer),
             voodoo: crate::voodoo::VoodooSettings {
                 enabled: config.voodoo.unwrap_or(default.voodoo.enabled),
                 board: {

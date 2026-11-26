@@ -205,13 +205,19 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 config.renderer = Some(renderer);
                                 config.voodoo_renderer = None;
                                 config.toadforce_renderer = None;
+                                let at = Some((index + 1, line.to_string()));
+                                config.renderer_lines = [at.clone(), at];
                             }
                             None => warn(format!(
                                 "invalid renderer '{value}' (auto, opengl or software)"
                             )),
                         },
                         "toadforce_renderer" => match crate::toadforce::Renderer::parse(value) {
-                            Some(renderer) => config.toadforce_renderer = Some(renderer),
+                            Some(renderer) => {
+                                config.toadforce_renderer = Some(renderer);
+                                config.renderer_lines[1] = Some((index + 1, line.to_string()));
+                                config.renderer_old_lines.push((index + 1, line.to_string()));
+                            }
                             None => warn(format!(
                                 "invalid toadforce_renderer '{}' (auto, opengl or software)",
                                 value
@@ -259,7 +265,11 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             None => warn(format!("invalid voodoo_memory '{}' (4, 8 or 12)", value)),
                         },
                         "voodoo_renderer" => match crate::voodoo::Renderer::parse(value) {
-                            Some(renderer) => config.voodoo_renderer = Some(renderer),
+                            Some(renderer) => {
+                                config.voodoo_renderer = Some(renderer);
+                                config.renderer_lines[0] = Some((index + 1, line.to_string()));
+                                config.renderer_old_lines.push((index + 1, line.to_string()));
+                            }
                             None => warn(format!("invalid voodoo_renderer '{}' (software or opengl)", value)),
                         },
                         "voodoo_texture_sampling" => match crate::voodoo::TextureSampling::parse(value) {
@@ -802,17 +812,15 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
     if vr_before_auto {
         config.vr.from_before_auto();
     }
-    // The old settings' one pair `renderer` has no value for. The 3dfx
-    // part may come from a `renderer=opengl` line before the old line,
-    // such as the base settings' under a game profile's own lines.
-    if let Some((_, false)) = config.renderer() {
-        warnings.push(
-            "toadforce_renderer=software with the 3dfx cards on OpenGL (voodoo_renderer=opengl \
-             or renderer=opengl) has no renderer setting: both cards draw with OpenGL, as \
-             renderer=opengl has them; write renderer=opengl, or renderer=software for both \
-             in software"
-                .to_string(),
-        );
+    // Lines that ask for OpenGL for one card and software for the other,
+    // which `renderer` has no value for, are an error. One card's part
+    // may come from a `renderer` line before the other's old line, such
+    // as the base settings' under a game profile's own lines.
+    config.errors.extend(config.renderer_conflict(|number| format!("line {number}")));
+    // The old settings are read, with a warning that they will stop
+    // working, which names the line to write in their place.
+    if let Some(value) = config.renderer() {
+        warnings.extend(config.renderer_deprecation(value));
     }
     config.warnings = warnings;
     config

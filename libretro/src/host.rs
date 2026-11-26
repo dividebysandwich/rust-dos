@@ -66,8 +66,9 @@ impl Machine {
         self.cpu.bus.log_string(&format!("[CONFIG] Warning: {}", message));
     }
 
-    /// The settings the options and the files make now, below the game's.
-    pub fn base_settings(&self) -> (Settings, Vec<String>) {
+    /// The settings the options and the files make now, below the game's,
+    /// or the error of a file with lines that contradict each other.
+    pub fn base_settings(&self) -> Result<(Settings, Vec<String>), String> {
         content::settings(&self.base, &self.options, self.overlay.as_ref())
     }
 
@@ -96,7 +97,7 @@ impl Machine {
         if let Some(previous) = self.game.take() {
             self.end_game(previous);
         }
-        let (base, _) = self.base_settings();
+        let (base, _) = self.base_settings()?;
         let mut prepared = games::prepare(id, &base, text, dir, content::home().as_deref())?;
         for warning in &prepared.warnings {
             self.warn(&format!("{}.conf: {}", id, warning));
@@ -156,7 +157,16 @@ impl Machine {
     pub fn options_changed(&mut self, options: Values) {
         let memsize_before = self.options.get("memsize").map(str::to_string);
         self.options = options;
-        let (base, warnings) = self.base_settings();
+        // The files were read without an error as the core started, and
+        // the options write only a `renderer` line, which takes back the
+        // old lines before it: they can't make one now.
+        let (base, warnings) = match self.base_settings() {
+            Ok(base) => base,
+            Err(e) => {
+                self.warn(&e);
+                return;
+            }
+        };
         for warning in warnings {
             self.warn(&warning);
         }

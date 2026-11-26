@@ -152,23 +152,37 @@ pub fn home() -> Option<PathBuf> {
 
 /// The settings: rust-dos.conf's, the core options' over them, and the
 /// overlay's over those. A game profile goes over these as it is launched.
-pub fn settings(base: &Base, options: &Values, overlay: Option<&Overlay>) -> (Settings, Vec<String>) {
+/// A file with lines that contradict each other (`Config::errors`) is an
+/// error.
+pub fn settings(
+    base: &Base,
+    options: &Values,
+    overlay: Option<&Overlay>,
+) -> Result<(Settings, Vec<String>), String> {
     let home = home();
     let text = format!("{}\n{}", base.text, options.config_text());
     let parsed = config::parse(&text, base.dir(), home.as_deref());
+    if !parsed.errors.is_empty() {
+        let file = base.file.display();
+        let errors: Vec<String> = parsed.errors.iter().map(|e| format!("{file}: {e}")).collect();
+        return Err(errors.join("\n"));
+    }
     let mut warnings: Vec<String> = parsed.warnings.iter().map(|w| format!("rust-dos.conf: {}", w)).collect();
     let mut settings = Settings::from_config(&parsed);
     if let Some(overlay) = overlay {
-        let layered = format!(
-            "{}\n{}",
-            config::update_text("", &Settings::default(), &settings, &[], home.as_deref()),
-            overlay.text
+        let below = format!(
+            "{}\n",
+            config::update_text("", &Settings::default(), &settings, &[], home.as_deref())
         );
+        let layered = format!("{}{}", below, overlay.text);
         let parsed = config::parse(&layered, &overlay.dir, home.as_deref());
+        if let Some(error) = parsed.renderer_conflict_over(&below) {
+            return Err(format!("{}: {}", overlay.dir.join("rust-dos.conf").display(), error));
+        }
         warnings.extend(parsed.warnings.iter().map(|w| format!("{}: {}", overlay.dir.join("rust-dos.conf").display(), w)));
         settings = Settings::from_config(&parsed);
     }
-    (frontend_settings(settings), warnings)
+    Ok((frontend_settings(settings), warnings))
 }
 
 /// What the frontend does in the core's place: it rewinds, and
@@ -390,7 +404,8 @@ mod tests {
         assert!(plan.profile.is_none());
         let overlay = plan.overlay.unwrap();
         assert!(!has_autoexec(&overlay.text));
-        let (settings, warnings) = settings(&Base::load(&dirs), &Values::default(), Some(&overlay));
+        let (settings, warnings) =
+            settings(&Base::load(&dirs), &Values::default(), Some(&overlay)).unwrap();
         assert!(warnings.is_empty(), "{:?}", warnings);
         assert_eq!(settings.cycles, rust_dos::timer::CpuSpeed::Fixed(5000));
     }
@@ -504,9 +519,31 @@ mod tests {
         let mut options = Values::default();
         options.set("cycles", "20000");
         options.set("ems", "default");
-        let (settings, _) = settings(&Base::load(&dirs), &options, None);
+        let (settings, _) = settings(&Base::load(&dirs), &options, None).unwrap();
         assert_eq!(settings.cycles, rust_dos::timer::CpuSpeed::Fixed(20000));
         assert!(!settings.ems);
         assert!(!settings.rewind, "the frontend rewinds");
+    }
+
+    #[test]
+    fn a_rust_dos_conf_that_asks_for_two_renderers_is_an_error() {
+        let dir = scratch("two_renderers");
+        let dirs = Dirs::new(dir.join("system"), dir.join("saves"));
+        fs::create_dir_all(&dirs.sys).unwrap();
+        let file = dirs.sys.join("rust-dos.conf");
+        let text = "[emulator]\nvoodoo_renderer=opengl\ntoadforce_renderer=software\n";
+        fs::write(&file, text).unwrap();
+        let error = settings(&Base::load(&dirs), &Values::default(), None).unwrap_err();
+        assert!(error.starts_with(&format!("{}: ", file.display())), "{error}");
+        assert!(error.contains("ask for two renderers"), "{error}");
+
+        // An overlay's old line against rust-dos.conf's `renderer`.
+        fs::write(&file, "[emulator]\nrenderer=opengl\n").unwrap();
+        let overlay = Overlay {
+            text: "[emulator]\ntoadforce_renderer=software\n".to_string(),
+            dir: dir.join("game"),
+        };
+        let error = settings(&Base::load(&dirs), &Values::default(), Some(&overlay)).unwrap_err();
+        assert!(error.contains("its line 2 (toadforce_renderer=software)"), "{error}");
     }
 }

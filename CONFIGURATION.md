@@ -1882,11 +1882,14 @@ order.
   the window has it), `opengl` (your graphics card draws both) or
   `software` (the CPU draws both). See [choosing a
   renderer](#choosing-a-renderer). It changes at once. The old settings
-  `voodoo_renderer` and `toadforce_renderer`, one for each card, are still
-  read: a `voodoo_renderer=opengl` line gives `opengl`, and otherwise
-  `toadforce_renderer=software` gives `software` and anything else `auto`;
-  a `renderer` line after them goes over them, and the settings window
-  writes `renderer` in their place.
+  `voodoo_renderer` and `toadforce_renderer`, one for each card, are
+  deprecated and still read, each giving its value. Both together must
+  agree: `software` with `opengl` stops rust-dos with an error that names
+  the two lines, and the pair the settings window of earlier versions
+  wrote by default, `voodoo_renderer=software` with
+  `toadforce_renderer=auto`, gives `auto`. A `renderer` line after them
+  goes over them. The log warns that they will stop working in a future
+  version, and the settings window writes `renderer` in their place.
 * `voodoo`, `voodoo_model`, `voodoo_memory`, `voodoo_scale`,
   `voodoo_msaa`, `voodoo_anisotropy`, `voodoo_dither`, `voodoo_readback`,
   `voodoo_scale_shader`, `voodoo_texture_sampling` and `voodoo_gamma` set

@@ -308,11 +308,33 @@ pub fn prepare(id: &str, base: &Settings, text: &str, dir: &Path, home: Option<&
     if own.autoexec.is_empty() {
         return Err(format!("The profile {} has no commands to start the game ([autoexec])", id));
     }
+    if !own.errors.is_empty() {
+        return Err(format!("The profile {}: {}", id, own.errors.join("; ")));
+    }
     // The configuration's settings as a file would have them, then the
     // profile's, which win.
-    let layered = format!("{}\n{}", config::update_text("", &Settings::default(), base, &[], home), text);
-    let mut settings = Settings::from_config(&config::parse(&layered, dir, home));
-    let mut warnings = own.warnings;
+    let base_text = format!("{}\n", config::update_text("", &Settings::default(), base, &[], home));
+    let layered = config::parse(&format!("{}{}", base_text, text), dir, home);
+    // The profile's old renderer lines over the configuration's
+    // `renderer` can ask for two renderers too.
+    if let Some(error) = layered.renderer_conflict_over(&base_text) {
+        return Err(format!("The profile {}: {}", id, error));
+    }
+    let mut settings = Settings::from_config(&layered);
+    let mut warnings = own.warnings.clone();
+    // The warning for the profile's old renderer lines names the value
+    // they give over the configuration's `renderer`, which is what the
+    // game draws with.
+    if let (Some(alone), Some(over)) = (own.renderer(), layered.renderer()) {
+        let (alone, over) = (own.renderer_deprecation(alone), own.renderer_deprecation(over));
+        if let (Some(alone), Some(over)) = (alone, over) {
+            for warning in &mut warnings {
+                if *warning == alone {
+                    *warning = over.clone();
+                }
+            }
+        }
+    }
     let boots = own.autoexec.iter().any(|line| starts_with_word(line, "BOOT"));
     match own.game_windows.as_deref() {
         // Its .exe runs in the built-in Windows.

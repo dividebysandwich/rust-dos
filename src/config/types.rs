@@ -152,28 +152,38 @@ impl Renderer {
         }
     }
 
-    /// The setting that stands for what the old settings
-    /// `voodoo_renderer` and `toadforce_renderer` ask for together, and
-    /// whether each card still draws with the renderer they ask for,
-    /// OpenGL or software. Only a 3dfx card on OpenGL with a ToadForce in
-    /// software has no setting of its own: it gets `opengl`, so the
-    /// ToadForce draws with OpenGL too. A ToadForce's `auto` and `opengl`
-    /// both draw with OpenGL, and differ in the setup crash guard, which
-    /// only `auto` keeps: `toadforce_renderer=opengl` with a 3dfx card in
-    /// software reads as `auto`, which keeps the guard, and
-    /// `voodoo_renderer=opengl` with `toadforce_renderer=auto` reads as
-    /// `opengl`, which skips it.
-    pub fn of_cards(
-        voodoo: crate::voodoo::Renderer,
-        toadforce: crate::toadforce::Renderer,
-    ) -> (Self, bool) {
-        use crate::toadforce::Renderer as T;
-        use crate::voodoo::Renderer as V;
+    /// The value an old `voodoo_renderer` line asks for.
+    pub fn of_voodoo(renderer: crate::voodoo::Renderer) -> Self {
+        match renderer {
+            crate::voodoo::Renderer::Software => Self::Software,
+            crate::voodoo::Renderer::OpenGl => Self::OpenGl,
+        }
+    }
+
+    /// The value an old `toadforce_renderer` line asks for.
+    pub fn of_toadforce(renderer: crate::toadforce::Renderer) -> Self {
+        match renderer {
+            crate::toadforce::Renderer::Auto => Self::Auto,
+            crate::toadforce::Renderer::OpenGl => Self::OpenGl,
+            crate::toadforce::Renderer::Software => Self::Software,
+        }
+    }
+
+    /// The setting that stands for what is asked for the 3dfx cards and
+    /// for the ToadForce, each by its old line (`of_voodoo`,
+    /// `of_toadforce`) or by a `renderer` line before it. `auto` agrees
+    /// with either value, and the other value wins; the 3dfx cards in
+    /// software with the ToadForce on `auto`, the pair the settings window
+    /// of an earlier rust-dos wrote by default, gives `auto`, as both are
+    /// each card's default. `opengl` with `software`, either way round,
+    /// asks for two renderers: None, an error in the file
+    /// (`Config::errors`).
+    pub fn of_cards(voodoo: Self, toadforce: Self) -> Option<Self> {
         match (voodoo, toadforce) {
-            (V::Software, T::Auto | T::OpenGl) => (Self::Auto, true),
-            (V::Software, T::Software) => (Self::Software, true),
-            (V::OpenGl, T::Auto | T::OpenGl) => (Self::OpenGl, true),
-            (V::OpenGl, T::Software) => (Self::OpenGl, false),
+            (Self::OpenGl, Self::Software) | (Self::Software, Self::OpenGl) => None,
+            (Self::Software, Self::Auto) => Some(Self::Auto),
+            (Self::Auto, other) | (other, Self::Auto) => Some(other),
+            (same, _) => Some(same),
         }
     }
 }

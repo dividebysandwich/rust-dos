@@ -166,7 +166,7 @@ impl Core {
         let base = Base::load(&dirs);
         content::add_os_dirs(&dirs.system);
         let plan = content::plan(content.as_deref(), &dirs, options.boot(), options.boot_os())?;
-        let (settings, mut warnings) = content::settings(&base, &options, plan.overlay.as_ref());
+        let (settings, mut warnings) = content::settings(&base, &options, plan.overlay.as_ref())?;
         let home = content::home();
         let memory = match &plan.profile {
             Some(p) => {
