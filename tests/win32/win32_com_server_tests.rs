@@ -1277,3 +1277,56 @@ fn another_process_finds_an_object_in_the_running_object_table() {
         assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {}", printed(&cpu));
     }
 }
+
+#[test]
+fn revoke_releases_the_object_and_register_sets_its_time() {
+    // 0x00: "!", 0x04: "Test", 0x20: a path, 0xA0: the item moniker,
+    // 0xA4: the file moniker that stands for the object, 0xA8: the
+    // table, 0xAC: the hash, 0xB0: the cookie, 0xB8: a FILETIME.
+    let mut data = vec![0u8; 0x100];
+    put(&mut data, 0x00, &wide("!"));
+    put(&mut data, 0x04, &wide("Test"));
+    put(&mut data, 0x20, &wide("C:\\A.TXT"));
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        (
+            "OLE32.dll",
+            &[
+                "CoInitialize",
+                "CreateFileMoniker",
+                "CreateItemMoniker",
+                "GetRunningObjectTable",
+            ],
+        ),
+    ];
+    let code = program(imports, &data, |a, l| {
+        use Arg::{Imm, Var};
+        a.xor(ebx, ebx)?;
+        call(a, l.import(1), &[0])?;
+        call(a, l.import(3), &[l.at(0), l.at(4), l.at(0xA0)])?;
+        call(a, l.import(2), &[l.at(0x20), l.at(0xA4)])?;
+        // Hash(&hash): Windows' of the item "Test", as Wine's tests have.
+        call_method(a, l.at(0xA0), 14, &[l.at(0xAC)])?;
+        check_var(a, l.var(0xAC), 0x73C, 0)?;
+        call(a, l.import(4), &[0, l.at(0xA8)])?;
+        let args = [Imm(0), Var(l.var(0xA4)), Var(l.var(0xA0)), Imm(l.at(0xB0))];
+        call_with(a, l.at(0xA8), 3, &args)?;
+        check_eax(a, 0, 1)?;
+        // GetTimeOfLastChange(moniker, &time): Register's time.
+        call_with(a, l.at(0xA8), 8, &[Var(l.var(0xA0)), Imm(l.at(0xB8))])?;
+        check_eax(a, 0, 2)?;
+        // Revoke(cookie) releases the table's reference before it
+        // returns, so the program's Release is the last.
+        call_with(a, l.at(0xA8), 4, &[Var(l.var(0xB0))])?;
+        check_eax(a, 0, 3)?;
+        call_method(a, l.at(0xA4), 2, &[])?;
+        check_eax(a, 0, 4)?;
+        a.or(ebx, 0xE0)?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let mut cpu = machine("rot_revoke_release", core, &code);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {}", printed(&cpu));
+    }
+}
