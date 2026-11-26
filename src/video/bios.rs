@@ -138,9 +138,55 @@ pub fn reset_for_shell(bus: &mut Bus) {
         bus.vga.sum_to_gray(0..256);
     }
     bus.vbe.reset();
+    load_mode_font(bus);
     // A ToadForce counts the retraces of the text mode's timing from
     // here.
     bus.toadforce_retime();
+}
+
+/// The ROM font of a character height: 8x8 up to 10 lines, 8x14 up to 14
+/// and 8x16 above, as the text modes' cells take them.
+pub fn rom_font(height: u16) -> (&'static [u8], usize) {
+    match height {
+        1..=10 => (super::font_8x8(), 8),
+        11..=14 => (super::font_8x14(), 14),
+        _ => (super::font_8x16(), 16),
+    }
+}
+
+/// The text mode's font into plane 2 as an EGA's or VGA's BIOS loads it
+/// at a mode set (`load_text_font`), and map 0 selected for all
+/// characters. Nothing on other adapters, or in a graphics mode.
+pub fn load_mode_font(bus: &mut Bus) {
+    if load_text_font(bus) {
+        bus.vga.sequencer_regs[0x03] = 0;
+    }
+}
+
+/// The ROM font of the text mode's character height (BDA 0485h) into map
+/// 0 of plane 2, with the alternate glyphs of 9-dot cells in the
+/// monochrome mode, leaving Character Map Select as it is. False, with
+/// nothing loaded, on other adapters or in a graphics mode.
+pub fn load_text_font(bus: &mut Bus) -> bool {
+    if !bus.vga.adapter.ega_bios() || !bus.video_mode.is_text() {
+        return false;
+    }
+    let (font, height) = rom_font(bus.read_16(0x0485));
+    bus.vga.load_font(0, 0, height, font);
+    let alternate = match height {
+        16 => super::FONT_9X16_ALTERNATE,
+        14 => super::FONT_9X14_ALTERNATE,
+        _ => &[],
+    };
+    if bus.video_mode == VideoMode::Mono80x25 {
+        for entry in alternate
+            .chunks_exact(height + 1)
+            .take_while(|entry| entry[0] != 0)
+        {
+            bus.vga.load_font(0, entry[0] as usize, height, &entry[1..]);
+        }
+    }
+    true
 }
 
 /// Whether the VGA BIOS sums the palettes it loads to grey (BDA 0489h bit

@@ -29,8 +29,8 @@ const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
-const DPMI_VERSION: u16 = 3;
-const WIN32_VERSION: u16 = 105;
+const DPMI_VERSION: u16 = 4;
+const WIN32_VERSION: u16 = 106;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -78,9 +78,10 @@ const WIN32_VERSION: u16 = 105;
 /// (`kernel32::module::UNLOADING_SAVED`), 71's to 102's no OpenGL
 /// raster position (`opengl32::raster::RASTER_SAVED`), 71's to 103's
 /// not the format GDI's bitmaps were made in (`gdi32::DDB_FORMAT_SAVED`),
-/// and 71's to 104's not which entries of a palette share their nearest
-/// color's entry (`gdi32::palette::NEAREST_SAVED`).
-const WIN32_LOADS: [u16; 35] = [
+/// 71's to 104's not which entries of a palette share their nearest
+/// color's entry (`gdi32::palette::NEAREST_SAVED`), and 71's to 105's
+/// not the DPMI memory of a DOS program's PIF (`dosvm::DOSVM_DPMI`).
+const WIN32_LOADS: [u16; 36] = [
     71,
     72,
     73,
@@ -115,6 +116,7 @@ const WIN32_LOADS: [u16; 35] = [
     102,
     103,
     104,
+    105,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -126,6 +128,7 @@ const CMS_VERSION: u16 = 2;
 const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 3;
 const ET4000_VERSION: u16 = 1;
+const FONT_VERSION: u16 = 1;
 const MACH64_VERSION: u16 = 1;
 const TOADFORCE_VERSION: u16 = crate::toadforce::STATE_VERSION;
 const SHARED_VERSION: u16 = 1;
@@ -387,6 +390,11 @@ impl Bus {
             }
             save_all!(w; s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         });
+        // That plane 2 holds the text modes' font, in a section only when
+        // it does, so states saved before it load with the ROM's fonts.
+        if vga.font_loaded {
+            w.section(b"FONT", FONT_VERSION, |_| {});
+        }
         // An S3 ViRGE's engines, only on one, so other states load as they
         // did.
         if vga.adapter.is_virge() {
@@ -517,6 +525,7 @@ impl Bus {
             w.section(b"DPMI", DPMI_VERSION, |w| {
                 dpmi.save(w);
                 dpmi.save_ldt_limits(w);
+                dpmi.save_vm(w);
             });
         }
         // The built-in Windows, while it runs a program or is about to.
@@ -822,6 +831,10 @@ impl Bus {
         }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+        vga.font_loaded = r.next_is(b"FONT");
+        if vga.font_loaded {
+            r.section(b"FONT", FONT_VERSION)?;
+        }
         *last_present = None;
         *virge = Default::default();
         if r.next_is(b"VIRG") {
@@ -980,11 +993,13 @@ impl Bus {
         }
         dpmi.reset();
         if r.next_is(b"DPMI") {
-            // Version 2 has no LDT limits (`Dpmi::load_ldt_limits`).
-            let mut section = r.section_of(b"DPMI", &[2, DPMI_VERSION])?;
+            // Version 2 has no LDT limits (`Dpmi::load_ldt_limits`), and 2
+            // and 3 no virtual memory (`Dpmi::load_vm`).
+            let mut section = r.section_of(b"DPMI", &[2, 3, DPMI_VERSION])?;
             dpmi.load(&mut section)?;
             let version = section.version();
             dpmi.load_ldt_limits(&mut section, version)?;
+            dpmi.load_vm(&mut section, version)?;
         }
         win32.reset();
         if r.next_is(b"W32 ") {
@@ -1248,6 +1263,7 @@ mod tests {
         (103, 0x71A7_50FA_4BC4_2EA0), // OpenGL's raster position
         (104, 0x3F37_6484_BDFC_4AF1), // the format GDI's bitmaps were made in
         (105, 0xA544_B486_2D04_DB0B), // palette entries sharing their nearest color's entry
+        (106, 0x4045_F07A_2E86_6065), // the DPMI memory of a DOS program's PIF
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

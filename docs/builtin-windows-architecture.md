@@ -807,6 +807,28 @@ the place of the PIF's parameters, and its working folder that of the
 caller's. The program is looked for in the working folder, the PIF's
 folder, and then where SearchPathA looks.
 
+The "WINDOWS VMM 4.0" record of a PIF gives the DOS machine's DPMI
+memory in KB (at 1A8h in its data; 0 is Auto, FFFFh as much as
+Windows can give). On Windows 98 a DOS machine's DPMI memory is
+virtual: the VMM pages it to the swap file, so a program may allocate
+more than the machine has RAM, up to that limit. Redguard's launcher
+starts the game through a PIF of FFFFh, and the game asks for its 3D
+heap from about 45 MB on a 32 MB machine. When the PIF sets the
+memory, rust-dos's DPMI host (`src/dpmi/vm.rs`) does the same: while
+its clients run in protected mode, paging is on, the first megabytes
+up to the machine's memory are mapped where they are, and memory
+blocks go above them in a linear space of the PIF's size. A page gets
+a frame from extended memory when it is first touched, and when XMS
+has no more to give, the least recently used page goes to a page file
+in the host's memory and comes back on a page fault. Locked pages
+(INT 31h 0600h) stay in memory. Pointers the host follows itself, in
+the DOS and video functions it translates and in its real-mode
+callbacks, are brought in before it reads them. On Auto, and for DOS
+programs not started from the built-in Windows, the host gives
+extended memory as it is, without paging: Windows 98 gives an Auto
+machine virtual memory too, up to a bit less than the RAM, which
+rust-dos doesn't do yet.
+
 This is what a full-screen DOS box does on Windows 98, but for the
 Windows programs, which run on there behind it. Running them side by
 side, a window for the DOS program, and a first megabyte of its own for
