@@ -881,9 +881,11 @@ directly, at the points where the software renderer would draw them
   host renderer"). The host keeps a framebuffer for each pair of a
   target and its depth buffer, and asks the driver whether it is
   complete once, when it makes it. A driver that runs the commands on
-  a thread of its own has to catch up with them before it answers:
-  asked at every batch, that wait was close to half of the host's time
-  on the emulator's thread in Unreal's Direct3D flyby.
+  a thread of its own has to catch up with them before it answers.
+  Asked at every batch, that wait was the largest part of the
+  renderer's time on the emulator's thread in Unreal's Direct3D
+  flyby on an NVIDIA driver (8% of the thread's busy samples, against
+  5% for decoding textures).
 - **16-bit targets** are host framebuffers in the 565 format
   (`GL_RGB565`, renderable since OpenGL 4.1 and with
   `ARB_ES2_compatibility`), so the host's blend result is rounded to

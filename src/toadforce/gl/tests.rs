@@ -886,7 +886,8 @@ fn address_modes_and_mip_levels_agree() {
 
 /// A program that writes one level of a texture with mip levels between
 /// two draws with it, as Unreal does with the textures it animates: the
-/// host decodes that level again, and keeps the others as they were.
+/// host decodes the images on the pages written again, and keeps the
+/// others as they were.
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
 fn a_level_written_between_draws_is_sampled_as_written() {
@@ -902,26 +903,41 @@ fn a_level_written_between_draws_is_sampled_as_written() {
     let levels = |level: u32, _: u32, x: u32, y: u32| {
         ramp(32)(level, 0, x, y) ^ 0x40 << (8 * (level % 3))
     };
-    for written in [0, 2] {
+    let scene = |rig: &mut Rig, written: usize| {
+        let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 6, false, levels);
+        rig.texture(0, 1, &t);
+        filter(rig, 0, 1, 1, 2);
+        rig.stage(0, &[(TSS_ADDRESSU, 3), (TSS_ADDRESSV, 3)]);
+        rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
+        squares(rig);
+        // The level again, in other colours, and the squares over the
+        // first ones.
+        let (at, pitch) = t.images[written];
+        let side = 32u32 >> written;
+        for y in 0..side {
+            let row: Vec<u8> = (0..side)
+                .flat_map(|x| (0xFF00_00FFu32 ^ (x * 8) << 8 ^ (y * 8) << 16).to_le_bytes())
+                .collect();
+            poke(rig, at + y * pitch, &row);
+        }
+        squares(rig);
+    };
+    // The six levels decoded for the first squares, and then those on
+    // the pages written: level 0 fills the texture's first page alone,
+    // and levels 1 to 5 share the next.
+    for (written, images) in [(0, 6 + 1), (2, 6 + 5)] {
         bench.close(&format!("level {written} written"), |rig| {
-            let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 6, false, levels);
-            rig.texture(0, 1, &t);
-            filter(rig, 0, 1, 1, 2);
-            rig.stage(0, &[(TSS_ADDRESSU, 3), (TSS_ADDRESSV, 3)]);
-            rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
-            squares(rig);
-            // The level again, in other colours, and the squares over
-            // the first ones.
-            let (at, pitch) = t.images[written];
-            let side = 32u32 >> written;
-            for y in 0..side {
-                let row: Vec<u8> = (0..side)
-                    .flat_map(|x| (0xFF00_00FFu32 ^ (x * 8) << 8 ^ (y * 8) << 16).to_le_bytes())
-                    .collect();
-                poke(rig, at + y * pitch, &row);
-            }
-            squares(rig);
+            scene(rig, written)
         });
+        let mut rig = Rig::new(Format::A8R8G8B8, Some(Format::D16));
+        rig.card.set_host(Some(bench.host()), &mut rig.memory);
+        scene(&mut rig, written);
+        rig.card.settle(&mut rig.memory, None);
+        let counts = &rig.card.describe(Rig::live())["host"]["counts"];
+        assert_eq!(
+            counts["texture_images"], images,
+            "level {written}: {counts}"
+        );
     }
 }
 

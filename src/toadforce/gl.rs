@@ -1273,8 +1273,9 @@ impl ToadForceGl {
         // stays so: a copy's texture keeps its size and format. Asking
         // the driver again would have the program wait for it to run
         // every command given so far, which a driver that runs them on
-        // a thread of its own does at the next query: at every batch,
-        // that was most of the host's time on the emulation thread.
+        // a thread of its own does at the next query. Asked at every
+        // batch, that wait was the largest part of the renderer's time
+        // on the emulation thread in Unreal on an NVIDIA driver.
         if let Some(&buffer) = self.framebuffers.get(&key) {
             // SAFETY: the caller's.
             unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, Some(buffer)) };
