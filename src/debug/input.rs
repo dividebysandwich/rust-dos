@@ -231,7 +231,7 @@ impl DebugHub {
                 LowInput::MouseTo { x, y, coords } => {
                     let (vx, vy) = match coords {
                         Coords::Virtual => (x, y),
-                        Coords::Screen => screen_to_virtual_mouse(cpu, x, y),
+                        Coords::Screen => video::overlay::screen_to_mouse(&cpu.bus, (x, y)),
                     };
                     cpu.bus.mouse.set_position(vx, vy);
                 }
@@ -349,25 +349,4 @@ fn ui_key(key: PcKey, ascii: u8, mods: u8) -> Option<UiKey> {
         _ if (0x20..0x7F).contains(&ascii) => Char(ascii as char),
         _ => return None,
     })
-}
-
-/// Map screenshot pixels (the picture's own size) into the mouse driver's
-/// virtual coordinate system. Unlike captured SDL motion, an explicit screen
-/// position must also span large absolute ranges (e.g. Allegro's 8x pixels).
-fn screen_to_virtual_mouse(cpu: &Cpu, x: i32, y: i32) -> (i32, i32) {
-    let (w, h) = video::frame_size(&cpu.bus);
-    let (w, h) = (w as i32, h as i32);
-    let px = x.clamp(0, w - 1);
-    let py = y.clamp(0, h - 1);
-    let (virt_w, virt_h) = cpu.bus.mouse.virtual_screen(&cpu.bus);
-    let axis = |pixel: i32, size: i32, extent: i32, max: i32| {
-        if max >= extent {
-            // virtual_screen intentionally ignores large ranges for relative
-            // mouse users. Absolute positions need their inclusive endpoints.
-            (pixel as i64 * max as i64 / (size - 1).max(1) as i64) as i32
-        } else {
-            (pixel as i64 * extent as i64 / size as i64) as i32
-        }
-    };
-    (axis(px, w, virt_w, cpu.bus.mouse.max_x), axis(py, h, virt_h, cpu.bus.mouse.max_y))
 }

@@ -687,6 +687,11 @@ fn a_crtc_showing_fewer_rows_maps_the_picture_row_for_row() {
         overlay::frame_to_mouse(&cpu.bus, &frame, (320, 295)),
         (320, 295)
     );
+    assert_eq!(
+        overlay::screen_to_mouse(&cpu.bus, (320, 295)),
+        (320, 295),
+        "/api/input/mouse in screenshot pixels maps the same"
+    );
 
     // The game's range for its title menu.
     range(&mut cpu, 0x0007, 194, 445);
@@ -696,6 +701,7 @@ fn a_crtc_showing_fewer_rows_maps_the_picture_row_for_row() {
         overlay::frame_to_mouse(&cpu.bus, &frame, (320, 295)),
         (320, 295)
     );
+    assert_eq!(overlay::screen_to_mouse(&cpu.bus, (320, 295)), (320, 295));
     assert_eq!(
         overlay::frame_motion_to_mouse(&cpu.bus, &frame, (3.0, 3.0)),
         (3.0, 3.0)

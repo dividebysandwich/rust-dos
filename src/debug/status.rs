@@ -241,7 +241,10 @@ impl DebugHub {
                     cpu.bus.mouse.callback_cs, cpu.bus.mouse.callback_ip, cpu.bus.mouse.callback_mask
                 ),
                 "range": [
-                    cpu.bus.mouse.min_x, cpu.bus.mouse.min_y, cpu.bus.mouse.max_x, cpu.bus.mouse.max_y
+                    cpu.bus.mouse.min_x,
+                    cpu.bus.mouse.min_y,
+                    cpu.bus.mouse.max_x,
+                    cpu.bus.mouse.max_y
                 ],
                 "ps2": {
                     "enabled": cpu.bus.mouse.ps2.enabled,

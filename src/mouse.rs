@@ -254,12 +254,29 @@ impl MouseState {
             range(self.max_x, driver_w)
         };
         let shown_h = shown_rows as i32;
-        let y = if (self.min_y, self.max_y) == (0, driver_h - 1) {
+        let y = if self.spans_mode_rows(driver_h) {
             shown_h
         } else {
             range(self.max_y, shown_h)
         };
         (x, y)
+    }
+
+    /// Whether the y range is a mode's whole height, `driver_h` rows (0
+    /// to `driver_h` - 1), as the driver's reset and a mode set give it.
+    fn spans_mode_rows(&self, driver_h: i32) -> bool {
+        (self.min_y, self.max_y) == (0, driver_h - 1)
+    }
+
+    /// Whether `virtual_screen` leaves out rows of the y range on `bus`:
+    /// the range is the mode's whole height and the CRTC shows fewer
+    /// rows (see `virtual_extent`). The host's pointer then reaches the
+    /// rows shown, and the range's rows past them are out of its reach.
+    pub fn leaves_out_rows(&self, bus: &crate::bus::Bus) -> bool {
+        let mode_rows = screen_size(bus).1;
+        crate::win32::user32::cursor::pointer_screen(&bus.win32).is_none()
+            && self.spans_mode_rows(mode_rows as i32)
+            && shown_rows(bus) < mode_rows
     }
 
     /// Whether the x range says the program counts the pixels of a mode
@@ -521,7 +538,7 @@ pub fn shown_rows(bus: &crate::bus::Bus) -> usize {
     use crate::video::VideoMode;
     let mode_rows = screen_size(bus).1;
     let banshee_desktop = bus.banshee().is_some_and(|b| b.extended());
-    if banshee_desktop || bus.voodoo.as_ref().is_some_and(|v| v.output()) {
+    if banshee_desktop || bus.voodoo_output() {
         return mode_rows;
     }
     match bus.video_mode {
