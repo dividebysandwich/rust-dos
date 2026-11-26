@@ -1441,6 +1441,9 @@ fn get_caps_fills_directx_1s_ddcaps() {
     for at in [DX1_HAL, DX1_HEL] {
         let caps = peek(&cpu, data + at + 4);
         assert_ne!(caps & DDCAPS_BLT, 0, "{at:X}: {caps:08X}");
+        // ddsCaps at 0x84, the last field GetCaps fills at this size.
+        let surface_caps = peek(&cpu, data + at + 0x84);
+        assert_ne!(surface_caps & DDSCAPS_PRIMARYSURFACE, 0, "{at:X}");
         let past = peek(&cpu, data + at + DX1_CAPS_SIZE);
         assert_eq!(past, PAST_CAPS, "{at:X}");
     }
