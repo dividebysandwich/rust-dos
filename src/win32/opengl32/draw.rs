@@ -608,8 +608,8 @@ fn put(cpu: &mut Cpu, a: &Applied, card: bool) -> bool {
             d.planes[i] = *p;
         }
     }
-    if !d.gl_pixel_centres {
-        d.gl_pixel_centres = true;
+    if !d.opengl {
+        d.opengl = true;
     }
     let held: Vec<u32> = d.textures.iter().take(UNITS).copied().collect();
     for (stage, &iface) in a.textures.iter().enumerate() {
@@ -1349,7 +1349,7 @@ fn fragment_layout() -> Layout {
 ///
 /// Each rectangle, cut to the buffers, is two triangles of vertices on
 /// the screen, which cover its pixels' centres and none other
-/// (`gl_pixel_centres`), drawn through Direct3D's pipeline as the
+/// (`Drawn::opengl`), drawn through Direct3D's pipeline as the
 /// processor's vertices are. The draws that wait are drawn first.
 pub(super) fn draw_fragments(
     cpu: &mut Cpu,
