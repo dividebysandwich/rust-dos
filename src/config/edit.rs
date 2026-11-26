@@ -275,11 +275,12 @@ pub fn with_entries(
         .iter()
         .map(|(section, key, value)| format!("[{}]\n{}={}\n", section, key, value))
         .collect();
-    let config = parse(&format!("{}\n{}", base, own), base_dir, home);
+    let below = format!("{}\n", base);
+    let config = parse(&format!("{}{}", below, own), base_dir, home);
     // What the entries brought: the settings' own were taken before. The
     // line numbers are of no file.
     let before = parse(&base, base_dir, home).warnings;
-    let warnings = config
+    let mut warnings: Vec<String> = config
         .warnings
         .iter()
         .filter(|w| !before.contains(w))
@@ -290,7 +291,24 @@ pub fn with_entries(
         })
         .map(str::to_string)
         .collect();
-    (Settings::from_config(&config), warnings)
+    let mut new = Settings::from_config(&config);
+    // An old renderer line that asks for the other renderer than the
+    // settings' `renderer` has no value to give: it isn't taken, and the
+    // renderer stays as it was.
+    let below_lines = below.lines().count();
+    let conflict = config.renderer_conflict(|number| {
+        let name = if number > below_lines {
+            "the setting"
+        } else {
+            "the current settings"
+        };
+        name.to_string()
+    });
+    if let Some(error) = conflict {
+        warnings.push(error);
+        new.renderer = settings.renderer;
+    }
+    (new, warnings)
 }
 
 /// `original` with what changed from `baseline` to `settings`, and the

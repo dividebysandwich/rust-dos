@@ -307,6 +307,30 @@ fn settings_write_renderer_and_not_the_old_names() {
 }
 
 #[test]
+fn config_set_of_an_old_renderer_line_against_renderer_is_not_taken() {
+    let set = |settings: &Settings, key: &str, value: &str| {
+        let entry = ("emulator".to_string(), key.to_string(), value.to_string());
+        with_entries(settings, &[entry], Path::new("/cfg"), None)
+    };
+    // The other renderer than the settings' `renderer`: the renderer
+    // stays, and the warning names both and the setting to use.
+    let software = Settings { renderer: Renderer::Software, ..Settings::default() };
+    let (new, warnings) = set(&software, "voodoo_renderer", "opengl");
+    assert_eq!(new.renderer, Renderer::Software);
+    let lines = [
+        "the current settings (renderer=software)",
+        "the setting (voodoo_renderer=opengl)",
+    ];
+    assert!(names_two_renderers(&warnings, &lines), "{warnings:?}");
+    // One that agrees is taken, with the deprecation warning.
+    let (new, warnings) = set(&software, "toadforce_renderer", "software");
+    assert_eq!(new.renderer, Renderer::Software);
+    assert!(warnings.iter().any(|w| w.contains("deprecated")), "{warnings:?}");
+    let (new, _) = set(&Settings::default(), "voodoo_renderer", "opengl");
+    assert_eq!(new.renderer, Renderer::OpenGl);
+}
+
+#[test]
 fn toadforce_gamma_is_off_or_a_glide_gamma() {
     let get = |value: &str| {
         let text = format!("[emulator]\ntoadforce_gamma={}\n", value);
