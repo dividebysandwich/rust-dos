@@ -55,10 +55,11 @@ fn set_invalid(cpu: &mut Cpu, underflow: bool, invalid: bool) {
     }
 }
 
-/// A double from memory as 80 bits, where a register holds it as it is (0
-/// or a normal number); None otherwise.
+/// A double from memory as 80 bits, where a register holds it as it is (0,
+/// a normal number, or a denormal, which is a normal number in 80 bits);
+/// None for an infinity or a NaN.
 fn f80_of(value: f64) -> Option<F80> {
-    (value == 0.0 || value.is_normal()).then(|| {
+    value.is_finite().then(|| {
         let mut f = F80::new();
         f.set_f64(value);
         f

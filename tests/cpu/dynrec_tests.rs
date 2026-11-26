@@ -7138,6 +7138,44 @@ fn fpu_sums_with_a_denormal_double_operand_use_all_of_it() {
     }
 }
 
+#[test]
+fn fpu_sums_just_below_a_doubles_normals_use_all_80_bits() {
+    // 2^-1022 - 2^-1075 (80 bits) rounds up to the double 2^-1022, but
+    // isn't it: plus 2^-1022 at 64 bits it is 2^-1021 - 2^-1075, where
+    // the doubles would make 2^-1021. And #2103's last case: at 53 bits,
+    // 2^-1022 plus the least denormal double's negative from memory is
+    // the largest denormal double.
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(DATA, 0);
+        rig.write32(DATA + 4, 0x0010_0000); // 2^-1022
+        rig.write32(DATA + 8, 1);
+        rig.write32(DATA + 12, 0x8000_0000); // -2^-1074
+        rig.write32(DATA + 0x10, 0xFFFF_F800);
+        rig.write32(DATA + 0x14, 0xFFFF_FFFF);
+        rig.write32(DATA + 0x18, 0x3C00); // 2^-1022 - 2^-1075
+        rig.write32(DATA + 0x20, 0x027F);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.fld(tword_ptr(DATA + 0x10))?;
+            a.fld(qword_ptr(DATA))?;
+            a.fadd_2(st0, st1)?;
+            a.fstp(tword_ptr(DATA + 0x40))?;
+            a.fstp(st0)?;
+            a.fldcw(word_ptr(DATA + 0x20))?;
+            a.fld(qword_ptr(DATA))?;
+            a.fadd(qword_ptr(DATA + 8))?;
+            a.fstp(qword_ptr(DATA + 0x50))?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let man = b.read32(DATA + 0x40) as u64 | (b.read32(DATA + 0x44) as u64) << 32;
+    let se = b.read32(DATA + 0x48) & 0xFFFF;
+    assert_eq!((se, man), (0x3C01, 0xFFFF_FFFF_FFFF_FC00));
+    let sum = b.read32(DATA + 0x50) as u64 | (b.read32(DATA + 0x54) as u64) << 32;
+    assert_eq!(sum, 0x000F_FFFF_FFFF_FFFF);
+}
+
 /// Writes and reads of video memory, the ROMs and addresses past the end
 /// of RAM, which translated code hands to the bus by their physical
 /// addresses: the VGA's planes through every map mask as mode X programs

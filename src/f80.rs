@@ -851,24 +851,25 @@ impl FpuRegs {
     }
 
     /// Register `i`'s double where its 80 bits are that double and no
-    /// more: a register that is stale, or one whose significand ends at a
-    /// double's 53 bits and has the integer bit set where the double isn't
-    /// 0 and no bits where it is. That leaves out a number below a
-    /// double's normals, which the double has rounded to a denormal or
-    /// 0 with fewer bits than 53, and the formats a 387 doesn't take (an
+    /// more: a register that is stale, or one whose significand is the
+    /// double's (its 53 bits, the integer bit set) where the double is a
+    /// normal number, and no bits where it is 0. That leaves out a number
+    /// below a double's normals, which the double has rounded to a
+    /// denormal, to 0 or up to the least normal double, with fewer bits
+    /// than 53 or other ones, and the formats a 387 doesn't take (an
     /// unnormal, a pseudo-zero or a pseudo-infinity), whose double
     /// `F80::get_f64` makes as if the integer bit were set.
     #[inline]
     pub fn only_double(&self, i: usize) -> Option<f64> {
         let value = self.f64s[i];
         if self.stale[i] == 0 {
-            let significand = self.x80[i].st as u64;
-            let whole = if value.to_bits() << 1 >> 53 == 0 {
+            let (bits, significand) = (value.to_bits(), self.x80[i].st as u64);
+            let whole = if bits << 1 >> 53 == 0 {
                 value == 0.0 && significand == 0
             } else {
-                significand >> 63 == 1
+                significand == (bits << 11 | 1 << 63)
             };
-            if significand & 0x7FF != 0 || !whole {
+            if !whole {
                 return None;
             }
         }
@@ -1280,6 +1281,37 @@ mod tests {
             regs.set(i, got);
             assert_eq!(regs.get(i).st, f.st);
             assert_eq!(regs.get_f64(i).to_bits(), f.get_f64().to_bits());
+        }
+    }
+
+    #[test]
+    fn only_a_register_that_is_its_double_is_only_double() {
+        let mut regs = FpuRegs::default();
+        // (Exponent, significand) of 80 bits, and whether they are the
+        // double they round to.
+        let cases: [(u16, u64, bool); 7] = [
+            (0, 0, true),
+            (16383, 1 << 63, true),
+            (16383 - 1022, 1 << 63, true),
+            // One bit more than a double's 53.
+            (16383, 1 << 63 | 1 << 10, false),
+            // 2^-1023 is the denormal double 2^-1023, exactly.
+            (16383 - 1023, 1 << 63, false),
+            // 2^-1022 - 2^-1075 rounds up to the least normal double,
+            // 2^-1022, with the low 11 bits clear.
+            (16383 - 1023, !0 << 11, false),
+            // An unnormal.
+            (16383, 1 << 62, false),
+        ];
+        for (exp, significand, only) in cases {
+            regs.set(0, F80 { st: (exp as u128) << 64 | significand as u128 });
+            let double = regs.only_double(0);
+            assert_eq!(double.is_some(), only, "{:04X} {:016X}", exp, significand);
+            if let Some(v) = double {
+                let mut f = F80::new();
+                f.set_f64(v);
+                assert_eq!(f.st, regs.get(0).st);
+            }
         }
     }
 }
