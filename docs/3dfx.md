@@ -99,8 +99,9 @@ there:
 
 `GLIDE2X.DLL` and `GLIDE3X.DLL` are in the system folder only with a
 3dfx card, so a game that checks for Glide by its file finds none
-without one. Without a 3dfx card, Direct3D finds no 3D device: there is
-no software Direct3D.
+without one. Without a 3dfx card or a ToadForce, Direct3D lists only its
+software devices, Ramp and RGB, which draw on the processor with one
+texture stage ([Direct3D's devices](builtin-windows.md#direct3ds-devices)).
 
 ## Settings
 

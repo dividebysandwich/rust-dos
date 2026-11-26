@@ -1516,6 +1516,7 @@ const STILL: &[(&str, &str)] = &[
     ("8254.pit0_phase", "a mode 3 count loaded at a half-cycle, which the run's mode 2 has none of"),
     ("8254.pit1_phase", "a count loaded at a half-cycle, which the run never reads channel 1 after"),
     ("8254.pit2_phase", "a mode 3 count loaded at a half-cycle, which the run's mode 2 has none of"),
+    ("FONT", "that plane 2 holds the text font, which the mode set at the prompt loaded"),
     ("VIDE.gate_array_shadow", "the PCjr's and Tandy's gate array"),
     ("VIDE.gate_array_shadow_at", "the PCjr's and Tandy's gate array"),
     ("SOUN.tandy_sound", "the PCjr's and Tandy's sound chip"),

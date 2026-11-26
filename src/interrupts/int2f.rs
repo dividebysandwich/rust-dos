@@ -4,11 +4,11 @@
 //! the MSCDEX CD-ROM extensions (AH=15h, and MSCDEX's installation check
 //! through the network redirector's, AX=1100h, see `mscdex.rs`), the DOS
 //! internal calls that find DOS's data segment and file tables (AX=1203h,
-//! 1216h, 1220h), DOS's interface for Windows' DOSMGR (AX=1607h BX=0015h)
-//! the expanded memory manager's part of Windows' exit (AX=1606h),
-//! Windows' installation and version checks (AX=1600h, 160Ah) from a DOS
-//! program the built-in Windows started, and SHARE's installation check
-//! (AX=1000h) while the built-in Windows runs, are there.
+//! 1216h, 1220h), DOS's interface for Windows' DOSMGR (AX=1607h BX=0015h),
+//! the expanded memory manager's part of Windows' start and exit (AX=1605h,
+//! 1606h), Windows' installation and version checks (AX=1600h, 160Ah) from
+//! a DOS program the built-in Windows started, and SHARE's installation
+//! check (AX=1000h) while the built-in Windows runs, are there.
 //! Every other function leaves the registers untouched, which callers read
 //! as "not installed" (AL stays 00h for the usual install checks, AX stays
 //! 1687h for the DPMI check with the host off, ...).
@@ -61,9 +61,14 @@ pub fn handle(cpu: &mut Cpu) {
         0x1607 if cpu.bx() == 0x0018 && cpu.bus.idle_hint => cpu.bus.idle_until_event(),
         0x1689 if cpu.bus.idle_hint => cpu.bus.idle_until_event(),
         // Windows' 386 enhanced mode (DX bit 0 clear) starts: the keys
-        // reach its virtual machines through their BIOS. The registers
-        // come back as they were.
-        0x1605 if cpu.dx() & 1 == 0 => crate::bios::windows_keyboard(&mut cpu.bus, true),
+        // reach its virtual machines through their BIOS, and under the
+        // virtual-8086 monitor DS:SI gets the monitor's switch to real
+        // mode, as EMM386 answers. The other registers come back as they
+        // were.
+        0x1605 if cpu.dx() & 1 == 0 => {
+            crate::bios::windows_keyboard(&mut cpu.bus, true);
+            crate::v86mon::windows_init(cpu);
+        }
         // Windows exited: expanded memory's page frame is the manager's
         // again, and the keys are the built-in DOS's. The registers come
         // back as they were.
