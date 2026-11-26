@@ -1355,12 +1355,15 @@ impl FileReader {
             };
             let size = READ_AHEAD.min(len - start) as usize;
             self.block.resize(size, 0);
-            if self.read_exact_at(offset + start, size).is_err() {
-                // A file shorter than its header says (a WAVE file cut
-                // short): only what is asked for is read, as below.
-                self.block.clear();
-            } else {
-                self.block_at = start;
+            // A file shorter than its header says (a WAVE file cut short)
+            // fills the block only up to its end. A piece past that is
+            // read on its own below and fails as a read of the file does.
+            match self.fill_block(offset + start) {
+                Ok(got) => {
+                    self.block.truncate(got);
+                    self.block_at = start;
+                }
+                Err(_) => self.block.clear(),
             }
         }
         if self.holds(at, end) {
@@ -1377,10 +1380,20 @@ impl FileReader {
         at >= self.block_at && end <= self.block_at + self.block.len() as u64
     }
 
-    /// Read `size` bytes at `pos` of the file into the block.
-    fn read_exact_at(&mut self, pos: u64, size: usize) -> io::Result<()> {
+    /// Fill the block from byte `pos` of the file, or as much of it as the
+    /// file has from there; returns how many bytes that is.
+    fn fill_block(&mut self, pos: u64) -> io::Result<usize> {
         self.file.seek(SeekFrom::Start(pos))?;
-        self.file.read_exact(&mut self.block[..size])
+        let mut got = 0;
+        while got < self.block.len() {
+            match self.file.read(&mut self.block[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(got)
     }
 }
 
@@ -3423,14 +3436,16 @@ mod tests {
     #[test]
     fn file_reader_reads_a_file_shorter_than_its_data() {
         // A WAVE file whose header gives more data than the file has: the
-        // bytes there read, and a piece past the end fails as a read of
-        // the file does.
+        // bytes there read, the block keeps them up to the file's end,
+        // and a piece past the end fails as a read of the file does.
         let (path, bytes) = patterned("reader_short", 70_000);
         let len = 100_000;
         let mut reader = FileReader::new(File::open(&path).unwrap());
         let mut buf = vec![0; 2352];
         reader.read_at(0, len, 66_000, &mut buf).unwrap();
         assert_eq!(buf, bytes[66_000..68_352]);
+        assert!(reader.holds(READ_AHEAD, 70_000));
+        assert!(!reader.holds(READ_AHEAD, 70_001));
         assert!(reader.read_at(0, len, 69_000, &mut buf).is_err());
     }
 }
