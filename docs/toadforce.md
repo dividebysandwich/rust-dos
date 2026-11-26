@@ -608,10 +608,16 @@ section covers names that section.
   planes of the program's, flat shading, lines and points. A draw's
   setup (matrix products, lights in camera space) is worked out again
   for every draw.
-- **The software renderer** is too slow for some games at their usual
-  resolutions ("The software renderer"). It draws wherever the OpenGL
-  renderer doesn't: a host without desktop OpenGL 3.2, a window drawn
-  by SDL's renderer, the web build, and a run with `--deterministic`.
+- **The software renderer** is several times slower than the OpenGL
+  renderer in most games (Unreal's Direct3D intro: 20.7 frames a second
+  against 53), and too slow for some at their usual resolutions ("The
+  software renderer"). It draws at `flush` on the emulation thread,
+  which waits for it (a pool splits large flushes, but the thread
+  still waits), on top of the vertex work above. It draws wherever the
+  OpenGL renderer doesn't: a host without desktop OpenGL 3.2, a window
+  drawn by SDL's renderer, the web build, and a run with
+  `--deterministic`. Users are told to keep `toadforce_renderer` at
+  `auto` or `opengl` (CONFIGURATION.md).
 - **Declined states.** A draw in a state the OpenGL renderer declines
   is drawn in software, with its target and depth buffer read back
   before and uploaded again after ("The OpenGL renderer" lists the
