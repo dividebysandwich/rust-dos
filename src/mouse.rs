@@ -236,7 +236,16 @@ impl MouseState {
     /// In a mode narrower than the driver's 640, an x range from 0 that
     /// ends within 32 pixels of the mode's width counts the mode's pixels
     /// instead (see `counts_pixels`).
-    pub fn virtual_extent(&self, (w, h): (usize, usize)) -> (i32, i32) {
+    ///
+    /// `shown_rows` is how many of the mode's rows the picture shows, which
+    /// a program can change from the mode's height through the CRTC: the
+    /// height is then those rows, since the driver's y counts the mode's
+    /// rows whatever the CRTC shows. Knights of Xentar sets mode 12h and
+    /// shows 400 of its 480 rows; with the mode's 480 over the picture's
+    /// 400, a pointer on "Start a new game" reached the game 20% lower, on
+    /// "Exit to MSDOS". A y range of the whole mode (0 to its height - 1),
+    /// which the driver's reset and a mode set give, doesn't widen it.
+    pub fn virtual_extent(&self, (w, h): (usize, usize), shown_rows: usize) -> (i32, i32) {
         let (driver_w, driver_h) = driver_extent((w, h));
         let range = |max: i32, size: i32| if max < 2048 { size.max(max + 1) } else { size };
         let x = if self.counts_pixels(w as i32, driver_w) {
@@ -244,7 +253,13 @@ impl MouseState {
         } else {
             range(self.max_x, driver_w)
         };
-        (x, range(self.max_y, driver_h))
+        let shown_h = shown_rows as i32;
+        let y = if (self.min_y, self.max_y) == (0, driver_h - 1) {
+            shown_h
+        } else {
+            range(self.max_y, shown_h)
+        };
+        (x, y)
     }
 
     /// Whether the x range says the program counts the pixels of a mode
@@ -261,15 +276,15 @@ impl MouseState {
     }
 
     /// The virtual screen of `bus`'s current video mode (see
-    /// `virtual_extent` and `screen_size`). While the built-in Windows
-    /// has the mouse it is Windows' screen instead
+    /// `virtual_extent`, `screen_size` and `shown_rows`). While the
+    /// built-in Windows has the mouse it is Windows' screen instead
     /// (`cursor::pointer_screen`): the driver's 640 across a 320-wide
     /// DirectDraw mode would pin the cursor at the right edge from the
     /// middle of the picture on, and a Voodoo3's desktop leaves the VGA's
     /// text mode set, whose screen isn't the one shown.
     pub fn virtual_screen(&self, bus: &crate::bus::Bus) -> (i32, i32) {
         crate::win32::user32::cursor::pointer_screen(&bus.win32)
-            .unwrap_or_else(|| self.virtual_extent(screen_size(bus)))
+            .unwrap_or_else(|| self.virtual_extent(screen_size(bus), shown_rows(bus)))
     }
 
     /// Forget the program's event handler (AX=000Ch), whose code is gone
@@ -490,6 +505,34 @@ pub fn screen_size(bus: &crate::bus::Bus) -> (usize, usize) {
     match crate::video::text::geometry(bus) {
         Some(text) => (text.cols * 8, text.rows * 8),
         None => bus.adapter_display_size(),
+    }
+}
+
+/// How many of the mode's rows (`screen_size`'s height) the picture
+/// shows. In the VGA's graphics modes a program can show fewer through
+/// the CRTC (`Vga::graphics_size`): Knights of Xentar shows 400 of mode
+/// 12h's 480. A CRTC that shows more rows than the mode has, as a
+/// 320x240 "mode X" does in mode 13h, counts as the mode's height: the
+/// driver's y doesn't reach the rows past it unless the program sets a
+/// range, which `MouseState::virtual_extent` then takes. Elsewhere, and
+/// while a 3dfx card shows its own picture or a Banshee's desktop, it is
+/// the mode's height (see `screen_size` for Lands of Lore 2).
+pub fn shown_rows(bus: &crate::bus::Bus) -> usize {
+    use crate::video::VideoMode;
+    let mode_rows = screen_size(bus).1;
+    let banshee_desktop = bus.banshee().is_some_and(|b| b.extended());
+    if banshee_desktop || bus.voodoo.as_ref().is_some_and(|v| v.output()) {
+        return mode_rows;
+    }
+    match bus.video_mode {
+        VideoMode::Graphics320x200
+        | VideoMode::Ega320x200
+        | VideoMode::Ega640x200
+        | VideoMode::Ega640x350
+        | VideoMode::Ega640x350Mono
+        | VideoMode::Vga640x480
+        | VideoMode::Vga640x480Mono => bus.vga.graphics_size().1.min(mode_rows),
+        _ => mode_rows,
     }
 }
 

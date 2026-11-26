@@ -240,6 +240,9 @@ impl DebugHub {
                     "{:04X}:{:04X} mask {:04X}",
                     cpu.bus.mouse.callback_cs, cpu.bus.mouse.callback_ip, cpu.bus.mouse.callback_mask
                 ),
+                "range": [
+                    cpu.bus.mouse.min_x, cpu.bus.mouse.min_y, cpu.bus.mouse.max_x, cpu.bus.mouse.max_y
+                ],
                 "ps2": {
                     "enabled": cpu.bus.mouse.ps2.enabled,
                     "handler": format!("{:04X}:{:04X}", cpu.bus.mouse.ps2.handler.0, cpu.bus.mouse.ps2.handler.1),

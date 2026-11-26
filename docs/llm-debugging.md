@@ -310,8 +310,9 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   `"dx"` and `"dy"` instead move by that much, as a captured mouse does:
   programs that read the PS/2 mouse themselves, such as Windows, only
   follow motion, so steer their pointer with these.
-  `/api/status` → `mouse` shows the driver's position and whether it is
-  installed.
+  `/api/status` → `mouse` shows the driver's position, whether it is
+  installed, and the cursor's `range` as min x, min y, max x, max y
+  (INT 33h AX=0007h and 0008h, or what the last reset or mode set gave).
 - **A held key repeats** as a PC keyboard's does, in emulated time: its
   make code (and keystroke) comes again 500 ms after it went down, then
   10.9 times a second, or at the rate a program set (command F3h, INT 16h
