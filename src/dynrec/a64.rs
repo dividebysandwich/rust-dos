@@ -3472,6 +3472,7 @@ impl Gen<'_> {
             self.record_lazy(kind, size);
             if matches!(op, AluOp::Adc | AluOp::Sbb) {
                 // The carry in, into the third byte (`flags::LAZY_CARRY`).
+                // W12 keeps it for the operation below.
                 const _: () = assert!(super::flags::LAZY_CARRY == 1 << 16);
                 self.carry_in();
                 dynasm!(self.ops ; .arch aarch64 ; strb w12, [x20, (CTX_LAZY + 2) as u32]);
@@ -3481,23 +3482,17 @@ impl Gen<'_> {
             AluOp::Add => self.add_sub_flags(size, false, need),
             AluOp::Sub | AluOp::Cmp => self.add_sub_flags(size, true, need),
             AluOp::Adc => {
-                if op == AluOp::Adc {
+                if !self.record_now {
                     self.carry_in();
                 }
-                dynasm!(self.ops ; .arch aarch64 ; add x0, x10, x11);
-                if op == AluOp::Adc {
-                    dynasm!(self.ops ; .arch aarch64 ; add x0, x0, x12);
-                }
+                dynasm!(self.ops ; .arch aarch64 ; add x0, x10, x11 ; add x0, x0, x12);
                 self.arith_flags(size, false, need);
             }
             AluOp::Sbb => {
-                if op == AluOp::Sbb {
+                if !self.record_now {
                     self.carry_in();
                 }
-                dynasm!(self.ops ; .arch aarch64 ; sub x0, x10, x11);
-                if op == AluOp::Sbb {
-                    dynasm!(self.ops ; .arch aarch64 ; sub x0, x0, x12);
-                }
+                dynasm!(self.ops ; .arch aarch64 ; sub x0, x10, x11 ; sub x0, x0, x12);
                 self.arith_flags(size, true, need);
             }
             AluOp::And | AluOp::Or | AluOp::Xor | AluOp::Test => {
