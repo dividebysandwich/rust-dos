@@ -941,3 +941,82 @@ fn repeated_dos_failures_are_logged_a_few_times() {
     assert_eq!(of("(not logging more)"), 2, "{lines:?}");
     assert_eq!(of("Pattern='GAME1.SAV'"), 1, "{lines:?}");
 }
+
+/// A name that ends in a slash or backslash has an empty last name, and
+/// MS-DOS 6.22 refuses it with path not found (03h) in create (3Ch, 5Bh,
+/// 6Ch), open (3Dh), attributes (43h), delete (41h) and find first
+/// (4Eh), whatever the name before the slash is, and makes nothing: a
+/// probe of these calls in 86Box. PKUNZIP creates a ZIP's folder entry
+/// ("DATA/") as a file, expects the error and makes the folder; Dominus's
+/// installer fails when the create makes a file instead.
+#[test]
+fn a_name_ending_in_a_slash_is_path_not_found() {
+    let base = scratch("trailing_slash", &["c/EXD"]);
+    fs::write(base.join("c/EXF.TXT"), b"file").unwrap();
+    let mut cpu = Cpu::new(base.join("c"));
+    set_dta(&mut cpu);
+    let names = [
+        r"C:\NEWD\",
+        "C:/NEWD/",
+        r"NEWD\",
+        r"C:\EXD\",
+        r"C:\EXF.TXT\",
+        r"C:\EXD\NEWF.TXT\",
+    ];
+    for name in names {
+        for ah in [0x3C, 0x3D, 0x5B, 0x6C, 0x43, 0x41, 0x4E] {
+            set_dsdx_string(&mut cpu, name);
+            cpu.set_si(0);
+            cpu.set_cx(0x16);
+            cpu.set_bx(0x0002);
+            // 43h AL=00h: get the attributes. 6Ch takes the name at DS:SI
+            // and DX=11h: open or create.
+            cpu.set_reg8(Register::AL, 0);
+            if ah == 0x6C {
+                cpu.set_dx(0x11);
+            }
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+            int21(&mut cpu, ah);
+            assert!(cf(&cpu), "AH={ah:02X} {name}");
+            assert_eq!(cpu.ax(), 0x03, "AH={ah:02X} {name}");
+        }
+    }
+    let mut left: Vec<_> = fs::read_dir(base.join("c"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["EXD", "EXF.TXT"]);
+    assert!(base.join("c/EXD").is_dir());
+    assert_eq!(fs::read(base.join("c/EXF.TXT")).unwrap(), b"file");
+    assert_eq!(fs::read_dir(base.join("c/EXD")).unwrap().count(), 0);
+
+    // A root is a folder's name: its attributes are a folder's.
+    set_dsdx_string(&mut cpu, r"C:\");
+    cpu.set_reg8(Register::AL, 0);
+    int21(&mut cpu, 0x43);
+    assert!(!cf(&cpu));
+    assert_eq!(cpu.cx() & 0x10, 0x10);
+
+    // PKUNZIP's order: the folder entry fails, MKDIR makes the folder,
+    // and the files go into it.
+    set_dsdx_string(&mut cpu, "C:/DOMINUS/");
+    int21(&mut cpu, 0x39);
+    assert!(cf(&cpu));
+    set_dsdx_string(&mut cpu, "C:/DOMINUS");
+    int21(&mut cpu, 0x39);
+    assert!(!cf(&cpu));
+    set_dsdx_string(&mut cpu, "C:/DOMINUS/DATA/");
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x3C);
+    assert!(cf(&cpu));
+    assert_eq!(cpu.ax(), 0x03);
+    set_dsdx_string(&mut cpu, "C:/DOMINUS/DATA");
+    int21(&mut cpu, 0x39);
+    assert!(!cf(&cpu));
+    set_dsdx_string(&mut cpu, "C:/DOMINUS/DATA/INTERTXT.COM");
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x3C);
+    assert!(!cf(&cpu));
+    assert!(base.join("c/DOMINUS/DATA/INTERTXT.COM").is_file());
+}

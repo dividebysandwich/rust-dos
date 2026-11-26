@@ -6,7 +6,7 @@ use iced_x86::Register;
 use super::utils::{pattern_to_fcb, read_asciiz_string, read_dta_template};
 use crate::audio::play_sdl_beep;
 use crate::cpu::{Cpu, CpuFlags, CpuState};
-use crate::disk::{CharDevice, DriveKind, LOCK_VIOLATION, parse_drive_prefix};
+use crate::disk::{CharDevice, DriveKind, LOCK_VIOLATION, ends_in_separator, parse_drive_prefix};
 use crate::diskio;
 use crate::disknoise::Access;
 use crate::dos_data;
@@ -1823,6 +1823,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let al = cpu.get_reg8(Register::AL);
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let filename = read_asciiz_string(&mut cpu.bus, addr);
+            if al <= 0x01 && ends_in_separator(&filename) {
+                set_result(cpu, Err(0x03));
+                return;
+            }
             match al {
                 0x00 => match cpu.bus.disk.get_file_attribute(&filename) {
                     Ok(attr) => {
@@ -2134,6 +2138,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let (index, search_attr, raw_pattern, search_id) = if ah == 0x4E {
                 let name_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
                 let mut pattern = read_asciiz_string(&mut cpu.bus, name_addr);
+                // "C:\GAMES\" finds nothing, not even the folder.
+                if ends_in_separator(&pattern) {
+                    set_result(cpu, Err(0x03));
+                    return;
+                }
 
                 // Heuristic Fix for d.com (and potentially others):
                 // If the search pattern ends with the Current Directory name followed by a wildcard
@@ -2407,6 +2416,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x41 => {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let filename = read_asciiz_string(&mut cpu.bus, addr);
+            if ends_in_separator(&filename) {
+                set_result(cpu, Err(0x03));
+                return;
+            }
             let result = cpu.bus.disk.delete_file(&filename).map(|_| cpu.ax());
             set_result(cpu, result);
         }
@@ -2693,6 +2706,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let exists = cpu.bus.disk.is_file(&filename);
             let psp = cpu.current_psp;
             let result = match (exists, action & 0x0F, action >> 4) {
+                _ if ends_in_separator(&filename) => Err(0x03),
                 (true, 1, _) => cpu.bus.disk.open_file(&filename, mode, psp).map(|h| (h, 1)),
                 (true, 2, _) => cpu.bus.disk.create_file(&filename, psp).map(|h| (h, 3)),
                 (true, _, _) => Err(0x50),
