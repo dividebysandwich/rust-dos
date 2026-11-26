@@ -1975,11 +1975,15 @@ pub fn foreground_gone(cpu: &mut Cpu) {
 /// cursor (`msg`'s), the hit-test code and the client mouse message,
 /// for WM_MOUSEACTIVATE.
 ///
-/// While a window has the capture, a click activates nothing. On Windows
-/// 98 SE a click with the capture on a window goes to that window and
-/// leaves the active window as it was, whether the click is on the
-/// capture window or on a dialog box in front of it; without the capture
-/// the same click on the same window activates it (#745). InstallShield
+/// While a window of the running thread's queue has the capture, a click
+/// activates nothing and sends no WM_MOUSEACTIVATE. On Windows 98 SE a
+/// click with the capture on a window goes to that window, which gets no
+/// WM_MOUSEACTIVATE, and leaves the active window as it was, whether the
+/// click is on the capture window or on a dialog box in front of it;
+/// without the capture the same click on the same window asks it with
+/// WM_MOUSEACTIVATE and activates it (#745). The capture is the state of
+/// a queue there, so another queue's capture, taken after the click was
+/// queued, leaves this queue's click to activate as usual. InstallShield
 /// 6's engine holds the capture on its background window while it copies
 /// files and keeps it while its "Setup Needs the Next Disk" dialog box
 /// asks for the next disc: a click on the box's OK reaches the background
@@ -1999,7 +2003,8 @@ pub fn click_activates(cpu: &mut Cpu, msg: &Msg) -> Option<(u32, u32)> {
     }
     let queue = current_queue(cpu);
     let state = user(cpu);
-    if state.input.capture != 0 && state.is_window(state.input.capture) {
+    let capture = state.input.capture;
+    if capture != 0 && state.is_window(capture) && state.window_queue(capture) == queue {
         return None;
     }
     let top = state.top_level(msg.hwnd);
