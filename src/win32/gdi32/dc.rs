@@ -86,7 +86,16 @@ pub struct Attrs {
     pub arc_dir: u32,
     pub mapper: u32,
     pub graphics_mode: u32,
+    /// A memory DC's size, its visible region: the size its bitmap had
+    /// when SelectObject put it in the DC. None in a DC saved before
+    /// there was one, which goes by the bitmap's size. A bitmap's size
+    /// changes only in Windows 3.1's GDI heap, when the program changes
+    /// its device BITMAP, and the DC keeps the size it had (#1900).
+    pub bitmap_size: crate::savestate::Since<{ BITMAP_SIZE_SAVED }, Option<(i32, i32)>>,
 }
+
+/// The W32 section's version that added `Attrs::bitmap_size`.
+pub const BITMAP_SIZE_SAVED: u16 = 107;
 
 #[derive(Clone, Debug, Default)]
 pub struct Dc {
@@ -235,6 +244,7 @@ pub fn default_attrs() -> Attrs {
         arc_dir: AD_COUNTERCLOCKWISE,
         mapper: 0,
         graphics_mode: GM_COMPATIBLE,
+        bitmap_size: Default::default(),
     }
 }
 
@@ -278,12 +288,13 @@ pub struct Place {
 }
 
 /// The device's size: the screen's GDI draws on (the desktop's) for all
-/// but a memory DC, whose bitmap's it is.
+/// but a memory DC, whose bitmap's it is, as it was when SelectObject
+/// put it in the DC.
 pub fn device_size(cpu: &Cpu, dc: &Dc) -> (i32, i32) {
     if dc.kind == MEMORY
         && let Some(b) = cpu.bus.win32.gdi.bitmap(dc.attrs.bitmap)
     {
-        return (b.width, b.height);
+        return dc.attrs.bitmap_size.unwrap_or((b.width, b.height));
     }
     let (w, h, _, _) = super::surface::screen(cpu);
     (w, h)
@@ -970,11 +981,17 @@ pub fn select_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if let Some(b) = gdi(cpu).bitmap_mut(old) {
                 b.dc = 0;
             }
+            // In Windows 3.1's GDI heap, the size its device BITMAP says
+            // now, which the DC keeps if the program changes it later.
+            crate::win32::shims::win31::gdi_heap::refresh(cpu, handle);
+            let mut size = None;
             if let Some(b) = gdi(cpu).bitmap_mut(handle) {
                 b.dc = hdc;
+                size = Some((b.width, b.height));
             }
             with(cpu, hdc, |d| {
                 d.attrs.bitmap = handle;
+                *d.attrs.bitmap_size = size;
                 // The clip region goes with the old bitmap.
                 d.attrs.clip = None;
             })
@@ -1569,7 +1586,8 @@ crate::state_fields!(Attrs {
     break_count,
     arc_dir,
     mapper,
-    graphics_mode
+    graphics_mode,
+    bitmap_size
 });
 crate::state_fields!(Dc {
     kind,

@@ -2955,6 +2955,143 @@ fn fills_and_copies_have_the_bytes_the_processor_writes() {
     }
 }
 
+/// `FILL`s of the depth buffer named as colour of its pixel size, as
+/// DirectDraw's `DDBLT_DEPTHFILL` sends them, while the host has it
+/// ahead: the nearest and the farthest depth, which the host clears,
+/// and values between them with every bit set some way, which it
+/// writes as they are. Quads the depth test lets through where the
+/// fills leave a depth behind them show the fills to the draws after.
+fn depth_fills(rig: &mut Rig) {
+    use crate::toadforce::command::encode::fill;
+    let depth = rig.target(COLOUR).depth_surface().unwrap();
+    let as_colour = Surface {
+        format: if depth.format == Format::D16 {
+            Format::R5G6B5
+        } else {
+            Format::X8R8G8B8
+        },
+        ..depth
+    };
+    let between = between(depth.format);
+    let farthest = if depth.format != Format::D16 {
+        0xFFFF_FFFF
+    } else {
+        0xFFFF
+    };
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0, &[]);
+    rig.states(&[(RS_ZENABLE, 1)]);
+    rig.draw(&quad_z(2.0, 2.0, 40.0, 0xFFFF_0000, 0.5));
+    rig.run(|w| fill(w, &as_colour, &rect(8, 8, 24, 16), 0));
+    rig.run(|w| fill(w, &as_colour, &rect(40, 40, 20, 12), between));
+    rig.draw(&quad_z(0.0, 0.0, 60.0, 0xFF00_FF00, 0.75));
+    rig.run(|w| fill(w, &as_colour, &rect(0, 0, SIZE, SIZE), farthest));
+    rig.draw(&quad_z(4.0, 4.0, 30.0, 0xFF00_00FF, 0.25));
+    rig.run(|w| fill(w, &as_colour, &rect(20, 20, 10, 10), between));
+}
+
+/// The depth between the nearest and the farthest that `depth_fills`
+/// writes, with every byte of a pixel of `depth` set some way.
+fn between(depth: Format) -> u32 {
+    if depth == Format::D16 {
+        0x8011
+    } else {
+        0x8000_0011
+    }
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn depth_fills_have_the_bytes_the_processor_writes() {
+    bench!(bench, "toadforce depth fills");
+    for depth in [Format::D16, Format::D24X8, Format::D24S8] {
+        let name = format!("depth fills {depth:?}");
+        let bound = close(depth);
+        let declined = bench.compare(&name, Format::X8R8G8B8, Some(depth), bound, depth_fills);
+        assert_eq!(declined, 0);
+        // Every fill was the host's: nothing was read back for one.
+        let mut hosted = Rig::new(Format::X8R8G8B8, Some(depth));
+        hosted.card.set_host(Some(bench.host()), &mut hosted.memory);
+        depth_fills(&mut hosted);
+        let host = &hosted.card.describe(Rig::live())["host"];
+        assert_eq!(host["read_backs"], 0, "{name}: read-backs");
+        // The last fill's bytes exactly, where `compare` allows the
+        // draws' depths a rounding.
+        hosted.card.settle(&mut hosted.memory, None);
+        let surface = hosted.target(COLOUR).depth_surface().unwrap();
+        let bytes = depth.bytes() as usize;
+        let want = &between(depth).to_le_bytes()[..bytes];
+        for (x, y) in (20..30).flat_map(|y| (20..30).map(move |x| (x, y))) {
+            let at = surface.at(x, y);
+            assert_eq!(&hosted.memory[at..at + bytes], want, "{name} at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_depth_fill_passes_over_an_older_copy_of_the_bytes_under_another_format() {
+    use crate::toadforce::gpu::{Clear, Host, Pages};
+    bench!(bench, "toadforce depth fill past an older copy");
+    for (depth, named) in [
+        (Format::D16, Format::R5G6B5),
+        (Format::D24S8, Format::X8R8G8B8),
+    ] {
+        let mut host = bench.host();
+        let surface = Surface {
+            offset: 0,
+            pitch: SIZE * depth.bytes(),
+            width: SIZE,
+            height: SIZE,
+            format: depth,
+        };
+        let as_colour = Surface {
+            format: named,
+            ..surface
+        };
+        let bytes = depth.bytes() as usize;
+        let mut memory = vec![0xAB; (SIZE * SIZE) as usize * bytes];
+        let pages = Pages::default();
+        // The depth buffer cleared to the farthest on the host, so its
+        // copy is ahead of card memory.
+        let all = rect(0, 0, SIZE, SIZE);
+        let clear = Clear {
+            surface,
+            rects: std::slice::from_ref(&all),
+            value: 0xFFFF_FFFF,
+            mask: 0xFFFF_FFFF,
+        };
+        assert_eq!(host.clear(&clear, &memory, &pages), Some(surface));
+        // Before it, a copy of the same bytes under the colour format
+        // the fill names them with, made from card memory and not
+        // ahead: the host's commands drop such a copy as they write
+        // the bytes, so it is put there by hand.
+        // SAFETY: the bench's context is current.
+        unsafe {
+            host.enter();
+            let at = host.copy(&as_colour, &memory, &pages, false);
+            host.leave();
+            let older = host.copies.remove(at);
+            host.copies.insert(0, older);
+        }
+        assert!(!host.copies[0].ahead && host.copies[1].ahead);
+        // The fill goes into the copy that is ahead, with its bits.
+        let value = between(depth);
+        let part = rect(8, 8, 24, 16);
+        let filled = host.fill(&as_colour, &part, value, &memory, &pages);
+        assert_eq!(filled, Some(surface), "{depth:?}");
+        assert!(host.copies.iter().all(|c| c.surface.format != named));
+        assert!(host.read_back(&surface, &mut memory, Some(&pages)));
+        let far = &0xFFFF_FFFFu32.to_le_bytes()[..bytes];
+        let inner = &value.to_le_bytes()[..bytes];
+        for (x, y) in (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))) {
+            let inside = (8..32).contains(&x) && (8..24).contains(&y);
+            let at = surface.at(x, y);
+            let want = if inside { inner } else { far };
+            assert_eq!(&memory[at..at + bytes], want, "{depth:?} at ({x}, {y})");
+        }
+    }
+}
+
 /// A position, a colour and a coordinate set of two numbers, for the
 /// card to transform: 6 words.
 const FVF_UNLIT: u32 = 0x002 | 0x040 | 0x100;
