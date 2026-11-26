@@ -214,6 +214,15 @@ opcode, `win32_version=98se` when a message names the version, more
   room](../CONFIGURATION.md#directplay-games-on-the-built-in-windows)
   over the IPX connection, the only one the game takes; it lists the
   TCP/IP one but ignores it, on Windows too.
+* **Omikron: The Nomad Soul** on an S3 with a Voodoo2 (`machine=svga_s3`,
+  `voodoo=true`, `voodoo_model=voodoo2`): `win32_depth=16`. The game sets
+  640x480 in 16 bits on the Voodoo2 and plays its movies through
+  DirectShow, which takes its picture format from the S3's desktop. That
+  desktop stays at 32 bits, the S3's default, and the movies show as
+  stripes and colour noise. Windows 98 SE with an S3 Trio64 and a
+  Voodoo2 reports the same 32 bits to DirectShow while the Voodoo2's mode
+  is set. On `svga_voodoo3` and `svga_toadforce` the game sets its mode
+  on the display card itself, and the movies play at any desktop depth.
 * **Rage of Mages** (GOG): `cpu=pentium_ii`. The game needs a Pentium; on
   the default 486 the map's unexplored areas show dark blue instead of
   black. Copy the game's folder into a folder of drive C:, such as
