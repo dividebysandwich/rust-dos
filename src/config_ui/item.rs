@@ -4,7 +4,7 @@
 use super::Frontend;
 use super::values::{
     DEADZONE_UNIT, SCREEN_GLOW_UNIT, awe32, bar, describe_blocksize, host_midi, memsize_bar, mt32, on_off, percent_bar,
-    ram_size, sc55_found, soundfonts,
+    ram_size, sc55_found, soundfonts, voodoo_add_on, voodoo_opengl,
 };
 use crate::config::{MidiSynth, Settings};
 use crate::cpu::CoreMode;
@@ -630,7 +630,13 @@ impl Item {
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
             Item::AutoFps | Item::AutoBusyOs => matches!(s.cycles, CpuSpeed::Auto(_)),
-            Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooGamma => s.voodoo.enabled,
+            // The add-on card's own: a Voodoo3 or Banshee as the display
+            // adapter leaves no room for it, and has its 16 MB whatever
+            // these say.
+            Item::Voodoo => s.machine.voodoo_board().is_none(),
+            Item::VoodooMemory | Item::VoodooGamma => voodoo_add_on(s),
+            // Every 3dfx card's, the display adapter's too.
+            Item::VoodooRenderer | Item::VoodooTextureSampling => s.voodoo_board().is_some(),
             Item::PowerVrFilter => s.powervr.is_some(),
             Item::VeriteRisc | Item::VeriteIrq => s.machine.is_verite(),
             Item::ToadForceMemory | Item::ToadForceRenderer | Item::ToadForceGamma => {
@@ -646,15 +652,11 @@ impl Item {
             Item::Sc55Roms | Item::Sc55Model => s.sound.midisynth == MidiSynth::Sc55,
             // Until there are ROMs.
             Item::Sc55Download => s.sound.midisynth == MidiSynth::Sc55 && sc55_found(s).is_none(),
-            // Until it is there.
-            Item::VoodooOverlay => s.voodoo.enabled && crate::voodoo::overlay::find().is_none(),
-            Item::VoodooScale | Item::VoodooMsaa | Item::VoodooDither | Item::VoodooAnisotropy => {
-                s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl
-            }
+            // DOS games' Glide for the add-on card, until it is there.
+            Item::VoodooOverlay => voodoo_add_on(s) && crate::voodoo::overlay::find().is_none(),
+            Item::VoodooScale | Item::VoodooMsaa | Item::VoodooDither | Item::VoodooAnisotropy => voodoo_opengl(s),
             // At 1x the lines are the card's own, whatever the look.
-            Item::VoodooScaleShader => {
-                s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl && s.voodoo.scale > 1
-            }
+            Item::VoodooScaleShader => voodoo_opengl(s) && s.voodoo.scale > 1,
             Item::Relay => s.network.online,
             Item::SerialIrq(n) => s.serial.ports[n as usize] != crate::serial::PortType::Off,
             Item::MouseType => s.serial.ports.contains(&crate::serial::PortType::Mouse),

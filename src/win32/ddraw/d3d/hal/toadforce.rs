@@ -1777,6 +1777,16 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     }
 }
 
+/// The surface `id` goes: the blocks of its copies go back to video
+/// memory now. Kept until `room` let go of them, they would hold memory
+/// that the surfaces made next, such as an OpenGL context's buffers for
+/// a larger window, can't take from them.
+pub fn surface_destroyed(cpu: &mut Cpu, id: u32) {
+    if hal(cpu).textures.iter().any(|c| c.surface == id) {
+        forget(cpu, |c| c.surface == id);
+    }
+}
+
 /// Video memory was lost: the copies' blocks went with it, and may be
 /// other surfaces' now, so the copies are dropped without giving them
 /// back. The textures are copied again when they are next drawn with.
