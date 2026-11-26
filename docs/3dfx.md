@@ -114,7 +114,7 @@ Banshee, which always has 16 MB. The others work for every 3dfx card.
 | `voodoo` | `false`, `true` | Adds the Voodoo Graphics or Voodoo2 add-on card |
 | `voodoo_model` | `voodoo1`, `voodoo2` | The add-on card's chip |
 | `voodoo_memory` | `12`, `8`, `4` | The add-on card's memory in MB: 12 is two texture units with 4 MB each, 8 a Voodoo2 with 2 MB each (it picks the Voodoo2 when `voodoo_model` isn't set; a Voodoo Graphics takes it as 12), 4 a Voodoo Graphics with one texture unit (a Voodoo2 takes it as 8) |
-| `voodoo_renderer` | `software`, `opengl` | What draws the card's picture. `software` draws it at the card's resolution; `opengl` has your graphics card draw it again at `voodoo_scale` times that. `opengl` needs OpenGL 3.2 from your graphics driver; without it the `software` picture shows and a `[DISPLAY]` line at startup says why |
+| `renderer` | `auto`, `opengl`, `software` | What draws the card's picture, and a ToadForce's. `auto` and `software` draw a 3dfx card at its resolution; `opengl` has your graphics card draw it again at `voodoo_scale` times that. `opengl` needs OpenGL 3.2 from your graphics driver; without it the software picture shows and a `[DISPLAY]` line at startup says why |
 | `voodoo_scale` | `2`, 1 to 4 | How many times the card's resolution OpenGL draws at |
 | `voodoo_scale_shader` | `true`, `false` | Whether the CRT looks keep one scanline per line of the card's resolution; `false` gives a line per pixel of the bigger picture (above 1x only) |
 | `voodoo_msaa` | `off`, `2`, `4`, `8` | OpenGL's antialiasing |
@@ -126,19 +126,19 @@ Banshee, which always has 16 MB. The others work for every 3dfx card.
 
 `voodoo`, `voodoo_model`, `voodoo_memory`, `voodoo_gamma` and `machine`
 take effect at the DOS prompt, the others at once. The settings
-window's Emulator page has them as *Video card*, *3dfx Voodoo
-Graphics*, *3dfx card* (the chip and memory together), *3dfx drawn by*
-and the *3dfx* settings after it. The window shows the settings the
-machine's card uses: with the add-on card, all of them; with a Voodoo3
-or Banshee, *3dfx drawn by*, texture sampling and the OpenGL settings,
-but not the add-on's switch, memory or gamma. The OpenGL settings show
-while *3dfx drawn by* is OpenGL. The card's swaps are held to `fps_cap`,
+window's Emulator page has them as *Video card*, *3D drawn by*, *3dfx
+Voodoo Graphics*, *3dfx card* (the chip and memory together) and the
+*3dfx* settings after it. The window shows the settings the machine's
+card uses: with the add-on card, all of them; with a Voodoo3 or
+Banshee, *3D drawn by*, texture sampling and the OpenGL settings, but
+not the add-on's switch, memory or gamma. The OpenGL settings show
+while *3D drawn by* is OpenGL. The card's swaps are held to `fps_cap`,
 the frame rate cap of every card (`voodoo_fps_cap` is its old name; see
 [Frame rate cap](../CONFIGURATION.md#frame-rate-cap)).
 
 The Voodoo2 is a single board: SLI, two Voodoo2s drawing alternate
 lines, isn't emulated, so games see one card. The libretro core draws a
-Banshee or Voodoo3 in software whatever `voodoo_renderer` says.
+Banshee or Voodoo3 in software whatever `renderer` says.
 
 [The 3dfx OpenGL renderer](../CONFIGURATION.md#the-3dfx-opengl-renderer)
 explains the OpenGL settings, and [3dfx
