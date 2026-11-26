@@ -146,7 +146,8 @@ struct Backing {
 
 /// Where a track file's bytes are.
 enum Source {
-    File(RefCell<File>),
+    /// A host file, read a block at a time (`FileReader`).
+    File(RefCell<FileReader>),
     /// In memory, as the browser build has its CD images.
     Memory(MemoryImage),
     /// Decoded from a compressed audio file as they are read.
@@ -1310,6 +1311,79 @@ fn decode_q(q: &[u8]) -> Option<QPosition> {
     })
 }
 
+/// How much of a track file `FileReader` reads at once.
+const READ_AHEAD: u64 = 0x10000;
+
+/// A track file on the host, read in blocks of `READ_AHEAD` bytes, the
+/// last of which it keeps. Programs read a disc in pieces of a sector or
+/// less (Microsoft Setup copies a file 1 KB at a time, which reads every
+/// sector twice), and one host read for each, a seek and a read, costs
+/// more than the copy: on a hard disk whose cache doesn't hold the image
+/// yet, about 100 us. Read a block at a time, a run of such reads is one
+/// host read for every 64 KB, and the others copy from memory. The disc
+/// is read-only, so the block kept is never out of date.
+struct FileReader {
+    file: File,
+    /// Where the block kept starts, in the file's sector data, and its
+    /// bytes; empty before the first read.
+    block_at: u64,
+    block: Vec<u8>,
+}
+
+impl FileReader {
+    fn new(file: File) -> Self {
+        FileReader {
+            file,
+            block_at: 0,
+            block: Vec::new(),
+        }
+    }
+
+    /// Fill `buf` from byte `at` of the sector data, which starts at
+    /// `offset` in the file and is `len` bytes long; `buf` ends within
+    /// it.
+    fn read_at(&mut self, offset: u64, len: u64, at: u64, buf: &mut [u8]) -> io::Result<()> {
+        let end = at + buf.len() as u64;
+        if !self.holds(at, end) && buf.len() as u64 <= READ_AHEAD {
+            // The block `at` is in, or a block from `at` where the piece
+            // reaches past that one's end.
+            let aligned = at - at % READ_AHEAD;
+            let start = if end <= aligned + READ_AHEAD {
+                aligned
+            } else {
+                at
+            };
+            let size = READ_AHEAD.min(len - start) as usize;
+            self.block.resize(size, 0);
+            if self.read_exact_at(offset + start, size).is_err() {
+                // A file shorter than its header says (a WAVE file cut
+                // short): only what is asked for is read, as below.
+                self.block.clear();
+            } else {
+                self.block_at = start;
+            }
+        }
+        if self.holds(at, end) {
+            let from = (at - self.block_at) as usize;
+            buf.copy_from_slice(&self.block[from..from + buf.len()]);
+            return Ok(());
+        }
+        self.file.seek(SeekFrom::Start(offset + at))?;
+        self.file.read_exact(buf)
+    }
+
+    /// Whether the block kept has the bytes from `at` to `end`.
+    fn holds(&self, at: u64, end: u64) -> bool {
+        at >= self.block_at && end <= self.block_at + self.block.len() as u64
+    }
+
+    /// Read `size` bytes at `pos` of the file into the block.
+    fn read_exact_at(&mut self, pos: u64, size: usize) -> io::Result<()> {
+        self.file.seek(SeekFrom::Start(pos))?;
+        self.file.read_exact(&mut self.block[..size])
+    }
+}
+
 impl Backing {
     fn open(path: &Path, format: FileFormat) -> Result<Self, String> {
         let error = |e: io::Error| format!("{}: {}", path.display(), e);
@@ -1326,7 +1400,13 @@ impl Backing {
             FileFormat::Compressed => return Self::decoded(path),
             _ => (0, total),
         };
-        Ok(Backing { source: Source::File(RefCell::new(file)), data_offset, len, swap: format == FileFormat::Motorola })
+        let source = Source::File(RefCell::new(FileReader::new(file)));
+        Ok(Backing {
+            source,
+            data_offset,
+            len,
+            swap: format == FileFormat::Motorola,
+        })
     }
 
     /// A compressed audio file, decoded to CD audio as it is read. Its
@@ -1352,28 +1432,27 @@ impl Backing {
             return Ok(());
         }
         let n = buf.len().min((self.len - at) as usize);
-        let at = self.data_offset + at;
+        let pos = self.data_offset + at;
         match &self.source {
             Source::File(file) => {
-                let mut file = file.borrow_mut();
-                file.seek(SeekFrom::Start(at))?;
-                file.read_exact(&mut buf[..n])
+                file.borrow_mut()
+                    .read_at(self.data_offset, self.len, at, &mut buf[..n])
             }
-            Source::Memory(data) => match data.read_at(at, &mut buf[..n]) {
+            Source::Memory(data) => match data.read_at(pos, &mut buf[..n]) {
                 true => Ok(()),
                 false => Err(io::ErrorKind::UnexpectedEof.into()),
             },
             #[cfg(feature = "cdaudio")]
             Source::Decoded(track) => {
-                track.borrow_mut().read_at(at, &mut buf[..n]);
+                track.borrow_mut().read_at(pos, &mut buf[..n]);
                 Ok(())
             }
             Source::Folder(disc, open) => {
-                disc.read_at(at, &mut buf[..n], &mut open.borrow_mut());
+                disc.read_at(pos, &mut buf[..n], &mut open.borrow_mut());
                 Ok(())
             }
             #[cfg(feature = "chd")]
-            Source::Chd(disc) => disc.borrow_mut().read_at(at, &mut buf[..n]),
+            Source::Chd(disc) => disc.borrow_mut().read_at(pos, &mut buf[..n]),
         }
     }
 }
@@ -3296,5 +3375,62 @@ mod tests {
         // The data moves the sectors from where the uniform spiral has
         // them.
         assert!((a.turns(100) - plain.turns(100)).abs() > 0.5);
+    }
+
+    /// A track file of `size` bytes, each one's value made from its
+    /// position.
+    fn patterned(name: &str, size: usize) -> (PathBuf, Vec<u8>) {
+        let bytes: Vec<u8> = (0..size).map(|i| (i * 7 % 251) as u8).collect();
+        let path = scratch(name).join("track.bin");
+        fs::write(&path, &bytes).unwrap();
+        (path, bytes)
+    }
+
+    #[test]
+    fn file_reader_reads_the_bytes_of_the_file() {
+        let (path, bytes) = patterned("reader", 300_000);
+        let offset = 44u64;
+        let data = &bytes[offset as usize..];
+        let len = data.len() as u64;
+        let mut reader = FileReader::new(File::open(&path).unwrap());
+        let block = READ_AHEAD as usize;
+        // Pieces a program reads: 1 KB after 1 KB, sectors, pieces across
+        // a block's end, backwards, larger than a block, at the end.
+        let pieces = [
+            (0, 1024),
+            (1024, 1024),
+            (2048, 2048),
+            (block - 20, 40),
+            (block - 20, 2352),
+            (3 * block + 100, 2352),
+            (100, 10),
+            (0, block + 5000),
+            (len as usize - 10, 10),
+            (len as usize - 3000, 3000),
+            (2 * block, block),
+        ];
+        for (at, size) in pieces {
+            let mut buf = vec![0xEE; size];
+            reader.read_at(offset, len, at as u64, &mut buf).unwrap();
+            assert_eq!(buf, data[at..at + size], "{size} bytes at {at}");
+        }
+        // The second KB of a sector comes from the block read for the
+        // first.
+        reader.read_at(offset, len, 0, &mut [0; 1024]).unwrap();
+        assert!(reader.holds(1024, 2048));
+    }
+
+    #[test]
+    fn file_reader_reads_a_file_shorter_than_its_data() {
+        // A WAVE file whose header gives more data than the file has: the
+        // bytes there read, and a piece past the end fails as a read of
+        // the file does.
+        let (path, bytes) = patterned("reader_short", 70_000);
+        let len = 100_000;
+        let mut reader = FileReader::new(File::open(&path).unwrap());
+        let mut buf = vec![0; 2352];
+        reader.read_at(0, len, 66_000, &mut buf).unwrap();
+        assert_eq!(buf, bytes[66_000..68_352]);
+        assert!(reader.read_at(0, len, 69_000, &mut buf).is_err());
     }
 }
