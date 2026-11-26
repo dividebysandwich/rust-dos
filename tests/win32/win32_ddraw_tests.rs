@@ -287,6 +287,7 @@ const S_SET_COLOR_KEY: u32 = 29;
 const S_SET_PALETTE: u32 = 31;
 const S_UNLOCK: u32 = 32;
 const PAL_SET_ENTRIES: u32 = 6;
+const CLIP_GET_CLIP_LIST: u32 = 3;
 const CLIP_SET_HWND: u32 = 8;
 
 const DDSD_CAPS: u32 = 0x1;
@@ -313,6 +314,8 @@ const DDPCAPS_8BIT: u32 = 0x4;
 const DDPCAPS_ALLOW256: u32 = 0x40;
 const WS_POPUP: u32 = 0x8000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
+const WS_CHILD: u32 = 0x4000_0000;
+const WS_CLIPCHILDREN: u32 = 0x0200_0000;
 const WS_EX_TOPMOST: u32 = 0x8;
 
 /// A DDSURFACEDESC at `offset` with `flags`, `caps` and the rest given.
@@ -1551,6 +1554,131 @@ fn a_windowed_program_blits_to_the_desktop_inside_its_window() {
         assert_ne!(pixel(&cpu, 92, y), 0x00FF_0000);
     }
     assert_ne!(pixel(&cpu, 100, 66), 0x00FF_0000);
+}
+
+/// A window with a frame and a caption, as Actua Soccer 2's setup
+/// screen has, its left edge at `x`, and the clip list of a clipper set
+/// to it. With `child`, the window has WS_CLIPCHILDREN and a child that
+/// covers the top 20 rows of its client area.
+fn framed_clip_list_program(x: i32, child: bool) -> (Vec<u8>, u32) {
+    let mut d = data();
+    put32(&mut d, RECT, 0x100);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        // WS_CAPTION, WS_SYSMENU, WS_THICKFRAME and WS_MINIMIZEBOX, at
+        // the place and size the game gives its window.
+        let clip_children = if child { WS_CLIPCHILDREN } else { 0 };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(0x00CE_0000 | WS_VISIBLE | clip_children),
+                Arg::I(x as u32),
+                Arg::I(94),
+                Arg::I(328),
+                Arg::I(227),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        if child {
+            c.api(
+                a,
+                l,
+                CREATE_WINDOW,
+                &[
+                    Arg::I(0),
+                    Arg::At(CLASS),
+                    Arg::At(CLASS),
+                    Arg::I(WS_CHILD | WS_VISIBLE),
+                    Arg::I(0),
+                    Arg::I(0),
+                    Arg::I(320),
+                    Arg::I(20),
+                    Arg::Val(HWND),
+                    Arg::I(0),
+                    Arg::I(BASE),
+                    Arg::I(0),
+                ],
+            )?;
+        }
+        c.api(
+            a,
+            l,
+            DIRECT_DRAW_CREATE_CLIPPER,
+            &[Arg::I(0), Arg::At(CLIPPER), Arg::I(0)],
+        )?;
+        c.com(a, l, CLIPPER, CLIP_SET_HWND, &[Arg::I(0), Arg::Val(HWND)])?;
+        c.com(
+            a,
+            l,
+            CLIPPER,
+            CLIP_GET_CLIP_LIST,
+            &[Arg::I(0), Arg::At(ENTRIES), Arg::At(RECT)],
+        )?;
+        finish(a, l)
+    })
+}
+
+/// The clip list `framed_clip_list_program` gets: its header, bounds
+/// and rectangle, as dwords.
+fn framed_clip_list(test: &str, x: i32, child: bool) -> Vec<u32> {
+    let (program, data) = framed_clip_list_program(x, child);
+    let mut cpu = machine(test, program);
+    run_until_done(&mut cpu, data);
+    let windows = 1 + usize::from(child);
+    let results = results(&mut cpu, data, windows as u32 + 3);
+    assert!(results[..windows].iter().all(|&hwnd| hwnd != 0));
+    assert_eq!(results[windows..], [0; 3]);
+    (0..12)
+        .map(|i| peek(&cpu, data + ENTRIES + 4 * i))
+        .collect()
+}
+
+#[test]
+fn a_windows_clip_list_is_its_client_area() {
+    let list = framed_clip_list("framed_clip_list", 152, false);
+    // One rectangle: the window less its 4-pixel frame and its 19-pixel
+    // caption bar, the client area the game's AdjustWindowRectEx put at
+    // (156, 117) to (476, 317). The game copies its picture into the
+    // primary surface by these rectangles, from its 320x200 buffer at
+    // their place in the client area.
+    let client = [156, 117, 476, 317];
+    assert_eq!(list[..4], [32, 1, 1, 16]);
+    assert_eq!(list[4..8], client, "bounds");
+    assert_eq!(list[8..12], client, "rectangle");
+}
+
+/// The clip list is the region GetDC's DC of the window has: a window
+/// with WS_CLIPCHILDREN leaves its children out.
+#[test]
+fn a_windows_clip_list_leaves_out_its_children_with_clipchildren() {
+    let list = framed_clip_list("framed_clip_list_child", 152, true);
+    // The client area less the child's 20 rows at its top.
+    let below = [156, 137, 476, 317];
+    assert_eq!(list[..4], [32, 1, 1, 16]);
+    assert_eq!(list[4..8], below, "bounds");
+    assert_eq!(list[8..12], below, "rectangle");
+}
+
+/// What of a window lies off the screen isn't in its clip list, as on
+/// Windows, where a window's visible region is cut to the screen.
+#[test]
+fn a_windows_clip_list_is_cut_to_the_screen() {
+    let list = framed_clip_list("framed_clip_list_left", -52, false);
+    // The client area, (-48, 117) to (272, 317), from the screen's left
+    // edge on.
+    let shown = [0, 117, 272, 317];
+    assert_eq!(list[..4], [32, 1, 1, 16]);
+    assert_eq!(list[4..8], shown, "bounds");
+    assert_eq!(list[8..12], shown, "rectangle");
 }
 
 /// A palette on the primary surface of an 8-bit mode, and an entry
