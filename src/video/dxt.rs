@@ -22,6 +22,10 @@
 //!   value to the first, so that code 2 is the one nearest the second;
 //!   and DXT2 and DXT4 keep each colour channel at most the alpha.
 
+mod encode;
+
+pub use encode::encode_block;
+
 /// A DXT format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
