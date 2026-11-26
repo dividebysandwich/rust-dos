@@ -490,6 +490,14 @@ fn has_msr(model: CpuModel, msr: u32, write: bool) -> bool {
 pub fn msr(cpu: &mut Cpu, write: bool) -> CpuResult {
     require_pentium(cpu)?;
     require_cpl0(cpu)?;
+    msr_at_level0(cpu, write)
+}
+
+/// RDMSR or WRMSR as level 0 runs it (`msr`), once the processor and the
+/// level are checked. The DPMI host runs Glide's marked accesses from
+/// level 3 with it, so that both levels give a marked access the same
+/// result.
+pub(crate) fn msr_at_level0(cpu: &mut Cpu, write: bool) -> CpuResult {
     let msr = cpu.ecx();
     if !has_msr(cpu.model, msr, write) {
         if cpu.ebx() == GLIDE_MSR_MARK {

@@ -1163,7 +1163,7 @@ fn idt(cpu: &mut Cpu, vector: u8) {
     }
     if vector == 13
         && error == Some(0)
-        && (emulate_mov_system(cpu, &mut ctx) || skip_glide_msr(cpu, &mut ctx))
+        && (emulate_mov_system(cpu, &mut ctx) || run_glide_msr(cpu, &mut ctx))
     {
         resume(cpu, &ctx);
     } else if exception {
@@ -1219,24 +1219,36 @@ fn emulate_mov_system(cpu: &mut Cpu, ctx: &mut Context) -> bool {
 /// EBX, in the client's context `ctx`. Glide's DOS overlay reaches for the
 /// memory type range registers so from level 3 in a Windows DOS box, and
 /// 3dfx's Windows driver, which Windows has with a Voodoo, catches the
-/// #GP and goes on after the instruction: RDMSR reads 0 and WRMSR writes
-/// nothing, as the processor does at level 0 (instructions/system.rs).
-/// Returns whether the instruction was one.
-fn skip_glide_msr(cpu: &mut Cpu, ctx: &mut Context) -> bool {
-    if ctx.gpr[EBX] != crate::instructions::system::GLIDE_MSR_MARK {
+/// #GP and goes on after the instruction. The host runs the access as
+/// level 0 does (`msr_at_level0` in instructions/system.rs), where the
+/// MTRRs that Glide marks read 0 and keep nothing, so that a program gets
+/// the same from either level. An access that faults at level 0 too goes
+/// to the client's handler. Returns whether the instruction was one.
+fn run_glide_msr(cpu: &mut Cpu, ctx: &mut Context) -> bool {
+    use crate::instructions::system::{GLIDE_MSR_MARK, msr_at_level0};
+    if ctx.gpr[EBX] != GLIDE_MSR_MARK {
         return false;
     }
-    let Some(base) = selector_base(cpu, ctx.sel(Seg::CS)) else { return false };
+    let Some(base) = selector_base(cpu, ctx.sel(Seg::CS)) else {
+        return false;
+    };
     let at = base.wrapping_add(ctx.eip);
-    let (escape, opcode) = (vm::read_8(cpu, at), vm::read_8(cpu, at.wrapping_add(1)));
-    match (escape, opcode) {
-        (0x0F, 0x32) => {
-            ctx.gpr[EAX] = 0;
-            ctx.gpr[EDX] = 0;
-        }
-        (0x0F, 0x30) => {}
+    let write = match (vm::read_8(cpu, at), vm::read_8(cpu, at.wrapping_add(1))) {
+        (0x0F, 0x32) => false,
+        (0x0F, 0x30) => true,
         _ => return false,
+    };
+    // The access reads the client's registers. `resume` loads the
+    // context's, so those it doesn't change come back as they were.
+    cpu.set_eax(ctx.gpr[EAX]);
+    cpu.set_ecx(ctx.gpr[ECX]);
+    cpu.set_edx(ctx.gpr[EDX]);
+    cpu.set_ebx(ctx.gpr[EBX]);
+    if msr_at_level0(cpu, write).is_err() {
+        return false;
     }
+    ctx.gpr[EAX] = cpu.eax();
+    ctx.gpr[EDX] = cpu.edx();
     ctx.eip = ctx.eip.wrapping_add(2);
     true
 }

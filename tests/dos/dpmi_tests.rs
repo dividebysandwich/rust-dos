@@ -1802,23 +1802,45 @@ fn a_32_bit_client_gets_big_psp_and_environment_selectors() {
     // through such a vector.
     for (bits32, name) in [(true, "pspsel32"), (false, "pspsel16")] {
         let (mut cpu, psp) = machine(name, &[("T.COM", psp_selector_program(bits32))], "T.COM");
-        assert!(run_to_exit(&mut cpu, 200), "the program didn't end (step {})", word(&cpu, psp, STEP));
-        assert_eq!(cpu.errorlevel, 0x2A, "failed at step {}", word(&cpu, psp, STEP));
+        assert!(
+            run_to_exit(&mut cpu, 200),
+            "the program didn't end (step {})",
+            word(&cpu, psp, STEP)
+        );
+        assert_eq!(
+            cpu.errorlevel,
+            0x2A,
+            "failed at step {}",
+            word(&cpu, psp, STEP)
+        );
         let rights = |at: u16| (word(&cpu, psp, at + 2) as u32) << 16 | word(&cpu, psp, at) as u32;
         for (at, what) in [(R, "PSP"), (R + 4, "environment")] {
             let rights = rights(at);
             assert_eq!(rights >> 8 & 0xFE, 0xF2, "the {what} is data at level 3");
-            assert_eq!(rights & 1 << 22 != 0, bits32, "the {what}'s B bit, {bits32}");
+            assert_eq!(
+                rights & 1 << 22 != 0,
+                bits32,
+                "the {what}'s B bit, {bits32}"
+            );
         }
     }
 }
 
 /// Read and write a model-specific register from level 3 with Glide's
-/// mark (DEADCAFEh) in EBX, keeping EDX:EAX after the read at R.
+/// mark (DEADCAFEh) in EBX, keeping EDX:EAX after the read at R, then
+/// read it without the mark, which faults to a #GP handler that ends the
+/// program with DDh.
 fn glide_msr_program() -> Vec<u8> {
     let main = asm16(0x100, |a| {
         let mut fail = a.create_label();
         enter(a, true, fail)?;
+        a.mov(ax, 0x0203)?;
+        a.mov(bl, 0x0D)?;
+        a.mov(cx, cs)?;
+        a.xor(edx, edx)?;
+        a.mov(dx, EXC_HANDLER as u32)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
         step(a, 4)?;
         a.mov(eax, 0x1234_5678u32)?;
         a.mov(edx, 0x9ABC_DEF0u32)?;
@@ -1830,23 +1852,37 @@ fn glide_msr_program() -> Vec<u8> {
         step(a, 5)?;
         a.wrmsr()?;
         step(a, 6)?;
+        a.xor(ebx, ebx)?;
+        a.rdmsr()?;
         exit(a, 0x2A)?;
         a.set_label(&mut fail)?;
         exit(a, 0xEE)
     });
-    com(&[(0x100, main)])
+    let exc = asm16(EXC_HANDLER, |a| exit(a, 0xDD));
+    com(&[(0x100, main), (EXC_HANDLER, exc)])
 }
 
 #[test]
-fn the_host_skips_glides_marked_msr_accesses() {
+fn the_host_runs_only_glides_marked_msr_accesses() {
     // Glide's DOS overlay reads and writes the MTRRs from level 3 in a
     // Windows DOS box, with DEADCAFEh in EBX for 3dfx's Windows driver to
     // catch the #GP: the read gives 0, the write does nothing, and the
-    // program goes on (Redguard's 3dfx version from its launcher).
+    // program goes on (Redguard's 3dfx version from its launcher). An
+    // access without the mark is the client's #GP, as on Windows.
     let (mut cpu, psp) = machine("glidemsr", &[("T.COM", glide_msr_program())], "T.COM");
     cpu.model = rust_dos::cpu::CpuModel::Pentium;
-    assert!(run_to_exit(&mut cpu, 200), "the program didn't end (step {})", word(&cpu, psp, STEP));
-    assert_eq!(cpu.errorlevel, 0x2A, "failed at step {}", word(&cpu, psp, STEP));
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end (step {})",
+        word(&cpu, psp, STEP)
+    );
+    assert_eq!(
+        cpu.errorlevel,
+        0xDD,
+        "failed at step {}",
+        word(&cpu, psp, STEP)
+    );
+    assert_eq!(word(&cpu, psp, STEP), 6, "the unmarked read's #GP");
     for at in [R, R + 2, R + 4, R + 6] {
         assert_eq!(word(&cpu, psp, at), 0, "EDX:EAX after the read");
     }
