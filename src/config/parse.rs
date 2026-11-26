@@ -812,10 +812,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
     if vr_before_auto {
         config.vr.from_before_auto();
     }
-    // Lines that ask for OpenGL for one card and software for the other,
-    // which `renderer` has no value for, are an error. One card's part
-    // may come from a `renderer` line before the other's old line, such
-    // as the base settings' under a game profile's own lines.
+    // Lines that ask for the 3dfx cards on OpenGL and the ToadForce in
+    // software, which `renderer` has no value for, are an error. One
+    // card's part may come from a `renderer` line of this text before the
+    // other's old line; text read over other settings is checked alone.
     config.errors.extend(config.renderer_conflict(|number| format!("line {number}")));
     // The old settings are read, with a warning that they will stop
     // working, which names the line to write in their place.
