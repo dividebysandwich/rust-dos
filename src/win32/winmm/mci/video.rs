@@ -94,9 +94,10 @@ pub const MCI_DGV_PUT_WINDOW: u32 = 0x0020_0000;
 const MCI_DGV_WHERE_MAX: u32 = 0x0040_0000;
 pub const MCI_DGV_UPDATE_HDC: u32 = 0x0002_0000;
 
-/// MCI_STATUS's items: the window; whether it shows, is minimized, is
-/// maximized.
+/// MCI_STATUS's items: the window; the palette; whether the window
+/// shows, is minimized, is maximized.
 pub const MCI_DGV_STATUS_HWND: u32 = 0x4001;
+pub const MCI_DGV_STATUS_HPAL: u32 = 0x4004;
 pub const MCI_DGV_STATUS_WINDOW_VISIBLE: u32 = 0x4021;
 pub const MCI_DGV_STATUS_WINDOW_MINIMIZED: u32 = 0x4022;
 pub const MCI_DGV_STATUS_WINDOW_MAXIMIZED: u32 = 0x4023;
@@ -167,7 +168,8 @@ pub struct Video {
     pub media: Option<Arc<Media>>,
     pub pictures: Pictures,
     /// On a palette device, the palette the pictures are drawn with,
-    /// once one was drawn; 0 before.
+    /// once one was drawn, realized or asked for by MCI_STATUS
+    /// (`movie_palette`); 0 before.
     pub palette: u32,
     /// Whether the palette is realized as a background palette: the
     /// last MCI_REALIZE had MCI_DGV_REALIZE_BKGD.
@@ -929,6 +931,7 @@ fn status(cpu: &mut Cpu, i: usize, flags: u32, p: &mut Parms) -> u32 {
         MCI_STATUS_MEDIA_PRESENT | MCI_STATUS_READY => (TRUE, Ret::Bool),
         MCI_STATUS_TIME_FORMAT => (device(cpu, i).time_format, Ret::TimeFormat),
         MCI_DGV_STATUS_HWND => (video(cpu, i).hwnd, Ret::Int),
+        MCI_DGV_STATUS_HPAL => (status_palette(cpu, i), Ret::Int),
         MCI_DGV_STATUS_WINDOW_VISIBLE
         | MCI_DGV_STATUS_WINDOW_MINIMIZED
         | MCI_DGV_STATUS_WINDOW_MAXIMIZED => {
@@ -1257,33 +1260,58 @@ fn realize(cpu: &mut Cpu, i: usize, flags: u32) -> u32 {
     0
 }
 
+/// MCI_STATUS's MCI_DGV_STATUS_HPAL: the palette the device draws with
+/// (`movie_palette`), as MCIAVI answers with DrawDib's palette. It is
+/// made now if no frame was drawn yet, so the handle is the one the
+/// frames are drawn and realized with. On a device of more than 256
+/// colours DrawDib realizes no palette and the answer is 0, as it is for
+/// a device with no file, or with a file of no pictures, which DrawDib
+/// never begins to draw (`draw`).
+fn status_palette(cpu: &mut Cpu, i: usize) -> u32 {
+    if !palette::palette_device(cpu) {
+        return 0;
+    }
+    match media(cpu, i) {
+        Some(m) if m.frames > 0 => movie_palette(cpu, i, &m),
+        _ => 0,
+    }
+}
+
+/// The palette the device `i` draws `m` with on a palette device: the
+/// movie's own colours for an 8-bit movie, the palette of iccvid.dll's
+/// 8-bit output for a Cinepak movie, the halftone palette for one of
+/// more bits. It is made the first time it is asked for and kept in
+/// `Video::palette` until the device closes.
+fn movie_palette(cpu: &mut Cpu, i: usize, m: &Media) -> u32 {
+    let hpal = video(cpu, i).palette;
+    if crate::win32::gdi32::gdi(cpu).palette(hpal).is_some() {
+        return hpal;
+    }
+    let mut colors = match &m.video {
+        MediaKind::Avi(v) if v.cinepak() => v.cinepak_palette(crate::win32::gdi32::static_colors()),
+        MediaKind::Avi(v) => v.colors(),
+        _ => Vec::new(),
+    };
+    if colors.is_empty() {
+        colors = palette::halftone_colors();
+    }
+    let hpal = palette::system_palette_of(cpu, &colors);
+    video(cpu, i).palette = hpal;
+    hpal
+}
+
 /// On a palette device, select the movie's palette into `hdc` and
-/// realize it, as MCIAVI's DrawDib does before it draws: the movie's own
-/// colours for an 8-bit movie, the palette of iccvid.dll's 8-bit output
-/// for a Cinepak movie, the halftone palette for one of more bits.
-/// Unless MCI_REALIZE asked for the background, it is selected as
-/// a foreground palette, so in the foreground window or a child of it,
-/// its colours take the system palette's free entries. Returns the
-/// palette it replaced, which goes back in after the picture is drawn.
+/// realize it, as MCIAVI's DrawDib does before it draws
+/// (`movie_palette`). Unless MCI_REALIZE asked for the background, it
+/// is selected as a foreground palette, so in the foreground window or a
+/// child of it, its colours take the system palette's free entries.
+/// Returns the palette it replaced, which goes back in after the
+/// picture is drawn.
 fn select_movie_palette(cpu: &mut Cpu, i: usize, m: &Media, hdc: u32) -> Option<u32> {
     if !palette::palette_device(cpu) {
         return None;
     }
-    let mut hpal = video(cpu, i).palette;
-    if crate::win32::gdi32::gdi(cpu).palette(hpal).is_none() {
-        let mut colors = match &m.video {
-            MediaKind::Avi(v) if v.cinepak() => {
-                v.cinepak_palette(crate::win32::gdi32::static_colors())
-            }
-            MediaKind::Avi(v) => v.colors(),
-            _ => Vec::new(),
-        };
-        if colors.is_empty() {
-            colors = palette::halftone_colors();
-        }
-        hpal = palette::system_palette_of(cpu, &colors);
-        video(cpu, i).palette = hpal;
-    }
+    let hpal = movie_palette(cpu, i, m);
     // A full-screen play has the screen to itself, as in MCIAVI's display
     // mode of its own: its palette is the foreground one, though the
     // window that covers the screen is never the foreground window, so
