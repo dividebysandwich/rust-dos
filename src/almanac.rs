@@ -29,9 +29,11 @@ pub const API: &str = "https://almanac.rust-dos.com/api/v1";
 pub const API_VARIABLE: &str = "RUST_DOS_ALMANAC_API";
 
 /// The settings the almanac knows, by section and key: those of the
-/// machine a game runs on, and the frame rate cap, which some games need
-/// (Test Drive 4 misbehaves above 60) and a benchmark's entry turns off.
-pub const KEYS: [(&str, &str); 42] = [
+/// machine a game runs on, the frame rate cap, which some games need
+/// (Test Drive 4 misbehaves above 60) and a benchmark's entry turns off,
+/// and what draws the 3D cards (`renderer`), as some games draw right
+/// with only one of OpenGL and software.
+pub const KEYS: [(&str, &str); 43] = [
     ("emulator", "machine"),
     ("emulator", "cpu"),
     ("emulator", "core"),
@@ -57,6 +59,7 @@ pub const KEYS: [(&str, &str); 42] = [
     ("emulator", "hard_disk_speed"),
     ("emulator", "floppy_disk_speed"),
     ("emulator", "fps_cap"),
+    ("emulator", "renderer"),
     ("sound", "sbtype"),
     ("sound", "sbbase"),
     ("sound", "irq"),
@@ -1250,6 +1253,40 @@ mod tests {
             notes: Vec::new(),
         };
         assert_eq!(r.usable().len(), 1, "the old name is the setting's");
+    }
+
+    /// `renderer` goes to the almanac and comes back by its name, over the
+    /// configuration's; a value the parser doesn't take leaves the
+    /// configuration's.
+    #[test]
+    fn the_renderer_goes_to_the_almanac_and_comes_back() {
+        use crate::config::Renderer;
+        let setting = |value: &str| Setting {
+            section: "emulator".into(),
+            key: "renderer".into(),
+            value: value.into(),
+        };
+        let default = Settings::default();
+        let reported = report_settings(&default, default.memory_mb(), None);
+        assert_eq!(reported["emulator"]["renderer"], "auto");
+        let base = Settings { renderer: Renderer::Software, ..Settings::default() };
+        for r in Renderer::ALL {
+            let layered = layer(&base, &[&setting(r.name())], None);
+            assert_eq!(layered.renderer, r, "{}", r.name());
+            let reported = report_settings(&layered, layered.memory_mb(), None);
+            assert_eq!(reported["emulator"]["renderer"], r.name());
+        }
+        let opengl = setting("OpenGL");
+        assert_eq!(layer(&base, &[&opengl], None).renderer, Renderer::OpenGl);
+        let bad = setting("vulkan");
+        assert_eq!(layer(&base, &[&bad], None).renderer, Renderer::Software);
+        let r = Recommendation {
+            source: Source::Consensus { reports: 2 },
+            rating: Ratings::default(),
+            settings: vec![setting("opengl")],
+            notes: Vec::new(),
+        };
+        assert_eq!(r.usable().len(), 1);
     }
 
     #[test]

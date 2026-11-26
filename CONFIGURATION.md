@@ -2222,10 +2222,11 @@ order.
   back once it has ended. A moderator's blessed settings win over the
   ones most reports chose. The program waits ten seconds at most for the
   answer, and Esc ends the wait. Only the machine's settings (CPU,
-  memory, sound cards and the like) and the [frame rate
-  cap](#frame-rate-cap) come from it, never drives, commands or
-  paths. A game launched from its profile and
-  deterministic mode never ask. `true` or `false` (the default).
+  memory, sound cards and the like), the [frame rate
+  cap](#frame-rate-cap) and what draws the 3D cards (OpenGL or
+  software) come from it, never drives, commands or paths. A game
+  launched from its profile and deterministic mode never ask. `true` or
+  `false` (the default).
 
 ### `[sound]`
 
