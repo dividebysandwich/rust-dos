@@ -1038,8 +1038,24 @@ pub(crate) mod tests {
         v.mark_drawn(a as usize / 2);
         picture_comes_before(&mut v, &gate, "page flip");
         assert_eq!(v.fbi.ram.get(b as usize / 2), 0x1234, "B's frame is drawn");
-        // Flipped back to A while its frame is still drawing: that one
-        // waits for it.
+        // Drawn into B after the flip that showed it, behind the held
+        // job: the flip's mark doesn't cover it, and the picture waits
+        // for all (`drawn_shown`).
+        let fb = v.fbi.ram.clone();
+        let words = vec![Word {
+            row: 0,
+            at: b / 2 + 1,
+            value: 0x5678,
+        }];
+        v.submit_outside(Job::Pixels { fb, words }, None);
+        v.mark_drawn(b as usize / 2);
+        picture_waits_for_all(&mut v, &gate, "drawn into the frame shown");
+        assert_eq!(v.fbi.ram.get(b as usize / 2 + 1), 0x5678);
+        // Flipped back to A while its next frame is still drawing: that
+        // one waits for it.
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        v.mark_drawn(a as usize / 2);
         write(&mut v, VID_DESKTOP_START_ADDR, a);
         picture_waits_for_all(&mut v, &gate, "flip to the frame drawing");
     }
