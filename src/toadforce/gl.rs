@@ -437,9 +437,9 @@ pub struct ToadForceGl {
     /// which has no colour.
     target: glow::Framebuffer,
     depth_only: glow::Framebuffer,
-    /// The framebuffers the draws and the clears go to (`attach`), by
-    /// the textures of the colour and the depth buffer, each made and
-    /// checked once.
+    /// The framebuffers the draws and the clears go to, and the
+    /// read-backs of colour read from (`attach`), by the textures of
+    /// the colour and the depth buffer, each made and checked once.
     framebuffers: HashMap<(glow::Texture, Option<glow::Texture>), glow::Framebuffer>,
     /// The framebuffers a copy between two textures reads from: one
     /// for colour, and one without colour for depth.
@@ -502,8 +502,8 @@ pub struct ToadForceGl {
     writes: u64,
     /// The frames the window showed from a copy (`composite`).
     presents: u64,
-    /// The framebuffers made for the draws and the clears, each asked
-    /// once whether it is complete (`attach`).
+    /// The framebuffers made for `framebuffers`, each asked once
+    /// whether it is complete (`attach`).
     framebuffers_made: u64,
     /// The host has no framebuffer the card's surfaces fit: nothing is
     /// taken.
@@ -1591,13 +1591,14 @@ impl ToadForceGl {
         // Every image, or the ones whose bytes were written (`stale`) or
         // whose surface changed on the host.
         let mut all = false;
-        let mut stale = vec![false; images];
+        let mut stale = Vec::new();
         match self.textures.get_mut(texture) {
             Some(t) => {
                 if t.used == batch {
                     return;
                 }
                 t.used = batch;
+                stale.resize(images, false);
                 // The palette's bytes come first where there is one, and
                 // the images' in their order after
                 // (`pipeline::texture_reads`). A program that writes some
@@ -1619,6 +1620,7 @@ impl ToadForceGl {
             }
             None => {
                 all = true;
+                stale.resize(images, false);
                 let mut ranges = Vec::new();
                 let clamp = |at: u64| at.min(u32::MAX as u64) as u32;
                 pipeline::texture_reads(texture, |r| {

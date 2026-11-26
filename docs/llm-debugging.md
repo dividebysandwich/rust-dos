@@ -1236,9 +1236,9 @@ counts what the OpenGL renderer costs and misses:
   GPU, `presents` (frames the window showed from the GPU's surface),
   the shader `programs` compiled and `failed_programs`, the
   `surfaces` and `textures` it holds, the `framebuffers` it keeps for
-  its draws and clears, `framebuffers_made` (each asked once whether
-  it is complete), and `packed_565` (whether 16-bit targets are the
-  GPU's 5-6-5 format).
+  its draws, clears and read-backs, `framebuffers_made` (each asked
+  once whether it is complete), and `packed_565` (whether 16-bit
+  targets are the GPU's 5-6-5 format).
 
 A run with `--deterministic` draws the card in software, so that its
 pictures are the same on every host. To compare the two renderers at
