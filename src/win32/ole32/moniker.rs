@@ -359,19 +359,25 @@ pub fn moniker_is_equal(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(if a == b { S_OK } else { S_FALSE })
 }
 
-/// IMoniker::Hash(this, out): from the display name in capitals, so that
-/// equal monikers hash alike, sampled as Wine's file moniker does for a
-/// long one.
+/// IMoniker::Hash(this, out): from the name in capitals, so that equal
+/// monikers hash alike. An item moniker's is Windows' and Wine's, of
+/// its item without the delimiter (Wine's tests have 0x73C for "Test").
+/// A file moniker's is sampled as Wine's is for a long path.
 pub fn moniker_hash(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[this, out] = args else { unreachable!() };
-    let Some((_, name)) = moniker(cpu, this) else {
+    let Some((class, name)) = moniker(cpu, this) else {
         return Some(E_INVALIDARG);
     };
     if out == 0 {
         return Some(E_POINTER);
     }
     let units: Vec<u32> = name.into_iter().map(|c| upper(c) as u32).collect();
-    let hash = if units.len() < 16 {
+    let hash = if class == ITEM {
+        let delimiter = cpu.bus.guest_read_32(this + DELIMITER) as usize;
+        units[delimiter.min(units.len())..]
+            .iter()
+            .fold(0u32, |h, &c| h.wrapping_mul(3) ^ c)
+    } else if units.len() < 16 {
         units
             .iter()
             .fold(0u32, |h, &c| h.wrapping_mul(37).wrapping_add(c))
