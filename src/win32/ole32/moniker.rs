@@ -331,6 +331,9 @@ pub fn moniker_reduce(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[this, _, _, _, out] = args else {
         unreachable!()
     };
+    if moniker(cpu, this).is_none() {
+        return Some(E_INVALIDARG);
+    }
     if out == 0 {
         return Some(E_POINTER);
     }
