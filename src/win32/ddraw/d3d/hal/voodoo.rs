@@ -290,7 +290,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     api::depth_bias_level(cpu, d.depth_bias);
     api::chromakey_mode(cpu, api::CHROMAKEY_DISABLE);
     let dither = d.state(RS_DITHERENABLE) != 0;
-    api::dither_mode(cpu, dither_mode(dither, banshee, d.gl_pixel_centres));
+    api::dither_mode(cpu, dither_mode(dither, banshee, d.opengl));
 
     // Fog: the table by W, or the vertices' through W, the card's W
     // being free while depth is by Z. With depth by W the vertices' fog
@@ -429,7 +429,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     // pixel at its integer coordinates plus half a pixel. OpenGL's
     // window coordinates put the centre there too; Direct3D's put it on
     // them, so its vertices move half a pixel right and down.
-    let centre = if d.gl_pixel_centres { 0.0 } else { 0.5 };
+    let centre = if d.opengl { 0.0 } else { 0.5 };
     let mut card = Card {
         fog_z,
         fog_w,
@@ -531,7 +531,7 @@ fn local() -> u32 {
 
 /// Glide's dither mode for a draw that dithers or not (`on`), on a
 /// Banshee or Voodoo3 or not (`banshee`), for OpenGL or Direct3D
-/// (`opengl`, which OpenGL's device has as `gl_pixel_centres`).
+/// (`opengl`).
 ///
 /// 3dfx's OpenGL driver for the Banshee and Voodoo3 draws through
 /// their Glide 3, whose grDitherMode (h3/glide3/src/gglide.c) takes

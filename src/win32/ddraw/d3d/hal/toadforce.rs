@@ -941,7 +941,7 @@ fn render_value(
         RS_COLORWRITEENABLE if d.version == 8 => d.state(def.id) & 0xF,
         RS_COLORWRITEENABLE => 0xF,
         RS_BLENDOP if d.version != 8 => 1,
-        RS_PIXEL_CENTRE => d.gl_pixel_centres as u32,
+        RS_PIXEL_CENTRE => d.opengl as u32,
         // Table fog goes by w when the projection gives a w that is
         // the distance from the eye, as Direct3D decides it.
         RS_FOG_BY_W => {
