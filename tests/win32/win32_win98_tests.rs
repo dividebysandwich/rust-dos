@@ -1731,6 +1731,146 @@ fn try_enter_critical_section_is_exported_from_windows_98_on() {
     assert_eq!(run(Win98Se, "try_enter", finds()).0, 7);
 }
 
+/// The last error and the TLS slots are in the thread's TIB where
+/// Windows 98 SE has them, so a program that reads `fs:[60h]` or the
+/// slots through `fs:[2Ch]` sees what GetLastError and TlsGetValue
+/// return: SetLastError writes fs:[60h] (1) and GetLastError reads it
+/// (2); fs:[2Ch] points at TIB+88h (3), where TlsSetValue's value is (4);
+/// TlsGetValue reads it and clears the last error (5); an index past the
+/// 80 slots fails with ERROR_INVALID_PARAMETER in TlsGetValue (6) and
+/// TlsSetValue (7); an error set by a function written in Rust lands in
+/// fs:[60h] (8); and a second thread has a last error of its own, which
+/// leaves the first one's as it was (9). The program ends with the
+/// number of the first check that failed, or 0.
+fn tib_fields() -> Vec<u8> {
+    let names: &[&str] = &[
+        "GetLastError",
+        "SetLastError",
+        "TlsAlloc",
+        "TlsGetValue",
+        "TlsSetValue",
+        "GetEnvironmentVariableA",
+        "CreateThread",
+        "WaitForSingleObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // A variable's name at 0, the slot at 20h, what the thread saw at 24h.
+    let mut data = b"RD_NO_SUCH_VARIABLE\0".to_vec();
+    data.resize(0x40, 0);
+    program(imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut fail = a.create_label();
+        let mut over = a.create_label();
+        a.mov(ebx, 1)?;
+        a.push(0x1234)?;
+        a.call(f("SetLastError"))?;
+        a.cmp(dword_ptr(0x60u64).fs(), 0x1234)?;
+        a.jne(fail)?;
+        a.mov(ebx, 2)?;
+        a.mov(dword_ptr(0x60u64).fs(), 0x55)?;
+        a.call(f("GetLastError"))?;
+        a.cmp(eax, 0x55)?;
+        a.jne(fail)?;
+        a.mov(ebx, 3)?;
+        a.call(f("TlsAlloc"))?;
+        a.mov(esi, eax)?;
+        a.mov(dword_ptr(l.at(0x20)), eax)?;
+        a.mov(edi, dword_ptr(0x18u64).fs())?;
+        a.add(edi, 0x88)?;
+        a.cmp(dword_ptr(0x2Cu64).fs(), edi)?;
+        a.jne(fail)?;
+        a.mov(ebx, 4)?;
+        a.push(0xABCD)?;
+        a.push(esi)?;
+        a.call(f("TlsSetValue"))?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(edi + esi * 4), 0xABCD)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.push(5)?;
+        a.call(f("SetLastError"))?;
+        a.push(esi)?;
+        a.call(f("TlsGetValue"))?;
+        a.cmp(eax, 0xABCD)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(0x60u64).fs(), 0)?;
+        a.jne(fail)?;
+        a.mov(ebx, 6)?;
+        a.push(80)?;
+        a.call(f("TlsGetValue"))?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.call(f("GetLastError"))?;
+        a.cmp(eax, 87)?;
+        a.jne(fail)?;
+        a.mov(ebx, 7)?;
+        a.push(0)?;
+        a.call(f("SetLastError"))?;
+        a.push(1)?;
+        a.push(80)?;
+        a.call(f("TlsSetValue"))?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(0x60u64).fs(), 87)?;
+        a.jne(fail)?;
+        // ERROR_ENVVAR_NOT_FOUND.
+        a.mov(ebx, 8)?;
+        a.push(0x10)?;
+        a.push(l.at(0x30) as i32)?;
+        a.push(l.at(0) as i32)?;
+        a.call(f("GetEnvironmentVariableA"))?;
+        a.cmp(dword_ptr(0x60u64).fs(), 203)?;
+        a.jne(fail)?;
+        a.mov(ebx, 9)?;
+        a.push(0x11)?;
+        a.call(f("SetLastError"))?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: its own last error and slot.
+        a.push(0x22)?;
+        a.call(f("SetLastError"))?;
+        a.push(dword_ptr(l.at(0x20)))?;
+        a.call(f("TlsGetValue"))?;
+        a.mov(dword_ptr(l.at(0x28)), eax)?;
+        a.push(0x33)?;
+        a.call(f("SetLastError"))?;
+        a.call(f("GetLastError"))?;
+        a.mov(dword_ptr(l.at(0x24)), eax)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.push(-1)?;
+        a.push(eax)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.cmp(dword_ptr(l.at(0x24)), 0x33)?;
+        a.jne(fail)?;
+        // A slot of the new thread starts at 0.
+        a.cmp(dword_ptr(l.at(0x28)), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(0x60u64).fs(), 0x11)?;
+        a.jne(fail)?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn the_last_error_and_tls_slots_are_in_the_tib() {
+    for version in [Win95, Win98Se] {
+        let (code, text) = run(version, "tib_fields", tib_fields());
+        assert_eq!(code, 0, "{:?}: check {} failed: {}", version, code, text);
+    }
+}
+
 /// A program that walks a Toolhelp32 snapshot of itself as SmartHeap's
 /// start does: it finds CreateToolhelp32Snapshot and Heap32ListFirst
 /// with GetProcAddress (1), takes a snapshot of its heaps, processes,

@@ -146,7 +146,7 @@ fn reg_not_implemented(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// A function Windows 95 has only as a stub that fails.
 fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    super::process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
+    super::set_last_error(cpu, ERROR_CALL_NOT_IMPLEMENTED);
     Some(FALSE)
 }
 
@@ -158,7 +158,7 @@ fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// and give up on the key when the descriptor fails (InstallShield 5's
 /// engine).
 fn succeeds_not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    super::process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
+    super::set_last_error(cpu, ERROR_CALL_NOT_IMPLEMENTED);
     Some(TRUE)
 }
 
@@ -718,7 +718,7 @@ fn get_user_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let need = name.len() as u32 + 1;
     if room < need {
         write_32(cpu, size, need);
-        super::process(cpu).last_error = ERROR_INSUFFICIENT_BUFFER;
+        super::set_last_error(cpu, ERROR_INSUFFICIENT_BUFFER);
         return Some(FALSE);
     }
     write_string(cpu, buffer, &name);
