@@ -2,8 +2,8 @@
 //! decompress it first when it is compressed; ICInfo, ICOpen, ICLocate,
 //! ICGetInfo and ICClose, which find, open and describe the decompressors
 //! codec.rs has; and ICSendMessage and ICDecompress, through which a
-//! program decompresses frames itself. The DrawDib
-//! functions' behaviour follows Wine's drawdib.c (LGPL 2.1 or later):
+//! program decompresses frames itself. The DrawDib functions' behaviour
+//! follows Wine's drawdib.c (LGPL 2.1 or later):
 //!
 //! Copyright 2000 Bradley Baetz
 //!
