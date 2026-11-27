@@ -766,7 +766,9 @@ pub(super) fn move_path(cpu: &mut Cpu, from: &str, to: &str) -> Result<(), u32> 
     // So does another of the file's own names: Windows 98 renames "Third
     // file.txt" to its alias "THIRDF~1.TXT" (`rename_file`).
     let itself = recased || disk.file_key(to) == disk.file_key(from);
-    if disk.exists(to) && !itself {
+    // A shown system file doesn't take the name (`name_taken`): the move
+    // puts the file in its place, as a copy over it does.
+    if disk.name_taken(to) && !itself {
         return Err(ERROR_ALREADY_EXISTS);
     }
     if drive_of(from_full) == drive_of(to_full) {

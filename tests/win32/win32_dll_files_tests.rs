@@ -694,6 +694,99 @@ fn a_built_in_dll_file_can_be_written_over() {
     assert!(system.join("NEW.DLL").is_file());
 }
 
+/// Copies T.EXE to a temporary name beside DDRAW.DLL, deletes DDRAW.DLL
+/// and moves the copy to its name, as InstallShield 6 puts a shared DLL
+/// in place (Leadfoot's setup with its MSVCRT.DLL, #2183). Then makes
+/// another copy and moves it there too, which DDRAW.DLL, now a file of
+/// the drive's, refuses. A bit of the exit code for each call that works
+/// as on Windows 98.
+fn moves_over_ddraw() -> Vec<u8> {
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, DDRAW);
+    put(&mut data, 0x40, b"C:\\WINDOWS\\SYSTEM\\DDRA60bd.rra\0");
+    put(&mut data, 0x60, b"C:\\T.EXE\0");
+    put(&mut data, 0x80, b"C:\\WINDOWS\\SYSTEM\\DDRA60bc.rra\0");
+    program(&[("KERNEL32.DLL", KERNEL32)], &data, |a, l| {
+        let at = |offset: u32| l.at(offset);
+        a.xor(ebx, ebx)?;
+        call(a, l.import("CopyFileA"), &[at(0x60), at(0x40), 1])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        call(a, l.import("DeleteFileA"), &[at(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        call(a, l.import("MoveFileA"), &[at(0x40), at(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
+        call(a, l.import("CopyFileA"), &[at(0x60), at(0x80), 1])?;
+        a.test(eax, eax)?;
+        check(a, true, 3)?;
+        call(a, l.import("MoveFileA"), &[at(0x80), at(0)])?;
+        failed_with(a, l, 0, ERROR_ALREADY_EXISTS, 4)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
+/// A file moved to a built-in DLL's name, after the DLL was deleted,
+/// takes its place: the delete succeeded, so the name is free as far as
+/// the setup can tell. A file the drive has there takes the name, as on
+/// Windows 98.
+#[test]
+fn a_file_moved_over_a_deleted_built_in_dll_takes_its_place() {
+    assert_eq!(run("move-over", None, &[], moves_over_ddraw()), 0x1F);
+    let base = PathBuf::from("target/test_win32_dll_files/move-over");
+    let system = base.join("WINDOWS/SYSTEM");
+    let exe = fs::read(base.join("T.EXE")).unwrap();
+    assert_eq!(fs::read(system.join("DDRAW.DLL")).unwrap(), exe);
+    assert!(!system.join("DDRA60bd.rra").exists());
+    assert!(system.join("DDRA60bc.rra").is_file());
+}
+
+/// Copies T.EXE to a temporary name beside DDRAW.DLL, then removes
+/// DDRAW.DLL and renames the copy to its name with msvcrt's remove and
+/// rename. A bit of the exit code for each call that succeeds.
+fn renames_over_ddraw() -> Vec<u8> {
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, DDRAW);
+    put(&mut data, 0x40, b"C:\\WINDOWS\\SYSTEM\\DDRA60bd.rra\0");
+    put(&mut data, 0x60, b"C:\\T.EXE\0");
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", KERNEL32),
+        ("MSVCRT.DLL", &["remove", "rename"]),
+    ];
+    program(imports, &data, |a, l| {
+        let at = |offset: u32| l.at(offset);
+        a.xor(ebx, ebx)?;
+        call(a, l.import("CopyFileA"), &[at(0x60), at(0x40), 1])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        call(a, l.import("remove"), &[at(0)])?;
+        a.add(esp, 4)?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        call(a, l.import("rename"), &[at(0x40), at(0)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
+/// msvcrt's rename puts a file in a removed built-in DLL's place, as
+/// MoveFileA, which it calls on Windows 98, does.
+#[test]
+fn a_file_renamed_over_a_removed_built_in_dll_takes_its_place() {
+    assert_eq!(run("rename-over", None, &[], renames_over_ddraw()), 7);
+    let base = PathBuf::from("target/test_win32_dll_files/rename-over");
+    let system = base.join("WINDOWS/SYSTEM");
+    let exe = fs::read(base.join("T.EXE")).unwrap();
+    assert_eq!(fs::read(system.join("DDRAW.DLL")).unwrap(), exe);
+    assert!(!system.join("DDRA60bd.rra").exists());
+}
+
 /// Reads the first 8 bytes of DDRAW.DLL, looks for it, and for DSOUND.DLL
 /// beside it.
 fn reads_host_ddraw() -> Vec<u8> {

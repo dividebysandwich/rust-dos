@@ -1141,6 +1141,13 @@ pub mod files {
         cpu.bus.disk.is_file(&full)
     }
 
+    /// Whether a file or directory takes the name `name` from a file
+    /// MoveFileA would move there (`DiskController::name_taken`).
+    pub fn name_taken(cpu: &mut Cpu, name: &str) -> bool {
+        let full = full_path(cpu, name);
+        cpu.bus.disk.name_taken(&full)
+    }
+
     /// Write `data` as the whole file `name`, made anew.
     pub fn write_whole(cpu: &mut Cpu, name: &str, data: &[u8]) -> Result<(), u32> {
         let full = full_path(cpu, name);
