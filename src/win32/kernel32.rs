@@ -1480,10 +1480,11 @@ fn get_module_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 // last error at TIB+60h, where Windows 98 SE's TlsGetValue clears it,
 // with no trap. They find the TIB through fs:[18h] as that TlsGetValue
 // does, so a program that has put another selector in FS reads its own
-// memory there. Windows 98's own GetLastError may reach the field
-// without FS (through KERNEL32's pointer to the running thread); that
-// hasn't been checked against its code. The handlers below are for
-// states saved when they were traps.
+// memory there. Windows 98 SE's own (4.10.2222) reach the same field
+// without FS: through KERNEL32's pointer to the running thread's
+// database, where it is at +68h (the TIB starts at +8), and with no
+// thread GetLastError returns a value of KERNEL32's own. The handlers
+// below are for states saved when they were traps.
 
 /// GetLastError(): the running thread's last error.
 const GET_LAST_ERROR: &[u8] = &[
