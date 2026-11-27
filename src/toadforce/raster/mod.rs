@@ -169,13 +169,16 @@ impl Queue<'_> {
             }
             Queue::Host(vertices, count) => {
                 for t in Prim::point_triangles(v, shape) {
-                    // One with no area has no pixels.
-                    if Prim::facing([&t[0], &t[1], &t[2]], 1).is_none() {
+                    // One with no area has no pixels. The depth is
+                    // that of the triangle `Prim::point` draws.
+                    let corners = [&t[0], &t[1], &t[2]];
+                    let Some((p, _)) = Prim::facing(corners, 1) else {
                         continue;
-                    }
+                    };
+                    let depth = Prim::triangle_depth(p, corners, shape);
                     // The corners have the point's colours.
                     let t = kept(t, shape);
-                    vertices.extend(t.iter().map(|c| gpu::Vertex::of(c, sets)));
+                    vertices.extend(t.iter().map(|c| gpu::Vertex::of(c, sets).at_depth(&depth)));
                     **count += 1;
                 }
             }
@@ -199,13 +202,18 @@ impl Queue<'_> {
             Queue::Software(prims) => prims.push(line),
             Queue::Host(vertices, count) => {
                 // The corners have their coordinates in the slots
-                // already, and the pixels' colours.
+                // already, and the pixels' colours. The depth is the
+                // line's.
+                let depth = line.depth();
                 line.squares(shape, |c| {
                     for t in [[0, 1, 2], [1, 3, 2]] {
                         let t = kept(t.map(|i| c[i]), shape);
-                        vertices.extend(t.iter().map(|v| match shape.flat {
-                            true => gpu::Vertex::flat(v, &c[0], &[]),
-                            false => gpu::Vertex::of(v, &[]),
+                        vertices.extend(t.iter().map(|v| {
+                            match shape.flat {
+                                true => gpu::Vertex::flat(v, &c[0], &[]),
+                                false => gpu::Vertex::of(v, &[]),
+                            }
+                            .at_depth(&depth)
                         }));
                     }
                 });
@@ -377,13 +385,18 @@ fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
             // The triangles the card doesn't cull.
             Queue::Host(vertices, count) => {
                 for i in 1..n - 1 {
-                    if Prim::facing(fan(i), shape.cull).is_some() {
-                        vertices.extend(fan(i).map(|v| match shape.flat {
+                    let Some((p, _)) = Prim::facing(fan(i), shape.cull) else {
+                        continue;
+                    };
+                    let depth = Prim::triangle_depth(p, fan(i), shape);
+                    vertices.extend(fan(i).map(|v| {
+                        match shape.flat {
                             true => gpu::Vertex::flat(v, provoking, sets),
                             false => gpu::Vertex::of(v, sets),
-                        }));
-                        **count += 1;
-                    }
+                        }
+                        .at_depth(&depth)
+                    }));
+                    **count += 1;
                 }
             }
         },

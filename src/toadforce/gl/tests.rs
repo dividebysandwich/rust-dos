@@ -360,6 +360,12 @@ impl Bench {
         let host = &hosted.card.describe(Rig::live())["host"];
         let declined = host["declined_draws"].as_u64().unwrap();
         let transformed = &host["counts"]["transformed_runs"];
+        // The host works out the depth of the card's screen vertices
+        // as the card does: only a transform of its own moves it.
+        let bound = match transformed.as_u64() {
+            Some(0) => Bound { depth: 0, ..bound },
+            _ => bound,
+        };
 
         // The colour buffers, channel by channel.
         let (mut differing, mut largest, mut outliers, mut sum) = (0, 0, 0, 0u64);
@@ -553,15 +559,6 @@ fn gradient(rig: &mut Rig, corners: [u32; 4]) {
     rig.draw(&q);
 }
 
-/// How far a depth may be off in a buffer of `depth`: a step of 16
-/// bits, and of 24 what single precision leaves of them.
-fn close(depth: Format) -> Bound {
-    Bound {
-        depth: if depth == Format::D16 { 1 } else { 4 },
-        ..CLOSE
-    }
-}
-
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
 fn depth_tests_and_the_bias_agree() {
@@ -586,7 +583,7 @@ fn depth_tests_and_the_bias_agree() {
                 rig.draw(&slope);
             };
             assert_eq!(
-                bench.compare(&name, Format::X8R8G8B8, Some(depth), close(depth), scene),
+                bench.compare(&name, Format::X8R8G8B8, Some(depth), CLOSE, scene),
                 0
             );
         }
@@ -606,7 +603,59 @@ fn depth_tests_and_the_bias_agree() {
             rig.draw(&quad_z(8.0, 56.0, 8.0, 0xFF80_8080, 0.0));
         };
         assert_eq!(
-            bench.compare(&name, Format::X8R8G8B8, Some(depth), close(depth), scene),
+            bench.compare(&name, Format::X8R8G8B8, Some(depth), CLOSE, scene),
+            0
+        );
+    }
+}
+
+/// Marks a game draws on the ground, as Giants does its tracks: the
+/// ground as a grid of squares, then triangles of other corners on its
+/// plane, with a depth bias of two steps and with none. Two steps are
+/// fewer than the host's own interpolation of depth was off by in a
+/// 24-bit buffer, and with no bias the marks and the ground fight, so
+/// only the card's depth at every pixel draws the same pixels.
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn marks_on_the_ground_agree() {
+    bench!(bench, "toadforce marks");
+    let at = |x: f32, y: f32, diffuse: u32| V {
+        z: 0.9 + 0.0013 * x + 0.0007 * y,
+        ..v(x, y, diffuse, 0.0, 0.0)
+    };
+    for depth in [Format::D16, Format::D24S8] {
+        let scene = |rig: &mut Rig| {
+            rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0, &[]);
+            rig.states(&[(RS_ZENABLE, 1), (RS_ZFUNC, 4)]);
+            let mut ground = Vec::new();
+            for square in 0..16 {
+                let x = (square % 4) as f32 * 16.0 - 0.3;
+                let y = (square / 4) as f32 * 16.0 - 0.3;
+                let (r, b) = (x + 16.0, y + 16.0);
+                let corners = [(x, y), (r, y), (x, b), (r, y), (r, b), (x, b)];
+                ground.extend(corners.map(|(x, y)| at(x, y, 0xFF40_8040)));
+            }
+            rig.draw(&ground);
+            for (bias, colour, top) in [(2, 0xFFC0_4040, 2.0), (0, 0xFF40_40C0, 34.0)] {
+                rig.states(&[(RS_ZBIAS, bias)]);
+                let corners = [
+                    (3.7, 1.1),
+                    (29.9, 3.3),
+                    (12.2, 27.6),
+                    (31.3, 2.9),
+                    (60.6, 9.8),
+                    (44.1, 25.4),
+                ];
+                rig.draw(&corners.map(|(x, y)| at(x, top + y, colour)));
+            }
+        };
+        let exact = Bound {
+            channel: 0,
+            ..CLOSE
+        };
+        let name = format!("marks on the ground {depth:?}");
+        assert_eq!(
+            bench.compare(&name, Format::X8R8G8B8, Some(depth), exact, scene),
             0
         );
     }
@@ -1401,7 +1450,7 @@ fn stencil_operations_agree() {
             rig.states(&[(RS_ZENABLE, 0), (RS_STENCILFUNC, 6), (RS_STENCILREF, 0xFF)]);
             rig.draw(&quad_z(20.0, 0.0, 30.0, 0xFFFF_FF00, 0.875));
         };
-        let bound = close(Format::D24S8);
+        let bound = CLOSE;
         let name = format!("stencil op {op}");
         assert_eq!(
             bench.compare(&name, Format::X8R8G8B8, Some(Format::D24S8), bound, scene),
@@ -2396,12 +2445,10 @@ fn lines_agree() {
         }
     }
     for format in [Format::X8R8G8B8, Format::R5G6B5] {
-        // The host interpolates a square's depth in single precision
-        // and rounds it by itself, as a triangle's: 2 steps of 24
-        // bits over these lines.
+        // The squares carry the line's depth plane: the same depth.
         let bound = Bound {
             channel: 0,
-            depth: 2,
+            depth: 0,
             ..CLOSE
         };
         let declined = bench.compare("lines", format, Some(Format::D24S8), bound, |rig| {
@@ -3062,7 +3109,7 @@ fn depth_fills_have_the_bytes_the_processor_writes() {
     bench!(bench, "toadforce depth fills");
     for depth in [Format::D16, Format::D24X8, Format::D24S8] {
         let name = format!("depth fills {depth:?}");
-        let bound = close(depth);
+        let bound = CLOSE;
         let declined = bench.compare(&name, Format::X8R8G8B8, Some(depth), bound, depth_fills);
         assert_eq!(declined, 0);
         // Every fill was the host's: nothing was read back for one.
@@ -3541,3 +3588,4 @@ fn the_host_lights_and_fogs_by_the_cards_rules_at_the_ends() {
         assert_eq!(counts["transformed_runs"], runs, "wrap {wrap}: {counts}");
     }
 }
+
