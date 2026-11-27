@@ -340,14 +340,22 @@ pub fn unregister_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// IFilterMapper2::RegisterFilter(this, clsidFilter, Name, ppMoniker,
 /// pclsidCategory, szInstance, prf2): the filter goes in its category
 /// (DirectShow filters when NULL), as the instance `szInstance` or else
-/// its CLSID. The moniker of the registration (`ppMoniker`) isn't made:
-/// with one asked for, nothing is registered and the call fails with
-/// E_NOTIMPL. The base classes' registration asks for none.
+/// its CLSID. With `ppMoniker` and NULL at it, the device moniker of the
+/// registration goes there (`device`), and the caller may add values of
+/// its own through the moniker's property bag, as the Indeo 5 codec does
+/// for its decoder among the video compressors. A moniker passed in at
+/// `ppMoniker` names where the filter goes on Windows; that isn't taken
+/// here (E_NOTIMPL), as no program seen passes one.
 pub fn register_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !is_mapper(cpu, args[0]) {
         return Some(E_POINTER);
     }
-    if args[3] != 0 {
+    let given = match args[3] {
+        0 => 0,
+        p if cpu.bus.guest_probe(p, 4, false) => cpu.bus.guest_read_32(p),
+        _ => return Some(E_POINTER),
+    };
+    if given != 0 {
         return Some(E_NOTIMPL);
     }
     let Some(filter) = Guid::read(cpu, args[1]) else {
@@ -378,6 +386,13 @@ pub fn register_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         ("FilterData", REG_BINARY, filter_data(merit, &pins)),
     ];
     write_key(cpu, &instance_key(&category, &instance), values);
+    if args[3] != 0 {
+        let moniker = super::device::new_moniker(cpu, &category, &instance);
+        crate::win32::com::write_out(cpu, args[3], moniker);
+        if moniker == 0 {
+            return Some(super::E_OUTOFMEMORY);
+        }
+    }
     Some(S_OK)
 }
 

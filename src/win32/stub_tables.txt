@@ -4625,6 +4625,28 @@ Mapper_CreateCategory
 Mapper_UnregisterFilter
 Mapper_RegisterFilter
 Mapper_EnumMatchingFilters
+Device_GetClassID
+Device_IsDirty
+Device_Load
+Device_Save
+Device_GetSizeMax
+Device_BindToObject
+Device_BindToStorage
+Device_Reduce
+Device_ComposeWith
+Device_Enum
+Device_IsEqual
+Device_Hash
+Device_IsRunning
+Device_GetTimeOfLastChange
+Device_Inverse
+Device_CommonPrefixWith
+Device_RelativePathTo
+Device_GetDisplayName
+Device_ParseDisplayName
+Device_IsSystemMoniker
+Bag_Read
+Bag_Write
 
 DLL AMSTREAM.DLL
 DllCanUnloadNow

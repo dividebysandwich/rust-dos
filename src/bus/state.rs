@@ -1286,7 +1286,7 @@ mod tests {
         (108, 0xD583_DDB0_E20F_D89B), // the GDI palette a DirectDraw palette is realized through
         (109, 0x5FC6_2F5F_06D7_B415), // SETUPX's open INF files, LDIDs and copy queue
         (110, 0x567C_F664_B7FC_E0F3), // OLE32's Running Object Table
-        (111, 0xDFCC_68BC_E45B_D512), // DirectShow's filter mapper
+        (111, 0x2D6E_CF93_BE65_D9A6), // DirectShow's filter mapper and device monikers
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

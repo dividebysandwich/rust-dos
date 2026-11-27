@@ -1954,6 +1954,9 @@ const IID_IFILTER_MAPPER2: [u8; 16] = guid(
 // IFilterMapper2's methods, by their offsets in its vtable.
 const MAPPER_UNREGISTER_FILTER: i32 = 16;
 const MAPPER_REGISTER_FILTER: i32 = 20;
+// IMoniker::BindToStorage and IPropertyBag::Write.
+const MONIKER_BIND_TO_STORAGE: i32 = 36;
+const BAG_WRITE: i32 = 16;
 
 /// HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND).
 const FILE_NOT_FOUND: u32 = 0x8007_0002;
@@ -1970,6 +1973,27 @@ const M_MAPPER: u32 = 0x100;
 const M_RF2: u32 = 0x110;
 const M_PIN: u32 = 0x120;
 const M_TYPES: u32 = 0x150;
+const M_MONIKER: u32 = 0x104;
+const M_BAG: u32 = 0x108;
+const M_BAG_IID: u32 = 0x160;
+const M_PROP: u32 = 0x170;
+const M_VAR: u32 = 0x1A0;
+const M_CATEGORY: u32 = 0x190;
+
+/// IID_IPropertyBag.
+const IID_IPROPERTY_BAG: [u8; 16] = guid(
+    0x5503_3091,
+    0xA5D4,
+    0x11CE,
+    [0x8C, 0x5F, 0x00, 0xAA, 0x00, 0x6B, 0xBE, 0x3C],
+);
+/// CLSID_VideoCompressorCategory.
+const VIDEO_COMPRESSORS: [u8; 16] = guid(
+    0x33D9_A760,
+    0x90C8,
+    0x11D0,
+    [0xBD, 0x43, 0x00, 0xA0, 0xC9, 0x11, 0xCE, 0x86],
+);
 
 const FILTER: [u8; 16] = guid(
     0x1234_5678,
@@ -2029,6 +2053,16 @@ fn the_filter_mapper_registers_a_filter_in_its_category() {
     put(M_RF2 + 4, &0x0060_0000u32.to_le_bytes());
     put(M_RF2 + 8, &1u32.to_le_bytes());
     put(M_PIN + 28, &1u32.to_le_bytes());
+    put(M_BAG_IID, &IID_IPROPERTY_BAG);
+    put(M_CATEGORY, &VIDEO_COMPRESSORS);
+    let prop: Vec<u8> = "FccHandler\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    put(M_PROP, &prop);
+    // A VARIANT of VT_I4.
+    put(M_VAR, &3u16.to_le_bytes());
+    put(M_VAR + 8, &0x3035_5649u32.to_le_bytes());
     let exe = program(IMPORTS, &d, |a, l| {
         let mut fail = a.create_label();
         let pointers = [
@@ -2064,6 +2098,23 @@ fn the_filter_mapper_registers_a_filter_in_its_category() {
         let unregister = (M_MAPPER, MAPPER_UNREGISTER_FILTER);
         let args = [Imm(0), Imm(0), Ptr(M_OTHER)];
         method(a, l, fail, 4, unregister, &args, FILE_NOT_FOUND)?;
+        // With a moniker asked for, as the Indeo 5 codec registers its
+        // decoder among the video compressors, and a value of the
+        // caller's own written through its property bag.
+        let args = [
+            Ptr(M_FILTER),
+            Ptr(M_NAME),
+            Ptr(M_MONIKER),
+            Ptr(M_CATEGORY),
+            Imm(0),
+            Ptr(M_RF2),
+        ];
+        method(a, l, fail, 5, register, &args, S_OK)?;
+        let bind = (M_MONIKER, MONIKER_BIND_TO_STORAGE);
+        let args = [Imm(0), Imm(0), Ptr(M_BAG_IID), Ptr(M_BAG)];
+        method(a, l, fail, 6, bind, &args, S_OK)?;
+        let args = [Ptr(M_PROP), Ptr(M_VAR)];
+        method(a, l, fail, 7, (M_BAG, BAG_WRITE), &args, S_OK)?;
         exit(a, l, &mut fail, Imm(0))
     });
     let mut cpu = machine("filter-mapper", exe, &[]);
@@ -2097,5 +2148,13 @@ fn the_filter_mapper_registers_a_filter_in_its_category() {
     data.extend(MINOR);
     let hex: Vec<String> = data.iter().map(|b| format!("{:02x}", b)).collect();
     let want = format!("hex:{}", hex.join(","));
+    assert_eq!(value("FilterData"), Some(want.clone()));
+
+    let key = "HKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID\\\
+        {33D9A760-90C8-11D0-BD43-00A0C911CE86}\\Instance\\\
+        {12345678-9ABC-11D0-0102-030405060708}";
+    let value = |name: &str| registry_value(&text, key, name);
+    assert_eq!(value("FriendlyName").as_deref(), Some("\"Test Decoder\""));
     assert_eq!(value("FilterData"), Some(want));
+    assert_eq!(value("FccHandler").as_deref(), Some("dword:30355649"));
 }

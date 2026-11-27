@@ -33,6 +33,7 @@ macro_rules! hr {
 
 pub mod filter;
 pub mod graph;
+pub mod device;
 pub mod mapper;
 pub mod sample;
 pub mod stream;
@@ -130,6 +131,8 @@ pub const IID_IMEDIA_EVENT_SINK: Guid = quartz_iid(0x56A8_68A2);
 pub const IID_IBASE_FILTER: Guid = quartz_iid(0x56A8_6895);
 pub const IID_IMEDIA_FILTER: Guid = quartz_iid(0x56A8_6899);
 pub const IID_IPERSIST: Guid = guid(0x0000_010C, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]);
+pub const IID_IPERSIST_STREAM: Guid = guid(0x0000_0109, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]);
+pub const IID_IMONIKER: Guid = guid(0x0000_000F, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]);
 pub const IID_IPIN: Guid = quartz_iid(0x56A8_6891);
 pub const IID_IENUM_MEDIA_TYPES: Guid = guid(
     0x89C3_1040,
@@ -613,6 +616,30 @@ static QUARTZ_APIS: &[Api] = &[
     method("Mapper_UnregisterFilter", 4, mapper::unregister_filter),
     method("Mapper_RegisterFilter", 7, mapper::register_filter),
     method("Mapper_EnumMatchingFilters", 16, mapper::enum_matching_filters),
+    // The device monikers RegisterFilter gives, and their property
+    // bags.
+    method("Device_GetClassID", 2, device::get_class_id),
+    method("Device_IsDirty", 1, device::is_dirty),
+    method("Device_Load", 2, device::not_implemented),
+    method("Device_Save", 3, device::not_implemented),
+    method("Device_GetSizeMax", 2, device::not_implemented),
+    method("Device_BindToObject", 5, device::bind_to_object),
+    method("Device_BindToStorage", 5, device::bind_to_storage),
+    method("Device_Reduce", 5, device::not_implemented),
+    method("Device_ComposeWith", 4, device::not_implemented),
+    method("Device_Enum", 3, device::not_implemented),
+    method("Device_IsEqual", 2, device::is_equal),
+    method("Device_Hash", 2, device::hash),
+    method("Device_IsRunning", 4, device::not_implemented),
+    method("Device_GetTimeOfLastChange", 3, device::not_implemented),
+    method("Device_Inverse", 2, device::not_implemented),
+    method("Device_CommonPrefixWith", 3, device::not_implemented),
+    method("Device_RelativePathTo", 3, device::not_implemented),
+    method("Device_GetDisplayName", 4, device::get_display_name),
+    method("Device_ParseDisplayName", 6, device::not_implemented),
+    method("Device_IsSystemMoniker", 2, device::is_system_moniker),
+    method("Bag_Read", 4, device::bag_read),
+    method("Bag_Write", 3, device::bag_write),
 ];
 
 static QUARTZ_VTABLES: &[Vtable] = &[
@@ -898,6 +925,35 @@ static QUARTZ_VTABLES: &[Vtable] = &[
             "Mapper_EnumMatchingFilters",
         ],
     },
+    Vtable {
+        name: "IMoniker",
+        methods: unknown![
+            "Device_GetClassID",
+            "Device_IsDirty",
+            "Device_Load",
+            "Device_Save",
+            "Device_GetSizeMax",
+            "Device_BindToObject",
+            "Device_BindToStorage",
+            "Device_Reduce",
+            "Device_ComposeWith",
+            "Device_Enum",
+            "Device_IsEqual",
+            "Device_Hash",
+            "Device_IsRunning",
+            "Device_GetTimeOfLastChange",
+            "Device_Inverse",
+            "Device_CommonPrefixWith",
+            "Device_RelativePathTo",
+            "Device_GetDisplayName",
+            "Device_ParseDisplayName",
+            "Device_IsSystemMoniker",
+        ],
+    },
+    Vtable {
+        name: "IPropertyBag",
+        methods: unknown!["Bag_Read", "Bag_Write"],
+    },
 ];
 
 /// AMSTREAM.DLL's functions. Append only (see `stubs`).
@@ -1089,6 +1145,8 @@ pub const MEDIA_SAMPLE: Iface = Iface(D_QUARTZ, 13);
 pub const CLOCK: Iface = Iface(D_QUARTZ, 14);
 pub const TYPE_ENUM: Iface = Iface(D_QUARTZ, 15);
 pub const MAPPER: Iface = Iface(D_QUARTZ, 16);
+pub const DEVICE_MONIKER: Iface = Iface(D_QUARTZ, 17);
+pub const PROPERTY_BAG: Iface = Iface(D_QUARTZ, 18);
 pub const MULTI_STREAM: Iface = Iface(D_AMSTREAM, 0);
 pub const DD_STREAM: Iface = Iface(D_AMSTREAM, 1);
 pub const AUDIO_STREAM: Iface = Iface(D_AMSTREAM, 2);
@@ -1170,6 +1228,11 @@ pub enum Kind {
     Pin { p: filter::Pin },
     TypeEnum { e: filter::TypeEnum },
     Mapper {},
+    /// A device moniker (`device`): the key of the instance
+    /// `instance` of the category `category` (a GUID in braces).
+    Device { category: String, instance: String },
+    /// The property bag of a device moniker's key.
+    Bag { category: String, instance: String },
     Allocator { a: sample::Allocator },
     MediaSample { s: sample::MediaSample },
     Clock { c: sample::Clock },
@@ -1235,6 +1298,12 @@ impl Kind {
                 (IID_IAUDIO_STREAM_SAMPLE, AUDIO_SAMPLE),
             ],
             Kind::Mapper {} => &[(IID_IFILTER_MAPPER2, MAPPER)],
+            Kind::Device { .. } => &[
+                (IID_IMONIKER, DEVICE_MONIKER),
+                (IID_IPERSIST_STREAM, DEVICE_MONIKER),
+                (IID_IPERSIST, DEVICE_MONIKER),
+            ],
+            Kind::Bag { .. } => &[(device::IID_IPROPERTY_BAG, PROPERTY_BAG)],
             Kind::AudioData { .. } => &[
                 (IID_IAUDIO_DATA, AUDIO_DATA),
                 (IID_IMEMORY_DATA, AUDIO_DATA),
@@ -1653,5 +1722,7 @@ super::state_variants!(Kind {
     Clock { c },
     TypeEnum { e },
     Mapper {},
+    Device { category, instance },
+    Bag { category, instance },
 });
 crate::state_fields!(State { objects, last_id });
