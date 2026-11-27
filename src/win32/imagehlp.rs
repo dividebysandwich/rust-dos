@@ -164,7 +164,7 @@ fn sym_load_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let found = process(cpu).module(&name);
     if found.is_none() {
-        process(cpu).last_error = ERROR_MOD_NOT_FOUND;
+        super::set_last_error(cpu, ERROR_MOD_NOT_FOUND);
     }
     Some(found.unwrap_or(0))
 }
@@ -192,15 +192,15 @@ fn sym_get_module_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         unreachable!()
     };
     if info == 0 || !allows(cpu, info, IMAGEHLP_MODULE, true) {
-        process(cpu).last_error = ERROR_INVALID_PARAMETER;
+        super::set_last_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
     if cpu.bus.guest_read_32(info) < IMAGEHLP_MODULE {
-        process(cpu).last_error = ERROR_INVALID_PARAMETER;
+        super::set_last_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
     let Some((base, size, name, path)) = module_at(cpu, address) else {
-        process(cpu).last_error = ERROR_MOD_NOT_FOUND;
+        super::set_last_error(cpu, ERROR_MOD_NOT_FOUND);
         return Some(FALSE);
     };
     cpu.bus
@@ -217,7 +217,7 @@ fn sym_get_module_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// SymGetSymFromAddr(process, address, displacement, symbol): there are
 /// no symbols to find.
 fn sym_get_sym_from_addr(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    process(cpu).last_error = ERROR_INVALID_ADDRESS;
+    super::set_last_error(cpu, ERROR_INVALID_ADDRESS);
     Some(FALSE)
 }
 
@@ -244,7 +244,7 @@ fn undecorate_symbol_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         unreachable!()
     };
     if name == 0 || out == 0 || length == 0 {
-        process(cpu).last_error = ERROR_INVALID_PARAMETER;
+        super::set_last_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     }
     let text = super::user32::bytes_at(cpu, name)?;
@@ -299,7 +299,7 @@ fn stack_walk(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         || frame == 0
         || !allows(cpu, frame, STACKFRAME, true)
     {
-        process(cpu).last_error = ERROR_INVALID_PARAMETER;
+        super::set_last_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
     let mut ebp = cpu.bus.guest_read_32(frame + ADDR_FRAME);
@@ -438,7 +438,7 @@ fn rebase_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             None => Err(ERROR_FILE_NOT_FOUND),
         }
     };
-    process(cpu).last_error = done.err().unwrap_or(0);
+    super::set_last_error(cpu, done.err().unwrap_or(0));
     Some(done.is_ok() as u32)
 }
 

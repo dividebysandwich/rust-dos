@@ -30,7 +30,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 4;
-const WIN32_VERSION: u16 = 114;
+const WIN32_VERSION: u16 = 115;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -91,9 +91,11 @@ const WIN32_VERSION: u16 = 114;
 /// 71's to 111's no filter mappers or device monikers
 /// (`dshow::Kind::Mapper`, `Device` and `Bag`, which they load
 /// without), 71's to 112's no TOOLHELP notification callbacks
-/// (`win16::notify::NOTIFY_SAVED`), and 71's to 113's no VxD handles
-/// (`object::Kind::Vxd`, which they load without).
-const WIN32_LOADS: [u16; 44] = [
+/// (`win16::notify::NOTIFY_SAVED`), 71's to 113's the last errors
+/// outside the TIBs and the TLS slots at TIB+100h
+/// (`win32::thread::TIB_98`, which the load moves), and 71's to 114's
+/// no VxD handles (`object::Kind::Vxd`, which they load without).
+const WIN32_LOADS: [u16; 45] = [
     71,
     72,
     73,
@@ -137,6 +139,7 @@ const WIN32_LOADS: [u16; 44] = [
     111,
     112,
     113,
+    114,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1079,6 +1082,9 @@ impl Bus {
         // The processes' stubs from older tables call what their programs
         // were bound to.
         crate::win32::stub_tables::mend(self)?;
+        // Their TIBs from before the TIB had the last error, with the TLS
+        // slots where Windows 98 has them.
+        crate::win32::thread::mend_tibs(self);
         // The Win16 KERNEL's stubs for imports nothing has keep their ids
         // when KERNEL's table grows.
         crate::win16::builtin::mend(self)?;
@@ -1296,7 +1302,8 @@ mod tests {
         (111, 0xD41F_776E_514F_5CE1), // MSACM32's installable drivers and their streams
         (112, 0x44D4_782D_337F_ABB0), // DirectShow's filter mapper and device monikers
         (113, 0xF99C_2FAA_09BF_36F8), // TOOLHELP's notification callbacks
-        (114, 0x2D21_AEA7_1521_A4AD), // VxD handles of DeviceIoControl
+        (114, 0x21C4_F6F9_14CC_F1AA), // the last error and TLS slots in the TIB, as Windows 98's
+        (115, 0x3DE4_F58C_0828_F3E7), // VxD handles of DeviceIoControl
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

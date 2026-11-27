@@ -1120,6 +1120,190 @@ fn an_idle_loop_that_waits_for_a_deadline_by_get_tick_count_is_skipped_to_it() {
     assert!(stats.skipped / stats.proofs > 4 * ms, "{stats:?}");
 }
 
+/// Run a loop that waits 200 ms by GetTickCount and in every pass calls
+/// the functions of `pass` with the object `create` made (and a timeout
+/// of 0 where it says so), on a machine that skips passes and one that
+/// runs them all, in lockstep. What the skipping one skipped, and its
+/// instructions a millisecond.
+fn object_loop(
+    test: &str,
+    create: (&str, &[i32]),
+    pass: &[(&str, bool)],
+) -> (rust_dos::idle::IdleStats, u64) {
+    let names: Vec<&str> = ["GetTickCount", create.0]
+        .into_iter()
+        .chain(pass.iter().map(|&(name, _)| name))
+        .collect();
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &names)];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut spin = a.create_label();
+        for &arg in create.1.iter().rev() {
+            a.push(arg)?;
+        }
+        a.call(f(create.0))?;
+        a.mov(esi, eax)?;
+        a.call(f("GetTickCount"))?;
+        a.mov(ebx, eax)?;
+        a.set_label(&mut spin)?;
+        for &(name, timeout) in pass {
+            if timeout {
+                a.push(0)?;
+            }
+            a.push(esi)?;
+            a.call(f(name))?;
+        }
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start(&format!("{test}_plain"), CoreMode::Normal, false);
+    let mut skipping = start(&format!("{test}_skipping"), CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    assert_eq!(
+        skipping.errorlevel, 0x2A,
+        "{:?}",
+        skipping.bus.observe.stats
+    );
+    let ms = skipping.bus.clock.cycles_per_ms() as u64;
+    (skipping.bus.observe.stats, ms)
+}
+
+/// Zanzarah's wait for its next frame (#1240): it takes a free mutex with
+/// WaitForSingleObject(mutex, 0) and releases it in every pass, and reads
+/// the clock. Every pass leaves the mutex free, as the one before found
+/// it, so the passes are skipped, and come out the same as when they all
+/// run.
+#[test]
+fn a_loop_that_takes_and_releases_a_free_mutex_is_skipped() {
+    let (stats, ms) = object_loop(
+        "mutex_pass",
+        ("CreateMutexA", &[0, 0, 0]),
+        &[("WaitForSingleObject", true), ("ReleaseMutex", false)],
+    );
+    assert!(stats.proofs >= 1 && stats.skipped > 100 * ms, "{stats:?}");
+}
+
+/// The same with an auto-reset event that is signaled: the wait takes the
+/// signal and SetEvent gives it back in every pass.
+#[test]
+fn a_loop_that_takes_and_sets_an_event_is_skipped() {
+    let (stats, ms) = object_loop(
+        "event_pass",
+        ("CreateEventA", &[0, 0, 1, 0]),
+        &[("WaitForSingleObject", true), ("SetEvent", false)],
+    );
+    assert!(stats.proofs >= 1 && stats.skipped > 100 * ms, "{stats:?}");
+}
+
+/// A loop that takes the mutex in every pass and never releases it owns
+/// it once more after each pass: no pass leaves the machine as the one
+/// before found it, and none is skipped.
+#[test]
+fn a_loop_that_takes_a_mutex_without_releasing_it_is_not_skipped() {
+    let (stats, _) = object_loop(
+        "mutex_held",
+        ("CreateMutexA", &[0, 0, 0]),
+        &[("WaitForSingleObject", true)],
+    );
+    assert_eq!(stats.skipped, 0, "{stats:?}");
+    assert!(
+        stats.failed_by.iter().any(|&(why, n)| why == "object" && n > 0),
+        "{stats:?}"
+    );
+}
+
+/// Bink's timer, as Zanzarah's frame wait reads it (#2252): a loop that
+/// waits 200 ms by QueryPerformanceCounter, which it reads into the stack,
+/// subtracts the start count from in 64 bits (SUB, SBB), multiplies the
+/// difference by 1000 (MUL of each half), divides it by the counter's
+/// rate (DIV) and takes the absolute value of the milliseconds (CDQ, XOR,
+/// SUB). It reads GetTickCount too, as Bink's timer reads timeGetTime,
+/// whose reads arm the loop. The count moves on in every pass. A count
+/// proof follows it through that arithmetic, so the passes are skipped up
+/// to the next timer event, and come out the same as when they all run.
+#[test]
+fn a_loop_that_waits_by_the_performance_counter_through_a_division_is_skipped() {
+    let imports: &[(&str, &[&str])] =
+        &[("KERNEL32.DLL", &["QueryPerformanceCounter", "GetTickCount"])];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut spin = a.create_label();
+        // The start count at [esp], the count now at [esp+8].
+        a.sub(esp, 16)?;
+        a.mov(eax, esp)?;
+        a.push(eax)?;
+        a.call(l.import(0))?;
+        a.mov(edi, 1000)?;
+        a.set_label(&mut spin)?;
+        a.lea(eax, ptr(esp + 8))?;
+        a.push(eax)?;
+        a.call(l.import(0))?;
+        a.call(l.import(1))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.mov(edx, dword_ptr(esp + 12))?;
+        a.sub(eax, dword_ptr(esp))?;
+        a.sbb(edx, dword_ptr(esp + 4))?;
+        // EDX:EAX times 1000.
+        a.mov(ecx, eax)?;
+        a.mov(eax, edx)?;
+        a.mul(edi)?;
+        a.mov(esi, eax)?;
+        a.mov(eax, ecx)?;
+        a.mul(edi)?;
+        a.add(edx, esi)?;
+        a.mov(ecx, 1_193_182)?;
+        a.div(ecx)?;
+        a.cdq()?;
+        a.xor(eax, edx)?;
+        a.sub(eax, edx)?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.add(esp, 16)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start("performance_plain", CoreMode::Normal, false);
+    let mut skipping = start("performance_skipping", CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    let stats = &skipping.bus.observe.stats;
+    assert_eq!(skipping.errorlevel, 0x2A, "{stats:?}");
+    let ms = skipping.bus.clock.cycles_per_ms() as u64;
+    assert!(stats.proofs >= 1 && stats.skipped > 100 * ms, "{stats:?}");
+}
+
 /// Tribal Rage's MFC idle loop (#1729): it counts its passes in RAM, hands
 /// the count to OnIdle, which compares it with 0 and 1, and waits for a
 /// deadline by GetTickCount. A proof skips up to the next timer event,

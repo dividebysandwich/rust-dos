@@ -519,6 +519,26 @@ impl<const V: u16, T: State + Default> State for Until<V, T> {
     }
 }
 
+/// A field a section's layout lost in its version `V` whose value a load
+/// of an older section still needs, to put it where the newer layout
+/// keeps it: `Some` with what a section saved in an older version has
+/// there, `None` from a newer one, which has nothing. It saves nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lost<const V: u16, T>(pub Option<T>);
+
+impl<const V: u16, T: State + Default> State for Lost<V, T> {
+    fn save(&self, _: &mut Writer) {}
+    fn load(&mut self, r: &mut Reader) -> Result<()> {
+        self.0 = None;
+        if r.version().is_some_and(|v| v < V) {
+            let mut value = T::default();
+            value.load(r)?;
+            self.0 = Some(value);
+        }
+        Ok(())
+    }
+}
+
 impl<A: State, B: State> State for (A, B) {
     fn save(&self, w: &mut Writer) {
         self.0.save(w);
@@ -745,6 +765,31 @@ mod tests {
         gone.load(&mut new).unwrap();
         a.load(&mut new).unwrap();
         assert_eq!(a, 9);
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn a_lost_field_keeps_an_older_sections_value_only() {
+        let mut w = Writer::new();
+        w.section(b"OLD ", 1, |w| {
+            5u32.save(w);
+            7u32.save(w);
+        });
+        w.section(b"NEW ", 2, |w| {
+            Lost::<2, u32>(Some(6)).save(w);
+            9u32.save(w);
+        });
+        let mut r = Reader::new(&w.buf);
+        let (mut lost, mut a) = (Lost::<2, u32>::default(), 0u32);
+        let mut old = r.section_of(b"OLD ", &[1, 2]).unwrap();
+        lost.load(&mut old).unwrap();
+        a.load(&mut old).unwrap();
+        assert_eq!((lost.0, a), (Some(5), 7));
+        assert!(old.is_empty());
+        let mut new = r.section_of(b"NEW ", &[1, 2]).unwrap();
+        lost.load(&mut new).unwrap();
+        a.load(&mut new).unwrap();
+        assert_eq!((lost.0, a), (None, 9));
         assert!(new.is_empty());
     }
 

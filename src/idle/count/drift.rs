@@ -41,7 +41,7 @@
 //! every pass a value moves: where something reads them, no pass is known
 //! to run the same.
 
-use super::{CountOp, Model, Run, State, read_operand, write_value};
+use super::{CountOp, Model, Run, Source, State, read_operand, write_value, write_wide};
 use crate::cpu::alu::{AF, PF};
 
 /// How a byte of the model's state at a place in the pass goes on from
@@ -84,7 +84,7 @@ impl Drift {
         model: &Model,
         start: &State,
         end: &State,
-        clock: impl Fn(u64) -> u32,
+        clock: impl Fn(Source, u64) -> u64,
     ) -> Option<Drift> {
         if start
             .iter()
@@ -115,9 +115,14 @@ impl Drift {
                     state[s] = None;
                     tags[s] = Tag::Fixed;
                 }
-                Run::Clock { slot, offset } => {
-                    write_value(&mut state, Some(slot), Some(clock(offset)), 4);
-                    tags[slot..slot + 4].fill(Tag::Fixed);
+                Run::Clock {
+                    slot,
+                    size,
+                    source,
+                    offset,
+                } => {
+                    write_wide(&mut state, Some(slot), Some(clock(source, offset)), size);
+                    tags[slot..slot + size as usize].fill(Tag::Fixed);
                 }
                 Run::Op {
                     op,
@@ -404,7 +409,7 @@ mod tests {
         model: &Model,
         mut state: State,
         most: u64,
-        clock: impl Fn(u64, u64) -> u32,
+        clock: impl Fn(u64, Source, u64) -> u64,
     ) -> (u64, State, (u32, u32)) {
         let mut done = state.clone();
         let mut passes = 0;
@@ -414,7 +419,7 @@ mod tests {
             let mut left = head;
             let same = model.run(
                 &mut state,
-                |offset| clock(p, offset),
+                |source, offset| clock(p, source, offset),
                 |i, _, flags| {
                     let (live, seen, out) = model.checks[i];
                     left = (left.0 | out, left.1 & !out | flags & out);
@@ -436,7 +441,7 @@ mod tests {
     /// comparisons of them with values close to where their flags change,
     /// with now and then what `Drift` doesn't follow. The flags something
     /// reads are those of the pass with `clock`.
-    fn program(rng: &mut Rng, clock: impl Fn(u64) -> u32) -> (Model, State) {
+    fn program(rng: &mut Rng, clock: impl Fn(Source, u64) -> u64) -> (Model, State) {
         use crate::cpu::alu::{ARITH, CF, OF, SF, ZF, size_mask};
         const CLOCK: usize = 12;
         let near = |rng: &mut Rng, size: u8| -> u32 {
@@ -471,6 +476,8 @@ mod tests {
             if rng.below(8) == 0 {
                 runs.push(Run::Clock {
                     slot: CLOCK,
+                    size: 4,
+                    source: Source::Millis,
                     offset: rng.below(64),
                 });
                 continue;
@@ -566,8 +573,8 @@ mod tests {
             let from = rng.below(1 << 20);
             let period = 1 + rng.below(300);
             let per_ms = 50 + rng.below(20_000);
-            let clock = |p: u64, offset: u64| ((from + p * period + offset) / per_ms + 7) as u32;
-            let (model, state) = program(&mut rng, |offset| clock(0, offset));
+            let clock = |p: u64, _: Source, offset: u64| (from + p * period + offset) / per_ms + 7;
+            let (model, state) = program(&mut rng, |source, offset| clock(0, source, offset));
             let (passes, done, head) = one_by_one(&model, state.clone(), most, clock);
             let counted = super::super::passes_from(&model, state, most, clock);
             let values: Vec<(u64, u8)> = done

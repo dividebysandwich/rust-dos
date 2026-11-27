@@ -271,11 +271,14 @@ fn process_info(
                 tib: thread.tib,
                 selector: thread.selector,
                 stack: thread.stack,
-                // The running thread's last error is the process's.
-                last_error: if current {
-                    process.last_error
-                } else {
-                    thread.last_error
+                last_error: match thread.tib {
+                    0 => 0,
+                    tib => super::loader::peek_32(
+                        &cpu.bus,
+                        &process.memory,
+                        tib + super::loader::TIB_LAST_ERROR,
+                    )
+                    .unwrap_or(0),
                 },
                 priority: thread.priority,
                 suspended: thread.suspended,

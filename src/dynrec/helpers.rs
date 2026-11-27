@@ -256,7 +256,9 @@ const NO_SLOT: NoteSlot = NoteSlot {
 /// `PAGE_SHOWN` as bytes of the picture `cycles=auto` knows. Bits 4 to
 /// 6 hold the number (from 1) of the `card_notes` slot whose surface a
 /// write's bytes go into, noted there. `PAGE_RETRY`: a write through the
-/// bus there can let the code write the page (`card_state` after it).
+/// bus there can let the code write the page (`card_state` after it), or
+/// in a Banshee's memory a read or write can let it read or write it
+/// (`card_granted`).
 pub const PAGE_WRITE: u8 = 1;
 pub const PAGE_READ: u8 = 2;
 pub const PAGE_COUNT: u8 = 4;
@@ -278,7 +280,9 @@ const _: () = assert!(NOTES < 8);
 /// (`Bus::banshee_direct`), then the VESA frame buffer
 /// (`Bus::lfb_direct`). The pages a write does more for than the code
 /// does stay the bus's: a Banshee's desktop shown and command rings
-/// (`Direct::kept`), the frame buffer's picture shown
+/// (`Direct::kept`) and, while it says so page by page, the pages whose
+/// reads or writes it hasn't said are only the bytes (`Direct::grants`),
+/// the frame buffer's picture shown
 /// (`LfbDirect::shown`) and the partial pages of the one `cycles=auto`
 /// counts, and pages where a ToadForce's host has newer pixels the code
 /// can't note.
@@ -314,6 +318,16 @@ pub fn card_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
             ctx.card_lo = bar1;
             make_card_map(ctx, direct.len, 0, &direct.kept);
             ctx.card_retry = false;
+            if direct.grants.is_some() {
+                // Only the pages the card says, and the others may become
+                // so after an access through the bus (`card_granted`).
+                let map = &mut ctx.card_map;
+                cpu.bus.banshee_grants(|grants| {
+                    for (flags, grant) in map.iter_mut().zip(grants.chain(std::iter::repeat(0))) {
+                        *flags = granted(*flags, grant);
+                    }
+                });
+            }
         }
         Some(CardKey::Lfb(direct)) => {
             ctx.card_base = direct.base;
@@ -364,6 +378,58 @@ pub fn card_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
                 }
             }
         }
+    }
+}
+
+/// What a page whose byte of `card_map` would be `flags` with every page
+/// of a Banshee's memory the code's allows with `grant` from the card
+/// (`Voodoo::banshee_grant`): `PAGE_RETRY` where it allows less.
+fn granted(flags: u8, grant: u8) -> u8 {
+    use crate::voodoo::tracker::{DIRECT_READ, DIRECT_WRITE};
+    let mut allowed = 0;
+    if grant & DIRECT_READ != 0 {
+        allowed |= PAGE_READ;
+    }
+    if grant & DIRECT_WRITE != 0 {
+        allowed |= PAGE_WRITE;
+    }
+    let denied = flags & (PAGE_READ | PAGE_WRITE) & !allowed;
+    if denied != 0 {
+        flags & !denied | PAGE_RETRY
+    } else {
+        flags
+    }
+}
+
+/// A read or write through the bus of the page with physical address
+/// `phys` in a Banshee's memory, which the card lets the code use page by
+/// page (`Direct::grants`): what the card allows there now. A page it
+/// allows nothing more on stays as it is, and a page that lost something
+/// makes the whole map again.
+fn card_granted(cpu: &mut Cpu, ctx: &mut JitCtx, phys: u32) {
+    if card_page(ctx, phys) & PAGE_RETRY == 0 {
+        return;
+    }
+    let Some(CardKey::Banshee(bar1, direct)) = ctx.card_key else {
+        return;
+    };
+    let at = phys.wrapping_sub(bar1);
+    let Some((grant, generation)) = cpu.bus.banshee_grant(at) else {
+        return;
+    };
+    if direct.grants != Some(generation) {
+        card_state(cpu, ctx);
+        return;
+    }
+    let page = at as usize >> 12;
+    // The page as the map has it with every page allowed.
+    let whole = (page as u64 + 1) << 12 <= direct.len as u64;
+    let kept = direct.kept.iter().any(|&(start, end)| {
+        page_span(start, end, ctx.card_map.len()).is_some_and(|(a, b)| (a..=b).contains(&page))
+    });
+    let flags = PAGE_READ | if whole && !kept { PAGE_WRITE } else { 0 };
+    if let Some(f) = ctx.card_map.get_mut(page) {
+        *f = granted(flags, grant);
     }
 }
 
@@ -1357,6 +1423,8 @@ jit_fn! {
         // software renderer reads back as it draws: without the bus's
         // way through every window before the card's.
         if let Some(value) = guard(ctx, None, || cpu.bus.read_banshee_linear(p, size as usize)) {
+            // The card may let the code read the page itself now.
+            card_granted(cpu, ctx, phys);
             return value;
         }
         guard(ctx, 0, || match size {
@@ -1400,6 +1468,8 @@ jit_fn! {
         // panic in it is the store's, as above.)
         let p = phys as usize;
         if guard(ctx, true, || cpu.bus.write_banshee_linear(p, value, size as usize)) {
+            // The card may let the code write the page itself now.
+            card_granted(cpu, ctx, phys);
             return 0;
         }
         // Dwords into a 3dfx card's frame buffer through its 3D engine,
@@ -1446,6 +1516,9 @@ jit_fn! {
         let wrote = guard(ctx, true, || cpu.bus.write_to_voodoo(p, bytes));
         // (Dwords through a card's 3D engine queue drawing.)
         card_state(cpu, ctx);
+        if wrote {
+            card_granted(cpu, ctx, phys);
+        }
         wrote as u32
     }
 }
@@ -1512,12 +1585,38 @@ mod tests {
         cpu.bus.voodoo_write_32(VID_DESKTOP_START_ADDR, 0x3F_F000);
         card_state(&mut cpu, &mut ctx);
         assert_eq!(pages(&ctx), (0..0x3FF).collect::<Vec<_>>());
-        // A recording for the OpenGL renderer hears of every write.
+        // A recording for the OpenGL renderer hears of every write: the
+        // code reads and writes a page itself once the card says the
+        // page needs nothing else, after an access through the bus.
         cpu.bus.voodoo.as_mut().unwrap().set_mirror(true);
         card_state(&mut cpu, &mut ctx);
-        assert_eq!(ctx.card_len, 0);
+        assert_eq!(ctx.card_len, 0x40_0000 - 3);
+        let open = |ctx: &JitCtx| -> Vec<usize> {
+            let open = |p: &usize| ctx.card_map[*p] & (PAGE_READ | PAGE_WRITE) != 0;
+            (0..ctx.card_map.len()).filter(open).collect()
+        };
+        assert!(open(&ctx).is_empty());
+        assert!(ctx.card_map.iter().all(|&f| f & PAGE_RETRY != 0));
+        let at = INITIAL_BAR1 + 0x2_0004;
+        assert!(cpu.bus.write_banshee_linear(at as usize, 7, 4));
+        card_granted(&mut cpu, &mut ctx, at);
+        assert_eq!(ctx.card_map[0x20], PAGE_READ | PAGE_WRITE);
+        assert_eq!(open(&ctx), [0x20]);
+        // The desktop shown is the bus's to write still.
+        let shown = INITIAL_BAR1 + 0x3F_F004;
+        assert!(cpu.bus.write_banshee_linear(shown as usize, 7, 4));
+        card_granted(&mut cpu, &mut ctx, shown);
+        assert_eq!(ctx.card_map[0x3FF], PAGE_READ);
+        // The page's writes have to reach the texture units: they go
+        // through the bus again, and the map is made again.
+        let card = cpu.bus.voodoo.as_mut().unwrap();
+        card.banshee_stamp_direct_writes();
+        card_state(&mut cpu, &mut ctx);
+        assert_eq!(ctx.card_map[0x20], PAGE_READ | PAGE_RETRY);
+        assert_eq!(ctx.card_map[0x3FF], PAGE_READ);
         cpu.bus.voodoo.as_mut().unwrap().set_mirror(false);
         card_state(&mut cpu, &mut ctx);
-        assert_eq!(ctx.card_len, 0x40_0000 - 3);
+        assert_eq!(pages(&ctx), (0..0x3FF).collect::<Vec<_>>());
+        assert!(ctx.card_map.iter().all(|&f| f & PAGE_RETRY == 0));
     }
 }

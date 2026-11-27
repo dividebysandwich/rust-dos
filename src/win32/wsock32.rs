@@ -86,7 +86,7 @@ const WSAEFAULT: u32 = 10014;
 const HOST_NAME: &[u8] = b"RUSTDOS\0";
 
 fn set_error(cpu: &mut Cpu, code: u32) {
-    super::process(cpu).last_error = code;
+    super::set_last_error(cpu, code);
 }
 
 pub(super) fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -157,7 +157,7 @@ pub(super) fn gethostname(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 pub(super) fn wsa_get_last_error(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(super::process(cpu).last_error)
+    Some(super::last_error(cpu))
 }
 
 pub(super) fn wsa_set_last_error(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {

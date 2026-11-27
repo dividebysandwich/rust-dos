@@ -371,7 +371,7 @@ pub fn current_pid(cpu: &Cpu) -> u32 {
 }
 
 pub fn set_error(cpu: &mut Cpu, code: u32) {
-    super::process(cpu).last_error = code;
+    super::set_last_error(cpu, code);
 }
 
 /// A function Windows 95 has only as a stub that fails.

@@ -439,7 +439,7 @@ pub fn main(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         stage::LOADED => {
             let path = d.path(cpu);
             if result == 0 {
-                let error = crate::win32::process(cpu).last_error;
+                let error = crate::win32::last_error(cpu);
                 let text = format!(
                     "LoadLibrary(\"{}\") failed.\nGetLastError returns 0x{:08x}.",
                     path, error
