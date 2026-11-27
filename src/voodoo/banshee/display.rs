@@ -444,9 +444,10 @@ impl Banshee {
                         }
                     }
                     _ => {
-                        // 24 or 32 bits a pixel: blue, green and red,
-                        // each through its own component of the table
-                        // unless the desktop bypasses it, as in 5-6-5.
+                        // 24 or 32 bits a pixel (the reserved formats
+                        // 4-7 as 32): blue, green and red, each through
+                        // its own component of the table unless the
+                        // desktop bypasses it, as in 5-6-5.
                         let a = if format == 2 { 3 * x } else { 4 * x };
                         let [r, g, b] = [2, 1, 0].map(|i| byte(ram, at(a + i), mask));
                         if bypass {
