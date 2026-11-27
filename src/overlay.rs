@@ -435,12 +435,14 @@ impl Backend for Overlay {
     /// that is the time of now, later than the other's. A folder only
     /// below (none above yet) has the time below; the guest's calls that
     /// make it above add a name, which `disk` notes by itself. What is
-    /// hidden below changes only by the guest's calls too.
+    /// hidden below changes only by the guest's calls too. Each side's
+    /// time is what its own folder gives (`hostfs::folder_time`), so an
+    /// upper folder on a backend that can't tell leaves it unknown.
     fn folder_time(&self, path: &Path) -> Option<SystemTime> {
         let path = hostfs::layer_path(path);
         let above = match self.upper_meta(&path) {
             Some(meta) if !meta.is_dir => return None,
-            Some(meta) => Some(meta.modified?),
+            Some(_) => Some(hostfs::folder_time(self.upper_path(&path)?)?),
             None => None,
         };
         let below = match self.lower_meta(&path) {

@@ -295,7 +295,7 @@ fn dos_seek(cpu: &mut Cpu, handle: u32, offset: i64, whence: u32) -> Result<u64,
     let base = match whence {
         0 => 0,
         1 => cpu.bus.disk.position(sft).unwrap_or(0) as i64,
-        _ => cpu.bus.disk.sft_entry(sft).map_or(0, |e| e.size as i64),
+        _ => cpu.bus.disk.file_size(sft).map_or(0, i64::from),
     };
     if base + offset < 0 {
         return Err(131);
@@ -309,7 +309,7 @@ fn dos_seek(cpu: &mut Cpu, handle: u32, offset: i64, whence: u32) -> Result<u64,
 /// The size of the file of `handle`.
 fn dos_size(cpu: &mut Cpu, handle: u32) -> Option<u32> {
     let sft = sft_of(cpu, handle)?;
-    cpu.bus.disk.sft_entry(sft).map(|e| e.size)
+    cpu.bus.disk.file_size(sft)
 }
 
 /// Close `handle`, and with its last handle its file: a standard one's
