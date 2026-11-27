@@ -1344,8 +1344,12 @@ fn performance_ticks(micros: u64) -> u64 {
 /// and what it read stays the same until the next microsecond, when the
 /// count moves on. A pass `Phase::Count` records follows the count where
 /// the service writes it, and the passes after it read it anew, as Bink's
-/// timer does in Zanzarah's frame wait (#2252); elsewhere they hold up to
-/// the next microsecond.
+/// timer does in Zanzarah's frame wait (#2252). Before that the passes
+/// hold up to the next microsecond, which the call's own stalls outlast:
+/// no pass skips by it, but the bytes the count moved on lead the proof
+/// to count them (`compare`). A pass that counts and can't follow the
+/// count ends the proof, which a hold would let run on at every chance
+/// without skipping a pass or backing off.
 pub fn performance_count(cpu: &mut Cpu, into: u32) -> u64 {
     let micros = cpu.bus.clock.now_micros();
     let ticks = performance_ticks(micros);
@@ -1361,10 +1365,16 @@ pub fn performance_count(cpu: &mut Cpu, into: u32) -> u64 {
 /// the linear address `into` (`tick_count`, `performance_count`).
 fn clock_service(cpu: &mut Cpu, source: count::Source, value: u64, next: u64, into: Option<u32>) {
     let o = &mut cpu.bus.observe;
+    let counting = matches!(o.phase, Phase::Count { .. });
     let follows = match &o.phase {
         Phase::Count { head, .. } => !o.plain_clock.iter().any(|p| p.head == *head && p.left > 0),
         _ => false,
     };
+    if counting && source == count::Source::Performance && !(follows && o.nesting == 0) {
+        // Held to its next microsecond, no pass would skip
+        // (`performance_count`).
+        return;
+    }
     if follows && o.nesting == 0 {
         o.service_clock = Some(count::ClockRead {
             source,

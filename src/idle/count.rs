@@ -1491,6 +1491,13 @@ fn passes_from(
             continue;
         }
         let this = reads(ran);
+        // Fewer than two read what it read, as in every pass that reads
+        // the performance counter, whose count moves on within the call:
+        // no search.
+        if reads(ran + 2) != this {
+            done.clone_from(&state);
+            continue;
+        }
         let mut same = rest;
         if reads(ran + same) != this {
             let mut differ = same;
@@ -1667,7 +1674,10 @@ pub(super) fn after_service(cpu: &mut Cpu) {
     // anything in AX, BX, CX and DX.
     let thunked = stub16 && !crate::win16::in_16bit_code(cpu);
     let o = &mut cpu.bus.observe;
-    o.clock_modelled |= clocked;
+    // `idle::clock_read` takes this after GetTickCount and timeGetTime
+    // alone: a read of the performance counter would leave it for the
+    // next of them.
+    o.clock_modelled |= in_eax;
     let Phase::Count { pass, .. } = &mut o.phase else {
         return;
     };
@@ -1708,12 +1718,18 @@ pub(super) fn after_service(cpu: &mut Cpu) {
             pass.kill(cells);
         }
     }
-    if clock.is_some() && !clocked {
+    if let Some(c) = clock
+        && !clocked
+    {
+        let o = &mut cpu.bus.observe;
+        if c.source == Source::Performance {
+            // Its bytes aren't one run of RAM. Held to its next
+            // microsecond, no pass would skip (`idle::performance_count`).
+            return o.opaque();
+        }
         // A read of the clock the passes can't follow: they hold up to
         // when it reads otherwise.
-        let next = clock.map_or(0, |c| c.next);
-        let o = &mut cpu.bus.observe;
-        o.holds_until = Some(o.holds_until.map_or(next, |h| h.min(next)));
+        o.holds_until = Some(o.holds_until.map_or(c.next, |h| h.min(c.next)));
     }
     let o = &cpu.bus.observe;
     let Phase::Count { pass, .. } = &o.phase else {

@@ -1175,8 +1175,7 @@ fn object_loop(
     let mut skipping = start(&format!("{test}_skipping"), CoreMode::Dynamic, true);
     let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
     if let Err(e) = run {
-        panic!("{e}
-  {:?}", skipping.bus.observe.stats);
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
     }
     assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
     assert_eq!(
