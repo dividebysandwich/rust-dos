@@ -14,6 +14,9 @@
 //! profile says of the game (`About`): its year, publisher and the
 //! player's notes, and its UUID, with which the almanac replaces the
 //! report the profile sent before instead of adding another.
+//!
+//! `rust-dos report` (main_report.rs) sends a report from the command
+//! line: the settings rust-dos would start with, for a program's file.
 
 use crate::config::{self, Settings};
 use crate::cpu::Cpu;
@@ -27,6 +30,11 @@ pub const SITE: &str = "almanac.rust-dos.com";
 pub const API: &str = "https://almanac.rust-dos.com/api/v1";
 /// The variable that names another almanac's API, one's own or a test's.
 pub const API_VARIABLE: &str = "RUST_DOS_ALMANAC_API";
+/// The variable that holds an almanac staff member's token (from the
+/// API's `POST /auth/login`), sent with every request. The almanac
+/// limits how many games, versions and reports an address may add
+/// without one; a moderator seeding it with many reports sends one.
+pub const TOKEN_VARIABLE: &str = "RUST_DOS_ALMANAC_TOKEN";
 
 /// The settings the almanac knows, by section and key: those of the
 /// machine a game runs on, the frame rate cap, which some games need
@@ -197,15 +205,18 @@ impl About {
 }
 
 /// A report the almanac took: its number, whether it replaced the one
-/// the profile sent before, and whether the game it was to add as a new
-/// one was in the almanac already, so it went to that game.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+/// the profile sent before, whether the game it was to add as a new one
+/// was in the almanac already, so it went to that game, and the slug of
+/// the game it went to.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Reported {
     pub id: i64,
     #[serde(default)]
     pub replaced: bool,
     #[serde(skip)]
     pub existing: bool,
+    #[serde(skip)]
+    pub slug: String,
 }
 
 /// The program at the DOS path `path`, read from the machine's drives.
@@ -448,6 +459,37 @@ pub fn best(candidates: &[Candidate]) -> Option<&Candidate> {
             .is_some_and(|r| matches!(r.source, Source::Blessed { .. }))
     };
     usable().find(blessed).or_else(|| usable().next())
+}
+
+/// Where a report from the command line goes (`rust-dos report`), given
+/// the candidates for the program's file and the game's `name`: the
+/// game and version its file matched by checksum, else the game with
+/// that name (the report adds the file as a version of it), else a new
+/// game of that name. None if the file matched nothing and there is no
+/// name to add a game by.
+pub fn subject_for(candidates: &[Candidate], name: Option<&str>) -> Option<Subject> {
+    let words = |text: &str| -> String {
+        text.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    if let Some(c) = candidates.iter().find(|c| c.hash_match) {
+        return Some(Subject::Game {
+            slug: c.slug.clone(),
+            version: c.version.as_ref().map(|(id, _)| *id),
+        });
+    }
+    let name = name.map(str::trim).filter(|n| !n.is_empty())?;
+    Some(
+        match candidates.iter().find(|c| words(&c.name) == words(name)) {
+            Some(c) => Subject::Game {
+                slug: c.slug.clone(),
+                version: None,
+            },
+            None => Subject::New(name.to_string()),
+        },
+    )
 }
 
 /// The settings a report sends: `settings`' values of `KEYS`, by section.
@@ -742,8 +784,22 @@ pub mod client {
             .unwrap_or_else(|| API.to_string())
     }
 
+    /// `Authorization`'s value for the token `TOKEN_VARIABLE` holds, if
+    /// it holds one.
+    fn authorization() -> Option<String> {
+        std::env::var(TOKEN_VARIABLE)
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("Bearer {}", t))
+    }
+
     fn get<T: DeserializeOwned>(path: &str) -> Result<T, String> {
-        answer(agent().get(&format!("{}{}", api(), path)).call())
+        let request = agent().get(&format!("{}{}", api(), path));
+        answer(match authorization() {
+            Some(value) => request.header("Authorization", &value).call(),
+            None => request.call(),
+        })
     }
 
     fn post<T: DeserializeOwned>(path: &str, body: &impl Serialize) -> Result<T, String> {
@@ -753,12 +809,13 @@ pub mod client {
     /// `post`, with why the almanac said no.
     fn post_reply<T: DeserializeOwned>(path: &str, body: &impl Serialize) -> Result<T, Problem> {
         let body = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        reply(
-            agent()
-                .post(&format!("{}{}", api(), path))
-                .header("Content-Type", "application/json")
-                .send(body),
-        )
+        let request = agent()
+            .post(&format!("{}{}", api(), path))
+            .header("Content-Type", "application/json");
+        reply(match authorization() {
+            Some(value) => request.header("Authorization", &value).send(body),
+            None => request.send(body),
+        })
     }
 
     /// `text` for a URL's query.
@@ -982,6 +1039,7 @@ pub mod client {
         let reported: Reported = post("/reports", &body)?;
         Ok(Reported {
             existing,
+            slug,
             ..reported
         })
     }
@@ -1071,6 +1129,48 @@ mod tests {
             "\u{201C}Voodoo 3: crashes in the menu\u{201D} (red, 1.8.3) \
              \u{201C}Needs the CD in D: Fine on Voodoo 2\u{201D} (green)"
         );
+    }
+
+    fn candidate(slug: &str, name: &str, version: Option<i64>, hash_match: bool) -> Candidate {
+        Candidate {
+            slug: slug.to_string(),
+            name: name.to_string(),
+            version: version.map(|id| (id, "LOLG.EXE".to_string())),
+            hash_match,
+            ratings: Ratings::default(),
+            recommendation: None,
+        }
+    }
+
+    #[test]
+    fn a_command_line_report_goes_to_the_game_its_file_matched() {
+        let candidates = [
+            candidate("lands-of-lore", "Lands of Lore", None, false),
+            candidate("lands-of-lore-2", "Lands of Lore 2", Some(7), true),
+        ];
+        let game = |slug: &str, version| Subject::Game {
+            slug: slug.to_string(),
+            version,
+        };
+        // The checksum wins over the name typed.
+        assert_eq!(
+            subject_for(&candidates, Some("Lands of Lore")),
+            Some(game("lands-of-lore-2", Some(7)))
+        );
+        // Without a match, the game of that name, in any case and
+        // punctuation, gets the file as a version of its own.
+        let named = &candidates[..1];
+        assert_eq!(
+            subject_for(named, Some("lands of LORE!")),
+            Some(game("lands-of-lore", None))
+        );
+        // A name the almanac hasn't is a new game; no name, no report.
+        assert_eq!(
+            subject_for(named, Some(" Dune ")),
+            Some(Subject::New("Dune".to_string()))
+        );
+        assert_eq!(subject_for(named, None), None);
+        assert_eq!(subject_for(&[], Some("  ")), None);
     }
 
     #[test]

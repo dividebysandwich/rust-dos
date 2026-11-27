@@ -4966,8 +4966,9 @@ exits instead, since the run asked for the lock.
 * `rust-dos run` takes it as the emulator does, but reads no
   configuration file, so `run_lock` doesn't apply to it: give it
   `--no-run-lock` or `--run-lock DIR` instead (`rust-dos --no-run-lock
-  run ...`). `rust-dos unpack` and `rust-dos commit` take no lock. The
-  libretro core and `rust-dos-relay` take no lock either.
+  run ...`). `rust-dos unpack`, `rust-dos commit` and `rust-dos report`
+  take no lock. The libretro core and `rust-dos-relay` take no lock
+  either.
 
 `rust-dos-lock` holds the lock around any command, so that builds and
 scripts count too, and lists who holds it. `rust-dos lock` does the same
@@ -5048,6 +5049,52 @@ It exits with 1 when the archive doesn't open, a group isn't in it, or a
 file fails its check. A game profile's
 [`[install]`](#unpacking-the-installer) section unpacks the same
 archives from the game's drives.
+
+### Reporting a game to the almanac
+
+`rust-dos report PROGRAM` tells
+[almanac.rust-dos.com](docs/compatibility.md#the-almanac-first) how a
+game plays, as *Report settings to Almanac* in the settings window does,
+without starting the emulator. `PROGRAM` is the file on the host that
+players start: the almanac knows the game and its version by its name,
+size and checksums. The settings sent are the ones Rust-DOS would start
+the game with: the configuration file's (or `--config`'s), the options
+given before `report` (`--cycles`, `--core`, `--fps-cap`), and with
+`--game NAME` the game profile's over them. As from the settings window,
+only the machine's settings go: no drives, paths or commands.
+
+```sh
+rust-dos --game "Lands of Lore 2" report /games/lol2/LOLG.EXE
+rust-dos -c u7.conf report --name "Ultima VII: The Black Gate" --year 1992 \
+    --rating yellow --notes "Needs the mouse driver" /games/u7/ULTIMA7.COM
+```
+
+The report goes to the game and version whose file matches, else to the
+game named `--name` (which gets the file as a new version), else to a new
+game of that name. A file the almanac doesn't know needs `--name`.
+
+| Option | What it does |
+|---|---|
+| `--rating green\|yellow\|red` | How it plays: runs great, playable with some problems, or not playable (default `green`) |
+| `--name NAME` | The game's name, to find it by or to add it as (default: the profile's) |
+| `--year YEAR`, `--publisher TEXT` | For a game the almanac has no year or publisher of (default: the profile's) |
+| `--notes TEXT` | What players should know: what the game needs, a problem left (default: the profile's) |
+| `--key UUID` | The report's key: a later report with the same key on the same game replaces it |
+| `--dry-run` | Print the game the report would go to and its settings, and send nothing |
+
+A report from a game profile is sent with the profile's `uuid`, which
+the profile gets if it has none, and keeps the year, publisher and notes
+in the profile, as a report from the settings window does: report again
+from it and the almanac replaces the report. Without a profile or
+`--key`, the report gets a new key, which `report` prints; give it with
+`--key` to replace that report later.
+
+The almanac limits how many games, versions and reports one address may
+add. A moderator seeding it with many reports puts the token the
+almanac's `POST /api/v1/auth/login` gives in `RUST_DOS_ALMANAC_TOKEN`,
+which Rust-DOS then sends with every request to the almanac, and the
+limit doesn't apply. `report` exits with 1 when the program can't be
+read, the almanac can't be reached, or it turns the report down.
 
 ## Shipping Rust-DOS with a game
 
