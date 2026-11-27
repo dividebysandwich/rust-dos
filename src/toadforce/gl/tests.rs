@@ -659,7 +659,7 @@ fn marks_on_the_ground_agree() {
         }
         draw(rig, &marks);
     };
-    for (shade, transformed) in [(2, 1), (1, 0)] {
+    for (shade, transformed, card) in [(2, 1, 1), (1, 0, 2)] {
         // A ground the host transforms has the colours and the depth
         // of `the_vertices_the_host_transforms_agree`. Everything else
         // has the card's depth.
@@ -675,13 +675,15 @@ fn marks_on_the_ground_agree() {
         let declined = bench.compare(&name, Format::A8R8G8B8, Some(Format::D24S8), bound, scene);
         assert_eq!(declined, 0);
         // The host transformed the ground of smooth shading, and not
-        // the marks.
+        // the marks, which it drew with the card's depth, as it did
+        // the flat ground.
         let mut rig = Rig::new(Format::A8R8G8B8, Some(Format::D24S8));
         rig.card.set_host(Some(bench.host()), &mut rig.memory);
         scene(&mut rig);
         rig.card.settle(&mut rig.memory, None);
         let counts = &rig.card.describe(Rig::live())["host"]["counts"];
         assert_eq!(counts["transformed_runs"], transformed, "{counts}");
+        assert_eq!(counts["card_depth_runs"], card, "{counts}");
     }
 }
 

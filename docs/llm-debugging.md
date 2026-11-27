@@ -1233,13 +1233,14 @@ counts what the OpenGL renderer costs and misses:
   `runs` (draw calls), `transformed_runs` (those of them whose
   vertices the GPU's vertex shader took to the screen, where the card
   transforms the others on the processor) and `transforming_programs`
-  (the shader programs made for them), `surface_uploads` and
-  `texture_uploads` from card memory, with `texture_images` (the
-  images, levels and cube faces, decoded for those),
-  `texture_converts` (images of textures filled from a surface the
-  GPU has, with nothing read back), `clears` and `blits` done on the
-  GPU, `presents` (frames the window showed from the GPU's surface),
-  the shader `programs` compiled and `failed_programs`, the
+  (the shader programs made for them), `card_depth_runs` (the runs
+  drawn with the card's depth, of vertices the card transformed),
+  `surface_uploads` and `texture_uploads` from card memory, with
+  `texture_images` (the images, levels and cube faces, decoded for
+  those), `texture_converts` (images of textures filled from a surface
+  the GPU has, with nothing read back), `clears` and `blits` done on
+  the GPU, `presents` (frames the window showed from the GPU's
+  surface), the shader `programs` compiled and `failed_programs`, the
   `surfaces` and `textures` it holds, the `framebuffers` it keeps for
   its draws, clears and read-backs, `framebuffers_made` (each asked
   once whether it is complete), and `packed_565` (whether 16-bit

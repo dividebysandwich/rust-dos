@@ -489,6 +489,9 @@ pub struct ToadForceGl {
     runs: u64,
     /// The runs among them whose vertices the host transformed.
     transformed: u64,
+    /// The runs among them drawn with the card's depth
+    /// (`gpu::Run::card_depth`).
+    card_depth_runs: u64,
     uploads: u64,
     decodes: u64,
     /// The images of textures decoded: the levels, and the faces of a
@@ -605,6 +608,7 @@ impl ToadForceGl {
                 vertex_bytes: Vec::new(),
                 runs: 0,
                 transformed: 0,
+                card_depth_runs: 0,
                 uploads: 0,
                 decodes: 0,
                 images_decoded: 0,
@@ -2388,6 +2392,7 @@ impl Host for ToadForceGl {
             "programs": self.programs.borrow().len(),
             "transforming_programs": self.tnl.borrow().len(),
             "transformed_runs": self.transformed,
+            "card_depth_runs": self.card_depth_runs,
             "failed_programs": self.failed.borrow().len(),
             "surfaces": self.copies.len(),
             "textures": self.textures.len(),
@@ -2528,6 +2533,7 @@ impl Host for ToadForceGl {
                     .any(|step| matches!(step, Step::Write { blend: None, .. }));
                 let pack = plain && colour.format == Format::R5G6B5;
                 Self::uniforms(&gl, &program.uniforms, state, pack);
+                self.card_depth_runs += key.card_depth as u64;
                 match geometry {
                     Some(geometry) => {
                         self.transformed += 1;
