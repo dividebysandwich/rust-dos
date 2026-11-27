@@ -1496,9 +1496,12 @@ impl Chip {
     }
 }
 
+/// The operator slot an operator register (0x20 to 0x95, 0xe0 to 0xf5)
+/// addresses, or `None` for an offset with no operator behind it (0x06,
+/// 0x07, 0x0e, 0x0f and 0x16 to 0x1f), whose writes the chip ignores.
 fn decoded_slot(high: usize, regm: u8) -> Option<usize> {
-    let decoded = AD_SLOT[(regm & 0x1f) as usize];
-    (decoded >= 0).then_some(18 * high + decoded as usize)
+    let decoded = usize::try_from(AD_SLOT[(regm & 0x1f) as usize]).ok()?;
+    Some(18 * high + decoded)
 }
 
 fn clip_sample(sample: i32) -> i16 {

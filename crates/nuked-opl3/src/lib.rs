@@ -818,6 +818,31 @@ mod tests {
     }
 
     #[test]
+    fn operator_registers_without_an_operator_are_ignored() {
+        // Offsets 0x06, 0x07, 0x0e, 0x0f and 0x16 to 0x1f of each operator
+        // register block have no operator slot. Civilization's AdLib
+        // driver writes some of them; such a write reaches no slot.
+        let mut device = Opl3Device::new(44_100);
+        let empty = [0x06u8, 0x07, 0x0e, 0x0f, 0x16, 0x17, 0x18, 0x1f];
+        for secondary in [false, true] {
+            for base in [0x20u8, 0x40, 0x60, 0x80, 0xe0] {
+                for offset in empty {
+                    let file = if secondary {
+                        OplRegisterFile::Secondary
+                    } else {
+                        OplRegisterFile::Primary
+                    };
+                    device.write_register(base + offset, 0xff, file, false);
+                }
+            }
+        }
+
+        let mut buffer = [0i16; 64];
+        device.generate_samples(&mut buffer).unwrap();
+        assert!(buffer.iter().all(|&sample| sample == 0));
+    }
+
+    #[test]
     fn stats_track_generated_samples() {
         let mut device = Opl3Device::new(44_100);
 
