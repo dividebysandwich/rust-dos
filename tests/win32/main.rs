@@ -38,6 +38,7 @@ mod win32_shell_tests;
 mod win32_shims_tests;
 mod win32_tests;
 mod win32_universal_thunk_tests;
+mod win32_vwin32_tests;
 mod win32_win98_tests;
 mod win32_winmm_tests;
 mod win32_zorder_tests;

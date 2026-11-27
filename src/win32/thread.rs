@@ -680,7 +680,10 @@ fn signaled(objects: &Objects, id: u32, tid: u32) -> bool {
         }
         Some(Kind::Dos { .. } | Kind::File { .. }) => true,
         Some(Kind::Change { signaled, .. }) => *signaled,
-        Some(Kind::Mapping { .. } | Kind::Find { .. } | Kind::Snapshot { .. }) | None => false,
+        Some(
+            Kind::Mapping { .. } | Kind::Find { .. } | Kind::Snapshot { .. } | Kind::Vxd { .. },
+        )
+        | None => false,
     }
 }
 
