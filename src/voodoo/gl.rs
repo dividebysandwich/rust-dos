@@ -3564,6 +3564,14 @@ pub(crate) mod tests {
                 card(3 << 18 | VIDPROC_DESKTOP_TILED | VIDPROC_CURSOR, 5, None),
             ),
             (
+                "32 bits, linear, CLUT high, bypassed",
+                card(
+                    3 << 18 | VIDPROC_DESKTOP_CLUT_SEL | VIDPROC_DESKTOP_CLUT_BYPASS,
+                    640,
+                    None,
+                ),
+            ),
+            (
                 "YUYV overlay, scaled, cursor",
                 card(
                     1 << 18
