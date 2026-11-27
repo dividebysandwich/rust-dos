@@ -21016,6 +21016,131 @@ fn icdecompress_decodes_cinepak_frames_to_16_bits() {
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
+/// ICSendMessage's ICDecompressEx messages, as Leadfoot plays its Indeo
+/// 5 films: ICM_DECOMPRESSEX_QUERY and _BEGIN take an ICDECOMPRESSEX
+/// whose source rectangle is the whole frame and whose destination one
+/// is of the frame's size, or twice it, inside a larger output, and
+/// refuse another stretch (ICERR_BADFORMAT). ICM_DECOMPRESSEX writes the
+/// frame there and leaves the rest of the output as it was: an 8 by 4
+/// Cinepak frame at left 8 and top 4 of a bottom-up RGB555 DIB of 16 by
+/// 8, so in its first four rows in memory, from byte 16. Zoomed by two
+/// it fills the DIB. _END answers ICERR_OK. The program ends with a bit
+/// set for each check that held.
+#[test]
+fn icdecompressex_places_the_frame_in_a_larger_output() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let msvfw32: &[&str] = &["ICLocate", "ICSendMessage", "ICClose"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
+    const OUT: usize = 0x100;
+    const BIG: usize = 0x180;
+    const FRAMES: usize = 0x200;
+    const EX: usize = 0x280;
+    const BITS: usize = 0x300;
+    let mut data = bitmap_info(8, 4, 24, b"cvid");
+    data.resize(OUT, 0);
+    data.extend(bitmap_info(8, 4, 16, &[0; 4]));
+    data.resize(BIG, 0);
+    data.extend(bitmap_info(16, 8, 16, &[0; 4]));
+    data.resize(FRAMES, 0);
+    // A key frame: a grey V1 codebook of one entry, level 200, and both
+    // blocks V1 of it.
+    let books = cinepak_part(0x26, &[], &[200; 4]);
+    data.extend(cinepak_frame(0, &[books, cinepak_part(0x32, &[], &[0, 0])]));
+    data.resize(BITS, 0);
+    data.extend_from_slice(&[0xCC; 256]);
+    const ICM_DECOMPRESSEX_BEGIN: i32 = 0x403C;
+    const ICM_DECOMPRESSEX_QUERY: i32 = 0x403D;
+    const ICM_DECOMPRESSEX: i32 = 0x403E;
+    const ICM_DECOMPRESSEX_END: i32 = 0x403F;
+    const ICERR_BADFORMAT: i32 = -2;
+    // RGB555 of grey 200, two pixels.
+    const GREY_200: u32 = 0x6739_6739;
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = msvfw32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let at = |offset: usize| l.at(offset as u32) as i32;
+        let vidc = i32::from_le_bytes(*b"vidc");
+        // The ICDECOMPRESSEX: flags, lpbiSrc, lpSrc, lpbiDst, lpDst,
+        // the destination rectangle, then the source's.
+        let ex = [0, at(0), at(FRAMES), at(BIG), at(BITS), 8, 4, 8, 4, 0, 0, 8, 4];
+        for (n, v) in ex.into_iter().enumerate() {
+            a.mov(dword_ptr(l.at((EX + 4 * n) as u32)), v)?;
+        }
+        let send = |a: &mut CodeAssembler, msg: i32| {
+            push_args(a, &[0, msg, at(EX), 52])?;
+            a.mov(dword_ptr(esp), esi)?;
+            a.call(f("ICSendMessage"))
+        };
+        // The number of the first check that failed, in ebx.
+        let check = |a: &mut CodeAssembler, n: i32| {
+            let mut held = a.create_label();
+            a.je(held)?;
+            a.test(ebx, ebx)?;
+            a.jnz(held)?;
+            a.mov(ebx, n)?;
+            a.set_label(&mut held)?;
+            a.nop()
+        };
+        a.xor(ebx, ebx)?;
+        push_args(a, &[vidc, 0, at(0), at(OUT), 2])?;
+        a.call(f("ICLocate"))?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.setz(al)?;
+        a.cmp(al, 0)?;
+        check(a, 1)?;
+        send(a, ICM_DECOMPRESSEX_QUERY)?;
+        a.cmp(eax, 0)?;
+        check(a, 2)?;
+        // A destination of 12 by 8 would stretch the frame.
+        a.mov(dword_ptr(l.at((EX + 4 * 7) as u32)), 12)?;
+        a.mov(dword_ptr(l.at((EX + 4 * 8) as u32)), 8)?;
+        send(a, ICM_DECOMPRESSEX_QUERY)?;
+        a.cmp(eax, ICERR_BADFORMAT)?;
+        check(a, 3)?;
+        a.mov(dword_ptr(l.at((EX + 4 * 7) as u32)), 8)?;
+        a.mov(dword_ptr(l.at((EX + 4 * 8) as u32)), 4)?;
+        send(a, ICM_DECOMPRESSEX_BEGIN)?;
+        a.cmp(eax, 0)?;
+        check(a, 4)?;
+        send(a, ICM_DECOMPRESSEX)?;
+        a.cmp(eax, 0)?;
+        check(a, 5)?;
+        // Rows of 16 pixels of 2 bytes, the bottom one first.
+        let pixels = |y: u32, x: u32| dword_ptr(l.at(BITS as u32 + 32 * y + 2 * x));
+        a.cmp(pixels(0, 8), GREY_200 as i32)?;
+        check(a, 6)?;
+        a.cmp(pixels(3, 14), GREY_200 as i32)?;
+        check(a, 7)?;
+        // Left of the frame and above it, the output is as it was.
+        a.cmp(pixels(0, 6), 0xCCCC_CCCCu32 as i32)?;
+        check(a, 8)?;
+        a.cmp(pixels(4, 8), 0xCCCC_CCCCu32 as i32)?;
+        check(a, 9)?;
+        send(a, ICM_DECOMPRESSEX_END)?;
+        a.cmp(eax, 0)?;
+        check(a, 10)?;
+        // Twice the frame's size, at 0, 0: the whole DIB.
+        for (n, v) in [(5, 0), (6, 0), (7, 16), (8, 8)] {
+            a.mov(dword_ptr(l.at((EX + 4 * n) as u32)), v)?;
+        }
+        send(a, ICM_DECOMPRESSEX)?;
+        a.cmp(eax, 0)?;
+        check(a, 11)?;
+        a.cmp(pixels(7, 0), GREY_200 as i32)?;
+        check(a, 12)?;
+        a.push(esi)?;
+        a.call(f("ICClose"))?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family("icdecompressex_cvid", &[("T.EXE", program)]);
+    assert_eq!(code, 0, "the first check that failed");
+}
+
 /// A program linked with MFC's OLE support imports OLEDLG.DLL's
 /// OleUIBusyA and OLEPRO32.DLL's OleCreateFontIndirect by ordinal (8 and
 /// 253), as Discworld Noir's setup does. It loads, and OleTranslateColor,
