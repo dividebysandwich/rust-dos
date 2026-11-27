@@ -21024,8 +21024,10 @@ fn icdecompress_decodes_cinepak_frames_to_16_bits() {
 /// frame there and leaves the rest of the output as it was: an 8 by 4
 /// Cinepak frame at left 8 and top 4 of a bottom-up RGB555 DIB of 16 by
 /// 8, so in its first four rows in memory, from byte 16. Zoomed by two
-/// it fills the DIB. _END answers ICERR_OK. The program ends with a bit
-/// set for each check that held.
+/// it fills the DIB. _END answers ICERR_OK. At the same place of a
+/// top-down RGB565 DIB of 16 by 8, as Leadfoot's surface is, the frame
+/// goes to its last four rows in memory. The program ends with the
+/// number of the first check that failed, or 0.
 #[test]
 fn icdecompressex_places_the_frame_in_a_larger_output() {
     let kernel32: &[&str] = &["ExitProcess"];
@@ -21033,6 +21035,7 @@ fn icdecompressex_places_the_frame_in_a_larger_output() {
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
     const OUT: usize = 0x100;
     const BIG: usize = 0x180;
+    const TOP_DOWN: usize = 0x1C0;
     const FRAMES: usize = 0x200;
     const EX: usize = 0x280;
     const BITS: usize = 0x300;
@@ -21041,6 +21044,12 @@ fn icdecompressex_places_the_frame_in_a_larger_output() {
     data.extend(bitmap_info(8, 4, 16, &[0; 4]));
     data.resize(BIG, 0);
     data.extend(bitmap_info(16, 8, 16, &[0; 4]));
+    data.resize(TOP_DOWN, 0);
+    // BI_BITFIELDS, with RGB565's masks after the header.
+    data.extend(bitmap_info(16, -8i32 as u32, 16, &3u32.to_le_bytes()));
+    for mask in [0xF800u32, 0x07E0, 0x001F] {
+        data.extend_from_slice(&mask.to_le_bytes());
+    }
     data.resize(FRAMES, 0);
     // A key frame: a grey V1 codebook of one entry, level 200, and both
     // blocks V1 of it.
@@ -21053,8 +21062,9 @@ fn icdecompressex_places_the_frame_in_a_larger_output() {
     const ICM_DECOMPRESSEX: i32 = 0x403E;
     const ICM_DECOMPRESSEX_END: i32 = 0x403F;
     const ICERR_BADFORMAT: i32 = -2;
-    // RGB555 of grey 200, two pixels.
+    // RGB555 of grey 200, two pixels, and RGB565 of it.
     const GREY_200: u32 = 0x6739_6739;
+    const GREY_200_565: u32 = 0xCE59_CE59;
     let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
         let f = |name: &str| {
             let index = msvfw32.iter().position(|n| *n == name).unwrap();
@@ -21131,6 +21141,27 @@ fn icdecompressex_places_the_frame_in_a_larger_output() {
         check(a, 11)?;
         a.cmp(pixels(7, 0), GREY_200 as i32)?;
         check(a, 12)?;
+        // The two corners the frame at its own size wouldn't reach.
+        a.cmp(pixels(0, 0), GREY_200 as i32)?;
+        check(a, 13)?;
+        a.cmp(pixels(4, 14), GREY_200 as i32)?;
+        check(a, 14)?;
+        // At 8, 4 of the top-down DIB: rows 4 to 7 in memory.
+        let place = [(3, at(TOP_DOWN)), (5, 8), (6, 4), (7, 8), (8, 4)];
+        for (n, v) in place {
+            a.mov(dword_ptr(l.at((EX + 4 * n) as u32)), v)?;
+        }
+        send(a, ICM_DECOMPRESSEX)?;
+        a.cmp(eax, 0)?;
+        check(a, 15)?;
+        a.cmp(pixels(4, 8), GREY_200_565 as i32)?;
+        check(a, 16)?;
+        a.cmp(pixels(7, 14), GREY_200_565 as i32)?;
+        check(a, 17)?;
+        a.cmp(pixels(3, 8), GREY_200 as i32)?;
+        check(a, 18)?;
+        a.cmp(pixels(4, 6), GREY_200 as i32)?;
+        check(a, 19)?;
         a.push(esi)?;
         a.call(f("ICClose"))?;
         a.push(ebx)?;
