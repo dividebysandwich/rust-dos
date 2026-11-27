@@ -17,6 +17,7 @@
 //! CLSID_ActiveMovieCategories. The built-in graph doesn't read these
 //! keys: it plays the files it knows with its own decoders.
 
+use super::device::ansi_at;
 use super::{E_INVALIDARG, E_NOTIMPL, E_POINTER, FILE_NOT_FOUND, Kind, S_OK};
 use crate::cpu::Cpu;
 use crate::win32::com::Guid;
@@ -62,28 +63,6 @@ pub fn create(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
 fn is_mapper(cpu: &mut Cpu, this: u32) -> bool {
     super::object_of(cpu, this)
         .is_some_and(|id| matches!(super::kind(cpu, id), Some(Kind::Mapper {})))
-}
-
-/// The NUL-terminated UTF-16 string at `at` in the system's ANSI code
-/// page, as the registry keeps its names and strings (a char for each
-/// byte), or None if it can't be read there.
-fn wide(cpu: &mut Cpu, at: u32) -> Option<String> {
-    if at == 0 {
-        return None;
-    }
-    let mut units = Vec::new();
-    loop {
-        let here = at.wrapping_add(2 * units.len() as u32);
-        if units.len() >= 0x1000 || !cpu.bus.guest_probe(here, 2, false) {
-            return None;
-        }
-        match cpu.bus.guest_read_16(here) {
-            0 => break,
-            c => units.push(c),
-        }
-    }
-    let bytes = crate::win32::kernel32::wide_to_ansi(cpu, &units);
-    Some(crate::dosstr::from_bytes(&bytes))
 }
 
 /// The double-word at `at`, or None if it can't be read there.
@@ -251,7 +230,7 @@ fn filter_data(merit: u32, pins: &[Pin]) -> Vec<u8> {
 /// The path under HKEY_CLASSES_ROOT of the instance `instance` of the
 /// category `category`.
 fn instance_key(category: &Guid, instance: &str) -> String {
-    format!("CLSID\\{}\\Instance\\{}", category, instance)
+    super::device::key_path(&category.to_string(), instance)
 }
 
 /// Make the key `path` under HKEY_CLASSES_ROOT with `values` (name,
@@ -267,7 +246,7 @@ fn write_key(cpu: &mut Cpu, path: &str, values: Vec<(&str, u32, Vec<u8>)>) {
     }
 }
 
-/// A string value's data: the ANSI text (from `wide`, or a GUID's)
+/// A string value's data: the ANSI text (from `ansi_at`, or a GUID's)
 /// with its NUL.
 fn sz(text: &str) -> Vec<u8> {
     let mut data = crate::dosstr::to_bytes(text);
@@ -293,7 +272,7 @@ pub fn create_category(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(category) = Guid::read(cpu, args[1]) else {
         return Some(E_POINTER);
     };
-    let Some(name) = wide(cpu, args[3]) else {
+    let Some(name) = ansi_at(cpu, args[3]) else {
         return Some(E_POINTER);
     };
     let path = instance_key(&CLSID_ACTIVE_MOVIE_CATEGORIES, &category.to_string());
@@ -319,7 +298,7 @@ pub fn unregister_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let instance = match args[2] {
         0 => Guid::read(cpu, args[3]).map(|g| g.to_string()),
-        p => wide(cpu, p),
+        p => ansi_at(cpu, p),
     };
     let Some(instance) = instance else {
         return Some(E_POINTER);
@@ -350,9 +329,11 @@ pub fn register_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !is_mapper(cpu, args[0]) {
         return Some(E_POINTER);
     }
+    // `ppMoniker` takes the moniker made below, so it is checked for
+    // writing before anything is registered or made.
     let given = match args[3] {
         0 => 0,
-        p if cpu.bus.guest_probe(p, 4, false) => cpu.bus.guest_read_32(p),
+        p if cpu.bus.guest_probe(p, 4, true) => cpu.bus.guest_read_32(p),
         _ => return Some(E_POINTER),
     };
     if given != 0 {
@@ -361,7 +342,7 @@ pub fn register_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(filter) = Guid::read(cpu, args[1]) else {
         return Some(E_POINTER);
     };
-    let Some(name) = wide(cpu, args[2]) else {
+    let Some(name) = ansi_at(cpu, args[2]) else {
         return Some(E_POINTER);
     };
     let Some(category) = category_at(cpu, args[4]) else {
@@ -369,7 +350,7 @@ pub fn register_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let instance = match args[5] {
         0 => Some(filter.to_string()),
-        p => wide(cpu, p),
+        p => ansi_at(cpu, p),
     };
     let Some(instance) = instance else {
         return Some(E_POINTER);

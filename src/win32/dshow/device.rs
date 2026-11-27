@@ -39,6 +39,7 @@ const CLSID_CDEVICE_MONIKER: Guid = Guid::new(
 
 /// VARIANT types the property bag keeps.
 const VT_I4: u16 = 3;
+const VT_UI1: u16 = 17;
 const VT_BSTR: u16 = 8;
 const VT_UI4: u16 = 19;
 const VT_INT: u16 = 22;
@@ -71,8 +72,10 @@ fn names(cpu: &mut Cpu, this: u32, bag: bool) -> Option<(String, String)> {
     }
 }
 
-/// The path under HKEY_CLASSES_ROOT of the key a moniker names.
-fn key_path(category: &str, instance: &str) -> String {
+/// The path under HKEY_CLASSES_ROOT of the instance `instance` of the
+/// category `category`: the key a moniker names, and the one the filter
+/// mapper writes a filter or a category to.
+pub(super) fn key_path(category: &str, instance: &str) -> String {
     format!("CLSID\\{}\\Instance\\{}", category, instance)
 }
 
@@ -101,8 +104,9 @@ fn units_at(cpu: &mut Cpu, at: u32) -> Option<Vec<u16>> {
 }
 
 /// The UTF-16 string at `at` in the ANSI code page, as the registry
-/// keeps names (a char for each byte).
-fn ansi_at(cpu: &mut Cpu, at: u32) -> Option<String> {
+/// keeps names and strings (a char for each byte), or None if it can't
+/// be read there.
+pub(super) fn ansi_at(cpu: &mut Cpu, at: u32) -> Option<String> {
     let units = units_at(cpu, at)?;
     let bytes = crate::win32::kernel32::wide_to_ansi(cpu, &units);
     Some(crate::dosstr::from_bytes(&bytes))
@@ -145,8 +149,12 @@ pub fn bind_to_storage(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(iid) = Guid::read(cpu, args[3]) else {
         return Some(E_POINTER);
     };
+    // An out-pointer that can't take the bag fails before one is made,
+    // or the bag would be left with a reference nobody holds.
+    if !com::write_out(cpu, args[4], 0) {
+        return Some(E_POINTER);
+    }
     if iid != IID_IPROPERTY_BAG {
-        com::write_out(cpu, args[4], 0);
         return Some(E_NOINTERFACE);
     }
     let id = super::add(cpu, Kind::Bag { category, instance });
@@ -171,15 +179,11 @@ pub fn hash(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((category, instance)) = names(cpu, args[0], false) else {
         return Some(E_POINTER);
     };
-    if args[1] == 0 {
-        return Some(E_POINTER);
-    }
     let name = display_name(&category, &instance).to_ascii_uppercase();
     let h = name
         .bytes()
         .fold(0u32, |h, b| h.rotate_left(3) ^ u32::from(b));
-    cpu.bus.guest_write_32(args[1], h);
-    Some(S_OK)
+    Some(super::put32(cpu, args[1], h).map_or_else(|e| e, |()| S_OK))
 }
 
 /// IMoniker::GetDisplayName(this, pbc, pmkToLeft, ppszDisplayName):
@@ -207,19 +211,15 @@ pub fn get_display_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// IMoniker::IsSystemMoniker(this, pdwMksys): MKSYS_NONE, S_FALSE.
 pub fn is_system_moniker(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if args[1] == 0 {
-        return Some(E_POINTER);
-    }
-    cpu.bus.guest_write_32(args[1], 0);
-    Some(S_FALSE)
+    Some(super::put32(cpu, args[1], 0).map_or_else(|e| e, |()| S_FALSE))
 }
 
 // IPropertyBag.
 
 /// IPropertyBag::Read(this, pszPropName, pVar, pErrorLog): the value
-/// of the key as a VARIANT: a string as a BSTR, a DWORD as VT_I4.
-/// E_FAIL when the key or value isn't there, or is binary data, which
-/// would need a SAFEARRAY.
+/// of the key as a VARIANT: a string as a BSTR, a DWORD as VT_I4, and
+/// binary data as a SAFEARRAY of bytes (VT_ARRAY | VT_UI1), the types
+/// Write keeps. E_FAIL when the key or value isn't there.
 pub fn bag_read(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((category, instance)) = names(cpu, args[0], true) else {
         return Some(E_POINTER);
@@ -227,7 +227,7 @@ pub fn bag_read(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(name) = ansi_at(cpu, args[1]) else {
         return Some(E_POINTER);
     };
-    if args[2] == 0 {
+    if args[2] == 0 || !cpu.bus.guest_probe(args[2], 16, true) {
         return Some(E_POINTER);
     }
     let registry = registry::get(cpu);
@@ -260,6 +260,17 @@ pub fn bag_read(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 u32::from_le_bytes([value.data[0], value.data[1], value.data[2], value.data[3]]);
             cpu.bus.guest_write_16(var, VT_I4);
             cpu.bus.guest_write_32(var + 8, d);
+        }
+        REG_BINARY => {
+            let len = value.data.len() as u32;
+            let bounds = [(len, 0)];
+            let create = crate::win32::oleaut32::safearray::create;
+            let Some(array) = create(cpu, VT_UI1, 0, &bounds) else {
+                return Some(super::E_OUTOFMEMORY);
+            };
+            cpu.bus.guest_write_bytes(array.data, &value.data);
+            cpu.bus.guest_write_16(var, VT_UI1_ARRAY);
+            cpu.bus.guest_write_32(var + 8, array.at);
         }
         _ => return Some(E_FAIL),
     }

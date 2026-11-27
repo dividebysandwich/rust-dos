@@ -631,7 +631,7 @@ static QUARTZ_APIS: &[Api] = &[
     method("Device_IsEqual", 2, device::is_equal),
     method("Device_Hash", 2, device::hash),
     method("Device_IsRunning", 4, device::not_implemented),
-    method("Device_GetTimeOfLastChange", 3, device::not_implemented),
+    method("Device_GetTimeOfLastChange", 4, device::not_implemented),
     method("Device_Inverse", 2, device::not_implemented),
     method("Device_CommonPrefixWith", 3, device::not_implemented),
     method("Device_RelativePathTo", 3, device::not_implemented),
