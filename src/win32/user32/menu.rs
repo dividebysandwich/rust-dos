@@ -1984,6 +1984,14 @@ const M_SYS: u32 = 0x02;
 const M_END: u32 = 0x04;
 const M_HIDE: u32 = 0x08;
 const M_KEY_START: u32 = 0x10;
+/// The tracking's scratch space has room for an owner-drawn item's
+/// MEASUREITEMSTRUCT or DRAWITEMSTRUCT after the MSG (ITEM_SCRATCH).
+/// Tracking that a state older than `OWNER_DRAWN` saved has only the
+/// MSG's 32 bytes, with the caller's return address and arguments right
+/// above them, so it sends no WM_MEASUREITEM or WM_DRAWITEM: its
+/// owner-drawn items stay as the rust-dos that saved it showed them
+/// until the menu closes.
+const M_ITEMS: u32 = 0x20;
 
 /// Where a menu that opens is: WM_INITMENUPOPUP is to be sent, its
 /// window to be made, to be shown, or it shows.
@@ -2297,7 +2305,8 @@ fn track_popup(cpu: &mut Cpu, h: u32, flags: u32, (x, y): (i32, i32), hwnd: u32)
 }
 
 /// Start tracking's task, with the mouse captured for it.
-fn start(cpu: &mut Cpu, tr: Track) -> Option<u32> {
+fn start(cpu: &mut Cpu, mut tr: Track) -> Option<u32> {
+    tr.mode |= M_ITEMS;
     if tr.mode & M_END == 0 {
         user(cpu).input.capture = tr.owner;
     }
@@ -2980,6 +2989,9 @@ fn owner_drawn_from(state: &State, h: u32, from: u32) -> Option<u32> {
 /// menu `lv`, which is being measured (L_MEASURE): WM_MEASUREITEM with
 /// a MEASUREITEMSTRUCT in the scratch space. None when all are measured.
 fn measure_next(cpu: &mut Cpu, tr: &mut Track, lv: usize, scratch: u32) -> Option<Next> {
+    if tr.mode & M_ITEMS == 0 {
+        return None;
+    }
     let l = tr.levels[lv];
     let i = owner_drawn_from(user(cpu), l.menu, l.state - L_MEASURE)?;
     let (id, data) = item(user(cpu), (l.menu, i as usize)).map(|it| (it.id, it.data))?;
@@ -3032,6 +3044,16 @@ fn measured(cpu: &mut Cpu, tr: &Track, scratch: u32) {
 /// area, inside the 3-pixel edge, where rcItem is. None when no item
 /// waits.
 fn next_owner_draw(cpu: &mut Cpu, tr: &mut Track, scratch: u32) -> Option<Next> {
+    if tr.mode & M_ITEMS == 0 {
+        // No room to draw them in: the items waiting are dropped, so
+        // that none is drawn late when the menu shows next.
+        for l in &tr.levels {
+            if let Some(m) = get_mut(user(cpu), l.menu) {
+                m.od_queue.clear();
+            }
+        }
+        return None;
+    }
     for l in tr.levels.clone() {
         if l.hwnd == 0 || l.state != L_SHOWN {
             continue;
@@ -3297,5 +3319,37 @@ mod tests {
         assert_eq!(rect(3), Rect::new(3, 46, 128, 63), "Exit");
         assert_eq!(item(state, (h, 1)).unwrap().tab + 24, 106, "Ctrl+S");
         assert_eq!(text_x(), 22);
+    }
+
+    /// Tracking from a state older than `OWNER_DRAWN` (no M_ITEMS) has
+    /// scratch space for the MSG only: it measures and draws no
+    /// owner-drawn item, as either structure would overwrite the
+    /// caller's return address above the MSG (#1630).
+    #[test]
+    fn tracking_without_item_room_sends_no_owner_draw_messages() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        super::super::init(&mut cpu);
+        let h = new_menu(user(&mut cpu), MF_POPUP, 0);
+        let info = info_of(MF_OWNERDRAW, 1, 0, None);
+        insert_item(&mut cpu, h, NONE, MF_BYPOSITION, &info);
+        if let Some(m) = get_mut(user(&mut cpu), h) {
+            *m.od_queue = vec![(0, ODA_SELECT)];
+        }
+        let mut tr = Track {
+            owner: 1,
+            mode: M_POPUP,
+            levels: vec![Level {
+                menu: h,
+                hwnd: 2,
+                state: L_SHOWN,
+                first: 0,
+            }],
+            ..Track::default()
+        };
+        assert!(next_owner_draw(&mut cpu, &mut tr, 0x1000).is_none());
+        assert!(get(user(&mut cpu), h).unwrap().od_queue.is_empty());
+        tr.levels[0].state = L_MEASURE;
+        assert!(measure_next(&mut cpu, &mut tr, 0, 0x1000).is_none());
+        assert_eq!(tr.levels[0].state, L_MEASURE);
     }
 }
