@@ -162,6 +162,9 @@ pub struct Engine {
     /// drawn and not the whole rows around them; past `MAX_RUNS` they
     /// fold into one.
     pub touched: Vec<(u32, u32)>,
+    /// The pixels plain copies drew a run at a time (`plain_row`), for
+    /// the debugger.
+    pub plain_pixels: u64,
 }
 
 /// The most runs of bytes `Engine::touched` keeps apart: a 1024x768
@@ -243,6 +246,7 @@ impl Default for Engine {
             rx_cur: 0,
             drawn: false,
             touched: Vec::new(),
+            plain_pixels: 0,
         }
     }
 }
@@ -259,7 +263,7 @@ crate::state_fields!(Engine {
     src_size_y, src_x, src_y, dst_size_x, dst_size_y, dst_x, dst_y, launch_pending, patoff_x,
     patoff_y, cur_y, src_stride_src, src_stride_dest, host_data_size_src, host_data_size_dest,
     host_data, host_data_count, lx, ly, rx, ry, dx, dy, x_inc, error, lx_cur, rx_cur, drawn,
-    touched,
+    touched, plain_pixels,
 });
 
 /// The signed 13-bit x and y of an XY register.
@@ -956,7 +960,29 @@ impl Engine {
             COL_24BPP => 3,
             _ => 4,
         };
-        if dst_y >= clip.y_min && dst_y < clip.y_max {
+        // A plain copy: ROP CCh with no colour key gives the source pixel
+        // as it is, so `plot`'s pattern and raster operation, worked out
+        // for every pixel, change nothing. A program that shows its frames
+        // by copying them to the screen copies 300,000 pixels a frame at
+        // 640x480.
+        let plain = same
+            && !trans
+            && self.rops[0] == 0xCC
+            && self.command_extra & (CMDEXTRA_SRC_COLORKEY | CMDEXTRA_DST_COLORKEY) == 0
+            && matches!(
+                self.dst_format & COL_MASK,
+                COL_8BPP | COL_16BPP | COL_24BPP | COL_32BPP
+            );
+        let shown_row = dst_y >= clip.y_min && dst_y < clip.y_max;
+        let from_memory = match src {
+            Source::Vram(row) if plain && bytes != 3 => Some(row),
+            _ => None,
+        };
+        if let Some(row) = from_memory
+            && shown_row
+        {
+            self.plain_row(ram, mask, row, src_x, src_tiled, sx, bytes as u32, clip);
+        } else if shown_row {
             let mut dst_x = self.dst_x;
             let mut pat_x = self.patoff_x + self.dst_x;
             let pattern_mask = self.mono_pattern(pat_y);
@@ -967,7 +993,19 @@ impl Engine {
                     real = (real & 127) + (real >> 7) * 128 * 32;
                 }
                 if dst_x >= clip.x_min && dst_x < clip.x_max && shown {
-                    if same {
+                    if plain {
+                        let value = match src {
+                            Source::Vram(base) => {
+                                read(ram, base.wrapping_add(real as u32), bytes as u32, mask)
+                            }
+                            Source::Host(_) => self.src_word(ram, src, real as usize, bytes, mask),
+                        };
+                        let bytes = bytes as u32;
+                        let addr = self.addr(dst_x * bytes as i32, dst_y, false, 0, mask);
+                        write(ram, addr, bytes, value, mask);
+                        self.drawn = true;
+                        self.touch(addr, addr + bytes);
+                    } else if same {
                         let value = self.src_word(ram, src, real as usize, bytes, mask);
                         let src_key = self.src_key();
                         self.plot(
@@ -1004,6 +1042,113 @@ impl Engine {
         let sy = step(self.command & COMMAND_DY != 0);
         self.src_y += sy;
         self.dst_y += sy;
+    }
+
+    /// A row of a plain copy (`copy_line`'s `plain`) of pixels of 1, 2 or
+    /// 4 bytes from the card's memory, the source's row at `row`: the
+    /// pixels `copy_line` plots, in the same order and with the same runs
+    /// touched, worked out a run at a time where both the source's and
+    /// the destination's pixels follow on in memory (within a tile's
+    /// column of 128 bytes, and short of the memory's end).
+    #[allow(clippy::too_many_arguments)]
+    fn plain_row(
+        &mut self,
+        ram: &Vram,
+        mask: u32,
+        row: u32,
+        src_x: i32,
+        src_tiled: bool,
+        sx: i32,
+        bytes: u32,
+        clip: Clip,
+    ) {
+        let b = bytes as i32;
+        // The pixels from byte `at` of a row on, `sx` a step, that stay in
+        // its tile's column.
+        let in_column = |at: i32, tiled: bool| match (tiled, sx > 0) {
+            (false, _) => i32::MAX,
+            (true, true) => (128 - (at & 127)) / b,
+            (true, false) => (at & 127) / b + 1,
+        };
+        // The pixels from memory address `at` on that start short of the
+        // memory's end (or its start, going left).
+        let in_memory = |at: u32| {
+            let left = if sx > 0 {
+                (mask - at) / bytes
+            } else {
+                at / bytes
+            };
+            left.min(i32::MAX as u32 - 1) as i32 + 1
+        };
+        let (y, size) = (self.dst_y, self.dst_size_x);
+        let mut i = 0;
+        while i < size {
+            let dst_x = self.dst_x + i * sx;
+            if dst_x < clip.x_min || dst_x >= clip.x_max {
+                i += 1;
+                continue;
+            }
+            let real = (src_x + i * sx) * b;
+            let to = self.addr(dst_x * b, y, false, 0, mask);
+            let from = if src_tiled {
+                (real & 127) + (real >> 7) * 128 * 32
+            } else {
+                real
+            };
+            let from = row.wrapping_add(from as u32) & mask;
+            let in_clip = if sx > 0 {
+                clip.x_max - dst_x
+            } else {
+                dst_x - clip.x_min + 1
+            };
+            let run = (size - i)
+                .min(in_clip)
+                .min(in_column(real, src_tiled))
+                .min(in_column(dst_x * b, self.dst_tiled))
+                .min(in_memory(from))
+                .min(in_memory(to));
+            let step = sx * b;
+            // The run's bytes, the source's and the destination's.
+            let span = |at: u32| {
+                if sx > 0 {
+                    (at as usize, at as usize + (run * b) as usize)
+                } else {
+                    (
+                        at as usize - ((run - 1) * b) as usize,
+                        at as usize + b as usize,
+                    )
+                }
+            };
+            let ((src_lo, src_hi), (dst_lo, dst_hi)) = (span(from), span(to));
+            let memory = mask as usize + 1;
+            if src_hi <= memory && dst_hi <= memory && (src_hi <= dst_lo || dst_hi <= src_lo) {
+                // Apart, and short of the memory's end: the bytes copied
+                // all at once are the bytes copied a pixel at a time.
+                let mut buffer = [0u8; 256];
+                for start in (src_lo..src_hi).step_by(buffer.len()) {
+                    let part = &mut buffer[..(src_hi - start).min(256)];
+                    ram.read_bytes(start, part);
+                    ram.write_bytes(dst_lo + (start - src_lo), part);
+                }
+            } else {
+                for j in 0..run {
+                    let offset = (j * step) as u32;
+                    let value = read(ram, from.wrapping_add(offset), bytes, mask);
+                    write(ram, to.wrapping_add(offset), bytes, value, mask);
+                }
+            }
+            // `touch` of each pixel in turn: the first's run, which the
+            // others, each next to the one before, then grow.
+            self.touch(to, to + bytes);
+            let last = to.wrapping_add(((run - 1) * step) as u32);
+            if let Some(span) = self.touched.last_mut() {
+                span.0 = span.0.min(to.min(last));
+                span.1 = span.1.max(to.max(last) + bytes);
+            }
+            self.drawn = true;
+            self.plain_pixels += run as u64;
+            i += run;
+        }
     }
 
     fn screen_to_screen(&mut self, ram: &Vram, mask: u32) {
@@ -2339,11 +2484,62 @@ pub(crate) mod tests {
                 for e in [&mut e, &mut twin] {
                     e.drawn = false;
                     e.touched.clear();
+                    e.plain_pixels = 0;
                 }
                 assert_eq!(format!("{twin:?}"), format!("{e:?}"), "{reg:#x} {val:#x}");
             }
         }
         assert!(fills > 100 && copies > 50, "{fills} {copies} of {writes}");
+    }
+
+    #[test]
+    fn plain_copies_draw_what_the_raster_operation_draws() {
+        // Copies with ROP CCh and random registers otherwise. Without a
+        // colour key they take `copy_line`'s plain way; a twin with a
+        // source colour key that keys no colour takes the raster
+        // operation's, and draws the same bytes, the same runs and all.
+        const SIZE: usize = 1 << 21;
+        let mut n = Numbers(279);
+        let (mut drawn, mut plain) = (0, 0);
+        for _ in 0..300 {
+            let (mut e, _) = engine();
+            let ram = Vram::new(SIZE);
+            let words = random_fill_or_copy(&mut n, &mut e, &ram);
+            let mut fill = vec![0u8; SIZE];
+            fill.iter_mut().for_each(|b| *b = n.next() as u8);
+            ram.write_bytes(0, &fill);
+            let twin_ram = Vram::new(SIZE);
+            twin_ram.write_bytes(0, &fill);
+            let mut twin = e.clone();
+            e.write(&ram, 0x38, 0);
+            twin.write(&twin_ram, 0x38, CMDEXTRA_SRC_COLORKEY);
+            twin.write(&twin_ram, 0x18, 0xFF_FFFF);
+            twin.write(&twin_ram, 0x1C, 0);
+            for (reg, val) in words {
+                let val = if reg == 0x70 {
+                    0xCC << 24 | val & 0x00FF_FFF0 | CMD_SCREEN_TO_SCREEN
+                } else {
+                    val
+                };
+                e.write(&ram, reg, val);
+                twin.write(&twin_ram, reg, val);
+                assert_eq!(e.drawn, twin.drawn, "{reg:#x} {val:#x}");
+                assert_eq!(e.touched, twin.touched, "{reg:#x} {val:#x}");
+                drawn += e.drawn as u32;
+                for e in [&mut e, &mut twin] {
+                    e.drawn = false;
+                    e.touched.clear();
+                }
+            }
+            if ram.to_bytes() != twin_ram.to_bytes() {
+                let (a, b) = (ram.to_bytes(), twin_ram.to_bytes());
+                let at = (0..SIZE).find(|&at| a[at] != b[at]);
+                panic!("byte {at:x?}");
+            }
+            assert_eq!(twin.plain_pixels, 0);
+            plain += e.plain_pixels;
+        }
+        assert!(drawn > 300 && plain > 100_000, "{drawn} {plain}");
     }
 
     #[test]
