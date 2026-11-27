@@ -507,6 +507,16 @@ Thread32Next
 Module32First
 Module32Next
 Toolhelp32ReadProcessMemory
+DebugBreak
+UTRegister
+UTUnRegister
+UTGlue32
+FindResourceW
+FindResourceExW
+EnumResourceTypesW
+EnumResourceNamesW
+EnumResourceLanguagesA
+EnumResourceLanguagesW
 
 DLL ADVAPI32.DLL
 InitializeSecurityDescriptor
@@ -556,6 +566,8 @@ FreeSid
 EqualSid
 GetTokenInformation
 OpenThreadToken
+RegeditMain
+SetThreadToken
 
 DLL MSVCRT.DLL
 __getmainargs
@@ -1664,6 +1676,9 @@ SetDebugErrorLevel
 SetSystemCursor
 NotepadMain
 NotepadWndProc
+SendMessage16
+UserYield16
+RestoreDefaultPalette
 
 DLL GDI32.DLL
 GetStockObject
@@ -2043,6 +2058,42 @@ OleSaveToStream
 OleLoadFromStream
 RegisterDragDrop
 RevokeDragDrop
+CreateFileMoniker
+CreateItemMoniker
+GetRunningObjectTable
+IMoniker_QueryInterface
+IMoniker_AddRef
+IMoniker_Release
+IMoniker_GetClassID
+IMoniker_IsDirty
+IMoniker_Load
+IMoniker_Save
+IMoniker_GetSizeMax
+IMoniker_BindToObject
+IMoniker_BindToStorage
+IMoniker_Reduce
+IMoniker_ComposeWith
+IMoniker_Enum
+IMoniker_IsEqual
+IMoniker_Hash
+IMoniker_IsRunning
+IMoniker_GetTimeOfLastChange
+IMoniker_Inverse
+IMoniker_CommonPrefixWith
+IMoniker_RelativePathTo
+IMoniker_GetDisplayName
+IMoniker_ParseDisplayName
+IMoniker_IsSystemMoniker
+IRunningObjectTable_QueryInterface
+IRunningObjectTable_AddRef
+IRunningObjectTable_Release
+IRunningObjectTable_Register
+IRunningObjectTable_Revoke
+IRunningObjectTable_IsRunning
+IRunningObjectTable_GetObject
+IRunningObjectTable_NoteChangeTime
+IRunningObjectTable_GetTimeOfLastChange
+IRunningObjectTable_EnumRunning
 
 DLL DDRAW.DLL
 DllCanUnloadNow
@@ -4174,6 +4225,7 @@ ICClose
 ICLocate
 ICSendMessage
 ICDecompress
+ICGetInfo
 
 DLL AVIFIL32.DLL
 AVIFileInit
@@ -4232,6 +4284,8 @@ IGetFrame_GetFrame
 IGetFrame_Begin
 IGetFrame_End
 IGetFrame_SetFormat
+AVIStreamOpenFromFileA
+AVIStreamOpenFromFile
 
 DLL DINPUT8.DLL
 DirectInput8Create
@@ -4569,6 +4623,32 @@ TypeEnum_Next
 TypeEnum_Skip
 TypeEnum_Reset
 TypeEnum_Clone
+Mapper_CreateCategory
+Mapper_UnregisterFilter
+Mapper_RegisterFilter
+Mapper_EnumMatchingFilters
+Device_GetClassID
+Device_IsDirty
+Device_Load
+Device_Save
+Device_GetSizeMax
+Device_BindToObject
+Device_BindToStorage
+Device_Reduce
+Device_ComposeWith
+Device_Enum
+Device_IsEqual
+Device_Hash
+Device_IsRunning
+Device_GetTimeOfLastChange
+Device_Inverse
+Device_CommonPrefixWith
+Device_RelativePathTo
+Device_GetDisplayName
+Device_ParseDisplayName
+Device_IsSystemMoniker
+Bag_Read
+Bag_Write
 
 DLL AMSTREAM.DLL
 DllCanUnloadNow
@@ -5138,6 +5218,64 @@ IPSFactoryBuffer_Release
 IPSFactoryBuffer_CreateProxy
 IPSFactoryBuffer_CreateStub
 
+DLL D3DRM.DLL
+D3DRMColorGetAlpha
+D3DRMColorGetBlue
+D3DRMColorGetGreen
+D3DRMColorGetRed
+D3DRMCreateColorRGB
+D3DRMCreateColorRGBA
+D3DRMMatrixFromQuaternion
+D3DRMQuaternionFromRotation
+D3DRMQuaternionMultiply
+D3DRMQuaternionSlerp
+D3DRMVectorAdd
+D3DRMVectorCrossProduct
+D3DRMVectorDotProduct
+D3DRMVectorModulus
+D3DRMVectorNormalize
+D3DRMVectorRandom
+D3DRMVectorReflect
+D3DRMVectorRotate
+D3DRMVectorScale
+D3DRMVectorSubtract
+Direct3DRMCreate
+IUnknown_QueryInterface
+IUnknown_AddRef
+IUnknown_Release
+D3DRM_CreateObject
+D3DRM_CreateFrame
+D3DRM_CreateMesh
+D3DRM_CreateMeshBuilder
+D3DRM_CreateFace
+D3DRM_CreateAnimation
+D3DRM_CreateAnimationSet
+D3DRM_CreateTexture
+D3DRM_CreateLight
+D3DRM_CreateLightRGB
+D3DRM_CreateMaterial
+D3DRM_CreateDevice
+D3DRM_CreateDeviceFromSurface
+D3DRM_CreateDeviceFromD3D
+D3DRM_CreateDeviceFromClipper
+D3DRM_CreateTextureFromSurface
+D3DRM_CreateShadow
+D3DRM_CreateViewport
+D3DRM_CreateWrap
+D3DRM_CreateUserVisual
+D3DRM_LoadTexture
+D3DRM_LoadTextureFromResource
+D3DRM_SetSearchPath
+D3DRM_AddSearchPath
+D3DRM_GetSearchPath
+D3DRM_SetDefaultTextureColors
+D3DRM_SetDefaultTextureShades
+D3DRM_GetDevices
+D3DRM_GetNamedObject
+D3DRM_EnumerateObjects
+D3DRM_Load
+D3DRM_Tick
+
 MODULE KERNEL
 CallReturn16
 Thunk16
@@ -5348,6 +5486,14 @@ ThunkConnect16
 MyAlloc
 EntryAddrProc
 PatchCodeHandle
+_DebugOutput
+DirectedYield
+LoadLibraryEx32W
+FreeLibrary32W
+GetProcAddress32W
+GetVDMPointer32W
+CallProc32W
+_CallProcEx32W
 
 MODULE USER
 MessageBox
@@ -5873,6 +6019,8 @@ GetArcDirection
 SetArcDirection
 GetAspectRatioFilter
 GetAspectRatioFilterEx
+IsDCCurrentPalette
+CreateScalableFontResource
 
 MODULE KEYBOARD
 ToAscii
@@ -6041,6 +6189,46 @@ mciSendCommand
 mciSendString
 mciGetDeviceID
 mciGetErrorString
+midiOutGetVolume
+midiOutSetVolume
+midiOutGetID
+auxGetDevCaps
+auxGetVolume
+auxSetVolume
+waveOutGetID
+midiOutGetErrorText
+midiOutPrepareHeader
+midiOutUnprepareHeader
+midiOutLongMsg
+midiOutCachePatches
+midiOutCacheDrumPatches
+waveInGetNumDevs
+waveInGetDevCaps
+waveInGetErrorText
+waveInOpen
+waveInClose
+waveInPrepareHeader
+waveInUnprepareHeader
+waveInAddBuffer
+waveInStart
+waveInStop
+waveInReset
+waveInGetPosition
+waveInGetID
+waveInMessage
+midiInGetNumDevs
+midiInGetDevCaps
+midiInGetErrorText
+midiInOpen
+midiInClose
+midiInPrepareHeader
+midiInUnprepareHeader
+midiInAddBuffer
+midiInStart
+midiInStop
+midiInReset
+midiInGetID
+midiInMessage
 
 MODULE LZEXPAND
 LZCopy
@@ -6102,6 +6290,17 @@ DdeCmpStringHandles
 MODULE DISPLAY
 
 MODULE SETUPX
+IpOpen
+IpClose
+CtlGetLddPath
+suErrorToIds
+GenInstall
+GenFormStrWithoutPlaceHolders
+VcpOpen
+VcpClose
+IpGetProfileString
+vcpUICallbackProc
+CtlSetLddPath
 
 MODULE COMPOBJ
 CoBuildVersion
@@ -6541,6 +6740,10 @@ ITypeInfo_ReleaseTypeAttr
 ITypeInfo_ReleaseFuncDesc
 ITypeInfo_ReleaseVarDesc
 
+MODULE WIN32S16
+UTSelectorOffsetToLinear
+UTLinearToSelectorOffset
+
 VARS MSVCRT.DLL
 _iob 640
 _environ 4
@@ -6610,3 +6813,6 @@ strings 320
 VARS GLU32.DLL
 texts 3584
 wide 7168
+
+VARS D3DRM.DLL
+seed 4

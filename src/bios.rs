@@ -59,6 +59,9 @@ pub const SERVICE_KBD_INTERCEPTED: u8 = 0x25;
 /// The INT 33h driver's IRQ handler: call the program's event handler, or
 /// pass the IRQ on to the BIOS's PS/2 handler (`mouse::irq_service`).
 pub const SERVICE_MOUSE_IRQ: u8 = 0x26;
+/// DOS back from the Ctrl+C handler (INT 23h) it called
+/// (`int21::break_return`).
+pub const SERVICE_BREAK_RETURN: u8 = 0x27;
 pub const SERVICE_POST: u8 = 0xF0;
 
 /// Far-call services (`FE 3A nn`, then RETF) at the ROM's entry points for
@@ -69,10 +72,45 @@ pub const FAR_APM: u8 = 0x02;
 pub const FAR_ATI: u8 = 0x03;
 /// The VCPI's protected-mode entry point (`vcpi::pm_entry`).
 pub const FAR_VCPI: u8 = 0x04;
+/// The virtual-8086 monitor's switch to real mode and back, which INT 2Fh
+/// AX=1605h hands Windows (`v86mon::windows_switch`).
+pub const FAR_V86_SWITCH: u8 = 0x05;
 
 /// Offsets in the F000 segment.
 const TIMER_HANDLER: u16 = 0x1100;
 const MASTER_EOI_HANDLER: u16 = 0x1110;
+
+/// The timer interrupt (IRQ 0) as the IBM AT's BIOS has it: save DS, AX
+/// and DX, count the tick, call the user timer hook INT 1Ch, acknowledge
+/// the interrupt, and restore the three. An INT 1Ch handler that changes
+/// them and returns without restoring them is harmless on a PC, and games
+/// have such handlers: Whale's Voyage's music player sets DS to its own
+/// segment and returns with it, which, passed back to the code the tick
+/// interrupted, sends that code's writes into the program's runtime.
+///
+/// The AT's handler also starts with STI and loads DS with 0040h to count
+/// the tick, so INT 1Ch is entered with IF set and DS = 0040h. Here the
+/// tick is counted by the emulator, and INT 1Ch gets IF clear and the
+/// interrupted program's DS (#1838): the code fills its slot.
+///
+/// A save state keeps the ROM it was saved with (it is part of the RAM),
+/// so a state of an older build runs on with its own handler: its stack
+/// may hold a return into the old handler's code after INT 1Ch.
+#[rustfmt::skip]
+const TIMER_CODE: [u8; 16] = [
+    0x1E, // PUSH DS
+    0x50, // PUSH AX
+    0x52, // PUSH DX
+    0xFE, 0x39, SERVICE_TIMER_TICK, // count the tick
+    0xCD, 0x1C, // INT 1Ch
+    0xB0, 0x20, // MOV AL, 20h
+    0xE6, 0x20, // OUT 20h, AL
+    0x5A, // POP DX
+    0x58, // POP AX
+    0x1F, // POP DS
+    0xCF, // IRET
+];
+const _: () = assert!(TIMER_HANDLER as usize + TIMER_CODE.len() <= MASTER_EOI_HANDLER as usize);
 const SLAVE_EOI_HANDLER: u16 = 0x1120;
 const IRQ9_HANDLER: u16 = 0x1130;
 /// The diskette parameter table INT 1Eh points to, for 1.44 MB drives.
@@ -80,6 +118,11 @@ pub const DISKETTE_PARAMS: u16 = 0x1150;
 /// Where disk services wait for slow disk access to end, after the CD-ROM
 /// driver's entries.
 pub const IO_WAIT: u16 = 0x1190;
+/// The Ctrl+C handler (INT 23h) COMMAND.COM leaves the programs it runs:
+/// STC and RETF, which tells DOS to end the program.
+const BREAK_HANDLER: u16 = 0x1194;
+/// Where DOS's INT 23h call returns to (`int21::break_return`).
+pub const BREAK_RETURN: u16 = 0x1198;
 /// The PS/2 mouse's IRQ 12 handler (INT 74h), and where it finds the far
 /// address of the program's handler (INT 15h AX=C207h).
 pub const PS2_HANDLER: u16 = 0x11A0;
@@ -95,6 +138,8 @@ const PORT_ACCESSES_MORE: u16 = 0x1500;
 /// system that passes the IRQ down to real mode gets the program's event
 /// handler called (`mouse::irq_service`).
 pub const MOUSE_IRQ: u16 = 0x1600;
+/// The real-time clock's interrupt (IRQ 8, INT 70h).
+const RTC_HANDLER: u16 = 0x1640;
 /// The keyboard interrupt (IRQ 1) of a booted system, which keeps the
 /// keystrokes in the BIOS data area as a PC's BIOS does.
 const KBD_HANDLER: u16 = 0x1230;
@@ -184,17 +229,24 @@ pub fn default_ivt() -> [u32; 256] {
     ivt[0x78..].fill(0);
     ivt[0x0A..=0x0F].fill(far(MASTER_EOI_HANDLER));
     ivt[0x70..=0x77].fill(far(SLAVE_EOI_HANDLER));
+    ivt[0x70] = far(RTC_HANDLER);
     ivt[0x71] = far(IRQ9_HANDLER);
     ivt[0x74] = far(PS2_HANDLER);
     for (i, &vector) in HLE_VECTORS.iter().enumerate() {
         ivt[vector as usize] = far(TRAP_BASE + 4 * i as u16);
     }
     ivt[0x08] = far(TIMER_HANDLER);
+    // The built-in DOS's IRET for INT 01h, 03h and 04h, in segment 0070h
+    // as MS-DOS's IO.SYS has it (`shell::dos_iret`).
+    for vector in [0x01, 0x03, 0x04] {
+        ivt[vector] = crate::shell::dos_iret();
+    }
     // The mouse driver's handler is in low memory, where a mouse driver's
     // resident code is. Its trap in the ROM stays, for save states and
     // programs that kept its address.
     ivt[0x33] = crate::mouse::vector();
     ivt[0x1E] = far(DISKETTE_PARAMS);
+    ivt[0x23] = far(BREAK_HANDLER);
     // The video BIOS's fonts: the second half of the 8x8 font for the CGA
     // graphics modes, and the graphics font of the mode it starts in.
     use crate::video::bios::{FONT_8X8, FONT_8X8_HIGH, rom_pointer};
@@ -209,7 +261,9 @@ pub fn default_ivt() -> [u32; 256] {
 /// in the BIOS data area, and the fixed disk parameter tables.
 pub fn boot_ivt() -> [u32; 256] {
     let mut ivt = default_ivt();
-    for vector in [0x00, 0x20, 0x21, 0x25, 0x26, 0x27, 0x29, 0x2F, 0x33, 0x67, 0x7A] {
+    for vector in [
+        0x00, 0x01, 0x03, 0x04, 0x20, 0x21, 0x23, 0x25, 0x26, 0x27, 0x29, 0x2F, 0x33, 0x67, 0x7A,
+    ] {
         ivt[vector] = far(IRET_HANDLER);
     }
     ivt[0x09] = far(KBD_HANDLER);
@@ -325,9 +379,17 @@ pub fn ticks_since_midnight(at: chrono::NaiveDateTime) -> u32 {
 }
 
 /// The offset in F000 of the trap of the HLE vector `vector`.
-fn hle_trap(vector: u8) -> u16 {
+pub fn hle_trap(vector: u8) -> u16 {
     let i = HLE_VECTORS.iter().position(|&v| v == vector).expect("an HLE vector");
     TRAP_BASE + 4 * i as u16
+}
+
+/// Write DOS's Ctrl+C code in the ROM: COMMAND.COM's INT 23h handler
+/// and where DOS's INT 23h call returns to. Also after a save state of an
+/// older build is loaded, whose ROM lacks them.
+pub fn write_break_code(bus: &mut Bus) {
+    write_rom(bus, BREAK_HANDLER, &[0xF9, 0xCB]);
+    write_rom(bus, BREAK_RETURN, &[0xFE, 0x39, SERVICE_BREAK_RETURN]);
 }
 
 /// Write the ROM code and data, and the default vector table.
@@ -335,27 +397,34 @@ pub fn install(bus: &mut Bus) {
     for (i, &vector) in HLE_VECTORS.iter().enumerate() {
         write_rom(bus, TRAP_BASE + 4 * i as u16, &[0xFE, 0x38, vector, 0xCF]);
     }
-    // Timer (IRQ 0): count the tick, call the user timer hook INT 1Ch,
-    // acknowledge the interrupt, as the IBM BIOS does.
-    write_rom(
-        bus,
-        TIMER_HANDLER,
-        &[
-            0xFE, 0x39, SERVICE_TIMER_TICK, // count the tick
-            0xCD, 0x1C, // INT 1Ch
-            0x50, // PUSH AX
-            0xB0, 0x20, // MOV AL, 20h
-            0xE6, 0x20, // OUT 20h, AL
-            0x58, // POP AX
-            0xCF, // IRET
-        ],
-    );
+    write_rom(bus, TIMER_HANDLER, &TIMER_CODE);
     // IRQs nothing else handles: acknowledge them.
     write_rom(bus, MASTER_EOI_HANDLER, &[0x50, 0xB0, 0x20, 0xE6, 0x20, 0x58, 0xCF]);
     write_rom(
         bus,
         SLAVE_EOI_HANDLER,
         &[0x50, 0xB0, 0x20, 0xE6, 0xA0, 0xE6, 0x20, 0x58, 0xCF],
+    );
+    // The real-time clock's interrupt, as an AT's BIOS has it: read
+    // status C, which acknowledges the clock, call the alarm's INT 4Ah if
+    // the alarm came, and acknowledge both PICs.
+    write_rom(
+        bus,
+        RTC_HANDLER,
+        &[
+            0x50, // PUSH AX
+            0xB0, 0x0C, // MOV AL, 0Ch
+            0xE6, 0x70, // OUT 70h, AL
+            0xE4, 0x71, // IN AL, 71h
+            0xA8, 0x20, // TEST AL, 20h
+            0x74, 0x02, // JZ eoi
+            0xCD, 0x4A, // INT 4Ah
+            0xB0, 0x20, // eoi: MOV AL, 20h
+            0xE6, 0xA0, // OUT A0h, AL
+            0xE6, 0x20, // OUT 20h, AL
+            0x58, // POP AX
+            0xCF, // IRET
+        ],
     );
     // IRQ 9 is the AT's rerouted IRQ 2: acknowledge the slave and run the
     // IRQ 2 handler (INT 0Ah), which acknowledges the master.
@@ -374,6 +443,7 @@ pub fn install(bus: &mut Bus) {
     );
     // Disk services wait here for slow disk access (`diskio::wait`).
     write_rom(bus, IO_WAIT, &[0xFE, 0x39, SERVICE_IO_WAIT]);
+    write_break_code(bus);
     let [trap_lo, trap_hi] = hle_trap(0x21).to_le_bytes();
     write_rom(
         bus,
@@ -437,6 +507,11 @@ pub fn install(bus: &mut Bus) {
     write_rom(bus, 0xFFF5, b"01/10/92");
     set_machine_id(bus);
 
+    // The IRET INT 01h, 03h and 04h point at is in the shell's code, which
+    // the shell puts there again each time it loads; this one is for a
+    // program that runs before it does.
+    let dos_iret = crate::shell::dos_iret();
+    bus.write_8(((dos_iret >> 16) as usize) * 16 + (dos_iret as u16) as usize, 0xCF);
     write_ivt(bus, &default_ivt());
     // The video BIOS's VESA data.
     crate::interrupts::vbe::install_rom(bus);
@@ -552,7 +627,9 @@ fn mouse_irq_handler() -> Vec<u8> {
 /// BIOS's own IRQ handlers that only acknowledge the interrupt, or the
 /// IPX driver's, which a device may take the IRQ over from.
 pub fn is_default_irq_handler(entry: u32) -> bool {
-    [MASTER_EOI_HANDLER, SLAVE_EOI_HANDLER, IRQ9_HANDLER, IRET_HANDLER, IPX_IRQ].into_iter().any(|h| far(h) == entry)
+    [MASTER_EOI_HANDLER, SLAVE_EOI_HANDLER, IRQ9_HANDLER, RTC_HANDLER, IRET_HANDLER, IPX_IRQ]
+        .into_iter()
+        .any(|h| far(h) == entry)
 }
 
 /// The keyboard interrupt of a booted system, as a PC's BIOS runs it:

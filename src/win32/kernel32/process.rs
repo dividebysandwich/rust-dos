@@ -4,6 +4,7 @@
 use super::threads::{process_of, thread_of};
 use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error, string_at};
 use crate::cpu::Cpu;
+use crate::win32::directories::{self, Directories};
 use crate::win32::memory::{Memory, PAGE, PRIVATE, SYSTEM};
 use crate::win32::object;
 use crate::win32::task::{self, Next, Task};
@@ -228,8 +229,9 @@ pub(crate) fn spawn(
 
 /// `spawn` with CreateProcessA's lpCurrentDirectory, `directory`: the
 /// folder the program starts in, or ERROR_DIRECTORY when it isn't one.
-/// A DOS program starts there. A Windows program starts in its parent's
-/// current folder, which the processes share here (#1611).
+/// The program is looked for from the caller's current directory, and
+/// starts in `directory` with the caller's current directories on the
+/// other drives (win32/directories.rs), as on Windows.
 #[allow(clippy::too_many_arguments)]
 fn spawn_in(
     cpu: &mut Cpu,
@@ -238,7 +240,7 @@ fn spawn_in(
     environment: Option<Vec<String>>,
     inherit: bool,
     flags: u32,
-    mut startup: Vec<u8>,
+    startup: Vec<u8>,
     directory: Option<&str>,
 ) -> Result<[u32; 4], u32> {
     const ERROR_DIRECTORY: u32 = 267;
@@ -272,12 +274,60 @@ fn spawn_in(
         cpu.almanac.last_program = Some(path);
         return Ok(handles(cpu, spawned.process, spawned.thread));
     }
-    if launcher::is_ne(&file) {
+    // A Windows program takes the directories DOS has as it is made:
+    // its parent's, or those with `directory` current.
+    let Some(directory) = directory else {
+        return spawn_windows(
+            cpu,
+            &path,
+            &line,
+            arguments,
+            &file,
+            environment,
+            inherit,
+            flags,
+            startup,
+        );
+    };
+    let own = Directories::with_directory(cpu, directory).map_err(|_| ERROR_DIRECTORY)?;
+    let parent = Directories::now(cpu);
+    directories::put_back(cpu, own);
+    let spawned = spawn_windows(
+        cpu,
+        &path,
+        &line,
+        arguments,
+        &file,
+        environment,
+        inherit,
+        flags,
+        startup,
+    );
+    directories::put_back(cpu, parent);
+    spawned
+}
+
+/// `spawn_in` for the Windows program at `path`, its file `file`, with
+/// the command line `line` and the `arguments` in it.
+#[allow(clippy::too_many_arguments)]
+fn spawn_windows(
+    cpu: &mut Cpu,
+    path: &str,
+    line: &str,
+    arguments: &str,
+    file: &[u8],
+    environment: Vec<String>,
+    inherit: bool,
+    flags: u32,
+    mut startup: Vec<u8>,
+) -> Result<[u32; 4], u32> {
+    let path = path.to_string();
+    if launcher::is_ne(file) {
         // InstallShield's setup launcher starts its 32-bit engine in its
         // place, as from the DOS prompt (`launcher`). Windows 98's waits
         // for the engine before it ends, so what waits for the launcher
         // waits for the engine here.
-        if let Some((engine, engine_arguments)) = launcher::engine(cpu, &path, &file) {
+        if let Some((engine, engine_arguments)) = launcher::engine(cpu, &path, file) {
             let line = format!("{} {}", engine, engine_arguments);
             let environment = Some(environment);
             let spawned = spawn(
@@ -296,7 +346,7 @@ fn spawn_in(
             }
             return spawned;
         }
-        let spawned = spawn_win16(cpu, &path, &file, arguments, environment, &startup);
+        let spawned = spawn_win16(cpu, &path, file, arguments, environment, &startup);
         if spawned.is_ok() {
             cpu.almanac.last_program = Some(path);
         }
@@ -341,8 +391,8 @@ fn spawn_in(
     let created = create_process_from(
         cpu,
         &path,
-        &line,
-        &file,
+        line,
+        file,
         environment,
         inherited,
         std,
@@ -362,8 +412,9 @@ fn spawn_in(
     Ok(handles(cpu, created.process, created.thread))
 }
 
-/// Who started the process `pid`: a program the foreground one starts may
-/// bring its windows to the foreground (user32::input).
+/// Who started the process `pid`: a program the foreground one, or the
+/// one that took the last input, starts may bring its windows to the
+/// foreground (user32::input).
 fn set_parent(cpu: &mut Cpu, pid: u32, parent: u32) {
     if let Some(p) = cpu.bus.win32.processes.iter_mut().find(|p| p.id == pid) {
         p.parent = parent;

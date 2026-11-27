@@ -81,7 +81,7 @@ impl VizAction {
         match self {
             VizAction::Source(channel, solo) => {
                 let bit = 1u16 << channel.index();
-                let all = (1u16 << CHANNELS) - 1;
+                let all = ((1u32 << CHANNELS) - 1) as u16;
                 let master = 1u16 << Channel::Master.index();
                 let mixer = &mut bus.mixer;
                 mixer.silenced = if !solo {
@@ -189,6 +189,7 @@ fn source_label(channel: Channel) -> &'static str {
         Channel::Modem => "Modem",
         Channel::Windows => "Windows",
         Channel::AdlibGold => "AdLib Gold",
+        Channel::Cms => "CMS",
     }
 }
 
@@ -207,17 +208,20 @@ enum Part {
 }
 
 impl ConfigUi {
-    /// Ctrl+Shift+S: show or hide the visualizer. Returns what to tell
-    /// the user over the picture.
-    pub fn sound_viz_key(&mut self, bus: &mut Bus) -> &'static str {
+    /// sound_visualizer's key (Ctrl+Shift+S): show or hide the
+    /// visualizer. Returns what to tell the user over the picture.
+    pub fn sound_viz_key(&mut self, bus: &mut Bus) -> String {
         let on = self.sound_viz.is_none();
         watch(bus, on);
         if on {
             self.sound_viz = Some(SoundViz::default());
-            "Sound visualizer: click to mute, S to solo (Ctrl+Shift+S hides it)"
+            match self.hotkey(crate::hotkeys::Action::SoundVisualizer) {
+                Some(key) => format!("Sound visualizer: click to mute, S to solo ({} hides it)", key),
+                None => "Sound visualizer: click to mute, S to solo".to_string(),
+            }
         } else {
             self.sound_viz = None;
-            "Sound visualizer off"
+            "Sound visualizer off".to_string()
         }
     }
 
@@ -252,6 +256,10 @@ impl ConfigUi {
         if self.open {
             return;
         }
+        let title = match self.hotkey(crate::hotkeys::Action::SoundVisualizer) {
+            Some(key) => format!("click to mute, S to play alone, {} to hide", key),
+            None => "click to mute, S to play alone".to_string(),
+        };
         let Some(viz) = &mut self.sound_viz else { return };
         viz.hits.clear();
         let Some(view) = &viz.view else { return };
@@ -317,7 +325,7 @@ impl ConfigUi {
             match *part {
                 Part::Title => {
                     grid.text(1, row, "Sound", draw::BRIGHT);
-                    grid.text_to(8, row, "click to mute, S to play alone, Ctrl+Shift+S to hide", draw::DIM, cols - 1);
+                    grid.text_to(8, row, &title, draw::DIM, cols - 1);
                     row += 1;
                 }
                 Part::Scopes(from, to) => {

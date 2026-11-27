@@ -123,7 +123,7 @@ fn parse(args: &str) -> Result<Parsed, String> {
 /// screen, and a new line.
 fn print_line(cpu: &mut Cpu, text: &str) {
     let bytes: Vec<u8> = text.chars().map(crate::config_ui::cp437).collect();
-    print_cp437(cpu, &bytes, 0x07);
+    crate::video::print_console(cpu, &bytes);
     print_string(cpu, "\r\n");
 }
 

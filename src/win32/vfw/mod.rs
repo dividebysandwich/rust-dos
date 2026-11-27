@@ -5,7 +5,7 @@
 //! DrawDibDraw, and ACM 1918 takes its frames from AVIStreamGetFrame.
 //! codec.rs has the codecs: Indeo Video 3, 4 and 5, Cinepak and
 //! Microsoft Video 1. Biosys decompresses its Video 1 films itself, with
-//! ICLocate and ICDecompress.
+//! ICLocate and ICDecompress, and Outlaw Racers its Cinepak ones.
 
 pub mod avi;
 pub mod avifil32;
@@ -16,14 +16,20 @@ pub mod msvfw32;
 pub mod msvideo1;
 
 /// What a process has open of the two: its AVI files, their
-/// IGetFrames, its DrawDib handles, and the codecs it opened with ICOpen,
-/// each by its FourCC in capitals.
+/// IGetFrames, its DrawDib handles, and the codecs it opened with ICOpen
+/// or ICLocate, each by its FourCC in capitals, with the decoder that
+/// ICDecompress decodes its frames with. A save state doesn't keep the
+/// decoders, as it doesn't a DrawDib's: after a restore a handle's
+/// decoder starts again, and refuses the frames up to the next key
+/// frame.
 #[derive(Clone, Debug, Default)]
 pub struct State {
     pub files: Vec<Option<avifil32::AviFile>>,
     pub frames: Vec<Option<avifil32::GetFrame>>,
     pub drawdibs: Vec<Option<msvfw32::DrawDib>>,
     pub codecs: Vec<Option<u32>>,
+    /// By the index of `codecs`: the decoder of the handle there.
+    pub decoders: Vec<codec::Codec>,
 }
 
 crate::state_fields!(State {
@@ -31,6 +37,8 @@ crate::state_fields!(State {
     frames,
     drawdibs,
     codecs
+} skip {
+    decoders
 });
 
 /// The index of the first empty entry of `list`, which a new handle takes

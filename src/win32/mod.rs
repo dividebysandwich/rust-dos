@@ -21,10 +21,12 @@ mod comctl32;
 mod comdlg32;
 mod convert;
 mod d3d8;
+mod d3drm;
 mod dciman32;
 mod ddraw;
 pub use ddraw::is_lost_cache;
 mod dinput;
+pub(crate) mod directories;
 pub mod dll_files;
 mod forwarders;
 mod dmusic;
@@ -39,6 +41,7 @@ mod glide;
 pub(crate) mod heap;
 mod imagehlp;
 mod imm32;
+pub(crate) mod inf;
 pub(crate) mod kernel32;
 mod launcher;
 pub(crate) mod loader;
@@ -63,11 +66,13 @@ mod pace;
 mod pif;
 mod advpack;
 pub(crate) mod realmode;
+mod regedit;
 pub(crate) mod registry;
 mod rpcrt4;
 mod screen;
 pub(crate) mod seh;
 mod shell32;
+pub mod shims;
 pub mod snapshot;
 pub(crate) mod stub_tables;
 pub(crate) mod stubs;
@@ -75,6 +80,7 @@ pub(crate) mod system;
 mod tapi32;
 mod task;
 pub(crate) mod thread;
+pub use thread::times as thread_times;
 pub mod trace;
 pub mod trace3d;
 pub mod user32;
@@ -292,6 +298,11 @@ pub struct Process {
     dll_tls: Vec<(u32, Vec<u8>)>,
     /// Whether ExitProcess is ending it, telling the DLLs.
     exiting: bool,
+    /// While the outermost FreeLibrary's chain of DllMain calls runs, the
+    /// modules whose last reference went, which it detaches and unmaps
+    /// (kernel32/module.rs): Wine's `free_lib_count` above 0. A chain
+    /// that stopped in a DllMain leaves them to the next FreeLibrary.
+    unloading: crate::savestate::Since<{ kernel32::module::UNLOADING_SAVED }, Option<Vec<u32>>>,
     /// The compressed files LZInit opened (kernel32/lz.rs).
     lz_files: Vec<kernel32::lz::LzFile>,
     /// The object of its input idle event, which a program that isn't a
@@ -308,10 +319,26 @@ pub struct Process {
     /// The system's heap in the shared arena (`Heap::create_shared`),
     /// once a critical section needs it.
     system_heap: heap::SystemHeap,
+    /// Its current drive and directories while another program's are
+    /// DOS's (directories.rs): None while they are DOS's.
+    directories: crate::savestate::Since<
+        { directories::DIRECTORIES_SAVED },
+        Option<directories::Directories>,
+    >,
     /// Its images of built-in DLLs made from an older table, which keep
     /// its order, and which the addresses Rust works out for it follow. A
     /// load works them out again (`stub_tables::mend`).
     pub(crate) older_images: Vec<stub_tables::OlderImage>,
+    /// The behaviours of an older Windows it gets instead of Windows
+    /// 98's, which a game fix or the `win32_shims` setting gives it as it
+    /// starts (shims).
+    pub(crate) shims: crate::savestate::Since<{ shims::SHIMS_SAVED }, shims::Shims>,
+    /// Its view of Windows 3.1's GDI heap, with the shim that keeps one
+    /// (shims/win31/gdi_heap.rs).
+    pub(crate) gdi_heap: crate::savestate::Since<
+        { shims::win31::gdi_heap::GDI_HEAP_SAVED },
+        shims::win31::gdi_heap::GdiHeapView,
+    >,
 }
 
 impl Process {
@@ -343,6 +370,24 @@ impl Process {
             .iter()
             .find(|m| m.name.eq_ignore_ascii_case(&file) && m.flags & loader::DATAFILE == 0)
             .map(|m| m.base)
+    }
+
+    /// `size` bytes of the system's heap (`system_heap`), made the first
+    /// time one is needed: where Windows 98 keeps what KERNEL32 makes for
+    /// the process, such as the objects of critical sections and the code
+    /// of Universal Thunks. None when it is full.
+    pub(crate) fn system_alloc(&mut self, bus: &mut crate::bus::Bus, size: u32) -> Option<u32> {
+        if self.system_heap.is_none() {
+            *self.system_heap = heap::Heap::create_shared(&mut self.memory, heap::SYSTEM_HEAP_SIZE);
+        }
+        self.system_heap.as_mut()?.alloc(&mut self.memory, bus, size)
+    }
+
+    /// The block `system_alloc` gave at `at` is free again.
+    pub(crate) fn system_free(&mut self, bus: &mut crate::bus::Bus, at: u32) {
+        if let Some(heap) = self.system_heap.as_mut() {
+            heap.free(&self.memory, bus, at);
+        }
     }
 }
 
@@ -376,6 +421,9 @@ pub struct Win32 {
     /// the running processes see, the setting's when the first of them
     /// started (nls.rs).
     pub locale: nls::Win32Locale,
+    /// The shims every program gets as it starts (the `win32_shims`
+    /// setting).
+    pub shims: shims::Shims,
     pub(crate) os_locale: nls::Win32Locale,
     /// The desktop's size as ChangeDisplaySettings set it, and the
     /// process that set it: None while it is its own (screen.rs).
@@ -440,6 +488,15 @@ pub struct Win32 {
     /// time rather than at the next interrupt. Worked out again after a
     /// load.
     pub(crate) wait_due: Option<u64>,
+    /// When the running thread's turn ends, by the clock's microseconds
+    /// (`thread::turn_due`), so that another thread that is ready takes
+    /// over then rather than at the BIOS's next interrupt. Worked out
+    /// again after a load.
+    pub(crate) turn_due: Option<u64>,
+    /// The emulated time and the instructions each thread has had, by its
+    /// id (0 for the idle loop), and where the running one's share began
+    /// (`thread::charge`). Not kept in a save state.
+    pub(crate) times: thread::Times,
     /// Where the system's time was taken from the machine's clock
     /// (`kernel32::time::now`). Worked out again after a load.
     pub(crate) system_clock: Option<kernel32::time::Anchor>,
@@ -458,7 +515,8 @@ pub struct Win32 {
     sections: Vec<Option<mapping::Section>>,
 
     /// The current directories SetCurrentDirectoryA was given with long
-    /// names, as (the directory in short names, as DOS has it; as given).
+    /// names, as (the directory in short names, as DOS has it; as given),
+    /// of the program whose directories DOS has (directories.rs).
     long_dirs: Vec<(String, String)>,
     /// The console's input and output modes (SetConsoleMode), or None
     /// for those it starts with.
@@ -512,6 +570,10 @@ pub struct Win32 {
     dpnet: dpnet::State,
     /// The DOS program a Windows program started (dosvm.rs).
     pub(crate) dosvm: crate::savestate::Since<{ dosvm::DOSVM_SAVED }, dosvm::State>,
+    /// Whose current directories DOS has, and DOS's own while a
+    /// program's are there (directories.rs).
+    directories:
+        crate::savestate::Since<{ directories::DIRECTORIES_SAVED }, directories::State>,
 }
 
 impl Win32 {
@@ -525,6 +587,7 @@ impl Win32 {
             depth: self.depth,
             desktop: self.desktop,
             locale: self.locale,
+            shims: self.shims,
             dll_files: self.dll_files.take(),
             trace: trace::Trace::new(self.trace.level()),
             trace3d: self.trace3d.take(),
@@ -570,11 +633,14 @@ impl Win32 {
     }
 
     /// When WinMM next has work to do (its timers, MIDI streams and MCI
-    /// devices) or a thread's wait times out, in PIT ticks, for the bus's
-    /// timer events.
+    /// devices), a thread's wait times out or the running thread's turn
+    /// ends, in PIT ticks, for the bus's timer events.
     pub fn next_event(&self) -> Option<u64> {
         let saver = Some(self.user.input.saver_due).filter(|&due| due != 0);
-        let micros = [self.winmm.due, self.wait_due, saver].into_iter().flatten().min()?;
+        let micros = [self.winmm.due, self.wait_due, self.turn_due, saver]
+            .into_iter()
+            .flatten()
+            .min()?;
         Some(crate::timer::mul_div_ceil(micros, crate::timer::PIT_HZ, 1_000_000))
     }
 
@@ -610,17 +676,23 @@ impl Win32 {
     }
 }
 
-/// WinMM's or the sound device's time for work came, or a thread's wait
-/// timed out (`Win32::due`), between two instructions: the work is done,
-/// and if the program's code was running, a thread of a higher priority
-/// that it readied (the multimedia thread, whose callbacks ran at
-/// interrupt time on Windows 95) or one whose wait timed out runs at
-/// once (`thread::preempt`).
+/// WinMM's or the sound device's time for work came, a thread's wait
+/// timed out or the running thread's turn ended (`Win32::due`), between
+/// two instructions: the work is done, and if the program's code was
+/// running, a thread of a higher priority that it readied (the
+/// multimedia thread, whose callbacks ran at interrupt time on Windows
+/// 95) or one whose wait timed out runs at once (`thread::preempt`), and
+/// at the end of a turn the next thread in turn does
+/// (`thread::turn_over`).
 pub fn timer(cpu: &mut Cpu) {
+    let now = cpu.bus.clock.now_micros();
+    if cpu.bus.win32.turn_due.is_some_and(|due| due <= now) {
+        let in_program = in_program(cpu);
+        thread::turn_over(cpu, in_program);
+    }
     // A wait that ended before its time out (its object was signaled)
     // leaves its event behind: with nothing else due it does nothing, as
     // in a machine loaded from a state, which has no such event.
-    let now = cpu.bus.clock.now_micros();
     let ticks = cpu.bus.clock.now_ticks();
     let w = &cpu.bus.win32;
     let others = w.winmm.due.is_some_and(|d| d <= now)
@@ -644,12 +716,7 @@ pub fn timer(cpu: &mut Cpu) {
         return;
     }
     user32::saver::tick(cpu);
-    let in_program = cpu.pe()
-        && !cpu.v86()
-        && cpu.cpl == 3
-        && !realmode::waiting(cpu)
-        && running(cpu).is_some_and(|p| p.current.is_some());
-    if in_program {
+    if in_program(cpu) {
         thread::preempt(cpu);
     } else {
         winmm::tick(cpu);
@@ -660,6 +727,16 @@ pub fn timer(cpu: &mut Cpu) {
     let now = cpu.bus.clock.now_micros();
     cpu.bus.win32.wait_due = thread::wait_due(&cpu.bus.win32, now);
     winmm::schedule(cpu);
+}
+
+/// Whether a thread of a program runs its code at level 3, where the
+/// system may switch threads.
+fn in_program(cpu: &Cpu) -> bool {
+    cpu.pe()
+        && !cpu.v86()
+        && cpu.cpl == 3
+        && !realmode::waiting(cpu)
+        && running(cpu).is_some_and(|p| p.current.is_some())
 }
 
 /// The running process.
@@ -818,6 +895,13 @@ pub fn accepts(cpu: &Cpu, phys_ip: usize, id: u16) -> bool {
             _ => id & 0xFF00 == ID_IDT && cpu.pm() && cpu.cpl == 0 && win32.active(),
         };
     }
+    in_stub_page(cpu, phys_ip)
+}
+
+/// Whether `phys_ip` is in one of the running process's pages of stubs,
+/// where its program calls the built-in DLLs' functions, at privilege
+/// level 3 in protected mode.
+pub(crate) fn in_stub_page(cpu: &Cpu, phys_ip: usize) -> bool {
     let Some(process) = running(cpu) else {
         return false;
     };
@@ -862,6 +946,7 @@ fn start(cpu: &mut Cpu) {
     }
     let (psp, rm_stack, a20, cr4) = (cpu.current_psp, (cpu.ss(), cpu.sp()), cpu.bus.a20(), cpu.cr4);
     let win32 = &mut cpu.bus.win32;
+    let first = win32.processes.is_empty();
     win32.psp = psp;
     win32.rm_stack = rm_stack;
     win32.a20 = a20;
@@ -869,8 +954,14 @@ fn start(cpu: &mut Cpu) {
     version::start(win32);
     nls::start(win32);
     dll_files::sync(&mut cpu.bus);
+    directories::session_starts(&mut cpu.bus.win32);
     boot::session_starts(cpu);
-    // Windows sets the keyboard's typematic rate from its own settings.
+    // Windows sets the keyboard's typematic rate from its own settings,
+    // which it reads from the registry and WIN.INI as it starts: when
+    // the first program does.
+    if first {
+        user32::sysparams::read_keyboard_settings(cpu);
+    }
     user32::sysparams::program_keyboard(cpu);
     loop {
         let Some(program) = cpu.bus.win32.pending.take() else {
@@ -928,6 +1019,10 @@ fn start_program(cpu: &mut Cpu, program: boot::Program) -> Result<u32, String> {
         crate::win16::task::start(cpu, &path, &line, environment)?;
         return Ok(cpu.bus.win32.win16.pid);
     }
+    // Windows' loader finds the program's DLLs by their long names, as
+    // LoadLibraryA does (a long-name call, `stubs::call`): on a disk image
+    // too, where DOS would cut a name to 8.3.
+    let was = cpu.bus.disk.set_long_name_call(true);
     let created = create_process(
         cpu,
         &path,
@@ -937,8 +1032,9 @@ fn start_program(cpu: &mut Cpu, program: boot::Program) -> Result<u32, String> {
         None,
         Vec::new(),
         false,
-    )?;
-    Ok(created.process.1)
+    );
+    cpu.bus.disk.set_long_name_call(was);
+    Ok(created?.process.1)
 }
 
 /// What `create_process` made: the process's object and id, and its main
@@ -988,6 +1084,40 @@ fn patch_at_load(cpu: &mut Cpu, path: &str, file: &[u8]) -> Option<Vec<u8>> {
     Some(patched)
 }
 
+/// The shims the program file `file`, read from `path`, gets: those of
+/// the `win32_shims` setting and of the game fixes for it.
+fn shims_at_load(cpu: &mut Cpu, path: &str, file: &[u8]) -> shims::Shims {
+    let mut all = cpu.bus.win32.shims;
+    if !all.is_empty() {
+        let names: Vec<_> = all.iter().map(|s| s.describe()).collect();
+        let set = shims::name_of(all).unwrap_or("?");
+        cpu.bus.log_string(&format!(
+            "[W32] win32_shims={}: {} gets {}",
+            set,
+            path,
+            names.join(", ")
+        ));
+    }
+    if !cpu.bus.game_fixes {
+        return all;
+    }
+    let bus = &cpu.bus;
+    let found = crate::game_fixes::win32_shims(path, file.len(), |fix| bus.game_fix_enabled(fix));
+    for (fix, set) in found {
+        let names: Vec<_> = set.iter().map(|s| s.describe()).collect();
+        cpu.bus.log_string(&format!(
+            "[game fix] {}: {} ({}): {} gets {}",
+            fix.name,
+            fix.game,
+            fix.reason,
+            path,
+            names.join(", ")
+        ));
+        all = all.union(set);
+    }
+    all
+}
+
 /// `create_process` with the program's file `file`, read already (or
 /// made, as the Win16 process's is).
 #[allow(clippy::too_many_arguments)]
@@ -1011,6 +1141,12 @@ pub(crate) fn create_process_from(
     let file = patched.as_deref().unwrap_or(file);
     let loaded = loader::load(cpu, path, line, file, environment)?;
     let mut process = loaded.process;
+    // A program that a game fix gives an older Windows's behaviours
+    // (Lunicus's, Win32s's).
+    *process.shims = shims_at_load(cpu, path, file);
+    // It starts in the current directories of the program that starts
+    // it, which DOS has.
+    process.directories.0 = Some(directories::Directories::now(cpu));
     process.priority_class = 0x20;
     process.startup = startup;
     let return_address = stub_tables::fixed_address(0, kernel32::PROCESS_RETURN);
@@ -1127,6 +1263,9 @@ pub(crate) fn create_process_from(
         thread: (thread_object, tid),
     };
     win32.processes.push(process);
+    // The thread that made it may have run alone: it has a turn to end
+    // now.
+    thread::arm_turn(cpu);
     Ok(created)
 }
 
@@ -1201,6 +1340,9 @@ fn terminate(cpu: &mut Cpu, index: usize, code: u32) -> bool {
 }
 
 fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
+    // The running thread's time up to now is its own, before its process
+    // may go and the next thread or the idle loop takes over.
+    thread::charge(cpu);
     if !remove_process(cpu, index, code) {
         return;
     }
@@ -1233,12 +1375,17 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         thread::run_next(cpu);
         return;
     }
-    let code = win32.exit_code;
+    // With no process left, the time until the next program starts is
+    // DOS's: the threads' count stops here (`thread::charge`).
+    thread::charge(cpu);
+    let code = cpu.bus.win32.exit_code;
     // The last program's loops get their summaries.
     trace::flush(cpu);
     let (rm_stack, a20) = (cpu.bus.win32.rm_stack, cpu.bus.win32.a20);
     // The breakpoints were the last thread's, which is gone.
     seh::set_debug_registers(cpu, &[0; 6]);
+    // DOS has the directories back that it had before the session.
+    directories::session_ended(cpu);
     system::enter_real(cpu, (ROM_SEG, EXIT), rm_stack, 0x0202);
     // The session's files are closed before a restart's work, as Windows
     // closes them before it restarts: WININIT.INI's renames and deletes
@@ -1308,9 +1455,14 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     // task there ends (flat thunks).
     let pid = cpu.bus.win32.processes[index].id;
     crate::win16::flat::process_ending(cpu, pid);
+    if pid == cpu.bus.win32.win16.pid {
+        crate::win16::dos::free_pdbs(cpu);
+    }
     let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
     cpu.programs.processes_ended += 1;
+    // Its locks go, those of a file another process still has open too.
+    cpu.bus.disk.release_locks(process.id);
     registry::process_ended(cpu, process.id);
     user32::process_ended(cpu, process.id, &tids);
     gdi32::process_ended(cpu, process.id);
@@ -1322,6 +1474,8 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     msacm32::process_ended(cpu, process.id);
     d3d8::process_ended(cpu, process.id);
     ddraw::process_ended(cpu, process.id, &tids);
+    // With the desktop's mode back, the palette its threads kept goes.
+    user32::palette::task_ended(cpu);
     dsound::process_ended(cpu, process.id, &tids);
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);
@@ -1582,9 +1736,14 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
     let win32 = &mut cpu.bus.win32;
     if win32.active() && win32.psp == psp {
         let a20 = win32.a20;
+        // The files of the Win16 tasks still running close, which DOS's
+        // end of the process doesn't reach: they are in the tasks' PDBs.
+        crate::win16::dos::free_pdbs(cpu);
+        let win32 = &mut cpu.bus.win32;
         for process in std::mem::take(&mut win32.processes) {
             process.memory.release(&mut cpu.bus);
             cpu.programs.processes_ended += 1;
+            cpu.bus.disk.release_locks(process.id);
             registry::process_ended(cpu, process.id);
         }
         // DirectPlay's objects leave their sessions, which the room would
@@ -1690,12 +1849,16 @@ crate::state_fields!(Process {
 
     dll_tls,
     exiting,
+    unloading,
     lz_files,
     idle_event,
     imagehlp,
     parent,
     vfw,
     system_heap,
+    directories,
+    shims,
+    gdi_heap,
 } skip {
     file_apis_oem,
     older_images,
@@ -1756,6 +1919,7 @@ crate::state_fields!(Win32 {
     comm,
     dpnet,
     dosvm,
+    directories,
 } skip {
     enabled,
     guest_dlls,
@@ -1764,10 +1928,13 @@ crate::state_fields!(Win32 {
     depth,
     desktop,
     locale,
+    shims,
     dll_files,
     trace,
     trace3d,
     wait_due,
+    turn_due,
+    times,
     system_clock,
     tlb_stale,
     paging,

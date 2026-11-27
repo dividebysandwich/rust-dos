@@ -46,6 +46,7 @@ fn classify(lines: &[String]) -> Vec<(Section, Line)> {
                 | Section::Shell
                 | Section::Vr
                 | Section::Vfx1
+                | Section::Hotkeys
                 | Section::Drives => {
                     if let Some(comment) = line.strip_prefix(['#', ';']) {
                         key_of(section, comment.trim_start_matches(['#', ';']).trim_start())
@@ -128,16 +129,55 @@ fn with_value(line: &str, value: &str) -> String {
     format!("{}={}{}", &line[..eq], &rest[..gap], value)
 }
 
+/// The old settings `key` of `section` took the place of, several
+/// settings in one (`RENDERER_OLD_NAMES`); the renamed ones of
+/// `OLD_NAMES` are `key`'s own lines.
+fn replaced_names(section: Section, key: &str) -> &'static [&'static str] {
+    match (section, key) {
+        (Section::Emulator, "renderer") => &super::RENDERER_OLD_NAMES,
+        _ => &[],
+    }
+}
+
+/// Whether `line` sets one of the settings `key` of `section` took the
+/// place of.
+fn is_replaced(section: Section, key: &str, line: &Line) -> bool {
+    matches!(line, Line::Setting(name) if replaced_names(section, key).contains(&name.as_str()))
+}
+
+/// Whether a line of `lines` sets one of the settings `key` of `section`
+/// took the place of.
+fn has_replaced(lines: &[String], section: Section, key: &str) -> bool {
+    // Most settings took the place of none, and need no look at the file.
+    !replaced_names(section, key).is_empty()
+        && classify(lines)
+            .into_iter()
+            .any(|(s, line)| s == section && is_replaced(section, key, &line))
+}
+
 /// Set `key` in `section` to `value`: the last line that sets it gets the
 /// new value, or a new line is added. With None, the lines that set it
-/// are commented out.
+/// are commented out. The lines of the settings `key` took the place of
+/// count as its own, and only the last line that sets any of them stays:
+/// an old line left after the new one would set its card again.
 fn set_key(lines: &mut Vec<String>, section: Section, key: &str, value: Option<&str>) {
     let layout = classify(lines);
     let setting = Line::Setting(key.to_string());
-    let existing: Vec<usize> =
-        (0..lines.len()).filter(|&i| layout[i].0 == section && layout[i].1 == setting).collect();
+    let existing: Vec<usize> = (0..lines.len())
+        .filter(|&i| {
+            layout[i].0 == section
+                && (layout[i].1 == setting || is_replaced(section, key, &layout[i].1))
+        })
+        .collect();
     match (existing.last(), value) {
-        (Some(&i), Some(value)) => lines[i] = with_value(&with_key(&lines[i], key), value),
+        (Some(&i), Some(value)) => {
+            lines[i] = with_value(&with_key(&lines[i], key), value);
+            for &old in existing.iter().rev() {
+                if old != i && is_replaced(section, key, &layout[old].1) {
+                    lines.remove(old);
+                }
+            }
+        }
         (Some(_), None) => {
             for i in existing {
                 lines[i] = format!("#{}", lines[i]);
@@ -237,21 +277,33 @@ pub fn with_entries(
         .map(|(section, key, value)| format!("[{}]\n{}={}\n", section, key, value))
         .collect();
     let config = parse(&format!("{}\n{}", base, own), base_dir, home);
+    // The entries are a layer over the settings: their renderer is their
+    // own lines' alone, which replaces the settings' (`Config::renderer`).
+    let entries_alone = parse(&own, base_dir, home);
+    let layered_deprecation = config.renderer().and_then(|r| config.renderer_deprecation(r));
     // What the entries brought: the settings' own were taken before. The
     // line numbers are of no file.
     let before = parse(&base, base_dir, home).warnings;
-    let warnings = config
+    let mut warnings: Vec<String> = config
         .warnings
         .iter()
-        .filter(|w| !before.contains(w))
+        .filter(|w| !before.contains(w) && layered_deprecation.as_ref() != Some(*w))
+        .chain(entries_alone.renderer().and_then(|r| entries_alone.renderer_deprecation(r)).iter())
         .map(|w| {
             w.split_once(": ")
                 .filter(|(at, _)| at.starts_with("line "))
                 .map_or(w.as_str(), |(_, rest)| rest)
+                .to_string()
         })
-        .map(str::to_string)
         .collect();
-    (Settings::from_config(&config), warnings)
+    let mut new = Settings::from_config(&config);
+    new.renderer = entries_alone.renderer_over(settings.renderer);
+    // Entries that ask for two renderers together aren't taken, and the
+    // renderer stays as it was.
+    if let Some(error) = entries_alone.renderer_conflict(|_| "the setting".to_string()) {
+        warnings.push(error);
+    }
+    (new, warnings)
 }
 
 /// `original` with what changed from `baseline` to `settings`, and the
@@ -265,11 +317,28 @@ pub fn update_text(
     drives: &[DriveChange],
     home: Option<&Path>,
 ) -> String {
+    // What the file's own lines stand for, for the settings whose old
+    // lines it has: a game profile's are a layer over the configuration,
+    // and `settings` has the value the layers give together.
+    let file = || {
+        let own = Settings::from_config(&parse(original, Path::new("."), home));
+        entries(&own, home)
+    };
     edit_text(original, drives, home, |lines| {
         let before = entries(baseline, home);
-        for ((section, key, value), (_, _, old)) in entries(settings, home).into_iter().zip(before) {
+        let mut in_file = None;
+        for (i, ((section, key, value), (_, _, old))) in
+            entries(settings, home).into_iter().zip(before).enumerate()
+        {
             if value != old {
                 set_key(lines, section, key, value.as_deref());
+            } else if has_replaced(lines, section, key) {
+                // Lines of the settings `key` took the place of get its
+                // line in their place, with the value they stood for in
+                // the file: the layers' value would pin the ones below
+                // into it.
+                let in_file = in_file.get_or_insert_with(file);
+                set_key(lines, section, key, in_file[i].2.as_deref());
             }
         }
     })
@@ -295,7 +364,7 @@ pub fn complete_text(
         for ((section, key, value), ((_, _, old), (_, _, in_file))) in entries(settings, home).into_iter().zip(before) {
             if value != old {
                 set_key(lines, section, key, value.as_deref());
-            } else if !has_key(lines, section, key) {
+            } else if !has_key(lines, section, key) || has_replaced(lines, section, key) {
                 set_key(lines, section, key, in_file.as_deref());
             }
         }
@@ -323,7 +392,7 @@ pub fn save(
     home: Option<&Path>,
     saving: Saving,
 ) -> Result<(), String> {
-    let original = read_or_template(path)?;
+    let (original, encoding) = read_or_template(path)?;
     let text = match saving {
         Saving::All => {
             let absolute = crate::hostfs::absolute(path).unwrap_or_else(|_| path.to_path_buf());
@@ -332,7 +401,7 @@ pub fn save(
         }
         Saving::Changes => update_text(&original, baseline, settings, drives, home),
     };
-    replace_file(path, &text)
+    replace_file(path, &encoding.encode(&text))
 }
 
 /// The lines of `text`'s `[autoexec]` sections as they are written,
@@ -395,22 +464,45 @@ pub fn with_autoexec(original: &str, autoexec: &[String]) -> String {
 /// The `[autoexec]` lines of the configuration file at `path` (see
 /// `autoexec_lines`), which has the template's text if it isn't there yet.
 pub fn load_autoexec(path: &Path) -> Result<Vec<String>, String> {
-    read_or_template(path).map(|text| autoexec_lines(&text))
+    read_or_template(path).map(|(text, _)| autoexec_lines(&text))
 }
 
 /// Make `autoexec` the `[autoexec]` section of the configuration file at
 /// `path` (see `load_autoexec`).
 pub fn save_autoexec(path: &Path, autoexec: &[String]) -> Result<(), String> {
-    let original = read_or_template(path)?;
-    replace_file(path, &with_autoexec(&original, autoexec))
+    let (original, encoding) = read_or_template(path)?;
+    replace_file(path, &encoding.encode(&with_autoexec(&original, autoexec)))
+}
+
+/// How a configuration file is written: UTF-8, or code page 437, as
+/// DOSBox's often are (`dosstr::decode_cp437`).
+#[derive(Clone, Copy)]
+enum Encoding {
+    Utf8,
+    Cp437,
+}
+
+impl Encoding {
+    /// `text` as the file's bytes, the encoding it was read in.
+    fn encode(self, text: &str) -> Vec<u8> {
+        match self {
+            Encoding::Utf8 => text.as_bytes().to_vec(),
+            Encoding::Cp437 => crate::dosstr::encode_cp437(text),
+        }
+    }
 }
 
 /// The text of the configuration file at `path`, or the template's if it
-/// isn't there yet.
-fn read_or_template(path: &Path) -> Result<String, String> {
-    match crate::hostfs::read_to_string(path) {
-        Ok(text) => Ok(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TEMPLATE.to_string()),
+/// isn't there yet, and the encoding to write it back in.
+fn read_or_template(path: &Path) -> Result<(String, Encoding), String> {
+    match crate::hostfs::read(path) {
+        Ok(bytes) => Ok(match String::from_utf8(bytes) {
+            Ok(text) => (text, Encoding::Utf8),
+            Err(e) => (crate::dosstr::decode_cp437(e.as_bytes()), Encoding::Cp437),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok((TEMPLATE.to_string(), Encoding::Utf8))
+        }
         Err(e) => Err(format!("cannot read {}: {}", path.display(), e)),
     }
 }
@@ -418,7 +510,7 @@ fn read_or_template(path: &Path) -> Result<String, String> {
 /// Replace the file at `path` with `text` in one step, so a failed write
 /// leaves the old one. Where the frontend keeps the files (`hostfs`), it
 /// is written as it is.
-fn replace_file(path: &Path, text: &str) -> Result<(), String> {
+fn replace_file(path: &Path, text: &[u8]) -> Result<(), String> {
     if crate::hostfs::is_foreign(path) {
         return crate::hostfs::write(path, text).map_err(|e| format!("cannot write {}: {}", path.display(), e));
     }

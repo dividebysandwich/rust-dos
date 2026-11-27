@@ -19,7 +19,7 @@ settings window's Emulator page) picks what runs the instructions:
 
 | `core` | Runs |
 |---|---|
-| `auto` (default) | The interpreter, and the recompiler for a program from its first switch to protected mode (CR0.PE 0 to 1) until it ends, as DOSBox's `core=auto` does. The latch is `Cpu::dyn_latched`: `note_mode_switch` sets it, `restore_process_context` and `load_shell` clear it. |
+| `auto` (default) | The interpreter, and the recompiler for a program from its first switch to protected mode (CR0.PE 0 to 1) until it ends, as DOSBox's `core=auto` does. The latch is `Cpu::pm_latched`: `note_mode_switch` sets it, `restore_process_context` and `load_shell` clear it. The recompiler also runs while the CPU is in real mode with a data segment limit above 64 KB (`Cpu::big_real`, "big real mode"): a program that switched to protected mode set it, and the program running may be a later one, as Ultima VII's U7.EXE runs in the limits MAINMENU.EXE left. |
 | `dynamic` | The recompiler throughout. |
 | `normal` | The interpreter. |
 
@@ -303,13 +303,14 @@ Each instruction becomes one of two things:
 The interpreter computes products, quotients, loads, stores and
 comparisons with doubles, and sums and differences on the registers' 80
 bits (`F80::add`), or as doubles rounded to the control word's precision
-(see [Sums at 53 and 24 bits](#sums-at-53-and-24-bits)). So each FPU
+(see [Sums and the control word](#sums-and-the-control-word)). So each FPU
 register keeps the double it comes to beside its 80 bits
 (`f80::FpuRegs`): an instruction that gives a register a double stores
 only that, and the 80 bits are made from it when something asks for them
 (a sum, FSTP of 10 bytes, FSAVE, a saved state). The double is always
-what the 80 bits would come to (`f80::canon_f64`: a denormal is 0 and a
-NaN quiet, as a double that went through 80 bits always was).
+what the 80 bits would come to (`f80::canon_f64`: a NaN quiet, as a
+double that went through 80 bits always was; a denormal double is a
+normal number in 80 bits, and comes back as it was).
 
 `dynrec/fpu.rs` translates these forms, which then run on the doubles
 with SSE2 on x86-64 hosts and the FP instructions on ARM64 hosts (which
@@ -333,9 +334,9 @@ compute what the handlers' own doubles do there), as their handlers do:
 - FADD, FSUB, FSUBR and their popping forms, and FIADD, FISUB and
   FISUBR: a routine of the trampoline's (`fpu_addsub`) that adds as the
   handlers' `fpu::arithmetic::addsub_st` and `addsub_value` do, rounded
-  to the control word's precision or on the 80 bits, and leaves
-  infinities, NaNs, empty registers and results outside a double's range
-  to the handlers;
+  as the control word says, as a double or on the 80 bits, and leaves
+  infinities, NaNs, denormals, formats a 387 doesn't take, empty
+  registers and results outside a double's range to the handlers;
 - FCOM, FCOMP, FCOMPP and the FUCOMs with a single or ST(i), FNSTSW AX,
   FLDCW and FNSTCW.
 
@@ -359,30 +360,43 @@ compiler made the destination in the handler; nothing else differs.
 The lockstep tests compare the FPU's registers (their 80 bits), tags,
 stack top, status and control words after every batch.
 
-#### Sums at 53 and 24 bits
+#### Sums and the control word
 
-A 387 rounds a sum to the precision its control word asks for. DOS
-programs leave that at 64 bits, where the sum is the 80 bits'
-(`F80::add`). Win32 programs don't: the C runtime sets 53 bits and
-Direct3D 24, and on a real machine every sum they compute comes out a
-double or a single. `fpu::arithmetic::narrow_sum` gives that sum where
-the control word asks for 53 or 24 bits and rounds to nearest, both
-operands are doubles and no more (`FpuRegs::only_double`), and the sum
-is zero or a normal number of that size: the two doubles added, and at
-24 bits the double sum rounded to a single. A double sum that was
-rounded already and lies halfway between two singles would round the
-wrong way there, so what the first rounding left out (Knuth's two-sum
-gives it exactly) moves such a sum to its odd neighbour first, which
-rounds as the exact sum does. Everything else goes to the 80 bits as
-before: another rounding, an operand with more than a double's bits or
-in a format a 387 doesn't take (an unnormal, a pseudo-zero), an
-infinity or a NaN, and a sum below or above the normal numbers, which a
-387 keeps with its 15 bits of exponent.
+A 387 rounds a sum once to the precision its control word asks for (64,
+53 or 24 bits of significand, keeping its 15 bits of exponent) as the
+rounding field says (to nearest, down, up or toward zero). DOS programs
+mostly run at 64 bits and round to nearest. Win32 programs run at 53
+bits (the C runtime) or 24 (Direct3D). Quake's rasterizer runs at 24
+bits chopped, with rounding up for some of its edge steps: in its
+640x480 timedemo 94% of the sums are chopped to 24 bits.
 
-The register then holds a double alone, so the stores, compares and
-conversions after it stay in translated code, where a sum on 80 bits
-leaves bits a double hasn't and sends them to the handlers. The
-trampoline's routine checks the control word on every call, so one
+`F80::add` gives that sum from any two 80-bit operands: the smaller's
+significand shifted down with a sticky bit for what falls out, the sum
+or difference on 128 bits, and one rounding to the precision. Where both
+operands are doubles and no more (`FpuRegs::only_double`),
+`fpu::arithmetic::narrow_sum` gives the same sum without the 80 bits,
+whenever it is a zero or a normal double: the two doubles added on the
+host, and what that rounding left out (exact, by Knuth's two-sum)
+deciding the cases where it matters. At 53 bits the double sum is the
+sum rounded to nearest, and a directed rounding takes its neighbour on
+the exact sum's side. At 24 bits a double sum with any of its low 28
+bits set rounds as the exact sum does; one with them all clear (a
+single, or halfway between two) is first moved to its odd neighbour on
+the exact sum's side. At 64 bits it takes only exact sums. The rest
+goes to the 80 bits: a sum at 64 bits that needs more than 53 bits, an
+operand with more than a double's bits, an infinity or a NaN, a
+denormal or a format a 387 doesn't take (an unnormal, a pseudo-zero),
+and a sum below or above the normal doubles, which a 387 keeps with its
+15 bits of exponent.
+
+The trampoline's `fpu_addsub` does both, case for case: its narrow part
+(`narrow_addsub`) as `narrow_sum`, its wide part as `F80::add` for
+normal and zero operands and results in a double's range, and the
+handlers the rest. So a register holds a double alone, or 80 bits, the
+same way on both cores. A register that holds a double alone keeps the
+stores, compares and conversions after it in translated code, where a
+sum on 80 bits leaves bits a double hasn't and sends them to the
+handlers. The routine checks the control word on every call, so one
 block serves threads that run with different control words.
 
 #### Fast mode
@@ -698,11 +712,17 @@ in real mode leaves it, loading it changes only its selector and base
 (`Uop::CsReal`, `LoadCsReal`; elsewhere the handler runs the instruction),
 and the block leaves for the target through the links a return takes.
 Loads of DS, ES, FS and GS in real mode (MOV, POP, LES, LDS, LFS, LGS)
-are translated the same way on both hosts, segments with a 4 GB limit
-("big real mode", as HIMEM leaves them) included but where the load
-would make the segment flat or not (base 0), and a load that would change
+are translated the same way on both hosts, and a load that would change
 more than the selector and base runs through its handler and stops the
-block after it.
+block after it. A segment with a 4 GB limit ("big real mode", as HIMEM
+leaves them) becomes flat when it is loaded with 0 and stops being flat
+when it is loaded with anything else, as Ultima VII's memory manager
+does around each copy to and from extended memory: where the block's
+environment has the segment big (`Gen::big_load`), the code notes in
+`JitCtx::flat` whether it is flat after the load, as `jit_load_seg`
+does, and the block goes on, checking the segment's accesses as a
+segment's that isn't flat and taking its links only where the segments
+are flat as they were (`check_flat`).
 INT and IRET, and far transfers in virtual-8086 and protected mode, run
 through their handlers and end their block, but where that leaves
 translated code nothing to check (`helpers::far_goes_on`: still in the

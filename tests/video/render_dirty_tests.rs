@@ -39,7 +39,7 @@ fn row_has_pixels(frame: &Frame, row: usize) -> bool {
 #[test]
 fn print_string_output_is_repainted() {
     let (mut cpu, mut frame) = rendered_shell("print_string");
-    cpu.bus.cursor_y = 3;
+    cpu.bus.set_console_cursor(0, 3);
     video::print_string(&mut cpu, "Bad command or file name.\r\nsecond line");
     video::render_screen(&mut frame, &cpu.bus);
     assert!(row_has_pixels(&frame, 3));
@@ -62,15 +62,14 @@ fn builtin_command_output_is_repainted() {
 #[test]
 fn print_char_and_scrolling_are_repainted() {
     let (mut cpu, mut frame) = rendered_shell("print_char");
-    cpu.bus.cursor_y = 10;
+    cpu.bus.set_console_cursor(0, 10);
     video::print_char(&mut cpu.bus, b'X');
     video::render_screen(&mut frame, &cpu.bus);
     assert!(row_has_pixels(&frame, 10));
 
     // Printing past the last row scrolls: everything moves up one row.
     cpu.bus.vga.clear_dirty();
-    cpu.bus.cursor_x = 0;
-    cpu.bus.cursor_y = 24;
+    cpu.bus.set_console_cursor(0, 24);
     video::print_string(&mut cpu, "bottom\r\n");
     video::render_screen(&mut frame, &cpu.bus);
     assert!(row_has_pixels(&frame, 9), "X should have scrolled to row 9");
@@ -332,7 +331,7 @@ fn indexed_dirty_rows_include_scaled_copies_and_skip_unchanged_sources() {
 fn text_dirty_rows_leave_the_rest_of_the_composed_picture_alone() {
     let (mut cpu, mut frame) = rendered_shell("text_rows");
     assert!(video::render_screen_rows(&mut frame, &cpu.bus).is_empty());
-    cpu.bus.cursor_y = 10;
+    cpu.bus.set_console_cursor(0, 10);
     video::print_char(&mut cpu.bus, b'X');
     let previous = frame.rgba.clone();
     let rows = video::render_screen_rows(&mut frame, &cpu.bus);

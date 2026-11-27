@@ -116,6 +116,43 @@ fn mode_info() {
     assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x102, 0), 0x014F);
 }
 
+/// Function 01h writes the whole 256-byte ModeInfoBlock, the fields past
+/// VBE 2.0's zeroed, as VBE 1.1 and later BIOSes do, and nothing after
+/// it. Function 00h writes 256 bytes for a VBE 1.x caller and 512 for
+/// one that asks for VBE 2.0.
+#[test]
+fn info_blocks_are_written_whole_and_no_further() {
+    let mut cpu = machine();
+    let fill = |cpu: &mut Cpu| {
+        for i in 0..0x300 {
+            cpu.bus.write_8(BUF + i, 0xAA);
+        }
+    };
+    // The last byte of the buffer that changed, if any did.
+    let changed = |cpu: &Cpu| {
+        (0..0x300)
+            .filter(|&i| cpu.bus.read_8(BUF + i) != 0xAA)
+            .max()
+    };
+    fill(&mut cpu);
+    assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x100, 0), 0x004F);
+    assert_eq!(changed(&cpu), Some(0xFF));
+    // Reserved from OffScreenMemSize's end (32h) on: zero.
+    assert!((0x32..0x100).all(|i| cpu.bus.read_8(BUF + i) == 0));
+
+    fill(&mut cpu);
+    assert_eq!(int10(&mut cpu, 0x4F00, 0, 0, 0), 0x004F);
+    assert_eq!(
+        changed(&cpu),
+        Some(0xFF),
+        "a VBE 1.x block, reserved part zeroed"
+    );
+
+    fill(&mut cpu);
+    controller_info(&mut cpu, true);
+    assert_eq!(changed(&cpu), Some(0x1FF), "VBE 2.0's, OemData zeroed");
+}
+
 /// 640x400 in truecolour, mode 213h as S3 cards such as Diamond's
 /// Stealth64 Video have it: the generic Super VGA lists and sets it, so
 /// programs that choose by size and colours (SDL3's DOS video) find it.

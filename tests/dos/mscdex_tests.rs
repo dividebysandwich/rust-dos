@@ -261,6 +261,109 @@ fn images_answer_the_volume_calls() {
     assert_eq!(cpu.bus.read_32(0x33000 + 10), 4, "file size");
 }
 
+/// MSCDEX 2.25 looks the drive up from CL alone: Ultimate Domain sends its
+/// device status request with CX=2E03h (#1796).
+#[test]
+fn the_drive_is_in_cl() {
+    let (mut cpu, _) = disc("cl");
+
+    // Device status through AX=1510h for D:, with garbage in CH.
+    for i in 0..16 {
+        cpu.bus.write_8(BUFFER + i, 0);
+    }
+    cpu.bus.write_8(BUFFER, 0x06);
+    for i in 0..0x1A {
+        cpu.bus.write_8(HEADER + i, 0);
+    }
+    cpu.bus.write_8(HEADER, 0x1A);
+    cpu.bus.write_8(HEADER + 1, 0xEE);
+    cpu.bus.write_8(HEADER + 2, 0x03);
+    cpu.bus.write_16(HEADER + 0x10, 0x3100);
+    cpu.bus.write_16(HEADER + 0x12, 5);
+    cpu.set_es(0x3000);
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    int2f(&mut cpu, 0x1510, 0, 0x2E03);
+    assert_eq!(cpu.bus.read_16(HEADER + 3), 0x0100, "done, no error");
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.bus.read_8(HEADER + 1), 0, "D: is subunit 0");
+    assert_eq!(cpu.bus.read_32(BUFFER + 1) & 0x0800, 0, "a disc is in");
+
+    // C: isn't a CD drive: the call fails and the header stays as it was.
+    cpu.bus.write_16(HEADER + 3, 0x1234);
+    int2f(&mut cpu, 0x1510, 0, 0x2E02);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.ax(), 15);
+    assert_eq!(cpu.bus.read_16(HEADER + 3), 0x1234);
+
+    int2f(&mut cpu, 0x150B, 0, 0xFF03);
+    assert_eq!(cpu.bx(), 0xADAD);
+    assert_ne!(cpu.ax(), 0);
+    int2f(&mut cpu, 0x150B, 0, 0x0302);
+    assert_eq!(cpu.ax(), 0, "C: is no CD drive");
+
+    cpu.set_es(0x3100);
+    cpu.set_dx(0);
+    int2f(&mut cpu, 0x1505, 0, 0x8003);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.ax(), 1);
+    cpu.set_si(0);
+    cpu.set_di(16);
+    cpu.set_dx(1);
+    int2f(&mut cpu, 0x1508, 0, 0x4103);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.bus.read_8(BUFFER + 5), b'1');
+
+    // The volume descriptor preference: for D:, and C: is no CD drive.
+    cpu.set_dx(0x1234);
+    int2f(&mut cpu, 0x150E, 0, 0x7703);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.dx(), 0x0100, "the primary descriptor");
+    int2f(&mut cpu, 0x150E, 0, 0x0302);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.ax(), 15);
+}
+
+/// MSCDEX 2.25's dispatcher clears CF before each of its functions, 00h
+/// to 10h, and fails the others with AX=1 (invalid function). Absolute
+/// write (1509h) is one it doesn't have.
+#[test]
+fn cf_and_the_functions_mscdex_lacks() {
+    let (mut cpu, _) = disc("dispatch");
+    cpu.set_es(0x3100);
+
+    // Functions that don't fail clear a CF the caller left set.
+    for (ax, cx) in [(0x1500, 0), (0x150A, 0), (0x150B, 3), (0x150C, 0)] {
+        cpu.set_cpu_flag(CpuFlags::CF, true);
+        int2f(&mut cpu, ax, 0, cx);
+        assert!(!cpu.get_cpu_flag(CpuFlags::CF), "AX={:04X}", ax);
+    }
+    assert_eq!(cpu.bx(), 0x0217, "150Ch ran");
+
+    for (ax, cx) in [(0x1509, 3), (0x1509, 2), (0x1511, 3), (0x15FF, 3)] {
+        cpu.set_cpu_flag(CpuFlags::CF, false);
+        int2f(&mut cpu, ax, 0, cx);
+        assert!(cpu.get_cpu_flag(CpuFlags::CF), "AX={:04X}", ax);
+        assert_eq!(cpu.ax(), 1, "AX={:04X}", ax);
+    }
+
+    // 150Eh sets the preference to the primary descriptor or the
+    // supplementary one in Shift-JIS, and fails anything else.
+    for dx in [0x0100, 0x0105, 0x0201] {
+        cpu.set_dx(dx);
+        int2f(&mut cpu, 0x150E, 1, 3);
+        assert!(!cpu.get_cpu_flag(CpuFlags::CF), "DX={:04X}", dx);
+        assert_eq!(cpu.dx(), dx);
+    }
+    cpu.set_dx(0x0202);
+    int2f(&mut cpu, 0x150E, 1, 3);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!((cpu.ax(), cpu.dx()), (1, 0));
+    cpu.set_dx(0x0100);
+    int2f(&mut cpu, 0x150E, 2, 3);
+    assert!(cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!((cpu.ax(), cpu.dx()), (1, 0x0100));
+}
+
 #[test]
 fn high_sierra_discs_answer_the_volume_calls() {
     let dir = cdimage::scratch("mscdex_high_sierra");
@@ -324,6 +427,80 @@ fn read_long_cooked_and_raw() {
     params.extend(le(100_000));
     params.push(0);
     assert_eq!(request(&mut cpu, 0x80, &params), 0x8108);
+}
+
+/// A CopyLok disc as Redump dumps it, mounted as D:. It has an ISO 9660
+/// file system whose volume descriptor carries the protection's mark,
+/// then a band of 8 sectors as redumper writes those a drive can't read
+/// (sync, header, and 55h for the rest), then 4 good sectors. Returns the
+/// first sector of the band.
+fn copylok_disc(name: &str) -> (Box<Cpu>, u32) {
+    let dir = cdimage::scratch(&format!("mscdex_{}", name));
+    fs::create_dir_all(dir.join("c")).unwrap();
+    let mut image = iso("TESTDISC", &[file("HELLO.TXT", b"hello")]);
+    // The early variant's mark: its first dword and the word after it in
+    // the application use field, at byte 883 of the descriptor.
+    let at = 16 * 2048 + 883;
+    image[at..at + 6].copy_from_slice(&[0xE1, 0x8A, 0xD3, 0x4E, 0xAD, 0xD1]);
+    let band = (image.len() / 2048) as u32;
+    image.extend(vec![0x77; 12 * 2048]);
+    let mut raw = cdimage::mode1_2352(&image);
+    for lba in band..band + 8 {
+        let at = lba as usize * 2352;
+        raw[at + 16..at + 2352].fill(0x55);
+    }
+    fs::write(dir.join("GAME.BIN"), raw).unwrap();
+    let cue = dir.join("GAME.CUE");
+    fs::write(
+        &cue,
+        "FILE \"GAME.BIN\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n",
+    )
+    .unwrap();
+    let mut cpu = Cpu::new(dir.join("c"));
+    cpu.bus
+        .mount_drive(3, &cue, MountOptions::default(), false)
+        .unwrap();
+    (cpu, band)
+}
+
+#[test]
+fn a_copylok_band_fails_to_read() {
+    let (mut cpu, band) = copylok_disc("copylok");
+    // Absolute read (1508h) of a sector of the band, and of 3 sectors
+    // that end in it: a data error.
+    cpu.set_es(0x3100);
+    cpu.set_bx(0);
+    for (first, count) in [(band + 3, 1), (band - 2, 3)] {
+        cpu.set_si((first >> 16) as u16);
+        cpu.set_di(first as u16);
+        cpu.set_dx(count);
+        int2f(&mut cpu, 0x1508, 0, 3);
+        assert!(cpu.get_cpu_flag(CpuFlags::CF), "sector {} on", first);
+        assert_eq!(cpu.ax(), 23, "data error, sector {} on", first);
+    }
+    // READ LONG through the device driver, cooked and raw: a CRC error.
+    for raw in [0, 1] {
+        let mut params = vec![0, 0x00, 0x00, 0x00, 0x31, 1, 0];
+        params.extend(le(band + 7));
+        params.push(raw);
+        assert_eq!(request(&mut cpu, 0x80, &params), 0x8104, "raw {}", raw);
+    }
+
+    // The sectors before and after the band read.
+    for lba in [band - 1, band + 8, band + 11] {
+        cpu.set_es(0x3100);
+        cpu.set_si(0);
+        cpu.set_di(lba as u16);
+        cpu.set_dx(1);
+        int2f(&mut cpu, 0x1508, 0, 3);
+        assert!(!cpu.get_cpu_flag(CpuFlags::CF), "sector {}", lba);
+        assert_eq!(read_raw(&mut cpu, lba, 1), 0x0100, "sector {}", lba);
+    }
+    assert_eq!(
+        cpu.bus.read_8(BUFFER + 16),
+        0x77,
+        "the sector after the band, raw"
+    );
 }
 
 /// Seek (83h) to sector `lba` in HSG addressing.

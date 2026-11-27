@@ -288,7 +288,6 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
             }
             0
         }
-        MCI_BREAK => 0,
         _ => MCIERR_UNSUPPORTED_FUNCTION,
     }
 }

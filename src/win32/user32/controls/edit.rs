@@ -6,7 +6,8 @@
 //! (notifications to the parent, SetFocus, SetScrollInfo) waits in a
 //! list, `Calls`, that the controls' task goes through when the work is
 //! done, so the program always sees the control whole. A change
-//! invalidates the window, and WM_PAINT draws all of it.
+//! invalidates the window, and WM_PAINT draws all of it but a
+//! multi-line edit's background, which WM_ERASEBKGND fills.
 //!
 //! The list box and the combo box use `Calls` and the start of the
 //! WM_PAINT task (`paint_head`) as well.
@@ -25,7 +26,7 @@ use super::super::sysparams::{
     self, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWFRAME,
     COLOR_WINDOWTEXT,
 };
-use super::super::window::{WS_BORDER, WS_DISABLED, WS_HSCROLL, WS_VSCROLL};
+use super::super::window::{WS_BORDER, WS_DISABLED, WS_HSCROLL, WS_VSCROLL, thread_expects_win3};
 use super::super::{
     State, address_of, bytes_at, copy_out, input, make_long, paint, point_of, read_words, user,
     write_words,
@@ -191,6 +192,16 @@ const EF_CREATED: u32 = 0x4000;
 pub(super) const K_CALLS: u32 = 0;
 pub(super) const K_PAINT: u32 = 1;
 const K_RETURN: u32 = 2;
+
+// What an edit's K_PAINT task does, in its first own variable (`P_OWN`):
+// WM_PAINT, WM_PRINTCLIENT, or a multi-line edit's WM_ERASEBKGND.
+const PAINT_PAINT: u32 = 0;
+const PAINT_PRINT: u32 = 1;
+const PAINT_ERASE: u32 = 2;
+
+// ExtTextOut's options.
+const ETO_OPAQUE: u32 = 2;
+const ETO_CLIPPED: u32 = 4;
 
 /// The scratch space of a task that writes structures for the calls it
 /// makes: a PAINTSTRUCT, then room for the others.
@@ -2059,6 +2070,18 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             c.redraw = true;
             0
         }
+        // A multi-line edit erases its background here and its WM_PAINT
+        // draws only its border and its lines, as Windows 98's USER.EXE
+        // does (its multi-line procedure fills the window with the
+        // WM_CTLCOLOR brush in WM_ERASEBKGND). A program that draws on
+        // the control between the erase and the WM_PAINT keeps what it
+        // drew below the text: Memphis Math draws an objective's sample
+        // on an empty edit control that way. A single-line edit draws
+        // all of itself in WM_PAINT, as on Windows.
+        WM_ERASEBKGND if c.e.ml() && wp != 0 => {
+            let (ctl, to) = ctl_color(cpu, &c);
+            return paint_start(cpu, EDIT, hwnd, wp, ctl, to, &[PAINT_ERASE]);
+        }
         WM_ERASEBKGND => return Some(1),
         WM_GETFONT => return Some(c.e.font),
         WM_GETTEXT => {
@@ -2140,20 +2163,13 @@ pub fn edit_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             0
         }
         WM_PAINT | WM_PRINTCLIENT => {
-            let parent = user(cpu).window(hwnd).map_or(0, |w| w.parent);
-            let to = if parent == super::super::DESKTOP {
-                0
+            let (ctl, to) = ctl_color(cpu, &c);
+            let (hdc, mode) = if msg == WM_PAINT {
+                (wp, PAINT_PAINT)
             } else {
-                parent
+                (wp.max(1), PAINT_PRINT)
             };
-            let static_ = c.e.flags & EF_DISABLED != 0 || c.e.style & ES_READONLY != 0;
-            let ctl = if static_ {
-                WM_CTLCOLORSTATIC
-            } else {
-                WM_CTLCOLOREDIT
-            };
-            let hdc = if msg == WM_PAINT { wp } else { wp.max(1) };
-            return paint_start(cpu, EDIT, hwnd, hdc, ctl, to, &[]);
+            return paint_start(cpu, EDIT, hwnd, hdc, ctl, to, &[mode]);
         }
         WM_SETFOCUS => {
             c.e.flags |= EF_FOCUSED;
@@ -2637,14 +2653,54 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         return next;
     }
     if t.step == 3 {
-        draw(cpu, t.var(P_HWND), t.var(P_HDC), t.var(P_BRUSH));
+        let (hwnd, hdc, brush) = (t.var(P_HWND), t.var(P_HDC), t.var(P_BRUSH));
+        let mode = t.var(P_OWN);
+        if mode == PAINT_ERASE {
+            let client = client_of(user(cpu), hwnd);
+            let brush = default_brush(cpu, hdc, brush, COLOR_WINDOW);
+            paint::fill(cpu, hdc, client, brush);
+            return Next::Done(1);
+        }
+        draw(cpu, hwnd, hdc, brush, mode == PAINT_PRINT);
         return paint_end(cpu, t, 4);
     }
     Next::Done(0)
 }
 
+/// The WM_CTLCOLOR* message an edit's painting sends and the window it
+/// goes to (0 for a control on the desktop, which takes
+/// DefWindowProcA's). A read-only or disabled edit asks for
+/// WM_CTLCOLORSTATIC, but only in a program made for Windows 4.0 or
+/// later: Windows 98's USER.EXE sends a program made for an older
+/// version CTLCOLOR_EDIT for every edit, in WM_ERASEBKGND and WM_PAINT
+/// alike, as Windows 3.1 did.
+fn ctl_color(cpu: &mut Cpu, c: &Ctx) -> (u32, u32) {
+    let parent = user(cpu).window(c.hwnd).map_or(0, |w| w.parent);
+    let to = if parent == super::super::DESKTOP {
+        0
+    } else {
+        parent
+    };
+    let static_ = (c.e.flags & EF_DISABLED != 0 || c.e.style & ES_READONLY != 0)
+        && !thread_expects_win3(cpu, c.hwnd);
+    let ctl = if static_ {
+        WM_CTLCOLORSTATIC
+    } else {
+        WM_CTLCOLOREDIT
+    };
+    (ctl, to)
+}
+
 /// Draw the edit `hwnd` on `hdc` with `brush`, as EDIT_WM_Paint does.
-fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32, brush: u32) {
+/// A single-line edit fills all of itself with the brush, and so does
+/// WM_PRINTCLIENT (`print`), which gets no WM_ERASEBKGND before it. A
+/// multi-line edit's WM_PAINT leaves the background to WM_ERASEBKGND:
+/// it fills only the band of each line it draws, from the formatting
+/// rectangle's left to its right, in the DC's background color when the
+/// background mode is OPAQUE. That is what Windows 98's MLDrawText does:
+/// each line ends with an ExtTextOut, ETO_OPAQUE in OPAQUE mode, of the
+/// rest of the line out to the right edge, an empty line included.
+fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32, brush: u32, print: bool) {
     let state = user(cpu);
     let Some(w) = state.window(hwnd) else {
         return;
@@ -2652,6 +2708,7 @@ fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32, brush: u32) {
     let e = w.control.edit.clone();
     let client = client_of(state, hwnd);
     let brush = default_brush(cpu, hdc, brush, COLOR_WINDOW);
+    let fill_all = !e.ml() || print;
     let enabled = e.flags & EF_DISABLED == 0;
     let rev = enabled && (e.flags & EF_FOCUSED != 0 || e.style & ES_NOHIDESEL != 0);
     dc::save_dc(cpu, &[hdc]);
@@ -2700,12 +2757,20 @@ fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32, brush: u32) {
         );
         clip(cpu, hdc, inner);
     }
-    paint::fill(cpu, hdc, inner, brush);
+    if fill_all {
+        paint::fill(cpu, hdc, inner, brush);
+    }
     clip(cpu, hdc, e.format);
     select_font(cpu, hdc, e.font);
-    if !enabled {
+    // A disabled edit's text is gray, unless that is the background's
+    // color, as Windows 98's USER.EXE paints it. A multi-line edit of a
+    // program made for a Windows before 4.0 keeps the WM_CTLCOLOR text
+    // color there.
+    if !enabled && (!e.ml() || !thread_expects_win3(cpu, hwnd)) {
         let gray = user(cpu).color(COLOR_GRAYTEXT);
-        dc::set_text_color(cpu, &[hdc, gray]);
+        if dc::get_bk_color(cpu, &[hdc]) != Some(gray) {
+            dc::set_text_color(cpu, &[hdc, gray]);
+        }
     }
     let lines = e.lines();
     let (first, last) = if e.ml() {
@@ -2719,6 +2784,11 @@ fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32, brush: u32) {
     for l in first.max(0)..=last {
         let line = lines[l as usize];
         let (x, y) = e.pos_from_char(&lines, line.index as i32, false);
+        if !fill_all && dc::get_bk_mode(cpu, &[hdc]) == Some(dc::OPAQUE) {
+            let band = Rect::new(e.format.left, y, e.format.right, y + e.line_height());
+            let opaque = ETO_OPAQUE | ETO_CLIPPED;
+            font::draw_text(cpu, hdc, (band.left, y), opaque, Some(band), b"", None);
+        }
         let li = line.index;
         let end = li + line.net;
         let s = (s as usize).clamp(li, end);

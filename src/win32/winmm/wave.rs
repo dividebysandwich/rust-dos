@@ -22,6 +22,7 @@ use super::callback::{self, Callback};
 use crate::cpu::Cpu;
 use crate::timer::PIT_HZ;
 use crate::win32::dsound::device::{self, Format, Reader, WAVE_FORMAT_PCM};
+use crate::win32::msacm32::adpcm;
 
 /// MMSYSERR_ and WAVERR_ results.
 pub use super::{
@@ -285,7 +286,7 @@ fn done(cpu: &mut Cpu, i: usize, header: u32) {
         header + HDR_FLAGS,
         flags & !WHDR_INQUEUE | WHDR_DONE,
     );
-    let header = crate::win16::wave_header16(cpu, pid, header);
+    let header = crate::win16::header16(cpu, pid, header);
     callback::notify(cpu, &cb, handle, WOM_DONE, instance, header, 0);
 }
 
@@ -600,7 +601,7 @@ pub fn wave_out_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // A 16-bit program's header keeps its 16:16 pointer to the data.
     let pid = wave(cpu).outs[i].pid;
     let data = cpu.bus.guest_read_32(header + HDR_DATA);
-    let data = crate::win16::wave_data(cpu, pid, header, data);
+    let data = crate::win16::header_data(cpu, pid, header, data);
     let length = cpu.bus.guest_read_32(header + HDR_LENGTH);
     let loops = cpu.bus.guest_read_32(header + HDR_LOOPS);
     // The device reads the block as it plays, without a page fault, as
@@ -965,8 +966,21 @@ const SYSTEM_SOUNDS: &[&str] = &[
 ];
 
 /// The format and samples of a WAV file's data: its RIFF chunks "fmt "
-/// and "data". None if it isn't one the device plays.
+/// and "data". None if it isn't one the device plays. MS ADPCM and IMA
+/// ADPCM come back decoded to 16-bit PCM, as Windows plays them: MCIWAVE
+/// and PlaySound open the wave mapper with the file's format, and the
+/// mapper converts it through ACM's codecs (msacm32/adpcm.rs).
 pub fn parse_wav(bytes: &[u8]) -> Option<(Format, Vec<u8>)> {
+    read_wav(bytes).map(|(format, data, _)| (format, data))
+}
+
+/// A WAV file's own format when its samples were decoded: its fields,
+/// nAvgBytesPerSec and nBlockAlign. MCIWAVE answers status and counts
+/// bytes in the file's format, not the one it plays.
+pub type FileFormat = (Format, u32, u16);
+
+/// `parse_wav`, and the file's own format if the samples were decoded.
+pub fn read_wav(bytes: &[u8]) -> Option<(Format, Vec<u8>, Option<FileFormat>)> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return None;
     }
@@ -978,10 +992,24 @@ pub fn parse_wav(bytes: &[u8]) -> Option<(Format, Vec<u8>)> {
         let body = bytes.get(at + 8..(at + 8).saturating_add(size).min(bytes.len()))?;
         if id == b"fmt " && body.len() >= 16 {
             let (f, align) = Format::from_bytes(body[..16].try_into().ok()?);
-            check_format(&f, align).ok()?;
-            format = Some(f);
+            format = Some(match adpcm::Format::from_wave_format(body) {
+                Some((adpcm, rate)) => {
+                    let pcm = Format::pcm(rate, 16, adpcm.channels);
+                    check_format(&pcm, pcm.block() as u16).ok()?;
+                    let avg = u32::from_le_bytes(body[8..12].try_into().ok()?);
+                    (pcm, Some((adpcm, (f, avg, align))))
+                }
+                None => {
+                    check_format(&f, align).ok()?;
+                    (f, None)
+                }
+            });
         } else if id == b"data" {
-            return Some((format?, body.to_vec()));
+            let (f, decoded) = format?;
+            return Some(match decoded {
+                Some((adpcm, file)) => (f, adpcm.to_pcm(body), Some(file)),
+                None => (f, body.to_vec(), None),
+            });
         }
         at += 8 + size + (size & 1);
     }
@@ -1219,4 +1247,72 @@ crate::state_fields!(Wave {
 /// PlaySoundW and sndPlaySoundW: Windows 95 has them as stubs that fail.
 pub fn play_sound_w(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A RIFF WAVE file of the format chunk `fmt` and the samples `data`.
+    fn wav_file(fmt: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut chunks = Vec::new();
+        for (id, body) in [(b"fmt ", fmt), (b"data", data)] {
+            chunks.extend_from_slice(id);
+            chunks.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            chunks.extend_from_slice(body);
+            if body.len() % 2 == 1 {
+                chunks.push(0);
+            }
+        }
+        [b"RIFF".as_slice(), &(4 + chunks.len() as u32).to_le_bytes(), b"WAVE", &chunks].concat()
+    }
+
+    /// Encarta 97's sounds are MS ADPCM WAVs (#1991), which Windows plays
+    /// through the wave mapper and msadp32.acm: they come back as 16-bit
+    /// PCM of their rate and channels.
+    #[test]
+    fn ms_adpcm_wav_reads_as_16_bit_pcm() {
+        // Mono MS ADPCM in blocks of 16 bytes: a 7-byte header and 9
+        // bytes of codes, 2 + 18 samples.
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&adpcm::MS_ADPCM.to_le_bytes());
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&22050u32.to_le_bytes());
+        fmt.extend_from_slice(&22050u32.to_le_bytes());
+        for v in [16u16, 4, 32, 20, 7] {
+            fmt.extend_from_slice(&v.to_le_bytes());
+        }
+        for (a, b) in adpcm::tests::MS_COEFFICIENTS {
+            fmt.extend_from_slice(&a.to_le_bytes());
+            fmt.extend_from_slice(&b.to_le_bytes());
+        }
+        // Predictor 0, delta 16, then the samples 1000 and 500, which
+        // play in the other order, and codes of 0.
+        let mut block = vec![0, 16, 0];
+        block.extend_from_slice(&1000i16.to_le_bytes());
+        block.extend_from_slice(&500i16.to_le_bytes());
+        block.extend_from_slice(&[0; 9]);
+        let (format, pcm) = parse_wav(&wav_file(&fmt, &[block.clone(), block].concat())).unwrap();
+        let f = (format.tag, format.rate, format.bits, format.channels);
+        assert_eq!(f, (WAVE_FORMAT_PCM, 22050, 16, 1));
+        assert_eq!(pcm.len(), 2 * 20 * 2);
+        let sample = |i: usize| i16::from_le_bytes([pcm[i * 2], pcm[i * 2 + 1]]);
+        assert_eq!((sample(0), sample(1), sample(20), sample(21)), (500, 1000, 500, 1000));
+    }
+
+    /// A format the codecs don't decode, such as 3-bit ADPCM, isn't one
+    /// the device plays.
+    #[test]
+    fn adpcm_wav_the_codecs_do_not_take_is_refused() {
+        let mut fmt = Vec::new();
+        for v in [adpcm::IMA_ADPCM, 1] {
+            fmt.extend_from_slice(&v.to_le_bytes());
+        }
+        fmt.extend_from_slice(&22050u32.to_le_bytes());
+        fmt.extend_from_slice(&11025u32.to_le_bytes());
+        for v in [256u16, 3, 2, 505] {
+            fmt.extend_from_slice(&v.to_le_bytes());
+        }
+        assert!(parse_wav(&wav_file(&fmt, &[0; 256])).is_none());
+    }
 }

@@ -1493,6 +1493,108 @@ fn a_modeless_property_sheet_shows_its_page() {
     assert_eq!(r[10], 1);
 }
 
+/// A wizard of no pages keeps its dialog template's size, with Cancel
+/// inside it: Outlaw Racers' installer (Setup Factory, MFC) shows its
+/// copy progress on one, and it was a sliver 6 pixels wide.
+#[test]
+fn a_wizard_with_no_pages_keeps_its_size() {
+    use Arg::*;
+    const PSH_PROPSHEETPAGE: u32 = 0x0008;
+    const PSH_WIZARD: u32 = 0x0020;
+    const PSH_MODELESS: u32 = 0x0400;
+    const IDCANCEL: u32 = 2;
+    const HEADER: u32 = FREE;
+    const SHEET: u32 = FREE + 0x40;
+    const CANCEL: u32 = FREE + 0x50;
+    const CAPTION: u32 = FREE + 0x60;
+    let calls = [
+        call("InitCommonControls", &[]),
+        call("PropertySheetA", &[At(HEADER)]),
+        call("GetWindowRect", &[Res(1), At(SHEET)]),
+        call("GetDlgItem", &[Res(1), I(IDCANCEL)]),
+        call("GetWindowRect", &[Res(3), At(CANCEL)]),
+        call("DestroyWindow", &[Res(1)]),
+    ];
+    let base = data_address(&calls);
+    let mut d = data();
+    put(&mut d, CAPTION, b"Setup Wizard\0");
+    let flags = PSH_WIZARD | PSH_PROPSHEETPAGE | PSH_MODELESS;
+    let header = [40, flags, 0, 0, 0, base + CAPTION, 0, 0, 0, 0];
+    for (i, w) in header.iter().enumerate() {
+        put32(&mut d, HEADER + 4 * i as u32, *w);
+    }
+    let (cpu, at) = run("propsheet_no_pages", &d, &calls);
+    assert_eq!(at, base);
+    let r = results(&cpu, at, calls.len());
+    assert!(r[1] != 0 && r[1] != u32::MAX, "the sheet is made");
+    let rect = |at: u32| -> Vec<i32> { (0..4).map(|i| peek(&cpu, at + 4 * i) as i32).collect() };
+    let (sheet, cancel) = (rect(base + SHEET), rect(base + CANCEL));
+    assert!(sheet[2] - sheet[0] > 200, "the sheet is wide: {sheet:?}");
+    assert!(sheet[3] - sheet[1] > 100, "and high: {sheet:?}");
+    assert!(
+        cancel[0] > sheet[0] && cancel[2] < sheet[2] && cancel[3] < sheet[3],
+        "Cancel {cancel:?} is inside the sheet {sheet:?}"
+    );
+}
+
+/// A page added to a wizard of no pages (PSM_ADDPAGE, which doesn't
+/// resize the sheet) goes in the area above the wizard's line, which
+/// its template's size leaves for it.
+#[test]
+fn a_page_added_to_a_wizard_of_no_pages_goes_above_its_line() {
+    use Arg::*;
+    const PSP_DLGINDIRECT: u32 = 0x0001;
+    const PSH_PROPSHEETPAGE: u32 = 0x0008;
+    const PSH_WIZARD: u32 = 0x0020;
+    const PSH_MODELESS: u32 = 0x0400;
+    const PSM_ADDPAGE: u32 = 0x0467;
+    const PSM_GETCURRENTPAGEHWND: u32 = 0x0476;
+    const IDC_SUNKEN_LINE: u32 = 12326;
+    const HEADER: u32 = FREE;
+    const PAGE: u32 = FREE + 0x40;
+    const TEMPLATE: u32 = FREE + 0x80;
+    const CAPTION: u32 = FREE + 0xC0;
+    const PAGE_RECT: u32 = FREE + 0xE0;
+    const LINE_RECT: u32 = FREE + 0xF0;
+    let calls = [
+        call("InitCommonControls", &[]),
+        call("PropertySheetA", &[At(HEADER)]),
+        call("CreatePropertySheetPageA", &[At(PAGE)]),
+        send(1, PSM_ADDPAGE, I(0), Res(2)),
+        send(1, PSM_GETCURRENTPAGEHWND, I(0), I(0)),
+        call("GetWindowRect", &[Res(4), At(PAGE_RECT)]),
+        call("GetDlgItem", &[Res(1), I(IDC_SUNKEN_LINE)]),
+        call("GetWindowRect", &[Res(6), At(LINE_RECT)]),
+        call("DestroyWindow", &[Res(1)]),
+    ];
+    let base = data_address(&calls);
+    let mut d = data();
+    // A DLGTEMPLATE of a page with no controls, titled "Pg".
+    put32(&mut d, TEMPLATE, WS_CHILD);
+    put(&mut d, TEMPLATE + 8, &[0, 0, 0, 0, 0, 0, 100, 0, 50, 0]);
+    put(&mut d, TEMPLATE + 22, &[b'P', 0, b'g', 0, 0, 0]);
+    put(&mut d, CAPTION, b"Setup Wizard\0");
+    let page = [40, PSP_DLGINDIRECT, 0, base + TEMPLATE, 0, 0, 0, 0, 0, 0];
+    let flags = PSH_WIZARD | PSH_PROPSHEETPAGE | PSH_MODELESS;
+    let header = [40, flags, 0, 0, 0, base + CAPTION, 0, 0, 0, 0];
+    for (at, words) in [(PAGE, page), (HEADER, header)] {
+        for (i, w) in words.iter().enumerate() {
+            put32(&mut d, at + 4 * i as u32, *w);
+        }
+    }
+    let (cpu, at) = run("propsheet_add_to_empty", &d, &calls);
+    assert_eq!(at, base);
+    let r = results(&cpu, at, calls.len());
+    assert!(r[1] != 0 && r[1] != u32::MAX, "the sheet is made");
+    assert_eq!(r[3], 1, "the page is added");
+    assert_ne!(r[4], 0, "and made");
+    let rect = |at: u32| -> Vec<i32> { (0..4).map(|i| peek(&cpu, at + 4 * i) as i32).collect() };
+    let (page, line) = (rect(base + PAGE_RECT), rect(base + LINE_RECT));
+    assert!(page[2] - page[0] > 200, "the page is wide: {page:?}");
+    assert!(page[3] - page[1] > 100, "and high: {page:?}");
+    assert!(page[3] <= line[1], "above the line {line:?}: {page:?}");
+}
+
 /// MFC lays out its property pages in the font of COMCTL32's own sheet
 /// and wizard dialogs, which it reads from their resources
 /// (AfxGetPropSheetFont): Beasts and Bumpkins' setup came out with pages
@@ -1958,6 +2060,53 @@ fn a_popup_that_saves_bits_gives_them_back_as_it_hides() {
             assert_ne!(r[9], 0, "the window under it paints what it uncovered");
         }
     }
+}
+
+/// A program's first window that saves bits (a message box of a program
+/// with no window of its own) shows over the desktop's background,
+/// which Windows 98 painted as it started, and gives it back as it
+/// hides. Sub Culture's 1.16 patch shows its message boxes so.
+#[test]
+fn the_first_popup_that_saves_bits_gives_back_the_desktop() {
+    use Arg::*;
+    const S_DIALOG: u32 = 0x280;
+    const WS_POPUP: u32 = 0x8000_0000;
+    const SW_HIDE: u32 = 0;
+    let calls = [
+        call(
+            "CreateWindowExA",
+            &[
+                I(0),
+                At(S_DIALOG),
+                I(0),
+                I(WS_POPUP | WS_VISIBLE),
+                I(20),
+                I(20),
+                I(100),
+                I(80),
+                I(0),
+                I(0),
+                I(0),
+                I(0),
+            ],
+        ),
+        call("UpdateWindow", &[Res(0)]),
+        call("GetDC", &[I(0)]),
+        call("GetPixel", &[Res(2), I(300), I(300)]),
+        call("GetPixel", &[Res(2), I(50), I(50)]),
+        call("ShowWindow", &[Res(0), I(SW_HIDE)]),
+        call("GetPixel", &[Res(2), I(50), I(50)]),
+    ];
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, S_DIALOG, b"#32770\0");
+    let (cpu, at) = run("save_bits_first", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[0], 0, "the popup is made");
+    assert_ne!(r[3], 0, "the desktop isn't black");
+    assert_ne!(r[4], r[3], "the popup covers it");
+    assert_ne!(r[5], 0, "the popup was visible");
+    assert_eq!(r[6], r[3], "the desktop shows again where it was");
 }
 
 /// A popup of a class with CS_SAVEBITS gives back only what didn't

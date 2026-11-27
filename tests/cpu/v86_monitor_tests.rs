@@ -373,6 +373,71 @@ fn an_irq_at_moved_vectors_reaches_the_bios_vector() {
     assert_eq!(cpu.bus.read_8(0x20010), 1, "INT 0Bh's handler ran once");
 }
 
+/// Freed VCPI pages go back to the memory EMS and XMS allocate from:
+/// Phar Lap's 286|DOS-Extender allocates the pages there are and frees
+/// most of them as it starts (Ultima VIII).
+#[test]
+fn freed_vcpi_pages_go_back_to_the_pool() {
+    let mut cpu = machine(true);
+    run(&mut cpu, |a| {
+        // The free EMS pages before, after five VCPI pages (two 16 KB
+        // pages) and after freeing them.
+        a.mov(ah, 0x42)?;
+        a.int(0x67)?;
+        a.mov(word_ptr(0), bx)?;
+        a.mov(si, 0x10)?;
+        a.mov(cx, 5)?;
+        let mut more = a.create_label();
+        a.set_label(&mut more)?;
+        a.mov(ax, 0xDE04)?;
+        a.int(0x67)?;
+        a.mov(dword_ptr(si), edx)?;
+        a.add(si, 4)?;
+        a.loop_(more)?;
+        a.mov(ah, 0x42)?;
+        a.int(0x67)?;
+        a.mov(word_ptr(2), bx)?;
+        // Free them last first: after four, the second 16 KB page is
+        // back and the first still holds one page in use.
+        a.mov(si, 0x20)?;
+        a.mov(cx, 5)?;
+        let mut free = a.create_label();
+        a.set_label(&mut free)?;
+        a.mov(edx, dword_ptr(si))?;
+        a.mov(ax, 0xDE05)?;
+        a.int(0x67)?;
+        a.sub(si, 4)?;
+        a.cmp(cx, 2)?;
+        let mut on = a.create_label();
+        a.jne(on)?;
+        a.mov(ah, 0x42)?;
+        a.int(0x67)?;
+        a.mov(word_ptr(6), bx)?;
+        a.mov(ax, 0xDE03)?;
+        a.int(0x67)?;
+        a.mov(dword_ptr(12), edx)?;
+        a.set_label(&mut on)?;
+        a.loop_(free)?;
+        a.mov(ah, 0x42)?;
+        a.int(0x67)?;
+        a.mov(word_ptr(4), bx)?;
+        a.mov(ax, 0xDE03)?;
+        a.int(0x67)?;
+        a.mov(dword_ptr(8), edx)?;
+        a.hlt()
+    });
+    let (before, taken, freed) = (read16(&cpu, 0), read16(&cpu, 2), read16(&cpu, 4));
+    assert_eq!(taken, before - 2);
+    assert_eq!(read16(&cpu, 6), before - 1, "one 16 KB page still in use");
+    assert_eq!(
+        read32(&cpu, 12),
+        (before as u32 - 1) * 4 + 3,
+        "DE03h counts the pool and the three spare pages of the one in use"
+    );
+    assert_eq!(freed, before, "the 16 KB pages are back in the pool");
+    assert_eq!(read32(&cpu, 8), before as u32 * 4, "and DE03h counts them once");
+}
+
 /// In real mode (EMS off, or a state saved before the monitor), VCPI
 /// isn't there.
 #[test]
@@ -398,4 +463,131 @@ fn ems_at_the_prompt_switches_the_mode() {
     assert!(!cpu.pe());
     cpu.set_upper_memory(true, true).unwrap();
     assert!(cpu.v86());
+}
+
+/// Windows' 386 enhanced mode startup broadcast (INT 2Fh AX=1605h, DX 0,
+/// DI 030Bh) as HWiNFO for DOS sends it, finding SMSW's PE set: under the
+/// monitor CX stays 0 and DS:SI points at the switch EMM386 hands out,
+/// which AX=0000h turns to real mode and AX=0001h back to virtual-8086
+/// mode, CF clear each time. The registers come back.
+#[test]
+fn windows_init_broadcast_gets_the_switch_to_real_mode() {
+    let mut cpu = machine(true);
+    run(&mut cpu, |a| {
+        a.push(ds)?;
+        a.mov(ax, 0x1605)?;
+        a.xor(bx, bx)?;
+        a.xor(cx, cx)?;
+        a.mov(ds, bx)?;
+        a.mov(es, bx)?;
+        a.xor(dx, dx)?;
+        a.xor(si, si)?;
+        a.mov(di, 0x030B)?;
+        a.int(0x2F)?;
+        a.mov(ax, ds)?;
+        a.pop(ds)?;
+        a.mov(word_ptr(0), cx)?;
+        a.mov(word_ptr(2), si)?;
+        a.mov(word_ptr(4), ax)?;
+        // Off: real mode.
+        a.cli()?;
+        a.mov(ebp, 0x1234_5678)?;
+        a.xor(ax, ax)?;
+        a.call(dword_ptr(2))?;
+        a.setc(byte_ptr(6))?;
+        a.smsw(word_ptr(8))?;
+        a.mov(dword_ptr(0x18), ebp)?;
+        // And on again.
+        a.mov(ax, 1)?;
+        a.call(dword_ptr(2))?;
+        a.setc(byte_ptr(10))?;
+        a.smsw(word_ptr(12))?;
+        a.mov(ax, 0x1606)?;
+        a.xor(dx, dx)?;
+        a.int(0x2F)?;
+        a.hlt()
+    });
+    assert_ne!(cpu.state, CpuState::RebootShell);
+    assert_eq!(read16(&cpu, 0), 0, "CX 0: Windows may start");
+    assert_eq!(read32(&cpu, 2), 0xF000_4050, "DS:SI points at the switch");
+    assert_eq!(cpu.bus.read_8(0x20006), 0, "AX=0000h: CF clear");
+    assert_eq!(read16(&cpu, 8) & 1, 0, "real mode: PE clear");
+    assert_eq!(read32(&cpu, 0x18), 0x1234_5678, "EBP as it was");
+    assert_eq!(cpu.bus.read_8(0x2000A), 0, "AX=0001h: CF clear");
+    assert_eq!(read16(&cpu, 12) & 1, 1, "virtual-8086 mode: PE set");
+    assert!(cpu.v86(), "under the monitor again");
+}
+
+/// Without EMS DOS runs in real mode with no memory manager, and the
+/// broadcast leaves DS:SI 0000h:0000h, as plain DOS does.
+#[test]
+fn windows_init_broadcast_gets_no_switch_without_ems() {
+    let mut cpu = machine(false);
+    run(&mut cpu, |a| {
+        a.push(ds)?;
+        a.mov(ax, 0x1605)?;
+        a.xor(bx, bx)?;
+        a.xor(cx, cx)?;
+        a.mov(ds, bx)?;
+        a.mov(es, bx)?;
+        a.xor(dx, dx)?;
+        a.xor(si, si)?;
+        a.mov(di, 0x030B)?;
+        a.int(0x2F)?;
+        a.mov(ax, ds)?;
+        a.pop(ds)?;
+        a.mov(word_ptr(0), si)?;
+        a.mov(word_ptr(2), ax)?;
+        a.mov(word_ptr(4), cx)?;
+        a.hlt()
+    });
+    assert_eq!(read32(&cpu, 0), 0, "DS:SI stays 0000h:0000h");
+    assert_eq!(read16(&cpu, 4), 0);
+}
+
+/// Under the monitor, Windows' standard mode (DX bit 0 set) gets no
+/// switch, and neither does a broadcast whose DS:SI a handler further
+/// down the chain set. The switch, which is in the ROM from DOS's start,
+/// sets CF for an AX it doesn't know and leaves the mode as it is.
+#[test]
+fn windows_init_broadcast_switch_only_for_enhanced_mode() {
+    let mut cpu = machine(true);
+    run(&mut cpu, |a| {
+        a.push(ds)?;
+        a.xor(bx, bx)?;
+        a.mov(es, bx)?;
+        // Standard mode.
+        a.mov(ax, 0x1605)?;
+        a.mov(ds, bx)?;
+        a.xor(si, si)?;
+        a.mov(dx, 1)?;
+        a.int(0x2F)?;
+        a.mov(bp, ds)?;
+        a.pop(ds)?;
+        a.mov(word_ptr(0), si)?;
+        a.mov(word_ptr(2), bp)?;
+        // DS:SI already set.
+        a.push(ds)?;
+        a.mov(ax, 0x1605)?;
+        a.mov(si, 0x1234)?;
+        a.xor(dx, dx)?;
+        a.int(0x2F)?;
+        a.mov(bp, ds)?;
+        a.pop(ds)?;
+        a.mov(word_ptr(4), si)?;
+        a.mov(word_ptr(6), bp)?;
+        // A function the switch doesn't know.
+        a.cli()?;
+        a.mov(word_ptr(8), 0x4050)?;
+        a.mov(word_ptr(10), 0xF000)?;
+        a.mov(ax, 2)?;
+        a.call(dword_ptr(8))?;
+        a.setc(byte_ptr(12))?;
+        a.hlt()
+    });
+    assert_eq!(read32(&cpu, 0), 0, "standard mode: DS:SI stays 0000h:0000h");
+    assert_eq!(read16(&cpu, 4), 0x1234, "SI as the chain set it");
+    assert_eq!(read16(&cpu, 6), 0x2000, "DS as the chain set it");
+    assert_eq!(cpu.bus.read_8(0x2000C), 1, "AX=0002h: CF set");
+    assert!(cpu.v86(), "still under the monitor");
 }

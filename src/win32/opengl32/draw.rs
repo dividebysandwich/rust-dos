@@ -21,21 +21,22 @@
 //! ones of the side it shows (`back_faces`).
 
 use super::super::ddraw::d3d::device::{
-    self as inner_device, RS_ALPHAFUNC, RS_BLENDOP, RS_CLIPPING, RS_COLORWRITEENABLE, RS_CULLMODE,
-    RS_DESTBLEND, RS_FILLMODE, RS_FOGDENSITY, RS_FOGENABLE, RS_FOGEND, RS_FOGSTART,
-    RS_FOGTABLEMODE, RS_FOGVERTEXMODE, RS_LIGHTING, RS_SHADEMODE, RS_SPECULARENABLE, RS_SRCBLEND,
-    RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_CURRENT, TA_DIFFUSE, TA_TEXTURE, TOP_ADD,
-    TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU,
-    TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2,
-    TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER, TSS_TEXCOORDINDEX,
+    self as inner_device, RS_ALPHAFUNC, RS_BLENDOP, RS_CLIPPING, RS_CLIPPLANEENABLE,
+    RS_COLORWRITEENABLE, RS_CULLMODE, RS_DESTBLEND, RS_FILLMODE, RS_FOGDENSITY, RS_FOGENABLE,
+    RS_FOGEND, RS_FOGSTART, RS_FOGTABLEMODE, RS_FOGVERTEXMODE, RS_LIGHTING, RS_SHADEMODE,
+    RS_SPECULARENABLE, RS_SRCBLEND, RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_CURRENT, TA_DIFFUSE,
+    TA_TEXTURE, TOP_ADD, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1,
+    TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP,
+    TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER,
+    TSS_TEXCOORDINDEX,
 };
 use super::super::ddraw::d3d::hal::{
     RS_ALPHABLENDENABLE, RS_ALPHAREF, RS_ALPHATESTENABLE, RS_COLORKEYENABLE, RS_DITHERENABLE,
     RS_FOGCOLOR,
 };
 use super::super::ddraw::d3d::pipeline::{
-    self, CULL_CCW, CULL_CW, FVF_DIFFUSE, FVF_NORMAL, FVF_XYZ, IDENTITY, Layout, Matrix, Prim,
-    Vertex,
+    self, CULL_CCW, CULL_CW, FVF_DIFFUSE, FVF_NORMAL, FVF_SPECULAR, FVF_XYZ, FVF_XYZRHW, IDENTITY,
+    Layout, Matrix, Prim, Vertex,
 };
 use super::super::ddraw::d3d::{draw as d3d_draw, hal, states};
 use super::light::Lighting;
@@ -44,6 +45,7 @@ use super::shade::{self, Input};
 use super::state::{
     GL_BACK, GL_CW, GL_EXP, GL_EXP2, GL_FLAT, GL_FRONT_AND_BACK, GL_LINE, GL_POINT,
 };
+use super::texgen::{self, TEXGEN_SAVED};
 use super::texture::{self, GL_ADD, GL_CLAMP, GL_DECAL, GL_LINEAR, GL_REPLACE};
 use super::tnl::{self, Why};
 use super::{
@@ -53,6 +55,7 @@ use super::{
     UNITS, ctx, current, error, signed_unit, state,
 };
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 
 // Primitives.
 const GL_POINTS: u32 = 0;
@@ -183,6 +186,19 @@ impl<'a> Lit<'a> {
         };
         shade::shade(self.lighting, &input).map(argb)
     }
+}
+
+/// The front color of a vertex of the context `c` at `position` in
+/// object coordinates with the normal `normal` and the current color
+/// `color`, lit as a vertex of a draw is: None with GL_LIGHTING off.
+pub(super) fn lit_color(
+    c: &Context,
+    position: [f32; 4],
+    normal: [f32; 3],
+    color: [f32; 4],
+) -> Option<[f32; 4]> {
+    let lit = Lit::of(c)?;
+    Some(pipeline::rgba(lit.colors(position, normal, color)[0]))
 }
 
 /// Whether the context's vertices have back colors of their own, which
@@ -347,6 +363,10 @@ pub struct Applied {
     scissor: Option<[u32; 4]>,
     depth_bias: i16,
     color_off: bool,
+    /// The clip planes that are on, in eye coordinates, which are the
+    /// device's world space: its planes from the first, as many as
+    /// RS_CLIPPLANEENABLE in `render` has bits.
+    planes: Since<TEXGEN_SAVED, Vec<[f32; 4]>>,
 }
 
 crate::state_fields!(Applied {
@@ -359,7 +379,8 @@ crate::state_fields!(Applied {
     viewport,
     scissor,
     depth_bias,
-    color_off
+    color_off,
+    planes
 });
 
 impl Applied {
@@ -377,6 +398,9 @@ impl Applied {
             && self.scissor == other.scissor
             && self.depth_bias == other.depth_bias
             && self.color_off == other.color_off
+            && self.planes.len() == other.planes.len()
+            && (self.planes.iter().zip(other.planes.iter()))
+                .all(|(a, b)| a.map(f32::to_bits) == b.map(f32::to_bits))
     }
 }
 
@@ -399,6 +423,17 @@ fn applied_of<'a>(c: &'a mut Context, lists: &super::lists::Shared) -> Option<&'
 /// its buffers, and nothing is drawn.
 fn applied(c: &Settings, shared: &[Texture]) -> Option<Applied> {
     let (viewport, fit) = super::wgl::inner_viewport(c)?;
+    Some(applied_in(c, shared, viewport, fit))
+}
+
+/// `applied` with the device's viewport `viewport`, and `fit` the
+/// matrix that takes OpenGL's viewport into it.
+fn applied_in(
+    c: &Settings,
+    shared: &[Texture],
+    viewport: inner_device::Viewport7,
+    fit: Matrix,
+) -> Applied {
     let on = |cap: u32| c.caps & cap != 0;
     let depth = on(CAP_DEPTH_TEST);
     let cull = if !on(CAP_CULL_FACE) {
@@ -411,16 +446,13 @@ fn applied(c: &Settings, shared: &[Texture]) -> Option<Applied> {
         let ccw_front = c.front_face != GL_CW;
         if back == ccw_front { CULL_CW } else { CULL_CCW }
     };
-    let fog_mode = match c.fog_mode {
-        GL_EXP => pipeline::FOG_EXP,
-        GL_EXP2 => pipeline::FOG_EXP2,
-        _ => pipeline::FOG_LINEAR,
-    };
+    let fog_mode = fog_mode(c);
     let fill = match c.polygon_mode {
         GL_POINT => 1,
         GL_LINE => 2,
         _ => 3,
     };
+    let planes = c.clip.on();
     let render = vec![
         (RS_ZENABLE, depth as u32),
         (RS_ZWRITEENABLE, (depth && c.depth_mask) as u32),
@@ -449,6 +481,7 @@ fn applied(c: &Settings, shared: &[Texture]) -> Option<Applied> {
         (RS_SHADEMODE, if c.shade_model == GL_FLAT { 1 } else { 2 }),
         (RS_LIGHTING, 0),
         (RS_CLIPPING, 1),
+        (RS_CLIPPLANEENABLE, (1 << planes.len()) - 1),
         // A card that writes some channels of a color and not others
         // takes the color mask from here (`color_off` below is the
         // mask of one that writes all of them or none).
@@ -502,7 +535,7 @@ fn applied(c: &Settings, shared: &[Texture]) -> Option<Applied> {
         0
     };
     let projection = c.projection.last().copied().unwrap_or(IDENTITY);
-    Some(Applied {
+    Applied {
         inner: c.inner,
         render,
         stages,
@@ -513,7 +546,17 @@ fn applied(c: &Settings, shared: &[Texture]) -> Option<Applied> {
         scissor: on(CAP_SCISSOR_TEST).then(|| scissor_rect(c)),
         depth_bias,
         color_off: !c.color_mask[..3].iter().any(|&m| m),
-    })
+        planes: Since(planes),
+    }
+}
+
+/// Direct3D's vertex fog mode of the context's fog.
+fn fog_mode(c: &Settings) -> u32 {
+    match c.fog_mode {
+        GL_EXP => pipeline::FOG_EXP,
+        GL_EXP2 => pipeline::FOG_EXP2,
+        _ => pipeline::FOG_LINEAR,
+    }
 }
 
 /// Put the state `a` on its device, for vertices the card transforms
@@ -557,8 +600,16 @@ fn put(cpu: &mut Cpu, a: &Applied, card: bool) -> bool {
     if d.color_off != a.color_off {
         d.color_off = a.color_off;
     }
-    if !d.gl_pixel_centres {
-        d.gl_pixel_centres = true;
+    for (i, p) in a.planes.iter().enumerate() {
+        if d.planes
+            .get(i)
+            .is_some_and(|q| q.map(f32::to_bits) != p.map(f32::to_bits))
+        {
+            d.planes[i] = *p;
+        }
+    }
+    if !d.opengl {
+        d.opengl = true;
     }
     let held: Vec<u32> = d.textures.iter().take(UNITS).copied().collect();
     for (stage, &iface) in a.textures.iter().enumerate() {
@@ -1147,6 +1198,11 @@ fn draw(
     if prims.is_empty() || applied_of(c, &st.lists).is_none() {
         return;
     }
+    // The texture coordinates the context generates take the place of
+    // the vertices' own from here, on the card's way and the
+    // processor's, for a draw that draws something.
+    let generated = texgen::generate(c, raw);
+    let raw = generated.as_deref().unwrap_or(raw);
     let per = polygon_triangles(kind);
     let path = match transforms {
         Ok(()) => match tnl::state_of(c) {
@@ -1252,6 +1308,155 @@ fn card_of(c: &Context) -> Option<&hal::Gl> {
     }
 }
 
+// Fragments that aren't a primitive's.
+
+/// A rectangle of fragments of one color and depth: pixels of a bitmap
+/// or of a copy of pixels (`raster.rs`), from (`x`, `y`) of the window
+/// from the bottom left, `width` by `height` of them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Fragments {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    /// ARGB.
+    pub color: u32,
+    /// The window's depth, from 0 to 1.
+    pub z: f32,
+}
+
+/// The rectangles of fragments drawn with one call at most.
+const FRAGMENTS_AT_ONCE: usize = 0x4000;
+
+/// Each corner of a rectangle of fragments as the pipeline takes it:
+/// where it is in the target with its depth and rhw, a color, the fog
+/// factor as the specular color's alpha, and two sets of two texture
+/// coordinates.
+fn fragment_layout() -> Layout {
+    Layout::of(FVF_XYZRHW | FVF_DIFFUSE | FVF_SPECULAR | 2 << 8).expect("a valid FVF")
+}
+
+/// Draw the fragments `rects` of the current context, each with the
+/// texture coordinates `tex` and at `distance` from the eye: those of
+/// the current raster position (OpenGL 1.1, sections 3.6.4 and 4.3.3).
+/// They go through the per-fragment operations a primitive's pixels go
+/// through: texturing, fog, the scissor, alpha, stencil and depth
+/// tests, blending, dithering and the color mask, the card's as for
+/// any draw, on a 3dfx card and on a ToadForce. None of a polygon's
+/// own state applies (culling, the polygon mode, polygon offset), nor
+/// the viewport, which only placed the raster position, nor the clip
+/// planes, which only decided whether it is valid.
+///
+/// Each rectangle, cut to the buffers, is two triangles of vertices on
+/// the screen, which cover its pixels' centres and none other
+/// (`Drawn::opengl`), drawn through Direct3D's pipeline as the
+/// processor's vertices are. The draws that wait are drawn first.
+pub(super) fn draw_fragments(
+    cpu: &mut Cpu,
+    rects: &[Fragments],
+    tex: &[[f32; 4]; UNITS],
+    distance: f32,
+) {
+    if rects.is_empty() {
+        return;
+    }
+    let Some((index, _)) = current(cpu) else {
+        return;
+    };
+    flush_waiting(cpu);
+    let st = state(cpu);
+    let Some(Some(c)) = st.contexts.get_mut(index) else {
+        return;
+    };
+    if c.target == 0 || c.width == 0 || c.height == 0 {
+        return;
+    }
+    // The part of each rectangle on the buffers, worked out in 64 bits:
+    // glBitmap's moves can take the raster position anywhere, and a
+    // rectangle far off the buffers has none.
+    let (buffer_w, buffer_h) = (i64::from(c.width), i64::from(c.height));
+    let rects: Vec<Fragments> = rects
+        .iter()
+        .filter_map(|r| {
+            let (x, y) = (i64::from(r.x), i64::from(r.y));
+            let (left, right) = (x.max(0), (x + i64::from(r.width)).min(buffer_w));
+            let (bottom, top) = (y.max(0), (y + i64::from(r.height)).min(buffer_h));
+            (left < right && bottom < top).then(|| Fragments {
+                x: left as i32,
+                y: bottom as i32,
+                width: (right - left) as i32,
+                height: (top - bottom) as i32,
+                ..*r
+            })
+        })
+        .collect();
+    if rects.is_empty() {
+        return;
+    }
+    let whole = inner_device::Viewport7 {
+        x: 0,
+        y: 0,
+        width: c.width,
+        height: c.height,
+        min_z: 0.0,
+        max_z: 1.0,
+    };
+    let mut applied = applied_in(c, st.lists.textures(c.lists.group), whole, IDENTITY);
+    for (s, v) in &mut applied.render {
+        *v = match *s {
+            // D3DCULL_NONE, D3DFILL_SOLID, D3DSHADE_FLAT.
+            RS_CULLMODE => 1,
+            RS_FILLMODE => 3,
+            RS_SHADEMODE => 1,
+            // The clip planes cut the raster position, not its fragments.
+            RS_CLIPPLANEENABLE => 0,
+            _ => *v,
+        };
+    }
+    applied.planes = Since(Vec::new());
+    applied.depth_bias = 0;
+    // Fog by the raster position's distance, as the vertices' fog
+    // factor; without fog, none of it.
+    let fog = (c.caps & CAP_FOG != 0).then(|| {
+        let [density, start, end] = c.fog;
+        pipeline::fog_factor(fog_mode(c), start, end, density, distance)
+    });
+    let specular = fog.map_or(0xFF00_0000, |f| {
+        ((f.clamp(0.0, 1.0) * 255.0 + 0.5) as u32) << 24
+    });
+    let tex = tex.map(|t| texture_coords(&None, t));
+    let height = c.height as f32;
+    c.drawn = true;
+    let layout = fragment_layout();
+    for chunk in rects.chunks(FRAGMENTS_AT_ONCE) {
+        let mut vertices = Vec::with_capacity(4 * chunk.len());
+        let mut prims = Vec::with_capacity(2 * chunk.len());
+        for r in chunk {
+            let (left, right) = (r.x as f32, (r.x + r.width) as f32);
+            let top = height - (r.y + r.height) as f32;
+            let bottom = height - r.y as f32;
+            let first = vertices.len() as u32;
+            for (x, y) in [(left, top), (right, top), (right, bottom), (left, bottom)] {
+                let mut v = Vertex {
+                    position: [x, y, r.z, 1.0],
+                    diffuse: Some(r.color),
+                    specular: Some(specular),
+                    ..Vertex::default()
+                };
+                v.tex[..UNITS].copy_from_slice(&tex);
+                vertices.push(v);
+            }
+            let [a, b, c, d] = [first, first + 1, first + 2, first + 3];
+            prims.push(Prim::Triangle([a, b, c], c, 7));
+            prims.push(Prim::Triangle([a, c, d], d, 7));
+        }
+        if !put(cpu, &applied, false) {
+            return;
+        }
+        let _ = d3d_draw::draw_prims(cpu, applied.inner, 8, &layout, &vertices, &prims, 0);
+    }
+}
+
 /// Whether a primitive is one there is.
 fn valid_kind(kind: u32) -> bool {
     kind <= GL_POLYGON
@@ -1268,10 +1473,8 @@ pub fn begin(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(c) = ctx(cpu) else {
         return Some(0);
     };
-    if c.begin.is_some() {
-        error(cpu, GL_INVALID_OPERATION);
-        return Some(0);
-    }
+    // A glBegin between glBegin and glEnd doesn't get here: the calls
+    // are refused there (`lists::refused`).
     c.begin = Some(args[0]);
     c.vertices.clear();
     Some(0)
@@ -1687,7 +1890,7 @@ pub fn draw_arrays(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         error(cpu, GL_INVALID_VALUE);
         return Some(0);
     }
-    if count == 0 || ctx(cpu).is_some_and(|c| c.begin.is_some()) {
+    if count == 0 {
         return Some(0);
     }
     // A range past the end of the address space is a program's error.
@@ -1720,7 +1923,7 @@ pub fn draw_elements(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(0);
         }
     };
-    if count == 0 || ctx(cpu).is_some_and(|c| c.begin.is_some()) {
+    if count == 0 {
         return Some(0);
     }
     let len = count as usize * size;
@@ -1832,10 +2035,6 @@ fn rect(cpu: &mut Cpu, r: [f32; 4]) {
     let Some(c) = ctx(cpu) else {
         return;
     };
-    if c.begin.is_some() {
-        error(cpu, GL_INVALID_OPERATION);
-        return;
-    }
     // A rectangle is a polygon of four vertices, lit as glVertex's are.
     let corners = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
     let vertices = corners.map(|[x, y]| ImmVertex {
@@ -1934,10 +2133,6 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((index, _)) = current(cpu) else {
         return Some(0);
     };
-    if ctx(cpu).is_some_and(|c| c.begin.is_some()) {
-        error(cpu, GL_INVALID_OPERATION);
-        return Some(0);
-    }
     clear_in(
         cpu,
         index,

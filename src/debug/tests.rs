@@ -1926,6 +1926,7 @@ fn win32_without_a_program_has_no_processes() {
         "active": false,
         "pending": null,
         "processes": [],
+        "thread_times": [],
         "trace": "collapsed",
         "page_file": null,
     });

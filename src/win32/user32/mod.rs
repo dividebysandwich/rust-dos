@@ -23,6 +23,7 @@ pub mod message;
 pub mod monitor;
 pub mod notepad;
 pub mod paint;
+pub mod palette;
 pub mod progman;
 pub mod rect;
 pub mod resource;
@@ -34,7 +35,7 @@ pub mod text;
 pub mod window;
 pub mod winhelp;
 
-use super::gdi32::Rect;
+use super::gdi32::{Rect, Region};
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
 
@@ -156,6 +157,15 @@ pub struct State {
     pub saved_bits: Vec<paint::SavedBits>,
     /// The help viewer (winhelp), which save states leave out.
     pub help: winhelp::Help,
+    /// The threads that selected a palette into a DC of a window on a
+    /// palette device (`palette::selected`).
+    pub palette_threads: crate::savestate::Since<{ palette::PALETTE_SAVED }, Vec<u32>>,
+    /// The foreground window as threads with a palette ended, for
+    /// `palette::task_ended`; None when none of them had one.
+    pub palette_exit: Option<u32>,
+    /// The step of the cascade the last overlapped window of
+    /// CW_USEDEFAULT took (`window::next_default_place`).
+    pub cascade: crate::savestate::Since<{ window::CASCADE_SAVED }, u32>,
 }
 
 impl State {
@@ -510,11 +520,15 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
     if user(cpu).windows.is_empty() {
         return;
     }
-    forget_windows(cpu, |w| w.pid == pid, tids);
+    let shown = forget_windows(cpu, |w| w.pid == pid, tids);
     let state = user(cpu);
-    state
-        .classes
-        .retain(|c| c.as_ref().is_none_or(|c| c.pid != pid));
+    // Their slots empty, not taken out: the other processes' windows
+    // keep their classes by place.
+    for c in state.classes.iter_mut() {
+        if c.as_ref().is_some_and(|c| c.pid == pid) {
+            *c = None;
+        }
+    }
     state.hooks.retain(|h| h.pid != pid);
     for m in state.menus.iter_mut() {
         if m.as_ref().is_some_and(|m| m.pid == pid) {
@@ -529,7 +543,7 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
         let arrow = resource::system_cursor(cpu, resource::IDC_ARROW);
         cursor::set(cpu, arrow);
     }
-    redraw_after(cpu);
+    redraw_after(cpu, &shown);
 }
 
 /// A Win16 task, a thread of the Win16 process, ended: its windows go,
@@ -539,24 +553,38 @@ pub fn destroy_thread_windows(cpu: &mut Cpu, tid: u32) {
     if user(cpu).windows.is_empty() {
         return;
     }
-    forget_windows(cpu, |w| w.tid == tid, &[tid]);
-    redraw_after(cpu);
+    let shown = forget_windows(cpu, |w| w.tid == tid, &[tid]);
+    palette::task_ended(cpu);
+    redraw_after(cpu, &shown);
 }
 
 /// Drop the windows `gone` says, without the messages DestroyWindow
-/// sends, and the timers and queues of the threads `tids`.
-fn forget_windows(cpu: &mut Cpu, gone: impl Fn(&Window) -> bool, tids: &[u32]) {
+/// sends, and the timers and queues of the threads `tids`. They leave
+/// the screen as `paint::windows_gone` says, CS_SAVEBITS windows giving
+/// back their saved bits, and what is left to paint is the result.
+fn forget_windows(cpu: &mut Cpu, gone: impl Fn(&Window) -> bool, tids: &[u32]) -> Region {
     let state = user(cpu);
     let gone: Vec<u32> = (1..state.windows.len())
         .filter(|&i| state.windows[i].as_ref().is_some_and(&gone))
         .map(handle)
         .collect();
+    let shown = paint::windows_gone(cpu, &gone);
+    let state = user(cpu);
     for &hwnd in &gone {
         window::unlink(state, hwnd);
     }
+    // Their classes have them no more, as when DestroyWindow takes them:
+    // a module freed after its task's windows went unregisters its
+    // classes.
     for &hwnd in &gone {
-        if let Some(i) = slot(hwnd) {
-            state.windows[i] = None;
+        if let Some(i) = slot(hwnd)
+            && let Some(w) = state.windows[i].take()
+            && let Some(c) = state
+                .classes
+                .get_mut(w.class as usize)
+                .and_then(|c| c.as_mut())
+        {
+            c.windows = c.windows.saturating_sub(1);
         }
     }
     state.saved_bits.retain(|s| !gone.contains(&s.hwnd));
@@ -587,22 +615,27 @@ fn forget_windows(cpu: &mut Cpu, gone: impl Fn(&Window) -> bool, tids: &[u32]) {
     if state.clipboard.owner != 0 && !alive(state.clipboard.owner) {
         state.clipboard.owner = 0;
     }
+    palette::threads_ending(state, tids);
     // The foreground window went with them: the next one comes there.
     if had_foreground && state.foreground_window() == 0 {
         input::foreground_gone(cpu);
     }
+    shown
 }
 
-/// Windows went: the desktop left when none are left, redrawn when some
-/// are.
-fn redraw_after(cpu: &mut Cpu) {
+/// Windows went and left `shown` of the screen to paint: the desktop
+/// leaves when none are left, and when some are, what is under them
+/// paints there, as when DestroyWindow hides a window. Hidden windows
+/// going change nothing on the screen: a Win16 task that destroyed its
+/// window before it ended leaves the other windows as they are.
+fn redraw_after(cpu: &mut Cpu, shown: &Region) {
     let state = user(cpu);
     let empty = state.windows.iter().skip(1).all(|w| w.is_none());
     if state.desktop {
         if empty {
             paint::leave_desktop(cpu);
         } else {
-            paint::redraw_screen(cpu);
+            paint::expose(cpu, shown);
         }
     }
 }
@@ -1047,7 +1080,7 @@ static APIS: &[Api] = &[
     stdcall("LoadIconW", 406, 2, resource::load_icon),
     stdcall("LoadCursorW", 404, 2, resource::load_cursor),
     stdcall("CopyImage", 70, 5, resource::copy_image),
-    stdcall("LoadCursorFromFileA", 402, 1, nothing),
+    stdcall("LoadCursorFromFileA", 402, 1, resource::load_cursor_from_file),
     stdcall(
         "CreateIconFromResource",
         84,
@@ -1427,6 +1460,11 @@ static APIS: &[Api] = &[
     // procedure (notepad.rs).
     stdcall("NotepadMain", 0, 0, notepad::main),
     stdcall("NotepadWndProc", 0, 4, notepad::wnd_proc),
+    // A 16-bit SendMessage to another task's window, and the 16-bit
+    // Yield that receives what other tasks sent (message.rs).
+    stdcall("SendMessage16", 0, 4, message::send_message16),
+    stdcall("UserYield16", 0, 0, message::user_yield16),
+    stdcall("RestoreDefaultPalette", 0, 2, palette::restore_default_palette),
 ];
 
 crate::state_fields!(State {
@@ -1451,7 +1489,10 @@ crate::state_fields!(State {
     registered,
     in_hooks,
     last_hook,
-    saved_bits
+    saved_bits,
+    palette_threads,
+    cascade
 } skip {
-    help
+    help,
+    palette_exit
 });

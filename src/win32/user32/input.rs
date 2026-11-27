@@ -21,6 +21,7 @@ use super::message::{
     WM_NCLBUTTONDOWN, WM_NCMOUSEMOVE, WM_QUERYNEWPALETTE, WM_SETFOCUS, WM_SYSCHAR, WM_SYSKEYDOWN,
     WM_SYSKEYUP,
 };
+use super::resource::ANI_CURSORS;
 use super::sysparams::{metric, screen_size};
 use super::window::{
     self, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_CAPTION, WS_CHILD, WS_DISABLED,
@@ -32,6 +33,7 @@ use super::{
     current_tid, read_words, set_error, string_at, user, write_words,
 };
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 use crate::win32::gdi32::{self, Rect};
 use crate::win32::task::{self, Next, Task};
 
@@ -110,10 +112,17 @@ pub struct Input {
     pub async_keys: Vec<u8>,
     /// ClipCursor's rectangle.
     pub clip: Option<Rect>,
-    /// SetCursor's cursor, its picture, and ShowCursor's count.
+    /// SetCursor's cursor, its picture, and ShowCursor's count. The count
+    /// is a 16-bit value, as Windows 9x's USER keeps it, widened to 32
+    /// bits so that the saved state keeps its shape; `show_cursor` steps
+    /// it. A state saved before it wrapped at 16 bits can hold a count
+    /// outside that range until the next ShowCursor takes its low bits.
     pub cursor_handle: u32,
     pub cursor_image: super::cursor::CursorImage,
     pub cursor_count: i32,
+    /// When SetCursor last set another cursor, in emulated microseconds
+    /// (`Clock::now_micros`): an animated cursor's steps count from it.
+    pub cursor_since: Since<ANI_CURSORS, u64>,
     /// What the devices had when they were last read: the keys held, the
     /// mouse's place, its buttons and how often each was pressed and
     /// released.
@@ -1225,7 +1234,22 @@ fn activation_pending(state: &State, queue: u32) -> bool {
 /// Windows 98's rules for SetForegroundWindow: no queue is in the
 /// foreground, or the thread's own is; the foreground queue has no
 /// active window and none on its way; its process took the last input;
-/// or its process is the foreground one, or was started by it.
+/// or its process is the foreground one, or was started by it or by the
+/// process that took the last input.
+///
+/// A program started by the process that took the last input may take
+/// the foreground. DirectX 7's package (DX7AENG.EXE), whose licence the
+/// user had just accepted, closed its window, which gave the foreground
+/// back to the setup that started it, and then started DXSETUP.EXE.
+/// DXSETUP's message box comes in front of the setup's window on
+/// Windows 98; refused the foreground, it stayed behind it, and
+/// Demolition Racer's setup waited for it for ever (#2150).
+///
+/// Only the caller's parent counts, and as things are when it calls: a
+/// program that parent's child starts is refused, and one started before
+/// its parent took the input is let through. Whether Windows 98 passes
+/// the permission further down, and when it decides, waits for a probe
+/// (#2168).
 fn may_take_foreground(cpu: &Cpu) -> bool {
     let queue = current_queue(cpu);
     let pid = super::current_pid(cpu);
@@ -1242,7 +1266,8 @@ fn may_take_foreground(cpu: &Cpu) -> bool {
     }
     let owner = queue_pid(cpu, foreground);
     let running = crate::win32::running(cpu);
-    owner == 0 || running.is_some_and(|p| p.id == owner || p.parent == owner)
+    let started_by = |parent: u32| parent != 0 && (parent == owner || parent == input.last_input);
+    owner == 0 || running.is_some_and(|p| p.id == owner || started_by(p.parent))
 }
 
 /// The foreground moved to or from the queue `queue` while another
@@ -1903,21 +1928,8 @@ fn can_activate(state: &State, h: u32) -> bool {
 pub fn activate_other_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let hwnd = args[0];
     let queue = current_queue(cpu);
+    let next = other_window(cpu, hwnd);
     let state = user(cpu);
-    let foreground = state.input.foreground == queue;
-    let usable = |h: u32| {
-        h != hwnd && can_activate(state, h) && (foreground || state.window_queue(h) == queue)
-    };
-    let owner = state.window(hwnd).map_or(0, |w| w.owner);
-    let next = if owner != 0 && usable(owner) {
-        owner
-    } else {
-        state
-            .top_levels()
-            .into_iter()
-            .find(|&h| usable(h))
-            .unwrap_or(0)
-    };
     let target = state.window_queue(next);
     if next == 0 || target == queue {
         return start_switch(cpu, 0, None, Some([next, 0, 0]));
@@ -1927,6 +1939,27 @@ pub fn activate_other_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let tid = current_tid(cpu);
     post_activation(cpu, target, EV_ACTIVATE, next, tid);
     start_switch(cpu, 0, Some(to_tid), None)
+}
+
+/// The window ActivateOtherWindow activates when `hwnd`, the running
+/// thread's active window, goes, or 0 for none.
+pub fn other_window(cpu: &Cpu, hwnd: u32) -> u32 {
+    let queue = current_queue(cpu);
+    let state = &cpu.bus.win32.user;
+    let foreground = state.input.foreground == queue;
+    let usable = |h: u32| {
+        h != hwnd && can_activate(state, h) && (foreground || state.window_queue(h) == queue)
+    };
+    let owner = state.window(hwnd).map_or(0, |w| w.owner);
+    if owner != 0 && usable(owner) {
+        owner
+    } else {
+        state
+            .top_levels()
+            .into_iter()
+            .find(|&h| usable(h))
+            .unwrap_or(0)
+    }
 }
 
 /// The foreground window went without its thread activating another,
@@ -1957,6 +1990,20 @@ pub fn foreground_gone(cpu: &mut Cpu) {
 /// active window of the foreground queue. With it the window under the
 /// cursor (`msg`'s), the hit-test code and the client mouse message,
 /// for WM_MOUSEACTIVATE.
+///
+/// While a window of the running thread's queue has the capture, a click
+/// activates nothing and sends no WM_MOUSEACTIVATE. On Windows 98 SE a
+/// click with the capture on a window goes to that window, which gets no
+/// WM_MOUSEACTIVATE, and leaves the active window as it was, whether the
+/// click is on the capture window or on a dialog box in front of it;
+/// without the capture the same click on the same window asks it with
+/// WM_MOUSEACTIVATE and activates it (#745). The capture is the state of
+/// a queue there, so another queue's capture, taken after the click was
+/// queued, leaves this queue's click to activate as usual. InstallShield
+/// 6's engine holds the capture on its background window while it copies
+/// files and keeps it while its "Setup Needs the Next Disk" dialog box
+/// asks for the next disc: a click on the box's OK reaches the background
+/// window, and the box keeps the keyboard, so Enter takes it.
 pub fn click_activates(cpu: &mut Cpu, msg: &Msg) -> Option<(u32, u32)> {
     let (down, hit, mouse) = match msg.message {
         m @ (WM_LBUTTONDOWN..=0x0209) => ((m - WM_LBUTTONDOWN).is_multiple_of(3), HTCLIENT, m),
@@ -1972,6 +2019,10 @@ pub fn click_activates(cpu: &mut Cpu, msg: &Msg) -> Option<(u32, u32)> {
     }
     let queue = current_queue(cpu);
     let state = user(cpu);
+    let capture = state.input.capture;
+    if capture != 0 && state.is_window(capture) && state.window_queue(capture) == queue {
+        return None;
+    }
     let top = state.top_level(msg.hwnd);
     let w = state.window(top)?;
     let front = state.input.foreground == queue && state.activation(queue).active == top;
@@ -2105,7 +2156,7 @@ fn read_quiet(cpu: &mut Cpu, read: impl FnOnce(&mut Cpu) -> bool) {
 
 /// What a read of the devices may change (`seen`), and the messages in
 /// every queue it may post input to. None when a key went down.
-fn settled(cpu: &mut Cpu) -> Option<(Seen, usize, u32)> {
+pub(crate) fn settled(cpu: &mut Cpu) -> Option<(Seen, usize, u32)> {
     let seen = seen(cpu)?;
     let queues = &user(cpu).queues;
     let messages = queues.iter().map(|q| q.posted.len() + q.input.len()).sum();
@@ -2563,10 +2614,16 @@ pub fn get_cursor(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(user(cpu).input.cursor_handle)
 }
 
-/// ShowCursor(show): the count it then has.
+/// ShowCursor(show): the count it then has. Windows 9x's USER32 thunks
+/// to 16-bit USER's ShowCursor, whose count is 16 bits: it wraps from
+/// -32768 to 32767, and USER32 returns it sign-extended. Warhammer: Dark
+/// Omen hides the cursor with a loop that calls ShowCursor(FALSE) while
+/// the count is below 0, which ends at the wrap after at most 32768
+/// calls; a 32-bit count would take 2^31.
 pub fn show_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let input = &mut user(cpu).input;
-    input.cursor_count += if args[0] != 0 { 1 } else { -1 };
+    let step = if args[0] != 0 { 1 } else { -1 };
+    input.cursor_count = (input.cursor_count as i16).wrapping_add(step) as i32;
     Some(input.cursor_count as u32)
 }
 
@@ -2886,6 +2943,7 @@ crate::state_fields!(Input {
     cursor_handle,
     cursor_image,
     cursor_count,
+    cursor_since,
     held,
     device_pos,
     buttons,
@@ -2958,6 +3016,29 @@ mod tests {
         let notify = address_of(&cpu, "SendNotifyMessageA");
         assert_eq!(activation_call(&mut cpu, other), notify);
         assert_eq!(activation_call(&mut cpu, client), notify);
+    }
+
+    /// ShowCursor's count is 16 bits, as Windows 9x's USER keeps it: it
+    /// wraps from -32768 to 32767 and back, and comes back sign-extended.
+    /// Dark Omen's loop that calls ShowCursor(FALSE) while the count is
+    /// below 0 ends at the wrap, from any count it starts at. That
+    /// includes F231607Ch, the 32-bit count a state saved by an older
+    /// build inside the loop holds: its low 16 bits are taken.
+    #[test]
+    fn show_cursor_counts_in_16_bits() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        assert_eq!(show_cursor(&mut cpu, &[0]), Some(u32::MAX));
+        assert_eq!(show_cursor(&mut cpu, &[1]), Some(0));
+        user(&mut cpu).input.cursor_count = -32768;
+        assert_eq!(show_cursor(&mut cpu, &[0]), Some(32767));
+        assert_eq!(show_cursor(&mut cpu, &[1]), Some(-32768i32 as u32));
+        for start in [-1, -2, i32::from(i16::MIN), 0xF231_607C_u32 as i32] {
+            user(&mut cpu).input.cursor_count = start;
+            let calls = (1..=65536)
+                .find(|_| show_cursor(&mut cpu, &[0]).is_some_and(|c| (c as i32) >= 0))
+                .expect("the loop ends");
+            assert!(calls <= 32768, "{calls} calls from {start}");
+        }
     }
 
     /// A program that hid the cursor and took the capture steers with

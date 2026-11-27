@@ -16,7 +16,9 @@
 //! enhanced mode uses in place of the basic section's. The "WINDOWS VMM
 //! 4.0" record Windows 95 added holds the icon, the fonts, the
 //! keyboard, mouse and other settings of the Properties sheet, and no
-//! program, folder or parameters.
+//! program, folder or parameters. Its last two words are the protected
+//! mode (DPMI) memory of the Memory page, in KB (at 1A8h; 0 for Auto),
+//! and the record's revision. Redguard's PIFs have FFFFh there.
 
 /// The basic section's size, and where the records start.
 const BASIC: usize = 0x171;
@@ -40,6 +42,9 @@ const FIRST_RECORD: &[u8] = b"MICROSOFT PIFEX";
 const ENHANCED_RECORD: &[u8] = b"WINDOWS 386";
 /// The 386 enhanced record's parameters.
 const ENHANCED_PARAMETERS: usize = 0x28;
+const VMM_RECORD: &[u8] = b"WINDOWS VMM 4.0";
+/// The Windows 95 record's DPMI memory, in KB.
+const VMM_DPMI: usize = 0x1A8;
 
 /// What a PIF says about the program it starts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -55,6 +60,9 @@ pub struct Pif {
     pub parameters: String,
     /// Whether its window closes when it ends.
     pub close_on_exit: bool,
+    /// The DPMI memory its DOS machine may have, in KB: 0 for Auto, as
+    /// for a PIF without the Windows 95 record.
+    pub dpmi_kb: u16,
 }
 
 /// The NUL-ended string of at most `len` bytes at `at`.
@@ -76,18 +84,27 @@ pub fn parse(data: &[u8]) -> Option<Pif> {
         directory: string(data, DIRECTORY, STRING_LEN),
         parameters: string(data, PARAMETERS, STRING_LEN),
         close_on_exit: data[FLAGS] & CLOSE_ON_EXIT != 0,
+        dpmi_kb: 0,
     };
     if pif.program.is_empty() {
         return None;
     }
-    if let Some(parameters) = enhanced_parameters(data) {
-        pif.parameters = parameters;
+    if let Some(record) = record(data, ENHANCED_RECORD)
+        && record.len() >= ENHANCED_PARAMETERS + STRING_LEN
+    {
+        pif.parameters = string(record, ENHANCED_PARAMETERS, STRING_LEN);
+    }
+    if let Some(record) = record(data, VMM_RECORD)
+        && let Some(kb) = record.get(VMM_DPMI..VMM_DPMI + 2)
+    {
+        pif.dpmi_kb = u16::from_le_bytes([kb[0], kb[1]]);
     }
     Some(pif)
 }
 
-/// The 386 enhanced record's parameters, if the PIF has the record.
-fn enhanced_parameters(data: &[u8]) -> Option<String> {
+/// The data of the record whose name starts with `wanted`, if the PIF
+/// has it whole.
+fn record<'a>(data: &'a [u8], wanted: &[u8]) -> Option<&'a [u8]> {
     let word = |at: usize| Some(u16::from_le_bytes(data.get(at..at + 2)?.try_into().ok()?));
     if !data.get(BASIC..)?.starts_with(FIRST_RECORD) {
         return None;
@@ -102,11 +119,8 @@ fn enhanced_parameters(data: &[u8]) -> Option<String> {
         let next = word(at + NAME_LEN)?;
         let start = word(at + NAME_LEN + 2)? as usize;
         let size = word(at + NAME_LEN + 4)? as usize;
-        if name.starts_with(ENHANCED_RECORD) {
-            if size < ENHANCED_PARAMETERS + STRING_LEN || data.len() < start + size {
-                return None;
-            }
-            return Some(string(data, start + ENHANCED_PARAMETERS, STRING_LEN));
+        if name.starts_with(wanted) {
+            return data.get(start..start + size);
         }
         if next == LAST {
             return None;
@@ -197,6 +211,19 @@ mod tests {
         assert_eq!(pif.program, "z.bat");
         assert_eq!(pif.directory, "");
         assert_eq!(pif.parameters, "");
+    }
+
+    /// The DPMI memory of the Windows 95 record: Redguard's RG.PIF has
+    /// FFFFh KB, and a PIF without the record (or with 0) has Auto.
+    #[test]
+    fn reads_the_dpmi_memory() {
+        let mut data = pif("RG.EXE", "", "", None);
+        assert_eq!(parse(&data).unwrap().dpmi_kb, 0);
+        let at = data.len() - 0x1AC + VMM_DPMI;
+        data[at..at + 2].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        assert_eq!(parse(&data).unwrap().dpmi_kb, 0xFFFF);
+        data.truncate(BASIC);
+        assert_eq!(parse(&data).unwrap().dpmi_kb, 0);
     }
 
     #[test]

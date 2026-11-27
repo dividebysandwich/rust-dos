@@ -274,10 +274,7 @@ impl DebugHub {
         }
 
         if self.tracing_now {
-            let mut bytes = [0u8; 15];
-            let end = (phys_ip + 15).min(ram.len());
-            let len = end.saturating_sub(phys_ip);
-            bytes[..len].copy_from_slice(&ram[phys_ip..end]);
+            let (bytes, len) = instruction_bytes(cpu, phys_ip, ram);
             self.trace.push(TraceEntry {
                 t_us: self.batch_t_us,
                 icount: cpu.executed,
@@ -504,6 +501,7 @@ impl DebugHub {
                 "costly": cpu.bus.observe.stats.costly,
                 "proving": cpu.bus.observe.stats.proving,
                 "shaped": cpu.bus.observe.stats.shaped,
+                "modelled": cpu.bus.observe.stats.modelled,
                 "starts": cpu.bus.observe.stats.starts,
                 "cut": cpu.bus.observe.stats.cut,
                 "failed_by": cpu
@@ -788,5 +786,94 @@ impl crate::exec::ExecHook for DebugHub {
             }
         }
         false
+    }
+}
+
+/// The 15 bytes from the instruction at `phys_ip`, CS:EIP, for the
+/// trace, and how many of them there are. Those past the end of its page
+/// are from the page after it in linear memory, which needn't follow it
+/// in RAM. `exec::trap_bytes` reads a service trap across a page the
+/// same way for the CPU, through the TLB with a fault where this walks
+/// the tables and stops: a change to how one crosses a page belongs in
+/// the other too.
+fn instruction_bytes(cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> ([u8; 15], usize) {
+    let mut bytes = [0u8; 15];
+    let in_page = (0x1000 - (phys_ip & 0xFFF)).min(bytes.len());
+    let mut len = 0;
+    for (i, byte) in bytes[..in_page].iter_mut().enumerate() {
+        let Some(&b) = ram.get(phys_ip + i) else {
+            return (bytes, len);
+        };
+        *byte = b;
+        len += 1;
+    }
+    let cs = cpu.seg_cache(crate::cpu::Seg::CS).base;
+    let next = cs.wrapping_add(cpu.eip()).wrapping_add(in_page as u32);
+    if len == bytes.len() || next & 0xFFF != 0 {
+        return (bytes, len);
+    }
+    let Some(phys) = cpu.peek_translate(next) else {
+        return (bytes, len);
+    };
+    for byte in bytes[in_page..].iter_mut() {
+        let Some(&b) = ram.get(phys as usize + len - in_page) else {
+            break;
+        };
+        *byte = b;
+        len += 1;
+    }
+    (bytes, len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::{CR0_PE, CR0_PG, Seg};
+    use rust_dos::win32::TRAP;
+
+    /// The physical pages of the code page at 400000h and of the page
+    /// after it in linear memory, which aren't next to each other.
+    const FIRST: usize = 0x2_0000;
+    const SECOND: usize = 0x3_0000;
+
+    /// A CPU with paging on and CS:EIP at 400FFDh, 3 bytes before the end
+    /// of its page, where a trap of the built-in Windows, `FE 3E 34`,
+    /// runs on into the next page: 12h there, or no page without
+    /// `present`. The RAM after `FIRST` holds 99h.
+    fn split_code(present: bool) -> Box<Cpu> {
+        const CODE: u32 = 0x40_0000;
+        const DIRECTORY: usize = 0x1_0000;
+        const TABLE: usize = 0x1_1000;
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let entry = |phys: usize| phys as u32 | 7;
+        cpu.bus
+            .write_32(DIRECTORY + (CODE as usize >> 22) * 4, entry(TABLE));
+        cpu.bus.write_32(TABLE, entry(FIRST));
+        cpu.bus
+            .write_32(TABLE + 4, if present { entry(SECOND) } else { 0 });
+        for (i, b) in [0xFE, TRAP, 0x34, 0x99].into_iter().enumerate() {
+            cpu.bus.write_8(FIRST + 0xFFD + i, b);
+        }
+        cpu.bus.write_8(SECOND, 0x12);
+        cpu.cr3 = DIRECTORY as u32;
+        cpu.cr0 |= CR0_PE | CR0_PG;
+        let cs = cpu.seg_cache(Seg::CS).base;
+        cpu.set_eip((CODE + 0xFFD).wrapping_sub(cs));
+        cpu
+    }
+
+    #[test]
+    fn an_instruction_running_on_into_another_page_traces_its_bytes_from_there() {
+        let cpu = split_code(true);
+        let (bytes, len) = instruction_bytes(&cpu, FIRST + 0xFFD, cpu.bus.ram());
+        assert_eq!(len, 15);
+        assert_eq!(bytes[..4], [0xFE, TRAP, 0x34, 0x12]);
+    }
+
+    #[test]
+    fn an_instruction_running_into_a_missing_page_traces_the_bytes_of_its_own() {
+        let cpu = split_code(false);
+        let (bytes, len) = instruction_bytes(&cpu, FIRST + 0xFFD, cpu.bus.ram());
+        assert_eq!(bytes[..len], [0xFE, TRAP, 0x34]);
     }
 }

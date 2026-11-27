@@ -32,6 +32,8 @@ pub struct ShellLabels {
     pub shell_wait: u16,
     /// The key they waited for is handed over here, in AX.
     pub key_ready: u16,
+    /// An IRET, which INT 01h, 03h and 04h point at (`dos_iret`).
+    pub int_iret: u16,
 }
 
 /// A Tiny "OS" written in Machine Code, and its labels. Asks the emulator
@@ -88,12 +90,17 @@ fn assemble() -> (Vec<u8>, ShellLabels) {
     a.op(&[0xFE, 0x39, SERVICE_SHELL_KEY_READY]); // `key_ready`
     a.jump(0xEB, "PROMPT_START");
 
+    // The IRET that INT 01h, 03h and 04h point at (`dos_iret`).
+    a.label("INT_IRET");
+    a.op(&[0xCF]); // IRET
+
     let labels = ShellLabels {
         prompt_start: a.at("PROMPT_START"),
         key_read: a.at("KEY_READ"),
         after_trap: a.at("AFTER_TRAP"),
         shell_wait: a.at("SHELL_WAIT"),
         key_ready: a.at("KEY_READY"),
+        int_iret: a.at("INT_IRET"),
     };
     (a.finish(), labels)
 }
@@ -108,6 +115,17 @@ pub fn get_shell_code() -> Vec<u8> {
 /// Where the parts of the shell's code are.
 pub fn labels() -> ShellLabels {
     SHELL.get_or_init(assemble).1
+}
+
+/// Where the built-in DOS points INT 01h, 03h and 04h, as segment:offset:
+/// the IRET in the shell's code. MS-DOS's IO.SYS points them at an IRET
+/// in its own segment, 0070h (INTRET, in MSINIT.ASM of MS-DOS 4.0's
+/// source), which is the shell's segment here. A program that reads the
+/// vectors then finds 0070h as their segment, not the BIOS's F000h:
+/// Maelstrom takes INT 3's segment as the flags of a button it has no
+/// pointer to, and calls the button only while bit 4 of them is clear.
+pub fn dos_iret() -> u32 {
+    (crate::cpu::SHELL_SEGMENT as u32) << 16 | labels().int_iret as u32
 }
 
 /// INT 10h with these registers.
@@ -258,12 +276,14 @@ pub fn prompt(cpu: &mut Cpu) {
     // The batch files have run: ECHO is as it was before them.
     cpu.batch.settle();
     cpu.shell_prompt_at = None;
-    // RC left to run a command line, which has run: RC comes back.
-    if cpu.shell_wait.is_none()
-        && cpu.pending_command.is_none()
-        && !cpu.batch.is_active()
-        && crate::rc_command::resume(cpu, None)
-    {
+    let reads_line =
+        cpu.shell_wait.is_none() && cpu.pending_command.is_none() && !cpu.batch.is_active();
+    if reads_line {
+        prompt_break(cpu);
+    }
+    // RC left to run a command line, which has run: RC comes back, its
+    // command line where the prompt would be.
+    if reads_line && crate::rc_command::resume(cpu, None) {
         return;
     }
     if cpu.batch.echo && cpu.shell_wait.is_none() {
@@ -271,6 +291,36 @@ pub fn prompt(cpu: &mut Cpu) {
         show_prompt(cpu);
     }
     crate::cmdline::start(cpu);
+}
+
+/// What COMMAND.COM prints before it reads a command line at its prompt:
+/// CR LF when a command line has run since the last one and ECHO is on
+/// (the CRLF2 at COMMAND in MS-DOS 4.0's TCODE.ASM). So the output of
+/// the command keeps its last line, whether it ended with CR LF (which
+/// leaves an empty line before the prompt), with a CR alone or with
+/// nothing. An empty line, a CLS, a batch file and a FOR whose last line
+/// is empty print none. The batch files have ended (`Batch::settle`).
+pub fn prompt_break(cpu: &mut Cpu) {
+    let ran = std::mem::take(&mut cpu.batch.crlf.command_ran);
+    // The shell reads a line: the empty batch line before doesn't count
+    // for the echo of the next.
+    cpu.batch.crlf.null_line = false;
+    if ran && cpu.batch.echo && !cpu.batch.is_active() {
+        teletype(cpu, b"\r\n");
+    }
+}
+
+/// Show a batch line as COMMAND.COM does before it runs it: the CR LFs
+/// before it (`BatchLine::breaks`), and with ECHO on the prompt and the
+/// line, and CR LF.
+pub fn echo_batch_line(cpu: &mut Cpu, line: &crate::batch::BatchLine) {
+    for _ in 0..line.breaks {
+        video::print_string(cpu, "\r\n");
+    }
+    if line.echo {
+        show_prompt(cpu);
+        video::print_string(cpu, &format!("{}\r\n", line.text));
+    }
 }
 
 /// What the shell waits for, outside of a typed line.
@@ -613,6 +663,9 @@ pub fn abandon_input(cpu: &mut Cpu) -> bool {
     }
     crate::cmdline::finish(cpu);
     erase_prompt(cpu);
+    // The first line echoed takes the prompt's place, without the CR LF
+    // that would leave its row empty.
+    cpu.batch.crlf.null_line = true;
     cpu.set_sp(cpu.sp().wrapping_add(6));
     cpu.set_cs(SHELL_SEGMENT);
     cpu.set_ip(labels().after_trap);

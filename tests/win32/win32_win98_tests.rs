@@ -596,7 +596,7 @@ fn get_disk_free_space_ex_gives_bytes() {
 
 /// A setup checks a whole install against the free space, so a folder
 /// hard disk has more room under the built-in Windows than DOS's fake
-/// 320 MB: about 3.75 GB when empty. GetDiskFreeSpaceExA gives it all.
+/// 1 GB: about 3.75 GB when empty. GetDiskFreeSpaceExA gives it all.
 /// GetDiskFreeSpaceA gives it as Windows 95 and 98 do, through INT 21h
 /// AH=36h's 16-bit numbers: 65535 clusters of 32 KB, just under 2 GB.
 #[test]
@@ -803,6 +803,11 @@ fn boot_work() -> Vec<(&'static str, Vec<u8>)> {
 /// Run `exe` from the folder `base`, as drive C:, to its end: its exit
 /// code.
 fn run_in(base: &std::path::Path, exe: &str) -> u8 {
+    run_machine(base, exe).errorlevel
+}
+
+/// `run_in`, giving the machine, back at the prompt.
+fn run_machine(base: &std::path::Path, exe: &str) -> Box<Cpu> {
     let mut cpu = Cpu::new(base.to_path_buf());
     cpu.bus.win32.enabled = true;
     cpu.bus.win32.version = Win98Se;
@@ -812,7 +817,7 @@ fn run_in(base: &std::path::Path, exe: &str) -> u8 {
     for _ in 0..1000 {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
         if run_batch(&mut cpu, &mut NoHook, false) == StopReason::ShellReloaded {
-            return cpu.errorlevel;
+            return cpu;
         }
     }
     panic!("{} didn't end: {:?}", exe, printed(&cpu));
@@ -949,6 +954,89 @@ fn the_program_dos_started_keeps_its_directory_after_the_commands() {
     assert!(!registry.contains("\"cd\""), "the command ran: {}", registry);
     // CD.EXE's directory was its own: D.EXE starts in DOS's, the root.
     assert_eq!(fs::read_to_string(base.join("DIR.TXT")).unwrap(), "C:\\");
+}
+
+/// A program that starts C:\CD.EXE and then C:\D.EXE, in `directory`
+/// if it isn't empty (CreateProcessA's lpCurrentDirectory), waiting for
+/// each to end. It ends with what GetCurrentDirectoryA then gives, the
+/// length of its own current directory.
+fn starts_both(directory: &str) -> Vec<u8> {
+    let kernel32 = [
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetCurrentDirectoryA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &kernel32)];
+    const STARTUP: u32 = 0x80;
+    const INFO: u32 = 0xD0;
+    const BUFFER: u32 = 0xE0;
+    let mut data = vec![0u8; 0x120];
+    data[..10].copy_from_slice(b"C:\\CD.EXE\0");
+    data[0x20..0x29].copy_from_slice(b"C:\\D.EXE\0");
+    data[0x40..0x40 + directory.len()].copy_from_slice(directory.as_bytes());
+    // STARTUPINFOA's cb.
+    data[STARTUP as usize] = 68;
+    program(imports, &data, |a, l| {
+        for (exe, dir) in [(0, 0), (0x20, if directory.is_empty() { 0 } else { 0x40 })] {
+            a.push(l.at(INFO) as i32)?;
+            a.push(l.at(STARTUP) as i32)?;
+            a.push(if dir == 0 { 0 } else { l.at(dir) as i32 })?;
+            for _ in 0..5 {
+                a.push(0)?;
+            }
+            a.push(0)?;
+            a.push(l.at(exe) as i32)?;
+            a.call(l.import(0))?;
+            a.push(-1)?;
+            a.push(dword_ptr(l.at(INFO)))?;
+            a.call(l.import(1))?;
+        }
+        a.push(l.at(BUFFER) as i32)?;
+        a.push(0x40)?;
+        a.call(l.import(2))?;
+        a.ret()
+    })
+}
+
+#[test]
+fn a_process_keeps_its_directory_when_its_child_changes_its_own() {
+    // Each Win32 process has its own current directory, which a process
+    // it starts begins with: CD.EXE's move to C:\WINDOWS is its own, so
+    // D.EXE, started after it ended, starts in the program's, C:\. The
+    // program is still there too (3 is the length of "C:\").
+    let files = [
+        ("P.EXE", starts_both("")),
+        ("CD.EXE", changes_directory()),
+        ("D.EXE", notes_its_directory()),
+    ];
+    let base = boot_scratch("own_directory", &files);
+    assert_eq!(run_in(&base, "P.EXE"), 3);
+    assert_eq!(fs::read_to_string(base.join("DIR.TXT")).unwrap(), "C:\\");
+}
+
+#[test]
+fn a_process_starts_in_the_directory_create_process_names() {
+    // lpCurrentDirectory is the child's current directory, and the
+    // parent's stays as it was.
+    let files = [
+        ("P.EXE", starts_both("C:\\SUB")),
+        ("CD.EXE", changes_directory()),
+        ("D.EXE", notes_its_directory()),
+        ("SUB/KEEP.TXT", Vec::new()),
+    ];
+    let base = boot_scratch("start_directory", &files);
+    assert_eq!(run_in(&base, "P.EXE"), 3);
+    assert_eq!(fs::read_to_string(base.join("DIR.TXT")).unwrap(), "C:\\SUB");
+}
+
+#[test]
+fn the_prompt_keeps_its_directory_after_a_windows_program() {
+    // A Windows program started from a DOS box on Windows 98 has a
+    // current directory of its own: the prompt is still at C:\ after
+    // CD.EXE moved to C:\WINDOWS.
+    let base = boot_scratch("prompt_directory", &[("CD.EXE", changes_directory())]);
+    let cpu = run_machine(&base, "CD.EXE");
+    assert_eq!(cpu.bus.disk.get_current_directory(), "");
 }
 
 /// A setup program that leaves work for the next boot, a file to delete
@@ -1107,7 +1195,9 @@ const STREAM_NO_FORMATS: &[i32] = &[OUT, 0, 0, 0, 0, 0, 0, 0];
 
 /// What MSACM32's code answers without drivers, read from the code of
 /// Windows 98 SE's 4.03.1998; MAX_SIZE_FORMAT is the size on a Windows
-/// with its codecs, so programs that size a buffer by it run.
+/// with its codecs, so programs that size a buffer by it run. A PCM to
+/// PCM stream opens, as the PCM converter Windows installs with MSACM32
+/// opens it, and its handle is the output.
 const ACM_CALLS: &[AcmCall] = &[
     AcmCall("acmMetrics", &[0, 50, OUT], 0, Some(50)),
     AcmCall("acmMetrics", &[0, 51, OUT], 512, Some(0)),
@@ -1120,8 +1210,8 @@ const ACM_CALLS: &[AcmCall] = &[
     AcmCall("acmMetrics", &[0, 7, 0], 8, None),
     AcmCall("acmMetrics", &[0, 50, 0], 11, None),
     AcmCall("acmMetrics", &[0, 50, UNMAPPED], 11, None),
-    AcmCall("acmStreamOpen", STREAM, 512, Some(0)),
-    AcmCall("acmStreamOpen", STREAM_QUERY, 512, None),
+    AcmCall("acmStreamOpen", STREAM, 0, None),
+    AcmCall("acmStreamOpen", STREAM_QUERY, 0, None),
     AcmCall("acmStreamOpen", STREAM_OF_DRIVER, 5, Some(0)),
     AcmCall("acmStreamOpen", STREAM_NO_OUT, 11, None),
     AcmCall("acmStreamOpen", STREAM_BAD_OUT, 11, None),

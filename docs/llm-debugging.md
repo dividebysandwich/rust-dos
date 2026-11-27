@@ -45,10 +45,10 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   still mixed and streamed. A run on a machine with no sound device
   plays on the null output too, with a window or without.
 - **OpenGL without a window:** the dummy video driver has no OpenGL, so
-  `voodoo_renderer=opengl` falls back to the software rasterizer. To run
-  the OpenGL renderer on the host's GPU, leave `SDL_VIDEO_DRIVER` unset
-  and pass `--hidden`: the window is made with its OpenGL context but
-  never shown.
+  `renderer=opengl` falls back to the software rasterizer. To run the
+  OpenGL renderer on the host's GPU, leave `SDL_VIDEO_DRIVER` unset and
+  pass `--hidden`: the window is made with its OpenGL context but never
+  shown.
 - **A smaller OpenGL:** `RUST_DOS_GL_MAX_TEXTURE_SIZE=1024` makes the
   3dfx renderer lay out a Banshee's or Voodoo3's memory as if OpenGL
   allowed textures of no more than 1024 texels a side, and
@@ -310,8 +310,9 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   `"dx"` and `"dy"` instead move by that much, as a captured mouse does:
   programs that read the PS/2 mouse themselves, such as Windows, only
   follow motion, so steer their pointer with these.
-  `/api/status` → `mouse` shows the driver's position and whether it is
-  installed.
+  `/api/status` → `mouse` shows the driver's position, whether it is
+  installed, and the cursor's `range` as min x, min y, max x, max y
+  (INT 33h AX=0007h and 0008h, or what the last reset or mode set gave).
 - **A held key repeats** as a PC keyboard's does, in emulated time: its
   make code (and keystroke) comes again 500 ms after it went down, then
   10.9 times a second, or at the rate a program set (command F3h, INT 16h
@@ -330,6 +331,10 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   refuse unknown fields the same way.
 - **Stop pending input:** `DELETE /api/input` clears whatever is still
   queued.
+- **Hotkeys:** keys sent here don't go through `[hotkeys]`. Ctrl+F12
+  (the settings window) and Ctrl+Shift+S (the sound visualizer) act as
+  they do in the `rust-dos` profile whatever the profile is, and every
+  other key goes to the machine, Ctrl+F1 too.
 - **The settings window** opens with `DOSCONFIG` at the prompt or
   `key {"key":"f12","mods":["ctrl"]}`, and closes with the same key or
   `esc`. While it is open the machine is paused, `/api/status` shows
@@ -602,11 +607,11 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   each with the physical register it is (`reg`), its `tag` (`valid`,
   `zero`, `special` or `empty`), its 80 `bits` and its `value` as a
   double (null for a NaN, an infinity or a number beyond a double's range,
-  0 for one below a double's normal range). With MMX it adds `mm`, MM0 to
-  MM7 as 16 hex digits (the low 64 bits of physical registers 0 to 7,
-  whatever the stack top); with SSE, `xmm` (each register's `bits` and its
-  four singles, `ps`, low lane first, null for a NaN or an infinity) and
-  `mxcsr`. They are read only.
+  the nearest denormal double or 0 for one below a double's normal
+  range). With MMX it adds `mm`, MM0 to MM7 as 16 hex digits (the low 64
+  bits of physical registers 0 to 7, whatever the stack top); with SSE,
+  `xmm` (each register's `bits` and its four singles, `ps`, low lane
+  first, null for a NaN or an infinity) and `mxcsr`. They are read only.
 - **Memory:**
   - Read with `GET /api/memory?addr=B800:0000&len=160`. `format` picks the
     reply: `hex` (the default) is a text dump in DEBUG's layout, `json` is
@@ -1124,7 +1129,8 @@ the mount names the delta file. `-inplace` writes the image itself.
   `triangles` and `lines_3d`, the last 3D command (`cmd_3d`), the
   subsystem status, and the overlay, if one is shown, `video.vga.crtc`
   with the standard CRTC registers, and `kbc` with the keyboard
-  controller's output buffer and queues.
+  controller's output buffer and queues and the keyboard's `typematic`
+  byte (command F3h's: bits 5-6 the delay, bits 0-4 the rate).
 - **The mouse:** Windows reads the PS/2 mouse's motion and accelerates
   it, so move in small relative steps (`{"action":"move","dx":10,"dy":-6}`)
   a few tenths of a second apart and read where the pointer went from
@@ -1183,7 +1189,7 @@ since the GPU cuts and culls them. So one scene counts more
 `primitives` with the OpenGL renderer than with the software one.
 
 `renderer` is what draws the card's triangles: `software`, or `OpenGL`
-with `toadforce_renderer` `auto` or `opengl` in a window that has
+with the setting `renderer` `auto` or `opengl` in a window that has
 OpenGL 3.2 (`--hidden` has it, `SDL_VIDEO_DRIVER=dummy` hasn't). `host`
 counts what the OpenGL renderer costs and misses:
 
@@ -1228,13 +1234,16 @@ counts what the OpenGL renderer costs and misses:
   vertices the GPU's vertex shader took to the screen, where the card
   transforms the others on the processor) and `transforming_programs`
   (the shader programs made for them), `surface_uploads` and
-  `texture_uploads` from card memory, `texture_converts` (images of
-  textures filled from a surface the GPU has, with nothing read
-  back), `clears` and `blits` done on the GPU, `presents` (frames the
-  window showed from the GPU's surface), the shader `programs`
-  compiled and `failed_programs`, the `surfaces` and `textures` it
-  holds, and `packed_565` (whether 16-bit targets are the GPU's 5-6-5
-  format).
+  `texture_uploads` from card memory, with `texture_images` (the
+  images, levels and cube faces, decoded for those),
+  `texture_converts` (images of textures filled from a surface the
+  GPU has, with nothing read back), `clears` and `blits` done on the
+  GPU, `presents` (frames the window showed from the GPU's surface),
+  the shader `programs` compiled and `failed_programs`, the
+  `surfaces` and `textures` it holds, the `framebuffers` it keeps for
+  its draws, clears and read-backs, `framebuffers_made` (each asked
+  once whether it is complete), and `packed_565` (whether 16-bit
+  targets are the GPU's 5-6-5 format).
 
 A run with `--deterministic` draws the card in software, so that its
 pictures are the same on every host. To compare the two renderers at
@@ -1308,18 +1317,18 @@ of and what each adds.
 
 With `voodoo=true` (CONFIGURATION.md's "3dfx Voodoo Graphics"),
 `/api/status` → `video.voodoo` shows the card: `output` (true while its
-picture is on the screen instead of the VGA's; `/api/screenshot` then
-shows it), `clock` (the video clock Glide turns on first), `base` (BAR0),
+picture is on the screen instead of the VGA's; `/api/screenshot` then shows
+it), `clock` (the video clock Glide turns on first), `base` (BAR0),
 `width`/`height` and `hz`, the `front` and `back` buffers, `pending_swaps`
 (swaps waiting for the retrace), `fifo_writes` behind them, `triangles`
-drawn, the `fbiInit` registers and `init_enable`, and `opengl` (true
-while `voodoo_renderer=opengl` draws the window's picture again). While it
-shows, `fps` counts its buffer swaps. With OpenGL (and `--hidden` or a
-window), `/api/screenshot` and the screen stream are OpenGL's picture,
-read back at the card's resolution; with `--deterministic`, and without
-OpenGL, they are the software rasterizer's. A game that detects no card
-usually left `fbiInit` at their power-on values (`00000410 00201102
-80000040 001E4000 00000001`); one that drew nothing has `triangles` 0.
+drawn, the `fbiInit` registers and `init_enable`, and `opengl` (true while
+`renderer=opengl` draws the window's picture again). While it shows, `fps`
+counts its buffer swaps. With OpenGL (and `--hidden` or a window),
+`/api/screenshot` and the screen stream are OpenGL's picture, read back at
+the card's resolution; with `--deterministic`, and without OpenGL, they are
+the software rasterizer's. A game that detects no card usually left
+`fbiInit` at their power-on values (`00000410 00201102 80000040 001E4000
+00000001`); one that drew nothing has `triangles` 0.
 
 - **Read-backs:** with `voodoo_readback=gpu`, `gpu_read_backs` counts the
   times the card's memory was brought up to OpenGL's pictures, and
@@ -1432,18 +1441,24 @@ what the program does, and `/api/status` → `activity` has its counts since
 start: `bursts` (writes to video memory the size of a frame, the frames a
 program copies there), `copies` (smaller bursts that reach across at least
 half the screen, frames copied as what changed; counted as frames for
-protected-mode programs only), `flips` (display start changes), `presents`
+protected-mode programs only), `window_copies` (the copies that redraw the
+same window of a quarter of the screen or more), `windows` (smaller bursts
+still that redraw such a window, a movie's pictures; counted as frames for
+protected-mode programs, and with `window_copies` for real-mode ones while
+they read from their drives), `flips` (display start changes), `presents`
 (what the built-in Windows drew on the screen for the program, its blits to
-the primary surface and GDI's drawing, in bursts that are a frame or a copy
-by the same rules), `polls` (key checks that found nothing, idle calls),
+the primary surface and GDI's drawing, in bursts that are a frame, a copy or
+a window by the same rules), `shown_windows` (the presents that were only a
+window's), `polls` (key checks that found nothing, idle calls),
 `status_reads` (port 3DAh) and `missed_retraces` (vertical retraces that
 began and ended between two reads of 3DAh less than a quarter of a frame
 apart: the program polled for one and an interrupt covered it), with
 `emulated_ns` to make rates of them. Sample it twice and divide: a game's
-frame rate at a few fixed speeds shows where it stops growing. `presents` count only what lands in the picture shown, not
-the copies to surfaces out of sight, and where there are any, they are the
-frames instead of the program's own bursts and copies, which may be the same
-frames drawn in video memory before they were shown. Start the emulator with
+frame rate at a few fixed speeds shows where it stops growing. `presents`
+count only what lands in the picture shown, not the copies to surfaces out
+of sight, and where there are any, they are the frames instead of the
+program's own bursts and copies, which may be the same frames drawn in video
+memory before they were shown. Start the emulator with
 `RUST_DOS_AUTO_TRACE=1` to have every measurement and the speed it chose
 printed to stderr, with `longest_frame`, the longest host frame during the
 measurement (`none` in a frontend that doesn't time its frames).
@@ -1573,6 +1588,19 @@ With `win32` on, a Win32 console program runs on the built-in Windows
   whether they found any or not; each gives back at most a batch, so
   many more searches than pages given back means the views have little
   left to give. Null until the built-in Windows has its memory.
+- `thread_times`: for each thread that has run (`id`, and `00000000`
+  for the idle loop, when no thread could run), the emulated
+  microseconds (`us`) and the instructions (`instructions`) it has had
+  while a Win32 program ran, since the first thread started or the
+  first switch after a load. Read it at two emulated times and take the
+  differences for each thread's share of the processor over that
+  window. `instructions` counts the passes of a busy-wait loop that the
+  idle skip skipped as if they had run, so a thread that spins shows
+  its whole turn there. The counts change at thread switches, as a
+  process ends and when this is read; nothing the machine does reads
+  them. When the last program ends and DOS's shell comes back, the
+  built-in Windows starts over and the list is empty: read it while
+  the program runs.
 
 `GET /api/win32/page_file` lists the pages of the running address space
 (`cr3`) that are in the page file, as `ranges` of pages next to each
@@ -1588,7 +1616,7 @@ breakpoints and watchpoints on pages in the page file.
 
 Ids, addresses and exit codes are 8-digit hex strings; handles and
 `last_error` are numbers. Pause the machine first for a view that
-holds still: the threads take turns as the timer's interrupts come.
+holds still: the threads take turns of 20 ms.
 
 `trace` is the `win32_trace` level: which calls of the built-in
 functions get a `[W32]` (or `[W16]`) line in the log. `collapsed`, the

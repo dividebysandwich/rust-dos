@@ -401,9 +401,16 @@ impl Cpu {
     /// Whether the shell's code runs: at SHELL_SEGMENT, in real mode. In
     /// protected mode the same number is a selector of a DOS extender's
     /// (DOS/4GW's code is 0070h), whose program is anything but idle. On a
-    /// booted system there is no shell (and IO.SYS runs at 0070h).
+    /// booted system there is no shell (and IO.SYS runs at 0070h). The
+    /// IRET that INT 01h, 03h and 04h point at (`shell::dos_iret`) is in
+    /// the shell's code too, but whatever raised the interrupt runs it: a
+    /// program, or a resident program's handler while the shell waits at
+    /// its prompt. A command line taken there would run inside the handler.
     pub fn in_shell_code(&self) -> bool {
-        self.dos_mode() && self.cs() == SHELL_SEGMENT && self.bus.boot.is_none()
+        self.dos_mode()
+            && self.cs() == SHELL_SEGMENT
+            && self.bus.boot.is_none()
+            && self.ip() != crate::shell::labels().int_iret
     }
 
     /// True while no program runs: the shell is at its prompt, or in the
@@ -419,7 +426,8 @@ impl Cpu {
             let frame = self.get_physical_addr(self.ss(), self.sp().wrapping_add(if waiting { 12 } else { 2 }));
             self.bus.read_16(frame)
         };
-        self.dos_mode() && (self.cs() == SHELL_SEGMENT || (self.cs() == 0xF000 && caller_cs() == SHELL_SEGMENT))
+        self.in_shell_code()
+            || (self.dos_mode() && self.cs() == 0xF000 && caller_cs() == SHELL_SEGMENT)
     }
 }
 
@@ -502,10 +510,7 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
             cpu.batch.clear();
             crate::video::print_string(cpu, "^C\r\n");
         } else if let Some(line) = cpu.batch.next_line(&cpu.environment) {
-            if line.echo {
-                crate::shell::show_prompt(cpu);
-                crate::video::print_string(cpu, &format!("{}\r\n", line.text));
-            }
+            crate::shell::echo_batch_line(cpu, &line);
             cpu.pending_command = Some(line.text);
             from_batch = true;
             cpu.bus.clock.stall(BATCH_LINE_NS);
@@ -540,11 +545,6 @@ fn shell_services(cpu: &mut Cpu) -> Shell {
     if cpu.state == CpuState::RebootShell {
         cpu.load_shell();
         cpu.state = CpuState::Running;
-
-        // Start the prompt on a new line.
-        if cpu.bus.read_8(0x0450) != 0 {
-            cpu.screen_only(|cpu| crate::video::print_string(cpu, "\r\n"));
-        }
         return Shell::Reloaded;
     }
 
@@ -571,6 +571,11 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
     // A leading '@' (which hides a batch line's echo) means nothing here.
     let cmd = cmd.trim_start();
     let cmd = cmd.strip_prefix('@').unwrap_or(cmd);
+    // COMMAND.COM goes back to its prompt through a CR LF once a command
+    // line has run (`shell::prompt_break`).
+    if !cmd.trim().is_empty() {
+        cpu.batch.crlf.command_ran = true;
+    }
     let stages = split_pipes(cmd);
     if stages.len() > 1 {
         return start_pipe(cpu, &stages);
@@ -768,7 +773,7 @@ pub fn take_redirections(line: &str) -> (String, Redirections) {
 fn write_redirected(cpu: &mut Cpu, redirect: &Redirections, captured: &[u8]) {
     let Some((path, append)) = &redirect.output else { return };
     match crate::disk::char_device(path) {
-        Some(crate::disk::CharDevice::Con) => return crate::video::print_cp437(cpu, captured, 0x07),
+        Some(crate::disk::CharDevice::Con) => return crate::video::print_console(cpu, captured),
         Some(device) => {
             if let Some(n) = device.com_port() {
                 for &byte in captured {
@@ -1292,9 +1297,21 @@ fn trap_after(cpu: &mut Cpu, instr: &Instruction) {
 
 /// An instruction at `phys_ip` faulted and was undone: deliver the fault,
 /// unless it is the #UD of an emulator service trap, which runs instead.
-/// Returns true for a service trap.
+/// Returns true for a service trap. A trap whose last bytes are on a page
+/// that isn't there takes that page's fault instead (`trap_page_missing`).
 pub(crate) fn after_fault(cpu: &mut Cpu, fault: Fault, ram: &[u8], phys_ip: usize) -> bool {
-    let service = fault == Fault::UD && service_trap(cpu, ram, phys_ip);
+    let service = if fault == Fault::UD {
+        service_trap(cpu, ram, phys_ip)
+    } else {
+        Ok(false)
+    };
+    let service = match service {
+        Ok(ran) => ran,
+        Err(page_fault) => {
+            cpu.raise(page_fault);
+            return false;
+        }
+    };
     if !service {
         cpu.raise(fault);
     }
@@ -1403,27 +1420,78 @@ pub(crate) fn is_service_trap(ram: &[u8], phys_ip: usize) -> bool {
 /// * `FE 3E nn nn`: the built-in Windows's (`win32::service`): its DLLs'
 ///   functions, and its system's traps in the ROM, the function's id the
 ///   word after it.
-fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
-    if phys_ip + 3 > ram.len() || ram[phys_ip] != 0xFE {
-        return false;
-    }
-    let vector = ram[phys_ip + 2];
-    if ram[phys_ip + 1] == crate::win32::TRAP {
-        return win32_trap(cpu, ram, phys_ip);
-    }
-    // The far-call services work in any mode, from the ROM (the Plug and
-    // Play BIOS's and APM's protected-mode entry points); the others in
-    // real and virtual-8086 mode.
-    let kind = ram[phys_ip + 1];
-    let allowed = match kind {
-        0x38 | 0x39 => !cpu.pm(),
-        0x3A => crate::bus::Bus::is_rom(phys_ip),
-        0x3B => crate::bus::Bus::is_rom(phys_ip) && crate::dpmi::accepts(cpu, vector),
-        _ => false,
+///
+/// Err with the page fault to raise when the trap's last bytes are on a
+/// page that isn't there (`trap_page_missing`).
+fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> Result<bool, Fault> {
+    let [first, kind, vector] = match trap_bytes(cpu, ram, phys_ip) {
+        Ok(bytes) => bytes,
+        Err(missing) => return trap_page_missing(cpu, ram, phys_ip, missing),
     };
-    if !allowed {
-        return false;
+    if first != 0xFE {
+        return Ok(false);
     }
+    if kind == crate::win32::TRAP {
+        return match trap_bytes(cpu, ram, phys_ip) {
+            Ok([_, _, lo, hi]) => Ok(win32_trap(cpu, phys_ip, u16::from_le_bytes([lo, hi]))),
+            Err(missing) => trap_page_missing(cpu, ram, phys_ip, missing),
+        };
+    }
+    if !trap_runs_here(cpu, kind, phys_ip) || kind == 0x3B && !crate::dpmi::accepts(cpu, vector) {
+        return Ok(false);
+    }
+    bop(cpu, kind, vector);
+    Ok(true)
+}
+
+/// Whether a trap of kind `kind` at `phys_ip` runs where the processor is
+/// now, as far as its first two bytes tell. The far-call services work in
+/// any mode, from the ROM (the Plug and Play BIOS's and APM's
+/// protected-mode entry points); the built-in Windows's from the ROM or
+/// the process's pages of stubs; the others in real and virtual-8086
+/// mode. The DPMI host's entry points look at their vector too
+/// (`dpmi::accepts`), and the built-in Windows at the id
+/// (`win32::accepts`).
+fn trap_runs_here(cpu: &Cpu, kind: u8, phys_ip: usize) -> bool {
+    match kind {
+        0x38 | 0x39 => !cpu.pm(),
+        0x3A | 0x3B => crate::bus::Bus::is_rom(phys_ip),
+        crate::win32::TRAP => {
+            crate::bus::Bus::is_rom(phys_ip) || crate::win32::in_stub_page(cpu, phys_ip)
+        }
+        _ => false,
+    }
+}
+
+/// The trap at `phys_ip`, whose bytes `trap_bytes` couldn't read
+/// (`missing`). Where its last bytes are on a page that isn't there and
+/// its first two are those of a trap that runs here, that page's fault,
+/// with CR2 its address, as the processor's fetch of an instruction's
+/// bytes takes it: the system puts the page there and the trap runs
+/// again. Otherwise it is the invalid opcode it encodes.
+fn trap_page_missing(
+    cpu: &mut Cpu,
+    ram: &[u8],
+    phys_ip: usize,
+    missing: Option<(Fault, u32)>,
+) -> Result<bool, Fault> {
+    let Some((fault, lin)) = missing else {
+        return Ok(false);
+    };
+    // Both bytes are in the first page unless the trap starts in its last
+    // byte, whose fetch takes the fault itself, for the ModR/M byte.
+    match ram.get(phys_ip..phys_ip + 2) {
+        Some(&[0xFE, kind]) if phys_ip & 0xFFF != 0xFFF && trap_runs_here(cpu, kind, phys_ip) => {
+            cpu.cr2 = lin;
+            Err(fault)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Run the service of kind `kind` (38h to 3Bh) and vector `vector`, whose
+/// trap is at CS:EIP and runs here (`service_trap`).
+fn bop(cpu: &mut Cpu, kind: u8, vector: u8) {
     // A loop being proven to change nothing (`idle`) may only use services
     // that work on RAM alone: the others keep state of their own, or reach
     // devices.
@@ -1465,13 +1533,13 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
             if let Some(before) = &before
                 && guest_page_fault(cpu, before)
             {
-                return true;
+                return;
             }
             if cpu.pm() {
                 // The service took the caller to protected mode (VCPI's
                 // switch, AX=DE0Ch): its frame is gone with the call.
                 flush_stale_tlb(cpu);
-                return true;
+                return;
             }
             let disk_time = cpu.bus.disk_io.take_pending();
             if cpu.hle_retry {
@@ -1510,7 +1578,7 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
             if let Some(before) = &before
                 && guest_page_fault(cpu, before)
             {
-                return true;
+                return;
             }
         }
         _ => {
@@ -1519,7 +1587,7 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
             if let Some(before) = &before
                 && guest_page_fault(cpu, before)
             {
-                return true;
+                return;
             }
         }
     }
@@ -1536,15 +1604,47 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     }
     // Services change what may interrupt (INT 33h's mouse event mask).
     cpu.bus.refresh_irq();
-    true
 }
 
-/// A trap of the built-in Windows (`service_trap`).
-fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
-    let Some(&[lo, hi]) = ram.get(phys_ip + 2..phys_ip + 4) else {
-        return false;
+/// The first `N` bytes of the trap at `phys_ip`, at CS:EIP, as the
+/// processor fetches them: a trap that begins near the end of a page goes
+/// on in the page its linear address goes on in, which with paging needn't
+/// be the next physical page. Each process has the built-in DLLs in pages
+/// of its own, taken from the pool wherever one is free, so a trap at the
+/// end of one of KERNEL32's pages can have its id anywhere in RAM. Err
+/// when the bytes aren't in RAM, with the fault and the linear address of
+/// the next page when that page isn't there (CR2 stays as it was). The
+/// debugger's trace reads an instruction's bytes across a page the same
+/// way (`debug::run::instruction_bytes`).
+fn trap_bytes<const N: usize>(
+    cpu: &mut Cpu,
+    ram: &[u8],
+    phys_ip: usize,
+) -> Result<[u8; N], Option<(Fault, u32)>> {
+    let mut bytes = [0; N];
+    let lin_ip = cpu.seg_cache(Seg::CS).base.wrapping_add(cpu.eip());
+    let paging = cpu.cr0 & CR0_PG != 0;
+    let in_page = if paging {
+        (0x1000 - (lin_ip & 0xFFF) as usize).min(N)
+    } else {
+        N
     };
-    let id = u16::from_le_bytes([lo, hi]);
+    bytes[..in_page].copy_from_slice(ram.get(phys_ip..phys_ip + in_page).ok_or(None)?);
+    if in_page < N {
+        // Looking doesn't change CR2, as for the fetch (`fetch_slow`).
+        let cr2 = cpu.cr2;
+        let user = cpu.cpl == 3;
+        let lin = lin_ip.wrapping_add(in_page as u32);
+        let next = cpu.lin_to_phys(lin, false, user);
+        cpu.cr2 = cr2;
+        let next = next.map_err(|fault| Some((fault, lin)))? as usize;
+        bytes[in_page..].copy_from_slice(ram.get(next..next + N - in_page).ok_or(None)?);
+    }
+    Ok(bytes)
+}
+
+/// The trap of the built-in Windows with id `id` (`service_trap`).
+fn win32_trap(cpu: &mut Cpu, phys_ip: usize, id: u16) -> bool {
     if !crate::win32::accepts(cpu, phys_ip, id) {
         return false;
     }
@@ -1579,7 +1679,15 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     // long the drive's noise goes on, so it starts from none and is
     // dropped when the call is done.
     cpu.bus.disk_io.clear();
+    // Timed only for `cycles=max` (`Bus::service_time`). A call made while
+    // the execution loop watches is in the watching's time already, which
+    // counts as the frame's own work (`Observe::take_watched`).
+    let timed = cpu.bus.service_time.is_some() && !cpu.bus.observe.in_watch();
+    let started = timed.then(web_time::Instant::now);
     crate::win32::service(cpu, id);
+    if let (Some(started), Some(total)) = (started, &mut cpu.bus.service_time) {
+        *total += started.elapsed();
+    }
     flush_stale_tlb(cpu);
     if observed {
         crate::idle::after_service(cpu);
@@ -1598,6 +1706,9 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     crate::win32::dosvm::start_pending(cpu);
     if reads_clock {
         crate::idle::clock_read(cpu, trap.0, trap.1);
+    }
+    if std::mem::take(&mut cpu.bus.observe.peeked) {
+        crate::idle::message_peeked(cpu, trap.0, trap.1);
     }
     if std::mem::take(&mut cpu.bus.observe.polled) {
         crate::idle::service_polled(cpu, trap.0, trap.1);

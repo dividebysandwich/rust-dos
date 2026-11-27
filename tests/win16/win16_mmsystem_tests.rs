@@ -14,6 +14,13 @@ const WAVE_OUT_UNPREPARE_HEADER: u16 = 407;
 const WAVE_OUT_WRITE: u16 = 408;
 const WAVE_OUT_RESET: u16 = 411;
 const WAVE_OUT_GET_POSITION: u16 = 412;
+const WAVE_OUT_GET_DEV_CAPS: u16 = 402;
+const WAVE_OUT_GET_ID: u16 = 420;
+const MIDI_OUT_GET_ID: u16 = 215;
+const AUX_GET_NUM_DEVS: u16 = 350;
+const AUX_GET_DEV_CAPS: u16 = 351;
+const AUX_GET_VOLUME: u16 = 352;
+const AUX_SET_VOLUME: u16 = 353;
 const TIME_GET_SYSTEM_TIME: u16 = 601;
 const TIME_GET_DEV_CAPS: u16 = 604;
 const GET_CURRENT_TASK: u16 = 36;
@@ -223,6 +230,140 @@ fn a_wave_position_gets_windows_3_1s_eight_bytes_and_no_more() {
         .emit(&[0xB0, 0x01])
         .exit_al();
     let (exit, log) = run("wave_position", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn wave_out_get_id_writes_a_16_bit_uint() {
+    // waveOutGetID of an open device, as Battle Beast calls it: 0 in the
+    // word, the word after it left alone. A handle that isn't one gets
+    // MMSYSERR_INVALHANDLE and nothing written, and so does midiOutGetID
+    // with a handle that isn't a MIDI device's.
+    let mut code = Code::new();
+    open_wave(&mut code, |code| _ = code.push(0), 0, 7);
+    mark(&mut code);
+    push_word(&mut code, HANDLE);
+    code.emit(&[0x1E])
+        .push(TIME)
+        .call("MMSYSTEM", WAVE_OUT_GET_ID);
+    expect_ax(&mut code, 0, 2);
+    expect(&mut code, TIME, 0, true, 3);
+    expect(&mut code, TIME + 2, 0xFFFF, true, 4);
+    set(&mut code, TIME, 0xEEEE);
+    code.push(0x1234)
+        .emit(&[0x1E])
+        .push(TIME)
+        .call("MMSYSTEM", WAVE_OUT_GET_ID);
+    expect_ax(&mut code, 5, 5);
+    expect(&mut code, TIME, 0xEEEE, true, 6);
+    code.push(0x1234)
+        .emit(&[0x1E])
+        .push(TIME)
+        .call("MMSYSTEM", MIDI_OUT_GET_ID);
+    expect_ax(&mut code, 5, 8);
+    expect(&mut code, TIME, 0xEEEE, true, 9);
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", WAVE_OUT_CLOSE)
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let (exit, log) = run("wave_get_id", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// Where the aux test puts its AUXCAPS16 (44 bytes) and the word after.
+const CAPS: u16 = 0x80;
+
+#[test]
+fn aux_devices_are_winmms_with_16_bit_caps() {
+    // auxGetNumDevs counts WINMM's devices; auxGetDevCaps fills the 44
+    // bytes of an AUXCAPS16 (a WORD version at 4, the name at 6, the
+    // technology at 38, dwSupport at 40 with AUXCAPS_VOLUME) and not the
+    // word after; AUX_MAPPER is a bad id; auxSetVolume and auxGetVolume
+    // set and read a device's volume as a DWORD.
+    let mut code = Code::new();
+    code.call("MMSYSTEM", AUX_GET_NUM_DEVS);
+    expect_nonzero(&mut code, 2);
+    set(&mut code, CAPS + 40, 0);
+    set(&mut code, CAPS + 44, 0xBEEF);
+    code.push(0)
+        .emit(&[0x1E])
+        .push(CAPS)
+        .push(44)
+        .call("MMSYSTEM", AUX_GET_DEV_CAPS);
+    expect_ax(&mut code, 0, 3);
+    // Device 0 is "Sound Card Aux: Wave", AUXCAPS_WAVE (32), version 4.0.
+    expect(&mut code, CAPS + 4, 0x0400, true, 12);
+    expect(&mut code, CAPS + 6, u16::from_le_bytes(*b"So"), true, 13);
+    expect(&mut code, CAPS + 38, 32, true, 14);
+    code.emit(&[0xF6, 0x06, lo(CAPS + 40), hi(CAPS + 40), 0x01]) // test byte [..],1
+        .emit(&[0x75, 0x06]) // jnz over the next
+        .emit(&[0xB0, 4, 0xB4, 0x4C, 0xCD, 0x21]);
+    expect(&mut code, CAPS + 44, 0xBEEF, true, 5);
+    code.push(0xFFFF)
+        .emit(&[0x1E])
+        .push(CAPS)
+        .push(44)
+        .call("MMSYSTEM", AUX_GET_DEV_CAPS);
+    expect_ax(&mut code, 2, 6); // MMSYSERR_BADDEVICEID
+    code.push(0xFFFF)
+        .push(0x1234)
+        .push(0x5678)
+        .call("MMSYSTEM", AUX_SET_VOLUME);
+    expect_ax(&mut code, 2, 15);
+    code.push(0)
+        .push(0x1234)
+        .push(0x5678)
+        .call("MMSYSTEM", AUX_SET_VOLUME);
+    expect_ax(&mut code, 0, 7);
+    mark(&mut code);
+    code.push(0)
+        .emit(&[0x1E])
+        .push(TIME)
+        .call("MMSYSTEM", AUX_GET_VOLUME);
+    expect_ax(&mut code, 0, 8);
+    expect(&mut code, TIME, 0x5678, true, 9);
+    expect(&mut code, TIME + 2, 0x1234, true, 10);
+    expect(&mut code, TIME + 4, 0xFFFF, true, 11);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let (exit, log) = run("aux_devices", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// Call the MMSYSTEM function `ordinal` with `first` (a handle or a
+/// device) and a null pointer, and `size` after it when there is one;
+/// end with `fail` unless AX is `error`.
+fn null_call(code: &mut Code, ordinal: u16, first: u16, size: Option<u16>, error: u16, fail: u8) {
+    code.push(first).push(0).push(0);
+    if let Some(size) = size {
+        code.push(size);
+    }
+    code.call("MMSYSTEM", ordinal);
+    expect_ax(code, error, fail);
+}
+
+#[test]
+fn a_null_pointer_is_refused_after_the_handle_or_device() {
+    // A null pointer is MMSYSERR_INVALPARAM (11) for a good handle or
+    // device, and the handle's MMSYSERR_INVALHANDLE (5) or the device's
+    // MMSYSERR_BADDEVICEID (2) for a bad one; nothing is written at
+    // linear 0.
+    let mut code = Code::new();
+    open_wave(&mut code, |code| _ = code.push(0), 0, 2);
+    push_word(&mut code, HANDLE);
+    code.push(0).push(0).call("MMSYSTEM", WAVE_OUT_GET_ID);
+    expect_ax(&mut code, 11, 3);
+    null_call(&mut code, WAVE_OUT_GET_ID, 0x1234, None, 5, 4);
+    null_call(&mut code, WAVE_OUT_GET_DEV_CAPS, 0, Some(52), 11, 5);
+    null_call(&mut code, WAVE_OUT_GET_DEV_CAPS, 0x1234, Some(52), 2, 6);
+    null_call(&mut code, AUX_GET_DEV_CAPS, 0, Some(44), 11, 7);
+    null_call(&mut code, AUX_GET_DEV_CAPS, 0xFFFF, Some(44), 2, 8);
+    null_call(&mut code, AUX_GET_VOLUME, 0, None, 11, 9);
+    null_call(&mut code, AUX_GET_VOLUME, 0xFFFF, None, 2, 10);
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", WAVE_OUT_CLOSE)
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let (exit, log) = run("null_pointers", program(&code, CODE));
     assert_eq!(exit, 1, "{log}");
 }
 
@@ -438,11 +579,11 @@ const FIRST: u16 = 0x22;
 const SECOND: u16 = 0x24;
 const DONE_P1: u16 = 0x26;
 
-/// A wave callback function, `void CALLBACK f(HWAVEOUT, UINT, DWORD,
-/// DWORD, DWORD)`, which counts its calls in SS:CALLS, keeps the
-/// messages of the first two in SS:FIRST and SS:SECOND, and MM_WOM_DONE's
-/// dwParam1 in SS:DONE_P1.
-fn wave_callback(code: &mut Code) -> u16 {
+/// A wave or MIDI callback function, `void CALLBACK f(HANDLE, UINT,
+/// DWORD, DWORD, DWORD)`, which counts its calls in SS:CALLS, keeps the
+/// messages of the first two in SS:FIRST and SS:SECOND, and the dwParam1
+/// of `done` (MM_WOM_DONE or MM_MOM_DONE) in SS:DONE_P1.
+fn callback_function(code: &mut Code, done: u16) -> u16 {
     let at = code.here();
     #[rustfmt::skip]
     let bytes = [
@@ -457,7 +598,7 @@ fn wave_callback(code: &mut Code) -> u16 {
         0x36, 0xA3, lo(SECOND), hi(SECOND), // mov ss:[SECOND],ax
         // not_second:
         0x36, 0xFF, 0x06, lo(CALLS), hi(CALLS), // inc word ss:[CALLS]
-        0x3D, lo(MM_WOM_DONE), hi(MM_WOM_DONE), // cmp ax,MM_WOM_DONE
+        0x3D, lo(done), hi(done), // cmp ax,done
         0x75, 0x0E, // jne end
         0x8B, 0x46, 0x0A, // mov ax,[bp+0Ah]: dwParam1's low word
         0x36, 0xA3, lo(DONE_P1), hi(DONE_P1), // mov ss:[DONE_P1],ax
@@ -532,9 +673,506 @@ fn a_wave_callback_function_is_called_with_the_programs_header() {
     expect_ax(&mut code, 0, 14);
     expect(&mut code, CALLS, 4, true, 9);
     code.emit(&[0xB0, 0x01]).exit_al();
-    let callback = wave_callback(&mut code);
+    let callback = callback_function(&mut code, MM_WOM_DONE);
     code.patch(callback_at, callback);
     let (exit, log) = run("wave_callback", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+const MIDI_OUT_GET_NUM_DEVS: u16 = 201;
+const MIDI_OUT_GET_DEV_CAPS: u16 = 202;
+const MIDI_OUT_GET_ERROR_TEXT: u16 = 203;
+const MIDI_OUT_OPEN: u16 = 204;
+const MIDI_OUT_CLOSE: u16 = 205;
+const MIDI_OUT_PREPARE_HEADER: u16 = 206;
+const MIDI_OUT_UNPREPARE_HEADER: u16 = 207;
+const MIDI_OUT_SHORT_MSG: u16 = 208;
+const MIDI_OUT_LONG_MSG: u16 = 209;
+const MIDI_OUT_RESET: u16 = 210;
+const MIDI_OUT_GET_VOLUME: u16 = 211;
+const MIDI_OUT_SET_VOLUME: u16 = 212;
+const WAVE_IN_GET_NUM_DEVS: u16 = 501;
+const WAVE_IN_GET_DEV_CAPS: u16 = 502;
+const WAVE_IN_OPEN: u16 = 504;
+const WAVE_IN_CLOSE: u16 = 505;
+const WAVE_IN_MESSAGE: u16 = 514;
+const MIDI_IN_GET_NUM_DEVS: u16 = 301;
+const MIDI_IN_GET_DEV_CAPS: u16 = 302;
+const MIDI_IN_OPEN: u16 = 304;
+const MIDI_IN_CLOSE: u16 = 305;
+
+/// The MIDI callback messages.
+const MM_MOM_OPEN: u16 = 0x3C7;
+const MM_MOM_CLOSE: u16 = 0x3C8;
+const MM_MOM_DONE: u16 = 0x3C9;
+
+#[test]
+fn midi_out_devices_are_winmms_with_16_bit_caps() {
+    // midiOutGetNumDevs counts WINMM's devices. midiOutGetDevCaps fills
+    // the 50 bytes of a MIDIOUTCAPS16 and not the word after: a WORD
+    // version at 4, the name at 6, wTechnology at 38 (MOD_SYNTH, 2),
+    // wVoices at 40, wChannelMask at 44 and dwSupport at 46
+    // (MIDICAPS_VOLUME, LRVOLUME and STREAM). MIDI_MAPPER (FFFFh) is
+    // MOD_MAPPER (5), and device 7 a bad id. The volume set is read back
+    // as a DWORD, and midiOutGetErrorText has a text. With no input
+    // device, waveInGetNumDevs and midiInGetNumDevs are 0, the
+    // GetDevCaps and Open functions get MMSYSERR_BADDEVICEID, and
+    // waveInClose, waveInMessage and midiInClose MMSYSERR_INVALHANDLE.
+    // Exit code 1, or the check that failed.
+    let mut code = Code::new();
+    code.call("MMSYSTEM", MIDI_OUT_GET_NUM_DEVS);
+    expect_nonzero(&mut code, 2);
+    set(&mut code, CAPS + 38, 0xEEEE);
+    set(&mut code, CAPS + 50, 0xBEEF);
+    code.push(0)
+        .emit(&[0x1E])
+        .push(CAPS)
+        .push(50)
+        .call("MMSYSTEM", MIDI_OUT_GET_DEV_CAPS);
+    expect_ax(&mut code, 0, 3);
+    expect(&mut code, CAPS + 4, 0x0400, true, 12);
+    expect(&mut code, CAPS + 6, u16::from_le_bytes(*b"MP"), true, 13);
+    expect(&mut code, CAPS + 38, 2, true, 14);
+    expect(&mut code, CAPS + 40, 32, true, 15);
+    expect(&mut code, CAPS + 44, 0xFFFF, true, 16);
+    expect(&mut code, CAPS + 46, 0x000B, true, 17);
+    expect(&mut code, CAPS + 48, 0, true, 18);
+    expect(&mut code, CAPS + 50, 0xBEEF, true, 4);
+    code.push(0xFFFF)
+        .emit(&[0x1E])
+        .push(CAPS)
+        .push(50)
+        .call("MMSYSTEM", MIDI_OUT_GET_DEV_CAPS);
+    expect_ax(&mut code, 0, 5);
+    expect(&mut code, CAPS + 38, 5, true, 6);
+    code.push(7)
+        .emit(&[0x1E])
+        .push(CAPS)
+        .push(50)
+        .call("MMSYSTEM", MIDI_OUT_GET_DEV_CAPS);
+    expect_ax(&mut code, 2, 7); // MMSYSERR_BADDEVICEID
+    code.push(0)
+        .push(0x1234)
+        .push(0x5678)
+        .call("MMSYSTEM", MIDI_OUT_SET_VOLUME);
+    expect_ax(&mut code, 0, 8);
+    mark(&mut code);
+    code.push(0)
+        .emit(&[0x1E])
+        .push(TIME)
+        .call("MMSYSTEM", MIDI_OUT_GET_VOLUME);
+    expect_ax(&mut code, 0, 9);
+    expect(&mut code, TIME, 0x5678, true, 10);
+    expect(&mut code, TIME + 2, 0x1234, true, 10);
+    expect(&mut code, TIME + 4, 0xFFFF, true, 10);
+    set(&mut code, CAPS, 0);
+    code.push(6) // MMSYSERR_NODRIVER
+        .emit(&[0x1E])
+        .push(CAPS)
+        .push(50)
+        .call("MMSYSTEM", MIDI_OUT_GET_ERROR_TEXT);
+    expect_ax(&mut code, 0, 11);
+    expect(&mut code, CAPS, 0, false, 11);
+    code.call("MMSYSTEM", WAVE_IN_GET_NUM_DEVS);
+    expect_ax(&mut code, 0, 20);
+    code.push(0)
+        .emit(&[0x1E])
+        .push(CAPS)
+        .push(48)
+        .call("MMSYSTEM", WAVE_IN_GET_DEV_CAPS);
+    expect_ax(&mut code, 2, 21);
+    code.emit(&[0x1E]) // push ds
+        .push(HANDLE)
+        .push(0xFFFF) // WAVE_MAPPER
+        .emit(&[0x1E])
+        .push(FORMAT)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .call("MMSYSTEM", WAVE_IN_OPEN);
+    expect_ax(&mut code, 2, 22);
+    code.push(0x1234).call("MMSYSTEM", WAVE_IN_CLOSE);
+    expect_ax(&mut code, 5, 23);
+    code.push(0x1234)
+        .push(0x0400) // MM_USER
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .call("MMSYSTEM", WAVE_IN_MESSAGE);
+    expect_ax(&mut code, 5, 24);
+    code.call("MMSYSTEM", MIDI_IN_GET_NUM_DEVS);
+    expect_ax(&mut code, 0, 25);
+    code.push(0)
+        .emit(&[0x1E])
+        .push(CAPS)
+        .push(44)
+        .call("MMSYSTEM", MIDI_IN_GET_DEV_CAPS);
+    expect_ax(&mut code, 2, 26);
+    code.emit(&[0x1E]) // push ds
+        .push(HANDLE)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0)
+        .call("MMSYSTEM", MIDI_IN_OPEN);
+    expect_ax(&mut code, 2, 27);
+    code.push(0x1234).call("MMSYSTEM", MIDI_IN_CLOSE);
+    expect_ax(&mut code, 5, 28);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let (exit, log) = run("midi_caps", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// Open MIDI device `device` into HANDLE, with `callback` (what pushes
+/// it, a DWORD) told as `flags` (their high word) say; end with `fail`
+/// if it can't.
+fn open_midi(code: &mut Code, device: u16, callback: impl FnOnce(&mut Code), flags: u16, fail: u8) {
+    code.emit(&[0x1E]) // push ds
+        .push(HANDLE)
+        .push(device);
+    callback(code);
+    code.push(0)
+        .push(0) // instance
+        .push(flags)
+        .push(0)
+        .call("MMSYSTEM", MIDI_OUT_OPEN);
+    expect_ax(code, 0, fail);
+}
+
+/// A MIDIHDR at HEADER of the 6 bytes of a General MIDI System On
+/// message at SAMPLES, its lpData the program's 16:16 pointer.
+fn midi_header(code: &mut Code) {
+    for i in 0..14 {
+        set(code, HEADER + 2 * i, 0);
+    }
+    set(code, SAMPLES, 0x7EF0);
+    set(code, SAMPLES + 2, 0x097F);
+    set(code, SAMPLES + 4, 0xF701);
+    set(code, HEADER, SAMPLES);
+    set_seg(code, HEADER + 2, true);
+    set(code, HEADER + 4, 6);
+}
+
+/// Call the MIDI function `ordinal` with the device and the header at
+/// HEADER, `size` bytes; end with `fail` unless it returns `result`.
+fn midi_header_call(code: &mut Code, ordinal: u16, size: u16, result: u16, fail: u8) {
+    push_word(code, HANDLE);
+    code.emit(&[0x1E])
+        .push(HEADER)
+        .push(size)
+        .call("MMSYSTEM", ordinal);
+    expect_ax(code, result, fail);
+}
+
+#[test]
+fn a_midi_callback_function_is_called_with_the_programs_header() {
+    // MIDI output through the MIDI mapper with CALLBACK_FUNCTION, as
+    // Battle Beast plays its music: the function gets MM_MOM_OPEN before
+    // midiOutOpen returns, and midiOutGetID gives MIDI_MAPPER as a word.
+    // A note goes out with midiOutShortMsg. A System Exclusive message
+    // goes out with midiOutLongMsg from a 28-byte MIDIHDR whose lpData
+    // is the program's 16:16 pointer, which stays as it was: only
+    // dwFlags change (MHDR_PREPARED, then MHDR_DONE as well, then
+    // MHDR_DONE alone once unprepared). MM_MOM_DONE, with the program's
+    // pointer to the header, comes before midiOutLongMsg returns, and
+    // MM_MOM_CLOSE before midiOutClose does. A header shorter than
+    // Windows 3.1's is MMSYSERR_INVALPARAM. Exit code 1, or the check
+    // that failed.
+    let mut code = Code::new();
+    for at in [CALLS, FIRST, SECOND, DONE_P1, DONE_P1 + 2] {
+        set(&mut code, at, 0);
+    }
+    let mut callback_at = 0;
+    open_midi(
+        &mut code,
+        0xFFFF, // MIDI_MAPPER
+        |code| {
+            callback_at = code.here() + 2;
+            code.push_far(0);
+        },
+        CALLBACK_FUNCTION,
+        2,
+    );
+    expect(&mut code, CALLS, 1, true, 3);
+    expect(&mut code, FIRST, MM_MOM_OPEN, true, 3);
+    set(&mut code, TIME, 0xEEEE);
+    set(&mut code, TIME + 2, 0x1111);
+    push_word(&mut code, HANDLE);
+    code.emit(&[0x1E])
+        .push(TIME)
+        .call("MMSYSTEM", MIDI_OUT_GET_ID);
+    expect_ax(&mut code, 0, 4);
+    expect(&mut code, TIME, 0xFFFF, true, 5);
+    expect(&mut code, TIME + 2, 0x1111, true, 5);
+    // Note on: middle C, velocity 127, on channel 1.
+    push_word(&mut code, HANDLE);
+    code.push(0x007F)
+        .push(0x3C90)
+        .call("MMSYSTEM", MIDI_OUT_SHORT_MSG);
+    expect_ax(&mut code, 0, 6);
+    midi_header(&mut code);
+    midi_header_call(&mut code, MIDI_OUT_PREPARE_HEADER, 20, 11, 7);
+    midi_header_call(&mut code, MIDI_OUT_PREPARE_HEADER, 28, 0, 8);
+    expect_header(&mut code, 0x02, 20);
+    midi_header_call(&mut code, MIDI_OUT_LONG_MSG, 28, 0, 9);
+    expect_header(&mut code, 0x03, 22);
+    expect(&mut code, CALLS, 2, true, 10);
+    expect(&mut code, SECOND, MM_MOM_DONE, true, 10);
+    expect(&mut code, DONE_P1, HEADER, true, 11);
+    expect_ds(&mut code, DONE_P1 + 2, 11);
+    midi_header_call(&mut code, MIDI_OUT_UNPREPARE_HEADER, 28, 0, 12);
+    expect_header(&mut code, 0x01, 24);
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", MIDI_OUT_RESET);
+    expect_ax(&mut code, 0, 13);
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", MIDI_OUT_CLOSE);
+    expect_ax(&mut code, 0, 14);
+    expect(&mut code, CALLS, 3, true, 15);
+    // The handle is gone.
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", MIDI_OUT_CLOSE);
+    expect_ax(&mut code, 5, 16);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let callback = callback_function(&mut code, MM_MOM_DONE);
+    code.patch(callback_at, callback);
+    let (exit, log) = run("midi_callback", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// Where `nested_long_msg_callback` keeps how deep its calls are, the
+/// deepest they went, and the MM_MOM_DONEs it got.
+const DEPTH: u16 = 0x2A;
+const MAX_DEPTH: u16 = 0x2C;
+const DONES: u16 = 0x2E;
+
+/// A MIDI callback function that counts how deep its calls nest in
+/// SS:DEPTH and SS:MAX_DEPTH and its MM_MOM_DONEs in SS:DONES, and sends
+/// the header of the first MM_MOM_DONE again with midiOutLongMsg, as a
+/// program that sends a SysEx from the callback does.
+fn nested_long_msg_callback(code: &mut Code) -> u16 {
+    let at = code.here();
+    #[rustfmt::skip]
+    let head = [
+        0x55, 0x8B, 0xEC, // push bp; mov bp,sp
+        0x36, 0xFF, 0x06, lo(DEPTH), hi(DEPTH), // inc word ss:[DEPTH]
+        0x36, 0xA1, lo(DEPTH), hi(DEPTH), // mov ax,ss:[DEPTH]
+        0x36, 0x3B, 0x06, lo(MAX_DEPTH), hi(MAX_DEPTH), // cmp ax,ss:[MAX_DEPTH]
+        0x76, 0x04, // jbe not_deeper
+        0x36, 0xA3, lo(MAX_DEPTH), hi(MAX_DEPTH), // mov ss:[MAX_DEPTH],ax
+        // not_deeper:
+        0x8B, 0x46, 0x12, // mov ax,[bp+12h]: the message
+        0x3D, lo(MM_MOM_DONE), hi(MM_MOM_DONE), // cmp ax,MM_MOM_DONE
+        0x75, 0x1E, // jne end
+        0x36, 0xFF, 0x06, lo(DONES), hi(DONES), // inc word ss:[DONES]
+        0x36, 0x83, 0x3E, lo(DONES), hi(DONES), 0x01, // cmp word ss:[DONES],1
+        0x75, 0x11, // jne end
+        0xFF, 0x76, 0x14, // push word [bp+14h]: the handle
+        0xFF, 0x76, 0x0C, // push word [bp+0Ch]: dwParam1, the header
+        0xFF, 0x76, 0x0A, // push word [bp+0Ah]
+    ];
+    code.emit(&head)
+        .push(28)
+        .call("MMSYSTEM", MIDI_OUT_LONG_MSG);
+    #[rustfmt::skip]
+    let end = [
+        // end:
+        0x36, 0xFF, 0x0E, lo(DEPTH), hi(DEPTH), // dec word ss:[DEPTH]
+        0x5D, 0xCA, 0x10, 0x00, // pop bp; retf 10h
+    ];
+    code.emit(&end);
+    at
+}
+
+#[test]
+fn callback_functions_are_not_called_inside_each_other() {
+    // A callback function that calls midiOutLongMsg, here for the
+    // MM_MOM_DONE of an earlier one, isn't called again before it
+    // returns: the MM_MOM_DONE of its own message comes after it
+    // returns, and still before the program's midiOutLongMsg returns.
+    // Exit code 1, 5 for MM_MOM_DONEs that didn't come, 6 for calls
+    // inside each other, or the call that failed.
+    let mut code = Code::new();
+    for at in [DEPTH, MAX_DEPTH, DONES] {
+        set(&mut code, at, 0);
+    }
+    let mut callback_at = 0;
+    open_midi(
+        &mut code,
+        0xFFFF, // MIDI_MAPPER
+        |code| {
+            callback_at = code.here() + 2;
+            code.push_far(0);
+        },
+        CALLBACK_FUNCTION,
+        2,
+    );
+    midi_header(&mut code);
+    midi_header_call(&mut code, MIDI_OUT_PREPARE_HEADER, 28, 0, 3);
+    midi_header_call(&mut code, MIDI_OUT_LONG_MSG, 28, 0, 4);
+    expect(&mut code, DONES, 2, true, 5);
+    expect(&mut code, MAX_DEPTH, 1, true, 6);
+    expect_header(&mut code, 0x03, 7);
+    midi_header_call(&mut code, MIDI_OUT_UNPREPARE_HEADER, 28, 0, 9);
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", MIDI_OUT_CLOSE);
+    expect_ax(&mut code, 0, 10);
+    expect(&mut code, MAX_DEPTH, 1, true, 11);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let callback = nested_long_msg_callback(&mut code);
+    code.patch(callback_at, callback);
+    let (exit, log) = run("midi_nested", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// PeekMessage(DS:MSG, any window, `msg`, `msg`, PM_REMOVE); end with
+/// `fail` if there is none.
+fn peek(code: &mut Code, msg: u16, fail: u8) {
+    code.emit(&[0x1E]) // push ds
+        .push(MSG)
+        .push(0) // any window
+        .push(msg)
+        .push(msg)
+        .push(1) // PM_REMOVE
+        .call("USER", PEEK_MESSAGE);
+    expect_nonzero(code, fail);
+}
+
+#[test]
+fn a_task_is_posted_mm_mom_done_with_the_programs_header() {
+    // MIDI device 0 opened with CALLBACK_TASK: the task gets MM_MOM_OPEN,
+    // MM_MOM_DONE for the header midiOutLongMsg sent, its lParam the
+    // program's 16:16 pointer to the header, and MM_MOM_CLOSE. Exit code
+    // 1, or the check that failed.
+    let mut code = Code::new();
+    code.call("KERNEL", GET_CURRENT_TASK)
+        .emit(&[0xA3, lo(HWND), hi(HWND)]); // mov [HWND],ax: the task
+    open_midi(
+        &mut code,
+        0,
+        |code| {
+            code.push(0);
+            push_word(code, HWND);
+        },
+        CALLBACK_TASK,
+        2,
+    );
+    peek(&mut code, MM_MOM_OPEN, 3);
+    midi_header(&mut code);
+    midi_header_call(&mut code, MIDI_OUT_PREPARE_HEADER, 28, 0, 4);
+    midi_header_call(&mut code, MIDI_OUT_LONG_MSG, 28, 0, 5);
+    peek(&mut code, MM_MOM_DONE, 6);
+    expect(&mut code, MSG + 6, HEADER, true, 7);
+    expect_ds(&mut code, MSG + 8, 7);
+    midi_header_call(&mut code, MIDI_OUT_UNPREPARE_HEADER, 28, 0, 8);
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", MIDI_OUT_CLOSE);
+    expect_ax(&mut code, 0, 9);
+    peek(&mut code, MM_MOM_CLOSE, 10);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let (exit, log) = run("midi_task", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+const TIME_SET_EVENT: u16 = 602;
+const TIME_KILL_EVENT: u16 = 603;
+
+/// A timer's function, `void CALLBACK f(UINT id, UINT msg, DWORD user,
+/// DWORD, DWORD)`, which counts its calls in SS:CALLS and keeps the last
+/// call's id in SS:FIRST and the low word of its user's DWORD in
+/// SS:SECOND.
+fn timer_callback(code: &mut Code) -> u16 {
+    let at = code.here();
+    #[rustfmt::skip]
+    let bytes = [
+        0x55, 0x8B, 0xEC, // push bp; mov bp,sp
+        0x36, 0xFF, 0x06, lo(CALLS), hi(CALLS), // inc word ss:[CALLS]
+        0x8B, 0x46, 0x14, // mov ax,[bp+14h]: the id
+        0x36, 0xA3, lo(FIRST), hi(FIRST), // mov ss:[FIRST],ax
+        0x8B, 0x46, 0x0E, // mov ax,[bp+0Eh]: the user's low word
+        0x36, 0xA3, lo(SECOND), hi(SECOND), // mov ss:[SECOND],ax
+        0x5D, 0xCA, 0x10, 0x00, // pop bp; retf 10h
+    ];
+    code.emit(&bytes);
+    at
+}
+
+/// Ask for messages with PeekMessage until SS:CALLS is `calls`; end with
+/// `fail` if it isn't after 65535 asks.
+fn peek_until_calls(code: &mut Code, calls: u8, fail: u8) {
+    code.emit(&[0xBE, 0xFF, 0xFF]); // mov si,0FFFFh
+    let ask = code.here();
+    code.emit(&[0x1E]) // push ds
+        .push(MSG)
+        .push(0) // any window
+        .push(0)
+        .push(0)
+        .push(1) // PM_REMOVE
+        .call("USER", PEEK_MESSAGE)
+        .emit(&[0x83, 0x3E, lo(CALLS), hi(CALLS), calls]) // cmp word [CALLS],calls
+        .emit(&[0x74, 0x09]) // je over the rest
+        .emit(&[0x4E]); // dec si
+    let back = ask as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x75, back as i8 as u8]) // jnz ask
+        .emit(&[0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21]); // mov al,fail; exit
+}
+
+/// timeSetEvent(`delay` ms, 1 ms, the function at `callback`'s place,
+/// 1234_5678h, `flags`); its id goes to HANDLE, and the program ends
+/// with `fail` if there is none. Returns where the function's offset
+/// goes.
+fn set_timer(code: &mut Code, delay: u16, flags: u16, fail: u8) -> u16 {
+    code.push(delay).push(1);
+    let callback_at = code.here() + 2;
+    code.push_far(0)
+        .push(0x1234)
+        .push(0x5678)
+        .push(flags)
+        .call("MMSYSTEM", TIME_SET_EVENT)
+        .emit(&[0xA3, lo(HANDLE), hi(HANDLE)]); // mov [HANDLE],ax
+    expect_nonzero(code, fail);
+    callback_at
+}
+
+#[test]
+fn a_timers_function_is_called_by_its_task() {
+    // timeSetEvent's one-shot timer calls its function once, with the
+    // timer's id and the user's DWORD, as Battle Beast's MIDI sequencer
+    // sets one for each event of its songs; the task makes the call as
+    // it asks for messages. A periodic timer calls it until
+    // timeKillEvent, which succeeds once. Exit code 1, or the check
+    // that failed.
+    let mut code = Code::new();
+    for at in [CALLS, FIRST, SECOND] {
+        set(&mut code, at, 0);
+    }
+    let one_shot = set_timer(&mut code, 2, 0, 2);
+    peek_until_calls(&mut code, 1, 3);
+    code.emit(&[0xA1, lo(HANDLE), hi(HANDLE)]) // mov ax,[HANDLE]
+        .emit(&[0x3B, 0x06, lo(FIRST), hi(FIRST)]) // cmp ax,[FIRST]
+        .emit(&[0x74, 0x06]) // je over the next
+        .emit(&[0xB0, 0x04, 0xB4, 0x4C, 0xCD, 0x21]); // mov al,4; exit
+    expect(&mut code, SECOND, 0x5678, true, 5);
+    let periodic = set_timer(&mut code, 1, 1, 6); // TIME_PERIODIC
+    peek_until_calls(&mut code, 4, 7);
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", TIME_KILL_EVENT);
+    expect_ax(&mut code, 0, 8);
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", TIME_KILL_EVENT);
+    expect_nonzero(&mut code, 9);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let callback = timer_callback(&mut code);
+    code.patch(one_shot, callback);
+    code.patch(periodic, callback);
+    let (exit, log) = run("time_set_event", program(&code, CODE));
     assert_eq!(exit, 1, "{log}");
 }
 
@@ -762,6 +1400,48 @@ fn avi_clip() -> Vec<u8> {
     out
 }
 
+/// An AVI file of sound only: one stream of 8-bit mono PCM at 11025 Hz,
+/// with 100 bytes of silence and an index.
+fn avi_sound() -> Vec<u8> {
+    fn chunk(out: &mut Vec<u8>, id: &[u8], data: &[u8]) {
+        out.extend_from_slice(id);
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+    }
+    let le = |v: u32| v.to_le_bytes();
+    let mut strh = vec![0; 56];
+    strh[..4].copy_from_slice(b"auds");
+    strh[20..24].copy_from_slice(&le(1));
+    strh[24..28].copy_from_slice(&le(11025));
+    strh[32..36].copy_from_slice(&le(100));
+    strh[44..48].copy_from_slice(&le(1));
+    // PCMWAVEFORMAT: PCM, mono, 11025 Hz, 11025 bytes a second, 1-byte
+    // blocks of 8 bits.
+    let mut wf = vec![1, 0, 1, 0];
+    wf.extend_from_slice(&le(11025));
+    wf.extend_from_slice(&le(11025));
+    wf.extend_from_slice(&[1, 0, 8, 0]);
+    let mut strl = b"strl".to_vec();
+    chunk(&mut strl, b"strh", &strh);
+    chunk(&mut strl, b"strf", &wf);
+    let mut hdrl = b"hdrl".to_vec();
+    chunk(&mut hdrl, b"avih", &[0; 56]);
+    chunk(&mut hdrl, b"LIST", &strl);
+    let mut movi = b"movi".to_vec();
+    let mut idx1 = b"00wb".to_vec();
+    idx1.extend_from_slice(&le(0x10));
+    idx1.extend_from_slice(&le(movi.len() as u32));
+    idx1.extend_from_slice(&le(100));
+    chunk(&mut movi, b"00wb", &[0x80; 100]);
+    let mut body = b"AVI ".to_vec();
+    chunk(&mut body, b"LIST", &hdrl);
+    chunk(&mut body, b"LIST", &movi);
+    chunk(&mut body, b"idx1", &idx1);
+    let mut out = Vec::new();
+    chunk(&mut out, b"RIFF", &body);
+    out
+}
+
 /// A RECT of words at `at` and a mark after it.
 fn set_rect(code: &mut Code, at: u16, rect: [u16; 4]) {
     for (i, v) in rect.into_iter().enumerate() {
@@ -819,4 +1499,114 @@ fn mci_send_command_plays_an_avi_file_with_rects_of_words() {
         std::fs::write(dir.join("CLIP.AVI"), avi_clip()).unwrap();
     });
     assert_eq!(exit, 1, "{log}");
+}
+
+const MCI_SEND_STRING: u16 = 702;
+const MCI_GET_DEVICE_ID: u16 = 703;
+const GET_PALETTE_ENTRIES: u16 = 363;
+const MCI_DGV_STATUS_HPAL: u16 = 0x4004;
+
+/// mciSendString(the string at the code's `text`, DS:BUFFER, 32, 0);
+/// end with `fail` unless it returns 0 in DX:AX. Returns the place of
+/// the string's offset, which is patched in.
+fn mci_string(code: &mut Code, fail: u8) -> u16 {
+    code.emit(&[0x0E]); // push cs
+    let place = code.here() + 1;
+    code.push(0)
+        .emit(&[0x1E]) // push ds
+        .push(BUFFER)
+        .push(32)
+        .push(0)
+        .call("MMSYSTEM", MCI_SEND_STRING);
+    expect_ax(code, 0, fail);
+    code.emit(&[0x0B, 0xD2]) // or dx,dx
+        .emit(&[0x74, 0x06]) // jz over the next
+        .emit(&[0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21]); // mov al,fail; exit
+    place
+}
+
+#[test]
+fn mci_status_palette_handle_is_the_avi_devices_palette() {
+    // `status c palette handle`, as Memphis Math's animations send it
+    // through mciSendString, and MCI_STATUS of MCI_DGV_STATUS_HPAL
+    // through mciSendCommand, before a frame is drawn. On a desktop of
+    // 256 colours both give the palette MCIAVI draws the movie with:
+    // the string's decimal number is the DWORD's, and GetPaletteEntries
+    // counts the halftone palette's 256 colours of a 24-bit movie. On a
+    // desktop of more colours there is no palette, and both give 0, as
+    // they do for a file of sound and no pictures, which is never drawn.
+    // Exit code 1, or the check that failed.
+    let cases = [
+        ("mci_hpal_8", true, avi_clip(), true),
+        ("mci_hpal_24", false, avi_clip(), false),
+        ("mci_hpal_sound", true, avi_sound(), false),
+    ];
+    for (test, desktop_palette, file, palette) in cases {
+        let mut code = Code::new();
+        let open = mci_string(&mut code, 2);
+        code.emit(&[0x0E]); // push cs
+        let alias = code.here() + 1;
+        code.push(0).call("MMSYSTEM", MCI_GET_DEVICE_ID);
+        expect_nonzero(&mut code, 3);
+        code.emit(&[0xA3, lo(DEVICE), hi(DEVICE)]); // mov [DEVICE],ax
+        let status = mci_string(&mut code, 4);
+        // The reply's decimal number into AX.
+        code.emit(&[0x33, 0xC0]) // xor ax,ax
+            .emit(&[0xBE, lo(BUFFER), hi(BUFFER)]) // mov si,BUFFER
+            .emit(&[0xB9, 10, 0]); // mov cx,10
+        let top = code.here();
+        code.emit(&[0x8A, 0x1C]) // mov bl,[si]
+            .emit(&[0x0A, 0xDB]) // or bl,bl
+            .emit(&[0x74, 0x0C]) // jz done
+            .emit(&[0x80, 0xEB, b'0']) // sub bl,'0'
+            .emit(&[0x32, 0xFF]) // xor bh,bh
+            .emit(&[0xF7, 0xE1]) // mul cx
+            .emit(&[0x03, 0xC3]) // add ax,bx
+            .emit(&[0x46]); // inc si
+        let back = top.wrapping_sub(code.here() + 2) as u8;
+        code.emit(&[0xEB, back]); // jmp top
+        code.emit(&[0xA3, lo(HWND), hi(HWND)]); // done: mov [HWND],ax
+        // MCI_STATUS_PARMS of MCI_DGV_STATUS_HPAL.
+        set(&mut code, STATUS, 0);
+        set(&mut code, STATUS + 2, 0);
+        set(&mut code, STATUS + 4, 0xEEEE);
+        set(&mut code, STATUS + 6, 0xEEEE);
+        set(&mut code, STATUS + 8, MCI_DGV_STATUS_HPAL);
+        set(&mut code, STATUS + 10, 0);
+        mci(&mut code, MCI_STATUS, MCI_STATUS_ITEM, STATUS, 0, 5);
+        expect(&mut code, STATUS + 6, 0, true, 6);
+        // mov ax,[HWND]; cmp ax,[STATUS+4]
+        code.emit(&[0xA1, lo(HWND), hi(HWND)]);
+        code.emit(&[0x3B, 0x06, lo(STATUS + 4), hi(STATUS + 4)]);
+        code.emit(&[0x74, 0x06]) // je over the next
+            .emit(&[0xB0, 7, 0xB4, 0x4C, 0xCD, 0x21]);
+        if palette {
+            // GetPaletteEntries(hpal, 0, 0, NULL): how many it has.
+            push_word(&mut code, STATUS + 4);
+            code.push(0).push(0).push(0).push(0);
+            code.call("GDI", GET_PALETTE_ENTRIES);
+            expect_ax(&mut code, 256, 8);
+        } else {
+            expect(&mut code, STATUS + 4, 0, true, 8);
+            expect(&mut code, BUFFER, u16::from_le_bytes(*b"0\0"), true, 9);
+        }
+        mci(&mut code, MCI_CLOSE, 0, 0, 0, 10);
+        code.emit(&[0xB0, 0x01]).exit_al();
+        for (place, text) in [
+            (open, &b"open CLIP.AVI alias c\0"[..]),
+            (alias, b"c\0"),
+            (status, b"status c palette handle\0"),
+        ] {
+            let at = code.here();
+            code.emit(text);
+            code.patch(place, at);
+        }
+        let (exit, log) = run_with(test, program(&code, CODE), |cpu, dir| {
+            if desktop_palette {
+                cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+            }
+            std::fs::write(dir.join("CLIP.AVI"), file).unwrap();
+        });
+        assert_eq!(exit, 1, "{test}: {log}");
+    }
 }

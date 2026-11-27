@@ -275,7 +275,8 @@ pub struct Sheet {
     pub active_valid: bool,
     pub ended: bool,
     pub result: i32,
-    /// The largest page, in dialog units.
+    /// The largest page, in dialog units; for a wizard of no pages, the
+    /// area above its line.
     pub width: i32,
     pub height: i32,
     /// The template the dialog is made from, until it is made.
@@ -1553,17 +1554,35 @@ fn adjust_sheet(cpu: &mut Cpu, sheet: &mut Sheet) -> Vec<Op> {
 }
 
 /// PROPSHEET_AdjustSizeWizard and PROPSHEET_AdjustButtonsWizard.
-fn adjust_wizard(cpu: &mut Cpu, sheet: &Sheet) -> Vec<Op> {
+fn adjust_wizard(cpu: &mut Cpu, sheet: &mut Sheet) -> Vec<Op> {
     let hwnd = sheet.hwnd;
     let line = item(cpu, hwnd, IDC_SUNKEN_LINE);
     let header = item(cpu, hwnd, IDC_SUNKEN_LINEHEADER);
-    let mut rc = map_rect(cpu, hwnd, Rect::new(0, 0, sheet.width, sheet.height));
     let line_rect = child_rect(cpu, line);
-    let (_, client_h) = client_size(cpu, hwnd);
-    rc.bottom += client_h - line_rect.top - 1;
-    let (fx, fy) = frame_size(cpu, hwnd);
-    let mut ops = vec![resize(cpu, hwnd, rc.width() + fx, rc.height() + fy)];
-    let cl = Rect::new(0, 0, rc.width(), rc.height());
+    let (client_w, client_h) = client_size(cpu, hwnd);
+    let mut ops = Vec::new();
+    // A wizard with no page keeps the size of its dialog template, where
+    // Wine shrinks it to its frame. Outlaw Racers' installer (Setup
+    // Factory) shows its copy progress on a wizard of no pages, with
+    // controls of its own, and came out a sliver 6 pixels wide. On a
+    // Windows 98 SE image its window is 347 by 191 pixels, and it is
+    // 348 by 189 here.
+    let cl = if sheet.pages.is_empty() {
+        // The page area is what lies above the line, the inverse of the
+        // sizing below, so that a page added later (PSM_ADDPAGE, which
+        // doesn't resize the sheet) goes there and not into a rectangle
+        // of negative size.
+        let units = map_rect(cpu, hwnd, Rect::new(4, 8, 4, 8));
+        sheet.width = super::gfx::mul_div(client_w, 4, units.left);
+        sheet.height = super::gfx::mul_div(line_rect.top + 1, 8, units.top);
+        Rect::new(0, 0, client_w, client_h)
+    } else {
+        let mut rc = map_rect(cpu, hwnd, Rect::new(0, 0, sheet.width, sheet.height));
+        rc.bottom += client_h - line_rect.top - 1;
+        let (fx, fy) = frame_size(cpu, hwnd);
+        ops.push(resize(cpu, hwnd, rc.width() + fx, rc.height() + fy));
+        Rect::new(0, 0, rc.width(), rc.height())
+    };
     // PROPSHEET_GetPaddingInfoWizard: from the line to the buttons.
     let measure = if sheet.has_help {
         IDHELP
@@ -1680,7 +1699,7 @@ fn init_layout(cpu: &mut Cpu, id: u32) -> Vec<Op> {
     if wizard(&sheet) {
         let tab = item(cpu, hwnd, IDC_TABCONTROL);
         ops.push(user(cpu, "ShowWindow", &[tab, SW_HIDE]));
-        ops.extend(adjust_wizard(cpu, &sheet));
+        ops.extend(adjust_wizard(cpu, &mut sheet));
     } else {
         ops.extend(adjust_sheet(cpu, &mut sheet));
     }
@@ -2079,8 +2098,12 @@ fn add_page(cpu: &mut Cpu, id: u32, hwnd: u32, hpage: u32) -> Vec<Op> {
     if sheet.pages.len() == 1 {
         ops.extend(set_cur_sel(id, 0, 1, 0));
     }
+    // TRUE once the steps have run, as Wine sets it last: making and
+    // selecting the page sends the sheet messages of its own, and
+    // DefDlgProcA clears DWL_MSGRESULT for each, which left PSM_ADDPAGE
+    // returning 0. MFC's CPropertySheet::AddPage throws on 0.
+    ops.push(user(cpu, "SetWindowLongA", &[hwnd, DWL_MSGRESULT, 1]));
     put(cpu, id, sheet);
-    set_result(cpu, hwnd, 1);
     ops
 }
 

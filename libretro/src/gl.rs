@@ -1,7 +1,7 @@
 //! The picture drawn with the frontend's OpenGL (libretro's hardware
-//! rendering), for the 3dfx card's OpenGL renderer (`voodoo_renderer=
-//! opengl`): the card's picture at `voodoo_scale` times its resolution, as
-//! the rust-dos window draws it (`rust_dos::voodoo::gl`), and every other
+//! rendering), for the 3dfx card's OpenGL renderer (`renderer=opengl`):
+//! the card's picture at `voodoo_scale` times its resolution, as the
+//! rust-dos window draws it (`rust_dos::voodoo::gl`), and every other
 //! picture uploaded as a texture. The frontend makes the context when it
 //! likes (`context_reset`), and may take it away and make another
 //! (`context_destroy`); the card's recording then starts again from its
@@ -28,10 +28,15 @@ thread_local! {
     static SCREEN: RefCell<Option<Screen>> = const { RefCell::new(None) };
 }
 
-/// Ask the frontend for an OpenGL 3.2 core context, or a compatibility one
-/// (of 3.0 or later, as the shaders need): whether it has one to give.
+/// Ask the frontend for an OpenGL 3.2 core context, a compatibility one
+/// (of 3.0 or later, as the shaders need), or an OpenGL ES 3.0 one, which
+/// is what RetroArch has on Android: whether it has one to give.
 pub fn request(cb: &Callbacks) -> bool {
-    let contexts = [(RETRO_HW_CONTEXT_OPENGL_CORE, 3, 2), (RETRO_HW_CONTEXT_OPENGL, 3, 0)];
+    let contexts = [
+        (RETRO_HW_CONTEXT_OPENGL_CORE, 3, 2),
+        (RETRO_HW_CONTEXT_OPENGL, 3, 0),
+        (RETRO_HW_CONTEXT_OPENGLES3, 3, 0),
+    ];
     for (context_type, version_major, version_minor) in contexts {
         let mut hw = retro_hw_render_callback {
             context_type,
@@ -180,11 +185,16 @@ impl Screen {
         self.voodoo_key = None;
     }
 
-    /// With `voodoo_renderer=opengl`, draw what the 3dfx card recorded;
+    /// With `renderer=opengl`, draw what the 3dfx card recorded;
     /// true if its picture is the one to show (`present`'s `voodoo`).
     /// Otherwise the card stops recording, and its picture is drawn in
     /// software.
-    pub fn run_voodoo(&mut self, bus: &mut Bus, settings: &VoodooSettings) -> bool {
+    pub fn run_voodoo(
+        &mut self,
+        bus: &mut Bus,
+        renderer: Renderer,
+        settings: &VoodooSettings,
+    ) -> bool {
         let Some(card) = bus.voodoo.as_mut() else {
             self.drop_voodoo();
             return false;
@@ -194,7 +204,7 @@ impl Screen {
         // (the desktop frontend's is `VoodooGl::compose`), so it draws the
         // card in software. This is the core's limit, not the card's, so
         // the check lives here and the desktop frontend has none.
-        if settings.renderer != Renderer::OpenGl
+        if renderer != Renderer::OpenGl
             || card.banshee.is_some()
             || self.voodoo_failed.is_some()
         {
@@ -216,7 +226,10 @@ impl Screen {
                     self.voodoo_key = Some(key);
                 }
                 Err(e) => {
-                    bus.log_string(&format!("[3DFX] voodoo_renderer=opengl: {}; the software renderer draws", e));
+                    bus.log_string(&format!(
+                        "[3DFX] renderer=opengl: {}; the software renderer draws",
+                        e
+                    ));
                     self.voodoo_failed = Some(e);
                     return false;
                 }

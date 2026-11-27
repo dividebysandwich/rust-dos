@@ -355,6 +355,146 @@ fn program_manager_makes_a_group_through_ddeml() {
     }
 }
 
+/// Windows 98 SE at 640x480 (measured in 86Box): overlapped windows of
+/// CW_USEDEFAULT cascade 22 pixels at a time, programs' and Explorer's
+/// alike, each three quarters of the work area less a row of minimized
+/// windows; the folder window Explorer opens for CreateGroup is 416x389
+/// at the next place; ShowGroup brings an open group's window to the
+/// foreground and shows it normally whatever its show command.
+#[test]
+fn program_manager_group_windows_cascade_as_explorer_places_them() {
+    const APPCMD_CLIENTONLY: i32 = 0x10;
+    const CP_WINANSI: i32 = 1004;
+    const XTYP_EXECUTE: i32 = 0x4050;
+    const WS_OVERLAPPEDWINDOW: i32 = 0x00CF_0000;
+    const CW_USEDEFAULT: i32 = 0x8000_0000_u32 as i32;
+    let create = b"[CreateGroup(Games)]\0";
+    let show = b"[ShowGroup(Games,7)]\0";
+    // 0x00: the instance, 0x04: the result, 0x08: the conversation,
+    // 0x40: a RECT, 0x50: the program's window, 0x54: the group's.
+    let mut data = vec![0u8; 0x100];
+    put(&mut data, 0x10, b"PROGMAN\0");
+    put(&mut data, 0x20, b"CabinetWClass\0");
+    put(&mut data, 0x30, b"Plain\0");
+    put(&mut data, 0x38, b"Games\0");
+    put(&mut data, 0x60, create);
+    put(&mut data, 0x80, show);
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        (
+            "USER32.dll",
+            &[
+                "DdeInitializeA",
+                "DdeCreateStringHandleA",
+                "DdeConnect",
+                "DdeClientTransaction",
+                "CreateWindowExA",
+                "GetWindowRect",
+                "FindWindowA",
+                "SetForegroundWindow",
+                "GetForegroundWindow",
+                "IsIconic",
+            ],
+        ),
+    ];
+    let code = program(imports, &data, |a, l| {
+        let mut start = a.create_label();
+        a.call(start)?;
+        a.xor(eax, eax)?;
+        a.ret_1(32)?;
+        a.set_label(&mut start)?;
+        a.pop(ebp)?;
+        a.xor(ebx, ebx)?;
+        // A window of the program's own: the cascade's first place.
+        let window = [
+            0,
+            l.at(0x20),
+            l.at(0x30),
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            0,
+            0,
+            BASE as i32,
+            0,
+        ];
+        call(a, l.import(5), &window)?;
+        a.mov(dword_ptr(l.at(0x50) as u64), eax)?;
+        a.push(l.at(0x40))?;
+        a.push(dword_ptr(l.at(0x50) as u64))?;
+        a.call(l.import(6))?;
+        a.mov(eax, dword_ptr(l.at(0x40) as u64))?;
+        check_eax(a, 22, 0)?;
+        a.mov(eax, dword_ptr(l.at(0x4C) as u64))?;
+        check_eax(a, 22 + 342, 1)?;
+        // CreateGroup through DDEML.
+        a.push(0)?;
+        a.push(APPCMD_CLIENTONLY)?;
+        a.push(ebp)?;
+        a.push(l.at(0))?;
+        a.call(l.import(1))?;
+        a.mov(esi, dword_ptr(l.at(0) as u64))?;
+        a.push(CP_WINANSI)?;
+        a.push(l.at(0x10))?;
+        a.push(esi)?;
+        a.call(l.import(2))?;
+        a.mov(edi, eax)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.push(edi)?;
+        a.push(esi)?;
+        a.call(l.import(3))?;
+        a.mov(dword_ptr(l.at(8) as u64), eax)?;
+        for (offset, text) in [(0x60, &create[..]), (0x80, &show[..])] {
+            if offset == 0x80 {
+                // The program's window in front, then ShowGroup with
+                // SW_SHOWMINNOACTIVE.
+                a.push(dword_ptr(l.at(0x50) as u64))?;
+                a.call(l.import(8))?;
+            }
+            a.push(l.at(4))?;
+            a.push(1000)?;
+            a.push(XTYP_EXECUTE)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(8) as u64))?;
+            a.push(text.len() as i32)?;
+            a.push(l.at(offset))?;
+            a.call(l.import(4))?;
+        }
+        // The group's window: the cascade's second place, 416x389.
+        call(a, l.import(7), &[l.at(0x20), l.at(0x38)])?;
+        a.mov(dword_ptr(l.at(0x54) as u64), eax)?;
+        a.push(l.at(0x40))?;
+        a.push(eax)?;
+        a.call(l.import(6))?;
+        a.mov(eax, dword_ptr(l.at(0x40) as u64))?;
+        check_eax(a, 44, 2)?;
+        a.mov(eax, dword_ptr(l.at(0x48) as u64))?;
+        check_eax(a, 44 + 416, 3)?;
+        a.mov(eax, dword_ptr(l.at(0x4C) as u64))?;
+        check_eax(a, 44 + 389, 4)?;
+        // ShowGroup brought it to the foreground, not minimized.
+        call(a, l.import(9), &[])?;
+        a.cmp(eax, dword_ptr(l.at(0x54) as u64))?;
+        let mut other = a.create_label();
+        a.jne(other)?;
+        a.or(ebx, 1 << 5)?;
+        a.set_label(&mut other)?;
+        a.push(dword_ptr(l.at(0x54) as u64))?;
+        a.call(l.import(10))?;
+        check_eax(a, 0, 6)?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let mut cpu = machine("progman_place", core, &[("T.EXE", code.clone())]);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 0x7F, "{core:?}: {}", printed(&cpu));
+    }
+}
+
 /// Get messages until one is `msg`, dispatching the others.
 fn wait_for_message(a: &mut CodeAssembler, l: &Layout, msg: i32) -> Result<(), IcedError> {
     // The MSG at 0x60 of the data; GetMessageA and DispatchMessageA.
@@ -791,9 +931,9 @@ fn notepad_shows_a_readme_that_winexec_opens() {
     ];
     let code = program(imports, &data, |a, l| {
         a.xor(ebx, ebx)?;
-        // A read-only file in the Windows directory.
+        // A file in the Windows directory.
         call(a, l.import(1), &[l.at(0)])?;
-        check_eax(a, 0x21, 0)?;
+        check_eax(a, 0x20, 0)?;
         call(a, l.import(2), &[0, l.at(0x20), 0, 0x104, l.at(0x100), 0])?;
         check_eax(a, 22, 1)?;
         // WinExec returns once Notepad waits for input, its window made.

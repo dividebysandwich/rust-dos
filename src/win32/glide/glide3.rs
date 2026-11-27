@@ -551,7 +551,16 @@ fn gr_sst_win_open(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
         ..State::default()
     };
     set_hint(cpu);
+    // Glide 3 opens with grDitherMode(GR_DITHER_4x4) too (gsst.c), which
+    // on a Banshee or Voodoo3 is its own.
+    api::glide3_dither_mode(cpu, api::DITHER_4X4);
     Some(context())
+}
+
+/// grDitherMode, as Glide 3 sets it (`api::glide3_dither_mode`).
+fn gr_dither_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+    api::glide3_dither_mode(cpu, a[0]);
+    Some(0)
 }
 
 fn gr_sst_win_close(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
@@ -1209,7 +1218,7 @@ pub static APIS: &[Api] = &[
     stdcall("_grDepthRange@8", 24, 2, gr_depth_range),
     stdcall("_grDisable@4", 25, 1, gr_disable),
     stdcall("_grDisableAllEffects@0", 26, 0, x::gr_disable_all_effects),
-    stdcall("_grDitherMode@4", 27, 1, x::gr_dither_mode),
+    stdcall("_grDitherMode@4", 27, 1, gr_dither_mode),
     stdcall("_grDrawLine@8", 28, 2, gr_draw_line),
     stdcall("_grDrawPoint@4", 29, 1, gr_draw_point),
     stdcall("_grDrawTriangle@12", 30, 3, gr_draw_triangle),

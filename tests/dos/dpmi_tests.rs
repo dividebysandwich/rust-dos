@@ -1425,6 +1425,99 @@ fn a_client_allocates_linear_memory_at_an_address() {
     assert_eq!(dword(R + 16), 0x40_0000);
 }
 
+/// Copy the LDT's descriptor from the GDT, through the selector at
+/// `R + 8`, to `at` (DS = the data).
+fn copy_ldt_descriptor(a: &mut CodeAssembler, at: u16) -> Result<(), IcedError> {
+    a.push(es)?;
+    a.mov(es, word_ptr(R + 8))?;
+    a.mov(bx, word_ptr(R + 6))?;
+    a.and(bx, 0xFFF8)?;
+    a.mov(eax, dword_ptr(bx).es())?;
+    a.mov(dword_ptr(at), eax)?;
+    a.mov(eax, dword_ptr(bx + 4).es())?;
+    a.mov(dword_ptr(at + 4), eax)?;
+    a.pop(es)
+}
+
+#[test]
+fn the_ldt_descriptor_covers_the_pages_in_use() {
+    // The LDT's descriptor in the GDT, read through a selector over the
+    // GDT (SGDT, SLDT), as Ultima VIII's DOSFIX32 reads it: at the start,
+    // with 1000 more selectors and after they are freed. Windows 98's DOS
+    // box gives limits FFFh, 1FFFh and 1FFFh: its LDT grows a 4 KB page at
+    // a time and doesn't shrink.
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        let mut free = a.create_label();
+        enter(a, false, fail)?;
+        step(a, 4)?;
+        a.sgdt(ptr(R))?;
+        a.sldt(word_ptr(R + 6))?;
+        a.xor(ax, ax)?;
+        a.mov(cx, 1)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(R + 8), ax)?;
+        a.mov(bx, ax)?;
+        a.mov(ax, 0x0007)?;
+        a.mov(cx, word_ptr(R + 4))?;
+        a.mov(dx, word_ptr(R + 2))?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(ax, 0x0008)?;
+        a.xor(cx, cx)?;
+        a.mov(dx, 0xFFFF)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        step(a, 5)?;
+        copy_ldt_descriptor(a, R + 0x10)?;
+        a.xor(ax, ax)?;
+        a.mov(cx, 1000)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(R + 10), ax)?;
+        step(a, 6)?;
+        copy_ldt_descriptor(a, R + 0x18)?;
+        a.mov(bx, word_ptr(R + 10))?;
+        a.mov(cx, 1000)?;
+        a.set_label(&mut free)?;
+        a.push(cx)?;
+        a.push(bx)?;
+        a.mov(ax, 0x0001)?;
+        a.int(0x31)?;
+        a.pop(bx)?;
+        a.pop(cx)?;
+        a.add(bx, 8)?;
+        a.loop_(free)?;
+        step(a, 7)?;
+        copy_ldt_descriptor(a, R + 0x20)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    let (mut cpu, psp) = machine("ldtlimit", &[("T.COM", com(&[(0x100, main)]))], "T.COM");
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end (step {})",
+        word(&cpu, psp, STEP)
+    );
+    assert_eq!(
+        cpu.errorlevel,
+        0x2A,
+        "failed at step {}",
+        word(&cpu, psp, STEP)
+    );
+    let limit = |at: u16| {
+        let low = word(&cpu, psp, at) as u32;
+        let high = cpu.bus.read_8(psp as usize * 16 + at as usize + 6) as u32;
+        assert_eq!(high & 0x80, 0, "byte-granular");
+        (high & 0x0F) << 16 | low
+    };
+    assert_eq!(limit(R + 0x10), 0x0FFF, "at the start");
+    assert_eq!(limit(R + 0x18), 0x1FFF, "with 1000 more selectors");
+    assert_eq!(limit(R + 0x20), 0x1FFF, "after they are freed");
+}
+
 /// Set DAC colours 40h and 41h from a buffer the client addresses by
 /// selector (INT 10h AX=1012h, as Jazz Jackrabbit's RTM does), read them
 /// back into another (1017h), and get the 8x16 font's address (1130h),
@@ -1674,4 +1767,123 @@ fn a_client_runs_sse_on_a_pentium_iii() {
     cpu.model = rust_dos::cpu::CpuModel::PentiumIII;
     assert!(run_to_exit(&mut cpu, 2000), "the program didn't end (step {})", word(&cpu, psp, STEP));
     assert_eq!(cpu.errorlevel, 0x2A);
+}
+
+/// Enter as a 32-bit or 16-bit client and keep the access rights (LAR)
+/// of ES, the PSP's selector, at R and of the environment's selector at
+/// PSP:2Ch at R+4.
+fn psp_selector_program(bits32: bool) -> Vec<u8> {
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, bits32, fail)?;
+        step(a, 4)?;
+        a.mov(ax, es)?;
+        a.movzx(ecx, ax)?;
+        a.lar(eax, ecx)?;
+        a.jnz(fail)?;
+        a.mov(dword_ptr(R), eax)?;
+        a.movzx(ecx, word_ptr(0x2C).es())?;
+        a.lar(eax, ecx)?;
+        a.jnz(fail)?;
+        a.mov(dword_ptr(R + 4), eax)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    com(&[(0x100, main)])
+}
+
+#[test]
+fn a_32_bit_client_gets_big_psp_and_environment_selectors() {
+    // Windows 98's DOS box gives a 32-bit client its PSP and environment
+    // as big (32-bit) data segments, and a 16-bit client 16-bit ones.
+    // DOS/4GW hands a vector back only to callers of its selector's size,
+    // and Glide's DOS overlay (Redguard's 3dfx version) finds its PSP
+    // through such a vector.
+    for (bits32, name) in [(true, "pspsel32"), (false, "pspsel16")] {
+        let (mut cpu, psp) = machine(name, &[("T.COM", psp_selector_program(bits32))], "T.COM");
+        assert!(
+            run_to_exit(&mut cpu, 200),
+            "the program didn't end (step {})",
+            word(&cpu, psp, STEP)
+        );
+        assert_eq!(
+            cpu.errorlevel,
+            0x2A,
+            "failed at step {}",
+            word(&cpu, psp, STEP)
+        );
+        let rights = |at: u16| (word(&cpu, psp, at + 2) as u32) << 16 | word(&cpu, psp, at) as u32;
+        for (at, what) in [(R, "PSP"), (R + 4, "environment")] {
+            let rights = rights(at);
+            assert_eq!(rights >> 8 & 0xFE, 0xF2, "the {what} is data at level 3");
+            assert_eq!(
+                rights & 1 << 22 != 0,
+                bits32,
+                "the {what}'s B bit, {bits32}"
+            );
+        }
+    }
+}
+
+/// Read and write a model-specific register from level 3 with Glide's
+/// mark (DEADCAFEh) in EBX, keeping EDX:EAX after the read at R, then
+/// read it without the mark, which faults to a #GP handler that ends the
+/// program with DDh.
+fn glide_msr_program() -> Vec<u8> {
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, true, fail)?;
+        a.mov(ax, 0x0203)?;
+        a.mov(bl, 0x0D)?;
+        a.mov(cx, cs)?;
+        a.xor(edx, edx)?;
+        a.mov(dx, EXC_HANDLER as u32)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        step(a, 4)?;
+        a.mov(eax, 0x1234_5678u32)?;
+        a.mov(edx, 0x9ABC_DEF0u32)?;
+        a.mov(ecx, 0x2FFu32)?;
+        a.mov(ebx, 0xDEAD_CAFEu32)?;
+        a.rdmsr()?;
+        a.mov(dword_ptr(R), eax)?;
+        a.mov(dword_ptr(R + 4), edx)?;
+        step(a, 5)?;
+        a.wrmsr()?;
+        step(a, 6)?;
+        a.xor(ebx, ebx)?;
+        a.rdmsr()?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    let exc = asm16(EXC_HANDLER, |a| exit(a, 0xDD));
+    com(&[(0x100, main), (EXC_HANDLER, exc)])
+}
+
+#[test]
+fn the_host_runs_only_glides_marked_msr_accesses() {
+    // Glide's DOS overlay reads and writes the MTRRs from level 3 in a
+    // Windows DOS box, with DEADCAFEh in EBX for 3dfx's Windows driver to
+    // catch the #GP: the read gives 0, the write does nothing, and the
+    // program goes on (Redguard's 3dfx version from its launcher). An
+    // access without the mark is the client's #GP, as on Windows.
+    let (mut cpu, psp) = machine("glidemsr", &[("T.COM", glide_msr_program())], "T.COM");
+    cpu.model = rust_dos::cpu::CpuModel::Pentium;
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end (step {})",
+        word(&cpu, psp, STEP)
+    );
+    assert_eq!(
+        cpu.errorlevel,
+        0xDD,
+        "failed at step {}",
+        word(&cpu, psp, STEP)
+    );
+    assert_eq!(word(&cpu, psp, STEP), 6, "the unmarked read's #GP");
+    for at in [R, R + 2, R + 4, R + 6] {
+        assert_eq!(word(&cpu, psp, at), 0, "EDX:EAX after the read");
+    }
 }

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Datelike, Local, Timelike};
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -13,18 +14,27 @@ use crate::hostfs::{self, File, OpenOptions};
 use crate::memfs::{Bytes, MemFs, Node};
 use crate::mount::MountSpec;
 
+mod closed_files;
 mod drives;
 mod files;
+mod host_alias;
 mod host_dir;
+mod identity;
 mod layout;
+mod locks;
 mod mount;
 mod paths;
 mod search;
 mod state;
 mod system_files;
 
+use closed_files::ClosedFiles;
+use host_alias::HostAliases;
+pub(crate) use host_alias::SavedFolder;
 use host_dir::{DirCount, HostDirCache, SearchKey};
+use identity::FileId;
 pub use layout::{DriveKind, Fat32Layout, FatLayout, old_space};
+pub use locks::{LOCK_VIOLATION, Lock, TASK_OWNER};
 pub use search::NameFilter;
 
 /// The open files are numbered as DOS numbers the entries of its System
@@ -66,9 +76,9 @@ const FLOPPY_CLUSTERS: u16 = 2847;
 const MEMORY_TIME: u16 = 0x0000;
 const MEMORY_DATE: u16 = 0x5021;
 
-/// A list of owned path components as the FAT driver takes them.
-fn refs(parts: &[String]) -> Vec<&str> {
-    parts.iter().map(String::as_str).collect()
+/// A list of path components as the FAT driver takes them.
+fn refs<S: AsRef<str>>(parts: &[S]) -> Vec<&str> {
+    parts.iter().map(AsRef::as_ref).collect()
 }
 
 /// A path on a disk image the way DOS shows it: its components as they are
@@ -165,6 +175,19 @@ pub fn parse_drive_prefix(path: &str) -> (Option<u8>, &str) {
     }
 }
 
+/// Whether `path` ends in a slash or backslash after a name, which leaves
+/// its last name empty: "C:\GAMES\", "GAMES/". MS-DOS refuses such a
+/// path with path not found (03h) in the calls that create, open, find,
+/// delete or read the attributes of a file, whether a file, a folder or
+/// nothing has the name before the slash, and makes nothing. PKUNZIP
+/// creates a ZIP's folder entry ("DATA/") as a file, expects that error
+/// and makes the folder after it. A drive's root ("C:\", "\") is no
+/// such path.
+pub fn ends_in_separator(path: &str) -> bool {
+    let (_, rest) = parse_drive_prefix(path);
+    rest.ends_with(['\\', '/']) && !rest.trim_end_matches(['\\', '/']).is_empty()
+}
+
 /// DOS volume labels are at most 11 uppercase characters.
 pub fn normalize_label(label: &str) -> String {
     label.trim().to_ascii_uppercase().chars().take(11).collect()
@@ -186,16 +209,18 @@ fn is_short_name(name: &str) -> bool {
 }
 
 /// The name a new file or directory gets on a host drive when a program
-/// asks for `name`. DOS uppercases an 8.3 name. A longer name keeps the
-/// case it was given, as Windows 9x keeps a name from a long-name call
-/// (Win32's CreateFileA, CreateDirectoryA and MoveFileA, or INT 21h's
-/// 71xxh): Oni's setup makes "level0_Final.dat", and Oni reads the
-/// "Final" in the name back, case and all. The host path doesn't know
-/// which call asked, so DOS's own calls, which on DOS would cut such a
-/// name to 8.3, make it under the same name; what DOS programs see of it
-/// is its generated 8.3 name either way.
-pub(crate) fn new_entry_name(name: &str) -> String {
-    if is_short_name(name) {
+/// asks for `name`. DOS's own calls uppercase an 8.3 name. A long-name
+/// call (`keep_case`: a Win32 call, `long_name_call`) keeps the case it
+/// was given, as Windows 9x does, whose VFAT gives a name that isn't all
+/// uppercase a long-name entry:
+/// Alice's installer makes "Program Files\EA Games" and the game writes
+/// "config.cfg". A longer name keeps its case from DOS's calls too: on
+/// DOS they would cut it to 8.3, but the name is made as asked, and what
+/// DOS programs see of it is its generated 8.3 name either way. Oni's
+/// setup makes "level0_Final.dat", and Oni reads the "Final" in the
+/// name back, case and all.
+pub(crate) fn new_entry_name(name: &str, keep_case: bool) -> String {
+    if !keep_case && is_short_name(name) {
         name.to_ascii_uppercase()
     } else {
         name.to_string()
@@ -253,7 +278,21 @@ pub(crate) fn host_private(name: &str) -> bool {
 /// number, `~N`, counted per prefix: "Day Of The Tentacle.BIN" and ".cue"
 /// are DAYOFT~1.BIN and DAYOFT~2.CUE.
 pub fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
-    let mut used = std::collections::HashSet::new();
+    let none = std::collections::HashSet::new();
+    short_names_beside(names, &none, &none)
+}
+
+/// `short_names` for names new to a folder whose other entries keep their
+/// aliases (`HostAliases`): a name that is 8.3 already is its own alias
+/// unless it is in `live`, the aliases those entries have, and the others
+/// get the first numbers free that are in neither `live` nor `held`, the
+/// aliases of entries just gone.
+fn short_names_beside<S: AsRef<str>>(
+    names: &[S],
+    live: &std::collections::HashSet<String>,
+    held: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut used = live.clone();
     let mut result = vec![String::new(); names.len()];
     // 8.3 names come first, so that no generated name takes one.
     let mut long = Vec::new();
@@ -294,7 +333,7 @@ pub fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
             if !ext.is_empty() {
                 name = format!("{}.{}", name, ext);
             }
-            if used.insert(name.clone()) {
+            if !held.contains(&name) && used.insert(name.clone()) {
                 result[i] = name;
                 break;
             }
@@ -560,8 +599,8 @@ struct OpenFile {
     /// PSP of the process that opened the file. DOS closes a process's files
     /// when it terminates.
     owner: u16,
-    /// Tells the file apart from others (`DiskController::file_key`).
-    key: u64,
+    /// The file, whatever name opened it (`DiskController::file_id`).
+    id: FileId,
     /// The file as it was opened, for a save state to open it again: its
     /// full DOS path and access mode.
     path: String,
@@ -577,6 +616,13 @@ struct OpenFile {
     /// A device a program put in raw (binary) mode with IOCTL 4401h:
     /// its output goes out as it is, a tab without being expanded.
     raw: bool,
+}
+
+impl OpenFile {
+    /// The number for the file (`FileId::key`).
+    fn key(&self) -> u64 {
+        self.id.key()
+    }
 }
 
 /// Empty a file a create call opened, which nothing has used yet.
@@ -623,6 +669,9 @@ enum OpenData {
 /// itself.
 struct HostFile {
     file: File,
+    /// Whether anything was written or cut through it: only such a
+    /// handle is kept after the guest closes it (`ClosedFiles`).
+    wrote: Cell<bool>,
     /// None until it is asked for, and after a call that failed, which
     /// may have left the pointer anywhere.
     pos: Cell<Option<u64>>,
@@ -632,6 +681,7 @@ impl HostFile {
     fn new(file: File) -> Self {
         HostFile {
             file,
+            wrote: Cell::new(false),
             pos: Cell::new(None),
         }
     }
@@ -667,6 +717,7 @@ impl HostFile {
     /// seldom cut a file, so that costs nothing that matters.
     fn set_len(&self, len: u64) -> std::io::Result<()> {
         self.pos.set(None);
+        self.wrote.set(true);
         self.file.set_len(len)
     }
 
@@ -687,6 +738,7 @@ impl Read for HostFile {
 
 impl Write for HostFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.wrote.set(true);
         self.moved((&self.file).write(buf))
     }
 
@@ -839,6 +891,8 @@ pub struct DiskController {
     /// only the position (`dos_files::flush`).
     sft_dirty: u128,
     position_dirty: u128,
+    /// The locked ranges of the open files (INT 21h AH=5Ch, locks.rs).
+    locks: Vec<locks::Lock>,
 
     // File System State
     /// The lettered drives, then the disks mounted by number.
@@ -867,9 +921,17 @@ pub struct DiskController {
     pub(crate) media: Cell<Option<crate::savestate::media::Kept>>,
     /// The entries of host folders as last read (`host_entries`).
     host_dirs: HostDirCache,
+    /// The aliases the entries of host folders keep (`read_host_entries`).
+    host_aliases: HostAliases,
+    /// The aliases a state being loaded keeps, for once its drives are
+    /// mounted (`load_state`).
+    pub(crate) aliases_from_state: Option<Vec<SavedFolder>>,
     /// The files shown in directories that the drive doesn't have: the
     /// built-in Windows's DLLs and its NOTEPAD.EXE (system_files.rs).
     system_files: system_files::SystemFiles,
+    /// Whether the call running now is a long-name call
+    /// (`long_name_call`).
+    long_call: bool,
 }
 
 impl DiskController {
@@ -912,6 +974,7 @@ impl DiskController {
             open_files: HashMap::new(),
             sft_dirty: 0,
             position_dirty: 0,
+            locks: Vec::new(),
             drives,
             current_drive: DRIVE_C, // Default to C:
             emm_device: false,
@@ -922,10 +985,41 @@ impl DiskController {
             notes: Vec::new(),
             media: Cell::new(None),
             host_dirs: HostDirCache::default(),
+            host_aliases: HostAliases::default(),
+            aliases_from_state: None,
             system_files: Default::default(),
+            long_call: false,
         };
         disk.open_standard_devices();
         disk
+    }
+
+    /// Run `call` as a long-name call, as Windows 9x's VFAT runs a Win32
+    /// call: the files and directories it makes on host drives keep the
+    /// case of their names (`new_entry_name`), and on disk images it
+    /// finds entries by their long names or their DOS names and makes
+    /// names with the long name entries they need (`FatVolume::find_long`,
+    /// `create_long`). Every function of the built-in Windows's DLLs runs
+    /// as one (`win32::stubs::call`); DOS's INT 21h calls keep to 8.3
+    /// names.
+    pub fn long_name_call<R>(&mut self, call: impl FnOnce(&mut Self) -> R) -> R {
+        let was = self.set_long_name_call(true);
+        let result = call(self);
+        self.set_long_name_call(was);
+        result
+    }
+
+    /// Start (`on`) or end a long-name call, for a caller that can't run
+    /// it as a closure (`long_name_call`): whether one ran before, to put
+    /// back after it.
+    pub fn set_long_name_call(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.long_call, on)
+    }
+
+    /// The name a new entry `name` gets on a host drive, for the call
+    /// running now (`new_entry_name`).
+    fn entry_name(&self, name: &str) -> String {
+        new_entry_name(name, self.long_call)
     }
 
     /// AUX, CON and PRN in the first entries of the file table, where DOS
@@ -939,7 +1033,7 @@ impl DiskController {
                 data: OpenData::Device(device),
                 drive: DRIVE_C,
                 owner: 0,
-                key: 0,
+                id: FileId::Device,
                 path: name.to_string(),
                 mode: 0x02,
                 refs: 0,
@@ -956,6 +1050,15 @@ impl DiskController {
     pub fn add_virtual_file(&mut self, name: &str, bytes: Vec<u8>) {
         if let Some(Storage::Tree { files, .. }) = self.drives[DRIVE_Z as usize].as_mut().map(|d| &mut d.storage) {
             files.insert(name, bytes);
+        }
+    }
+
+    /// Take a file off Z: (`add_virtual_file`). A program that has it
+    /// open keeps reading what it opened.
+    pub fn remove_virtual_file(&mut self, name: &str) {
+        let drive = self.drives[DRIVE_Z as usize].as_mut();
+        if let Some(Storage::Tree { files, .. }) = drive.map(|d| &mut d.storage) {
+            files.remove(name);
         }
     }
 

@@ -18,7 +18,7 @@ fn test_f80_add_sub_shift_overflow() {
     // Test Addition
     let mut res_add = big_num;
     // This will panic if the shift isn't clamped
-    res_add.add(small_num);
+    res_add.add(small_num, 0x037F);
     
     // Result should effectively be big_num because small_num is infinitesimally small in comparison
     assert_eq!(res_add.get_exponent(), 0x4100);
@@ -27,7 +27,7 @@ fn test_f80_add_sub_shift_overflow() {
     // Test Subtraction
     let mut res_sub = big_num;
     // This will panic if the shift isn't clamped
-    res_sub.sub(small_num);
+    res_sub.sub(small_num, 0x037F);
 
     assert_eq!(res_sub.get_exponent(), 0x4100);
     assert_eq!(res_sub.get_mantissa(), 0xC000_0000_0000_0000);
@@ -45,7 +45,7 @@ fn test_f80_extreme_garbage_values() {
 
     // Delta is ~32000. Massive shift.
     let mut res = garbage_a;
-    res.sub(garbage_b);
+    res.sub(garbage_b, 0x037F);
     
     // Should not panic, result remains A
     assert_eq!(res.get_exponent(), 0x7FFE);

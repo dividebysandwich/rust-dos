@@ -271,6 +271,13 @@ fn create_task(
         module::release(cpu, m.handle);
         return Err(format!("{} is a library, not a program.", path));
     }
+    // KERNEL, USER and GDI are programs by their flags, but the built-in
+    // ones have stubs where a program's code starts: their files in the
+    // system directory don't start.
+    if m.builtin.is_some() {
+        module::release(cpu, m.handle);
+        return Err(format!("{} is a part of Windows, not a program.", path));
+    }
     let parsed = module::parsed_of(cpu, &m).ok_or("The program can't be read.")?;
     let prev = cpu
         .bus
@@ -288,22 +295,13 @@ fn create_task(
         return Err(format!("There isn't enough memory to run {}.", m.name));
     }
 
-    // The task database, with the PDB at 100h, which has a selector of
-    // its own.
-    let tdb = global::alloc(cpu, global::GMEM_ZEROINIT, 0x200, 0, false);
-    let psp = cpu.bus.win32.win16.ldt.alloc(1).unwrap_or(0);
-    if tdb == 0 || psp == 0 {
+    // The task database in conventional memory, with the PDB at 100h,
+    // which has a selector of its own (dos.rs).
+    let Some((tdb, psp)) = new_tdb(cpu) else {
         module::release(cpu, m.handle);
         return Err(format!("There isn't enough memory to run {}.", m.name));
-    }
+    };
     let tdb_base = global::get(cpu, tdb).map_or(0, |a| a.base);
-    let system = super::win16(cpu).system;
-    ldt::write(
-        cpu,
-        system,
-        psp,
-        ldt::segment(tdb_base + 0x100, 0xFF, ldt::ACCESS_DATA),
-    );
     if let Some(a) = cpu.bus.win32.win16.arena.get_mut(&ldt::index(tdb)) {
         a.owner = tdb;
     }
@@ -321,6 +319,9 @@ fn create_task(
         environment,
         arguments,
     );
+    // LoadModule posts the new task an event, which its startup code's
+    // WaitEvent(0) takes without giving up its turn.
+    super::write_16(cpu, tdb_base + TDB_EVENTS, 1);
 
     // The 16-bit stack, in the automatic data segment unless the header
     // says otherwise.
@@ -344,6 +345,7 @@ fn create_task(
         .get(cs_seg.max(1) as usize - 1)
         .map(|s| s.selector)
     else {
+        free_tdb(cpu, tdb, psp);
         module::release(cpu, m.handle);
         return Err(format!("{} has no entry point.", m.name));
     };
@@ -374,11 +376,15 @@ fn create_task(
         match new_thread(cpu, ctx) {
             Some(made) => made,
             None => {
+                free_tdb(cpu, tdb, psp);
                 module::release(cpu, m.handle);
                 return Err(format!("There isn't enough memory to run {}.", m.name));
             }
         }
     };
+    // It starts in the current directories of the program that starts
+    // it, which DOS has (win32/directories.rs).
+    let directories = crate::win32::directories::Directories::now(cpu);
     // Its process object, which its starters wait on.
     let win32 = &mut cpu.bus.win32;
     let process_id = if first {
@@ -416,12 +422,67 @@ fn create_task(
             .iter()
             .map(|&i| win32.win16.modules[i].handle)
             .collect(),
+        directories: crate::savestate::Since(Some(directories)),
     });
     cpu.bus.log_string(&format!(
         "[W16] Task {:04X} of {} starts at {:04X}:{:04X}, stack {:04X}:{:04X}",
         tdb, m.name, cs, ip, ss, sp
     ));
     Ok(cpu.bus.win32.win16.tasks.len() - 1)
+}
+
+/// Where a task database keeps its events (Windows 3.1's nEvents): those
+/// PostEvent gave the task that WaitEvent hasn't taken yet.
+const TDB_EVENTS: u32 = 0x06;
+
+/// The task `handle`, or the running task for 0: its index in
+/// `State::tasks`, if it is a task that hasn't ended.
+fn live_task(cpu: &Cpu, handle: u16) -> Option<usize> {
+    if handle == 0 {
+        return super::current_task(cpu);
+    }
+    cpu.bus
+        .win32
+        .win16
+        .tasks
+        .iter()
+        .position(|t| t.handle == handle && t.exit_code.is_none())
+}
+
+/// The linear address of the events count in the task database of the
+/// task `handle` (0 for the running task).
+fn events_at(cpu: &Cpu, handle: u16) -> Option<u32> {
+    let t = live_task(cpu, handle)?;
+    let tdb = cpu.bus.win32.win16.tasks[t].handle;
+    global::get(cpu, tdb).map(|a| a.base + TDB_EVENTS)
+}
+
+/// PostEvent(task): one more event for the task (0 for the running
+/// one), which its next WaitEvent takes.
+pub fn post_event(cpu: &mut Cpu, handle: u16) {
+    if let Some(at) = events_at(cpu, handle) {
+        let events = super::read_16(cpu, at);
+        super::write_16(cpu, at, events.saturating_add(1));
+    }
+}
+
+/// WaitEvent's part before any waiting: an event of the task (0 for the
+/// running one) taken, if it has one. Whether it had.
+pub fn take_event(cpu: &mut Cpu, handle: u16) -> bool {
+    let Some(at) = events_at(cpu, handle) else {
+        return false;
+    };
+    let events = super::read_16(cpu, at);
+    if events == 0 {
+        return false;
+    }
+    super::write_16(cpu, at, events - 1);
+    true
+}
+
+/// Whether `handle` is the running task (or 0, which means it).
+pub fn is_running_task(cpu: &Cpu, handle: u16) -> bool {
+    handle == 0 || live_task(cpu, handle) == super::current_task(cpu)
 }
 
 /// The bytes of a client task's 16-bit stack.
@@ -450,28 +511,15 @@ pub(super) fn client_task(
         return Err(full());
     }
     let memory = || format!("There isn't enough memory for {}'s 16-bit calls.", name);
-    let tdb = global::alloc(cpu, global::GMEM_ZEROINIT, 0x200, 0, false);
-    let psp = cpu.bus.win32.win16.ldt.alloc(1).unwrap_or(0);
+    let Some((tdb, psp)) = new_tdb(cpu) else {
+        return Err(memory());
+    };
     let stack = global::alloc(cpu, global::GMEM_ZEROINIT, CLIENT_STACK, tdb, false);
-    if tdb == 0 || psp == 0 || stack == 0 {
-        for h in [stack, tdb] {
-            if h != 0 {
-                global::free(cpu, h);
-            }
-        }
-        if psp != 0 {
-            cpu.bus.win32.win16.ldt.free(psp, 1);
-        }
+    if stack == 0 {
+        free_tdb(cpu, tdb, psp);
         return Err(memory());
     }
     let tdb_base = global::get(cpu, tdb).map_or(0, |a| a.base);
-    let system = super::win16(cpu).system;
-    ldt::write(
-        cpu,
-        system,
-        psp,
-        ldt::segment(tdb_base + 0x100, 0xFF, ldt::ACCESS_DATA),
-    );
     if let Some(a) = cpu.bus.win32.win16.arena.get_mut(&ldt::index(tdb)) {
         a.owner = tdb;
     }
@@ -506,10 +554,7 @@ pub(super) fn client_task(
         new_thread(cpu, ctx)
     };
     let Some((tid, stack32)) = made else {
-        // Its stack and environment block are the TDB's.
-        global::free_owned(cpu, tdb);
-        cpu.bus.win32.win16.ldt.free(psp, 1);
-        global::free(cpu, tdb);
+        free_tdb(cpu, tdb, psp);
         return Err(memory());
     };
     let p = super::win16(cpu);
@@ -571,9 +616,53 @@ pub(super) fn end_client_task(cpu: &mut Cpu, tid: u32) {
     super::comm::task_ended(cpu, task.handle);
     super::ole2::task_ended(cpu, task.handle);
     super::misc::task_ended(cpu, task.tid);
-    global::free_owned(cpu, task.handle);
-    cpu.bus.win32.win16.ldt.free(task.psp, 1);
-    global::free(cpu, task.handle);
+    crate::win32::shims::win31::gdi_heap::task_ended(cpu, task.handle);
+    // Its locks (INT 21h AH=5Ch) go before its PDB's selector is free
+    // for another task to have, and them with it.
+    cpu.bus
+        .disk
+        .release_locks(crate::disk::TASK_OWNER | task.psp as u32);
+    free_tdb(cpu, task.handle, task.psp);
+}
+
+/// A task database in conventional memory, with its PDB at 100h
+/// (`dos::alloc_task_database`), and a selector for the PDB: the task
+/// database's handle and the PDB's selector, or None without the memory.
+fn new_tdb(cpu: &mut Cpu) -> Option<(u16, u16)> {
+    use super::dos::{PDB_OFFSET, TDB_SIZE};
+    let segment = super::dos::alloc_task_database(cpu)?;
+    let base = segment as u32 * 16;
+    let tdb = global::create_block(cpu, global::GMEM_ZEROINIT, base, TDB_SIZE, 0, false, true);
+    let psp = cpu.bus.win32.win16.ldt.alloc(1);
+    let (Some(tdb), Some(psp)) = (tdb, psp) else {
+        if let Some(tdb) = tdb {
+            global::free(cpu, tdb);
+        }
+        if let Some(psp) = psp {
+            cpu.bus.win32.win16.ldt.free(psp, 1);
+        }
+        super::dos::free_task_database(cpu, segment);
+        return None;
+    };
+    let system = super::win16(cpu).system;
+    ldt::write(
+        cpu,
+        system,
+        psp,
+        ldt::segment(base + PDB_OFFSET, 0xFF, ldt::ACCESS_DATA),
+    );
+    Some((tdb, psp))
+}
+
+/// The task database `tdb` and its PDB `psp` go, with the blocks the task
+/// database owns (its environment, a client's stack): the files the PDB's
+/// handles refer to close, and the task database's DOS memory is free
+/// again (`dos::free_pdb`).
+fn free_tdb(cpu: &mut Cpu, tdb: u16, psp: u16) {
+    global::free_owned(cpu, tdb);
+    global::free(cpu, tdb);
+    super::dos::free_pdb(cpu, psp);
+    cpu.bus.win32.win16.ldt.free(psp, 1);
 }
 
 /// The task's environment block: the Win16 process's environment, then
@@ -597,7 +686,9 @@ fn environment_block(cpu: &mut Cpu, path: &str, owner: u16) -> u16 {
     global::handle_to_sel(h)
 }
 
-/// Fill the task database at `base` (and its PDB at 100h).
+/// Fill the task database at `base`, and its PDB `psp` past what
+/// `dos::alloc_task_database` wrote: the environment and the command
+/// tail.
 #[allow(clippy::too_many_arguments)]
 fn write_tdb(
     cpu: &mut Cpu,
@@ -628,15 +719,10 @@ fn write_tdb(
     super::poke(cpu, base + 0xF2, &name);
     w16(cpu, 0xFA, 0x4454);
     // The PDB.
-    let pdb = base + 0x100;
+    let pdb = super::lin(cpu, psp, 0);
     super::poke(cpu, pdb, &[0xCD, 0x20]);
     super::write_16(cpu, pdb + 0x02, 0xA000);
-    super::poke(cpu, pdb + 0x18, &[0, 1, 2, 3, 4]);
-    super::poke(cpu, pdb + 0x1D, &[0xFF; 15]);
     super::write_16(cpu, pdb + 0x2C, environment);
-    super::write_16(cpu, pdb + 0x32, 20);
-    super::write_32(cpu, pdb + 0x34, (psp as u32) << 16 | 0x18);
-    super::poke(cpu, pdb + 0x50, &[0xCD, 0x21, 0xCB]);
     let mut tail = crate::dosstr::to_bytes(arguments);
     if !tail.is_empty() && tail[0] != b' ' {
         tail.insert(0, b' ');
@@ -701,6 +787,8 @@ fn new_thread(cpu: &mut Cpu, ctx: Context) -> Option<(u32, u32)> {
         ctx,
         ..Thread::default()
     });
+    // A task that ran alone has a turn to end now, as after CreateThread.
+    crate::win32::thread::arm_turn(cpu);
     Some((id, top))
 }
 
@@ -740,11 +828,12 @@ pub fn may_run(win32: &crate::win32::Win32, p: usize, t: usize) -> bool {
 /// task, which handles the message, and the reply switches back: a third
 /// task that is ready doesn't run in between. Here the sender gives up
 /// the lock when it waits for the reply, so the receiver runs next; the
-/// receiver keeps the lock after it replies until it waits, and then the
-/// sender runs. Without this, a task that had just started ran between a
-/// message and its reply: the Metal Marines CD's launcher was still
-/// being activated, as the Video for Windows setup hid its window, when
-/// the setup's next task activated its dialog, and the rest of the
+/// receiver gives up its turn as it replies in GetMessage, PeekMessage or
+/// SendMessage's wait (USER32's `sender_goes_on`) or with ReplyMessage,
+/// so the sender runs next. Without this, a task that had just started ran between a message
+/// and its reply: the Metal Marines CD's launcher was still being
+/// activated, as the Video for Windows setup hid its window, when the
+/// setup's next task activated its dialog, and the rest of the
 /// launcher's activation then brought it back over the dialog.
 pub fn hand_turn(win32: &mut crate::win32::Win32, from: u32, to: u32) {
     if from != to && both_tasks(win32, from, to) {
@@ -772,6 +861,12 @@ pub fn entered(win32: &mut crate::win32::Win32, tid: u32) {
 /// and this one when its turn comes again. It goes on at `ctx`.
 pub fn yield_now(cpu: &mut Cpu, ctx: Context) {
     crate::win32::system::load_context(cpu, &ctx);
+    give_up_turn(cpu);
+}
+
+/// The running task gives up its turn where the processor is: another
+/// task that is ready runs, the one `hand_turn` named first.
+pub fn give_up_turn(cpu: &mut Cpu) {
     cpu.bus.win32.win16.lock = 0;
     crate::win32::thread::reschedule(cpu);
 }
@@ -960,27 +1055,24 @@ pub fn then(_: &mut Cpu, _: u32, _: &[u32], ctx: &mut Context) -> Option<u32> {
     Some(ctx.gpr[EAX])
 }
 
-/// WinExec and EXEC from the running task: the program at `path` as a
-/// new task. Its instance, or the error below 32 Windows gives.
-pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16, u16> {
+/// What `exec` started: the instance the caller gets (33 for a Win32 or
+/// DOS program), and the new task's thread when it is a Windows 3.1
+/// program's.
+pub struct Started {
+    pub instance: u16,
+    pub thread: Option<u32>,
+}
+
+/// WinExec and EXEC from the running task: the program at `path`, or
+/// found where LoadModule looks for it (`module::find_program`), as a new
+/// task, unless it is loaded already and not MULTIPLEDATA
+/// (`module::loaded_single_instance`). What it started, or the error
+/// below 32 Windows gives (2 when no file is found). The caller then
+/// lets a new task run first (`after_exec`).
+pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<Started, u16> {
     let parent = super::current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].handle);
     let environment = super::win16_ref(cpu).map_or(Vec::new(), |p| p.environment.clone());
-    let path = if path.contains('.') {
-        path.to_string()
-    } else {
-        format!("{}.EXE", path)
-    };
-    let (path, file) = match cpu.read_program_file(&path) {
-        Some(file) => (path, file),
-        None => {
-            let windows = format!("{}\\{}", crate::win32::loader::WINDOWS_DIR, path);
-            if path.contains(['\\', '/', ':']) {
-                return Err(2);
-            }
-            let file = cpu.read_program_file(&windows).ok_or(2u16)?;
-            (windows, file)
-        }
-    };
+    let (path, file) = module::find_program(cpu, path).ok_or(2u16)?;
     // The module's path as Windows keeps it, whatever form the caller
     // gave: full, with backslashes (D:/METAL.EXE is D:\METAL.EXE), which
     // GetModuleFileName gives and the module's DLLs are looked for by.
@@ -988,23 +1080,63 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
     // A DOS program starts in a DOS machine, as CreateProcessA starts
     // one (win32/dosvm.rs).
     if pe::is_pe(&file) || crate::win32::dosvm::is_program(&path, &file) {
-        return exec_win32(cpu, &path, arguments, show, environment);
+        let instance = exec_win32(cpu, &path, arguments, show, environment)?;
+        return Ok(Started {
+            instance,
+            thread: None,
+        });
+    }
+    // A program that is loaded already and isn't MULTIPLEDATA gets no
+    // second task: LoadModule gives the loaded copy's instance.
+    if let Some(instance) = module::loaded_single_instance(cpu, &path) {
+        cpu.bus.log_string(&format!(
+            "[W16] {} is loaded and not MULTIPLEDATA: its instance {:04X}, no new task",
+            path, instance
+        ));
+        return Ok(Started {
+            instance,
+            thread: None,
+        });
     }
     match spawn(cpu, &path, arguments, show, parent, environment) {
-        Ok(spawned) => Ok(cpu
-            .bus
-            .win32
-            .win16
-            .tasks
-            .iter()
-            .find(|t| t.handle == spawned.task)
-            .map_or(0, |t| t.instance)),
+        Ok(spawned) => {
+            let win16 = &cpu.bus.win32.win16;
+            Ok(Started {
+                instance: super::live_task(win16, spawned.task)
+                    .map_or(0, |t| win16.tasks[t].instance),
+                thread: Some(spawned.thread.1),
+            })
+        }
         Err(message) => {
             cpu.bus
                 .log_string(&format!("[W16] {} can't start: {}", path, message));
             Err(if message.contains("memory") { 8 } else { 11 })
         }
     }
+}
+
+/// The running task goes on at `ctx`, which holds what `exec` gives it,
+/// after starting `started`. A new task runs first: Windows 3.1's
+/// LoadModule gives it a DirectedYield and returns only when it yields
+/// back, so the new program's startup code and WinMain run until it
+/// first waits for a message or yields. A program may count on that: it
+/// sends a program it just started a message at once, and that program
+/// has to have registered itself somewhere before (Memphis Math's
+/// MEMPHIS starts MMAP and then shows it through MCLIB.DLL, which posts
+/// the show command to the task MMAP put in MCLIB's table as it
+/// started). True when the task gave up its turn, so that `ctx` goes on
+/// later; false when it goes on now.
+pub fn after_exec(cpu: &mut Cpu, ctx: Context, started: &Started) -> bool {
+    let Some(to) = started.thread else {
+        return false;
+    };
+    let from = crate::win32::user32::current_tid(cpu);
+    if from == to || !both_tasks(&cpu.bus.win32, from, to) {
+        return false;
+    }
+    hand_turn(&mut cpu.bus.win32, from, to);
+    yield_now(cpu, ctx);
+    true
 }
 
 /// `exec` of the Win32 or DOS program at `path`: as on Windows 98, a
@@ -1085,6 +1217,7 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     super::comm::task_ended(cpu, task.handle);
     super::ole2::task_ended(cpu, task.handle);
     super::misc::task_ended(cpu, task.tid);
+    crate::win32::shims::win31::gdi_heap::task_ended(cpu, task.handle);
     // The process object its starters wait on.
     let objects = &mut cpu.bus.win32.objects;
     if let Some(object) = objects.get_mut(task.process_object)
@@ -1093,6 +1226,15 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
         *exit_code = Some(code as u32);
     }
     objects.release(task.process_object);
+    // The byte ranges it locked (INT 21h AH=5Ch) are free again. The
+    // files its PDB's handles refer to close with its task database
+    // (`dos::free_pdb`), as Windows closes an ending task's files. The
+    // files of other tasks stay open, those with the same handle numbers
+    // too: a C runtime's exit closes all the handles its table could
+    // have, the others' numbers among them.
+    cpu.bus
+        .disk
+        .release_locks(crate::disk::TASK_OWNER | task.psp as u32);
     let others = cpu
         .bus
         .win32
@@ -1102,11 +1244,13 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
         .any(|k| k.exit_code.is_none());
     if !others {
         // The last task: the Win16 process ends.
+        super::dos::free_pdb(cpu, task.psp);
         crate::win32::exit(cpu, code as u32);
         return;
     }
     crate::win32::user32::destroy_thread_windows(cpu, task.tid);
     crate::win32::user32::ddeml::thread_ended(cpu, task.tid);
+    super::dos::free_pdb(cpu, task.psp);
     global::free_owned(cpu, task.handle);
     let shared = cpu
         .bus
@@ -1120,6 +1264,7 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     super::hook::task_ended(cpu, task.tid, ds);
     if freed {
         global::free(cpu, task.instance);
+        cpu.bus.win32.win16.tasks[t].instance = 0;
     }
     cpu.bus.win32.win16.ldt.free(task.psp, 1);
     global::free(cpu, task.handle);

@@ -368,7 +368,8 @@ impl DiskController {
             None => (MemFs::new(), "AUDIO_CD".to_string(), 0),
         };
         let volume_label = if volume_label.is_empty() { "CDROM".to_string() } else { volume_label };
-        // Which subchannel file beside the image it reads, for the log.
+        // Which subchannel file beside the image it reads, and whether it
+        // is a CopyLok disc, for the log.
         for note in image.notes() {
             crate::diskdelta::note(note.clone());
         }
@@ -609,6 +610,9 @@ impl DiskController {
             ));
         }
         self.close_drive_files(drive);
+        if let Some(root) = self.drive(drive).and_then(|d| d.host_root()) {
+            self.host_dirs.closed.drop_under(root);
+        }
         self.drives[drive as usize] = None;
         if self.current_drive == drive {
             self.current_drive = DRIVE_C;
@@ -627,6 +631,7 @@ impl DiskController {
             .collect();
         for sft in gone {
             self.open_files.remove(&sft);
+            self.forget_locks(sft);
             self.mark_dirty(sft);
         }
     }

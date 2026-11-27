@@ -204,6 +204,11 @@ impl Xms {
         }
     }
 
+    /// The address of the expanded memory page that holds `address`.
+    pub(crate) fn page_holding(&self, address: u32) -> Option<u32> {
+        self.ems_pages.iter().copied().find(|&page| (page..page + EMS_PAGE).contains(&address))
+    }
+
     /// How many expanded memory pages the free memory has room for.
     pub(crate) fn free_pages(&self, memory_end: u32) -> u32 {
         self.gaps(memory_end).iter().map(|&(_, kb)| kb * KB / EMS_PAGE).sum()

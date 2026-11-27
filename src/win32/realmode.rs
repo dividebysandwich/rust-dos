@@ -4,9 +4,10 @@
 //! interrupt that came while a program ran (system.rs), the handler a
 //! program put in the real-mode vector table for a Win16 task's INT n
 //! (win16/dos.rs), the code a Win16 task calls with DPMI's INT 31h
-//! AX=0300h, 0301h and 0302h (win16/dpmi.rs), and DOS's EXEC of a DOS
-//! program a Windows program started, which runs until the program ends
-//! (dosvm.rs).
+//! AX=0300h, 0301h and 0302h (win16/dpmi.rs), the same calls of a Win32
+//! program through VWIN32's DPMI dispatch (kernel32/vxd.rs), and DOS's
+//! EXEC of a DOS program a Windows program started, which runs until the
+//! program ends (dosvm.rs).
 //!
 //! Each goes the same way. `call` keeps what the system goes on with
 //! afterwards in a `Frame`, switches the processor to real mode with the
@@ -55,6 +56,10 @@ pub enum Kind {
     /// DOS's EXEC of a DOS program a Windows program started: the
     /// program that started it goes on when it ends (dosvm.rs).
     Exec,
+    /// Real-mode code a Win32 program called through VWIN32's DPMI
+    /// dispatch: the call structure, at this flat address of the
+    /// program's, gets the registers the code left (kernel32/vxd.rs).
+    Vxd,
 }
 
 /// What the system goes on with when the code it called returns.
@@ -65,7 +70,8 @@ pub struct Frame {
     /// code's for a `Callback`.
     pub ctx: Context,
     /// A `Call`'s call structure, at this linear address of the Win16
-    /// process; a `Callback`'s slot.
+    /// process; a `Vxd`'s, at this flat address of the Win32 program's;
+    /// a `Callback`'s slot.
     pub at: u32,
 }
 
@@ -204,6 +210,9 @@ pub fn returned(cpu: &mut Cpu) {
         .expect("real-mode code called");
     let rm = Context::of(cpu);
     let mut ctx = frame.ctx;
+    if is_task_call(frame.kind) {
+        end_task_calls(cpu);
+    }
     match frame.kind {
         Kind::Irq if cpu.bus.win32.real_mode.is_empty() => {
             super::thread::after_interrupt(cpu, ctx);
@@ -220,6 +229,7 @@ pub fn returned(cpu: &mut Cpu) {
         }
         Kind::Call => crate::win16::dpmi::call_returned(cpu, frame, &rm),
         Kind::Exec => super::dosvm::ended(cpu, frame, &rm),
+        Kind::Vxd => super::kernel32::vxd_call_returned(cpu, frame, &rm),
         Kind::Callback => unreachable!("a callback's code returned to the system"),
     }
 }
@@ -260,6 +270,26 @@ pub fn abandon(cpu: &mut Cpu) {
             frames.len()
         ));
     }
+    if frames.iter().any(|f| is_task_call(f.kind)) {
+        end_task_calls(cpu);
+    }
+}
+
+/// Whether a frame waits for real-mode code a Win16 task called (an INT
+/// that went down to the vector table, a DPMI call), which runs with the
+/// task's current PDB as DOS's current process (win16/dos.rs).
+fn is_task_call(kind: Kind) -> bool {
+    matches!(kind, Kind::Int | Kind::Call)
+}
+
+/// A task's real-mode call returned or went: when no other is waiting,
+/// DOS's current process is the Windows process's PSP again, as it is
+/// while protected-mode code runs.
+fn end_task_calls(cpu: &mut Cpu) {
+    let win32 = &cpu.bus.win32;
+    if !win32.real_mode.iter().any(|f| is_task_call(f.kind)) {
+        cpu.current_psp = win32.psp;
+    }
 }
 
 crate::state_enum!(Kind {
@@ -267,6 +297,7 @@ crate::state_enum!(Kind {
     Kind::Int,
     Kind::Call,
     Kind::Callback,
-    Kind::Exec
+    Kind::Exec,
+    Kind::Vxd
 });
 crate::state_fields!(Frame { kind, ctx, at });

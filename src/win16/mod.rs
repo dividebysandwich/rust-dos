@@ -22,23 +22,25 @@ pub mod dos;
 pub(crate) mod dpmi;
 pub(crate) mod flat;
 mod gdi;
-mod global;
+pub(crate) mod global;
 mod handles;
 mod hook;
 mod kernel;
-mod ldt;
+pub(crate) mod ldt;
 mod local;
 mod lz;
 mod message;
 mod misc;
-mod module;
+pub(crate) mod module;
 mod ole2;
 mod ole2disp;
 pub(crate) mod resource;
+mod setupx;
 pub mod task;
 pub(crate) mod thunk;
 mod typelib;
 mod typelib_invoke;
+pub(crate) mod universal;
 mod user;
 
 pub use builtin::{function_name, trap_name};
@@ -53,7 +55,9 @@ use std::collections::BTreeMap;
 
 pub use global::Arena;
 pub use ldt::Ldt;
-pub use misc::{Mmsystem, call_queued16, queue_call16, wave_data, wave_header16};
+pub use misc::{
+    Mmsystem, call_queued16, cancel_timer_calls16, header_data, header16, queue_call16,
+};
 
 /// The Win16 tasks' state: the system's.
 #[derive(Clone, Debug, Default)]
@@ -134,6 +138,10 @@ pub struct State {
     pub comm: Vec<comm::Port>,
     /// What the 16-bit OLE modules keep (ole2.rs).
     pub ole: crate::savestate::Since<{ ole2::OLE16 }, ole2::Ole16>,
+    /// The Universal Thunks and their selectors (universal.rs).
+    pub universal: crate::savestate::Since<{ universal::UT_SAVED }, universal::Universal>,
+    /// SETUPX's open INF files, LDIDs and copy queue (setupx.rs).
+    pub setupx: crate::savestate::Since<{ setupx::SETUPX_SAVED }, setupx::Setupx>,
     /// The exit code of the last task that ended other than a client's,
     /// which the Win16 process ends with when a client outlived it.
     pub exit_code: u16,
@@ -235,6 +243,14 @@ pub struct Task16 {
     /// The libraries it came with whose entry points InitTask is yet to
     /// call, by module handle.
     pub inits: Vec<u16>,
+    /// Its current drive and directories while another program's are
+    /// DOS's (win32/directories.rs): None while they are DOS's, and
+    /// always for a task that runs a Win32 process's 16-bit calls, which
+    /// works in that process's.
+    pub directories: crate::savestate::Since<
+        { crate::win32::directories::DIRECTORIES_SAVED },
+        Option<crate::win32::directories::Directories>,
+    >,
 }
 
 /// A switch between a task's 16-bit and 32-bit code (thunk.rs).
@@ -355,6 +371,16 @@ pub fn current_task(cpu: &Cpu) -> Option<usize> {
     cpu.bus.win32.win16.tasks.iter().position(|t| t.tid == tid)
 }
 
+/// The task whose handle is `handle`, if it hasn't ended. The tasks that
+/// ended stay in the list with the handle of their task database, which
+/// was freed at their end and which a task started later may get.
+pub fn live_task(win16: &State, handle: u16) -> Option<usize> {
+    win16
+        .tasks
+        .iter()
+        .position(|t| handle != 0 && t.handle == handle && t.exit_code.is_none())
+}
+
 /// The running task's switches between 16-bit and 32-bit code: the
 /// contexts that go on when the code called returns, which the registers
 /// don't show (`Cpu::idle_key`). Empty outside a Win16 task.
@@ -375,6 +401,7 @@ pub fn is_task(win32: &crate::win32::Win32, tid: u32) -> bool {
 
 pub use ddeml::free_dde_copy;
 pub use kernel::{atom_name, atom_of};
+pub use message::send_message_slot;
 
 /// The bytes of the global block `handle`, as a 16-bit program passes
 /// one in a DDE message: None if it isn't a block that is there.
@@ -612,6 +639,18 @@ pub fn expects_win3(cpu: &Cpu, pid: u32, instance: u32) -> bool {
     })
 }
 
+/// Whether the Win16 task whose thread is `tid` runs a Windows 3.x
+/// program: its module's header expects a version of Windows before
+/// 4.0, the version KERNEL's GetExeVersion gives the task. None when
+/// no task has that thread. The system's modules don't count, as in
+/// `expects_win3`.
+pub fn task_expects_win3(cpu: &Cpu, tid: u32) -> Option<bool> {
+    let win16 = &cpu.bus.win32.win16;
+    let task = win16.tasks.iter().find(|t| t.tid == tid)?;
+    let m = win16.modules.iter().find(|m| m.handle == task.module)?;
+    Some(m.builtin.is_none() && m.expected_version < 0x0400)
+}
+
 crate::state_fields!(State {
     pid,
     lock,
@@ -646,7 +685,9 @@ crate::state_fields!(State {
     links,
     exit_code,
     comm,
-    ole
+    ole,
+    universal,
+    setupx
 });
 crate::state_fields!(Module16 {
     name,
@@ -692,7 +733,8 @@ crate::state_fields!(Task16 {
     error_mode,
     yielding,
     vectors,
-    inits
+    inits,
+    directories
 });
 crate::win32::state_variants!(Frame {
     To32 { ctx, post, data },

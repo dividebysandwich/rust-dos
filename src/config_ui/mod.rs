@@ -18,6 +18,7 @@ mod games;
 mod glide;
 mod help;
 mod host;
+mod hotkeys_page;
 mod image;
 mod input;
 mod item;
@@ -128,6 +129,7 @@ enum Page {
     Drives,
     Display,
     Emulator,
+    Hotkeys,
     Sound,
     Mixer,
     Network,
@@ -138,12 +140,13 @@ enum Page {
     Stats,
 }
 
-const PAGES: [Page; 13] = [
+const PAGES: [Page; 14] = [
     Page::Games,
     Page::States,
     Page::Drives,
     Page::Display,
     Page::Emulator,
+    Page::Hotkeys,
     Page::Sound,
     Page::Mixer,
     Page::Network,
@@ -160,6 +163,7 @@ impl Page {
             Page::Drives => "Drives",
             Page::Display => "Display",
             Page::Emulator => "Emulator",
+            Page::Hotkeys => "Hotkeys",
             Page::Sound => "Sound",
             Page::Mixer => "Mixer",
             Page::Network => "Network",
@@ -176,7 +180,13 @@ impl Page {
     fn items(self) -> &'static [Item] {
         use Item::*;
         match self {
-            Page::Drives | Page::Games | Page::States | Page::Cheats | Page::Achievements | Page::Stats => &[],
+            Page::Drives
+            | Page::Games
+            | Page::States
+            | Page::Cheats
+            | Page::Achievements
+            | Page::Stats
+            | Page::Hotkeys => &[],
             Page::Vr => &[
                 VrMode, VrScene, VrScreenFit, VrQuality, VrAmbientOcclusion, VrMsaa, VrScreenGlow, VrControllers, VrSpatialAudio,
                 VrCenter, VrSceneScale, VrSeat(0), VrSeat(1), VrSeat(2), VrSeatTurn, VrKeyboard, VrMarkKeyboard, VrTime, VrTimeSpeed, VrLatitude,
@@ -188,20 +198,19 @@ impl Page {
                 &[Scale, Fullscreen, Aspect, Vrr, FpsCap, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, MonitorEffects, Composite, CompositeEra]
             }
             Page::Emulator => &[
-                Cycles, AutoFps, AutoBusyOs, Core, Fpu, Cpu, Post, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
+                Cycles, AutoFps, AutoBusyOs, Core, Fpu, Cpu, Post, Machine, Renderer, Voodoo, VoodooMemory, VoodooScale, VoodooScaleShader, VoodooMsaa,
                 VoodooDither,
                 VoodooAnisotropy, VoodooTextureSampling, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter,
-                VeriteRisc, VeriteMhz, VeriteRom, VeriteIrq, ToadForceMemory, ToadForceRenderer,
-                ToadForceGamma,
+                VeriteRisc, VeriteMhz, VeriteRom, VeriteIrq, ToadForceMemory, ToadForceGamma,
                 Memsize, Ems, Umb, DosHigh, Dpmi,
-                DosVersion, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
+                DosVersion, AnsiSys, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, PauseInSettings, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
                 ShellSuggestions, ShellColors, SaveShellHistory, GameFixes,
                 VersionCheck, AlmanacAuto,
                 AlmanacFetch, AlmanacReport,
             ],
             Page::Sound => &[
-                SbType, SbPorts, Awe32Rom, Awe32Download, Awe32Ram, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
+                SbType, SbPorts, Cms, Awe32Rom, Awe32Download, Awe32Ram, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
                 Sc55Roms, Sc55Model, Sc55Download, SoundFont, Mt32Roms, Mt32Model, MidiPort, LptDac, TandySound,
                 Pit2GateAtStart, HardDiskNoise, FloppyDiskNoise,
             ],
@@ -221,6 +230,7 @@ impl Page {
                 Volume(Channel::Modem),
                 Volume(Channel::Windows),
                 Volume(Channel::AdlibGold),
+                Volume(Channel::Cms),
                 SpeakerFilter,
                 SbFilter,
                 SbCoupling,
@@ -311,6 +321,9 @@ struct Popup {
     /// The settings with each value (`Item::choices`), the one selected,
     /// the first one shown and how many the last frame showed.
     choices: Vec<Settings>,
+    /// What the list says of each, where the setting's value doesn't say
+    /// it (the hotkeys' custom profiles).
+    labels: Option<Vec<String>>,
     selected: usize,
     scroll: usize,
     visible: usize,
@@ -389,9 +402,9 @@ pub struct ConfigUi {
     /// download once the user agreed to it.
     confirm_sc55: Option<&'static crate::sc55::rom::Romset>,
     sc55_download: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
-    /// The question before Glide's DOS overlay is downloaded, and the
-    /// download going on.
-    confirm_glide: bool,
+    /// The question before a board's Glide DOS overlay is downloaded,
+    /// and the download going on.
+    confirm_glide: Option<&'static crate::voodoo::overlay::Overlay>,
     glide_download: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     /// The selected setting's value being typed, or picked from a list.
     edit: Option<TextField>,
@@ -470,6 +483,12 @@ pub struct ConfigUi {
     almanac: Option<AlmanacView>,
     /// The sound visualizer while it shows (sound_viz.rs).
     sound_viz: Option<sound_viz::SoundViz>,
+    /// The front end's hotkeys, which the window's texts name: the
+    /// `rust-dos` profile's unless the front end says otherwise
+    /// (`set_hotkeys`).
+    hotkeys: crate::hotkeys::Hotkeys,
+    /// The Hotkeys page: custom profiles, and a rebind under way.
+    hotkeys_page: hotkeys_page::HotkeysPage,
     /// The settings as a BIOS setup, while it shows (setup.rs).
     setup: Option<setup::Setup>,
     scene_download: Option<scenes::SceneDownload>,
@@ -495,6 +514,17 @@ impl ConfigUi {
     /// The rust-dos program's window.
     pub fn new() -> Self {
         Self::for_frontend(Frontend::DESKTOP)
+    }
+
+    /// The hotkeys the front end takes, as `[hotkeys]` binds them, for
+    /// the texts that name them.
+    pub fn set_hotkeys(&mut self, hotkeys: crate::hotkeys::Hotkeys) {
+        self.hotkeys = hotkeys;
+    }
+
+    /// The key of `action` as the texts name it, or None if it has none.
+    fn hotkey(&self, action: crate::hotkeys::Action) -> Option<String> {
+        self.hotkeys.key_text(action)
     }
 
     pub fn for_frontend(frontend: Frontend) -> Self {
@@ -554,13 +584,15 @@ impl ConfigUi {
             phone_catalog: phonebook::Catalog::default(),
             almanac: None,
             sound_viz: None,
+            hotkeys: crate::hotkeys::HotkeySettings::default().table(),
+            hotkeys_page: hotkeys_page::HotkeysPage::default(),
             setup: None,
             scene_download: None,
             help: None,
             awe32_download: None,
             confirm_sc55: None,
             sc55_download: None,
-            confirm_glide: false,
+            confirm_glide: None,
             glide_download: None,
         }
     }
@@ -705,9 +737,12 @@ impl ConfigUi {
         self.confirm_launch = None;
         self.confirm_delete = None;
         self.confirm_sc55 = None;
-        self.confirm_glide = false;
+        self.confirm_glide = None;
         self.cheats.edit = None;
         self.achievements.edit = None;
+        self.hotkeys_page.cancel();
+        self.hotkeys_page.dir = crate::hotkeys::custom_dir();
+        self.hotkeys_page.refresh();
         self.cheats.refresh(host);
         self.achievements.edit = None;
         self.achievements.refresh(host);
@@ -723,6 +758,7 @@ impl ConfigUi {
 
     pub fn close(&mut self) {
         self.open = false;
+        self.hotkeys_page.cancel();
         self.setup = None;
         self.layout = None;
         self.hits.clear();
@@ -791,6 +827,7 @@ impl ConfigUi {
             Page::Cheats => self.cheats.rows().len(),
             Page::Achievements => self.achievements.rows(self.active_game.is_some()).len(),
             Page::Stats => 0,
+            Page::Hotkeys => self.hotkey_rows().len(),
             _ => self.items().len(),
         }
     }

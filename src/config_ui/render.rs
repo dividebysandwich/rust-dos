@@ -74,7 +74,7 @@ impl ConfigUi {
             self.draw_almanac(&mut g, content.clone());
         } else if self.confirm_sc55.is_some() {
             self.draw_sc55_question(&mut g, content.clone());
-        } else if self.confirm_glide {
+        } else if self.confirm_glide.is_some() {
             self.draw_glide_question(&mut g, content.clone());
         } else if self.confirm_launch.is_some() {
             if let Some(pending) = &self.confirm_launch {
@@ -94,6 +94,8 @@ impl ConfigUi {
             self.draw_achievements(&mut g, content.clone());
         } else if self.page == Page::Stats {
             self.draw_stats(&mut g, content.clone());
+        } else if self.page == Page::Hotkeys {
+            self.draw_hotkeys(&mut g, content.clone());
         } else {
             self.draw_settings(&mut g, content.clone());
         }
@@ -337,10 +339,18 @@ impl ConfigUi {
     /// picks is: below it, or above it where it doesn't fit below, else as
     /// low in the rows `content` as it fits, scrolled where it is longer
     /// than they are.
-    fn draw_popup(&mut self, g: &mut Grid, content: std::ops::Range<usize>, (col, row): (usize, usize)) {
+    pub(super) fn draw_popup(
+        &mut self,
+        g: &mut Grid,
+        content: std::ops::Range<usize>,
+        (col, row): (usize, usize),
+    ) {
         let home = self.home.as_deref();
         let Some(popup) = &mut self.popup else { return };
-        let labels: Vec<String> = popup.choices.iter().map(|s| popup.item.value(s, home)).collect();
+        let labels: Vec<String> = match &popup.labels {
+            Some(labels) => labels.clone(),
+            None => popup.choices.iter().map(|s| popup.item.value(s, home)).collect(),
+        };
         let height = (labels.len() + 2).min(content.len());
         let top = if row + 1 + height <= content.end {
             row + 1
@@ -633,7 +643,7 @@ impl ConfigUi {
 
     /// The help topic on what is under the cursor: the setting selected,
     /// or the page, or the dialog open over it.
-    fn help_topic(&self) -> Option<&'static str> {
+    pub(super) fn help_topic(&self) -> Option<&'static str> {
         if let Some((_, pick)) = &self.browser {
             return Some(pick.help());
         }
@@ -744,6 +754,8 @@ impl ConfigUi {
     /// The key hints for what is showing, each clickable.
     fn draw_hints(&mut self, g: &mut Grid, row: usize) {
         use UiKey::*;
+        // The performance overlay's key, as `[hotkeys]` has it.
+        let overlay_key = self.hotkey(crate::hotkeys::Action::PerformanceOverlay);
         let mut hints: Vec<(&str, &str, UiKey)> = if self.help.is_some() {
             vec![("\u{2191}\u{2193}", "Scroll", Down), ("Esc", "Close", Esc)]
         } else if let Some(chooser) = &self.chooser {
@@ -780,7 +792,7 @@ impl ConfigUi {
             vec![("Enter", "Close and start", Enter), ("Esc", "Keep running", Esc)]
         } else if self.confirm_delete.is_some() {
             vec![("Enter", if self.confirm_reset { "Reset" } else { "Delete" }, Enter), ("Esc", "Keep", Esc)]
-        } else if self.confirm_sc55.is_some() || self.confirm_glide {
+        } else if self.confirm_sc55.is_some() || self.confirm_glide.is_some() {
             vec![("Enter", "Download", Enter), ("Esc", "Cancel", Esc)]
         } else if self.page == Page::States {
             vec![
@@ -790,6 +802,8 @@ impl ConfigUi {
                 ("Tab", "Page", Tab),
                 ("Esc", "Close", Esc),
             ]
+        } else if self.page == Page::Hotkeys && self.popup.is_none() {
+            self.hotkeys_hints()
         } else if self.popup.is_some() {
             let mut hints = vec![("\u{2191}\u{2193}", "Select", Down), ("Enter", "OK", Enter), ("Esc", "Cancel", Esc)];
             if self.item().is_some_and(|item| !item.fields(&self.settings).is_empty()) {
@@ -804,7 +818,9 @@ impl ConfigUi {
             self.achievements_hints()
         } else if self.page == Page::Stats {
             let overlay = if self.overlay { "Hide overlay" } else { "Show overlay" };
-            vec![("Tab", "Page", Tab), ("Esc", "Close", Esc), ("Ctrl+Shift+F12", overlay, Overlay)]
+            let mut hints = vec![("Tab", "Page", Tab), ("Esc", "Close", Esc)];
+            hints.extend(overlay_key.as_deref().map(|key| (key, overlay, Overlay)));
+            hints
         } else if self.page == Page::Games {
             vec![
                 ("Enter", "Launch", Enter),
@@ -863,7 +879,8 @@ impl ConfigUi {
             hints.extend([("Tab", "Page", Tab), ("F2", "Save", Save), ("Esc", "Close", Esc)]);
             hints
         };
-        if self.help.is_none() && self.help_topic().is_some() {
+        // A rebind takes F1 as the key to bind.
+        if self.help.is_none() && self.help_topic().is_some() && !self.capturing_hotkey() {
             hints.push(("F1", "Help", Help));
         }
         fit_hints(&mut hints, g.cols - 4);

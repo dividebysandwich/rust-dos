@@ -602,15 +602,14 @@ fn the_sse_state_goes_into_a_save_state() {
     cpu.sse.mxcsr = 0x7F80;
     cpu.sse.psn_off = true;
     let saved = cpu.sse;
-    let state = rust_dos::savestate::machine::save(&cpu);
+    let (state, parts) = rust_dos::savestate::machine::save_parts(&cpu);
     cpu.sse = Default::default();
     rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
     assert_eq!(cpu.sse, saved);
-    // A state from before it (without its section and the K6, IDLE and
-    // RC ones after it, the last) loads, with the registers as after a
-    // reset.
-    let older = &state
-        [..state.len() - (4 + 2 + 4 + 8 * 16 + 4 + 1) - (4 + 2 + 4 + 6 * 8) - 2 * (4 + 2 + 4 + 1)];
+    // A state from before it (cut where its section starts, without the
+    // ones after it) loads, with the registers as after a reset.
+    let section = parts.iter().find(|(part, _)| part == "SSE").unwrap();
+    let older = &state[..section.1.start];
     rust_dos::savestate::machine::load(&mut cpu, older).unwrap();
     assert_eq!(cpu.sse, Default::default());
 }

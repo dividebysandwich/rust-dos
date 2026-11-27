@@ -1,5 +1,6 @@
 //! Free space, attributes, directory creation and removal, and directory search.
 
+use super::layout::HARD_DISK_CLUSTERS;
 use super::*;
 
 impl DiskController {
@@ -52,7 +53,7 @@ impl DiskController {
 
     /// The free space of `drive` (0 the current one, 1 A:) as the built-in
     /// Windows tells it, in the numbers of `get_disk_free_space32`. A
-    /// folder hard disk has more room here than DOS's fake 320 MB
+    /// folder hard disk has more room here than DOS's fake 1 GB
     /// (`windows_hard_disk_free`): Windows 95 and 98 report a real disk's
     /// space, up to 2 GB through GetDiskFreeSpaceA and all of it through
     /// GetDiskFreeSpaceExA, and their setup programs check whole installs
@@ -90,12 +91,13 @@ impl DiskController {
             DriveKind::Floppy => (spc, total - used(spc, total as u64) as u32, bps, total),
             // A hard disk counts it too, so the free space drops as files
             // are written: Sierra's installer takes a disk whose free space
-            // doesn't for a compressed one. DOS sees a fake disk of 16 KB
-            // clusters (`DriveKind::geometry`) with 160 to 480 MB free, in
-            // no more clusters than AH=36h holds, so that it doesn't count
-            // in larger clusters (`old_space`) and every 16 KB written
-            // shows. The built-in Windows sees between 1.75 and 3.75 GB
-            // free in 4 KB clusters (`windows_hard_disk_free`).
+            // doesn't for a compressed one. DOS sees a fake 1 GB disk of
+            // 16 KB clusters (`DriveKind::geometry`) with 512 MB to 1 GB
+            // free (`hard_disk_free`), in no more clusters than AH=36h
+            // holds, so that it doesn't count in larger clusters
+            // (`old_space`) and every 16 KB written shows. The built-in
+            // Windows sees between 1.75 and 3.75 GB free in 4 KB clusters
+            // (`windows_hard_disk_free`).
             DriveKind::HardDisk if windows => {
                 let spc = WINDOWS_SECTORS_PER_CLUSTER;
                 let used = used(spc, u64::MAX);
@@ -103,12 +105,7 @@ impl DiskController {
                 let total = (used + free as u64).min(u32::MAX as u64) as u32;
                 (spc, free, bps, total)
             }
-            DriveKind::HardDisk => {
-                let used = used(spc, u64::MAX);
-                let free = hard_disk_free(total, used);
-                let total = (used + free as u64).min(0xFFFF) as u32;
-                (spc, free, bps, total)
-            }
+            DriveKind::HardDisk => (spc, hard_disk_free(used(spc, u64::MAX)), bps, total),
             // Windows 95 and 98's CDFS counts a disc in 32 KB clusters of
             // 16 sectors, as many as fill the volume space its primary
             // descriptor gives, and Drakan's CD check wants just that: 16
@@ -132,6 +129,9 @@ impl DiskController {
     /// mounting a huge directory as a floppy stays cheap. Symlinks are not
     /// followed.
     fn used_clusters(&self, root: &Path, cluster_bytes: u64, cap: u64) -> u64 {
+        // A file whose handle is kept after the guest closed it
+        // (`ClosedFiles`) is still open for writing on the host.
+        let kept = self.host_dirs.closed.paths();
         let writing: Vec<&Path> = self
             .open_files
             .values()
@@ -139,6 +139,7 @@ impl DiskController {
                 OpenData::Host(_, Some(path)) => Some(path.as_path()),
                 _ => None,
             })
+            .chain(kept.iter().map(PathBuf::as_path))
             .collect();
         let mut used = 0u64;
         let mut pending = vec![root.to_path_buf()];
@@ -158,10 +159,11 @@ impl DiskController {
     /// The clusters the files in the host folder `dir` take, up to `cap`,
     /// and the folders in it. A file's size comes with the listing where
     /// the host gives it (`hostfs::DirEntry::len`), or from a stat. The
-    /// files in `writing`, which the guest holds open for writing, are
-    /// statted: NTFS may leave what a handle still open wrote out of the
-    /// size its listing gives, and the count would then depend on when it
-    /// was taken.
+    /// files in `writing`, which have a host handle open for writing (the
+    /// guest's, or one kept after the guest closed it), are statted: NTFS
+    /// may leave what a handle still open wrote out of the size its
+    /// listing gives, and the count would then depend on when it was
+    /// taken.
     fn dir_usage(dir: &Path, cluster_bytes: u64, cap: u64, writing: &[&Path]) -> DirCount {
         let mut clusters = 0u64;
         let mut dirs = Vec::new();
@@ -221,7 +223,7 @@ impl DiskController {
         // to `is_file` and opens.
         let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?;
         if missing || !hostfs::exists(&path) {
-            return Err(0x02); // File Not Found
+            return Err(self.missing_error(filename));
         }
 
         let mut attr: u16 = 0;
@@ -245,7 +247,17 @@ impl DiskController {
     /// Hidden/System bits. Directory and Volume Label bits cannot be set via
     /// this call on real DOS either.
     pub fn set_file_attribute(&self, filename: &str, attr: u16) -> Result<(), u8> {
-        if self.is_system_entry(filename) {
+        // A root keeps its attributes: access denied (05h).
+        if self.is_root(filename) {
+            return Err(0x05);
+        }
+        // A system file keeps its attributes, as it keeps its contents
+        // until it is written to (system_files.rs); a setup that clears
+        // the read-only bit before it copies over a file goes on.
+        if self.system_file(filename).is_some() {
+            return Ok(());
+        }
+        if self.is_system_dir(filename) {
             return Err(0x05);
         }
         // A file in a system directory the drive hasn't is not found
@@ -254,10 +266,10 @@ impl DiskController {
             return Err(0x02);
         }
         if let Some((drive, volume, parts)) = self.locate_fat(filename) {
-            let parts = refs(&parts);
-            volume.find(&parts)?;
+            let parts = self.fat_dos_path(&volume, &parts)?;
+            volume.find(&refs(&parts))?;
             self.check_writable(drive)?;
-            return volume.set_attr(&parts, attr as u8);
+            return volume.set_attr(&refs(&parts), attr as u8);
         }
         // A file on a CD image is there and can't be changed: access
         // denied (05h), as MSCDEX and Windows 98's CDFS answer, which
@@ -272,7 +284,7 @@ impl DiskController {
         // to `is_file` and opens.
         let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?;
         if missing || !hostfs::exists(&path) {
-            return Err(0x02);
+            return Err(self.missing_error(filename));
         }
         self.check_writable(drive)?;
         if let Ok(meta) = hostfs::metadata(&path) {
@@ -288,8 +300,12 @@ impl DiskController {
 
     /// DOS AH=39h: Create a directory at the given DOS path.
     pub fn create_directory(&self, path: &str) -> Result<(), u8> {
-        // A system file or directory is there already.
-        if self.is_system_entry(path) {
+        // A system file or directory is there already, and so is a root
+        // (05h, where a name ending in a slash is 03h).
+        if ends_in_separator(path) {
+            return Err(0x03);
+        }
+        if self.is_system_entry(path) || self.is_root(path) {
             return Err(0x05);
         }
         self.make_system_dirs(path);
@@ -302,10 +318,15 @@ impl DiskController {
         let (drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
         if let Some((_, volume, parts)) = self.locate_fat(path) {
-            if parts.is_empty() {
-                return Err(0x05);
-            }
-            return volume.mkdir(&refs(&parts));
+            // A long-name call gives the directory the long name entries
+            // its name needs, in a directory found by long names.
+            return match parts.split_last() {
+                None => Err(0x05),
+                Some((leaf, dir)) if self.long_call => {
+                    volume.mkdir_long(&refs(dir), leaf).map(|_| ())
+                }
+                Some(_) => volume.mkdir(&refs(&parts)),
+            };
         }
 
         // resolve_path walks any existing leaf, but MKDIR needs to create a new
@@ -316,7 +337,8 @@ impl DiskController {
             None => (".", rest), // current directory of that drive
         };
         // MKDIR "SAVES." makes SAVES, as the paths into it name it.
-        let leaf = Self::dos_component(leaf);
+        let leaf = self.dos_component(leaf);
+        let leaf = &*leaf;
         if leaf.is_empty() {
             return Err(0x03); // Path not found / invalid
         }
@@ -335,10 +357,16 @@ impl DiskController {
                 return Err(0x05); // Access denied / already exists
             }
         }
-        let target = parent_path.join(leaf.to_uppercase());
+        // DOS's MKDIR cuts the name to 8.3: MKDIR "SAVEGAMES" beside
+        // SAVEGAME finds it there.
+        if self.cut_name_taken(&parent_path, leaf) {
+            return Err(0x05);
+        }
+        let target = parent_path.join(self.entry_name(leaf));
         let created = hostfs::create_dir(&target);
         self.host_dirs.changed();
         self.host_dirs.touched(&target);
+        self.host_aliases.touched(&target);
         created.map_err(|_| 0x05)
     }
 
@@ -351,17 +379,31 @@ impl DiskController {
         let normalized = path.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized).ok_or(0x03)?;
         if let Some((_, volume, parts)) = self.locate_fat(path) {
-            let parts = refs(&parts);
-            if parts.is_empty() || !volume.find(&parts).is_ok_and(|e| e.is_dir()) {
+            let Ok(parts) = self.fat_dos_path(&volume, &parts) else {
                 return Err(0x03);
+            };
+            let parts = refs(&parts);
+            // A file is no folder to remove: access denied (05h).
+            match volume.find(&parts) {
+                Ok(entry) if !entry.is_dir() => return Err(0x05),
+                Ok(_) => {}
+                Err(_) => return Err(0x03),
             }
             self.check_writable(drive_num)?;
             if self.drive(drive_num).is_some_and(|d| canonical_path(&parts) == d.current_dir) {
                 return Err(0x10);
             }
+            // The root, when it isn't the current directory, stays as on
+            // a host drive, where removing it fails: access denied (05h).
+            if parts.is_empty() {
+                return Err(0x05);
+            }
             return volume.rmdir(&parts);
         }
         let (host_path, dos_form) = self.resolve_names_on(drive_num, rest).ok_or(0x03)?;
+        if hostfs::is_file(&host_path) {
+            return Err(0x05);
+        }
         if !hostfs::is_dir(&host_path) {
             return Err(0x03);
         }
@@ -370,27 +412,48 @@ impl DiskController {
         if self.drive(drive_num).is_some_and(|d| dos_form.eq_ignore_ascii_case(&d.current_dir)) {
             return Err(0x10);
         }
+        self.host_dirs.closed.drop_under(&host_path);
         let removed = hostfs::remove_dir(&host_path);
         self.host_dirs.changed();
         self.host_dirs.touched(&host_path);
+        if removed.is_ok() {
+            self.host_aliases.removed(&host_path);
+            self.host_aliases.touched(&host_path);
+        }
         removed.map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => 0x03,
             _ => 0x05, // Access denied (e.g. not empty)
         })
     }
 
-    /// Case-insensitive lookup of a child by name in a host directory.
+    /// Case-insensitive lookup of a child by name in a host directory, by
+    /// its long name or its alias (`find_host_entry`), or else by the name
+    /// the call running now packs it to (`dos_component`). The folder's
+    /// entries are read first, so the names the guest made in it since
+    /// the last read get their aliases before the change about to be made
+    /// (`HostAliases`): two folders made one after the other get ~1 and
+    /// ~2 in that order, as on Windows 9x. MKDIR "SAVES.DIR" and a rename
+    /// to "DUNE.BAT" meet the "saves   .dir" and "dune    .bat" that
+    /// builds which kept the padding made, rather than make a second
+    /// entry beside it that hides it from opens.
     pub(super) fn find_existing_child(&self, parent: &Path, name: &str) -> Option<std::ffi::OsString> {
-        let upper = name.to_uppercase();
-        if let Ok(entries) = hostfs::read_dir(parent) {
-            for e in entries {
-                let fname = e.file_name();
-                if fname.to_string_lossy().to_uppercase() == upper {
-                    return Some(fname);
-                }
-            }
+        if let (_, Some((host, _))) = self.find_host_entry(parent, name) {
+            return Some(host.into());
         }
-        None
+        let upper = name.to_uppercase();
+        let names: Vec<std::ffi::OsString> = hostfs::read_dir(parent)
+            .into_iter()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        let packed = |fname: &std::ffi::OsString| {
+            self.dos_component(&fname.to_string_lossy()).to_uppercase()
+        };
+        names
+            .iter()
+            .find(|fname| fname.to_string_lossy().to_uppercase() == upper)
+            .or_else(|| names.iter().find(|fname| packed(fname) == upper))
+            .cloned()
     }
 
     /// The name and the extension a search pattern looks for. DOS packs
@@ -600,9 +663,14 @@ impl DiskController {
         let drive = self.drive(drive_num)?;
         let volume = drive.fat()?;
         let (dir, pattern) = Self::dir_and_pattern(rest);
-        let dir = Self::logical_components(drive, dir);
+        let dir: Vec<String> = self
+            .logical_components(drive, dir)
+            .into_iter()
+            .map(Cow::into_owned)
+            .collect();
+        let dir = self.fat_dos_path(volume, &dir).ok()?;
         let (slots, entries): (Vec<usize>, Vec<DosDirEntry>) = volume
-            .list_slots(&dir)
+            .list_slots(&refs(&dir))
             .ok()?
             .into_iter()
             .filter_map(|(slot, entry)| {
@@ -746,13 +814,18 @@ impl DiskController {
         // Windows 98 Setup's 0Eh for "is this name taken?") find it as
         // the entry of the root directory it is, by its name, and the
         // files besides. In a subdirectory there is no label to find.
-        if search_attr & 0x08 != 0 && Self::logical_components(drive, search_dir_str).is_empty() {
+        if search_attr & 0x08 != 0 && self.logical_components(drive, search_dir_str).is_empty() {
             valid_entries.extend(label().filter(|e| Self::matches_pattern(&e.filename, pattern)));
         }
 
         if let Some(volume) = drive.fat() {
-            let dir = Self::logical_components(drive, search_dir_str);
-            let entries = volume.list(&dir).map_err(|_| 0x03u8)?;
+            let dir: Vec<String> = self
+                .logical_components(drive, search_dir_str)
+                .into_iter()
+                .map(Cow::into_owned)
+                .collect();
+            let dir = self.fat_dos_path(volume, &dir).map_err(|_| 0x03u8)?;
+            let entries = volume.list(&refs(&dir)).map_err(|_| 0x03u8)?;
             valid_entries.extend(
                 entries
                     .into_iter()
@@ -762,7 +835,7 @@ impl DiskController {
         }
 
         if let Some(files) = drive.tree() {
-            let dir = Self::memory_path(drive, search_dir_str);
+            let dir = self.memory_path(drive, search_dir_str);
             if !files.is_dir(&dir) {
                 return Err(0x03);
             }
@@ -831,7 +904,7 @@ impl DiskController {
         } else if pattern.contains(['*', '?']) {
             let (entries, kept) = self.host_entries(&host_dir);
             if kept {
-                self.host_dirs.reread(&host_dir, || Self::read_host_entries(&host_dir))
+                self.host_dirs.reread(&host_dir, || self.read_host_entries(&host_dir))
             } else {
                 entries
             }
@@ -893,18 +966,41 @@ pub struct NameFilter<'a> {
     pub name: Option<&'a str>,
 }
 
-/// The free clusters of a hard disk made of a host folder, `used` of them
-/// in use: what is left of the fake size `step`, or of as many times that
-/// as leaves more than half of it free. Free space then drops cluster by
-/// cluster as files are written, and a folder holding more than the fake
-/// size still has room for a save. Free clusters stay between half a step
-/// and one and a half: 10,001 to 30,000 of DOS's 20,000, which signed
-/// 16-bit numbers hold, and with 16 KB clusters 160 to 480 MB, room for
-/// an install of over 100 MB (Shannara's Optimum one takes 107 MB).
-fn hard_disk_free(step: u32, used: u64) -> u32 {
-    let step = step as u64;
-    (((used + step / 2) / step + 1) * step - used) as u32
+/// The free 16 KB clusters of a hard disk made of a host folder as DOS
+/// sees it, `used` of them in use: all of its fake 1 GB when the folder
+/// is empty, and otherwise what is left after the clusters written since
+/// free space last went back up. Free space drops cluster by cluster as
+/// files are written, from 65,517 to 32,768 clusters (512 MB), then goes
+/// back up to 65,517, so it never falls below 512 MB whatever the folder
+/// holds, and only an empty folder shows all of the disk free. An empty
+/// folder has room for a whole CD, and any folder for Perfect Assassin's
+/// LARGE install (361 MB), as the 1 to 2 GB disk of a PC of 1996 or 1997
+/// had. A real FAT16 disk of that size gave counts past 32,767 as soon as
+/// it was half empty. The count leaves the host's own free space out, so
+/// a run doesn't depend on the host.
+///
+/// DOS sees the clusters written since free space last went back up as
+/// the disk's used space (total less free), not all of the folder: a
+/// fixed 1 GB total can't hold both the folder and 512 MB free. And the
+/// one write that crosses a step makes free space go up by 512 MB
+/// instead of down, which Sierra's installer would take for a compressed
+/// disk if its test file landed just there.
+pub(super) fn hard_disk_free(used: u64) -> u32 {
+    match used.checked_sub(1) {
+        None => HARD_DISK_CLUSTERS as u32,
+        Some(past_first) => {
+            (HARD_DISK_CLUSTERS as u64 - 1 - past_first % HARD_DISK_FREE_DROP) as u32
+        }
+    }
 }
+
+/// The least free space of a folder hard disk under DOS, 512 MB in 16 KB
+/// clusters (`hard_disk_free`).
+const HARD_DISK_MIN_FREE: u64 = 0x8000;
+
+/// How many clusters a folder hard disk's free space under DOS drops by
+/// before it goes back up: from 65,517 down to `HARD_DISK_MIN_FREE`.
+const HARD_DISK_FREE_DROP: u64 = HARD_DISK_CLUSTERS as u64 - HARD_DISK_MIN_FREE;
 
 /// The sectors in a cluster of a folder hard disk as the built-in Windows
 /// sees it: 4 KB, as FAT32 has on the disks of up to 8 GB of the time.

@@ -370,6 +370,32 @@ pub fn parse_mount_command(args: &str, paths: &PathContext) -> Result<MountCmd, 
     parse_mount_tokens(&tokenize(args)?, paths)
 }
 
+/// Parse the words of a MOUNT or BOOT command line, which are DOS text
+/// (`dosstr`), with the host paths among them read as host text: first
+/// as code page 437 shows the bytes (`dosstr::host_text`), so a folder
+/// `Über` typed at the prompt is found; where that names nothing on the
+/// host, as Latin-1, which is how a configuration's `[autoexec]` passes
+/// a letter code page 437 lacks (`dosstr::encode_cp437`), and how a
+/// DOSBox configuration written in a Windows code page spells one. The
+/// DOS paths among the words (`PathContext::locate`) get the DOS text.
+pub fn parse_dos_mount_tokens(tokens: &[String], paths: &PathContext) -> Result<MountCmd, String> {
+    let host: Vec<String> = tokens.iter().map(|t| crate::dosstr::host_text(t)).collect();
+    let dos_locate = |word: &str| (paths.locate)(&crate::dosstr::from_host_text(word));
+    let parsed = parse_mount_tokens(&host, &PathContext { locate: &dos_locate, ..*paths });
+    let names_something = |cmd: &MountCmd| match cmd {
+        MountCmd::Mount(spec) => hostfs::exists(&spec.path),
+        MountCmd::Overlay(_, dir) => hostfs::exists(dir),
+        _ => true,
+    };
+    if host == tokens || parsed.as_ref().is_ok_and(names_something) {
+        return parsed;
+    }
+    match parse_mount_tokens(tokens, paths) {
+        Ok(cmd) if names_something(&cmd) => Ok(cmd),
+        _ => parsed,
+    }
+}
+
 /// Parse the arguments of a `MOUNT` command, split into tokens.
 pub fn parse_mount_tokens(tokens: &[String], paths: &PathContext) -> Result<MountCmd, String> {
     if tokens.is_empty() {

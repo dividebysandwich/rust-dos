@@ -11,6 +11,7 @@
 use super::{
     CharDevice, DRIVE_C, DRIVE_SLOTS, DiskController, Drive, LASTDRIVE, MountOptions, OpenData, OpenFile, drive_name,
 };
+use super::FileId;
 use crate::diskimage::SavedDisk;
 use crate::mount::{MountSpec, mount_spec_value, parse_mount_spec, tokenize};
 use crate::savestate::{Reader, Result, State, StateError, Writer};
@@ -54,6 +55,8 @@ impl DiskController {
             open_files,
             sft_dirty: _,
             position_dirty: _,
+            // In a section of their own, after this one (bus/state.rs).
+            locks: _,
             drives,
             current_drive,
             emm_device: _,
@@ -61,6 +64,9 @@ impl DiskController {
             copies_from: _,
             folders_from_state: _,
             shared_from_state: _,
+            // In a section of their own, before this one (bus/state.rs).
+            host_aliases: _,
+            aliases_from_state: _,
             // Told as the drive was mounted.
             notes: _,
             // Made again from the drives as they are mounted.
@@ -69,6 +75,8 @@ impl DiskController {
             host_dirs: _,
             // The built-in Windows's, which shows them as configured.
             system_files: _,
+            // Set only while a call runs (`long_name_call`).
+            long_call: _,
         } = self;
         current_drive.save(w);
         for drive in &drives[..LASTDRIVE as usize] {
@@ -79,8 +87,19 @@ impl DiskController {
         entries.sort_unstable();
         entries.len().save(w);
         for sft in entries {
-            let OpenFile { data, drive, owner, key, path, mode, refs, fcb, empty_on_use, raw } =
-                &open_files[&sft];
+            let open = &open_files[&sft];
+            let OpenFile {
+                data,
+                drive,
+                owner,
+                path,
+                mode,
+                refs,
+                fcb,
+                empty_on_use,
+                raw,
+                ..
+            } = open;
             let (device, position) = match data {
                 OpenData::Host(file, _) => (None, file.position().unwrap_or(0)),
                 OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => (None, pos.get()),
@@ -93,7 +112,7 @@ impl DiskController {
                 fcb: *fcb,
                 drive: *drive,
                 owner: *owner,
-                key: *key,
+                key: open.key(),
                 path: path.clone(),
                 mode: *mode,
                 device,
@@ -107,6 +126,19 @@ impl DiskController {
             }
             self.save_checkpoints(LASTDRIVE..DRIVE_SLOTS, w);
         }
+    }
+
+    /// The aliases of host folders a save state keeps, in a section of
+    /// their own (`HostAliases::saved`).
+    pub(crate) fn saved_aliases(&self) -> Vec<super::SavedFolder> {
+        self.host_aliases.saved(&self.host_roots(), Self::host_names)
+    }
+
+    /// The host drives, by number, and their roots.
+    fn host_roots(&self) -> Vec<(u8, PathBuf)> {
+        (0..DRIVE_SLOTS)
+            .filter_map(|drive| Some((drive, self.drive(drive)?.host_root()?.to_path_buf())))
+            .collect()
     }
 
     /// The disks of `drives` that keep journals as they are now: a
@@ -131,10 +163,16 @@ impl DiskController {
         }
         self.current_drive = if self.is_mounted(current) { current } else { DRIVE_C };
         self.restore_shared().map_err(StateError::Mismatch)?;
+        // The aliases the state's host folders kept, before its files
+        // are opened again by their names.
+        let aliases = self.aliases_from_state.take().unwrap_or_default();
+        self.host_aliases.load(&aliases, &self.host_roots());
         self.reverts.clear();
         self.load_checkpoints(0..LASTDRIVE, r)?;
 
         self.open_files.clear();
+        // The state's, if it has any, come in a later section.
+        self.locks.clear();
         let mut files = Vec::new();
         for _ in 0..r.count()? {
             let mut file = SavedFile::default();
@@ -148,7 +186,9 @@ impl DiskController {
         for file in files {
             let reopened = match file.device {
                 Some(device) => {
-                    Some(self.opened(OpenData::Device(device), file.drive, file.owner, 0, &file.path, file.mode))
+                    let data = OpenData::Device(device);
+                    let (drive, owner) = (file.drive, file.owner);
+                    Some(self.opened(data, drive, owner, FileId::Device, &file.path, file.mode))
                 }
                 None => match self.open_or_create(&file.path, file.mode, file.owner, false) {
                     Ok(at) => self.open_files.remove(&at),
@@ -161,7 +201,6 @@ impl DiskController {
             };
             open.drive = file.drive;
             open.owner = file.owner;
-            open.key = file.key;
             open.path = file.path;
             open.mode = file.mode;
             open.refs = file.refs & !(EMPTY_ON_USE | RAW);

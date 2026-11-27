@@ -2,6 +2,7 @@
 //! the keyboard, and the layout of the host's keyboard, which the machine
 //! types in with `keyboard_layout=auto`.
 
+use rust_dos::hotkeys::Key as HotKey;
 use rust_dos::keylayout::{self, Layout};
 use sdl3::keyboard::Scancode;
 use sdl3::sys::keycode::{SDL_KMOD_NONE, SDLK_UNKNOWN};
@@ -119,6 +120,31 @@ pub fn pc_scan(scancode: Scancode) -> Option<(u8, bool)> {
         Application => extended(0x5D),
         _ => None,
     }
+}
+
+/// The hotkey key (`[hotkeys]`) of a key event: the key at `scancode` as
+/// the host's layout has it without modifiers. SDL's key events carry the
+/// keycode Shift makes, '!' for Shift+1 on a US keyboard, which a binding
+/// such as Ctrl+Shift+1 doesn't name. `keycode` stands in for an event
+/// without a scan code.
+pub fn hotkey(keycode: sdl3::keyboard::Keycode, scancode: Option<Scancode>) -> Option<HotKey> {
+    let unshifted = scancode.and_then(|scancode| {
+        let code = sdl3::sys::scancode::SDL_Scancode(scancode as i32);
+        // As a key event, so SDL's options for those (French digits, Latin
+        // letters) apply as they do to the keycodes the events carry.
+        // SAFETY: a lookup in SDL's keymap, which takes any scan code.
+        let keycode =
+            unsafe { sdl3::sys::keyboard::SDL_GetKeyFromScancode(code, SDL_KMOD_NONE, true) };
+        if keycode == SDLK_UNKNOWN {
+            return None;
+        }
+        // SAFETY: SDL returns a string, empty for a key without a name,
+        // that stays valid until it is copied here.
+        let name = unsafe { std::ffi::CStr::from_ptr(sdl3::sys::keyboard::SDL_GetKeyName(keycode)) };
+        let name = name.to_string_lossy().into_owned();
+        (!name.is_empty()).then_some(name)
+    });
+    HotKey::named(&unshifted.unwrap_or_else(|| keycode.name()))
 }
 
 /// The layout of the host's keyboard: from the characters the host says

@@ -522,6 +522,8 @@ fn call_real_mode(cpu: &mut Cpu, ctx: &Context, kind: Kind) -> Result<bool, u16>
         ctx: after,
         at,
     };
+    // The code's DOS calls run in the task's current PDB (dos.rs).
+    super::dos::enter_task_pdb(cpu);
     crate::win32::realmode::call(cpu, frame, &rm, &words);
     Ok(true)
 }

@@ -6,7 +6,7 @@
 use crate::command::ShellCommand;
 use crate::cpu::Cpu;
 use crate::disk::{DosDirEntry, drive_letter, parse_drive_prefix};
-use crate::video::{print_cp437, print_string};
+use crate::video::print_string;
 
 /// DOS's message for an error code of the disk controller.
 fn error_text(code: u8) -> &'static str {
@@ -275,7 +275,7 @@ fn write_target(cpu: &mut Cpu, source: &str, target: &str, mut data: Vec<u8>, as
     }
     match crate::disk::char_device(target) {
         Some(crate::disk::CharDevice::Con) => {
-            print_cp437(cpu, &data, 0x07);
+            crate::video::print_console(cpu, &data);
             return true;
         }
         Some(device) => {

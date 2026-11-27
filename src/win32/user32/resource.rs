@@ -14,6 +14,7 @@ use super::{
     current_pid, read_words, set_error, user, write_words,
 };
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 use crate::win32::gdi32::surface::{Surface, Target};
 use crate::win32::gdi32::{self, bitmap};
 use crate::win32::kernel32;
@@ -63,6 +64,62 @@ pub struct Icon {
     pub name: String,
     /// The process that made it, or 0 for the system's.
     pub pid: u32,
+    /// An animated cursor's steps, in the order it shows them; empty for
+    /// one that isn't animated. The first step's picture is the cursor's
+    /// own (`width` to `color`), and steps that show the same frame share
+    /// its bitmaps.
+    pub steps: Since<ANI_CURSORS, Vec<AniStep>>,
+}
+
+/// The W32 section's version that added animated cursors.
+pub const ANI_CURSORS: u16 = 90;
+
+/// A step of an animated cursor: the picture it shows, and for how long,
+/// in jiffies (sixtieths of a second) as an .ANI file gives it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AniStep {
+    pub width: i32,
+    pub height: i32,
+    pub hotspot: (i32, i32),
+    pub mask: u32,
+    pub color: u32,
+    pub jiffies: u32,
+}
+
+impl Icon {
+    /// The picture of step `step` of an animated cursor as an icon of its
+    /// own, without steps; the icon itself for one that isn't animated,
+    /// whatever the step. None past an animated cursor's last step.
+    pub fn step(&self, step: u32) -> Option<Icon> {
+        if self.steps.is_empty() {
+            return Some(self.clone());
+        }
+        let s = *self.steps.get(step as usize)?;
+        Some(Icon {
+            width: s.width,
+            height: s.height,
+            hotspot: s.hotspot,
+            mask: s.mask,
+            color: s.color,
+            steps: Since(Vec::new()),
+            ..self.clone()
+        })
+    }
+
+    /// Its bitmaps, each once: those of its steps too.
+    fn bitmaps(&self) -> Vec<u32> {
+        let mut all = vec![self.mask, self.color];
+        for s in self.steps.iter() {
+            all.extend([s.mask, s.color]);
+        }
+        let mut seen = Vec::new();
+        for b in all {
+            if b != 0 && !seen.contains(&b) {
+                seen.push(b);
+            }
+        }
+        seen
+    }
 }
 
 /// An entry of an accelerator table, as ACCEL has it.
@@ -403,48 +460,60 @@ pub fn set_system_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(TRUE);
     }
     // A shared cursor stays, so the system's gets copies of its bitmaps;
-    // another one's bitmaps become the system's.
-    let (mask, color) = if ic.shared {
-        let color = if ic.color != 0 {
-            copy_bitmap(cpu, ic.color)
-        } else {
-            0
-        };
-        (copy_bitmap(cpu, ic.mask), color)
+    // another one's bitmaps become the system's. An animated one's steps
+    // come with them.
+    let new = if ic.shared {
+        with_copied_bitmaps(cpu, &ic)
     } else {
         let i = ((handle - ICON_BASE) / STEP) as usize;
         user(cpu).icons[i] = None;
-        (ic.mask, ic.color)
+        ic
     };
-    for b in [mask, color] {
-        if b != 0 {
-            keep(cpu, b);
-        }
+    for b in new.bitmaps() {
+        keep(cpu, b);
     }
     let i = ((system - ICON_BASE) / STEP) as usize;
     let Some(old) = user(cpu).icons[i].clone() else {
         return Some(FALSE);
     };
     user(cpu).icons[i] = Some(Icon {
-        width: ic.width,
-        height: ic.height,
-        hotspot: ic.hotspot,
-        mask,
-        color,
+        width: new.width,
+        height: new.height,
+        hotspot: new.hotspot,
+        mask: new.mask,
+        color: new.color,
+        steps: new.steps,
         ..old.clone()
     });
-    for b in [old.mask, old.color] {
+    for b in old.bitmaps() {
         if let Some(o) = gdi32::gdi(cpu).get_mut(b) {
             o.stock = false;
         }
-        if b != 0 {
-            gdi32::delete_object_now(cpu, b);
-        }
+        gdi32::delete_object_now(cpu, b);
     }
     if user(cpu).input.cursor_handle == system {
         super::cursor::set(cpu, system);
     }
     Some(TRUE)
+}
+
+/// `ic` with copies of its bitmaps: steps of an animated cursor that
+/// share a frame share its copy.
+fn with_copied_bitmaps(cpu: &mut Cpu, ic: &Icon) -> Icon {
+    let copies: Vec<(u32, u32)> = ic
+        .bitmaps()
+        .into_iter()
+        .map(|b| (b, copy_bitmap(cpu, b)))
+        .collect();
+    let copy = |b: u32| copies.iter().find(|c| c.0 == b).map_or(0, |c| c.1);
+    let mut new = ic.clone();
+    new.mask = copy(ic.mask);
+    new.color = copy(ic.color);
+    for s in new.steps.iter_mut() {
+        s.mask = copy(s.mask);
+        s.color = copy(s.color);
+    }
+    new
 }
 
 /// The system's icons and cursors a program may load.
@@ -806,6 +875,196 @@ fn load_file(cpu: &mut Cpu, name: u32) -> Option<Option<(u32, u32)>> {
     kernel32::read_whole_file(cpu, name)
 }
 
+/// An icon or cursor from the .ICO or .CUR file read to `at`, `size`
+/// bytes long: the image of its directory whose width is nearest `cx`
+/// (32 for 0). The directory has each image's offset where a group has
+/// its id, and a cursor's hot spot where an icon's planes and bits are.
+/// None if the image isn't all in the file.
+fn from_icon_file(cpu: &mut Cpu, at: u32, size: u32, is_icon: bool, cx: i32) -> Option<Icon> {
+    if size < 6 {
+        return None;
+    }
+    let count = (cpu.bus.guest_read_16(at + 4) as u32).min((size - 6) / 16);
+    let want = if cx == 0 { 32 } else { cx };
+    let mut best: Option<(i32, u32)> = None;
+    for i in 0..count {
+        let w = cpu.bus.guest_read_8(at + 6 + 16 * i) as i32;
+        let w = if w == 0 { 256 } else { w };
+        let off = (w - want).abs();
+        if best.is_none_or(|(o, _)| off < o) {
+            best = Some((off, i));
+        }
+    }
+    let e = at + 6 + 16 * best?.1;
+    let hot = cpu.bus.guest_read_32(e + 4);
+    let len = cpu.bus.guest_read_32(e + 8);
+    let offset = cpu.bus.guest_read_32(e + 12);
+    if offset.checked_add(len).is_none_or(|end| end > size) {
+        return None;
+    }
+    let mut ic = from_bits(cpu, at + offset, len, true)?;
+    if !is_icon {
+        ic.cursor = true;
+        ic.hotspot = (hot as u16 as i32, (hot >> 16) as u16 as i32);
+    }
+    Some(ic)
+}
+
+/// "RIFF", "ACON" and the chunks of an .ANI file, as little-endian
+/// numbers.
+const RIFF: u32 = u32::from_le_bytes(*b"RIFF");
+const ACON: u32 = u32::from_le_bytes(*b"ACON");
+const ANIH: u32 = u32::from_le_bytes(*b"anih");
+const RATE: u32 = u32::from_le_bytes(*b"rate");
+const SEQ: u32 = u32::from_le_bytes(*b"seq ");
+const LIST: u32 = u32::from_le_bytes(*b"LIST");
+const FRAM: u32 = u32::from_le_bytes(*b"fram");
+const ICON: u32 = u32::from_le_bytes(*b"icon");
+/// The flags of an .ANI file's header: its frames are .ICO or .CUR
+/// files, and a "seq " chunk orders them.
+const AF_ICON: u32 = 1;
+const AF_SEQUENCE: u32 = 2;
+
+/// The chunks of a RIFF list from `from` to `end` in `data`: each one's
+/// id, and where its data starts and ends. A chunk's data is padded to
+/// an even length; one that runs past `end` is cut there.
+fn riff_chunks(data: &[u8], from: usize, end: usize) -> Vec<(u32, usize, usize)> {
+    let word = |o: usize| u32::from_le_bytes(data[o..o + 4].try_into().unwrap());
+    let mut chunks = Vec::new();
+    let mut o = from;
+    // `o` saturates past a chunk whose length runs off the end; on a
+    // 32-bit host (the web build) `o + 8` would then overflow.
+    while end.saturating_sub(o) >= 8 {
+        let (id, len) = (word(o), word(o + 4) as usize);
+        let body = o + 8;
+        chunks.push((id, body, body.saturating_add(len).min(end)));
+        o = body.saturating_add(len).saturating_add(len & 1);
+    }
+    chunks
+}
+
+/// An animated cursor from the .ANI file read to `at`, `size` bytes
+/// long, as Windows 98's LoadImage and LoadCursorFromFile load one: a
+/// RIFF "ACON" whose "anih" chunk gives the counts of frames and steps,
+/// the rate and the flags, whose "LIST fram" holds the frames as "icon"
+/// chunks, each an .ICO or .CUR file, and whose "rate" and "seq "
+/// chunks may give each step its jiffies and its frame. None for raw
+/// frames (no AF_ICON), which Wine doesn't load either, and for a file
+/// whose steps show frames it doesn't have.
+fn from_ani_file(cpu: &mut Cpu, at: u32, size: u32, is_icon: bool, cx: i32) -> Option<Icon> {
+    let mut data = vec![0u8; size as usize];
+    cpu.bus.guest_read_bytes(at, &mut data);
+    let word = |o: usize| {
+        data.get(o..o + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+    };
+    if word(8)? != ACON {
+        return None;
+    }
+    let end = (word(4)? as usize).saturating_add(8).min(data.len());
+    let chunks = riff_chunks(&data, 12, end);
+    let chunk = |id: u32| chunks.iter().find(|c| c.0 == id).map(|c| (c.1, c.2));
+    let (header, header_end) = chunk(ANIH)?;
+    if header_end - header < 36 {
+        return None;
+    }
+    let (frames, steps) = (word(header + 4)?, word(header + 8)?);
+    let (rate, flags) = (word(header + 28)?, word(header + 32)?);
+    if flags & AF_ICON == 0 || frames == 0 {
+        return None;
+    }
+    let steps = if steps == 0 { frames } else { steps };
+    let list = chunks
+        .iter()
+        .find(|c| c.0 == LIST && c.2 - c.1 >= 4 && word(c.1) == Some(FRAM))?;
+    let files: Vec<(usize, usize)> = riff_chunks(&data, list.1 + 4, list.2)
+        .into_iter()
+        .filter(|c| c.0 == ICON)
+        .map(|c| (c.1, c.2))
+        .take(frames as usize)
+        .collect();
+    // Each step's frame and jiffies: without a sequence the steps show
+    // the frames in order, and without rates each the header's.
+    let seq = chunk(SEQ).filter(|_| flags & AF_SEQUENCE != 0);
+    let count = match seq {
+        Some(_) => steps,
+        None => steps.min(files.len() as u32),
+    };
+    let entry = |list: Option<(usize, usize)>, i: u32| {
+        let (from, end) = list?;
+        let o = from + 4 * i as usize;
+        if o + 4 <= end { word(o) } else { None }
+    };
+    let plan: Vec<(u32, u32)> = (0..count)
+        .map(|i| {
+            let frame = if seq.is_some() {
+                entry(seq, i)
+            } else {
+                Some(i)
+            };
+            let jiffies = entry(chunk(RATE), i).unwrap_or(rate);
+            frame.map(|f| (f, jiffies))
+        })
+        .collect::<Option<_>>()?;
+    let mut made: Vec<Option<Icon>> = Vec::new();
+    for &(from, end) in &files {
+        made.push(from_icon_file(
+            cpu,
+            at + from as u32,
+            (end - from) as u32,
+            is_icon,
+            cx,
+        ));
+    }
+    let shown = plan
+        .iter()
+        .all(|&(f, _)| made.get(f as usize).is_some_and(|m| m.is_some()));
+    if plan.is_empty() || !shown {
+        for ic in made.iter().flatten() {
+            for b in ic.bitmaps() {
+                gdi32::delete_object_now(cpu, b);
+            }
+        }
+        return None;
+    }
+    // The frames no step shows go.
+    for (i, ic) in made.iter().enumerate() {
+        if let Some(ic) = ic
+            && !plan.iter().any(|&(f, _)| f as usize == i)
+        {
+            for b in ic.bitmaps() {
+                gdi32::delete_object_now(cpu, b);
+            }
+        }
+    }
+    let frame = |f: u32| made[f as usize].as_ref().unwrap();
+    let steps = plan
+        .iter()
+        .map(|&(f, jiffies)| {
+            let ic = frame(f);
+            AniStep {
+                width: ic.width,
+                height: ic.height,
+                hotspot: ic.hotspot,
+                mask: ic.mask,
+                color: ic.color,
+                jiffies,
+            }
+        })
+        .collect();
+    Some(Icon {
+        steps: Since(steps),
+        ..frame(plan[0].0).clone()
+    })
+}
+
+/// LoadCursorFromFileA(name): a cursor from a .CUR or .ANI file, as
+/// LoadImage loads one at the system's size.
+pub fn load_cursor_from_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let flags = LR_LOADFROMFILE | LR_DEFAULTSIZE;
+    load_image(cpu, &[0, args[0], IMAGE_CURSOR, 0, 0, flags])
+}
+
 /// LoadImageA(module, name, type, cx, cy, flags).
 pub fn load_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[module, name, kind, cx, cy, flags] = args else {
@@ -843,41 +1102,15 @@ pub fn load_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 }
             }
             _ => {
-                // An .ICO or .CUR file: its directory has each image's
-                // offset where a group has its id.
+                // An .ANI file is a RIFF one, whichever kind is asked for,
+                // as Wine's LoadImage has it.
                 let is_icon = kind == IMAGE_ICON;
-                let count = cpu.bus.guest_read_16(at + 4) as u32;
-                let mut best: Option<(i32, u32)> = None;
-                for i in 0..count {
-                    let e = at + 6 + 16 * i;
-                    let w = cpu.bus.guest_read_8(e) as i32;
-                    let w = if w == 0 { 256 } else { w };
-                    let want = if cx == 0 { 32 } else { cx };
-                    let off = (w - want).abs();
-                    if best.is_none_or(|(o, _)| off < o) {
-                        best = Some((off, i));
-                    }
-                }
-                match best {
-                    Some((_, i)) => {
-                        let e = at + 6 + 16 * i;
-                        let len = cpu.bus.guest_read_32(e + 8);
-                        let offset = cpu.bus.guest_read_32(e + 12);
-                        let hot = cpu.bus.guest_read_32(e + 4);
-                        let image = at + offset;
-                        let made = if is_icon {
-                            from_bits(cpu, image, len, true)
-                        } else {
-                            from_bits(cpu, image, len, true).map(|mut ic| {
-                                ic.cursor = true;
-                                ic.hotspot = (hot as u16 as i32, (hot >> 16) as u16 as i32);
-                                ic
-                            })
-                        };
-                        Some(made.map_or(0, |ic| add_icon(cpu, ic)))
-                    }
-                    None => Some(0),
-                }
+                let made = if size >= 12 && cpu.bus.guest_read_32(at) == RIFF {
+                    from_ani_file(cpu, at, size, is_icon, cx)
+                } else {
+                    from_icon_file(cpu, at, size, is_icon, cx)
+                };
+                Some(made.map_or(0, |ic| add_icon(cpu, ic)))
             }
         };
         kernel32::free_pages(cpu, at);
@@ -922,8 +1155,16 @@ pub fn copy_bitmap(cpu: &mut Cpu, handle: u32) -> u32 {
         return 0;
     };
     if b.dib.is_none() {
-        let mut copy = b;
+        // Its rows as they are, which are in the program's memory for a
+        // bitmap in Windows 3.1's GDI heap.
+        let rows = Surface::load_all(cpu, Target::Bitmap(handle));
+        let Some(mut copy) = gdi32::gdi(cpu).bitmap(handle).cloned() else {
+            return 0;
+        };
         copy.dc = 0;
+        if let Some(rows) = rows {
+            copy.bits = rows.data;
+        }
         return gdi32::add(cpu, gdi32::Kind::Bitmap { bitmap: copy });
     }
     let bpp = (b.bpp * b.planes).max(1);
@@ -960,11 +1201,7 @@ pub fn create_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let mut bits = vec![0u8; 2 * stride];
         cpu.bus.guest_read_bytes(and, &mut bits[..stride]);
         cpu.bus.guest_read_bytes(xor, &mut bits[stride..]);
-        let mask = bitmap::new_ddb(cpu, w, 2 * h, 1);
-        if let Some(b) = gdi32::gdi(cpu).bitmap_mut(mask) {
-            let n = b.bits.len().min(bits.len());
-            b.bits[..n].copy_from_slice(&bits[..n]);
-        }
+        let mask = bitmap::new_ddb_with(cpu, w, 2 * h, 1, &bits);
         Icon {
             width: w,
             height: h,
@@ -1054,10 +1291,8 @@ pub fn destroy_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn free_icon(cpu: &mut Cpu, handle: u32, ic: &Icon) {
-    for b in [ic.mask, ic.color] {
-        if b != 0 {
-            gdi32::delete_object_now(cpu, b);
-        }
+    for b in ic.bitmaps() {
+        gdi32::delete_object_now(cpu, b);
     }
     let i = ((handle - ICON_BASE) / STEP) as usize;
     if let Some(slot) = user(cpu).icons.get_mut(i) {
@@ -1065,7 +1300,8 @@ fn free_icon(cpu: &mut Cpu, handle: u32, ic: &Icon) {
     }
 }
 
-/// CopyIcon(icon).
+/// CopyIcon(icon). The copy of an animated cursor is its first step's
+/// picture, as GetIconInfo gives it.
 pub fn copy_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(ic) = icon(cpu, args[0]) else {
         set_error(cpu, ERROR_INVALID_ICON_HANDLE);
@@ -1080,6 +1316,7 @@ pub fn copy_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         },
         shared: false,
         pid: current_pid(cpu),
+        steps: Since(Vec::new()),
         ..ic
     };
     Some(add_icon(cpu, copy))
@@ -1433,7 +1670,16 @@ crate::state_fields!(Icon {
     shared,
     module,
     name,
-    pid
+    pid,
+    steps
+});
+crate::state_fields!(AniStep {
+    width,
+    height,
+    hotspot,
+    mask,
+    color,
+    jiffies
 });
 crate::state_fields!(Accel { virt, key, cmd });
 

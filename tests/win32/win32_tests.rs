@@ -1120,6 +1120,67 @@ fn an_idle_loop_that_waits_for_a_deadline_by_get_tick_count_is_skipped_to_it() {
     assert!(stats.skipped / stats.proofs > 4 * ms, "{stats:?}");
 }
 
+/// Tribal Rage's MFC idle loop (#1729): it counts its passes in RAM, hands
+/// the count to OnIdle, which compares it with 0 and 1, and waits for a
+/// deadline by GetTickCount. A proof skips up to the next timer event,
+/// hundreds of passes at the speed below, and the passes skipped must come
+/// out as when they all run. The model of the counts finds how many run
+/// the same without running each of them: they move the count by one and
+/// read the clock as the one before did until its next millisecond.
+#[test]
+fn an_idle_loop_that_counts_its_passes_is_proven_without_modelling_each() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetTickCount"])];
+    // The count at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut spin = a.create_label();
+        let mut idle = a.create_label();
+        a.call(l.import(0))?;
+        a.mov(ebx, eax)?;
+        a.set_label(&mut spin)?;
+        a.mov(ecx, dword_ptr(l.data))?;
+        a.inc(dword_ptr(l.data))?;
+        // OnIdle(count): more idle work for counts 0 and 1.
+        a.test(ecx, ecx)?;
+        a.jle(idle)?;
+        a.cmp(ecx, 1)?;
+        a.je(idle)?;
+        a.set_label(&mut idle)?;
+        // OnIdle returns with ECX as it left it, not the count.
+        a.mov(ecx, 0)?;
+        a.call(l.import(0))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu.bus.set_cycles_per_ms(100_000);
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start("idle_count_plain", CoreMode::Normal, false);
+    let mut skipping = start("idle_count_skipping", CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 400, 100_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    let stats = &skipping.bus.observe.stats;
+    assert_eq!(skipping.errorlevel, 0x2A, "{stats:?}");
+    assert!(stats.proofs >= 10 && stats.skipped > 100 * 100_000, "{stats:?}");
+    // A few passes of the model for each proof, where running each pass
+    // skipped would take hundreds.
+    assert!(stats.modelled < 20 * stats.proofs, "{stats:?}");
+}
+
 /// Run `image` on a machine that skips passes (on the recompiler) and one
 /// that runs them all (on the interpreter), in lockstep: they must come
 /// out the same after every batch, and the program must end with 2Ah.
@@ -1242,6 +1303,172 @@ fn a_sleep_zero_loop_that_counts_while_it_waits_is_skipped() {
     });
     let stats = idle_lockstep("sleep_zero_count_wait", image);
     assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// A wait for a timer's WM_TIMER in a loop of PeekMessageA, as Wizardry
+/// Gold waits between the steps of its animations (#1692), then the same
+/// with a GetTickCount in each pass, as its loop over its mouse hot spots
+/// does. A PeekMessageA that finds nothing changes nothing up to the
+/// timer, so the passes are skipped to it in both loops, and come out the
+/// same as when they all run.
+#[test]
+fn a_peek_message_loop_that_waits_for_a_timer_is_skipped() {
+    let names: &[&str] = &["SetTimer", "PeekMessageA"];
+    let imports: &[(&str, &[&str])] =
+        &[("USER32.DLL", names), ("KERNEL32.DLL", &["GetTickCount"])];
+    // The MSG at 0.
+    let image = program(BASE, false, imports, &[0; 32], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(0)?;
+        a.push(50)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("SetTimer"))?;
+        for clock in [false, true] {
+            let mut spin = a.create_label();
+            a.set_label(&mut spin)?;
+            if clock {
+                a.call(l.import(names.len()))?;
+            }
+            a.push(1)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(l.data)?;
+            a.call(f("PeekMessageA"))?;
+            a.test(eax, eax)?;
+            a.jz(spin)?;
+            // WM_TIMER.
+            a.cmp(dword_ptr(l.at(4)), 0x113)?;
+            a.jne(spin)?;
+        }
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let (stats, ms) = peek_lockstep("peek_timer", image);
+    // The two waits come to 100 ms; the passes run to prove the loops
+    // are a small part of them.
+    assert!(stats.skipped > 80 * ms, "{stats:?}");
+}
+
+/// A loop that draws a frame between its PeekMessageAs (PM_NOREMOVE)
+/// until the timer's WM_TIMER comes, as a game's main loop does: its
+/// passes peek close enough together to arm the place, but each writes
+/// another frame number over the frame, so they aren't all the same.
+/// Whatever the proofs make of them, the program draws as many frames,
+/// and leaves its memory and registers, as when every pass runs.
+#[test]
+fn a_peek_message_loop_that_draws_between_peeks_runs_as_it_would() {
+    let names: &[&str] = &["SetTimer", "PeekMessageA"];
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", names)];
+    // The MSG at 0, the frame of 64 dwords at 32, the frames drawn after.
+    let image = program(BASE, false, imports, &[0; 0x200], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(0)?;
+        a.push(50)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("SetTimer"))?;
+        a.xor(ebx, ebx)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        a.inc(ebx)?;
+        a.mov(eax, ebx)?;
+        a.mov(edi, l.data + 32)?;
+        a.mov(ecx, 64)?;
+        a.rep().stosd()?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(l.data)?;
+        a.call(f("PeekMessageA"))?;
+        a.test(eax, eax)?;
+        a.jz(spin)?;
+        // WM_TIMER.
+        a.cmp(dword_ptr(l.at(4)), 0x113)?;
+        a.jne(spin)?;
+        a.mov(dword_ptr(l.at(0x120)), ebx)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let (stats, _) = peek_lockstep("peek_draw", image);
+    assert!(stats.arms > 0, "the peeks armed the loop: {stats:?}");
+}
+
+/// A PeekMessageA loop that takes five of a 20 ms timer's WM_TIMERs: each
+/// wait is skipped up to the timer, and the peek after the skip finds the
+/// message. The place isn't proven again right there, where the proof
+/// would end at that peek, but once the loop has peeked its way back to
+/// waiting; a proof that a message ends hasn't failed.
+#[test]
+fn a_peek_message_loop_is_not_proven_again_where_its_timer_comes() {
+    let names: &[&str] = &["SetTimer", "PeekMessageA"];
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", names)];
+    // The MSG at 0.
+    let image = program(BASE, false, imports, &[0; 32], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(0)?;
+        a.push(20)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("SetTimer"))?;
+        a.mov(esi, 5)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        // PM_REMOVE.
+        a.push(1)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(l.data)?;
+        a.call(f("PeekMessageA"))?;
+        a.test(eax, eax)?;
+        a.jz(spin)?;
+        // WM_TIMER.
+        a.cmp(dword_ptr(l.at(4)), 0x113)?;
+        a.jne(spin)?;
+        a.dec(esi)?;
+        a.jnz(spin)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let (stats, ms) = peek_lockstep("peek_timers", image);
+    assert!(stats.skipped > 80 * ms, "{stats:?}");
+    // Armed again where the timer comes, every wait would fail a proof
+    // at its first peek. A proof that is running when the timer comes
+    // (the last one is due a few instructions after the event before it)
+    // ends at the peek that finds its message, as at a timer event.
+    assert_eq!(stats.failures, 0, "{stats:?}");
+}
+
+/// Run `image` on a machine that skips idle loops and one that doesn't,
+/// in lockstep, up to its exit with 0x2A: the skips found and the
+/// instructions in a millisecond.
+fn peek_lockstep(test: &str, image: Vec<u8>) -> (rust_dos::idle::IdleStats, u64) {
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    // Both machines start their clocks at the same host time, which a
+    // second passing between them would otherwise make differ.
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start(&format!("{test}_plain"), CoreMode::Normal, false);
+    let mut skipping = start(&format!("{test}_skipping"), CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the waits ended");
+    let stats = skipping.bus.observe.stats;
+    assert_eq!(skipping.errorlevel, 0x2A, "{stats:?}");
+    (stats, skipping.bus.clock.cycles_per_ms() as u64)
 }
 
 /// A Sleep(0) loop that leaves after 50 ms by GetTickCount, alone in its
@@ -1426,6 +1653,550 @@ fn a_sleep_zero_loop_waits_for_a_multimedia_timer() {
     });
     let stats = idle_lockstep("sleep_zero_timer", image);
     assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// A program whose main thread spins for `ms` milliseconds by
+/// GetTickCount, once for each of `peeks`, with a PeekMessageA of those
+/// flags in each pass when there are some. Meanwhile a second thread of
+/// the same priority runs a short loop and calls Sleep(0), again and
+/// again, and counts how long each Sleep(0) took by
+/// QueryPerformanceCounter, in half milliseconds up to 63. For each spin
+/// it prints a line: the spin's number, the second thread's passes, the
+/// main thread's, and each length that came with its count.
+fn turns_program(peeks: &[Option<u32>], ms: i32) -> Vec<u8> {
+    let k32: &[&str] = &[
+        "GetTickCount",
+        "CreateThread",
+        "Sleep",
+        "WaitForSingleObject",
+        "CloseHandle",
+        "GetStdHandle",
+        "WriteFile",
+        "ExitProcess",
+        "QueryPerformanceCounter",
+        "QueryPerformanceFrequency",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", k32), ("USER32.DLL", &["PeekMessageA"])];
+    // The stop flag at 0, the second thread's passes at 4, the main
+    // thread's at 8, the spin's start at 0xC, the MSG at 0x10, the digits
+    // up to 0x40, the count written at 0x40, the output's handle at 0x44,
+    // the second thread's start at 0x48 and its id at 0x4C (which Windows
+    // 98's CreateThread fails without), the line's end at 0x50, the
+    // counter before and after a Sleep at 0x60 and 0x68, its counts in
+    // half a millisecond at 0x70 and in a second at 0x78, the counts of
+    // the lengths from 0x100.
+    let mut data = vec![0; 0x200];
+    data[0x50..0x52].copy_from_slice(b"\r\n");
+    program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(k32.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut print = a.create_label();
+        let mut pass = a.create_label();
+        let mut work = a.create_label();
+        a.call(over)?;
+        // The second thread: a short loop and Sleep(0), until stopped.
+        a.set_label(&mut pass)?;
+        a.mov(ecx, 100)?;
+        a.set_label(&mut work)?;
+        a.dec(ecx)?;
+        a.jnz(work)?;
+        a.push(l.at(0x60) as i32)?;
+        a.call(f("QueryPerformanceCounter"))?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.push(l.at(0x68) as i32)?;
+        a.call(f("QueryPerformanceCounter"))?;
+        a.mov(eax, dword_ptr(l.at(0x68)))?;
+        a.sub(eax, dword_ptr(l.at(0x60)))?;
+        a.xor(edx, edx)?;
+        a.div(dword_ptr(l.at(0x70)))?;
+        let mut small = a.create_label();
+        a.cmp(eax, 63)?;
+        a.jbe(small)?;
+        a.mov(eax, 63)?;
+        a.set_label(&mut small)?;
+        a.inc(dword_ptr(eax * 4 + l.at(0x100)))?;
+        a.inc(dword_ptr(l.at(4)))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(pass)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        // Print eax in decimal and a space.
+        a.set_label(&mut print)?;
+        a.mov(edi, l.at(0x3F) as i32)?;
+        a.mov(byte_ptr(edi), b' ' as i32)?;
+        a.mov(ecx, 10)?;
+        let mut digit = a.create_label();
+        a.set_label(&mut digit)?;
+        a.dec(edi)?;
+        a.xor(edx, edx)?;
+        a.div(ecx)?;
+        a.add(dl, b'0' as i32)?;
+        a.mov(byte_ptr(edi), dl)?;
+        a.test(eax, eax)?;
+        a.jnz(digit)?;
+        a.mov(edx, l.at(0x40) as i32)?;
+        a.sub(edx, edi)?;
+        a.push(0)?;
+        a.push(l.at(0x40) as i32)?;
+        a.push(edx)?;
+        a.push(edi)?;
+        a.push(dword_ptr(l.at(0x44)))?;
+        a.call(f("WriteFile"))?;
+        a.ret()?;
+        a.set_label(&mut over)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0x48)), eax)?;
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(f("GetStdHandle"))?;
+        a.mov(dword_ptr(l.at(0x44)), eax)?;
+        a.push(l.at(0x78) as i32)?;
+        a.call(f("QueryPerformanceFrequency"))?;
+        a.mov(eax, dword_ptr(l.at(0x78)))?;
+        a.xor(edx, edx)?;
+        a.mov(ecx, 2000)?;
+        a.div(ecx)?;
+        a.mov(dword_ptr(l.at(0x70)), eax)?;
+        for (n, peek) in peeks.iter().enumerate() {
+            a.mov(dword_ptr(l.data), 0)?;
+            a.mov(dword_ptr(l.at(4)), 0)?;
+            a.mov(dword_ptr(l.at(8)), 0)?;
+            a.push(l.at(0x4C) as i32)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(0x48)))?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateThread"))?;
+            a.mov(esi, eax)?;
+            a.call(f("GetTickCount"))?;
+            a.mov(dword_ptr(l.at(0xC)), eax)?;
+            let mut spin = a.create_label();
+            a.set_label(&mut spin)?;
+            if let Some(flags) = *peek {
+                a.push(flags as i32)?;
+                a.push(0)?;
+                a.push(0)?;
+                a.push(0)?;
+                a.push(l.at(0x10) as i32)?;
+                a.call(l.import(k32.len()))?;
+            }
+            a.inc(dword_ptr(l.at(8)))?;
+            a.call(f("GetTickCount"))?;
+            a.sub(eax, dword_ptr(l.at(0xC)))?;
+            a.cmp(eax, ms)?;
+            a.jb(spin)?;
+            a.mov(dword_ptr(l.data), 1)?;
+            a.push(-1)?;
+            a.push(esi)?;
+            a.call(f("WaitForSingleObject"))?;
+            a.push(esi)?;
+            a.call(f("CloseHandle"))?;
+            a.mov(eax, n as u32)?;
+            a.call(print)?;
+            a.mov(eax, dword_ptr(l.at(4)))?;
+            a.call(print)?;
+            a.mov(eax, dword_ptr(l.at(8)))?;
+            a.call(print)?;
+            a.xor(ebx, ebx)?;
+            let mut bucket = a.create_label();
+            let mut empty = a.create_label();
+            a.set_label(&mut bucket)?;
+            a.mov(eax, dword_ptr(ebx * 4 + l.at(0x100)))?;
+            a.test(eax, eax)?;
+            a.jz(empty)?;
+            a.mov(eax, ebx)?;
+            a.call(print)?;
+            a.mov(eax, dword_ptr(ebx * 4 + l.at(0x100)))?;
+            a.call(print)?;
+            a.mov(dword_ptr(ebx * 4 + l.at(0x100)), 0)?;
+            a.set_label(&mut empty)?;
+            a.inc(ebx)?;
+            a.cmp(ebx, 64)?;
+            a.jb(bucket)?;
+            a.push(0)?;
+            a.push(l.at(0x40) as i32)?;
+            a.push(2)?;
+            a.push(l.at(0x50) as i32)?;
+            a.push(dword_ptr(l.at(0x44)))?;
+            a.call(f("WriteFile"))?;
+        }
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    })
+}
+
+/// A thread that gives up its turn with Sleep(0) while another of the
+/// same priority spins gets the processor back when the spinning one's
+/// turn ends, 20 ms later, at the fourth of Windows 98's 5 ms ticks. The
+/// spinning thread reads GetTickCount, and then PeekMessageA too, as Dark
+/// Omen's main thread does while its movie decoder gives up its turn once
+/// a picture (#1802). Turns that ended at the BIOS's 55 ms interrupt left
+/// the decoder 2 pictures a second. The same program with spins of two
+/// seconds, run on Windows 98 SE, gave the second thread 109 and 137
+/// passes, its Sleeps taking 5 to 20 ms in steps of 5 ms, 20 ms most
+/// often, and a few longer ones as the system's own threads ran.
+#[test]
+fn a_thread_that_sleeps_zero_gets_the_processor_back_after_a_turn() {
+    const PM_REMOVE: u32 = 1;
+    let mut cpu = machine("turns", turns_program(&[None, Some(PM_REMOVE)], 1000));
+    assert!(run_to_exit(&mut cpu, 1000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0);
+    let out = printed(&cpu);
+    let lines: Vec<Vec<u32>> = out
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .map(|n| n.parse().unwrap())
+                .collect()
+        })
+        .collect();
+    assert_eq!(lines.len(), 2, "{out}");
+    for line in &lines {
+        let (passes, lengths) = (line[1], line[3..].chunks(2));
+        // A pass for each turn of 20 ms, and the first, whose Sleep(0) can
+        // come before the spin begins.
+        assert!((49..=50).contains(&passes), "{out}");
+        // A turn is 39 or 40 half milliseconds by the counter read on both
+        // sides of the Sleep, and never more.
+        let turns: u32 = lengths.clone().filter(|c| c[0] >= 39).map(|c| c[1]).sum();
+        assert!(turns + 1 >= passes, "{out}");
+        assert!(lengths.into_iter().all(|c| c[0] <= 40), "{out}");
+    }
+}
+
+/// `thread_times` in the debug server's `/api/win32`: each thread's
+/// emulated time and instructions. In `turns_program` the main thread
+/// spins while a second thread gives up its turn with Sleep(0) as soon as
+/// it gets it, so the main thread has nearly all the time, and between
+/// two reads the two together have all the time that passed.
+#[test]
+fn each_threads_time_and_instructions_are_counted() {
+    let mut cpu = machine("thread_times", turns_program(&[None], 1000));
+    let mut start = None;
+    let times = loop {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        let stop = run_batch(&mut cpu, &mut NoHook, false);
+        assert_ne!(stop, StopReason::ShellReloaded, "{}", printed(&cpu));
+        let times = rust_dos::win32::thread_times(&mut cpu);
+        let now = cpu.bus.clock.now_micros();
+        let us: u64 = times.iter().map(|t| t.1).sum();
+        if times.is_empty() {
+            continue;
+        }
+        // The time counted at the first read, and when that was.
+        let (base, since) = *start.get_or_insert((us, now));
+        if now - since >= 300_000 {
+            // The two threads and no idle loop, as the main thread is
+            // always ready. Asserted here so that the loop can't run on.
+            assert_eq!(times.len(), 2, "{times:?}");
+            assert_eq!(us - base, now - since, "{times:?}");
+            break times;
+        }
+    };
+    let main = times.iter().max_by_key(|t| t.1).unwrap();
+    let other = times.iter().min_by_key(|t| t.1).unwrap();
+    assert!(other.1 > 0 && other.1 < main.1 / 10, "{times:?}");
+    assert!(main.2 > other.2 && other.2 > 0, "{times:?}");
+    // A read charges the time to the running thread and changes nothing
+    // else: another at once finds the same counts.
+    assert_eq!(rust_dos::win32::thread_times(&mut cpu), times);
+}
+
+/// A thread that ends its process with ExitProcess keeps its time:
+/// `end_process` charges it before the process goes and the next thread
+/// runs. T.EXE starts C.EXE and waits for it; C.EXE runs a loop of 4
+/// million instructions with no thread switch and calls ExitProcess;
+/// T.EXE then spins 200 ms and ends. Read while T.EXE spins, C.EXE's
+/// thread (the later id) has the loop's instructions. Without the
+/// charge they went to T.EXE's thread, and C.EXE's had none.
+#[test]
+fn a_thread_that_ends_its_process_keeps_its_time() {
+    let child = {
+        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            a.mov(ecx, 2_000_000)?;
+            let mut work = a.create_label();
+            a.set_label(&mut work)?;
+            a.dec(ecx)?;
+            a.jnz(work)?;
+            a.push(0)?;
+            a.call(l.import(0))?;
+            a.int3()
+        })
+    };
+    let names: &[&str] = &[
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetTickCount",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line at 0, STARTUPINFO at 0x40, PROCESS_INFORMATION at
+    // 0x90, the spin's start at 0xA0.
+    let mut data = b"C.EXE".to_vec();
+    data.resize(0xB0, 0);
+    data[0x40] = 68;
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.call(f("GetTickCount"))?;
+        a.mov(dword_ptr(l.at(0xA0)), eax)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, dword_ptr(l.at(0xA0)))?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let mut cpu = machine_with("thread_times_exit", &[("T.EXE", parent), ("C.EXE", child)]);
+    // The last counts read while a program ran: the shell's reload after
+    // T.EXE ends starts the built-in Windows over (`Win32::reset`).
+    let mut last = Vec::new();
+    for _ in 0..10_000 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        if run_batch(&mut cpu, &mut NoHook, false) == StopReason::ShellReloaded {
+            break;
+        }
+        if cpu.bus.win32.active() {
+            last = rust_dos::win32::thread_times(&mut cpu);
+        }
+    }
+    let threads: Vec<_> = last.iter().filter(|t| t.0 != 0).collect();
+    assert_eq!(threads.len(), 2, "{last:x?}");
+    let child = threads.iter().max_by_key(|t| t.0).unwrap();
+    assert!(child.2 >= 4_000_000, "{last:x?}");
+}
+
+/// A program that spins on GetTickCount for `ms` milliseconds and ends.
+fn spin_program(ms: i32) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetTickCount", "ExitProcess"])];
+    program(BASE, false, imports, &[0; 4], |a, l| {
+        a.call(l.import(0))?;
+        a.mov(ebx, eax)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        a.call(l.import(0))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, ms)?;
+        a.jb(spin)?;
+        a.push(0)?;
+        a.call(l.import(1))?;
+        a.int3()
+    })
+}
+
+/// The DOS time between two Win32 programs that a DOS program starts in
+/// turn, with no shell in between to start the built-in Windows over,
+/// goes to no thread: the last process's end drops the counts' mark.
+/// P.COM starts A.EXE, waits six timer ticks (about 330 ms) in DOS and
+/// starts B.EXE; each spins 100 ms. Read while B.EXE runs, the counts
+/// hold the two programs' time and no more. Before, B.EXE's first switch
+/// gave the DOS wait to the idle loop.
+#[test]
+fn thread_times_leave_out_dos_between_programs() {
+    // The names, the command tail and EXEC's block at fixed places after
+    // the code, as 16-bit code can't address a label.
+    let (a_exe, b_exe, tail, block) = (0x180, 0x186, 0x18C, 0x18E);
+    let mut a = CodeAssembler::new(16).unwrap();
+    let mut exec = a.create_label();
+    let mut wait = a.create_label();
+    // Give back the memory past 64 KB, for the programs.
+    a.mov(ah, 0x4A).unwrap();
+    a.mov(bx, 0x1000).unwrap();
+    a.int(0x21).unwrap();
+    a.mov(dx, a_exe).unwrap();
+    a.call(exec).unwrap();
+    // Six ticks of the BIOS's count at 0040:006C.
+    a.push(0x40).unwrap();
+    a.pop(es).unwrap();
+    a.mov(si, word_ptr(0x6C).es()).unwrap();
+    a.add(si, 6).unwrap();
+    a.set_label(&mut wait).unwrap();
+    a.cmp(si, word_ptr(0x6C).es()).unwrap();
+    a.jne(wait).unwrap();
+    a.mov(dx, b_exe).unwrap();
+    a.call(exec).unwrap();
+    a.mov(ax, 0x4C00).unwrap();
+    a.int(0x21).unwrap();
+    // EXEC of the name at DX, with the parameter block filled in.
+    a.set_label(&mut exec).unwrap();
+    a.push(cs).unwrap();
+    a.pop(es).unwrap();
+    a.mov(bx, block).unwrap();
+    a.mov(word_ptr(bx), 0).unwrap();
+    a.mov(word_ptr(bx + 2), tail).unwrap();
+    a.mov(word_ptr(bx + 4), cs).unwrap();
+    a.mov(ax, 0x4B00).unwrap();
+    a.int(0x21).unwrap();
+    a.push(cs).unwrap();
+    a.pop(ds).unwrap();
+    a.ret().unwrap();
+    let mut com = a.assemble(0x100).unwrap();
+    assert!(com.len() <= 0x80);
+    com.resize(0x80, 0);
+    com.extend_from_slice(b"A.EXE\0B.EXE\0\0\x0D");
+    com.resize(0x80 + 0x1C, 0);
+    let files = [
+        ("P.COM", com),
+        ("A.EXE", spin_program(100)),
+        ("B.EXE", spin_program(100)),
+    ];
+    let mut cpu = Cpu::new(scratch("thread_times_dos", &files));
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("P.COM", None));
+    // The emulated time each program ran, and the counts read last while
+    // one ran.
+    let (mut ran, mut last) = (0, Vec::new());
+    for _ in 0..20_000 {
+        let before = cpu.bus.clock.now_micros();
+        let active = cpu.bus.win32.active();
+        cpu.bus.start_batch(cpu.bus.clock.icount + 10_000);
+        if run_batch(&mut cpu, &mut NoHook, false) == StopReason::ShellReloaded {
+            break;
+        }
+        if active || cpu.bus.win32.active() {
+            ran += cpu.bus.clock.now_micros() - before;
+        }
+        if cpu.bus.win32.active() {
+            last = rust_dos::win32::thread_times(&mut cpu);
+        }
+    }
+    let us: u64 = last.iter().map(|t| t.1).sum();
+    assert_eq!(last.iter().filter(|t| t.0 != 0).count(), 2, "{last:x?}");
+    assert!(
+        (190_000..=ran).contains(&us),
+        "{us} us counted, {ran} us run: {last:x?}"
+    );
+}
+
+/// A loop that waits for the time by GetTickCount, acquiring the
+/// keyboard again and reading its buffered data with DirectInput in each
+/// pass, and peeking at its messages, as Dark Omen's main thread does
+/// while a movie plays (#1802). Acquire finds the keyboard acquired and
+/// GetDeviceData finds no keys, so neither changes anything, and the
+/// passes are skipped to the time, coming out the same as when they all
+/// run.
+#[test]
+fn a_loop_that_polls_directinput_while_it_waits_is_skipped() {
+    // IDirectInputA's CreateDevice, IDirectInputDeviceA's methods.
+    const CREATE_DEVICE: u32 = 3;
+    const SET_PROPERTY: u32 = 6;
+    const ACQUIRE: u32 = 7;
+    const GET_DEVICE_DATA: u32 = 10;
+    const SET_DATA_FORMAT: u32 = 11;
+    const SET_COOPERATIVE_LEVEL: u32 = 13;
+    const DIPROP_BUFFERSIZE: i32 = 1;
+    const DISCL_NONEXCLUSIVE_BACKGROUND: i32 = 2 | 8;
+    const DI_NOEFFECT: i32 = 1;
+    let k32: &[&str] = &["GetModuleHandleA", "GetTickCount", "ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", k32),
+        ("DINPUT.DLL", &["DirectInputCreateA"]),
+        ("USER32.DLL", &["PeekMessageA"]),
+    ];
+    // The interfaces at 0 and 4, the start at 8, the count at 0xC,
+    // GUID_SysKeyboard at 0x10, the buffer's size as a DIPROPDWORD at
+    // 0x20, the data format at 0x40 with its keys at 0x200, the MSG at
+    // 0x60, the events read at 0x80.
+    let mut data = vec![0u8; 0x1200];
+    let mut put = |at: usize, words: &[u32]| {
+        for (i, w) in words.iter().enumerate() {
+            data[at + 4 * i..at + 4 * i + 4].copy_from_slice(&w.to_le_bytes());
+        }
+    };
+    put(0x10, &[0x6F1D_2B61, 0x11CF_D5A0, 0x4544_C7BF, 0x0000_5453]);
+    put(0x20, &[20, 16, 0, 0, 16]);
+    put(0x40, &[24, 16, 0, 256, 256, 0]);
+    for key in 0..256 {
+        // DIDFT_OPTIONAL | DIDFT_BUTTON, a key a byte, as c_dfDIKeyboard.
+        put(0x200 + 16 * key as usize, &[0, key, 0x8000_000C | key << 8, 0]);
+    }
+    let image = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(k32.iter().position(|n| *n == name).unwrap());
+        let mut fail = a.create_label();
+        let mut spin = a.create_label();
+        let method = |a: &mut CodeAssembler, object: u32, index: u32, args: &[i32]| {
+            push_args(a, args)?;
+            a.mov(eax, dword_ptr(l.at(object)))?;
+            a.push(eax)?;
+            a.mov(ecx, dword_ptr(eax))?;
+            a.call(dword_ptr(ecx + 4 * index))
+        };
+        let at = |offset: u32| l.at(offset) as i32;
+        a.mov(dword_ptr(l.at(0x54)), at(0x200))?;
+        a.push(0)?;
+        a.call(f("GetModuleHandleA"))?;
+        push_args(a, &[0, 0x500, at(0), 0])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(l.import(k32.len()))?;
+        a.mov(ebx, 1)?;
+        a.test(eax, eax)?;
+        a.jnz(fail)?;
+        let setup: [(u32, Vec<i32>); 4] = [
+            (SET_DATA_FORMAT, vec![at(0x40)]),
+            (SET_COOPERATIVE_LEVEL, vec![0, DISCL_NONEXCLUSIVE_BACKGROUND]),
+            (SET_PROPERTY, vec![DIPROP_BUFFERSIZE, at(0x20)]),
+            (ACQUIRE, vec![]),
+        ];
+        method(a, 0, CREATE_DEVICE, &[at(0x10), at(4), 0])?;
+        a.inc(ebx)?;
+        a.test(eax, eax)?;
+        a.jnz(fail)?;
+        for (index, args) in &setup {
+            method(a, 4, *index, args)?;
+            a.inc(ebx)?;
+            a.test(eax, eax)?;
+            a.jnz(fail)?;
+        }
+        a.call(f("GetTickCount"))?;
+        a.mov(dword_ptr(l.at(8)), eax)?;
+        // The loop: Acquire, which has nothing to do, GetDeviceData,
+        // which finds nothing, and PeekMessageA, for 30 ms.
+        a.set_label(&mut spin)?;
+        a.mov(ebx, 10)?;
+        method(a, 4, ACQUIRE, &[])?;
+        a.cmp(eax, DI_NOEFFECT)?;
+        a.jne(fail)?;
+        a.mov(dword_ptr(l.at(0xC)), 16)?;
+        method(a, 4, GET_DEVICE_DATA, &[16, at(0x80), at(0xC), 0])?;
+        a.inc(ebx)?;
+        a.test(eax, eax)?;
+        a.jnz(fail)?;
+        a.inc(ebx)?;
+        a.cmp(dword_ptr(l.at(0xC)), 0)?;
+        a.jne(fail)?;
+        push_args(a, &[at(0x60), 0, 0, 0, 1])?;
+        a.call(l.import(k32.len() + 1))?;
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, dword_ptr(l.at(8)))?;
+        a.cmp(eax, 30)?;
+        a.jb(spin)?;
+        a.mov(ebx, 0x2A)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let stats = idle_lockstep("poll_directinput", image);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
 }
 
 /// The number of proofs that failed for `why`.
@@ -2612,6 +3383,24 @@ fn a_program_starts_a_dos_program_and_waits_for_it() {
     assert_eq!(code, 0x71);
 }
 
+/// SHARE's installation check (INT 2Fh AX=1000h) from a DOS program
+/// Windows started: installed, AL=FFh, as in a DOS box of Windows 98 SE,
+/// whose VSHARE keeps the locks. The child ends with 7 for FFh, else 9.
+#[test]
+fn a_dos_program_windows_started_finds_share() {
+    let child = vec![
+        0xB8, 0x00, 0x10, // mov ax,1000h
+        0xCD, 0x2F, // int 2Fh
+        0x3C, 0xFF, // cmp al,0FFh
+        0xB0, 0x07, // mov al,7
+        0x74, 0x02, // je end
+        0xB0, 0x09, // mov al,9
+        0xB4, 0x4C, 0xCD, 0x21, // end: mov ah,4Ch; int 21h
+    ];
+    let code = start_program("child_dos_share", "C.COM", "C.COM", child, &[]);
+    assert_eq!(code, 0x71);
+}
+
 /// CreateProcessA of a batch file: Windows 98 runs it with COMMAND.COM
 /// /C in a DOS box, and the programs it starts see its arguments. The
 /// batch file starts the DOS program D.COM with its first argument,
@@ -3115,6 +3904,193 @@ fn a_programs_pages_read_back_after_a_dos_program_got_the_memory_under_them() {
     let (_, before) = xms_free_after("dos_xms_pages_kept_unused", 0);
     // The view, the block and a page table or two.
     assert!(total + 256 >= before, "{total} KB, {before} KB without");
+}
+
+/// A DPMI client (a 16-bit COM file) that asks the host for its free
+/// memory (INT 31h AX=0500h) and a block of `size` bytes (0501h), writes
+/// the block's offset XOR 5A5A5A5Ah into the first dword of each of its
+/// pages, reads them all back, and writes the 8 bytes at offset
+/// `size - 3000h` of the block to VM.BIN through DOS (INT 21h AH=40h,
+/// which the host translates). Exit code 5; 6 if it can't become a
+/// client, 7 if the largest free block is smaller than `size`, 8 if the
+/// block can't be had, 9 if a selector can't, 0Ah if a page reads back
+/// wrong, 0Bh if the file can't be written.
+fn dpmi_block_filler(size: u32) -> Vec<u8> {
+    const ENTRY: u32 = 0x1F00;
+    const INFO: u32 = 0x1F10;
+    const BLOCK: u32 = 0x1F40;
+    const NAME: u32 = 0x1F50;
+    const OFF: u32 = 0x3000;
+    let assemble = || -> Result<Vec<u8>, IcedError> {
+        let mut a = CodeAssembler::new(16)?;
+        let mut fails: Vec<CodeLabel> = (6..=0xB).map(|_| a.create_label()).collect();
+        a.push(cs)?;
+        a.pop(es)?;
+        a.mov(bx, 0x1000)?;
+        a.mov(ah, 0x4A)?;
+        a.int(0x21)?;
+        a.mov(ax, 0x1687)?;
+        a.int(0x2F)?;
+        a.test(ax, ax)?;
+        a.jnz(fails[0])?;
+        a.mov(word_ptr(ENTRY), di)?;
+        a.mov(word_ptr(ENTRY + 2), es)?;
+        a.mov(bx, si)?;
+        a.mov(ah, 0x48)?;
+        a.int(0x21)?;
+        a.jc(fails[0])?;
+        a.mov(es, ax)?;
+        a.xor(ax, ax)?;
+        // call far [ENTRY]: a 16-bit client.
+        a.db(&[0xFF, 0x1E])?;
+        a.dw(&[ENTRY as u16])?;
+        a.jc(fails[0])?;
+        // The free memory.
+        a.push(ds)?;
+        a.pop(es)?;
+        a.mov(di, INFO)?;
+        a.mov(ax, 0x0500)?;
+        a.int(0x31)?;
+        a.cmp(dword_ptr(INFO), size)?;
+        a.jb(fails[1])?;
+        // The block.
+        a.mov(bx, size >> 16)?;
+        a.mov(cx, size & 0xFFFF)?;
+        a.mov(ax, 0x0501)?;
+        a.int(0x31)?;
+        a.jc(fails[2])?;
+        a.mov(word_ptr(BLOCK), cx)?;
+        a.mov(word_ptr(BLOCK + 2), bx)?;
+        // A selector for all of it, in SI.
+        a.xor(ax, ax)?;
+        a.mov(cx, 1)?;
+        a.int(0x31)?;
+        a.jc(fails[3])?;
+        a.mov(si, ax)?;
+        a.mov(bx, si)?;
+        a.mov(cx, word_ptr(BLOCK + 2))?;
+        a.mov(dx, word_ptr(BLOCK))?;
+        a.mov(ax, 0x0007)?;
+        a.int(0x31)?;
+        a.jc(fails[3])?;
+        a.mov(bx, si)?;
+        a.mov(cx, 0xFFFF)?;
+        a.mov(dx, 0xFFFF)?;
+        a.mov(ax, 0x0008)?;
+        a.int(0x31)?;
+        a.jc(fails[3])?;
+        // Each page's first dword, then each read back.
+        a.push(ds)?;
+        a.mov(ds, si)?;
+        a.xor(edi, edi)?;
+        a.mov(ecx, size / 0x1000)?;
+        let mut fill = a.create_label();
+        a.set_label(&mut fill)?;
+        a.mov(eax, edi)?;
+        a.xor(eax, 0x5A5A_5A5A)?;
+        a.mov(dword_ptr(edi), eax)?;
+        a.add(edi, 0x1000)?;
+        a.dec(ecx)?;
+        a.jnz(fill)?;
+        a.xor(edi, edi)?;
+        a.mov(ecx, size / 0x1000)?;
+        let mut check = a.create_label();
+        let mut wrong = a.create_label();
+        a.set_label(&mut check)?;
+        a.mov(eax, edi)?;
+        a.xor(eax, 0x5A5A_5A5A)?;
+        a.cmp(dword_ptr(edi), eax)?;
+        a.jne(wrong)?;
+        a.add(edi, 0x1000)?;
+        a.dec(ecx)?;
+        a.jnz(check)?;
+        a.pop(ds)?;
+        // VM.BIN, its handle in BP.
+        a.mov(ah, 0x3C)?;
+        a.xor(cx, cx)?;
+        a.mov(dx, NAME)?;
+        a.int(0x21)?;
+        a.jc(fails[5])?;
+        a.mov(bp, ax)?;
+        // The selector's base at the bytes to write.
+        a.mov(eax, dword_ptr(BLOCK))?;
+        a.add(eax, size - OFF)?;
+        a.mov(dx, ax)?;
+        a.shr(eax, 16)?;
+        a.mov(cx, ax)?;
+        a.mov(bx, si)?;
+        a.mov(ax, 0x0007)?;
+        a.int(0x31)?;
+        a.push(ds)?;
+        a.mov(ds, si)?;
+        a.mov(bx, bp)?;
+        a.mov(cx, 8)?;
+        a.xor(dx, dx)?;
+        a.mov(ah, 0x40)?;
+        a.int(0x21)?;
+        a.pop(ds)?;
+        a.jc(fails[5])?;
+        a.mov(bx, bp)?;
+        a.mov(ah, 0x3E)?;
+        a.int(0x21)?;
+        a.mov(ax, 0x4C05)?;
+        a.int(0x21)?;
+        a.set_label(&mut wrong)?;
+        a.pop(ds)?;
+        a.mov(ax, 0x4C0A)?;
+        a.int(0x21)?;
+        for (code, label) in (6u32..=0xB).zip(fails.iter_mut()) {
+            a.set_label(label)?;
+            a.mov(ax, 0x4C00 | code)?;
+            a.int(0x21)?;
+        }
+        a.assemble(0x100)
+    };
+    let mut code = assemble().unwrap();
+    assert!(code.len() <= (ENTRY - 0x100) as usize);
+    code.resize((NAME - 0x100) as usize, 0);
+    code.extend_from_slice(b"VM.BIN\0");
+    code
+}
+
+/// Run `dpmi_block_filler` of `size` bytes from a PIF that gives its DOS
+/// machine `dpmi_kb` KB of DPMI memory (0 for Auto), started by a Windows
+/// program: T.EXE's exit code, and VM.BIN.
+fn run_dpmi_block_filler(test: &str, size: u32, dpmi_kb: u16) -> (u8, Option<Vec<u8>>) {
+    let mut pif = win16::pif("VM.COM", "C:\\GAME", "", "");
+    // The Windows 95 record's DPMI memory, at 1A8h in its data.
+    pif[0x21B + 0x1A8..0x21B + 0x1AA].copy_from_slice(&dpmi_kb.to_le_bytes());
+    let files = vec![("GAME\\VM.PIF", pif), ("GAME\\VM.COM", dpmi_block_filler(size))];
+    let code = start_programs(test, "T.EXE", "C:\\GAME\\VM.PIF", files, &[]);
+    let base = PathBuf::from("target/test_win32").join(test);
+    (code, fs::read(base.join("GAME/VM.BIN")).ok())
+}
+
+/// A DOS program started through a PIF that gives its DOS machine 32 MB
+/// of DPMI memory gets a 24 MB block on a 16 MB machine, as on Windows
+/// 98, whose VMM pages a DOS machine's DPMI memory to the swap file up
+/// to the PIF's limit: Redguard's launcher starts the game so, and the
+/// game asks for about 45 MB on a 32 MB machine. Every page holds what
+/// was written to it, though most went to the page file and came back,
+/// and DOS writes the bytes of a page near the end of the block.
+#[test]
+fn a_dos_program_gets_the_dpmi_memory_its_pif_allows_past_the_machines() {
+    const SIZE: u32 = 0x180_0000;
+    let (code, written) = run_dpmi_block_filler("dos_dpmi_virtual", SIZE, 0x8000);
+    // 5 from the program, WAIT_OBJECT_0 and TRUE.
+    assert_eq!(code, 0x51);
+    let mut expected = ((SIZE - 0x3000) ^ 0x5A5A_5A5A).to_le_bytes().to_vec();
+    expected.extend_from_slice(&[0; 4]);
+    assert_eq!(written.unwrap(), expected);
+}
+
+/// With its PIF's DPMI memory on Auto, a DOS program gets the memory
+/// that is free as it is: no 24 MB block on a 16 MB machine (7, the
+/// largest free block is smaller).
+#[test]
+fn a_dos_program_whose_pif_has_auto_dpmi_memory_gets_what_is_free() {
+    let (code, _) = run_dpmi_block_filler("dos_dpmi_auto", 0x180_0000, 0);
+    assert_eq!(code, 0x71);
 }
 
 #[test]
@@ -6057,8 +7033,10 @@ fn a_program_commits_and_touches_more_memory_than_the_machine_has() {
 /// A zeroed block takes no physical memory until it is touched: after
 /// GlobalAlloc(GMEM_ZEROINIT) of 8 MB, GlobalMemoryStatus has nearly as
 /// much physical memory available as before, and 8 MB less room in the
-/// page file. Touching a page takes it from the physical memory. A bit
-/// each in the exit code.
+/// page file, with a page or so more for the heap's own bytes around the
+/// block (Windows 98's header before it and end marker after it).
+/// Touching a page takes it from the physical memory. A bit each in the
+/// exit code.
 #[test]
 fn a_zeroed_block_takes_no_memory_until_it_is_touched() {
     const GMEM_ZEROINIT: i32 = 0x40;
@@ -6086,11 +7064,16 @@ fn a_zeroed_block_takes_no_memory_until_it_is_touched() {
             a.jae(much)?;
             a.or(ebx, 1)?;
             a.set_label(&mut much)?;
-            // dwAvailPageFile down by the block.
+            // dwAvailPageFile down by the block, and by less than 64 KB
+            // more: the pages of the heap's bytes before and after it.
             a.mov(eax, dword_ptr(l.at(0x14)))?;
             a.sub(eax, dword_ptr(l.at(0x34)))?;
-            a.cmp(eax, SIZE)?;
-            bit_if_equal(a, 1)?;
+            a.sub(eax, SIZE)?;
+            a.cmp(eax, 0x1_0000)?;
+            let mut more = a.create_label();
+            a.jae(more)?;
+            a.or(ebx, 2)?;
+            a.set_label(&mut more)?;
             // A page of it touched: a page less physical memory, a page
             // more room in the page file.
             a.mov(dword_ptr(esi + 0x4000), 1)?;
@@ -6334,6 +7317,525 @@ fn a_program_makes_reads_finds_moves_and_deletes_files() {
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
     let dir = PathBuf::from("target/test_win32/files");
     assert!(!dir.join("D").exists() && !dir.join("G.TXT").exists());
+}
+
+/// The names a Win32 program makes keep the case it gives them, as
+/// Windows 98's VFAT keeps them: CreateDirectoryA's "Program Files" and
+/// "Base", CreateFileA's "config.cfg" (an 8.3 name, which DOS's own calls
+/// uppercase), MoveFileA's "Old.cfg" and CopyFileA's "save.dat". MoveFileA
+/// gives "save.dat" another case, as Windows 9x lets it. American McGee's
+/// Alice's installer makes its folders so, and the game its files.
+#[test]
+fn win32_calls_make_names_in_the_case_they_are_given() {
+    use Arg::{Esi, I};
+    let names: &[&str] = &[
+        "CreateDirectoryA",
+        "CreateFileA",
+        "CloseHandle",
+        "MoveFileA",
+        "CopyFileA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, b"C:\\Program Files\0");
+    put(&mut data, 0x20, b"C:\\Program Files\\Base\0");
+    put(&mut data, 0x40, b"C:\\Program Files\\Base\\config.cfg\0");
+    put(&mut data, 0x80, b"C:\\Program Files\\Base\\Old.cfg\0");
+    put(&mut data, 0xC0, b"C:\\Program Files\\Base\\save.dat\0");
+    put(&mut data, 0xE0, b"C:\\Program Files\\Base\\Save.dat\0");
+    let (code, text) = run(
+        "name_case",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let at = |offset: u32| I(l.at(offset) as u32);
+            a.xor(ebx, ebx)?;
+            call_with(a, f("CreateDirectoryA"), &[at(0), I(0)])?;
+            a.test(eax, eax)?;
+            check(a, true, 0)?;
+            call_with(a, f("CreateDirectoryA"), &[at(0x20), I(0)])?;
+            a.test(eax, eax)?;
+            check(a, true, 1)?;
+            // CREATE_ALWAYS.
+            let new = [at(0x40), I(0x4000_0000), I(0), I(0), I(2), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &new)?;
+            a.mov(esi, eax)?;
+            a.cmp(eax, -1)?;
+            check(a, true, 2)?;
+            call_with(a, f("CloseHandle"), &[Esi])?;
+            call_with(a, f("MoveFileA"), &[at(0x40), at(0x80)])?;
+            a.test(eax, eax)?;
+            check(a, true, 3)?;
+            call_with(a, f("CopyFileA"), &[at(0x80), at(0xC0), I(1)])?;
+            a.test(eax, eax)?;
+            check(a, true, 4)?;
+            call_with(a, f("MoveFileA"), &[at(0xC0), at(0xE0)])?;
+            a.test(eax, eax)?;
+            check(a, true, 5)?;
+            a.mov(eax, ebx)?;
+            a.or(eax, 0xC0)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {}", !code, text);
+    let listed = |dir: &str| {
+        let mut names: Vec<String> =
+            fs::read_dir(PathBuf::from("target/test_win32/name_case").join(dir))
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+        names.sort();
+        names
+    };
+    assert!(listed("").contains(&"Program Files".to_string()));
+    assert_eq!(listed("Program Files"), ["Base"]);
+    assert_eq!(listed("Program Files/Base"), ["Old.cfg", "Save.dat"]);
+}
+
+/// Win32 calls name files on a FAT disk image (D:) by their long names,
+/// as Windows 98's VFAT does: CreateDirectoryA and CreateFileA make "My
+/// Saves" and "Saved game.dat" with long name entries, CreateFileA and
+/// GetFileAttributesA find the file by its long name in another case,
+/// FindFirstFileA gives the long name in cFileName and the alias
+/// SAVEDG~1.DAT in cAlternateFileName, and MoveFileA finds the source by
+/// its long name. Each check sets a bit of the exit code.
+#[test]
+fn win32_calls_name_files_by_long_names_on_a_disk_image() {
+    use Arg::{Esi, I};
+    let names: &[&str] = &[
+        "CreateDirectoryA",
+        "CreateFileA",
+        "CloseHandle",
+        "GetFileAttributesA",
+        "FindFirstFileA",
+        "FindClose",
+        "lstrcmpA",
+        "MoveFileA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x300];
+    put(&mut data, 0, b"D:\\My Saves\0");
+    put(&mut data, 0x20, b"D:\\My Saves\\Saved game.dat\0");
+    put(&mut data, 0x40, b"D:\\my saves\\SAVED GAME.DAT\0");
+    put(&mut data, 0x60, b"D:\\My Saves\\Saved*\0");
+    put(&mut data, 0x80, b"Saved game.dat\0");
+    put(&mut data, 0x90, b"SAVEDG~1.DAT\0");
+    put(&mut data, 0xA0, b"D:\\My Saves\\Slot one.sav\0");
+    // WIN32_FIND_DATAA at 100h: cFileName at 44, cAlternateFileName
+    // after its 260 bytes.
+    let find = 0x100;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        a.xor(ebx, ebx)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        // GENERIC_WRITE, CREATE_NEW.
+        let new = [at(0x20), I(0x4000_0000), I(0), I(0), I(1), I(0x80), I(0)];
+        call_with(a, f("CreateFileA"), &new)?;
+        a.mov(esi, eax)?;
+        a.cmp(eax, -1)?;
+        check(a, true, 1)?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING.
+        let open = [at(0x40), I(0x8000_0000), I(1), I(0), I(3), I(0x80), I(0)];
+        call_with(a, f("CreateFileA"), &open)?;
+        a.mov(esi, eax)?;
+        a.cmp(eax, -1)?;
+        check(a, true, 2)?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        call_with(a, f("GetFileAttributesA"), &[at(0x40)])?;
+        a.cmp(eax, -1)?;
+        check(a, true, 3)?;
+        call_with(a, f("FindFirstFileA"), &[at(0x60), at(find)])?;
+        a.mov(esi, eax)?;
+        a.cmp(eax, -1)?;
+        check(a, true, 4)?;
+        call_with(a, f("lstrcmpA"), &[at(0x80), at(find + 44)])?;
+        a.test(eax, eax)?;
+        check(a, false, 5)?;
+        call_with(a, f("lstrcmpA"), &[at(0x90), at(find + 44 + 260)])?;
+        a.test(eax, eax)?;
+        check(a, false, 6)?;
+        call_with(a, f("FindClose"), &[Esi])?;
+        call_with(a, f("MoveFileA"), &[at(0x40), at(0xA0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 7)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let image_dir = PathBuf::from("target/test_win32/long_names_image_d");
+    let _ = fs::remove_dir_all(&image_dir);
+    fs::create_dir_all(&image_dir).unwrap();
+    let image = image_dir.join("d.img");
+    rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+        .unwrap()
+        .copy_to(&image)
+        .unwrap();
+    let mut cpu = machine("long_names_image", exe);
+    cpu.bus
+        .disk
+        .mount(3, &image, rust_dos::disk::MountOptions::default(), true)
+        .unwrap();
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+    let volume = cpu.bus.disk.fat_volume(3).unwrap();
+    let listed = |path: &[&str]| -> Vec<(String, Option<String>)> {
+        volume
+            .list(path)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.long_name))
+            .collect()
+    };
+    let named = |name: &str, long: Option<&str>| (name.to_string(), long.map(str::to_string));
+    assert_eq!(listed(&[]), [named("MYSAVE~1", Some("My Saves"))]);
+    assert_eq!(
+        listed(&["MYSAVE~1"]),
+        [
+            named(".", None),
+            named("..", None),
+            named("SLOTON~1.SAV", Some("Slot one.sav")),
+        ]
+    );
+}
+
+/// A file opened by its long name and by its 8.3 alias is one file, as
+/// on Windows 98, where VFAT finds the same directory entry through both
+/// names: on drive `drive` the program writes "Saved game one.dat",
+/// asks GetShortPathNameA for its alias, and checks that a CREATE_ALWAYS
+/// by the long name empties the file that an open by the alias then reads
+/// (GetFileSize 0), and that a handle opened by either name with no
+/// sharing makes an open by the other fail with ERROR_SHARING_VIOLATION.
+/// Each check sets a bit of the exit code.
+fn check_long_name_and_alias_are_one_file(test: &str, drive: &str, image: bool) {
+    use Arg::{Esi, I};
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const CREATE_ALWAYS: u32 = 2;
+    const OPEN_EXISTING: u32 = 3;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    let names: &[&str] = &[
+        "CreateFileA",
+        "WriteFile",
+        "CloseHandle",
+        "GetShortPathNameA",
+        "GetFileSize",
+        "GetLastError",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x200];
+    put(&mut data, 0, format!("{drive}\\Saved game one.dat\0").as_bytes());
+    // The alias, at 40h; the bytes to write and the count written.
+    let (alias, old, written) = (0x40, 0x180, 0x190);
+    put(&mut data, old, b"old data");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: usize| I(l.at(offset as u32) as u32);
+        let open = |a: &mut CodeAssembler, name, access, share, disposition| {
+            let args = [at(name), I(access), I(share), I(0), I(disposition), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &args)
+        };
+        a.xor(ebx, ebx)?;
+        open(a, 0, GENERIC_WRITE, 0, CREATE_ALWAYS)?;
+        a.mov(esi, eax)?;
+        call_with(a, f("WriteFile"), &[Esi, at(old), I(8), at(written), I(0)])?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        a.cmp(dword_ptr(l.at(written as u32)), 8)?;
+        check(a, false, 0)?;
+        call_with(a, f("GetShortPathNameA"), &[at(0), at(alias), I(0x100)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        // Emptied at the create, for whatever name the file is opened by
+        // next.
+        open(a, 0, GENERIC_WRITE, 3, CREATE_ALWAYS)?;
+        a.mov(esi, eax)?;
+        open(a, alias, GENERIC_READ, 3, OPEN_EXISTING)?;
+        a.mov(edi, eax)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("GetFileSize"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        call_with(a, f("CloseHandle"), &[Esi])?;
+        // Opened by one name with no sharing, the file can't be opened
+        // by the other.
+        for (bit, (first, second)) in [(3, (0, alias)), (5, (alias, 0))] {
+            open(a, first, GENERIC_READ, 0, OPEN_EXISTING)?;
+            a.mov(esi, eax)?;
+            open(a, second, GENERIC_READ, 1, OPEN_EXISTING)?;
+            a.cmp(eax, -1)?;
+            check(a, false, bit)?;
+            a.call(f("GetLastError"))?;
+            a.cmp(eax, ERROR_SHARING_VIOLATION)?;
+            check(a, false, bit + 1)?;
+            call_with(a, f("CloseHandle"), &[Esi])?;
+        }
+        a.mov(eax, ebx)?;
+        a.or(eax, 0x80)?;
+        a.ret()
+    });
+    let mut cpu = machine(test, exe);
+    if image {
+        let image_dir = PathBuf::from("target/test_win32").join(format!("{test}_d"));
+        let _ = fs::remove_dir_all(&image_dir);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image = image_dir.join("d.img");
+        rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.disk.mount(3, &image, options, true).unwrap();
+    }
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+}
+
+#[test]
+fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_host_drive() {
+    check_long_name_and_alias_are_one_file("one_file_host", "C:", false);
+}
+
+#[test]
+fn a_file_opened_by_its_long_name_and_its_alias_is_one_file_on_a_disk_image() {
+    check_long_name_and_alias_are_one_file("one_file_image", "D:", true);
+}
+
+/// MoveFileA renames a file to its own 8.3 alias, as on Windows 98 SE
+/// (checked in 86Box): "Third file.txt" becomes THIRDF~1.TXT, where the
+/// call had found the name taken by the file itself (183). The program
+/// also makes MADE~1.TXT and then MADE.TXT, and renames "Fourth file.txt"
+/// to FOURTH~1.TXT with msvcrt's rename, which calls MoveFileA on Windows
+/// 98. Each check sets a bit of the exit code. Returns the machine, for
+/// its drive's names.
+fn rename_to_own_alias(test: &str, drive: &str, image: bool) -> Box<Cpu> {
+    use Arg::{Esi, I};
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CloseHandle",
+        "MoveFileA",
+        "GetShortPathNameA",
+        "lstrcmpA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names), ("MSVCRT.DLL", &["rename"])];
+    let mut data = vec![0; 0x200];
+    for (at, name) in [
+        (0x00, "Third file.txt"),
+        (0x20, "THIRDF~1.TXT"),
+        (0x40, "MADE~1.TXT"),
+        (0x60, "MADE.TXT"),
+        (0x80, "Fourth file.txt"),
+        (0xA0, "FOURTH~1.TXT"),
+    ] {
+        put(&mut data, at, format!("{drive}\\{name}\0").as_bytes());
+    }
+    let buf = 0x100;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let make = |a: &mut CodeAssembler, name, bit| {
+            // GENERIC_WRITE, CREATE_NEW.
+            let args = [at(name), I(0x4000_0000), I(0), I(0), I(1), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &args)?;
+            a.mov(esi, eax)?;
+            a.cmp(eax, -1)?;
+            check(a, true, bit)?;
+            call_with(a, f("CloseHandle"), &[Esi])
+        };
+        a.xor(ebx, ebx)?;
+        make(a, 0x00, 0)?;
+        call_with(a, f("MoveFileA"), &[at(0x00), at(0x20)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        call_with(a, f("GetShortPathNameA"), &[at(0x20), at(buf), I(0x100)])?;
+        call_with(a, f("lstrcmpA"), &[at(0x20), at(buf)])?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        make(a, 0x40, 3)?;
+        make(a, 0x60, 4)?;
+        make(a, 0x80, 5)?;
+        // rename(old, new) is cdecl, and returns 0 when it renames.
+        call_with(a, l.import(names.len()), &[at(0x80), at(0xA0)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 6)?;
+        a.mov(eax, ebx)?;
+        a.or(eax, 0x80)?;
+        a.ret()
+    });
+    let mut cpu = machine(test, exe);
+    if image {
+        let image_dir = PathBuf::from("target/test_win32").join(format!("{test}_d"));
+        let _ = fs::remove_dir_all(&image_dir);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image = image_dir.join("d.img");
+        rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.disk.mount(3, &image, options, true).unwrap();
+    }
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+    cpu
+}
+
+/// On a FAT image the renamed file keeps the DOS name THIRDF~1.TXT and
+/// gets long name entries holding it, as Windows 98 SE writes them for
+/// an 8.3 name beside a numeric tail made from its start: its own old
+/// alias. So does MADE.TXT, made beside MADE~1.TXT, which has none.
+#[test]
+fn move_file_renames_a_file_to_its_own_alias_on_a_disk_image() {
+    let cpu = rename_to_own_alias("own_alias_image", "D:", true);
+    let volume = cpu.bus.disk.fat_volume(3).unwrap();
+    let mut listed: Vec<(String, Option<String>)> = volume
+        .list(&[])
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.name, e.long_name))
+        .collect();
+    listed.sort();
+    let named = |name: &str, long: Option<&str>| (name.to_string(), long.map(str::to_string));
+    assert_eq!(
+        listed,
+        [
+            named("FOURTH~1.TXT", Some("FOURTH~1.TXT")),
+            named("MADE.TXT", Some("MADE.TXT")),
+            named("MADE~1.TXT", None),
+            named("THIRDF~1.TXT", Some("THIRDF~1.TXT")),
+        ]
+    );
+}
+
+/// On a host folder the files are named THIRDF~1.TXT and FOURTH~1.TXT on
+/// the host.
+#[test]
+fn move_file_renames_a_file_to_its_own_alias_on_a_host_drive() {
+    rename_to_own_alias("own_alias_host", "C:", false);
+    let dir = PathBuf::from("target/test_win32/own_alias_host");
+    let mut names: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".TXT") || n.ends_with(".txt"))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["FOURTH~1.TXT", "MADE.TXT", "MADE~1.TXT", "THIRDF~1.TXT"]
+    );
+}
+
+/// Folders keep their 8.3 aliases as on Windows 98 SE (checked in 86Box):
+/// on drive `drive` the program makes "Parent zeta" (PARENT~1) and
+/// "Parent alpha" (PARENT~2), renames "Parent zeta" to "Parent moved",
+/// which gets PARENT~3 (its own alias is held during the rename), and
+/// makes "Parent again", which takes the freed PARENT~1, while "Parent
+/// alpha" keeps PARENT~2. GetShortPathNameA gives the aliases. Each check
+/// sets a bit of the exit code.
+fn check_folders_keep_their_aliases(test: &str, drive: &str, image: bool) {
+    use Arg::I;
+    let names: &[&str] = &["CreateDirectoryA", "MoveFileA", "GetShortPathNameA", "lstrcmpA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x200];
+    for (at, name) in [
+        (0x00, "Parent zeta"),
+        (0x20, "Parent alpha"),
+        (0x40, "Parent moved"),
+        (0x60, "Parent again"),
+        (0x80, "PARENT~3"),
+        (0x90, "PARENT~2"),
+        (0xA0, "PARENT~1"),
+    ] {
+        put(&mut data, at, format!("{drive}\\{name}\0").as_bytes());
+    }
+    // GetShortPathNameA's answer.
+    let buf = 0x100;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let alias_is = |a: &mut CodeAssembler, long, short, bit| {
+            call_with(a, f("GetShortPathNameA"), &[at(long), at(buf), I(0x100)])?;
+            call_with(a, f("lstrcmpA"), &[at(short), at(buf)])?;
+            a.test(eax, eax)?;
+            check(a, false, bit)
+        };
+        a.xor(ebx, ebx)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0x00), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0x20), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        call_with(a, f("MoveFileA"), &[at(0x00), at(0x40)])?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
+        alias_is(a, 0x40, 0x80, 3)?;
+        call_with(a, f("CreateDirectoryA"), &[at(0x60), I(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 4)?;
+        alias_is(a, 0x60, 0xA0, 5)?;
+        alias_is(a, 0x20, 0x90, 6)?;
+        a.mov(eax, ebx)?;
+        a.or(eax, 0x80)?;
+        a.ret()
+    });
+    let mut cpu = machine(test, exe);
+    if image {
+        let image_dir = PathBuf::from("target/test_win32").join(format!("{test}_d"));
+        let _ = fs::remove_dir_all(&image_dir);
+        fs::create_dir_all(&image_dir).unwrap();
+        let image = image_dir.join("d.img");
+        rust_dos::diskimage::DiskImage::blank_hard_disk("d.img", 8 << 20, Some("SAVES"))
+            .unwrap()
+            .copy_to(&image)
+            .unwrap();
+        let options = rust_dos::disk::MountOptions::default();
+        cpu.bus.disk.mount(3, &image, options, true).unwrap();
+    }
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0xFF,
+        "the checks that failed: {:08b} {}",
+        !code,
+        printed(&cpu)
+    );
+}
+
+#[test]
+fn folders_keep_their_aliases_on_a_host_drive() {
+    check_folders_keep_their_aliases("aliases_host", "C:", false);
+}
+
+#[test]
+fn folders_keep_their_aliases_on_a_disk_image() {
+    check_folders_keep_their_aliases("aliases_image", "D:", true);
 }
 
 /// SetFileTime on a file in a host folder, as Windows 98 SE does it on
@@ -9101,6 +10603,601 @@ fn a_built_in_dll_loaded_as_it_goes_stays() {
     );
 }
 
+/// The DirectX 5 redistributable's DSETUP.DLL at ExitProcess (#1803): D.DLL
+/// loads E.DLL in its DLL_PROCESS_ATTACH, E.DLL imports from D.DLL, and
+/// D.DLL's DLL_PROCESS_DETACH frees E.DLL. The program has let go of
+/// D.DLL, so E.DLL's import holds the last reference to it. At process
+/// exit the FreeLibrary succeeds and does nothing, as Wine's LdrUnloadDll
+/// does while the process detaches: each DLL learns once that the process
+/// ends, and D.DLL's code is still there when its FreeLibrary returns. A
+/// FreeLibrary of NULL still fails.
+#[test]
+fn a_dll_freeing_a_dll_as_the_process_ends_stays_mapped() {
+    let d_imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+    )];
+    let mut d_data = b"E.DLL\0\0\0D detached\r\n".to_vec();
+    d_data.resize(0x28, 0);
+    d_data.extend_from_slice(b"D freed E\r\n\0D null\r\n");
+    d_data.resize(0x40, 0);
+    const D_TEXT: u32 = 8;
+    const D_HANDLE: u32 = 0x20;
+    const D_WRITTEN: u32 = 0x24;
+    const D_FREED: u32 = 0x28;
+    const D_NULL: u32 = 0x34;
+    let d_main = |a: &mut CodeAssembler, l: &Layout| {
+        let say = |a: &mut CodeAssembler, at: u32, len: i32| -> Result<(), IcedError> {
+            a.push(STD_OUTPUT_HANDLE)?;
+            a.call(l.import(2))?;
+            a.push(0)?;
+            a.push(l.at(D_WRITTEN) as i32)?;
+            a.push(len)?;
+            a.push(l.at(at) as i32)?;
+            a.push(eax)?;
+            a.call(l.import(3))
+        };
+        let (mut detach, mut null, mut done) =
+            (a.create_label(), a.create_label(), a.create_label());
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.cmp(eax, 1)?;
+        a.jne(detach)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(dword_ptr(l.at(D_HANDLE)), eax)?;
+        a.jmp(done)?;
+        a.set_label(&mut detach)?;
+        a.test(eax, eax)?;
+        a.jne(done)?;
+        say(a, D_TEXT, 12)?;
+        // As DSETUP.DLL does: the handle stays where it was.
+        a.push(dword_ptr(l.at(D_HANDLE)))?;
+        a.call(l.import(1))?;
+        // Back in D.DLL's code, with the free a success.
+        a.test(eax, eax)?;
+        a.je(null)?;
+        say(a, D_FREED, 11)?;
+        a.set_label(&mut null)?;
+        a.push(0)?;
+        a.call(l.import(1))?;
+        a.test(eax, eax)?;
+        a.jne(done)?;
+        say(a, D_NULL, 8)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let seven = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 7)?;
+        a.ret()
+    };
+    let d = module_image(
+        DLL_BASE,
+        Some("D.DLL"),
+        d_imports,
+        &d_data,
+        &[("", &d_main), ("Seven", &seven)],
+        &[],
+    );
+
+    let e_imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetStdHandle", "WriteFile"]),
+        ("D.DLL", &["Seven"]),
+    ];
+    let mut e_data = b"E detached\r\n".to_vec();
+    e_data.resize(0x40, 0);
+    let e_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(l.import(0))?;
+        a.push(0)?;
+        a.push(l.at(0x20) as i32)?;
+        a.push(12)?;
+        a.push(l.at(0) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let e = module_image(
+        DLL_BASE,
+        Some("E.DLL"),
+        e_imports,
+        &e_data,
+        &[("", &e_main)],
+        &[],
+    );
+
+    let names: &[&str] = &["LoadLibraryA", "FreeLibrary", "GetModuleHandleA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"D.DLL\0".to_vec();
+    data.resize(0x200, 0);
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.push(l.at(0) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        check(a, true, 0)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        // E.DLL's import keeps it.
+        a.push(l.at(0) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 1)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run_files(
+        "dll_exit_free",
+        &[("T.EXE", exe), ("D.DLL", d), ("E.DLL", e)],
+    );
+    assert_eq!(
+        code,
+        3,
+        "the checks that failed: {:02b}, {}",
+        !code & 3,
+        text
+    );
+    assert_eq!(text.matches("D detached\r\n").count(), 1, "{text}");
+    assert_eq!(text.matches("E detached\r\n").count(), 1, "{text}");
+    assert_eq!(text.matches("D freed E\r\n").count(), 1, "{text}");
+    assert_eq!(text.matches("D null\r\n").count(), 1, "{text}");
+}
+
+/// Write the `len` bytes at `at` in a test module's data to standard
+/// output, with GetStdHandle and WriteFile at its import slots `get` and
+/// `write`, the count going to `written` in its data.
+fn say_from(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    (get, write): (usize, usize),
+    at: u32,
+    len: i32,
+    written: u32,
+) -> Result<(), IcedError> {
+    a.push(STD_OUTPUT_HANDLE)?;
+    a.call(l.import(get))?;
+    a.push(0)?;
+    a.push(l.at(written) as i32)?;
+    a.push(len)?;
+    a.push(l.at(at) as i32)?;
+    a.push(eax)?;
+    a.call(l.import(write))
+}
+
+/// D.DLL for the nested FreeLibrary tests: an entry point that does
+/// nothing, and Seven, which X.DLL imports.
+fn seven_dll() -> Vec<u8> {
+    let entry = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let seven = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 7)?;
+        a.ret()
+    };
+    let data = [0u8; 0x10];
+    module_image(
+        DLL_BASE,
+        Some("D.DLL"),
+        &[],
+        &data,
+        &[("", &entry), ("Seven", &seven)],
+        &[],
+    )
+}
+
+/// The program of the nested FreeLibrary tests: it loads D.DLL, then
+/// `first`, and frees `first`. Then `first` and `gone` are gone, and
+/// D.DLL is there with its export, under the handle the load gave.
+fn nested_free_program(first: &str, gone: &str) -> Vec<u8> {
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "FreeLibrary",
+        "GetModuleHandleA",
+        "GetProcAddress",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"D.DLL\0Seven\0".to_vec();
+    data.resize(0x10, 0);
+    data.extend_from_slice(first.as_bytes());
+    data.resize(0x20, 0);
+    data.extend_from_slice(gone.as_bytes());
+    data.resize(0x40, 0);
+    const D: u32 = 0;
+    const SEVEN: u32 = 6;
+    const FIRST: u32 = 0x10;
+    const GONE: u32 = 0x20;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.push(l.at(D) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.push(l.at(FIRST) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(edi, eax)?;
+        a.test(edi, edi)?;
+        check(a, true, 0)?;
+        a.push(edi)?;
+        a.call(f("FreeLibrary"))?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        a.push(l.at(FIRST) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.push(l.at(GONE) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 3)?;
+        a.push(l.at(D) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 4)?;
+        a.push(l.at(SEVEN) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.test(eax, eax)?;
+        check(a, true, 5)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    module_image(BASE, None, imports, &data, &[("", &main)], &[])
+}
+
+/// X.DLL's DLL_PROCESS_DETACH loads X.DLL and frees it again (#1893).
+/// The load finds it still there and the FreeLibrary inside DllMain only
+/// takes that reference away, as Wine's LdrUnloadDll does: X.DLL's code
+/// is there when it returns, and it goes when the program's FreeLibrary
+/// does. D.DLL, which X.DLL imports from and the program loaded as well,
+/// loses X.DLL's reference once and stays. X.DLL learns once that it is
+/// detached because the load doesn't attach it again; Wine's LdrLoadDll
+/// would, and what Windows 9x does is open in #2014.
+#[test]
+fn a_dll_freeing_itself_as_it_detaches_goes_after_the_outer_free() {
+    let x_imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+        ),
+        ("D.DLL", &["Seven"]),
+    ];
+    let mut x_data = b"X.DLL\0\0\0X detached\r\nX back\r\n".to_vec();
+    x_data.resize(0x40, 0);
+    const NAME: u32 = 0;
+    const DETACHED: u32 = 8;
+    const BACK: u32 = 20;
+    const WRITTEN: u32 = 0x30;
+    let x_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        say_from(a, l, (2, 3), DETACHED, 12, WRITTEN)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(l.import(0))?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        // Back in X.DLL's code, which is still there.
+        say_from(a, l, (2, 3), BACK, 8, WRITTEN)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let x = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        x_imports,
+        &x_data,
+        &[("", &x_main)],
+        &[],
+    );
+    let exe = nested_free_program("X.DLL", "X.DLL");
+    let (code, text) = run_files(
+        "nested_free_self",
+        &[("T.EXE", exe), ("X.DLL", x), ("D.DLL", seven_dll())],
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text.matches("X detached\r\n").count(), 1, "{text}");
+    assert_eq!(text.matches("X back\r\n").count(), 1, "{text}");
+}
+
+/// Y.DLL imports from X.DLL, which imports from D.DLL. The program frees
+/// Y.DLL, the last reference to both, and Y.DLL's DLL_PROCESS_DETACH
+/// loads X.DLL and frees it again (#1893). That inner FreeLibrary only
+/// lowers X.DLL's count: X.DLL learns that it is detached after Y.DLL's
+/// DllMain has returned, as Wine's process_detach tells it when the
+/// outermost FreeLibrary ends, and D.DLL, which the program loaded as
+/// well, loses X.DLL's reference once and stays.
+#[test]
+fn a_free_inside_a_dllmain_leaves_the_detach_to_the_outer_free() {
+    let x_imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetStdHandle", "WriteFile"]),
+        ("D.DLL", &["Seven"]),
+    ];
+    let mut x_data = b"X detached\r\n".to_vec();
+    x_data.resize(0x40, 0);
+    let x_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        say_from(a, l, (0, 1), 0, 12, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let six = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 6)?;
+        a.ret()
+    };
+    let x = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        x_imports,
+        &x_data,
+        &[("", &x_main), ("Six", &six)],
+        &[],
+    );
+
+    let y_imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+        ),
+        ("X.DLL", &["Six"]),
+    ];
+    let mut y_data = b"X.DLL\0\0\0Y freed X\r\n".to_vec();
+    y_data.resize(0x40, 0);
+    let y_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        say_from(a, l, (2, 3), 8, 11, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let y = module_image(
+        DLL_BASE,
+        Some("Y.DLL"),
+        y_imports,
+        &y_data,
+        &[("", &y_main)],
+        &[],
+    );
+
+    let exe = nested_free_program("Y.DLL", "X.DLL");
+    let (code, text) = run_files(
+        "nested_free_other",
+        &[
+            ("T.EXE", exe),
+            ("Y.DLL", y),
+            ("X.DLL", x),
+            ("D.DLL", seven_dll()),
+        ],
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text.matches("X detached\r\n").count(), 1, "{text}");
+    let freed = text.find("Y freed X\r\n");
+    let detached = text.find("X detached\r\n");
+    assert!(
+        freed.is_some() && freed < detached,
+        "X.DLL learned that it is detached before Y.DLL's FreeLibrary returned: {text}"
+    );
+}
+
+/// A DLL named `name` whose DLL_PROCESS_DETACH writes `says` (shorter
+/// than 30h bytes) to standard output.
+fn telling_dll(name: &str, says: &'static [u8]) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetStdHandle", "WriteFile"])];
+    let mut data = says.to_vec();
+    data.resize(0x40, 0);
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        say_from(a, l, (0, 1), 0, says.len() as i32, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    module_image(DLL_BASE, Some(name), imports, &data, &[("", &main)], &[])
+}
+
+/// Y.DLL loads Z.DLL as it attaches and frees it as it detaches, which
+/// lets go of Z.DLL's last reference while the program's FreeLibrary of
+/// Y.DLL runs (#1893). Z.DLL isn't among the modules that FreeLibrary
+/// let go of, and the inner FreeLibrary only lowers its count: Z.DLL
+/// learns that it is detached once Y.DLL's DllMain has returned, and
+/// goes with Y.DLL.
+#[test]
+fn a_dll_a_dllmain_frees_is_detached_after_the_dllmain_returns() {
+    let y_imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["LoadLibraryA", "FreeLibrary", "GetStdHandle", "WriteFile"],
+    )];
+    let mut y_data = b"Z.DLL\0\0\0Y freed Z\r\n".to_vec();
+    y_data.resize(0x40, 0);
+    const HANDLE: u32 = 0x20;
+    let y_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut detach = a.create_label();
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 1)?;
+        a.jne(detach)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(dword_ptr(l.at(HANDLE)), eax)?;
+        a.jmp(done)?;
+        a.set_label(&mut detach)?;
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(dword_ptr(l.at(HANDLE)))?;
+        a.call(l.import(1))?;
+        say_from(a, l, (2, 3), 8, 11, 0x30)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let y = module_image(
+        DLL_BASE,
+        Some("Y.DLL"),
+        y_imports,
+        &y_data,
+        &[("", &y_main)],
+        &[],
+    );
+    let exe = nested_free_program("Y.DLL", "Z.DLL");
+    let (code, text) = run_files(
+        "nested_free_loaded",
+        &[
+            ("T.EXE", exe),
+            ("Y.DLL", y),
+            ("Z.DLL", telling_dll("Z.DLL", b"Z detached\r\n")),
+            ("D.DLL", seven_dll()),
+        ],
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text.matches("Z detached\r\n").count(), 1, "{text}");
+    let freed = text.find("Y freed Z\r\n");
+    let detached = text.find("Z detached\r\n");
+    assert!(
+        freed.is_some() && freed < detached,
+        "Z.DLL learned that it is detached before Y.DLL's FreeLibrary returned: {text}"
+    );
+}
+
+/// A second thread frees X.DLL, whose DLL_PROCESS_DETACH calls
+/// ExitThread, so that FreeLibrary's chain of DllMain calls ends with
+/// the thread and never finishes. The main thread's FreeLibrary of
+/// W.DLL after it is the outermost one, not one nested in a chain that
+/// is gone: W.DLL learns that it is detached and goes, and X.DLL, which
+/// the ended chain let go of, goes with it.
+#[test]
+fn a_free_after_a_chain_ended_with_its_thread_detaches_and_unmaps() {
+    let names: &[&str] = &[
+        "CreateThread",
+        "WaitForSingleObject",
+        "LoadLibraryA",
+        "FreeLibrary",
+        "GetModuleHandleA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"X.DLL\0\0\0W.DLL\0".to_vec();
+    data.resize(0x10, 0);
+    const X: u32 = 0;
+    const W: u32 = 8;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        a.xor(ebx, ebx)?;
+        // CreateThread's flags, parameter and thread ID, then the
+        // thread's address as the call's return address.
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: load X.DLL and free it.
+        a.push(l.at(X) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(eax)?;
+        a.call(f("FreeLibrary"))?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.push(-1)?;
+        a.push(eax)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.push(l.at(W) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        check(a, true, 0)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        a.push(l.at(W) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.push(l.at(X) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 3)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+
+    let x_imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitThread"])];
+    let x_main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let x = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        x_imports,
+        &[0; 0x10],
+        &[("", &x_main)],
+        &[],
+    );
+    let (code, text) = run_files(
+        "nested_free_ended",
+        &[
+            ("T.EXE", exe),
+            ("X.DLL", x),
+            ("W.DLL", telling_dll("W.DLL", b"W detached\r\n")),
+        ],
+    );
+    assert_eq!(
+        code,
+        0xF,
+        "the checks that failed: {:04b}, {}",
+        !code & 0xF,
+        text
+    );
+    assert_eq!(text.matches("W detached\r\n").count(), 1, "{text}");
+}
+
 /// A state saved after the last free of a built-in DLL has its mapping and
 /// stub pages: after a load the DLL isn't there, and it loads again where
 /// it was, with a new runtime.
@@ -9310,6 +11407,241 @@ fn a_program_reads_its_resources_and_file_name() {
     );
     let (code, _) = run_files("resources", &[("T.EXE", exe)]);
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
+}
+
+/// Set bit `bit` of EBX if each dword at the addresses holds its value.
+fn check_all(a: &mut CodeAssembler, values: &[(u32, u32)], bit: u32) -> Result<(), IcedError> {
+    let mut wrong = a.create_label();
+    for (i, &(at, value)) in values.iter().enumerate() {
+        a.cmp(dword_ptr(at as u64), value as i32)?;
+        if i + 1 < values.len() {
+            a.jne(wrong)?;
+        }
+    }
+    a.set_label(&mut wrong)?;
+    check(a, false, bit)
+}
+
+/// The W resource functions, which Windows 98's KERNEL32 has alongside
+/// the A ones (Windows Installer's MSIEXEC.EXE for 9x calls
+/// EnumResourceNamesW). They call back with the module as the program
+/// named it, a named type first as a UTF-16 string, and the type the
+/// program passed; FindResourceW looks for any language, and
+/// FindResourceExW for the language asked for, its primary language
+/// alone and the neutral ones, not for others of the same primary
+/// language. A "#number" past FFFFh is ERROR_INVALID_PARAMETER.
+#[test]
+fn the_wide_resource_functions_find_and_enumerate_resources() {
+    use Arg::I;
+    let names: &[&str] = &[
+        "FindResourceW",
+        "FindResourceExW",
+        "EnumResourceTypesW",
+        "EnumResourceNamesW",
+        "EnumResourceLanguagesW",
+        "GetLastError",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    const RT_RCDATA: u32 = 10;
+    // L"WAVE" at 0, L"#10" at 10h, L"#70000" at 20h; what the functions
+    // returned and their callbacks saw from 100h.
+    let wide = |text: &str| -> Vec<u8> {
+        let units = text.encode_utf16().chain([0]);
+        units.flat_map(|u| u.to_le_bytes()).collect()
+    };
+    let mut data = vec![0; 0x200];
+    put(&mut data, 0, &wide("WAVE"));
+    put(&mut data, 0x10, &wide("#10"));
+    put(&mut data, 0x20, &wide("#70000"));
+    const TYPES: u32 = 0x100;
+    const FIRST_TYPE: u32 = 0x104;
+    const ID_TYPE: u32 = 0x108;
+    const TYPES_MODULE: u32 = 0x10C;
+    const NAMES_TYPE: u32 = 0x110;
+    const NAME: u32 = 0x114;
+    const NAMES_MODULE: u32 = 0x118;
+    const LANGUAGE: u32 = 0x120;
+    const RETURNED: u32 = 0x130;
+    const ERROR: u32 = 0x140;
+    const TYPES_PROC: u32 = 0x150;
+    const NAMES_PROC: u32 = 0x154;
+    const LANGUAGES_PROC: u32 = 0x158;
+    let mut b = Builder::exe(BASE);
+    b.resource(RT_RCDATA as u16, 5, 0x409, b"hello");
+    b.named_resource("WAVE", 7, 0x409, b"wave");
+    let program = program_with(b, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| l.at(offset) as u32;
+        let keep = |a: &mut CodeAssembler, offset: u32| a.mov(dword_ptr(at(offset) as u64), eax);
+        // The callbacks, each one's address kept from the call over it.
+        let mut over = a.create_label();
+        a.call(over)?;
+        // EnumResTypeProcW(module, type, param): the first type's first
+        // two characters, then the second type.
+        let mut second = a.create_label();
+        let mut counted = a.create_label();
+        a.mov(eax, dword_ptr(esp + 4))?;
+        keep(a, TYPES_MODULE)?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.cmp(dword_ptr(at(TYPES) as u64), 0)?;
+        a.jne(second)?;
+        a.mov(eax, dword_ptr(eax))?;
+        keep(a, FIRST_TYPE)?;
+        a.jmp(counted)?;
+        a.set_label(&mut second)?;
+        keep(a, ID_TYPE)?;
+        a.set_label(&mut counted)?;
+        a.inc(dword_ptr(at(TYPES) as u64))?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)?;
+        a.set_label(&mut over)?;
+        a.pop(eax)?;
+        keep(a, TYPES_PROC)?;
+        let mut over = a.create_label();
+        a.call(over)?;
+        // EnumResNameProcW(module, type, name, param).
+        a.mov(eax, dword_ptr(esp + 4))?;
+        keep(a, NAMES_MODULE)?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        keep(a, NAMES_TYPE)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        keep(a, NAME)?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)?;
+        a.set_label(&mut over)?;
+        a.pop(eax)?;
+        keep(a, NAMES_PROC)?;
+        let mut over = a.create_label();
+        a.call(over)?;
+        // EnumResLangProcW(module, type, name, language, param).
+        a.mov(eax, dword_ptr(esp + 16))?;
+        keep(a, LANGUAGE)?;
+        a.mov(eax, 1)?;
+        a.ret_1(20)?;
+        a.set_label(&mut over)?;
+        a.pop(eax)?;
+        keep(a, LANGUAGES_PROC)?;
+
+        a.xor(ebx, ebx)?;
+        // Found in US English though no language is asked for.
+        call_with(a, f("FindResourceW"), &[I(0), I(5), I(at(0x10))])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        call_with(
+            a,
+            f("FindResourceExW"),
+            &[I(0), I(at(0x10)), I(5), I(0x409)],
+        )?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        // UK English isn't US English.
+        call_with(
+            a,
+            f("FindResourceExW"),
+            &[I(0), I(RT_RCDATA), I(5), I(0x809)],
+        )?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        call_with(a, f("FindResourceW"), &[I(0), I(5), I(at(0x20))])?;
+        keep(a, RETURNED)?;
+        a.call(f("GetLastError"))?;
+        keep(a, ERROR)?;
+        check_all(a, &[(at(RETURNED), 0), (at(ERROR), 87)], 3)?;
+        // The types, "WAVE" first, with NULL as the module.
+        a.push(0)?;
+        a.push(dword_ptr(at(TYPES_PROC) as u64))?;
+        a.push(0)?;
+        a.call(f("EnumResourceTypesW"))?;
+        keep(a, RETURNED)?;
+        let first = (at(FIRST_TYPE), 0x0041_0057);
+        let listed = [(at(RETURNED), 1), (at(TYPES), 2), first];
+        check_all(a, &listed, 4)?;
+        let rcdata = [(at(ID_TYPE), RT_RCDATA), (at(TYPES_MODULE), 0)];
+        check_all(a, &rcdata, 5)?;
+        // The names of the type "WAVE", with the type as the program
+        // passed it.
+        a.push(0)?;
+        a.push(dword_ptr(at(NAMES_PROC) as u64))?;
+        a.push(at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("EnumResourceNamesW"))?;
+        keep(a, RETURNED)?;
+        let named = [
+            (at(RETURNED), 1),
+            (at(NAME), 7),
+            (at(NAMES_TYPE), at(0)),
+            (at(NAMES_MODULE), 0),
+        ];
+        check_all(a, &named, 6)?;
+        // The languages of RT_RCDATA 5.
+        a.push(0)?;
+        a.push(dword_ptr(at(LANGUAGES_PROC) as u64))?;
+        a.push(5)?;
+        a.push(RT_RCDATA as i32)?;
+        a.push(0)?;
+        a.call(f("EnumResourceLanguagesW"))?;
+        keep(a, RETURNED)?;
+        check_all(a, &[(at(RETURNED), 1), (at(LANGUAGE), 0x409)], 7)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run_files("wide_resources", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {text}", !code);
+}
+
+/// MsgWaitForMultipleObjects returns the index of a signaled object
+/// before the input: the input is the last of the things waited for, and
+/// as in WaitForMultipleObjects the first one ready is the answer. Rage
+/// Rally's setup waits this way for INSTMSIA.EXE to end, peeking at its
+/// messages without taking them, and waited for ever when the message
+/// it left in the queue came first.
+#[test]
+fn msg_wait_gives_a_signaled_object_before_the_input() {
+    use Arg::I;
+    let names: &[&str] = &[
+        "CreateEventA",
+        "ResetEvent",
+        "GetCurrentThreadId",
+        "PeekMessageA",
+        "PostThreadMessageA",
+        "MsgWaitForMultipleObjects",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &names[..3]), ("USER32.DLL", &names[3..])];
+    const WM_USER: u32 = 0x0400;
+    const QS_ALLINPUT: u32 = 0xFF;
+    // The event's handle at 0, a MSG at 10h.
+    let program = program(BASE, false, imports, &[0; 0x40], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| l.at(offset) as u32;
+        a.xor(ebx, ebx)?;
+        // A manual-reset event, signaled.
+        call_with(a, f("CreateEventA"), &[I(0), I(1), I(1), I(0)])?;
+        a.mov(dword_ptr(at(0) as u64), eax)?;
+        // The thread's queue, and a message in it, new since the peek.
+        call_with(a, f("PeekMessageA"), &[I(at(0x10)), I(0), I(0), I(0), I(0)])?;
+        call_with(a, f("GetCurrentThreadId"), &[])?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(WM_USER as i32)?;
+        a.push(eax)?;
+        a.call(f("PostThreadMessageA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        let wait = [I(1), I(at(0)), I(0), I(0), I(QS_ALLINPUT)];
+        call_with(a, f("MsgWaitForMultipleObjects"), &wait)?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        // With the event reset, the message ends the wait.
+        a.push(dword_ptr(at(0) as u64))?;
+        a.call(f("ResetEvent"))?;
+        call_with(a, f("MsgWaitForMultipleObjects"), &wait)?;
+        a.cmp(eax, 1)?;
+        check(a, false, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run_files("msg_wait_object_first", &[("T.EXE", program)]);
+    assert_eq!(code, 7, "the checks that failed: {:03b} {text}", !code & 7);
 }
 
 /// LoadImageA with LR_CREATEDIBSECTION of an RLE8 bitmap gives a DIB
@@ -12721,6 +15053,79 @@ fn get_frame_gives_a_streams_frames_as_dibs() {
     assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
 }
 
+/// AVIStreamOpenFromFileA opens a file's stream in one call: the stream
+/// reads as AVIFileGetStream's does, and its release closes the file,
+/// whose only reference it holds. A file that isn't there gives
+/// AVIERR_FILEOPEN and no stream; a type the file has no stream of gives
+/// AVIERR_NODATA, no stream, and closes the file. Once both are done, a
+/// handle that writes the file and shares nothing opens, so no handle of
+/// it is left open. Outlaw Racers opens its films this way.
+#[test]
+fn avi_stream_open_from_file_gives_a_files_stream() {
+    let kernel32: &[&str] = &["ExitProcess", "CreateFileA"];
+    let avifil32: &[&str] = &[
+        "AVIFileInit",
+        "AVIStreamOpenFromFileA",
+        "AVIStreamLength",
+        "AVIStreamRelease",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("AVIFIL32.DLL", avifil32)];
+    let mut data = vec![0; 0x100];
+    data[..6].copy_from_slice(b"T.AVI\0");
+    data[0x10..0x16].copy_from_slice(b"N.AVI\0");
+    data[0x28..0x30].copy_from_slice(&u64::MAX.to_le_bytes());
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = avifil32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let (stream, missing, no_audio) = (l.at(0x20), l.at(0x28), l.at(0x2C));
+        const VIDS: i32 = 0x7364_6976;
+        const AUDS: i32 = 0x7364_7561;
+        const GENERIC_WRITE: i32 = 0x4000_0000;
+        const OPEN_EXISTING: i32 = 3;
+        a.xor(ebx, ebx)?;
+        a.call(f("AVIFileInit"))?;
+        push_args(a, &[stream as i32, l.at(0) as i32, VIDS, 0, 0x20, 0])?;
+        a.call(f("AVIStreamOpenFromFileA"))?;
+        a.test(eax, eax)?;
+        bit_if_equal(a, 0)?;
+        a.push(dword_ptr(stream))?;
+        a.call(f("AVIStreamLength"))?;
+        a.cmp(eax, 2)?;
+        bit_if_equal(a, 1)?;
+        a.push(dword_ptr(stream))?;
+        a.call(f("AVIStreamRelease"))?;
+        a.test(eax, eax)?;
+        bit_if_equal(a, 2)?;
+        push_args(a, &[missing as i32, l.at(0x10) as i32, 0, 0, 0x20, 0])?;
+        a.call(f("AVIStreamOpenFromFileA"))?;
+        a.cmp(eax, 0x8004_406F_u32 as i32)?;
+        bit_if_equal(a, 3)?;
+        a.cmp(dword_ptr(missing), 0)?;
+        bit_if_equal(a, 4)?;
+        push_args(a, &[no_audio as i32, l.at(0) as i32, AUDS, 0, 0x20, 0])?;
+        a.call(f("AVIStreamOpenFromFileA"))?;
+        a.cmp(eax, 0x8004_4073_u32 as i32)?;
+        bit_if_equal(a, 5)?;
+        a.cmp(dword_ptr(no_audio), 0)?;
+        bit_if_equal(a, 6)?;
+        let write = [l.at(0) as i32, GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0x80, 0];
+        push_args(a, &write)?;
+        a.call(l.import(1))?;
+        a.cmp(eax, -1)?;
+        bit_if(a, ne, 7)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family(
+        "stream_open_from_file",
+        &[("T.EXE", program), ("T.AVI", small_avi())],
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
 /// A BITMAPINFOHEADER of `bits` bits a pixel, its image size unset.
 fn bitmap_info(width: u32, height: u32, bits: u16, compression: &[u8; 4]) -> Vec<u8> {
     let mut info = [40, width, height].map(u32::to_le_bytes).concat();
@@ -12971,6 +15376,137 @@ fn a_program_started_from_the_foreground_comes_to_it_and_stays() {
         &[("T.EXE", parent), ("C.EXE", shows_a_window("Child", 0))],
     );
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn a_program_started_by_the_one_that_took_the_last_input_comes_to_the_foreground() {
+    // T.EXE shows a window and starts M.EXE, which comes to the
+    // foreground and takes a key. M.EXE's window then goes, which gives
+    // the foreground back to T.EXE's, and M.EXE starts G.EXE. On Windows
+    // 98 a program started by the one that took the last input may take
+    // the foreground: G.EXE's SetForegroundWindow brings its window in
+    // front, and T.EXE, which waited for M.EXE without looking at its
+    // messages, doesn't raise its own over it when it looks. (Demolition
+    // Racer's setup covered DXSETUP's message box this way, and waited
+    // for it for ever, #2150.)
+    const VK_A: i32 = 0x41;
+    const KEYEVENTF_KEYUP: i32 = 2;
+    const WM_QUIT: i32 = 0x0012;
+    let style = WS_POPUP | WS_VISIBLE;
+    let kernel32 = ["CreateProcessA", "WaitForSingleObject", "ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "PeekMessageA",
+        "DispatchMessageA",
+        "GetForegroundWindow",
+        "GetTopWindow",
+        "FindWindowA",
+        "PostMessageA",
+    ];
+    // A MSG at 0xC0.
+    let texts = [(0, "M.EXE"), (0x10, "Static"), (0x20, "Setup"), (0x30, "Box")];
+    let data = child_data(&texts);
+    let setup = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        push_args(a, &[0, class, title, style, 0, 0, 640, 480, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.xor(ebx, ebx)?;
+        create_child(a, l, f, 0)?;
+        // M.EXE ends once G.EXE waits for messages.
+        a.push(INFINITE)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        pump(a, l, f, 0xC0)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.mov(edi, eax)?;
+        a.test(edi, edi)?;
+        bit_if(a, ne, 0)?;
+        a.cmp(edi, esi)?;
+        bit_if(a, ne, 1)?;
+        a.push(0)?;
+        a.call(f("GetTopWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 2)?;
+        push_args(a, &[class, l.at(0x30) as i32])?;
+        a.call(f("FindWindowA"))?;
+        a.mov(esi, eax)?;
+        a.cmp(esi, edi)?;
+        bit_if(a, eq, 3)?;
+        push_args(a, &[WM_QUIT, 0, 0])?;
+        a.push(esi)?;
+        a.call(f("PostMessageA"))?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let kernel32 = ["CreateProcessA", "ExitProcess"];
+    let user32 = [
+        "WaitForInputIdle",
+        "CreateWindowExA",
+        "SetForegroundWindow",
+        "PeekMessageA",
+        "DispatchMessageA",
+        "DestroyWindow",
+        "keybd_event",
+    ];
+    let data = child_data(&[(0, "G.EXE"), (0x10, "Static"), (0x20, "Package")]);
+    let package = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        push_args(a, &[0, class, title, style, 100, 100, 200, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.push(esi)?;
+        a.call(f("SetForegroundWindow"))?;
+        pump(a, l, f, 0xC0)?;
+        // The user presses a key in its window.
+        for flags in [0, KEYEVENTF_KEYUP] {
+            push_args(a, &[VK_A, 0, flags, 0])?;
+            a.call(f("keybd_event"))?;
+        }
+        pump(a, l, f, 0xC0)?;
+        a.push(esi)?;
+        a.call(f("DestroyWindow"))?;
+        create_child(a, l, f, 0)?;
+        idle(a, l, f, INFINITE)?;
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "SetForegroundWindow",
+        "GetMessageA",
+        "DispatchMessageA",
+    ];
+    let data = child_data(&[(0x10, "Static"), (0x20, "Box")]);
+    let message_box = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        push_args(a, &[0, class, title, style, 200, 200, 100, 50, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.push(eax)?;
+        a.call(f("SetForegroundWindow"))?;
+        let mut next = a.create_label();
+        let mut quit = a.create_label();
+        a.set_label(&mut next)?;
+        push_args(a, &[l.at(0xC0) as i32, 0, 0, 0])?;
+        a.call(f("GetMessageA"))?;
+        a.test(eax, eax)?;
+        a.je(quit)?;
+        a.push(l.at(0xC0) as i32)?;
+        a.call(f("DispatchMessageA"))?;
+        a.jmp(next)?;
+        a.set_label(&mut quit)?;
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family(
+        "foreground_from_last_input",
+        &[("T.EXE", setup), ("M.EXE", package), ("G.EXE", message_box)],
+    );
+    assert_eq!(code, 0xF, "the checks that failed: {:04b}", !code & 0xF);
 }
 
 /// SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE.
@@ -13956,6 +16492,134 @@ fn a_keyboard_hook_that_peeks_with_the_programs_msg_doesnt_change_its_key() {
 }
 
 #[test]
+fn a_window_has_no_size_while_the_cbt_hook_sees_it_made() {
+    // T.EXE's CBT hook changes the frame of a captioned popup at
+    // HCBT_CREATEWND, as MFC's hook in Encarta 97 does, and then reads its
+    // rectangles: both are empty, as Wine's NtUserCreateWindowEx leaves
+    // them until after the hook, since the hook may still change the
+    // CREATESTRUCT's place and size. A frame change of a 0 by 0 window
+    // keeps its client area at 0 by 0, so the window's procedure gets its
+    // first WM_SIZE after WM_CREATE. The window has its 200 by 100 at
+    // (10, 20) once CreateWindowExA returns (#2006).
+    const WH_CBT: i32 = 5;
+    const HCBT_CREATEWND: i32 = 3;
+    const WM_CREATE: i32 = 0x0001;
+    const WM_SIZE: i32 = 0x0005;
+    const WS_CAPTION: i32 = 0x00C0_0000;
+    // SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+    // SWP_FRAMECHANGED.
+    const FRAME_CHANGED: i32 = 0x37;
+    let kernel32 = ["GetCurrentThreadId", "ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "RegisterClassA",
+        "SetWindowsHookExA",
+        "SetWindowPos",
+        "GetWindowRect",
+        "GetClientRect",
+    ];
+    // The hook's window RECT at 0xA0 and client RECT at 0xB0, the hook's
+    // calls at 0x9C; the window's RECT after it is made at 0xC0. The
+    // procedure counts WM_CREATE and the first WM_SIZE at 0x110 and keeps
+    // the count of each at 0x114 and 0x118.
+    let mut data = session_data(&[(0x10, "CbtRect")]);
+    data.resize(0x120, 0);
+    let exe = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        let mut cbt = a.create_label();
+        let mut pass = a.create_label();
+        a.jmp(start)?;
+
+        a.set_label(&mut cbt)?;
+        a.cmp(dword_ptr(esp + 4), HCBT_CREATEWND)?;
+        a.jne(pass)?;
+        a.inc(dword_ptr(l.at(0x9C)))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, 0, 0, 0, 0, 0, FRAME_CHANGED])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("SetWindowPos"))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, l.at(0xA0) as i32])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("GetWindowRect"))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        push_args(a, &[0, l.at(0xB0) as i32])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("GetClientRect"))?;
+        a.set_label(&mut pass)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+
+        a.set_label(&mut start)?;
+        a.xor(ebx, ebx)?;
+        // Rectangles the hook must overwrite.
+        for at in (0xA0..0xC0).step_by(4) {
+            a.mov(dword_ptr(l.at(at)), 7)?;
+        }
+        a.call(f("GetCurrentThreadId"))?;
+        a.push(eax)?;
+        a.push(0)?;
+        push_label(a, cbt)?;
+        a.push(WH_CBT)?;
+        a.call(f("SetWindowsHookExA"))?;
+        session_class(a, l, f, |a| {
+            let mut not_create = a.create_label();
+            let mut done = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_CREATE)?;
+            a.jne(not_create)?;
+            a.inc(dword_ptr(l.at(0x110)))?;
+            a.mov(eax, dword_ptr(l.at(0x110)))?;
+            a.mov(dword_ptr(l.at(0x114)), eax)?;
+            a.jmp(done)?;
+            a.set_label(&mut not_create)?;
+            a.cmp(dword_ptr(esp + 8), WM_SIZE)?;
+            a.jne(done)?;
+            a.cmp(dword_ptr(l.at(0x118)), 0)?;
+            a.jne(done)?;
+            a.inc(dword_ptr(l.at(0x110)))?;
+            a.mov(eax, dword_ptr(l.at(0x110)))?;
+            a.mov(dword_ptr(l.at(0x118)), eax)?;
+            a.set_label(&mut done)
+        })?;
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_CAPTION;
+        push_args(a, &[0, class, class, style, 10, 20, 200, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        push_args(a, &[0, l.at(0xC0) as i32])?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.call(f("GetWindowRect"))?;
+        a.cmp(dword_ptr(l.at(0x9C)), 1)?;
+        bit_if(a, eq, 0)?;
+        // Both rectangles all zeros.
+        a.mov(eax, dword_ptr(l.at(0xA0)))?;
+        for at in (0xA4..0xC0).step_by(4) {
+            a.or(eax, dword_ptr(l.at(at)))?;
+        }
+        a.test(eax, eax)?;
+        bit_if(a, eq, 1)?;
+        a.cmp(dword_ptr(l.at(0xC8)), 210)?;
+        bit_if(a, eq, 2)?;
+        a.cmp(dword_ptr(l.at(0xCC)), 120)?;
+        bit_if(a, eq, 3)?;
+        a.cmp(dword_ptr(l.at(0xC0)), 10)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xC4)), 20)?;
+        bit_if(a, eq, 5)?;
+        // WM_CREATE came first, WM_SIZE second.
+        a.cmp(dword_ptr(l.at(0x114)), 1)?;
+        bit_if(a, eq, 6)?;
+        a.cmp(dword_ptr(l.at(0x118)), 2)?;
+        bit_if(a, eq, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("cbt_create_rect", &[("T.EXE", exe)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
 fn a_click_on_a_window_behind_activates_it_and_is_delivered() {
     // T.EXE's window, with a button, is behind C.EXE's, which it started.
     // A click on the button asks the window with WM_MOUSEACTIVATE, whose
@@ -14099,6 +16763,158 @@ fn a_click_on_a_window_behind_activates_it_and_is_delivered() {
         "click_activates_behind",
         &[("T.EXE", parent), ("C.EXE", shows_a_window("Child", 300))],
     );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn a_click_while_a_window_has_the_capture_activates_nothing() {
+    // Window A has the capture and B, a popup shown after it, is active.
+    // A click on B and then a click on A both go to A as WM_LBUTTONDOWN,
+    // and B stays active: A gets no WM_MOUSEACTIVATE and no WM_ACTIVATE.
+    // Once A lets the capture go, the same click on A asks it with
+    // WM_MOUSEACTIVATE and activates it. This is what Windows 98 SE
+    // does (a probe run there, #745); InstallShield 6's engine holds the
+    // capture on its background window while its "Setup Needs the Next
+    // Disk" box is up, and a click on the box mustn't activate the
+    // background window and take the keyboard from the box.
+    const WM_ACTIVATE: i32 = 0x0006;
+    const WM_MOUSEACTIVATE: i32 = 0x0021;
+    const WM_LBUTTONDOWN: i32 = 0x0201;
+    const WM_TIMER: i32 = 0x0113;
+    const MOUSEEVENTF_LEFTDOWN: i32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: i32 = 0x0004;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "GetMessageA",
+        "DispatchMessageA",
+        "GetActiveWindow",
+        "SetCapture",
+        "ReleaseCapture",
+        "SetCursorPos",
+        "mouse_event",
+        "SetTimer",
+        "KillTimer",
+    ];
+    // What A's procedure saw: WM_LBUTTONDOWN's count at 0xA0, the count
+    // of WM_ACTIVATE that activates it at 0xA4 and WM_MOUSEACTIVATE's at
+    // 0xA8. The timer's id at 0xB4, a MSG at 0xC0 and a WNDCLASSA at 0xE0,
+    // its procedure put in by the code.
+    let mut data = child_data(&[(0x10, "Frame"), (0x20, "Static")]);
+    data.resize(0x110, 0);
+    data[0xF0..0xF4].copy_from_slice(&BASE.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_LBUTTONDOWN)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0xA0)))?;
+        a.set_label(&mut other)?;
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_ACTIVATE)?;
+        a.jne(other)?;
+        a.cmp(word_ptr(esp + 12), 0)?;
+        a.je(other)?;
+        a.inc(dword_ptr(l.at(0xA4)))?;
+        a.set_label(&mut other)?;
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_MOUSEACTIVATE)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0xA8)))?;
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0xE4)), eax)?;
+        a.mov(dword_ptr(l.at(0xE0 + 36)), l.at(0x10) as i32)?;
+        a.push(l.at(0xE0) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        let (class, stat) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        let style = WS_POPUP | WS_VISIBLE;
+        let instance = BASE as i32;
+        push_args(
+            a,
+            &[0, class, class, style, 0, 0, 200, 100, 0, 0, instance, 0],
+        )?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        push_args(a, &[0, 0, instance, 0])?;
+        push_args(a, &[0, stat, stat, style, 0, 150, 100, 50])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(edi, eax)?;
+        a.xor(ebx, ebx)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 0)?;
+        // A click at (x, y), then the messages until a timer's.
+        let click = |a: &mut CodeAssembler, x: i32, y: i32| -> Result<(), IcedError> {
+            push_args(a, &[x, y])?;
+            a.call(f("SetCursorPos"))?;
+            for flags in [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP] {
+                push_args(a, &[flags, 0, 0, 0, 0])?;
+                a.call(f("mouse_event"))?;
+            }
+            push_args(a, &[0, 0, 500, 0])?;
+            a.call(f("SetTimer"))?;
+            a.mov(dword_ptr(l.at(0xB4)), eax)?;
+            let mut next = a.create_label();
+            let mut done = a.create_label();
+            a.set_label(&mut next)?;
+            push_args(a, &[l.at(0xC0) as i32, 0, 0, 0])?;
+            a.call(f("GetMessageA"))?;
+            a.cmp(dword_ptr(l.at(0xC4)), WM_TIMER)?;
+            a.je(done)?;
+            a.push(l.at(0xC0) as i32)?;
+            a.call(f("DispatchMessageA"))?;
+            a.jmp(next)?;
+            a.set_label(&mut done)?;
+            a.push(dword_ptr(l.at(0xB4)))?;
+            a.push(0)?;
+            a.call(f("KillTimer"))
+        };
+        a.mov(dword_ptr(l.at(0xA4)), 0)?;
+        a.mov(dword_ptr(l.at(0xA8)), 0)?;
+        a.push(esi)?;
+        a.call(f("SetCapture"))?;
+        // A click on B: A gets it, B stays active.
+        click(a, 50, 175)?;
+        a.cmp(dword_ptr(l.at(0xA0)), 1)?;
+        bit_if(a, eq, 1)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 2)?;
+        // A click on A itself: the same.
+        click(a, 150, 50)?;
+        a.cmp(dword_ptr(l.at(0xA0)), 2)?;
+        bit_if(a, eq, 3)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 4)?;
+        a.mov(eax, dword_ptr(l.at(0xA4)))?;
+        a.or(eax, dword_ptr(l.at(0xA8)))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 5)?;
+        // Without the capture, a click on A activates it.
+        a.call(f("ReleaseCapture"))?;
+        click(a, 150, 50)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 6)?;
+        // One WM_MOUSEACTIVATE and one WM_ACTIVATE.
+        a.mov(eax, dword_ptr(l.at(0xA8)))?;
+        a.shl(eax, 4)?;
+        a.or(eax, dword_ptr(l.at(0xA4)))?;
+        a.cmp(eax, 0x11)?;
+        bit_if(a, eq, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("click_with_capture", &[("T.EXE", program)]);
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
@@ -17814,6 +20630,109 @@ fn icopen_opens_installed_decompressors() {
     assert_eq!(ic_open("icopen_draw", vidc, b"IV50", ICMODE_DRAW), 0xEE);
 }
 
+/// ICGetInfo describes an open codec, as Actua Soccer 2 asks for its
+/// film's Microsoft Video 1 decoder: ICINFO's size back, and the type,
+/// handler, versions, name, description and driver's file in the
+/// ICINFO. A buffer smaller than an ICINFO gets 0, no ICINFO
+/// MMSYSERR_INVALPARAM, and a closed handle ICERR_BADHANDLE. The
+/// driver's own ICM_GETINFO, sent with ICSendMessage, answers the same
+/// but leaves szDriver as it was, and gives ICINFO's size for no ICINFO.
+/// The program ends with 0, or the number of the first check that
+/// failed.
+#[test]
+fn icgetinfo_describes_an_open_codec() {
+    const ICINFO: i32 = 568;
+    let imports: &[(&str, &[&str])] = &[(
+        "MSVFW32.DLL",
+        &["ICOpen", "ICGetInfo", "ICClose", "ICSendMessage"],
+    )];
+    let exe = program(BASE, false, imports, &[0xCC; 0x300], |a, l| {
+        let mut fail = a.create_label();
+        let get_info = |a: &mut CodeAssembler, size: i32| {
+            a.push(size)?;
+            a.push(l.at(0) as i32)?;
+            a.push(ebx)?;
+            a.call(l.import(1))
+        };
+        a.push(2)?; // ICMODE_DECOMPRESS
+        a.push(i32::from_le_bytes(*b"MSVC"))?;
+        a.push(i32::from_le_bytes(*b"vidc"))?;
+        a.call(l.import(0))?;
+        a.mov(ebx, eax)?;
+        get_info(a, ICINFO)?;
+        // The result, dwSize, fccType, fccHandler, dwVersion,
+        // dwVersionICM, and the first characters of szName ("MS-CRAM"),
+        // szDescription ("Microsoft Video 1") and szDriver
+        // ("msvidc32.dll").
+        let checks: [(Option<u32>, u32); 9] = [
+            (None, ICINFO as u32),
+            (Some(0), ICINFO as u32),
+            (Some(4), u32::from_le_bytes(*b"vidc")),
+            (Some(8), u32::from_le_bytes(*b"msvc")),
+            (Some(16), 0x0104),
+            (Some(20), 0x0104),
+            (Some(24), u32::from(b'M') | u32::from(b'S') << 16),
+            (Some(24 + 32), u32::from(b'M') | u32::from(b'i') << 16),
+            (Some(24 + 288), u32::from(b'm') | u32::from(b's') << 16),
+        ];
+        for (n, (at, value)) in checks.into_iter().enumerate() {
+            a.mov(esi, n as u32 + 1)?;
+            match at {
+                None => a.cmp(eax, value as i32)?,
+                Some(at) => a.cmp(dword_ptr(l.at(at)), value as i32)?,
+            }
+            a.jne(fail)?;
+        }
+        get_info(a, ICINFO - 1)?;
+        a.mov(esi, 10)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        // ICM_GETINFO: the ICINFO filled but for szDriver.
+        let send_get_info = |a: &mut CodeAssembler, info: i32| {
+            a.push(ICINFO)?;
+            a.push(info)?;
+            a.push(0x5002)?; // ICM_GETINFO
+            a.push(ebx)?;
+            a.call(l.import(3))
+        };
+        a.mov(dword_ptr(l.at(8)), 0)?;
+        a.mov(dword_ptr(l.at(24 + 288)), 0)?;
+        send_get_info(a, l.at(0) as i32)?;
+        a.mov(esi, 11)?;
+        a.cmp(eax, ICINFO)?;
+        a.jne(fail)?;
+        a.mov(esi, 12)?;
+        a.cmp(dword_ptr(l.at(8)), u32::from_le_bytes(*b"msvc") as i32)?;
+        a.jne(fail)?;
+        a.mov(esi, 13)?;
+        a.cmp(dword_ptr(l.at(24 + 288)), 0)?;
+        a.jne(fail)?;
+        send_get_info(a, 0)?;
+        a.mov(esi, 14)?;
+        a.cmp(eax, ICINFO)?;
+        a.jne(fail)?;
+        // ICGetInfo with no ICINFO.
+        a.push(ICINFO)?;
+        a.push(0)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.mov(esi, 15)?;
+        a.cmp(eax, 11)?; // MMSYSERR_INVALPARAM
+        a.jne(fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        get_info(a, ICINFO)?;
+        a.mov(esi, 16)?;
+        a.cmp(eax, -8)?; // ICERR_BADHANDLE
+        a.jne(fail)?;
+        a.xor(esi, esi)?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, esi)?;
+        a.ret()
+    });
+    assert_eq!(run("icgetinfo", exe).0, 0);
+}
+
 /// A BITMAPINFOHEADER of a Microsoft Video 1 stream of 8 by 4 pixels and
 /// `bits` bits, with an 8-bit one's two colours: blue and red.
 fn cram_info(bits: u16) -> Vec<u8> {
@@ -17979,6 +20898,128 @@ fn icdecompress_draws_microsoft_video_1_frames_in_place() {
         a.int3()
     });
     let code = run_family("icdecompress_cram", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+/// A Cinepak chunk, strip or frame: `id`, its size in 24 bits with the
+/// 4 bytes of `id` and size, then `header` and `body`.
+fn cinepak_part(id: u8, header: &[u8], body: &[u8]) -> Vec<u8> {
+    let size = (4 + header.len() + body.len()) as u32;
+    let mut out = vec![id];
+    out.extend_from_slice(&size.to_be_bytes()[1..]);
+    out.extend_from_slice(header);
+    out.extend_from_slice(body);
+    out
+}
+
+/// A Cinepak frame of 8 by 4 pixels, of one strip of `chunks`, with the
+/// frame's flags `flags`.
+fn cinepak_frame(flags: u8, chunks: &[Vec<u8>]) -> Vec<u8> {
+    let strip_header: Vec<u8> = [0u16, 0, 4, 8].iter().flat_map(|v| v.to_be_bytes()).collect();
+    let strip = cinepak_part(0x11, &strip_header, &chunks.concat());
+    let header: Vec<u8> = [8u16, 4, 1].iter().flat_map(|v| v.to_be_bytes()).collect();
+    cinepak_part(flags, &header, &strip)
+}
+
+/// ICDecompress decodes Cinepak frames to the program's 16-bit buffer,
+/// as Outlaw Racers plays its films: ICLocate finds iccvid.dll for a
+/// `cvid` stream and an RGB555 output, and the decoder keeps its picture
+/// and codebooks from frame to frame, so a frame that skips a block
+/// gives the block it had. A null frame (ICDECOMPRESS_NULLFRAME) keeps
+/// the picture whatever its lpInput holds: here the key frame, which
+/// would undo the second. ICM_DECOMPRESS_GET_FORMAT gives 24 bits. For
+/// an 8-bit output ICLocate finds none, though on Windows iccvid.dll
+/// decodes to a palette of its own (#2202). The program ends with a bit
+/// set for each check that held.
+#[test]
+fn icdecompress_decodes_cinepak_frames_to_16_bits() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let msvfw32: &[&str] = &["ICLocate", "ICDecompress", "ICSendMessage", "ICClose"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
+    const OUT: usize = 0x100;
+    const OUT8: usize = 0x180;
+    const FRAMES: usize = 0x200;
+    const BITS: usize = 0x300;
+    const FORMAT: usize = 0x400;
+    let mut data = bitmap_info(8, 4, 24, b"cvid");
+    data.resize(OUT, 0);
+    data.extend(bitmap_info(8, 4, 16, &[0; 4]));
+    data.resize(OUT8, 0);
+    data.extend(bitmap_info(8, 4, 8, &[0; 4]));
+    data.resize(FRAMES, 0);
+    // A key frame: a grey V1 codebook of one entry, level 200, and both
+    // blocks V1 of it.
+    let books = cinepak_part(0x26, &[], &[200; 4]);
+    data.extend(cinepak_frame(0, &[books, cinepak_part(0x32, &[], &[0, 0])]));
+    data.resize(FRAMES + 0x40, 0);
+    // The next keeps the codebook but for entry 0, now level 90, skips
+    // the left block and gives the right one entry 0: flags 0, 1 0.
+    let update = cinepak_part(0x27, &[], &[0x80, 0, 0, 0, 90, 90, 90, 90]);
+    let blocks = cinepak_part(0x31, &[], &[0x40, 0, 0, 0, 0]);
+    data.extend(cinepak_frame(1, &[update, blocks]));
+    data.resize(BITS, 0);
+    data.extend_from_slice(&[0xCC; 64]);
+    data.resize(FORMAT + 0x100, 0);
+    const ICM_DECOMPRESS_GET_FORMAT: i32 = 0x400A;
+    const ICDECOMPRESS_NULLFRAME: i32 = 0x1000_0000;
+    // RGB555 of grey 200 and of grey 90.
+    const GREY_200: u32 = 0x6739_6739;
+    const GREY_90: u32 = 0x2D6B_2D6B;
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = msvfw32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let at = |offset: usize| l.at(offset as u32) as i32;
+        let vidc = i32::from_le_bytes(*b"vidc");
+        a.xor(ebx, ebx)?;
+        push_args(a, &[vidc, 0, at(0), at(OUT8), 2])?;
+        a.call(f("ICLocate"))?;
+        a.test(eax, eax)?;
+        bit_if_equal(a, 0)?;
+        push_args(a, &[vidc, 0, at(0), at(OUT), 2])?;
+        a.call(f("ICLocate"))?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.setnz(al)?;
+        a.shl(al, 1)?;
+        a.or(bl, al)?;
+        let decompress = |a: &mut CodeAssembler, flags: i32, frame: usize| {
+            push_args(a, &[0, flags, at(0), at(frame), at(OUT), at(BITS)])?;
+            a.mov(dword_ptr(esp), esi)?;
+            a.call(f("ICDecompress"))?;
+            a.add(esp, 24)?;
+            a.cmp(eax, 0)
+        };
+        // Rows of 8 pixels of 2 bytes; the left block's first two
+        // pixels, then the right block's.
+        let pixels = |y: u32, x: u32| dword_ptr(l.at(BITS as u32 + 16 * y + 2 * x));
+        decompress(a, 0, FRAMES)?;
+        bit_if_equal(a, 2)?;
+        a.cmp(pixels(0, 0), GREY_200 as i32)?;
+        bit_if_equal(a, 3)?;
+        a.cmp(pixels(3, 4), GREY_200 as i32)?;
+        bit_if_equal(a, 4)?;
+        decompress(a, 0, FRAMES + 0x40)?;
+        a.cmp(pixels(3, 0), GREY_200 as i32)?;
+        bit_if_equal(a, 5)?;
+        // The right block is grey 90 after the second frame, and stays
+        // so through a null frame that points at the key frame.
+        decompress(a, ICDECOMPRESS_NULLFRAME, FRAMES)?;
+        a.cmp(pixels(0, 4), GREY_90 as i32)?;
+        bit_if_equal(a, 6)?;
+        push_args(a, &[0, ICM_DECOMPRESS_GET_FORMAT, at(0), at(FORMAT)])?;
+        a.mov(dword_ptr(esp), esi)?;
+        a.call(f("ICSendMessage"))?;
+        a.cmp(word_ptr(l.at(FORMAT as u32 + 14)), 24)?;
+        bit_if_equal(a, 7)?;
+        a.push(esi)?;
+        a.call(f("ICClose"))?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family("icdecompress_cvid", &[("T.EXE", program)]);
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
@@ -18178,6 +21219,81 @@ fn fon(fonts: &[Vec<u8>]) -> Vec<u8> {
     d
 }
 
+/// DeleteObject of a memory DC deletes it as DeleteDC does, and the
+/// bitmap selected into it can go into another DC; DeleteObject of
+/// GetDC's DC returns TRUE and leaves it until ReleaseDC. A probe on
+/// Windows 98 SE gives the same (#2161), and Beetle Crazy Cup's CD
+/// launcher frees the memory DC of every paint so. Its exit code: one
+/// bit each for DeleteObject's TRUE on the memory DC, the bitmap's
+/// SelectObject into a second DC, the first DC gone (GetObjectType 0),
+/// DeleteObject's TRUE on the screen DC, and that DC still a DC
+/// (GetObjectType OBJ_DC).
+#[test]
+fn deleteobject_deletes_a_memory_dc_and_keeps_a_window_dc() {
+    let names: &[&str] = &[
+        "CreateCompatibleDC",
+        "CreateCompatibleBitmap",
+        "SelectObject",
+        "DeleteObject",
+        "GetObjectType",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names), ("USER32.DLL", &["GetDC"])];
+    let exe = program(BASE, false, imports, &[0; 4], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let (object_type, get_dc) = (f("GetObjectType"), l.import(names.len()));
+        let bit = |a: &mut CodeAssembler, n: u32| -> Result<(), IcedError> {
+            a.neg(eax)?;
+            a.sbb(eax, eax)?;
+            a.and(eax, 1 << n)?;
+            a.or(ebx, eax)
+        };
+        a.xor(ebx, ebx)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(esi, eax)?;
+        a.push(8)?;
+        a.push(8)?;
+        a.push(esi)?;
+        a.call(f("CreateCompatibleBitmap"))?;
+        a.mov(edi, eax)?;
+        a.push(edi)?;
+        a.push(esi)?;
+        a.call(f("SelectObject"))?;
+        a.push(esi)?;
+        a.call(f("DeleteObject"))?;
+        bit(a, 0)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.push(edi)?;
+        a.push(eax)?;
+        a.call(f("SelectObject"))?;
+        bit(a, 1)?;
+        a.push(esi)?;
+        a.call(object_type)?;
+        a.cmp(eax, 0)?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        bit(a, 2)?;
+        a.push(0)?;
+        a.call(get_dc)?;
+        a.mov(esi, eax)?;
+        a.push(esi)?;
+        a.call(f("DeleteObject"))?;
+        bit(a, 3)?;
+        a.push(esi)?;
+        a.call(object_type)?;
+        a.cmp(eax, 3)?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        bit(a, 4)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let mut cpu = machine_with("deleteobject_dc", &[("T.EXE", exe)]);
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x1F);
+}
+
 /// A program adds F.FON, a file of two sizes of the face "Test Face",
 /// with AddFontResourceA, measures two characters in a font of the face
 /// 12 pixels high and counts the sizes EnumFontsA lists of the face. Its
@@ -18247,6 +21363,192 @@ fn a_font_file_a_program_adds_is_listed_and_drawn() {
     assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
     // Two fonts added, both sizes listed, and "!\"" 2 + 9 pixels wide.
     assert_eq!(cpu.errorlevel, 2 << 6 | 2 << 4 | 11);
+}
+
+/// Windows 95 and 98 load the installed fonts as they start: the files
+/// the registry's `CurrentVersion\Fonts` key lists and those of WIN.INI's
+/// `[Fonts]`. A setup that installed one added it with AddFontResourceA,
+/// which lasts until Windows ends, so a later start finds the font only
+/// this way (Encarta 97's "MS Reference 1", issue #1989). The registry
+/// names a TrueType file in the system folder by its full path, as
+/// Encarta's setup does, and WIN.INI a raster font by a bare name, which
+/// is looked for in the fonts, Windows and system folders, and the
+/// TrueType file again by a bare name. A file that isn't there is left
+/// out. A program that never added a font then gets the faces it asks
+/// for. It then adds the TrueType file itself by a name relative to its
+/// folder, which is the same file, and EnumFontFamiliesA lists the
+/// TrueType face once. Its exit code: the TrueType face matched in bit
+/// 0, the raster face in bit 1, AddFontResourceA's success in bit 2, and
+/// the count of fonts listed of the TrueType face above them.
+#[test]
+fn installed_fonts_are_loaded_as_windows_starts() {
+    let names: &[&str] = &[
+        "AddFontResourceA",
+        "CreateCompatibleDC",
+        "CreateFontIndirectA",
+        "SelectObject",
+        "GetTextFaceA",
+        "EnumFontFamiliesA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names), ("KERNEL32.DLL", &["lstrcmpA"])];
+    // LOGFONTAs at 0 and 0x40, GetTextFaceA's buffer at 0x80, the faces
+    // asked for at 0xA0 and 0xB0, the count of fonts listed at 0xC0 and
+    // the TrueType file's name relative to the program's folder at 0xD0.
+    let mut data = vec![0u8; 0xF0];
+    data[0..4].copy_from_slice(&(-16i32).to_le_bytes());
+    data[28..36].copy_from_slice(b"Reg Face");
+    data[0x40..0x44].copy_from_slice(&12i32.to_le_bytes());
+    data[0x40 + 28..0x40 + 36].copy_from_slice(b"Ini Face");
+    data[0xA0..0xA8].copy_from_slice(b"Reg Face");
+    data[0xB0..0xB8].copy_from_slice(b"Ini Face");
+    data[0xD0..0xEA].copy_from_slice(b"WINDOWS\\SYSTEM\\REGFACE.TTF");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut proc = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(esi, eax)?;
+        for (bit, log, face) in [(0, 0, 0xA0), (1, 0x40, 0xB0)] {
+            a.push(l.at(log) as i32)?;
+            a.call(f("CreateFontIndirectA"))?;
+            a.push(eax)?;
+            a.push(esi)?;
+            a.call(f("SelectObject"))?;
+            a.push(l.at(0x80) as i32)?;
+            a.push(32)?;
+            a.push(esi)?;
+            a.call(f("GetTextFaceA"))?;
+            a.push(l.at(face) as i32)?;
+            a.push(l.at(0x80) as i32)?;
+            a.call(l.import(names.len()))?;
+            a.test(eax, eax)?;
+            check(a, false, bit)?;
+        }
+        a.push(l.at(0xD0) as i32)?;
+        a.call(f("AddFontResourceA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
+        a.push(0)?;
+        push_label(a, proc)?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(esi)?;
+        a.call(f("EnumFontFamiliesA"))?;
+        a.mov(eax, dword_ptr(l.at(0xC0)))?;
+        a.shl(eax, 3)?;
+        a.or(eax, ebx)?;
+        a.ret()?;
+        // The callback: count the font, go on.
+        a.set_label(&mut proc)?;
+        a.inc(dword_ptr(l.at(0xC0)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)
+    });
+    let test = "installed_fonts";
+    let mut cpu = machine_with(test, &[("T.EXE", exe)]);
+    let base = PathBuf::from("target/test_win32").join(test);
+    let system = base.join("WINDOWS").join("SYSTEM");
+    fs::create_dir_all(&system).unwrap();
+    let ttf = rust_dos::win32::gdi32::sample_truetype("Reg Face");
+    fs::write(system.join("REGFACE.TTF"), ttf).unwrap();
+    fs::write(system.join("INIFACE.FON"), fon(&[fnt("Ini Face", 12)])).unwrap();
+    let registry = "REGEDIT4\r\n\r\n\
+        [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Fonts]\r\n\
+        \"Reg Face (TrueType)\"=\"C:\\\\WINDOWS\\\\SYSTEM\\\\REGFACE.TTF\"\r\n\
+        \"Gone (TrueType)\"=\"GONE.TTF\"\r\n";
+    fs::write(base.join("REGISTRY.REG"), registry).unwrap();
+    let win_ini = "[Fonts]\r\nIni Face 12=INIFACE.FON\r\n\
+                   Reg Face (TrueType)=REGFACE.TTF\r\nGone=GONE.FON\r\n";
+    fs::write(base.join("WINDOWS").join("WIN.INI"), win_ini).unwrap();
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 1 << 3 | 0b111);
+}
+
+/// A Windows 3.1 WIN.INI lists in `[Fonts]` files of faces GDI has
+/// built in: `SSERIFE.FON` for MS Sans Serif, and Arial's TrueType file
+/// through its `ARIAL.FOT`, which the registry lists again as
+/// `ARIAL.TTF`, as a setup such as Encarta 97's writes it. Windows has
+/// each face once, from the file, so EnumFontFamiliesA lists MS Sans
+/// Serif's one size once and Arial once: the built-in face is left out
+/// where a file has it, and the .FOT and the TrueType file it names are
+/// one font. A line that starts with ';' is a comment, whose file isn't
+/// loaded. EnumFontFamiliesExA lists Arial in the one character set the
+/// file has, Latin 1, and not the built-in face in the others, as a font
+/// asking for Arial in any of them is realized from the file. The exit
+/// code is the count of fonts listed for each face, two bits each: MS
+/// Sans Serif's, Arial's above, the comment's face's above, and
+/// EnumFontFamiliesExA's of Arial at the top.
+#[test]
+fn installed_fonts_list_each_face_once() {
+    let names: &[&str] = &[
+        "CreateCompatibleDC",
+        "EnumFontFamiliesA",
+        "EnumFontFamiliesExA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names)];
+    // The faces at 0, 0x20 and 0x40, their counts at 0x60, 0x64, 0x68,
+    // EnumFontFamiliesExA's LOGFONTA (Arial, DEFAULT_CHARSET) at 0x70
+    // and its count at 0xAC.
+    let mut data = vec![0u8; 0xB0];
+    data[0..13].copy_from_slice(b"MS Sans Serif");
+    data[0x20..0x25].copy_from_slice(b"Arial");
+    data[0x40..0x4C].copy_from_slice(b"Comment Face");
+    data[0x70 + 23] = 1;
+    data[0x70 + 28..0x70 + 33].copy_from_slice(b"Arial");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut proc = a.create_label();
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.mov(esi, eax)?;
+        for (face, count) in [(0, 0x60), (0x20, 0x64), (0x40, 0x68)] {
+            a.push(l.at(count) as i32)?;
+            push_label(a, proc)?;
+            a.push(l.at(face) as i32)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+        }
+        a.push(0)?;
+        a.push(l.at(0xAC) as i32)?;
+        push_label(a, proc)?;
+        a.push(l.at(0x70) as i32)?;
+        a.push(esi)?;
+        a.call(l.import(2))?;
+        a.mov(eax, dword_ptr(l.at(0xAC)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x68)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x64)))?;
+        a.shl(eax, 2)?;
+        a.or(eax, dword_ptr(l.at(0x60)))?;
+        a.ret()?;
+        // The callback: count the font in the dword its lParam points
+        // at, go on.
+        a.set_label(&mut proc)?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        a.inc(dword_ptr(eax))?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)
+    });
+    let test = "installed_fonts_once";
+    let mut cpu = machine_with(test, &[("T.EXE", exe)]);
+    let base = PathBuf::from("target/test_win32").join(test);
+    let system = base.join("WINDOWS").join("SYSTEM");
+    fs::create_dir_all(&system).unwrap();
+    let ttf = rust_dos::win32::gdi32::sample_truetype("Arial");
+    let fot = rust_dos::win32::gdi32::sample_fot("ARIAL.TTF", &ttf);
+    fs::write(system.join("ARIAL.TTF"), ttf).unwrap();
+    fs::write(system.join("ARIAL.FOT"), fot).unwrap();
+    fs::write(system.join("SSERIFE.FON"), fon(&[fnt("MS Sans Serif", 13)])).unwrap();
+    fs::write(system.join("COMMENT.FON"), fon(&[fnt("Comment Face", 12)])).unwrap();
+    let registry = "REGEDIT4\r\n\r\n\
+        [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Fonts]\r\n\
+        \"Arial (TrueType)\"=\"ARIAL.TTF\"\r\n";
+    fs::write(base.join("REGISTRY.REG"), registry).unwrap();
+    let win_ini = "[Fonts]\r\nMS Sans Serif 8,10,12,14,18,24 (VGA res)=SSERIFE.FON\r\n\
+                   Arial (TrueType)=ARIAL.FOT\r\n;Comment Face=COMMENT.FON\r\n";
+    fs::write(base.join("WINDOWS").join("WIN.INI"), win_ini).unwrap();
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 1 << 6 | 1 << 2 | 1);
 }
 
 /// A program asks CreateScalableFontResourceA for a .FOT of `ttf`, with
@@ -19485,8 +22787,10 @@ fn a_win16_state_from_before_a_kernel_append_has_no_address_for_it() {
     code.push_far(0); // "KERNEL"
     code.call("KERNEL", 47); // GetModuleHandle
     code.emit(&[0x50]); // push ax
-    code.push(0);
-    code.push(110); // PatchCodeHandle, KERNEL's last function
+    // KERNEL's last function, by its name, which stays right when
+    // another function is appended to the table.
+    let last = code.here() + 1;
+    code.push_far(0);
     code.call("KERNEL", 50); // GetProcAddress
     code.emit(&[0x09, 0xD0]); // or ax, dx
     code.emit(&[0x74, 0x02]); // jz +2
@@ -19495,6 +22799,11 @@ fn a_win16_state_from_before_a_kernel_append_has_no_address_for_it() {
     let text = code.here();
     code.emit(b"KERNEL\0");
     code.patch(name + 1, text);
+    let function = rust_dos::win16::function_name(kernel16_functions() as u16 - 1).unwrap();
+    let function = function.strip_prefix("KERNEL.").unwrap();
+    let text = code.here();
+    code.emit(function.as_bytes()).emit(&[0]);
+    code.patch(last + 1, text);
     let mut cpu = machine("missing16_address", win16::program(&code, win16::CODE));
     run_into_the_wait(&mut cpu);
     kernel16_from_before_1599(&mut cpu, kernel16_functions() - 1);
@@ -19529,4 +22838,704 @@ fn a_win16_state_of_now_calls_its_missing_import() {
     assert_eq!(mended, stub);
     assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
     assert!(printed(&cpu).contains(MISSING_CALL16), "{}", printed(&cpu));
+}
+
+/// VWIN32's services that need no real mode, called with VxDCall0 as
+/// Win32 programs call them: its version (GetVersion's, major in the
+/// high byte), VMCPD's version for one argument (4.05), and the debugger
+/// dispatch, which gives back the whole dword it is passed. The services
+/// pop their arguments and no more, so the stack is as it was before
+/// they were pushed, also when the program calls VxDCall2, which on
+/// Windows 98 is the same function as VxDCall0. The exit code is the
+/// step that failed.
+#[test]
+fn vwin32_gives_its_version_and_pops_its_arguments() {
+    let imports: &[(&str, &[&str])] =
+        &[("KERNEL32.DLL", &["#1", "GetVersion", "ExitProcess", "#3"])];
+    let exe = program(BASE, false, imports, &[0; 0x10], |a, l| {
+        let mut fail = a.create_label();
+        a.call(l.import(1))?;
+        a.mov(ecx, eax)?;
+        a.xchg(cl, ch)?;
+        a.movzx(ecx, cx)?;
+        // Room above the stack pointer: VxDCall2's stub reads its two
+        // dwords whether the program pushed them or not.
+        a.sub(esp, 0x20)?;
+        a.mov(esi, esp)?;
+        a.push(0x002A_0000)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 1)?;
+        a.cmp(eax, ecx)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.push(0)?;
+        a.push(0x002A_0020)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 2)?;
+        a.cmp(eax, 0x0405)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.push(0x0001_004F)?;
+        a.push(0x002A_002A)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 3)?;
+        a.cmp(eax, 0x0001_004F)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        // The same services through VxDCall2, whose stub pops two dwords
+        // after the service: one more than VMCPD's version takes and two
+        // more than VWIN32's, which stay the program's.
+        a.push(0)?;
+        a.push(0x002A_0020)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 4)?;
+        a.cmp(eax, 0x0405)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.push(0x002A_0000)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 5)?;
+        a.cmp(eax, ecx)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let (code, text) = run("vwin32_version", exe);
+    assert_eq!(code, 0, "{}", text);
+}
+
+/// A real mode call structure for INT 2Fh's MSCDEX function `function`
+/// on drive D:, with SI:DI `sector` and DX `count` (an absolute read's)
+/// and its buffer at 9000:0000.
+fn mscdex_structure(function: u16, sector: u32, count: u16) -> [u8; 0x32] {
+    let mut s = [0u8; 0x32];
+    s[0x00..0x02].copy_from_slice(&(sector as u16).to_le_bytes());
+    s[0x04..0x06].copy_from_slice(&((sector >> 16) as u16).to_le_bytes());
+    s[0x14..0x16].copy_from_slice(&count.to_le_bytes());
+    s[0x18] = 3;
+    s[0x1C..0x1E].copy_from_slice(&function.to_le_bytes());
+    s[0x20] = 0x02;
+    s[0x22..0x24].copy_from_slice(&0x9000u16.to_le_bytes());
+    s
+}
+
+/// VWIN32's Int31Dispatch (VxDCall0 of 002A0029h with the DPMI function
+/// and ECX pushed), as CopyLok calls it: DPMI 0300h runs INT 2Fh in real
+/// mode, MSCDEX answers, and the call structure at EDI gets the
+/// registers and flags it left. The program goes on with AX the
+/// function, CF clear, its other registers as they were and the two
+/// arguments popped. On a disc with a band of sectors the drive can't
+/// read, MSCDEX's absolute read of one fails with a data error (CF and
+/// AX=17h in the structure), and the sector after the band reads. A
+/// function VWIN32 doesn't give fails with CF and 8001h; 0400h gives the
+/// DPMI version, 0.90. The exit code is the step that failed.
+#[test]
+fn vwin32_int31_dispatch_calls_mscdex_in_real_mode() {
+    let dir = cdimage::scratch("vwin32_mscdex");
+    let mut image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    let band = (image.len() / 2048) as u32;
+    image.extend(vec![0x77; 4 * 2048]);
+    let mut raw = cdimage::mode1_2352(&image);
+    for lba in band..band + 2 {
+        let at = lba as usize * 2352;
+        raw[at + 16..at + 2352].fill(0x55);
+    }
+    fs::write(dir.join("GAME.BIN"), raw).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    const CHECK: u32 = 0x00;
+    const READ: u32 = 0x40;
+    let mut data = vec![0u8; 0x80];
+    let check = mscdex_structure(0x150B, 0, 0);
+    data[CHECK as usize..CHECK as usize + 0x32].copy_from_slice(&check);
+    let read = mscdex_structure(0x1508, band, 1);
+    data[READ as usize..READ as usize + 0x32].copy_from_slice(&read);
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["#1", "ExitProcess"])];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        // Int31Dispatch(function, ECX) with BL the interrupt and EDI the
+        // structure. EBP keeps the step, ESI the stack.
+        let dispatch = |a: &mut CodeAssembler, function: i32, structure: u32| {
+            a.mov(esi, esp)?;
+            a.mov(ebx, 0x2F)?;
+            a.mov(edi, l.at(structure) as i32)?;
+            a.push(0)?;
+            a.push(function)?;
+            a.push(0x002A_0029)?;
+            a.call(l.import(0))
+        };
+        // The drive check, 150Bh: D: is a CD-ROM drive, and BX=ADADh.
+        dispatch(a, 0x0300, CHECK)?;
+        a.mov(ebp, 1)?;
+        a.jc(fail)?;
+        a.cmp(eax, 0x0300)?;
+        a.jne(fail)?;
+        a.mov(ebp, 2)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.cmp(ebx, 0x2F)?;
+        a.jne(fail)?;
+        a.cmp(edi, l.at(CHECK) as i32)?;
+        a.jne(fail)?;
+        a.mov(ebp, 3)?;
+        a.cmp(word_ptr(l.at(CHECK + 0x1C)), 0x5AD8)?;
+        a.jne(fail)?;
+        a.cmp(word_ptr(l.at(CHECK + 0x10)), 0xADAD)?;
+        a.jne(fail)?;
+        // An absolute read (1508h) of the band's first sector: a data
+        // error.
+        dispatch(a, 0x0300, READ)?;
+        a.mov(ebp, 4)?;
+        a.jc(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        a.test(byte_ptr(l.at(READ + 0x20)), 1)?;
+        a.je(fail)?;
+        a.cmp(word_ptr(l.at(READ + 0x1C)), 0x17)?;
+        a.jne(fail)?;
+        // Then of the sector after the band: read.
+        a.mov(word_ptr(l.at(READ)), (band + 2) as i32)?;
+        a.mov(word_ptr(l.at(READ + 0x1C)), 0x1508)?;
+        dispatch(a, 0x0300, READ)?;
+        a.mov(ebp, 5)?;
+        a.jc(fail)?;
+        a.test(byte_ptr(l.at(READ + 0x20)), 1)?;
+        a.jne(fail)?;
+        // A function VWIN32 doesn't give.
+        dispatch(a, 0x0500, CHECK)?;
+        a.mov(ebp, 6)?;
+        a.jnc(fail)?;
+        a.cmp(eax, 0x8001)?;
+        a.jne(fail)?;
+        a.cmp(esp, esi)?;
+        a.jne(fail)?;
+        // The DPMI version.
+        dispatch(a, 0x0400, CHECK)?;
+        a.mov(ebp, 7)?;
+        a.jc(fail)?;
+        a.cmp(eax, 0x005A)?;
+        a.jne(fail)?;
+        a.xor(ebp, ebp)?;
+        a.set_label(&mut fail)?;
+        a.push(ebp)?;
+        a.call(l.import(1))?;
+        a.int3()
+    });
+    let mut cpu = machine("vwin32_mscdex", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+    // The sector after the band went to 9000:0000.
+    assert_eq!(cpu.bus.read_8(0x9_0000), 0x77);
+}
+
+/// KERNEL32 exports DebugBreak, as Windows 98's does: games import it,
+/// and CopyLok's loader refuses to start a game with an import it can't
+/// find.
+#[test]
+fn kernel32_exports_debug_break() {
+    let mut data = vec![0u8; 0x40];
+    data[..9].copy_from_slice(b"KERNEL32\0");
+    data[0x10..0x1B].copy_from_slice(b"DebugBreak\0");
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["GetModuleHandleA", "GetProcAddress", "ExitProcess"],
+    )];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.test(eax, eax)?;
+        a.setne(al)?;
+        a.movzx(eax, al)?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let (code, text) = run("debug_break_export", exe);
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// DebugBreak raises a breakpoint, as the INT 3 of Windows 98's does: the
+/// program's handler gets the exception with the one parameter the
+/// processor's breakpoint gives, and when it goes on the call returns,
+/// here with the EAX it put in the context. The exit code is 7 when the
+/// record was right, 1 when it wasn't.
+#[test]
+fn debug_break_raises_a_breakpoint_the_handler_goes_on_from() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["DebugBreak", "ExitProcess"])];
+    let exe = program(BASE, false, imports, &[0; 4], |a, l| {
+        let mut over = a.create_label();
+        let mut bad = a.create_label();
+        a.call(over)?;
+        // The handler: EDX 7 if the record (its first argument) is a
+        // breakpoint with one parameter, else 1, into the context's Eax
+        // (B0h).
+        a.mov(edx, 1)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.cmp(dword_ptr(eax), 0x8000_0003u32 as i32)?;
+        a.jne(bad)?;
+        a.cmp(dword_ptr(eax + 16), 1)?;
+        a.jne(bad)?;
+        a.mov(edx, 7)?;
+        a.set_label(&mut bad)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(eax + 0xB0), edx)?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut over)?;
+        a.push(dword_ptr(0).fs())?;
+        a.mov(dword_ptr(0).fs(), esp)?;
+        a.xor(eax, eax)?;
+        a.call(l.import(0))?;
+        a.pop(dword_ptr(0).fs())?;
+        a.add(esp, 4)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.int3()
+    });
+    let (code, text) = run("debug_break_seh", exe);
+    assert_eq!(code, 7, "{}", text);
+}
+
+/// D3DRM.DLL's math helpers compute what native D3DRM does, on values
+/// whose results are exact in single precision: normalizing (in place,
+/// a zero vector to (1, 0, 0)), the cross and dot products, the modulus,
+/// colors from components (clamped, cut to 255ths) and back, a
+/// quaternion from a rotation (normalizing the axis in place), the
+/// product of quaternions, the matrix of one, a reflection, a rotation,
+/// a slerp between equal quaternions, the sum, the difference, a scaled
+/// vector, and a random vector from the C runtime's series. The program
+/// ends with the number of the first check that went wrong, or 0.
+#[test]
+fn d3drm_math_helpers_compute_as_native_d3drm() {
+    const ONE: u32 = 0x3F80_0000;
+    const TWO: u32 = 0x4000_0000;
+    const HALF: u32 = 0x3F00_0000;
+    const MINUS_ONE: u32 = 0xBF80_0000;
+    let functions = [
+        "D3DRMVectorNormalize",
+        "D3DRMVectorCrossProduct",
+        "D3DRMVectorDotProduct",
+        "D3DRMVectorModulus",
+        "D3DRMCreateColorRGBA",
+        "D3DRMCreateColorRGB",
+        "D3DRMColorGetGreen",
+        "D3DRMColorGetAlpha",
+        "D3DRMQuaternionFromRotation",
+        "D3DRMQuaternionMultiply",
+        "D3DRMMatrixFromQuaternion",
+        "D3DRMVectorReflect",
+        "D3DRMVectorRotate",
+        "D3DRMQuaternionSlerp",
+        "D3DRMVectorAdd",
+        "D3DRMVectorSubtract",
+        "D3DRMVectorScale",
+        "D3DRMColorGetRed",
+        "D3DRMColorGetBlue",
+        "D3DRMVectorRandom",
+    ];
+    let imports: &[(&str, &[&str])] = &[("D3DRM.DLL", &functions)];
+    let index = |name: &str| functions.iter().position(|n| *n == name).unwrap();
+    let float = |v: f32| v.to_bits();
+    // Each operand and result has a block of 16 bytes of the data, by
+    // number. Quaternions have the scalar first.
+    let operands: &[(u32, [f32; 4])] = &[
+        (1, [0.0, 0.0, 2.0, 0.0]),
+        (2, [0.0, 0.0, 0.0, 0.0]),
+        (3, [1.0, 0.0, 0.0, 0.0]),
+        (4, [0.0, 1.0, 0.0, 0.0]),
+        (5, [1.0, 2.0, 3.0, 0.0]),
+        (6, [4.0, 5.0, 6.0, 0.0]),
+        (7, [3.0, 4.0, 0.0, 0.0]),
+        (8, [0.0, 0.0, 2.0, 0.0]),
+        (9, [0.0, 1.0, 0.0, 0.0]),
+        (10, [0.0, 0.0, 1.0, 0.0]),
+        (11, [1.0, 1.0, 0.0, 0.0]),
+        (12, [0.0, 0.0, 1.0, 0.0]),
+        (13, [1.0, 0.0, 0.0, 0.0]),
+    ];
+    let mut data = vec![0u8; 64 * 16];
+    for (n, values) in operands {
+        for (i, v) in values.iter().enumerate() {
+            let at = (*n * 16) as usize + 4 * i;
+            data[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    // What a function returns: in EAX, a D3DVALUE in ST(0), or nothing.
+    enum Ret {
+        Eax(u32),
+        Float,
+        Nothing,
+    }
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut wrong = a.create_label();
+        let p = |n: u32| l.at(n * 16) as u32;
+        let mut step = 0;
+        // Call `name` with `args`; what it returns must be `ret`, then
+        // each (block, word, value) must hold. Block 30 gets a D3DVALUE
+        // the function returns in ST(0).
+        let mut check = |a: &mut CodeAssembler,
+                         name: &str,
+                         args: &[u32],
+                         ret: Ret,
+                         words: &[(u32, u32, u32)]|
+         -> Result<(), IcedError> {
+            step += 1;
+            a.mov(ebx, step)?;
+            for &arg in args.iter().rev() {
+                a.push(arg as i32)?;
+            }
+            a.call(l.import(index(name)))?;
+            match ret {
+                Ret::Eax(ret) => {
+                    a.cmp(eax, ret as i32)?;
+                    a.jne(wrong)?;
+                }
+                Ret::Float => a.fstp(dword_ptr(l.at(30 * 16)))?,
+                Ret::Nothing => {}
+            }
+            for &(block, word, value) in words {
+                a.cmp(dword_ptr(l.at(block * 16 + 4 * word)), value as i32)?;
+                a.jne(wrong)?;
+            }
+            Ok(())
+        };
+        let normalized = [(1, 0, 0), (1, 1, 0), (1, 2, ONE)];
+        check(
+            a,
+            "D3DRMVectorNormalize",
+            &[p(1)],
+            Ret::Eax(p(1)),
+            &normalized,
+        )?;
+        let zero = [(2, 0, ONE), (2, 1, 0), (2, 2, 0)];
+        check(a, "D3DRMVectorNormalize", &[p(2)], Ret::Eax(p(2)), &zero)?;
+        let cross = [(20, 0, 0), (20, 1, 0), (20, 2, ONE)];
+        check(
+            a,
+            "D3DRMVectorCrossProduct",
+            &[p(20), p(3), p(4)],
+            Ret::Eax(p(20)),
+            &cross,
+        )?;
+        let dot = [(30, 0, float(32.0))];
+        check(a, "D3DRMVectorDotProduct", &[p(5), p(6)], Ret::Float, &dot)?;
+        check(
+            a,
+            "D3DRMVectorModulus",
+            &[p(7)],
+            Ret::Float,
+            &[(30, 0, float(5.0))],
+        )?;
+        check(
+            a,
+            "D3DRMColorGetGreen",
+            &[0x0000_FF00],
+            Ret::Float,
+            &[(30, 0, ONE)],
+        )?;
+        check(
+            a,
+            "D3DRMColorGetAlpha",
+            &[0x00FF_FFFF],
+            Ret::Float,
+            &[(30, 0, 0)],
+        )?;
+        let rgba = [ONE, HALF, 0, TWO];
+        check(a, "D3DRMCreateColorRGBA", &rgba, Ret::Eax(0xFFFF_7F00), &[])?;
+        let rgb = [MINUS_ONE, 0, ONE];
+        check(a, "D3DRMCreateColorRGB", &rgb, Ret::Eax(0xFF00_00FF), &[])?;
+        let rotation = [
+            (21, 0, ONE),
+            (21, 1, 0),
+            (21, 2, 0),
+            (21, 3, 0),
+            (8, 2, ONE),
+        ];
+        let args = [p(21), p(8), 0];
+        check(
+            a,
+            "D3DRMQuaternionFromRotation",
+            &args,
+            Ret::Eax(p(21)),
+            &rotation,
+        )?;
+        let product = [(22, 0, 0), (22, 1, 0), (22, 2, 0), (22, 3, ONE)];
+        let args = [p(22), p(9), p(10)];
+        check(
+            a,
+            "D3DRMQuaternionMultiply",
+            &args,
+            Ret::Eax(p(22)),
+            &product,
+        )?;
+        // Half a turn about x: the diagonal 1, -1, -1, 1, the rest 0.
+        let matrix: Vec<(u32, u32, u32)> = (0..16u32)
+            .map(|i| {
+                let value = match i {
+                    0 | 15 => ONE,
+                    5 | 10 => MINUS_ONE,
+                    _ => 0,
+                };
+                (24 + i / 4, i % 4, value)
+            })
+            .collect();
+        check(
+            a,
+            "D3DRMMatrixFromQuaternion",
+            &[p(24), p(9)],
+            Ret::Nothing,
+            &matrix,
+        )?;
+        let reflected = [(28, 0, MINUS_ONE), (28, 1, ONE), (28, 2, 0)];
+        let args = [p(28), p(11), p(4)];
+        check(a, "D3DRMVectorReflect", &args, Ret::Eax(p(28)), &reflected)?;
+        let rotated = [(29, 0, ONE), (29, 1, 0), (29, 2, 0)];
+        let args = [p(29), p(3), p(12), 0];
+        check(a, "D3DRMVectorRotate", &args, Ret::Eax(p(29)), &rotated)?;
+        let slerp = [(31, 0, ONE), (31, 1, 0), (31, 2, 0), (31, 3, 0)];
+        let args = [p(31), p(13), p(13), HALF];
+        check(a, "D3DRMQuaternionSlerp", &args, Ret::Eax(p(31)), &slerp)?;
+        let sum = [
+            (32, 0, float(5.0)),
+            (32, 1, float(7.0)),
+            (32, 2, float(9.0)),
+        ];
+        check(
+            a,
+            "D3DRMVectorAdd",
+            &[p(32), p(5), p(6)],
+            Ret::Eax(p(32)),
+            &sum,
+        )?;
+        let difference = [
+            (33, 0, float(3.0)),
+            (33, 1, float(3.0)),
+            (33, 2, float(3.0)),
+        ];
+        let args = [p(33), p(6), p(5)];
+        check(
+            a,
+            "D3DRMVectorSubtract",
+            &args,
+            Ret::Eax(p(33)),
+            &difference,
+        )?;
+        let scaled = [(34, 0, TWO), (34, 1, float(4.0)), (34, 2, float(6.0))];
+        check(
+            a,
+            "D3DRMVectorScale",
+            &[p(34), p(5), TWO],
+            Ret::Eax(p(34)),
+            &scaled,
+        )?;
+        check(
+            a,
+            "D3DRMColorGetRed",
+            &[0x00FF_0000],
+            Ret::Float,
+            &[(30, 0, ONE)],
+        )?;
+        check(
+            a,
+            "D3DRMColorGetBlue",
+            &[0x00FF_0000],
+            Ret::Float,
+            &[(30, 0, 0)],
+        )?;
+        // The C runtime's first three numbers, its seed 1: 41, 18467 and
+        // 6334, made length 1.
+        let v = [41.0f32, 18467.0, 6334.0];
+        let reciprocal = 1.0 / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        let random: Vec<(u32, u32, u32)> = (0..3u32)
+            .map(|i| (35, i, float(v[i as usize] * reciprocal)))
+            .collect();
+        check(a, "D3DRMVectorRandom", &[p(35)], Ret::Eax(p(35)), &random)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, out) = run("d3drm_math", exe);
+    assert_eq!(code, 0, "check {code} went wrong {out}");
+}
+
+/// A program that imports D3DRM.DLL's Direct3DRMCreate alone, as
+/// Warhammer: Dark Omen's CD release does, starts and gets a Direct3DRM
+/// object: QueryInterface gives the same interface for IUnknown and for
+/// IDirect3DRM and counts a reference, and Release counts them down. The
+/// program ends with the number of the first check that went wrong, or
+/// 0.
+#[test]
+fn direct3drm_create_makes_an_object_that_counts_its_references() {
+    let imports: &[(&str, &[&str])] = &[("D3DRM.DLL", &["Direct3DRMCreate"])];
+    let mut data = vec![0u8; 64];
+    // IID_IUnknown at 16, IID_IDirect3DRM at 32.
+    data[16 + 8] = 0xC0;
+    data[16 + 15] = 0x46;
+    data[32..48].copy_from_slice(&[
+        0x61, 0x93, 0xC4, 0x2B, 0x27, 0x83, 0xCF, 0x11, 0xAC, 0x4A, 0x00, 0x00, 0xC0, 0x38, 0x25,
+        0xA1,
+    ]);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut wrong = a.create_label();
+        a.mov(ebx, 1)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.jne(wrong)?;
+        a.mov(esi, dword_ptr(l.at(0)))?;
+        a.test(esi, esi)?;
+        a.je(wrong)?;
+        // QueryInterface of each IID: S_OK and the same pointer.
+        for (step, iid) in [(2, 16), (3, 32)] {
+            a.mov(ebx, step)?;
+            a.push(l.at(4) as i32)?;
+            a.push(l.at(iid) as i32)?;
+            a.push(esi)?;
+            a.mov(eax, dword_ptr(esi))?;
+            a.call(dword_ptr(eax))?;
+            a.test(eax, eax)?;
+            a.jne(wrong)?;
+            a.cmp(dword_ptr(l.at(4)), esi)?;
+            a.jne(wrong)?;
+        }
+        // Three references, released one by one.
+        for (step, left) in [(4, 2), (5, 1), (6, 0)] {
+            a.mov(ebx, step)?;
+            a.push(esi)?;
+            a.mov(eax, dword_ptr(esi))?;
+            a.call(dword_ptr(eax + 8))?;
+            a.cmp(eax, left)?;
+            a.jne(wrong)?;
+        }
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, out) = run("direct3drm_create", exe);
+    assert_eq!(code, 0, "check {code} went wrong {out}");
+}
+
+/// A GUI program made for the Windows `major`.`minor` (its subsystem
+/// version) with a visible edit control of the style `style` in a popup
+/// of its own class. The popup's procedure notes the WM_CTLCOLOR*
+/// messages it gets, 1 for WM_CTLCOLOREDIT and 2 for WM_CTLCOLORSTATIC,
+/// and passes them on to DefWindowProcA. The program paints the edit
+/// with UpdateWindow and ends with what was noted.
+fn edit_colors_program(style: i32, (major, minor): (u16, u16)) -> Vec<u8> {
+    const WM_CTLCOLOREDIT: i32 = 0x0133;
+    const WM_CTLCOLORSTATIC: i32 = 0x0138;
+    const WS_CHILD_VISIBLE: i32 = 0x5000_0000;
+    let names: &[&str] = &[
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "UpdateWindow",
+    ];
+    let kernel: &[&str] = &["ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("USER32.dll", names), ("KERNEL32.dll", kernel)];
+    let mut d = Data::default();
+    let name = d.text("EditColors");
+    let edit = d.text("Edit");
+    let text = d.text("WWWW");
+    let asked = d.add(&[0; 4]);
+    let mut wndclass = [0; 40];
+    wndclass[16..20].copy_from_slice(&BASE.to_le_bytes());
+    let class = d.add(&wndclass);
+    let mut b = Builder::exe(BASE);
+    b.subsystem(pe::SUBSYSTEM_GUI)
+        .subsystem_version(major, minor);
+    program_with(b, false, imports, &d.0, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut not_edit = a.create_label();
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_CTLCOLOREDIT)?;
+        a.jne(not_edit)?;
+        a.or(dword_ptr(l.at(asked)), 1)?;
+        a.set_label(&mut not_edit)?;
+        a.cmp(dword_ptr(esp + 8), WM_CTLCOLORSTATIC)?;
+        a.jne(other)?;
+        a.or(dword_ptr(l.at(asked)), 2)?;
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(class + 4)), eax)?;
+        a.mov(dword_ptr(l.at(class + 36)), l.at(name) as i32)?;
+        a.push(l.at(class) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        for value in [0, BASE as i32, 0, 0, 100, 200, 0, 0, POPUP] {
+            a.push(value)?;
+        }
+        a.push(l.at(name) as i32)?;
+        a.push(l.at(name) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.push(0)?;
+        a.push(BASE as i32)?;
+        a.push(5)?;
+        a.push(eax)?;
+        for value in [40, 100, 0, 0, WS_CHILD_VISIBLE | style] {
+            a.push(value)?;
+        }
+        a.push(l.at(text) as i32)?;
+        a.push(l.at(edit) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.push(eax)?;
+        a.call(f("UpdateWindow"))?;
+        a.push(dword_ptr(l.at(asked)))?;
+        a.call(l.import(names.len()))
+    })
+}
+
+#[test]
+fn a_win32_program_for_windows_3_gets_edit_colors_for_a_read_only_edit() {
+    // Windows 98's USER checks the version the program was made for,
+    // which for a Win32 program is its header's subsystem version: one
+    // made for 3.10 gets WM_CTLCOLOREDIT for a read-only edit, one made
+    // for 4.0 WM_CTLCOLORSTATIC.
+    const ES_MULTILINE: i32 = 0x0004;
+    const ES_READONLY: i32 = 0x0800;
+    const WS_DISABLED: i32 = 0x0800_0000;
+    for (style, what) in [
+        (ES_MULTILINE | ES_READONLY, "read-only"),
+        (ES_MULTILINE | WS_DISABLED, "disabled"),
+        (WS_DISABLED, "disabled single-line"),
+    ] {
+        let exe = edit_colors_program(style, (3, 10));
+        let (code, out) = run("edit_colors_win32_3", exe);
+        assert_eq!(code, 1, "a {what} edit of a 3.10 program: {out}");
+        let exe = edit_colors_program(style, (4, 0));
+        let (code, out) = run("edit_colors_win32_4", exe);
+        assert_eq!(code, 2, "a {what} edit of a 4.0 program: {out}");
+    }
+    let exe = edit_colors_program(ES_MULTILINE, (4, 0));
+    let (code, out) = run("edit_colors_win32_plain", exe);
+    assert_eq!(code, 1, "an edit that takes input: {out}");
 }

@@ -1,4 +1,4 @@
-# ToadForce: a synthetic 3D card for games of 2000 to 2002
+# ToadForce: a synthetic 3D card for GeForce-class games
 
 This document says why the card exists, how it is defined, how the
 emulator draws it and what the guest software does with it. What a guest
@@ -551,8 +551,7 @@ section covers names that section.
   every pixel, so what a program masks with the stencil buffer is drawn
   unmasked.
 - **Functions that do nothing.** `glDrawPixels`, `glBitmap` and the
-  raster position, `glCopyPixels`, texture coordinate generation
-  (`glTexGen`), user clip planes, 1D textures, stipples, `glLogicOp`,
+  raster position, `glCopyPixels`, 1D textures, stipples, `glLogicOp`,
   colour index mode, the accumulation buffer, evaluators, selection and
   feedback log their first call and do nothing else. A display list
   records calls of these with the rest and does nothing for them when
@@ -609,10 +608,16 @@ section covers names that section.
   planes of the program's, flat shading, lines and points. A draw's
   setup (matrix products, lights in camera space) is worked out again
   for every draw.
-- **The software renderer** is too slow for some games at their usual
-  resolutions ("The software renderer"). It draws wherever the OpenGL
-  renderer doesn't: a host without desktop OpenGL 3.2, a window drawn
-  by SDL's renderer, the web build, and a run with `--deterministic`.
+- **The software renderer** is several times slower than the OpenGL
+  renderer in most games (Unreal's Direct3D intro: 20.7 frames a second
+  against 53), and too slow for some at their usual resolutions ("The
+  software renderer"). It draws at `flush` on the emulation thread,
+  which waits for it (a pool splits large flushes, but the thread
+  still waits), on top of the vertex work above. It draws wherever the
+  OpenGL renderer doesn't: a host without desktop OpenGL 3.2, a window
+  drawn by SDL's renderer, the web build, and a run with
+  `--deterministic`. Users are told to keep `toadforce_renderer` at
+  `auto` or `opengl` (CONFIGURATION.md).
 - **Declined states.** A draw in a state the OpenGL renderer declines
   is drawn in software, with its target and depth buffer read back
   before and uploaded again after ("The OpenGL renderer" lists the
@@ -620,9 +625,8 @@ section covers names that section.
 - **Read-backs.** With the OpenGL renderer, card memory gets a
   surface's pixels from the GPU when the processor needs them: for a
   stretched, mirrored or destination-keyed blit of a surface the host
-  drew, a z-buffer filled with DirectDraw's `Blt` (`DDBLT_DEPTHFILL`),
-  a keyed copy of more than 4096 runs of pixels or from a source the
-  host drew, the picture of a 256-colour mode or of a mode shown
+  drew, a keyed copy of more than 4096 runs of pixels or from a source
+  the host drew, the picture of a 256-colour mode or of a mode shown
   doubled, once a frame, and a program's polls of port 3DAh between
   the host's draws into the surface shown. `/api/status` counts them
   by cause.
@@ -867,8 +871,12 @@ directly, at the points where the software renderer would draw them
   renderer draws, so the card transforms everything there.
 - **Textures** are host textures decoded once and kept by their
   description (format, size, levels and the offset of each image), with
-  the write counters of the pages their images cover. A write to any of
-  those pages decodes and uploads every image again.
+  the write counters of the pages each image covers. A write to a page
+  decodes and uploads again the images on it, and a write to the
+  palette every image. Unreal writes the two largest levels of a
+  texture it animates apart from the smaller ones, with a draw between
+  them, and so has each level uploaded once a frame rather than the
+  whole texture twice.
 - **Render targets** are host framebuffers. A target drawn on the GPU is
   marked newer there. The card's own work on it on the processor (a
   declined draw, a `BLT` or `FILL` the host doesn't take) and a switch to
@@ -876,7 +884,14 @@ directly, at the points where the software renderer would draw them
   save state and the program's reads of it read nothing back into card
   memory, and the program's writes only where they write parts of
   pixels or more than 1024 rectangles (see "Between the card and the
-  host renderer").
+  host renderer"). The host keeps a framebuffer for each pair of a
+  target and its depth buffer, and asks the driver whether it is
+  complete once, when it makes it. A driver that runs the commands on
+  a thread of its own has to catch up with them before it answers.
+  Asked at every batch, that wait was the largest part of the
+  renderer's time on the emulator's thread in Unreal's Direct3D
+  flyby on an NVIDIA driver (8% of the thread's busy samples, against
+  5% for decoding textures).
 - **16-bit targets** are host framebuffers in the 565 format
   (`GL_RGB565`, renderable since OpenGL 4.1 and with
   `ARB_ES2_compatibility`), so the host's blend result is rounded to
@@ -1181,14 +1196,16 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   command names (`gpu::alias`) and copies what they hold: colour to
   colour, or depth to depth of one layout. DirectDraw's `Blt` between
   two z-buffers names both as a colour format of their size and is such
-  a copy. A depth source card memory holds gets a host copy of its own,
-  made again only after a write to its pages, so a game that puts a kept
-  scene's depths back every frame (Nocturne, behind its drawn
-  backgrounds) has them copied on the GPU. A surface inside a larger
-  copy of the same bytes (one depth buffer under targets of several
-  sizes) uses that copy. Everything else is read back as before: a keyed
-  texture, a texture that overlaps a surface without being an image of
-  it, a stretch, a copy between colour and depth.
+  a copy. Its depth fill (`DDBLT_DEPTHFILL`) names a z-buffer the same
+  way, and the host writes the fill's bits into its depth copy
+  (`gpu::fills`). A depth source card memory holds gets a host copy of
+  its own, made again only after a write to its pages, so a game that
+  puts a kept scene's depths back every frame (Nocturne, behind its drawn
+  backgrounds) has them copied on the GPU. A surface inside a larger copy
+  of the same bytes (one depth buffer under targets of several sizes) uses
+  that copy. Everything else is read back as before: a keyed texture, a
+  texture that overlaps a surface without being an image of it, a stretch,
+  a copy between colour and depth.
 - **A window's back buffer.** The OpenGL front end's and Direct3D 8's
   windowed presents copy the back buffer to the screen with `BLT`
   when it has the screen's format and isn't stretched

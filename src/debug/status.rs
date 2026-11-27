@@ -81,22 +81,32 @@ impl DebugHub {
             // time, the frames the program drew (at most one a retrace),
             // its bursts of writes to video memory the size of a frame,
             // the smaller ones that reach across the screen (copies of
-            // what changed), its page flips (the frames it draws, however
+            // what changed) and of those the ones that redraw one window,
+            // the smaller ones still that redraw one window (a movie's
+            // pictures), its page flips (the frames it draws, however
             // many), the frames the built-in Windows showed for it (its
-            // blits to the screen, as bursts and copies), its checks for
+            // blits to the screen, as bursts, copies and windows) and of
+            // those the ones that were only a window's, its checks for
             // keys that weren't there and idle calls, its reads of the
-            // input status register (retrace polling), and the vertical
-            // retraces it let pass while it polled for them.
+            // input status register (retrace polling), the vertical
+            // retraces it let pass while it polled for them, and of the
+            // intervals between its page flips, how many were judged and
+            // how many frames they showed a retrace late (an estimate).
             "activity": {
                 "emulated_ns": cpu.bus.clock.now_ns(),
                 "frames_drawn": cpu.bus.frames_drawn,
                 "bursts": cpu.bus.activity.bursts,
                 "copies": cpu.bus.activity.copies,
+                "window_copies": cpu.bus.activity.window_copies,
+                "windows": cpu.bus.activity.windows,
                 "flips": cpu.bus.activity.flips,
                 "presents": cpu.bus.activity.presents,
+                "shown_windows": cpu.bus.activity.shown_windows,
                 "polls": cpu.bus.activity.polls,
                 "status_reads": cpu.bus.activity.status_reads,
                 "missed_retraces": cpu.bus.activity.missed_retraces,
+                "late_flips": cpu.bus.activity.late_flips,
+                "paced_flips": cpu.bus.activity.paced_flips,
             },
             "cs_ip": cs_ip(cpu),
             "cpu_mode": pm::mode_name(cpu),
@@ -230,6 +240,12 @@ impl DebugHub {
                     "{:04X}:{:04X} mask {:04X}",
                     cpu.bus.mouse.callback_cs, cpu.bus.mouse.callback_ip, cpu.bus.mouse.callback_mask
                 ),
+                "range": [
+                    cpu.bus.mouse.min_x,
+                    cpu.bus.mouse.min_y,
+                    cpu.bus.mouse.max_x,
+                    cpu.bus.mouse.max_y
+                ],
                 "ps2": {
                     "enabled": cpu.bus.mouse.ps2.enabled,
                     "handler": format!("{:04X}:{:04X}", cpu.bus.mouse.ps2.handler.0, cpu.bus.mouse.ps2.handler.1),
@@ -587,8 +603,8 @@ pub fn regs_json(cpu: &Cpu) -> Value {
 /// on a CPU that has them, MM0-MM7 (the physical registers' significands)
 /// and XMM0-XMM7 with MXCSR. A value is the register's double: one that
 /// JSON can't hold (a NaN, an infinity, or an extended number beyond a
-/// double's range) is null, and one below a double's normal range is 0;
-/// its bits and tag say which it is.
+/// double's range) is null, and one below a double's normal range is the
+/// nearest denormal double, or 0; its bits and tag say which it is.
 pub(super) fn fpu_json(cpu: &Cpu) -> Value {
     let number = |v: f64| if v.is_finite() { json!(v) } else { Value::Null };
     let tags = cpu.fpu_tag_word();
@@ -730,7 +746,8 @@ pub(super) fn screen_text(cpu: &Cpu) -> Reply {
 }
 
 /// What the sound visualizer shows: the FM channels, the Ultrasound's
-/// voices, the MIDI notes held, and what is muted.
+/// voices, the MIDI notes held, and what is muted; and the CMS chips'
+/// channels, with the tone each plays.
 pub(super) fn sound_json(cpu: &Cpu) -> Value {
     let bus = &cpu.bus;
     let fm: Vec<Value> = bus
@@ -771,7 +788,34 @@ pub(super) fn sound_json(cpu: &Cpu) -> Value {
         "held": bus.opl.is_held(),
         "channels": fm,
     });
-    json!({ "fm": fm, "gus": gus, "midi": midi, "silenced": silenced })
+    let cms = bus.cms.as_ref().map(|cms| {
+        let config = cms.config();
+        let chips: Vec<Value> = cms
+            .chips()
+            .iter()
+            .map(|chip| {
+                let channels: Vec<Value> = chip
+                    .channels()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let (left, right) = c.amplitudes();
+                        let hz = c.hz(rust_dos::gameblaster::CLOCK as f64);
+                        json!({ "channel": i, "tone": c.freq_enable, "noise": c.noise_enable,
+                                "octave": c.octave, "frequency": c.frequency,
+                                "hz": (hz * 10.0).round() / 10.0,
+                                "amplitude": [left, right] })
+                    })
+                    .collect();
+                json!({ "enabled": chip.enabled(), "noise": chip.noise_params(),
+                        "envelope": chip.envelope_registers().map(|r| format!("{:02X}", r)),
+                        "channels": channels })
+            })
+            .collect();
+        json!({ "base": format!("{:X}", config.base), "game_blaster": config.detection,
+                "chips": chips })
+    });
+    json!({ "fm": fm, "gus": gus, "midi": midi, "cms": cms, "silenced": silenced })
 }
 
 pub(super) fn ivt_json(cpu: &Cpu) -> Value {

@@ -1347,7 +1347,10 @@ pub(super) fn exports(bus: &Bus, memory: &Memory, base: u32) -> Vec<(Vec<u8>, u3
 /// Take a reference on the module at `base` away (FreeLibrary): the
 /// modules whose last reference went, it first and then those it imported
 /// from, are added to `freed`. The modules that stay while the program
-/// runs (`STATIC`) lose nothing.
+/// runs (`STATIC`) lose nothing. A module in `freed` already, which a
+/// load took again while it was going and a free let go of once more,
+/// is there once, and the modules it imported from lost its references
+/// the first time.
 pub(super) fn release(process: &mut Process, base: u32, freed: &mut Vec<u32>) {
     let Some(module) = process.modules.iter_mut().find(|m| m.base == base) else {
         return;
@@ -1356,7 +1359,7 @@ pub(super) fn release(process: &mut Process, base: u32, freed: &mut Vec<u32>) {
         return;
     }
     module.refs -= 1;
-    if module.refs > 0 {
+    if module.refs > 0 || freed.contains(&base) {
         return;
     }
     let deps = module.deps.clone();

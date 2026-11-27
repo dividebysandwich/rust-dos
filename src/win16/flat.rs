@@ -34,6 +34,8 @@
 //! joined as Windows 95 joins it, but its calls fail as Windows 95's
 //! fail when the Win32 side isn't there: the 16-bit function returns
 //! the error value its thunk data has for it.
+//!
+//! Win32s's Universal Thunks (universal.rs) run on the same clients.
 
 use super::thunk::{self, EAX, EBX, ECX, EDI, EDX, ESI, ESP};
 use super::{ldt, module};
@@ -54,6 +56,8 @@ pub const CALLBACK_EX: u8 = 4;
 /// FT_Thunk's: a call as QT_Thunk's, whose pointers the mask in
 /// `Request::data32` names were mapped, and are let go when it returns.
 pub const FT_CALL: u8 = 5;
+/// UTRegister's (universal.rs): load a 16-bit DLL and call its UTInit.
+pub const UT_REGISTER: u8 = 6;
 
 /// The bytes of a thunk block's header: magic and checksum.
 const HEADER: usize = 8;
@@ -80,9 +84,9 @@ pub struct Client {
 }
 
 /// A Win32 thread's request: a call of a 16-bit function (`CALL` from
-/// QT_Thunk, `CALLBACK` and `CALLBACK_EX` from WOW32), a ThunkConnect32
-/// (`CONNECT`) or a LoadLibrary16 (`LOAD`). The thread waits until it is
-/// done.
+/// QT_Thunk, `CALLBACK` and `CALLBACK_EX` from WOW32 and the Universal
+/// Thunks), a ThunkConnect32 (`CONNECT`), a LoadLibrary16 (`LOAD`) or a
+/// UTRegister (`UT_REGISTER`). The thread waits until it is done.
 #[derive(Clone, Debug, Default)]
 pub struct Request {
     pub kind: u8,
@@ -101,9 +105,15 @@ pub struct Request {
     /// module loaded. LOAD: the DLL's name, an empty one and the
     /// directory, and the module loaded. CALLBACK_EX: where DX:AX
     /// goes, or 0. FT_CALL: the mask of the arguments mapped.
+    /// UT_REGISTER: where the thunk's address goes, the names of the DLL,
+    /// an empty one, the directory, UTInit (empty for none) and UTProc,
+    /// and the module loaded.
     pub data32: u32,
     pub names: Vec<String>,
     pub module: u16,
+    /// UT_REGISTER: the Win32 DLL's handle and the buffer's address
+    /// (universal.rs).
+    pub held: crate::savestate::Since<{ super::universal::UT_SAVED }, Vec<u32>>,
 }
 
 /// A window of the process `owner`'s address space mapping the pages
@@ -145,14 +155,14 @@ fn read(cpu: &mut Cpu, pid: u32, at: u32, len: usize) -> Option<Vec<u8>> {
 
 /// Write `data` at `at` of the process `pid`. False where a page isn't
 /// there.
-fn write(cpu: &mut Cpu, pid: u32, at: u32, data: &[u8]) -> bool {
+pub(super) fn write(cpu: &mut Cpu, pid: u32, at: u32, data: &[u8]) -> bool {
     with_memory(cpu, pid, |m, bus| m.write(bus, at, data))
         .flatten()
         .is_some()
 }
 
 /// The running process's id.
-fn running_pid(cpu: &Cpu) -> u32 {
+pub(super) fn running_pid(cpu: &Cpu) -> u32 {
     crate::win32::running(cpu).map_or(0, |p| p.id)
 }
 
@@ -222,16 +232,35 @@ fn alias(
 
 /// Take the alias `i` away: its window's pages go out of its owner's page
 /// tables, the pages staying their source's, and its selector, if it
-/// has one, is free again.
+/// has one, is free again. The pin it took (`alias`, `refresh`) goes
+/// from each page the window maps and its source still has there; a page
+/// the source committed after the window last looked has no pin of its,
+/// and may have another alias's.
 fn unalias(cpu: &mut Cpu, i: usize) {
     let a = cpu.bus.win32.win16.aliases.remove(i);
-    with_memory(cpu, a.owner, |m, bus| {
+    let mapped: Vec<(u32, u32)> = with_memory(cpu, a.owner, |m, bus| {
+        let mut mapped = Vec::new();
         for page in 0..a.pages {
-            m.set_entry(bus, a.window + page * PAGE, 0);
+            let at = a.window + page * PAGE;
+            if let Some(e) = m.entry(bus, at).filter(|e| e & PRESENT != 0) {
+                mapped.push((page, e & !(PAGE - 1)));
+            }
+            m.set_entry(bus, at, 0);
         }
         m.unreserve(a.window);
+        mapped
+    })
+    .unwrap_or_default();
+    let first = a.address & !(PAGE - 1);
+    with_memory(cpu, a.source, |m, bus| {
+        for (page, frame) in mapped {
+            let lin = first.wrapping_add(page * PAGE);
+            let now = m.entry(bus, lin);
+            if now.is_some_and(|e| e & PRESENT != 0 && e & !(PAGE - 1) == frame) {
+                crate::win32::memory::unpin(bus, m.cr3, lin);
+            }
+        }
     });
-    unpin_pages(cpu, a.source, a.address & !(PAGE - 1), a.pages);
     cpu.tlb.flush();
     if a.selector != 0 {
         free_selector(cpu, a.selector);
@@ -275,14 +304,107 @@ fn aliased(cpu: &Cpu, owner: u32, source: u32, address: u32, len: u32) -> Option
     })
 }
 
+/// The windows of the aliases of the process `source`'s memory whose
+/// selectors are `sels` map what it has now, as a selector of Windows
+/// 95's one address space sees the memory as it is: a page committed
+/// since a window was made comes in, one decommitted since goes out, and
+/// one committed again at another physical page is mapped anew. For
+/// selectors that live on (universal.rs), whose windows would otherwise
+/// keep a physical page the pool gave back and handed to someone else.
+/// Each process's memory is taken out once for all of them.
+pub(super) fn refresh(cpu: &mut Cpu, source: u32, sels: &[u16]) {
+    use crate::win32::memory::{is_pageable, pin};
+    let owner = cpu.bus.win32.win16.pid;
+    let aliases: Vec<Alias> = cpu
+        .bus
+        .win32
+        .win16
+        .aliases
+        .iter()
+        .filter(|a| {
+            a.owner == owner
+                && a.source == source
+                && a.selector != 0
+                && sels.iter().any(|&s| s | 3 == a.selector | 3)
+        })
+        .cloned()
+        .collect();
+    if aliases.is_empty() {
+        return;
+    }
+    let windows: Vec<Vec<u32>> = with_memory(cpu, owner, |m, bus| {
+        aliases
+            .iter()
+            .map(|a| {
+                (0..a.pages)
+                    .map(|i| m.entry(bus, a.window + i * PAGE).unwrap_or(0))
+                    .collect()
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+    // Each window page whose entry changes: the source's entry it maps
+    // now, or None for a page the source no longer has. A decommitted
+    // page lost its pin with its physical page, so a page the window maps
+    // anew, or one committed again at the same physical page, is pinned
+    // again; a page the window still maps keeps the pin it has.
+    let changes: Vec<(u32, Option<u32>)> = with_memory(cpu, source, |m, bus| {
+        let mut changes = Vec::new();
+        for (a, window) in aliases.iter().zip(&windows) {
+            let first = a.address & !(PAGE - 1);
+            for (i, &old) in (0u32..).zip(window) {
+                let lin = first.wrapping_add(i * PAGE);
+                let at = a.window + i * PAGE;
+                let mapped = old & PRESENT != 0;
+                let now = m.entry(bus, lin).filter(|e| e & PRESENT != 0);
+                if let Some(e) = now.filter(|e| mapped && (e ^ old) & !(PAGE - 1) == 0) {
+                    if is_pageable(bus, m.cr3, lin) {
+                        pin(bus, m.cr3, lin);
+                    }
+                    if (e ^ old) & WRITABLE != 0 {
+                        changes.push((at, Some(e)));
+                    }
+                    continue;
+                }
+                pin(bus, m.cr3, lin);
+                match m.entry(bus, lin).filter(|e| e & PRESENT != 0) {
+                    Some(e) => changes.push((at, Some(e))),
+                    None if mapped => changes.push((at, None)),
+                    None => {}
+                }
+            }
+        }
+        changes
+    })
+    .unwrap_or_default();
+    if changes.is_empty() {
+        return;
+    }
+    with_memory(cpu, owner, |m, bus| {
+        for (at, e) in changes {
+            match e {
+                Some(e) => m.map(bus, at, e, e & WRITABLE | USER),
+                None => m.set_entry(bus, at, 0),
+            };
+        }
+    });
+    cpu.tlb.flush();
+}
+
 /// MapLS: a 16:16 pointer to `ptr` of the running process, its selector
 /// a new one of the Win16 process's LDT covering 64 KB from there. A
 /// value below 64 KB is no pointer and comes back as it is.
 pub fn map_ls(cpu: &mut Cpu, ptr: u32) -> u32 {
+    let pid = running_pid(cpu);
+    map_ls_from(cpu, pid, ptr)
+}
+
+/// MapLS of `ptr` of the process `pid`, which needn't be the running
+/// one.
+pub(super) fn map_ls_from(cpu: &mut Cpu, pid: u32, ptr: u32) -> u32 {
     if ptr >> 16 == 0 {
         return ptr;
     }
-    let pid = running_pid(cpu);
     let Some(win16) = ensure_win16(cpu) else {
         return 0;
     };
@@ -308,6 +430,37 @@ pub fn map_ls(cpu: &mut Cpu, ptr: u32) -> u32 {
     (sel as u32) << 16
 }
 
+/// Tiled selectors, as Windows gives a huge block, for the `len` bytes at
+/// `start` of the process `pid`: the first of `ldt::tiles(len)`
+/// selectors `AHINCR` apart, each for the rest of the bytes from its
+/// 64 KB, or None when the LDT has no run of them free. One alias maps
+/// them all and has the first selector; the others are the caller's to
+/// free (`free_tiles`) when the alias goes.
+pub(super) fn map_tiles_from(cpu: &mut Cpu, pid: u32, start: u32, len: u32) -> Option<u16> {
+    let win16 = ensure_win16(cpu)?;
+    let sel = cpu.bus.win32.win16.ldt.alloc(ldt::tiles(len))?;
+    let base = if pid == win16 {
+        Some(start)
+    } else {
+        alias(cpu, pid, start, len, win16, sel)
+    };
+    let Some(base) = base else {
+        cpu.bus.win32.win16.ldt.free(sel, ldt::tiles(len));
+        return None;
+    };
+    let system = super::win16(cpu).system;
+    ldt::set_block(cpu, system, sel, base, len, ldt::ACCESS_DATA, false);
+    Some(sel)
+}
+
+/// Free the selectors after the first of the tiles `map_tiles_from`
+/// made from `sel` for `len` bytes; the first goes with its alias.
+pub(super) fn free_tiles(cpu: &mut Cpu, sel: u16, len: u32) {
+    for i in 1..ldt::tiles(len) {
+        free_selector(cpu, sel + i * ldt::AHINCR);
+    }
+}
+
 /// UnMapLS: the selector of a 16:16 pointer MapLS made is free again.
 pub fn unmap_ls(cpu: &mut Cpu, segptr: u32) {
     let sel = (segptr >> 16) as u16;
@@ -326,12 +479,18 @@ pub fn unmap_ls(cpu: &mut Cpu, segptr: u32) {
 /// MapSL: the running process's flat address of the 16:16 pointer
 /// `segptr`, 0 if its selector isn't there.
 pub fn map_sl(cpu: &mut Cpu, segptr: u32) -> u32 {
+    let pid = running_pid(cpu);
+    map_sl_for(cpu, pid, segptr)
+}
+
+/// MapSL for the process `pid`, which needn't be the running one: its
+/// flat address of `segptr`.
+pub(super) fn map_sl_for(cpu: &mut Cpu, pid: u32, segptr: u32) -> u32 {
     let sel = (segptr >> 16) as u16;
     let offset = segptr & 0xFFFF;
     if sel == 0 {
         return 0;
     }
-    let pid = running_pid(cpu);
     // A pointer MapLS made for the process's own memory.
     if let Some(a) = cpu
         .bus
@@ -746,7 +905,13 @@ pub fn wow_callback16_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Post a WOWCallback16 (`kind`) of `target` with the argument bytes
 /// `args`. The thread goes on from the function's stub with DX:AX, or
 /// with TRUE and DX:AX written at `result` for WOWCallback16Ex.
-fn callback16(cpu: &mut Cpu, kind: u8, target: u32, args: Vec<u8>, result: u32) -> Option<u32> {
+pub(super) fn callback16(
+    cpu: &mut Cpu,
+    kind: u8,
+    target: u32,
+    args: Vec<u8>,
+    result: u32,
+) -> Option<u32> {
     let request = Request {
         kind,
         target,
@@ -798,15 +963,25 @@ pub fn free_library16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let pid = running_pid(cpu);
     let handle =
         super::module_index(cpu, args[0] as u16).map(|i| cpu.bus.win32.win16.modules[i].handle);
+    if let Some(handle) = handle {
+        release_module(cpu, pid, handle);
+    }
+    Some(0)
+}
+
+/// One of the references the Win32 process `pid`'s client holds to the
+/// 16-bit module `handle` goes, and the module with the last: whether it
+/// held one.
+pub(super) fn release_module(cpu: &mut Cpu, pid: u32, handle: u16) -> bool {
     let clients = &mut cpu.bus.win32.win16.clients;
     let held = clients.iter_mut().find(|c| c.pid == pid).and_then(|c| {
-        let i = c.modules.iter().position(|&m| Some(m) == handle)?;
+        let i = c.modules.iter().position(|&m| m == handle)?;
         Some(c.modules.remove(i))
     });
     if let Some(handle) = held {
         module::release(cpu, handle);
     }
-    Some(0)
+    held.is_some()
 }
 
 /// GetProcAddress16(module, name), ordinal 37: the 16:16 address of the
@@ -931,7 +1106,7 @@ fn guest_bytes(cpu: &mut Cpu, at: u32, len: usize) -> Vec<u8> {
     bytes
 }
 
-fn guest_string(cpu: &mut Cpu, at: u32) -> String {
+pub(super) fn guest_string(cpu: &mut Cpu, at: u32) -> String {
     let bytes = cpu.bus.guest_read_asciiz(at, 0x200);
     crate::dosstr::from_bytes(&bytes)
 }
@@ -940,7 +1115,7 @@ fn guest_string(cpu: &mut Cpu, at: u32) -> String {
 
 /// The client of the Win32 process `pid`, made with its task if there is
 /// none: its place in `State::clients`.
-fn ensure_client(cpu: &mut Cpu, pid: u32) -> Option<usize> {
+pub(super) fn ensure_client(cpu: &mut Cpu, pid: u32) -> Option<usize> {
     if let Some(c) = cpu
         .bus
         .win32
@@ -989,7 +1164,7 @@ fn ensure_client(cpu: &mut Cpu, pid: u32) -> Option<usize> {
 /// The running Win32 thread asks the client of the process `pid` for
 /// `request`, and waits until it is done. The client is woken if it
 /// waits for one.
-fn post(cpu: &mut Cpu, pid: u32, request: Request) {
+pub(super) fn post(cpu: &mut Cpu, pid: u32, request: Request) {
     let Some(c) = cpu
         .bus
         .win32
@@ -1014,13 +1189,26 @@ fn post(cpu: &mut Cpu, pid: u32, request: Request) {
 /// `tid`. The 16-bit code a client runs can give up its turn, and a
 /// client that goes meanwhile moves the others down the list, so what
 /// runs after it keeps the thread, which stays the same.
-fn client_of(cpu: &Cpu, tid: u32) -> Option<usize> {
+pub(super) fn client_of(cpu: &Cpu, tid: u32) -> Option<usize> {
     cpu.bus
         .win32
         .win16
         .clients
         .iter()
         .position(|c| c.tid == tid)
+}
+
+/// The process whose flat addresses the running 16-bit code's are: the
+/// Win32 process a client task runs a call for, as Windows 95 runs a
+/// thunk's 16-bit code in the calling process's context, or else the
+/// Win16 process's own.
+pub(crate) fn served_pid(cpu: &Cpu) -> u32 {
+    let tid = crate::win32::running(cpu)
+        .and_then(|p| p.current_thread())
+        .map_or(0, |t| t.id);
+    client_of(cpu, tid).map_or(cpu.bus.win32.win16.pid, |c| {
+        cpu.bus.win32.win16.clients[c].pid
+    })
 }
 
 /// Whether the thread `tid` is a client's task. Between calls it waits in
@@ -1048,8 +1236,11 @@ pub fn serve(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         let request = client.queue.remove(0);
         client.current = Some(request.clone());
         match request.kind {
-            CALL | CALLBACK | CALLBACK_EX | FT_CALL => start_call(cpu, c, request),
-            LOAD => start_load(cpu, c, request),
+            CALL | CALLBACK | CALLBACK_EX | FT_CALL => {
+                let resume = Context::of(cpu);
+                start_call(cpu, c, request, resume);
+            }
+            LOAD | UT_REGISTER => start_load(cpu, c, request),
             _ => start_connect(cpu, c, request),
         }
         return None;
@@ -1060,7 +1251,7 @@ pub fn serve(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 /// The Win32 thread `tid` goes on, `f` having set its registers, with
 /// `eax` in EAX.
-fn finish(cpu: &mut Cpu, tid: u32, eax: u32, f: impl FnOnce(&mut Context)) {
+pub(super) fn finish(cpu: &mut Cpu, tid: u32, eax: u32, f: impl FnOnce(&mut Context)) {
     let Some((p, t)) = crate::win32::thread::find(&cpu.bus.win32, tid) else {
         return;
     };
@@ -1070,15 +1261,15 @@ fn finish(cpu: &mut Cpu, tid: u32, eax: u32, f: impl FnOnce(&mut Context)) {
 
 /// The client `c` is done with its request: the Win32 thread goes on
 /// with `eax`.
-fn done(cpu: &mut Cpu, c: usize, eax: u32) {
+pub(super) fn done(cpu: &mut Cpu, c: usize, eax: u32) {
     if let Some(request) = cpu.bus.win32.win16.clients[c].current.take() {
         finish(cpu, request.tid, eax, |_| ());
     }
 }
 
-/// Run the call `request` on the client `c`'s task, from Win16Serve.
-fn start_call(cpu: &mut Cpu, c: usize, request: Request) {
-    let resume = Context::of(cpu);
+/// Run the call `request` on the client `c`'s task, which goes on at
+/// `resume` (in Win16Serve) once it returns.
+pub(super) fn start_call(cpu: &mut Cpu, c: usize, request: Request, resume: Context) {
     let (ss, sp) = thunk::stack16_for(cpu, &resume);
     let len = request.args.len() as u16;
     // The arguments as they were on the 32-bit stack, the lowest at the
@@ -1128,7 +1319,10 @@ pub fn then_call(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Opti
     if request.kind == FT_CALL {
         unmap_args(cpu, &request);
     }
-    if matches!(request.kind, CALL | FT_CALL) {
+    if request.kind == UT_REGISTER {
+        let value = (edx & 0xFFFF) << 16 | (eax & 0xFFFF);
+        super::universal::initialized(cpu, c, request, value);
+    } else if matches!(request.kind, CALL | FT_CALL) {
         let popped = (cpu.sp() as u32).wrapping_sub(request.sp) & 0xFFFF;
         finish(cpu, request.tid, eax, |t| {
             t.gpr[ECX] = ecx;
@@ -1209,10 +1403,10 @@ fn start_connect(cpu: &mut Cpu, c: usize, request: Request) {
 }
 
 /// The modules `data[1..]` are to have their entry points run, for the
-/// ThunkConnect32 or LoadLibrary16 of the client whose thread is
-/// `data[0]`: a ThunkConnect32 then joins the thunk data, a
-/// LoadLibrary16 returns the instance. None when an entry point runs
-/// first.
+/// ThunkConnect32, LoadLibrary16 or UTRegister of the client whose
+/// thread is `data[0]`: a ThunkConnect32 then joins the thunk data, a
+/// LoadLibrary16 returns the instance, a UTRegister goes on to the
+/// DLL's UTInit. None when an entry point or UTInit runs first.
 pub fn then_inits(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     let tid = data.first().copied().unwrap_or(0);
     if data.len() > 1 {
@@ -1230,6 +1424,8 @@ pub fn then_inits(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Opt
             let instance =
                 super::module_index(cpu, module).map_or(module, |i| module::instance_of(cpu, i));
             done(cpu, c, instance as u32);
+        } else if load.is_some_and(|r| r.kind == UT_REGISTER) {
+            return super::universal::loaded(cpu, c, ctx);
         } else {
             let joined = connect(cpu, c);
             done(cpu, c, joined as u32);
@@ -1238,19 +1434,24 @@ pub fn then_inits(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Opt
     Some(ctx.gpr[EAX])
 }
 
-/// Load the 16-bit DLL of the LoadLibrary16 `request` on the client
-/// `c`'s task, from Win16Serve, and run the entry points of the modules
-/// that came with it, as the Win16 LoadLibrary does. The Win32 thread
-/// gets the DLL's instance, or the Win16 loader's error below 32.
+/// Load the 16-bit DLL of the LoadLibrary16 or UTRegister `request` on
+/// the client `c`'s task, from Win16Serve, and run the entry points of
+/// the modules that came with it, as the Win16 LoadLibrary does. The
+/// Win32 thread gets the DLL's instance, or the Win16 loader's error
+/// below 32; UTRegister goes on in `universal::loaded`, or fails.
 fn start_load(cpu: &mut Cpu, c: usize, request: Request) {
     let mut inits = Vec::new();
     let (dll, dir) = (&request.names[0], &request.names[2]);
     let index = match module::load(cpu, dll, dir, &mut inits) {
         Ok(index) => index,
         Err(e) => {
+            let (what, eax) = match request.kind {
+                UT_REGISTER => ("UTRegister", 0),
+                _ => ("LoadLibrary16", e.code),
+            };
             cpu.bus
-                .log_string(&format!("[W16] LoadLibrary16({}): {}", dll, e.message));
-            done(cpu, c, e.code);
+                .log_string(&format!("[W16] {}({}): {}", what, dll, e.message));
+            done(cpu, c, eax);
             return;
         }
     };
@@ -1501,6 +1702,7 @@ pub fn process_ending(cpu: &mut Cpu, pid: u32) {
     if win16 == 0 {
         return;
     }
+    super::universal::process_ending(cpu, pid);
     while let Some(i) = cpu
         .bus
         .win32
@@ -1558,7 +1760,8 @@ crate::state_fields!(Request {
     sp,
     data32,
     names,
-    module
+    module,
+    held
 });
 crate::state_fields!(Alias {
     owner,

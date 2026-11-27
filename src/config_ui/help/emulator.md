@@ -130,27 +130,35 @@ The display card games find, which decides the graphics they choose:
 
 Takes effect at the DOS prompt.
 
+# 3D drawn by {#renderer}
+
+What draws the pictures of the 3D cards in the window: a 3dfx card (the
+add-on, or a Voodoo3 or Banshee as the *Video card*) and the ToadForce.
+
+- **Auto**: each card as it draws best by default. A 3dfx card is drawn
+  by Rust-DOS, the ToadForce by your graphics card, through OpenGL,
+  where the window has it.
+- **OpenGL**: your graphics card draws every card. A 3dfx card is drawn
+  at a higher resolution (*3dfx OpenGL size*), with sharper edges and
+  textures; the ToadForce is faster in most games.
+- **Software**: Rust-DOS draws every card on the processor, at the
+  card's own resolution, with the card's exact pixels.
+
 # 3dfx Voodoo Graphics {#voodoo}
 
 Adds a 3dfx Voodoo 3D card, for games with a 3dfx or Glide version, such
 as Tomb Raider's 3dfx patch. Games without such a version don't use it.
 
 Set *Processor* to **Pentium** too: 3dfx games expect one. Takes effect
-at the DOS prompt.
+at the DOS prompt. A Voodoo3 or Banshee as the *Video card* is a 3dfx
+card itself and leaves no room for this one, so the setting isn't shown
+then.
 
 # 3dfx memory {#voodoo-memory}
 
 The Voodoo's memory: **12 MB** with two texture units (best) or **4 MB**
 with one, as on the cheapest boards. Leave it at 12 MB unless a game
 has trouble with it.
-
-# 3dfx drawn by {#voodoo-renderer}
-
-What draws the 3dfx picture in the window:
-
-- **Rust-DOS**: the card's own resolution, exactly as the card drew it.
-- **OpenGL**: drawn again by your graphics card at a higher resolution
-  (*3dfx OpenGL size*), with sharper edges and textures.
 
 # 3dfx OpenGL size {#voodoo-scale}
 
@@ -219,14 +227,17 @@ yours and stays as you set it. Takes effect at the DOS prompt.
 Games made for the Voodoo Rush and later 3dfx boards, such as Tomb
 Raider's Rush version (`3DPATCH\VOORUSH` on the Tomb Raider Gold CD),
 don't draw with Glide of their own: they load it from **GLIDE2X.OVL**,
-which came with 3dfx's drivers. The one of the Voodoo Graphics driver
-drives Rust-DOS's card, whichever board the game was made for.
+which came with 3dfx's drivers. Each board has its own: the Voodoo
+Graphics driver's finds no Voodoo2, as on a real PC. The card's own
+overlay drives it, whichever board the game was made for.
 
 It is 3dfx's and doesn't come with Rust-DOS. Enter downloads 3dfx's last
-Voodoo Graphics driver from the Internet Archive, after asking, and keeps
-its GLIDE2X.OVL in Rust-DOS's configuration directory. It is then on
-**Z:**, where games find it on the PATH. A GLIDE2X.OVL in the game's own
-folder comes first. A game that looks for it while it is missing says so.
+driver for the card you picked (Voodoo Graphics 3.01.00 or Voodoo2
+3.02.02) from the Internet Archive, after asking, and keeps its
+GLIDE2X.OVL in Rust-DOS's configuration directory. While that card is
+in, it is on **Z:**, where games find it on the PATH. A GLIDE2X.OVL in
+the game's own folder comes first. A game that looks for it while it is
+missing says so.
 
 # PowerVR card {#powervr}
 
@@ -247,7 +258,8 @@ How the PowerVR card smooths textures:
 
 - **As the game sets it**: the card's own bilinear filtering, which most
   games turn on. The PCX1 has none; it blends between mip map levels.
-- **Point**: blocky texels, as with filtering off.
+- **Point**: blocky, one texel of one mip map level for each pixel. With
+  filtering off the card itself still blends two levels.
 - **Bilinear**: smoothed, even where the game turns filtering off.
 
 # Vérité RISC {#verite-risc}
@@ -288,15 +300,6 @@ The video memory of the ToadForce, the card Rust-DOS defines for the
 Windows programs it runs without Windows. **64 MB** holds the screen and
 the surfaces of any game of the time. **128 MB** leaves more room at the
 largest modes; **32 MB** is what the cards of 1999 had.
-
-# ToadForce drawn by {#toadforce-renderer}
-
-What draws the ToadForce's 3D:
-
-- **Automatic**: your graphics card, through OpenGL, where the window
-  has it, and Rust-DOS itself elsewhere.
-- **OpenGL**: your graphics card. Faster in most games.
-- **Rust-DOS**: the processor, with the card's exact pixels.
 
 # ToadForce gamma {#toadforce-gamma}
 
@@ -364,6 +367,13 @@ The DOS version games are told. **5.00** suits nearly everything. A
 program that complains about the DOS version may want **6.22**. Disk
 tools for Windows 95's disks want its DOS: **7.00** as in the first
 Windows 95, **7.10** as in the later ones with FAT32.
+
+# ANSI.SYS {#ansi-sys}
+
+Whether DOS's screen output understands ANSI.SYS's escape codes, the
+colours and cursor moves of menus written for DOSBox. Leave it **on**;
+turn it off only for a program that misbehaves when it finds ANSI.SYS
+installed, as on a DOS without it in CONFIG.SYS.
 
 # IDE hard disks {#ide-hard-disks}
 
@@ -479,10 +489,11 @@ window is open, except on the Mixer and Stats pages. Turn it **off** to
 let the program run on behind the window. In a LAN room it always runs
 on, whatever this says, as the other players' games would wait for it.
 
-# Rewind (Alt+F11) {#rewind}
+# Rewind {#rewind}
 
-When **on**, Rust-DOS keeps the last minutes of play: hold **Alt+F11** to
-go back in time, for instance right before you fell into that pit.
+When **on**, Rust-DOS keeps the last minutes of play: hold **Alt+F11**
+(rewind's key, if the hotkeys changed it) to go back in time, for
+instance right before you fell into that pit.
 
 # Rewind memory {#rewind-memory}
 
@@ -510,7 +521,7 @@ Commands that run each time Rust-DOS starts, before you get the prompt,
 as in a DOS `AUTOEXEC.BAT`. For example, to mount a CD and start a game:
 
 ```
-MOUNT D ~/dos/cds/game.cue
+MOUNT D ~/games/my-game/disc.cue
 C:
 CD GAME
 GAME.EXE

@@ -617,21 +617,22 @@ fn rebase_image_moves_files_as_windows_98_se_does() {
 }
 
 /// MDK2 moves OPENGL32.DLL below 64500000h before it loads it. On
-/// Windows 98 that is the system's file, which ReBaseImage changes; the
-/// built-in OPENGL32.DLL's file is read-only, so the call fails as it
-/// does for any read-only file, and the game, which ignores the result,
+/// Windows 98 that is the system's file, which ReBaseImage changes. The
+/// built-in OPENGL32.DLL's file has no base relocations, so the call
+/// reads its sizes and base and then fails as it does for any such file,
+/// leaving the file as it was, and the game, which ignores the result,
 /// goes on to load it.
 #[test]
-fn rebasing_the_built_in_opengl32_is_denied() {
+fn the_built_in_opengl32_can_not_be_moved() {
     let (outcomes, _) = run("opengl32", &[call("OPENGL32.DLL")], &[], None);
     assert_eq!(
         outcomes,
         [Outcome {
             result: 0,
-            error: ERROR_ACCESS_DENIED,
-            old_size: UNTOUCHED,
-            old_base: UNTOUCHED,
-            new_size: UNTOUCHED,
+            error: ERROR_INVALID_ADDRESS,
+            old_size: 0x6000,
+            old_base: 0xBF74_0000,
+            new_size: 0x1_0000,
             new_base: 0x6450_0000,
         }]
     );

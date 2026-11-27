@@ -1,19 +1,21 @@
 //! The built-in Windows's Win16 loader and memory: Windows 3.1 programs
 //! with segments flagged 32-bit, and the selectors such programs make
 //! 32-bit; libraries that load their own segments; what Windows does for
-//! their CLI, STI and INT n; and the real-mode code they run through
-//! DPMI (INT 31h AX=0300h to 0304h). The programs are made byte by byte
+//! their CLI, STI and INT n; the real-mode code they run through DPMI
+//! (INT 31h AX=0300h to 0304h); and the prologues of exported functions
+//! the loader patches. The programs are made byte by byte
 //! (tests/common/win16), or assembled.
 
 use crate::win16;
 
 use iced_x86::code_asm::*;
 use rust_dos_ne as ne;
-use win16::{CODE, Code, program, run};
+use win16::{CODE, Code, module, program, run};
 
 /// KERNEL's ordinals.
 const GLOBAL_ALLOC: u16 = 15;
 const GLOBAL_REALLOC: u16 = 16;
+const MAKE_PROC_INSTANCE: u16 = 51;
 const ALLOC_DS_TO_CS_ALIAS: u16 = 171;
 const ZERO_SELECTOR: u16 = 183;
 const GLOBAL_DOS_ALLOC: u16 = 184;
@@ -230,6 +232,153 @@ fn a_real_mode_handler_a_task_set_runs_for_its_int() {
     code.fixup(zero, ne::ADDR_OFFSET, target);
     let (exit, log) = run("real_mode_handler", program(&code, CODE));
     assert_eq!(exit, 0x42, "{log}");
+}
+
+/// A program with the module flags `module_flags` that calls its
+/// exported function through MakeProcInstance's thunk, kept at 10h of
+/// its data segment, with DS 0. It passes MakeProcInstance its instance
+/// if `instance`, else 0. The function has the "mov ax,ds; nop"
+/// prologue, sets DS from AX and returns it; the program ends with 0 if
+/// that was its data segment (SS) and 1 if not.
+fn exported_callback_program(module_flags: u16, instance: bool) -> Vec<u8> {
+    let mut code = Code::new();
+    let function_at = code.here() + 2;
+    code.push_far(0);
+    if instance {
+        code.emit(&[0x57]); // push di: the instance
+    } else {
+        code.push(0);
+    }
+    code.call("KERNEL", MAKE_PROC_INSTANCE)
+        .emit(&[
+            0x36, 0xA3, 0x10, 0x00, // mov ss:[10h],ax
+            0x36, 0x89, 0x16, 0x12, 0x00, // mov ss:[12h],dx
+            0x31, 0xC0, // xor ax,ax
+            0x8E, 0xD8, // mov ds,ax
+            0x36, 0xFF, 0x1E, 0x10, 0x00, // call far ss:[10h]
+            0x8C, 0xD1, // mov cx,ss
+            0x3B, 0xC1, // cmp ax,cx
+            0xB0, 0x00, // mov al,0
+            0x74, 0x02, // je over the next
+            0xB0, 0x01, // mov al,1
+        ])
+        .exit_al();
+    let function = code.here();
+    code.emit(&[
+        0x8C, 0xD8, 0x90, // mov ax,ds; nop: the prologue the loader patches
+        0x45, // inc bp
+        0x55, // push bp
+        0x8B, 0xEC, // mov bp,sp
+        0x1E, // push ds
+        0x8E, 0xD8, // mov ds,ax
+        0x8C, 0xD8, // mov ax,ds: the data segment it got
+        0x1F, // pop ds
+        0x5D, // pop bp
+        0x4D, // dec bp
+        0xCB, // retf
+    ]);
+    code.patch(function_at, function);
+    module(&code, CODE, module_flags, &[], &[function])
+}
+
+#[test]
+fn an_exported_function_of_a_singledata_program_gets_its_data_segment() {
+    // Borland's linker marks some programs SINGLEDATA (Memphis Math's
+    // MMAP.EXE and MINVEN.EXE) and flags their exports as exported only,
+    // not as using the shared data segment. Windows still patches their
+    // prologues: with "mov ax,ds" left in, a call through the thunk runs
+    // the function with the caller's DS.
+    let program = exported_callback_program(ne::SINGLEDATA, true);
+    let (exit, log) = run("singledata_callback", program);
+    assert_eq!(exit, 0, "{log}");
+}
+
+#[test]
+fn an_exported_function_of_a_multipledata_program_gets_its_data_segment() {
+    let program = exported_callback_program(ne::MULTIPLEDATA, true);
+    let (exit, log) = run("multipledata_callback", program);
+    assert_eq!(exit, 0, "{log}");
+}
+
+/// MakeProcInstance with no instance makes a thunk for the caller's data
+/// segment, as Wine's does: the program's export, whose prologue the
+/// loader made "nop; nop", gets the program's data segment through it.
+#[test]
+fn make_proc_instance_without_an_instance_uses_the_callers_data_segment() {
+    let program = exported_callback_program(ne::SINGLEDATA, false);
+    let (exit, log) = run("callback_no_instance", program);
+    assert_eq!(exit, 0, "{log}");
+}
+
+/// LIB.DLL, a SINGLEDATA library whose ordinal 1, flagged exported only,
+/// has the "mov ax,ds; nop" prologue, sets DS from AX and returns the
+/// word at 10h of that segment: 1772h in the library's data segment.
+fn singledata_library() -> Vec<u8> {
+    let mut b = ne::Builder::new("LIB", ne::LIBMODULE | ne::SINGLEDATA | ne::PROTMODE);
+    let text = b.segment(ne::SegmentSpec {
+        data: vec![
+            0xB8, 0x01, 0x00, 0xCB, // LibMain: mov ax,1; retf
+            0x8C, 0xD8, 0x90, // mov ax,ds; nop: the prologue patched
+            0x45, // inc bp
+            0x55, // push bp
+            0x8B, 0xEC, // mov bp,sp
+            0x1E, // push ds
+            0x8E, 0xD8, // mov ds,ax
+            0xA1, 0x10, 0x00, // mov ax,[10h]
+            0x1F, // pop ds
+            0x5D, // pop bp
+            0x4D, // dec bp
+            0xCB, // retf
+        ],
+        flags: CODE,
+        alloc: 0,
+        relocations: Vec::new(),
+    });
+    let mut data = vec![0; 0x12];
+    data[0x10..].copy_from_slice(&0x1772u16.to_le_bytes());
+    let data = b.segment(ne::SegmentSpec {
+        data,
+        flags: ne::SEG_DATA | 0x0C00,
+        alloc: 0x100,
+        relocations: Vec::new(),
+    });
+    b.auto_data(data, 0, 0);
+    b.entry_point(text, 0);
+    let entry = ne::Entry::Code {
+        segment: text as u8,
+        offset: 4,
+        flags: ne::ENTRY_EXPORTED,
+        moveable: true,
+    };
+    b.entry(1, entry);
+    b.build()
+}
+
+#[test]
+fn an_exported_function_of_a_singledata_library_gets_its_data_segment() {
+    // A library's exports are called directly, with the caller's DS (0
+    // here), so its loader-patched prologue has to load the library's
+    // own data segment even where the linker left out the shared-data
+    // flag. The program ends with 0 if the function read the library's
+    // 1772h, 1 if not.
+    let mut code = Code::new();
+    code.emit(&[
+        0x31, 0xC0, // xor ax,ax
+        0x8E, 0xD8, // mov ds,ax
+    ])
+    .call("LIB", 1)
+    .emit(&[
+        0x3D, 0x72, 0x17, // cmp ax,1772h
+        0xB0, 0x00, // mov al,0
+        0x74, 0x02, // je over the next
+        0xB0, 0x01, // mov al,1
+    ])
+    .exit_al();
+    let exe = program(&code, CODE);
+    let (exit, log) = win16::run_with("singledata_library_export", exe, |_, dir| {
+        std::fs::write(dir.join("LIB.DLL"), singledata_library()).unwrap();
+    });
+    assert_eq!(exit, 0, "{log}");
 }
 
 /// The DPMI tests' places in the automatic data segment: the DOS block's

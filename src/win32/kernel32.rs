@@ -19,8 +19,10 @@ pub(crate) mod path;
 mod process;
 pub use process::ProgramInLine;
 mod profile;
-pub(in crate::win32) use profile::profile_int;
-pub(crate) use profile::profile_value;
+pub(in crate::win32) use profile::{
+    parse_int, profile_entries, profile_int, profile_number, profile_values,
+};
+pub(crate) use profile::{profile_value, update_profile};
 mod sort;
 mod sync;
 mod text;
@@ -31,6 +33,7 @@ mod win98;
 pub use win98::is_directory;
 pub(crate) mod virtual_memory;
 mod vxd;
+pub(super) use vxd::call_returned as vxd_call_returned;
 
 pub(super) use locale::enum_returned;
 pub(crate) use path::{change_directory, current_directory, find_entries, full_path, matches};
@@ -38,7 +41,8 @@ pub(crate) use process::{spawn, startup_show, startup_showing};
 pub(super) use process::{STARTUPINFO_SIZE, win_exec_step};
 pub(super) use file::{
     CREATE_ALWAYS, CREATE_NEW, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,
-    OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING, new_file, open_file, open_of,
+    OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING, io_locked, new_file, open_file, open_of,
+    resize_locked,
 };
 
 use super::stubs::{Api, Conv, Dll};
@@ -362,7 +366,7 @@ static APIS: &[Api] = &[
     stdcall("LocalLock", 567, 1, global::global_lock),
     stdcall("LocalUnlock", 571, 1, global::global_unlock),
     stdcall("LocalHandle", 566, 1, global::global_handle),
-    stdcall("LocalFlags", 564, 1, global::global_flags),
+    stdcall("LocalFlags", 564, 1, global::local_flags),
     stdcall("LocalCompact", 562, 1, global::global_compact),
     stdcall("LocalShrink", 569, 2, global::local_shrink),
     stdcall("IsBadReadPtr", 533, 2, virtual_memory::is_bad_read_ptr),
@@ -818,7 +822,46 @@ static APIS: &[Api] = &[
         5,
         toolhelp::toolhelp32_read_process_memory,
     ),
+    stdcall("DebugBreak", 210, 0, debug_break),
+    // Win32s's Universal Thunks (src/win16/universal.rs), and where their
+    // thunks' code goes.
+    stdcall("UTRegister", 780, 7, crate::win16::universal::ut_register),
+    stdcall("UTUnRegister", 781, 1, crate::win16::universal::ut_unregister),
+    stdcall("UTGlue32", 0, 4, crate::win16::universal::ut_glue32),
+    // The resource functions' W versions, which Windows 95 and 98
+    // implement, and EnumResourceLanguagesA.
+    stdcall("FindResourceW", 294, 3, module::find_resource_w),
+    stdcall("FindResourceExW", 293, 4, module::find_resource_ex_w),
+    stdcall("EnumResourceTypesW", 239, 3, module::enum_resource_types_w),
+    stdcall("EnumResourceNamesW", 237, 4, module::enum_resource_names_w),
+    stdcall(
+        "EnumResourceLanguagesA",
+        234,
+        5,
+        module::enum_resource_languages,
+    ),
+    stdcall(
+        "EnumResourceLanguagesW",
+        235,
+        5,
+        module::enum_resource_languages_w,
+    ),
 ];
+
+/// DebugBreak: Windows 98's is an INT 3, whose breakpoint exception goes
+/// to the program's handlers without a debugger, and ends the program if
+/// none handles it. A handler that goes on goes on after the call. The
+/// record has the one parameter the processor's breakpoint gives. KISS
+/// Psycho Circus imports it, and CopyLok's loader refuses to start a game
+/// whose imports aren't all there.
+///
+/// It is a trap, not INT 3 and RET as code: older tables lack it, and
+/// `stub_tables::mend` can only give them a trap. So the exception is at
+/// the caller's return address rather than at an INT 3 in KERNEL32.
+fn debug_break(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    const EXCEPTION_BREAKPOINT: u32 = 0x8000_0003;
+    super::seh::raise_from_call(cpu, 0, EXCEPTION_BREAKPOINT, 0, &[0])
+}
 
 /// The places in `APIS` of the system's own stubs.
 const CALL_RETURN: usize = 43;
@@ -887,6 +930,9 @@ pub fn read_file(cpu: &mut Cpu, handle: u32, n: u32) -> Result<Vec<u8>, u32> {
     if open.access & file::GENERIC_READ == 0 {
         return Err(ERROR_ACCESS_DENIED);
     }
+    if file::io_locked(cpu, open, n, false) {
+        return Err(crate::disk::LOCK_VIOLATION as u32);
+    }
     crate::interrupts::int21::read_open_file(cpu, open.sft, n as usize).map_err(|e| e as u32)
 }
 
@@ -896,6 +942,9 @@ pub fn write_file(cpu: &mut Cpu, handle: u32, data: &[u8]) -> Result<u32, u32> {
     let open = file::open_of(cpu, handle).ok_or(ERROR_INVALID_HANDLE)?;
     if open.access & file::GENERIC_WRITE == 0 {
         return Err(ERROR_ACCESS_DENIED);
+    }
+    if !data.is_empty() && file::io_locked(cpu, open, data.len() as u32, true) {
+        return Err(crate::disk::LOCK_VIOLATION as u32);
     }
     let (dos, sft) = (open.dos, open.sft);
     super::dos(cpu, |cpu| crate::interrupts::int21::write_open_file(cpu, dos, sft, data))
@@ -1092,12 +1141,19 @@ pub mod files {
         cpu.bus.disk.is_file(&full)
     }
 
+    /// Whether a file or directory takes the name `name` from a file
+    /// MoveFileA would move there (`DiskController::name_taken`).
+    pub fn name_taken(cpu: &mut Cpu, name: &str) -> bool {
+        let full = full_path(cpu, name);
+        cpu.bus.disk.name_taken(&full)
+    }
+
     /// Write `data` as the whole file `name`, made anew.
     pub fn write_whole(cpu: &mut Cpu, name: &str, data: &[u8]) -> Result<(), u32> {
         let full = full_path(cpu, name);
         cpu.bus
             .disk
-            .write_whole_file(&full, data, None)
+            .long_name_call(|disk| disk.write_whole_file(&full, data, None))
             .map_err(|e| e as u32)
     }
 

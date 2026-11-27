@@ -3,7 +3,9 @@
 Rust-DOS runs in [RetroArch](https://www.retroarch.com/) and the other
 [libretro](https://www.libretro.com/) frontends as the core `rust_dos_libretro`.
 It is the same emulator as the Rust-DOS program, with the frontend's window,
-sound, gamepads, save states and RetroAchievements.
+sound, gamepads, save states and RetroAchievements. It is also how Rust-DOS
+runs on Android phones and tablets: in RetroArch for Android, with the core
+from the `-libretro-android-` zip (see [Installing](#installing)).
 
 ## Installing
 
@@ -80,17 +82,69 @@ start it (pick with the D-pad, A to start). A game's gamepad mapping plays on
 the first port set to **Gamepad as keyboard** in *Controls → Port 1 Controls*,
 its action wheel included.
 
-**OS images.** Hard disk images of installed operating systems go in
-`system/rust-dos/os/`. The core
-option **Boot OS** (*System*) lists them: with one chosen, a zip, `.dosz` or
-folder without a configuration of its own starts that system from its image
-(`BOOT -l C`), with the game as its second disk, D:. The game gets a profile
-as any package does, with the drives of its
-[`automount` folder](../GAME-PACKAGES.md#the-automount-folder). Each game keeps the
-image's changes in its own delta file in `saves/rust-dos/saves/<name>`, so the
-image stays as it was installed and one install serves every game. At the
-prompt, `REMOUNT WIN98SE C` (or `IMGMOUNT C WIN98SE`) mounts an image by its
-name.
+**OS images (optional).** You usually don't need one. DOS games run on
+the core's own DOS, and Windows 95, 98 and 3.1 games run on the built-in
+Windows (see [Windows games](#windows-games)), with no operating system
+installed anywhere. Skip this part unless a game doesn't run that way,
+or you know it has to run under the real system.
+
+If you do need one: an OS image is a hard disk image with an operating
+system already installed on it, such as Windows 98 SE, and the core can
+start a game inside that system instead of on its own DOS. Making the
+image means installing the system on it first, as
+[win9x-howto.md](../docs/win9x-howto.md) describes. Then:
+
+* Put the image in the `rust-dos/os` folder inside the frontend's system
+  folder (in RetroArch, *Settings → Directory → System/BIOS*), for
+  example `system/rust-dos/os/win98se.img`. `.img`, `.vhd` and `.ima`
+  files are found there.
+* The core option **Boot OS** (*System*) lists the images there by file
+  name, without the extension: `win98se.img` shows as `WIN98SE`. The
+  list is read when the core loads, so reload the core after adding an
+  image.
+* With an image chosen, loading a game's zip, `.dosz` or folder boots
+  that system from the image as C: (`BOOT -l C`) and puts the game on
+  D:. The game gets a profile as any package does, with the drives of
+  its [`automount` folder](../GAME-PACKAGES.md#the-automount-folder).
+* A game with a configuration of its own (a `rust-dos.conf` or
+  `dosbox.conf` in it, or a DOSBox `GAME.conf` beside `GAME.zip`)
+  ignores **Boot OS** and runs as its configuration says. So do an
+  `.exe` loaded directly and disk images loaded as content.
+* The image file itself is never written. What the system and the game
+  change on C: (a game installed from D: to C:, saved settings) goes to
+  a delta file for that game in `saves/rust-dos/saves/<name>`. One
+  installed image serves every game, and each game sees only its own
+  changes.
+
+At the prompt, `REMOUNT WIN98SE C` (or `IMGMOUNT C WIN98SE`) mounts an
+image from that folder by its name.
+
+## Windows games
+
+Windows 95 and 98 games, and Windows 3.1 programs, usually need no
+operating system image. The core has the built-in Windows: KERNEL32,
+USER32, GDI32, DirectX and the other system DLLs are written into the
+emulator, as its DOS is, so a Windows game starts from the DOS prompt
+like a DOS game, with no Windows files. It is off by default: turn it on
+with `win32=true` in the `[emulator]` section of `rust-dos.conf`, or
+with `windows=builtin` in a game profile's `[game]`, then load the
+game's `.exe`, folder or archive as content. A GOG install whose
+launcher starts a Windows program gets such a profile when it is
+imported. [builtin-windows.md](../docs/builtin-windows.md) says how to
+use it and install a game from its CD,
+[compatibility.md](../docs/compatibility.md#windows-games-on-the-built-in-windows)
+lists the games known to run, and
+[Windows games](../CONFIGURATION.md#windows-games) in CONFIGURATION.md
+has a profile to start from.
+
+Booting an installed Windows 95 or 98 from an OS image with **Boot OS**
+(see [Content](#content)) is the fallback. Use it for a game the
+built-in Windows doesn't run yet (it stops with a message naming the
+function it lacks), or when the game has to behave exactly as on real
+Windows: the built-in DLLs cover what the tested games call, and
+[What differs from Windows 98](../docs/builtin-windows.md#what-differs-from-windows-98)
+lists where they behave differently. The image needs Windows installed
+in it first, as [win9x-howto.md](../docs/win9x-howto.md) describes.
 
 ## Settings
 
@@ -119,21 +173,22 @@ again.
 
 ## The 3dfx Voodoo with OpenGL
 
-With the core options **3dfx Voodoo** on and **3dfx renderer** set to
-OpenGL (`voodoo_renderer=opengl`), the frontend's OpenGL draws the card's
-picture, as the program's window does: at **3dfx OpenGL scale** times its
-resolution (`voodoo_scale`), with **3dfx OpenGL antialiasing**
-(`voodoo_msaa`) and **3dfx OpenGL dithering** (`voodoo_dither`, the
-card's dither pattern, on by default). That needs RetroArch's `glcore`
-or `gl` video driver (OpenGL 3, not OpenGL ES). The renderer is picked
-when content is loaded; without such a driver, the software renderer
-draws the card, as it does by default. A Voodoo3 or Banshee is always
-drawn in software: its picture is the whole desktop, with the video
-overlay and the hardware cursor, which the OpenGL renderer doesn't draw.
-Save states and the settings window work as with the software renderer;
-while the settings window or the performance overlay is open, the card's
-picture is the software one. A Voodoo3 or Banshee (`machine=svga_voodoo3`
-or `svga_banshee`) is always drawn in software in the core.
+With the core options **3dfx Voodoo** on and **3dfx renderer** set to OpenGL
+(`voodoo_renderer=opengl`), the frontend's OpenGL draws the card's picture,
+as the program's window does: at **3dfx OpenGL scale** times its resolution
+(`voodoo_scale`), with **3dfx OpenGL antialiasing** (`voodoo_msaa`) and
+**3dfx OpenGL dithering** (`voodoo_dither`, the card's dither pattern, on by
+default). That needs RetroArch's `glcore` or `gl` video driver: OpenGL 3, or
+OpenGL ES 3 as RetroArch has on Android. The renderer is picked when content
+is loaded; without such a driver, the software renderer draws the card, as
+it does by default. With OpenGL ES, antialiasing takes the pixels' resolved
+colours where a draw blends, as on a desktop driver without
+`GL_ARB_sample_shading`. A Voodoo3 or Banshee (`machine=svga_voodoo3` or
+`svga_banshee`) is always drawn in software in the core: its picture is the
+whole desktop, with the video overlay and the hardware cursor, which the
+OpenGL renderer doesn't draw. Save states and the settings window work as
+with the software renderer; while the settings window or the performance
+overlay is open, the card's picture is the software one.
 
 ## Controls
 

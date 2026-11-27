@@ -1,8 +1,8 @@
 //! MSVFW32.DLL: the DrawDib functions, which draw a DIB to a DC and
-//! decompress it first when it is compressed; ICInfo, ICOpen, ICLocate
-//! and ICClose, which find and open the decompressors codec.rs has; and
-//! ICSendMessage and ICDecompress, through which a program decompresses
-//! Microsoft Video 1 frames itself. The DrawDib functions' behaviour
+//! decompress it first when it is compressed; ICInfo, ICOpen, ICLocate,
+//! ICGetInfo and ICClose, which find, open and describe the decompressors
+//! codec.rs has; and ICSendMessage and ICDecompress, through which a
+//! program decompresses frames itself. The DrawDib functions' behaviour
 //! follows Wine's drawdib.c (LGPL 2.1 or later):
 //!
 //! Copyright 2000 Bradley Baetz
@@ -11,9 +11,15 @@
 //! the process heap, which DrawDibDraw then draws with StretchDIBits;
 //! DDF_UPDATE draws it again and DDF_DONTDRAW decompresses without
 //! drawing. DrawDibBegin fails for a DIB no codec of codec.rs takes. An
-//! uncompressed DIB goes to StretchDIBits as it is. A save state keeps the
-//! DIB but not the decoder: after a restore the decoder refuses the
-//! frames up to the next key frame, and the picture stays until then.
+//! uncompressed DIB goes to StretchDIBits as it is. On a display of 256
+//! colours a picture of more than 8 bits a pixel is stretched to the
+//! destination and dithered to the halftone palette (`gdi32::dither`),
+//! but for a Cinepak one: iccvid.dll decodes that to 8 bits itself, in
+//! a palette of its own (`cinepak::palette_8`), at the size of the
+//! picture or twice it, and DrawDib stretches that.
+//! A save state keeps the DIB but not the decoder: after a restore the
+//! decoder refuses the frames up to the next key frame, and the picture
+//! stays until then.
 
 use super::codec::{self, Codec};
 use super::msvideo1;
@@ -71,6 +77,7 @@ static APIS: &[Api] = &[
         conv: Conv::Cdecl,
         handler: ic_decompress,
     },
+    stdcall("ICGetInfo", 30, 3, ic_get_info),
 ];
 
 /// ICINFO's size: six DWORDs, then szName[16], szDescription[128] and
@@ -106,17 +113,48 @@ fn ic_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(&(fourcc, driver)) = found else {
         return Some(0);
     };
+    write_info(cpu, info, fourcc, 0, "", "", Some(driver));
+    Some(1)
+}
+
+/// An ICINFO at `at`: the codec `fourcc`'s type and handler, its flags
+/// and versions, and its name, description and driver's file in UTF-16.
+/// With no `driver`, szDriver is left as it is, as a driver answering
+/// ICM_GETINFO leaves it for MSVFW32 to fill.
+fn write_info(
+    cpu: &mut Cpu,
+    at: u32,
+    fourcc: &[u8; 4],
+    version: u32,
+    name: &str,
+    description: &str,
+    driver: Option<&str>,
+) {
     let mut bytes = Vec::with_capacity(ICINFO as usize);
-    for value in [ICINFO, ICTYPE_VIDEO, u32::from_le_bytes(*fourcc), 0, 0, ICVERSION] {
+    for value in [
+        ICINFO,
+        ICTYPE_VIDEO,
+        u32::from_le_bytes(*fourcc),
+        0,
+        version,
+        ICVERSION,
+    ] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
-    bytes.resize(24 + 2 * (16 + 128), 0);
-    for unit in driver.encode_utf16() {
-        bytes.extend_from_slice(&unit.to_le_bytes());
+    let texts = [
+        Some((name, 16)),
+        Some((description, 128)),
+        driver.map(|driver| (driver, 128)),
+    ];
+    for (text, chars) in texts.into_iter().flatten() {
+        let end = bytes.len() + 2 * chars;
+        // The last character stays the terminating 0.
+        for unit in text.encode_utf16().take(chars - 1) {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes.resize(end, 0);
     }
-    bytes.resize(ICINFO as usize, 0);
-    cpu.bus.guest_write_bytes(info, &bytes);
-    Some(1)
+    cpu.bus.guest_write_bytes(at, &bytes);
 }
 
 /// Whether `kind` is `vidc`, the type of the codecs here, in either case.
@@ -165,25 +203,95 @@ fn ic_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((fourcc, _)) = installed(handler).filter(|_| video(kind)) else {
         return Some(0);
     };
-    let list = &mut crate::win32::process(cpu).vfw.codecs;
-    let slot = super::free_slot(list);
-    list[slot] = Some(codec::upper(u32::from_le_bytes(**fourcc)));
-    Some(slot as u32 + 1)
+    Some(open(cpu, codec::upper(u32::from_le_bytes(**fourcc))))
+}
+
+/// A new handle to the codec `fourcc` (in capitals), with no decoder
+/// yet.
+fn open(cpu: &mut Cpu, fourcc: u32) -> u32 {
+    let vfw = &mut crate::win32::process(cpu).vfw;
+    let slot = super::free_slot(&mut vfw.codecs);
+    vfw.codecs[slot] = Some(fourcc);
+    if vfw.decoders.len() <= slot {
+        vfw.decoders.resize_with(slot + 1, Codec::default);
+    }
+    vfw.decoders[slot] = Codec::default();
+    slot as u32 + 1
 }
 
 /// ICClose(hic): ICERR_OK, or ICERR_BADHANDLE for a handle that isn't
 /// open.
 fn ic_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let list = &mut crate::win32::process(cpu).vfw.codecs;
-    let open = (args[0] as usize)
-        .checked_sub(1)
-        .and_then(|slot| list.get_mut(slot))
+    let vfw = &mut crate::win32::process(cpu).vfw;
+    let slot = (args[0] as usize).checked_sub(1);
+    let open = slot
+        .and_then(|slot| vfw.codecs.get_mut(slot))
         .and_then(Option::take);
+    if let Some(decoder) = slot.and_then(|slot| vfw.decoders.get_mut(slot)) {
+        *decoder = Codec::default();
+    }
     Some(if open.is_some() {
         ICERR_OK
     } else {
         ICERR_BADHANDLE
     })
+}
+
+/// ICGetInfo(hic, lpicinfo, cb): the ICINFO of the open codec, which on
+/// Windows its driver fills (ICM_GETINFO, `get_info`) with its name and
+/// description, and MSVFW32 with the driver's file. It answers what the
+/// driver does: ICINFO's size, or 0 when `cb` is smaller than an ICINFO.
+/// A handle that isn't open gets ICERR_BADHANDLE, and no ICINFO
+/// MMSYSERR_INVALPARAM, as Wine's ICGetInfo gives. Actua Soccer 2 asks
+/// for its intro film's Microsoft Video 1 decoder's after ICLocate,
+/// before it decompresses, and stops without it.
+fn ic_get_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[hic, info, size] = args else {
+        unreachable!()
+    };
+    let Some(open) = open_codec(cpu, hic) else {
+        return Some(ICERR_BADHANDLE);
+    };
+    if info == 0 {
+        return Some(MMSYSERR_INVALPARAM);
+    }
+    Some(get_info(cpu, open, info, size, true))
+}
+
+/// ICM_GETINFO(lpicinfo, cb) of the open codec `open`: with no ICINFO,
+/// its size; 0 when `cb` is smaller than an ICINFO; else the ICINFO
+/// filled and its size. dwFlags is 0, since the codecs here don't
+/// compress, and dwVersion is ICVERSION, as Wine's drivers give. The
+/// driver leaves szDriver alone; ICGetInfo (`with_driver`) fills it.
+fn get_info(cpu: &mut Cpu, open: u32, info: u32, size: u32, with_driver: bool) -> u32 {
+    if info == 0 {
+        return ICINFO;
+    }
+    if size < ICINFO || !allows(cpu, info, ICINFO, true) {
+        return 0;
+    }
+    let Some(&(fourcc, driver)) = installed(open) else {
+        return 0;
+    };
+    let (name, description) = describe(open);
+    let driver = with_driver.then_some(driver);
+    write_info(cpu, info, fourcc, ICVERSION, name, description, driver);
+    ICINFO
+}
+
+/// ICM_GETINFO, and MMSYSERR_INVALPARAM.
+const ICM_GETINFO: u32 = 0x5002;
+const MMSYSERR_INVALPARAM: u32 = 11;
+
+/// The name and description of the installed codec of FourCC `fourcc`
+/// (in capitals), as Windows 98's drivers give them. The Indeo drivers'
+/// aren't known here, and their ICINFO has none.
+fn describe(fourcc: u32) -> (&'static str, &'static str) {
+    match &fourcc.to_le_bytes() {
+        b"MSVC" => ("MS-CRAM", "Microsoft Video 1"),
+        b"CVID" => ("Cinepak", "Cinepak Codec by Radius"),
+        _ => ("", ""),
+    }
 }
 
 /// The BITMAPINFO at `at`, its header and colours: None if the header
@@ -230,13 +338,42 @@ const BI_BITFIELDS: u32 = 3;
 /// rows run from the top.
 type Layout = (msvideo1::Output, bool);
 
+/// The layout of the uncompressed DIB the BITMAPINFO at `output`
+/// describes, and its width and height: 8 bits, 16 (RGB555, or RGB565
+/// by its BI_BITFIELDS masks), 24 or 32, from the bottom or the top. An
+/// error for another format.
+fn output_layout(cpu: &mut Cpu, output: u32) -> Result<(Layout, (u32, u32)), u32> {
+    let out = read_info(cpu, output).ok_or(ICERR_BADPARAM)?;
+    // BI_BITFIELDS's masks follow a BITMAPINFOHEADER, and are the same
+    // place in a BITMAPV4HEADER or V5 one: at 40 either way.
+    let masks = output.wrapping_add(HEADER);
+    let masks = allows(cpu, masks, 12, false).then(|| {
+        let mut mask = |n: u32| cpu.bus.guest_read_32(masks + 4 * n);
+        [mask(0), mask(1), mask(2)]
+    });
+    use msvideo1::Output;
+    let layout = match (out.compression, out.bit_count) {
+        (BI_RGB, 8) => Output::Indexes,
+        (BI_RGB, 16) => Output::Rgb16 { green6: false },
+        (BI_RGB, 24) => Output::Rgb24,
+        (BI_RGB, 32) => Output::Rgb32,
+        (BI_BITFIELDS, 16) => match masks {
+            Some([0xF800, 0x07E0, 0x001F]) => Output::Rgb16 { green6: true },
+            Some([0x7C00, 0x03E0, 0x001F]) => Output::Rgb16 { green6: false },
+            _ => return Err(ICERR_BADFORMAT),
+        },
+        _ => return Err(ICERR_BADFORMAT),
+    };
+    let size = (out.width.unsigned_abs(), out.height.unsigned_abs());
+    Ok(((layout, out.height < 0), size))
+}
+
 /// The formats of a Microsoft Video 1 decompression, from the
 /// BITMAPINFOs at `input` and `output`: the stream's, and the layout of
 /// the output (none for no `output`). An error for a pair it doesn't
 /// decompress. The stream is CRAM (or MSVC) of 8 or 16 bits, and the
-/// output an uncompressed DIB of its size: 8 bits for an 8-bit stream,
-/// 16 (RGB555, or RGB565 by its BI_BITFIELDS masks), 24 or 32, from the
-/// bottom or the top.
+/// output an uncompressed DIB of its size (`output_layout`), of 8 bits
+/// only for an 8-bit stream.
 fn ms_video_1_formats(
     cpu: &mut Cpu,
     input: u32,
@@ -250,46 +387,73 @@ fn ms_video_1_formats(
     if output == 0 {
         return Ok((source, None));
     }
-    let out = read_info(cpu, output).ok_or(ICERR_BADPARAM)?;
-    // BI_BITFIELDS's masks follow a BITMAPINFOHEADER, and are the same
-    // place in a BITMAPV4HEADER or V5 one: at 40 either way.
-    let masks = output.wrapping_add(HEADER);
-    let masks = allows(cpu, masks, 12, false).then(|| {
-        let mut mask = |n: u32| cpu.bus.guest_read_32(masks + 4 * n);
-        [mask(0), mask(1), mask(2)]
-    });
-    use msvideo1::Output;
-    let layout = match (out.compression, out.bit_count) {
-        (BI_RGB, 8) => Some(Output::Indexes),
-        (BI_RGB, 16) => Some(Output::Rgb16 { green6: false }),
-        (BI_RGB, 24) => Some(Output::Rgb24),
-        (BI_RGB, 32) => Some(Output::Rgb32),
-        (BI_BITFIELDS, 16) => match masks {
-            Some([0xF800, 0x07E0, 0x001F]) => Some(Output::Rgb16 { green6: true }),
-            Some([0x7C00, 0x03E0, 0x001F]) => Some(Output::Rgb16 { green6: false }),
-            _ => None,
-        },
-        _ => None,
-    };
-    let size = (out.width.unsigned_abs(), out.height.unsigned_abs());
-    match layout {
-        Some(layout) if size == (source.width, source.height) && layout.takes(depth) => {
-            Ok((source, Some((layout, out.height < 0))))
+    match output_layout(cpu, output)? {
+        (layout, size) if size == (source.width, source.height) && layout.0.takes(depth) => {
+            Ok((source, Some(layout)))
         }
         _ => Err(ICERR_BADFORMAT),
     }
 }
 
+/// Whether the codec opened as `fourcc` (in capitals) decodes frames of
+/// biCompression `compression`: its own FourCC, which for Indeo 3's
+/// driver is either of IV31 and IV32.
+fn decodes(fourcc: u32, compression: u32) -> bool {
+    const IV31: u32 = u32::from_le_bytes(*b"IV31");
+    const IV32: u32 = u32::from_le_bytes(*b"IV32");
+    let compression = codec::upper(compression);
+    compression == fourcc || matches!((fourcc, compression), (IV31 | IV32, IV31 | IV32))
+}
+
+/// The formats of a decompression by the codec `fourcc` other than
+/// Microsoft Video 1, as `ms_video_1_formats` gives them: the stream is
+/// one of the codec's that codec.rs decodes, and the output an
+/// uncompressed DIB of its size of 16, 24 or 32 bits. codec.rs gives a
+/// picture of 24 bits, which is written in the output's format.
+/// Cinepak's 8 bits, in iccvid.dll's own palette, aren't given here
+/// (#2202), though iccvid.dll gives them.
+fn codec_formats(
+    cpu: &mut Cpu,
+    fourcc: u32,
+    input: u32,
+    output: u32,
+) -> Result<(codec::Format, Option<Layout>), u32> {
+    let source = read_format(cpu, input).ok_or(ICERR_BADPARAM)?;
+    if !decodes(fourcc, source.compression) || !codec::supported(&source) {
+        return Err(ICERR_BADFORMAT);
+    }
+    if output == 0 {
+        return Ok((source, None));
+    }
+    match output_layout(cpu, output)? {
+        (layout, size)
+            if size == (source.width, source.height) && layout.0 != msvideo1::Output::Indexes =>
+        {
+            Ok((source, Some(layout)))
+        }
+        _ => Err(ICERR_BADFORMAT),
+    }
+}
+
+/// The formats of a decompression by the codec `fourcc`.
+fn formats(
+    cpu: &mut Cpu,
+    fourcc: u32,
+    input: u32,
+    output: u32,
+) -> Result<(codec::Format, Option<Layout>), u32> {
+    if fourcc == MSVC {
+        ms_video_1_formats(cpu, input, output)
+    } else {
+        codec_formats(cpu, fourcc, input, output)
+    }
+}
+
 /// ICM_DECOMPRESS_QUERY of the open codec `fourcc`: whether it
 /// decompresses the format at `input` to the one at `output`, or to one
-/// of its choice for 0. Only Microsoft Video 1 answers here: the other
-/// codecs decode for DrawDib, AVIStreamGetFrame and MCI, and have no
-/// ICDecompress yet.
+/// of its choice for 0.
 fn decompress_query(cpu: &mut Cpu, fourcc: u32, input: u32, output: u32) -> u32 {
-    if fourcc != MSVC {
-        return ICERR_UNSUPPORTED;
-    }
-    match ms_video_1_formats(cpu, input, output) {
+    match formats(cpu, fourcc, input, output) {
         Ok(_) => ICERR_OK,
         Err(e) => e,
     }
@@ -303,7 +467,8 @@ fn decompress_query(cpu: &mut Cpu, fourcc: u32, input: u32, output: u32) -> u32 
 /// handle is one ICOpen would give, which ICClose closes. Only
 /// ICMODE_DECOMPRESS and ICMODE_FASTDECOMPRESS find one, since no codec
 /// here compresses or draws. Biosys finds the decoder of its Microsoft
-/// Video 1 films so, and stops when there is none.
+/// Video 1 films so, and Outlaw Racers that of its Cinepak ones, and
+/// both stop or show nothing when there is none.
 fn ic_locate(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[kind, handler, input, output, mode] = args else {
         unreachable!()
@@ -321,17 +486,14 @@ fn ic_locate(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         };
         let fourcc = codec::upper(u32::from_le_bytes(**name));
         if decompress_query(cpu, fourcc, input, output) == ICERR_OK {
-            let list = &mut crate::win32::process(cpu).vfw.codecs;
-            let slot = super::free_slot(list);
-            list[slot] = Some(fourcc);
-            return Some(slot as u32 + 1);
+            return Some(open(cpu, fourcc));
         }
     }
     Some(0)
 }
 
-/// ICSendMessage(hic, msg, dw1, dw2): the codec's answer. A codec here
-/// answers Microsoft Video 1's decompression messages, and
+/// ICSendMessage(hic, msg, dw1, dw2): the codec's answer. Every codec
+/// here answers ICM_GETINFO and the decompression messages, and
 /// ICERR_UNSUPPORTED to the others; a handle that isn't open gets
 /// ICERR_BADHANDLE.
 fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -341,12 +503,12 @@ fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(fourcc) = open_codec(cpu, hic) else {
         return Some(ICERR_BADHANDLE);
     };
-    if fourcc != MSVC {
-        return Some(ICERR_UNSUPPORTED);
+    if msg == ICM_GETINFO {
+        return Some(get_info(cpu, fourcc, dw1, dw2, false));
     }
     Some(match msg {
         ICM_DECOMPRESS_QUERY | ICM_DECOMPRESS_BEGIN => decompress_query(cpu, fourcc, dw1, dw2),
-        ICM_DECOMPRESS_GET_FORMAT => decompress_get_format(cpu, dw1, dw2),
+        ICM_DECOMPRESS_GET_FORMAT => decompress_get_format(cpu, fourcc, dw1, dw2),
         ICM_DECOMPRESS => {
             // An ICDECOMPRESS: dwFlags, lpbiInput, lpInput, lpbiOutput,
             // lpOutput and ckid.
@@ -354,12 +516,14 @@ fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 return Some(ICERR_BADPARAM);
             }
             let field = |cpu: &mut Cpu, n: u32| cpu.bus.guest_read_32(dw1 + 4 * n);
-            let (input, data) = (field(cpu, 1), field(cpu, 2));
+            let (flags, input, data) = (field(cpu, 0), field(cpu, 1), field(cpu, 2));
             let (output, bits) = (field(cpu, 3), field(cpu, 4));
-            decompress(cpu, input, data, output, bits)
+            let frame = Frame { flags, data };
+            decompress_with(cpu, hic, fourcc, input, frame, output, bits)
         }
-        // Nothing is kept between frames: each is drawn onto the output,
-        // which holds the frame before.
+        // Microsoft Video 1 keeps nothing between frames: each is drawn
+        // onto the output, which holds the frame before. The other
+        // codecs' decoders stay with the handle until it is closed.
         ICM_DECOMPRESS_END => ICERR_OK,
         // An 8-bit stream's palette indexes go out as they are, whatever
         // the output's palette.
@@ -371,26 +535,64 @@ fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// ICDecompress(hic, dwFlags, lpbiFormat, lpData, lpbi, lpBits), which
 /// sends the codec ICM_DECOMPRESS: ICERR_OK, or an error.
 fn ic_decompress(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[hic, _flags, input, data, output, bits] = args else {
+    let &[hic, flags, input, data, output, bits] = args else {
         unreachable!()
     };
+    let frame = Frame { flags, data };
     Some(match open_codec(cpu, hic) {
-        Some(MSVC) => decompress(cpu, input, data, output, bits),
-        Some(_) => ICERR_UNSUPPORTED,
+        Some(fourcc) => decompress_with(cpu, hic, fourcc, input, frame, output, bits),
         None => ICERR_BADHANDLE,
     })
 }
 
+/// ICDECOMPRESS's dwFlags ICDECOMPRESS_NULLFRAME: the frame has no data,
+/// and the picture stays as it is: an AVI's empty chunk, for one, whose
+/// `lpInput` may still hold the frame before.
+const ICDECOMPRESS_NULLFRAME: u32 = 0x1000_0000;
+
+/// A frame to decompress: ICDECOMPRESS's dwFlags and lpInput.
+#[derive(Clone, Copy)]
+struct Frame {
+    flags: u32,
+    data: u32,
+}
+
+impl Frame {
+    /// Whether the frame has no data to decode (ICDECOMPRESS_NULLFRAME).
+    fn null(self) -> bool {
+        self.flags & ICDECOMPRESS_NULLFRAME != 0
+    }
+}
+
+/// ICM_DECOMPRESS of the codec `fourcc` open as `hic`.
+fn decompress_with(
+    cpu: &mut Cpu,
+    hic: u32,
+    fourcc: u32,
+    input: u32,
+    frame: Frame,
+    output: u32,
+    bits: u32,
+) -> u32 {
+    if fourcc == MSVC {
+        decompress(cpu, input, frame, output, bits)
+    } else {
+        decompress_picture(cpu, hic, fourcc, input, frame, output, bits)
+    }
+}
+
 /// ICM_DECOMPRESS_GET_FORMAT: with no `output`, the bytes of the
 /// format the codec decompresses `input` to; else that format written
-/// at `output`: the stream's size and bits, uncompressed, with an 8-bit
-/// stream's 256 colours.
-fn decompress_get_format(cpu: &mut Cpu, input: u32, output: u32) -> u32 {
-    let source = match ms_video_1_formats(cpu, input, 0) {
+/// at `output`: the stream's size, uncompressed, in the stream's bits
+/// with an 8-bit stream's 256 colours for Microsoft Video 1, and in 24
+/// bits for the other codecs, whose pictures codec.rs gives so.
+fn decompress_get_format(cpu: &mut Cpu, fourcc: u32, input: u32, output: u32) -> u32 {
+    let source = match formats(cpu, fourcc, input, 0) {
         Ok((source, _)) => source,
         Err(e) => return e,
     };
-    let colours: u32 = if source.bits == 8 { 256 } else { 0 };
+    let bits = if fourcc == MSVC { source.bits } else { 24 };
+    let colours: u32 = if bits == 8 { 256 } else { 0 };
     let size = HEADER + 4 * colours;
     if output == 0 {
         return size;
@@ -398,13 +600,13 @@ fn decompress_get_format(cpu: &mut Cpu, input: u32, output: u32) -> u32 {
     if !allows(cpu, output, size, true) {
         return ICERR_BADPARAM;
     }
-    let image = codec::dib_size(source.bits, source.width, source.height).unwrap_or(0);
+    let image = codec::dib_size(bits, source.width, source.height).unwrap_or(0);
     let mut out = vec![0u8; size as usize];
     out[0..4].copy_from_slice(&HEADER.to_le_bytes());
     out[4..8].copy_from_slice(&source.width.to_le_bytes());
     out[8..12].copy_from_slice(&source.height.to_le_bytes());
     out[12..14].copy_from_slice(&1u16.to_le_bytes());
-    out[14..16].copy_from_slice(&source.bits.to_le_bytes());
+    out[14..16].copy_from_slice(&bits.to_le_bytes());
     out[20..24].copy_from_slice(&image.to_le_bytes());
     out[32..36].copy_from_slice(&colours.to_le_bytes());
     let palette = out[HEADER as usize..].as_chunks_mut::<4>().0;
@@ -420,8 +622,8 @@ fn decompress_get_format(cpu: &mut Cpu, input: u32, output: u32) -> u32 {
 /// draws in place: the blocks a frame skips keep what the DIB had, which
 /// is the frame before when the program decodes every frame to one
 /// buffer. A frame cut short draws the blocks before its end and is
-/// logged.
-fn decompress(cpu: &mut Cpu, input: u32, data: u32, output: u32, bits: u32) -> u32 {
+/// logged. A null frame draws nothing.
+fn decompress(cpu: &mut Cpu, input: u32, frame: Frame, output: u32, bits: u32) -> u32 {
     let (source, (layout, top_down)) = match ms_video_1_formats(cpu, input, output) {
         Ok((source, Some(layout))) => (source, layout),
         Ok((_, None)) => return ICERR_BADPARAM,
@@ -435,6 +637,11 @@ fn decompress(cpu: &mut Cpu, input: u32, data: u32, output: u32, bits: u32) -> u
     if bits == 0 || !allows(cpu, bits, size, true) {
         return ICERR_BADPARAM;
     }
+    // The DIB holds the picture before, which a null frame keeps.
+    if frame.null() {
+        return ICERR_OK;
+    }
+    let data = frame.data;
     // The frame's size is the input's biSizeImage, as for DrawDibDraw's
     // frames, and is at most a code and eight 16-bit colours a block. A
     // biSizeImage of 0 says nothing: the frame ends where its last block
@@ -462,11 +669,115 @@ fn decompress(cpu: &mut Cpu, input: u32, data: u32, output: u32, bits: u32) -> u
     ICERR_OK
 }
 
+/// Decodes the frame `data`, of the format at `input`, with the decoder
+/// of the handle `hic` of the codec `fourcc`, and writes its picture to
+/// the DIB `bits` of the format at `output`. The decoder keeps the
+/// picture between frames, as the codecs' drivers do, so a frame that
+/// changes part of it gives the whole picture. A frame the decoder
+/// refuses is logged, and the DIB gets the picture as it stands, as it
+/// does for a null frame; with no picture yet (after a restore, before a
+/// key frame) the DIB is left as it is.
+fn decompress_picture(
+    cpu: &mut Cpu,
+    hic: u32,
+    fourcc: u32,
+    input: u32,
+    frame: Frame,
+    output: u32,
+    bits: u32,
+) -> u32 {
+    let (source, (layout, top_down)) = match codec_formats(cpu, fourcc, input, output) {
+        Ok((source, Some(layout))) => (source, layout),
+        Ok((_, None)) => return ICERR_BADPARAM,
+        Err(e) => return e,
+    };
+    let (width, height) = (source.width, source.height);
+    let Some(size) = codec::dib_size(layout.bits(), width, height) else {
+        return ICERR_BADFORMAT;
+    };
+    if bits == 0 || !allows(cpu, bits, size, true) {
+        return ICERR_BADPARAM;
+    }
+    // As for DrawDibDraw's frames: a frame's own header has its size,
+    // and biSizeImage (or a 24-bit picture's size when that is 0) is
+    // only the most it can be. A null frame has none.
+    let most = match read_info(cpu, input).map_or(0, |i| i.size_image) {
+        _ if frame.null() => 0,
+        0 => codec::dib_size(24, width, height).unwrap_or(0),
+        size => size,
+    };
+    let data = frame.data;
+    let mut frame = vec![0; readable(cpu, data, most) as usize];
+    cpu.bus.guest_read_bytes(data, &mut frame);
+    let slot = hic as usize - 1;
+    let decoders = &mut crate::win32::process(cpu).vfw.decoders;
+    if decoders.len() <= slot {
+        decoders.resize_with(slot + 1, Codec::default);
+    }
+    let decoder = &mut decoders[slot];
+    if decoder.is_empty() {
+        *decoder = Codec::new(&source);
+    }
+    let decoded = if frame.is_empty() {
+        Ok(())
+    } else {
+        decoder.decode(&frame)
+    };
+    let picture = decoder.picture(width, height);
+    if let Err(e) = decoded {
+        cpu.bus.log_string(&format!("[W32] ICDecompress: {e}"));
+    }
+    if let Some(picture) = picture {
+        let pixels = from_rgb24(&picture, width, height, layout, top_down);
+        cpu.bus.guest_write_bytes(bits, &pixels);
+    }
+    ICERR_OK
+}
+
+/// A bottom-up 24-bit DIB of `width` by `height` in `layout` (16, 24 or
+/// 32 bits), its rows from the top when `top_down`.
+fn from_rgb24(
+    picture: &[u8],
+    width: u32,
+    height: u32,
+    layout: msvideo1::Output,
+    top_down: bool,
+) -> Vec<u8> {
+    use msvideo1::Output;
+    let (w, h) = (width as usize, height as usize);
+    let from = crate::win32::gdi32::surface::dib_stride(width as i32, 24);
+    let to = crate::win32::gdi32::surface::dib_stride(width as i32, u32::from(layout.bits()));
+    let bytes = usize::from(layout.bits() / 8);
+    let mut out = vec![0; to * h];
+    for y in 0..h {
+        let row = if top_down { h - 1 - y } else { y };
+        let source = picture[y * from..][..w * 3].as_chunks::<3>().0;
+        let dest = &mut out[row * to..][..w * bytes];
+        for (o, &[b, g, r]) in dest.chunks_exact_mut(bytes).zip(source) {
+            match layout {
+                Output::Rgb16 { green6 } => {
+                    let [r, g, b] = [r, g, b].map(u16::from);
+                    let word = if green6 {
+                        (r >> 3) << 11 | (g >> 2) << 5 | b >> 3
+                    } else {
+                        (r >> 3) << 10 | (g >> 3) << 5 | b >> 3
+                    };
+                    o.copy_from_slice(&word.to_le_bytes());
+                }
+                Output::Rgb24 | Output::Rgb32 => o[..3].copy_from_slice(&[b, g, r]),
+                Output::Indexes => unreachable!("no picture goes out in 8 bits"),
+            }
+        }
+    }
+    out
+}
+
 /// DrawDibDraw's flags.
 const DDF_UPDATE: u32 = 0x0002;
 const DDF_SAME_HDC: u32 = 0x0004;
 const DDF_SAME_DRAW: u32 = 0x0008;
 const DDF_DONTDRAW: u32 = 0x0010;
+const DDF_BACKGROUNDPAL: u32 = 0x0200;
 
 const BI_RGB: u32 = 0;
 
@@ -498,6 +809,13 @@ pub struct DrawDib {
     /// DDF_UPDATE of an uncompressed DIB draws again.
     last: (u32, u32),
     codec: Codec,
+    /// Whether the compressed source has more than 8 bits a pixel, so
+    /// its picture is dithered on a display of 256 colours. Set again
+    /// from the format when the decoder is (after a restore).
+    deep: bool,
+    /// The palette of a Cinepak picture's 8-bit colours, made when it is
+    /// first drawn on a display of 256 colours (`draw_cinepak_8`).
+    palette: u32,
 }
 
 crate::state_fields!(DrawDib {
@@ -509,7 +827,9 @@ crate::state_fields!(DrawDib {
     dirty,
     last
 } skip {
-    codec
+    codec,
+    deep,
+    palette
 });
 
 /// A BITMAPINFOHEADER's fields this needs.
@@ -608,11 +928,12 @@ fn draw_dib_end(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn end(cpu: &mut Cpu, slot: usize) {
+    drop_palette(cpu, slot);
     let d = dd(cpu, slot);
     let buffer = std::mem::take(&mut d.buffer);
     *d = DrawDib::default();
     if buffer != 0 {
-        crate::win32::with_process(cpu, |p, _| p.heap.free(buffer));
+        crate::win32::with_process(cpu, |p, bus| p.heap.free(&p.memory, bus, buffer));
     }
 }
 
@@ -642,7 +963,15 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, at: u32) -> bool {
         if d.buffer != 0
             && let Some(format) = read_format(cpu, at)
         {
-            dd(cpu, slot).codec.follow(&format);
+            let d = dd(cpu, slot);
+            d.codec.follow(&format);
+            let deep = format.bits > 8;
+            if d.deep != deep {
+                // A Cinepak stream of the other kind (grey or colour)
+                // takes the other palette.
+                d.deep = deep;
+                drop_palette(cpu, slot);
+            }
         }
         return true;
     }
@@ -688,6 +1017,7 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, at: u32) -> bool {
     let d = dd(cpu, slot);
     d.buffer = buffer;
     d.codec = Codec::new(&format);
+    d.deep = format.bits > 8;
     true
 }
 
@@ -736,7 +1066,7 @@ fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         (dxd, dyd)
     };
-    let (src_info, src_bits) = if d.buffer != 0 {
+    let (src_info, src_bits, deep) = if d.buffer != 0 {
         if flags & DDF_UPDATE == 0 && bits != 0 {
             decode(cpu, slot, info, bits);
         }
@@ -744,18 +1074,30 @@ fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if d.dirty && flags & DDF_DONTDRAW == 0 {
             write_picture(cpu, slot);
         }
-        let buffer = dd(cpu, slot).buffer;
-        (buffer, buffer + HEADER)
+        let d = dd(cpu, slot);
+        (d.buffer, d.buffer + HEADER, d.deep)
     } else {
         if flags & DDF_UPDATE == 0 {
             d.last = (info, bits);
         }
-        d.last
+        let (at, bits) = d.last;
+        let deep = read_info(cpu, at).is_some_and(|i| i.bit_count > 8);
+        (at, bits, deep)
     };
     if flags & DDF_DONTDRAW != 0 || src_bits == 0 {
         return Some(1);
     }
-    let drawn = bitmap::stretch_di_bits(
+    let src_rect = (xs as i32, ys as i32, dxs as i32, dys as i32);
+    let dst_rect = (xd as i32, yd as i32, dxd as i32, dyd as i32);
+    let background = flags & DDF_BACKGROUNDPAL != 0;
+    if draw_cinepak_8(cpu, slot, hdc, dst_rect, src_rect, background) {
+        return Some(1);
+    }
+    // On a display of 256 colours, a picture of more bits is dithered to
+    // the halftone palette. DrawDib asks the display, as GetDeviceCaps
+    // tells every DC the display's depth.
+    let halftone = deep && crate::win32::gdi32::palette::palette_device(cpu);
+    let drawn = bitmap::stretch_dib(
         cpu,
         &[
             hdc,
@@ -772,8 +1114,94 @@ fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             DIB_RGB_COLORS,
             SRCCOPY,
         ],
+        halftone,
     )?;
     Some((drawn != 0) as u32)
+}
+
+/// On a display of 256 colours, draws the picture of a Cinepak source as
+/// Windows 98's DrawDib does: decoded by the codec to 8 bits in its
+/// palette, at twice the size when the whole picture is drawn at twice
+/// its size, and stretched to the destination `dst` (x, y, width,
+/// height) from the source rectangle `src` (x and y from the picture's
+/// bottom left). The codec's palette is selected into the DC and
+/// realized for the drawing, so the pixels keep their indexes, which on
+/// Windows land on the same entries of the system palette. It is
+/// realized as a foreground palette unless `background`
+/// (DDF_BACKGROUNDPAL), as Wine's DrawDibDraw selects it. False when the
+/// picture isn't drawn so.
+fn draw_cinepak_8(
+    cpu: &mut Cpu,
+    slot: usize,
+    hdc: u32,
+    (xd, yd, dxd, dyd): (i32, i32, i32, i32),
+    (xs, ys, dxs, dys): (i32, i32, i32, i32),
+    background: bool,
+) -> bool {
+    use crate::win32::gdi32::{self, dither, draw, palette};
+    let d = dd(cpu, slot);
+    let cinepak = codec::upper(d.compression) == codec::upper(u32::from_le_bytes(*b"cvid"));
+    if d.buffer == 0 || !cinepak || !palette::palette_device(cpu) {
+        return false;
+    }
+    let Some(dc) = gdi32::gdi(cpu).dc(hdc).cloned() else {
+        return false;
+    };
+    let d = dd(cpu, slot);
+    let (w, h) = (d.width as i32, d.height as i32);
+    let (x0, y0) = dc.to_device(xd, yd);
+    let (x1, y1) = dc.to_device(xd + dxd, yd + dyd);
+    let (pw, ph) = (x1 - x0, y1 - y0);
+    if pw <= 0 || ph <= 0 || dxs <= 0 || dys <= 0 {
+        return false;
+    }
+    let top = h - ys - dys;
+    let from = (xs, top, xs + dxs, top + dys);
+    let zoom = if from == (0, 0, w, h) && (pw, ph) == (2 * w, 2 * h) {
+        2
+    } else {
+        1
+    };
+    let Some(indexes) = d.codec.indexes_8(d.width, d.height, zoom as u32) else {
+        return false;
+    };
+    let grey = !d.deep;
+    let mut hpal = d.palette;
+    let colors = super::cinepak::palette_8(gdi32::static_colors(), grey);
+    if gdi32::gdi(cpu).palette(hpal).is_none() {
+        hpal = palette::system_palette_of(cpu, &colors);
+        dd(cpu, slot).palette = hpal;
+    }
+    let from = if zoom == 2 { (0, 0, pw, ph) } else { from };
+    let surface = dither::stretch_8(&indexes, w * zoom, colors, from, pw, ph);
+    let source = draw::Source {
+        surface,
+        bk_color: 0xFF_FFFF,
+        origin: (0, 0),
+    };
+    let old = palette::select_palette(cpu, &[hdc, hpal, background as u32]).filter(|&o| o != 0);
+    palette::realize_posted(cpu, hdc);
+    draw::blit_from(
+        cpu,
+        hdc,
+        (x0, y0, x1, y1),
+        Some((source, (0, 0, pw, ph))),
+        SRCCOPY,
+    );
+    if let Some(old) = old {
+        palette::select_palette(cpu, &[hdc, old, 1]);
+    }
+    true
+}
+
+/// Deletes the palette of a DrawDib's Cinepak pictures (`draw_cinepak_8`),
+/// which no process owns, when the DrawDib ends or its stream changes
+/// kind.
+fn drop_palette(cpu: &mut Cpu, slot: usize) {
+    let hpal = std::mem::take(&mut dd(cpu, slot).palette);
+    if crate::win32::gdi32::gdi(cpu).palette(hpal).is_some() {
+        crate::win32::gdi32::delete_object(cpu, &[hpal]);
+    }
 }
 
 /// How many of the `len` bytes at `at` the program can read, up to the
@@ -815,7 +1243,9 @@ fn decode(cpu: &mut Cpu, slot: usize, at: u32, bits: u32) {
     // A copy's (after a restore) starts again.
     if dd(cpu, slot).codec.is_empty() {
         let format = read_format(cpu, at).unwrap_or_default();
-        dd(cpu, slot).codec = Codec::new(&format);
+        let d = dd(cpu, slot);
+        d.codec = Codec::new(&format);
+        d.deep = format.bits > 8;
     }
     let d = dd(cpu, slot);
     if frame.is_empty() {

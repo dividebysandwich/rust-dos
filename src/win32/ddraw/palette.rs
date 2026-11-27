@@ -1,6 +1,7 @@
 //! IDirectDrawPalette: a palette of 2, 4, 16 or 256 entries. Set on the
-//! primary surface of an 8-bit mode, its entries are the DAC's, and
-//! SetEntries changes the colors on the screen at once.
+//! primary surface of 8 bits, its entries are the screen's colors, and
+//! SetEntries changes them at once: all of the DAC's in exclusive mode,
+//! and below it the system palette's entries GDI maps them to (`show`).
 
 use super::com::CLASS_E_NOAGGREGATION;
 use super::{
@@ -8,6 +9,8 @@ use super::{
     DDERR_NOCOOPERATIVELEVELSET, Object, V_PALETTE, state,
 };
 use crate::cpu::Cpu;
+use crate::savestate::Since;
+use crate::win32::gdi32::palette;
 
 const DDPCAPS_4BIT: u32 = 0x1;
 const DDPCAPS_8BITENTRIES: u32 = 0x2;
@@ -21,6 +24,11 @@ const DDPCAPS_1BIT: u32 = 0x100;
 const DDPCAPS_2BIT: u32 = 0x200;
 const DDPCAPS_ALPHA: u32 = 0x400;
 
+/// The W32 section's version that saves a palette's GDI palette
+/// (`Palette::gdi`). An older state's palettes load without, and map
+/// their entries from scratch when they are next realized.
+pub const GDI_PALETTE_SAVED: u16 = 108;
+
 #[derive(Clone, Debug, Default)]
 pub struct Palette {
     /// CreatePalette's flags.
@@ -28,6 +36,10 @@ pub struct Palette {
     /// The entries: red, green, blue and flags each, or with
     /// DDPCAPS_8BITENTRIES a byte each.
     pub entries: Vec<u8>,
+    /// The GDI palette its entries are realized through on the primary
+    /// surface below exclusive mode (`show`), which keeps the entries of
+    /// the system palette they mapped to; 0 before.
+    pub gdi: Since<{ GDI_PALETTE_SAVED }, u32>,
 }
 
 impl Palette {
@@ -139,6 +151,7 @@ pub fn create_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             palette: Some(Palette {
                 caps,
                 entries: data,
+                ..Palette::default()
             }),
             ..Object::default()
         },
@@ -164,8 +177,15 @@ fn system_colors(entries: &mut [u8]) {
     entries[1020..].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0]);
 }
 
-/// The palette `id` goes.
-pub fn destroyed(_: &mut Cpu, _: u32) {}
+/// The palette `id` goes, and the GDI palette it was realized through
+/// with it.
+pub fn destroyed(cpu: &mut Cpu, id: u32) {
+    let gdi = state(cpu)
+        .object(id)
+        .and_then(|o| o.palette.as_ref())
+        .map_or(0, |p| *p.gdi);
+    palette::entries_gone(cpu, gdi);
+}
 
 /// GetCaps(this, out).
 pub fn get_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -270,18 +290,53 @@ pub fn colors(cpu: &mut Cpu, pal: u32) -> Option<Vec<u32>> {
     state(cpu).object(id)?.palette.as_ref()?.colorrefs()
 }
 
-/// Put the palette at the interface `pal` in the DAC, if DirectDraw has
-/// the display. GDI's next RealizePalette puts the system palette back
-/// even for the palette it realized last.
+/// Realize the entries of the palette `id` with their flags through its
+/// GDI palette (`gdi32::palette::realize_entries`), unless they are
+/// indexes into another palette (DDPCAPS_8BITENTRIES).
+fn realize(cpu: &mut Cpu, id: u32) {
+    let Some(p) = state(cpu).object(id).and_then(|o| o.palette.as_ref()) else {
+        return;
+    };
+    if p.entry_size() != 4 {
+        return;
+    }
+    let entries: Vec<[u8; 4]> = p
+        .entries
+        .chunks(4)
+        .map(|e| [e[0], e[1], e[2], e[3]])
+        .collect();
+    let gdi = *p.gdi;
+    let gdi = palette::realize_entries(cpu, gdi, &entries);
+    if let Some(p) = state(cpu).object_mut(id).and_then(|o| o.palette.as_mut()) {
+        *p.gdi = gdi;
+    }
+}
+
+/// Show the palette at the interface `pal`, the primary surface's. In
+/// exclusive mode, in an 8-bit mode DirectDraw set or on a desktop of
+/// 256 colours, all of it goes in the DAC, and GDI's next RealizePalette
+/// puts the system palette back even for the palette it realized last.
+/// Below exclusive mode on a palette device (a desktop of 256 colours,
+/// or a mode kept after exclusive mode ended) it shares the screen with
+/// GDI, which realizes its entries in the foreground, in the entries of
+/// the system palette they took the first time (`realize`).
 pub fn show(cpu: &mut Cpu, pal: u32) {
-    if !super::display::owns_display(cpu) {
+    let Some((_, id)) = super::this(cpu, pal) else {
+        return;
+    };
+    let owner = state(cpu).object(id).map_or(0, |o| o.owner);
+    let exclusive = owner != 0 && state(cpu).display.exclusive == owner;
+    if !exclusive {
+        realize(cpu, id);
         return;
     }
     let Some(colors) = colors(cpu, pal) else {
         return;
     };
-    crate::win32::screen::set_colors(cpu, 0, &colors);
-    crate::win32::gdi32::gdi(cpu).last_realized = 0;
+    if super::display::owns_display(cpu) || palette::palette_device(cpu) {
+        crate::win32::screen::set_colors(cpu, 0, &colors);
+        crate::win32::gdi32::gdi(cpu).last_realized = 0;
+    }
 }
 
-crate::state_fields!(Palette { caps, entries });
+crate::state_fields!(Palette { caps, entries, gdi });

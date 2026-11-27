@@ -298,20 +298,27 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     }
     match op.dxt {
         Some(Plan::Nothing) => return Ok(()),
-        Some(Plan::Copy) => {
+        Some(plan @ (Plan::Copy | Plan::Compress)) => {
             let (src_id, sr) = op.src.ok_or(DDERR_INVALIDPARAMS)?;
             let s = state(cpu).surface(src_id).cloned();
             let s = s.ok_or(DDERR_INVALIDOBJECT)?;
-            // Blocks are copied whole: a clipper that cuts the rectangle
-            // would need them compressed again. The rectangles a clip
-            // leaves don't overlap and lie within the destination's, so
-            // they cover it when their areas add up to its area.
+            // Blocks are copied whole where they can be. The rectangles a
+            // clip leaves don't overlap and lie within the destination's,
+            // so they cover it when their areas add up to its area.
             let size = |r: &Rect| r.width() as i64 * r.height() as i64;
             let covered: i64 = rects.iter().map(size).sum();
-            if area != op.dst || covered != size(&op.dst) || op.mirror_x || op.mirror_y {
-                return Err(DDERR_UNSUPPORTED);
+            let whole = area == op.dst && covered == size(&op.dst);
+            let copied = plan == Plan::Copy
+                && whole
+                && !op.mirror_x
+                && !op.mirror_y
+                && dxt_blt::copy(cpu, &s, &sr, &d, &op.dst).is_ok();
+            if !copied {
+                // A copy that cuts blocks, stretches or mirrors has its
+                // blocks compressed again, as other sources do.
+                let mirror = [op.mirror_x, op.mirror_y];
+                dxt_blt::compress(cpu, &s, &sr, &d, &op.dst, &rects, mirror)?;
             }
-            dxt_blt::copy(cpu, &s, &sr, &d, &op.dst)?;
             surface::changed(cpu, dst_id);
             return Ok(());
         }

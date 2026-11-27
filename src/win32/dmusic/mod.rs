@@ -1767,7 +1767,7 @@ pub fn alloc(cpu: &mut Cpu, size: u32) -> Option<u32> {
 }
 
 pub fn free(cpu: &mut Cpu, at: u32) {
-    super::with_process(cpu, |p, _| p.heap.free(at));
+    super::with_process(cpu, |p, bus| p.heap.free(&p.memory, bus, at));
 }
 
 pub fn read_u64(cpu: &mut Cpu, at: u32) -> u64 {

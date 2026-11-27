@@ -196,8 +196,7 @@ kernel32/environ: skipped environ.c:387
 kernel32/environ: skipped environ.c:468
 kernel32/fiber: fiber: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/fiber: skipped fiber.c:190
-kernel32/file: file: 489792 tests executed (0 marked as todo, 1 failure), 16 skipped.
-kernel32/file: failed file.c:350
+kernel32/file: file: 489792 tests executed (0 marked as todo, 0 failures), 16 skipped.
 kernel32/file: skipped file.c:757
 kernel32/file: skipped file.c:924 (x2)
 kernel32/file: skipped file.c:926 (x3)
@@ -377,7 +376,7 @@ user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/msg: msg: 11769 tests executed (0 marked as todo, 509 failures), 6 skipped.
+user32/msg: msg: 11767 tests executed (0 marked as todo, 507 failures), 6 skipped.
 user32/msg: skipped msg.c:12537
 user32/msg: failed msg.c:8462
 user32/msg: skipped msg.c:12177
@@ -533,8 +532,6 @@ user32/msg: skipped msg.c:8103
 user32/msg: failed msg.c:8928 (x10)
 user32/msg: failed msg.c:9028 (x3)
 user32/msg: failed msg.c:9066
-user32/msg: failed msg.c:9076
-user32/msg: failed msg.c:9086
 user32/msg: failed msg.c:9096
 user32/msg: failed msg.c:9107
 user32/msg: failed msg.c:9304 (x2)

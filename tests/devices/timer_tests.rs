@@ -1,5 +1,5 @@
 use rust_dos::bus::Bus;
-use rust_dos::cpu::Cpu;
+use rust_dos::cpu::{Cpu, CpuModel};
 use rust_dos::timer::{Clock, CpuSpeed, PIT_HZ, Pacer};
 use std::time::{Duration, Instant};
 
@@ -381,6 +381,51 @@ fn bios_timer_handler_returns_with_the_interrupted_flags() {
     }
 }
 
+/// Whale's Voyage's music player hooks INT 1Ch with PUSHA, PUSH CS, POP
+/// DS ... POPA, IRET, and so returns with DS set to its own segment. The
+/// IBM AT's timer interrupt saves DS, AX and DX around INT 1Ch, so the
+/// code the tick interrupted gets its own back.
+#[test]
+fn bios_timer_handler_keeps_ds_ax_and_dx_across_int_1ch() {
+    use rust_dos::exec::{self, NoHook};
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    // INT 1Ch at 2000:0000: DS = CS, AX and DX zero, and a count of its
+    // calls at 2000:0100.
+    cpu.bus.load_bytes(
+        0x20000,
+        &[
+            0x0E, 0x1F, // PUSH CS; POP DS
+            0x31, 0xC0, // XOR AX, AX
+            0x31, 0xD2, // XOR DX, DX
+            0xFF, 0x06, 0x00, 0x01, // INC WORD [0100h]
+            0xCF, // IRET
+        ],
+    );
+    cpu.bus.write_16(0x1C * 4, 0x0000);
+    cpu.bus.write_16(0x1C * 4 + 2, 0x2000);
+    // The program the ticks interrupt: STI; JMP $ at 3000:0000.
+    cpu.bus.load_bytes(0x30000, &[0xFB, 0xEB, 0xFE]);
+    cpu.set_cs(0x3000);
+    cpu.set_ip(0);
+    cpu.set_ss(0x4000);
+    cpu.set_sp(0x1000);
+    cpu.set_ds(0x5000);
+    cpu.set_ax(0x1234);
+    cpu.set_dx(0x5678);
+    for _ in 0..1000 {
+        let end = cpu.bus.clock.icount + 10_000;
+        cpu.bus.start_batch(end);
+        exec::run_batch(&mut cpu, &mut NoHook, false);
+        if cpu.bus.read_16(0x20100) >= 2 && cpu.cs() == 0x3000 {
+            break;
+        }
+    }
+    assert!(cpu.bus.read_16(0x20100) >= 2, "INT 1Ch ran on the ticks");
+    assert_eq!(cpu.cs(), 0x3000, "back in the program");
+    assert_eq!((cpu.ds(), cpu.ax(), cpu.dx()), (0x5000, 0x1234, 0x5678));
+    assert_eq!(cpu.sp(), 0x1000, "the stack as it was");
+}
+
 #[test]
 fn shell_reload_resets_timer_and_pic() {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
@@ -509,6 +554,110 @@ fn auto_speed_follows_the_program() {
     assert_eq!(bus.clock.cycles_per_ms(), 20_000);
     // Once it ends, whatever runs next starts from the real-mode speed.
     assert_eq!(run(&mut bus, &mut pacer, false, 0, 16), Some(3000));
+}
+
+#[test]
+fn auto_speed_keeps_a_real_mode_game_within_its_cpu() {
+    // Ultimate Domain's map (#1813): a real-mode game whose frame rate
+    // follows the speed, 23 frames a second at 51,000, on a host that runs
+    // far more. Past about 78,500 a pass of its main loop can end inside
+    // one timer tick, and the game divides by the ticks it counted. The
+    // 486 it runs on, a DX2-66, stops short of that.
+    let fastest = |model| {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.model = model;
+        cpu.bus.set_cycles_per_ms(3000);
+        let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, Instant::now());
+        let (mut frames, mut fastest) = (0.0, 0);
+        for _ in 0..60 * 30 {
+            let speed = cpu.bus.clock.cycles_per_ms();
+            let executed = speed as u64 * 50 / 3;
+            cpu.bus.clock.icount += executed;
+            frames += speed as f64 * 0.00045 / 60.0;
+            cpu.bus.activity.swapped(frames as u64);
+            frames = frames.fract();
+            // 2 ns an instruction: the host runs about 400,000 a ms.
+            let exec = Duration::from_nanos(executed * 2);
+            if let Some(next) = pacer.end_cpu_frame(&mut cpu, executed, exec, Duration::ZERO) {
+                cpu.bus.set_cycles_per_ms(next);
+            }
+            fastest = fastest.max(cpu.bus.clock.cycles_per_ms());
+        }
+        fastest
+    };
+    let on_a_486 = fastest(CpuModel::I486);
+    assert!((40_000..=52_800).contains(&on_a_486), "{on_a_486}");
+    // A Pentium runs more than hosts do: the game gets what the host has.
+    let on_a_pentium = fastest(CpuModel::Pentium);
+    assert!(on_a_pentium > 100_000, "{on_a_pentium}");
+}
+
+#[test]
+fn a_fixed_speed_past_the_cpus_real_mode_speed_says_so_once() {
+    // `cycles=auto` keeps a real-mode game within what its CPU ran
+    // (52,800 on a 486). A fixed speed or `max` stays what the user chose,
+    // and the log says once that a game timing its loop by the timer may
+    // fail there (#1813). Choosing a speed again says it again.
+    let lines = |model, speed: CpuSpeed, cycles: u32, frames: usize| {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.model = model;
+        cpu.bus.set_cycles_per_ms(cycles);
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = log.clone();
+        cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+            if line.starts_with("[SPEED]") {
+                sink.lock().unwrap().push(line.to_string());
+            }
+        }));
+        let mut pacer = Pacer::new(speed, None, Instant::now());
+        for i in 0..frames {
+            if i == frames / 2 {
+                pacer.set_speed(speed);
+            }
+            let executed = cpu.bus.clock.cycles_per_ms() as u64 * 50 / 3;
+            cpu.bus.clock.icount += executed;
+            // 2 ns an instruction: the host runs about 400,000 a ms.
+            let exec = Duration::from_nanos(executed * 2);
+            if let Some(next) = pacer.end_cpu_frame(&mut cpu, executed, exec, Duration::ZERO) {
+                cpu.bus.set_cycles_per_ms(next);
+            }
+        }
+        let speed = cpu.bus.clock.cycles_per_ms();
+        let lines = log.lock().unwrap().clone();
+        (speed, lines)
+    };
+    let (speed, said) = lines(CpuModel::I486, CpuSpeed::Fixed(100_000), 100_000, 20);
+    assert_eq!(speed, 100_000);
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(
+        said[0].contains("cycles=100000") && said[0].contains("52800"),
+        "{}",
+        said[0]
+    );
+    // `max` goes as far as the host keeps up with, here past 52,800.
+    let (speed, said) = lines(CpuModel::I486, CpuSpeed::Max, 20_000, 600);
+    assert!(speed > 100_000, "{speed}");
+    assert!(
+        !said.is_empty() && said[0].contains("cycles=max"),
+        "{said:?}"
+    );
+    // Within the 486's speed, and on a model with no such speed, nothing.
+    assert!(
+        lines(CpuModel::I486, CpuSpeed::Fixed(40_000), 40_000, 20)
+            .1
+            .is_empty()
+    );
+    assert!(
+        lines(CpuModel::Pentium, CpuSpeed::Fixed(100_000), 100_000, 20)
+            .1
+            .is_empty()
+    );
+    // `auto` keeps within it, and says nothing.
+    assert!(
+        lines(CpuModel::I486, CpuSpeed::Auto(3000), 3000, 600)
+            .1
+            .is_empty()
+    );
 }
 
 #[test]

@@ -71,16 +71,16 @@ struct CursorRect {
 }
 
 /// The cursor of the built-in Windows, if the screen shows one: its
-/// picture and where its hot spot is, in the screen's pixels.
-/// Windows draws it on the desktop and over DirectDraw's modes, which a
-/// Voodoo3 or Banshee shows in its extended modes; Glide's picture on a
-/// 3dfx card has none.
+/// picture (an animated cursor's step at the emulated time) and where
+/// its hot spot is, in the screen's pixels. Windows draws it on the
+/// desktop and over DirectDraw's modes, which a Voodoo3 or Banshee shows
+/// in its extended modes; Glide's picture on a 3dfx card has none.
 fn shown_windows_cursor(bus: &Bus) -> Option<(&CursorImage, (i32, i32))> {
     let glide = bus.banshee().is_none() || bus.win32.glide_open();
     if bus.voodoo_output() && glide {
         return None;
     }
-    cursor::shown(&bus.win32)
+    cursor::shown(&bus.win32, bus.clock.now_micros())
 }
 
 /// The cursor of the built-in Windows, if it shows one, and where it
@@ -258,6 +258,35 @@ pub fn frame_to_mouse(bus: &Bus, frame: &Frame, (x, y): (i32, i32)) -> (i32, i32
     let vx = (px as i64 * virt_w as i64 / w as i64) as i32;
     let vy = (py as i64 * virt_h as i64 / h as i64) as i32;
     (vx.clamp(0, virt_w - 1), vy.clamp(0, virt_h - 1))
+}
+
+/// Convert a position in screenshot pixels (`frame_size`, as
+/// `/api/input/mouse` takes it) into the driver's virtual coordinates.
+/// A range of 2048 and up, which `virtual_screen` leaves out for programs
+/// that steer by motion, is spanned to its last pixel: a position has to
+/// reach the whole range, such as Allegro's eight virtual pixels to a
+/// screen pixel. The rows of the driver's whole-mode range that the CRTC
+/// doesn't show are left out, as `frame_to_mouse` leaves them
+/// (`MouseState::leaves_out_rows`).
+pub fn screen_to_mouse(bus: &Bus, (x, y): (i32, i32)) -> (i32, i32) {
+    let (w, h) = super::frame_size(bus);
+    let (w, h) = (w as i32, h as i32);
+    let px = x.clamp(0, w - 1);
+    let py = y.clamp(0, h - 1);
+    let (virt_w, virt_h) = bus.mouse.virtual_screen(bus);
+    let max_y = if bus.mouse.leaves_out_rows(bus) {
+        virt_h - 1
+    } else {
+        bus.mouse.max_y
+    };
+    let axis = |pixel: i32, size: i32, extent: i32, max: i32| {
+        if max >= extent {
+            (pixel as i64 * max as i64 / (size - 1).max(1) as i64) as i32
+        } else {
+            (pixel as i64 * extent as i64 / size as i64) as i32
+        }
+    };
+    (axis(px, w, virt_w, bus.mouse.max_x), axis(py, h, virt_h, max_y))
 }
 
 /// Where the driver's virtual pixel (`x`, `y`) is on the picture, in

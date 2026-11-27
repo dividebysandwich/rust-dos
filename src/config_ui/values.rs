@@ -156,6 +156,27 @@ pub(super) fn awe32(s: &Settings) -> bool {
     s.sound.sb_installed && s.sound.sb.model == SbModel::Awe32
 }
 
+/// Whether the machine has the 3dfx add-on card, a Voodoo Graphics or
+/// Voodoo2: `voodoo` on, and a display adapter that leaves room for it.
+pub(super) fn voodoo_add_on(s: &Settings) -> bool {
+    s.voodoo.enabled && s.machine.voodoo_board().is_none()
+}
+
+/// The DOS Glide overlay of the add-on card the settings give, if they
+/// give one.
+pub(super) fn add_on_overlay(s: &Settings) -> Option<&'static crate::voodoo::overlay::Overlay> {
+    if !voodoo_add_on(s) {
+        return None;
+    }
+    crate::voodoo::overlay::Overlay::of(s.voodoo.board.model())
+}
+
+/// Whether the machine's 3dfx card, the add-on or the display adapter,
+/// is drawn again with OpenGL.
+pub(super) fn voodoo_opengl(s: &Settings) -> bool {
+    s.voodoo_board().is_some() && s.voodoo_renderer() == crate::voodoo::Renderer::OpenGl
+}
+
 /// A memory size in KB, as the settings show it.
 pub(super) fn ram_size(kb: u32) -> String {
     match kb {
@@ -266,22 +287,30 @@ impl Item {
             // card's default replaces it: the settings window of an earlier
             // rust-dos saved `cpu=486` into every configuration file. One
             // picked with the card in place stays. The memory is cut to
-            // what the processor takes, as for a picked one.
+            // what the processor takes, as for a picked one. A Voodoo3 or
+            // Banshee picked is a 3dfx card itself and leaves no room for
+            // the add-on card, so `voodoo` goes off: a file saved with both
+            // would say two things about the 3dfx card. The card the
+            // machine has stays as it is, so that its choice is the
+            // settings the window has, which the list opens on and Left
+            // and Right step from.
             Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| {
                 let suited = !s.cpu_below_card();
+                let picked = machine != s.machine;
                 s.machine = machine;
                 if suited && s.cpu_below_card() {
                     s.cpu = None;
                 }
+                if picked && machine.voodoo_board().is_some() {
+                    s.voodoo.enabled = false;
+                }
                 s.memsize = s.memsize.map(|mb| mb.min(s.cpu_model().max_memsize()));
             }),
+            Renderer => each(s, crate::config::Renderer::ALL, |s, renderer| s.renderer = renderer),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),
             VoodooMemory => {
                 each(s, crate::voodoo::Board::ALL, |s, board| s.voodoo.board = board)
             }
-            VoodooRenderer => each(s, [crate::voodoo::Renderer::Software, crate::voodoo::Renderer::OpenGl], |s, r| {
-                s.voodoo.renderer = r
-            }),
             VoodooScale => each(s, [1, 2, 3, 4], |s, scale| s.voodoo.scale = scale),
             VoodooTextureSampling => {
                 use crate::voodoo::TextureSampling;
@@ -308,9 +337,6 @@ impl Item {
                 let sizes = crate::toadforce::regs::MEMORY_SIZES.map(|bytes| bytes >> 20);
                 each(s, sizes, |s, megabytes| s.toadforce_memory = megabytes)
             }
-            ToadForceRenderer => each(s, crate::toadforce::Renderer::ALL, |s, renderer| {
-                s.toadforce_renderer = renderer
-            }),
             ToadForceGamma => each(s, gammas(), |s, gamma| s.toadforce_gamma = gamma),
             PowerVrFilter => {
                 use crate::powervr::tsp::Filter;
@@ -323,6 +349,7 @@ impl Item {
             IdeHardDisks => on_off(|s, on| s.ide_hard_disks = on),
             BootCdrom => on_off(|s, on| s.boot_cdrom = on),
             FloppyController => on_off(|s, on| s.floppy_controller = on),
+            AnsiSys => on_off(|s, on| s.ansi_sys = on),
             DosVersion => {
                 let mut versions = crate::config::DosVersion::PRESETS.to_vec();
                 if !versions.contains(&s.dos_version) {
@@ -332,6 +359,9 @@ impl Item {
                 each(s, versions, |s, version| s.dos_version = version)
             }
             KeyboardLayout => each(s, crate::keylayout::LayoutSetting::all(), |s, layout| s.keyboard_layout = layout),
+            HotkeyProfile => {
+                each(s, crate::hotkeys::Profile::ALL, |s, profile| s.hotkeys.profile = profile)
+            }
             MouseAutocapture => on_off(|s, on| s.mouse_autocapture = on),
             MouseCaptureMessages => on_off(|s, on| s.mouse_capture_messages = on),
             MouseMenuHold => on_off(|s, on| s.mouse_menu_hold = on),
@@ -351,24 +381,32 @@ impl Item {
             AutoBusyOs => on_off(|s, on| s.auto_busy_os = on),
             RewindMemory => each(s, REWIND_MEMORY, |s, mb| s.rewind_memory = mb),
             SbType => {
+                // A model, or none: the Game Blaster (true) or no card.
                 let models = [
-                    Some(SbModel::Sb16),
-                    Some(SbModel::Awe32),
-                    Some(SbModel::SbPro2),
-                    Some(SbModel::SbPro1),
-                    Some(SbModel::Sb2),
-                    Some(SbModel::Sb16Vibra),
-                    None,
+                    Ok(SbModel::Sb16),
+                    Ok(SbModel::Awe32),
+                    Ok(SbModel::SbPro2),
+                    Ok(SbModel::SbPro1),
+                    Ok(SbModel::Sb2),
+                    Ok(SbModel::Sb16Vibra),
+                    Err(true),
+                    Err(false),
                 ];
                 each(s, models, |s, model| match model {
-                    Some(model) => {
+                    Ok(model) => {
                         s.sound.sb.model = model;
                         s.sound.sb_installed = true;
+                        s.sound.game_blaster = false;
                     }
-                    None => s.sound.sb_installed = false,
+                    Err(game_blaster) => {
+                        s.sound.sb_installed = false;
+                        s.sound.game_blaster = game_blaster;
+                    }
                 })
             }
-            SbBase => each(s, [0x210, 0x220, 0x230, 0x240, 0x250, 0x260, 0x270, 0x280], |s, base| s.sound.sb.base = base),
+            SbBase => each(s, crate::sb::SbConfig::BASES, |s, base| {
+                s.sound.sb.base = base
+            }),
             SbIrq => each(s, [2, 3, 5, 7, 9, 10, 11, 12, 15], |s, irq| s.sound.sb.irq = irq),
             SbDma => each(s, [0, 1, 3], |s, dma| s.sound.sb.dma8 = dma),
             SbHdma => each(s, [5, 6, 7], |s, dma| s.sound.sb.dma16 = dma),
@@ -440,6 +478,7 @@ impl Item {
             LptDac => each(s, crate::lpt_dac::LptDacType::ALL, |s, dac| s.sound.lpt_dac = dac),
             TandySound => each(s, crate::sn76489::TandySound::ALL, |s, tandy| s.sound.tandy = tandy),
             Pit2GateAtStart => on_off(|s, on| s.sound.pit2_gate_at_start = on),
+            Cms => on_off(|s, on| s.sound.cms = on),
             Ipx => each(s, crate::net::IpxMode::ALL, |s, mode| s.network.ipx = mode),
             IpxIrq => each(s, [None, Some(3), Some(4), Some(5), Some(7), Some(9), Some(10), Some(11), Some(15)], |s, irq| {
                 s.network.ipx_irq = irq

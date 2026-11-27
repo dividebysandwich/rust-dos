@@ -22,7 +22,7 @@ use crate::cpu::Cpu;
 
 /// The mouse as DirectInput last read it: all its motion, and how often
 /// each button went down and up.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MouseSeen {
     pub started: bool,
     pub motion: (i32, i32),
@@ -90,6 +90,52 @@ pub fn poll(cpu: &mut Cpu) {
 pub fn refresh(cpu: &mut Cpu) {
     crate::win32::user32::input::poll(cpu);
     poll(cpu);
+}
+
+/// What USER32's input and DirectInput's devices are: USER32's input
+/// and messages (`user32::input::settled`), the mouse as DirectInput last
+/// read it, the last event's sequence number, and each device's
+/// acquisition and buffered events. None when a key went down.
+type Quiet = (
+    crate::win32::user32::input::Seen,
+    usize,
+    u32,
+    MouseSeen,
+    u32,
+    Vec<(bool, bool, usize, bool)>,
+);
+
+fn quiet_key(cpu: &mut Cpu) -> Option<Quiet> {
+    let (seen, messages, changed) = crate::win32::user32::input::settled(cpu)?;
+    let s = state(cpu);
+    let devices = s
+        .devices_mut()
+        .map(|(_, d)| (d.acquired, d.lost, d.queue.len(), d.overflow))
+        .collect();
+    let mouse = s.mouse.clone();
+    Some((seen, messages, changed, mouse, s.sequence, devices))
+}
+
+/// Run `call`, a device's method that reads the devices (`ready`,
+/// `refresh`), which says whether it left its device as it found it.
+/// During an idle proof a call that found nothing new on the devices and
+/// changed nothing is followed by the proof: the passes after it find
+/// the same until an input comes, which comes with an interrupt or
+/// between the host's frames, either of which ends the passes skipped,
+/// or a device's window leaves the foreground, which input does too. It
+/// reads no RAM but its arguments, the interface block and what `call`
+/// names (`idle::reads_also`).
+pub fn quietly<R>(cpu: &mut Cpu, call: impl FnOnce(&mut Cpu) -> (R, bool)) -> R {
+    let before = cpu.bus.observe.on.then(|| quiet_key(cpu)).flatten();
+    let (result, kept) = call(cpu);
+    if let Some(before) = before
+        && kept
+        && quiet_key(cpu).is_some_and(|after| after == before)
+    {
+        crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
+    }
+    result
 }
 
 /// Whether `hwnd`'s top-level window is the foreground window.

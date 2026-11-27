@@ -21,11 +21,9 @@ const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const FILE_SHARE_READ: u32 = 1;
 const CREATE_NEW: u32 = 1;
-const CREATE_ALWAYS: u32 = 2;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 const OF_EXIST: u32 = 0x4000;
-const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_DLL_NOT_FOUND: u32 = 1157;
 
 /// Where a test program's data and imports are, for its code.
@@ -400,12 +398,12 @@ fn finds_ddraw() -> Vec<u8> {
         let at = |offset: u32| l.at(offset);
         a.xor(ebx, ebx)?;
         call(a, l.import("GetFileAttributesA"), &[at(0)])?;
-        a.cmp(eax, 0x21)?;
+        a.cmp(eax, 0x20)?;
         check(a, false, 0)?;
         call(a, l.import("GetFileAttributesA"), &[at(0x40)])?;
         a.cmp(eax, 0x10)?;
         check(a, false, 1)?;
-        // Found by its name, read-only, with its size.
+        // Found by its name, with its size.
         call(a, l.import("FindFirstFileA"), &[at(0), at(0x200)])?;
         a.push(eax)?;
         a.call(l.import("FindClose"))?;
@@ -417,7 +415,7 @@ fn finds_ddraw() -> Vec<u8> {
         a.cmp(dword_ptr(at(0x200 + 32) as u64), 0x1000)?;
         a.seta(cl)?;
         a.and(al, cl)?;
-        a.cmp(dword_ptr(at(0x200) as u64), 0x21)?;
+        a.cmp(dword_ptr(at(0x200) as u64), 0x20)?;
         a.sete(cl)?;
         a.and(al, cl)?;
         a.movzx(eax, al)?;
@@ -481,6 +479,55 @@ fn finds_ddraw() -> Vec<u8> {
 #[test]
 fn the_system_directory_shows_the_built_in_dlls_as_files() {
     assert_eq!(run("find", None, &[], finds_ddraw()), 0xFF);
+}
+
+#[test]
+fn find_data_leaves_the_padding_after_its_last_field() {
+    // WIN32_FIND_DATAA's fields end with cAlternateFileName, at 318;
+    // Windows 95 writes them and leaves the 2 bytes of padding after
+    // them alone. Encarta 97's Wise setup keeps a string right after a
+    // struct of 318 bytes (#1965).
+    assert_eq!(run("find_tail", None, &[], keeps_find_tail()), 3);
+}
+
+/// Searches C:\WINDOWS\SYSTEM with FindFirstFileA and FindNextFileA.
+/// Before each call the dword at 316 holds 0x5AA5FFFF: the call must
+/// succeed, clear the end of cAlternateFileName (316-317, past the
+/// short names of the DLLs there) and leave the padding (318-319).
+fn keeps_find_tail() -> Vec<u8> {
+    let mut data = vec![0; 0x800];
+    put(&mut data, 0x60, b"C:\\WINDOWS\\SYSTEM\\*.DLL\0");
+    program(&[("KERNEL32.DLL", KERNEL32)], &data, |a, l| {
+        let at = |offset: u32| l.at(offset);
+        let tail = at(0x200 + 316) as u64;
+        a.xor(ebx, ebx)?;
+        a.mov(dword_ptr(tail), 0x5AA5_FFFFu32 as i32)?;
+        call(a, l.import("FindFirstFileA"), &[at(0x60), at(0x200)])?;
+        a.mov(esi, eax)?;
+        a.cmp(eax, -1)?;
+        a.setne(cl)?;
+        a.cmp(dword_ptr(tail), 0x5AA5_0000)?;
+        a.sete(al)?;
+        a.and(al, cl)?;
+        a.movzx(eax, al)?;
+        a.or(ebx, eax)?;
+        a.mov(dword_ptr(tail), 0x5AA5_FFFFu32 as i32)?;
+        a.push(at(0x200) as i32)?;
+        a.push(esi)?;
+        a.call(l.import("FindNextFileA"))?;
+        a.test(eax, eax)?;
+        a.setne(cl)?;
+        a.cmp(dword_ptr(tail), 0x5AA5_0000)?;
+        a.sete(al)?;
+        a.and(al, cl)?;
+        a.movzx(eax, al)?;
+        a.shl(eax, 1)?;
+        a.or(ebx, eax)?;
+        a.push(esi)?;
+        a.call(l.import("FindClose"))?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
 }
 
 /// Opens GLIDE2X.DLL as MPROFILE.EXE does, with CreateFileA and with
@@ -584,8 +631,10 @@ fn a_missing_windows_dll_is_logged_as_lacking() {
     }
 }
 
-/// Tries to write, make, delete, rename, copy over and change the
-/// attributes of DDRAW.DLL, and makes a file beside it.
+/// Changes the attributes of DDRAW.DLL, deletes it, renames it to
+/// OTHER.DLL, copies T.EXE over it and makes a file beside it, as setups
+/// do with Windows' own DLLs. A bit of the exit code for each that works
+/// as on Windows 98, where the files are writable.
 fn writes_ddraw() -> Vec<u8> {
     let mut data = vec![0; 0x100];
     put(&mut data, 0, DDRAW);
@@ -594,51 +643,148 @@ fn writes_ddraw() -> Vec<u8> {
     put(&mut data, 0x80, b"C:\\WINDOWS\\SYSTEM\\NEW.DLL\0");
     program(&[("KERNEL32.DLL", KERNEL32)], &data, |a, l| {
         let at = |offset: u32| l.at(offset);
-        let denied = ERROR_ACCESS_DENIED;
         a.xor(ebx, ebx)?;
-        let write = [at(0), GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0x80, 0];
-        call(a, l.import("CreateFileA"), &write)?;
-        failed_with(a, l, u32::MAX, denied, 0)?;
-        let both = GENERIC_READ | GENERIC_WRITE;
-        let create = [at(0), both, 0, 0, CREATE_ALWAYS, 0x80, 0];
-        call(a, l.import("CreateFileA"), &create)?;
-        failed_with(a, l, u32::MAX, denied, 1)?;
-        call(a, l.import("DeleteFileA"), &[at(0)])?;
-        failed_with(a, l, 0, denied, 2)?;
-        call(a, l.import("MoveFileA"), &[at(0), at(0x40)])?;
-        failed_with(a, l, 0, denied, 3)?;
+        // An archive file, whose attributes can be set.
+        call(a, l.import("GetFileAttributesA"), &[at(0)])?;
+        a.cmp(eax, 0x20)?;
+        check(a, false, 0)?;
         call(
             a,
             l.import("SetFileAttributesA"),
             &[at(0), FILE_ATTRIBUTE_NORMAL],
         )?;
-        failed_with(a, l, 0, denied, 4)?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        // Deleted, it is still there: the built-in one can't go.
+        call(a, l.import("DeleteFileA"), &[at(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
+        // Renamed, OTHER.DLL is a copy.
+        call(a, l.import("MoveFileA"), &[at(0), at(0x40)])?;
+        a.test(eax, eax)?;
+        check(a, true, 3)?;
+        // A copy over it takes its place.
         call(a, l.import("CopyFileA"), &[at(0x60), at(0), 0])?;
-        failed_with(a, l, 0, denied, 5)?;
-        call(a, l.import("GetFileAttributesA"), &[at(0)])?;
-        a.cmp(eax, 0x21)?;
-        check(a, false, 6)?;
+        a.test(eax, eax)?;
+        check(a, true, 4)?;
         // A file of its own beside it.
         let new = [at(0x80), GENERIC_WRITE, 0, 0, CREATE_NEW, 0x80, 0];
         call(a, l.import("CreateFileA"), &new)?;
         a.cmp(eax, -1)?;
-        check(a, true, 7)?;
+        check(a, true, 5)?;
         a.push(eax)?;
         a.call(l.import("CloseHandle"))?;
+        a.or(ebx, 0xC0)?;
         a.mov(eax, ebx)?;
         a.ret()
     })
 }
 
+/// Windows 98's DLLs in the system directory are files like others: a
+/// setup can copy over them, and the copy is a file of the drive's. The
+/// built-in one stays there until then, and deleting it does nothing.
 #[test]
-fn a_built_in_dll_file_is_read_only() {
+fn a_built_in_dll_file_can_be_written_over() {
     assert_eq!(run("write", None, &[], writes_ddraw()), 0xFF);
     let system = PathBuf::from("target/test_win32_dll_files/write/WINDOWS/SYSTEM");
-    // Made on the drive with the directories on its way; DDRAW.DLL stays
-    // the built-in one's, OTHER.DLL isn't made.
+    let other = fs::read(system.join("OTHER.DLL")).unwrap();
+    assert_eq!(&other[..2], b"MZ");
+    let exe = fs::read("target/test_win32_dll_files/write/T.EXE").unwrap();
+    assert_eq!(fs::read(system.join("DDRAW.DLL")).unwrap(), exe);
     assert!(system.join("NEW.DLL").is_file());
-    assert!(!system.join("DDRAW.DLL").exists());
-    assert!(!system.join("OTHER.DLL").exists());
+}
+
+/// Copies T.EXE to a temporary name beside DDRAW.DLL, deletes DDRAW.DLL
+/// and moves the copy to its name, as InstallShield 6 puts a shared DLL
+/// in place (Leadfoot's setup with its MSVCRT.DLL, #2183). Then makes
+/// another copy and moves it there too, which DDRAW.DLL, now a file of
+/// the drive's, refuses. A bit of the exit code for each call that works
+/// as on Windows 98.
+fn moves_over_ddraw() -> Vec<u8> {
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, DDRAW);
+    put(&mut data, 0x40, b"C:\\WINDOWS\\SYSTEM\\DDRA60bd.rra\0");
+    put(&mut data, 0x60, b"C:\\T.EXE\0");
+    put(&mut data, 0x80, b"C:\\WINDOWS\\SYSTEM\\DDRA60bc.rra\0");
+    program(&[("KERNEL32.DLL", KERNEL32)], &data, |a, l| {
+        let at = |offset: u32| l.at(offset);
+        a.xor(ebx, ebx)?;
+        call(a, l.import("CopyFileA"), &[at(0x60), at(0x40), 1])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        call(a, l.import("DeleteFileA"), &[at(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        call(a, l.import("MoveFileA"), &[at(0x40), at(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 2)?;
+        call(a, l.import("CopyFileA"), &[at(0x60), at(0x80), 1])?;
+        a.test(eax, eax)?;
+        check(a, true, 3)?;
+        call(a, l.import("MoveFileA"), &[at(0x80), at(0)])?;
+        failed_with(a, l, 0, ERROR_ALREADY_EXISTS, 4)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
+/// A file moved to a built-in DLL's name, after the DLL was deleted,
+/// takes its place: the delete succeeded, so the name is free as far as
+/// the setup can tell. A file the drive has there takes the name, as on
+/// Windows 98.
+#[test]
+fn a_file_moved_over_a_deleted_built_in_dll_takes_its_place() {
+    assert_eq!(run("move-over", None, &[], moves_over_ddraw()), 0x1F);
+    let base = PathBuf::from("target/test_win32_dll_files/move-over");
+    let system = base.join("WINDOWS/SYSTEM");
+    let exe = fs::read(base.join("T.EXE")).unwrap();
+    assert_eq!(fs::read(system.join("DDRAW.DLL")).unwrap(), exe);
+    assert!(!system.join("DDRA60bd.rra").exists());
+    assert!(system.join("DDRA60bc.rra").is_file());
+}
+
+/// Copies T.EXE to a temporary name beside DDRAW.DLL, then removes
+/// DDRAW.DLL and renames the copy to its name with msvcrt's remove and
+/// rename. A bit of the exit code for each call that succeeds.
+fn renames_over_ddraw() -> Vec<u8> {
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, DDRAW);
+    put(&mut data, 0x40, b"C:\\WINDOWS\\SYSTEM\\DDRA60bd.rra\0");
+    put(&mut data, 0x60, b"C:\\T.EXE\0");
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", KERNEL32),
+        ("MSVCRT.DLL", &["remove", "rename"]),
+    ];
+    program(imports, &data, |a, l| {
+        let at = |offset: u32| l.at(offset);
+        a.xor(ebx, ebx)?;
+        call(a, l.import("CopyFileA"), &[at(0x60), at(0x40), 1])?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        call(a, l.import("remove"), &[at(0)])?;
+        a.add(esp, 4)?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        call(a, l.import("rename"), &[at(0x40), at(0)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
+/// msvcrt's rename puts a file in a removed built-in DLL's place, as
+/// MoveFileA, which it calls on Windows 98, does.
+#[test]
+fn a_file_renamed_over_a_removed_built_in_dll_takes_its_place() {
+    assert_eq!(run("rename-over", None, &[], renames_over_ddraw()), 7);
+    let base = PathBuf::from("target/test_win32_dll_files/rename-over");
+    let system = base.join("WINDOWS/SYSTEM");
+    let exe = fs::read(base.join("T.EXE")).unwrap();
+    assert_eq!(fs::read(system.join("DDRAW.DLL")).unwrap(), exe);
+    assert!(!system.join("DDRA60bd.rra").exists());
 }
 
 /// Reads the first 8 bytes of DDRAW.DLL, looks for it, and for DSOUND.DLL
@@ -691,7 +837,7 @@ fn reads_host_ddraw() -> Vec<u8> {
         a.cmp(eax, 0x20)?;
         check(a, false, 4)?;
         call(a, l.import("GetFileAttributesA"), &[at(0x40)])?;
-        a.cmp(eax, 0x21)?;
+        a.cmp(eax, 0x20)?;
         check(a, false, 5)?;
         a.or(ebx, 0xC0)?;
         a.mov(eax, ebx)?;

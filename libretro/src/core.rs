@@ -166,7 +166,7 @@ impl Core {
         let base = Base::load(&dirs);
         content::add_os_dirs(&dirs.system);
         let plan = content::plan(content.as_deref(), &dirs, options.boot(), options.boot_os())?;
-        let (settings, mut warnings) = content::settings(&base, &options, plan.overlay.as_ref());
+        let (settings, mut warnings) = content::settings(&base, &options, plan.overlay.as_ref())?;
         let home = content::home();
         let memory = match &plan.profile {
             Some(p) => {
@@ -304,7 +304,7 @@ impl Core {
         if plan.profile.is_none() {
             commands.push(StartupItem::Lines(plan.commands.clone()));
         }
-        m.cpu.startup = Startup { notes, update: None, commands };
+        m.cpu.startup = Startup { notes, update: None, commands, ..Default::default() };
         m.cpu.start_dos();
         if let Some(profile) = &plan.profile {
             // One with launch configurations offers them first.
@@ -389,6 +389,7 @@ impl Core {
         let m = &mut self.m;
         self.memmap.refresh(&mut m.cpu.bus, cb.env);
         m.notices.extend(m.cpu.bus.printer_notices());
+        m.cpu.bus.disk.close_idle_files();
         for notice in m.notices.drain(..) {
             cb.message(&notice);
         }
@@ -545,7 +546,9 @@ impl Core {
         // vertical retraces that passed.
         bus.sync_display();
         let voodoo_settings = self.m.settings.voodoo;
-        let voodoo_gl = crate::gl::with_screen(|s| s.run_voodoo(bus, &voodoo_settings)).unwrap_or(false);
+        let renderer = self.m.settings.voodoo_renderer();
+        let voodoo_gl = crate::gl::with_screen(|s| s.run_voodoo(bus, renderer, &voodoo_settings))
+            .unwrap_or(false);
         if !voodoo_gl
             && !voodoo_picture
             && let Some(v) = &mut bus.voodoo

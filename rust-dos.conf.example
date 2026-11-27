@@ -144,6 +144,14 @@
 #         720x348 graphics
 # A change takes effect at the DOS prompt.
 #machine=svga
+# What draws the 3D cards' pictures in the window: the 3dfx cards (voodoo,
+# or machine=svga_voodoo3 or svga_banshee) and the ToadForce. auto: each
+# card's own default, the 3dfx cards in software (rust-dos) and the
+# ToadForce with OpenGL where the window has it; opengl: every card with
+# OpenGL, the 3dfx cards at voodoo_scale (1 to 4) times their resolution;
+# software: every card in software. Screenshots show a 3dfx card's
+# software picture either way. Changes take effect immediately.
+#renderer=auto
 # A 3dfx Voodoo Graphics for games that draw with Glide, in DOS or in a
 # booted Windows 95, with 12 MB (4 MB frame buffer, two texture units) or
 # 4 MB (2 MB, one texture unit). Changes take effect at the DOS prompt.
@@ -153,10 +161,6 @@
 # voodoo_memory 8 (4 MB frame buffer, two 2 MB texture units) or 12.
 # voodoo_memory=8 picks voodoo2 when voodoo_model is not set.
 #voodoo_model=voodoo1
-# What draws the card's picture in the window: software (rust-dos) or
-# opengl, which draws it again at voodoo_scale (1 to 4) times the card's
-# resolution. Screenshots show the software picture either way.
-#voodoo_renderer=software
 # Texture sampling for both renderers: default (as the game sets it) or
 # unfiltered (nearest-neighbour). With OpenGL anisotropy enabled, unfiltered
 # also blends mip levels and allows anisotropic filtering to reduce shimmer;
@@ -357,15 +361,19 @@
 # The Sound Blaster: sb16 (the default), sb16vibra (an SB16 as the ViBRA16C,
 # an ISA Plug and Play card whose resources Windows 95 sets), awe32 (an
 # SB16 with the EMU8000 wavetable synthesizer), sbpro2, sbpro1 (the first
-# SB Pro, DSP 3.00, for drivers that take no later one), sb2, or none.
-# Programs learn its settings from the BLASTER environment variable, which
-# follows these.
+# SB Pro, DSP 3.00, for drivers that take no later one), sb2, gb (the Game
+# Blaster, Creative Music System, at sbbase in place of a Sound Blaster),
+# or none. Programs learn its settings from the BLASTER environment
+# variable, which follows these.
 #sbtype=sb16
 # Base port (hex), IRQ, 8-bit DMA channel, and the SB16's 16-bit channel.
 #sbbase=220
 #irq=7
 #dma=1
 #hdma=5
+# The Game Blaster's two SAA1099 chips in the SB 2.0's sockets (sbtype=sb2),
+# at its base+0 to base+3, for games with CMS music.
+#cms=false
 # The AWE32's 1 MB sample ROM with its General MIDI instruments, which
 # doesn't come with rust-dos. Without it rust-dos looks for awe32.raw
 # beside this file's default location and in the working directory; the
@@ -717,6 +725,17 @@
 # Answer as the 3D BIOS of shutter glasses too, for games that draw
 # interlaced stereo for them (Descent 2 in 800x600).
 #stereo_bios=true
+
+[hotkeys]
+# The emulator's keys, which the program doesn't get. profile picks a set
+# of them: rust-dos (the default), pcsx2, duckstation,
+# pcsx-redux, epsxe, retroarch, dosbox or 86box.
+#profile=rust-dos
+# A line named after an action binds it alone, over the profile: keys
+# such as Ctrl+Shift+F3 separated by commas, or none. CONFIGURATION.md
+# lists the actions.
+#save_state=Ctrl+F1
+#load_state=Ctrl+F2
 
 [drives]
 # Mount host directories, or floppy, hard disk or CD images, as DOS drives

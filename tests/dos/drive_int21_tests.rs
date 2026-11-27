@@ -173,9 +173,9 @@ fn free_space_allocation_info_and_dpb() {
     int21(&mut cpu, 0x36);
     assert_eq!((cpu.bx(), cpu.cx()), (0, 2048));
 
-    cpu.set_reg8(Register::DL, 3); // C: empty, the fake 320 MB
+    cpu.set_reg8(Register::DL, 3); // C: empty, the fake 1 GB
     int21(&mut cpu, 0x36);
-    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (32, 20000, 512, 20000));
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (32, 65_518, 512, 65_518));
 
     cpu.set_reg8(Register::DL, 7); // G: not mounted
     int21(&mut cpu, 0x36);
@@ -223,7 +223,7 @@ fn disk_free(cpu: &mut Cpu, dl: u8) -> (u16, u16, u16, u16) {
 fn hard_disk_free_space_drops_as_files_are_written() {
     let base = scratch("hd_space", &["c"]);
     let mut cpu = Cpu::new(base.join("c"));
-    assert_eq!(disk_free(&mut cpu, 3), (32, 20000, 512, 20000));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 65_518, 512, 65_518));
 
     set_dsdx_string(&mut cpu, "C:\\ISCMPRSD.$$$");
     cpu.set_cx(0);
@@ -239,25 +239,59 @@ fn hard_disk_free_space_drops_as_files_are_written() {
     cpu.set_bx(handle);
     int21(&mut cpu, 0x3E);
     assert!(!cf(&cpu));
-    assert_eq!(disk_free(&mut cpu, 3), (32, 19999, 512, 20000));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 65_517, 512, 65_518));
 
     set_dsdx_string(&mut cpu, "C:\\ISCMPRSD.$$$");
     int21(&mut cpu, 0x41);
     assert!(!cf(&cpu));
-    assert_eq!(disk_free(&mut cpu, 3), (32, 20000, 512, 20000));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 65_518, 512, 65_518));
 }
 
-/// A folder holding more than half the fake 320 MB still has room: the
-/// disk grows in steps of 320 MB, and AX=7303h tells the same.
+/// Perfect Assassin's installer multiplies AH=36h's AX, BX and CX and
+/// refuses its LARGE install, 360,857,188 bytes, on a drive with less
+/// free. An empty folder C: has room for it, and AH=1Ch and the DPB
+/// count the same 1 GB disk.
 #[test]
-fn hard_disk_grows_past_what_its_folder_holds() {
+fn an_empty_hard_disk_takes_a_large_cd_install() {
+    let base = scratch("hd_large", &["c"]);
+    let mut cpu = Cpu::new(base.join("c"));
+    let (spc, free, bps, total) = disk_free(&mut cpu, 3);
+    assert!(spc as u64 * free as u64 * bps as u64 >= 360_857_188);
+    // A cluster of 16 KB, whose size 16-bit arithmetic holds.
+    assert_eq!((spc, bps, total), (32, 512, 65_518));
+
+    cpu.set_reg8(Register::DL, 3);
+    int21(&mut cpu, 0x1C);
+    assert_eq!((cpu.get_reg8(Register::AL), cpu.cx(), cpu.dx()), (32, 512, 65_518));
+
+    rust_dos::dos_data::set_version(&mut cpu.bus, rust_dos::config::DosVersion::new(7, 10));
+    cpu.set_es(0x3000);
+    cpu.set_di(0);
+    cpu.set_cx(0x3F);
+    cpu.set_dx(3);
+    cpu.set_ax(0x7302);
+    int21::handle(&mut cpu);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    // The DPB's free clusters (+1Fh) and highest cluster (+2Dh), past
+    // its size word.
+    let dword = |at: usize| cpu.bus.read_32(0x30000 + 2 + at);
+    assert_eq!((dword(0x1F), dword(0x2D)), (65_518, 65_519));
+}
+
+/// A folder holding more than 512 MB still has 512 MB or more free: the
+/// free space goes back up each time it would fall below 512 MB, and
+/// AX=7303h tells the same.
+#[test]
+fn a_folder_past_512_mb_keeps_512_mb_free() {
     let base = scratch("hd_grow", &["c"]);
-    // 240 MB, 15,000 clusters of 16 KB; sparse where the host allows.
+    // 640 MB, 40,000 clusters of 16 KB; sparse where the host allows.
     let file = fs::File::create(base.join("c/BIG.DAT")).unwrap();
-    file.set_len(15_000 * 16384).unwrap();
+    file.set_len(40_000 * 16384).unwrap();
     drop(file);
     let mut cpu = Cpu::new(base.join("c"));
-    assert_eq!(disk_free(&mut cpu, 3), (32, 25000, 512, 40000));
+    // 65,517 clusters less the 7,249 written past the first 32,751, the
+    // most that are written before free space goes back up.
+    assert_eq!(disk_free(&mut cpu, 3), (32, 58_268, 512, 65_518));
 
     rust_dos::dos_data::set_version(&mut cpu.bus, rust_dos::config::DosVersion::new(7, 10));
     set_dsdx_string(&mut cpu, "C:\\");
@@ -269,11 +303,12 @@ fn hard_disk_grows_past_what_its_folder_holds() {
     assert!(!cf(&cpu));
     let dword = |i: usize| cpu.bus.read_32(0x30000 + 4 + 4 * i);
     // Sectors per cluster, bytes per sector, free and total clusters.
-    assert_eq!((dword(0), dword(1), dword(2), dword(3)), (32, 512, 25000, 40000));
+    assert_eq!((dword(0), dword(1), dword(2), dword(3)), (32, 512, 58_268, 65_518));
 }
 
 /// Past 65,535 clusters AH=36h would count clusters of 32 KB, where a
-/// 16 KB write may not show: the total stops there instead.
+/// 16 KB write may not show: the total stays at the 1 GB disk's 65,518
+/// however much the folder holds.
 #[test]
 fn a_full_folder_still_shows_each_cluster_written() {
     let base = scratch("hd_full", &["c/GAMES"]);
@@ -282,8 +317,9 @@ fn a_full_folder_still_shows_each_cluster_written() {
     file.set_len(60_000 * 16384).unwrap();
     drop(file);
     let mut cpu = Cpu::new(base.join("c"));
-    // 80,000 clusters less 60,001 used (the file and its folder).
-    assert_eq!(disk_free(&mut cpu, 3), (32, 19999, 512, 0xFFFF));
+    // 65,517 clusters less the 27,250 of the 60,001 used (the file and its
+    // folder) written past the first 32,751.
+    assert_eq!(disk_free(&mut cpu, 3), (32, 38_267, 512, 65_518));
 
     set_dsdx_string(&mut cpu, "C:\\GAMES\\SAVE.DAT");
     cpu.set_cx(0);
@@ -296,7 +332,7 @@ fn a_full_folder_still_shows_each_cluster_written() {
     assert_eq!((cf(&cpu), cpu.ax()), (false, 0x4000));
     cpu.set_bx(handle);
     int21(&mut cpu, 0x3E);
-    assert_eq!(disk_free(&mut cpu, 3), (32, 19998, 512, 0xFFFF));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 38_266, 512, 65_518));
 }
 
 #[test]
@@ -904,4 +940,206 @@ fn repeated_dos_failures_are_logged_a_few_times() {
     assert_eq!(of("Alloc FFFF paras failed"), 8, "{lines:?}");
     assert_eq!(of("(not logging more)"), 2, "{lines:?}");
     assert_eq!(of("Pattern='GAME1.SAV'"), 1, "{lines:?}");
+}
+
+/// A name that ends in a slash or backslash has an empty last name, and
+/// MS-DOS 6.22 refuses it with path not found (03h) in create (3Ch, 5Bh,
+/// 6Ch), open (3Dh), attributes (43h), delete (41h) and find first
+/// (4Eh), whatever the name before the slash is, and makes nothing: a
+/// probe of these calls in 86Box. PKUNZIP creates a ZIP's folder entry
+/// ("DATA/") as a file, expects the error and makes the folder; Dominus's
+/// installer fails when the create makes a file instead.
+#[test]
+fn a_name_ending_in_a_slash_is_path_not_found() {
+    let base = scratch("trailing_slash", &["c/EXD"]);
+    fs::write(base.join("c/EXF.TXT"), b"file").unwrap();
+    let mut cpu = Cpu::new(base.join("c"));
+    set_dta(&mut cpu);
+    let names = [
+        r"C:\NEWD\",
+        "C:/NEWD/",
+        r"NEWD\",
+        r"C:\EXD\",
+        r"C:\EXF.TXT\",
+        r"C:\EXD\NEWF.TXT\",
+    ];
+    for name in names {
+        for ah in [0x3C, 0x3D, 0x5B, 0x6C, 0x43, 0x41, 0x4E] {
+            set_dsdx_string(&mut cpu, name);
+            cpu.set_si(0);
+            cpu.set_cx(0x16);
+            cpu.set_bx(0x0002);
+            // 43h AL=00h: get the attributes. 6Ch takes the name at DS:SI
+            // and DX=11h: open or create.
+            cpu.set_reg8(Register::AL, 0);
+            if ah == 0x6C {
+                cpu.set_dx(0x11);
+            }
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+            int21(&mut cpu, ah);
+            assert!(cf(&cpu), "AH={ah:02X} {name}");
+            assert_eq!(cpu.ax(), 0x03, "AH={ah:02X} {name}");
+        }
+    }
+    let mut left: Vec<_> = fs::read_dir(base.join("c"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["EXD", "EXF.TXT"]);
+    assert!(base.join("c/EXD").is_dir());
+    assert_eq!(fs::read(base.join("c/EXF.TXT")).unwrap(), b"file");
+    assert_eq!(fs::read_dir(base.join("c/EXD")).unwrap().count(), 0);
+
+    // A root is a folder's name: its attributes are a folder's.
+    set_dsdx_string(&mut cpu, r"C:\");
+    cpu.set_reg8(Register::AL, 0);
+    int21(&mut cpu, 0x43);
+    assert!(!cf(&cpu));
+    assert_eq!(cpu.cx() & 0x10, 0x10);
+
+    // PKUNZIP's order: the folder entry fails, MKDIR makes the folder,
+    // and the files go into it.
+    set_dsdx_string(&mut cpu, "C:/DOMINUS/");
+    int21(&mut cpu, 0x39);
+    assert!(cf(&cpu));
+    set_dsdx_string(&mut cpu, "C:/DOMINUS");
+    int21(&mut cpu, 0x39);
+    assert!(!cf(&cpu));
+    set_dsdx_string(&mut cpu, "C:/DOMINUS/DATA/");
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x3C);
+    assert!(cf(&cpu));
+    assert_eq!(cpu.ax(), 0x03);
+    set_dsdx_string(&mut cpu, "C:/DOMINUS/DATA");
+    int21(&mut cpu, 0x39);
+    assert!(!cf(&cpu));
+    set_dsdx_string(&mut cpu, "C:/DOMINUS/DATA/INTERTXT.COM");
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x3C);
+    assert!(!cf(&cpu));
+    assert!(base.join("c/DOMINUS/DATA/INTERTXT.COM").is_file());
+}
+
+/// What each call answers for a root, a folder, a file, a file used as a
+/// folder and a name in a missing folder, as MS-DOS 6.22 answers them in
+/// 86Box (A: there, C: here): `Ok(ax)` for CF clear, `Err(ax)` for CF
+/// set. The current directory is the root. Delete (41h) of a root and
+/// get attributes (4300h) of a name in a missing folder are 05h and 03h,
+/// where another folder and a name in a folder that is there are 02h.
+#[test]
+fn file_calls_answer_as_ms_dos_does() {
+    let base = scratch("ms_dos_codes", &["c/EXD"]);
+    fs::write(base.join("c/EXF.TXT"), b"file").unwrap();
+    fs::write(base.join("c/EXD/IN.TXT"), b"in").unwrap();
+    let mut cpu = Cpu::new(base.join("c"));
+    let roots = [r"C:\", r"\", "C:.", r"C:\.", r"C:\EXD\.."];
+    let folders = [r"C:\EXD", r"C:\EXD\.", "EXD"];
+    let elsewhere = [r"C:\EXF.TXT\X", r"C:\NEWD\X.TXT", r"C:\NEWD\SUB\X.TXT"];
+    let mut cases: Vec<(u16, &str, Result<u16, u16>)> = Vec::new();
+    for name in roots {
+        cases.push((0x5B00, name, Err(0x05)));
+        cases.push((0x4100, name, Err(0x05)));
+        cases.push((0x4300, name, Ok(0x10)));
+        cases.push((0x4301, name, Err(0x05)));
+    }
+    for name in [r"C:\", r"\", "C:.", r"C:\."] {
+        cases.push((0x3900, name, Err(0x05)));
+        cases.push((0x3A00, name, Err(0x10)));
+    }
+    for name in folders {
+        cases.push((0x5B00, name, Err(0x05)));
+        cases.push((0x3900, name, Err(0x05)));
+        cases.push((0x4100, name, Err(0x02)));
+        cases.push((0x4300, name, Ok(0x10)));
+    }
+    for name in elsewhere {
+        for call in [0x5B00, 0x3900, 0x3A00, 0x4100, 0x4300, 0x4301] {
+            cases.push((call, name, Err(0x03)));
+        }
+    }
+    for name in [r"C:\EXF.TXT", r"C:\EXD\IN.TXT"] {
+        cases.push((0x3900, name, Err(0x05)));
+        cases.push((0x3A00, name, Err(0x05)));
+        cases.push((0x5B00, name, Err(0x50)));
+        cases.push((0x4300, name, Ok(0x20)));
+    }
+    for call in [0x4100, 0x4300, 0x4301] {
+        cases.push((call, r"C:\NEWF.TXT", Err(0x02)));
+    }
+    for (call, name, want) in cases {
+        set_dsdx_string(&mut cpu, name);
+        cpu.set_ax(call);
+        cpu.set_cx(0x20);
+        cpu.set_cpu_flag(CpuFlags::CF, false);
+        int21::handle(&mut cpu);
+        let got = if cf(&cpu) {
+            Err(cpu.ax())
+        } else {
+            Ok(cpu.ax())
+        };
+        assert_eq!(got, want, "AX={call:04X} {name}");
+        if call == 0x4300 && !cf(&cpu) {
+            assert_eq!(cpu.cx(), cpu.ax(), "AX={call:04X} {name}");
+        }
+    }
+
+    // TRUENAME keeps a slash that ends the name and returns AX=005Ch.
+    for (name, want) in [
+        (r"C:\NEWD\", r"C:\NEWD\"),
+        (r"NEWD\", r"C:\NEWD\"),
+        ("C:/NEWD/", r"C:\NEWD\"),
+        (r"C:\EXF.TXT\", r"C:\EXF.TXT\"),
+        (r"C:\EXD\.", r"C:\EXD"),
+        (r"C:\EXD\..", r"C:\"),
+        (r"C:\", r"C:\"),
+    ] {
+        set_dsdx_string(&mut cpu, name);
+        cpu.set_si(0);
+        cpu.set_es(0x3000);
+        cpu.set_reg16(Register::DI, 0);
+        cpu.set_ax(0x6000);
+        int21::handle(&mut cpu);
+        assert!(!cf(&cpu), "{name}");
+        assert_eq!(cpu.ax(), 0x005C, "{name}");
+        let got: String = (0..128)
+            .map(|i| cpu.bus.read_8(0x30000 + i))
+            .take_while(|&b| b != 0)
+            .map(|b| b as char)
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    // Rename (56h), from DS:DX to ES:DI.
+    for (from, to, want) in [
+        (r"C:\EXF.TXT\", r"C:\NEW.TXT", 0x03),
+        (r"C:\EXF.TXT", r"C:\NEW.TXT\", 0x03),
+        (r"C:\EXF.TXT", r"C:\NEWD\", 0x03),
+        (r"C:\EXD\", r"C:\EXD2", 0x03),
+        (r"C:\EXD", r"C:\EXD2\", 0x03),
+        (r"C:\NEWD\X.TXT", r"C:\NEW.TXT", 0x03),
+        (r"C:\EXF.TXT", r"C:\NEWD\NEW.TXT", 0x03),
+        (r"C:\EXF.TXT", r"C:\", 0x05),
+        (r"C:\MISSING.TXT", r"C:\NEW.TXT", 0x02),
+        (r"C:\EXF.TXT", r"C:\EXD", 0x05),
+    ] {
+        set_dsdx_string(&mut cpu, from);
+        for (i, b) in to.bytes().chain(std::iter::once(0)).enumerate() {
+            cpu.bus.write_8(0x30000 + i, b);
+        }
+        cpu.set_es(0x3000);
+        cpu.set_reg16(Register::DI, 0);
+        cpu.set_ax(0x5600);
+        int21::handle(&mut cpu);
+        assert!(cf(&cpu), "{from} -> {to}");
+        assert_eq!(cpu.ax(), want, "{from} -> {to}");
+    }
+
+    let mut left: Vec<_> = fs::read_dir(base.join("c"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["EXD", "EXF.TXT"]);
+    assert_eq!(fs::read(base.join("c/EXF.TXT")).unwrap(), b"file");
 }

@@ -877,6 +877,45 @@ fn a_windows_3_1_peek_message_loop_is_skipped() {
 }
 
 #[test]
+fn a_windows_3_1_yield_loop_is_skipped() {
+    // GetCurrentTime and Yield until 300 ms passed, then the exit code 1.
+    // With no other task and nothing sent to it, Yield gives the turn
+    // back at once and changes nothing but when the turn started, as a
+    // PeekMessage that finds nothing does: its passes are skipped too.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("USER", 15).emit(&[0x8B, 0xF0]); // GetCurrentTime; mov si,ax
+    let top = code.here();
+    code.call("KERNEL", 29) // Yield
+        .call("USER", 15)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_yield";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}
+  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+#[test]
 fn a_windows_3_1_timegettime_loop_is_skipped() {
     // A loop that waits 300 ms with timeGetTime, which reads the same
     // clock as GetTickCount and changes nothing else: its passes are
@@ -1024,6 +1063,67 @@ fn an_mfc_idle_loop_of_window_queries_is_skipped() {
         .exit_al();
     let program = program(&code, CODE);
     let test = "win16_mfc_idle";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+#[test]
+fn a_win16_loop_that_waits_for_a_module_is_skipped() {
+    // Memphis Math's INSTALL.EXE waits for the setup program it started
+    // to end (#1775): in every pass PeekMessage finding nothing,
+    // GetModuleHandle of the program's name and GetModuleUsage of the
+    // module. Here the module is T itself, which stays loaded, and the
+    // loop ends after 300 ms by timeGetTime. Both KERNEL functions only
+    // read the module table, so the passes are skipped as the plain
+    // PeekMessage loop's are.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.emit(&[0xC7, 0x06, 0x30, 0x00, 0x54, 0x00]) // mov word [30h],"T"
+        .call("MMSYSTEM", 607)
+        .emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    let top = code.here();
+    code.emit(&[0x1E]) // push ds
+        .push(0x10) // the MSG at DS:10h
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0) // PM_NOREMOVE
+        .call("USER", 109) // PeekMessage
+        .emit(&[0x1E]) // push ds
+        .push(0x30) // the name at DS:30h
+        .call("KERNEL", 47) // GetModuleHandle
+        .emit(&[0x50]) // push ax
+        .call("KERNEL", 48) // GetModuleUsage
+        .emit(&[0x85, 0xC0]) // test ax,ax
+        .emit(&[0x74, 0x00]); // jz gone
+    let gone = code.here();
+    code.call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    // A module that isn't there anymore ends the program with 2.
+    let at = code.here();
+    code.bytes[gone as usize - 1] = (at - gone) as u8;
+    code.emit(&[0xB0, 0x02]).exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_module_wait";
     let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
     let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
     let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);

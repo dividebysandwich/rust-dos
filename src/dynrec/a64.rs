@@ -228,13 +228,13 @@ fn dev_write_routine(ops: &mut Asm) {
     dynasm!(ops ; .arch aarch64 ; br x16);
 }
 
-/// ST(dst) = a + b, or a - b with W3 set, rounded to the control word's
-/// precision where `narrow_addsub` does, else as `F80::add` and `F80::sub`
-/// add their 80 bits, where x86-64's `Gen::fpu_addsub` does; a routine of
-/// the trampoline's that translated code calls with the physical registers
-/// a, b and dst in W0-W2 (8 for the double in D16), which returns W0 = 0,
-/// or 1 with nothing changed for the handler's code. X0-X15, X17 and
-/// D17-D21 are changed.
+/// ST(dst) = a + b, or a - b with W3 set, rounded as the control word
+/// says: as a double where `narrow_addsub` has the sum, else as `F80::add`
+/// and `F80::sub` add their 80 bits, where x86-64's `Gen::fpu_addsub`
+/// does; a routine of the trampoline's that translated code calls with
+/// the physical registers a, b and dst in W0-W2 (8 for the double in
+/// D16), which returns W0 = 0, or 1 with nothing changed for the
+/// handler's code. X0-X15, X17 and D17-D21 are changed.
 fn fpu_addsub(ops: &mut Asm) {
     let slow = ops.new_dynamic_label();
     dynasm!(ops ; .arch aarch64 ; mov w8, w0 ; mov w9, w1 ; mov w15, w2 ; mov w17, w3);
@@ -252,52 +252,171 @@ fn fpu_addsub(ops: &mut Asm) {
         ; cbz w17, >signed
         ; eor w1, w1, 0x8000
         ; signed:
-        // Exponents aligned: the smaller operand's mantissa shifted
-        // right (to 0 by 64 or more); W10 the larger exponent.
+        // The larger in magnitude in W0 and X2, W10 its exponent and W6
+        // how far below it the other's is.
         ; and w4, w0, 0x7FFF
-        ; and w10, w1, 0x7FFF
-        ; subs w5, w4, w10
-        ; csel w10, w4, w10, hs
-        ; cneg w5, w5, lo
-        ; csel w6, w5, wzr, lo
-        ; csel w7, w5, wzr, hs
-        ; lsr x2, x2, x6
+        ; and w5, w1, 0x7FFF
+        ; cmp w4, w5
+        ; b.hi >ordered
+        ; b.lo >swap
+        ; cmp x2, x3
+        ; b.hs >ordered
+        ; swap:
+        ; mov w6, w0
+        ; mov w0, w1
+        ; mov w1, w6
+        ; mov x6, x2
+        ; mov x2, x3
+        ; mov x3, x6
+        ; mov w6, w4
+        ; mov w4, w5
+        ; mov w5, w6
+        ; ordered:
+        ; mov w10, w4
+        ; sub w6, w4, w5
+        // The other's significand shifted down by that much as X3:X7,
+        // 128 bits: exact below 64; further down, what falls out of X7 a
+        // sticky bit in its lowest (127 places down is as good as more,
+        // with the rounding at most 65 places down).
+        ; mov x7, xzr
         ; cmp w6, 64
-        ; csel x2, xzr, x2, hs
-        ; lsr x3, x3, x7
-        ; cmp w7, 64
-        ; csel x3, xzr, x3, hs
-        // Same signs: the sum, a carry shifted in from the top.
-        ; eor w5, w0, w1
-        ; tbnz w5, 15, >differ
+        ; b.hs >far
+        ; cbz w6, >aligned
+        ; neg w5, w6
+        ; lsl x7, x3, x5
+        ; lsr x3, x3, x6
+        ; b >aligned
+        ; far:
+        ; mov w5, 127
+        ; cmp w6, w5
+        ; csel w6, w6, w5, ls
+        ; sub w6, w6, 64
+        ; lsr x7, x3, x6
+        ; lsl x5, x7, x6
+        ; cmp x5, x3
+        ; cset x5, ne
+        ; orr x7, x7, x5
+        ; mov x3, xzr
+        ; aligned:
+        ; and w0, w0, 0x8000
+        ; and w1, w1, 0x8000
+        ; cmp w0, w1
+        ; b.ne >differ
+        // Same signs: the 128-bit sum, a carry shifted back in from the
+        // top with the bit it pushes out kept as a sticky bit; two zeros
+        // the zero of their sign.
         ; adds x2, x2, x3
-        ; lsr x6, x2, 1
-        ; orr x6, x6, 1 << 63
-        ; csel x2, x6, x2, hs
-        ; cinc w10, w10, hs
-        ; and w0, w0, 0x8000
-        ; b >result
-        // Different signs: the difference, normalized, with the larger
-        // one's sign; 0 for none.
-        ; differ:
-        ; subs x5, x2, x3
-        ; sub x6, x3, x2
-        ; csel x2, x5, x6, hs
-        ; csel w0, w0, w1, hs
-        ; cbz x2, >nothing
-        ; clz x5, x2
-        ; lsl x2, x2, x5
-        ; sub w10, w10, w5
-        ; and w0, w0, 0x8000
-        ; b >result
-        ; nothing:
-        ; mov w0, wzr
+        ; b.hs >carry
+        ; cbnz x2, >round
         ; mov w10, wzr
-        // The double `F80::get_f64` makes of it into X7: 0 for exponent
-        // 0; outside a double's range (or an exponent that wrapped) the
-        // handlers'.
-        ; result:
-        ; cbz w10, >zero
+        ; b >zero
+        ; carry:
+        ; and x5, x7, 1
+        ; extr x7, x2, x7, 1
+        ; orr x7, x7, x5
+        ; lsr x2, x2, 1
+        ; orr x2, x2, 1 << 63
+        ; add w10, w10, 1
+        ; b >round
+        // Different signs: the difference, the larger's sign; brought up
+        // to the integer bit (a difference of operands more than a place
+        // apart moves one place at most, so the sticky bit stays below
+        // the rounding).
+        ; differ:
+        ; negs x7, x7
+        ; sbc x2, x2, x3
+        ; orr x5, x2, x7
+        ; cbz x5, >cancel
+        ; cbnz x2, >up
+        ; mov x2, x7
+        ; mov x7, xzr
+        ; sub w10, w10, 64
+        ; up:
+        ; clz x5, x2
+        ; cbz x5, >round
+        ; lsl x2, x2, x5
+        ; neg x6, x5
+        ; lsr x6, x7, x6
+        ; orr x2, x2, x6
+        ; lsl x7, x7, x5
+        ; sub w10, w10, w5
+        ; b >round
+        // A cancellation is +0, but -0 rounding down.
+        ; cancel:
+    );
+    mov32(ops, 5, layout::fpu::CONTROL as u32);
+    dynasm!(ops
+        ; .arch aarch64
+        ; ldrh w5, [x19, x5]
+        ; and w5, w5, 0xC00
+        ; cmp w5, 0x400
+        ; cset w0, eq
+        ; lsl w0, w0, 15
+        ; mov x2, xzr
+        ; mov w10, wzr
+        ; b >zero
+        // Rounded to the precision (64 bits, or with the reserved setting;
+        // 53; 24), as the rounding says: the part kept in X2, the rest
+        // in X5 (the bits below it at its top, a sticky bit for any
+        // further down), W6 1 where it goes up. A denormal is the
+        // handler's.
+        ; round:
+        ; cmp w10, 0
+        ; b.le =>slow
+    );
+    mov32(ops, 4, layout::fpu::CONTROL as u32);
+    dynasm!(ops
+        ; .arch aarch64
+        ; ldrh w4, [x19, x4]
+        ; and w5, w4, 0x300
+        ; cbz w5, >p24
+        ; cmp w5, 0x200
+        ; b.eq >p53
+        ; mov x5, x7
+    );
+    round_away(ops);
+    dynasm!(ops
+        ; .arch aarch64
+        ; adds x2, x2, x6
+        ; b.lo >rounded
+        ; movz x2, 0x8000, lsl 48
+        ; add w10, w10, 1
+        ; b >rounded
+    );
+    for (label, bits) in [("p53", 53u32), ("p24", 24)] {
+        let cut = 64 - bits;
+        match label {
+            "p53" => dynasm!(ops ; .arch aarch64 ; p53:),
+            _ => dynasm!(ops ; .arch aarch64 ; p24:),
+        }
+        dynasm!(ops
+            ; .arch aarch64
+            ; cmp x7, 0
+            ; cset x6, ne
+            ; orr x5, x6, x2, lsl bits
+            ; lsr x2, x2, cut
+        );
+        round_away(ops);
+        dynasm!(ops
+            ; .arch aarch64
+            ; add x2, x2, x6
+            ; tbz x2, bits, >fits
+            ; lsr x2, x2, 1
+            ; add w10, w10, 1
+            ; fits:
+            ; lsl x2, x2, cut
+            ; b >rounded
+        );
+    }
+    dynasm!(ops
+        ; .arch aarch64
+        // Past the largest number: the handler's.
+        ; rounded:
+        ; mov w5, 0x7FFF
+        ; cmp w10, w5
+        ; b.hs =>slow
+        // The double `F80::get_f64` makes of it into X7; outside a
+        // double's range the handler's.
         ; sub w5, w10, (16383 - 1023) >> 12, lsl 12
         ; sub w5, w5, (16383 - 1023) & 0xFFF
         ; sub w6, w5, 1
@@ -333,29 +452,90 @@ fn fpu_addsub(ops: &mut Asm) {
     );
 }
 
-/// `fpu_addsub` where the control word has a sum rounded to nearest at 53
-/// or 24 bits and both operands are doubles: the sum
+/// W6 = 1 where `fpu_addsub`'s sum goes up from the part kept in X2, as
+/// the rounding in W4 (the control word) says, with the rest in X5 (the
+/// bits below the part kept, at its top) and the sign in W0 (0x8000 for
+/// a negative sum), else 0: to nearest above a half, or at a half with
+/// the part kept odd; down for a negative sum and up for a positive one
+/// where anything is left; never chopped. X7 is changed.
+fn round_away(ops: &mut Asm) {
+    dynasm!(ops
+        ; .arch aarch64
+        ; ands w6, w4, 0xC00
+        ; b.ne >directed
+        ; and x6, x2, 1
+        ; movz x7, 0x8000, lsl 48
+        ; add x7, x7, 1
+        ; sub x7, x7, x6
+        ; cmp x5, x7
+        ; cset w6, hs
+        ; b >decided
+        ; directed:
+        ; lsr w6, w6, 10
+        ; add w6, w6, w0, lsr 15
+        ; cmp w6, 2
+        ; b.ne >keep
+        ; cmp x5, 0
+        ; cset w6, ne
+        ; b >decided
+        ; keep:
+        ; mov w6, wzr
+        ; decided:
+    );
+}
+
+/// What the sum left out, for `narrow_addsub`, with the operands in D17
+/// and D18 and their double sum in D19 (its bits in X7): with part =
+/// sum - a, (a - (sum - part)) + (b - part), into D21; X10 its bits
+/// shifted up by 1 (0 where it is 0), and X6 its bits xor the sum's (bit
+/// 63 set where the exact sum's magnitude is below the double's). D20 is
+/// changed.
+fn sum_error(ops: &mut Asm) {
+    dynasm!(ops
+        ; .arch aarch64
+        ; fsub d20, d19, d17
+        ; fsub d21, d19, d20
+        ; fsub d21, d17, d21
+        ; fsub d20, d18, d20
+        ; fadd d21, d21, d20
+        ; fmov x6, d21
+        ; lsl x10, x6, 1
+        ; eor x6, x6, x7
+    );
+}
+
+/// W10 = 1 for `narrow_addsub` where the rounding in W4 (the control
+/// word) goes away from 0 for the sum whose bits are in X7: down for a
+/// negative sum, up for a positive one; else 0.
+fn narrow_away(ops: &mut Asm) {
+    dynasm!(ops
+        ; .arch aarch64
+        ; ubfx w10, w4, 10, 2
+        ; add x10, x10, x7, lsr 63
+        ; cmp x10, 2
+        ; cset w10, eq
+    );
+}
+
+/// `fpu_addsub` where both operands are doubles: the sum
 /// `fpu::arithmetic::narrow_sum` gives, case for case, stored as ST(dst)'s
 /// double; to `wide` with nothing but X4 to X7, X10 and D17 to D21
 /// changed where it gives none, for the 80 bits' sum.
 fn narrow_addsub(ops: &mut Asm, wide: DynamicLabel) {
-    let (narrow, store, single) =
-        (ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label());
-    mov32(ops, 4, layout::fpu::CONTROL as u32);
-    dynasm!(ops
-        ; .arch aarch64
-        // The precision field 53 bits (2) or 24 (0), rounding to nearest.
-        ; ldrh w4, [x19, x4]
-        ; ands w5, w4, 0xF00
-        ; b.eq =>narrow
-        ; cmp w5, 0x200
-        ; b.ne =>wide
-        ; =>narrow
+    let (store, zero, p53, p24, round24, check) = (
+        ops.new_dynamic_label(),
+        ops.new_dynamic_label(),
+        ops.new_dynamic_label(),
+        ops.new_dynamic_label(),
+        ops.new_dynamic_label(),
+        ops.new_dynamic_label(),
     );
     narrow_operand(ops, 8, 17, wide);
     narrow_operand(ops, 9, 18, wide);
+    mov32(ops, 4, layout::fpu::CONTROL as u32);
     dynasm!(ops
         ; .arch aarch64
+        ; ldrh w4, [x19, x4]
         // A difference adds b with its sign turned.
         ; cbz w17, >plus
         ; fneg d18, d18
@@ -364,54 +544,96 @@ fn narrow_addsub(ops: &mut Asm, wide: DynamicLabel) {
         ; fmov x7, d19
         // Zero, or a normal double; any other sum is the 80 bits'.
         ; lsl x6, x7, 1
-        ; cbz x6, =>store
+        ; cbz x6, =>zero
         ; lsr x6, x6, 53
         ; sub w6, w6, 1
         ; cmp w6, 0x7FD
         ; b.hi =>wide
-        ; tst w4, 0x300
-        ; b.ne =>store
-        // To 24 bits: the double as a single, unless it is halfway
-        // between two singles (the 29 bits a single leaves out are
-        // 1000...), where the sum's own rounding decides the way.
-        ; and w6, w7, 0x1FFF_FFFF
-        ; movz w10, 0x1000, lsl 16
-        ; cmp w6, w10
-        ; b.ne =>single
-        // What the sum left out, into D21: with part = sum - a,
-        // (a - (sum - part)) + (b - part).
-        ; fsub d20, d19, d17
-        ; fsub d21, d19, d20
-        ; fsub d21, d17, d21
-        ; fsub d20, d18, d20
-        ; fadd d21, d21, d20
-        // A rounded sum that is even goes to its odd neighbour on the
-        // true sum's side: one up in its bits where what it left out has
-        // its sign, else one down.
-        ; fmov x6, d21
-        ; lsl x10, x6, 1
-        ; cbz x10, =>single
-        ; tbnz w7, 0, =>single
-        ; eor x6, x6, x7
+        // The precision: 24 bits (0), 53 (2), else 64 (3, and the
+        // reserved 1, which rounds the same).
+        ; and w5, w4, 0x300
+        ; cbz w5, =>p24
+        ; cmp w5, 0x200
+        ; b.eq =>p53
+    );
+    // 64 bits: the double sum where it is exact.
+    sum_error(ops);
+    dynasm!(ops
+        ; .arch aarch64
+        ; cbz x10, =>store
+        ; b =>wide
+        // 53 bits: the double sum rounded to nearest; another rounding
+        // takes its neighbour on the exact sum's side where that is the
+        // way it goes.
+        ; =>p53
+        ; tst w4, 0xC00
+        ; b.eq =>store
+    );
+    sum_error(ops);
+    dynasm!(ops
+        ; .arch aarch64
+        ; cbz x10, =>store
+        ; asr x6, x6, 63
+    );
+    narrow_away(ops);
+    dynasm!(ops
+        ; .arch aarch64
+        ; add x7, x7, x6
+        ; add x7, x7, x10
+        ; b =>check
+        // 24 bits: a sum with its low 28 bits 0 (a single, or halfway
+        // between two) moved to its odd neighbour on the exact sum's side
+        // where it isn't exact, which rounds as the exact sum does.
+        ; =>p24
+        ; tst w7, 0x0FFF_FFFF
+        ; b.ne =>round24
+    );
+    sum_error(ops);
+    dynasm!(ops
+        ; .arch aarch64
+        ; cbz x10, =>round24
         ; asr x6, x6, 63
         ; add x7, x7, x6, lsl 1
         ; add x7, x7, 1
-        // Below the smallest normal single the 80 bits' sum: a single's
-        // denormals are coarser than the 24 bits a 387 keeps there.
-        ; =>single
-        ; ubfx x6, x7, 52, 11
-        ; cmp w6, 1023 - 126
-        ; b.lo =>wide
-        ; fmov d19, x7
-        ; fcvt s19, d19
-        // A normal single, or the 80 bits' sum.
-        ; fmov w6, s19
-        ; ubfx w6, w6, 23, 8
+        ; =>round24
+        ; tst w4, 0xC00
+        ; b.ne >directed
+        // To nearest: up from a half, or from a half when the single
+        // below is odd.
+        ; ubfx x6, x7, 29, 1
+        ; add x7, x7, x6
+        ; movz w6, 0x0FFF, lsl 16
+        ; movk w6, 0xFFFF
+        ; add x7, x7, x6
+        ; b >cut
+        ; directed:
+    );
+    narrow_away(ops);
+    dynasm!(ops
+        ; .arch aarch64
+        ; neg x10, x10
+        ; and x10, x10, 0x1FFF_FFFF
+        ; add x7, x7, x10
+        ; cut:
+        ; and x7, x7, 0xFFFF_FFFF_E000_0000
+        // A normal double, or the 80 bits' sum.
+        ; =>check
+        ; lsl x6, x7, 1
+        ; lsr x6, x6, 53
         ; sub w6, w6, 1
-        ; cmp w6, 0xFD
+        ; cmp w6, 0x7FD
         ; b.hi =>wide
-        ; fcvt d19, s19
-        ; fmov x7, d19
+        ; b =>store
+        // A zero sum is exact: +0 from two signs (as the host gives it),
+        // but -0 rounding down.
+        ; =>zero
+        ; and w6, w4, 0xC00
+        ; cmp w6, 0x400
+        ; b.ne =>store
+        ; fmov x6, d17
+        ; fmov x10, d18
+        ; orr x7, x6, x10
+        ; and x7, x7, 1 << 63
         // ST(dst): the double alone.
         ; =>store
         ; str x7, [x12, x15, lsl 3]
@@ -438,17 +660,24 @@ fn narrow_operand(ops: &mut Asm, idx: u8, x: u8, wide: DynamicLabel) {
         ; ldr D(x), [x12, X(idx), lsl 3]
         ; ldrb w6, [x13, X(idx)]
         ; cbnz w6, =>done
-        // The 80 bits count: a significand that ends at a double's 53
-        // bits, with the integer bit set where the double isn't 0 and
-        // nothing where it is.
+        // The 80 bits count: the double's significand (its 53 bits, the
+        // integer bit set) where the double is a normal number, and
+        // nothing where it is 0.
         ; add x6, x11, X(idx), lsl 4
         ; ldr x6, [x6]
-        ; tst x6, 0x7FF
-        ; b.ne =>wide
         ; fmov x7, D(x)
         ; lsl x7, x7, 1
         ; cbz x7, >zero
-        ; tbnz x6, 63, =>done
+        // A denormal double: the 80 bits may hold more than it.
+        ; lsr x7, x7, 53
+        ; cbz x7, =>wide
+        // Another significand: more bits, or a number just below the
+        // least normal double, which rounds up to it.
+        ; fmov x7, D(x)
+        ; lsl x7, x7, 11
+        ; orr x7, x7, 1 << 63
+        ; cmp x6, x7
+        ; b.eq =>done
         ; b =>wide
         ; zero:
         ; cbnz x6, =>wide
@@ -461,8 +690,9 @@ fn narrow_operand(ops: &mut Asm, idx: u8, x: u8, wide: DynamicLabel) {
 
 /// Operand W`idx` of `fpu_addsub` (a physical register, or 8 for D16) into
 /// W`hi` (sign << 15 | exponent) and X`man`, as `FpuRegs::get` and
-/// `F80::set_f64` make its 80 bits; to `slow` for an empty register or an
-/// infinity or a NaN. X6 and X7 are changed.
+/// `F80::set_f64` make its 80 bits; to `slow` for an empty register, an
+/// infinity or a NaN, a denormal, and a format the FPU doesn't take. X6
+/// and X7 are changed.
 fn f80_operand(ops: &mut Asm, idx: u8, hi: u8, man: u8, slow: DynamicLabel) {
     let (value, stale, loaded, zero) =
         (ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label());
@@ -482,6 +712,15 @@ fn f80_operand(ops: &mut Asm, idx: u8, hi: u8, man: u8, slow: DynamicLabel) {
         ; mvn w6, W(hi)
         ; tst w6, 0x7FFF
         ; b.eq =>slow
+        // The integer bit set with an exponent, or neither and no bits:
+        // a denormal, or a format the FPU doesn't take, is the handler's.
+        ; tst W(hi), 0x7FFF
+        ; cset w6, ne
+        ; lsr x7, X(man), 63
+        ; cmp w6, w7
+        ; b.ne =>slow
+        ; cbnz w6, =>loaded
+        ; cbnz X(man), =>slow
         ; b =>loaded
         ; =>stale
         ; ldr x7, [x12, X(idx), lsl 3]
@@ -501,7 +740,11 @@ fn f80_operand(ops: &mut Asm, idx: u8, hi: u8, man: u8, slow: DynamicLabel) {
         ; lsl X(man), x7, 11
         ; orr XSP(man), X(man), 1 << 63
         ; b =>loaded
+        // A zero; a denormal double, a normal number in 80 bits, is the
+        // handler's.
         ; =>zero
+        ; lsl x6, x7, 1
+        ; cbnz x6, =>slow
         ; lsr X(hi), x7, 63
         ; lsl W(hi), W(hi), 15
         ; mov X(man), xzr
@@ -987,9 +1230,22 @@ impl Gen<'_> {
     /// as HIMEM leaves them, with base 0: the block's environment has
     /// that), run the instruction through its handler (and with `leave`,
     /// stop the block after it). The selector is in `sel` (or not known
-    /// yet: then no segment with a 4 GB limit).
+    /// yet: then no segment with a 4 GB limit). Where the block's
+    /// environment has the register big (`big_load`), the load may make
+    /// it flat or not, which the caller notes (`note_big_load`). In
+    /// virtual-8086 mode the same, unless the register has the 64 KB
+    /// level-3 segment that `Cpu::load_seg_v86` keeps (never flat), as
+    /// every load there leaves.
     fn real_load(&mut self, seg: Seg, sel: Option<T>, leave: bool) {
         let at = self.ops.new_dynamic_label();
+        if self.env.bits & super::ENV_V86 != 0 {
+            self.field(Access::Ldr16, 0, seg_field(seg, layout::SEG_ATTR));
+            dynasm!(self.ops ; .arch aarch64 ; cmp w0, layout::AR_DATA_RW_V86 as u32 ; b.ne =>at);
+            self.field(Access::Ldr32, 0, seg_field(seg, layout::SEG_LIMIT));
+            dynasm!(self.ops ; .arch aarch64 ; movz w1, 0xFFFF ; cmp w0, w1 ; b.ne =>at);
+            self.bail_load(at, leave);
+            return;
+        }
         self.field(Access::Ldr8, 0, seg_field(seg, layout::SEG_ATTR));
         dynasm!(self.ops ; .arch aarch64 ; cmp w0, layout::AR_DATA_RW as u32 & 0xFF ; b.ne =>at);
         self.field(Access::Ldr8, 0, seg_field(seg, layout::SEG_RIGHTS));
@@ -1000,6 +1256,7 @@ impl Gen<'_> {
         dynasm!(self.ops ; .arch aarch64 ; cmn w0, 1);
         match sel {
             None => dynasm!(self.ops ; .arch aarch64 ; b.eq =>at),
+            Some(_) if self.big_load(seg) => dynasm!(self.ops ; .arch aarch64 ; b.ne =>at),
             Some(t) => {
                 let plain = self.ops.new_dynamic_label();
                 dynasm!(self.ops ; .arch aarch64 ; b.ne =>plain);
@@ -1013,6 +1270,36 @@ impl Gen<'_> {
                 );
             }
         }
+        self.bail_load(at, leave);
+    }
+
+    /// Whether the block's environment has segment register `seg` big
+    /// in real mode (see `x64::Gen::big_load`).
+    fn big_load(&self, seg: Seg) -> bool {
+        let bits = self.env.bits;
+        bits & super::ENV_V86 == 0 && bits & super::ENV_BIG << seg as u32 != 0
+    }
+
+    /// After a load of big segment register `seg` in real mode, with its
+    /// new base in W0: whether it is flat now goes into the context, and
+    /// the rest of the block checks its accesses as a segment's that isn't
+    /// flat (see `x64::Gen::note_big_load`).
+    fn note_big_load(&mut self, seg: Seg) {
+        let bit = super::ENV_FLAT << seg as u32;
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; ldr w1, [x20, CTX_FLAT as u32]
+            ; and w1, w1, !bit
+            ; cbnz w0, >based
+            ; orr w1, w1, bit
+            ; based:
+            ; str w1, [x20, CTX_FLAT as u32]
+        );
+        self.loaded_segs |= 1 << seg as u8;
+    }
+
+    /// The handler's call for `real_load`'s instruction at `at`.
+    fn bail_load(&mut self, at: DynamicLabel, leave: bool) {
         let end = self.end();
         self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave });
     }
@@ -1127,8 +1414,6 @@ impl Gen<'_> {
         );
     }
 
-    /// Make the double in D`x` what an FPU register holds
-    /// (`f80::canon_f64`): a denormal 0, a NaN quiet.
     /// IN or OUT of `size` bytes at port `port` through `jit_port`, as
     /// x86-64's: its value into (or from) t; a fault or panic leaves.
     fn port_io(&mut self, out: bool, size: u8, port: Src, t: T) {
@@ -1200,24 +1485,18 @@ impl Gen<'_> {
         dynasm!(self.ops ; .arch aarch64 ; ldr x16, [x20, CTX_FPU as u32] ; blr x16);
     }
 
+    /// Make the double in D`x` what an FPU register holds
+    /// (`f80::canon_f64`): a NaN quiet.
     fn fpu_canon(&mut self, x: u8) {
         dynasm!(self.ops
             ; .arch aarch64
             ; fmov x1, D(x)
             ; ubfx x2, x1, 52, 11
-            ; sub w2, w2, 1
-            ; cmp w2, 0x7FE
-            ; b.lo >canon_done
-            ; cmn w2, 1
-            ; b.ne >canon_nan
-            // A zero or a denormal: the sign alone.
-            ; and x1, x1, 0x8000_0000_0000_0000
-            ; b >canon_fix
-            ; canon_nan:
+            ; cmp w2, 0x7FF
+            ; b.ne >canon_done
             ; lsl x2, x1, 12
             ; cbz x2, >canon_done
             ; orr x1, x1, 1 << 51
-            ; canon_fix:
             ; fmov D(x), x1
             ; canon_done:
         );
@@ -2236,15 +2515,24 @@ impl Gen<'_> {
                 }
             }
             Uop::CsReal => self.real_load(Seg::CS, None, false),
-            Uop::LoadSeg { seg, t } if self.env.bits & super::ENV_REAL != 0 => {
-                // As `Cpu::load_seg_real` loads it once it is a plain
-                // segment (which it stays): its handler runs the
-                // instruction otherwise, and the block stops after it.
+            Uop::LoadSeg { seg, t } if self.env.bits & (super::ENV_REAL | super::ENV_V86) != 0 => {
+                // As `Cpu::load_seg_real` (or `load_seg_v86`) loads it once
+                // it is a plain segment (which it stays): its handler runs
+                // the instruction otherwise, and the block stops after it.
+                let big = self.big_load(seg);
                 self.real_load(seg, Some(t), true);
                 dynasm!(self.ops ; .arch aarch64 ; and w0, W(r(t)), 0xFFFF);
                 self.field(Access::Str16, 0, seg_field(seg, layout::SEG_SELECTOR));
                 dynasm!(self.ops ; .arch aarch64 ; lsl w0, w0, 4);
                 self.field(Access::Str32, 0, seg_field(seg, layout::SEG_BASE));
+                if big {
+                    self.note_big_load(seg);
+                }
+                if seg == Seg::SS {
+                    // As x86-64's: the interrupt shadow of a stack switch.
+                    dynasm!(self.ops ; .arch aarch64 ; movz w2, 1);
+                    self.field(Access::Str8, 2, layout::IRQ_SHADOW);
+                }
             }
             Uop::LoadCsReal { t } => {
                 self.data_x1();

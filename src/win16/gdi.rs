@@ -220,7 +220,7 @@ static APIS: &[Api16] = &[
     rust("GetCharWidth", 350, "wwwp", get_char_width),
     rust("ExtTextOut", 351, "wsswpSwp", ext_text_out),
     win32("CreatePalette", 360, "p", G, "CreatePalette", b'w'),
-    win32("GDISelectPalette", 361, "www", G, "SelectPalette", b'w'),
+    rust("GDISelectPalette", 361, "www", gdi_select_palette),
     win32("GDIRealizePalette", 362, "w", G, "RealizePalette", b'w'),
     win32(
         "GetPaletteEntries",
@@ -238,7 +238,7 @@ static APIS: &[Api16] = &[
         "SetPaletteEntries",
         b'w',
     ),
-    rust("RealizeDefaultPalette", 365, "w", zero),
+    rust("RealizeDefaultPalette", 365, "w", realize_default_palette),
     win32("UpdateColors", 366, "w", G, "UpdateColors", b'b'),
     win32("AnimatePalette", 367, "wwwp", G, "AnimatePalette", b'b'),
     win32("ResizePalette", 368, "ww", G, "ResizePalette", b'b'),
@@ -401,6 +401,15 @@ static APIS: &[Api16] = &[
         "wP",
         G,
         "GetAspectRatioFilterEx",
+        b'b',
+    ),
+    rust("IsDCCurrentPalette", 412, "w", is_dc_current_palette),
+    win32(
+        "CreateScalableFontResource",
+        310,
+        "wppp",
+        G,
+        "CreateScalableFontResourceA",
         b'b',
     ),
 ];
@@ -925,6 +934,32 @@ fn reset_dc(_: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn get_cur_log_font(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // OBJ_FONT.
     go(cpu, "GetCurrentObject", &[args[0], 6])
+}
+
+/// IsDCCurrentPalette(hdc), undocumented: TRUE when the DC's palette is
+/// the one last selected in the foreground. Video for Windows 1.1's
+/// DrawDib (MSVIDEO.DLL) asks it on a 256-colour display: when TRUE it
+/// takes the palette's indices as the system palette's, else it maps
+/// each index through GetSystemPaletteEntries and GetNearestColor.
+fn is_dc_current_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let current = crate::win32::gdi32::palette::is_dc_current_palette(cpu, args[0]);
+    Some(current as u32)
+}
+
+/// GDISelectPalette(hdc, hpal, wBkg), which USER's SelectPalette calls:
+/// with wBkg FALSE the palette becomes the foreground one, whatever the
+/// display and the DC's window (`palette::gdi_select_palette`).
+fn gdi_select_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let background = args[2] & 0xFFFF != 0;
+    crate::win32::gdi32::palette::gdi_select_palette(cpu, args[0], args[1], background)
+}
+
+/// RealizeDefaultPalette(hdc), GDI.365, which USER calls when no window
+/// keeps a palette in the foreground: on a palette device DEFAULT_PALETTE
+/// becomes the foreground palette (`palette::realize_default`).
+fn realize_default_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    use crate::win32::gdi32::palette;
+    Some(palette::realize_default_palette(cpu, args[0]))
 }
 
 /// CreateDIBPatternBrush(global block, usage): the packed DIB in the

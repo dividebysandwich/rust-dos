@@ -104,6 +104,8 @@ static APIS: &[Api] = &[
     stdcall("IGetFrame_Begin", 0, 4, nothing),
     stdcall("IGetFrame_End", 0, 1, nothing),
     stdcall("IGetFrame_SetFormat", 0, 7, get_frame_set_format),
+    stdcall("AVIStreamOpenFromFileA", 48, 6, avi_stream_open_from_file),
+    stdcall("AVIStreamOpenFromFile", 47, 6, avi_stream_open_from_file),
 ];
 
 static VTABLES: &[Vtable] = &[
@@ -408,6 +410,29 @@ fn avi_file_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     });
     write_32(cpu, out, iface);
     Some(AVIERR_OK)
+}
+
+/// AVIStreamOpenFromFileA(stream, name, type, n, mode, handler): the
+/// `n`th stream of type `type` (any type for 0) of the AVI file `name`.
+/// As in Wine's api.c, the file is opened, the stream taken from it and
+/// the file released, so the stream holds the file's only reference and
+/// its release closes the file.
+fn avi_stream_open_from_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[out, name, kind, n, mode, handler] = args else {
+        unreachable!()
+    };
+    if out == 0 || !cpu.bus.guest_probe(out, 4, true) {
+        return Some(AVIERR_BADPARAM);
+    }
+    // The file's interface goes where the stream's will.
+    let opened = avi_file_open(cpu, &[out, name, mode, handler])?;
+    let file = cpu.bus.guest_read_32(out);
+    if opened != AVIERR_OK || file == 0 {
+        return Some(opened);
+    }
+    let result = file_get_stream(cpu, &[file, out, kind, n])?;
+    release(cpu, file);
+    Some(result)
 }
 
 /// AddRef of a file or a stream: the count of the file's references.
@@ -1061,7 +1086,7 @@ fn set_format(cpu: &mut Cpu, slot: usize, wanted: u32) -> bool {
     f.last = -1;
     f.codec = Codec::new(&source);
     if old != 0 {
-        crate::win32::with_process(cpu, |p, _| p.heap.free(old));
+        crate::win32::with_process(cpu, |p, bus| p.heap.free(&p.memory, bus, old));
     }
     true
 }
@@ -1111,7 +1136,7 @@ fn release_frame(cpu: &mut Cpu, this: u32) -> u32 {
     let file_open = frame_file(cpu, slot).is_some();
     let f = frames(cpu)[slot].take().expect("an open IGetFrame");
     if f.buffer != 0 {
-        crate::win32::with_process(cpu, |p, _| p.heap.free(f.buffer));
+        crate::win32::with_process(cpu, |p, bus| p.heap.free(&p.memory, bus, f.buffer));
     }
     com::free_interface(cpu, f.iface);
     // Its reference to the file, through the file's own interface.

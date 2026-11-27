@@ -110,7 +110,7 @@ pub(super) fn alloc(cpu: &mut Cpu, heap: u32, flags: u32, size: u32) -> Result<u
 
 /// Give the block at `at` of `heap` back.
 pub(super) fn free(cpu: &mut Cpu, heap: u32, at: u32) -> Result<(), u32> {
-    match with_heap(cpu, heap, |h, _, _| at == 0 || h.free(at)) {
+    match with_heap(cpu, heap, |h, m, bus| at == 0 || h.free(m, bus, at)) {
         None => Err(ERROR_INVALID_HANDLE),
         Some(false) => Err(ERROR_INVALID_PARAMETER),
         Some(true) => Ok(()),

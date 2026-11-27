@@ -1,17 +1,17 @@
 //! The 3dfx card drawn again with OpenGL at `voodoo_scale` times its
 //! resolution, for the window and the libretro core's hardware rendering
-//! (`voodoo_renderer=opengl`). The card records what it draws
-//! (`super::mirror`); here each of its colour buffers is the texture of a
-//! framebuffer object, all sharing one depth texture, the triangles go
-//! through the card's pixel pipeline in a shader (gl/triangle.frag) with
-//! OpenGL's depth test and blending, and the front buffer through the
-//! card's gamma table is the picture shown. With `voodoo_dither`, what the
-//! game draws dithered (triangles and fastfills) is dithered to 5-6-5 as
-//! the card does it (`set_dither`). With `voodoo_msaa`, the buffers are
-//! multisampled and resolved into their textures before they are shown.
-//! The software rasterizer's memory stays what screenshots, recordings and
-//! the debugger see, and what the game reads back; it only draws what those
-//! can still see (`super::backlog`).
+//! (`renderer=opengl`). The card records what it draws (`super::mirror`);
+//! here each of its colour buffers is the texture of a framebuffer object,
+//! all sharing one depth texture, the triangles go through the card's pixel
+//! pipeline in a shader (gl/triangle.frag) with OpenGL's depth test and
+//! blending, and the front buffer through the card's gamma table is the
+//! picture shown. With `voodoo_dither`, what the game draws dithered
+//! (triangles and fastfills) is dithered to 5-6-5 as the card does it
+//! (`set_dither`). With `voodoo_msaa`, the buffers are multisampled and
+//! resolved into their textures before they are shown. The software
+//! rasterizer's memory stays what screenshots, recordings and the debugger
+//! see, and what the game reads back; it only draws what those can still
+//! see (`super::backlog`).
 
 use glow::HasContext;
 use crate::video::Frame;
@@ -774,9 +774,6 @@ impl VoodooGl {
         anisotropy: u32,
         limits: Limits,
     ) -> Result<Self, String> {
-        if glsl == Glsl::Es300 {
-            return Err("OpenGL ES has no noperspective interpolation".to_string());
-        }
         let attributes = [
             (0, "a_pos"),
             (1, "a_color"),
@@ -1527,7 +1524,7 @@ impl VoodooGl {
                 }
                 if let Ok(target) = target(gl, (w, h), self.samples, self.depth) {
                     gl.clear_color(0.0, 0.0, 0.0, 1.0);
-                    gl.clear_depth_f64(1.0);
+                    gl.clear_depth(1.0);
                     gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
                     self.targets.insert(offs, target);
                 }
@@ -2076,7 +2073,7 @@ impl VoodooGl {
                     gl.clear(glow::COLOR_BUFFER_BIT);
                 } else if self.depth.is_some() {
                     gl.depth_mask(true);
-                    gl.clear_depth_f64(aux as f64 / 65535.0);
+                    gl.clear_depth(aux as f64 / 65535.0);
                     gl.clear(glow::DEPTH_BUFFER_BIT);
                 }
             }
@@ -2891,6 +2888,18 @@ fn target(gl: &glow::Context, (w, h): (i32, i32), samples: u32, depth: Option<De
     }
 }
 
+/// The first lines of a shader `compile` makes: the version's
+/// (`Glsl::preamble`), and on OpenGL ES samplers of high precision. A
+/// fragment shader's samplers are of low precision there by default, whose
+/// values need only reach from -2 to 2, and the shaders scale what they
+/// read by 255.
+fn preamble(glsl: Glsl) -> String {
+    match glsl {
+        Glsl::Es300 => format!("{}precision highp sampler2D;\n", glsl.preamble()),
+        Glsl::Gl130 | Glsl::Gl150 => glsl.preamble().to_string(),
+    }
+}
+
 /// Compile and link a program with its attributes at their locations, and
 /// find its uniforms. The ToadForce's renderer makes its programs with it
 /// too (`toadforce::gl`).
@@ -2908,7 +2917,7 @@ pub(crate) fn compile<U: Locations>(
         let mut problem = None;
         for (kind, source) in [(glow::VERTEX_SHADER, vertex), (glow::FRAGMENT_SHADER, fragment)] {
             let stage = gl.create_shader(kind)?;
-            gl.shader_source(stage, &format!("{}{}", glsl.preamble(), source));
+            gl.shader_source(stage, &format!("{}{}", preamble(glsl), source));
             gl.compile_shader(stage);
             gl.attach_shader(program, stage);
             stages.push(stage);
@@ -2921,7 +2930,11 @@ pub(crate) fn compile<U: Locations>(
             for &(index, name) in attributes {
                 gl.bind_attrib_location(program, index, name);
             }
-            gl.bind_frag_data_location(program, 0, "o_color");
+            // OpenGL ES has no glBindFragDataLocation: a shader's one
+            // output is at location 0 there.
+            if glsl != Glsl::Es300 {
+                gl.bind_frag_data_location(program, 0, "o_color");
+            }
             gl.link_program(program);
             if !gl.get_program_link_status(program) {
                 problem = Some(format!("a 3dfx shader doesn't link: {}", gl.get_program_info_log(program)));
@@ -2942,6 +2955,67 @@ pub(crate) fn compile<U: Locations>(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{Catch, RUN_TRIANGLES, Unread, Vertex, buffer_rect, sampling_filters};
+
+    /// Every 3dfx shader compiles in every dialect a context may take (the
+    /// per-sample program in GLSL 1.50 only, the one `VoodooGl` makes it
+    /// in), where glslang's validator is installed. OpenGL ES is what
+    /// RetroArch has on Android, and no OpenGL test runs it. CI sets
+    /// `RUST_DOS_REQUIRE_GLSLANG`, so that there a missing validator fails
+    /// the test instead of skipping it.
+    #[test]
+    fn sources_compile() {
+        use super::*;
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        if Command::new("glslangValidator").arg("--version").output().is_err() {
+            assert!(
+                std::env::var_os("RUST_DOS_REQUIRE_GLSLANG").is_none(),
+                "RUST_DOS_REQUIRE_GLSLANG is set, but glslangValidator isn't installed"
+            );
+            eprintln!("glslangValidator isn't installed, not compiling the 3dfx shaders");
+            return;
+        }
+        // As `VoodooGl::with_limits` makes the per-sample program.
+        let per_sample = format!(
+            "#extension GL_ARB_sample_shading : require\n#define PER_SAMPLE\n{TRIANGLE_FRAG}"
+        );
+        let quads = [
+            ("fill", FILL_FRAG),
+            ("pixels", PIXELS_FRAG),
+            ("depth", DEPTH_FRAG),
+            ("clut", CLUT_FRAG),
+            ("copy", COPY_FRAG),
+            ("banshee", BANSHEE_FRAG),
+            ("blit", BLIT_FRAG),
+        ];
+        for glsl in [Glsl::Gl130, Glsl::Gl150, Glsl::Es300] {
+            let mut programs = vec![("triangle", TRIANGLE_VERT, TRIANGLE_FRAG)];
+            programs.extend(quads.map(|(name, fragment)| (name, QUAD_VERT, fragment)));
+            if glsl == Glsl::Gl150 {
+                programs.push(("per-sample triangle", TRIANGLE_VERT, per_sample.as_str()));
+            }
+            for (name, vertex, fragment) in programs {
+                for (stage, source) in [("vert", vertex), ("frag", fragment)] {
+                    let mut child = Command::new("glslangValidator")
+                        .args(["--stdin", "-S", stage])
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .spawn()
+                        .unwrap();
+                    // As `compile` puts them together.
+                    let source = format!("{}{}", preamble(glsl), source);
+                    child.stdin.take().unwrap().write_all(source.as_bytes()).unwrap();
+                    let output = child.wait_with_output().unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{name} {glsl:?} {stage}: {}",
+                        String::from_utf8_lossy(&output.stdout)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     #[ignore = "requires a desktop OpenGL context"]

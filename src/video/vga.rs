@@ -132,6 +132,15 @@ pub struct VgaCard {
 
     /// A monochrome monitor on the adapter (see `VideoSetup`).
     pub mono_monitor: bool,
+
+    /// Whether plane 2 holds the font the text modes draw with, as on an
+    /// EGA or VGA: the BIOS loaded one there (a mode set, INT 10h AH=11h),
+    /// so the characters' glyphs are what the planes have, a program's own
+    /// included. Without, the text modes draw with the ROM's fonts: a state
+    /// saved before rust-dos kept the font there, or a mode set the BIOS
+    /// made under a booted system's V86 monitor (Windows, which keeps the
+    /// planes itself, or EMM386).
+    pub font_loaded: bool,
 }
 
 /// The memory text and CGA modes show: 32 KB at B8000h (or B0000h for a
@@ -215,6 +224,7 @@ impl VgaCard {
             herc_mode: 0x29,
             herc_config: 0,
             mono_monitor: false,
+            font_loaded: false,
         };
         // The BIOS starts in 80x25 color text mode.
         vga.set_video_mode(super::VideoMode::Text80x25Color);
@@ -228,6 +238,60 @@ impl VgaCard {
         self.vram_graphics.len() / 4
     }
 
+    /// Where character map `map` (0-7) starts in plane 2: maps 0-3 at
+    /// 16 KB apart, and on a VGA maps 4-7 8 KB after each of them.
+    fn font_map_offset(&self, map: u8) -> usize {
+        let low = (map & 3) as usize * 0x4000;
+        if self.adapter.vga_bios() {
+            low + (map >> 2 & 1) as usize * 0x2000
+        } else {
+            low
+        }
+    }
+
+    /// Where in plane 2 the fonts of the characters with attribute bit 3
+    /// clear and set start, as Character Map Select (SR03) picks them:
+    /// map B in bits 0, 1 and 4, map A in bits 2, 3 and 5. The two are
+    /// the same font unless a program asks for 512 characters.
+    pub fn char_maps(&self) -> [usize; 2] {
+        let select = self.sequencer_regs[0x03];
+        let b = (select & 3) | (select >> 2 & 4);
+        let a = (select >> 2 & 3) | (select >> 3 & 4);
+        [self.font_map_offset(b), self.font_map_offset(a)]
+    }
+
+    /// Row `row` (0-31) of character `ch`'s glyph in the font at `map` in
+    /// plane 2 (see `char_maps`): 32 bytes a character.
+    #[inline]
+    pub fn font_row(&self, map: usize, ch: u8, row: usize) -> u8 {
+        let size = self.plane_size();
+        self.vram_graphics[2 * size + ((map + ch as usize * 32 + row) & (size - 1))]
+    }
+
+    /// Load `glyphs`, `height` bytes each, into character map `map` from
+    /// character `first` on, as the BIOS does through the planes: the
+    /// rows of each character past `height` stay as they are. The text
+    /// modes draw with plane 2's font from then on.
+    pub fn load_font(&mut self, map: u8, first: usize, height: usize, glyphs: &[u8]) {
+        if height == 0 {
+            return;
+        }
+        let (start, size) = (self.font_map_offset(map), self.plane_size());
+        let plane = &mut self.vram_graphics[2 * size..3 * size];
+        for (i, glyph) in glyphs
+            .chunks_exact(height)
+            .enumerate()
+            .take(256usize.saturating_sub(first))
+        {
+            let at = start + (first + i) * 32;
+            for (row, &bits) in glyph.iter().take(32).enumerate() {
+                plane[(at + row) & (size - 1)] = bits;
+            }
+        }
+        self.font_loaded = true;
+        self.mark_dirty_full();
+    }
+
     /// The registers were set from outside the ports (a DOS box's display
     /// put back): mode 12h's rows no longer follow from the last mode set.
     pub(crate) fn forget_layout(&mut self) {
@@ -239,6 +303,7 @@ impl VgaCard {
     pub fn set_memory(&mut self, plane_size: usize) {
         self.mode12_rows = false;
         self.vram_graphics = vec![0; plane_size * 4];
+        self.font_loaded = false;
     }
 
     /// Whether a VGA's picture is turned off: the sequencer's Clocking Mode
@@ -352,6 +417,17 @@ impl VgaCard {
         self.get_rgb(self.dac_index(value))
     }
 
+    /// Whether the card answers at A0000h-AFFFFh, its graphics window. An
+    /// EGA or VGA decodes the addresses the Graphics Controller's
+    /// Miscellaneous register (GR06) maps its memory at: A0000h for 128 KB
+    /// or 64 KB (Memory Map Select 00b and 01b), B0000h or B8000h for 32 KB
+    /// (10b and 11b, the text modes'). Outside them the processor reaches
+    /// no memory of the card: reads find the open bus, and writes go
+    /// nowhere. The other adapters keep the window as they had it.
+    pub fn maps_graphics_window(&self) -> bool {
+        !self.adapter.ega_bios() || self.graphics_regs[0x06] & 0x08 == 0
+    }
+
     /// Where the text and CGA modes' memory is, how big the window onto it
     /// is, and where the memory wraps (a mask): 32 KB at B8000h, or at
     /// B0000h when the Graphics Miscellaneous register maps memory there
@@ -366,6 +442,28 @@ impl VgaCard {
         }
         let base = if self.graphics_regs[0x06] & 0x0C == 0x08 { 0xB0000 } else { 0xB8000 };
         (base, 0x8000, 0x7FFF)
+    }
+
+    /// `text_window` while the card answers there: always on the CGA,
+    /// Tandy, PCjr and Hercules, and on an EGA or VGA only while GR06's
+    /// Memory Map Select maps the memory at B0000h (10b) or B8000h (11b).
+    #[inline]
+    pub fn decoded_text_window(&self) -> Option<(usize, usize, usize)> {
+        if !self.adapter.ega_bios() {
+            return Some(self.text_window());
+        }
+        match self.graphics_regs[0x06] & 0x0C {
+            0x08 => Some((0xB0000, 0x8000, 0x7FFF)),
+            0x0C => Some((0xB8000, 0x8000, 0x7FFF)),
+            _ => None,
+        }
+    }
+
+    /// Whether GR06 maps an EGA's or VGA's memory at A0000h-BFFFFh, 128 KB
+    /// (Memory Map Select 00b): B0000h-BFFFFh reach the planes from offset
+    /// 10000h on, as the window from A0000h goes on.
+    pub fn maps_128k(&self) -> bool {
+        self.adapter.ega_bios() && self.graphics_regs[0x06] & 0x0C == 0
     }
 
     /// Whether attribute bit 7 makes characters blink rather than select
@@ -972,14 +1070,8 @@ impl VgaCard {
             super::adapter::Adapter::Ega => super::modes::ega_mode_regs(mode),
             _ => super::modes::mode_regs(mode),
         };
-        self.misc_output_reg = regs.misc;
-        self.sequencer_regs[0] = 0x03;
-        self.sequencer_regs[1..].copy_from_slice(&regs.seq);
-        self.crtc_regs = regs.crtc;
-        self.graphics_regs = regs.gc;
-        self.attribute_regs = regs.attr;
+        self.load_mode_regs(regs);
         self.fixed_timing = None;
-        self.timing_cache = None;
         self.mode12_rows = mode == super::VideoMode::Vga640x480
             && self.adapter.supports_mode(0x12)
             && self.plane_size() == 0x10000;
@@ -989,6 +1081,53 @@ impl VgaCard {
         // the 256 are mode 13h's, which programs customizing part of the
         // palette rely on.
         DacTable::for_mode(mode).load(&mut self.palette);
+    }
+
+    /// Load a mode's registers from the BIOS's table.
+    fn load_mode_regs(&mut self, regs: &super::modes::VgaModeRegs) {
+        self.misc_output_reg = regs.misc;
+        self.sequencer_regs[0] = 0x03;
+        self.sequencer_regs[1..].copy_from_slice(&regs.seq);
+        self.crtc_regs = regs.crtc;
+        self.graphics_regs = regs.gc;
+        self.attribute_regs = regs.attr;
+        self.timing_cache = None;
+    }
+
+    /// Program the text mode `mode` the way a VGA BIOS does at `lines`
+    /// scanlines (200, 350 or 400; see `bios::text_lines`): the mode's
+    /// registers, then for 200 or 350 lines the table of those. Other
+    /// adapters and the graphics modes keep the registers of `mode`.
+    pub fn set_video_mode_lines(&mut self, mode: super::VideoMode, lines: u16) {
+        self.set_video_mode(mode);
+        if !self.adapter.vga_bios() {
+            return;
+        }
+        if let Some(regs) = super::modes::text_lines_regs(mode, lines) {
+            self.load_mode_regs(regs);
+            // Like the 200-line graphics modes, the 200-line text modes
+            // take a CGA monitor's colors.
+            if lines == 200 {
+                DacTable::Cga.load(&mut self.palette);
+            }
+        }
+    }
+
+    /// The scanlines a text mode's rows go over, as a VGA BIOS reads them
+    /// from the CRTC: Vertical Display End and its overflow bits, plus
+    /// one, halved when Maximum Scan Line (09h bit 7) scans each line
+    /// twice. 400, 350 or 200 after a text mode set. The EGA's Maximum
+    /// Scan Line has no bit 7, so a program that sets it there changes
+    /// nothing.
+    pub fn text_scanlines(&self) -> u16 {
+        let crtc = &self.crtc_regs;
+        let overflow = crtc[0x07] as u16;
+        let lines = (crtc[0x12] as u16 | (overflow & 0x02) << 7 | (overflow & 0x40) << 3) + 1;
+        if self.adapter.vga_bios() && crtc[0x09] & 0x80 != 0 {
+            lines / 2
+        } else {
+            lines
+        }
     }
 
     /// The timing given the display instead of the registers', if any.
@@ -1394,6 +1533,9 @@ crate::state_fields!(VgaCard {
     blink_on,
     // Counted at the next retrace, as the frame counter isn't saved.
     presented, gdi_changed,
+    // In a section of its own (`bus::state`), so states saved before it
+    // load with the ROM's fonts.
+    font_loaded,
 });
 
 impl VgaCard {

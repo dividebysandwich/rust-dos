@@ -487,11 +487,14 @@ pub unsafe extern "C" fn retro_load_game(game: *const retro_game_info) -> bool {
     };
     core.ports = PORTS.with(Cell::get);
     // The 3dfx card's OpenGL renderer draws with the frontend's OpenGL.
-    if core.m.settings.voodoo.renderer == rust_dos::voodoo::Renderer::OpenGl {
+    if core.m.settings.voodoo_renderer() == rust_dos::voodoo::Renderer::OpenGl {
         if gl::request(&cb) {
             core.hardware_rendering();
         } else {
-            cb.log(RETRO_LOG_WARN, "The frontend has no OpenGL 3 for the 3dfx card: the software renderer draws it");
+            cb.log(
+                RETRO_LOG_WARN,
+                "The frontend has no OpenGL 3 or OpenGL ES 3 for the 3dfx card: the software renderer draws it",
+            );
         }
     }
     let mut yes = true;

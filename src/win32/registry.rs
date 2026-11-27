@@ -473,16 +473,62 @@ impl Registry {
 
     /// The root key a .reg file's name of a tree names, and the path in it.
     fn tree(name: &str) -> Option<(u32, &'static str)> {
+        Registry::tree_named(name).map(|(root, path, _)| (root, path))
+    }
+
+    /// The root key a .reg file's name of a tree names, the path in it,
+    /// and the tree's full name, which REGEDIT writes.
+    fn tree_named(name: &str) -> Option<(u32, &'static str, &'static str)> {
         let upper = name.to_ascii_uppercase();
         Some(match upper.as_str() {
-            "HKEY_LOCAL_MACHINE" | "HKLM" => (LOCAL_MACHINE, ""),
-            "HKEY_USERS" | "HKU" => (USERS, ""),
-            "HKEY_DYN_DATA" => (DYN_DATA, ""),
-            "HKEY_CLASSES_ROOT" | "HKCR" => (LOCAL_MACHINE, "Software\\Classes"),
-            "HKEY_CURRENT_USER" | "HKCU" => (USERS, ".Default"),
-            "HKEY_CURRENT_CONFIG" | "HKCC" => (LOCAL_MACHINE, "Config\\0001"),
+            "HKEY_LOCAL_MACHINE" | "HKLM" => (LOCAL_MACHINE, "", "HKEY_LOCAL_MACHINE"),
+            "HKEY_USERS" | "HKU" => (USERS, "", "HKEY_USERS"),
+            "HKEY_DYN_DATA" => (DYN_DATA, "", "HKEY_DYN_DATA"),
+            "HKEY_CLASSES_ROOT" | "HKCR" => {
+                (LOCAL_MACHINE, "Software\\Classes", "HKEY_CLASSES_ROOT")
+            }
+            "HKEY_CURRENT_USER" | "HKCU" => (USERS, ".Default", "HKEY_CURRENT_USER"),
+            "HKEY_CURRENT_CONFIG" | "HKCC" => {
+                (LOCAL_MACHINE, "Config\\0001", "HKEY_CURRENT_CONFIG")
+            }
             _ => return None,
         })
+    }
+
+    /// Put the keys and values of `text`, a registration file of
+    /// Windows 3.1's REGEDIT, into the registry. After its first line,
+    /// `REGEDIT`, each line is a key and the string its default value
+    /// gets: `HKEY_CLASSES_ROOT\mplayer\shell\open\command = mplayer.exe
+    /// /play /close %1`. A line without `=` makes the key alone. Windows
+    /// 3.1's registration database is HKEY_CLASSES_ROOT alone, so a line
+    /// that starts with another tree is left out, as are those that name
+    /// no key (comments).
+    pub fn import_win31(&mut self, text: &str) {
+        for line in text.lines().skip(1) {
+            let line = line.trim_start();
+            let (path, value) = match line.split_once('=') {
+                Some((path, value)) => {
+                    let value = value.trim_end_matches(['\r', '\n']);
+                    let value = value.strip_prefix(' ').unwrap_or(value);
+                    (path.trim_end(), Some(value))
+                }
+                None => (line.trim_end(), None),
+            };
+            let (tree, rest) = path.split_once('\\').unwrap_or((path, ""));
+            if !tree.eq_ignore_ascii_case("HKEY_CLASSES_ROOT") {
+                continue;
+            }
+            let Some((root, base)) = Registry::tree(tree) else {
+                continue;
+            };
+            let base = self.create(root, base).0;
+            let key = self.create(base, rest).0;
+            if let Some(value) = value {
+                let mut data = crate::dosstr::to_bytes(value);
+                data.push(0);
+                self.set_value(key, "", REG_SZ, data);
+            }
+        }
     }
 
     /// Put the keys and values of `text`, a .reg file (REGEDIT4, or
@@ -545,21 +591,70 @@ impl Registry {
     pub fn export(&self) -> String {
         let mut out = String::from("REGEDIT4\r\n");
         for root in [LOCAL_MACHINE, USERS] {
-            let mut stack = vec![(root, ROOTS[root as usize].to_string())];
-            while let Some((key, path)) = stack.pop() {
-                let k = self.key(key);
-                if key != root {
-                    out.push_str(&format!("\r\n[{}]\r\n", path));
-                    for value in &k.values {
-                        out.push_str(&export_value(value));
-                    }
-                }
-                for &child in k.children.iter().rev() {
-                    stack.push((child, format!("{}\\{}", path, self.key(child).name)));
-                }
-            }
+            self.export_keys(&mut out, root, ROOTS[root as usize].to_string());
         }
         out
+    }
+
+    /// The key at `path` (`HKEY_CLASSES_ROOT\mplayer`, its tree first)
+    /// and its subkeys as a REGEDIT4 file, as Windows 95's REGEDIT
+    /// exports a branch: the tree by its full name, the keys by the names
+    /// they were made with. None if the key isn't there.
+    pub fn export_branch(&self, path: &str) -> Option<String> {
+        let path = path.trim_matches('\\');
+        let (tree, rest) = path.split_once('\\').unwrap_or((path, ""));
+        let (root, base, tree_name) = Registry::tree_named(tree)?;
+        let mut name = tree_name.to_string();
+        let mut key = self.find(root, base)?;
+        for part in rest.split('\\').filter(|n| !n.is_empty()) {
+            key = self.child(key, part)?;
+            name.push('\\');
+            name.push_str(&self.key(key).name);
+        }
+        let mut out = String::from("REGEDIT4\r\n");
+        self.export_keys(&mut out, key, name);
+        Some(out)
+    }
+
+    /// Write `key` and its subkeys to `out`, each with its values, `key`
+    /// named `path`. A tree's root has no line of its own.
+    fn export_keys(&self, out: &mut String, key: u32, path: String) {
+        let mut stack = vec![(key, path)];
+        while let Some((id, path)) = stack.pop() {
+            let k = self.key(id);
+            if !self.is_root(id) {
+                out.push_str(&format!("\r\n[{}]\r\n", path));
+                for value in &k.values {
+                    out.push_str(&export_value(value));
+                }
+            }
+            for &child in k.children.iter().rev() {
+                stack.push((child, format!("{}\\{}", path, self.key(child).name)));
+            }
+        }
+    }
+}
+
+/// The kinds of registration file REGEDIT imports, which their first
+/// line tells apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Script {
+    /// Windows 95's, `REGEDIT4`.
+    Regedit4,
+    /// Windows 3.1's, `REGEDIT`.
+    Win31,
+}
+
+/// The kind of registration file `text` is, by its first line, or None
+/// if it is none that Windows 95's REGEDIT imports.
+pub fn script_kind(text: &str) -> Option<Script> {
+    let first = text.lines().next()?.trim();
+    if first.eq_ignore_ascii_case("REGEDIT4") {
+        Some(Script::Regedit4)
+    } else if first.eq_ignore_ascii_case("REGEDIT") {
+        Some(Script::Win31)
+    } else {
+        None
     }
 }
 
@@ -840,6 +935,34 @@ pub fn import_file(cpu: &mut Cpu, text: &str) -> Result<(), String> {
     saved.map_err(|_| format!("the registry can't be saved to {}", FILE))
 }
 
+/// Put the registration file `text` into the registry, as REGEDIT
+/// imports it, and save it: false, with nothing changed, if `text` is
+/// no registration file of a kind `script_kind` knows.
+pub fn import_script(cpu: &mut Cpu, text: &str) -> bool {
+    let Some(kind) = script_kind(text) else {
+        return false;
+    };
+    let ((), saved) = change_and_save(cpu, |registry| match kind {
+        Script::Regedit4 => registry.import(text),
+        Script::Win31 => registry.import_win31(text),
+    });
+    if saved.is_err() {
+        cpu.bus
+            .log_string(&format!("[W32] The registry can't be saved to {}", FILE));
+    }
+    true
+}
+
+/// The registry as REGEDIT exports it: the whole of it, or the branch
+/// at `path` (`Registry::export_branch`). None if that isn't there.
+pub fn export_script(cpu: &mut Cpu, path: Option<&str>) -> Option<String> {
+    let registry = get(cpu);
+    match path {
+        Some(path) => registry.export_branch(path),
+        None => Some(registry.export()),
+    }
+}
+
 /// Change the registry with `f` and save it at once, whether a program
 /// runs or not. With no program running, the registry is read from its
 /// file for this and let go after, so the next program reads it again,
@@ -891,6 +1014,36 @@ pub fn string_values(cpu: &mut Cpu, keys: &[(u32, &str)]) -> Vec<Vec<(String, St
     values
 }
 
+/// The subkeys of the key `path` under the predefined key `hkey` that
+/// have a string value `name`, as (subkey's name, text), in the order
+/// RegEnumKeyA lists them: MSACM32's drivers under MediaResources\ACM.
+/// As `string_values`, the registry is let go after with no program
+/// running.
+pub fn subkey_strings(cpu: &mut Cpu, hkey: u32, path: &str, name: &str) -> Vec<(String, String)> {
+    let idle = cpu.bus.win32.processes.is_empty();
+    let registry = get(cpu);
+    let found = match registry.open(hkey, 0) {
+        Open::Key(root) => registry.find(root, path).map_or_else(Vec::new, |key| {
+            registry
+                .key(key)
+                .children
+                .iter()
+                .filter_map(|&child| {
+                    let value = registry.value(child, name)?;
+                    let text = (value.kind == REG_SZ || value.kind == REG_EXPAND_SZ)
+                        .then(|| value.text())?;
+                    Some((registry.key(child).name.clone(), text))
+                })
+                .collect()
+        }),
+        _ => Vec::new(),
+    };
+    if idle {
+        cpu.bus.win32.registry = Registry::default();
+    }
+    found
+}
+
 /// Whether the key `path` under the predefined key `hkey` has a value
 /// named `name` (in any case), of any type. As `string_values`, the
 /// registry is let go after with no program running.
@@ -926,6 +1079,25 @@ pub fn delete_value_now(cpu: &mut Cpu, hkey: u32, path: &str, name: &str) -> boo
             .log_string(&format!("[W32] The registry can't be saved to {}", FILE));
     }
     deleted
+}
+
+/// Set the string value `name` of the key `path` under the predefined key
+/// `hkey` to `text`, making the key if it isn't there, and save the
+/// registry at once.
+pub fn set_string_now(cpu: &mut Cpu, hkey: u32, path: &str, name: &str, text: &str) {
+    let mut data = crate::dosstr::to_bytes(text);
+    data.push(0);
+    let ((), saved) = change_and_save(cpu, |registry| {
+        let Open::Key(root) = registry.open(hkey, 0) else {
+            return;
+        };
+        let (key, _) = registry.create(root, path);
+        registry.set_value(key, name, REG_SZ, data);
+    });
+    if saved.is_err() {
+        cpu.bus
+            .log_string(&format!("[W32] The registry can't be saved to {}", FILE));
+    }
 }
 
 /// The process `id` ended: its keys close. After the last process, the
@@ -1166,5 +1338,64 @@ mod tests {
         let scsi = later.find(LOCAL_MACHINE, r"Enum\SCSI").unwrap();
         assert!(later.key(scsi).children.is_empty());
         assert!(later.find(DYN_DATA, r"Config Manager\Enum").is_none());
+    }
+
+    /// A registration file of Windows 3.1's REGEDIT, as Video for
+    /// Windows 1.1's MPLAYER.REG has it: each line sets a key's default
+    /// value, `= ` with nothing after it the empty string; comment lines
+    /// name no key, and a line of a tree other than HKEY_CLASSES_ROOT is
+    /// left out.
+    #[test]
+    fn a_windows_31_file_sets_default_values() {
+        let file = [
+            "REGEDIT",
+            r"HKEY_CLASSES_ROOT\mplayer = Media Clip",
+            r"HKEY_CLASSES_ROOT\mplayer\protocol\StdFileEditing\PackageObjects = ",
+            r"HKEY_CLASSES_ROOT\mplayer\shell\open\command = mplayer.exe /play %1",
+            "",
+            ";OLE2 Compatibility entries.",
+            "// a comment",
+            r"HKEY_CLASSES_ROOT\MPlayer\CLSID = {0003000E-0000-0000-C000-000000000046}",
+            r"HKEY_CLASSES_ROOT\.avi = mplayer",
+            r"HKEY_LOCAL_MACHINE\Software\Win31 = no such tree in 3.1",
+        ]
+        .join("\r\n");
+        assert_eq!(script_kind(&file), Some(Script::Win31));
+        assert_eq!(script_kind("REGEDIT4\r\n"), Some(Script::Regedit4));
+        assert_eq!(script_kind("[HKEY_USERS\\x]\r\n"), None);
+        let mut registry = Registry::seeded(None, Win95);
+        registry.import_win31(&file);
+        let classes = registry.find(LOCAL_MACHINE, r"Software\Classes").unwrap();
+        let default = |path: &str| {
+            let key = registry.find(classes, path).unwrap();
+            registry.value(key, "").unwrap().data.clone()
+        };
+        assert_eq!(default("mplayer"), b"Media Clip\0");
+        let objects = r"mplayer\protocol\StdFileEditing\PackageObjects";
+        assert_eq!(default(objects), b"\0");
+        let command = r"mplayer\shell\open\command";
+        assert_eq!(default(command), b"mplayer.exe /play %1\0");
+        let clsid = b"{0003000E-0000-0000-C000-000000000046}\0";
+        assert_eq!(default(r"mplayer\CLSID"), clsid);
+        assert_eq!(default(".avi"), b"mplayer\0");
+        let comment = registry.find(classes, ";OLE2 Compatibility entries.");
+        assert!(comment.is_none());
+        assert!(registry.find(LOCAL_MACHINE, r"Software\Win31").is_none());
+    }
+
+    /// REGEDIT /e of a branch names its keys from the tree's full name,
+    /// whatever the case the path was given in.
+    #[test]
+    fn a_branch_exports_under_its_trees_full_name() {
+        let mut registry = Registry::seeded(None, Win95);
+        registry.import_win31("REGEDIT\r\nHKEY_CLASSES_ROOT\\Clip\\shell = Play\r\n");
+        let out = registry.export_branch("hkcr\\CLIP").unwrap();
+        assert_eq!(
+            out,
+            "REGEDIT4\r\n\r\n[HKEY_CLASSES_ROOT\\Clip]\r\n\
+             \r\n[HKEY_CLASSES_ROOT\\Clip\\shell]\r\n@=\"Play\"\r\n"
+        );
+        assert!(registry.export_branch("HKEY_CLASSES_ROOT\\None").is_none());
+        assert!(registry.export_branch("HKEY_NOWHERE").is_none());
     }
 }

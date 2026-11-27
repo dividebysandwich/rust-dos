@@ -773,7 +773,9 @@ pub fn destroyed(cpu: &mut Cpu, id: u32) {
     }
 }
 
-/// The surface `id` goes: devices forget it as a texture's handle.
+/// The surface `id` goes: devices forget it as a texture's handle, and
+/// the HALs their copies of it.
 pub fn surface_destroyed(cpu: &mut Cpu, id: u32) {
     device::forget_handles(cpu, device::HANDLE_TEXTURE, id);
+    hal::surface_destroyed(cpu, id);
 }

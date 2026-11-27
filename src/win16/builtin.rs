@@ -189,13 +189,14 @@ pub static MODULES: &[&Def] = &[
     &super::misc::WING,
     &super::ddeml::MODULE,
     &super::misc::DISPLAY,
-    &super::misc::SETUPX,
+    &super::setupx::MODULE,
     &super::ole2::COMPOBJ,
     &super::ole2::STORAGE,
     &super::ole2::OLE2,
     &super::ole2::OLE2NLS,
     &super::ole2disp::OLE2DISP,
     &super::typelib::TYPELIB,
+    &super::universal::WIN32S16,
 ];
 
 /// The place in `MODULES` of the module named `name` ("USER",
@@ -275,6 +276,45 @@ pub fn arg_bytes(args: &str) -> u16 {
 /// The NE image of the system module `index`: its code segment of stubs
 /// and its entry table, the constants' values `cpu` has.
 pub fn image(cpu: &Cpu, index: usize) -> Vec<u8> {
+    builder(index, |f| f(cpu)).build()
+}
+
+/// The file of the system module `index` in the system directory
+/// (win32/dll_files.rs): its image, with `version` (VS_VERSIONINFO in
+/// the ANSI layout) as its version resource, so that a program that
+/// reads the file finds the module's name, its exports and its version.
+/// Its constants (KERNEL's __0040H, __AHINCR, __WINFLAGS) are all 0, as
+/// their values come from a running machine (`Run::Value` takes the
+/// CPU). Loading it binds the built-in module (module.rs), so its stubs
+/// never run as a module of their own.
+pub fn file(index: usize, version: &[u8]) -> Vec<u8> {
+    let mut b = builder(index, |_| 0);
+    b.resource(ne::ResId::Int(RT_VERSION), ne::ResId::Int(1), 0, version);
+    b.build()
+}
+
+/// The resource type of a version resource.
+const RT_VERSION: u16 = 16;
+
+/// The description of the system module `def`'s image and file.
+fn description(def: &Def) -> String {
+    format!("{} (built-in)", def.file)
+}
+
+/// The system module whose file (`file`) the NE file `file` is a copy
+/// of, known by its module name and its description, which no other
+/// file has.
+pub fn of_file(file: &[u8]) -> Option<usize> {
+    let parsed = ne::Module::parse(file).ok()?;
+    let text = &parsed.nonresident_names.first()?.0;
+    MODULES
+        .iter()
+        .position(|def| parsed.name() == def.name && *text == description(def))
+}
+
+/// The NE image of the system module `index`, to build, the values of its
+/// constants from `constant`.
+fn builder(index: usize, constant: impl Fn(fn(&Cpu) -> u16) -> u16) -> ne::Builder {
     let def = MODULES[index];
     let flags = if def.library {
         ne::LIBMODULE | ne::SINGLEDATA | ne::PROTMODE
@@ -317,7 +357,7 @@ pub fn image(cpu: &Cpu, index: usize) -> Vec<u8> {
             relocations: Vec::new(),
         });
     }
-    b.description(&format!("{} (built-in)", def.file));
+    b.description(&description(def));
     b.expected_version(0x030A);
     for (i, api) in def.apis.iter().enumerate() {
         if api.ordinal == 0 {
@@ -325,7 +365,7 @@ pub fn image(cpu: &Cpu, index: usize) -> Vec<u8> {
         }
         let entry = match api.run {
             Run::Value(f) => ne::Entry::Constant {
-                value: f(cpu),
+                value: constant(f),
                 flags: ne::ENTRY_EXPORTED,
             },
             Run::Data(_) => ne::Entry::Code {
@@ -344,7 +384,7 @@ pub fn image(cpu: &Cpu, index: usize) -> Vec<u8> {
         b.entry(api.ordinal, entry);
         b.export(api.name, api.ordinal, true);
     }
-    b.build()
+    b
 }
 
 /// Where the variable `apis[i]` of the module `def` is in its data

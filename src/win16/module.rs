@@ -62,16 +62,83 @@ impl From<LoadError> for String {
 
 /// Load the module `name` (a module name, or a file's name or path) for
 /// a task whose executable is in the directory `dir` (`find_file`): one
-/// loaded already, its count raised, a system module, or the file found
-/// where Windows looks.
-/// Its place in `State::modules`, and the libraries loaded with it whose
-/// entry points are yet to run, in the order they are to run in.
+/// loaded already, a system module, or the file found where Windows
+/// looks. The module and every module it imports from, directly or
+/// through others, then count one user more (`add_user`), as KERNEL's
+/// LoadModule calls IncExeUsage once, after the imports of all levels
+/// are loaded (Pietrek, Windows Internals, LMImports). The imports
+/// themselves count nothing, so DLLs that import each other go when
+/// the last program that loaded them frees them. A load that fails
+/// takes away the modules it loaded. Its place in `State::modules`, and
+/// the libraries loaded with it whose entry points are yet to run, in
+/// the order they are to run in.
 pub fn load(
     cpu: &mut Cpu,
     name: &str,
     dir: &str,
     inits: &mut Vec<usize>,
 ) -> Result<usize, LoadError> {
+    let before = cpu.bus.win32.win16.modules.len();
+    match find_or_load(cpu, name, dir, inits) {
+        Ok(index) => {
+            let handle = cpu.bus.win32.win16.modules[index].handle;
+            add_user(cpu, handle);
+            Ok(index)
+        }
+        Err(e) => {
+            // The modules loaded for it, which no one uses: the newest
+            // are last.
+            while cpu.bus.win32.win16.modules.len() > before {
+                unload(cpu, cpu.bus.win32.win16.modules.len() - 1);
+            }
+            inits.retain(|&i| i < before);
+            Err(e)
+        }
+    }
+}
+
+/// `load` without the count: the module `name`, loaded already or now,
+/// with the modules it imports from.
+fn find_or_load(
+    cpu: &mut Cpu,
+    name: &str,
+    dir: &str,
+    inits: &mut Vec<usize>,
+) -> Result<usize, LoadError> {
+    let file_name = name.rsplit(['\\', '/', ':']).next().unwrap_or(name);
+    let (loaded, builtin) = find_loaded(cpu, name);
+    if let Some(i) = loaded {
+        return Ok(i);
+    }
+    if let Some(index) = builtin {
+        let image = builtin::image(cpu, index);
+        let path = format!(
+            "{}\\{}",
+            crate::win32::loader::SYSTEM_DIR,
+            builtin::MODULES[index].file
+        );
+        return load_file(cpu, image, &path, Some(index as u16), dir, inits);
+    }
+    let Some((path, file)) = find_file(cpu, name, dir) else {
+        return Err(LoadError::new(
+            ERROR_FILE_NOT_FOUND,
+            format!("{} can't be found.", file_name),
+        ));
+    };
+    // A copy of a system module's file, under any name, is that module:
+    // its code is stubs of the built-in functions, which only the
+    // built-in module may run.
+    if let Some(index) = builtin::of_file(&file) {
+        return load(cpu, builtin::MODULES[index].file, dir, inits);
+    }
+    let loaded = load_file(cpu, file, &path, None, dir, inits)?;
+    remember_known(cpu, loaded);
+    Ok(loaded)
+}
+
+/// The loaded module that `name` (a module name, or a file's name or
+/// path) names, and the system module it names, if it names one.
+fn find_loaded(cpu: &Cpu, name: &str) -> (Option<usize>, Option<usize>) {
     let file_name = name.rsplit(['\\', '/', ':']).next().unwrap_or(name);
     let module_name = file_name
         .split('.')
@@ -80,8 +147,10 @@ pub fn load(
         .to_ascii_uppercase();
     let has_path = name.contains(['\\', '/', ':']);
     // A system module is found by its file's name too, which may differ
-    // from its module's (KRNL386.EXE is KERNEL), as Windows finds it.
-    let builtin = builtin::find(file_name).filter(|_| !has_path);
+    // from its module's (KRNL386.EXE is KERNEL), as Windows finds it. A
+    // path names it in the system directory, where its file is
+    // (win32/dll_files.rs); one elsewhere names a file of the program's.
+    let builtin = builtin::find(file_name).filter(|_| !has_path || in_system_dir(cpu, name));
     let module_name = builtin.map_or(module_name, |i| {
         builtin::MODULES[i].name.to_ascii_uppercase()
     });
@@ -101,35 +170,48 @@ pub fn load(
     // Sierra's setup copies itself to _SETUP.EXE and its resources to
     // SETUPL.DLL, whose modules are all named SETUP, and runs the copy
     // while it waits for it to end.
-    if let Some(i) = cpu
+    let loaded = cpu
         .bus
         .win32
         .win16
         .modules
         .iter()
-        .position(|m| m.name == module_name || by_file(m))
-    {
-        cpu.bus.win32.win16.modules[i].refs += 1;
-        return Ok(i);
+        .position(|m| m.name == module_name || by_file(m));
+    (loaded, builtin)
+}
+
+/// What LoadModule gives for the program `path` when its module is
+/// loaded already without a data segment for each instance (the module
+/// flags have no MULTIPLEDATA): the module counts one user more
+/// (`add_user`), and its instance is given, with no task started.
+/// KRNL386's LoadModule starts a task of a loaded program only when the
+/// program is MULTIPLEDATA, so a SINGLEDATA program, which has one
+/// automatic data segment, runs once at most; a second WinExec of it
+/// gets the running copy's instance. (Windows 98 SE's KRNL386.EXE: its
+/// code for a module that is loaded already tests bit 1 of ne_flags, and
+/// without it calls IncExeUsage and returns MyGetInstance, which is the
+/// segment table's DGROUP entry for a SINGLEDATA module and the module's
+/// handle for one without automatic data.) None when the module isn't
+/// loaded, is a library or a system module, or is MULTIPLEDATA, which
+/// `task::create_task` loads, refuses or starts as a new task.
+pub fn loaded_single_instance(cpu: &mut Cpu, path: &str) -> Option<u16> {
+    let index = find_loaded(cpu, path).0?;
+    let m = &cpu.bus.win32.win16.modules[index];
+    // The built-in KERNEL, USER and GDI are programs by their flags, but
+    // Windows 98's KRNL386.EXE, USER.EXE and GDI.EXE are libraries (flags
+    // 8301h), which this path doesn't take: `task::create_task` refuses
+    // them, as it does a library (#1987).
+    if m.flags & (ne::LIBMODULE | ne::MULTIPLEDATA) != 0 || m.builtin.is_some() {
+        return None;
     }
-    if let Some(index) = builtin {
-        let image = builtin::image(cpu, index);
-        let path = format!(
-            "{}\\{}",
-            crate::win32::loader::SYSTEM_DIR,
-            builtin::MODULES[index].file
-        );
-        return load_file(cpu, image, &path, Some(index as u16), dir, inits);
-    }
-    let Some((path, file)) = find_file(cpu, name, dir) else {
-        return Err(LoadError::new(
-            ERROR_FILE_NOT_FOUND,
-            format!("{} can't be found.", file_name),
-        ));
+    let handle = m.handle;
+    let instance = if m.flags & ne::SINGLEDATA != 0 {
+        instance_of(cpu, index)
+    } else {
+        handle
     };
-    let loaded = load_file(cpu, file, &path, None, dir, inits)?;
-    remember_known(cpu, loaded);
-    Ok(loaded)
+    add_user(cpu, handle);
+    Some(instance)
 }
 
 /// Where Windows 95 and 98 keep the 16-bit DLLs they look for in the
@@ -171,61 +253,107 @@ fn remember_known(cpu: &mut Cpu, index: usize) {
     reg.set_value(key, &file, registry::REG_SZ, data);
 }
 
+/// Whether the path `name` is of a file in the system directory.
+fn in_system_dir(cpu: &Cpu, name: &str) -> bool {
+    cpu.bus
+        .disk
+        .qualify_path(name.trim_end_matches(' '))
+        .is_some_and(|path| {
+            crate::win32::loader::directory_of(&path)
+                .eq_ignore_ascii_case(crate::win32::loader::SYSTEM_DIR)
+        })
+}
+
 fn file_name_of(path: &str) -> &str {
     path.rsplit(['\\', '/', ':']).next().unwrap_or(path)
 }
 
-/// The file `name` and its path: as it is if it has a directory, else
-/// where Windows 3.1's LoadLibrary and LoadModule look for it, with
-/// ".DLL" added to a name without an extension. Windows 3.1's order is:
+/// The directory of the running task's program: where the libraries it
+/// loads and the programs it starts are looked for after the system
+/// directory.
+pub(super) fn task_dir(cpu: &Cpu) -> String {
+    let Some(t) = super::current_task(cpu) else {
+        return String::new();
+    };
+    let handle = cpu.bus.win32.win16.tasks[t].module;
+    super::module_index(cpu, handle)
+        .map(|i| crate::win32::loader::directory_of(&cpu.bus.win32.win16.modules[i].path))
+        .unwrap_or_default()
+}
+
+/// The paths where Windows 3.1's LoadLibrary and LoadModule look for the
+/// file `name`, in order: the name itself if it has a directory, else
 /// the current directory, the Windows directory, the system directory,
 /// the directory of the current task's executable (`dir`), then the
 /// directories of PATH. For a file of Known16DLLs, Windows 95 and 98
 /// look in the system directory, the Windows directory, the current
 /// directory, the task's directory and PATH (Q141969).
-fn find_file(cpu: &mut Cpu, name: &str, dir: &str) -> Option<(String, Vec<u8>)> {
-    let name = if name.contains('.') {
+fn search_paths(cpu: &mut Cpu, name: &str, dir: &str) -> Vec<String> {
+    if name.contains(['\\', '/', ':']) {
+        return vec![name.to_string()];
+    }
+    let (windows, system) = (
+        crate::win32::loader::WINDOWS_DIR,
+        crate::win32::loader::SYSTEM_DIR,
+    );
+    let cwd = crate::win32::kernel32::current_directory(cpu, cpu.bus.disk.get_current_drive());
+    let order = if is_known(cpu, name) {
+        [system, windows, cwd.as_str(), dir]
+    } else {
+        [cwd.as_str(), windows, system, dir]
+    };
+    let mut paths: Vec<String> = order
+        .into_iter()
+        .filter(|d| !d.is_empty())
+        .map(|d| join(d, name))
+        .collect();
+    if let Some(path) = crate::win32::running(cpu).and_then(|p| {
+        p.environment
+            .iter()
+            .find_map(|v| v.strip_prefix("PATH=").map(str::to_string))
+    }) {
+        for d in path.split(';').filter(|d| !d.is_empty()) {
+            paths.push(join(d, name));
+        }
+    }
+    paths
+}
+
+/// `name` with the extension `ext` added if its file name has none, as
+/// LoadLibrary adds ".DLL" and LoadModule ".EXE".
+fn with_extension(name: &str, ext: &str) -> String {
+    if file_name_of(name).contains('.') {
         name.to_string()
     } else {
-        format!("{}.DLL", name)
-    };
-    let mut candidates = Vec::new();
-    if name.contains(['\\', '/', ':']) {
-        candidates.push(name.clone());
-    } else {
-        let (windows, system) = (
-            crate::win32::loader::WINDOWS_DIR,
-            crate::win32::loader::SYSTEM_DIR,
-        );
-        let cwd = crate::win32::kernel32::current_directory(cpu, cpu.bus.disk.get_current_drive());
-        let order = if is_known(cpu, &name) {
-            [system, windows, cwd.as_str(), dir]
-        } else {
-            [cwd.as_str(), windows, system, dir]
-        };
-        for d in order {
-            if !d.is_empty() {
-                candidates.push(join(d, &name));
-            }
-        }
-        if let Some(path) = crate::win32::running(cpu).and_then(|p| {
-            p.environment
-                .iter()
-                .find_map(|v| v.strip_prefix("PATH=").map(str::to_string))
-        }) {
-            for d in path.split(';').filter(|d| !d.is_empty()) {
-                candidates.push(join(d, &name));
-            }
-        }
+        format!("{}.{}", name, ext)
     }
-    for path in candidates {
-        if let Some(file) = cpu.read_program_file(&path)
-            && ne::is_ne(&file)
-        {
-            return Some((path, file.to_vec()));
-        }
-    }
-    None
+}
+
+/// The library `name` and its path, found where LoadLibrary looks for it
+/// (`search_paths`), with ".DLL" added to a name without an extension.
+/// Only an NE file is taken.
+fn find_file(cpu: &mut Cpu, name: &str, dir: &str) -> Option<(String, Vec<u8>)> {
+    let name = with_extension(name, "DLL");
+    search_paths(cpu, &name, dir).into_iter().find_map(|path| {
+        let file = cpu.read_program_file(&path)?;
+        ne::is_ne(&file).then(|| (path, file.to_vec()))
+    })
+}
+
+/// The program `name` that LoadModule, WinExec or DOS's EXEC starts, and
+/// its path: the first file found where LoadModule looks for it
+/// (`search_paths`, with the running task's directory), with ".EXE"
+/// added to a name without an extension. It can be a Windows 3.1
+/// program, a Win32 one or a DOS one. Microsoft Setup's bootstrapper
+/// starts `_MSTEST` by that name alone, and finds it beside itself on the
+/// CD through the task's directory.
+pub(super) fn find_program(cpu: &mut Cpu, name: &str) -> Option<(String, crate::memfs::Bytes)> {
+    let name = with_extension(name, "EXE");
+    let dir = task_dir(cpu);
+    search_paths(cpu, &name, &dir).into_iter().find_map(|path| {
+        let file = cpu.read_program_file(&path)?;
+        Some((path, file))
+    })
 }
 
 fn join(dir: &str, file: &str) -> String {
@@ -240,8 +368,10 @@ fn join(dir: &str, file: &str) -> String {
 /// `builtin`), for a task whose executable is in the directory `dir`.
 /// The modules it imports from are looked for as `find_file` does, with
 /// `dir` as the task's directory; a program's own imports with its own
-/// directory, as it is the task they are loaded for.
-pub fn load_file(
+/// directory, as it is the task they are loaded for. It counts no user
+/// (`load` adds one); a load that fails leaves the modules it made to
+/// `load` to take away.
+fn load_file(
     cpu: &mut Cpu,
     file: Vec<u8>,
     path: &str,
@@ -356,7 +486,7 @@ pub fn load_file(
         },
         segments: segments.clone(),
         dgroup,
-        refs: 1,
+        refs: 0,
         builtin,
         resources32: 0,
         image32: None,
@@ -376,13 +506,9 @@ pub fn load_file(
     };
     let mut deps = Vec::new();
     for dep in &parsed.module_refs {
-        match load(cpu, dep, &dir, inits) {
+        match find_or_load(cpu, dep, &dir, inits) {
             Ok(i) => deps.push(cpu.bus.win32.win16.modules[i].handle),
             Err(e) => {
-                for h in deps {
-                    release(cpu, h);
-                }
-                unload(cpu, index);
                 let message = format!("{} needs {}: {}", file_name, dep, e.message);
                 return Err(LoadError::new(e.code, message));
             }
@@ -740,15 +866,35 @@ fn unresolved(cpu: &mut Cpu, module: u16, what: &str) -> u32 {
 
 /// Patch the prologues of the exported functions of the code segment
 /// `segnum`, whose bytes are `bytes`, as Windows 3.1's loader does:
-/// "push ds; pop ax" and "mov ax, ds" become "mov ax, DGROUP" in a
-/// function using the shared data segment, whose selector is
-/// `dgroup_sel`, and "nop; nop" in an exported one of a module with an
-/// instance for each task, which gets its data segment in AX from its
-/// caller. Nothing changes for a module without a data segment.
+/// "push ds; pop ax" and "mov ax, ds" become "mov ax, DGROUP", whose
+/// selector is `dgroup_sel`, in a function flagged as using the shared
+/// data segment and in an exported function of a library with a single
+/// data segment (SINGLEDATA), which programs call directly. They become
+/// "nop; nop" in an exported function of a program, SINGLEDATA or
+/// MULTIPLEDATA, which gets its data segment in AX from its caller: a
+/// MakeProcInstance thunk loads its instance's, and USER the instance
+/// of the window whose procedure it calls. Nothing changes for a module
+/// without a data segment.
+///
+/// Wine patches only the functions flagged as using the shared data,
+/// which leaves "mov ax, ds" in an exported function of a SINGLEDATA
+/// program whose linker (Borland's) didn't set that flag: called
+/// through its MakeProcInstance thunk, it then runs with its caller's
+/// data segment. Windows runs such programs, so its loader patches
+/// their exports too, and to "nop; nop": their window procedures run
+/// with the data segment of the window's instance, which isn't the
+/// program's own when another program made the window. Memphis Math's
+/// MMAP.EXE registers the global class "__canim_class"; MPHSROOM.EXE's
+/// RegisterClass of that name then fails, and it makes its window of
+/// MMAP's class. The procedure, in MMAP's code, reads the window's
+/// object in MPHSROOM's data segment and calls through the object's
+/// table there. MMAP's IPC callback, which MCLIB.DLL calls through the
+/// thunk, gets MMAP's data segment either way.
 fn patch_prologues(parsed: &ne::Module, segnum: u8, bytes: &mut [u8], dgroup_sel: u16) {
     if parsed.auto_data == 0 || dgroup_sel == 0 {
         return;
     }
+    let library = parsed.flags & ne::LIBMODULE != 0;
     for entry in &parsed.entries {
         let ne::Entry::Code {
             segment,
@@ -774,10 +920,13 @@ fn patch_prologues(parsed: &ne::Module, segnum: u8, bytes: &mut [u8], dgroup_sel
             p[1] = 0xD8;
         }
         if p[0] == 0x8C && p[1] == 0xD8 {
-            if flags & ne::ENTRY_SHARED_DATA != 0 {
+            let exported = flags & ne::ENTRY_EXPORTED != 0;
+            if flags & ne::ENTRY_SHARED_DATA != 0
+                || (exported && library && parsed.flags & ne::SINGLEDATA != 0)
+            {
                 p[0] = 0xB8;
                 p[1..3].copy_from_slice(&dgroup_sel.to_le_bytes());
-            } else if parsed.flags & ne::MULTIPLEDATA != 0 && flags & ne::ENTRY_EXPORTED != 0 {
+            } else if exported && (!library || parsed.flags & ne::MULTIPLEDATA != 0) {
                 p[0] = 0x90;
                 p[1] = 0x90;
             }
@@ -793,33 +942,121 @@ pub const SYSTEM_MODULES: [&str; 8] = [
     "KERNEL", "USER", "GDI", "KEYBOARD", "SYSTEM", "DISPLAY", "SOUND", "MMSYSTEM",
 ];
 
-/// Let go of a reference to the module `handle`: at the last, it goes,
-/// and so do the references it held to the modules it imports from.
-pub fn release(cpu: &mut Cpu, handle: u16) {
-    let Some(index) = super::module_index(cpu, handle) else {
-        return;
-    };
-    let m = &mut cpu.bus.win32.win16.modules[index];
-    // The system's own modules stay; the other built-in libraries go when
-    // the last user frees them, as DLLs do.
-    if m.builtin.is_some() && SYSTEM_MODULES.contains(&m.name.as_str()) {
-        m.refs = m.refs.saturating_sub(1).max(1);
-        return;
+/// The indexes of the module `handle` and of every module it imports
+/// from, directly or through others, each once: the modules KERNEL's
+/// IncExeUsage and DecExeUsage count, which DLLs that import each other
+/// don't make go round for ever.
+fn users_of(cpu: &Cpu, handle: u16) -> Vec<usize> {
+    super::module_index(cpu, handle)
+        .map_or_else(Vec::new, |index| reach(&cpu.bus.win32.win16.modules, index))
+}
+
+/// The indexes in `modules` of the module at `start` and of every module
+/// it imports from, directly or through others, each once.
+fn reach(modules: &[Module16], start: usize) -> Vec<usize> {
+    let mut found: Vec<usize> = Vec::new();
+    let mut next = vec![start];
+    while let Some(index) = next.pop() {
+        if found.contains(&index) {
+            continue;
+        }
+        found.push(index);
+        for d in modules[index].deps.iter().rev() {
+            if let Some(i) = modules.iter().position(|m| m.handle == *d) {
+                next.push(i);
+            }
+        }
     }
-    m.refs = m.refs.saturating_sub(1);
-    if m.refs > 0 {
-        return;
-    }
-    let deps = m.deps.clone();
-    unload(cpu, index);
-    for d in deps {
-        release(cpu, d);
+    found
+}
+
+/// The module `handle` has one user more: it, and every module it
+/// imports from, directly or through others, once each, count one more
+/// (KERNEL's IncExeUsage). A module's count is so the number of loads
+/// and tasks that use it, whichever module they loaded.
+pub fn add_user(cpu: &mut Cpu, handle: u16) {
+    for index in users_of(cpu, handle) {
+        let m = &mut cpu.bus.win32.win16.modules[index];
+        m.refs = m.refs.saturating_add(1);
     }
 }
 
-/// Take the module at `index` away: its blocks, and its entry.
+/// A user of the module `handle` lets go of it (FreeLibrary, or a task's
+/// end): it, and every module it imports from, directly or through
+/// others, once each, count one less (KERNEL's DecExeUsage). Those whose
+/// count is 0 go, the system's own modules apart.
+pub fn release(cpu: &mut Cpu, handle: u16) {
+    let mut gone = Vec::new();
+    for index in users_of(cpu, handle) {
+        let m = &mut cpu.bus.win32.win16.modules[index];
+        // The system's own modules stay; the other built-in libraries go
+        // when the last user frees them, as DLLs do.
+        if m.builtin.is_some() && SYSTEM_MODULES.contains(&m.name.as_str()) {
+            m.refs = m.refs.saturating_sub(1).max(1);
+            continue;
+        }
+        m.refs = m.refs.saturating_sub(1);
+        if m.refs == 0 {
+            gone.push(m.handle);
+        }
+    }
+    for h in gone {
+        if let Some(index) = super::module_index(cpu, h) {
+            unload(cpu, index);
+        }
+    }
+}
+
+/// The W32 section's version that first counts a Win16 module's users
+/// (`add_user`). An older one counted one for each load of the module
+/// and one for each loaded module that imports it (`recount_users`).
+pub(crate) const USERS_COUNTED: u16 = 91;
+
+/// Count the users of the modules of a state saved before
+/// `USERS_COUNTED` as `add_user` counts them. A module's old count less
+/// the imports of it by loaded modules is the loads and tasks that use
+/// the module itself; its new count adds up those of every module that
+/// reaches it, itself among them. A module no load or task reaches, one
+/// of the DLLs importing each other that the old counts kept, counts 0
+/// and goes when its next user lets go of it. The system's own modules
+/// count at least 1.
+pub(crate) fn recount_users(modules: &mut [Module16]) {
+    let mut own: Vec<u16> = modules.iter().map(|m| m.refs).collect();
+    for m in modules.iter() {
+        for d in &m.deps {
+            if let Some(i) = modules.iter().position(|x| x.handle == *d) {
+                own[i] = own[i].saturating_sub(1);
+            }
+        }
+    }
+    let mut counts = vec![0u16; modules.len()];
+    for (i, &n) in own.iter().enumerate() {
+        if n == 0 {
+            continue;
+        }
+        for j in reach(modules, i) {
+            counts[j] = counts[j].saturating_add(n);
+        }
+    }
+    for (m, count) in modules.iter_mut().zip(counts) {
+        let system = m.builtin.is_some() && SYSTEM_MODULES.contains(&m.name.as_str());
+        m.refs = if system { count.max(1) } else { count };
+    }
+}
+
+/// Take the module at `index` away: its window classes, its blocks, and
+/// its entry.
 fn unload(cpu: &mut Cpu, index: usize) {
+    free_classes(cpu, index);
     let m = cpu.bus.win32.win16.modules.remove(index);
+    // The tasks of it that ended hold neither it nor its data segment
+    // from now on, whose handles a module loaded later may get.
+    for t in &mut cpu.bus.win32.win16.tasks {
+        if t.exit_code.is_some() && t.module == m.handle {
+            t.module = 0;
+            t.instance = 0;
+        }
+    }
     let code: Vec<u16> = m
         .segments
         .iter()
@@ -844,11 +1081,58 @@ fn unload(cpu: &mut Cpu, index: usize) {
     }
 }
 
+/// Unregister the window classes the module at `index` registered, as
+/// Windows 3.1's and Windows 95's USER does when KERNEL frees a module:
+/// a later program may register the same names with the same handles.
+/// A class is the module's when it was registered with the module's
+/// 32-bit image or with one of its 16-bit handles (the module's, an
+/// instance's, a segment's).
+fn free_classes(cpu: &mut Cpu, index: usize) {
+    let pid = cpu.bus.win32.win16.pid;
+    let image = cpu.bus.win32.win16.modules[index].resources32;
+    let mut instances: Vec<u32> = crate::win32::user32::user(cpu)
+        .classes
+        .iter()
+        .flatten()
+        .filter(|c| !c.system && c.pid == pid)
+        .map(|c| c.instance)
+        .collect();
+    instances.sort_unstable();
+    instances.dedup();
+    instances.retain(|&i| {
+        (image != 0 && i == image)
+            || (i != 0 && i < 0x1_0000 && super::module_index(cpu, i as u16) == Some(index))
+    });
+    if instances.is_empty() {
+        return;
+    }
+    let user = crate::win32::user32::user(cpu);
+    let mut gone = crate::win32::user32::class::module_freed(user, pid, &instances);
+    // GetClassInfo's menu names of those classes, which pointed into the
+    // module's segments. They are kept by name alone, so a name that
+    // another module's class of the process still has keeps its entry.
+    gone.retain(|(name, _)| {
+        !user
+            .classes
+            .iter()
+            .flatten()
+            .any(|c| !c.system && c.pid == pid && c.name.eq_ignore_ascii_case(name))
+    });
+    let menus = &mut cpu.bus.win32.win16.class_menus;
+    for (name, atom) in gone {
+        let name = name.to_ascii_uppercase();
+        let atom = format!("#{}", atom);
+        menus.retain(|(k, _)| *k != name && *k != atom);
+    }
+}
+
 /// A new instance of the program module at `index`: its automatic data
 /// segment, the module's own for the first instance, a fresh copy from
 /// the file, relocated, for the others. The module's own stays with an
 /// instance that ended while others kept the module loaded, since its
-/// data is that instance's: later instances get copies. Its handle, or
+/// data is that instance's: later instances get copies. An ended task
+/// claims it only while the module is loaded (`unload`), so a module
+/// loaded again with the same handles starts in its own. Its handle, or
 /// 0.
 pub fn new_instance(cpu: &mut Cpu, index: usize) -> u16 {
     let m = cpu.bus.win32.win16.modules[index].clone();
@@ -1188,4 +1472,38 @@ pub fn patch_code_handle(cpu: &mut Cpu, handle: u16) -> u32 {
     patch_prologues(&parsed, n as u8, &mut bytes, dgroup_sel);
     super::poke(cpu, a.base, &bytes);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn module(name: &str, handle: u16, refs: u16, deps: &[u16]) -> Module16 {
+        Module16 {
+            name: name.to_string(),
+            handle,
+            refs,
+            deps: deps.to_vec(),
+            ..Module16::default()
+        }
+    }
+
+    #[test]
+    fn old_counts_of_imports_become_counts_of_users() {
+        // An older state: a program P imports D1 and D2, both import E,
+        // and A and B, which import each other, were loaded by a
+        // LoadLibrary of A and then freed. Each import counted one, so
+        // E counted 2, and A and B kept 1 each with nothing using them.
+        let mut modules = vec![
+            module("P", 0x10, 1, &[0x20, 0x30]),
+            module("D1", 0x20, 1, &[0x40]),
+            module("D2", 0x30, 1, &[0x40]),
+            module("E", 0x40, 2, &[]),
+            module("A", 0x50, 1, &[0x60]),
+            module("B", 0x60, 1, &[0x50]),
+        ];
+        recount_users(&mut modules);
+        let counts: Vec<u16> = modules.iter().map(|m| m.refs).collect();
+        assert_eq!(counts, [1, 1, 1, 1, 0, 0]);
+    }
 }

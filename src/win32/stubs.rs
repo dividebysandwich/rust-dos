@@ -201,6 +201,7 @@ pub static DLLS: &[&Dll] = &[
     &super::wing32::DLL,
     &super::dpnet::DLL,
     &super::rpcrt4::DLL,
+    &super::d3drm::DLL,
 ];
 
 /// Bytes each function's stub takes.
@@ -561,6 +562,9 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     let caller = traced.then(|| super::peek_32(cpu, esp));
     let caller = caller.flatten().unwrap_or(0);
     settle_before(cpu, id);
+    // A Win32 call names files as Windows 9x's VFAT does, by long names
+    // on disk images too (`DiskController::long_name_call`).
+    let long_call = cpu.bus.disk.set_long_name_call(true);
     let result = if std::ptr::eq(dll, &super::opengl32::DLL) {
         // OpenGL's calls go by its display lists, which record them
         // while one is being compiled.
@@ -569,6 +573,7 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     } else {
         (api.handler)(cpu, args)
     };
+    cpu.bus.disk.set_long_name_call(long_call);
     let _profile = crate::profile::zone(crate::profile::Zone::Win32After);
     // File mappings no handle or view holds go, then the files whose
     // last handle the function closed close in DOS.
@@ -694,6 +699,7 @@ mod tests {
         "WING32.DLL",
         "DPNET.DLL",
         "RPCRT4.DLL",
+        "D3DRM.DLL",
     ];
 
     #[test]

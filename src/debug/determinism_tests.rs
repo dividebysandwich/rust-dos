@@ -1493,8 +1493,12 @@ const ABSENT_SECTIONS: &[(&str, &str)] = &[
     ("SHRD", "shared disks are a booted system's"),
     ("SBHS", "the SB 2.0's and SB Pro's high-speed mode: the machine's AWE32 has none"),
     ("PNP", "the ISA Plug and Play card is a ViBRA16C: the machine's card is an AWE32"),
+    ("CMS", "the CMS chips are a Game Blaster's or an SB 2.0's: the machine's card is an AWE32"),
     ("VFX1", "the VFX1 headset is a VR headset's: its tracking is the host's, as the VR pads are"),
     ("W32", "the built-in Windows runs Win32 programs, which the run doesn't start"),
+    ("RTCA", "the clock's alarm, which the run's program never enables"),
+    ("LOCK", "file region locks (INT 21h AH=5Ch), which the run's program never takes"),
+    ("ALIA", "host folders' aliases other than those made afresh: the run makes no long names"),
 ];
 
 /// Parts of the save state that the run doesn't change, and why.
@@ -1512,6 +1516,7 @@ const STILL: &[(&str, &str)] = &[
     ("8254.pit0_phase", "a mode 3 count loaded at a half-cycle, which the run's mode 2 has none of"),
     ("8254.pit1_phase", "a count loaded at a half-cycle, which the run never reads channel 1 after"),
     ("8254.pit2_phase", "a mode 3 count loaded at a half-cycle, which the run's mode 2 has none of"),
+    ("FONT", "that plane 2 holds the text font, which the mode set at the prompt loaded"),
     ("VIDE.gate_array_shadow", "the PCjr's and Tandy's gate array"),
     ("VIDE.gate_array_shadow_at", "the PCjr's and Tandy's gate array"),
     ("SOUN.tandy_sound", "the PCjr's and Tandy's sound chip"),
@@ -1527,6 +1532,7 @@ const STILL: &[(&str, &str)] = &[
     ("K6", "the K6-2's MSRs, which only its WRMSR sets"),
     ("IDLE", "whether cycles=auto saw an idle loop: deterministic runs have a fixed speed"),
     ("RC", "RC waiting to come back after a command line it ran, which the run doesn't start"),
+    ("ANSI", "the console's ANSI.SYS state: the run's program writes no escape sequences"),
     ("KEYQ", "queued keys INT 09h hasn't taken yet, none left at the stops"),
 ];
 
@@ -1553,6 +1559,7 @@ const SECTION_FIELDS: &[(&str, &str)] = &[
     ("isapnp", "PNP"),
     ("adlib_gold", "AGLD"),
     ("adlib_gold_line", "AGLD"),
+    ("cms", "CMS"),
     ("vfx1", "VFX1"),
     ("win32", "W32"),
     ("frame_cap", "PACE"),

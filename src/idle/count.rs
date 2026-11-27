@@ -39,6 +39,8 @@
 //! beyond them (`reads_arguments`, `reads_also`), or else everything but
 //! the free stack below its caller's stack top.
 
+mod drift;
+
 use std::collections::BTreeSet;
 use std::ops::Range;
 
@@ -64,6 +66,9 @@ const SEED_BYTES: usize = 64;
 const ROUNDS: u8 = 3;
 /// Bytes below the stack's top that a service reads nothing of.
 const FREE_STACK: u32 = 0x1_0000;
+/// Passes of `counted_passes` after which `drift` finds nothing before it
+/// stops looking.
+const DRIFT_TRIES: u32 = 3;
 
 /// The general registers, in the CPU's order.
 pub(super) const GPR32: [Register; 8] = [
@@ -1008,6 +1013,28 @@ pub(super) struct Model {
 
 type State = Vec<Option<u8>>;
 
+/// The `size` bytes of an operand of the model, from its slot in `state`
+/// (`Run::Op`): a byte that holds no count there is what the recorded pass
+/// found, `fixed`.
+fn read_operand(state: &State, (slot, fixed): (Option<usize>, u32), size: u8) -> u32 {
+    (0..size as usize).fold(0u32, |v, i| {
+        let byte = slot
+            .and_then(|s| state[s + i])
+            .unwrap_or((fixed >> (8 * i)) as u8);
+        v | (byte as u32) << (8 * i)
+    })
+}
+
+/// Writes `value`'s `size` bytes into `state` from `slot`, where both are
+/// there.
+fn write_value(state: &mut State, slot: Option<usize>, value: Option<u32>, size: u8) {
+    if let (Some(value), Some(slot)) = (value, slot) {
+        for i in 0..size as usize {
+            state[slot + i] = Some((value >> (8 * i)) as u8);
+        }
+    }
+}
+
 impl Model {
     fn new(pass: &Pass) -> Model {
         let mut cells: Vec<Cell> = pass.seeds.clone();
@@ -1053,6 +1080,15 @@ impl Model {
         }
     }
 
+    /// Where the pass reads the built-in Windows' clock: the instructions
+    /// from its start.
+    fn clock_offsets(&self) -> impl Iterator<Item = u64> + '_ {
+        self.runs.iter().filter_map(|run| match *run {
+            Run::Clock { offset, .. } => Some(offset),
+            _ => None,
+        })
+    }
+
     /// The state with the seeds' values `value` gives.
     fn seeded(&self, value: impl Fn(Cell) -> u8) -> State {
         let mut state = vec![None; self.cells.len()];
@@ -1074,26 +1110,13 @@ impl Model {
         clock: impl Fn(u64) -> u32,
         mut each: impl FnMut(usize, [u32; 3], u32) -> bool,
     ) -> bool {
-        let read = |state: &State, (slot, fixed): (Option<usize>, u32), size: u8| {
-            (0..size as usize).fold(0u32, |v, i| {
-                let byte = slot
-                    .and_then(|s| state[s + i])
-                    .unwrap_or((fixed >> (8 * i)) as u8);
-                v | (byte as u32) << (8 * i)
-            })
-        };
-        let write = |state: &mut State, slot: Option<usize>, value: Option<u32>, size: u8| {
-            if let (Some(value), Some(slot)) = (value, slot) {
-                for i in 0..size as usize {
-                    state[slot + i] = Some((value >> (8 * i)) as u8);
-                }
-            }
-        };
         let mut index = 0;
         for run in &self.runs {
             match *run {
                 Run::Kill(s) => state[s] = None,
-                Run::Clock { slot, offset } => write(state, Some(slot), Some(clock(offset)), 4),
+                Run::Clock { slot, offset } => {
+                    write_value(state, Some(slot), Some(clock(offset)), 4)
+                }
                 Run::Op {
                     op,
                     size,
@@ -1102,13 +1125,13 @@ impl Model {
                     hi,
                     carry,
                 } => {
-                    let found = [dst, src, hi].map(|o| read(state, o, size));
+                    let found = [dst, src, hi].map(|o| read_operand(state, o, size));
                     let [d, s, h] = found;
                     let Some((after, upper, flags)) = op.run(size, d, s, h, carry) else {
                         return false;
                     };
-                    write(state, dst.0, after, size);
-                    write(state, hi.0, upper, size);
+                    write_value(state, dst.0, after, size);
+                    write_value(state, hi.0, upper, size);
                     if !each(index, found, flags) {
                         return false;
                     }
@@ -1305,28 +1328,63 @@ fn clock_at(cpu: &Cpu, icount: u64) -> u32 {
     (cpu.bus.clock.micros_at(icount) / 1000) as u32
 }
 
+/// What `counted_passes` found.
+pub(super) struct Counted {
+    /// The passes that run as the recorded one.
+    pub(super) passes: u64,
+    /// The cells holding counts after them, with their values.
+    pub(super) values: Vec<(Cell, u8)>,
+    /// The flags the last leaves the head where they come from a count: a
+    /// mask and their values.
+    pub(super) flags: (u32, u32),
+    /// The passes the model ran to find that.
+    pub(super) modelled: u64,
+}
+
 /// How many of the next passes, up to `most`, run as the recorded one:
 /// those whose operations set the flags read after them as it did, the
 /// first starting at instruction count `from` and each `period` after the
-/// one before. Also the cells holding counts after them, and the flags
-/// the last leaves the head where they come from a count: a mask and
-/// their values.
+/// one before (`Counted`).
 pub(super) fn counted_passes(
     cpu: &Cpu,
     model: &Model,
     most: u64,
     from: u64,
     period: u64,
-) -> (u64, Vec<(Cell, u8)>, (u32, u32)) {
-    let mut state = model.seeded(|c| value_now(cpu, c));
+) -> Counted {
+    let state = model.seeded(|c| value_now(cpu, c));
+    passes_from(model, state, most, |pass, offset| {
+        clock_at(cpu, from + pass * period + offset)
+    })
+}
+
+/// `counted_passes` from the counts in `state`, where `clock(p, offset)` is
+/// what pass `p` reads of the clock `offset` instructions from its start,
+/// which never goes back as `p` goes on.
+fn passes_from(
+    model: &Model,
+    mut state: State,
+    most: u64,
+    clock: impl Fn(u64, u64) -> u32,
+) -> Counted {
     let mut done = state.clone();
     let mut passes = 0;
     let mut head_flags = (0, 0);
+    let mut modelled = 0;
+    // Tries of `drift::Drift::of` left that skipped nothing: it finds none
+    // before the cells settle, none in a pass whose counts don't move by
+    // steps and none that skip in one where a flag read changes at the next
+    // pass, and trying after every such pass would double the model's work.
+    // A try that skips gives them all back.
+    let mut tries = DRIFT_TRIES;
+    // What pass `p` reads of the clock, at each place it reads it.
+    let reads = |p: u64| -> Vec<u32> { model.clock_offsets().map(|o| clock(p, o)).collect() };
     while passes < most {
-        let start = from + passes * period;
-        let clock = |offset: u64| clock_at(cpu, start + offset);
+        let ran = passes;
+        let clock = |offset: u64| clock(ran, offset);
         let mut left = head_flags;
-        let same = model.run(&mut state, clock, |i, _, flags| {
+        modelled += 1;
+        let same = model.run(&mut state, &clock, |i, _, flags| {
             let (live, seen, out) = model.checks[i];
             left = (left.0 | out, left.1 & !out | flags & out);
             flags & live == seen
@@ -1335,15 +1393,62 @@ pub(super) fn counted_passes(
             break;
         }
         passes += 1;
-        done.clone_from(&state);
         head_flags = left;
+        // The passes after the one ran that read the clock as it did. What
+        // a pass reads of the clock never goes back as the passes go on, so
+        // they are those up to the last that reads what it read, found by
+        // halving. Where fewer than two do, as at the last pass before the
+        // clock's next millisecond, there is nothing to skip, and `Drift`
+        // isn't worked out.
+        let rest = most - passes;
+        if tries == 0 || rest < 2 {
+            done.clone_from(&state);
+            continue;
+        }
+        let this = reads(ran);
+        let mut same = rest;
+        if reads(ran + same) != this {
+            let mut differ = same;
+            same = 0;
+            while differ - same > 1 {
+                let mid = same + (differ - same) / 2;
+                if reads(ran + mid) == this {
+                    same = mid;
+                } else {
+                    differ = mid;
+                }
+            }
+        }
+        if same >= 2 {
+            modelled += 1;
+            // Of those, the ones that set the flags as it did. All but the
+            // last of them are skipped, which the model runs from the cells
+            // they leave, as it runs any other: the flags the passes leave
+            // the head are those of the last, which `Drift::of` doesn't
+            // hold to stay the same.
+            match drift::Drift::of(model, &done, &state, &clock) {
+                Some(drift) if drift.bound >= 2 => {
+                    let skip = drift.bound.min(same) - 1;
+                    state = drift.after(&state, skip);
+                    passes += skip;
+                    tries = DRIFT_TRIES;
+                }
+                _ => tries -= 1,
+            }
+        }
+        done.clone_from(&state);
     }
     let values = done
         .iter()
         .zip(&model.cells)
         .filter_map(|(v, &c)| v.map(|v| (c, v)))
         .collect();
-    (passes, values, head_flags)
+    Counted {
+        passes,
+        values,
+        flags: head_flags,
+        modelled,
+    }
 }
 
 /// The service running read the general registers (`reads_registers`):

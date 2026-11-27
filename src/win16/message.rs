@@ -6,14 +6,16 @@
 //! WM_CTLCOLOR for Win32's seven, number the controls' messages from
 //! WM_USER, and point to structures of 16-bit fields; each is
 //! translated, the structures copied to the other side's stack and
-//! back.
+//! back. A message 16-bit code sends to a 16-bit window procedure of
+//! its own thread isn't translated: the procedure gets it as it was
+//! sent (`send16`).
 //!
 //! The translations follow Wine's user.exe16 message.c (LGPL 2.1 or
 //! later, copyright 1993-1996 Alexandre Julliard and others).
 
 use super::Thunk;
 use super::handles::{icon16, icon32, menu16, menu32};
-use super::thunk::{self, EAX, ESP, KIND_DLGPROC};
+use super::thunk::{self, EAX, EDX, ESP, KIND_DLGPROC};
 use crate::cpu::{Cpu, Seg};
 use crate::dpmi::Context;
 
@@ -120,6 +122,13 @@ const FIX_INTS: u32 = 8;
 /// A scroll bar's range: the 32-bit addresses of its two integers, and
 /// the value Windows 3.1's SBM_GETRANGE returns has both.
 const FIX_RANGE: u32 = 9;
+/// A buffer of `len` bytes the callee filled whatever it returned: a
+/// list box's item data, for LB_GETTEXT on one without strings.
+const FIX_BYTES: u32 = 10;
+/// EM_GETLINE's buffer, a copy of the caller's of `len` bytes: the line
+/// the call returned the length of and the byte after it, which the edit
+/// control makes a NUL when the buffer has room.
+const FIX_LINE: u32 = 11;
 
 fn lo(v: u32) -> u32 {
     v & 0xFFFF
@@ -652,6 +661,20 @@ fn has_strings(cpu: &Cpu, hwnd: u32, msg: u32) -> bool {
     style & owner_draw == 0 || style & strings != 0
 }
 
+/// The length of the text of the item `index` that USER32's list box
+/// `hwnd` keeps, or the one of the combo box `hwnd` for CB_GETLBTEXT:
+/// none for a window that is neither or an index it doesn't have.
+fn item_text_len(cpu: &Cpu, hwnd: u32, msg: u32, index: u32) -> Option<u32> {
+    let user = &cpu.bus.win32.user;
+    let list = if msg == CB_GETLBTEXT {
+        user.window(hwnd)?.control.combo.list
+    } else {
+        hwnd
+    };
+    let item = user.window(list)?.control.list.items.get(index as usize)?;
+    Some(item.text.len() as u32)
+}
+
 /// A WINDOWPOS16 at `p16` as a WINDOWPOS at `p`.
 fn windowpos32(cpu: &mut Cpu, p16: u32, p: u32) {
     let fields = [
@@ -817,6 +840,78 @@ pub(super) fn to16(
             data.push(FIX_NONE);
             (msg, wp, seg)
         }
+        // The list box, combo box and edit messages that carry a string
+        // or a buffer for one. A 16-bit procedure that subclasses the
+        // control (CTL3D, Borland's BWCC, Memphis Math's SDSC) gets a
+        // 16:16 copy, as Windows 95's thunks give it; a list without
+        // strings has item data in lParam, which goes as it is.
+        LB_ADDSTRING | LB_INSERTSTRING | LB_FINDSTRING | LB_FINDSTRINGEXACT | LB_SELECTSTRING
+        | LB_DIR | LB_ADDFILE | CB_ADDSTRING | CB_INSERTSTRING | CB_FINDSTRING
+        | CB_FINDSTRINGEXACT | CB_SELECTSTRING | CB_DIR | EM_REPLACESEL => {
+            let strings = !matches!(
+                msg,
+                LB_ADDSTRING
+                    | LB_INSERTSTRING
+                    | LB_FINDSTRING
+                    | LB_FINDSTRINGEXACT
+                    | LB_SELECTSTRING
+                    | CB_ADDSTRING
+                    | CB_INSERTSTRING
+                    | CB_FINDSTRING
+                    | CB_FINDSTRINGEXACT
+                    | CB_SELECTSTRING
+            ) || has_strings(cpu, hwnd, msg);
+            let seg = if lp == 0 || !strings {
+                lp
+            } else {
+                string16(cpu, stack, lp)
+            };
+            data.push(FIX_NONE);
+            (control_msg16(cpu, hwnd, msg), lo(wp), seg)
+        }
+        // The text of an item, into the caller's buffer once the 16-bit
+        // procedure returned its length; a list without strings copies
+        // the item's data, a DWORD. The control the procedure passes the
+        // message on to writes the whole text, so the buffer holds at
+        // least that.
+        LB_GETTEXT | CB_GETLBTEXT => {
+            let msg16 = control_msg16(cpu, hwnd, msg);
+            if lp == 0 {
+                data.push(FIX_NONE);
+                return (msg16, lo(wp), 0);
+            }
+            if has_strings(cpu, hwnd, msg) {
+                let size = item_text_len(cpu, hwnd, msg, wp)
+                    .map_or(0, |len| len + 1)
+                    .clamp(0x800, 0x8000);
+                let (seg, b16) = stack.alloc(size);
+                data.extend([FIX_TEXT, lp, b16, size]);
+                (msg16, lo(wp), seg)
+            } else {
+                let (seg, b16) = stack.alloc(4);
+                data.extend([FIX_BYTES, lp, b16, 4]);
+                (msg16, lo(wp), seg)
+            }
+        }
+        // The line's buffer starts with its size in a word, which the
+        // procedure gets as the caller set it. The copy has the caller's
+        // bytes, so that the ones the procedure doesn't write go back as
+        // they were, as through a mapped pointer.
+        EM_GETLINE => {
+            let msg16 = control_msg16(cpu, hwnd, msg);
+            if lp == 0 {
+                data.push(FIX_NONE);
+                return (msg16, lo(wp), 0);
+            }
+            let size = r16(cpu, lp).min(0x800);
+            let len = size.max(2);
+            let (seg, b16) = stack.alloc(len);
+            let bytes = super::peek(cpu, lp, len as usize).unwrap_or_default();
+            super::poke(cpu, b16, &bytes);
+            w16(cpu, b16, size);
+            data.extend([FIX_LINE, lp, b16, len]);
+            (msg16, lo(wp), seg)
+        }
         WM_COMMAND => {
             data.push(FIX_NONE);
             (msg, lo(wp), make_long(lp, hi(wp)))
@@ -960,7 +1055,9 @@ fn returned32(cpu: &mut Cpu, value: u32, data: &[u32], dialog: bool) -> u32 {
             }
             FIX_TEXT => {
                 let size = fix.get(3).copied().unwrap_or(0);
-                if size > 0 {
+                // LB_ERR and CB_ERR (-1) leave the caller's buffer as it
+                // was.
+                if size > 0 && (value as u16 as i16) >= 0 {
                     let len = (value & 0xFFFF).min(size - 1);
                     let mut text = super::peek(cpu, p16, len as usize).unwrap_or_default();
                     text.push(0);
@@ -968,6 +1065,17 @@ fn returned32(cpu: &mut Cpu, value: u32, data: &[u32], dialog: bool) -> u32 {
                 }
             }
             FIX_STRING => copy_string(cpu, p16, p),
+            FIX_BYTES if (value as u16 as i16) >= 0 => {
+                let len = fix.get(3).copied().unwrap_or(0);
+                let bytes = super::peek(cpu, p16, len as usize).unwrap_or_default();
+                super::poke(cpu, p, &bytes);
+            }
+            FIX_LINE => {
+                let size = fix.get(3).copied().unwrap_or(0);
+                let len = ((value & 0xFFFF) + 1).min(size);
+                let bytes = super::peek(cpu, p16, len as usize).unwrap_or_default();
+                super::poke(cpu, p, &bytes);
+            }
             FIX_RANGE => {
                 // Into the integers Win32's caller gave (p, then p16).
                 for (at, v) in [(p, lo(value)), (p16, hi(value))] {
@@ -1103,6 +1211,21 @@ pub fn send32_with(
     lp: u32,
 ) {
     let ctx = Context::of(cpu);
+    send32_from(cpu, ctx, target, hwnd, extra, msg, wp, lp);
+}
+
+/// `send32_with` with the 16-bit context `ctx` that goes on afterwards.
+#[allow(clippy::too_many_arguments)]
+fn send32_from(
+    cpu: &mut Cpu,
+    ctx: Context,
+    target: u32,
+    hwnd: u32,
+    extra: &[u32],
+    msg: u32,
+    wp: u32,
+    lp: u32,
+) {
     let mut stack = Stack32 {
         top: thunk::scratch32(cpu, 0x400),
     };
@@ -1122,15 +1245,234 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Option<
 }
 
 /// The address of USER32's function `name`.
-fn user32(cpu: &Cpu, name: &str) -> u32 {
+pub(super) fn user32(cpu: &Cpu, name: &str) -> u32 {
     crate::win32::user32::address_of(cpu, name)
 }
 
-/// SendMessage(hwnd, msg, wParam, lParam) of 16-bit code: USER32's
-/// SendMessageA with the message translated.
+/// SendMessage(hwnd, msg, wParam, lParam) of 16-bit code (`send16`).
 pub fn send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    send32_fn(cpu, "SendMessageA", args);
+    send16(cpu, args[0], args[1], args[2], args[3]);
     None
+}
+
+/// The 16-bit window procedure of `hwnd` that a message 16-bit code
+/// sends goes to as it is: the window's procedure when that is 16-bit
+/// code (USER32 keeps the 32-bit slot standing for it) and the window
+/// is the running thread's. None for a window whose procedure is 32-bit
+/// code (USER32's controls, DefDlgProc for a dialog), and for another
+/// task's window (`other_task`).
+pub(super) fn window_proc16(cpu: &Cpu, hwnd: u32) -> Option<Thunk> {
+    let w = cpu.bus.win32.user.window(hwnd)?;
+    let me = crate::win32::user32::current_tid(cpu);
+    if hwnd == crate::win32::user32::DESKTOP || w.tid != me {
+        return None;
+    }
+    thunk::thunk32_of(cpu, w.proc).filter(|t| t.kind == thunk::KIND_WNDPROC)
+}
+
+/// Whether `hwnd` is a window of another Win16 task than the running
+/// one, which a message 16-bit code sends goes to as it is (`send16`).
+pub(super) fn other_task(cpu: &Cpu, hwnd: u32) -> bool {
+    let Some(w) = cpu.bus.win32.user.window(hwnd) else {
+        return false;
+    };
+    let me = crate::win32::user32::current_tid(cpu);
+    hwnd != crate::win32::user32::DESKTOP && w.tid != me && super::is_task(&cpu.bus.win32, w.tid)
+}
+
+/// USER's ordinal of SendMessage.
+const SEND_MESSAGE: u16 = 111;
+
+/// The 16:16 address of USER's SendMessage, 0 without USER.
+pub(super) fn send_message_entry(cpu: &Cpu) -> u32 {
+    let win16 = &cpu.bus.win32.win16;
+    let Some(user) = win16.modules.iter().find(|m| m.name == "USER") else {
+        return 0;
+    };
+    super::module::entry_point(cpu, user.handle, SEND_MESSAGE)
+}
+
+/// The 32-bit slot of USER's SendMessage (`thunk::proc32`), through
+/// which a task's thread sends a message another task sent it in
+/// Win16's form (USER32's `handle_sent`): (hwnd, msg, wParam, lParam),
+/// stdcall, EAX the window procedure's DX:AX. 0 when there is no room
+/// for the slot.
+pub fn send_message_slot(cpu: &mut Cpu) -> u32 {
+    let target = send_message_entry(cpu);
+    // Four arguments, the fourth (lParam) a long.
+    thunk::proc32(cpu, target, thunk::KIND_PLAIN, 4 | 1 << 3 << 8)
+}
+
+/// Send a message of 16-bit code: SendMessage, SendDlgItemMessage, and
+/// the functions Windows 3.1 makes of a message (GetWindowText and
+/// SetWindowText, GetDlgItemText and SetDlgItemText). DX:AX what the
+/// window procedure returns.
+///
+/// Windows 3.1's USER calls a 16-bit window procedure with the caller's
+/// own message: the same wParam and lParam, so a procedure that writes
+/// into lParam's buffer writes into the caller's, whatever it returns.
+/// Windows 95 does the same when 16-bit code sends to a 16-bit
+/// procedure, and Wine's SendMessage16 too. So a window of the running
+/// thread whose procedure is 16-bit (`window_proc16`) has it called
+/// here, directly, with the message untranslated. Going through
+/// SendMessageA would translate the message twice, to Win32's and back
+/// (`to32`, then `to16` in the procedure's slot), and the round trip
+/// isn't the identity: a buffer becomes a copy on the 16-bit stack, of
+/// which WM_GETTEXT gives back as many bytes as the procedure says it
+/// wrote (Memphis Math's answer field writes the text and returns 0), a
+/// string is cut at the copy's size, and the procedure sees another
+/// pointer than the one the caller passed.
+///
+/// To a window of another Win16 task (`other_task`), Windows 3.1
+/// switches to that task and calls the procedure there, with the same
+/// wParam and lParam: every task has the one address space. Windows
+/// 98's 16-bit USER queues the message for the other task as it is too,
+/// and translates it only for a 32-bit thread. So USER32's
+/// `send_message16` queues it for the task's thread untranslated, and
+/// that thread sends it with this function, as a message of its own
+/// (`send_message_slot`), while this one waits for the reply.
+///
+/// A window whose procedure is 32-bit code gets the message through
+/// SendMessageA, translated. A WH_CALLWNDPROC hook runs before the
+/// procedure and a WH_CALLWNDPROCRET hook after it, as SendMessageA runs
+/// them, with the message translated for them; the procedure gets the
+/// caller's message (`post_send16_hooks`, `then_send16`).
+pub fn send16(cpu: &mut Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32) {
+    let ctx = Context::of(cpu);
+    if other_task(cpu, hwnd) && send_message_slot(cpu) != 0 {
+        let target = user32(cpu, "SendMessage16");
+        thunk::enter32(
+            cpu,
+            ctx,
+            target,
+            &[hwnd, msg, wp, lp],
+            thunk::POST_MESSAGE,
+            Vec::new(),
+        );
+        return;
+    }
+    let Some(proc) = window_proc16(cpu, hwnd) else {
+        let target = user32(cpu, "SendMessageA");
+        send32_from(cpu, ctx, target, hwnd, &[], msg, wp, lp);
+        return;
+    };
+    let hook = crate::win32::user32::hook::WH_CALLWNDPROC as u32;
+    if !crate::win32::user32::hook::has(cpu, hook) {
+        call_proc16(cpu, ctx, &proc, hwnd, msg, wp, lp);
+        return;
+    }
+    // CallHooks(WH_CALLWNDPROC, 0, sent by this thread, the CWPSTRUCT),
+    // the message in it as 32-bit code gets it. The hook only sees the
+    // message: what it would change in a structure's copy is dropped.
+    let mut stack = Stack32 {
+        top: thunk::scratch32(cpu, 0x400),
+    };
+    let mut fixes = Vec::new();
+    let (msg32, wp32, lp32) = to32(cpu, hwnd, msg, wp, lp, 0, &mut stack, &mut fixes);
+    let cwp = stack.alloc(16);
+    for (i, v) in [lp32, wp32, msg32, hwnd].into_iter().enumerate() {
+        w32(cpu, cwp + 4 * i as u32, v);
+    }
+    let target = user32(cpu, "CallHooks");
+    thunk::enter32_at(
+        cpu,
+        ctx,
+        stack.top,
+        target,
+        &[hook, 0, 1, cwp],
+        thunk::POST_SEND16_HOOKS,
+        vec![hwnd, msg, wp, lp],
+    );
+}
+
+/// The WH_CALLWNDPROC hooks of a message 16-bit code sent (`send16`)
+/// returned: the window procedure gets the message. The hooks may have
+/// given the window another procedure, or destroyed it.
+pub fn post_send16_hooks(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
+    let [hwnd, msg, wp, lp] = *data else {
+        return Some(0);
+    };
+    if let Some(proc) = window_proc16(cpu, hwnd) {
+        call_proc16(cpu, *ctx, &proc, hwnd, msg, wp, lp);
+        return None;
+    }
+    let target = cpu.bus.win32.user.window(hwnd).map_or(0, |w| w.proc);
+    if target < 0x1_0000 {
+        return Some(0);
+    }
+    send32_from(cpu, *ctx, target, hwnd, &[], msg, wp, lp);
+    None
+}
+
+/// Call the 16-bit window procedure `proc` of `hwnd` with a message
+/// 16-bit code sent, as it is, and go on with `ctx`, DX:AX what the
+/// procedure returned (`then_send16`). The registers as
+/// `call_wndproc16` gives them: DS and ES the stack, AX the window's
+/// instance's data segment.
+fn call_proc16(cpu: &mut Cpu, ctx: Context, proc: &Thunk, hwnd: u32, msg: u32, wp: u32, lp: u32) {
+    let at = thunk::stack16_for(cpu, &ctx);
+    let mut regs = Context::default();
+    regs.gpr[EAX] = window_ds(cpu, hwnd, proc) as u32;
+    thunk::call16_regs(
+        cpu,
+        proc.target,
+        &[
+            hwnd as u16,
+            msg as u16,
+            wp as u16,
+            (lp >> 16) as u16,
+            lp as u16,
+        ],
+        regs,
+        ctx,
+        thunk::THEN_SEND16,
+        vec![hwnd, msg, wp, lp],
+        at,
+    );
+}
+
+/// A 16-bit window procedure `call_proc16` called returned: DX:AX as it
+/// gave them to the 16-bit code that sent the message. A WH_CALLWNDPROCRET
+/// hook runs first, as SendMessageA runs it after the procedure, with
+/// the message translated for it (`post_send16_ret`).
+pub fn then_send16(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
+    let hook = crate::win32::user32::hook::WH_CALLWNDPROCRET as u32;
+    if let [hwnd, msg, wp, lp] = *data
+        && crate::win32::user32::hook::has(cpu, hook)
+    {
+        // CallHooks(WH_CALLWNDPROCRET, 0, sent by this thread, the
+        // CWPRETSTRUCT: lResult, lParam, wParam, message, hwnd). The
+        // 16-bit context goes on, so the 32-bit stack's top is the one
+        // its calls use.
+        let mut stack = Stack32 {
+            top: thunk::scratch32(cpu, 0x400),
+        };
+        let mut fixes = Vec::new();
+        let (msg32, wp32, lp32) = to32(cpu, hwnd, msg, wp, lp, 0, &mut stack, &mut fixes);
+        let cwp = stack.alloc(20);
+        for (i, v) in [value, lp32, wp32, msg32, hwnd].into_iter().enumerate() {
+            w32(cpu, cwp + 4 * i as u32, v);
+        }
+        let target = user32(cpu, "CallHooks");
+        thunk::enter32_at(
+            cpu,
+            *ctx,
+            stack.top,
+            target,
+            &[hook, 0, 1, cwp],
+            thunk::POST_SEND16_RET,
+            vec![value],
+        );
+        return None;
+    }
+    ctx.gpr[EDX] = ctx.gpr[EDX] & 0xFFFF_0000 | value >> 16;
+    Some(ctx.gpr[EAX] & 0xFFFF_0000 | value & 0xFFFF)
+}
+
+/// The WH_CALLWNDPROCRET hooks of a message `then_send16` saw returned:
+/// DX:AX what the window procedure returned.
+pub fn post_send16_ret(_: &mut Cpu, _: u32, data: &[u32], _: &mut Context) -> Option<u32> {
+    Some(data.first().copied().unwrap_or(0))
 }
 
 /// DefWindowProc, DefDlgProc and the others that take a message.

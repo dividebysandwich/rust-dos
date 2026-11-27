@@ -5,13 +5,15 @@
 //!
 //! GDI's objects are the system's, as on Windows 95, in `State`, in
 //! `Win32::gdi`; their handles are small numbers, as GDI's 16-bit heap
-//! made them. Compatible bitmaps have the desktop's depth: 32 bits a
-//! pixel, or 16 (5-6-5) on a Banshee or Voodoo3. Like Windows 95's GDI
+//! made them. Compatible bitmaps have the depth of the mode GDI draws
+//! on: the desktop's, 32 bits a pixel or 16 (5-6-5) on a Banshee or
+//! Voodoo3, or that of the mode DirectDraw set. Like Windows 95's GDI
 //! it has no world transforms (GM_ADVANCED), and of the Unicode (W)
 //! functions only those Windows 95 has.
 
 pub mod bitmap;
 pub mod dc;
+pub mod dither;
 pub mod draw;
 #[cfg(test)]
 mod draw_tests;
@@ -33,7 +35,11 @@ pub use region::{Rect, Region};
 use super::opengl32::wgl;
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 use crate::win32::task::{Next, Task};
+
+/// The W32 version whose sections have a bitmap's `masks` and `display`.
+pub const DDB_FORMAT_SAVED: u16 = 104;
 
 pub static DLL: Dll = Dll {
     name: "GDI32.DLL",
@@ -180,6 +186,16 @@ pub struct Bitmap {
     pub stride: u32,
     /// A bitmap of GDI's: its rows, the top first.
     pub bits: Vec<u8>,
+    /// A bitmap of GDI's: the masks of its pixels, the display's format
+    /// for its depth when it was made (`surface::ddb_masks`). Its rows
+    /// keep that format when DirectDraw sets or restores a mode. Zeros
+    /// in one from a state saved before bitmaps kept them
+    /// (`Bitmap::pixel_masks`).
+    pub masks: Since<{ DDB_FORMAT_SAVED }, [u32; 3]>,
+    /// A bitmap of GDI's made at the display's depth: memory DCs take it
+    /// in any mode, as one made before a mode DirectDraw set, or in it,
+    /// is the program's drawing on either side of the change.
+    pub display: Since<{ DDB_FORMAT_SAVED }, bool>,
     pub dib: Option<Dib>,
     /// The DC it is selected into, or 0.
     pub dc: u32,
@@ -194,6 +210,22 @@ pub struct Palette {
     /// On a desktop of 256 colours, the system palette's index of each
     /// entry, from when it was last realized; empty before.
     pub mapping: Vec<u8>,
+    /// Which entries had no entry of the system palette left when the
+    /// palette was mapped, and share the entry of their nearest color
+    /// with the entry that took it. A realization that keeps the mapping
+    /// gives such an entry of the system palette the taker's color. Empty
+    /// with `mapping`, and in a state saved before W32 105, where the
+    /// first of the entries sharing one gives it its color.
+    pub nearest: crate::savestate::Since<{ palette::NEAREST_SAVED }, Vec<bool>>,
+}
+
+impl Palette {
+    /// Forget the mapping: the next realization maps the palette from
+    /// scratch.
+    pub fn clear_mapping(&mut self) {
+        self.mapping.clear();
+        self.nearest.clear();
+    }
 }
 
 /// What an object is.
@@ -275,7 +307,8 @@ pub struct State {
     /// and the one realized last.
     pub primary_palette: u32,
     pub last_realized: u32,
-    /// The files AddFontResourceA added and their fonts.
+    /// The installed font files GDI loaded as it started, then those
+    /// AddFontResourceA added, and their fonts.
     pub font_files: Vec<fnt::AddedFile>,
     /// The last blit's translation table from a color table onto a
     /// palette device (`draw::Translate::kept`). Not saved: a blit
@@ -332,6 +365,14 @@ impl State {
         self.next = i + 1;
         self.objects[i] = Some(object);
         Some(handle(i))
+    }
+
+    /// The objects there are, with their handles.
+    pub fn handles(&self) -> impl Iterator<Item = (u32, &Object)> {
+        self.objects
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| Some((handle(i), o.as_ref()?)))
     }
 
     pub fn stock(&self, index: u32) -> u32 {
@@ -434,10 +475,13 @@ fn current_pid(cpu: &Cpu) -> u32 {
 }
 
 /// Add `kind` as an object of the running process: its handle, or 0
-/// with ERROR_NOT_ENOUGH_MEMORY when GDI's table is full.
+/// with ERROR_NOT_ENOUGH_MEMORY when GDI's table is full. A bitmap joins
+/// the views of Windows 3.1's GDI heap it belongs in (`Shim::Win31GdiHeap`,
+/// shims/win31/gdi_heap.rs).
 pub fn add(cpu: &mut Cpu, kind: Kind) -> u32 {
     init(cpu);
     let pid = current_pid(cpu);
+    let is_bitmap = matches!(kind, Kind::Bitmap { .. });
     let object = Object {
         kind,
         stock: false,
@@ -445,7 +489,12 @@ pub fn add(cpu: &mut Cpu, kind: Kind) -> u32 {
         deleted: false,
     };
     match gdi(cpu).add(object) {
-        Some(h) => h,
+        Some(h) => {
+            if is_bitmap {
+                crate::win32::shims::win31::gdi_heap::bitmap_added(cpu, h, pid);
+            }
+            h
+        }
         None => {
             set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
             0
@@ -488,7 +537,8 @@ const STATIC_COLORS: [u32; 20] = [
     0xFFFF00, 0xFFFFFF,
 ];
 
-/// The stock objects and the system palette, made on GDI's first use.
+/// The stock objects and the system palette, made on GDI's first use,
+/// and the installed fonts loaded (`font::load_installed`).
 pub fn init(cpu: &mut Cpu) {
     // The stock fonts are in the system locale's character set, Terminal
     // in its OEM one.
@@ -570,6 +620,7 @@ pub fn init(cpu: &mut Cpu) {
                 .map(|&c| [c as u8, (c >> 8) as u8, (c >> 16) as u8, 0])
                 .collect(),
             mapping: (0..10).chain(246..=255).collect(),
+            ..Palette::default()
         },
     });
     let state = gdi(cpu);
@@ -596,12 +647,28 @@ pub fn init(cpu: &mut Cpu) {
     state.static_use = palette::SYSPAL_STATIC;
     state.system_use = palette::static_uses(palette::SYSPAL_STATIC);
     state.system_owner = vec![0; 256];
+    font::load_installed(cpu);
 }
 
 /// The static colors of the system palette as COLORREFs, for the
 /// default palette and the halftone one.
 pub fn static_colors() -> &'static [u32; 20] {
     &STATIC_COLORS
+}
+
+/// A small TrueType font file of the family `family`, for the tests of
+/// the functions that take one (`ttf::sample` says what it has).
+#[doc(hidden)]
+pub fn sample_truetype(family: &str) -> Vec<u8> {
+    ttf::sample(family, false)
+}
+
+/// The .FOT file of the TrueType file `ttf` named `ttf_name`, as
+/// CreateScalableFontResourceA writes it, for the tests of the fonts
+/// that name one.
+#[doc(hidden)]
+pub fn sample_fot(ttf_name: &str, ttf: &[u8]) -> Vec<u8> {
+    fot::for_truetype(ttf_name, ttf, false).expect("a TrueType font")
 }
 
 /// The region of the region object `handle`, if it is one.
@@ -660,7 +727,12 @@ pub fn get_object_type(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// DeleteObject(handle): an object selected into a DC goes when it is
-/// deselected; stock objects stay.
+/// deselected; stock objects stay. A DC goes as DeleteDC deletes it, its
+/// bitmap free to be selected into another. A window DC stays: one of
+/// GetDC's or GetWindowDC's until ReleaseDC, a window's own until the
+/// window goes. Both return TRUE. Windows 98 SE does so for a memory DC,
+/// a window's GetDC DC and the screen's (#2161), and Beetle Crazy Cup's
+/// CD launcher frees the memory DC of every paint with DeleteObject.
 pub fn delete_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let handle = args[0];
     let Some(object) = gdi(cpu).get(handle) else {
@@ -672,10 +744,11 @@ pub fn delete_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if object.stock {
         return Some(TRUE);
     }
-    if let Kind::Dc { .. } = object.kind {
-        // DeleteObject doesn't delete DCs.
-        set_error(cpu, ERROR_INVALID_HANDLE);
-        return Some(FALSE);
+    if let Kind::Dc { dc } = &object.kind {
+        if dc.kind == dc::WINDOW {
+            return Some(TRUE);
+        }
+        return dc::delete_dc(cpu, &[handle]);
     }
     if dc::selected_anywhere(gdi(cpu), handle) {
         if let Some(o) = gdi(cpu).get_mut(handle) {
@@ -687,7 +760,9 @@ pub fn delete_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// Free the object `handle` and what it holds: a DIB section's memory.
+/// Free the object `handle` and what it holds: a DIB section's memory,
+/// and a bitmap's place in Windows 3.1's GDI heap (`Shim::Win31GdiHeap`,
+/// shims/win31/gdi_heap.rs).
 pub fn free(cpu: &mut Cpu, handle: u32) {
     let Some(i) = slot(handle) else {
         return;
@@ -695,6 +770,9 @@ pub fn free(cpu: &mut Cpu, handle: u32) {
     let Some(Some(object)) = gdi(cpu).objects.get_mut(i).map(|o| o.take()) else {
         return;
     };
+    if let Kind::Bitmap { .. } = object.kind {
+        crate::win32::shims::win31::gdi_heap::bitmap_freed(cpu, handle);
+    }
     if let Kind::Palette { .. } = object.kind {
         palette::palette_deleted(cpu, handle);
     }
@@ -746,6 +824,9 @@ pub fn get_object_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn get_object_as(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
     let (handle, size, at) = (args[0], args[1], args[2]);
     init(cpu);
+    // A bitmap in Windows 3.1's GDI heap: the size its device BITMAP
+    // says, which the program may have changed.
+    crate::win32::shims::win31::gdi_heap::refresh(cpu, handle);
     let Some(object) = gdi(cpu).get(handle).cloned() else {
         if handle != 0 {
             set_error(cpu, ERROR_INVALID_HANDLE);
@@ -842,7 +923,7 @@ pub fn get_current_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn unrealize_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     match gdi(cpu).get(args[0]).map(Object::type_of) {
         Some(OBJ_PAL) => {
-            palette::unrealize(cpu, args[0]);
+            palette::forget_mapping(cpu, args[0]);
             Some(TRUE)
         }
         Some(_) => Some(TRUE),
@@ -1698,11 +1779,17 @@ crate::state_fields!(Bitmap {
     planes,
     stride,
     bits,
+    masks,
+    display,
     dib,
     dc,
     dimension
 });
-crate::state_fields!(Palette { entries, mapping });
+crate::state_fields!(Palette {
+    entries,
+    mapping,
+    nearest
+});
 crate::state_fields!(Object {
     kind,
     stock,

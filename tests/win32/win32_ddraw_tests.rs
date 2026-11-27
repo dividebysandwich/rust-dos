@@ -287,6 +287,7 @@ const S_SET_COLOR_KEY: u32 = 29;
 const S_SET_PALETTE: u32 = 31;
 const S_UNLOCK: u32 = 32;
 const PAL_SET_ENTRIES: u32 = 6;
+const CLIP_GET_CLIP_LIST: u32 = 3;
 const CLIP_SET_HWND: u32 = 8;
 
 const DDSD_CAPS: u32 = 0x1;
@@ -313,6 +314,8 @@ const DDPCAPS_8BIT: u32 = 0x4;
 const DDPCAPS_ALLOW256: u32 = 0x40;
 const WS_POPUP: u32 = 0x8000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
+const WS_CHILD: u32 = 0x4000_0000;
+const WS_CLIPCHILDREN: u32 = 0x0200_0000;
 const WS_EX_TOPMOST: u32 = 0x8;
 
 /// A DDSURFACEDESC at `offset` with `flags`, `caps` and the rest given.
@@ -1120,6 +1123,161 @@ fn a_back_buffer_in_system_memory_doesnt_flip_with_the_primary_surface() {
     assert_eq!(back & DDSCAPS_FLIP, 0);
 }
 
+/// Where the second back buffer's DDSCAPS is, after the first's at CAPS.
+const NEXT_CAPS: u32 = CAPS + 0x10;
+/// Where Lock describes the front buffer: the palette's entries' place,
+/// which the programs that use it don't need.
+const FRONT_LOCKED: u32 = ENTRIES;
+
+/// The data of a program that makes a flip chain in system memory, as
+/// G-Police's software renderer does: the primary surface and
+/// `backbuffers` back buffers asked for with DDSCAPS_SYSTEMMEMORY.
+fn system_flip_chain_data(backbuffers: u32) -> Vec<u8> {
+    let mut d = data();
+    let caps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX | DDSCAPS_SYSTEMMEMORY;
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        caps,
+        0,
+        0,
+        backbuffers,
+    );
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    put32(&mut d, NEXT_CAPS, DDSCAPS_FLIP);
+    put32(&mut d, LOCKED, 108);
+    put32(&mut d, FRONT_LOCKED, 108);
+    d
+}
+
+/// Write `value` at the start of the first row of the surface at data
+/// offset `slot`, through Lock (described at LOCKED) and Unlock.
+fn draw_first_pixels(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    slot: u32,
+    value: u32,
+) -> Result<(), IcedError> {
+    c.com(
+        a,
+        l,
+        slot,
+        S_LOCK,
+        &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+    )?;
+    a.mov(edi, dword_ptr(l.at(LOCKED + 0x24)))?;
+    a.mov(dword_ptr(edi), value as i32)?;
+    c.com(a, l, slot, S_UNLOCK, &[Arg::I(0)])
+}
+
+/// The frames the program of the system memory flip chain draws in its
+/// back buffer, one a flip: an odd number of them, so that a flip that
+/// swapped the front buffer's memory with the back buffer's would leave
+/// the system memory on the screen.
+const SYSTEM_FRAMES: [u32; 3] = [0x4433_2211, 0x8877_6655, 0xCCBB_AA99];
+
+/// Full screen with a flip chain in system memory with one back buffer:
+/// each of SYSTEM_FRAMES drawn in the back buffer and flipped, then the
+/// front buffer locked (described at FRONT_LOCKED) and unlocked.
+fn system_flip_chain_program() -> (Vec<u8>, u32) {
+    let d = system_flip_chain_data(1);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start_flip_chain(a, l, &mut c)?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        for value in SYSTEM_FRAMES {
+            draw_first_pixels(a, l, &mut c, BACK, value)?;
+            c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        }
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(FRONT_LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        c.com(a, l, FRONT, S_UNLOCK, &[Arg::I(0)])?;
+        finish(a, l)
+    })
+}
+
+/// G-Police's software renderer (#1830): the display shows video memory
+/// only, so a flip of a primary surface whose back buffer is in system
+/// memory copies the back buffer's pixels to the screen. Every flip
+/// shows the frame just drawn, the screen stays at the start of video
+/// memory, the back buffer in system memory, and the primary surface's
+/// Lock still gives the screen.
+#[test]
+fn a_flip_chain_in_system_memory_shows_every_frame() {
+    let (program, data) = system_flip_chain_program();
+    let mut cpu = machine("system_flip_chain", program);
+    run_until_done(&mut cpu, data);
+    // The calls after CreateWindowExA's all succeed: 5 to make the chain
+    // and find the back buffer, 3 a frame, and the front buffer's Lock
+    // and Unlock.
+    assert_eq!(results(&mut cpu, data, 17)[1..], [0; 16]);
+    assert_eq!(cpu.bus.vbe.start, 0);
+    let last = SYSTEM_FRAMES[SYSTEM_FRAMES.len() - 1];
+    assert_eq!(cpu.bus.vbe.vram[..4], last.to_le_bytes());
+    // The front buffer is the screen, in the program's view of video
+    // memory; the back buffer is elsewhere, and keeps the frame it had.
+    let front = peek(&cpu, data + FRONT_LOCKED + 0x24);
+    let back = peek(&cpu, data + LOCKED + 0x24);
+    assert_eq!(front & 0x3F_FFFF, 0);
+    assert_ne!(back, front);
+    assert_eq!(peek(&cpu, back), last);
+}
+
+/// Full screen with a flip chain in system memory with two back buffers:
+/// a frame drawn in each, then two flips.
+fn system_flip_chain_of_two_program() -> (Vec<u8>, u32) {
+    let d = system_flip_chain_data(2);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start_flip_chain(a, l, &mut c)?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(NEXT_CAPS), Arg::At(OFFSCREEN)],
+        )?;
+        draw_first_pixels(a, l, &mut c, BACK, SYSTEM_FRAMES[0])?;
+        draw_first_pixels(a, l, &mut c, OFFSCREEN, SYSTEM_FRAMES[1])?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        finish(a, l)
+    })
+}
+
+/// The back buffers of a flip chain in system memory go round as a page
+/// flip's do: the second flip shows the frame drawn in the second back
+/// buffer.
+#[test]
+fn a_flip_chain_in_system_memory_shows_its_back_buffers_in_turn() {
+    let (program, data) = system_flip_chain_of_two_program();
+    let mut cpu = machine("system_flip_chain_of_two", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 13)[1..], [0; 12]);
+    assert_eq!(cpu.bus.vbe.start, 0);
+    assert_eq!(cpu.bus.vbe.vram[..4], SYSTEM_FRAMES[1].to_le_bytes());
+}
+
 /// A primary surface that says it is a back buffer.
 fn primary_back_buffer_program() -> (Vec<u8>, u32) {
     let mut d = data();
@@ -1160,6 +1318,138 @@ fn a_primary_surface_cant_be_a_back_buffer() {
     run_until_done(&mut cpu, data);
     const DDERR_INVALIDCAPS: u32 = 0x8876_0064;
     assert_eq!(results(&mut cpu, data, 4)[1..], [0, 0, DDERR_INVALIDCAPS]);
+}
+
+/// Where caps_without_flag_program puts its descriptions, after the
+/// first at DESC: the palette's entries' place, which it doesn't use.
+const DESCS: [u32; 4] = [ENTRIES, ENTRIES + 0x70, ENTRIES + 0xE0, ENTRIES + 0x150];
+
+/// A program in a window that asks for surfaces with ddsCaps set and
+/// DDSD_CAPS left out of dwFlags, as Intel RDX's DMIX.DLL asks for its
+/// primary surface: the primary surface (no flags), a 64x32 surface in
+/// system memory, the primary surface with a size, nothing, and a
+/// surface in both memories.
+fn caps_without_flag_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    let sized = DDSD_WIDTH | DDSD_HEIGHT;
+    desc(&mut d, DESC, 0, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    desc(&mut d, DESCS[0], sized, DDSCAPS_SYSTEMMEMORY, 64, 32, 0);
+    desc(&mut d, DESCS[1], sized, DDSCAPS_PRIMARYSURFACE, 64, 32, 0);
+    desc(&mut d, DESCS[2], 0, 0, 0, 0, 0);
+    let both = DDSCAPS_SYSTEMMEMORY | DDSCAPS_VIDEOMEMORY;
+    desc(&mut d, DESCS[3], sized, both, 64, 32, 0);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_NORMAL)],
+        )?;
+        let create = |c: &mut Calls, a: &mut CodeAssembler, desc: u32, out: u32| {
+            c.com(
+                a,
+                l,
+                DD,
+                DD_CREATE_SURFACE,
+                &[Arg::At(desc), Arg::At(out), Arg::I(0)],
+            )
+        };
+        create(&mut c, a, DESC, FRONT)?;
+        c.com(a, l, FRONT, S_GET_CAPS, &[Arg::At(CAPS)])?;
+        create(&mut c, a, DESCS[0], OFFSCREEN)?;
+        c.com(a, l, OFFSCREEN, S_GET_CAPS, &[Arg::At(CAPS + 4)])?;
+        for at in &DESCS[1..] {
+            create(&mut c, a, *at, SOURCE)?;
+        }
+        finish(a, l)
+    })
+}
+
+/// DirectDraw on Windows 98 SE reads ddsCaps whether dwFlags has
+/// DDSD_CAPS or not. A probe on Windows 98 SE (DirectX 6.1, an S3 Trio64
+/// in 86Box) got these results through IDirectDraw and IDirectDraw4:
+/// flags 0 with DDSCAPS_PRIMARYSURFACE made the primary surface, a sized
+/// surface with DDSCAPS_SYSTEMMEMORY was in system memory, the primary
+/// surface with a size failed with DDERR_INVALIDPARAMS, as did flags 0
+/// and caps 0, and both memories failed with DDERR_INVALIDCAPS.
+#[test]
+fn surface_caps_count_without_ddsd_caps() {
+    let (program, data) = caps_without_flag_program();
+    let mut cpu = machine("caps_without_flag", program);
+    run_until_done(&mut cpu, data);
+    const DDERR_INVALIDCAPS: u32 = 0x8876_0064;
+    assert_eq!(
+        results(&mut cpu, data, 10)[1..],
+        [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            DDERR_INVALIDPARAMS,
+            DDERR_INVALIDPARAMS,
+            DDERR_INVALIDCAPS
+        ]
+    );
+    let primary = peek(&cpu, data + CAPS);
+    assert_ne!(primary & DDSCAPS_PRIMARYSURFACE, 0, "{primary:08X}");
+    let system = peek(&cpu, data + CAPS + 4);
+    assert_ne!(system & DDSCAPS_SYSTEMMEMORY, 0, "{system:08X}");
+}
+
+/// Where dx1_caps_program has GetCaps put the driver's caps and the
+/// emulation's, each a DDCAPS of DirectX 1's 172 bytes with a word
+/// after it that is left alone, and a DDCAPS of a size no DirectX has.
+const DX1_HAL: u32 = ENTRIES;
+const DX1_HEL: u32 = ENTRIES + 0xC0;
+const ODD_CAPS: u32 = ENTRIES + 0x180;
+const DX1_CAPS_SIZE: u32 = 172;
+const PAST_CAPS: u32 = 0x5AA5_C33C;
+
+/// A program that asks DirectDraw for its caps in DDCAPS of DirectX 1's
+/// size, as Intel RDX's DMIX.DLL does, then in one of 256 bytes.
+fn dx1_caps_program() -> (Vec<u8>, u32) {
+    const DD_GET_CAPS: u32 = 11;
+    let mut d = data();
+    for at in [DX1_HAL, DX1_HEL] {
+        put32(&mut d, at, DX1_CAPS_SIZE);
+        put32(&mut d, at + DX1_CAPS_SIZE, PAST_CAPS);
+    }
+    put32(&mut d, ODD_CAPS, 0x100);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        let caps = [Arg::At(DX1_HAL), Arg::At(DX1_HEL)];
+        c.com(a, l, DD, DD_GET_CAPS, &caps)?;
+        c.com(a, l, DD, DD_GET_CAPS, &[Arg::At(ODD_CAPS), Arg::I(0)])?;
+        finish(a, l)
+    })
+}
+
+/// DirectDraw on Windows 98 SE fills a DDCAPS of DirectX 1's 172 bytes,
+/// as it does DirectX 3's, 5's and 6's, and refuses one of 256 bytes
+/// with DDERR_INVALIDPARAMS: a probe there (DirectX 6.1, an S3 Trio64 in
+/// 86Box) got DD_OK and the same dwCaps for all four sizes.
+#[test]
+fn get_caps_fills_directx_1s_ddcaps() {
+    let (program, data) = dx1_caps_program();
+    let mut cpu = machine("dx1_caps", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 4)[1..], [0, 0, DDERR_INVALIDPARAMS]);
+    const DDCAPS_BLT: u32 = 0x40;
+    for at in [DX1_HAL, DX1_HEL] {
+        let caps = peek(&cpu, data + at + 4);
+        assert_ne!(caps & DDCAPS_BLT, 0, "{at:X}: {caps:08X}");
+        // ddsCaps at 0x84, the last field GetCaps fills at this size.
+        let surface_caps = peek(&cpu, data + at + 0x84);
+        assert_ne!(surface_caps & DDSCAPS_PRIMARYSURFACE, 0, "{at:X}");
+        let past = peek(&cpu, data + at + DX1_CAPS_SIZE);
+        assert_eq!(past, PAST_CAPS, "{at:X}");
+    }
 }
 
 /// A program in a window: an offscreen surface filled with a color and
@@ -1264,6 +1554,131 @@ fn a_windowed_program_blits_to_the_desktop_inside_its_window() {
         assert_ne!(pixel(&cpu, 92, y), 0x00FF_0000);
     }
     assert_ne!(pixel(&cpu, 100, 66), 0x00FF_0000);
+}
+
+/// A window with a frame and a caption, as Actua Soccer 2's setup
+/// screen has, its left edge at `x`, and the clip list of a clipper set
+/// to it. With `child`, the window has WS_CLIPCHILDREN and a child that
+/// covers the top 20 rows of its client area.
+fn framed_clip_list_program(x: i32, child: bool) -> (Vec<u8>, u32) {
+    let mut d = data();
+    put32(&mut d, RECT, 0x100);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        // WS_CAPTION, WS_SYSMENU, WS_THICKFRAME and WS_MINIMIZEBOX, at
+        // the place and size the game gives its window.
+        let clip_children = if child { WS_CLIPCHILDREN } else { 0 };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(0x00CE_0000 | WS_VISIBLE | clip_children),
+                Arg::I(x as u32),
+                Arg::I(94),
+                Arg::I(328),
+                Arg::I(227),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        if child {
+            c.api(
+                a,
+                l,
+                CREATE_WINDOW,
+                &[
+                    Arg::I(0),
+                    Arg::At(CLASS),
+                    Arg::At(CLASS),
+                    Arg::I(WS_CHILD | WS_VISIBLE),
+                    Arg::I(0),
+                    Arg::I(0),
+                    Arg::I(320),
+                    Arg::I(20),
+                    Arg::Val(HWND),
+                    Arg::I(0),
+                    Arg::I(BASE),
+                    Arg::I(0),
+                ],
+            )?;
+        }
+        c.api(
+            a,
+            l,
+            DIRECT_DRAW_CREATE_CLIPPER,
+            &[Arg::I(0), Arg::At(CLIPPER), Arg::I(0)],
+        )?;
+        c.com(a, l, CLIPPER, CLIP_SET_HWND, &[Arg::I(0), Arg::Val(HWND)])?;
+        c.com(
+            a,
+            l,
+            CLIPPER,
+            CLIP_GET_CLIP_LIST,
+            &[Arg::I(0), Arg::At(ENTRIES), Arg::At(RECT)],
+        )?;
+        finish(a, l)
+    })
+}
+
+/// The clip list `framed_clip_list_program` gets: its header, bounds
+/// and rectangle, as dwords.
+fn framed_clip_list(test: &str, x: i32, child: bool) -> Vec<u32> {
+    let (program, data) = framed_clip_list_program(x, child);
+    let mut cpu = machine(test, program);
+    run_until_done(&mut cpu, data);
+    let windows = 1 + usize::from(child);
+    let results = results(&mut cpu, data, windows as u32 + 3);
+    assert!(results[..windows].iter().all(|&hwnd| hwnd != 0));
+    assert_eq!(results[windows..], [0; 3]);
+    (0..12)
+        .map(|i| peek(&cpu, data + ENTRIES + 4 * i))
+        .collect()
+}
+
+#[test]
+fn a_windows_clip_list_is_its_client_area() {
+    let list = framed_clip_list("framed_clip_list", 152, false);
+    // One rectangle: the window less its 4-pixel frame and its 19-pixel
+    // caption bar, the client area the game's AdjustWindowRectEx put at
+    // (156, 117) to (476, 317). The game copies its picture into the
+    // primary surface by these rectangles, from its 320x200 buffer at
+    // their place in the client area.
+    let client = [156, 117, 476, 317];
+    assert_eq!(list[..4], [32, 1, 1, 16]);
+    assert_eq!(list[4..8], client, "bounds");
+    assert_eq!(list[8..12], client, "rectangle");
+}
+
+/// The clip list is the region GetDC's DC of the window has: a window
+/// with WS_CLIPCHILDREN leaves its children out.
+#[test]
+fn a_windows_clip_list_leaves_out_its_children_with_clipchildren() {
+    let list = framed_clip_list("framed_clip_list_child", 152, true);
+    // The client area less the child's 20 rows at its top.
+    let below = [156, 137, 476, 317];
+    assert_eq!(list[..4], [32, 1, 1, 16]);
+    assert_eq!(list[4..8], below, "bounds");
+    assert_eq!(list[8..12], below, "rectangle");
+}
+
+/// What of a window lies off the screen isn't in its clip list, as on
+/// Windows, where a window's visible region is cut to the screen.
+#[test]
+fn a_windows_clip_list_is_cut_to_the_screen() {
+    let list = framed_clip_list("framed_clip_list_left", -52, false);
+    // The client area, (-48, 117) to (272, 317), from the screen's left
+    // edge on.
+    let shown = [0, 117, 272, 317];
+    assert_eq!(list[..4], [32, 1, 1, 16]);
+    assert_eq!(list[4..8], shown, "bounds");
+    assert_eq!(list[8..12], shown, "rectangle");
 }
 
 /// A palette on the primary surface of an 8-bit mode, and an entry
@@ -2060,6 +2475,132 @@ fn gdi_draws_on_the_screen_in_the_mode_directdraw_set() {
     assert_eq!(vram[20 * 640 + 20], 0);
 }
 
+const DEEP_GDI32: (&str, &[&str]) = (
+    "GDI32.DLL",
+    &[
+        "CreatePalette",
+        "SelectPalette",
+        "RealizePalette",
+        "CreateCompatibleDC",
+        "CreateSolidBrush",
+    ],
+);
+const D_CREATE_DC: usize = 7;
+const D_CREATE_SOLID_BRUSH: usize = 8;
+
+// The palette selected before the mode: B's LOGPALETTE, the memory DC
+// and B.
+const D_LOGPAL: u32 = 0xA28;
+const D_MEMORY_DC: u32 = 0xA30;
+const D_HPAL: u32 = 0xA34;
+
+/// The color of B, the palette realized in the background.
+const D_COLOR: [u8; 3] = [0x20, 0x60, 0xA0];
+
+/// On the desktop, of 32 bits: palette A selected into the window's DC
+/// without bForceBackground and realized. Then full screen at 640x480x8,
+/// palette B selected into a memory DC with bForceBackground and
+/// realized, and A realized again in the window's DC, which then fills
+/// a rectangle from 10,10 to 20,20 with A's entry.
+fn palette_before_mode_program() -> (Vec<u8>, u32) {
+    let mut d = screen_data();
+    put32(&mut d, G_RECT, 10);
+    put32(&mut d, G_RECT + 4, 10);
+    put32(&mut d, G_RECT + 8, 20);
+    put32(&mut d, G_RECT + 12, 20);
+    // LOGPALETTEs: version 0x300, one entry, PC_NOCOLLAPSE.
+    let entry = |c: [u8; 3]| [c[0], c[1], c[2], 4];
+    put32(&mut d, G_LOGPAL, 0x0001_0300);
+    put(&mut d, G_LOGPAL + 4, &entry(G_COLOR));
+    put32(&mut d, D_LOGPAL, 0x0001_0300);
+    put(&mut d, D_LOGPAL + 4, &entry(D_COLOR));
+    let dlls = [
+        GDI_USER32,
+        ("DDRAW.DLL", &["DirectDrawCreate"][..]),
+        DEEP_GDI32,
+    ];
+    program(&dlls, &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let window = [
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(640),
+            Arg::I(480),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(BASE),
+            Arg::I(0),
+        ];
+        c.api(a, l, G_CREATE_WINDOW, &window)?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        c.api(a, l, G_GET_DC, &[Arg::Val(HWND)])?;
+        a.mov(dword_ptr(l.at(G_HDC)), eax)?;
+        c.api(a, l, G_CREATE_PALETTE, &[Arg::At(G_LOGPAL)])?;
+        a.mov(dword_ptr(l.at(G_HPAL)), eax)?;
+        let select = [Arg::Val(G_HDC), Arg::Val(G_HPAL), Arg::I(0)];
+        c.api(a, l, G_SELECT_PALETTE, &select)?;
+        c.api(a, l, G_REALIZE_PALETTE, &[Arg::Val(G_HDC)])?;
+        let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+        c.api(a, l, G_DIRECT_DRAW_CREATE, &create)?;
+        let level = Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), level])?;
+        let mode = [Arg::I(640), Arg::I(480), Arg::I(8)];
+        c.com(a, l, DD, DD_SET_DISPLAY_MODE, &mode)?;
+        c.api(a, l, D_CREATE_DC, &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(D_MEMORY_DC)), eax)?;
+        c.api(a, l, G_CREATE_PALETTE, &[Arg::At(D_LOGPAL)])?;
+        a.mov(dword_ptr(l.at(D_HPAL)), eax)?;
+        let select = [Arg::Val(D_MEMORY_DC), Arg::Val(D_HPAL), Arg::I(1)];
+        c.api(a, l, G_SELECT_PALETTE, &select)?;
+        c.api(a, l, G_REALIZE_PALETTE, &[Arg::Val(D_MEMORY_DC)])?;
+        c.api(a, l, G_REALIZE_PALETTE, &[Arg::Val(G_HDC)])?;
+        // PALETTEINDEX(0).
+        c.api(a, l, D_CREATE_SOLID_BRUSH, &[Arg::I(0x0100_0000)])?;
+        a.mov(dword_ptr(l.at(G_BRUSH)), eax)?;
+        let fill = [Arg::Val(G_HDC), Arg::At(G_RECT), Arg::Val(G_BRUSH)];
+        c.api(a, l, G_FILL_RECT, &fill)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_palette_selected_on_a_deep_desktop_realizes_in_the_background_in_an_8_bit_mode() {
+    // Windows 98's USER selects a palette in the foreground only on a
+    // palette device, so A, selected on the desktop of 32 bits, isn't
+    // the foreground palette in the 8-bit mode. Realized there in the
+    // background, it maps to the first entry after the static ones, as
+    // B did, and puts its color in no entry, since that one isn't free
+    // (Windows 95 OSR2.5's rule, `gdi32::palette`). In the foreground
+    // it would take the next entry, which is free, and put its color
+    // there.
+    let (program, data) = palette_before_mode_program();
+    let mut cpu = machine("palette_before_mode", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 15);
+    // RealizePalette on the desktop of 32 bits maps nothing.
+    assert_eq!(r[4], 0);
+    assert_eq!(r[5..8], [0; 3]);
+    // B takes the first entry after the static ones. A, in the
+    // background, maps from entry 10 up, free or not, as Windows 95
+    // does (`realize`): it maps to B's entry and leaves its color, so
+    // entry 11 keeps the black it had.
+    assert_eq!(r[11..13], [1, 1]);
+    assert_ne!(r[13], 0, "CreateSolidBrush");
+    assert_eq!(r[14], 1, "FillRect");
+    let (dac, b) = dac_entry(&cpu, 10, D_COLOR);
+    assert_eq!(dac, b, "B's entry");
+    let (dac, _) = dac_entry(&cpu, 11, G_COLOR);
+    assert_eq!(dac, [0; 3], "the entry after B's");
+    // A's entry maps to B's: the rectangle is entry 10.
+    let vram = &cpu.bus.vbe.vram;
+    assert_eq!(vram[10 * 640 + 10..10 * 640 + 20], [10; 10]);
+    assert_eq!(vram[19 * 640 + 19], 10);
+}
+
 const DD_QUERY_INTERFACE: u32 = 0;
 /// Where the program that leaves exclusive mode keeps the IDirectDraw2
 /// it asks for, and IID_IDirectDraw2.
@@ -2160,6 +2701,212 @@ fn back_in_exclusive_mode_the_primary_surfaces_palette_is_the_dacs_again() {
     // the program's palette is back in their place.
     for i in [0, 1, 255] {
         let (dac, expected) = dac_entry(&cpu, i, [i as u8, 0x40, 255 - i as u8]);
+        assert_eq!(dac, expected, "entry {i}");
+    }
+}
+
+// A palette on the primary surface in a window on a desktop of 256
+// colours.
+
+const W_CREATE_WINDOW: usize = 0;
+const W_GET_DC: usize = 1;
+const W_DIRECT_DRAW_CREATE: usize = 2;
+const W_SET_SYSTEM_PALETTE_USE: usize = 3;
+const SYSPAL_NOSTATIC: u32 = 2;
+const PC_RESERVED: u8 = 1;
+const PC_NOCOLLAPSE: u8 = 4;
+
+/// The entry `changed` sets: its index and its color and flags.
+type Changed = (u32, [u8; 4]);
+
+/// In a window with DDSCL_NORMAL on a desktop of 256 colours, a palette
+/// of all 256 entries (DDPCAPS_ALLOW256) on the primary surface, its
+/// entries `entries`, and the entry `changed` names set after with
+/// SetEntries. With `nostatic`, SetSystemPaletteUse(SYSPAL_NOSTATIC)
+/// first. Bedlam's windowed mode does both, its entries PC_RESERVED
+/// (#2113).
+fn windowed_palette_program(
+    nostatic: bool,
+    entries: &[[u8; 4]; 256],
+    changed: Changed,
+) -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    for (i, e) in entries.iter().enumerate() {
+        put(&mut d, ENTRIES + 4 * i as u32, e);
+    }
+    put(&mut d, KEY, &changed.1);
+    let dlls = [
+        ("USER32.DLL", &["CreateWindowExA", "GetDC"][..]),
+        ("DDRAW.DLL", &["DirectDrawCreate"][..]),
+        ("GDI32.DLL", &["SetSystemPaletteUse"][..]),
+    ];
+    program(&dlls, &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let window = [
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(100),
+            Arg::I(50),
+            Arg::I(200),
+            Arg::I(100),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(BASE),
+            Arg::I(0),
+        ];
+        c.api(a, l, W_CREATE_WINDOW, &window)?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        if nostatic {
+            c.api(a, l, W_GET_DC, &[Arg::I(0)])?;
+            a.push(SYSPAL_NOSTATIC as i32)?;
+            a.push(eax)?;
+            a.call(l.import(W_SET_SYSTEM_PALETTE_USE))?;
+        }
+        let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+        c.api(a, l, W_DIRECT_DRAW_CREATE, &create)?;
+        let normal = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &normal)?;
+        let primary = [Arg::At(DESC), Arg::At(FRONT), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &primary)?;
+        let caps = Arg::I(DDPCAPS_8BIT | DDPCAPS_ALLOW256);
+        let palette = [caps, Arg::At(ENTRIES), Arg::At(PALETTE), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_PALETTE, &palette)?;
+        c.com(a, l, FRONT, S_SET_PALETTE, &[Arg::Val(PALETTE)])?;
+        let entry = [Arg::I(0), Arg::I(changed.0), Arg::I(1), Arg::At(KEY)];
+        c.com(a, l, PALETTE, PAL_SET_ENTRIES, &entry)?;
+        finish(a, l)
+    })
+}
+
+/// Run `windowed_palette_program` on a desktop of 256 colours, and check
+/// that its DirectDraw calls succeeded.
+fn run_windowed_palette(
+    test: &str,
+    nostatic: bool,
+    entries: &[[u8; 4]; 256],
+    changed: Changed,
+) -> Box<Cpu> {
+    let (program, data) = windowed_palette_program(nostatic, entries, changed);
+    let base = PathBuf::from("target/test_win32_ddraw").join(test);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    run_until_done(&mut cpu, data);
+    // The window, GetDC with `nostatic`, then DirectDraw's calls.
+    let first = if nostatic { 2 } else { 1 };
+    let r = results(&mut cpu, data, first + 6);
+    assert_eq!(r[first as usize..], [0; 6]);
+    cpu
+}
+
+/// The palette's entry `i`, as the test programs make it.
+fn program_color(i: usize) -> [u8; 3] {
+    [i as u8, 0x40, 255 - i as u8]
+}
+
+/// A palette of `program_color`s, each with the flags `flags`.
+fn program_entries(flags: u8) -> [[u8; 4]; 256] {
+    std::array::from_fn(|i| {
+        let [r, g, b] = program_color(i);
+        [r, g, b, flags]
+    })
+}
+
+/// Entry 7 changed to a color none of the others has, without flags.
+const CHANGED_7: Changed = (7, [0x80, 0xC0, 0x10, 0]);
+
+/// The system palette's static colors as red, green and blue: entries 0
+/// to 9, then 246 to 255.
+const STATIC_RGB: [[u8; 3]; 20] = [
+    [0, 0, 0],
+    [0x80, 0, 0],
+    [0, 0x80, 0],
+    [0x80, 0x80, 0],
+    [0, 0, 0x80],
+    [0x80, 0, 0x80],
+    [0, 0x80, 0x80],
+    [0xC0, 0xC0, 0xC0],
+    [0xC0, 0xDC, 0xC0],
+    [0xA6, 0xCA, 0xF0],
+    [0xFF, 0xFB, 0xF0],
+    [0xA0, 0xA0, 0xA4],
+    [0x80, 0x80, 0x80],
+    [0xFF, 0, 0],
+    [0, 0xFF, 0],
+    [0xFF, 0xFF, 0],
+    [0, 0, 0xFF],
+    [0xFF, 0, 0xFF],
+    [0, 0xFF, 0xFF],
+    [0xFF, 0xFF, 0xFF],
+];
+
+#[test]
+fn a_windowed_primary_surfaces_palette_is_realized_in_the_foreground() {
+    let entries = program_entries(0);
+    let cpu = run_windowed_palette("windowed_palette", false, &entries, CHANGED_7);
+    // Through GDI, as a logical palette realized in the foreground: the
+    // 20 static colors stay, and the entries, of colors none of them
+    // has, take the entries between them from the bottom up.
+    for (i, color) in [(0, [0, 0, 0]), (9, [0xA6, 0xCA, 0xF0]), (255, [0xFF; 3])] {
+        let (dac, expected) = dac_entry(&cpu, i, color);
+        assert_eq!(dac, expected, "entry {i}");
+    }
+    for k in [0, 100, 235] {
+        let (dac, expected) = dac_entry(&cpu, 10 + k, program_color(k));
+        assert_eq!(dac, expected, "entry {}", 10 + k);
+    }
+    // SetEntries realizes it again with the entries it mapped to: entry
+    // 7 keeps its own, with its new color.
+    let (dac, expected) = dac_entry(&cpu, 17, [0x80, 0xC0, 0x10]);
+    assert_eq!(dac, expected, "entry 17");
+}
+
+#[test]
+fn a_windowed_palette_of_reserved_entries_starts_above_black_with_syspal_nostatic() {
+    // Bedlam's case: with SYSPAL_NOSTATIC only black (0) and white (255)
+    // are static, and PC_RESERVED entries never share one, so entry k
+    // takes the system palette's k + 1, as Bedlam's window shows on
+    // Windows 98 SE.
+    let entries = program_entries(PC_RESERVED);
+    let cpu = run_windowed_palette("windowed_palette_nostatic", true, &entries, CHANGED_7);
+    for (i, color) in [(0, [0, 0, 0]), (255, [0xFF; 3])] {
+        let (dac, expected) = dac_entry(&cpu, i, color);
+        assert_eq!(dac, expected, "entry {i}");
+    }
+    for k in [0, 8, 199, 253] {
+        let (dac, expected) = dac_entry(&cpu, k + 1, program_color(k));
+        assert_eq!(dac, expected, "entry {}", k + 1);
+    }
+    let (dac, expected) = dac_entry(&cpu, 8, [0x80, 0xC0, 0x10]);
+    assert_eq!(dac, expected, "entry 8");
+}
+
+#[test]
+fn a_windowed_identity_palette_keeps_its_indices_when_its_entries_change() {
+    // The static colors without flags at the ends, PC_NOCOLLAPSE colors
+    // between, one of them white. Each SetEntries realizes the palette
+    // with the entries it mapped to first, so the static white at the
+    // end doesn't move to the entry the white between them took.
+    let mut entries = program_entries(PC_NOCOLLAPSE);
+    for (n, &[r, g, b]) in STATIC_RGB.iter().enumerate() {
+        let i = if n < 10 { n } else { 236 + n };
+        entries[i] = [r, g, b, 0];
+    }
+    entries[100] = [0xFF, 0xFF, 0xFF, PC_NOCOLLAPSE];
+    let changed = (50, [0x80, 0xC0, 0x10, PC_NOCOLLAPSE]);
+    let cpu = run_windowed_palette("windowed_palette_identity", false, &entries, changed);
+    entries[50] = changed.1;
+    for (i, &[r, g, b, _]) in entries.iter().enumerate() {
+        let (dac, expected) = dac_entry(&cpu, i, [r, g, b]);
         assert_eq!(dac, expected, "entry {i}");
     }
 }
@@ -3169,22 +3916,161 @@ fn blits_from_dxt_stretch_cut_blocks_and_mirror_as_windows() {
 }
 
 #[test]
-fn a_dxt_surface_takes_whole_blocks_of_its_format_and_nothing_else() {
+fn a_dxt_surface_copies_whole_blocks_and_compresses_the_rest() {
     let (program, data) = dxt_blits_program();
     let mut cpu = machine("dxt_to_dxt", program);
     run_until_done(&mut cpu, data);
     let r = results(&mut cpu, data, 26);
     assert_eq!(r[12], 0, "{r:X?}");
-    // Windows compresses these; the built-in DirectDraw doesn't.
-    assert_eq!(r[13..16], [E_NOTIMPL; 3], "{r:X?}");
+    // A rectangle within blocks, DXT1 to DXT3 and R5G6B5 to DXT1 are
+    // compressed, as on Windows.
+    assert_eq!(r[13..16], [0; 3], "{r:X?}");
     // A fill of a DXT surface fails on Windows too.
     assert_eq!(r[16], E_NOTIMPL);
     assert_eq!(r[22..26], [0; 4], "{r:X?}");
     let blocks = locked_pixels(&cpu, data, DESC3, (8, 1), 4);
     let green = [0x001F_07E0, 0];
-    assert_eq!(blocks[..4], [0; 4], "{blocks:X?}");
+    // The first block took the compressed pixels; the copied block is
+    // the third, and the second and fourth weren't written.
+    assert_ne!(blocks[..2], [0; 2], "{blocks:X?}");
+    assert_eq!(blocks[2..4], [0; 2], "{blocks:X?}");
     assert_eq!(blocks[4..6], green, "{blocks:X?}");
     assert_eq!(blocks[6..], [0; 2], "{blocks:X?}");
+}
+
+const DDBLTFX_MIRRORUPDOWN: u32 = 0x4;
+
+/// An 8x4 A8R8G8B8 surface: its left 4x4 a pattern of two 5-6-5
+/// colours (0xFFE0 and 0x0843), its right red with alpha 0 to 255 in
+/// steps of 17, row by row.
+fn compress_source() -> Vec<u32> {
+    let mut pixels = Vec::new();
+    for y in 0..4u32 {
+        for x in 0..8u32 {
+            pixels.push(if x < 4 {
+                if (x + y) % 2 == 0 {
+                    0xFFFF_FF00
+                } else {
+                    0xFF08_0818
+                }
+            } else {
+                ((y * 4 + x - 4) * 17) << 24 | 0xFF_0000
+            });
+        }
+    }
+    pixels
+}
+
+/// `compress_source` BltFast into an 8x4 DXT1 surface, Blt into an 8x4
+/// DXT3 one mirrored up and down, as Rage Rally loads its textures, and
+/// BltFast into an 8x4 DXT2 one.
+fn dxt_compress_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    d.resize(DXT_DATA_SIZE, 0);
+    rgb_desc(&mut d, DESC, A8R8G8B8, 8, 4);
+    dxt_desc(&mut d, DESC3, b"DXT1", 8, 4);
+    dxt_desc(&mut d, DESC4, b"DXT3", 8, 4);
+    dxt_desc(&mut d, LOCKED, b"DXT2", 8, 4);
+    let pixels: Vec<u8> = compress_source()
+        .iter()
+        .flat_map(|p| p.to_le_bytes())
+        .collect();
+    put(&mut d, BLOCKS, &pixels);
+    put32(&mut d, FX, 100);
+    put32(&mut d, FX + 4, DDBLTFX_MIRRORUPDOWN);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let others = [(DESC3, FRONT), (DESC4, BACK), (LOCKED, OFFSCREEN)];
+        dxt_start(a, l, &mut c, pixels.len() as u32, &others)?;
+        // 9: into DXT1; 10: into DXT3, mirrored; 11: into DXT2.
+        let fast = [
+            Arg::I(0),
+            Arg::I(0),
+            Arg::Val(SOURCE),
+            Arg::I(0),
+            Arg::I(DDBLTFAST_WAIT),
+        ];
+        c.com(a, l, FRONT, S_BLT_FAST, &fast)?;
+        let mirrored = [
+            Arg::I(0),
+            Arg::Val(SOURCE),
+            Arg::I(0),
+            Arg::I(DDBLT_WAIT | DDBLT_DDFX),
+            Arg::At(FX),
+        ];
+        c.com(a, l, BACK, S_BLT, &mirrored)?;
+        c.com(a, l, OFFSCREEN, S_BLT_FAST, &fast)?;
+        // 12 to 17.
+        find_pixels(a, l, &mut c, FRONT, DESC3)?;
+        find_pixels(a, l, &mut c, BACK, DESC4)?;
+        find_pixels(a, l, &mut c, OFFSCREEN, LOCKED)?;
+        finish(a, l)
+    })
+}
+
+/// The pixels of a row of DXT blocks `blocks` (dwords) of `format`, 4
+/// rows of 8, as a card decodes them.
+fn decode_blocks(format: rust_dos::video::dxt::Format, blocks: &[u32]) -> Vec<[u8; 4]> {
+    use rust_dos::video::dxt::{Rules, decode_block};
+    let bytes: Vec<u8> = blocks.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let decoded: Vec<[[u8; 4]; 16]> = bytes
+        .chunks(format.block_bytes())
+        .map(|b| decode_block(format, Rules::S3tc, b))
+        .collect();
+    (0..32)
+        .map(|i| {
+            let (x, y) = (i % 8, i / 8);
+            decoded[x / 4][y * 4 + x % 4]
+        })
+        .collect()
+}
+
+/// An A8R8G8B8 pixel as red, green, blue and alpha.
+fn rgba(p: u32) -> [u8; 4] {
+    let [b, g, r, a] = p.to_le_bytes();
+    [r, g, b, a]
+}
+
+#[test]
+fn blits_into_dxt_compress_the_pixels() {
+    use rust_dos::video::dxt::Format;
+    let (program, data) = dxt_compress_program();
+    let mut cpu = machine("dxt_compress", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 18);
+    assert_eq!(r[1..18], [0; 17], "{r:X?}");
+    let source = compress_source();
+    // DXT1: the two colours exactly, and the red with alpha under 128
+    // transparent black.
+    let blocks = locked_pixels(&cpu, data, DESC3, (4, 1), 4);
+    let dxt1 = decode_blocks(Format::Dxt1, &blocks);
+    for (i, (&p, q)) in source.iter().zip(&dxt1).enumerate() {
+        let expected = match rgba(p) {
+            [_, _, _, a] if a < 128 => [0, 0, 0, 0],
+            [r, g, b, _] => [r, g, b, 255],
+        };
+        assert_eq!(*q, expected, "pixel {i}");
+    }
+    // DXT3, mirrored: the rows the other way up, the alpha exact.
+    let blocks = locked_pixels(&cpu, data, DESC4, (8, 1), 4);
+    let dxt3 = decode_blocks(Format::Dxt3, &blocks);
+    for (i, q) in dxt3.iter().enumerate() {
+        let (x, y) = (i % 8, i / 8);
+        assert_eq!(*q, rgba(source[(3 - y) * 8 + x]), "pixel {i}");
+    }
+    // DXT2: the colours multiplied by their alpha, the red ramp's within
+    // half a step of its four codes.
+    let blocks = locked_pixels(&cpu, data, LOCKED, (8, 1), 4);
+    let dxt2 = decode_blocks(Format::Dxt2, &blocks);
+    for (i, (&p, q)) in source.iter().zip(&dxt2).enumerate() {
+        let [r, g, b, a] = rgba(p);
+        if i % 8 < 4 {
+            assert_eq!(*q, [r, g, b, a], "pixel {i}");
+        } else {
+            assert_eq!((q[1], q[2], q[3]), (0, 0, a), "pixel {i}");
+            assert!((q[0] as i32 - a as i32).abs() <= 43, "pixel {i}: {q:?}");
+        }
+    }
 }
 
 #[test]
@@ -3693,4 +4579,450 @@ fn is_lost_forgets_a_released_surface() {
         results(&mut cpu, data, 8)[3..],
         [0, 0, SURFACE_LOST, 0, INVALID_OBJECT]
     );
+}
+
+// GDI's display bitmaps in a mode DirectDraw set.
+
+const BITMAP_GDI32: (&str, &[&str]) = (
+    "GDI32.DLL",
+    &[
+        "CreateDCA",
+        "CreateCompatibleBitmap",
+        "GetDIBits",
+        "CreateCompatibleDC",
+        "SelectObject",
+    ],
+);
+const B_CREATE_WINDOW: usize = 0;
+const B_DIRECT_DRAW_CREATE: usize = 1;
+const B_CREATE_DC: usize = 2;
+const B_CREATE_COMPATIBLE_BITMAP: usize = 3;
+const B_GET_DI_BITS: usize = 4;
+const B_CREATE_COMPATIBLE_DC: usize = 5;
+const B_SELECT_OBJECT: usize = 6;
+
+// The bitmap program's data, after the screen programs'.
+const B_DISPLAY: u32 = 0xA40;
+const B_DESKTOP_BITMAP: u32 = 0xA48;
+const B_HDC: u32 = 0xA4C;
+const B_BITMAP: u32 = 0xA50;
+const B_MEMORY_DC: u32 = 0xA54;
+const B_COMPATIBLE: u32 = 0xA58;
+/// The BITMAPINFOHEADERs GetDIBits fills, and the masks after them: of
+/// the mode's bitmap, the desktop's, the memory DC's compatible one, and
+/// the mode's again after the mode is restored.
+const B_INFO: u32 = 0xA60;
+const B_DESKTOP_INFO: u32 = 0xAA0;
+const B_COMPATIBLE_INFO: u32 = 0xAE0;
+const B_AFTER_INFO: u32 = 0xB20;
+const B_DATA_SIZE: usize = 0xB60;
+
+/// GetDIBits(hdc at `hdc`, the bitmap at `bitmap`, 0, 1, NULL, `info`,
+/// DIB_RGB_COLORS): the bitmap's format, as the DirectShow base classes'
+/// CImageDisplay asks for it.
+fn format_query(hdc: u32, bitmap: u32, info: u32) -> [Arg; 7] {
+    [
+        Arg::Val(hdc),
+        Arg::Val(bitmap),
+        Arg::I(0),
+        Arg::I(1),
+        Arg::I(0),
+        Arg::At(info),
+        Arg::I(0),
+    ]
+}
+
+/// On the 32-bit desktop, a bitmap compatible with the display, and its
+/// format. Then full screen at 640x480x16: another such bitmap, whose
+/// format GetDIBits gives as CImageDisplay asks for it (twice, the
+/// second time for the masks), both bitmaps selected into a memory DC,
+/// and a bitmap compatible with that DC and its format. Then the mode
+/// restored: the mode's bitmap's format again, and the bitmap selected.
+fn display_bitmap_program() -> (Vec<u8>, u32) {
+    let mut d = screen_data();
+    d.resize(B_DATA_SIZE, 0);
+    put(&mut d, B_DISPLAY, b"DISPLAY\0");
+    for info in [B_INFO, B_DESKTOP_INFO, B_COMPATIBLE_INFO, B_AFTER_INFO] {
+        put32(&mut d, info, 40);
+    }
+    let dlls = [
+        ("USER32.DLL", &["CreateWindowExA"][..]),
+        ("DDRAW.DLL", &["DirectDrawCreate"][..]),
+        BITMAP_GDI32,
+    ];
+    program(&dlls, &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let window = [
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(640),
+            Arg::I(480),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(BASE),
+            Arg::I(0),
+        ];
+        c.api(a, l, B_CREATE_WINDOW, &window)?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        let display = [Arg::At(B_DISPLAY), Arg::I(0), Arg::I(0), Arg::I(0)];
+        c.api(a, l, B_CREATE_DC, &display)?;
+        a.mov(dword_ptr(l.at(B_HDC)), eax)?;
+        let bitmap = [Arg::Val(B_HDC), Arg::I(1), Arg::I(1)];
+        c.api(a, l, B_CREATE_COMPATIBLE_BITMAP, &bitmap)?;
+        a.mov(dword_ptr(l.at(B_DESKTOP_BITMAP)), eax)?;
+        let query = format_query(B_HDC, B_DESKTOP_BITMAP, B_DESKTOP_INFO);
+        c.api(a, l, B_GET_DI_BITS, &query)?;
+        let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+        c.api(a, l, B_DIRECT_DRAW_CREATE, &create)?;
+        let level = Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), level])?;
+        let mode = [Arg::I(640), Arg::I(480), Arg::I(16)];
+        c.com(a, l, DD, DD_SET_DISPLAY_MODE, &mode)?;
+        c.api(a, l, B_CREATE_DC, &display)?;
+        a.mov(dword_ptr(l.at(B_HDC)), eax)?;
+        c.api(a, l, B_CREATE_COMPATIBLE_BITMAP, &bitmap)?;
+        a.mov(dword_ptr(l.at(B_BITMAP)), eax)?;
+        let query = format_query(B_HDC, B_BITMAP, B_INFO);
+        c.api(a, l, B_GET_DI_BITS, &query)?;
+        c.api(a, l, B_GET_DI_BITS, &query)?;
+        c.api(a, l, B_CREATE_COMPATIBLE_DC, &[Arg::Val(B_HDC)])?;
+        a.mov(dword_ptr(l.at(B_MEMORY_DC)), eax)?;
+        let select = [Arg::Val(B_MEMORY_DC), Arg::Val(B_BITMAP)];
+        c.api(a, l, B_SELECT_OBJECT, &select)?;
+        let select = [Arg::Val(B_MEMORY_DC), Arg::Val(B_DESKTOP_BITMAP)];
+        c.api(a, l, B_SELECT_OBJECT, &select)?;
+        let compatible = [Arg::Val(B_MEMORY_DC), Arg::I(1), Arg::I(1)];
+        c.api(a, l, B_CREATE_COMPATIBLE_BITMAP, &compatible)?;
+        a.mov(dword_ptr(l.at(B_COMPATIBLE)), eax)?;
+        let query = format_query(B_HDC, B_COMPATIBLE, B_COMPATIBLE_INFO);
+        c.api(a, l, B_GET_DI_BITS, &query)?;
+        c.com(a, l, DD, DD_RESTORE_DISPLAY_MODE, &[])?;
+        let query = format_query(B_HDC, B_BITMAP, B_AFTER_INFO);
+        c.api(a, l, B_GET_DI_BITS, &query)?;
+        c.api(a, l, B_GET_DI_BITS, &query)?;
+        let select = [Arg::Val(B_MEMORY_DC), Arg::Val(B_BITMAP)];
+        c.api(a, l, B_SELECT_OBJECT, &select)?;
+        finish(a, l)
+    })
+}
+
+/// The BITMAPINFOHEADER at `at` and the three masks after it, as
+/// doublewords.
+fn bitmap_info(cpu: &Cpu, at: u32) -> Vec<u32> {
+    (0..13).map(|i| peek(cpu, at + 4 * i)).collect()
+}
+
+#[test]
+fn display_bitmaps_take_the_mode_directdraw_set() {
+    let (program, data) = display_bitmap_program();
+    let mut cpu = machine("display_bitmap", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 20);
+    let desktop = bitmap_info(&cpu, data + B_DESKTOP_INFO);
+    assert_eq!(desktop[3] >> 16, 32, "the desktop's bitmap: 32 bits");
+    assert_eq!(r[5..7], [0, 0], "SetCooperativeLevel, SetDisplayMode");
+    assert_eq!(r[9..11], [1, 1], "GetDIBits");
+    let info = bitmap_info(&cpu, data + B_INFO);
+    assert_eq!(info[3] >> 16, 16, "biBitCount: the mode's depth");
+    assert_eq!(info[4], 3, "BI_BITFIELDS");
+    let masks = [0xF800, 0x07E0, 0x001F];
+    assert_eq!(info[10..13], masks, "5-6-5, as the mode is");
+    assert_ne!(r[12], 0, "the mode's bitmap goes into a memory DC");
+    assert_ne!(r[13], 0, "and so does the one made on the desktop");
+    let compatible = bitmap_info(&cpu, data + B_COMPATIBLE_INFO);
+    assert_ne!(r[14], 0, "CreateCompatibleBitmap of the memory DC");
+    assert_eq!(compatible[3] >> 16, 32, "the depth of the DC's bitmap");
+    assert_eq!(r[16], 0, "RestoreDisplayMode");
+    let after = bitmap_info(&cpu, data + B_AFTER_INFO);
+    assert_eq!(after[3] >> 16, 16, "the mode's bitmap keeps its depth");
+    assert_eq!(after[10..13], masks, "and its 5-6-5 pixels");
+    assert_ne!(r[19], 0, "and still goes into a memory DC");
+}
+
+const IID_IDIRECTDRAW4: [u8; 16] = [
+    0x9A, 0x50, 0x59, 0x9C, 0xBD, 0x39, 0xD1, 0x11, 0x8C, 0x4A, 0x00, 0xC0, 0x4F, 0xD9, 0x30, 0xC5,
+];
+const DDSD_PITCH: u32 = 0x8;
+const DDSD_LPSURFACE: u32 = 0x800;
+const DDERR_INVALIDCAPS: u32 = 0x8876_0064;
+/// The DDSURFACEDESC2s of the program over its own memory: without a
+/// pitch, and without system memory.
+const U_NO_PITCH: u32 = ENTRIES;
+const U_NO_SYSTEM: u32 = ENTRIES + 0x80;
+/// A DDSURFACEDESC of IDirectDraw's, over the same memory.
+const U_OLD: u32 = ENTRIES + 0x100;
+/// A complex mipmap of one level over the program's memory, and an 8x8
+/// DXT1 texture there with DDSD_PITCH and a pitch of 0.
+const U_MIPMAP: u32 = ENTRIES + 0x180;
+const U_DXT: u32 = ENTRIES + 0x200;
+
+/// A DDSURFACEDESC2 (or, `size` 108, DDSURFACEDESC) at `offset` of a
+/// 4x2 32-bit surface, rows 32 bytes apart, with `flags` and `caps`.
+fn user_memory_desc(d: &mut [u8], offset: u32, size: u32, flags: u32, caps: u32) {
+    desc(d, offset, flags, caps, 4, 2, 0);
+    put32(d, offset, size);
+    put32(d, offset + 0x10, 32);
+    rgb32(d, offset);
+}
+
+/// IDirectDraw4: a system memory surface over the program's own pixels
+/// (DDSD_LPSURFACE), locked, and its second row filled; then the
+/// descriptions DirectX turns down: no pitch, no system memory,
+/// IDirectDraw's CreateSurface, and a complex mipmap; then a DXT1
+/// texture whose pitch IDirectDraw4 doesn't read.
+fn user_memory_program() -> (Vec<u8>, u32) {
+    let given = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_LPSURFACE;
+    let plain_system = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    let mut d = data();
+    user_memory_desc(&mut d, DESC, 124, given | DDSD_PITCH, plain_system);
+    user_memory_desc(&mut d, U_NO_PITCH, 124, given, plain_system);
+    let plain = DDSCAPS_OFFSCREENPLAIN;
+    user_memory_desc(&mut d, U_NO_SYSTEM, 124, given | DDSD_PITCH, plain);
+    user_memory_desc(&mut d, U_OLD, 108, given | DDSD_PITCH, plain_system);
+    let mipmap = DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX;
+    let counted = given | DDSD_PITCH | DDSD_MIPMAPCOUNT;
+    user_memory_desc(&mut d, U_MIPMAP, 124, counted, mipmap);
+    put32(&mut d, U_MIPMAP + 0x18, 1);
+    dxt_desc(&mut d, U_DXT, b"DXT1", 8, 8);
+    put32(&mut d, U_DXT, 124);
+    put32(&mut d, U_DXT + 0x04, given | DDSD_PITCH);
+    put32(&mut d, LOCKED, 124);
+    put(&mut d, KEY, &IID_IDIRECTDRAW4);
+    // The pixels: two rows of four, and what lies between them.
+    for i in 0..16 {
+        put32(&mut d, PIXELS + 4 * i, 0x0100_0000 + i);
+    }
+    put32(&mut d, FX, 100);
+    put32(&mut d, FX + 0x50, 0x00AB_CDEF);
+    // The second row.
+    for (i, v) in [0, 1, 4, 2].into_iter().enumerate() {
+        put32(&mut d, RECT + 4 * i as u32, v);
+    }
+    program(&[USER32, DDRAW], &d, |a, l| {
+        for offset in [DESC, U_NO_PITCH, U_NO_SYSTEM, U_OLD, U_MIPMAP, U_DXT] {
+            a.mov(dword_ptr(l.at(offset + 0x24)), l.at(PIXELS) as u32)?;
+        }
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        let query = [Arg::At(KEY), Arg::At(QUERIED)];
+        c.com(a, l, DD, S_QUERY_INTERFACE, &query)?;
+        let level = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+        c.com(a, l, QUERIED, DD_SET_COOPERATIVE_LEVEL, &level)?;
+        let create = [Arg::At(DESC), Arg::At(SOURCE), Arg::I(0)];
+        c.com(a, l, QUERIED, DD_CREATE_SURFACE, &create)?;
+        let lock = [Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)];
+        c.com(a, l, SOURCE, S_LOCK, &lock)?;
+        c.com(a, l, SOURCE, S_UNLOCK, &[Arg::I(0)])?;
+        let flags = DDBLT_COLORFILL | DDBLT_WAIT;
+        let fill = [
+            Arg::At(RECT),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(flags),
+            Arg::At(FX),
+        ];
+        c.com(a, l, SOURCE, S_BLT, &fill)?;
+        for offset in [U_NO_PITCH, U_NO_SYSTEM] {
+            let create = [Arg::At(offset), Arg::At(OFFSCREEN), Arg::I(0)];
+            c.com(a, l, QUERIED, DD_CREATE_SURFACE, &create)?;
+        }
+        let create = [Arg::At(U_OLD), Arg::At(OFFSCREEN), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &create)?;
+        for offset in [U_MIPMAP, U_DXT] {
+            let create = [Arg::At(offset), Arg::At(OFFSCREEN), Arg::I(0)];
+            c.com(a, l, QUERIED, DD_CREATE_SURFACE, &create)?;
+        }
+        finish(a, l)
+    })
+}
+
+#[test]
+fn create_surface_makes_a_surface_over_the_programs_memory() {
+    let (program, data) = user_memory_program();
+    let mut cpu = machine("user_memory", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 13);
+    assert_eq!(r[2..8], [0; 6], "QueryInterface to Blt");
+    // Lock gives the program's own pixels and pitch.
+    assert_eq!(peek(&cpu, data + LOCKED + 0x24), data + PIXELS);
+    assert_eq!(peek(&cpu, data + LOCKED + 0x10), 32);
+    // The fill went into the program's memory: the second row, 32 bytes
+    // on, and nothing between the rows.
+    let pixels: Vec<u32> = (0..16).map(|i| peek(&cpu, data + PIXELS + 4 * i)).collect();
+    let first: Vec<u32> = (0..8).map(|i| 0x0100_0000 + i).collect();
+    assert_eq!(pixels[..8], first);
+    assert_eq!(pixels[8..12], [0x00AB_CDEF; 4]);
+    let after: Vec<u32> = (12..16).map(|i| 0x0100_0000 + i).collect();
+    assert_eq!(pixels[12..], after);
+    // Wine's ddraw tests find these on Windows: a pitch has to be given,
+    // the surface has to be in system memory, and IDirectDraw has no
+    // surfaces over the program's memory.
+    assert_eq!(r[8], DDERR_INVALIDPARAMS, "no pitch");
+    assert_eq!(r[9], DDERR_INVALIDCAPS, "no system memory");
+    assert_eq!(r[10], DDERR_INVALIDPARAMS, "IDirectDraw");
+    // Wine's test_user_memory and test_block_formats_creation find these
+    // on Windows: a complex mipmap fails even with one level, and
+    // IDirectDraw4 takes a compressed surface with DDSD_PITCH whatever
+    // the pitch.
+    assert_eq!(r[11], DDERR_INVALIDCAPS, "complex mipmap");
+    assert_eq!(r[12], 0, "DXT1 with DDSD_PITCH 0");
+}
+
+const S4_SET_SURFACE_DESC: u32 = 39;
+/// The DDSURFACEDESC2s SetSurfaceDesc is given: the program's memory
+/// alone, the memory with a width and pitch other than the level's, and
+/// the memory with caps.
+const SET_MEMORY: u32 = DESC;
+const SET_WIDER: u32 = ENTRIES;
+const SET_CAPS: u32 = ENTRIES + 0x80;
+/// The mipmap's top level through IDirectDrawSurface4.
+const TOP4: u32 = CLIPPER;
+
+/// IDirectDrawSurface4's SetSurfaceDesc on the levels of a 4x4 system
+/// memory mipmap of two levels: the second level and the top level
+/// given the program's memory, the second level given a width it
+/// hasn't got, then caps, and the second level locked.
+fn mipmap_user_memory_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    mipmap_desc(&mut d, DDSCAPS_SYSTEMMEMORY, 4, 2);
+    put32(&mut d, SET_MEMORY, 124);
+    put32(&mut d, SET_MEMORY + 0x04, DDSD_LPSURFACE);
+    put32(&mut d, SET_WIDER, 124);
+    put32(
+        &mut d,
+        SET_WIDER + 0x04,
+        DDSD_LPSURFACE | DDSD_WIDTH | DDSD_PITCH,
+    );
+    put32(&mut d, SET_WIDER + 0x0C, 4);
+    put32(&mut d, SET_WIDER + 0x10, 8);
+    put32(&mut d, SET_CAPS, 124);
+    put32(&mut d, SET_CAPS + 0x04, DDSD_LPSURFACE | DDSD_CAPS);
+    put32(&mut d, SET_CAPS + 0x68, DDSCAPS_TEXTURE);
+    put32(&mut d, LOCKED, 124);
+    put(&mut d, KEY, &IID_IDIRECTDRAWSURFACE4);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        for offset in [SET_MEMORY, SET_WIDER, SET_CAPS] {
+            a.mov(dword_ptr(l.at(offset + 0x24)), l.at(PIXELS) as u32)?;
+        }
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        let level = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &level)?;
+        let create = [Arg::At(FX), Arg::At(SOURCE), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &create)?;
+        let attached = [Arg::At(LEVEL_CAPS), Arg::At(OFFSCREEN)];
+        c.com(a, l, SOURCE, S_GET_ATTACHED_SURFACE, &attached)?;
+        for (from, to) in [(OFFSCREEN, QUERIED), (SOURCE, TOP4)] {
+            c.com(a, l, from, S_QUERY_INTERFACE, &[Arg::At(KEY), Arg::At(to)])?;
+        }
+        for (surface, desc) in [
+            (QUERIED, SET_MEMORY),
+            (TOP4, SET_MEMORY),
+            (QUERIED, SET_WIDER),
+            (QUERIED, SET_CAPS),
+        ] {
+            let set = [Arg::At(desc), Arg::I(0)];
+            c.com(a, l, surface, S4_SET_SURFACE_DESC, &set)?;
+        }
+        let lock = [Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)];
+        c.com(a, l, QUERIED, S_LOCK, &lock)?;
+        c.com(a, l, QUERIED, S_UNLOCK, &[Arg::I(0)])?;
+        finish(a, l)
+    })
+}
+
+/// A level of a system memory mipmap takes the program's memory as it
+/// is, as Demolition Racer has its track's textures' levels take
+/// theirs before it loads them into video memory. A size other than
+/// the level's is turned down, as Wine does, though Windows takes it
+/// (#2207); caps are turned down as on Windows (Wine's
+/// `test_set_surface_desc`).
+#[test]
+fn set_surface_desc_gives_a_mipmap_level_the_programs_memory() {
+    let (program, data) = mipmap_user_memory_program();
+    let mut cpu = machine("mipmap_user_memory", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 13);
+    assert_eq!(r[2..6], [0; 4], "SetCooperativeLevel to QueryInterface");
+    assert_eq!(r[6], 0, "QueryInterface of the top level");
+    assert_eq!(r[7], 0, "the second level's memory");
+    assert_eq!(r[8], 0, "the top level's memory");
+    assert_eq!(r[9], DDERR_INVALIDPARAMS, "a width other than the level's");
+    assert_eq!(r[10], DDERR_INVALIDCAPS, "caps");
+    assert_eq!(r[11..13], [0; 2], "Lock and Unlock");
+    // The second level keeps its 2x2 size and has the program's pixels.
+    assert_eq!(peek(&cpu, data + LOCKED + 0x24), data + PIXELS);
+    assert_eq!(peek(&cpu, data + LOCKED + 0x08), 2);
+    assert_eq!(peek(&cpu, data + LOCKED + 0x0C), 2);
+}
+
+/// The DDSURFACEDESC2 that gives the back buffer the program's memory,
+/// with a pitch of 64 bytes, and the one Lock fills for the back buffer.
+const SET_BACK: u32 = DESC;
+const BACK_LOCKED: u32 = ENTRIES;
+
+/// IDirectDraw4: an offscreen flip chain of 4x2 32-bit surfaces in
+/// system memory with one back buffer, the back buffer given the
+/// program's memory with a pitch of 64, a flip, the front buffer locked
+/// (at LOCKED) and the back buffer locked (at BACK_LOCKED), then the
+/// chain released.
+fn flip_user_memory_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    let caps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY | DDSCAPS_FLIP | DDSCAPS_COMPLEX;
+    let flags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_BACKBUFFERCOUNT;
+    user_memory_desc(&mut d, FX, 124, flags, caps);
+    put32(&mut d, FX + 0x14, 1);
+    put32(&mut d, SET_BACK, 124);
+    put32(&mut d, SET_BACK + 0x04, DDSD_LPSURFACE | DDSD_PITCH);
+    put32(&mut d, SET_BACK + 0x10, 64);
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    put32(&mut d, LOCKED, 124);
+    put32(&mut d, BACK_LOCKED, 124);
+    put(&mut d, KEY, &IID_IDIRECTDRAW4);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        a.mov(dword_ptr(l.at(SET_BACK + 0x24)), l.at(PIXELS) as u32)?;
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        let query = [Arg::At(KEY), Arg::At(QUERIED)];
+        c.com(a, l, DD, S_QUERY_INTERFACE, &query)?;
+        let level = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+        c.com(a, l, QUERIED, DD_SET_COOPERATIVE_LEVEL, &level)?;
+        let create = [Arg::At(FX), Arg::At(FRONT), Arg::I(0)];
+        c.com(a, l, QUERIED, DD_CREATE_SURFACE, &create)?;
+        let attached = [Arg::At(CAPS), Arg::At(BACK)];
+        c.com(a, l, FRONT, S_GET_ATTACHED_SURFACE, &attached)?;
+        let set = [Arg::At(SET_BACK), Arg::I(0)];
+        c.com(a, l, BACK, S4_SET_SURFACE_DESC, &set)?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        for (surface, desc) in [(FRONT, LOCKED), (BACK, BACK_LOCKED)] {
+            let lock = [Arg::I(0), Arg::At(desc), Arg::I(1), Arg::I(0)];
+            c.com(a, l, surface, S_LOCK, &lock)?;
+            c.com(a, l, surface, S_UNLOCK, &[Arg::I(0)])?;
+        }
+        c.com(a, l, BACK, S_RELEASE, &[])?;
+        c.com(a, l, FRONT, S_RELEASE, &[])?;
+        finish(a, l)
+    })
+}
+
+/// A flip moves the program's memory that SetSurfaceDesc gave the back
+/// buffer to the front buffer, with its pitch, and the buffer that had
+/// it gets the front buffer's own pixels back.
+#[test]
+fn flip_moves_the_programs_memory_with_its_pitch() {
+    let (program, data) = flip_user_memory_program();
+    let mut cpu = machine("flip_user_memory", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 12);
+    assert_eq!(r[2..12], [0; 10], "QueryInterface to the last Unlock");
+    assert_eq!(peek(&cpu, data + LOCKED + 0x24), data + PIXELS);
+    assert_eq!(peek(&cpu, data + LOCKED + 0x10), 64);
+    let back = peek(&cpu, data + BACK_LOCKED + 0x24);
+    assert_ne!(back, data + PIXELS);
+    assert_ne!(back, 0);
+    assert_eq!(peek(&cpu, data + BACK_LOCKED + 0x10), 16);
 }

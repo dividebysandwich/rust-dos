@@ -38,6 +38,9 @@ pub struct Settings {
     /// The CGA's composite monitor.
     pub composite: CompositeSettings,
     pub machine: Adapter,
+    /// What draws the 3D cards; `voodoo_renderer()` and
+    /// `toadforce_renderer()` give what draws each card.
+    pub renderer: super::Renderer,
     /// The 3dfx card.
     pub voodoo: crate::voodoo::VoodooSettings,
     /// The PowerVR card, if there is one, and how it filters textures.
@@ -47,8 +50,6 @@ pub struct Settings {
     pub verite: crate::verite::VeriteSettings,
     /// The megabytes of memory a ToadForce has.
     pub toadforce_memory: u32,
-    /// What draws a ToadForce's triangles.
-    pub toadforce_renderer: crate::toadforce::Renderer,
     /// The gamma a ToadForce's picture is shown with, after the card's
     /// own ramp, or None for none.
     pub toadforce_gamma: Option<f32>,
@@ -105,11 +106,16 @@ pub struct Settings {
     pub win32_locale: Win32Locale,
     /// Which calls of its functions the log gets a line for.
     pub win32_trace: Win32Trace,
+    /// The compatibility shims every program it starts gets: a set of
+    /// an older Windows' (`win32::shims::SETS`), none by default.
+    pub win32_shims: crate::win32::shims::Shims,
     /// DOS's tables packed below the first MCB, as DOS=HIGH leaves
     /// conventional memory, rather than spread out up to 64 KB.
     pub dos_high: bool,
     /// The DOS version programs are told.
     pub dos_version: DosVersion,
+    /// DOS's console takes ANSI.SYS's escape sequences.
+    pub ansi_sys: bool,
     /// A booted system's hard disks are ATA disks on the IDE channels too.
     pub ide_hard_disks: bool,
     /// A booted system has a CD-ROM drive even with no CD mounted.
@@ -171,6 +177,8 @@ pub struct Settings {
     pub vr: crate::vr::VrSettings,
     /// `[vfx1]`: the Forte VFX1 headset.
     pub vfx1: crate::vfx1::Vfx1Settings,
+    /// `[hotkeys]`: the emulator's keys.
+    pub hotkeys: crate::hotkeys::HotkeySettings,
 }
 
 impl Default for Settings {
@@ -189,12 +197,12 @@ impl Default for Settings {
             post: crate::post::PostMode::Off,
             composite: CompositeSettings::default(),
             machine: Adapter::Svga,
+            renderer: Default::default(),
             voodoo: Default::default(),
             powervr: None,
             powervr_filter: Default::default(),
             verite: Default::default(),
             toadforce_memory: crate::toadforce::regs::DEFAULT_MEMORY >> 20,
-            toadforce_renderer: Default::default(),
             toadforce_gamma: None,
             capture_dir: PathBuf::from("capture"),
             record_ui: false,
@@ -217,8 +225,10 @@ impl Default for Settings {
             win32_desktop: DesktopSize::Vga,
             win32_locale: Win32Locale::EnUs,
             win32_trace: Win32Trace::Collapsed,
+            win32_shims: crate::win32::shims::Shims::NONE,
             dos_high: true,
             dos_version: DosVersion::default(),
+            ansi_sys: true,
             ide_hard_disks: true,
             boot_cdrom: true,
             floppy_controller: true,
@@ -249,6 +259,7 @@ impl Default for Settings {
             shell: Default::default(),
             vr: Default::default(),
             vfx1: Default::default(),
+            hotkeys: Default::default(),
         }
     }
 }
@@ -285,6 +296,16 @@ impl Settings {
         self.machine.voodoo_board().or(self.voodoo.board())
     }
 
+    /// What draws for a 3dfx card (`renderer`).
+    pub fn voodoo_renderer(&self) -> crate::voodoo::Renderer {
+        self.renderer.voodoo()
+    }
+
+    /// What draws a ToadForce's triangles (`renderer`).
+    pub fn toadforce_renderer(&self) -> crate::toadforce::Renderer {
+        self.renderer.toadforce()
+    }
+
     /// The guest environment variables every setting asks for. A name two
     /// settings give takes the value of the later one.
     pub fn environment(&self) -> Vec<crate::env_inject::Rule> {
@@ -316,6 +337,7 @@ impl Settings {
                 era: config.composite_era.unwrap_or(default.composite.era),
             },
             machine: config.machine.unwrap_or(default.machine),
+            renderer: config.renderer().unwrap_or(default.renderer),
             voodoo: crate::voodoo::VoodooSettings {
                 enabled: config.voodoo.unwrap_or(default.voodoo.enabled),
                 board: {
@@ -325,7 +347,6 @@ impl Settings {
                     let model = config.voodoo_model.unwrap_or(memory.model());
                     crate::voodoo::Board::of(model, memory.megabytes())
                 },
-                renderer: config.voodoo_renderer.unwrap_or(default.voodoo.renderer),
                 texture_sampling: config.voodoo_texture_sampling.unwrap_or(default.voodoo.texture_sampling),
                 scale: config.voodoo_scale.unwrap_or(default.voodoo.scale),
                 scale_shader: config.voodoo_scale_shader.unwrap_or(default.voodoo.scale_shader),
@@ -346,9 +367,6 @@ impl Settings {
                 irq: config.verite_irq.unwrap_or(default.verite.irq),
             },
             toadforce_memory: config.toadforce_memory.unwrap_or(default.toadforce_memory),
-            toadforce_renderer: config
-                .toadforce_renderer
-                .unwrap_or(default.toadforce_renderer),
             toadforce_gamma: config.toadforce_gamma.unwrap_or(default.toadforce_gamma),
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             record_ui: config.record_ui.unwrap_or(default.record_ui),
@@ -376,8 +394,10 @@ impl Settings {
             win32_desktop: config.win32_desktop.unwrap_or(default.win32_desktop),
             win32_locale: config.win32_locale.unwrap_or(default.win32_locale),
             win32_trace: config.win32_trace.unwrap_or(default.win32_trace),
+            win32_shims: config.win32_shims.unwrap_or(default.win32_shims),
             dos_high: config.dos_high.unwrap_or(default.dos_high),
             dos_version: config.dos_version.unwrap_or(default.dos_version),
+            ansi_sys: config.ansi_sys.unwrap_or(default.ansi_sys),
             ide_hard_disks: config.ide_hard_disks.unwrap_or(default.ide_hard_disks),
             boot_cdrom: config.boot_cdrom.unwrap_or(default.boot_cdrom),
             floppy_controller: config.floppy_controller.unwrap_or(default.floppy_controller),
@@ -408,6 +428,7 @@ impl Settings {
             shell: config.shell,
             vr: config.vr.clone(),
             vfx1: config.vfx1,
+            hotkeys: config.hotkeys.clone(),
         }
     }
 }
@@ -549,10 +570,10 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "composite", Some(settings.composite.mode.name().to_string())),
         (Emulator, "composite_era", Some(settings.composite.era.name().to_string())),
         (Emulator, "machine", Some(settings.machine.name().to_string())),
+        (Emulator, "renderer", Some(settings.renderer.name().to_string())),
         (Emulator, "voodoo", yes_no(settings.voodoo.enabled)),
         (Emulator, "voodoo_model", Some(settings.voodoo.board.model().name().to_string())),
         (Emulator, "voodoo_memory", Some(settings.voodoo.board.megabytes().to_string())),
-        (Emulator, "voodoo_renderer", Some(settings.voodoo.renderer.name().to_string())),
         (Emulator, "voodoo_texture_sampling", Some(settings.voodoo.texture_sampling.name().to_string())),
         (Emulator, "voodoo_scale", Some(settings.voodoo.scale.to_string())),
         (Emulator, "voodoo_scale_shader", yes_no(settings.voodoo.scale_shader)),
@@ -578,11 +599,6 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "verite_rom", settings.verite.rom.as_deref().map(|p| contract_home(p, home))),
         (Emulator, "verite_irq", Some(settings.verite.irq.to_string())),
         (Emulator, "toadforce_memory", Some(settings.toadforce_memory.to_string())),
-        (
-            Emulator,
-            "toadforce_renderer",
-            Some(settings.toadforce_renderer.name().to_string()),
-        ),
         (
             Emulator,
             "toadforce_gamma",
@@ -637,8 +653,14 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "win32_desktop", Some(settings.win32_desktop.name().to_string())),
         (Emulator, "win32_locale", Some(settings.win32_locale.name().to_string())),
         (Emulator, "win32_trace", Some(settings.win32_trace.name().to_string())),
+        (
+            Emulator,
+            "win32_shims",
+            crate::win32::shims::name_of(settings.win32_shims).map(str::to_string),
+        ),
         (Emulator, "dos_high", yes_no(settings.dos_high)),
         (Emulator, "dos_version", Some(settings.dos_version.name())),
+        (Emulator, "ansi_sys", yes_no(settings.ansi_sys)),
         (Emulator, "ide_hard_disks", yes_no(settings.ide_hard_disks)),
         (Emulator, "boot_cdrom", yes_no(settings.boot_cdrom)),
         (Emulator, "floppy_controller", yes_no(settings.floppy_controller)),
@@ -662,12 +684,13 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         ),
         (Emulator, "hard_disk_speed", Some(settings.disk.hard_disk_speed.name().to_string())),
         (Emulator, "floppy_disk_speed", Some(settings.disk.floppy_disk_speed.name().to_string())),
-        (Sound, "sbtype", Some(if sound.sb_installed { sb.model.name() } else { "none" }.to_string())),
+        (Sound, "sbtype", Some(sound.sb_type_name().to_string())),
         (Sound, "sbbase", Some(format!("{:X}", sb.base))),
         (Sound, "irq", Some(sb.irq.to_string())),
         (Sound, "dma", Some(sb.dma8.to_string())),
         (Sound, "hdma", Some(sb.dma16.to_string())),
         (Sound, "opl", Some(sound.opl.map_or("auto", |chip| chip.name()).to_string())),
+        (Sound, "cms", yes_no(sound.cms)),
         (Sound, "awe32rom", sound.awe32rom.as_deref().map(|p| contract_home(p, home))),
         (Sound, "awe32ram", Some(sound.awe32ram.to_string())),
         (Sound, "soundfont", sound.soundfont.as_deref().map(|p| contract_home(p, home))),
@@ -725,6 +748,8 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
     entries.extend(settings.vr.entries().into_iter().map(|(key, value)| (Section::Vr, key, value)));
     let vfx1 = settings.vfx1.entries().into_iter();
     entries.extend(vfx1.map(|(key, value)| (Section::Vfx1, key, value)));
+    let hotkeys = settings.hotkeys.entries().into_iter();
+    entries.extend(hotkeys.map(|(key, value)| (Section::Hotkeys, key, value)));
     entries
 }
 

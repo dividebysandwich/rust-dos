@@ -392,6 +392,13 @@ pub fn visible_region(state: &State, hwnd: u32, flags: u32) -> Region {
     vis
 }
 
+/// What of the screen a DC from GetDC(`hwnd`) may draw on: the window's
+/// client area, clipped as its style and its class's ask (DCX_USESTYLE),
+/// less what covers it.
+pub fn get_dc_visible_region(state: &State, hwnd: u32) -> Region {
+    visible_region(state, hwnd, fix_flags(state, hwnd, DCX_USESTYLE))
+}
+
 /// A window DC's device origin on the screen and the region it may draw
 /// on there: for GDI.
 pub fn dc_region(
@@ -742,13 +749,19 @@ fn clear_updates(state: &mut State, hwnd: u32) {
 /// Paint the desktop's background over `area` of the screen, where no
 /// window covers it.
 fn paint_background(cpu: &mut Cpu, area: &Region) {
+    fill_background(cpu, area, DCX_CLIPCHILDREN);
+}
+
+/// Paint the desktop's background over `area` of the screen, under the
+/// windows too unless `flags` has DCX_CLIPCHILDREN.
+fn fill_background(cpu: &mut Cpu, area: &Region, flags: u32) {
     if !user(cpu).desktop || area.is_empty() {
         return;
     }
     let hdc = gdi32::dc::new_window_dc(
         cpu,
         DESKTOP,
-        DCX_CLIPCHILDREN | DCX_INTERSECTRGN,
+        flags | DCX_INTERSECTRGN,
         Some(area.clone()),
         false,
     );
@@ -817,12 +830,107 @@ pub fn raised_but(cpu: &mut Cpu, hwnd: u32, before: &Region, but: u32) {
     }
 }
 
-/// SetWindowPos moved, sized, showed or hid `hwnd`: what it uncovered
-/// shows what is under it, and the window needs painting where it is.
+/// What of the screen the window `hwnd` shows, frame and children
+/// included: its visible region less what the siblings above it cover,
+/// all of them for a top-level window and for a child with
+/// WS_CLIPSIBLINGS. SetWindowPos takes it before and after a change, and
+/// what the window showed before and not after is what it uncovered.
+pub fn shown_region(state: &State, hwnd: u32) -> Region {
+    let flags = fix_flags(state, hwnd, DCX_WINDOW | DCX_USESTYLE);
+    visible_region(state, hwnd, flags)
+}
+
+/// The windows `gone` leave the screen with the task that made them,
+/// before they are unlinked. Windows destroys each window a task left
+/// with DestroyWindow, from the top of the windows down, and the hide
+/// that starts gives a CS_SAVEBITS window's saved bits back, as
+/// `moved` does. The result is what of the screen is left to paint: the
+/// visible regions of the windows, frames included, less what saved
+/// bits put back. What windows that stay cover above them is left out,
+/// as nothing changes there.
+pub fn windows_gone(cpu: &mut Cpu, gone: &[u32]) -> Region {
+    let state = user(cpu);
+    // A child that goes from a parent that stays (a Win16 task's child of
+    // another task's window) uncovers its part of its parent. The
+    // children of the windows that go are in theirs. The saved bits of
+    // the windows above the parent hold the child where they cover it,
+    // and are stale there, so a window going above it doesn't put the
+    // child back on the screen.
+    let children: Vec<u32> = gone
+        .iter()
+        .copied()
+        .filter(|&h| {
+            let parent = state.parent(h);
+            !matches!(parent, DESKTOP | 0) && !gone.contains(&parent)
+        })
+        .collect();
+    let mut area = Region::new();
+    for h in children {
+        if state.is_visible(h) {
+            area = area.or(&shown_region(state, h));
+            let rect = Region::from_rect(state.screen_rect(h));
+            stale_bits_under(state, h, &rect);
+        }
+    }
+    let tops: Vec<u32> = state
+        .top_levels()
+        .into_iter()
+        .filter(|h| gone.contains(h))
+        .collect();
+    for hwnd in tops {
+        let state = user(cpu);
+        if !state.is_visible(hwnd) {
+            continue;
+        }
+        let old = state.screen_rect(hwnd);
+        let shown = shown_region(state, hwnd);
+        stale_bits_under(state, hwnd, &Region::from_rect(old));
+        if let Some(w) = state.window_mut(hwnd) {
+            w.style &= !WS_VISIBLE;
+        }
+        let stale = if user(cpu).desktop {
+            restore_bits(cpu, hwnd, old)
+        } else {
+            None
+        };
+        area = match stale {
+            // The bits went back where it showed and they weren't stale,
+            // over whatever a window above it that went left to paint.
+            Some(stale) => area.diff(&shown.diff(&stale)).or(&shown.and(&stale)),
+            None => area.or(&shown),
+        };
+    }
+    area
+}
+
+/// SetWindowPos took the top-level window `hwnd` down in the z-order in
+/// place, with a window it moves with there (its owner, or a window it
+/// owns). The windows that came above it show now where it showed
+/// before (`before`, from `shown_region`), and need painting there.
+pub fn lowered(cpu: &mut Cpu, hwnd: u32, before: &Region) {
+    let state = user(cpu);
+    let gone = before.diff(&shown_region(state, hwnd));
+    if gone.is_empty() {
+        return;
+    }
+    stale_bits_under(state, hwnd, &gone);
+    for top in state.top_levels() {
+        if top != hwnd && state.window(top).is_some_and(|w| w.style & WS_VISIBLE != 0) {
+            invalidate_screen(state, top, &gone);
+        }
+    }
+    thread::wake(cpu);
+}
+
+/// SetWindowPos moved, sized, showed, hid or restacked `hwnd`, which
+/// showed `old_shown` of the screen (`shown_region`) at `old` before:
+/// what it uncovered shows what is under it, and the window needs
+/// painting where it is.
 pub fn moved(
     cpu: &mut Cpu,
     hwnd: u32,
     old: Rect,
+    old_shown: &Region,
     was_visible: bool,
     now_visible: bool,
     flags: u32,
@@ -865,14 +973,19 @@ pub fn moved(
         None
     };
     let state = user(cpu);
-    if was_visible && (!now_visible || old != new) {
-        let mut gone = Region::from_rect(old);
-        if now_visible {
-            gone = gone.diff_rect(&new);
-        }
-        if let Some(stale) = &stale {
-            gone = gone.and(stale);
-        }
+    // What it showed before and doesn't now. The windows above it covered
+    // the rest of where it was, before and after, so nothing changes for
+    // them there; a window that went down under others uncovers them
+    // where it showed over them.
+    let mut gone = if was_visible {
+        old_shown.diff(&shown_region(state, hwnd))
+    } else {
+        Region::new()
+    };
+    if let Some(stale) = &stale {
+        gone = gone.and(stale);
+    }
+    if !gone.is_empty() {
         // What is under it: its parent, or the desktop and the windows
         // there.
         let parent = state.parent(hwnd);
@@ -930,6 +1043,22 @@ pub fn ensure_desktop(cpu: &mut Cpu) {
         (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w - 1, 0, h - 1);
         let (x, y) = user(cpu).input.cursor;
         cpu.bus.mouse.warp(x, y);
+        // Windows 98 paints the desktop as it starts, before any program
+        // shows a window. Here windows may be visible already: the one
+        // whose showing brings the desktop up, or those a DOS session
+        // that ends gives the screen back to. `redraw_screen` paints the
+        // background where no window covers it, and this paints it under
+        // them: a CS_SAVEBITS window (a message box) keeps the screen
+        // under it and gives it back as it hides, which would be the
+        // black of the new mode instead of the background.
+        let state = user(cpu);
+        let mut under = Region::new();
+        for top in state.top_levels() {
+            if state.window(top).is_some_and(|w| w.style & WS_VISIBLE != 0) {
+                under = under.or(&shape(state, top));
+            }
+        }
+        fill_background(cpu, &under, 0);
     }
     super::input::desktop_started(cpu);
     redraw_screen(cpu);
@@ -2365,16 +2494,31 @@ const SRCAND: u32 = 0x0088_00C6;
 const SRCINVERT: u32 = 0x0066_0046;
 
 /// Draw the icon or cursor `icon` at (`x`, `y`) of `hdc`, `cx` by `cy`
-/// (0: its own size): its mask by AND, then its image by XOR.
+/// (0: its own size): its mask by AND, then its image by XOR. An
+/// animated cursor draws its first step.
 pub fn draw_icon_at(
+    cpu: &mut Cpu,
+    hdc: u32,
+    at: (i32, i32),
+    icon: u32,
+    size: (i32, i32),
+    flags: u32,
+) -> bool {
+    draw_icon_step(cpu, hdc, at, icon, 0, size, flags)
+}
+
+/// `draw_icon_at` for step `step` of an animated cursor, which another
+/// icon or cursor ignores: false past an animated cursor's last step.
+fn draw_icon_step(
     cpu: &mut Cpu,
     hdc: u32,
     (x, y): (i32, i32),
     icon: u32,
+    step: u32,
     (cx, cy): (i32, i32),
     flags: u32,
 ) -> bool {
-    let Some(ic) = super::resource::icon(cpu, icon) else {
+    let Some(ic) = super::resource::icon(cpu, icon).and_then(|ic| ic.step(step)) else {
         return false;
     };
     let (w, h) = (ic.width, ic.height);
@@ -2440,9 +2584,10 @@ pub fn draw_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// DrawIconEx(hdc, x, y, icon, cx, cy, step, brush, flags): with a brush,
-/// the rectangle is filled with it first.
+/// the rectangle is filled with it first. `step` picks an animated
+/// cursor's step.
 pub fn draw_icon_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[hdc, x, y, icon, cx, cy, _step, brush, flags] = args else {
+    let &[hdc, x, y, icon, cx, cy, step, brush, flags] = args else {
         unreachable!()
     };
     let (x, y, cx, cy) = (x as i32, y as i32, cx as i32, cy as i32);
@@ -2457,7 +2602,7 @@ pub fn draw_icon_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         flags
     };
-    Some(draw_icon_at(cpu, hdc, (x, y), icon, (cx, cy), flags) as u32)
+    Some(draw_icon_step(cpu, hdc, (x, y), icon, step, (cx, cy), flags) as u32)
 }
 
 /// DrawCaption's flags.
@@ -2684,6 +2829,52 @@ mod tests {
         let left = &state.window(parent).unwrap().update;
         assert!(left.and_rect(&at).is_empty());
         assert_eq!(left.or(&Region::from_rect(at)), Region::from_rect(all));
+    }
+
+    /// A task's child of another task's window goes with it, under the
+    /// task's CS_SAVEBITS window: the saved bits hold the child, so they
+    /// are stale where it was, and its parent paints there when the bits
+    /// go back.
+    #[test]
+    fn a_gone_child_makes_the_saved_bits_over_it_stale() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        super::super::window::create_desktop(&mut cpu);
+        let state = user(&mut cpu);
+        let top_level = |r: Rect| Window {
+            style: WS_VISIBLE,
+            parent: DESKTOP,
+            rect: r,
+            client: r,
+            ..Window::default()
+        };
+        let all = Rect::new(0, 0, 200, 200);
+        let parent = state.new_window(top_level(all)).expect("a window");
+        super::super::window::link(state, parent, super::super::window::HWND_TOP);
+        let at = Rect::new(20, 20, 60, 60);
+        let child = state
+            .new_window(Window {
+                style: WS_VISIBLE | super::super::window::WS_CHILD,
+                parent,
+                rect: at,
+                client: Rect::new(0, 0, 40, 40),
+                ..Window::default()
+            })
+            .expect("a child");
+        super::super::window::link(state, child, super::super::window::HWND_TOP);
+        let over = Rect::new(0, 0, 100, 100);
+        let popup = state.new_window(top_level(over)).expect("a popup");
+        super::super::window::link(state, popup, super::super::window::HWND_TOP);
+        state.saved_bits.push(SavedBits {
+            hwnd: popup,
+            rect: over,
+            under: vec![parent],
+            ..SavedBits::default()
+        });
+        let area = windows_gone(&mut cpu, &[child, popup]);
+        let state = user(&mut cpu);
+        let bits = state.saved_bits.iter().find(|s| s.hwnd == popup);
+        assert_eq!(bits.expect("the popup's bits").stale.bounds(), at);
+        assert_eq!(area.bounds(), over);
     }
 
     /// The glyph `glyph` on a 16 by 14 caption button, a line a row.

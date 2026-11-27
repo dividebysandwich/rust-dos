@@ -1613,6 +1613,14 @@ pub fn blit_from(
     };
     let text = value_through(cpu, &ddc, &c.surface, ddc.attrs.text_color, map.as_ref());
     let bk = value_through(cpu, &ddc, &c.surface, ddc.attrs.bk_color, map.as_ref());
+    // The source's colors on the screen (`DeviceMap::on_screen`). The
+    // brush's go through the palette's entries above, as FillRect's do:
+    // only DIBs and bitmaps of GDI's were measured going to the nearest
+    // color shown.
+    let map = match map {
+        Some(map) if ddc.kind != super::dc::MEMORY => Some(map.on_screen(cpu)),
+        map => map,
+    };
     let mask = c.surface.value_mask();
     let (black, white) = match rop3 {
         0x00 | 0xFF => black_white(&c.surface),
@@ -1818,10 +1826,22 @@ impl Translate {
                 return indices.get(v as usize).map_or(0, |&i| map.index(i as usize));
             }
             if src.device {
-                return v;
+                // A bitmap's values go through a palette in the background
+                // on the screen (`DeviceMap::bitmap_value`). The screen's
+                // own are the entries it shows, which a copy within it
+                // keeps.
+                return match src.target {
+                    Target::Bitmap(_) => map.bitmap_value(v),
+                    _ => v,
+                };
             }
-            let hint = (src.bpp <= 8).then_some(v);
-            return map.blit_color(src.color_of(v), hint);
+            // Deeper pixels go through Windows' inverse color table
+            // (`DeviceMap::deep_color`), those of a color table to the
+            // nearest color.
+            if src.bpp > 8 {
+                return map.deep_color(src.color_of(v));
+            }
+            return map.blit_color(src.color_of(v), Some(v));
         }
         convert(src, v, dst, self.src_bk, self.text, self.bk)
     }
@@ -1852,9 +1872,9 @@ impl Translate {
 }
 
 /// What a table of translations from `src` through `map` is of when it
-/// can be kept: a source with a color table onto a palette device, where
-/// a value's translation depends on these and nothing else
-/// (`Translate::one`).
+/// can be kept: a source of 8 bits a pixel or fewer onto a palette
+/// device, where a value's translation depends on these and nothing
+/// else (`Translate::one`).
 fn table_key(src: &Surface, map: Option<&super::palette::DeviceMap>) -> Option<TableKey> {
     let map = map?;
     (!src.mono && src.bpp <= 8).then(|| TableKey {
@@ -1862,6 +1882,7 @@ fn table_key(src: &Surface, map: Option<&super::palette::DeviceMap>) -> Option<T
         colors: src.colors.clone(),
         pal_indices: src.pal_indices.clone(),
         device: src.device,
+        screen: src.target == Target::Screen,
         map: map.clone(),
     })
 }
@@ -1873,6 +1894,9 @@ pub struct TableKey {
     colors: Vec<u32>,
     pal_indices: Option<Vec<u16>>,
     device: bool,
+    /// The screen's values, which a bitmap's of the same colors aren't
+    /// translated as.
+    screen: bool,
     map: super::palette::DeviceMap,
 }
 
@@ -1882,6 +1906,7 @@ impl TableKey {
     fn is_of(&self, src: &Surface, map: &super::palette::DeviceMap) -> bool {
         self.bpp == src.bpp
             && self.device == src.device
+            && self.screen == (src.target == Target::Screen)
             && self.colors == src.colors
             && self.pal_indices == src.pal_indices
             && self.map == *map

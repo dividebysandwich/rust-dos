@@ -28,6 +28,41 @@
 //! (`cmdfifo`), the triangle setup engine (`tsu`), the 2D blitter
 //! (`blit`), and the constants where the two chips differ (`chip`).
 
+// The emulation is derived from MAME's 3dfx Voodoo emulation by Aaron
+// Giles (voodoo.cpp and voodoo_2.cpp, license:BSD-3-Clause,
+// copyright-holders:Aaron Giles), through DOSBox-X's copy, whose notice
+// follows.
+//
+//     Copyright Aaron Giles
+//     All rights reserved.
+//
+//     Redistribution and use in source and binary forms, with or without
+//     modification, are permitted provided that the following conditions
+//     are met:
+//
+//         * Redistributions of source code must retain the above
+//           copyright notice, this list of conditions and the following
+//           disclaimer.
+//         * Redistributions in binary form must reproduce the above
+//           copyright notice, this list of conditions and the following
+//           disclaimer in the documentation and/or other materials
+//           provided with the distribution.
+//         * Neither the name 'MAME' nor the names of its contributors may
+//           be used to endorse or promote products derived from this
+//           software without specific prior written permission.
+//
+//     THIS SOFTWARE IS PROVIDED BY AARON GILES ''AS IS'' AND ANY EXPRESS
+//     OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+//     WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+//     ARE DISCLAIMED. IN NO EVENT SHALL AARON GILES BE LIABLE FOR ANY
+//     DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+//     DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+//     GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+//     INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+//     IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+//     OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+//     IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 pub mod backlog;
 pub mod banshee;
 pub mod blit;
@@ -280,7 +315,6 @@ impl TextureSampling {
 pub struct VoodooSettings {
     pub enabled: bool,
     pub board: Board,
-    pub renderer: Renderer,
     pub texture_sampling: TextureSampling,
     /// How many times the native size OpenGL draws at.
     pub scale: u32,
@@ -307,7 +341,6 @@ impl Default for VoodooSettings {
         Self {
             enabled: false,
             board: Board::Max,
-            renderer: Renderer::Software,
             texture_sampling: TextureSampling::Default,
             scale: 2,
             scale_shader: true,
@@ -725,11 +758,15 @@ pub struct Voodoo {
     /// Lines for the log, which the bus writes out.
     pub log: Vec<String>,
     /// A Voodoo2's command FIFO, the setup engine's vertices (the last
-    /// three, and how many since the strip or fan began) and its
-    /// blitter's CPU-to-screen copy.
+    /// three, oldest first, and how many since the strip or fan began)
+    /// and its blitter's CPU-to-screen copy.
     pub(crate) cmdfifo: cmdfifo::CmdFifo,
     pub(crate) svert: [tsu::Vertex; 3],
     pub(crate) sverts: u32,
+    /// Whether the setup engine's three vertex slots hold `svert` with
+    /// two of them swapped, which turns the triangle's winding around
+    /// (`Voodoo::add_vertex`).
+    pub(crate) sslots_swapped: bool,
     pub(crate) blt: blit::Blit,
     /// `blt_queue_dest`'s answer for the copy under way, until a register
     /// write or a new layout drops it (`blt_queue_stale`), and what it was
@@ -831,6 +868,7 @@ impl Voodoo {
             cmdfifo: Default::default(),
             svert: Default::default(),
             sverts: 0,
+            sslots_swapped: false,
             blt: Default::default(),
             blt_queue: Cell::new(None),
             banshee: board.banshee().map(|kind| Box::new(banshee::Banshee::new(kind))),
@@ -905,6 +943,7 @@ impl Voodoo {
         self.cmdfifo = Default::default();
         self.svert = Default::default();
         self.sverts = 0;
+        self.sslots_swapped = false;
         self.blt = Default::default();
         self.fbi.yorigin = 0;
         self.recompute_video_memory();
@@ -2692,6 +2731,8 @@ impl State for Voodoo {
                 self.pll_high.save(w);
             }
         }
+        // Added later, at the end: the order of the setup engine's slots.
+        self.sslots_swapped.save(w);
     }
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
@@ -2766,6 +2807,13 @@ impl State for Voodoo {
         if self.banshee.is_none() && !r.is_empty() {
             self.pll.load(r)?;
             self.pll_high.load(r)?;
+        }
+        // A state from before the slots' order was kept has it guessed
+        // from the setup mode and the vertex count: right for a strip or a
+        // fan that began as one (`Voodoo::guess_slots_swapped`).
+        self.sslots_swapped = self.guess_slots_swapped();
+        if !r.is_empty() {
+            self.sslots_swapped.load(r)?;
         }
         self.after_load();
         Ok(())

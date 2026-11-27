@@ -33,8 +33,10 @@ const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
 pub(crate) const WINDOWS: &str = "C:\\WINDOWS";
 pub(crate) const SYSTEM: &str = "C:\\WINDOWS\\SYSTEM";
 
-/// WIN32_FIND_DATAA's size, and where its names are.
-const FIND_DATA: usize = 320;
+/// WIN32_FIND_DATAA's fields' bytes, and where its names are. The
+/// struct is 320 bytes with its padding, which Windows 95 leaves alone:
+/// Encarta 97's Wise setup keeps a string right after 318 bytes (#1965).
+const FIND_DATA: usize = 318;
 const FIND_NAME: u32 = 44;
 const FIND_SHORT_NAME: u32 = 304;
 
@@ -571,7 +573,8 @@ pub(super) fn make_directory(cpu: &mut Cpu, path: &str) -> Result<(), u32> {
     if disk.exists(full) {
         return Err(ERROR_ALREADY_EXISTS);
     }
-    disk.create_directory(full).map_err(u32::from)
+    disk.long_name_call(|disk| disk.create_directory(full))
+        .map_err(u32::from)
 }
 
 /// RemoveDirectoryA(path): an empty directory, not the current one.
@@ -665,7 +668,7 @@ fn copy(cpu: &mut Cpu, from: &str, to: &str) -> Result<(), u32> {
     if disk.is_directory(to) {
         return Err(ERROR_ACCESS_DENIED);
     }
-    disk.write_whole_file(to, &data, Some(stamp))
+    disk.long_name_call(|disk| disk.write_whole_file(to, &data, Some(stamp)))
         .map_err(|e| e as u32)?;
     if attr & 0x01 != 0 {
         let _ = disk.set_file_attribute(to, 0x01);
@@ -740,32 +743,42 @@ pub(super) fn move_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Move or rename `from` to `to` (as `dos_path` gives them) as MoveFileA
 /// does.
 pub(super) fn move_path(cpu: &mut Cpu, from: &str, to: &str) -> Result<(), u32> {
+    // A folder may be named with a slash at its end ("C:\SAVES\"), which
+    // DOS's rename refuses (`rename_file`).
     let (from_full, to_full) = (full_path(cpu, from), full_path(cpu, to));
+    let (from_full, to_full) = (trim_slash(&from_full), trim_slash(&to_full));
     let disk = &mut cpu.bus.disk;
     if !disk.exists(from) {
-        return Err(not_found(cpu, &from_full));
+        return Err(not_found(cpu, from_full));
     }
     if has_wildcards(to) {
         return Err(ERROR_INVALID_NAME);
     }
-    if from_full.eq_ignore_ascii_case(&to_full) {
+    // The same name in another case renames it (`rename_file`).
+    let recased = from_full.eq_ignore_ascii_case(to_full);
+    if from_full == to_full {
         return Ok(());
     }
     if open_sharing(cpu, from).is_some() {
         return Err(ERROR_ACCESS_DENIED);
     }
     let disk = &mut cpu.bus.disk;
-    if disk.exists(to) {
+    // So does another of the file's own names: Windows 98 renames "Third
+    // file.txt" to its alias "THIRDF~1.TXT" (`rename_file`).
+    let itself = recased || disk.file_key(to) == disk.file_key(from);
+    // A shown system file doesn't take the name (`name_taken`): the move
+    // puts the file in its place, as a copy over it does.
+    if disk.name_taken(to) && !itself {
         return Err(ERROR_ALREADY_EXISTS);
     }
-    if drive_of(&from_full) == drive_of(&to_full) {
-        disk.rename_file(&from_full, &to_full)
+    if drive_of(from_full) == drive_of(to_full) {
+        disk.long_name_call(|disk| disk.rename_file(from_full, to_full))
             .map_err(|e| e as u32)
     } else if disk.is_directory(from) {
         Err(ERROR_NOT_SAME_DEVICE)
     } else {
-        copy(cpu, &from_full, &to_full)
-            .and_then(|()| cpu.bus.disk.delete_file(&from_full).map_err(|e| e as u32))
+        copy(cpu, from_full, to_full)
+            .and_then(|()| cpu.bus.disk.delete_file(from_full).map_err(|e| e as u32))
     }
 }
 

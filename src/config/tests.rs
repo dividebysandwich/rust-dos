@@ -31,28 +31,360 @@ fn run_lock_is_off_on_or_a_directory() {
     assert!(get("\"\"").warnings.iter().any(|w| w.contains("invalid run_lock")));
 }
 
+/// The renderer setting of configuration text, and its warnings.
+fn renderer_of(text: &str) -> (Renderer, Vec<String>) {
+    let config = parse(text, Path::new("/cfg"), None);
+    (Settings::from_config(&config).renderer, config.warnings)
+}
+
 #[test]
-fn toadforce_renderer_is_auto_opengl_or_software() {
-    use crate::toadforce::Renderer;
-    let get = |value: &str| {
-        let text = format!("[emulator]\ntoadforce_renderer={}\n", value);
-        parse(&text, Path::new("/cfg"), None)
-    };
+fn renderer_is_auto_opengl_or_software() {
     for renderer in Renderer::ALL {
-        let config = get(renderer.name());
-        assert_eq!(config.toadforce_renderer, Some(renderer));
-        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let (got, warnings) = renderer_of(&format!("[emulator]\nrenderer={}\n", renderer.name()));
+        assert_eq!(got, renderer);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
-    assert_eq!(get(" OpenGL ").toadforce_renderer, Some(Renderer::OpenGl));
+    assert_eq!(renderer_of("[emulator]\nrenderer= OpenGL \n").0, Renderer::OpenGl);
     for value in ["", "gl", "on", "vulkan"] {
-        let config = get(value);
-        assert_eq!(config.toadforce_renderer, None, "{value}");
-        let warned = |w: &String| w.contains("invalid toadforce_renderer");
-        assert!(config.warnings.iter().any(warned), "{value}");
+        let (got, warnings) = renderer_of(&format!("[emulator]\nrenderer={value}\n"));
+        assert_eq!(got, Renderer::Auto, "{value}");
+        assert!(warnings.iter().any(|w| w.contains("invalid renderer")), "{value}");
     }
-    // Without the setting the card draws with OpenGL where it can.
+    // Without the setting each card draws as it did before there was
+    // one: the 3dfx cards in software, a ToadForce with OpenGL where it
+    // can.
+    use crate::toadforce::Renderer as T;
+    use crate::voodoo::Renderer as V;
     let settings = Settings::from_config(&parse("", Path::new("/cfg"), None));
-    assert_eq!(settings.toadforce_renderer, Renderer::Auto);
+    assert_eq!(settings.renderer, Renderer::Auto);
+    assert_eq!(settings.voodoo_renderer(), V::Software);
+    assert_eq!(settings.toadforce_renderer(), T::Auto);
+    let each = |r: Renderer| (r.voodoo(), r.toadforce());
+    assert_eq!(each(Renderer::OpenGl), (V::OpenGl, T::OpenGl));
+    assert_eq!(each(Renderer::Software), (V::Software, T::Software));
+}
+
+/// The configuration of `[emulator]` lines.
+fn emulator(lines: &str) -> Config {
+    parse(&format!("[emulator]\n{lines}"), Path::new("/cfg"), None)
+}
+
+/// Whether `errors` has the one for lines that ask for two renderers,
+/// and it names `lines` and the line to write.
+fn names_two_renderers(errors: &[String], lines: &[&str]) -> bool {
+    errors.iter().any(|e| {
+        e.contains("ask for two renderers")
+            && e.contains("renderer=opengl or renderer=software")
+            && lines.iter().all(|line| e.contains(line))
+    })
+}
+
+#[test]
+fn one_old_renderer_line_gives_its_own_value() {
+    let get = |line: &str| {
+        let config = emulator(&format!("{line}\n"));
+        assert!(config.errors.is_empty(), "{line}: {:?}", config.errors);
+        Settings::from_config(&config).renderer
+    };
+    assert_eq!(get("voodoo_renderer=software"), Renderer::Software);
+    assert_eq!(get("voodoo_renderer=opengl"), Renderer::OpenGl);
+    assert_eq!(get("toadforce_renderer=auto"), Renderer::Auto);
+    assert_eq!(get("toadforce_renderer=opengl"), Renderer::OpenGl);
+    assert_eq!(get("toadforce_renderer=software"), Renderer::Software);
+    // The old values are checked as before.
+    let (_, warnings) = renderer_of("[emulator]\nvoodoo_renderer=auto\n");
+    let invalid = |w: &String| w.contains("invalid voodoo_renderer");
+    assert!(warnings.iter().any(invalid), "{warnings:?}");
+    let (_, warnings) = renderer_of("[emulator]\ntoadforce_renderer=gl\n");
+    let invalid = |w: &String| w.contains("invalid toadforce_renderer");
+    assert!(warnings.iter().any(invalid), "{warnings:?}");
+}
+
+#[test]
+fn both_old_renderer_lines_agree_or_are_an_error() {
+    use crate::toadforce::Renderer as T;
+    use crate::voodoo::Renderer as V;
+    let pair = |v: V, t: T| {
+        emulator(&format!("voodoo_renderer={}\ntoadforce_renderer={}\n", v.name(), t.name()))
+    };
+    // The pairs that agree, `auto` with either value. The ones the
+    // settings window of an earlier rust-dos wrote by default and for
+    // OpenGL for the ToadForce alone give `auto`.
+    let agree = [
+        (V::Software, T::Auto, Renderer::Auto),
+        (V::Software, T::OpenGl, Renderer::Auto),
+        (V::OpenGl, T::Auto, Renderer::OpenGl),
+        (V::Software, T::Software, Renderer::Software),
+        (V::OpenGl, T::OpenGl, Renderer::OpenGl),
+    ];
+    for (v, t, renderer) in agree {
+        let config = pair(v, t);
+        assert!(config.errors.is_empty(), "{v:?} {t:?}: {:?}", config.errors);
+        assert_eq!(Settings::from_config(&config).renderer, renderer, "{v:?} {t:?}");
+    }
+    // The 3dfx cards on OpenGL with the ToadForce in software: an error
+    // that names both lines.
+    let config = pair(V::OpenGl, T::Software);
+    let lines = ["line 2 (voodoo_renderer=opengl)", "line 3 (toadforce_renderer=software)"];
+    assert!(names_two_renderers(&config.errors, &lines), "{:?}", config.errors);
+    // The software 3dfx cards with an OpenGL ToadForce draw as `auto`
+    // does, with the warning that names it.
+    let config = pair(V::Software, T::OpenGl);
+    let deprecated = |w: &String| w.contains("deprecated") && w.ends_with("renderer=auto");
+    assert!(config.warnings.iter().any(deprecated), "{:?}", config.warnings);
+    // The order of the lines doesn't matter.
+    let config = emulator("toadforce_renderer=software\nvoodoo_renderer=opengl\n");
+    assert_eq!(config.errors.len(), 1, "{:?}", config.errors);
+    // A file without them has no errors.
+    assert!(emulator("renderer=opengl\n").errors.is_empty());
+    assert!(emulator("").errors.is_empty());
+}
+
+#[test]
+fn the_old_renderer_lines_are_deprecated() {
+    let deprecated = |w: &String| w.contains("deprecated") && w.contains("will stop working");
+    // One warning, which names every old line and the value they give.
+    let config = emulator("voodoo_renderer=software\nscale=2\ntoadforce_renderer=auto\n");
+    let warnings: Vec<_> = config.warnings.iter().filter(|w| deprecated(w)).collect();
+    assert_eq!(warnings.len(), 1, "{:?}", config.warnings);
+    let warning = warnings[0];
+    assert!(warning.contains("line 2 (voodoo_renderer=software)"), "{warning}");
+    assert!(warning.contains("line 4 (toadforce_renderer=auto)"), "{warning}");
+    assert!(warning.ends_with("one line renderer=auto"), "{warning}");
+    let config = emulator("toadforce_renderer=opengl\n");
+    assert!(config.warnings.iter().any(|w| deprecated(w) && w.ends_with("renderer=opengl")));
+    // `renderer` alone has no warning.
+    assert!(emulator("renderer=software\n").warnings.is_empty());
+}
+
+#[test]
+fn a_later_renderer_line_wins_over_old_lines_and_the_other_way() {
+    // A `renderer` line takes back what the old lines before it said.
+    let text = "[emulator]\nvoodoo_renderer=opengl\ntoadforce_renderer=software\nrenderer=auto\n";
+    let config = parse(text, Path::new("/cfg"), None);
+    assert!(config.errors.is_empty(), "{:?}", config.errors);
+    assert_eq!(Settings::from_config(&config).renderer, Renderer::Auto);
+    // An old line after it gives its card's value, the other card's from
+    // `renderer`, and the two must agree. `renderer=auto` asks for each
+    // card's default, as no line does: one old line after it gives its
+    // own value.
+    let get = |text: &str| renderer_of(&format!("[emulator]\n{text}")).0;
+    assert_eq!(get("renderer=auto\nvoodoo_renderer=opengl\n"), Renderer::OpenGl);
+    assert_eq!(get("renderer=auto\nvoodoo_renderer=software\n"), Renderer::Software);
+    assert_eq!(get("renderer=auto\ntoadforce_renderer=software\n"), Renderer::Software);
+    assert_eq!(get("renderer=opengl\ntoadforce_renderer=auto\n"), Renderer::OpenGl);
+    assert_eq!(get("renderer=software\ntoadforce_renderer=auto\n"), Renderer::Auto);
+    let config = emulator("renderer=opengl\ntoadforce_renderer=software\n");
+    let lines = ["line 2 (renderer=opengl)", "line 3 (toadforce_renderer=software)"];
+    assert!(names_two_renderers(&config.errors, &lines), "{:?}", config.errors);
+    let config = emulator("renderer=software\nvoodoo_renderer=opengl\n");
+    let lines = ["line 3 (voodoo_renderer=opengl)", "line 2 (renderer=software)"];
+    assert!(names_two_renderers(&config.errors, &lines), "{:?}", config.errors);
+}
+
+#[test]
+fn a_configuration_file_that_asks_for_two_renderers_does_not_load() {
+    let dir = scratch("two_renderers");
+    let path = dir.join("rust-dos.conf");
+    fs::write(&path, "[emulator]\nvoodoo_renderer=opengl\ntoadforce_renderer=software\n").unwrap();
+    let error = load(Some(&path), &dir, None, None, None).unwrap_err();
+    assert!(error.starts_with(&format!("{}: ", path.display())), "{error}");
+    let lines = ["line 2 (voodoo_renderer=opengl)", "line 3 (toadforce_renderer=software)"];
+    assert!(names_two_renderers(&[error], &lines));
+    // Found without --config, too.
+    let error = load(None, &dir, None, None, None).unwrap_err();
+    assert!(error.contains("ask for two renderers"), "{error}");
+    // The old lines that agree load, with the warning.
+    fs::write(&path, "[emulator]\nvoodoo_renderer=software\ntoadforce_renderer=auto\n").unwrap();
+    let config = load(Some(&path), &dir, None, None, None).unwrap();
+    assert!(config.warnings.iter().any(|w| w.contains("deprecated")), "{:?}", config.warnings);
+    assert_eq!(Settings::from_config(&config).renderer, Renderer::Auto);
+}
+
+#[test]
+fn a_game_profile_s_renderer_replaces_the_base_one() {
+    let dir = scratch("profile_renderer");
+    let base = |renderer| Settings { renderer, ..Settings::default() };
+    let prepare = |base: &Settings, own: &str| {
+        let text = format!("[emulator]\n{own}\n[autoexec]\nGAME.EXE\n");
+        crate::games::prepare("game", base, &text, &dir, None)
+    };
+    let renderer = |base: &Settings, own: &str| prepare(base, own).unwrap().settings.renderer;
+    let (auto, software, opengl) =
+        (base(Renderer::Auto), base(Renderer::Software), base(Renderer::OpenGl));
+    // The profile's old lines give its own value, which replaces the
+    // base's for both cards, whatever the base's is: they are never put
+    // together with the base's.
+    for base in [&auto, &software, &opengl] {
+        let name = base.renderer;
+        assert_eq!(renderer(base, "voodoo_renderer=opengl"), Renderer::OpenGl, "{name:?}");
+        assert_eq!(renderer(base, "voodoo_renderer=software"), Renderer::Software, "{name:?}");
+        assert_eq!(renderer(base, "toadforce_renderer=software"), Renderer::Software, "{name:?}");
+        assert_eq!(renderer(base, "toadforce_renderer=auto"), Renderer::Auto, "{name:?}");
+        let pair = "voodoo_renderer=software\ntoadforce_renderer=opengl";
+        assert_eq!(renderer(base, pair), Renderer::Auto, "{name:?}");
+        // Its `renderer`, `auto` too, replaces the base's, and without a
+        // line the base's stays.
+        assert_eq!(renderer(base, "renderer=software"), Renderer::Software, "{name:?}");
+        assert_eq!(renderer(base, "renderer=auto"), Renderer::Auto, "{name:?}");
+        assert_eq!(renderer(base, "scale=2"), name);
+    }
+    // The warning names the profile's own value, the one the game draws
+    // with.
+    let warnings = prepare(&opengl, "toadforce_renderer=auto").unwrap().warnings;
+    let named = |w: &String| {
+        w.contains("line 2 (toadforce_renderer=auto)") && w.ends_with("one line renderer=auto")
+    };
+    assert!(warnings.iter().any(named), "{warnings:?}");
+
+    // The profile's own lines asking for two renderers: the game doesn't
+    // start, and the error names the profile and its lines.
+    let error = match prepare(&auto, "voodoo_renderer=opengl\ntoadforce_renderer=software") {
+        Err(error) => error,
+        Ok(_) => panic!("the profile's lines ask for two renderers"),
+    };
+    assert!(error.starts_with("The profile game: "), "{error}");
+    let lines = ["line 2 (voodoo_renderer=opengl)", "line 3 (toadforce_renderer=software)"];
+    assert!(names_two_renderers(&[error], &lines));
+}
+
+#[test]
+fn a_profile_over_a_base_file_with_old_lines_launches_with_its_own() {
+    // A configuration file of an earlier rust-dos, the 3dfx cards on
+    // OpenGL, under a profile that has them in software: the profile's
+    // value, as main had it for the 3dfx cards.
+    let dir = scratch("profile_over_old_lines");
+    let path = dir.join("rust-dos.conf");
+    fs::write(&path, "[emulator]\nvoodoo_renderer=opengl\ntoadforce_renderer=auto\n").unwrap();
+    let base = Settings::from_config(&load(Some(&path), &dir, None, None, None).unwrap());
+    assert_eq!(base.renderer, Renderer::OpenGl);
+    let text = "[emulator]\nvoodoo_renderer=software\n[autoexec]\nGAME.EXE\n";
+    let prepared = crate::games::prepare("game", &base, text, &dir, None).unwrap();
+    assert_eq!(prepared.settings.renderer, Renderer::Software);
+    assert_eq!(prepared.settings.voodoo_renderer(), crate::voodoo::Renderer::Software);
+}
+
+#[test]
+fn a_profile_warns_of_settings_together_as_they_are_over_the_base() {
+    let dir = scratch("profile_memsize");
+    // The base's Pentium II takes 256 MB, which the profile's memsize
+    // alone, with the default processor, would warn of.
+    let base = Settings { cpu: Some(crate::cpu::CpuModel::PentiumII), ..Settings::default() };
+    let text = "[emulator]\nmemsize=256\n[autoexec]\nGAME.EXE\n";
+    let alone = parse(text, &dir, None);
+    assert!(alone.warnings.iter().any(|w| w.starts_with("memsize")), "{:?}", alone.warnings);
+    let prepared = crate::games::prepare("game", &base, text, &dir, None).unwrap();
+    assert!(!prepared.warnings.iter().any(|w| w.contains("memsize")), "{:?}", prepared.warnings);
+    // Over a processor that doesn't take it, the warning is there.
+    let base = Settings { cpu: Some(crate::cpu::CpuModel::I486), ..Settings::default() };
+    let prepared = crate::games::prepare("game", &base, text, &dir, None).unwrap();
+    let warned = |w: &String| w.contains("memsize 256 MB");
+    assert!(prepared.warnings.iter().any(warned), "{:?}", prepared.warnings);
+}
+
+#[test]
+fn saving_a_file_with_the_old_renderer_lines_writes_renderer_in_their_place() {
+    let settings = |text: &str| Settings::from_config(&parse(text, Path::new("/cfg"), None));
+    let old_lines = |text: &str| text.lines().filter(|l| l.contains("_renderer")).count();
+    // What the settings window of an earlier rust-dos saved: every
+    // setting, both old lines among them.
+    let original = "[emulator]\nmachine=svga\nvoodoo_renderer=opengl\nvoodoo_scale=2\n\
+                    toadforce_renderer=auto\n";
+    let file = settings(original);
+    assert_eq!(file.renderer, Renderer::OpenGl);
+
+    // Every setting saved, with another one changed: one `renderer` line,
+    // where the last old line was, and the setting as it was.
+    let changed = Settings { scale: 3, ..file.clone() };
+    let all = complete_text(original, Path::new("/cfg"), &file, &changed, &[], None);
+    assert_eq!(old_lines(&all), 0, "{all}");
+    assert!(all.contains("voodoo_scale=2\nrenderer=opengl\n"), "{all}");
+    assert_eq!(settings(&all).renderer, Renderer::OpenGl);
+    assert_eq!(settings(&all).scale, 3);
+    assert!(parse(&all, Path::new("/cfg"), None).warnings.is_empty());
+
+    // The renderer changed in the window, every setting saved or only
+    // what changed.
+    let changed = Settings { renderer: Renderer::Software, ..file.clone() };
+    for saved in [
+        complete_text(original, Path::new("/cfg"), &file, &changed, &[], None),
+        update_text(original, &file, &changed, &[], None),
+    ] {
+        assert_eq!(old_lines(&saved), 0, "{saved}");
+        assert_eq!(saved.matches("renderer=").count(), 1, "{saved}");
+        assert_eq!(settings(&saved).renderer, Renderer::Software, "{saved}");
+    }
+
+    // A game profile's own old line, with another change saved.
+    let profile = "[emulator]\nvoodoo_renderer=opengl\n";
+    let file = settings(profile);
+    let changed = Settings { scale: 3, ..file.clone() };
+    let saved = update_text(profile, &file, &changed, &[], None);
+    assert_eq!(old_lines(&saved), 0, "{saved}");
+    assert!(saved.contains("\nrenderer=opengl\n"), "{saved}");
+
+    // A profile's lone old line over a base with another renderer: the
+    // settings have the layers' value, and the line is saved with the
+    // profile's own, so the base's isn't pinned into it.
+    let profile = "[emulator]\ntoadforce_renderer=auto\n";
+    let layered = Settings { renderer: Renderer::Auto, ..Settings::default() };
+    let over_opengl = Settings { renderer: Renderer::OpenGl, ..layered.clone() };
+    for file in [&layered, &over_opengl] {
+        let changed = Settings { scale: 3, ..file.clone() };
+        let saved = update_text(profile, file, &changed, &[], None);
+        assert_eq!(old_lines(&saved), 0, "{saved}");
+        assert!(saved.contains("\nrenderer=auto\n"), "{saved}");
+    }
+    // Picked in the window: the value picked.
+    let changed = Settings { renderer: Renderer::Software, ..over_opengl.clone() };
+    let saved = update_text(profile, &over_opengl, &changed, &[], None);
+    assert_eq!(old_lines(&saved), 0, "{saved}");
+    assert!(saved.contains("\nrenderer=software\n"), "{saved}");
+}
+
+#[test]
+fn settings_write_renderer_and_not_the_old_names() {
+    let settings = Settings { renderer: Renderer::OpenGl, ..Settings::default() };
+    let written = update_text("", &Settings::default(), &settings, &[], None);
+    assert!(written.contains("renderer=opengl"), "{written}");
+    assert_eq!(written.matches("renderer").count(), 1, "{written}");
+    let keys: Vec<_> = entries(&settings, None).into_iter().map(|(_, key, _)| key).collect();
+    assert!(keys.contains(&"renderer"));
+    assert!(!keys.iter().any(|k| RENDERER_OLD_NAMES.contains(k)));
+}
+
+#[test]
+fn config_set_of_an_old_renderer_line_replaces_the_renderer() {
+    let set = |settings: &Settings, lines: &[(&str, &str)]| {
+        let entries: Vec<_> = lines
+            .iter()
+            .map(|(key, value)| ("emulator".to_string(), key.to_string(), value.to_string()))
+            .collect();
+        with_entries(settings, &entries, Path::new("/cfg"), None)
+    };
+    let deprecated = |warnings: &[String], value: &str| {
+        let warning = format!("one line renderer={value}");
+        warnings.iter().any(|w| w.contains("deprecated") && w.ends_with(&warning))
+    };
+    // A set line is a layer over the settings: its value replaces
+    // theirs, with the deprecation warning that names it.
+    let software = Settings { renderer: Renderer::Software, ..Settings::default() };
+    let (new, warnings) = set(&software, &[("voodoo_renderer", "opengl")]);
+    assert_eq!(new.renderer, Renderer::OpenGl);
+    assert!(deprecated(&warnings, "opengl"), "{warnings:?}");
+    let opengl = Settings { renderer: Renderer::OpenGl, ..Settings::default() };
+    let (new, warnings) = set(&opengl, &[("toadforce_renderer", "software")]);
+    assert_eq!(new.renderer, Renderer::Software);
+    assert!(deprecated(&warnings, "software"), "{warnings:?}");
+    assert!(!warnings.iter().any(|w| w.contains("two renderers")), "{warnings:?}");
+    // Other settings leave the renderer.
+    let (new, _) = set(&opengl, &[("scale", "2")]);
+    assert_eq!(new.renderer, Renderer::OpenGl);
+    // Set lines that ask for two renderers together aren't taken.
+    let two = [("voodoo_renderer", "opengl"), ("toadforce_renderer", "software")];
+    let (new, warnings) = set(&software, &two);
+    assert_eq!(new.renderer, Renderer::Software);
+    assert!(warnings.iter().any(|w| w.contains("two renderers")), "{warnings:?}");
 }
 
 #[test]
@@ -362,6 +694,38 @@ fn sound_section() {
     let config = parse("[sound]\nsbtype=none\nirq=4\n", Path::new("/cfg"), None);
     assert_eq!(config.sound.card(), None);
     assert!(config.warnings[0].contains("invalid irq '4'"));
+}
+
+/// `sbtype=gb` is a Game Blaster at `sbbase`, with its detection chip
+/// and no Sound Blaster; `cms` fits the chips to an SB 2.0 only.
+#[test]
+fn game_blaster_and_cms_chips() {
+    use crate::gameblaster::CmsConfig;
+    let config = parse("[sound]\nsbtype=gb\nsbbase=230\n", Path::new("/cfg"), None);
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    assert_eq!(config.sound.card(), None);
+    assert_eq!(config.sound.cms_chips(), Some(CmsConfig { base: 0x230, detection: true }));
+    assert_eq!(config.sound.sb_type_name(), "gb");
+    // The Ultrasound can't share its ports.
+    let text = "[sound]\nsbtype=gb\nsbbase=240\ngus=true\ngusbase=240\n";
+    let config = parse(text, Path::new("/cfg"), None);
+    assert!(config.warnings[0].contains("Game Blaster"), "{:?}", config.warnings);
+    assert!(config.sound.ultrasound().is_none());
+
+    let config = parse("[sound]\nsbtype=sb2\ncms=true\n", Path::new("/cfg"), None);
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    assert!(config.sound.card().is_some());
+    assert_eq!(config.sound.cms_chips(), Some(CmsConfig { base: 0x220, detection: false }));
+
+    let config = parse("[sound]\nsbtype=sb2\n", Path::new("/cfg"), None);
+    assert_eq!(config.sound.cms_chips(), None);
+    // The SB16 has no sockets for them.
+    let config = parse("[sound]\nsbtype=sb16\ncms=true\n", Path::new("/cfg"), None);
+    assert_eq!(config.sound.cms_chips(), None);
+    // A later sbtype replaces the Game Blaster.
+    let config = parse("[sound]\nsbtype=gb\nsbtype=sbpro2\n", Path::new("/cfg"), None);
+    assert_eq!(config.sound.cms_chips(), None);
+    assert!(config.sound.card().is_some());
 }
 
 #[test]
@@ -732,7 +1096,7 @@ fn mixer_settings() {
     assert!(config.warnings[1].starts_with("line 6: unknown setting 'bass'"), "{:?}", config.warnings);
     let mixer = Settings::from_config(&config).mixer;
     let levels = Channel::ALL.map(|channel| mixer.level(channel));
-    assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100, 100, 100, 100, 100]);
+    assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100, 100, 100, 100, 100, 100]);
     assert!(mixer.speaker_filter && mixer.sb_coupling);
     assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Auto, ReverbPreset::Off, ChorusPreset::Off));
 
@@ -841,6 +1205,8 @@ fn changed_settings() -> Settings {
     let sound = SoundConfig {
         sb: crate::sb::SbConfig { model: crate::sb::SbModel::SbPro2, base: 0x240, irq: 5, dma8: 3, dma16: 6 },
         sb_installed: true,
+        game_blaster: false,
+        cms: true,
         opl: Some(crate::opl::Chip::DualOpl2),
         awe32rom: Some(PathBuf::from("/home/u/roms/awe32.raw")),
         awe32ram: 2048,
@@ -880,10 +1246,10 @@ fn changed_settings() -> Settings {
         post: crate::post::PostMode::Full,
         composite: CompositeSettings { mode: CompositeMode::On, era: CompositeEra::New },
         machine: Adapter::Vga,
+        renderer: Renderer::OpenGl,
         voodoo: crate::voodoo::VoodooSettings {
             enabled: true,
             board: crate::voodoo::Board::Standard,
-            renderer: crate::voodoo::Renderer::OpenGl,
             texture_sampling: crate::voodoo::TextureSampling::Unfiltered,
             scale: 3,
             scale_shader: false,
@@ -902,7 +1268,6 @@ fn changed_settings() -> Settings {
             irq: 5,
         },
         toadforce_memory: 128,
-        toadforce_renderer: crate::toadforce::Renderer::Software,
         toadforce_gamma: Some(1.5),
         capture_dir: PathBuf::from("/home/u/dos captures"),
         record_ui: true,
@@ -925,8 +1290,10 @@ fn changed_settings() -> Settings {
         win32_desktop: DesktopSize::Svga,
         win32_locale: Win32Locale::RuRu,
         win32_trace: Win32Trace::Off,
+        win32_shims: crate::win32::shims::win32s::WIN32S,
         dos_high: false,
         dos_version: DosVersion::new(7, 10),
+        ansi_sys: false,
         ide_hard_disks: false,
         boot_cdrom: false,
         floppy_controller: false,
@@ -1037,6 +1404,12 @@ fn changed_settings() -> Settings {
             view_size: 50,
             steer: true,
             stereo_bios: false,
+        },
+        hotkeys: {
+            let mut hotkeys = crate::hotkeys::HotkeySettings::default();
+            hotkeys.set("save_state", "Ctrl+Shift+F1, Ctrl+S").unwrap();
+            hotkeys.set("mute", "none").unwrap();
+            hotkeys
         },
     }
 }
@@ -1261,7 +1634,9 @@ fn saving_all_fills_in_every_setting() {
         // printer paths and programs, Win32 DLL folder or game fixes left
         // out of its own, and no memsize or cpu, which stay the defaults
         // for the display adapter and the CPU.)
-        let wanted = !matches!(
+        // (Nor the hotkeys' actions, which follow the profile.)
+        let action = section == Section::Hotkeys && key != "profile";
+        let wanted = !action && !matches!(
             key,
             "memsize" | "cpu" | "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "sc55roms" | "midiport" | "password" | "username" | "token"
                 | "verite_rom"
@@ -1279,7 +1654,7 @@ fn saving_all_fills_in_every_setting() {
     assert!(saved.contains("\nroom=lobby\n\n[serial]\nserial1=mouse\n"), "{}", saved);
     assert!(saved.contains("\nmodemtelnet=off\n\n[printer]\noutput=pdf\n"), "{}", saved);
     assert!(saved.contains("\ntimeout=3000\n\n[achievements]\nenabled=false\nhardcore=false\n\n[shell]\nautosuggest=true\n"), "{}", saved);
-    assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=auto\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\ngraphics=auto\nresolution=auto\nambient_occlusion=auto\nmsaa=auto\nrefresh=auto\nfoveation=auto\nkeyboard=off\ntime=now\ntime_speed=1\nlatitude=48\nweather=clear\nweather_sound=70\nlightning=true\n\n[vfx1]\nenabled=false\nport=260\nstereo=auto\nswap_eyes=false\nview_size=36\nsteer=false\nstereo_bios=true\n\n[autoexec]\nDIR\n"), "{}", saved);
+    assert!(saved.contains("\nsuggestion_color=darkgray\n\n[vr]\nmode=off\ncontrollers=both\nspatial_audio=true\nscreen_fit=auto\nquality=auto\nscreen_glow=100\nscene_scale=100\nseat_right=0\nseat_up=0\nseat_forward=0\nseat_turn=0\ngraphics=auto\nresolution=auto\nambient_occlusion=auto\nmsaa=auto\nrefresh=auto\nfoveation=auto\nkeyboard=off\ntime=now\ntime_speed=1\nlatitude=48\nweather=clear\nweather_sound=70\nlightning=true\n\n[vfx1]\nenabled=false\nport=260\nstereo=auto\nswap_eyes=false\nview_size=36\nsteer=false\nstereo_bios=true\n\n[hotkeys]\nprofile=rust-dos\n\n[autoexec]\nDIR\n"), "{}", saved);
     let config = parse(&saved, Path::new("/cfg"), Some(home));
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     assert_eq!(Settings::from_config(&config), Settings { cycles: CpuSpeed::Max, ..settings.clone() });
@@ -1363,6 +1738,26 @@ fn the_desktop_size_is_read() {
     assert_eq!(Settings::from_config(&config).win32_desktop, DesktopSize::Vga);
     let config = parse("[emulator]\nwin32_desktop=1280x1024\n", Path::new("/cfg"), None);
     assert_eq!(config.warnings.len(), 1);
+}
+
+#[test]
+fn the_win32_shims_set_is_read_and_written_back() {
+    assert!(Settings::default().win32_shims.is_empty());
+    for &(name, set) in crate::win32::shims::SETS {
+        let text = format!("[emulator]\nwin32_shims={}\n", name.to_uppercase());
+        let config = parse(&text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.win32_shims, set);
+        let written = entries(&settings, None)
+            .into_iter()
+            .find(|(_, key, _)| *key == "win32_shims")
+            .and_then(|(_, _, value)| value);
+        assert_eq!(written.as_deref(), Some(name));
+    }
+    let config = parse("[emulator]\nwin32_shims=win95\n", Path::new("/cfg"), None);
+    assert_eq!(config.warnings.len(), 1);
+    assert!(config.warnings[0].contains("win31"), "{:?}", config.warnings);
 }
 
 #[test]
@@ -1572,4 +1967,21 @@ fn saving_keeps_an_unset_memsize_unset() {
     let saved = complete_text(own, Path::new("/cfg"), &file, &changed, &[], None);
     assert!(saved.contains("\nmemsize=64\n"), "{}", saved);
     assert_eq!(Settings::from_config(&parse(&saved, Path::new("/cfg"), None)).memory_mb(), 64);
+}
+
+#[test]
+fn a_code_page_437_file_loads_and_keeps_its_encoding() {
+    // A DOSBox configuration in code page 437, a menu of box characters
+    // in its [autoexec]: it loads, and the editors write it back in code
+    // page 437, so DOSBox still shows the boxes.
+    let dir = scratch("cp437");
+    let path = dir.join("dosbox.conf");
+    fs::write(&path, b"[cpu]\ncycles=max\n[autoexec]\nECHO \xC9\xCD\xBB\n").unwrap();
+    let config = load(Some(&path), &dir, None, None, None).unwrap();
+    assert_eq!(config.autoexec, ["ECHO ╔═╗"]);
+    assert_eq!(load_autoexec(&path).unwrap(), ["ECHO ╔═╗"]);
+    save_autoexec(&path, &["ECHO ╔═╗".to_string(), "DIR".to_string()]).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    assert!(std::str::from_utf8(&bytes).is_err());
+    assert!(bytes.windows(9).any(|w| w == b"ECHO \xC9\xCD\xBB\n"));
 }

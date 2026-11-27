@@ -128,10 +128,10 @@ Mount the descriptor or CUE sheet, not the data file:
 
 ```ini
 [drives]
-D=~/cds/game.mds cdrom
+D=~/games/my-game/disc.mds cdrom
 ```
 
-At the DOS prompt, `MOUNT D ~/cds/game.mds` does the same. For a game on
+At the DOS prompt, `MOUNT D ~/games/my-game/disc.mds` does the same. For a game on
 the built-in Windows, that drive line goes in the game's profile
 ([Windows games](../CONFIGURATION.md#windows-games)). A booted Windows
 image gets the CD in its IDE CD-ROM drive
@@ -157,7 +157,7 @@ label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
 5. **On the built-in Windows, a message naming a function or DLL:** the
    check may have passed, and the game stops at something the built-in
    Windows doesn't have yet. The last `[W32]` lines of the [log
-   file](../README.md#log-file) name it.
+   file](../REFERENCE.md#log-file) name it.
 
 If it still fails,
 [open an issue](https://github.com/dividebysandwich/rust-dos/issues)

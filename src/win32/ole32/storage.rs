@@ -599,7 +599,7 @@ pub fn stg_create_docfile(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
     };
     if !path.is_empty() {
-        if open_doc(cpu, &path).is_some() {
+        if share_violation(cpu, &path, mode) {
             return Some(STG_E_SHAREVIOLATION);
         }
         if files::is_file(cpu, &path) && mode & STGM_CREATE == 0 {
@@ -635,17 +635,43 @@ pub fn stg_create_docfile(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
-/// The docfile of `path` open in the running process, if there is one.
-fn open_doc(cpu: &mut Cpu, path: &str) -> Option<u32> {
+/// Whether the docfile `path` is open in the running process in a way
+/// that refuses another open of it with `mode`. As with the file
+/// underneath, which Windows opens with the share mode STGM_SHARE_*
+/// gives, each open must let the other do what it asks to: read for
+/// STGM_READ, write for STGM_WRITE, both for STGM_READWRITE. Windows
+/// Installer opens a package twice with STGM_SHARE_DENY_WRITE.
+///
+/// Two opens that both write are refused whatever their share modes.
+/// Each open here keeps its own copy of the docfile's elements and
+/// writes the whole copy back to the file, so the one written last would
+/// drop what the other wrote, where Windows writes each one's changes
+/// into the one file.
+fn share_violation(cpu: &mut Cpu, path: &str, mode: u32) -> bool {
     let pid = current_pid(cpu);
-    storages(cpu)
-        .docs
-        .iter()
-        .position(|d| {
-            d.as_ref()
-                .is_some_and(|d| d.pid == pid && !d.closed && d.path.eq_ignore_ascii_case(path))
-        })
-        .map(|i| i as u32)
+    storages(cpu).docs.iter().flatten().any(|d| {
+        d.pid == pid
+            && !d.closed
+            && d.path.eq_ignore_ascii_case(path)
+            && (!(shares(d.mode, mode) && shares(mode, d.mode))
+                || (writable(d.mode) && writable(mode)))
+    })
+}
+
+/// Whether an open with `held` lets another with `wanted` do what it
+/// asks to.
+fn shares(held: u32, wanted: u32) -> bool {
+    const STGM_SHARE_DENY_WRITE: u32 = 0x20;
+    const STGM_SHARE_DENY_READ: u32 = 0x30;
+    let (lets_read, lets_write) = match held & STGM_SHARE {
+        STGM_SHARE_EXCLUSIVE => (false, false),
+        STGM_SHARE_DENY_WRITE => (true, false),
+        STGM_SHARE_DENY_READ => (false, true),
+        _ => (true, true),
+    };
+    let reads = wanted & STGM_ACCESS != 1;
+    let writes = wanted & STGM_ACCESS != 0;
+    (lets_read || !reads) && (lets_write || !writes)
 }
 
 /// StgOpenStorage(name, priority, mode, exclude, reserved, out): the
@@ -665,7 +691,7 @@ pub fn stg_open_storage(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Ok(p) => p,
         Err(e) => return Some(e),
     };
-    if open_doc(cpu, &path).is_some() {
+    if share_violation(cpu, &path, mode) {
         return Some(STG_E_SHAREVIOLATION);
     }
     let data = match files::read_whole(cpu, &path) {

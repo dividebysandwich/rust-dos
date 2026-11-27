@@ -1346,12 +1346,13 @@ fn sti_at_the_end_of_a_full_block_holds_interrupts_for_one_instruction() {
     assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
 }
 
-/// A DOS program (`T.COM`, in real mode) on the interpreter and on the
-/// recompiler, from directories of their own, run in lockstep to its end.
-/// Returns the recompiler's counts. The machines are boxed: a debug build
-/// on Windows makes copies of a `Cpu` on the stack, and two of them by
-/// value overflow a test thread's 2 MB.
-fn com_in_lockstep(test: &str, code: &[u8]) -> (Box<Cpu>, Box<Cpu>) {
+/// A DOS program (`T.COM`) on the interpreter and on the recompiler, from
+/// directories of their own, run in lockstep to its end: in real mode, or
+/// with `ems` in virtual-8086 mode under the built-in monitor. Returns the
+/// two machines. They are boxed: a debug build on Windows makes copies of
+/// a `Cpu` on the stack, and two of them by value overflow a test thread's
+/// 2 MB.
+fn com_in_lockstep(test: &str, code: &[u8], ems: bool) -> (Box<Cpu>, Box<Cpu>) {
     rust_dos::hosttime::fix(NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56));
     let machine = |name: &str, core: CoreMode| {
         let dir = std::path::Path::new("target/dynrec_tests").join(test).join(name);
@@ -1360,6 +1361,7 @@ fn com_in_lockstep(test: &str, code: &[u8]) -> (Box<Cpu>, Box<Cpu>) {
         std::fs::write(dir.join("T.COM"), code).unwrap();
         let mut cpu = Cpu::new(dir);
         cpu.core = core;
+        rust_dos::ems::set_enabled(&mut cpu.bus, ems);
         cpu.load_shell();
         cpu.pending_command = Some("T".to_string());
         cpu
@@ -1441,11 +1443,139 @@ fn far_calls_returns_and_interrupts_in_real_mode_go_on_in_translated_code() {
     code.extend(&handler);
     code.resize(FAR_AT, 0x90);
     code.extend(&far);
-    let (_, b) = com_in_lockstep("far", &code);
+    let (_, b) = com_in_lockstep("far", &code, false);
     let stats = b.dynrec.stats();
     if AVAILABLE {
         // Far transfers went on through the links, not the execution loop.
         assert!(stats.runs < 20000, "{:?}", stats);
+    }
+}
+
+/// A COM program whose loop loads segment registers every way a real-mode
+/// program does (MOV, POP, LES and LDS, MOV and POP SS) and makes far
+/// calls, jumps and returns, with INT 60h and the timer interrupting it.
+fn segment_loop_program() -> Vec<u8> {
+    const FAR_AT: usize = 0xF00;
+    const HANDLER: u32 = 0x0C00;
+    const PTR: u64 = 0x0E00;
+    const DPTR: u64 = 0x0E04;
+    const JPTR: u64 = 0x0E08;
+    let main = {
+        let mut a = CodeAssembler::new(16).unwrap();
+        let mut top = a.create_label();
+        a.mov(ax, cs).unwrap();
+        a.add(ax, 0x100).unwrap();
+        a.mov(word_ptr(PTR), 0).unwrap();
+        a.mov(word_ptr(PTR + 2), ax).unwrap();
+        a.mov(word_ptr(JPTR), 0x80).unwrap();
+        a.mov(word_ptr(JPTR + 2), ax).unwrap();
+        a.add(ax, 0x100).unwrap();
+        a.mov(word_ptr(DPTR), 0).unwrap();
+        a.mov(word_ptr(DPTR + 2), ax).unwrap();
+        a.xor(ax, ax).unwrap();
+        a.mov(es, ax).unwrap();
+        a.mov(word_ptr(0x180).es(), HANDLER).unwrap();
+        a.mov(word_ptr(0x182).es(), cs).unwrap();
+        // The timer at about 8 kHz.
+        a.mov(al, 0x36).unwrap();
+        a.out(0x43, al).unwrap();
+        a.mov(al, 150).unwrap();
+        a.out(0x40, al).unwrap();
+        a.xor(al, al).unwrap();
+        a.out(0x40, al).unwrap();
+        a.xor(si, si).unwrap();
+        a.xor(di, di).unwrap();
+        a.mov(cx, 20000).unwrap();
+        a.set_label(&mut top).unwrap();
+        a.mov(bx, cx).unwrap();
+        // ES and then DS on the data segment, and back.
+        a.les(ax, dword_ptr(DPTR)).unwrap();
+        a.add(word_ptr(0).es(), bx).unwrap();
+        a.push(ds).unwrap();
+        a.push(es).unwrap();
+        a.pop(ds).unwrap();
+        a.add(si, word_ptr(0)).unwrap();
+        a.pop(ds).unwrap();
+        a.lds(dx, dword_ptr(DPTR)).unwrap();
+        a.mov(ax, cs).unwrap();
+        a.mov(ds, ax).unwrap();
+        // The same stack again, by MOV and POP.
+        a.mov(ax, ss).unwrap();
+        a.mov(ss, ax).unwrap();
+        a.push(ss).unwrap();
+        a.pop(ss).unwrap();
+        a.call(dword_ptr(PTR)).unwrap();
+        a.add(si, ax).unwrap();
+        a.loop_(top).unwrap();
+        a.mov(al, 0x36).unwrap();
+        a.out(0x43, al).unwrap();
+        a.xor(al, al).unwrap();
+        a.out(0x40, al).unwrap();
+        a.out(0x40, al).unwrap();
+        a.mov(word_ptr(0x80), si).unwrap();
+        a.mov(word_ptr(0x82), di).unwrap();
+        a.mov(ax, 0x4C00).unwrap();
+        a.int(0x21).unwrap();
+        a.assemble(0x100).unwrap()
+    };
+    // The far function: INT 60h, then a far jump through a pointer to its
+    // RETF.
+    let far = {
+        let mut a = CodeAssembler::new(16).unwrap();
+        a.mov(ax, bx).unwrap();
+        a.imul_3(ax, ax, 7).unwrap();
+        a.int(0x60).unwrap();
+        a.xor(ax, di).unwrap();
+        a.jmp(dword_ptr(JPTR)).unwrap();
+        let mut code = a.assemble(0).unwrap();
+        code.resize(0x80, 0x90);
+        let mut b = CodeAssembler::new(16).unwrap();
+        b.inc(ax).unwrap();
+        b.retf().unwrap();
+        code.extend(b.assemble(0x80).unwrap());
+        code
+    };
+    let handler = {
+        let mut a = CodeAssembler::new(16).unwrap();
+        a.add(di, bx).unwrap();
+        a.rol(di, 3).unwrap();
+        a.iret().unwrap();
+        a.assemble(HANDLER as u64).unwrap()
+    };
+    assert!(main.len() < HANDLER as usize - 0x100);
+    let mut code = main;
+    code.resize(HANDLER as usize - 0x100, 0x90);
+    code.extend(&handler);
+    code.resize(FAR_AT, 0x90);
+    code.extend(&far);
+    // The data segment, 2 KB on.
+    code.resize(0x2000 - 0x100 + 2, 0);
+    code
+}
+
+#[test]
+fn segment_loads_and_far_transfers_under_the_v86_monitor_run_in_translated_code() {
+    // With EMS the program runs in virtual-8086 mode under the built-in
+    // monitor, as under EMM386, and without in real mode. Its segment
+    // loads and far transfers run in translated code in both, as the
+    // interpreter runs them, without a call into Rust for each load.
+    let code = segment_loop_program();
+    for ems in [true, false] {
+        let (_, b) = com_in_lockstep(if ems { "segs_v86" } else { "segs_real" }, &code, ems);
+        assert_eq!(b.v86(), ems, "EMS {ems}");
+        if !AVAILABLE {
+            continue;
+        }
+        let stats = b.dynrec.stats();
+        let calls = b.dynrec.calls().unwrap();
+        assert_eq!(calls.load_seg, 0, "segment loads through jit_load_seg, EMS {ems}");
+        use iced_x86::Mnemonic::*;
+        for m in [Mov, Pop, Les, Lds, Call, Jmp, Retf] {
+            let n = calls.fallback[m as usize];
+            assert!(n < 100, "{n} {m:?} through their handlers, EMS {ems}");
+        }
+        // Far transfers went on through the links, not the execution loop.
+        assert!(stats.runs < 20000, "EMS {ems}: {stats:?}");
     }
 }
 
@@ -1454,7 +1584,11 @@ fn segment_loads_in_big_real_mode_keep_the_limits_and_flatness() {
     // Back in real mode from protected mode, the data segments keep their
     // 4 GB limit ("big real mode", as HIMEM leaves them). A loop loads DS
     // with selectors 0 to 3000h in turn, making it flat (base 0) and not,
-    // and reads and writes through it above 1 MB.
+    // and reads and writes through it above 1 MB; then pops 0 into ES and
+    // DS's selector after it, as Ultima VII's memory manager loads and
+    // restores its segments around each copy. The loads run in
+    // translated code, which goes on after them, not through their
+    // handlers.
     const PM16: u32 = 0x8000;
     const REAL: u32 = 0x9000;
     let (mut a, mut b) = twins(|rig| {
@@ -1484,12 +1618,108 @@ fn segment_loads_in_big_real_mode_keep_the_limits_and_flatness() {
             a.mov(dx, ds)?;
             a.add(si, dx)?;
             a.add(si, word_ptr(ebx))?;
+            a.push(ds)?;
+            a.xor(dx, dx)?;
+            a.push(dx)?;
+            a.pop(es)?;
+            a.add(di, word_ptr(ebx).es())?;
+            a.pop(es)?;
+            a.add(di, word_ptr(ebx).es())?;
             a.loop_(top)?;
             a.hlt()
         }));
     });
     run_both(&mut a, &mut b);
     assert_ne!(b.cpu.esi() & 0xFFFF, 0);
+    if AVAILABLE {
+        let calls = b.cpu.dynrec.calls().unwrap();
+        use iced_x86::Mnemonic::*;
+        for m in [Mov, Pop] {
+            let n = calls.fallback[m as usize];
+            assert!(n < 100, "{n} {m:?} through their handlers");
+        }
+    }
+}
+
+#[test]
+fn far_transfers_after_a_load_in_big_real_mode_run_code_for_the_segments_as_they_are() {
+    // In big real mode a loop loads DS with 0 and 1000h in turn, which
+    // makes it flat and not, and after each load, in the same block,
+    // calls an interrupt handler (INT, which runs through its handler) or
+    // a far procedure (CALL FAR, which is translated) that add through
+    // DS above 1 MB. Both go
+    // on through the links a return takes, to blocks translated for DS
+    // as it is after the load, not as it was when the block was entered.
+    const PM16: u32 = 0x8000;
+    const REAL: u32 = 0x9000;
+    const FAR: u32 = 0xA000;
+    const IVT_PTR: u32 = 0x5100;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.db(&[0xEA])?;
+                a.dd(&[PM16])?;
+                a.dw(&[CODE16])
+            }),
+        );
+        rig.load(
+            PM16,
+            &asm16(PM16, |a| {
+                a.mov(eax, cr0)?;
+                a.and(eax, 0xFFFF_FFFEu32 as i32)?;
+                a.mov(cr0, eax)?;
+                a.db(&[0xEA])?;
+                a.dw(&[0, (REAL >> 4) as u16])
+            }),
+        );
+        rig.load(
+            REAL,
+            &asm16(0, |a| {
+                let mut top = a.create_label();
+                // The real-mode interrupt vectors at 0.
+                a.xor(ax, ax)?;
+                a.mov(ds, ax)?;
+                a.lidt(ptr(IVT_PTR))?;
+                a.mov(cx, 2000)?;
+                a.xor(si, si)?;
+                a.mov(ebx, 0x20_0000u32)?;
+                a.set_label(&mut top)?;
+                a.mov(ax, cx)?;
+                a.and(ax, 1)?;
+                a.shl(ax, 12)?;
+                a.mov(ds, ax)?;
+                a.int(0x60)?;
+                a.xor(ax, 0x1000)?;
+                a.mov(ds, ax)?;
+                a.db(&[0x9A])?;
+                a.dw(&[0, (FAR >> 4) as u16])?;
+                a.xor(ax, 0x1000)?;
+                a.mov(ds, ax)?;
+                a.loop_(top)?;
+                a.hlt()
+            }),
+        );
+        rig.load(
+            FAR,
+            &asm16(0, |a| {
+                a.add(word_ptr(ebx), cx)?;
+                a.add(si, word_ptr(ebx))?;
+                a.retf()
+            }),
+        );
+        rig.load(
+            FAR + 0x100,
+            &asm16(0x100, |a| {
+                a.add(word_ptr(ebx), si)?;
+                a.iret()
+            }),
+        );
+        rig.load(0x60 * 4, &[0x00, 0x01, (FAR >> 4) as u8, (FAR >> 12) as u8]);
+        rig.load(IVT_PTR, &[0xFF, 0x03, 0, 0, 0, 0]);
+    });
+    run_both(&mut a, &mut b);
+    assert_ne!(b.cpu.bus.read_16(0x21_0000), 0);
 }
 
 #[test]
@@ -2110,7 +2340,8 @@ fn popf_in_virtual_8086_mode_at_iopl_3_runs_in_translated_code() {
 #[test]
 fn stack_switches_in_virtual_8086_mode_run_in_translated_code() {
     // MOV SS and POP SS in virtual-8086 code, which loads SS as real mode
-    // does, through `jit_load_seg`, 200 times, then INT 40h into ring 0.
+    // does, in the translated code itself, 200 times, then INT 40h into
+    // ring 0.
     let (mut a, mut b) = twins(|rig| {
         rig.handler(0x40, 3, |a| record_code(a, 0x40));
         rig.load(0x30000, &asm16(0x30000, |a| {
@@ -2143,6 +2374,10 @@ fn stack_switches_in_virtual_8086_mode_run_in_translated_code() {
     assert_eq!(b.cpu.ebp() & 0xFFFF, (1..=200u32).sum::<u32>() & 0xFFFF);
     if AVAILABLE {
         assert_eq!(handled(&b, iced_x86::Mnemonic::Pop), 0);
+        // The loop's 800 loads of SS; the rig's protected-mode code loads
+        // a few segments through `jit_load_seg`.
+        let calls = b.cpu.dynrec.calls().unwrap().load_seg;
+        assert!(calls < 50, "{calls} through jit_load_seg");
     }
 }
 
@@ -2256,6 +2491,56 @@ fn auto_uses_the_recompiler_from_protected_mode_until_the_program_ends() {
 }
 
 #[test]
+fn auto_uses_the_recompiler_in_big_real_mode_a_program_before_set_up() {
+    // A program switches to protected mode, where the rig loads the data
+    // segments with 4 GB limits, switches back to real mode, which keeps
+    // them ("big real mode"), and ends. The next program runs in real
+    // mode with those limits without switching itself, as Ultima VII's
+    // U7.EXE does after MAINMENU.EXE, and reads and writes above 1 MB
+    // through DS = 0: it runs on the recompiler too.
+    const PM16: u32 = 0x8000;
+    const REAL: u32 = 0x9000;
+    let mut rig = Rig::new();
+    rig.cpu.core = CoreMode::Auto;
+    rig.load(CODE, &asm32(CODE, |a| {
+        a.db(&[0xEA])?;
+        a.dd(&[PM16])?;
+        a.dw(&[CODE16])
+    }));
+    rig.load(PM16, &asm16(PM16, |a| {
+        a.mov(eax, cr0)?;
+        a.and(eax, 0xFFFF_FFFEu32 as i32)?;
+        a.mov(cr0, eax)?;
+        a.db(&[0xEA])?;
+        a.dw(&[0, (REAL >> 4) as u16])
+    }));
+    rig.load(REAL, &asm16(0, |a| a.hlt()));
+    rig.enter_pm();
+    rig.run_batched_to_halt();
+    assert!(!rig.cpu.pe(), "back in real mode");
+    // The program ends (`Cpu::restore_context`), and the limits stay.
+    rig.cpu.pm_latched = false;
+    assert_eq!(rig.cpu.dynamic_active(), AVAILABLE, "big real mode runs on the recompiler");
+    rig.load(REAL + 0x100, &asm16(0x100, |a| {
+        let mut top = a.create_label();
+        a.xor(ax, ax)?;
+        a.mov(ds, ax)?;
+        a.mov(ebx, 0x20_0000u32)?;
+        a.mov(cx, 1000)?;
+        a.set_label(&mut top)?;
+        a.add(word_ptr(ebx), cx)?;
+        a.loop_(top)?;
+        a.hlt()
+    }));
+    rig.cpu.set_ip(0x100);
+    rig.run_batched_to_halt();
+    assert_eq!(rig.cpu.bus.read_16(0x20_0000), (500_500 % 65_536) as u16);
+    if AVAILABLE {
+        assert!(rig.cpu.dynrec.stats().runs > 0, "{:?}", rig.cpu.dynrec.stats());
+    }
+}
+
+#[test]
 fn changing_a_linked_block_unlinks_it() {
     // Two passes of a loop whose blocks link to each other; between them
     // the code rewrites the ADD's immediate in the block the jump leads
@@ -2339,7 +2624,10 @@ fn a_block_translated_again_takes_the_place_of_the_one_it_replaces() {
             a.hlt()
         }));
     });
-    b.cpu.dynrec.set_code_size(16 << 10);
+    // (The translations that live at once took nearly all of the 16 KB
+    // this test gave them, and outgrew it once memory operands got their
+    // device handle inline. 1000 of them still need far more than 24 KB.)
+    b.cpu.dynrec.set_code_size(24 << 10);
     let stats = run_both(&mut a, &mut b);
     assert_eq!(b.cpu.ebx(), replicated_sum(1000));
     if AVAILABLE {
@@ -6723,37 +7011,36 @@ fn an_fpu_store_past_its_segments_limit_changes_nothing() {
 }
 
 #[test]
-fn fpu_products_and_quotients_too_small_for_a_double_are_zero() {
-    // 1e-30 ten times over is 1e-300; times 2^-31, and divided by 2^31
-    // again, it is a denormal double, which a register doesn't hold: it
-    // is 0, and stays 0 when multiplied up again.
+fn fpu_products_and_quotients_below_a_doubles_normals_are_kept() {
+    // 2^-1000 times 2^-31 (FMUL with memory), divided by 2^31 (FDIV) and
+    // times a register of 2^-31 (FMULP) is 2^-1031, under a double's
+    // normals, which an x87 holds as a normal number in 80 bits and
+    // stores as the denormal double exactly. Multiplied up by 2^31 again
+    // it is 2^-1000.
     let (mut a, mut b) = twins(|rig| {
-        rig.write32(DATA, 0x0DA2_4260); // 1e-30
-        rig.write32(DATA + 4, 0x3000_0000); // 2^-31
-        rig.write32(DATA + 8, 0x4F00_0000); // 2^31
+        rig.write32(DATA, 0);
+        rig.write32(DATA + 4, (1023 - 1000) << 20); // 2^-1000
+        rig.write32(DATA + 8, 0x3000_0000); // 2^-31
+        rig.write32(DATA + 12, 0x4F00_0000); // 2^31
         rig.load(CODE, &asm32(CODE, |a| {
             a.fninit()?;
-            a.fld1()?;
-            for _ in 0..10 {
-                a.fmul(dword_ptr(DATA))?;
-            }
+            a.fld(qword_ptr(DATA))?;
             a.fld(st0)?;
             a.fld(st0)?;
             a.jmp(CODE as u64 + 0x100)
         }));
         rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
             // ST(0) by FMUL with memory, ST(1) by FDIV, ST(2) by FMULP.
-            a.fmul(dword_ptr(DATA + 4))?;
+            a.fmul(dword_ptr(DATA + 8))?;
             a.fxch(st0, st1)?;
-            a.fdiv(dword_ptr(DATA + 8))?;
-            a.fld(dword_ptr(DATA + 4))?;
+            a.fdiv(dword_ptr(DATA + 12))?;
+            a.fld(dword_ptr(DATA + 8))?;
             a.fmulp(st3, st0)?;
             for _ in 0..3 {
-                for _ in 0..4 {
-                    a.fmul(dword_ptr(DATA + 8))?;
-                }
-                a.fstp(dword_ptr(edi))?;
-                a.add(edi, 4)?;
+                a.fst(qword_ptr(edi))?;
+                a.fmul(dword_ptr(DATA + 12))?;
+                a.fstp(qword_ptr(edi + 8))?;
+                a.add(edi, 16)?;
             }
             a.hlt()
         }));
@@ -6761,9 +7048,132 @@ fn fpu_products_and_quotients_too_small_for_a_double_are_zero() {
     a.cpu.set_edi(DATA + 0x100);
     b.cpu.set_edi(DATA + 0x100);
     run_both(&mut a, &mut b);
+    let read64 = |at: u32| b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32;
     for i in 0..3 {
-        assert_eq!(b.read32(DATA + 0x100 + 4 * i), 0, "result {}", i);
+        let at = DATA + 0x100 + 16 * i;
+        assert_eq!(read64(at), 1 << (1074 - 1031), "result {}", i);
+        assert_eq!(read64(at + 8), ((1023 - 1000) as u64) << 52, "result {} times 2^31", i);
     }
+}
+
+/// Doubles of every kind, denormals among them, as programs copy memory
+/// a qword at a time with FLD and FSTP. Beetle Crazy Cup copies its 4x4
+/// float matrices so: a pair of singles 1.0 and 0.0 is the denormal
+/// double 3F800000h.
+const COPIED: [u64; 10] = [
+    0x0000_0000_3F80_0000, // 1.0f, 0.0f
+    0x8000_0000_3F80_0000, // the same with the sign
+    0x0000_0000_0000_0001, // the least denormal
+    0x000F_FFFF_FFFF_FFFF, // the largest denormal
+    0x0008_0000_0000_0000, // 2^-1023
+    0x0010_0000_0000_0000, // the least normal
+    0x3F80_0000_0000_0000, // 0.0f, 1.0f
+    0x3FF0_0000_0000_0000, // 1
+    0x8000_0000_0000_0000, // -0
+    0x7FF8_0000_0000_0000, // a quiet NaN
+];
+
+#[test]
+fn fpu_qword_copies_keep_denormals() {
+    // FLD and FSTP of each, and FLD, FST, FSTP through a second register
+    // (FLD ST(0)); on the recompiler, in one block.
+    let (input, output) = (DATA, DATA + 0x1000);
+    let (mut a, mut b) = twins(|rig| {
+        for (k, bits) in COPIED.iter().enumerate() {
+            rig.write32(input + 8 * k as u32, *bits as u32);
+            rig.write32(input + 8 * k as u32 + 4, (bits >> 32) as u32);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            for k in 0..COPIED.len() as u32 {
+                let (from, to) = (input + 8 * k, output + 24 * k);
+                a.fld(qword_ptr(from))?;
+                a.fld(st0)?;
+                a.fst(qword_ptr(to))?;
+                a.fstp(qword_ptr(to + 8))?;
+                a.fstp(qword_ptr(to + 16))?;
+            }
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    for rig in [&a, &b] {
+        for (k, bits) in COPIED.iter().enumerate() {
+            for copy in 0..3 {
+                let at = output + 24 * k as u32 + 8 * copy;
+                let got = rig.read32(at) as u64 | (rig.read32(at + 4) as u64) << 32;
+                assert_eq!(got, *bits, "{:016X}, copy {}", bits, copy);
+            }
+        }
+    }
+}
+
+#[test]
+fn fpu_sums_with_a_denormal_double_operand_use_all_of_it() {
+    // #2103: ST(0) = 1, plus the least denormal double 2^-1074 at 64 bits
+    // rounding up, is 1 + 2^-63: from FADD with memory, and from FADD of
+    // a register loaded with it. Stored as 80 bits.
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(DATA, 1);
+        rig.write32(DATA + 4, 0);
+        rig.write32(DATA + 8, 0x0B7F);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.fldcw(word_ptr(DATA + 8))?;
+            a.fld1()?;
+            a.fadd(qword_ptr(DATA))?;
+            a.fstp(tword_ptr(DATA + 0x10))?;
+            a.fld(qword_ptr(DATA))?;
+            a.fld1()?;
+            a.fadd_2(st0, st1)?;
+            a.fstp(tword_ptr(DATA + 0x20))?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    for at in [DATA + 0x10, DATA + 0x20] {
+        let man = b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32;
+        let se = b.read32(at + 8) & 0xFFFF;
+        assert_eq!((se, man), (0x3FFF, 0x8000_0000_0000_0001), "at {:X}", at);
+    }
+}
+
+#[test]
+fn fpu_sums_just_below_a_doubles_normals_use_all_80_bits() {
+    // 2^-1022 - 2^-1075 (80 bits) rounds up to the double 2^-1022, but
+    // isn't it: plus 2^-1022 at 64 bits it is 2^-1021 - 2^-1075, where
+    // the doubles would make 2^-1021. And #2103's last case: at 53 bits,
+    // 2^-1022 plus the least denormal double's negative from memory is
+    // the largest denormal double.
+    let (mut a, mut b) = twins(|rig| {
+        rig.write32(DATA, 0);
+        rig.write32(DATA + 4, 0x0010_0000); // 2^-1022
+        rig.write32(DATA + 8, 1);
+        rig.write32(DATA + 12, 0x8000_0000); // -2^-1074
+        rig.write32(DATA + 0x10, 0xFFFF_F800);
+        rig.write32(DATA + 0x14, 0xFFFF_FFFF);
+        rig.write32(DATA + 0x18, 0x3C00); // 2^-1022 - 2^-1075
+        rig.write32(DATA + 0x20, 0x027F);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            a.fld(tword_ptr(DATA + 0x10))?;
+            a.fld(qword_ptr(DATA))?;
+            a.fadd_2(st0, st1)?;
+            a.fstp(tword_ptr(DATA + 0x40))?;
+            a.fstp(st0)?;
+            a.fldcw(word_ptr(DATA + 0x20))?;
+            a.fld(qword_ptr(DATA))?;
+            a.fadd(qword_ptr(DATA + 8))?;
+            a.fstp(qword_ptr(DATA + 0x50))?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let man = b.read32(DATA + 0x40) as u64 | (b.read32(DATA + 0x44) as u64) << 32;
+    let se = b.read32(DATA + 0x48) & 0xFFFF;
+    assert_eq!((se, man), (0x3C01, 0xFFFF_FFFF_FFFF_FC00));
+    let sum = b.read32(DATA + 0x50) as u64 | (b.read32(DATA + 0x54) as u64) << 32;
+    assert_eq!(sum, 0x000F_FFFF_FFFF_FFFF);
 }
 
 /// Writes and reads of video memory, the ROMs and addresses past the end
@@ -7002,6 +7412,79 @@ fn stores_into_the_linear_frame_buffer_are_the_interpreters() {
     assert_eq!(shown(&a), shown(&b));
     if AVAILABLE {
         assert_eq!(untranslated(&stats), 0, "{:?}", stats);
+    }
+}
+
+#[test]
+fn a_software_renderers_back_page_counts_as_the_interpreters() {
+    // A software renderer drawing a frame out of sight in a 640x480
+    // 16-bit VESA mode's frame buffer (Quake's page flipping), with the
+    // picture `cycles=auto` counts known: bytes, words and dwords into
+    // pages it counts and doesn't show, which the code writes and counts
+    // itself within a burst (`x64::lean_card_store`), and a pause longer
+    // than a burst's gap after each half, after which the next store
+    // starts a burst through the full path. Then dwords into the picture
+    // shown, which go through the bus.
+    const LFB: u32 = 0xE000_0000;
+    const BACK: u32 = LFB + 0x10_0000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.set_ax(0x4F02);
+        rig.cpu.set_reg16(iced_x86::Register::BX, 0x4111);
+        rust_dos::interrupts::int10::handle(&mut rig.cpu);
+        assert_eq!(rig.cpu.ax(), 0x004F, "no VESA mode");
+        let picture = rust_dos::autospeed::picture(&rig.cpu.bus);
+        assert_eq!(picture, Some((0, 640 * 480 * 2)));
+        rig.cpu.bus.activity.set_picture(picture);
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut half = a.create_label();
+            let mut each = a.create_label();
+            let mut pause = a.create_label();
+            let mut shown = a.create_label();
+            a.mov(ebp, 2u32)?;
+            a.mov(edi, BACK)?;
+            a.set_label(&mut half)?;
+            a.mov(ecx, 0x800u32)?;
+            a.set_label(&mut each)?;
+            a.mov(eax, ecx)?;
+            a.imul_3(eax, eax, 0x0301_0507)?;
+            a.mov(byte_ptr(edi), al)?;
+            a.mov(word_ptr(edi + 1), ax)?;
+            a.mov(dword_ptr(edi + 3), eax)?;
+            a.add(edi, 7)?;
+            a.dec(ecx)?;
+            a.jnz(each)?;
+            a.mov(ecx, 8000u32)?;
+            a.set_label(&mut pause)?;
+            a.dec(ecx)?;
+            a.jnz(pause)?;
+            a.dec(ebp)?;
+            a.jnz(half)?;
+            a.mov(edi, LFB + 0x2_0000)?;
+            a.mov(ecx, 0x400u32)?;
+            a.set_label(&mut shown)?;
+            a.mov(dword_ptr(edi), ecx)?;
+            a.add(edi, 4)?;
+            a.dec(ecx)?;
+            a.jnz(shown)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    let back = |rig: &Rig| rig.cpu.bus.vbe.vram[0x10_0000..0x10_8000].to_vec();
+    assert!(back(&b).iter().any(|&x| x != 0));
+    assert!(back(&a) == back(&b), "the back page differs");
+    let front = |rig: &Rig| rig.cpu.bus.vbe.vram[0x2_0000..0x2_1000].to_vec();
+    assert!(front(&a) == front(&b), "the picture differs");
+    // All of what `cycles=auto` counts: the bursts' bytes, the bursts
+    // and the last write's time.
+    let activity = |rig: &Rig| format!("{:?}", rig.cpu.bus.activity);
+    assert_eq!(activity(&a), activity(&b));
+    assert_ne!(a.cpu.bus.activity.video_bytes, 0);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        // The code wrote the back page itself: through the bus went the
+        // picture's 400h dwords, and a handful of others at most.
+        let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev + c.slow);
+        assert!(calls < 0x400 + 64, "{calls} calls");
     }
 }
 
@@ -7424,7 +7907,11 @@ fn host_bytes(paging: bool, instr: impl Fn(&mut CodeAssembler) -> Result<(), Ice
 #[test]
 fn memory_operands_take_little_host_code() {
     // Each memory operand's slow paths call the trampoline's routines
-    // (`x64::Thunk`) instead of carrying their own copies.
+    // (`x64::Thunk`) instead of carrying their own copies. One part is
+    // inline where `Thunk::Dev` is the slow path (paging off, or the A20
+    // gate closed): the handle of an operand at 1 MB or above that isn't
+    // RAM, 36 bytes for a dword, which spares a software renderer's
+    // stores into the VESA frame buffer a call each.
     if !AVAILABLE || !cfg!(target_arch = "x86_64") {
         return;
     }
@@ -7432,7 +7919,10 @@ fn memory_operands_take_little_host_code() {
         let load = host_bytes(paging, |a| a.mov(eax, dword_ptr(esi + 4)));
         let store = host_bytes(paging, |a| a.mov(dword_ptr(edi + 4), eax));
         let both = host_bytes(paging, |a| a.add(dword_ptr(edi + 8), eax));
-        assert!(load < 220 && store < 280 && both < 450, "paging {paging}: {load}, {store}, {both} bytes");
+        assert!(
+            load < 230 && store < 310 && both < 480,
+            "paging {paging}: {load}, {store}, {both} bytes"
+        );
     }
 }
 

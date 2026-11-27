@@ -2,7 +2,7 @@
 //! their resources, tasks, files through DOS, and the profile and
 //! string functions, which go on to KERNEL32's.
 
-use super::builtin::{Api16, Def, register, rust, value, win32};
+use super::builtin::{Api16, Def, cdecl, register, rust, value, win32};
 use super::thunk::{self, EBP, EDI, ESI, ESP};
 use super::{Frame, dos, dpmi, global, ldt, local, module, resource, task};
 use crate::cpu::{Cpu, Seg};
@@ -53,7 +53,7 @@ static APIS: &[Api16] = &[
     rust("GlobalFreeAll", 26, "w", global_free_all),
     rust("Yield", 29, "", yield16),
     rust("WaitEvent", 30, "w", wait_event),
-    rust("PostEvent", 31, "w", zero),
+    rust("PostEvent", 31, "w", post_event),
     rust("SetPriority", 32, "ws", zero),
     rust("LockCurrentTask", 33, "w", zero),
     rust("GetCurrentTask", 36, "", get_current_task),
@@ -136,7 +136,7 @@ static APIS: &[Api16] = &[
     value("__AHSHIFT", 113, |_| ldt::AHSHIFT),
     value("__AHINCR", 114, |_| ldt::AHINCR),
     rust("OutputDebugString", 115, "p", output_debug_string),
-    rust("OldYield", 117, "", yield16),
+    rust("OldYield", 117, "", old_yield),
     rust("GetTaskQueueDS", 118, "", zero),
     rust("GetTaskQueueES", 119, "", zero),
     rust("UndefDynLink", 120, "", zero),
@@ -290,6 +290,39 @@ static APIS: &[Api16] = &[
     rust("MyAlloc", 668, "www", my_alloc),
     rust("EntryAddrProc", 667, "ww", entry_addr_proc),
     rust("PatchCodeHandle", 110, "w", patch_code_handle),
+    // Saved states keep the stubs in this order: new functions go after
+    // the others (src/win32/stub_tables.rs).
+    cdecl("_DebugOutput", 328, "wS", debug_output),
+    rust("DirectedYield", 150, "w", directed_yield),
+    // The generic thunks: 16-bit code loads a Win32 DLL into its process
+    // and calls its functions.
+    win32(
+        "LoadLibraryEx32W",
+        513,
+        "pll",
+        "KERNEL32.DLL",
+        "LoadLibraryExA",
+        b'l',
+    ),
+    win32(
+        "FreeLibrary32W",
+        514,
+        "l",
+        "KERNEL32.DLL",
+        "FreeLibrary",
+        b'b',
+    ),
+    win32(
+        "GetProcAddress32W",
+        515,
+        "lr",
+        "KERNEL32.DLL",
+        "GetProcAddress",
+        b'l',
+    ),
+    rust("GetVDMPointer32W", 516, "lw", get_vdm_pointer32w),
+    register("CallProc32W", 517, call_proc32w),
+    cdecl("_CallProcEx32W", 518, "lll", call_proc_ex32w),
 ];
 
 /// GetWinFlags': protected mode, 386 enhanced mode, a 486 with a
@@ -495,9 +528,31 @@ fn local_heap_size(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 // The global heap.
 
+/// GlobalAlloc(flags, size): a block the running task owns, which goes
+/// when the task ends. A GMEM_DDESHARE block is the calling code's
+/// module's instead, as in Windows 3.1, and stays until that module is
+/// freed: a DLL keeps its shared blocks whichever task it ran for, as
+/// the Borland runtime's heap in a DLL does with the blocks it chains
+/// together (Memphis Math's MEMPHDB.DLL walked into a block freed with
+/// the task that had asked for it).
 fn global_alloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let owner = current_handle(cpu);
-    Some(global::alloc(cpu, args[0] as u16, args[1], owner, false) as u32)
+    let flags = args[0] as u16;
+    let caller = if flags & global::GMEM_DDESHARE != 0 {
+        caller_module(cpu)
+    } else {
+        None
+    };
+    let owner = caller.unwrap_or_else(|| current_handle(cpu));
+    Some(global::alloc(cpu, flags, args[1], owner, false) as u32)
+}
+
+/// The module whose code called the function running now: the one its
+/// far return address is in.
+fn caller_module(cpu: &mut Cpu) -> Option<u16> {
+    let base = cpu.seg_cache(Seg::SS).base;
+    let ret = cpu.bus.guest_read_32(base.wrapping_add(cpu.sp() as u32));
+    let index = super::module_index(cpu, (ret >> 16) as u16)?;
+    Some(cpu.bus.win32.win16.modules[index].handle)
 }
 
 fn global_realloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -763,19 +818,132 @@ fn hmemcpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // Tasks.
 
+/// Yield: USER's UserYield handles the messages other tasks sent to
+/// this one, gives up the turn, and handles those sent meanwhile when
+/// the turn comes back (Wine's Yield16 calls UserYield16 for a task with
+/// a queue). Windows 95 does the same: a message sent before the Yield,
+/// or while the task waits in it, is handled before Yield returns
+/// (#1913's measurements in 86Box). A task that polls with Yield would
+/// otherwise hold up a task that sends to its windows for good.
+///
+/// With messages waiting, the task gives up its turn twice: the reply in
+/// UserYield16 hands it to the sender, and then the yield itself. That is
+/// deliberate: in #1913's QPEND run on Windows 95, B's message waiting at
+/// A's Yield is handled, B runs to its end, and C, which A posted to
+/// before the Yield, runs to its end too before A's Yield returns.
 fn yield16(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let ctx = Context::of(cpu);
+    if crate::win32::user32::message::has_sent(cpu) {
+        let target = super::message::user32(cpu, "UserYield16");
+        thunk::enter32(cpu, ctx, target, &[], thunk::POST_YIELD, vec![0]);
+    } else {
+        yield_turn(cpu, ctx);
+    }
+    None
+}
+
+/// The yield of Yield, and of a PeekMessage that finds no message
+/// (user.rs), with nothing sent to the task: `yield_and_receive`, and
+/// `ctx` goes on. When no other task ran and nothing was sent, the call
+/// changed nothing but the start of the turn, and an idle proof follows
+/// it, so a lone Yield or PeekMessage loop is skipped as idle.
+pub(super) fn yield_turn(cpu: &mut Cpu, ctx: Context) {
+    if !yield_and_receive(cpu, ctx) {
+        crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
+        crate::idle::turn_started(cpu);
+    }
+}
+
+/// The task gives up its turn, and when the turn comes back it handles
+/// the messages sent to it meanwhile (UserYield16) before `ctx` goes on.
+/// False when the same task goes on at once with nothing sent to it: it
+/// goes on at `ctx` straight away, without the call of UserYield16.
+fn yield_and_receive(cpu: &mut Cpu, ctx: Context) -> bool {
+    let me = running_thread(cpu);
+    let target = super::message::user32(cpu, "UserYield16");
+    thunk::enter32(cpu, ctx, target, &[], thunk::POST_YIELD, vec![1]);
+    task::give_up_turn(cpu);
+    if running_thread(cpu) != me || crate::win32::user32::message::has_sent(cpu) {
+        return true;
+    }
+    thunk::drop32(cpu);
+    crate::win32::system::load_context(cpu, &ctx);
+    false
+}
+
+/// The thread that runs, if any.
+fn running_thread(cpu: &mut Cpu) -> Option<u32> {
+    crate::win32::process(cpu).current_thread().map(|t| t.id)
+}
+
+/// OldYield: the task gives its turn up, and nothing else.
+fn old_yield(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let ctx = Context::of(cpu);
     task::yield_now(cpu, ctx);
     None
 }
 
-/// WaitEvent: the task gives up its turn, as there are no events but
-/// messages, which GetMessage waits for.
-fn wait_event(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let mut ctx = Context::of(cpu);
-    thunk::set_ax(&mut ctx, 0);
+/// UserYield16 returned to Yield or to PeekMessage's yield: before the
+/// yield (`data` 0), the task gives up its turn; after it, the task goes
+/// on, its registers as they were.
+pub(super) fn post_yield(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
+    if data.first() == Some(&0) {
+        yield_and_receive(cpu, *ctx);
+    } else {
+        crate::win32::system::load_context(cpu, ctx);
+    }
+    None
+}
+
+/// DirectedYield(task): the running task gives up its turn, and `task`
+/// has the next one if it can run, before the other tasks that are
+/// ready, as with a message sent to it (task::hand_turn). A handle that
+/// is no task's, or the running task's own, makes it Yield.
+fn directed_yield(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    direct_turn(cpu, args[0] as u16);
+    let ctx = Context::of(cpu);
     task::yield_now(cpu, ctx);
     None
+}
+
+/// The running task hands the next turn to the task whose handle is
+/// `handle`, if that task hasn't ended (task::hand_turn).
+fn direct_turn(cpu: &mut Cpu, handle: u16) {
+    let win16 = &cpu.bus.win32.win16;
+    let to = super::live_task(win16, handle).map(|t| win16.tasks[t].tid);
+    let from = crate::win32::user32::current_tid(cpu);
+    if let Some(to) = to {
+        task::hand_turn(&mut cpu.bus.win32, from, to);
+    }
+}
+
+/// WaitEvent(task): an event the task has (PostEvent's, or the one
+/// LoadModule gives a new task) is taken, and the task goes on: 0, as
+/// it didn't wait. Without one, the running task gives up its turn, as
+/// there are no other events but messages, which GetMessage waits for,
+/// and gets 1 when its turn comes again. Another task's handle with no
+/// event gives 1 at once: a task waits for its own events only (Wine's
+/// WaitEvent16, which keeps the count where Windows 3.1's TDB has it).
+fn wait_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let handle = args[0] as u16;
+    if task::take_event(cpu, handle) {
+        return Some(0);
+    }
+    if !task::is_running_task(cpu, handle) {
+        return Some(1);
+    }
+    let mut ctx = Context::of(cpu);
+    thunk::set_ax(&mut ctx, 1);
+    task::yield_now(cpu, ctx);
+    None
+}
+
+/// PostEvent(task): an event for the task (0 for the running one), which
+/// its next WaitEvent takes without waiting.
+fn post_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    task::post_event(cpu, args[0] as u16);
+    Some(0)
 }
 
 /// GetCurrentTask: the task in AX, the first task in DX.
@@ -792,7 +960,7 @@ fn get_current_task(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 fn get_current_pdb(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(super::current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].psp) as u32)
+    Some(dos::current_pdb(cpu).unwrap_or(0) as u32)
 }
 
 fn get_num_tasks(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -809,14 +977,7 @@ fn get_num_tasks(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 fn is_task(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let h = args[0] as u16;
-    Some(
-        cpu.bus
-            .win32
-            .win16
-            .tasks
-            .iter()
-            .any(|t| t.exit_code.is_none() && t.handle == h && h != 0) as u32,
-    )
+    Some(super::live_task(&cpu.bus.win32.win16, h).is_some() as u32)
 }
 
 fn get_task_ds(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -859,6 +1020,36 @@ fn output_debug_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let text = super::string(cpu, args[0]);
     cpu.bus
         .log_string(&format!("[W16] Debug: {}", text.trim_end()));
+    Some(0)
+}
+
+/// _DebugOutput(flags, format, ...), cdecl: a message for the debugger,
+/// formatted as wsprintf does with the arguments after `format`. The
+/// retail KERNEL of Windows 3.1 and 95 writes nothing and returns, so
+/// the program goes on whatever the severity; only the debug KERNEL
+/// prints it, and breaks for DBF_FATAL. Here the message goes to the
+/// log, with the severity in the flags' top two bits (DBF_TRACE,
+/// DBF_WARNING, DBF_ERROR, DBF_FATAL) and the flags themselves.
+fn debug_output(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // The variable arguments follow the return address, the flags and
+    // the format's far pointer.
+    let base = cpu.seg_cache(Seg::SS).base;
+    let list = base.wrapping_add(cpu.sp() as u32 + 10);
+    let flags = args[0] as u16;
+    let text = super::user::format_bytes(cpu, args[1], list);
+    let text = String::from_utf8_lossy(&text);
+    let level = match flags >> 14 {
+        0 => "trace",
+        1 => "warning",
+        2 => "error",
+        _ => "fatal",
+    };
+    cpu.bus.log_string(&format!(
+        "[W16] _DebugOutput ({}, flags {:04X}): {}",
+        level,
+        flags,
+        text.trim_end()
+    ));
     Some(0)
 }
 
@@ -1001,23 +1192,11 @@ fn patch_code_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(module::patch_code_handle(cpu, args[0] as u16))
 }
 
-/// The directory of the running task's program, for the libraries it
-/// loads.
-fn task_dir(cpu: &Cpu) -> String {
-    let Some(t) = super::current_task(cpu) else {
-        return String::new();
-    };
-    let handle = cpu.bus.win32.win16.tasks[t].module;
-    super::module_index(cpu, handle)
-        .map(|i| crate::win32::loader::directory_of(&cpu.bus.win32.win16.modules[i].path))
-        .unwrap_or_default()
-}
-
 /// LoadLibrary: the library and those it imports from loaded, their
 /// entry points run; its instance, or an error below 32.
 fn load_library(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let name = super::string(cpu, args[0]);
-    let dir = task_dir(cpu);
+    let dir = module::task_dir(cpu);
     let mut inits = Vec::new();
     let index = match module::load(cpu, &name, &dir, &mut inits) {
         Ok(index) => index,
@@ -1063,11 +1242,23 @@ fn free_library(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// GetModuleHandle(name): a module name's module, or with a selector of
 /// 0 the module of the instance it is.
 fn get_module_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // Only a read of the module table, which no service an idle proof
+    // follows changes: a proof goes through it. A program that waits for
+    // a task it started to end asks it and GetModuleUsage in every pass
+    // of its PeekMessage loop (Memphis Math's INSTALL.EXE, #1775).
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     if args[0] >> 16 == 0 {
         let index = super::module_index(cpu, args[0] as u16);
         return Some(index.map_or(0, |i| cpu.bus.win32.win16.modules[i].handle) as u32);
     }
-    let name = super::string(cpu, super::linear(cpu, args[0]));
+    let at = super::linear(cpu, args[0]);
+    let bytes = super::string_bytes(cpu, at, 0x1_0000);
+    // A selector that isn't there gives no address, and nothing is read.
+    if at != 0 {
+        crate::idle::reads_also(cpu, at, bytes.len() as u32 + 1);
+    }
+    let name = crate::dosstr::from_bytes(&bytes);
     let base = name
         .rsplit(['\\', '/', ':'])
         .next()
@@ -1087,7 +1278,11 @@ fn get_module_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
+/// GetModuleUsage(module): how many times the module is loaded.
 fn get_module_usage(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // A read of the module table, as GetModuleHandle's.
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     let index = super::module_index(cpu, args[0] as u16);
     Some(index.map_or(0, |i| cpu.bus.win32.win16.modules[i].refs) as u32)
 }
@@ -1152,8 +1347,9 @@ fn get_proc_address(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// GetExePtr(handle): the module of an instance, a task or a module.
 fn get_exe_ptr(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let h = args[0] as u16;
-    if let Some(t) = cpu.bus.win32.win16.tasks.iter().find(|t| t.handle == h) {
-        return Some(t.module as u32);
+    let win16 = &cpu.bus.win32.win16;
+    if let Some(t) = super::live_task(win16, h) {
+        return Some(win16.tasks[t].module as u32);
     }
     let index = super::module_index(cpu, h);
     Some(index.map_or(0, |i| cpu.bus.win32.win16.modules[i].handle) as u32)
@@ -1212,7 +1408,10 @@ fn get_instance_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// MakeProcInstance(function, instance): a thunk that loads AX with the
 /// instance's data segment, for an exported function whose prologue
-/// takes DS from AX, and jumps to it.
+/// takes DS from AX, and jumps to it. With no instance the thunk loads
+/// the caller's DS, as Wine's MakeProcInstance does: a program's
+/// exported function has the prologue "nop; nop", and called without a
+/// thunk it would run on whatever AX its caller left.
 fn make_proc_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (function, instance) = (args[0], args[1] as u16);
     if function == 0 {
@@ -1221,14 +1420,14 @@ fn make_proc_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // A library's functions load their own data segment.
     let library = super::module_index(cpu, (function >> 16) as u16)
         .is_some_and(|i| cpu.bus.win32.win16.modules[i].flags & rust_dos_ne::LIBMODULE != 0);
-    if instance == 0 || library {
+    let sel = match instance {
+        0 => Context::of(cpu).seg[Seg::DS as usize],
+        instance => global::handle_to_sel(instance),
+    };
+    if sel == 0 || library {
         return Some(function);
     }
-    Some(thunk::instance_thunk(
-        cpu,
-        function,
-        global::handle_to_sel(instance),
-    ))
+    Some(thunk::instance_thunk(cpu, function, sel))
 }
 
 /// WinExec(command line, show): the program as a new task; its instance,
@@ -1240,10 +1439,26 @@ fn win_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Some(n) => (&line[..n], line[n..].trim_start()),
         None => (line, ""),
     };
-    Some(match task::exec(cpu, path, arguments, args[1] as u16) {
-        Ok(instance) => instance as u32,
-        Err(code) => code as u32,
-    })
+    let started = task::exec(cpu, path, arguments, args[1] as u16);
+    exec_result(cpu, started)
+}
+
+/// What WinExec and LoadModule give: the instance, or the error below
+/// 32. A task they started runs first, and the caller gets the instance
+/// when the new task yields (`task::after_exec`).
+fn exec_result(cpu: &mut Cpu, started: Result<task::Started, u16>) -> Option<u32> {
+    match started {
+        Ok(started) => {
+            let mut ctx = Context::of(cpu);
+            thunk::set_ax(&mut ctx, started.instance);
+            if task::after_exec(cpu, ctx, &started) {
+                None
+            } else {
+                Some(started.instance as u32)
+            }
+        }
+        Err(code) => Some(code as u32),
+    }
 }
 
 /// LoadModule(name, parameters): WinExec's, with the command tail and
@@ -1264,10 +1479,8 @@ fn load_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         1
     };
-    Some(match task::exec(cpu, &path, arguments.trim(), show) {
-        Ok(instance) => instance as u32,
-        Err(code) => code as u32,
-    })
+    let started = task::exec(cpu, &path, arguments.trim(), show);
+    exec_result(cpu, started)
 }
 
 // Resources.
@@ -1520,7 +1733,7 @@ pub(super) fn open_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             path.extend_from_slice(&name);
             candidates.push(path);
         }
-        let dir = task_dir(cpu);
+        let dir = module::task_dir(cpu);
         if !dir.is_empty() {
             let mut path = crate::dosstr::to_bytes(&dir);
             path.push(b'\\');
@@ -1735,4 +1948,128 @@ fn lstrcat(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     text.push(0);
     super::poke(cpu, to + len, &text);
     Some(args[0])
+}
+
+/// GetVDMPointer32W(address, protected): the flat address of a 16:16
+/// address (`protected` not 0) or of a real mode segment:offset one.
+fn get_vdm_pointer32w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let address = args[0];
+    Some(if args[1] as u16 != 0 {
+        super::linear(cpu, address)
+    } else {
+        ((address >> 16) << 4) + (address & 0xFFFF)
+    })
+}
+
+/// The parameters a generic thunk passes on, from the 16-bit stack at
+/// `at`, where the caller pushed `count` of them: as `order` says which
+/// one each is (Pascal's last first, C's first first), the 16:16
+/// addresses whose bits are set in `mask` made flat (bit n for the nth
+/// one on the stack). As many as there are on the stack's segment at
+/// most, so that a wrong count doesn't read past it.
+fn generic_parameters(cpu: &mut Cpu, at: u16, count: u32, mask: u32, pascal: bool) -> Vec<u32> {
+    let ss = cpu.seg_cache(Seg::SS);
+    let base = ss.base;
+    let room = (ss.limit.min(0xFFFF) + 1).saturating_sub(at as u32);
+    let count = count.min(room / 4) as usize;
+    crate::idle::reads_also(cpu, base.wrapping_add(at as u32), 4 * count as u32);
+    let mut params = vec![0; count];
+    for i in 0..count {
+        let value = cpu
+            .bus
+            .guest_read_32(base.wrapping_add(at as u32 + 4 * i as u32));
+        let value = if i < 32 && mask & 1 << i != 0 {
+            super::linear(cpu, value)
+        } else {
+            value
+        };
+        params[if pascal { count - 1 - i } else { i }] = value;
+    }
+    params
+}
+
+/// _CallProcEx32W's flag in the count: the 32-bit function is C's.
+const CPEX_DEST_CDECL: u32 = 0x8000_0000;
+
+/// CallProc32W(p1, ..., pn, proc, mask, n), Pascal's with as many
+/// parameters as the caller says: call the 32-bit `proc` with p1 to pn,
+/// those that `mask` names made flat (bit 0 for pn, the last), as
+/// Windows 95's KERNEL does for the generic thunks. It takes them all
+/// off the stack, so the 32-bit function returns straight to the caller,
+/// with what it returned in DX:AX.
+fn call_proc32w(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let mut ctx = Context::of(cpu);
+    let base = cpu.seg_cache(Seg::SS).base;
+    let sp = cpu.sp();
+    let word = |cpu: &mut Cpu, at: u16| cpu.bus.guest_read_32(base.wrapping_add(at as u32));
+    let back = word(cpu, sp);
+    let count = word(cpu, sp.wrapping_add(4));
+    let mask = word(cpu, sp.wrapping_add(8));
+    let proc = word(cpu, sp.wrapping_add(12));
+    // Its arguments are read here, not by builtin::call.
+    crate::idle::reads_also(cpu, base.wrapping_add(sp as u32 + 4), 12);
+    let params = generic_parameters(cpu, sp.wrapping_add(16), count, mask, true);
+    let popped = 16 + 4 * params.len() as u32;
+    ctx.gpr[ESP] = ctx.gpr[ESP] & 0xFFFF_0000 | (sp as u32 + popped) & 0xFFFF;
+    ctx.seg[Seg::CS as usize] = (back >> 16) as u16;
+    ctx.eip = back & 0xFFFF;
+    thunk::enter32(cpu, ctx, proc, &params, thunk::POST_PLAIN, Vec::new());
+    None
+}
+
+/// _CallProcEx32W(n, mask, proc, p1, ..., pn), C's: CallProc32W's call
+/// with the parameters in the order C pushes them, bit 0 of `mask` for
+/// p1, and left on the stack for the caller to take off. The count's
+/// top bit, CPEX_DEST_CDECL in wownt16.h, says the 32-bit function is
+/// C's rather than stdcall: either way the 16-bit stack is restored
+/// after it, so only the count below it matters here.
+fn call_proc_ex32w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[count, mask, proc] = args else {
+        unreachable!()
+    };
+    let count = count & !CPEX_DEST_CDECL;
+    let at = cpu.sp().wrapping_add(16);
+    let params = generic_parameters(cpu, at, count, mask, false);
+    thunk::call32(cpu, proc, &params, thunk::POST_PLAIN, Vec::new());
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::win32::user32::message::tests::win16_process;
+
+    /// DirectedYield hands its turn to the task it names, before another
+    /// task that is ready, and its caller waits for its turn too: Memphis
+    /// Math's login yields so to the story it closes. A task that ended,
+    /// or a handle that is no task's, gets no turn, and the call is a
+    /// plain Yield.
+    #[test]
+    fn directed_yield_hands_the_named_task_the_next_turn() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        win16_process(&mut cpu, &[1, 2, 3]);
+        for (t, handle) in cpu.bus.win32.win16.tasks.iter_mut().zip([0x10, 0x20, 0x30]) {
+            t.handle = handle;
+        }
+        // Thread 1 runs and holds the lock until it yields, which lets go
+        // of it (task::yield_now).
+        let turn = |cpu: &mut Cpu, handle| {
+            task::entered(&mut cpu.bus.win32, 1);
+            direct_turn(cpu, handle);
+            cpu.bus.win32.win16.lock = 0;
+        };
+        // The threads' places in the process: 0 runs task 1, 1 task 2 and
+        // 2 task 3.
+        let may_run = |cpu: &Cpu, t| task::may_run(&cpu.bus.win32, 0, t);
+        turn(&mut cpu, 0x30);
+        assert!(may_run(&cpu, 2));
+        assert!(!may_run(&cpu, 1) && !may_run(&cpu, 0));
+        // Task 3 ran; a handle that is no task's hands no turn.
+        task::entered(&mut cpu.bus.win32, 3);
+        turn(&mut cpu, 0x1234);
+        assert_eq!(cpu.bus.win32.win16.directed, 0);
+        cpu.bus.win32.win16.tasks[1].exit_code = Some(0);
+        turn(&mut cpu, 0x20);
+        assert_eq!(cpu.bus.win32.win16.directed, 0);
+    }
 }

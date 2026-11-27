@@ -666,7 +666,8 @@ mod tests {
     #[test]
     fn a_state_from_before_the_pll_loads_at_60_hz() {
         // A state saved before the PLL's registers were kept ends where
-        // they would begin: the select pins chose the clock then.
+        // they would begin: the select pins chose the clock then. What
+        // was added after them (the setup engine's slot order) goes too.
         use crate::savestate::{Reader, State, Writer};
         let v = at_75_hz();
         let mut w = Writer::new();
@@ -674,6 +675,7 @@ mod tests {
         let mut pll = Writer::new();
         v.pll.save(&mut pll);
         v.pll_high.save(&mut pll);
+        v.sslots_swapped.save(&mut pll);
         let old = &w.buf[..w.buf.len() - pll.buf.len()];
         let mut loaded = Voodoo::with_workers(Board::Voodoo2, 0);
         loaded.load(&mut Reader::new(old)).unwrap();

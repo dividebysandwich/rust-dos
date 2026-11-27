@@ -58,10 +58,7 @@ pub fn switch(cpu: &mut crate::cpu::Cpu, setup: VideoSetup) {
         cpu.bus.vga.mark_dirty_full();
     }
     let row = row.min(cpu.bus.text_rows() as u8 - 1);
-    cpu.bus.write_8(0x0450, col);
-    cpu.bus.write_8(0x0451, row);
-    cpu.bus.cursor_x = col as usize;
-    cpu.bus.cursor_y = row as usize;
+    cpu.bus.set_console_cursor(col as usize, row as usize);
 }
 
 /// The text cursor's scanlines for a text mode with `height` scanlines to
@@ -71,6 +68,35 @@ pub fn cursor_shape(adapter: Adapter, height: u16) -> u16 {
         (Adapter::Cga | Adapter::Tandy | Adapter::Pcjr, _) | (_, 8) => 0x0607,
         (_, 14) => 0x0B0C,
         _ => 0x0D0E,
+    }
+}
+
+/// The scanlines a VGA BIOS gives the text mode `mode` (0-3, 7) at its
+/// next mode set, as INT 10h AH=12h BL=30h selected them in `flags`, BDA
+/// 0489h, bits 7 and 4: 200 (10), 350 (00) or 400 (01). Mode 7 has no
+/// 200-line form and takes 350. 400 on other adapters and in the graphics
+/// modes, whose registers this doesn't change. The caller reads `flags`
+/// where its other BIOS data is: through the guest's paging in an
+/// INT 10h service, whose BDA may be a DOS box's own copy.
+pub fn text_lines(adapter: Adapter, mode: u8, flags: u8) -> u16 {
+    if !adapter.vga_bios() {
+        return 400;
+    }
+    match (mode, flags & 0x90) {
+        (0x00..=0x03 | 0x07, 0x10) => 400,
+        (0x00..=0x03, 0x80) => 200,
+        (0x00..=0x03 | 0x07, _) => 350,
+        _ => 400,
+    }
+}
+
+/// The font height of a text mode at `lines` scanlines on a VGA: the 8x8
+/// font at 200, 8x14 at 350 and 8x16 at 400, 25 rows of each.
+pub fn text_lines_font(lines: u16) -> u16 {
+    match lines {
+        200 => 8,
+        350 => 14,
+        _ => 16,
     }
 }
 
@@ -95,25 +121,72 @@ pub fn reset_for_shell(bus: &mut Bus) {
     bus.write_8(0x0451, 0); // Cursor row
     bus.write_8(0x0465, 0x29);
     bus.write_8(0x0466, 0x30);
+    let lines = text_lines(adapter, mode as u8, bus.read_8(0x0489));
     let height = match adapter {
         Adapter::Cga | Adapter::Tandy | Adapter::Pcjr => 0,
         Adapter::Ega | Adapter::Hercules => 14,
-        _ => 16,
+        _ => text_lines_font(lines),
     };
     if adapter.ega_bios() {
         bus.write_8(0x0484, 24); // 25 rows
-        bus.write_16(0x0485, height); // 8x16 font cell
+        bus.write_16(0x0485, height); // the font's cell
     }
     bus.write_16(0x0460, cursor_shape(adapter, if adapter.mono_only() { 14 } else { height }));
     bus.video_mode = mode;
-    bus.vga.set_video_mode(mode);
+    bus.vga.set_video_mode_lines(mode, lines);
     if gray_summing(bus) {
         bus.vga.sum_to_gray(0..256);
     }
     bus.vbe.reset();
+    load_mode_font(bus);
     // A ToadForce counts the retraces of the text mode's timing from
     // here.
     bus.toadforce_retime();
+}
+
+/// The ROM font of a character height: 8x8 up to 10 lines, 8x14 up to 14
+/// and 8x16 above, as the text modes' cells take them.
+pub fn rom_font(height: u16) -> (&'static [u8], usize) {
+    match height {
+        1..=10 => (super::font_8x8(), 8),
+        11..=14 => (super::font_8x14(), 14),
+        _ => (super::font_8x16(), 16),
+    }
+}
+
+/// The text mode's font into plane 2 as an EGA's or VGA's BIOS loads it
+/// at a mode set (`load_text_font`), and map 0 selected for all
+/// characters. Nothing on other adapters, or in a graphics mode.
+pub fn load_mode_font(bus: &mut Bus) {
+    if load_text_font(bus) {
+        bus.vga.sequencer_regs[0x03] = 0;
+    }
+}
+
+/// The ROM font of the text mode's character height (BDA 0485h) into map
+/// 0 of plane 2, with the alternate glyphs of 9-dot cells in the
+/// monochrome mode, leaving Character Map Select as it is. False, with
+/// nothing loaded, on other adapters or in a graphics mode.
+pub fn load_text_font(bus: &mut Bus) -> bool {
+    if !bus.vga.adapter.ega_bios() || !bus.video_mode.is_text() {
+        return false;
+    }
+    let (font, height) = rom_font(bus.read_16(0x0485));
+    bus.vga.load_font(0, 0, height, font);
+    let alternate = match height {
+        16 => super::FONT_9X16_ALTERNATE,
+        14 => super::FONT_9X14_ALTERNATE,
+        _ => &[],
+    };
+    if bus.video_mode == VideoMode::Mono80x25 {
+        for entry in alternate
+            .chunks_exact(height + 1)
+            .take_while(|entry| entry[0] != 0)
+        {
+            bus.vga.load_font(0, entry[0] as usize, height, &entry[1..]);
+        }
+    }
+    true
 }
 
 /// Whether the VGA BIOS sums the palettes it loads to grey (BDA 0489h bit

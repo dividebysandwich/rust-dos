@@ -111,43 +111,6 @@ fn apply(m: &M, v: [f64; 4]) -> [f64; 4] {
     std::array::from_fn(|row| (0..4).map(|k| m[k * 4 + row] * v[k]).sum())
 }
 
-/// The inverse of `m`, None for a matrix that has none.
-fn invert(m: &M) -> Option<M> {
-    // Gauss-Jordan elimination with partial pivoting, on rows of the
-    // matrix as OpenGL lays it out (column-major: element (r, c) is
-    // m[c * 4 + r]).
-    let mut a = [[0.0f64; 8]; 4];
-    for (r, row) in a.iter_mut().enumerate() {
-        for c in 0..4 {
-            row[c] = m[c * 4 + r];
-        }
-        row[4 + r] = 1.0;
-    }
-    for col in 0..4 {
-        let pivot = (col..4).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
-        if a[pivot][col] == 0.0 {
-            return None;
-        }
-        a.swap(col, pivot);
-        let p = a[col][col];
-        for v in a[col].iter_mut() {
-            *v /= p;
-        }
-        for r in 0..4 {
-            if r != col {
-                let f = a[r][col];
-                if f != 0.0 {
-                    let pivot_row = a[col];
-                    for (v, p) in a[r].iter_mut().zip(pivot_row) {
-                        *v -= f * p;
-                    }
-                }
-            }
-        }
-    }
-    Some(std::array::from_fn(|i| a[i % 4][4 + i / 4]))
-}
-
 /// gluProject's arithmetic: the window coordinates of `obj`, None when
 /// the point goes to w = 0.
 pub fn project(obj: [f64; 3], model: &M, proj: &M, vp: [i32; 4]) -> Option<[f64; 3]> {
@@ -169,7 +132,7 @@ pub fn project(obj: [f64; 3], model: &M, proj: &M, vp: [i32; 4]) -> Option<[f64;
 /// point `win`, None when the matrices have no inverse or the point
 /// goes to w = 0.
 pub fn un_project(win: [f64; 3], model: &M, proj: &M, vp: [i32; 4]) -> Option<[f64; 3]> {
-    let inverse = invert(&mul(proj, model))?;
+    let inverse = gl::invert_doubles(&mul(proj, model))?;
     let x = (win[0] - f64::from(vp[0])) / f64::from(vp[2]);
     let y = (win[1] - f64::from(vp[1])) / f64::from(vp[3]);
     let v = [x, y, win[2]].map(|c| c * 2.0 - 1.0);
@@ -377,7 +340,7 @@ mod tests {
     fn a_singular_matrix_has_no_inverse() {
         let mut m = IDENTITY;
         m[10] = 0.0;
-        assert!(invert(&m).is_none());
-        assert!(close(&invert(&IDENTITY).unwrap(), &IDENTITY));
+        assert!(gl::invert_doubles(&m).is_none());
+        assert!(close(&gl::invert_doubles(&IDENTITY).unwrap(), &IDENTITY));
     }
 }

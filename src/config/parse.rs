@@ -103,6 +103,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
             | Section::Shell
             | Section::Vr
             | Section::Vfx1
+            | Section::Hotkeys
             | Section::Game
             | Section::Gamepad
             | Section::Install => {
@@ -200,8 +201,24 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 value
                             )),
                         },
+                        "renderer" => match super::Renderer::parse(value) {
+                            Some(renderer) => {
+                                config.renderer = Some(renderer);
+                                config.voodoo_renderer = None;
+                                config.toadforce_renderer = None;
+                                let at = Some((index + 1, line.to_string()));
+                                config.renderer_lines = [at.clone(), at];
+                            }
+                            None => warn(format!(
+                                "invalid renderer '{value}' (auto, opengl or software)"
+                            )),
+                        },
                         "toadforce_renderer" => match crate::toadforce::Renderer::parse(value) {
-                            Some(renderer) => config.toadforce_renderer = Some(renderer),
+                            Some(renderer) => {
+                                config.toadforce_renderer = Some(renderer);
+                                config.renderer_lines[1] = Some((index + 1, line.to_string()));
+                                config.renderer_old_lines.push((index + 1, line.to_string()));
+                            }
                             None => warn(format!(
                                 "invalid toadforce_renderer '{}' (auto, opengl or software)",
                                 value
@@ -249,7 +266,11 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             None => warn(format!("invalid voodoo_memory '{}' (4, 8 or 12)", value)),
                         },
                         "voodoo_renderer" => match crate::voodoo::Renderer::parse(value) {
-                            Some(renderer) => config.voodoo_renderer = Some(renderer),
+                            Some(renderer) => {
+                                config.voodoo_renderer = Some(renderer);
+                                config.renderer_lines[0] = Some((index + 1, line.to_string()));
+                                config.renderer_old_lines.push((index + 1, line.to_string()));
+                            }
                             None => warn(format!("invalid voodoo_renderer '{}' (software or opengl)", value)),
                         },
                         "voodoo_texture_sampling" => match crate::voodoo::TextureSampling::parse(value) {
@@ -378,6 +399,18 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 Win32Locale::ALL.map(Win32Locale::name).join(", ")
                             )),
                         },
+                        "win32_shims" => match crate::win32::shims::by_name(value) {
+                            Some(set) => config.win32_shims = Some(set),
+                            None => warn(format!(
+                                "invalid win32_shims '{}' (one of {})",
+                                value,
+                                crate::win32::shims::SETS
+                                    .iter()
+                                    .map(|(name, _)| *name)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )),
+                        },
                         "win32_depth" => match DesktopDepth::parse(value) {
                             Some(depth) => config.win32_depth = Some(depth),
                             None => warn(format!(
@@ -410,6 +443,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "floppy_controller" => match parse_bool(value) {
                             Some(on) => config.floppy_controller = Some(on),
                             None => warn(format!("invalid floppy_controller '{}' (true or false)", value)),
+                        },
+                        "ansi_sys" => match parse_bool(value) {
+                            Some(on) => config.ansi_sys = Some(on),
+                            None => warn(format!("invalid ansi_sys '{}' (true or false)", value)),
                         },
                         "dos_version" => match DosVersion::parse(value) {
                             Some(version) => config.dos_version = Some(version),
@@ -706,6 +743,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     continue;
                 }
 
+                if section == Section::Hotkeys {
+                    if let Err(e) = config.hotkeys.set(key, value) {
+                        warn(e);
+                    }
+                    continue;
+                }
+
                 if section == Section::Vr {
                     vr_before_auto &= !key.eq_ignore_ascii_case("msaa");
                     if let Err(e) = config.vr.set(key, value, base_dir) {
@@ -775,6 +819,18 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
     }
     if vr_before_auto {
         config.vr.from_before_auto();
+    }
+    // Two actions on one key, of the lines and the profile together.
+    warnings.extend(config.hotkeys.resolve().1);
+    // Lines that ask for the 3dfx cards on OpenGL and the ToadForce in
+    // software, which `renderer` has no value for, are an error. One
+    // card's part may come from a `renderer` line of this text before the
+    // other's old line; text read over other settings is checked alone.
+    config.errors.extend(config.renderer_conflict(|number| format!("line {number}")));
+    // The old settings are read, with a warning that they will stop
+    // working, which names the line to write in their place.
+    if let Some(value) = config.renderer() {
+        warnings.extend(config.renderer_deprecation(value));
     }
     config.warnings = warnings;
     config

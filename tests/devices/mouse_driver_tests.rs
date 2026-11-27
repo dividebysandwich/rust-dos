@@ -660,6 +660,88 @@ fn a_range_set_after_the_mode_stays() {
     assert_eq!(cpu.bus.mouse.max_y, 399);
 }
 
+/// Knights of Xentar sets mode 12h, has the CRTC show 400 of its 480 lines
+/// (Vertical Display End 18Fh), and draws its cursor at the driver's y. A
+/// pointer on the picture's row 295 is the driver's y 295, with the
+/// game's own range and with the driver's whole-mode range alike: the
+/// mode's 480 over the picture's 400 put it at y 354, on "Exit to MSDOS"
+/// instead of "Start a new game".
+#[test]
+fn a_crtc_showing_fewer_rows_maps_the_picture_row_for_row() {
+    use rust_dos::video::{Frame, frame_size, overlay};
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0012, 0);
+    call(&mut cpu, 0x0000);
+    cpu.bus.io_write(0x3D4, 0x12);
+    cpu.bus.io_write(0x3D5, 0x8F);
+    assert_eq!(frame_size(&cpu.bus), (640, 400));
+    let m = &cpu.bus.mouse;
+    assert_eq!(
+        (m.min_y, m.max_y),
+        (0, 479),
+        "the reset's range stays the mode's"
+    );
+    assert_eq!(m.virtual_screen(&cpu.bus), (640, 400));
+    let frame = Frame::new(640, 400);
+    assert_eq!(
+        overlay::frame_to_mouse(&cpu.bus, &frame, (320, 295)),
+        (320, 295)
+    );
+    assert_eq!(
+        overlay::screen_to_mouse(&cpu.bus, (320, 295)),
+        (320, 295),
+        "/api/input/mouse in screenshot pixels maps the same"
+    );
+
+    // The game's range for its title menu.
+    range(&mut cpu, 0x0007, 194, 445);
+    range(&mut cpu, 0x0008, 286, 387);
+    assert_eq!(cpu.bus.mouse.virtual_screen(&cpu.bus), (640, 400));
+    assert_eq!(
+        overlay::frame_to_mouse(&cpu.bus, &frame, (320, 295)),
+        (320, 295)
+    );
+    assert_eq!(overlay::screen_to_mouse(&cpu.bus, (320, 295)), (320, 295));
+    assert_eq!(
+        overlay::frame_motion_to_mouse(&cpu.bus, &frame, (3.0, 3.0)),
+        (3.0, 3.0)
+    );
+
+    // A range past the picture is still the program's screen.
+    range(&mut cpu, 0x0008, 0, 799);
+    assert_eq!(cpu.bus.mouse.virtual_screen(&cpu.bus), (640, 800));
+}
+
+/// A CRTC showing more rows than the mode has (a 320x240 "mode X" set
+/// from mode 13h) leaves the driver's 200 rows over the picture until the
+/// program sets a range of its own.
+#[test]
+fn a_crtc_showing_more_rows_keeps_the_modes_range() {
+    use rust_dos::video::frame_size;
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0013, 0);
+    call(&mut cpu, 0x0000);
+    // Mode X's vertical timing: 525 scanlines, 480 shown, 240 rows
+    // doubled. CR11 first, to lift the protection of CR00-07.
+    for (index, value) in [
+        (0x11, 0x2C),
+        (0x06, 0x0D),
+        (0x07, 0x3E),
+        (0x10, 0xEA),
+        (0x11, 0xAC),
+        (0x12, 0xDF),
+        (0x15, 0xE7),
+        (0x16, 0x06),
+    ] {
+        cpu.bus.io_write(0x3D4, index);
+        cpu.bus.io_write(0x3D5, value);
+    }
+    assert_eq!(frame_size(&cpu.bus), (640, 480));
+    assert_eq!(cpu.bus.mouse.virtual_screen(&cpu.bus), (640, 200));
+    range(&mut cpu, 0x0008, 0, 239);
+    assert_eq!(cpu.bus.mouse.virtual_screen(&cpu.bus), (640, 240));
+}
+
 #[test]
 fn a_range_of_a_narrow_modes_width_spans_its_pixels() {
     // Dark Sun 2 sets x 0-319 in mode 13h and draws its cursor at the

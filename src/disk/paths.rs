@@ -5,6 +5,24 @@ use super::*;
 /// The entries of a host folder, as (host name, DOS name).
 type HostEntries = Rc<[(String, String)]>;
 
+/// A DOS path on a host drive, as `DiskController::walk_host` finds it.
+pub(super) struct HostWalk {
+    /// The host path: each component the entry's long name, or the name
+    /// to create it under where it matches none.
+    pub path: PathBuf,
+    /// The DOS path from the root in short names.
+    pub dos: String,
+    /// A component isn't among its folder's entries, so the path names
+    /// nothing on the host.
+    pub missing: bool,
+    /// Each component matched an entry of its folder, so `path` has the
+    /// names the host has.
+    pub matched: bool,
+    /// Each component but the last matched one: the folder `path` is in
+    /// has the names the host has.
+    pub dirs_matched: bool,
+}
+
 impl DiskController {
     // ========================================================================
     // PATH RESOLUTION
@@ -28,18 +46,24 @@ impl DiskController {
     /// Logical path components of `rest` on `drive`, applying the drive's
     /// current directory for relative paths and folding "." / "..". Each
     /// component is the name DOS packs it into (`dos_component`).
-    pub(super) fn logical_components<'a>(drive: &'a Drive, rest: &'a str) -> Vec<&'a str> {
-        let mut components: Vec<&str> = Vec::new();
+    pub(super) fn logical_components<'a>(
+        &self,
+        drive: &'a Drive,
+        rest: &'a str,
+    ) -> Vec<Cow<'a, str>> {
+        let mut components: Vec<Cow<'a, str>> = Vec::new();
         if !rest.starts_with('\\') {
-            components.extend(drive.current_dir.split('\\').filter(|p| !p.is_empty()));
+            let current = drive.current_dir.split('\\').filter(|p| !p.is_empty());
+            components.extend(current.map(Cow::Borrowed));
         }
         for part in rest.split('\\') {
-            match Self::dos_component(part) {
+            let part = self.dos_component(part);
+            match &*part {
                 "" | "." => {}
                 ".." => {
                     components.pop();
                 }
-                part => components.push(part),
+                _ => components.push(part),
             }
         }
         components
@@ -53,23 +77,36 @@ impl DiskController {
     /// left to drop it: a drive's root is a verbatim path on Windows
     /// (`\\?\`), under which the dot stays, and other hosts keep it too.
     /// "." and ".." stay, padded or not.
-    pub(super) fn dos_component(part: &str) -> &str {
+    ///
+    /// The spaces that end the name before the dot are padding of its 8
+    /// characters too, outside a long-name call: Dune CD's installer
+    /// makes its launcher as "dune    .bat", DUNE.BAT, which the launcher
+    /// opens as "dune.bat". A long name keeps them, as Windows does.
+    pub(super) fn dos_component<'a>(&self, part: &'a str) -> Cow<'a, str> {
         let unpadded = part.trim_end_matches(' ');
         if unpadded == "." || unpadded == ".." {
-            return unpadded;
+            return Cow::Borrowed(unpadded);
         }
-        match unpadded.trim_end_matches([' ', '.']) {
-            "" => part,
+        let trimmed = match unpadded.trim_end_matches([' ', '.']) {
+            "" => return Cow::Borrowed(part),
             trimmed => trimmed,
+        };
+        if !self.long_call && let Some((stem, ext)) = trimmed.split_once('.') {
+            let stem_unpadded = stem.trim_end_matches(' ');
+            if stem_unpadded.len() < stem.len() && !stem_unpadded.is_empty() {
+                return Cow::Owned(format!("{stem_unpadded}.{ext}"));
+            }
         }
+        Cow::Borrowed(trimmed)
     }
 
     /// The path `rest` names on a drive held in memory, as `MemFs` keeps
-    /// paths: in DOS names, where `rest` may have long ones.
-    pub(super) fn memory_path(drive: &Drive, rest: &str) -> String {
-        let components = Self::logical_components(drive, rest);
+    /// paths: in DOS names, where `rest` may have long ones, or, in DOS's
+    /// calls, names that DOS cuts to 8.3 (`MemFs::resolve_cut`).
+    pub(super) fn memory_path(&self, drive: &Drive, rest: &str) -> String {
+        let components = self.logical_components(drive, rest);
         match drive.tree() {
-            Some(files) => files.resolve(&components),
+            Some(files) => files.resolve_cut(&refs(&components), !self.long_call),
             None => components.join("\\").to_ascii_uppercase(),
         }
     }
@@ -93,7 +130,7 @@ impl DiskController {
     /// The host path of `rest` on a host drive, and its DOS path from the
     /// root in short names (e.g. "GAMES\DAYOFT~1").
     pub(super) fn resolve_names_on(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String)> {
-        self.walk_host(drive_num, rest).map(|(path, dos, _)| (path, dos))
+        self.walk_host(drive_num, rest).map(|walk| (walk.path, walk.dos))
     }
 
     /// `resolve_names_on`, and whether a component of the path isn't
@@ -104,7 +141,7 @@ impl DiskController {
     /// can't rule out (`entries_settle`) is never missing. None for a path
     /// through one of the host's own files (`host_private`), by its name
     /// or by the host's short name for it.
-    fn walk_host(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String, bool)> {
+    pub(super) fn walk_host(&self, drive_num: u8, rest: &str) -> Option<HostWalk> {
         let drive = self.drive(drive_num)?;
         // Drives held in memory have no host paths; callers look there
         // first (`locate_in_memory`).
@@ -121,16 +158,33 @@ impl DiskController {
         // reads so too (`read_host_entries`), though it may open names in
         // it.
         let mut sure = true;
-        for part in Self::logical_components(drive, rest) {
+        let mut matched = true;
+        let mut dirs_matched = true;
+        for part in self.logical_components(drive, rest) {
+            let part = &*part;
             // The host's own files aren't the drive's (`host_private`):
             // no call reaches them, to open, make, rename or delete.
             if super::host_private(part) {
                 return None;
             }
-            let (entries, found) = self.find_host_entry(&full_path, part);
-            if found.is_none() && Self::host_alias_of_private(&full_path, part) {
+            // DOS's calls cut a name to 8.3: Redguard opens
+            // "MM_SLIDER.GXA", which is MM_SLIDE.GXA on its disc. A host
+            // entry of the whole name comes first, as DOS's calls make a
+            // long name as asked (`new_entry_name`). Both are looked for
+            // in the same entries, so that a miss reads the folder again
+            // once and notes one name missing (`find_host_where`).
+            let find = |entries: &[(String, String)]| {
+                self.host_entry_named(entries, part).or_else(|| {
+                    let cut = self.cut_name(part)?;
+                    self.host_entry_named(entries, &cut)
+                })
+            };
+            let (entries, found) = self.find_host_where(&full_path, part, find);
+            if found.is_none() && Self::host_alias_hidden(&full_path, part, &entries) {
                 return None;
             }
+            dirs_matched = matched;
+            matched &= found.is_some();
             if found.is_none() && sure {
                 if Self::entries_settle(part) && !entries.is_empty() {
                     missing = true;
@@ -138,32 +192,59 @@ impl DiskController {
                     sure = false;
                 }
             }
-            let (host_name, dos_name) = found
-                .unwrap_or_else(|| (super::new_entry_name(part), part.to_ascii_uppercase()));
+            let (host_name, dos_name) =
+                found.unwrap_or_else(|| (self.entry_name(part), part.to_ascii_uppercase()));
             full_path.push(host_name);
             dos_path.push(dos_name);
         }
 
         // Final Security Check
         if full_path.starts_with(root) {
-            Some((full_path, dos_path.join("\\"), missing))
+            Some(HostWalk {
+                path: full_path,
+                dos: dos_path.join("\\"),
+                missing,
+                matched,
+                dirs_matched,
+            })
         } else {
             None
         }
     }
 
+    /// The 8.3 name DOS's calls cut the path component `part` to, where
+    /// that is another name: "MM_SLIDER.GXA" is MM_SLIDE.GXA. None in a
+    /// long-name call, which takes names as they are, and for a name
+    /// DOS couldn't pack (`fat::canonical_name`).
+    fn cut_name(&self, part: &str) -> Option<String> {
+        if self.long_call {
+            return None;
+        }
+        fat::canonical_name(part).filter(|cut| !cut.eq_ignore_ascii_case(part))
+    }
+
     /// Whether `part`, which no entry of the folder `dir` matches, is a
-    /// short name the Windows host has for one of its own files
-    /// (`host_private`): "RUST-D~1" for an overlay's ".rust-dos-deleted"
-    /// on a volume that makes 8.3 names. Only such names ("~") can be
-    /// one, and only a name the host finds is asked for its long name.
-    fn host_alias_of_private(dir: &Path, part: &str) -> bool {
+    /// short name the Windows host has for a file the drive doesn't show
+    /// by that name, so that it names nothing:
+    /// - one of the host's own files (`host_private`): "RUST-D~1" for an
+    ///   overlay's ".rust-dos-deleted" on a volume that makes 8.3 names;
+    /// - one of the folder's `entries`, which has an alias of its own
+    ///   (`HostAliases`): on Windows 9x an entry is found by its alias
+    ///   only, so after "Parent two" (PARENT~1) is renamed to "Parent
+    ///   moved" (PARENT~2), PARENT~1 names nothing, whatever short name
+    ///   the host gave the folder.
+    ///
+    /// Only such names ("~") can be one, and only a name the host finds
+    /// is asked for its long name.
+    fn host_alias_hidden(dir: &Path, part: &str, entries: &[(String, String)]) -> bool {
         if !cfg!(windows) || !part.contains('~') {
             return false;
         }
         std::fs::canonicalize(dir.join(part)).is_ok_and(|long| {
-            long.file_name()
-                .is_some_and(|name| super::host_private(&name.to_string_lossy()))
+            long.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                super::host_private(&name) || entries.iter().any(|(long, _)| *long == name)
+            })
         })
     }
 
@@ -184,10 +265,16 @@ impl DiskController {
     /// the host. Where each is, a stat tells whether the path names a file
     /// or a folder.
     pub(super) fn locate_found(&self, dos_path: &str) -> Option<(u8, PathBuf, bool)> {
+        self.locate_walk(dos_path)
+            .map(|(drive, walk)| (drive, walk.path, walk.missing))
+    }
+
+    /// The drive a DOS path is on, and the path as `walk_host` finds it
+    /// there.
+    pub(super) fn locate_walk(&self, dos_path: &str) -> Option<(u8, HostWalk)> {
         let path_str = dos_path.replace('/', "\\");
         let (drive, rest) = self.split_drive(&path_str)?;
-        let (path, _, missing) = self.walk_host(drive, rest)?;
-        Some((drive, path, missing))
+        Some((drive, self.walk_host(drive, rest)?))
     }
 
     /// The host path of a DOS path, None where it names nothing on the
@@ -197,18 +284,31 @@ impl DiskController {
     }
 
     /// The names of the entries of the directory `dos_dir`, as (long
-    /// name, DOS name), on a host drive and on a drive held in memory: the
-    /// host's names are the long names Windows has, and so are a CD's
-    /// Joliet names. None on disk images, where names are 8.3 alone, and
-    /// for a directory that isn't there. A host folder's are its kept
-    /// entries (`HostDirCache`), shared rather than copied: FindFirstFileA
-    /// asks for them on each call.
+    /// name, DOS name): the host's names are the long names Windows has,
+    /// and so are a CD's Joliet names; a disk image's are the long names
+    /// its long name entries hold, or the DOS name of an entry without
+    /// them. `dos_dir` may have long names, as a Win32 call gives them.
+    /// None for a directory that isn't there. A host folder's are its
+    /// kept entries (`HostDirCache`), shared rather than copied:
+    /// FindFirstFileA asks for them on each call.
     pub fn long_names(&self, dos_dir: &str) -> Option<Rc<[(String, String)]>> {
         let normalized = dos_dir.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized)?;
         let drive = self.drive(drive_num)?;
+        if let Some(volume) = drive.fat() {
+            let dir = volume
+                .dos_path(&refs(&self.logical_components(drive, rest)))
+                .ok()?;
+            let entries = volume.list(&refs(&dir)).ok()?;
+            return Some(
+                entries
+                    .into_iter()
+                    .map(|e| (e.long_name.unwrap_or_else(|| e.name.clone()), e.name))
+                    .collect(),
+            );
+        }
         if let Some(files) = drive.tree() {
-            let dir = Self::memory_path(drive, rest);
+            let dir = self.memory_path(drive, rest);
             return files.is_dir(&dir).then(|| files.long_names(&dir).into());
         }
         drive.host_root()?;
@@ -233,7 +333,7 @@ impl DiskController {
             Some(i) => &rest[..i],
             None => "",
         };
-        let components = Self::logical_components(drive, dir_part);
+        let components = self.logical_components(drive, dir_part);
         Some(format!(
             "{}:\\{}",
             drive_letter(drive_num),
@@ -249,12 +349,39 @@ impl DiskController {
         let normalized = spec.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized)?;
         let drive = self.drive(drive_num)?;
-        let components = Self::logical_components(drive, rest);
+        let components = self.logical_components(drive, rest);
         Some(format!(
             "{}:\\{}",
             drive_letter(drive_num),
             components.join("\\").to_ascii_uppercase()
         ))
+    }
+
+    /// Whether a DOS path names a drive's root: "C:\", "\" on drive C:,
+    /// "C:\." or "C:\GAMES\..". MS-DOS refuses to create, make, delete or
+    /// set the attributes of a root with access denied (05h).
+    pub fn is_root(&self, dos_path: &str) -> bool {
+        self.qualify_path(dos_path)
+            .is_some_and(|full| full.len() == 3)
+    }
+
+    /// The error for a name that isn't there, as MS-DOS gives it: file
+    /// not found (02h) when the folder it is in is there, path not found
+    /// (03h) when that folder isn't, or is a file.
+    pub(super) fn missing_error(&self, dos_path: &str) -> u8 {
+        let Some(full) = self.qualify_path(dos_path) else {
+            return 0x03;
+        };
+        let folder = match full.rsplit_once('\\') {
+            Some((folder, _)) if folder.len() == 2 => format!("{folder}\\"),
+            Some((folder, _)) => folder.to_string(),
+            None => return 0x03,
+        };
+        if self.is_directory(&folder) {
+            0x02
+        } else {
+            0x03
+        }
     }
 
     /// The drive a DOS path is on and the path there, if that drive is
@@ -264,7 +391,7 @@ impl DiskController {
         let normalized = dos_path.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized)?;
         let drive = self.drive(drive_num).filter(|d| d.tree().is_some())?;
-        let path = Self::memory_path(drive, rest);
+        let path = self.memory_path(drive, rest);
         Some((drive_num, drive, path))
     }
 
@@ -283,21 +410,63 @@ impl DiskController {
         let (drive_num, rest) = self.split_drive(&normalized)?;
         let drive = self.drive(drive_num)?;
         let volume = drive.fat()?.clone();
-        let parts = Self::logical_components(drive, rest).into_iter().map(str::to_string).collect();
+        let parts = self
+            .logical_components(drive, rest)
+            .into_iter()
+            .map(Cow::into_owned)
+            .collect();
         Some((drive_num, volume, parts))
     }
 
     /// The file or directory a DOS path names on a drive mounted from a
-    /// disk image: None if the path is on another drive.
+    /// disk image (`fat_find`): None if the path is on another drive.
     pub(super) fn find_fat(&self, dos_path: &str) -> Option<Result<fat::Entry, u8>> {
         let (_, volume, parts) = self.locate_fat(dos_path)?;
-        Some(volume.find(&refs(&parts)))
+        Some(self.fat_find(&volume, &parts))
+    }
+
+    /// The file or directory `parts` names on `volume`, for the call
+    /// running now: a long-name call finds entries by their long names or
+    /// their whole DOS names (`FatVolume::find_long`), DOS's calls by the
+    /// 8.3 names they cut names to (`FatVolume::find`).
+    pub(super) fn fat_find(&self, volume: &FatVolume, parts: &[String]) -> Result<fat::Entry, u8> {
+        if self.long_call {
+            volume.find_long(&refs(parts))
+        } else {
+            volume.find(&refs(parts))
+        }
+    }
+
+    /// The path `parts` names on `volume` in DOS names, as the volume's
+    /// DOS functions take it, for the call running now: a long-name
+    /// call's components are found as `fat_find` finds them, and must be
+    /// there (02h, or 03h for a directory on the way); DOS's calls name
+    /// entries by their DOS names already.
+    pub(super) fn fat_dos_path(
+        &self,
+        volume: &FatVolume,
+        parts: &[String],
+    ) -> Result<Vec<String>, u8> {
+        if self.long_call {
+            volume.dos_path(&refs(parts))
+        } else {
+            Ok(parts.to_vec())
+        }
     }
 
     /// A file on a drive held in memory.
     fn virtual_file(&self, filename: &str) -> Option<&Node> {
         let (_, drive, path) = self.locate_in_memory(filename)?;
         drive.tree()?.file(&path)
+    }
+
+    /// The bytes of a file on a drive held in memory, if it holds them
+    /// itself (a CD image's files are on the disc).
+    pub fn virtual_file_bytes(&self, filename: &str) -> Option<&[u8]> {
+        match self.virtual_file(filename)? {
+            Node::Bytes(bytes) => Some(bytes),
+            Node::Extent(_) => None,
+        }
     }
 
     /// Whether `filename` is a file on a drive held in memory.
@@ -343,13 +512,28 @@ impl DiskController {
         self.is_file(dos_path) || self.is_directory(dos_path)
     }
 
+    /// Whether a rename or move to `dos_path` finds its name taken, as
+    /// MoveFileA and msvcrt's rename check before they rename: by a file
+    /// or directory the drive has, or a system directory. A shown system
+    /// file doesn't take it: deleting one succeeds and changes nothing
+    /// (`delete_file`), so a setup that deletes it and then moves its own
+    /// copy to the name finds it still there, and the file renamed to it
+    /// takes its place (`rename_file`). A move with no delete before it
+    /// succeeds too, where Windows 98 refuses it (#2186).
+    pub fn name_taken(&self, dos_path: &str) -> bool {
+        self.real_is_file(dos_path) || self.is_directory(dos_path)
+    }
+
     /// Where the contents of the file a DOS path names are, on any drive.
     pub fn file_data(&self, dos_path: &str) -> Option<FileData> {
         if let Some(data) = self.system_file(dos_path) {
             return Some(FileData::Memory(data));
         }
         if let Some((_, volume, parts)) = self.locate_fat(dos_path) {
-            let entry = volume.find(&refs(&parts)).ok().filter(|e| !e.is_dir())?;
+            let entry = self
+                .fat_find(&volume, &parts)
+                .ok()
+                .filter(|e| !e.is_dir())?;
             return Some(FileData::Fat(volume, entry));
         }
         match self.locate_in_memory(dos_path) {
@@ -365,10 +549,20 @@ impl DiskController {
     /// kept while the folder doesn't change (`HostDirCache`).
     /// The flag says whether they are the kept ones.
     pub(super) fn host_entries(&self, dir: &Path) -> (Rc<[(String, String)]>, bool) {
-        self.host_dirs.entries(dir, || Self::read_host_entries(dir))
+        self.host_dirs.entries(dir, || self.read_host_entries(dir))
     }
 
-    pub(super) fn read_host_entries(dir: &Path) -> Vec<(String, String)> {
+    /// The entries of the host folder `dir` as they are now, with the
+    /// aliases they keep (`HostAliases`).
+    pub(super) fn read_host_entries(&self, dir: &Path) -> Vec<(String, String)> {
+        let names = Self::host_names(dir);
+        let short = self.host_aliases.assign(dir, &names);
+        names.into_iter().zip(short).collect()
+    }
+
+    /// The names of the entries the host folder `dir` has now, without the
+    /// host's own files (`host_private`), sorted as they are numbered.
+    pub(super) fn host_names(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = hostfs::read_dir(dir)
             .into_iter()
             .flatten()
@@ -376,38 +570,55 @@ impl DiskController {
             .filter(|name| !host_private(name))
             .collect();
         names.sort_by_key(|name| name.to_ascii_uppercase());
-        let short = short_names(&names);
-        names.into_iter().zip(short).collect()
+        names
     }
 
-    /// The entries of the host folder `dir`, and the one named `name`: by
-    /// its long name in any case, or by its short name. A name the kept
-    /// entries lack is looked for in a fresh read, unless a recent read
-    /// lacked it too (`HostDirCache`).
-    ///
-    /// Last comes a host name that is `name` with dots or spaces after
-    /// it, which DOS and Windows drop (`dos_component`): builds before
-    /// they were dropped made "SAVE." on the host for a program's
-    /// "SAVE.", and the program opens it as that name still.
+    /// The entries of the host folder `dir`, and the one named `name`
+    /// (`host_entry_named`). A name the kept entries lack is looked for in
+    /// a fresh read, unless a recent read lacked it too (`HostDirCache`).
     pub(super) fn find_host_entry(
         &self,
         dir: &Path,
         name: &str,
     ) -> (HostEntries, Option<(String, String)>) {
+        self.find_host_where(dir, name, |entries| self.host_entry_named(entries, name))
+    }
+
+    /// The entry of a host folder's `entries` named `name`: by its long
+    /// name in any case, or by its short name.
+    ///
+    /// Last comes a host name that is `name` with the padding the call
+    /// running now drops (`dos_component`): dots or spaces after it, or,
+    /// in a DOS call, spaces before its extension. Builds before they were
+    /// dropped made "SAVE." on the host for a program's "SAVE.", and
+    /// "dune    .bat" for Dune's "dune    .bat", and the program opens it
+    /// as that name still. A long-name call keeps those spaces, so to it
+    /// "read me .txt" is another file than "read me.txt", as on Windows.
+    fn host_entry_named(
+        &self,
+        entries: &[(String, String)],
+        name: &str,
+    ) -> Option<(String, String)> {
         let upper = name.to_ascii_uppercase();
-        let find = |entries: &[(String, String)]| {
-            entries
-                .iter()
-                .find(|(long, _)| long.eq_ignore_ascii_case(name))
-                .or_else(|| entries.iter().find(|(_, short)| *short == upper))
-                .or_else(|| {
-                    entries.iter().find(|(long, _)| {
-                        long.trim_end_matches([' ', '.']).eq_ignore_ascii_case(name)
-                    })
-                })
-                .cloned()
-        };
-        self.find_host_where(dir, name, find)
+        entries
+            .iter()
+            .find(|(long, _)| long.eq_ignore_ascii_case(name))
+            .or_else(|| entries.iter().find(|(_, short)| *short == upper))
+            .or_else(|| {
+                entries
+                    .iter()
+                    .find(|(long, _)| self.dos_component(long).eq_ignore_ascii_case(name))
+            })
+            .cloned()
+    }
+
+    /// Whether DOS's calls find a host entry of `dir` by the name they cut
+    /// `name` to (`cut_name`) where none has the whole name: a rename or
+    /// MKDIR to "MM_SLIDER.GXA" finds MM_SLIDE.GXA there, as DOS does,
+    /// and fails, where a create opens it (`walk_host`).
+    pub(super) fn cut_name_taken(&self, dir: &Path, name: &str) -> bool {
+        self.cut_name(name)
+            .is_some_and(|cut| self.find_host_entry(dir, &cut).1.is_some())
     }
 
     /// The entries of the host folder `dir`, and what `find` finds among
@@ -429,7 +640,7 @@ impl DiskController {
             if self.host_dirs.known_missing(dir, &upper) {
                 return (entries, None);
             }
-            entries = self.host_dirs.reread(dir, || Self::read_host_entries(dir));
+            entries = self.host_dirs.reread(dir, || self.read_host_entries(dir));
             if let Some(found) = find(&entries) {
                 return (entries, Some(found));
             }
@@ -462,18 +673,26 @@ impl DiskController {
             return false;
         };
         if let Some(volume) = drive.fat() {
-            let parts = Self::logical_components(drive, rest);
-            if !volume.find(&parts).is_ok_and(|e| e.is_dir()) {
+            let parts: Vec<String> = self
+                .logical_components(drive, rest)
+                .into_iter()
+                .map(Cow::into_owned)
+                .collect();
+            if !self.fat_find(volume, &parts).is_ok_and(|e| e.is_dir()) {
                 return false;
             }
-            let dir = canonical_path(&parts);
+            // DOS keeps the directory in DOS names.
+            let Ok(parts) = self.fat_dos_path(volume, &parts) else {
+                return false;
+            };
+            let dir = canonical_path(&refs(&parts));
             if let Some(d) = self.drives[drive_num as usize].as_mut() {
                 d.current_dir = dir;
             }
             return true;
         }
         if let Some(files) = drive.tree() {
-            let dir = Self::memory_path(drive, rest);
+            let dir = self.memory_path(drive, rest);
             if !files.is_dir(&dir) {
                 return false;
             }
@@ -485,10 +704,10 @@ impl DiskController {
 
         // Resolve the new path to check existence, and keep it in short
         // names, as programs see it.
-        match self.resolve_names_on(drive_num, rest) {
-            Some((host_path, dos_dir)) if hostfs::is_dir(&host_path) => {
+        match self.walk_host(drive_num, rest) {
+            Some(walk) if hostfs::is_dir(&walk.path) => {
                 if let Some(d) = self.drives[drive_num as usize].as_mut() {
-                    d.current_dir = dos_dir;
+                    d.current_dir = walk.dos;
                 }
                 true
             }

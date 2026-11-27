@@ -101,7 +101,7 @@ fn profile_saved_voodoo_scene() {
     assert_ne!(dir, path.canonicalize().unwrap().parent().unwrap());
     let (header, state) = slots::decode(&fs::read(&path).unwrap()).unwrap();
     let mut settings = slots::machine_settings(&header.machine, &Default::default());
-    settings.voodoo.renderer = crate::voodoo::Renderer::Software;
+    settings.renderer = crate::config::Renderer::Software;
     let mut cpu = Cpu::with_memory(dir.clone(), header.memsize);
     crate::hardware::configure(&mut cpu, &settings, crate::keylayout::Layout::us());
     cpu.bus

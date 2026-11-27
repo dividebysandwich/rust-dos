@@ -628,15 +628,19 @@ fn a_full_screen_mode_flips_in_the_cards_memory_and_the_desktop_comes_back() {
     assert_eq!(results(&cpu, data, 11)[9..], [0; 2]);
     // The desktop's mode again, from the start of memory, repainted.
     // The window, which the mode changes made cover the screen, as
-    // DirectDraw does on Windows 98, is over all of it: its corner with
-    // its text as before, and its background where the desktop's was.
+    // DirectDraw does on Windows 98, is over all of it. The program
+    // takes no messages, so the window never paints: before, it showed
+    // the background the desktop painted as it came up, and now the
+    // background shows nowhere.
     assert_eq!(card_mode(&cpu), (640, 480, 1, 1280));
     assert_eq!(card_reg(&cpu, VID_DESKTOP_START_ADDR), 0);
     let after = desktop(&cpu);
     let at = |x: usize, y: usize| y * 640 + x;
-    assert!(after[..at(320, 0)] == before[..at(320, 0)], "its top");
-    assert!(before[at(639, 479)] != before[at(319, 239)]);
-    assert!(after[at(639, 479)] == before[at(319, 239)], "covered");
+    let background = before[at(639, 479)];
+    assert!(before[at(0, 0)] == background, "the window showed it");
+    for (x, y) in [(0, 0), (319, 239), (639, 479)] {
+        assert!(after[at(x, y)] != background, "covered at {x},{y}");
+    }
 }
 
 /// Let the next retrace come, as the frontend does before it draws.
@@ -3358,6 +3362,166 @@ fn a_256_colour_desktop_has_a_system_palette() {
     assert_eq!(dac[10 * 3..11 * 3], [10 >> shift, 20 >> shift, 30 >> shift]);
 }
 
+// The background palette program's data: two palettes of 236 entries.
+const PALETTE_A: u32 = 0x400;
+const PALETTE_B: u32 = 0x800;
+const SYSTEM_10: u32 = 0xC00;
+const SCREEN_DC: u32 = 0x18;
+const HPAL_B: u32 = 0x1C;
+const ONE_PIXEL_BMI: u32 = 0xD00;
+const ONE_PIXEL: u32 = 0xE00;
+
+/// A palette of 236 colors that the static ones don't have, for one
+/// whose colors are `color(i)`.
+fn put_palette(d: &mut [u8], at: u32, color: impl Fn(u32) -> u32) {
+    put32(d, at, 0x300 | 236 << 16);
+    for i in 0..236 {
+        put32(d, at + 4 + 4 * i, color(i));
+    }
+}
+
+fn a_color(i: u32) -> u32 {
+    (i + 10) | (245 - i) << 8 | 100 << 16
+}
+
+fn b_color(i: u32) -> u32 {
+    (245 - i) | 37 << 8 | (i + 10) << 16
+}
+
+/// A window's palette A realized, taking every free entry; then B
+/// realized in GetDC(NULL)'s DC, in the background, and two of its
+/// entries set as pixels of the screen, and system palette entry 10
+/// read back; then a DIB_RGB_COLORS pixel of one of A's colors set.
+fn background_palette_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    put_palette(&mut d, PALETTE_A, a_color);
+    put_palette(&mut d, PALETTE_B, b_color);
+    // A DIB of one pixel, of A's color 100, in its color table.
+    put32(&mut d, ONE_PIXEL_BMI, 40);
+    put32(&mut d, ONE_PIXEL_BMI + 4, 1);
+    put32(&mut d, ONE_PIXEL_BMI + 8, 1);
+    put32(&mut d, ONE_PIXEL_BMI + 12, 1 | 8 << 16);
+    put32(&mut d, ONE_PIXEL_BMI + 32, 1);
+    let c = a_color(100);
+    put32(
+        &mut d,
+        ONE_PIXEL_BMI + 40,
+        (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16) & 0xFF,
+    );
+    program(&[USER32_PAL, GDI32_PAL], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(64),
+                Arg::I(64),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        c.api(a, l, GET_DC, &[Arg::Val(HWND)])?;
+        a.mov(dword_ptr(l.at(HDC)), eax)?;
+        c.api(a, l, CREATE_PALETTE, &[Arg::At(PALETTE_A)])?;
+        a.mov(dword_ptr(l.at(PALETTE)), eax)?;
+        c.api(
+            a,
+            l,
+            SELECT_PALETTE,
+            &[Arg::Val(HDC), Arg::Val(PALETTE), Arg::I(0)],
+        )?;
+        c.api(a, l, REALIZE_PALETTE, &[Arg::Val(HDC)])?;
+        c.api(a, l, GET_DC, &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(SCREEN_DC)), eax)?;
+        c.api(a, l, CREATE_PALETTE, &[Arg::At(PALETTE_B)])?;
+        a.mov(dword_ptr(l.at(HPAL_B)), eax)?;
+        c.api(
+            a,
+            l,
+            SELECT_PALETTE,
+            &[Arg::Val(SCREEN_DC), Arg::Val(HPAL_B), Arg::I(0)],
+        )?;
+        c.api(a, l, REALIZE_PALETTE, &[Arg::Val(SCREEN_DC)])?;
+        // PALETTEINDEX(0) and PALETTEINDEX(235), outside the window.
+        for (x, color) in [(100, 0x0100_0000), (101, 0x0100_00EB)] {
+            c.api(
+                a,
+                l,
+                P_SET_PIXEL,
+                &[Arg::Val(SCREEN_DC), Arg::I(x), Arg::I(100), Arg::I(color)],
+            )?;
+        }
+        c.api(
+            a,
+            l,
+            GET_SYSTEM_PALETTE_ENTRIES,
+            &[
+                Arg::Val(SCREEN_DC),
+                Arg::I(10),
+                Arg::I(1),
+                Arg::At(SYSTEM_10),
+            ],
+        )?;
+        c.api(
+            a,
+            l,
+            SET_DI_BITS_TO_DEVICE,
+            &[
+                Arg::Val(SCREEN_DC),
+                Arg::I(102),
+                Arg::I(100),
+                Arg::I(1),
+                Arg::I(1),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(1),
+                Arg::At(ONE_PIXEL),
+                Arg::At(ONE_PIXEL_BMI),
+                Arg::I(0),
+            ],
+        )?;
+        finish(a, l, 1)
+    })
+}
+
+/// A palette realized in the background, with no free entry left, maps
+/// its entries to the system palette's entries from 10 up, those a
+/// realization in the foreground will give it, and leaves their colors
+/// as they are: Windows 95 OSR2.5 at 256 colours does, and a DDB or a
+/// pixel drawn through it then shows the palette's colors once it is
+/// realized in the foreground. Memphis Math makes its pictures so. A
+/// DIB's color drawn on the screen then takes the system palette's entry
+/// of the nearest color, not B's entry nearest to it: Memphis Math's
+/// toolbar draws so.
+#[test]
+fn a_background_palette_maps_to_its_foreground_entries() {
+    let (program, data) = background_palette_program();
+    let mut cpu = card_machine("background_palette", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 13);
+    assert_eq!(r[4], 236, "A's RealizePalette");
+    assert_eq!(r[8], 236, "B's RealizePalette");
+    assert_eq!(r[11], 1, "GetSystemPaletteEntries");
+    let pixel = |x: usize, y: usize| cpu.bus.vbe.vram[y * 640 + x];
+    assert_eq!((pixel(100, 100), pixel(101, 100)), (10, 245));
+    let system = peek(&cpu, data + SYSTEM_10) & 0xFF_FFFF;
+    assert_eq!(system, a_color(0), "entry 10 keeps A's color");
+    assert_eq!(r[12], 1, "SetDIBitsToDevice's lines");
+    assert_eq!(pixel(102, 100), 110, "A's color 100 is entry 110");
+}
+
 const USER32_DITHER: (&str, &[&str]) = ("USER32.DLL", &["CreateWindowExA", "GetDC", "FillRect"]);
 const GDI32_DITHER: (&str, &[&str]) = ("GDI32.DLL", &["CreateSolidBrush"]);
 const FILL_RECT: usize = 2;
@@ -3457,6 +3621,267 @@ fn a_256_colour_desktop_dithers_solid_brushes() {
             assert_eq!(got, want, "cell {} at ({x}, {y})", x / 16);
         }
     }
+}
+
+const GDI32_DIB: (&str, &[&str]) = (
+    "GDI32.DLL",
+    &[
+        "CreateHalftonePalette",
+        "GetPaletteEntries",
+        "CreatePalette",
+        "SelectPalette",
+        "RealizePalette",
+        "StretchDIBits",
+        "SetDIBitsToDevice",
+    ],
+);
+const D_CREATE_HALFTONE_PALETTE: usize = 2;
+const D_GET_PALETTE_ENTRIES: usize = 3;
+const D_CREATE_PALETTE: usize = 4;
+const D_SELECT_PALETTE: usize = 5;
+const D_REALIZE_PALETTE: usize = 6;
+const D_STRETCH_DI_BITS: usize = 7;
+const D_SET_DI_BITS_TO_DEVICE: usize = 8;
+
+// The DIB colour program's data.
+const D_LOGPALETTE: u32 = 0x400;
+const D_ENTRIES: u32 = 0x600;
+const D_BMI: u32 = 0xA00;
+const D_BITS: u32 = 0x1000;
+const D_SIZE: usize = 0x1000 + 256 * 128 * 3;
+const SRCCOPY: u32 = 0x00CC_0020;
+
+/// What Windows 98 SE drew on a desktop of 256 colours (640x480 on a
+/// Voodoo 3 in 86Box) from 24-bit DIBs holding every cell of 5 bits a
+/// channel of the RGB cube, read back with BitBlt into a 24-bit DIB
+/// section; the probe is `data/win98-dib-colors.c`. The file is gzipped
+/// and holds the 256 colours of CreateHalftonePalette's palette
+/// (GetPaletteEntries), 3 bytes each, and the 64 colours of the probe's
+/// own palette; then for each of the 32768 cells (red, green and blue
+/// `n >> 10`, `n >> 5 & 31` and `n & 31`) the colour drawn, as an index:
+/// into the halftone palette with it selected, into `VGA` with the
+/// default palette, and into the probe's palette with that. These are
+/// the probe's pictures 1, 0 and 2 in its `C:\DD2.BIN` (StretchDIBits
+/// of the colours 8 c), each pixel written as its colour's index.
+struct Win98DibColors {
+    halftone: Vec<[u8; 3]>,
+    custom: Vec<[u8; 3]>,
+    with_halftone: Vec<u8>,
+    with_default: Vec<u8>,
+    with_custom: Vec<u8>,
+}
+
+/// The 16 VGA colours, in the order of `Win98DibColors::with_default`.
+const VGA: [[u8; 3]; 16] = [
+    [0, 0, 0],
+    [128, 0, 0],
+    [0, 128, 0],
+    [128, 128, 0],
+    [0, 0, 128],
+    [128, 0, 128],
+    [0, 128, 128],
+    [192, 192, 192],
+    [128, 128, 128],
+    [255, 0, 0],
+    [0, 255, 0],
+    [255, 255, 0],
+    [0, 0, 255],
+    [255, 0, 255],
+    [0, 255, 255],
+    [255, 255, 255],
+];
+
+fn win98_dib_colors() -> Win98DibColors {
+    use std::io::Read;
+    let gz: &[u8] = include_bytes!("data/win98-dib-colors.bin.gz");
+    let mut raw = Vec::new();
+    flate2::read::GzDecoder::new(gz)
+        .read_to_end(&mut raw)
+        .unwrap();
+    let rgb = |b: &[u8]| b.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
+    let (halftone, rest) = raw.split_at(256 * 3);
+    let (custom, rest) = rest.split_at(64 * 3);
+    let (with_halftone, rest) = rest.split_at(32768);
+    let (with_default, with_custom) = rest.split_at(32768);
+    Win98DibColors {
+        halftone: rgb(halftone),
+        custom: rgb(custom),
+        with_halftone: with_halftone.to_vec(),
+        with_default: with_default.to_vec(),
+        with_custom: with_custom.to_vec(),
+    }
+}
+
+/// On a desktop of 256 colours, a window of 256x128 at (0, 0) and a
+/// 24-bit DIB of that size whose pixel `n` (from the top left) is the
+/// colour 8 c + 5 of each channel c of the cell `n` of 5 bits a channel,
+/// drawn with StretchDIBits with the default palette (step 1), with
+/// SetDIBitsToDevice with the halftone palette, whose entries are read
+/// back (step 2), and with StretchDIBits with a palette of `custom`
+/// (step 3).
+fn dib_colors_program(custom: &[[u8; 3]]) -> (Vec<u8>, u32) {
+    let mut d = data();
+    d.resize(D_SIZE, 0);
+    put32(&mut d, D_LOGPALETTE, 0x300 | (custom.len() as u32) << 16);
+    for (i, c) in custom.iter().enumerate() {
+        put(
+            &mut d,
+            D_LOGPALETTE + 4 + 4 * i as u32,
+            &[c[0], c[1], c[2], 0],
+        );
+    }
+    // A bottom-up BITMAPINFOHEADER of 256x128 at 24 bits.
+    put32(&mut d, D_BMI, 40);
+    put32(&mut d, D_BMI + 4, 256);
+    put32(&mut d, D_BMI + 8, 128);
+    put32(&mut d, D_BMI + 12, 1 | 24 << 16);
+    for n in 0..32768u32 {
+        let (x, y) = (n % 256, n / 256);
+        let v = |c: u32| (8 * c + 5) as u8;
+        let at = D_BITS + ((127 - y) * 256 + x) * 3;
+        put(&mut d, at, &[v(n & 31), v(n >> 5 & 31), v(n >> 10)]);
+    }
+    program(&[USER32, GDI32_DIB], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(256),
+                Arg::I(128),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        c.api(a, l, GET_DC, &[Arg::Val(HWND)])?;
+        a.mov(dword_ptr(l.at(HDC)), eax)?;
+        let stretch = [
+            Arg::Val(HDC),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(256),
+            Arg::I(128),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(256),
+            Arg::I(128),
+            Arg::At(D_BITS),
+            Arg::At(D_BMI),
+            Arg::I(0),
+            Arg::I(SRCCOPY),
+        ];
+        c.api(a, l, D_STRETCH_DI_BITS, &stretch)?;
+        wait(a, l, 1)?;
+        c.api(a, l, D_CREATE_HALFTONE_PALETTE, &[Arg::Val(HDC)])?;
+        a.mov(dword_ptr(l.at(PALETTE)), eax)?;
+        c.api(
+            a,
+            l,
+            D_GET_PALETTE_ENTRIES,
+            &[
+                Arg::Val(PALETTE),
+                Arg::I(0),
+                Arg::I(256),
+                Arg::At(D_ENTRIES),
+            ],
+        )?;
+        let select = [Arg::Val(HDC), Arg::Val(PALETTE), Arg::I(0)];
+        c.api(a, l, D_SELECT_PALETTE, &select)?;
+        c.api(a, l, D_REALIZE_PALETTE, &[Arg::Val(HDC)])?;
+        c.api(
+            a,
+            l,
+            D_SET_DI_BITS_TO_DEVICE,
+            &[
+                Arg::Val(HDC),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(256),
+                Arg::I(128),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(128),
+                Arg::At(D_BITS),
+                Arg::At(D_BMI),
+                Arg::I(0),
+            ],
+        )?;
+        wait(a, l, 2)?;
+        c.api(a, l, D_CREATE_PALETTE, &[Arg::At(D_LOGPALETTE)])?;
+        a.mov(dword_ptr(l.at(PALETTE)), eax)?;
+        c.api(a, l, D_SELECT_PALETTE, &select)?;
+        c.api(a, l, D_REALIZE_PALETTE, &[Arg::Val(HDC)])?;
+        c.api(a, l, D_STRETCH_DI_BITS, &stretch)?;
+        finish(a, l, 3)
+    })
+}
+
+/// How many of the 256x128 pixels at the screen's top left, as the DAC
+/// shows them, differ from Windows 98's colours `want`, and the first
+/// few of them.
+fn differing_cells(cpu: &Cpu, want: impl Iterator<Item = [u8; 3]>) -> (usize, String) {
+    let shift = if cpu.bus.vga.dac_8bit { 0 } else { 2 };
+    let dac = &cpu.bus.vga.palette;
+    let mut first = String::new();
+    let mut count = 0;
+    for (n, want) in want.enumerate() {
+        let i = cpu.bus.vbe.vram[(n / 256) * 640 + n % 256] as usize;
+        let got = [dac[3 * i], dac[3 * i + 1], dac[3 * i + 2]];
+        if got != want.map(|v| v >> shift) {
+            if count < 5 {
+                let cell = (n >> 10, n >> 5 & 31, n & 31);
+                first += &format!(" cell {cell:?}: {got:?} for {want:?};");
+            }
+            count += 1;
+        }
+    }
+    (count, first)
+}
+
+/// On a desktop of 256 colours CreateHalftonePalette gives Windows 98's
+/// palette, and a 24-bit DIB's pixels take the colours Windows 98 SE
+/// draws through its inverse colour table, in every one of the 32768
+/// cells of 5 bits a channel: with the default palette only the 16 VGA
+/// colours, with the halftone palette and a palette of 64 colours only
+/// their own.
+#[test]
+fn a_256_colour_desktop_maps_deep_dibs_as_windows_98() {
+    let want = win98_dib_colors();
+    let (program, data) = dib_colors_program(&want.custom);
+    let mut cpu = card_machine("dib_colors", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let default = want.with_default.iter().map(|&i| VGA[i as usize]);
+    assert_eq!(differing_cells(&cpu, default), (0, String::new()));
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    let entries: Vec<[u8; 3]> = (0..256)
+        .map(|i| {
+            let [r, g, b, _] = peek(&cpu, data + D_ENTRIES + 4 * i).to_le_bytes();
+            [r, g, b]
+        })
+        .collect();
+    assert_eq!(entries, want.halftone, "CreateHalftonePalette's entries");
+    let halftone = want
+        .with_halftone
+        .iter()
+        .map(|&i| want.halftone[i as usize]);
+    assert_eq!(differing_cells(&cpu, halftone), (0, String::new()));
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 3);
+    let custom = want.with_custom.iter().map(|&i| want.custom[i as usize]);
+    assert_eq!(differing_cells(&cpu, custom), (0, String::new()));
 }
 
 const USER32_CURSOR: (&str, &[&str]) = (
@@ -3642,6 +4067,254 @@ fn set_system_cursor_gives_the_arrow_another_picture() {
     assert_eq!(r[7], r[1], "LoadCursorA(IDC_ARROW) after SetSystemCursor");
     assert_ne!(arrow, ibeam, "the arrow and the I-beam look different");
     assert!(system == ibeam, "the arrow shows the I-beam's picture");
+}
+
+const USER32_CURSOR_FILE: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "LoadCursorFromFileA",
+        "GetDC",
+        "DrawIconEx",
+        "DestroyCursor",
+        "SetCursor",
+        "SetCursorPos",
+    ],
+);
+const FILE_LOAD: usize = 1;
+const FILE_GET_DC: usize = 2;
+const FILE_DRAW_ICON_EX: usize = 3;
+const FILE_DESTROY_CURSOR: usize = 4;
+const FILE_SET_CURSOR: usize = 5;
+const FILE_SET_CURSOR_POS: usize = 6;
+/// The files' names in the data.
+const CUR_NAME: u32 = 0x380;
+const ANI_NAME: u32 = 0x3A0;
+const MISSING_NAME: u32 = 0x3C0;
+const DI_NORMAL: u32 = 3;
+
+/// A .CUR file of one 32 x 32 monochrome cursor whose hot spot is `hot`:
+/// a 16 x 16 square at its top left, white or black, and the rest
+/// transparent.
+fn cur_file(hot: (u16, u16), white: bool) -> Vec<u8> {
+    let mut f = Vec::new();
+    for w in [0u16, 2, 1] {
+        f.extend(w.to_le_bytes());
+    }
+    f.extend([32, 32, 2, 0]);
+    f.extend(hot.0.to_le_bytes());
+    f.extend(hot.1.to_le_bytes());
+    f.extend((40u32 + 8 + 2 * 128).to_le_bytes());
+    f.extend(22u32.to_le_bytes());
+    for w in [40u32, 32, 64] {
+        f.extend(w.to_le_bytes());
+    }
+    f.extend(1u16.to_le_bytes());
+    f.extend(1u16.to_le_bytes());
+    f.extend([0u8; 24]);
+    f.extend([0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0]);
+    // The XOR mask, then the AND mask, rows from the bottom up: the
+    // square is the first 16 pixels of the top 16 rows.
+    for xor in [true, false] {
+        for row in (0..32).rev() {
+            let bits = match (xor, row < 16) {
+                (true, true) if white => [0xFF, 0xFF, 0, 0],
+                (true, _) => [0; 4],
+                (false, true) => [0, 0, 0xFF, 0xFF],
+                (false, false) => [0xFF; 4],
+            };
+            f.extend(bits);
+        }
+    }
+    f
+}
+
+/// A RIFF chunk: its id, its length and its data, padded to an even
+/// length.
+fn riff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut c = id.to_vec();
+    c.extend((body.len() as u32).to_le_bytes());
+    c.extend(body);
+    if body.len() % 2 == 1 {
+        c.push(0);
+    }
+    c
+}
+
+fn dwords(list: &[u32]) -> Vec<u8> {
+    list.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+/// An .ANI file of two frames, the black square (0) and the white one
+/// (1), both with their hot spot at the top left, in three steps: frame
+/// 1 for 6 jiffies, frame 0 for 12 and frame 1 for 3, which a "seq " and
+/// a "rate" chunk give.
+fn ani_file() -> Vec<u8> {
+    const AF_ICON: u32 = 1;
+    const AF_SEQUENCE: u32 = 2;
+    let header = dwords(&[36, 2, 3, 0, 0, 0, 0, 10, AF_ICON | AF_SEQUENCE]);
+    let mut frames = b"fram".to_vec();
+    frames.extend(riff_chunk(b"icon", &cur_file((0, 0), false)));
+    frames.extend(riff_chunk(b"icon", &cur_file((0, 0), true)));
+    let mut acon = b"ACON".to_vec();
+    acon.extend(riff_chunk(b"LIST", b"INFOINAM\x05\0\0\0Spin\0\0"));
+    acon.extend(riff_chunk(b"anih", &header));
+    acon.extend(riff_chunk(b"rate", &dwords(&[6, 12, 3])));
+    acon.extend(riff_chunk(b"seq ", &dwords(&[1, 0, 1])));
+    acon.extend(riff_chunk(b"LIST", &frames));
+    riff_chunk(b"RIFF", &acon)
+}
+
+/// LoadCursorFromFileA loads a .CUR file and an .ANI one, as Windows 98
+/// does, and fails for a file that isn't there. The .CUR's picture shows
+/// at its hot spot. The .ANI's steps show one after another in emulated
+/// time from when SetCursor set it, each for its rate in jiffies, in the
+/// order its "seq " chunk gives: white for 100 ms, black for 200 ms,
+/// white for 50 ms, and again. Setting it again goes on with its steps,
+/// and setting another cursor and then it starts them over. DrawIconEx
+/// draws a step the animated cursor has and fails past its last, and
+/// DestroyCursor destroys one. Warhammer: Dark Omen loads its cursors
+/// this way and showed none in its 3D battles.
+#[test]
+fn cursors_load_from_cur_and_ani_files_and_animate() {
+    let mut data = data();
+    put(&mut data, CUR_NAME, b"C:\\ARROW.CUR\0");
+    put(&mut data, ANI_NAME, b"C:\\SPIN.ANI\0");
+    put(&mut data, MISSING_NAME, b"C:\\NONE.CUR\0");
+    let (program, data) = program(&[USER32_CURSOR_FILE], &data, |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, FILE_LOAD, &[Arg::At(CUR_NAME)])?;
+        c.api(a, l, FILE_LOAD, &[Arg::At(ANI_NAME)])?;
+        c.api(a, l, FILE_LOAD, &[Arg::At(MISSING_NAME)])?;
+        c.api(a, l, FILE_GET_DC, &[Arg::Val(RESULTS)])?;
+        let hdc = Arg::Val(RESULTS + 16);
+        let ani = Arg::Val(RESULTS + 8);
+        for step in [2, 3] {
+            let at = [hdc, Arg::I(0), Arg::I(0), ani, Arg::I(0), Arg::I(0)];
+            let rest = [Arg::I(step), Arg::I(0), Arg::I(DI_NORMAL)];
+            c.api(a, l, FILE_DRAW_ICON_EX, &[&at[..], &rest[..]].concat())?;
+        }
+        c.api(a, l, FILE_LOAD, &[Arg::At(ANI_NAME)])?;
+        c.api(a, l, FILE_DESTROY_CURSOR, &[Arg::Val(RESULTS + 28)])?;
+        c.api(a, l, FILE_SET_CURSOR, &[Arg::Val(RESULTS + 4)])?;
+        c.api(a, l, FILE_SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        wait(a, l, 1)?;
+        c.api(a, l, FILE_SET_CURSOR, &[ani])?;
+        wait(a, l, 2)?;
+        c.api(a, l, FILE_SET_CURSOR, &[ani])?;
+        wait(a, l, 3)?;
+        c.api(a, l, FILE_SET_CURSOR, &[Arg::Val(RESULTS + 4)])?;
+        c.api(a, l, FILE_SET_CURSOR, &[ani])?;
+        finish(a, l, 4)
+    });
+    let test = "cursor_files";
+    let mut cpu = card_machine(test, None, program);
+    let dir = PathBuf::from("target/test_win32_screen").join(test);
+    fs::write(dir.join("ARROW.CUR"), cur_file((8, 8), true)).unwrap();
+    fs::write(dir.join("SPIN.ANI"), ani_file()).unwrap();
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 11);
+    assert_ne!(r[0], 0, "CreateWindowExA");
+    assert_ne!(r[1], 0, "LoadCursorFromFileA of the .CUR");
+    assert_ne!(r[2], 0, "LoadCursorFromFileA of the .ANI");
+    assert_eq!(r[3], 0, "LoadCursorFromFileA of a file that isn't there");
+    assert_ne!(r[4], 0, "GetDC");
+    assert_eq!(r[5], 1, "DrawIconEx of the .ANI's step 2");
+    assert_eq!(r[6], 0, "DrawIconEx of the .ANI's step 3, which it hasn't");
+    assert_ne!(r[7], 0, "LoadCursorFromFileA of the .ANI again");
+    assert_eq!(r[8], 1, "DestroyCursor of it");
+    assert_eq!(r[10], 1, "SetCursorPos");
+    const WHITE: [u8; 3] = [0xFF, 0xFF, 0xFF];
+    const BLACK: [u8; 3] = [0, 0, 0];
+    // The .CUR's white square, 16 x 16 around its hot spot (8, 8).
+    let shown = with_cursors(&cpu, &[(92, 92), (107, 107), (108, 108)]);
+    assert_eq!(shown[0], WHITE, "the .CUR's square's top left");
+    assert_eq!(shown[1], WHITE, "the .CUR's square's bottom right");
+    assert_ne!(shown[2], WHITE, "past the .CUR's square");
+    // The .ANI's square at the cursor's place, through at least one
+    // round of its 350 ms: each look shows the step of its moment after
+    // SetCursor, which ran between the times `set` gives. A look too
+    // near a step's end to tell which step it is at isn't counted.
+    let step_at = |t: u64| match t % 350_000 {
+        t if t < 100_000 => WHITE,
+        t if t < 300_000 => BLACK,
+        _ => WHITE,
+    };
+    let want = |cpu: &Cpu, set: (u64, u64)| {
+        let now = cpu.bus.clock.now_micros();
+        let (a, b) = (step_at(now - set.0), step_at(now - set.1));
+        (a == b).then_some(a)
+    };
+    let look = |cpu: &Cpu| {
+        let shown = with_cursors(cpu, &[(100, 100), (115, 115)]);
+        assert_eq!(shown[0], shown[1], "the square is one color");
+        shown[0]
+    };
+    let run = |cpu: &mut Cpu, n: u64| {
+        cpu.bus.start_batch(cpu.bus.clock.icount + n);
+        run_batch(cpu, &mut NoHook, false);
+    };
+    go_on(&mut cpu, data);
+    let set = run_to(&mut cpu, data, 2);
+    let start = cpu.bus.clock.now_micros();
+    let (mut whites, mut blacks) = (0, 0);
+    while cpu.bus.clock.now_micros() <= start + 400_000 {
+        let now = cpu.bus.clock.now_micros();
+        if let Some(want) = want(&cpu, set) {
+            assert_eq!(look(&cpu), want, "the step at {now} us");
+            if want == WHITE {
+                whites += 1;
+            } else {
+                blacks += 1;
+            }
+        }
+        run(&mut cpu, 5_000);
+    }
+    assert!(whites > 0 && blacks > 0, "both frames showed");
+    // SetCursor of it again while its black step has 100 ms to go: it
+    // goes on with that step rather than starting over with white.
+    let in_black = |cpu: &Cpu| {
+        let now = cpu.bus.clock.now_micros();
+        (110_000..200_000).contains(&((now - set.0) % 350_000))
+            && (110_000..200_000).contains(&((now - set.1) % 350_000))
+    };
+    while !in_black(&cpu) {
+        run(&mut cpu, 5_000);
+    }
+    go_on(&mut cpu, data);
+    run_to(&mut cpu, data, 3);
+    assert!(in_black(&cpu), "still in the black step");
+    assert_eq!(look(&cpu), BLACK, "the same cursor set again");
+    // The .CUR and then the .ANI again: it starts over, white, while it
+    // would still be black had it gone on.
+    go_on(&mut cpu, data);
+    let again = run_to(&mut cpu, data, 4);
+    assert!(in_black(&cpu), "still in the black step");
+    assert_eq!(want(&cpu, again), Some(WHITE));
+    assert_eq!(look(&cpu), WHITE, "the .ANI set after another cursor");
+}
+
+/// Run the program in small batches until it is at `step`: the emulated
+/// times between which its last call ran, from before the batch ahead
+/// of the one it got there in to after that one.
+fn run_to(cpu: &mut Cpu, data: u32, step: u32) -> (u64, u64) {
+    let mut before = cpu.bus.clock.now_micros();
+    for _ in 0..1_000_000 {
+        let batch = cpu.bus.clock.now_micros();
+        cpu.bus.start_batch(cpu.bus.clock.icount + 1_000);
+        run_batch(cpu, &mut NoHook, false);
+        // The program's memory is there while its code runs, with paging.
+        let paged = cpu.cr0 & 0x8000_0001 == 0x8000_0001;
+        if paged && peek(cpu, data + DONE) == step {
+            let after = cpu.bus.clock.now_micros();
+            assert!(after - before < 10_000, "the call's time is known");
+            return (before, after);
+        }
+        before = batch;
+    }
+    panic!("the program didn't get to step {step}");
 }
 
 const USER32_FIRST_CURSOR: (&str, &[&str]) = (
@@ -4754,12 +5427,17 @@ fn a_full_screen_mode_flips_in_a_toadforces_memory_and_the_desktop_comes_back() 
     run_until(&mut cpu, data, 3);
     assert_eq!(results(&cpu, data, 11)[9..], [0; 2]);
     // The desktop's mode again, from the start of memory, repainted,
-    // the window over all of it (as on the other adapters).
+    // the window over all of it (as on the other adapters): the
+    // background it showed before, as it never paints, shows nowhere.
     assert_eq!(toad_mode(&cpu), (1, 640, 480, 3, 2560, 60));
     assert_eq!(toad(&cpu, toad_regs::MODE_START), 0);
     let after = &cpu.bus.vbe.vram[..640 * 480 * 4];
-    let at = |x: usize, y: usize| (y * 640 + x) * 4;
-    assert!(after[..at(320, 0)] == before[..at(320, 0)], "its top");
+    let pixel = |b: &[u8], x: usize, y: usize| b[(y * 640 + x) * 4..][..4].to_vec();
+    let background = pixel(&before, 639, 479);
+    assert_eq!(pixel(&before, 0, 0), background, "the window showed it");
+    for (x, y) in [(0, 0), (319, 239), (639, 479)] {
+        assert_ne!(pixel(after, x, y), background, "covered at {x},{y}");
+    }
     assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
 }
 

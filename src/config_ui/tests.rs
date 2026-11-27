@@ -1614,6 +1614,146 @@ fn mouse_sensitivity_is_live_typed_and_resettable() {
 }
 
 #[test]
+fn the_3dfx_rows_follow_the_card_the_machine_has() {
+    use crate::config::Renderer;
+    use crate::video::adapter::Adapter;
+    let add_on_only = [Item::VoodooMemory, Item::VoodooGamma];
+    let every_card = [Item::Renderer, Item::VoodooTextureSampling];
+    let opengl = [
+        Item::VoodooScale,
+        Item::VoodooMsaa,
+        Item::VoodooDither,
+        Item::VoodooAnisotropy,
+    ];
+    let shown = |s: &Settings, items: &[Item]| items.iter().map(|i| i.shown(s)).collect::<Vec<_>>();
+
+    // No 3dfx card: only the switch that adds one.
+    let mut s = Settings::default();
+    assert!(Item::Voodoo.shown(&s));
+    assert_eq!(shown(&s, &add_on_only), [false; 2]);
+    assert_eq!(shown(&s, &every_card), [false; 2]);
+    assert_eq!(shown(&s, &opengl), [false; 4]);
+
+    // The add-on card: its own rows, and the OpenGL ones with OpenGL.
+    s.voodoo.enabled = true;
+    assert_eq!(shown(&s, &add_on_only), [true; 2]);
+    assert_eq!(shown(&s, &every_card), [true; 2]);
+    assert_eq!(shown(&s, &opengl), [false; 4]);
+    s.renderer = Renderer::OpenGl;
+    assert_eq!(shown(&s, &opengl), [true; 4]);
+    // Auto and software draw the 3dfx cards on the processor.
+    for renderer in [Renderer::Auto, Renderer::Software] {
+        s.renderer = renderer;
+        assert_eq!(shown(&s, &opengl), [false; 4], "{renderer:?}");
+    }
+
+    // A Voodoo3 or Banshee as the display adapter: the renderer and its
+    // settings, whether `voodoo` is on or not, and none of the add-on's.
+    for machine in [Adapter::Voodoo3, Adapter::Banshee] {
+        for enabled in [false, true] {
+            let mut s = Settings {
+                machine,
+                ..Settings::default()
+            };
+            s.voodoo.enabled = enabled;
+            assert!(!Item::Voodoo.shown(&s), "{machine:?}");
+            assert_eq!(shown(&s, &add_on_only), [false; 2], "{machine:?}");
+            assert!(!Item::VoodooOverlay.shown(&s), "{machine:?}");
+            assert_eq!(shown(&s, &every_card), [true; 2], "{machine:?}");
+            assert_eq!(shown(&s, &opengl), [false; 4], "{machine:?}");
+            s.renderer = Renderer::OpenGl;
+            assert_eq!(shown(&s, &opengl), [true; 4], "{machine:?}");
+            assert_eq!(Item::VoodooScaleShader.shown(&s), s.voodoo.scale > 1);
+        }
+    }
+}
+
+#[test]
+fn one_renderer_row_draws_every_3d_card() {
+    use crate::config::Renderer;
+    use crate::video::adapter::Adapter;
+    // A ToadForce has the row too, and none of the 3dfx OpenGL rows.
+    let s = Settings {
+        machine: Adapter::ToadForce,
+        renderer: Renderer::OpenGl,
+        ..Settings::default()
+    };
+    assert!(Item::Renderer.shown(&s));
+    assert!(!Item::VoodooScale.shown(&s));
+    // A machine without a 3D card it draws has none.
+    assert!(!Item::Renderer.shown(&Settings::default()));
+    assert_eq!(Item::Renderer.applies(), Applies::Now);
+
+    // The row steps through the values and applies them at once, to both
+    // cards.
+    let mut host = FakeHost::new();
+    let mut ui = ConfigUi::new();
+    let settings = Settings {
+        machine: Adapter::ToadForce,
+        ..Settings::default()
+    };
+    ui.open(&settings, Some("/cfg/rust-dos.conf".into()), &host);
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Renderer).unwrap();
+    assert_eq!(Item::Renderer.value(&ui.settings, None), "Auto");
+    keys(&mut ui, &mut host, &[UiKey::Right]);
+    let applied = host.applied.last().unwrap();
+    assert_eq!(applied.renderer, Renderer::OpenGl);
+    assert_eq!(applied.voodoo_renderer(), crate::voodoo::Renderer::OpenGl);
+    assert_eq!(applied.toadforce_renderer(), crate::toadforce::Renderer::OpenGl);
+    assert_eq!(Item::Renderer.value(&ui.settings, None), "OpenGL");
+    keys(&mut ui, &mut host, &[UiKey::Right]);
+    assert_eq!(host.applied.last().unwrap().renderer, Renderer::Software);
+    assert_eq!(Item::Renderer.value(&ui.settings, None), "Software");
+}
+
+#[test]
+fn a_voodoo3_or_banshee_picked_turns_the_add_on_card_off() {
+    use crate::video::adapter::Adapter;
+    for machine in [Adapter::Voodoo3, Adapter::Banshee] {
+        let mut host = FakeHost::new();
+        let mut ui = ConfigUi::new();
+        let mut settings = Settings::default();
+        settings.voodoo.enabled = true;
+        ui.open(&settings, Some("/cfg/rust-dos.conf".into()), &host);
+        ui.show_page(Page::Emulator);
+        ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+        pick(&mut ui, &mut host, machine.describe());
+        let applied = host.applied.last().unwrap();
+        assert_eq!((applied.machine, applied.voodoo.enabled), (machine, false));
+        assert!(!ui.items().contains(&Item::Voodoo));
+        // Another card brings the switch back, off, for the player to
+        // turn on again.
+        ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+        pick(&mut ui, &mut host, Adapter::Svga.describe());
+        let applied = host.applied.last().unwrap();
+        assert_eq!((applied.machine, applied.voodoo.enabled), (Adapter::Svga, false));
+        assert!(ui.items().contains(&Item::Voodoo));
+    }
+}
+
+#[test]
+fn a_voodoo3_with_voodoo_on_in_the_file_is_the_card_the_list_opens_on() {
+    use crate::video::adapter::Adapter;
+    let mut host = FakeHost::new();
+    let mut ui = ConfigUi::new();
+    let mut settings = Settings {
+        machine: Adapter::Voodoo3,
+        ..Settings::default()
+    };
+    settings.voodoo.enabled = true;
+    ui.open(&settings, Some("/cfg/rust-dos.conf".into()), &host);
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    keys(&mut ui, &mut host, &[UiKey::Enter]);
+    let popup = ui.popup.as_ref().unwrap();
+    assert_eq!(popup.choices[popup.selected], settings);
+    keys(&mut ui, &mut host, &[UiKey::Esc, UiKey::Right]);
+    let applied = host.applied.last().unwrap();
+    assert_eq!((applied.machine, applied.voodoo.enabled), (Adapter::Banshee, false));
+}
+
+#[test]
 fn version_check_never_leaves_the_window_and_the_switch_toggles_on_and_off() {
     use crate::version_check::Setting;
     let item = Item::VersionCheck;
@@ -2976,4 +3116,273 @@ fn the_almanac_report_says_what_the_profile_says_of_the_game() {
     );
     ui.text("93", &mut host);
     assert!(ui.almanac.as_ref().unwrap().about().is_err());
+}
+
+/// The window on its Hotkeys page, with custom profiles kept in a folder
+/// of this test's own.
+fn hotkeys_ui(host: &FakeHost, settings: &Settings, test: &str) -> (ConfigUi, PathBuf) {
+    let name = format!("rust-dos-hotkeys-page-{}-{}", test, std::process::id());
+    let dir = std::env::temp_dir().join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut ui = ConfigUi::new();
+    ui.open(settings, Some("/cfg/rust-dos.conf".into()), host);
+    ui.hotkeys_page.dir = Some(dir.clone());
+    ui.hotkeys_page.refresh();
+    ui.show_page(Page::Hotkeys);
+    (ui, dir)
+}
+
+fn combo(text: &str) -> crate::hotkeys::Combo {
+    crate::hotkeys::Combo::parse(text).unwrap()
+}
+
+fn action_row(ui: &ConfigUi, action: crate::hotkeys::Action) -> usize {
+    use hotkeys_page::HotkeyRow;
+    let rows = ui.hotkey_rows();
+    rows.iter().position(|&r| r == HotkeyRow::Action(action)).unwrap()
+}
+
+#[test]
+fn the_hotkeys_page_rebinds_an_action_to_the_keys_pressed() {
+    use crate::hotkeys::Action;
+    use UiKey::*;
+    let mut host = FakeHost::new();
+    let (mut ui, dir) = hotkeys_ui(&host, &Settings::default(), "rebind");
+    ui.select(action_row(&ui, Action::SaveState));
+    ui.key(Enter, &mut host);
+    assert!(ui.capturing_hotkey());
+    // Typed text is no key to bind, and Esc ends the rebind.
+    ui.text("x", &mut host);
+    assert!(ui.capturing_hotkey());
+    ui.hotkey_pressed(combo("Escape"), &mut host);
+    assert!(!ui.capturing_hotkey());
+    assert!(host.applied.is_empty());
+
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("Shift+F5"), &mut host);
+    assert!(!ui.capturing_hotkey());
+    let keys_of = |ui: &ConfigUi, action| ui.settings.hotkeys.keys_of(action);
+    assert_eq!(keys_of(&ui, Action::SaveState), [combo("Shift+F5")]);
+    assert_eq!(host.applied.last().unwrap().hotkeys, ui.settings.hotkeys, "at once");
+    assert_eq!(status(&ui), ("save_state is Shift+F5 now", false));
+    assert!(ui.settings.hotkeys.is_own(Action::SaveState));
+
+    // Ctrl+F5 is screenshot's: the window asks before taking it, and Esc
+    // asks for other keys.
+    ui.key(Insert, &mut host);
+    ui.hotkey_pressed(combo("Ctrl+F5"), &mut host);
+    assert!(ui.hotkeys_page.clash.is_some());
+    let mut frame = Frame::new(640, 400);
+    ui.draw(&mut frame);
+    ui.key(Esc, &mut host);
+    assert!(ui.capturing_hotkey());
+    ui.hotkey_pressed(combo("Ctrl+F5"), &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(keys_of(&ui, Action::SaveState), [combo("Shift+F5"), combo("Ctrl+F5")]);
+    assert_eq!(keys_of(&ui, Action::Screenshot), []);
+    assert_eq!(ui.settings.hotkeys.resolve().1, Vec::<String>::new());
+
+    // The text a letter's key types after it isn't the window's: an R
+    // would reset the action, a Y answer the question for the user.
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("R"), &mut host);
+    ui.text("r", &mut host);
+    assert_eq!(keys_of(&ui, Action::SaveState), [combo("R")]);
+    ui.select(action_row(&ui, Action::Pause));
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("R"), &mut host);
+    assert!(ui.hotkeys_page.clash.is_some());
+    ui.text("r", &mut host);
+    assert!(ui.hotkeys_page.clash.is_some());
+    // Text after another key, or after the next text, is the window's.
+    ui.key(Esc, &mut host);
+    assert!(ui.capturing_hotkey());
+    ui.hotkey_pressed(combo("R"), &mut host);
+    ui.text("x", &mut host);
+    ui.text("y", &mut host);
+    assert!(ui.hotkeys_page.clash.is_none());
+    assert_eq!(keys_of(&ui, Action::Pause), [combo("R")]);
+    // The keys as they were.
+    ui.select(action_row(&ui, Action::SaveState));
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("Shift+F5"), &mut host);
+    ui.key(Insert, &mut host);
+    ui.hotkey_pressed(combo("Ctrl+F5"), &mut host);
+    ui.select(action_row(&ui, Action::Pause));
+    ui.key(Char('r'), &mut host);
+    assert!(!ui.settings.hotkeys.is_own(Action::Pause));
+    ui.select(action_row(&ui, Action::SaveState));
+    assert_eq!(keys_of(&ui, Action::SaveState), [combo("Shift+F5"), combo("Ctrl+F5")]);
+
+    // Del leaves it without a key, R gives it the profile's again.
+    ui.key(Delete, &mut host);
+    assert_eq!(keys_of(&ui, Action::SaveState), []);
+    ui.key(Char('r'), &mut host);
+    assert!(!ui.settings.hotkeys.is_own(Action::SaveState));
+    assert_eq!(keys_of(&ui, Action::SaveState), [combo("Ctrl+F1")]);
+    // F2 saves the lines with the window's other settings.
+    ui.key(Save, &mut host);
+    let saved = &host.saved.last().unwrap().hotkeys;
+    assert_eq!(saved.keys_of(Action::Screenshot), []);
+    assert!(saved.is_own(Action::Screenshot));
+    // Reset every key.
+    ui.select(2);
+    ui.key(Enter, &mut host);
+    assert_eq!(ui.settings.hotkeys, crate::hotkeys::HotkeySettings::default());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_rebind_never_leaves_the_window_without_a_way_to_open_it() {
+    use crate::hotkeys::Action;
+    use UiKey::*;
+    let mut host = FakeHost::new();
+    let settings = Settings { mouse_menu_hold: false, ..Settings::default() };
+    let (mut ui, dir) = hotkeys_ui(&host, &settings, "lockout");
+    let window = action_row(&ui, Action::SettingsWindow);
+    let keys_of = |ui: &ConfigUi| ui.settings.hotkeys.keys_of(Action::SettingsWindow);
+    ui.select(window);
+    // A key the window moves or types with would close it instead.
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("Up"), &mut host);
+    assert!(ui.capturing_hotkey());
+    assert!(status(&ui).1);
+    ui.hotkey_pressed(combo("Ctrl+Shift+F10"), &mut host);
+    assert_eq!(keys_of(&ui), [combo("Ctrl+Shift+F10")]);
+    // Clearing its key, or giving it to another action, is refused.
+    ui.key(Delete, &mut host);
+    assert!(status(&ui).1);
+    assert_eq!(keys_of(&ui), [combo("Ctrl+Shift+F10")]);
+    ui.select(action_row(&ui, Action::Pause));
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("Ctrl+Shift+F10"), &mut host);
+    ui.key(Enter, &mut host);
+    assert!(status(&ui).1);
+    assert_eq!(keys_of(&ui), [combo("Ctrl+Shift+F10")]);
+    // With the right button's hold on, the window opens without a key.
+    ui.settings.mouse_menu_hold = true;
+    ui.select(window);
+    ui.key(Delete, &mut host);
+    assert_eq!(keys_of(&ui), []);
+    // Then the hold stays on.
+    ui.show_page(Page::Emulator);
+    let hold = ui.items().iter().position(|&i| i == Item::MouseMenuHold).unwrap();
+    ui.select(hold);
+    ui.key(Left, &mut host);
+    assert!(ui.settings.mouse_menu_hold);
+    assert!(status(&ui).1);
+    // A custom profile's file edited by hand can't give the window a key
+    // it moves with either.
+    let custom = crate::hotkeys::CustomProfile::parse(
+        "hand",
+        "profile=rust-dos\nsettings_window=Up\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("hand.conf"), custom.text()).unwrap();
+    ui.show_page(Page::Hotkeys);
+    ui.hotkeys_page.refresh();
+    ui.key(Left, &mut host);
+    assert!(status(&ui).1);
+    assert_eq!(keys_of(&ui), []);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_hotkeys_page_saves_and_loads_custom_profiles() {
+    use crate::hotkeys::Action;
+    use UiKey::*;
+    use hotkeys_page::HotkeyRow;
+    let mut host = FakeHost::new();
+    let (mut ui, dir) = hotkeys_ui(&host, &Settings::default(), "custom");
+    let keys_of = |ui: &ConfigUi| ui.settings.hotkeys.keys_of(Action::SaveState);
+    ui.select(action_row(&ui, Action::SaveState));
+    ui.key(Enter, &mut host);
+    ui.hotkey_pressed(combo("Ctrl+Shift+F8"), &mut host);
+    let row = |ui: &ConfigUi, r| ui.hotkey_rows().iter().position(|&x| x == r).unwrap();
+    ui.select(row(&ui, HotkeyRow::SaveAs));
+    ui.key(Enter, &mut host);
+    ui.text("../up", &mut host);
+    ui.key(Enter, &mut host);
+    assert!(status(&ui).1, "not a name");
+    keys(&mut ui, &mut host, &[Backspace, Backspace, Backspace, Backspace, Backspace]);
+    ui.text("Mine", &mut host);
+    ui.key(Enter, &mut host);
+    assert!(dir.join("Mine.conf").is_file());
+    assert_eq!(ui.hotkey_profile_text(), "Mine (custom)");
+
+    // Back to the profile's keys, then the custom profile from the list.
+    ui.select(row(&ui, HotkeyRow::ResetAll));
+    ui.key(Enter, &mut host);
+    assert_eq!(ui.hotkey_profile_text(), "Rust-DOS");
+    ui.select(0);
+    ui.key(Enter, &mut host);
+    let popup = ui.popup.as_ref().unwrap();
+    assert_eq!(popup.labels.as_ref().unwrap().last().unwrap(), "Mine (custom)");
+    ui.key(End, &mut host);
+    ui.key(Enter, &mut host);
+    assert_eq!(keys_of(&ui), [combo("Ctrl+Shift+F8")]);
+    assert_eq!(host.applied.last().unwrap().hotkeys, ui.settings.hotkeys);
+
+    // A window opened later finds it, and Left from the first profile
+    // goes round to it.
+    let (mut again, _) = hotkeys_ui(&host, &Settings::default(), "custom-again");
+    again.hotkeys_page.dir = Some(dir.clone());
+    again.hotkeys_page.refresh();
+    again.key(Left, &mut host);
+    assert_eq!(keys_of(&again), [combo("Ctrl+Shift+F8")]);
+    // A built-in profile picked keeps the changed keys.
+    again.key(Right, &mut host);
+    assert_eq!(again.hotkey_profile_text(), "Rust-DOS, 1 key changed");
+    again.key(Left, &mut host);
+    assert_eq!(again.hotkey_profile_text(), "Mine (custom)");
+    // Del on it deletes its file, once confirmed; the keys stay.
+    again.key(Delete, &mut host);
+    again.key(Enter, &mut host);
+    assert!(!dir.join("Mine.conf").exists());
+    assert!(again.hotkeys_page.custom.is_empty());
+    assert_eq!(keys_of(&again), [combo("Ctrl+Shift+F8")]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_hotkeys_page_draws_and_clicks() {
+    use crate::hotkeys::Action;
+    use UiKey::*;
+    let mut host = FakeHost::new();
+    let (mut ui, dir) = hotkeys_ui(&host, &Settings::default(), "click");
+    // The profile is picked here, and no longer on the Emulator page.
+    assert!(!Page::Emulator.items().contains(&Item::HotkeyProfile));
+    assert_eq!(ui.help_topic(), Some("hotkeys"));
+    let mut frame = Frame::new(640, 400);
+    let layout = Layout::for_frame(640, 400);
+    let mut click = |ui: &mut ConfigUi, host: &mut FakeHost, target: &dyn Fn(&Target) -> bool| {
+        ui.draw(&mut frame);
+        let h = ui.hits.iter().find(|h| target(&h.target)).expect("a target");
+        let x = (layout.x + h.col * 8 + 4) as i32;
+        let y = (layout.y + h.row * layout.cell_h + 4) as i32;
+        ui.click(x, y, host);
+    };
+    // A click on an action's keys rebinds it.
+    let row = action_row(&ui, Action::SaveState);
+    ui.select(row);
+    click(&mut ui, &mut host, &|t| matches!(t, Target::Button(i) if *i == row));
+    assert!(ui.capturing_hotkey());
+    // Tabs don't leave a rebind; the hint's Esc ends it.
+    click(&mut ui, &mut host, &|t| matches!(t, Target::Tab(Page::Sound)));
+    assert_eq!(ui.page, Page::Hotkeys);
+    click(&mut ui, &mut host, &|t| matches!(t, Target::Key(UiKey::Esc)));
+    assert!(!ui.capturing_hotkey());
+    // The profile's arrow steps to the next one.
+    ui.select(0);
+    click(&mut ui, &mut host, &|t| matches!(t, Target::Step(0, 1)));
+    assert_eq!(ui.settings.hotkeys.profile, crate::hotkeys::Profile::Pcsx2);
+    for (width, height) in [(640, 400), (400, 300), (320, 200)] {
+        let mut frame = Frame::new(width, height);
+        ui.draw(&mut frame);
+        ui.key(Enter, &mut host);
+        ui.draw(&mut frame);
+        ui.key(Esc, &mut host);
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }

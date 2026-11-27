@@ -4,7 +4,7 @@
 use super::Frontend;
 use super::values::{
     DEADZONE_UNIT, SCREEN_GLOW_UNIT, awe32, bar, describe_blocksize, host_midi, memsize_bar, mt32, on_off, percent_bar,
-    ram_size, sc55_found, soundfonts,
+    add_on_overlay, ram_size, sc55_found, soundfonts, voodoo_add_on, voodoo_opengl,
 };
 use crate::config::{MidiSynth, Settings};
 use crate::cpu::CoreMode;
@@ -137,10 +137,11 @@ pub(super) enum Item {
     Cpu,
     /// The display adapter.
     Machine,
+    /// What draws the 3D cards: the 3dfx cards and the ToadForce.
+    Renderer,
     /// The 3dfx card, its memory, and how the host draws for it.
     Voodoo,
     VoodooMemory,
-    VoodooRenderer,
     VoodooScale,
     VoodooScaleShader,
     VoodooMsaa,
@@ -161,8 +162,6 @@ pub(super) enum Item {
     VeriteIrq,
     /// The megabytes of memory a ToadForce has.
     ToadForceMemory,
-    /// What draws a ToadForce's triangles.
-    ToadForceRenderer,
     /// The gamma a ToadForce's picture is shown with.
     ToadForceGamma,
     Memsize,
@@ -175,12 +174,15 @@ pub(super) enum Item {
     Dpmi,
     /// The DOS version programs are told.
     DosVersion,
+    AnsiSys,
     /// A booted system's hard disks on the IDE channels.
     IdeHardDisks,
     /// A booted system's CD-ROM drive, with or without a CD.
     BootCdrom,
     FloppyController,
     KeyboardLayout,
+    /// The emulator's keys' profile (`[hotkeys]`).
+    HotkeyProfile,
     /// The captured mouse's motion multiplier.
     MouseSensitivity,
     /// The mouse captured and let go by itself.
@@ -274,6 +276,8 @@ pub(super) enum Item {
     TandySound,
     /// PIT channel 2's gate at startup (`pit2_gate_at_start`).
     Pit2GateAtStart,
+    /// The CMS chips in the SB 2.0's sockets (`cms`).
+    Cms,
     /// The configuration file's `[autoexec]` commands (autoexec.rs).
     Autoexec,
     /// The IPX driver, its IRQ and its frame type.
@@ -377,10 +381,10 @@ impl Item {
             Fpu => "FPU arithmetic",
             Cpu => "Processor",
             Machine => "Video card",
+            Renderer => "3D drawn by",
             Memsize => "Memory",
             Voodoo => "3dfx Voodoo Graphics",
             VoodooMemory => "3dfx card",
-            VoodooRenderer => "3dfx drawn by",
             VoodooScale => "3dfx OpenGL size",
             VoodooScaleShader => "  Sized for the CRT look",
             VoodooMsaa => "3dfx antialiasing",
@@ -396,17 +400,18 @@ impl Item {
             VeriteRom => "  Board ROM",
             VeriteIrq => "  Vérité IRQ",
             ToadForceMemory => "  ToadForce memory",
-            ToadForceRenderer => "  ToadForce drawn by",
             ToadForceGamma => "  ToadForce gamma",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
             DosHigh => "DOS high",
             Dpmi => "DPMI host",
             DosVersion => "Reported DOS version",
+            AnsiSys => "ANSI.SYS",
             IdeHardDisks => "IDE hard disks (BOOT)",
             BootCdrom => "CD-ROM drive (BOOT)",
             FloppyController => "Floppy controller (BOOT)",
             KeyboardLayout => "Keyboard layout",
+            HotkeyProfile => "Hotkeys",
             MouseSensitivity => "Mouse sensitivity",
             MouseAutocapture => "Mouse auto capture",
             MouseCaptureMessages => "Mouse capture messages",
@@ -420,7 +425,7 @@ impl Item {
             GameFixes => "Game fixes",
             AlmanacFetch => "Fetch settings from Almanac...",
             AlmanacReport => "Report settings to Almanac...",
-            Rewind => "Rewind (Alt+F11)",
+            Rewind => "Rewind",
             RewindMemory => "  Rewind memory",
             SbType => "Sound Blaster",
             // The fields of a row of several go by their names, after
@@ -466,6 +471,7 @@ impl Item {
             LptDac => "Parallel port DAC",
             TandySound => "Tandy/PCjr sound",
             Pit2GateAtStart => "Timer 2 gate at startup",
+            Cms => "CMS chips on the SB 2.0",
             Autoexec => "Edit the [autoexec] commands...",
             Ipx => "IPX driver",
             IpxIrq => "  IRQ",
@@ -549,8 +555,7 @@ impl Item {
             Item::CaptureDir | Item::RecordUi | Item::RecordShader => frontend.host_files,
             Item::Core => crate::dynrec::AVAILABLE,
             // The browser draws with the emulator's own rasterizer only.
-            Item::VoodooRenderer
-            | Item::ToadForceRenderer
+            Item::Renderer
             | Item::VoodooScale
             | Item::VoodooScaleShader
             | Item::VoodooMsaa
@@ -625,30 +630,34 @@ impl Item {
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
             Item::AutoFps | Item::AutoBusyOs => matches!(s.cycles, CpuSpeed::Auto(_)),
-            Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooGamma => s.voodoo.enabled,
+            // The add-on card's own: a Voodoo3 or Banshee as the display
+            // adapter leaves no room for it, and has its 16 MB whatever
+            // these say.
+            Item::Voodoo => s.machine.voodoo_board().is_none(),
+            Item::VoodooMemory | Item::VoodooGamma => voodoo_add_on(s),
+            // Every 3D card's: a 3dfx card, the display adapter too, or a
+            // ToadForce.
+            Item::Renderer => s.voodoo_board().is_some() || s.machine.is_toadforce(),
+            // Every 3dfx card's, the display adapter's too.
+            Item::VoodooTextureSampling => s.voodoo_board().is_some(),
             Item::PowerVrFilter => s.powervr.is_some(),
             Item::VeriteRisc | Item::VeriteIrq => s.machine.is_verite(),
-            Item::ToadForceMemory | Item::ToadForceRenderer | Item::ToadForceGamma => {
-                s.machine.is_toadforce()
-            }
+            Item::ToadForceMemory | Item::ToadForceGamma => s.machine.is_toadforce(),
             Item::VeriteMhz | Item::VeriteRom => {
                 s.machine.is_verite() && s.verite.risc == crate::verite::Risc::Lle
             }
             Item::Awe32Rom | Item::Awe32Ram => awe32(s),
+            Item::Cms => s.sound.sb_installed && s.sound.sb.model == crate::sb::SbModel::Sb2,
             // Until there is a ROM.
             Item::Awe32Download => awe32(s) && crate::awe32::rom::find(s.sound.awe32rom.as_deref()).is_none(),
             Item::Sc55Roms | Item::Sc55Model => s.sound.midisynth == MidiSynth::Sc55,
             // Until there are ROMs.
             Item::Sc55Download => s.sound.midisynth == MidiSynth::Sc55 && sc55_found(s).is_none(),
-            // Until it is there.
-            Item::VoodooOverlay => s.voodoo.enabled && crate::voodoo::overlay::find().is_none(),
-            Item::VoodooScale | Item::VoodooMsaa | Item::VoodooDither | Item::VoodooAnisotropy => {
-                s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl
-            }
+            // DOS games' Glide for the add-on card, until it is there.
+            Item::VoodooOverlay => add_on_overlay(s).is_some_and(|o| o.find().is_none()),
+            Item::VoodooScale | Item::VoodooMsaa | Item::VoodooDither | Item::VoodooAnisotropy => voodoo_opengl(s),
             // At 1x the lines are the card's own, whatever the look.
-            Item::VoodooScaleShader => {
-                s.voodoo.enabled && s.voodoo.renderer == crate::voodoo::Renderer::OpenGl && s.voodoo.scale > 1
-            }
+            Item::VoodooScaleShader => voodoo_opengl(s) && s.voodoo.scale > 1,
             Item::Relay => s.network.online,
             Item::SerialIrq(n) => s.serial.ports[n as usize] != crate::serial::PortType::Off,
             Item::MouseType => s.serial.ports.contains(&crate::serial::PortType::Mouse),
@@ -670,10 +679,10 @@ impl Item {
             Scale | Fullscreen | Aspect | Vrr | FpsCap | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
-            Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
-            | ToadForceRenderer
+            Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | AnsiSys | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | HotkeyProfile | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
+            | Renderer
             | ToadForceGamma
-            | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooOverlay | PowerVrFilter => Applies::Now,
+            | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
             Post => Applies::NextStart,
@@ -835,13 +844,15 @@ impl Item {
                 None => format!("{} (auto)", s.cpu_model().describe()),
             },
             Machine => s.machine.describe().to_string(),
+            Renderer => match s.renderer {
+                crate::config::Renderer::Auto => "Auto",
+                crate::config::Renderer::OpenGl => "OpenGL",
+                crate::config::Renderer::Software => "Software",
+            }
+            .to_string(),
             Memsize => memsize_bar(s),
             Voodoo => on_off(s.voodoo.enabled),
             VoodooMemory => s.voodoo.board.describe().to_string(),
-            VoodooRenderer => match s.voodoo.renderer {
-                crate::voodoo::Renderer::Software => "Rust-DOS".to_string(),
-                crate::voodoo::Renderer::OpenGl => "OpenGL".to_string(),
-            },
             VoodooScale => format!("{}x", s.voodoo.scale),
             VoodooTextureSampling => match s.voodoo.texture_sampling {
                 crate::voodoo::TextureSampling::Default => "Default",
@@ -881,11 +892,6 @@ impl Item {
             },
             VeriteIrq => s.verite.irq.to_string(),
             ToadForceMemory => format!("{} MB", s.toadforce_memory),
-            ToadForceRenderer => match s.toadforce_renderer {
-                crate::toadforce::Renderer::Auto => "Automatic".to_string(),
-                crate::toadforce::Renderer::OpenGl => "OpenGL".to_string(),
-                crate::toadforce::Renderer::Software => "Rust-DOS".to_string(),
-            },
             ToadForceGamma => match s.toadforce_gamma {
                 None => "Off".to_string(),
                 Some(g) => format!("{}", g),
@@ -901,10 +907,12 @@ impl Item {
             DosHigh => on_off(s.dos_high),
             Dpmi => on_off(s.dpmi),
             DosVersion => s.dos_version.name(),
+            AnsiSys => on_off(s.ansi_sys),
             IdeHardDisks => on_off(s.ide_hard_disks),
             BootCdrom => if s.boot_cdrom { "always" } else { "with a CD" }.to_string(),
             FloppyController => on_off(s.floppy_controller),
             KeyboardLayout => s.keyboard_layout.describe(),
+            HotkeyProfile => s.hotkeys.profile.describe().to_string(),
             MouseSensitivity => bar(format!("{:.2}x", s.mouse_sensitivity), (s.mouse_sensitivity * 100.0).round() as u16, 1000, 50),
             MouseAutocapture => on_off(s.mouse_autocapture),
             MouseCaptureMessages => on_off(s.mouse_capture_messages),
@@ -919,6 +927,7 @@ impl Item {
             AlmanacFetch | AlmanacReport => String::new(),
             Rewind => on_off(s.rewind),
             RewindMemory => format!("{} MB", s.rewind_memory),
+            SbType if s.sound.game_blaster => "Game Blaster".to_string(),
             SbType if !s.sound.sb_installed => "none".to_string(),
             SbType => match sb.model {
                 SbModel::Sb16 => "SB16",
@@ -1027,6 +1036,7 @@ impl Item {
             LptDac => s.sound.lpt_dac.describe().to_string(),
             TandySound => s.sound.tandy.describe().to_string(),
             Pit2GateAtStart => on_off(s.sound.pit2_gate_at_start),
+            Cms => on_off(s.sound.cms),
             Autoexec | Rooms | Phonebook => String::new(),
             Ipx => match s.network.ipx {
                 crate::net::IpxMode::Auto => "auto (with LAN HOST or JOIN)",

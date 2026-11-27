@@ -4,7 +4,7 @@
 //! changes for a program that isn't recognised, and `game_fixes = false`
 //! or `game_fixes_off = <names>` turns them off.
 //!
-//! There are four kinds:
+//! There are five kinds:
 //!
 //! - [`Kind::Code`]: code bytes in conventional memory, patched in place.
 //!   The check runs when a program starts a reset of the Sound Blaster's
@@ -27,6 +27,10 @@
 //!   patched as the built-in Windows loads it, such as Test Drive 4's.
 //!   Windows booted from a disk image loads its programs itself, and
 //!   they run as they are.
+//! - [`Kind::Win32Shims`]: a Win32 program by name and size that the
+//!   built-in Windows runs with some behaviours of an older Windows
+//!   (`win32::shims`), such as Win32s's for Lunicus. Its file isn't
+//!   changed, and other programs keep Windows 98's behaviour.
 //!
 //! The Sound Blaster fixes are for the driver of two Titus games of 1993
 //! with the same sound engine: Prehistorik 2 and Blues Brothers: Jukebox
@@ -53,10 +57,12 @@
 //!
 //! To add a fix: an entry in [`FIXES`] with a name of its own, a test that
 //! runs it (`tests/program/game_fixes_tests.rs`,
-//! `tests/dos/exec_tests.rs` for a program skipped at EXEC, or
-//! `tests/win32/win32_tests.rs` for a Win32 program), and a line in
-//! CONFIGURATION.md's list of game fixes.
+//! `tests/dos/exec_tests.rs` for a program skipped at EXEC,
+//! `tests/win32/win32_tests.rs` for a Win32 program, or
+//! `tests/win32/win32_shims_tests.rs` for one given shims), and a line
+//! in CONFIGURATION.md's list of game fixes.
 
+use crate::win32::shims::{Shims, win32s::WIN32S};
 use memchr::memmem::Finder;
 use std::sync::OnceLock;
 
@@ -80,6 +86,12 @@ pub struct CodePatch {
     /// What to change: the bytes there now, and what replaces them (of
     /// the same length). The first is what the search looks for.
     pub patches: &'static [(Bytes, &'static [u8])],
+    /// Data the driver works on, as `patches` has its code: rewritten
+    /// where it holds the bytes listed and left alone where it doesn't.
+    /// It doesn't decide whether the code is the fix's: a copy of the
+    /// driver with its data elsewhere is patched all the same. Only fixes
+    /// found in memory (`Kind::Code`) rewrite it.
+    pub data: &'static [(Bytes, &'static [u8])],
 }
 
 /// How a fix recognises its game, and what it does.
@@ -111,6 +123,14 @@ pub enum Kind {
         program: &'static str,
         size: usize,
         code: &'static CodePatch,
+    },
+    /// A Win32 program that the built-in Windows runs with `shims`: its
+    /// file name and the file's size. Matched as [`Kind::Win32`] is, by
+    /// name and size alone, since the shims don't touch its code.
+    Win32Shims {
+        program: &'static str,
+        size: usize,
+        shims: Shims,
     },
 }
 
@@ -224,6 +244,18 @@ const PREHISTORIK_2_SB_MIX: CodePatch = CodePatch {
             &[0xEB, 0x0D, 0x90, 0x90, 0x90, 0x90, 0x90],
         ),
     ],
+    // The two DMA buffers the music plays from, which sit at 0FB9:10C9h
+    // when the code is at 05DA:0000h. The driver plays both once before
+    // it has mixed anything into them: 40 ms of the zeros they hold
+    // until then, which the patched mix's centre line of 80h makes the
+    // lowest level the card has, a thump as the music starts.
+    data: &[(
+        Bytes {
+            at: 0xAEB9,
+            bytes: &[0; 2 * 0xA8],
+        },
+        &[0x80; 2 * 0xA8],
+    )],
 };
 
 /// Blues Brothers: Jukebox Adventure's driver (BLUES.EXE as PKLITE
@@ -302,6 +334,7 @@ const JUKEBOX_SB_MIX: CodePatch = CodePatch {
             &[0x32, 0xC0, 0x90, 0x90, 0x90, 0x90],
         ),
     ],
+    data: &[],
 };
 
 /// Jukebox Adventure's MOD player, in the same code segment: before its
@@ -345,6 +378,7 @@ const JUKEBOX_MOD_HANG: CodePatch = CodePatch {
         },
         &[0x83, 0xFB, 0x0B, 0x90, 0x90],
     )],
+    data: &[],
 };
 
 /// The DOS/4GW settings that Lands of Lore 2's launchers add to the
@@ -398,6 +432,7 @@ const LOL2_LAUNCHER: CodePatch = CodePatch {
         },
         b"32",
     )],
+    data: &[],
 };
 
 /// SETUPG.EXE's copy of the settings `LOL2_LAUNCHER` patches.
@@ -425,6 +460,7 @@ const LOL2_SETUP_LAUNCHER: CodePatch = CodePatch {
         },
         b"32",
     )],
+    data: &[],
 };
 
 /// Test Drive 4's race camera, in the game's Win32 program (3.EXE, which
@@ -523,6 +559,92 @@ const TD4_INTRO_CAMERA: CodePatch = CodePatch {
             ],
         ),
     ],
+    data: &[],
+};
+
+/// What the player sees: the CD edition's intro (the title, the story
+/// screens with the crew's portraits) was drawn twice, in 320x200 and in
+/// 640x400 Super VGA. Without the fix it always plays the 320x200
+/// version, blocky and with blurred small print, though the video card
+/// has the 640x400 mode; with it, the sharp 640x400 one, without the
+/// VESA driver the CD has for cards whose BIOS lacks VESA. The game
+/// after the intro is 320x200 either way.
+///
+/// The VESA check of Whale's Voyage's CD intro (INTRO.EXE in \WV, which
+/// WV.EXE starts). Addresses here are offsets in its code segment, which
+/// starts 10h bytes into the file's load module, at 210h in the file; the
+/// pieces below are at offsets in the file. The routine at 1CCBh asks
+/// INT 10h AX=4F00h for the VbeInfoBlock into 1BA8h, and if that says
+/// "VESA", AX=4F01h for the ModeInfoBlock of mode 100h (640x400 in 256
+/// colours) into 1CA8h. Only 35 bytes are free there: the routine itself
+/// starts at 1CCBh, and the 4F01h call returns to 1D04h. A VBE 1.1 or
+/// later BIOS writes all 256 bytes of the block, zeros after the fields
+/// it defines (`interrupts::vbe`'s `mode_info`): the block's fields from
+/// 23h on land on the routine's first bytes, and zeros on the rest of
+/// the intro's code up to 1DA7h, 1D04h among it. The intro then runs
+/// the zeros, reaches code that finds its SVGA flag (1BA3h) unset and
+/// plays in 320x200. A real PC with VBE in its video BIOS does the same.
+///
+/// The patch gives 4F01h the 4F00h buffer at 1BA8h instead, 256 bytes
+/// up to 1CA7h. The intro is done with the VbeInfoBlock by then: it
+/// reads only its signature, before the 4F01h call, and nothing else of
+/// its code reads or writes 1BA8h-1CA7h, which 4F00h fills with 256
+/// bytes anyway (the file has zeros there, not the "VBE2" that would
+/// ask for 512). Of the ModeInfoBlock it reads only WinGranularity (at
+/// 4), which the patch reads from 1BACh instead of 1CACh. Its own
+/// variables at 1CC5h and 1CC9h, inside the old buffer, are left alone.
+/// For the 1993 CD release: INTRO.EXE of 10446 bytes, SHA-256
+/// 95a687dc9105903a96d430524963467e339efcefc20ccf78077ce8da18795d5c.
+const WHALES_VOYAGE_VESA_INTRO: CodePatch = CodePatch {
+    checks: &[
+        // mov byte cs:[1BA3h],0 / 4F00h into ES:1BA8h / the "VESA"
+        // checks / mov ax,4F01h / mov bx,cs / mov es,bx.
+        Bytes {
+            at: 0x1EDB,
+            bytes: &[
+                0x2E, 0xC6, 0x06, 0xA3, 0x1B, 0x00, 0xB8, 0x00, 0x4F, 0x8C, 0xCB, 0x8E, 0xC3, 0xBF,
+                0xA8, 0x1B, 0xCD, 0x10, 0x2E, 0x81, 0x3E, 0xA8, 0x1B, 0x56, 0x45, 0x75, 0x56, 0x90,
+                0x90, 0x2E, 0x81, 0x3E, 0xAA, 0x1B, 0x53, 0x41, 0x75, 0x4B, 0x90, 0x90, 0xB8, 0x01,
+                0x4F, 0x8C, 0xCB, 0x8E, 0xC3,
+            ],
+        },
+        // mov cx,cs:[1BA4h] / int 10h / xor eax,eax.
+        Bytes {
+            at: 0x1F0D,
+            bytes: &[0x2E, 0x8B, 0x0E, 0xA4, 0x1B, 0xCD, 0x10, 0x66, 0x33, 0xC0],
+        },
+        // The rest: the granularity in bytes to 1CC5h, the mode sets
+        // (4F02h with 1BA4h, then 1BA6h), the flag, ret.
+        Bytes {
+            at: 0x1F1B,
+            bytes: &[
+                0x66, 0xC1, 0xE0, 0x0A, 0x66, 0x2E, 0xA3, 0xC5, 0x1C, 0xB8, 0x02, 0x4F, 0x2E, 0x8B,
+                0x1E, 0xA4, 0x1B, 0xCD, 0x10, 0x80, 0xFC, 0x00, 0x74, 0x13, 0x90, 0x90, 0xB8, 0x02,
+                0x4F, 0x2E, 0x8B, 0x1E, 0xA6, 0x1B, 0xCD, 0x10, 0x80, 0xFC, 0x00, 0x75, 0x08, 0x90,
+                0x90, 0x2E, 0xC6, 0x06, 0xA3, 0x1B, 0xFF, 0xC3,
+            ],
+        },
+    ],
+    irq_handler: None,
+    patches: &[
+        // mov di,1CA8h becomes mov di,1BA8h.
+        (
+            Bytes {
+                at: 0x1F0A,
+                bytes: &[0xBF, 0xA8, 0x1C],
+            },
+            &[0xBF, 0xA8, 0x1B],
+        ),
+        // mov ax,cs:[1CACh] becomes mov ax,cs:[1BACh].
+        (
+            Bytes {
+                at: 0x1F17,
+                bytes: &[0x2E, 0xA1, 0xAC, 0x1C],
+            },
+            &[0x2E, 0xA1, 0xAC, 0x1B],
+        ),
+    ],
+    data: &[],
 };
 
 /// The fixes rust-dos knows.
@@ -601,6 +723,48 @@ pub const FIXES: &[Fix] = &[
             code: &TD4_INTRO_CAMERA,
         },
     },
+    // Cyberflix's engine of 1994 was made for Win32s. Its wrappers of
+    // GlobalLock (LUNICUS.EXE 414A39 and 414A85, JDEMO.EXE 4066D6 and
+    // 40672B) stop the program when GlobalFlags says a block is locked,
+    // which Win32s never did, and Windows 98 does after every lock:
+    // Windows 98 lists the game as incompatible. Its LUNIFX.DLL blits
+    // each frame in bands that start where UTLinearToSelectorOffset's
+    // pointers say, and sizes them for Win32s's tiled selectors of the
+    // frame's region (`Shim::UtRegionSelectors`): with Windows 98's 32 KB
+    // blocks the 3D view's last rows are noise. The CD's demo player,
+    // PREVIEWS\JDEMO.EXE, plays the demos of Cyberflix's games with the
+    // same engine.
+    Fix {
+        name: "lunicus-win32s",
+        game: "Lunicus",
+        reason: "it stops with \"bad lock use count\" unless GlobalFlags is Win32s's, and \
+                 draws its frames with a bitmap it finds in Windows 3.1's GDI heap, in bands \
+                 sized for Win32s's UTLinearToSelectorOffset",
+        kind: Kind::Win32Shims {
+            program: "LUNICUS.EXE",
+            size: 206_336,
+            shims: WIN32S,
+        },
+    },
+    Fix {
+        name: "cyberflix-demo-win32s",
+        game: "Lunicus (the CD's demo player)",
+        reason: "it stops with \"bad lock use count\" unless GlobalFlags is Win32s's",
+        kind: Kind::Win32Shims {
+            program: "JDEMO.EXE",
+            size: 83_456,
+            shims: WIN32S,
+        },
+    },
+    Fix {
+        name: "whales-voyage-vesa-intro",
+        game: "Whale's Voyage",
+        reason: "the CD intro plays in 320x200 instead of its 640x400 Super VGA version",
+        kind: Kind::AtLoad {
+            programs: &[("INTRO.EXE", &WHALES_VOYAGE_VESA_INTRO)],
+            beside: Some("WVD.EXE"),
+        },
+    },
 ];
 
 /// The fix called `name`.
@@ -641,7 +805,10 @@ pub fn find_code(
             .iter()
             .map(|fix| match fix.kind {
                 Kind::Code(code) => Some(Finder::new(code.patches[0].0.bytes)),
-                Kind::SkipAtExec { .. } | Kind::AtLoad { .. } | Kind::Win32 { .. } => None,
+                Kind::SkipAtExec { .. }
+                | Kind::AtLoad { .. }
+                | Kind::Win32 { .. }
+                | Kind::Win32Shims { .. } => None,
             })
             .collect()
     });
@@ -688,6 +855,23 @@ pub fn writes(code: &CodePatch, base: usize) -> impl Iterator<Item = (usize, u8)
             .enumerate()
             .map(move |(i, &byte)| (base + old.at + i, byte))
     })
+}
+
+/// The bytes to write for the data of `code` at `base` that `ram` holds as
+/// listed (see `CodePatch::data`): (linear address, byte).
+pub fn data_writes<'a>(
+    ram: &'a [u8],
+    code: &'a CodePatch,
+    base: usize,
+) -> impl Iterator<Item = (usize, u8)> + 'a {
+    code.data
+        .iter()
+        .filter(move |(old, _)| has(ram, base, old))
+        .flat_map(move |(old, new)| {
+            new.iter()
+                .enumerate()
+                .map(move |(i, &byte)| (base + old.at + i, byte))
+        })
 }
 
 /// The fix, and the exit code it gives, for an EXEC (AL=00h) of `path`:
@@ -773,6 +957,30 @@ pub fn patch_win32(
     })
 }
 
+/// The fixes that give the Win32 program file of `size` bytes, which the
+/// built-in Windows loads from `path`, shims, each with its shims:
+/// `enabled` says whether a fix applies.
+pub fn win32_shims(
+    path: &str,
+    size: usize,
+    enabled: impl Fn(&Fix) -> bool,
+) -> Vec<(&'static Fix, Shims)> {
+    FIXES
+        .iter()
+        .filter(|fix| enabled(fix))
+        .filter_map(|fix| match fix.kind {
+            Kind::Win32Shims {
+                program,
+                size: wanted,
+                shims,
+            } if size == wanted && is_program(path, program, None, &|_| false) => {
+                Some((fix, shims))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whether `path` names the file `program` and, with `beside`, a file of
 /// that name is in the same directory: `is_file` says whether a path
 /// names a file.
@@ -796,7 +1004,10 @@ mod tests {
     fn codes() -> impl Iterator<Item = (&'static Fix, &'static CodePatch)> {
         FIXES.iter().filter_map(|fix| match fix.kind {
             Kind::Code(code) => Some((fix, code)),
-            Kind::SkipAtExec { .. } | Kind::AtLoad { .. } | Kind::Win32 { .. } => None,
+            Kind::SkipAtExec { .. }
+            | Kind::AtLoad { .. }
+            | Kind::Win32 { .. }
+            | Kind::Win32Shims { .. } => None,
         })
     }
 
@@ -809,7 +1020,7 @@ mod tests {
                 programs.iter().map(|&(_, code)| (fix, code)).collect()
             }
             Kind::Win32 { code, .. } => vec![(fix, code)],
-            Kind::SkipAtExec { .. } => vec![],
+            Kind::SkipAtExec { .. } | Kind::Win32Shims { .. } => vec![],
         })
     }
 
@@ -963,9 +1174,52 @@ mod tests {
                     pair[1].at
                 );
             }
-            for (old, new) in code.patches {
+            for (old, new) in code.patches.iter().chain(code.data) {
                 assert_eq!(old.bytes.len(), new.len(), "{} at {:04X}", fix.name, old.at);
             }
+            for (old, _) in code.data {
+                assert!(
+                    all.iter().all(|b| b.at + b.bytes.len() <= old.at
+                        || old.at + old.bytes.len() <= b.at),
+                    "{}'s data at {:04X} overlaps its code",
+                    fix.name,
+                    old.at
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_memory_fixes_have_data() {
+        // `Kind::AtLoad` and `Kind::Win32` patch files and images, which
+        // never apply `CodePatch::data`: data listed there would do
+        // nothing.
+        for fix in FIXES {
+            let files: Vec<&CodePatch> = match fix.kind {
+                Kind::AtLoad { programs, .. } => programs.iter().map(|&(_, c)| c).collect(),
+                Kind::Win32 { code, .. } => vec![code],
+                Kind::Code(_) | Kind::SkipAtExec { .. } | Kind::Win32Shims { .. } => vec![],
+            };
+            for code in files {
+                assert!(code.data.is_empty(), "{} has data it never writes", fix.name);
+            }
+        }
+    }
+
+    #[test]
+    fn data_is_rewritten_only_where_it_is_as_listed() {
+        let base = 0x3_0000;
+        for (fix, code) in codes().filter(|(_, code)| !code.data.is_empty()) {
+            let mut ram = memory(code, base);
+            let all: Vec<_> = data_writes(&ram, code, base).collect();
+            let want: usize = code.data.iter().map(|(_, new)| new.len()).sum();
+            assert_eq!(all.len(), want, "{}", fix.name);
+            for (old, _) in code.data {
+                ram[base + old.at] ^= 1;
+            }
+            assert_eq!(data_writes(&ram, code, base).count(), 0, "{}", fix.name);
+            // The code is still the fix's.
+            assert_eq!(names(&find_code(&ram, |_| true)), [(fix.name, base)]);
         }
     }
 
@@ -1129,6 +1383,36 @@ mod tests {
                 changed[offset(b.at)] ^= 1;
                 assert!(patch_win32(&path, &changed, |_| true).is_none());
             }
+        }
+    }
+
+    #[test]
+    fn gives_win32_shims_to_a_program_of_its_name_and_size() {
+        let shimmed: Vec<_> = FIXES
+            .iter()
+            .filter_map(|fix| match fix.kind {
+                Kind::Win32Shims {
+                    program,
+                    size,
+                    shims,
+                } => Some((fix, program, size, shims)),
+                _ => None,
+            })
+            .collect();
+        assert!(!shimmed.is_empty());
+        for (fix, program, size, shims) in shimmed {
+            assert!(!shims.is_empty(), "{}", fix.name);
+            let path = format!("C:\\GAME\\{}", program.to_ascii_lowercase());
+            let found = win32_shims(&path, size, |_| true);
+            let names: Vec<_> = found.iter().map(|(f, _)| f.name).collect();
+            assert_eq!(names, [fix.name]);
+            assert_eq!(found[0].1, shims);
+            // Not with the fix off, under another name, or of another
+            // size.
+            let off = vec![fix.name.to_string()];
+            assert!(win32_shims(&path, size, |f| enabled(f, true, &off)).is_empty());
+            assert!(win32_shims("C:\\GAME\\OTHER.EXE", size, |_| true).is_empty());
+            assert!(win32_shims(&path, size + 1, |_| true).is_empty());
         }
     }
 }

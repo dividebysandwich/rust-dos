@@ -146,7 +146,8 @@ struct Backing {
 
 /// Where a track file's bytes are.
 enum Source {
-    File(RefCell<File>),
+    /// A host file, read a block at a time (`FileReader`).
+    File(RefCell<FileReader>),
     /// In memory, as the browser build has its CD images.
     Memory(MemoryImage),
     /// Decoded from a compressed audio file as they are read.
@@ -171,7 +172,8 @@ pub struct CdImage {
     /// files keep none.
     sub_file: Option<SubFile>,
     /// What opening the image found that the user should hear of: the
-    /// subchannel file it reads, or why it reads none it found.
+    /// subchannel file it reads, or why it reads none it found, and a
+    /// CopyLok disc and whether the image can pass its check.
     notes: Vec<String>,
 }
 
@@ -215,7 +217,7 @@ impl CdImage {
     /// .bin, .img), whose sector format is found from where the ISO 9660 or
     /// High Sierra volume descriptor is.
     pub fn open(path: &Path) -> Result<Self, String> {
-        if is_b6t(path) {
+        let mut image = if is_b6t(path) {
             Self::open_b6t(path)
         } else if is_mds(path) {
             Self::open_mds(path)
@@ -225,7 +227,47 @@ impl CdImage {
             Self::open_chd(path)
         } else {
             Self::open_bare(path)
+        }?;
+        image.note_copylok();
+        Ok(image)
+    }
+
+    /// Note a disc that CopyLok protects (`super::copylok`), and whether
+    /// the image can pass its check: the band of sectors the check expects
+    /// to fail is there only in an image of whole 2352-byte sectors, where
+    /// the EDC of each says whether a drive reads it.
+    fn note_copylok(&mut self) {
+        let Some(track) = self.data_track() else {
+            return;
+        };
+        let mut pvd = [0u8; DATA_SECTOR];
+        if self.read_data(track.start + 16, &mut pvd).is_err() {
+            return;
         }
+        let Some(variant) = super::copylok::variant(&pvd) else {
+            return;
+        };
+        let raw = matches!(track.mode, TrackMode::Mode1_2352 | TrackMode::Mode2_2352);
+        let shown = crate::mount::display_host_path(&self.path);
+        self.notes.push(if raw {
+            format!(
+                "{} is a CopyLok disc ({}): its sectors whose EDC doesn't match their data \
+                 read as errors, so the protection's check passes if the image keeps the \
+                 band of unreadable sectors, as Redump's dumps do. A BIN made from an ISO \
+                 doesn't keep it",
+                shown,
+                variant.describe()
+            )
+        } else {
+            format!(
+                "{} is a CopyLok disc ({}), but the image doesn't keep whole 2352-byte \
+                 sectors, so it can't hold the sectors a drive fails to read and the \
+                 protection's check fails. An image of whole sectors, as Redump's BIN and CUE, \
+                 passes it",
+                shown,
+                variant.describe()
+            )
+        });
     }
 
     fn open_cue(path: &Path, sheet: CueSheet) -> Result<Self, String> {
@@ -587,7 +629,7 @@ impl CdImage {
 
     /// What opening the image found that the user should hear of: the
     /// subchannel file beside it that it reads, or why it reads none of
-    /// those it found.
+    /// those it found, and a CopyLok disc (`note_copylok`).
     pub fn notes(&self) -> &[String] {
         &self.notes
     }
@@ -643,10 +685,20 @@ impl CdImage {
     pub fn from_memory(name: &str, data: MemoryImage) -> Result<Self, String> {
         #[cfg(feature = "chd")]
         if is_chd_memory(&data) {
-            return Self::chd(Path::new(name), Box::new(MemoryReader { data, pos: 0 }));
+            let mut image = Self::chd(Path::new(name), Box::new(MemoryReader { data, pos: 0 }))?;
+            image.note_copylok();
+            return Ok(image);
         }
         let len = data.len();
-        Self::bare(Path::new(name), Backing { source: Source::Memory(data), data_offset: 0, len, swap: false })
+        let backing = Backing {
+            source: Source::Memory(data),
+            data_offset: 0,
+            len,
+            swap: false,
+        };
+        let mut image = Self::bare(Path::new(name), backing)?;
+        image.note_copylok();
+        Ok(image)
     }
 
     /// The disc made from the host folder `root` (`folder::build`).
@@ -1259,6 +1311,92 @@ fn decode_q(q: &[u8]) -> Option<QPosition> {
     })
 }
 
+/// How much of a track file `FileReader` reads at once.
+const READ_AHEAD: u64 = 0x10000;
+
+/// A track file on the host, read in blocks of `READ_AHEAD` bytes, the
+/// last of which it keeps. Programs read a disc in pieces of a sector or
+/// less (Microsoft Setup copies a file 1 KB at a time, which reads every
+/// sector twice), and one host read for each, a seek and a read, costs
+/// more than the copy: on a hard disk whose cache doesn't hold the image
+/// yet, about 100 us. Read a block at a time, a run of such reads is one
+/// host read for every 64 KB, and the others copy from memory. The disc
+/// is read-only, so the block kept is never out of date.
+struct FileReader {
+    file: File,
+    /// Where the block kept starts, in the file's sector data, and its
+    /// bytes; empty before the first read.
+    block_at: u64,
+    block: Vec<u8>,
+}
+
+impl FileReader {
+    fn new(file: File) -> Self {
+        FileReader {
+            file,
+            block_at: 0,
+            block: Vec::new(),
+        }
+    }
+
+    /// Fill `buf` from byte `at` of the sector data, which starts at
+    /// `offset` in the file and is `len` bytes long; `buf` ends within
+    /// it.
+    fn read_at(&mut self, offset: u64, len: u64, at: u64, buf: &mut [u8]) -> io::Result<()> {
+        let end = at + buf.len() as u64;
+        if !self.holds(at, end) && buf.len() as u64 <= READ_AHEAD {
+            // The block `at` is in, or a block from `at` where the piece
+            // reaches past that one's end.
+            let aligned = at - at % READ_AHEAD;
+            let start = if end <= aligned + READ_AHEAD {
+                aligned
+            } else {
+                at
+            };
+            let size = READ_AHEAD.min(len - start) as usize;
+            self.block.resize(size, 0);
+            // A file shorter than its header says (a WAVE file cut short)
+            // fills the block only up to its end. A piece past that is
+            // read on its own below and fails as a read of the file does.
+            match self.fill_block(offset + start) {
+                Ok(got) => {
+                    self.block.truncate(got);
+                    self.block_at = start;
+                }
+                Err(_) => self.block.clear(),
+            }
+        }
+        if self.holds(at, end) {
+            let from = (at - self.block_at) as usize;
+            buf.copy_from_slice(&self.block[from..from + buf.len()]);
+            return Ok(());
+        }
+        self.file.seek(SeekFrom::Start(offset + at))?;
+        self.file.read_exact(buf)
+    }
+
+    /// Whether the block kept has the bytes from `at` to `end`.
+    fn holds(&self, at: u64, end: u64) -> bool {
+        at >= self.block_at && end <= self.block_at + self.block.len() as u64
+    }
+
+    /// Fill the block from byte `pos` of the file, or as much of it as the
+    /// file has from there; returns how many bytes that is.
+    fn fill_block(&mut self, pos: u64) -> io::Result<usize> {
+        self.file.seek(SeekFrom::Start(pos))?;
+        let mut got = 0;
+        while got < self.block.len() {
+            match self.file.read(&mut self.block[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(got)
+    }
+}
+
 impl Backing {
     fn open(path: &Path, format: FileFormat) -> Result<Self, String> {
         let error = |e: io::Error| format!("{}: {}", path.display(), e);
@@ -1275,7 +1413,13 @@ impl Backing {
             FileFormat::Compressed => return Self::decoded(path),
             _ => (0, total),
         };
-        Ok(Backing { source: Source::File(RefCell::new(file)), data_offset, len, swap: format == FileFormat::Motorola })
+        let source = Source::File(RefCell::new(FileReader::new(file)));
+        Ok(Backing {
+            source,
+            data_offset,
+            len,
+            swap: format == FileFormat::Motorola,
+        })
     }
 
     /// A compressed audio file, decoded to CD audio as it is read. Its
@@ -1301,28 +1445,27 @@ impl Backing {
             return Ok(());
         }
         let n = buf.len().min((self.len - at) as usize);
-        let at = self.data_offset + at;
+        let pos = self.data_offset + at;
         match &self.source {
             Source::File(file) => {
-                let mut file = file.borrow_mut();
-                file.seek(SeekFrom::Start(at))?;
-                file.read_exact(&mut buf[..n])
+                file.borrow_mut()
+                    .read_at(self.data_offset, self.len, at, &mut buf[..n])
             }
-            Source::Memory(data) => match data.read_at(at, &mut buf[..n]) {
+            Source::Memory(data) => match data.read_at(pos, &mut buf[..n]) {
                 true => Ok(()),
                 false => Err(io::ErrorKind::UnexpectedEof.into()),
             },
             #[cfg(feature = "cdaudio")]
             Source::Decoded(track) => {
-                track.borrow_mut().read_at(at, &mut buf[..n]);
+                track.borrow_mut().read_at(pos, &mut buf[..n]);
                 Ok(())
             }
             Source::Folder(disc, open) => {
-                disc.read_at(at, &mut buf[..n], &mut open.borrow_mut());
+                disc.read_at(pos, &mut buf[..n], &mut open.borrow_mut());
                 Ok(())
             }
             #[cfg(feature = "chd")]
-            Source::Chd(disc) => disc.borrow_mut().read_at(at, &mut buf[..n]),
+            Source::Chd(disc) => disc.borrow_mut().read_at(pos, &mut buf[..n]),
         }
     }
 }
@@ -1917,6 +2060,125 @@ mod tests {
         );
         // Past the disc is another error.
         assert!(!is_unreadable(&image.read_data(10, &mut data).unwrap_err()));
+    }
+
+    /// A disc of 40 Mode 1 sectors whose volume descriptor carries
+    /// CopyLok's mark, as whole sectors: the descriptor at 16, and a band
+    /// of sectors 20 to 29 as Redump's dumps keep a CopyLok disc's, sync,
+    /// header and 55h for the rest. Returns the raw sectors and the
+    /// descriptor.
+    fn copylok_disc() -> (Vec<u8>, [u8; DATA_SECTOR]) {
+        let pvd = crate::cdrom::copylok::marked_pvd(&crate::cdrom::copylok::early_mark());
+        let mut data = Vec::new();
+        for lba in 0..40u32 {
+            let mut raw = crate::cdrom::mode1_sector(lba, lba as u8);
+            if lba == 16 {
+                raw[16..16 + DATA_SECTOR].copy_from_slice(&pvd);
+                let edc = crate::cdrom::edc(&raw[..2064]);
+                raw[2064..2068].copy_from_slice(&edc.to_le_bytes());
+            }
+            if (20..30).contains(&lba) {
+                raw[16..].fill(0x55);
+            }
+            data.extend(raw);
+        }
+        (data, pvd)
+    }
+
+    #[test]
+    fn a_copylok_disc_reads_its_band_as_errors() {
+        let dir = scratch("copylok");
+        let (data, _) = copylok_disc();
+        fs::write(dir.join("disc.bin"), data).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        let notes = image.notes().join("\n");
+        assert!(
+            notes.contains("CopyLok")
+                && notes.contains("early variant")
+                && notes.contains("read as errors"),
+            "{}",
+            notes
+        );
+        let mut data = [0u8; DATA_SECTOR];
+        let mut raw = [0u8; RAW_SECTOR];
+        for lba in 20..30 {
+            assert!(
+                is_unreadable(&image.read_data(lba, &mut data).unwrap_err()),
+                "{}",
+                lba
+            );
+            assert!(
+                is_unreadable(&image.read_raw(lba, &mut raw).unwrap_err()),
+                "{}",
+                lba
+            );
+        }
+        // The sectors around the band read as they are.
+        for lba in [17, 19, 30, 39] {
+            image.read_data(lba, &mut data).unwrap();
+            assert!(data.iter().all(|&b| b == lba as u8), "{}", lba);
+            image.read_raw(lba, &mut raw).unwrap();
+            assert_eq!(raw[16], lba as u8);
+        }
+    }
+
+    #[test]
+    fn a_copylok_disc_in_an_iso_is_noted_as_failing_the_check() {
+        let dir = scratch("copylok_iso");
+        let (data, pvd) = copylok_disc();
+        // The user data of the same sectors, as an ISO keeps them: the
+        // band reads as 55h, as good data.
+        let iso: Vec<u8> = data
+            .chunks(RAW_SECTOR)
+            .flat_map(|raw| raw[16..16 + DATA_SECTOR].to_vec())
+            .collect();
+        fs::write(dir.join("disc.iso"), &iso).unwrap();
+        // The same image held in memory, as one from an archive is.
+        let in_memory = CdImage::from_memory("disc.iso", iso.into()).unwrap();
+        let image = CdImage::open(&dir.join("disc.iso")).unwrap();
+        for image in [&image, &in_memory] {
+            let notes = image.notes().join("\n");
+            assert!(
+                notes.contains("CopyLok") && notes.contains("check fails"),
+                "{}",
+                notes
+            );
+        }
+        let mut data = [0u8; DATA_SECTOR];
+        image.read_data(16, &mut data).unwrap();
+        assert_eq!(data, pvd);
+        image.read_data(25, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 0x55));
+    }
+
+    #[test]
+    fn discs_without_copylok_have_no_note_of_it() {
+        let dir = scratch("no_copylok");
+        let (mut data, _) = copylok_disc();
+        // The same disc with a plain volume descriptor.
+        let mut pvd = crate::cdrom::mode1_sector(16, 0);
+        pvd[16] = 1;
+        pvd[17..22].copy_from_slice(b"CD001");
+        let edc = crate::cdrom::edc(&pvd[..2064]);
+        pvd[2064..2068].copy_from_slice(&edc.to_le_bytes());
+        data[16 * RAW_SECTOR..17 * RAW_SECTOR].copy_from_slice(&pvd);
+        fs::write(dir.join("disc.bin"), data).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        assert!(
+            image.notes().iter().all(|n| !n.contains("CopyLok")),
+            "{:?}",
+            image.notes()
+        );
     }
 
     /// Raw sector `lba` of a BlindWrite data file: a Mode 1 sector whose
@@ -3126,5 +3388,64 @@ mod tests {
         // The data moves the sectors from where the uniform spiral has
         // them.
         assert!((a.turns(100) - plain.turns(100)).abs() > 0.5);
+    }
+
+    /// A track file of `size` bytes, each one's value made from its
+    /// position.
+    fn patterned(name: &str, size: usize) -> (PathBuf, Vec<u8>) {
+        let bytes: Vec<u8> = (0..size).map(|i| (i * 7 % 251) as u8).collect();
+        let path = scratch(name).join("track.bin");
+        fs::write(&path, &bytes).unwrap();
+        (path, bytes)
+    }
+
+    #[test]
+    fn file_reader_reads_the_bytes_of_the_file() {
+        let (path, bytes) = patterned("reader", 300_000);
+        let offset = 44u64;
+        let data = &bytes[offset as usize..];
+        let len = data.len() as u64;
+        let mut reader = FileReader::new(File::open(&path).unwrap());
+        let block = READ_AHEAD as usize;
+        // Pieces a program reads: 1 KB after 1 KB, sectors, pieces across
+        // a block's end, backwards, larger than a block, at the end.
+        let pieces = [
+            (0, 1024),
+            (1024, 1024),
+            (2048, 2048),
+            (block - 20, 40),
+            (block - 20, 2352),
+            (3 * block + 100, 2352),
+            (100, 10),
+            (0, block + 5000),
+            (len as usize - 10, 10),
+            (len as usize - 3000, 3000),
+            (2 * block, block),
+        ];
+        for (at, size) in pieces {
+            let mut buf = vec![0xEE; size];
+            reader.read_at(offset, len, at as u64, &mut buf).unwrap();
+            assert_eq!(buf, data[at..at + size], "{size} bytes at {at}");
+        }
+        // The second KB of a sector comes from the block read for the
+        // first.
+        reader.read_at(offset, len, 0, &mut [0; 1024]).unwrap();
+        assert!(reader.holds(1024, 2048));
+    }
+
+    #[test]
+    fn file_reader_reads_a_file_shorter_than_its_data() {
+        // A WAVE file whose header gives more data than the file has: the
+        // bytes there read, the block keeps them up to the file's end,
+        // and a piece past the end fails as a read of the file does.
+        let (path, bytes) = patterned("reader_short", 70_000);
+        let len = 100_000;
+        let mut reader = FileReader::new(File::open(&path).unwrap());
+        let mut buf = vec![0; 2352];
+        reader.read_at(0, len, 66_000, &mut buf).unwrap();
+        assert_eq!(buf, bytes[66_000..68_352]);
+        assert!(reader.holds(READ_AHEAD, 70_000));
+        assert!(!reader.holds(READ_AHEAD, 70_001));
+        assert!(reader.read_at(0, len, 69_000, &mut buf).is_err());
     }
 }

@@ -115,8 +115,7 @@ does, but with paging on (`system.rs`, `memory.rs`):
   memory, taken from the XMS pool when the first process starts.
 - An IDT whose gates lead to service traps in the ROM. Hardware
   interrupts go to their real-mode handlers (the BIOS's, DOS's, resident
-  programs') as under Windows 95, through `realmode.rs`, and the timer's
-  drives thread switching.
+  programs') as under Windows 95, through `realmode.rs`.
 - A TSS whose I/O permission bitmap leaves every port open, as Windows
   95 leaves those no driver of its own claims. Some games read the
   joystick port or check the Sound Blaster themselves.
@@ -248,10 +247,11 @@ in Rust tables of plain data, which the save state covers.
 Guest threads are saved CPU contexts, switched on one host thread
 (`thread.rs`). A thread that blocks (`WaitForSingleObject`,
 `GetMessage`, `Sleep`) is switched out at once; one that runs gives way
-to another that is ready after a fixed slice, switched on the timer's
-interrupt, because games spin on flags that another thread sets. There
-are no host threads, so the web build works, and runs stay
-deterministic.
+to another that is ready when its turn ends, because games spin on flags
+that another thread sets. A turn ends at the fourth of Windows 98's 5 ms
+timer ticks after it began, an event of the machine's clock of its own,
+as the BIOS's timer interrupt comes only every 55 ms. There are no host
+threads, so the web build works, and runs stay deterministic.
 
 ## Exceptions
 
@@ -321,8 +321,9 @@ against that DLL's results in `undname_vc6.txt`).
   `GetDiskFreeSpaceExA` (`kernel32/win98.rs`), and at most just under 2
   GB through `GetDiskFreeSpaceA` (`kernel32/disk.rs`), as Windows 95 and
   98 give a real disk's space. It drops as files are written. DOS's own
-  answer for such a drive is 160 to 480 MB, too little for some setups
-  that check the space they need.
+  answer for such a drive is 512 MB to 1 GB, in the 16-bit counts of
+  INT 21h AH=36h and a FAT16 disk's 16 KB clusters, too little for some
+  setups that check the space they need.
 - `GetVersion` and `GetVersionEx` say Windows 95 (4.0.950, platform 1),
   or with `win32_version=98` Windows 98 (4.10.1998) and with
   `win32_version=98se` Windows 98 SE (4.10.2222, " A "), as do the
@@ -369,12 +370,12 @@ against that DLL's results in `undname_vc6.txt`).
   function of the same name. The loader loads them as DLL files and
   follows the forwarders, so they are modules of their own names.
 
-  The files are read-only: they open for reading alone, show as
-  read-only (FILE_ATTRIBUTE_READONLY and ARCHIVE), and opening one for
-  writing, making, deleting or renaming one, copying a file over it or
-  changing its attributes fails with ERROR_ACCESS_DENIED, as for a
-  read-only file. A file of the same name on C: wins: a game that copies
-  its own DLL there has it. `DiskController` shows them
+  The files are writable, as Windows' own are, and show as
+  FILE_ATTRIBUTE_ARCHIVE. A file of the same name on C: wins: a game
+  that copies its own DLL there has it, and making a file of that name,
+  opening one for writing or renaming a file to its name makes the file
+  on C:. Deleting one or changing its attributes succeeds and changes
+  nothing, and renaming one copies it to C:. `DiskController` shows them
   (`src/disk/system_files.rs`), under the drive's own files, so DOS sees
   them too: `DIR C:\WINDOWS\SYSTEM` and a DOS program's INT 21h list and
   open them, as in a DOS box of Windows 98. A save state opens a file
@@ -523,9 +524,19 @@ what `ddraw/dxt_blt.rs` and `video/dxt.rs` do:
 - A blit to an 8-bit palette surface succeeds and draws nothing, a fill
   of a DXT surface fails with E_NOTIMPL, and so do a source colour key
   and DXT2 or DXT4 to a format with alpha.
-- Windows compresses what is blitted to a DXT surface. Here only blocks
-  of the same format are copied, between rectangles on block
-  boundaries; other blits to a DXT surface fail with E_NOTIMPL.
+- Windows compresses what is blitted to a DXT surface. Blocks of the
+  same format between rectangles on block boundaries are copied as they
+  are; anything else (an RGB source, another DXT format, a stretch, a
+  mirror, a rectangle within blocks) is compressed by `video::dxt`'s
+  encoder, which picks the end colours that decode nearest the pixels
+  and isn't Microsoft's block for block. The blocks the rectangle cuts
+  are decoded, given the new pixels and compressed again. DXT1 keeps a
+  pixel of alpha under 128 transparent. DXT2 and DXT4 take colours
+  multiplied by their alpha from a source that isn't premultiplied, and
+  a premultiplied source goes only to them. What Windows does with the
+  premultiplied formats here wasn't probed. Rage Rally loads its
+  textures this way, from A8R8G8B8 into DXT2 and DXT3, mirrored up and
+  down.
 
 ## Movies
 
@@ -806,6 +817,28 @@ the place of the PIF's parameters, and its working folder that of the
 caller's. The program is looked for in the working folder, the PIF's
 folder, and then where SearchPathA looks.
 
+The "WINDOWS VMM 4.0" record of a PIF gives the DOS machine's DPMI
+memory in KB (at 1A8h in its data; 0 is Auto, FFFFh as much as
+Windows can give). On Windows 98 a DOS machine's DPMI memory is
+virtual: the VMM pages it to the swap file, so a program may allocate
+more than the machine has RAM, up to that limit. Redguard's launcher
+starts the game through a PIF of FFFFh, and the game asks for its 3D
+heap from about 45 MB on a 32 MB machine. When the PIF sets the
+memory, rust-dos's DPMI host (`src/dpmi/vm.rs`) does the same: while
+its clients run in protected mode, paging is on, the first megabytes
+up to the machine's memory are mapped where they are, and memory
+blocks go above them in a linear space of the PIF's size. A page gets
+a frame from extended memory when it is first touched, and when XMS
+has no more to give, the least recently used page goes to a page file
+in the host's memory and comes back on a page fault. Locked pages
+(INT 31h 0600h) stay in memory. Pointers the host follows itself, in
+the DOS and video functions it translates and in its real-mode
+callbacks, are brought in before it reads them. On Auto, and for DOS
+programs not started from the built-in Windows, the host gives
+extended memory as it is, without paging: Windows 98 gives an Auto
+machine virtual memory too, up to a bit less than the RAM, which
+rust-dos doesn't do yet.
+
 This is what a full-screen DOS box does on Windows 98, but for the
 Windows programs, which run on there behind it. Running them side by
 side, a window for the DOS program, and a first megabyte of its own for
@@ -861,16 +894,17 @@ encodes 16-bit PCM to IMA ADPCM and decodes it back through
 `acmStreamOpen` and `acmStreamConvert`, and the samples match a decoder
 written from the format's definition (`tests/win32/wine_dlls.rs`, which
 runs when WINE_DLLS names the folder). It takes
-`win32_dlls_replace=msacm32`: the built-in MSACM32.DLL has Windows'
-exports and only the decoders of MS ADPCM and IMA ADPCM. MSACM32 finds
-the codec in SYSTEM.INI's `[drivers32]` (`msacm.imaadpcm=imaadp32.acm`)
-and opens it with OpenDriver. WINMM's installable drivers are real for
-that: OpenDriver loads the DLL as LoadLibrary does, finds its alias in
+`win32_dlls_replace=msacm32`, so that Wine's DLL is what runs: the
+built-in MSACM32.DLL would decode IMA ADPCM with its own decoder and
+hand only the encoding to the codec. MSACM32 finds the codec in
+SYSTEM.INI's `[drivers32]` (`msacm.imaadpcm=imaadp32.acm`) and opens
+it with OpenDriver. WINMM's installable drivers are real for that:
+OpenDriver loads the DLL as LoadLibrary does, finds its alias in
 SYSTEM.INI, and sends its `DriverProc` DRV_LOAD, DRV_ENABLE and
 DRV_OPEN; SendDriverMessage and CloseDriver call it as Wine's `winmm`
 does. ADVAPI32's `Reg*W` stubs return ERROR_CALL_NOT_IMPLEMENTED to
-guest code: Windows 95's return 0 with that error set, and MSACM32 takes
-0 as ERROR_SUCCESS.
+guest code: Windows 95's return 0 with that error set, and MSACM32
+takes 0 as ERROR_SUCCESS.
 
 Wine's `comctl32`, `comdlg32` and `quartz` don't run this way: their
 window classes and dialogs are written in Unicode, so they need USER32's

@@ -109,14 +109,19 @@ fn value_of<'a>(section: &'a Section, key: &[u8]) -> Option<&'a [u8]> {
         .find(|e| same(&e.key, key))?
         .value
         .as_deref()?;
+    Some(unquoted(value))
+}
+
+/// A value with the quotes around it taken off.
+fn unquoted(value: &[u8]) -> &[u8] {
     let quoted = value.len() >= 2
         && (value[0] == b'"' || value[0] == b'\'')
         && value[value.len() - 1] == value[0];
-    Some(if quoted {
+    if quoted {
         &value[1..value.len() - 1]
     } else {
         value
-    })
+    }
 }
 
 /// The DOS path of the profile `name`: WIN.INI for NULL, and in the
@@ -345,7 +350,7 @@ pub(super) fn get_profile_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The number at the start of `text` as Windows 95 reads it: an
 /// optional '-' and decimal digits, in 32 bits; 0 if there are none.
-fn parse_int(text: &[u8]) -> u32 {
+pub(in crate::win32) fn parse_int(text: &[u8]) -> u32 {
     let (negative, digits) = match text.split_first() {
         Some((b'-', rest)) => (true, rest),
         _ => (false, text),
@@ -469,6 +474,105 @@ pub(crate) fn profile_value(
         .map(<[u8]>::to_vec)
 }
 
+/// Change the lines of `section` in the profile `file` with `change`, for
+/// the system's own use: SETUPX's UpdateInis (win32/inf.rs). A line is
+/// its key and its value, None for a line without '='. The section is
+/// made at the end of the file if it isn't there, and the file if it
+/// isn't. The file is written only if the lines changed; false if it
+/// couldn't be, also when a program has it open without sharing it for
+/// reading and writing, as WritePrivateProfileStringA refuses then: read
+/// as empty, the file would be written back with this section alone.
+pub(crate) fn update_profile(
+    cpu: &mut Cpu,
+    file: &[u8],
+    section: &[u8],
+    change: impl FnOnce(&mut Vec<(String, Option<String>)>),
+) -> bool {
+    let path = path_of(Some(file));
+    let both = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    if super::path::open_sharing(cpu, &path).is_some_and(|s| s & both != both) {
+        return false;
+    }
+    let mut sections = parse(&read_file(cpu, &path).unwrap_or_default());
+    let i = section_index(&mut sections, section);
+    let text = |b: &[u8]| crate::dosstr::from_bytes(b);
+    let before: Vec<(String, Option<String>)> = sections[i]
+        .entries
+        .iter()
+        .map(|e| (text(&e.key), e.value.as_deref().map(text)))
+        .collect();
+    let mut lines = before.clone();
+    change(&mut lines);
+    if lines == before {
+        return true;
+    }
+    sections[i].entries = lines
+        .into_iter()
+        .map(|(key, value)| Entry {
+            key: crate::dosstr::to_bytes(&key),
+            value: value.map(|v| crate::dosstr::to_bytes(&v)),
+        })
+        .collect();
+    let data = unparse(&sections);
+    cpu.bus
+        .disk
+        .long_name_call(|disk| disk.write_whole_file(&path, &data, None))
+        .is_ok()
+}
+
+/// The values of the keys of `section` in the profile `file`, in their
+/// order, for the system's own use: WIN.INI's `[Fonts]`, which GDI
+/// loads as it starts. They are read as a program reads them, listing
+/// the keys (GetProfileStringA with no key) and then each key's value,
+/// so a comment line (';') and a line without '=' have none, and a key
+/// listed twice has its first value twice. The file is read from the
+/// disk, not through a process's file handle, which a program holding
+/// it open without sharing it could refuse.
+pub(in crate::win32) fn profile_values(cpu: &mut Cpu, file: &[u8], section: &[u8]) -> Vec<Vec<u8>> {
+    let path = path_of(Some(file));
+    let Some(data) = cpu.bus.disk.file_data(&path) else {
+        return Vec::new();
+    };
+    let Ok(text) = data.read() else {
+        return Vec::new();
+    };
+    let sections = parse(&text);
+    find(&sections, section).map_or(Vec::new(), |s| {
+        section_lines(s, false)
+            .iter()
+            .filter_map(|key| value_of(s, key).map(<[u8]>::to_vec))
+            .collect()
+    })
+}
+
+/// The keys of `section` in the profile `file` with their values, in
+/// their order, for the system's own use: MSACM32's drivers in
+/// SYSTEM.INI's `[drivers32]`. A comment line (';') and a line without
+/// '=' are left out. As `profile_values`, the file is read from the
+/// disk.
+pub(in crate::win32) fn profile_entries(
+    cpu: &mut Cpu,
+    file: &[u8],
+    section: &[u8],
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let path = path_of(Some(file));
+    let Some(data) = cpu.bus.disk.file_data(&path) else {
+        return Vec::new();
+    };
+    let Ok(text) = data.read() else {
+        return Vec::new();
+    };
+    let sections = parse(&text);
+    let Some(s) = find(&sections, section) else {
+        return Vec::new();
+    };
+    s.entries
+        .iter()
+        .filter(|e| !e.key.is_empty() && !e.key.starts_with(b";"))
+        .filter_map(|e| Some((e.key.clone(), unquoted(e.value.as_deref()?).to_vec())))
+        .collect()
+}
+
 /// `profile_value` as a number, as GetPrivateProfileIntA reads it:
 /// `default` when the file doesn't have the key or its value is empty.
 pub(in crate::win32) fn profile_int(
@@ -480,6 +584,22 @@ pub(in crate::win32) fn profile_int(
 ) -> u32 {
     let sections = load(cpu, Some(file));
     int_in(&sections, section, key, default)
+}
+
+/// `profile_value` as a number, as GetPrivateProfileIntA reads it, or
+/// None where it gives its default: the file doesn't have the key, or
+/// its value is empty.
+pub(in crate::win32) fn profile_number(
+    cpu: &mut Cpu,
+    file: &[u8],
+    section: &[u8],
+    key: &[u8],
+) -> Option<u32> {
+    let sections = load(cpu, Some(file));
+    find(&sections, section)
+        .and_then(|s| value_of(s, key))
+        .filter(|value| !value.is_empty() && !key.is_empty())
+        .map(parse_int)
 }
 
 /// GetPrivateProfileSectionNamesA(buffer, size, file).
@@ -520,10 +640,12 @@ fn store(
     if !change(&mut sections) {
         return Some(TRUE);
     }
+    // A new file's name keeps the case it is given, as on Windows 9x.
+    let data = unparse(&sections);
     match cpu
         .bus
         .disk
-        .write_whole_file(&path, &unparse(&sections), None)
+        .long_name_call(|disk| disk.write_whole_file(&path, &data, None))
     {
         Ok(()) => Some(TRUE),
         Err(code) => {

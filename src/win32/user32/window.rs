@@ -96,6 +96,44 @@ pub const SW_FORCEMINIMIZE: u32 = 11;
 
 pub const CW_USEDEFAULT: u32 = 0x8000_0000;
 
+/// The W32 version whose sections have `State::cascade`.
+pub const CASCADE_SAVED: u16 = 101;
+
+/// The area overlapped windows of CW_USEDEFAULT share out, as Windows
+/// 98 has it: the work area less a row of minimized windows
+/// (SM_CYMINSPACING) at its bottom. On a 640x480 Windows 98 with its
+/// taskbar, 640x428: such a window is 480x321, 800x600 gives 600x411.
+/// The built-in Windows has no taskbar and its work area is the screen
+/// (SPI_GETWORKAREA), so at 640x480 the area here is 640x456 and the
+/// window 480x342.
+pub fn tiled_area(cpu: &Cpu) -> (i32, i32) {
+    let work = super::sysparams::work_area(cpu);
+    (work.width(), work.height() - super::sysparams::metric(48))
+}
+
+/// The place of the next overlapped window of CW_USEDEFAULT, which
+/// Windows 98 cascades for all programs alike: each one a step of
+/// SM_CXSIZE + SM_CXFRAME (and SM_CYSIZE + SM_CYFRAME) further right
+/// and down, 22 pixels, and back at the top-left corner when the place
+/// would be past a quarter of the tiled area's width or height. The
+/// first window after startup is one step in. Measured on Windows 98
+/// SE at 640x480 and 800x600, with windows of programs and Explorer's
+/// folder windows taking turns.
+pub fn next_default_place(cpu: &mut Cpu) -> (i32, i32) {
+    let (w, h) = tiled_area(cpu);
+    let work = super::sysparams::work_area(cpu);
+    let step_x = super::sysparams::metric(30) + super::sysparams::metric(32);
+    let step_y = super::sysparams::metric(31) + super::sysparams::metric(33);
+    let state = user(cpu);
+    let mut n = *state.cascade + 1;
+    let (mut x, mut y) = (n as i32 * step_x, n as i32 * step_y);
+    if x > w / 4 || y > h / 4 {
+        (x, y, n) = (0, 0, 0);
+    }
+    *state.cascade = n;
+    (work.left + x, work.top + y)
+}
+
 /// GetWindowLongA's indices.
 pub const GWL_WNDPROC: i32 = -4;
 pub const GWL_HINSTANCE: i32 = -6;
@@ -126,6 +164,9 @@ pub const IN_DESTROY_MSG: u32 = 0x10;
 pub const NC_DESTROYED: u32 = 0x20;
 /// Its last WM_SIZE was sent.
 pub const SIZE_SENT: u32 = 0x40;
+/// A palette was selected into a DC of it or of a descendant on a
+/// palette device (`palette::selected`). 0x80 is defwnd.rs's NC_ACTIVE.
+pub const HAS_PALETTE: u32 = 0x100;
 
 /// A window.
 #[derive(Clone, Debug, Default)]
@@ -555,6 +596,31 @@ fn keep_above_owners(state: &mut State, hwnd: u32, left_topmost: bool) {
     }
 }
 
+/// Whether the window `hwnd` belongs to a thread of a program made for
+/// a version of Windows before 4.0: a Windows 3.x program's task
+/// (`win16::task_expects_win3`), or a Win32 program whose header gives a
+/// subsystem version below 4.0. Windows 98's USER keeps this version in
+/// each thread's message queue, from KERNEL's GetExeVersion (the task's
+/// expected version) when it makes the queue, and the controls check it
+/// as the window's thread runs their procedure, whatever instance the
+/// window was made with. A process loaded from a save state made before
+/// the version was kept has 0, and counts as a 4.0 program.
+pub(crate) fn thread_expects_win3(cpu: &mut Cpu, hwnd: u32) -> bool {
+    let Some((pid, tid, instance)) = user(cpu).window(hwnd).map(|w| (w.pid, w.tid, w.instance))
+    else {
+        return false;
+    };
+    if pid == cpu.bus.win32.win16.pid {
+        return crate::win16::task_expects_win3(cpu, tid)
+            .unwrap_or_else(|| crate::win16::expects_win3(cpu, pid, instance));
+    }
+    let processes = &cpu.bus.win32.processes;
+    processes
+        .iter()
+        .find(|p| p.id == pid)
+        .is_some_and(|p| p.subsystem_version != 0 && p.subsystem_version < 0x4_0000)
+}
+
 /// Put `hwnd` in its parent's list of children, after `after` (HWND_TOP,
 /// HWND_BOTTOM or a sibling). Topmost windows stay above the others.
 pub fn link(state: &mut State, hwnd: u32, after: u32) {
@@ -793,17 +859,22 @@ pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, super::ERROR_NOT_ENOUGH_MEMORY);
         return Some(0);
     }
-    // CW_USEDEFAULT: an overlapped window gets a place and three
-    // quarters of the screen; a popup or child window none.
+    // CW_USEDEFAULT: an overlapped window gets the next place of the
+    // cascade and three quarters of the tiled area, or with a place of
+    // its own, three quarters of the screen less that place; a popup or
+    // child window none.
     let (sw, sh) = super::sysparams::screen_size(cpu);
     let (mut x, mut y, mut cx, mut cy) = (x as i32, y as i32, cx as i32, cy as i32);
     let default = CW_USEDEFAULT as i32;
     if style & (WS_CHILD | WS_POPUP) == 0 {
         if x == default {
-            x = 0;
-            y = 0;
-        }
-        if cx == default {
+            (x, y) = next_default_place(cpu);
+            if cx == default {
+                let (area_w, area_h) = tiled_area(cpu);
+                cx = area_w * 3 / 4;
+                cy = area_h * 3 / 4;
+            }
+        } else if cx == default {
             cx = sw * 3 / 4 - x;
             cy = sh * 3 / 4 - y;
         }
@@ -824,7 +895,6 @@ pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         menu
     };
-    let rect = Rect::sized(x, y, cx, cy);
     let window = Window {
         class: class_index,
         // What the window gets besides is added after the CBT hook.
@@ -832,15 +902,22 @@ pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         ex_style: ex,
         parent,
         owner,
-        rect,
-        client: rect,
+        // Its rectangles are empty until the CBT hook has seen the
+        // CREATESTRUCT, which may change the place and size. Wine's
+        // NtUserCreateWindowEx does the same; win.c's check of both
+        // rectangles at HCBT_CREATEWND is there but turned off. A hook
+        // that changes the frame then finds a client area of 0 by 0, so
+        // the window gets no WM_SIZE before WM_CREATE (Encarta 97's
+        // timeline, #2006). Its normal place is the one asked for, as
+        // Wine sets it before the hook: GetWindowPlacement returns it for
+        // a window made minimized or maximized.
+        normal: Rect::sized(x, y, cx, cy),
         id: menu_handle,
         instance,
         proc: class_info.proc,
         extra: vec![0; class_info.wnd_extra as usize],
         tid: current_tid(cpu),
         pid,
-        normal: rect,
         icon_pos: (-1, -1),
         ..Window::default()
     };
@@ -1232,12 +1309,13 @@ pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
     // but showed nothing, and uncovers nothing.
     if state.is_visible(hwnd) {
         let old = state.screen_rect(hwnd);
+        let old_shown = super::paint::shown_region(state, hwnd);
         if let Some(w) = state.window_mut(hwnd) {
             w.style &= !WS_VISIBLE;
         }
         super::paint::tree_changed(cpu);
         let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW;
-        super::paint::moved(cpu, hwnd, old, true, false, flags);
+        super::paint::moved(cpu, hwnd, old, &old_shown, true, false, flags);
     }
     let state = user(cpu);
     for &child in &w.children {
@@ -1289,6 +1367,9 @@ const D_HWND: usize = 0;
 const D_CHILD: usize = 1;
 const D_AT: usize = 2;
 const D_LIST: usize = 3;
+/// The window activated next, while the palette is to go, before the
+/// list is there.
+const D_NEXT: usize = 3;
 
 /// DestroyWindow(hwnd).
 pub fn destroy_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1417,8 +1498,21 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 // the owner of a popup hidden so and destroyed is active.
                 t.step = 9;
                 if user(cpu).is_active(hwnd) {
-                    return Next::call(address_of(cpu, "ActivateOtherWindow"), &[hwnd], 9);
+                    // Windows 98 then lets a palette the window kept in
+                    // the foreground go (`palette`).
+                    if super::palette::destroy_restores(user(cpu), hwnd) {
+                        let next = super::input::other_window(cpu, hwnd);
+                        t.set(D_NEXT, next);
+                        t.step = 10;
+                    }
+                    let step = t.step;
+                    return Next::call(address_of(cpu, "ActivateOtherWindow"), &[hwnd], step);
                 }
+            }
+            10 => {
+                t.step = 9;
+                let args = [t.var(D_NEXT), hwnd];
+                return Next::call(address_of(cpu, "RestoreDefaultPalette"), &args, 9);
             }
             9 => {
                 if !user(cpu).is_window(hwnd) {
@@ -1527,6 +1621,9 @@ const S_FLAGS: usize = 3;
 const S_RECT: usize = 4;
 /// Whether WM_GETMINMAXINFO filled the MINMAXINFO in the scratch space.
 const S_MINMAX: usize = 8;
+/// Whether it minimizes a top-level window with a palette, whose
+/// palette is then to go (`palette`).
+const S_PALETTE: usize = 9;
 const SHOW_SCRATCH: u32 = 40;
 
 /// ShowWindow(hwnd, command): whether it was visible.
@@ -1613,6 +1710,11 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                             swp |= SWP_NOACTIVATE | SWP_NOZORDER;
                         }
                         if style & WS_MINIMIZE == 0 {
+                            let state = user(cpu);
+                            let palette = state
+                                .window(hwnd)
+                                .is_some_and(|w| w.parent == DESKTOP && w.flags & HAS_PALETTE != 0);
+                            t.set(S_PALETTE, palette as u32);
                             new = minimize(cpu, hwnd);
                             swp |= SWP_STATECHANGED;
                         } else {
@@ -1754,6 +1856,17 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     super::make_long(client.left, client.top),
                     4,
                 );
+            }
+            4 => {
+                // A window with a palette was minimized. Windows 98 passes
+                // the window SW_MINIMIZE activates, and none for the other
+                // commands, which means the active window; the built-in
+                // SW_MINIMIZE activates none, so the active window it is.
+                t.step = 7;
+                if t.var(S_PALETTE) != 0 {
+                    let args = [0, hwnd];
+                    return Next::call(address_of(cpu, "RestoreDefaultPalette"), &args, 7);
+                }
             }
             _ => return Next::Done(was as u32),
         }
@@ -2046,6 +2159,7 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let old_screen = user(cpu).screen_rect(hwnd);
                 let was_visible = user(cpu).is_visible(hwnd);
                 let state = user(cpu);
+                let old_shown = super::paint::shown_region(state, hwnd);
                 let under = super::input::under_cursor(state);
                 // What siblings above it cover, which a raise shows.
                 let restacked = flags & (SWP_NOZORDER | SWP_NOREDRAW) == 0;
@@ -2063,6 +2177,18 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                         .filter(|&h| h != hwnd && state.is_visible(h))
                         .map(|h| (h, super::paint::covered_but(state, h, hwnd)))
                         .filter(|(_, r)| !r.is_empty())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                // What they show: when they go down with it (HWND_BOTTOM
+                // takes its owned windows along), the windows that come
+                // above them show the part they cover then.
+                let group_shown: Vec<(u32, Region)> = if restacked {
+                    owner_group(state, hwnd)
+                        .into_iter()
+                        .filter(|&h| h != hwnd && state.is_visible(h))
+                        .map(|h| (h, super::paint::shown_region(state, h)))
                         .collect()
                 } else {
                     Vec::new()
@@ -2110,7 +2236,15 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 // What it uncovered and what it shows now need painting.
                 let now_visible = user(cpu).is_visible(hwnd);
                 if flags & SWP_NOREDRAW == 0 || flags & (SWP_SHOWWINDOW | SWP_HIDEWINDOW) != 0 {
-                    super::paint::moved(cpu, hwnd, old_screen, was_visible, now_visible, flags);
+                    super::paint::moved(
+                        cpu,
+                        hwnd,
+                        old_screen,
+                        &old_shown,
+                        was_visible,
+                        now_visible,
+                        flags,
+                    );
                 }
                 // Moved or shown, it is painted whole; raised in place,
                 // where the windows above it were.
@@ -2124,6 +2258,11 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 for (h, before) in group_covered {
                     if user(cpu).is_visible(h) {
                         super::paint::raised_but(cpu, h, &before, hwnd);
+                    }
+                }
+                for (h, before) in group_shown {
+                    if user(cpu).is_visible(h) {
+                        super::paint::lowered(cpu, h, &before);
                     }
                 }
                 if flags & SWP_HIDEWINDOW != 0 {

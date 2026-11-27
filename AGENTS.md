@@ -45,8 +45,8 @@ and `cargo clippy --all-targets` stop at the link step with
 environment, not the code: don't change the code or the build to get
 around it.
 
-- Set up SDL3's Visual C++ package as the README's build section says,
-  and add its `lib\x64` to `LIB` before building.
+- Set up SDL3's Visual C++ package as `docs/building.md` says, and add
+  its `lib\x64` to `LIB` before building.
 - A new shell, a git worktree, or a subagent's shell may not have the
   `LIB` you set elsewhere, so set it in the same command as the build,
   for example `LIB='C:\SDL3-3.4.20\lib\x64' cargo test` in Git Bash.
@@ -60,8 +60,9 @@ around it.
 whole crate. A file in a folder is a module of the folder's `main.rs`, so
 its tests are named `<file>::<test>`. `cargo build --all-targets`,
 `cargo clippy --all-targets` and a plain `cargo test` build and link all
-seven. CI does that on every push, on Linux, Windows and macOS, so you
-don't need to before you push.
+seven. CI does that on every push, and runs the whole suite on Linux
+(Windows and macOS run a few tests of their own), so you don't need to
+before you push.
 
 - Build the library and the program with `cargo build`, and lint them
   with `cargo clippy`.
@@ -89,6 +90,11 @@ that it improves on main. Steps, in this order:
    /code-review high --fix Make judgement calls based on long-term quality and robust architecture rather than small scope or simplicity, do not postpone decisions to later unless there is no clearly better option (in which case create a GitHub issue to address this later), explain judgement calls made in comments to the reviewed PR. Commit and push review fixes to the PR branch. Treat claims in the PR description as unverified: check each one against the code, and report any the code doesn't support.
    ```
 
+   The review runs in a fresh agent, not in the context that wrote the
+   change or in a fork of it: one that knows the author's reading of the
+   bug inherits its blind spots. Give the reviewer the pull request and
+   its worktree, not the author's explanation of the change.
+
    Then check each finding against the code before keeping its fix: a
    review at this effort doesn't verify its own findings, and `--fix`
    applies them all. Confirm a finding with a test, a trace or a read of
@@ -105,14 +111,67 @@ that it improves on main. Steps, in this order:
    that says what the real system does, what the emulator does, and why
    it waits, and the comment links it. "Left as is" or "out of scope"
    with neither is a decision put off with no record of it.
+
+   An issue filed this way, or from reading the specification or the
+   code, is worked on when a game or program shows the problem: a wrong
+   picture or sound, a crash or a hang, lost input, a feature it uses
+   that fails, a cost measured in it. A program shows it when running
+   that program brings the problem up: the one the work is for, another
+   on the machine, or one an issue or a user's report names. A test, or
+   a program written to reach the case, doesn't count. Until then the
+   issue waits with the `low-priority` label, and isn't queued as a task
+   of its own unless the user asks for that issue. Once a program shows
+   it, the issue names that program and its label is raised to the
+   priority the program's problem calls for.
+
+   This rule decides which issues are taken up. A pull request already
+   open, whatever started it, is marked ready on the evidence step 4
+   asks for, and a test of the real system's behaviour is such
+   evidence.
 3. Validate it, after the review and with its fixes: run the real game
    or program the change is for, where there is one, on the build of the
    branch, and compare with main.
 4. Mark it ready for review only when that shows a clear improvement on
    main: a speed-up you measured, against main on the same machine and
-   scene; a bug that main has and the branch fixes, seen in the game; or
-   behaviour closer to the real hardware or the real Windows, shown by a
-   test or a comparison with it. Put the evidence in the description.
+   scene; less work for the same output, counted in deterministic runs;
+   a bug that main has and the branch fixes, seen in the game; or
+   behaviour closer to the real hardware or the real Windows, shown by
+   a test or a comparison with it. Put the evidence in the description.
+   How much checking that takes depends on what the change can break
+   ("Checks in proportion to the change", below), which also says which
+   changes need a "Regression check" section and how many programs it
+   lists.
+
+   Before it is marked ready, check that it still merges with main,
+   which moves on while a pull request is in draft. Fetch both and run
+   `git merge-tree --write-tree origin/main origin/<branch>`: it exits
+   with 1 and names the files when the two conflict. Don't go by
+   GitHub's `mergeable`, which reads `UNKNOWN` while GitHub computes it
+   and can describe the old head for minutes after a push. If it
+   doesn't merge, the agent that has the branch's worktree merges main
+   into the branch (no rebase, no force-push), keeps what both sides
+   meant, and pushes.
+
+   A resolution that keeps both sides' lines as they were, or moves a
+   save-state version, is pushed without a local build: CI builds and
+   tests it, and a build of the crate's tests takes many minutes. Lines
+   that compile on each side can still clash once both are kept: two
+   imports of one name, two items or match arms for the same thing, or
+   one side's call to what the other renamed. Read the merged code
+   around each conflict for these before pushing, and fix the branch if
+   CI fails. Build and run the tests the conflict touches only where the
+   resolution writes code that neither side had, such as a call changed
+   to fit the other side's new signature.
+
+   A save-state version both sides raised (`WIN32_VERSION` and the
+   like): the branch takes the next free number, and main's joins the
+   versions the branch loads (`WIN32_LOADS`, its comment, and a line in
+   `WIN32_LAYOUTS`). Main's saves of that number don't hold what the
+   branch added, so the branch's own gates that named it move to the new
+   number too: a `Since<N, _>`, an `Until<N, _>`, a `*_SAVED` constant.
+   `python -I tools/win32_layout.py` prints the new `WIN32_LAYOUTS`
+   hash without a build, and exits with 1, saying what to change, while
+   the table's last line isn't `WIN32_VERSION` with that hash.
 
 If the evidence isn't there yet, improve the change and go through the
 steps again. A pull request stays a draft only when the next step needs
@@ -120,6 +179,130 @@ a decision with no clearly better option, or is far beyond the change's
 scope; say which in a comment on it. When several agents work together,
 the one coordinating them marks pull requests ready, not the agents
 doing the work.
+
+## Comments on issues: other people's issues need approval
+
+An agent doesn't comment on an issue opened by anyone other than the
+maintainers, dividebysandwich and kibertoad, until a maintainer has
+approved the comment's text. Write the comment, show it to the
+maintainer the agent works for, and post it only once they approve it.
+An agent working under a coordinator sends the text to the coordinator,
+which asks. Look up the issue's author with `gh issue view <n> --json
+author` before commenting.
+
+On the maintainers' own issues, and on the pull requests and issues an
+agent opens itself, agents comment without asking.
+
+## Checks in proportion to the change
+
+Check a change as much as what it can break calls for, and no more.
+Start from two questions: what could go wrong if the change is wrong,
+and where would it show? The answers pick the checks; a habit of
+running everything, many times, doesn't. A long check has a cost
+beyond its own time: an exclusive measurement keeps every other
+agent's new builds and emulators from starting while it waits and
+while it runs.
+
+- A change that removes work and keeps the output (a read-back, an
+  upload or a copy no longer made, fewer calls or hand-offs) is shown
+  by a deterministic comparison: identical frames at equal emulated
+  times, and the counter of the work removed lower on the branch
+  (`/api/stats`, or the card's and its renderer's counts under `video`
+  in `/api/status`). That is the evidence it is better. The comparison
+  has to run the changed code. `--deterministic` draws the cards in
+  software, so a change to the ToadForce's OpenGL renderer is compared
+  with `RUST_DOS_TOADFORCE_GL_DETERMINISTIC=1` and `renderer` checked
+  ("The ToadForce card" in `docs/llm-debugging.md`), and one to the
+  Voodoo cards' OpenGL path, which no deterministic run reaches, takes
+  the form for runs that can't be deterministic (end of "Comparing
+  what two builds draw", below). A timing run then only puts a number
+  on the gain: one run per build on one scene that shows it is enough,
+  main first and at a fixed `--cycles`, and the description calls the
+  figure indicative. Later runs in a session tend to read slower
+  whatever the build, so main first makes that drift count against
+  the branch.
+- A timing series (several runs per build, the order alternated, the
+  spread given) is for claims whose truth is the timing itself: a
+  change that does the same work faster with no counter to show it, a
+  change that trades one cost for another, a gain close to the spread
+  of the runs, a change to how `cycles=auto` picks its speed, or a
+  figure the description quotes as a size. Keep even a series short: a
+  fixed window of a minute or so after a fixed warm-up, the builds and
+  states prepared under the shared lock first, and the exclusive lock
+  asked for only when no emulator holds the lock, with `--wait` so a
+  long holder makes the run give up and retry instead of stalling
+  everyone behind it. A waiting exclusive request already keeps new
+  shared jobs out, so without `--wait` a measurement queued behind a
+  long run holds up every build and test that comes after it.
+- A save state made by main can carry main's state of the thing the
+  change moves into the branch's run: a texture's placement in the
+  card's memory, for one. Compare from states each build saved itself,
+  or from a plan that replays from power-on.
+- Other programs are run when the change is in a path they share with
+  the program the work is for, and how many depends on whether a
+  program that works on main can take the changed path. The pull
+  request's description gets a "Regression check" section that names
+  the tier below and says why the change is in it, then lists the
+  programs, their settings, the builds and what each showed. The
+  program the work is for shows that the change fixes it, not what it
+  does to the others. The reviewer checks the tier like any other
+  claim in the description.
+
+  1. Two to four other programs, main against the branch, for a change
+     to what every program meets: the CPU, the recompiler and the FPU,
+     timers and the pacing of `cycles` (`auto`, `max` and their
+     tuning), the heap, DOS's file calls, a card's setup or a
+     renderer's common path, and any change made for speed. Runs are
+     deterministic where the path allows, and take the form for runs
+     that can't be deterministic (end of "Comparing what two builds
+     draw") on an OpenGL path or at `cycles=max` or `auto`. These
+     changes cost other programs quietly, and a timing claim isn't
+     settled by tests.
+  2. One other program that reaches the path, for a change to Win32 or
+     Win16 behaviour that working programs already rely on: USER's
+     messages, focus and activation, GDI's palette and bitmaps,
+     DirectDraw's blits and surfaces, the registry, resources. If none
+     is found within a short search (a quarter of an hour over the
+     fixtures), say so. The test of the real system's behaviour and the
+     conformance results (`tests/win32/conformance_tests.rs`) carry the
+     rest: they caught what game runs missed in #2160.
+  3. No other program, for a change that only adds what was missing or
+     failing: a function, interface or DLL that didn't exist, an error
+     path where main crashed, page-faulted or returned
+     "not implemented", or a flag or format no working program passes
+     (`DDSD_LPSURFACE` in #2152). No program that works on main can
+     reach the changed code, so a run of another program shows
+     nothing. The section says which call failed on main, and the
+     tests and the game check carry it.
+
+  A change in tier 3 that also changes a path working programs take
+  is in tier 2 for that part: an ACM that now loads installable
+  drivers (#2178) also changes what a program gets for a format no
+  driver took, which on main failed at once and let it fall back.
+  Every test file that covers the changed code is run locally whatever
+  the tier. Only CI's Linux jobs run the whole suite: the Windows and
+  macOS jobs run the recompiler's and the deterministic mode's tests
+  (and Windows a start of the debug build) and none of `tests/win32`,
+  so their passing says nothing about it, and a pull request can be
+  marked ready before the Linux jobs end (#2024 merged with them red).
+- A run of another program counts only if it reaches the changed code:
+  check the counter or the log that shows it did. Of five games run for
+  a change to the ToadForce's depth fills (#2066), one reached it; the
+  others showed only that nothing else moved, and don't count. When the
+  programs the tier asks for reach the code and draw the same, stop:
+  searching every program for more scenes that reach it adds little.
+- A question of what the real system does is answered by the real
+  system: a small probe program run on real Windows or on an emulated
+  real PC (86Box) settles it sooner and more surely than reasoning
+  from documentation, as one did for #2046 in #2076. Its source and
+  output go in the pull request.
+- When the machine is busy (the user says so, or `rust-dos-lock status`
+  shows others' emulators running for long), take no timing
+  measurements. The deterministic evidence above doesn't depend on the
+  host's speed and goes on. For a change that removes work it is
+  enough for step 4, and the indicative figure joins the description
+  once the machine is quiet; a change whose claim is the timing itself
+  stays a draft until its series is run.
 
 ## Comparing what two builds draw: deterministic runs
 
@@ -184,10 +367,19 @@ disk.
   such as sccache doesn't do this across directories: its cache keys
   include the target directory's path, so a new directory gets no hits.
 - Cargo starts as many jobs as there are processors, and every agent's
-  build does. With more than two or three builds at once, pass `-j 2`
-  or so. Otherwise the machine thrashes, and on Windows rustc and the
+  build does. Share the processors among the builds that run at once.
+  `rust-dos-lock status` (below) lists every job under the lock: count
+  the builds and tests among them by their names, and your own. A build
+  takes no `-j` only when no other agent works on the machine, since it
+  keeps the jobs it started with when other builds start after it.
+  Otherwise each takes about the processors divided by the number of
+  builds, fewer while emulators run, and `-j 2` once the builds' memory
+  nears what the machine has free, since rustc's grows with its jobs.
+  Past these limits the machine thrashes, and on Windows rustc and the
   linker can run out of memory (`os error 1455`, the paging file is too
-  small).
+  small). A fixed `-j 2` for every build leaves a build that runs alone
+  with two of the processors for the rust-dos crate, which is most of
+  what a build in a reused target directory compiles.
 - Stop the emulators you start, by their process ID, before you finish:
   one left running holds its files, its debug server's port and a
   processor.

@@ -1,0 +1,12 @@
+[package]
+name = "rust-dos-gameblaster"
+description = "Creative's Game Blaster (Creative Music System): two Philips SAA1099 sound chips and the card's detection latch, as rust-dos emulates it"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-dos-savestate = { path = "../savestate" }
+rust-dos-audio-core = { path = "../audio-core" }

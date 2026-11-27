@@ -86,7 +86,16 @@ pub struct Attrs {
     pub arc_dir: u32,
     pub mapper: u32,
     pub graphics_mode: u32,
+    /// A memory DC's size, its visible region: the size its bitmap had
+    /// when SelectObject put it in the DC. None in a DC saved before
+    /// there was one, which goes by the bitmap's size. A bitmap's size
+    /// changes only in Windows 3.1's GDI heap, when the program changes
+    /// its device BITMAP, and the DC keeps the size it had (#1900).
+    pub bitmap_size: crate::savestate::Since<{ BITMAP_SIZE_SAVED }, Option<(i32, i32)>>,
 }
+
+/// The W32 section's version that added `Attrs::bitmap_size`.
+pub const BITMAP_SIZE_SAVED: u16 = 107;
 
 #[derive(Clone, Debug, Default)]
 pub struct Dc {
@@ -235,6 +244,7 @@ pub fn default_attrs() -> Attrs {
         arc_dir: AD_COUNTERCLOCKWISE,
         mapper: 0,
         graphics_mode: GM_COMPATIBLE,
+        bitmap_size: Default::default(),
     }
 }
 
@@ -278,12 +288,13 @@ pub struct Place {
 }
 
 /// The device's size: the screen's GDI draws on (the desktop's) for all
-/// but a memory DC, whose bitmap's it is.
+/// but a memory DC, whose bitmap's it is, as it was when SelectObject
+/// put it in the DC.
 pub fn device_size(cpu: &Cpu, dc: &Dc) -> (i32, i32) {
     if dc.kind == MEMORY
         && let Some(b) = cpu.bus.win32.gdi.bitmap(dc.attrs.bitmap)
     {
-        return (b.width, b.height);
+        return dc.attrs.bitmap_size.unwrap_or((b.width, b.height));
     }
     let (w, h, _, _) = super::surface::screen(cpu);
     (w, h)
@@ -567,7 +578,7 @@ pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if get(cpu, args[0]).is_none() {
         return Some(0);
     }
-    let bpp = super::surface::screen_mode(cpu).bpp;
+    let bpp = device_depth(cpu);
     match args[1] {
         BITSPIXEL => return Some(bpp),
         // COLORRES: the bits of a color the display shows.
@@ -593,9 +604,17 @@ const COLORRES: u32 = 108;
 const RC_PALETTE: u32 = 0x0100;
 
 /// The depth of the display's bitmaps (compatible bitmaps, and those a
-/// display DC's memory DCs take): the desktop's.
+/// display DC's memory DCs take): that of the mode GDI draws on, the
+/// desktop's or the one DirectDraw set, as GetDeviceCaps reports it. On
+/// Windows 98 a mode DirectDraw sets is the display's for GDI too: the
+/// DirectShow base classes' CImageDisplay reads the display's format
+/// from a compatible bitmap's GetDIBits, and a video renderer then
+/// takes only pictures no deeper than the display. Omikron's renderer
+/// copies 16-bit pictures into its 16-bit mode; told the display had
+/// the 32-bit desktop's depth, it took RGB24 from the MPEG decoder and
+/// showed its bytes as 16-bit pixels.
 pub fn device_depth(cpu: &Cpu) -> u32 {
-    crate::win32::screen::desktop(cpu).bpp
+    super::surface::screen_mode(cpu).bpp
 }
 
 /// The display's capability `index`, the depth that of the pixels GDI
@@ -943,20 +962,36 @@ pub fn select_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 return Some(0);
             }
             // A bitmap of GDI's must be monochrome or the display's
-            // depth; a DIB section may be any.
+            // depth; a DIB section may be any. One made at the display's
+            // depth stays usable when DirectDraw sets or restores a mode
+            // (`Bitmap::display`): programs load their bitmaps before
+            // they set their mode, and keep those made in it after. One
+            // from a state saved before bitmaps kept that was made at
+            // the desktop's depth.
             let depth = bitmap.bpp as u32 * bitmap.planes as u32;
-            if bitmap.dib.is_none() && depth != 1 && depth != device_depth(cpu) {
+            let made_for_display = match bitmap.pixel_masks() {
+                Some(_) => *bitmap.display,
+                None => depth == crate::win32::screen::desktop(cpu).bpp,
+            };
+            let display = made_for_display || depth == device_depth(cpu);
+            if bitmap.dib.is_none() && depth != 1 && !display {
                 return Some(0);
             }
             let old = dc.attrs.bitmap;
             if let Some(b) = gdi(cpu).bitmap_mut(old) {
                 b.dc = 0;
             }
+            // In Windows 3.1's GDI heap, the size its device BITMAP says
+            // now, which the DC keeps if the program changes it later.
+            crate::win32::shims::win31::gdi_heap::refresh(cpu, handle);
+            let mut size = None;
             if let Some(b) = gdi(cpu).bitmap_mut(handle) {
                 b.dc = hdc;
+                size = Some((b.width, b.height));
             }
             with(cpu, hdc, |d| {
                 d.attrs.bitmap = handle;
+                *d.attrs.bitmap_size = size;
                 // The clip region goes with the old bitmap.
                 d.attrs.clip = None;
             })
@@ -1551,7 +1586,8 @@ crate::state_fields!(Attrs {
     break_count,
     arc_dir,
     mapper,
-    graphics_mode
+    graphics_mode,
+    bitmap_size
 });
 crate::state_fields!(Dc {
     kind,

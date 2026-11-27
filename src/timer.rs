@@ -136,6 +136,14 @@ pub struct Clock {
     /// Only differences between two points count, so a save state leaves
     /// it out.
     pub disk_wait: u64,
+    /// Of `idle`, the counts the idle skip skipped in a busy-wait loop of
+    /// a Win32 thread while another thread could run
+    /// (`win32::thread::others_can_run`). Windows runs such a loop out to
+    /// the end of its thread's turn, so the processor didn't wait: more
+    /// speed gives the other thread more done, as far as it has work
+    /// (`waited`). Only differences between two points count, so a save
+    /// state leaves it out.
+    pub handed_over: u64,
     batch_end: u64,
     cycles_per_ms: u32,
     base_icount: u64,
@@ -161,6 +169,19 @@ pub struct Tsc {
     pub hz: Option<u64>,
 }
 
+/// Of the `idle` counts skipped while `ran` counts passed, those the
+/// processor waited: less those `handed` over (`Clock::handed_over`), but
+/// no more of them than the counts that weren't skipped, the threads'
+/// work. A spin handed over is time another thread works in, and at a
+/// higher speed it gets more done. Where every thread that can run spins,
+/// each hands its turns to the next and none has work: the program waits
+/// for something else, as a halted one does, and more speed brings
+/// nothing.
+pub fn waited(ran: f64, idle: f64, handed: f64) -> f64 {
+    let worked = (ran - idle).max(0.0);
+    (idle - handed.min(worked)).max(0.0)
+}
+
 impl Clock {
     pub fn new(cycles_per_ms: u32) -> Self {
         Self {
@@ -170,6 +191,7 @@ impl Clock {
             idle: 0,
             offloaded: 0,
             disk_wait: 0,
+            handed_over: 0,
             batch_end: u64::MAX,
             cycles_per_ms: cycles_per_ms.clamp(MIN_CYCLES, MAX_CYCLES),
             base_icount: 0,
@@ -772,15 +794,18 @@ pub struct Pacer {
     /// The frames measured for the host's speed so far: the instructions
     /// they ran, the time those took and the rest of their work.
     sample: HostSample,
-    /// `Clock::offloaded`, `Clock::idle` and `Clock::icount` as the last
-    /// frame left them.
+    /// `Clock::offloaded`, `Clock::idle`, `Clock::handed_over` and
+    /// `Clock::icount` as the last frame left them.
     offloaded: u64,
     idle: u64,
+    handed_over: u64,
     icount: u64,
-    /// The counts of the recent frames and those of them the processor
-    /// halted, each frame's weighing `BUSY_DECAY` times the next one's.
+    /// The counts of the recent frames, those of them the processor
+    /// halted, and of those the ones handed over, each frame's weighing
+    /// `BUSY_DECAY` times the next one's.
     recent_ran: f64,
     recent_idle: f64,
+    recent_handed: f64,
     /// The emulated time dropped behind the wall clock so far
     /// (`MAX_LAG`), stalls and lag alike (`backlog` sorts them for `Auto`).
     /// And the emulated time the last frame ended at, and whether it ran
@@ -809,6 +834,10 @@ pub struct Pacer {
     presented: bool,
     /// The emulated time the batch covers, a frame's.
     period: Duration,
+    /// Whether the log has said that a fixed or `max` speed is past what
+    /// the CPU model ran in real mode (`hint_real_most`), once for each
+    /// speed set.
+    real_most_hinted: bool,
 }
 
 impl Pacer {
@@ -822,9 +851,11 @@ impl Pacer {
             sample: HostSample::default(),
             offloaded: 0,
             idle: 0,
+            handed_over: 0,
             icount: 0,
             recent_ran: 0.0,
             recent_idle: 0.0,
+            recent_handed: 0.0,
             lost_ns: 0,
             last_ns: 0,
             ran: false,
@@ -837,6 +868,7 @@ impl Pacer {
             deadline: None,
             presented: false,
             period: FRAME,
+            real_most_hinted: false,
         }
     }
 
@@ -884,6 +916,7 @@ impl Pacer {
             self.auto = self.auto.with(base, self.auto.target_fps());
         }
         self.speed = speed;
+        self.real_most_hinted = false;
     }
 
     /// Change the frame rate `Auto` aims for (`auto_fps`), None for the
@@ -915,6 +948,8 @@ impl Pacer {
     /// Win32 program that keeps it from halting is at work, even one that
     /// never waits long enough for `Auto` to see the halt. A client of the
     /// emulator's DPMI host has no system under it (`set_dpmi_client`).
+    /// `Auto` also counts the DOS programs started and ended
+    /// (`set_programs`).
     pub fn end_cpu_frame(
         &mut self,
         cpu: &mut crate::cpu::Cpu,
@@ -923,8 +958,10 @@ impl Pacer {
         overhead: Duration,
     ) -> Option<u32> {
         self.auto.set_protected_least(cpu.model.auto_least());
+        self.auto.set_real_most(cpu.model.auto_real_most());
         self.auto.set_idles(cpu.os_idles || cpu.bus.win32.active());
         self.auto.set_dpmi_client(cpu.bus.dpmi.active() && !cpu.bus.win32.active());
+        self.auto.set_programs(cpu.programs.started + cpu.programs.ended);
         // What the idle skip's watching cost (`Observe::take_watched`) is
         // work of the frame's own, as the rest of `overhead` is: counted
         // per instruction, the proofs that come with each timer event would
@@ -957,22 +994,51 @@ impl Pacer {
         // recent frames (about half a second's, as a single frame's would
         // give a movie's frame that decodes and blits) halted none of
         // their counts, not at all once they halted `BLITS_UNTIL_HALTED`
-        // of them, and in proportion between.
+        // of them, and in proportion between. A Win32 thread's spin handed
+        // over to one that works isn't halted (`waited`): the blits of a
+        // movie decoder whose main thread spins meanwhile follow the speed.
         let clock = &cpu.bus.clock;
         let offloaded = clock.offloaded.saturating_sub(self.offloaded);
         let ran = clock.icount.saturating_sub(self.icount);
         let idle = clock.idle.saturating_sub(self.idle).min(ran);
-        (self.offloaded, self.idle, self.icount) = (clock.offloaded, clock.idle, clock.icount);
+        let handed = clock.handed_over.saturating_sub(self.handed_over).min(idle);
+        (self.offloaded, self.idle, self.handed_over, self.icount) =
+            (clock.offloaded, clock.idle, clock.handed_over, clock.icount);
         self.recent_ran = self.recent_ran * BUSY_DECAY + ran as f64;
         self.recent_idle = self.recent_idle * BUSY_DECAY + idle as f64;
+        self.recent_handed = self.recent_handed * BUSY_DECAY + handed as f64;
         let halted = if self.recent_ran > 0.0 {
-            self.recent_idle / self.recent_ran
+            waited(self.recent_ran, self.recent_idle, self.recent_handed) / self.recent_ran
         } else {
             1.0
         };
         let share = (1.0 - halted / BLITS_UNTIL_HALTED).clamp(0.0, 1.0);
         let executed = executed + (offloaded as f64 * share) as u64;
+        // The host's time in the built-in Windows' functions is in `exec`
+        // too, and goes the same way at `max`: a program that keeps the
+        // processor busy calls them more often the faster it runs, so it
+        // counts as the instructions' time, but one that waits between its
+        // frames calls them as often at any speed, so it is the frame's
+        // own work (`overhead`), in the same proportion as the blits.
+        // Charged to the few instructions a waiting program runs, the
+        // decoding and the blits to the 3dfx card of Omikron's movies on a
+        // Voodoo2 machine took the speed to 3,300 to 5,000 cycles/ms, at
+        // which the game's copy of each picture took about 10 ms of the 33
+        // between them, and Escape freed the surface in the middle of one.
+        // A busy program's loop of calls (#1052's) still counts per
+        // instruction. Only `max` has the functions timed, from the frame
+        // after it is set.
+        let timing = matches!(self.speed, CpuSpeed::Max).then_some(Duration::ZERO);
+        let service = std::mem::replace(&mut cpu.bus.service_time, timing).unwrap_or_default();
+        let (exec, overhead) = match self.speed {
+            CpuSpeed::Max => {
+                let own = service.min(exec).mul_f64(1.0 - share);
+                (exec - own, overhead + own)
+            }
+            _ => (exec, overhead),
+        };
         let next = self.end_frame(&cpu.bus, cpu.pm_latched, executed, exec, overhead);
+        self.hint_real_most(cpu, next);
         cpu.os_idles = self.auto.idles();
         // What a device may go back to in the middle of the next frame
         // (`Bus::end_work_boost`): only a speed `Auto` set.
@@ -981,6 +1047,35 @@ impl Pacer {
             _ => None,
         };
         next
+    }
+
+    /// Say once in the log, for each speed set, that a fixed or `max`
+    /// speed runs real-mode code faster than the CPU model ran
+    /// (`CpuModel::auto_real_most`). `cycles=auto` keeps a real-mode
+    /// program's frames within that, as a game that counts the timer ticks
+    /// a pass of its main loop takes can count none past it and fail
+    /// (Ultimate Domain divides by the count, #1813). A fixed speed and
+    /// `max` are the user's choice and stay as they are.
+    fn hint_real_most(&mut self, cpu: &mut crate::cpu::Cpu, next: Option<u32>) {
+        if self.real_most_hinted || cpu.pm_latched || matches!(self.speed, CpuSpeed::Auto(_)) {
+            return;
+        }
+        let Some(most) = cpu.model.auto_real_most() else {
+            return;
+        };
+        let speed = next.unwrap_or_else(|| cpu.bus.clock.cycles_per_ms());
+        if speed <= most {
+            return;
+        }
+        self.real_most_hinted = true;
+        let setting = match self.speed {
+            CpuSpeed::Max => "max".to_string(),
+            _ => speed.to_string(),
+        };
+        cpu.bus.log_string(&format!(
+            "[SPEED] cycles={setting} runs real-mode code at {speed} instructions per ms,              more than the {most} cycles=auto gives a {}: a game that times its main              loop by the timer may fail at this speed",
+            cpu.model.describe()
+        ));
     }
 
     /// The instruction count the next batch should run to, so emulated time
@@ -1979,7 +2074,7 @@ crate::state_fields!(PitPort {
     latched,
     status
 });
-crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded, disk_wait });
+crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded, disk_wait, handed_over });
 crate::state_fields!(Tsc { base, icount, hz });
 
 #[cfg(test)]
@@ -2295,6 +2390,11 @@ mod tests {
             refresh: 60.0,
             pace: 1.0,
             missed: 0,
+            late: 0.0,
+            paced: 0,
+            ahead: Default::default(),
+            follows: 0.0,
+            spread: 0.0,
         };
         let host_max = pacer.host.max.unwrap() as u32;
         let boost = pacer.auto.decide(433_332, &loading, true, host_max);
@@ -2457,6 +2557,57 @@ mod tests {
         assert_eq!(overhead_ns, 800_000.0);
         // And starts over.
         assert_eq!(sample.add(50_000, ms(1), Duration::ZERO), None);
+    }
+
+    /// The speed `max` settles at from 20,000 after 400 frames that each
+    /// ran `executed` instructions and halted `halted` counts, in `exec`
+    /// of the host's time, `service` of it in the built-in Windows'
+    /// functions, with 1 ms of other work.
+    fn max_after(executed: u64, halted: u64, exec: Duration, service: Duration) -> u32 {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        cpu.pm_latched = true;
+        let mut pacer = Pacer::new(CpuSpeed::Max, None, Instant::now());
+        cpu.bus.clock.set_cycles_per_ms(20_000);
+        for _ in 0..400 {
+            cpu.bus.clock.icount += executed + halted;
+            cpu.bus.clock.idle += halted;
+            // As `exec::win32_trap` adds it: once the pacer times them.
+            if let Some(total) = &mut cpu.bus.service_time {
+                *total += service;
+            }
+            let overhead = Duration::from_millis(1);
+            if let Some(next) = pacer.end_cpu_frame(&mut cpu, executed, exec, overhead) {
+                cpu.bus.clock.set_cycles_per_ms(next);
+            }
+        }
+        cpu.bus.clock.cycles_per_ms()
+    }
+
+    /// A program that waits for most of each frame and spends the time it
+    /// runs in services (Omikron's movies: the decoder and the blits to
+    /// the 3dfx card) calls them as often at any speed. Their time is the
+    /// frame's own work, not its instructions': `max` goes up, where
+    /// counted per instruction it took the speed down.
+    #[test]
+    fn max_counts_a_waiting_programs_services_as_the_frames_work() {
+        let us = Duration::from_micros;
+        let waiting = max_after(15_000, 300_000, us(5_600), us(5_500));
+        assert!(waiting > 20_000, "{waiting}");
+        let unseen = max_after(15_000, 300_000, us(5_600), Duration::ZERO);
+        assert!(unseen < 20_000, "{unseen}");
+    }
+
+    /// A program that keeps the processor busy calls its services more
+    /// often the faster it runs: their time counts as its instructions',
+    /// and frames that overrun take the speed down.
+    #[test]
+    fn max_counts_a_busy_programs_services_as_its_instructions() {
+        let ms = Duration::from_millis;
+        // 333,340 instructions a frame at 20,000 in 33 ms, 30 of them in
+        // services.
+        let busy = 20_000 * 16_667 / 1000;
+        assert!(max_after(busy, 0, ms(33), ms(30)) < 20_000);
+        assert!(max_after(busy, 0, ms(3), ms(2)) > 20_000);
     }
 
     #[test]

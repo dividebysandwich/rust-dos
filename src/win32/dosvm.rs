@@ -32,8 +32,9 @@
 //!
 //! That is what a full-screen DOS box does on Windows 98, but for the
 //! Windows programs, which go on running there behind it. It shares
-//! DOS's drives and current directories with the Windows programs, so
-//! what the DOS program writes is there for them.
+//! DOS's drives with the Windows programs, so what the DOS program
+//! writes is there for them, and starts in the current directories of
+//! the program that started it (directories.rs).
 //!
 //! The rest of a virtual machine waits for later: the Windows programs
 //! running beside the DOS program, a window for it, and a first megabyte
@@ -48,7 +49,7 @@
 //! files are freed by DOS when it ends, and the screen is the desktop
 //! again, in its mode, with the mouse's range over it.
 
-use super::boot::Directories;
+use super::directories::{self, Directories};
 use super::realmode::{self, Frame, Kind};
 use super::{Context, EAX, EBX, EDX, ESP, ROM_SEG, object};
 use crate::cpu::{Cpu, CpuFlags};
@@ -81,6 +82,8 @@ const VECTORS: usize = 0x400;
 pub const DOSVM_SAVED: u16 = 85;
 /// The W32 section's version that added the folder it starts in.
 pub const DOSVM_DIRECTORY: u16 = 86;
+/// The W32 section's version that added its PIF's DPMI memory.
+pub const DOSVM_DPMI: u16 = 106;
 
 /// A DOS program a Windows program started.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -111,6 +114,9 @@ pub struct Session {
     /// The bytes of the Windows programs' memory pool lent to the XMS
     /// pool while it runs (`memory::Pool::lend`).
     lent: crate::savestate::Since<DOSVM_DIRECTORY, u32>,
+    /// The DPMI memory its PIF gives its DOS machine, in KB: 0 for Auto,
+    /// and for a program started without a PIF (`dpmi_limit`).
+    dpmi_kb: crate::savestate::Since<DOSVM_DPMI, u32>,
 }
 
 /// What of the machine a DOS program can change that Windows 98 keeps
@@ -196,6 +202,17 @@ pub fn running(win32: &super::Win32) -> bool {
     win32.dosvm.running.is_some()
 }
 
+/// The DPMI memory the DOS machine of the DOS program running may have,
+/// in bytes, when its PIF sets it: on Windows 98 that memory is virtual,
+/// up to the PIF's limit, and the VMM pages it to the swap file, so a
+/// program may have more than the machine's memory (the DPMI host's
+/// `vm.rs`). None for Auto, where the program gets the memory that is
+/// free as it is.
+pub fn dpmi_limit(win32: &super::Win32) -> Option<u32> {
+    let kb = *win32.dosvm.running.as_ref()?.dpmi_kb;
+    (kb != 0).then_some(kb * 1024)
+}
+
 /// The Windows version a DOS program it started finds (INT 2Fh AX=1600h
 /// and 160Ah): the major and minor version GetVersion gives.
 pub fn windows_version(cpu: &Cpu) -> (u8, u8) {
@@ -235,6 +252,8 @@ struct Start {
     program: String,
     arguments: String,
     directory: String,
+    /// The PIF's DPMI memory, in KB (0 for Auto).
+    dpmi_kb: u16,
 }
 
 /// The program the PIF at `path` starts (pif.rs), as Windows 98 starts
@@ -317,10 +336,17 @@ fn open_pif(cpu: &mut Cpu, path: &str, arguments: &str, directory: String) -> Re
         "[W32] {} starts {}{} in {}",
         path, program, arguments, directory
     ));
+    if pif.dpmi_kb != 0 {
+        cpu.bus.log_string(&format!(
+            "[W32] {}'s DOS machine may have {} KB of DPMI memory",
+            path, pif.dpmi_kb
+        ));
+    }
     Ok(Start {
         program,
         arguments,
         directory,
+        dpmi_kb: pif.dpmi_kb,
     })
 }
 
@@ -370,6 +396,7 @@ pub fn spawn(
             program: path.to_string(),
             arguments: arguments.to_string(),
             directory,
+            dpmi_kb: 0,
         }
     };
     let (path, arguments) = (start.program.as_str(), start.arguments.as_str());
@@ -474,6 +501,7 @@ pub fn spawn(
         thread,
         block,
         directory: crate::savestate::Since(start.directory.clone()),
+        dpmi_kb: crate::savestate::Since(start.dpmi_kb as u32),
         ..Session::default()
     });
     cpu.bus.log_string(&format!(
@@ -611,7 +639,7 @@ pub fn ended(cpu: &mut Cpu, frame: Frame, rm: &Context) {
         let _ = crate::mcb::free(&mut cpu.bus, session.block);
     });
     cpu.current_psp = session.psp;
-    super::boot::put_back(cpu, session.directories);
+    directories::put_back(cpu, session.directories);
     session.machine.put_back(cpu);
     if !super::memory::Pool::take_back(&mut cpu.bus, *session.lent) {
         cpu.bus.log_string(&format!(
@@ -653,6 +681,7 @@ crate::state_fields!(Session {
     machine,
     directory,
     lent,
+    dpmi_kb,
 });
 crate::state_fields!(Machine {
     fpu,

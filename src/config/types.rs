@@ -100,6 +100,96 @@ impl Filter {
     }
 }
 
+/// What draws the emulated 3D cards' pictures on the host (`renderer`):
+/// the 3dfx cards (`voodoo::Renderer`) and the ToadForce
+/// (`toadforce::Renderer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Renderer {
+    /// Each card's own default: the 3dfx cards draw on the processor,
+    /// and the ToadForce with OpenGL where the window has it.
+    #[default]
+    Auto,
+    /// The host's OpenGL draws for every card.
+    OpenGl,
+    /// Every card draws on the processor.
+    Software,
+}
+
+impl Renderer {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::OpenGl, Self::Software];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "opengl" => Some(Self::OpenGl),
+            "software" => Some(Self::Software),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::OpenGl => "opengl",
+            Self::Software => "software",
+        }
+    }
+
+    /// What draws for a 3dfx card.
+    pub fn voodoo(self) -> crate::voodoo::Renderer {
+        match self {
+            Self::OpenGl => crate::voodoo::Renderer::OpenGl,
+            Self::Auto | Self::Software => crate::voodoo::Renderer::Software,
+        }
+    }
+
+    /// What draws for a ToadForce.
+    pub fn toadforce(self) -> crate::toadforce::Renderer {
+        match self {
+            Self::Auto => crate::toadforce::Renderer::Auto,
+            Self::OpenGl => crate::toadforce::Renderer::OpenGl,
+            Self::Software => crate::toadforce::Renderer::Software,
+        }
+    }
+
+    /// The value an old `voodoo_renderer` line asks for.
+    pub fn of_voodoo(renderer: crate::voodoo::Renderer) -> Self {
+        match renderer {
+            crate::voodoo::Renderer::Software => Self::Software,
+            crate::voodoo::Renderer::OpenGl => Self::OpenGl,
+        }
+    }
+
+    /// The value an old `toadforce_renderer` line asks for.
+    pub fn of_toadforce(renderer: crate::toadforce::Renderer) -> Self {
+        match renderer {
+            crate::toadforce::Renderer::Auto => Self::Auto,
+            crate::toadforce::Renderer::OpenGl => Self::OpenGl,
+            crate::toadforce::Renderer::Software => Self::Software,
+        }
+    }
+
+    /// The setting that stands for what is asked for the 3dfx cards and
+    /// for the ToadForce, each by its old line (`of_voodoo`,
+    /// `of_toadforce`) or by a `renderer` line before it. `auto` agrees
+    /// with either value, and the other value wins. The 3dfx cards in
+    /// software with the ToadForce on `auto` or `opengl` give `auto`: the
+    /// first is the pair the settings window of an earlier rust-dos wrote
+    /// by default, the second the one it wrote for OpenGL for the
+    /// ToadForce alone, and `auto` draws both cards as they ask. The 3dfx
+    /// cards on OpenGL with the ToadForce in software asks for two
+    /// renderers, which no value draws: None, an error in the file
+    /// (`Config::errors`).
+    pub fn of_cards(voodoo: Self, toadforce: Self) -> Option<Self> {
+        match (voodoo, toadforce) {
+            (Self::OpenGl, Self::Software) => None,
+            (Self::Software, Self::Auto | Self::OpenGl) => Some(Self::Auto),
+            (Self::Auto, other) | (other, Self::Auto) => Some(other),
+            (same, _) => Some(same),
+        }
+    }
+}
+
 /// The DOS version the built-in DOS reports (`dos_version`): INT 21h
 /// AH=30h, AX=3306h and the PSP's, and the version the FAT32 functions of
 /// MS-DOS 7 (AX=7302h to 7305h) need while no FAT32 drive is mounted.
@@ -331,6 +421,11 @@ pub struct SoundConfig {
     /// The Sound Blaster's resources, and whether there is one.
     pub sb: crate::sb::SbConfig,
     pub sb_installed: bool,
+    /// A Game Blaster (`sbtype=gb`) at the Sound Blaster's base, in place
+    /// of the Sound Blaster.
+    pub game_blaster: bool,
+    /// The two CMS chips in the SB 2.0's sockets (`cms`).
+    pub cms: bool,
     /// The FM chip (`opl`), or None for the Sound Blaster's own: two
     /// OPL2s on an SB Pro 1, else an OPL3.
     pub opl: Option<crate::opl::Chip>,
@@ -391,6 +486,8 @@ impl Default for SoundConfig {
         Self {
             sb: crate::sb::SbConfig::default(),
             sb_installed: true,
+            game_blaster: false,
+            cms: false,
             opl: None,
             awe32rom: None,
             awe32ram: crate::awe32::DEFAULT_RAM_KB,
@@ -416,6 +513,28 @@ impl SoundConfig {
     /// The Sound Blaster to install, if any.
     pub fn card(&self) -> Option<crate::sb::SbConfig> {
         self.sb_installed.then_some(self.sb)
+    }
+
+    /// The Creative Music System's chips, if any: the Game Blaster's,
+    /// with its detection chip, or those in an SB 2.0's sockets (`cms`).
+    pub fn cms_chips(&self) -> Option<crate::gameblaster::CmsConfig> {
+        let base = self.sb.base;
+        if self.game_blaster {
+            Some(crate::gameblaster::CmsConfig { base, detection: true })
+        } else if self.cms && self.card().is_some_and(|sb| sb.model == crate::sb::SbModel::Sb2) {
+            Some(crate::gameblaster::CmsConfig { base, detection: false })
+        } else {
+            None
+        }
+    }
+
+    /// The `sbtype` value.
+    pub fn sb_type_name(&self) -> &'static str {
+        match (self.game_blaster, self.sb_installed) {
+            (true, _) => "gb",
+            (false, true) => self.sb.model.name(),
+            (false, false) => "none",
+        }
     }
 
     /// The Gravis Ultrasound to install, if any.
@@ -447,6 +566,13 @@ impl SoundConfig {
     /// channels only work while programs use one card at a time.
     pub fn check(&mut self) -> Vec<String> {
         let mut warnings = self.check_adlib_gold();
+        if self.game_blaster && self.gus.enabled && self.gus.base == self.sb.base {
+            warnings.push(format!(
+                "[sound]: gusbase {:X} is the Game Blaster's base port; there is no Ultrasound",
+                self.gus.base
+            ));
+            self.gus.enabled = false;
+        }
         let Some(sb) = self.card() else { return warnings };
         if !self.gus.enabled {
             return warnings;
@@ -479,6 +605,9 @@ impl SoundConfig {
         if let Some(sb) = self.card() {
             taken.push(("the Sound Blaster", sb.base..sb.base + 0x10));
         }
+        if self.game_blaster {
+            taken.push(("the Game Blaster", self.sb.base..self.sb.base + 0x10));
+        }
         if self.gus.enabled {
             taken.push(("the Ultrasound", self.gus.base + 0x100..self.gus.base + 0x108));
             taken.push(("the Ultrasound", self.gus.base..self.gus.base + 0x10));
@@ -501,16 +630,27 @@ impl SoundConfig {
             "sbtype" => {
                 if value.eq_ignore_ascii_case("none") {
                     self.sb_installed = false;
+                    self.game_blaster = false;
+                } else if value.eq_ignore_ascii_case("gb") {
+                    self.sb_installed = false;
+                    self.game_blaster = true;
                 } else {
-                    sb.model = crate::sb::SbModel::parse(value)
-                        .ok_or_else(|| format!("invalid sbtype '{}' (sb16, sb16vibra, awe32, sbpro2, sbpro1, sb2 or none)", value))?;
+                    sb.model = crate::sb::SbModel::parse(value).ok_or_else(|| {
+                        let types = "sb16, sb16vibra, awe32, sbpro2, sbpro1, sb2, gb or none";
+                        format!("invalid sbtype '{}' ({})", value, types)
+                    })?;
                     self.sb_installed = true;
+                    self.game_blaster = false;
                 }
+            }
+            "cms" => {
+                self.cms = parse_bool(value)
+                    .ok_or_else(|| format!("invalid cms '{}' (true or false)", value))?;
             }
             "sbbase" => {
                 let base = u16::from_str_radix(value.trim_start_matches("0x"), 16)
                     .ok()
-                    .filter(|b| (0x210..=0x280).contains(b) && b & 0xF == 0)
+                    .filter(|b| crate::sb::SbConfig::BASES.contains(b))
                     .ok_or_else(|| format!("invalid sbbase '{}' (210 to 280, hex)", value))?;
                 sb.base = base;
             }

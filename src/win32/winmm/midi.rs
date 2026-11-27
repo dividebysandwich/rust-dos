@@ -14,6 +14,12 @@
 //! multimedia thread (`poll`), which also writes the headers back and
 //! makes the callbacks. As on Windows 9x, a header's dwOffset is the
 //! offset of the event played last.
+//!
+//! Windows 3.1 programs reach the same devices through MMSYSTEM
+//! (win16/misc.rs), which gives their MIDIHDRs here where they are: a
+//! header's data pointer is then a 16:16 one, and the callbacks get the
+//! program's own pointer to the header (`win16::header_data`,
+//! `win16::header16`).
 
 use super::callback::{self, Callback};
 use super::*;
@@ -300,11 +306,26 @@ pub fn notes_off(cpu: &mut Cpu) {
     midi(cpu).status = 0;
 }
 
-/// Tell the callback of the open device `i` about `msg`.
+/// Tell the callback of the open device `i` about `msg`. A header in
+/// `p1` is a Windows 3.1 program's own 16:16 pointer to it, as MMSYSTEM
+/// gives it.
 fn notify(cpu: &mut Cpu, i: usize, msg: u32, p1: u32) {
     let o = &cpu.bus.win32.winmm.midi.outs[i];
-    let (cb, handle, instance) = (o.callback.clone(), o.handle, o.instance);
+    let (cb, handle, instance, pid) = (o.callback.clone(), o.handle, o.instance, o.pid);
+    let p1 = crate::win16::header16(cpu, pid, p1);
     callback::notify(cpu, &cb, handle, msg, instance, p1, 0);
+}
+
+/// The device `handle` calls the 16-bit function at the 16:16 `address`
+/// from now on, which the task whose thread is `tid` calls; it is told
+/// first that the device is open, as midiOutOpen tells it. For
+/// MMSYSTEM's midiOutOpen, which opens the device without a callback.
+pub fn call16_on(cpu: &mut Cpu, handle: u32, tid: u32, address: u32) {
+    let Some(i) = find(cpu, handle) else {
+        return;
+    };
+    midi(cpu).outs[i].callback = Callback::Function16 { tid, address };
+    notify(cpu, i, MOM_OPEN, 0);
 }
 
 /// midiOutGetNumDevs: the MPU-401's synthesizer.
@@ -474,6 +495,8 @@ pub fn midi_out_long_msg(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(MIDIERR_STILLPLAYING);
     }
     let data = cpu.bus.guest_read_32(hdr + HDR_DATA);
+    let pid = midi(cpu).outs[i].pid;
+    let data = crate::win16::header_data(cpu, pid, hdr, data);
     let len = cpu.bus.guest_read_32(hdr + HDR_LENGTH);
     if !cpu.bus.guest_probe(data, len as usize, false) {
         return None;

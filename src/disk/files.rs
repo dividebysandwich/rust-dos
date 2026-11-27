@@ -17,9 +17,28 @@ impl DiskController {
 
     /// A file just opened as `filename` with access `mode`, with the one
     /// reference of whoever opened it.
-    pub(super) fn opened(&mut self, data: OpenData, drive: u8, owner: u16, key: u64, filename: &str, mode: u8) -> OpenFile {
+    pub(super) fn opened(
+        &mut self,
+        data: OpenData,
+        drive: u8,
+        owner: u16,
+        id: FileId,
+        filename: &str,
+        mode: u8,
+    ) -> OpenFile {
         let path = self.qualify_path(filename).unwrap_or_else(|| filename.to_ascii_uppercase());
-        OpenFile { data, drive, owner, key, path, mode, refs: 1, fcb: false, empty_on_use: false, raw: false }
+        OpenFile {
+            data,
+            drive,
+            owner,
+            id,
+            path,
+            mode,
+            refs: 1,
+            fcb: false,
+            empty_on_use: false,
+            raw: false,
+        }
     }
 
     /// The lowest unused entry of the file table.
@@ -73,18 +92,28 @@ impl DiskController {
         // create.
         if let Some(device) = self.device(filename) {
             let handle = self.free_handle()?;
-            let file = self.opened(OpenData::Device(device), self.current_drive, owner, 0, filename, mode);
+            let data = OpenData::Device(device);
+            let drive = self.current_drive;
+            let file = self.opened(data, drive, owner, FileId::Device, filename, mode);
             self.insert(handle, file);
             return Ok(handle);
+        }
+        // "C:\GAMES\" names no file, nor does "C:\GAME.EXE\"; none is made.
+        if ends_in_separator(filename) {
+            return Err(0x03);
         }
         // DOS empties the file at the create call, so opening it again while
         // the create's handle is still unused must find it empty.
         self.settle_named(filename);
         if let Some(data) = self.system_file(filename) {
-            if create {
-                return Err(0x05);
+            if !create && mode & 0x03 != 1 && mode & 0x03 != 2 {
+                return self.open_system_file(filename, data, mode, owner);
             }
-            return self.open_system_file(filename, data, mode, owner);
+            // Written to, it becomes a file of the drive's, which then
+            // shadows the shown one: a create makes it empty, an open
+            // for writing starts it as a copy.
+            let start: &[u8] = if create { &[] } else { &data };
+            self.write_whole_file(filename, start, None)?;
         }
         // A system directory the drive hasn't is no file to open (05h), and
         // a file in it that isn't a system file is not found (02h), as in
@@ -111,8 +140,8 @@ impl DiskController {
                 _ => return Err(0x0C),
             }
             let handle = self.free_handle()?;
-            let key = self.file_key(filename);
-            let file = self.opened(data, drive, owner, key, filename, mode);
+            let id = FileId::Named(format!("{}:\\{}", drive_letter(drive), path));
+            let file = self.opened(data, drive, owner, id, filename, mode);
             self.insert(handle, file);
             return Ok(handle);
         }
@@ -125,12 +154,11 @@ impl DiskController {
                 1 if !writable => return Err(0x05),
                 _ => {}
             }
-            let parts = refs(&parts);
             let handle = self.free_handle()?;
-            let entry = match volume.find(&parts) {
+            let entry = match self.fat_find(&volume, &parts) {
                 Ok(entry) if entry.is_dir() => return Err(0x05),
                 Ok(entry) => entry,
-                Err(0x02) if create && writable => volume.create(&parts, 0)?,
+                Err(0x02) if create && writable => self.fat_create(&volume, &parts)?,
                 Err(0x02) if create => return Err(0x05),
                 Err(e) => return Err(e),
             };
@@ -141,14 +169,15 @@ impl DiskController {
                 return Err(0x05);
             }
             let at = entry.at.ok_or(0x05u8)?;
+            let id = FileId::fat(drive, &volume, at);
             let data = OpenData::Fat { volume, at, pos: Rc::new(Cell::new(0)), write };
-            let key = self.file_key(filename);
-            let file = self.opened(data, drive, owner, key, filename, mode);
+            let file = self.opened(data, drive, owner, id, filename, mode);
             self.insert(handle, file);
             return Ok(handle);
         }
 
-        let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?; // Path not found
+        let (drive, walk) = self.locate_walk(filename).ok_or(0x03)?; // Path not found
+        let (path, missing) = (walk.path, walk.missing);
         // A directory (or a bare "D:") isn't a file: access denied. A name
         // its folder's entries lack names nothing there (`locate_found`):
         // programs poll for files that aren't there, and a stat or an
@@ -158,6 +187,12 @@ impl DiskController {
             return Err(0x05);
         }
         let writable = self.is_writable(drive);
+        // The access the host's handle has.
+        let (read, write) = match mode & 0x03 {
+            0 => (true, false),
+            1 => (false, true),
+            _ => (true, writable),
+        };
 
         let mut options = OpenOptions::new();
         match mode & 0x03 {
@@ -184,22 +219,37 @@ impl DiskController {
         }
 
         let handle = self.free_handle()?;
-        let opened = if missing && !create {
-            Err(std::io::ErrorKind::NotFound.into())
-        } else {
-            options.open(&path)
+        // A file the guest just wrote and closed opens through the handle
+        // that wrote it, which costs the host nothing (`ClosedFiles`).
+        let reused = existing
+            .as_ref()
+            .and_then(|meta| self.host_dirs.closed.take(&path, read, write, meta));
+        let opened = match reused {
+            Some(file) => Ok(file),
+            None if missing && !create => Err(std::io::ErrorKind::NotFound.into()),
+            None => options.open(&path),
         };
         // Opening a file that is there already adds no name to its folder.
         if create && existing.is_none() {
             self.host_dirs.changed();
             self.host_dirs.touched(&path);
+            self.host_aliases.touched(&path);
         }
         match opened {
             Ok(file) => {
-                let key = self.file_key(filename);
+                // A path each of whose names the walk found has the
+                // host's names already (`host_file_id`), and so has a file
+                // this call made in a folder the walk found: no second
+                // walk. Others are asked of the host (`file_id`).
+                let made = create && existing.is_none() && walk.dirs_matched;
+                let id = if walk.matched || made {
+                    FileId::Host(path.clone())
+                } else {
+                    self.file_id(filename)
+                };
                 let written = (writable && mode & 0x03 != 0).then_some(path);
                 let data = OpenData::Host(HostFile::new(file), written);
-                let file = self.opened(data, drive, owner, key, filename, mode);
+                let file = self.opened(data, drive, owner, id, filename, mode);
                 self.insert(handle, file);
                 Ok(handle)
             }
@@ -218,6 +268,19 @@ impl DiskController {
         }
     }
 
+    /// Create the empty file `parts` on `volume`, for the call running
+    /// now: a long-name call gives it the long name entries its name
+    /// needs and finds its directory by long names
+    /// (`FatVolume::create_long`); DOS's calls give it the 8.3 name they
+    /// cut its name to.
+    fn fat_create(&self, volume: &FatVolume, parts: &[String]) -> Result<fat::Entry, u8> {
+        if !self.long_call {
+            return volume.create(&refs(parts), 0);
+        }
+        let (leaf, dir) = parts.split_last().ok_or(0x05u8)?;
+        volume.create_long(&refs(dir), leaf, 0)
+    }
+
     /// INT 21h, AH=3Ch: Create File. Opens read/write, creating the file
     /// if missing. A file that was there is emptied as DOS does, but only
     /// when the program first reads, writes, seeks, resizes, stamps or
@@ -228,12 +291,17 @@ impl DiskController {
         if self.device(filename).is_some() {
             return self.open_file(filename, 0x02, owner);
         }
+        // Before anything is made on the way (`ends_in_separator`).
+        if ends_in_separator(filename) {
+            return Err(0x03);
+        }
         let normalized = filename.replace('/', "\\");
         let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
         self.host_dirs.creating();
-        // A system file or directory is there already.
-        if self.is_system_entry(filename) {
+        // A system directory is there already; a system file is made a
+        // file of the drive's (`open_or_create`).
+        if self.is_system_dir(filename) {
             return Err(0x05);
         }
         self.make_system_dirs(filename);
@@ -264,7 +332,7 @@ impl DiskController {
         self.open_files.get(&sft).is_some_and(|open| {
             self.open_files
                 .values()
-                .any(|f| f.empty_on_use && f.key == open.key)
+                .any(|f| f.empty_on_use && f.id == open.id)
         })
     }
 
@@ -272,8 +340,8 @@ impl DiskController {
     /// use, through whichever handle: DOS emptied it for all of them.
     fn settle(&mut self, sft: u16) {
         if self.settles(sft) {
-            let key = self.open_files[&sft].key;
-            self.settle_where(|_, f| f.key == key);
+            let id = self.open_files[&sft].id.clone();
+            self.settle_where(|_, f| f.id == id);
         }
     }
 
@@ -307,14 +375,24 @@ impl DiskController {
     /// does to the file the create already emptied.
     fn settle_named(&mut self, filename: &str) {
         if self.open_files.values().any(|f| f.empty_on_use) {
-            let key = self.file_key(filename);
-            self.settle_where(|_, f| f.key == key);
+            let id = self.file_id(filename);
+            self.settle_where(|_, f| f.id == id);
         }
     }
 
     /// INT 21h, AH=5Bh: create a file that must not exist yet.
     pub fn create_new_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
+        // "C:\GAMES\" is no file that is there (`ends_in_separator`). No
+        // device's name ends in a slash: its last name is empty.
+        if ends_in_separator(filename) {
+            return Err(0x03);
+        }
         self.host_dirs.creating();
+        // A folder (a root among them) is no file to make, as to 3Ch:
+        // access denied (05h), where a file there is file exists (50h).
+        if self.device(filename).is_none() && self.is_directory(filename) {
+            return Err(0x05);
+        }
         if self.device(filename).is_none() && self.exists(filename) {
             return Err(0x50); // File exists
         }
@@ -338,17 +416,27 @@ impl DiskController {
     /// replacing a file that is there, dated `stamp` (the packed DOS time
     /// and date) or now.
     pub fn write_whole_file(&mut self, dos_path: &str, data: &[u8], stamp: Option<(u16, u16)>) -> Result<(), u8> {
+        // As to a create: COMMAND's `ECHO X > C:\NEW\` makes nothing.
+        if ends_in_separator(dos_path) {
+            return Err(0x03);
+        }
         self.host_dirs.creating();
         // Before the file is replaced: a FAT image's entry may move.
         self.settle_named(dos_path);
-        if self.is_system_entry(dos_path) {
+        // A system file written becomes a file of the drive's, which
+        // shadows the shown one; a system directory is no file.
+        if self.is_system_dir(dos_path) {
             return Err(0x05);
         }
         self.make_system_dirs(dos_path);
         if let Some((drive, volume, parts)) = self.locate_fat(dos_path) {
             self.check_writable(drive)?;
             let (time, date) = stamp.unwrap_or_else(fat::dos_now);
-            return volume.put_file(&refs(&parts), data, time, date);
+            return if self.long_call {
+                volume.put_file_long(&refs(&parts), data, time, date)
+            } else {
+                volume.put_file(&refs(&parts), data, time, date)
+            };
         }
         if self.locate_in_memory(dos_path).is_some() {
             return Err(0x05);
@@ -366,9 +454,11 @@ impl DiskController {
         if hostfs::metadata(&path).is_ok_and(|m| m.readonly) {
             return Err(0x05);
         }
+        self.host_dirs.closed.drop_under(&path);
         let written = hostfs::write(&path, data);
         self.host_dirs.changed();
         self.host_dirs.touched(&path);
+        self.host_aliases.touched(&path);
         written.map_err(|_| 0x05)?;
         if let Some(when) = stamp.and_then(|(time, date)| dos_to_system_time(time, date)) {
             let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_modified(when));
@@ -378,10 +468,21 @@ impl DiskController {
 
     /// INT 21h, AH=41h: delete a file.
     pub fn delete_file(&mut self, filename: &str) -> Result<(), u8> {
+        // "C:\GAME.EXE\" names no file (`ends_in_separator`), and a root
+        // is access denied (05h), where another folder is not found.
+        if ends_in_separator(filename) {
+            return Err(0x03);
+        }
+        if self.is_root(filename) {
+            return Err(0x05);
+        }
         // A disk image's entry must not be emptied after it is freed.
         self.settle_named(filename);
+        // The built-in Windows's own files can't go: deleting one changes
+        // nothing, so a setup that deletes it before it puts its own copy
+        // there goes on (Windows' own files are writable).
         if self.system_file(filename).is_some() {
-            return Err(0x05);
+            return Ok(());
         }
         // A system directory the drive hasn't, or a file in it, is not
         // found (02h), as a directory or a missing file is on the host.
@@ -389,8 +490,7 @@ impl DiskController {
             return Err(0x02);
         }
         if let Some((drive, volume, parts)) = self.locate_fat(filename) {
-            let parts = refs(&parts);
-            let entry = volume.find(&parts)?;
+            let entry = self.fat_find(&volume, &parts)?;
             if entry.is_dir() {
                 return Err(0x02);
             }
@@ -398,56 +498,109 @@ impl DiskController {
             if entry.attr & fat::ATTR_READ_ONLY != 0 {
                 return Err(0x05);
             }
-            return volume.remove(&parts);
+            return volume.remove(&refs(&self.fat_dos_path(&volume, &parts)?));
         }
         let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?;
+        if !missing && hostfs::is_dir(&path) {
+            return Err(0x02);
+        }
         if missing || !hostfs::is_file(&path) {
-            return Err(0x02); // File not found
+            return Err(self.missing_error(filename));
         }
         self.check_writable(drive)?;
+        self.host_dirs.closed.drop_under(&path);
         let removed = hostfs::remove_file(&path);
         self.host_dirs.changed();
         self.host_dirs.touched(&path);
+        self.host_aliases.touched(&path);
         removed.map_err(|_| 0x05)
     }
 
     /// INT 21h, AH=56h: rename or move a file within a drive.
     pub fn rename_file(&mut self, from: &str, to: &str) -> Result<(), u8> {
+        // Neither name may end in a slash (`ends_in_separator`), and a
+        // root is no name to take (05h).
+        if ends_in_separator(from) || ends_in_separator(to) {
+            return Err(0x03);
+        }
+        if self.is_root(to) {
+            return Err(0x05);
+        }
         // A disk image's entry may move: empty the file while it is where
         // the handle has it.
         self.settle_named(from);
-        // A system file is read-only, and a system directory has them.
-        if self.is_system_entry(from) || self.is_system_entry(to) {
+        // A system directory has system files: it doesn't move, and
+        // nothing takes its name.
+        if self.is_system_dir(from) || self.is_system_dir(to) {
             return Err(0x05);
+        }
+        // A system file to rename stays, as it can't be deleted
+        // (`delete_file`): the new name gets a copy of it.
+        if let Some(data) = self.system_file(from) {
+            if self.exists(to) && self.system_file(to).is_none() {
+                return Err(0x05);
+            }
+            return self.write_whole_file(to, &data, None);
         }
         // A file in a system directory the drive hasn't is not found
         // (02h), on a disk image as on the host.
         if self.in_system_dir(from) {
             return Err(0x02);
         }
+        // A file renamed to a system file's name shadows it: the system
+        // file is gone as far as the program can tell (`delete_file`).
         self.make_system_dirs(to);
         if let Some((drive, volume, from_parts)) = self.locate_fat(from) {
-            let from_parts = refs(&from_parts);
             if from_parts.is_empty() {
                 return Err(0x05);
             }
-            volume.find(&from_parts)?;
+            let found = self.fat_find(&volume, &from_parts)?;
             self.check_writable(drive)?;
             let normalized = to.replace('/', "\\");
             let (to_drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
             if to_drive != drive {
                 return Err(0x11); // Not same device
             }
-            let to_parts = Self::logical_components(self.drive(drive).ok_or(0x03u8)?, rest);
-            if to_parts.is_empty() {
-                return Err(0x03);
+            let to_parts = self.logical_components(self.drive(drive).ok_or(0x03u8)?, rest);
+            let to_parts = refs(&to_parts);
+            let (leaf, to_dir) = to_parts.split_last().ok_or(0x03u8)?;
+            // A long-name call (MoveFileA, msvcrt's rename) names the entry
+            // as VFAT does on Windows 9x: a long name gets its long name
+            // entries, and the name may be the entry's own in another
+            // case. DOS's rename keeps to 8.3 names and drops a long one.
+            let moved_to = if self.long_call {
+                volume.rename_long(&refs(&from_parts), to_dir, leaf)?.at
+            } else {
+                volume.rename(&refs(&from_parts), &to_parts)?;
+                volume.find(&to_parts).ok().and_then(|e| e.at)
+            };
+            // The entry may have moved to other slots: the handles open on
+            // it (which msvcrt's rename and mmioRename don't refuse) follow
+            // it, or their writes would land in the slots it left, which
+            // may now hold its long name entries.
+            if let (Some(old), Some(new)) = (found.at, moved_to)
+                && old != new
+            {
+                for open in self.open_files.values_mut() {
+                    if let OpenData::Fat { volume: v, at, .. } = &mut open.data
+                        && Rc::ptr_eq(v, &volume)
+                        && *at == old
+                    {
+                        *at = new;
+                    }
+                }
+                // So do their ids, which name the entry by its slot.
+                let old = FileId::fat(drive, &volume, old);
+                let new = FileId::fat(drive, &volume, new);
+                self.moved_files(|id| (*id == old).then(|| new.clone()));
             }
-            return volume.rename(&from_parts, &to_parts);
+            return Ok(());
         }
         let (drive, source) = self.locate(from).ok_or(0x03)?;
         if !hostfs::exists(&source) {
-            return Err(0x02);
+            return Err(self.missing_error(from));
         }
+        let source_id = self.file_id(from);
         self.check_writable(drive)?;
         let normalized = to.replace('/', "\\");
         let (to_drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
@@ -460,23 +613,71 @@ impl DiskController {
             None => (".", rest),
         };
         // Renamed to "NEW.", the file is NEW, as opens name it.
-        let leaf = Self::dos_component(leaf);
+        let leaf = self.dos_component(leaf);
+        let leaf = &*leaf;
         let parent = self.resolve_on(to_drive, parent_dos).ok_or(0x03)?;
         if leaf.is_empty() || !hostfs::is_dir(&parent) {
             return Err(0x03);
         }
         // Destination exists, or is a name the host keeps for its own
-        // files (`host_private`).
-        if super::host_private(leaf) || self.find_existing_child(&parent, leaf).is_some() {
+        // files (`host_private`). A long-name call may give a name another
+        // case, or the entry's alias, as MoveFileA does on Windows 9x: the
+        // destination is then the source itself (`itself`). DOS's rename
+        // finds the source there as it finds any other file, and fails,
+        // as it does on a disk image. It cuts the name to 8.3, and a file
+        // of that name is the destination too (`cut_name_taken`).
+        let existing = self.find_existing_child(&parent, leaf);
+        let recased = self.long_call && existing.as_ref().is_some_and(|e| parent.join(e) == source);
+        let itself = recased || self.file_id(to) == source_id;
+        if super::host_private(leaf)
+            || (existing.is_some() && !recased)
+            || (itself && !self.long_call)
+            || self.cut_name_taken(&parent, leaf)
+        {
             return Err(0x05);
         }
-        let target = parent.join(super::new_entry_name(leaf));
-        let renamed = hostfs::rename(&source, &target);
+        let target = parent.join(self.entry_name(leaf));
+        self.host_dirs.closed.drop_under(&source);
+        self.host_dirs.closed.drop_under(&target);
+        // A name no entry has may still be one the host knows: a Windows
+        // host's own short name of an entry. For another entry that is
+        // taken (05h), as the rename would replace that entry, and so it
+        // is for DOS's rename. For the file itself, renamed to its alias
+        // by a long-name call, the host would take the name for the file
+        // and leave it as it is: it goes by way of a name of rust-dos's
+        // own. A file left by that name, by a run that stopped between
+        // the two renames, is one of the program's, and isn't replaced.
+        let host_short = !same_name(&source, &target) && hostfs::exists(&target);
+        if host_short && !(self.long_call && same_file(&source, &target)) {
+            return Err(0x05);
+        }
+        let aside = parent.join(RENAMING_TO_ALIAS);
+        if host_short && hostfs::exists(&aside) {
+            return Err(0x05);
+        }
+        let renamed = if host_short {
+            hostfs::rename(&source, &aside).and_then(|()| {
+                hostfs::rename(&aside, &target).inspect_err(|_| {
+                    let _ = hostfs::rename(&aside, &source);
+                })
+            })
+        } else {
+            hostfs::rename(&source, &target)
+        };
         self.host_dirs.changed();
         if renamed.is_ok() {
             let from_leaf = from.rsplit(['\\', '/', ':']).next().unwrap_or(from);
-            let from_leaf = Self::dos_component(from_leaf);
-            self.host_dirs.renamed(&source, &target, from_leaf, leaf);
+            let from_leaf = self.dos_component(from_leaf);
+            self.host_dirs.renamed(&source, &target, &from_leaf, leaf);
+            // The files open there, or in the directory renamed, are
+            // there under the new name now.
+            if let (FileId::Host(old), FileId::Host(new)) = (source_id, self.file_id(to)) {
+                self.moved_files(Self::host_files_moved(&old, &new));
+            }
+            // A folder's entries keep their aliases wherever it goes.
+            self.host_aliases.moved(&source, &target);
+            self.host_aliases.touched(&source);
+            self.host_aliases.touched(&target);
         } else {
             self.host_dirs.touched(&source);
             self.host_dirs.touched(&target);
@@ -548,13 +749,28 @@ impl DiskController {
         let Some(open) = self.open_files.get_mut(&sft) else { return false };
         open.refs = open.refs.saturating_sub(1);
         if open.refs == 0 && sft >= FIRST_FILE {
+            self.forget_locks(sft);
             // The host may set a written file's time when it is closed.
-            if let Some(OpenFile { data: OpenData::Host(_, Some(path)), .. }) = self.open_files.remove(&sft) {
+            // Its handle stays open a moment for an open that follows
+            // (`ClosedFiles`).
+            if let Some(OpenFile { data: OpenData::Host(file, Some(path)), mode, .. }) =
+                self.open_files.remove(&sft)
+            {
                 self.host_dirs.touched(&path);
+                if file.wrote.get() {
+                    self.host_dirs.closed.keep(path, file.file, mode & 0x03 != 1);
+                }
             }
         }
         self.mark_dirty(sft);
         true
+    }
+
+    /// Close the host handles kept of files the guest closed a while ago
+    /// (`ClosedFiles`). The frame loop calls this, so that a guest that
+    /// goes quiet after writing a file doesn't leave it open on the host.
+    pub fn close_idle_files(&self) {
+        self.host_dirs.closed.expire();
     }
 
     /// Whether a process started now gets a handle for the open file
@@ -584,15 +800,21 @@ impl DiskController {
             self.open_files.iter().filter(|(_, f)| f.fcb && f.owner == owner).map(|(&sft, _)| sft).collect();
         for sft in gone {
             self.open_files.remove(&sft);
+            self.forget_locks(sft);
             self.mark_dirty(sft);
         }
     }
 
     /// Close every open file, for when the shell is reloaded. A file a
     /// create call left for its first use keeps its bytes: the program
-    /// was aborted or the machine reset before it wrote its save.
+    /// was aborted or the machine reset before it wrote its save. The
+    /// host handles kept of closed files go too (`ClosedFiles`): a system
+    /// booted next writes its disks without the guest's file calls, which
+    /// would otherwise close them.
     pub fn close_all_files(&mut self) {
         self.open_files.clear();
+        self.host_dirs.closed.clear();
+        self.locks.clear();
         self.open_standard_devices();
     }
 
@@ -790,4 +1012,24 @@ fn dos_to_system_time(time: u16, date: u16) -> Option<std::time::SystemTime> {
             .earliest()
     })?;
     Some(t.into())
+}
+
+/// The name a file renamed to its alias has on the host between the two
+/// renames that give it the alias (`DiskController::rename_file`). It
+/// starts with ".rust-dos", so programs never see it (`host_private`).
+const RENAMING_TO_ALIAS: &str = ".rust-dos-renaming-to-alias";
+
+/// Whether `a` and `b` name one file on the host, by its long name and its
+/// short name on a Windows host.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (hostfs::canonicalize(a), hostfs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Whether the last components of `a` and `b` are one name in any case.
+fn same_name(a: &Path, b: &Path) -> bool {
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    name(a) == name(b)
 }

@@ -8,6 +8,13 @@
 //! reserved argument DllMain gets, the next module, and the modules'
 //! bases. `run_chain` makes the next call, or when none is left, does
 //! what the chain was for (`done`).
+//!
+//! FreeLibrary works as Wine's LdrUnloadDll does. One made while another
+//! one's chain runs, as from a DllMain, only takes references away, and
+//! the modules whose last one went join those the outermost FreeLibrary
+//! frees (`Process::unloading`). Its chain tells each of them that it is
+//! detached, after the DllMain that freed it has returned, and only then
+//! are they unmapped.
 
 use super::{
     ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_PROC_NOT_FOUND, FALSE, TRUE, set_error,
@@ -40,6 +47,12 @@ const THEN_EXIT_PROCESS: u32 = 4;
 const THEN_FREE_EXIT: u32 = 5;
 const THEN_DRIVER: u32 = 6;
 
+/// The W32 version whose processes first keep the modules the outermost
+/// FreeLibrary frees (`Process::unloading`). A state saved before it
+/// during a FreeLibrary's chain finishes it with the modules the chain
+/// names.
+pub(in crate::win32) const UNLOADING_SAVED: u16 = 102;
+
 /// The places in a chain's data.
 const THEN: usize = 0;
 const ARG: usize = 1;
@@ -61,20 +74,29 @@ fn chain(then: u32, arg: u32, reason: u32, reserved: u32, bases: &[u32]) -> Vec<
 /// started it returns to.
 fn run_chain(cpu: &mut Cpu, resume: (u32, u32), mut data: Vec<u32>) {
     let reason = data[REASON];
+    let freeing = matches!(data[THEN], THEN_FREE | THEN_FREE_EXIT);
     while data[NEXT] as usize + LIST < data.len() {
         let base = data[LIST + data[NEXT] as usize];
         data[NEXT] += 1;
-        let Some(module) = process(cpu).modules.iter().find(|m| m.base == base) else {
+        let Some(module) = process(cpu).modules.iter_mut().find(|m| m.base == base) else {
             continue;
         };
         let attached = module.flags & ATTACHED != 0;
         let wanted = match reason {
             DLL_PROCESS_ATTACH => !attached,
-            DLL_PROCESS_DETACH => attached,
+            // A FreeLibrary's chain passes over a module that a load
+            // took again while it ran, as Wine's process_detach does.
+            DLL_PROCESS_DETACH => attached && !(freeing && module.refs > 0),
             _ => attached && module.flags & NO_THREAD_CALLS == 0,
         };
         if module.entry == 0 || !wanted {
             continue;
+        }
+        // A DLL counts as detached once its DLL_PROCESS_DETACH starts, as
+        // in Wine's process_detach, so a FreeLibrary it makes that frees
+        // it again doesn't tell it a second time.
+        if reason == DLL_PROCESS_DETACH {
+            module.flags &= !ATTACHED;
         }
         let (entry, reserved) = (module.entry, data[RESERVED]);
         if !call::call(
@@ -103,12 +125,12 @@ pub(in crate::win32) fn notified(cpu: &mut Cpu, value: u32, call: Call) {
         attach_failed(cpu, call.resume, &data, base);
         return;
     }
-    if let Some(m) = process(cpu).modules.iter_mut().find(|m| m.base == base) {
-        match reason {
-            DLL_PROCESS_ATTACH => m.flags |= ATTACHED,
-            DLL_PROCESS_DETACH => m.flags &= !ATTACHED,
-            _ => {}
-        }
+    // A DLL is attached once its DLL_PROCESS_ATTACH returns, and detached
+    // from when its DLL_PROCESS_DETACH starts (`run_chain`).
+    if reason == DLL_PROCESS_ATTACH
+        && let Some(m) = process(cpu).modules.iter_mut().find(|m| m.base == base)
+    {
+        m.flags |= ATTACHED;
     }
     run_chain(cpu, call.resume, data);
 }
@@ -133,10 +155,7 @@ fn attach_failed(cpu: &mut Cpu, resume: (u32, u32), data: &[u32], base: u32) {
         crate::win32::exit(cpu, crate::win32::FAILED);
         return;
     }
-    let mut freed = Vec::new();
-    loader::release(process(cpu), data[ARG], &mut freed);
-    let data = chain(THEN_FREE, 0, DLL_PROCESS_DETACH, 0, &freed);
-    run_chain(cpu, resume, data);
+    free_module(cpu, data[ARG], THEN_FREE, 0, resume);
 }
 
 /// What a chain was for, now that the entry points have run.
@@ -147,7 +166,28 @@ fn done(cpu: &mut Cpu, resume: (u32, u32), data: Vec<u32>) {
         THEN_LOAD => call::finish(cpu, resume, arg),
         THEN_DRIVER => crate::win32::winmm::driver::loaded(cpu, resume, arg),
         THEN_FREE | THEN_FREE_EXIT => {
-            let bases = data[LIST..].to_vec();
+            let p = process(cpu);
+            let bases = p
+                .unloading
+                .get_or_insert_with(|| data[LIST..].to_vec())
+                .clone();
+            // The modules that a FreeLibrary made by an entry point let
+            // go of and that haven't learned yet that they are detached.
+            let left: Vec<u32> = bases
+                .iter()
+                .copied()
+                .filter(|&base| {
+                    p.modules.iter().any(|m| {
+                        m.base == base && m.refs == 0 && m.entry != 0 && m.flags & ATTACHED != 0
+                    })
+                })
+                .collect();
+            if !left.is_empty() {
+                let data = chain(data[THEN], arg, DLL_PROCESS_DETACH, 0, &left);
+                run_chain(cpu, resume, data);
+                return;
+            }
+            *p.unloading = None;
             with_process(cpu, |p, bus| {
                 let mut memory = std::mem::take(&mut p.memory);
                 // An entry point that ran may have loaded one again.
@@ -159,14 +199,7 @@ fn done(cpu: &mut Cpu, resume: (u32, u32), data: Vec<u32>) {
                 p.memory = memory;
             });
             cpu.tlb.flush();
-            if data[THEN] == THEN_FREE_EXIT {
-                exit_thread(cpu, arg);
-                return;
-            }
-            if arg == 0 {
-                set_error(cpu, ERROR_DLL_INIT_FAILED);
-            }
-            call::finish(cpu, resume, arg);
+            freed(cpu, resume, data[THEN], arg);
         }
         THEN_EXIT_THREAD => thread::exit_current(cpu, arg),
         _ => crate::win32::exit(cpu, arg),
@@ -273,12 +306,65 @@ pub(in crate::win32) fn load_driver(cpu: &mut Cpu, name: &str) {
 
 /// FreeLibrary for the system, from a call's continuation: the module at
 /// `module` loses a reference, and when the DLLs' entry points have run
-/// `value` returns to `resume`.
+/// `value` returns to `resume`. While the process ends, nothing is freed
+/// (`free`).
 pub(in crate::win32) fn free_then(cpu: &mut Cpu, module: u32, resume: (u32, u32), value: u32) {
-    let mut freed = Vec::new();
-    loader::release(process(cpu), module, &mut freed);
-    let data = chain(THEN_FREE, value, DLL_PROCESS_DETACH, 0, &freed);
-    run_chain(cpu, resume, data);
+    if process(cpu).exiting {
+        call::finish(cpu, resume, value);
+        return;
+    }
+    free_module(cpu, module, THEN_FREE, value, resume);
+}
+
+/// The module at `module` loses a reference, and `then` (THEN_FREE or
+/// THEN_FREE_EXIT) goes on with `arg` from `resume`. The outermost free
+/// starts a chain that tells the modules whose last reference went that
+/// they are detached, and then unmaps them (`done`). A free made while
+/// that chain runs adds the modules it lets go of to the chain's and
+/// goes on at once, as Wine's LdrUnloadDll detaches and unmaps modules
+/// only when `free_lib_count` says it is the outermost.
+///
+/// A chain that no thread runs any more, because its thread ended in a
+/// DllMain or an exception unwound past the call, leaves its modules in
+/// `Process::unloading`. The next free is then the outermost again and
+/// takes them over, rather than every later free only lowering counts.
+fn free_module(cpu: &mut Cpu, module: u32, then: u32, arg: u32, resume: (u32, u32)) {
+    let p = process(cpu);
+    let outermost = p.unloading.is_none() || !free_chain_runs(p);
+    let mut bases = p.unloading.take().unwrap_or_default();
+    loader::release(p, module, &mut bases);
+    *p.unloading = Some(bases.clone());
+    if outermost {
+        let data = chain(then, arg, DLL_PROCESS_DETACH, 0, &bases);
+        run_chain(cpu, resume, data);
+    } else {
+        freed(cpu, resume, then, arg);
+    }
+}
+
+/// Whether a FreeLibrary's chain of DllMain calls is under way: one of
+/// the process's threads waits for an entry point the chain called to
+/// return. An ended thread's calls are gone (`thread::end`), and so are
+/// those an exception unwound past (`call::unwound_to`).
+fn free_chain_runs(p: &crate::win32::Process) -> bool {
+    p.threads.iter().flat_map(|t| &t.calls).any(|c| {
+        c.then == DLL_NOTIFIED && matches!(c.data.get(THEN), Some(&(THEN_FREE | THEN_FREE_EXIT)))
+    })
+}
+
+/// What a free does once its modules have gone, or at once for one made
+/// while another one's chain runs: end the thread with `arg`
+/// (FreeLibraryAndExitThread), or return `arg` (TRUE, or 0 for a load
+/// that failed).
+fn freed(cpu: &mut Cpu, resume: (u32, u32), then: u32, arg: u32) {
+    if then == THEN_FREE_EXIT {
+        exit_thread(cpu, arg);
+        return;
+    }
+    if arg == 0 {
+        set_error(cpu, ERROR_DLL_INIT_FAILED);
+    }
+    call::finish(cpu, resume, arg);
 }
 
 /// `load` of the name `name`, the chain doing `then` when it is done. The
@@ -352,18 +438,28 @@ pub(super) fn free_library_and_exit_thread(cpu: &mut Cpu, args: &[u32]) -> Optio
 }
 
 fn free(cpu: &mut Cpu, module: u32, then: u32, arg: u32) -> Option<u32> {
-    if !is_module(cpu, module) {
+    let valid = is_module(cpu, module);
+    if !valid {
         set_error(cpu, ERROR_INVALID_HANDLE);
+    }
+    // While ExitProcess tells the DLLs that the process ends, a FreeLibrary
+    // of a module succeeds and does nothing: no DLL is told again or
+    // unmapped, and the whole address space goes when the process does.
+    // Wine's LdrUnloadDll returns at once while `process_detaching` is set.
+    // A DLL's DLL_PROCESS_DETACH that frees a DLL importing from it, as
+    // DirectX 5's DSETUP.DLL does with DSETUP32.DLL (#1803), would
+    // otherwise free and unmap itself and return into pages that are gone;
+    // Windows 95 and 98 end such a process cleanly. Nothing is unmapped
+    // until the process ends, so a handle that isn't a module's fails as
+    // it does at any other time.
+    if !valid || process(cpu).exiting {
         if then == THEN_FREE_EXIT {
             exit_thread(cpu, arg);
             return None;
         }
-        return Some(FALSE);
+        return Some(if valid { TRUE } else { FALSE });
     }
-    let mut freed = Vec::new();
-    loader::release(process(cpu), module, &mut freed);
-    let data = chain(then, arg, DLL_PROCESS_DETACH, 0, &freed);
-    run_chain(cpu, call::here(cpu), data);
+    free_module(cpu, module, then, arg, call::here(cpu));
     None
 }
 
@@ -472,17 +568,61 @@ impl Res {
     }
 }
 
+/// The strings a resource function takes and gives: ANSI text in the
+/// system's code page (the A functions) or UTF-16 (the W ones). Windows
+/// 98's KERNEL32 implements both, the W ones alongside the A ones with
+/// the same lookup.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Chars {
+    Ansi,
+    Wide,
+}
+
 /// The type or name a program passes: a number below 10000h, a string
-/// "#number", or a name. None if a page isn't there.
-fn res_arg(cpu: &mut Cpu, arg: u32) -> Option<Res> {
+/// "#number", or a name. Windows 98 reads the number as RtlCharToInteger
+/// does: past spaces and a sign, the decimal digits up to the first other
+/// character ("#" alone is 0). A number past FFFFh is
+/// ERROR_INVALID_PARAMETER. None if a page isn't there.
+fn res_arg(cpu: &mut Cpu, arg: u32, chars: Chars) -> Option<Result<Res, u32>> {
     if arg < 0x1_0000 {
-        return Some(Res::Id(arg as u16));
+        return Some(Ok(Res::Id(arg as u16)));
     }
-    let text = string_at(cpu, arg)?;
-    Some(match text.strip_prefix('#').and_then(|n| n.parse().ok()) {
-        Some(id) => Res::Id(id),
-        None => Res::Name(text),
+    let units = match chars {
+        Chars::Ansi => {
+            let bytes = super::text::read_string(cpu, arg)?;
+            super::text::ansi_to_wide(cpu, &bytes)
+        }
+        Chars::Wide => super::text::read_wide_string(cpu, arg)?,
+    };
+    Some(match units.split_first() {
+        Some((&hash, digits)) if hash == u16::from(b'#') => res_number(digits)
+            .map(Res::Id)
+            .ok_or(ERROR_INVALID_PARAMETER),
+        _ => Ok(Res::Name(String::from_utf16_lossy(&units))),
     })
+}
+
+/// The number after a "#": None if it is past FFFFh.
+fn res_number(units: &[u16]) -> Option<u16> {
+    let mut rest = units.iter().copied().skip_while(|&c| c <= 0x20).peekable();
+    let negative = match rest.peek() {
+        Some(&c) if c == u16::from(b'-') || c == u16::from(b'+') => {
+            rest.next();
+            c == u16::from(b'-')
+        }
+        _ => false,
+    };
+    let mut value = 0u32;
+    for c in rest {
+        let Some(digit) = char::from_u32(c.into()).and_then(|c| c.to_digit(10)) else {
+            break;
+        };
+        value = value.wrapping_mul(10).wrapping_add(digit);
+    }
+    if negative {
+        value = value.wrapping_neg();
+    }
+    u16::try_from(value).ok()
 }
 
 /// The module a resource function names: NULL is the program. None if
@@ -550,13 +690,16 @@ fn resource_subdir(cpu: &Cpu, root: u32, dir: u32, want: &Res) -> Option<u32> {
 }
 
 /// The data entry of the resource `name` of type `kind` in the module at
-/// `base`: in the language `language`, or one of the same primary
-/// language, or a neutral one; with no language asked for, the neutral
-/// one, the system locale's language, its language with no sublanguage,
-/// US English, or else the first, as Windows looks for them. Its address,
-/// the HRSRC.
-fn find(cpu: &Cpu, base: u32, kind: &Res, name: &Res, language: Option<u16>) -> Result<u32, u32> {
+/// `base`, in the first of the languages Windows 98's KERNEL32 looks for:
+/// `language`, its primary language alone, LANG_NEUTRAL, and the user's
+/// and the system's default (400h and 800h). When `language` is a
+/// neutral one (0 for FindResourceA, which Windows 98 passes on to
+/// FindResourceExA), the system locale's language follows, then its
+/// primary language, US English, and else the first language the
+/// resource has. Its address, the HRSRC.
+fn find(cpu: &Cpu, base: u32, kind: &Res, name: &Res, language: u16) -> Result<u32, u32> {
     const LANG_ENGLISH_US: u16 = 0x0409;
+    const PRIMARY: u16 = 0x3FF;
     let root = resource_root(cpu, base).ok_or(ERROR_RESOURCE_DATA_NOT_FOUND)?;
     let names = resource_subdir(cpu, root, root, kind).ok_or(ERROR_RESOURCE_TYPE_NOT_FOUND)?;
     let languages = resource_subdir(cpu, root, names, name).ok_or(ERROR_RESOURCE_NAME_NOT_FOUND)?;
@@ -568,45 +711,39 @@ fn find(cpu: &Cpu, base: u32, kind: &Res, name: &Res, language: Option<u16>) -> 
             _ => None,
         })
         .collect();
-    let found = match language {
-        Some(language) => entries
-            .iter()
-            .find(|(id, _)| *id == language)
-            .or_else(|| {
-                entries
-                    .iter()
-                    .find(|(id, _)| id & 0x3FF == language & 0x3FF)
-            })
-            .or_else(|| entries.iter().find(|(id, _)| *id == 0)),
-        None => {
-            let system = crate::win32::nls::current(cpu).lang_id() as u16;
-            [0, system, system & 0x3FF, LANG_ENGLISH_US]
-                .into_iter()
-                .find_map(|want| entries.iter().find(|(id, _)| *id == want))
-                .or_else(|| entries.first())
-        }
-    };
-    found
+    let mut wanted = vec![language, language & PRIMARY, 0, 0x400, 0x800];
+    let neutral = language & PRIMARY == 0;
+    if neutral {
+        let system = crate::win32::nls::current(cpu).lang_id() as u16;
+        wanted.extend([system, system & PRIMARY, LANG_ENGLISH_US]);
+    }
+    wanted
+        .into_iter()
+        .find_map(|want| entries.iter().find(|(id, _)| *id == want))
+        .or_else(|| entries.first().filter(|_| neutral))
         .map(|(_, target)| root.wrapping_add(*target))
         .ok_or(ERROR_RESOURCE_LANG_NOT_FOUND)
 }
 
-/// Find the resource for FindResourceA and FindResourceExA: its HRSRC, or
-/// 0 with the error set.
+/// Find the resource for FindResourceExA and FindResourceExW, which
+/// FindResourceA and FindResourceW call with the language 0: its HRSRC,
+/// or 0 with the error set.
 fn find_for(
     cpu: &mut Cpu,
     module: u32,
     kind: u32,
     name: u32,
-    language: Option<u16>,
+    language: u16,
+    chars: Chars,
 ) -> Option<u32> {
-    let kind = res_arg(cpu, kind)?;
-    let name = res_arg(cpu, name)?;
-    let Some(base) = resource_module(cpu, module) else {
-        set_error(cpu, ERROR_INVALID_HANDLE);
-        return Some(0);
+    let found = match (res_arg(cpu, kind, chars)?, res_arg(cpu, name, chars)?) {
+        (Ok(kind), Ok(name)) => match resource_module(cpu, module) {
+            Some(base) => find(cpu, base, &kind, &name, language),
+            None => Err(ERROR_INVALID_HANDLE),
+        },
+        (Err(error), _) | (_, Err(error)) => Err(error),
     };
-    match find(cpu, base, &kind, &name, language) {
+    match found {
         Ok(found) => Some(found),
         Err(error) => {
             set_error(cpu, error);
@@ -623,9 +760,9 @@ pub(super) fn resource_data(
     kind: u32,
     name: u32,
 ) -> Option<Result<(u32, u32), u32>> {
-    let kind = res_arg(cpu, kind)?;
-    let name = res_arg(cpu, name)?;
-    Some(data_of(cpu, module, &kind, &name))
+    let kind = res_arg(cpu, kind, Chars::Ansi)?;
+    let name = res_arg(cpu, name, Chars::Ansi)?;
+    Some(kind.and_then(|kind| data_of(cpu, module, &kind, &name?)))
 }
 
 /// The data of the resource `name` of the named type `kind` ("WAVE") in
@@ -638,15 +775,16 @@ pub(super) fn named_resource_data(
     kind: &str,
     name: u32,
 ) -> Option<Result<(u32, u32), u32>> {
-    let name = res_arg(cpu, name)?;
-    Some(data_of(cpu, module, &Res::Name(kind.to_string()), &name))
+    let name = res_arg(cpu, name, Chars::Ansi)?;
+    let kind = Res::Name(kind.to_string());
+    Some(name.and_then(|name| data_of(cpu, module, &kind, &name)))
 }
 
 fn data_of(cpu: &mut Cpu, module: u32, kind: &Res, name: &Res) -> Result<(u32, u32), u32> {
     let Some(base) = resource_module(cpu, module) else {
         return Err(ERROR_INVALID_HANDLE);
     };
-    let (at, size) = find(cpu, base, kind, name, None).and_then(|entry| {
+    let (at, size) = find(cpu, base, kind, name, 0).and_then(|entry| {
         data_entry(cpu, entry)
             .map(|(rva, size)| (base.wrapping_add(rva), size))
             .ok_or(ERROR_RESOURCE_DATA_NOT_FOUND)
@@ -659,12 +797,22 @@ fn data_of(cpu: &mut Cpu, module: u32, kind: &Res, name: &Res) -> Result<(u32, u
 
 /// FindResourceA(module, name, type).
 pub(super) fn find_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    find_for(cpu, args[0], args[2], args[1], None)
+    find_for(cpu, args[0], args[2], args[1], 0, Chars::Ansi)
+}
+
+/// FindResourceW(module, name, type).
+pub(super) fn find_resource_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    find_for(cpu, args[0], args[2], args[1], 0, Chars::Wide)
 }
 
 /// FindResourceExA(module, type, name, language).
 pub(super) fn find_resource_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    find_for(cpu, args[0], args[1], args[2], Some(args[3] as u16))
+    find_for(cpu, args[0], args[1], args[2], args[3] as u16, Chars::Ansi)
+}
+
+/// FindResourceExW(module, type, name, language).
+pub(super) fn find_resource_ex_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    find_for(cpu, args[0], args[1], args[2], args[3] as u16, Chars::Wide)
 }
 
 /// The data entry at `entry` (an HRSRC): its data's RVA and size.
@@ -717,90 +865,179 @@ pub(super) fn free_resource(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(FALSE)
 }
 
-/// The places in a resource enumeration's data: what it lists, the
-/// module, the callback and its argument, the type whose names it lists,
-/// and the next entry.
+/// The places in a resource enumeration's data: what it lists (with
+/// ENUM_WIDE for a W function), the module as the program named it, the
+/// callback and its argument, the type whose names or languages it lists,
+/// the next entry, and the name whose languages it lists.
 const ENUM_KIND: usize = 0;
 const ENUM_MODULE: usize = 1;
 const ENUM_FUNCTION: usize = 2;
 const ENUM_PARAM: usize = 3;
 const ENUM_TYPE: usize = 4;
 const ENUM_NEXT: usize = 5;
+const ENUM_NAME: usize = 6;
 const ENUM_TYPES: u32 = 0;
 const ENUM_NAMES: u32 = 1;
+const ENUM_LANGUAGES: u32 = 2;
+const ENUM_WIDE: u32 = 0x8000_0000;
+
+/// What an enumeration's data says it lists, and in which strings.
+fn enum_kind(data: &[u32]) -> (u32, Chars) {
+    let chars = if data[ENUM_KIND] & ENUM_WIDE != 0 {
+        Chars::Wide
+    } else {
+        Chars::Ansi
+    };
+    (data[ENUM_KIND] & !ENUM_WIDE, chars)
+}
 
 /// EnumResourceTypesA(module, function, param): the function is called
 /// with each type the module's resources have, until it returns FALSE.
 pub(super) fn enum_resource_types(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[module, function, param] = args else {
-        unreachable!()
-    };
-    let found =
-        resource_module(cpu, module).and_then(|base| Some((base, resource_root(cpu, base)?)));
-    let Some((base, _)) = found else {
-        set_error(cpu, ERROR_RESOURCE_DATA_NOT_FOUND);
-        return Some(FALSE);
-    };
-    let data = vec![ENUM_TYPES, base, function, param, 0, 0];
-    enum_next(cpu, call::here(cpu), data);
-    None
+    enum_start(cpu, ENUM_TYPES, Chars::Ansi, args)
+}
+
+/// EnumResourceTypesW(module, function, param).
+pub(super) fn enum_resource_types_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    enum_start(cpu, ENUM_TYPES, Chars::Wide, args)
 }
 
 /// EnumResourceNamesA(module, type, function, param): the function is
 /// called with the name of each resource of the type, until it returns
 /// FALSE.
 pub(super) fn enum_resource_names(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[module, kind, function, param] = args else {
-        unreachable!()
+    enum_start(cpu, ENUM_NAMES, Chars::Ansi, args)
+}
+
+/// EnumResourceNamesW(module, type, function, param). Windows Installer's
+/// MSIEXEC.EXE for Windows 9x calls it.
+pub(super) fn enum_resource_names_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    enum_start(cpu, ENUM_NAMES, Chars::Wide, args)
+}
+
+/// EnumResourceLanguagesA(module, type, name, function, param): the
+/// function is called with each language the resource is in, until it
+/// returns FALSE.
+pub(super) fn enum_resource_languages(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    enum_start(cpu, ENUM_LANGUAGES, Chars::Ansi, args)
+}
+
+/// EnumResourceLanguagesW(module, type, name, function, param).
+pub(super) fn enum_resource_languages_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    enum_start(cpu, ENUM_LANGUAGES, Chars::Wide, args)
+}
+
+/// Start an enumeration of `what` with the function's arguments `args`
+/// (the module, the type for names and languages, the name for
+/// languages, the callback and its argument), or fail with FALSE and the
+/// error set: ERROR_INVALID_PARAMETER for a "#number" past FFFFh, and
+/// the error FindResourceA would set when the module has no resources or
+/// no such type or name.
+///
+/// Windows 98 calls the function with the module as the program named it
+/// (NULL stays NULL), and the type and name the program passed: the same
+/// addresses, whether they are numbers or strings. It lists the named
+/// entries before the numbered ones, as they come in the directory, and
+/// gives a name as a string of the function's kind. It lists no
+/// languages, and returns FALSE, when a resource has a language with a
+/// name.
+fn enum_start(cpu: &mut Cpu, what: u32, chars: Chars, args: &[u32]) -> Option<u32> {
+    let (module, (kind, name), [function, param]) = match (what, args) {
+        (ENUM_TYPES, &[module, function, param]) => (module, (0, 0), [function, param]),
+        (ENUM_NAMES, &[module, kind, function, param]) => (module, (kind, 0), [function, param]),
+        (_, &[module, kind, name, function, param]) => (module, (kind, name), [function, param]),
+        _ => unreachable!(),
     };
-    let want = res_arg(cpu, kind)?;
-    let Some(base) = resource_module(cpu, module) else {
-        set_error(cpu, ERROR_RESOURCE_DATA_NOT_FOUND);
-        return Some(FALSE);
+    let flag = if chars == Chars::Wide { ENUM_WIDE } else { 0 };
+    let mut data = vec![what | flag, module, function, param, kind, 0];
+    if what == ENUM_LANGUAGES {
+        data.push(name);
+    }
+    let entries = match enum_list(cpu, &data)? {
+        Ok(entries) => entries,
+        Err(error) => {
+            set_error(cpu, error);
+            return Some(FALSE);
+        }
     };
-    let Some(root) = resource_root(cpu, base) else {
-        set_error(cpu, ERROR_RESOURCE_DATA_NOT_FOUND);
-        return Some(FALSE);
-    };
-    if resource_subdir(cpu, root, root, &want).is_none() {
-        set_error(cpu, ERROR_RESOURCE_TYPE_NOT_FOUND);
+    if what == ENUM_LANGUAGES && entries.iter().any(|id| matches!(id, Res::Name(_))) {
         return Some(FALSE);
     }
-    let data = vec![ENUM_NAMES, base, function, param, kind, 0];
     enum_next(cpu, call::here(cpu), data);
     None
 }
 
-/// The entries an enumeration lists.
-fn enum_entries(cpu: &mut Cpu, data: &[u32]) -> Option<Vec<Res>> {
-    let root = resource_root(cpu, data[ENUM_MODULE])?;
-    let dir = if data[ENUM_KIND] == ENUM_NAMES {
-        let want = res_arg(cpu, data[ENUM_TYPE])?;
-        resource_subdir(cpu, root, root, &want)?
-    } else {
-        root
+/// What an enumeration lists: the entries of the root, of a type's
+/// directory, or of a resource's languages. None if a string's page
+/// isn't there.
+fn enum_list(cpu: &mut Cpu, data: &[u32]) -> Option<Result<Vec<Res>, u32>> {
+    let (what, chars) = enum_kind(data);
+    let kind = match what {
+        ENUM_TYPES => None,
+        _ => match res_arg(cpu, data[ENUM_TYPE], chars)? {
+            Ok(kind) => Some(kind),
+            Err(error) => return Some(Err(error)),
+        },
     };
-    let entries = resource_entries(cpu, root, dir)?;
-    Some(entries.into_iter().map(|(id, _)| id).collect())
+    let name = match what {
+        ENUM_LANGUAGES => match res_arg(cpu, data[ENUM_NAME], chars)? {
+            Ok(name) => Some(name),
+            Err(error) => return Some(Err(error)),
+        },
+        _ => None,
+    };
+    let Some(root) = resource_module(cpu, data[ENUM_MODULE]).and_then(|b| resource_root(cpu, b))
+    else {
+        return Some(Err(ERROR_RESOURCE_DATA_NOT_FOUND));
+    };
+    let mut dir = root;
+    if let Some(kind) = kind {
+        match resource_subdir(cpu, root, dir, &kind) {
+            Some(names) => dir = names,
+            None => return Some(Err(ERROR_RESOURCE_TYPE_NOT_FOUND)),
+        }
+    }
+    if let Some(name) = name {
+        match resource_subdir(cpu, root, dir, &name) {
+            Some(languages) => dir = languages,
+            None => return Some(Err(ERROR_RESOURCE_NAME_NOT_FOUND)),
+        }
+    }
+    let entries = resource_entries(cpu, root, dir).unwrap_or_default();
+    Some(Ok(entries.into_iter().map(|(id, _)| id).collect()))
 }
 
 /// Call the enumeration's function with its next entry, or return TRUE
 /// when none is left. A name is passed as a string on the stack below the
-/// call.
+/// call, of up to 255 characters.
 fn enum_next(cpu: &mut Cpu, resume: (u32, u32), mut data: Vec<u32>) {
-    let entries = enum_entries(cpu, &data).unwrap_or_default();
+    let entries = enum_list(cpu, &data).and_then(Result::ok);
+    let entries = entries.unwrap_or_default();
     let Some(entry) = entries.get(data[ENUM_NEXT] as usize).cloned() else {
         call::finish(cpu, resume, TRUE);
         return;
     };
     data[ENUM_NEXT] += 1;
+    let (what, chars) = enum_kind(&data);
     let area = resume.1.wrapping_sub(0x200) & !3;
     let item = match entry {
         Res::Id(id) => id as u32,
         Res::Name(name) => {
-            let mut bytes = crate::dosstr::to_bytes(&name);
-            bytes.truncate(0xFF);
-            bytes.push(0);
+            let units: Vec<u16> = name.encode_utf16().collect();
+            let bytes: Vec<u8> = match chars {
+                Chars::Ansi => {
+                    let mut text = super::text::wide_to_ansi(cpu, &units);
+                    text.truncate(0xFF);
+                    text.push(0);
+                    text
+                }
+                Chars::Wide => units
+                    .iter()
+                    .take(0xFF)
+                    .chain(&[0])
+                    .flat_map(|u| u.to_le_bytes())
+                    .collect(),
+            };
             if !cpu.bus.guest_probe(area, bytes.len(), true) {
                 crate::win32::fatal(cpu, "a thread's stack isn't there", None);
                 return;
@@ -811,10 +1048,10 @@ fn enum_next(cpu: &mut Cpu, resume: (u32, u32), mut data: Vec<u32>) {
     };
     cpu.set_esp(area);
     let (module, param) = (data[ENUM_MODULE], data[ENUM_PARAM]);
-    let args = if data[ENUM_KIND] == ENUM_NAMES {
-        vec![module, data[ENUM_TYPE], item, param]
-    } else {
-        vec![module, item, param]
+    let args = match what {
+        ENUM_TYPES => vec![module, item, param],
+        ENUM_NAMES => vec![module, data[ENUM_TYPE], item, param],
+        _ => vec![module, data[ENUM_TYPE], data[ENUM_NAME], item, param],
     };
     let function = data[ENUM_FUNCTION];
     if !call::call(cpu, function, &args, RESOURCE_ENUMERATED, resume, data) {

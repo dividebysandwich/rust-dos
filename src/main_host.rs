@@ -561,6 +561,7 @@ impl Host for MainHost<'_, '_> {
         self.cpu.bus.win32.depth = new.win32_depth;
         self.cpu.bus.win32.desktop = new.win32_desktop;
         self.cpu.bus.win32.locale = new.win32_locale;
+        self.cpu.bus.win32.shims = new.win32_shims;
         if new.win32_trace != old.win32_trace {
             rust_dos::win32::trace::set_level(self.cpu, new.win32_trace);
         }
@@ -570,6 +571,7 @@ impl Host for MainHost<'_, '_> {
         self.cpu.bus.ide_hard_disks = new.ide_hard_disks;
         self.cpu.bus.boot_cdrom = new.boot_cdrom;
         self.cpu.bus.floppy_controller = new.floppy_controller;
+        self.cpu.bus.ansi_sys = new.ansi_sys;
         if new.dos_version != old.dos_version {
             rust_dos::dos_data::set_version(&mut self.cpu.bus, new.dos_version);
         }
@@ -596,6 +598,12 @@ impl Host for MainHost<'_, '_> {
         }
         if new.keyboard_layout != old.keyboard_layout {
             apply_keyboard_layout(self.cpu, new.keyboard_layout);
+        }
+        // The settings window's key, which the box above the prompt and the
+        // machine's notices name.
+        if new.hotkeys != old.hotkeys {
+            let window = rust_dos::hotkeys::Action::SettingsWindow;
+            self.cpu.startup.settings_key = new.hotkeys.table().key_text(window);
         }
         if new.achievements != old.achievements {
             self.achievements.apply(&new.achievements);

@@ -30,14 +30,24 @@
 //! through the host's translation of their pointers (dos.rs), as under
 //! Windows, and so do the video BIOS's functions that take a pointer
 //! (video.rs).
+//!
+//! In a DOS machine of the built-in Windows whose PIF sets its DPMI
+//! memory, the host has virtual memory, as Windows 98's VMM gives such a
+//! machine: paging is on while its clients run in protected mode, and
+//! their memory blocks may add up to more than the machine has (vm.rs).
 
 mod dos;
 mod int31;
 pub(crate) mod realcall;
 mod video;
+mod vm;
 
 use crate::bus::Bus;
-use crate::cpu::{CR0_PE, CR4_OSFXSR, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Seg, SegCache};
+use crate::cpu::{
+    ATTR_DB, CR0_PE, CR4_OSFXSR, Cpu, CpuFlags, CpuModel, CpuResult, CpuState, DescTable, Seg,
+    SegCache,
+};
+use crate::savestate::{Reader, State, StateError, Writer};
 
 /// The host's code in the BIOS ROM: segment F000, which its protected-mode
 /// code segments have as their base too.
@@ -128,6 +138,9 @@ const HOST_BLOCK: u32 = 0x2000;
 /// callbacks and its exception handlers.
 pub const LDT_ENTRIES: usize = 8192;
 const LDT_SIZE: u32 = LDT_ENTRIES as u32 * 8;
+/// The LDT's descriptor in the GDT covers the LDT in steps of this many
+/// bytes (`Client::ldt_limit`).
+const LDT_PAGE: u32 = 0x1000;
 const LPMS_SIZE: u32 = 0x4000;
 const CLIENT_BLOCK: u32 = LDT_SIZE + LPMS_SIZE;
 /// LDT entries INT 31h AX=000Dh hands out by number; AX=0000h allocates
@@ -251,6 +264,8 @@ pub struct Client {
     dta: Option<(u16, u32)>,
     /// The selector of its LDT the "MS-DOS" extensions gave it, or 0.
     ldt_alias: u16,
+    /// The limit of its LDT's descriptor in the GDT (`grow_ldt`).
+    ldt_limit: u32,
     /// Memory blocks of INT 21h AH=48h: the first of their selectors, how
     /// many, and their handle in `memory`.
     blocks: Vec<(u16, u16, u32)>,
@@ -294,6 +309,19 @@ impl Client {
     fn handler(&self, vector: u8) -> Option<(u16, u32)> {
         let handler = self.vectors[vector as usize];
         (handler != Self::default_vector(vector)).then_some(handler)
+    }
+
+    /// The limit that covers the LDT's entries in use, in whole 4 KB
+    /// pages, as Windows 98 grows a DOS box's LDT: its descriptor in the
+    /// GDT has limit FFFh while the entries in use fit in one page, and
+    /// a page more each time they reach past it.
+    fn ldt_limit_in_use(&self) -> u32 {
+        let used = self
+            .ldt
+            .iter()
+            .rposition(|&use_| use_ != LDT_FREE)
+            .map_or(1, |i| i + 1);
+        (used as u32 * 8).next_multiple_of(LDT_PAGE) - 1
     }
 
     fn lpms_base(&self) -> u32 {
@@ -372,6 +400,9 @@ pub struct Dpmi {
     a20: bool,
     next_id: u32,
     next_handle: u32,
+    /// The virtual memory of a DOS machine whose PIF sets its DPMI
+    /// memory, from the first client to the last (vm.rs).
+    vm: Option<vm::Vm>,
 }
 
 impl Default for Dpmi {
@@ -387,6 +418,7 @@ impl Default for Dpmi {
             a20: false,
             next_id: 1,
             next_handle: 1,
+            vm: None,
         }
     }
 }
@@ -423,15 +455,72 @@ impl Dpmi {
         self.clients.iter().map(|c| (c.psp, c.bits32)).collect()
     }
 
+    /// The limits of the clients' LDT descriptors, for a save state: after
+    /// the rest of the host's (`State`), in version 3 of its section.
+    pub fn save_ldt_limits(&self, w: &mut Writer) {
+        let limits: Vec<u32> = self.clients.iter().map(|c| c.ldt_limit).collect();
+        limits.save(w);
+    }
+
+    /// The limits `save_ldt_limits` saved. A state of version 2 has none:
+    /// the rust-dos that saved it gave every LDT descriptor all 8192
+    /// entries, which the GDT and LDTR in the state still have, so its
+    /// clients keep that limit.
+    pub fn load_ldt_limits(
+        &mut self,
+        r: &mut Reader,
+        version: Option<u16>,
+    ) -> crate::savestate::Result<()> {
+        if version >= Some(3) {
+            let mut limits: Vec<u32> = Vec::new();
+            limits.load(r)?;
+            if limits.len() != self.clients.len() {
+                return Err(StateError::Invalid("LDT limits for other clients".into()));
+            }
+            for (client, limit) in self.clients.iter_mut().zip(limits) {
+                client.ldt_limit = limit;
+            }
+        } else {
+            for client in &mut self.clients {
+                client.ldt_limit = LDT_SIZE - 1;
+            }
+        }
+        Ok(())
+    }
+
     /// The extended memory the host holds, as (address, bytes): for the
-    /// XMS pool after a state is loaded.
+    /// XMS pool after a state is loaded. Memory blocks in the virtual
+    /// memory's linear space aren't extended memory; its pages are.
     pub fn reservations(&self) -> Vec<(u32, u32)> {
         let mut held: Vec<(u32, u32)> = self.host.map(|base| (base, HOST_BLOCK)).into_iter().collect();
+        let vm = self.vm.as_ref();
         for client in &self.clients {
             held.push((client.block, CLIENT_BLOCK));
-            held.extend(client.memory.iter().map(|&(_, base, len)| (base, len)));
+            let blocks = client.memory.iter().filter(|&&(_, base, _)| !vm::is_virtual(vm, base));
+            held.extend(blocks.map(|&(_, base, len)| (base, len)));
         }
+        held.extend(vm.map(vm::reservations).unwrap_or_default());
         held
+    }
+
+    /// The virtual memory, for a save state: after the LDT limits, in
+    /// version 4 of the host's section.
+    pub fn save_vm(&self, w: &mut Writer) {
+        self.vm.save(w);
+    }
+
+    /// The virtual memory `save_vm` saved. A state of an older version
+    /// has none: the rust-dos that saved it had no virtual memory.
+    pub fn load_vm(
+        &mut self,
+        r: &mut Reader,
+        version: Option<u16>,
+    ) -> crate::savestate::Result<()> {
+        self.vm = None;
+        if version >= Some(4) {
+            self.vm.load(r)?;
+        }
+        Ok(())
     }
 }
 
@@ -495,13 +584,19 @@ pub fn installation_check(cpu: &mut Cpu) -> bool {
     true
 }
 
-/// Whether the program in `bytes` is to run without the host: one that
-/// loads Glide's DOS overlay (GLIDE2X.OVL) as a DOS/4G DLL, with DOS/4GW's
-/// loader (`LINEXE_LOADMODULE`), as Tomb Raider's Voodoo Rush version
-/// does. The overlay's run-time library takes its selectors as DOS/4GW
-/// sets them up as its own host, at level 0, and aborts the load under
-/// another host, as under Windows; with none, DOS/4GW is its own. (Bound
-/// DOS/4GW has the loader too, so it takes the overlay's name as well.)
+/// Whether the program in `bytes` is to run without the host on plain
+/// DOS: one that loads Glide's DOS overlay (GLIDE2X.OVL) as a DOS/4G DLL,
+/// with DOS/4GW's loader (`LINEXE_LOADMODULE`), as Tomb Raider's Voodoo
+/// Rush version and Redguard's 3dfx version do. A real machine's DOS has
+/// no DPMI host, so DOS/4GW is its own, at level 0, and the overlay's
+/// run-time library takes DOS/4GW's own selectors (28h and 20h in its
+/// GDT). Under a DPMI host, as in a Windows DOS box, the library takes
+/// the PSP selector its program put in INT E9h's vector instead, and
+/// aborts the load if there is none ("DLL load aborted"); Redguard sets
+/// it, and the host gives it the big PSP selector that this needs
+/// (`enter`). The built-in Windows' DOS machines keep the host, as on
+/// Windows 98. (Bound DOS/4GW has the loader too, so it takes the
+/// overlay's name as well.)
 pub fn passes_over(bytes: &[u8]) -> bool {
     const LOADER: &[u8] = b"LINEXE_LOADMODULE";
     const OVERLAY: &[u8] = b"glide2x";
@@ -643,7 +738,42 @@ fn allocate(cpu: &mut Cpu, count: usize, desc: u64, use_: u8) -> Option<usize> {
     for i in first..first + count {
         write_desc(&mut cpu.bus, ldt, i, desc);
     }
+    grow_ldt(cpu);
     Some(first)
+}
+
+/// Make the running client's LDT descriptor in the GDT, and LDTR when it
+/// holds it, cover the entries in use (`Client::ldt_limit_in_use`). The
+/// limit only grows while the client runs, as under Windows 98, where
+/// freeing selectors leaves it as it was. A limit of FFFFh for all 8192
+/// entries breaks programs that map the LDT with a 16-bit size of the
+/// limit plus 1: Ultima VIII's DOSFIX32 asks Phar Lap's 286|DOS-Extender
+/// for a segment of size 0 and halts.
+pub(super) fn grow_ldt(cpu: &mut Cpu) {
+    let Some(host) = cpu.bus.dpmi.host else {
+        return;
+    };
+    let Some(client) = cpu.bus.dpmi.clients.last_mut() else {
+        return;
+    };
+    let limit = client.ldt_limit_in_use();
+    if limit <= client.ldt_limit {
+        return;
+    }
+    client.ldt_limit = limit;
+    let ldt = client.block;
+    write_gdt_ldt(cpu, host, ldt, limit);
+    if cpu.ldtr.selector == HOST_LDT && cpu.ldtr.base == ldt {
+        cpu.ldtr = SegCache::from_descriptor(HOST_LDT, ldt, limit, 0x82);
+    }
+}
+
+/// The GDT's descriptor of the LDT at `ldt`, `limit` its limit.
+fn write_gdt_ldt(cpu: &mut Cpu, host: u32, ldt: u32, limit: u32) {
+    let desc = descriptor(ldt, limit, 0x82, 0);
+    let at = (host + HOST_GDT) as usize + (HOST_LDT >> 3) as usize * 8;
+    cpu.bus.write_32(at, desc as u32);
+    cpu.bus.write_32(at + 4, (desc >> 32) as u32);
 }
 
 fn free_entry(cpu: &mut Cpu, index: usize) {
@@ -739,7 +869,7 @@ fn start_host(cpu: &mut Cpu) -> Option<u32> {
         (HOST_CODE0, descriptor(ROM_BASE, 0xFFFF, 0x9B, BIG)),
         (HOST_DATA0, descriptor(0, 0xFFFF_FFFF, 0x93, BIG)),
         (HOST_TSS, descriptor(host + TSS_OFFSET, 0x67, 0x8B, 0)),
-        (HOST_LDT, descriptor(0, LDT_SIZE - 1, 0x82, 0)),
+        (HOST_LDT, descriptor(0, LDT_PAGE - 1, 0x82, 0)),
         (HOST_CODE3, descriptor(ROM_BASE, 0xFFFF, 0xFB, 0)),
         (BIOS_DATA, descriptor(0x400, 0xFFFF, 0xF3, 0)),
     ];
@@ -768,6 +898,7 @@ fn start_host(cpu: &mut Cpu) -> Option<u32> {
     dpmi.a20 = a20;
     cpu.bus.set_a20(true);
     cpu.bus.log_string("[DPMI] Host started");
+    vm::start(cpu);
     Some(host)
 }
 
@@ -825,22 +956,32 @@ fn enter(cpu: &mut Cpu) {
         env: 0,
         dta: None,
         ldt_alias: 0,
+        ldt_limit: LDT_PAGE - 1,
         blocks: Vec::new(),
     });
     let real = |segment: u16, access: u8, limit: u32| descriptor((segment as u32) << 4, limit, access, 0);
     let (ds, ss) = (cpu.ds(), cpu.ss());
-    let lpms = descriptor(block + LDT_SIZE, LPMS_SIZE - 1, DATA3, if bits32 { BIG } else { 0 });
+    let big = if bits32 { BIG } else { 0 };
+    let lpms = descriptor(block + LDT_SIZE, LPMS_SIZE - 1, DATA3, big);
     let lpms = allocate(cpu, 1, lpms, LDT_FIXED).unwrap();
     let cb = allocate(cpu, 1, real(0, DATA3, 0xFFFF), LDT_FIXED).unwrap();
     let code = allocate(cpu, 1, real(cs, CODE3, 0xFFFF), LDT_CLIENT).unwrap();
     let data = allocate(cpu, 1, real(ds, DATA3, 0xFFFF), LDT_CLIENT).unwrap();
     let stack = allocate(cpu, 1, real(ss, DATA3, 0xFFFF), LDT_CLIENT).unwrap();
-    let psp_sel = allocate(cpu, 1, real(psp, DATA3, 0xFF), LDT_CLIENT).unwrap();
+    // Windows 98 gives a 32-bit client its PSP and environment as big
+    // (32-bit) data segments, and its CS, DS and SS as 16-bit ones. DOS/4GW
+    // keeps the size of a handler's selector with the vector it sets, and
+    // gives the vector back only to callers of that size: Glide's DOS
+    // overlay finds the PSP selector its program puts in INT E9h's vector
+    // only when that selector is big (see `passes_over`).
+    let psp_desc = descriptor((psp as u32) << 4, 0xFF, DATA3, big);
+    let psp_sel = allocate(cpu, 1, psp_desc, LDT_CLIENT).unwrap();
     let env = cpu.bus.read_16(psp as usize * 16 + 0x2C);
     if env != 0 {
         let mcb = crate::mcb::read_mcb(&mut cpu.bus, env.wrapping_sub(1));
         let limit = if mcb.is_valid() { (mcb.size as u32 * 16).clamp(1, 0x10000) - 1 } else { 0xFFFF };
-        let env_sel = allocate(cpu, 1, real(env, DATA3, limit), LDT_CLIENT).unwrap();
+        let env_desc = descriptor((env as u32) << 4, limit, DATA3, big);
+        let env_sel = allocate(cpu, 1, env_desc, LDT_CLIENT).unwrap();
         cpu.bus.write_16(psp as usize * 16 + 0x2C, Client::selector(env_sel));
     }
     let c = client(cpu);
@@ -879,21 +1020,25 @@ fn host_ring0(cpu: &mut Cpu) {
         cpu.cr4 |= CR4_OSFXSR;
     }
     let host = cpu.bus.dpmi.host.expect("the DPMI host");
-    let ldt = cpu.bus.dpmi.clients.last().map_or(0, |c| c.block);
+    let (ldt, limit) = cpu
+        .bus
+        .dpmi
+        .clients
+        .last()
+        .map_or((0, LDT_PAGE - 1), |c| (c.block, c.ldt_limit));
     // The GDT's LDT descriptor is the running client's.
-    let desc = descriptor(ldt, LDT_SIZE - 1, 0x82, 0);
-    let at = (host + HOST_GDT) as usize + (HOST_LDT >> 3) as usize * 8;
-    cpu.bus.write_32(at, desc as u32);
-    cpu.bus.write_32(at + 4, (desc >> 32) as u32);
+    write_gdt_ldt(cpu, host, ldt, limit);
     if !cpu.pm() {
         // From real mode, or virtual-8086 mode under the built-in monitor.
         cpu.cr0 |= CR0_PE;
         cpu.set_cpu_flag(CpuFlags::VM, false);
         cpu.note_mode_switch(true);
     }
+    // Paging on, where the host has virtual memory.
+    vm::enter(cpu);
     cpu.gdtr = DescTable { base: host + HOST_GDT, limit: (GDT_ENTRIES * 8 - 1) as u16 };
     cpu.idtr = DescTable { base: host + HOST_IDT, limit: 0x7FF };
-    cpu.ldtr = SegCache::from_descriptor(HOST_LDT, ldt, LDT_SIZE - 1, 0x82);
+    cpu.ldtr = SegCache::from_descriptor(HOST_LDT, ldt, limit, 0x82);
     cpu.tr = SegCache::from_descriptor(HOST_TSS, host + TSS_OFFSET, 0x67, 0x8B);
     cpu.set_seg_cache(Seg::CS, SegCache::from_descriptor(HOST_CODE0, ROM_BASE, 0xFFFF, 0x409B));
     cpu.set_seg_cache(Seg::SS, SegCache::from_descriptor(HOST_DATA0, 0, 0xFFFF_FFFF, 0xC093));
@@ -942,6 +1087,10 @@ fn resume(cpu: &mut Cpu, ctx: &Context) {
 /// with 64 KB segments and the real-mode vector table, or to
 /// virtual-8086 mode under the built-in monitor, where DOS runs there.
 fn enter_rm(cpu: &mut Cpu, ctx: &Context) {
+    // Real mode can't page.
+    if vm::active(cpu) {
+        vm::leave(cpu);
+    }
     if cpu.pe() {
         cpu.cr0 &= !CR0_PE;
         cpu.note_mode_switch(false);
@@ -1006,7 +1155,16 @@ fn idt(cpu: &mut Cpu, vector: u8) {
     // The vectors of exceptions 8-15 are the first PIC's too; exceptions
     // there push an error code (#DF, #TS, #NP, #SS, #GP, #PF).
     let exception = (vector < 8 && vector != 2) || ((8..16).contains(&vector) && error.is_some());
-    if vector == 13 && error == Some(0) && emulate_mov_system(cpu, &mut ctx) {
+    // A page of a memory block that isn't in memory: it is now, and the
+    // instruction runs again.
+    if vector == 14 && error.is_some_and(|error| vm::page_fault(cpu, cpu.cr2, error)) {
+        resume(cpu, &ctx);
+        return;
+    }
+    if vector == 13
+        && error == Some(0)
+        && (emulate_mov_system(cpu, &mut ctx) || run_glide_msr(cpu, &mut ctx))
+    {
         resume(cpu, &ctx);
     } else if exception {
         exception_entry(cpu, vector, error.unwrap_or(0), ctx);
@@ -1025,7 +1183,8 @@ fn idt(cpu: &mut Cpu, vector: u8) {
 /// Returns whether the instruction was one.
 fn emulate_mov_system(cpu: &mut Cpu, ctx: &mut Context) -> bool {
     let Some(base) = selector_base(cpu, ctx.sel(Seg::CS)) else { return false };
-    let byte = |i: u32| cpu.bus.read_8(base.wrapping_add(ctx.eip).wrapping_add(i) as usize);
+    let eip = ctx.eip;
+    let mut byte = |i: u32| vm::read_8(cpu, base.wrapping_add(eip).wrapping_add(i));
     // Operand and address size prefixes change nothing.
     let mut at = 0;
     while at < 4 && matches!(byte(at), 0x66 | 0x67) {
@@ -1053,6 +1212,44 @@ fn emulate_mov_system(cpu: &mut Cpu, ctx: &mut Context) -> bool {
         _ => cpu.dr[n] = ctx.gpr[reg],
     }
     ctx.eip = ctx.eip.wrapping_add(at + 3);
+    true
+}
+
+/// An RDMSR or WRMSR (0F 32h, 0F 30h) that Glide marked with DEADCAFEh in
+/// EBX, in the client's context `ctx`. Glide's DOS overlay reaches for the
+/// memory type range registers so from level 3 in a Windows DOS box, and
+/// 3dfx's Windows driver, which Windows has with a Voodoo, catches the
+/// #GP and goes on after the instruction. The host runs the access as
+/// level 0 does (`msr_at_level0` in instructions/system.rs), where the
+/// MTRRs that Glide marks read 0 and keep nothing, so that a program gets
+/// the same from either level. An access that faults at level 0 too goes
+/// to the client's handler. Returns whether the instruction was one.
+fn run_glide_msr(cpu: &mut Cpu, ctx: &mut Context) -> bool {
+    use crate::instructions::system::{GLIDE_MSR_MARK, msr_at_level0};
+    if ctx.gpr[EBX] != GLIDE_MSR_MARK {
+        return false;
+    }
+    let Some(base) = selector_base(cpu, ctx.sel(Seg::CS)) else {
+        return false;
+    };
+    let at = base.wrapping_add(ctx.eip);
+    let write = match (vm::read_8(cpu, at), vm::read_8(cpu, at.wrapping_add(1))) {
+        (0x0F, 0x32) => false,
+        (0x0F, 0x30) => true,
+        _ => return false,
+    };
+    // The access reads the client's registers. `resume` loads the
+    // context's, so those it doesn't change come back as they were.
+    cpu.set_eax(ctx.gpr[EAX]);
+    cpu.set_ecx(ctx.gpr[ECX]);
+    cpu.set_edx(ctx.gpr[EDX]);
+    cpu.set_ebx(ctx.gpr[EBX]);
+    if msr_at_level0(cpu, write).is_err() {
+        return false;
+    }
+    ctx.gpr[EAX] = cpu.eax();
+    ctx.gpr[EDX] = cpu.edx();
+    ctx.eip = ctx.eip.wrapping_add(2);
     true
 }
 
@@ -1086,6 +1283,10 @@ fn call_handler(cpu: &mut Cpu, ctx: Context, (sel, off): (u16, u32)) {
     }
     let size = frame_size(cpu) as u8;
     let (eip, esp, cs, flags) = (cpu.eip(), cpu.esp(), cpu.cs(), cpu.eflags_image());
+    // The frame's stack pages in memory first: a page fault while the
+    // host pushes it would lose the interrupt.
+    let frame = 3 * size as u32;
+    touch_stack(cpu, esp.wrapping_sub(frame), frame);
     let entered = (|| -> CpuResult {
         cpu.push_sized(size, flags)?;
         cpu.push_sized(size, cs as u32)?;
@@ -1111,6 +1312,7 @@ fn call_handler(cpu: &mut Cpu, ctx: Context, (sel, off): (u16, u32)) {
 fn default_handler(cpu: &mut Cpu, vector: u8) {
     let size = frame_size(cpu) as u8;
     let mut ctx = Context::of(cpu);
+    touch_stack(cpu, cpu.esp(), 3 * size as u32);
     let popped = (|| -> CpuResult<(u32, u32, u32)> {
         let eip = cpu.pop_sized(size)?;
         let cs = cpu.pop_sized(size)?;
@@ -1125,7 +1327,25 @@ fn default_handler(cpu: &mut Cpu, vector: u8) {
             ctx.gpr[ESP] = cpu.esp();
             default_interrupt(cpu, vector, ctx);
         }
-        Err(fault) => cpu.raise(fault),
+        // The jump to the default handler runs again after the fault, with
+        // the stack as it was.
+        Err(fault) => {
+            cpu.set_esp(ctx.gpr[ESP]);
+            cpu.raise(fault);
+        }
+    }
+}
+
+/// Bring in the pages of the client's stack that the `len` bytes from
+/// SS:`from` on are in, before the host pushes or pops them (vm.rs). In a
+/// 16-bit stack segment the offsets wrap at 64 KB, as SP does.
+fn touch_stack(cpu: &mut Cpu, from: u32, len: u32) {
+    if cpu.seg_cache(Seg::SS).attr & ATTR_DB != 0 {
+        int31::touch_segment(cpu, Seg::SS, from, len);
+    } else {
+        for i in 0..len {
+            int31::touch_segment(cpu, Seg::SS, from.wrapping_add(i) & 0xFFFF, 1);
+        }
     }
 }
 
@@ -1159,11 +1379,11 @@ fn default_interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
 
 /// The vendor name at DS:(E)SI in the client's context `ctx`, without its
 /// terminating zero (at most 32 bytes of it).
-fn vendor(cpu: &Cpu, ctx: &Context) -> Vec<u8> {
+fn vendor(cpu: &mut Cpu, ctx: &Context) -> Vec<u8> {
     let bits32 = cpu.bus.dpmi.clients.last().is_some_and(|c| c.bits32);
     let Some(base) = selector_base(cpu, ctx.sel(Seg::DS)) else { return Vec::new() };
     let at = base.wrapping_add(if bits32 { ctx.gpr[ESI] } else { ctx.gpr[ESI] & 0xFFFF });
-    (0..32).map(|i| cpu.bus.read_8(at.wrapping_add(i) as usize)).take_while(|&b| b != 0).collect()
+    (0..32).map(|i| vm::read_8(cpu, at.wrapping_add(i))).take_while(|&b| b != 0).collect()
 }
 
 /// The "MS-DOS" extensions' entry point, far-called: AX=0100h gives the
@@ -1619,9 +1839,9 @@ fn default_exception(cpu: &mut Cpu, exception: u8, error: u32, mut ctx: Context)
 }
 
 /// The first byte of the instruction at the context's CS:EIP.
-fn instruction_byte(cpu: &Cpu, ctx: &Context) -> Option<u8> {
+fn instruction_byte(cpu: &mut Cpu, ctx: &Context) -> Option<u8> {
     let base = selector_base(cpu, ctx.sel(Seg::CS))?;
-    Some(cpu.bus.read_8(base.wrapping_add(ctx.eip) as usize))
+    Some(vm::read_8(cpu, base.wrapping_add(ctx.eip)))
 }
 
 /// The client can't go on: say why, and end its program with exit code
@@ -1680,7 +1900,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
             }
         }
         for &(_, base, _) in &client.memory {
-            cpu.bus.xms.release_dpmi(base);
+            vm::release(cpu, base);
         }
         cpu.bus.xms.release_dpmi(client.block);
         if client.env != 0 {
@@ -1715,6 +1935,7 @@ pub fn release_vectors(bus: &mut Bus) {
 /// The last client ended: the host's tables go, and the A20 gate is as it
 /// was before.
 fn stop_host(cpu: &mut Cpu) {
+    vm::stop(cpu);
     release_vectors(&mut cpu.bus);
     let dpmi = &mut cpu.bus.dpmi;
     if let Some(host) = dpmi.host.take() {
@@ -1735,10 +1956,12 @@ crate::state_fields!(Context { gpr, eip, eflags, seg });
 crate::state_fields!(Client {
     id, psp, bits32, block, ldt, segments, vectors, exceptions, memory, dos_blocks,
     rm_stack, rm_sp, lpms_sel, lpms_esp, cb_sel, segs, env, dta, ldt_alias, blocks,
-});
+} skip { ldt_limit });
 crate::state_fields!(Callback { client, proc_sel, proc_off, struct_sel, struct_off });
 crate::state_fields!(Frame { kind, client, ctx, vector, sel, off, rm_sp, lpms, base });
-crate::state_fields!(Dpmi { host, clients, frames, callbacks, hooks, a20, next_id, next_handle } skip { enabled, passed_over });
+crate::state_fields!(Dpmi {
+    host, clients, frames, callbacks, hooks, a20, next_id, next_handle
+} skip { enabled, passed_over, vm });
 
 #[cfg(test)]
 mod tests {
