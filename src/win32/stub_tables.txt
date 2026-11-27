@@ -4284,6 +4284,8 @@ IGetFrame_GetFrame
 IGetFrame_Begin
 IGetFrame_End
 IGetFrame_SetFormat
+AVIStreamOpenFromFileA
+AVIStreamOpenFromFile
 
 DLL DINPUT8.DLL
 DirectInput8Create
