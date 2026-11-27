@@ -40,7 +40,10 @@
 //! timeGetTime read the emulated clock in milliseconds, with no device or
 //! state of their own, so a pass that calls them is the same pass again
 //! until the next millisecond. The passes skipped end before it, and the
-//! loop is proven again from there (`clock_read`).
+//! loop is proven again from there (`clock_read`). A pass that uses the
+//! time it read, or reads QueryPerformanceCounter, whose count moves on
+//! every microsecond, is proven over counts (`count`), which follows the
+//! clock's value through the pass's arithmetic.
 //!
 //! **Where loops come from.** A head is armed at the service trap where the
 //! BIOS keyboard's status call found no key, the built-in Windows's clock
@@ -461,10 +464,10 @@ pub struct Observe {
     /// The function running set EAX to the value it returns
     /// (`returned`).
     service_returned: bool,
-    /// The function running read the built-in Windows' clock as the value
-    /// it returns (`tick_count`): the milliseconds, the instruction count
-    /// it read them at, and when they move on.
-    service_clock: Option<(u32, u64, u64)>,
+    /// The function running read one of the built-in Windows' clocks as
+    /// the value it returns or into its caller's RAM (`tick_count`,
+    /// `performance_count`).
+    service_clock: Option<count::ClockRead>,
     /// The function running was Win16Return, which loaded the 16-bit
     /// context with DX:AX the value in EAX if true (`resumed16`).
     resumed16: Option<bool>,
@@ -1320,22 +1323,61 @@ pub fn tick_count(cpu: &mut Cpu) -> u32 {
     let ms = (micros / 1000) as u32;
     if cpu.bus.observe.on {
         let next = cpu.bus.clock.icount_at_micros((micros / 1000 + 1) * 1000);
-        let o = &mut cpu.bus.observe;
-        let follows = match &o.phase {
-            Phase::Count { head, .. } => {
-                !o.plain_clock.iter().any(|p| p.head == *head && p.left > 0)
-            }
-            _ => false,
-        };
-        if follows && o.nesting == 0 {
-            o.service_clock = Some((ms, cpu.bus.clock.icount, next));
-            pure_call(cpu, None);
-        } else {
-            pure_call(cpu, Some(next));
-        }
-        reads_arguments(cpu);
+        clock_service(cpu, count::Source::Millis, ms as u64, next, None);
     }
     ms
+}
+
+/// The rate of the built-in Windows' performance counter
+/// (QueryPerformanceFrequency): the PIT's, as on Windows 95.
+pub const PERFORMANCE_FREQUENCY: u64 = 1_193_182;
+
+/// The performance counter at `micros` microseconds of the machine's
+/// clock.
+fn performance_ticks(micros: u64) -> u64 {
+    (micros as u128 * PERFORMANCE_FREQUENCY as u128 / 1_000_000) as u64
+}
+
+/// The machine's clock in the performance counter's ticks, as
+/// QueryPerformanceCounter reads it, which writes it to the eight bytes
+/// at the linear address `into`. The service changes nothing but those,
+/// and what it read stays the same until the next microsecond, when the
+/// count moves on. A pass `Phase::Count` records follows the count where
+/// the service writes it, and the passes after it read it anew, as Bink's
+/// timer does in Zanzarah's frame wait (#2252); elsewhere they hold up to
+/// the next microsecond.
+pub fn performance_count(cpu: &mut Cpu, into: u32) -> u64 {
+    let micros = cpu.bus.clock.now_micros();
+    let ticks = performance_ticks(micros);
+    if cpu.bus.observe.on {
+        let next = cpu.bus.clock.icount_at_micros(micros + 1);
+        clock_service(cpu, count::Source::Performance, ticks, next, Some(into));
+    }
+    ticks
+}
+
+/// The service running read clock `source`, as `value`, which it reads
+/// until the instruction count `next`, into EAX or the eight bytes at
+/// the linear address `into` (`tick_count`, `performance_count`).
+fn clock_service(cpu: &mut Cpu, source: count::Source, value: u64, next: u64, into: Option<u32>) {
+    let o = &mut cpu.bus.observe;
+    let follows = match &o.phase {
+        Phase::Count { head, .. } => !o.plain_clock.iter().any(|p| p.head == *head && p.left > 0),
+        _ => false,
+    };
+    if follows && o.nesting == 0 {
+        o.service_clock = Some(count::ClockRead {
+            source,
+            value,
+            at: cpu.bus.clock.icount,
+            next,
+            into,
+        });
+        pure_call(cpu, None);
+    } else {
+        pure_call(cpu, Some(next));
+    }
+    reads_arguments(cpu);
 }
 
 /// Win16Return loaded the 16-bit context that called 32-bit code, with

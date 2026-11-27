@@ -1232,6 +1232,79 @@ fn a_loop_that_takes_a_mutex_without_releasing_it_is_not_skipped() {
     );
 }
 
+/// Bink's timer, as Zanzarah's frame wait reads it (#2252): a loop that
+/// waits 200 ms by QueryPerformanceCounter, which it reads into the stack,
+/// subtracts the start count from in 64 bits (SUB, SBB), multiplies the
+/// difference by 1000 (MUL of each half), divides it by the counter's
+/// rate (DIV) and takes the absolute value of the milliseconds (CDQ, XOR,
+/// SUB). It reads GetTickCount too, as Bink's timer reads timeGetTime,
+/// whose reads arm the loop. The count moves on in every pass. A count
+/// proof follows it through that arithmetic, so the passes are skipped up
+/// to the next timer event, and come out the same as when they all run.
+#[test]
+fn a_loop_that_waits_by_the_performance_counter_through_a_division_is_skipped() {
+    let imports: &[(&str, &[&str])] =
+        &[("KERNEL32.DLL", &["QueryPerformanceCounter", "GetTickCount"])];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut spin = a.create_label();
+        // The start count at [esp], the count now at [esp+8].
+        a.sub(esp, 16)?;
+        a.mov(eax, esp)?;
+        a.push(eax)?;
+        a.call(l.import(0))?;
+        a.mov(edi, 1000)?;
+        a.set_label(&mut spin)?;
+        a.lea(eax, ptr(esp + 8))?;
+        a.push(eax)?;
+        a.call(l.import(0))?;
+        a.call(l.import(1))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.mov(edx, dword_ptr(esp + 12))?;
+        a.sub(eax, dword_ptr(esp))?;
+        a.sbb(edx, dword_ptr(esp + 4))?;
+        // EDX:EAX times 1000.
+        a.mov(ecx, eax)?;
+        a.mov(eax, edx)?;
+        a.mul(edi)?;
+        a.mov(esi, eax)?;
+        a.mov(eax, ecx)?;
+        a.mul(edi)?;
+        a.add(edx, esi)?;
+        a.mov(ecx, 1_193_182)?;
+        a.div(ecx)?;
+        a.cdq()?;
+        a.xor(eax, edx)?;
+        a.sub(eax, edx)?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.add(esp, 16)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start("performance_plain", CoreMode::Normal, false);
+    let mut skipping = start("performance_skipping", CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    let stats = &skipping.bus.observe.stats;
+    assert_eq!(skipping.errorlevel, 0x2A, "{stats:?}");
+    let ms = skipping.bus.clock.cycles_per_ms() as u64;
+    assert!(stats.proofs >= 1 && stats.skipped > 100 * ms, "{stats:?}");
+}
+
 /// Tribal Rage's MFC idle loop (#1729): it counts its passes in RAM, hands
 /// the count to OnIdle, which compares it with 0 and 1, and waits for a
 /// deadline by GetTickCount. A proof skips up to the next timer event,
