@@ -615,9 +615,9 @@ pub(super) fn set_file_pointer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
-/// The size of the open file `sft`.
+/// The size of the open file `sft` (`DiskController::file_size`).
 fn size_of(disk: &crate::disk::DiskController, sft: u16) -> u32 {
-    disk.sft_entry(sft).map_or(0, |e| e.size)
+    disk.file_size(sft).map_or(0, |size| size.min(u32::MAX as u64) as u32)
 }
 
 /// GetFileSize(handle, high): the size's low 32 bits, its high ones (0)

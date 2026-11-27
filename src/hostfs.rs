@@ -102,6 +102,12 @@ pub trait Backend {
     fn set_readonly(&self, _path: &Path, _readonly: bool) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "read-only flags aren't kept here"))
     }
+    /// A time that moves whenever the names in the folder `path` change
+    /// (`folder_time`); None for no folder, and where the backend can't
+    /// tell, as the default says.
+    fn folder_time(&self, _path: &Path) -> Option<SystemTime> {
+        None
+    }
 }
 
 thread_local! {
@@ -443,6 +449,20 @@ pub fn metadata(path: impl AsRef<Path>) -> io::Result<Meta> {
     match backend(path) {
         Some(backend) => backend.metadata(path),
         None => fs::metadata(path).map(std_meta),
+    }
+}
+
+/// A time that moves whenever the names in the folder `path` change, by
+/// which `disk`'s cache of folder entries tells whether to read a folder
+/// again: a host folder's modification time, or what its backend gives
+/// (`Backend::folder_time`). None for no folder, and for a backend that
+/// can't tell.
+pub fn folder_time(path: impl AsRef<Path>) -> Option<SystemTime> {
+    let path = path.as_ref();
+    match backend(path) {
+        Some(backend) => backend.folder_time(path),
+        None if has_scheme(path) => None,
+        None => fs::metadata(path).ok().filter(|m| m.is_dir()).and_then(|m| m.modified().ok()),
     }
 }
 

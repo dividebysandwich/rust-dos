@@ -403,18 +403,28 @@ impl DiskController {
         }
     }
 
-    /// What DOS keeps in the file table entry `sft` about the file open
-    /// there, but its position (`position`).
-    pub fn sft_entry(&self, sft: u16) -> Option<SftEntry> {
+    /// The size of the file open in the file table entry `sft`, which
+    /// `sft_entry` has too: alone, it costs a host file one call of the
+    /// host's, where the entry's time takes another and a conversion to
+    /// local time. MechCommander asks for the size of a file it writes
+    /// 9,500 times in 17 ms of a mission's load (#1359).
+    pub fn file_size(&self, sft: u16) -> Option<u64> {
         let open = self.open_files.get(&sft)?;
-        let size = match &open.data {
+        Some(match &open.data {
             _ if open.empty_on_use => 0,
             OpenData::Host(file, _) => file.len().unwrap_or(0),
             OpenData::Memory(data, _) => data.len() as u64,
             OpenData::Image(_, extent, _) => extent.size as u64,
             OpenData::Fat { volume, at, .. } => volume.reload(*at).map_or(0, |entry| entry.size as u64),
             OpenData::Device(_) => 0,
-        };
+        })
+    }
+
+    /// What DOS keeps in the file table entry `sft` about the file open
+    /// there, but its position (`position`).
+    pub fn sft_entry(&self, sft: u16) -> Option<SftEntry> {
+        let open = self.open_files.get(&sft)?;
+        let size = self.file_size(sft)?;
         let (time, date) = self.file_time(sft).unwrap_or((0, 0));
         let leaf = open.path.rsplit(['\\', '/', ':']).next().unwrap_or("");
         // A device keeps its name alone, also when it was opened as "NUL:".

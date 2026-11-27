@@ -341,6 +341,12 @@ impl Lower for Archive {
         }
         Ok(Box::new(Bytes { data: self.contents(entry.data)?, pos: 0, modified }))
     }
+
+    /// The names are listed once, when the archive is opened, and never
+    /// change: one time for every folder.
+    fn folder_time(&self, path: &str) -> Option<SystemTime> {
+        self.metadata(path).ok().filter(|m| m.is_dir).map(|_| SystemTime::UNIX_EPOCH)
+    }
 }
 
 fn read_only() -> io::Error {
@@ -600,6 +606,11 @@ impl Lower for Stack {
                 self.layers[at].open(path)
             }
         }
+    }
+
+    /// Its archives' names never change (`Archive::folder_time`).
+    fn folder_time(&self, path: &str) -> Option<SystemTime> {
+        self.metadata(path).ok().filter(|m| m.is_dir).map(|_| SystemTime::UNIX_EPOCH)
     }
 }
 
