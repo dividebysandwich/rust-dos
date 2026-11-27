@@ -96,7 +96,8 @@ pub fn task_ended(cpu: &mut Cpu, task: u16) {
 /// The task ends when the last returns (`then_exit`). False, with nothing
 /// called, when there is nothing to call, when the task is already
 /// telling its end (a callback that faulted, or ended the task, ends it
-/// without the rest), or when its stack is no stack.
+/// without the rest), or when its stack has no room for them
+/// (`has_room`).
 pub fn exit(cpu: &mut Cpu, code: u16, ctx: &Context) -> bool {
     let Some(t) = super::current_task(cpu) else {
         return false;
@@ -113,8 +114,8 @@ pub fn exit(cpu: &mut Cpu, code: u16, ctx: &Context) -> bool {
     if telling {
         return false;
     }
-    let (ss, _) = thunk::stack16_for(cpu, ctx);
-    if super::selector_base(cpu, ss).is_none() {
+    let (ss, sp) = thunk::stack16_for(cpu, ctx);
+    if !has_room(cpu, ss, sp) {
         return false;
     }
     let module = cpu.bus.win32.win16.tasks[t].module;
@@ -132,28 +133,59 @@ pub fn exit(cpu: &mut Cpu, code: u16, ctx: &Context) -> bool {
     }
     let mut events = vec![(NFY_EXITTASK, (code & 0xFF) as u32)];
     events.extend(going.into_iter().map(|h| (NFY_DELMODULE, h as u32)));
-    // The code to end with, then each call's callback, wID and dwData.
+    // The code to end with, then each call's task (the one that
+    // registered the callback), callback, wID and dwData.
     let mut data = vec![code as u32];
     for (id, value) in events {
         for n in cpu.bus.win32.win16.notifications.iter() {
-            data.extend([n.callback, id as u32, value]);
+            data.extend([n.task as u32, n.callback, id as u32, value]);
         }
     }
     call_next(cpu, *ctx, data)
 }
 
+/// The bytes of stack the callbacks are given at least: a fault from a
+/// stack that ran out, or whose SP is past its segment, ends the task
+/// without them, as the words pushed would land outside the segment, in
+/// memory other blocks have.
+const STACK_ROOM: u32 = 0x200;
+
+/// Whether the 16-bit stack `ss`:`sp` has `STACK_ROOM` bytes below SP
+/// inside its segment.
+fn has_room(cpu: &Cpu, ss: u16, sp: u16) -> bool {
+    let Some((_, limit, attr)) = super::selector_base(cpu, ss) else {
+        return false;
+    };
+    // SP 0 is the top of a 64 KB stack: the first push goes to FFFEh.
+    let top = if sp == 0 { 0x1_0000 } else { sp as u32 };
+    let Some(bottom) = top.checked_sub(STACK_ROOM) else {
+        return false;
+    };
+    // An expand-down data segment has the offsets above its limit.
+    if attr & 0x1C == 0x14 {
+        bottom > limit
+    } else {
+        top <= limit.saturating_add(1)
+    }
+}
+
 /// Make the first call `data` has after the exit code (`exit`) whose
-/// callback is still registered: one that an earlier callback
-/// unregistered is left out. False when there is none.
+/// callback is still registered by the task that registered it: one
+/// that an earlier callback unregistered is left out, though another
+/// task registered the same address. False when there is none.
 fn call_next(cpu: &mut Cpu, resume: Context, mut data: Vec<u32>) -> bool {
     let (callback, id, value) = loop {
-        if data.len() < 4 {
+        if data.len() < 5 {
             return false;
         }
-        let call: Vec<u32> = data.drain(1..4).collect();
+        let call: Vec<u32> = data.drain(1..5).collect();
+        let (task, callback) = (call[0] as u16, call[1]);
         let list = &cpu.bus.win32.win16.notifications;
-        if list.iter().any(|n| n.callback == call[0]) {
-            break (call[0], call[1] as u16, call[2]);
+        if list
+            .iter()
+            .any(|n| n.task == task && n.callback == callback)
+        {
+            break (callback, call[2] as u16, call[3]);
         }
     };
     cpu.bus.log_string(&format!(

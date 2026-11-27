@@ -720,11 +720,13 @@ const NOTIFY_UNREGISTER: u16 = 74;
 
 /// Where the notification test keeps what it learns: the events seen so
 /// far, the child's instance and module, the result the callback sets
-/// (FFh until it does), and a TASKENTRY.
+/// (FFh until it does), the callback's MakeProcInstance address, and a
+/// TASKENTRY.
 const SEEN: u16 = 0x10;
 const CHILD_INSTANCE: u16 = 0x12;
 const RESULT: u16 = 0x14;
 const CHILD_MODULE: u16 = 0x16;
+const PROC: u16 = 0x18;
 const TASK_ENTRY: u16 = 0x40;
 
 /// Emit the jump `op` (a short one) to a place given later: its
@@ -769,14 +771,20 @@ fn notify_register_tells_a_task_end_in_the_ending_task() {
     set(&mut code, TASK_ENTRY + 2, 0);
     let callback_at = code.here() + 2;
     code.push_far(0).push(0).call("KERNEL", MAKE_PROC_INSTANCE);
+    code.emit(&[0xA3, lo(PROC), hi(PROC)]) // mov [PROC],ax
+        .emit(&[0x89, 0x16, lo(PROC + 2), hi(PROC + 2)]); // mov [PROC+2],dx
     code.push(0)
         .emit(&[0x52, 0x50]) // push dx; push ax
         .push(0)
         .call("TOOLHELP", NOTIFY_REGISTER);
     expect_ax(&mut code, 1, 7);
-    // A second callback for the task is refused (FALSE on Windows 95),
-    // and the first stays.
-    code.push(0).push_far(0).push(0).call("TOOLHELP", NOTIFY_REGISTER);
+    // A second registration of the same callback for the task is refused
+    // (FALSE on Windows 95), and the first stays.
+    code.push(0)
+        .emit(&[0xFF, 0x36, lo(PROC + 2), hi(PROC + 2)]) // push word [PROC+2]
+        .emit(&[0xFF, 0x36, lo(PROC), hi(PROC)]) // push word [PROC]
+        .push(0)
+        .call("TOOLHELP", NOTIFY_REGISTER);
     expect_ax(&mut code, 0, 8);
     let path_at = code.here() + 2;
     code.push_far(0).push(1).call("KERNEL", WIN_EXEC);
