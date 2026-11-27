@@ -1036,6 +1036,7 @@ crate::state_fields!(Wait {
     section,
     queue
 });
+
 /// Move the TIB fields of a state saved before `TIB_98` to where the TIB
 /// has them now: each thread's TLS slots from 100h to 88h, with
 /// `fs:[2Ch]` pointing at them there, and its last error from its entry
@@ -1056,7 +1057,10 @@ pub(crate) fn mend_tibs(bus: &mut Bus) {
                     continue;
                 }
                 let mut slots = vec![0; size as usize];
-                if memory.read(bus, tib + OLDER_TLS_ARRAY, &mut slots).is_some() {
+                if memory
+                    .read(bus, tib + OLDER_TLS_ARRAY, &mut slots)
+                    .is_some()
+                {
                     // The old array's end, past the new one's.
                     let past = TLS_ARRAY + size;
                     let gone = vec![0; (OLDER_TLS_ARRAY + size - past) as usize];
@@ -1090,3 +1094,88 @@ crate::state_fields!(Thread {
     calls,
     fault
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::savestate::Lost;
+    use crate::win32::loader::{TIB_LAST_ERROR, TIB_TLS_ARRAY, TLS_ARRAY, TLS_SLOTS};
+    use crate::win32::memory::{PAGE, Pool, SYSTEM};
+
+    /// What an older state has in slot `slot` of the TIB at `tib`.
+    fn value(tib: u32, slot: u32) -> u32 {
+        tib ^ (0x5A00 + slot)
+    }
+
+    /// A process of a state saved before `TIB_98`, with two threads, the
+    /// second running: the load moves each thread's slots from 100h to
+    /// 88h, clears the old array's end past the new one's, points
+    /// `fs:[2Ch]` at them, and puts the running thread's last error,
+    /// which the process kept, and the other's, which its entry kept, at
+    /// TIB+60h. A process of a newer state, with nothing lost, is left
+    /// as it is.
+    #[test]
+    fn an_older_states_tibs_get_their_slots_and_last_errors_moved() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.win32.pool = Pool::take(&mut cpu.bus, 0x40_0000);
+        let mut processes = Vec::new();
+        let mut tibs = Vec::new();
+        for older in [true, false] {
+            let mut memory = Memory::new(&mut cpu.bus).expect("a page directory");
+            let mut threads = Vec::new();
+            for t in 0..2 {
+                let bus = &mut cpu.bus;
+                let tib = memory.reserve(None, GRANULARITY, SHARED, SYSTEM).unwrap();
+                memory.commit(bus, tib, PAGE, USER | WRITABLE).unwrap();
+                memory
+                    .write_32(bus, tib + TIB_TLS_ARRAY, tib + OLDER_TLS_ARRAY)
+                    .unwrap();
+                for slot in 0..TLS_SLOTS {
+                    let at = tib + OLDER_TLS_ARRAY + 4 * slot;
+                    memory.write_32(bus, at, value(tib, slot)).unwrap();
+                }
+                threads.push(Thread {
+                    tib,
+                    older_last_error: Lost(older.then_some(10 + t)),
+                    ..Thread::default()
+                });
+                tibs.push((older, t, tib));
+            }
+            processes.push(super::super::Process {
+                memory,
+                threads,
+                current: Some(1),
+                older_last_error: Lost(older.then_some(99)),
+                ..Default::default()
+            });
+        }
+        cpu.bus.win32.processes = processes;
+        mend_tibs(&mut cpu.bus);
+        let bus = &cpu.bus;
+        for (p, process) in bus.win32.processes.iter().enumerate() {
+            assert_eq!(process.older_last_error.0, None);
+            let memory = &process.memory;
+            for thread in &process.threads {
+                assert_eq!(thread.older_last_error.0, None);
+            }
+            for &(older, t, tib) in tibs.iter().skip(2 * p).take(2) {
+                let read = |at: u32| memory.read_32(bus, tib + at).unwrap();
+                if !older {
+                    assert_eq!(read(TIB_TLS_ARRAY), tib + OLDER_TLS_ARRAY);
+                    assert_eq!(read(TIB_LAST_ERROR), 0);
+                    assert_eq!(read(OLDER_TLS_ARRAY), value(tib, 0));
+                    continue;
+                }
+                assert_eq!(read(TIB_TLS_ARRAY), tib + TLS_ARRAY);
+                for slot in 0..TLS_SLOTS {
+                    assert_eq!(read(TLS_ARRAY + 4 * slot), value(tib, slot), "slot {slot}");
+                }
+                for at in (TLS_ARRAY + 4 * TLS_SLOTS..OLDER_TLS_ARRAY + 4 * TLS_SLOTS).step_by(4) {
+                    assert_eq!(read(at), 0, "TIB+{at:X}h");
+                }
+                let error = if t == 1 { 99 } else { 10 };
+                assert_eq!(read(TIB_LAST_ERROR), error, "thread {t}");
+            }
+        }
+    }
+}
