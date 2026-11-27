@@ -909,6 +909,7 @@ pub const DDERR_NOTLOCKED: u32 = dderr(584);
 pub const DDERR_CANTCREATEDC: u32 = dderr(585);
 pub const DDERR_NODC: u32 = dderr(586);
 pub const DDERR_WRONGMODE: u32 = dderr(587);
+pub const DDERR_INVALIDSURFACETYPE: u32 = dderr(592);
 pub const DDERR_DCALREADYCREATED: u32 = dderr(620);
 pub const DDERR_WASSTILLDRAWING: u32 = dderr(540);
 pub const DDERR_EXPIRED: u32 = dderr(691);
