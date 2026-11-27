@@ -512,6 +512,18 @@ impl DiskController {
         self.is_file(dos_path) || self.is_directory(dos_path)
     }
 
+    /// Whether a rename or move to `dos_path` finds its name taken, as
+    /// MoveFileA and msvcrt's rename check before they rename: by a file
+    /// or directory the drive has, or a system directory. A shown system
+    /// file doesn't take it: deleting one succeeds and changes nothing
+    /// (`delete_file`), so a setup that deletes it and then moves its own
+    /// copy to the name finds it still there, and the file renamed to it
+    /// takes its place (`rename_file`). A move with no delete before it
+    /// succeeds too, where Windows 98 refuses it (#2186).
+    pub fn name_taken(&self, dos_path: &str) -> bool {
+        self.real_is_file(dos_path) || self.is_directory(dos_path)
+    }
+
     /// Where the contents of the file a DOS path names are, on any drive.
     pub fn file_data(&self, dos_path: &str) -> Option<FileData> {
         if let Some(data) = self.system_file(dos_path) {

@@ -19,7 +19,9 @@ pub(crate) mod path;
 mod process;
 pub use process::ProgramInLine;
 mod profile;
-pub(in crate::win32) use profile::{parse_int, profile_int, profile_number, profile_values};
+pub(in crate::win32) use profile::{
+    parse_int, profile_entries, profile_int, profile_number, profile_values,
+};
 pub(crate) use profile::{profile_value, update_profile};
 mod sort;
 mod sync;
@@ -1137,6 +1139,13 @@ pub mod files {
     pub fn is_file(cpu: &mut Cpu, name: &str) -> bool {
         let full = full_path(cpu, name);
         cpu.bus.disk.is_file(&full)
+    }
+
+    /// Whether a file or directory takes the name `name` from a file
+    /// MoveFileA would move there (`DiskController::name_taken`).
+    pub fn name_taken(cpu: &mut Cpu, name: &str) -> bool {
+        let full = full_path(cpu, name);
+        cpu.bus.disk.name_taken(&full)
     }
 
     /// Write `data` as the whole file `name`, made anew.

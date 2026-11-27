@@ -1987,7 +1987,10 @@ order.
   how many bytes of arguments each takes. Empty (the default), there is
   no such folder. Wine's MSACM32.DLL with its codecs runs this way, with
   `win32_dlls_replace=msacm32`, for what the built-in MSACM32.DLL can't
-  convert: it only decodes MS ADPCM and IMA ADPCM. See
+  convert: it decodes MS ADPCM and IMA ADPCM itself, and otherwise only
+  through the codecs installed on the machine (SYSTEM.INI's
+  `msacm.<name>` entries and the registry's `MediaResources\ACM` key),
+  such as the Windows Media Audio codec. See
   [Wine's DLLs as guest code](docs/builtin-windows-architecture.md#wines-dlls-as-guest-code).
 * `win32_dlls_replace` lists the built-in DLLs that the `win32_dlls`
   folder's DLLs of the same name replace, separated by commas, such as

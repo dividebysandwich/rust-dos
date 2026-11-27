@@ -545,6 +545,34 @@ pub(in crate::win32) fn profile_values(cpu: &mut Cpu, file: &[u8], section: &[u8
     })
 }
 
+/// The keys of `section` in the profile `file` with their values, in
+/// their order, for the system's own use: MSACM32's drivers in
+/// SYSTEM.INI's `[drivers32]`. A comment line (';') and a line without
+/// '=' are left out. As `profile_values`, the file is read from the
+/// disk.
+pub(in crate::win32) fn profile_entries(
+    cpu: &mut Cpu,
+    file: &[u8],
+    section: &[u8],
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let path = path_of(Some(file));
+    let Some(data) = cpu.bus.disk.file_data(&path) else {
+        return Vec::new();
+    };
+    let Ok(text) = data.read() else {
+        return Vec::new();
+    };
+    let sections = parse(&text);
+    let Some(s) = find(&sections, section) else {
+        return Vec::new();
+    };
+    s.entries
+        .iter()
+        .filter(|e| !e.key.is_empty() && !e.key.starts_with(b";"))
+        .filter_map(|e| Some((e.key.clone(), unquoted(e.value.as_deref()?).to_vec())))
+        .collect()
+}
+
 /// `profile_value` as a number, as GetPrivateProfileIntA reads it:
 /// `default` when the file doesn't have the key or its value is empty.
 pub(in crate::win32) fn profile_int(
