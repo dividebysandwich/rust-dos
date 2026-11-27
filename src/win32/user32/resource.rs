@@ -35,7 +35,9 @@ const IMAGE_CURSOR: u32 = 2;
 const LR_MONOCHROME: u32 = 0x0001;
 const LR_COPYDELETEORG: u32 = 0x0008;
 const LR_LOADFROMFILE: u32 = 0x0010;
+const LR_LOADTRANSPARENT: u32 = 0x0020;
 const LR_DEFAULTSIZE: u32 = 0x0040;
+const LR_LOADMAP3DCOLORS: u32 = 0x1000;
 const LR_CREATEDIBSECTION: u32 = 0x2000;
 const LR_SHARED: u32 = 0x8000;
 
@@ -813,17 +815,98 @@ fn packed_bits(cpu: &mut Cpu, at: u32) -> Option<(bitmap::DibInfo, u32)> {
     Some((info, at + offset))
 }
 
-/// A bitmap from the packed DIB at `at`: one of GDI's, or a DIB section.
-fn bitmap_from_dib(cpu: &mut Cpu, at: u32, dib_section: bool) -> Option<u32> {
-    let Some((info, bits)) = packed_bits(cpu, at) else {
+/// A copy of the DIB header and color table at `at`, in pages the
+/// caller frees, with the colors LoadImage's LR_LOADTRANSPARENT and
+/// LR_LOADMAP3DCOLORS ask for; None without either flag or without a
+/// color table. As LoadImage's documentation and Wine's have it:
+/// LR_LOADTRANSPARENT turns the table entry of the first pixel (in the
+/// first byte of `bits`) into COLOR_WINDOW, or COLOR_3DFACE when
+/// LR_LOADMAP3DCOLORS is given too, and LR_LOADMAP3DCOLORS turns the
+/// table's RGB(128,128,128), RGB(192,192,192) and RGB(223,223,223)
+/// into COLOR_3DSHADOW, COLOR_3DFACE and COLOR_3DLIGHT. The resource
+/// itself keeps its colors.
+fn mapped_colors(
+    cpu: &mut Cpu,
+    at: u32,
+    info: &bitmap::DibInfo,
+    bits: u32,
+    flags: u32,
+) -> Option<u32> {
+    use super::sysparams::{COLOR_3DLIGHT, COLOR_BTNFACE, COLOR_BTNSHADOW, COLOR_WINDOW};
+    let map_3d = flags & LR_LOADMAP3DCOLORS != 0;
+    if flags & (LR_LOADTRANSPARENT | LR_LOADMAP3DCOLORS) == 0 || info.bpp > 8 {
+        return None;
+    }
+    let entry = if info.core { 3 } else { 4 };
+    let len = info.header_size + info.table_len * entry;
+    let mut data = vec![0u8; len as usize];
+    cpu.bus.guest_read_bytes(at, &mut data);
+    let [window, shadow, face, light] =
+        [COLOR_WINDOW, COLOR_BTNSHADOW, COLOR_BTNFACE, COLOR_3DLIGHT].map(|i| user(cpu).color(i));
+    let first = if flags & LR_LOADTRANSPARENT != 0 {
+        Some(u32::from(cpu.bus.guest_read_8(bits)) >> (8 - info.bpp))
+    } else {
+        None
+    };
+    // An RGBQUAD or RGBTRIPLE is blue, green, red; a COLORREF red first.
+    let bgr = |color: u32| [(color >> 16) as u8, (color >> 8) as u8, color as u8];
+    let table = &mut data[info.header_size as usize..];
+    if let Some(first) = first.filter(|&first| first < info.table_len) {
+        let i = (first * entry) as usize;
+        table[i..i + 3].copy_from_slice(&bgr(if map_3d { face } else { window }));
+    }
+    if map_3d {
+        for color in table.chunks_exact_mut(entry as usize) {
+            let to = match color[..3] {
+                [128, 128, 128] => shadow,
+                [192, 192, 192] => face,
+                [223, 223, 223] => light,
+                _ => continue,
+            };
+            color[..3].copy_from_slice(&bgr(to));
+        }
+    }
+    let copy = kernel32::alloc_pages(cpu, len)?;
+    cpu.bus.guest_write_bytes(copy, &data);
+    Some(copy)
+}
+
+/// A bitmap from the DIB whose header and color table are at `at`: one
+/// of GDI's, or a DIB section. Its bits follow the table (a packed DIB)
+/// unless `file_bits` says where they are. `flags` are LoadImage's.
+fn bitmap_from_dib(cpu: &mut Cpu, at: u32, file_bits: Option<u32>, flags: u32) -> Option<u32> {
+    let Some((info, packed)) = packed_bits(cpu, at) else {
         return if cpu.bus.guest_faulted() {
             None
         } else {
             Some(0)
         };
     };
+    let bits = file_bits.unwrap_or(packed);
+    let dib_section = flags & LR_CREATEDIBSECTION != 0;
+    let Some(copy) = mapped_colors(cpu, at, &info, bits, flags) else {
+        return bitmap_from_parts(cpu, at, &info, bits, dib_section);
+    };
+    let h = match bitmap::read_info(cpu, copy, 0, 0) {
+        Some(info) => bitmap_from_parts(cpu, copy, &info, bits, dib_section),
+        None => Some(0),
+    };
+    kernel32::free_pages(cpu, copy);
+    h
+}
+
+/// A bitmap from the DIB header and color table at `at`, which `info`
+/// was read from, and its bits at `bits`: one of GDI's, or a DIB
+/// section.
+fn bitmap_from_parts(
+    cpu: &mut Cpu,
+    at: u32,
+    info: &bitmap::DibInfo,
+    bits: u32,
+    dib_section: bool,
+) -> Option<u32> {
     if dib_section {
-        if let Some(h) = bitmap::unpacked_dib_section(cpu, &info, bits) {
+        if let Some(h) = bitmap::unpacked_dib_section(cpu, info, bits) {
             return Some(h);
         }
         let h = bitmap::create_dib_section(cpu, &[0, at, 0, 0, 0, 0])?;
@@ -860,7 +943,7 @@ pub fn load_bitmap(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(h);
     }
     match kernel32::resource_data(cpu, module, RT_BITMAP, name)? {
-        Ok((at, _)) => bitmap_from_dib(cpu, at, false),
+        Ok((at, _)) => bitmap_from_dib(cpu, at, None, 0),
         Err(_) => {
             set_error(cpu, ERROR_RESOURCE_NAME_NOT_FOUND);
             Some(0)
@@ -1087,16 +1170,7 @@ pub fn load_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 let magic = cpu.bus.guest_read_16(at);
                 if magic == 0x4D42 && size > 14 {
                     let bits = at + cpu.bus.guest_read_32(at + 10);
-                    let info_at = at + 14;
-                    if flags & LR_CREATEDIBSECTION != 0 {
-                        bitmap_from_dib(cpu, info_at, true)
-                    } else {
-                        let screen = super::paint::window_dc(cpu, super::DESKTOP, 0, None);
-                        let h =
-                            bitmap::create_di_bitmap(cpu, &[screen, info_at, 4, bits, info_at, 0]);
-                        super::paint::release_dc(cpu, &[0, screen]);
-                        h
-                    }
+                    bitmap_from_dib(cpu, at + 14, Some(bits), flags)
                 } else {
                     Some(0)
                 }
@@ -1122,7 +1196,7 @@ pub fn load_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 return load_bitmap(cpu, &[0, name]);
             }
             match kernel32::resource_data(cpu, module, RT_BITMAP, name)? {
-                Ok((at, _)) => bitmap_from_dib(cpu, at, flags & LR_CREATEDIBSECTION != 0),
+                Ok((at, _)) => bitmap_from_dib(cpu, at, None, flags),
                 Err(_) => {
                     set_error(cpu, ERROR_RESOURCE_NAME_NOT_FOUND);
                     Some(0)

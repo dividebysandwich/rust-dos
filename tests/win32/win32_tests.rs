@@ -11708,6 +11708,107 @@ fn load_image_unpacks_an_rle8_bitmap_into_a_dib_section() {
     assert_eq!(code, 0x1F, "the checks that failed: {:05b} {text}", !code & 0x1F);
 }
 
+/// LoadImageA's LR_LOADTRANSPARENT and LR_LOADMAP3DCOLORS change the
+/// color table of the bitmap it makes, as LoadImage's documentation and
+/// Wine's have it: the first pixel's entry becomes COLOR_WINDOW, or
+/// COLOR_3DFACE with both flags, and the second flag turns 128, 192 and
+/// 223 grey into COLOR_3DSHADOW, COLOR_3DFACE and COLOR_3DLIGHT. The
+/// resource keeps its colors. InstallShield 6 setups (Anachronox) load
+/// their buttons' pictures this way, which have a magenta background.
+#[test]
+fn load_image_maps_a_bitmaps_transparent_and_3d_colors() {
+    let names: &[&str] = &[
+        "GetModuleHandleA",
+        "LoadImageA",
+        "CreateCompatibleDC",
+        "SelectObject",
+        "GetDIBColorTable",
+        "GetPixel",
+    ];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &names[..1]),
+        ("USER32.DLL", &names[1..2]),
+        ("GDI32.DLL", &names[2..]),
+    ];
+    const RT_BITMAP: u16 = 2;
+    const LR_LOADTRANSPARENT: u32 = 0x0020;
+    const LR_LOADMAP3DCOLORS: u32 = 0x1000;
+    const LR_CREATEDIBSECTION: u32 = 0x2000;
+    const TABLE: u32 = 0x100;
+    // A 2x1 bitmap of 4 bits with five colors, its first pixel magenta
+    // (entry 1, in the byte's high half).
+    let colors = [0x80_8080u32, 0xFF_00FF, 0xC0_C0C0, 0xDF_DFDF, 0x12_3456];
+    let mut dib = Vec::new();
+    for w in [40u32, 2, 1, 1 | 4 << 16, 0, 4, 0, 0, 5, 0] {
+        dib.extend_from_slice(&w.to_le_bytes());
+    }
+    for c in colors {
+        dib.extend_from_slice(&c.to_le_bytes());
+    }
+    dib.extend_from_slice(&[0x10, 0, 0, 0]);
+    let mut both = colors;
+    both[1] = 0xC0_C0C0;
+    both[3] = 0xC0_C0C0;
+    let mut transparent = colors;
+    transparent[1] = 0xFF_FFFF;
+    let cases = [
+        (LR_LOADTRANSPARENT | LR_LOADMAP3DCOLORS, both),
+        (LR_LOADTRANSPARENT, transparent),
+        (0, colors),
+    ];
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        call_with(a, l.import(0), &[Arg::I(0)])?;
+        a.mov(esi, eax)?;
+        call_with(a, l.import(2), &[Arg::I(0)])?;
+        a.mov(edi, eax)?;
+        // LoadImageA, and the bitmap selected into the DC in EDI.
+        let load = |a: &mut CodeAssembler, flags: u32| -> Result<(), IcedError> {
+            let image = [Arg::Esi, Arg::I(3), Arg::I(0), Arg::I(0), Arg::I(0)];
+            call_with(a, l.import(1), &[&image[..], &[Arg::I(flags)]].concat())?;
+            a.push(eax)?;
+            a.push(edi)?;
+            a.call(l.import(3))
+        };
+        // The color tables of DIB sections.
+        for (bit, (flags, want)) in cases.into_iter().enumerate() {
+            load(a, flags | LR_CREATEDIBSECTION)?;
+            a.push(l.at(TABLE) as i32)?;
+            a.push(5)?;
+            a.push(0)?;
+            a.push(edi)?;
+            a.call(l.import(4))?;
+            let mut wrong = a.create_label();
+            for (i, c) in want.into_iter().enumerate() {
+                a.cmp(dword_ptr(l.at(TABLE + 4 * i as u32)), c as i32)?;
+                a.jne(wrong)?;
+            }
+            a.set_label(&mut wrong)?;
+            check(a, false, bit as u32)?;
+        }
+        // A bitmap of GDI's: its first pixel is the button face's grey.
+        load(a, LR_LOADTRANSPARENT | LR_LOADMAP3DCOLORS)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(l.import(5))?;
+        a.cmp(eax, 0xC0_C0C0)?;
+        check(a, false, 3)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(
+        BASE,
+        None,
+        imports,
+        &[0; 0x200],
+        &[("", &main)],
+        &[(RT_BITMAP, 3, 0x409, &dib)],
+    );
+    let (code, text) = run_files("load_image_3d_colors", &[("T.EXE", exe)]);
+    assert_eq!(code, 0xF, "the checks that failed: {:04b} {text}", !code & 0xF);
+}
+
 /// LoadLibraryA of files Windows 95 can't load: an empty one is in a bad
 /// format, and one whose PE header has no optional header gives
 /// ERROR_GEN_FAILURE, as Wine's loader test found on Windows 9x.
