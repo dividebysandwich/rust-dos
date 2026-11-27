@@ -462,7 +462,10 @@ pub fn folder_time(path: impl AsRef<Path>) -> Option<SystemTime> {
     match backend(path) {
         Some(backend) => backend.folder_time(path),
         None if has_scheme(path) => None,
-        None => fs::metadata(path).ok().filter(|m| m.is_dir()).and_then(|m| m.modified().ok()),
+        None => fs::metadata(path)
+            .ok()
+            .filter(|m| m.is_dir())
+            .and_then(|m| m.modified().ok()),
     }
 }
 

@@ -345,7 +345,10 @@ impl Lower for Archive {
     /// The names are listed once, when the archive is opened, and never
     /// change: one time for every folder.
     fn folder_time(&self, path: &str) -> Option<SystemTime> {
-        self.metadata(path).ok().filter(|m| m.is_dir).map(|_| SystemTime::UNIX_EPOCH)
+        self.metadata(path)
+            .ok()
+            .filter(|m| m.is_dir)
+            .map(|_| SystemTime::UNIX_EPOCH)
     }
 }
 
@@ -610,7 +613,10 @@ impl Lower for Stack {
 
     /// Its archives' names never change (`Archive::folder_time`).
     fn folder_time(&self, path: &str) -> Option<SystemTime> {
-        self.metadata(path).ok().filter(|m| m.is_dir).map(|_| SystemTime::UNIX_EPOCH)
+        self.metadata(path)
+            .ok()
+            .filter(|m| m.is_dir)
+            .map(|_| SystemTime::UNIX_EPOCH)
     }
 }
 

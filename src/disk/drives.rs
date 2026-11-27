@@ -415,7 +415,9 @@ impl DiskController {
             OpenData::Host(file, _) => file.len().unwrap_or(0),
             OpenData::Memory(data, _) => data.len() as u64,
             OpenData::Image(_, extent, _) => extent.size as u64,
-            OpenData::Fat { volume, at, .. } => volume.reload(*at).map_or(0, |entry| entry.size as u64),
+            OpenData::Fat { volume, at, .. } => {
+                volume.reload(*at).map_or(0, |entry| entry.size as u64)
+            }
             OpenData::Device(_) => 0,
         })
     }

@@ -1938,7 +1938,10 @@ fn overlay_drive(name: &str) -> (PathBuf, DiskController) {
         age(&base.join(dir));
     }
     let mut disk = DiskController::new(base.join("c"));
-    let opts = MountOptions { overlay: Some(base.join("upper")), ..MountOptions::default() };
+    let opts = MountOptions {
+        overlay: Some(base.join("upper")),
+        ..MountOptions::default()
+    };
     disk.mount(3, &base.join("game"), opts, false).unwrap();
     age(&base.join("upper"));
     (base, disk)
@@ -1954,7 +1957,10 @@ fn an_overlay_drives_folders_are_kept_until_they_change() {
     let art = disk.resolve_path(r"D:\DATA\ART").unwrap();
     assert!(disk.is_file(r"D:\DATA\ART\ART.PAK"));
     assert!(!disk.is_file(r"D:\DATA\ART\MR_BKGD.TGA"));
-    assert!(disk.host_dirs.dirs.borrow().contains_key(&art), "an old folder is kept");
+    assert!(
+        disk.host_dirs.dirs.borrow().contains_key(&art),
+        "an old folder is kept"
+    );
 
     let reads = disk.host_dirs.reads.get();
     for _ in 0..3 {
@@ -1964,7 +1970,11 @@ fn an_overlay_drives_folders_are_kept_until_they_change() {
     assert_eq!(disk.host_dirs.reads.get(), reads, "no folder is read again");
     disk.host_dirs.expire();
     assert!(disk.is_file(r"D:\DATA\ART\ART.PAK"));
-    assert_eq!(disk.host_dirs.reads.get(), reads, "nor once its time is checked");
+    assert_eq!(
+        disk.host_dirs.reads.get(),
+        reads,
+        "nor once its time is checked"
+    );
 }
 
 /// Another program's change to an overlay drive's folder, below or above,
