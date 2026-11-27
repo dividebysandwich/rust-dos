@@ -3788,12 +3788,20 @@ impl Gen<'_> {
         dynasm!(self.ops ; .arch aarch64 ; mov W(r(t)), w0);
     }
 
-    /// The count of a shift by register `count` (CL) & 31 into W12, and on
-    /// to the instruction's end if it is 0: nothing changes then. The
-    /// guest's flags are in W28 both ways if the shift's are live.
-    fn var_count(&mut self, count: Gpr, set: u32) {
+    /// The count of a shift by `count` (CL, or a byte of RAM) & 31 into
+    /// W12, and on to the instruction's end if it is 0: nothing changes
+    /// then. The guest's flags are in W28 both ways if the shift's are
+    /// live.
+    fn var_count(&mut self, count: Count, set: u32) {
         let end = self.end();
-        self.field(Access::Ldr8, 12, gpr_offset(count));
+        match count {
+            Count::Reg(g) => self.field(Access::Ldr8, 12, gpr_offset(g)),
+            Count::Code(phys) => {
+                self.mov32(12, phys);
+                dynasm!(self.ops ; .arch aarch64 ; ldrb w12, [x21, x12]);
+            }
+            Count::Const(c) => self.mov32(12, c as u32),
+        }
         if set & self.live_after != 0 && !self.dirty {
             self.field(Access::Ldr32, 28, layout::FLAGS);
             self.dirty = true;

@@ -1369,7 +1369,14 @@ fn uop_gprs(u: &Uop) -> u8 {
     match *u {
         Uop::Get { r, .. } | Uop::Set { r, .. } => bit(r),
         Uop::Ea { base, index, .. } => base.map_or(0, bit) | index.map_or(0, bit),
-        Uop::ShiftVar { count, .. } | Uop::DoubleShiftVar { count, .. } => bit(count),
+        Uop::ShiftVar {
+            count: Count::Reg(count),
+            ..
+        }
+        | Uop::DoubleShiftVar {
+            count: Count::Reg(count),
+            ..
+        } => bit(count),
         Uop::MulWide { size, .. } | Uop::DivWide { size, .. } => {
             if size == 1 {
                 1
@@ -4966,12 +4973,19 @@ impl Gen<'_> {
         }
     }
 
-    /// The count of a shift by register `count` (CL) & 31 into ECX, and on
-    /// to the instruction's end if it is 0: nothing changes then. The
-    /// guest's flags are in EBP both ways if the shift's are live.
-    fn var_count(&mut self, count: Gpr, set: u32) {
+    /// The count of a shift by `count` (CL, or a byte of RAM) & 31 into
+    /// ECX, and on to the instruction's end if it is 0: nothing changes
+    /// then. The guest's flags are in EBP both ways if the shift's are
+    /// live.
+    fn var_count(&mut self, count: Count, set: u32) {
         let end = self.end();
-        self.get_into(RCX, count);
+        match count {
+            Count::Reg(g) => self.get_into(RCX, g),
+            Count::Code(phys) => {
+                dynasm!(self.ops ; .arch x64 ; movzx ecx, BYTE [r13 + phys as i32])
+            }
+            Count::Const(c) => dynasm!(self.ops ; .arch x64 ; mov ecx, c as i32),
+        }
         if self.wanted(set) && !self.dirty {
             dynasm!(self.ops ; .arch x64 ; mov ebp, DWORD [rbx + FLAGS]);
             self.dirty = true;
