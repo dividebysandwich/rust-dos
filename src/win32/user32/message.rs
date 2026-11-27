@@ -453,7 +453,8 @@ fn next_timer(state: &super::State, tid: u32) -> Option<u64> {
 
 /// The first window of `tid` (under `hwnd`, if it isn't 0) that needs
 /// painting: parents before their children, the top of the z-order
-/// first.
+/// first. A WS_EX_TRANSPARENT window waits for the siblings beneath it,
+/// so that it draws over what they paint.
 pub fn paint_window(state: &super::State, tid: u32, hwnd: u32) -> Option<u32> {
     let root = if hwnd == 0 || hwnd == 0xFFFF_FFFF {
         DESKTOP
@@ -461,7 +462,7 @@ pub fn paint_window(state: &super::State, tid: u32, hwnd: u32) -> Option<u32> {
         hwnd
     };
     let order = super::window::pre_order(state, root);
-    order.into_iter().find(|&h| {
+    let found = order.into_iter().find(|&h| {
         h != DESKTOP
             && state.window(h).is_some_and(|w| {
                 w.tid == tid
@@ -469,6 +470,35 @@ pub fn paint_window(state: &super::State, tid: u32, hwnd: u32) -> Option<u32> {
                     && super::paint::needs_paint(w)
             })
             && state.is_visible(h)
+    })?;
+    if found == root {
+        return Some(found);
+    }
+    Some(sibling_below_to_paint(state, tid, found).unwrap_or(found))
+}
+
+/// For the window `hwnd` that needs painting, if it is WS_EX_TRANSPARENT:
+/// the first sibling beneath it of the thread `tid` that is visible, not
+/// transparent itself and needs painting. Windows documents
+/// WS_EX_TRANSPARENT so, and the welcome page of InstallShield 6's
+/// wizard relies on it: its paragraph lies, transparent, over a white
+/// static below it in the z-order, and is drawn only if that one paints
+/// first.
+fn sibling_below_to_paint(state: &super::State, tid: u32, hwnd: u32) -> Option<u32> {
+    use super::window::{WS_EX_TRANSPARENT, WS_VISIBLE};
+    let w = state.window(hwnd)?;
+    if w.ex_style & WS_EX_TRANSPARENT == 0 {
+        return None;
+    }
+    let siblings = &state.window(w.parent)?.children;
+    let at = siblings.iter().position(|&h| h == hwnd)?;
+    siblings[at + 1..].iter().copied().find(|&h| {
+        state.window(h).is_some_and(|s| {
+            s.tid == tid
+                && s.style & WS_VISIBLE != 0
+                && s.ex_style & WS_EX_TRANSPARENT == 0
+                && super::paint::needs_paint(s)
+        })
     })
 }
 
@@ -2279,6 +2309,49 @@ pub(crate) mod tests {
     /// The next message for `tid`, taken: its message and lParam.
     fn take(cpu: &mut Cpu, tid: u32) -> Option<(u32, u32)> {
         take_message(cpu, tid, Filter::default(), true).map(|(m, _)| (m.message, m.lparam))
+    }
+
+    /// A WS_EX_TRANSPARENT child gets WM_PAINT after the siblings beneath
+    /// it that need painting, and before none above it; a child without
+    /// the style goes first, from the top of the z-order. InstallShield
+    /// 6's welcome page draws its paragraph, transparent, over a white
+    /// static beneath it (#1265).
+    #[test]
+    fn a_transparent_window_paints_after_the_siblings_beneath_it() {
+        use super::super::paint::PAINT_INTERNAL;
+        use super::super::window::{WS_CHILD, WS_EX_TRANSPARENT, WS_VISIBLE, Window};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let visible = Window {
+            style: WS_VISIBLE,
+            ..Window::default()
+        };
+        let parent = user(&mut cpu).new_window(visible).unwrap();
+        let child = |ex_style| Window {
+            style: WS_CHILD | WS_VISIBLE,
+            ex_style,
+            parent,
+            paint: PAINT_INTERNAL,
+            ..Window::default()
+        };
+        let top = user(&mut cpu).new_window(child(0)).unwrap();
+        let text = user(&mut cpu).new_window(child(WS_EX_TRANSPARENT)).unwrap();
+        let white = user(&mut cpu).new_window(child(0)).unwrap();
+        let hidden = Window {
+            style: WS_CHILD,
+            ..child(0)
+        };
+        let hidden = user(&mut cpu).new_window(hidden).unwrap();
+        if let Some(w) = user(&mut cpu).window_mut(parent) {
+            w.children = vec![top, text, hidden, white];
+        }
+        let mut order = Vec::new();
+        while let Some(h) = paint_window(user(&mut cpu), 0, parent) {
+            order.push(h);
+            if let Some(w) = user(&mut cpu).window_mut(h) {
+                w.paint = 0;
+            }
+        }
+        assert_eq!(order, [top, white, text]);
     }
 
     /// A program that puts the cursor back in the middle after each move
