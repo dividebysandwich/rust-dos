@@ -356,6 +356,11 @@ pub struct Observe {
     failed: Cell<Option<&'static str>>,
     /// The blocks written since the last look.
     chunks: Vec<u32>,
+    /// The kernel objects of the built-in Windows that the services the
+    /// proof followed took or changed (`changes_object`), each with its
+    /// state before the first of them, which every visit of the head has
+    /// to find again.
+    objects: Vec<(u32, Option<crate::win32::object::Kind>)>,
     phase: Phase,
     /// The millisecond the first read of the built-in Windows's clock since
     /// the base found (`clock_read`), up to which its passes read the same.
@@ -505,6 +510,7 @@ impl Default for Observe {
             peeked: false,
             failed: Cell::new(None),
             chunks: Vec::new(),
+            objects: Vec::new(),
             phase: Phase::Off,
             clock_read: None,
             polls_at: [Poll::default(); POLL_HEADS],
@@ -785,6 +791,7 @@ impl Observe {
         self.on = false;
         self.failed.set(None);
         self.chunks.clear();
+        self.objects.clear();
         self.phase = Phase::Off;
         self.forget_ports();
         self.tainted = false;
@@ -1258,6 +1265,40 @@ pub fn nested<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
     value
 }
 
+/// The built-in Windows' service running is about to take or change the
+/// kernel object `id` (a wait that ends at once takes a mutex, an
+/// auto-reset event's signal or a semaphore's count; ReleaseMutex and
+/// SetEvent change it). Its state before the first such change in the
+/// proof is kept, and every later visit of the head has to find it so
+/// (`objects_as_before`): the service may then say it changed nothing
+/// but RAM and registers (`pure_call`), since each pass leaves the object
+/// as it found it, as Zanzarah's frame wait does with a mutex it takes
+/// and releases in every pass (#1240).
+///
+/// That is all a skip has to keep of the object. No other thread runs
+/// during a proof's passes or the passes skipped, which end by the next
+/// timer event, so no other thread sees the object meanwhile; a change
+/// that ends another thread's wait isn't followed. The skip ends at a
+/// visit of the head, where the object is as it was before the passes.
+pub fn changes_object(cpu: &mut Cpu, id: u32) {
+    if !cpu.bus.observe.on || cpu.bus.observe.objects.iter().any(|&(o, _)| o == id) {
+        return;
+    }
+    let kind = cpu.bus.win32.objects.get(id).map(|o| o.kind.clone());
+    cpu.bus.observe.objects.push((id, kind));
+}
+
+/// The kernel objects the proof's services changed are as they were
+/// before the first change (`changes_object`).
+fn objects_as_before(cpu: &Cpu) -> bool {
+    let objects = &cpu.bus.win32.objects;
+    cpu.bus
+        .observe
+        .objects
+        .iter()
+        .all(|(id, kind)| objects.get(*id).map(|o| &o.kind) == kind.as_ref())
+}
+
 /// The service `pure_call` follows started the running thread's turn
 /// over, now.
 pub fn turn_started(cpu: &mut Cpu) {
@@ -1562,6 +1603,9 @@ fn visit(cpu: &mut Cpu, now: u64) {
         // A pass read the PIT's count without latching it.
         return o.fail("port read");
     }
+    if !objects_as_before(cpu) {
+        return cpu.bus.observe.fail("object");
+    }
     let mut key = cpu.idle_key();
     if cpu.bus.observe.tainted {
         key.regs.gpr[0] &= !0xFF;
@@ -1599,6 +1643,7 @@ fn visit(cpu: &mut Cpu, now: u64) {
             o.started = now;
             o.failed.set(None);
             o.chunks.clear();
+            o.objects.clear();
             o.forget_ports();
             let until = now + PROOF_LIMIT;
             let Some(shape) = o.shapes.iter().find(|s| s.head == head) else {
