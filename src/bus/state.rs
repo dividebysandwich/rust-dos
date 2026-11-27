@@ -30,7 +30,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 4;
-const WIN32_VERSION: u16 = 112;
+const WIN32_VERSION: u16 = 113;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -87,11 +87,11 @@ const WIN32_VERSION: u16 = 112;
 /// (`ddraw::palette::GDI_PALETTE_SAVED`), 71's to 108's not SETUPX's
 /// open INF files, LDIDs and copy queue (`win16::setupx::SETUPX_SAVED`),
 /// 71's to 109's no Running Object Table (`ole32::ROT_SAVED`), 71's
-/// to 110's no installable ACM drivers (`msacm32::DRIVERS_SAVED`), and
-/// 71's to 111's no filter mappers or device monikers
-/// (`dshow::Kind::Mapper`, `Device` and `Bag`, which they load
-/// without).
-const WIN32_LOADS: [u16; 42] = [
+/// to 110's no installable ACM drivers (`msacm32::DRIVERS_SAVED`), 71's
+/// to 111's no filter mappers or device monikers (`dshow::Kind::Mapper`,
+/// `Device` and `Bag`, which they load without), and 71's to 112's no
+/// OLE standard font or picture objects (`oleaut32::font::FONTS_SAVED`).
+const WIN32_LOADS: [u16; 43] = [
     71,
     72,
     73,
@@ -133,6 +133,7 @@ const WIN32_LOADS: [u16; 42] = [
     109,
     110,
     111,
+    112,
     WIN32_VERSION,
 ];
 const NET_VERSION: u16 = 2;
@@ -1291,6 +1292,7 @@ mod tests {
         (110, 0x567C_F664_B7FC_E0F3), // OLE32's Running Object Table
         (111, 0xD41F_776E_514F_5CE1), // MSACM32's installable drivers and their streams
         (112, 0x44D4_782D_337F_ABB0), // DirectShow's filter mapper and device monikers
+        (113, 0xD6EE_80DB_5F6E_99F9), // OLEAUT32's standard font and picture objects
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
