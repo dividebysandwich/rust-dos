@@ -1537,6 +1537,64 @@ fn a_wizard_with_no_pages_keeps_its_size() {
     );
 }
 
+/// A page added to a wizard of no pages (PSM_ADDPAGE, which doesn't
+/// resize the sheet) goes in the area above the wizard's line, which
+/// its template's size leaves for it.
+#[test]
+fn a_page_added_to_a_wizard_of_no_pages_goes_above_its_line() {
+    use Arg::*;
+    const PSP_DLGINDIRECT: u32 = 0x0001;
+    const PSH_PROPSHEETPAGE: u32 = 0x0008;
+    const PSH_WIZARD: u32 = 0x0020;
+    const PSH_MODELESS: u32 = 0x0400;
+    const PSM_ADDPAGE: u32 = 0x0467;
+    const PSM_GETCURRENTPAGEHWND: u32 = 0x0476;
+    const IDC_SUNKEN_LINE: u32 = 12326;
+    const HEADER: u32 = FREE;
+    const PAGE: u32 = FREE + 0x40;
+    const TEMPLATE: u32 = FREE + 0x80;
+    const CAPTION: u32 = FREE + 0xC0;
+    const PAGE_RECT: u32 = FREE + 0xE0;
+    const LINE_RECT: u32 = FREE + 0xF0;
+    let calls = [
+        call("InitCommonControls", &[]),
+        call("PropertySheetA", &[At(HEADER)]),
+        call("CreatePropertySheetPageA", &[At(PAGE)]),
+        send(1, PSM_ADDPAGE, I(0), Res(2)),
+        send(1, PSM_GETCURRENTPAGEHWND, I(0), I(0)),
+        call("GetWindowRect", &[Res(4), At(PAGE_RECT)]),
+        call("GetDlgItem", &[Res(1), I(IDC_SUNKEN_LINE)]),
+        call("GetWindowRect", &[Res(6), At(LINE_RECT)]),
+        call("DestroyWindow", &[Res(1)]),
+    ];
+    let base = data_address(&calls);
+    let mut d = data();
+    // A DLGTEMPLATE of a page with no controls, titled "Pg".
+    put32(&mut d, TEMPLATE, WS_CHILD);
+    put(&mut d, TEMPLATE + 8, &[0, 0, 0, 0, 0, 0, 100, 0, 50, 0]);
+    put(&mut d, TEMPLATE + 22, &[b'P', 0, b'g', 0, 0, 0]);
+    put(&mut d, CAPTION, b"Setup Wizard\0");
+    let page = [40, PSP_DLGINDIRECT, 0, base + TEMPLATE, 0, 0, 0, 0, 0, 0];
+    let flags = PSH_WIZARD | PSH_PROPSHEETPAGE | PSH_MODELESS;
+    let header = [40, flags, 0, 0, 0, base + CAPTION, 0, 0, 0, 0];
+    for (at, words) in [(PAGE, page), (HEADER, header)] {
+        for (i, w) in words.iter().enumerate() {
+            put32(&mut d, at + 4 * i as u32, *w);
+        }
+    }
+    let (cpu, at) = run("propsheet_add_to_empty", &d, &calls);
+    assert_eq!(at, base);
+    let r = results(&cpu, at, calls.len());
+    assert!(r[1] != 0 && r[1] != u32::MAX, "the sheet is made");
+    assert_eq!(r[3], 1, "the page is added");
+    assert_ne!(r[4], 0, "and made");
+    let rect = |at: u32| -> Vec<i32> { (0..4).map(|i| peek(&cpu, at + 4 * i) as i32).collect() };
+    let (page, line) = (rect(base + PAGE_RECT), rect(base + LINE_RECT));
+    assert!(page[2] - page[0] > 200, "the page is wide: {page:?}");
+    assert!(page[3] - page[1] > 100, "and high: {page:?}");
+    assert!(page[3] <= line[1], "above the line {line:?}: {page:?}");
+}
+
 /// MFC lays out its property pages in the font of COMCTL32's own sheet
 /// and wizard dialogs, which it reads from their resources
 /// (AfxGetPropSheetFont): Beasts and Bumpkins' setup came out with pages
