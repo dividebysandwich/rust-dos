@@ -30,6 +30,16 @@
 //! EnumDevicesBySemantics, ConfigureDevices) and device images aren't there
 //! (#378).
 //!
+//! Each object has Unicode interfaces as well, as on Windows:
+//! DirectInputCreateW and QueryInterface give IDirectInputW, 2W and 7W
+//! (IDirectInput8W of DINPUT8), and a device has IDirectInputDeviceW, 2W
+//! and 7W (IDirectInputDevice8W). They are a second block of the object,
+//! made when the program first asks for one, with the same reference
+//! count. Their vtables differ from the ANSI ones only in the methods
+//! that give strings, EnumDevices, EnumObjects, GetDeviceInfo and
+//! GetObjectInfo, whose structures have WCHAR names; a device that a
+//! Unicode interface creates has the Unicode interface.
+//!
 //! ("Sound and input" in docs/builtin-windows-architecture.md.)
 
 mod device;
@@ -128,6 +138,11 @@ static APIS: &[Api] = &[
     method("DID_SendDeviceData", 5, device::send_device_data),
     method("DID_EnumEffectsInFile", 5, device::effects_in_file),
     method("DID_WriteEffectToFile", 5, device::effects_in_file),
+    stdcall("DirectInputCreateW", 2, 4, direct_input_create_w),
+    method("DIW_EnumDevices", 5, enumerate::enum_devices_w),
+    method("DIDW_EnumObjects", 4, enumerate::enum_objects_w),
+    method("DIDW_GetObjectInfo", 4, device::get_object_info_w),
+    method("DIDW_GetDeviceInfo", 2, device::get_device_info_w),
 ];
 
 /// DINPUT8.DLL, DirectX 8.1's, with its exports' ordinals.
@@ -200,10 +215,14 @@ static APIS8: &[Api] = &[
     method("DID8_BuildActionMap", 4, device::action_map),
     method("DID8_SetActionMap", 4, device::action_map),
     method("DID8_GetImageInfo", 2, device::action_map),
+    method("DI8W_EnumDevices", 5, enumerate::enum_devices_w),
+    method("DID8W_EnumObjects", 4, enumerate::enum_objects_w),
+    method("DID8W_GetObjectInfo", 4, device::get_object_info_w),
+    method("DID8W_GetDeviceInfo", 2, device::get_device_info_w),
 ];
 
-/// DINPUT8's vtables, in the places DINPUT's have: IDirectInput8A and
-/// IDirectInputDevice8A.
+/// DINPUT8's vtables, in the places DINPUT's have: IDirectInput8A,
+/// IDirectInputDevice8A and their Unicode forms.
 static VTABLES8: &[Vtable] = &[
     Vtable {
         name: "IDirectInput8A",
@@ -258,11 +277,65 @@ static VTABLES8: &[Vtable] = &[
             "DID8_GetImageInfo",
         ],
     },
+    Vtable {
+        name: "IDirectInput8W",
+        methods: &[
+            "DI8_QueryInterface",
+            "DI8_AddRef",
+            "DI8_Release",
+            "DI8_CreateDevice",
+            "DI8W_EnumDevices",
+            "DI8_GetDeviceStatus",
+            "DI8_RunControlPanel",
+            "DI8_Initialize",
+            "DI8_FindDevice",
+            "DI8_EnumDevicesBySemantics",
+            "DI8_ConfigureDevices",
+        ],
+    },
+    Vtable {
+        name: "IDirectInputDevice8W",
+        methods: &[
+            "DID8_QueryInterface",
+            "DID8_AddRef",
+            "DID8_Release",
+            "DID8_GetCapabilities",
+            "DID8W_EnumObjects",
+            "DID8_GetProperty",
+            "DID8_SetProperty",
+            "DID8_Acquire",
+            "DID8_Unacquire",
+            "DID8_GetDeviceState",
+            "DID8_GetDeviceData",
+            "DID8_SetDataFormat",
+            "DID8_SetEventNotification",
+            "DID8_SetCooperativeLevel",
+            "DID8W_GetObjectInfo",
+            "DID8W_GetDeviceInfo",
+            "DID8_RunControlPanel",
+            "DID8_Initialize",
+            "DID8_CreateEffect",
+            "DID8_EnumEffects",
+            "DID8_GetEffectInfo",
+            "DID8_GetForceFeedbackState",
+            "DID8_SendForceFeedbackCommand",
+            "DID8_EnumCreatedEffectObjects",
+            "DID8_Escape",
+            "DID8_Poll",
+            "DID8_SendDeviceData",
+            "DID8_EnumEffectsInFile",
+            "DID8_WriteEffectToFile",
+            "DID8_BuildActionMap",
+            "DID8_SetActionMap",
+            "DID8_GetImageInfo",
+        ],
+    },
 ];
 
 /// The tables of methods: IDirectInput7A's, which IDirectInputA's and
 /// IDirectInput2A's are the start of, and IDirectInputDevice7A's, which
-/// IDirectInputDeviceA's and IDirectInputDevice2A's are.
+/// IDirectInputDeviceA's and IDirectInputDevice2A's are; then their
+/// Unicode forms.
 static VTABLES: &[Vtable] = &[
     Vtable {
         name: "IDirectInput7A",
@@ -313,12 +386,63 @@ static VTABLES: &[Vtable] = &[
             "DID_WriteEffectToFile",
         ],
     },
+    Vtable {
+        name: "IDirectInput7W",
+        methods: &[
+            "DI_QueryInterface",
+            "DI_AddRef",
+            "DI_Release",
+            "DI_CreateDevice",
+            "DIW_EnumDevices",
+            "DI_GetDeviceStatus",
+            "DI_RunControlPanel",
+            "DI_Initialize",
+            "DI_FindDevice",
+            "DI_CreateDeviceEx",
+        ],
+    },
+    Vtable {
+        name: "IDirectInputDevice7W",
+        methods: &[
+            "DID_QueryInterface",
+            "DID_AddRef",
+            "DID_Release",
+            "DID_GetCapabilities",
+            "DIDW_EnumObjects",
+            "DID_GetProperty",
+            "DID_SetProperty",
+            "DID_Acquire",
+            "DID_Unacquire",
+            "DID_GetDeviceState",
+            "DID_GetDeviceData",
+            "DID_SetDataFormat",
+            "DID_SetEventNotification",
+            "DID_SetCooperativeLevel",
+            "DIDW_GetObjectInfo",
+            "DIDW_GetDeviceInfo",
+            "DID_RunControlPanel",
+            "DID_Initialize",
+            "DID_CreateEffect",
+            "DID_EnumEffects",
+            "DID_GetEffectInfo",
+            "DID_GetForceFeedbackState",
+            "DID_SendForceFeedbackCommand",
+            "DID_EnumCreatedEffectObjects",
+            "DID_Escape",
+            "DID_Poll",
+            "DID_SendDeviceData",
+            "DID_EnumEffectsInFile",
+            "DID_WriteEffectToFile",
+        ],
+    },
 ];
 
 /// The places of the vtables in `VTABLES`, and of DirectInput 8's in
-/// `VTABLES8`.
+/// `VTABLES8`: the ANSI interfaces, then the Unicode ones at the same
+/// places plus `WIDE`.
 const DIRECT_INPUT: usize = 0;
 const DEVICE: usize = 1;
+const WIDE: usize = 2;
 
 /// DirectInput's results.
 pub const DI_OK: u32 = S_OK;
@@ -378,6 +502,35 @@ const IID_IDIRECT_INPUT_8A: Guid = Guid::new(
     0x4DA2,
     [0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00],
 );
+const IID_IDIRECT_INPUT_W: Guid = Guid::new(
+    0x8952_1361,
+    0xAA8A,
+    0x11CF,
+    [0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0],
+);
+const IID_IDIRECT_INPUT_2W: Guid = Guid::new(
+    0x5944_E663,
+    0xAA8A,
+    0x11CF,
+    [0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0],
+);
+const IID_IDIRECT_INPUT_7W: Guid = Guid::new(
+    0x9A4C_B685,
+    0x236D,
+    0x11D3,
+    [0x8E, 0x9D, 0x00, 0xC0, 0x4F, 0x68, 0x44, 0xAE],
+);
+const IID_IDIRECT_INPUT_8W: Guid = Guid::new(
+    0xBF79_8031,
+    0x483A,
+    0x4DA2,
+    [0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00],
+);
+
+/// The W32 section's version that saves an object's Unicode interface
+/// (`Object::wide`). An older state's objects load without one, and
+/// make it when the program first asks for it.
+pub const WIDE_SAVED: u16 = 115;
 
 /// The one version of DirectInput DirectInput8Create takes.
 const VERSION_8: u32 = 0x800;
@@ -435,8 +588,11 @@ pub static CLASSES8: &[com::Class] = &[
 pub struct Object {
     /// The process it is in.
     pub pid: u32,
-    /// Its interface's block, which all its interfaces are.
+    /// Its ANSI interface's block, which all its ANSI interfaces are.
     pub this: u32,
+    /// Its Unicode interface's block, which all its Unicode interfaces
+    /// are, or 0 before the program asks for one.
+    pub wide: crate::savestate::Since<{ WIDE_SAVED }, u32>,
     pub refs: u32,
     /// The DirectInput version it was made for, or 0 before Initialize.
     pub version: u32,
@@ -569,16 +725,16 @@ fn version_of(cpu: &mut Cpu, id: u32) -> u32 {
 }
 
 /// The object whose interface `this` is, if it is one of DINPUT's or
-/// DINPUT8's with the vtable `vtable`: its id.
+/// DINPUT8's with the vtable `vtable` or its Unicode form: its id.
 fn object_of(cpu: &mut Cpu, this: u32, vtable: usize) -> Option<u32> {
     match interface_of(cpu, this)? {
         // A device's interface needs a device: the id in a forged one may
         // be that of the DirectInput object.
         (v, id)
-            if v == vtable
+            if v % WIDE == vtable
                 && state(cpu)
                     .object(id)
-                    .is_some_and(|o| v != DEVICE || o.device.is_some()) =>
+                    .is_some_and(|o| vtable != DEVICE || o.device.is_some()) =>
         {
             Some(id)
         }
@@ -586,22 +742,29 @@ fn object_of(cpu: &mut Cpu, this: u32, vtable: usize) -> Option<u32> {
     }
 }
 
+/// Whether `this` is a Unicode interface.
+fn is_wide(cpu: &mut Cpu, this: u32) -> bool {
+    interface_of(cpu, this).is_some_and(|(v, _)| v >= WIDE)
+}
+
 /// A new object of the running process, with one reference, DINPUT8's
-/// if `eight`: its interface, or None when the heap is full.
+/// if `eight`: its interface, the Unicode one if `wide`, or None when
+/// the heap is full.
 fn new_object(
     cpu: &mut Cpu,
     vtable: usize,
     eight: bool,
     version: u32,
     device: Option<device::Device>,
+    wide: bool,
 ) -> Option<u32> {
     let pid = super::user32::current_pid(cpu);
     let id = state(cpu).add(Object {
         pid,
-        this: 0,
         refs: 1,
         version,
         device,
+        ..Object::default()
     });
     let dll = if eight { dll8_index() } else { dll_index() };
     let Some(this) = com::new_interface(cpu, dll, vtable, id, 0) else {
@@ -611,7 +774,37 @@ fn new_object(
     if let Some(o) = state(cpu).object_mut(id) {
         o.this = this;
     }
-    Some(this)
+    if !wide {
+        return Some(this);
+    }
+    let it = interface(cpu, id, true);
+    if it.is_none() {
+        release_object(cpu, id);
+    }
+    it
+}
+
+/// The interface of the object `id`, the Unicode one if `wide`, which is
+/// made when it is first asked for; None when the heap is full.
+fn interface(cpu: &mut Cpu, id: u32, wide: bool) -> Option<u32> {
+    let o = state(cpu).object(id)?;
+    if !wide {
+        return Some(o.this);
+    }
+    if *o.wide != 0 {
+        return Some(*o.wide);
+    }
+    let vtable = WIDE + if o.device.is_some() { DEVICE } else { DIRECT_INPUT };
+    let dll = if is_eight(cpu, id) {
+        dll8_index()
+    } else {
+        dll_index()
+    };
+    let it = com::new_interface(cpu, dll, vtable, id, 0)?;
+    if let Some(o) = state(cpu).object_mut(id) {
+        *o.wide = it;
+    }
+    Some(it)
 }
 
 /// Take a reference of the object `id` away: it goes with the last one.
@@ -624,7 +817,7 @@ fn release_object(cpu: &mut Cpu, id: u32) -> u32 {
     if o.refs > 0 {
         return o.refs;
     }
-    let this = o.this;
+    let (this, wide) = (o.this, *o.wide);
     if let Some(d) = state(cpu).objects[id as usize - 1]
         .take()
         .and_then(|o| o.device)
@@ -632,6 +825,9 @@ fn release_object(cpu: &mut Cpu, id: u32) -> u32 {
         device::destroyed(cpu, d);
     }
     com::free_interface(cpu, this);
+    if wide != 0 {
+        com::free_interface(cpu, wide);
+    }
     0
 }
 
@@ -674,19 +870,36 @@ fn check_version(hinst: u32, version: u32, eight: bool) -> Result<(), u32> {
     }
 }
 
-/// Whether `iid` is one of the DirectInput object's interfaces:
-/// IDirectInput8A alone for DirectInput 8's (`eight`).
-fn is_direct_input_iid(iid: &Guid, eight: bool) -> bool {
-    if eight {
-        return [IID_IUNKNOWN, IID_IDIRECT_INPUT_8A].contains(iid);
+/// Whether `iid` is one of the DirectInput object's interfaces, and
+/// whether it is a Unicode one: IDirectInput8A and 8W alone for
+/// DirectInput 8's (`eight`). IUnknown is the ANSI interface, as in
+/// Wine.
+fn direct_input_iid(iid: &Guid, eight: bool) -> Option<bool> {
+    let (ansi, wide): (&[Guid], &[Guid]) = if eight {
+        (
+            &[IID_IUNKNOWN, IID_IDIRECT_INPUT_8A],
+            &[IID_IDIRECT_INPUT_8W],
+        )
+    } else {
+        (
+            &[
+                IID_IUNKNOWN,
+                IID_IDIRECT_INPUT_A,
+                IID_IDIRECT_INPUT_2A,
+                IID_IDIRECT_INPUT_7A,
+            ],
+            &[
+                IID_IDIRECT_INPUT_W,
+                IID_IDIRECT_INPUT_2W,
+                IID_IDIRECT_INPUT_7W,
+            ],
+        )
+    };
+    if ansi.contains(iid) {
+        Some(false)
+    } else {
+        wide.contains(iid).then_some(true)
     }
-    [
-        IID_IUNKNOWN,
-        IID_IDIRECT_INPUT_A,
-        IID_IDIRECT_INPUT_2A,
-        IID_IDIRECT_INPUT_7A,
-    ]
-    .contains(iid)
 }
 
 fn result(r: Result<u32, u32>) -> Option<u32> {
@@ -722,10 +935,10 @@ fn create_direct_input_8(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
 }
 
 fn create_uninitialized(cpu: &mut Cpu, iid: &Guid, out: u32, eight: bool) -> u32 {
-    if !is_direct_input_iid(iid, eight) {
+    let Some(wide) = direct_input_iid(iid, eight) else {
         return E_NOINTERFACE;
-    }
-    let Some(this) = new_object(cpu, DIRECT_INPUT, eight, 0, None) else {
+    };
+    let Some(this) = new_object(cpu, DIRECT_INPUT, eight, 0, None, wide) else {
         return E_OUTOFMEMORY;
     };
     if !com::write_out(cpu, out, this) {
@@ -743,6 +956,21 @@ fn direct_input_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         hinst,
         version,
         &IID_IDIRECT_INPUT_A,
+        out,
+        outer,
+        false,
+    ))
+}
+
+/// DirectInputCreateW(hinst, version, out, outer): the same with
+/// IDirectInputW.
+fn direct_input_create_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (hinst, version, out, outer) = (args[0], args[1], args[2], args[3]);
+    Some(create(
+        cpu,
+        hinst,
+        version,
+        &IID_IDIRECT_INPUT_W,
         out,
         outer,
         false,
@@ -782,13 +1010,13 @@ fn create(
     if outer != 0 {
         return CLASS_E_NOAGGREGATION;
     }
-    if !is_direct_input_iid(iid, eight) {
+    let Some(wide) = direct_input_iid(iid, eight) else {
         return E_NOINTERFACE;
-    }
+    };
     if let Err(e) = check_version(hinst, version, eight) {
         return e;
     }
-    match new_object(cpu, DIRECT_INPUT, eight, version, None) {
+    match new_object(cpu, DIRECT_INPUT, eight, version, None, wide) {
         Some(this) => {
             com::write_out(cpu, out, this);
             DI_OK
@@ -821,13 +1049,13 @@ fn di_query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if !com::write_out(cpu, out, 0) {
             return Err(E_POINTER);
         }
-        if !is_direct_input_iid(&iid, is_eight(cpu, id)) {
-            return Err(E_NOINTERFACE);
-        }
+        let eight = is_eight(cpu, id);
+        let wide = direct_input_iid(&iid, eight).ok_or(E_NOINTERFACE)?;
+        let it = interface(cpu, id, wide).ok_or(E_OUTOFMEMORY)?;
         if let Some(o) = state(cpu).object_mut(id) {
             o.refs += 1;
         }
-        com::write_out(cpu, out, this);
+        com::write_out(cpu, out, it);
         Ok(S_OK)
     })();
     result(r)
@@ -865,7 +1093,8 @@ fn di_create_device_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// A device of the DirectInput object `this`, with the interface `iid`,
-/// or with the one its CreateDevice gives for None.
+/// or with the one its CreateDevice gives for None: the Unicode one of a
+/// Unicode `this`.
 fn create_device(
     cpu: &mut Cpu,
     this: u32,
@@ -887,17 +1116,14 @@ fn create_device(
         return Err(CLASS_E_NOAGGREGATION);
     }
     let eight = is_eight(cpu, id);
-    let iid = iid.copied().unwrap_or(if eight {
-        device::IID_IDIRECT_INPUT_DEVICE_8A
-    } else {
-        device::IID_IDIRECT_INPUT_DEVICE_A
-    });
-    if !device::is_device_iid(&iid, eight) {
-        return Err(E_NOINTERFACE);
-    }
+    let wide = match iid {
+        Some(iid) => device::device_interface(iid, eight).ok_or(E_NOINTERFACE)?,
+        None => is_wide(cpu, this),
+    };
     let kind = objects::kind_of(cpu, &guid, version).ok_or(DIERR_DEVICENOTREG)?;
     let device = device::Device::new(id, kind, objects::shape(cpu, kind));
-    let this = new_object(cpu, DEVICE, eight, version, Some(device)).ok_or(E_OUTOFMEMORY)?;
+    let this =
+        new_object(cpu, DEVICE, eight, version, Some(device), wide).ok_or(E_OUTOFMEMORY)?;
     if let Some(o) = state(cpu).object_mut(id) {
         o.refs += 1;
     }
@@ -971,6 +1197,7 @@ fn di_action_maps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 crate::state_fields!(Object {
     pid,
     this,
+    wide,
     refs,
     version,
     device

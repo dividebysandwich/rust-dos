@@ -21,6 +21,7 @@ mod win32_d3d8_tests;
 mod win32_d3d_tests;
 mod win32_ddraw_tests;
 mod win32_dinput_tests;
+mod win32_dinput_unicode_tests;
 mod win32_dll_files_tests;
 mod win32_dmusic_tests;
 mod win32_dpnet_tests;
