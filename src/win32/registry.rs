@@ -1014,6 +1014,36 @@ pub fn string_values(cpu: &mut Cpu, keys: &[(u32, &str)]) -> Vec<Vec<(String, St
     values
 }
 
+/// The subkeys of the key `path` under the predefined key `hkey` that
+/// have a string value `name`, as (subkey's name, text), in the order
+/// RegEnumKeyA lists them: MSACM32's drivers under MediaResources\ACM.
+/// As `string_values`, the registry is let go after with no program
+/// running.
+pub fn subkey_strings(cpu: &mut Cpu, hkey: u32, path: &str, name: &str) -> Vec<(String, String)> {
+    let idle = cpu.bus.win32.processes.is_empty();
+    let registry = get(cpu);
+    let found = match registry.open(hkey, 0) {
+        Open::Key(root) => registry.find(root, path).map_or_else(Vec::new, |key| {
+            registry
+                .key(key)
+                .children
+                .iter()
+                .filter_map(|&child| {
+                    let value = registry.value(child, name)?;
+                    let text = (value.kind == REG_SZ || value.kind == REG_EXPAND_SZ)
+                        .then(|| value.text())?;
+                    Some((registry.key(child).name.clone(), text))
+                })
+                .collect()
+        }),
+        _ => Vec::new(),
+    };
+    if idle {
+        cpu.bus.win32.registry = Registry::default();
+    }
+    found
+}
+
 /// Whether the key `path` under the predefined key `hkey` has a value
 /// named `name` (in any case), of any type. As `string_values`, the
 /// registry is let go after with no program running.
