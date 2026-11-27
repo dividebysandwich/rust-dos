@@ -410,7 +410,8 @@ fn decodes(fourcc: u32, compression: u32) -> bool {
 /// one of the codec's that codec.rs decodes, and the output an
 /// uncompressed DIB of its size of 16, 24 or 32 bits. codec.rs gives a
 /// picture of 24 bits, which is written in the output's format.
-/// Cinepak's 8 bits, in iccvid.dll's own palette, aren't given here.
+/// Cinepak's 8 bits, in iccvid.dll's own palette, aren't given here
+/// (#2202), though iccvid.dll gives them.
 fn codec_formats(
     cpu: &mut Cpu,
     fourcc: u32,
@@ -515,9 +516,10 @@ fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 return Some(ICERR_BADPARAM);
             }
             let field = |cpu: &mut Cpu, n: u32| cpu.bus.guest_read_32(dw1 + 4 * n);
-            let (input, data) = (field(cpu, 1), field(cpu, 2));
+            let (flags, input, data) = (field(cpu, 0), field(cpu, 1), field(cpu, 2));
             let (output, bits) = (field(cpu, 3), field(cpu, 4));
-            decompress_with(cpu, hic, fourcc, input, data, output, bits)
+            let frame = Frame { flags, data };
+            decompress_with(cpu, hic, fourcc, input, frame, output, bits)
         }
         // Microsoft Video 1 keeps nothing between frames: each is drawn
         // onto the output, which holds the frame before. The other
@@ -533,13 +535,33 @@ fn ic_send_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// ICDecompress(hic, dwFlags, lpbiFormat, lpData, lpbi, lpBits), which
 /// sends the codec ICM_DECOMPRESS: ICERR_OK, or an error.
 fn ic_decompress(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[hic, _flags, input, data, output, bits] = args else {
+    let &[hic, flags, input, data, output, bits] = args else {
         unreachable!()
     };
+    let frame = Frame { flags, data };
     Some(match open_codec(cpu, hic) {
-        Some(fourcc) => decompress_with(cpu, hic, fourcc, input, data, output, bits),
+        Some(fourcc) => decompress_with(cpu, hic, fourcc, input, frame, output, bits),
         None => ICERR_BADHANDLE,
     })
+}
+
+/// ICDECOMPRESS's dwFlags ICDECOMPRESS_NULLFRAME: the frame has no data,
+/// and the picture stays as it is: an AVI's empty chunk, for one, whose
+/// `lpInput` may still hold the frame before.
+const ICDECOMPRESS_NULLFRAME: u32 = 0x1000_0000;
+
+/// A frame to decompress: ICDECOMPRESS's dwFlags and lpInput.
+#[derive(Clone, Copy)]
+struct Frame {
+    flags: u32,
+    data: u32,
+}
+
+impl Frame {
+    /// Whether the frame has no data to decode (ICDECOMPRESS_NULLFRAME).
+    fn null(self) -> bool {
+        self.flags & ICDECOMPRESS_NULLFRAME != 0
+    }
 }
 
 /// ICM_DECOMPRESS of the codec `fourcc` open as `hic`.
@@ -548,14 +570,14 @@ fn decompress_with(
     hic: u32,
     fourcc: u32,
     input: u32,
-    data: u32,
+    frame: Frame,
     output: u32,
     bits: u32,
 ) -> u32 {
     if fourcc == MSVC {
-        decompress(cpu, input, data, output, bits)
+        decompress(cpu, input, frame, output, bits)
     } else {
-        decompress_picture(cpu, hic, fourcc, input, data, output, bits)
+        decompress_picture(cpu, hic, fourcc, input, frame, output, bits)
     }
 }
 
@@ -600,8 +622,8 @@ fn decompress_get_format(cpu: &mut Cpu, fourcc: u32, input: u32, output: u32) ->
 /// draws in place: the blocks a frame skips keep what the DIB had, which
 /// is the frame before when the program decodes every frame to one
 /// buffer. A frame cut short draws the blocks before its end and is
-/// logged.
-fn decompress(cpu: &mut Cpu, input: u32, data: u32, output: u32, bits: u32) -> u32 {
+/// logged. A null frame draws nothing.
+fn decompress(cpu: &mut Cpu, input: u32, frame: Frame, output: u32, bits: u32) -> u32 {
     let (source, (layout, top_down)) = match ms_video_1_formats(cpu, input, output) {
         Ok((source, Some(layout))) => (source, layout),
         Ok((_, None)) => return ICERR_BADPARAM,
@@ -615,6 +637,11 @@ fn decompress(cpu: &mut Cpu, input: u32, data: u32, output: u32, bits: u32) -> u
     if bits == 0 || !allows(cpu, bits, size, true) {
         return ICERR_BADPARAM;
     }
+    // The DIB holds the picture before, which a null frame keeps.
+    if frame.null() {
+        return ICERR_OK;
+    }
+    let data = frame.data;
     // The frame's size is the input's biSizeImage, as for DrawDibDraw's
     // frames, and is at most a code and eight 16-bit colours a block. A
     // biSizeImage of 0 says nothing: the frame ends where its last block
@@ -647,15 +674,15 @@ fn decompress(cpu: &mut Cpu, input: u32, data: u32, output: u32, bits: u32) -> u
 /// the DIB `bits` of the format at `output`. The decoder keeps the
 /// picture between frames, as the codecs' drivers do, so a frame that
 /// changes part of it gives the whole picture. A frame the decoder
-/// refuses is logged, and the DIB gets the picture as it stands; with no
-/// picture yet (after a restore, before a key frame) the DIB is left as
-/// it is.
+/// refuses is logged, and the DIB gets the picture as it stands, as it
+/// does for a null frame; with no picture yet (after a restore, before a
+/// key frame) the DIB is left as it is.
 fn decompress_picture(
     cpu: &mut Cpu,
     hic: u32,
     fourcc: u32,
     input: u32,
-    data: u32,
+    frame: Frame,
     output: u32,
     bits: u32,
 ) -> u32 {
@@ -673,11 +700,13 @@ fn decompress_picture(
     }
     // As for DrawDibDraw's frames: a frame's own header has its size,
     // and biSizeImage (or a 24-bit picture's size when that is 0) is
-    // only the most it can be.
+    // only the most it can be. A null frame has none.
     let most = match read_info(cpu, input).map_or(0, |i| i.size_image) {
+        _ if frame.null() => 0,
         0 => codec::dib_size(24, width, height).unwrap_or(0),
         size => size,
     };
+    let data = frame.data;
     let mut frame = vec![0; readable(cpu, data, most) as usize];
     cpu.bus.guest_read_bytes(data, &mut frame);
     let slot = hic as usize - 1;

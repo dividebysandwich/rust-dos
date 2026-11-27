@@ -20843,11 +20843,14 @@ fn cinepak_frame(flags: u8, chunks: &[Vec<u8>]) -> Vec<u8> {
 
 /// ICDecompress decodes Cinepak frames to the program's 16-bit buffer,
 /// as Outlaw Racers plays its films: ICLocate finds iccvid.dll for a
-/// `cvid` stream and an RGB555 output (and none for 8 bits, whose
-/// palette is the codec's own), and the decoder keeps its picture and
-/// codebooks from frame to frame, so a frame that skips a block gives
-/// the block it had. ICM_DECOMPRESS_GET_FORMAT gives 24 bits. The
-/// program ends with a bit set for each check that held.
+/// `cvid` stream and an RGB555 output, and the decoder keeps its picture
+/// and codebooks from frame to frame, so a frame that skips a block
+/// gives the block it had. A null frame (ICDECOMPRESS_NULLFRAME) keeps
+/// the picture whatever its lpInput holds: here the key frame, which
+/// would undo the second. ICM_DECOMPRESS_GET_FORMAT gives 24 bits. For
+/// an 8-bit output ICLocate finds none, though on Windows iccvid.dll
+/// decodes to a palette of its own (#2202). The program ends with a bit
+/// set for each check that held.
 #[test]
 fn icdecompress_decodes_cinepak_frames_to_16_bits() {
     let kernel32: &[&str] = &["ExitProcess"];
@@ -20878,6 +20881,7 @@ fn icdecompress_decodes_cinepak_frames_to_16_bits() {
     data.extend_from_slice(&[0xCC; 64]);
     data.resize(FORMAT + 0x100, 0);
     const ICM_DECOMPRESS_GET_FORMAT: i32 = 0x400A;
+    const ICDECOMPRESS_NULLFRAME: i32 = 0x1000_0000;
     // RGB555 of grey 200 and of grey 90.
     const GREY_200: u32 = 0x6739_6739;
     const GREY_90: u32 = 0x2D6B_2D6B;
@@ -20900,8 +20904,8 @@ fn icdecompress_decodes_cinepak_frames_to_16_bits() {
         a.setnz(al)?;
         a.shl(al, 1)?;
         a.or(bl, al)?;
-        let decompress = |a: &mut CodeAssembler, frame: usize| {
-            push_args(a, &[0, 0, at(0), at(frame), at(OUT), at(BITS)])?;
+        let decompress = |a: &mut CodeAssembler, flags: i32, frame: usize| {
+            push_args(a, &[0, flags, at(0), at(frame), at(OUT), at(BITS)])?;
             a.mov(dword_ptr(esp), esi)?;
             a.call(f("ICDecompress"))?;
             a.add(esp, 24)?;
@@ -20910,15 +20914,18 @@ fn icdecompress_decodes_cinepak_frames_to_16_bits() {
         // Rows of 8 pixels of 2 bytes; the left block's first two
         // pixels, then the right block's.
         let pixels = |y: u32, x: u32| dword_ptr(l.at(BITS as u32 + 16 * y + 2 * x));
-        decompress(a, FRAMES)?;
+        decompress(a, 0, FRAMES)?;
         bit_if_equal(a, 2)?;
         a.cmp(pixels(0, 0), GREY_200 as i32)?;
         bit_if_equal(a, 3)?;
         a.cmp(pixels(3, 4), GREY_200 as i32)?;
         bit_if_equal(a, 4)?;
-        decompress(a, FRAMES + 0x40)?;
+        decompress(a, 0, FRAMES + 0x40)?;
         a.cmp(pixels(3, 0), GREY_200 as i32)?;
         bit_if_equal(a, 5)?;
+        // The right block is grey 90 after the second frame, and stays
+        // so through a null frame that points at the key frame.
+        decompress(a, ICDECOMPRESS_NULLFRAME, FRAMES)?;
         a.cmp(pixels(0, 4), GREY_90 as i32)?;
         bit_if_equal(a, 6)?;
         push_args(a, &[0, ICM_DECOMPRESS_GET_FORMAT, at(0), at(FORMAT)])?;
