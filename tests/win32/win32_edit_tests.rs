@@ -191,25 +191,31 @@ const SB_PAGEDOWN: u32 = 3;
 const VK_PRIOR: u32 = 0x21;
 const VK_NEXT: u32 = 0x22;
 
-/// Page Down and Page Up in a multi-line edit, and EM_SCROLL's and
-/// WM_VSCROLL's pages. Windows 98 SE scrolls a page of one line less
-/// than the edit shows, and puts the caret where a click at its old
-/// place in the window would: it keeps its row and column, and one out
-/// of view goes to the line next to the view on its side. A probe on
-/// Windows 98 SE in 86Box sent these keys and messages to edits of 9,
-/// 10 and 1 lines from these starting points; the values below are what
-/// it gave for 9 lines. Only the setting up differs: there EM_SETSEL
-/// leaves the view as it is (#2237), so the calls here put the view in
-/// place after it.
-#[test]
-fn page_keys_scroll_a_page() {
+const S_STATIC: u32 = FREE;
+const S_EDIT: u32 = FREE + 0x10;
+const RECT: u32 = FREE + 0x20;
+const TEXT: u32 = FREE + 0x40;
+
+/// SendMessageA to the edit, the result of call 1.
+fn send(msg: u32, wp: u32, lp: u32) -> Call {
+    call(
+        "SendMessageA",
+        &[Arg::Res(1), Arg::I(msg), Arg::I(wp), Arg::I(lp)],
+    )
+}
+
+/// Where column `col` of line `line` is: each line is 9 bytes with its
+/// break.
+fn at(line: u32, col: u32) -> u32 {
+    line * 9 + col
+}
+
+/// The data and the first calls of a program that makes a window with an
+/// edit `height` pixels high in it (call 1), in the fixed font, with 100
+/// lines "line 00" to "line 99", the focus, and its format rectangle at
+/// RECT.
+fn edit_program(height: u32) -> (Vec<u8>, Vec<Call>) {
     use Arg::*;
-    // The edit's 100 lines, "line 00" to "line 99", 9 bytes each with
-    // the line break.
-    const S_STATIC: u32 = FREE;
-    const S_EDIT: u32 = FREE + 0x10;
-    const RECT: u32 = FREE + 0x20;
-    const TEXT: u32 = FREE + 0x40;
     let mut d = vec![0u8; DATA_SIZE];
     let put = |d: &mut [u8], at: u32, bytes: &[u8]| {
         d[at as usize..at as usize + bytes.len()].copy_from_slice(bytes)
@@ -218,11 +224,7 @@ fn page_keys_scroll_a_page() {
     put(&mut d, S_EDIT, b"Edit\0");
     let text: Vec<String> = (0..100).map(|i| format!("line {i:02}")).collect();
     put(&mut d, TEXT, text.join("\r\n").as_bytes());
-    let send = |msg: u32, wp: u32, lp: u32| call("SendMessageA", &[Res(1), I(msg), I(wp), I(lp)]);
-    let key = |vk: u32| send(WM_KEYDOWN, vk, 1);
-    let first = || send(EM_GETFIRSTVISIBLELINE, 0, 0);
-    let sel = || send(EM_GETSEL, 0, 0);
-    let mut calls = vec![
+    let calls = vec![
         call(
             "CreateWindowExA",
             &[
@@ -256,8 +258,7 @@ fn page_keys_scroll_a_page() {
                 I(0),
                 I(0),
                 I(300),
-                // Nine lines of the fixed font, 16 pixels high.
-                I(162),
+                I(height),
                 Res(0),
                 I(1),
                 I(0),
@@ -270,79 +271,39 @@ fn page_keys_scroll_a_page() {
         call("SetFocus", &[Res(1)]),
         call("SendMessageA", &[Res(1), I(EM_GETRECT), I(0), At(RECT)]),
     ];
-    // (what was done, the call that gives the first line in view, the
-    // one that gives the selection, the expected first line and caret).
-    let mut checks: Vec<(&str, usize, usize, u32, u32)> = Vec::new();
-    let mut check = |calls: &mut Vec<Call>, what, line, caret| {
-        calls.push(first());
-        calls.push(sel());
-        checks.push((what, calls.len() - 2, calls.len() - 1, line, caret));
-    };
-    let at = |line: u32, col: u32| line * 9 + col;
-    // From the top: a page is 8 lines, and the caret keeps its row.
-    calls.push(key(VK_NEXT));
-    check(&mut calls, "Page Down from the top", 8, at(8, 0));
-    calls.push(key(VK_NEXT));
-    check(&mut calls, "Page Down again", 16, at(16, 0));
-    calls.push(key(VK_PRIOR));
-    check(&mut calls, "Page Up", 8, at(8, 0));
-    // The caret keeps its column too.
-    calls.push(send(EM_SETSEL, 0, 0));
-    calls.push(send(EM_SCROLLCARET, 0, 0));
-    calls.push(send(EM_SETSEL, at(3, 4), at(3, 4)));
-    calls.push(key(VK_NEXT));
-    check(&mut calls, "Page Down from row 3", 8, at(11, 4));
-    calls.push(key(VK_PRIOR));
-    check(&mut calls, "Page Up to row 3", 0, at(3, 4));
-    // At the end the view stops with the last line at its bottom, and
-    // the caret moves as far as the view did.
-    calls.push(send(EM_LINESCROLL, 0, 85));
-    calls.push(send(EM_SETSEL, at(86, 0), at(86, 0)));
-    calls.push(key(VK_NEXT));
-    check(&mut calls, "Page Down near the end", 91, at(92, 0));
-    calls.push(key(VK_NEXT));
-    check(&mut calls, "Page Down at the end", 91, at(92, 0));
-    // A caret below the view: the line just below the page's view,
-    // which the view then follows by one line.
-    calls.push(send(EM_SETSEL, 0, 0));
-    calls.push(send(EM_SCROLLCARET, 0, 0));
-    calls.push(send(EM_SETSEL, at(30, 3), at(30, 3)));
-    calls.push(send(EM_LINESCROLL, 0, (-30i32) as u32));
-    calls.push(key(VK_NEXT));
-    check(&mut calls, "Page Down, caret below", 9, at(17, 3));
-    // A caret above the view: the line just above it. Line 10 is in
-    // view, so the view stays at 9 and then moves to 40.
-    calls.push(send(EM_SETSEL, at(10, 3), at(10, 3)));
-    calls.push(send(EM_LINESCROLL, 0, 31));
-    calls.push(key(VK_PRIOR));
-    check(&mut calls, "Page Up, caret above", 31, at(31, 3));
-    // EM_SCROLL's page: the lines it moved in the low word, 1 above.
-    calls.push(send(EM_SETSEL, 0, 0));
-    calls.push(send(EM_SCROLLCARET, 0, 0));
-    let scrolls = calls.len();
-    calls.push(send(EM_SCROLL, SB_PAGEDOWN, 0));
-    calls.push(send(EM_SCROLL, SB_PAGEDOWN, 0));
-    calls.push(send(EM_SCROLL, SB_PAGEUP, 0));
-    check(&mut calls, "EM_SCROLL pages", 8, 0);
-    // Page up from line 3 moves 3 lines.
-    calls.push(send(EM_LINESCROLL, 0, (-5i32) as u32));
-    let up = calls.len();
-    calls.push(send(EM_SCROLL, SB_PAGEUP, 0));
-    calls.push(send(EM_SCROLL, SB_PAGEUP, 0));
-    check(&mut calls, "EM_SCROLL page up to the top", 0, 0);
-    calls.push(send(WM_VSCROLL, SB_PAGEDOWN, 0));
-    check(&mut calls, "WM_VSCROLL page down", 8, 0);
-    calls.push(send(EM_LINESCROLL, 0, 82));
-    let end = calls.len();
-    calls.push(send(EM_SCROLL, SB_PAGEDOWN, 0));
-    calls.push(send(EM_SCROLL, SB_PAGEDOWN, 0));
-    check(&mut calls, "EM_SCROLL page down to the end", 91, 0);
+    (d, calls)
+}
 
-    let (r, cpu, data) = run("page_keys", &d, &calls);
+/// Put the caret at `caret` and the view at line `first`, whether or not
+/// EM_SETSEL scrolls the caret into view (#2237).
+fn place(calls: &mut Vec<Call>, first: u32, caret: u32) {
+    calls.push(send(EM_SETSEL, caret, caret));
+    calls.push(send(EM_LINESCROLL, 0, (-100i32) as u32));
+    calls.push(send(EM_LINESCROLL, 0, first));
+}
+
+/// The checks a test makes of the first line in view and the caret: what
+/// was done, the call that gives the first line, the one that gives the
+/// selection, and the line and caret expected.
+type Checks = Vec<(&'static str, usize, usize, u32, u32)>;
+
+/// Ask for the first line in view and the selection, and expect `line`
+/// and an empty selection at `caret`.
+fn check(calls: &mut Vec<Call>, checks: &mut Checks, what: &'static str, line: u32, caret: u32) {
+    calls.push(send(EM_GETFIRSTVISIBLELINE, 0, 0));
+    calls.push(send(EM_GETSEL, 0, 0));
+    checks.push((what, calls.len() - 2, calls.len() - 1, line, caret));
+}
+
+/// Run the program `calls` with `d`, check that its edit shows `shown`
+/// lines and that the calls returned what `checks` expects, and give
+/// what each call returned.
+fn run_checks(test: &str, d: &[u8], calls: &[Call], shown: u32, checks: Checks) -> Vec<u32> {
+    let (r, cpu, data) = run(test, d, calls);
     assert_ne!(r[1], 0, "the edit is made");
     let top = peek(&cpu, data + RECT + 4);
     let bottom = peek(&cpu, data + RECT + 12);
-    assert_eq!((bottom - top) / 16, 9, "the edit shows 9 lines");
+    assert_eq!((bottom - top) / 16, shown, "the edit shows {shown} lines");
     for (what, first, sel, line, caret) in checks {
         assert_eq!(
             (r[first], r[sel] >> 16, r[sel] & 0xFFFF),
@@ -350,9 +311,204 @@ fn page_keys_scroll_a_page() {
             "{what}: the first line in view, and the selection"
         );
     }
+    r
+}
+
+/// Page Down and Page Up in a multi-line edit, and EM_SCROLL's and
+/// WM_VSCROLL's pages. Windows 98 SE scrolls a page of one line less
+/// than the edit shows, and puts the caret where a click at its old
+/// place in the window would: it keeps its row and column, and one out
+/// of view goes to the line next to the view on its side. A probe on
+/// Windows 98 SE in 86Box sent these keys and messages to edits of 9,
+/// 10 and 1 lines from these starting points; the values below are what
+/// it gave for 9 lines. Only the setting up differs: there EM_SETSEL
+/// leaves the view as it is (#2237), so the calls here put the view in
+/// place after it.
+#[test]
+fn page_keys_scroll_a_page() {
+    // Nine lines of the fixed font, 16 pixels high, and the border.
+    let (d, mut calls) = edit_program(162);
+    let mut checks = Checks::new();
+    let key = |vk: u32| send(WM_KEYDOWN, vk, 1);
+    // From the top: a page is 8 lines, and the caret keeps its row.
+    calls.push(key(VK_NEXT));
+    check(
+        &mut calls,
+        &mut checks,
+        "Page Down from the top",
+        8,
+        at(8, 0),
+    );
+    calls.push(key(VK_NEXT));
+    check(&mut calls, &mut checks, "Page Down again", 16, at(16, 0));
+    calls.push(key(VK_PRIOR));
+    check(&mut calls, &mut checks, "Page Up", 8, at(8, 0));
+    // The caret keeps its column too.
+    calls.push(send(EM_SETSEL, 0, 0));
+    calls.push(send(EM_SCROLLCARET, 0, 0));
+    calls.push(send(EM_SETSEL, at(3, 4), at(3, 4)));
+    calls.push(key(VK_NEXT));
+    check(
+        &mut calls,
+        &mut checks,
+        "Page Down from row 3",
+        8,
+        at(11, 4),
+    );
+    calls.push(key(VK_PRIOR));
+    check(&mut calls, &mut checks, "Page Up to row 3", 0, at(3, 4));
+    // At the end the view stops with the last line at its bottom, and
+    // the caret moves as far as the view did.
+    calls.push(send(EM_LINESCROLL, 0, 85));
+    calls.push(send(EM_SETSEL, at(86, 0), at(86, 0)));
+    calls.push(key(VK_NEXT));
+    check(
+        &mut calls,
+        &mut checks,
+        "Page Down near the end",
+        91,
+        at(92, 0),
+    );
+    calls.push(key(VK_NEXT));
+    check(
+        &mut calls,
+        &mut checks,
+        "Page Down at the end",
+        91,
+        at(92, 0),
+    );
+    // A caret below the view: the line just below the page's view,
+    // which the view then follows by one line.
+    calls.push(send(EM_SETSEL, 0, 0));
+    calls.push(send(EM_SCROLLCARET, 0, 0));
+    calls.push(send(EM_SETSEL, at(30, 3), at(30, 3)));
+    calls.push(send(EM_LINESCROLL, 0, (-30i32) as u32));
+    calls.push(key(VK_NEXT));
+    check(
+        &mut calls,
+        &mut checks,
+        "Page Down, caret below",
+        9,
+        at(17, 3),
+    );
+    // A caret above the view: the line just above it. Line 10 is in
+    // view, so the view stays at 9 and then moves to 40.
+    calls.push(send(EM_SETSEL, at(10, 3), at(10, 3)));
+    calls.push(send(EM_LINESCROLL, 0, 31));
+    calls.push(key(VK_PRIOR));
+    check(
+        &mut calls,
+        &mut checks,
+        "Page Up, caret above",
+        31,
+        at(31, 3),
+    );
+    // EM_SCROLL's page: the lines it moved in the low word, 1 above.
+    calls.push(send(EM_SETSEL, 0, 0));
+    calls.push(send(EM_SCROLLCARET, 0, 0));
+    let scrolls = calls.len();
+    calls.push(send(EM_SCROLL, SB_PAGEDOWN, 0));
+    calls.push(send(EM_SCROLL, SB_PAGEDOWN, 0));
+    calls.push(send(EM_SCROLL, SB_PAGEUP, 0));
+    check(&mut calls, &mut checks, "EM_SCROLL pages", 8, 0);
+    // Page up from line 3 moves 3 lines.
+    calls.push(send(EM_LINESCROLL, 0, (-5i32) as u32));
+    let up = calls.len();
+    calls.push(send(EM_SCROLL, SB_PAGEUP, 0));
+    calls.push(send(EM_SCROLL, SB_PAGEUP, 0));
+    check(
+        &mut calls,
+        &mut checks,
+        "EM_SCROLL page up to the top",
+        0,
+        0,
+    );
+    calls.push(send(WM_VSCROLL, SB_PAGEDOWN, 0));
+    check(&mut calls, &mut checks, "WM_VSCROLL page down", 8, 0);
+    calls.push(send(EM_LINESCROLL, 0, 82));
+    let end = calls.len();
+    calls.push(send(EM_SCROLL, SB_PAGEDOWN, 0));
+    calls.push(send(EM_SCROLL, SB_PAGEDOWN, 0));
+    check(
+        &mut calls,
+        &mut checks,
+        "EM_SCROLL page down to the end",
+        91,
+        0,
+    );
+
+    let r = run_checks("page_keys", &d, &calls, 9, checks);
     assert_eq!(&r[scrolls..scrolls + 3], &[0x1_0008, 0x1_0008, 0x1_FFF8]);
     // From line 3, after EM_LINESCROLL took 8 - 5.
     assert_eq!(&r[up..up + 2], &[0x1_FFFD, 0]);
     // From line 8 + 82 = 90, one line to go.
     assert_eq!(&r[end..end + 2], &[0x1_0001, 0]);
+}
+
+/// An edit that shows one line has pages of no lines: EM_SCROLL's pages
+/// move nothing, and Page Down and Page Up move only a caret out of
+/// view, to the line next to the view on its side, which the view then
+/// follows. The values are what the probe of `page_keys_scroll_a_page`
+/// gave on Windows 98 SE for an edit of one line.
+#[test]
+fn page_keys_in_a_one_line_edit() {
+    // One line of the fixed font and the border.
+    let (d, mut calls) = edit_program(18);
+    let mut checks = Checks::new();
+    let key = |vk: u32| send(WM_KEYDOWN, vk, 1);
+    // The view at 0 and the caret below it, at line 30.
+    for (vk, what) in [
+        (VK_NEXT, "Page Down, caret below"),
+        (VK_PRIOR, "Page Up, caret below"),
+    ] {
+        place(&mut calls, 0, at(30, 3));
+        calls.push(key(vk));
+        check(&mut calls, &mut checks, what, 1, at(1, 3));
+    }
+    // The view at 40 and the caret above it, at line 10.
+    place(&mut calls, 40, at(10, 3));
+    calls.push(key(VK_PRIOR));
+    check(
+        &mut calls,
+        &mut checks,
+        "Page Up, caret above",
+        39,
+        at(39, 3),
+    );
+    // The view at 85 and the caret below it, at line 99.
+    place(&mut calls, 85, at(99, 2));
+    calls.push(key(VK_NEXT));
+    check(
+        &mut calls,
+        &mut checks,
+        "Page Down near the end",
+        86,
+        at(86, 2),
+    );
+    // A caret in view stays where it is, and so does the view.
+    place(&mut calls, 3, at(3, 4));
+    calls.push(key(VK_NEXT));
+    check(
+        &mut calls,
+        &mut checks,
+        "Page Down, caret in view",
+        3,
+        at(3, 4),
+    );
+    calls.push(key(VK_PRIOR));
+    check(
+        &mut calls,
+        &mut checks,
+        "Page Up, caret in view",
+        3,
+        at(3, 4),
+    );
+    // EM_SCROLL's pages move nothing and return 0.
+    let scrolls = calls.len();
+    calls.push(send(EM_SCROLL, SB_PAGEDOWN, 0));
+    calls.push(send(EM_SCROLL, SB_PAGEUP, 0));
+    check(&mut calls, &mut checks, "EM_SCROLL pages", 3, at(3, 4));
+
+    let r = run_checks("page_keys_one_line", &d, &calls, 1, checks);
+    assert_eq!(&r[scrolls..scrolls + 2], &[0, 0]);
 }
