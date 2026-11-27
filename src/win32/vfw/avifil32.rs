@@ -104,6 +104,8 @@ static APIS: &[Api] = &[
     stdcall("IGetFrame_Begin", 0, 4, nothing),
     stdcall("IGetFrame_End", 0, 1, nothing),
     stdcall("IGetFrame_SetFormat", 0, 7, get_frame_set_format),
+    stdcall("AVIStreamOpenFromFileA", 48, 6, avi_stream_open_from_file),
+    stdcall("AVIStreamOpenFromFile", 47, 6, avi_stream_open_from_file),
 ];
 
 static VTABLES: &[Vtable] = &[
@@ -408,6 +410,29 @@ fn avi_file_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     });
     write_32(cpu, out, iface);
     Some(AVIERR_OK)
+}
+
+/// AVIStreamOpenFromFileA(stream, name, type, n, mode, handler): the
+/// `n`th stream of type `type` (any type for 0) of the AVI file `name`.
+/// As in Wine's api.c, the file is opened, the stream taken from it and
+/// the file released, so the stream holds the file's only reference and
+/// its release closes the file.
+fn avi_stream_open_from_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[out, name, kind, n, mode, handler] = args else {
+        unreachable!()
+    };
+    if out == 0 || !cpu.bus.guest_probe(out, 4, true) {
+        return Some(AVIERR_BADPARAM);
+    }
+    // The file's interface goes where the stream's will.
+    let opened = avi_file_open(cpu, &[out, name, mode, handler])?;
+    let file = cpu.bus.guest_read_32(out);
+    if opened != AVIERR_OK || file == 0 {
+        return Some(opened);
+    }
+    let result = file_get_stream(cpu, &[file, out, kind, n])?;
+    release(cpu, file);
+    Some(result)
 }
 
 /// AddRef of a file or a stream: the count of the file's references.
