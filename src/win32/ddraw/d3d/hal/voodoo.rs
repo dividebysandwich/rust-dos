@@ -572,8 +572,15 @@ fn blend(src: u32, dst: u32) -> (u32, u32) {
         9 => COLOR,
         10 => OM_COLOR,
         11 => SATURATE,
-        // SRCCOLOR and INVSRCCOLOR: the card has neither as a source
-        // factor.
+        // SRCCOLOR: the card has no source colour as a source factor,
+        // and 3dfx's Voodoo3 driver (4.11.01.1151) gives it the code of
+        // the source colour as a destination factor, 2, which as a
+        // source factor is the destination's colour. Outlaw Racers'
+        // rain (SRCCOLOR, ZERO) multiplies the scene by its streaks so
+        // on Windows 98 with that driver; read as ONE it was white.
+        3 => COLOR,
+        // INVSRCCOLOR: neither, and what the driver does with it isn't
+        // known yet.
         4 => ZERO,
         _ => ONE,
     };
@@ -1926,5 +1933,21 @@ pub fn clear(
         if !shadow(cpu, zid, rects, exact, v) {
             fill(cpu, zid, v);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::blend;
+
+    /// SRCCOLOR as the source factor is the card's code 2, which as a
+    /// source factor is the destination's colour: 3dfx's Voodoo3
+    /// driver gives Outlaw Racers' rain (SRCCOLOR, ZERO) so, and the
+    /// scene is multiplied by it.
+    #[test]
+    fn a_source_colour_source_factor_takes_the_destination_colour() {
+        const SRCCOLOR: u32 = 3;
+        const D3DZERO: u32 = 1;
+        assert_eq!(blend(SRCCOLOR, D3DZERO), (2, 0));
     }
 }
