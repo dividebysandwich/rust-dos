@@ -1108,6 +1108,10 @@ impl Voodoo {
             "engine_left_to_cpu": gpu.engine_counts.left,
             "left_to_cpu": gpu.hot,
             "pages_read_back": gpu.read_back,
+            // Pages let a program's reads or writes skip the bookkeeping,
+            // and times pages lost it (`Tracker::grant`).
+            "direct_grants": gpu.tracker.direct_grants(),
+            "direct_revokes": gpu.tracker.direct_generation(),
         })
     }
 }

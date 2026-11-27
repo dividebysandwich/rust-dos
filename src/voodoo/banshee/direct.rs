@@ -15,9 +15,13 @@
 //!   an access of 1 to 4 bytes, for the bus (`Bus::read_banshee_linear`).
 //! * `banshee_direct` says where nothing is left to do but the bytes, so
 //!   that translated code reads and writes them itself (`dynrec`'s
-//!   `card_state`), and what it must leave to the bus.
+//!   `card_state`), and what it must leave to the bus. While the OpenGL
+//!   renderer records, that is page by page: a page whose access through
+//!   the card left nothing behind it lets the next ones skip the card
+//!   (`Tracker::grant`) until its state changes.
 
 use super::super::Voodoo;
+use super::super::tracker::{DIRECT_WRITE, PAGE};
 use super::{BAR_SIZE, blit2d};
 
 /// How many ranges of the memory translated code leaves to the bus when
@@ -39,6 +43,11 @@ pub struct Direct {
     /// the command FIFOs' rings, whose dwords are commands. Reads of
     /// them are only the bytes.
     pub kept: [(u32, u32); KEPT],
+    /// None if every page is only its bytes. Otherwise only those that
+    /// the card says are (`Voodoo::banshee_grant`), with the count that
+    /// changes when a page stops being so (`Tracker::direct_generation`):
+    /// a page that isn't may become so after an access through the card.
+    pub grants: Option<u64>,
 }
 
 impl Voodoo {
@@ -64,14 +73,22 @@ impl Voodoo {
             self.catch_up_workers();
         }
         let mask = self.fbi.mask;
+        let (first, last) = (addr & !3, addr.wrapping_add(len - 1) & !3);
         if !self.banshee_memory_quiet() {
-            let (first, last) = (addr & !3, addr.wrapping_add(len - 1) & !3);
             self.gpu_sync(first & mask, (first & mask) + 4);
             if last != first {
                 self.gpu_sync(last & mask, (last & mask) + 4);
             }
         }
-        blit2d::read(&self.fbi.ram, addr, len, mask)
+        let value = blit2d::read(&self.fbi.ram, addr, len, mask);
+        // The next reads of the page may need nothing but the bytes.
+        let tracker = &mut self.gpu.borrow_mut().tracker;
+        for at in [first & mask, last & mask] {
+            if tracker.direct_at(at) == 0 {
+                tracker.grant(at, false);
+            }
+        }
+        value
     }
 
     /// `len` bytes (1 to 4) of `value` written into the card's memory
@@ -98,29 +115,44 @@ impl Voodoo {
             blit2d::write(&self.fbi.ram, at, n, value, mask);
             self.display_dirty = true;
             self.mirror_memory(a, a + n);
+            self.banshee_grant_write(a);
             at = at.wrapping_add(n);
             left -= n;
             value = value.checked_shr(8 * n).unwrap_or(0);
         }
     }
 
+    /// A program wrote byte `at` of the memory through BAR1, with all
+    /// that goes with it done: its next writes of the page may be only
+    /// the bytes if the recording has no pixel of its 3D buffers there
+    /// (`mirror_memory`), as far as the tracker goes (`Tracker::grant`).
+    pub(super) fn banshee_grant_write(&mut self, at: u32) {
+        let tracker = &mut self.gpu.get_mut().tracker;
+        if tracker.direct_at(at) & DIRECT_WRITE != 0 {
+            return;
+        }
+        let page = at & !(PAGE - 1);
+        let layout = self.mirror.get_mut().as_ref().and_then(|m| m.layout());
+        let free = layout.is_none_or(|key| !key.overlaps(page, page + PAGE));
+        tracker.grant(at, free);
+    }
+
     /// Where a program's reads and writes of the card's memory through
     /// BAR1 are only the bytes, while nothing else changes the card:
-    /// nothing is queued for the workers, no swap waits for its turn
-    /// under the frame rate cap (a write behind it waits for it), the
-    /// OpenGL renderer has nothing newer and isn't recording (a write
-    /// tells the recording), and no bytes are hot. A write still marks
-    /// the picture changed: `banshee_wrote_directly`, once the writes
-    /// are done and before anything looks.
+    /// nothing is queued for the workers, and no swap waits for its turn
+    /// under the frame rate cap (a write behind it waits for it). Every
+    /// page is if the OpenGL renderer has nothing newer and isn't
+    /// recording (a write tells the recording), and no bytes are hot;
+    /// otherwise those the tracker says are (`Direct::grants`). A write
+    /// still marks the picture changed: `banshee_wrote_directly`, once
+    /// the writes are done and before anything looks.
     pub fn banshee_direct(&self) -> Option<Direct> {
         let b = self.banshee.as_deref()?;
-        if self.workers_queue()
-            || self.deferred.is_some()
-            || self.recording()
-            || !self.banshee_memory_quiet()
-        {
+        if self.workers_queue() || self.deferred.is_some() {
             return None;
         }
+        let grants = (self.recording() || !self.banshee_memory_quiet())
+            .then(|| self.gpu.borrow().tracker.direct_generation());
         let bytes = self.fbi.ram.bytes().min(self.fbi.mask as usize + 1) as u64;
         let len = bytes.min(b.tile_base() as u64).min(BAR_SIZE as u64) as u32;
         let mut kept = [(0, 0); KEPT];
@@ -140,7 +172,32 @@ impl Voodoo {
             base: self.fbi.ram.as_mut_ptr(),
             len,
             kept,
+            grants,
         })
+    }
+
+    /// For `Direct::grants`: what a program's reads and writes of the page
+    /// with byte `at` of the memory may do by themselves
+    /// (`tracker::DIRECT_READ`, `DIRECT_WRITE`), and the count of changes.
+    pub fn banshee_grant(&self, at: u32) -> (u8, u64) {
+        let tracker = &self.gpu.borrow().tracker;
+        (tracker.direct_at(at), tracker.direct_generation())
+    }
+
+    /// `banshee_grant` for every page from the first, which `f` gets.
+    pub fn banshee_grants<R>(&self, f: impl FnOnce(&mut dyn Iterator<Item = u8>) -> R) -> R {
+        f(&mut self.gpu.borrow().tracker.direct())
+    }
+
+    /// The texture units hear of the pages the program may have written
+    /// by itself (`Tracker::take_unstamped`): before the recording decodes
+    /// textures from the memory.
+    pub(crate) fn banshee_stamp_direct_writes(&mut self) {
+        for (start, end) in self.gpu.get_mut().tracker.take_unstamped() {
+            for tmu in &mut self.tmu {
+                tmu.note_written(start, end);
+            }
+        }
     }
 
     /// Translated code wrote the card's memory by itself
@@ -248,24 +305,66 @@ mod tests {
     }
 
     #[test]
-    fn a_recording_rows_behind_and_a_held_swap_keep_the_memory_from_being_direct() {
+    fn a_held_swap_keeps_the_memory_from_being_direct() {
         let mut v = card();
         v.gpu.get_mut().tracker.mark(0, 4096);
-        assert!(
-            v.banshee_direct().is_some(),
-            "dirty pages are the card's own"
-        );
+        let grants = |v: &Voodoo| v.banshee_direct().map(|d| d.grants.is_some());
+        assert_eq!(grants(&v), Some(false), "dirty pages are the card's own");
+        // A write tells the recording, and rows newer in the renderer are
+        // read back first: the card says which pages need neither.
         v.set_mirror(true);
-        assert!(v.banshee_direct().is_none(), "a write tells the recording");
+        assert_eq!(grants(&v), Some(true), "a write tells the recording");
         v.set_mirror(false);
-        assert!(v.banshee_direct().is_some());
+        assert_eq!(grants(&v), Some(false));
         v.gpu_behind.set(true);
-        assert!(
-            v.banshee_direct().is_none(),
-            "rows are newer in the renderer"
-        );
+        assert_eq!(grants(&v), Some(true), "rows are newer in the renderer");
         v.gpu_behind.set(false);
         v.deferred = Some((0, 1));
         assert!(v.banshee_direct().is_none(), "a write waits for the swap");
+    }
+
+    #[test]
+    fn while_recording_a_page_goes_direct_after_an_access_through_the_card() {
+        use crate::voodoo::tracker::DIRECT_READ;
+        let mut v = card();
+        v.set_mirror(true);
+        let grants = v
+            .banshee_direct()
+            .and_then(|d| d.grants)
+            .expect("page by page");
+        assert_eq!(v.banshee_grant(0x5000), (0, grants));
+        // A read: the page's reads need nothing else from now on.
+        v.banshee_linear_load(0x5004, 4);
+        assert_eq!(v.banshee_grant(0x5000), (DIRECT_READ, grants));
+        // A write marks the page, after which its writes need nothing
+        // else either.
+        v.banshee_linear_store(0x5FFE, 0x1234, 2);
+        assert_eq!(v.banshee_grant(0x5000).0, DIRECT_READ | DIRECT_WRITE);
+        assert_eq!(v.banshee_grant(0x6000).0, 0);
+        // Before a texture is decoded the texture units hear of the page,
+        // whose writes go through the card again: the next one is heard
+        // of too.
+        let heard = v.tmu[0].page_writes[5];
+        v.banshee_stamp_direct_writes();
+        assert_ne!(v.tmu[0].page_writes[5], heard);
+        assert_eq!(v.banshee_grant(0x5000).0, DIRECT_READ);
+        assert_ne!(v.banshee_direct().and_then(|d| d.grants), Some(grants));
+        let mut pages = Vec::new();
+        v.banshee_grants(|g| pages.extend(g.take(7)));
+        assert_eq!(pages, [0, 0, 0, 0, 0, DIRECT_READ, 0]);
+    }
+
+    #[test]
+    fn while_recording_a_run_of_bytes_lets_the_pages_it_wrote_go_direct() {
+        use crate::voodoo::tracker::DIRECT_READ;
+        let mut v = card();
+        v.set_mirror(true);
+        // An MMX store's 8 bytes across pages 2 and 3, as
+        // `jit_dev_write_run` writes them.
+        v.banshee_memory_write(0x2FFC, &[1; 8]);
+        let both = DIRECT_READ | DIRECT_WRITE;
+        assert_eq!(v.banshee_grant(0x2000).0, both);
+        assert_eq!(v.banshee_grant(0x3000).0, both);
+        assert_eq!(v.banshee_grant(0x4000).0, 0);
     }
 }
